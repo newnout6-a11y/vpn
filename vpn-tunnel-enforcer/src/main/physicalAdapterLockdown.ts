@@ -45,6 +45,11 @@ interface AdapterSnapshot {
   // What we found before we touched it. We restore exactly these.
   ipv6Enabled: boolean
   ipv4DnsServers: string[]
+  // TRUE when DNS was obtained via DHCP (NameServer registry key is empty).
+  // On rollback we must use -ResetServerAddresses instead of setting the
+  // snapshotted DHCP-pushed addresses statically — otherwise the adapter
+  // loses its ability to follow DHCP and "sticks" on 192.168.x.x forever.
+  dnsWasDhcp: boolean
   // What we set it to (or null if we left it alone for that field).
   forcedDnsTo: string[] | null
   forcedIpv6Off: boolean
@@ -117,7 +122,18 @@ async function runPS(script: string, timeoutMs = 30000): Promise<string> {
  *   - Hyper-V virtual switches (vEthernet)
  *
  * The shape we get back from PowerShell:
- *   [{ifIndex, alias, ipv6Enabled, ipv4DnsServers}]
+ *   [{ifIndex, alias, ipv6Enabled, ipv4DnsServers, dnsWasDhcp}]
+ *
+ * KEY FIX: we now check the registry key
+ *   HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\{GUID}\NameServer
+ * If NameServer is empty/absent → DNS was obtained via DHCP.
+ * If NameServer has a value → DNS was set statically by the user.
+ *
+ * This distinction is critical for rollback: DHCP-obtained DNS (typically
+ * 192.168.0.1 or 192.168.1.1) must be restored via -ResetServerAddresses
+ * (return to DHCP), NOT by writing the same IP statically — otherwise the
+ * adapter permanently loses DHCP DNS and "sticks" on the router IP even
+ * when the user switches networks.
  *
  * Note: PS arrays of single objects deserialize as the object itself, so we
  * normalize that on the JS side.
@@ -143,11 +159,26 @@ foreach ($a in $adapters) {
   $bind6 = Get-NetAdapterBinding -InterfaceAlias $a.Name -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue
   $dns4 = (Get-DnsClientServerAddress -InterfaceAlias $a.Name -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses
   if ($null -eq $dns4) { $dns4 = @() }
+
+  # Determine if DNS was obtained via DHCP or set statically.
+  # The authoritative source is the registry: if NameServer is empty,
+  # the adapter relies on DHCP for DNS (DhcpNameServer field).
+  # If NameServer has content, it was manually/statically configured.
+  $guid = $a.InterfaceGuid
+  $regPath = "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\$guid"
+  $nameServer = ''
+  try {
+    $regVal = Get-ItemProperty -Path $regPath -Name 'NameServer' -ErrorAction SilentlyContinue
+    if ($regVal) { $nameServer = [string]$regVal.NameServer }
+  } catch {}
+  $dnsIsDhcp = ($nameServer -eq '' -or $null -eq $nameServer)
+
   $rows += [pscustomobject]@{
     ifIndex      = [int]$a.ifIndex
     alias        = [string]$a.Name
     ipv6Enabled  = [bool]($bind6 -and $bind6.Enabled)
     ipv4Dns      = @($dns4)
+    dnsWasDhcp   = [bool]$dnsIsDhcp
   }
 }
 $rows | ConvertTo-Json -Compress -Depth 4
@@ -168,6 +199,7 @@ $rows | ConvertTo-Json -Compress -Depth 4
     alias: String(row.alias),
     ipv6Enabled: Boolean(row.ipv6Enabled),
     ipv4DnsServers: Array.isArray(row.ipv4Dns) ? row.ipv4Dns.map((x: any) => String(x)) : [],
+    dnsWasDhcp: row.dnsWasDhcp !== false, // default to true (safe: DHCP restore) if field missing
     forcedDnsTo: null,
     forcedIpv6Off: false
   }))
@@ -177,17 +209,29 @@ $rows | ConvertTo-Json -Compress -Depth 4
  * Apply the lockdown: disable IPv6 on each physical adapter and force its
  * IPv4 DNS to the TUN's resolver. Each step is logged separately so a partial
  * failure is recoverable.
+ *
+ * If lockdown is already applied (manifest exists), we DELETE the old manifest
+ * and re-snapshot. This handles the case where the user changed networks
+ * (e.g. from home Wi-Fi to office Ethernet) while TUN was up — the old
+ * snapshot would contain stale DNS/adapter data. Re-applying ensures the
+ * rollback will restore the CURRENT network state, not the old one.
  */
 export async function applyPhysicalAdapterLockdown(tunDnsIpv4: string): Promise<{ applied: boolean; adapters: number; warnings: string[] }> {
   if (process.platform !== 'win32') {
     return { applied: false, adapters: 0, warnings: ['platform is not Windows'] }
   }
+
+  // Previously this was an early-return (idempotent skip). Now we delete the
+  // stale manifest and re-apply with a fresh snapshot. This fixes the bug
+  // where switching networks while TUN is up causes rollback to restore
+  // DNS from the wrong network.
   const existing = await readManifest()
   if (existing) {
-    logEvent('info', 'phys-lockdown', 'lockdown already applied — skipping (idempotent)', {
-      adapters: existing.adapters.length
+    logEvent('info', 'phys-lockdown', 'lockdown already applied — refreshing snapshot for current network state', {
+      oldAdapters: existing.adapters.length,
+      oldTunDns: existing.tunDnsIpv4
     })
-    return { applied: true, adapters: existing.adapters.length, warnings: [] }
+    await deleteManifest()
   }
 
   const adapters = await snapshotPhysicalAdapters()
@@ -213,7 +257,7 @@ try { Clear-DnsClientCache -ErrorAction Stop; Write-Host 'cache:clear' } catch {
       if (!ipv6Off || !dnsSet) {
         warnings.push(`${a.alias}: ${out.trim().split('\n').filter((l) => /err/.test(l)).join('; ') || 'partial'}`)
       }
-      logEvent('info', 'phys-lockdown', `locked down ${a.alias}`, { ipv6Off, dnsSet })
+      logEvent('info', 'phys-lockdown', `locked down ${a.alias}`, { ipv6Off, dnsSet, dnsWasDhcp: a.dnsWasDhcp })
     } catch (err: any) {
       warnings.push(`${a.alias}: ${err?.message ?? String(err)}`)
       logEvent('warn', 'phys-lockdown', `lockdown failed for ${a.alias}`, err)
@@ -232,9 +276,19 @@ try { Clear-DnsClientCache -ErrorAction Stop; Write-Host 'cache:clear' } catch {
 /**
  * Roll back exactly what we changed. We re-enable IPv6 only if we forced it
  * off (so we don't accidentally turn ON IPv6 on an adapter that the user had
- * deliberately disabled). DNS is restored to the exact list we snapshotted —
- * empty list means "back to DHCP", which is what `Set-DnsClientServerAddress
- * -ResetServerAddresses` does.
+ * deliberately disabled).
+ *
+ * DNS restore logic (THE KEY FIX):
+ *   - If dnsWasDhcp === true → use -ResetServerAddresses to return to DHCP.
+ *     This is the correct action for most home/office users whose DNS was
+ *     automatically assigned by the router (192.168.0.1, etc.). Previously
+ *     we would SET these addresses statically, which permanently broke DHCP
+ *     DNS assignment — the adapter would "stick" on 192.168.x.x even when
+ *     switching to a different network.
+ *   - If dnsWasDhcp === false → restore the exact static DNS servers the
+ *     user had configured manually (e.g. 8.8.8.8, 1.1.1.1).
+ *   - If ipv4DnsServers is empty AND dnsWasDhcp is false (edge case: user
+ *     had no DNS at all) → also use -ResetServerAddresses as a safe default.
  */
 export async function rollbackPhysicalAdapterLockdownIfApplied(reason: string): Promise<{ rolledBack: boolean }> {
   if (process.platform !== 'win32') return { rolledBack: false }
@@ -243,9 +297,23 @@ export async function rollbackPhysicalAdapterLockdownIfApplied(reason: string): 
 
   for (const a of m.adapters) {
     try {
-      const dnsRestoreLine = a.ipv4DnsServers.length === 0
-        ? `try { Set-DnsClientServerAddress -InterfaceAlias ${psSingleQuote(a.alias)} -ResetServerAddresses -ErrorAction Stop; Write-Host 'dns:reset' } catch { Write-Host "dns:err: $_" }`
-        : `try { Set-DnsClientServerAddress -InterfaceAlias ${psSingleQuote(a.alias)} -ServerAddresses ${a.ipv4DnsServers.map(psSingleQuote).join(',')} -ErrorAction Stop; Write-Host 'dns:restore' } catch { Write-Host "dns:err: $_" }`
+      // Determine the correct DNS restore command.
+      // dnsWasDhcp might be undefined on old manifests (before this fix) —
+      // treat missing/undefined as true (safe default: return to DHCP).
+      const wasDhcp = (a as any).dnsWasDhcp !== false
+
+      let dnsRestoreLine: string
+      if (wasDhcp || a.ipv4DnsServers.length === 0) {
+        // DNS was from DHCP (or we have no static record) → reset to DHCP.
+        // This is the FIX: previously when ipv4DnsServers had DHCP-pushed
+        // values like ['192.168.0.1'], we'd SET them statically. Now we
+        // correctly return the adapter to automatic DNS.
+        dnsRestoreLine = `try { Set-DnsClientServerAddress -InterfaceAlias ${psSingleQuote(a.alias)} -ResetServerAddresses -ErrorAction Stop; Write-Host 'dns:reset-dhcp' } catch { Write-Host "dns:err: $_" }`
+      } else {
+        // DNS was statically configured by the user → restore exact values.
+        dnsRestoreLine = `try { Set-DnsClientServerAddress -InterfaceAlias ${psSingleQuote(a.alias)} -ServerAddresses ${a.ipv4DnsServers.map(psSingleQuote).join(',')} -ErrorAction Stop; Write-Host 'dns:restore-static' } catch { Write-Host "dns:err: $_" }`
+      }
+
       const ipv6RestoreLine = a.forcedIpv6Off && a.ipv6Enabled
         ? `try { Enable-NetAdapterBinding -InterfaceAlias ${psSingleQuote(a.alias)} -ComponentID ms_tcpip6 -ErrorAction Stop; Write-Host 'ipv6:on' } catch { Write-Host "ipv6:err: $_" }`
         : `Write-Host 'ipv6:noop'`
@@ -256,7 +324,7 @@ ${dnsRestoreLine}
 try { Clear-DnsClientCache -ErrorAction Stop } catch {}
 `
       const out = await runPS(script, 15000)
-      logEvent('info', 'phys-lockdown', `rolled back ${a.alias}`, { reason, out: out.trim() })
+      logEvent('info', 'phys-lockdown', `rolled back ${a.alias}`, { reason, wasDhcp, out: out.trim() })
     } catch (err) {
       logEvent('warn', 'phys-lockdown', `rollback failed for ${a.alias}`, err)
     }

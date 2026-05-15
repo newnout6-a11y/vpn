@@ -596,7 +596,7 @@ export const tunController = {
     })
     if (wantAdapterLockdown) {
       try {
-        const lock = await applyPhysicalAdapterLockdown('172.19.0.2')
+        const lock = await applyPhysicalAdapterLockdown('172.19.0.1')
         logEvent('info', 'tun', 'adapter lockdown result', {
           applied: lock.applied,
           adapters: lock.adapters,
