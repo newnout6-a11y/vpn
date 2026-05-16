@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
-import { CheckCircle2, Clock, Globe, Loader2, Lock, Power, RefreshCw, ShieldAlert, ShieldCheck, ShieldOff, TriangleAlert } from 'lucide-react'
+import { CheckCircle2, Clock, Download, Globe, Loader2, Lock, Power, RefreshCw, ShieldAlert, ShieldCheck, ShieldOff, TriangleAlert, Upload } from 'lucide-react'
 import { useAppStore } from '../store'
+import { SERVER_CHANGED_EVENT } from '../nav'
 
 // Format an elapsed-ms duration as a short Russian string. Used by the uptime
 // pill on the protected hero.
@@ -12,6 +13,20 @@ function formatUptime(ms: number): string {
   if (hours > 0) return `${hours} ч ${minutes} мин`
   if (minutes > 0) return `${minutes} мин ${seconds} с`
   return `${seconds} с`
+}
+
+function formatSpeed(bytesPerSecond: number): string {
+  const bits = Math.max(0, bytesPerSecond * 8)
+  if (bits < 1_000_000) return `${Math.round(bits / 1_000)} Kbps`
+  return `${(bits / 1_000_000).toFixed(bits < 10_000_000 ? 1 : 0)} Mbps`
+}
+
+function formatBytes(bytes: number): string {
+  const value = Math.max(0, bytes)
+  if (value < 1024) return `${Math.round(value)} B`
+  if (value < 1024 ** 2) return `${(value / 1024).toFixed(1)} KB`
+  if (value < 1024 ** 3) return `${(value / 1024 ** 2).toFixed(1)} MB`
+  return `${(value / 1024 ** 3).toFixed(2)} GB`
 }
 
 /**
@@ -49,6 +64,7 @@ function pickPhase(args: {
   isLeak: boolean
   killswitchActive: boolean
   proxy: ReturnType<typeof useAppStore.getState>['proxy']
+  hasDirectVpn: boolean
   proxyDown: boolean
   restartingProgress: string | null
 }): Phase {
@@ -62,7 +78,7 @@ function pickPhase(args: {
   if (args.tunRunning && args.proxyDown) return 'proxy-down'
   if (args.isLeak) return 'leaking'
   if (args.tunRunning) return 'protected'
-  if (!args.proxy) return 'no-proxy'
+  if (!args.proxy && !args.hasDirectVpn) return 'no-proxy'
   return 'off'
 }
 
@@ -168,8 +184,8 @@ function uiForPhase(phase: Phase, vpnIp: string | null, proxyAddr: string | null
         borderClass: 'border-warning/40',
         title: 'VPN отключён, файрвол блокирует трафик',
         subtitle:
-          'sing-box не работает, но правила Windows Firewall не дают трафику утечь мимо туннеля. Перезапустите защиту или снимите блокировку вручную в банере.',
-        primaryLabel: 'Перезапустить защиту',
+          'sing-box не работает, но правила Windows Firewall не дают трафику утечь мимо туннеля. Перезапуск сначала снимет старую блокировку, затем включит её заново.',
+        primaryLabel: 'Снять блокировку и перезапустить',
         primaryAction: 'start',
         primaryColor: 'success',
         showSpinner: false
@@ -233,18 +249,53 @@ export function HeroStatus() {
   const vpnIp = useAppStore((s) => s.vpnIp)
   const publicIp = useAppStore((s) => s.publicIp)
   const firewallKillSwitchActive = useAppStore((s) => s.firewallKillSwitchActive)
+  const traffic = useAppStore((s) => s.traffic)
   const setMode = useAppStore((s) => s.setMode)
   const setTunRunning = useAppStore((s) => s.setTunRunning)
   const setVpnIp = useAppStore((s) => s.setVpnIp)
   const setPublicIp = useAppStore((s) => s.setPublicIp)
   const setProxy = useAppStore((s) => s.setProxy)
   const setDetecting = useAppStore((s) => s.setDetecting)
+  const setSettings = useAppStore((s) => s.setSettings)
+  const setFirewallKillSwitchActive = useAppStore((s) => s.setFirewallKillSwitchActive)
   const addLog = useAppStore((s) => s.addLog)
 
   const [busy, setBusy] = useState<'starting' | 'stopping' | null>(null)
   const [proxyDown, setProxyDown] = useState(false)
+  const [hasActiveServer, setHasActiveServer] = useState(false)
 
-  const proxyAddr = settings.proxyOverride.trim() || (proxy ? `${proxy.host}:${proxy.port}` : '')
+  // Track whether the user has at least one server profile selected. Polled
+  // because the selection is owned by the main process (server-picker store)
+  // and reaches this component through IPC, not through the global store.
+  // We also listen for explicit change events so picks reflect instantly
+  // (e.g. from the right-hand quick picker on the dashboard).
+  useEffect(() => {
+    let cancelled = false
+    const refresh = async () => {
+      try {
+        const { profile } = await window.electronAPI.serversGetActive()
+        if (!cancelled) setHasActiveServer(Boolean(profile))
+      } catch {
+        if (!cancelled) setHasActiveServer(false)
+      }
+    }
+    refresh()
+    const id = setInterval(refresh, 3000)
+    const handler = () => refresh()
+    window.addEventListener(SERVER_CHANGED_EVENT, handler)
+    return () => {
+      cancelled = true
+      clearInterval(id)
+      window.removeEventListener(SERVER_CHANGED_EVENT, handler)
+    }
+  }, [])
+
+  const directVpnReady =
+    settings.connectionMode === 'directVpn' &&
+    (hasActiveServer || settings.directVpnInput.trim().length > 0)
+  const proxyAddr = settings.connectionMode === 'directVpn'
+    ? ''
+    : settings.proxyOverride.trim() || (proxy ? `${proxy.host}:${proxy.port}` : '')
   const proxyType = (settings.proxyOverride.trim() ? settings.proxyType : proxy?.type) ?? 'socks5'
 
   // proxy-down is signalled via the same TUN status stream the App.tsx handler
@@ -266,10 +317,16 @@ export function HeroStatus() {
     isLeak,
     killswitchActive: firewallKillSwitchActive,
     proxy,
+    hasDirectVpn: directVpnReady,
     proxyDown,
     restartingProgress
   })
-  const ui = uiForPhase(phase, vpnIp || publicIp, proxyAddr || null, restartingProgress)
+  const ui = uiForPhase(
+    phase,
+    vpnIp || publicIp,
+    settings.connectionMode === 'directVpn' ? 'Direct VPN' : proxyAddr || null,
+    restartingProgress
+  )
 
   // Tick once a second so the uptime label refreshes naturally without us
   // having to wire it through the IPC stream. Cheap — only re-renders this
@@ -300,12 +357,55 @@ export function HeroStatus() {
   }
 
   const handleStart = async () => {
+    const restartingFromKillSwitch = firewallKillSwitchActive && !tunRunning
+    const refreshKillSwitchState = () => {
+      window.electronAPI.getFirewallKillSwitchStatus()
+        .then(({ active }) => setFirewallKillSwitchActive(active))
+        .catch(() => undefined)
+    }
+
+    if (settings.connectionMode === 'directVpn') {
+      if (!hasActiveServer && !settings.directVpnInput.trim()) {
+        addLog('error', 'Сначала выберите сервер в разделе «Серверы».')
+        return
+      }
+      setBusy('starting')
+      addLog('info', restartingFromKillSwitch
+        ? 'Снимаем старую блокировку и перезапускаем Direct VPN…'
+        : 'Включаем защиту…')
+      try {
+        const saved = await window.electronAPI.saveSettings(settings)
+        setSettings(saved)
+        const result = await window.electronAPI.startDirectVpn()
+        if (result.success) {
+          setMode('hard')
+          setTunRunning(true)
+          if (result.vpnIp) {
+            setVpnIp(result.vpnIp)
+            setPublicIp(result.vpnIp, false)
+          }
+          addLog('info', 'Защита включена — Happ больше не участвует в маршруте.')
+          if (result.warning) addLog('warn', result.warning)
+        } else {
+          addLog('error', `Не удалось включить Direct VPN: ${result.error || 'неизвестная ошибка'}`)
+        }
+      } catch (err: any) {
+        addLog('error', `Ошибка запуска Direct VPN: ${err.message}`)
+      } finally {
+        refreshKillSwitchState()
+        setBusy(null)
+      }
+      return
+    }
+
     if (!proxyAddr) {
       await handleDetect()
       return
     }
     setBusy('starting')
-    addLog('info', 'Включаем защиту…')
+    addLog('info', restartingFromKillSwitch
+      ? 'Снимаем старую блокировку и перезапускаем защиту…'
+      : 'Включаем защиту…')
     try {
       const result = await window.electronAPI.startTun(proxyAddr, proxyType)
       if (result.success) {
@@ -323,6 +423,7 @@ export function HeroStatus() {
     } catch (err: any) {
       addLog('error', `Ошибка запуска: ${err.message}`)
     } finally {
+      refreshKillSwitchState()
       setBusy(null)
     }
   }
@@ -391,8 +492,14 @@ export function HeroStatus() {
 
         {/* Compact status chips */}
         <div className="flex flex-wrap gap-2 text-xs">
-          {proxyAddr && (
-            <span className="flex items-center gap-1.5 rounded-full bg-black/20 px-3 py-1.5 text-gray-300">
+          {settings.connectionMode === 'directVpn' && (
+            <span className="flex items-center gap-1.5 rounded-full bg-bg/60 border border-border px-3 py-1.5 text-gray-400">
+              <Globe className="w-3.5 h-3.5 text-accent" />
+              Direct VPN: <span className="font-mono">sing-box</span>
+            </span>
+          )}
+          {settings.connectionMode !== 'directVpn' && proxyAddr && (
+            <span className="flex items-center gap-1.5 rounded-full bg-bg/60 border border-border px-3 py-1.5 text-gray-400">
               <Globe className="w-3.5 h-3.5 text-accent" />
               Прокси: <span className="font-mono">{proxyAddr}</span>
               <span className="opacity-60">({proxyType.toUpperCase()})</span>
@@ -410,8 +517,23 @@ export function HeroStatus() {
               Внешний IP: <span className="font-mono">{publicIp}</span>
             </span>
           )}
+          {tunRunning && (
+            <>
+              <span className="flex items-center gap-1.5 rounded-full bg-bg/60 border border-border px-3 py-1.5 text-gray-400">
+                <Download className="w-3.5 h-3.5 text-success" />
+                ↓ <span className="font-mono">{formatSpeed(traffic.downloadBps)}</span>
+              </span>
+              <span className="flex items-center gap-1.5 rounded-full bg-bg/60 border border-border px-3 py-1.5 text-gray-400">
+                <Upload className="w-3.5 h-3.5 text-accent" />
+                ↑ <span className="font-mono">{formatSpeed(traffic.uploadBps)}</span>
+              </span>
+              <span className="flex items-center gap-1.5 rounded-full bg-bg/60 border border-border px-3 py-1.5 text-gray-400">
+                Сессия: <span className="font-mono">↓ {formatBytes(traffic.sessionDownloadBytes)} / ↑ {formatBytes(traffic.sessionUploadBytes)}</span>
+              </span>
+            </>
+          )}
           {tunRunning && tunStartedAt && (
-            <span className="flex items-center gap-1.5 rounded-full bg-black/20 px-3 py-1.5 text-gray-300">
+            <span className="flex items-center gap-1.5 rounded-full bg-bg/60 border border-border px-3 py-1.5 text-gray-400">
               <Clock className="w-3.5 h-3.5 text-accent" />
               Аптайм: <span className="font-mono">{formatUptime(now - tunStartedAt)}</span>
             </span>

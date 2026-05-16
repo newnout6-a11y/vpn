@@ -11,7 +11,7 @@
  */
 import { exec as execCb } from 'child_process'
 import { dialog, app } from 'electron'
-import { mkdtemp, writeFile, copyFile, readdir, rm } from 'fs/promises'
+import { mkdtemp, writeFile, copyFile, readdir, rm, readFile } from 'fs/promises'
 import { existsSync } from 'fs'
 import { tmpdir, hostname, release, type as osType, arch as osArch, totalmem, freemem, cpus } from 'os'
 import { join } from 'path'
@@ -20,6 +20,7 @@ import { logEvent, getFullLogs } from './appLogger'
 import { settingsStore } from './settings'
 import { runSystemDiagnostics } from './systemDiagnostics'
 import { getTunRuntimeDir } from './tunController'
+import { redactSensitiveConfig, redactSensitiveText, redactSettingsForDiagnostics } from './vpnProfiles'
 
 const exec = promisify(execCb)
 
@@ -77,8 +78,8 @@ export async function exportDiagnosticsZip(): Promise<ExportResult> {
   try {
     stage = await mkdtemp(join(tmpdir(), 'vpnte-diag-'))
 
-    // 1. Settings (redacted of nothing — we don't store secrets in there).
-    await writeFile(join(stage, 'settings.json'), JSON.stringify(settingsStore.get(), null, 2), 'utf-8')
+    // 1. Settings. Direct-VPN subscriptions/keys are secrets, redact them.
+    await writeFile(join(stage, 'settings.json'), JSON.stringify(redactSettingsForDiagnostics(settingsStore.get()), null, 2), 'utf-8')
 
     // 2. App logs (the in-memory + on-disk app log).
     const logs = await getFullLogs()
@@ -104,7 +105,22 @@ export async function exportDiagnosticsZip(): Promise<ExportResult> {
           // Skip the binaries themselves — they're huge and the user already
           // has them. Only ship configs/logs/manifests.
           if (/\.(json|log|txt|manifest)$/i.test(name)) {
-            await copyIfExists(join(runtime, name), join(stage, `runtime-${name}`))
+            const src = join(runtime, name)
+            const dst = join(stage, `runtime-${name}`)
+            if (/\.json$/i.test(name)) {
+              try {
+                const parsed = JSON.parse(await readFile(src, 'utf-8'))
+                await writeFile(dst, JSON.stringify(redactSensitiveConfig(parsed), null, 2), 'utf-8')
+              } catch {
+                await writeFile(dst, '<redacted: runtime json>\n', 'utf-8')
+              }
+            } else {
+              try {
+                await writeFile(dst, redactSensitiveText(await readFile(src, 'utf-8')), 'utf-8')
+              } catch {
+                await writeFile(dst, '<redacted: runtime log>\n', 'utf-8')
+              }
+            }
           }
         }
       } catch (err) {
@@ -129,7 +145,15 @@ export async function exportDiagnosticsZip(): Promise<ExportResult> {
         const entries = await readdir(snapshotsDir)
         for (const name of entries) {
           if (/\.json$/i.test(name)) {
-            await copyIfExists(join(snapshotsDir, name), join(stagedSnaps, name))
+            const src = join(snapshotsDir, name)
+            const dst = join(stagedSnaps, name)
+            const raw = await readFile(src, 'utf-8')
+            try {
+              const parsed = JSON.parse(raw)
+              await writeFile(dst, JSON.stringify(redactSensitiveConfig(parsed), null, 2), 'utf-8')
+            } catch {
+              await writeFile(dst, redactSensitiveText(raw), 'utf-8')
+            }
           }
         }
       } catch (err) {

@@ -1,12 +1,12 @@
 import { app } from 'electron'
 import { mkdir, readFile, writeFile, unlink } from 'fs/promises'
 import { join } from 'path'
-import { exec as execCb } from 'child_process'
+import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import { execElevated } from './admin'
 import { logEvent } from './appLogger'
 
-const exec = promisify(execCb)
+const execFile = promisify(execFileCb)
 
 // Rule-name prefix for every firewall rule we add. We rely on this prefix to
 // find and remove our rules during rollback, even if our manifest is missing
@@ -36,10 +36,16 @@ export interface FirewallKillSwitchResult {
   details?: string
 }
 
+interface SavedProfile {
+  name: string
+  defaultOutbound: string
+}
+
 interface FirewallManifest {
   createdAt: number
   ruleNames: string[]
   singboxExePath: string | null
+  savedProfiles: SavedProfile[]
 }
 
 function backupDir() {
@@ -72,25 +78,55 @@ async function clearManifest(): Promise<void> {
   }
 }
 
-function encodedPowerShell(script: string) {
+function withPowerShellPrelude(script: string) {
   const prelude =
     '$OutputEncoding=[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new();' +
     '[Console]::InputEncoding=[System.Text.UTF8Encoding]::new();' +
+    '$ProgressPreference="SilentlyContinue";' +
     '$ErrorActionPreference="Stop";'
-  return Buffer.from(prelude + script, 'utf16le').toString('base64')
+  return prelude + script
+}
+
+function cmdDoubleQuote(value: string): string {
+  return `"${value.replace(/"/g, '\\"')}"`
 }
 
 async function ps(script: string, elevated = false, timeout = 30000) {
-  const command = `powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encodedPowerShell(script)}`
-  if (elevated) {
-    return execElevated(command, { timeout, maxBuffer: 1024 * 1024 * 4 })
+  // Keep elevated scripts under userData instead of %TEMP% and do not remove them
+  // immediately: sudo-prompt can return before the elevated PowerShell has opened
+  // the -File path, which made PowerShell report "argument for -File does not exist".
+  const scriptDir = join(backupDir(), 'ps')
+  await mkdir(scriptDir, { recursive: true })
+  const scriptPath = join(
+    scriptDir,
+    `script-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.ps1`
+  )
+  await writeFile(scriptPath, '\ufeff' + withPowerShellPrelude(script), 'utf8')
+
+  try {
+    if (elevated) {
+      const command = `powershell -NoProfile -ExecutionPolicy Bypass -File ${cmdDoubleQuote(scriptPath)}`
+      return execElevated(command, { timeout, maxBuffer: 1024 * 1024 * 4 })
+    }
+    const result = await execFile(
+      'powershell',
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath],
+      {
+        windowsHide: true,
+        timeout,
+        maxBuffer: 1024 * 1024 * 4,
+        encoding: 'utf8'
+      }
+    ) as { stdout: string; stderr: string }
+    return {
+      stdout: String(result.stdout ?? ''),
+      stderr: String(result.stderr ?? '')
+    }
+  } finally {
+    if (!elevated) {
+      await unlink(scriptPath).catch(() => undefined)
+    }
   }
-  return exec(command, {
-    windowsHide: true,
-    timeout,
-    maxBuffer: 1024 * 1024 * 4,
-    encoding: 'utf8'
-  })
 }
 
 function psSingleQuote(value: string): string {
@@ -98,136 +134,249 @@ function psSingleQuote(value: string): string {
 }
 
 export async function isKillSwitchActive(): Promise<boolean> {
-  return (await readManifest()) !== null
+  return (await readManifest()) !== null || await probeFirewallForOurRules()
 }
 
 /**
- * Install Windows Firewall rules so that, when sing-box dies or fails to start,
- * outbound traffic on every physical adapter is blocked. sing-box itself and
- * private-LAN ranges are explicitly allowed so the user can still reach printers,
- * NAS, and the local proxy.
+ * Install Windows Firewall kill-switch using the DefaultOutboundAction strategy.
  *
- * Order of installation (each rule is independent — Windows Firewall uses a
- * "block wins unless a more specific allow exists" model and we rely on the
- * Program-based allow being more specific than the Interface-based block):
- *  1. Allow program=sing-box.exe outbound (so sing-box can talk to a remote proxy
- *     across the internet — for local 127.0.0.1 proxies this is a no-op since
- *     loopback isn't bound to a physical adapter).
- *  2. Allow LAN CIDRs outbound (so the firewall doesn't break the user's network).
- *  3. Block outbound on every physical adapter (every adapter that isn't Wintun /
- *     loopback / VM / virtual / Bluetooth).
+ * Previous approach (Block by InterfaceAlias) failed because Windows Firewall
+ * Block rules always win over Allow rules at the same specificity — the block
+ * on the physical adapter also blocked sing-box.exe itself.
  *
- * Returns success even if some rules failed — we record what we managed to
- * install in the manifest so the rollback path knows what to remove. Returns
- * { success: false } only if we couldn't install ANY rule (so the caller knows
- * the kill-switch is NOT engaged).
+ * New approach:
+ *  1. Save the current DefaultOutboundAction for each profile (Domain/Private/Public).
+ *  2. Add Allow rules for: sing-box.exe, proxy owner processes, VPNTE-TUN,
+ *     LAN CIDRs, TUN subnet.
+ *  3. Set DefaultOutboundAction=Block for all profiles.
+ *
+ * With DefaultOutboundAction=Block, ONLY explicitly allowed programs/destinations
+ * can send outbound traffic. Program-based Allow rules correctly override the
+ * default Block (unlike explicit Block rules which always win).
+ *
+ * Safety: Allow rules are created BEFORE setting the default to Block, so if
+ * the script fails partway, only harmless extra Allow rules remain.
  */
 export async function enableKillSwitch(opts: {
   singboxExePath: string
+  proxyOwnerProgramPaths?: string[]
 }): Promise<FirewallKillSwitchResult> {
   if (process.platform !== 'win32') {
     return { success: true, message: 'Firewall kill-switch недоступен (не Windows)' }
   }
 
-  const ruleNames: string[] = []
   const singboxAllow = `${RULE_PREFIX}-allow-singbox`
+  const tunInterfaceAllow = `${RULE_PREFIX}-allow-tun-interface`
   const lanAllow = `${RULE_PREFIX}-allow-lan`
-  const physicalBlock = `${RULE_PREFIX}-block-physical`
+  const tunAllow = `${RULE_PREFIX}-allow-tun`
+  const dhcpAllow = `${RULE_PREFIX}-allow-dhcp`
 
-  // Build one giant PowerShell script so installation is atomic from the user's
-  // POV (one UAC prompt, not three). Also clears any stale rules from a
-  // previous run before installing fresh ones.
-  const lanRemoteAddresses = LAN_BYPASS_CIDRS.map((c) => `'${c}'`).join(',')
+  // Windows Firewall can be picky about mixed IPv4/IPv6 CIDR arrays here. IPv6 is
+  // disabled by adapter lockdown anyway, so keep the firewall LAN bypass IPv4-only.
+  const lanRemoteAddresses = LAN_BYPASS_CIDRS
+    .filter((c) => !c.includes(':'))
+    .map((c) => `'${c}'`)
+    .join(',')
+
+  // Build proxy process allow rules dynamically
+  const proxyPaths = opts.proxyOwnerProgramPaths ?? []
+  const proxyAllowParts: string[] = []
+  for (let i = 0; i < proxyPaths.length; i++) {
+    const ruleName = `${RULE_PREFIX}-allow-proxy-${i}`
+    proxyAllowParts.push(`
+try {
+  New-NetFirewallRule \`
+    -DisplayName ${psSingleQuote(ruleName)} \`
+    -Description 'VPN Tunnel Enforcer kill-switch: allow upstream proxy process outbound.' \`
+    -Direction Outbound -Action Allow \`
+    -Program ${psSingleQuote(proxyPaths[i])} \`
+    -Profile Any -Enabled True | Out-Null
+  $rules += ${psSingleQuote(ruleName)}
+} catch { Write-Host "WARN allow-proxy-${i}: $_" }`)
+  }
+
+  // One atomic elevated PowerShell script: save defaults → add allows → set block.
   const script = `
-# Clean up stale rules from a previous run (idempotent).
+# --- Step 1: Save current DefaultOutboundAction ---
+$profileNames = @('Domain','Private','Public')
+$saved = @()
+foreach ($pn in $profileNames) {
+  $prof = Get-NetFirewallProfile -Profile $pn
+  $saved += @{ name = $pn; defaultOutbound = $prof.DefaultOutboundAction.ToString() }
+}
+$savedJson = ($saved | ConvertTo-Json -Compress)
+
+# --- Step 2: Clean stale rules ---
 Get-NetFirewallRule -DisplayName '${RULE_PREFIX}*' -ErrorAction SilentlyContinue |
   Remove-NetFirewallRule -ErrorAction SilentlyContinue
 
 $rules = @()
 
-# 1. Allow sing-box.exe outbound on any profile/interface.
+# --- Step 3: Add Allow rules (BEFORE setting Block default) ---
+
+# 3a. Allow the TUN runtime (sing-box.exe) outbound.
 try {
   New-NetFirewallRule \`
     -DisplayName ${psSingleQuote(singboxAllow)} \`
-    -Description 'VPN Tunnel Enforcer kill-switch: allow sing-box.exe outbound (must be more specific than the block rule below).' \`
+    -Description 'VPN Tunnel Enforcer kill-switch: allow VPNTE sing-box outbound.' \`
     -Direction Outbound -Action Allow \`
     -Program ${psSingleQuote(opts.singboxExePath)} \`
     -Profile Any -Enabled True | Out-Null
   $rules += ${psSingleQuote(singboxAllow)}
 } catch { Write-Host "WARN allow-singbox: $_" }
 
-# 2. Allow LAN ranges outbound (printers, NAS, router, mDNS, IPv6 ULA).
+# 3b. Allow proxy owner processes (Happ xray.exe, etc.)
+${proxyAllowParts.join('\n')}
+
+# 3c. Allow all captured app traffic on VPNTE-TUN. Without this, the global
+# DefaultOutboundAction=Block blocks the browser before Windows can route the
+# packet into the TUN, which looks like "internet is blocked" even though
+# sing-box itself is allowed.
+try {
+  New-NetFirewallRule \`
+    -DisplayName ${psSingleQuote(tunInterfaceAllow)} \`
+    -Description 'VPN Tunnel Enforcer kill-switch: allow captured app traffic through VPNTE-TUN.' \`
+    -Direction Outbound -Action Allow \`
+    -InterfaceAlias 'VPNTE-TUN' \`
+    -Profile Any -Enabled True | Out-Null
+  $rules += ${psSingleQuote(tunInterfaceAllow)}
+} catch { Write-Host "WARN allow-tun-interface: $_" }
+
+# 3d. Allow IPv4 LAN ranges outbound (printers, NAS, router, mDNS).
 try {
   New-NetFirewallRule \`
     -DisplayName ${psSingleQuote(lanAllow)} \`
-    -Description 'VPN Tunnel Enforcer kill-switch: allow private-LAN destinations so the firewall does not break the home network.' \`
+    -Description 'VPN Tunnel Enforcer kill-switch: allow private-LAN destinations.' \`
     -Direction Outbound -Action Allow \`
     -RemoteAddress ${lanRemoteAddresses} \`
     -Profile Any -Enabled True | Out-Null
   $rules += ${psSingleQuote(lanAllow)}
 } catch { Write-Host "WARN allow-lan: $_" }
 
-# 3. Block outbound on every physical adapter that isn't our Wintun TUN.
-#    InterfaceType Wired/Wireless covers Ethernet + Wi-Fi.
-#    The TUN adapter itself reports as 'RemoteAccess' or has a Wintun interface
-#    description, so it is not in the Wired/Wireless set and stays unblocked.
+# 3e. Allow TUN subnet (172.19.0.0/30) so sing-box TUN traffic works.
 try {
   New-NetFirewallRule \`
-    -DisplayName ${psSingleQuote(physicalBlock)} \`
-    -Description 'VPN Tunnel Enforcer kill-switch: block all outbound on physical adapters. Removed when TUN stops gracefully.' \`
-    -Direction Outbound -Action Block \`
-    -InterfaceType Wired,Wireless \`
+    -DisplayName ${psSingleQuote(tunAllow)} \`
+    -Description 'VPN Tunnel Enforcer kill-switch: allow TUN subnet.' \`
+    -Direction Outbound -Action Allow \`
+    -RemoteAddress '172.19.0.0/30' \`
     -Profile Any -Enabled True | Out-Null
-  $rules += ${psSingleQuote(physicalBlock)}
-} catch { Write-Host "WARN block-physical: $_" }
+  $rules += ${psSingleQuote(tunAllow)}
+} catch { Write-Host "WARN allow-tun: $_" }
 
-$rules -join ','
+# 3f. Allow DHCP (UDP 67/68) so Wi-Fi lease renewal works.
+try {
+  New-NetFirewallRule \`
+    -DisplayName ${psSingleQuote(dhcpAllow)} \`
+    -Description 'VPN Tunnel Enforcer kill-switch: allow DHCP.' \`
+    -Direction Outbound -Action Allow \`
+    -Protocol UDP -RemotePort 67,68 \`
+    -Profile Any -Enabled True | Out-Null
+  $rules += ${psSingleQuote(dhcpAllow)}
+} catch { Write-Host "WARN allow-dhcp: $_" }
+
+# --- Step 4: Set DefaultOutboundAction=Block ---
+try {
+  Set-NetFirewallProfile -Profile Domain,Private,Public -DefaultOutboundAction Block
+} catch {
+  Write-Host "FATAL set-block: $_"
+  # Rollback: remove rules we just added
+  Get-NetFirewallRule -DisplayName '${RULE_PREFIX}*' -ErrorAction SilentlyContinue |
+    Remove-NetFirewallRule -ErrorAction SilentlyContinue
+  throw
+}
+
+# Output: JSON with rules + saved profiles
+$rulesCsv = ($rules -join ',')
+Write-Host "RULES:$rulesCsv"
+Write-Host "SAVED:$savedJson"
 `
 
   let installedRules: string[] = []
+  let savedProfiles: SavedProfile[] = []
   try {
     const { stdout } = await ps(script, true, 60000)
-    installedRules = String(stdout || '')
-      .split('\n')
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0 && !line.startsWith('WARN'))
-      .flatMap((line) => line.split(','))
-      .map((name) => name.trim())
-      .filter((name) => name.startsWith(RULE_PREFIX))
+    const output = String(stdout || '')
+    const lines = output.split('\n').map((l) => l.trim())
+
+    const rulesLine = lines.find((l) => l.startsWith('RULES:'))
+    if (rulesLine) {
+      installedRules = rulesLine
+        .slice(6)
+        .split(',')
+        .map((n) => n.trim())
+        .filter((n) => n.startsWith(RULE_PREFIX))
+    }
+
+    const savedLine = lines.find((l) => l.startsWith('SAVED:'))
+    if (savedLine) {
+      try {
+        const parsed = JSON.parse(savedLine.slice(5))
+        savedProfiles = Array.isArray(parsed)
+          ? parsed.map((p: any) => ({ name: String(p.name), defaultOutbound: String(p.defaultOutbound) }))
+          : []
+      } catch {
+        savedProfiles = [
+          { name: 'Domain', defaultOutbound: 'Allow' },
+          { name: 'Private', defaultOutbound: 'Allow' },
+          { name: 'Public', defaultOutbound: 'Allow' }
+        ]
+      }
+    }
   } catch (err: any) {
-    logEvent('error', 'firewall-killswitch', 'failed to install firewall rules', err)
+    logEvent('error', 'firewall-killswitch', 'failed to install kill-switch', err)
     return {
       success: false,
-      message: 'Не удалось установить правила Windows Firewall',
+      message: 'Не удалось установить kill-switch (DefaultOutboundAction)',
       details: err?.stderr || err?.message || String(err)
     }
   }
 
-  ruleNames.push(...installedRules)
-  if (ruleNames.length === 0) {
+  if (installedRules.length === 0) {
     return {
       success: false,
-      message: 'Windows Firewall не принял ни одного правила kill-switch'
+      message: 'Kill-switch: ни одно Allow-правило не создалось'
     }
   }
 
   await writeManifest({
     createdAt: Date.now(),
-    ruleNames,
-    singboxExePath: opts.singboxExePath
+    ruleNames: installedRules,
+    singboxExePath: opts.singboxExePath,
+    savedProfiles
   })
 
-  logEvent('info', 'firewall-killswitch', 'kill-switch engaged', { ruleNames })
+  logEvent('info', 'firewall-killswitch', 'kill-switch engaged (DefaultOutboundAction=Block)', {
+    ruleNames: installedRules,
+    savedProfiles
+  })
   return {
     success: true,
-    message: `Firewall kill-switch активирован (правил: ${ruleNames.length})`
+    message: `Firewall kill-switch активирован (правил: ${installedRules.length}, DefaultOutbound=Block)`
   }
 }
 
-async function removeAllOurRules(): Promise<void> {
-  // Wildcard-match by display name, so we still clean up if the manifest is
-  // gone or out-of-sync.
+/**
+ * Restore DefaultOutboundAction to saved values and remove all our rules.
+ * Order: restore defaults FIRST (so traffic flows), then remove allow rules.
+ */
+async function restoreAndCleanup(): Promise<void> {
+  const manifest = await readManifest()
+
+  // Build restore script. Even if manifest is missing, try to set defaults
+  // back to Allow and remove any stale rules.
+  const profiles = manifest?.savedProfiles ?? [
+    { name: 'Domain', defaultOutbound: 'Allow' },
+    { name: 'Private', defaultOutbound: 'Allow' },
+    { name: 'Public', defaultOutbound: 'Allow' }
+  ]
+
+  const restoreLines = profiles.map(
+    (p) => `Set-NetFirewallProfile -Profile '${p.name}' -DefaultOutboundAction ${p.defaultOutbound} -ErrorAction SilentlyContinue`
+  )
+
   await ps(
+    restoreLines.join('\n') + '\n' +
     `Get-NetFirewallRule -DisplayName '${RULE_PREFIX}*' -ErrorAction SilentlyContinue | ` +
       `Remove-NetFirewallRule -ErrorAction SilentlyContinue`,
     true,
@@ -241,12 +390,11 @@ export async function disableKillSwitch(reason: string): Promise<FirewallKillSwi
   }
 
   try {
-    await removeAllOurRules()
+    await restoreAndCleanup()
   } catch (err: any) {
-    logEvent('warn', 'firewall-killswitch', 'failed to remove firewall rules', err)
+    logEvent('warn', 'firewall-killswitch', 'failed to fully restore kill-switch', err)
     // Still clear manifest so the app doesn't get stuck thinking kill-switch is
-    // active. The rules will still be removed by the next successful disable
-    // (Get-NetFirewallRule is idempotent).
+    // active. The rules will still be removed by the next successful disable.
     await clearManifest()
     return {
       success: false,
@@ -295,7 +443,7 @@ async function probeFirewallForOurRules(): Promise<boolean> {
 /**
  * Crash recovery: if a previous session left kill-switch rules behind but
  * sing-box is no longer running, the user is locked out of the internet for
- * no good reason. Snip the rules on next startup.
+ * no good reason. Restore defaults and snip the rules on next startup.
  *
  * We check BOTH our manifest AND a direct probe of Windows Firewall, because
  * the app could have crashed between rule installation and manifest write,
@@ -324,4 +472,37 @@ export async function recoverStaleKillSwitch(isSingboxRunning: () => Promise<boo
   await disableKillSwitch('crash recovery on startup').catch((err) =>
     logEvent('warn', 'firewall-killswitch', 'crash-recovery disable failed', err)
   )
+}
+
+/**
+ * Nuclear option: reset Windows Firewall back to factory defaults.
+ *
+ * This is the last-resort recovery for users whose firewall is jammed by
+ * accumulated rules / a stuck DefaultOutboundAction=Block / our own kill-switch
+ * that won't come off cleanly. `netsh advfirewall reset` wipes ALL rules
+ * (including third-party ones), then we re-apply the safe Windows default of
+ * "block inbound, allow outbound" so the user has working internet again.
+ *
+ * Returns success=true even if the second `set allprofiles` step fails — the
+ * reset itself usually unblocks things. Returns success=false only if the
+ * reset itself errors out (typically a privilege failure).
+ */
+export async function nuclearFirewallReset(): Promise<{ success: boolean; message: string }> {
+  if (process.platform !== 'win32') {
+    return { success: false, message: 'Only supported on Windows' }
+  }
+  try {
+    const { exec } = await import('child_process')
+    const { promisify } = await import('util')
+    const execAsync = promisify(exec)
+    await execAsync('netsh advfirewall reset', { windowsHide: true, timeout: 10000 })
+    await execAsync('netsh advfirewall set allprofiles firewallpolicy blockinbound,allowoutbound', { windowsHide: true, timeout: 10000 })
+    // After a full reset our manifest no longer reflects reality — clear it.
+    await clearManifest()
+    logEvent('info', 'firewall-killswitch', 'nuclear firewall reset completed')
+    return { success: true, message: 'Firewall сброшен к настройкам по умолчанию' }
+  } catch (err: any) {
+    logEvent('error', 'firewall-killswitch', 'nuclear firewall reset failed', err)
+    return { success: false, message: err.message || String(err) }
+  }
 }

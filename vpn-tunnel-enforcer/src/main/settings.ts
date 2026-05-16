@@ -4,8 +4,19 @@ import { execElevated } from './admin'
 
 export interface AppSettings {
   routingMode: 'compatible'
+  connectionMode: 'localProxy' | 'directVpn'
   proxyOverride: string
   proxyType: 'socks5' | 'http'
+  directVpnInput: string
+  directVpnSelectedIndex: number
+  directVpnCachedInput: string
+  directVpnCachedSource: string
+  directVpnCachedAt: number | null
+  directVpnCachedProfiles: Array<{
+    name: string
+    protocol: string
+    outbound: Record<string, any>
+  }>
   checkInterval: number
   autoStart: boolean
   autoPilotEnabled: boolean
@@ -28,6 +39,10 @@ export interface AppSettings {
   // Show Windows toast notifications on state changes (TUN up/down, leak,
   // kill-switch engaged). On by default.
   desktopNotifications: boolean
+  // Public/captive Wi-Fi compatibility: do not rewrite physical adapter DNS.
+  // Captive portals often decide "no internet" if Wi-Fi DNS is forced to the
+  // TUN resolver before the portal is authorized.
+  publicWifiCompatibility: boolean
   // Hard adapter lockdown: while TUN is up, disable IPv6 + force IPv4 DNS to
   // the TUN resolver on every physical (Wired/Wireless) adapter. Catches
   // leaks the firewall kill-switch alone misses (DNS-over-HTTPS bypassing
@@ -39,8 +54,15 @@ export interface AppSettings {
 
 const defaults: AppSettings = {
   routingMode: 'compatible',
+  connectionMode: 'localProxy',
   proxyOverride: '',
   proxyType: 'socks5',
+  directVpnInput: '',
+  directVpnSelectedIndex: 0,
+  directVpnCachedInput: '',
+  directVpnCachedSource: '',
+  directVpnCachedAt: null,
+  directVpnCachedProfiles: [],
   checkInterval: 30000,
   autoStart: false,
   autoPilotEnabled: true,
@@ -50,14 +72,14 @@ const defaults: AppSettings = {
   // and not actually required for TUN to capture traffic at the routing layer. Users who
   // need to fix UWP/Store traffic capture can opt in via Settings → "Auto baseline".
   autoNetworkBaseline: false,
-  // On by default — this is the only thing that turns "all traffic should go through VPN"
-  // from a routing convention into a real guarantee. Without it, sing-box dying for any
-  // reason (crash, OOM, killed by AV) instantly drops traffic onto the physical adapter.
-  firewallKillSwitch: true,
+  // Off by default: Windows Firewall block rules can also block the VPN core
+  // process on public Wi-Fi, which looks exactly like "DNS/internet died".
+  firewallKillSwitch: false,
   advancedMode: false,
   firstRunComplete: false,
   autoRestartOnCrash: true,
   desktopNotifications: true,
+  publicWifiCompatibility: true,
   strictAdapterLockdown: true
 }
 
@@ -68,10 +90,26 @@ const store = new Store<{ settings: AppSettings }>({
 
 function normalizeSettings(input: Partial<AppSettings> | undefined): AppSettings {
   const merged = { ...defaults, ...(input ?? {}) }
+  const cachedProfiles = Array.isArray(merged.directVpnCachedProfiles)
+    ? merged.directVpnCachedProfiles
+        .filter((profile: any) => profile && typeof profile === 'object' && profile.outbound && typeof profile.outbound === 'object')
+        .map((profile: any) => ({
+          name: typeof profile.name === 'string' && profile.name.trim() ? profile.name.trim() : 'VPN',
+          protocol: typeof profile.protocol === 'string' && profile.protocol.trim() ? profile.protocol.trim() : String(profile.outbound?.type || 'sing-box'),
+          outbound: profile.outbound
+        }))
+    : []
   return {
     routingMode: 'compatible',
+    connectionMode: merged.connectionMode === 'directVpn' ? 'directVpn' : 'localProxy',
     proxyOverride: typeof merged.proxyOverride === 'string' ? merged.proxyOverride.trim() : '',
     proxyType: merged.proxyType === 'http' ? 'http' : 'socks5',
+    directVpnInput: typeof merged.directVpnInput === 'string' ? merged.directVpnInput.trim() : '',
+    directVpnSelectedIndex: Math.max(0, Math.floor(Number(merged.directVpnSelectedIndex) || 0)),
+    directVpnCachedInput: typeof merged.directVpnCachedInput === 'string' ? merged.directVpnCachedInput.trim() : '',
+    directVpnCachedSource: typeof merged.directVpnCachedSource === 'string' ? merged.directVpnCachedSource.trim() : '',
+    directVpnCachedAt: Number.isFinite(Number(merged.directVpnCachedAt)) ? Number(merged.directVpnCachedAt) : null,
+    directVpnCachedProfiles: cachedProfiles,
     checkInterval: Math.min(300000, Math.max(5000, Number(merged.checkInterval) || defaults.checkInterval)),
     autoStart: Boolean(merged.autoStart),
     autoPilotEnabled: merged.autoPilotEnabled !== false,
@@ -83,6 +121,7 @@ function normalizeSettings(input: Partial<AppSettings> | undefined): AppSettings
     firstRunComplete: Boolean(merged.firstRunComplete),
     autoRestartOnCrash: merged.autoRestartOnCrash !== false,
     desktopNotifications: merged.desktopNotifications !== false,
+    publicWifiCompatibility: merged.publicWifiCompatibility !== false,
     strictAdapterLockdown: merged.strictAdapterLockdown !== false
   }
 }

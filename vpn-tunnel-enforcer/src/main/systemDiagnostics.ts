@@ -8,6 +8,7 @@ import { getAppLogPath, getLogDir, logEvent } from './appLogger'
 import { getRoutingPlan } from './connectionPlanner'
 import { runLeakCheck, type CheckStatus } from './leakDiagnostics'
 import { settingsStore } from './settings'
+import { redactSensitiveText, redactSettingsForDiagnostics } from './vpnProfiles'
 import { runStoreDiagnostics } from './storeDiagnostics'
 import { getTunRuntimeDir, parseProxyAddress, probeTcp, tunController } from './tunController'
 
@@ -126,13 +127,16 @@ async function getLogSummary(
           if (!Number.isFinite(ts) || now - ts > freshMs) return []
           if (row.level !== 'warn' && row.level !== 'error') return []
           const details = row.details ? ` ${JSON.stringify(row.details).slice(0, 180)}` : ''
-          return [`${row.ts} ${row.level} ${row.scope || 'app'}: ${row.message || ''}${details}`]
+          return [redactSensitiveText(`${row.ts} ${row.level} ${row.scope || 'app'}: ${row.message || ''}${details}`)]
         } catch {
           return []
         }
       }).slice(-8)
     } else if (includeErrors) {
-      errors = lines.filter(line => /\b(fatal|error|panic|failed|timeout|refused|denied)\b/i.test(line)).slice(-8)
+      errors = lines
+        .filter(line => /\b(fatal|error|panic|failed|timeout|refused|denied)\b/i.test(line))
+        .map(redactSensitiveText)
+        .slice(-8)
     }
     return { exists: true, size: info.size, lines: lines.length, errors }
   } catch {
@@ -166,7 +170,7 @@ async function getRuntimeItems(): Promise<SystemDiagnosticItem[]> {
       'Current settings',
       'info',
       `proxyType=${settings.proxyType}, interval=${settings.checkInterval}ms`,
-      JSON.stringify(settings)
+      JSON.stringify(redactSettingsForDiagnostics(settings))
     ),
     item(
       'runtime-tun-status',

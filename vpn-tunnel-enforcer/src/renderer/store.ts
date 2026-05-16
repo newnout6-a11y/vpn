@@ -1,5 +1,35 @@
 import { create } from 'zustand'
 
+/**
+ * State Management Architecture Decision (Task 21.3)
+ *
+ * The design document specifies Zustand slices for: connection, splitTunnel, servers,
+ * schedule, dns, routing, theme, i18n, widgets, notifications, speedTest, rotation, killSwitch.
+ *
+ * After implementation, the following architecture was adopted instead:
+ *
+ * 1. **Connection state (this store)** — Shared across Dashboard, Sidebar, widgets, and Settings.
+ *    Contains: tunRunning, tunStartedAt, publicIp, isLeak, vpnIp, proxy, detecting,
+ *    firewallKillSwitchActive, traffic, settings, logs, etc.
+ *
+ * 2. **Theme** — Managed by ThemeProvider (React Context) in providers/ThemeProvider.tsx.
+ *    Applies CSS custom properties and listens for system theme changes via IPC.
+ *
+ * 3. **i18n** — Managed by react-i18next. No Zustand slice needed.
+ *
+ * 4. **Feature-specific state** (splitTunnel, servers, schedule, dns, routing, widgets,
+ *    notifications, speedTest, rotation, killSwitch) — Each page/component manages its own
+ *    state locally via useState + IPC calls to the main process. This is intentional:
+ *    - Data is always fresh from the source of truth (main process)
+ *    - No stale cache issues
+ *    - Features are self-contained and don't need cross-component state sharing
+ *    - Simpler mental model: component mounts → fetches data → displays it
+ *
+ * Separate Zustand slices were deemed unnecessary because the IPC-first pattern
+ * provides better data freshness guarantees and the features don't share state
+ * across unrelated components.
+ */
+
 export type Mode = 'off' | 'soft' | 'hard' | 'external'
 
 export interface ProxyInfo {
@@ -34,8 +64,19 @@ function persistRendererLog(level: LogEntry['level'], message: string) {
 
 export interface AppSettings {
   routingMode: 'compatible'
+  connectionMode: 'localProxy' | 'directVpn'
   proxyOverride: string
   proxyType: 'socks5' | 'http'
+  directVpnInput: string
+  directVpnSelectedIndex: number
+  directVpnCachedInput: string
+  directVpnCachedSource: string
+  directVpnCachedAt: number | null
+  directVpnCachedProfiles: Array<{
+    name: string
+    protocol: string
+    outbound: Record<string, any>
+  }>
   checkInterval: number
   autoStart: boolean
   autoPilotEnabled: boolean
@@ -47,6 +88,7 @@ export interface AppSettings {
   firstRunComplete: boolean
   autoRestartOnCrash: boolean
   desktopNotifications: boolean
+  publicWifiCompatibility: boolean
   strictAdapterLockdown: boolean
 }
 
@@ -68,6 +110,52 @@ export interface RoutingHealth {
   lastCheck: number | null
   summary: LeakCheckResult['summary'] | 'unknown'
   message: string
+}
+
+export interface TrafficStats {
+  ts: number
+  running: boolean
+  adapterName: string
+  adapterFound: boolean
+  downloadBps: number
+  uploadBps: number
+  totalDownloadBytes: number
+  totalUploadBytes: number
+  sessionDownloadBytes: number
+  sessionUploadBytes: number
+  peakDownloadBps: number
+  peakUploadBps: number
+  startedAt: number | null
+}
+
+export interface BrowserIpCheck {
+  ranAt: number
+  summary: 'ok' | 'warn' | 'fail' | 'info'
+  browserIpv4: string | null
+  browserIpv6: string | null
+  nodeIp: string | null
+  browserMatchesNode: boolean | null
+  webRtcPublicIps: string[]
+  webRtcLocalIps: string[]
+  webRtcMdnsCount: number
+  webRtcError: string | null
+  details: string[]
+}
+
+const emptyTrafficStats: TrafficStats = {
+  ts: Date.now(),
+  running: false,
+  adapterName: 'VPNTE-TUN',
+  adapterFound: false,
+  downloadBps: 0,
+  uploadBps: 0,
+  totalDownloadBytes: 0,
+  totalUploadBytes: 0,
+  sessionDownloadBytes: 0,
+  sessionUploadBytes: 0,
+  peakDownloadBps: 0,
+  peakUploadBps: 0,
+  startedAt: null
 }
 
 interface AppState {
@@ -92,6 +180,8 @@ interface AppState {
   autoconfigTargets: AutoconfigTarget[]
   routingHealth: RoutingHealth
   leakChecks: LeakCheckResult | null
+  traffic: TrafficStats
+  browserIpCheck: BrowserIpCheck | null
   logs: LogEntry[]
   settings: AppSettings
 
@@ -106,6 +196,8 @@ interface AppState {
   setFirewallKillSwitchActive: (active: boolean) => void
   setAutoconfigTargets: (targets: AutoconfigTarget[]) => void
   setLeakChecks: (checks: LeakCheckResult | null) => void
+  setTrafficStats: (stats: TrafficStats) => void
+  setBrowserIpCheck: (check: BrowserIpCheck | null) => void
   toggleTarget: (id: string) => void
   addLog: (level: LogEntry['level'], message: string) => void
   clearLogs: () => void
@@ -163,22 +255,32 @@ export const useAppStore = create<AppState>((set) => ({
     message: 'Диагностика ещё не запускалась'
   },
   leakChecks: null,
+  traffic: emptyTrafficStats,
+  browserIpCheck: null,
   logs: [],
   settings: {
     routingMode: 'compatible',
+    connectionMode: 'localProxy',
     proxyOverride: '',
     proxyType: 'socks5',
+    directVpnInput: '',
+    directVpnSelectedIndex: 0,
+    directVpnCachedInput: '',
+    directVpnCachedSource: '',
+    directVpnCachedAt: null,
+    directVpnCachedProfiles: [],
     checkInterval: 30000,
     autoStart: false,
     autoPilotEnabled: true,
     minimizeToTray: true,
     locationPrivacyEnabled: false,
     autoNetworkBaseline: false,
-    firewallKillSwitch: true,
+    firewallKillSwitch: false,
     advancedMode: false,
     firstRunComplete: false,
     autoRestartOnCrash: true,
     desktopNotifications: true,
+    publicWifiCompatibility: true,
     strictAdapterLockdown: true
   },
 
@@ -211,6 +313,8 @@ export const useAppStore = create<AppState>((set) => ({
         }
       : { lastCheck: null, summary: 'unknown', message: 'Диагностика ещё не запускалась' }
   }),
+  setTrafficStats: (traffic) => set({ traffic }),
+  setBrowserIpCheck: (browserIpCheck) => set({ browserIpCheck }),
   toggleTarget: (id) => set((s) => ({
     autoconfigTargets: s.autoconfigTargets.map(t =>
       t.id === id ? { ...t, enabled: !t.enabled } : t

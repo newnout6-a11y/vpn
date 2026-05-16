@@ -6,7 +6,7 @@ import { happDetector } from './happDetector'
 import { tunController } from './tunController'
 import { ipMonitor } from './ipMonitor'
 import { autoconfig } from './autoconfig'
-import { createTray, updateTrayIcon } from './tray'
+import { createTray, updateTrayState, type TrayStatus } from './tray'
 import { settingsStore } from './settings'
 import { runLeakCheck } from './leakDiagnostics'
 import { runStoreRepair, type StoreRepairAction } from './storeRepair'
@@ -21,10 +21,12 @@ import {
 import {
   disableKillSwitchIfActive,
   isKillSwitchActive,
+  nuclearFirewallReset,
   recoverStaleKillSwitch
 } from './firewallKillSwitch'
 import {
   isPhysicalAdapterLockdownApplied,
+  repairOrphanedPhysicalAdapterDns,
   rollbackPhysicalAdapterLockdownIfApplied
 } from './physicalAdapterLockdown'
 import { relaunchElevatedIfNeeded } from './admin'
@@ -36,6 +38,27 @@ import { notify } from './notifications'
 import { exportDiagnosticsZip } from './diagnosticsExport'
 import { captureSnapshot, getSnapshotsDir, startPeriodicSnapshots, stopPeriodicSnapshots } from './systemSnapshot'
 import { runLeakSelfTest, startPeriodicLeakTest, stopPeriodicLeakTest, setLeakDetectedCallback } from './leakSelfTest'
+import { trafficMonitor, type TrafficStats } from './trafficMonitor'
+import { applyBrowserLeakProtection, rollbackBrowserLeakProtection } from './browserHardening'
+import { resolveVpnProfile, resolveVpnProfiles, redactSensitiveConfig, type VpnProfile } from './vpnProfiles'
+
+// ─── V2 Feature Modules ──────────────────────────────────────────────────────
+import { registerSplitTunnelHandlers } from './splitTunneling'
+import { registerServerPickerHandlers, serverPicker } from './serverPicker'
+import { registerServerProbeIpcHandlers } from './serverProbe'
+import { registerSpeedTestHandlers } from './speedTest'
+import { registerKillSwitchIpc, granularKillSwitch } from './granularKillSwitch'
+import { registerRotationHandlers, initProfileRotation } from './profileRotation'
+import { registerSchedulerIpcHandlers, schedulerService } from './scheduler'
+import { registerConnectionHistoryIpcHandlers, connectionHistoryService } from './connectionHistory'
+import { registerTrafficHistoryIpcHandlers } from './trafficHistory'
+import { registerDnsHandlers, initDnsProfiles } from './dnsProfiles'
+import { registerDomainRoutingIpcHandlers } from './domainRouting'
+import { registerConfigManagerIpcHandlers } from './configManager'
+import { registerNotificationPrefsIpcHandlers } from './notificationPrefs'
+import { registerI18nIpcHandlers } from './i18n'
+import { registerThemeIpcHandlers } from './themeManager'
+import { registerWidgetLayoutIpcHandlers } from './widgetLayout'
 
 const exec = promisify(execCb)
 
@@ -43,6 +66,21 @@ let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
 let isQuitting = false
 let shutdownInProgress = false
+let latestPublicIp: string | null = null
+let latestTraffic: TrafficStats = trafficMonitor.getCurrentStats()
+let latestTrayStatus: TrayStatus = 'off'
+let latestTrayProxyAddr: string | null = null
+let latestKillSwitchActive = false
+let latestRestartingProgress: string | null = null
+
+// Connection history tracking. We open a "current connection" record when
+// startProtection / startDirectVpnProtection succeeds, and close it on stop or
+// on a status change to a terminal state. `stopInProgress` guards against
+// double-recording when the user-initiated stop also triggers a status-change
+// event.
+let currentConnectionStart: number | null = null
+let currentConnectionProfile: { id: string; name: string; mode: 'hard' | 'soft' | 'direct' } | null = null
+let stopInProgress = false
 
 // Global guards against uncaught exceptions / rejections in the main process.
 // Without these, a stray ECONNRESET on a stale TCP socket (axios connection
@@ -140,7 +178,7 @@ function createWindow() {
 
 function compactForLog(value: unknown): string {
   try {
-    const raw = JSON.stringify(value)
+    const raw = JSON.stringify(redactSensitiveConfig(value))
     if (!raw) return ''
     return raw.length > 2000 ? `${raw.slice(0, 2000)}...<truncated>` : raw
   } catch {
@@ -192,6 +230,399 @@ async function recoverStaleBaseline(): Promise<void> {
   await rollbackTunNetworkBaselineIfApplied('crash recovery on startup').catch(err =>
     logEvent('warn', 'app', 'crash-recovery rollback failed', err)
   )
+}
+
+function refreshTrayState(patch: {
+  status?: TrayStatus
+  publicIp?: string | null
+  proxyAddr?: string | null
+  traffic?: TrafficStats
+  killSwitchActive?: boolean
+  restartingProgress?: string | null
+} = {}): void {
+  if (patch.status) latestTrayStatus = patch.status
+  if (patch.publicIp !== undefined) latestPublicIp = patch.publicIp
+  if (patch.traffic) latestTraffic = patch.traffic
+  if (patch.killSwitchActive !== undefined) latestKillSwitchActive = patch.killSwitchActive
+  if (patch.restartingProgress !== undefined) latestRestartingProgress = patch.restartingProgress
+
+  const tunStatus = tunController.getStatus()
+  const settings = settingsStore.get()
+  if (patch.proxyAddr !== undefined) {
+    latestTrayProxyAddr = patch.proxyAddr
+  } else {
+    latestTrayProxyAddr = tunStatus.proxyAddr || settings.proxyOverride.trim() || latestTrayProxyAddr
+  }
+
+  if (!tray) return
+  updateTrayState(tray, {
+    status: latestTrayStatus,
+    publicIp: latestPublicIp,
+    proxyAddr: latestTrayProxyAddr,
+    downloadBps: latestTraffic.downloadBps,
+    uploadBps: latestTraffic.uploadBps,
+    tunRunning: tunStatus.running,
+    firewallKillSwitchActive: latestKillSwitchActive,
+    restartingProgress: latestRestartingProgress
+  })
+}
+
+async function clearStaleKillSwitchBeforeStart(context: string): Promise<{ success: boolean; error?: string }> {
+  if (tunController.getStatus().running) return { success: true }
+  if (!(await isKillSwitchActive())) return { success: true }
+
+  logEvent('info', 'firewall-killswitch', `restart preflight: clearing stale kill-switch before ${context}`)
+  const result = await disableKillSwitchIfActive(`restart preflight: ${context}`)
+  refreshTrayState({ killSwitchActive: await isKillSwitchActive().catch(() => false) })
+  if (!result.success) {
+    return {
+      success: false,
+      error: `Не удалось снять старую блокировку перед перезапуском: ${result.message}`
+    }
+  }
+  return { success: true }
+}
+
+function trayStatusFromTunStatus(status: string): TrayStatus {
+  if (status === 'running') return 'protected'
+  if (status === 'proxy-down') return 'proxy-down'
+  if (status === 'killswitch-active') return 'killswitch'
+  if (status.startsWith('restarting:')) return 'restarting'
+  return 'off'
+}
+
+async function resolveProxyForTrayStart(): Promise<{ proxyAddr: string; proxyType: 'socks5' | 'http' } | null> {
+  const settings = settingsStore.get()
+  const override = settings.proxyOverride.trim()
+  if (override) return { proxyAddr: override, proxyType: settings.proxyType }
+  const detected = await happDetector.detect()
+  if (!detected) return null
+  return { proxyAddr: `${detected.host}:${detected.port}`, proxyType: detected.type }
+}
+
+async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http'): Promise<{ success: boolean; error?: string; warning?: string | null; vpnIp?: string | null }> {
+  // Snapshot BEFORE we change anything. This is the baseline state that
+  // support/diagnostics will compare against.
+  captureSnapshot('tun-pre-start').catch(() => undefined)
+
+  const staleKillSwitch = await clearStaleKillSwitchBeforeStart('local proxy start')
+  if (!staleKillSwitch.success) return { success: false, error: staleKillSwitch.error }
+
+  const plan = await getRoutingPlan()
+  if (!plan.canStartHard) {
+    return {
+      success: false,
+      error: `${plan.title}. ${plan.explanation} ${plan.after}`
+    }
+  }
+
+  let baselineWarning: string | null = null
+  if (settingsStore.get().autoNetworkBaseline) {
+    const baseline = await applyTunNetworkBaseline()
+    if (!baseline.success) {
+      baselineWarning = `Не удалось применить сетевой baseline: ${baseline.message}`
+    }
+  }
+
+  const result = await tunController.start({
+    proxyAddr,
+    proxyType: proxyType ?? 'socks5',
+    enableFirewallKillSwitch: settingsStore.get().firewallKillSwitch,
+    enableAdapterLockdown: settingsStore.get().strictAdapterLockdown,
+    publicWifiCompatibility: settingsStore.get().publicWifiCompatibility
+  })
+  if (!result.success) {
+    // TUN failed to start. If we wiped the user's proxy settings to prepare for it,
+    // restore them now so we don't leave the system worse than we found it. The
+    // kill-switch is dropped by tunController itself in this path — see start().
+    await rollbackTunNetworkBaselineIfApplied('start-tun failed').catch(err =>
+      logEvent('warn', 'app', 'rollback after start-tun failure failed', err)
+    )
+    captureSnapshot('tun-start-failed').catch(() => undefined)
+    return result
+  }
+
+  const ipInfo = await ipMonitor.getCurrentIp()
+  if (ipInfo.ip) {
+    ipMonitor.setVpnIp(ipInfo.ip)
+    try {
+      mainWindow?.webContents.send('ip-changed', { ip: ipInfo.ip, isLeak: false })
+    } catch {}
+  }
+  refreshTrayState({ status: 'protected', publicIp: ipInfo.ip ?? latestPublicIp, proxyAddr })
+
+  // Open a connection-history record. Closed by stopProtection() or by the
+  // tunController.onStatusChange handler if the tunnel dies on its own.
+  currentConnectionStart = Date.now()
+  currentConnectionProfile = {
+    id: 'local-proxy',
+    name: `Proxy ${proxyAddr}`,
+    mode: 'hard'
+  }
+
+  // Schedule a follow-up IP recheck after the tunnel is fully ready. The first
+  // check above can race with route propagation, leaving `isLeak` stale on the
+  // renderer until the periodic monitor catches up. Re-baselining the VPN IP
+  // 2.5s later ensures the leak banner clears once routes settle.
+  setTimeout(() => {
+    ipMonitor.recheck(true).catch(() => undefined)
+  }, 2500)
+
+  // Snapshot AFTER everything is applied (TUN up, kill-switch up,
+  // adapter lockdown up). Then start the periodic snapshot timer +
+  // periodic leak self-test so we keep collecting data for support.
+  captureSnapshot('tun-post-start').catch(() => undefined)
+  startPeriodicSnapshots(60_000)
+  startPeriodicLeakTest(120_000)
+
+  return {
+    ...result,
+    warning: [baselineWarning, result.warning].filter(Boolean).join(' | ') || null,
+    vpnIp: ipInfo.ip ?? null
+  }
+}
+
+async function startDirectVpnProtection(): Promise<{ success: boolean; error?: string; warning?: string | null; vpnIp?: string | null }> {
+  captureSnapshot('tun-pre-start').catch(() => undefined)
+
+  const staleKillSwitch = await clearStaleKillSwitchBeforeStart('Direct VPN start')
+  if (!staleKillSwitch.success) return { success: false, error: staleKillSwitch.error }
+
+  const settings = settingsStore.get()
+
+  // V2: server-picker store is the single source of truth. Pull the active
+  // profile from there. If its outbound was lost (older builds saved
+  // profiles without it) we try to recover from the legacy
+  // directVpnCachedProfiles list at runtime.
+  let profile: VpnProfile | undefined
+  const activeServer = serverPicker.getActiveProfile()
+  if (activeServer) {
+    let outbound = activeServer.outbound
+    if (!outbound || typeof outbound !== 'object') {
+      const legacy = Array.isArray(settings.directVpnCachedProfiles)
+        ? settings.directVpnCachedProfiles
+        : []
+      const fallback = legacy.find((p: any) =>
+        p?.outbound?.server === activeServer.server &&
+        Number(p?.outbound?.server_port || 0) === activeServer.port
+      ) || legacy.find((p: any) => p?.name === activeServer.name && p?.outbound)
+      if (fallback?.outbound) {
+        outbound = fallback.outbound as Record<string, any>
+        logEvent('info', 'tun', 'recovered outbound from legacy cache for active picker profile', {
+          name: activeServer.name,
+          server: activeServer.server
+        })
+      }
+    }
+    if (outbound && typeof outbound === 'object') {
+      profile = {
+        name: activeServer.name,
+        protocol: activeServer.protocol as VpnProfile['protocol'],
+        outbound
+      }
+      logEvent('info', 'tun', 'using server-picker active profile', {
+        id: activeServer.id,
+        protocol: activeServer.protocol,
+        name: activeServer.name
+      })
+    } else {
+      captureSnapshot('tun-start-failed').catch(() => undefined)
+      return {
+        success: false,
+        error: 'У выбранного сервера нет конфигурации (outbound пуст). Удалите его в разделе «Серверы» и добавьте подписку заново.'
+      }
+    }
+  } else if (settings.directVpnInput.trim()) {
+    try {
+      profile = await resolveVpnProfile(settings.directVpnInput, settings.directVpnSelectedIndex, {
+        proxyAddr: settings.proxyOverride,
+        proxyType: settings.proxyType
+      })
+      logEvent('info', 'tun', 'using legacy directVpnInput fallback (no server-picker profile)', {
+        protocol: profile.protocol,
+        name: profile.name
+      })
+    } catch (err: any) {
+      captureSnapshot('tun-start-failed').catch(() => undefined)
+      return { success: false, error: err?.message || String(err) }
+    }
+  } else {
+    captureSnapshot('tun-start-failed').catch(() => undefined)
+    return {
+      success: false,
+      error: 'Нет выбранного сервера. Откройте раздел "Серверы" и добавьте подписку или ключ.'
+    }
+  }
+
+  let baselineWarning: string | null = null
+  if (settings.autoNetworkBaseline) {
+    const baseline = await applyTunNetworkBaseline()
+    if (!baseline.success) {
+      baselineWarning = `Не удалось применить сетевой baseline: ${baseline.message}`
+    }
+  }
+
+  logEvent('info', 'tun', 'direct VPN profile selected', {
+    protocol: profile.protocol,
+    name: profile.name
+  })
+
+  const result = await tunController.start({
+    mode: 'directVpn',
+    vpnProfile: profile,
+    proxyType: 'socks5',
+    enableFirewallKillSwitch: settings.firewallKillSwitch,
+    enableAdapterLockdown: settings.strictAdapterLockdown,
+    publicWifiCompatibility: settings.publicWifiCompatibility
+  })
+  if (!result.success) {
+    await rollbackTunNetworkBaselineIfApplied('direct-vpn start failed').catch(err =>
+      logEvent('warn', 'app', 'rollback after direct-vpn start failure failed', err)
+    )
+    captureSnapshot('tun-start-failed').catch(() => undefined)
+    return result
+  }
+
+  const ipInfo = await ipMonitor.getCurrentIp()
+  if (ipInfo.ip) {
+    ipMonitor.setVpnIp(ipInfo.ip)
+    try {
+      mainWindow?.webContents.send('ip-changed', { ip: ipInfo.ip, isLeak: false })
+    } catch {}
+  }
+  refreshTrayState({ status: 'protected', publicIp: ipInfo.ip ?? latestPublicIp, proxyAddr: profile.name })
+
+  // Open a connection-history record (Direct VPN variant).
+  currentConnectionStart = Date.now()
+  currentConnectionProfile = {
+    id: profile.name || 'direct-vpn',
+    name: profile.name || 'Direct VPN',
+    mode: 'direct'
+  }
+
+  // Schedule a follow-up IP recheck after the tunnel is fully ready (see
+  // matching comment in `startProtection`).
+  setTimeout(() => {
+    ipMonitor.recheck(true).catch(() => undefined)
+  }, 2500)
+
+  captureSnapshot('tun-post-start').catch(() => undefined)
+  startPeriodicSnapshots(60_000)
+  startPeriodicLeakTest(120_000)
+
+  return {
+    ...result,
+    warning: [baselineWarning, result.warning].filter(Boolean).join(' | ') || null,
+    vpnIp: ipInfo.ip ?? null
+  }
+}
+
+async function stopProtection(): Promise<{ success: boolean; error?: string }> {
+  // Record the connection BEFORE we stop, so traffic counters are still valid.
+  // `stopInProgress` ensures the status-change handler doesn't double-record
+  // when tunController emits 'stopped' as a result of the call below.
+  stopInProgress = true
+  if (currentConnectionStart && currentConnectionProfile) {
+    const traffic = trafficMonitor.getCurrentStats()
+    try {
+      connectionHistoryService.addEntry({
+        startedAt: currentConnectionStart,
+        endedAt: Date.now(),
+        profileName: currentConnectionProfile.name,
+        profileId: currentConnectionProfile.id,
+        mode: currentConnectionProfile.mode,
+        bytesDown: traffic.sessionDownloadBytes ?? 0,
+        bytesUp: traffic.sessionUploadBytes ?? 0,
+        disconnectReason: 'user'
+      })
+    } catch (err) {
+      logEvent('warn', 'app', 'failed to record connection history', err)
+    }
+    currentConnectionStart = null
+    currentConnectionProfile = null
+  }
+
+  stopPeriodicSnapshots()
+  stopPeriodicLeakTest()
+  const result = await tunController.stop()
+  ipMonitor.clearVpnIp()
+  trafficMonitor.stop()
+  await repairOrphanedPhysicalAdapterDns('post-stop safety repair').catch(err =>
+    logEvent('warn', 'phys-lockdown', 'post-stop orphaned DNS repair failed', err)
+  )
+
+  // Auto-rollback Windows location-privacy if we (or the user) had it
+  // applied for the duration of the VPN session. Without this, geolocation
+  // stays disabled across reboots and the user wonders why Maps/Weather
+  // can't find them. We always check status (not just our settings flag)
+  // because the user might have applied it manually in Maintenance.
+  try {
+    const status = await getLocationPrivacyStatus()
+    if (status.applied) {
+      const rolled = await rollbackLocationPrivacy()
+      settingsStore.save({ locationPrivacyEnabled: rolled.applied })
+      logEvent('info', 'tun', 'rolled back location privacy on VPN stop', {
+        wasApplied: true,
+        nowApplied: rolled.applied
+      })
+    }
+  } catch (err) {
+    logEvent('warn', 'tun', 'location privacy rollback on stop failed', err)
+  }
+
+  refreshTrayState({ status: 'off', restartingProgress: null })
+  captureSnapshot('tun-post-stop').catch(() => undefined)
+  stopInProgress = false
+  return result
+}
+
+async function startProtectionFromTray(): Promise<void> {
+  if (settingsStore.get().connectionMode === 'directVpn') {
+    refreshTrayState({ status: 'starting' })
+    const result = await startDirectVpnProtection()
+    if (!result.success) {
+      notify('error', 'Не удалось включить защиту', result.error || 'Неизвестная ошибка')
+      refreshTrayState({ status: 'off' })
+    }
+    return
+  }
+
+  const resolved = await resolveProxyForTrayStart()
+  if (!resolved) {
+    notify('error', 'Прокси не найден', 'Запустите VPN-клиент в режиме Proxy или задайте адрес вручную в настройках.')
+    mainWindow?.show()
+    return
+  }
+  refreshTrayState({ proxyAddr: resolved.proxyAddr })
+  const result = await startProtection(resolved.proxyAddr, resolved.proxyType)
+  if (!result.success) {
+    notify('error', 'Не удалось включить защиту', result.error || 'Неизвестная ошибка')
+  }
+}
+
+async function runTrayDiagnostics(): Promise<void> {
+  const tunStatus = tunController.getStatus()
+  const settings = settingsStore.get()
+  const proxyAddr = tunStatus.proxyAddr || settings.proxyOverride.trim() || undefined
+  const result = await runLeakCheck({
+    proxyAddr,
+    proxyType: tunStatus.proxyType || settings.proxyType,
+    tunRunning: tunStatus.running
+  })
+  const message =
+    result.summary === 'ok'
+      ? 'Утечек не найдено.'
+      : result.summary === 'fail'
+        ? 'Найдена критичная проблема маршрутизации.'
+        : 'Есть предупреждения, откройте приложение для деталей.'
+  notify(result.summary === 'fail' ? 'error' : result.summary === 'warn' ? 'warn' : 'info', 'Проверка маршрута', message)
+  mainWindow?.show()
+}
+
+async function quitFromTray(): Promise<void> {
+  mainWindow?.removeAllListeners('close')
+  mainWindow?.close()
+  app.quit()
 }
 
 app.whenReady().then(async () => {
@@ -246,13 +677,25 @@ app.whenReady().then(async () => {
       }
     }
   }
+  await repairOrphanedPhysicalAdapterDns('startup orphaned DNS repair')
+    .catch(err => logEvent('warn', 'phys-lockdown', 'startup orphaned DNS repair failed', err))
 
   const initialSettings = settingsStore.get()
   settingsStore.syncLoginItem()
   ipMonitor.setCheckInterval(initialSettings.checkInterval)
 
   createWindow()
-  tray = createTray(mainWindow!)
+  tray = createTray(mainWindow!, {
+    onStart: startProtectionFromTray,
+    onStop: stopProtection,
+    onRunDiagnostics: runTrayDiagnostics,
+    onOpenLogs: openLogFolder,
+    onQuit: quitFromTray
+  })
+  refreshTrayState()
+  isKillSwitchActive()
+    .then(active => refreshTrayState({ killSwitchActive: active, status: active && !tunController.getStatus().running ? 'killswitch' : latestTrayStatus }))
+    .catch(() => undefined)
 
   // Capture a snapshot of the system state on every app launch — gives us a
   // "what does the network look like before the user clicks anything" record
@@ -280,74 +723,28 @@ app.whenReady().then(async () => {
     return ipMonitor.getCurrentIp()
   })
 
+  handleLogged('recheck-public-ip', async (_e, rebaseline?: boolean) => {
+    return ipMonitor.recheck(rebaseline === true)
+  })
+
   handleLogged('start-tun', async (_e, proxyAddr: string, proxyType?: 'socks5' | 'http') => {
-    // Snapshot BEFORE we change anything. This is the baseline state that
-    // support/diagnostics will compare against.
-    captureSnapshot('tun-pre-start').catch(() => undefined)
+    return startProtection(proxyAddr, proxyType)
+  })
 
-    const plan = await getRoutingPlan()
-    if (!plan.canStartHard) {
-      return {
-        success: false,
-        error: `${plan.title}. ${plan.explanation} ${plan.after}`
-      }
-    }
-
-    let baselineWarning: string | null = null
-    if (settingsStore.get().autoNetworkBaseline) {
-      const baseline = await applyTunNetworkBaseline()
-      if (!baseline.success) {
-        baselineWarning = `Не удалось применить сетевой baseline: ${baseline.message}`
-      }
-    }
-
-    const result = await tunController.start({
-      proxyAddr,
-      proxyType: proxyType ?? 'socks5',
-      enableFirewallKillSwitch: settingsStore.get().firewallKillSwitch,
-      enableAdapterLockdown: settingsStore.get().strictAdapterLockdown
-    })
-    if (!result.success) {
-      // TUN failed to start. If we wiped the user's proxy settings to prepare for it,
-      // restore them now so we don't leave the system worse than we found it. The
-      // kill-switch is dropped by tunController itself in this path — see start().
-      await rollbackTunNetworkBaselineIfApplied('start-tun failed').catch(err =>
-        logEvent('warn', 'app', 'rollback after start-tun failure failed', err)
-      )
-      captureSnapshot('tun-start-failed').catch(() => undefined)
-      return result
-    }
-
-    const ipInfo = await ipMonitor.getCurrentIp()
-    if (ipInfo.ip) ipMonitor.setVpnIp(ipInfo.ip)
-    if (tray) updateTrayIcon(tray, 'protected')
-
-    // Snapshot AFTER everything is applied (TUN up, kill-switch up,
-    // adapter lockdown up). Then start the periodic snapshot timer +
-    // periodic leak self-test so we keep collecting data for support.
-    captureSnapshot('tun-post-start').catch(() => undefined)
-    startPeriodicSnapshots(60_000)
-    startPeriodicLeakTest(120_000)
-
-    return {
-      ...result,
-      warning: [baselineWarning, result.warning].filter(Boolean).join(' | ') || null,
-      vpnIp: ipInfo.ip ?? null
-    }
+  handleLogged('start-direct-vpn', async () => {
+    return startDirectVpnProtection()
   })
 
   handleLogged('stop-tun', async () => {
-    stopPeriodicSnapshots()
-    stopPeriodicLeakTest()
-    const result = await tunController.stop()
-    ipMonitor.clearVpnIp()
-    if (tray) updateTrayIcon(tray, 'off')
-    captureSnapshot('tun-post-stop').catch(() => undefined)
-    return result
+    return stopProtection()
   })
 
   handleLogged('get-tun-status', async () => {
     return tunController.getStatus()
+  })
+
+  handleLogged('get-traffic-stats', async () => {
+    return trafficMonitor.getCurrentStats()
   })
 
   handleLogged('apply-autoconfig', async (_e, targets: string[], proxyAddr: string, proxyType?: 'socks5' | 'http') => {
@@ -367,9 +764,78 @@ app.whenReady().then(async () => {
   })
 
   handleLogged('save-settings', async (_e, settings) => {
+    const previous = settingsStore.get()
     const saved = settingsStore.save(settings)
     ipMonitor.setCheckInterval(saved.checkInterval)
+
+    // Apply changes that affect the running tunnel/firewall.
+
+    // 1. firewallKillSwitch toggled OFF → must disengage active rules so the
+    //    user gets internet back even without restarting VPN.
+    if (previous.firewallKillSwitch && !saved.firewallKillSwitch) {
+      try {
+        await disableKillSwitchIfActive('user disabled firewall kill-switch in Settings')
+        // Also sync the granular level so they stay aligned.
+        if (granularKillSwitch.getLevel() !== 'off') {
+          await granularKillSwitch.setLevel('off')
+        }
+      } catch (err) {
+        logEvent('warn', 'app', 'failed to disengage kill-switch on settings save', err)
+      }
+    }
+
+    // 2. firewallKillSwitch toggled ON while VPN is running → engage now so
+    //    the user doesn't have to reconnect.
+    if (!previous.firewallKillSwitch && saved.firewallKillSwitch && tunController.getStatus().running) {
+      try {
+        if (granularKillSwitch.getLevel() === 'off') {
+          await granularKillSwitch.setLevel('standard')
+        }
+        // applyPolicy() is called by setLevel; nothing else needed.
+      } catch (err) {
+        logEvent('warn', 'app', 'failed to engage kill-switch on settings save', err)
+      }
+    }
+
     return saved
+  })
+
+  handleLogged('inspect-vpn-input', async (_e, input: string) => {
+    const settings = settingsStore.get()
+    const resolved = await resolveVpnProfiles(input, {
+      proxyAddr: settings.proxyOverride,
+      proxyType: settings.proxyType
+    })
+    const protocols: Record<string, number> = {}
+    for (const profile of resolved.profiles) {
+      protocols[profile.protocol] = (protocols[profile.protocol] || 0) + 1
+    }
+    // Only overwrite the cached profile list when the new probe actually
+    // produced something — otherwise a typo or a not-yet-supported share
+    // link (e.g. Happ encrypted subscription) would silently wipe the
+    // user's previously-imported servers. We always update the input
+    // text and last-checked timestamp so the UI shows what was inspected.
+    if (resolved.profiles.length > 0) {
+      settingsStore.save({
+        directVpnInput: input,
+        directVpnCachedInput: input.trim(),
+        directVpnCachedSource: resolved.source,
+        directVpnCachedAt: Date.now(),
+        directVpnCachedProfiles: resolved.profiles
+      })
+    } else {
+      settingsStore.save({
+        directVpnInput: input,
+        directVpnCachedAt: Date.now()
+      })
+    }
+    return {
+      count: resolved.profiles.length,
+      protocols,
+      profiles: resolved.profiles.map((profile, index) => ({ index, name: profile.name, protocol: profile.protocol })),
+      fetched: resolved.fetched,
+      source: resolved.source
+    }
   })
 
   handleLogged('set-login-item', async (_e, openAtLogin: boolean) => {
@@ -399,6 +865,14 @@ app.whenReady().then(async () => {
 
   handleLogged('get-routing-plan', async () => {
     return getRoutingPlan()
+  })
+
+  handleLogged('apply-browser-leak-protection', async () => {
+    return applyBrowserLeakProtection()
+  })
+
+  handleLogged('rollback-browser-leak-protection', async () => {
+    return rollbackBrowserLeakProtection()
   })
 
   handleLogged('run-auto-pilot', async () => {
@@ -439,6 +913,13 @@ app.whenReady().then(async () => {
 
   handleLogged('get-firewall-kill-switch-status', async () => {
     return { active: await isKillSwitchActive() }
+  })
+
+  // Nuclear option for stuck firewalls: reset Windows Firewall to defaults if
+  // even disable-firewall-kill-switch can't restore connectivity (e.g. the user
+  // accumulated other rules or DefaultOutboundAction got stuck on Block).
+  handleLogged('firewall:nuclear-reset', async () => {
+    return nuclearFirewallReset()
   })
 
   handleLogged('get-location-privacy', async () => {
@@ -501,10 +982,90 @@ app.whenReady().then(async () => {
     }
   })
 
+  // ─── V2 Feature Module Registration ──────────────────────────────────────────
+  // Order: infrastructure (settings already loaded above) → i18n/theme → feature services → widgets
+
+  // Infrastructure services
+  registerI18nIpcHandlers()
+  registerThemeIpcHandlers()
+
+  // Feature services
+  registerSplitTunnelHandlers()
+  registerServerPickerHandlers()
+  // Migrate legacy directVpnCachedProfiles → server-picker store on first run.
+  // No-op for fresh installs and for users already on the new store.
+  serverPicker.migrateLegacyDirectVpnProfiles()
+  // Backfill `outbound` on picker entries that were saved by older builds
+  // before the field existed. No-op when nothing needs fixing.
+  serverPicker.backfillMissingOutbounds()
+  // Fire-and-forget background geolocation pass for any profile that doesn't
+  // already have a country tag. This makes country labels appear on the
+  // dashboard without the user having to ping every server manually.
+  void serverPicker.geolocateAll().catch(() => undefined)
+  registerServerProbeIpcHandlers()
+  registerSpeedTestHandlers()
+  registerKillSwitchIpc()
+  registerRotationHandlers()
+  registerSchedulerIpcHandlers()
+  registerConnectionHistoryIpcHandlers()
+  registerTrafficHistoryIpcHandlers()
+  registerDnsHandlers()
+  registerDomainRoutingIpcHandlers()
+  registerConfigManagerIpcHandlers()
+  registerNotificationPrefsIpcHandlers()
+
+  // Widget layout (depends on feature services being registered)
+  registerWidgetLayoutIpcHandlers()
+
+  // Initialize services that need startup logic
+  const singboxExePath = app.isPackaged
+    ? join(process.resourcesPath, 'sing-box.exe')
+    : join(app.getAppPath(), 'resources', 'sing-box.exe')
+  granularKillSwitch.init(singboxExePath)
+  initDnsProfiles()
+  initProfileRotation()
+  schedulerService.init({
+    onConnect: (schedule) => {
+      logEvent('info', 'scheduler', `schedule "${schedule.name}" triggered connect`, { profileId: schedule.profileId, mode: schedule.mode })
+      if (schedule.mode === 'direct') {
+        startDirectVpnProtection().catch(err =>
+          logEvent('error', 'scheduler', 'scheduled direct VPN start failed', err)
+        )
+      } else {
+        resolveProxyForTrayStart().then(resolved => {
+          if (!resolved) {
+            logEvent('warn', 'scheduler', 'scheduled connect failed: no proxy found')
+            return
+          }
+          startProtection(resolved.proxyAddr, resolved.proxyType).catch(err =>
+            logEvent('error', 'scheduler', 'scheduled start failed', err)
+          )
+        })
+      }
+    },
+    onDisconnect: (schedule) => {
+      logEvent('info', 'scheduler', `schedule "${schedule.name}" triggered disconnect`)
+      stopProtection().catch(err =>
+        logEvent('error', 'scheduler', 'scheduled stop failed', err)
+      )
+    }
+  })
+
+  logEvent('info', 'app', 'V2 feature modules registered and initialized')
+
   // Push events from main → renderer
+  trafficMonitor.onStatsChange((stats) => {
+    latestTraffic = stats
+    try {
+      mainWindow?.webContents.send('traffic-stats', stats)
+    } catch {}
+    refreshTrayState({ traffic: stats })
+  })
+
   ipMonitor.onIpChange((ip: string, isLeak: boolean) => {
+    latestPublicIp = ip
     mainWindow?.webContents.send('ip-changed', { ip, isLeak })
-    if (tray) updateTrayIcon(tray, isLeak ? 'leak' : tunController.getStatus().running ? 'protected' : 'off')
+    refreshTrayState({ status: isLeak ? 'leak' : tunController.getStatus().running ? 'protected' : 'off', publicIp: ip })
     if (isLeak) {
       notify('error', 'Виден ваш реальный IP', `Текущий публичный IP: ${ip}. Включите защиту или проверьте VPN-клиент.`)
     }
@@ -512,7 +1073,51 @@ app.whenReady().then(async () => {
 
   tunController.onStatusChange((status: string) => {
     mainWindow?.webContents.send('tun-status-changed', status)
-    if (tray) updateTrayIcon(tray, status === 'running' ? 'protected' : 'off')
+    const isRestarting = status.startsWith('restarting:')
+    if (status === 'running' || status === 'proxy-down') {
+      trafficMonitor.start()
+    } else {
+      trafficMonitor.stop()
+    }
+
+    // Record connection-history entry on terminal/error transitions if we
+    // weren't already in the user-initiated stop path. `crash` for kill-switch
+    // (sing-box died and left firewall rules), otherwise `error` — the
+    // tunController emits 'stopped' on internal failures too.
+    if (
+      (status === 'killswitch-active' || status === 'stopped') &&
+      currentConnectionStart &&
+      currentConnectionProfile &&
+      !stopInProgress
+    ) {
+      const reason: 'crash' | 'error' = status === 'killswitch-active' ? 'crash' : 'error'
+      const traffic = trafficMonitor.getCurrentStats()
+      try {
+        connectionHistoryService.addEntry({
+          startedAt: currentConnectionStart,
+          endedAt: Date.now(),
+          profileName: currentConnectionProfile.name,
+          profileId: currentConnectionProfile.id,
+          mode: currentConnectionProfile.mode,
+          bytesDown: traffic.sessionDownloadBytes ?? 0,
+          bytesUp: traffic.sessionUploadBytes ?? 0,
+          disconnectReason: reason
+        })
+      } catch (err) {
+        logEvent('warn', 'app', 'failed to record connection history (status-change)', err)
+      }
+      currentConnectionStart = null
+      currentConnectionProfile = null
+    }
+
+    refreshTrayState({
+      status: trayStatusFromTunStatus(status),
+      proxyAddr: tunController.getStatus().proxyAddr,
+      restartingProgress: isRestarting ? status.slice('restarting:'.length) : null
+    })
+    isKillSwitchActive()
+      .then(active => refreshTrayState({ killSwitchActive: active }))
+      .catch(() => undefined)
   })
 
   app.on('activate', () => {
@@ -559,6 +1164,12 @@ async function performShutdownCleanup(reason: string): Promise<void> {
     await rollbackPhysicalAdapterLockdownIfApplied(`shutdown: ${reason}`)
   } catch (err) {
     logEvent('warn', 'app', 'adapter lockdown rollback during shutdown failed', err)
+  }
+
+  try {
+    await repairOrphanedPhysicalAdapterDns(`shutdown: ${reason}`)
+  } catch (err) {
+    logEvent('warn', 'app', 'orphaned DNS repair during shutdown failed', err)
   }
 
   try {

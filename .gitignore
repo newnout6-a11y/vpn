@@ -6,3 +6,22 @@ out/
 .DS_Store
 *.exe
 *.dll
+
+# Ad-hoc developer artefacts that shouldn't ship:
+# - Diagnostic ZIPs and unpacked folders the user generates while
+#   troubleshooting are large, contain timestamps and PII-ish hostnames,
+#   and have no value in source control.
+# - Editor / agent state directories.
+# - Throwaway scripts under _diag_temp and ad-hoc probe scripts.
+diag-extract/
+diag-extract-new/
+_diag_temp/
+*-diagnostics-*.zip
+.kiro/
+.vscode/
+vpn-tunnel-enforcer/scripts/probe-subscription.mjs
+vpn-tunnel-enforcer/scripts/inspect-bundle.mjs
+
+
+# Russian-named developer drafts in the repo root.
+Диагностика маршрутизации*.txt

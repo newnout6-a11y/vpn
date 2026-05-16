@@ -173,13 +173,17 @@ async function getLoopbackListenerCandidates(): Promise<ProxyCandidate[]> {
   if (process.platform !== 'win32') return []
 
   try {
+    // Behavior-based detection: return ALL user-level loopback listeners as
+    // candidates. Process name is just a hint, not a filter — `verifyCandidate()`
+    // probes whether each candidate actually speaks SOCKS5 or HTTP proxy
+    // protocol, which is the reliable signal. We only filter out well-known
+    // non-proxy ports and core OS processes to keep the candidate list small.
     const command =
       "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$OutputEncoding=[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new();" +
-      "$rx='(?i)happ|hiddify|nekoray|v2ray|xray|sing-box|singbox|clash|mihomo|shadowsocks|ss-local|trojan|outline|wireguard|openvpn|vpn';" +
       "Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | " +
       "Where-Object { $_.LocalAddress -in @('127.0.0.1','::1','0.0.0.0','::') } | " +
       "ForEach-Object { $p=Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue; [pscustomobject]@{Address=$_.LocalAddress;Port=$_.LocalPort;Process=$p.ProcessName} } | " +
-      "Where-Object { ($_.Process -match $rx) -or ($_.Port -in @(1080,10808,10809,7890,7891,8080,2080,2081,1087,1081,20170,20171,9090)) } | " +
+      "Where-Object { ($_.Port -notin @(135,139,445,3389,5985,5986,5040,5357,49664,49665,49666,49667,49668,49669,49670,49671,49672,49673,80,443,3306,5432,6379,27017,11211,8443,8888,9000)) -and ($_.Process -notmatch '(?i)^(svchost|System|wininit|services|lsass|csrss|smss|winlogon|spoolsv|RuntimeBroker|SearchHost|SearchApp|StartMenuExperienceHost|TextInputHost|ShellExperienceHost|ApplicationFrameHost|Explorer|Taskmgr|dllhost|conhost|fontdrvhost|sihost|ctfmon|dwm|audiodg)$') -and ($_.Port -ge 1024) } | " +
       "Sort-Object Port -Unique | ConvertTo-Json -Compress\""
     const { stdout } = await exec(command, {
       windowsHide: true,

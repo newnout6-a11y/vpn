@@ -1,13 +1,20 @@
 import { useEffect } from 'react'
+import { motion, AnimatePresence } from 'framer-motion'
 import { useAppStore } from './store'
-import { Sidebar } from './components/Sidebar'
+import { Sidebar, type SidebarPage } from './components/Sidebar'
 import { FirstRunWizard } from './components/FirstRunWizard'
+import { ThemeProvider } from './providers/ThemeProvider'
 import { Dashboard } from './pages/Dashboard'
-import { Apps } from './pages/Apps'
+import { SplitTunnel } from './pages/SplitTunnel'
+import { Servers } from './pages/Servers'
+import { SpeedTest } from './pages/SpeedTest'
+import { TrafficHistory } from './pages/TrafficHistory'
+import { Schedule } from './pages/Schedule'
 import { Settings } from './pages/Settings'
 import { Logs } from './pages/Logs'
 import { Maintenance } from './pages/Maintenance'
-import type { AppSettings, LeakCheckResult } from './store'
+import type { AppSettings, LeakCheckResult, TrafficStats } from './store'
+import { NAV_EVENT, type AppPage } from './nav'
 
 declare global {
   interface Window {
@@ -15,19 +22,24 @@ declare global {
       detectHapp: () => Promise<any>
       getPublicIp: () => Promise<{ ip: string | null; isLeak: boolean; vpnIp: string | null }>
       startTun: (proxyAddr: string, proxyType?: 'socks5' | 'http') => Promise<{ success: boolean; error?: string; warning?: string | null; vpnIp?: string | null }>
+      startDirectVpn: () => Promise<{ success: boolean; error?: string; warning?: string | null; vpnIp?: string | null }>
       stopTun: () => Promise<{ success: boolean; error?: string }>
       getTunStatus: () => Promise<{ running: boolean; proxyAddr: string | null; proxyType: 'socks5' | 'http' | null; pid: number | null; warning?: string | null; startedAt?: number | null; restartAttempt?: number }>
+      getTrafficStats: () => Promise<TrafficStats>
       applyAutoconfig: (targets: string[], proxyAddr: string, proxyType?: 'socks5' | 'http') => Promise<Record<string, boolean>>
       rollbackAutoconfig: (targets: string[]) => Promise<Record<string, boolean>>
       getAutoconfigStatus: () => Promise<any[]>
       getSettings: () => Promise<AppSettings>
       saveSettings: (settings: Partial<AppSettings>) => Promise<AppSettings>
+      inspectVpnInput: (input: string) => Promise<{ count: number; protocols: Record<string, number>; profiles: Array<{ index: number; name: string; protocol: string }>; fetched: boolean; source: string }>
       setLoginItem: (openAtLogin: boolean) => Promise<AppSettings>
       runLeakCheck: (options?: { proxyAddr?: string; proxyType?: 'socks5' | 'http' }) => Promise<LeakCheckResult>
       runStoreRepair: (action: string) => Promise<{ success: boolean; message: string; details?: string }>
       runStoreDiagnostics: () => Promise<any>
       runSystemDiagnostics: () => Promise<any>
       getRoutingPlan: () => Promise<any>
+      applyBrowserLeakProtection: () => Promise<any>
+      rollbackBrowserLeakProtection: () => Promise<any>
       runAutoPilot: () => Promise<any>
       logRenderer: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => Promise<any>
       getFullLogs: () => Promise<any>
@@ -44,10 +56,89 @@ declare global {
       exportDiagnostics: () => Promise<{ success: boolean; path?: string; error?: string; cancelled?: boolean }>
       runLeakSelfTest: () => Promise<LeakSelfTestResult>
       openSnapshotsFolder: () => Promise<{ success: boolean; path?: string; error?: string }>
+      // Split Tunneling
+      splitTunnelGetApps: () => Promise<import('../shared/ipc-types').SplitTunnelApp[]>
+      splitTunnelSetRule: (appId: string, rule: 'vpn' | 'direct' | 'none') => Promise<void>
+      splitTunnelAddApp: (exePath: string) => Promise<import('../shared/ipc-types').SplitTunnelApp>
+      splitTunnelRemoveApp: (appId: string) => Promise<void>
+      // Server Picker
+      serversList: () => Promise<import('../shared/ipc-types').ServerProfile[]>
+      serversSelect: (id: string) => Promise<void>
+      serversGetActive: () => Promise<{ profile: import('../shared/ipc-types').ServerProfile | null; activeId: string | null }>
+      serversPingAll: () => Promise<import('../shared/ipc-types').ServerProfile[]>
+      serversPingOne: (host: string, port: number) => Promise<number | null>
+      serversAdd: (input: string) => Promise<import('../shared/ipc-types').ServerProfile[]>
+      serversRemove: (id: string) => Promise<void>
+      serverProbe: (host: string, knownPort?: number) => Promise<any>
+      // Kill-Switch
+      killSwitchGetLevel: () => Promise<import('../shared/ipc-types').KillSwitchLevel>
+      killSwitchSetLevel: (level: import('../shared/ipc-types').KillSwitchLevel) => Promise<any>
+      killSwitchGetExceptions: () => Promise<import('../shared/ipc-types').KillSwitchException[]>
+      killSwitchAddException: (exception: Omit<import('../shared/ipc-types').KillSwitchException, 'id'>) => Promise<import('../shared/ipc-types').KillSwitchException>
+      killSwitchRemoveException: (id: string) => Promise<any>
+      killSwitchBrowseApp: () => Promise<{ path: string; name: string } | null>
       onIpChanged: (callback: (data: { ip: string; isLeak: boolean }) => void) => () => void
       onTunStatusChanged: (callback: (status: string) => void) => () => void
+      onTrafficStats: (callback: (stats: TrafficStats) => void) => () => void
       onLeakDetected: (callback: (result: LeakSelfTestResult) => void) => () => void
       onMainError: (callback: (data: { code: string; message: string }) => void) => () => void
+      // Speed Test
+      speedTestRun: () => Promise<import('../shared/ipc-types').SpeedTestResult>
+      speedTestHistory: () => Promise<import('../shared/ipc-types').SpeedTestResult[]>
+      onSpeedTestProgress: (callback: (data: { percent: number; phase: string }) => void) => () => void
+      // DNS Profiles
+      dnsList: () => Promise<import('../shared/ipc-types').DnsProfile[]>
+      dnsCreate: (profile: { name: string; primary: string; secondary: string; type: 'plain' | 'doh' | 'dot' }) => Promise<import('../shared/ipc-types').DnsProfile>
+      dnsDelete: (id: string) => Promise<void>
+      dnsSelect: (id: string) => Promise<void>
+      dnsValidate: (address: string) => Promise<{ valid: boolean; type: 'plain' | 'doh' | 'dot'; error?: string }>
+      // Connection History
+      connectionHistoryList: () => Promise<import('../shared/ipc-types').ConnectionLogEntry[]>
+      connectionHistoryFilter: (filters: any) => Promise<import('../shared/ipc-types').ConnectionLogEntry[]>
+      connectionHistoryStats: (period: 'day' | 'week' | 'month') => Promise<{ totalTimeMs: number; totalBytesDown: number; totalBytesUp: number; entryCount: number }>
+      connectionHistoryExportCsv: () => Promise<string>
+      connectionHistoryExportJson: () => Promise<string>
+      // Traffic History
+      trafficHistoryList: (vpnIp?: string) => Promise<Array<{ domain: string; firstSeen: number; lastSeen: number; count: number; vpnIp: string | null }>>
+      trafficHistoryClear: () => Promise<{ success: boolean }>
+      // Domain Routing
+      domainRoutingList: () => Promise<import('../shared/ipc-types').DomainRule[]>
+      domainRoutingAdd: (rule: { pattern: string; action: 'vpn' | 'direct' | 'block'; priority: number }) => Promise<import('../shared/ipc-types').DomainRule>
+      domainRoutingUpdate: (id: string, patch: Partial<import('../shared/ipc-types').DomainRule>) => Promise<import('../shared/ipc-types').DomainRule>
+      domainRoutingDelete: (id: string) => Promise<void>
+      domainRoutingReorder: (ids: string[]) => Promise<import('../shared/ipc-types').DomainRule[]>
+      domainRoutingImport: (filePath: string) => Promise<import('../shared/ipc-types').DomainRule[]>
+      domainRoutingResetHits: () => Promise<void>
+      domainRoutingBrowseFile: () => Promise<string | null>
+      // Scheduler
+      schedulerList: () => Promise<import('../shared/ipc-types').ScheduleEntry[]>
+      schedulerCreate: (entry: Omit<import('../shared/ipc-types').ScheduleEntry, 'id'>) => Promise<import('../shared/ipc-types').ScheduleEntry>
+      schedulerUpdate: (id: string, patch: Partial<import('../shared/ipc-types').ScheduleEntry>) => Promise<import('../shared/ipc-types').ScheduleEntry>
+      schedulerDelete: (id: string) => Promise<void>
+      schedulerNextEvent: () => Promise<{ type: 'start' | 'stop'; at: number; schedule: import('../shared/ipc-types').ScheduleEntry } | null>
+      // Profile Rotation
+      rotationGetConfig: () => Promise<import('../shared/ipc-types').RotationConfig>
+      rotationSetConfig: (config: Partial<import('../shared/ipc-types').RotationConfig>) => Promise<import('../shared/ipc-types').RotationConfig>
+      rotationRotateNow: () => Promise<{ success: boolean; newProfile: string }>
+      // Config Import/Export
+      configExport: () => Promise<{ success: boolean; path?: string; error?: string }>
+      configBrowseImport: () => Promise<string | null>
+      configImport: (filePath: string) => Promise<{ success: boolean; sections: string[]; conflicts: string[]; error?: string }>
+      configImportApply: (filePath: string, sections: string[], conflictResolution: 'replace' | 'merge') => Promise<{ success: boolean; error?: string }>
+      // Notification Preferences
+      notificationsGetPrefs: () => Promise<import('../shared/ipc-types').NotificationPreferences>
+      notificationsSetPrefs: (prefs: Partial<import('../shared/ipc-types').NotificationPreferences>) => Promise<import('../shared/ipc-types').NotificationPreferences>
+      // Theme
+      themeGetActive: () => Promise<import('../shared/ipc-types').ThemeConfig>
+      themeList: () => Promise<import('../shared/ipc-types').ThemeConfig[]>
+      themeSetActive: (id: string) => Promise<void>
+      onThemeChanged: (callback: (theme: import('../shared/ipc-types').ThemeConfig) => void) => () => void
+      // i18n
+      i18nGetLocale: () => Promise<string>
+      i18nSetLocale: (locale: string) => Promise<void>
+      // Widgets
+      getWidgetLayout: () => Promise<import('../shared/ipc-types').WidgetLayout[]>
+      setWidgetLayout: (layout: import('../shared/ipc-types').WidgetLayout[]) => Promise<void>
     }
   }
 }
@@ -68,7 +159,7 @@ export interface LeakSelfTestResult {
   summary: string
 }
 
-type Page = 'dashboard' | 'apps' | 'maintenance' | 'settings' | 'logs'
+type Page = SidebarPage | 'maintenance'
 
 import { useState } from 'react'
 
@@ -135,6 +226,10 @@ export default function App() {
         .catch(() => undefined)
     })
 
+    const unsubTraffic = window.electronAPI.onTrafficStats((stats) => {
+      useAppStore.getState().setTrafficStats(stats)
+    })
+
     const unsubLeak = window.electronAPI.onLeakDetected((result) => {
       const store = useAppStore.getState()
       store.setLeakSelfTestResult(result)
@@ -150,6 +245,7 @@ export default function App() {
     return () => {
       unsubIp()
       unsubTun()
+      unsubTraffic()
       unsubLeak()
       unsubMainErr()
     }
@@ -169,8 +265,11 @@ export default function App() {
         addLog('warn', `Не удалось загрузить настройки: ${err.message}`)
       }
 
-      const manualProxy = proxyFromOverride(settings)
-      if (manualProxy) {
+      const manualProxy = settings.connectionMode === 'directVpn' ? null : proxyFromOverride(settings)
+      if (settings.connectionMode === 'directVpn') {
+        store.setProxy(null)
+        addLog('info', 'Режим Direct VPN: Happ не используется.')
+      } else if (manualProxy) {
         store.setProxy(manualProxy)
         addLog('info', `Используется ручной прокси: ${manualProxy.host}:${manualProxy.port} (${manualProxy.type})`)
       } else {
@@ -189,7 +288,7 @@ export default function App() {
         }
       }
 
-      if (settings.autoPilotEnabled) {
+      if (settings.autoPilotEnabled && settings.connectionMode !== 'directVpn') {
         try {
           addLog('info', 'Автопилот маршрута включен: приложение само выберет безопасный режим.')
           const autoPilot = await window.electronAPI.runAutoPilot()
@@ -230,6 +329,11 @@ export default function App() {
       } catch { /* */ }
 
       try {
+        const traffic = await window.electronAPI.getTrafficStats()
+        store.setTrafficStats(traffic)
+      } catch { /* */ }
+
+      try {
         const ks = await window.electronAPI.getFirewallKillSwitchStatus()
         store.setFirewallKillSwitchActive(ks.active)
       } catch { /* */ }
@@ -266,6 +370,7 @@ export default function App() {
       const state = useAppStore.getState()
       if (state.tunRunning) return
       if (state.restartingProgress !== null) return
+      if (state.settings.connectionMode === 'directVpn') return
       if (state.settings.proxyOverride.trim()) return
       try {
         const fresh = await window.electronAPI.detectHapp()
@@ -287,12 +392,25 @@ export default function App() {
     return () => clearInterval(interval)
   }, [addLog])
 
+  // Listen for navigation requests from deep components (e.g. inline links
+  // in cards/modals). They dispatch a CustomEvent that we translate into a
+  // setPage call here so the rest of the app doesn't need to know about the
+  // page state machine.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const target = (e as CustomEvent<AppPage>).detail
+      if (target) setPage(target as Page)
+    }
+    window.addEventListener(NAV_EVENT, handler)
+    return () => window.removeEventListener(NAV_EVENT, handler)
+  }, [])
+
   const settings = useAppStore(s => s.settings)
   const updateSettings = useAppStore(s => s.updateSettings)
   // Force-redirect away from advanced-only pages if the user disables advancedMode
   // while sitting on one of them.
   useEffect(() => {
-    if (!settings.advancedMode && (page === 'apps' || page === 'maintenance')) {
+    if (!settings.advancedMode && page === 'maintenance') {
       setPage('dashboard')
     }
   }, [settings.advancedMode, page])
@@ -300,8 +418,11 @@ export default function App() {
   const renderPage = () => {
     switch (page) {
       case 'dashboard': return <Dashboard />
-      case 'apps':
-        return settings.advancedMode ? <Apps /> : <Dashboard />
+      case 'apps': return <SplitTunnel />
+      case 'servers': return <Servers />
+      case 'speedtest': return <SpeedTest />
+      case 'trafficHistory': return <TrafficHistory />
+      case 'schedule': return <Schedule />
       case 'maintenance':
         return settings.advancedMode ? <Maintenance /> : <Dashboard />
       case 'settings': return <Settings />
@@ -320,14 +441,25 @@ export default function App() {
   }
 
   return (
-    <div className="flex h-screen">
-      <Sidebar currentPage={page} onNavigate={setPage} />
-      <main className="flex-1 overflow-y-auto p-6">
-        {renderPage()}
-      </main>
-      {!settings.firstRunComplete && (
-        <FirstRunWizard onComplete={handleWizardComplete} onSkip={handleWizardComplete} />
-      )}
-    </div>
+    <ThemeProvider>
+      <div className="flex h-screen">
+        <Sidebar currentPage={page} onNavigate={setPage} />
+        <AnimatePresence mode="wait">
+          <motion.main
+            key={page}
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -8 }}
+            transition={{ duration: 0.18, ease: [0.4, 0, 0.2, 1] }}
+            className="flex-1 overflow-y-auto p-6 tabular"
+          >
+            {renderPage()}
+          </motion.main>
+        </AnimatePresence>
+        {!settings.firstRunComplete && (
+          <FirstRunWizard onComplete={handleWizardComplete} onSkip={handleWizardComplete} />
+        )}
+      </div>
+    </ThemeProvider>
   )
 }

@@ -73,6 +73,27 @@ export const ipMonitor = {
     return { ip: currentIp, isLeak, vpnIp }
   },
 
+  /**
+   * Force an immediate IP re-check. When `rebaseline` is true, the freshly
+   * fetched IP is treated as the new VPN baseline (clearing any stale leak
+   * status). Use this after a VPN tunnel is established so the user doesn't
+   * see "real IP visible" while routes are still propagating.
+   */
+  async recheck(rebaseline = false): Promise<{ ip: string | null; isLeak: boolean; vpnIp: string | null }> {
+    const ip = await fetchPublicIp()
+    if (ip) {
+      currentIp = ip
+      if (rebaseline) {
+        vpnIp = ip
+        isLeak = false
+      } else if (vpnIp) {
+        isLeak = ip !== vpnIp
+      }
+      notifyCallbacks(ip, isLeak)
+    }
+    return { ip: currentIp, isLeak, vpnIp }
+  },
+
   setVpnIp(ip: string) {
     vpnIp = ip
     isLeak = false

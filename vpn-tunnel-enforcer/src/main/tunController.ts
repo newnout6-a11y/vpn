@@ -1,8 +1,8 @@
-import { exec as execCb } from 'child_process'
+import { exec as execCb, execFile as execFileCb } from 'child_process'
 import { writeFile, mkdir, copyFile, access, rename, stat } from 'fs/promises'
 import { join, dirname } from 'path'
 import { promisify } from 'util'
-import { createConnection } from 'net'
+import { createConnection, isIP } from 'net'
 import { networkInterfaces } from 'os'
 import { app } from 'electron'
 import sudo from 'sudo-prompt'
@@ -20,15 +20,21 @@ import {
 import {
   applyPhysicalAdapterLockdown,
   isPhysicalAdapterLockdownApplied,
+  repairOrphanedPhysicalAdapterDns,
   rollbackPhysicalAdapterLockdownIfApplied
 } from './physicalAdapterLockdown'
+import type { VpnProfile } from './vpnProfiles'
 
 const exec = promisify(execCb)
+const execFile = promisify(execFileCb)
 
 export interface TunStatus {
   running: boolean
+  mode?: 'localProxy' | 'directVpn'
   proxyAddr: string | null
   proxyType: 'socks5' | 'http' | null
+  vpnProfileName?: string | null
+  vpnProtocol?: string | null
   pid: number | null
   warning?: string | null
   proxyReachable?: boolean
@@ -42,26 +48,30 @@ export interface TunStatus {
 }
 
 interface StartOptions {
-  proxyAddr: string
+  mode?: 'localProxy' | 'directVpn'
+  proxyAddr?: string
   proxyType?: 'socks5' | 'http'
-  // When true, install Windows Firewall block-outbound rules on every physical
-  // adapter before sing-box starts. The rules stay active for the entire TUN
-  // lifetime and are NOT removed if sing-box dies unexpectedly — that's the
-  // whole point: traffic stays blocked at the firewall layer until the user
-  // explicitly stops TUN or the daemon comes back up.
+  vpnProfile?: VpnProfile
+  // Requested legacy Windows Firewall kill-switch. Currently ignored in start()
+  // because broad physical-adapter block rules also block the VPN core itself.
   enableFirewallKillSwitch?: boolean
   // When true, also disable IPv6 + force IPv4 DNS to TUN's resolver on every
-  // physical adapter. This is more invasive than the firewall kill-switch
-  // (it modifies adapter-level network settings) but it's the only thing that
-  // catches leaks from apps that bring their own DNS-over-HTTPS or that prefer
-  // IPv6 default routes (e.g. Yandex Browser). Reverted on stop.
+  // physical adapter. This modifies adapter-level network settings and catches
+  // leaks from apps that bring their own DNS-over-HTTPS or that prefer IPv6
+  // default routes (e.g. Yandex Browser). Reverted on stop.
   enableAdapterLockdown?: boolean
+  // Keep DHCP/public-Wi-Fi DNS on the physical adapter instead of forcing it to
+  // VPNTE-TUN. This avoids captive-portal/Windows "no internet" false positives.
+  publicWifiCompatibility?: boolean
 }
 
 let currentStatus: TunStatus = {
   running: false,
+  mode: 'localProxy',
   proxyAddr: null,
   proxyType: null,
+  vpnProfileName: null,
+  vpnProtocol: null,
   pid: null,
   warning: null,
   proxyReachable: true,
@@ -71,6 +81,7 @@ let currentStatus: TunStatus = {
 let statusCallbacks: ((status: string) => void)[] = []
 let watchdogTimer: ReturnType<typeof setInterval> | null = null
 let watchdogFailures = 0
+let startInProgress = false
 
 // Auto-restart bookkeeping. We remember the last successful start params so we
 // can replay them after an unexpected sing-box crash without asking the user.
@@ -85,6 +96,7 @@ let stableTimer: ReturnType<typeof setTimeout> | null = null
 let userInitiatedStop = false
 const RESTART_BACKOFF_MS = [2000, 5000, 10000] as const
 const STABLE_RESET_MS = 30000
+
 
 function clearRestartTimers() {
   if (restartTimer) {
@@ -178,24 +190,64 @@ function uniqueProcessNames(names: string[]): string[] {
   return result
 }
 
+const DNS_STRATEGY = 'ipv4_only'
+const BOOTSTRAP_DNS_TAG = 'dns-bootstrap'
+
+function isDomainServer(server: unknown): boolean {
+  if (typeof server !== 'string') return false
+  const trimmed = server.trim()
+  if (!trimmed) return false
+  const unbracketed = trimmed.startsWith('[') && trimmed.endsWith(']')
+    ? trimmed.slice(1, -1)
+    : trimmed
+  return isIP(unbracketed) === 0
+}
+
+function sanitizeProxyOutbound(outbound: Record<string, any>): { outbound: Record<string, any>; needsBootstrapDns: boolean } {
+  const result = JSON.parse(JSON.stringify(outbound))
+  const legacyStrategy = typeof result.domain_strategy === 'string' && result.domain_strategy.trim()
+    ? result.domain_strategy.trim()
+    : null
+  const existingStrategy =
+    result.domain_resolver &&
+    typeof result.domain_resolver === 'object' &&
+    typeof result.domain_resolver.strategy === 'string' &&
+    result.domain_resolver.strategy.trim()
+      ? result.domain_resolver.strategy.trim()
+      : null
+
+  delete result.domain_strategy
+  delete result.domain_resolver
+
+  const needsBootstrapDns = isDomainServer(result.server)
+  if (needsBootstrapDns) {
+    result.domain_resolver = {
+      server: BOOTSTRAP_DNS_TAG,
+      strategy: existingStrategy || legacyStrategy || DNS_STRATEGY
+    }
+  }
+
+  return { outbound: result, needsBootstrapDns }
+}
+
 export function generateSingboxConfig(
-  proxyAddr: string,
-  proxyType: 'socks5' | 'http',
+  upstream: string | { outbound: Record<string, any>; proxyType?: 'socks5' | 'http' },
+  proxyType: 'socks5' | 'http' = 'socks5',
   directProcessNames: string[] = []
 ): object {
-  const { host, port } = parseProxyAddress(proxyAddr)
-  const proxyCoreProcesses = uniqueProcessNames([...PROXY_CORE_PROCESS_NAMES, ...directProcessNames])
+  const isDirectVpn = typeof upstream !== 'string'
+  const parsedProxy = typeof upstream === 'string' ? parseProxyAddress(upstream) : null
+  const proxyCoreProcesses = isDirectVpn ? [] : uniqueProcessNames([...PROXY_CORE_PROCESS_NAMES, ...directProcessNames])
 
-  // domain_strategy: 'prefer_ipv4' on the outbound is belt-and-suspenders.
-  // Our DNS already resolves with prefer_ipv4 (see dns.strategy below), but
-  // when sing-box has to re-resolve a sniffed SNI domain it falls back to
-  // default_domain_resolver — telling the outbound to also prefer IPv4 keeps
-  // a SOCKS5/HTTP proxy that has no IPv6 upstream from blackholing AAAA-only
-  // destinations.
-  const proxyOutbound =
-    proxyType === 'http'
-      ? { type: 'http', tag: 'proxy-out', server: host, server_port: port, domain_strategy: 'prefer_ipv4' }
-      : { type: 'socks', tag: 'proxy-out', version: '5', server: host, server_port: port, domain_strategy: 'prefer_ipv4' }
+  // sing-box 1.13 deprecates outbound domain_strategy; if the proxy/VPN
+  // endpoint is a hostname, resolve only that bootstrap name directly, while
+  // captured app DNS still goes through proxy-out and fails closed.
+  const baseProxyOutbound = isDirectVpn
+    ? { ...upstream.outbound, tag: 'proxy-out' }
+    : proxyType === 'http'
+      ? { type: 'http', tag: 'proxy-out', server: parsedProxy!.host, server_port: parsedProxy!.port }
+      : { type: 'socks', tag: 'proxy-out', version: '5', server: parsedProxy!.host, server_port: parsedProxy!.port }
+  const { outbound: proxyOutbound, needsBootstrapDns } = sanitizeProxyOutbound(baseProxyOutbound)
 
   const logPath = join(getTunRuntimeDir(), 'sing-box.log').replace(/\\/g, '/')
   const privateRanges = [
@@ -214,15 +266,21 @@ export function generateSingboxConfig(
   return {
     log: { level: 'debug', timestamp: true, output: logPath },
     dns: {
-      // TCP/TLS DNS is deliberately detoured through proxy-out so DNS cannot fall back
-      // to the physical adapter while the full-tunnel route is active.
-      // No local resolver is registered — if proxy-out is unreachable, DNS must fail
-      // closed instead of silently falling back to the ISP resolver via the physical NIC.
+      // sing-box 1.13.x rejects `detour: direct-out` on DNS servers when the
+      // direct outbound has no explicit override/bind options ("detour to an
+      // empty direct outbound makes no sense"). The recommended replacement
+      // for bootstrap DNS (resolving the proxy hostname before the tunnel
+      // is up) is `type: local` — sing-box delegates the lookup to the
+      // platform native resolver, which still uses the physical interface
+      // because we ask it before strict_route hijacks the system DNS.
       servers: [
         { type: 'tls', tag: 'dns-remote', server: '1.1.1.1', detour: 'proxy-out' },
-        { type: 'tls', tag: 'dns-backup', server: '8.8.8.8', detour: 'proxy-out' }
+        { type: 'tls', tag: 'dns-backup', server: '8.8.8.8', detour: 'proxy-out' },
+        ...(needsBootstrapDns
+          ? [{ type: 'local', tag: BOOTSTRAP_DNS_TAG }]
+          : [])
       ],
-      strategy: 'prefer_ipv4'
+      strategy: DNS_STRATEGY
     },
     inbounds: [
       {
@@ -244,13 +302,18 @@ export function generateSingboxConfig(
     ],
     route: {
       rules: [
-        {
-          process_name: proxyCoreProcesses,
-          outbound: 'direct-out'
-        },
+        ...(
+          proxyCoreProcesses.length > 0
+            ? [{
+                process_name: proxyCoreProcesses,
+                outbound: 'direct-out'
+              }]
+            : []
+        ),
         { action: 'sniff' },
         { protocol: 'dns', action: 'hijack-dns' },
         { ip_cidr: privateRanges, outbound: 'direct-out' },
+        { ip_cidr: ['::/0'], outbound: 'block-out' },
         // HTTP proxy outbound has no UDP transport at all, so every UDP packet
         // (QUIC/HTTP3, gaming, raw DNS that escaped hijack) would silently time
         // out. Explicitly block UDP/443 so browsers fail fast on QUIC and fall
@@ -270,10 +333,34 @@ function notifyStatus(status: string) {
   statusCallbacks.forEach(cb => cb(status))
 }
 
+async function runPowerShell(script: string, timeout = 8000, elevated = false): Promise<string> {
+  const prelude =
+    '$OutputEncoding=[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new();' +
+    '[Console]::InputEncoding=[System.Text.UTF8Encoding]::new();' +
+    '$ProgressPreference="SilentlyContinue";'
+  const command = `powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${Buffer.from(prelude + script, 'utf16le').toString('base64')}`
+  if (elevated) {
+    const { stdout } = await execElevated(command, { timeout, maxBuffer: 1024 * 1024 })
+    return stdout.toString()
+  }
+  const { stdout } = await exec(command, {
+    windowsHide: true,
+    timeout,
+    encoding: 'utf8',
+    maxBuffer: 1024 * 1024
+  })
+  return stdout
+}
+
 async function isSingboxRunning(): Promise<boolean> {
   try {
-    const { stdout } = await exec(`tasklist /FI "IMAGENAME eq ${RUNTIME_EXE_NAME}" /FO CSV /NH`)
-    return stdout.toLowerCase().includes(RUNTIME_EXE_NAME)
+    const runtimeExe = join(getTunRuntimeDir(), RUNTIME_EXE_NAME)
+    const stdout = await runPowerShell(`
+$p=${psQuote(runtimeExe)}
+@(Get-CimInstance Win32_Process -Filter "Name='${RUNTIME_EXE_NAME}'" -ErrorAction SilentlyContinue |
+  Where-Object { $_.ExecutablePath -eq $p }).Count
+`, 5000)
+    return parseInt(String(stdout).trim() || '0', 10) > 0
   } catch {
     return false
   }
@@ -298,6 +385,60 @@ async function killOwnedRuntimeProcesses(): Promise<void> {
   await killRuntimeProcess(RUNTIME_EXE_NAME, join(runtimeDir, RUNTIME_EXE_NAME))
   await killRuntimeProcess('sing-box.exe', join(runtimeDir, 'sing-box.exe'))
   await killRuntimeProcess('sing-box.exe', getBundledResource('sing-box.exe'))
+}
+
+async function waitForOwnedRuntimeToExit(timeoutMs = 3000): Promise<boolean> {
+  const started = Date.now()
+  while (Date.now() - started < timeoutMs) {
+    if (!(await isSingboxRunning())) return true
+    await new Promise((resolve) => setTimeout(resolve, 250))
+  }
+  return !(await isSingboxRunning())
+}
+
+// Polls Get-NetAdapter until VPNTE-TUN reports Status=Up. Wintun creates the
+// adapter shortly after sing-box opens its TUN inbound, but there's a small
+// gap where Get-NetAdapter either doesn't see it or reports it as Disconnected.
+// Firewall rules with -InterfaceAlias 'VPNTE-TUN' fail silently when the alias
+// doesn't exist yet, so any caller that's about to install such a rule must
+// wait for this helper to succeed first.
+async function waitForTunInterface(timeoutMs = 5000): Promise<boolean> {
+  if (process.platform !== 'win32') return false
+  const start = Date.now()
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const stdout = await runPowerShell(
+        `(Get-NetAdapter -Name 'VPNTE-TUN' -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' } | Measure-Object).Count`,
+        3000
+      )
+      if (parseInt(String(stdout).trim() || '0', 10) > 0) {
+        return true
+      }
+    } catch {
+      // Fall through and retry — Get-NetAdapter occasionally fails transiently.
+    }
+    await new Promise(r => setTimeout(r, 200))
+  }
+  return false
+}
+
+async function removeStaleTunInterface(): Promise<void> {
+  if (process.platform !== 'win32') return
+  const script = `
+$adapter = Get-NetAdapter -Name 'VPNTE-TUN' -ErrorAction SilentlyContinue
+if ($adapter) {
+  try { Remove-NetAdapter -Name 'VPNTE-TUN' -Confirm:$false -ErrorAction Stop; Write-Host 'removed' }
+  catch {
+    try { Disable-NetAdapter -Name 'VPNTE-TUN' -Confirm:$false -ErrorAction Stop; Write-Host 'disabled' }
+    catch { Write-Host "err: $_" }
+  }
+}
+`
+  try {
+    await runPowerShell(script, 15000, true)
+  } catch (err) {
+    logEvent('warn', 'tun', 'stale TUN interface cleanup failed', err)
+  }
 }
 
 // Kill-switch behavior: when the upstream proxy is unreachable, we INTENTIONALLY do NOT
@@ -385,31 +526,128 @@ export function probeTcp(host: string, port: number, timeoutMs = 2000): Promise<
   })
 }
 
-async function getProxyOwnerProcessNames(host: string, port: number): Promise<string[]> {
+const PROXY_PUBLIC_IP_CHECKS = [
+  { label: 'ipify', url: 'https://api.ipify.org' },
+  { label: 'myip', url: 'https://api.myip.com' },
+  { label: '2ip', url: 'https://2ip.ru' }
+]
+
+function isPrivateIpv4(ip: string): boolean {
+  return (
+    ip.startsWith('10.') ||
+    ip.startsWith('127.') ||
+    ip.startsWith('169.254.') ||
+    ip.startsWith('192.168.') ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(ip)
+  )
+}
+
+function extractPublicIpv4(text: string): string | null {
+  const matches = String(text).match(/(?<!\d)(?:\d{1,3}\.){3}\d{1,3}(?!\d)/g) ?? []
+  for (const ip of matches) {
+    const parts = ip.split('.').map((part) => Number(part))
+    if (parts.length === 4 && parts.every((part) => Number.isInteger(part) && part >= 0 && part <= 255) && !isPrivateIpv4(ip)) {
+      return ip
+    }
+  }
+  return null
+}
+
+function curlProxyUrl(host: string, port: number, proxyType: 'socks5' | 'http'): string {
+  const h = isIP(host) === 6 && !host.startsWith('[') ? `[${host}]` : host
+  return `${proxyType === 'socks5' ? 'socks5h' : 'http'}://${h}:${port}`
+}
+
+async function curlText(args: string[], timeoutMs = 12000): Promise<string> {
+  const { stdout } = await execFile('curl.exe', args, {
+    windowsHide: true,
+    timeout: timeoutMs,
+    encoding: 'utf8',
+    maxBuffer: 1024 * 1024
+  })
+  return stdout
+}
+
+async function fetchPublicIpDirect(): Promise<string | null> {
+  if (process.platform !== 'win32') return null
+  try {
+    return extractPublicIpv4(await curlText(['-4', '-L', '-sS', '--max-time', '8', '--connect-timeout', '6', 'https://api.ipify.org']))
+  } catch {
+    return null
+  }
+}
+
+async function validateProxyFullTunnel(
+  host: string,
+  port: number,
+  proxyType: 'socks5' | 'http'
+): Promise<{ ok: boolean; message?: string; directIp: string | null; proxyIps: Array<{ label: string; ip: string | null; error?: string }> }> {
+  if (process.platform !== 'win32') return { ok: true, directIp: null, proxyIps: [] }
+
+  const proxyUrl = curlProxyUrl(host, port, proxyType)
+  const directIp = await fetchPublicIpDirect()
+  const proxyIps: Array<{ label: string; ip: string | null; error?: string }> = []
+  for (const check of PROXY_PUBLIC_IP_CHECKS) {
+    try {
+      const body = await curlText(['-4', '-L', '-sS', '--max-time', '10', '--connect-timeout', '6', '--proxy', proxyUrl, check.url], 14000)
+      proxyIps.push({ label: check.label, ip: extractPublicIpv4(body) })
+    } catch (err: any) {
+      proxyIps.push({ label: check.label, ip: null, error: err?.message || String(err) })
+    }
+  }
+
+  const seen = [...new Set(proxyIps.map((row) => row.ip).filter((ip): ip is string => Boolean(ip)))]
+  if (seen.length >= 2) {
+    return {
+      ok: false,
+      directIp,
+      proxyIps,
+      message:
+        `Upstream proxy ${host}:${port} работает как split/direct proxy: разные сайты через него видят разные IP (${proxyIps.map((row) => `${row.label}=${row.ip ?? 'нет ответа'}`).join(', ')}). ` +
+        'Включите в Happ режим Global/Proxy без обхода RU/локальных сайтов, иначе часть трафика будет выходить с провайдерского IP.'
+    }
+  }
+
+  if (directIp && seen.length === 1 && seen[0] === directIp) {
+    return {
+      ok: false,
+      directIp,
+      proxyIps,
+      message:
+        `Upstream proxy ${host}:${port} не меняет внешний IP (${directIp}). ` +
+        'Hard mode не будет запущен, потому что выбранный proxy ведёт напрямую, а не через VPN.'
+    }
+  }
+
+  return { ok: true, directIp, proxyIps }
+}
+
+async function getProxyOwnerProcesses(host: string, port: number): Promise<Array<{ name: string; path: string | null }>> {
   if (process.platform !== 'win32') return []
 
   const safeHost = host.replace(/'/g, "''")
   const script = [
-    '$OutputEncoding=[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new();',
     `$hostName='${safeHost}';`,
     `$port=${port};`,
     "$addresses=@($hostName,'127.0.0.1','::1','0.0.0.0','::');",
     'Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue |',
     'Where-Object { $addresses -contains $_.LocalAddress } |',
     'ForEach-Object {',
-    '  $p=Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue;',
-    '  if ($p) { [pscustomobject]@{ ProcessName=$p.ProcessName; Id=$p.Id } }',
+    '  $p=Get-CimInstance Win32_Process -Filter "ProcessId=$($_.OwningProcess)" -ErrorAction SilentlyContinue;',
+    '  if ($p) { [pscustomobject]@{ ProcessName=$p.Name; Path=$p.ExecutablePath; Id=$p.ProcessId } }',
     '} | ConvertTo-Json -Compress'
   ].join(' ')
-  const command = `powershell -NoProfile -ExecutionPolicy Bypass -Command "${script}"`
 
   try {
-    const { stdout } = await exec(command, { windowsHide: true, timeout: 8000, encoding: 'utf8' })
+    const stdout = await runPowerShell(script, 8000)
     const raw = stdout.trim()
     if (!raw) return []
     const parsed = JSON.parse(raw)
     const rows = Array.isArray(parsed) ? parsed : [parsed]
-    return uniqueProcessNames(rows.map((row: any) => String(row.ProcessName || '')))
+    return rows.map((row: any) => ({
+      name: normalizeProcessName(String(row.ProcessName || '')) || '',
+      path: row.Path ? String(row.Path) : null
+    })).filter((row) => row.name)
   } catch (err: any) {
     logEvent('warn', 'tun', 'failed to detect proxy owner process', { host, port, error: err.message || String(err) })
     return []
@@ -439,7 +677,7 @@ export function detectForeignTun(): string | null {
 }
 
 async function prepareRuntime(
-  proxyAddr: string,
+  upstream: string | { outbound: Record<string, any>; proxyType?: 'socks5' | 'http' },
   proxyType: 'socks5' | 'http',
   directProcessNames: string[]
 ): Promise<{ singbox: string; config: string }> {
@@ -469,7 +707,7 @@ async function prepareRuntime(
   await copyFile(singboxSrc, singboxDst)
   await copyFile(wintunSrc, wintunDst)
 
-  const config = generateSingboxConfig(proxyAddr, proxyType, directProcessNames)
+  const config = generateSingboxConfig(upstream, proxyType, directProcessNames)
   await writeFile(configPath, JSON.stringify(config, null, 2), 'utf-8')
 
   return { singbox: singboxDst, config: configPath }
@@ -479,6 +717,14 @@ export const tunController = {
   async start(proxyAddrOrOpts: string | StartOptions): Promise<{ success: boolean; error?: string; warning?: string | null }> {
     if (currentStatus.running) {
       return { success: false, error: 'TUN уже запущен' }
+    }
+    if (startInProgress) {
+      return { success: false, error: 'Запуск защиты уже выполняется' }
+    }
+    startInProgress = true
+    const finishStart = <T extends { success: boolean; error?: string; warning?: string | null }>(result: T): T => {
+      startInProgress = false
+      return result
     }
 
     // A new start() always reopens the auto-restart window. If a pending
@@ -490,13 +736,29 @@ export const tunController = {
       restartTimer = null
     }
 
-    const proxyAddr = typeof proxyAddrOrOpts === 'string' ? proxyAddrOrOpts : proxyAddrOrOpts.proxyAddr
+    const startOptions: StartOptions =
+      typeof proxyAddrOrOpts === 'string'
+        ? { mode: 'localProxy', proxyAddr: proxyAddrOrOpts, proxyType: 'socks5' }
+        : { mode: 'localProxy', ...proxyAddrOrOpts }
+    const mode = startOptions.mode ?? 'localProxy'
+    const proxyAddr = startOptions.proxyAddr ?? ''
     const proxyType: 'socks5' | 'http' =
-      typeof proxyAddrOrOpts === 'string' ? 'socks5' : proxyAddrOrOpts.proxyType ?? 'socks5'
-    const wantKillSwitch =
-      typeof proxyAddrOrOpts === 'object' && proxyAddrOrOpts.enableFirewallKillSwitch === true
+      startOptions.proxyType ?? 'socks5'
+    const vpnProfile = startOptions.vpnProfile
+    const requestedKillSwitch =
+      startOptions.enableFirewallKillSwitch === true
+    const wantKillSwitch = requestedKillSwitch
     const wantAdapterLockdown =
-      typeof proxyAddrOrOpts === 'object' && proxyAddrOrOpts.enableAdapterLockdown === true
+      startOptions.enableAdapterLockdown === true
+    const publicWifiCompatibility =
+      startOptions.publicWifiCompatibility ?? settingsStore.get().publicWifiCompatibility
+
+    if (mode === 'localProxy' && !proxyAddr) {
+      return finishStart({ success: false, error: 'Не указан upstream proxy' })
+    }
+    if (mode === 'directVpn' && !vpnProfile) {
+      return finishStart({ success: false, error: 'Не выбран Direct VPN профиль' })
+    }
 
     // ---------- Pre-flight 1: detect another VPN/TUN ----------
     // We no longer abort here: Happ often exposes both a local proxy and its own TUN.
@@ -506,39 +768,57 @@ export const tunController = {
       const message =
         `Уже активен другой системный туннель: ${foreign}. Второй TUN поверх него не запускается, ` +
         'потому что так чаще всего ломаются DNS и интернет. Оставьте текущий VPN/TUN включенным или выключите TUN в VPN-клиенте и оставьте только локальный proxy.'
-      logEvent('warn', 'tun', 'start refused because another TUN/VPN is already active', { foreign, proxyAddr, proxyType })
-      return { success: false, error: message }
+      logEvent('warn', 'tun', 'start refused because another TUN/VPN is already active', { foreign, mode, proxyAddr, proxyType })
+      return finishStart({ success: false, error: message })
     }
     const warning = null
 
-    // ---------- Pre-flight 2: proxy must actually be listening ----------
-    // If Happ is closed or in TUN mode, port 10808 isn't listening — without this check
-    // sing-box would start TUN, hijack all routes, and then 100% of traffic would blackhole.
-    let parsedProxy: { host: string; port: number }
-    try {
-      parsedProxy = parseProxyAddress(proxyAddr)
-    } catch (err: any) {
-      return { success: false, error: err.message || String(err) }
-    }
-
-    const { host, port } = parsedProxy
-    const proxyAlive = await probeTcp(host, port, 2000)
-    if (!proxyAlive) {
-      logEvent('error', 'tun', 'start refused because upstream proxy is not reachable', { proxyAddr, proxyType })
-      return {
-        success: false,
-        error:
-          `Прокси ${proxyAddr} недоступен. Убедитесь, что Happ запущен в режиме Proxy ` +
-          `и слушает порт ${port}.`
+    let proxyOwnerProcessNames: string[] = []
+    let proxyOwnerProgramPaths: string[] = []
+    if (mode === 'localProxy') {
+      // ---------- Pre-flight 2: proxy must actually be listening ----------
+      // If Happ is closed or in TUN mode, port 10808 isn't listening — without this check
+      // sing-box would start TUN, hijack all routes, and then 100% of traffic would blackhole.
+      let parsedProxy: { host: string; port: number }
+      try {
+        parsedProxy = parseProxyAddress(proxyAddr)
+      } catch (err: any) {
+        return finishStart({ success: false, error: err.message || String(err) })
       }
-    }
-    logEvent('info', 'tun', 'upstream proxy is reachable', { proxyAddr, proxyType })
 
-    const proxyOwnerProcesses = await getProxyOwnerProcessNames(host, port)
-    if (proxyOwnerProcesses.length > 0) {
-      logEvent('info', 'tun', 'detected local proxy owner process for direct-out exclusion', {
-        proxyAddr,
-        processNames: proxyOwnerProcesses
+      const { host, port } = parsedProxy
+      const proxyAlive = await probeTcp(host, port, 2000)
+      if (!proxyAlive) {
+        logEvent('error', 'tun', 'start refused because upstream proxy is not reachable', { proxyAddr, proxyType })
+        return finishStart({
+          success: false,
+          error:
+            `Прокси ${proxyAddr} недоступен. Убедитесь, что Happ запущен в режиме Proxy ` +
+            `и слушает порт ${port}.`
+        })
+      }
+      logEvent('info', 'tun', 'upstream proxy is reachable', { proxyAddr, proxyType })
+
+      const proxyFullTunnel = await validateProxyFullTunnel(host, port, proxyType)
+      logEvent(proxyFullTunnel.ok ? 'info' : 'error', 'tun', 'upstream proxy full-tunnel check', proxyFullTunnel)
+      if (!proxyFullTunnel.ok) {
+        return finishStart({ success: false, error: proxyFullTunnel.message || 'Upstream proxy не прошёл проверку полного туннеля' })
+      }
+
+      const proxyOwnerProcesses = await getProxyOwnerProcesses(host, port)
+      proxyOwnerProcessNames = uniqueProcessNames(proxyOwnerProcesses.map((process) => process.name))
+      proxyOwnerProgramPaths = [...new Set(proxyOwnerProcesses.map((process) => process.path).filter((path): path is string => Boolean(path)))]
+      if (proxyOwnerProcesses.length > 0) {
+        logEvent('info', 'tun', 'detected local proxy owner process for direct-out exclusion', {
+          proxyAddr,
+          processNames: proxyOwnerProcessNames,
+          processPaths: proxyOwnerProgramPaths
+        })
+      }
+    } else {
+      logEvent('info', 'tun', 'starting Direct VPN profile', {
+        protocol: vpnProfile?.protocol,
+        name: vpnProfile?.name
       })
     }
 
@@ -546,40 +826,42 @@ export const tunController = {
     // Happ may use its own sing-box/xray core.
     if (await isSingboxRunning()) {
       await killOwnedRuntimeProcesses()
-      // Give the OS a moment to release handles.
-      await new Promise((r) => setTimeout(r, 500))
+      if (!(await waitForOwnedRuntimeToExit())) {
+        return finishStart({ success: false, error: 'Не удалось остановить предыдущий vpnte-sing-box.exe. Завершите его в Диспетчере задач и повторите.' })
+      }
     } else {
       await killRuntimeProcess('sing-box.exe', join(getTunRuntimeDir(), 'sing-box.exe'))
     }
+    await removeStaleTunInterface()
 
     let runtime: { singbox: string; config: string }
     try {
-      runtime = await prepareRuntime(proxyAddr, proxyType, proxyOwnerProcesses)
+      runtime = await prepareRuntime(
+        mode === 'directVpn' && vpnProfile
+          ? { outbound: vpnProfile.outbound, proxyType }
+          : proxyAddr,
+        proxyType,
+        proxyOwnerProcessNames
+      )
       await exec(`"${runtime.singbox}" check -c "${runtime.config}"`)
     } catch (err: any) {
       logEvent('error', 'tun', 'failed to prepare TUN runtime', err)
-      return { success: false, error: `Не удалось подготовить TUN-окружение: ${err.stderr || err.message || err}` }
+      return finishStart({ success: false, error: `Не удалось подготовить TUN-окружение: ${err.stderr || err.message || err}` })
     }
 
     const runtimeDir = dirname(runtime.singbox)
 
-    // Engage firewall kill-switch BEFORE spawning sing-box. Doing it after
-    // would leave a tiny window where TUN is up but the firewall is open —
-    // and more importantly, if sing-box ever crashes, the rules are already
-    // in place so traffic cannot leak. The allow-program rule we install for
-    // sing-box.exe is what lets sing-box dial the upstream proxy through the
-    // physical adapter (relevant for non-loopback proxies).
+    // Firewall kill-switch via DefaultOutboundAction=Block. Program-based Allow
+    // rules for sing-box and proxy owner processes override the default Block,
+    // so VPN traffic flows while everything else is blocked.
+    // We DEFER engaging it until after sing-box has actually started AND the
+    // VPNTE-TUN adapter is Up — otherwise the -InterfaceAlias 'VPNTE-TUN' rule
+    // fails silently (the alias doesn't exist yet), traffic to the TUN gets
+    // caught by DefaultOutboundAction=Block, and the user loses internet.
+    // The actual enableKillSwitch() call happens in the polling success path
+    // below, after waitForTunInterface().
     let killSwitchEngaged = false
     let killSwitchWarning: string | null = null
-    if (wantKillSwitch) {
-      const ks = await enableKillSwitch({ singboxExePath: runtime.singbox })
-      if (ks.success) {
-        killSwitchEngaged = true
-      } else {
-        killSwitchWarning = `Firewall kill-switch не включился: ${ks.message}`
-        logEvent('warn', 'tun', 'firewall kill-switch failed to engage', ks)
-      }
-    }
 
     // Adapter lockdown: disable IPv6 + force DNS to TUN on every physical
     // adapter. This is the only thing that catches DNS-over-HTTPS leaks (a
@@ -590,13 +872,16 @@ export const tunController = {
     let adapterLockdownWarning: string | null = null
     logEvent('info', 'tun', 'adapter lockdown decision', {
       wantAdapterLockdown,
+      publicWifiCompatibility,
       reason: wantAdapterLockdown
         ? 'strictAdapterLockdown is ON in settings — will apply'
         : 'strictAdapterLockdown is OFF in settings — will not apply'
     })
     if (wantAdapterLockdown) {
       try {
-        const lock = await applyPhysicalAdapterLockdown('172.19.0.2')
+        const lock = await applyPhysicalAdapterLockdown('172.19.0.2', {
+          forceDns: !publicWifiCompatibility
+        })
         logEvent('info', 'tun', 'adapter lockdown result', {
           applied: lock.applied,
           adapters: lock.adapters,
@@ -606,14 +891,21 @@ export const tunController = {
           adapterLockdownEngaged = true
           if (lock.warnings.length > 0) {
             adapterLockdownWarning = `Lockdown с замечаниями: ${lock.warnings.join('; ')}`
+            if (killSwitchEngaged) await disableKillSwitch('adapter lockdown warnings before start').catch(() => undefined)
+            await rollbackPhysicalAdapterLockdownIfApplied('adapter lockdown warnings before start').catch(() => undefined)
+            return finishStart({ success: false, error: adapterLockdownWarning })
           }
         } else {
           adapterLockdownWarning = `Lockdown не применился: ${lock.warnings.join('; ') || 'нет физических адаптеров'}`
           logEvent('warn', 'tun', 'physical adapter lockdown did not apply', lock)
+          if (killSwitchEngaged) await disableKillSwitch('adapter lockdown did not apply before start').catch(() => undefined)
+          return finishStart({ success: false, error: adapterLockdownWarning })
         }
       } catch (err: any) {
         adapterLockdownWarning = `Lockdown упал: ${err?.message ?? String(err)}`
         logEvent('warn', 'tun', 'physical adapter lockdown threw', err)
+        if (killSwitchEngaged) await disableKillSwitch('adapter lockdown threw before start').catch(() => undefined)
+        return finishStart({ success: false, error: adapterLockdownWarning })
       }
     }
 
@@ -625,6 +917,7 @@ export const tunController = {
       const finish = (result: { success: boolean; error?: string; warning?: string | null }) => {
         if (resolved) return
         resolved = true
+        startInProgress = false
         resolve(result)
       }
 
@@ -637,8 +930,11 @@ export const tunController = {
         stopProxyWatchdog()
         currentStatus = {
           running: false,
+          mode,
           proxyAddr: null,
           proxyType: null,
+          vpnProfileName: null,
+          vpnProtocol: null,
           pid: null,
           warning: null,
           proxyReachable: true,
@@ -670,7 +966,7 @@ export const tunController = {
         } else {
           logEvent('info', 'tun', 'sing-box process exited')
         }
-        // sing-box died unexpectedly while we believed TUN was up. Two things to do:
+        // sing-box died unexpectedly while we believed TUN was up. Three things to do:
         //  1. Restore proxy baseline (if applied) so we don't leave the user with
         //     no-VPN AND no-original-proxy-config.
         //  2. INTENTIONALLY KEEP the firewall kill-switch in place. Removing it
@@ -678,7 +974,18 @@ export const tunController = {
         //     entire reason it exists is to block fall-through to the physical
         //     adapter when the daemon dies. The user must explicitly press Stop
         //     (or the daemon must come back up) to drop the rules.
+        //  3. Roll back the physical adapter lockdown (IPv6 disable + DNS override
+        //     to 172.19.0.2) IF auto-restart is NOT going to happen. Without a
+        //     running TUN, the lockdown is actively harmful: DNS points to a
+        //     non-existent resolver and IPv6 is broken. If auto-restart IS
+        //     scheduled, we leave the lockdown in place — start() is idempotent
+        //     and will skip it when the manifest already exists.
         if (wasRunning) {
+          if (userInitiatedStop) {
+            logEvent('info', 'tun', 'sing-box exited after user stop')
+            return
+          }
+
           rollbackTunNetworkBaselineIfApplied('sing-box exited').catch(err =>
             logEvent('warn', 'tun', 'baseline auto-rollback after sing-box exit failed', err)
           )
@@ -695,6 +1002,10 @@ export const tunController = {
             restartAttempt < RESTART_BACKOFF_MS.length
 
           if (canAutoRestart && lastStartOptions) {
+            // Auto-restart is scheduled — keep adapter lockdown in place so the
+            // restarted sing-box immediately has clean adapters. start() will
+            // call applyPhysicalAdapterLockdown() which is idempotent when the
+            // manifest already exists.
             const attempt = restartAttempt + 1
             const delay = RESTART_BACKOFF_MS[restartAttempt]
             restartAttempt = attempt
@@ -727,14 +1038,36 @@ export const tunController = {
             return
           }
 
+          // No auto-restart coming — roll back the adapter lockdown NOW.
+          // Without a running TUN, having DNS pointed at 172.19.0.2 and IPv6
+          // disabled on physical adapters will completely break the user's
+          // internet. This is the root cause of the "DNS сломался" bug.
+          if (adapterLockdownEngaged) {
+            rollbackPhysicalAdapterLockdownIfApplied('sing-box exited — no auto-restart').catch(err =>
+              logEvent('warn', 'tun', 'adapter lockdown rollback after sing-box crash failed', err)
+            )
+            repairOrphanedPhysicalAdapterDns('sing-box exited — safety repair').catch(err =>
+              logEvent('warn', 'tun', 'orphaned DNS repair after sing-box crash failed', err)
+            )
+          }
+
           if (restartAttempt >= RESTART_BACKOFF_MS.length) {
             logEvent('error', 'tun', 'auto-restart gave up — too many failures', {
               attempts: restartAttempt
             })
             notify('error', 'Защита остановилась', 'Превышено число попыток перезапуска. Включите защиту вручную.')
+            // All retries burned through. The VPN is not coming back without
+            // user intervention. Keeping the kill-switch active at this point
+            // would permanently lock out the user's internet for no benefit,
+            // so we disable it and restore connectivity.
+            if (killSwitchEngaged) {
+              disableKillSwitch('auto-restart exhausted — restoring internet').catch(err =>
+                logEvent('warn', 'tun', 'kill-switch disable after exhausted retries failed', err)
+              )
+            }
           }
 
-          if (killSwitchEngaged) {
+          if (killSwitchEngaged && restartAttempt < RESTART_BACKOFF_MS.length) {
             logEvent(
               'warn',
               'tun',
@@ -761,34 +1094,91 @@ export const tunController = {
       // Poll for sing-box.exe presence.
       let attempts = 0
       const maxAttempts = 15 // 15 * 500ms = 7.5s
+      let successHandled = false
       const poller = setInterval(async () => {
+        if (resolved || successHandled) {
+          clearInterval(poller)
+          return
+        }
         attempts++
         const running = await isSingboxRunning()
         if (running) {
+          if (successHandled) return
+          successHandled = true
           clearInterval(poller)
+
+          // Engage the firewall kill-switch NOW, after sing-box is up. The
+          // kill-switch installs an Allow rule scoped to -InterfaceAlias
+          // 'VPNTE-TUN', and Windows Firewall validates that alias when the
+          // rule is created. If we engage too early the rule fails silently,
+          // DefaultOutboundAction=Block kicks in, and traffic to the TUN dies.
+          if (wantKillSwitch) {
+            const tunReady = await waitForTunInterface(5000)
+            if (!tunReady) {
+              logEvent(
+                'warn',
+                'tun',
+                'VPNTE-TUN did not reach Status=Up within 5s — skipping kill-switch to avoid blocking traffic'
+              )
+              killSwitchWarning =
+                'TUN-адаптер не поднялся за 5 с — kill-switch пропущен, чтобы не блокировать интернет.'
+            } else {
+              const ks = await enableKillSwitch({
+                singboxExePath: runtime.singbox,
+                proxyOwnerProgramPaths
+              })
+              if (ks.success) {
+                killSwitchEngaged = true
+                logEvent('info', 'tun', 'kill-switch engaged after TUN interface came up')
+              } else {
+                logEvent(
+                  'warn',
+                  'tun',
+                  'firewall kill-switch failed to engage after TUN came up — continuing without it',
+                  ks
+                )
+                killSwitchWarning = `Kill-switch не включился: ${ks.message}. VPN работает без дополнительной защиты от утечек.`
+              }
+            }
+          }
+
           const combinedWarning = [warning, killSwitchWarning].filter(Boolean).join(' | ') || null
           currentStatus = {
             running: true,
+            mode,
             proxyAddr,
             proxyType,
+            vpnProfileName: vpnProfile?.name ?? null,
+            vpnProtocol: vpnProfile?.protocol ?? null,
             pid: null,
             warning: combinedWarning,
             proxyReachable: true,
             startedAt: Date.now(),
             restartAttempt
           }
-          startProxyWatchdog(proxyAddr)
-          logEvent('info', 'tun', 'TUN started', { proxyAddr, proxyType, warning: combinedWarning, killSwitch: killSwitchEngaged, restartAttempt })
+          if (mode === 'localProxy') startProxyWatchdog(proxyAddr)
+          logEvent('info', 'tun', 'TUN started', {
+            mode,
+            proxyAddr,
+            proxyType,
+            vpnProtocol: vpnProfile?.protocol,
+            warning: combinedWarning,
+            killSwitch: killSwitchEngaged,
+            restartAttempt
+          })
 
           // Remember the start params so we can replay them after a crash.
           // Mark the run as "user-initiated" while we hold the line —
           // userInitiatedStop is cleared on success so an unexpected exit
           // from here on is treated as a crash (and triggers auto-restart).
           lastStartOptions = {
+            mode,
             proxyAddr,
             proxyType,
+            vpnProfile,
             enableFirewallKillSwitch: wantKillSwitch,
-            enableAdapterLockdown: wantAdapterLockdown
+            enableAdapterLockdown: wantAdapterLockdown,
+            publicWifiCompatibility
           }
           userInitiatedStop = false
 
@@ -842,57 +1232,89 @@ export const tunController = {
   },
 
   async stop(): Promise<{ success: boolean; error?: string }> {
-    try {
-      // Mark this as a user-initiated stop BEFORE we kill sing-box, so the
-      // exit handler doesn't kick off auto-restart. Also clear any pending
-      // restart timer from a previous crash so we don't fight ourselves.
-      userInitiatedStop = true
-      lastStartOptions = null
-      restartAttempt = 0
-      clearRestartTimers()
+    // Mark this as a user-initiated stop BEFORE we kill sing-box, so the
+    // exit handler doesn't kick off auto-restart. Also clear any pending
+    // restart timer from a previous crash so we don't fight ourselves.
+    userInitiatedStop = true
+    lastStartOptions = null
+    restartAttempt = 0
+    clearRestartTimers()
 
-      stopProxyWatchdog()
-      await killOwnedRuntimeProcesses()
-
-      currentStatus = {
-        running: false,
-        proxyAddr: null,
-        proxyType: null,
-        pid: null,
-        warning: null,
-        proxyReachable: true,
-        startedAt: null,
-        restartAttempt: 0
-      }
-      logEvent('info', 'tun', 'TUN stopped')
-      notify('info', 'Защита выключена', 'Трафик идёт по обычному маршруту.')
-      notifyStatus('stopped')
-
-      // If we modified HKCU/HKLM proxy settings before starting the TUN, restore them now.
-      // Without this, stopping the TUN leaves the user without VPN AND without the proxy
-      // settings they had before — the exact "breaks global settings" failure mode.
-      await rollbackTunNetworkBaselineIfApplied('TUN stopped').catch(err =>
-        logEvent('warn', 'tun', 'baseline auto-rollback after stop failed', err)
-      )
-
-      // Drop the firewall kill-switch (if any). This is the only graceful path
-      // that removes it — the onExit handler intentionally keeps it engaged.
-      await disableKillSwitchIfActive('TUN stopped').catch(err =>
-        logEvent('warn', 'tun', 'kill-switch disable after stop failed', err)
-      )
-
-      // Roll back the adapter lockdown if it's active. Same story: only on
-      // a deliberate user stop. If sing-box died unexpectedly the lockdown
-      // stays engaged until the user presses Stop or the daemon recovers.
-      await rollbackPhysicalAdapterLockdownIfApplied('TUN stopped').catch(err =>
-        logEvent('warn', 'tun', 'adapter lockdown rollback after stop failed', err)
-      )
-
-      return { success: true }
-    } catch (err: any) {
-      logEvent('error', 'tun', 'failed to stop TUN', err)
-      return { success: false, error: err.message || String(err) }
+    const cleanupErrors: string[] = []
+    const rememberCleanupError = (label: string, err: unknown) => {
+      const message = (err as Error)?.message || String(err)
+      cleanupErrors.push(`${label}: ${message}`)
+      logEvent('warn', 'tun', `${label} after stop failed`, err)
     }
+
+    stopProxyWatchdog()
+    try {
+      await killOwnedRuntimeProcesses()
+      if (!(await waitForOwnedRuntimeToExit())) {
+        cleanupErrors.push('runtime process stop: vpnte-sing-box.exe is still running')
+        logEvent('warn', 'tun', 'runtime process still running after stop')
+      }
+    } catch (err) {
+      rememberCleanupError('runtime process stop', err)
+    }
+
+    currentStatus = {
+      running: false,
+      mode: 'localProxy',
+      proxyAddr: null,
+      proxyType: null,
+      vpnProfileName: null,
+      vpnProtocol: null,
+      pid: null,
+      warning: null,
+      proxyReachable: true,
+      startedAt: null,
+      restartAttempt: 0
+    }
+    logEvent('info', 'tun', 'TUN stopped')
+    notify('info', 'Защита выключена', 'Трафик идёт по обычному маршруту.')
+    notifyStatus('stopped')
+
+    // Every cleanup step is independent. A failed taskkill or baseline rollback
+    // must not prevent us from removing firewall/DNS changes; that is exactly how
+    // the app can leave Windows with "VPN off, internet broken".
+    try {
+      const baseline = await rollbackTunNetworkBaselineIfApplied('TUN stopped')
+      if (!baseline.success) {
+        cleanupErrors.push(`baseline auto-rollback: ${baseline.message}`)
+        logEvent('warn', 'tun', 'baseline auto-rollback after stop failed', baseline)
+      }
+    } catch (err) {
+      rememberCleanupError('baseline auto-rollback', err)
+    }
+
+    try {
+      const killSwitch = await disableKillSwitchIfActive('TUN stopped')
+      if (!killSwitch.success) {
+        cleanupErrors.push(`kill-switch disable: ${killSwitch.message}`)
+        logEvent('warn', 'tun', 'kill-switch disable after stop failed', killSwitch)
+      }
+    } catch (err) {
+      rememberCleanupError('kill-switch disable', err)
+    }
+
+    try {
+      await rollbackPhysicalAdapterLockdownIfApplied('TUN stopped')
+    } catch (err) {
+      rememberCleanupError('adapter lockdown rollback', err)
+    }
+
+    try {
+      await repairOrphanedPhysicalAdapterDns('TUN stopped safety repair')
+    } catch (err) {
+      rememberCleanupError('orphaned DNS repair', err)
+    }
+
+    if (cleanupErrors.length > 0) {
+      return { success: false, error: cleanupErrors.join(' | ') }
+    }
+
+    return { success: true }
   },
 
   async isFirewallKillSwitchActive(): Promise<boolean> {

@@ -1,0 +1,1548 @@
+import { execFile as execFileCb } from 'child_process'
+import { createHash } from 'crypto'
+import { hostname, userInfo } from 'os'
+import { promisify } from 'util'
+import { brotliDecompressSync, gunzipSync, inflateRawSync, inflateSync } from 'zlib'
+
+const execFile = promisify(execFileCb)
+
+export type VpnProtocol = 'vless' | 'trojan' | 'shadowsocks' | 'vmess' | 'hysteria2' | 'sing-box'
+
+export interface VpnProfile {
+  name: string
+  protocol: VpnProtocol
+  outbound: Record<string, any>
+}
+
+export interface VpnProfileSummary {
+  index: number
+  name: string
+  protocol: VpnProtocol
+}
+
+export interface VpnInputInspection {
+  count: number
+  protocols: Record<string, number>
+  profiles: VpnProfileSummary[]
+  fetched: boolean
+  source: string
+}
+
+export interface SubscriptionFetchOptions {
+  proxyAddr?: string
+  proxyType?: 'socks5' | 'http'
+}
+
+interface FetchAttempt {
+  label: string
+  args: string[]
+}
+
+const SUPPORTED_OUTBOUND_TYPES = new Set(['vless', 'trojan', 'shadowsocks', 'vmess', 'hysteria2'])
+const SUBSCRIPTION_USER_AGENTS = ['v2rayN/7.0', 'sing-box/1.13.8', 'v2RayTun/1.0', 'Happ/2.6.0/windows']
+const SECRET_KEYS = new Set([
+  'uuid',
+  'password',
+  'id',
+  'address',
+  'server',
+  'server_port',
+  'private_key',
+  'public_key',
+  'short_id',
+  'client_secret',
+  'token',
+  'auth_str',
+  'directvpninput',
+  'vpninput',
+  'subscription',
+  'subscriptionurl',
+  'up_mbps',
+  'down_mbps'
+])
+
+export function redactSensitiveText(value: string): string {
+  return value
+    .replace(/\b(?:vless|trojan|ss|vmess|hysteria2|hy2):\/\/\S+/gi, '<redacted-vpn-uri>')
+    .replace(/\bhttps?:\/\/[^\s"'<>]{8,}/gi, '<redacted-url>')
+    .replace(/\b(Could not resolve host|No such host is known|resolve host):\s*[^\s"'<>]+/gi, '$1: <redacted-host>')
+    .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi, '<redacted-uuid>')
+}
+
+function safeDecode(value: string): string {
+  try {
+    return decodeURIComponent(value)
+  } catch {
+    return value
+  }
+}
+
+function decodeBase64Text(value: string): string | null {
+  const compact = value.trim().replace(/\s+/g, '').replace(/-/g, '+').replace(/_/g, '/')
+  if (!compact || compact.length < 4 || !/^[A-Za-z0-9+/]+={0,2}$/.test(compact)) return null
+  try {
+    const padded = compact + '='.repeat((4 - compact.length % 4) % 4)
+    const decoded = Buffer.from(padded, 'base64').toString('utf8')
+    const trimmed = decoded.trim()
+    if (!trimmed || trimmed.includes('\u0000')) return null
+    return decoded
+  } catch {
+    return null
+  }
+}
+
+function decodeBase64Loose(value: string): string | null {
+  const decoded = decodeBase64Text(value)
+  if (!decoded) return null
+  const trimmed = decoded.trim()
+  const looksLikeJsonConfig = /["'](?:outbounds|xrayFullConfig|rawConfig|proxies|dns|routing)["']\s*:/i.test(decoded)
+  return decoded.includes('://') || trimmed.startsWith('{') || trimmed.startsWith('[') || looksLikeJsonConfig || /^\s*proxies\s*:/im.test(decoded) ? decoded : null
+}
+
+function decodeSubscriptionBody(value: Buffer): string {
+  let body = value
+  try {
+    if (body.length >= 2 && body[0] === 0x1f && body[1] === 0x8b) {
+      body = gunzipSync(body)
+    } else if (body.length >= 2 && body[0] === 0x78) {
+      body = inflateSync(body)
+    }
+  } catch {
+    try {
+      body = inflateRawSync(value)
+    } catch {
+      body = value
+    }
+  }
+
+  const probe = body.subarray(0, Math.min(body.length, 80))
+  const nulBytes = probe.filter(byte => byte === 0).length
+  if (nulBytes > probe.length / 4) {
+    return body.toString('utf16le')
+  }
+
+  const utf8 = body.toString('utf8')
+  if (utf8.includes('\uFFFD') && body.length > 4) {
+    try {
+      const brotli = brotliDecompressSync(body).toString('utf8')
+      if (brotli.trim()) return brotli
+    } catch {
+      // Not brotli or not valid compressed data; keep UTF-8 below.
+    }
+  }
+  return utf8
+}
+
+function numberPort(raw: string | null | undefined): number {
+  const port = Number(raw)
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+    throw new Error(`Некорректный порт VPN-сервера: ${raw || 'пусто'}`)
+  }
+  return port
+}
+
+function param(params: URLSearchParams, ...names: string[]): string | null {
+  for (const name of names) {
+    const value = params.get(name)
+    if (value !== null && value !== '') return safeDecode(value)
+  }
+  return null
+}
+
+function boolParam(params: URLSearchParams, ...names: string[]): boolean {
+  const raw = param(params, ...names)
+  if (!raw) return false
+  return /^(1|true|yes)$/i.test(raw)
+}
+
+function boolValue(value: unknown): boolean {
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'number') return value !== 0
+  if (typeof value !== 'string') return false
+  return /^(1|true|yes|on)$/i.test(value.trim())
+}
+
+function stringValue(value: unknown): string | null {
+  if (value === null || value === undefined) return null
+  const text = String(value).trim()
+  return text ? text : null
+}
+
+function stringListValue(value: unknown): string[] | null {
+  if (Array.isArray(value)) {
+    const items = value.map(item => stringValue(item)).filter((item): item is string => Boolean(item))
+    return items.length ? items : null
+  }
+  const text = stringValue(value)
+  if (!text) return null
+  const trimmed = text.trim()
+  const unwrapped = trimmed.startsWith('[') && trimmed.endsWith(']') ? trimmed.slice(1, -1) : trimmed
+  const items = splitInlineYaml(unwrapped).map(item => stringValue(item)).filter((item): item is string => Boolean(item))
+  return items.length ? items : null
+}
+
+function splitCsv(value: string | null): string[] | undefined {
+  if (!value) return undefined
+  const items = value.split(',').map(item => item.trim()).filter(Boolean)
+  return items.length ? items : undefined
+}
+
+function buildTls(params: URLSearchParams, host: string, defaultEnabled = false): Record<string, any> | undefined {
+  const security = (param(params, 'security', 'tls') || '').toLowerCase()
+  const enabled = defaultEnabled || security === 'tls' || security === 'reality'
+  if (!enabled || security === 'none') return undefined
+
+  const tls: Record<string, any> = { enabled: true }
+  const serverName = param(params, 'sni', 'serverName', 'peer', 'host')
+  tls.server_name = serverName || host
+
+  const alpn = splitCsv(param(params, 'alpn'))
+  if (alpn) tls.alpn = alpn
+  if (boolParam(params, 'allowInsecure', 'insecure', 'skip-cert-verify')) tls.insecure = true
+
+  const fp = param(params, 'fp', 'fingerprint')
+  if (fp && fp.toLowerCase() !== 'none') {
+    tls.utls = { enabled: true, fingerprint: fp }
+  }
+
+  if (security === 'reality') {
+    const publicKey = param(params, 'pbk', 'publicKey', 'public_key')
+    if (!publicKey) throw new Error('VLESS Reality ключ без pbk/publicKey')
+    if (!tls.utls) tls.utls = { enabled: true, fingerprint: 'chrome' }
+    tls.reality = {
+      enabled: true,
+      public_key: publicKey,
+      short_id: param(params, 'sid', 'shortId', 'short_id') || ''
+    }
+  }
+
+  return tls
+}
+
+function buildTransport(params: URLSearchParams): Record<string, any> | undefined {
+  const type = (param(params, 'type', 'net') || 'tcp').toLowerCase()
+  if (!type || type === 'tcp' || type === 'raw') return undefined
+
+  if (type === 'ws' || type === 'websocket') {
+    const headers: Record<string, string> = {}
+    const host = param(params, 'host')
+    if (host) headers.Host = host
+    const transport: Record<string, any> = {
+      type: 'ws',
+      path: param(params, 'path') || '/'
+    }
+    if (Object.keys(headers).length) transport.headers = headers
+    const earlyData = Number(param(params, 'ed', 'max_early_data') || 0)
+    if (Number.isInteger(earlyData) && earlyData > 0) transport.max_early_data = earlyData
+    const earlyHeader = param(params, 'eh', 'early_data_header_name')
+    if (earlyHeader) transport.early_data_header_name = earlyHeader
+    return transport
+  }
+
+  if (type === 'grpc') {
+    return {
+      type: 'grpc',
+      service_name: param(params, 'serviceName', 'service_name') || ''
+    }
+  }
+
+  if (type === 'httpupgrade' || type === 'http-upgrade') {
+    const transport: Record<string, any> = {
+      type: 'httpupgrade',
+      host: param(params, 'host') || '',
+      path: param(params, 'path') || '/'
+    }
+    return transport
+  }
+
+  if (type === 'http' || type === 'h2') {
+    const host = param(params, 'host')
+    return {
+      type: 'http',
+      host: host ? [host] : [],
+      path: param(params, 'path') || '/'
+    }
+  }
+
+  throw new Error(`Транспорт ${type} пока не поддерживается встроенным импортом`)
+}
+
+function finishOutbound(outbound: Record<string, any>): Record<string, any> {
+  const result = JSON.parse(JSON.stringify(outbound))
+  result.tag = 'proxy-out'
+  delete result.detour
+  delete result.domain_strategy
+  delete result.domain_resolver
+  return result
+}
+
+function parseStandardUrl(line: string): URL {
+  try {
+    return new URL(line)
+  } catch (err: any) {
+    throw new Error(`Не удалось разобрать VPN-ссылку: ${err?.message || String(err)}`)
+  }
+}
+
+function parseVless(line: string): VpnProfile {
+  const url = parseStandardUrl(line)
+  const params = url.searchParams
+  const outbound: Record<string, any> = {
+    type: 'vless',
+    tag: 'proxy-out',
+    server: url.hostname,
+    server_port: numberPort(url.port),
+    uuid: safeDecode(url.username),
+    network: 'tcp'
+  }
+  const flow = param(params, 'flow')
+  if (flow) outbound.flow = flow
+  const tls = buildTls(params, url.hostname)
+  if (tls) outbound.tls = tls
+  const transport = buildTransport(params)
+  if (transport) outbound.transport = transport
+  const packetEncoding = param(params, 'packetEncoding', 'packet_encoding')
+  if (packetEncoding) outbound.packet_encoding = packetEncoding
+  return { name: safeDecode(url.hash.slice(1)) || 'VLESS', protocol: 'vless', outbound: finishOutbound(outbound) }
+}
+
+function parseTrojan(line: string): VpnProfile {
+  const url = parseStandardUrl(line)
+  const params = url.searchParams
+  const outbound: Record<string, any> = {
+    type: 'trojan',
+    tag: 'proxy-out',
+    server: url.hostname,
+    server_port: numberPort(url.port),
+    password: safeDecode(url.username),
+    network: 'tcp'
+  }
+  const tls = buildTls(params, url.hostname, (param(params, 'security') || 'tls').toLowerCase() !== 'none')
+  if (tls) outbound.tls = tls
+  const transport = buildTransport(params)
+  if (transport) outbound.transport = transport
+  return { name: safeDecode(url.hash.slice(1)) || 'Trojan', protocol: 'trojan', outbound: finishOutbound(outbound) }
+}
+
+function splitHostPort(authority: string): { host: string; port: number } {
+  if (authority.startsWith('[')) {
+    const end = authority.indexOf(']')
+    if (end > 0) return { host: authority.slice(1, end), port: numberPort(authority.slice(end + 2)) }
+  }
+  const idx = authority.lastIndexOf(':')
+  if (idx <= 0) throw new Error('Не найден host:port в Shadowsocks ссылке')
+  return { host: authority.slice(0, idx), port: numberPort(authority.slice(idx + 1)) }
+}
+
+function parseShadowsocks(line: string): VpnProfile {
+  const withoutScheme = line.slice('ss://'.length)
+  const [beforeHash, hash = ''] = withoutScheme.split('#', 2)
+  const [main, query = ''] = beforeHash.split('?', 2)
+  const params = new URLSearchParams(query)
+
+  let userInfo = ''
+  let authority = ''
+  if (main.includes('@')) {
+    const at = main.lastIndexOf('@')
+    userInfo = main.slice(0, at)
+    authority = main.slice(at + 1)
+  } else {
+    const decoded = decodeBase64Text(main)
+    if (!decoded || !decoded.includes('@')) throw new Error('Не удалось декодировать Shadowsocks ссылку')
+    const at = decoded.lastIndexOf('@')
+    userInfo = decoded.slice(0, at)
+    authority = decoded.slice(at + 1)
+  }
+
+  let credentials = userInfo.includes(':') ? userInfo : decodeBase64Text(userInfo) || userInfo
+  credentials = safeDecode(credentials)
+  const sep = credentials.indexOf(':')
+  if (sep <= 0) throw new Error('Не найден method:password в Shadowsocks ссылке')
+  const plugin = param(params, 'plugin')
+  if (plugin) throw new Error('Shadowsocks SIP003 plugins пока не поддерживаются встроенным sing-box runtime')
+  const { host, port } = splitHostPort(authority)
+  return {
+    name: safeDecode(hash) || 'Shadowsocks',
+    protocol: 'shadowsocks',
+    outbound: finishOutbound({
+      type: 'shadowsocks',
+      tag: 'proxy-out',
+      server: host,
+      server_port: port,
+      method: credentials.slice(0, sep),
+      password: credentials.slice(sep + 1)
+    })
+  }
+}
+
+function parseVmess(line: string): VpnProfile {
+  const payload = line.slice('vmess://'.length)
+  const decoded = decodeBase64Loose(payload)
+  if (!decoded) throw new Error('Не удалось декодировать VMess ссылку')
+  const raw = JSON.parse(decoded)
+  const params = new URLSearchParams()
+  if (raw.tls) params.set('security', raw.tls === 'tls' ? 'tls' : String(raw.tls))
+  if (raw.sni) params.set('sni', raw.sni)
+  if (raw.fp) params.set('fp', raw.fp)
+  if (raw.alpn) params.set('alpn', Array.isArray(raw.alpn) ? raw.alpn.join(',') : String(raw.alpn))
+  if (raw.net) params.set('type', raw.net)
+  if (raw.host) params.set('host', raw.host)
+  if (raw.path) params.set('path', raw.path)
+
+  const outbound: Record<string, any> = {
+    type: 'vmess',
+    tag: 'proxy-out',
+    server: String(raw.add || raw.server || ''),
+    server_port: numberPort(String(raw.port || raw.server_port || '')),
+    uuid: String(raw.id || raw.uuid || ''),
+    security: String(raw.scy || raw.security || 'auto'),
+    alter_id: Number(raw.aid || raw.alterId || 0),
+    network: 'tcp'
+  }
+  const tls = buildTls(params, outbound.server)
+  if (tls) outbound.tls = tls
+  const transport = buildTransport(params)
+  if (transport) outbound.transport = transport
+  return { name: String(raw.ps || raw.name || 'VMess'), protocol: 'vmess', outbound: finishOutbound(outbound) }
+}
+
+function parseHysteria2(line: string): VpnProfile {
+  const normalized = line.replace(/^hy2:\/\//i, 'hysteria2://')
+  const url = parseStandardUrl(normalized)
+  const params = url.searchParams
+  const outbound: Record<string, any> = {
+    type: 'hysteria2',
+    tag: 'proxy-out',
+    server: url.hostname,
+    server_port: numberPort(url.port),
+    password: safeDecode(url.username || param(params, 'password') || ''),
+    network: 'tcp',
+    tls: buildTls(params, url.hostname, true)
+  }
+  const obfsType = param(params, 'obfs')
+  const obfsPassword = param(params, 'obfs-password', 'obfs_password')
+  if (obfsType) outbound.obfs = { type: obfsType, password: obfsPassword || '' }
+  return { name: safeDecode(url.hash.slice(1)) || 'Hysteria2', protocol: 'hysteria2', outbound: finishOutbound(outbound) }
+}
+
+function xrayProtocol(value: unknown): VpnProtocol | null {
+  const protocol = (stringValue(value) || '').toLowerCase()
+  if (protocol === 'vless' || protocol === 'trojan' || protocol === 'vmess') return protocol
+  if (protocol === 'shadowsocks' || protocol === 'ss') return 'shadowsocks'
+  if (protocol === 'hysteria2' || protocol === 'hy2') return 'hysteria2'
+  return null
+}
+
+function buildTlsFromXrayStream(stream: Record<string, any>, server: string): Record<string, any> | undefined {
+  const security = (stringValue(stream.security) || '').toLowerCase()
+  const tlsSettings = stream.tlsSettings && typeof stream.tlsSettings === 'object' ? stream.tlsSettings : {}
+  const realitySettings = stream.realitySettings && typeof stream.realitySettings === 'object' ? stream.realitySettings : {}
+  if (security !== 'tls' && security !== 'reality') return undefined
+
+  const source = security === 'reality' ? realitySettings : tlsSettings
+  const tls: Record<string, any> = {
+    enabled: true,
+    server_name: stringValue(source.serverName) || stringValue(source.server_name) || server
+  }
+  const alpn = stringListValue(source.alpn)
+  if (alpn) tls.alpn = alpn
+  if (boolValue(source.allowInsecure) || boolValue(source.insecure)) tls.insecure = true
+  const fingerprint = stringValue(source.fingerprint) || stringValue(source.fp)
+  if (fingerprint && fingerprint.toLowerCase() !== 'none') {
+    tls.utls = { enabled: true, fingerprint }
+  }
+
+  if (security === 'reality') {
+    const publicKey = stringValue(realitySettings.publicKey) || stringValue(realitySettings.public_key)
+    if (!publicKey) throw new Error('Xray Reality outbound без publicKey')
+    if (!tls.utls) tls.utls = { enabled: true, fingerprint: 'chrome' }
+    tls.reality = {
+      enabled: true,
+      public_key: publicKey,
+      short_id: stringValue(realitySettings.shortId) || stringValue(realitySettings.short_id) || ''
+    }
+  }
+
+  return tls
+}
+
+function buildTransportFromXrayStream(stream: Record<string, any>): Record<string, any> | undefined {
+  const network = (stringValue(stream.network) || 'tcp').toLowerCase()
+  if (!network || network === 'tcp' || network === 'raw') return undefined
+
+  if (network === 'ws' || network === 'websocket') {
+    const ws = stream.wsSettings && typeof stream.wsSettings === 'object' ? stream.wsSettings : {}
+    const transport: Record<string, any> = {
+      type: 'ws',
+      path: stringValue(ws.path) || '/'
+    }
+    if (ws.headers && typeof ws.headers === 'object' && Object.keys(ws.headers).length) {
+      transport.headers = ws.headers
+    }
+    return transport
+  }
+
+  if (network === 'grpc') {
+    const grpc = stream.grpcSettings && typeof stream.grpcSettings === 'object' ? stream.grpcSettings : {}
+    return {
+      type: 'grpc',
+      service_name: stringValue(grpc.serviceName) || stringValue(grpc.service_name) || ''
+    }
+  }
+
+  if (network === 'httpupgrade' || network === 'http-upgrade') {
+    const http = stream.httpupgradeSettings && typeof stream.httpupgradeSettings === 'object' ? stream.httpupgradeSettings : {}
+    return {
+      type: 'httpupgrade',
+      host: stringValue(http.host) || '',
+      path: stringValue(http.path) || '/'
+    }
+  }
+
+  if (network === 'http' || network === 'h2') {
+    const http = stream.httpSettings && typeof stream.httpSettings === 'object' ? stream.httpSettings : {}
+    const host = stringListValue(http.host)
+    return {
+      type: 'http',
+      host: host || [],
+      path: stringValue(http.path) || '/'
+    }
+  }
+
+  return undefined
+}
+
+function xrayOutboundToProfiles(raw: Record<string, any>): VpnProfile[] {
+  const protocol = xrayProtocol(raw.protocol)
+  if (!protocol) return []
+  const settings = raw.settings && typeof raw.settings === 'object' ? raw.settings : {}
+  const stream = raw.streamSettings && typeof raw.streamSettings === 'object' ? raw.streamSettings : {}
+  const tag = stringValue(raw.tag) || protocol.toUpperCase()
+  const profiles: VpnProfile[] = []
+
+  if (protocol === 'vless' || protocol === 'vmess') {
+    const vnext = Array.isArray(settings.vnext) ? settings.vnext : []
+    for (const node of vnext) {
+      const server = stringValue(node?.address)
+      if (!server) continue
+      const port = numberPort(String(node?.port || ''))
+      const users = Array.isArray(node?.users) && node.users.length ? node.users : [{}]
+      for (let i = 0; i < users.length; i++) {
+        const user = users[i] || {}
+        const outbound: Record<string, any> = {
+          type: protocol,
+          tag: 'proxy-out',
+          server,
+          server_port: port,
+          uuid: stringValue(user.id) || stringValue(user.uuid) || '',
+          network: 'tcp'
+        }
+        if (protocol === 'vmess') {
+          outbound.security = stringValue(user.security) || 'auto'
+          outbound.alter_id = Number(user.alterId || user.alter_id || 0)
+        }
+        const flow = stringValue(user.flow)
+        if (flow) outbound.flow = flow
+        const tls = buildTlsFromXrayStream(stream, server)
+        if (tls) outbound.tls = tls
+        const transport = buildTransportFromXrayStream(stream)
+        if (transport) outbound.transport = transport
+        profiles.push({
+          name: users.length > 1 ? `${tag} #${i + 1}` : tag,
+          protocol,
+          outbound: finishOutbound(outbound)
+        })
+      }
+    }
+    return profiles
+  }
+
+  const servers = Array.isArray(settings.servers) ? settings.servers : []
+  for (const node of servers) {
+    const server = stringValue(node?.address)
+    if (!server) continue
+    const port = numberPort(String(node?.port || ''))
+    const outbound: Record<string, any> = {
+      type: protocol,
+      tag: 'proxy-out',
+      server,
+      server_port: port
+    }
+    if (protocol === 'trojan' || protocol === 'hysteria2') {
+      outbound.password = stringValue(node.password) || ''
+      outbound.network = 'tcp'
+    } else if (protocol === 'shadowsocks') {
+      outbound.method = stringValue(node.method) || stringValue(node.cipher) || ''
+      outbound.password = stringValue(node.password) || ''
+    }
+    const tls = buildTlsFromXrayStream(stream, server)
+    if (tls) outbound.tls = tls
+    const transport = buildTransportFromXrayStream(stream)
+    if (transport) outbound.transport = transport
+    profiles.push({ name: tag, protocol, outbound: finishOutbound(outbound) })
+  }
+  return profiles
+}
+
+function jsonOutboundCandidatesToProfiles(candidates: any[]): VpnProfile[] {
+  const singBoxProfiles = candidates
+    .filter((outbound: any) => outbound && SUPPORTED_OUTBOUND_TYPES.has(String(outbound.type)))
+    .map((outbound: any) => ({
+      name: String(outbound.tag || outbound.type || 'sing-box'),
+      protocol: 'sing-box' as const,
+      outbound: finishOutbound(outbound)
+    }))
+  if (singBoxProfiles.length) return singBoxProfiles
+
+  return candidates.flatMap((outbound: any) => {
+    try {
+      return outbound && typeof outbound === 'object' ? xrayOutboundToProfiles(outbound) : []
+    } catch {
+      return []
+    }
+  })
+}
+
+function findJsonDocumentEnd(text: string, start: number): number | null {
+  const opener = text[start]
+  const expectedCloser = opener === '{' ? '}' : opener === '[' ? ']' : null
+  if (!expectedCloser) return null
+
+  const stack = [expectedCloser]
+  let quote: string | null = null
+  let escaped = false
+  for (let i = start + 1; i < text.length; i++) {
+    const ch = text[i]
+    if (quote) {
+      if (escaped) {
+        escaped = false
+      } else if (ch === '\\') {
+        escaped = true
+      } else if (ch === quote) {
+        quote = null
+      }
+      continue
+    }
+
+    if (ch === '"' || ch === "'") {
+      quote = ch
+      continue
+    }
+    if (ch === '{') {
+      stack.push('}')
+    } else if (ch === '[') {
+      stack.push(']')
+    } else if (ch === '}' || ch === ']') {
+      if (stack[stack.length - 1] !== ch) return null
+      stack.pop()
+      if (!stack.length) return i + 1
+    }
+  }
+  return null
+}
+
+function jsonDocumentTexts(text: string): string[] {
+  const trimmed = text.trim()
+  const documents: string[] = []
+  const seen = new Set<string>()
+  const add = (candidate: string) => {
+    const item = candidate.trim()
+    if (!item || seen.has(item)) return
+    seen.add(item)
+    documents.push(item)
+  }
+
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) add(trimmed)
+
+  // Some subscription endpoints prepend profile metadata lines before JSON.
+  for (let i = 0; i < text.length && documents.length < 12; i++) {
+    const ch = text[i]
+    if (ch !== '{' && ch !== '[') continue
+    const end = findJsonDocumentEnd(text, i)
+    if (!end) continue
+    add(text.slice(i, end))
+    i = end - 1
+  }
+  return documents
+}
+
+function collectTextVariants(text: string, maxDepth = 3): string[] {
+  const variants: string[] = []
+  const seen = new Set<string>()
+  const queue: Array<{ text: string; depth: number }> = [{ text, depth: 0 }]
+  while (queue.length && variants.length < 12) {
+    const current = queue.shift()!
+    const normalized = current.text.trim()
+    if (!normalized || seen.has(normalized)) continue
+    seen.add(normalized)
+    variants.push(current.text)
+    if (current.depth >= maxDepth) continue
+    const decoded = decodeBase64Loose(current.text)
+    if (decoded && decoded.trim() && !seen.has(decoded.trim())) {
+      queue.push({ text: decoded, depth: current.depth + 1 })
+    }
+  }
+  return variants
+}
+
+function cleanExtractedUri(raw: string): string {
+  let value = raw.trim()
+  while (/[),.;\]}]+$/.test(value)) value = value.slice(0, -1)
+  return value
+}
+
+function parseUriProfilesFromText(text: string): VpnProfile[] {
+  const profiles: VpnProfile[] = []
+  const seen = new Set<string>()
+  const addCandidate = (candidate: string) => {
+    const uri = cleanExtractedUri(candidate)
+    if (!uri || seen.has(uri)) return
+    seen.add(uri)
+    try {
+      const profile = parseLine(uri)
+      if (profile) profiles.push(profile)
+    } catch {
+      // Ignore broken entries in a mixed subscription and keep parsing the rest.
+    }
+  }
+
+  for (const line of text.replace(/\r/g, '\n').split('\n')) {
+    const trimmed = line.trim()
+    if (/^(vless|trojan|ss|vmess|hysteria2|hy2):\/\//i.test(trimmed)) addCandidate(trimmed)
+  }
+
+  const uriPattern = /\b(?:vless|trojan|ss|vmess|hysteria2|hy2):\/\/[^\s"'<>`\\]+/gi
+  for (const match of text.matchAll(uriPattern)) addCandidate(match[0])
+  return profiles
+}
+
+function parseJsonValueProfiles(value: any, seenTexts: Set<string>, depth = 0): VpnProfile[] {
+  if (depth > 6 || value === null || value === undefined) return []
+
+  if (typeof value === 'string') {
+    const variants = collectTextVariants(value, 2)
+    for (const decoded of variants) {
+      for (const document of jsonDocumentTexts(decoded)) {
+        if (seenTexts.has(document)) continue
+        seenTexts.add(document)
+        try {
+          const profiles = parseJsonValueProfiles(JSON.parse(document), seenTexts, depth + 1)
+          if (profiles.length) return profiles
+        } catch {
+          // Try the next embedded JSON document, if any.
+        }
+      }
+    }
+
+    for (const decoded of variants) {
+      const clashProfiles = parseClashProfiles(decoded)
+      if (clashProfiles.length) return clashProfiles
+      const uriProfiles = parseUriProfilesFromText(decoded)
+      if (uriProfiles.length) return uriProfiles
+    }
+    return []
+  }
+
+  if (Array.isArray(value)) {
+    const directProfiles = jsonOutboundCandidatesToProfiles(value)
+    if (directProfiles.length) return directProfiles
+
+    const nestedProfiles: VpnProfile[] = []
+    for (const item of value) {
+      const profiles = parseJsonValueProfiles(item, seenTexts, depth + 1)
+      if (profiles.length) nestedProfiles.push(...profiles)
+    }
+    return nestedProfiles
+  }
+
+  if (typeof value !== 'object') return []
+
+  if (Array.isArray(value.outbounds)) {
+    const profiles = jsonOutboundCandidatesToProfiles(value.outbounds)
+    if (profiles.length) return profiles
+  }
+
+  const directProfile = jsonOutboundCandidatesToProfiles([value])
+  if (directProfile.length) return directProfile
+
+  // Some clients wrap the real Xray JSON into a subscription object/string.
+  const preferredKeys = [
+    'xrayFullConfig',
+    'fullConfig',
+    'full_config',
+    'rawConfig',
+    'raw_config',
+    'config',
+    'configs',
+    'configuration',
+    'profile',
+    'profiles',
+    'server',
+    'servers',
+    'node',
+    'nodes',
+    'data',
+    'result',
+    'subscription'
+  ]
+
+  const visitedKeys = new Set<string>()
+  for (const key of preferredKeys) {
+    if (!Object.prototype.hasOwnProperty.call(value, key)) continue
+    visitedKeys.add(key)
+    const profiles = parseJsonValueProfiles(value[key], seenTexts, depth + 1)
+    if (profiles.length) return profiles
+  }
+
+  for (const [key, child] of Object.entries(value)) {
+    if (visitedKeys.has(key)) continue
+    if (child === null || child === undefined) continue
+    if (typeof child !== 'object' && typeof child !== 'string') continue
+    const profiles = parseJsonValueProfiles(child, seenTexts, depth + 1)
+    if (profiles.length) return profiles
+  }
+
+  return []
+}
+
+function parseJsonProfiles(text: string): VpnProfile[] {
+  for (const document of jsonDocumentTexts(text)) {
+    try {
+      const profiles = parseJsonValueProfiles(JSON.parse(document), new Set([document]))
+      if (profiles.length) return profiles
+    } catch {
+      // Keep looking; subscription metadata may contain unrelated braces.
+    }
+  }
+  return []
+}
+
+function stripYamlComment(value: string): string {
+  let quote: string | null = null
+  for (let i = 0; i < value.length; i++) {
+    const ch = value[i]
+    if ((ch === '"' || ch === "'") && value[i - 1] !== '\\') {
+      quote = quote === ch ? null : quote || ch
+    }
+    if (ch === '#' && !quote && (i === 0 || /\s/.test(value[i - 1]))) return value.slice(0, i).trim()
+  }
+  return value.trim()
+}
+
+function parseYamlScalar(value: string): any {
+  const raw = stripYamlComment(value)
+  if (!raw) return ''
+  if (raw.startsWith('[') && raw.endsWith(']')) {
+    return splitInlineYaml(raw.slice(1, -1)).map(item => parseYamlScalar(item))
+  }
+  if ((raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'"))) {
+    return safeDecode(raw.slice(1, -1))
+  }
+  if (/^(true|false)$/i.test(raw)) return /^true$/i.test(raw)
+  if (/^null$/i.test(raw)) return null
+  if (/^-?\d+(\.\d+)?$/.test(raw)) return Number(raw)
+  return safeDecode(raw)
+}
+
+function splitInlineYaml(value: string): string[] {
+  const parts: string[] = []
+  let quote: string | null = null
+  let depth = 0
+  let start = 0
+  for (let i = 0; i < value.length; i++) {
+    const ch = value[i]
+    if ((ch === '"' || ch === "'") && value[i - 1] !== '\\') {
+      quote = quote === ch ? null : quote || ch
+    } else if (!quote && (ch === '{' || ch === '[')) {
+      depth++
+    } else if (!quote && (ch === '}' || ch === ']')) {
+      depth = Math.max(0, depth - 1)
+    } else if (!quote && depth === 0 && ch === ',') {
+      parts.push(value.slice(start, i).trim())
+      start = i + 1
+    }
+  }
+  parts.push(value.slice(start).trim())
+  return parts.filter(Boolean)
+}
+
+function findYamlKeySeparator(value: string): number {
+  let quote: string | null = null
+  for (let i = 0; i < value.length; i++) {
+    const ch = value[i]
+    if ((ch === '"' || ch === "'") && value[i - 1] !== '\\') {
+      quote = quote === ch ? null : quote || ch
+    } else if (ch === ':' && !quote) {
+      return i
+    }
+  }
+  return -1
+}
+
+function parseInlineYamlMap(value: string): Record<string, any> {
+  const trimmed = value.trim().replace(/^\{/, '').replace(/\}$/, '')
+  const result: Record<string, any> = {}
+  for (const part of splitInlineYaml(trimmed)) {
+    const idx = findYamlKeySeparator(part)
+    if (idx <= 0) continue
+    const key = part.slice(0, idx).trim()
+    result[key] = parseYamlScalar(part.slice(idx + 1))
+  }
+  return result
+}
+
+function parseYamlObject(lines: string[]): Record<string, any> {
+  const first = lines.find(line => line.trim())
+  if (first?.trim().startsWith('{')) return parseInlineYamlMap(first.trim())
+
+  const root: Record<string, any> = {}
+  const stack: Array<{ indent: number; obj: Record<string, any> }> = [{ indent: -1, obj: root }]
+
+  for (const rawLine of lines) {
+    if (!rawLine.trim() || rawLine.trim().startsWith('#')) continue
+    const indent = rawLine.match(/^\s*/)?.[0].length ?? 0
+    const trimmed = rawLine.trim()
+    const idx = findYamlKeySeparator(trimmed)
+    if (idx <= 0) continue
+
+    while (stack.length > 1 && indent <= stack[stack.length - 1].indent) stack.pop()
+    const parent = stack[stack.length - 1].obj
+    const key = trimmed.slice(0, idx).trim()
+    const value = trimmed.slice(idx + 1).trim()
+    if (!value) {
+      const child: Record<string, any> = {}
+      parent[key] = child
+      stack.push({ indent, obj: child })
+    } else if (value.startsWith('{') && value.endsWith('}')) {
+      parent[key] = parseInlineYamlMap(value)
+    } else {
+      parent[key] = parseYamlScalar(value)
+    }
+  }
+
+  return root
+}
+
+function collectClashProxyBlocks(text: string): string[][] {
+  const lines = text.replace(/\r/g, '\n').split('\n')
+  const blocks: string[][] = []
+  let inProxies = false
+  let current: string[] | null = null
+
+  for (const line of lines) {
+    if (!inProxies) {
+      if (/^\s*proxies\s*:\s*(?:#.*)?$/i.test(line)) inProxies = true
+      continue
+    }
+
+    if (/^\S[^:]*:\s*/.test(line)) break
+    const item = line.match(/^(\s*)-\s*(.*)$/)
+    if (item && item[1].length <= 2) {
+      if (current?.length) blocks.push(current)
+      const rest = item[2].trim()
+      current = rest ? [`${item[1]}  ${rest}`] : []
+      continue
+    }
+    if (current) current.push(line)
+  }
+
+  if (current?.length) blocks.push(current)
+  return blocks
+}
+
+function buildTlsFromClash(raw: Record<string, any>, server: string): Record<string, any> | undefined {
+  const realityOpts = raw['reality-opts'] && typeof raw['reality-opts'] === 'object' ? raw['reality-opts'] : null
+  const serverName = stringValue(raw.servername) || stringValue(raw.sni) || stringValue(raw.host)
+  const tlsEnabled = boolValue(raw.tls) || Boolean(serverName) || Boolean(realityOpts)
+  if (!tlsEnabled) return undefined
+
+  const tls: Record<string, any> = { enabled: true, server_name: serverName || server }
+  if (boolValue(raw['skip-cert-verify']) || boolValue(raw.insecure)) tls.insecure = true
+  const fp = stringValue(raw['client-fingerprint']) || stringValue(raw.fingerprint)
+  if (fp && fp.toLowerCase() !== 'none') tls.utls = { enabled: true, fingerprint: fp }
+  const alpn = stringListValue(raw.alpn)
+  if (alpn) tls.alpn = alpn
+
+  if (realityOpts) {
+    const publicKey = stringValue(realityOpts['public-key']) || stringValue(realityOpts.public_key) || stringValue(raw['reality-public-key'])
+    if (publicKey) {
+      if (!tls.utls) tls.utls = { enabled: true, fingerprint: 'chrome' }
+      tls.reality = {
+        enabled: true,
+        public_key: publicKey,
+        short_id: stringValue(realityOpts['short-id']) || stringValue(realityOpts.short_id) || ''
+      }
+    }
+  }
+
+  return tls
+}
+
+function buildTransportFromClash(raw: Record<string, any>): Record<string, any> | undefined {
+  const network = (stringValue(raw.network) || stringValue(raw.net) || 'tcp').toLowerCase()
+  if (!network || network === 'tcp') return undefined
+
+  if (network === 'ws' || network === 'websocket') {
+    const ws = raw['ws-opts'] && typeof raw['ws-opts'] === 'object' ? raw['ws-opts'] : {}
+    const headers = ws.headers && typeof ws.headers === 'object' ? ws.headers : {}
+    const transport: Record<string, any> = {
+      type: 'ws',
+      path: stringValue(ws.path) || stringValue(raw.path) || '/'
+    }
+    if (Object.keys(headers).length) transport.headers = headers
+    return transport
+  }
+
+  if (network === 'grpc') {
+    const grpc = raw['grpc-opts'] && typeof raw['grpc-opts'] === 'object' ? raw['grpc-opts'] : {}
+    return {
+      type: 'grpc',
+      service_name: stringValue(grpc['grpc-service-name']) || stringValue(grpc.serviceName) || stringValue(raw['grpc-service-name']) || ''
+    }
+  }
+
+  if (network === 'httpupgrade' || network === 'http-upgrade') {
+    const http = raw['http-opts'] && typeof raw['http-opts'] === 'object' ? raw['http-opts'] : {}
+    return {
+      type: 'httpupgrade',
+      host: stringValue(http.host) || stringValue(raw.host) || '',
+      path: stringValue(http.path) || stringValue(raw.path) || '/'
+    }
+  }
+
+  if (network === 'h2' || network === 'http') {
+    const http = raw['http-opts'] && typeof raw['http-opts'] === 'object' ? raw['http-opts'] : {}
+    const host = stringValue(http.host) || stringValue(raw.host)
+    return {
+      type: 'http',
+      host: host ? [host] : [],
+      path: stringValue(http.path) || stringValue(raw.path) || '/'
+    }
+  }
+
+  return undefined
+}
+
+function clashProxyToProfile(raw: Record<string, any>): VpnProfile | null {
+  const rawType = (stringValue(raw.type) || '').toLowerCase()
+  const type = rawType === 'ss' ? 'shadowsocks' : rawType === 'hy2' ? 'hysteria2' : rawType
+  if (!SUPPORTED_OUTBOUND_TYPES.has(type)) return null
+  const server = stringValue(raw.server)
+  const port = numberPort(String(raw.port || raw.server_port || ''))
+  if (!server) return null
+
+  const outbound: Record<string, any> = {
+    type,
+    tag: 'proxy-out',
+    server,
+    server_port: port
+  }
+
+  if (type === 'vless' || type === 'vmess') {
+    outbound.uuid = stringValue(raw.uuid) || stringValue(raw.id) || ''
+    outbound.network = 'tcp'
+    if (type === 'vmess') {
+      outbound.security = stringValue(raw.cipher) || stringValue(raw.security) || 'auto'
+      outbound.alter_id = Number(raw.alterId || raw.alter_id || 0)
+    }
+    const flow = stringValue(raw.flow)
+    if (flow) outbound.flow = flow
+  } else if (type === 'trojan' || type === 'hysteria2') {
+    outbound.password = stringValue(raw.password) || ''
+    outbound.network = 'tcp'
+  } else if (type === 'shadowsocks') {
+    outbound.method = stringValue(raw.cipher) || stringValue(raw.method) || ''
+    outbound.password = stringValue(raw.password) || ''
+  }
+
+  const tls = buildTlsFromClash(raw, server)
+  if (tls) outbound.tls = tls
+  const transport = buildTransportFromClash(raw)
+  if (transport) outbound.transport = transport
+
+  return {
+    name: stringValue(raw.name) || type.toUpperCase(),
+    protocol: type as VpnProtocol,
+    outbound: finishOutbound(outbound)
+  }
+}
+
+function parseClashProfiles(text: string): VpnProfile[] {
+  if (!/^\s*proxies\s*:/im.test(text)) return []
+  const profiles: VpnProfile[] = []
+  for (const block of collectClashProxyBlocks(text)) {
+    try {
+      const profile = clashProxyToProfile(parseYamlObject(block))
+      if (profile) profiles.push(profile)
+    } catch {
+      // Keep parsing other proxies if one YAML entry is unsupported/broken.
+    }
+  }
+  return profiles
+}
+
+function parseLine(line: string): VpnProfile | null {
+  const trimmed = line.trim()
+  if (!trimmed || trimmed.startsWith('#')) return null
+  const scheme = trimmed.match(/^([a-z0-9+.-]+):\/\//i)?.[1]?.toLowerCase()
+  if (!scheme) return null
+  if (scheme === 'vless') return parseVless(trimmed)
+  if (scheme === 'trojan') return parseTrojan(trimmed)
+  if (scheme === 'ss') return parseShadowsocks(trimmed)
+  if (scheme === 'vmess') return parseVmess(trimmed)
+  if (scheme === 'hysteria2' || scheme === 'hy2') return parseHysteria2(trimmed)
+  return null
+}
+
+export function parseVpnProfiles(text: string): VpnProfile[] {
+  const inputs = collectTextVariants(text)
+
+  for (const input of inputs) {
+    try {
+      const jsonProfiles = parseJsonProfiles(input)
+      if (jsonProfiles.length) return jsonProfiles
+    } catch {
+      // Fall through; subscriptions often contain non-JSON text.
+    }
+
+    const clashProfiles = parseClashProfiles(input)
+    if (clashProfiles.length) return clashProfiles
+  }
+
+  for (const input of inputs) {
+    const uriProfiles = parseUriProfilesFromText(input)
+    if (uriProfiles.length) return uriProfiles
+  }
+  return []
+}
+
+function normalizeProxyAddress(raw: string | null | undefined): string | null {
+  const value = (raw || '').trim().replace(/^(socks5h?|https?):\/\//i, '')
+  if (!value) return null
+  const sep = value.lastIndexOf(':')
+  if (sep <= 0) return null
+  const host = value.slice(0, sep).trim()
+  const port = Number(value.slice(sep + 1))
+  if (!host || !Number.isInteger(port) || port <= 0 || port > 65535) return null
+  return `${host}:${port}`
+}
+
+function proxyUrl(addr: string, type: 'socks5' | 'http'): string {
+  return type === 'http' ? `http://${addr}` : `socks5h://${addr}`
+}
+
+function buildSubscriptionHwid(): string {
+  const override = (process.env.VPNTE_SUBSCRIPTION_HWID || '').trim()
+  if (override) return override
+
+  let username = ''
+  try {
+    username = userInfo().username || ''
+  } catch {
+    username = process.env.USERNAME || process.env.USER || ''
+  }
+  const seed = [
+    'vpn-tunnel-enforcer',
+    hostname(),
+    username,
+    process.env.USERDOMAIN || '',
+    process.arch,
+    process.platform
+  ].join('|')
+  return `vpnte-${createHash('sha256').update(seed).digest('hex').slice(0, 32)}`
+}
+
+function subscriptionCommonCurlArgs(): string[] {
+  // X-HWID is what every modern Marzban/Marzneshin-style panel uses to bind a
+  // subscription to a specific device. Sosa Connect (sub.sosa.ink) and similar
+  // panels return an EMPTY 200 OK when the header is missing — that's the
+  // root cause of the long-standing "пустой ответ" failure.
+  //
+  // Earlier the header was removed under the (wrong) assumption that it was
+  // causing the empty response. The actual behaviour is the opposite: most
+  // panels require it. We always send a stable, hashed HWID derived from the
+  // host so the panel can recognise this device on subsequent updates.
+  //
+  // For panels that explicitly reject unknown HWIDs (rare), buildFetchAttempts
+  // will additionally fall back to no-header attempts.
+  return ['-H', `X-HWID: ${buildSubscriptionHwid()}`]
+}
+
+// Same fetch args but without X-HWID, used as a secondary attempt for panels
+// that would reject unknown device identifiers. Most won't need this branch.
+function subscriptionFallbackCurlArgs(): string[] {
+  return []
+}
+
+function buildFetchAttempts(options: SubscriptionFetchOptions = {}): FetchAttempt[] {
+  const headerSets: Array<{ args: string[]; suffix: string }> = [
+    { args: subscriptionCommonCurlArgs(), suffix: '' },
+    { args: subscriptionFallbackCurlArgs(), suffix: ' [no-hwid]' }
+  ]
+  const proxyCandidates: Array<{ addr: string; type: 'socks5' | 'http'; label: string }> = []
+  const seen = new Set<string>()
+  const addProxy = (addr: string | null, type: 'socks5' | 'http', label: string) => {
+    if (!addr) return
+    const key = `${type}:${addr}`
+    if (seen.has(key)) return
+    seen.add(key)
+    proxyCandidates.push({ addr, type, label })
+  }
+
+  addProxy(normalizeProxyAddress(options.proxyAddr), options.proxyType ?? 'socks5', 'через выбранный локальный proxy')
+  addProxy('127.0.0.1:10808', 'socks5', 'через Happ SOCKS 127.0.0.1:10808')
+  addProxy('127.0.0.1:10809', 'http', 'через Happ HTTP 127.0.0.1:10809')
+
+  const attempts: FetchAttempt[] = []
+  // Try with HWID first (Marzban/Sosa-style panels require it). Only if every
+  // HWID-bearing attempt produces an empty body do we fall back to bare attempts.
+  for (const headerSet of headerSets) {
+    for (const ua of SUBSCRIPTION_USER_AGENTS) {
+      attempts.push({
+        label: `напрямую (${ua})${headerSet.suffix}`,
+        args: ['--noproxy', '*', '--compressed', '-A', ua, ...headerSet.args]
+      })
+      for (const proxy of proxyCandidates) {
+        attempts.push({
+          label: `${proxy.label} (${ua})${headerSet.suffix}`,
+          args: ['--compressed', '-A', ua, ...headerSet.args, '--proxy', proxyUrl(proxy.addr, proxy.type)]
+        })
+      }
+    }
+  }
+  return attempts
+}
+
+async function resolveHostWithDoh(host: string): Promise<string[]> {
+  const resolvers = [
+    {
+      label: 'Cloudflare DoH',
+      resolve: 'cloudflare-dns.com:443:1.1.1.1',
+      url: `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(host)}&type=A`,
+      headers: ['-H', 'accept: application/dns-json']
+    },
+    {
+      label: 'Google DoH',
+      resolve: 'dns.google:443:8.8.8.8',
+      url: `https://dns.google/resolve?name=${encodeURIComponent(host)}&type=A`,
+      headers: []
+    }
+  ]
+  const ips: string[] = []
+  const seen = new Set<string>()
+  for (const resolver of resolvers) {
+    try {
+      const { stdout } = await execFile('curl.exe', [
+        '-L',
+        '-sS',
+        '--fail',
+        '--noproxy',
+        '*',
+        '--max-time',
+        '12',
+        '--connect-timeout',
+        '6',
+        '--resolve',
+        resolver.resolve,
+        ...resolver.headers,
+        resolver.url
+      ], {
+        windowsHide: true,
+        timeout: 15000,
+        encoding: 'buffer',
+        maxBuffer: 1024 * 1024
+      })
+      const parsed = JSON.parse(decodeSubscriptionBody(stdout as Buffer))
+      const answers = Array.isArray(parsed.Answer) ? parsed.Answer : []
+      for (const answer of answers) {
+        const ip = stringValue(answer?.data)
+        if (!ip || !/^\d{1,3}(?:\.\d{1,3}){3}$/.test(ip) || seen.has(ip)) continue
+        seen.add(ip)
+        ips.push(ip)
+      }
+      if (ips.length) return ips
+    } catch {
+      // Keep trying other DNS-over-HTTPS resolvers.
+    }
+  }
+  return ips
+}
+
+async function buildDnsBypassAttempts(url: string): Promise<FetchAttempt[]> {
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    return []
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return []
+  const host = parsed.hostname
+  if (!host || /^\d{1,3}(?:\.\d{1,3}){3}$/.test(host) || host === 'localhost') return []
+
+  const ips = (await resolveHostWithDoh(host)).slice(0, 3)
+  if (!ips.length) return []
+  const port = parsed.port || (parsed.protocol === 'https:' ? '443' : '80')
+  const headerSets: Array<{ args: string[]; suffix: string }> = [
+    { args: subscriptionCommonCurlArgs(), suffix: '' },
+    { args: subscriptionFallbackCurlArgs(), suffix: ' [no-hwid]' }
+  ]
+  const attempts: FetchAttempt[] = []
+  for (const headerSet of headerSets) {
+    for (const ua of SUBSCRIPTION_USER_AGENTS) {
+      for (const ip of ips) {
+        attempts.push({
+          label: `напрямую через DoH ${ip} (${ua})${headerSet.suffix}`,
+          args: ['--noproxy', '*', '--compressed', '-A', ua, ...headerSet.args, '--resolve', `${host}:${port}:${ip}`]
+        })
+      }
+    }
+  }
+  return attempts
+}
+
+function curlErrorMessage(err: any): string {
+  const stderr = typeof err?.stderr === 'string' ? err.stderr.trim() : Buffer.isBuffer(err?.stderr) ? err.stderr.toString('utf8').trim() : ''
+  const stdout = typeof err?.stdout === 'string' ? err.stdout.trim() : Buffer.isBuffer(err?.stdout) ? decodeSubscriptionBody(err.stdout).trim() : ''
+  const message = stderr || stdout || err?.message || String(err)
+  return redactSensitiveText(message).replace(/\s+/g, ' ').slice(0, 500)
+}
+
+function describeSubscriptionBody(text: string): string {
+  const trimmed = text.trim()
+  if (!trimmed) return 'пустой ответ'
+  const parts = [`${Buffer.byteLength(text, 'utf8')} байт`]
+  const first = trimmed[0]
+  if (first === '<') {
+    parts.push('похоже на HTML')
+  } else if (first === '{' || first === '[' || /["'](?:outbounds|xrayFullConfig|config|proxies)["']\s*:/i.test(trimmed)) {
+    parts.push('похоже на JSON')
+    for (const document of jsonDocumentTexts(trimmed).slice(0, 1)) {
+      try {
+        const parsed = JSON.parse(document)
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          const keys = Object.keys(parsed).slice(0, 8).join(',')
+          if (keys) parts.push(`keys=${keys}`)
+          if (Array.isArray(parsed.outbounds)) parts.push(`outbounds=${parsed.outbounds.length}`)
+        } else if (Array.isArray(parsed)) {
+          parts.push(`array=${parsed.length}`)
+        }
+      } catch {
+        parts.push('JSON не разобран')
+      }
+    }
+  } else if (/^[A-Za-z0-9+/=_-]{64,}$/.test(trimmed.replace(/\s+/g, ''))) {
+    parts.push('похоже на base64')
+  } else if (trimmed.includes('://')) {
+    parts.push('есть URI-схемы')
+  } else {
+    parts.push(`начало=${JSON.stringify(trimmed.slice(0, 12))}`)
+  }
+  return parts.join(', ')
+}
+
+function summarizeSubscriptionErrors(errors: string[]): string {
+  const primary = errors.slice(0, 6)
+  const dnsBypass = errors
+    .filter(error => /DoH|DNS-over-HTTPS/i.test(error) && !primary.includes(error))
+    .slice(-4)
+  const shown = [...primary, ...dnsBypass]
+  const hidden = Math.max(0, errors.length - shown.length)
+  if (hidden > 0) shown.push(`еще ${hidden} попыток не сработали`)
+  return shown.join(' | ')
+}
+
+async function fetchAndParseSubscription(url: string, options?: SubscriptionFetchOptions): Promise<{ profiles: VpnProfile[]; source: string }> {
+  const errors: string[] = []
+  const runAttempts = async (attempts: FetchAttempt[]) => {
+    for (const attempt of attempts) {
+      try {
+        const { stdout } = await execFile('curl.exe', [
+          '-L',
+          '-sS',
+          '--fail',
+          '--max-time',
+          '25',
+          ...attempt.args,
+          url
+        ], {
+          windowsHide: true,
+          timeout: 30000,
+          encoding: 'buffer',
+          maxBuffer: 1024 * 1024 * 16
+        })
+        const body = decodeSubscriptionBody(stdout as Buffer)
+        const profiles = parseVpnProfiles(body)
+        if (profiles.length) return { profiles, source: attempt.label }
+        errors.push(`${attempt.label}: скачано (${describeSubscriptionBody(body)}), но VLESS/Trojan/SS/VMess/Hysteria2 не найдены`)
+      } catch (err: any) {
+        errors.push(`${attempt.label}: ${curlErrorMessage(err)}`)
+      }
+    }
+    return null
+  }
+
+  const directResult = await runAttempts(buildFetchAttempts(options))
+  if (directResult) return directResult
+
+  const dnsBypassAttempts = await buildDnsBypassAttempts(url)
+  if (dnsBypassAttempts.length) {
+    const dnsBypassResult = await runAttempts(dnsBypassAttempts)
+    if (dnsBypassResult) return dnsBypassResult
+  } else if (/^https?:\/\//i.test(url)) {
+    errors.push('DNS-over-HTTPS fallback: не удалось получить A-записи для домена подписки')
+  }
+
+  throw new Error(`Не удалось скачать или распознать subscription. ${summarizeSubscriptionErrors(errors)}`)
+}
+
+/**
+ * Unwraps a Happ deep-link to extract a usable subscription URL or VPN-link.
+ *
+ * Happ uses several `happ://` schemes (see Happ-docs/dev-docs):
+ *   - `happ://add/<payload>` — community shorthand used by VPN providers
+ *     (Sosa, Marzban, etc.). Payload is the subscription URL, either
+ *     URL-encoded or base64-encoded. We try both and return the unwrapped URL.
+ *   - `happ://routing/add/{base64}` and `happ://routing/onadd/{base64}` —
+ *     routing profile (NOT a server subscription). Reject with a clear error
+ *     so we don't silently produce 0 profiles.
+ *   - `happ://crypt3/...`, `happ://crypt4/...`, `happ://crypt5/...` —
+ *     RSA-encrypted subscriptions. The keys live inside the Happ app and we
+ *     can't decrypt them here. Reject with a clear error.
+ *
+ * Returns the unwrapped string (a regular URL or VPN URI) or `null` if the
+ * input isn't a `happ://` link.
+ */
+function unwrapHappAddLink(input: string): string | null {
+  const match = input.match(/^happ:\/\/([^/]+)(?:\/(.*))?$/i)
+  if (!match) return null
+  const host = match[1].toLowerCase()
+  const rest = match[2] ?? ''
+
+  if (host === 'crypt3' || host === 'crypt4' || host === 'crypt5' || host === 'crypto') {
+    throw new Error(
+      'Это зашифрованная подписка Happ (' + host + '). VPNTE не умеет её расшифровать — ' +
+      'попросите у вашего провайдера обычный subscription URL (https://…) или vless://-ссылку.'
+    )
+  }
+
+  if (host === 'routing') {
+    throw new Error(
+      'Это правило маршрутизации Happ (happ://routing/…), а не VPN-подписка. ' +
+      'Вставьте ссылку на подписку или ключ протокола (vless://, trojan://, ss://, vmess://, hysteria2://).'
+    )
+  }
+
+  if (host === 'add') {
+    // Payload might be URL-encoded (https%3A%2F%2F…), bare URL after the slash,
+    // base64 of a URL, base64 of a base64-list of vless://… links — try each.
+    const candidates: string[] = []
+    const trySafeDecode = (value: string) => {
+      const decoded = safeDecode(value).trim()
+      if (decoded) candidates.push(decoded)
+    }
+    trySafeDecode(rest)
+    // Some senders include the scheme in the path: happ://add/https://example/sub
+    if (/^https?:\/\//i.test(rest)) candidates.push(rest)
+    const base64 = decodeBase64Text(rest)
+    if (base64) candidates.push(base64.trim())
+
+    for (const candidate of candidates) {
+      if (/^https?:\/\//i.test(candidate)) return candidate
+      if (/^(?:vless|trojan|ss|vmess|hysteria2|hy2):\/\//i.test(candidate)) return candidate
+      // Could be a base64 blob with multiple vless:// lines — let parseVpnProfiles handle it.
+      if (/(?:vless|trojan|ss|vmess|hysteria2|hy2):\/\//i.test(candidate)) return candidate
+    }
+
+    throw new Error(
+      'Не удалось разобрать ссылку happ://add/… — внутри ожидается subscription URL или ' +
+      'vless://-ссылка, но содержимое не похоже ни на то, ни на другое.'
+    )
+  }
+
+  // Unknown happ:// host — bail out loudly instead of silently producing 0 profiles.
+  throw new Error(
+    'Неизвестная схема happ://' + host + '/. Вставьте обычную ссылку подписки (https://…) ' +
+    'или ключ протокола (vless://, trojan://, ss://, vmess://, hysteria2://).'
+  )
+}
+
+export async function resolveVpnProfiles(input: string, options?: SubscriptionFetchOptions): Promise<{ profiles: VpnProfile[]; source: string; fetched: boolean }> {
+  const trimmed = input.trim()
+  if (!trimmed) throw new Error('Вставьте VPN-ссылку, subscription URL или sing-box outbound JSON')
+
+  // Auto-unwrap `happ://add/<encoded-url>` etc. before hitting the regular pipeline.
+  // This is the format VPN providers (Sosa, Marzban, …) put into their share buttons.
+  const unwrapped = unwrapHappAddLink(trimmed)
+  const effective = unwrapped ?? trimmed
+
+  if (/^https?:\/\//i.test(effective)) {
+    const result = await fetchAndParseSubscription(effective, options)
+    return { ...result, fetched: true }
+  }
+
+  const profiles = parseVpnProfiles(effective)
+  return { profiles, source: unwrapped ? 'распакованная ссылка happ://' : 'вставленный текст', fetched: false }
+}
+
+export async function resolveVpnProfile(input: string, selectedIndex = 0, options?: SubscriptionFetchOptions): Promise<VpnProfile> {
+  const { profiles } = await resolveVpnProfiles(input, options)
+  if (!profiles.length) {
+    throw new Error('В подписке/ключе не найдено поддерживаемых профилей (VLESS, Trojan, Shadowsocks, VMess, Hysteria2 или sing-box outbound JSON)')
+  }
+  return profiles[Math.min(Math.max(0, selectedIndex), profiles.length - 1)]
+}
+
+export async function inspectVpnInput(input: string, options?: SubscriptionFetchOptions): Promise<VpnInputInspection> {
+  if (!input.trim()) {
+    return { count: 0, protocols: {}, profiles: [], fetched: false, source: 'пусто' }
+  }
+  const resolved = await resolveVpnProfiles(input, options)
+  const profiles = resolved.profiles
+  const protocols: Record<string, number> = {}
+  for (const profile of profiles) {
+    protocols[profile.protocol] = (protocols[profile.protocol] || 0) + 1
+  }
+  return {
+    count: profiles.length,
+    protocols,
+    profiles: profiles.map((profile, index) => ({ index, name: profile.name, protocol: profile.protocol })),
+    fetched: resolved.fetched,
+    source: resolved.source
+  }
+}
+
+export function redactSensitiveConfig(value: unknown): unknown {
+  if (typeof value === 'string') {
+    return redactSensitiveText(value)
+  }
+  if (Array.isArray(value)) return value.map(item => redactSensitiveConfig(item))
+  if (value && typeof value === 'object') {
+    const result: Record<string, unknown> = {}
+    for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+      const lower = key.toLowerCase()
+      if (SECRET_KEYS.has(lower) || /uuid|password|token|secret|private[_-]?key|public[_-]?key|short[_-]?id|^id$/i.test(key)) {
+        result[key] = '<redacted>'
+      } else {
+        result[key] = redactSensitiveConfig(raw)
+      }
+    }
+    return result
+  }
+  return value
+}
+
+export function redactSettingsForDiagnostics<T extends Record<string, any>>(settings: T): T {
+  return {
+    ...settings,
+    directVpnInput: settings.directVpnInput ? '<redacted>' : '',
+    directVpnCachedInput: settings.directVpnCachedInput ? '<redacted>' : '',
+    directVpnCachedProfiles: Array.isArray(settings.directVpnCachedProfiles)
+      ? settings.directVpnCachedProfiles.map((profile: any, index: number) => ({
+          index,
+          name: profile?.name,
+          protocol: profile?.protocol,
+          outbound: '<redacted>'
+        }))
+      : []
+  }
+}

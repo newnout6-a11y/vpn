@@ -2,25 +2,174 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ─── Theme CSS Custom Properties ─────────────────────────────────────────────
+ *
+ * Two parallel formats for every colour:
+ *
+ *   --color-NAME      — CSS-ready value (e.g. "#ffffff" or "var(--rgb-card)").
+ *                       Used directly inside CSS, e.g. `color: var(--color-text)`.
+ *
+ *   --rgb-NAME        — three space-separated channel values (e.g. "255 255 255").
+ *                       Required by Tailwind to apply the `/<alpha-value>` modifier:
+ *                         `bg-card/60`  →  rgb(var(--rgb-card) / 0.6)
+ *
+ * Always update both formats together when changing a theme.
+ * ────────────────────────────────────────────────────────────────────────── */
+
+:root {
+  /* Light theme defaults — RGB channel triples for Tailwind alpha support */
+  --rgb-bg: 245 245 247;
+  --rgb-card: 255 255 255;
+  --rgb-card-elevated: 250 250 252;
+  --rgb-accent: 0 122 255;
+  --rgb-accent-hover: 0 102 214;
+  --rgb-text: 29 29 31;
+  --rgb-text-secondary: 134 134 139;
+  --rgb-text-muted: 174 174 178;
+  --rgb-sidebar: 240 240 242;
+  --rgb-border: 229 229 234;
+  --rgb-border-strong: 209 209 214;
+  --rgb-success: 52 199 89;
+  --rgb-warning: 255 159 10;
+  --rgb-danger: 255 59 48;
+
+  /* CSS-ready aliases — derived from the RGB channels above */
+  --color-bg: rgb(var(--rgb-bg));
+  --color-card: rgb(var(--rgb-card));
+  --color-card-elevated: rgb(var(--rgb-card-elevated));
+  --color-accent: rgb(var(--rgb-accent));
+  --color-accent-hover: rgb(var(--rgb-accent-hover));
+  --color-text: rgb(var(--rgb-text));
+  --color-text-secondary: rgb(var(--rgb-text-secondary));
+  --color-text-muted: rgb(var(--rgb-text-muted));
+  --color-sidebar: rgb(var(--rgb-sidebar));
+  --color-border: rgb(var(--rgb-border));
+  --color-border-strong: rgb(var(--rgb-border-strong));
+  --color-success: rgb(var(--rgb-success));
+  --color-warning: rgb(var(--rgb-warning));
+  --color-danger: rgb(var(--rgb-danger));
+
+  /* Shared radius tokens */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+
+  /* Shared shadow tokens — light mode (subtle, mostly opacity) */
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.04), 0 2px 8px rgba(0, 0, 0, 0.06);
+  --shadow-card-hover: 0 2px 4px rgba(0, 0, 0, 0.06), 0 8px 24px rgba(0, 0, 0, 0.08);
+  --shadow-modal: 0 8px 32px rgba(0, 0, 0, 0.12);
+  --shadow-toast: 0 4px 16px rgba(0, 0, 0, 0.1);
+  --shadow-button: 0 1px 0 rgba(255, 255, 255, 0.12) inset, 0 1px 2px rgba(0, 0, 0, 0.08);
+  --shadow-button-hover: 0 1px 0 rgba(255, 255, 255, 0.16) inset, 0 4px 8px rgba(0, 0, 0, 0.12);
+
+  /* Shared transition tokens */
+  --transition-fast: 150ms cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-normal: 200ms cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-slow: 300ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+[data-theme="dark"] {
+  --rgb-bg: 28 28 30;
+  --rgb-card: 44 44 46;
+  --rgb-card-elevated: 58 58 60;
+  --rgb-accent: 10 132 255;
+  --rgb-accent-hover: 64 156 255;
+  --rgb-text: 245 245 247;
+  --rgb-text-secondary: 152 152 157;
+  --rgb-text-muted: 99 99 102;
+  --rgb-sidebar: 28 28 30;
+  --rgb-border: 56 56 58;
+  --rgb-border-strong: 72 72 74;
+  --rgb-success: 48 209 88;
+  --rgb-warning: 255 214 10;
+  --rgb-danger: 255 69 58;
+
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.2), 0 2px 8px rgba(0, 0, 0, 0.32);
+  --shadow-card-hover: 0 2px 4px rgba(0, 0, 0, 0.24), 0 8px 24px rgba(0, 0, 0, 0.4);
+  --shadow-modal: 0 8px 32px rgba(0, 0, 0, 0.5);
+  --shadow-toast: 0 4px 16px rgba(0, 0, 0, 0.4);
+  --shadow-button: 0 1px 0 rgba(255, 255, 255, 0.06) inset, 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-button-hover: 0 1px 0 rgba(255, 255, 255, 0.1) inset, 0 4px 8px rgba(0, 0, 0, 0.5);
+}
+
+/* ─── End Theme CSS Custom Properties ─────────────────────────────────────── */
+
 @layer base {
   * {
-    border-color: theme('colors.surface.lighter');
+    border-color: var(--color-border);
   }
+
+  html, body {
+    background-color: var(--color-bg);
+    color: var(--color-text);
+  }
+
   body {
-    @apply bg-surface text-gray-100 font-sans antialiased;
+    @apply font-sans antialiased;
     -webkit-app-region: no-drag;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+    /* Inter / SF Pro tabular and stylistic features for cleaner numbers and "i", "l" */
+    font-feature-settings: "cv11", "ss01", "ss03";
+    font-variant-ligatures: contextual;
   }
+
+  /* Native selection — branded with the accent colour */
+  ::selection {
+    background-color: rgb(var(--rgb-accent) / 0.3);
+    color: var(--color-text);
+  }
+
+  /* Default focus ring for any keyboard-navigated interactive element that does
+     not provide its own focus style. Mouse clicks are unaffected thanks to
+     :focus-visible. */
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  /* Numeric data (IPs, speeds, byte counts, timers) should align in tabular
+     columns. Apply via the `.tabular` class or `<data>` element. */
+  .tabular,
+  data,
+  code,
+  kbd {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Custom scrollbar — themed to the active palette, not hardcoded. */
   ::-webkit-scrollbar {
-    width: 6px;
+    width: 8px;
+    height: 8px;
   }
   ::-webkit-scrollbar-track {
-    @apply bg-surface;
+    background: transparent;
   }
   ::-webkit-scrollbar-thumb {
-    @apply bg-surface-lighter rounded-full;
+    background: rgb(var(--rgb-text-secondary) / 0.3);
+    border-radius: 8px;
+    border: 2px solid var(--color-bg);
+    background-clip: padding-box;
   }
   ::-webkit-scrollbar-thumb:hover {
-    @apply bg-gray-500;
+    background: rgb(var(--rgb-text-secondary) / 0.6);
+    background-clip: padding-box;
+    border: 2px solid var(--color-bg);
+  }
+
+  /* Honour the OS reduced-motion preference. Animations still happen, but in
+     a single tick — no springs, no slides. Required for accessibility. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+      scroll-behavior: auto !important;
+    }
   }
 }
 
@@ -31,19 +180,55 @@
   .no-drag {
     -webkit-app-region: no-drag;
   }
+
+  /* Legacy utility classes — kept for any place still referencing them.
+     Prefer the Mac* primitives in src/renderer/design-system instead. */
   .card {
-    @apply bg-surface-light rounded-lg border border-surface-lighter/50 p-5 transition-all duration-200;
+    @apply rounded-lg border p-5 transition-all duration-200;
+    background-color: var(--color-card);
+    border-color: var(--color-border);
+    box-shadow: var(--shadow-card);
   }
   .card:hover {
-    @apply border-accent/30;
+    box-shadow: var(--shadow-card-hover);
   }
   .btn-primary {
-    @apply bg-accent hover:bg-accent/90 text-white font-medium px-5 py-2.5 rounded-md transition-all duration-200 active:scale-95;
+    @apply text-white font-medium px-5 py-2.5 rounded-md transition-all duration-200 active:scale-95;
+    background-color: var(--color-accent);
+    box-shadow: var(--shadow-button);
+  }
+  .btn-primary:hover {
+    background-color: var(--color-accent-hover);
+    box-shadow: var(--shadow-button-hover);
   }
   .btn-secondary {
-    @apply bg-surface-lighter hover:bg-gray-600 text-gray-200 font-medium px-5 py-2.5 rounded-md transition-all duration-200 active:scale-95;
+    @apply font-medium px-5 py-2.5 rounded-md transition-all duration-200 active:scale-95;
+    background-color: var(--color-card);
+    color: var(--color-text);
+    border: 1px solid var(--color-border);
+  }
+  .btn-secondary:hover {
+    background-color: var(--color-border);
   }
   .btn-danger {
-    @apply bg-danger/20 hover:bg-danger/30 text-danger font-medium px-5 py-2.5 rounded-md transition-all duration-200 active:scale-95;
+    @apply text-white font-medium px-5 py-2.5 rounded-md transition-all duration-200 active:scale-95;
+    background-color: var(--color-danger);
+  }
+
+  /* Subtle ripple kept around the badge dot to draw the eye to live updates
+     (used by MacBadge with the `pulse` prop). */
+  .pulse-ring::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: 9999px;
+    background: currentColor;
+    opacity: 0.6;
+    animation: pulse-ring 1.6s cubic-bezier(0, 0, 0.2, 1) infinite;
+  }
+
+  @keyframes pulse-ring {
+    0% { transform: scale(1); opacity: 0.6; }
+    80%, 100% { transform: scale(2.4); opacity: 0; }
   }
 }

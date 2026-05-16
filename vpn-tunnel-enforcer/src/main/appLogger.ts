@@ -1,6 +1,7 @@
 import { app, shell } from 'electron'
 import { mkdir, open, readFile, stat, writeFile, appendFile } from 'fs/promises'
 import { join } from 'path'
+import { redactSensitiveConfig, redactSensitiveText } from './vpnProfiles'
 
 export type AppLogLevel = 'debug' | 'info' | 'warn' | 'error'
 
@@ -32,24 +33,28 @@ function getTunLogDir(): string {
 
 function normalizeDetail(value: unknown): unknown {
   if (value instanceof Error) {
-    return {
+    return redactSensitiveConfig({
       name: value.name,
       message: value.message,
       stack: value.stack
-    }
+    })
   }
 
   if (typeof value === 'string') {
-    return value.length > MAX_DETAIL_CHARS ? `${value.slice(0, MAX_DETAIL_CHARS)}...<truncated>` : value
+    const redacted = redactSensitiveText(value)
+    return redacted.length > MAX_DETAIL_CHARS ? `${redacted.slice(0, MAX_DETAIL_CHARS)}...<truncated>` : redacted
   }
 
   try {
     const raw = JSON.stringify(value)
     if (!raw) return value
-    if (raw.length <= MAX_DETAIL_CHARS) return value
-    return `${raw.slice(0, MAX_DETAIL_CHARS)}...<truncated>`
+    const redacted = redactSensitiveConfig(value)
+    const redactedRaw = JSON.stringify(redacted)
+    if (!redactedRaw) return redacted
+    if (redactedRaw.length <= MAX_DETAIL_CHARS) return redacted
+    return `${redactedRaw.slice(0, MAX_DETAIL_CHARS)}...<truncated>`
   } catch {
-    return String(value)
+    return redactSensitiveText(String(value))
   }
 }
 
@@ -59,12 +64,13 @@ function formatLine(level: AppLogLevel, scope: string, message: string, details?
     level,
     scope,
     message,
-    details: details === undefined ? undefined : normalizeDetail(details)
+    details
   }) + '\n'
 }
 
 export function logEvent(level: AppLogLevel, scope: string, message: string, details?: unknown): void {
-  const line = formatLine(level, scope, message, details)
+  const normalizedDetails = details === undefined ? undefined : normalizeDetail(details)
+  const line = formatLine(level, scope, message, normalizedDetails)
   queue = queue
     .then(async () => {
       await mkdir(getLogDir(), { recursive: true })
@@ -73,9 +79,9 @@ export function logEvent(level: AppLogLevel, scope: string, message: string, det
     .catch(() => undefined)
 
   const consoleLine = `[${scope}] ${message}`
-  if (level === 'error') console.error(consoleLine, details ?? '')
-  else if (level === 'warn') console.warn(consoleLine, details ?? '')
-  else console.log(consoleLine, details ?? '')
+  if (level === 'error') console.error(consoleLine, normalizedDetails ?? '')
+  else if (level === 'warn') console.warn(consoleLine, normalizedDetails ?? '')
+  else console.log(consoleLine, normalizedDetails ?? '')
 }
 
 async function readTail(path: string, maxBytes = MAX_READ_BYTES): Promise<LogFileSnapshot> {
@@ -119,6 +125,41 @@ async function readTail(path: string, maxBytes = MAX_READ_BYTES): Promise<LogFil
   }
 }
 
+function redactJsonLines(content: string): string {
+  return content
+    .split(/\r?\n/)
+    .map((line) => {
+      if (!line.trim()) return line
+      try {
+        return JSON.stringify(redactSensitiveConfig(JSON.parse(line)))
+      } catch {
+        return redactSensitiveText(line)
+      }
+    })
+    .join('\n')
+}
+
+function redactSnapshot(snapshot: LogFileSnapshot): LogFileSnapshot {
+  if (!snapshot.content.trim()) return snapshot
+  if (/sing-box\.json$/i.test(snapshot.path)) {
+    try {
+      const redacted = redactSensitiveConfig(JSON.parse(snapshot.content))
+      return {
+        ...snapshot,
+        content: JSON.stringify(redacted, null, 2)
+      }
+    } catch {
+      return { ...snapshot, content: '<redacted: sing-box config>' }
+    }
+  }
+
+  if (/app\.log$/i.test(snapshot.path)) {
+    return { ...snapshot, content: redactJsonLines(snapshot.content) }
+  }
+
+  return { ...snapshot, content: redactSensitiveText(snapshot.content) }
+}
+
 export async function getFullLogs(): Promise<LogFileSnapshot[]> {
   const files = [
     getAppLogPath(),
@@ -126,7 +167,8 @@ export async function getFullLogs(): Promise<LogFileSnapshot[]> {
     join(getTunLogDir(), 'sing-box.prev.log'),
     join(getTunLogDir(), 'sing-box.json')
   ]
-  return Promise.all(files.map(file => readTail(file)))
+  const snapshots = await Promise.all(files.map(file => readTail(file)))
+  return snapshots.map(redactSnapshot)
 }
 
 export async function clearAppLog(): Promise<void> {

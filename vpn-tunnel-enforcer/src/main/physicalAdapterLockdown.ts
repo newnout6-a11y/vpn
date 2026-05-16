@@ -17,8 +17,8 @@
  *      happened to bind to that interface.
  *
  * This module's nuke-from-orbit response: on TUN start, disable IPv6 on every
- * physical adapter and force their IPv4 DNS to point to the TUN's resolver.
- * On TUN stop / rollback, restore exactly what was there before.
+ * physical adapter and optionally force their IPv4 DNS to point to the TUN's
+ * resolver. On TUN stop / rollback, restore exactly what was there before.
  *
  * Wintun adapters are excluded by name and InterfaceType. Tailscale and other
  * "RemoteAccess" adapters are also excluded — we only touch real Wi-Fi /
@@ -50,10 +50,26 @@ interface AdapterSnapshot {
   forcedIpv6Off: boolean
 }
 
+interface TransitionAdapterSnapshot {
+  teredoType: string | null
+  sixToFourState: string | null
+  isatapState: string | null
+}
+
 interface LockdownManifest {
   appliedAt: number
   tunDnsIpv4: string
+  forceDns?: boolean
   adapters: AdapterSnapshot[]
+  transitionAdapters?: TransitionAdapterSnapshot
+}
+
+interface LockdownOptions {
+  forceDns?: boolean
+}
+
+interface RollbackOptions {
+  resetDnsToDhcp?: boolean
 }
 
 function manifestPath(): string {
@@ -173,15 +189,88 @@ $rows | ConvertTo-Json -Compress -Depth 4
   }))
 }
 
+function netshValue(raw: string, label: string): string | null {
+  const line = raw.split(/\r?\n/).find(x => x.trim().toLowerCase().startsWith(label.toLowerCase()))
+  if (!line) return null
+  const value = line.split(':').slice(1).join(':').trim()
+  return value ? value.split(/\s+/)[0].toLowerCase() : null
+}
+
+async function snapshotTransitionAdapters(): Promise<TransitionAdapterSnapshot> {
+  const script = `
+$teredo = netsh interface teredo show state
+$sixToFour = netsh interface 6to4 show state
+$isatap = netsh interface isatap show state
+[pscustomobject]@{
+  teredo = ($teredo -join [Environment]::NewLine)
+  sixToFour = ($sixToFour -join [Environment]::NewLine)
+  isatap = ($isatap -join [Environment]::NewLine)
+} | ConvertTo-Json -Compress
+`
+  try {
+    const raw = (await runPS(script, 15000)).trim()
+    const parsed = JSON.parse(raw)
+    return {
+      teredoType: netshValue(String(parsed.teredo ?? ''), 'Type'),
+      sixToFourState: netshValue(String(parsed.sixToFour ?? ''), '6to4 Service State'),
+      isatapState: netshValue(String(parsed.isatap ?? ''), 'ISATAP State')
+    }
+  } catch (err) {
+    logEvent('warn', 'phys-lockdown', 'transition adapter snapshot failed', err)
+    return { teredoType: null, sixToFourState: null, isatapState: null }
+  }
+}
+
+async function applyTransitionAdapterLockdown(snapshot: TransitionAdapterSnapshot): Promise<string[]> {
+  const warnings: string[] = []
+  try {
+    const out = await runPS(`
+$ErrorActionPreference = 'Continue'
+try { netsh interface teredo set state type=disabled | Out-Null; Write-Host 'teredo:disabled' } catch { Write-Host "teredo:err: $_" }
+try { netsh interface 6to4 set state state=disabled | Out-Null; Write-Host '6to4:disabled' } catch { Write-Host "6to4:err: $_" }
+try { netsh interface isatap set state state=disabled | Out-Null; Write-Host 'isatap:disabled' } catch { Write-Host "isatap:err: $_" }
+`, 15000)
+    for (const line of out.trim().split(/\r?\n/).filter(x => /err/.test(x))) warnings.push(line)
+    logEvent('info', 'phys-lockdown', 'transition adapters disabled', { snapshot, out: out.trim() })
+  } catch (err: any) {
+    warnings.push(err?.message ?? String(err))
+    logEvent('warn', 'phys-lockdown', 'transition adapter lockdown failed', err)
+  }
+  return warnings
+}
+
+function netshState(value: string | null, fallback = 'default'): string {
+  const normalized = (value || fallback).toLowerCase()
+  return /^[a-z]+$/.test(normalized) ? normalized : fallback
+}
+
+async function restoreTransitionAdapters(snapshot: TransitionAdapterSnapshot, reason: string): Promise<void> {
+  const teredoType = netshState(snapshot.teredoType)
+  const sixToFourState = netshState(snapshot.sixToFourState)
+  const isatapState = netshState(snapshot.isatapState)
+  try {
+    const out = await runPS(`
+$ErrorActionPreference = 'Continue'
+try { netsh interface teredo set state type=${teredoType} | Out-Null; Write-Host 'teredo:restore' } catch { Write-Host "teredo:err: $_" }
+try { netsh interface 6to4 set state state=${sixToFourState} | Out-Null; Write-Host '6to4:restore' } catch { Write-Host "6to4:err: $_" }
+try { netsh interface isatap set state state=${isatapState} | Out-Null; Write-Host 'isatap:restore' } catch { Write-Host "isatap:err: $_" }
+`, 15000)
+    logEvent('info', 'phys-lockdown', 'transition adapters restored', { reason, snapshot, out: out.trim() })
+  } catch (err) {
+    logEvent('warn', 'phys-lockdown', 'transition adapter restore failed', err)
+  }
+}
+
 /**
- * Apply the lockdown: disable IPv6 on each physical adapter and force its
- * IPv4 DNS to the TUN's resolver. Each step is logged separately so a partial
- * failure is recoverable.
+ * Apply the lockdown: disable IPv6 on each physical adapter and, unless public
+ * Wi-Fi compatibility is enabled, force IPv4 DNS to the TUN's resolver. Each
+ * step is logged separately so a partial failure is recoverable.
  */
-export async function applyPhysicalAdapterLockdown(tunDnsIpv4: string): Promise<{ applied: boolean; adapters: number; warnings: string[] }> {
+export async function applyPhysicalAdapterLockdown(tunDnsIpv4: string, options: LockdownOptions = {}): Promise<{ applied: boolean; adapters: number; warnings: string[] }> {
   if (process.platform !== 'win32') {
     return { applied: false, adapters: 0, warnings: ['platform is not Windows'] }
   }
+  const forceDns = options.forceDns !== false
   const existing = await readManifest()
   if (existing) {
     logEvent('info', 'phys-lockdown', 'lockdown already applied — skipping (idempotent)', {
@@ -191,39 +280,55 @@ export async function applyPhysicalAdapterLockdown(tunDnsIpv4: string): Promise<
   }
 
   const adapters = await snapshotPhysicalAdapters()
+  const transitionAdapters = await snapshotTransitionAdapters()
   if (adapters.length === 0) {
     logEvent('warn', 'phys-lockdown', 'no physical adapters to lock down — nothing to do')
-    return { applied: false, adapters: 0, warnings: ['no physical adapters found'] }
+    const transitionWarnings = await applyTransitionAdapterLockdown(transitionAdapters)
+    await writeManifest({
+      appliedAt: Date.now(),
+      tunDnsIpv4,
+      forceDns,
+      adapters,
+      transitionAdapters
+    })
+    return { applied: true, adapters: 0, warnings: ['no physical adapters found', ...transitionWarnings] }
   }
 
   const warnings: string[] = []
   for (const a of adapters) {
     try {
+      const dnsLine = forceDns
+        ? `try { Set-DnsClientServerAddress -InterfaceAlias ${psSingleQuote(a.alias)} -ServerAddresses ${psSingleQuote(tunDnsIpv4)} -ErrorAction Stop; Write-Host 'dns:set' } catch { Write-Host "dns:err: $_" }`
+        : `Write-Host 'dns:skip'`
       const script = `
 $ErrorActionPreference = 'Stop'
 try { Disable-NetAdapterBinding -InterfaceAlias ${psSingleQuote(a.alias)} -ComponentID ms_tcpip6 -ErrorAction Stop; Write-Host 'ipv6:off' } catch { Write-Host "ipv6:err: $_" }
-try { Set-DnsClientServerAddress -InterfaceAlias ${psSingleQuote(a.alias)} -ServerAddresses ${psSingleQuote(tunDnsIpv4)} -ErrorAction Stop; Write-Host 'dns:set' } catch { Write-Host "dns:err: $_" }
+${dnsLine}
 try { Clear-DnsClientCache -ErrorAction Stop; Write-Host 'cache:clear' } catch {}
 `
       const out = await runPS(script, 15000)
       const ipv6Off = /ipv6:off/.test(out)
       const dnsSet = /dns:set/.test(out)
+      const dnsSkipped = /dns:skip/.test(out)
       a.forcedIpv6Off = ipv6Off
       a.forcedDnsTo = dnsSet ? [tunDnsIpv4] : null
-      if (!ipv6Off || !dnsSet) {
+      if (!ipv6Off || (forceDns && !dnsSet)) {
         warnings.push(`${a.alias}: ${out.trim().split('\n').filter((l) => /err/.test(l)).join('; ') || 'partial'}`)
       }
-      logEvent('info', 'phys-lockdown', `locked down ${a.alias}`, { ipv6Off, dnsSet })
+      logEvent('info', 'phys-lockdown', `locked down ${a.alias}`, { ipv6Off, dnsSet, dnsSkipped })
     } catch (err: any) {
       warnings.push(`${a.alias}: ${err?.message ?? String(err)}`)
       logEvent('warn', 'phys-lockdown', `lockdown failed for ${a.alias}`, err)
     }
   }
+  warnings.push(...await applyTransitionAdapterLockdown(transitionAdapters))
 
   const manifest: LockdownManifest = {
     appliedAt: Date.now(),
     tunDnsIpv4,
-    adapters
+    forceDns,
+    adapters,
+    transitionAdapters
   }
   await writeManifest(manifest)
   return { applied: true, adapters: adapters.length, warnings }
@@ -236,16 +341,19 @@ try { Clear-DnsClientCache -ErrorAction Stop; Write-Host 'cache:clear' } catch {
  * empty list means "back to DHCP", which is what `Set-DnsClientServerAddress
  * -ResetServerAddresses` does.
  */
-export async function rollbackPhysicalAdapterLockdownIfApplied(reason: string): Promise<{ rolledBack: boolean }> {
+export async function rollbackPhysicalAdapterLockdownIfApplied(reason: string, options: RollbackOptions = {}): Promise<{ rolledBack: boolean }> {
   if (process.platform !== 'win32') return { rolledBack: false }
   const m = await readManifest()
   if (!m) return { rolledBack: false }
 
   for (const a of m.adapters) {
     try {
-      const dnsRestoreLine = a.ipv4DnsServers.length === 0
-        ? `try { Set-DnsClientServerAddress -InterfaceAlias ${psSingleQuote(a.alias)} -ResetServerAddresses -ErrorAction Stop; Write-Host 'dns:reset' } catch { Write-Host "dns:err: $_" }`
-        : `try { Set-DnsClientServerAddress -InterfaceAlias ${psSingleQuote(a.alias)} -ServerAddresses ${a.ipv4DnsServers.map(psSingleQuote).join(',')} -ErrorAction Stop; Write-Host 'dns:restore' } catch { Write-Host "dns:err: $_" }`
+      const shouldTouchDns = Array.isArray(a.forcedDnsTo) && a.forcedDnsTo.length > 0
+      const dnsRestoreLine = !shouldTouchDns
+        ? `Write-Host 'dns:noop'`
+        : (options.resetDnsToDhcp || a.ipv4DnsServers.length === 0)
+          ? `try { Set-DnsClientServerAddress -InterfaceAlias ${psSingleQuote(a.alias)} -ResetServerAddresses -ErrorAction Stop; Write-Host 'dns:reset' } catch { Write-Host "dns:err: $_" }`
+          : `try { Set-DnsClientServerAddress -InterfaceAlias ${psSingleQuote(a.alias)} -ServerAddresses ${a.ipv4DnsServers.map(psSingleQuote).join(',')} -ErrorAction Stop; Write-Host 'dns:restore' } catch { Write-Host "dns:err: $_" }`
       const ipv6RestoreLine = a.forcedIpv6Off && a.ipv6Enabled
         ? `try { Enable-NetAdapterBinding -InterfaceAlias ${psSingleQuote(a.alias)} -ComponentID ms_tcpip6 -ErrorAction Stop; Write-Host 'ipv6:on' } catch { Write-Host "ipv6:err: $_" }`
         : `Write-Host 'ipv6:noop'`
@@ -261,9 +369,60 @@ try { Clear-DnsClientCache -ErrorAction Stop } catch {}
       logEvent('warn', 'phys-lockdown', `rollback failed for ${a.alias}`, err)
     }
   }
+  if (m.transitionAdapters) {
+    await restoreTransitionAdapters(m.transitionAdapters, reason)
+  }
 
   await deleteManifest()
   return { rolledBack: true }
+}
+
+export async function repairOrphanedPhysicalAdapterDns(reason: string): Promise<{ repaired: boolean; adapters: string[] }> {
+  if (process.platform !== 'win32') return { repaired: false, adapters: [] }
+  if (await readManifest()) return { repaired: false, adapters: [] }
+
+  const script = `
+$ErrorActionPreference = 'SilentlyContinue'
+$vpnteDns = @('172.19.0.1', '172.19.0.2')
+$tunUp = Get-NetAdapter -ErrorAction SilentlyContinue |
+  Where-Object { $_.Status -eq 'Up' -and ($_.Name -eq 'VPNTE-TUN' -or $_.InterfaceDescription -match 'VPNTE') } |
+  Select-Object -First 1
+if ($tunUp) {
+  [pscustomobject]@{ skipped = 'tun-up'; adapters = @() } | ConvertTo-Json -Compress
+  exit 0
+}
+$fixed = @()
+$adapters = Get-NetAdapter |
+  Where-Object {
+    $_.Status -eq 'Up' -and
+    $_.InterfaceDescription -notmatch 'Wintun|TAP-Windows|Tailscale|WireGuard|Hyper-V|Loopback|vEthernet|VPN|VirtualBox|VMware|Bluetooth' -and
+    $_.MacAddress -and $_.MacAddress -ne '00-00-00-00-00-00'
+  }
+foreach ($a in $adapters) {
+  $dns4 = @((Get-DnsClientServerAddress -InterfaceAlias $a.Name -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses)
+  if ($dns4 | Where-Object { $vpnteDns -contains $_ }) {
+    try {
+      Set-DnsClientServerAddress -InterfaceAlias $a.Name -ResetServerAddresses -ErrorAction Stop
+      $fixed += [pscustomobject]@{ alias = [string]$a.Name; oldDns = @($dns4) }
+    } catch {}
+  }
+}
+try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}
+[pscustomobject]@{ skipped = $null; adapters = @($fixed) } | ConvertTo-Json -Compress -Depth 4
+`
+  try {
+    const raw = (await runPS(script, 20000)).trim()
+    const parsed = raw ? JSON.parse(raw) : { adapters: [] }
+    const adaptersRaw = Array.isArray(parsed.adapters) ? parsed.adapters : parsed.adapters ? [parsed.adapters] : []
+    const adapters = adaptersRaw.map((row: any) => String(row.alias || '')).filter(Boolean)
+    if (adapters.length) {
+      logEvent('warn', 'phys-lockdown', 'repaired orphaned VPNTE DNS on physical adapters', { reason, adapters })
+      return { repaired: true, adapters }
+    }
+  } catch (err) {
+    logEvent('warn', 'phys-lockdown', 'orphaned DNS repair failed', { reason, err: (err as Error).message })
+  }
+  return { repaired: false, adapters: [] }
 }
 
 export async function isPhysicalAdapterLockdownApplied(): Promise<boolean> {

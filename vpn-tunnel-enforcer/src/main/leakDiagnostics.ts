@@ -347,14 +347,21 @@ export async function runLeakCheck(options: RunLeakCheckOptions = {}): Promise<L
   items.push(await getTunLogItem(Boolean(options.tunRunning)))
 
   const directPublic = await getDirectPublicSummary()
+  const suspiciousCoreDirect = directPublic.allowedCoreCount > 10 || directPublic.allowedExamples.length > 1
   items.push({
     id: 'direct-public',
     label: 'Direct-out приложений',
-    status: directPublic.leakedCount > 0 ? 'fail' : 'ok',
-    value: directPublic.leakedCount > 0 ? `${directPublic.leakedCount} записей` : 'Утечек не найдено',
+    status: directPublic.leakedCount > 0 ? 'fail' : suspiciousCoreDirect ? 'warn' : 'ok',
+    value: directPublic.leakedCount > 0
+      ? `${directPublic.leakedCount} записей`
+      : suspiciousCoreDirect
+        ? `${directPublic.allowedCoreCount} VPN-core direct-out`
+        : 'Утечек не найдено',
     details:
       directPublic.leakedCount > 0
         ? `Публичные IP ушли в direct-out без VPN-core исключения: ${directPublic.leakedExamples.join(', ')}`
+        : suspiciousCoreDirect
+          ? `VPN-core процесс делает direct-out к нескольким публичным IP: ${directPublic.allowedExamples.join(', ')}. Это похоже на split/direct правила upstream proxy.`
         : directPublic.allowedCoreCount > 0
           ? `Найден только разрешённый direct-out VPN-core процессов Happ/xray: ${directPublic.allowedExamples.join(', ')}`
           : 'Публичный direct-out по текущему логу не найден'
