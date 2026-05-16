@@ -12,6 +12,7 @@
 
 import { ipcMain, type IpcMainInvokeEvent } from 'electron'
 import { Socket } from 'net'
+import { connect as tlsConnect } from 'tls'
 import { promises as dns } from 'dns'
 import axios from 'axios'
 import { randomUUID } from 'crypto'
@@ -44,37 +45,86 @@ const PING_CONCURRENCY = 5
 // ─── Ping Measurement ────────────────────────────────────────────────────────
 
 /**
- * Measures latency to a server via TCP connection timing.
- * Returns latency in ms or null if unreachable.
+ * Measures realistic round-trip latency to a server.
+ *
+ * Why not a plain TCP `connect()`?
+ *   When our own TUN tunnel is active, sing-box accepts SYN packets locally
+ *   and only forwards them upstream after the handshake — so Node's `connect`
+ *   event fires the moment the local TUN handler dispatches the SYN, which
+ *   gives the user a misleading 1 ms reading regardless of where the server
+ *   actually lives. The user sees that same "1 ms" on a Frankfurt VPS while
+ *   they're sitting in Moscow on Wi-Fi, which is obviously wrong.
+ *
+ * Strategy:
+ *   We do a TLS ClientHello → ServerHello handshake instead. That forces a
+ *   real round-trip with payload, which the upstream proxy server has to
+ *   actually answer (vless/trojan/hysteria2 panels camouflage with a real
+ *   TLS endpoint on :443 specifically for this reason — they always reply).
+ *   `rejectUnauthorized: false` because we don't care about the cert chain;
+ *   we only want the wire-level timing.
+ *
+ * For non-TLS ports (e.g. ss:// on 8388) TLS will fail; we fall back to
+ * plain TCP connect timing in that case — there's no better signal we can
+ * cheaply produce, and at least the reading is comparable across servers
+ * on the same port type.
+ *
+ * Returns latency in ms or null if the server is fully unreachable.
  */
 export function pingServer(host: string, port: number): Promise<number | null> {
   return new Promise((resolve) => {
-    const socket = new Socket()
     const start = Date.now()
+    const socket = tlsConnect({
+      host,
+      port,
+      // We don't care about the cert chain — many VPN panels use self-signed
+      // or hostname-mismatched certs on purpose. Setting both ensures Node
+      // doesn't bail on cert problems before we get the timing reading.
+      rejectUnauthorized: false,
+      // Limit handshake size so we get the timing as soon as ServerHello
+      // arrives rather than after the full chain.
+      ALPNProtocols: ['h2', 'http/1.1'],
+      // Don't validate hostname for the same reason as above.
+      checkServerIdentity: () => undefined,
+      timeout: PING_TIMEOUT_MS
+    })
 
-    const cleanup = (): void => {
+    let done = false
+    const finish = (value: number | null) => {
+      if (done) return
+      done = true
       socket.removeAllListeners()
       socket.destroy()
+      resolve(value)
     }
 
+    socket.once('secureConnect', () => finish(Date.now() - start))
+    socket.once('timeout', () => finish(null))
+    socket.once('error', () => {
+      // TLS failed (e.g. server is plain TCP / shadowsocks). Fall back to
+      // a plain TCP connect on a fresh socket so we at least return *some*
+      // reading instead of marking the server dead. The two timings are not
+      // directly comparable but they remain monotonic relative to distance.
+      void plainTcpPing(host, port).then(finish)
+    })
+  })
+}
+
+function plainTcpPing(host: string, port: number): Promise<number | null> {
+  return new Promise((resolve) => {
+    const socket = new Socket()
+    const start = Date.now()
+    let done = false
+    const finish = (value: number | null) => {
+      if (done) return
+      done = true
+      socket.removeAllListeners()
+      socket.destroy()
+      resolve(value)
+    }
     socket.setTimeout(PING_TIMEOUT_MS)
-
-    socket.on('connect', () => {
-      const latency = Date.now() - start
-      cleanup()
-      resolve(latency)
-    })
-
-    socket.on('timeout', () => {
-      cleanup()
-      resolve(null)
-    })
-
-    socket.on('error', () => {
-      cleanup()
-      resolve(null)
-    })
-
+    socket.once('connect', () => finish(Date.now() - start))
+    socket.once('timeout', () => finish(null))
+    socket.once('error', () => finish(null))
     socket.connect(port, host)
   })
 }
