@@ -69,6 +69,10 @@ declare global {
       serversPingOne: (host: string, port: number) => Promise<number | null>
       serversAdd: (input: string) => Promise<import('../shared/ipc-types').ServerProfile[]>
       serversRemove: (id: string) => Promise<void>
+      serversExportKey: (id: string) => Promise<
+        | { ok: true; uri: string; name: string; protocol: string }
+        | { ok: false; reason: string; protocol?: string }
+      >
       serverProbe: (host: string, knownPort?: number) => Promise<any>
       // Kill-Switch
       killSwitchGetLevel: () => Promise<import('../shared/ipc-types').KillSwitchLevel>

@@ -1546,3 +1546,198 @@ export function redactSettingsForDiagnostics<T extends Record<string, any>>(sett
       : []
   }
 }
+
+
+// ─── Outbound → URI export ──────────────────────────────────────────────────
+//
+// Inverse of parseVless / parseTrojan / parseVmess / parseShadowsocks /
+// parseHysteria2. Lets the user export a saved server profile back to a
+// shareable single-line key (vless://…, trojan://…, ss://…, vmess://…,
+// hysteria2://…) so they can paste it into Happ, v2RayN, sing-box CLI, or
+// hand it off to another device.
+//
+// Notes:
+//   - We round-trip outbounds that came from URI imports lossless-ly; the
+//     output URL is functionally equivalent to whatever the user originally
+//     pasted (modulo URL-encoding nits in fragments/comments).
+//   - Hysteria2 output is best-effort: not every implementation accepts the
+//     exact same query-string flavour, so we stick to the params Happ and
+//     v2RayN both understand.
+//   - The function intentionally does not redact secrets — the caller is
+//     responsible for showing it only to the local user (clipboard is fine,
+//     diagnostic exports are not).
+
+function appendTransportParams(params: URLSearchParams, transport: Record<string, any> | undefined): void {
+  if (!transport || typeof transport !== 'object') return
+  const type = String(transport.type || '').toLowerCase()
+  if (!type || type === 'tcp' || type === 'raw') return
+  if (type === 'ws') {
+    params.set('type', 'ws')
+    if (typeof transport.path === 'string' && transport.path) params.set('path', transport.path)
+    const headerHost = transport.headers && typeof transport.headers === 'object' ? transport.headers.Host || transport.headers.host : null
+    if (headerHost) params.set('host', String(headerHost))
+    if (Number.isInteger(transport.max_early_data) && transport.max_early_data > 0) params.set('ed', String(transport.max_early_data))
+    if (typeof transport.early_data_header_name === 'string' && transport.early_data_header_name) {
+      params.set('eh', transport.early_data_header_name)
+    }
+  } else if (type === 'grpc') {
+    params.set('type', 'grpc')
+    if (typeof transport.service_name === 'string' && transport.service_name) params.set('serviceName', transport.service_name)
+  } else if (type === 'httpupgrade') {
+    params.set('type', 'httpupgrade')
+    if (typeof transport.host === 'string' && transport.host) params.set('host', transport.host)
+    if (typeof transport.path === 'string' && transport.path) params.set('path', transport.path)
+  } else if (type === 'http') {
+    params.set('type', 'http')
+    if (Array.isArray(transport.host) && transport.host.length) params.set('host', String(transport.host[0]))
+    if (typeof transport.path === 'string' && transport.path) params.set('path', transport.path)
+  } else {
+    params.set('type', type)
+  }
+}
+
+function appendTlsParams(params: URLSearchParams, tls: Record<string, any> | undefined, host: string): boolean {
+  if (!tls || tls.enabled === false) return false
+  const isReality = tls.reality && typeof tls.reality === 'object' && tls.reality.enabled !== false
+  params.set('security', isReality ? 'reality' : 'tls')
+  const sni = String(tls.server_name || '').trim()
+  if (sni && sni !== host) params.set('sni', sni)
+  if (Array.isArray(tls.alpn) && tls.alpn.length) params.set('alpn', tls.alpn.join(','))
+  if (tls.insecure === true) params.set('allowInsecure', '1')
+  const fp = tls.utls && typeof tls.utls === 'object' && typeof tls.utls.fingerprint === 'string'
+    ? tls.utls.fingerprint
+    : null
+  if (fp) params.set('fp', fp)
+  if (isReality) {
+    if (typeof tls.reality.public_key === 'string' && tls.reality.public_key) params.set('pbk', tls.reality.public_key)
+    if (typeof tls.reality.short_id === 'string' && tls.reality.short_id) params.set('sid', tls.reality.short_id)
+  }
+  return true
+}
+
+function buildHostPort(server: string, port: unknown): string {
+  const portStr = Number.isFinite(Number(port)) ? String(Number(port)) : String(port ?? '')
+  if (server.includes(':') && !server.startsWith('[')) {
+    return `[${server}]${portStr ? `:${portStr}` : ''}`
+  }
+  return portStr ? `${server}:${portStr}` : server
+}
+
+function nameToFragment(name: string | undefined): string {
+  if (!name) return ''
+  return '#' + encodeURIComponent(name).replace(/%20/g, '%20')
+}
+
+function vlessToUri(name: string, outbound: Record<string, any>): string {
+  const params = new URLSearchParams()
+  params.set('encryption', 'none')
+  appendTlsParams(params, outbound.tls, String(outbound.server || ''))
+  appendTransportParams(params, outbound.transport)
+  if (typeof outbound.flow === 'string' && outbound.flow) params.set('flow', outbound.flow)
+  if (typeof outbound.packet_encoding === 'string' && outbound.packet_encoding) {
+    params.set('packetEncoding', outbound.packet_encoding)
+  }
+  const uuid = encodeURIComponent(String(outbound.uuid || ''))
+  const authority = buildHostPort(String(outbound.server || ''), outbound.server_port)
+  return `vless://${uuid}@${authority}?${params.toString()}${nameToFragment(name)}`
+}
+
+function trojanToUri(name: string, outbound: Record<string, any>): string {
+  const params = new URLSearchParams()
+  appendTlsParams(params, outbound.tls, String(outbound.server || ''))
+  appendTransportParams(params, outbound.transport)
+  const password = encodeURIComponent(String(outbound.password || ''))
+  const authority = buildHostPort(String(outbound.server || ''), outbound.server_port)
+  return `trojan://${password}@${authority}?${params.toString()}${nameToFragment(name)}`
+}
+
+function shadowsocksToUri(name: string, outbound: Record<string, any>): string {
+  const method = String(outbound.method || '')
+  const password = String(outbound.password || '')
+  const userinfo = Buffer.from(`${method}:${password}`, 'utf8').toString('base64').replace(/=+$/, '')
+  const authority = buildHostPort(String(outbound.server || ''), outbound.server_port)
+  return `ss://${userinfo}@${authority}${nameToFragment(name)}`
+}
+
+function vmessToUri(name: string, outbound: Record<string, any>): string {
+  // VMess shares one canonical JSON-base64 schema (the v2rayN flavour).
+  const tls = outbound.tls && typeof outbound.tls === 'object' && outbound.tls.enabled !== false ? outbound.tls : null
+  const transport = outbound.transport && typeof outbound.transport === 'object' ? outbound.transport : null
+  const transportType = transport ? String(transport.type || '').toLowerCase() : ''
+  const payload: Record<string, any> = {
+    v: '2',
+    ps: name || 'VMess',
+    add: String(outbound.server || ''),
+    port: Number(outbound.server_port || 0),
+    id: String(outbound.uuid || ''),
+    aid: Number(outbound.alter_id ?? 0),
+    scy: String(outbound.security || 'auto'),
+    net: transportType === 'ws' ? 'ws'
+       : transportType === 'grpc' ? 'grpc'
+       : transportType === 'http' ? 'http'
+       : 'tcp',
+    type: 'none',
+    tls: tls ? 'tls' : ''
+  }
+  if (tls) {
+    if (typeof tls.server_name === 'string' && tls.server_name) payload.sni = tls.server_name
+    if (Array.isArray(tls.alpn) && tls.alpn.length) payload.alpn = tls.alpn.join(',')
+    if (tls.utls && typeof tls.utls === 'object' && typeof tls.utls.fingerprint === 'string') {
+      payload.fp = tls.utls.fingerprint
+    }
+  }
+  if (transport) {
+    if (transportType === 'ws') {
+      if (typeof transport.path === 'string') payload.path = transport.path
+      const headerHost = transport.headers && typeof transport.headers === 'object' ? transport.headers.Host || transport.headers.host : null
+      if (headerHost) payload.host = String(headerHost)
+    } else if (transportType === 'grpc') {
+      if (typeof transport.service_name === 'string') payload.path = transport.service_name
+    } else if (transportType === 'http') {
+      if (Array.isArray(transport.host) && transport.host.length) payload.host = String(transport.host[0])
+      if (typeof transport.path === 'string') payload.path = transport.path
+    }
+  }
+  const json = JSON.stringify(payload)
+  const b64 = Buffer.from(json, 'utf8').toString('base64')
+  return `vmess://${b64}`
+}
+
+function hysteria2ToUri(name: string, outbound: Record<string, any>): string {
+  const params = new URLSearchParams()
+  if (outbound.tls && typeof outbound.tls === 'object') {
+    if (typeof outbound.tls.server_name === 'string' && outbound.tls.server_name) {
+      params.set('sni', outbound.tls.server_name)
+    }
+    if (outbound.tls.insecure === true) params.set('insecure', '1')
+  }
+  if (outbound.obfs && typeof outbound.obfs === 'object') {
+    if (typeof outbound.obfs.type === 'string' && outbound.obfs.type) params.set('obfs', outbound.obfs.type)
+    if (typeof outbound.obfs.password === 'string' && outbound.obfs.password) params.set('obfs-password', outbound.obfs.password)
+  }
+  const password = encodeURIComponent(String(outbound.password || ''))
+  const authority = buildHostPort(String(outbound.server || ''), outbound.server_port)
+  const query = params.toString()
+  return `hysteria2://${password}@${authority}${query ? `?${query}` : ''}${nameToFragment(name)}`
+}
+
+/**
+ * Renders a single sing-box outbound back to its scheme URI.
+ *
+ * Returns null when the outbound type is genuinely not exportable (e.g.
+ * raw "sing-box outbound JSON" profiles imported as-is — those don't map
+ * to any single-line scheme).
+ */
+export function exportOutboundToUri(profile: { name: string; protocol: string; outbound: Record<string, any> }): string | null {
+  const out = profile.outbound
+  if (!out || typeof out !== 'object') return null
+  const type = String(out.type || profile.protocol || '').toLowerCase()
+  switch (type) {
+    case 'vless':       return vlessToUri(profile.name, out)
+    case 'trojan':      return trojanToUri(profile.name, out)
+    case 'shadowsocks': return shadowsocksToUri(profile.name, out)
+    case 'vmess':       return vmessToUri(profile.name, out)
+    case 'hysteria2':   return hysteria2ToUri(profile.name, out)
+    default:            return null
+  }
+}

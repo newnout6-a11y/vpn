@@ -223,6 +223,9 @@ export interface ServerChannels {
   'servers:ping-all': () => ServerProfile[]
   'servers:add': (input: string) => ServerProfile[]
   'servers:remove': (id: string) => void
+  'servers:export-key': (id: string) =>
+    | { ok: true; uri: string; name: string; protocol: string }
+    | { ok: false; reason: string; protocol?: string }
 }
 
 /** Speed Test IPC channels */

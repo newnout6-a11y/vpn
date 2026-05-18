@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Server, Wifi, WifiOff, Plus, Trash2, Check, RefreshCw, Loader2 } from 'lucide-react'
+import { Server, Wifi, WifiOff, Plus, Trash2, Check, RefreshCw, Loader2, Copy } from 'lucide-react'
 import { MacCard, MacBadge, MacButton, MacInput } from '../design-system'
 import { PageTip } from '../components/PageTip'
 import { ServerDetailModal } from '../components/ServerDetailModal'
@@ -71,6 +71,10 @@ export function Servers() {
   const [addError, setAddError] = useState('')
   const [perRowPings, setPerRowPings] = useState<Record<string, PerRowPing>>({})
   const [detailProfile, setDetailProfile] = useState<ServerProfile | null>(null)
+  // Per-row "Скопировано/Ошибка" badge state for the export-key button.
+  // Cleared automatically after a few seconds; multiple rows can be in
+  // flight simultaneously without stomping each other.
+  const [exportFlash, setExportFlash] = useState<Record<string, 'copied' | 'failed'>>({})
 
   const fetchProfiles = useCallback(async () => {
     try {
@@ -185,6 +189,23 @@ export function Servers() {
     }
   }
 
+  const handleExport = async (id: string) => {
+    try {
+      const result = await window.electronAPI.serversExportKey(id)
+      if (!result.ok) {
+        setExportFlash(prev => ({ ...prev, [id]: 'failed' }))
+        setTimeout(() => setExportFlash(prev => { const next = { ...prev }; delete next[id]; return next }), 2200)
+        return
+      }
+      await navigator.clipboard.writeText(result.uri)
+      setExportFlash(prev => ({ ...prev, [id]: 'copied' }))
+      setTimeout(() => setExportFlash(prev => { const next = { ...prev }; delete next[id]; return next }), 2200)
+    } catch {
+      setExportFlash(prev => ({ ...prev, [id]: 'failed' }))
+      setTimeout(() => setExportFlash(prev => { const next = { ...prev }; delete next[id]; return next }), 2200)
+    }
+  }
+
   const grouped = groupByProtocol(profiles)
   const protocolKeys = Object.keys(grouped).sort()
 
@@ -262,9 +283,11 @@ export function Servers() {
                     profile={profile}
                     isActive={profile.id === activeId}
                     perRowPing={perRowPings[profile.id]}
+                    exportFlash={exportFlash[profile.id]}
                     onSelect={handleSelect}
                     onRemove={handleRemove}
                     onPing={handlePingOne}
+                    onExport={handleExport}
                     onOpenDetail={setDetailProfile}
                     t={t}
                   />
@@ -289,9 +312,11 @@ interface ServerProfileCardProps {
   profile: ServerProfile
   isActive: boolean
   perRowPing?: PerRowPing
+  exportFlash?: 'copied' | 'failed'
   onSelect: (id: string) => void
   onRemove: (id: string) => void
   onPing: (profile: ServerProfile) => void
+  onExport: (id: string) => void
   onOpenDetail: (profile: ServerProfile) => void
   t: (key: string, fallback?: string) => string
 }
@@ -300,9 +325,11 @@ function ServerProfileCard({
   profile,
   isActive,
   perRowPing,
+  exportFlash,
   onSelect,
   onRemove,
   onPing,
+  onExport,
   onOpenDetail,
   t
 }: ServerProfileCardProps) {
@@ -379,6 +406,26 @@ function ServerProfileCard({
             ) : (
               <Wifi size={12} />
             )}
+          </MacButton>
+          <MacButton
+            size="sm"
+            variant="ghost"
+            onClick={(e) => {
+              e.stopPropagation()
+              onExport(profile.id)
+            }}
+            aria-label={t('servers.exportKey', 'Скопировать ключ')}
+            title={
+              exportFlash === 'copied'
+                ? t('servers.keyCopied', 'Ключ скопирован')
+                : exportFlash === 'failed'
+                  ? t('servers.exportFailed', 'Не удалось экспортировать')
+                  : t('servers.exportKey', 'Скопировать ключ')
+            }
+          >
+            {exportFlash === 'copied'
+              ? <Check className="w-3.5 h-3.5 text-[var(--color-success)]" />
+              : <Copy className="w-3.5 h-3.5" />}
           </MacButton>
           <MacButton
             size="sm"

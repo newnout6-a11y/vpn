@@ -17,7 +17,7 @@ import axios from 'axios'
 import { randomUUID } from 'crypto'
 import Store from 'electron-store'
 import { logEvent } from './appLogger'
-import { resolveVpnProfiles, type VpnProfile } from './vpnProfiles'
+import { resolveVpnProfiles, exportOutboundToUri, type VpnProfile } from './vpnProfiles'
 import { settingsStore } from './settings'
 import type { ServerProfile } from '../shared/ipc-types'
 
@@ -574,6 +574,26 @@ export function registerServerPickerHandlers(): void {
 
   handleLogged('servers:remove', async (_event, id: string) => {
     removeProfile(id)
+  })
+
+  // Export an entry back to its scheme URI (vless://, trojan://, …) so the
+  // user can move the key to another device or another client. Returns
+  // {ok: true, uri, profile} on success, or {ok: false, reason} when the
+  // outbound shape isn't representable as a single-line URI (custom
+  // sing-box JSON profiles fall in that bucket).
+  handleLogged('servers:export-key', async (_event, id: string) => {
+    const profile = getProfiles().find(p => p.id === id)
+    if (!profile) return { ok: false as const, reason: 'profile-not-found' }
+    if (!profile.outbound || typeof profile.outbound !== 'object') {
+      return { ok: false as const, reason: 'no-outbound' }
+    }
+    const uri = exportOutboundToUri({
+      name: profile.name,
+      protocol: profile.protocol,
+      outbound: profile.outbound
+    })
+    if (!uri) return { ok: false as const, reason: 'unsupported-protocol', protocol: profile.protocol }
+    return { ok: true as const, uri, name: profile.name, protocol: profile.protocol }
   })
 }
 

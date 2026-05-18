@@ -58,6 +58,10 @@ export interface ElectronAPI {
   serversPingOne: (host: string, port: number) => Promise<number | null>
   serversAdd: (input: string) => Promise<any[]>
   serversRemove: (id: string) => Promise<void>
+  serversExportKey: (id: string) => Promise<
+    | { ok: true; uri: string; name: string; protocol: string }
+    | { ok: false; reason: string; protocol?: string }
+  >
   serverProbe: (host: string, knownPort?: number) => Promise<any>
   // Scheduler
   schedulerList: () => Promise<any[]>
@@ -214,6 +218,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   serversPingOne: (host: string, port: number) => ipcRenderer.invoke('servers:ping-one', host, port),
   serversAdd: (input: string) => ipcRenderer.invoke('servers:add', input),
   serversRemove: (id: string) => ipcRenderer.invoke('servers:remove', id),
+  serversExportKey: (id: string) => ipcRenderer.invoke('servers:export-key', id),
   serverProbe: (host: string, knownPort?: number) => ipcRenderer.invoke('server:probe', host, knownPort),
   // Scheduler
   schedulerList: () => ipcRenderer.invoke('scheduler:list'),
