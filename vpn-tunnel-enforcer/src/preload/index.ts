@@ -136,6 +136,11 @@ export interface ElectronAPI {
   onTrafficStats: (callback: (stats: TrafficStats) => void) => () => void
   onLeakDetected: (callback: (result: LeakSelfTestResult) => void) => () => void
   onMainError: (callback: (data: { code: string; message: string }) => void) => () => void
+  // Fires when the user chose "Отключить и закрыть" from the close-confirm
+  // dialog and the main process is winding the tunnel down. The renderer
+  // should disable controls and surface a "Выключаем защиту…" overlay so the
+  // user doesn't keep clicking buttons that won't be honoured.
+  onAppShuttingDown: (callback: () => void) => () => void
 }
 
 export interface TrafficStats {
@@ -326,5 +331,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const handler = (_event: any, data: { code: string; message: string }) => callback(data)
     ipcRenderer.on('main-error', handler)
     return () => ipcRenderer.removeListener('main-error', handler)
+  },
+  onAppShuttingDown: (callback: () => void) => {
+    const handler = () => callback()
+    ipcRenderer.on('app:shutting-down', handler)
+    return () => ipcRenderer.removeListener('app:shutting-down', handler)
   }
 })

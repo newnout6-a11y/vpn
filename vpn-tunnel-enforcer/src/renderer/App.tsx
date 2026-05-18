@@ -91,6 +91,7 @@ declare global {
       onTrafficStats: (callback: (stats: TrafficStats) => void) => () => void
       onLeakDetected: (callback: (result: LeakSelfTestResult) => void) => () => void
       onMainError: (callback: (data: { code: string; message: string }) => void) => () => void
+      onAppShuttingDown: (callback: () => void) => () => void
       // Speed Test
       speedTestRun: () => Promise<import('../shared/ipc-types').SpeedTestResult>
       speedTestHistory: () => Promise<import('../shared/ipc-types').SpeedTestResult[]>
@@ -184,6 +185,11 @@ function proxyFromOverride(settings: AppSettings) {
 
 export default function App() {
   const [page, setPage] = useState<Page>('dashboard')
+  // Set to true when the main process tells us it's running shutdown cleanup
+  // (the user just confirmed "Отключить и закрыть"). Locks the UI behind a
+  // full-screen overlay until the window itself goes away — without it the
+  // user can still click around for the 5–15s the cleanup takes.
+  const [shuttingDown, setShuttingDown] = useState(false)
   const addLog = useAppStore(s => s.addLog)
 
   // Listen for IPC events
@@ -251,12 +257,17 @@ export default function App() {
       addLog('error', `Ошибка main-процесса (поймана хэндлером, app не упал): ${code} — ${message}`)
     })
 
+    const unsubShutdown = window.electronAPI.onAppShuttingDown(() => {
+      setShuttingDown(true)
+    })
+
     return () => {
       unsubIp()
       unsubTun()
       unsubTraffic()
       unsubLeak()
       unsubMainErr()
+      unsubShutdown()
     }
   }, [addLog])
 
@@ -467,6 +478,21 @@ export default function App() {
         </AnimatePresence>
         {!settings.firstRunComplete && (
           <FirstRunWizard onComplete={handleWizardComplete} onSkip={handleWizardComplete} />
+        )}
+        {/* Full-window overlay shown only while the main process is doing
+            shutdown cleanup (kill-switch / adapter lockdown / DNS rollback).
+            Pointer-events on the overlay block UI interaction so the user
+            can't fire stray IPCs into a dying main. */}
+        {shuttingDown && (
+          <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-[var(--color-bg)]/85 backdrop-blur-sm">
+            <div className="flex flex-col items-center gap-3 px-6 py-5 rounded-[var(--radius-md)] bg-[var(--color-card)] border border-[var(--color-border)] shadow-xl">
+              <div className="w-8 h-8 rounded-full border-2 border-[var(--color-accent)] border-t-transparent animate-spin" />
+              <p className="text-sm font-medium text-[var(--color-text)]">Выключаем защиту…</p>
+              <p className="text-xs text-[var(--color-text-secondary)] text-center max-w-xs">
+                Откатываем DNS, IPv6 и правила брандмауэра. Не закрывайте окно.
+              </p>
+            </div>
+          </div>
         )}
       </div>
     </ThemeProvider>

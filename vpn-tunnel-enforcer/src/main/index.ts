@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Tray, shell, type IpcMainInvokeEvent } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Tray, shell, type IpcMainInvokeEvent } from 'electron'
 import { exec as execCb } from 'child_process'
 import { promisify } from 'util'
 import { join } from 'path'
@@ -159,9 +159,71 @@ function createWindow() {
   })
 
   mainWindow.on('close', (e) => {
-    if (isQuitting || !settingsStore.get().minimizeToTray) return
+    // Quitting through tray menu / app.quit() — let it close immediately.
+    if (isQuitting) return
+
+    const tunRunning = tunController.getStatus().running
+    const minimizeToTray = settingsStore.get().minimizeToTray
+
+    // Common case: tunnel idle. Either send to tray (if user wants that) or
+    // proceed with the regular close flow that triggers before-quit cleanup.
+    if (!tunRunning) {
+      if (!minimizeToTray) return
+      e.preventDefault()
+      mainWindow!.hide()
+      return
+    }
+
+    // VPN is running. Closing the window now would trigger an asynchronous
+    // shutdown sequence (tunController.stop → kill-switch rollback → adapter
+    // lockdown rollback → DNS repair) which takes 5–15s, during which the
+    // app looks "dead" and the user might pull the plug or relaunch — both
+    // leave Windows in a half-cleaned-up state. So we prompt explicitly.
     e.preventDefault()
-    mainWindow!.hide()
+    const choices = minimizeToTray
+      ? ['Свернуть в трей', 'Отключить и закрыть', 'Отмена']
+      : ['Отключить и закрыть', 'Отмена']
+    const trayIdx = minimizeToTray ? 0 : -1
+    const stopIdx = minimizeToTray ? 1 : 0
+    const cancelIdx = choices.length - 1
+
+    void dialog.showMessageBox(mainWindow!, {
+      type: 'question',
+      title: 'Защита включена',
+      message: 'VPN сейчас активен.',
+      detail: minimizeToTray
+        ? 'Окно можно свернуть в трей — защита продолжит работать в фоне. Или полностью отключить защиту и закрыть приложение (это безопасно откатит все сетевые настройки, занимает несколько секунд).'
+        : 'Чтобы корректно завершить работу, нужно сначала отключить защиту: мы вернём DNS, IPv6 и правила брандмауэра в исходное состояние. Это займёт несколько секунд.',
+      buttons: choices,
+      defaultId: trayIdx >= 0 ? trayIdx : stopIdx,
+      cancelId: cancelIdx,
+      noLink: true
+    }).then(async ({ response }) => {
+      if (response === cancelIdx) return
+      if (trayIdx >= 0 && response === trayIdx) {
+        mainWindow!.hide()
+        return
+      }
+      // "Отключить и закрыть": stop the tunnel synchronously, then quit.
+      // The renderer is still mounted at this point so we can show progress
+      // through the tray balloon and the in-window overlay (the renderer is
+      // also notified via 'app:shutting-down' so it can disable controls).
+      isQuitting = true
+      try {
+        mainWindow?.webContents.send('app:shutting-down')
+      } catch {
+        /* renderer may already be gone */
+      }
+      try {
+        await stopProtection()
+      } catch (err) {
+        logEvent('warn', 'app', 'stopProtection during user-initiated close failed', err)
+      }
+      app.quit()
+    }).catch(() => {
+      /* Dialog itself failed (rare). Leave window as-is rather than risk
+         a half-closed state. */
+    })
   })
 
   const loadRenderer = () => {
