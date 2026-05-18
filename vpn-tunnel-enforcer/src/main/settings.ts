@@ -50,6 +50,20 @@ export interface AppSettings {
   // invasive but reverted on stop, and without it real-world users still see
   // their original ISP IP in some apps.
   strictAdapterLockdown: boolean
+  // Anti-DPI / "stealth" mode against ISP-level traffic-shaping (TSPU and
+  // similar). When ON we apply a bundle of mitigations that reduce VPN
+  // signature visibility:
+  //   1. Lower TUN MTU to 1280 so XTLS/Reality payload sizes drift away
+  //      from the values DPI signature databases pattern-match.
+  //   2. Enable TLS ClientHello fragmentation in the proxy outbound (only
+  //      for non-Reality outbounds — Reality embeds auth in ClientHello and
+  //      breaks if fragmented).
+  //   3. Activate the auto-failover watchdog: if the active server starts
+  //      timing out (3+ consecutive TLS pings fail within 2 minutes), the
+  //      next picker profile is selected and the tunnel is restarted.
+  // Safe to leave ON outside of restrictive networks too — costs ~5% extra
+  // bandwidth from MTU overhead and a handful of extra TLS roundtrips.
+  stealthMode: boolean
 }
 
 const defaults: AppSettings = {
@@ -80,7 +94,8 @@ const defaults: AppSettings = {
   autoRestartOnCrash: true,
   desktopNotifications: true,
   publicWifiCompatibility: true,
-  strictAdapterLockdown: true
+  strictAdapterLockdown: true,
+  stealthMode: false
 }
 
 const store = new Store<{ settings: AppSettings }>({

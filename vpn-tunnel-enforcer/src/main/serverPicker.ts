@@ -12,7 +12,6 @@
 
 import { ipcMain, type IpcMainInvokeEvent } from 'electron'
 import { Socket } from 'net'
-import { connect as tlsConnect } from 'tls'
 import { promises as dns } from 'dns'
 import axios from 'axios'
 import { randomUUID } from 'crypto'
@@ -45,68 +44,35 @@ const PING_CONCURRENCY = 5
 // ─── Ping Measurement ────────────────────────────────────────────────────────
 
 /**
- * Measures realistic round-trip latency to a server.
+ * Measures latency to a server.
  *
- * Why not a plain TCP `connect()`?
- *   When our own TUN tunnel is active, sing-box accepts SYN packets locally
- *   and only forwards them upstream after the handshake — so Node's `connect`
- *   event fires the moment the local TUN handler dispatches the SYN, which
- *   gives the user a misleading 1 ms reading regardless of where the server
- *   actually lives. The user sees that same "1 ms" on a Frankfurt VPS while
- *   they're sitting in Moscow on Wi-Fi, which is obviously wrong.
+ * The implementation is intentionally **plain TCP**, not TLS. The earlier
+ * TLS-handshake version produced realistic numbers but had a nasty side
+ * effect on restricted networks: each ping sent a clear-text TLS
+ * ClientHello with the real server_name (e.g. lk.cloudrynth.com,
+ * dgsfgh.feodorn.com) directly through the physical adapter, bypassing the
+ * TUN. ISP-level DPI (TSPU and similar) pattern-matches that SNI against
+ * its VPN-endpoint database, decides "this client is talking to a VPN
+ * front", and throttles or blackholes the connection to that IP for the
+ * next several minutes. Result: the user clicks "Ping", and a few seconds
+ * later the actual VPN session can't connect because the IP just got
+ * mass-blocked. Reported as "the ping button kills my internet".
  *
- * Strategy:
- *   We do a TLS ClientHello → ServerHello handshake instead. That forces a
- *   real round-trip with payload, which the upstream proxy server has to
- *   actually answer (vless/trojan/hysteria2 panels camouflage with a real
- *   TLS endpoint on :443 specifically for this reason — they always reply).
- *   `rejectUnauthorized: false` because we don't care about the cert chain;
- *   we only want the wire-level timing.
+ * Plain TCP connect doesn't transmit SNI in clear text — there's no TLS
+ * record at all, just a SYN/SYN-ACK exchange. DPI sees a generic TCP
+ * connection to <ip>:443 and has no signature to match.
  *
- * For non-TLS ports (e.g. ss:// on 8388) TLS will fail; we fall back to
- * plain TCP connect timing in that case — there's no better signal we can
- * cheaply produce, and at least the reading is comparable across servers
- * on the same port type.
+ * Trade-off: when the user's TUN is up, sing-box terminates the SYN
+ * locally and `connect()` returns ~1 ms regardless of distance. We accept
+ * that — measuring real RTT through the tunnel would require sending
+ * actual application data, which can't be done without picking a probe
+ * destination that isn't itself fingerprintable. The Servers page warns
+ * the user that ping is a "rough" measurement when VPN is active.
  *
- * Returns latency in ms or null if the server is fully unreachable.
+ * Returns latency in ms, or null if the server is fully unreachable.
  */
 export function pingServer(host: string, port: number): Promise<number | null> {
-  return new Promise((resolve) => {
-    const start = Date.now()
-    const socket = tlsConnect({
-      host,
-      port,
-      // We don't care about the cert chain — many VPN panels use self-signed
-      // or hostname-mismatched certs on purpose. Setting both ensures Node
-      // doesn't bail on cert problems before we get the timing reading.
-      rejectUnauthorized: false,
-      // Limit handshake size so we get the timing as soon as ServerHello
-      // arrives rather than after the full chain.
-      ALPNProtocols: ['h2', 'http/1.1'],
-      // Don't validate hostname for the same reason as above.
-      checkServerIdentity: () => undefined,
-      timeout: PING_TIMEOUT_MS
-    })
-
-    let done = false
-    const finish = (value: number | null) => {
-      if (done) return
-      done = true
-      socket.removeAllListeners()
-      socket.destroy()
-      resolve(value)
-    }
-
-    socket.once('secureConnect', () => finish(Date.now() - start))
-    socket.once('timeout', () => finish(null))
-    socket.once('error', () => {
-      // TLS failed (e.g. server is plain TCP / shadowsocks). Fall back to
-      // a plain TCP connect on a fresh socket so we at least return *some*
-      // reading instead of marking the server dead. The two timings are not
-      // directly comparable but they remain monotonic relative to distance.
-      void plainTcpPing(host, port).then(finish)
-    })
-  })
+  return plainTcpPing(host, port)
 }
 
 function plainTcpPing(host: string, port: number): Promise<number | null> {

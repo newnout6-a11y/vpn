@@ -1,7 +1,6 @@
 import { ipcMain } from 'electron'
 import { promises as dns } from 'dns'
 import { Socket } from 'net'
-import { connect as tlsConnect } from 'tls'
 import axios from 'axios'
 import { logEvent } from './appLogger'
 
@@ -140,88 +139,53 @@ async function getAsnInfo(ip: string): Promise<AsnInfo | null> {
   return null
 }
 
-// Scan common ports in parallel (with concurrency limit)
+// Scan ports.
+//
+// Restricted to the *known* port of the profile. Scanning a fan of common
+// ports (22/80/443/8080/3128/etc.) on a VPN endpoint is an obvious DPI
+// signal — censorship boxes don't even need a signature, the port-fan
+// pattern itself triggers throttling. We only check that the actual VPN
+// port is reachable; everything else is unused diagnostic noise that hurt
+// users far more than it helped them.
 async function scanPorts(host: string, knownPort?: number): Promise<PortScanResult[]> {
-  const portsToScan = knownPort && !COMMON_PORTS.includes(knownPort)
-    ? [knownPort, ...COMMON_PORTS]
-    : COMMON_PORTS
-
-  const results: PortScanResult[] = []
-  const concurrency = 8
-  for (let i = 0; i < portsToScan.length; i += concurrency) {
-    const batch = portsToScan.slice(i, i + concurrency)
-    const batchResults = await Promise.all(
-      batch.map(async (port) => ({
-        port,
-        open: await probePort(host, port, 1000),
-        service: SERVICE_HINTS[port]
-      }))
-    )
-    results.push(...batchResults)
-  }
-  return results.filter(r => r.open)  // only return open ports
+  const port = knownPort && knownPort > 0 ? knownPort : 443
+  const open = await probePort(host, port, 1000)
+  if (!open) return []
+  return [{ port, open, service: SERVICE_HINTS[port] }]
 }
 
-// Get TLS certificate info from a host:port
-function getTlsCert(host: string, port: number): Promise<TlsCertInfo | null> {
-  return new Promise((resolve) => {
-    let resolved = false
-    const finish = (result: TlsCertInfo | null) => {
-      if (resolved) return
-      resolved = true
-      try { socket.destroy() } catch {}
-      resolve(result)
-    }
-    const socket = tlsConnect({
-      host,
-      port,
-      servername: host,
-      rejectUnauthorized: false,
-      timeout: 5000
-    }, () => {
-      try {
-        const cert = (socket as any).getPeerCertificate(true)
-        if (!cert || Object.keys(cert).length === 0) return finish(null)
-        const subject = Object.entries(cert.subject || {}).map(([k, v]) => `${k}=${v}`).join(', ')
-        const issuer = Object.entries(cert.issuer || {}).map(([k, v]) => `${k}=${v}`).join(', ')
-        const sans: string[] = []
-        if (cert.subjectaltname) {
-          for (const part of String(cert.subjectaltname).split(',')) {
-            const m = part.trim().match(/^(?:DNS|IP Address):(.+)$/)
-            if (m) sans.push(m[1])
-          }
-        }
-        finish({
-          subject,
-          issuer,
-          validFrom: cert.valid_from || '',
-          validTo: cert.valid_to || '',
-          fingerprint: cert.fingerprint256 || cert.fingerprint || '',
-          sans,
-          protocol: (socket as any).getProtocol() || '',
-          cipher: (socket as any).getCipher()?.name || ''
-        })
-      } catch {
-        finish(null)
-      }
-    })
-    socket.on('error', () => finish(null))
-    socket.on('timeout', () => finish(null))
-  })
+// Get TLS certificate info from a host:port.
+//
+// IMPORTANT: We intentionally do NOT send a TLS ClientHello to the
+// requested host. The hosts probed here are VPN endpoints (vless/trojan
+// fronts on :443) — sending a ClientHello with their server_name leaks
+// that hostname to the local DPI in clear text. Russian TSPU and similar
+// censorship boxes pattern-match SNIs against a database of known VPN
+// fronts and start throttling/blackholing the IP for several minutes
+// after a single such request. Reported by users as "the diagnostic
+// page killed my internet for 10 minutes".
+//
+// We have no useful information to gain from probing the cert anyway —
+// VPN fronts deliberately camouflage with a real domain's certificate
+// (Reality), so the cert tells us nothing about the actual VPN backend.
+//
+// The function is kept for backwards compatibility with the IPC schema
+// but always resolves null. Future versions can re-enable it for
+// genuinely user-supplied hosts (custom Tahoe/SS endpoints), but never
+// for our own picker entries.
+function getTlsCert(_host: string, _port: number): Promise<TlsCertInfo | null> {
+  return Promise.resolve(null)
 }
 
-// Get HTTP banner from port 80 (Server header)
-async function getHttpBanner(host: string, port = 80): Promise<string | null> {
-  try {
-    const resp = await axios.head(`http://${host}:${port}/`, {
-      timeout: 4000,
-      validateStatus: () => true,
-      maxRedirects: 0
-    })
-    return (resp.headers['server'] as string | undefined) || null
-  } catch {
-    return null
-  }
+// HTTP banner from port 80.
+//
+// Disabled for the same reason as getTlsCert: probing VPN endpoints with
+// raw HTTP requests is a clean fingerprint for DPI ("client just hit
+// :80 on a VPN backend"). The banner string isn't actionable anyway —
+// these endpoints rarely have any meaningful Server header, and the few
+// that do are camouflaged.
+async function getHttpBanner(_host: string, _port = 80): Promise<string | null> {
+  return null
 }
 
 // Main probe entry point
