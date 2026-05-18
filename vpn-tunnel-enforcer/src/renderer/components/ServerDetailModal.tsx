@@ -14,7 +14,8 @@ import {
   Building2,
   AlertCircle,
   Copy,
-  Check
+  Check,
+  Download
 } from 'lucide-react'
 import { MacModal, MacButton, MacCard, MacBadge } from '../design-system'
 import { detectCountry } from './countryGlyph'
@@ -104,22 +105,46 @@ export function ServerDetailModal({ open, profile, onClose }: ServerDetailModalP
   const [probe, setProbe] = useState<ServerProbeResult | null>(null)
   const [probing, setProbing] = useState(false)
   const [probeError, setProbeError] = useState(false)
-  const [exportState, setExportState] = useState<'idle' | 'copied' | 'failed'>('idle')
+  const [exportState, setExportState] = useState<'idle' | 'copied' | 'saved' | 'failed'>('idle')
 
-  // Reset the "Скопировано" pill whenever the user opens a different server.
+  // Reset the export status pill whenever the user opens a different server.
   useEffect(() => { setExportState('idle') }, [profile])
 
-  const handleExportKey = async () => {
+  const handleCopyKey = async () => {
     const id = (profile as ServerProfile | null)?.id
     if (!id) return
     try {
       const result = await window.electronAPI.serversExportKey(id)
       if (!result.ok) {
         setExportState('failed')
+        setTimeout(() => setExportState('idle'), 2200)
         return
       }
       await navigator.clipboard.writeText(result.uri)
       setExportState('copied')
+      setTimeout(() => setExportState('idle'), 2200)
+    } catch {
+      setExportState('failed')
+      setTimeout(() => setExportState('idle'), 2200)
+    }
+  }
+
+  const handleSaveKeyToFile = async () => {
+    const id = (profile as ServerProfile | null)?.id
+    if (!id) return
+    try {
+      const result = await window.electronAPI.serversExportKeyToFile(id)
+      if (result.ok) {
+        setExportState('saved')
+        setTimeout(() => setExportState('idle'), 2500)
+        return
+      }
+      // User clicked Cancel in the OS dialog — silently revert state, no error pill.
+      if ((result as any).cancelled) {
+        setExportState('idle')
+        return
+      }
+      setExportState('failed')
       setTimeout(() => setExportState('idle'), 2200)
     } catch {
       setExportState('failed')
@@ -534,26 +559,41 @@ export function ServerDetailModal({ open, profile, onClose }: ServerDetailModalP
           {/*
             Export to URI: round-trips the saved sing-box outbound back to a
             single-line vless://… / trojan://… / ss://… / vmess://… /
-            hysteria2://… key so the user can paste it into another client
-            (Happ on phone, v2RayN, sing-box CLI). Only available for picker
-            entries (those have an `id`); the cached Direct VPN summary view
-            doesn't carry one.
+            hysteria2://… key. Two paths so the user can either save it as
+            a backup file (.txt) — primary action — or paste it into another
+            client via the clipboard. Both are no-ops for the cached Direct
+            VPN summary view (no profile id).
           */}
           {(profile as ServerProfile | null)?.id ? (
-            <MacButton
-              variant={exportState === 'copied' ? 'secondary' : 'ghost'}
-              size="sm"
-              onClick={handleExportKey}
-              disabled={exportState === 'copied'}
-            >
-              {exportState === 'copied' ? (
-                <><Check className="w-3.5 h-3.5 mr-1.5" />{t('serverDetail.keyCopied', 'Ключ скопирован')}</>
-              ) : exportState === 'failed' ? (
-                <><AlertCircle className="w-3.5 h-3.5 mr-1.5" />{t('serverDetail.keyExportFailed', 'Не удалось экспортировать')}</>
-              ) : (
-                <><Copy className="w-3.5 h-3.5 mr-1.5" />{t('serverDetail.exportKey', 'Экспортировать ключ')}</>
-              )}
-            </MacButton>
+            <div className="flex items-center gap-2">
+              <MacButton
+                variant={exportState === 'saved' ? 'secondary' : 'primary'}
+                size="sm"
+                onClick={handleSaveKeyToFile}
+                disabled={exportState === 'saved'}
+              >
+                {exportState === 'saved' ? (
+                  <><Check className="w-3.5 h-3.5 mr-1.5" />{t('serverDetail.keySaved', 'Сохранено')}</>
+                ) : (
+                  <><Download className="w-3.5 h-3.5 mr-1.5" />{t('serverDetail.saveKey', 'Сохранить ключ в файл')}</>
+                )}
+              </MacButton>
+              <MacButton
+                variant="ghost"
+                size="sm"
+                onClick={handleCopyKey}
+                disabled={exportState === 'copied'}
+                title={t('serverDetail.copyKey', 'Скопировать в буфер обмена')}
+              >
+                {exportState === 'copied' ? (
+                  <><Check className="w-3.5 h-3.5 mr-1.5" />{t('serverDetail.keyCopied', 'Скопирован')}</>
+                ) : exportState === 'failed' ? (
+                  <><AlertCircle className="w-3.5 h-3.5 mr-1.5" />{t('serverDetail.keyExportFailed', 'Не удалось')}</>
+                ) : (
+                  <><Copy className="w-3.5 h-3.5 mr-1.5" />{t('serverDetail.copyKey', 'В буфер')}</>
+                )}
+              </MacButton>
+            </div>
           ) : <span />}
           <MacButton variant="ghost" onClick={onClose}>
             {t('common.close')}

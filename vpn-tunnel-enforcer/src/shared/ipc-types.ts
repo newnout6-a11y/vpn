@@ -226,6 +226,10 @@ export interface ServerChannels {
   'servers:export-key': (id: string) =>
     | { ok: true; uri: string; name: string; protocol: string }
     | { ok: false; reason: string; protocol?: string }
+  'servers:export-key-file': (id: string) =>
+    | { ok: true; path: string; uri: string; name: string; protocol: string }
+    | { ok: false; cancelled: true }
+    | { ok: false; reason: string; protocol?: string; error?: string }
 }
 
 /** Speed Test IPC channels */

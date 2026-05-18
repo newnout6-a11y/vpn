@@ -10,9 +10,11 @@
  * - Register IPC handlers for all ServerChannels
  */
 
-import { ipcMain, type IpcMainInvokeEvent } from 'electron'
+import { app, dialog, ipcMain, type IpcMainInvokeEvent } from 'electron'
 import { Socket } from 'net'
 import { promises as dns } from 'dns'
+import { writeFile } from 'fs/promises'
+import { join } from 'path'
 import axios from 'axios'
 import { randomUUID } from 'crypto'
 import Store from 'electron-store'
@@ -594,6 +596,63 @@ export function registerServerPickerHandlers(): void {
     })
     if (!uri) return { ok: false as const, reason: 'unsupported-protocol', protocol: profile.protocol }
     return { ok: true as const, uri, name: profile.name, protocol: profile.protocol }
+  })
+
+  // Save the exported URI to a .txt file via the OS save dialog. Used when
+  // the user wants to keep a backup, store keys in a password manager, or
+  // share the key out-of-band — clipboard is fine for one-shot paste, but
+  // a file is what people actually archive. Returns:
+  //   {ok: true, path}            — file written
+  //   {ok: false, cancelled: true} — user dismissed the dialog
+  //   {ok: false, reason}          — anything else (no profile, write failed, …)
+  handleLogged('servers:export-key-file', async (_event, id: string) => {
+    const profile = getProfiles().find(p => p.id === id)
+    if (!profile) return { ok: false as const, reason: 'profile-not-found' }
+    if (!profile.outbound || typeof profile.outbound !== 'object') {
+      return { ok: false as const, reason: 'no-outbound' }
+    }
+    const uri = exportOutboundToUri({
+      name: profile.name,
+      protocol: profile.protocol,
+      outbound: profile.outbound
+    })
+    if (!uri) return { ok: false as const, reason: 'unsupported-protocol', protocol: profile.protocol }
+
+    // Pick a sane default filename: "<protocol>-<sanitised-name>.txt".
+    // Stripping non-filename characters makes the dialog suggestion usable on
+    // Windows without the user having to retype.
+    const safeName = (profile.name || profile.protocol)
+      .replace(/[<>:"/\\|?*\u0000-\u001F]/g, '')
+      .replace(/\s+/g, '-')
+      .slice(0, 60) || profile.protocol
+    const defaultFileName = `${profile.protocol}-${safeName}.txt`
+
+    const choice = await dialog.showSaveDialog({
+      title: 'Сохранить ключ VPN',
+      defaultPath: join(app.getPath('desktop'), defaultFileName),
+      filters: [
+        { name: 'Текстовый файл', extensions: ['txt'] },
+        { name: 'Все файлы', extensions: ['*'] }
+      ]
+    })
+
+    if (choice.canceled || !choice.filePath) {
+      return { ok: false as const, cancelled: true as const }
+    }
+
+    try {
+      // We persist just the URI on a single line plus a trailing newline.
+      // Most clients accept extra leading/trailing whitespace, but minimum
+      // surprise is "the file is exactly the URI".
+      await writeFile(choice.filePath, uri + '\n', 'utf8')
+      return { ok: true as const, path: choice.filePath, uri, name: profile.name, protocol: profile.protocol }
+    } catch (err: any) {
+      logEvent('warn', 'server-picker', 'export-key-file write failed', {
+        path: choice.filePath,
+        error: err?.message || String(err)
+      })
+      return { ok: false as const, reason: 'write-failed', error: err?.message || String(err) }
+    }
   })
 }
 
