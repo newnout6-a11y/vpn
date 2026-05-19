@@ -6,6 +6,7 @@ import { PageTip } from '../components/PageTip'
 import { ServerDetailModal } from '../components/ServerDetailModal'
 import { detectCountry } from '../components/countryGlyph'
 import { emitServerChanged } from '../nav'
+import { useAppStore } from '../store'
 import type { ServerProfile } from '../../shared/ipc-types'
 
 /**
@@ -62,6 +63,7 @@ function probeToPing(probe: any): { ping: number | null; country: string | null 
  */
 export function Servers() {
   const { t } = useTranslation()
+  const addLog = useAppStore((s) => s.addLog)
   const [profiles, setProfiles] = useState<ServerProfile[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -226,6 +228,31 @@ export function Servers() {
     }
   }
 
+  // Export every saved profile as one .txt file (one URI per line) via
+  // an OS save dialog.
+  const [exportingAll, setExportingAll] = useState(false)
+  const handleExportAll = async () => {
+    setExportingAll(true)
+    try {
+      const result = await window.electronAPI.serversExportAllKeysToFile()
+      if (result.ok) {
+        addLog(
+          'info',
+          `Сохранено ${result.exported} ключей в ${result.path}` +
+            (result.skipped > 0 ? ` (пропущено: ${result.skipped})` : '')
+        )
+        return
+      }
+      if ((result as any).cancelled) return
+      const reason = (result as { reason?: string }).reason || 'неизвестная ошибка'
+      addLog('error', `Не удалось сохранить ключи: ${reason}`)
+    } catch (err: any) {
+      addLog('error', `Не удалось сохранить ключи: ${err?.message ?? err}`)
+    } finally {
+      setExportingAll(false)
+    }
+  }
+
   const grouped = groupByProtocol(profiles)
   const protocolKeys = Object.keys(grouped).sort()
 
@@ -244,15 +271,26 @@ export function Servers() {
             {t('servers.description')}
           </p>
         </div>
-        <MacButton
-          variant="secondary"
-          onClick={handlePingAll}
-          loading={pinging}
-          disabled={profiles.length === 0}
-        >
-          <RefreshCw className="w-4 h-4 mr-2" />
-          {pinging ? t('servers.checking') : t('servers.pingAll')}
-        </MacButton>
+        <div className="flex items-center gap-2">
+          <MacButton
+            variant="secondary"
+            onClick={handleExportAll}
+            loading={exportingAll}
+            disabled={profiles.length === 0 || exportingAll}
+          >
+            <Download className="w-4 h-4 mr-2" />
+            {t('servers.exportAllKeys', 'Сохранить все ключи')}
+          </MacButton>
+          <MacButton
+            variant="secondary"
+            onClick={handlePingAll}
+            loading={pinging}
+            disabled={profiles.length === 0}
+          >
+            <RefreshCw className="w-4 h-4 mr-2" />
+            {pinging ? t('servers.checking') : t('servers.pingAll')}
+          </MacButton>
+        </div>
       </div>
 
       {/* Add server input */}

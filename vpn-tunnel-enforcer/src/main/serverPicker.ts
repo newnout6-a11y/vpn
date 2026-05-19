@@ -21,6 +21,7 @@ import Store from 'electron-store'
 import { logEvent } from './appLogger'
 import { resolveVpnProfiles, exportOutboundToUri, type VpnProfile } from './vpnProfiles'
 import { settingsStore } from './settings'
+import { tunController } from './tunController'
 import type { ServerProfile } from '../shared/ipc-types'
 
 // ─── Persistent Store ────────────────────────────────────────────────────────
@@ -46,35 +47,28 @@ const PING_CONCURRENCY = 5
 // ─── Ping Measurement ────────────────────────────────────────────────────────
 
 /**
- * Measures latency to a server.
+ * Measures latency to a server, with two paths:
  *
- * The implementation is intentionally **plain TCP**, not TLS. The earlier
- * TLS-handshake version produced realistic numbers but had a nasty side
- * effect on restricted networks: each ping sent a clear-text TLS
- * ClientHello with the real server_name (e.g. lk.cloudrynth.com,
- * dgsfgh.feodorn.com) directly through the physical adapter, bypassing the
- * TUN. ISP-level DPI (TSPU and similar) pattern-matches that SNI against
- * its VPN-endpoint database, decides "this client is talking to a VPN
- * front", and throttles or blackholes the connection to that IP for the
- * next several minutes. Result: the user clicks "Ping", and a few seconds
- * later the actual VPN session can't connect because the IP just got
- * mass-blocked. Reported as "the ping button kills my internet".
+ *   1. VPN OFF → plain TCP connect (SYN/SYN-ACK only). Real network RTT.
+ *      We deliberately do NOT do a TLS handshake here: that would put the
+ *      server_name on the wire in clear text and Russian TSPU / similar
+ *      DPI boxes blackhole the IP for several minutes after seeing a
+ *      known VPN-front SNI. The Ping button used to literally kill the
+ *      user's internet for ~10 minutes.
  *
- * Plain TCP connect doesn't transmit SNI in clear text — there's no TLS
- * record at all, just a SYN/SYN-ACK exchange. DPI sees a generic TCP
- * connection to <ip>:443 and has no signature to match.
+ *   2. VPN ON → connect, then send one byte and wait for the first kernel
+ *      response (data, FIN, or RST). Plain `connect()` returns instantly
+ *      when sing-box hijacks the SYN locally, which made every server
+ *      look like 1 ms. The first-byte trip happens entirely inside the
+ *      already-encrypted vless flow, so DPI sees only the regular
+ *      shielded traffic — no extra fingerprint.
  *
- * Trade-off: when the user's TUN is up, sing-box terminates the SYN
- * locally and `connect()` returns ~1 ms regardless of distance. We accept
- * that — measuring real RTT through the tunnel would require sending
- * actual application data, which can't be done without picking a probe
- * destination that isn't itself fingerprintable. The Servers page warns
- * the user that ping is a "rough" measurement when VPN is active.
- *
- * Returns latency in ms, or null if the server is fully unreachable.
+ * Returns latency in ms or null if the server is fully unreachable.
  */
 export function pingServer(host: string, port: number): Promise<number | null> {
-  return plainTcpPing(host, port)
+  return tunController.getStatus().running
+    ? roundTripPing(host, port)
+    : plainTcpPing(host, port)
 }
 
 function plainTcpPing(host: string, port: number): Promise<number | null> {
@@ -93,6 +87,68 @@ function plainTcpPing(host: string, port: number): Promise<number | null> {
     socket.once('connect', () => finish(Date.now() - start))
     socket.once('timeout', () => finish(null))
     socket.once('error', () => finish(null))
+    socket.connect(port, host)
+  })
+}
+
+/**
+ * Tunnel-aware RTT measurement.
+ *
+ * After `connect()` returns (which is immediate when sing-box terminates
+ * the SYN locally) we send a single \r\n and start the timer. The timer
+ * stops on the first sign of life from the far side: bytes returned,
+ * a graceful FIN, or an RST. Any of those guarantees a full round-trip
+ * over the encrypted tunnel.
+ *
+ * For VPN-front servers on :443 our junk byte triggers an immediate TLS
+ * alert / RST from the upstream — which is exactly what we want, since
+ * the alert itself crosses the tunnel. Worst-case the server is silent
+ * and we time out (returning null), but in practice every Reality /
+ * standard TLS endpoint we tested replies within tens of ms.
+ */
+function roundTripPing(host: string, port: number): Promise<number | null> {
+  return new Promise((resolve) => {
+    const socket = new Socket()
+    const connectStart = Date.now()
+    let probeStart = 0
+    let done = false
+    const finish = (value: number | null) => {
+      if (done) return
+      done = true
+      socket.removeAllListeners()
+      socket.destroy()
+      resolve(value)
+    }
+    socket.setTimeout(PING_TIMEOUT_MS)
+
+    socket.once('connect', () => {
+      probeStart = Date.now()
+      try {
+        // Either a tiny readable HTTP-ish probe so the server fast-path
+        // its response, or just an empty newline. Either yields a quick
+        // RST/FIN/data from the far side.
+        socket.write('\r\n')
+      } catch {
+        // Write failed (already torn down) — fall back to connect time so
+        // we still return *something* sensible rather than null.
+        finish(Date.now() - connectStart)
+      }
+    })
+
+    socket.once('data', () => finish(Date.now() - probeStart))
+    socket.once('end', () => finish(Date.now() - probeStart))
+    socket.once('close', () => {
+      // Some servers close without ever emitting 'data' or 'end' — fall
+      // back to whichever clock we have, preferring the post-connect
+      // measurement when available.
+      finish(probeStart ? Date.now() - probeStart : Date.now() - connectStart)
+    })
+    socket.once('timeout', () => finish(null))
+    socket.once('error', () => {
+      // RST counts as a real round-trip too. Same reasoning.
+      finish(probeStart ? Date.now() - probeStart : null)
+    })
+
     socket.connect(port, host)
   })
 }
@@ -648,6 +704,85 @@ export function registerServerPickerHandlers(): void {
       return { ok: true as const, path: choice.filePath, uri, name: profile.name, protocol: profile.protocol }
     } catch (err: any) {
       logEvent('warn', 'server-picker', 'export-key-file write failed', {
+        path: choice.filePath,
+        error: err?.message || String(err)
+      })
+      return { ok: false as const, reason: 'write-failed', error: err?.message || String(err) }
+    }
+  })
+
+  // Bulk export: dump every saved profile (one URI per line) into a single
+  // .txt file via the OS save dialog. Profiles that don't have a single-line
+  // representation (custom sing-box JSON, missing outbound) are skipped and
+  // their count is returned so the UI can mention them.
+  //
+  // Returns the same shape as the single-key handler, plus counts:
+  //   {ok: true, path, total, exported, skipped}
+  //   {ok: false, cancelled: true}
+  //   {ok: false, reason: 'no-profiles' | 'unsupported-all' | 'write-failed'}
+  handleLogged('servers:export-all-keys-file', async () => {
+    const profiles = getProfiles()
+    if (!profiles.length) return { ok: false as const, reason: 'no-profiles' }
+
+    const lines: string[] = []
+    let skipped = 0
+    for (const profile of profiles) {
+      if (!profile.outbound || typeof profile.outbound !== 'object') { skipped++; continue }
+      const uri = exportOutboundToUri({
+        name: profile.name,
+        protocol: profile.protocol,
+        outbound: profile.outbound
+      })
+      if (!uri) { skipped++; continue }
+      lines.push(uri)
+    }
+
+    if (!lines.length) {
+      return { ok: false as const, reason: 'unsupported-all' }
+    }
+
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+    const defaultFileName = `vpn-keys-${stamp}.txt`
+
+    const choice = await dialog.showSaveDialog({
+      title: 'Сохранить все ключи VPN',
+      defaultPath: join(app.getPath('desktop'), defaultFileName),
+      filters: [
+        { name: 'Текстовый файл', extensions: ['txt'] },
+        { name: 'Все файлы', extensions: ['*'] }
+      ]
+    })
+
+    if (choice.canceled || !choice.filePath) {
+      return { ok: false as const, cancelled: true as const }
+    }
+
+    // Header comments so future-you remembers what this file is. Most VPN
+    // clients (Happ / v2RayN / sing-box) ignore '#' lines on import.
+    const header = [
+      `# VPN keys exported by VPN Tunnel Enforcer`,
+      `# Profiles: ${lines.length} exported, ${skipped} skipped`,
+      `# Generated: ${new Date().toISOString()}`,
+      ''
+    ].join('\n')
+
+    try {
+      await writeFile(choice.filePath, header + lines.join('\n') + '\n', 'utf8')
+      logEvent('info', 'server-picker', 'export-all-keys-file', {
+        path: choice.filePath,
+        total: profiles.length,
+        exported: lines.length,
+        skipped
+      })
+      return {
+        ok: true as const,
+        path: choice.filePath,
+        total: profiles.length,
+        exported: lines.length,
+        skipped
+      }
+    } catch (err: any) {
+      logEvent('warn', 'server-picker', 'export-all-keys-file write failed', {
         path: choice.filePath,
         error: err?.message || String(err)
       })

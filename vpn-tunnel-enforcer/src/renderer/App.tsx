@@ -78,6 +78,11 @@ declare global {
         | { ok: false; cancelled: true }
         | { ok: false; reason: string; protocol?: string; error?: string }
       >
+      serversExportAllKeysToFile: () => Promise<
+        | { ok: true; path: string; total: number; exported: number; skipped: number }
+        | { ok: false; cancelled: true }
+        | { ok: false; reason: string; error?: string }
+      >
       serverProbe: (host: string, knownPort?: number) => Promise<any>
       // Kill-Switch
       killSwitchGetLevel: () => Promise<import('../shared/ipc-types').KillSwitchLevel>

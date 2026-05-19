@@ -67,6 +67,11 @@ export interface ElectronAPI {
     | { ok: false; cancelled: true }
     | { ok: false; reason: string; protocol?: string; error?: string }
   >
+  serversExportAllKeysToFile: () => Promise<
+    | { ok: true; path: string; total: number; exported: number; skipped: number }
+    | { ok: false; cancelled: true }
+    | { ok: false; reason: string; error?: string }
+  >
   serverProbe: (host: string, knownPort?: number) => Promise<any>
   // Scheduler
   schedulerList: () => Promise<any[]>
@@ -230,6 +235,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   serversRemove: (id: string) => ipcRenderer.invoke('servers:remove', id),
   serversExportKey: (id: string) => ipcRenderer.invoke('servers:export-key', id),
   serversExportKeyToFile: (id: string) => ipcRenderer.invoke('servers:export-key-file', id),
+  serversExportAllKeysToFile: () => ipcRenderer.invoke('servers:export-all-keys-file'),
   serverProbe: (host: string, knownPort?: number) => ipcRenderer.invoke('server:probe', host, knownPort),
   // Scheduler
   schedulerList: () => ipcRenderer.invoke('scheduler:list'),
