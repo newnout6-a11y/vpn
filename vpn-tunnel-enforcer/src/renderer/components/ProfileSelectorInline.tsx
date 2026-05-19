@@ -28,6 +28,11 @@ function countryGlyph(name: string): string {
 export function ProfileSelectorInline() {
   const { t } = useTranslation()
   const addLog = useAppStore(s => s.addLog)
+  // We branch the ping UX on this: when the tunnel is up the result reflects
+  // round-trip through the active outbound, *not* per-server latency, so we
+  // surface different copy ("Тоннель: 87 ms" vs "Сервер: 87 ms") to avoid
+  // misleading the user.
+  const tunRunning = useAppStore(s => s.tunRunning)
 
   const [open, setOpen] = useState(false)
   const [profiles, setProfiles] = useState<ServerProfile[]>([])
@@ -103,12 +108,20 @@ export function ProfileSelectorInline() {
     setPingMs('pinging')
     try {
       const ms = await window.electronAPI.serversPingOne(current.server, current.port)
+      // When the tunnel is up the main process measures the active outbound's
+      // round-trip via a neutral CDN (host:port through the tunnel would
+      // self-loop when the picked server == active VPN endpoint). Reflect
+      // that in the log so users don't think they're seeing per-server
+      // latency.
+      const label = tunRunning
+        ? `Тоннель (${current.server}:${current.port})`
+        : `${current.server}:${current.port}`
       if (ms == null) {
         setPingMs(-1)
-        addLog('warn', `Пинг ${current.server}:${current.port} не прошёл.`)
+        addLog('warn', `Пинг ${label} не прошёл.`)
       } else {
         setPingMs(ms)
-        addLog('info', `Пинг ${current.server}:${current.port}: ${ms} мс`)
+        addLog('info', `Пинг ${label}: ${ms} мс`)
       }
     } catch (err: any) {
       setPingMs(-1)
@@ -129,7 +142,13 @@ export function ProfileSelectorInline() {
   const pingLabel = (() => {
     if (pingMs === 'pinging') return '…'
     if (pingMs === -1) return t('profileSelector.pingFailed', '—')
-    if (typeof pingMs === 'number') return `${pingMs} ${t('profileSelector.ms', 'ms')}`
+    if (typeof pingMs === 'number') {
+      // Prefix with "Тон." (тоннель) when measuring round-trip through the
+      // active outbound, so the value can't be confused with per-server
+      // latency. The button is narrow, so we avoid a longer prefix.
+      const prefix = tunRunning ? 'Тон. ' : ''
+      return `${prefix}${pingMs} ${t('profileSelector.ms', 'ms')}`
+    }
     return null
   })()
 
@@ -193,8 +212,12 @@ export function ProfileSelectorInline() {
           type="button"
           onClick={handlePingSelected}
           disabled={pingMs === 'pinging' || !currentName}
-          aria-label={t('profileSelector.pingSelected', 'Пингануть выбранный')}
-          title={t('profileSelector.pingSelected', 'Пингануть выбранный')}
+          aria-label={tunRunning
+            ? t('profileSelector.pingTunnel', 'Замерить пинг через тоннель')
+            : t('profileSelector.pingSelected', 'Пингануть выбранный')}
+          title={tunRunning
+            ? t('profileSelector.pingTunnel', 'Замерить пинг через тоннель')
+            : t('profileSelector.pingSelected', 'Пингануть выбранный')}
           className={cn(
             'inline-flex items-center gap-1.5 px-2.5 py-1.5 mr-1 rounded-[var(--radius-sm)] text-xs font-medium tabular-nums',
             'border border-[var(--color-border)] bg-[var(--color-bg)]/60',

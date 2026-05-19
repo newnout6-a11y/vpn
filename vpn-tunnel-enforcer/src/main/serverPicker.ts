@@ -44,6 +44,25 @@ const store = new Store<ServerPickerStore>({
 const PING_TIMEOUT_MS = 5000
 const PING_CONCURRENCY = 5
 
+// Neutral "is the tunnel responsive" probe targets. Cloudflare's trace
+// endpoint returns ~30 bytes of plain text, has no rate limiting, and is
+// allow-listed pretty much everywhere — including on Reality fronts that
+// would loop on a bare SNI to our own VPN endpoint. gstatic.com/generate_204
+// is a backup with the same guarantees but goes through Google.
+const TUNNEL_PROBE_URLS = [
+  'https://1.1.1.1/cdn-cgi/trace',
+  'https://www.gstatic.com/generate_204'
+] as const
+
+// Cache the last successful tunnel-probe result for a few seconds. Without
+// this, a "Ping all" sweep over N profiles fires N identical HTTP requests
+// to the same CDN within milliseconds (since the tunnel itself is the
+// bottleneck — every profile would return the same number anyway). The
+// cache is intentionally short so the user still sees a fresh number when
+// they explicitly click "ping" twice in a row.
+const TUNNEL_PROBE_CACHE_MS = 2500
+let tunnelProbeCache: { value: number | null; at: number } | null = null
+
 // ─── Ping Measurement ────────────────────────────────────────────────────────
 
 /**
@@ -67,8 +86,65 @@ const PING_CONCURRENCY = 5
  */
 export function pingServer(host: string, port: number): Promise<number | null> {
   return tunController.getStatus().running
-    ? roundTripPing(host, port)
+    ? tunnelHttpProbe()
     : plainTcpPing(host, port)
+}
+
+/**
+ * Tunnel-aware RTT measurement via HTTPS GET to a neutral CDN.
+ *
+ * The Node `axios` request goes through the OS kernel network stack,
+ * which — with TUN strict_route + auto_route active — is captured by
+ * sing-box and dispatched through `proxy-out`. So whatever number this
+ * function returns is the real round-trip cost of the *tunnel* (TLS
+ * handshake + GET request + response from the CDN), not just a fake
+ * "connect" event from sing-box's local SYN hijack.
+ *
+ * Why we no longer probe `host:port` of the picker entry through the
+ * tunnel: when `host` is the active VPN endpoint (the most common case
+ * — users ping the server they're connected to), the connection turns
+ * into a self-loop. sing-box dispatches the connect via vless to the
+ * same upstream IP, vless tries to dial that IP locally, and the chain
+ * stalls until our 5 s timeout. Confirmed in user diagnostics: every
+ * ping during an active tunnel returned `ms: 5000` followed by
+ * `Пинг … не прошёл`.
+ *
+ * Tries each probe URL in order. Caches the result for a couple of
+ * seconds so a `pingAll` sweep over N profiles doesn't fire N parallel
+ * requests (the tunnel is the bottleneck — every profile would return
+ * the same number anyway).
+ */
+export async function tunnelHttpProbe(): Promise<number | null> {
+  const cached = tunnelProbeCache
+  if (cached && Date.now() - cached.at < TUNNEL_PROBE_CACHE_MS) {
+    return cached.value
+  }
+
+  for (const url of TUNNEL_PROBE_URLS) {
+    const start = Date.now()
+    try {
+      // Any non-5xx = successful round-trip. generate_204 returns 204,
+      // the trace endpoint returns 200; both count.
+      await axios.get(url, {
+        timeout: PING_TIMEOUT_MS,
+        validateStatus: status => status < 500,
+        // Connection: close so each ping measures a fresh round-trip
+        // rather than the warmth of a pooled TLS session.
+        headers: { 'Cache-Control': 'no-cache', Connection: 'close' }
+      })
+      const ms = Date.now() - start
+      tunnelProbeCache = { value: ms, at: Date.now() }
+      return ms
+    } catch {
+      // Try the next URL. If both fail, the tunnel is genuinely
+      // unreachable (or the user is on a network where both Cloudflare
+      // and Google are blocked) — nothing useful to measure either way.
+      continue
+    }
+  }
+
+  tunnelProbeCache = { value: null, at: Date.now() }
+  return null
 }
 
 function plainTcpPing(host: string, port: number): Promise<number | null> {
@@ -87,68 +163,6 @@ function plainTcpPing(host: string, port: number): Promise<number | null> {
     socket.once('connect', () => finish(Date.now() - start))
     socket.once('timeout', () => finish(null))
     socket.once('error', () => finish(null))
-    socket.connect(port, host)
-  })
-}
-
-/**
- * Tunnel-aware RTT measurement.
- *
- * After `connect()` returns (which is immediate when sing-box terminates
- * the SYN locally) we send a single \r\n and start the timer. The timer
- * stops on the first sign of life from the far side: bytes returned,
- * a graceful FIN, or an RST. Any of those guarantees a full round-trip
- * over the encrypted tunnel.
- *
- * For VPN-front servers on :443 our junk byte triggers an immediate TLS
- * alert / RST from the upstream — which is exactly what we want, since
- * the alert itself crosses the tunnel. Worst-case the server is silent
- * and we time out (returning null), but in practice every Reality /
- * standard TLS endpoint we tested replies within tens of ms.
- */
-function roundTripPing(host: string, port: number): Promise<number | null> {
-  return new Promise((resolve) => {
-    const socket = new Socket()
-    const connectStart = Date.now()
-    let probeStart = 0
-    let done = false
-    const finish = (value: number | null) => {
-      if (done) return
-      done = true
-      socket.removeAllListeners()
-      socket.destroy()
-      resolve(value)
-    }
-    socket.setTimeout(PING_TIMEOUT_MS)
-
-    socket.once('connect', () => {
-      probeStart = Date.now()
-      try {
-        // Either a tiny readable HTTP-ish probe so the server fast-path
-        // its response, or just an empty newline. Either yields a quick
-        // RST/FIN/data from the far side.
-        socket.write('\r\n')
-      } catch {
-        // Write failed (already torn down) — fall back to connect time so
-        // we still return *something* sensible rather than null.
-        finish(Date.now() - connectStart)
-      }
-    })
-
-    socket.once('data', () => finish(Date.now() - probeStart))
-    socket.once('end', () => finish(Date.now() - probeStart))
-    socket.once('close', () => {
-      // Some servers close without ever emitting 'data' or 'end' — fall
-      // back to whichever clock we have, preferring the post-connect
-      // measurement when available.
-      finish(probeStart ? Date.now() - probeStart : Date.now() - connectStart)
-    })
-    socket.once('timeout', () => finish(null))
-    socket.once('error', () => {
-      // RST counts as a real round-trip too. Same reasoning.
-      finish(probeStart ? Date.now() - probeStart : null)
-    })
-
     socket.connect(port, host)
   })
 }
