@@ -1,6 +1,6 @@
 {
   "name": "vpn-tunnel-enforcer",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Force all traffic through VPN Happ — Hard (TUN) or Soft (Autoconfig) mode with IP leak monitoring",
   "main": "./out/main/index.js",
   "scripts": {
