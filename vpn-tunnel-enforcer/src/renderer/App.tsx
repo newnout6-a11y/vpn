@@ -8,6 +8,7 @@ import { Dashboard } from './pages/Dashboard'
 import { SplitTunnel } from './pages/SplitTunnel'
 import { Servers } from './pages/Servers'
 import { SpeedTest } from './pages/SpeedTest'
+import { Availability } from './pages/Availability'
 import { TrafficHistory } from './pages/TrafficHistory'
 import { Schedule } from './pages/Schedule'
 import { Settings } from './pages/Settings'
@@ -84,6 +85,10 @@ declare global {
         | { ok: false; reason: string; error?: string }
       >
       serverProbe: (host: string, knownPort?: number) => Promise<any>
+      // URL Availability
+      urlAvailabilityCheck: (url: string) => Promise<any>
+      urlAvailabilityHistory: () => Promise<any[]>
+      urlAvailabilityClearHistory: () => Promise<void>
       // Kill-Switch
       killSwitchGetLevel: () => Promise<import('../shared/ipc-types').KillSwitchLevel>
       killSwitchSetLevel: (level: import('../shared/ipc-types').KillSwitchLevel) => Promise<any>
@@ -446,6 +451,7 @@ export default function App() {
       case 'apps': return <SplitTunnel />
       case 'servers': return <Servers />
       case 'speedtest': return <SpeedTest />
+      case 'availability': return <Availability />
       case 'trafficHistory': return <TrafficHistory />
       case 'schedule': return <Schedule />
       case 'maintenance':

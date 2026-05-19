@@ -26,6 +26,7 @@ export type AppPage =
   | 'apps'
   | 'servers'
   | 'speedtest'
+  | 'availability'
   | 'trafficHistory'
   | 'schedule'
   | 'maintenance'

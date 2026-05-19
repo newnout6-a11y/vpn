@@ -1,9 +1,9 @@
-import { LayoutDashboard, AppWindow, Server, Calendar, FileText, Settings, Zap, Globe } from 'lucide-react'
+import { LayoutDashboard, AppWindow, Server, Calendar, FileText, Settings, Zap, Globe, Search } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { MacSidebar, type ConnectionStatus, type SidebarItem } from '../design-system'
 import { useAppStore } from '../store'
 
-export type SidebarPage = 'dashboard' | 'apps' | 'servers' | 'speedtest' | 'trafficHistory' | 'schedule' | 'logs' | 'settings'
+export type SidebarPage = 'dashboard' | 'apps' | 'servers' | 'speedtest' | 'availability' | 'trafficHistory' | 'schedule' | 'logs' | 'settings'
 
 interface SidebarProps {
   currentPage: string
@@ -28,6 +28,7 @@ export function Sidebar({ currentPage, onNavigate }: SidebarProps) {
     { id: 'apps', label: t('sidebar.apps'), icon: <AppWindow className="w-5 h-5" /> },
     { id: 'servers', label: t('sidebar.servers'), icon: <Server className="w-5 h-5" /> },
     { id: 'speedtest', label: t('sidebar.speedTest'), icon: <Zap className="w-5 h-5" /> },
+    { id: 'availability', label: t('sidebar.availability', 'Доступность'), icon: <Search className="w-5 h-5" /> },
     { id: 'trafficHistory', label: t('sidebar.trafficHistory'), icon: <Globe className="w-5 h-5" /> },
     { id: 'schedule', label: t('sidebar.schedule'), icon: <Calendar className="w-5 h-5" /> },
     { id: 'logs', label: t('sidebar.logs'), icon: <FileText className="w-5 h-5" /> },

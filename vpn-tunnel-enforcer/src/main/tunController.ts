@@ -70,6 +70,29 @@ interface StartOptions {
   stealthMode?: boolean
 }
 
+// Localhost clash-API state. Populated when sing-box starts; cleared on
+// stop. Used by url-availability checks (and any future "test through a
+// specific outbound" caller) to issue /proxies/<tag>/delay queries without
+// having to spawn another sing-box.
+let clashApiInfo: { port: number; secret: string } | null = null
+
+export function getClashApiInfo(): { port: number; secret: string } | null {
+  return clashApiInfo
+}
+
+function randomLocalPort(): number {
+  // We bind to 127.0.0.1 only and require a secret, so picking a random
+  // ephemeral-range port is enough. 49152-65535 is the IANA private range
+  // and unlikely to collide with anything mainstream the user has running.
+  return 49152 + Math.floor(Math.random() * (65535 - 49152))
+}
+
+function randomSecret(): string {
+  // 32 hex chars = 128 bits. Generated per run; never persisted.
+  const bytes = new Uint8Array(16)
+  for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256)
+  return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('')
+}
 let currentStatus: TunStatus = {
   running: false,
   mode: 'localProxy',
@@ -294,6 +317,14 @@ export function generateSingboxConfig(
     'ff00::/8'
   ]
 
+  // Allocate a fresh clash-API port+secret for this run. Bound to
+  // 127.0.0.1 so it is only reachable from the same machine, and the
+  // secret is mandatory — anyone running another userland process on
+  // the box still cannot probe outbounds without knowing the token.
+  const clashPort = randomLocalPort()
+  const clashSecret = randomSecret()
+  clashApiInfo = { port: clashPort, secret: clashSecret }
+
   return {
     log: { level: 'debug', timestamp: true, output: logPath },
     dns: {
@@ -356,6 +387,17 @@ export function generateSingboxConfig(
       final: 'proxy-out',
       auto_detect_interface: true,
       default_domain_resolver: 'dns-remote'
+    },
+    // Localhost-only diagnostics API. Used by Settings → Availability
+    // to test arbitrary URLs through both proxy-out and direct-out
+    // without disrupting live traffic. NOT a remote-management
+    // endpoint — bound to 127.0.0.1, secret randomised every start.
+    experimental: {
+      clash_api: {
+        external_controller: `127.0.0.1:${clashPort}`,
+        secret: clashSecret,
+        default_mode: 'rule'
+      }
     }
   }
 }
@@ -1310,6 +1352,10 @@ export const tunController = {
       startedAt: null,
       restartAttempt: 0
     }
+    // sing-box is gone — the clash API socket is no longer listening.
+    // Clear the cached port/secret so url-availability checks know to
+    // tell callers "VPN is off" instead of returning ECONNREFUSED.
+    clashApiInfo = null
     logEvent('info', 'tun', 'TUN stopped')
     notify('info', 'Защита выключена', 'Трафик идёт по обычному маршруту.')
     notifyStatus('stopped')

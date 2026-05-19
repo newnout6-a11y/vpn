@@ -46,6 +46,7 @@ import { resolveVpnProfile, resolveVpnProfiles, redactSensitiveConfig, type VpnP
 import { registerSplitTunnelHandlers } from './splitTunneling'
 import { registerServerPickerHandlers, serverPicker } from './serverPicker'
 import { registerServerProbeIpcHandlers } from './serverProbe'
+import { registerUrlAvailabilityHandlers } from './urlAvailability'
 import { registerSpeedTestHandlers } from './speedTest'
 import { registerKillSwitchIpc, granularKillSwitch } from './granularKillSwitch'
 import { registerRotationHandlers, initProfileRotation } from './profileRotation'
@@ -1067,6 +1068,7 @@ app.whenReady().then(async () => {
   // dashboard without the user having to ping every server manually.
   void serverPicker.geolocateAll().catch(() => undefined)
   registerServerProbeIpcHandlers()
+  registerUrlAvailabilityHandlers()
   registerSpeedTestHandlers()
   registerKillSwitchIpc()
   registerRotationHandlers()

@@ -73,6 +73,9 @@ export interface ElectronAPI {
     | { ok: false; reason: string; error?: string }
   >
   serverProbe: (host: string, knownPort?: number) => Promise<any>
+  urlAvailabilityCheck: (url: string) => Promise<any>
+  urlAvailabilityHistory: () => Promise<any[]>
+  urlAvailabilityClearHistory: () => Promise<void>
   // Scheduler
   schedulerList: () => Promise<any[]>
   schedulerCreate: (entry: any) => Promise<any>
@@ -237,6 +240,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   serversExportKeyToFile: (id: string) => ipcRenderer.invoke('servers:export-key-file', id),
   serversExportAllKeysToFile: () => ipcRenderer.invoke('servers:export-all-keys-file'),
   serverProbe: (host: string, knownPort?: number) => ipcRenderer.invoke('server:probe', host, knownPort),
+  // URL Availability — paste a link, get verdict + diagnostics for both
+  // the tunnel path and the direct path (clash-direct-out when VPN is on).
+  urlAvailabilityCheck: (url: string) => ipcRenderer.invoke('url-availability:check', url),
+  urlAvailabilityHistory: () => ipcRenderer.invoke('url-availability:history'),
+  urlAvailabilityClearHistory: () => ipcRenderer.invoke('url-availability:clear-history'),
   // Scheduler
   schedulerList: () => ipcRenderer.invoke('scheduler:list'),
   schedulerCreate: (entry: any) => ipcRenderer.invoke('scheduler:create', entry),
