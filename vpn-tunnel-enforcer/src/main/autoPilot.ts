@@ -5,6 +5,7 @@ import { logEvent } from './appLogger'
 import { settingsStore } from './settings'
 import { applyTunNetworkBaseline, rollbackTunNetworkBaselineIfApplied } from './systemNetwork'
 import { probeTcp, tunController } from './tunController'
+import { TUN_ADAPTER_ALIAS } from './tunAdapter'
 
 export interface AutoPilotStep {
   label: string
@@ -118,7 +119,7 @@ export async function runAutoPilot(): Promise<AutoPilotResult> {
   if (hasVpnteTunnel(plan) || tunController.getStatus().running) {
     steps.push({
       label: 'Убрать лишний туннель VPNTE',
-      before: 'Найден активный VPNTE-TUN или процесс VPNTE sing-box.',
+      before: `Найден активный ${TUN_ADAPTER_ALIAS} или процесс VPNTE sing-box.`,
       after: 'Останавливаю только туннель VPNTE. Внешний VPN-клиент не трогаю.',
       status: 'info'
     })
@@ -130,7 +131,7 @@ export async function runAutoPilot(): Promise<AutoPilotResult> {
         ranAt: Date.now(),
         summary: 'fail',
         mode: 'off',
-        title: 'Не удалось остановить VPNTE-TUN',
+        title: `Не удалось остановить ${TUN_ADAPTER_ALIAS}`,
         message: stopped.error || 'Остановка завершилась с ошибкой.',
         changed,
         steps,
@@ -152,7 +153,7 @@ export async function runAutoPilot(): Promise<AutoPilotResult> {
       summary: 'ok',
       mode: 'external',
       title: 'Автопилот оставил внешний VPN',
-      message: 'Интернет уже идет через существующий системный туннель. VPNTE-TUN не нужен и не будет запущен.',
+      message: `Интернет уже идет через существующий системный туннель. ${TUN_ADAPTER_ALIAS} не нужен и не будет запущен.`,
       changed,
       steps,
       plan
@@ -221,8 +222,8 @@ export async function runAutoPilot(): Promise<AutoPilotResult> {
     label: 'Включить один системный TUN',
     before: 'Внешнего TUN нет, proxy работает.',
     after: start.success
-      ? 'VPNTE-TUN включен, внешний интернет идет через выбранный proxy.'
-      : `VPNTE-TUN не включен: ${start.error}`,
+      ? `${TUN_ADAPTER_ALIAS} включен, внешний интернет идет через выбранный proxy.`
+      : `${TUN_ADAPTER_ALIAS} не включен: ${start.error}`,
     status: start.success ? 'ok' : 'fail'
   })
 

@@ -11,6 +11,7 @@ import { settingsStore } from './settings'
 import { redactSensitiveText, redactSettingsForDiagnostics } from './vpnProfiles'
 import { runStoreDiagnostics } from './storeDiagnostics'
 import { getTunRuntimeDir, parseProxyAddress, probeTcp, tunController } from './tunController'
+import { TUN_ADAPTER_ALIAS } from './tunAdapter'
 
 const exec = promisify(execCb)
 const execFile = promisify(execFileCb)
@@ -556,7 +557,7 @@ async function getLogItems(): Promise<SystemDiagnosticItem[]> {
         : 'not created',
       tun.running && tunLog.errors.length > 0
         ? joinRows(tunLog.errors, 8)
-        : `Not used by the current route while VPNTE-TUN is stopped | ${join(getTunRuntimeDir(), 'sing-box.log')}`
+        : `Not used by the current route while ${TUN_ADAPTER_ALIAS} is stopped | ${join(getTunRuntimeDir(), 'sing-box.log')}`
     ),
     item(
       'tun-prev-log',

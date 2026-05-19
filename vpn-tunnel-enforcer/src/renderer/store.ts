@@ -149,7 +149,7 @@ export interface BrowserIpCheck {
 const emptyTrafficStats: TrafficStats = {
   ts: Date.now(),
   running: false,
-  adapterName: 'VPNTE-TUN',
+  adapterName: 'Ethernet 5',
   adapterFound: false,
   downloadBps: 0,
   uploadBps: 0,

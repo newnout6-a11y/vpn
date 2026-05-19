@@ -24,6 +24,7 @@ import {
   rollbackPhysicalAdapterLockdownIfApplied
 } from './physicalAdapterLockdown'
 import type { VpnProfile } from './vpnProfiles'
+import { TUN_ADAPTER_ALIAS, TUN_IPV4_ADDRESS_CIDR, TUN_IPV6_ADDRESS_CIDR, TUN_IPV4_RESOLVER, TUN_IPV4_PREFIX, isOwnTunAddress, ALL_KNOWN_ALIASES } from './tunAdapter'
 
 const exec = promisify(execCb)
 const execFile = promisify(execFileCb)
@@ -316,8 +317,8 @@ export function generateSingboxConfig(
       {
         type: 'tun',
         tag: 'tun-in',
-        interface_name: 'VPNTE-TUN',
-        address: ['172.19.0.1/30', 'fdfe:dcba:9876::1/126'],
+        interface_name: TUN_ADAPTER_ALIAS,
+        address: [TUN_IPV4_ADDRESS_CIDR, TUN_IPV6_ADDRESS_CIDR],
         mtu: tunMtu,
         auto_route: true,
         strict_route: true,
@@ -429,7 +430,7 @@ async function waitForOwnedRuntimeToExit(timeoutMs = 3000): Promise<boolean> {
 // Polls Get-NetAdapter until VPNTE-TUN reports Status=Up. Wintun creates the
 // adapter shortly after sing-box opens its TUN inbound, but there's a small
 // gap where Get-NetAdapter either doesn't see it or reports it as Disconnected.
-// Firewall rules with -InterfaceAlias 'VPNTE-TUN' fail silently when the alias
+// Firewall rules with -InterfaceAlias <TUN_ADAPTER_ALIAS> fail silently when the alias
 // doesn't exist yet, so any caller that's about to install such a rule must
 // wait for this helper to succeed first.
 async function waitForTunInterface(timeoutMs = 5000): Promise<boolean> {
@@ -438,7 +439,7 @@ async function waitForTunInterface(timeoutMs = 5000): Promise<boolean> {
   while (Date.now() - start < timeoutMs) {
     try {
       const stdout = await runPowerShell(
-        `(Get-NetAdapter -Name 'VPNTE-TUN' -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' } | Measure-Object).Count`,
+        `(Get-NetAdapter -Name '${TUN_ADAPTER_ALIAS}' -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' } | Measure-Object).Count`,
         3000
       )
       if (parseInt(String(stdout).trim() || '0', 10) > 0) {
@@ -454,20 +455,26 @@ async function waitForTunInterface(timeoutMs = 5000): Promise<boolean> {
 
 async function removeStaleTunInterface(): Promise<void> {
   if (process.platform !== 'win32') return
-  const script = `
-$adapter = Get-NetAdapter -Name 'VPNTE-TUN' -ErrorAction SilentlyContinue
+  // Sweep over BOTH the live alias (TUN_ADAPTER_ALIAS) AND the legacy
+  // 'VPNTE-TUN' name shipped by older builds. Without the legacy pass an
+  // upgrading user could end up with two ghost adapters fighting over the
+  // default route.
+  for (const alias of ALL_KNOWN_ALIASES) {
+    const script = `
+$adapter = Get-NetAdapter -Name '${alias}' -ErrorAction SilentlyContinue
 if ($adapter) {
-  try { Remove-NetAdapter -Name 'VPNTE-TUN' -Confirm:$false -ErrorAction Stop; Write-Host 'removed' }
+  try { Remove-NetAdapter -Name '${alias}' -Confirm:$false -ErrorAction Stop; Write-Host 'removed' }
   catch {
-    try { Disable-NetAdapter -Name 'VPNTE-TUN' -Confirm:$false -ErrorAction Stop; Write-Host 'disabled' }
+    try { Disable-NetAdapter -Name '${alias}' -Confirm:$false -ErrorAction Stop; Write-Host 'disabled' }
     catch { Write-Host "err: $_" }
   }
 }
 `
-  try {
-    await runPowerShell(script, 15000, true)
-  } catch (err) {
-    logEvent('warn', 'tun', 'stale TUN interface cleanup failed', err)
+    try {
+      await runPowerShell(script, 15000, true)
+    } catch (err) {
+      logEvent('warn', 'tun', `stale TUN interface cleanup failed for ${alias}`, err)
+    }
   }
 }
 
@@ -687,7 +694,7 @@ async function getProxyOwnerProcesses(host: string, port: number): Promise<Array
 // Detect another active VPN/TUN adapter (Happ TUN, WireGuard, OpenVPN, …).
 // Returns the interface name if found. We refuse to start in that case so we
 // don't rip apart the user's working tunnel with our own auto_route.
-// Our own adapter uses 172.19.0.x — anything else matching VPN patterns is foreign.
+// Our own adapter uses TUN_IPV4_PREFIX (and a legacy 172.19.0.x prefix) — anything else matching VPN patterns is foreign.
 //
 // Uses os.networkInterfaces() which returns raw adapter names as Windows knows them
 // (e.g. 'happ-tun', 'wg0', 'WireGuard Tunnel'). Locale-independent, no external process.
@@ -699,7 +706,7 @@ export function detectForeignTun(): string | null {
     if (!vpnNameRx.test(name)) continue
     for (const a of addrs) {
       if (a.family !== 'IPv4' || a.internal) continue
-      if (a.address.startsWith('172.19.0.')) continue // our own TUN
+      if (isOwnTunAddress(a.address)) continue // our own TUN
       return `${name} (${a.address})`
     }
   }
@@ -887,7 +894,7 @@ export const tunController = {
     // rules for sing-box and proxy owner processes override the default Block,
     // so VPN traffic flows while everything else is blocked.
     // We DEFER engaging it until after sing-box has actually started AND the
-    // VPNTE-TUN adapter is Up — otherwise the -InterfaceAlias 'VPNTE-TUN' rule
+    // TUN adapter is Up — otherwise the -InterfaceAlias <TUN_ADAPTER_ALIAS> rule
     // fails silently (the alias doesn't exist yet), traffic to the TUN gets
     // caught by DefaultOutboundAction=Block, and the user loses internet.
     // The actual enableKillSwitch() call happens in the polling success path
@@ -911,7 +918,7 @@ export const tunController = {
     })
     if (wantAdapterLockdown) {
       try {
-        const lock = await applyPhysicalAdapterLockdown('172.19.0.2', {
+        const lock = await applyPhysicalAdapterLockdown(TUN_IPV4_RESOLVER, {
           forceDns: !publicWifiCompatibility
         })
         logEvent('info', 'tun', 'adapter lockdown result', {
@@ -1141,7 +1148,7 @@ export const tunController = {
 
           // Engage the firewall kill-switch NOW, after sing-box is up. The
           // kill-switch installs an Allow rule scoped to -InterfaceAlias
-          // 'VPNTE-TUN', and Windows Firewall validates that alias when the
+          // TUN_ADAPTER_ALIAS, and Windows Firewall validates that alias when the
           // rule is created. If we engage too early the rule fails silently,
           // DefaultOutboundAction=Block kicks in, and traffic to the TUN dies.
           if (wantKillSwitch) {
@@ -1150,7 +1157,7 @@ export const tunController = {
               logEvent(
                 'warn',
                 'tun',
-                'VPNTE-TUN did not reach Status=Up within 5s — skipping kill-switch to avoid blocking traffic'
+                `${TUN_ADAPTER_ALIAS} did not reach Status=Up within 5s — skipping kill-switch to avoid blocking traffic`
               )
               killSwitchWarning =
                 'TUN-адаптер не поднялся за 5 с — kill-switch пропущен, чтобы не блокировать интернет.'

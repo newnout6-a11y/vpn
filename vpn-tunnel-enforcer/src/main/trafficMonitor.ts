@@ -1,6 +1,7 @@
 import { exec as execCb } from 'child_process'
 import { promisify } from 'util'
 import { logEvent } from './appLogger'
+import { TUN_ADAPTER_ALIAS } from './tunAdapter'
 
 const exec = promisify(execCb)
 
@@ -28,7 +29,7 @@ interface AdapterCounters {
   ts: number
 }
 
-function emptyStats(adapterName = 'VPNTE-TUN'): TrafficStats {
+function emptyStats(adapterName = TUN_ADAPTER_ALIAS): TrafficStats {
   return {
     ts: Date.now(),
     running: false,
@@ -50,7 +51,7 @@ let currentStats = emptyStats()
 let callbacks: Array<(stats: TrafficStats) => void> = []
 let intervalId: ReturnType<typeof setInterval> | null = null
 let polling = false
-let adapterName = 'VPNTE-TUN'
+let adapterName = TUN_ADAPTER_ALIAS
 let baseCounters: AdapterCounters | null = null
 let previousCounters: AdapterCounters | null = null
 let peakDownloadBps = 0
@@ -190,7 +191,7 @@ async function poll() {
 }
 
 export const trafficMonitor = {
-  start(name = 'VPNTE-TUN') {
+  start(name = TUN_ADAPTER_ALIAS) {
     if (intervalId) return
     adapterName = name
     startedAt = Date.now()

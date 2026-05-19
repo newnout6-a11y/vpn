@@ -35,6 +35,7 @@ import { readFile, writeFile, unlink } from 'fs/promises'
 import { join } from 'path'
 import { execElevated } from './admin'
 import { logEvent } from './appLogger'
+import { TUN_ADAPTER_ALIAS, TUN_IPV4_GATEWAY, TUN_IPV4_RESOLVER } from './tunAdapter'
 
 const MANIFEST_BASENAME = 'latest-physical-adapter-lockdown.json'
 
@@ -383,9 +384,9 @@ export async function repairOrphanedPhysicalAdapterDns(reason: string): Promise<
 
   const script = `
 $ErrorActionPreference = 'SilentlyContinue'
-$vpnteDns = @('172.19.0.1', '172.19.0.2')
+$vpnteDns = @('${TUN_IPV4_GATEWAY}', '${TUN_IPV4_RESOLVER}')
 $tunUp = Get-NetAdapter -ErrorAction SilentlyContinue |
-  Where-Object { $_.Status -eq 'Up' -and ($_.Name -eq 'VPNTE-TUN' -or $_.InterfaceDescription -match 'VPNTE') } |
+  Where-Object { $_.Status -eq 'Up' -and ($_.Name -eq '${TUN_ADAPTER_ALIAS}' -or $_.InterfaceDescription -match 'VPNTE') } |
   Select-Object -First 1
 if ($tunUp) {
   [pscustomobject]@{ skipped = 'tun-up'; adapters = @() } | ConvertTo-Json -Compress

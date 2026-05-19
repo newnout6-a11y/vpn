@@ -5,6 +5,7 @@ import { join } from 'path'
 import { networkInterfaces } from 'os'
 import { promisify } from 'util'
 import { detectForeignTun, getTunRuntimeDir, parseProxyAddress, probeTcp } from './tunController'
+import { TUN_ADAPTER_ALIAS } from './tunAdapter'
 
 const exec = promisify(execCb)
 
@@ -292,7 +293,7 @@ export async function runLeakCheck(options: RunLeakCheckOptions = {}): Promise<L
       status: externalOnly ? 'info' : 'warn',
       value: externalOnly ? 'Не нужен: внешний VPN активен' : 'Не указан',
       details: externalOnly
-        ? `Найден ${foreignTun}. VPNTE-TUN намеренно выключен, поэтому upstream proxy сейчас не требуется.`
+        ? `Найден ${foreignTun}. ${TUN_ADAPTER_ALIAS} намеренно выключен, поэтому upstream proxy сейчас не требуется.`
         : 'Диагностика не может проверить upstream proxy'
     })
   }
@@ -306,7 +307,7 @@ export async function runLeakCheck(options: RunLeakCheckOptions = {}): Promise<L
     details: options.tunRunning
       ? 'Должен совпадать с IP через выбранный proxy'
       : externalOnly
-        ? 'VPNTE-TUN выключен, интернет идет через внешний VPN/TUN'
+        ? `${TUN_ADAPTER_ALIAS} выключен, интернет идет через внешний VPN/TUN`
         : 'TUN сейчас выключен'
   })
 

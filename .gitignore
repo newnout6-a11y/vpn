@@ -15,7 +15,7 @@ out/
 # - Throwaway scripts under _diag_temp and ad-hoc probe scripts.
 diag-extract/
 diag-extract-new/
-_diag_temp/
+_diag*/
 *-diagnostics-*.zip
 .kiro/
 .vscode/

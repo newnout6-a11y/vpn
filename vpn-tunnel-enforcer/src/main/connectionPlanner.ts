@@ -4,6 +4,7 @@ import { happDetector, type ProxyInfo } from './happDetector'
 import { settingsStore } from './settings'
 import { parseProxyAddress, probeTcp, tunController } from './tunController'
 import { logEvent } from './appLogger'
+import { TUN_ADAPTER_ALIAS } from './tunAdapter'
 
 const exec = promisify(execCb)
 const MAX_BUFFER = 1024 * 1024 * 4
@@ -112,7 +113,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue |
       Name=$adapter.Name;
       Description=$adapter.InterfaceDescription;
       Address=($ips -join ', ');
-      IsVpnte=($adapter.Name -eq 'VPNTE-TUN' -or ($ips -join ',') -match '^172\\.19\\.')
+      IsVpnte=($adapter.Name -eq TUN_ADAPTER_ALIAS -or ($ips -join ',') -match '^172\\.19\\.')
     }
   } | ConvertTo-Json -Compress
 `)
@@ -188,11 +189,11 @@ export async function getRoutingPlan(): Promise<RoutingPlan> {
   const vpnteText = vpnteTunnels.map(tunnelLabel).join(', ')
 
   if (tunStatus.running && foreignTunnels.length > 0) {
-    blockers.push('Одновременно активны внешний TUN и VPNTE-TUN.')
+    blockers.push(`Одновременно активны внешний TUN и ${TUN_ADAPTER_ALIAS}.`)
     steps.push({
       label: 'Убрать двойной туннель',
-      before: `Сейчас включены два системных туннеля: ${foreignText} и ${vpnteText || 'VPNTE-TUN'}.`,
-      after: 'Приложение остановит VPNTE-TUN. Останется один существующий VPN/TUN, поэтому DNS перестанет петлять.',
+      before: `Сейчас включены два системных туннеля: ${foreignText} и ${vpnteText || TUN_ADAPTER_ALIAS}.`,
+      after: `Приложение остановит ${TUN_ADAPTER_ALIAS}. Останется один существующий VPN/TUN, поэтому DNS перестанет петлять.`,
       status: 'fail'
     })
     return {
@@ -201,8 +202,8 @@ export async function getRoutingPlan(): Promise<RoutingPlan> {
       recommendedMode: 'external',
       title: 'Найден двойной туннель',
       explanation: 'Это как раз тот сценарий, из-за которого интернет “иногда умирает”: DNS и HTTPS могут уходить в циклический маршрут.',
-      before: `Было: ${foreignText} + VPNTE-TUN.`,
-      after: 'Станет: один активный туннель. VPNTE-TUN нужно остановить, либо выключить TUN в VPN-клиенте и оставить только proxy.',
+      before: `Было: ${foreignText} + ${TUN_ADAPTER_ALIAS}.`,
+      after: `Станет: один активный туннель. ${TUN_ADAPTER_ALIAS} нужно остановить, либо выключить TUN в VPN-клиенте и оставить только proxy.`,
       canStartHard: false,
       proxy,
       activeTunnels,
@@ -299,7 +300,7 @@ export async function getRoutingPlan(): Promise<RoutingPlan> {
 
   steps.push({
     label: 'Создать системный TUN',
-    before: `Сейчас системного VPNTE-TUN нет, а proxy ${proxyText} работает.`,
+    before: `Сейчас системного ${TUN_ADAPTER_ALIAS} нет, а proxy ${proxyText} работает.`,
     after: 'VPNTE создаст один системный туннель и направит обычный интернет через этот proxy.',
     status: 'ok'
   })
@@ -317,7 +318,7 @@ export async function getRoutingPlan(): Promise<RoutingPlan> {
     title: 'Можно включать Hard mode',
     explanation: 'Конфликтующих TUN не найдено, proxy живой. Это безопасный сценарий для системного перенаправления.',
     before: `Было: интернет идет обычным маршрутом, proxy доступен на ${proxyText}.`,
-    after: 'Станет: внешний интернет пойдет через VPNTE-TUN, а proxy-core будет исключен из туннеля, чтобы не было петли.',
+    after: `Станет: внешний интернет пойдет через ${TUN_ADAPTER_ALIAS}, а proxy-core будет исключен из туннеля, чтобы не было петли.`,
     canStartHard: true,
     proxy,
     activeTunnels,

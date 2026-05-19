@@ -5,6 +5,7 @@ import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import { execElevated } from './admin'
 import { logEvent } from './appLogger'
+import { TUN_ADAPTER_ALIAS, TUN_IPV4_NETWORK_CIDR } from './tunAdapter'
 
 const execFile = promisify(execFileCb)
 
@@ -235,9 +236,9 @@ ${proxyAllowParts.join('\n')}
 try {
   New-NetFirewallRule \`
     -DisplayName ${psSingleQuote(tunInterfaceAllow)} \`
-    -Description 'VPN Tunnel Enforcer kill-switch: allow captured app traffic through VPNTE-TUN.' \`
+    -Description 'VPN Tunnel Enforcer kill-switch: allow captured app traffic through ${TUN_ADAPTER_ALIAS}.' \`
     -Direction Outbound -Action Allow \`
-    -InterfaceAlias 'VPNTE-TUN' \`
+    -InterfaceAlias '${TUN_ADAPTER_ALIAS}' \`
     -Profile Any -Enabled True | Out-Null
   $rules += ${psSingleQuote(tunInterfaceAllow)}
 } catch { Write-Host "WARN allow-tun-interface: $_" }
@@ -253,13 +254,13 @@ try {
   $rules += ${psSingleQuote(lanAllow)}
 } catch { Write-Host "WARN allow-lan: $_" }
 
-# 3e. Allow TUN subnet (172.19.0.0/30) so sing-box TUN traffic works.
+# 3e. Allow TUN subnet (${TUN_IPV4_NETWORK_CIDR}) so sing-box TUN traffic works.
 try {
   New-NetFirewallRule \`
     -DisplayName ${psSingleQuote(tunAllow)} \`
     -Description 'VPN Tunnel Enforcer kill-switch: allow TUN subnet.' \`
     -Direction Outbound -Action Allow \`
-    -RemoteAddress '172.19.0.0/30' \`
+    -RemoteAddress '${TUN_IPV4_NETWORK_CIDR}' \`
     -Profile Any -Enabled True | Out-Null
   $rules += ${psSingleQuote(tunAllow)}
 } catch { Write-Host "WARN allow-tun: $_" }
