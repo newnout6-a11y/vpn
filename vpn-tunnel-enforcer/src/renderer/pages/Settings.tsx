@@ -1,5 +1,5 @@
 import { useAppStore } from '../store'
-import { Bell, FileArchive, FolderOpen, Globe2, Loader2, Network, Palette, RefreshCw, Save, Settings2, ShieldCheck, Wand2, Languages } from 'lucide-react'
+import { Bell, EyeOff, FileArchive, FolderOpen, Globe2, Loader2, Network, Palette, RefreshCw, Save, Settings2, ShieldCheck, Wand2, Languages } from 'lucide-react'
 import { ReactNode, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { KillSwitchSettings } from '../components/KillSwitchSettings'
@@ -326,6 +326,23 @@ export function Settings() {
             description="Показывать toast при включении защиты, падении sing-box, утечке IP."
             checked={settings.desktopNotifications}
             onChange={(next) => updateSettings({ desktopNotifications: next })}
+          />
+
+          <ToggleRow
+            icon={<EyeOff className="w-4 h-4 text-[var(--color-warning)]" />}
+            title={<>Stealth-режим <span className="text-[var(--color-warning)]">(ТСПУ / DPI)</span></>}
+            description={
+              <>
+                Маскирует характерные признаки VPN-трафика для DPI-фильтров
+                (TSPU и аналогичных): MTU 1280 вместо 1500 и фрагментация TLS
+                ClientHello для не-Reality outbounds. Цена — ~5% пропускной
+                способности и пара лишних round-trip'ов на handshake.
+                Включайте, если VPN режется или скорость обваливается без
+                видимой причины. Применяется при перезапуске защиты.
+              </>
+            }
+            checked={settings.stealthMode}
+            onChange={(next) => updateSettings({ stealthMode: next })}
           />
         </div>
       </MacCard>

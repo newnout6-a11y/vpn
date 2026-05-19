@@ -63,6 +63,10 @@ interface StartOptions {
   // Keep DHCP/public-Wi-Fi DNS on the physical adapter instead of forcing it to
   // VPNTE-TUN. This avoids captive-portal/Windows "no internet" false positives.
   publicWifiCompatibility?: boolean
+  // Anti-DPI mitigations (TSPU bypass): MTU 1280 in TUN inbound and TLS
+  // record-fragment in non-Reality outbounds. Read from settings on every
+  // start so toggling the UI immediately takes effect on the next restart.
+  stealthMode?: boolean
 }
 
 let currentStatus: TunStatus = {
@@ -233,8 +237,21 @@ function sanitizeProxyOutbound(outbound: Record<string, any>): { outbound: Recor
 export function generateSingboxConfig(
   upstream: string | { outbound: Record<string, any>; proxyType?: 'socks5' | 'http' },
   proxyType: 'socks5' | 'http' = 'socks5',
-  directProcessNames: string[] = []
+  directProcessNames: string[] = [],
+  options: { stealthMode?: boolean } = {}
 ): object {
+  // Stealth mode (TSPU/DPI bypass) toggles two knobs:
+  //   1. TUN MTU 1500 → 1280 — encrypted payload sizes drift away from
+  //      values DPI signature databases pattern-match for VPN traffic, and
+  //      1280 is the IPv6-min-MTU floor so it always negotiates cleanly.
+  //   2. tls.record_fragment on the proxy outbound (when the outbound has
+  //      regular TLS, NOT Reality — Reality has its own ClientHello
+  //      mimicry and fragmenting on top can break the auth handshake).
+  //      record_fragment is the cheaper of the two TLS fragmenting modes
+  //      offered by sing-box 1.12+; the docs explicitly recommend it as
+  //      the first thing to try.
+  const stealthMode = options.stealthMode === true
+  const tunMtu = stealthMode ? 1280 : 1500
   const isDirectVpn = typeof upstream !== 'string'
   const parsedProxy = typeof upstream === 'string' ? parseProxyAddress(upstream) : null
   const proxyCoreProcesses = isDirectVpn ? [] : uniqueProcessNames([...PROXY_CORE_PROCESS_NAMES, ...directProcessNames])
@@ -248,6 +265,19 @@ export function generateSingboxConfig(
       ? { type: 'http', tag: 'proxy-out', server: parsedProxy!.host, server_port: parsedProxy!.port }
       : { type: 'socks', tag: 'proxy-out', version: '5', server: parsedProxy!.host, server_port: parsedProxy!.port }
   const { outbound: proxyOutbound, needsBootstrapDns } = sanitizeProxyOutbound(baseProxyOutbound)
+
+  // Apply TLS record-fragmentation when stealthMode is on AND the outbound
+  // has plain TLS (NOT Reality). Reality embeds auth in the structure of
+  // the ClientHello that mimics the camouflage target — fragmenting on top
+  // would scramble that and break Reality auth on the server side.
+  if (stealthMode && proxyOutbound.tls && typeof proxyOutbound.tls === 'object') {
+    const tls = proxyOutbound.tls as Record<string, any>
+    const realityEnabled = tls.reality && typeof tls.reality === 'object'
+      && tls.reality.enabled !== false
+    if (!realityEnabled) {
+      tls.record_fragment = true
+    }
+  }
 
   const logPath = join(getTunRuntimeDir(), 'sing-box.log').replace(/\\/g, '/')
   const privateRanges = [
@@ -288,7 +318,7 @@ export function generateSingboxConfig(
         tag: 'tun-in',
         interface_name: 'VPNTE-TUN',
         address: ['172.19.0.1/30', 'fdfe:dcba:9876::1/126'],
-        mtu: 1500,
+        mtu: tunMtu,
         auto_route: true,
         strict_route: true,
         route_address: ['0.0.0.0/1', '128.0.0.0/1', '::/1', '8000::/1'],
@@ -679,7 +709,8 @@ export function detectForeignTun(): string | null {
 async function prepareRuntime(
   upstream: string | { outbound: Record<string, any>; proxyType?: 'socks5' | 'http' },
   proxyType: 'socks5' | 'http',
-  directProcessNames: string[]
+  directProcessNames: string[],
+  options: { stealthMode?: boolean } = {}
 ): Promise<{ singbox: string; config: string }> {
   const runtimeDir = getTunRuntimeDir()
   await mkdir(runtimeDir, { recursive: true })
@@ -707,7 +738,7 @@ async function prepareRuntime(
   await copyFile(singboxSrc, singboxDst)
   await copyFile(wintunSrc, wintunDst)
 
-  const config = generateSingboxConfig(upstream, proxyType, directProcessNames)
+  const config = generateSingboxConfig(upstream, proxyType, directProcessNames, options)
   await writeFile(configPath, JSON.stringify(config, null, 2), 'utf-8')
 
   return { singbox: singboxDst, config: configPath }
@@ -841,7 +872,8 @@ export const tunController = {
           ? { outbound: vpnProfile.outbound, proxyType }
           : proxyAddr,
         proxyType,
-        proxyOwnerProcessNames
+        proxyOwnerProcessNames,
+        { stealthMode: startOptions.stealthMode === true }
       )
       await exec(`"${runtime.singbox}" check -c "${runtime.config}"`)
     } catch (err: any) {

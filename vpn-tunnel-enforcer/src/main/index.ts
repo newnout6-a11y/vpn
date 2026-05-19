@@ -391,7 +391,8 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
     proxyType: proxyType ?? 'socks5',
     enableFirewallKillSwitch: settingsStore.get().firewallKillSwitch,
     enableAdapterLockdown: settingsStore.get().strictAdapterLockdown,
-    publicWifiCompatibility: settingsStore.get().publicWifiCompatibility
+    publicWifiCompatibility: settingsStore.get().publicWifiCompatibility,
+    stealthMode: settingsStore.get().stealthMode
   })
   if (!result.success) {
     // TUN failed to start. If we wiped the user's proxy settings to prepare for it,
@@ -535,7 +536,8 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
     proxyType: 'socks5',
     enableFirewallKillSwitch: settings.firewallKillSwitch,
     enableAdapterLockdown: settings.strictAdapterLockdown,
-    publicWifiCompatibility: settings.publicWifiCompatibility
+    publicWifiCompatibility: settings.publicWifiCompatibility,
+    stealthMode: settings.stealthMode
   })
   if (!result.success) {
     await rollbackTunNetworkBaselineIfApplied('direct-vpn start failed').catch(err =>

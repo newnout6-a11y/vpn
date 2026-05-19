@@ -137,7 +137,13 @@ function normalizeSettings(input: Partial<AppSettings> | undefined): AppSettings
     autoRestartOnCrash: merged.autoRestartOnCrash !== false,
     desktopNotifications: merged.desktopNotifications !== false,
     publicWifiCompatibility: merged.publicWifiCompatibility !== false,
-    strictAdapterLockdown: merged.strictAdapterLockdown !== false
+    strictAdapterLockdown: merged.strictAdapterLockdown !== false,
+    // stealthMode is OFF by default — its mitigations (smaller MTU, TLS
+    // fragmentation) cost a few % bandwidth and extra round-trips, only
+    // worth paying on networks that actively shape VPN traffic. Without
+    // this line the field was silently dropped on every save/load, so
+    // the existing UI toggle had no effect.
+    stealthMode: Boolean(merged.stealthMode)
   }
 }
 

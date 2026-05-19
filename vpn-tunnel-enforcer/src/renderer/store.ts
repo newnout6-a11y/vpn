@@ -90,6 +90,10 @@ export interface AppSettings {
   desktopNotifications: boolean
   publicWifiCompatibility: boolean
   strictAdapterLockdown: boolean
+  // Anti-DPI / TSPU bypass mode. When true the main process lowers TUN
+  // MTU and adds TLS ClientHello fragmentation to non-Reality outbounds
+  // to make the encrypted flow harder to fingerprint.
+  stealthMode: boolean
 }
 
 export interface LeakCheckItem {
@@ -281,7 +285,8 @@ export const useAppStore = create<AppState>((set) => ({
     autoRestartOnCrash: true,
     desktopNotifications: true,
     publicWifiCompatibility: true,
-    strictAdapterLockdown: true
+    strictAdapterLockdown: true,
+    stealthMode: false
   },
 
   setMode: (mode) => set({ mode }),

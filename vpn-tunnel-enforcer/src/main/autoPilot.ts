@@ -206,7 +206,8 @@ export async function runAutoPilot(): Promise<AutoPilotResult> {
     proxyAddr: `${proxy.host}:${proxy.port}`,
     proxyType: proxy.type,
     enableFirewallKillSwitch: settingsStore.get().firewallKillSwitch,
-    enableAdapterLockdown: settingsStore.get().strictAdapterLockdown
+    enableAdapterLockdown: settingsStore.get().strictAdapterLockdown,
+    stealthMode: settingsStore.get().stealthMode
   })
   changed = true
   if (!start.success) {
