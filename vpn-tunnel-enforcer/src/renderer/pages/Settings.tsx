@@ -285,6 +285,33 @@ export function Settings() {
             Защита
           </h3>
 
+          {/* Read-only banner: surfaces the always-on adapter-disguise
+              behaviour added in the disguise feature commit. No toggle —
+              we want this on by default for everyone. */}
+          <div className="rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[var(--color-bg)] p-3 flex gap-3">
+            <EyeOff className="w-4 h-4 text-[var(--color-accent)] flex-shrink-0 mt-0.5" />
+            <div className="text-xs text-[var(--color-text-secondary)] space-y-1">
+              <p className="text-[var(--color-text)] font-medium">
+                Другие программы не видят, что вы под VPN
+              </p>
+              <p>
+                <span className="text-[var(--color-text-secondary)]">Сейчас:</span>{' '}
+                игры, банковские клиенты и сайты часто отказываются работать,
+                если замечают характерное «VPN-соединение» в системе.
+              </p>
+              <p>
+                <span className="text-[var(--color-text-secondary)]">Станет:</span>{' '}
+                ваш канал в системе выглядит как обычная домашняя сеть, без
+                выпирающих VPN-меток. Большинство таких проверок не
+                сработает.
+              </p>
+              <p className="text-[var(--color-text-muted)]">
+                Работает автоматически при каждом включении защиты — отдельный
+                переключатель не нужен.
+              </p>
+            </div>
+          </div>
+
           <ToggleRow
             icon={<Network className="w-4 h-4 text-green-500" />}
             title={<>Жёсткая блокировка адаптеров <span className="text-green-500">(рекомендуется)</span></>}
@@ -330,15 +357,26 @@ export function Settings() {
 
           <ToggleRow
             icon={<EyeOff className="w-4 h-4 text-[var(--color-warning)]" />}
-            title={<>Stealth-режим <span className="text-[var(--color-warning)]">(ТСПУ / DPI)</span></>}
+            title={<>Невидимка против «фильтров» <span className="text-[var(--color-warning)]">(когда «режут» VPN)</span></>}
             description={
               <>
-                Маскирует характерные признаки VPN-трафика для DPI-фильтров
-                (TSPU и аналогичных): MTU 1280 вместо 1500 и фрагментация TLS
-                ClientHello для не-Reality outbounds. Цена — ~5% пропускной
-                способности и пара лишних round-trip'ов на handshake.
-                Включайте, если VPN режется или скорость обваливается без
-                видимой причины. Применяется при перезапуске защиты.
+                <span className="block">
+                  <span className="text-[var(--color-text-secondary)]">Сейчас:</span>{' '}
+                  поток через защиту виден провайдеру как «типичный VPN»,
+                  и его могут замедлять или резать пакетами.
+                </span>
+                <span className="block mt-1">
+                  <span className="text-[var(--color-text-secondary)]">Станет:</span>{' '}
+                  поток будет выглядеть «обычнее», и фильтрам сложнее его
+                  опознать. Помогает, если страницы зависают, видео
+                  тормозит или сайты грузятся «через раз», хотя интернет
+                  вроде есть.
+                </span>
+                <span className="block mt-1 text-[var(--color-text-secondary)]">
+                  Цена: пара процентов скорости и чуть более долгий первый
+                  отклик. Изменения вступят в силу после следующего
+                  включения защиты.
+                </span>
               </>
             }
             checked={settings.stealthMode}

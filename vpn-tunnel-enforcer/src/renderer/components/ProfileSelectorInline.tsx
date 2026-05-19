@@ -143,10 +143,11 @@ export function ProfileSelectorInline() {
     if (pingMs === 'pinging') return '…'
     if (pingMs === -1) return t('profileSelector.pingFailed', '—')
     if (typeof pingMs === 'number') {
-      // Prefix with "Тон." (тоннель) when measuring round-trip through the
-      // active outbound, so the value can't be confused with per-server
-      // latency. The button is narrow, so we avoid a longer prefix.
-      const prefix = tunRunning ? 'Тон. ' : ''
+      // "≈" before the number when the value is the round-trip through
+      // the active tunnel rather than per-server latency. The button is
+      // narrow so we stick to a single glyph — the tooltip carries the
+      // full explanation.
+      const prefix = tunRunning ? '≈ ' : ''
       return `${prefix}${pingMs} ${t('profileSelector.ms', 'ms')}`
     }
     return null
@@ -213,11 +214,11 @@ export function ProfileSelectorInline() {
           onClick={handlePingSelected}
           disabled={pingMs === 'pinging' || !currentName}
           aria-label={tunRunning
-            ? t('profileSelector.pingTunnel', 'Замерить пинг через тоннель')
-            : t('profileSelector.pingSelected', 'Пингануть выбранный')}
+            ? t('profileSelector.pingTunnelLong', 'Замерить отклик активного канала. Пока защита включена, цифра отражает общее «как сейчас», а не задержку до конкретного сервера — для сравнения серверов отключите защиту.')
+            : t('profileSelector.pingSelectedLong', 'Измерить, насколько быстро отвечает выбранный сервер.')}
           title={tunRunning
-            ? t('profileSelector.pingTunnel', 'Замерить пинг через тоннель')
-            : t('profileSelector.pingSelected', 'Пингануть выбранный')}
+            ? t('profileSelector.pingTunnelLong', 'Замерить отклик активного канала. Пока защита включена, цифра отражает общее «как сейчас», а не задержку до конкретного сервера — для сравнения серверов отключите защиту.')
+            : t('profileSelector.pingSelectedLong', 'Измерить, насколько быстро отвечает выбранный сервер.')}
           className={cn(
             'inline-flex items-center gap-1.5 px-2.5 py-1.5 mr-1 rounded-[var(--radius-sm)] text-xs font-medium tabular-nums',
             'border border-[var(--color-border)] bg-[var(--color-bg)]/60',
