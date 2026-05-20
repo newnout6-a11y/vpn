@@ -49,6 +49,7 @@ declare global {
       rollbackTunNetworkBaseline: () => Promise<any>
       disableFirewallKillSwitch: () => Promise<{ success: boolean; message: string }>
       getFirewallKillSwitchStatus: () => Promise<{ active: boolean }>
+      firewallNuclearReset: () => Promise<{ success: boolean; message: string }>
       getLocationPrivacy: () => Promise<any>
       applyLocationPrivacy: () => Promise<any>
       rollbackLocationPrivacy: () => Promise<any>

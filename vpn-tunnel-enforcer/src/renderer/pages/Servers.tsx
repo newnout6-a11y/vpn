@@ -348,7 +348,7 @@ export function Servers() {
                     onExport={handleExport}
                     onExportToFile={handleExportToFile}
                     onOpenDetail={setDetailProfile}
-                    t={t}
+                    t={(key, fallback) => t(key, fallback ?? key) as string}
                   />
                 ))}
               </div>
