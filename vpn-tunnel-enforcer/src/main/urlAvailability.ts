@@ -470,9 +470,15 @@ export function deriveVerdict(
   // Tunnel off — only direct measurement was taken.
   if (!tunnel && direct) {
     if (direct.available) {
+      if (direct.http?.status === 403 || direct.http?.status === 401) {
+        return {
+          verdict: 'works-only-with-vpn',
+          recommendation: 'Сам сайт запрещает доступ (отдаёт ошибку доступа 403). Скорее всего, он блокирует пользователей по IP. Включите VPN.'
+        }
+      }
       return {
         verdict: 'works-both',
-        recommendation: 'Сайт доступен без VPN. Защита не требуется для этого ресурса.'
+        recommendation: 'Провайдер не блокирует сайт (сеть работает). Если сайт всё равно недоступен или пишет «Not supported in your country», значит он сам запрещает доступ по IP — включите VPN.'
       }
     }
     return {
@@ -485,9 +491,22 @@ export function deriveVerdict(
     const t = tunnel.available
     const d = direct.available
     if (t && d) {
+      // Geo-block heuristic: VPN gets 200 OK, direct gets 403 Forbidden.
+      // This means the ISP/RKN is NOT blocking the site, but the destination
+      // server is actively refusing Russian IPs.
+      if (
+        (tunnel.http?.status === 200 || tunnel.http?.status === 301 || tunnel.http?.status === 302 || tunnel.http?.status === 307) &&
+        (direct.http?.status === 403 || direct.http?.status === 401)
+      ) {
+        return {
+          verdict: 'works-only-with-vpn',
+          recommendation: 'Сам сайт запрещает доступ без VPN (отдаёт ошибку доступа 403). Оставьте защиту включённой.'
+        }
+      }
+
       return {
         verdict: 'works-both',
-        recommendation: 'Сайт открывается и с VPN, и без него. Защита для этого ресурса опциональна.'
+        recommendation: 'Провайдер не блокирует сайт (сеть работает). Если сайт всё равно недоступен или пишет «Not supported in your country», значит он сам запрещает доступ из РФ — в таком случае включите VPN.'
       }
     }
     if (t && !d) {
