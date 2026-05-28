@@ -7,7 +7,8 @@
  *
  * Three at-a-glance widgets, top to bottom:
  *   1. Quick server picker — every profile with country flag and live ping,
- *      one click to switch.
+ *      one click to switch. Profiles are now grouped by their parent
+ *      subscription/manual group with a tiny status pill (А/И/Н/?).
  *   2. Live traffic sparkline — download/upload over the last 60 seconds.
  *   3. Recent sites — top-5 domains seen by the tunnel.
  *
@@ -35,6 +36,14 @@ import { detectCountry } from './countryGlyph'
 import { SERVER_CHANGED_EVENT, emitServerChanged } from '../nav'
 import type { ServerProfile } from '../../shared/ipc-types'
 
+// Local mirror — see Servers.tsx / ProfileSelectorInline.tsx for rationale.
+interface ServerGroup {
+  id: string
+  name: string
+  source: 'subscription' | 'manual'
+  status: 'active' | 'expired' | 'unreachable' | 'unknown'
+}
+
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
 function formatSpeedShort(bytesPerSecond: number): string {
@@ -55,6 +64,19 @@ function pingTone(ms: number | null | undefined): string {
   return 'text-[var(--color-danger)]'
 }
 
+function groupPillTone(status: ServerGroup['status']): string {
+  switch (status) {
+    case 'active':
+      return 'bg-[var(--color-success)]/15 text-[var(--color-success)] border-[var(--color-success)]/30'
+    case 'expired':
+      return 'bg-[var(--color-warning)]/15 text-[var(--color-warning)] border-[var(--color-warning)]/30'
+    case 'unreachable':
+      return 'bg-[var(--color-danger)]/15 text-[var(--color-danger)] border-[var(--color-danger)]/30'
+    default:
+      return 'bg-[var(--color-border)] text-[var(--color-text-secondary)] border-[var(--color-border)]'
+  }
+}
+
 // ─── Quick server picker ───────────────────────────────────────────────────
 
 /**
@@ -66,6 +88,8 @@ function QuickServers() {
   const addLog = useAppStore(s => s.addLog)
 
   const [profiles, setProfiles] = useState<ServerProfile[]>([])
+  const [groups, setGroups] = useState<ServerGroup[]>([])
+  const [groupsAvailable, setGroupsAvailable] = useState<boolean>(false)
   const [activeId, setActiveId] = useState<string | null>(null)
   const [pings, setPings] = useState<Record<string, number | null | 'pinging'>>({})
   const [pingingAll, setPingingAll] = useState(false)
@@ -78,6 +102,22 @@ function QuickServers() {
       ])
       setProfiles(list)
       setActiveId(active.activeId ?? active.profile?.id ?? null)
+      const api = window.electronAPI as unknown as {
+        groupsList?: () => Promise<ServerGroup[]>
+      }
+      if (typeof api.groupsList === 'function') {
+        try {
+          const gs = await api.groupsList()
+          setGroups(Array.isArray(gs) ? gs : [])
+          setGroupsAvailable(true)
+        } catch {
+          setGroupsAvailable(false)
+          setGroups([])
+        }
+      } else {
+        setGroupsAvailable(false)
+        setGroups([])
+      }
     } catch {
       // Silent — list will simply stay empty if IPC fails.
     }
@@ -108,8 +148,10 @@ function QuickServers() {
     onSelect: () => void
   }
 
-  const rows: Row[] = useMemo(() => {
-    return profiles.map(profile => ({
+  // Build clusters per group, falling back to a single ungrouped cluster
+  // when IPC isn't available.
+  const clusters = useMemo<Array<{ group: ServerGroup | null; rows: Row[] }>>(() => {
+    const makeRow = (profile: ServerProfile): Row => ({
       key: profile.id,
       name: profile.name,
       protocol: profile.protocol,
@@ -129,8 +171,36 @@ function QuickServers() {
           refresh()
         }
       }
-    }))
-  }, [profiles, activeId, addLog, refresh])
+    })
+
+    if (!groupsAvailable) {
+      return [{ group: null, rows: profiles.map(makeRow) }]
+    }
+    const buckets = new Map<string, Row[]>()
+    const orphans: Row[] = []
+    for (const g of groups) buckets.set(g.id, [])
+    for (const p of profiles) {
+      const gid = (p as ServerProfile & { groupId?: string }).groupId
+      if (gid && buckets.has(gid)) buckets.get(gid)!.push(makeRow(p))
+      else orphans.push(makeRow(p))
+    }
+    const sorted = [...groups].sort((a, b) => {
+      if (a.source !== b.source) return a.source === 'subscription' ? -1 : 1
+      return 0
+    })
+    const out: Array<{ group: ServerGroup | null; rows: Row[] }> = []
+    for (const g of sorted) {
+      const list = buckets.get(g.id) ?? []
+      if (list.length > 0) out.push({ group: g, rows: list })
+    }
+    if (orphans.length > 0) out.push({ group: null, rows: orphans })
+    return out
+  }, [profiles, groups, groupsAvailable, activeId, addLog, refresh])
+
+  const totalRows = useMemo(
+    () => clusters.reduce((sum, c) => sum + c.rows.length, 0),
+    [clusters]
+  )
 
   // Ping a single endpoint and write the result into our local map.
   const pingOne = useCallback(async (key: string, host: string, port: number) => {
@@ -146,9 +216,7 @@ function QuickServers() {
   const handlePingAll = async () => {
     setPingingAll(true)
     try {
-      // Limit concurrency to 5 so we don't open dozens of sockets at once
-      // when the user has 50+ profiles in their subscription.
-      const queue = rows.filter(r => r.host && r.port)
+      const queue: Row[] = clusters.flatMap(c => c.rows.filter(r => r.host && r.port))
       const concurrency = 5
       let i = 0
       const worker = async () => {
@@ -164,7 +232,7 @@ function QuickServers() {
     }
   }
 
-  if (rows.length === 0) {
+  if (totalRows === 0) {
     return (
       <MacCard className="!p-3">
         <h3 className="text-xs font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider mb-2 flex items-center gap-1.5">
@@ -185,7 +253,7 @@ function QuickServers() {
           <Globe className="w-3.5 h-3.5" />
           {t('dashboardSide.servers', 'Серверы')}
           <span className="text-[var(--color-text-muted)] font-normal lowercase">
-            ·&nbsp;{rows.length}
+            ·&nbsp;{totalRows}
           </span>
         </h3>
         <button
@@ -210,87 +278,129 @@ function QuickServers() {
         </button>
       </div>
 
-      <ul className="overflow-y-auto pr-1 -mr-1 space-y-1 max-h-[420px]">
-        {rows.map(row => {
-          // Country comes from the picker geolocation (filled by IP via ipapi)
-          // — we only fall back to name recognition for the flag emoji when
-          // geolocation hasn't completed yet.
-          const recognised = detectCountry(row.name)
-          const ping = pings[row.key]
-          const pingValue = ping === 'pinging' ? null : ping
+      <div className="overflow-y-auto pr-1 -mr-1 max-h-[420px] space-y-3">
+        {clusters.map((cluster, idx) => {
+          const statusKey = cluster.group?.status ?? 'unknown'
+          const statusShort =
+            statusKey === 'active'
+              ? t('dashboardSide.groupActive', 'А')
+              : statusKey === 'expired'
+                ? t('dashboardSide.groupExpired', 'И')
+                : statusKey === 'unreachable'
+                  ? t('dashboardSide.groupUnreachable', 'Н')
+                  : t('dashboardSide.groupUnknown', '?')
+          const statusTitle =
+            statusKey === 'active'
+              ? t('dashboardSide.groupStatusActiveTitle', 'Активна')
+              : statusKey === 'expired'
+                ? t('dashboardSide.groupStatusExpiredTitle', 'Истекла, ключи могут работать')
+                : statusKey === 'unreachable'
+                  ? t('dashboardSide.groupStatusUnreachableTitle', 'Не отвечает')
+                  : t('dashboardSide.groupStatusUnknownTitle', 'Не проверена')
           return (
-            <li key={row.key}>
-              <button
-                type="button"
-                onClick={row.onSelect}
-                aria-pressed={row.selected}
-                className={cn(
-                  'group w-full flex items-center gap-2 px-2 py-1.5 rounded-[var(--radius-sm)] text-left',
-                  'transition-all duration-[var(--transition-fast)]',
-                  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)]',
-                  row.selected
-                    ? 'bg-[color-mix(in_srgb,var(--color-accent)_12%,transparent)] border border-[var(--color-accent)]/40'
-                    : 'border border-transparent hover:bg-[var(--color-border)]/40'
-                )}
-              >
-                <span
-                  className="text-base leading-none flex-shrink-0 select-none"
-                  aria-hidden="true"
-                >
-                  {recognised?.flag ?? '🌐'}
-                </span>
-                <span className="flex-1 min-w-0">
-                  <span className="block text-xs font-medium text-[var(--color-text)] truncate">
-                    {row.name}
+            <div key={cluster.group?.id ?? `orphan-${idx}`}>
+              {cluster.group && (
+                <div className="flex items-center gap-1.5 mb-1 px-1">
+                  <span className="text-[10px]" aria-hidden="true">
+                    {cluster.group.source === 'subscription' ? '📡' : '🔑'}
                   </span>
-                  <span className="block text-[10px] text-[var(--color-text-secondary)] truncate font-mono">
-                    {row.country
-                      ? `${row.country} · ${row.host ? `${row.host}${row.port ? `:${row.port}` : ''}` : row.protocol.toUpperCase()}`
-                      : (row.host ? `${row.host}${row.port ? `:${row.port}` : ''}` : row.protocol.toUpperCase())}
+                  <span className="text-[10px] uppercase tracking-wider font-semibold text-[var(--color-text-secondary)] truncate flex-1">
+                    {cluster.group.name}
                   </span>
-                </span>
-                <span
-                  className={cn(
-                    'text-[11px] tabular-nums font-medium flex-shrink-0 min-w-[34px] text-right',
-                    pingTone(pingValue)
-                  )}
-                  aria-label={pingValue == null ? '' : `${pingValue} ms`}
-                >
-                  {ping === 'pinging'
-                    ? '…'
-                    : pingValue == null
-                      ? '—'
-                      : `${pingValue}`}
-                </span>
-                {row.selected && (
-                  <Check className="w-3.5 h-3.5 text-[var(--color-accent)] flex-shrink-0" />
-                )}
-                {!row.selected && (
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      if (row.host && row.port) pingOne(row.key, row.host, row.port)
-                    }}
-                    aria-label={t('dashboardSide.pingOne', 'Пингануть профиль')}
+                  <span
                     className={cn(
-                      'opacity-0 group-hover:opacity-100',
-                      'p-1 rounded-[4px] transition-opacity duration-[var(--transition-fast)]',
-                      'text-[var(--color-text-secondary)] hover:text-[var(--color-accent)]',
-                      'hover:bg-[var(--color-card-elevated)]'
+                      'inline-flex items-center justify-center w-4 h-4 rounded-full border text-[9px] font-bold leading-none',
+                      groupPillTone(cluster.group.status)
                     )}
+                    title={statusTitle}
+                    aria-label={statusTitle}
                   >
-                    <Activity className={cn(
-                      'w-3 h-3',
-                      ping === 'pinging' && 'animate-pulse'
-                    )} />
-                  </button>
-                )}
-              </button>
-            </li>
+                    {statusShort}
+                  </span>
+                </div>
+              )}
+              <ul className="space-y-1">
+                {cluster.rows.map(row => {
+                  const recognised = detectCountry(row.name)
+                  const ping = pings[row.key]
+                  const pingValue = ping === 'pinging' ? null : ping
+                  return (
+                    <li key={row.key}>
+                      <button
+                        type="button"
+                        onClick={row.onSelect}
+                        aria-pressed={row.selected}
+                        className={cn(
+                          'group w-full flex items-center gap-2 px-2 py-1.5 rounded-[var(--radius-sm)] text-left',
+                          'transition-all duration-[var(--transition-fast)]',
+                          'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)]',
+                          row.selected
+                            ? 'bg-[color-mix(in_srgb,var(--color-accent)_12%,transparent)] border border-[var(--color-accent)]/40'
+                            : 'border border-transparent hover:bg-[var(--color-border)]/40'
+                        )}
+                      >
+                        <span
+                          className="text-base leading-none flex-shrink-0 select-none"
+                          aria-hidden="true"
+                        >
+                          {recognised?.flag ?? '🌐'}
+                        </span>
+                        <span className="flex-1 min-w-0">
+                          <span className="block text-xs font-medium text-[var(--color-text)] truncate">
+                            {row.name}
+                          </span>
+                          <span className="block text-[10px] text-[var(--color-text-secondary)] truncate font-mono">
+                            {row.country
+                              ? `${row.country} · ${row.host ? `${row.host}${row.port ? `:${row.port}` : ''}` : row.protocol.toUpperCase()}`
+                              : (row.host ? `${row.host}${row.port ? `:${row.port}` : ''}` : row.protocol.toUpperCase())}
+                          </span>
+                        </span>
+                        <span
+                          className={cn(
+                            'text-[11px] tabular-nums font-medium flex-shrink-0 min-w-[34px] text-right',
+                            pingTone(pingValue)
+                          )}
+                          aria-label={pingValue == null ? '' : `${pingValue} ms`}
+                        >
+                          {ping === 'pinging'
+                            ? '…'
+                            : pingValue == null
+                              ? '—'
+                              : `${pingValue}`}
+                        </span>
+                        {row.selected && (
+                          <Check className="w-3.5 h-3.5 text-[var(--color-accent)] flex-shrink-0" />
+                        )}
+                        {!row.selected && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              if (row.host && row.port) pingOne(row.key, row.host, row.port)
+                            }}
+                            aria-label={t('dashboardSide.pingOne', 'Пингануть профиль')}
+                            className={cn(
+                              'opacity-0 group-hover:opacity-100',
+                              'p-1 rounded-[4px] transition-opacity duration-[var(--transition-fast)]',
+                              'text-[var(--color-text-secondary)] hover:text-[var(--color-accent)]',
+                              'hover:bg-[var(--color-card-elevated)]'
+                            )}
+                          >
+                            <Activity className={cn(
+                              'w-3 h-3',
+                              ping === 'pinging' && 'animate-pulse'
+                            )} />
+                          </button>
+                        )}
+                      </button>
+                    </li>
+                  )
+                })}
+              </ul>
+            </div>
           )
         })}
-      </ul>
+      </div>
     </MacCard>
   )
 }

@@ -33,6 +33,28 @@ export interface SubscriptionFetchOptions {
   proxyType?: 'socks5' | 'http'
 }
 
+/**
+ * Standard subscription metadata exposed by xray/sing-box panels
+ * (Marzban, Marzneshin, 3X-UI, …) via response headers. We surface this so
+ * the renderer can show "subscription expires in N days", "X / Y GB used",
+ * and — most importantly — distinguish "the panel is gone but the keys may
+ * still work" (post-trial scenario) from "the keys themselves were revoked".
+ *
+ * All fields are optional. A missing header just means the panel doesn't
+ * publish that piece of info; we never fabricate values.
+ */
+export interface SubscriptionUserInfo {
+  trafficUploadBytes?: number
+  trafficDownloadBytes?: number
+  /** upload + download, only set when at least one of the two is present. */
+  trafficUsedBytes?: number
+  trafficTotalBytes?: number
+  /** Wall-clock ms timestamp (Date.now() compatible). Header gives unix seconds. */
+  expiresAt?: number
+  refreshIntervalSeconds?: number
+  webPageUrl?: string
+}
+
 interface FetchAttempt {
   label: string
   args: string[]
@@ -1351,7 +1373,129 @@ function summarizeSubscriptionErrors(errors: string[]): string {
   return shown.join(' | ')
 }
 
-async function fetchAndParseSubscription(url: string, options?: SubscriptionFetchOptions): Promise<{ profiles: VpnProfile[]; source: string }> {
+// ─── Subscription header parsing ────────────────────────────────────────────
+//
+// curl.exe with `-D -` dumps response headers to stdout BEFORE the body, with
+// a `\r\n\r\n` terminator. With `-L` (follow redirects) it emits one header
+// block per hop. We always want the LAST hop — that's the panel's actual
+// response — so we scan from the end for the last terminator and treat
+// everything after it as the body.
+//
+// Windows curl always uses CRLF; we don't bother with bare-LF fallbacks.
+
+function lastIndexOfHeaderTerminator(buf: Buffer): number {
+  // Search backwards for `\r\n\r\n` (CRLF CRLF). We only care about the last
+  // occurrence: with -L, every redirect hop writes its own header block.
+  for (let i = buf.length - 4; i >= 0; i--) {
+    if (buf[i] === 0x0d && buf[i + 1] === 0x0a && buf[i + 2] === 0x0d && buf[i + 3] === 0x0a) {
+      return i
+    }
+  }
+  return -1
+}
+
+function parseHttpHeaders(text: string): Record<string, string> {
+  // The text contains potentially MULTIPLE header blocks separated by blank
+  // lines (one per redirect hop). We want the last block — that's the final
+  // response. Split on blank-line boundaries first, then parse the last
+  // non-empty group.
+  const lines = text.replace(/\r/g, '').split('\n')
+  const blocks: string[][] = []
+  let current: string[] = []
+  for (const line of lines) {
+    if (!line.trim()) {
+      if (current.length) {
+        blocks.push(current)
+        current = []
+      }
+      continue
+    }
+    current.push(line)
+  }
+  if (current.length) blocks.push(current)
+  if (!blocks.length) return {}
+  const lastBlock = blocks[blocks.length - 1]
+
+  const headers: Record<string, string> = {}
+  // Skip the status line (e.g. `HTTP/1.1 200 OK`) — it has no `:` separator
+  // we care about. Be defensive: some non-conforming servers omit it.
+  const startIdx = /^HTTP\/[0-9.]+\s/i.test(lastBlock[0]) ? 1 : 0
+  for (let i = startIdx; i < lastBlock.length; i++) {
+    const line = lastBlock[i]
+    const sep = line.indexOf(':')
+    if (sep <= 0) continue
+    const key = line.slice(0, sep).trim().toLowerCase()
+    const value = line.slice(sep + 1).trim()
+    if (!key) continue
+    // Last writer wins — RFC says repeated headers can be combined with
+    // commas, but for the fields we care about (subscription-userinfo,
+    // profile-update-interval, profile-web-page-url) panels always emit a
+    // single value.
+    headers[key] = value
+  }
+  return headers
+}
+
+function parseSubscriptionUserInfo(headers: Record<string, string>): SubscriptionUserInfo | undefined {
+  const result: SubscriptionUserInfo = {}
+  let touched = false
+
+  const rawUserInfo = headers['subscription-userinfo']
+  if (rawUserInfo) {
+    // Format: `upload=12345; download=67890; total=1000000000; expire=1735689600`
+    // Whitespace around `;` and `=` is tolerated by every panel we've seen.
+    let upload: number | undefined
+    let download: number | undefined
+    for (const part of rawUserInfo.split(';')) {
+      const eq = part.indexOf('=')
+      if (eq <= 0) continue
+      const key = part.slice(0, eq).trim().toLowerCase()
+      const valueText = part.slice(eq + 1).trim()
+      if (!valueText) continue
+      const value = Number(valueText)
+      if (!Number.isFinite(value) || value < 0) continue
+      if (key === 'upload') upload = value
+      else if (key === 'download') download = value
+      else if (key === 'total') { result.trafficTotalBytes = value; touched = true }
+      else if (key === 'expire') {
+        // Header gives unix seconds. Multiply to ms for Date.now() compat.
+        // Treat 0 as "no expiry set" (some panels emit `expire=0`).
+        if (value > 0) { result.expiresAt = value * 1000; touched = true }
+      }
+    }
+    if (upload !== undefined) { result.trafficUploadBytes = upload; touched = true }
+    if (download !== undefined) { result.trafficDownloadBytes = download; touched = true }
+    if (upload !== undefined || download !== undefined) {
+      result.trafficUsedBytes = (upload ?? 0) + (download ?? 0)
+      touched = true
+    }
+  }
+
+  const refreshRaw = headers['profile-update-interval']
+  if (refreshRaw) {
+    const refresh = Number(refreshRaw.trim())
+    if (Number.isFinite(refresh) && refresh > 0 && Number.isInteger(refresh)) {
+      result.refreshIntervalSeconds = refresh
+      touched = true
+    }
+  }
+
+  const webPage = headers['profile-web-page-url']
+  if (webPage) {
+    const trimmed = webPage.trim()
+    // Drop anything that isn't an http(s) URL. Some panels accidentally emit
+    // garbage here (relative paths, `null`, …) and we don't want the renderer
+    // to render an unsafe link.
+    if (/^https?:\/\//i.test(trimmed)) {
+      result.webPageUrl = trimmed
+      touched = true
+    }
+  }
+
+  return touched ? result : undefined
+}
+
+async function fetchAndParseSubscription(url: string, options?: SubscriptionFetchOptions): Promise<{ profiles: VpnProfile[]; source: string; userInfo?: SubscriptionUserInfo }> {
   const errors: string[] = []
   const runAttempts = async (attempts: FetchAttempt[]) => {
     for (const attempt of attempts) {
@@ -1360,6 +1504,12 @@ async function fetchAndParseSubscription(url: string, options?: SubscriptionFetc
           '-L',
           '-sS',
           '--fail',
+          // Dump response headers to stdout alongside the body. With -L, curl
+          // emits a header block per redirect hop separated by an empty CRLF
+          // line. We keep the LAST block — that's the final response — and
+          // discard the rest. The body always follows the last \r\n\r\n.
+          '-D',
+          '-',
           '--max-time',
           '25',
           ...attempt.args,
@@ -1370,9 +1520,15 @@ async function fetchAndParseSubscription(url: string, options?: SubscriptionFetc
           encoding: 'buffer',
           maxBuffer: 1024 * 1024 * 16
         })
-        const body = decodeSubscriptionBody(stdout as Buffer)
+        const raw = stdout as Buffer
+        const splitIdx = lastIndexOfHeaderTerminator(raw)
+        const headerBytes = splitIdx >= 0 ? raw.subarray(0, splitIdx) : Buffer.alloc(0)
+        const bodyBytes = splitIdx >= 0 ? raw.subarray(splitIdx + 4) : raw
+        const headers = parseHttpHeaders(headerBytes.toString('utf8'))
+        const userInfo = parseSubscriptionUserInfo(headers)
+        const body = decodeSubscriptionBody(bodyBytes)
         const profiles = parseVpnProfiles(body)
-        if (profiles.length) return { profiles, source: attempt.label }
+        if (profiles.length) return { profiles, source: attempt.label, userInfo }
         errors.push(`${attempt.label}: скачано (${describeSubscriptionBody(body)}), но VLESS/Trojan/SS/VMess/Hysteria2 не найдены`)
       } catch (err: any) {
         errors.push(`${attempt.label}: ${curlErrorMessage(err)}`)
@@ -1466,7 +1622,7 @@ function unwrapHappAddLink(input: string): string | null {
   )
 }
 
-export async function resolveVpnProfiles(input: string, options?: SubscriptionFetchOptions): Promise<{ profiles: VpnProfile[]; source: string; fetched: boolean }> {
+export async function resolveVpnProfiles(input: string, options?: SubscriptionFetchOptions): Promise<{ profiles: VpnProfile[]; source: string; fetched: boolean; userInfo?: SubscriptionUserInfo }> {
   const trimmed = input.trim()
   if (!trimmed) throw new Error('Вставьте VPN-ссылку, subscription URL или sing-box outbound JSON')
 
@@ -1481,7 +1637,7 @@ export async function resolveVpnProfiles(input: string, options?: SubscriptionFe
   }
 
   const profiles = parseVpnProfiles(effective)
-  return { profiles, source: unwrapped ? 'распакованная ссылка happ://' : 'вставленный текст', fetched: false }
+  return { profiles, source: unwrapped ? 'распакованная ссылка happ://' : 'вставленный текст', fetched: false, userInfo: undefined }
 }
 
 export async function resolveVpnProfile(input: string, selectedIndex = 0, options?: SubscriptionFetchOptions): Promise<VpnProfile> {

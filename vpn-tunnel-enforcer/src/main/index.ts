@@ -45,6 +45,7 @@ import { resolveVpnProfile, resolveVpnProfiles, redactSensitiveConfig, type VpnP
 // ─── V2 Feature Modules ──────────────────────────────────────────────────────
 import { registerSplitTunnelHandlers } from './splitTunneling'
 import { registerServerPickerHandlers, serverPicker } from './serverPicker'
+import { registerServerGroupsHandlers } from './serverGroups'
 import { registerServerProbeIpcHandlers } from './serverProbe'
 import { registerUrlAvailabilityHandlers } from './urlAvailability'
 import { registerSpeedTestHandlers } from './speedTest'
@@ -1057,12 +1058,17 @@ app.whenReady().then(async () => {
   // Feature services
   registerSplitTunnelHandlers()
   registerServerPickerHandlers()
+  registerServerGroupsHandlers()
   // Migrate legacy directVpnCachedProfiles → server-picker store on first run.
   // No-op for fresh installs and for users already on the new store.
   serverPicker.migrateLegacyDirectVpnProfiles()
   // Backfill `outbound` on picker entries that were saved by older builds
   // before the field existed. No-op when nothing needs fixing.
   serverPicker.backfillMissingOutbounds()
+  // Assign every dangling picker profile to a default group, so the new
+  // groups-aware UI never has to deal with ungrouped entries from older
+  // versions of the app. Idempotent.
+  serverPicker.migrateProfilesIntoGroups()
   // Fire-and-forget background geolocation pass for any profile that doesn't
   // already have a country tag. This makes country labels appear on the
   // dashboard without the user having to ping every server manually.

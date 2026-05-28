@@ -21,6 +21,17 @@ import { MacModal, MacButton, MacCard, MacBadge } from '../design-system'
 import { detectCountry } from './countryGlyph'
 import type { ServerProfile } from '../../shared/ipc-types'
 
+// Local mirror of the upcoming `ServerGroup` shape. See Servers.tsx for the
+// rationale — once Agent A merges the type into shared/ipc-types this can
+// be replaced with a direct import.
+interface ServerGroupLite {
+  id: string
+  name: string
+  source: 'subscription' | 'manual'
+  status: 'active' | 'expired' | 'unreachable' | 'unknown'
+  lastFetchedAt?: number
+}
+
 interface IpInfo {
   ip: string
   country?: string
@@ -106,6 +117,7 @@ export function ServerDetailModal({ open, profile, onClose }: ServerDetailModalP
   const [probing, setProbing] = useState(false)
   const [probeError, setProbeError] = useState(false)
   const [exportState, setExportState] = useState<'idle' | 'copied' | 'saved' | 'failed'>('idle')
+  const [group, setGroup] = useState<ServerGroupLite | null>(null)
 
   // Reset the export status pill whenever the user opens a different server.
   useEffect(() => { setExportState('idle') }, [profile])
@@ -157,6 +169,21 @@ export function ServerDetailModal({ open, profile, onClose }: ServerDetailModalP
     setIpInfo(null)
     setProbe(null)
     setProbeError(false)
+    setGroup(null)
+
+    // Best-effort group lookup via the new IPC. Tolerates missing channel
+    // (Agent A may not have merged) and missing/null result.
+    const groupId = (profile as ServerProfile & { groupId?: string }).groupId
+    if (groupId) {
+      const api = window.electronAPI as unknown as {
+        groupsGet?: (id: string) => Promise<ServerGroupLite | null>
+      }
+      if (typeof api.groupsGet === 'function') {
+        api.groupsGet(groupId)
+          .then((g) => { if (g) setGroup(g) })
+          .catch(() => {})
+      }
+    }
 
     const host = (profile as any).server
     const port = (profile as any).port as number | undefined
@@ -264,6 +291,71 @@ export function ServerDetailModal({ open, profile, onClose }: ServerDetailModalP
             value={ping != null ? `${ping} ms` : '—'}
           />
         </div>
+
+        {/* Group context — shown only when the profile belongs to a known
+            group. Surfaces a subtle hint when the source subscription is
+            expired so the user understands why connecting may be flaky. */}
+        {group && (
+          <MacCard className="!p-3">
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5 text-[var(--color-text-secondary)] mb-0.5">
+                  <span aria-hidden="true">
+                    {group.source === 'subscription' ? '📡' : '🔑'}
+                  </span>
+                  <span className="text-xs">{t('serverDetail.group', 'Группа')}</span>
+                </div>
+                <p className="text-sm font-medium text-[var(--color-text)] truncate">
+                  {group.name}
+                </p>
+              </div>
+              <MacBadge
+                variant={
+                  group.status === 'active'
+                    ? 'success'
+                    : group.status === 'expired'
+                      ? 'warning'
+                      : group.status === 'unreachable'
+                        ? 'danger'
+                        : 'neutral'
+                }
+              >
+                {group.status === 'active'
+                  ? t('servers.groups.statusActive', 'Активна')
+                  : group.status === 'expired'
+                    ? t('servers.groups.statusExpired', 'Истекла, ключи могут работать')
+                    : group.status === 'unreachable'
+                      ? t('servers.groups.statusUnreachable', 'Не отвечает')
+                      : t('servers.groups.statusUnknown', 'Не проверена')}
+              </MacBadge>
+            </div>
+            {group.status === 'expired' && (
+              <p className="text-[11px] text-[var(--color-text-secondary)] mt-2">
+                {t('serverDetail.groupExpiredHint', 'Подписка-источник истекла — ключи могут продолжать работать.')}
+              </p>
+            )}
+            {(() => {
+              const lastSeen =
+                (profile as ServerProfile & { lastSeenInSubscriptionAt?: number })
+                  .lastSeenInSubscriptionAt
+              if (
+                lastSeen == null ||
+                !group.lastFetchedAt ||
+                group.lastFetchedAt - lastSeen < 60_000
+              ) {
+                return null
+              }
+              return (
+                <p className="text-[11px] text-[var(--color-warning)] mt-1">
+                  {t(
+                    'serverDetail.removedFromSubscription',
+                    'Этого сервера больше нет в подписке-источнике'
+                  )}
+                </p>
+              )
+            })()}
+          </MacCard>
+        )}
 
         {/* Geo info. We render the card whenever we know *anything* about
             the location — either ipapi returned data, or the profile name

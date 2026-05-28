@@ -57,6 +57,7 @@ export interface ElectronAPI {
   serversPingAll: () => Promise<any[]>
   serversPingOne: (host: string, port: number) => Promise<number | null>
   serversAdd: (input: string) => Promise<any[]>
+  serversAddToGroup: (input: string, groupId: string | null) => Promise<any[]>
   serversRemove: (id: string) => Promise<void>
   serversExportKey: (id: string) => Promise<
     | { ok: true; uri: string; name: string; protocol: string }
@@ -71,6 +72,19 @@ export interface ElectronAPI {
     | { ok: true; path: string; total: number; exported: number; skipped: number }
     | { ok: false; cancelled: true }
     | { ok: false; reason: string; error?: string }
+  >
+  // Server Groups — origin tracking and post-trial-aware refresh.
+  groupsList: () => Promise<any[]>
+  groupsGet: (id: string) => Promise<any | null>
+  groupsRename: (id: string, name: string) => Promise<any | null>
+  groupsDelete: (id: string, deleteServers: boolean) => Promise<{ ok: boolean }>
+  groupsRefresh: (id: string) => Promise<
+    | { ok: true; group: any; addedCount: number; updatedCount: number; removedCount: number }
+    | { ok: false; error: string }
+  >
+  groupsCheckHealth: (id: string) => Promise<
+    | { ok: true; results: Array<{ profileId: string; online: boolean; latencyMs: number | null; reason?: string }> }
+    | { ok: false; error: string }
   >
   serverProbe: (host: string, knownPort?: number) => Promise<any>
   urlAvailabilityCheck: (url: string) => Promise<any>
@@ -239,10 +253,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
   serversPingAll: () => ipcRenderer.invoke('servers:ping-all'),
   serversPingOne: (host: string, port: number) => ipcRenderer.invoke('servers:ping-one', host, port),
   serversAdd: (input: string) => ipcRenderer.invoke('servers:add', input),
+  serversAddToGroup: (input: string, groupId: string | null) => ipcRenderer.invoke('servers:add-to-group', input, groupId),
   serversRemove: (id: string) => ipcRenderer.invoke('servers:remove', id),
   serversExportKey: (id: string) => ipcRenderer.invoke('servers:export-key', id),
   serversExportKeyToFile: (id: string) => ipcRenderer.invoke('servers:export-key-file', id),
   serversExportAllKeysToFile: () => ipcRenderer.invoke('servers:export-all-keys-file'),
+  // Server Groups — origin tracking and post-trial-aware refresh.
+  groupsList: () => ipcRenderer.invoke('groups:list'),
+  groupsGet: (id: string) => ipcRenderer.invoke('groups:get', id),
+  groupsRename: (id: string, name: string) => ipcRenderer.invoke('groups:rename', id, name),
+  groupsDelete: (id: string, deleteServers: boolean) => ipcRenderer.invoke('groups:delete', id, deleteServers),
+  groupsRefresh: (id: string) => ipcRenderer.invoke('groups:refresh', id),
+  groupsCheckHealth: (id: string) => ipcRenderer.invoke('groups:check-health', id),
   serverProbe: (host: string, knownPort?: number) => ipcRenderer.invoke('server:probe', host, knownPort),
   // URL Availability — paste a link, get verdict + diagnostics for both
   // the tunnel path and the direct path (clash-direct-out when VPN is on).

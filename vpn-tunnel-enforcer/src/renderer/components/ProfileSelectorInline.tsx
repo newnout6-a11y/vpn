@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { MouseEventHandler } from 'react'
 import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Check, ChevronDown, Globe, Activity } from 'lucide-react'
 import { MacCard } from '../design-system/MacCard'
 import { MacButton } from '../design-system/MacButton'
+import { MacBadge, type BadgeVariant } from '../design-system/MacBadge'
 import { cn } from '../design-system/utils'
 import { countryFlag } from './countryGlyph'
 import { useAppStore } from '../store'
@@ -16,6 +17,28 @@ import type { ServerProfile } from '../../shared/ipc-types'
  */
 function countryGlyph(name: string): string {
   return countryFlag(name)
+}
+
+// Local mirror of the upcoming `ServerGroup` shape — see Servers.tsx for the
+// rationale. Once Agent A merges, this can be replaced by the shared import.
+interface ServerGroup {
+  id: string
+  name: string
+  source: 'subscription' | 'manual'
+  status: 'active' | 'expired' | 'unreachable' | 'unknown'
+}
+
+function groupBadgeVariant(status: ServerGroup['status']): BadgeVariant {
+  switch (status) {
+    case 'active':
+      return 'success'
+    case 'expired':
+      return 'warning'
+    case 'unreachable':
+      return 'danger'
+    default:
+      return 'neutral'
+  }
 }
 
 /**
@@ -36,6 +59,8 @@ export function ProfileSelectorInline() {
 
   const [open, setOpen] = useState(false)
   const [profiles, setProfiles] = useState<ServerProfile[]>([])
+  const [groups, setGroups] = useState<ServerGroup[]>([])
+  const [groupsAvailable, setGroupsAvailable] = useState<boolean>(false)
   const [activeId, setActiveId] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   /** null = never measured, 'pinging' = inflight, number = ms, -1 = failed */
@@ -50,6 +75,23 @@ export function ProfileSelectorInline() {
       ])
       setProfiles(list)
       setActiveId(active.activeId ?? active.profile?.id ?? null)
+      // Best-effort group fetch; tolerate missing IPC.
+      const api = window.electronAPI as unknown as {
+        groupsList?: () => Promise<ServerGroup[]>
+      }
+      if (typeof api.groupsList === 'function') {
+        try {
+          const gs = await api.groupsList()
+          setGroups(Array.isArray(gs) ? gs : [])
+          setGroupsAvailable(true)
+        } catch {
+          setGroupsAvailable(false)
+          setGroups([])
+        }
+      } else {
+        setGroupsAvailable(false)
+        setGroups([])
+      }
     } catch (err) {
       console.warn('[ProfileSelectorInline] refresh failed:', err)
     } finally {
@@ -82,6 +124,44 @@ export function ProfileSelectorInline() {
   const currentProtocol = current?.protocol ?? null
   const hasProfiles = profiles.length > 0
 
+  const groupById = useMemo(() => {
+    const map = new Map<string, ServerGroup>()
+    for (const g of groups) map.set(g.id, g)
+    return map
+  }, [groups])
+
+  // Build clusters for the dropdown: an array of { group, profiles[] } in the
+  // order [subscriptions newest-first, manual, orphans]. When IPC isn't
+  // available we render a single "no group" cluster (flat list, same as
+  // before).
+  const clusters = useMemo<Array<{ group: ServerGroup | null; profiles: ServerProfile[] }>>(() => {
+    if (!groupsAvailable) {
+      return [{ group: null, profiles }]
+    }
+    const buckets = new Map<string, ServerProfile[]>()
+    const orphans: ServerProfile[] = []
+    for (const g of groups) buckets.set(g.id, [])
+    for (const p of profiles) {
+      const gid = (p as ServerProfile & { groupId?: string }).groupId
+      if (gid && buckets.has(gid)) {
+        buckets.get(gid)!.push(p)
+      } else {
+        orphans.push(p)
+      }
+    }
+    const sortedGroups = [...groups].sort((a, b) => {
+      if (a.source !== b.source) return a.source === 'subscription' ? -1 : 1
+      return 0
+    })
+    const out: Array<{ group: ServerGroup | null; profiles: ServerProfile[] }> = []
+    for (const g of sortedGroups) {
+      const list = buckets.get(g.id) ?? []
+      if (list.length > 0) out.push({ group: g, profiles: list })
+    }
+    if (orphans.length > 0) out.push({ group: null, profiles: orphans })
+    return out
+  }, [profiles, groups, groupsAvailable])
+
   const handleSelect = async (id: string) => {
     setOpen(false)
     if (id === current?.id) return
@@ -92,6 +172,19 @@ export function ProfileSelectorInline() {
       const profile = profiles.find(p => p.id === id)
       addLog('info', `Сервер выбран: ${profile?.name ?? id}`)
       emitServerChanged()
+      // Pull a one-time warning when the user picks something out of an
+      // expired group. We do this AFTER serversSelect resolves so failures
+      // don't leave a confusing log line.
+      if (profile) {
+        const gid = (profile as ServerProfile & { groupId?: string }).groupId
+        const group = gid ? groupById.get(gid) : null
+        if (group?.status === 'expired') {
+          addLog('warn', t(
+            'profileSelector.expiredGroupWarning',
+            'Выбран сервер из истёкшей группы. Если перестанет работать — пробуйте другой ключ из этой же группы.'
+          ))
+        }
+      }
     } catch (err: any) {
       addLog('error', `Не удалось выбрать сервер: ${err.message}`)
       // Roll back optimistic state
@@ -108,11 +201,6 @@ export function ProfileSelectorInline() {
     setPingMs('pinging')
     try {
       const ms = await window.electronAPI.serversPingOne(current.server, current.port)
-      // When the tunnel is up the main process measures the active outbound's
-      // round-trip via a neutral CDN (host:port through the tunnel would
-      // self-loop when the picked server == active VPN endpoint). Reflect
-      // that in the log so users don't think they're seeing per-server
-      // latency.
       const label = tunRunning
         ? `Тоннель (${current.server}:${current.port})`
         : `${current.server}:${current.port}`
@@ -143,10 +231,6 @@ export function ProfileSelectorInline() {
     if (pingMs === 'pinging') return '…'
     if (pingMs === -1) return t('profileSelector.pingFailed', '—')
     if (typeof pingMs === 'number') {
-      // "≈" before the number when the value is the round-trip through
-      // the active tunnel rather than per-server latency. The button is
-      // narrow so we stick to a single glyph — the tooltip carries the
-      // full explanation.
       const prefix = tunRunning ? '≈ ' : ''
       return `${prefix}${pingMs} ${t('profileSelector.ms', 'ms')}`
     }
@@ -256,37 +340,58 @@ export function ProfileSelectorInline() {
             transition={{ duration: 0.2, ease: 'easeOut' }}
             className="overflow-hidden"
           >
-            <div className="mt-2 max-h-72 overflow-y-auto pr-1 space-y-1">
-              {profiles.map(profile => {
-                const selected = profile.id === current?.id
-                return (
-                  <button
-                    key={profile.id}
-                    type="button"
-                    onClick={() => handleSelect(profile.id)}
-                    className={`w-full flex items-center gap-3 px-3 py-2 rounded-[var(--radius-sm)] text-left transition-all duration-[var(--transition-fast)] ${
-                      selected
-                        ? 'bg-[var(--color-accent)]/10 border border-[var(--color-accent)]/40'
-                        : 'border border-transparent hover:bg-[var(--color-border)]/40'
-                    }`}
-                  >
-                    <span className="text-lg flex-shrink-0">{countryGlyph(profile.name)}</span>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-[var(--color-text)] truncate">
-                        {profile.name}
-                      </p>
-                      <p className="text-[11px] uppercase tracking-wider text-[var(--color-text-secondary)]">
-                        {profile.protocol}
-                        {profile.country ? ` · ${profile.country}` : ''}
-                        {profile.ping != null ? ` · ${profile.ping} ms` : ''}
-                      </p>
+            <div className="mt-2 max-h-72 overflow-y-auto pr-1 space-y-2">
+              {clusters.map((cluster, idx) => (
+                <div key={cluster.group?.id ?? `orphan-${idx}`} className="space-y-1">
+                  {cluster.group && (
+                    <div className="flex items-center gap-2 px-3 pt-1">
+                      <span className="text-[10px] uppercase tracking-wider font-semibold text-[var(--color-text-secondary)] truncate">
+                        {cluster.group.source === 'subscription' ? '📡 ' : '🔑 '}
+                        {cluster.group.name}
+                      </span>
+                      <MacBadge variant={groupBadgeVariant(cluster.group.status)} className="!text-[10px] !px-1.5 !py-0">
+                        {cluster.group.status === 'active'
+                          ? t('profileSelector.groupStatusActive', 'Активна')
+                          : cluster.group.status === 'expired'
+                            ? t('profileSelector.groupStatusExpired', 'Истекла')
+                            : cluster.group.status === 'unreachable'
+                              ? t('profileSelector.groupStatusUnreachable', 'Не отвечает')
+                              : t('profileSelector.groupStatusUnknown', 'Не проверена')}
+                      </MacBadge>
                     </div>
-                    {selected && (
-                      <Check className="w-4 h-4 text-[var(--color-accent)] flex-shrink-0" />
-                    )}
-                  </button>
-                )
-              })}
+                  )}
+                  {cluster.profiles.map(profile => {
+                    const selected = profile.id === current?.id
+                    return (
+                      <button
+                        key={profile.id}
+                        type="button"
+                        onClick={() => handleSelect(profile.id)}
+                        className={`w-full flex items-center gap-3 px-3 py-2 rounded-[var(--radius-sm)] text-left transition-all duration-[var(--transition-fast)] ${
+                          selected
+                            ? 'bg-[var(--color-accent)]/10 border border-[var(--color-accent)]/40'
+                            : 'border border-transparent hover:bg-[var(--color-border)]/40'
+                        }`}
+                      >
+                        <span className="text-lg flex-shrink-0">{countryGlyph(profile.name)}</span>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium text-[var(--color-text)] truncate">
+                            {profile.name}
+                          </p>
+                          <p className="text-[11px] uppercase tracking-wider text-[var(--color-text-secondary)]">
+                            {profile.protocol}
+                            {profile.country ? ` · ${profile.country}` : ''}
+                            {profile.ping != null ? ` · ${profile.ping} ms` : ''}
+                          </p>
+                        </div>
+                        {selected && (
+                          <Check className="w-4 h-4 text-[var(--color-accent)] flex-shrink-0" />
+                        )}
+                      </button>
+                    )
+                  })}
+                </div>
+              ))}
               {loading && (
                 <p className="text-xs text-[var(--color-text-secondary)] px-3 py-2">
                   {t('common.loading')}

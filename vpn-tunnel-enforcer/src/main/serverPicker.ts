@@ -22,6 +22,12 @@ import { logEvent } from './appLogger'
 import { resolveVpnProfiles, exportOutboundToUri, type VpnProfile } from './vpnProfiles'
 import { settingsStore } from './settings'
 import { tunController } from './tunController'
+import {
+  serverGroups,
+  ensureManualKeysGroup,
+  findGroupBySourceUrl,
+  refreshGroup as refreshSubscriptionGroup
+} from './serverGroups'
 import type { ServerProfile } from '../shared/ipc-types'
 
 // ─── Persistent Store ────────────────────────────────────────────────────────
@@ -427,6 +433,67 @@ export function backfillMissingOutbounds(): void {
   }
 }
 
+/**
+ * One-time migration that backfills `groupId` on every picker entry.
+ *
+ * Why: introducing groups means every profile must belong to exactly one,
+ * but the picker store predates groups. Without this migration, the
+ * Servers page would show all pre-existing profiles as "ungrouped",
+ * which is not useful — the user has no idea where they came from
+ * either, and the refresh / health-check buttons need a group context to
+ * work.
+ *
+ * Heuristic:
+ *   1. If every profile already has a valid groupId, no-op.
+ *   2. Otherwise, ensure an "Импортированные" `manual` group exists and
+ *      assign every dangling/orphaned profile to it.
+ *
+ * Idempotent: subsequent calls are no-ops once profiles have valid
+ * groupIds. We pick `manual` rather than `subscription` because we have
+ * no upstream URL to refresh against — these keys came from a previous
+ * version of the app that didn't track origin.
+ */
+export function migrateProfilesIntoGroups(): void {
+  const profiles = getProfiles()
+  if (!profiles.length) return
+
+  const groups = serverGroups.getGroups()
+  const groupIds = new Set(groups.map(g => g.id))
+
+  const dangling = profiles.filter(p => !p.groupId || !groupIds.has(p.groupId))
+  if (!dangling.length) return
+
+  // Look for an existing "Импортированные" manual group first; if absent,
+  // create one. This keeps re-running the migration idempotent in the
+  // pathological case where a group somehow gets deleted but profiles
+  // remain.
+  const IMPORTED_NAME = 'Импортированные'
+  let importedGroup = groups.find(
+    g => g.source === 'manual' && g.name === IMPORTED_NAME
+  )
+  if (!importedGroup) {
+    importedGroup = serverGroups.createGroup({
+      name: IMPORTED_NAME,
+      source: 'manual',
+      importedAt: Date.now(),
+      status: 'unknown'
+    })
+  }
+
+  const updated = profiles.map(p =>
+    !p.groupId || !groupIds.has(p.groupId)
+      ? { ...p, groupId: importedGroup!.id }
+      : p
+  )
+  saveProfiles(updated)
+
+  logEvent('info', 'server-picker', 'migrated-profiles-into-groups', {
+    total: profiles.length,
+    migrated: dangling.length,
+    groupId: importedGroup.id
+  })
+}
+
 function getProfiles(): ServerProfile[] {
   return store.get('profiles') ?? []
 }
@@ -491,8 +558,18 @@ function removeProfile(id: string): void {
 
 /**
  * Converts a VpnProfile (from vpnProfiles module) to a ServerProfile.
+ *
+ * Newly-imported profiles always carry a `groupId` — every entry in the
+ * picker store belongs to exactly one {@link ServerGroup}. The optional
+ * `sourceUri` is the lossless representation of the VPN URI we parsed
+ * (when the user pasted a single key) so we can re-export it later
+ * without re-deriving it from the outbound shape.
  */
-function vpnProfileToServerProfile(vpnProfile: VpnProfile): ServerProfile {
+function vpnProfileToServerProfile(
+  vpnProfile: VpnProfile,
+  groupId: string,
+  sourceUri?: string
+): ServerProfile {
   const outbound = vpnProfile.outbound || {}
   return {
     id: randomUUID(),
@@ -504,16 +581,98 @@ function vpnProfileToServerProfile(vpnProfile: VpnProfile): ServerProfile {
     ping: null,
     status: 'unknown',
     lastChecked: undefined,
-    outbound
+    outbound,
+    groupId,
+    sourceUri,
+    lastSeenInSubscriptionAt: Date.now(),
+    enabled: true
   }
+}
+
+/**
+ * Stable identity for dedupe. Two profiles are "the same" when:
+ *   1. They share an exact `sourceUri` (lossless, survives renames), OR
+ *   2. They share `(server, port, protocol)`.
+ *
+ * The first wins because it's strictly more specific — two providers can
+ * legitimately use the same `1.2.3.4:443/vless` triplet for different
+ * UUIDs, but a re-pasted URI is unambiguously the same key.
+ */
+function isSameServerProfile(a: ServerProfile, b: ServerProfile): boolean {
+  if (a.sourceUri && b.sourceUri) return a.sourceUri === b.sourceUri
+  return a.server === b.server && a.port === b.port && a.protocol === b.protocol
+}
+
+/**
+ * Derive a group name from a subscription URL. Prefers the panel's
+ * advertised `webPageUrl` (the user's browser-facing dashboard) and falls
+ * back to the subscription URL host. Capped at 60 chars so the UI doesn't
+ * have to truncate aggressively.
+ */
+function deriveSubscriptionGroupName(input: string, webPageUrl?: string): string {
+  const candidates: Array<string | undefined> = [webPageUrl, input]
+  for (const candidate of candidates) {
+    if (!candidate) continue
+    try {
+      const host = new URL(candidate).host
+      if (host) return host.slice(0, 60)
+    } catch {
+      // Not a URL — try the next candidate.
+    }
+  }
+  // Last-resort fallback: a sanitised slice of the raw input. We never
+  // want to leave a group with an empty name.
+  return input.replace(/\s+/g, ' ').trim().slice(0, 60) || 'Подписка'
+}
+
+/**
+ * Append a batch of resolved {@link VpnProfile}s to a group, deduping
+ * against the existing picker store. Returns the freshly-created
+ * {@link ServerProfile} entries (not the duplicates).
+ *
+ * Shared between {@link addFromInput} and {@link addFromInputToGroup} so
+ * both paths get identical merge semantics.
+ */
+function appendProfilesToGroup(
+  vpnProfiles: VpnProfile[],
+  groupId: string,
+  sourceUriPerProfile: (vp: VpnProfile, index: number) => string | undefined
+): ServerProfile[] {
+  const existingProfiles = getProfiles()
+  const newProfiles: ServerProfile[] = []
+
+  vpnProfiles.forEach((vpnProfile, index) => {
+    const sourceUri = sourceUriPerProfile(vpnProfile, index)
+    const candidate = vpnProfileToServerProfile(vpnProfile, groupId, sourceUri)
+    const isDuplicate =
+      existingProfiles.some(p => isSameServerProfile(p, candidate)) ||
+      newProfiles.some(p => isSameServerProfile(p, candidate))
+    if (!isDuplicate) newProfiles.push(candidate)
+  })
+
+  if (newProfiles.length > 0) {
+    saveProfiles([...existingProfiles, ...newProfiles])
+    if (!getActiveProfileId()) {
+      store.set('activeProfileId', newProfiles[0].id)
+    }
+  }
+  return newProfiles
 }
 
 /**
  * Adds profiles from a subscription URL or a single protocol link.
  *
- * - If input is a URL (starts with http), fetches and parses the subscription
- * - If input is a single protocol link (ss://, vmess://, vless://, trojan://), parses it directly
- * - Returns the newly added ServerProfile entries
+ * Behaviour by input type:
+ *
+ * - Subscription URL the user has already imported: treat as a refresh of
+ *   the existing group. Same dedupe-merge semantics as `groups:refresh` —
+ *   keep stable IDs, leave previously-seen-but-now-missing keys in place.
+ * - New subscription URL: create a fresh `subscription` group, name it
+ *   from the panel's webPageUrl or the URL host, store the new profiles
+ *   under that group.
+ * - Single VPN URI: ensure the shared "Ручные ключи" group exists and
+ *   append the parsed profile under it. The raw URI is stored as
+ *   `sourceUri` for lossless re-export.
  */
 export async function addFromInput(input: string): Promise<ServerProfile[]> {
   const trimmed = input.trim()
@@ -521,51 +680,155 @@ export async function addFromInput(input: string): Promise<ServerProfile[]> {
     throw new Error('Введите ссылку подписки или VPN-ссылку')
   }
 
-  // Use the existing vpnProfiles resolver which handles both URLs and protocol links
-  const { profiles: vpnProfiles } = await resolveVpnProfiles(trimmed)
+  const isSubscriptionUrl = /^https?:\/\//i.test(trimmed)
 
-  if (!vpnProfiles.length) {
+  if (isSubscriptionUrl) {
+    // If the user re-pasted a subscription they've already imported, we
+    // funnel the request through the same merge logic the refresh button
+    // uses. No duplicate group, no surprise data loss.
+    const existing = findGroupBySourceUrl(trimmed)
+    if (existing) {
+      const beforeIds = new Set(getProfiles().map(p => p.id))
+      const result = await refreshSubscriptionGroup(existing.id)
+      if (!result.ok) {
+        throw new Error(result.error)
+      }
+      const after = getProfiles()
+      const newlyAdded = after.filter(p => !beforeIds.has(p.id))
+      logEvent('info', 'server-picker', 'profiles refreshed via re-paste', {
+        groupId: existing.id,
+        added: result.addedCount,
+        updated: result.updatedCount
+      })
+      void geolocateAll().catch(() => undefined)
+      return newlyAdded
+    }
+
+    // First-time subscription import — fetch + create the group + persist.
+    let proxyAddr: string | undefined
+    let proxyType: 'socks5' | 'http' | undefined
+    try {
+      const settings = settingsStore.get()
+      proxyAddr = settings.proxyOverride?.trim() || undefined
+      proxyType = settings.proxyType
+    } catch {
+      /* fall through with no proxy override */
+    }
+
+    const resolved = await resolveVpnProfiles(trimmed, { proxyAddr, proxyType })
+    if (!resolved.profiles.length) {
+      throw new Error('Не найдено поддерживаемых профилей в указанном источнике')
+    }
+
+    const now = Date.now()
+    const userInfo = resolved.userInfo
+    const group = serverGroups.createGroup({
+      name: deriveSubscriptionGroupName(trimmed, userInfo?.webPageUrl),
+      source: 'subscription',
+      sourceUrl: trimmed,
+      importedAt: now,
+      lastFetchedAt: now,
+      lastFetchAttemptAt: now,
+      lastFetchError: null,
+      status: 'active',
+      lastRefreshProfilesCount: resolved.profiles.length,
+      trafficUploadBytes: userInfo?.trafficUploadBytes ?? undefined,
+      trafficDownloadBytes: userInfo?.trafficDownloadBytes ?? undefined,
+      trafficUsedBytes: userInfo?.trafficUsedBytes ?? undefined,
+      trafficTotalBytes: userInfo?.trafficTotalBytes ?? undefined,
+      expiresAt: userInfo?.expiresAt ?? undefined,
+      refreshIntervalSeconds: userInfo?.refreshIntervalSeconds ?? undefined,
+      webPageUrl: userInfo?.webPageUrl ?? undefined
+    })
+
+    const newProfiles = appendProfilesToGroup(
+      resolved.profiles,
+      group.id,
+      // We don't have per-profile URIs from a subscription resolver
+      // (the upstream feed often omits them), so leave `sourceUri`
+      // unset and let the connection-tuple do the dedupe work.
+      () => undefined
+    )
+
+    logEvent('info', 'server-picker', 'profiles added from subscription', {
+      groupId: group.id,
+      count: newProfiles.length
+    })
+    void geolocateAll().catch(() => undefined)
+    return newProfiles
+  }
+
+  // Single VPN URI path. We need the parsed profile AND the original line
+  // so we can store it as sourceUri.
+  const resolved = await resolveVpnProfiles(trimmed)
+  if (!resolved.profiles.length) {
     throw new Error('Не найдено поддерживаемых профилей в указанном источнике')
   }
 
-  const existingProfiles = getProfiles()
-  const newProfiles: ServerProfile[] = []
+  const groupId = ensureManualKeysGroup()
+  // Pasting one key returns one profile, but a multi-line paste of single
+  // URIs is technically valid too — we keep the lossless URI for the
+  // first profile only, since we can't reliably split a multi-line paste
+  // back into per-profile lines from here. Single-key (the dominant case)
+  // gets the source URI; bulk paste falls back to undefined.
+  const newProfiles = appendProfilesToGroup(
+    resolved.profiles,
+    groupId,
+    (_vp, index) => (resolved.profiles.length === 1 && index === 0 ? trimmed : undefined)
+  )
 
-  for (const vpnProfile of vpnProfiles) {
-    const serverProfile = vpnProfileToServerProfile(vpnProfile)
+  logEvent('info', 'server-picker', 'profile added from URI', {
+    groupId,
+    count: newProfiles.length
+  })
+  void geolocateAll().catch(() => undefined)
+  return newProfiles
+}
 
-    // Skip duplicates (same server + port + protocol)
-    const isDuplicate = existingProfiles.some(
-      (p) =>
-        p.server === serverProfile.server &&
-        p.port === serverProfile.port &&
-        p.protocol === serverProfile.protocol
-    )
+/**
+ * Append `input` to the named group regardless of input type. Used by the
+ * "paste an extra key under this subscription" flow in the UI — the user
+ * already chose the group, so we never auto-create or auto-route.
+ *
+ * Subscription URLs append the full set of resolved profiles. Single
+ * URIs append one profile with `sourceUri = trimmed`.
+ */
+export async function addFromInputToGroup(input: string, groupId: string): Promise<ServerProfile[]> {
+  const trimmed = input.trim()
+  if (!trimmed) throw new Error('Введите ссылку подписки или VPN-ссылку')
 
-    if (!isDuplicate) {
-      newProfiles.push(serverProfile)
-    }
+  const target = serverGroups.getGroup(groupId)
+  if (!target) throw new Error('Группа не найдена')
+
+  let proxyAddr: string | undefined
+  let proxyType: 'socks5' | 'http' | undefined
+  try {
+    const settings = settingsStore.get()
+    proxyAddr = settings.proxyOverride?.trim() || undefined
+    proxyType = settings.proxyType
+  } catch {
+    /* fall through */
   }
 
-  if (newProfiles.length > 0) {
-    const allProfiles = [...existingProfiles, ...newProfiles]
-    saveProfiles(allProfiles)
-    // If the user has no active profile yet, auto-select the first one we
-    // just imported. Without this the dashboard shows "no servers" until
-    // they manually click one, even though the list is populated.
-    if (!getActiveProfileId()) {
-      store.set('activeProfileId', newProfiles[0].id)
-    }
-    logEvent('info', 'server-picker', 'profiles added from input', {
-      count: newProfiles.length,
-      source: /^https?:\/\//i.test(trimmed) ? 'subscription' : 'link'
-    })
-    // Kick off geolocation in the background. We don't await — the import
-    // call should return as soon as profiles are saved, and the UI will
-    // poll/listen for country fields populating over the next few seconds.
-    void geolocateAll().catch(() => undefined)
+  const resolved = await resolveVpnProfiles(trimmed, { proxyAddr, proxyType })
+  if (!resolved.profiles.length) {
+    throw new Error('Не найдено поддерживаемых профилей в указанном источнике')
   }
 
+  const isSubscriptionUrl = /^https?:\/\//i.test(trimmed)
+  const newProfiles = appendProfilesToGroup(
+    resolved.profiles,
+    groupId,
+    (_vp, index) =>
+      !isSubscriptionUrl && resolved.profiles.length === 1 && index === 0 ? trimmed : undefined
+  )
+
+  logEvent('info', 'server-picker', 'profiles appended to existing group', {
+    groupId,
+    count: newProfiles.length,
+    source: isSubscriptionUrl ? 'subscription' : 'uri'
+  })
+  void geolocateAll().catch(() => undefined)
   return newProfiles
 }
 
@@ -641,6 +904,14 @@ export function registerServerPickerHandlers(): void {
   })
 
   handleLogged('servers:add', async (_event, input: string) => {
+    return await addFromInput(input)
+  })
+
+  // Append profiles to a specific group. When `groupId` is null, fall back
+  // to the same defaults as `servers:add`: subscription URLs create their
+  // own group; single URIs land in "Ручные ключи".
+  handleLogged('servers:add-to-group', async (_event, input: string, groupId: string | null) => {
+    if (groupId) return await addFromInputToGroup(input, groupId)
     return await addFromInput(input)
   })
 
@@ -816,9 +1087,11 @@ export const serverPicker = {
   pingServer,
   pingAll,
   addFromInput,
+  addFromInputToGroup,
   groupByProtocol,
   migrateLegacyDirectVpnProfiles,
   backfillMissingOutbounds,
+  migrateProfilesIntoGroups,
   geolocateAll,
   registerHandlers: registerServerPickerHandlers
 }

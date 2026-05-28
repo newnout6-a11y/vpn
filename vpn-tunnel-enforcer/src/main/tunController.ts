@@ -182,6 +182,14 @@ let userInitiatedStop = false
 const RESTART_BACKOFF_MS = [2000, 5000, 10000] as const
 const STABLE_RESET_MS = 30000
 
+// Post-trial auto-failover: when sing-box can't keep the active key alive
+// AND that key belongs to an "expired" group (subscription panel is gone
+// but the keys themselves may still work for a while), we try the next live
+// key in the same group instead of just disengaging the kill-switch. The
+// flag prevents two concurrent failover attempts from stomping each other
+// when, for example, watchdog and onExit both notice the death.
+let postTrialFailoverInProgress = false
+
 
 function clearRestartTimers() {
   if (restartTimer) {
@@ -922,6 +930,170 @@ async function prepareRuntime(
   return { singbox: singboxDst, config: configPath }
 }
 
+// ─── Post-trial failover ────────────────────────────────────────────────────
+//
+// When sing-box can't keep the active key alive AND that key was part of a
+// subscription whose panel has expired (status === 'expired'), the most
+// likely cause isn't a bug in our pipeline — it's that the provider finally
+// revoked server-side access for that specific key. The keys NEXT to it in
+// the same group very often still work, because providers revoke per-user
+// quotas and not the entire pool at once.
+//
+// Instead of giving up and dropping the kill-switch, we walk the rest of the
+// group, ping each candidate via keyHealthChecker, and switch the active
+// profile to the first one that answers TLS. The user just sees a banner
+// saying "we moved you to the next live key" and traffic resumes.
+//
+// This intentionally does NOT engage for healthy subscriptions: those go
+// through the normal restart-with-backoff path, because the right answer
+// there is "wait a moment and try the same server again", not "rotate keys".
+export async function attemptPostTrialFailover(): Promise<{ tried: number; succeeded: boolean; newProfileId?: string }> {
+  if (postTrialFailoverInProgress) {
+    return { tried: 0, succeeded: false }
+  }
+  postTrialFailoverInProgress = true
+  try {
+    // Lazy-load the stores and the health checker so we never break the
+    // module-load graph (keyHealthChecker imports tunController). Using
+    // require here also keeps the per-store reads scoped to this rare path
+    // — the normal start/stop flow doesn't touch them.
+    let StoreCtor: any
+    let checkProfileHealth: ((profile: any) => Promise<{ online: boolean; latencyMs: number | null; reason?: string }>) | null = null
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      StoreCtor = require('electron-store')
+      if (StoreCtor && StoreCtor.default) StoreCtor = StoreCtor.default
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const mod = require('./keyHealthChecker')
+      checkProfileHealth = mod.checkProfileHealth
+    } catch (err) {
+      logEvent('warn', 'tun', 'post-trial failover: failed to load dependencies', err)
+      return { tried: 0, succeeded: false }
+    }
+    if (!StoreCtor || !checkProfileHealth) {
+      return { tried: 0, succeeded: false }
+    }
+
+    const pickerStore = new StoreCtor({ name: 'server-picker' })
+    const groupsStore = new StoreCtor({ name: 'server-groups' })
+
+    const profiles: any[] = pickerStore.get('profiles', []) || []
+    const activeId: string | null = pickerStore.get('activeProfileId', null) || null
+    if (!Array.isArray(profiles) || !activeId) {
+      return { tried: 0, succeeded: false }
+    }
+    const activeProfile = profiles.find(p => p && p.id === activeId)
+    if (!activeProfile) {
+      return { tried: 0, succeeded: false }
+    }
+
+    const activeGroupId: string | null = activeProfile.groupId ?? null
+    if (!activeGroupId) {
+      return { tried: 0, succeeded: false }
+    }
+
+    const groups: any[] = groupsStore.get('groups', []) || []
+    const group = Array.isArray(groups) ? groups.find(g => g && g.id === activeGroupId) : null
+    if (!group || group.status !== 'expired') {
+      // Failover only makes sense for post-trial groups. Healthy subscriptions
+      // get the existing restart-with-backoff path.
+      return { tried: 0, succeeded: false }
+    }
+
+    const candidates: any[] = profiles
+      .filter(p => p && p.groupId === activeGroupId && p.id !== activeId && p.enabled !== false)
+      .sort((a: any, b: any) => {
+        // Most-recently-seen-in-subscription first: those are the keys the
+        // panel was happy with most recently, so the odds they still work
+        // are slightly better.
+        const ax = Number(a.lastSeenInSubscriptionAt ?? 0)
+        const bx = Number(b.lastSeenInSubscriptionAt ?? 0)
+        return bx - ax
+      })
+
+    if (!candidates.length) {
+      logEvent('info', 'tun', 'post-trial failover: no sibling keys to try', {
+        groupId: activeGroupId,
+        from: activeId
+      })
+      return { tried: 0, succeeded: false }
+    }
+
+    let tried = 0
+    for (const candidate of candidates) {
+      tried += 1
+      let result: { online: boolean; latencyMs: number | null; reason?: string }
+      try {
+        result = await checkProfileHealth(candidate)
+      } catch (err) {
+        logEvent('warn', 'tun', 'post-trial failover: probe threw', err)
+        continue
+      }
+      if (!result.online) continue
+
+      // Promote the candidate to active BEFORE we restart so the next
+      // start() picks it up via lastStartOptions / the renderer state.
+      try {
+        pickerStore.set('activeProfileId', candidate.id)
+      } catch (err) {
+        logEvent('warn', 'tun', 'post-trial failover: failed to set active profile', err)
+      }
+
+      logEvent('info', 'tun', 'post-trial failover: switching to next live key', {
+        from: activeId,
+        to: candidate.id,
+        group: activeGroupId,
+        latencyMs: result.latencyMs
+      })
+
+      const candidateName = typeof candidate.name === 'string' && candidate.name.trim() ? candidate.name.trim() : 'другой ключ'
+      notifyStatus(`post-trial-failover:${candidateName}`)
+      notify(
+        'warn',
+        'Сервер сменился',
+        `Активный ключ перестал отвечать. Переключились на «${candidateName}» — другой ключ из той же подписки. Подписка-источник истекла, но этот ключ ещё живой.`
+      ).catch(() => undefined)
+
+      // Re-arm the tunnel with the candidate's outbound. We reuse the prefs
+      // from the last successful start so the user doesn't have to re-tick
+      // kill-switch / lockdown / stealth mode toggles.
+      try {
+        const settings: any = settingsStore.get()
+        const outbound = candidate.outbound && typeof candidate.outbound === 'object' ? candidate.outbound : null
+        if (!outbound) {
+          logEvent('warn', 'tun', 'post-trial failover: candidate has no outbound', { candidate: candidate.id })
+          return { tried, succeeded: false }
+        }
+        const startResult = await tunController.start({
+          mode: 'directVpn',
+          vpnProfile: { name: candidateName, protocol: candidate.protocol, outbound },
+          enableFirewallKillSwitch: lastStartOptions?.enableFirewallKillSwitch ?? settings.firewallKillSwitch === true,
+          enableAdapterLockdown: lastStartOptions?.enableAdapterLockdown ?? settings.strictAdapterLockdown === true,
+          publicWifiCompatibility: lastStartOptions?.publicWifiCompatibility ?? settings.publicWifiCompatibility,
+          stealthMode: lastStartOptions?.stealthMode ?? settings.stealthMode === true
+        })
+        if (!startResult.success) {
+          logEvent('warn', 'tun', 'post-trial failover: start failed', { error: startResult.error })
+          continue
+        }
+      } catch (err) {
+        logEvent('warn', 'tun', 'post-trial failover: start threw', err)
+        continue
+      }
+
+      return { tried, succeeded: true, newProfileId: candidate.id }
+    }
+
+    logEvent('info', 'tun', 'post-trial failover: no live sibling found', {
+      groupId: activeGroupId,
+      tried
+    })
+    return { tried, succeeded: false }
+  } finally {
+    postTrialFailoverInProgress = false
+  }
+}
+
 export const tunController = {
   async start(proxyAddrOrOpts: string | StartOptions): Promise<{ success: boolean; error?: string; warning?: string | null }> {
     if (currentStatus.running) {
@@ -1306,18 +1478,44 @@ export const tunController = {
           }
 
           if (restartAttempt >= RESTART_BACKOFF_MS.length) {
-            logEvent('error', 'tun', 'auto-restart gave up — too many failures', {
-              attempts: restartAttempt
-            })
-            notify('error', 'Защита остановилась', 'Превышено число попыток перезапуска. Включите защиту вручную.')
-            // All retries burned through. The VPN is not coming back without
-            // user intervention. Keeping the kill-switch active at this point
-            // would permanently lock out the user's internet for no benefit,
-            // so we disable it (idempotent — does nothing if already off) and
-            // restore connectivity.
-            disableKillSwitchIfActive('auto-restart exhausted — restoring internet').catch(err =>
-              logEvent('warn', 'tun', 'kill-switch disable after exhausted retries failed', err)
-            )
+            // Before giving up, try post-trial failover: if the active key
+            // belongs to an "expired" group, the panel is gone but sibling
+            // keys may still tunnel. attemptPostTrialFailover() bails fast
+            // when the group is healthy / not expired, so the regular path
+            // is unaffected. Fire-and-forget: it publishes its own
+            // notifyStatus events, and a successful start() inside it will
+            // naturally reset restartAttempt = 0.
+            attemptPostTrialFailover()
+              .then((res) => {
+                if (res.succeeded) {
+                  logEvent('info', 'tun', 'post-trial failover handled exhausted retries', res)
+                  return
+                }
+                // Failover declined or every sibling was dead — fall back
+                // to the original give-up path: announce stop, drop the
+                // kill-switch so the user gets internet back, and tell the
+                // UI we're done trying.
+                logEvent('error', 'tun', 'auto-restart gave up — too many failures', {
+                  attempts: restartAttempt,
+                  failoverTried: res.tried
+                })
+                notify('error', 'Защита остановилась', 'Превышено число попыток перезапуска. Включите защиту вручную.')
+                disableKillSwitchIfActive('auto-restart exhausted — restoring internet').catch(err =>
+                  logEvent('warn', 'tun', 'kill-switch disable after exhausted retries failed', err)
+                )
+                notifyStatus('stopped')
+              })
+              .catch((err) => {
+                logEvent('error', 'tun', 'post-trial failover threw', err)
+                disableKillSwitchIfActive('post-trial failover threw — restoring internet').catch(e =>
+                  logEvent('warn', 'tun', 'kill-switch disable after failover throw failed', e)
+                )
+                notifyStatus('stopped')
+              })
+            // Done with this onExit invocation. Don't fall through to the
+            // killSwitchEngaged branch below — the failover handler owns
+            // the recovery path now.
+            return
           }
 
           if (killSwitchEngaged && restartAttempt < RESTART_BACKOFF_MS.length) {

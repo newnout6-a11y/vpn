@@ -40,6 +40,102 @@ export interface ServerProfile {
    * will refuse to start a tunnel for any profile missing this object.
    */
   outbound?: Record<string, any>
+  /**
+   * FK to {@link ServerGroup}. Undefined for legacy rows; the startup
+   * migration assigns every dangling profile to an "Импортированные" group
+   * on first run, so any new code can treat this as effectively required.
+   */
+  groupId?: string
+  /**
+   * The exact `vless://` / `trojan://` / `ss://` / `vmess://` line as it was
+   * imported. Lossless re-export, stable identity for dedupe — two profiles
+   * with the same `sourceUri` are the same key, even if their derived
+   * `name` (the URL fragment) differs.
+   */
+  sourceUri?: string
+  /**
+   * ms timestamp. Updated on every refresh that saw this server in the
+   * upstream feed. When the subscription stops listing it, this stays
+   * frozen — we use the gap (`now - lastSeenInSubscriptionAt`) to surface
+   * "удалён провайдером" in the UI without actually deleting the key.
+   */
+  lastSeenInSubscriptionAt?: number
+  /**
+   * Soft-disable. Tunnel start refuses to dial when false. Default: true.
+   * We keep it optional for backward compat — undefined === enabled.
+   */
+  enabled?: boolean
+}
+
+/**
+ * Origin of a {@link ServerGroup}.
+ *
+ * - `subscription` — fetched from a remote panel (Marzban / 3X-UI / …).
+ *   Has a `sourceUrl` and is refreshable.
+ * - `manual` — single VPN URIs the user pasted by hand. No upstream feed,
+ *   so a "refresh" call is a no-op and the UI hides the refresh button.
+ */
+export type GroupSource = 'subscription' | 'manual'
+
+/**
+ * Lifecycle of a {@link ServerGroup}'s upstream feed.
+ *
+ * - `active` — last refresh succeeded.
+ * - `expired` — last refresh failed (HTTP 4xx, empty body, panel gone).
+ *   Profiles are intentionally left in place: post-trial keys often keep
+ *   working for hours/days after the panel itself disappears.
+ * - `unreachable` — network error during refresh (DNS, TCP, TLS). Not the
+ *   panel's fault per se; usually the user is offline.
+ * - `unknown` — never fetched yet (freshly imported manual group, or first
+ *   run before the initial refresh completes).
+ */
+export type GroupStatus = 'active' | 'expired' | 'unreachable' | 'unknown'
+
+/**
+ * Top-level grouping for {@link ServerProfile}s. One subscription URL == one
+ * group; loose user-pasted keys go into a shared "Ручные ключи" group.
+ *
+ * Most metadata fields come from the standard subscription-userinfo headers
+ * exposed by xray/sing-box panels; they're all optional because many panels
+ * publish none of them.
+ */
+export interface ServerGroup {
+  id: string
+  /** "feodorn LTE 12" / "Personal vless key" / etc. Free-form, user-renameable. */
+  name: string
+  source: GroupSource
+  /** Only populated when `source === 'subscription'`. */
+  sourceUrl?: string
+  /** ms timestamp the user added the group. */
+  importedAt: number
+  /** ms timestamp of the last successful refresh. */
+  lastFetchedAt?: number
+  /** ms timestamp of the last refresh attempt — success OR failure. */
+  lastFetchAttemptAt?: number
+  /**
+   * Human-readable error from the most recent failed fetch. `null` means
+   * the last fetch succeeded (and we explicitly cleared the field), so the
+   * UI can distinguish "never failed" (undefined) from "recovered after a
+   * failure" (null) from "still failing" (string).
+   */
+  lastFetchError?: string | null
+  status: GroupStatus
+  /** Subscription-userinfo: bytes already used (upload + download). */
+  trafficUsedBytes?: number
+  /** Subscription-userinfo: bytes uploaded. */
+  trafficUploadBytes?: number
+  /** Subscription-userinfo: bytes downloaded. */
+  trafficDownloadBytes?: number
+  /** Subscription-userinfo: total quota. */
+  trafficTotalBytes?: number
+  /** Subscription-userinfo: ms timestamp when the plan expires. */
+  expiresAt?: number
+  /** Subscription-userinfo: server-recommended refresh interval, in seconds. */
+  refreshIntervalSeconds?: number
+  /** Subscription-userinfo: panel URL the user can open in a browser. */
+  webPageUrl?: string
+  /** Number of profiles seen on the most recent successful refresh. */
+  lastRefreshProfilesCount?: number
 }
 
 /** Speed test result entry */
@@ -222,6 +318,13 @@ export interface ServerChannels {
   'servers:get-active': () => { profile: ServerProfile | null; activeId: string | null }
   'servers:ping-all': () => ServerProfile[]
   'servers:add': (input: string) => ServerProfile[]
+  /**
+   * Append a profile (single VPN URI) or a batch of profiles (subscription
+   * URL) to a specific group. When `groupId` is null we fall back to the
+   * defaults: subscription → new "subscription" group, single URI → the
+   * shared "Ручные ключи" group (auto-created).
+   */
+  'servers:add-to-group': (input: string, groupId: string | null) => ServerProfile[]
   'servers:remove': (id: string) => void
   'servers:export-key': (id: string) =>
     | { ok: true; uri: string; name: string; protocol: string }
@@ -234,6 +337,40 @@ export interface ServerChannels {
     | { ok: true; path: string; total: number; exported: number; skipped: number }
     | { ok: false; cancelled: true }
     | { ok: false; reason: string; error?: string }
+  // ── Server group management ────────────────────────────────────────────
+  'groups:list': () => ServerGroup[]
+  'groups:get': (id: string) => ServerGroup | null
+  'groups:rename': (id: string, name: string) => ServerGroup | null
+  /**
+   * If `deleteServers` is true, every profile with `groupId === id` is also
+   * removed from the picker store (and the active selection is cleared if
+   * it pointed at one of them). Otherwise the profiles are detached
+   * (`groupId` cleared) — they end up "ungrouped" and can be reassigned
+   * later by the user.
+   */
+  'groups:delete': (id: string, deleteServers: boolean) => { ok: boolean }
+  /**
+   * Re-fetch the upstream subscription. On success the group is marked
+   * `active`, profiles are dedupe-merged, and `lastSeenInSubscriptionAt` is
+   * stamped on every profile that came back. On failure the group is
+   * marked `expired` and profiles are LEFT IN PLACE — post-trial keys
+   * routinely keep working for hours after the panel goes 403.
+   *
+   * The outer envelope distinguishes "the call itself failed" (network
+   * issue, group not found) from "the refresh succeeded but the panel is
+   * gone" — the latter still returns `ok: true`.
+   */
+  'groups:refresh': (id: string) =>
+    | { ok: true; group: ServerGroup; addedCount: number; updatedCount: number; removedCount: number }
+    | { ok: false; error: string }
+  /**
+   * Run a TCP/TLS health probe across every profile in the group.
+   * Delegates to keyHealthChecker (Agent C). Wrapped in a try/catch so the
+   * UI gets a friendly error if the module isn't wired up yet.
+   */
+  'groups:check-health': (id: string) =>
+    | { ok: true; results: Array<{ profileId: string; online: boolean; latencyMs: number | null; reason?: string }> }
+    | { ok: false; error: string }
 }
 
 /** Speed Test IPC channels */
