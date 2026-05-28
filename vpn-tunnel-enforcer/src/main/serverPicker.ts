@@ -312,6 +312,26 @@ async function icmpPing(host: string, timeoutMs: number): Promise<number | null>
       { windowsHide: true, timeout: timeoutMs + 1500, encoding: 'buffer', maxBuffer: 64 * 1024 }
     )
     const text = decodeMaybeCp866(stdout as Buffer)
+
+    // Sanity gate: ping.exe will *successfully* exit even when the local
+    // gateway returns "Host unreachable" / "Сеть недоступна" / TTL expired
+    // — and on some routers it also emits a `<1ms` line for those replies
+    // because it's measuring the LAN hop to the router, not the actual
+    // destination. Without this gate we'd return `1` for unreachable VPN
+    // hosts and the UI would show a fake "1 ms". Only count a measurement
+    // if we see "Reply from <host>" / "Ответ от <host>" — that's the
+    // canonical "destination answered" line.
+    const echoOk = /(?:Reply from|Ответ от|Ответ из)\s+/i.test(text)
+    if (!echoOk) return null
+
+    // Belt-and-braces: if ping.exe printed "Destination host unreachable"
+    // / "Заданный узел недоступен" anywhere in the output, treat the
+    // whole probe as a miss even if a stray `<1ms` slipped past the gate
+    // above. Some routers reply with both lines in a single ping packet.
+    if (/(?:Destination .*unreachable|Заданный узел недоступен|Сеть недоступна|Превышен интервал)/i.test(text)) {
+      return null
+    }
+
     // English: "time=53ms" / "time<1ms" / "time=1.2 ms"
     // Russian: "время=53мс" / "время<1мс"
     const m = text.match(/(?:time|время)\s*[<=]\s*([0-9.]+)\s*(?:ms|мс)/i)

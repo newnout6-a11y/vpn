@@ -441,8 +441,17 @@ export async function refreshGroup(
 
   savePickerProfiles([...outOfGroup, ...merged])
 
+  // The subscription answered with usable data. Default status is `active`,
+  // but if the panel told us the trial already expired we honor that — the
+  // UI must not say "Активна" while showing "Триал истёк 9 дней назад"
+  // right next to it. Saved keys frequently keep working past the trial
+  // boundary (providers don't revoke immediately), so `expired` is the
+  // correct signal: "источник истёк, ключи могут работать".
+  const expiresAt = userInfo?.expiresAt
+  const trialAlreadyExpired =
+    typeof expiresAt === 'number' && Number.isFinite(expiresAt) && expiresAt > 0 && expiresAt < now
   updateGroup(groupId, {
-    status: 'active',
+    status: trialAlreadyExpired ? 'expired' : 'active',
     lastFetchedAt: now,
     lastFetchAttemptAt: now,
     lastFetchError: null,
@@ -553,22 +562,16 @@ export function registerServerGroupsHandlers(): void {
     return await refreshGroup(id)
   })
 
-  // Health-check delegates to keyHealthChecker (Agent C). The require() is
-  // wrapped in try/catch so we don't crash if Agent C's branch hasn't been
-  // merged yet — the UI just gets a friendly error.
+  // Health-check delegates to keyHealthChecker. Static import so the bundler
+  // includes the module — earlier dynamic require() got tree-shaken out
+  // by electron-vite and exploded in production with "Cannot find module".
   handleLogged('groups:check-health', async (_event, id: string) => {
     try {
-      // Dynamic require so a missing module doesn't blow up app startup.
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const mod = require('./keyHealthChecker') as {
-        checkGroupHealth?: (
-          groupId: string
-        ) => Promise<Array<{ profileId: string; online: boolean; latencyMs: number | null; reason?: string }>>
-      }
-      if (typeof mod.checkGroupHealth !== 'function') {
+      const { checkGroupHealth } = await import('./keyHealthChecker')
+      if (typeof checkGroupHealth !== 'function') {
         return { ok: false as const, error: 'health checker недоступен' }
       }
-      const results = await mod.checkGroupHealth(id)
+      const results = await checkGroupHealth(id)
       return { ok: true as const, results }
     } catch (err: any) {
       logEvent('warn', 'server-groups', 'check-health failed', err)

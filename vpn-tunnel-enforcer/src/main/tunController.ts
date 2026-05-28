@@ -1154,18 +1154,16 @@ export async function attemptPostTrialFailover(): Promise<{ tried: number; succe
   }
   postTrialFailoverInProgress = true
   try {
-    // Lazy-load the stores and the health checker so we never break the
-    // module-load graph (keyHealthChecker imports tunController). Using
-    // require here also keeps the per-store reads scoped to this rare path
-    // — the normal start/stop flow doesn't touch them.
+    // Lazy-import the health checker via dynamic ESM `import()` so the
+    // bundler still resolves it (unlike `require()` which electron-vite
+    // tree-shook in production and broke "Проверить ключи").
     let StoreCtor: any
     let checkProfileHealth: ((profile: any) => Promise<{ online: boolean; latencyMs: number | null; reason?: string }>) | null = null
     try {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       StoreCtor = require('electron-store')
       if (StoreCtor && StoreCtor.default) StoreCtor = StoreCtor.default
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const mod = require('./keyHealthChecker')
+      const mod = await import('./keyHealthChecker')
       checkProfileHealth = mod.checkProfileHealth
     } catch (err) {
       logEvent('warn', 'tun', 'post-trial failover: failed to load dependencies', err)
