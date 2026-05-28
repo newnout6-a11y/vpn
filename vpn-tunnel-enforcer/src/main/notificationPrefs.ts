@@ -17,7 +17,7 @@
 
 import { ipcMain, BrowserWindow } from 'electron'
 import Store from 'electron-store'
-import { notify } from './notifications'
+import { getWindowsNotificationState, notify } from './notifications'
 import type { NotificationPreferences } from '../shared/ipc-types'
 
 // ─── Event type mapping ──────────────────────────────────────────────────────
@@ -143,5 +143,14 @@ export function registerNotificationPrefsIpcHandlers(): void {
 
   ipcMain.handle('notifications:set-prefs', (_event, partial: Partial<NotificationPreferences>) => {
     return setPrefs(partial)
+  })
+
+  ipcMain.handle('notifications:check-os-state', async () => {
+    try {
+      const state = await getWindowsNotificationState()
+      return { osNotificationsEnabled: state.enabled, appUserModelId: state.appUserModelId }
+    } catch {
+      return { osNotificationsEnabled: true, appUserModelId: null }
+    }
   })
 }

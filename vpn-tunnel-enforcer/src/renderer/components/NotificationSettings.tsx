@@ -3,6 +3,7 @@
  *
  * Features:
  * - Fetches current prefs from 'notifications:get-prefs' IPC on mount
+ * - Checks Windows OS notification state and warns if disabled
  * - Toggle (MacSwitch) for each event type: vpnConnect, vpnDisconnect, leakDetected,
  *   profileRotation, scheduleTriggered, connectionError
  * - Method selector (MacSegmentedControl): System / In-app / Both
@@ -14,7 +15,7 @@
  * Validates: Requirements 17.1, 17.2, 17.4, 17.5
  */
 
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
   Bell,
@@ -60,8 +61,20 @@ const EVENT_TOGGLES: EventToggleConfig[] = [
 export const NotificationSettings: React.FC = () => {
   const { t } = useTranslation()
   const [prefs, setPrefs] = useState<NotificationPreferences | null>(null)
+  const [osBlocked, setOsBlocked] = useState(false)
 
   const api = (window as any).electronAPI
+
+  // ─── Fetch OS notification state ──────────────────────────────────────────
+
+  const fetchOsState = useCallback(async () => {
+    try {
+      const state = await api.checkOsNotificationState()
+      setOsBlocked(!state.osNotificationsEnabled)
+    } catch {
+      // IPC not yet available — assume allowed
+    }
+  }, [api])
 
   // ─── Fetch initial preferences ────────────────────────────────────────────
 
@@ -76,7 +89,16 @@ export const NotificationSettings: React.FC = () => {
 
   useEffect(() => {
     fetchPrefs()
-  }, [fetchPrefs])
+    fetchOsState()
+  }, [fetchPrefs, fetchOsState])
+
+  // Re-check OS state when the window regains focus (user may have fixed it
+  // in Windows Settings without restarting the app).
+  useEffect(() => {
+    const onFocus = () => fetchOsState()
+    window.addEventListener('focus', onFocus)
+    return () => window.removeEventListener('focus', onFocus)
+  }, [fetchOsState])
 
   // ─── Update preferences via IPC ───────────────────────────────────────────
 
@@ -143,6 +165,23 @@ export const NotificationSettings: React.FC = () => {
           </p>
         </div>
       </div>
+
+      {/* OS-level warning banner */}
+      {osBlocked && (
+        <div className="flex items-start gap-3 p-3 rounded-[var(--radius-sm)] bg-[var(--color-warning)]/10 border border-[var(--color-warning)]/30">
+          <ShieldAlert size={18} className="mt-0.5 shrink-0 text-[var(--color-warning)]" />
+          <div className="space-y-1">
+            <p className="text-xs font-medium text-[var(--color-warning)]">
+              {t('notifications.osBlockedWarning')}
+            </p>
+            {prefs && (prefs.method === 'system' || prefs.method === 'both') && (
+              <p className="text-xs text-[var(--color-text-secondary)]">
+                {t('notifications.osBlockedHint')}
+              </p>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Event type toggles */}
       <div className="space-y-3">

@@ -73,10 +73,14 @@ export interface SystemSnapshot {
     adapterLockdown: object | null
   }
   // Process owner of likely upstream proxy ports (10808 SOCKS, 10809 HTTP).
-  proxyOwnersPort10808?: string | { error: string }
-  proxyOwnersPort10809?: string | { error: string }
-  // Active sing-box state.
-  singboxRunning?: string | { error: string }
+  // The PS commands wrap their bodies in try/catch so "no listener" produces
+  // an explicit { empty: true } marker rather than a noisy { error: ... }
+  // (which is the common case when nothing is listening on that port).
+  proxyOwnersPort10808?: string | { empty: true } | { error: string }
+  proxyOwnersPort10809?: string | { empty: true } | { error: string }
+  // Active sing-box state. Uses tasklist directly (yes/no semantics) so this
+  // never reports an error in normal operation.
+  singboxRunning?: { running: boolean; pid?: number } | { error: string }
 }
 
 function snapshotsDir(): string {
@@ -123,6 +127,78 @@ async function tryReadJsonFile(path: string): Promise<object | null> {
 }
 
 /**
+ * Marker emitted by proxy-port PS scripts when nothing is listening on the
+ * target port. The script wraps its body in try/catch so a "no rows"
+ * outcome produces this explicit token instead of a non-zero exit (which
+ * tryPS would otherwise turn into { error: 'Command failed: ...' }, the
+ * noisy false-positive we used to see in every snapshot).
+ */
+const PS_EMPTY_MARKER = '__VPNTE_EMPTY__'
+
+/**
+ * Run a PS script that's expected to either emit the empty marker or some
+ * stdout. Returns:
+ *   - { empty: true } when the script reported no rows (common case).
+ *   - the trimmed stdout string otherwise.
+ *   - { error } if the PS process itself failed (rare — only for unrelated
+ *     issues like timeout or missing cmdlet).
+ */
+async function tryProxyOwnersPS(port: number): Promise<string | { empty: true } | { error: string }> {
+  const script = `
+try {
+  $rows = Get-NetTCPConnection -State Listen -LocalPort ${port} -ErrorAction Stop |
+    ForEach-Object {
+      $p = Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue
+      [pscustomobject]@{Port=$_.LocalPort; LocalAddress=$_.LocalAddress; Pid=$_.OwningProcess; Process=$p.ProcessName; Path=$p.Path}
+    }
+  if (-not $rows) {
+    Write-Output '${PS_EMPTY_MARKER}'
+  } else {
+    $rows | Format-List | Out-String
+  }
+} catch {
+  Write-Output '${PS_EMPTY_MARKER}'
+}
+`
+  const result = await tryPS(script)
+  if (typeof result !== 'string') return result
+  const trimmed = result.trim()
+  if (!trimmed || trimmed === PS_EMPTY_MARKER || trimmed.includes(PS_EMPTY_MARKER)) {
+    return { empty: true }
+  }
+  return trimmed
+}
+
+/**
+ * Tasklist-based check for our owned sing-box runtime. Returns a structured
+ * { running, pid? } object so consumers don't have to grep raw text. We
+ * use tasklist (not PS) because the previous PS-based approach was brittle
+ * — Get-Process throws when no match, which tryPS turned into an error
+ * even though "nothing running" is a perfectly valid yes/no answer.
+ */
+async function tryGetSingboxRunning(): Promise<{ running: boolean; pid?: number } | { error: string }> {
+  if (process.platform !== 'win32') return { error: 'platform is not Windows' }
+  try {
+    const { stdout } = await exec(
+      'tasklist /FI "IMAGENAME eq vpnte-sing-box.exe" /FO CSV /NH',
+      { windowsHide: true, timeout: 5000, encoding: 'utf8', maxBuffer: 1024 * 1024 }
+    )
+    const text = String(stdout || '')
+    // tasklist with /NH on no-match prints either an empty result or
+    // 'INFO: No tasks are running...' to stdout depending on Windows
+    // build. CSV rows for matches look like:
+    //   "vpnte-sing-box.exe","1234","Console","1","12,345 K"
+    const match = text.match(/^"vpnte-sing-box\.exe","(\d+)"/im)
+    if (match) {
+      return { running: true, pid: Number(match[1]) }
+    }
+    return { running: false }
+  } catch (err: any) {
+    return { error: err?.message ?? String(err) }
+  }
+}
+
+/**
  * The Windows-y bits. We pull EVERYTHING here so support has zero questions
  * to ask back. Each PS command is independent — one failure (e.g. missing
  * cmdlet on an old Windows version) never blocks the rest.
@@ -164,13 +240,9 @@ async function capturePlatformDumps(): Promise<Partial<SystemSnapshot>> {
     tryPS("Get-NetFirewallRule -DisplayName 'VPNTE-*' -ErrorAction SilentlyContinue | Format-List Name, DisplayName, Enabled, Direction, Action, Profile, EdgeTraversalPolicy, InterfaceType, Description | Out-String -Width 4096"),
     tryPS('Get-NetFirewallProfile | Format-Table -AutoSize -Wrap | Out-String -Width 4096'),
     tryPS('netsh winhttp show proxy 2>&1 | Out-String'),
-    tryPS("Get-NetTCPConnection -State Listen -LocalPort 10808 -ErrorAction SilentlyContinue | ForEach-Object { $p = Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue; [pscustomobject]@{Port=$_.LocalPort; LocalAddress=$_.LocalAddress; Pid=$_.OwningProcess; Process=$p.ProcessName; Path=$p.Path} } | Format-List | Out-String"),
-    tryPS("Get-NetTCPConnection -State Listen -LocalPort 10809 -ErrorAction SilentlyContinue | ForEach-Object { $p = Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue; [pscustomobject]@{Port=$_.LocalPort; LocalAddress=$_.LocalAddress; Pid=$_.OwningProcess; Process=$p.ProcessName; Path=$p.Path} } | Format-List | Out-String"),
-    // ProgressPreference=SilentlyContinue suppresses the "Preparing modules
-    // for first use" progress XML that otherwise contaminates stdout when
-    // stdout is redirected. -ErrorAction SilentlyContinue means we don't
-    // throw if the process isn't running.
-    tryPS("$ProgressPreference='SilentlyContinue';Get-Process -Name 'vpnte-sing-box','sing-box' -ErrorAction SilentlyContinue | Format-Table Id, ProcessName, Path, StartTime -AutoSize | Out-String -Width 4096")
+    tryProxyOwnersPS(10808),
+    tryProxyOwnersPS(10809),
+    tryGetSingboxRunning()
   ])
 
   return {

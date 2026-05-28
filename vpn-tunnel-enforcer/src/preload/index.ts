@@ -120,6 +120,10 @@ export interface ElectronAPI {
   // Notification Preferences
   notificationsGetPrefs: () => Promise<any>
   notificationsSetPrefs: (prefs: any) => Promise<any>
+  checkOsNotificationState: () => Promise<{ osNotificationsEnabled: boolean; appUserModelId: string | null }>
+  // ip-monitor suspend/resume — leak detection guard during stop-tun rollback.
+  ipMonitorSuspend: () => Promise<{ ok: true } | undefined>
+  ipMonitorResume: () => Promise<{ ok: true } | undefined>
   // i18n
   i18nGetLocale: () => Promise<string>
   i18nSetLocale: (locale: string) => Promise<void>
@@ -294,6 +298,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Notification Preferences
   notificationsGetPrefs: () => ipcRenderer.invoke('notifications:get-prefs'),
   notificationsSetPrefs: (prefs: any) => ipcRenderer.invoke('notifications:set-prefs', prefs),
+  checkOsNotificationState: () => ipcRenderer.invoke('notifications:check-os-state'),
+  // ip-monitor suspend/resume bridge — main self-registers these on
+  // process.type==='browser'. Renderer flips them when TUN status moves
+  // to 'stopping'/'stopped' to silence false-positive leak events.
+  ipMonitorSuspend: () => ipcRenderer.invoke('ip-monitor:suspend'),
+  ipMonitorResume: () => ipcRenderer.invoke('ip-monitor:resume'),
   // i18n
   i18nGetLocale: () => ipcRenderer.invoke('i18n:get-locale'),
   i18nSetLocale: (locale: string) => ipcRenderer.invoke('i18n:set-locale', locale),

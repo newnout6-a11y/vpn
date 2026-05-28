@@ -4,7 +4,7 @@ import { happDetector, type ProxyInfo } from './happDetector'
 import { settingsStore } from './settings'
 import { parseProxyAddress, probeTcp, tunController } from './tunController'
 import { logEvent } from './appLogger'
-import { TUN_ADAPTER_ALIAS } from './tunAdapter'
+import { TUN_ADAPTER_ALIAS, TUN_IPV4_PREFIX } from './tunAdapter'
 
 const exec = promisify(execCb)
 const MAX_BUFFER = 1024 * 1024 * 4
@@ -96,11 +96,23 @@ function proxyFromOverride(): ProxyInfo | null {
   }
 }
 
+// Module-level guard so the smoke-check log fires only on the first call —
+// future regressions show up as a single explicit line in app.log instead of
+// silent empty results (which is exactly how FIX C1's regression hid).
+let activeTunnelsScriptLogged = false
+
 async function getActiveTunnels(): Promise<TunnelInfo[]> {
   if (process.platform !== 'win32') return []
 
-  try {
-    const raw = await ps(`
+  // Build the PS regex prefix from TUN_IPV4_PREFIX so this stays in sync
+  // with tunAdapter.ts. Period is regex-special so each '.' becomes '\.'
+  // (one backslash in the runtime string -> literal period in PS regex).
+  // JS source '\\.' -> runtime '\.' -> PS sees regex \. -> matches '.'.
+  const prefixRegex = '^' + TUN_IPV4_PREFIX.replace(/\./g, '\\.')
+  // Single-quote the alias for PS so spaces in 'Ethernet 5' parse correctly.
+  const aliasLiteral = `'${TUN_ADAPTER_ALIAS.replace(/'/g, "''")}'`
+
+  const script = `
 $rx='(?i)wintun|\\btun\\b|wireguard|openvpn|tap-windows|happ|hiddify|singbox|sing-tun|v2ray|xray|vpn';
 Get-NetAdapter -ErrorAction SilentlyContinue |
   Where-Object { $_.Status -eq 'Up' -and ($_.Name -match $rx -or $_.InterfaceDescription -match $rx) } |
@@ -113,11 +125,27 @@ Get-NetAdapter -ErrorAction SilentlyContinue |
       Name=$adapter.Name;
       Description=$adapter.InterfaceDescription;
       Address=($ips -join ', ');
-      IsVpnte=($adapter.Name -eq TUN_ADAPTER_ALIAS -or ($ips -join ',') -match '^172\\.19\\.')
+      IsVpnte=($adapter.Name -eq ${aliasLiteral} -or ($ips -join ',') -match '${prefixRegex}')
     }
   } | ConvertTo-Json -Compress
-`)
-    return asArray<any>(parseJson(raw)).map(row => ({
+`
+
+  if (!activeTunnelsScriptLogged) {
+    activeTunnelsScriptLogged = true
+    logEvent('debug', 'planner', 'getActiveTunnels PS script', {
+      preview: script.replace(/\s+/g, ' ').trim().slice(0, 200)
+    })
+  }
+
+  try {
+    const raw = await ps(script)
+    const parsed = parseJson(raw)
+    if (parsed === null && raw.trim().length > 0) {
+      logEvent('warn', 'planner', 'getActiveTunnels: PS output non-empty but JSON parse failed', {
+        rawPreview: raw.slice(0, 300)
+      })
+    }
+    return asArray<any>(parsed).map(row => ({
       name: String(row.Name || ''),
       description: String(row.Description || ''),
       address: String(row.Address || ''),
@@ -145,7 +173,13 @@ Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
   Sort-Object Process,Port -Unique |
   ConvertTo-Json -Compress
 `)
-    return asArray<any>(parseJson(raw)).map(row => ({
+    const parsed = parseJson(raw)
+    if (parsed === null && raw.trim().length > 0) {
+      logEvent('warn', 'planner', 'getProxyListeners: PS output non-empty but JSON parse failed', {
+        rawPreview: raw.slice(0, 300)
+      })
+    }
+    return asArray<any>(parsed).map(row => ({
       host: String(row.Host || '127.0.0.1'),
       port: Number(row.Port),
       process: String(row.Process || 'unknown'),
@@ -214,6 +248,10 @@ export async function getRoutingPlan(): Promise<RoutingPlan> {
   }
 
   if (foreignTunnels.length > 0) {
+    // FIX C2: foreign TUN exists but our TUN is not running. We still
+    // recommend external (don't double-tunnel), but let the user proceed
+    // if they really want to — emit a soft warning instead of hard-blocking.
+    blockers.push('Внешний VPN/TUN уже активен. Запуск нашей защиты создаст конфликт маршрутов.')
     steps.push({
       label: 'Использовать уже поднятый VPN',
       before: `Сейчас система уже идет через ${foreignText}.`,
@@ -237,7 +275,7 @@ export async function getRoutingPlan(): Promise<RoutingPlan> {
       explanation: 'Hard mode здесь не нужен и будет вреден. Система уже видит активный туннель, поэтому приложение должно не плодить второй.',
       before: `Было: активный системный туннель ${foreignText}.`,
       after: 'Станет: текущий VPN остается главным маршрутом; VPNTE только показывает статус и помогает настроить приложения при необходимости.',
-      canStartHard: false,
+      canStartHard: true,
       proxy,
       activeTunnels,
       proxyListeners,

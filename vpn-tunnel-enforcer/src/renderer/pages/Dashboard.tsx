@@ -289,6 +289,7 @@ export function Dashboard() {
   // ─── Kill-switch disengage ──────────────────────────────────────────────
 
   const showKillSwitchBanner = firewallKillSwitchActive && !tunRunning
+  const competingTun = useAppStore(s => s.competingTun)
 
   const handleDisengageKillSwitch = async () => {
     setDisengaging(true)
@@ -296,7 +297,13 @@ export function Dashboard() {
       const result = await window.electronAPI.disableFirewallKillSwitch()
       if (result.success) {
         setFirewallKillSwitchActive(false)
-        addLog('warn', `Файрвол kill-switch снят вручную: ${result.message}`)
+        // `skipped:true` means main found nothing to disable — kill-switch was
+        // already off (typical: user clicks the banner just after the auto-
+        // rollback fired on TUN stop). Don't pretend the user "did" anything,
+        // just close the banner silently.
+        if (!result.skipped) {
+          addLog('warn', `Файрвол kill-switch снят вручную: ${result.message}`)
+        }
       } else {
         addLog('error', `Не удалось снять kill-switch: ${result.message}`)
       }
@@ -412,6 +419,22 @@ export function Dashboard() {
           above-the-fold so users don't miss it when their browser stops
           working. The smaller informational banner with both action buttons
           still appears further down. */}
+      {competingTun && tunRunning && (
+        <motion.div
+          initial={{ opacity: 0, y: -20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="rounded-[var(--radius-md)] border border-[var(--color-warning)]/60 bg-[var(--color-warning)]/10 p-4"
+          role="alert"
+          aria-live="polite"
+        >
+          <p className="text-sm font-semibold text-[var(--color-warning)]">
+            Обнаружен второй VPN/TUN: {competingTun}
+          </p>
+          <p className="text-xs text-[var(--color-text-secondary)] mt-1">
+            Два туннеля одновременно ломают DNS и интернет. Оставьте включённым только один — выключите либо нашу защиту, либо сторонний клиент (Happ TUN, WireGuard, OpenVPN и т.п.).
+          </p>
+        </motion.div>
+      )}
       {showKillSwitchBanner && (
         <motion.div
           initial={{ opacity: 0, y: -20 }}

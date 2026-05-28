@@ -35,6 +35,11 @@ export interface FirewallKillSwitchResult {
   success: boolean
   message: string
   details?: string
+  // True iff the call was a no-op because there was nothing to do (kill-switch
+  // already inactive). The renderer uses this to suppress the noisy
+  // "Kill-switch снят вручную" warn log that fired every stop because main
+  // had already auto-disabled before the user-driven IPC arrived.
+  skipped?: boolean
 }
 
 interface SavedProfile {
@@ -415,12 +420,17 @@ export async function disableKillSwitch(reason: string): Promise<FirewallKillSwi
  */
 export async function disableKillSwitchIfActive(
   reason: string
-): Promise<FirewallKillSwitchResult & { skipped?: boolean }> {
+): Promise<FirewallKillSwitchResult> {
   if (process.platform !== 'win32') {
     return { success: true, skipped: true, message: 'Firewall kill-switch недоступен (не Windows)' }
   }
   if (!(await isKillSwitchActive())) {
-    return { success: true, skipped: true, message: 'Kill-switch уже снят' }
+    // This path is hit on every stop-tun: tunController.stop() calls us
+    // BEFORE the renderer's own disable-IPC arrives. Logging at `warn` made
+    // the user think something went wrong every time. It didn't — the
+    // kill-switch is just already gone.
+    logEvent('debug', 'firewall-killswitch', 'kill-switch already inactive — skip', { reason })
+    return { success: true, skipped: true, message: 'Kill-switch already inactive' }
   }
   logEvent('info', 'firewall-killswitch', `auto-disable kill-switch: ${reason}`)
   return disableKillSwitch(reason)

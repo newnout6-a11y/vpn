@@ -2,7 +2,7 @@ import { exec as execCb, execFile as execFileCb } from 'child_process'
 import { writeFile, mkdir, copyFile, access, rename, stat } from 'fs/promises'
 import { join, dirname } from 'path'
 import { promisify } from 'util'
-import { createConnection, isIP } from 'net'
+import { createConnection, createServer, isIP } from 'net'
 import { networkInterfaces } from 'os'
 import { app } from 'electron'
 import sudo from 'sudo-prompt'
@@ -25,6 +25,9 @@ import {
 } from './physicalAdapterLockdown'
 import type { VpnProfile } from './vpnProfiles'
 import { TUN_ADAPTER_ALIAS, TUN_IPV4_ADDRESS_CIDR, TUN_IPV6_ADDRESS_CIDR, TUN_IPV4_RESOLVER, TUN_IPV4_PREFIX, isOwnTunAddress, ALL_KNOWN_ALIASES } from './tunAdapter'
+import { ipMonitor } from './ipMonitor'
+import { cancelLeakSelfTest } from './leakSelfTest'
+import { startCompetingTunWatch, stopCompetingTunWatch } from './competingTunDetector'
 
 const exec = promisify(execCb)
 const execFile = promisify(execFileCb)
@@ -76,6 +79,12 @@ interface StartOptions {
 // having to spawn another sing-box.
 let clashApiInfo: { port: number; secret: string } | null = null
 
+let directProxyPort: number | null = null;
+
+export function getDirectProxyPort(): number | null {
+  return directProxyPort;
+}
+
 export function getClashApiInfo(): { port: number; secret: string } | null {
   return clashApiInfo
 }
@@ -85,6 +94,54 @@ function randomLocalPort(): number {
   // ephemeral-range port is enough. 49152-65535 is the IANA private range
   // and unlikely to collide with anything mainstream the user has running.
   return 49152 + Math.floor(Math.random() * (65535 - 49152))
+}
+
+// Ask the OS for a port we can actually bind to right now. Windows reserves
+// chunks of the ephemeral range for Hyper-V/WSL/containers (the "excluded
+// port range"); a randomly-picked port can land inside one of those and
+// sing-box then fails to bind with WSAEACCES ("An attempt was made to access
+// a socket in a way forbidden"). createServer().listen(0) makes the OS hand
+// back a port from outside any excluded range, which is the cheapest reliable
+// signal that the port is bindable from user-space. We close immediately —
+// there is a tiny TOCTOU window between close and sing-box's bind, but in
+// practice the OS does not hand the same port to a second listener that fast.
+function pickFreeLocalPort(exclude: number[] = []): Promise<number> {
+  const excludeSet = new Set(exclude)
+  const tryOnce = (): Promise<number> => new Promise((resolve, reject) => {
+    const server = createServer()
+    server.unref()
+    server.once('error', (err) => {
+      try { server.close() } catch { /* ignore */ }
+      reject(err)
+    })
+    server.listen(0, '127.0.0.1', () => {
+      const addr = server.address()
+      const port = addr && typeof addr === 'object' ? addr.port : 0
+      server.close(() => {
+        if (port > 0) resolve(port)
+        else reject(new Error('createServer returned no port'))
+      })
+    })
+  })
+
+  return (async () => {
+    let lastErr: unknown = null
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        const port = await tryOnce()
+        if (!excludeSet.has(port)) return port
+      } catch (err) {
+        lastErr = err
+      }
+    }
+    if (lastErr) throw lastErr
+    // All 5 attempts collided with the exclude list — fall back to a random
+    // port outside the excluded set. Astronomically unlikely, but we bias
+    // toward returning *something* over throwing.
+    let fallback = randomLocalPort()
+    while (excludeSet.has(fallback)) fallback = randomLocalPort()
+    return fallback
+  })()
 }
 
 function randomSecret(): string {
@@ -262,7 +319,7 @@ export function generateSingboxConfig(
   upstream: string | { outbound: Record<string, any>; proxyType?: 'socks5' | 'http' },
   proxyType: 'socks5' | 'http' = 'socks5',
   directProcessNames: string[] = [],
-  options: { stealthMode?: boolean } = {}
+  options: { stealthMode?: boolean; directProxyPortOverride?: number } = {}
 ): object {
   // Stealth mode (TSPU/DPI bypass) toggles two knobs:
   //   1. TUN MTU 1500 → 1280 — encrypted payload sizes drift away from
@@ -325,6 +382,19 @@ export function generateSingboxConfig(
   const clashSecret = randomSecret()
   clashApiInfo = { port: clashPort, secret: clashSecret }
 
+  let dPort = options.directProxyPortOverride
+  if (typeof dPort !== 'number' || !Number.isInteger(dPort) || dPort <= 0 || dPort > 65535 || dPort === clashPort) {
+    // Fall back to a random pick when the caller did not pre-resolve a port
+    // (e.g. unit tests calling generateSingboxConfig directly). prepareRuntime
+    // pre-resolves the port via pickFreeLocalPort to avoid Windows excluded
+    // port ranges that cause WSAEACCES on bind.
+    dPort = randomLocalPort()
+    while (dPort === clashPort) {
+      dPort = randomLocalPort()
+    }
+  }
+  directProxyPort = dPort
+
   return {
     log: { level: 'debug', timestamp: true, output: logPath },
     dns: {
@@ -355,6 +425,12 @@ export function generateSingboxConfig(
         strict_route: true,
         route_address: ['0.0.0.0/1', '128.0.0.0/1', '::/1', '8000::/1'],
         stack: 'system'
+      },
+      {
+        type: 'mixed',
+        tag: 'mixed-direct-in',
+        listen: '127.0.0.1',
+        listen_port: dPort
       }
     ],
     outbounds: [
@@ -364,6 +440,7 @@ export function generateSingboxConfig(
     ],
     route: {
       rules: [
+        { inbound: 'mixed-direct-in', outbound: 'direct-out' },
         ...(
           proxyCoreProcesses.length > 0
             ? [{
@@ -382,6 +459,15 @@ export function generateSingboxConfig(
         // back to TCP TLS instead of waiting for QUIC to time out on each load.
         ...(proxyType === 'http'
           ? [{ network: 'udp', port: 443, outbound: 'block-out' }]
+          : []),
+        // VLESS+Reality with `network: tcp` cannot carry UDP at all — sing-box
+        // would otherwise let UDP fall through to `final: proxy-out` and stall
+        // until the per-flow timeout. Blocking all UDP up front fails fast and,
+        // more importantly, prevents UDP-only protocols (QUIC, gaming) from
+        // looking "open" while actually being a leak/blackhole. We only insert
+        // this for tcp-only outbounds; UDP-capable outbounds keep UDP routed.
+        ...(typeof proxyOutbound.network === 'string' && proxyOutbound.network === 'tcp'
+          ? [{ network: 'udp', outbound: 'block-out' }]
           : [])
       ],
       final: 'proxy-out',
@@ -502,18 +588,47 @@ async function removeStaleTunInterface(): Promise<void> {
   // upgrading user could end up with two ghost adapters fighting over the
   // default route.
   for (const alias of ALL_KNOWN_ALIASES) {
+    // Wrap the whole body in PowerShell try/catch so a "no such adapter"
+    // condition exits cleanly with our sentinel instead of spilling a
+    // Get-NetAdapter error onto stderr and triggering a noisy warn-level
+    // log on every start. The sentinels let the JS side classify the
+    // outcome (no-op / removed / disabled) without parsing PS error text.
     const script = `
-$adapter = Get-NetAdapter -Name '${alias}' -ErrorAction SilentlyContinue
-if ($adapter) {
-  try { Remove-NetAdapter -Name '${alias}' -Confirm:$false -ErrorAction Stop; Write-Host 'removed' }
-  catch {
-    try { Disable-NetAdapter -Name '${alias}' -Confirm:$false -ErrorAction Stop; Write-Host 'disabled' }
-    catch { Write-Host "err: $_" }
+try {
+  $adapter = Get-NetAdapter -Name '${alias}' -ErrorAction SilentlyContinue
+  if (-not $adapter) {
+    Write-Host '__VPNTE_NOOP__'
+  } else {
+    try {
+      Remove-NetAdapter -Name '${alias}' -Confirm:$false -ErrorAction Stop
+      Write-Host '__VPNTE_DONE__ removed'
+    } catch {
+      try {
+        Disable-NetAdapter -Name '${alias}' -Confirm:$false -ErrorAction Stop
+        Write-Host '__VPNTE_DONE__ disabled'
+      } catch {
+        Write-Host "__VPNTE_ERR__ $_"
+      }
+    }
   }
+} catch {
+  Write-Host "__VPNTE_ERR__ $_"
 }
 `
     try {
-      await runPowerShell(script, 15000, true)
+      const stdout = await runPowerShell(script, 15000, true)
+      const out = String(stdout || '').trim()
+      if (out.includes('__VPNTE_NOOP__')) {
+        logEvent('debug', 'tun', `no stale TUN interface for ${alias}`)
+      } else if (out.includes('__VPNTE_DONE__')) {
+        logEvent('info', 'tun', `cleaned up stale TUN interface for ${alias}`, { output: out })
+      } else if (out.includes('__VPNTE_ERR__')) {
+        logEvent('warn', 'tun', `stale TUN interface cleanup failed for ${alias}`, { output: out })
+      } else {
+        // No sentinel — treat as benign (PS returned empty stdout); avoid the
+        // legacy warn that fired on every start.
+        logEvent('debug', 'tun', `stale TUN interface check returned no output for ${alias}`)
+      }
     } catch (err) {
       logEvent('warn', 'tun', `stale TUN interface cleanup failed for ${alias}`, err)
     }
@@ -787,7 +902,21 @@ async function prepareRuntime(
   await copyFile(singboxSrc, singboxDst)
   await copyFile(wintunSrc, wintunDst)
 
-  const config = generateSingboxConfig(upstream, proxyType, directProcessNames, options)
+  // Pre-resolve the mixed-direct-in port via the OS so we never land inside a
+  // Windows Hyper-V/WSL excluded port range (which causes sing-box to fail
+  // bind with WSAEACCES). generateSingboxConfig falls back to randomLocalPort
+  // if no override is supplied, so direct callers (e.g. tests) still work.
+  let directProxyPortOverride: number | undefined
+  try {
+    directProxyPortOverride = await pickFreeLocalPort()
+  } catch (err) {
+    logEvent('warn', 'tun', 'pickFreeLocalPort failed — falling back to random port', err)
+  }
+
+  const config = generateSingboxConfig(upstream, proxyType, directProcessNames, {
+    ...options,
+    directProxyPortOverride
+  })
   await writeFile(configPath, JSON.stringify(config, null, 2), 'utf-8')
 
   return { singbox: singboxDst, config: configPath }
@@ -1024,23 +1153,67 @@ export const tunController = {
         }
         if (!resolved) {
           const msg = error?.message || (stderr ? String(stderr) : 'sing-box не запустился')
+          const combined = `${error?.message ?? ''} ${stderr ?? ''}`
+          // sing-box can fail to bind the mixed-direct-in inbound when the
+          // randomly-picked port falls inside a Windows Hyper-V/WSL excluded
+          // port range. In real diagnostics this surfaced as WSAEACCES on
+          // port 53771. We pre-resolve via pickFreeLocalPort now, but the OS
+          // can still race and reserve a port between our probe and the bind.
+          // Treat it as a transient failure and try ONCE with a fresh port.
+          const isPortAccessForbidden =
+            /WSAEACCES/i.test(combined) ||
+            /An attempt was made to access a socket in a way forbidden/i.test(combined)
+          const canRetryPortBind =
+            isPortAccessForbidden && !userInitiatedStop && restartAttempt === 0
           logEvent('error', 'tun', 'sing-box exited before startup completed', { message: msg, stderr })
+          if (canRetryPortBind) {
+            logEvent(
+              'warn',
+              'tun',
+              'sing-box hit Windows excluded port range — picking new port and retrying',
+              { stderr }
+            )
+            // Burn one auto-restart slot so we never loop indefinitely on a
+            // persistent bind failure. The retry is fire-and-forget; if it
+            // also fails we surface that error to the user via finish().
+            restartAttempt = 1
+          }
           // sing-box never came up. Tear down the kill-switch we just installed
           // — otherwise the user is locked out of the internet for no reason.
-          if (killSwitchEngaged) {
-            disableKillSwitch('sing-box never started').catch(err =>
+          // Skip the teardown when we are about to retry: the next attempt
+          // benefits from the rules already being in place.
+          if (killSwitchEngaged && !canRetryPortBind) {
+            disableKillSwitchIfActive('sing-box never started').catch(err =>
               logEvent('warn', 'tun', 'kill-switch disable after start failure failed', err)
             )
           }
           // Same for the adapter lockdown: it must always come down on a failed
           // start, otherwise the user has IPv6 disabled + ISP DNS overridden
           // for no reason.
-          if (adapterLockdownEngaged) {
+          if (adapterLockdownEngaged && !canRetryPortBind) {
             rollbackPhysicalAdapterLockdownIfApplied('sing-box never started').catch(err =>
               logEvent('warn', 'tun', 'adapter lockdown rollback after start failure failed', err)
             )
           }
-          notifyStatus('stopped')
+          if (canRetryPortBind) {
+            const retryOpts = startOptions
+            // Schedule the retry on next tick so the current start() call
+            // unwinds cleanly (startInProgress cleared, callbacks fired) before
+            // we kick off another full attempt.
+            setTimeout(() => {
+              tunController.start(retryOpts).then((res) => {
+                if (!res.success) {
+                  logEvent('error', 'tun', 'WSAEACCES retry failed', { error: res.error })
+                  notify('error', 'Не удалось запустить защиту', res.error || 'Неизвестная ошибка')
+                }
+              }).catch((err) => {
+                logEvent('error', 'tun', 'WSAEACCES retry threw', err)
+              })
+            }, 250)
+            notifyStatus('restarting:1/1')
+          } else {
+            notifyStatus('stopped')
+          }
           finish({ success: false, error: msg })
         } else if (error || stderr) {
           logEvent(error ? 'error' : 'warn', 'tun', 'sing-box process exited', { error: error?.message, stderr })
@@ -1140,12 +1313,11 @@ export const tunController = {
             // All retries burned through. The VPN is not coming back without
             // user intervention. Keeping the kill-switch active at this point
             // would permanently lock out the user's internet for no benefit,
-            // so we disable it and restore connectivity.
-            if (killSwitchEngaged) {
-              disableKillSwitch('auto-restart exhausted — restoring internet').catch(err =>
-                logEvent('warn', 'tun', 'kill-switch disable after exhausted retries failed', err)
-              )
-            }
+            // so we disable it (idempotent — does nothing if already off) and
+            // restore connectivity.
+            disableKillSwitchIfActive('auto-restart exhausted — restoring internet').catch(err =>
+              logEvent('warn', 'tun', 'kill-switch disable after exhausted retries failed', err)
+            )
           }
 
           if (killSwitchEngaged && restartAttempt < RESTART_BACKOFF_MS.length) {
@@ -1203,6 +1375,12 @@ export const tunController = {
               )
               killSwitchWarning =
                 'TUN-адаптер не поднялся за 5 с — kill-switch пропущен, чтобы не блокировать интернет.'
+            } else if (await isKillSwitchActive()) {
+              // Auto-restart path: rules left in place by the previous run are
+              // still doing their job, no need to reinstall (which would also
+              // briefly drop and re-add allow rules). Just take ownership.
+              killSwitchEngaged = true
+              logEvent('info', 'tun', 'kill-switch already active — reusing existing rules')
             } else {
               const ks = await enableKillSwitch({
                 singboxExePath: runtime.singbox,
@@ -1285,6 +1463,11 @@ export const tunController = {
           }
 
           notifyStatus('running')
+          // Start the runtime watchdog for a foreign VPN/TUN appearing
+          // mid-session. The watcher emits its own 'competing-tun:<name>'
+          // status events through the existing status callback bus so the
+          // renderer can show a banner without polling.
+          startCompetingTunWatch((s) => notifyStatus(s))
           finish({ success: true, warning: combinedWarning })
         } else if (attempts >= maxAttempts) {
           clearInterval(poller)
@@ -1321,6 +1504,27 @@ export const tunController = {
     restartAttempt = 0
     clearRestartTimers()
 
+    // Status contract for the renderer:
+    //   'stopping'         — user just pressed Stop; cleanup is in flight.
+    //                        Renderer should suppress "VPN unreachable" toasts
+    //                        from ipMonitor and similar during this window.
+    //   'stopped'          — cleanup finished, traffic is back to normal.
+    //   'running'          — TUN is up and traffic is flowing.
+    //   'killswitch-active'— TUN is down but the firewall is still blocking
+    //                        leaks while we wait for retry / user action.
+    //   'restarting:N/M'   — auto-restart attempt N of M is scheduled.
+    //   'proxy-down'       — upstream proxy stopped responding; TUN still up.
+    notifyStatus('stopping')
+
+    // Defense-in-depth: silence the false-positive leak path before any
+    // rollback runs. The renderer-side stoppingNowRef + ipMonitor IPC bridge
+    // already guard against the same race, but doing it here means the
+    // suppression takes effect even if the renderer hasn't received the
+    // status event yet (or isn't running, e.g. during shutdown).
+    ipMonitor.suspend()
+    cancelLeakSelfTest()
+    stopCompetingTunWatch()
+
     const cleanupErrors: string[] = []
     const rememberCleanupError = (label: string, err: unknown) => {
       const message = (err as Error)?.message || String(err)
@@ -1356,6 +1560,7 @@ export const tunController = {
     // Clear the cached port/secret so url-availability checks know to
     // tell callers "VPN is off" instead of returning ECONNREFUSED.
     clashApiInfo = null
+    directProxyPort = null
     logEvent('info', 'tun', 'TUN stopped')
     notify('info', 'Защита выключена', 'Трафик идёт по обычному маршруту.')
     notifyStatus('stopped')
@@ -1399,6 +1604,10 @@ export const tunController = {
       return { success: false, error: cleanupErrors.join(' | ') }
     }
 
+    // Cleanup finished — let the leak-detector run again. The next tunnel
+    // start (or a manual recheck) will set a fresh vpnIp baseline.
+    ipMonitor.resume()
+
     return { success: true }
   },
 
@@ -1406,7 +1615,7 @@ export const tunController = {
     return isKillSwitchActive()
   },
 
-  async disableFirewallKillSwitch(reason: string): Promise<{ success: boolean; message: string }> {
+  async disableFirewallKillSwitch(reason: string): Promise<{ success: boolean; message: string; skipped?: boolean }> {
     return disableKillSwitchIfActive(reason)
   },
 

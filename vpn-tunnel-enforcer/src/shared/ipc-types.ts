@@ -328,6 +328,10 @@ export interface NotificationChannels {
   'notifications:set-prefs': (
     prefs: Partial<NotificationPreferences>
   ) => NotificationPreferences
+  'notifications:check-os-state': () => {
+    osNotificationsEnabled: boolean
+    appUserModelId: string | null
+  }
 }
 
 /** Theme IPC channels */

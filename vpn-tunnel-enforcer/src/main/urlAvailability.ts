@@ -25,7 +25,7 @@
  * only without VPN", "blocked everywhere", etc.
  */
 
-import { ipcMain } from 'electron'
+import { ipcMain, BrowserWindow } from 'electron'
 import { Socket } from 'net'
 import { connect as tlsConnect, type TLSSocket } from 'tls'
 import { promises as dns } from 'dns'
@@ -33,7 +33,7 @@ import axios from 'axios'
 import Store from 'electron-store'
 import { randomUUID } from 'crypto'
 import { logEvent } from './appLogger'
-import { tunController } from './tunController'
+import { tunController, getDirectProxyPort } from './tunController'
 import { getClashApiInfo } from './tunController'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -59,6 +59,8 @@ export interface PathReport {
   http: { status: number | null; ms: number | null; server: string | null } | null
   /** ASN/geo of the resolved IP, best-effort. */
   asn: { country: string; org: string } | null
+  /** Set to true if the website returned 200 OK but the HTML body contains GeoBlock markers (e.g. Gemini). */
+  geoBlocked?: boolean
   /** How the measurement was taken — useful for telling apart full probe
    *  results from "clash API delay only" approximations. */
   source: 'native' | 'clash-direct-out'
@@ -359,19 +361,31 @@ async function probeNative(parsed: ParsedUrl): Promise<PathReport> {
   }
 
   const httpRes = await probeHttp(parsed)
-  const availableHttp = httpRes.status != null && httpRes.status < 500
+  let availableHttp = httpRes.status != null && httpRes.status < 500
+  let geoBlocked = false
+
+  if (availableHttp) {
+    // Real browser check for SPA geo-blocks
+    geoBlocked = await probeBrowserGeoBlock(parsed.raw, tunController.getStatus().running ? undefined : 'direct://')
+    if (geoBlocked) {
+      availableHttp = false
+    }
+  }
+
   return {
     available: availableHttp,
     totalMs: Date.now() - totalStart,
-    errorStage: availableHttp ? null : 'http',
-    errorMessage: availableHttp
-      ? null
-      : `HTTP-запрос не вернул осмысленного ответа: ${httpRes.error ?? `статус ${httpRes.status}`}.`,
+    errorStage: availableHttp ? null : (geoBlocked ? 'http' : 'http'),
+    errorMessage: geoBlocked ? 'Сайт загрузился, но сам запретил доступ для вашего региона (Geo-Block).' :
+      (availableHttp
+        ? null
+        : `HTTP-запрос не вернул осмысленного ответа: ${httpRes.error ?? `статус ${httpRes.status}`}.`),
     dns: dnsRes,
     tcp: { connected: true, ms: tcpRes.ms },
     tls: tlsRes,
     http: { status: httpRes.status, ms: httpRes.ms, server: httpRes.server },
     asn,
+    geoBlocked,
     source: 'native'
   }
 }
@@ -417,16 +431,22 @@ async function probeViaClashApi(parsed: ParsedUrl): Promise<PathReport> {
       }
     )
     if (resp.status >= 200 && resp.status < 300 && typeof resp.data?.delay === 'number') {
+      const dpPort = getDirectProxyPort()
+      let geoBlocked = false
+      if (dpPort) {
+        geoBlocked = await probeBrowserGeoBlock(parsed.raw, `socks5://127.0.0.1:${dpPort}`)
+      }
       return {
-        available: true,
+        available: !geoBlocked,
         totalMs: resp.data.delay,
-        errorStage: null,
-        errorMessage: null,
+        errorStage: geoBlocked ? 'http' : null,
+        errorMessage: geoBlocked ? 'Сайт загрузился, но сам запретил доступ для вашего региона (Geo-Block).' : null,
         dns: null,
         tcp: null,
         tls: null,
         http: { status: 200, ms: resp.data.delay, server: null },
         asn: null,
+        geoBlocked,
         source: 'clash-direct-out'
       }
     }
@@ -612,5 +632,61 @@ export function registerUrlAvailabilityHandlers(): void {
   })
   ipcMain.handle('url-availability:clear-history', async () => {
     clearHistory()
+  })
+}
+
+export async function probeBrowserGeoBlock(url: string, proxyRules?: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const win = new BrowserWindow({
+      show: false,
+      webPreferences: {
+        offscreen: true,
+        nodeIntegration: false,
+        contextIsolation: true
+      }
+    })
+
+    const timeoutId = setTimeout(() => {
+      win.destroy()
+      resolve(false)
+    }, 10000)
+
+    if (proxyRules) {
+      win.webContents.session.setProxy({ proxyRules }).catch(() => {})
+    } else {
+      win.webContents.session.setProxy({ proxyRules: 'direct://' }).catch(() => {})
+    }
+
+    win.webContents.on('did-finish-load', async () => {
+      // Give SPA a little time to render
+      setTimeout(async () => {
+        try {
+          if (win.isDestroyed()) return resolve(false)
+          const text = await win.webContents.executeJavaScript('document.body.innerText')
+          clearTimeout(timeoutId)
+          win.destroy()
+          
+          if (!text) return resolve(false)
+          const lower = text.toLowerCase()
+          // Common SPA GeoBlock markers (e.g. Gemini, ChatGPT, Claude)
+          const isBlocked = lower.includes('isn\'t supported in your country') ||
+                            lower.includes('not available in your region') ||
+                            lower.includes('country_unsupported') ||
+                            lower.includes('not supported in your location') ||
+                            lower.includes('services are not available in your country')
+          resolve(isBlocked)
+        } catch {
+          resolve(false)
+        }
+      }, 1500)
+    })
+
+    win.webContents.on('did-fail-load', () => {
+      clearTimeout(timeoutId)
+      if (!win.isDestroyed()) win.destroy()
+      resolve(false)
+    })
+
+    win.loadURL(url).catch(() => {})
   })
 }

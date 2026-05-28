@@ -181,6 +181,11 @@ interface AppState {
   // are still in place — the user has to either restart TUN or manually drop
   // the rules.
   firewallKillSwitchActive: boolean
+  // Name+IP of a foreign VPN/TUN adapter that appeared while our tunnel is
+  // running (e.g. user flipped Happ to TUN mode mid-session). null when the
+  // runtime watchdog sees a clean state. Drives a Dashboard banner so the
+  // user understands why DNS suddenly flapped.
+  competingTun: string | null
   autoconfigTargets: AutoconfigTarget[]
   routingHealth: RoutingHealth
   leakChecks: LeakCheckResult | null
@@ -198,6 +203,7 @@ interface AppState {
   setTunStartedAt: (ts: number | null) => void
   setRestarting: (progress: string | null) => void
   setFirewallKillSwitchActive: (active: boolean) => void
+  setCompetingTun: (name: string | null) => void
   setAutoconfigTargets: (targets: AutoconfigTarget[]) => void
   setLeakChecks: (checks: LeakCheckResult | null) => void
   setTrafficStats: (stats: TrafficStats) => void
@@ -245,6 +251,7 @@ export const useAppStore = create<AppState>((set) => ({
   tunStartedAt: null,
   restartingProgress: null,
   firewallKillSwitchActive: false,
+  competingTun: null,
   leakSelfTestResult: null,
   lastMainError: null,
   autoconfigTargets: [
@@ -302,6 +309,7 @@ export const useAppStore = create<AppState>((set) => ({
   setTunStartedAt: (ts) => set({ tunStartedAt: ts }),
   setRestarting: (progress) => set({ restartingProgress: progress }),
   setFirewallKillSwitchActive: (active) => set({ firewallKillSwitchActive: active }),
+  setCompetingTun: (name) => set({ competingTun: name }),
   setAutoconfigTargets: (targets) => set({ autoconfigTargets: targets }),
   setLeakChecks: (checks) => set({
     leakChecks: checks,

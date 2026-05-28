@@ -277,7 +277,9 @@
     "methodInapp": "In-app",
     "methodBoth": "Both",
     "sound": "Sound",
-    "soundEnabled": "Enable notification sound"
+    "soundEnabled": "Enable notification sound",
+    "osBlockedWarning": "Notifications are disabled in Windows. Enable them: Settings → System → Notifications → VPN Tunnel Enforcer",
+    "osBlockedHint": "System notifications will not appear until this is fixed in Windows"
   },
   "themes": {
     "title": "Themes",

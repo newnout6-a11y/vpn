@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useAppStore } from './store'
 import { Sidebar, type SidebarPage } from './components/Sidebar'
@@ -47,7 +47,7 @@ declare global {
       clearAppLog: () => Promise<any>
       applyTunNetworkBaseline: () => Promise<any>
       rollbackTunNetworkBaseline: () => Promise<any>
-      disableFirewallKillSwitch: () => Promise<{ success: boolean; message: string }>
+      disableFirewallKillSwitch: () => Promise<{ success: boolean; message: string; skipped?: boolean }>
       getFirewallKillSwitchStatus: () => Promise<{ active: boolean }>
       firewallNuclearReset: () => Promise<{ success: boolean; message: string }>
       getLocationPrivacy: () => Promise<any>
@@ -149,6 +149,13 @@ declare global {
       // Notification Preferences
       notificationsGetPrefs: () => Promise<import('../shared/ipc-types').NotificationPreferences>
       notificationsSetPrefs: (prefs: Partial<import('../shared/ipc-types').NotificationPreferences>) => Promise<import('../shared/ipc-types').NotificationPreferences>
+      checkOsNotificationState: () => Promise<{ osNotificationsEnabled: boolean; appUserModelId: string | null }>
+      // ip-monitor suspend/resume — silences false-positive leak events
+      // during the user-initiated stop-tun rollback window. Best-effort
+      // bridge: callers should still gate on the renderer-side stoppingNow
+      // ref since both can race against the IPC round-trip.
+      ipMonitorSuspend: () => Promise<{ ok: true } | undefined>
+      ipMonitorResume: () => Promise<{ ok: true } | undefined>
       // Theme
       themeGetActive: () => Promise<import('../shared/ipc-types').ThemeConfig>
       themeList: () => Promise<import('../shared/ipc-types').ThemeConfig[]>
@@ -203,9 +210,24 @@ export default function App() {
   const [shuttingDown, setShuttingDown] = useState(false)
   const addLog = useAppStore(s => s.addLog)
 
+  // True while the TUN status is 'stopping' — i.e. main is mid-rollback of
+  // firewall / adapter lockdown / DNS. During that window any leak event or
+  // changed-IP event is a false positive (the user is the one tearing the
+  // tunnel down) and must not reach the log or store. We use a ref so the
+  // IPC callbacks below can read the live value without re-subscribing
+  // every time it flips.
+  const stoppingNowRef = useRef(false)
+
   // Listen for IPC events
   useEffect(() => {
     const unsubIp = window.electronAPI.onIpChanged(({ ip, isLeak }) => {
+      if (stoppingNowRef.current) {
+        // Drop on the floor — we're in the middle of stop-tun rollback. The
+        // ipMonitor in main is being told to suspend via IPC below, but the
+        // bridge call is best-effort and this client-side guard is the
+        // authoritative defense.
+        return
+      }
       useAppStore.getState().setPublicIp(ip, isLeak)
       if (isLeak) {
         addLog('error', `ОБНАРУЖЕНА УТЕЧКА IP! Текущий: ${ip}`)
@@ -222,15 +244,44 @@ export default function App() {
       // firewall kill-switch is still blocking outbound traffic on the physical adapter.
       // 'restarting:N/M' is fired by the auto-restart loop while we wait between
       // attempts — TUN is down but we expect it to come back without user action.
+      // 'stopping' is fired at the top of tunController.stop() BEFORE rollback —
+      // we use it to silence the false-positive leak / IP-changed events that
+      // would otherwise fire during the 7-9s rollback window.
       const isRestarting = status.startsWith('restarting:')
-      const tunUp = status === 'running' || status === 'proxy-down'
-      store.setTunRunning(tunUp)
+      const isCompetingTun = status.startsWith('competing-tun:')
+      const tunUp = status === 'running' || status === 'proxy-down' || isCompetingTun
+      const isStopping = status === 'stopping'
+
+      // Flip the ref BEFORE we run any callbacks-that-flush so the leak/ip
+      // callbacks above can read the latest value.
+      stoppingNowRef.current = isStopping
+
+      // Best-effort: tell main's ipMonitor to suspend / resume too. The
+      // preload bridge for these channels may not exist yet — the Window
+      // typing (and the actual contextBridge exposure) is owned by another
+      // file. Fall back to silently ignoring; the renderer-side
+      // stoppingNowRef guard is the authoritative defense.
+      const api = window.electronAPI as unknown as Record<string, undefined | (() => Promise<unknown>)>
+      if (isStopping) {
+        api.ipMonitorSuspend?.()?.catch(() => undefined)
+      } else if (status === 'running' || status === 'stopped') {
+        api.ipMonitorResume?.()?.catch(() => undefined)
+      }
+
+      // Don't flip tunRunning to false purely on 'stopping' — the rollback is
+      // still in progress and other UI (e.g. uptime pill) shouldn't snap to
+      // the stopped state until tunController emits 'stopped'.
+      if (!isStopping) {
+        store.setTunRunning(tunUp)
+      }
       store.setRestarting(isRestarting ? status.slice('restarting:'.length) : null)
-      if (!tunUp && !isRestarting && store.mode === 'hard') store.setMode('off')
+      if (!tunUp && !isRestarting && !isStopping && store.mode === 'hard') store.setMode('off')
       if (status === 'running') {
         addLog('info', 'Защита включена — весь трафик идёт через VPN.')
       } else if (status === 'stopped') {
         addLog('info', 'Защита выключена. Трафик идёт по обычному маршруту.')
+      } else if (isStopping) {
+        addLog('info', 'Останавливаем защиту — откатываем DNS, IPv6, файрвол…')
       } else if (status === 'proxy-down') {
         addLog('warn', 'VPN-сервер не отвечает — трафик заблокирован для безопасности. Проверьте ваш VPN-клиент (Happ).')
       } else if (status === 'killswitch-active') {
@@ -238,8 +289,18 @@ export default function App() {
       } else if (isRestarting) {
         const [n, total] = status.slice('restarting:'.length).split('/')
         addLog('warn', `Авто-перезапуск защиты (попытка ${n} из ${total})…`)
+      } else if (isCompetingTun) {
+        const name = status.slice('competing-tun:'.length)
+        store.setCompetingTun(name)
+        addLog('warn', `Запущен второй VPN: ${name}. Двойной маршрут может ломать DNS — оставьте только один туннель.`)
       } else {
         addLog('info', `Статус TUN: ${status}`)
+      }
+      // Clear the competing-tun flag on any status that is not a competing
+      // marker (the watchdog itself fires 'running' when the foreign tunnel
+      // disappears).
+      if (!isCompetingTun) {
+        store.setCompetingTun(null)
       }
       // Refresh kill-switch state after every TUN transition so the Dashboard
       // banner reflects reality without polling.
@@ -257,6 +318,14 @@ export default function App() {
     })
 
     const unsubLeak = window.electronAPI.onLeakDetected((result) => {
+      if (stoppingNowRef.current) {
+        // Same reason as onIpChanged — a leak verdict produced during
+        // user-initiated rollback is false positive. The leakSelfTest in
+        // main also self-cancels via its session-id guard, but this is
+        // belt-and-braces for the case where the result IPC arrives
+        // before the cancel takes effect.
+        return
+      }
       const store = useAppStore.getState()
       store.setLeakSelfTestResult(result)
       addLog('error', `УТЕЧКА: ${result.summary}`)

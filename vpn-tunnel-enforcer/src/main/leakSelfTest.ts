@@ -20,6 +20,15 @@
  *
  * Result is logged AND fed back to the renderer so the UI can show a giant
  * red banner "УТЕЧКА: kill-switch не блокирует Wi-Fi".
+ *
+ * ─── Cancellation ─────────────────────────────────────────────────────────
+ * Each call to `runLeakSelfTest()` reserves a session id. Whenever the
+ * caller (or `cancelLeakSelfTest()`) bumps `activeSessionId`, every await
+ * boundary inside the in-flight run checks `mySession !== activeSessionId`
+ * and bails out with a sanitized cancelled result. This kills the false-
+ * positive "physicalAdapterReached:true" report that used to fire 8-10s
+ * after a user-initiated stop, when the curl probes outlived the rollback
+ * and saw the real public IP through a now-unblocked adapter.
  */
 import { exec as execCb } from 'child_process'
 import { promisify } from 'util'
@@ -55,6 +64,22 @@ export interface LeakSelfTestResult {
 
 const PROBE_URL = 'https://1.1.1.1'
 const IP_ENDPOINT = 'https://api.ipify.org'
+
+// Bumped on every new run AND every explicit cancel. In-flight runs snapshot
+// the value at start (`mySession`) and bail at every await boundary if the
+// global has moved past them.
+let activeSessionId = 0
+
+function cancelledResult(): LeakSelfTestResult {
+  return {
+    ts: Date.now(),
+    physicalAdapterReached: false,
+    publicIpMismatch: false,
+    defaultRoutePublicIp: null,
+    perAdapter: [],
+    summary: 'Тест отменён (защита остановлена)'
+  }
+}
 
 function parseIp(stdout: string): string | null {
   const trimmed = String(stdout).trim()
@@ -128,6 +153,11 @@ $rows | ConvertTo-Json -Compress
 }
 
 export async function runLeakSelfTest(): Promise<LeakSelfTestResult> {
+  // Reserve a session id for this run. Any prior in-flight run will see
+  // `mySession !== activeSessionId` at its next await and bail.
+  activeSessionId += 1
+  const mySession = activeSessionId
+
   const ts = Date.now()
 
   // 1. Public IP via the default route (which should be the TUN). Use plain
@@ -139,8 +169,10 @@ export async function runLeakSelfTest(): Promise<LeakSelfTestResult> {
       timeout: 8000,
       encoding: 'utf8'
     })
+    if (mySession !== activeSessionId) return cancelledResult()
     defaultRoutePublicIp = parseIp(stdout)
   } catch {
+    if (mySession !== activeSessionId) return cancelledResult()
     defaultRoutePublicIp = null
   }
 
@@ -148,9 +180,12 @@ export async function runLeakSelfTest(): Promise<LeakSelfTestResult> {
   //    default route. If curl succeeds while TUN+kill-switch are up, that's a
   //    leak.
   const adapters = await listPhysicalAdaptersWithIPv4()
+  if (mySession !== activeSessionId) return cancelledResult()
+
   const perAdapter: AdapterReach[] = []
   for (const a of adapters) {
     const res = await curlBound(a.ipv4, IP_ENDPOINT, 4)
+    if (mySession !== activeSessionId) return cancelledResult()
     perAdapter.push({
       alias: a.alias,
       ipv4: a.ipv4,
@@ -159,6 +194,10 @@ export async function runLeakSelfTest(): Promise<LeakSelfTestResult> {
       curlStderrTail: (res.stderr || '').slice(-200) || null
     })
   }
+
+  // Cancellation check before computing the verdict — we don't want to log
+  // a "leak" against a user who has already torn the tunnel down.
+  if (mySession !== activeSessionId) return cancelledResult()
 
   const physicalAdapterReached = perAdapter.some(
     (a) => a.curlExitCode === 0 && a.publicIpViaThisAdapter !== null
@@ -188,6 +227,12 @@ export async function runLeakSelfTest(): Promise<LeakSelfTestResult> {
     summary
   }
 
+  // Final cancellation check before any side effects (logEvent + callback).
+  // Without this, a stop-tun that finishes between adapter probes and here
+  // would still emit a misleading "УТЕЧКА" log line and trigger the
+  // renderer leak banner.
+  if (mySession !== activeSessionId) return cancelledResult()
+
   logEvent(physicalAdapterReached || publicIpMismatch ? 'warn' : 'info', 'leak-test', summary, {
     physicalAdapterReached,
     publicIpMismatch,
@@ -205,11 +250,43 @@ export function setLeakDetectedCallback(cb: (r: LeakSelfTestResult) => void): vo
   onLeakDetectedCb = cb
 }
 
-export function startPeriodicLeakTest(intervalMs = 120_000): void {
+/**
+ * Cancel any in-flight `runLeakSelfTest()` by bumping the session id. The
+ * existing run will short-circuit at its next await boundary and return a
+ * sanitized result. Periodic ticks scheduled after this call get a fresh
+ * session id of their own and run normally — call `stopPeriodicLeakTest()`
+ * if you want them to stop firing entirely.
+ */
+export function cancelLeakSelfTest(): void {
+  activeSessionId += 1
+}
+
+/**
+ * Start the periodic leak self-test loop.
+ *
+ * @param intervalMs  How often to run the probe.
+ * @param shouldRun   Optional gate evaluated on every tick BEFORE
+ *                    scheduling the run. If it returns false, the tick is
+ *                    skipped (without stopping the timer). Use this to
+ *                    gate the test on TUN status without ripping the
+ *                    timer down on every transition. Defaults to
+ *                    `() => true` for backward compatibility with callers
+ *                    that don't care about gating.
+ */
+export function startPeriodicLeakTest(
+  intervalMs = 120_000,
+  shouldRun: () => boolean = () => true
+): void {
   stopPeriodicLeakTest()
   periodicLeakTimer = setInterval(() => {
+    if (!shouldRun()) return
+    const tickSession = activeSessionId + 1 // what runLeakSelfTest will reserve
     runLeakSelfTest()
       .then((r) => {
+        // Only fire the leak callback if the run we kicked off is still the
+        // active one. A stop-tun that bumps activeSessionId between scheduling
+        // and resolution must not trigger the renderer leak banner.
+        if (tickSession !== activeSessionId) return
         if (r.physicalAdapterReached || r.publicIpMismatch) {
           onLeakDetectedCb?.(r)
         }
@@ -223,4 +300,7 @@ export function stopPeriodicLeakTest(): void {
     clearInterval(periodicLeakTimer)
     periodicLeakTimer = null
   }
+  // Bump the session so any still-resolving run from the timer doesn't
+  // sneak past the callback gate after the timer is gone.
+  activeSessionId += 1
 }

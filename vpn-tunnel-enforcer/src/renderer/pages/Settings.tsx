@@ -1,6 +1,6 @@
 import { useAppStore } from '../store'
-import { Bell, EyeOff, FileArchive, FolderOpen, Globe2, Loader2, Network, Palette, RefreshCw, Save, Settings2, ShieldCheck, Wand2, Languages } from 'lucide-react'
-import { ReactNode, useState } from 'react'
+import { Bell, EyeOff, FileArchive, FolderOpen, Globe2, Loader2, Network, Palette, RefreshCw, Save, Settings2, ShieldAlert, ShieldCheck, Wand2, Languages } from 'lucide-react'
+import { ReactNode, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { KillSwitchSettings } from '../components/KillSwitchSettings'
 import { RotationSettings } from '../components/RotationSettings'
@@ -151,6 +151,18 @@ export function Settings() {
   const [saving, setSaving] = useState(false)
   const [openingLogs, setOpeningLogs] = useState(false)
   const [exporting, setExporting] = useState(false)
+  const [osNotificationsBlocked, setOsNotificationsBlocked] = useState(false)
+
+  useEffect(() => {
+    ;(async () => {
+      try {
+        const state = await window.electronAPI.checkOsNotificationState()
+        setOsNotificationsBlocked(!state.osNotificationsEnabled)
+      } catch {
+        // assume allowed
+      }
+    })()
+  }, [])
 
   const handleSave = async () => {
     setSaving(true)
@@ -348,9 +360,32 @@ export function Settings() {
           />
 
           <ToggleRow
-            icon={<Bell className="w-4 h-4 text-[var(--color-accent)]" />}
-            title="Уведомления Windows"
-            description="Показывать toast при включении защиты, падении sing-box, утечке IP."
+            icon={
+              <div className="relative">
+                <Bell className="w-4 h-4 text-[var(--color-accent)]" />
+                {osNotificationsBlocked && (
+                  <ShieldAlert
+                    size={10}
+                    className="absolute -top-1 -right-1.5 text-[var(--color-warning)]"
+                  />
+                )}
+              </div>
+            }
+            title={
+              <span className="flex items-center gap-2">
+                Уведомления Windows
+                {osNotificationsBlocked && (
+                  <span className="text-[var(--color-warning)] text-xs font-medium" title="Уведомления отключены в системе">
+                    ⚠
+                  </span>
+                )}
+              </span>
+            }
+            description={
+              osNotificationsBlocked
+                ? '⚠ Система блокирует уведомления для приложения. Включите: Параметры Windows → Система → Уведомления → VPN Tunnel Enforcer'
+                : 'Показывать toast при включении защиты, падении sing-box, утечке IP.'
+            }
             checked={settings.desktopNotifications}
             onChange={(next) => updateSettings({ desktopNotifications: next })}
           />
