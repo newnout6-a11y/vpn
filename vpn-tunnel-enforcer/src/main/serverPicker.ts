@@ -917,23 +917,24 @@ export function migrateProfilesIntoGroups(): void {
     stillUnclassified.push(...needsClassification)
   }
 
-  // ── Tier 2: detect a panel by common SNI suffix ────────────────────────
+  // ── Tier 2: detect MULTIPLE panels by SNI suffix ──────────────────────
   //
   // VPN providers reuse a single Reality / TLS server_name domain across
-  // every key they hand out. If ≥80% of the still-unclassified profiles
-  // share the last 2 dotted segments of their tls.server_name, those
-  // segments are the panel's identity — bucket them under a subscription
-  // group named after that suffix, with sourceUrl left undefined (we
-  // don't know it). Better than dumping in manual.
+  // every key they hand out (e.g. `feodorn.com`, `xoyit.com`,
+  // `dinoadd.online`). The previous version of this tier only created a
+  // group when ONE suffix dominated ≥80% of the unclassified pool — fine
+  // for users with one provider, but if the user has THREE providers
+  // imported in roughly equal portions, no suffix hits 80% and everyone
+  // falls into "Ручные ключи".
   //
-  // Optimisation: when tier 1 already created a subscription group AND
-  // the unclassified profiles share a SNI suffix that matches the SNI
-  // suffix of the tier-1 profiles, sweep them into the existing group
-  // instead of creating a separate one. The user almost certainly has
-  // ONE provider whose subscription URL `directVpnCachedInput` only
-  // captured 30 of 112 profiles for (because the cache was a single
-  // index file from one fetch); the other 82 are siblings.
-  if (stillUnclassified.length >= 5) {
+  // New behaviour: every distinct suffix with ≥3 members becomes its own
+  // subscription group named after the suffix. Tier-1 still gets first
+  // dibs — when an unclassified suffix matches the tier-1 group's
+  // dominant suffix, those profiles are merged into the tier-1 group
+  // instead of creating a duplicate. Solo / pair keys (suffix count < 3)
+  // stay unclassified and fall through to "Ручные ключи" — too small a
+  // sample to confidently call it a subscription.
+  if (stillUnclassified.length >= 3) {
     const suffixCounts = new Map<string, ServerProfile[]>()
     for (const p of stillUnclassified) {
       const suffix = extractSniSuffix(p)
@@ -943,55 +944,74 @@ export function migrateProfilesIntoGroups(): void {
       suffixCounts.set(suffix, arr)
     }
 
-    let bestSuffix: string | null = null
-    let bestMembers: ServerProfile[] = []
-    for (const [suffix, members] of suffixCounts) {
-      if (members.length > bestMembers.length) {
-        bestSuffix = suffix
-        bestMembers = members
+    // Pre-compute the tier-1 group's dominant suffix (if any) so we can
+    // sweep matching profiles into it without spawning a duplicate.
+    let tier1Suffix: string | null = null
+    if (subscriptionGroupId) {
+      const tier1Members = needsClassification.filter(p =>
+        assignments.get(subscriptionGroupId!)?.includes(p.id)
+      )
+      const tier1SuffixCounts = new Map<string, number>()
+      for (const p of tier1Members) {
+        const s = extractSniSuffix(p)
+        if (s) tier1SuffixCounts.set(s, (tier1SuffixCounts.get(s) ?? 0) + 1)
+      }
+      let bestCount = 0
+      for (const [s, c] of tier1SuffixCounts) {
+        if (c > bestCount) {
+          bestCount = c
+          tier1Suffix = s
+        }
       }
     }
 
-    if (
-      bestSuffix &&
-      bestMembers.length / stillUnclassified.length >= 0.8
-    ) {
-      // Reuse the tier-1 subscription group when its members share the
-      // same SNI suffix — almost certainly one provider with one panel.
-      let targetGroupId = subscriptionGroupId
-      if (targetGroupId) {
-        const tier1Members = needsClassification.filter(p =>
-          assignments.get(targetGroupId!)?.includes(p.id)
-        )
-        const tier1Suffixes = new Set(
-          tier1Members
-            .map(p => extractSniSuffix(p))
-            .filter((s): s is string => Boolean(s))
-        )
-        if (!tier1Suffixes.has(bestSuffix)) {
-          targetGroupId = undefined
-        }
-      }
+    const claimedIds = new Set<string>()
 
-      if (!targetGroupId) {
-        const group = serverGroups.createGroup({
-          name: bestSuffix,
-          source: 'subscription',
-          sourceUrl: undefined,
-          importedAt: Date.now(),
-          status: 'unknown'
-        })
+    // Sort suffixes deterministically (largest first, then alphabetical)
+    // so re-running the migration produces stable group names.
+    const orderedSuffixes = Array.from(suffixCounts.entries())
+      .filter(([, members]) => members.length >= 3)
+      .sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]))
+
+    for (const [suffix, members] of orderedSuffixes) {
+      let targetGroupId: string
+
+      if (tier1Suffix && suffix === tier1Suffix && subscriptionGroupId) {
+        // Tier-1 already owns this panel — sweep the rest in. No duplicate.
+        targetGroupId = subscriptionGroupId
+      } else {
+        // Either a fresh panel or tier-1 is for a different one.
+        // Reuse an existing group with the same name (idempotent re-runs)
+        // before creating a new one.
+        const existing = serverGroups
+          .getGroups()
+          .find(g => g.source === 'subscription' && g.name === suffix && !g.sourceUrl)
+        const group =
+          existing ??
+          serverGroups.createGroup({
+            name: suffix,
+            source: 'subscription',
+            sourceUrl: undefined,
+            importedAt: Date.now(),
+            status: 'unknown'
+          })
         targetGroupId = group.id
       }
 
       const arr = assignments.get(targetGroupId) ?? []
-      for (const p of bestMembers) arr.push(p.id)
+      for (const p of members) {
+        arr.push(p.id)
+        claimedIds.add(p.id)
+      }
       assignments.set(targetGroupId, arr)
-      const stillUnclassifiedRemaining = stillUnclassified.filter(
-        p => !bestMembers.includes(p)
-      )
+    }
+
+    // Strip claimed profiles from stillUnclassified — only suffix-less
+    // and below-threshold (< 3 members) entries remain for tier 3.
+    if (claimedIds.size) {
+      const remaining = stillUnclassified.filter(p => !claimedIds.has(p.id))
       stillUnclassified.length = 0
-      stillUnclassified.push(...stillUnclassifiedRemaining)
+      stillUnclassified.push(...remaining)
     }
   }
 

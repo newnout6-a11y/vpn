@@ -562,17 +562,23 @@ export function registerServerGroupsHandlers(): void {
     return await refreshGroup(id)
   })
 
-  // Health-check delegates to keyHealthChecker. Static import so the bundler
-  // includes the module — earlier dynamic require() got tree-shaken out
-  // by electron-vite and exploded in production with "Cannot find module".
+  // Health-check delegates to keyHealthChecker. Static `await import()`
+  // so the bundler includes the module — earlier dynamic require() got
+  // tree-shaken out by electron-vite and exploded in production with
+  // "Cannot find module".
+  //
+  // checkGroupHealth ALREADY returns a discriminated union
+  // ({ ok: true, results } | { ok: false, error }), so we forward it
+  // verbatim. The renderer expects exactly that shape; double-wrapping
+  // it makes `result.results` undefined on the renderer side and crashes
+  // the React tree (black window).
   handleLogged('groups:check-health', async (_event, id: string) => {
     try {
       const { checkGroupHealth } = await import('./keyHealthChecker')
       if (typeof checkGroupHealth !== 'function') {
         return { ok: false as const, error: 'health checker недоступен' }
       }
-      const results = await checkGroupHealth(id)
-      return { ok: true as const, results }
+      return await checkGroupHealth(id)
     } catch (err: any) {
       logEvent('warn', 'server-groups', 'check-health failed', err)
       return { ok: false as const, error: err?.message || 'health checker недоступен' }
