@@ -15,9 +15,9 @@
  * Requirements: 17.1, 17.2, 17.3, 17.4, 17.5
  */
 
-import { ipcMain, BrowserWindow } from 'electron'
+import { ipcMain, BrowserWindow, shell } from 'electron'
 import Store from 'electron-store'
-import { getWindowsNotificationState, notify } from './notifications'
+import { getWindowsNotificationState, notify, resetWindowsNotificationBlock } from './notifications'
 import type { NotificationPreferences } from '../shared/ipc-types'
 
 // ─── Event type mapping ──────────────────────────────────────────────────────
@@ -151,6 +151,32 @@ export function registerNotificationPrefsIpcHandlers(): void {
       return { osNotificationsEnabled: state.enabled, appUserModelId: state.appUserModelId }
     } catch {
       return { osNotificationsEnabled: true, appUserModelId: null }
+    }
+  })
+
+  // Clear the Windows-side notification block (the registry "Enabled = 0"
+  // that Windows sets when the user clicks "Don't show notifications" on a
+  // toast). Returns a structured result — never throws to the renderer, so
+  // the UI can show a single friendly outcome regardless of registry state.
+  ipcMain.handle('notifications:reset-os-block', async () => {
+    try {
+      const result = await resetWindowsNotificationBlock()
+      return { ok: true as const, cleared: result.cleared, errors: result.errors }
+    } catch (err: any) {
+      return { ok: false as const, error: err?.message || String(err) }
+    }
+  })
+
+  // Open Windows' built-in Notifications settings page so the user can
+  // double-check the per-app entry (or unblock manually if our automated
+  // reset somehow wasn't enough). ms-settings: URIs are handled by the
+  // shell on Windows 10/11.
+  ipcMain.handle('notifications:open-windows-settings', async () => {
+    try {
+      await shell.openExternal('ms-settings:notifications')
+      return { ok: true as const }
+    } catch (err: any) {
+      return { ok: false as const, error: err?.message || String(err) }
     }
   })
 }

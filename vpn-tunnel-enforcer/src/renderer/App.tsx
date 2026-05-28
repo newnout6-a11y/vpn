@@ -150,6 +150,9 @@ declare global {
       notificationsGetPrefs: () => Promise<import('../shared/ipc-types').NotificationPreferences>
       notificationsSetPrefs: (prefs: Partial<import('../shared/ipc-types').NotificationPreferences>) => Promise<import('../shared/ipc-types').NotificationPreferences>
       checkOsNotificationState: () => Promise<{ osNotificationsEnabled: boolean; appUserModelId: string | null }>
+      notificationsResetOsBlock: () => Promise<{ ok: true; cleared: string[]; errors: string[] } | { ok: false; error: string }>
+      notificationsOpenWindowsSettings: () => Promise<{ ok: true } | { ok: false; error: string }>
+      onInAppNotification: (callback: (data: { level: 'info' | 'warn' | 'error'; title: string; body: string; ts: number }) => void) => () => void
       // ip-monitor suspend/resume — silences false-positive leak events
       // during the user-initiated stop-tun rollback window. Best-effort
       // bridge: callers should still gate on the renderer-side stoppingNow
@@ -341,6 +344,17 @@ export default function App() {
       setShuttingDown(true)
     })
 
+    // In-app notification fallback. Main fires this whenever a notify() call
+    // can't deliver an OS toast (Windows blocks our AUMID, or the platform
+    // doesn't support notifications). For now we surface it through the log
+    // store so the user sees it on the Logs page — it's not lost. The
+    // optional `onInAppNotification` chain keeps us safe if an older preload
+    // build is still loaded (no crash, just no fallback).
+    const unsubInApp = window.electronAPI.onInAppNotification?.(({ level, title, body }) => {
+      const logLevel: 'info' | 'warn' | 'error' = level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'info'
+      addLog(logLevel, `[уведомление] ${title}: ${body}`)
+    })
+
     return () => {
       unsubIp()
       unsubTun()
@@ -348,6 +362,7 @@ export default function App() {
       unsubLeak()
       unsubMainErr()
       unsubShutdown()
+      unsubInApp?.()
     }
   }, [addLog])
 

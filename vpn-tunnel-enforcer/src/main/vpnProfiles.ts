@@ -238,6 +238,22 @@ function buildTls(params: URLSearchParams, host: string, defaultEnabled = false)
     }
   }
 
+  // Anti-DPI default: ensure every TLS outbound carries a browser-like
+  // fingerprint and ALPN. Without this, sing-box emits a Go-stdlib
+  // ClientHello (TSPU known-bad pattern) and Russian university DPI
+  // rate-limits the connection. Reality already forces utls on its own
+  // path; we only fill in the gaps for plain TLS.
+  if (tls.enabled !== false) {
+    if (!tls.utls || typeof tls.utls !== 'object' || tls.utls.enabled === false) {
+      tls.utls = { enabled: true, fingerprint: 'chrome' }
+    } else if (!tls.utls.fingerprint) {
+      tls.utls.fingerprint = 'chrome'
+    }
+    if (!Array.isArray(tls.alpn) || tls.alpn.length === 0) {
+      tls.alpn = ['h2', 'http/1.1']
+    }
+  }
+
   return tls
 }
 
@@ -295,6 +311,25 @@ function finishOutbound(outbound: Record<string, any>): Record<string, any> {
   delete result.detour
   delete result.domain_strategy
   delete result.domain_resolver
+  // Anti-DPI default for the JSON-paste path: a user who pasted a full
+  // sing-box outbound may not have included utls/alpn, so apply the same
+  // browser-like defaults here. This is the last gate before the outbound
+  // leaves the parser, so it covers parseLine, xray-format JSON, AND
+  // Clash YAML (all of which call finishOutbound). Existing utls or alpn
+  // values on the user's outbound are preserved.
+  if (result.tls && typeof result.tls === 'object') {
+    const tls = result.tls as Record<string, any>
+    if (tls.enabled !== false) {
+      if (!tls.utls || typeof tls.utls !== 'object' || tls.utls.enabled === false) {
+        tls.utls = { enabled: true, fingerprint: 'chrome' }
+      } else if (!tls.utls.fingerprint) {
+        tls.utls.fingerprint = 'chrome'
+      }
+      if (!Array.isArray(tls.alpn) || tls.alpn.length === 0) {
+        tls.alpn = ['h2', 'http/1.1']
+      }
+    }
+  }
   return result
 }
 
@@ -482,6 +517,22 @@ function buildTlsFromXrayStream(stream: Record<string, any>, server: string): Re
       enabled: true,
       public_key: publicKey,
       short_id: stringValue(realitySettings.shortId) || stringValue(realitySettings.short_id) || ''
+    }
+  }
+
+  // Anti-DPI default: ensure every TLS outbound carries a browser-like
+  // fingerprint and ALPN. Without this, sing-box emits a Go-stdlib
+  // ClientHello (TSPU known-bad pattern) and Russian university DPI
+  // rate-limits the connection. Reality already forces utls on its own
+  // path; we only fill in the gaps for plain TLS.
+  if (tls.enabled !== false) {
+    if (!tls.utls || typeof tls.utls !== 'object' || tls.utls.enabled === false) {
+      tls.utls = { enabled: true, fingerprint: 'chrome' }
+    } else if (!tls.utls.fingerprint) {
+      tls.utls.fingerprint = 'chrome'
+    }
+    if (!Array.isArray(tls.alpn) || tls.alpn.length === 0) {
+      tls.alpn = ['h2', 'http/1.1']
     }
   }
 
@@ -994,6 +1045,22 @@ function buildTlsFromClash(raw: Record<string, any>, server: string): Record<str
         public_key: publicKey,
         short_id: stringValue(realityOpts['short-id']) || stringValue(realityOpts.short_id) || ''
       }
+    }
+  }
+
+  // Anti-DPI default: ensure every TLS outbound carries a browser-like
+  // fingerprint and ALPN. Without this, sing-box emits a Go-stdlib
+  // ClientHello (TSPU known-bad pattern) and Russian university DPI
+  // rate-limits the connection. Reality already forces utls on its own
+  // path; we only fill in the gaps for plain TLS.
+  if (tls.enabled !== false) {
+    if (!tls.utls || typeof tls.utls !== 'object' || tls.utls.enabled === false) {
+      tls.utls = { enabled: true, fingerprint: 'chrome' }
+    } else if (!tls.utls.fingerprint) {
+      tls.utls.fingerprint = 'chrome'
+    }
+    if (!Array.isArray(tls.alpn) || tls.alpn.length === 0) {
+      tls.alpn = ['h2', 'http/1.1']
     }
   }
 

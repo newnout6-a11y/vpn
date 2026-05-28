@@ -238,6 +238,32 @@ function getBundledResource(name: string): string {
   return join(app.getAppPath(), 'resources', name)
 }
 
+// Cheap "did the source change?" check for sing-box.exe (~30 MB) and wintun.dll.
+// Both binaries live in app-resources and only change when the user installs a
+// new app build, so on 99% of restarts they are byte-identical to the copy
+// already sitting under userData/tun-runtime. Stat-based comparison (mtime+size)
+// matches the heuristic Node uses for its own dependency-cache invalidation
+// and is good enough — when in doubt we still fall back to a plain copyFile,
+// so we can never end up with no destination file.
+async function copyResourceIfStale(src: string, dst: string): Promise<boolean> {
+  try {
+    const [srcStat, dstStat] = await Promise.all([stat(src), stat(dst)])
+    if (
+      dstStat.size === srcStat.size &&
+      dstStat.mtimeMs === srcStat.mtimeMs
+    ) {
+      return false
+    }
+  } catch {
+    // dst doesn't exist, stat failed, or anything else odd — fall through to
+    // the unconditional copyFile path below, which is the same behaviour we
+    // had before this helper existed. We never want to silently skip the copy
+    // and leave a stale (or missing) binary in the runtime dir.
+  }
+  await copyFile(src, dst)
+  return true
+}
+
 export function parseProxyAddress(proxyAddr: string): { host: string; port: number } {
   const trimmed = proxyAddr.trim()
   const ipv6Match = trimmed.match(/^\[([^\]]+)]:(\d+)$/)
@@ -355,15 +381,49 @@ export function generateSingboxConfig(
       : { type: 'socks', tag: 'proxy-out', version: '5', server: parsedProxy!.host, server_port: parsedProxy!.port }
   const { outbound: proxyOutbound, needsBootstrapDns } = sanitizeProxyOutbound(baseProxyOutbound)
 
-  // Apply TLS record-fragmentation when stealthMode is on AND the outbound
-  // has plain TLS (NOT Reality). Reality embeds auth in the structure of
-  // the ClientHello that mimics the camouflage target — fragmenting on top
-  // would scramble that and break Reality auth on the server side.
-  if (stealthMode && proxyOutbound.tls && typeof proxyOutbound.tls === 'object') {
+  // Always-on anti-DPI defaults plus stealth-mode extras, applied to the
+  // outbound's TLS object. Two layers:
+  //   1. uTLS + ALPN ("chrome" / h2,http/1.1) is forced on EVERY TLS
+  //      outbound regardless of stealthMode. sing-box's default ClientHello
+  //      is shaped like Go stdlib which TSPU/Russian ISPs rate-limit.
+  //      parseLine usually sets these, but custom JSON outbounds — and
+  //      anything that bypassed parseLine — can arrive without them.
+  //   2. record_fragment is the stealth-mode-only knob that fragments the
+  //      ClientHello at the TLS-record layer. It must NOT be applied to
+  //      Reality, because Reality embeds auth in the structure of its
+  //      camouflage ClientHello and fragmenting on top would scramble it
+  //      and break Reality auth on the server side.
+  if (proxyOutbound.tls && typeof proxyOutbound.tls === 'object') {
     const tls = proxyOutbound.tls as Record<string, any>
     const realityEnabled = tls.reality && typeof tls.reality === 'object'
       && tls.reality.enabled !== false
-    if (!realityEnabled) {
+
+    if (!tls.utls || typeof tls.utls !== 'object' || tls.utls.enabled === false) {
+      tls.utls = { enabled: true, fingerprint: 'chrome' }
+    } else if (!tls.utls.fingerprint) {
+      tls.utls.fingerprint = 'chrome'
+    }
+    if (!Array.isArray(tls.alpn) || tls.alpn.length === 0) {
+      tls.alpn = ['h2', 'http/1.1']
+    }
+
+    // In stealth mode on non-Reality outbounds, deterministically rotate
+    // the uTLS fingerprint per-server. The seed combines server, port and
+    // the per-key secret (uuid for VLESS/VMess, password for Trojan/HY2)
+    // so the same outbound always picks the same fingerprint (stable for
+    // server-side allowlists/sticky sessions) but different outbounds
+    // within the same subscription look like different browsers, which
+    // makes a big subscription harder to bulk-block by a single fp pattern.
+    if (stealthMode && !realityEnabled && tls.utls && typeof tls.utls === 'object') {
+      const fps = ['chrome', 'firefox', 'safari', 'edge'] as const
+      const seed = String(proxyOutbound.server || '') + ':' + String(proxyOutbound.server_port || '') +
+                   ':' + String(proxyOutbound.uuid || proxyOutbound.password || '')
+      let h = 0
+      for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) | 0
+      tls.utls.fingerprint = fps[Math.abs(h) % fps.length]
+    }
+
+    if (stealthMode && !realityEnabled) {
       tls.record_fragment = true
     }
   }
@@ -589,12 +649,44 @@ async function waitForTunInterface(timeoutMs = 5000): Promise<boolean> {
   return false
 }
 
+// Single-shot "is anything to clean up?" probe. ONE PowerShell call returns
+// the count of adapters matching ANY of our well-known aliases (live + legacy).
+// Around 150ms vs 1-3s for the full per-alias sweep — used as a fast-path
+// gate so a clean shutdown doesn't pay for an empty cleanup loop on the
+// next start.
+async function fastTunPresenceProbe(): Promise<boolean> {
+  if (process.platform !== 'win32') return false
+  const aliasList = ALL_KNOWN_ALIASES.map((alias) => `'${alias.replace(/'/g, "''")}'`).join(',')
+  try {
+    const stdout = await runPowerShell(
+      `@(Get-NetAdapter -Name ${aliasList} -ErrorAction SilentlyContinue).Count`,
+      3000
+    )
+    const count = parseInt(String(stdout).trim() || '0', 10)
+    return count > 0
+  } catch (err) {
+    // Probe failed — be conservative and let the caller run the full sweep.
+    logEvent('debug', 'tun', 'fastTunPresenceProbe failed — assuming cleanup needed', err)
+    return true
+  }
+}
+
 async function removeStaleTunInterface(): Promise<void> {
   if (process.platform !== 'win32') return
   // Sweep over BOTH the live alias (TUN_ADAPTER_ALIAS) AND the legacy
   // 'VPNTE-TUN' name shipped by older builds. Without the legacy pass an
   // upgrading user could end up with two ghost adapters fighting over the
   // default route.
+  // Fast-path skip: ALL_KNOWN_ALIASES is small (2 entries today) and a
+  // single Get-NetAdapter -Name <list> call returns in ~150ms, so we use
+  // the per-alias loop below ONLY when at least one matching adapter is
+  // already present. Callers should still gate with fastTunPresenceProbe
+  // for the parent-level skip, but the inner pre-check is cheap insurance
+  // against future callers.
+  if (!(await fastTunPresenceProbe())) {
+    logEvent('debug', 'tun', 'removeStaleTunInterface: no aliases present, nothing to do')
+    return
+  }
   for (const alias of ALL_KNOWN_ALIASES) {
     // Wrap the whole body in PowerShell try/catch so a "no such adapter"
     // condition exits cleanly with our sentinel instead of spilling a
@@ -729,9 +821,13 @@ export function probeTcp(host: string, port: number, timeoutMs = 2000): Promise<
 }
 
 const PROXY_PUBLIC_IP_CHECKS = [
+  // Two endpoints, raced. We only need one good answer to clear the happy
+  // path; the cross-check below is only triggered when the first answer is
+  // suspicious (matches the direct IP), in which case we wait for the
+  // second endpoint too. Dropped 2ip.ru — it's slower (~1-2s extra) and
+  // not needed for the cross-check now that the first hit decides.
   { label: 'ipify', url: 'https://api.ipify.org' },
-  { label: 'myip', url: 'https://api.myip.com' },
-  { label: '2ip', url: 'https://2ip.ru' }
+  { label: 'ifconfig', url: 'https://ifconfig.me/ip' }
 ]
 
 function isPrivateIpv4(ip: string): boolean {
@@ -787,16 +883,61 @@ async function validateProxyFullTunnel(
   if (process.platform !== 'win32') return { ok: true, directIp: null, proxyIps: [] }
 
   const proxyUrl = curlProxyUrl(host, port, proxyType)
-  const directIp = await fetchPublicIpDirect()
-  const proxyIps: Array<{ label: string; ip: string | null; error?: string }> = []
-  for (const check of PROXY_PUBLIC_IP_CHECKS) {
-    try {
-      const body = await curlText(['-4', '-L', '-sS', '--max-time', '10', '--connect-timeout', '6', '--proxy', proxyUrl, check.url], 14000)
-      proxyIps.push({ label: check.label, ip: extractPublicIpv4(body) })
-    } catch (err: any) {
-      proxyIps.push({ label: check.label, ip: null, error: err?.message || String(err) })
+  // Run the direct-IP probe and the per-proxy probes IN PARALLEL. Direct
+  // and through-proxy paths are completely independent, so back-to-back
+  // sequencing was just adding a curl-handshake worth of latency.
+  const directIpPromise = fetchPublicIpDirect()
+
+  // Race the two through-proxy probes — first non-empty answer wins. Drop
+  // max-time from 14s to 6s now that we only have to clear "any" probe to
+  // make a happy-path decision.
+  const probeOne = (check: { label: string; url: string }): Promise<{ label: string; ip: string | null; error?: string }> =>
+    curlText(['-4', '-L', '-sS', '--max-time', '6', '--connect-timeout', '4', '--proxy', proxyUrl, check.url], 7000)
+      .then((body) => ({ label: check.label, ip: extractPublicIpv4(body) }))
+      .catch((err: any) => ({ label: check.label, ip: null, error: err?.message || String(err) }))
+
+  const probePromises = PROXY_PUBLIC_IP_CHECKS.map(probeOne)
+
+  // First successful (non-empty IP) answer wins. We can't use Promise.race
+  // directly because the "loser" of a race here might still resolve LATER
+  // with a useful answer — we only want to early-finish on a positive result.
+  const firstHit: { label: string; ip: string | null; error?: string } = await new Promise((resolve) => {
+    let pending = probePromises.length
+    let settled = false
+    for (const p of probePromises) {
+      p.then((row) => {
+        if (settled) return
+        if (row.ip) {
+          settled = true
+          resolve(row)
+          return
+        }
+        pending -= 1
+        if (pending === 0 && !settled) {
+          settled = true
+          // Nothing returned an IP — surface the first row so the caller
+          // gets a meaningful error structure.
+          resolve(row)
+        }
+      })
     }
+  })
+
+  const directIp = await directIpPromise
+
+  // Happy path: first probe returned an IP that ISN'T the direct IP. That's
+  // enough to certify the proxy is actually tunnelling traffic — short
+  // circuit and don't wait for the second probe.
+  if (firstHit.ip && (!directIp || firstHit.ip !== directIp)) {
+    return { ok: true, directIp, proxyIps: [firstHit] }
   }
+
+  // Suspicious path: either no IP came back or the IP matches direct. We
+  // need both probes for the cross-check ("split proxy" diagnosis), so
+  // wait out the second one too. Promise.allSettled is fine here because
+  // we already absorbed the throws inside probeOne.
+  const allRows = await Promise.all(probePromises)
+  const proxyIps = allRows
 
   const seen = [...new Set(proxyIps.map((row) => row.ip).filter((ip): ip is string => Boolean(ip)))]
   if (seen.length >= 2) {
@@ -895,6 +1036,16 @@ async function prepareRuntime(
   const logPath = join(runtimeDir, 'sing-box.log')
   const logPrevPath = join(runtimeDir, 'sing-box.prev.log')
 
+  // Kick the OS port pick off FIRST so it overlaps with the file IO below.
+  // pickFreeLocalPort is a couple of bind/close round-trips which the kernel
+  // can satisfy concurrently while we're stat-ing the bundled resources.
+  // generateSingboxConfig falls back to randomLocalPort if no override is
+  // supplied, so direct callers (e.g. tests) still work.
+  const portPromise = pickFreeLocalPort().catch((err) => {
+    logEvent('warn', 'tun', 'pickFreeLocalPort failed — falling back to random port', err)
+    return undefined as number | undefined
+  })
+
   // Rotate previous log so each run has a clean slate; previous one kept as .prev.log.
   try {
     await stat(logPath)
@@ -905,21 +1056,24 @@ async function prepareRuntime(
 
   // Copy binaries to a writable runtime dir (Program Files is read-only for normal users;
   // also ensures sing-box.exe and wintun.dll are in the same directory).
+  // copyResourceIfStale skips the ~30 MB sing-box.exe copy when an identical
+  // file already exists in the runtime dir — by far the common case after
+  // first install.
   await access(singboxSrc)
   await access(wintunSrc)
-  await copyFile(singboxSrc, singboxDst)
-  await copyFile(wintunSrc, wintunDst)
+  const [singboxCopied, wintunCopied] = await Promise.all([
+    copyResourceIfStale(singboxSrc, singboxDst),
+    copyResourceIfStale(wintunSrc, wintunDst)
+  ])
+  logEvent('debug', 'tun', 'runtime binaries staged', {
+    singbox: singboxCopied ? 'copied' : 'reused',
+    wintun: wintunCopied ? 'copied' : 'reused'
+  })
 
   // Pre-resolve the mixed-direct-in port via the OS so we never land inside a
   // Windows Hyper-V/WSL excluded port range (which causes sing-box to fail
-  // bind with WSAEACCES). generateSingboxConfig falls back to randomLocalPort
-  // if no override is supplied, so direct callers (e.g. tests) still work.
-  let directProxyPortOverride: number | undefined
-  try {
-    directProxyPortOverride = await pickFreeLocalPort()
-  } catch (err) {
-    logEvent('warn', 'tun', 'pickFreeLocalPort failed — falling back to random port', err)
-  }
+  // bind with WSAEACCES).
+  const directProxyPortOverride = await portPromise
 
   const config = generateSingboxConfig(upstream, proxyType, directProcessNames, {
     ...options,
@@ -1108,6 +1262,14 @@ export const tunController = {
       return result
     }
 
+    // Phase timing: lightweight, in-process, written to the diagnostic dump
+    // on success. Each phase is wall-clock ms since `tStart`. The next
+    // regression in TUN startup latency should be obvious from the dump
+    // without having to instrument anything else.
+    const phases: Record<string, number> = {}
+    const tStart = Date.now()
+    const mark = (name: string) => { phases[name] = Date.now() - tStart }
+
     // A new start() always reopens the auto-restart window. If a pending
     // restart timer is still ticking from a crash recovery, cancel it — the
     // user (or the recovery loop) is taking matters into their own hands.
@@ -1152,10 +1314,17 @@ export const tunController = {
       logEvent('warn', 'tun', 'start refused because another TUN/VPN is already active', { foreign, mode, proxyAddr, proxyType })
       return finishStart({ success: false, error: message })
     }
+    mark('preflight')
     const warning = null
 
     let proxyOwnerProcessNames: string[] = []
     let proxyOwnerProgramPaths: string[] = []
+    // We want prepareRuntime to start as soon as we know the proxy is alive
+    // (or, in directVpn mode, immediately) so its file IO + sing-box check
+    // can overlap with the rest of the start sequence. We declare it here
+    // so both branches below can populate it; the await happens after the
+    // stale-cleanup gate.
+    let runtimePromise: Promise<{ singbox: string; config: string }> | null = null
     if (mode === 'localProxy') {
       // ---------- Pre-flight 2: proxy must actually be listening ----------
       // If Happ is closed or in TUN mode, port 10808 isn't listening — without this check
@@ -1168,7 +1337,15 @@ export const tunController = {
       }
 
       const { host, port } = parsedProxy
-      const proxyAlive = await probeTcp(host, port, 2000)
+      // Race the TCP probe with the PowerShell owner-process lookup.
+      // getProxyOwnerProcesses is a ~1s PowerShell pipeline that we don't
+      // need until we generate the sing-box config later — running it in
+      // parallel with the TCP probe gets it for free. Errors are non-fatal
+      // by design (the path is already best-effort), so we swallow them.
+      const [proxyAlive, proxyOwnerProcesses] = await Promise.all([
+        probeTcp(host, port, 2000),
+        getProxyOwnerProcesses(host, port).catch(() => [] as Array<{ name: string; path: string | null }>)
+      ])
       if (!proxyAlive) {
         logEvent('error', 'tun', 'start refused because upstream proxy is not reachable', { proxyAddr, proxyType })
         return finishStart({
@@ -1180,13 +1357,6 @@ export const tunController = {
       }
       logEvent('info', 'tun', 'upstream proxy is reachable', { proxyAddr, proxyType })
 
-      const proxyFullTunnel = await validateProxyFullTunnel(host, port, proxyType)
-      logEvent(proxyFullTunnel.ok ? 'info' : 'error', 'tun', 'upstream proxy full-tunnel check', proxyFullTunnel)
-      if (!proxyFullTunnel.ok) {
-        return finishStart({ success: false, error: proxyFullTunnel.message || 'Upstream proxy не прошёл проверку полного туннеля' })
-      }
-
-      const proxyOwnerProcesses = await getProxyOwnerProcesses(host, port)
       proxyOwnerProcessNames = uniqueProcessNames(proxyOwnerProcesses.map((process) => process.name))
       proxyOwnerProgramPaths = [...new Set(proxyOwnerProcesses.map((process) => process.path).filter((path): path is string => Boolean(path)))]
       if (proxyOwnerProcesses.length > 0) {
@@ -1196,11 +1366,44 @@ export const tunController = {
           processPaths: proxyOwnerProgramPaths
         })
       }
+
+      // Kick off prepareRuntime NOW — it doesn't depend on the validation
+      // result. If validate fails we throw away the runtime; that's just a
+      // file overwrite on next start, no rollback needed.
+      runtimePromise = prepareRuntime(
+        proxyAddr,
+        proxyType,
+        proxyOwnerProcessNames,
+        { stealthMode: startOptions.stealthMode === true }
+      )
+
+      // Now do the slower full-tunnel check in parallel with prepareRuntime.
+      const proxyFullTunnel = await validateProxyFullTunnel(host, port, proxyType)
+      logEvent(proxyFullTunnel.ok ? 'info' : 'error', 'tun', 'upstream proxy full-tunnel check', proxyFullTunnel)
+      if (!proxyFullTunnel.ok) {
+        // Make sure the eagerly-started prepareRuntime doesn't reject in the
+        // background as an unhandled rejection. Its result is harmless
+        // (overwrites a file in userData/tun-runtime) so we just swallow it.
+        runtimePromise.catch(() => undefined)
+        return finishStart({ success: false, error: proxyFullTunnel.message || 'Upstream proxy не прошёл проверку полного туннеля' })
+      }
+      mark('proxy-validated')
     } else {
       logEvent('info', 'tun', 'starting Direct VPN profile', {
         protocol: vpnProfile?.protocol,
         name: vpnProfile?.name
       })
+      // Direct VPN mode has no validation step — we can start prepareRuntime
+      // immediately from the vpnProfile we already have in hand.
+      if (vpnProfile) {
+        runtimePromise = prepareRuntime(
+          { outbound: vpnProfile.outbound, proxyType },
+          proxyType,
+          proxyOwnerProcessNames,
+          { stealthMode: startOptions.stealthMode === true }
+        )
+      }
+      mark('proxy-validated')
     }
 
     // Kill only VPNTE-owned runtime binaries. Never kill generic sing-box.exe elsewhere:
@@ -1208,28 +1411,66 @@ export const tunController = {
     if (await isSingboxRunning()) {
       await killOwnedRuntimeProcesses()
       if (!(await waitForOwnedRuntimeToExit())) {
+        // Same harmless-throwaway dance as on validate failure: the eager
+        // prepareRuntime is already running, drop its rejection on the floor
+        // so it doesn't bubble as an unhandled rejection.
+        if (runtimePromise) runtimePromise.catch(() => undefined)
         return finishStart({ success: false, error: 'Не удалось остановить предыдущий vpnte-sing-box.exe. Завершите его в Диспетчере задач и повторите.' })
       }
     } else {
       await killRuntimeProcess('sing-box.exe', join(getTunRuntimeDir(), 'sing-box.exe'))
     }
-    await removeStaleTunInterface()
 
+    // Smart stale-cleanup gate: only walk the per-alias cleanup loop when at
+    // least one of our well-known TUN aliases is currently present. After a
+    // clean shutdown there's nothing to remove and the elevated PowerShell
+    // round-trip just adds 1-3s for no reason. fastTunPresenceProbe is a
+    // single ~150ms PowerShell call.
+    //
+    // We kick the cleanup off BUT DON'T AWAIT IT YET — it can run in
+    // parallel with the sing-box config-check, since the cleanup never
+    // touches our newly-copied binary or config in userData.
+    const cleanupPromise: Promise<void> = (async () => {
+      const needsCleanup = await fastTunPresenceProbe()
+      if (needsCleanup) {
+        await removeStaleTunInterface()
+      } else {
+        logEvent('debug', 'tun', 'skipping stale TUN cleanup — no aliases present')
+      }
+    })()
+
+    // prepareRuntime was kicked off as soon as we knew the tunnel was viable.
+    // Wait for it now and run the sing-box config check in parallel with the
+    // stale-cleanup that's still in flight above. If prepareRuntime didn't
+    // start (defensive — directVpn without a profile is rejected above),
+    // fall back to the original sequential path.
     let runtime: { singbox: string; config: string }
     try {
-      runtime = await prepareRuntime(
-        mode === 'directVpn' && vpnProfile
-          ? { outbound: vpnProfile.outbound, proxyType }
-          : proxyAddr,
-        proxyType,
-        proxyOwnerProcessNames,
-        { stealthMode: startOptions.stealthMode === true }
-      )
-      await exec(`"${runtime.singbox}" check -c "${runtime.config}"`)
+      if (!runtimePromise) {
+        runtimePromise = prepareRuntime(
+          mode === 'directVpn' && vpnProfile
+            ? { outbound: vpnProfile.outbound, proxyType }
+            : proxyAddr,
+          proxyType,
+          proxyOwnerProcessNames,
+          { stealthMode: startOptions.stealthMode === true }
+        )
+      }
+      runtime = await runtimePromise
+      // Run sing-box check in parallel with the stale-cleanup. Both are
+      // independent and the check is the longer of the two on a clean box.
+      await Promise.all([
+        exec(`"${runtime.singbox}" check -c "${runtime.config}"`),
+        cleanupPromise
+      ])
     } catch (err: any) {
+      // Make sure we don't leave the cleanup dangling as an unhandled rejection.
+      cleanupPromise.catch(() => undefined)
       logEvent('error', 'tun', 'failed to prepare TUN runtime', err)
       return finishStart({ success: false, error: `Не удалось подготовить TUN-окружение: ${err.stderr || err.message || err}` })
     }
+    mark('stale-cleanup-done')
+    mark('runtime-ready')
 
     const runtimeDir = dirname(runtime.singbox)
 
@@ -1290,6 +1531,7 @@ export const tunController = {
         return finishStart({ success: false, error: adapterLockdownWarning })
       }
     }
+    if (wantAdapterLockdown) mark('lockdown-done')
 
     // sudo-prompt's callback fires on child exit. For a long-running daemon we:
     // 1. Fire-and-forget the sudo.exec call, using its callback to mark "stopped" on exit.
@@ -1534,6 +1776,7 @@ export const tunController = {
         }
       }
 
+      mark('singbox-spawned')
       isProcessElevated().then((elevated) => {
         if (elevated) {
           execCb(cmd, { windowsHide: true, maxBuffer: 1024 * 1024 }, (error, _stdout, stderr) => onExit(error, stderr))
@@ -1613,6 +1856,7 @@ export const tunController = {
             startedAt: Date.now(),
             restartAttempt
           }
+          mark('tun-running')
           if (mode === 'localProxy') startProxyWatchdog(proxyAddr)
           logEvent('info', 'tun', 'TUN started', {
             mode,
@@ -1623,6 +1867,10 @@ export const tunController = {
             killSwitch: killSwitchEngaged,
             restartAttempt
           })
+          // Phase timing summary — gold for the diagnostic dump. If TUN
+          // startup ever regresses, the phase deltas in this single log line
+          // will pinpoint which step got slower.
+          logEvent('info', 'tun', 'start timing', { phases, totalMs: Date.now() - tStart })
 
           // Remember the start params so we can replay them after a crash.
           // Mark the run as "user-initiated" while we hold the line —

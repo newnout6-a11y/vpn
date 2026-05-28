@@ -380,7 +380,10 @@
     "sound": "Sound",
     "soundEnabled": "Enable notification sound",
     "osBlockedWarning": "Notifications are disabled in Windows. Enable them: Settings → System → Notifications → VPN Tunnel Enforcer",
-    "osBlockedHint": "System notifications will not appear until this is fixed in Windows"
+    "osBlockedHint": "System notifications will not appear until this is fixed in Windows",
+    "osBlockedExplanation": "This usually happens after you clicked 'Don't show notifications' in a Windows toast. The button below clears the block — after that, the app will reappear in Windows Settings → Notifications.",
+    "resetWindowsBlock": "Reset Windows block",
+    "openWindowsSettings": "Open Windows Settings"
   },
   "themes": {
     "title": "Themes",

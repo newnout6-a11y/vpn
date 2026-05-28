@@ -1,3 +1,9 @@
+# appId is the AppUserModelID Windows uses to correlate Start Menu shortcuts
+# with toast notifications. Must match `APP_USER_MODEL_ID` in
+# src/main/index.ts (passed to app.setAppUserModelId) and the candidate list
+# in src/main/notifications.ts. If these drift, Windows can't find the app
+# in Settings → Notifications and the registry-based block check / clear
+# will look at the wrong AUMID.
 appId: com.vpntunnelenforcer.app
 productName: VPN Tunnel Enforcer
 directories:
@@ -14,6 +20,10 @@ nsis:
   oneClick: false
   perMachine: true
   allowToChangeInstallationDirectory: true
+  # Both shortcuts are required so Windows treats us as a "real installed
+  # app" and keeps our entry in Settings → Notifications even after the
+  # user blocks toasts. Without a Start Menu shortcut tied to the AUMID,
+  # Windows can drop us from the list once the block is applied.
   createDesktopShortcut: always
   createStartMenuShortcut: true
   shortcutName: VPN Tunnel Enforcer

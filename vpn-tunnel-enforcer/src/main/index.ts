@@ -34,10 +34,10 @@ import { clearAppLog, getFullLogs, logEvent, openLogFolder, type AppLogLevel } f
 import { runSystemDiagnostics } from './systemDiagnostics'
 import { getRoutingPlan } from './connectionPlanner'
 import { runAutoPilot } from './autoPilot'
-import { notify } from './notifications'
+import { notify, setInAppFallbackCallback } from './notifications'
 import { exportDiagnosticsZip } from './diagnosticsExport'
 import { captureSnapshot, getSnapshotsDir, startPeriodicSnapshots, stopPeriodicSnapshots } from './systemSnapshot'
-import { runLeakSelfTest, startPeriodicLeakTest, stopPeriodicLeakTest, setLeakDetectedCallback } from './leakSelfTest'
+import { runLeakSelfTest, startPeriodicLeakTest, stopPeriodicLeakTest, setLeakDetectedCallback, startNetworkChangeWatcher, stopNetworkChangeWatcher } from './leakSelfTest'
 import { trafficMonitor, type TrafficStats } from './trafficMonitor'
 import { applyBrowserLeakProtection, rollbackBrowserLeakProtection } from './browserHardening'
 import { resolveVpnProfile, resolveVpnProfiles, redactSensitiveConfig, type VpnProfile } from './vpnProfiles'
@@ -130,6 +130,26 @@ function installCrashGuards(): void {
   })
 }
 installCrashGuards()
+
+// ─── Windows AppUserModelID ─────────────────────────────────────────────────
+//
+// Must be set BEFORE app.whenReady() so every Notification object created in
+// this process is tagged with this AUMID. Without it, Electron picks an
+// unstable auto-generated id, which means:
+//   - Windows can't find us in Settings → Notifications (no stable identity).
+//   - The "Don't show notifications" registry block ends up keyed to a random
+//     id that survives across builds (or, conversely, the user's intentional
+//     allow gets lost when the id rolls).
+//   - Toasts may show but never appear in Action Center history because the
+//     OS can't correlate them with a registered Start Menu shortcut.
+//
+// Keep this string in sync with electron-builder.yml `appId` and with the
+// `candidateModelIds()` list in src/main/notifications.ts — those three
+// places must agree or the registry-based block check / clear will miss.
+export const APP_USER_MODEL_ID = 'com.vpntunnelenforcer.app'
+if (process.platform === 'win32') {
+  app.setAppUserModelId(APP_USER_MODEL_ID)
+}
 
 function getIconPath() {
   if (process.env.ELECTRON_RENDERER_URL) {
@@ -438,7 +458,11 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
   // periodic leak self-test so we keep collecting data for support.
   captureSnapshot('tun-post-start').catch(() => undefined)
   startPeriodicSnapshots(60_000)
-  startPeriodicLeakTest(120_000)
+  startPeriodicLeakTest(30_000)
+  // Watch for network changes (Wi-Fi flap, Ethernet plug, IP renew). On
+  // any change, fire an event-driven leak check after a short grace so
+  // the new interface has time to come up.
+  startNetworkChangeWatcher()
 
   return {
     ...result,
@@ -574,7 +598,10 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
 
   captureSnapshot('tun-post-start').catch(() => undefined)
   startPeriodicSnapshots(60_000)
-  startPeriodicLeakTest(120_000)
+  startPeriodicLeakTest(30_000)
+  // Same network-change watcher as in startProtection — direct-vpn mode
+  // benefits equally from event-driven leak checks on Wi-Fi flap.
+  startNetworkChangeWatcher()
 
   return {
     ...result,
@@ -610,6 +637,7 @@ async function stopProtection(): Promise<{ success: boolean; error?: string }> {
 
   stopPeriodicSnapshots()
   stopPeriodicLeakTest()
+  stopNetworkChangeWatcher()
   const result = await tunController.stop()
   ipMonitor.clearVpnIp()
   trafficMonitor.stop()
@@ -763,6 +791,21 @@ app.whenReady().then(async () => {
     .then(active => refreshTrayState({ killSwitchActive: active, status: active && !tunController.getStatus().running ? 'killswitch' : latestTrayStatus }))
     .catch(() => undefined)
 
+  // In-app notification fallback. When `notify()` cannot deliver a Windows
+  // toast (Windows blocks the AUMID, or Notification.isSupported() === false
+  // on this platform), it calls this callback so the renderer can surface
+  // the message in-app instead of silently dropping it. This is what keeps
+  // notifications working after a user has clicked "Don't show notifications"
+  // on the Windows toast — until they hit "Reset Windows block" in Settings,
+  // at which point real toasts come back.
+  setInAppFallbackCallback((level, title, body) => {
+    try {
+      mainWindow?.webContents.send('inapp-notification', { level, title, body, ts: Date.now() })
+    } catch {
+      // Window may be torn down (close-on-quit race). Nothing to recover from.
+    }
+  })
+
   // Capture a snapshot of the system state on every app launch — gives us a
   // "what does the network look like before the user clicks anything" record
   // for free, in case they later report "doesn't work" without ever clicking.
@@ -770,13 +813,21 @@ app.whenReady().then(async () => {
 
   // When the periodic leak self-test (started at TUN start) detects a leak,
   // bubble that to the renderer so the UI can show a giant red banner, AND
-  // fire a Windows toast.
+  // fire a Windows toast. Two distinct toast paths so the user can tell at a
+  // glance whether it's a physical-adapter leak (most severe — egress IP
+  // bypasses the VPN entirely) or a DNS-side leak (resolver path egresses
+  // somewhere unexpected). If physical-adapter fires AND dns-leak fires,
+  // we prefer the physical-adapter toast — it's strictly more severe.
   setLeakDetectedCallback((r) => {
     try {
       mainWindow?.webContents.send('leak-detected', r)
     } catch {}
     try {
-      notify('warn', 'УТЕЧКА обнаружена', r.summary)
+      if (r.physicalAdapterReached) {
+        notify('warn', 'УТЕЧКА обнаружена', r.summary)
+      } else if ((r as any).dnsLeakDetected) {
+        notify('warn', 'УТЕЧКА DNS', r.summary)
+      }
     } catch {}
   })
 

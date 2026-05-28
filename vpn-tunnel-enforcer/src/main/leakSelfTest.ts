@@ -32,6 +32,7 @@
  */
 import { exec as execCb } from 'child_process'
 import { promisify } from 'util'
+import { networkInterfaces } from 'os'
 import { logEvent } from './appLogger'
 
 const exec = promisify(execCb)
@@ -60,6 +61,12 @@ export interface LeakSelfTestResult {
   perAdapter: AdapterReach[]
   // Compact human-readable summary (one line, used for notifications).
   summary: string
+  // Set when the Cloudflare side-channel returns a public IP that doesn't
+  // match the default-route public IP — strong signal of a DNS leak (or at
+  // least a different egress for some path). Optional so existing callers
+  // and the renderer client type stay structurally compatible.
+  dnsLeakDetected?: boolean
+  dnsLeakDetail?: string
 }
 
 const PROBE_URL = 'https://1.1.1.1'
@@ -206,12 +213,45 @@ export async function runLeakSelfTest(): Promise<LeakSelfTestResult> {
     (a) => a.publicIpViaThisAdapter !== null && a.publicIpViaThisAdapter !== defaultRoutePublicIp
   )
 
+  // 3. DNS-leak side-channel. We grab the Cloudflare trace via the default
+  //    route (which is TUN when the tunnel is up). The `ip=` line is the
+  //    public IP Cloudflare's anycast saw for our request — if that doesn't
+  //    match `defaultRoutePublicIp`, traffic for that hostname egressed
+  //    somewhere else (DNS-only resolver leak, split-tunnel rule, captive
+  //    portal hijack). Wrapped in try/catch — adding this probe must never
+  //    break the existing test.
+  let dnsLeakDetected = false
+  let dnsLeakDetail: string | null = null
+  try {
+    const { stdout } = await exec(
+      'curl.exe -4 -sS --max-time 4 --connect-timeout 4 https://cloudflare.com/cdn-cgi/trace',
+      { windowsHide: true, timeout: 6000, encoding: 'utf8' }
+    )
+    if (mySession !== activeSessionId) return cancelledResult()
+    // The trace returns lines like `ip=...`, `colo=...`, `warp=on/off`.
+    // We don't actually need to parse the resolver — `ip=` is the visible
+    // public IP. If it equals defaultRoutePublicIp, no leak; if it's
+    // different from the VPN egress, that's the leak.
+    const m = String(stdout).match(/^ip=(\S+)/m)
+    const cfIp = m ? m[1].trim() : null
+    if (cfIp && defaultRoutePublicIp && cfIp !== defaultRoutePublicIp) {
+      dnsLeakDetected = true
+      dnsLeakDetail = `Cloudflare видит ${cfIp}, наш default-route отдаёт ${defaultRoutePublicIp}`
+    }
+  } catch {
+    // Silent — adding a DNS-leak probe should never break the existing test.
+  }
+
   let summary: string
   if (physicalAdapterReached && publicIpMismatch) {
     const leakedIp = perAdapter.find((a) => a.publicIpViaThisAdapter)?.publicIpViaThisAdapter
     summary = `УТЕЧКА: физический адаптер виден из интернета как ${leakedIp} (TUN отдаёт ${defaultRoutePublicIp ?? 'неизвестно'})`
   } else if (physicalAdapterReached) {
     summary = `УТЕЧКА: kill-switch не блокирует физический адаптер (curl до 1.1.1.1 прошёл)`
+  } else if (dnsLeakDetected) {
+    // Physical adapter looks sealed but Cloudflare disagrees with the
+    // default-route IP — DNS-side leak.
+    summary = `УТЕЧКА DNS: ${dnsLeakDetail}`
   } else if (defaultRoutePublicIp) {
     summary = `OK: физические адаптеры заблокированы, TUN отдаёт публичный IP ${defaultRoutePublicIp}`
   } else {
@@ -224,7 +264,9 @@ export async function runLeakSelfTest(): Promise<LeakSelfTestResult> {
     publicIpMismatch,
     defaultRoutePublicIp,
     perAdapter,
-    summary
+    summary,
+    dnsLeakDetected,
+    dnsLeakDetail: dnsLeakDetail ?? undefined
   }
 
   // Final cancellation check before any side effects (logEvent + callback).
@@ -233,9 +275,11 @@ export async function runLeakSelfTest(): Promise<LeakSelfTestResult> {
   // renderer leak banner.
   if (mySession !== activeSessionId) return cancelledResult()
 
-  logEvent(physicalAdapterReached || publicIpMismatch ? 'warn' : 'info', 'leak-test', summary, {
+  logEvent(physicalAdapterReached || publicIpMismatch || dnsLeakDetected ? 'warn' : 'info', 'leak-test', summary, {
     physicalAdapterReached,
     publicIpMismatch,
+    dnsLeakDetected,
+    dnsLeakDetail,
     defaultRoutePublicIp,
     perAdapter
   })
@@ -262,6 +306,78 @@ export function cancelLeakSelfTest(): void {
 }
 
 /**
+ * Run the leak self-test asynchronously, regardless of the periodic timer.
+ * Used by network-change handlers and tunnel-status transitions to catch
+ * leaks the moment something interesting happens.
+ *
+ * Coalesced: if a check is already in flight (or was triggered <5s ago),
+ * this is a no-op. Without that guard, fast network flapping (re-associating
+ * to Wi-Fi) would queue up a dozen redundant checks.
+ */
+let lastTriggerAt = 0
+export function triggerLeakCheckNow(reason: string): void {
+  const now = Date.now()
+  if (now - lastTriggerAt < 5_000) return
+  lastTriggerAt = now
+  logEvent('debug', 'leak-test', 'event-triggered run', { reason })
+  runLeakSelfTest()
+    .then((r) => {
+      if (r.physicalAdapterReached || r.publicIpMismatch || r.dnsLeakDetected) {
+        onLeakDetectedCb?.(r)
+      }
+    })
+    .catch((err) => logEvent('warn', 'leak-test', 'event-triggered run threw', { err: (err as Error).message, reason }))
+}
+
+// Network-change detection. Windows raises NetworkInformation.NetworkAdapter
+// events via WMI but Electron exposes a simpler signal: we poll
+// os.networkInterfaces() every 8s and compare against the last snapshot.
+// On any add/remove/IP change, fire triggerLeakCheckNow. Good enough — a
+// real network change always moves at least one IPv4 address.
+let lastNetSignature = ''
+let netWatchTimer: ReturnType<typeof setInterval> | null = null
+
+function buildNetSignature(): string {
+  const nics = networkInterfaces()
+  const rows: string[] = []
+  for (const [name, addrs] of Object.entries(nics)) {
+    if (!addrs) continue
+    for (const a of addrs) {
+      if (a.internal) continue
+      rows.push(`${name}|${a.family}|${a.address}|${a.cidr}`)
+    }
+  }
+  return rows.sort().join(';')
+}
+
+export function startNetworkChangeWatcher(): void {
+  stopNetworkChangeWatcher()
+  lastNetSignature = buildNetSignature()
+  netWatchTimer = setInterval(() => {
+    const sig = buildNetSignature()
+    if (sig !== lastNetSignature) {
+      const old = lastNetSignature
+      lastNetSignature = sig
+      logEvent('info', 'leak-test', 'network change detected', {
+        oldRowCount: old.split(';').filter(Boolean).length,
+        newRowCount: sig.split(';').filter(Boolean).length
+      })
+      // Tiny grace period so the new interface fully comes up before we
+      // probe — otherwise the curl --interface call can fail with "no such
+      // address" and falsely report "physical adapter unreachable".
+      setTimeout(() => triggerLeakCheckNow('network-change'), 1500)
+    }
+  }, 8_000)
+}
+
+export function stopNetworkChangeWatcher(): void {
+  if (netWatchTimer) {
+    clearInterval(netWatchTimer)
+    netWatchTimer = null
+  }
+}
+
+/**
  * Start the periodic leak self-test loop.
  *
  * @param intervalMs  How often to run the probe.
@@ -274,7 +390,7 @@ export function cancelLeakSelfTest(): void {
  *                    that don't care about gating.
  */
 export function startPeriodicLeakTest(
-  intervalMs = 120_000,
+  intervalMs = 30_000,
   shouldRun: () => boolean = () => true
 ): void {
   stopPeriodicLeakTest()
@@ -287,7 +403,7 @@ export function startPeriodicLeakTest(
         // active one. A stop-tun that bumps activeSessionId between scheduling
         // and resolution must not trigger the renderer leak banner.
         if (tickSession !== activeSessionId) return
-        if (r.physicalAdapterReached || r.publicIpMismatch) {
+        if (r.physicalAdapterReached || r.publicIpMismatch || r.dnsLeakDetected) {
           onLeakDetectedCb?.(r)
         }
       })

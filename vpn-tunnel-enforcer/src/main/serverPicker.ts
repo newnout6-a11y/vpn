@@ -15,6 +15,8 @@ import { Socket } from 'net'
 import { promises as dns } from 'dns'
 import { writeFile } from 'fs/promises'
 import { join } from 'path'
+import { exec as execCb } from 'child_process'
+import { promisify } from 'util'
 import axios from 'axios'
 import { randomUUID } from 'crypto'
 import Store from 'electron-store'
@@ -29,6 +31,11 @@ import {
   refreshGroup as refreshSubscriptionGroup
 } from './serverGroups'
 import type { ServerProfile } from '../shared/ipc-types'
+
+// Promisified `exec` is used by the ICMP probe (Windows `ping.exe`). We
+// take the buffer form because Russian Windows prints CP866-encoded output
+// and we need the raw bytes for the locale-tolerant decoder below.
+const exec = promisify(execCb)
 
 // ─── Persistent Store ────────────────────────────────────────────────────────
 
@@ -47,15 +54,41 @@ const store = new Store<ServerPickerStore>({
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const PING_TIMEOUT_MS = 5000
+const PING_TIMEOUT_MS = 3500
 const PING_CONCURRENCY = 5
 
-// Neutral "is the tunnel responsive" probe targets. Cloudflare's trace
-// endpoint returns ~30 bytes of plain text, has no rate limiting, and is
-// allow-listed pretty much everywhere — including on Reality fronts that
-// would loop on a bare SNI to our own VPN endpoint. gstatic.com/generate_204
-// is a backup with the same guarantees but goes through Google.
+// Neutral "is the tunnel responsive" probe targets, ordered RU-friendly first.
+//
+// The original list (Cloudflare trace + gstatic 204) is well-behaved on most
+// networks but Russian university Wi-Fi and some federal-ISP TSPU configs
+// outright drop 1.1.1.1 and gstatic.com. Result: every ping during a working
+// tunnel returns "—" because neither URL ever responds.
+//
+// Mitigation: race a longer list with two RU-domestic anchors at the front.
+//   - yandex.ru/favicon.ico     — Yandex is the largest RU search engine; no
+//                                 operator blocks the homepage. The favicon
+//                                 keeps the response tiny (~1 KB) so the RTT
+//                                 we measure is dominated by tunnel cost,
+//                                 not download time.
+//   - gosuslugi.ru/favicon.ico  — Federal government services portal; every
+//                                 RU ISP and university actively whitelists
+//                                 it, so it survives even the strictest
+//                                 captive-portal regimes.
+//   - 1.1.1.1/cdn-cgi/trace     — Source-of-truth on non-RU networks; small
+//                                 plain-text response (~30 bytes), no rate
+//                                 limit, allow-listed almost everywhere
+//                                 globally.
+//   - gstatic.com/generate_204  — 204-No-Content backup via Google.
+//
+// The probe races them in parallel (see `tunnelHttpProbe`), so adding more
+// URLs cannot make a "Ping all" slower; it can only make it faster on
+// networks where some endpoints are blocked.
 const TUNNEL_PROBE_URLS = [
+  // RU-friendly endpoints (almost never blocked, even on uni Wi-Fi):
+  'https://yandex.ru/favicon.ico',
+  'https://www.gosuslugi.ru/favicon.ico',
+  // Then the global fallbacks. Keep them — they're the source of truth
+  // when the user is on a non-RU network.
   'https://1.1.1.1/cdn-cgi/trace',
   'https://www.gstatic.com/generate_204'
 ] as const
@@ -63,37 +96,46 @@ const TUNNEL_PROBE_URLS = [
 // Cache the last successful tunnel-probe result for a few seconds. Without
 // this, a "Ping all" sweep over N profiles fires N identical HTTP requests
 // to the same CDN within milliseconds (since the tunnel itself is the
-// bottleneck — every profile would return the same number anyway). The
-// cache is intentionally short so the user still sees a fresh number when
-// they explicitly click "ping" twice in a row.
-const TUNNEL_PROBE_CACHE_MS = 2500
+// bottleneck — every profile would return the same number anyway). Bumped
+// to 3.5 s because back-to-back "Ping all" clicks always return the same
+// tunnel RTT anyway, so a slightly longer cache window is purely a win.
+const TUNNEL_PROBE_CACHE_MS = 3500
 let tunnelProbeCache: { value: number | null; at: number } | null = null
+
+// Per-URL timeout for the tunnel probe race. 4 s covers any reasonable
+// global RTT plus TLS handshake jitter — anything longer means the URL is
+// effectively dead and another racer should already have won.
+const TUNNEL_PROBE_URL_TIMEOUT_MS = 4000
+
+// ICMP / TCP timeouts for the offline (VPN-off) ladder. Kept short on
+// purpose: the user wants snappy "Ping all" feedback, and DPI-blocked hosts
+// usually fail fast (RST) or never respond at all (drop). 1.5 s is the
+// sweet spot between "give a slow link a chance" and "don't make the UI
+// hang on dead servers".
+const ICMP_PROBE_TIMEOUT_MS = 1500
 
 // ─── Ping Measurement ────────────────────────────────────────────────────────
 
 /**
  * Measures latency to a server, with two paths:
  *
- *   1. VPN OFF → plain TCP connect (SYN/SYN-ACK only). Real network RTT.
- *      We deliberately do NOT do a TLS handshake here: that would put the
- *      server_name on the wire in clear text and Russian TSPU / similar
- *      DPI boxes blackhole the IP for several minutes after seeing a
- *      known VPN-front SNI. The Ping button used to literally kill the
- *      user's internet for ~10 minutes.
+ *   1. VPN OFF → smart offline ladder. Plain TCP-connect to known VPN IPs
+ *      gets blackholed at the firewall on Russian university nets and
+ *      similar TSPU-policed networks: the operator instant-RSTs anything
+ *      that looks like a VPN endpoint, so every server shows "—".
+ *      `smartOfflinePing` tries ICMP first (rarely blocked, no SNI on the
+ *      wire), then falls back to plain TCP — see its own JSDoc.
  *
- *   2. VPN ON → connect, then send one byte and wait for the first kernel
- *      response (data, FIN, or RST). Plain `connect()` returns instantly
- *      when sing-box hijacks the SYN locally, which made every server
- *      look like 1 ms. The first-byte trip happens entirely inside the
- *      already-encrypted vless flow, so DPI sees only the regular
- *      shielded traffic — no extra fingerprint.
+ *   2. VPN ON → race a list of HTTPS probes through the tunnel. Whichever
+ *      one returns first wins. RU-friendly endpoints (yandex.ru,
+ *      gosuslugi.ru) are listed first; global fallbacks come after.
  *
  * Returns latency in ms or null if the server is fully unreachable.
  */
 export function pingServer(host: string, port: number): Promise<number | null> {
   return tunController.getStatus().running
     ? tunnelHttpProbe()
-    : plainTcpPing(host, port)
+    : smartOfflinePing(host, port)
 }
 
 /**
@@ -115,10 +157,16 @@ export function pingServer(host: string, port: number): Promise<number | null> {
  * ping during an active tunnel returned `ms: 5000` followed by
  * `Пинг … не прошёл`.
  *
- * Tries each probe URL in order. Caches the result for a couple of
- * seconds so a `pingAll` sweep over N profiles doesn't fire N parallel
- * requests (the tunnel is the bottleneck — every profile would return
- * the same number anyway).
+ * Strategy: race all probe URLs concurrently and take the first one that
+ * resolves. This shaves up to (N-1) * timeout off per "Ping all" call
+ * when one of the URLs is firewall-blocked but others work — which is
+ * exactly the scenario on RU university Wi-Fi where Cloudflare and
+ * gstatic are dropped but Yandex / Gosuslugi sail through.
+ *
+ * Caches the winning result for a few seconds so back-to-back pingAll
+ * sweeps don't fire identical requests against the same CDN (the tunnel
+ * itself is the bottleneck — every profile would return the same number
+ * anyway).
  */
 export async function tunnelHttpProbe(): Promise<number | null> {
   const cached = tunnelProbeCache
@@ -126,33 +174,164 @@ export async function tunnelHttpProbe(): Promise<number | null> {
     return cached.value
   }
 
-  for (const url of TUNNEL_PROBE_URLS) {
-    const start = Date.now()
-    try {
-      // Any non-5xx = successful round-trip. generate_204 returns 204,
-      // the trace endpoint returns 200; both count.
-      await axios.get(url, {
-        timeout: PING_TIMEOUT_MS,
+  // Fire every probe in parallel. `validateStatus < 500` accepts any
+  // success/redirect/client-error response — generate_204 returns 204,
+  // the trace endpoint returns 200, favicons return 200 — all count as
+  // "the tunnel made it through". `Connection: close` ensures we measure
+  // a fresh round-trip rather than the warmth of a pooled TLS session.
+  const start = Date.now()
+  const races = TUNNEL_PROBE_URLS.map(url =>
+    axios
+      .get(url, {
+        timeout: TUNNEL_PROBE_URL_TIMEOUT_MS,
         validateStatus: status => status < 500,
-        // Connection: close so each ping measures a fresh round-trip
-        // rather than the warmth of a pooled TLS session.
         headers: { 'Cache-Control': 'no-cache', Connection: 'close' }
       })
-      const ms = Date.now() - start
-      tunnelProbeCache = { value: ms, at: Date.now() }
-      return ms
-    } catch {
-      // Try the next URL. If both fail, the tunnel is genuinely
-      // unreachable (or the user is on a network where both Cloudflare
-      // and Google are blocked) — nothing useful to measure either way.
-      continue
-    }
-  }
+      .then(() => Date.now() - start)
+  )
 
-  tunnelProbeCache = { value: null, at: Date.now() }
+  try {
+    // Promise.any is native in Node 18+; this project targets Electron with
+    // Node ≥ 18, so no polyfill needed. First successful response wins; the
+    // rest keep going harmlessly until their per-request timeout fires.
+    const ms = await Promise.any(races)
+    tunnelProbeCache = { value: ms, at: Date.now() }
+    return ms
+  } catch {
+    // All racers rejected — Promise.any throws AggregateError. The tunnel
+    // is genuinely unreachable, or every probe URL is blocked on this
+    // network (vanishingly unlikely with four geographically diverse
+    // anchors, but we cache the negative result either way so we don't
+    // hammer the network repeatedly).
+    tunnelProbeCache = { value: null, at: Date.now() }
+    return null
+  }
+}
+
+/**
+ * Multi-strategy "is this VPN server alive at all" probe used when the
+ * tunnel is OFF. Tries each method in order, returns the first successful
+ * latency number.
+ *
+ * Order is chosen for DPI safety:
+ *
+ *   1. ICMP echo (Windows ping.exe). Most university and corporate nets
+ *      allow ICMP to arbitrary hosts; ICMP packets carry no SNI / TLS
+ *      ClientHello and so cannot be IP-blackholed by a TSPU box that
+ *      pattern-matches on "known VPN front" SNI strings. Stealthiest
+ *      check we can do.
+ *   2. Plain TCP-connect (no TLS handshake). Some firewalls deny ICMP
+ *      but allow TCP on common ports. SYN/SYN-ACK alone still does NOT
+ *      put server_name on the wire, so it's safe from SNI-based
+ *      blackholing.
+ *
+ * We deliberately do NOT add a TLS-handshake rung here. That would put
+ * `server_name` in plaintext during ClientHello, and Russian TSPU is
+ * known to IP-blackhole the destination for ~10 minutes the moment it
+ * spots a known VPN-front SNI. Killing the user's internet for 10
+ * minutes because they pressed the Ping button is the bug we're
+ * specifically avoiding.
+ */
+async function smartOfflinePing(host: string, port: number): Promise<number | null> {
+  const icmp = await icmpPing(host, ICMP_PROBE_TIMEOUT_MS)
+  if (icmp != null) return icmp
+
+  const tcp = await plainTcpPing(host, port)
+  if (tcp != null) return tcp
+
   return null
 }
 
+/**
+ * ICMP echo via the system `ping.exe`. Windows-only; returns null on any
+ * non-Windows platform so callers can fall through to the TCP probe.
+ *
+ * We shell out to `ping.exe -n 1 -w <ms> <host>` rather than open a raw
+ * ICMP socket because:
+ *   - Raw sockets require admin / SeImpersonatePrivilege on Windows,
+ *     which we don't have at app launch.
+ *   - `ping.exe` is on every Windows install since XP, no extra deps.
+ *
+ * Locale handling is the awkward part: Russian Windows prints output in
+ * CP866, so the byte sequence for "время" doesn't decode as UTF-8. The
+ * `decodeMaybeCp866` helper handles both encodings; the regex matches
+ * either the English "time=53ms" or the Russian "время=53мс" form.
+ */
+async function icmpPing(host: string, timeoutMs: number): Promise<number | null> {
+  if (process.platform !== 'win32') return null
+  try {
+    // `encoding: 'buffer'` keeps the raw bytes — we decode below. The
+    // outer `timeout` is a safety net in case ping.exe itself hangs;
+    // ping's own `-w` is the per-echo deadline.
+    const { stdout } = await exec(
+      `ping.exe -n 1 -w ${timeoutMs} ${host}`,
+      { windowsHide: true, timeout: timeoutMs + 1500, encoding: 'buffer', maxBuffer: 64 * 1024 }
+    )
+    const text = decodeMaybeCp866(stdout as Buffer)
+    // English: "time=53ms" / "time<1ms" / "time=1.2 ms"
+    // Russian: "время=53мс" / "время<1мс"
+    const m = text.match(/(?:time|время)\s*[<=]\s*([0-9.]+)\s*(?:ms|мс)/i)
+    if (m) return Math.max(1, Math.round(Number(m[1])))
+    // Some Russian locales emit a comma decimal separator. Try once more
+    // accepting commas, then normalise.
+    const m2 = text.match(/(?:time|время)\s*[<=]\s*([0-9,]+)\s*(?:ms|мс)/i)
+    if (m2) return Math.max(1, Math.round(Number(m2[1].replace(',', '.'))))
+    return null
+  } catch {
+    // Non-zero exit (timeout / unreachable / DNS failure) — let the next
+    // rung in the ladder try.
+    return null
+  }
+}
+
+/**
+ * Decode `ping.exe` output, tolerating both UTF-8 (English Windows) and
+ * CP866 (default Russian Windows console). We try UTF-8 first because
+ * that's the cheap path; if it doesn't contain the marker bytes we expect
+ * for either locale, we re-decode the buffer treating bytes 0x80-0xFF as
+ * CP866 cyrillic.
+ *
+ * No external dep: `iconv-lite` is not in package.json and pulling it in
+ * just for this one path isn't worth the install footprint. The mapping
+ * we need is a tiny window of CP866 (just the Cyrillic block), so a
+ * hand-rolled table is both smaller and easier to audit.
+ */
+function decodeMaybeCp866(buf: Buffer): string {
+  // Fast path: English Windows already prints UTF-8-compatible ASCII for
+  // the digits and "time=" markers. If we can match either locale word
+  // already, no re-decode needed.
+  const utf8 = buf.toString('utf8')
+  if (/(?:time|время)\s*[<=]/i.test(utf8)) return utf8
+
+  // CP866 → Unicode for the Cyrillic block:
+  //   0x80-0x8F → U+0410-U+041F  (А..П, uppercase)
+  //   0x90-0x9F → U+0420-U+042F  (Р..Я, uppercase)
+  //   0xA0-0xAF → U+0430-U+043F  (а..п, lowercase)
+  //   0xE0-0xEF → U+0440-U+044F  (р..я, lowercase) — "время" needs this
+  // ASCII bytes < 0x80 pass through unchanged. Everything else maps to
+  // '?' since we only care about the regex hit on "время".
+  const out: number[] = []
+  for (const b of buf) {
+    if (b < 0x80) out.push(b)
+    else if (b >= 0x80 && b <= 0x8F) out.push(0x410 + (b - 0x80))
+    else if (b >= 0x90 && b <= 0x9F) out.push(0x420 + (b - 0x90))
+    else if (b >= 0xA0 && b <= 0xAF) out.push(0x430 + (b - 0xA0))
+    else if (b >= 0xE0 && b <= 0xEF) out.push(0x440 + (b - 0xE0))
+    else out.push(0x3F) // '?'
+  }
+  return String.fromCodePoint(...out)
+}
+
+/**
+ * Plain TCP-connect timing. Returns the SYN→SYN-ACK round-trip in ms or
+ * null on connect failure / timeout. Used as the second rung of
+ * `smartOfflinePing` and kept exported-by-position so future callers can
+ * still get at it directly if they really want a TCP-only measurement.
+ *
+ * Critically: no TLS, no data, no SNI. We just see if the remote port
+ * answers. Anything more (TLS handshake) would leak server_name and
+ * trigger TSPU-style IP blackholing for ~10 minutes.
+ */
 function plainTcpPing(host: string, port: number): Promise<number | null> {
   return new Promise((resolve) => {
     const socket = new Socket()

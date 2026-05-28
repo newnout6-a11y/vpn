@@ -5,13 +5,16 @@
  *  - Respects the user's `desktopNotifications` setting. When off, every call
  *    is a no-op.
  *  - If the platform doesn't support notifications (some headless envs), we
- *    just log and move on instead of crashing.
+ *    fall back to an in-app toast via the registered fallback callback so the
+ *    user still sees the message instead of silently losing it.
  *  - Coalesces duplicate notifications fired within 1.5s. sing-box can
  *    rapid-fire crash/restart cycles and we don't want to spam the user with
  *    five identical toasts.
  *  - Checks Windows OS notification state for the app. If the user disabled
- *    notifications in Windows Settings, we skip showing and the renderer UI
- *    surfaces a warning banner so the in-app toggle stays honest.
+ *    notifications in Windows Settings (or clicked "Don't show notifications"
+ *    on a toast), we skip the OS toast and route through the in-app fallback;
+ *    the renderer UI surfaces a warning banner with a "Reset Windows block"
+ *    button so the in-app toggle stays honest.
  */
 import { Notification, app } from 'electron'
 import { exec } from 'child_process'
@@ -30,6 +33,22 @@ interface PendingKey {
 let lastNotification: PendingKey | null = null
 const COALESCE_MS = 1500
 
+// ─── In-app fallback callback ───────────────────────────────────────────────
+//
+// The main process registers a callback (in index.ts) that forwards the
+// notification to the renderer over IPC, where it's surfaced as an in-app
+// toast. This is the safety net for the case where the OS blocks our toasts
+// or doesn't support them at all — without it, every notification would be
+// silently swallowed once the user clicked "Don't show notifications".
+
+type InAppFallbackCallback = (level: NotificationLevel, title: string, body: string) => void
+let inAppFallbackCb: InAppFallbackCallback | null = null
+
+/** Register the renderer-bound fallback. Called once from main during whenReady. */
+export function setInAppFallbackCallback(cb: InAppFallbackCallback): void {
+  inAppFallbackCb = cb
+}
+
 // ─── Windows OS notification state detection ────────────────────────────────
 
 interface OsNotificationState {
@@ -43,15 +62,19 @@ let _osState: OsNotificationState | null = null
 let _osStateTs = 0
 const OS_STATE_TTL_MS = 30_000
 
-/** Known candidate AppUserModelIDs this app may use (dev and packaged). */
+/**
+ * Known candidate AppUserModelIDs this app may use. Order matters: the AUMID
+ * we EXPLICITLY set in main/index.ts (`com.vpntunnelenforcer.app`) takes
+ * priority. The legacy `app.getName()` fallback is kept so users upgrading
+ * from older builds — where Electron used the auto-generated id — can still
+ * see their previously-applied registry block. That legacy block now has to
+ * be cleared via `resetWindowsNotificationBlock()`, which iterates over
+ * every entry in this list.
+ */
 function candidateModelIds(): string[] {
-  const ids: string[] = []
-  try {
-    ids.push(app.getName())
-  } catch { /* app might not be ready */ }
-  ids.push('com.vpntunnelenforcer.app')
-  // Deduplicate
-  return [...new Set(ids.filter(Boolean))]
+  return ['com.vpntunnelenforcer.app', (() => {
+    try { return app.getName() } catch { return '' }
+  })()].filter((s, i, a) => s && a.indexOf(s) === i)
 }
 
 /**
@@ -106,6 +129,53 @@ export function invalidateOsNotificationStateCache(): void {
   _osStateTs = 0
 }
 
+/**
+ * Delete the Windows-side notification block for this app. The block is a
+ * DWORD `Enabled = 0x0` under
+ *   HKCU\Software\Microsoft\Windows\CurrentVersion\Notifications\Settings\<AppUserModelID>.
+ * We clear values for EVERY known AUMID candidate so old blocks from previous
+ * builds (back when Electron auto-generated the AUMID) are also cleared.
+ *
+ * Implementation note: we use `reg delete ... /va /f` (delete all values)
+ * rather than deleting the entire key, so any other settings Windows might
+ * have stored under that AUMID node stay intact.
+ *
+ * After this, the OS treats us as default-allowed; Windows Settings will
+ * repopulate our entry the next time we show a toast.
+ *
+ * Returns the list of AUMIDs that were cleared (empty if no block existed)
+ * and any non-"key not found" errors. Never throws — the caller can show
+ * a friendly result regardless of registry state.
+ */
+export async function resetWindowsNotificationBlock(): Promise<{ cleared: string[]; errors: string[] }> {
+  if (process.platform !== 'win32') return { cleared: [], errors: [] }
+  const cleared: string[] = []
+  const errors: string[] = []
+  for (const modelId of candidateModelIds()) {
+    const regPath = `HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Notifications\\Settings\\${modelId}`
+    try {
+      // /va = delete all values; /f = no prompt. Using /va rather than
+      // deleting the whole key preserves any subkeys Windows might have
+      // created under this AUMID (sound overrides, etc.).
+      await execAsync(
+        `reg delete "${regPath}" /va /f`,
+        { timeout: 5000, windowsHide: true }
+      )
+      cleared.push(modelId)
+    } catch (err: any) {
+      // Most failures here are "key not found" — totally fine, treat as a
+      // no-op since the user wasn't blocked under this AUMID anyway.
+      const msg = err?.stderr?.toString?.() || err?.message || String(err)
+      if (!/cannot find/i.test(msg) && !/unable to find/i.test(msg)) {
+        errors.push(`${modelId}: ${msg.slice(0, 120)}`)
+      }
+    }
+  }
+  invalidateOsNotificationStateCache()
+  logEvent('info', 'notify', 'reset Windows notification block', { cleared, errors })
+  return { cleared, errors }
+}
+
 // ─── Notify ─────────────────────────────────────────────────────────────────
 
 export async function notify(level: NotificationLevel, title: string, body: string): Promise<void> {
@@ -126,14 +196,16 @@ export async function notify(level: NotificationLevel, title: string, body: stri
     lastNotification = { title, body, ts: now }
 
     if (!Notification.isSupported()) {
-      logEvent('debug', 'notify', 'platform does not support notifications', { level, title })
+      logEvent('debug', 'notify', 'platform does not support notifications — using in-app fallback', { level, title })
+      inAppFallbackCb?.(level, title, body)
       return
     }
 
     // Check if Windows itself blocks notifications for this app.
     const osState = await getWindowsNotificationState()
     if (!osState.enabled) {
-      logEvent('debug', 'notify', 'skipped — Windows blocks notifications for this app')
+      logEvent('debug', 'notify', 'Windows blocks notifications — using in-app fallback', { level, title })
+      inAppFallbackCb?.(level, title, body)
       return
     }
 
@@ -145,6 +217,10 @@ export async function notify(level: NotificationLevel, title: string, body: stri
     })
     n.show()
   } catch (err) {
-    logEvent('warn', 'notify', 'failed to show notification', { err: (err as Error)?.message, level, title })
+    logEvent('warn', 'notify', 'failed to show notification — using in-app fallback', { err: (err as Error)?.message, level, title })
+    // Last-ditch: try to surface in-app even when the OS path threw. If the
+    // fallback itself throws (e.g. main window torn down), there's nothing
+    // sensible left to do.
+    try { inAppFallbackCb?.(level, title, body) } catch { /* swallow */ }
   }
 }

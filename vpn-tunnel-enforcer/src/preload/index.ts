@@ -135,6 +135,9 @@ export interface ElectronAPI {
   notificationsGetPrefs: () => Promise<any>
   notificationsSetPrefs: (prefs: any) => Promise<any>
   checkOsNotificationState: () => Promise<{ osNotificationsEnabled: boolean; appUserModelId: string | null }>
+  notificationsResetOsBlock: () => Promise<{ ok: true; cleared: string[]; errors: string[] } | { ok: false; error: string }>
+  notificationsOpenWindowsSettings: () => Promise<{ ok: true } | { ok: false; error: string }>
+  onInAppNotification: (callback: (data: { level: 'info' | 'warn' | 'error'; title: string; body: string; ts: number }) => void) => () => void
   // ip-monitor suspend/resume — leak detection guard during stop-tun rollback.
   ipMonitorSuspend: () => Promise<{ ok: true } | undefined>
   ipMonitorResume: () => Promise<{ ok: true } | undefined>
@@ -321,6 +324,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
   notificationsGetPrefs: () => ipcRenderer.invoke('notifications:get-prefs'),
   notificationsSetPrefs: (prefs: any) => ipcRenderer.invoke('notifications:set-prefs', prefs),
   checkOsNotificationState: () => ipcRenderer.invoke('notifications:check-os-state'),
+  // Clear the Windows-side notification block (registry "Enabled = 0" set
+  // when the user clicked "Don't show notifications" on a toast). Returns
+  // a structured ok/error shape — never throws.
+  notificationsResetOsBlock: () => ipcRenderer.invoke('notifications:reset-os-block'),
+  notificationsOpenWindowsSettings: () => ipcRenderer.invoke('notifications:open-windows-settings'),
+  // In-app notification fallback: fired when notify() can't deliver an OS
+  // toast (Windows blocks us, or platform unsupported). Returns an
+  // unsubscribe handle.
+  onInAppNotification: (callback: (data: { level: 'info' | 'warn' | 'error'; title: string; body: string; ts: number }) => void) => {
+    const handler = (_event: any, data: { level: 'info' | 'warn' | 'error'; title: string; body: string; ts: number }) => callback(data)
+    ipcRenderer.on('inapp-notification', handler)
+    return () => ipcRenderer.removeListener('inapp-notification', handler)
+  },
   // ip-monitor suspend/resume bridge — main self-registers these on
   // process.type==='browser'. Renderer flips them when TUN status moves
   // to 'stopping'/'stopped' to silence false-positive leak events.

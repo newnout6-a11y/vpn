@@ -170,15 +170,48 @@ export const NotificationSettings: React.FC = () => {
       {osBlocked && (
         <div className="flex items-start gap-3 p-3 rounded-[var(--radius-sm)] bg-[var(--color-warning)]/10 border border-[var(--color-warning)]/30">
           <ShieldAlert size={18} className="mt-0.5 shrink-0 text-[var(--color-warning)]" />
-          <div className="space-y-1">
+          <div className="space-y-2 flex-1">
             <p className="text-xs font-medium text-[var(--color-warning)]">
               {t('notifications.osBlockedWarning')}
+            </p>
+            <p className="text-xs text-[var(--color-text-secondary)]">
+              {t('notifications.osBlockedExplanation')}
             </p>
             {prefs && (prefs.method === 'system' || prefs.method === 'both') && (
               <p className="text-xs text-[var(--color-text-secondary)]">
                 {t('notifications.osBlockedHint')}
               </p>
             )}
+            <div className="flex flex-wrap gap-2 pt-1">
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    // Best-effort: the IPC may be missing on older preload
+                    // builds, in which case we simply skip the reset and
+                    // still re-poll OS state.
+                    await api.notificationsResetOsBlock?.()
+                  } catch {
+                    // Handler returns a structured shape, but be defensive.
+                  }
+                  // Re-check immediately, then again after a beat — Windows
+                  // can lag a moment in propagating registry changes back to
+                  // its in-process notification state.
+                  fetchOsState()
+                  setTimeout(fetchOsState, 1000)
+                }}
+                className="text-xs font-medium px-3 py-1.5 rounded-[var(--radius-sm)] bg-[var(--color-warning)]/20 hover:bg-[var(--color-warning)]/30 text-[var(--color-warning)] transition-colors"
+              >
+                {t('notifications.resetWindowsBlock')}
+              </button>
+              <button
+                type="button"
+                onClick={() => api.notificationsOpenWindowsSettings?.()}
+                className="text-xs font-medium px-3 py-1.5 rounded-[var(--radius-sm)] border border-[var(--color-border)] hover:bg-[var(--color-card-elevated)] transition-colors"
+              >
+                {t('notifications.openWindowsSettings')}
+              </button>
+            </div>
           </div>
         </div>
       )}
