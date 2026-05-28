@@ -95,16 +95,112 @@ function createGroup(input: Omit<ServerGroup, 'id'>): ServerGroup {
 }
 
 /**
+ * Canonicalises a subscription input to its underlying https URL.
+ *
+ * VPN providers (Sosa / Marzban / 3X-UI panels) hand users a `happ://add/…`
+ * deep-link whose payload encodes the real https subscription URL — either
+ * URL-encoded, base64-encoded, or sometimes embedded raw. Different copies
+ * of the same logical subscription can therefore arrive in radically
+ * different string forms:
+ *
+ *   - `https://example.com/sub/abc`
+ *   - `happ://add/https://example.com/sub/abc`
+ *   - `happ://add/https%3A%2F%2Fexample.com%2Fsub%2Fabc`
+ *   - `happ://add/aHR0cHM6Ly9leGFtcGxlLmNvbS9zdWIvYWJj`
+ *
+ * All four mean the same subscription. Without this canonicalisation step,
+ * a user re-pasting the same key (e.g. by sharing it across two devices)
+ * would create a fresh duplicate group every time. With canonicalisation,
+ * `findGroupBySourceUrl` correctly hits the existing group regardless of
+ * the form the user pasted.
+ *
+ * NOTE: We intentionally inline the unwrap rather than re-using
+ * `unwrapHappAddLink` from `vpnProfiles.ts` — that function is not
+ * exported, and pulling it in would force `serverGroups.ts` to depend on
+ * `vpnProfiles.ts` strictly for a 15-line decoder. Easier to maintain a
+ * self-contained, narrowly-scoped helper here.
+ *
+ * Returns the unwrapped https URL when the input is a `happ://add/…` link
+ * with an https payload, the trimmed input otherwise. Never throws.
+ */
+export function canonicalizeSubscriptionUrl(input: string): string {
+  const trimmed = String(input || '').trim()
+  if (!trimmed) return trimmed
+
+  const happAddMatch = trimmed.match(/^happ:\/\/add\/(.*)$/i)
+  if (!happAddMatch) return trimmed
+  const rest = happAddMatch[1] ?? ''
+  if (!rest) return trimmed
+
+  const candidates: string[] = []
+
+  // Form 1: happ://add/https://… — payload is the URL itself.
+  if (/^https?:\/\//i.test(rest)) candidates.push(rest)
+
+  // Form 2: URL-encoded — happ://add/https%3A%2F%2F…
+  try {
+    const decoded = decodeURIComponent(rest)
+    if (decoded && decoded !== rest) candidates.push(decoded.trim())
+  } catch {
+    /* not URL-encoded; fall through */
+  }
+
+  // Form 3: base64-url — happ://add/aHR0cHM6Ly…
+  // base64url uses '-' / '_' for the URL-safe alphabet; convert to '+' / '/'.
+  const base64Url = rest.replace(/-/g, '+').replace(/_/g, '/')
+  if (base64Url.length >= 4 && /^[A-Za-z0-9+/]+={0,2}$/.test(base64Url)) {
+    try {
+      const decoded = Buffer.from(base64Url, 'base64').toString('utf8').trim()
+      if (decoded) candidates.push(decoded)
+    } catch {
+      /* not base64; fall through */
+    }
+  }
+
+  for (const candidate of candidates) {
+    if (/^https?:\/\//i.test(candidate)) {
+      // Final sanity check: must parse as a real URL. Otherwise we'd
+      // accidentally treat malformed payloads as canonical.
+      try {
+        // eslint-disable-next-line no-new
+        new URL(candidate)
+        return candidate
+      } catch {
+        /* keep trying other candidates */
+      }
+    }
+  }
+
+  // Couldn't unwrap to an https URL — return the input unchanged so the
+  // caller still gets a sensible "best-effort" identity for matching.
+  return trimmed
+}
+
+/**
  * Find an existing group whose `sourceUrl` matches the given URL. Used to
  * dedupe "user re-pasted the same subscription" — we treat that as a
  * refresh of the existing group rather than creating a duplicate.
+ *
+ * Matching is canonical: a stored `https://…` URL and a user-pasted
+ * `happ://add/<base64-of-the-same-https-url>` resolve to the same group.
+ * That covers the common case where one device shares the happ link and
+ * another device pastes the raw URL (or vice versa).
  */
 function findGroupBySourceUrl(url: string): ServerGroup | null {
   const trimmed = url.trim()
   if (!trimmed) return null
-  return getGroups().find(
-    g => g.source === 'subscription' && g.sourceUrl === trimmed
-  ) ?? null
+  const canonical = canonicalizeSubscriptionUrl(trimmed)
+  return getGroups().find(g => {
+    if (g.source !== 'subscription' || !g.sourceUrl) return false
+    // Cheap exact-match path first — avoids the canonicalisation cost on
+    // the dominant case (user pastes the same raw https URL twice).
+    if (g.sourceUrl === trimmed) return true
+    if (g.sourceUrl === canonical) return true
+    // Final pass: stored URL might itself be a happ:// link from an
+    // older build that didn't canonicalise on save. Canonicalise both
+    // sides for the comparison.
+    return canonicalizeSubscriptionUrl(g.sourceUrl) === canonical
+  }) ?? null
 }
 
 /**

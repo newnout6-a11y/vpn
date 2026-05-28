@@ -15,7 +15,7 @@ import { Socket } from 'net'
 import { promises as dns } from 'dns'
 import { writeFile } from 'fs/promises'
 import { join } from 'path'
-import { exec as execCb } from 'child_process'
+import { exec as execCb, execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import axios from 'axios'
 import { randomUUID } from 'crypto'
@@ -28,6 +28,7 @@ import {
   serverGroups,
   ensureManualKeysGroup,
   findGroupBySourceUrl,
+  canonicalizeSubscriptionUrl,
   refreshGroup as refreshSubscriptionGroup
 } from './serverGroups'
 import type { ServerProfile } from '../shared/ipc-types'
@@ -36,6 +37,12 @@ import type { ServerProfile } from '../shared/ipc-types'
 // take the buffer form because Russian Windows prints CP866-encoded output
 // and we need the raw bytes for the locale-tolerant decoder below.
 const exec = promisify(execCb)
+
+// `execFile` is what we want for the stealth-curl probe — argv-style
+// invocation avoids any shell-quoting issues with hostnames or query
+// strings, which matters because we feed `--resolve <host>:443:<ip>` as a
+// raw arg and don't want any cmd.exe to ever see it.
+const execFile = promisify(execFileCb)
 
 // ─── Persistent Store ────────────────────────────────────────────────────────
 
@@ -93,13 +100,22 @@ const TUNNEL_PROBE_URLS = [
   'https://www.gstatic.com/generate_204'
 ] as const
 
-// Cache the last successful tunnel-probe result for a few seconds. Without
-// this, a "Ping all" sweep over N profiles fires N identical HTTP requests
-// to the same CDN within milliseconds (since the tunnel itself is the
-// bottleneck — every profile would return the same number anyway). Bumped
-// to 3.5 s because back-to-back "Ping all" clicks always return the same
-// tunnel RTT anyway, so a slightly longer cache window is purely a win.
-const TUNNEL_PROBE_CACHE_MS = 3500
+// Cache the last tunnel-probe result for a short window so a `pingAll`
+// sweep across N profiles doesn't fan out into N identical requests
+// against the same CDN (the tunnel itself is the bottleneck — every
+// profile would otherwise report the same number anyway).
+//
+// We deliberately use a **shorter** TTL when caching a *failure*. The
+// previous fix bumped the success TTL to 3.5 s, but applied the same
+// window to negative results — meaning a single transient failure
+// (network blip, captive-portal interstitial) made the next ~3.5 s of
+// pings all return null even after the situation recovered. Tunnel
+// probing is reactive on user action and we want it to feel snappy when
+// connectivity comes back: a 1.5 s negative cache is enough to dedupe a
+// `pingAll` sweep but short enough that the user never has to wait more
+// than one extra click to see "the network is back".
+const TUNNEL_PROBE_SUCCESS_CACHE_MS = 3500
+const TUNNEL_PROBE_FAILURE_CACHE_MS = 1500
 let tunnelProbeCache: { value: number | null; at: number } | null = null
 
 // Per-URL timeout for the tunnel probe race. 4 s covers any reasonable
@@ -170,8 +186,15 @@ export function pingServer(host: string, port: number): Promise<number | null> {
  */
 export async function tunnelHttpProbe(): Promise<number | null> {
   const cached = tunnelProbeCache
-  if (cached && Date.now() - cached.at < TUNNEL_PROBE_CACHE_MS) {
-    return cached.value
+  if (cached) {
+    // Asymmetric TTL: short window for a cached failure (so we react
+    // quickly when the network recovers), longer window for a cached
+    // success (so a pingAll sweep doesn't fan out into N identical
+    // CDN hits).
+    const ttl = cached.value == null
+      ? TUNNEL_PROBE_FAILURE_CACHE_MS
+      : TUNNEL_PROBE_SUCCESS_CACHE_MS
+    if (Date.now() - cached.at < ttl) return cached.value
   }
 
   // Fire every probe in parallel. `validateStatus < 500` accepts any
@@ -224,13 +247,27 @@ export async function tunnelHttpProbe(): Promise<number | null> {
  *      but allow TCP on common ports. SYN/SYN-ACK alone still does NOT
  *      put server_name on the wire, so it's safe from SNI-based
  *      blackholing.
+ *   3. Stealth-TCP probe via curl `--resolve`: a regular HTTPS request
+ *      to `yandex.ru` on the wire (so the firewall sees a domain it
+ *      can't block), but with DNS overridden so the actual TCP
+ *      destination is the VPN server's IP. We read curl's
+ *      `%{time_connect}` writeout — the SYN/SYN-ACK round-trip — and
+ *      stop caring once the TLS handshake fails (cert mismatch is
+ *      expected). This rung exists for hostile networks where BOTH
+ *      ICMP and direct outbound TCP to the VPN port are blackholed
+ *      (Beeline dorm Wi-Fi was the field-report that motivated it):
+ *      the stateful firewall lets the request through because it sees
+ *      a ClientHello to yandex.ru, and we get a real RTT measurement
+ *      against the VPN endpoint anyway.
  *
- * We deliberately do NOT add a TLS-handshake rung here. That would put
- * `server_name` in plaintext during ClientHello, and Russian TSPU is
- * known to IP-blackhole the destination for ~10 minutes the moment it
- * spots a known VPN-front SNI. Killing the user's internet for 10
- * minutes because they pressed the Ping button is the bug we're
- * specifically avoiding.
+ * We deliberately do NOT add a normal TLS-handshake rung here. That
+ * would put the **VPN's actual** `server_name` in plaintext during
+ * ClientHello, and Russian TSPU is known to IP-blackhole the destination
+ * for ~10 minutes the moment it spots a known VPN-front SNI. Killing the
+ * user's internet for 10 minutes because they pressed the Ping button is
+ * the bug we're specifically avoiding. (The stealth rung above is fine
+ * because the SNI it leaks is `yandex.ru` — a domain no operator can
+ * afford to block.)
  */
 async function smartOfflinePing(host: string, port: number): Promise<number | null> {
   const icmp = await icmpPing(host, ICMP_PROBE_TIMEOUT_MS)
@@ -238,6 +275,13 @@ async function smartOfflinePing(host: string, port: number): Promise<number | nu
 
   const tcp = await plainTcpPing(host, port)
   if (tcp != null) return tcp
+
+  // Last rung: disguised HTTPS to yandex.ru that actually targets our
+  // VPN host. Works even when the firewall blackholes ICMP and direct
+  // TCP to the VPN port — the firewall sees a request to yandex.ru and
+  // lets it through, but curl's --resolve forces the actual TCP target.
+  const stealth = await stealthTcpProbe(host, port)
+  if (stealth != null) return stealth
 
   return null
 }
@@ -350,6 +394,97 @@ function plainTcpPing(host: string, port: number): Promise<number | null> {
     socket.once('error', () => finish(null))
     socket.connect(port, host)
   })
+}
+
+/**
+ * "Stealth TCP probe" — measures TCP connect-time to the target VPN
+ * host:port while looking like a regular HTTPS request to yandex.ru on
+ * the wire. We use curl's `--resolve` to override DNS for one specific
+ * (host, port) tuple, point yandex.ru at the VPN server's IP, then race
+ * the request. We do NOT care about the response body — we read curl's
+ * `%{time_connect}` writeout, which is the SYN/SYN-ACK round trip.
+ *
+ * Why this works on hostile firewalls (e.g. Beeline dorm Wi-Fi where
+ * BOTH ICMP and direct outbound TCP to the VPN port get blackholed):
+ *   - The TCP destination (VPN IP, port 443/etc) is the same as a
+ *     regular VPN handshake would use, but the operator's stateful
+ *     firewall sees a ClientHello with `server_name = yandex.ru` and
+ *     happily lets it through — yandex is a domain they can never
+ *     afford to block.
+ *   - TLS handshake will fail server-side (the VPN server doesn't have
+ *     a yandex.ru certificate) but `time_connect` is reported by curl
+ *     *before* TLS even starts, immediately after SYN-ACK. So we pull
+ *     out the RTT we wanted and bail before any handshake noise can
+ *     affect the measurement.
+ *   - curl prints the writeout regardless of exit code (cert errors,
+ *     TLS errors, even some timeouts). We just parse stdout and don't
+ *     trust the exit status.
+ *
+ * Returns ms or null. Hard-bounded at ~2.5 s by curl's own timeouts;
+ * the outer execFile timeout is a belt-and-suspenders deadline. No
+ * fallback if curl is missing — every Windows install has it shipped
+ * since 1809 (October 2018), well before our minimum supported OS.
+ *
+ * Windows-only on purpose: macOS/Linux users aren't behind RU TSPU and
+ * the existing ICMP/TCP rungs cover their needs without us having to
+ * audit `curl`'s flags on every distro.
+ */
+async function stealthTcpProbe(host: string, port: number): Promise<number | null> {
+  if (process.platform !== 'win32') return null
+  // We always disguise as yandex.ru:443 regardless of the VPN's actual
+  // port. The firewall's stateful inspection only allows port 443 for
+  // "ordinary" HTTPS anyway, so probing on 443 (and getting back a
+  // truthful TCP-connect time to the VPN host's IP on 443) is the most
+  // permissive path and the closest analogue to a real ClientHello
+  // request. We accept the small caveat that we measure host:443 even
+  // when the VPN listens on, say, 8443 — for the purpose of "is this
+  // host reachable from this hostile network at all" that's still a
+  // strictly better signal than null.
+  void port
+  try {
+    const args = [
+      '-sS',
+      '-o', 'NUL',
+      '-w', '%{time_connect}',
+      '--max-time', '2.5',
+      '--connect-timeout', '2',
+      '--resolve', `yandex.ru:443:${host}`,
+      'https://yandex.ru:443'
+    ]
+    const { stdout, stderr } = await execFile('curl.exe', args, {
+      windowsHide: true,
+      timeout: 4000,
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024
+    })
+    void stderr
+    // %{time_connect} is in seconds with decimal, e.g. "0.142315".
+    // Trim, parse, convert to integer ms. Reject NaN / non-positive.
+    const seconds = parseFloat(String(stdout).trim())
+    if (!Number.isFinite(seconds) || seconds <= 0) return null
+    return Math.max(1, Math.round(seconds * 1000))
+  } catch (err: unknown) {
+    // curl exits non-zero on cert mismatch (60), TLS handshake error
+    // (35), and timeout (28) — **all expected** here, since the VPN
+    // server doesn't actually serve a yandex.ru cert. Node's
+    // promisified `execFile` throws on non-zero exit, but it still
+    // attaches the full stdout/stderr buffers to the error object. The
+    // writeout we care about is in `err.stdout`, so we try to recover
+    // it before giving up.
+    try {
+      const out =
+        err && typeof err === 'object' && 'stdout' in err
+          ? String((err as { stdout: unknown }).stdout ?? '')
+          : ''
+      const seconds = parseFloat(out.trim())
+      if (Number.isFinite(seconds) && seconds > 0) {
+        return Math.max(1, Math.round(seconds * 1000))
+      }
+    } catch {
+      /* fall through to null */
+    }
+    return null
+  }
 }
 
 /**
@@ -613,64 +748,357 @@ export function backfillMissingOutbounds(): void {
 }
 
 /**
- * One-time migration that backfills `groupId` on every picker entry.
+ * One-time migration that ensures every picker entry belongs to a sensible
+ * group, reconstructing subscription metadata from settings/SNI when
+ * possible.
  *
- * Why: introducing groups means every profile must belong to exactly one,
- * but the picker store predates groups. Without this migration, the
- * Servers page would show all pre-existing profiles as "ungrouped",
- * which is not useful — the user has no idea where they came from
- * either, and the refresh / health-check buttons need a group context to
- * work.
+ * Why this is more than just "assign a groupId": earlier builds dumped
+ * every profile (including ones that came from a subscription URL) into a
+ * generic `manual` group called "Импортированные". That made the user
+ * unable to refresh the subscription, hid the panel's traffic / expiry
+ * metadata, and produced confusing duplicates whenever the user re-pasted
+ * the URL. This migration tries hard to recover the original origin so
+ * the new groups-aware UI works correctly for upgraded users.
  *
- * Heuristic:
- *   1. If every profile already has a valid groupId, no-op.
- *   2. Otherwise, ensure an "Импортированные" `manual` group exists and
- *      assign every dangling/orphaned profile to it.
+ * Strategy (in order of confidence):
  *
- * Idempotent: subsequent calls are no-ops once profiles have valid
- * groupIds. We pick `manual` rather than `subscription` because we have
- * no upstream URL to refresh against — these keys came from a previous
- * version of the app that didn't track origin.
+ *   1. **Recover subscription URL from settings.** Older builds cached the
+ *      last-imported URL in `settings.directVpnCachedInput` along with
+ *      every parsed profile's outbound. If we can match picker profiles
+ *      by host:port:protocol against that cache, those profiles came from
+ *      that subscription — fold them into a `subscription` group with the
+ *      cached URL as `sourceUrl`. `happ://add/…` inputs are unwrapped to
+ *      the underlying `https://…` so the resulting group is refreshable.
+ *
+ *   2. **Detect a panel by common SNI suffix.** Real VPN providers reuse a
+ *      single panel domain across all their VLESS-Reality keys (e.g.
+ *      `feodorn.com`, `cloudrynth.com`). When ≥80% of unrouted profiles
+ *      share the same last-2-segments SNI suffix, that's almost
+ *      certainly one provider — bucket them into a `subscription` group
+ *      named after the suffix, with `sourceUrl` left undefined. The user
+ *      can fix the URL via the rename dialog; meanwhile the keys are
+ *      grouped sensibly instead of dumped into "Импортированные".
+ *
+ *   3. **Fall back to "Ручные ключи".** Anything that doesn't fit a
+ *      detected subscription lands in the singleton manual group. We
+ *      stop creating "Импортированные" — that name confused users who
+ *      had no idea why they had two manual buckets.
+ *
+ * Idempotent: re-running with the same store state produces the same
+ * groups. If a previous run of this migration already created the
+ * "Импортированные" group, we'll find its profiles dangling under a
+ * `manual` group whose sole purpose is to hold legacy data, and re-run
+ * the splitting logic on them. When that succeeds we also delete the now
+ * empty "Импортированные" group so it stops cluttering the UI.
  */
 export function migrateProfilesIntoGroups(): void {
   const profiles = getProfiles()
   if (!profiles.length) return
 
   const groups = serverGroups.getGroups()
-  const groupIds = new Set(groups.map(g => g.id))
+  const groupIdSet = new Set(groups.map(g => g.id))
 
-  const dangling = profiles.filter(p => !p.groupId || !groupIds.has(p.groupId))
-  if (!dangling.length) return
-
-  // Look for an existing "Импортированные" manual group first; if absent,
-  // create one. This keeps re-running the migration idempotent in the
-  // pathological case where a group somehow gets deleted but profiles
-  // remain.
-  const IMPORTED_NAME = 'Импортированные'
-  let importedGroup = groups.find(
-    g => g.source === 'manual' && g.name === IMPORTED_NAME
+  // Treat the legacy "Импортированные" manual group as a "to-be-resorted"
+  // bucket: profiles inside it weren't truly manual, just dumped there
+  // because the previous migration had no better idea. Re-run the split
+  // logic on them.
+  const LEGACY_DUMP_NAME = 'Импортированные'
+  const legacyDumpGroup = groups.find(
+    g => g.source === 'manual' && g.name === LEGACY_DUMP_NAME
   )
-  if (!importedGroup) {
-    importedGroup = serverGroups.createGroup({
-      name: IMPORTED_NAME,
-      source: 'manual',
-      importedAt: Date.now(),
-      status: 'unknown'
-    })
+
+  // Profiles needing classification = profiles with no group OR with the
+  // legacy dump group. Everything else (already in a real subscription
+  // group, or already in "Ручные ключи") stays put.
+  const needsClassification = profiles.filter(
+    p =>
+      !p.groupId ||
+      !groupIdSet.has(p.groupId) ||
+      (legacyDumpGroup && p.groupId === legacyDumpGroup.id)
+  )
+  if (!needsClassification.length) return
+
+  // Map of groupId → array of profile-ids classified into it. We keep
+  // ids (not full profile objects) and write the assignments back in one
+  // pass at the end so partial state is never persisted.
+  const assignments = new Map<string, string[]>()
+  const stillUnclassified: ServerProfile[] = []
+
+  // ── Tier 1: subscription URL recovery from settings ────────────────────
+  //
+  // Older builds (pre-groups) stored the most-recently-imported
+  // subscription verbatim in settings.directVpnCachedInput plus every
+  // parsed profile's outbound in directVpnCachedProfiles. If the picker
+  // profiles' host:port:protocol triplet matches one of those cached
+  // outbounds, the profile demonstrably came from that subscription URL.
+  let cachedInput = ''
+  let cachedProfiles: any[] = []
+  try {
+    const settings = settingsStore.get()
+    cachedInput = String(settings.directVpnCachedInput || '').trim()
+    cachedProfiles = Array.isArray(settings.directVpnCachedProfiles)
+      ? settings.directVpnCachedProfiles
+      : []
+  } catch {
+    /* settings unavailable; skip tier 1 */
   }
 
-  const updated = profiles.map(p =>
-    !p.groupId || !groupIds.has(p.groupId)
-      ? { ...p, groupId: importedGroup!.id }
-      : p
-  )
+  // Canonicalise the cached input — happ://add/… inputs unwrap to the
+  // underlying https URL so the resulting group is refreshable. Falls
+  // back to the original input unchanged when there's nothing to unwrap.
+  const canonicalCachedUrl = cachedInput ? canonicalizeSubscriptionUrl(cachedInput) : ''
+  const isUsableSubscriptionUrl = /^https?:\/\//i.test(canonicalCachedUrl)
+
+  let subscriptionGroupId: string | undefined
+  if (isUsableSubscriptionUrl && cachedProfiles.length) {
+    // Build a quick lookup of (host|port|protocol) tuples that the cached
+    // settings vouch for. We use protocol-tolerant matching (legacy cache
+    // sometimes capitalises protocol differently from what we now store).
+    const cachedKeys = new Set<string>()
+    for (const c of cachedProfiles) {
+      if (!c || !c.outbound) continue
+      const host = String(c.outbound.server || '').toLowerCase()
+      const port = Number(c.outbound.server_port || 0)
+      const protocol = String(c.protocol || '').toLowerCase()
+      if (host && port) cachedKeys.add(`${host}|${port}|${protocol}`)
+    }
+
+    const matched: ServerProfile[] = []
+    const unmatched: ServerProfile[] = []
+    for (const p of needsClassification) {
+      const key = `${(p.server || '').toLowerCase()}|${p.port}|${(p.protocol || '').toLowerCase()}`
+      if (cachedKeys.has(key)) matched.push(p)
+      else unmatched.push(p)
+    }
+
+    if (matched.length) {
+      // Reuse an existing subscription group with the same URL when
+      // possible, so re-running the migration doesn't create duplicates.
+      // (Canonicalisation makes happ://add/… and the unwrapped https://…
+      // form resolve to the same group.)
+      const existing = findGroupBySourceUrl(canonicalCachedUrl)
+      let group = existing
+      if (!group) {
+        group = serverGroups.createGroup({
+          name: deriveSubscriptionGroupName(canonicalCachedUrl),
+          source: 'subscription',
+          sourceUrl: canonicalCachedUrl,
+          importedAt: Date.now(),
+          status: 'unknown'
+        })
+      }
+      assignments.set(group.id, matched.map(p => p.id))
+      stillUnclassified.push(...unmatched)
+      subscriptionGroupId = group.id
+    } else {
+      stillUnclassified.push(...needsClassification)
+    }
+  } else {
+    stillUnclassified.push(...needsClassification)
+  }
+
+  // ── Tier 2: detect a panel by common SNI suffix ────────────────────────
+  //
+  // VPN providers reuse a single Reality / TLS server_name domain across
+  // every key they hand out. If ≥80% of the still-unclassified profiles
+  // share the last 2 dotted segments of their tls.server_name, those
+  // segments are the panel's identity — bucket them under a subscription
+  // group named after that suffix, with sourceUrl left undefined (we
+  // don't know it). Better than dumping in manual.
+  //
+  // Optimisation: when tier 1 already created a subscription group AND
+  // the unclassified profiles share a SNI suffix that matches the SNI
+  // suffix of the tier-1 profiles, sweep them into the existing group
+  // instead of creating a separate one. The user almost certainly has
+  // ONE provider whose subscription URL `directVpnCachedInput` only
+  // captured 30 of 112 profiles for (because the cache was a single
+  // index file from one fetch); the other 82 are siblings.
+  if (stillUnclassified.length >= 5) {
+    const suffixCounts = new Map<string, ServerProfile[]>()
+    for (const p of stillUnclassified) {
+      const suffix = extractSniSuffix(p)
+      if (!suffix) continue
+      const arr = suffixCounts.get(suffix) ?? []
+      arr.push(p)
+      suffixCounts.set(suffix, arr)
+    }
+
+    let bestSuffix: string | null = null
+    let bestMembers: ServerProfile[] = []
+    for (const [suffix, members] of suffixCounts) {
+      if (members.length > bestMembers.length) {
+        bestSuffix = suffix
+        bestMembers = members
+      }
+    }
+
+    if (
+      bestSuffix &&
+      bestMembers.length / stillUnclassified.length >= 0.8
+    ) {
+      // Reuse the tier-1 subscription group when its members share the
+      // same SNI suffix — almost certainly one provider with one panel.
+      let targetGroupId = subscriptionGroupId
+      if (targetGroupId) {
+        const tier1Members = needsClassification.filter(p =>
+          assignments.get(targetGroupId!)?.includes(p.id)
+        )
+        const tier1Suffixes = new Set(
+          tier1Members
+            .map(p => extractSniSuffix(p))
+            .filter((s): s is string => Boolean(s))
+        )
+        if (!tier1Suffixes.has(bestSuffix)) {
+          targetGroupId = undefined
+        }
+      }
+
+      if (!targetGroupId) {
+        const group = serverGroups.createGroup({
+          name: bestSuffix,
+          source: 'subscription',
+          sourceUrl: undefined,
+          importedAt: Date.now(),
+          status: 'unknown'
+        })
+        targetGroupId = group.id
+      }
+
+      const arr = assignments.get(targetGroupId) ?? []
+      for (const p of bestMembers) arr.push(p.id)
+      assignments.set(targetGroupId, arr)
+      const stillUnclassifiedRemaining = stillUnclassified.filter(
+        p => !bestMembers.includes(p)
+      )
+      stillUnclassified.length = 0
+      stillUnclassified.push(...stillUnclassifiedRemaining)
+    }
+  }
+
+  // ── Tier 3: fall back to "Ручные ключи" ───────────────────────────────
+  if (stillUnclassified.length) {
+    const manualId = ensureManualKeysGroup()
+    const arr = assignments.get(manualId) ?? []
+    for (const p of stillUnclassified) arr.push(p.id)
+    assignments.set(manualId, arr)
+  }
+
+  // Apply assignments to the picker store in one pass.
+  const pidToGroup = new Map<string, string>()
+  for (const [groupId, pids] of assignments) {
+    for (const pid of pids) pidToGroup.set(pid, groupId)
+  }
+  const updated = profiles.map(p => {
+    const newGroupId = pidToGroup.get(p.id)
+    return newGroupId ? { ...p, groupId: newGroupId } : p
+  })
   saveProfiles(updated)
+
+  // Drop the legacy "Импортированные" group iff every one of its profiles
+  // got reassigned to a smarter bucket. If anything remains (e.g. a
+  // future bug leaves entries behind), keep the group around so we don't
+  // orphan profiles.
+  if (legacyDumpGroup) {
+    const stillInLegacy = updated.some(p => p.groupId === legacyDumpGroup.id)
+    if (!stillInLegacy) {
+      serverGroups.deleteGroup(legacyDumpGroup.id)
+    }
+  }
 
   logEvent('info', 'server-picker', 'migrated-profiles-into-groups', {
     total: profiles.length,
-    migrated: dangling.length,
-    groupId: importedGroup.id
+    classified: needsClassification.length,
+    intoSubscription: subscriptionGroupId ? assignments.get(subscriptionGroupId)?.length ?? 0 : 0,
+    intoManual: stillUnclassified.length,
+    droppedLegacyDump: Boolean(
+      legacyDumpGroup && !updated.some(p => p.groupId === legacyDumpGroup.id)
+    )
   })
+}
+
+/**
+ * Extract the last 2 dotted segments of a profile's TLS server_name. We
+ * use this as a panel-identity heuristic in tier 2 of the migration:
+ * `dsfgh.feodorn.com`, `sdfd.feodorn.com`, `gxds.feodorn.com` all share
+ * `feodorn.com`, which is virtually certain to be the panel's domain.
+ *
+ * Returns null when the profile has no tls.server_name (Reality / TLS
+ * disabled — uncommon for modern providers but possible).
+ */
+function extractSniSuffix(profile: ServerProfile): string | null {
+  const ob = profile.outbound
+  if (!ob || typeof ob !== 'object') return null
+  const tls = (ob as any).tls
+  const sni = tls && typeof tls === 'object' ? String(tls.server_name || '').trim() : ''
+  if (!sni) return null
+  // Strip a leading hostname label, keeping the last two segments. Two
+  // segments is the right cut for typical TLDs (`feodorn.com`); for
+  // multi-part TLDs like `co.uk` we'd ideally use the public suffix list,
+  // but in practice VPN panels almost never live on those, and a too-
+  // short suffix just means more groups (failsafe), never wrong groups.
+  const parts = sni.toLowerCase().split('.').filter(Boolean)
+  if (parts.length < 2) return null
+  return parts.slice(-2).join('.')
+}
+
+/**
+ * Backfills the `sourceUri` field on every picker profile that has an
+ * `outbound` block but no URI yet. This is purely a metadata recovery
+ * pass — it does not change which profiles exist or which group they
+ * belong to.
+ *
+ * Why: the dedupe key in `serverGroups.refreshGroup` (and the import
+ * dedupe in this file) prefer `sourceUri` when present. Without it we
+ * fall back to (host, port, protocol), which collides whenever a
+ * provider issues two keys on the same endpoint with different UUIDs.
+ * Reconstructing the URI via `exportOutboundToUri` gives us a
+ * credential-unique identity for those legacy profiles, so future
+ * refreshes correctly preserve their stable IDs instead of re-creating
+ * them on every fetch.
+ *
+ * Idempotent: profiles that already have a `sourceUri`, or whose
+ * outbound shape isn't representable as a single-line URI (custom
+ * sing-box JSON), are left alone.
+ *
+ * Run this AFTER `migrateProfilesIntoGroups` from `index.ts` startup.
+ */
+export function backfillProfileSourceUris(): void {
+  const profiles = getProfiles()
+  if (!profiles.length) return
+
+  let recovered = 0
+  let skippedUnsupported = 0
+  const updated = profiles.map(p => {
+    if (p.sourceUri) return p
+    if (!p.outbound || typeof p.outbound !== 'object') return p
+    try {
+      const uri = exportOutboundToUri({
+        name: p.name,
+        protocol: p.protocol,
+        outbound: p.outbound
+      })
+      if (uri) {
+        recovered++
+        return { ...p, sourceUri: uri }
+      }
+      skippedUnsupported++
+      return p
+    } catch {
+      // exportOutboundToUri shouldn't throw, but if it does we just
+      // skip the profile — better to lose one URI than crash the
+      // backfill for everyone.
+      return p
+    }
+  })
+
+  if (recovered > 0) {
+    saveProfiles(updated)
+    logEvent('info', 'server-picker', 'backfilled profile sourceUris', {
+      total: profiles.length,
+      recovered,
+      skippedUnsupported
+    })
+  }
 }
 
 function getProfiles(): ServerProfile[] {
@@ -859,13 +1287,22 @@ export async function addFromInput(input: string): Promise<ServerProfile[]> {
     throw new Error('Введите ссылку подписки или VPN-ссылку')
   }
 
-  const isSubscriptionUrl = /^https?:\/\//i.test(trimmed)
+  // Canonicalise once up front: a `happ://add/<base64-encoded-https-url>`
+  // input becomes `https://…`, an `https://…` input passes through
+  // unchanged. We use the canonical form for both the duplicate-group
+  // check and the `sourceUrl` we store on a freshly-created group, so a
+  // user pasting the same logical subscription in two different forms
+  // (raw URL on one device, happ link on another) hits the existing
+  // group on the second paste instead of creating a duplicate.
+  const canonical = canonicalizeSubscriptionUrl(trimmed)
+  const isSubscriptionUrl = /^https?:\/\//i.test(canonical)
 
   if (isSubscriptionUrl) {
     // If the user re-pasted a subscription they've already imported, we
     // funnel the request through the same merge logic the refresh button
-    // uses. No duplicate group, no surprise data loss.
-    const existing = findGroupBySourceUrl(trimmed)
+    // uses. No duplicate group, no surprise data loss. Lookup is canonical
+    // so happ:// and https:// forms of the same URL collide correctly.
+    const existing = findGroupBySourceUrl(canonical)
     if (existing) {
       const beforeIds = new Set(getProfiles().map(p => p.id))
       const result = await refreshSubscriptionGroup(existing.id)
@@ -894,6 +1331,9 @@ export async function addFromInput(input: string): Promise<ServerProfile[]> {
       /* fall through with no proxy override */
     }
 
+    // We hand the resolver the original (possibly happ://) input because
+    // `resolveVpnProfiles` already knows how to unwrap it; reusing that
+    // single code path avoids drift between two unwrap implementations.
     const resolved = await resolveVpnProfiles(trimmed, { proxyAddr, proxyType })
     if (!resolved.profiles.length) {
       throw new Error('Не найдено поддерживаемых профилей в указанном источнике')
@@ -902,9 +1342,11 @@ export async function addFromInput(input: string): Promise<ServerProfile[]> {
     const now = Date.now()
     const userInfo = resolved.userInfo
     const group = serverGroups.createGroup({
-      name: deriveSubscriptionGroupName(trimmed, userInfo?.webPageUrl),
+      // `sourceUrl` is stored in canonical (https://) form so future
+      // `findGroupBySourceUrl` lookups match cleanly with both forms.
+      name: deriveSubscriptionGroupName(canonical, userInfo?.webPageUrl),
       source: 'subscription',
-      sourceUrl: trimmed,
+      sourceUrl: canonical,
       importedAt: now,
       lastFetchedAt: now,
       lastFetchAttemptAt: now,
@@ -1271,6 +1713,7 @@ export const serverPicker = {
   migrateLegacyDirectVpnProfiles,
   backfillMissingOutbounds,
   migrateProfilesIntoGroups,
+  backfillProfileSourceUris,
   geolocateAll,
   registerHandlers: registerServerPickerHandlers
 }

@@ -82,6 +82,33 @@ export function isOwnTunAddress(address: string): boolean {
 export const TUN_IPV6_ADDRESS_CIDR = 'fdfe:dcba:9876::1/126'
 
 /**
+ * Interface metric we apply to the TUN adapter on every start. See
+ * tunController.applyLowTunInterfaceMetric for the rationale.
+ *
+ * Why 5 specifically:
+ *   - Windows route selection ties on RouteMetric=0 (auto_route installs
+ *     0.0.0.0/1 and 128.0.0.0/1 with metric 0 from BOTH the TUN and any
+ *     parallel default route on a physical NIC), then breaks the tie on
+ *     InterfaceMetric. Whichever interface has the lower InterfaceMetric
+ *     wins the default-route shootout.
+ *   - Wired Ethernet auto-metrics in the wild range 5-25 depending on link
+ *     speed (1 Gbps wired ~10, 10 Gbps wired ~5). Wi-Fi sits at 35-50.
+ *     Wintun/sing-tun adapters get the catch-all 256 unless we override.
+ *   - Picking 5 puts us BELOW Wi-Fi and below typical wired adapters, so
+ *     our routes win the tiebreak in every realistic home/office setup.
+ *   - We deliberately don't go to 1: that's localhost's territory, and a
+ *     metric collision with the loopback interface can confuse OS-level
+ *     route caches and some third-party VPN GUIs that scan metric=1 as
+ *     "primary internet". 5 is low enough to win, high enough not to
+ *     pretend we're a system interface.
+ *   - Explicit user overrides (the Windows networking advanced menu lets
+ *     a power user pin a NIC to metric 1-4) still beat us, which is the
+ *     correct behaviour — if the user has manually told Windows "always
+ *     use this NIC", we should not silently override that choice.
+ */
+export const TUN_INTERFACE_METRIC = 5
+
+/**
  * Aliases shipped by previous builds. Cleanup paths (firewall rule purge,
  * orphaned-adapter sweeper) iterate over this list so a user who crashed
  * on an old build still gets a clean machine after upgrading.

@@ -24,7 +24,7 @@ import {
   rollbackPhysicalAdapterLockdownIfApplied
 } from './physicalAdapterLockdown'
 import type { VpnProfile } from './vpnProfiles'
-import { TUN_ADAPTER_ALIAS, TUN_IPV4_ADDRESS_CIDR, TUN_IPV6_ADDRESS_CIDR, TUN_IPV4_RESOLVER, TUN_IPV4_PREFIX, isOwnTunAddress, ALL_KNOWN_ALIASES } from './tunAdapter'
+import { TUN_ADAPTER_ALIAS, TUN_IPV4_ADDRESS_CIDR, TUN_IPV6_ADDRESS_CIDR, TUN_IPV4_RESOLVER, TUN_IPV4_PREFIX, TUN_INTERFACE_METRIC, isOwnTunAddress, ALL_KNOWN_ALIASES } from './tunAdapter'
 import { ipMonitor } from './ipMonitor'
 import { cancelLeakSelfTest } from './leakSelfTest'
 import { startCompetingTunWatch, stopCompetingTunWatch } from './competingTunDetector'
@@ -647,6 +647,53 @@ async function waitForTunInterface(timeoutMs = 5000): Promise<boolean> {
     await new Promise(r => setTimeout(r, 200))
   }
   return false
+}
+
+/**
+ * Force the TUN adapter's IPv4 InterfaceMetric to LOW so Windows always
+ * prefers TUN routes over physical-adapter default routes. Without this,
+ * Wi-Fi adapters with their default metric (auto-assigned 35-50 depending
+ * on link speed) outrank our TUN's auto-assigned 256, and traffic leaks
+ * via the physical adapter despite auto_route + strict_route in sing-box.
+ *
+ * We use Set-NetIPInterface -InterfaceAlias <TUN> -InterfaceMetric 5.
+ * Metric 5 is well below typical wired (5-10) and Wi-Fi (35-50) auto values
+ * but high enough to lose to localhost (1) and explicit user overrides.
+ *
+ * IPv6 metric is set the same way for symmetry — even though our adapter
+ * lockdown disables IPv6 on physical adapters in many configs, the TUN
+ * adapter itself carries IPv6 routes and they should also win.
+ *
+ * Best-effort: if the call fails (PowerShell unavailable, adapter alias
+ * not found), we log a warning but don't fail the start. The leak window
+ * still narrows because sing-box's strict_route handles most paths; this
+ * is belt-and-braces for the edge case where InterfaceMetric tiebreak
+ * decides default-route winner.
+ */
+async function applyLowTunInterfaceMetric(): Promise<void> {
+  if (process.platform !== 'win32') return
+  try {
+    const script = `
+$ErrorActionPreference = 'SilentlyContinue'
+$alias = '${TUN_ADAPTER_ALIAS}'
+try {
+  Set-NetIPInterface -InterfaceAlias $alias -AddressFamily IPv4 -InterfaceMetric ${TUN_INTERFACE_METRIC} -ErrorAction Stop
+  Write-Host 'ipv4:set'
+} catch {
+  Write-Host "ipv4:err: $_"
+}
+try {
+  Set-NetIPInterface -InterfaceAlias $alias -AddressFamily IPv6 -InterfaceMetric ${TUN_INTERFACE_METRIC} -ErrorAction Stop
+  Write-Host 'ipv6:set'
+} catch {
+  Write-Host "ipv6:err: $_"
+}
+`
+    const stdout = await runPowerShell(script, 8000, true)
+    logEvent('info', 'tun', `set TUN InterfaceMetric=${TUN_INTERFACE_METRIC}`, { output: String(stdout || '').trim() })
+  } catch (err) {
+    logEvent('warn', 'tun', 'failed to set TUN InterfaceMetric', err)
+  }
 }
 
 // Single-shot "is anything to clean up?" probe. ONE PowerShell call returns
@@ -1806,8 +1853,38 @@ export const tunController = {
           // TUN_ADAPTER_ALIAS, and Windows Firewall validates that alias when the
           // rule is created. If we engage too early the rule fails silently,
           // DefaultOutboundAction=Block kicks in, and traffic to the TUN dies.
+          //
+          // We also need the adapter present for the route-metric tweak below,
+          // so wait for it unconditionally — this is a couple of hundred ms in
+          // the steady-state and prevents a leak window where Wi-Fi outranks
+          // our TUN on the default-route tiebreak.
+          const tunReady = await waitForTunInterface(5000)
+
+          // Lock in our TUN's InterfaceMetric BEFORE the kill-switch comes up. The
+          // kill-switch installs an InterfaceAlias-scoped allow rule that needs the
+          // adapter present (already verified by waitForTunInterface above), but the
+          // metric tweak is independent of firewall state and should always run when
+          // the adapter is up. Without it, Wi-Fi (auto-metric 35-50) beats our TUN
+          // (auto-metric 256 on sing-tun/Wintun) on the InterfaceMetric tiebreak and
+          // traffic leaks via the physical adapter despite strict_route. Best-effort
+          // — failure to set the metric does NOT fail the start.
+          if (tunReady) {
+            await applyLowTunInterfaceMetric()
+
+            // Sanity-check: read the metric back. If Windows refused our Set-NetIPInterface
+            // for any reason (rare, usually GPO), the kill-switch can still help (firewall
+            // blocks fall-through), but the user should know.
+            try {
+              const script = `(Get-NetIPInterface -InterfaceAlias '${TUN_ADAPTER_ALIAS}' -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty InterfaceMetric)`
+              const out = String(await runPowerShell(script, 4000)).trim()
+              const metric = parseInt(out, 10)
+              if (Number.isFinite(metric) && metric > 50) {
+                logEvent('warn', 'tun', `TUN InterfaceMetric is high (${metric}) — possible route-priority leak`, { metric })
+              }
+            } catch { /* not fatal */ }
+          }
+
           if (wantKillSwitch) {
-            const tunReady = await waitForTunInterface(5000)
             if (!tunReady) {
               logEvent(
                 'warn',

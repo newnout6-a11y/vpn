@@ -1120,6 +1120,11 @@ app.whenReady().then(async () => {
   // groups-aware UI never has to deal with ungrouped entries from older
   // versions of the app. Idempotent.
   serverPicker.migrateProfilesIntoGroups()
+  // Backfill missing `sourceUri` on profiles that were imported by older
+  // builds before we tracked subscription URLs. Lets the smart-group
+  // classifier re-bin previously-orphaned keys on the next migration pass.
+  // Idempotent — safe to run on every startup.
+  serverPicker.backfillProfileSourceUris()
   // Fire-and-forget background geolocation pass for any profile that doesn't
   // already have a country tag. This makes country labels appear on the
   // dashboard without the user having to ping every server manually.
