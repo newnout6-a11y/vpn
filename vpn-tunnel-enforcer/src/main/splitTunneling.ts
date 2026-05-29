@@ -298,23 +298,18 @@ async function hotReloadIfActive(): Promise<void> {
   logEvent('info', 'split-tunnel', 'hot-reloading split tunnel rules while TUN is active')
 
   try {
-    // Stop and restart TUN to apply new rules.
-    // The tunController.stop() + start() cycle will pick up the new split tunnel
-    // rules via getDirectProcessNames() which is called during config generation.
-    await tunController.stop()
-
-    // Small delay to ensure clean shutdown
-    await new Promise((resolve) => setTimeout(resolve, 500))
-
-    // Restart with the same parameters. We use the stored last start options
-    // from the tunController. Since we can't access lastStartOptions directly,
-    // we'll rely on the renderer to re-trigger the start if needed.
-    // For now, we emit a status change that the renderer can listen to.
-    logEvent(
-      'info',
-      'split-tunnel',
-      'TUN stopped for hot-reload. Renderer should re-trigger start.'
-    )
+    // Restart the tunnel reusing the last start options. The new split-tunnel
+    // rules are picked up via getDirectProcessNames() during config
+    // regeneration on the restart. Previously this only called stop() and
+    // logged "renderer should re-trigger start" — but nothing did, so changing
+    // a split-tunnel rule (or removing an app) while connected silently killed
+    // the VPN and left it down. restartWithLastOptions stops AND starts again.
+    const result = await tunController.restartWithLastOptions('split-tunnel rule change')
+    if (!result.success) {
+      logEvent('warn', 'split-tunnel', 'hot-reload restart failed — tunnel may be down', {
+        error: result.error
+      })
+    }
   } catch (err) {
     logEvent('error', 'split-tunnel', 'hot-reload failed', err)
   }

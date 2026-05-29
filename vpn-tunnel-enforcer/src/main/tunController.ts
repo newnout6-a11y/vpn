@@ -1487,7 +1487,20 @@ export const tunController = {
     mark('preflight')
     const warning = null
 
-    let proxyOwnerProcessNames: string[] = []
+    // Split-tunnel "direct" app rules — these processes must bypass the VPN
+    // (route through direct-out). Without merging them into directProcessNames
+    // here, the split-tunnel feature has no effect at all: getDirectProcessNames
+    // was never wired into config generation. Lazy import avoids the
+    // tunController↔splitTunneling circular dependency.
+    let splitTunnelDirectNames: string[] = []
+    try {
+      const { splitTunneling } = await import('./splitTunneling')
+      splitTunnelDirectNames = splitTunneling.getDirectProcessNames()
+    } catch (err) {
+      logEvent('debug', 'tun', 'could not read split-tunnel direct names', err)
+    }
+
+    let proxyOwnerProcessNames: string[] = [...splitTunnelDirectNames]
     let proxyOwnerProgramPaths: string[] = []
     // We want prepareRuntime to start as soon as we know the proxy is alive
     // (or, in directVpn mode, immediately) so its file IO + sing-box check
@@ -1527,7 +1540,10 @@ export const tunController = {
       }
       logEvent('info', 'tun', 'upstream proxy is reachable', { proxyAddr, proxyType })
 
-      proxyOwnerProcessNames = uniqueProcessNames(proxyOwnerProcesses.map((process) => process.name))
+      proxyOwnerProcessNames = uniqueProcessNames([
+        ...splitTunnelDirectNames,
+        ...proxyOwnerProcesses.map((process) => process.name)
+      ])
       proxyOwnerProgramPaths = [...new Set(proxyOwnerProcesses.map((process) => process.path).filter((path): path is string => Boolean(path)))]
       if (proxyOwnerProcesses.length > 0) {
         logEvent('info', 'tun', 'detected local proxy owner process for direct-out exclusion', {
@@ -2267,6 +2283,37 @@ export const tunController = {
 
   async isFirewallKillSwitchActive(): Promise<boolean> {
     return isKillSwitchActive()
+  },
+
+  /**
+   * Restart the tunnel reusing the last successful start options. Used by
+   * split-tunnel / config hot-reload: the config (process route rules, DNS
+   * profile, etc.) is regenerated on the next start(), so a stop→start cycle
+   * with the SAME options applies the change without disconnecting the user
+   * permanently.
+   *
+   * No-op (returns success) when the tunnel isn't running or when we have no
+   * memory of how it was started. Snapshots lastStartOptions BEFORE stop()
+   * (which clears it) and replays it.
+   */
+  async restartWithLastOptions(reason: string): Promise<{ success: boolean; error?: string }> {
+    if (!currentStatus.running) {
+      return { success: true }
+    }
+    const snapshot = lastStartOptions
+    if (!snapshot) {
+      logEvent('warn', 'tun', 'restartWithLastOptions: no last options — leaving tunnel as-is', { reason })
+      return { success: false, error: 'no last start options' }
+    }
+    logEvent('info', 'tun', `restarting tunnel to apply config change: ${reason}`)
+    const stopped = await this.stop()
+    if (!stopped.success) {
+      return { success: false, error: stopped.error }
+    }
+    // Brief pause so the runtime fully releases the TUN adapter before we
+    // recreate it — mirrors the delay the old split-tunnel hot-reload used.
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    return this.start(snapshot)
   },
 
   async disableFirewallKillSwitch(reason: string): Promise<{ success: boolean; message: string; skipped?: boolean }> {
