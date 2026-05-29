@@ -39,7 +39,7 @@ vi.mock('./serverGroups', () => ({
   refreshGroup: vi.fn()
 }))
 
-import { isProbablyHostOrIp } from './serverPicker'
+import { isProbablyHostOrIp, parseIcmpReply } from './serverPicker'
 
 describe('isProbablyHostOrIp', () => {
   it('accepts plain IPv4', () => {
@@ -76,5 +76,40 @@ describe('isProbablyHostOrIp', () => {
 
   it('rejects absurdly long input', () => {
     expect(isProbablyHostOrIp('a'.repeat(300))).toBe(false)
+  })
+})
+
+// ─── parseIcmpReply (the fake "1 ms" guard) ──────────────────────────────────
+
+describe('parseIcmpReply', () => {
+  const reply = (body: string) => `Pinging 1.2.3.4 with 32 bytes of data:\n${body}\n`
+
+  it('parses a normal reply', () => {
+    expect(parseIcmpReply(reply('Reply from 1.2.3.4: bytes=32 time=53ms TTL=55'), '1.2.3.4')).toBe(53)
+  })
+
+  it('parses Russian CP866-decoded reply', () => {
+    expect(parseIcmpReply('Ответ от 1.2.3.4: число байт=32 время=48мс TTL=55', '1.2.3.4')).toBe(48)
+  })
+
+  it('rejects sub-ms reply for a remote host (the fake 1 ms)', () => {
+    expect(parseIcmpReply('Reply from 46.243.142.239: bytes=32 time<1ms TTL=128', '46.243.142.239')).toBeNull()
+  })
+
+  it('allows sub-ms reply for loopback', () => {
+    expect(parseIcmpReply('Reply from 127.0.0.1: bytes=32 time<1ms TTL=128', '127.0.0.1')).toBe(1)
+  })
+
+  it('rejects when there is no Reply line (gateway unreachable, exit 0)', () => {
+    expect(parseIcmpReply('Reply from 192.168.0.1: Destination host unreachable.', '46.243.142.239')).toBeNull()
+  })
+
+  it('rejects TTL-expired / timeout output', () => {
+    expect(parseIcmpReply('Request timed out.', '1.2.3.4')).toBeNull()
+    expect(parseIcmpReply('Превышен интервал ожидания для запроса.', '1.2.3.4')).toBeNull()
+  })
+
+  it('accepts a real >=1ms reply even for remote host', () => {
+    expect(parseIcmpReply('Reply from 46.243.142.239: bytes=32 time=41ms TTL=52', '46.243.142.239')).toBe(41)
   })
 })

@@ -39,6 +39,26 @@ Switched curlBound from exec(string) to execFile('curl.exe', [args]) so the
 adapter IP/url are literal argv, no shell. (Lower risk — ip was
 local-adapter-derived — but no reason to keep a shell string.)
 
+### D6 — ping shows fake "1 ms" on every server + measures the wrong thing for RU [FIXED]
+The Servers page showed "1 ms" on all servers including a Netherlands node —
+physically impossible. Two root causes:
+  (a) The offline probe ladder ran ICMP FIRST. Routers/gateways answer ICMP
+      with "time<1ms" on behalf of hosts the VPN port can't actually reach, so
+      every server looked alive at 1 ms even when TSPU had IP-blackholed it.
+  (b) ICMP reachability ≠ "the obfuscation actually gets through". The real
+      RU question is whether the VPN ENDPOINT accepts a connection (TSPU's
+      main weapon is IP-blackholing known VPN IPs), which a TCP-connect to the
+      actual port answers and ICMP does not.
+FIX: reordered smartOfflinePing to TCP-connect-to-VPN-port FIRST → stealth
+curl (disguised 443) → ICMP last. Added a sub-ms plausibility gate
+(parseIcmpReply rejects "time<1ms" for non-loopback hosts — extracted as a
+pure, tested function). Net effect: the number now reflects whether the server
+is genuinely reachable from this network (the real "обход работает?" signal),
+and a TSPU-blackholed server correctly shows offline instead of fake 1 ms.
+The definitive bypass test remains "Проверить ключи" (TLS/Reality handshake,
+keyHealthChecker), which the row UI already prioritises over raw ping.
++7 tests (parseIcmpReply).
+
 ### D5 — geolocateAll: rate-limit-violating per-IP geo loop [FIXED]
 Country labels were filled via ipapi.co one IP at a time, 3 concurrent with a
 1.1s inter-batch sleep — i.e. ~2.7 req/s against a free tier the code's own
@@ -49,6 +69,8 @@ geolocate via ip-api.com/batch (up to 100 IPs per POST, free, no key,
 45 req/min) — two POSTs cover 200 servers, written back in a single store
 update. Removed the now-unused GEOLOCATE_CONCURRENCY/DELAY constants. (ip-api
 free tier is HTTP-only; the request carries only public server IPs, no secrets.)
+
+### D4 — keyHealthChecker: misleading "via tunnel" + plain-TLS SNI leak [FIXED]
 The module's doc claimed it probes "THROUGH the tunnel" via the mixed-direct-in
 SOCKS5 port — but that inbound is hard-routed to `direct-out` in the sing-box
 config, so the probe always egresses via the physical adapter. Worse: for

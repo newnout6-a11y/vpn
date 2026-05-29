@@ -270,18 +270,32 @@ export async function tunnelHttpProbe(): Promise<number | null> {
  * afford to block.)
  */
 async function smartOfflinePing(host: string, port: number): Promise<number | null> {
-  const icmp = await icmpPing(host, ICMP_PROBE_TIMEOUT_MS)
-  if (icmp != null) return icmp
-
+  // Rung order is chosen so the number the user sees reflects REAL endpoint
+  // reachability under RU conditions, not a meaningless router echo.
+  //
+  // 1. TCP-connect to the actual VPN port. This is the strongest cheap
+  //    signal: it proves the VPN endpoint accepts a connection from THIS
+  //    network. If TSPU has IP-blackholed the server (the common RU failure),
+  //    the SYN gets no SYN-ACK and this fails — correctly reporting the
+  //    server as unreachable. No SNI/TLS on the wire, so it's DPI-safe.
+  //    (ICMP used to be first, but routers answer ICMP on behalf of dead
+  //    hosts and return bogus "<1 ms" for servers the VPN port can't reach —
+  //    that's the fake "1 ms на всех серверах" the user reported.)
   const tcp = await plainTcpPing(host, port)
   if (tcp != null) return tcp
 
-  // Last rung: disguised HTTPS to yandex.ru that actually targets our
-  // VPN host. Works even when the firewall blackholes ICMP and direct
-  // TCP to the VPN port — the firewall sees a request to yandex.ru and
-  // lets it through, but curl's --resolve forces the actual TCP target.
+  // 2. Disguised HTTPS to yandex.ru that actually targets our VPN host.
+  //    Works on hostile nets that blackhole direct TCP to the VPN port but
+  //    let port-443 traffic through because the SNI says yandex.ru.
   const stealth = await stealthTcpProbe(host, port)
   if (stealth != null) return stealth
+
+  // 3. ICMP echo — last resort. Weakest signal (routers answer for dead
+  //    hosts), so we only trust it when both TCP rungs failed AND it returns
+  //    a plausible RTT. icmpPing itself rejects implausible sub-ms replies
+  //    for non-loopback hosts.
+  const icmp = await icmpPing(host, ICMP_PROBE_TIMEOUT_MS)
+  if (icmp != null) return icmp
 
   return null
 }
@@ -340,40 +354,44 @@ async function icmpPing(host: string, timeoutMs: number): Promise<number | null>
       { windowsHide: true, timeout: timeoutMs + 1500, encoding: 'buffer', maxBuffer: 64 * 1024 }
     )
     const text = decodeMaybeCp866(stdout as unknown as Buffer)
-
-    // Sanity gate: ping.exe will *successfully* exit even when the local
-    // gateway returns "Host unreachable" / "Сеть недоступна" / TTL expired
-    // — and on some routers it also emits a `<1ms` line for those replies
-    // because it's measuring the LAN hop to the router, not the actual
-    // destination. Without this gate we'd return `1` for unreachable VPN
-    // hosts and the UI would show a fake "1 ms". Only count a measurement
-    // if we see "Reply from <host>" / "Ответ от <host>" — that's the
-    // canonical "destination answered" line.
-    const echoOk = /(?:Reply from|Ответ от|Ответ из)\s+/i.test(text)
-    if (!echoOk) return null
-
-    // Belt-and-braces: if ping.exe printed "Destination host unreachable"
-    // / "Заданный узел недоступен" anywhere in the output, treat the
-    // whole probe as a miss even if a stray `<1ms` slipped past the gate
-    // above. Some routers reply with both lines in a single ping packet.
-    if (/(?:Destination .*unreachable|Заданный узел недоступен|Сеть недоступна|Превышен интервал)/i.test(text)) {
-      return null
-    }
-
-    // English: "time=53ms" / "time<1ms" / "time=1.2 ms"
-    // Russian: "время=53мс" / "время<1мс"
-    const m = text.match(/(?:time|время)\s*[<=]\s*([0-9.]+)\s*(?:ms|мс)/i)
-    if (m) return Math.max(1, Math.round(Number(m[1])))
-    // Some Russian locales emit a comma decimal separator. Try once more
-    // accepting commas, then normalise.
-    const m2 = text.match(/(?:time|время)\s*[<=]\s*([0-9,]+)\s*(?:ms|мс)/i)
-    if (m2) return Math.max(1, Math.round(Number(m2[1].replace(',', '.'))))
-    return null
+    return parseIcmpReply(text, host)
   } catch {
     // Non-zero exit (timeout / unreachable / DNS failure) — let the next
     // rung in the ladder try.
     return null
   }
+}
+
+/**
+ * Pure parser for `ping.exe` output. Exported for testing. Returns the RTT in
+ * ms, or null when the output doesn't show a genuine reply from the
+ * destination. Implements the anti-fake-"1 ms" gates:
+ *   - require a canonical "Reply from / Ответ от" line (ping exits 0 even on
+ *     gateway "unreachable" replies);
+ *   - reject if any unreachable/TTL-expired marker is present;
+ *   - reject sub-millisecond "time<1ms" for non-loopback hosts (that's a LAN
+ *     hop to the router, never a real RTT to a remote VPN server).
+ */
+export function parseIcmpReply(text: string, host: string): number | null {
+  const echoOk = /(?:Reply from|Ответ от|Ответ из)\s+/i.test(text)
+  if (!echoOk) return null
+
+  if (/(?:Destination .*unreachable|Заданный узел недоступен|Сеть недоступна|Превышен интервал)/i.test(text)) {
+    return null
+  }
+
+  const isLoopback = /^127\./.test(host) || host === '::1' || host === 'localhost'
+  const ltMatch = text.match(/(?:time|время)\s*<\s*1\s*(?:ms|мс)/i)
+  if (ltMatch && !isLoopback) return null
+
+  // English: "time=53ms" / "time<1ms" / "time=1.2 ms"
+  // Russian: "время=53мс" / "время<1мс"
+  const m = text.match(/(?:time|время)\s*[<=]\s*([0-9.]+)\s*(?:ms|мс)/i)
+  if (m) return Math.max(1, Math.round(Number(m[1])))
+  // Some Russian locales emit a comma decimal separator.
+  const m2 = text.match(/(?:time|время)\s*[<=]\s*([0-9,]+)\s*(?:ms|мс)/i)
+  if (m2) return Math.max(1, Math.round(Number(m2[1].replace(',', '.'))))
+  return null
 }
 
 /**
