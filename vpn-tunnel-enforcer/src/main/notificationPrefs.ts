@@ -17,7 +17,7 @@
 
 import { ipcMain, BrowserWindow, shell } from 'electron'
 import Store from 'electron-store'
-import { getWindowsNotificationState, notify, resetWindowsNotificationBlock } from './notifications'
+import { getWindowsNotificationState, notify, resetWindowsNotificationBlock, setNotificationPrefsProvider } from './notifications'
 import type { NotificationPreferences } from '../shared/ipc-types'
 
 // ─── Event type mapping ──────────────────────────────────────────────────────
@@ -137,6 +137,12 @@ export const notificationPrefsService = {
 // ─── IPC Registration ────────────────────────────────────────────────────────
 
 export function registerNotificationPrefsIpcHandlers(): void {
+  // Wire the per-event preference provider into notifications.notify() so the
+  // user's individual toggles + delivery method actually take effect. Without
+  // this, notify() only honoured the global desktopNotifications switch and
+  // every per-event toggle in the UI was a no-op (C17).
+  setNotificationPrefsProvider(() => getPrefs() as unknown as Record<string, unknown> & { method?: 'system' | 'inapp' | 'both' })
+
   ipcMain.handle('notifications:get-prefs', () => {
     return getPrefs()
   })

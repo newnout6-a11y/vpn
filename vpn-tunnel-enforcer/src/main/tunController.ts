@@ -1375,7 +1375,8 @@ export async function attemptPostTrialFailover(): Promise<{ tried: number; succe
       notify(
         'warn',
         'Сервер сменился',
-        `Активный ключ перестал отвечать. Переключились на «${candidateName}» — другой ключ из той же подписки. Подписка-источник истекла, но этот ключ ещё живой.`
+        `Активный ключ перестал отвечать. Переключились на «${candidateName}» — другой ключ из той же подписки. Подписка-источник истекла, но этот ключ ещё живой.`,
+        'profileRotation'
       ).catch(() => undefined)
 
       // Re-arm the tunnel with the candidate's outbound. We reuse the prefs
@@ -1804,7 +1805,7 @@ export const tunController = {
               tunController.start(retryOpts).then((res) => {
                 if (!res.success) {
                   logEvent('error', 'tun', 'WSAEACCES retry failed', { error: res.error })
-                  notify('error', 'Не удалось запустить защиту', res.error || 'Неизвестная ошибка')
+                  notify('error', 'Не удалось запустить защиту', res.error || 'Неизвестная ошибка', 'connectionError')
                 }
               }).catch((err) => {
                 logEvent('error', 'tun', 'WSAEACCES retry threw', err)
@@ -1868,7 +1869,7 @@ export const tunController = {
               maxAttempts: RESTART_BACKOFF_MS.length,
               delayMs: delay
             })
-            notify('warn', 'sing-box упал', `Перезапуск через ${Math.round(delay / 1000)} с (попытка ${attempt}/${RESTART_BACKOFF_MS.length}).`)
+            notify('warn', 'sing-box упал', `Перезапуск через ${Math.round(delay / 1000)} с (попытка ${attempt}/${RESTART_BACKOFF_MS.length}).`, 'connectionError')
             // Surface the restart attempt to the renderer so the hero card can
             // say "Перезапускаем защиту…" instead of "Файрвол блокирует".
             notifyStatus(`restarting:${attempt}/${RESTART_BACKOFF_MS.length}`)
@@ -1880,13 +1881,13 @@ export const tunController = {
               tunController.start(optsSnapshot).then((res) => {
                 if (!res.success) {
                   logEvent('error', 'tun', 'auto-restart attempt failed', { attempt, error: res.error })
-                  notify('error', 'Не удалось перезапустить защиту', res.error || 'Неизвестная ошибка')
+                  notify('error', 'Не удалось перезапустить защиту', res.error || 'Неизвестная ошибка', 'connectionError')
                   if (killSwitchEngaged) notifyStatus('killswitch-active')
                   else notifyStatus('stopped')
                 }
               }).catch((err) => {
                 logEvent('error', 'tun', 'auto-restart attempt threw', err)
-                notify('error', 'Не удалось перезапустить защиту', err?.message || String(err))
+                notify('error', 'Не удалось перезапустить защиту', err?.message || String(err), 'connectionError')
               })
             }, delay)
             return
@@ -1927,7 +1928,7 @@ export const tunController = {
                   attempts: restartAttempt,
                   failoverTried: res.tried
                 })
-                notify('error', 'Защита остановилась', 'Превышено число попыток перезапуска. Включите защиту вручную.')
+                notify('error', 'Защита остановилась', 'Превышено число попыток перезапуска. Включите защиту вручную.', 'connectionError')
                 disableKillSwitchIfActive('auto-restart exhausted — restoring internet').catch(err =>
                   logEvent('warn', 'tun', 'kill-switch disable after exhausted retries failed', err)
                 )
@@ -1952,12 +1953,12 @@ export const tunController = {
               'tun',
               'sing-box exited unexpectedly — keeping firewall kill-switch active'
             )
-            notify('warn', 'sing-box упал', 'Файрвол блокирует трафик, чтобы не было утечки IP. Включите защиту заново.')
+            notify('warn', 'sing-box упал', 'Файрвол блокирует трафик, чтобы не было утечки IP. Включите защиту заново.', 'connectionError')
             // Tell the UI traffic is now firewall-blocked, not just "stopped".
             notifyStatus('killswitch-active')
             return
           }
-          notify('warn', 'Защита остановилась', 'sing-box завершил работу.')
+          notify('warn', 'Защита остановилась', 'sing-box завершил работу.', 'vpnDisconnect')
           notifyStatus('stopped')
         }
       }
@@ -2120,9 +2121,9 @@ export const tunController = {
           }, STABLE_RESET_MS)
 
           if (restartAttempt > 0) {
-            notify('info', 'Защита восстановлена', `Подключение к VPN-серверу восстановлено после попытки ${restartAttempt}.`)
+            notify('info', 'Защита восстановлена', `Подключение к VPN-серверу восстановлено после попытки ${restartAttempt}.`, 'vpnConnect')
           } else if (!combinedWarning) {
-            notify('info', 'Защита включена', 'Весь трафик идёт через VPN.')
+            notify('info', 'Защита включена', 'Весь трафик идёт через VPN.', 'vpnConnect')
           }
 
           notifyStatus('running')
@@ -2225,7 +2226,7 @@ export const tunController = {
     clashApiInfo = null
     directProxyPort = null
     logEvent('info', 'tun', 'TUN stopped')
-    notify('info', 'Защита выключена', 'Трафик идёт по обычному маршруту.')
+    notify('info', 'Защита выключена', 'Трафик идёт по обычному маршруту.', 'vpnDisconnect')
     notifyStatus('stopped')
 
     // Every cleanup step is independent. A failed taskkill or baseline rollback

@@ -704,7 +704,7 @@ async function startProtectionFromTray(): Promise<void> {
     refreshTrayState({ status: 'starting' })
     const result = await startDirectVpnProtection()
     if (!result.success) {
-      notify('error', 'Не удалось включить защиту', result.error || 'Неизвестная ошибка')
+      notify('error', 'Не удалось включить защиту', result.error || 'Неизвестная ошибка', 'connectionError')
       refreshTrayState({ status: 'off' })
     }
     return
@@ -712,14 +712,14 @@ async function startProtectionFromTray(): Promise<void> {
 
   const resolved = await resolveProxyForTrayStart()
   if (!resolved) {
-    notify('error', 'Прокси не найден', 'Запустите VPN-клиент в режиме Proxy или задайте адрес вручную в настройках.')
+    notify('error', 'Прокси не найден', 'Запустите VPN-клиент в режиме Proxy или задайте адрес вручную в настройках.', 'connectionError')
     mainWindow?.show()
     return
   }
   refreshTrayState({ proxyAddr: resolved.proxyAddr })
   const result = await startProtection(resolved.proxyAddr, resolved.proxyType)
   if (!result.success) {
-    notify('error', 'Не удалось включить защиту', result.error || 'Неизвестная ошибка')
+    notify('error', 'Не удалось включить защиту', result.error || 'Неизвестная ошибка', 'connectionError')
   }
 }
 
@@ -853,9 +853,9 @@ app.whenReady().then(async () => {
     } catch {}
     try {
       if (r.physicalAdapterReached) {
-        notify('warn', 'УТЕЧКА обнаружена', r.summary)
+        notify('warn', 'УТЕЧКА обнаружена', r.summary, 'leakDetected')
       } else if ((r as any).dnsLeakDetected) {
-        notify('warn', 'УТЕЧКА DNS', r.summary)
+        notify('warn', 'УТЕЧКА DNS', r.summary, 'leakDetected')
       }
     } catch {}
   })
@@ -1224,7 +1224,7 @@ app.whenReady().then(async () => {
     mainWindow?.webContents.send('ip-changed', { ip, isLeak })
     refreshTrayState({ status: isLeak ? 'leak' : tunController.getStatus().running ? 'protected' : 'off', publicIp: ip })
     if (isLeak) {
-      notify('error', 'Виден ваш реальный IP', `Текущий публичный IP: ${ip}. Включите защиту или проверьте VPN-клиент.`)
+      notify('error', 'Виден ваш реальный IP', `Текущий публичный IP: ${ip}. Включите защиту или проверьте VPN-клиент.`, 'leakDetected')
     }
   })
 

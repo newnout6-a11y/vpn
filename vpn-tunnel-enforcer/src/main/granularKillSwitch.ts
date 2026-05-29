@@ -67,7 +67,7 @@ function sendNotification(reason: string, steps: string): void {
   }
 
   // Also send a system notification
-  notify('warn', 'Kill-Switch: трафик заблокирован', `${reason}\n${steps}`)
+  notify('warn', 'Kill-Switch: трафик заблокирован', `${reason}\n${steps}`, 'connectionError')
 }
 
 function getExceptionAppPaths(): string[] {

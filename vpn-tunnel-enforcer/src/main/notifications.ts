@@ -24,6 +24,22 @@ import { settingsStore } from './settings'
 
 export type NotificationLevel = 'info' | 'warn' | 'error'
 
+/**
+ * Notification event categories the user can individually toggle in Settings →
+ * Notifications. When a `notify()` call passes one of these, we consult the
+ * per-event preferences (and the system/inapp/both method) before showing the
+ * toast. Calls that omit it (eventType === undefined) always show, gated only
+ * by the global desktopNotifications switch — used for messages that don't map
+ * to a category.
+ */
+export type NotificationEventType =
+  | 'vpnConnect'
+  | 'vpnDisconnect'
+  | 'leakDetected'
+  | 'profileRotation'
+  | 'scheduleTriggered'
+  | 'connectionError'
+
 interface PendingKey {
   title: string
   body: string
@@ -47,6 +63,26 @@ let inAppFallbackCb: InAppFallbackCallback | null = null
 /** Register the renderer-bound fallback. Called once from main during whenReady. */
 export function setInAppFallbackCallback(cb: InAppFallbackCallback): void {
   inAppFallbackCb = cb
+}
+
+// ─── Per-event notification preferences provider ────────────────────────────
+//
+// notificationPrefs.ts registers this at startup. We invert the dependency
+// (provider pattern, like the in-app fallback above) so notifications.ts never
+// imports notificationPrefs.ts — that would be circular, since notificationPrefs
+// imports notify() from here. The provider returns the current preferences, or
+// null when none registered (tests / very early startup), in which case notify()
+// behaves as before (gated only by the global desktopNotifications switch).
+
+interface NotifyPrefsLike {
+  method?: 'system' | 'inapp' | 'both'
+  [eventType: string]: unknown
+}
+type PrefsProvider = () => NotifyPrefsLike | null
+let prefsProvider: PrefsProvider | null = null
+
+export function setNotificationPrefsProvider(provider: PrefsProvider): void {
+  prefsProvider = provider
 }
 
 // ─── Windows OS notification state detection ────────────────────────────────
@@ -178,10 +214,31 @@ export async function resetWindowsNotificationBlock(): Promise<{ cleared: string
 
 // ─── Notify ─────────────────────────────────────────────────────────────────
 
-export async function notify(level: NotificationLevel, title: string, body: string): Promise<void> {
+export async function notify(level: NotificationLevel, title: string, body: string, eventType?: NotificationEventType): Promise<void> {
   try {
     const settings = settingsStore.get()
     if (!settings.desktopNotifications) return
+
+    // Per-event-type gating. When the caller categorises the notification, we
+    // honour the user's individual toggles + delivery method from the
+    // notification-prefs store. Read it lazily (require) to avoid a circular
+    // import with notificationPrefs.ts. Failures here never block the toast —
+    // we fall back to "show via system".
+    let method: 'system' | 'inapp' | 'both' = 'system'
+    if (eventType) {
+      try {
+        const prefs = prefsProvider ? prefsProvider() : null
+        if (prefs && typeof prefs === 'object') {
+          // Event disabled → drop entirely.
+          if (prefs[eventType] === false) return
+          if (prefs.method === 'inapp' || prefs.method === 'both' || prefs.method === 'system') {
+            method = prefs.method
+          }
+        }
+      } catch {
+        /* prefs unavailable — fall through with method='system' */
+      }
+    }
 
     // Drop duplicates fired right after each other.
     const now = Date.now()
@@ -194,6 +251,13 @@ export async function notify(level: NotificationLevel, title: string, body: stri
       return
     }
     lastNotification = { title, body, ts: now }
+
+    // 'inapp' method → never show an OS toast, always route to the in-app
+    // fallback. (When no eventType is given, method stays 'system'.)
+    if (method === 'inapp') {
+      inAppFallbackCb?.(level, title, body)
+      return
+    }
 
     if (!Notification.isSupported()) {
       logEvent('debug', 'notify', 'platform does not support notifications — using in-app fallback', { level, title })
@@ -216,6 +280,11 @@ export async function notify(level: NotificationLevel, title: string, body: stri
       silent: level === 'info'
     })
     n.show()
+
+    // 'both' → also surface in-app alongside the OS toast.
+    if (method === 'both') {
+      try { inAppFallbackCb?.(level, title, body) } catch { /* swallow */ }
+    }
   } catch (err) {
     logEvent('warn', 'notify', 'failed to show notification — using in-app fallback', { err: (err as Error)?.message, level, title })
     // Last-ditch: try to surface in-app even when the OS path threw. If the
