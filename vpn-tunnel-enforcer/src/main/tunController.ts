@@ -1065,6 +1065,28 @@ async function getProxyOwnerProcesses(host: string, port: number): Promise<Array
   }
 }
 
+// Read the user's IP/CIDR kill-switch exceptions straight from the
+// granular-kill-switch store. We read the store directly (same pattern
+// serverGroups uses for the picker store) instead of importing
+// granularKillSwitch, which would create a circular import. Returns only the
+// `ip`-typed exception values; the firewall layer validates each one before
+// use, so a malformed entry here is harmless.
+function readGranularKillSwitchIpExceptions(): string[] {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    let StoreCtor: any = require('electron-store')
+    if (StoreCtor && StoreCtor.default) StoreCtor = StoreCtor.default
+    const ksStore = new StoreCtor({ name: 'granular-kill-switch' })
+    const exceptions = ksStore.get('killSwitchExceptions', []) as Array<{ type?: string; value?: string }>
+    if (!Array.isArray(exceptions)) return []
+    return exceptions
+      .filter((e) => e && e.type === 'ip' && typeof e.value === 'string' && e.value.trim())
+      .map((e) => String(e.value).trim())
+  } catch {
+    return []
+  }
+}
+
 // Detect another active VPN/TUN adapter (Happ TUN, WireGuard, OpenVPN, …).
 // Returns the interface name if found. We refuse to start in that case so we
 // don't rip apart the user's working tunnel with our own auto_route.
@@ -1939,7 +1961,8 @@ export const tunController = {
             } else {
               const ks = await enableKillSwitch({
                 singboxExePath: runtime.singbox,
-                proxyOwnerProgramPaths
+                proxyOwnerProgramPaths,
+                extraAllowedRemoteCidrs: readGranularKillSwitchIpExceptions()
               })
               if (ks.success) {
                 killSwitchEngaged = true

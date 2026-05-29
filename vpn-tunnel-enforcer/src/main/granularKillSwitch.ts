@@ -95,10 +95,12 @@ async function engageKillSwitch(reason: string): Promise<boolean> {
   }
 
   const appExceptions = getExceptionAppPaths()
+  const ipExceptions = getExceptionIpCidrs()
 
   const result = await enableKillSwitch({
     singboxExePath,
-    proxyOwnerProgramPaths: appExceptions.length > 0 ? appExceptions : undefined
+    proxyOwnerProgramPaths: appExceptions.length > 0 ? appExceptions : undefined,
+    extraAllowedRemoteCidrs: ipExceptions.length > 0 ? ipExceptions : undefined
   })
 
   if (result.success) {

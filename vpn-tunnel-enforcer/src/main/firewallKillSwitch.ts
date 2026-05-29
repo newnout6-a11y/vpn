@@ -177,6 +177,45 @@ function psSingleQuote(value: string): string {
   return `'${value.replace(/'/g, "''")}'`
 }
 
+/**
+ * Validate a user-supplied IP/CIDR exception before it is interpolated into a
+ * New-NetFirewallRule -RemoteAddress argument. We accept:
+ *   - IPv4 (optionally /0-32):     203.0.113.4   203.0.113.0/24
+ *   - IPv6 (optionally /0-128):    2001:db8::1   2001:db8::/32
+ * Anything else (hostnames, ranges, garbage, injection attempts) is rejected.
+ * This is a allow-list gate — the addresses come from the granular kill-switch
+ * exception UI which is user-editable.
+ */
+export function isValidIpOrCidr(value: string): boolean {
+  const v = String(value || '').trim()
+  if (!v) return false
+  const [addr, prefix, ...rest] = v.split('/')
+  if (rest.length > 0) return false
+
+  const isIpv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.test(addr)
+  if (isIpv4) {
+    const octets = addr.split('.').map(Number)
+    if (!octets.every((o) => o >= 0 && o <= 255)) return false
+    if (prefix !== undefined) {
+      const p = Number(prefix)
+      if (!Number.isInteger(p) || p < 0 || p > 32) return false
+    }
+    return true
+  }
+
+  // IPv6: conservative shape check (hex groups + optional :: compression).
+  const isIpv6 = /^[0-9a-fA-F:]+$/.test(addr) && addr.includes(':') && (addr.match(/::/g) || []).length <= 1
+  if (isIpv6) {
+    if (prefix !== undefined) {
+      const p = Number(prefix)
+      if (!Number.isInteger(p) || p < 0 || p > 128) return false
+    }
+    return true
+  }
+
+  return false
+}
+
 export async function isKillSwitchActive(): Promise<boolean> {
   return (await readManifest()) !== null || await probeFirewallForOurRules()
 }
@@ -204,6 +243,7 @@ export async function isKillSwitchActive(): Promise<boolean> {
 export async function enableKillSwitch(opts: {
   singboxExePath: string
   proxyOwnerProgramPaths?: string[]
+  extraAllowedRemoteCidrs?: string[]
 }): Promise<FirewallKillSwitchResult> {
   if (process.platform !== 'win32') {
     return { success: true, message: 'Firewall kill-switch недоступен (не Windows)' }
@@ -214,6 +254,7 @@ export async function enableKillSwitch(opts: {
   const lanAllow = `${RULE_PREFIX}-allow-lan`
   const tunAllow = `${RULE_PREFIX}-allow-tun`
   const dhcpAllow = `${RULE_PREFIX}-allow-dhcp`
+  const extraIpAllow = `${RULE_PREFIX}-allow-extra-ip`
 
   // Windows Firewall can be picky about mixed IPv4/IPv6 CIDR arrays here. IPv6 is
   // disabled by adapter lockdown anyway, so keep the firewall LAN bypass IPv4-only.
@@ -237,6 +278,27 @@ try {
     -Profile Any -Enabled True | Out-Null
   $rules += ${psSingleQuote(ruleName)}
 } catch { Write-Host "WARN allow-proxy-${i}: $_" }`)
+  }
+
+  // User-defined IP/CIDR exceptions (from the granular kill-switch UI). These
+  // were previously collected but never applied — the address stayed blocked.
+  // We validate each entry as an IPv4/IPv6 address or CIDR before letting it
+  // anywhere near New-NetFirewallRule (defence against injection through the
+  // exception list). Anything that doesn't look like an address is dropped.
+  const extraCidrs = (opts.extraAllowedRemoteCidrs ?? []).filter(isValidIpOrCidr)
+  let extraIpAllowPart = ''
+  if (extraCidrs.length > 0) {
+    const addressList = extraCidrs.map((c) => `'${c}'`).join(',')
+    extraIpAllowPart = `
+try {
+  New-NetFirewallRule \`
+    -DisplayName ${psSingleQuote(extraIpAllow)} \`
+    -Description 'VPN Tunnel Enforcer kill-switch: allow user-defined IP/CIDR exceptions.' \`
+    -Direction Outbound -Action Allow \`
+    -RemoteAddress ${addressList} \`
+    -Profile Any -Enabled True | Out-Null
+  $rules += ${psSingleQuote(extraIpAllow)}
+} catch { Write-Host "WARN allow-extra-ip: $_" }`
   }
 
   // One atomic elevated PowerShell script: save defaults → add allows → set block.
@@ -318,6 +380,9 @@ try {
     -Profile Any -Enabled True | Out-Null
   $rules += ${psSingleQuote(dhcpAllow)}
 } catch { Write-Host "WARN allow-dhcp: $_" }
+
+# 3g. Allow user-defined IP/CIDR exceptions (granular kill-switch UI).
+${extraIpAllowPart}
 
 # --- Step 4: Set DefaultOutboundAction=Block ---
 try {
