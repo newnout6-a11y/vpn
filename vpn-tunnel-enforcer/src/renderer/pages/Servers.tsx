@@ -301,6 +301,19 @@ export function Servers() {
     writeExpandedIds(expandedIds)
   }, [expandedIds])
 
+  // Group ids that profiles reference but no real group exists for. We render
+  // a synthetic "recovery" header for each so orphaned keys stay visible.
+  const orphanGroupIds = useMemo<string[]>(() => {
+    if (!groupsAvailable) return []
+    const known = new Set(groups.map((g) => g.id))
+    const orphans = new Set<string>()
+    for (const p of profiles) {
+      const gid = (p as ServerProfile & { groupId?: string }).groupId
+      if (gid && !known.has(gid)) orphans.add(gid)
+    }
+    return [...orphans]
+  }, [profiles, groups, groupsAvailable])
+
   const effectiveGroups = useMemo<ServerGroup[]>(() => {
     if (!groupsAvailable) {
       // Single virtual group containing every profile.
@@ -314,8 +327,19 @@ export function Servers() {
         }
       ]
     }
-    return sortGroups(groups)
-  }, [groups, groupsAvailable, t])
+    const real = sortGroups(groups)
+    // Append a synthetic "recovery" header for every orphaned groupId so the
+    // keys referencing a deleted/unknown group remain visible and movable
+    // instead of silently disappearing.
+    const recovery: ServerGroup[] = orphanGroupIds.map((id) => ({
+      id,
+      name: t('servers.groups.recovered', 'Восстановленные ключи'),
+      source: 'manual',
+      importedAt: 0,
+      status: 'unknown'
+    }))
+    return [...real, ...recovery]
+  }, [groups, groupsAvailable, orphanGroupIds, t])
 
   // When there's exactly one group, treat it as expanded by default.
   useEffect(() => {
@@ -326,7 +350,10 @@ export function Servers() {
   }, [effectiveGroups])
 
   // Map profiles to their group (or virtual). If a profile has a groupId we
-  // don't know about (race during refresh), it floats up as its own bucket.
+  // don't know about (race during refresh, deleted group), it floats up as
+  // its own synthetic "recovery" bucket — see orphanGroupIds below, which
+  // makes sure those buckets ALSO get a rendered header so the profiles are
+  // never invisible.
   const profilesByGroup = useMemo<Record<string, ServerProfile[]>>(() => {
     const map: Record<string, ServerProfile[]> = {}
     if (!groupsAvailable) {
@@ -340,9 +367,10 @@ export function Servers() {
       if (target) {
         map[target].push(p)
       } else if (gid) {
-        // Orphan — keep them in a synthetic bucket keyed by their groupId so
-        // they're at least visible. Won't normally render unless the group
-        // header is also synthesised.
+        // Orphan — keep them in a synthetic bucket keyed by their groupId.
+        // orphanGroupIds (below) synthesises a header for each such bucket so
+        // these profiles always render and can be reassigned, instead of
+        // silently vanishing from the UI.
         if (!map[gid]) map[gid] = []
         map[gid].push(p)
       } else {

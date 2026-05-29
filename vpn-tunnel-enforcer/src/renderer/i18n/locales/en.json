@@ -211,6 +211,7 @@
       "expand": "Expand group",
       "collapse": "Collapse group",
       "all": "All servers",
+      "recovered": "Recovered keys",
       "allDescription": "All saved profiles",
       "fallbackHint": "Group features will be available after the next update."
     },
