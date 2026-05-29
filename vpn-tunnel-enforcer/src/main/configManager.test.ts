@@ -19,6 +19,7 @@ function makeEmptyConfig(): ConfigExportData {
     version: CONFIG_VERSION,
     exportedAt: Date.now(),
     profiles: [],
+    serverGroups: [],
     schedules: [],
     splitTunnel: [],
     dns: [],
@@ -142,6 +143,21 @@ describe('validateImportData', () => {
     expect(result.sections).toContain('dns')
     expect(result.sections).not.toContain('schedules')
   })
+
+  it('recognizes the serverGroups section', () => {
+    const result = validateImportData({
+      version: CONFIG_VERSION,
+      serverGroups: [{ id: 'g1', name: 'g1', source: 'manual', importedAt: 0, status: 'unknown' }]
+    })
+    expect(result.valid).toBe(true)
+    expect(result.sections).toContain('serverGroups')
+  })
+
+  it('rejects a non-array serverGroups section', () => {
+    const result = validateImportData({ version: CONFIG_VERSION, serverGroups: {} })
+    expect(result.valid).toBe(false)
+    expect(result.error).toContain('expected array')
+  })
 })
 
 // ─── detectConflicts ─────────────────────────────────────────────────────────
@@ -169,6 +185,13 @@ describe('detectConflicts', () => {
     const existing = { ...makeEmptyConfig(), profiles: [makeProfile('p1')] }
     const incoming = { ...makeEmptyConfig(), profiles: [makeProfile('p2')] }
     expect(detectConflicts(existing, incoming)).toContain('profiles')
+  })
+
+  it('detects conflict when both have serverGroups', () => {
+    const grp = (id: string) => ({ id, name: id, source: 'manual' as const, importedAt: 0, status: 'unknown' as const })
+    const existing = { ...makeEmptyConfig(), serverGroups: [grp('g1')] }
+    const incoming = { ...makeEmptyConfig(), serverGroups: [grp('g2')] }
+    expect(detectConflicts(existing, incoming)).toContain('serverGroups')
   })
 
   it('detects conflict when both have schedules', () => {

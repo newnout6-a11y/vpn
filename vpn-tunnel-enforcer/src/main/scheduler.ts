@@ -274,6 +274,15 @@ export const schedulerService = {
     vpnDisconnectCallback = null
   },
 
+  /**
+   * Re-read schedules from the store and re-arm the timer. Used after a
+   * settings import overwrites the scheduler store so the live timer reflects
+   * the imported schedules without an app restart.
+   */
+  reschedule(): void {
+    scheduleNextTimer()
+  },
+
   getSchedules,
   createSchedule,
   updateSchedule,

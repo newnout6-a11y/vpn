@@ -222,6 +222,20 @@ export const granularKillSwitch = {
   },
 
   /**
+   * Re-read level + exceptions from the store into the in-memory cache. Used
+   * after a settings import overwrites the granular-kill-switch store so the
+   * live service reflects the imported values without an app restart.
+   */
+  reloadFromStore(): void {
+    currentLevel = store.get('killSwitchLevel', 'off')
+    exceptions = store.get('killSwitchExceptions', [])
+    logEvent('info', 'granular-kill-switch', 'reloaded from store after import', {
+      level: currentLevel,
+      exceptions: exceptions.length
+    })
+  },
+
+  /**
    * Set the kill-switch level and apply the policy.
    */
   async setLevel(level: KillSwitchLevel): Promise<void> {

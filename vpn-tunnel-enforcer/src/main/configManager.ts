@@ -26,6 +26,7 @@ import { logEvent } from './appLogger'
 import type {
   SplitTunnelApp,
   ServerProfile,
+  ServerGroup,
   ScheduleEntry,
   DnsProfile,
   DomainRule,
@@ -43,6 +44,7 @@ export const CONFIG_VERSION = '2.0'
 
 export const ALL_SECTIONS = [
   'profiles',
+  'serverGroups',
   'schedules',
   'splitTunnel',
   'dns',
@@ -62,6 +64,7 @@ export interface ConfigExportData {
   version: string
   exportedAt: number
   profiles: ServerProfile[]
+  serverGroups: ServerGroup[]
   schedules: ScheduleEntry[]
   splitTunnel: SplitTunnelApp[]
   dns: DnsProfile[]
@@ -86,6 +89,11 @@ const splitTunnelStore = new Store<{ splitTunnelApps: SplitTunnelApp[] }>({
 const serverPickerStore = new Store<{ profiles: ServerProfile[] }>({
   name: 'server-picker',
   defaults: { profiles: [] }
+})
+
+const serverGroupsStore = new Store<{ groups: ServerGroup[] }>({
+  name: 'server-groups',
+  defaults: { groups: [] }
 })
 
 const schedulerStore = new Store<{ schedules: ScheduleEntry[] }>({
@@ -205,6 +213,7 @@ export function validateImportData(data: unknown): {
 
   const arraySections: ConfigSection[] = [
     'profiles',
+    'serverGroups',
     'schedules',
     'splitTunnel',
     'dns',
@@ -289,6 +298,9 @@ export function detectConflicts(
   if (existing.profiles.length > 0 && incoming.profiles.length > 0) {
     conflicts.push('profiles')
   }
+  if (existing.serverGroups.length > 0 && incoming.serverGroups.length > 0) {
+    conflicts.push('serverGroups')
+  }
   if (existing.schedules.length > 0 && incoming.schedules.length > 0) {
     conflicts.push('schedules')
   }
@@ -370,6 +382,13 @@ export function applySelectiveImport(
         result.profiles = mergeArraySection(
           existing.profiles,
           incoming.profiles,
+          conflictResolution
+        )
+        break
+      case 'serverGroups':
+        result.serverGroups = mergeArraySection(
+          existing.serverGroups,
+          incoming.serverGroups,
           conflictResolution
         )
         break
@@ -485,6 +504,7 @@ export function collectCurrentConfig(): ConfigExportData {
     version: CONFIG_VERSION,
     exportedAt: Date.now(),
     profiles: serverPickerStore.get('profiles') ?? [],
+    serverGroups: serverGroupsStore.get('groups') ?? [],
     schedules: schedulerStore.get('schedules') ?? [],
     splitTunnel: splitTunnelStore.get('splitTunnelApps') ?? [],
     dns: allDns,
@@ -515,6 +535,9 @@ function writeConfigToStores(config: ConfigExportData, sections: ConfigSection[]
     switch (section) {
       case 'profiles':
         serverPickerStore.set('profiles', config.profiles)
+        break
+      case 'serverGroups':
+        serverGroupsStore.set('groups', config.serverGroups)
         break
       case 'schedules':
         schedulerStore.set('schedules', config.schedules)
@@ -667,6 +690,32 @@ function importApply(
 
     // Write merged data back to stores
     writeConfigToStores(merged, validSections)
+
+    // C16: refresh in-memory service state for sections whose live services
+    // cache data loaded at init. Without this, imported schedules/rotation/
+    // kill-switch values sit on disk but the running services keep using
+    // their stale in-memory copies until the next app restart. Best-effort —
+    // a refresh failure must not fail the import. Lazy require to avoid
+    // pulling these heavy modules into configManager's import graph.
+    try {
+      if (validSections.includes('rotation')) {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const { initProfileRotation } = require('./profileRotation')
+        initProfileRotation()
+      }
+      if (validSections.includes('schedules')) {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const { schedulerService } = require('./scheduler')
+        schedulerService.reschedule?.()
+      }
+      if (validSections.includes('killSwitch')) {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const { granularKillSwitch } = require('./granularKillSwitch')
+        granularKillSwitch.reloadFromStore?.()
+      }
+    } catch (err) {
+      logEvent('warn', 'config-manager', 'post-import service refresh failed', { err: (err as Error)?.message })
+    }
 
     logEvent('info', 'config-manager', 'import applied', {
       filePath,
