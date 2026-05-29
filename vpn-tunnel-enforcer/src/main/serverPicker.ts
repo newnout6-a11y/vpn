@@ -561,6 +561,31 @@ export async function pingAll(): Promise<ServerProfile[]> {
   const profiles = getProfiles()
   const now = Date.now()
 
+  // When the tunnel is UP, a per-server ping is meaningless: every probe goes
+  // through the same tunnel and returns the SAME round-trip number, which we
+  // would otherwise store on every profile and then keep showing as "1 ms on
+  // all servers" long after disconnect. So while connected we do ONE tunnel
+  // RTT measurement and apply it to the ACTIVE profile only, leaving every
+  // other profile's stored ping untouched. Real per-server latency requires
+  // the tunnel to be off (or the "Проверить ключи" TLS probe).
+  if (tunController.getStatus().running) {
+    const tunnelRtt = await pingServer('', 0) // host/port ignored on the tunnel path
+    const activeId = getActiveProfileId()
+    if (activeId) {
+      const idx = profiles.findIndex((p) => p.id === activeId)
+      if (idx !== -1) {
+        profiles[idx] = {
+          ...profiles[idx],
+          ping: tunnelRtt,
+          status: tunnelRtt !== null ? 'online' : 'offline',
+          lastChecked: now
+        }
+        saveProfiles(profiles)
+      }
+    }
+    return profiles
+  }
+
   // Process in batches of PING_CONCURRENCY
   for (let i = 0; i < profiles.length; i += PING_CONCURRENCY) {
     const batch = profiles.slice(i, i + PING_CONCURRENCY)
