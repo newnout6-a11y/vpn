@@ -28,6 +28,7 @@ import { TUN_ADAPTER_ALIAS, TUN_IPV4_ADDRESS_CIDR, TUN_IPV6_ADDRESS_CIDR, TUN_IP
 import { ipMonitor } from './ipMonitor'
 import { cancelLeakSelfTest } from './leakSelfTest'
 import { startCompetingTunWatch, stopCompetingTunWatch } from './competingTunDetector'
+import { dnsProfiles } from './dnsProfiles'
 
 const exec = promisify(execCb)
 const execFile = promisify(execFileCb)
@@ -322,6 +323,65 @@ function uniqueProcessNames(names: string[]): string[] {
 const DNS_STRATEGY = 'ipv4_only'
 const BOOTSTRAP_DNS_TAG = 'dns-bootstrap'
 
+/**
+ * Build the remote DNS server list for the sing-box config from the user's
+ * active DNS profile (Settings → DNS). Falls back to Cloudflare + Google when
+ * no profile is selected. Every server detours through `proxy-out` so DNS is
+ * tunnelled and never leaks to the ISP resolver.
+ *
+ * The first server MUST keep the tag `dns-remote` because the route block's
+ * `default_domain_resolver` references it by name.
+ *
+ * sing-box 1.13 server types:
+ *   - plain IP  → { type: 'udp', server: '1.1.1.1' }  (DoT upgrade not assumed)
+ *   - DoH       → { type: 'https', server: 'dns.google', ... }
+ *   - DoT       → { type: 'tls', server: 'dns.google', ... }
+ *
+ * We read the profile defensively via a dynamic import of dnsProfiles to avoid
+ * any load-order coupling, falling back to the hardcoded resolvers on any
+ * error so a bad profile can never break tunnel startup.
+ */
+function buildRemoteDnsServers(): Array<Record<string, any>> {
+  const fallback = [
+    { type: 'tls', tag: 'dns-remote', server: '1.1.1.1', detour: 'proxy-out' },
+    { type: 'tls', tag: 'dns-backup', server: '8.8.8.8', detour: 'proxy-out' }
+  ]
+  try {
+    const profile = dnsProfiles.getActiveDnsProfile()
+    if (!profile || !profile.primary) return fallback
+
+    const toServer = (address: string, tag: string): Record<string, any> | null => {
+      const addr = String(address || '').trim()
+      if (!addr) return null
+      if (profile.type === 'doh') {
+        // strip scheme + path → bare host for sing-box `server`
+        const host = addr.replace(/^https:\/\//i, '').split('/')[0].split(':')[0]
+        if (!host) return null
+        return { type: 'https', tag, server: host, detour: 'proxy-out' }
+      }
+      if (profile.type === 'dot') {
+        const host = addr.replace(/^tls:\/\//i, '').split('/')[0].split(':')[0]
+        if (!host) return null
+        return { type: 'tls', tag, server: host, detour: 'proxy-out' }
+      }
+      // plain IPv4/IPv6
+      return { type: 'udp', tag, server: addr, detour: 'proxy-out' }
+    }
+
+    const servers: Array<Record<string, any>> = []
+    const primary = toServer(profile.primary, 'dns-remote')
+    if (!primary) return fallback
+    servers.push(primary)
+    if (profile.secondary) {
+      const secondary = toServer(profile.secondary, 'dns-backup')
+      if (secondary) servers.push(secondary)
+    }
+    return servers
+  } catch {
+    return fallback
+  }
+}
+
 function isDomainServer(server: unknown): boolean {
   if (typeof server !== 'string') return false
   const trimmed = server.trim()
@@ -494,9 +554,13 @@ export function generateSingboxConfig(
       // is up) is `type: local` — sing-box delegates the lookup to the
       // platform native resolver, which still uses the physical interface
       // because we ask it before strict_route hijacks the system DNS.
+      //
+      // The remote resolvers come from the user's selected DNS profile
+      // (Settings → DNS) when one is active, falling back to Cloudflare +
+      // Google. Every remote server detours through proxy-out so DNS is
+      // tunnelled and can't leak to the ISP resolver.
       servers: [
-        { type: 'tls', tag: 'dns-remote', server: '1.1.1.1', detour: 'proxy-out' },
-        { type: 'tls', tag: 'dns-backup', server: '8.8.8.8', detour: 'proxy-out' },
+        ...buildRemoteDnsServers(),
         ...(needsBootstrapDns
           ? [{ type: 'local', tag: BOOTSTRAP_DNS_TAG }]
           : [])

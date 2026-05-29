@@ -45,11 +45,16 @@ function probePort(host: string, port: number, timeout = 1500): Promise<boolean>
 
 async function probeSocks5(host: string, port: number): Promise<boolean> {
   try {
-    await SocksClient.createConnection({
+    const { socket } = await SocksClient.createConnection({
       proxy: { host, port, type: 5 },
       command: 'connect',
       destination: { host: 'api.ipify.org', port: 443 }
     })
+    // Destroy the probe connection immediately — we only needed to know the
+    // SOCKS5 handshake succeeded. Without this every successful probe leaks
+    // an open socket to api.ipify.org until GC/timeout, and detect() probes
+    // many candidates per run.
+    try { socket.destroy() } catch { /* ignore */ }
     return true
   } catch {
     return false

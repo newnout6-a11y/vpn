@@ -14,7 +14,7 @@
  *   - parseProxyAddress handles IPv4 / IPv6 / bad input.
  */
 
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, afterEach } from 'vitest'
 
 // ─── Mock the import chain so tunController loads under vitest/node ──────────
 vi.mock('electron', () => ({
@@ -68,6 +68,16 @@ vi.mock('./leakSelfTest', () => ({ cancelLeakSelfTest: vi.fn() }))
 vi.mock('./competingTunDetector', () => ({
   startCompetingTunWatch: vi.fn(),
   stopCompetingTunWatch: vi.fn()
+}))
+
+// Mutable active DNS profile so tests can flip it. buildRemoteDnsServers()
+// require()s this module at call time. vi.hoisted so the state object exists
+// before the hoisted vi.mock factory closes over it.
+const dnsState = vi.hoisted(() => ({ active: null as any }))
+vi.mock('./dnsProfiles', () => ({
+  dnsProfiles: {
+    getActiveDnsProfile: () => dnsState.active
+  }
 }))
 
 import { generateSingboxConfig, parseProxyAddress } from './tunController'
@@ -277,5 +287,51 @@ describe('generateSingboxConfig process routing', () => {
     const cfg = gen({ outbound: { ...plainTlsOutbound } })
     const directRule = cfg.route.rules.find((r) => Array.isArray(r.process_name))
     expect(directRule).toBeUndefined()
+  })
+})
+
+// ─── DNS profile integration ──────────────────────────────────────────────────
+
+describe('generateSingboxConfig DNS profile', () => {
+  afterEach(() => {
+    dnsState.active = null
+  })
+
+  it('uses Cloudflare/Google fallback when no profile is active', () => {
+    dnsState.active = null
+    const cfg = gen({ outbound: { ...plainTlsOutbound, server: '1.2.3.4' } })
+    const remote = cfg.dns.servers.find((s: any) => s.tag === 'dns-remote') as any
+    expect(remote.server).toBe('1.1.1.1')
+  })
+
+  it('applies a plain DNS profile as udp servers through proxy-out', () => {
+    dnsState.active = { id: 'x', name: 'Quad9', primary: '9.9.9.9', secondary: '149.112.112.112', type: 'plain' }
+    const cfg = gen({ outbound: { ...plainTlsOutbound, server: '1.2.3.4' } })
+    const servers = cfg.dns.servers as any[]
+    const remote = servers.find((s) => s.tag === 'dns-remote')
+    const backup = servers.find((s) => s.tag === 'dns-backup')
+    expect(remote).toMatchObject({ type: 'udp', server: '9.9.9.9', detour: 'proxy-out' })
+    expect(backup).toMatchObject({ type: 'udp', server: '149.112.112.112', detour: 'proxy-out' })
+  })
+
+  it('applies a DoH profile as https server with bare host', () => {
+    dnsState.active = { id: 'x', name: 'DoH', primary: 'https://dns.google/dns-query', type: 'doh' }
+    const cfg = gen({ outbound: { ...plainTlsOutbound, server: '1.2.3.4' } })
+    const remote = cfg.dns.servers.find((s: any) => s.tag === 'dns-remote') as any
+    expect(remote).toMatchObject({ type: 'https', server: 'dns.google', detour: 'proxy-out' })
+  })
+
+  it('applies a DoT profile as tls server with bare host', () => {
+    dnsState.active = { id: 'x', name: 'DoT', primary: 'tls://dns.google', type: 'dot' }
+    const cfg = gen({ outbound: { ...plainTlsOutbound, server: '1.2.3.4' } })
+    const remote = cfg.dns.servers.find((s: any) => s.tag === 'dns-remote') as any
+    expect(remote).toMatchObject({ type: 'tls', server: 'dns.google', detour: 'proxy-out' })
+  })
+
+  it('keeps the dns-remote tag so default_domain_resolver resolves', () => {
+    dnsState.active = { id: 'x', name: 'Quad9', primary: '9.9.9.9', type: 'plain' }
+    const cfg = gen({ outbound: { ...plainTlsOutbound, server: '1.2.3.4' } })
+    expect(cfg.route.final).toBe('proxy-out')
+    expect(cfg.dns.servers.some((s: any) => s.tag === 'dns-remote')).toBe(true)
   })
 })
