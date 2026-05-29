@@ -129,9 +129,12 @@ export async function exportDiagnosticsZip(): Promise<ExportResult> {
     }
 
     // 6. Baseline manifest (so support can see what we changed in the registry).
+    // NOTE: these manifests live in SUBDIRECTORIES, not the userData root.
+    // network baseline → network-backups/, kill-switch → firewall-killswitch/.
+    // The old root-level paths never matched, so the ZIP shipped without them.
     const userData = app.getPath('userData')
-    await copyIfExists(join(userData, 'latest-tun-network-baseline.json'), join(stage, 'baseline-manifest.json'))
-    await copyIfExists(join(userData, 'latest-firewall-killswitch.json'), join(stage, 'killswitch-manifest.json'))
+    await copyIfExists(join(userData, 'network-backups', 'latest-tun-network-baseline.json'), join(stage, 'baseline-manifest.json'))
+    await copyIfExists(join(userData, 'firewall-killswitch', 'manifest.json'), join(stage, 'killswitch-manifest.json'))
     await copyIfExists(join(userData, 'latest-physical-adapter-lockdown.json'), join(stage, 'adapter-lockdown-manifest.json'))
 
     // 6b. Snapshots dir — every captured network/system snapshot from app

@@ -282,8 +282,13 @@ export async function captureSnapshot(reason: SnapshotReason): Promise<string | 
   const [platform, elevated, baseline, killSwitch, adapterLockdown] = await Promise.all([
     capturePlatformDumps(),
     isElevated(),
-    tryReadJsonFile(join(userData, 'latest-tun-network-baseline.json')),
-    tryReadJsonFile(join(userData, 'latest-firewall-killswitch.json')),
+    // Network baseline manifest lives under network-backups/ (systemNetwork.ts),
+    // not the userData root — the old path was always null.
+    tryReadJsonFile(join(userData, 'network-backups', 'latest-tun-network-baseline.json')),
+    // The kill-switch manifest lives under firewall-killswitch/manifest.json
+    // (see firewallKillSwitch.ts), NOT latest-firewall-killswitch.json in the
+    // userData root — that file never existed, so this section was always null.
+    tryReadJsonFile(join(userData, 'firewall-killswitch', 'manifest.json')),
     tryReadJsonFile(join(userData, 'latest-physical-adapter-lockdown.json'))
   ])
 
