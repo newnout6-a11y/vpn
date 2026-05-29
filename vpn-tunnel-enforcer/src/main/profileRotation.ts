@@ -193,6 +193,47 @@ async function performRotation(): Promise<{ success: boolean; newProfile: string
     index: updatedConfig.currentIndex
   })
 
+  // If the tunnel is currently UP, selecting a new profile is not enough —
+  // sing-box keeps using the old server until it restarts, so the egress IP
+  // would never actually change. Reconnect with the new profile so rotation
+  // does what the UI promises. When idle we just leave the selection for the
+  // next manual connect. Lazy import avoids any load-order coupling with
+  // tunController.
+  try {
+    const { tunController } = await import('./tunController')
+    if (tunController.getStatus().running) {
+      const profile = serverPicker.getProfiles().find((p) => p.id === nextProfileId)
+      const outbound = profile && (profile as any).outbound
+      if (outbound && typeof outbound === 'object') {
+        logEvent('info', 'profile-rotation', 'reconnecting live tunnel to rotated profile', {
+          profileId: nextProfileId
+        })
+        // Restart in directVpn mode with the rotated profile. start() is
+        // guarded against concurrent starts and reuses the prior kill-switch /
+        // lockdown / stealth prefs via lastStartOptions where applicable.
+        await tunController.stop().catch((err) =>
+          logEvent('warn', 'profile-rotation', 'stop before rotate-reconnect failed', err)
+        )
+        await tunController.start({
+          mode: 'directVpn',
+          vpnProfile: {
+            name: profile!.name,
+            protocol: profile!.protocol as any,
+            outbound
+          }
+        }).catch((err) =>
+          logEvent('warn', 'profile-rotation', 'start after rotate-reconnect failed', err)
+        )
+      } else {
+        logEvent('warn', 'profile-rotation', 'rotated profile has no outbound — cannot reconnect live tunnel', {
+          profileId: nextProfileId
+        })
+      }
+    }
+  } catch (err) {
+    logEvent('warn', 'profile-rotation', 'rotate-reconnect path threw', err)
+  }
+
   // Schedule next rotation
   scheduleNextRotation(updatedConfig)
   saveConfig(updatedConfig)
