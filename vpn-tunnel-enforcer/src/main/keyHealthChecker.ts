@@ -2,17 +2,25 @@
  * Key Health Checker — probes individual VPN keys to tell which ones are
  * still alive after a subscription's free trial expires.
  *
- * Strategy: TLS handshake to the outbound's `server_name`. A bare TCP
- * connect only proves the IP is reachable; a full VPN-protocol auth would
- * be protocol-specific and DPI-noisy. A TLS handshake exercises the front
- * (Reality camouflage host or real VPN front) the same way a normal client
- * session would, so it's a strong signal without an extra fingerprint.
+ * Strategy: TCP connect always; a TLS handshake to the outbound's
+ * `server_name` ONLY when it is safe to put that name on the wire.
  *
- * When the tunnel is up we route the probe THROUGH it via the sing-box
- * mixed-inbound SOCKS5 port — that tests "can my outbound reach its
- * endpoint" rather than "does my ISP let me reach the endpoint directly".
- * When the tunnel is off we go direct; the user explicitly asked for the
- * check, so the small DPI exposure is acceptable.
+ * SNI-leak safety (important on RU TSPU networks): a TLS ClientHello carries
+ * `server_name` in plaintext. For Reality keys that name is a camouflage
+ * domain (e.g. `www.microsoft.com`) — harmless to leak. For plain-TLS keys
+ * it is the provider's real front, and leaking it to a DPI box can get the
+ * destination IP blackholed for minutes. So we only do the TLS rung for
+ * Reality outbounds (or when the probe is genuinely tunnelled); otherwise we
+ * stop at the TCP connect, which carries no SNI.
+ *
+ * Routing note: when the tunnel is up we dial through sing-box's
+ * `mixed-direct-in` SOCKS5 inbound. NOTE that inbound is routed to
+ * `direct-out` (it is the local "direct proxy" for split-tunnel/diagnostics),
+ * so the probe still egresses via the physical adapter — it tests "is this
+ * endpoint reachable from this network", NOT "does it work through proxy-out".
+ * That is the right signal for post-trial failover (we want to know if the
+ * sibling server's IP answers), and routing the probe through sing-box keeps
+ * it consistent with the OS routing state while TUN owns the default route.
  */
 
 import { Socket } from 'net'
@@ -39,6 +47,13 @@ interface ProbeTarget {
   port: number
   serverName: string
   needsTls: boolean
+  /**
+   * True when a TLS handshake to `serverName` would put the provider's REAL
+   * front domain on the wire (plain TLS). False for Reality outbounds, where
+   * `server_name` is a camouflage domain that is safe to leak. We only run
+   * the TLS rung when this is false, to avoid SNI-blackholing on TSPU nets.
+   */
+  tlsLeaksSni: boolean
 }
 
 function pickServerName(outbound: Record<string, any>, fallback: string): string {
@@ -57,7 +72,7 @@ function pickServerName(outbound: Record<string, any>, fallback: string): string
   return fallback
 }
 
-function describeProbeTarget(profile: ServerProfile): ProbeTarget | null {
+export function describeProbeTarget(profile: ServerProfile): ProbeTarget | null {
   const outbound = profile.outbound && typeof profile.outbound === 'object' ? profile.outbound : null
   // Prefer outbound's server/port — that's what sing-box would dial. The
   // top-level ServerProfile copy is a UI display cache.
@@ -75,8 +90,13 @@ function describeProbeTarget(profile: ServerProfile): ProbeTarget | null {
   // sending protocol-specific bytes.
   const tls = outbound && outbound.tls && typeof outbound.tls === 'object' ? outbound.tls : null
   const needsTls = tls ? tls.enabled !== false : false
+  // Reality outbounds present a camouflage SNI — safe to leak. Plain TLS
+  // would leak the provider's real front, so we must NOT do a TLS handshake
+  // for those over a direct (untunnelled) path.
+  const isReality = Boolean(tls && tls.reality && typeof tls.reality === 'object' && tls.reality.enabled !== false)
+  const tlsLeaksSni = needsTls && !isReality
 
-  return { host, port, serverName, needsTls }
+  return { host, port, serverName, needsTls, tlsLeaksSni }
 }
 
 function shouldProbeViaTunnel(): { host: string; port: number } | null {
@@ -178,12 +198,21 @@ export async function checkProfileHealth(profile: ServerProfile): Promise<KeyHea
     return { profileId: profile.id, online: false, latencyMs: null, reason }
   }
 
-  if (!target.needsTls) {
+  // Decide whether to run the TLS rung. We skip it when the handshake would
+  // leak the provider's real front SNI over a direct path (tlsLeaksSni) —
+  // a TCP connect success is then our "online" verdict. Reality keys
+  // (tlsLeaksSni=false) still get the full handshake since their SNI is
+  // camouflage. If a future build adds a real proxy-out probe path, the
+  // `tunnel` check here can be widened to allow TLS for plain-TLS keys too.
+  const runTls = target.needsTls && !target.tlsLeaksSni
+
+  if (!runTls) {
     const latency = Date.now() - start
     try { socket.destroy() } catch { /* ignore */ }
     logEvent('debug', 'key-health', 'probe ok (tcp-only)', {
       profileId: profile.id, host: target.host, port: target.port,
-      latencyMs: latency, viaTunnel: Boolean(tunnel)
+      latencyMs: latency, viaTunnel: Boolean(tunnel),
+      tlsSkipped: target.needsTls && target.tlsLeaksSni ? 'sni-leak-guard' : 'no-tls'
     })
     return { profileId: profile.id, online: true, latencyMs: latency }
   }

@@ -39,6 +39,18 @@ Switched curlBound from exec(string) to execFile('curl.exe', [args]) so the
 adapter IP/url are literal argv, no shell. (Lower risk — ip was
 local-adapter-derived — but no reason to keep a shell string.)
 
+### D4 — keyHealthChecker: misleading "via tunnel" + plain-TLS SNI leak [FIXED]
+The module's doc claimed it probes "THROUGH the tunnel" via the mixed-direct-in
+SOCKS5 port — but that inbound is hard-routed to `direct-out` in the sing-box
+config, so the probe always egresses via the physical adapter. Worse: for
+plain-TLS keys it ran a full TLS handshake to the key's REAL `server_name`
+straight out the physical adapter — the exact TSPU SNI-blackhole risk the rest
+of the codebase carefully avoids. FIXED: corrected the doc to describe the
+real (direct) routing; added a tlsLeaksSni classification (Reality SNI is
+camouflage → safe; plain TLS → real front → unsafe) and the TLS rung now runs
+ONLY for Reality keys, falling back to a no-SNI TCP-connect verdict for
+plain-TLS keys. +5 tests.
+
 ---
 
 ## PASS 1 — Confirmed bugs (all fixed)
