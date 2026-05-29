@@ -74,10 +74,15 @@ vi.mock('./competingTunDetector', () => ({
 // require()s this module at call time. vi.hoisted so the state object exists
 // before the hoisted vi.mock factory closes over it.
 const dnsState = vi.hoisted(() => ({ active: null as any }))
+const domainState = vi.hoisted(() => ({ rules: [] as Array<Record<string, any>> }))
 vi.mock('./dnsProfiles', () => ({
   dnsProfiles: {
     getActiveDnsProfile: () => dnsState.active
   }
+}))
+
+vi.mock('./domainRouting', () => ({
+  generateDomainRouteRules: () => domainState.rules
 }))
 
 import { generateSingboxConfig, parseProxyAddress } from './tunController'
@@ -333,5 +338,32 @@ describe('generateSingboxConfig DNS profile', () => {
     const cfg = gen({ outbound: { ...plainTlsOutbound, server: '1.2.3.4' } })
     expect(cfg.route.final).toBe('proxy-out')
     expect(cfg.dns.servers.some((s: any) => s.tag === 'dns-remote')).toBe(true)
+  })
+})
+
+// ─── Domain routing injection (D1 — was dead) ──────────────────────────────────
+
+describe('generateSingboxConfig domain routing', () => {
+  afterEach(() => {
+    domainState.rules = []
+  })
+
+  it('injects domain rules into route.rules after hijack-dns, before private ranges', () => {
+    domainState.rules = [{ outbound: 'block-out', domain: ['ads.example.com'] }]
+    const cfg = gen({ outbound: { ...plainTlsOutbound, server: '1.2.3.4' } })
+    const rules = cfg.route.rules
+    const hijackIdx = rules.findIndex((r) => r.action === 'hijack-dns')
+    const domainIdx = rules.findIndex((r) => Array.isArray(r.domain) && r.domain.includes('ads.example.com'))
+    const privateIdx = rules.findIndex((r) => Array.isArray(r.ip_cidr) && r.ip_cidr.includes('127.0.0.0/8'))
+    expect(domainIdx).toBeGreaterThan(hijackIdx)
+    expect(domainIdx).toBeLessThan(privateIdx)
+    expect(rules[domainIdx].outbound).toBe('block-out')
+  })
+
+  it('adds no domain rules when the user has none', () => {
+    domainState.rules = []
+    const cfg = gen({ outbound: { ...plainTlsOutbound, server: '1.2.3.4' } })
+    const hasDomainRule = cfg.route.rules.some((r) => r.domain || r.domain_suffix || r.domain_keyword)
+    expect(hasDomainRule).toBe(false)
   })
 })

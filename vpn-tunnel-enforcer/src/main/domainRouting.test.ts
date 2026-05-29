@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { matchDomain, parseDomainList } from './domainRouting'
+import { matchDomain, parseDomainList, domainRulesToSingboxRules } from './domainRouting'
 import type { DomainRule } from '../shared/ipc-types'
 
 // ─── Helper ──────────────────────────────────────────────────────────────────
@@ -133,5 +133,61 @@ describe('parseDomainList', () => {
     const result = parseDomainList(text)
     const ids = result.map((r) => r.id)
     expect(new Set(ids).size).toBe(3)
+  })
+})
+
+// ─── domainRulesToSingboxRules (D1: was a dead feature) ───────────────────────
+
+describe('domainRulesToSingboxRules', () => {
+  it('returns [] for empty input', () => {
+    expect(domainRulesToSingboxRules([])).toEqual([])
+  })
+
+  it('maps actions to the right outbounds', () => {
+    const rules = [
+      makeRule('a.com', 0, 'vpn'),
+      makeRule('b.com', 1, 'direct'),
+      makeRule('c.com', 2, 'block')
+    ]
+    const out = domainRulesToSingboxRules(rules)
+    expect(out[0].outbound).toBe('proxy-out')
+    expect(out[1].outbound).toBe('direct-out')
+    expect(out[2].outbound).toBe('block-out')
+  })
+
+  it('maps *.x.com to domain_suffix .x.com (subdomains only)', () => {
+    const out = domainRulesToSingboxRules([makeRule('*.example.com', 0, 'direct')])
+    expect(out[0].domain_suffix).toEqual(['.example.com'])
+    expect(out[0].domain).toBeUndefined()
+  })
+
+  it('maps an exact domain to domain[]', () => {
+    const out = domainRulesToSingboxRules([makeRule('example.com', 0, 'vpn')])
+    expect(out[0].domain).toEqual(['example.com'])
+  })
+
+  it('maps a dotless token to domain_keyword[]', () => {
+    const out = domainRulesToSingboxRules([makeRule('telegram', 0, 'block')])
+    expect(out[0].domain_keyword).toEqual(['telegram'])
+  })
+
+  it('emits rules sorted ascending by priority (first-match-wins order)', () => {
+    const rules = [
+      makeRule('low.com', 5, 'block'),
+      makeRule('high.com', 0, 'direct')
+    ]
+    const out = domainRulesToSingboxRules(rules)
+    expect(out[0].domain).toEqual(['high.com'])
+    expect(out[1].domain).toEqual(['low.com'])
+  })
+
+  it('skips empty / whitespace patterns', () => {
+    const rules = [
+      { id: 'x', pattern: '   ', action: 'vpn' as const, priority: 0, hitCount: 0 },
+      makeRule('ok.com', 1, 'vpn')
+    ]
+    const out = domainRulesToSingboxRules(rules)
+    expect(out).toHaveLength(1)
+    expect(out[0].domain).toEqual(['ok.com'])
   })
 })

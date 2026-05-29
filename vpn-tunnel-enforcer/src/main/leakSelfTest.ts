@@ -30,12 +30,13 @@
  * after a user-initiated stop, when the curl probes outlived the rollback
  * and saw the real public IP through a now-unblocked adapter.
  */
-import { exec as execCb } from 'child_process'
+import { exec as execCb, execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import { networkInterfaces } from 'os'
 import { logEvent } from './appLogger'
 
 const exec = promisify(execCb)
+const execFile = promisify(execFileCb)
 
 export interface AdapterReach {
   alias: string
@@ -98,9 +99,11 @@ async function curlBound(ip: string, url: string, timeoutSec = 4): Promise<{ std
   // We want curl to succeed (stdout = result) OR fail cleanly. We capture
   // both so we can log details. The `--interface` flag forces the TCP source
   // IP, which is what we want for testing physical adapter reachability.
-  const cmd = `curl.exe -4 --interface ${ip} -sS --max-time ${timeoutSec} --connect-timeout ${timeoutSec} ${url}`
+  // execFile (argv-style, no cmd.exe shell) so the adapter IP / url are passed
+  // as literal arguments — no shell-metacharacter surface.
+  const args = ['-4', '--interface', ip, '-sS', '--max-time', String(timeoutSec), '--connect-timeout', String(timeoutSec), url]
   try {
-    const { stdout, stderr } = await exec(cmd, { windowsHide: true, timeout: (timeoutSec + 2) * 1000, encoding: 'utf8' })
+    const { stdout, stderr } = await execFile('curl.exe', args, { windowsHide: true, timeout: (timeoutSec + 2) * 1000, encoding: 'utf8' })
     return { stdout, exitCode: 0, stderr: stderr || '' }
   } catch (err: any) {
     return {

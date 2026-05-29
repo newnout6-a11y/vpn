@@ -239,6 +239,68 @@ export function recordHit(ruleId: string): void {
   sessionHitCounts.set(ruleId, current + 1)
 }
 
+// ─── Sing-box route rule generation ──────────────────────────────────────────
+
+/**
+ * Translate the user's domain rules into sing-box 1.13 route rules, ready to
+ * be spliced into the `route.rules` array of the generated config.
+ *
+ * Mapping:
+ *   - action 'direct' → outbound 'direct-out' (bypass VPN)
+ *   - action 'vpn'    → outbound 'proxy-out'  (force through VPN)
+ *   - action 'block'  → outbound 'block-out'  (drop)
+ *
+ * Pattern → sing-box matcher:
+ *   - "*.example.com"  → domain_suffix ".example.com"  (subdomains only — the
+ *     leading dot makes sing-box NOT match the bare apex, matching our
+ *     matchDomain() wildcard semantics)
+ *   - "example.com"    → domain "example.com"          (exact)
+ *   - "keyword"        → (no dot, no wildcard) domain_keyword "keyword"
+ *
+ * Rules are grouped by (action) and emitted in priority order. Because
+ * sing-box evaluates route rules top-to-bottom and first-match-wins, and we
+ * inject these BEFORE the catch-all final, the lowest-priority-number rule
+ * must come first — so we sort ascending by priority and emit one rule object
+ * per DomainRule (sing-box dedups internally; correctness over compactness).
+ *
+ * Returns [] when there are no rules, so callers can spread unconditionally.
+ */
+export function generateDomainRouteRules(): Array<Record<string, any>> {
+  return domainRulesToSingboxRules(getRules())
+}
+
+/**
+ * Pure translation of DomainRule[] → sing-box route rule objects. Exported
+ * separately so it can be unit-tested without touching the electron-store.
+ */
+export function domainRulesToSingboxRules(input: DomainRule[]): Array<Record<string, any>> {
+  const rules = input
+    .filter((r) => r && typeof r.pattern === 'string' && r.pattern.trim())
+    .sort((a, b) => a.priority - b.priority)
+
+  const outboundFor = (action: DomainAction): string =>
+    action === 'direct' ? 'direct-out' : action === 'block' ? 'block-out' : 'proxy-out'
+
+  const result: Array<Record<string, any>> = []
+  for (const rule of rules) {
+    const pattern = rule.pattern.trim().toLowerCase()
+    const rb: Record<string, any> = { outbound: outboundFor(rule.action) }
+
+    if (pattern.startsWith('*.')) {
+      const base = pattern.slice(2)
+      if (!base) continue
+      rb.domain_suffix = [`.${base}`]
+    } else if (pattern.includes('.')) {
+      rb.domain = [pattern]
+    } else {
+      // No dot, no wildcard — treat as a keyword match (e.g. "telegram").
+      rb.domain_keyword = [pattern]
+    }
+    result.push(rb)
+  }
+  return result
+}
+
 // ─── Public API ──────────────────────────────────────────────────────────────
 
 export const domainRoutingService = {

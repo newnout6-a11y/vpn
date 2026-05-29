@@ -29,6 +29,7 @@ import { ipMonitor } from './ipMonitor'
 import { cancelLeakSelfTest } from './leakSelfTest'
 import { startCompetingTunWatch, stopCompetingTunWatch } from './competingTunDetector'
 import { dnsProfiles } from './dnsProfiles'
+import { generateDomainRouteRules } from './domainRouting'
 
 const exec = promisify(execCb)
 const execFile = promisify(execFileCb)
@@ -320,6 +321,20 @@ function uniqueProcessNames(names: string[]): string[] {
   return result
 }
 
+/**
+ * Thin wrapper over domainRouting.generateDomainRouteRules so a failure in the
+ * domain-routing store can never break tunnel startup — we'd rather start the
+ * tunnel without the user's domain rules than not start at all.
+ */
+function buildDomainRouteRules(): Array<Record<string, any>> {
+  try {
+    return generateDomainRouteRules()
+  } catch (err) {
+    logEvent('warn', 'tun', 'failed to build domain route rules — starting without them', err)
+    return []
+  }
+}
+
 const DNS_STRATEGY = 'ipv4_only'
 const BOOTSTRAP_DNS_TAG = 'dns-bootstrap'
 
@@ -604,6 +619,12 @@ export function generateSingboxConfig(
         ),
         { action: 'sniff' },
         { protocol: 'dns', action: 'hijack-dns' },
+        // User-defined per-domain rules (Settings → Domain Routing). Injected
+        // AFTER sniff (so the SNI/Host is available to match on) and the DNS
+        // hijack, but BEFORE the private-range and catch-all rules so an
+        // explicit "block youtube.com" / "route netflix direct" actually wins.
+        // Empty array when the user has no rules — zero overhead.
+        ...buildDomainRouteRules(),
         { ip_cidr: privateRanges, outbound: 'direct-out' },
         { ip_cidr: ['::/0'], outbound: 'block-out' },
         // HTTP proxy outbound has no UDP transport at all, so every UDP packet

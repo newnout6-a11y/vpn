@@ -8,7 +8,41 @@ Deep manual audit of vpn-tunnel-enforcer main process. Status: COMPREHENSIVE PAS
 read in full; preload bridge + renderer store/Dashboard/Servers audited.
 Status: COMPLETE.
 
-## Confirmed bugs (to fix)
+---
+
+# PASS 2 — Deep network/logic audit (weak/crooked/dead code, not just bugs)
+
+Focus: networking correctness, RU/DPI fitness, security, and code that works
+through crutches or silently does nothing.
+
+## D-series findings
+
+### D1 — domainRouting is a fully DEAD feature [FIXED]
+domainRoutingService.getRules()/matchAndRecord() were NEVER consulted when
+building the sing-box config — per-domain rules (vpn/direct/block, priority,
+wildcards, file import) reached nothing. FIXED: added
+domainRulesToSingboxRules() (pure) + generateDomainRouteRules(), wired into
+generateSingboxConfig right after sniff + hijack-dns and before the
+private-range/catch-all rules. `*.x.com`→domain_suffix `.x.com`, exact→domain,
+dotless→domain_keyword; actions map to direct-out/proxy-out/block-out; emitted
+in ascending priority (first-match-wins). +8 tests.
+
+### D2 — icmpPing: command injection via subscription-controlled host [FIXED/security]
+serverPicker.icmpPing ran `exec('ping.exe ... ' + host)` through cmd.exe with
+host interpolated raw from imported subscription content → a server like
+`8.8.8.8 & calc` was arbitrary command execution. FIXED: execFile (no shell)
++ isProbablyHostOrIp() allow-list gate (rejects whitespace/metacharacters).
++6 tests incl. injection payloads.
+
+### D3 — leakSelfTest.curlBound: shell exec with interpolated value [FIXED/security-lite]
+Switched curlBound from exec(string) to execFile('curl.exe', [args]) so the
+adapter IP/url are literal argv, no shell. (Lower risk — ip was
+local-adapter-derived — but no reason to keep a shell string.)
+
+---
+
+## PASS 1 — Confirmed bugs (all fixed)
+
 
 ### B1 (was C4) — tunController: clash_api port not bind-safe → intermittent WSAEACCES
 `generateSingboxConfig` sets `clashPort = randomLocalPort()` (pure random,

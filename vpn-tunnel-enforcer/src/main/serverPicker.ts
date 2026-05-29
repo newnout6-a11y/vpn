@@ -301,17 +301,45 @@ async function smartOfflinePing(host: string, port: number): Promise<number | nu
  * `decodeMaybeCp866` helper handles both encodings; the regex matches
  * either the English "time=53ms" or the Russian "время=53мс" form.
  */
+/**
+ * Conservative allow-list for values we pass to ping.exe as a host argument.
+ * Accepts IPv4, bracketed/bare IPv6, and DNS hostnames (letters, digits,
+ * dots, hyphens). Rejects anything with whitespace or shell metacharacters —
+ * defence in depth on top of the execFile (no-shell) invocation, and a way to
+ * skip spawning a process for obviously-bad input from imported subscriptions.
+ */
+export function isProbablyHostOrIp(host: string): boolean {
+  const h = String(host || '').trim()
+  if (!h || h.length > 255) return false
+  // No shell metacharacters / whitespace ever.
+  if (/[\s&|;`$<>(){}[\]"'\\^%!]/.test(h)) return false
+  // Bare IPv6 (contains a colon) — allow the hex+colon shape only.
+  if (h.includes(':')) return /^[0-9a-fA-F:]+$/.test(h)
+  // IPv4 or hostname: letters, digits, dots, hyphens.
+  return /^[a-zA-Z0-9.-]+$/.test(h)
+}
+
 async function icmpPing(host: string, timeoutMs: number): Promise<number | null> {
   if (process.platform !== 'win32') return null
+  // Hard gate: only ever hand a clean hostname/IP to ping.exe. `host` comes
+  // from imported subscription content (outbound.server), so a malicious
+  // subscription could otherwise smuggle shell metacharacters. We also use
+  // execFile (no shell) below as defence-in-depth, but reject anything that
+  // isn't a plausible host up front so we never even spawn the process for
+  // garbage input.
+  if (!isProbablyHostOrIp(host)) return null
   try {
     // `encoding: 'buffer'` keeps the raw bytes — we decode below. The
     // outer `timeout` is a safety net in case ping.exe itself hangs;
-    // ping's own `-w` is the per-echo deadline.
-    const { stdout } = await exec(
-      `ping.exe -n 1 -w ${timeoutMs} ${host}`,
+    // ping's own `-w` is the per-echo deadline. execFile (NOT exec) so the
+    // arguments are passed to ping.exe directly without a cmd.exe shell —
+    // no command-injection surface from `host`.
+    const { stdout } = await execFile(
+      'ping.exe',
+      ['-n', '1', '-w', String(Math.max(1, Math.floor(timeoutMs))), host],
       { windowsHide: true, timeout: timeoutMs + 1500, encoding: 'buffer', maxBuffer: 64 * 1024 }
     )
-    const text = decodeMaybeCp866(stdout as Buffer)
+    const text = decodeMaybeCp866(stdout as unknown as Buffer)
 
     // Sanity gate: ping.exe will *successfully* exit even when the local
     // gateway returns "Host unreachable" / "Сеть недоступна" / TTL expired
