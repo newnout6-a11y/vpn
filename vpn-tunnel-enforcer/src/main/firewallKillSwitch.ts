@@ -1,5 +1,5 @@
 import { app } from 'electron'
-import { mkdir, readFile, writeFile, unlink } from 'fs/promises'
+import { mkdir, readFile, writeFile, unlink, stat } from 'fs/promises'
 import { join } from 'path'
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
@@ -131,8 +131,46 @@ async function ps(script: string, elevated = false, timeout = 30000) {
   } finally {
     if (!elevated) {
       await unlink(scriptPath).catch(() => undefined)
+    } else {
+      // Elevated scripts can't be unlinked synchronously (sudo-prompt may not
+      // have opened the -File yet on return), so we leave THIS run's file and
+      // instead sweep older ones. Without this, every enable/disable/probe
+      // leaves a .ps1 behind forever — a slow disk leak that also keeps adapter
+      // aliases on disk. Delete elevated scripts older than 60s; the in-flight
+      // one is always newer than that.
+      void sweepStaleElevatedScripts(scriptDir, scriptPath).catch(() => undefined)
     }
   }
+}
+
+// Remove leftover elevated .ps1 files older than 60 seconds. The currently
+// running script (`keepPath`) and anything fresh enough to still be in use by
+// a concurrent elevated call are preserved.
+async function sweepStaleElevatedScripts(scriptDir: string, keepPath: string): Promise<void> {
+  const { readdir } = await import('fs/promises')
+  let entries: string[]
+  try {
+    entries = await readdir(scriptDir)
+  } catch {
+    return
+  }
+  const now = Date.now()
+  await Promise.all(
+    entries
+      .filter((name) => name.endsWith('.ps1'))
+      .map(async (name) => {
+        const full = join(scriptDir, name)
+        if (full === keepPath) return
+        try {
+          const st = await stat(full)
+          if (now - st.mtimeMs > 60_000) {
+            await unlink(full).catch(() => undefined)
+          }
+        } catch {
+          // stat failed (file already gone / locked) — skip.
+        }
+      })
+  )
 }
 
 function psSingleQuote(value: string): string {

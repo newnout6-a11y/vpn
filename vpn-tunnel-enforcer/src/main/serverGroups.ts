@@ -229,19 +229,19 @@ function ensureManualKeysGroup(): string {
 // ─── Refresh helper ──────────────────────────────────────────────────────────
 
 /**
- * Stable identity key for dedupe-merging across refreshes. We prefer the
- * exact `sourceUri` (lossless, survives panel-side renames) and fall back
- * to the connection tuple when the source URI isn't available — the latter
- * happens for legacy profiles imported before we started tracking
- * `sourceUri`.
+ * Connection-tuple-only key for a stored ServerProfile. Used by
+ * refreshGroup() to match stored profiles against freshly-resolved
+ * subscription profiles, which only have a tuple to offer. Keeping both
+ * sides on the same key space prevents the "every refresh duplicates the
+ * sourceUri-bearing keys" bug — we deliberately do NOT consult `sourceUri`
+ * here because the fresh side never has a per-line URI at this point.
  */
-function profileKey(p: { sourceUri?: string; server: string; port: number; protocol: string }): string {
-  if (p.sourceUri) return `uri:${p.sourceUri}`
+function profileTupleKey(p: { server: string; port: number; protocol: string }): string {
   return `tuple:${p.server}|${p.port}|${p.protocol}`
 }
 
-function vpnProfileKey(p: VpnProfile, uri?: string): string {
-  if (uri) return `uri:${uri}`
+/** Connection-tuple-only key for a freshly-resolved VpnProfile. */
+function vpnProfileTupleKey(p: VpnProfile): string {
   const ob = p.outbound || {}
   return `tuple:${ob.server || ''}|${Number(ob.server_port || 0)}|${p.protocol}`
 }
@@ -379,7 +379,16 @@ export async function refreshGroup(
   const inGroupExisting = existing.filter(p => p.groupId === groupId)
   const outOfGroup = existing.filter(p => p.groupId !== groupId)
   const existingByKey = new Map<string, ServerProfile>()
-  for (const p of inGroupExisting) existingByKey.set(profileKey(p), p)
+  // IMPORTANT: index existing profiles by their CONNECTION TUPLE, not by
+  // profileKey(). profileKey() prefers `uri:<sourceUri>` when a profile has a
+  // sourceUri, but the fresh profiles coming back from a subscription refresh
+  // have no per-line URI here, so vpnProfileKey(fresh) always produces a
+  // `tuple:` key. Mixing the two key spaces means every profile that carries a
+  // sourceUri (now common, since backfillProfileSourceUris populates it) fails
+  // to match its fresh counterpart → the refresh re-adds it as a duplicate and
+  // keeps the stale copy. Keying both sides by the tuple keeps the match
+  // symmetric.
+  for (const p of inGroupExisting) existingByKey.set(profileTupleKey(p), p)
 
   let addedCount = 0
   let updatedCount = 0
@@ -391,7 +400,7 @@ export async function refreshGroup(
     // single-key inputs we could backfill from the input itself. The
     // subscription-URL case has no per-line URI handy here, so we rely on
     // the connection-tuple key — same behaviour as the legacy code.
-    const key = vpnProfileKey(fresh)
+    const key = vpnProfileTupleKey(fresh)
     if (seenKeys.has(key)) continue
     seenKeys.add(key)
 
@@ -433,7 +442,7 @@ export async function refreshGroup(
   // lastSeenInSubscriptionAt). We just count them for telemetry.
   let removedCount = 0
   for (const prior of inGroupExisting) {
-    if (!seenKeys.has(profileKey(prior))) {
+    if (!seenKeys.has(profileTupleKey(prior))) {
       merged.push(prior)
       removedCount++
     }
@@ -609,3 +618,5 @@ export {
   findGroupBySourceUrl,
   ensureManualKeysGroup
 }
+
+

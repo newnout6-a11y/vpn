@@ -151,6 +151,35 @@ if (process.platform === 'win32') {
   app.setAppUserModelId(APP_USER_MODEL_ID)
 }
 
+// ─── Single-instance lock ────────────────────────────────────────────────────
+//
+// A VPN enforcer must never run as two instances. Both would manage the SAME
+// kill-switch manifest, TUN adapter and adapter-lockdown manifest. The most
+// dangerous race: instance B's startup stale-recovery could roll back instance
+// A's LIVE kill-switch / adapter lockdown, opening a real IP-leak window while
+// A still believes its tunnel is protected. They'd also double-register IPC,
+// fight over the tray, and issue conflicting start/stop.
+//
+// requestSingleInstanceLock() returns false in the second process; we quit it
+// immediately. The first process gets a 'second-instance' event and focuses
+// its existing window so the user sees the running app instead of nothing.
+//
+// Skipped in dev (ELECTRON_RENDERER_URL set) so hot-reload / multiple dev
+// launches aren't blocked.
+if (app.isPackaged && !app.requestSingleInstanceLock()) {
+  // We are the second instance. Do NOT run any cleanup/recovery — that would
+  // touch the first instance's live firewall/adapter state. Just exit hard.
+  app.exit(0)
+} else {
+  app.on('second-instance', () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      if (!mainWindow.isVisible()) mainWindow.show()
+      mainWindow.focus()
+    }
+  })
+}
+
 function getIconPath() {
   if (process.env.ELECTRON_RENDERER_URL) {
     return join(__dirname, '../../resources/icon.ico')

@@ -145,10 +145,20 @@ function pickFreeLocalPort(exclude: number[] = []): Promise<number> {
 }
 
 function randomSecret(): string {
-  // 32 hex chars = 128 bits. Generated per run; never persisted.
-  const bytes = new Uint8Array(16)
-  for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256)
-  return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('')
+  // 32 hex chars = 128 bits. Generated per run; never persisted. Use the CSPRNG
+  // (crypto.randomBytes) rather than Math.random: this token gates the local
+  // clash_api controller, and Math.random is predictable enough that a hostile
+  // local process could feasibly guess it. crypto is cheap and removes all doubt.
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { randomBytes } = require('crypto') as typeof import('crypto')
+    return randomBytes(16).toString('hex')
+  } catch {
+    // Fallback only if crypto is somehow unavailable (never on Electron/Node).
+    const bytes = new Uint8Array(16)
+    for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256)
+    return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('')
+  }
 }
 let currentStatus: TunStatus = {
   running: false,
@@ -353,7 +363,7 @@ export function generateSingboxConfig(
   upstream: string | { outbound: Record<string, any>; proxyType?: 'socks5' | 'http' },
   proxyType: 'socks5' | 'http' = 'socks5',
   directProcessNames: string[] = [],
-  options: { stealthMode?: boolean; directProxyPortOverride?: number } = {}
+  options: { stealthMode?: boolean; directProxyPortOverride?: number; clashPortOverride?: number } = {}
 ): object {
   // Stealth mode (TSPU/DPI bypass) toggles two knobs:
   //   1. TUN MTU 1500 → 1280 — encrypted payload sizes drift away from
@@ -446,7 +456,18 @@ export function generateSingboxConfig(
   // 127.0.0.1 so it is only reachable from the same machine, and the
   // secret is mandatory — anyone running another userland process on
   // the box still cannot probe outbounds without knowing the token.
-  const clashPort = randomLocalPort()
+  //
+  // The port MUST be bind-safe. A pure random pick in 49152-65535 can land
+  // inside a Windows Hyper-V/WSL "excluded port range", and then sing-box
+  // fails to bind the clash_api external_controller with WSAEACCES and
+  // exits at startup — the same failure mode we already pre-resolve away
+  // for the mixed-direct-in port. prepareRuntime pre-resolves this via
+  // pickFreeLocalPort and passes clashPortOverride; the random fallback
+  // only kicks in for direct callers (tests) that don't supply one.
+  let clashPort = options.clashPortOverride
+  if (typeof clashPort !== 'number' || !Number.isInteger(clashPort) || clashPort <= 0 || clashPort > 65535) {
+    clashPort = randomLocalPort()
+  }
   const clashSecret = randomSecret()
   clashApiInfo = { port: clashPort, secret: clashSecret }
 
@@ -1083,15 +1104,32 @@ async function prepareRuntime(
   const logPath = join(runtimeDir, 'sing-box.log')
   const logPrevPath = join(runtimeDir, 'sing-box.prev.log')
 
-  // Kick the OS port pick off FIRST so it overlaps with the file IO below.
+  // Kick the OS port picks off FIRST so they overlap with the file IO below.
   // pickFreeLocalPort is a couple of bind/close round-trips which the kernel
   // can satisfy concurrently while we're stat-ing the bundled resources.
   // generateSingboxConfig falls back to randomLocalPort if no override is
   // supplied, so direct callers (e.g. tests) still work.
-  const portPromise = pickFreeLocalPort().catch((err) => {
-    logEvent('warn', 'tun', 'pickFreeLocalPort failed — falling back to random port', err)
-    return undefined as number | undefined
-  })
+  //
+  // We resolve BOTH the mixed-direct-in port AND the clash_api controller
+  // port through the OS, because either one landing inside a Windows
+  // Hyper-V/WSL excluded port range makes sing-box fail to bind (WSAEACCES)
+  // and exit at startup. The clash port is resolved second with the direct
+  // port excluded so the two never collide.
+  const portsPromise = (async () => {
+    let directPort: number | undefined
+    let clashPort: number | undefined
+    try {
+      directPort = await pickFreeLocalPort()
+    } catch (err) {
+      logEvent('warn', 'tun', 'pickFreeLocalPort (direct) failed — falling back to random port', err)
+    }
+    try {
+      clashPort = await pickFreeLocalPort(directPort ? [directPort] : [])
+    } catch (err) {
+      logEvent('warn', 'tun', 'pickFreeLocalPort (clash) failed — falling back to random port', err)
+    }
+    return { directPort, clashPort }
+  })()
 
   // Rotate previous log so each run has a clean slate; previous one kept as .prev.log.
   try {
@@ -1117,14 +1155,15 @@ async function prepareRuntime(
     wintun: wintunCopied ? 'copied' : 'reused'
   })
 
-  // Pre-resolve the mixed-direct-in port via the OS so we never land inside a
-  // Windows Hyper-V/WSL excluded port range (which causes sing-box to fail
-  // bind with WSAEACCES).
-  const directProxyPortOverride = await portPromise
+  // Pre-resolve the mixed-direct-in port AND the clash_api port via the OS
+  // so we never land inside a Windows Hyper-V/WSL excluded port range
+  // (which causes sing-box to fail bind with WSAEACCES).
+  const { directPort: directProxyPortOverride, clashPort: clashPortOverride } = await portsPromise
 
   const config = generateSingboxConfig(upstream, proxyType, directProcessNames, {
     ...options,
-    directProxyPortOverride
+    directProxyPortOverride,
+    clashPortOverride
   })
   await writeFile(configPath, JSON.stringify(config, null, 2), 'utf-8')
 
@@ -2122,6 +2161,13 @@ export const tunController = {
     }
 
     if (cleanupErrors.length > 0) {
+      // Resume leak detection even on a partial-cleanup failure. Suspending
+      // it without ever resuming (the bug this fixes) meant a single failed
+      // teardown step left leak monitoring OFF until the next app restart —
+      // exactly when the user most needs it, because teardown already went
+      // wrong. Resume here so the periodic monitor can re-evaluate against a
+      // fresh baseline.
+      ipMonitor.resume()
       return { success: false, error: cleanupErrors.join(' | ') }
     }
 
