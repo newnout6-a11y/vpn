@@ -295,6 +295,28 @@ export async function applyPhysicalAdapterLockdown(tunDnsIpv4: string, options: 
     return { applied: true, adapters: 0, warnings: ['no physical adapters found', ...transitionWarnings] }
   }
 
+  // Write a PENDING manifest BEFORE we touch any adapter. If the app crashes
+  // mid-loop, startup crash-recovery (rollbackPhysicalAdapterLockdownIfApplied)
+  // still finds a manifest and can re-enable IPv6 / restore DNS. Without this
+  // pre-write, a crash between the first Disable-NetAdapterBinding and the
+  // final writeManifest() left IPv6 disabled on physical adapters with NO
+  // record to roll back from — the user's IPv6 stayed broken until they
+  // manually re-enabled it. We mark each adapter with the change we're ABOUT
+  // to make (forcedIpv6Off when it currently has IPv6 on; forcedDnsTo when
+  // forceDns) so rollback restores exactly what we intend to change.
+  const pendingAdapters: AdapterSnapshot[] = adapters.map((a) => ({
+    ...a,
+    forcedIpv6Off: a.ipv6Enabled,
+    forcedDnsTo: forceDns ? [tunDnsIpv4] : null
+  }))
+  await writeManifest({
+    appliedAt: Date.now(),
+    tunDnsIpv4,
+    forceDns,
+    adapters: pendingAdapters,
+    transitionAdapters
+  })
+
   const warnings: string[] = []
   for (const a of adapters) {
     try {
@@ -324,6 +346,9 @@ try { Clear-DnsClientCache -ErrorAction Stop; Write-Host 'cache:clear' } catch {
   }
   warnings.push(...await applyTransitionAdapterLockdown(transitionAdapters))
 
+  // Overwrite the pending manifest with the ACTUAL outcome per adapter (some
+  // may have only partially applied). Rollback now restores exactly what was
+  // really changed.
   const manifest: LockdownManifest = {
     appliedAt: Date.now(),
     tunDnsIpv4,
