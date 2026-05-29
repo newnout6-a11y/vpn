@@ -119,6 +119,41 @@ The definitive bypass test remains "Проверить ключи" (TLS/Reality 
 keyHealthChecker), which the row UI already prioritises over raw ping.
 +7 tests (parseIcmpReply).
 
+### D6.5 — pingAll poisoned the active profile with tunnel-RTT, surviving disconnect [FIXED]
+User report: "другие норм пингуются, а выбранный всё равно криво" (screenshot:
+right-side list 16-817 ms realistic, but "Текущий профиль AE ОАЭ" pill 2 ms).
+Two combined bugs (one main, two renderer):
+
+(M) `serverPicker.pingAll`, when called while the tunnel was UP, measured a
+    SINGLE tunnel-RTT (HTTPS GET to yandex/gosuslugi via the active outbound
+    — typically 2-5 ms once Reality is warm) and stamped it onto the ACTIVE
+    profile's persisted `ping`/`status`/`lastChecked` fields. The dropdown row
+    (`ProfileSelectorInline`) reads `profile.ping` directly to render
+    "· X ms" next to the protocol. After disconnect the bogus value stayed
+    in the store forever — until the next OFFLINE pingAll, which the user
+    never explicitly triggered for the active profile.
+(R1) `ProfileSelectorInline.pingMs` (component state) wasn't reset on
+    `tunRunning` transitions, so a value pinged WHILE connected (tunnel-RTT,
+    rendered with "≈ " prefix) kept showing as plain "X ms" after disconnect
+    (the prefix is gated on `tunRunning`, the value isn't).
+(R2) `DashboardSide.pings` (right-list state) had the same staleness flaw,
+    though it was less visible because the user usually re-pings the list.
+
+FIX: 
+  (M) `pingAll` while the tunnel is up is now a no-op on persisted state.
+      The pill button still gets a live tunnel-RTT via its own `serversPingOne`
+      IPC call (which goes through `tunnelHttpProbe`), but nothing ever lands
+      in the store from that path. Per-server numbers are written only when
+      the tunnel is DOWN — when they actually mean per-server latency.
+  (M2) Added `clearStaleStoredPings` migration, run on every startup, that
+      wipes `ping`/`status`/`lastChecked` from every saved profile. This
+      cleans up data already poisoned by older builds and gives every
+      session a clean baseline.
+  (R1, R2) Both components now `setPingMs(null)` / `setPings({})` whenever
+      `tunRunning` flips. The two ping modes (per-server when off,
+      tunnel-RTT when on) never bleed into each other.
++7 tests (3 pingAll-tunnel-up + 4 clearStaleStoredPings). 208 → 215.
+
 ### D5 — geolocateAll: rate-limit-violating per-IP geo loop [FIXED]
 Country labels were filled via ipapi.co one IP at a time, 3 concurrent with a
 1.1s inter-batch sleep — i.e. ~2.7 req/s against a free tier the code's own

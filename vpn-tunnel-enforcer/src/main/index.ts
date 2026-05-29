@@ -1154,6 +1154,13 @@ app.whenReady().then(async () => {
   // classifier re-bin previously-orphaned keys on the next migration pass.
   // Idempotent — safe to run on every startup.
   serverPicker.backfillProfileSourceUris()
+
+  // One-time wipe of stale stored ping/status/lastChecked. Earlier builds
+  // (pre-D6.5) stamped tunnel-RTT onto the active profile during connected
+  // pingAll sweeps, leaving fake "~2 ms" values that survived disconnect.
+  // We clear them on startup so the user starts every session from a clean
+  // baseline; the next offline pingAll repopulates with real numbers.
+  serverPicker.clearStaleStoredPings()
   // Fire-and-forget background geolocation pass for any profile that doesn't
   // already have a country tag. This makes country labels appear on the
   // dashboard without the user having to ping every server manually.

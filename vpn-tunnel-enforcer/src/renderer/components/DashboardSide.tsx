@@ -86,6 +86,7 @@ function groupPillTone(status: ServerGroup['status']): string {
 function QuickServers() {
   const { t } = useTranslation()
   const addLog = useAppStore(s => s.addLog)
+  const tunRunning = useAppStore(s => s.tunRunning)
 
   const [profiles, setProfiles] = useState<ServerProfile[]>([])
   const [groups, setGroups] = useState<ServerGroup[]>([])
@@ -136,6 +137,17 @@ function QuickServers() {
       window.removeEventListener(SERVER_CHANGED_EVENT, handler)
     }
   }, [refresh])
+
+  // Drop cached per-row ping numbers whenever the tunnel state flips. Pings
+  // measured while the tunnel was UP are tunnel-RTT (every row would show
+  // the same number), and pings measured while DOWN are per-server. Mixing
+  // them in the same map produces "выбранный криво, остальные норм" type
+  // confusion — see pingServer dispatch in serverPicker.ts. Forcing a
+  // clean slate on each transition guarantees the user is always looking at
+  // numbers that mean what the column header claims.
+  useEffect(() => {
+    setPings({})
+  }, [tunRunning])
 
   type Row = {
     key: string

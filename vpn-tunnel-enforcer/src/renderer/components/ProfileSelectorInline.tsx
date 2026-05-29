@@ -119,6 +119,18 @@ export function ProfileSelectorInline() {
     if (open) refresh()
   }, [open, refresh])
 
+  // Drop the cached pingMs whenever the tunnel state flips. Without this,
+  // a value measured WHILE the tunnel was up (which is a tunnel-RTT, not a
+  // per-server latency — see pingServer dispatch in serverPicker.ts) keeps
+  // showing as a plain "X ms" after disconnect — the ≈ prefix only fires
+  // while tunRunning is true, so the user can no longer tell the number is
+  // stale and meaningless. Same the other way: an offline measurement taken
+  // before the tunnel came up shouldn't masquerade as a tunnel-RTT either.
+  // Clearing on every transition forces the next click to actually measure.
+  useEffect(() => {
+    setPingMs(null)
+  }, [tunRunning])
+
   const current = profiles.find(p => p.id === activeId) ?? profiles[0] ?? null
   const currentName = current?.name ?? null
   const currentProtocol = current?.protocol ?? null

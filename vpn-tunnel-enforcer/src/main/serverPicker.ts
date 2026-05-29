@@ -562,27 +562,21 @@ export async function pingAll(): Promise<ServerProfile[]> {
   const now = Date.now()
 
   // When the tunnel is UP, a per-server ping is meaningless: every probe goes
-  // through the same tunnel and returns the SAME round-trip number, which we
-  // would otherwise store on every profile and then keep showing as "1 ms on
-  // all servers" long after disconnect. So while connected we do ONE tunnel
-  // RTT measurement and apply it to the ACTIVE profile only, leaving every
-  // other profile's stored ping untouched. Real per-server latency requires
-  // the tunnel to be off (or the "Проверить ключи" TLS probe).
+  // through the same tunnel and returns the SAME round-trip number — the
+  // tunnel itself is the bottleneck, not the remote endpoint. We MUST NOT
+  // stamp that number onto any profile's stored .ping, because:
+  //   1. it would poison the dropdown / right-list UI which read profile.ping
+  //      directly (e.g. ProfileSelectorInline shows " · X ms" for the active
+  //      profile from the stored value);
+  //   2. after disconnect the stale value persists and the user sees a fake
+  //      ~2 ms latency for the active profile while every other profile shows
+  //      a realistic number — the exact "выбранный всё равно криво" symptom.
+  //
+  // So while connected: do nothing to the persisted profile state. The pill
+  // button in ProfileSelectorInline and the LiveTraffic widget already give
+  // the user a live tunnel-RTT readout via separate IPC calls; pingAll only
+  // exists for offline per-server comparison.
   if (tunController.getStatus().running) {
-    const tunnelRtt = await pingServer('', 0) // host/port ignored on the tunnel path
-    const activeId = getActiveProfileId()
-    if (activeId) {
-      const idx = profiles.findIndex((p) => p.id === activeId)
-      if (idx !== -1) {
-        profiles[idx] = {
-          ...profiles[idx],
-          ping: tunnelRtt,
-          status: tunnelRtt !== null ? 'online' : 'offline',
-          lastChecked: now
-        }
-        saveProfiles(profiles)
-      }
-    }
     return profiles
   }
 
@@ -1242,6 +1236,44 @@ export function backfillProfileSourceUris(): void {
   }
 }
 
+/**
+ * One-time cleanup of stored ping/status/lastChecked fields.
+ *
+ * Earlier builds of `pingAll` (pre-D6.5) stamped the tunnel-RTT (~2 ms when
+ * yandex.ru responds fast through Reality) onto the ACTIVE profile's stored
+ * `ping`, then left that value in place even after the tunnel went down.
+ * Result: the dropdown row in ProfileSelectorInline and any other UI that
+ * reads `profile.ping` would proudly show "2 ms" for the active profile
+ * forever — the "выбранный всё равно криво, остальные норм" symptom.
+ *
+ * The fix to pingAll only prevents NEW poisoning. This sweep wipes any
+ * stale data so the user sees a clean "—" until they (or the next offline
+ * pingAll sweep) measure for real. Cheap idempotent operation: O(N) over
+ * the saved profile list, runs once on app startup before the renderer
+ * even asks for the first list.
+ */
+export function clearStaleStoredPings(): void {
+  const profiles = getProfiles()
+  if (!profiles.length) return
+  let changed = 0
+  const cleaned = profiles.map(p => {
+    if (p.ping == null && p.status === 'unknown' && p.lastChecked == null) {
+      return p
+    }
+    changed++
+    const cleanedProfile: ServerProfile = { ...p, ping: null, status: 'unknown' }
+    delete cleanedProfile.lastChecked
+    return cleanedProfile
+  })
+  if (changed > 0) {
+    saveProfiles(cleaned)
+    logEvent('info', 'server-picker', 'cleared stale stored pings on startup', {
+      total: profiles.length,
+      cleared: changed
+    })
+  }
+}
+
 function getProfiles(): ServerProfile[] {
   return store.get('profiles') ?? []
 }
@@ -1862,6 +1894,7 @@ export const serverPicker = {
   backfillMissingOutbounds,
   migrateProfilesIntoGroups,
   backfillProfileSourceUris,
+  clearStaleStoredPings,
   geolocateAll,
   registerHandlers: registerServerPickerHandlers
 }
