@@ -249,6 +249,23 @@ describe('generateSingboxConfig stealth mode', () => {
     expect(out.tls.utls?.fingerprint).toBeTruthy()
     expect(Array.isArray(out.tls.alpn)).toBe(true)
   })
+
+  it('strips multiplex/mux from imported outbounds (DPI-harmful)', () => {
+    const cfg = gen({ outbound: { ...plainTlsOutbound, multiplex: { enabled: true, protocol: 'h2mux' }, mux: { enabled: true } } })
+    const out = cfg.outbounds.find((o) => o.tag === 'proxy-out')!
+    expect(out.multiplex).toBeUndefined()
+    expect(out.mux).toBeUndefined()
+  })
+
+  it('stealth fingerprint pool excludes Safari (implausible on Windows)', () => {
+    // Probe many servers; none should ever get the safari fp.
+    for (let i = 0; i < 50; i++) {
+      const cfg = gen({ outbound: { ...plainTlsOutbound, server: `s${i}.example.com`, uuid: `u${i}` } }, 'socks5', [], { stealthMode: true })
+      const out = cfg.outbounds.find((o) => o.tag === 'proxy-out')!
+      expect(out.tls.utls.fingerprint).not.toBe('safari')
+      expect(['chrome', 'firefox', 'edge']).toContain(out.tls.utls.fingerprint)
+    }
+  })
 })
 
 // ─── UDP blocking ─────────────────────────────────────────────────────────────

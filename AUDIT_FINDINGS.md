@@ -10,7 +10,67 @@ Status: COMPLETE.
 
 ---
 
-# PASS 2 — Deep network/logic audit (weak/crooked/dead code, not just bugs)
+# PASS 3 — DPI/TSPU circumvention research vs our config (2025-2026 intel)
+
+Sources (rephrased, content rephrased for licensing compliance):
+- [Lantern circumvention-corpus: Russia TSPU ECH direct block](https://corpus.lantern.io/findings/2025-niere-encrypted__russia-tspu-ech-direct-block/)
+- [Lantern: GFW ESNI 4-byte segmentation](https://corpus.lantern.io/findings/2020-gfw-esni-blocking__four-byte-segmentation-defeats-gfw-esni/)
+- [Lantern: AnyTLS padding scheme / protocol comparison](https://corpus.lantern.io/findings/2026-anon-anytls-anytls-sing-box-2026__anytls-protocol-comparison-performance-obfuscation/)
+- [Lantern: stateless single-record SNI matcher limitation](https://corpus.lantern.io/findings/2023-niere-poster__gfw-single-record-sni-matcher-limitation/)
+
+Key 2025-2026 facts:
+1. **TSPU upgraded TCP reassembly.** TLS *record* fragmentation ALONE (our
+   current `record_fragment: true`) is now often insufficient — the corpus
+   notes TCP segmentation + TLS record fragmentation are needed *in
+   combination* against ECH/SNI blocking. record_fragment is still useful but
+   no longer a silver bullet.
+2. **First TCP segment ≤4 bytes** (below the 5-byte TLS record header) defeats
+   SNI/ESNI classifiers that can't reassemble across segments. Client-side
+   this is a TCP-level split, distinct from TLS record fragmentation.
+3. **Reality is the strongest VLESS obfuscation** (rated "high"); it embeds
+   auth in a camouflage ClientHello to a real site. We correctly do NOT
+   fragment Reality (would break its handshake) — that's right.
+4. **AnyTLS / padding** is the TCP-only fallback when UDP is blocked, trading
+   throughput for obfuscation. Not worth adding for us now (limited client
+   support, large surface).
+5. **Mux/multiplexing HURTS** under DPI — it makes flow patterns more
+   distinguishable and breaks Reality's per-connection camouflage. We must
+   never enable multiplex for Reality outbounds.
+
+What our config already does RIGHT:
+- uTLS (chrome fp) forced on every TLS outbound — avoids Go-stdlib ClientHello
+  fingerprint that TSPU rate-limits. ✓
+- Reality preserved & never fragmented. ✓
+- record_fragment in stealth mode for non-Reality TLS. ✓ (but see N1)
+- DNS tunnelled through proxy-out (no plaintext DNS leak). ✓
+- IPv6 blocked to prevent leak. ✓
+
+## Network findings (N-series)
+
+### N1 — multiplex must be explicitly stripped from imported outbounds [planned]
+We never SET multiplex, but a user-pasted/subscription outbound can ARRIVE
+with a `multiplex: { enabled: true }` block (some panels ship it). Under DPI
+that's actively harmful (point 5) and especially bad layered on Reality. We
+should defensively delete `multiplex`/`mux` from the proxy outbound in
+sanitizeProxyOutbound unless the user opts in. Low effort, config-safe.
+
+### N2 — record_fragment alone is weakening; document + keep, don't over-trust [info]
+Per point 1, record_fragment is no longer sufficient on its own against
+upgraded TSPU. sing-box's client TLS doesn't expose a separate "first TCP
+segment ≤4 bytes" knob in the stable outbound TLS object the way Xray's
+`fragment` does, so we can't safely add TCP-segmentation without risking
+config-validation failure / version drift. Decision: keep record_fragment,
+do NOT invent unverified TLS fields (would break `sing-box check`), and lean on
+Reality (point 3) as the primary bypass — which our parser already preserves.
+Documented, no code change (correctness > cargo-culting unknown options).
+
+### N3 — stealth uTLS fingerprint pool weak/biased [planned]
+The stealth fp rotation hashes server:port:uuid with a weak `h*31+c` and picks
+from only 4 fps [chrome,firefox,safari,edge]. `safari` on Windows is an
+implausible fingerprint (no Safari on Windows) and stands out. Trim to
+plausible-on-Windows fps [chrome, firefox, edge] and keep deterministic seed.
+
+
 
 Focus: networking correctness, RU/DPI fitness, security, and code that works
 through crutches or silently does nothing.

@@ -423,6 +423,16 @@ function sanitizeProxyOutbound(outbound: Record<string, any>): { outbound: Recor
   delete result.domain_strategy
   delete result.domain_resolver
 
+  // Strip multiplexing. Some panels ship `multiplex: { enabled: true }` (or
+  // the legacy `mux`) in the outbound. Under modern DPI this is actively
+  // harmful: muxing several logical streams over one connection makes the
+  // flow's size/timing pattern more distinguishable, and it breaks Reality's
+  // per-connection camouflage (Reality authenticates each ClientHello against
+  // a real site — one long-lived muxed connection defeats that). We never
+  // benefit from it on a single-user client, so remove it unconditionally.
+  if (result.multiplex !== undefined) delete result.multiplex
+  if (result.mux !== undefined) delete result.mux
+
   const needsBootstrapDns = isDomainServer(result.server)
   if (needsBootstrapDns) {
     result.domain_resolver = {
@@ -500,7 +510,13 @@ export function generateSingboxConfig(
     // within the same subscription look like different browsers, which
     // makes a big subscription harder to bulk-block by a single fp pattern.
     if (stealthMode && !realityEnabled && tls.utls && typeof tls.utls === 'object') {
-      const fps = ['chrome', 'firefox', 'safari', 'edge'] as const
+      // Windows-plausible fingerprints only. Safari does not exist on Windows,
+      // so a "safari" uTLS fp on a Windows client is itself an anomaly DPI can
+      // flag — drop it. chrome/firefox/edge are all native to Windows. Keep
+      // the deterministic per-key seed so a given server always picks the same
+      // fp (stable for server-side sticky sessions) while a big subscription
+      // still spreads across multiple browser fingerprints.
+      const fps = ['chrome', 'firefox', 'edge'] as const
       const seed = String(proxyOutbound.server || '') + ':' + String(proxyOutbound.server_port || '') +
                    ':' + String(proxyOutbound.uuid || proxyOutbound.password || '')
       let h = 0
