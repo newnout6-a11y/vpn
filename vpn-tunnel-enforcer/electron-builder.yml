@@ -20,6 +20,15 @@ nsis:
   oneClick: false
   perMachine: true
   allowToChangeInstallationDirectory: true
+  # Custom hooks (build/installer.nsh): auto-close the running app + our
+  # sing-box runtime before install/uninstall, and clear the stale
+  # server-groups cache so the per-subscription migration re-runs. This is
+  # what makes the upgrade fully self-service — the user just runs setup.
+  include: build/installer.nsh
+  # On upgrade, run the previous version's uninstaller automatically and wait
+  # for it, so the user never has to "uninstall first". Keep user data
+  # (settings, keys) — we only clear the group cache in customInstall.
+  deleteAppDataOnUninstall: false
   # Both shortcuts are required so Windows treats us as a "real installed
   # app" and keeps our entry in Settings → Notifications even after the
   # user blocks toasts. Without a Start Menu shortcut tied to the AUMID,
