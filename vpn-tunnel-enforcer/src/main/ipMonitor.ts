@@ -15,7 +15,7 @@ let ipCallbacks: ((ip: string, isLeak: boolean) => void)[] = []
 let checkInterval = 30000 // 30 seconds
 
 // ─── suspended state ──────────────────────────────────────────────────────
-// While `suspended === true`, every public surface that could compute or emit
+// While `suppressed === true`, every public surface that could compute or emit
 // a leak verdict short-circuits: no callbacks fire, currentIp is not updated,
 // isLeak is not recomputed. This exists to silence the false-positive
 // "ОБНАРУЖЕНА УТЕЧКА IP" event that was firing during the user-initiated

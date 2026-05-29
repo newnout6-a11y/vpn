@@ -3,11 +3,10 @@
 Deep manual audit of vpn-tunnel-enforcer main process. Status: COMPREHENSIVE PASS COMPLETE.
 
 ## Summary
-18 issues found across the codebase. B1-B3 + C1/C3/C6/C7-C14/C17/C18 fixed with
-tests (133 → 176 tests). C15/C16 documented as deferred (export/import fidelity,
-lower urgency). C2 is cosmetic.
-Every main-process module read in full; preload bridge + key renderer paths
-audited.
+18 issues found across the codebase. ALL fixed (B1-B3 + C1-C18) with tests
+(133 → 179 tests). C2 was cosmetic (comment typo). Every main-process module
+read in full; preload bridge + renderer store/Dashboard/Servers audited.
+Status: COMPLETE.
 
 ## Confirmed bugs (to fix)
 
@@ -186,9 +185,9 @@ block only unlinks when `!elevated`. Every elevated call (enable/disable/probe
 of kill-switch) leaves a file behind forever. Slow disk leak + scripts may
 contain adapter aliases. Severity: low-med (housekeeping/info-leak).
 
-### C2 — ipMonitor.ts: comment/var name mismatch (`suspended` vs `suppressed`)
-Comment block refers to `suspended === true` but the actual var is `suppressed`.
-Cosmetic only — no functional bug. Severity: trivial.
+### C2 — ipMonitor.ts: comment/var name mismatch (`suspended` vs `suppressed`) [FIXED]
+Comment block referred to `suspended === true` but the actual var is
+`suppressed`. Cosmetic only — comment corrected.
 
 ### C3 — tunController randomSecret/randomLocalPort use Math.random()
 Clash API secret generated with Math.random() (not crypto). Localhost-only +
