@@ -39,7 +39,16 @@ Switched curlBound from exec(string) to execFile('curl.exe', [args]) so the
 adapter IP/url are literal argv, no shell. (Lower risk — ip was
 local-adapter-derived — but no reason to keep a shell string.)
 
-### D4 — keyHealthChecker: misleading "via tunnel" + plain-TLS SNI leak [FIXED]
+### D5 — geolocateAll: rate-limit-violating per-IP geo loop [FIXED]
+Country labels were filled via ipapi.co one IP at a time, 3 concurrent with a
+1.1s inter-batch sleep — i.e. ~2.7 req/s against a free tier the code's own
+comment says is "~1 req/sec". On any sizeable subscription (the user has 112
+keys) this tripped 429s and left most country labels empty. Crutch design.
+FIXED: rewrote to resolve all hostnames→IPs in parallel (local DNS), then
+geolocate via ip-api.com/batch (up to 100 IPs per POST, free, no key,
+45 req/min) — two POSTs cover 200 servers, written back in a single store
+update. Removed the now-unused GEOLOCATE_CONCURRENCY/DELAY constants. (ip-api
+free tier is HTTP-only; the request carries only public server IPs, no secrets.)
 The module's doc claimed it probes "THROUGH the tunnel" via the mixed-direct-in
 SOCKS5 port — but that inbound is hard-routed to `direct-out` in the sing-box
 config, so the probe always egresses via the physical adapter. Worse: for

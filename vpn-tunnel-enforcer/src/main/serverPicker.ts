@@ -568,9 +568,6 @@ export async function pingAll(): Promise<ServerProfile[]> {
 
 // ─── Geolocation ────────────────────────────────────────────────────────────
 
-const GEOLOCATE_CONCURRENCY = 3
-const GEOLOCATE_DELAY_MS = 1100 // ipapi.co allows ~1 req/sec on free tier
-
 /**
  * Resolve a hostname to its first IPv4 address. Returns null on any failure;
  * we don't want geolocation hiccups to throw out of the picker pipeline.
@@ -593,37 +590,79 @@ async function resolveHostIp(host: string): Promise<string | null> {
 }
 
 /**
- * Look up the country (and ISO-2) for a single IP via ipapi.co. Free tier
- * is rate-limited to ~1k/day with no API key, hence the small delay between
- * sequential lookups in {@link geolocateAll}.
- *
- * Returns null on any failure — caller leaves country empty so the next
- * background pass can retry.
+ * Resolve many hostnames to IPv4 in parallel (bounded). DNS is local and
+ * fast, so a modest concurrency is fine. Returns a Map host→ip (missing
+ * entries = resolution failed).
  */
-async function fetchCountryForIp(ip: string): Promise<string | null> {
-  try {
-    const resp = await axios.get(`https://ipapi.co/${ip}/json/`, { timeout: 6000 })
-    if (resp.data && !resp.data.error) {
-      const country = (resp.data.country_name || resp.data.country || '').toString().trim()
-      return country || null
-    }
-  } catch {
-    // Silent — we'll retry on the next geolocate pass.
+async function resolveHostsToIps(hosts: string[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>()
+  const unique = [...new Set(hosts.filter(Boolean))]
+  const CONCURRENCY = 8
+  for (let i = 0; i < unique.length; i += CONCURRENCY) {
+    const batch = unique.slice(i, i + CONCURRENCY)
+    const ips = await Promise.all(batch.map(h => resolveHostIp(h)))
+    batch.forEach((h, idx) => { if (ips[idx]) out.set(h, ips[idx] as string) })
   }
-  return null
+  return out
+}
+
+/**
+ * Bulk-geolocate IPs via ip-api.com's batch endpoint: up to 100 IPs per
+ * POST, free, no API key, 45 requests/min. This replaces the previous
+ * per-IP ipapi.co loop, which fired 3 concurrent requests against a "~1
+ * req/sec" free tier and got rate-limited (429) on any sizeable
+ * subscription — leaving most country labels empty. Two batch POSTs now
+ * cover 200 servers.
+ *
+ * ip-api.com is HTTP-only on the free tier (HTTPS is paid). That is
+ * acceptable here: the request carries only public server IPs (no user
+ * data, no secrets) and the response is advisory UI metadata. Returns a
+ * Map ip→country (missing = lookup failed / private IP).
+ */
+async function batchGeolocateIps(ips: string[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>()
+  const unique = [...new Set(ips.filter(Boolean))]
+  const CHUNK = 100
+  for (let i = 0; i < unique.length; i += CHUNK) {
+    const chunk = unique.slice(i, i + CHUNK)
+    try {
+      // `fields` trims the response to just what we need. `query` echoes the
+      // IP back so we can map results to inputs regardless of order.
+      const resp = await axios.post(
+        'http://ip-api.com/batch?fields=status,country,query',
+        chunk,
+        { timeout: 10000, headers: { 'Content-Type': 'application/json' } }
+      )
+      const rows = Array.isArray(resp.data) ? resp.data : []
+      for (const row of rows) {
+        if (row && row.status === 'success' && row.query && typeof row.country === 'string' && row.country.trim()) {
+          out.set(String(row.query), row.country.trim())
+        }
+      }
+    } catch (err) {
+      logEvent('debug', 'server-picker', 'batch geolocate chunk failed', { size: chunk.length, err: (err as Error)?.message })
+      // Leave this chunk's countries empty — the next pass retries.
+    }
+    // Stay well under 45 req/min even with many chunks.
+    if (i + CHUNK < unique.length) await new Promise(r => setTimeout(r, 1500))
+  }
+  return out
 }
 
 /**
  * Background pass that fills in `country` for every picker profile that
  * doesn't have one yet. Idempotent: if all profiles are tagged it returns
- * immediately. Saves to the store as soon as a single lookup completes so
- * the user sees country labels populating live.
+ * immediately.
+ *
+ * Pipeline: resolve all pending hostnames → IPs (parallel, local DNS) →
+ * one ip-api.com/batch POST per 100 IPs → write countries back in a single
+ * store update. Far fewer network calls than the old per-IP loop and no
+ * free-tier rate-limit dance.
  *
  * Why we do this server-side (in main) and not via a client probe:
- *   1. The Servers page already issues ad-hoc probes per row, but the
- *      Dashboard side panel never does — country labels there were always
- *      empty for subscriptions whose names don't include a country word
- *      (e.g. "feodorn LTE 12 | не гарант").
+ *   1. The Dashboard side panel never issues per-row probes, so country
+ *      labels there were always empty for subscriptions whose names don't
+ *      include a country word.
  *   2. Keeping the lookup behind the picker store means every UI that reads
  *      `profile.country` gets the populated value uniformly.
  *
@@ -643,39 +682,30 @@ export async function geolocateAll(opts: { force?: boolean } = {}): Promise<void
       force: Boolean(opts.force)
     })
 
-    let updated = 0
-    for (let i = 0; i < todo.length; i += GEOLOCATE_CONCURRENCY) {
-      const batch = todo.slice(i, i + GEOLOCATE_CONCURRENCY)
-      const results = await Promise.all(
-        batch.map(async profile => {
-          const ip = await resolveHostIp(profile.server)
-          if (!ip) return { id: profile.id, country: null as string | null }
-          const country = await fetchCountryForIp(ip)
-          return { id: profile.id, country }
-        })
-      )
-      // Re-read current store before writing — pingAll/select can mutate
-      // concurrently while we're working through the batch.
-      const current = getProfiles()
-      let dirty = false
-      for (const r of results) {
-        if (!r.country) continue
-        const idx = current.findIndex(p => p.id === r.id)
-        if (idx === -1) continue
-        if (current[idx].country !== r.country) {
-          current[idx] = { ...current[idx], country: r.country }
-          dirty = true
-          updated++
-        }
-      }
-      if (dirty) saveProfiles(current)
+    // 1. host → ip for every pending profile.
+    const hostToIp = await resolveHostsToIps(todo.map(p => p.server))
+    // 2. ip → country in bulk.
+    const ipToCountry = await batchGeolocateIps([...hostToIp.values()])
 
-      // Pace to stay under the free-tier limit. The last batch doesn't need
-      // to sleep.
-      if (i + GEOLOCATE_CONCURRENCY < todo.length) {
-        await new Promise(r => setTimeout(r, GEOLOCATE_DELAY_MS))
+    // 3. Write back in one pass. Re-read the store first — pingAll/select
+    //    can mutate concurrently while we were on the network.
+    const current = getProfiles()
+    let updated = 0
+    let dirty = false
+    for (const profile of todo) {
+      const ip = hostToIp.get(profile.server)
+      if (!ip) continue
+      const country = ipToCountry.get(ip)
+      if (!country) continue
+      const idx = current.findIndex(p => p.id === profile.id)
+      if (idx === -1) continue
+      if (current[idx].country !== country) {
+        current[idx] = { ...current[idx], country }
+        dirty = true
+        updated++
       }
     }
+    if (dirty) saveProfiles(current)
 
     logEvent('info', 'server-picker', 'geolocate pass finished', {
       pending: todo.length,
