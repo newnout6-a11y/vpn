@@ -1381,6 +1381,13 @@ export async function addFromInput(input: string): Promise<ServerProfile[]> {
 
     const now = Date.now()
     const userInfo = resolved.userInfo
+    // Honor an already-expired trial at import time too (same rule the
+    // refresh path uses): if the panel reports expiresAt in the past, the
+    // group is 'expired' ("источник истёк, ключи могут работать"), not
+    // 'active'. expiresAt is stored in ms.
+    const importExpiresAt = userInfo?.expiresAt
+    const importTrialExpired =
+      typeof importExpiresAt === 'number' && Number.isFinite(importExpiresAt) && importExpiresAt > 0 && importExpiresAt < now
     const group = serverGroups.createGroup({
       // `sourceUrl` is stored in canonical (https://) form so future
       // `findGroupBySourceUrl` lookups match cleanly with both forms.
@@ -1391,7 +1398,7 @@ export async function addFromInput(input: string): Promise<ServerProfile[]> {
       lastFetchedAt: now,
       lastFetchAttemptAt: now,
       lastFetchError: null,
-      status: 'active',
+      status: importTrialExpired ? 'expired' : 'active',
       lastRefreshProfilesCount: resolved.profiles.length,
       trafficUploadBytes: userInfo?.trafficUploadBytes ?? undefined,
       trafficDownloadBytes: userInfo?.trafficDownloadBytes ?? undefined,
