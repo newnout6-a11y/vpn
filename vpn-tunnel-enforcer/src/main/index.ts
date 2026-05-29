@@ -3,7 +3,7 @@ import { exec as execCb } from 'child_process'
 import { promisify } from 'util'
 import { join } from 'path'
 import { happDetector } from './happDetector'
-import { tunController } from './tunController'
+import { tunController, detectForeignTun } from './tunController'
 import { ipMonitor } from './ipMonitor'
 import { autoconfig } from './autoconfig'
 import { createTray, updateTrayState, type TrayStatus } from './tray'
@@ -1059,6 +1059,20 @@ app.whenReady().then(async () => {
 
   handleLogged('get-firewall-kill-switch-status', async () => {
     return { active: await isKillSwitchActive() }
+  })
+
+  // Detect another active VPN/TUN adapter (Happ, WireGuard, OpenVPN, …) that
+  // would intercept our latency probes. When such an adapter is up, every
+  // TCP-connect we make is answered locally by ITS tun stack — even to
+  // non-routable test IPs — so per-server pings become meaningless (the
+  // "1-46 ms на всех серверах" the user saw was Happ's happ-tun answering).
+  // The renderer polls this while OUR tunnel is OFF to warn the user that
+  // ping numbers can't be trusted until they close the other VPN. When our
+  // tunnel is ON, competingTunDetector already raises a stronger banner, so
+  // we return null here to avoid a duplicate warning.
+  handleLogged('system:detect-foreign-vpn', async () => {
+    if (tunController.getStatus().running) return { foreign: null }
+    return { foreign: detectForeignTun() }
   })
 
   // Nuclear option for stuck firewalls: reset Windows Firewall to defaults if

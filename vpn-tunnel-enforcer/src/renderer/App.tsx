@@ -50,6 +50,7 @@ declare global {
       disableFirewallKillSwitch: () => Promise<{ success: boolean; message: string; skipped?: boolean }>
       getFirewallKillSwitchStatus: () => Promise<{ active: boolean }>
       firewallNuclearReset: () => Promise<{ success: boolean; message: string }>
+      detectForeignVpn: () => Promise<{ foreign: string | null }>
       getLocationPrivacy: () => Promise<any>
       applyLocationPrivacy: () => Promise<any>
       rollbackLocationPrivacy: () => Promise<any>

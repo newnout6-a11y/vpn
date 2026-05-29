@@ -8,6 +8,7 @@ import { useAppStore } from '../store'
 import { DiagnosticsCard } from '../components/DiagnosticsCard'
 import { BrowserIpCard } from '../components/BrowserIpCard'
 import { ProfileSelectorInline } from '../components/ProfileSelectorInline'
+import { ForeignVpnBanner } from '../components/ForeignVpnBanner'
 import { DashboardSide } from '../components/DashboardSide'
 import {
   CheckCircle2,
@@ -522,7 +523,8 @@ export function Dashboard() {
         </p>
 
         {/* Profile selector card */}
-        <div className="w-full max-w-md">
+        <div className="w-full max-w-md space-y-2">
+          <ForeignVpnBanner />
           <ProfileSelectorInline />
         </div>
 

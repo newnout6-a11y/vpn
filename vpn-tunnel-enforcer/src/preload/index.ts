@@ -32,6 +32,7 @@ export interface ElectronAPI {
   disableFirewallKillSwitch: () => Promise<{ success: boolean; message: string }>
   getFirewallKillSwitchStatus: () => Promise<{ active: boolean }>
   firewallNuclearReset: () => Promise<{ success: boolean; message: string }>
+  detectForeignVpn: () => Promise<{ foreign: string | null }>
   getLocationPrivacy: () => Promise<any>
   applyLocationPrivacy: () => Promise<any>
   rollbackLocationPrivacy: () => Promise<any>
@@ -236,6 +237,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   disableFirewallKillSwitch: () => ipcRenderer.invoke('disable-firewall-kill-switch'),
   getFirewallKillSwitchStatus: () => ipcRenderer.invoke('get-firewall-kill-switch-status'),
   firewallNuclearReset: () => ipcRenderer.invoke('firewall:nuclear-reset'),
+  detectForeignVpn: () => ipcRenderer.invoke('system:detect-foreign-vpn'),
   getLocationPrivacy: () => ipcRenderer.invoke('get-location-privacy'),
   applyLocationPrivacy: () => ipcRenderer.invoke('apply-location-privacy'),
   rollbackLocationPrivacy: () => ipcRenderer.invoke('rollback-location-privacy'),

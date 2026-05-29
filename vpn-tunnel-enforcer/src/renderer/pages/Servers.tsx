@@ -34,6 +34,7 @@ import {
 import { PageTip } from '../components/PageTip'
 import { ServerDetailModal } from '../components/ServerDetailModal'
 import { detectCountry } from '../components/countryGlyph'
+import { ForeignVpnBanner } from '../components/ForeignVpnBanner'
 import { emitServerChanged } from '../nav'
 import { useAppStore } from '../store'
 import type { ServerProfile } from '../../shared/ipc-types'
@@ -843,6 +844,10 @@ export function Servers() {
     <div className="space-y-6">
       {/* Onboarding tip */}
       <PageTip tipKey="servers">{t('tips.servers')}</PageTip>
+
+      {/* Foreign-VPN warning: pings are unreliable while another VPN's TUN
+          adapter is up (it intercepts our probes). */}
+      <ForeignVpnBanner />
 
       {/* Header */}
       <div className="flex items-center justify-between">

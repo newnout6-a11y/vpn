@@ -77,7 +77,37 @@ through crutches or silently does nothing.
 
 ## D-series findings
 
-### D1 — domainRouting is a fully DEAD feature [FIXED]
+### D7 — no warning when a foreign VPN intercepts our ping probes [FIXED]
+User report: "другие норм пингуются, а выбранный всё равно криво", then after
+the D6.5 fix still "почему кто-то нормально а кто-то нет" with a screenshot
+showing wildly inconsistent pings (DE 46, SE 45, LV1 45, LV2 1, LV3 3, RU 3/4
+…). Live diagnosis on the user's box (TTL + TCP-connect probes) proved the
+numbers were ALL fake: a second VPN — **Happ** (FlyFrogLLC\Happ, Xray engine,
+adapter `happ-tun` 172.18.0.1) — was running. Its TUN captured every
+TCP-connect we make for latency measurement and answered locally, even to
+non-routable RFC5737 TEST-NET addresses (203.0.113.77 / 198.51.100.55 both
+"connected in 1 ms"). So per-server pings collapsed to the RTT of Happ's tun
+stack (~1-46 ms jitter), not the real servers. Even 1.1.1.1 / 8.8.8.8 replied
+"1 ms, TTL=128" — physically impossible from RU, conclusive proof of local
+interception. NOT a bug in our probe (it's honest); no client can measure
+correctly while another VPN owns the route.
+
+FIX: surface it to the user.
+  - New IPC `system:detect-foreign-vpn` reuses the existing locale-independent
+    `detectForeignTun()` (os.networkInterfaces, ~1ms). Returns the foreign
+    adapter descriptor when OUR tunnel is OFF; returns null when ours is ON
+    (the competingTunDetector already raises a stronger route-conflict banner
+    in that case, so we avoid a duplicate).
+  - `useForeignVpn` hook polls it every 5 s while our tunnel is down;
+    `foreignVpnFriendlyName` maps the raw adapter to a vendor label
+    (Happ / Hiddify / WireGuard / OpenVPN / Xray-V2Ray / fallback).
+  - `ForeignVpnBanner` renders a warning above the profile selector
+    (Dashboard) and at the top of the Servers page: "Обнаружен другой VPN:
+    Happ — пинг ненадёжен, закройте его полностью". Self-contained,
+    auto-clears when the foreign adapter disappears.
+  +7 tests (foreignVpnFriendlyName vendor mapping). 215 → 222.
+
+
 domainRoutingService.getRules()/matchAndRecord() were NEVER consulted when
 building the sing-box config — per-domain rules (vpn/direct/block, priority,
 wildcards, file import) reached nothing. FIXED: added
