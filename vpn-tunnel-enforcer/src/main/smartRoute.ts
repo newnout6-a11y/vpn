@@ -132,6 +132,40 @@ export const IP_CHECKER_SUFFIXES = [
 ]
 
 /**
+ * Turn a list of leading-dot suffixes (".2ip.ru", ".ipify.org") into a
+ * sing-box matcher object that catches BOTH the apex and any subdomain.
+ *
+ * THE BUG THIS FIXES: in sing-box, `domain_suffix: ".2ip.ru"` matches
+ * `www.2ip.ru` but NOT the bare apex `2ip.ru` — the leading dot makes it
+ * "subdomains only". So a user visiting `2ip.ru` (apex) slipped past the
+ * IP-checker pin, fell through to the RU-direct rules (2ip.ru is RU-hosted),
+ * egressed direct, and saw their REAL IP — exactly the "VPN leaks" symptom.
+ *
+ * Correct form: emit the apex as an exact `domain` match AND the dotted form
+ * as `domain_suffix`. Both keys in one rule are OR'd by sing-box. We keep the
+ * leading-dot suffix (rather than a dotless `domain_suffix: "2ip.ru"`) because
+ * the dotless form over-matches unrelated hosts like `my2ip.ru`.
+ *
+ * Returns `{ domain, domain_suffix }` ready to spread into a rule object.
+ */
+export function suffixListToMatcher(suffixes: string[]): {
+  domain: string[]
+  domain_suffix: string[]
+} {
+  const domain: string[] = []
+  const domain_suffix: string[] = []
+  for (const raw of suffixes) {
+    const s = String(raw || '').trim()
+    if (!s) continue
+    const dotted = s.startsWith('.') ? s : `.${s}`
+    const apex = dotted.slice(1) // strip the single leading dot
+    if (apex) domain.push(apex)
+    domain_suffix.push(dotted)
+  }
+  return { domain, domain_suffix }
+}
+
+/**
  * Rule-set definitions to splice into route.rule_set. Empty when disabled.
  * `downloadDetour` is the outbound tag used to fetch them (proxy-out).
  */
@@ -166,15 +200,17 @@ export function smartRouteRules(opts: SmartRouteOptions): Array<Record<string, a
   // 0. IP/location checkers ALWAYS go through the VPN — placed FIRST so they
   //    win over the RU-direct rules below. Otherwise an RU-hosted checker
   //    (2ip.ru) would match geoip-ru/geosite-ru and egress direct, showing the
-  //    user's real IP and faking a "leak".
-  rules.push({ domain_suffix: IP_CHECKER_SUFFIXES, outbound: 'proxy-out' })
+  //    user's real IP and faking a "leak". Match apex AND subdomains — a bare
+  //    `domain_suffix: ".2ip.ru"` would miss the apex `2ip.ru` (the common
+  //    case: users open `2ip.ru`, not `www.2ip.ru`).
+  rules.push({ ...suffixListToMatcher(IP_CHECKER_SUFFIXES), outbound: 'proxy-out' })
 
   // 1. Curated RU domain lists → direct.
   rules.push({ rule_set: ruDomainRuleSets(), outbound: 'direct-out' })
 
   // 2. Optional: online maps → direct (real location).
   if (opts.mapsDirect) {
-    rules.push({ domain_suffix: MAPS_DOMAIN_SUFFIXES, outbound: 'direct-out' })
+    rules.push({ ...suffixListToMatcher(MAPS_DOMAIN_SUFFIXES), outbound: 'direct-out' })
   }
 
   // 3. RU-hosted IPs → direct (catches services regardless of domain/TLD).
@@ -194,13 +230,12 @@ export function smartRouteDnsRules(opts: SmartRouteOptions): Array<Record<string
   const rules: Array<Record<string, any>> = []
   // IP checkers: resolve through the REMOTE (tunnelled) resolver, NOT the
   // direct one — matched first so an RU-hosted checker doesn't fall into the
-  // RU-direct DNS rule below and resolve to its RU node. `dns-remote` is the
-  // default tag the route block already defines.
-  rules.push({ domain_suffix: IP_CHECKER_SUFFIXES, server: 'dns-remote' })
+  // RU-direct DNS rule below and resolve to its RU node. Apex + subdomains.
+  rules.push({ ...suffixListToMatcher(IP_CHECKER_SUFFIXES), server: 'dns-remote' })
   // RU domains → direct resolver (real RU IPs, so geoip-ru matches).
   rules.push({ rule_set: ruDomainRuleSets(), server })
   if (opts.mapsDirect) {
-    rules.push({ domain_suffix: MAPS_DOMAIN_SUFFIXES, server })
+    rules.push({ ...suffixListToMatcher(MAPS_DOMAIN_SUFFIXES), server })
   }
   return rules
 }

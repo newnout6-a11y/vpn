@@ -138,6 +138,21 @@ is pure + tested; per-domain routing correctness is asserted by the
 smartRoute/config unit tests (+ real config passes `sing-box check`).
 +9 tests. 285 → 294.
 
+### F6 — IP-checker pin missed the APEX domain (2ip.ru still showed real IP) [FIXED]
+User screenshot: opened `2ip.ru` with smart-RU on → it showed the real Beeline
+Moscow IP + "Прокси: не используется". Root cause was a bug in F5's own pin:
+sing-box `domain_suffix: ".2ip.ru"` matches `www.2ip.ru` but NOT the bare apex
+`2ip.ru` (leading dot = "subdomains only"). The user opened the apex, it slipped
+past the proxy-out pin, fell into the RU-direct rules (2ip.ru is RU-hosted via
+geoip-ru/geosite), egressed direct, and leaked the real IP — the exact symptom
+the pin was meant to prevent.
+FIX: new pure `suffixListToMatcher()` emits BOTH an exact `domain` (apex) AND
+the dotted `domain_suffix` (subdomains) for every pinned entry; applied to the
+IP-checker pin, the maps list, and all smart-route DNS rules. We keep the
+dotted suffix (not a dotless one) so we don't over-match `my2ip.ru`. Verified
+the real config still passes `sing-box check`. +4 tests (apex regression +
+suffixListToMatcher). 294 → 298.
+
 ---
 
 # PASS 3 — DPI/TSPU circumvention research vs our config (2025-2026 intel)

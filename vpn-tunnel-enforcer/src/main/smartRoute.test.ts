@@ -8,6 +8,7 @@ import {
   smartRouteRules,
   smartRouteDnsRules,
   smartRouteNeedsDirectDns,
+  suffixListToMatcher,
   RU_GEOIP_RULESET,
   RU_GEOSITE_RULESET,
   RU_GOV_GEOSITE_RULESET,
@@ -53,6 +54,21 @@ describe('smartRouteRules', () => {
     const checkerRule = rules[idxChecker]
     expect(checkerRule.domain_suffix).toContain('.2ip.ru')
     expect(checkerRule.domain_suffix).toContain('.ipify.org')
+  })
+
+  it('pins the APEX of an IP checker, not just subdomains (2ip.ru bug)', () => {
+    // Regression: domain_suffix ".2ip.ru" matches www.2ip.ru but NOT the bare
+    // apex 2ip.ru in sing-box. The user opened `2ip.ru` and saw their real IP
+    // because the apex slipped past the pin into the RU-direct rules.
+    const rules = smartRouteRules(ON)
+    const pin = rules[0]
+    expect(pin.outbound).toBe('proxy-out')
+    // Apex present as an EXACT domain match.
+    expect(Array.isArray(pin.domain)).toBe(true)
+    expect(pin.domain).toContain('2ip.ru')
+    expect(pin.domain).toContain('ipify.org')
+    // Subdomains still covered via suffix.
+    expect(pin.domain_suffix).toContain('.2ip.ru')
   })
 
   it('routes RU domain lists and geoip-ru to direct-out', () => {
@@ -121,5 +137,25 @@ describe('smartRouteNeedsDirectDns', () => {
   it('mirrors enabled', () => {
     expect(smartRouteNeedsDirectDns(ON)).toBe(true)
     expect(smartRouteNeedsDirectDns(OFF)).toBe(false)
+  })
+})
+
+describe('suffixListToMatcher', () => {
+  it('emits both apex domain and dotted suffix', () => {
+    const m = suffixListToMatcher(['.2ip.ru', '.ipify.org'])
+    expect(m.domain).toEqual(['2ip.ru', 'ipify.org'])
+    expect(m.domain_suffix).toEqual(['.2ip.ru', '.ipify.org'])
+  })
+
+  it('normalises entries without a leading dot', () => {
+    const m = suffixListToMatcher(['2ip.ru'])
+    expect(m.domain).toEqual(['2ip.ru'])
+    expect(m.domain_suffix).toEqual(['.2ip.ru'])
+  })
+
+  it('skips empty/whitespace entries', () => {
+    const m = suffixListToMatcher(['', '   ', '.x.com'])
+    expect(m.domain).toEqual(['x.com'])
+    expect(m.domain_suffix).toEqual(['.x.com'])
   })
 })
