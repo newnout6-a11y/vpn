@@ -642,9 +642,17 @@ export async function probeBrowserGeoBlock(url: string, proxyRules?: string): Pr
       webPreferences: {
         offscreen: true,
         nodeIntegration: false,
-        contextIsolation: true
+        contextIsolation: true,
+        // This window loads arbitrary, possibly-hostile third-party pages
+        // (geo-block detection). Sandbox the renderer and give it no preload
+        // so a malicious page can't reach any Node/Electron API.
+        sandbox: true,
+        webSecurity: true
       }
     })
+
+    // Never let a probed page spawn child windows or navigate us elsewhere.
+    win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
 
     const timeoutId = setTimeout(() => {
       win.destroy()

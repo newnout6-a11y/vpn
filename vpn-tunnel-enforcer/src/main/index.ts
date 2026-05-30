@@ -1,9 +1,10 @@
-import { app, BrowserWindow, dialog, ipcMain, Tray, shell, type IpcMainInvokeEvent } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Tray, shell, session, type IpcMainInvokeEvent } from 'electron'
 import { exec as execCb } from 'child_process'
 import { promisify } from 'util'
 import { join } from 'path'
 import { happDetector } from './happDetector'
 import { tunController, detectForeignTun } from './tunController'
+import { classifyNavigation } from './navigationPolicy'
 import { ipMonitor } from './ipMonitor'
 import { autoconfig } from './autoconfig'
 import { createTray, updateTrayState, type TrayStatus } from './tray'
@@ -287,6 +288,59 @@ function createWindow() {
     }
   }
   loadRenderer()
+
+  hardenWebContents(mainWindow.webContents)
+}
+
+/**
+ * Lock down a BrowserWindow's webContents against the classic Electron
+ * navigation-hijack class of bugs. Two attack vectors matter here:
+ *
+ *   1. Attacker-controlled URLs reaching the renderer. The biggest one is
+ *      `webPageUrl`, which we read verbatim from a subscription's
+ *      `profile-web-page-url` HTTP header (vpnProfiles.ts) — i.e. the VPN
+ *      provider, not the user, controls it. The Servers page renders it as a
+ *      `<a target="_blank">`. Without a guard, a malicious panel could point
+ *      it at a `file://`, an arbitrary `https://` phishing page that loads
+ *      INSIDE our trusted window (same chromium, our preload), or a custom
+ *      scheme that launches another program.
+ *   2. Any in-app `window.open` / link click that would otherwise spawn a
+ *      child BrowserWindow with default (unhardened) webPreferences.
+ *
+ * The actual decision lives in the pure, tested `classifyNavigation`.
+ */
+function hardenWebContents(contents: Electron.WebContents): void {
+  const devUrl = process.env.ELECTRON_RENDERER_URL
+
+  // Hand http(s) links to the OS browser; reject everything else. Never let a
+  // renderer-triggered open create a new in-app window.
+  contents.setWindowOpenHandler(({ url }) => {
+    if (classifyNavigation(url, devUrl) === 'open-external') {
+      shell.openExternal(url).catch(err =>
+        logEvent('warn', 'security', 'openExternal failed', { url, err: String(err) })
+      )
+    } else {
+      logEvent('warn', 'security', 'blocked window.open', { url })
+    }
+    return { action: 'deny' }
+  })
+
+  // Cancel any attempt to navigate the main window away from our own origin.
+  contents.on('will-navigate', (event, url) => {
+    const verdict = classifyNavigation(url, devUrl)
+    if (verdict === 'allow-internal') return
+    event.preventDefault()
+    logEvent('warn', 'security', 'blocked in-app navigation', { url, verdict })
+    if (verdict === 'open-external') {
+      shell.openExternal(url).catch(() => undefined)
+    }
+  })
+
+  // Defence-in-depth: never allow <webview> embeds (we don't use them).
+  contents.on('will-attach-webview', (event) => {
+    event.preventDefault()
+    logEvent('warn', 'security', 'blocked webview attach')
+  })
 }
 
 function compactForLog(value: unknown): string {
@@ -754,6 +808,36 @@ app.whenReady().then(async () => {
     packaged: app.isPackaged,
     userData: app.getPath('userData')
   })
+
+  // Content-Security-Policy for the renderer. We ship a fully self-contained
+  // bundle (no external CDNs), so a strict policy costs us nothing and shuts
+  // the door on injected-script / data-exfil vectors if any renderer input is
+  // ever mishandled. 'unsafe-inline' for style is required by our CSS-in-JS
+  // (design tokens injected as inline <style>); script stays locked to 'self'.
+  // connect-src allows https/wss because the renderer talks to ip-api / ipify
+  // and the dev server uses ws for HMR.
+  if (app.isPackaged) {
+    const csp = [
+      "default-src 'self'",
+      "script-src 'self'",
+      "style-src 'self' 'unsafe-inline'",
+      "img-src 'self' data: https:",
+      "font-src 'self' data:",
+      "connect-src 'self' https: wss:",
+      "object-src 'none'",
+      "base-uri 'self'",
+      "frame-ancestors 'none'",
+      "form-action 'none'"
+    ].join('; ')
+    session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+      callback({
+        responseHeaders: {
+          ...details.responseHeaders,
+          'Content-Security-Policy': [csp]
+        }
+      })
+    })
+  }
 
   if (app.isPackaged && await relaunchElevatedIfNeeded()) {
     logEvent('info', 'app', 'relaunching elevated')
