@@ -48,6 +48,19 @@ size-based rotation (5 MB to app.prev.log, one generation kept, total bounded
 stats per line; app.prev.log included in diagnostics with the same redaction.
 +2 tests.
 
+### F2 — overnight schedules were silently dead [FIXED]
+The Schedule page lets the user pick any start/end via <input type="time"> with
+no validation. A natural "protect me overnight" entry (e.g. 22:00–06:00) was
+silently inert: isScheduleActive used `current >= start && current < end`,
+which is an empty set when start > end, so the VPN never came on, and
+computeNextEvent put the stop event in the past. FIX: isScheduleActive now
+handles wrap-past-midnight windows (active in the evening segment on a listed
+day OR the morning segment whose window opened the previous listed day) and
+rejects zero-length (start === end) windows; computeNextEvent pushes the stop
+event to the next calendar day for overnight windows. +7 tests incl. evening/
+morning/gap/zero-length and next-event timing; verified the overnight cases
+fail against the old same-day-only logic.
+
 ---
 
 # PASS 3 — DPI/TSPU circumvention research vs our config (2025-2026 intel)

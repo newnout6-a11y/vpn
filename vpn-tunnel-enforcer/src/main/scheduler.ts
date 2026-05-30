@@ -61,8 +61,18 @@ export function parseTimeToMinutes(time: string): number {
  * Determines if a schedule is active at the given timestamp.
  *
  * A schedule is active if:
- * 1. The timestamp's day-of-week is in the schedule's days array
- * 2. The timestamp's time-of-day is >= startTime (inclusive) and < endTime (exclusive)
+ * 1. The timestamp's day-of-week matches (see overnight note below).
+ * 2. The timestamp's time-of-day falls within [startTime, endTime).
+ *
+ * Overnight windows: when startTime > endTime (e.g. 22:00–06:00) the window
+ * wraps past midnight. We treat the schedule as active when EITHER:
+ *   - it's a listed day and the time is >= startTime (the evening part), OR
+ *   - the PREVIOUS day is a listed day and the time is < endTime (the morning
+ *     part that belongs to the window opened the night before).
+ * Without this an overnight schedule was silently dead — the old
+ * `current >= start && current < end` is an empty set when start > end, so the
+ * VPN never came on. A "22:00–06:00 protect me overnight" entry is a very
+ * natural thing for a user to create.
  *
  * Times are in "HH:mm" format. Days use 0=Sun, 1=Mon, ..., 6=Sat.
  */
@@ -70,19 +80,35 @@ export function isScheduleActive(schedule: ScheduleEntry, timestamp: number): bo
   if (!schedule.enabled) return false
   if (!Array.isArray(schedule.days) || schedule.days.length === 0) return false
 
-  const date = new Date(timestamp)
-  const dayOfWeek = date.getDay() // 0=Sun, 1=Mon, ..., 6=Sat
-
-  if (!schedule.days.includes(dayOfWeek)) return false
-
   const startMinutes = parseTimeToMinutes(schedule.startTime)
   const endMinutes = parseTimeToMinutes(schedule.endTime)
   if (isNaN(startMinutes) || isNaN(endMinutes)) return false
+  // Equal start/end is a zero-length (never-active) window — reject explicitly
+  // so it doesn't masquerade as "always on".
+  if (startMinutes === endMinutes) return false
 
+  const date = new Date(timestamp)
+  const dayOfWeek = date.getDay()
   const currentMinutes = date.getHours() * 60 + date.getMinutes()
 
-  // startTime inclusive, endTime exclusive
-  return currentMinutes >= startMinutes && currentMinutes < endMinutes
+  if (startMinutes < endMinutes) {
+    // Normal same-day window.
+    if (!schedule.days.includes(dayOfWeek)) return false
+    return currentMinutes >= startMinutes && currentMinutes < endMinutes
+  }
+
+  // Overnight window (wraps midnight).
+  // Evening segment: today is a listed day and we're at/after start.
+  if (schedule.days.includes(dayOfWeek) && currentMinutes >= startMinutes) {
+    return true
+  }
+  // Morning segment: the window was opened YESTERDAY (a listed day) and we're
+  // still before end.
+  const prevDayOfWeek = (dayOfWeek + 6) % 7
+  if (schedule.days.includes(prevDayOfWeek) && currentMinutes < endMinutes) {
+    return true
+  }
+  return false
 }
 
 /**
@@ -102,6 +128,8 @@ export function computeNextEvent(schedules: ScheduleEntry[], now: number): NextE
     const startMinutes = parseTimeToMinutes(schedule.startTime)
     const endMinutes = parseTimeToMinutes(schedule.endTime)
     if (isNaN(startMinutes) || isNaN(endMinutes)) continue
+    if (startMinutes === endMinutes) continue // zero-length window — no events
+    const overnight = startMinutes > endMinutes
 
     // Check up to 8 days ahead to find the next event
     for (let dayOffset = 0; dayOffset <= 7; dayOffset++) {
@@ -111,7 +139,7 @@ export function computeNextEvent(schedules: ScheduleEntry[], now: number): NextE
 
       if (!schedule.days.includes(dayOfWeek)) continue
 
-      // Compute start event timestamp for this day
+      // Start event: always at startTime on each listed day.
       const startEvent = new Date(candidateDate)
       startEvent.setHours(Math.floor(startMinutes / 60), startMinutes % 60, 0, 0)
       const startTs = startEvent.getTime()
@@ -122,9 +150,14 @@ export function computeNextEvent(schedules: ScheduleEntry[], now: number): NextE
         }
       }
 
-      // Compute stop event timestamp for this day
+      // Stop event: at endTime. For a same-day window it's on the listed day;
+      // for an overnight window the window opened on the listed day closes on
+      // the NEXT calendar day, so push the stop 24h forward.
       const stopEvent = new Date(candidateDate)
       stopEvent.setHours(Math.floor(endMinutes / 60), endMinutes % 60, 0, 0)
+      if (overnight) {
+        stopEvent.setDate(stopEvent.getDate() + 1)
+      }
       const stopTs = stopEvent.getTime()
 
       if (stopTs > now) {

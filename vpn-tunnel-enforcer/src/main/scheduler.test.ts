@@ -169,3 +169,61 @@ describe('computeNextEvent', () => {
     expect(result!.schedule.id).toBe('s2')
   })
 })
+
+// ─── Overnight windows (F2 regression) ──────────────────────────────────────
+
+describe('isScheduleActive — overnight windows (start > end)', () => {
+  // Window 22:00–06:00 listed on Wednesday (day 3). The window opened Wed 22:00
+  // belongs to Wednesday and closes Thursday 06:00.
+  const overnight = makeSchedule({ days: [3], startTime: '22:00', endTime: '06:00' })
+
+  it('is active in the evening segment on the listed day', () => {
+    const wed2300 = new Date(2024, 0, 10, 23, 0, 0).getTime() // Wed 23:00
+    expect(isScheduleActive(overnight, wed2300)).toBe(true)
+  })
+
+  it('is active in the morning segment of the NEXT day', () => {
+    const thu0500 = new Date(2024, 0, 11, 5, 0, 0).getTime() // Thu 05:00
+    expect(isScheduleActive(overnight, thu0500)).toBe(true)
+  })
+
+  it('is inactive in the daytime gap', () => {
+    const wed1200 = new Date(2024, 0, 10, 12, 0, 0).getTime() // Wed 12:00
+    const thu1200 = new Date(2024, 0, 11, 12, 0, 0).getTime() // Thu 12:00
+    expect(isScheduleActive(overnight, wed1200)).toBe(false)
+    expect(isScheduleActive(overnight, thu1200)).toBe(false)
+  })
+
+  it('is inactive Thursday evening (Thursday is not a listed start day)', () => {
+    const thu2300 = new Date(2024, 0, 11, 23, 0, 0).getTime() // Thu 23:00
+    expect(isScheduleActive(overnight, thu2300)).toBe(false)
+  })
+
+  it('treats a zero-length window (start === end) as never active', () => {
+    const zero = makeSchedule({ days: [3], startTime: '09:00', endTime: '09:00' })
+    const wed900 = new Date(2024, 0, 10, 9, 0, 0).getTime()
+    const wed1200 = new Date(2024, 0, 10, 12, 0, 0).getTime()
+    expect(isScheduleActive(zero, wed900)).toBe(false)
+    expect(isScheduleActive(zero, wed1200)).toBe(false)
+  })
+})
+
+describe('computeNextEvent — overnight windows', () => {
+  const overnight = makeSchedule({ days: [3], startTime: '22:00', endTime: '06:00' })
+
+  it('finds the start at 22:00 on the listed day when before it', () => {
+    const wed2000 = new Date(2024, 0, 10, 20, 0, 0).getTime() // Wed 20:00
+    const next = computeNextEvent([overnight], wed2000)
+    expect(next?.type).toBe('start')
+    expect(new Date(next!.at).getHours()).toBe(22)
+    expect(new Date(next!.at).getDate()).toBe(10) // same Wed
+  })
+
+  it('finds the stop on the NEXT day at 06:00 while inside the evening segment', () => {
+    const wed2300 = new Date(2024, 0, 10, 23, 0, 0).getTime() // Wed 23:00, inside window
+    const next = computeNextEvent([overnight], wed2300)
+    expect(next?.type).toBe('stop')
+    expect(new Date(next!.at).getHours()).toBe(6)
+    expect(new Date(next!.at).getDate()).toBe(11) // Thursday
+  })
+})
