@@ -10,6 +10,46 @@ Status: COMPLETE.
 
 ---
 
+# PASS 4 — Pentest hardening, feature work, stability (S/F/L series)
+
+Focus shifted from "visible bugs" to attack surface, a requested feature
+(per-command VPN bypass), and long-running stability/logging.
+
+### S1 — window navigation hijack + missing CSP [FIXED/security]
+The main BrowserWindow had no setWindowOpenHandler and no will-navigate guard,
+and there was no Content-Security-Policy. `webPageUrl` is read verbatim from a
+subscription's `profile-web-page-url` HTTP header (vpnProfiles.ts) — provider-
+controlled, not user — and rendered as a target=_blank link on the Servers
+page. A hostile panel could navigate our trusted, preload-bearing window to a
+phishing page or smuggle a custom scheme. FIX: pure tested
+`classifyNavigation()` (allow-internal / open-external / block); wired into
+setWindowOpenHandler + will-navigate + will-attach-webview block; strict CSP
+via onHeadersReceived in packaged builds; the offscreen geo-block probe window
+now runs sandbox:true + deny-all window-open. +8 tests.
+
+### F1 — per-command VPN bypass (terminal commands route direct) [DONE/feature]
+User wanted a single terminal command (curl/git/yt-dlp) to bypass the VPN
+without exempting a whole installed app. sing-box matches `process_name` on
+Windows and our split-tunnel pipeline already routes getDirectProcessNames() to
+direct-out; the gap was the UI only accepting registry-discovered apps with a
+real path. Added SplitTunnelApp.kind='process', normalizeProcessName() (pure,
+tested — strips dir/quotes, appends .exe, lower-cases, rejects illegal chars),
+addProcessName() (auto-direct, de-dup, re-arm), IPC split-tunnel:add-process,
+preload bridge, and a "Команда мимо VPN" card on the Split Tunnel page. Honest
+limitation documented: matches by executable name, not a single invocation
+(true per-launch isolation needs binary copying). +11 tests.
+
+### L1 — app.log grew unbounded (no rotation) [FIXED/stability]
+Every IPC call logs at debug level and the logger only appended, so app.log
+reached hundreds of MB over weeks (slow append queue, disk pressure, huge
+diagnostics ZIP — hidden because getFullLogs only reads the 1 MB tail). FIX:
+size-based rotation (5 MB to app.prev.log, one generation kept, total bounded
+~2x cap); in-memory byte counter seeded by one stat() so the hot path never
+stats per line; app.prev.log included in diagnostics with the same redaction.
++2 tests.
+
+---
+
 # PASS 3 — DPI/TSPU circumvention research vs our config (2025-2026 intel)
 
 Sources (rephrased, content rephrased for licensing compliance):
