@@ -89,6 +89,49 @@ const MAPS_DOMAIN_SUFFIXES = [
 ]
 
 /**
+ * IP / "what's my location" checker services. These MUST always egress through
+ * the VPN (proxy-out), never direct — for two reasons:
+ *   1. Many are RU-hosted or on .ru (2ip.ru, ip.bel.ru, …). Smart RU routing
+ *      would otherwise send them DIRECT, the page would show the user's REAL
+ *      IP, and the user would wrongly conclude "the VPN is leaking".
+ *   2. Conceptually an IP checker answers "what does the world see as my IP" —
+ *      while the VPN is on, the honest answer is the VPN's exit IP. Pinning
+ *      these to proxy-out makes the checkers agree with what every other
+ *      foreign site sees.
+ * Matched as domain_suffix (covers apex + subdomains). Exported so the
+ * routing self-test can avoid using a pinned domain as its RU-probe.
+ */
+export const IP_CHECKER_SUFFIXES = [
+  // Global
+  '.ipify.org',
+  '.ipinfo.io',
+  '.myip.com',
+  '.ifconfig.me',
+  '.icanhazip.com',
+  '.ipapi.co',
+  '.ip-api.com',
+  '.whatismyipaddress.com',
+  '.whatismyip.com',
+  '.iplocation.net',
+  '.ipleak.net',
+  '.browserleaks.com',
+  '.dnsleaktest.com',
+  '.whoer.net',
+  '.wtfismyip.com',
+  '.myexternalip.com',
+  '.getmyip.com',
+  '.ip.sb',
+  '.seeip.org',
+  '.bigdatacloud.net',
+  // Russian
+  '.2ip.ru',
+  '.2ip.io',
+  '.myip.ru',
+  '.smart-ip.net',
+  '.ip-ping.ru'
+]
+
+/**
  * Rule-set definitions to splice into route.rule_set. Empty when disabled.
  * `downloadDetour` is the outbound tag used to fetch them (proxy-out).
  */
@@ -120,6 +163,12 @@ export function smartRouteRules(opts: SmartRouteOptions): Array<Record<string, a
   if (!opts.enabled) return []
   const rules: Array<Record<string, any>> = []
 
+  // 0. IP/location checkers ALWAYS go through the VPN — placed FIRST so they
+  //    win over the RU-direct rules below. Otherwise an RU-hosted checker
+  //    (2ip.ru) would match geoip-ru/geosite-ru and egress direct, showing the
+  //    user's real IP and faking a "leak".
+  rules.push({ domain_suffix: IP_CHECKER_SUFFIXES, outbound: 'proxy-out' })
+
   // 1. Curated RU domain lists → direct.
   rules.push({ rule_set: ruDomainRuleSets(), outbound: 'direct-out' })
 
@@ -142,9 +191,14 @@ export function smartRouteRules(opts: SmartRouteOptions): Array<Record<string, a
 export function smartRouteDnsRules(opts: SmartRouteOptions): Array<Record<string, any>> {
   if (!opts.enabled) return []
   const server = opts.directDnsTag || 'dns-direct'
-  const rules: Array<Record<string, any>> = [
-    { rule_set: ruDomainRuleSets(), server }
-  ]
+  const rules: Array<Record<string, any>> = []
+  // IP checkers: resolve through the REMOTE (tunnelled) resolver, NOT the
+  // direct one — matched first so an RU-hosted checker doesn't fall into the
+  // RU-direct DNS rule below and resolve to its RU node. `dns-remote` is the
+  // default tag the route block already defines.
+  rules.push({ domain_suffix: IP_CHECKER_SUFFIXES, server: 'dns-remote' })
+  // RU domains → direct resolver (real RU IPs, so geoip-ru matches).
+  rules.push({ rule_set: ruDomainRuleSets(), server })
   if (opts.mapsDirect) {
     rules.push({ domain_suffix: MAPS_DOMAIN_SUFFIXES, server })
   }

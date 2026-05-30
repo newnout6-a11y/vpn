@@ -41,6 +41,20 @@ describe('smartRouteRules', () => {
     expect(smartRouteRules(OFF)).toEqual([])
   })
 
+  it('pins IP checkers to proxy-out FIRST (before RU-direct rules)', () => {
+    const rules = smartRouteRules(ON)
+    const idxChecker = rules.findIndex(
+      (r) => Array.isArray(r.domain_suffix) && r.outbound === 'proxy-out'
+    )
+    const idxRuDirect = rules.findIndex((r) => Array.isArray(r.rule_set))
+    expect(idxChecker).toBe(0)
+    expect(idxChecker).toBeLessThan(idxRuDirect)
+    // 2ip.ru (RU-hosted checker) must be in the pinned set so it doesn't go direct.
+    const checkerRule = rules[idxChecker]
+    expect(checkerRule.domain_suffix).toContain('.2ip.ru')
+    expect(checkerRule.domain_suffix).toContain('.ipify.org')
+  })
+
   it('routes RU domain lists and geoip-ru to direct-out', () => {
     const rules = smartRouteRules(ON)
     const domainRule = rules.find((r) => Array.isArray(r.rule_set))
@@ -51,9 +65,14 @@ describe('smartRouteRules', () => {
   })
 
   it('omits maps unless mapsDirect is set', () => {
-    expect(smartRouteRules(ON).some((r) => Array.isArray(r.domain_suffix))).toBe(false)
+    // Note: the IP-checker pin also uses domain_suffix, so check specifically
+    // for a maps domain routed to direct-out.
+    const hasMaps = (rules: Array<Record<string, any>>) =>
+      rules.some((r) => Array.isArray(r.domain_suffix) && r.outbound === 'direct-out' &&
+        r.domain_suffix.some((d: string) => d.includes('2gis') || d.includes('yandex')))
+    expect(hasMaps(smartRouteRules(ON))).toBe(false)
     const withMaps = smartRouteRules(ON_MAPS)
-    const mapsRule = withMaps.find((r) => Array.isArray(r.domain_suffix))
+    const mapsRule = withMaps.find((r) => Array.isArray(r.domain_suffix) && r.outbound === 'direct-out')
     expect(mapsRule?.outbound).toBe('direct-out')
     expect(mapsRule?.domain_suffix.some((d: string) => d.includes('yandex'))).toBe(true)
   })
@@ -71,20 +90,30 @@ describe('smartRouteDnsRules', () => {
     expect(smartRouteDnsRules(OFF)).toEqual([])
   })
 
+  it('resolves IP checkers via dns-remote (tunnelled) FIRST', () => {
+    const rules = smartRouteDnsRules(ON)
+    const first = rules[0]
+    expect(Array.isArray(first.domain_suffix)).toBe(true)
+    expect(first.server).toBe('dns-remote')
+    expect(first.domain_suffix).toContain('.2ip.ru')
+  })
+
   it('binds RU domain rule-sets to the direct resolver tag', () => {
     const rules = smartRouteDnsRules(ON)
-    expect(rules[0].server).toBe('dns-direct')
-    expect(rules[0].rule_set).toEqual([RU_GEOSITE_RULESET, RU_GOV_GEOSITE_RULESET])
+    const ruRule = rules.find((r) => Array.isArray(r.rule_set))
+    expect(ruRule?.server).toBe('dns-direct')
+    expect(ruRule?.rule_set).toEqual([RU_GEOSITE_RULESET, RU_GOV_GEOSITE_RULESET])
   })
 
   it('defaults the resolver tag to dns-direct when not provided', () => {
     const rules = smartRouteDnsRules({ enabled: true, mapsDirect: false })
-    expect(rules[0].server).toBe('dns-direct')
+    const ruRule = rules.find((r) => Array.isArray(r.rule_set))
+    expect(ruRule?.server).toBe('dns-direct')
   })
 
   it('adds maps DNS rule when mapsDirect is set', () => {
     const rules = smartRouteDnsRules(ON_MAPS)
-    expect(rules.some((r) => Array.isArray(r.domain_suffix) && r.server === 'dns-direct')).toBe(true)
+    expect(rules.some((r) => Array.isArray(r.domain_suffix) && r.domain_suffix.some((d: string) => d.includes('2gis')) && r.server === 'dns-direct')).toBe(true)
   })
 })
 

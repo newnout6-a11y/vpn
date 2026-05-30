@@ -116,6 +116,28 @@ geo-blocked → tell the user to switch server country. UI shows a distinct
 "Гео-блок" state ("сеть пропускает, но сайт закрыт для региона"). +18 tests
 (13 detector + 5 verdict). 267 → 285.
 
+### F5 — verify routing works + pin IP-checkers to the VPN [DONE/feature]
+Two related asks: (a) "how do I verify the per-site routing actually works?"
+and (b) IP-checkers must always reflect the VPN IP and NOT be caught by the
+RU-direct routing. Problem behind (b): smart RU split would send an RU-hosted
+checker (2ip.ru, myip.ru, …) DIRECT, the page would show the REAL IP, and the
+user would wrongly conclude "the VPN leaks".
+
+FIX (b): IP_CHECKER_SUFFIXES (global + RU checkers) pinned to proxy-out as the
+FIRST smart-route rule — ahead of every RU-direct rule — and their DNS pinned
+to dns-remote (tunnelled), so an RU checker can't fall into the RU-direct DNS
+rule and resolve to its RU node. Pure, unit-tested.
+
+FIX (a): new routingSelfTest module + "Проверить маршрутизацию" button on the
+Availability page. Measures the egress IP two ways at once: VPN path (Node
+request captured by TUN → proxy-out) vs direct path (HTTP over the local
+mixed-direct-in SOCKS port, hard-routed to direct-out = physical NIC). IPs
+DIFFER → split is real; EQUAL → leak/misconfig. With smart-RU on, it surfaces
+the RU egress and confirms RU hosts leave with the real IP. deriveRoutingVerdict
+is pure + tested; per-domain routing correctness is asserted by the
+smartRoute/config unit tests (+ real config passes `sing-box check`).
++9 tests. 285 → 294.
+
 ---
 
 # PASS 3 — DPI/TSPU circumvention research vs our config (2025-2026 intel)

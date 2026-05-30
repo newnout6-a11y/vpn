@@ -1209,6 +1209,14 @@ app.whenReady().then(async () => {
     return result
   })
 
+  // Routing self-test: prove the VPN/direct split is real by comparing the
+  // egress IP through proxy-out (VPN) vs direct-out, and — when smart RU split
+  // is on — that RU hosts egress with the real IP.
+  handleLogged('run-routing-self-test', async () => {
+    const { runRoutingSelfTest } = await import('./routingSelfTest')
+    return runRoutingSelfTest()
+  })
+
   handleLogged('open-snapshots-folder', async () => {
     const dir = getSnapshotsDir()
     try {

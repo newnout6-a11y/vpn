@@ -230,6 +230,17 @@ export function Availability() {
   const [latest, setLatest] = useState<UrlResult | null>(null)
   const [history, setHistory] = useState<UrlResult[]>([])
 
+  // Routing self-test state.
+  const [routingTesting, setRoutingTesting] = useState(false)
+  const [routing, setRouting] = useState<{
+    vpnIp: string | null
+    directIp: string | null
+    splitWorks: boolean
+    smartRu: { enabled: boolean; ruHostIp: string | null; ruGoesDirect: boolean | null }
+    verdict: 'ok' | 'partial' | 'leak' | 'tunnel-off' | 'inconclusive'
+    message: string
+  } | null>(null)
+
   const loadHistory = useCallback(async () => {
     try {
       const list = await window.electronAPI.urlAvailabilityHistory()
@@ -268,6 +279,19 @@ export function Availability() {
       setHistory([])
     } catch (err) {
       console.error('failed to clear history', err)
+    }
+  }
+
+  const handleRoutingTest = async () => {
+    setRoutingTesting(true)
+    try {
+      const r = await window.electronAPI.runRoutingSelfTest()
+      setRouting(r)
+      addLog('info', `Проверка маршрутизации: ${r.verdict}`)
+    } catch (err: any) {
+      addLog('error', `Ошибка проверки маршрутизации: ${err?.message ?? err}`)
+    } finally {
+      setRoutingTesting(false)
     }
   }
 
@@ -333,6 +357,62 @@ export function Availability() {
               Защита выключена. Проверим только «как сейчас, без VPN». Чтобы сравнить
               с защитой — включите её на главной и повторите.
             </p>
+          )}
+        </MacCard>
+
+        {/* Routing self-test — proves the VPN/direct split is real. */}
+        <MacCard>
+          <div className="flex items-center justify-between gap-3 mb-2">
+            <h2 className="text-sm font-semibold text-[var(--color-text)] uppercase tracking-wider flex items-center gap-2">
+              <Network className="w-4 h-4 text-[var(--color-accent)]" />
+              Проверка маршрутизации
+            </h2>
+            <MacButton
+              onClick={handleRoutingTest}
+              disabled={routingTesting || !tunRunning}
+              variant="secondary"
+            >
+              {routingTesting ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <ShieldCheck className="w-4 h-4 mr-2" />}
+              {routingTesting ? 'Проверяем…' : 'Проверить'}
+            </MacButton>
+          </div>
+          <p className="text-xs text-[var(--color-text-secondary)]">
+            Сравнивает, какой IP виден через VPN и какой — напрямую. Если адреса
+            разные — туннель реально разделяет трафик. При включённом «умном
+            режиме РФ» дополнительно проверяет, что РФ-сайты идут с вашим
+            настоящим адресом.
+          </p>
+          {!tunRunning && (
+            <p className="mt-2 text-xs text-[var(--color-text-muted)]">
+              Включите защиту, чтобы проверить маршрутизацию.
+            </p>
+          )}
+          {routing && (
+            <div
+              className="mt-3 rounded-[var(--radius-sm)] border-l-4 p-3"
+              style={{
+                borderLeftColor:
+                  routing.verdict === 'ok' ? 'var(--color-success)' :
+                  routing.verdict === 'partial' ? 'var(--color-warning)' :
+                  routing.verdict === 'leak' ? 'var(--color-danger)' :
+                  'var(--color-text-secondary)',
+                background: 'var(--color-bg)'
+              }}
+            >
+              <p className="text-sm text-[var(--color-text)]">{routing.message}</p>
+              <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
+                <div className="flex items-center gap-1.5">
+                  <ShieldCheck className="w-3 h-3 text-[var(--color-accent)]" />
+                  <span className="text-[var(--color-text-secondary)]">Через VPN:</span>
+                  <span className="font-mono text-[var(--color-text)]">{routing.vpnIp ?? '—'}</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <ShieldOff className="w-3 h-3 text-[var(--color-warning)]" />
+                  <span className="text-[var(--color-text-secondary)]">Напрямую:</span>
+                  <span className="font-mono text-[var(--color-text)]">{routing.directIp ?? '—'}</span>
+                </div>
+              </div>
+            </div>
           )}
         </MacCard>
 

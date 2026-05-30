@@ -40,6 +40,16 @@ export interface ElectronAPI {
   openLogFolder: () => Promise<string>
   exportDiagnostics: () => Promise<{ success: boolean; path?: string; error?: string; cancelled?: boolean }>
   runLeakSelfTest: () => Promise<LeakSelfTestResult>
+  runRoutingSelfTest: () => Promise<{
+    ranAt: number
+    tunnelActive: boolean
+    vpnIp: string | null
+    directIp: string | null
+    splitWorks: boolean
+    smartRu: { enabled: boolean; ruHostIp: string | null; ruGoesDirect: boolean | null }
+    verdict: 'ok' | 'partial' | 'leak' | 'tunnel-off' | 'inconclusive'
+    message: string
+  }>
   openSnapshotsFolder: () => Promise<{ success: boolean; path?: string; error?: string }>
   // Config Import/Export
   configExport: () => Promise<{ success: boolean; path?: string; error?: string }>
@@ -246,6 +256,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openLogFolder: () => ipcRenderer.invoke('open-log-folder'),
   exportDiagnostics: () => ipcRenderer.invoke('export-diagnostics'),
   runLeakSelfTest: () => ipcRenderer.invoke('run-leak-self-test'),
+  runRoutingSelfTest: () => ipcRenderer.invoke('run-routing-self-test'),
   openSnapshotsFolder: () => ipcRenderer.invoke('open-snapshots-folder'),
   // Split Tunneling
   splitTunnelGetApps: () => ipcRenderer.invoke('split-tunnel:get-apps'),

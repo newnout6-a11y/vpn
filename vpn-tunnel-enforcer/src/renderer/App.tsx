@@ -58,6 +58,16 @@ declare global {
       openLogFolder: () => Promise<string>
       exportDiagnostics: () => Promise<{ success: boolean; path?: string; error?: string; cancelled?: boolean }>
       runLeakSelfTest: () => Promise<LeakSelfTestResult>
+      runRoutingSelfTest: () => Promise<{
+        ranAt: number
+        tunnelActive: boolean
+        vpnIp: string | null
+        directIp: string | null
+        splitWorks: boolean
+        smartRu: { enabled: boolean; ruHostIp: string | null; ruGoesDirect: boolean | null }
+        verdict: 'ok' | 'partial' | 'leak' | 'tunnel-off' | 'inconclusive'
+        message: string
+      }>
       openSnapshotsFolder: () => Promise<{ success: boolean; path?: string; error?: string }>
       // Split Tunneling
       splitTunnelGetApps: () => Promise<import('../shared/ipc-types').SplitTunnelApp[]>
