@@ -17,7 +17,20 @@ export interface LogFileSnapshot {
 const MAX_DETAIL_CHARS = 4000
 const MAX_READ_BYTES = 1024 * 1024
 
+// Size-based rotation for app.log. Without this the file grows forever —
+// every IPC call logs at debug level, so over weeks of uptime the log can
+// reach hundreds of MB, which (a) slows the append queue, (b) fills the user's
+// disk, and (c) makes the diagnostics ZIP huge. When app.log crosses
+// MAX_LOG_BYTES we rename it to app.prev.log (replacing any older generation)
+// and start a fresh file. We keep exactly one previous generation — enough for
+// support to see what happened before the roll, bounded at 2x the cap total.
+const MAX_LOG_BYTES = 5 * 1024 * 1024
+
 let queue = Promise.resolve()
+// Cheap in-memory tally so we don't `stat()` the file on every single log
+// line. We stat lazily (first write after startup) to seed it, then track
+// growth from the byte length we append.
+let currentLogBytes = -1
 
 export function getLogDir(): string {
   return join(app.getPath('userData'), 'logs')
@@ -25,6 +38,37 @@ export function getLogDir(): string {
 
 export function getAppLogPath(): string {
   return join(getLogDir(), 'app.log')
+}
+
+function getAppLogPrevPath(): string {
+  return join(getLogDir(), 'app.prev.log')
+}
+
+/**
+ * Rotate app.log if it has grown past the cap. Called inside the serialized
+ * write queue so it can't race with appends. Best-effort: any failure leaves
+ * the current log in place (we'd rather keep logging to a big file than lose
+ * logging entirely).
+ */
+async function rotateIfNeeded(incomingBytes: number): Promise<void> {
+  try {
+    if (currentLogBytes < 0) {
+      // Seed from disk once.
+      try {
+        currentLogBytes = (await stat(getAppLogPath())).size
+      } catch {
+        currentLogBytes = 0
+      }
+    }
+    if (currentLogBytes + incomingBytes <= MAX_LOG_BYTES) return
+    // Roll: app.log → app.prev.log (overwrite the older generation).
+    const { rename, unlink } = await import('fs/promises')
+    await unlink(getAppLogPrevPath()).catch(() => undefined)
+    await rename(getAppLogPath(), getAppLogPrevPath()).catch(() => undefined)
+    currentLogBytes = 0
+  } catch {
+    // Leave currentLogBytes as-is; we'll retry on the next write.
+  }
 }
 
 function getTunLogDir(): string {
@@ -71,10 +115,14 @@ function formatLine(level: AppLogLevel, scope: string, message: string, details?
 export function logEvent(level: AppLogLevel, scope: string, message: string, details?: unknown): void {
   const normalizedDetails = details === undefined ? undefined : normalizeDetail(details)
   const line = formatLine(level, scope, message, normalizedDetails)
+  const lineBytes = Buffer.byteLength(line, 'utf8')
   queue = queue
     .then(async () => {
       await mkdir(getLogDir(), { recursive: true })
+      await rotateIfNeeded(lineBytes)
       await appendFile(getAppLogPath(), line, 'utf8')
+      // Track growth so we only stat() the file once per process.
+      if (currentLogBytes >= 0) currentLogBytes += lineBytes
     })
     .catch(() => undefined)
 
@@ -153,7 +201,7 @@ function redactSnapshot(snapshot: LogFileSnapshot): LogFileSnapshot {
     }
   }
 
-  if (/app\.log$/i.test(snapshot.path)) {
+  if (/app(?:\.prev)?\.log$/i.test(snapshot.path)) {
     return { ...snapshot, content: redactJsonLines(snapshot.content) }
   }
 
@@ -163,6 +211,7 @@ function redactSnapshot(snapshot: LogFileSnapshot): LogFileSnapshot {
 export async function getFullLogs(): Promise<LogFileSnapshot[]> {
   const files = [
     getAppLogPath(),
+    getAppLogPrevPath(),
     join(getTunLogDir(), 'sing-box.log'),
     join(getTunLogDir(), 'sing-box.prev.log'),
     join(getTunLogDir(), 'sing-box.json')
@@ -174,6 +223,7 @@ export async function getFullLogs(): Promise<LogFileSnapshot[]> {
 export async function clearAppLog(): Promise<void> {
   await mkdir(getLogDir(), { recursive: true })
   await writeFile(getAppLogPath(), '', 'utf8')
+  currentLogBytes = 0
 }
 
 export async function openLogFolder(): Promise<string> {
