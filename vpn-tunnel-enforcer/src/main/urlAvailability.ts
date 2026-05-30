@@ -35,6 +35,12 @@ import { randomUUID } from 'crypto'
 import { logEvent } from './appLogger'
 import { tunController, getDirectProxyPort } from './tunController'
 import { getClashApiInfo } from './tunController'
+import {
+  scoreSinglePage,
+  compareRenders,
+  type PageSignal,
+  type GeoBlockVerdict
+} from './geoBlockDetect'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -361,31 +367,41 @@ async function probeNative(parsed: ParsedUrl): Promise<PathReport> {
   }
 
   const httpRes = await probeHttp(parsed)
-  let availableHttp = httpRes.status != null && httpRes.status < 500
-  let geoBlocked = false
-
-  if (availableHttp) {
-    // Real browser check for SPA geo-blocks
-    geoBlocked = await probeBrowserGeoBlock(parsed.raw, tunController.getStatus().running ? undefined : 'direct://')
-    if (geoBlocked) {
-      availableHttp = false
+  // HTTP-level availability. Note: a 200 does NOT mean "usable here" — geo
+  // blocks return healthy 200s with an "unavailable in your country" body.
+  // That determination is made later via the rendered-page signal (single or
+  // differential). Here we only judge the transport: anything that returned a
+  // status below 500 reached the origin. 451 (legal block) is an explicit
+  // geo/legal denial, so we mark it unavailable right away.
+  let availableHttp = httpRes.status != null && httpRes.status < 500 && httpRes.status !== 451
+  if (httpRes.status === 451) {
+    return {
+      available: false,
+      totalMs: Date.now() - totalStart,
+      errorStage: 'http',
+      errorMessage: 'Сайт ответил 451 (заблокирован по юридическим причинам / гео-блок).',
+      dns: dnsRes,
+      tcp: { connected: true, ms: tcpRes.ms },
+      tls: tlsRes,
+      http: { status: httpRes.status, ms: httpRes.ms, server: httpRes.server },
+      asn,
+      geoBlocked: true,
+      source: 'native'
     }
   }
 
   return {
     available: availableHttp,
     totalMs: Date.now() - totalStart,
-    errorStage: availableHttp ? null : (geoBlocked ? 'http' : 'http'),
-    errorMessage: geoBlocked ? 'Сайт загрузился, но сам запретил доступ для вашего региона (Geo-Block).' :
-      (availableHttp
-        ? null
-        : `HTTP-запрос не вернул осмысленного ответа: ${httpRes.error ?? `статус ${httpRes.status}`}.`),
+    errorStage: availableHttp ? null : 'http',
+    errorMessage: availableHttp
+      ? null
+      : `HTTP-запрос не вернул осмысленного ответа: ${httpRes.error ?? `статус ${httpRes.status}`}.`,
     dns: dnsRes,
     tcp: { connected: true, ms: tcpRes.ms },
     tls: tlsRes,
     http: { status: httpRes.status, ms: httpRes.ms, server: httpRes.server },
     asn,
-    geoBlocked,
     source: 'native'
   }
 }
@@ -431,22 +447,20 @@ async function probeViaClashApi(parsed: ParsedUrl): Promise<PathReport> {
       }
     )
     if (resp.status >= 200 && resp.status < 300 && typeof resp.data?.delay === 'number') {
-      const dpPort = getDirectProxyPort()
-      let geoBlocked = false
-      if (dpPort) {
-        geoBlocked = await probeBrowserGeoBlock(parsed.raw, `socks5://127.0.0.1:${dpPort}`)
-      }
+      // Transport reached the origin via direct-out. Geo-block determination
+      // is done at the orchestration level using rendered-page signals, so we
+      // report "available" here and let checkUrl downgrade it if the rendered
+      // direct page turns out to be a geo-block.
       return {
-        available: !geoBlocked,
+        available: true,
         totalMs: resp.data.delay,
-        errorStage: geoBlocked ? 'http' : null,
-        errorMessage: geoBlocked ? 'Сайт загрузился, но сам запретил доступ для вашего региона (Geo-Block).' : null,
+        errorStage: null,
+        errorMessage: null,
         dns: null,
         tcp: null,
         tls: null,
         http: { status: 200, ms: resp.data.delay, server: null },
         asn: null,
-        geoBlocked,
         source: 'clash-direct-out'
       }
     }
@@ -510,6 +524,24 @@ export function deriveVerdict(
   if (tunnel && direct) {
     const t = tunnel.available
     const d = direct.available
+    // Strongest signal: the differential geo-block detector flagged the direct
+    // (local) side while the tunnel side renders fine. This is the definitive
+    // "works only with VPN because the SITE geo-blocks RU" case — independent
+    // of HTTP status and language.
+    if (t && direct.geoBlocked) {
+      return {
+        verdict: 'works-only-with-vpn',
+        recommendation: 'Сайт сам блокирует доступ из вашего региона (контент «недоступен в вашей стране»), хотя сеть его не режет. Через VPN он открывается — оставьте защиту включённой.'
+      }
+    }
+    // Even the VPN exit is geo-blocked (e.g. server in a country the site also
+    // blocks). Tell the user to switch server location.
+    if (tunnel.geoBlocked) {
+      return {
+        verdict: d && !direct.geoBlocked ? 'works-only-without-vpn' : 'blocked-everywhere',
+        recommendation: 'Сайт блокирует и страну VPN-сервера. Попробуйте сервер в другой стране (например, не в той, что сейчас).'
+      }
+    }
     if (t && d) {
       // Geo-block heuristic: VPN gets 200 OK, direct gets 403 Forbidden.
       // This means the ISP/RKN is NOT blocking the site, but the destination
@@ -552,6 +584,95 @@ export function deriveVerdict(
   }
 }
 
+// ─── Geo-block orchestration ─────────────────────────────────────────────────
+
+/** Stamp geoBlocked + downgrade availability on the relevant report(s) using
+ *  rendered-page signals. Mutates the passed report objects in place. */
+async function applyGeoBlock(
+  parsed: ParsedUrl,
+  tunnel: PathReport | null,
+  direct: PathReport | null,
+  tunRunning: boolean
+): Promise<void> {
+  // Only bother when at least one side reached the origin (transport OK) —
+  // there's nothing to "render" through a dead path.
+  const directReachable = !!direct && (direct.available || direct.http?.status != null)
+  const tunnelReachable = !!tunnel && (tunnel.available || tunnel.http?.status != null)
+
+  if (tunRunning) {
+    // Render foreign (TUN) and local (direct-out SOCKS) in parallel.
+    const dpPort = getDirectProxyPort()
+    const [foreignSig, localSig] = await Promise.all([
+      tunnelReachable ? probePageSignal(parsed.raw, undefined) : Promise.resolve(null),
+      directReachable && dpPort
+        ? probePageSignal(parsed.raw, `socks5://127.0.0.1:${dpPort}`)
+        : Promise.resolve(null)
+    ])
+
+    // Differential: if we have both renders, this is the strong signal for the
+    // LOCAL (direct) side — "works abroad, blocked at home".
+    if (foreignSig && localSig) {
+      const diff = compareRenders(foreignSig, localSig)
+      if (diff.blocked && direct) {
+        direct.available = false
+        direct.geoBlocked = true
+        direct.errorStage = 'http'
+        direct.errorMessage = geoBlockMessage(diff)
+      }
+      // The foreign (tunnel) side: a single-page check catches the rare case
+      // where even the VPN exit is geo-blocked (e.g. wrong-country server).
+      const foreignVerdict = scoreSinglePage(foreignSig)
+      if (foreignVerdict.blocked && tunnel) {
+        tunnel.available = false
+        tunnel.geoBlocked = true
+        tunnel.errorStage = 'http'
+        tunnel.errorMessage = geoBlockMessage(foreignVerdict)
+      }
+      return
+    }
+
+    // Fallbacks when one render is missing: single-page score each side we got.
+    if (localSig && direct) {
+      const v = scoreSinglePage(localSig)
+      if (v.blocked) {
+        direct.available = false
+        direct.geoBlocked = true
+        direct.errorStage = 'http'
+        direct.errorMessage = geoBlockMessage(v)
+      }
+    }
+    if (foreignSig && tunnel) {
+      const v = scoreSinglePage(foreignSig)
+      if (v.blocked) {
+        tunnel.available = false
+        tunnel.geoBlocked = true
+        tunnel.errorStage = 'http'
+        tunnel.errorMessage = geoBlockMessage(v)
+      }
+    }
+    return
+  }
+
+  // Tunnel OFF — only the local (direct) render exists; single-page scoring.
+  if (directReachable && direct) {
+    const sig = await probePageSignal(parsed.raw, 'direct://')
+    if (sig) {
+      const v = scoreSinglePage(sig)
+      if (v.blocked) {
+        direct.available = false
+        direct.geoBlocked = true
+        direct.errorStage = 'http'
+        direct.errorMessage = geoBlockMessage(v)
+      }
+    }
+  }
+}
+
+function geoBlockMessage(v: GeoBlockVerdict): string {
+  const why = v.reasons.length ? ` (${v.reasons.slice(0, 2).join('; ')})` : ''
+  return `Сайт загрузился, но сам запретил доступ для вашего региона (Geo-Block)${why}.`
+}
+
 // ─── Public entry point ──────────────────────────────────────────────────────
 
 export async function checkUrl(input: string): Promise<UrlAvailabilityResult> {
@@ -583,6 +704,23 @@ export async function checkUrl(input: string): Promise<UrlAvailabilityResult> {
     direct = d
   } else {
     direct = await probeNative(parsed)
+  }
+
+  // ─── Geo-block determination via rendered-page signals ──────────────────
+  // A transport-level "available" (200/connect) does NOT mean usable here: the
+  // site may serve a healthy 200 whose content says "not available in your
+  // country". We render the page through each exit and decide:
+  //   - tunnel ON  → render through BOTH exits (foreign via TUN, local via the
+  //     direct-out SOCKS port) and run the LANGUAGE-INDEPENDENT differential.
+  //   - tunnel OFF → only the local render exists; fall back to single-page
+  //     scoring (weaker, but the only option without a foreign reference).
+  // Only HTTPS/HTTP pages that reached the origin are worth rendering.
+  try {
+    await applyGeoBlock(parsed, tunnel, direct, tunRunning)
+  } catch (err) {
+    logEvent('debug', 'url-availability', 'geo-block detection skipped', {
+      error: (err as Error)?.message
+    })
   }
 
   const { verdict, recommendation } = deriveVerdict(tunnel, direct)
@@ -635,66 +773,110 @@ export function registerUrlAvailabilityHandlers(): void {
   })
 }
 
-export async function probeBrowserGeoBlock(url: string, proxyRules?: string): Promise<boolean> {
+/**
+ * Render a URL in an offscreen, sandboxed browser through a given proxy and
+ * extract a structured PageSignal (final URL, title, innerText sample+length).
+ * This replaces the old boolean regex probe: the heavy lifting (deciding
+ * "blocked") moved to the pure, tested geoBlockDetect module, which can do a
+ * language-independent differential comparison between two renders.
+ *
+ * Returns null when the page couldn't be rendered at all (load failure /
+ * timeout) — the caller treats that as "no signal" rather than "not blocked".
+ */
+export async function probePageSignal(url: string, proxyRules?: string): Promise<PageSignal | null> {
   return new Promise((resolve) => {
+    let mainStatus: number | null = null
     const win = new BrowserWindow({
       show: false,
       webPreferences: {
         offscreen: true,
         nodeIntegration: false,
         contextIsolation: true,
-        // This window loads arbitrary, possibly-hostile third-party pages
-        // (geo-block detection). Sandbox the renderer and give it no preload
-        // so a malicious page can't reach any Node/Electron API.
+        // Arbitrary, possibly-hostile third-party pages. Sandbox hard.
         sandbox: true,
         webSecurity: true
       }
     })
 
-    // Never let a probed page spawn child windows or navigate us elsewhere.
     win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
 
-    const timeoutId = setTimeout(() => {
-      win.destroy()
-      resolve(false)
-    }, 10000)
-
-    if (proxyRules) {
-      win.webContents.session.setProxy({ proxyRules }).catch(() => {})
-    } else {
-      win.webContents.session.setProxy({ proxyRules: 'direct://' }).catch(() => {})
+    let settled = false
+    const finish = (sig: PageSignal | null) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timeoutId)
+      try { if (!win.isDestroyed()) win.destroy() } catch { /* ignore */ }
+      resolve(sig)
     }
 
-    win.webContents.on('did-finish-load', async () => {
-      // Give SPA a little time to render
-      setTimeout(async () => {
-        try {
-          if (win.isDestroyed()) return resolve(false)
-          const text = await win.webContents.executeJavaScript('document.body.innerText')
-          clearTimeout(timeoutId)
-          win.destroy()
-          
-          if (!text) return resolve(false)
-          const lower = text.toLowerCase()
-          // Common SPA GeoBlock markers (e.g. Gemini, ChatGPT, Claude)
-          const isBlocked = lower.includes('isn\'t supported in your country') ||
-                            lower.includes('not available in your region') ||
-                            lower.includes('country_unsupported') ||
-                            lower.includes('not supported in your location') ||
-                            lower.includes('services are not available in your country')
-          resolve(isBlocked)
-        } catch {
-          resolve(false)
+    const timeoutId = setTimeout(() => finish(null), 12000)
+
+    win.webContents.session
+      .setProxy({ proxyRules: proxyRules || 'direct://' })
+      .catch(() => {})
+
+    // Capture the main-frame HTTP status. did-navigate fires with the response
+    // code for the top-level document.
+    win.webContents.on(
+      'did-navigate',
+      (_e, _url, httpResponseCode) => {
+        if (typeof httpResponseCode === 'number' && httpResponseCode > 0) {
+          mainStatus = httpResponseCode
         }
-      }, 1500)
+      }
+    )
+
+    const extract = async () => {
+      // Let SPAs settle a touch before sampling.
+      await new Promise((r) => setTimeout(r, 1500))
+      if (win.isDestroyed()) return finish(null)
+      try {
+        const data = await win.webContents.executeJavaScript(
+          `(() => {
+             const text = (document.body && document.body.innerText) || '';
+             return {
+               finalUrl: location.href,
+               title: document.title || '',
+               textLength: text.length,
+               textSample: text.slice(0, 8000)
+             };
+           })()`
+        )
+        finish({
+          requestedUrl: url,
+          finalUrl: typeof data?.finalUrl === 'string' ? data.finalUrl : null,
+          title: typeof data?.title === 'string' ? data.title : null,
+          textSample: (typeof data?.textSample === 'string' ? data.textSample : '').toLowerCase(),
+          textLength: Number.isFinite(data?.textLength) ? Number(data.textLength) : 0,
+          httpStatus: mainStatus
+        })
+      } catch {
+        finish(null)
+      }
+    }
+
+    win.webContents.on('did-finish-load', () => { void extract() })
+    // did-fail-load fires for the main frame on hard failures; for a geo-block
+    // that still renders an HTML page did-finish-load fires instead. If the
+    // main frame genuinely failed we still try to sample (some block pages
+    // report a failure code but render content).
+    win.webContents.on('did-fail-load', (_e, errorCode, _desc, _validatedUrl, isMainFrame) => {
+      if (isMainFrame && errorCode !== -3 /* ABORTED is benign */) {
+        // Give the renderer a beat in case a body was still painted.
+        setTimeout(() => { if (!settled) void extract() }, 500)
+      }
     })
 
-    win.webContents.on('did-fail-load', () => {
-      clearTimeout(timeoutId)
-      if (!win.isDestroyed()) win.destroy()
-      resolve(false)
-    })
-
-    win.loadURL(url).catch(() => {})
+    win.loadURL(url).catch(() => { /* finish via timeout/fail-load */ })
   })
+}
+
+/**
+ * Back-compat boolean wrapper around the new signal probe + single-page
+ * scorer. Kept for any caller that just wants "is this one render blocked".
+ */
+export async function probeBrowserGeoBlock(url: string, proxyRules?: string): Promise<boolean> {
+  const sig = await probePageSignal(url, proxyRules)
+  if (!sig) return false
+  return scoreSinglePage(sig).blocked
 }

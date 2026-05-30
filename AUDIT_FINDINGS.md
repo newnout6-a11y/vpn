@@ -85,6 +85,37 @@ config passes `sing-box.exe check` (resources/sing-box.exe 1.13.8) via an
 opt-in integration test (smartRouteCheck.itest.ts, RUN_SINGBOX_CHECK=1).
 +17 unit tests (smartRoute pure generators + config integration). 250 → 267.
 
+### F4 — availability check: "HTTP 200 ≠ доступно" + fragile geo-block regex [FIXED]
+User report: the URL checker is "туповат" — a 200 OK was treated as "works",
+but geo-blocked sites (Gemini, ChatGPT, …) return a healthy 200 whose body says
+"not available in your country". The old detector regex-matched a handful of
+English phrases on innerText — fragile (one wording change breaks it), narrow
+(English only), and useless when the page is an SPA. Two concrete bugs:
+  (a) `available = httpStatus < 500` treated 451 (Unavailable For Legal
+      Reasons) and 403 as "available".
+  (b) geo-block = 5-phrase English innerText regex.
+FIX: new pure, tested geoBlockDetect module with layered signals, strongest
+first:
+  1. DIFFERENTIAL (reliable, language-independent): render the page through
+     BOTH exits (foreign via TUN, local via the direct-out SOCKS port) and
+     compare — local tiny vs foreign full, local redirect to a block-shaped
+     URL, block marker present locally but not abroad. No phrase list needed.
+  2. HARD HTTP: 451 → blocked outright; 403 on a short page → strong hint.
+  3. FINAL-URL shape: /sorry, /unavailable, ?error=country_unsupported, …
+     (language-independent).
+  4. MARKER text (weak fallback, only when we can't compare — VPN off):
+     broadened to many phrasings + EN/RU/ES/PT/DE/FR, but only TRUSTED on an
+     interstitial-sized page so a long article quoting the phrase isn't
+     flagged.
+The offscreen probe now returns a structured PageSignal (final URL, title,
+innerText sample+length, main-frame status) instead of a bare boolean; geo
+determination moved to checkUrl orchestration (differential when tunnel is on,
+single-page when off). deriveVerdict now reads the reliable geoBlocked flag:
+tunnel-ok + direct-geo-blocked → "works-only-with-vpn"; VPN exit itself
+geo-blocked → tell the user to switch server country. UI shows a distinct
+"Гео-блок" state ("сеть пропускает, но сайт закрыт для региона"). +18 tests
+(13 detector + 5 verdict). 267 → 285.
+
 ---
 
 # PASS 3 — DPI/TSPU circumvention research vs our config (2025-2026 intel)

@@ -48,6 +48,7 @@ interface PathReport {
   tls: { handshakeOk: boolean; ms: number | null; cipher: string | null; protocol: string | null } | null
   http: { status: number | null; ms: number | null; server: string | null } | null
   asn: { country: string; org: string } | null
+  geoBlocked?: boolean
   source: 'native' | 'clash-direct-out'
 }
 
@@ -126,7 +127,7 @@ function PathDetailCard({ title, report, missingMessage }: {
       <div className="flex items-center gap-2">
         <Icon className={`w-5 h-5 ${color}`} />
         <span className={`text-base font-semibold ${color}`}>
-          {ok ? 'Открывается' : 'Не открывается'}
+          {ok ? 'Открывается' : (report.geoBlocked ? 'Гео-блок' : 'Не открывается')}
         </span>
         {report.totalMs != null && (
           <span className="ml-auto text-xs text-[var(--color-text-secondary)] tabular-nums">
@@ -134,6 +135,11 @@ function PathDetailCard({ title, report, missingMessage }: {
           </span>
         )}
       </div>
+      {report.geoBlocked && (
+        <p className="text-xs text-[var(--color-warning)] bg-[var(--color-warning)]/10 rounded-[var(--radius-sm)] p-2">
+          Сеть пропускает, но сам сайт закрыт для этого региона.
+        </p>
+      )}
       {report.errorMessage && (
         <p className="text-xs text-[var(--color-danger)] bg-[var(--color-danger)]/10 rounded-[var(--radius-sm)] p-2">
           {report.errorMessage}
