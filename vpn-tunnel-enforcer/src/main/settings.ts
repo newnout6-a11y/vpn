@@ -64,6 +64,21 @@ export interface AppSettings {
   // Safe to leave ON outside of restrictive networks too — costs ~5% extra
   // bandwidth from MTU overhead and a handful of extra TLS roundtrips.
   stealthMode: boolean
+  // Smart RU split-routing. When ON, Russian destinations (banks, gov
+  // portals, shops, local services) egress with the user's REAL IP via
+  // direct-out, while everything else goes through the VPN — so foreign
+  // sites see the VPN location and RU sites that geo-fence/whitelist RU IPs
+  // keep working. The signal is NOT a naive ".ru domain" check: we use
+  // sing-box geoip-ru (route by destination IP country) + geosite-category-ru
+  // / category-gov-ru rule-sets (curated RU domain lists that cover .com/.рф
+  // properties too), maintained upstream and refreshed via cache_file.
+  // Off by default — it's an opt-in routing policy, and when off the tunnel
+  // behaves exactly as before (everything through proxy-out).
+  smartRuSplit: boolean
+  // Optional sub-toggle: also send online maps (Yandex/2GIS/Google Maps tiles)
+  // direct so they resolve to the user's real location. Only meaningful when
+  // smartRuSplit is ON ("карты по желанию").
+  smartRuMapsDirect: boolean
 }
 
 const defaults: AppSettings = {
@@ -95,7 +110,9 @@ const defaults: AppSettings = {
   desktopNotifications: true,
   publicWifiCompatibility: true,
   strictAdapterLockdown: true,
-  stealthMode: false
+  stealthMode: false,
+  smartRuSplit: false,
+  smartRuMapsDirect: false
 }
 
 const store = new Store<{ settings: AppSettings }>({
@@ -143,7 +160,9 @@ function normalizeSettings(input: Partial<AppSettings> | undefined): AppSettings
     // worth paying on networks that actively shape VPN traffic. Without
     // this line the field was silently dropped on every save/load, so
     // the existing UI toggle had no effect.
-    stealthMode: Boolean(merged.stealthMode)
+    stealthMode: Boolean(merged.stealthMode),
+    smartRuSplit: Boolean(merged.smartRuSplit),
+    smartRuMapsDirect: Boolean(merged.smartRuMapsDirect)
   }
 }
 

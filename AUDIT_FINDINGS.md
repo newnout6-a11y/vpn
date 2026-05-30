@@ -48,8 +48,7 @@ size-based rotation (5 MB to app.prev.log, one generation kept, total bounded
 stats per line; app.prev.log included in diagnostics with the same redaction.
 +2 tests.
 
-### F2 — overnight schedules were silently dead [FIXED]
-The Schedule page lets the user pick any start/end via <input type="time"> with
+### F2 — overnight schedules were silently dead [FIXED]The Schedule page lets the user pick any start/end via <input type="time"> with
 no validation. A natural "protect me overnight" entry (e.g. 22:00–06:00) was
 silently inert: isScheduleActive used `current >= start && current < end`,
 which is an empty set when start > end, so the VPN never came on, and
@@ -60,6 +59,31 @@ rejects zero-length (start === end) windows; computeNextEvent pushes the stop
 event to the next calendar day for overnight windows. +7 tests incl. evening/
 morning/gap/zero-length and next-event timing; verified the overnight cases
 fail against the old same-day-only logic.
+
+### F3 — smart RU split-routing (real IP for RU services, VPN for the rest) [DONE/feature]
+User wanted RU banks / gov portals / shops / maps to open with their REAL IP
+while everything non-RU still sees the VPN — and explicitly NOT a naive ".ru"
+TLD redirect. Implemented the same approach mature clients (Hiddify/Nekoray)
+use, native to sing-box 1.13:
+  - geoip-ru rule-set → route by DESTINATION IP country, so RU-hosted services
+    go direct regardless of their domain/TLD (catches .com/.рф faces);
+  - geosite-category-ru + category-gov-ru rule-sets → curated upstream RU
+    domain lists (covers big properties incl. non-.ru domains);
+  - remote .srs downloaded through proxy-out (GitHub raw is itself throttled in
+    RU; tunnel is up by load time) and persisted via experimental.cache_file;
+  - DNS correctness: a `dns-direct` (local) resolver + DNS rules binding the RU
+    rule-sets to it, so RU domains resolve to their REAL RU IPs — otherwise the
+    tunnelled DNS returns a foreign CDN node and geoip-ru misses;
+  - optional maps sub-toggle (Yandex/2GIS/Google Maps tiles → direct) for real-
+    location results ("карты по желанию");
+  - user's own Domain Routing rules still evaluated BEFORE the smart-route
+    rules, so explicit overrides win.
+New pure module smartRoute.ts (rule-sets / route rules / DNS rules), gated by
+settings.smartRuSplit + smartRuMapsDirect (off by default), wired into
+generateSingboxConfig, with UI toggles in Settings. Verified the REAL generated
+config passes `sing-box.exe check` (resources/sing-box.exe 1.13.8) via an
+opt-in integration test (smartRouteCheck.itest.ts, RUN_SINGBOX_CHECK=1).
++17 unit tests (smartRoute pure generators + config integration). 250 → 267.
 
 ---
 

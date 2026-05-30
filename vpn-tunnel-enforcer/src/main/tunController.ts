@@ -30,6 +30,12 @@ import { cancelLeakSelfTest } from './leakSelfTest'
 import { startCompetingTunWatch, stopCompetingTunWatch } from './competingTunDetector'
 import { dnsProfiles } from './dnsProfiles'
 import { generateDomainRouteRules } from './domainRouting'
+import {
+  smartRouteRules,
+  smartRouteRuleSets,
+  smartRouteDnsRules,
+  type SmartRouteOptions
+} from './smartRoute'
 
 const exec = promisify(execCb)
 const execFile = promisify(execFileCb)
@@ -337,6 +343,8 @@ function buildDomainRouteRules(): Array<Record<string, any>> {
 
 const DNS_STRATEGY = 'ipv4_only'
 const BOOTSTRAP_DNS_TAG = 'dns-bootstrap'
+// DNS server tag for the direct (RU-visible) resolver used by smart RU split.
+const SMART_DIRECT_DNS_TAG = 'dns-direct'
 
 /**
  * Build the remote DNS server list for the sing-box config from the user's
@@ -448,7 +456,13 @@ export function generateSingboxConfig(
   upstream: string | { outbound: Record<string, any>; proxyType?: 'socks5' | 'http' },
   proxyType: 'socks5' | 'http' = 'socks5',
   directProcessNames: string[] = [],
-  options: { stealthMode?: boolean; directProxyPortOverride?: number; clashPortOverride?: number } = {}
+  options: {
+    stealthMode?: boolean
+    directProxyPortOverride?: number
+    clashPortOverride?: number
+    smartRuSplit?: boolean
+    smartRuMapsDirect?: boolean
+  } = {}
 ): object {
   // Stealth mode (TSPU/DPI bypass) toggles two knobs:
   //   1. TUN MTU 1500 → 1280 — encrypted payload sizes drift away from
@@ -463,6 +477,14 @@ export function generateSingboxConfig(
   const stealthMode = options.stealthMode === true
   const tunMtu = stealthMode ? 1280 : 1500
   const isDirectVpn = typeof upstream !== 'string'
+
+  // Smart RU split-routing options. Pure here (caller passes resolved flags
+  // from settings) so generateSingboxConfig stays unit-testable.
+  const smartRoute: SmartRouteOptions = {
+    enabled: options.smartRuSplit === true,
+    mapsDirect: options.smartRuMapsDirect === true,
+    directDnsTag: SMART_DIRECT_DNS_TAG
+  }
   const parsedProxy = typeof upstream === 'string' ? parseProxyAddress(upstream) : null
   const proxyCoreProcesses = isDirectVpn ? [] : uniqueProcessNames([...PROXY_CORE_PROCESS_NAMES, ...directProcessNames])
 
@@ -594,8 +616,22 @@ export function generateSingboxConfig(
         ...buildRemoteDnsServers(),
         ...(needsBootstrapDns
           ? [{ type: 'local', tag: BOOTSTRAP_DNS_TAG }]
+          : []),
+        // Smart RU split: a DIRECT (non-detoured) resolver so RU domains
+        // resolve to their real RU IPs. Without this the tunnelled DNS would
+        // return the site's nearest-to-the-VPN CDN node, the IP wouldn't be
+        // in geoip-ru, and the connection would wrongly take the VPN. `local`
+        // delegates to the platform resolver over the physical interface.
+        ...(smartRoute.enabled
+          ? [{ type: 'local', tag: SMART_DIRECT_DNS_TAG }]
           : [])
       ],
+      // DNS rules: bind RU domain rule-sets to the direct resolver. Only
+      // present when smart-route is on; empty otherwise so default behaviour
+      // is unchanged (everything resolves via dns-remote through the tunnel).
+      ...(smartRoute.enabled
+        ? { rules: smartRouteDnsRules(smartRoute) }
+        : {}),
       strategy: DNS_STRATEGY
     },
     inbounds: [
@@ -641,6 +677,12 @@ export function generateSingboxConfig(
         // explicit "block youtube.com" / "route netflix direct" actually wins.
         // Empty array when the user has no rules — zero overhead.
         ...buildDomainRouteRules(),
+        // Smart RU split-routing. RU domains (curated geosite) + RU-hosted
+        // IPs (geoip-ru) go direct so banks/gov/shops see the real IP, while
+        // everything else falls through to proxy-out. Placed AFTER the user's
+        // own domain rules (explicit overrides win) and BEFORE private/catch-
+        // all. Empty when the feature is off.
+        ...smartRouteRules(smartRoute),
         { ip_cidr: privateRanges, outbound: 'direct-out' },
         { ip_cidr: ['::/0'], outbound: 'block-out' },
         // HTTP proxy outbound has no UDP transport at all, so every UDP packet
@@ -660,6 +702,11 @@ export function generateSingboxConfig(
           ? [{ network: 'udp', outbound: 'block-out' }]
           : [])
       ],
+      // Remote rule-sets for smart RU split (geoip-ru + geosite RU lists).
+      // Downloaded through proxy-out and cached. Empty when feature is off.
+      ...(smartRoute.enabled
+        ? { rule_set: smartRouteRuleSets(smartRoute, 'proxy-out') }
+        : {}),
       final: 'proxy-out',
       auto_detect_interface: true,
       default_domain_resolver: 'dns-remote'
@@ -673,7 +720,14 @@ export function generateSingboxConfig(
         external_controller: `127.0.0.1:${clashPort}`,
         secret: clashSecret,
         default_mode: 'rule'
-      }
+      },
+      // cache_file persists downloaded rule-sets (and clash selections) across
+      // restarts so smart-route doesn't re-download the RU .srs every launch.
+      // Relative path → lands in the runtime dir (sing-box cwd). Only emitted
+      // when smart-route is on; otherwise we keep the config minimal.
+      ...(smartRoute.enabled
+        ? { cache_file: { enabled: true, path: 'cache.db', store_rdrc: true } }
+        : {})
     }
   }
 }
@@ -1214,7 +1268,7 @@ async function prepareRuntime(
   upstream: string | { outbound: Record<string, any>; proxyType?: 'socks5' | 'http' },
   proxyType: 'socks5' | 'http',
   directProcessNames: string[],
-  options: { stealthMode?: boolean } = {}
+  options: { stealthMode?: boolean; smartRuSplit?: boolean; smartRuMapsDirect?: boolean } = {}
 ): Promise<{ singbox: string; config: string }> {
   const runtimeDir = getTunRuntimeDir()
   await mkdir(runtimeDir, { recursive: true })
@@ -1504,6 +1558,14 @@ export const tunController = {
     const publicWifiCompatibility =
       startOptions.publicWifiCompatibility ?? settingsStore.get().publicWifiCompatibility
 
+    // Smart RU split-routing flags, read from settings on every start so
+    // toggling the UI takes effect on the next (re)connect. Passed through
+    // prepareRuntime → generateSingboxConfig. mapsDirect is meaningless
+    // unless the master switch is on, so gate it.
+    const smartRuSplit = settingsStore.get().smartRuSplit === true
+    const smartRuMapsDirect = smartRuSplit && settingsStore.get().smartRuMapsDirect === true
+    const smartRouteRuntimeOpts = { smartRuSplit, smartRuMapsDirect }
+
     if (mode === 'localProxy' && !proxyAddr) {
       return finishStart({ success: false, error: 'Не указан upstream proxy' })
     }
@@ -1598,7 +1660,7 @@ export const tunController = {
         proxyAddr,
         proxyType,
         proxyOwnerProcessNames,
-        { stealthMode: startOptions.stealthMode === true }
+        { stealthMode: startOptions.stealthMode === true, ...smartRouteRuntimeOpts }
       )
 
       // Now do the slower full-tunnel check in parallel with prepareRuntime.
@@ -1624,7 +1686,7 @@ export const tunController = {
           { outbound: vpnProfile.outbound, proxyType },
           proxyType,
           proxyOwnerProcessNames,
-          { stealthMode: startOptions.stealthMode === true }
+          { stealthMode: startOptions.stealthMode === true, ...smartRouteRuntimeOpts }
         )
       }
       mark('proxy-validated')
@@ -1677,7 +1739,7 @@ export const tunController = {
             : proxyAddr,
           proxyType,
           proxyOwnerProcessNames,
-          { stealthMode: startOptions.stealthMode === true }
+          { stealthMode: startOptions.stealthMode === true, ...smartRouteRuntimeOpts }
         )
       }
       runtime = await runtimePromise

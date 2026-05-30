@@ -94,6 +94,11 @@ export interface AppSettings {
   // MTU and adds TLS ClientHello fragmentation to non-Reality outbounds
   // to make the encrypted flow harder to fingerprint.
   stealthMode: boolean
+  // Smart RU split-routing: RU destinations (geoip-ru + curated geosite)
+  // egress direct with the real IP; everything else via VPN.
+  smartRuSplit: boolean
+  // Optional: route online maps direct for real-location results.
+  smartRuMapsDirect: boolean
 }
 
 export interface LeakCheckItem {
@@ -293,7 +298,9 @@ export const useAppStore = create<AppState>((set) => ({
     desktopNotifications: true,
     publicWifiCompatibility: true,
     strictAdapterLockdown: true,
-    stealthMode: false
+    stealthMode: false,
+    smartRuSplit: false,
+    smartRuMapsDirect: false
   },
 
   setMode: (mode) => set({ mode }),

@@ -1,0 +1,160 @@
+/**
+ * Smart RU split-routing.
+ *
+ * Goal: let Russian destinations (banks, government portals, shops, local
+ * services, optionally maps) egress with the user's REAL IP via `direct-out`,
+ * while everything else goes through the VPN. This solves the real-world pain:
+ *   - foreign sites should see the VPN's location (bypass RU blocks);
+ *   - but RU banks / gosuslugi / marketplaces geo-fence or risk-score foreign
+ *     IPs, so reaching them THROUGH a foreign VPN gets you blocked, captcha'd,
+ *     or logged out.
+ *
+ * Why not just "route *.ru direct": that's both too narrow and too broad.
+ *   - Too narrow: Sberbank, Ozon, VK, Yandex serve critical assets/APIs on
+ *     .com / .net / regional CDNs; a TLD check misses them.
+ *   - Too broad: plenty of .ru domains are fronted by Cloudflare/foreign CDNs
+ *     where "direct" gains nothing.
+ * The robust signal is twofold and is exactly what mature clients
+ * (Hiddify, Nekoray) use:
+ *   1. geoip-ru        — route by the DESTINATION IP's country. Catches any
+ *                        RU-hosted service regardless of its domain/TLD.
+ *   2. geosite-category-ru / category-gov-ru — curated upstream domain lists
+ *                        (SagerNet sing-geosite) that already map the big RU
+ *                        properties including their .com/.рф faces.
+ *
+ * We pull these as sing-box `remote` rule-sets (binary .srs) downloaded
+ * THROUGH the tunnel (download_detour: proxy-out — GitHub raw is itself often
+ * throttled/blocked in RU, and the tunnel is up by the time the rule-set
+ * loads) and cached via experimental.cache_file so they survive restarts and
+ * refresh once a day.
+ *
+ * DNS correctness: a domain matched for direct egress must ALSO be resolved by
+ * a direct (RU-visible) resolver — otherwise the tunnelled DNS returns the
+ * site's nearest-to-the-VPN CDN node, the resolved IP isn't in geoip-ru, and
+ * the connection wrongly goes through the VPN. So we add a `dns-direct` server
+ * (local system resolver, NOT detoured) and a DNS rule binding the RU domain
+ * rule-sets to it. This module emits that DNS rule too.
+ *
+ * Everything here is PURE (no electron, no store) so it's unit-testable; the
+ * caller passes the resolved options in.
+ */
+
+export interface SmartRouteOptions {
+  /** Master switch. When false, all generators return empty. */
+  enabled: boolean
+  /** Also route online maps direct (Yandex/2GIS/Google Maps tiles). */
+  mapsDirect: boolean
+  /**
+   * Tag of the direct-resolver DNS server the caller will define in the dns
+   * block (so RU domains resolve to their real RU IPs). Defaults to
+   * 'dns-direct'.
+   */
+  directDnsTag?: string
+}
+
+// Rule-set tags + their upstream .srs URLs. Verified present on the SagerNet
+// rule-set branches (geosite-ru.srs does NOT exist upstream — category-ru is
+// the correct tag). All downloaded through proxy-out and cached.
+export const RU_GEOIP_RULESET = 'geoip-ru'
+export const RU_GEOSITE_RULESET = 'geosite-category-ru'
+export const RU_GOV_GEOSITE_RULESET = 'geosite-category-gov-ru'
+
+const RULESET_URLS: Record<string, string> = {
+  [RU_GEOIP_RULESET]: 'https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-ru.srs',
+  [RU_GEOSITE_RULESET]: 'https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ru.srs',
+  [RU_GOV_GEOSITE_RULESET]: 'https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-gov-ru.srs'
+}
+
+/**
+ * The domain rule-sets used for RU-direct matching (geosite, not geoip). The
+ * gov set is included so government portals work even if they're not in the
+ * general category list yet.
+ */
+function ruDomainRuleSets(): string[] {
+  return [RU_GEOSITE_RULESET, RU_GOV_GEOSITE_RULESET]
+}
+
+/**
+ * Online-maps domains that benefit from real-location egress. Kept as a small
+ * inline list rather than a rule-set: it's tiny, stable, and there's no
+ * upstream "maps" geosite we can rely on. Suffix-matched.
+ */
+const MAPS_DOMAIN_SUFFIXES = [
+  '.maps.yandex.net',
+  '.maps.yandex.ru',
+  '.2gis.com',
+  '.2gis.ru',
+  '.maps.googleapis.com',
+  '.maps.gstatic.com'
+]
+
+/**
+ * Rule-set definitions to splice into route.rule_set. Empty when disabled.
+ * `downloadDetour` is the outbound tag used to fetch them (proxy-out).
+ */
+export function smartRouteRuleSets(
+  opts: SmartRouteOptions,
+  downloadDetour = 'proxy-out'
+): Array<Record<string, any>> {
+  if (!opts.enabled) return []
+  const tags = [RU_GEOIP_RULESET, ...ruDomainRuleSets()]
+  return tags.map((tag) => ({
+    type: 'remote',
+    tag,
+    format: 'binary',
+    url: RULESET_URLS[tag],
+    download_detour: downloadDetour,
+    update_interval: '1d'
+  }))
+}
+
+/**
+ * Route rules that send RU traffic to direct-out. Emitted AFTER the user's own
+ * domain rules (so an explicit user override still wins) and BEFORE the
+ * private-range / catch-all rules. Empty when disabled.
+ *
+ * Order within: domains first (cheap, sniffed SNI), then geoip (needs the
+ * resolved IP). Maps (optional) is a plain domain_suffix rule.
+ */
+export function smartRouteRules(opts: SmartRouteOptions): Array<Record<string, any>> {
+  if (!opts.enabled) return []
+  const rules: Array<Record<string, any>> = []
+
+  // 1. Curated RU domain lists → direct.
+  rules.push({ rule_set: ruDomainRuleSets(), outbound: 'direct-out' })
+
+  // 2. Optional: online maps → direct (real location).
+  if (opts.mapsDirect) {
+    rules.push({ domain_suffix: MAPS_DOMAIN_SUFFIXES, outbound: 'direct-out' })
+  }
+
+  // 3. RU-hosted IPs → direct (catches services regardless of domain/TLD).
+  rules.push({ rule_set: RU_GEOIP_RULESET, outbound: 'direct-out' })
+
+  return rules
+}
+
+/**
+ * DNS rule that makes RU domains resolve via the direct resolver, so the
+ * resolved IP is the real RU one and geoip-ru matches. Empty when disabled.
+ * The caller must define a DNS server with tag `directDnsTag`.
+ */
+export function smartRouteDnsRules(opts: SmartRouteOptions): Array<Record<string, any>> {
+  if (!opts.enabled) return []
+  const server = opts.directDnsTag || 'dns-direct'
+  const rules: Array<Record<string, any>> = [
+    { rule_set: ruDomainRuleSets(), server }
+  ]
+  if (opts.mapsDirect) {
+    rules.push({ domain_suffix: MAPS_DOMAIN_SUFFIXES, server })
+  }
+  return rules
+}
+
+/**
+ * Whether the smart-route feature needs a direct DNS server defined. Mirrors
+ * `enabled` but named for intent at the call site in the DNS block builder.
+ */
+export function smartRouteNeedsDirectDns(opts: SmartRouteOptions): boolean {
+  return opts.enabled
+}

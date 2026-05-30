@@ -384,3 +384,90 @@ describe('generateSingboxConfig domain routing', () => {
     expect(hasDomainRule).toBe(false)
   })
 })
+
+// ─── Smart RU split-routing ──────────────────────────────────────────────────
+
+describe('generateSingboxConfig smart RU split', () => {
+  afterEach(() => {
+    domainState.rules = []
+  })
+
+  const genSmart = (opts: { smartRuSplit?: boolean; smartRuMapsDirect?: boolean }) =>
+    generateSingboxConfig(
+      { outbound: { ...plainTlsOutbound } },
+      'socks5',
+      [],
+      opts
+    ) as any
+
+  it('adds NOTHING when smartRuSplit is off (config unchanged)', () => {
+    const cfg = genSmart({})
+    expect(cfg.route.rule_set).toBeUndefined()
+    expect(cfg.dns.rules).toBeUndefined()
+    expect(cfg.experimental.cache_file).toBeUndefined()
+    expect(cfg.dns.servers.find((s: any) => s.tag === 'dns-direct')).toBeUndefined()
+    // No direct-routing rule_set rules in the route.
+    expect(cfg.route.rules.some((r: any) => r.rule_set)).toBe(false)
+  })
+
+  it('adds RU rule-sets + geoip + cache_file when enabled', () => {
+    const cfg = genSmart({ smartRuSplit: true })
+    // rule_set definitions present and pointing at SagerNet srs.
+    const tags = (cfg.route.rule_set ?? []).map((rs: any) => rs.tag)
+    expect(tags).toContain('geoip-ru')
+    expect(tags).toContain('geosite-category-ru')
+    expect(tags).toContain('geosite-category-gov-ru')
+    for (const rs of cfg.route.rule_set) {
+      expect(rs.type).toBe('remote')
+      expect(rs.download_detour).toBe('proxy-out')
+      expect(String(rs.url)).toMatch(/\.srs$/)
+    }
+    // cache_file enabled so srs persists across restarts.
+    expect(cfg.experimental.cache_file?.enabled).toBe(true)
+  })
+
+  it('routes RU domains and RU IPs to direct-out', () => {
+    const cfg = genSmart({ smartRuSplit: true })
+    const directRuleSetRules = cfg.route.rules.filter(
+      (r: any) => r.rule_set && r.outbound === 'direct-out'
+    )
+    // One for the geosite domain lists, one for geoip-ru.
+    expect(directRuleSetRules.length).toBeGreaterThanOrEqual(2)
+    const hasGeoip = cfg.route.rules.some(
+      (r: any) => r.rule_set === 'geoip-ru' && r.outbound === 'direct-out'
+    )
+    expect(hasGeoip).toBe(true)
+  })
+
+  it('binds RU domains to a direct DNS resolver (no CDN mismatch)', () => {
+    const cfg = genSmart({ smartRuSplit: true })
+    expect(cfg.dns.servers.find((s: any) => s.tag === 'dns-direct')).toBeTruthy()
+    const dnsRule = (cfg.dns.rules ?? []).find(
+      (r: any) => r.rule_set && r.server === 'dns-direct'
+    )
+    expect(dnsRule).toBeTruthy()
+  })
+
+  it('adds maps domains direct ONLY when mapsDirect is on', () => {
+    const off = genSmart({ smartRuSplit: true, smartRuMapsDirect: false })
+    const offHasMaps = off.route.rules.some(
+      (r: any) => Array.isArray(r.domain_suffix) && r.domain_suffix.some((d: string) => d.includes('2gis'))
+    )
+    expect(offHasMaps).toBe(false)
+
+    const on = genSmart({ smartRuSplit: true, smartRuMapsDirect: true })
+    const onHasMaps = on.route.rules.some(
+      (r: any) => Array.isArray(r.domain_suffix) && r.domain_suffix.some((d: string) => d.includes('2gis'))
+    )
+    expect(onHasMaps).toBe(true)
+  })
+
+  it('keeps user domain rules BEFORE the smart-route rules (user override wins)', () => {
+    domainState.rules = [{ domain: ['bank.example'], outbound: 'proxy-out' }]
+    const cfg = genSmart({ smartRuSplit: true })
+    const idxUser = cfg.route.rules.findIndex((r: any) => Array.isArray(r.domain) && r.domain.includes('bank.example'))
+    const idxSmart = cfg.route.rules.findIndex((r: any) => r.rule_set)
+    expect(idxUser).toBeGreaterThanOrEqual(0)
+    expect(idxSmart).toBeGreaterThan(idxUser)
+  })
+})

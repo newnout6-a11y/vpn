@@ -1,5 +1,5 @@
 import { useAppStore } from '../store'
-import { Bell, EyeOff, FileArchive, FolderOpen, Globe2, Loader2, Network, Palette, RefreshCw, Save, Settings2, ShieldAlert, ShieldCheck, Wand2, Languages } from 'lucide-react'
+import { Bell, EyeOff, FileArchive, FolderOpen, Globe2, Loader2, MapPin, Network, Palette, RefreshCw, Save, Settings2, ShieldAlert, ShieldCheck, Wand2, Languages } from 'lucide-react'
 import { ReactNode, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { KillSwitchSettings } from '../components/KillSwitchSettings'
@@ -417,6 +417,44 @@ export function Settings() {
             checked={settings.stealthMode}
             onChange={(next) => updateSettings({ stealthMode: next })}
           />
+
+          <ToggleRow
+            icon={<MapPin className="w-4 h-4 text-[var(--color-success)]" />}
+            title={<>Умный режим РФ <span className="text-[var(--color-success)]">(банки/госуслуги/магазины напрямую)</span></>}
+            description={
+              <>
+                <span className="block">
+                  <span className="text-[var(--color-text-secondary)]">Сейчас:</span>{' '}
+                  весь трафик идёт через VPN, и российские сайты (банки,
+                  Госуслуги, маркетплейсы) видят зарубежный IP — это вызывает
+                  капчу, выходы из аккаунта и блокировки «вход из-за рубежа».
+                </span>
+                <span className="block mt-1">
+                  <span className="text-[var(--color-text-secondary)]">Станет:</span>{' '}
+                  российские сервисы открываются с вашим настоящим адресом, а
+                  всё остальное по-прежнему через VPN. Определяем РФ-назначения
+                  не по «.ru», а по стране IP (geoip-ru) и выверенным спискам
+                  доменов — поэтому ловятся и .com/.рф-сайты крупных сервисов.
+                </span>
+                <span className="block mt-1 text-[var(--color-text-secondary)]">
+                  Списки скачиваются через защиту и кэшируются. Изменения
+                  вступят в силу после следующего включения защиты.
+                </span>
+              </>
+            }
+            checked={settings.smartRuSplit}
+            onChange={(next) => updateSettings({ smartRuSplit: next })}
+          />
+
+          {settings.smartRuSplit && (
+            <ToggleRow
+              icon={<MapPin className="w-4 h-4 text-[var(--color-accent)]" />}
+              title="Карты с реальным местоположением"
+              description="Яндекс.Карты, 2ГИС и тайлы Google Maps идут напрямую, чтобы показывать вас там, где вы есть на самом деле, а не в стране VPN."
+              checked={settings.smartRuMapsDirect}
+              onChange={(next) => updateSettings({ smartRuMapsDirect: next })}
+            />
+          )}
         </div>
       </MacCard>
 
