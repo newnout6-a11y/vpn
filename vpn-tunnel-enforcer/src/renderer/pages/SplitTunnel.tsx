@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Search, FolderOpen, Trash2 } from 'lucide-react'
+import { Search, FolderOpen, Trash2, TerminalSquare, Plus } from 'lucide-react'
 import { MacCard, MacInput, MacButton, MacBadge } from '../design-system'
 import { PageTip } from '../components/PageTip'
+import { useAppStore } from '../store'
 import type { SplitTunnelApp } from '../../shared/ipc-types'
 
 type Rule = SplitTunnelApp['rule']
@@ -14,10 +15,13 @@ type Rule = SplitTunnelApp['rule']
  */
 export function SplitTunnel() {
   const { t } = useTranslation()
+  const addLog = useAppStore((s) => s.addLog)
   const [apps, setApps] = useState<SplitTunnelApp[]>([])
   const [search, setSearch] = useState('')
   const [loading, setLoading] = useState(true)
   const [addingApp, setAddingApp] = useState(false)
+  const [cmdName, setCmdName] = useState('')
+  const [addingCmd, setAddingCmd] = useState(false)
 
   // Fetch apps from main process on mount
   useEffect(() => {
@@ -82,6 +86,37 @@ export function SplitTunnel() {
     }
   }, [])
 
+  // Handle adding a bare command/process name to bypass the VPN.
+  const handleAddCommand = useCallback(async () => {
+    const raw = cmdName.trim()
+    if (!raw) return
+    setAddingCmd(true)
+    try {
+      const result = await window.electronAPI.splitTunnelAddProcess(raw)
+      if (result) {
+        setApps((prev) => {
+          const idx = prev.findIndex((a) => a.id === result.id)
+          if (idx !== -1) {
+            // Existing entry — replace (rule may have flipped to 'direct').
+            const next = [...prev]
+            next[idx] = result
+            return next
+          }
+          return [...prev, result]
+        })
+        setCmdName('')
+        addLog('info', t(
+          'splitTunneling.commandAdded',
+          `Команда «${result.name}» теперь идёт мимо VPN.`
+        ))
+      }
+    } catch (err: any) {
+      addLog('error', `${t('splitTunneling.commandAddFailed', 'Не удалось добавить команду')}: ${err?.message ?? err}`)
+    } finally {
+      setAddingCmd(false)
+    }
+  }, [cmdName, addLog, t])
+
   return (
     <div className="space-y-6 max-w-4xl">
       {/* Onboarding tip */}
@@ -117,6 +152,52 @@ export function SplitTunnel() {
           {t('splitTunneling.addApp')}
         </MacButton>
       </div>
+
+      {/* Bypass a terminal command / CLI tool by name. For commands that
+          aren't installed "apps" with a fixed path (curl, git, yt-dlp, …) —
+          the user types the command name and it routes around the VPN. */}
+      <MacCard className="!p-4 space-y-3">
+        <div className="flex items-start gap-2.5">
+          <TerminalSquare className="w-4 h-4 mt-0.5 text-[var(--color-accent)] shrink-0" />
+          <div className="min-w-0">
+            <h3 className="text-sm font-medium text-[var(--color-text)]">
+              {t('splitTunneling.bypassCommandTitle', 'Команда мимо VPN')}
+            </h3>
+            <p className="text-xs text-[var(--color-text-secondary)] mt-0.5">
+              {t(
+                'splitTunneling.bypassCommandHint',
+                'Укажите имя процесса (например curl.exe, git.exe, yt-dlp), и его трафик пойдёт напрямую, минуя VPN. Работает по имени исполняемого файла, а не по конкретному запуску.'
+              )}
+            </p>
+          </div>
+        </div>
+        <div className="flex items-end gap-3">
+          <div className="flex-1">
+            <MacInput
+              placeholder={t('splitTunneling.bypassCommandPlaceholder', 'curl.exe')}
+              value={cmdName}
+              onChange={(e) => setCmdName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault()
+                  handleAddCommand()
+                }
+              }}
+              leftIcon={<TerminalSquare className="w-4 h-4" />}
+            />
+          </div>
+          <MacButton
+            variant="primary"
+            onClick={handleAddCommand}
+            loading={addingCmd}
+            disabled={!cmdName.trim()}
+            className="shrink-0"
+          >
+            <Plus className="w-4 h-4 mr-2" />
+            {t('splitTunneling.bypassCommandAdd', 'Добавить')}
+          </MacButton>
+        </div>
+      </MacCard>
 
       {/* App list */}
       {loading ? (
@@ -160,11 +241,14 @@ const RULES: { value: Rule; labelKey: string; variant: 'info' | 'success' | 'neu
 ]
 
 function AppRow({ app, onRuleChange, onRemove, t }: AppRowProps) {
+  const isProcess = app.kind === 'process'
   return (
     <MacCard className="flex items-center gap-4 !p-3">
-      {/* App icon */}
+      {/* App icon (terminal glyph for command/process entries) */}
       <div className="w-9 h-9 rounded-[var(--radius-sm)] bg-[var(--color-border)] flex items-center justify-center shrink-0 overflow-hidden">
-        {app.icon ? (
+        {isProcess ? (
+          <TerminalSquare className="w-5 h-5 text-[var(--color-accent)]" />
+        ) : app.icon ? (
           <img
             src={`data:image/png;base64,${app.icon}`}
             alt={app.name}
@@ -179,11 +263,16 @@ function AppRow({ app, onRuleChange, onRemove, t }: AppRowProps) {
 
       {/* App info */}
       <div className="flex-1 min-w-0">
-        <div className="text-sm font-medium text-[var(--color-text)] truncate">
+        <div className="text-sm font-medium text-[var(--color-text)] truncate flex items-center gap-2">
           {app.name}
+          {isProcess && (
+            <MacBadge variant="info" className="!text-[10px] !px-1.5 !py-0">
+              {t('splitTunneling.commandTag')}
+            </MacBadge>
+          )}
         </div>
         <div className="text-xs text-[var(--color-text-secondary)] truncate">
-          {app.path}
+          {isProcess ? t('splitTunneling.commandSubtitle') : app.path}
         </div>
       </div>
 

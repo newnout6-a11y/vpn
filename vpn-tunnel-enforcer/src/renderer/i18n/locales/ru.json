@@ -129,7 +129,15 @@
     "ruleDirect": "Напрямую",
     "ruleNone": "Нет",
     "noApps": "Приложения не найдены",
-    "path": "Путь"
+    "path": "Путь",
+    "bypassCommandTitle": "Команда мимо VPN",
+    "bypassCommandHint": "Укажите имя процесса (например curl.exe, git.exe, yt-dlp), и его трафик пойдёт напрямую, минуя VPN. Работает по имени исполняемого файла, а не по конкретному запуску.",
+    "bypassCommandPlaceholder": "curl.exe",
+    "bypassCommandAdd": "Добавить",
+    "commandTag": "команда",
+    "commandSubtitle": "Идёт мимо VPN по имени процесса",
+    "commandAdded": "Команда теперь идёт мимо VPN.",
+    "commandAddFailed": "Не удалось добавить команду"
   },
   "servers": {
     "title": "Серверы",

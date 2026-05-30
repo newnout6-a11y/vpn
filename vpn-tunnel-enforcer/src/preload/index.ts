@@ -50,6 +50,7 @@ export interface ElectronAPI {
   splitTunnelGetApps: () => Promise<any[]>
   splitTunnelSetRule: (appId: string, rule: 'vpn' | 'direct' | 'none') => Promise<void>
   splitTunnelAddApp: (exePath: string) => Promise<any>
+  splitTunnelAddProcess: (name: string) => Promise<any>
   splitTunnelRemoveApp: (appId: string) => Promise<void>
   // Server Picker
   serversList: () => Promise<any[]>
@@ -250,6 +251,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   splitTunnelGetApps: () => ipcRenderer.invoke('split-tunnel:get-apps'),
   splitTunnelSetRule: (appId: string, rule: 'vpn' | 'direct' | 'none') => ipcRenderer.invoke('split-tunnel:set-rule', appId, rule),
   splitTunnelAddApp: (exePath: string) => ipcRenderer.invoke('split-tunnel:add-app', exePath),
+  splitTunnelAddProcess: (name: string) => ipcRenderer.invoke('split-tunnel:add-process', name),
   splitTunnelRemoveApp: (appId: string) => ipcRenderer.invoke('split-tunnel:remove-app', appId),
   // Server Picker
   serversList: () => ipcRenderer.invoke('servers:list'),

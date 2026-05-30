@@ -129,7 +129,15 @@
     "ruleDirect": "Direct",
     "ruleNone": "None",
     "noApps": "No applications found",
-    "path": "Path"
+    "path": "Path",
+    "bypassCommandTitle": "Bypass a command",
+    "bypassCommandHint": "Enter a process name (e.g. curl.exe, git.exe, yt-dlp) and its traffic will go directly, around the VPN. Matches by executable name, not a single launch.",
+    "bypassCommandPlaceholder": "curl.exe",
+    "bypassCommandAdd": "Add",
+    "commandTag": "command",
+    "commandSubtitle": "Bypasses the VPN by process name",
+    "commandAdded": "Command now bypasses the VPN.",
+    "commandAddFailed": "Could not add command"
   },
   "servers": {
     "title": "Servers",

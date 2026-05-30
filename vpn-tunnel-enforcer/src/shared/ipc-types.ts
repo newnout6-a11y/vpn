@@ -14,6 +14,19 @@ export interface SplitTunnelApp {
   path: string
   icon: string | null // base64 encoded icon
   rule: 'vpn' | 'direct' | 'none'
+  /**
+   * Entry kind:
+   *   - 'app'     (default) — a discovered/added installed application; `path`
+   *                is a real .exe path on disk.
+   *   - 'process' — a bare process/command name the user wants to bypass the
+   *                VPN (e.g. `curl.exe`, `git.exe`, `yt-dlp.exe`). `path` holds
+   *                just the process name; there is no on-disk validation
+   *                because the command may live anywhere on PATH or be invoked
+   *                transiently from a terminal.
+   * Optional for back-compat: entries saved by older builds have no `kind`
+   * and are treated as 'app'.
+   */
+  kind?: 'app' | 'process'
 }
 
 /** Split Tunneling full configuration */

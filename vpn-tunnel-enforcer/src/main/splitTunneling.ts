@@ -186,7 +186,8 @@ async function addApp(exePath: string): Promise<SplitTunnelApp> {
     name,
     path: exePath,
     icon: null,
-    rule: 'none'
+    rule: 'none',
+    kind: 'app'
   }
 
   const apps = getApps()
@@ -200,6 +201,76 @@ async function addApp(exePath: string): Promise<SplitTunnelApp> {
   saveApps(apps)
   logEvent('info', 'split-tunnel', `app added`, { id: app.id, name: app.name, path: app.path })
   return app
+}
+
+/**
+ * Normalize a user-typed process/command name into the form sing-box matches
+ * against on Windows. sing-box compares the executable's base name including
+ * the extension (e.g. `curl.exe`). We:
+ *   - strip any directory part the user may have pasted (`C:\foo\curl.exe` →
+ *     `curl.exe`) — process_name matches the leaf, process_path would need the
+ *     full real path which a transient PATH command doesn't have;
+ *   - trim quotes/whitespace;
+ *   - append `.exe` when the user typed a bare command (`curl` → `curl.exe`),
+ *     since Windows executables carry the extension and that's what sing-box
+ *     sees. Names that already have an extension are left as-is.
+ *   - lower-case for stable de-duplication (Windows process names are
+ *     case-insensitive).
+ * Returns null for input that can't be a valid Windows executable name
+ * (empty, path separators left over, illegal filename characters).
+ */
+export function normalizeProcessName(input: string): string | null {
+  let s = String(input ?? '').trim()
+  if (!s) return null
+  // Strip surrounding quotes a user might paste from a command line.
+  s = s.replace(/^["']+|["']+$/g, '').trim()
+  if (!s) return null
+  // Reduce any path to its leaf component (handle both separators).
+  const leaf = s.split(/[\\/]/).pop() ?? s
+  if (!leaf) return null
+  // Reject illegal Windows filename characters / whitespace inside the name.
+  if (/[<>:"/\\|?*\s]/.test(leaf)) return null
+  // Append .exe for a bare command name (no extension present).
+  const withExt = /\.[a-z0-9]+$/i.test(leaf) ? leaf : `${leaf}.exe`
+  return withExt.toLowerCase()
+}
+
+/**
+ * Add a bare process/command name to bypass the VPN (route 'direct'). Unlike
+ * addApp this does NOT touch the filesystem — the command may be anywhere on
+ * PATH or invoked transiently from a terminal. The entry is created already
+ * set to 'direct' because that's the only reason to add a command by name.
+ */
+export function addProcessName(rawName: string): SplitTunnelApp {
+  const proc = normalizeProcessName(rawName)
+  if (!proc) {
+    throw new Error('Некорректное имя процесса. Пример: curl.exe или yt-dlp')
+  }
+  const apps = getApps()
+  // De-dupe by process name (case-insensitive — already lower-cased).
+  const existing = apps.find(
+    (a) => a.kind === 'process' && a.path.toLowerCase() === proc
+  )
+  if (existing) {
+    // Make sure it's actually bypassing — a previous 'none' would be a no-op.
+    if (existing.rule !== 'direct') {
+      setRule(existing.id, 'direct')
+      return { ...existing, rule: 'direct' }
+    }
+    return existing
+  }
+  const entry: SplitTunnelApp = {
+    id: randomUUID(),
+    name: proc,
+    path: proc,
+    icon: null,
+    rule: 'direct',
+    kind: 'process'
+  }
+  apps.push(entry)
+  saveApps(apps)
+  logEvent('info', 'split-tunnel', 'process-name bypass added', { name: proc })
+  return entry
 }
 
 function removeApp(appId: string): void {
@@ -387,6 +458,17 @@ export function registerSplitTunnelHandlers(): void {
     return app
   })
 
+  // Add a bare process/command name to bypass the VPN (route direct). This is
+  // for terminal commands and CLI tools (curl, git, yt-dlp, …) that aren't
+  // installed "apps" with a fixed path — the user just types the command name.
+  // The entry is created already set to 'direct'. Hot-reloads if connected so
+  // the bypass takes effect without a manual reconnect.
+  handleLogged('split-tunnel:add-process', async (_event, rawName: string) => {
+    const entry = addProcessName(rawName)
+    await hotReloadIfActive()
+    return entry
+  })
+
   handleLogged('split-tunnel:remove-app', async (_event, appId: string) => {
     removeApp(appId)
     // Hot-reload if TUN is active (in case removed app had a rule)
@@ -405,6 +487,8 @@ export const splitTunneling = {
   getConfig,
   setRule,
   addApp,
+  addProcessName,
+  normalizeProcessName,
   removeApp,
   getDirectProcessNames,
   getVpnProcessNames,

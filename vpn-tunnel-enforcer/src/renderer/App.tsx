@@ -63,6 +63,7 @@ declare global {
       splitTunnelGetApps: () => Promise<import('../shared/ipc-types').SplitTunnelApp[]>
       splitTunnelSetRule: (appId: string, rule: 'vpn' | 'direct' | 'none') => Promise<void>
       splitTunnelAddApp: (exePath: string) => Promise<import('../shared/ipc-types').SplitTunnelApp>
+      splitTunnelAddProcess: (name: string) => Promise<import('../shared/ipc-types').SplitTunnelApp>
       splitTunnelRemoveApp: (appId: string) => Promise<void>
       // Server Picker
       serversList: () => Promise<import('../shared/ipc-types').ServerProfile[]>
