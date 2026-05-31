@@ -327,6 +327,43 @@ the user enabled; left as-is. The smart-RU geoip decision per destination is
 inherent to the split feature the user asked for and is cheap now that DNS is
 fast (median 84ms warm).
 
+### F12 — Direct VPN had no server-health watchdog → dead server looked like a leak/crash [FIXED]
+User (frantic): "IP опять не защищает, бесполезные непонятные слова, потом
+крашнулось, пинг всех стал 0, не подключается к Польше хотя Happ через неё
+работает 100%." Analyzed the 17-40 diag. What actually happened, in order:
+
+1. **The VLESS server `144.31.128.193` stopped responding.** sing-box log has
+   383 `wsarecv: connected host has failed to respond` errors to it, and the
+   in-app pings to `144.31.1.75` jumped from ~50ms to 4000-6756ms. This is a
+   SERVER-SIDE outage, not our bug.
+2. Because the server was dead, **DNS-through-the-tunnel timed out 15s+**, the
+   browser/IP-check couldn't resolve anything, and the card fell back to
+   showing the last-known real IP → looked like "IP не защищает" (it wasn't a
+   real leak; the leak self-test logged no `physicalAdapterReached`).
+3. The "crash" (`sing-box process exited` at ERROR) was actually the user's own
+   Stop — the next log line is `sing-box exited after user stop`. A force-kill
+   exits non-zero, which we wrongly logged at error.
+4. "ping всех = 0" — with the wedged tunnel still capturing traffic, every TCP
+   probe routed through the dead TUN and timed out → all null.
+
+Real gaps fixed:
+- **Direct VPN now has a server-health watchdog.** Previously `startProxyWatch
+  dog` ran ONLY in localProxy mode (`if (mode === 'localProxy')`); directVpn had
+  nothing watching the upstream. Added `startServerWatchdog(host, port, label)`
+  that TCP-probes the VLESS server's host:port every 5s and, after 3 failures,
+  emits `proxy-down` with a clear "Сервер «X» не отвечает … выберите другой
+  сервер" — instead of leaving the user with DNS timeouts and a misleading leak
+  card. Traffic stays blocked in the TUN (no real-IP leak) until it recovers.
+- **Downgraded the false "sing-box process exited" ERROR** to info when
+  `userInitiatedStop` is set, so a normal Stop no longer looks like a crash in
+  the log / diagnostics error summary.
+
+Honest limitation: I can't see why Happ stays up on the same route — it may use
+a different/healthier server for Poland, connection mux, or its own DNS path.
+If Happ uses the SAME key as our index-28/Poland entries, our watchdog + a
+future auto-failover to the next healthy key is the right direction. 324 tests
+green (watchdog uses setInterval+module state; covered at integration level).
+
 ---
 
 # PASS 3 — DPI/TSPU circumvention research vs our config (2025-2026 intel)

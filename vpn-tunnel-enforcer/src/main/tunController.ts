@@ -1045,6 +1045,45 @@ function startProxyWatchdog(proxyAddr: string) {
   }, 5000)
 }
 
+/**
+ * Direct-VPN counterpart of startProxyWatchdog. In directVpn mode there is no
+ * local proxy to probe — the upstream is the VLESS/Reality server itself. We
+ * TCP-probe its host:port so a dead/unresponsive server (the "wsarecv: host
+ * failed to respond" storm) is detected within ~15s and surfaced as
+ * `proxy-down` with a clear "сервер X не отвечает" message, instead of leaving
+ * the user staring at DNS timeouts and a misleading "leak" card.
+ *
+ * Note: a TCP connect succeeding doesn't fully prove the Reality handshake
+ * works, but a TCP connect FAILING is a definitive "server is down" signal,
+ * which is exactly the case we need to catch here. We use a slightly longer
+ * 2s probe timeout because the server is remote (not localhost).
+ */
+function startServerWatchdog(host: string, port: number, label: string) {
+  stopProxyWatchdog()
+  watchdogTimer = setInterval(async () => {
+    if (!currentStatus.running) {
+      stopProxyWatchdog()
+      return
+    }
+
+    const alive = await probeTcp(host, port, 2500)
+    if (alive) {
+      watchdogFailures = 0
+      markProxyRecovered()
+      return
+    }
+
+    watchdogFailures += 1
+    if (watchdogFailures >= 3) {
+      markProxyUnreachable(
+        `Сервер «${label}» не отвечает. Трафик блокируется в TUN (реальный IP не утекает). Выберите другой сервер.`
+      )
+    } else {
+      logEvent('warn', 'tun-watchdog', `VPN server probe failed (${watchdogFailures}/3)`, { host, port, label })
+    }
+  }, 5000)
+}
+
 // Quick TCP reachability probe (2s timeout). Used to verify the upstream proxy
 // (e.g. Happ on 127.0.0.1:10808) is actually accepting connections BEFORE we
 // rewrite system routing — otherwise the TUN would blackhole all traffic.
@@ -1976,7 +2015,12 @@ export const tunController = {
           }
           finish({ success: false, error: msg })
         } else if (error || stderr) {
-          logEvent(error ? 'error' : 'warn', 'tun', 'sing-box process exited', { error: error?.message, stderr })
+          // A force-kill on user-initiated stop makes the child exit with a
+          // non-zero "Command failed" error + empty stderr. That's expected,
+          // not a fault — don't cry ERROR for it (it polluted the diagnostics
+          // "errors:" summary and alarmed the user). Real unexpected crashes
+          // (userInitiatedStop === false) still log at error.
+          logEvent(userInitiatedStop ? 'info' : (error ? 'error' : 'warn'), 'tun', 'sing-box process exited', { error: error?.message, stderr, userInitiatedStop })
         } else {
           logEvent('info', 'tun', 'sing-box process exited')
         }
@@ -2234,7 +2278,22 @@ export const tunController = {
             restartAttempt
           }
           mark('tun-running')
-          if (mode === 'localProxy') startProxyWatchdog(proxyAddr)
+          if (mode === 'localProxy') {
+            startProxyWatchdog(proxyAddr)
+          } else if (mode === 'directVpn' && vpnProfile?.outbound) {
+            // Direct VPN mode had NO server-health watchdog — so when the VLESS
+            // server stopped responding mid-session (real case: wsarecv "host
+            // failed to respond" storm), nothing detected it. DNS-through-the-
+            // tunnel then timed out for 15s+, the IP-check fell back to showing
+            // the real IP, and the user saw confusing "leak"/error states with
+            // no clear "сервер не отвечает". Now we probe the VLESS server's
+            // host:port the same way and emit proxy-down so the UI can say so.
+            const vhost = vpnProfile.outbound.server
+            const vport = Number(vpnProfile.outbound.server_port)
+            if (typeof vhost === 'string' && vhost && Number.isInteger(vport) && vport > 0 && vport <= 65535) {
+              startServerWatchdog(vhost, vport, vpnProfile.name || vhost)
+            }
+          }
           logEvent('info', 'tun', 'TUN started', {
             mode,
             proxyAddr,
