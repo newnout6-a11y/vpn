@@ -95,6 +95,18 @@ function groupByProtocol(profiles: ServerProfile[]): Record<string, ServerProfil
   return groups
 }
 
+/**
+ * Happ-style per-row type label, e.g. "VLESS | JSON". Mirrors how Happ writes
+ * the protocol + config format next to each server. The "| JSON" part is shown
+ * when the profile carries a full sing-box outbound object (which every
+ * dial-able profile does), exactly like Happ marking JSON-config entries.
+ */
+function formatHappType(profile: ServerProfile): string {
+  const proto = (profile.protocol || 'unknown').toUpperCase()
+  const hasJson = !!profile.outbound && typeof profile.outbound === 'object'
+  return hasJson ? `${proto} | JSON` : proto
+}
+
 function statusVariant(status: ServerProfile['status']): BadgeVariant {
   switch (status) {
     case 'online':
@@ -1485,7 +1497,6 @@ function ServerProfileCard({
             <span className="text-sm font-medium text-[var(--color-text)] truncate">
               {profile.name}
             </span>
-            <MacBadge variant="info">{profile.protocol}</MacBadge>
             {staleFromSub && (
               <MacBadge variant="warning" className="!text-[10px]">
                 {t('servers.groups.removedFromSub')}
@@ -1498,8 +1509,13 @@ function ServerProfileCard({
               <span className="text-xs text-[var(--color-text-secondary)]">{country}</span>
             )}
           </div>
-          <div className="flex items-center gap-3 mt-0.5">
-            <span className="text-xs text-[var(--color-text-secondary)]">
+          {/* Happ-style type label ("VLESS | JSON") + endpoint underneath the
+              name, so each row reads like Happ's subscription list. */}
+          <div className="flex items-center gap-2 mt-0.5">
+            <span className="text-[11px] font-medium uppercase tracking-wide text-[var(--color-text-secondary)]">
+              {formatHappType(profile)}
+            </span>
+            <span className="text-[11px] text-[var(--color-text-muted)] truncate font-mono">
               {profile.server}:{profile.port}
             </span>
           </div>
