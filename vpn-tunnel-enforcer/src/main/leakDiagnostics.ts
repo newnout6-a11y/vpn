@@ -29,6 +29,19 @@ interface RunLeakCheckOptions {
   proxyAddr?: string
   proxyType?: 'socks5' | 'http'
   tunRunning?: boolean
+  /**
+   * Connection mode. In 'directVpn' sing-box IS the tunnel core — there is no
+   * separate local SOCKS/HTTP proxy to probe, so a stale proxyOverride like
+   * 127.0.0.1:10808 (left over from Happ-proxy mode) must NOT be flagged red.
+   */
+  connectionMode?: 'localProxy' | 'directVpn'
+  /**
+   * Smart-RU split is ON. When set, RU-hosted public IPs egressing via
+   * direct-out are EXPECTED (banks/gov/VK/Yandex see the real IP by design) —
+   * so the "Direct-out приложений" check must treat them as informational, not
+   * a leak.
+   */
+  smartRuSplit?: boolean
 }
 
 async function fetchJson(url: string, timeout = 8000): Promise<any | null> {
@@ -177,11 +190,34 @@ async function getDnsProbe(): Promise<string> {
   }
 }
 
+/**
+ * A sing-box log line is BENIGN block-out noise (not a real error) when it's
+ * the core refusing to open a UDP listen socket for traffic we deliberately
+ * route to block-out (QUIC/HTTP3 on a tcp-only Reality outbound). Counting
+ * these as errors made every healthy session look broken. Exported for tests.
+ */
+export function isBenignBlockLine(line: string): boolean {
+  return (
+    /outbound\/block\[block-out]/i.test(line) ||
+    /listen packet connection using .*block-out: operation not permitted/i.test(line)
+  )
+}
+
+/** Pure: extract the up-to-5 most recent REAL error lines from a sing-box log. */
+export function extractRealErrors(logText: string): string[] {
+  return logText
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .filter(line => /\b(fatal|error|panic|failed|timeout|refused)\b/i.test(line))
+    .filter(line => !isBenignBlockLine(line))
+    .slice(-5)
+}
+
 async function getLogSummary(): Promise<string> {
   try {
     const log = await readFile(join(getTunRuntimeDir(), 'sing-box.log'), 'utf-8')
     const lines = log.split(/\r?\n/).filter(Boolean)
-    const errors = lines.filter(line => /\b(fatal|error|panic|failed|timeout|refused)\b/i.test(line)).slice(-5)
+    const errors = extractRealErrors(log)
     const proxyHits = lines.filter(line => /outbound\/(socks|http)\[proxy-out]/i.test(line)).length
     const directHits = lines.filter(line => /outbound\/direct\[direct-out]/i.test(line)).length
     const dnsHits = lines.filter(line => /hijack|dns/i.test(line)).length
@@ -213,45 +249,71 @@ async function getTunLogItem(tunRunning: boolean): Promise<LeakCheckItem> {
   }
 }
 
-async function getDirectPublicSummary(): Promise<{ leakedCount: number; allowedCoreCount: number; leakedExamples: string[]; allowedExamples: string[] }> {
+/**
+ * Pure classifier for direct-out connections found in a sing-box log. Splits
+ * public IPs that egressed direct into three buckets:
+ *   - smartRu:  matched geoip-ru / geosite-category-gov-ru → RU split (expected)
+ *   - allowed:  the connection's process was a VPN-core (Happ/xray) exclusion
+ *   - leaked:   neither — a genuine unexplained direct-out of a public IP
+ * Exported for unit testing (the IO wrapper getDirectPublicSummary just reads
+ * the file and delegates here).
+ */
+export function classifyDirectPublic(logText: string): {
+  leakedCount: number; allowedCoreCount: number; smartRuCount: number
+  leakedExamples: string[]; allowedExamples: string[]; smartRuExamples: string[]
+} {
+  const byId = new Map<string, { allowedCore: boolean; smartRu: boolean; directIps: string[] }>()
+
+  for (const line of logText.split(/\r?\n/)) {
+    const id = line.match(/\[(\d+)\s/)?.[1]
+    if (!id) continue
+
+    const entry = byId.get(id) ?? { allowedCore: false, smartRu: false, directIps: [] }
+    if (/router: match\[\d+].*process_name=\[/i.test(line)) {
+      entry.allowedCore = true
+    }
+    // Smart-RU split: a connection routed direct because it matched the RU
+    // geoip / gov-geosite rule-set. This is EXPECTED (banks/gov/VK/Yandex
+    // egress with the real IP by design), NOT a leak.
+    if (/router: match\[\d+].*rule_set=(geoip-ru|geosite-category-gov-ru).*=>\s*route\(direct-out\)/i.test(line)) {
+      entry.smartRu = true
+    }
+
+    const direct = line.match(/outbound\/direct\[direct-out\].*?(?:to|connection to) ([0-9a-fA-F:.]+):\d+/)
+    if (direct && !isPrivateIp(direct[1])) {
+      entry.directIps.push(direct[1])
+    }
+
+    byId.set(id, entry)
+  }
+
+  const leaked: string[] = []
+  const allowed: string[] = []
+  const smartRu: string[] = []
+  for (const entry of byId.values()) {
+    for (const ip of entry.directIps) {
+      if (entry.smartRu) smartRu.push(ip)
+      else if (entry.allowedCore) allowed.push(ip)
+      else leaked.push(ip)
+    }
+  }
+
+  return {
+    leakedCount: leaked.length,
+    allowedCoreCount: allowed.length,
+    smartRuCount: smartRu.length,
+    leakedExamples: [...new Set(leaked)].slice(0, 5),
+    allowedExamples: [...new Set(allowed)].slice(0, 5),
+    smartRuExamples: [...new Set(smartRu)].slice(0, 5)
+  }
+}
+
+async function getDirectPublicSummary(): Promise<{ leakedCount: number; allowedCoreCount: number; smartRuCount: number; leakedExamples: string[]; allowedExamples: string[]; smartRuExamples: string[] }> {
   try {
     const log = await readFile(join(getTunRuntimeDir(), 'sing-box.log'), 'utf-8')
-    const byId = new Map<string, { allowedCore: boolean; directIps: string[] }>()
-
-    for (const line of log.split(/\r?\n/)) {
-      const id = line.match(/\[(\d+)\s/)?.[1]
-      if (!id) continue
-
-      const entry = byId.get(id) ?? { allowedCore: false, directIps: [] }
-      if (/router: match\[\d+].*process_name=\[/i.test(line)) {
-        entry.allowedCore = true
-      }
-
-      const direct = line.match(/outbound\/direct\[direct-out\].*?(?:to|connection to) ([0-9a-fA-F:.]+):\d+/)
-      if (direct && !isPrivateIp(direct[1])) {
-        entry.directIps.push(direct[1])
-      }
-
-      byId.set(id, entry)
-    }
-
-    const leaked: string[] = []
-    const allowed: string[] = []
-    for (const entry of byId.values()) {
-      for (const ip of entry.directIps) {
-        if (entry.allowedCore) allowed.push(ip)
-        else leaked.push(ip)
-      }
-    }
-
-    return {
-      leakedCount: leaked.length,
-      allowedCoreCount: allowed.length,
-      leakedExamples: [...new Set(leaked)].slice(0, 5),
-      allowedExamples: [...new Set(allowed)].slice(0, 5)
-    }
+    return classifyDirectPublic(log)
   } catch {
-    return { leakedCount: 0, allowedCoreCount: 0, leakedExamples: [], allowedExamples: [] }
+    return { leakedCount: 0, allowedCoreCount: 0, smartRuCount: 0, leakedExamples: [], allowedExamples: [], smartRuExamples: [] }
   }
 }
 
@@ -265,8 +327,23 @@ export async function runLeakCheck(options: RunLeakCheckOptions = {}): Promise<L
   const items: LeakCheckItem[] = []
   const foreignTun = detectForeignTun()
   const externalOnly = Boolean(foreignTun && !options.tunRunning)
+  const isDirectVpn = options.connectionMode === 'directVpn'
 
-  if (options.proxyAddr) {
+  // In Direct VPN mode sing-box itself is the tunnel core — there is no local
+  // SOCKS/HTTP proxy to probe. A leftover proxyOverride (e.g. 127.0.0.1:10808
+  // from a previous Happ-proxy session) is meaningless here and must not be
+  // probed/flagged red. Report the real architecture instead.
+  if (isDirectVpn) {
+    items.push({
+      id: 'proxy',
+      label: 'Прокси',
+      status: 'info',
+      value: 'Direct VPN (sing-box)',
+      details: options.tunRunning
+        ? 'Локальный proxy не используется — sing-box сам держит VLESS/Reality-туннель. Это нормально.'
+        : 'Режим Direct VPN: локальный proxy не нужен. sing-box поднимает туннель сам.'
+    })
+  } else if (options.proxyAddr) {
     try {
       const { host, port } = parseProxyAddress(options.proxyAddr)
       const alive = await probeTcp(host, port, 2000)
@@ -349,18 +426,26 @@ export async function runLeakCheck(options: RunLeakCheckOptions = {}): Promise<L
 
   const directPublic = await getDirectPublicSummary()
   const suspiciousCoreDirect = directPublic.allowedCoreCount > 10 || directPublic.allowedExamples.length > 1
+  // When smart-RU split is ON, RU-hosted public IPs routed direct are the
+  // feature working as intended (banks/gov/VK/Yandex see the real IP) — show
+  // them as informational, never a leak.
+  const smartRuDirectInfo = options.smartRuSplit === true && directPublic.smartRuCount > 0
   items.push({
     id: 'direct-public',
     label: 'Direct-out приложений',
     status: directPublic.leakedCount > 0 ? 'fail' : suspiciousCoreDirect ? 'warn' : 'ok',
     value: directPublic.leakedCount > 0
       ? `${directPublic.leakedCount} записей`
-      : suspiciousCoreDirect
-        ? `${directPublic.allowedCoreCount} VPN-core direct-out`
-        : 'Утечек не найдено',
+      : smartRuDirectInfo
+        ? `${directPublic.smartRuCount} RU-направлений (smart-RU)`
+        : suspiciousCoreDirect
+          ? `${directPublic.allowedCoreCount} VPN-core direct-out`
+          : 'Утечек не найдено',
     details:
       directPublic.leakedCount > 0
         ? `Публичные IP ушли в direct-out без VPN-core исключения: ${directPublic.leakedExamples.join(', ')}`
+        : smartRuDirectInfo
+          ? `Это умная маршрутизация РФ: российские сервисы (${directPublic.smartRuExamples.join(', ')}) идут напрямую с реальным IP по правилам geoip-ru/gov-ru. Так и задумано — иностранный трафик при этом через VPN.`
         : suspiciousCoreDirect
           ? `VPN-core процесс делает direct-out к нескольким публичным IP: ${directPublic.allowedExamples.join(', ')}. Это похоже на split/direct правила upstream proxy.`
         : directPublic.allowedCoreCount > 0

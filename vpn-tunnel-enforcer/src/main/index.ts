@@ -784,7 +784,9 @@ async function runTrayDiagnostics(): Promise<void> {
   const result = await runLeakCheck({
     proxyAddr,
     proxyType: tunStatus.proxyType || settings.proxyType,
-    tunRunning: tunStatus.running
+    tunRunning: tunStatus.running,
+    connectionMode: tunStatus.mode ?? settings.connectionMode,
+    smartRuSplit: settings.smartRuSplit === true
   })
   const message =
     result.summary === 'ok'
@@ -1074,10 +1076,13 @@ app.whenReady().then(async () => {
 
   handleLogged('run-leak-check', async (_e, options?: { proxyAddr?: string; proxyType?: 'socks5' | 'http' }) => {
     const tunStatus = tunController.getStatus()
+    const settings = settingsStore.get()
     return runLeakCheck({
       proxyAddr: options?.proxyAddr ?? tunStatus.proxyAddr ?? undefined,
       proxyType: options?.proxyType ?? tunStatus.proxyType ?? settingsStore.get().proxyType,
-      tunRunning: tunStatus.running
+      tunRunning: tunStatus.running,
+      connectionMode: tunStatus.mode ?? settings.connectionMode,
+      smartRuSplit: settings.smartRuSplit === true
     })
   })
 

@@ -227,6 +227,40 @@ setting (already opt-in, default off; user has it on). It only "vanished"
 because sing-box never started — once the tunnel starts cleanly the kill-switch
 behaves per the setting again. Left as the optional extra; no code change.
 
+### F9 — route-diagnostics screamed false "УТЕЧКА" because it was blind to smart-RU split + directVpn [FIXED]
+User report (VPN now hides the IP correctly): "много непонятных записей" in the
+diagnostics. Three were FALSE POSITIVES introduced by features the diagnostics
+predate:
+1. **"Прокси: Порт не отвечает" (red/fail)** — in directVpn mode there is NO
+   local SOCKS proxy; sing-box IS the tunnel core. The check was probing a
+   stale `proxyOverride` (127.0.0.1:10808, left from a past Happ-proxy session)
+   and flagging it red. Fixed: when `connectionMode==='directVpn'` the proxy
+   item is now informational ("Direct VPN (sing-box)"), not a probe.
+2. **"Direct-out приложений: 9 записей" (red/fail)** — every "leaked" IP was
+   Russian (77.88.21.24=api.passport.yandex.ru, 95.213.56.2=queuev4.vk.com,
+   etc.) going direct because it matched geoip-ru/gov-ru — i.e. smart-RU split
+   working EXACTLY as designed. The classifier didn't know about smart-RU and
+   counted RU-direct as a leak. Fixed: `classifyDirectPublic` now buckets
+   rule_set=geoip-ru/geosite-category-gov-ru direct-out hits as `smartRu`
+   (informational when the feature is on), separate from genuine leaks and
+   VPN-core process exclusions.
+3. **sing-box log "errors" inflated** by benign `block-out: operation not
+   permitted` lines — that's the core refusing a UDP listen socket for QUIC/
+   HTTP3 we deliberately route to block-out on a tcp-only Reality outbound.
+   Fixed: `isBenignBlockLine` excludes them from the error summary so a healthy
+   session stops showing scary "errors:".
+
+runLeakCheck now receives `connectionMode` + `smartRuSplit` from the IPC
+handler and tray path. Extracted pure helpers (classifyDirectPublic,
+isBenignBlockLine, extractRealErrors) and tested them against real log excerpts
+from the user's diagnostic; verified the smart-RU test fails if the classifier
+is reverted. +8 tests. 309 → 317.
+
+Note: the WebRTC "local addresses" browser warning is NOT a false positive —
+those are private LAN IPs that don't expose the public IP, and the warning
+about a possible browser-level WebRTC leak is legitimately informational. Left
+as-is.
+
 ---
 
 # PASS 3 — DPI/TSPU circumvention research vs our config (2025-2026 intel)
