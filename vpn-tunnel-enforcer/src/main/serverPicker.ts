@@ -1012,103 +1012,20 @@ export function migrateProfilesIntoGroups(): void {
     stillUnclassified.push(...needsClassification)
   }
 
-  // ── Tier 2: detect MULTIPLE panels by SNI suffix ──────────────────────
+  // ── Tier 2: (REMOVED) SNI-suffix splitting ────────────────────────────
   //
-  // VPN providers reuse a single Reality / TLS server_name domain across
-  // every key they hand out (e.g. `feodorn.com`, `xoyit.com`,
-  // `dinoadd.online`). The previous version of this tier only created a
-  // group when ONE suffix dominated ≥80% of the unclassified pool — fine
-  // for users with one provider, but if the user has THREE providers
-  // imported in roughly equal portions, no suffix hits 80% and everyone
-  // falls into "Ручные ключи".
+  // We used to split unclassified profiles into separate "subscription"
+  // groups by their Reality/TLS server_name suffix, assuming a provider
+  // reuses ONE panel domain across all keys. That assumption is WRONG for
+  // modern Reality: each key deliberately camouflages as a DIFFERENT famous
+  // site (vk.com, ozone.ru, x5.ru, userapi.com, amd.com, …). The result was
+  // a single real subscription getting shattered into a dozen bogus
+  // domain-named "groups" — exactly the mess the user reported.
   //
-  // New behaviour: every distinct suffix with ≥3 members becomes its own
-  // subscription group named after the suffix. Tier-1 still gets first
-  // dibs — when an unclassified suffix matches the tier-1 group's
-  // dominant suffix, those profiles are merged into the tier-1 group
-  // instead of creating a duplicate. Solo / pair keys (suffix count < 3)
-  // stay unclassified and fall through to "Ручные ключи" — too small a
-  // sample to confidently call it a subscription.
-  if (stillUnclassified.length >= 3) {
-    const suffixCounts = new Map<string, ServerProfile[]>()
-    for (const p of stillUnclassified) {
-      const suffix = extractSniSuffix(p)
-      if (!suffix) continue
-      const arr = suffixCounts.get(suffix) ?? []
-      arr.push(p)
-      suffixCounts.set(suffix, arr)
-    }
-
-    // Pre-compute the tier-1 group's dominant suffix (if any) so we can
-    // sweep matching profiles into it without spawning a duplicate.
-    let tier1Suffix: string | null = null
-    if (subscriptionGroupId) {
-      const tier1Members = needsClassification.filter(p =>
-        assignments.get(subscriptionGroupId!)?.includes(p.id)
-      )
-      const tier1SuffixCounts = new Map<string, number>()
-      for (const p of tier1Members) {
-        const s = extractSniSuffix(p)
-        if (s) tier1SuffixCounts.set(s, (tier1SuffixCounts.get(s) ?? 0) + 1)
-      }
-      let bestCount = 0
-      for (const [s, c] of tier1SuffixCounts) {
-        if (c > bestCount) {
-          bestCount = c
-          tier1Suffix = s
-        }
-      }
-    }
-
-    const claimedIds = new Set<string>()
-
-    // Sort suffixes deterministically (largest first, then alphabetical)
-    // so re-running the migration produces stable group names.
-    const orderedSuffixes = Array.from(suffixCounts.entries())
-      .filter(([, members]) => members.length >= 3)
-      .sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]))
-
-    for (const [suffix, members] of orderedSuffixes) {
-      let targetGroupId: string
-
-      if (tier1Suffix && suffix === tier1Suffix && subscriptionGroupId) {
-        // Tier-1 already owns this panel — sweep the rest in. No duplicate.
-        targetGroupId = subscriptionGroupId
-      } else {
-        // Either a fresh panel or tier-1 is for a different one.
-        // Reuse an existing group with the same name (idempotent re-runs)
-        // before creating a new one.
-        const existing = serverGroups
-          .getGroups()
-          .find(g => g.source === 'subscription' && g.name === suffix && !g.sourceUrl)
-        const group =
-          existing ??
-          serverGroups.createGroup({
-            name: suffix,
-            source: 'subscription',
-            sourceUrl: undefined,
-            importedAt: Date.now(),
-            status: 'unknown'
-          })
-        targetGroupId = group.id
-      }
-
-      const arr = assignments.get(targetGroupId) ?? []
-      for (const p of members) {
-        arr.push(p.id)
-        claimedIds.add(p.id)
-      }
-      assignments.set(targetGroupId, arr)
-    }
-
-    // Strip claimed profiles from stillUnclassified — only suffix-less
-    // and below-threshold (< 3 members) entries remain for tier 3.
-    if (claimedIds.size) {
-      const remaining = stillUnclassified.filter(p => !claimedIds.has(p.id))
-      stillUnclassified.length = 0
-      stillUnclassified.push(...remaining)
-    }
-  }
+  // Correct behaviour: anything we can't tie to a real subscription URL
+  // (Tier 1) belongs together in the single "Ручные ключи" bucket (Tier 3).
+  // No SNI-based grouping. extractSniSuffix is retained only for the
+  // consolidation pass that repairs already-shattered installs.
 
   // ── Tier 3: fall back to "Ручные ключи" ───────────────────────────────
   if (stillUnclassified.length) {
@@ -1152,28 +1069,53 @@ export function migrateProfilesIntoGroups(): void {
 }
 
 /**
- * Extract the last 2 dotted segments of a profile's TLS server_name. We
- * use this as a panel-identity heuristic in tier 2 of the migration:
- * `dsfgh.feodorn.com`, `sdfd.feodorn.com`, `gxds.feodorn.com` all share
- * `feodorn.com`, which is virtually certain to be the panel's domain.
+ * One-time repair for installs already shattered by the old Tier-2 SNI-suffix
+ * splitter: it created bogus `source:'subscription'` groups named after a
+ * Reality camouflage domain (vk.com, ozone.ru, x5.ru, userapi.com, amd.com,
+ * sub.dinoadd.online, …) with NO `sourceUrl`. One real subscription ended up
+ * as a dozen fake groups.
  *
- * Returns null when the profile has no tls.server_name (Reality / TLS
- * disabled — uncommon for modern providers but possible).
+ * We can't recover the original subscription URL (it was never stored on those
+ * groups), so the honest repair is to fold every such bogus group back into
+ * the single "Ручные ключи" bucket — keys from a subscription whose URL we
+ * lost still belong together, not scattered by camouflage domain. Real
+ * subscription groups (those WITH a sourceUrl) and the manual group are left
+ * untouched.
+ *
+ * Heuristic for "bogus": source==='subscription' AND no sourceUrl. A genuine
+ * subscription group always has a sourceUrl (set by addFromInput / Tier-1).
+ * Idempotent: after the first run there are no sourceUrl-less subscription
+ * groups left, so re-running is a no-op.
+ *
+ * Run AFTER migrateProfilesIntoGroups on startup.
  */
-function extractSniSuffix(profile: ServerProfile): string | null {
-  const ob = profile.outbound
-  if (!ob || typeof ob !== 'object') return null
-  const tls = (ob as any).tls
-  const sni = tls && typeof tls === 'object' ? String(tls.server_name || '').trim() : ''
-  if (!sni) return null
-  // Strip a leading hostname label, keeping the last two segments. Two
-  // segments is the right cut for typical TLDs (`feodorn.com`); for
-  // multi-part TLDs like `co.uk` we'd ideally use the public suffix list,
-  // but in practice VPN panels almost never live on those, and a too-
-  // short suffix just means more groups (failsafe), never wrong groups.
-  const parts = sni.toLowerCase().split('.').filter(Boolean)
-  if (parts.length < 2) return null
-  return parts.slice(-2).join('.')
+export function consolidateBogusSniGroups(): void {
+  const groups = serverGroups.getGroups()
+  const bogus = groups.filter(g => g.source === 'subscription' && !g.sourceUrl)
+  if (!bogus.length) return
+
+  const bogusIds = new Set(bogus.map(g => g.id))
+  const manualId = ensureManualKeysGroup()
+
+  // Re-point every profile in a bogus group to the manual bucket.
+  const profiles = getProfiles()
+  let moved = 0
+  const updated = profiles.map(p => {
+    if (p.groupId && bogusIds.has(p.groupId)) {
+      moved++
+      return { ...p, groupId: manualId }
+    }
+    return p
+  })
+  if (moved > 0) saveProfiles(updated)
+
+  // Delete the now-empty bogus groups.
+  for (const id of bogusIds) serverGroups.deleteGroup(id)
+
+  logEvent('info', 'server-picker', 'consolidated bogus SNI groups into manual', {
+    bogusGroups: bogus.length,
+    profilesMoved: moved
+  })
 }
 
 /**
@@ -1893,6 +1835,7 @@ export const serverPicker = {
   migrateLegacyDirectVpnProfiles,
   backfillMissingOutbounds,
   migrateProfilesIntoGroups,
+  consolidateBogusSniGroups,
   backfillProfileSourceUris,
   clearStaleStoredPings,
   geolocateAll,

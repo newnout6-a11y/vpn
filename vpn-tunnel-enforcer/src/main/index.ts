@@ -1255,6 +1255,11 @@ app.whenReady().then(async () => {
   // groups-aware UI never has to deal with ungrouped entries from older
   // versions of the app. Idempotent.
   serverPicker.migrateProfilesIntoGroups()
+
+  // Repair installs shattered by the old SNI-suffix splitter: fold bogus
+  // camouflage-domain "subscription" groups (no sourceUrl) back into the
+  // single "Ручные ключи" bucket. Idempotent — no-op once cleaned.
+  serverPicker.consolidateBogusSniGroups()
   // Backfill missing `sourceUri` on profiles that were imported by older
   // builds before we tracked subscription URLs. Lets the smart-group
   // classifier re-bin previously-orphaned keys on the next migration pass.
