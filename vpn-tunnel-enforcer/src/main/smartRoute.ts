@@ -18,9 +18,11 @@
  * (Hiddify, Nekoray) use:
  *   1. geoip-ru        — route by the DESTINATION IP's country. Catches any
  *                        RU-hosted service regardless of its domain/TLD.
- *   2. geosite-category-ru / category-gov-ru — curated upstream domain lists
- *                        (SagerNet sing-geosite) that already map the big RU
- *                        properties including their .com/.рф faces.
+ *   2. geosite-category-gov-ru — curated upstream list of RU government /
+ *                        banking domains (covers .com/.рф faces too). We do
+ *                        NOT use the broad `category-ru` list: it means
+ *                        "popular IN Russia" and includes YouTube/Google,
+ *                        which must stay on the VPN.
  *
  * We pull these as sing-box `remote` rule-sets (binary .srs) downloaded
  * THROUGH the tunnel (download_detour: proxy-out — GitHub raw is itself often
@@ -52,26 +54,29 @@ export interface SmartRouteOptions {
   directDnsTag?: string
 }
 
-// Rule-set tags + their upstream .srs URLs. Verified present on the SagerNet
-// rule-set branches (geosite-ru.srs does NOT exist upstream — category-ru is
-// the correct tag). All downloaded through proxy-out and cached.
+// Rule-set tags + their upstream .srs URLs.
+//
+// IMPORTANT — what we deliberately do NOT use: `geosite-category-ru`.
+// Despite the name it is NOT "Russian-owned services". It's the v2fly
+// "category-ru" list = "domains popular/accessed IN Russia", which INCLUDES
+// youtube.com, google, and other foreign giants. Routing that category direct
+// sent YouTube down the throttled ISP path (TSPU) and killed it, while leaving
+// the tunnel up — the "Telegram works, YouTube doesn't" breakage the user hit.
+// We only use the genuinely-Russian signals: gov/banks geosite + geoip-ru.
 export const RU_GEOIP_RULESET = 'geoip-ru'
-export const RU_GEOSITE_RULESET = 'geosite-category-ru'
 export const RU_GOV_GEOSITE_RULESET = 'geosite-category-gov-ru'
 
 const RULESET_URLS: Record<string, string> = {
   [RU_GEOIP_RULESET]: 'https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-ru.srs',
-  [RU_GEOSITE_RULESET]: 'https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ru.srs',
   [RU_GOV_GEOSITE_RULESET]: 'https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-gov-ru.srs'
 }
 
 /**
- * The domain rule-sets used for RU-direct matching (geosite, not geoip). The
- * gov set is included so government portals work even if they're not in the
- * general category list yet.
+ * The domain rule-sets used for RU-direct matching. ONLY the government/banks
+ * list — see the comment above on why category-ru is intentionally excluded.
  */
 function ruDomainRuleSets(): string[] {
-  return [RU_GEOSITE_RULESET, RU_GOV_GEOSITE_RULESET]
+  return [RU_GOV_GEOSITE_RULESET]
 }
 
 /**

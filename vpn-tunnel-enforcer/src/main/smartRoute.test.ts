@@ -10,7 +10,6 @@ import {
   smartRouteNeedsDirectDns,
   suffixListToMatcher,
   RU_GEOIP_RULESET,
-  RU_GEOSITE_RULESET,
   RU_GOV_GEOSITE_RULESET,
   type SmartRouteOptions
 } from './smartRoute'
@@ -24,10 +23,13 @@ describe('smartRouteRuleSets', () => {
     expect(smartRouteRuleSets(OFF)).toEqual([])
   })
 
-  it('returns geoip + two geosite remote rule-sets through proxy-out', () => {
+  it('returns geoip + gov geosite remote rule-sets through proxy-out (NOT category-ru)', () => {
     const sets = smartRouteRuleSets(ON, 'proxy-out')
     const tags = sets.map((s) => s.tag)
-    expect(tags).toEqual([RU_GEOIP_RULESET, RU_GEOSITE_RULESET, RU_GOV_GEOSITE_RULESET])
+    expect(tags).toEqual([RU_GEOIP_RULESET, RU_GOV_GEOSITE_RULESET])
+    // category-ru must NOT be present — it includes YouTube/Google and would
+    // route them direct (TSPU kills them). Regression guard.
+    expect(tags).not.toContain('geosite-category-ru')
     for (const s of sets) {
       expect(s.type).toBe('remote')
       expect(s.format).toBe('binary')
@@ -75,7 +77,7 @@ describe('smartRouteRules', () => {
     const rules = smartRouteRules(ON)
     const domainRule = rules.find((r) => Array.isArray(r.rule_set))
     expect(domainRule?.outbound).toBe('direct-out')
-    expect(domainRule?.rule_set).toEqual([RU_GEOSITE_RULESET, RU_GOV_GEOSITE_RULESET])
+    expect(domainRule?.rule_set).toEqual([RU_GOV_GEOSITE_RULESET])
     const geoipRule = rules.find((r) => r.rule_set === RU_GEOIP_RULESET)
     expect(geoipRule?.outbound).toBe('direct-out')
   })
@@ -118,7 +120,7 @@ describe('smartRouteDnsRules', () => {
     const rules = smartRouteDnsRules(ON)
     const ruRule = rules.find((r) => Array.isArray(r.rule_set))
     expect(ruRule?.server).toBe('dns-direct')
-    expect(ruRule?.rule_set).toEqual([RU_GEOSITE_RULESET, RU_GOV_GEOSITE_RULESET])
+    expect(ruRule?.rule_set).toEqual([RU_GOV_GEOSITE_RULESET])
   })
 
   it('defaults the resolver tag to dns-direct when not provided', () => {

@@ -354,11 +354,18 @@ export function Servers() {
     return [...real, ...recovery]
   }, [groups, groupsAvailable, orphanGroupIds, t])
 
-  // When there's exactly one group, treat it as expanded by default.
+  // When there's exactly one group, expand it by default ONCE — but only the
+  // first time we ever see that specific group id. After that the user is free
+  // to collapse it and it stays collapsed (the old code force-expanded on
+  // every render, so the collapse button did nothing for a single group).
+  const autoExpandedRef = useRef<Set<string>>(new Set())
   useEffect(() => {
     if (effectiveGroups.length === 1) {
       const onlyId = effectiveGroups[0].id
-      setExpandedIds((prev) => (prev.has(onlyId) ? prev : new Set([...prev, onlyId])))
+      if (!autoExpandedRef.current.has(onlyId)) {
+        autoExpandedRef.current.add(onlyId)
+        setExpandedIds((prev) => (prev.has(onlyId) ? prev : new Set([...prev, onlyId])))
+      }
     }
   }, [effectiveGroups])
 
@@ -942,7 +949,7 @@ export function Servers() {
         <div className="space-y-4">
           {effectiveGroups.map((group) => {
             const groupProfiles = profilesByGroup[group.id] ?? []
-            const isExpanded = expandedIds.has(group.id) || effectiveGroups.length === 1
+            const isExpanded = expandedIds.has(group.id)
             return (
               <GroupCard
                 key={group.id}

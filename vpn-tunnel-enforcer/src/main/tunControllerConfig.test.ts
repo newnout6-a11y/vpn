@@ -415,7 +415,7 @@ describe('generateSingboxConfig smart RU split', () => {
     // rule_set definitions present and pointing at SagerNet srs.
     const tags = (cfg.route.rule_set ?? []).map((rs: any) => rs.tag)
     expect(tags).toContain('geoip-ru')
-    expect(tags).toContain('geosite-category-ru')
+    expect(tags).not.toContain('geosite-category-ru')
     expect(tags).toContain('geosite-category-gov-ru')
     for (const rs of cfg.route.rule_set) {
       expect(rs.type).toBe('remote')
