@@ -327,6 +327,17 @@ the user enabled; left as-is. The smart-RU geoip decision per destination is
 inherent to the split feature the user asked for and is cheap now that DNS is
 fast (median 84ms warm).
 
+**REVERTED (F11 was WRONG).** The DoH switch BROKE DNS in the field: the user
+reported the VPN killed all internet (and disabling it restored internet
+immediately). The diagnostics proved it — DoH-over-IP through the Reality
+tunnel timed out almost every query: 24 ok / 2184 fail in the 18-04 zip, vs
+289 ok on DoT in 16-20. `sing-box check` passed (syntax) but DoH-over-bare-IP
+detoured through a tcp-only Reality outbound does not resolve at runtime.
+Reverted the resolver back to DoT (`type: tls`) and plain profiles back to
+`udp`. cache_file-always-on was kept (harmless). LESSON: `sing-box check` only
+validates syntax, NOT runtime resolution — a DNS transport change MUST be
+verified on-device before shipping, never on the check alone.
+
 ### F12 — Direct VPN had no server-health watchdog → dead server looked like a leak/crash [FIXED]
 User (frantic): "IP опять не защищает, бесполезные непонятные слова, потом
 крашнулось, пинг всех стал 0, не подключается к Польше хотя Happ через неё

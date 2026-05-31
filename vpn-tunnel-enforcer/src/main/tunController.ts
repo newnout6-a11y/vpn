@@ -356,20 +356,16 @@ const SMART_DIRECT_DNS_TAG = 'dns-direct'
  * The first server MUST keep the tag `dns-remote` because the route block's
  * `default_domain_resolver` references it by name.
  *
- * PERFORMANCE (why DoH, not DoT): DNS is resolved THROUGH the Reality tunnel.
- * With DoT (`type: tls`) sing-box opened a fresh TLS-in-TLS handshake per
- * resolver connection; when a page load fires dozens of lookups at once right
- * after connect, the cold connection pool serialized them — measured median
- * 536ms, p90 ~8s, worst 33s. DoH (`type: https`) multiplexes every concurrent
- * query over ONE persistent HTTP/2 connection, so after the first request
- * there are no more handshakes. DoH on 443 is also harder for TSPU to throttle
- * than DoT on 853. We point at the resolver IP directly (Cloudflare/Google
- * serve DoH on the IP SAN) so no bootstrap lookup is needed.
+ * NOTE (reverted F11): an attempt to switch the tunnelled resolver from DoT
+ * (`type: tls`) to DoH (`type: https`) for fewer handshakes BROKE resolving in
+ * the field — DoH-over-IP through the Reality tunnel timed out almost every
+ * query (measured 24 ok / 2184 fail vs 289 ok on DoT), killing all browsing
+ * until the user disabled the VPN. We are back on DoT, which is the
+ * known-working path. Do NOT change this to https without real on-device
+ * verification first.
  *
  * sing-box 1.13 server types:
- *   - plain IP  → { type: 'tcp', server: '1.1.1.1' }  (plaintext DNS over TCP;
- *                  works through tcp-only Reality, unlike udp which our route
- *                  blocks, and no TLS-handshake cost)
+ *   - plain IP  → { type: 'udp', server: '1.1.1.1' }
  *   - DoH       → { type: 'https', server: 'dns.google', ... }
  *   - DoT       → { type: 'tls', server: 'dns.google', ... }
  *
@@ -379,8 +375,8 @@ const SMART_DIRECT_DNS_TAG = 'dns-direct'
  */
 function buildRemoteDnsServers(): Array<Record<string, any>> {
   const fallback = [
-    { type: 'https', tag: 'dns-remote', server: '1.1.1.1', detour: 'proxy-out' },
-    { type: 'https', tag: 'dns-backup', server: '8.8.8.8', detour: 'proxy-out' }
+    { type: 'tls', tag: 'dns-remote', server: '1.1.1.1', detour: 'proxy-out' },
+    { type: 'tls', tag: 'dns-backup', server: '8.8.8.8', detour: 'proxy-out' }
   ]
   try {
     const profile = dnsProfiles.getActiveDnsProfile()
@@ -400,12 +396,9 @@ function buildRemoteDnsServers(): Array<Record<string, any>> {
         if (!host) return null
         return { type: 'tls', tag, server: host, detour: 'proxy-out' }
       }
-      // plain IPv4/IPv6 → plaintext DNS over TCP through the tunnel. We use
-      // `tcp` (not `udp`): a tcp-only Reality outbound can't carry UDP and our
-      // route rules block UDP on such outbounds, so a `udp` DNS server detoured
-      // through proxy-out would silently fail. TCP DNS works everywhere and the
-      // query is already protected by the Reality tunnel itself.
-      return { type: 'tcp', tag, server: addr, detour: 'proxy-out' }
+      // plain IPv4/IPv6 → DoT-style udp resolver detoured through the tunnel
+      // (reverted from the broken tcp experiment).
+      return { type: 'udp', tag, server: addr, detour: 'proxy-out' }
     }
 
     const servers: Array<Record<string, any>> = []

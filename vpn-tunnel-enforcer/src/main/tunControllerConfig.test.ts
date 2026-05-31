@@ -319,27 +319,25 @@ describe('generateSingboxConfig DNS profile', () => {
     dnsState.active = null
   })
 
-  it('uses Cloudflare/Google DoH fallback when no profile is active', () => {
+  it('uses Cloudflare/Google DoT fallback when no profile is active', () => {
     dnsState.active = null
     const cfg = gen({ outbound: { ...plainTlsOutbound, server: '1.2.3.4' } })
     const remote = cfg.dns.servers.find((s: any) => s.tag === 'dns-remote') as any
     expect(remote.server).toBe('1.1.1.1')
-    // DoH (https), not DoT (tls): multiplexes queries over one HTTP/2 conn so
-    // a page-load DNS storm doesn't serialize on cold TLS handshakes.
-    expect(remote.type).toBe('https')
+    // DoT (tls) — the known-working tunnelled resolver. A DoH (https) attempt
+    // (F11) timed out almost every query through the Reality tunnel in the
+    // field and was reverted.
+    expect(remote.type).toBe('tls')
   })
 
-  it('applies a plain DNS profile as tcp servers through proxy-out', () => {
+  it('applies a plain DNS profile as udp servers through proxy-out', () => {
     dnsState.active = { id: 'x', name: 'Quad9', primary: '9.9.9.9', secondary: '149.112.112.112', type: 'plain' }
     const cfg = gen({ outbound: { ...plainTlsOutbound, server: '1.2.3.4' } })
     const servers = cfg.dns.servers as any[]
     const remote = servers.find((s) => s.tag === 'dns-remote')
     const backup = servers.find((s) => s.tag === 'dns-backup')
-    // tcp (not udp): a tcp-only Reality outbound can't carry UDP and our route
-    // blocks UDP on it, so a udp DNS server detoured through proxy-out would
-    // silently fail. TCP DNS works and is already inside the Reality tunnel.
-    expect(remote).toMatchObject({ type: 'tcp', server: '9.9.9.9', detour: 'proxy-out' })
-    expect(backup).toMatchObject({ type: 'tcp', server: '149.112.112.112', detour: 'proxy-out' })
+    expect(remote).toMatchObject({ type: 'udp', server: '9.9.9.9', detour: 'proxy-out' })
+    expect(backup).toMatchObject({ type: 'udp', server: '149.112.112.112', detour: 'proxy-out' })
   })
 
   it('applies a DoH profile as https server with bare host', () => {
