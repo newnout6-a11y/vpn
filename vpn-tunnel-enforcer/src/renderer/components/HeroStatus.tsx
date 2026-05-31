@@ -260,7 +260,17 @@ export function HeroStatus() {
   const setFirewallKillSwitchActive = useAppStore((s) => s.setFirewallKillSwitchActive)
   const addLog = useAppStore((s) => s.addLog)
 
-  const [busy, setBusy] = useState<'starting' | 'stopping' | null>(null)
+  // Connect/disconnect transition lives in the GLOBAL store so it survives
+  // this component unmounting on a tab switch mid-connect. Local useState here
+  // used to be lost on unmount → the power button re-enabled → a second click
+  // double-started the tunnel and broke routing. The store vocabulary is
+  // connecting/disconnecting; the hero phases call it starting/stopping.
+  const connectionBusy = useAppStore((s) => s.connectionBusy)
+  const setConnectionBusy = useAppStore((s) => s.setConnectionBusy)
+  const busy: 'starting' | 'stopping' | null =
+    connectionBusy === 'connecting' ? 'starting'
+      : connectionBusy === 'disconnecting' ? 'stopping'
+        : null
   const [proxyDown, setProxyDown] = useState(false)
   const [hasActiveServer, setHasActiveServer] = useState(false)
 
@@ -357,6 +367,7 @@ export function HeroStatus() {
   }
 
   const handleStart = async () => {
+    if (connectionBusy) return
     const restartingFromKillSwitch = firewallKillSwitchActive && !tunRunning
     const refreshKillSwitchState = () => {
       window.electronAPI.getFirewallKillSwitchStatus()
@@ -369,7 +380,7 @@ export function HeroStatus() {
         addLog('error', 'Сначала выберите сервер в разделе «Серверы».')
         return
       }
-      setBusy('starting')
+      setConnectionBusy('connecting')
       addLog('info', restartingFromKillSwitch
         ? 'Снимаем старую блокировку и перезапускаем Direct VPN…'
         : 'Включаем защиту…')
@@ -393,7 +404,7 @@ export function HeroStatus() {
         addLog('error', `Ошибка запуска Direct VPN: ${err.message}`)
       } finally {
         refreshKillSwitchState()
-        setBusy(null)
+        setConnectionBusy(null)
       }
       return
     }
@@ -402,7 +413,7 @@ export function HeroStatus() {
       await handleDetect()
       return
     }
-    setBusy('starting')
+    setConnectionBusy('connecting')
     addLog('info', restartingFromKillSwitch
       ? 'Снимаем старую блокировку и перезапускаем защиту…'
       : 'Включаем защиту…')
@@ -424,12 +435,13 @@ export function HeroStatus() {
       addLog('error', `Ошибка запуска: ${err.message}`)
     } finally {
       refreshKillSwitchState()
-      setBusy(null)
+      setConnectionBusy(null)
     }
   }
 
   const handleStop = async () => {
-    setBusy('stopping')
+    if (connectionBusy) return
+    setConnectionBusy('disconnecting')
     addLog('info', 'Выключаем защиту…')
     try {
       const result = await window.electronAPI.stopTun()
@@ -444,7 +456,7 @@ export function HeroStatus() {
     } catch (err: any) {
       addLog('error', `Ошибка остановки: ${err.message}`)
     } finally {
-      setBusy(null)
+      setConnectionBusy(null)
     }
   }
 

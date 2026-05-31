@@ -289,6 +289,16 @@ export default function App() {
       if (!isStopping) {
         store.setTunRunning(tunUp)
       }
+      // Self-healing backstop for the global connect/disconnect busy flag.
+      // Normally handleConnect/handleStart clears it in their finally (which
+      // still runs even after the Dashboard unmounts on a tab switch), but if
+      // the tunnel transitions to a definitive state through any other path
+      // (auto-restart settling, main-driven stop, killswitch) we must clear
+      // the busy flag too — otherwise the power button could stay stuck on
+      // "Запускается…"/"Останавливается…" forever.
+      if (status === 'running' || status === 'stopped' || status === 'killswitch-active') {
+        store.setConnectionBusy(null)
+      }
       store.setRestarting(isRestarting ? status.slice('restarting:'.length) : null)
       if (!tunUp && !isRestarting && !isStopping && store.mode === 'hard') store.setMode('off')
       if (status === 'running') {

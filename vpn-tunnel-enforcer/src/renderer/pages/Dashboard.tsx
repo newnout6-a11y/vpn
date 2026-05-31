@@ -104,9 +104,16 @@ export function Dashboard() {
   const setLeakChecks = useAppStore(s => s.setLeakChecks)
   const addLog = useAppStore(s => s.addLog)
 
+  // Connect/disconnect transition lives in the GLOBAL store so it survives
+  // this component unmounting when the user switches tabs mid-connect. (Local
+  // useState here used to be lost on unmount → button re-enabled → double
+  // start → broken routing.)
+  const connectionBusy = useAppStore(s => s.connectionBusy)
+  const setConnectionBusy = useAppStore(s => s.setConnectionBusy)
+  const connecting = connectionBusy === 'connecting'
+  const disconnecting = connectionBusy === 'disconnecting'
+
   // Local state
-  const [connecting, setConnecting] = useState(false)
-  const [disconnecting, setDisconnecting] = useState(false)
   const [toasts, setToasts] = useState<ToastData[]>([])
   const [checking, setChecking] = useState(false)
   const [disengaging, setDisengaging] = useState(false)
@@ -172,7 +179,13 @@ export function Dashboard() {
   const proxyType = (settings.proxyOverride.trim() ? settings.proxyType : proxy?.type) ?? 'socks5'
 
   const handleConnect = async () => {
-    setConnecting(true)
+    // Re-entry guard. `connectionBusy` lives in the global store, so even if
+    // the Dashboard was unmounted/remounted on a tab switch mid-connect, a
+    // second click here is rejected while the first transition is still in
+    // flight. Without this the user could double-start the tunnel (main does
+    // guard it, but the UI used to still allow the click and then "broke").
+    if (connectionBusy) return
+    setConnectionBusy('connecting')
     addLog('info', t('dashboard.connecting'))
 
     const refreshKillSwitchState = () => {
@@ -250,12 +263,13 @@ export function Dashboard() {
       addLog('error', `Ошибка запуска: ${errorMsg}`)
     } finally {
       refreshKillSwitchState()
-      setConnecting(false)
+      setConnectionBusy(null)
     }
   }
 
   const handleDisconnect = async () => {
-    setDisconnecting(true)
+    if (connectionBusy) return
+    setConnectionBusy('disconnecting')
     addLog('info', 'Выключаем защиту…')
 
     try {
@@ -275,7 +289,7 @@ export function Dashboard() {
       showToast('error', t('dashboard.connectionError'), errorMsg)
       addLog('error', `Ошибка остановки: ${errorMsg}`)
     } finally {
-      setDisconnecting(false)
+      setConnectionBusy(null)
     }
   }
 

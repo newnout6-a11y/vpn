@@ -174,13 +174,19 @@ interface AppState {
   vpnIp: string | null
   proxy: ProxyInfo | null
   detecting: boolean
-  tunRunning: boolean
-  // Wall-clock ms when the current TUN run started (or null when not running).
+  tunRunning: boolean  // Wall-clock ms when the current TUN run started (or null when not running).
   // Used by the hero card to show "Защищено • 12 минут".
   tunStartedAt: number | null
   // When non-null we are inside the auto-restart loop. Format is "N/M" where
   // N is the current attempt and M is the max number of retries.
   restartingProgress: string | null
+
+  // In-flight connect/disconnect transition. Lives in the GLOBAL store (not
+  // local component state) so it survives the Dashboard/Hero unmounting when
+  // the user switches tabs mid-connect — otherwise the busy state was lost on
+  // return, the power button re-enabled, and a second click double-started the
+  // tunnel and broke routing. null = idle.
+  connectionBusy: 'connecting' | 'disconnecting' | null
   // True iff the firewall kill-switch rules are currently installed. Used to
   // drive the Dashboard banner that appears when sing-box died but the rules
   // are still in place — the user has to either restart TUN or manually drop
@@ -207,6 +213,7 @@ interface AppState {
   setTunRunning: (r: boolean) => void
   setTunStartedAt: (ts: number | null) => void
   setRestarting: (progress: string | null) => void
+  setConnectionBusy: (busy: 'connecting' | 'disconnecting' | null) => void
   setFirewallKillSwitchActive: (active: boolean) => void
   setCompetingTun: (name: string | null) => void
   setAutoconfigTargets: (targets: AutoconfigTarget[]) => void
@@ -255,6 +262,7 @@ export const useAppStore = create<AppState>((set) => ({
   tunRunning: false,
   tunStartedAt: null,
   restartingProgress: null,
+  connectionBusy: null,
   firewallKillSwitchActive: false,
   competingTun: null,
   leakSelfTestResult: null,
@@ -315,6 +323,7 @@ export const useAppStore = create<AppState>((set) => ({
   })),
   setTunStartedAt: (ts) => set({ tunStartedAt: ts }),
   setRestarting: (progress) => set({ restartingProgress: progress }),
+  setConnectionBusy: (busy) => set({ connectionBusy: busy }),
   setFirewallKillSwitchActive: (active) => set({ firewallKillSwitchActive: active }),
   setCompetingTun: (name) => set({ competingTun: name }),
   setAutoconfigTargets: (targets) => set({ autoconfigTargets: targets }),

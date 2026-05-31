@@ -153,6 +153,31 @@ dotted suffix (not a dotless one) so we don't over-match `my2ip.ru`. Verified
 the real config still passes `sing-box check`. +4 tests (apex regression +
 suffixListToMatcher). 294 → 298.
 
+### F7 (U1) — connection busy-state lost on tab switch → double-start breaks routing [FIXED]
+User report (with diagnostic ZIP): "если во время включения соединения, переходишь
+в другую вкладку, то при возвращении сбрасывается UI-статус, доступно ещё раз
+запустить — запускаешь и всё ломается." Root cause: the connecting/disconnecting
+transition flags were LOCAL React `useState` inside both `Dashboard.tsx` and
+`HeroStatus.tsx`. Switching tabs unmounts those components, destroying the
+`connecting=true` state. On return they remount with the flag reset to false;
+because the tunnel is still mid-start, `tunRunning` is also still false, so the
+power button rendered "Отключено"/"Включить" and stayed clickable. A second
+click fired a second `startDirectVpn`/`startTun`. The main process DOES guard a
+true double-start (`startInProgress`), but the racing start/save-settings churn
+was enough to wedge routing — the diagnostics show two sing-box starts 29s
+apart from the same session.
+FIX: moved the transition into the GLOBAL Zustand store as
+`connectionBusy: 'connecting' | 'disconnecting' | null` so it survives unmount.
+Both `Dashboard` and `HeroStatus` now read it from the store (Hero maps it onto
+its starting/stopping phase vocabulary), and both `handleConnect`/`handleStart`
+and `handleDisconnect`/`handleStop` early-return if `connectionBusy` is already
+set (re-entry guard against the double-click). App.tsx's `tun-status-changed`
+handler clears `connectionBusy` on any definitive status (running/stopped/
+killswitch-active) as a self-healing backstop so the button can never get stuck
+on "Запускается…". `setTunRunning` deliberately does NOT auto-clear the flag —
+the UI owns the clear so a 'running' status arriving before the start IPC
+resolves can't prematurely re-enable the button. +4 store tests. 302 → 306.
+
 ---
 
 # PASS 3 — DPI/TSPU circumvention research vs our config (2025-2026 intel)
