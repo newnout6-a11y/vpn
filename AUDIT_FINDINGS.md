@@ -290,6 +290,43 @@ a full browser restart to take effect (the warning text says so). The user
 hadn't clicked it yet in the diagnostics, which is why the WebRTC warning
 persisted.
 
+### F11 — DNS over the tunnel was DoT → multi-second lookups ("каждое видео по несколько секунд") [FIXED/perf]
+User: "всё медленнее, у Happ такого нет… как будто я подключаюсь к YouTube и он
+с каждым видео проверяет, не РФ ли это — доходит до нескольких секунд. Happ
+летает." Measured from the user's own sing-box log (16-20 diag):
+DNS exchanges median **536ms, p90 ≈ 8s, worst 33s**; 122 of 289 lookups > 1s.
+The very slow ones (5-33s) cluster right after connect.
+
+Root cause: the tunnelled resolver was **DoT** (`type: tls`, Cloudflare/Google
+on 853) detoured through the tcp-only Reality outbound. Every cold DNS lookup
+opened a fresh TLS-in-TLS handshake; when a page load fires dozens of lookups
+at once right after connect, the cold connection pool serialized them → multi-
+second stalls. Happ "flies" because it uses one multiplexed resolver and
+doesn't reopen a handshake per query.
+
+FIX:
+1. **DoT → DoH** for the tunnelled resolver (`type: https`). DoH multiplexes
+   every concurrent query over ONE persistent HTTP/2 connection — after the
+   first request there are no more handshakes. DoH on 443 is also harder for
+   TSPU to throttle than DoT on 853. Pointed at the resolver IP directly
+   (Cloudflare/Google serve DoH on the IP SAN) so no bootstrap lookup needed.
+2. **plain-IP DNS profiles → `tcp`** (was `udp`). A tcp-only Reality outbound
+   can't carry UDP and our route blocks UDP on it, so a `udp` DNS server
+   detoured through proxy-out would silently fail; TCP DNS works and is already
+   inside the Reality tunnel.
+3. **cache_file always-on** (was gated on smart-RU). Persisting the DNS answer
+   cache across restarts skips re-resolving every hostname on warm reconnects,
+   directly cutting the cold-start storm.
+
+Verified the real-world config shape (DoH fallback + local rule-sets + smart-RU
++ tcp-only Reality, MTU 1280) passes the bundled `sing-box check`. Tests
+updated for https/tcp + always-on cache. 323 → 324.
+
+Note: stealth-mode MTU 1280 (more fragmentation) is a deliberate anti-DPI knob
+the user enabled; left as-is. The smart-RU geoip decision per destination is
+inherent to the split feature the user asked for and is cheap now that DNS is
+fast (median 84ms warm).
+
 ---
 
 # PASS 3 — DPI/TSPU circumvention research vs our config (2025-2026 intel)

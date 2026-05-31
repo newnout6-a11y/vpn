@@ -319,21 +319,27 @@ describe('generateSingboxConfig DNS profile', () => {
     dnsState.active = null
   })
 
-  it('uses Cloudflare/Google fallback when no profile is active', () => {
+  it('uses Cloudflare/Google DoH fallback when no profile is active', () => {
     dnsState.active = null
     const cfg = gen({ outbound: { ...plainTlsOutbound, server: '1.2.3.4' } })
     const remote = cfg.dns.servers.find((s: any) => s.tag === 'dns-remote') as any
     expect(remote.server).toBe('1.1.1.1')
+    // DoH (https), not DoT (tls): multiplexes queries over one HTTP/2 conn so
+    // a page-load DNS storm doesn't serialize on cold TLS handshakes.
+    expect(remote.type).toBe('https')
   })
 
-  it('applies a plain DNS profile as udp servers through proxy-out', () => {
+  it('applies a plain DNS profile as tcp servers through proxy-out', () => {
     dnsState.active = { id: 'x', name: 'Quad9', primary: '9.9.9.9', secondary: '149.112.112.112', type: 'plain' }
     const cfg = gen({ outbound: { ...plainTlsOutbound, server: '1.2.3.4' } })
     const servers = cfg.dns.servers as any[]
     const remote = servers.find((s) => s.tag === 'dns-remote')
     const backup = servers.find((s) => s.tag === 'dns-backup')
-    expect(remote).toMatchObject({ type: 'udp', server: '9.9.9.9', detour: 'proxy-out' })
-    expect(backup).toMatchObject({ type: 'udp', server: '149.112.112.112', detour: 'proxy-out' })
+    // tcp (not udp): a tcp-only Reality outbound can't carry UDP and our route
+    // blocks UDP on it, so a udp DNS server detoured through proxy-out would
+    // silently fail. TCP DNS works and is already inside the Reality tunnel.
+    expect(remote).toMatchObject({ type: 'tcp', server: '9.9.9.9', detour: 'proxy-out' })
+    expect(backup).toMatchObject({ type: 'tcp', server: '149.112.112.112', detour: 'proxy-out' })
   })
 
   it('applies a DoH profile as https server with bare host', () => {
@@ -404,10 +410,18 @@ describe('generateSingboxConfig smart RU split', () => {
     const cfg = genSmart({})
     expect(cfg.route.rule_set).toBeUndefined()
     expect(cfg.dns.rules).toBeUndefined()
-    expect(cfg.experimental.cache_file).toBeUndefined()
     expect(cfg.dns.servers.find((s: any) => s.tag === 'dns-direct')).toBeUndefined()
     // No direct-routing rule_set rules in the route.
     expect(cfg.route.rules.some((r: any) => r.rule_set)).toBe(false)
+  })
+
+  it('always enables cache_file for the DNS answer cache (perf, even w/o smart-RU)', () => {
+    // cache_file is now always-on: persisting the DNS cache across restarts is
+    // what kills the cold-start DNS storm. Previously gated on smart-RU.
+    const off = genSmart({})
+    expect(off.experimental.cache_file?.enabled).toBe(true)
+    const on = genSmart({ smartRuSplit: true })
+    expect(on.experimental.cache_file?.enabled).toBe(true)
   })
 
   it('adds RU rule-sets + geoip + cache_file when enabled (remote fallback w/o dir)', () => {
