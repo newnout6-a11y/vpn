@@ -152,6 +152,33 @@ async function getDnsServers(): Promise<string> {
   }
 }
 
+/**
+ * Map a Windows Resolve-DnsName record Type to a human label.
+ *
+ * ConvertTo-Json serializes the [Microsoft.DnsClient.Commands.RecordType] enum
+ * to its NUMERIC value, so the diagnostics card was showing "1: 104.20.23.154"
+ * (1 = A) instead of "A: 104.20.23.154". This maps the common record types
+ * back to their names; unknown values fall back to "type N". Exported pure for
+ * tests.
+ */
+export function dnsTypeName(type: number | string): string {
+  if (typeof type === 'string' && /^[A-Za-z]/.test(type)) return type // already a name
+  const n = Number(type)
+  const map: Record<number, string> = {
+    1: 'A',
+    2: 'NS',
+    5: 'CNAME',
+    6: 'SOA',
+    12: 'PTR',
+    15: 'MX',
+    16: 'TXT',
+    28: 'AAAA',
+    33: 'SRV',
+    65: 'HTTPS'
+  }
+  return map[n] ?? (Number.isFinite(n) ? `type ${n}` : String(type))
+}
+
 async function getDnsProbe(): Promise<string> {
   if (process.platform === 'win32') {
     try {
@@ -171,7 +198,7 @@ async function getDnsProbe(): Promise<string> {
       if (!raw) return 'Resolve-DnsName: пустой ответ'
       const parsed = JSON.parse(raw)
       const rows = Array.isArray(parsed) ? parsed : [parsed]
-      return rows.map((row: any) => `${row.Type}: ${row.IPAddress}`).join(' | ')
+      return rows.map((row: any) => `${dnsTypeName(row.Type)}: ${row.IPAddress}`).join(' | ')
     } catch (err: any) {
       return `DNS не отвечает: ${String(err.stderr || err.stdout || err.message || 'Resolve-DnsName failed').replace(/#< CLIXML[\s\S]*/i, 'PowerShell returned no readable result').replace(/\s+/g, ' ').trim()}`
     }
@@ -213,17 +240,26 @@ export function extractRealErrors(logText: string): string[] {
     .slice(-5)
 }
 
+/** Pure: build the sing-box log one-line summary (counts + recent errors). */
+export function summarizeSingboxLog(logText: string): string {
+  const lines = logText.split(/\r?\n/).filter(Boolean)
+  const errors = extractRealErrors(logText)
+  // Count ANY outbound tagged proxy-out, not just socks/http. In Direct VPN
+  // mode the tunnel outbound is vless/vmess/trojan/hysteria2/etc — the old
+  // socks|http-only regex matched nothing and showed a misleading
+  // "proxy-out: 0" even on a fully working VLESS/Reality session.
+  const proxyHits = lines.filter(line => /outbound\/[a-z0-9]+\[proxy-out]/i.test(line)).length
+  const directHits = lines.filter(line => /outbound\/direct\[direct-out]/i.test(line)).length
+  const dnsHits = lines.filter(line => /hijack|dns/i.test(line)).length
+  const parts = [`proxy-out: ${proxyHits}`, `direct-out: ${directHits}`, `dns-events: ${dnsHits}`]
+  if (errors.length > 0) parts.push(`errors: ${errors.join(' | ')}`)
+  return parts.join('; ')
+}
+
 async function getLogSummary(): Promise<string> {
   try {
     const log = await readFile(join(getTunRuntimeDir(), 'sing-box.log'), 'utf-8')
-    const lines = log.split(/\r?\n/).filter(Boolean)
-    const errors = extractRealErrors(log)
-    const proxyHits = lines.filter(line => /outbound\/(socks|http)\[proxy-out]/i.test(line)).length
-    const directHits = lines.filter(line => /outbound\/direct\[direct-out]/i.test(line)).length
-    const dnsHits = lines.filter(line => /hijack|dns/i.test(line)).length
-    const parts = [`proxy-out: ${proxyHits}`, `direct-out: ${directHits}`, `dns-events: ${dnsHits}`]
-    if (errors.length > 0) parts.push(`errors: ${errors.join(' | ')}`)
-    return parts.join('; ')
+    return summarizeSingboxLog(log)
   } catch {
     return 'Лог sing-box пока не создан'
   }

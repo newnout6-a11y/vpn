@@ -26,7 +26,7 @@ vi.mock('electron-store', () => ({
 vi.mock('sudo-prompt', () => ({ default: { exec: vi.fn() }, exec: vi.fn() }))
 vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
 
-import { classifyDirectPublic, isBenignBlockLine, extractRealErrors } from './leakDiagnostics'
+import { classifyDirectPublic, isBenignBlockLine, extractRealErrors, summarizeSingboxLog, dnsTypeName } from './leakDiagnostics'
 
 // Real-shaped excerpt from the user's 16-20 diagnostic: Yandex/VK going direct
 // via geoip-ru, and a benign block-out UDP error.
@@ -109,5 +109,55 @@ describe('isBenignBlockLine / extractRealErrors', () => {
       '+0300 x INFO [1 0ms] outbound/direct[direct-out]: outbound connection to 77.88.21.24:443'
     ].join('\n')
     expect(extractRealErrors(log)).toEqual([])
+  })
+})
+
+describe('summarizeSingboxLog', () => {
+  it('counts ANY proxy-out outbound type, not just socks/http (Direct VPN/VLESS fix)', () => {
+    // Real directVpn sessions egress via vless[proxy-out]; the old regex only
+    // matched socks|http and reported a misleading "proxy-out: 0".
+    const log = [
+      '+0300 x INFO [1 0ms] outbound/vless[proxy-out]: outbound connection to ex.com:443',
+      '+0300 x INFO [2 0ms] outbound/vless[proxy-out]: outbound connection to ex.com:443',
+      '+0300 x INFO [3 0ms] outbound/direct[direct-out]: outbound connection to 77.88.21.24:443',
+      '+0300 x DEBUG [4 0ms] dns: exchanged example.com NOERROR 5'
+    ].join('\n')
+    const summary = summarizeSingboxLog(log)
+    expect(summary).toContain('proxy-out: 2')
+    expect(summary).toContain('direct-out: 1')
+  })
+
+  it('also counts socks/http/trojan/hysteria2 outbounds', () => {
+    const log = [
+      '+0300 x INFO [1 0ms] outbound/socks[proxy-out]: outbound connection to ex.com:443',
+      '+0300 x INFO [2 0ms] outbound/trojan[proxy-out]: outbound connection to ex.com:443',
+      '+0300 x INFO [3 0ms] outbound/hysteria2[proxy-out]: outbound connection to ex.com:443'
+    ].join('\n')
+    expect(summarizeSingboxLog(log)).toContain('proxy-out: 3')
+  })
+
+  it('does not count block-out as proxy-out', () => {
+    const log = [
+      '+0300 x INFO [1 0ms] outbound/block[block-out]: blocked packet connection to 8.8.8.8:443'
+    ].join('\n')
+    expect(summarizeSingboxLog(log)).toContain('proxy-out: 0')
+  })
+})
+
+describe('dnsTypeName', () => {
+  it('maps numeric Resolve-DnsName record types to names', () => {
+    expect(dnsTypeName(1)).toBe('A')
+    expect(dnsTypeName(28)).toBe('AAAA')
+    expect(dnsTypeName(5)).toBe('CNAME')
+    expect(dnsTypeName(65)).toBe('HTTPS')
+  })
+
+  it('passes through values that are already names', () => {
+    expect(dnsTypeName('A')).toBe('A')
+    expect(dnsTypeName('AAAA')).toBe('AAAA')
+  })
+
+  it('falls back to "type N" for unknown numeric codes', () => {
+    expect(dnsTypeName(999)).toBe('type 999')
   })
 })

@@ -261,6 +261,35 @@ those are private LAN IPs that don't expose the public IP, and the warning
 about a possible browser-level WebRTC leak is legitimately informational. Left
 as-is.
 
+### F10 — diagnostics cosmetics: "proxy-out: 0" on VLESS + raw DNS type numbers [FIXED]
+User asked what the DNS / sing-box-log rows mean and what the yellow numbers
+are. Two were genuine display bugs (the data was fine, the rendering lied):
+1. **sing-box log "proxy-out: 0"** even on a fully working VLESS/Reality
+   session. The counter regex was `outbound/(socks|http)[proxy-out]` — but in
+   Direct VPN mode the tunnel outbound is vless/vmess/trojan/hysteria2, so it
+   matched nothing. Diagnostics showed `proxy-out: 0; direct-out: 3` which
+   looked like "nothing goes through the VPN" when the real log had 276
+   vless[proxy-out] connections. Fixed: count ANY `outbound/<type>[proxy-out]`.
+2. **DNS row "1: 104.20.23.154"** — the yellow `1:` is the DNS record Type.
+   PowerShell `Resolve-DnsName | ConvertTo-Json` serializes the RecordType enum
+   to its NUMERIC value (1=A, 28=AAAA), so the card showed `1:`/`28:` instead
+   of `A:`/`AAAA:`. Fixed with a `dnsTypeName` map. (The yellow colour itself is
+   just the neutral `info` status styling — not an error.)
+Extracted pure helpers `summarizeSingboxLog` + `dnsTypeName`. +6 tests.
+317 → 323.
+
+Browser WebRTC protection — confirmed REAL, not a placeholder. applyBrowser
+LeakProtection writes the Chromium `WebRtcIPHandlingPolicy=disable_non_proxied_
+udp` policy key (HKLM/HKCU) for Yandex/Chrome/Edge/Brave/Vivaldi/Opera/Chromium,
+patches each profile's Preferences (`webrtc.ip_handling_policy`,
+multiple_routes_enabled=false, nonproxied_udp_enabled=false), and sets Firefox
+user.js peerconnection prefs. Every change is backed up first (reg export +
+file .bak) into a manifest; rollbackBrowserLeakProtection restores from it
+(reg import / copy back, or delete if the value didn't exist before). Requires
+a full browser restart to take effect (the warning text says so). The user
+hadn't clicked it yet in the diagnostics, which is why the WebRTC warning
+persisted.
+
 ---
 
 # PASS 3 — DPI/TSPU circumvention research vs our config (2025-2026 intel)
