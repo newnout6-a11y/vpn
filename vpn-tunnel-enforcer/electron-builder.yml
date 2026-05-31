@@ -45,6 +45,14 @@ extraResources:
     to: wintun.dll
   - from: resources/icon.ico
     to: icon.ico
+  # Smart-RU split rule-sets, bundled so sing-box loads them locally (type:
+  # local) with no network dependency at startup. A remote rule-set whose
+  # initial download fails is a FATAL sing-box error that takes the whole
+  # tunnel down — bundling removes that failure mode entirely.
+  - from: resources/geoip-ru.srs
+    to: geoip-ru.srs
+  - from: resources/geosite-category-gov-ru.srs
+    to: geosite-category-gov-ru.srs
 files:
   - out/**/*
   - package.json

@@ -178,6 +178,55 @@ on "Запускается…". `setTunRunning` deliberately does NOT auto-clear
 the UI owns the clear so a 'running' status arriving before the start IPC
 resolves can't prematurely re-enable the button. +4 store tests. 302 → 306.
 
+### F8 — smart-RU remote rule-sets are FATAL on startup → real IP leaked while UI says "Подключено" [FIXED/critical]
+User report (with diagnostic ZIP): "перестал скрывать IP вообще; блокировка
+файрволом после отключения пропала." Screenshot showed the app "Подключено"
+with a green power button while the displayed IP was `79.104.7.207` — the
+user's REAL Beeline IP, not the VPN's. Root cause from `runtime-sing-box.json`
++ app-log:
+
+```
+FATAL start service: initialize rule-set[0]: geoip-ru: dial tcp 144.31.1.75:443: i/o timeout
+                    | initialize rule-set[1]: geosite-category-gov-ru: i/o timeout
+```
+
+The smart-RU split feature (F3) registered geoip-ru + geosite-category-gov-ru
+as sing-box `remote` rule-sets, downloaded THROUGH proxy-out at startup. In
+sing-box a `remote` rule-set whose INITIAL fetch fails is a FATAL startup error
+— the entire core refuses to run. So when the VPN server was slow to handshake
+(or GitHub raw was throttled in RU), the 5s download timed out, sing-box exited
+before the TUN inbound opened, the start path logged "TUN-адаптер не поднялся
+за 5 с — kill-switch пропущен" and SKIPPED the firewall kill-switch (by design,
+so as not to brick the internet on a failed start). Net result: no tunnel, no
+kill-switch, real IP fully exposed — yet the renderer had optimistically set
+tunRunning=true and showed "Подключено". A chicken-and-egg too: the rule-set
+download NEEDS the tunnel, but the tunnel start was being GATED on that very
+download. A routing nicety was taking down the core "hide my IP" function.
+
+FIX (defence in depth):
+1. **Bundle the .srs locally** (resources/geoip-ru.srs + geosite-category-gov-
+   ru.srs, added to electron-builder extraResources). prepareRuntime stages
+   them into the runtime dir next to sing-box.exe (copyResourceIfStale, same as
+   the binaries).
+2. **Load as `type: local`** (smartRoute.ts: new `ruleSetDir` option →
+   smartRouteRuleSets emits `{type:'local', path}` instead of `{type:'remote',
+   url, download_detour}`). A local file can't time out, so rule-set init can
+   never again be a FATAL startup error.
+3. **Fail-safe**: if ANY .srs can't be staged, prepareRuntime drops the feature
+   for that run (forces smartRuSplit=false into generateSingboxConfig) so the
+   tunnel still starts and everything safely egresses via proxy-out — never the
+   old `remote` fallback that could re-introduce the fatal path.
+
+Verified BOTH the remote-fallback and the local-rule-set configs pass the real
+bundled `sing-box check` (smartRouteCheck.itest.ts, RUN_SINGBOX_CHECK=1),
+including parsing the actual binary .srs. +5 tests (3 unit + 2 integration).
+306 → 309.
+
+Note on "firewall block after disconnect": that's the `firewallKillSwitch`
+setting (already opt-in, default off; user has it on). It only "vanished"
+because sing-box never started — once the tunnel starts cleanly the kill-switch
+behaves per the setting again. Left as the optional extra; no code change.
+
 ---
 
 # PASS 3 — DPI/TSPU circumvention research vs our config (2025-2026 intel)

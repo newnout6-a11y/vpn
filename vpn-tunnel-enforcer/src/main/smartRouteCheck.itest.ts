@@ -65,4 +65,31 @@ describe.skipIf(!RUN)('smart-route config passes sing-box check', () => {
     const out = execFileSync(exe, ['check', '-c', f], { encoding: 'utf8' })
     expect(typeof out).toBe('string')
   })
+
+  it('validates the LOCAL rule-set config against the bundled .srs files', () => {
+    // Point ruleSetDir at the resources folder where the real .srs live, so
+    // sing-box `check` actually parses the bundled binary rule-sets (catches a
+    // corrupt/incompatible .srs format at build time, not at the user's first
+    // connect). This is the IP-leak fix path (finding F8).
+    const ruleSetDir = join(process.cwd(), 'resources')
+    expect(existsSync(join(ruleSetDir, 'geoip-ru.srs'))).toBe(true)
+    expect(existsSync(join(ruleSetDir, 'geosite-category-gov-ru.srs'))).toBe(true)
+    const cfg = generateSingboxConfig(
+      { outbound: { type: 'vless', server: 'ex.com', server_port: 443, uuid: 'u', tls: { enabled: true, server_name: 'ex.com' } } },
+      'socks5',
+      [],
+      { smartRuSplit: true, smartRuMapsDirect: true, smartRuRuleSetDir: ruleSetDir, directProxyPortOverride: 23458, clashPortOverride: 23459 }
+    ) as any
+    // Sanity: rule-sets must be local (no network), pointing at the .srs.
+    for (const rs of cfg.route.rule_set) {
+      expect(rs.type).toBe('local')
+      expect(String(rs.path)).toMatch(/\.srs$/)
+    }
+    const dir = mkdtempSync(join(tmpdir(), 'vpnte-cfg-local-'))
+    const f = join(dir, 'sing-box.json')
+    writeFileSync(f, JSON.stringify(cfg, null, 2))
+    const exe = join(process.cwd(), 'resources', 'sing-box.exe')
+    const out = execFileSync(exe, ['check', '-c', f], { encoding: 'utf8' })
+    expect(typeof out).toBe('string')
+  })
 })

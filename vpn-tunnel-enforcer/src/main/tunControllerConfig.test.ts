@@ -392,7 +392,7 @@ describe('generateSingboxConfig smart RU split', () => {
     domainState.rules = []
   })
 
-  const genSmart = (opts: { smartRuSplit?: boolean; smartRuMapsDirect?: boolean }) =>
+  const genSmart = (opts: { smartRuSplit?: boolean; smartRuMapsDirect?: boolean; smartRuRuleSetDir?: string }) =>
     generateSingboxConfig(
       { outbound: { ...plainTlsOutbound } },
       'socks5',
@@ -410,7 +410,7 @@ describe('generateSingboxConfig smart RU split', () => {
     expect(cfg.route.rules.some((r: any) => r.rule_set)).toBe(false)
   })
 
-  it('adds RU rule-sets + geoip + cache_file when enabled', () => {
+  it('adds RU rule-sets + geoip + cache_file when enabled (remote fallback w/o dir)', () => {
     const cfg = genSmart({ smartRuSplit: true })
     // rule_set definitions present and pointing at SagerNet srs.
     const tags = (cfg.route.rule_set ?? []).map((rs: any) => rs.tag)
@@ -424,6 +424,20 @@ describe('generateSingboxConfig smart RU split', () => {
     }
     // cache_file enabled so srs persists across restarts.
     expect(cfg.experimental.cache_file?.enabled).toBe(true)
+  })
+
+  it('emits LOCAL rule-sets when a ruleSetDir is staged (no network at startup)', () => {
+    // The IP-leak fix (finding F8): with the .srs bundled and staged, sing-box
+    // loads them off disk so a slow/blocked GitHub fetch can never make the
+    // core fail to start (which used to leak the real IP).
+    const cfg = genSmart({ smartRuSplit: true, smartRuRuleSetDir: 'C:\\rt' })
+    expect(Array.isArray(cfg.route.rule_set)).toBe(true)
+    for (const rs of cfg.route.rule_set) {
+      expect(rs.type).toBe('local')
+      expect(rs.url).toBeUndefined()
+      expect(rs.download_detour).toBeUndefined()
+      expect(String(rs.path)).toMatch(/\.srs$/)
+    }
   })
 
   it('routes RU domains and RU IPs to direct-out', () => {

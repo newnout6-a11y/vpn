@@ -34,6 +34,7 @@ import {
   smartRouteRules,
   smartRouteRuleSets,
   smartRouteDnsRules,
+  smartRouteLocalRuleSetFiles,
   type SmartRouteOptions
 } from './smartRoute'
 
@@ -462,6 +463,7 @@ export function generateSingboxConfig(
     clashPortOverride?: number
     smartRuSplit?: boolean
     smartRuMapsDirect?: boolean
+    smartRuRuleSetDir?: string
   } = {}
 ): object {
   // Stealth mode (TSPU/DPI bypass) toggles two knobs:
@@ -483,7 +485,8 @@ export function generateSingboxConfig(
   const smartRoute: SmartRouteOptions = {
     enabled: options.smartRuSplit === true,
     mapsDirect: options.smartRuMapsDirect === true,
-    directDnsTag: SMART_DIRECT_DNS_TAG
+    directDnsTag: SMART_DIRECT_DNS_TAG,
+    ruleSetDir: options.smartRuRuleSetDir
   }
   const parsedProxy = typeof upstream === 'string' ? parseProxyAddress(upstream) : null
   const proxyCoreProcesses = isDirectVpn ? [] : uniqueProcessNames([...PROXY_CORE_PROCESS_NAMES, ...directProcessNames])
@@ -702,10 +705,13 @@ export function generateSingboxConfig(
           ? [{ network: 'udp', outbound: 'block-out' }]
           : [])
       ],
-      // Remote rule-sets for smart RU split (geoip-ru + geosite RU lists).
-      // Downloaded through proxy-out and cached. Empty when feature is off.
-      ...(smartRoute.enabled
-        ? { rule_set: smartRouteRuleSets(smartRoute, 'proxy-out') }
+      // Rule-sets for smart RU split (geoip-ru + geosite gov-ru). Loaded
+      // LOCALLY from bundled .srs files (type: local) so a slow/blocked GitHub
+      // fetch can never make sing-box fail to start — a remote rule-set whose
+      // initial download times out is FATAL in sing-box and used to take the
+      // whole tunnel down (exposing the real IP). Empty when feature is off.
+      ...(smartRoute.enabled && (smartRouteRuleSets(smartRoute).length > 0)
+        ? { rule_set: smartRouteRuleSets(smartRoute) }
         : {}),
       final: 'proxy-out',
       auto_detect_interface: true,
@@ -1332,6 +1338,38 @@ async function prepareRuntime(
     wintun: wintunCopied ? 'copied' : 'reused'
   })
 
+  // Smart-RU split: stage the bundled .srs rule-sets into the runtime dir so
+  // sing-box loads them with `type: local` (no network at startup). This is a
+  // hard reliability requirement: a `remote` rule-set whose initial download
+  // fails is FATAL in sing-box — the core refuses to start, TUN never comes
+  // up, the kill-switch is skipped, and the user's REAL IP leaks while the UI
+  // still shows "Подключено". If ANY rule-set file can't be staged we DROP the
+  // ruleSetDir (leaving it undefined) so generateSingboxConfig emits no
+  // rule_set at all and the tunnel still starts — everything just tunnels via
+  // proxy-out (safe default) instead of splitting. A routing nicety must never
+  // be able to take down the core "hide my IP" function.
+  let smartRuRuleSetDir: string | undefined
+  if (options.smartRuSplit === true) {
+    try {
+      const staged = await Promise.all(
+        smartRouteLocalRuleSetFiles().map(async (file) => {
+          const src = getBundledResource(file)
+          const dst = join(runtimeDir, file)
+          await access(src) // throws if the file isn't bundled → caught below
+          await copyResourceIfStale(src, dst)
+          return true
+        })
+      )
+      if (staged.length > 0 && staged.every(Boolean)) {
+        smartRuRuleSetDir = runtimeDir
+        logEvent('debug', 'tun', 'smart-RU rule-sets staged (local)', { dir: runtimeDir, files: smartRouteLocalRuleSetFiles() })
+      }
+    } catch (err) {
+      logEvent('warn', 'tun', 'smart-RU rule-sets could not be staged — starting WITHOUT split-routing (all traffic via VPN)', err)
+      smartRuRuleSetDir = undefined
+    }
+  }
+
   // Pre-resolve the mixed-direct-in port AND the clash_api port via the OS
   // so we never land inside a Windows Hyper-V/WSL excluded port range
   // (which causes sing-box to fail bind with WSAEACCES).
@@ -1339,6 +1377,12 @@ async function prepareRuntime(
 
   const config = generateSingboxConfig(upstream, proxyType, directProcessNames, {
     ...options,
+    // If staging failed, smartRuRuleSetDir is undefined. Force the whole
+    // feature OFF for this run (rather than letting generateSingboxConfig fall
+    // back to the dangerous `remote` download path) so the tunnel still starts
+    // and everything safely egresses via proxy-out.
+    smartRuSplit: options.smartRuSplit === true && smartRuRuleSetDir !== undefined,
+    smartRuRuleSetDir,
     directProxyPortOverride,
     clashPortOverride
   })

@@ -8,6 +8,7 @@ import {
   smartRouteRules,
   smartRouteDnsRules,
   smartRouteNeedsDirectDns,
+  smartRouteLocalRuleSetFiles,
   suffixListToMatcher,
   RU_GEOIP_RULESET,
   RU_GOV_GEOSITE_RULESET,
@@ -17,6 +18,7 @@ import {
 const ON: SmartRouteOptions = { enabled: true, mapsDirect: false, directDnsTag: 'dns-direct' }
 const OFF: SmartRouteOptions = { enabled: false, mapsDirect: false }
 const ON_MAPS: SmartRouteOptions = { enabled: true, mapsDirect: true, directDnsTag: 'dns-direct' }
+const ON_LOCAL: SmartRouteOptions = { enabled: true, mapsDirect: false, directDnsTag: 'dns-direct', ruleSetDir: 'C:\\runtime\\dir' }
 
 describe('smartRouteRuleSets', () => {
   it('returns [] when disabled', () => {
@@ -36,6 +38,36 @@ describe('smartRouteRuleSets', () => {
       expect(s.download_detour).toBe('proxy-out')
       expect(String(s.url)).toMatch(/^https:\/\/raw\.githubusercontent\.com\/SagerNet\/.+\.srs$/)
     }
+  })
+
+  it('emits LOCAL rule-sets (no network) when ruleSetDir is set — the IP-leak fix', () => {
+    // Regression context (finding F8): a `remote` rule-set whose initial fetch
+    // fails is a FATAL sing-box startup error → TUN never came up → real IP
+    // leaked. Bundling the .srs and loading them as `type: local` removes the
+    // network dependency entirely.
+    const sets = smartRouteRuleSets(ON_LOCAL)
+    const tags = sets.map((s) => s.tag)
+    expect(tags).toEqual([RU_GEOIP_RULESET, RU_GOV_GEOSITE_RULESET])
+    for (const s of sets) {
+      expect(s.type).toBe('local')
+      expect(s.format).toBe('binary')
+      // No network keys at all.
+      expect(s.url).toBeUndefined()
+      expect(s.download_detour).toBeUndefined()
+      expect(s.update_interval).toBeUndefined()
+      // Path points at the staged file under the runtime dir, forward-slashed.
+      expect(String(s.path)).toMatch(/^C:\/runtime\/dir\/(geoip-ru|geosite-category-gov-ru)\.srs$/)
+    }
+  })
+})
+
+describe('smartRouteLocalRuleSetFiles', () => {
+  it('lists the bundled .srs filenames that must be staged', () => {
+    const files = smartRouteLocalRuleSetFiles()
+    expect(files).toContain('geoip-ru.srs')
+    expect(files).toContain('geosite-category-gov-ru.srs')
+    // No category-ru file (excluded by design).
+    expect(files.some((f) => f.includes('category-ru.srs') && !f.includes('gov'))).toBe(false)
   })
 })
 

@@ -52,6 +52,24 @@ export interface SmartRouteOptions {
    * 'dns-direct'.
    */
   directDnsTag?: string
+  /**
+   * Absolute path to the directory holding the bundled `.srs` rule-set files
+   * (geoip-ru.srs, geosite-category-gov-ru.srs). When set, rule-sets are
+   * emitted as `type: 'local'` — sing-box loads them straight off disk with
+   * ZERO network dependency.
+   *
+   * WHY THIS MATTERS (the bug that motivated it): when rule-sets were `remote`
+   * sing-box downloaded them THROUGH proxy-out at startup. A sing-box `remote`
+   * rule-set whose initial fetch fails is a FATAL startup error — the whole
+   * core refuses to run. So a slow/blocked GitHub fetch meant TUN never came
+   * up, the kill-switch was skipped, and the user's REAL IP was exposed while
+   * the UI still said "Подключено". Local files can't time out, so the routing
+   * nicety can never again take down the core tunnel.
+   *
+   * When omitted, falls back to `remote` download (legacy / direct unit-test
+   * callers that don't stage the files).
+   */
+  ruleSetDir?: string
 }
 
 // Rule-set tags + their upstream .srs URLs.
@@ -69,6 +87,18 @@ export const RU_GOV_GEOSITE_RULESET = 'geosite-category-gov-ru'
 const RULESET_URLS: Record<string, string> = {
   [RU_GEOIP_RULESET]: 'https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-ru.srs',
   [RU_GOV_GEOSITE_RULESET]: 'https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-gov-ru.srs'
+}
+
+// Local .srs filenames as bundled in app resources / staged into the runtime
+// dir. Loaded with `type: local` so startup has no network dependency.
+const RULESET_LOCAL_FILES: Record<string, string> = {
+  [RU_GEOIP_RULESET]: 'geoip-ru.srs',
+  [RU_GOV_GEOSITE_RULESET]: 'geosite-category-gov-ru.srs'
+}
+
+/** The bundled .srs filenames the caller must stage into the runtime dir. */
+export function smartRouteLocalRuleSetFiles(): string[] {
+  return [RU_GEOIP_RULESET, ...ruDomainRuleSets()].map((tag) => RULESET_LOCAL_FILES[tag])
 }
 
 /**
@@ -172,7 +202,15 @@ export function suffixListToMatcher(suffixes: string[]): {
 
 /**
  * Rule-set definitions to splice into route.rule_set. Empty when disabled.
- * `downloadDetour` is the outbound tag used to fetch them (proxy-out).
+ *
+ * When `opts.ruleSetDir` is set we emit `type: 'local'` entries pointing at the
+ * bundled .srs files — sing-box loads them off disk, so a missing GitHub/slow
+ * tunnel can never make startup fail (the bug this fixes: a `remote` rule-set
+ * whose initial download times out is a FATAL sing-box startup error, which
+ * took the whole tunnel down and exposed the real IP).
+ *
+ * When `ruleSetDir` is absent we fall back to the legacy `remote` form
+ * (`downloadDetour` = proxy-out) for direct/unit-test callers.
  */
 export function smartRouteRuleSets(
   opts: SmartRouteOptions,
@@ -180,14 +218,28 @@ export function smartRouteRuleSets(
 ): Array<Record<string, any>> {
   if (!opts.enabled) return []
   const tags = [RU_GEOIP_RULESET, ...ruDomainRuleSets()]
-  return tags.map((tag) => ({
-    type: 'remote',
-    tag,
-    format: 'binary',
-    url: RULESET_URLS[tag],
-    download_detour: downloadDetour,
-    update_interval: '1d'
-  }))
+  return tags.map((tag) => {
+    if (opts.ruleSetDir) {
+      // Forward slashes are valid on Windows in sing-box JSON and avoid having
+      // to JSON-escape backslashes; join manually so we don't pull in `path`
+      // (keeps this module pure/portable for the unit tests).
+      const dir = opts.ruleSetDir.replace(/\\/g, '/').replace(/\/+$/, '')
+      return {
+        type: 'local',
+        tag,
+        format: 'binary',
+        path: `${dir}/${RULESET_LOCAL_FILES[tag]}`
+      }
+    }
+    return {
+      type: 'remote',
+      tag,
+      format: 'binary',
+      url: RULESET_URLS[tag],
+      download_detour: downloadDetour,
+      update_interval: '1d'
+    }
+  })
 }
 
 /**
