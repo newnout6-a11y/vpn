@@ -35,6 +35,8 @@ export interface SplitTunnelConfig {
   enabled: boolean
 }
 
+export type ClientDevice = 'pc' | 'android' | 'ios' | 'mac'
+
 /** Server/Profile entry */
 export interface ServerProfile {
   id: string
@@ -42,7 +44,18 @@ export interface ServerProfile {
   protocol: string
   server: string
   port: number
+  /**
+   * Best-known exit country. This may come from background server IP
+   * geolocation, or from the actual public IP observed after connecting.
+   * It intentionally overrides country-like words in `name`, because provider
+   * labels can drift from the real exit location.
+   */
   country?: string
+  countryVerifiedAt?: number
+  countryVerifiedIp?: string
+  countryGeoVersion?: number
+  clientDevice?: ClientDevice
+  clientFingerprint?: string
   ping?: number | null
   status: 'online' | 'offline' | 'unknown'
   lastChecked?: number
@@ -330,14 +343,18 @@ export interface ServerChannels {
   'servers:select': (id: string) => void
   'servers:get-active': () => { profile: ServerProfile | null; activeId: string | null }
   'servers:ping-all': () => ServerProfile[]
-  'servers:add': (input: string) => ServerProfile[]
+  'servers:add': (input: string, options?: { clientDevice?: ClientDevice }) => ServerProfile[]
   /**
    * Append a profile (single VPN URI) or a batch of profiles (subscription
    * URL) to a specific group. When `groupId` is null we fall back to the
    * defaults: subscription → new "subscription" group, single URI → the
    * shared "Ручные ключи" group (auto-created).
    */
-  'servers:add-to-group': (input: string, groupId: string | null) => ServerProfile[]
+  'servers:add-to-group': (input: string, groupId: string | null, options?: { clientDevice?: ClientDevice }) => ServerProfile[]
+  'servers:set-client-device': (id: string, clientDevice: ClientDevice) => ServerProfile
+  'servers:verify-country': (id: string) =>
+    | { ok: true; country: string; profile: ServerProfile }
+    | { ok: false; reason: string; country?: string }
   'servers:remove': (id: string) => void
   'servers:export-key': (id: string) =>
     | { ok: true; uri: string; name: string; protocol: string }

@@ -7,25 +7,16 @@ import { MacCard } from '../design-system/MacCard'
 import { MacButton } from '../design-system/MacButton'
 import { MacBadge, type BadgeVariant } from '../design-system/MacBadge'
 import { cn } from '../design-system/utils'
-import { countryFlag } from './countryGlyph'
+import { countryFlagFromCountryOrName } from './countryGlyph'
 import { useAppStore } from '../store'
 import { navigateTo, SERVER_CHANGED_EVENT, emitServerChanged } from '../nav'
-import type { ServerProfile } from '../../shared/ipc-types'
+import type { ServerGroup, ServerProfile } from '../../shared/ipc-types'
 
 /**
  * Map a profile name to a country flag emoji.
  */
-function countryGlyph(name: string): string {
-  return countryFlag(name)
-}
-
-// Local mirror of the upcoming `ServerGroup` shape — see Servers.tsx for the
-// rationale. Once Agent A merges, this can be replaced by the shared import.
-interface ServerGroup {
-  id: string
-  name: string
-  source: 'subscription' | 'manual'
-  status: 'active' | 'expired' | 'unreachable' | 'unknown'
+function countryGlyph(country: string | null | undefined, name: string | null | undefined): string {
+  return countryFlagFromCountryOrName(country, name)
 }
 
 function groupBadgeVariant(status: ServerGroup['status']): BadgeVariant {
@@ -290,7 +281,7 @@ export function ProfileSelectorInline() {
         className="w-full flex items-center gap-3 px-3 py-2 rounded-[var(--radius-sm)] hover:bg-[var(--color-border)]/40 transition-colors duration-[var(--transition-fast)] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-bg)]"
       >
         <span className="grid h-9 w-9 place-items-center rounded-full bg-[var(--color-bg)] border border-[var(--color-border)] text-lg flex-shrink-0">
-          {currentName ? countryGlyph(currentName) : '🌐'}
+          {current ? countryGlyph(current.country, current.name) : '🌐'}
         </span>
         <div className="flex-1 min-w-0 text-left">
           <p className="text-xs uppercase tracking-wider text-[var(--color-text-secondary)]">
@@ -385,7 +376,7 @@ export function ProfileSelectorInline() {
                             : 'border border-transparent hover:bg-[var(--color-border)]/40'
                         }`}
                       >
-                        <span className="text-lg flex-shrink-0">{countryGlyph(profile.name)}</span>
+                        <span className="text-lg flex-shrink-0">{countryGlyph(profile.country, profile.name)}</span>
                         <div className="flex-1 min-w-0">
                           <p className="text-sm font-medium text-[var(--color-text)] truncate">
                             {profile.name}

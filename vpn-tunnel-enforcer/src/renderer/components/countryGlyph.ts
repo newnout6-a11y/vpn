@@ -118,3 +118,7 @@ export function detectCountry(name: string | null | undefined): CountryHit | nul
 export function countryFlag(name: string | null | undefined): string {
   return detectCountry(name)?.flag ?? '🌐'
 }
+
+export function countryFlagFromCountryOrName(country: string | null | undefined, name: string | null | undefined): string {
+  return detectCountry(country)?.flag ?? detectCountry(name)?.flag ?? '🌐'
+}

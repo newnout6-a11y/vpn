@@ -62,7 +62,7 @@ function getDayAbbreviations(days: number[], t: (key: string) => string): string
     5: 'schedule.friday',
     6: 'schedule.saturday'
   }
-  return days
+  return [...days]
     .sort((a, b) => a - b)
     .map((d) => t(dayKeyMap[d]))
     .join(', ')
@@ -104,7 +104,7 @@ export function Schedule() {
         setNextEvent(event)
       }
     } catch {
-      // IPC not yet wired
+      // Keep the page usable; next-event banner is supplementary.
     }
   }, [])
 
@@ -247,7 +247,12 @@ export function Schedule() {
     { value: 'direct', label: t('modes.direct') }
   ]
 
-  const isFormValid = form.name.trim() && form.days.length > 0 && form.startTime && form.endTime
+  const isFormValid = form.name.trim() && form.days.length > 0 && form.startTime && form.endTime && form.profileId
+  const nextEventLabel = nextEvent
+    ? nextEvent.type === 'start'
+      ? t('dashboardWidgets.scheduleConnect')
+      : t('dashboardWidgets.scheduleDisconnect')
+    : ''
 
   return (
     <div className="space-y-6">
@@ -284,12 +289,14 @@ export function Schedule() {
                 {t('schedule.nextEvent')}: {nextEvent.schedule.name}
               </p>
               <p className="text-xs text-[var(--color-text-secondary)]">
-                {nextEvent.type === 'start' ? 'Connect' : 'Disconnect'} at{' '}
-                {new Date(nextEvent.at).toLocaleTimeString([], {
-                  hour: '2-digit',
-                  minute: '2-digit'
-                })}{' '}
-                ({formatTimeUntil(nextEvent.at)})
+                {t('dashboardWidgets.scheduleAt', {
+                  action: nextEventLabel,
+                  time: new Date(nextEvent.at).toLocaleTimeString([], {
+                    hour: '2-digit',
+                    minute: '2-digit'
+                  }),
+                  until: formatTimeUntil(nextEvent.at)
+                })}
               </p>
             </div>
             <Clock size={16} className="text-[var(--color-text-secondary)] shrink-0" />

@@ -25,14 +25,24 @@ import { ipcMain, type IpcMainInvokeEvent } from 'electron'
 import { randomUUID } from 'crypto'
 import Store from 'electron-store'
 import { logEvent } from './appLogger'
-import { resolveVpnProfiles, type VpnProfile } from './vpnProfiles'
+import {
+  applyClientDeviceToOutbound,
+  clientFingerprintForDevice,
+  normalizeClientDevice,
+  resolveVpnProfiles,
+  type VpnProfile
+} from './vpnProfiles'
 import { settingsStore } from './settings'
-import type { ServerGroup, ServerProfile } from '../shared/ipc-types'
+import type { ClientDevice, ServerGroup, ServerProfile } from '../shared/ipc-types'
 
 // ─── Persistent Store ────────────────────────────────────────────────────────
 
 interface ServerGroupsStore {
   groups: ServerGroup[]
+}
+
+interface RefreshGroupOptions {
+  clientDevice?: ClientDevice
 }
 
 const store = new Store<ServerGroupsStore>({
@@ -48,8 +58,29 @@ const MANUAL_KEYS_GROUP_NAME = 'Ручные ключи'
 
 // ─── CRUD ───────────────────────────────────────────────────────────────────
 
+function expireGroupByClock(group: ServerGroup, now = Date.now()): ServerGroup {
+  if (
+    group.source === 'subscription' &&
+    group.expiresAt &&
+    group.expiresAt > 0 &&
+    group.expiresAt < now &&
+    group.status !== 'expired'
+  ) {
+    return { ...group, status: 'expired' }
+  }
+  return group
+}
+
 function getGroups(): ServerGroup[] {
-  return store.get('groups') ?? []
+  const groups = store.get('groups') ?? []
+  let changed = false
+  const normalized = groups.map((group) => {
+    const next = expireGroupByClock(group)
+    if (next !== group) changed = true
+    return next
+  })
+  if (changed) saveGroups(normalized)
+  return normalized
 }
 
 function saveGroups(groups: ServerGroup[]): void {
@@ -256,9 +287,11 @@ function vpnProfileToServerProfile(
   vpnProfile: VpnProfile,
   groupId: string,
   sourceUri: string | undefined,
-  now: number
+  now: number,
+  options: RefreshGroupOptions = {}
 ): ServerProfile {
-  const outbound = vpnProfile.outbound || {}
+  const clientDevice = normalizeClientDevice(options.clientDevice)
+  const outbound = applyClientDeviceToOutbound(vpnProfile.outbound || {}, clientDevice)
   return {
     id: randomUUID(),
     name: vpnProfile.name || vpnProfile.protocol.toUpperCase(),
@@ -270,6 +303,10 @@ function vpnProfileToServerProfile(
     status: 'unknown',
     lastChecked: undefined,
     outbound,
+    clientDevice,
+    clientFingerprint: outbound.tls && typeof outbound.tls === 'object'
+      ? clientFingerprintForDevice(clientDevice)
+      : undefined,
     groupId,
     sourceUri,
     lastSeenInSubscriptionAt: now,
@@ -310,7 +347,8 @@ function savePickerProfiles(profiles: ServerProfile[]): void {
  * Returns the same shape as the IPC channel envelope.
  */
 export async function refreshGroup(
-  groupId: string
+  groupId: string,
+  options: RefreshGroupOptions = {}
 ): Promise<
   | { ok: true; group: ServerGroup; addedCount: number; updatedCount: number; removedCount: number }
   | { ok: false; error: string }
@@ -335,9 +373,16 @@ export async function refreshGroup(
     /* fall through with no proxy override */
   }
 
+  const existing = getPickerProfiles()
+  const inGroupExisting = existing.filter(p => p.groupId === groupId)
+  const outOfGroup = existing.filter(p => p.groupId !== groupId)
+  const refreshClientDevice = normalizeClientDevice(
+    options.clientDevice ?? inGroupExisting.find(p => p.clientDevice)?.clientDevice
+  )
+
   let resolved: Awaited<ReturnType<typeof resolveVpnProfiles>>
   try {
-    resolved = await resolveVpnProfiles(group.sourceUrl, { proxyAddr, proxyType })
+    resolved = await resolveVpnProfiles(group.sourceUrl, { proxyAddr, proxyType, clientDevice: refreshClientDevice })
   } catch (err: any) {
     const message = err?.message || String(err)
     // Network errors (DNS, TCP, TLS) usually indicate the user is offline
@@ -375,9 +420,6 @@ export async function refreshGroup(
   // Dedupe-merge against the existing profiles. We keep stable IDs for
   // anything we recognise (so the user's "active profile" pointer doesn't
   // jump after a refresh), and append new profiles unchanged.
-  const existing = getPickerProfiles()
-  const inGroupExisting = existing.filter(p => p.groupId === groupId)
-  const outOfGroup = existing.filter(p => p.groupId !== groupId)
   const existingByKey = new Map<string, ServerProfile>()
   // IMPORTANT: index existing profiles by their CONNECTION TUPLE, not by
   // profileKey(). profileKey() prefers `uri:<sourceUri>` when a profile has a
@@ -406,6 +448,8 @@ export async function refreshGroup(
 
     const prior = existingByKey.get(key)
     if (prior) {
+      const profileDevice = normalizeClientDevice(prior.clientDevice ?? refreshClientDevice)
+      const outbound = applyClientDeviceToOutbound(fresh.outbound || {}, profileDevice)
       // Found a match — keep its id, update only the fields the upstream
       // can legitimately change. We deliberately do NOT touch user-edited
       // fields like `enabled`, `country`, or `ping`.
@@ -413,7 +457,11 @@ export async function refreshGroup(
         ...prior,
         // Refresh outbound: providers occasionally rotate Reality keys or
         // switch transports.
-        outbound: fresh.outbound,
+        outbound,
+        clientDevice: profileDevice,
+        clientFingerprint: outbound.tls && typeof outbound.tls === 'object'
+          ? clientFingerprintForDevice(profileDevice)
+          : undefined,
         protocol: fresh.protocol,
         server: fresh.outbound?.server || prior.server,
         port: fresh.outbound?.server_port || prior.port,
@@ -432,7 +480,7 @@ export async function refreshGroup(
       merged.push(updated)
       updatedCount++
     } else {
-      merged.push(vpnProfileToServerProfile(fresh, groupId, undefined, now))
+      merged.push(vpnProfileToServerProfile(fresh, groupId, undefined, now, { clientDevice: refreshClientDevice }))
       addedCount++
     }
   }
@@ -517,6 +565,22 @@ function deleteGroupAndProfiles(id: string, deleteServers: boolean): boolean {
   }
 
   savePickerProfiles(nextProfiles)
+  if (deleteServers && group.source === 'subscription' && group.sourceUrl) {
+    try {
+      const settings = settingsStore.get()
+      const cached = settings.directVpnCachedInput?.trim()
+      if (cached && canonicalizeSubscriptionUrl(cached) === canonicalizeSubscriptionUrl(group.sourceUrl)) {
+        settingsStore.save({
+          directVpnCachedInput: '',
+          directVpnCachedSource: '',
+          directVpnCachedAt: null,
+          directVpnCachedProfiles: []
+        })
+      }
+    } catch {
+      /* best-effort legacy cache cleanup */
+    }
+  }
   deleteGroupRecord(id)
 
   logEvent('info', 'server-groups', 'group deleted', {

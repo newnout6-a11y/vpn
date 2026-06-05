@@ -50,6 +50,20 @@ vi.mock('./settings', () => ({
 // resolveVpnProfiles is the network boundary — we stub it per test.
 const resolveVpnProfilesMock = vi.fn()
 vi.mock('./vpnProfiles', () => ({
+  applyClientDeviceToOutbound: (outbound: Record<string, any>, device: 'pc' | 'android' | 'ios' | 'mac' = 'pc') => {
+    const result = JSON.parse(JSON.stringify(outbound || {}))
+    if (result.tls && typeof result.tls === 'object' && result.tls.enabled !== false) {
+      result.tls.utls = {
+        ...(result.tls.utls && typeof result.tls.utls === 'object' ? result.tls.utls : {}),
+        enabled: true,
+        fingerprint: device === 'android' ? 'android' : device === 'ios' ? 'ios' : device === 'mac' ? 'safari' : 'chrome'
+      }
+    }
+    return result
+  },
+  clientFingerprintForDevice: (device: 'pc' | 'android' | 'ios' | 'mac' = 'pc') =>
+    device === 'android' ? 'android' : device === 'ios' ? 'ios' : device === 'mac' ? 'safari' : 'chrome',
+  normalizeClientDevice: (value: unknown) => value === 'android' || value === 'ios' || value === 'mac' ? value : 'pc',
   resolveVpnProfiles: (...args: any[]) => resolveVpnProfilesMock(...args)
 }))
 
@@ -245,5 +259,33 @@ describe('refreshGroup dedup-merge', () => {
     await refreshGroup(group.id)
     const updated = serverGroups.getGroup(group.id)
     expect(updated?.status).toBe('expired')
+  })
+
+  it('marks elapsed subscriptions expired without hiding saved profiles', async () => {
+    const group = serverGroups.createGroup({
+      name: 'expired.example.com',
+      source: 'subscription',
+      sourceUrl: 'https://sub.example.com/expired',
+      importedAt: Date.now() - 30 * 24 * 60 * 60 * 1000,
+      status: 'active',
+      expiresAt: Date.now() - 60_000
+    })
+
+    storeData.current['server-picker'].profiles = [
+      {
+        id: 'p1',
+        name: 'US',
+        protocol: 'vless',
+        server: 'us.example.com',
+        port: 443,
+        groupId: group.id,
+        outbound: { type: 'vless', server: 'us.example.com', server_port: 443 },
+        enabled: true
+      }
+    ]
+
+    const updated = serverGroups.getGroup(group.id)
+    expect(updated?.status).toBe('expired')
+    expect(pickerProfiles().filter((p) => p.groupId === group.id)).toHaveLength(1)
   })
 })

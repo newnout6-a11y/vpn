@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import type { ClientDevice } from '../shared/ipc-types'
 
 export interface ElectronAPI {
   detectHapp: () => Promise<any>
@@ -58,6 +59,7 @@ export interface ElectronAPI {
   configImportApply: (filePath: string, sections: string[], conflictResolution: 'replace' | 'merge') => Promise<{ success: boolean; error?: string }>
   // Split Tunneling
   splitTunnelGetApps: () => Promise<any[]>
+  splitTunnelGetConfig: () => Promise<any>
   splitTunnelSetRule: (appId: string, rule: 'vpn' | 'direct' | 'none') => Promise<void>
   splitTunnelAddApp: (exePath: string) => Promise<any>
   splitTunnelAddProcess: (name: string) => Promise<any>
@@ -68,8 +70,17 @@ export interface ElectronAPI {
   serversGetActive: () => Promise<{ profile: any | null; activeId: string | null }>
   serversPingAll: () => Promise<any[]>
   serversPingOne: (host: string, port: number) => Promise<number | null>
-  serversAdd: (input: string) => Promise<any[]>
-  serversAddToGroup: (input: string, groupId: string | null) => Promise<any[]>
+  serversVerifyActiveCountry: (ip: string) => Promise<
+    | { ok: true; country: string; profile: any }
+    | { ok: false; reason: string; country?: string }
+  >
+  serversVerifyCountry: (id: string) => Promise<
+    | { ok: true; country: string; profile: any }
+    | { ok: false; reason: string; country?: string }
+  >
+  serversAdd: (input: string, options?: { clientDevice?: ClientDevice }) => Promise<any[]>
+  serversAddToGroup: (input: string, groupId: string | null, options?: { clientDevice?: ClientDevice }) => Promise<any[]>
+  serversSetClientDevice: (id: string, clientDevice: ClientDevice) => Promise<any>
   serversRemove: (id: string) => Promise<void>
   serversExportKey: (id: string) => Promise<
     | { ok: true; uri: string; name: string; protocol: string }
@@ -122,6 +133,7 @@ export interface ElectronAPI {
   // DNS Profiles
   dnsList: () => Promise<any[]>
   dnsCreate: (profile: { name: string; primary: string; secondary: string; type: 'plain' | 'doh' | 'dot' }) => Promise<any>
+  dnsUpdate: (id: string, patch: any) => Promise<any>
   dnsDelete: (id: string) => Promise<void>
   dnsSelect: (id: string) => Promise<void>
   dnsValidate: (address: string) => Promise<{ valid: boolean; type: 'plain' | 'doh' | 'dot'; error?: string }>
@@ -214,6 +226,8 @@ export interface LeakSelfTestResult {
   defaultRoutePublicIp: string | null
   perAdapter: LeakSelfTestAdapter[]
   summary: string
+  dnsLeakDetected?: boolean
+  dnsLeakDetail?: string
 }
 
 contextBridge.exposeInMainWorld('electronAPI', {
@@ -260,6 +274,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openSnapshotsFolder: () => ipcRenderer.invoke('open-snapshots-folder'),
   // Split Tunneling
   splitTunnelGetApps: () => ipcRenderer.invoke('split-tunnel:get-apps'),
+  splitTunnelGetConfig: () => ipcRenderer.invoke('split-tunnel:get-config'),
   splitTunnelSetRule: (appId: string, rule: 'vpn' | 'direct' | 'none') => ipcRenderer.invoke('split-tunnel:set-rule', appId, rule),
   splitTunnelAddApp: (exePath: string) => ipcRenderer.invoke('split-tunnel:add-app', exePath),
   splitTunnelAddProcess: (name: string) => ipcRenderer.invoke('split-tunnel:add-process', name),
@@ -270,8 +285,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   serversGetActive: () => ipcRenderer.invoke('servers:get-active'),
   serversPingAll: () => ipcRenderer.invoke('servers:ping-all'),
   serversPingOne: (host: string, port: number) => ipcRenderer.invoke('servers:ping-one', host, port),
-  serversAdd: (input: string) => ipcRenderer.invoke('servers:add', input),
-  serversAddToGroup: (input: string, groupId: string | null) => ipcRenderer.invoke('servers:add-to-group', input, groupId),
+  serversVerifyActiveCountry: (ip: string) => ipcRenderer.invoke('servers:verify-active-country', ip),
+  serversVerifyCountry: (id: string) => ipcRenderer.invoke('servers:verify-country', id),
+  serversAdd: (input: string, options?: { clientDevice?: ClientDevice }) => ipcRenderer.invoke('servers:add', input, options),
+  serversAddToGroup: (input: string, groupId: string | null, options?: { clientDevice?: ClientDevice }) => ipcRenderer.invoke('servers:add-to-group', input, groupId, options),
+  serversSetClientDevice: (id: string, clientDevice: ClientDevice) => ipcRenderer.invoke('servers:set-client-device', id, clientDevice),
   serversRemove: (id: string) => ipcRenderer.invoke('servers:remove', id),
   serversExportKey: (id: string) => ipcRenderer.invoke('servers:export-key', id),
   serversExportKeyToFile: (id: string) => ipcRenderer.invoke('servers:export-key-file', id),
@@ -309,6 +327,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // DNS Profiles
   dnsList: () => ipcRenderer.invoke('dns:list'),
   dnsCreate: (profile: { name: string; primary: string; secondary: string; type: 'plain' | 'doh' | 'dot' }) => ipcRenderer.invoke('dns:create', profile),
+  dnsUpdate: (id: string, patch: any) => ipcRenderer.invoke('dns:update', id, patch),
   dnsDelete: (id: string) => ipcRenderer.invoke('dns:delete', id),
   dnsSelect: (id: string) => ipcRenderer.invoke('dns:select', id),
   dnsValidate: (address: string) => ipcRenderer.invoke('dns:validate', address),

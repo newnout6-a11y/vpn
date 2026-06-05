@@ -23,7 +23,12 @@ import {
   repairOrphanedPhysicalAdapterDns,
   rollbackPhysicalAdapterLockdownIfApplied
 } from './physicalAdapterLockdown'
-import type { VpnProfile } from './vpnProfiles'
+import {
+  clientFingerprintForDevice,
+  normalizeClientDevice,
+  type VpnProfile
+} from './vpnProfiles'
+import type { ClientDevice } from '../shared/ipc-types'
 import { TUN_ADAPTER_ALIAS, TUN_IPV4_ADDRESS_CIDR, TUN_IPV6_ADDRESS_CIDR, TUN_IPV4_RESOLVER, TUN_IPV4_PREFIX, TUN_INTERFACE_METRIC, isOwnTunAddress, ALL_KNOWN_ALIASES } from './tunAdapter'
 import { ipMonitor } from './ipMonitor'
 import { cancelLeakSelfTest } from './leakSelfTest'
@@ -463,7 +468,7 @@ function sanitizeProxyOutbound(outbound: Record<string, any>): { outbound: Recor
 }
 
 export function generateSingboxConfig(
-  upstream: string | { outbound: Record<string, any>; proxyType?: 'socks5' | 'http' },
+  upstream: string | { outbound: Record<string, any>; proxyType?: 'socks5' | 'http'; clientDevice?: ClientDevice },
   proxyType: 'socks5' | 'http' = 'socks5',
   directProcessNames: string[] = [],
   options: {
@@ -488,6 +493,9 @@ export function generateSingboxConfig(
   const stealthMode = options.stealthMode === true
   const tunMtu = stealthMode ? 1280 : 1500
   const isDirectVpn = typeof upstream !== 'string'
+  const explicitClientDevice = isDirectVpn && upstream.clientDevice
+    ? normalizeClientDevice(upstream.clientDevice)
+    : null
 
   // Smart RU split-routing options. Pure here (caller passes resolved flags
   // from settings) so generateSingboxConfig stays unit-testable.
@@ -532,6 +540,9 @@ export function generateSingboxConfig(
     } else if (!tls.utls.fingerprint) {
       tls.utls.fingerprint = 'chrome'
     }
+    if (explicitClientDevice) {
+      tls.utls.fingerprint = clientFingerprintForDevice(explicitClientDevice)
+    }
     if (!Array.isArray(tls.alpn) || tls.alpn.length === 0) {
       tls.alpn = ['h2', 'http/1.1']
     }
@@ -543,7 +554,7 @@ export function generateSingboxConfig(
     // server-side allowlists/sticky sessions) but different outbounds
     // within the same subscription look like different browsers, which
     // makes a big subscription harder to bulk-block by a single fp pattern.
-    if (stealthMode && !realityEnabled && tls.utls && typeof tls.utls === 'object') {
+    if (stealthMode && !realityEnabled && !explicitClientDevice && tls.utls && typeof tls.utls === 'object') {
       // Windows-plausible fingerprints only. Safari does not exist on Windows,
       // so a "safari" uTLS fp on a Windows client is itself an anomaly DPI can
       // flag — drop it. chrome/firefox/edge are all native to Windows. Keep
@@ -1319,7 +1330,7 @@ export function detectForeignTun(): string | null {
 }
 
 async function prepareRuntime(
-  upstream: string | { outbound: Record<string, any>; proxyType?: 'socks5' | 'http' },
+  upstream: string | { outbound: Record<string, any>; proxyType?: 'socks5' | 'http'; clientDevice?: ClientDevice },
   proxyType: 'socks5' | 'http',
   directProcessNames: string[],
   options: { stealthMode?: boolean; smartRuSplit?: boolean; smartRuMapsDirect?: boolean } = {}
@@ -1775,7 +1786,7 @@ export const tunController = {
       // immediately from the vpnProfile we already have in hand.
       if (vpnProfile) {
         runtimePromise = prepareRuntime(
-          { outbound: vpnProfile.outbound, proxyType },
+          { outbound: vpnProfile.outbound, proxyType, clientDevice: vpnProfile.clientDevice },
           proxyType,
           proxyOwnerProcessNames,
           { stealthMode: startOptions.stealthMode === true, ...smartRouteRuntimeOpts }
@@ -1827,7 +1838,7 @@ export const tunController = {
       if (!runtimePromise) {
         runtimePromise = prepareRuntime(
           mode === 'directVpn' && vpnProfile
-            ? { outbound: vpnProfile.outbound, proxyType }
+            ? { outbound: vpnProfile.outbound, proxyType, clientDevice: vpnProfile.clientDevice }
             : proxyAddr,
           proxyType,
           proxyOwnerProcessNames,

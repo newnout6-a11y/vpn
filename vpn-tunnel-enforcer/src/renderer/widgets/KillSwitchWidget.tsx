@@ -38,7 +38,11 @@ export const KillSwitchWidget: React.FC<KillSwitchWidgetProps> = ({ size }) => {
       <Shield size={size === 'compact' ? 18 : 22} className="text-green-500" />
     )
 
-  const statusText = firewallKillSwitchActive ? 'Blocking' : level === 'off' ? 'Disabled' : 'Standby'
+  const statusText = firewallKillSwitchActive
+    ? t('dashboardWidgets.killSwitchBlocking')
+    : level === 'off'
+      ? t('dashboardWidgets.killSwitchDisabled')
+      : t('dashboardWidgets.killSwitchStandby')
   const statusColor = firewallKillSwitchActive
     ? 'text-red-500'
     : level === 'off'
@@ -72,17 +76,21 @@ export const KillSwitchWidget: React.FC<KillSwitchWidgetProps> = ({ size }) => {
       </div>
       <div className="grid grid-cols-2 gap-2">
         <div className="rounded-[var(--radius-sm)] bg-[var(--color-bg)] p-2.5 border border-[var(--color-border)]">
-          <p className="text-xs text-[var(--color-text-secondary)] mb-0.5">Level</p>
+          <p className="text-xs text-[var(--color-text-secondary)] mb-0.5">
+            {t('dashboardWidgets.killSwitchLevel')}
+          </p>
           <p className="text-sm font-medium text-[var(--color-text)]">{levelLabel}</p>
         </div>
         <div className="rounded-[var(--radius-sm)] bg-[var(--color-bg)] p-2.5 border border-[var(--color-border)]">
-          <p className="text-xs text-[var(--color-text-secondary)] mb-0.5">Status</p>
+          <p className="text-xs text-[var(--color-text-secondary)] mb-0.5">
+            {t('dashboardWidgets.killSwitchStatus')}
+          </p>
           <p className={`text-sm font-medium ${statusColor}`}>{statusText}</p>
         </div>
       </div>
       {firewallKillSwitchActive && (
         <div className="rounded-[var(--radius-sm)] bg-red-500/10 border border-red-500/20 p-2 text-xs text-red-600">
-          Traffic is being blocked by kill-switch rules
+          {t('dashboardWidgets.killSwitchBlockingDetail')}
         </div>
       )}
     </div>

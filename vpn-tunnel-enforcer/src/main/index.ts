@@ -590,12 +590,16 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
       profile = {
         name: activeServer.name,
         protocol: activeServer.protocol as VpnProfile['protocol'],
-        outbound
+        outbound,
+        clientDevice: activeServer.clientDevice,
+        clientFingerprint: activeServer.clientFingerprint
       }
       logEvent('info', 'tun', 'using server-picker active profile', {
         id: activeServer.id,
         protocol: activeServer.protocol,
-        name: activeServer.name
+        name: activeServer.name,
+        clientDevice: activeServer.clientDevice ?? 'pc',
+        clientFingerprint: activeServer.clientFingerprint ?? null
       })
     } else {
       captureSnapshot('tun-start-failed').catch(() => undefined)
@@ -1277,10 +1281,9 @@ app.whenReady().then(async () => {
   // We clear them on startup so the user starts every session from a clean
   // baseline; the next offline pingAll repopulates with real numbers.
   serverPicker.clearStaleStoredPings()
-  // Fire-and-forget background geolocation pass for any profile that doesn't
-  // already have a country tag. This makes country labels appear on the
-  // dashboard without the user having to ping every server manually.
-  void serverPicker.geolocateAll().catch(() => undefined)
+  // Country geolocation is intentionally manual now: subscriptions can carry
+  // many servers, and automatically querying several public geo databases for
+  // every missing entry makes refresh/startup slow and burns external limits.
   registerServerProbeIpcHandlers()
   registerUrlAvailabilityHandlers()
   registerSpeedTestHandlers()

@@ -27,13 +27,9 @@
   !insertmacro killRunningApp
 !macroend
 
-; Runs after the new files are installed. We delete the cached server-groups
-; store so the app's startup migration re-bins every key into the correct
-; per-subscription group on first launch (the flat/legacy grouping from older
-; builds is discarded; the keys themselves in server-picker.json are kept).
 !macro customInstall
-  ; %APPDATA% of the installing user. NSIS expands $APPDATA per-user.
-  Delete "$APPDATA\vpn-tunnel-enforcer\server-groups.json"
+  ; Keep user data intact on upgrade/reinstall. Server groups are user state:
+  ; deleting them here can resurrect old subscriptions from legacy caches.
 !macroend
 
 ; Runs at the start of uninstall (both the standalone uninstaller and the

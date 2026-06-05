@@ -32,17 +32,9 @@ import {
 import { MacCard } from '../design-system/MacCard'
 import { cn } from '../design-system/utils'
 import { useAppStore } from '../store'
-import { detectCountry } from './countryGlyph'
+import { countryFlagFromCountryOrName } from './countryGlyph'
 import { SERVER_CHANGED_EVENT, emitServerChanged } from '../nav'
-import type { ServerProfile } from '../../shared/ipc-types'
-
-// Local mirror — see Servers.tsx / ProfileSelectorInline.tsx for rationale.
-interface ServerGroup {
-  id: string
-  name: string
-  source: 'subscription' | 'manual'
-  status: 'active' | 'expired' | 'unreachable' | 'unknown'
-}
+import type { ServerGroup, ServerProfile } from '../../shared/ipc-types'
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
@@ -333,7 +325,6 @@ function QuickServers() {
               )}
               <ul className="space-y-1">
                 {cluster.rows.map(row => {
-                  const recognised = detectCountry(row.name)
                   const ping = pings[row.key]
                   const pingValue = ping === 'pinging' ? null : ping
                   return (
@@ -355,7 +346,7 @@ function QuickServers() {
                           className="text-base leading-none flex-shrink-0 select-none"
                           aria-hidden="true"
                         >
-                          {recognised?.flag ?? '🌐'}
+                          {countryFlagFromCountryOrName(row.country, row.name)}
                         </span>
                         <span className="flex-1 min-w-0">
                           <span className="block text-xs font-medium text-[var(--color-text)] truncate">

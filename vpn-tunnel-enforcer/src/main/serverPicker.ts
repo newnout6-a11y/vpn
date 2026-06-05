@@ -21,7 +21,14 @@ import axios from 'axios'
 import { randomUUID } from 'crypto'
 import Store from 'electron-store'
 import { logEvent } from './appLogger'
-import { resolveVpnProfiles, exportOutboundToUri, type VpnProfile } from './vpnProfiles'
+import {
+  applyClientDeviceToOutbound,
+  clientFingerprintForDevice,
+  normalizeClientDevice,
+  resolveVpnProfiles,
+  exportOutboundToUri,
+  type VpnProfile
+} from './vpnProfiles'
 import { settingsStore } from './settings'
 import { tunController } from './tunController'
 import {
@@ -31,7 +38,7 @@ import {
   canonicalizeSubscriptionUrl,
   refreshGroup as refreshSubscriptionGroup
 } from './serverGroups'
-import type { ServerProfile } from '../shared/ipc-types'
+import type { ClientDevice, ServerProfile } from '../shared/ipc-types'
 
 // Promisified `exec` is used by the ICMP probe (Windows `ping.exe`). We
 // take the buffer form because Russian Windows prints CP866-encoded output
@@ -50,6 +57,12 @@ interface ServerPickerStore {
   profiles: ServerProfile[]
   activeProfileId: string | null
 }
+
+interface AddProfilesOptions {
+  clientDevice?: ClientDevice
+}
+
+const COUNTRY_GEO_VERSION = 3
 
 const store = new Store<ServerPickerStore>({
   name: 'server-picker',
@@ -643,6 +656,100 @@ async function resolveHostsToIps(hosts: string[]): Promise<Map<string, string>> 
   return out
 }
 
+interface GeoVote {
+  source: string
+  country: string
+  countryCode?: string
+}
+
+function normaliseCountryCode(value: unknown): string | null {
+  const code = typeof value === 'string' ? value.trim().toUpperCase() : ''
+  return /^[A-Z]{2}$/.test(code) ? code : null
+}
+
+function countryNameFromCode(code: string): string | null {
+  try {
+    return new Intl.DisplayNames(['en'], { type: 'region' }).of(code) ?? null
+  } catch {
+    return null
+  }
+}
+
+function addGeoVote(votes: GeoVote[], source: string, country: unknown, countryCode?: unknown): void {
+  const cleanCountry = typeof country === 'string' ? country.trim() : ''
+  const code = normaliseCountryCode(countryCode)
+  const fromCode = code ? countryNameFromCode(code) : null
+  const finalCountry = fromCode || cleanCountry
+  if (!finalCountry) return
+  votes.push({ source, country: finalCountry, countryCode: code ?? undefined })
+}
+
+function chooseGeoCountry(ip: string, votes: GeoVote[]): string | null {
+  if (!votes.length) return null
+  const byKey = new Map<string, { country: string; count: number; sources: string[] }>()
+  for (const vote of votes) {
+    const key = vote.countryCode || vote.country.toLowerCase()
+    const current = byKey.get(key) ?? { country: vote.country, count: 0, sources: [] }
+    current.count++
+    current.sources.push(vote.source)
+    byKey.set(key, current)
+  }
+  const ranked = [...byKey.values()].sort((a, b) => b.count - a.count)
+  const winner = ranked[0]
+  if (ranked.length > 1) {
+    logEvent('debug', 'server-picker', 'geo provider disagreement', {
+      ip,
+      votes,
+      selected: winner.country
+    })
+  }
+  return winner.country
+}
+
+async function fetchSecondaryGeoVote(ip: string, source: 'ipwho.is' | 'ipinfo.is' | 'ipinfo.io' | 'iplocation.net'): Promise<GeoVote | null> {
+  try {
+    if (source === 'ipwho.is') {
+      const resp = await axios.get(`https://ipwho.is/${encodeURIComponent(ip)}`, { timeout: 5000 })
+      if (resp.data?.success === false) return null
+      const votes: GeoVote[] = []
+      addGeoVote(votes, source, resp.data?.country, resp.data?.country_code)
+      return votes[0] ?? null
+    }
+    if (source === 'ipinfo.is') {
+      const resp = await axios.get(`https://ipinfo.is/${encodeURIComponent(ip)}`, { timeout: 5000 })
+      const votes: GeoVote[] = []
+      addGeoVote(
+        votes,
+        source,
+        resp.data?.country?.long_name || resp.data?.country,
+        resp.data?.country?.short_name
+      )
+      return votes[0] ?? null
+    }
+    if (source === 'ipinfo.io') {
+      const resp = await axios.get(`https://ipinfo.io/${encodeURIComponent(ip)}/json`, { timeout: 5000 })
+      const votes: GeoVote[] = []
+      addGeoVote(votes, source, undefined, resp.data?.country)
+      return votes[0] ?? null
+    }
+    const resp = await axios.get('https://api.iplocation.net/', {
+      timeout: 5000,
+      params: { ip }
+    })
+    if (String(resp.data?.response_code ?? '') !== '200') return null
+    const votes: GeoVote[] = []
+    addGeoVote(votes, source, resp.data?.country_name, resp.data?.country_code2)
+    return votes[0] ?? null
+  } catch (err) {
+    logEvent('debug', 'server-picker', 'secondary geo lookup failed', {
+      ip,
+      source,
+      err: (err as Error)?.message
+    })
+    return null
+  }
+}
+
 /**
  * Bulk-geolocate IPs via ip-api.com's batch endpoint: up to 100 IPs per
  * POST, free, no API key, 45 requests/min. This replaces the previous
@@ -659,6 +766,9 @@ async function resolveHostsToIps(hosts: string[]): Promise<Map<string, string>> 
 async function batchGeolocateIps(ips: string[]): Promise<Map<string, string>> {
   const out = new Map<string, string>()
   const unique = [...new Set(ips.filter(Boolean))]
+  const votesByIp = new Map<string, GeoVote[]>()
+  for (const ip of unique) votesByIp.set(ip, [])
+
   const CHUNK = 100
   for (let i = 0; i < unique.length; i += CHUNK) {
     const chunk = unique.slice(i, i + CHUNK)
@@ -666,14 +776,15 @@ async function batchGeolocateIps(ips: string[]): Promise<Map<string, string>> {
       // `fields` trims the response to just what we need. `query` echoes the
       // IP back so we can map results to inputs regardless of order.
       const resp = await axios.post(
-        'http://ip-api.com/batch?fields=status,country,query',
+        'http://ip-api.com/batch?fields=status,country,countryCode,query',
         chunk,
         { timeout: 10000, headers: { 'Content-Type': 'application/json' } }
       )
       const rows = Array.isArray(resp.data) ? resp.data : []
       for (const row of rows) {
-        if (row && row.status === 'success' && row.query && typeof row.country === 'string' && row.country.trim()) {
-          out.set(String(row.query), row.country.trim())
+        if (row && row.status === 'success' && row.query) {
+          const votes = votesByIp.get(String(row.query))
+          if (votes) addGeoVote(votes, 'ip-api.com', row.country, row.countryCode)
         }
       }
     } catch (err) {
@@ -683,7 +794,129 @@ async function batchGeolocateIps(ips: string[]): Promise<Map<string, string>> {
     // Stay well under 45 req/min even with many chunks.
     if (i + CHUNK < unique.length) await new Promise(r => setTimeout(r, 1500))
   }
+
+  const CONCURRENCY = 8
+  for (let i = 0; i < unique.length; i += CONCURRENCY) {
+    const batch = unique.slice(i, i + CONCURRENCY)
+    const rows = await Promise.all(batch.map(async (ip) => {
+      const [ipwho, ipinfoIs, ipinfoIo, iplocation] = await Promise.all([
+        fetchSecondaryGeoVote(ip, 'ipwho.is'),
+        fetchSecondaryGeoVote(ip, 'ipinfo.is'),
+        fetchSecondaryGeoVote(ip, 'ipinfo.io'),
+        fetchSecondaryGeoVote(ip, 'iplocation.net')
+      ])
+      return { ip, votes: [ipwho, ipinfoIs, ipinfoIo, iplocation].filter((v): v is GeoVote => !!v) }
+    }))
+    for (const row of rows) {
+      const votes = votesByIp.get(row.ip) ?? []
+      votes.push(...row.votes)
+      votesByIp.set(row.ip, votes)
+    }
+  }
+
+  for (const [ip, votes] of votesByIp) {
+    const country = chooseGeoCountry(ip, votes)
+    if (country) out.set(ip, country)
+  }
   return out
+}
+
+export async function geolocateIp(ip: string): Promise<string | null> {
+  const map = await batchGeolocateIps([ip])
+  return map.get(ip) ?? null
+}
+
+export function updateActiveProfileCountry(country: string, ip?: string | null): ServerProfile | null {
+  const cleanCountry = country.trim()
+  if (!cleanCountry) return null
+  const activeId = getActiveProfileId()
+  if (!activeId) return null
+
+  const profiles = getProfiles()
+  const idx = profiles.findIndex(p => p.id === activeId)
+  if (idx === -1) return null
+
+  const current = profiles[idx]
+  const cleanIp = ip?.trim() || undefined
+  if (
+    current.country === cleanCountry &&
+    current.countryVerifiedIp === cleanIp
+  ) {
+    return current
+  }
+
+  const updated: ServerProfile = {
+    ...current,
+    country: cleanCountry,
+    countryVerifiedAt: Date.now(),
+    countryVerifiedIp: cleanIp,
+    countryGeoVersion: COUNTRY_GEO_VERSION
+  }
+  profiles[idx] = updated
+  saveProfiles(profiles)
+  logEvent('info', 'server-picker', 'active profile country verified', {
+    id: activeId,
+    name: updated.name,
+    country: cleanCountry,
+    ip: cleanIp ?? null
+  })
+  return updated
+}
+
+export async function verifyProfileCountry(id: string): Promise<ServerProfile | null> {
+  const profiles = getProfiles()
+  const idx = profiles.findIndex(p => p.id === id)
+  if (idx === -1) return null
+
+  const current = profiles[idx]
+  const ip = await resolveHostIp(current.server)
+  if (!ip) return null
+  const country = await geolocateIp(ip)
+  if (!country) return null
+
+  const updated: ServerProfile = {
+    ...current,
+    country,
+    countryVerifiedAt: Date.now(),
+    countryVerifiedIp: ip,
+    countryGeoVersion: COUNTRY_GEO_VERSION
+  }
+  profiles[idx] = updated
+  saveProfiles(profiles)
+  logEvent('info', 'server-picker', 'profile country verified', {
+    id,
+    name: updated.name,
+    country,
+    ip
+  })
+  return updated
+}
+
+export function setProfileClientDevice(id: string, device: ClientDevice): ServerProfile | null {
+  const clientDevice = normalizeClientDevice(device)
+  const profiles = getProfiles()
+  const idx = profiles.findIndex(p => p.id === id)
+  if (idx === -1) return null
+  const current = profiles[idx]
+  const outbound = current.outbound && typeof current.outbound === 'object'
+    ? applyClientDeviceToOutbound(current.outbound, clientDevice)
+    : current.outbound
+  const updated: ServerProfile = {
+    ...current,
+    outbound,
+    clientDevice,
+    clientFingerprint: outbound && typeof outbound === 'object' && outbound.tls && typeof outbound.tls === 'object'
+      ? clientFingerprintForDevice(clientDevice)
+      : undefined
+  }
+  profiles[idx] = updated
+  saveProfiles(profiles)
+  logEvent('info', 'server-picker', 'profile client device updated', {
+    id,
+    clientDevice,
+    clientFingerprint: updated.clientFingerprint ?? null
+  })
+  return updated
 }
 
 /**
@@ -736,8 +969,18 @@ export async function geolocateAll(opts: { force?: boolean } = {}): Promise<void
       if (!country) continue
       const idx = current.findIndex(p => p.id === profile.id)
       if (idx === -1) continue
-      if (current[idx].country !== country) {
-        current[idx] = { ...current[idx], country }
+      if (
+        current[idx].country !== country ||
+        current[idx].countryVerifiedIp !== ip ||
+        opts.force
+      ) {
+        current[idx] = {
+          ...current[idx],
+          country,
+          countryVerifiedAt: Date.now(),
+          countryVerifiedIp: ip,
+          countryGeoVersion: COUNTRY_GEO_VERSION
+        }
         dirty = true
         updated++
       }
@@ -795,6 +1038,12 @@ export function migrateLegacyDirectVpnProfiles(): void {
   if (!migrated.length) return
 
   saveProfiles(migrated)
+  settingsStore.save({
+    directVpnCachedInput: '',
+    directVpnCachedSource: '',
+    directVpnCachedAt: null,
+    directVpnCachedProfiles: []
+  })
   // Activate whichever index used to be selected, clamped to range.
   const idx = Math.max(0, Math.min(settings.directVpnSelectedIndex || 0, migrated.length - 1))
   store.set('activeProfileId', migrated[idx].id)
@@ -1290,9 +1539,11 @@ function removeProfile(id: string): void {
 function vpnProfileToServerProfile(
   vpnProfile: VpnProfile,
   groupId: string,
-  sourceUri?: string
+  sourceUri: string | undefined,
+  options: AddProfilesOptions = {}
 ): ServerProfile {
-  const outbound = vpnProfile.outbound || {}
+  const clientDevice = normalizeClientDevice(options.clientDevice)
+  const outbound = applyClientDeviceToOutbound(vpnProfile.outbound || {}, clientDevice)
   return {
     id: randomUUID(),
     name: vpnProfile.name || vpnProfile.protocol.toUpperCase(),
@@ -1304,6 +1555,10 @@ function vpnProfileToServerProfile(
     status: 'unknown',
     lastChecked: undefined,
     outbound,
+    clientDevice,
+    clientFingerprint: outbound.tls && typeof outbound.tls === 'object'
+      ? clientFingerprintForDevice(clientDevice)
+      : undefined,
     groupId,
     sourceUri,
     lastSeenInSubscriptionAt: Date.now(),
@@ -1358,14 +1613,15 @@ function deriveSubscriptionGroupName(input: string, webPageUrl?: string): string
 function appendProfilesToGroup(
   vpnProfiles: VpnProfile[],
   groupId: string,
-  sourceUriPerProfile: (vp: VpnProfile, index: number) => string | undefined
+  sourceUriPerProfile: (vp: VpnProfile, index: number) => string | undefined,
+  options: AddProfilesOptions = {}
 ): ServerProfile[] {
   const existingProfiles = getProfiles()
   const newProfiles: ServerProfile[] = []
 
   vpnProfiles.forEach((vpnProfile, index) => {
     const sourceUri = sourceUriPerProfile(vpnProfile, index)
-    const candidate = vpnProfileToServerProfile(vpnProfile, groupId, sourceUri)
+    const candidate = vpnProfileToServerProfile(vpnProfile, groupId, sourceUri, options)
     const isDuplicate =
       existingProfiles.some(p => isSameServerProfile(p, candidate)) ||
       newProfiles.some(p => isSameServerProfile(p, candidate))
@@ -1396,8 +1652,9 @@ function appendProfilesToGroup(
  *   append the parsed profile under it. The raw URI is stored as
  *   `sourceUri` for lossless re-export.
  */
-export async function addFromInput(input: string): Promise<ServerProfile[]> {
+export async function addFromInput(input: string, options: AddProfilesOptions = {}): Promise<ServerProfile[]> {
   const trimmed = input.trim()
+  const clientDevice = normalizeClientDevice(options.clientDevice)
   if (!trimmed) {
     throw new Error('Введите ссылку подписки или VPN-ссылку')
   }
@@ -1420,7 +1677,7 @@ export async function addFromInput(input: string): Promise<ServerProfile[]> {
     const existing = findGroupBySourceUrl(canonical)
     if (existing) {
       const beforeIds = new Set(getProfiles().map(p => p.id))
-      const result = await refreshSubscriptionGroup(existing.id)
+      const result = await refreshSubscriptionGroup(existing.id, { clientDevice })
       if (!result.ok) {
         throw new Error(result.error)
       }
@@ -1431,7 +1688,6 @@ export async function addFromInput(input: string): Promise<ServerProfile[]> {
         added: result.addedCount,
         updated: result.updatedCount
       })
-      void geolocateAll().catch(() => undefined)
       return newlyAdded
     }
 
@@ -1449,7 +1705,7 @@ export async function addFromInput(input: string): Promise<ServerProfile[]> {
     // We hand the resolver the original (possibly happ://) input because
     // `resolveVpnProfiles` already knows how to unwrap it; reusing that
     // single code path avoids drift between two unwrap implementations.
-    const resolved = await resolveVpnProfiles(trimmed, { proxyAddr, proxyType })
+    const resolved = await resolveVpnProfiles(trimmed, { proxyAddr, proxyType, clientDevice })
     if (!resolved.profiles.length) {
       throw new Error('Не найдено поддерживаемых профилей в указанном источнике')
     }
@@ -1490,20 +1746,20 @@ export async function addFromInput(input: string): Promise<ServerProfile[]> {
       // We don't have per-profile URIs from a subscription resolver
       // (the upstream feed often omits them), so leave `sourceUri`
       // unset and let the connection-tuple do the dedupe work.
-      () => undefined
+      () => undefined,
+      { clientDevice }
     )
 
     logEvent('info', 'server-picker', 'profiles added from subscription', {
       groupId: group.id,
       count: newProfiles.length
     })
-    void geolocateAll().catch(() => undefined)
     return newProfiles
   }
 
   // Single VPN URI path. We need the parsed profile AND the original line
   // so we can store it as sourceUri.
-  const resolved = await resolveVpnProfiles(trimmed)
+  const resolved = await resolveVpnProfiles(trimmed, { clientDevice })
   if (!resolved.profiles.length) {
     throw new Error('Не найдено поддерживаемых профилей в указанном источнике')
   }
@@ -1517,14 +1773,14 @@ export async function addFromInput(input: string): Promise<ServerProfile[]> {
   const newProfiles = appendProfilesToGroup(
     resolved.profiles,
     groupId,
-    (_vp, index) => (resolved.profiles.length === 1 && index === 0 ? trimmed : undefined)
+    (_vp, index) => (resolved.profiles.length === 1 && index === 0 ? trimmed : undefined),
+    { clientDevice }
   )
 
   logEvent('info', 'server-picker', 'profile added from URI', {
     groupId,
     count: newProfiles.length
   })
-  void geolocateAll().catch(() => undefined)
   return newProfiles
 }
 
@@ -1536,8 +1792,9 @@ export async function addFromInput(input: string): Promise<ServerProfile[]> {
  * Subscription URLs append the full set of resolved profiles. Single
  * URIs append one profile with `sourceUri = trimmed`.
  */
-export async function addFromInputToGroup(input: string, groupId: string): Promise<ServerProfile[]> {
+export async function addFromInputToGroup(input: string, groupId: string, options: AddProfilesOptions = {}): Promise<ServerProfile[]> {
   const trimmed = input.trim()
+  const clientDevice = normalizeClientDevice(options.clientDevice)
   if (!trimmed) throw new Error('Введите ссылку подписки или VPN-ссылку')
 
   const target = serverGroups.getGroup(groupId)
@@ -1553,7 +1810,7 @@ export async function addFromInputToGroup(input: string, groupId: string): Promi
     /* fall through */
   }
 
-  const resolved = await resolveVpnProfiles(trimmed, { proxyAddr, proxyType })
+  const resolved = await resolveVpnProfiles(trimmed, { proxyAddr, proxyType, clientDevice })
   if (!resolved.profiles.length) {
     throw new Error('Не найдено поддерживаемых профилей в указанном источнике')
   }
@@ -1563,7 +1820,8 @@ export async function addFromInputToGroup(input: string, groupId: string): Promi
     resolved.profiles,
     groupId,
     (_vp, index) =>
-      !isSubscriptionUrl && resolved.profiles.length === 1 && index === 0 ? trimmed : undefined
+      !isSubscriptionUrl && resolved.profiles.length === 1 && index === 0 ? trimmed : undefined,
+    { clientDevice }
   )
 
   logEvent('info', 'server-picker', 'profiles appended to existing group', {
@@ -1571,7 +1829,6 @@ export async function addFromInputToGroup(input: string, groupId: string): Promi
     count: newProfiles.length,
     source: isSubscriptionUrl ? 'subscription' : 'uri'
   })
-  void geolocateAll().catch(() => undefined)
   return newProfiles
 }
 
@@ -1646,16 +1903,40 @@ export function registerServerPickerHandlers(): void {
     return await pingServer(host, port)
   })
 
-  handleLogged('servers:add', async (_event, input: string) => {
-    return await addFromInput(input)
+  handleLogged('servers:verify-active-country', async (_event, ip: string) => {
+    const cleanIp = typeof ip === 'string' ? ip.trim() : ''
+    if (!cleanIp) return { ok: false as const, reason: 'missing-ip' }
+    const country = await geolocateIp(cleanIp)
+    if (!country) return { ok: false as const, reason: 'geo-lookup-failed' }
+    const profile = updateActiveProfileCountry(country, cleanIp)
+    if (!profile) return { ok: false as const, reason: 'active-profile-not-found', country }
+    return { ok: true as const, country, profile }
+  })
+
+  handleLogged('servers:verify-country', async (_event, id: string) => {
+    const cleanId = typeof id === 'string' ? id.trim() : ''
+    if (!cleanId) return { ok: false as const, reason: 'missing-id' }
+    const profile = await verifyProfileCountry(cleanId)
+    if (!profile) return { ok: false as const, reason: 'geo-lookup-failed' }
+    return { ok: true as const, country: profile.country ?? '', profile }
+  })
+
+  handleLogged('servers:add', async (_event, input: string, options?: AddProfilesOptions) => {
+    return await addFromInput(input, options)
   })
 
   // Append profiles to a specific group. When `groupId` is null, fall back
   // to the same defaults as `servers:add`: subscription URLs create their
   // own group; single URIs land in "Ручные ключи".
-  handleLogged('servers:add-to-group', async (_event, input: string, groupId: string | null) => {
-    if (groupId) return await addFromInputToGroup(input, groupId)
-    return await addFromInput(input)
+  handleLogged('servers:add-to-group', async (_event, input: string, groupId: string | null, options?: AddProfilesOptions) => {
+    if (groupId) return await addFromInputToGroup(input, groupId, options)
+    return await addFromInput(input, options)
+  })
+
+  handleLogged('servers:set-client-device', async (_event, id: string, clientDevice: ClientDevice) => {
+    const profile = setProfileClientDevice(id, clientDevice)
+    if (!profile) throw new Error('Profile not found')
+    return profile
   })
 
   handleLogged('servers:remove', async (_event, id: string) => {
@@ -1839,5 +2120,9 @@ export const serverPicker = {
   backfillProfileSourceUris,
   clearStaleStoredPings,
   geolocateAll,
+  geolocateIp,
+  updateActiveProfileCountry,
+  verifyProfileCountry,
+  setProfileClientDevice,
   registerHandlers: registerServerPickerHandlers
 }

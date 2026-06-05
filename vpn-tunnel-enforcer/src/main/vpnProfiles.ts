@@ -3,6 +3,7 @@ import { createHash } from 'crypto'
 import { hostname, userInfo } from 'os'
 import { promisify } from 'util'
 import { brotliDecompressSync, gunzipSync, inflateRawSync, inflateSync } from 'zlib'
+import type { ClientDevice } from '../shared/ipc-types'
 
 const execFile = promisify(execFileCb)
 
@@ -12,6 +13,8 @@ export interface VpnProfile {
   name: string
   protocol: VpnProtocol
   outbound: Record<string, any>
+  clientDevice?: ClientDevice
+  clientFingerprint?: string
 }
 
 export interface VpnProfileSummary {
@@ -31,6 +34,7 @@ export interface VpnInputInspection {
 export interface SubscriptionFetchOptions {
   proxyAddr?: string
   proxyType?: 'socks5' | 'http'
+  clientDevice?: ClientDevice
 }
 
 /**
@@ -61,7 +65,98 @@ interface FetchAttempt {
 }
 
 const SUPPORTED_OUTBOUND_TYPES = new Set(['vless', 'trojan', 'shadowsocks', 'vmess', 'hysteria2'])
-const SUBSCRIPTION_USER_AGENTS = ['v2rayN/7.0', 'sing-box/1.13.8', 'v2RayTun/1.0', 'Happ/2.6.0/windows']
+const HAPP_VERSION = '3.22.1'
+const SUBSCRIPTION_USER_AGENTS = ['sing-box/1.13.8', 'v2RayTun/1.0', 'v2rayN/7.0']
+const DEVICE_FINGERPRINTS: Record<ClientDevice, string> = {
+  pc: 'chrome',
+  android: 'android',
+  ios: 'ios',
+  mac: 'safari'
+}
+
+const DEVICE_HEADER_PROFILES: Record<ClientDevice, {
+  os: string
+  osVersion: string
+  model: string
+}> = {
+  pc: { os: 'Windows', osVersion: '11', model: 'Windows PC' },
+  android: { os: 'Android', osVersion: '15', model: 'SM-A556B' },
+  ios: { os: 'iOS', osVersion: '18.3', model: 'iPhone 15 Pro' },
+  mac: { os: 'macOS', osVersion: '15.3', model: 'MacBookPro18,3' }
+}
+
+export function normalizeClientDevice(value: unknown): ClientDevice {
+  return value === 'android' || value === 'ios' || value === 'mac' || value === 'pc' ? value : 'pc'
+}
+
+export function clientFingerprintForDevice(device: ClientDevice): string {
+  return DEVICE_FINGERPRINTS[normalizeClientDevice(device)]
+}
+
+function buildMobileSubscriptionHwid(device: ClientDevice): string {
+  let username = ''
+  try {
+    username = userInfo().username || ''
+  } catch {
+    username = process.env.USERNAME || process.env.USER || ''
+  }
+  const seed = [
+    'happ-compatible-mobile-hwid',
+    normalizeClientDevice(device),
+    hostname(),
+    username,
+    process.env.USERDOMAIN || '',
+    process.arch,
+    process.platform
+  ].join('|')
+  return createHash('sha256').update(seed).digest('hex').slice(0, 16)
+}
+
+function buildHappSubscriptionHwid(device: ClientDevice): string {
+  return buildMobileSubscriptionHwid(device)
+}
+
+export function applyClientDeviceToOutbound(outbound: Record<string, any>, device: ClientDevice): Record<string, any> {
+  const result = JSON.parse(JSON.stringify(outbound || {}))
+  const tls = result.tls && typeof result.tls === 'object' ? result.tls as Record<string, any> : null
+  if (!tls || tls.enabled === false) return result
+  tls.utls = {
+    ...(tls.utls && typeof tls.utls === 'object' ? tls.utls : {}),
+    enabled: true,
+    fingerprint: clientFingerprintForDevice(device)
+  }
+  return result
+}
+
+export function applyClientDeviceToProfile(profile: VpnProfile, device: ClientDevice): VpnProfile {
+  const clientDevice = normalizeClientDevice(device)
+  const outbound = applyClientDeviceToOutbound(profile.outbound, clientDevice)
+  return {
+    ...profile,
+    outbound,
+    clientDevice,
+    clientFingerprint: outbound.tls && typeof outbound.tls === 'object'
+      ? clientFingerprintForDevice(clientDevice)
+      : undefined
+  }
+}
+
+export function getSubscriptionUserAgents(device: ClientDevice = 'pc'): string[] {
+  const clientDevice = normalizeClientDevice(device)
+  if (clientDevice === 'pc') {
+    return [`Happ/${HAPP_VERSION}/Windows/${buildHappSubscriptionHwid('pc')}`, ...SUBSCRIPTION_USER_AGENTS]
+  }
+  if (clientDevice === 'android') {
+    return [`Happ/${HAPP_VERSION}/Android/${buildHappSubscriptionHwid('android')}`, 'v2RayTun/1.0/android', ...SUBSCRIPTION_USER_AGENTS]
+  }
+  if (clientDevice === 'ios') {
+    return [`Happ/${HAPP_VERSION}/iOS/${buildHappSubscriptionHwid('ios')}`, 'v2RayTun/1.0/ios', ...SUBSCRIPTION_USER_AGENTS]
+  }
+  if (clientDevice === 'mac') {
+    return [`Happ/${HAPP_VERSION}/macOS/${buildHappSubscriptionHwid('mac')}`, 'sing-box/1.13.8', ...SUBSCRIPTION_USER_AGENTS]
+  }
+  return SUBSCRIPTION_USER_AGENTS
+}
 const SECRET_KEYS = new Set([
   'uuid',
   'password',
@@ -1220,9 +1315,13 @@ function proxyUrl(addr: string, type: 'socks5' | 'http'): string {
   return type === 'http' ? `http://${addr}` : `socks5h://${addr}`
 }
 
-function buildSubscriptionHwid(): string {
+export function buildSubscriptionHwid(device: ClientDevice = 'pc'): string {
   const override = (process.env.VPNTE_SUBSCRIPTION_HWID || '').trim()
   if (override) return override
+  const clientDevice = normalizeClientDevice(device)
+  if (clientDevice === 'pc' || clientDevice === 'android' || clientDevice === 'ios' || clientDevice === 'mac') {
+    return buildHappSubscriptionHwid(clientDevice)
+  }
 
   let username = ''
   try {
@@ -1232,6 +1331,7 @@ function buildSubscriptionHwid(): string {
   }
   const seed = [
     'vpn-tunnel-enforcer',
+    clientDevice,
     hostname(),
     username,
     process.env.USERDOMAIN || '',
@@ -1241,7 +1341,7 @@ function buildSubscriptionHwid(): string {
   return `vpnte-${createHash('sha256').update(seed).digest('hex').slice(0, 32)}`
 }
 
-function subscriptionCommonCurlArgs(): string[] {
+function subscriptionCommonCurlArgs(device: ClientDevice = 'pc'): string[] {
   // X-HWID is what every modern Marzban/Marzneshin-style panel uses to bind a
   // subscription to a specific device. Sosa Connect (sub.sosa.ink) and similar
   // panels return an EMPTY 200 OK when the header is missing — that's the
@@ -1254,7 +1354,16 @@ function subscriptionCommonCurlArgs(): string[] {
   //
   // For panels that explicitly reject unknown HWIDs (rare), buildFetchAttempts
   // will additionally fall back to no-header attempts.
-  return ['-H', `X-HWID: ${buildSubscriptionHwid()}`]
+  const clientDevice = normalizeClientDevice(device)
+  const hwid = buildSubscriptionHwid(clientDevice)
+  const args = ['-H', `x-hwid: ${hwid}`]
+  const profile = DEVICE_HEADER_PROFILES[clientDevice]
+  args.push(
+    '-H', `x-device-os: ${profile.os}`,
+    '-H', `x-ver-os: ${profile.osVersion}`,
+    '-H', `x-device-model: ${profile.model}`
+  )
+  return args
 }
 
 // Same fetch args but without X-HWID, used as a secondary attempt for panels
@@ -1264,8 +1373,9 @@ function subscriptionFallbackCurlArgs(): string[] {
 }
 
 function buildFetchAttempts(options: SubscriptionFetchOptions = {}): FetchAttempt[] {
+  const clientDevice = normalizeClientDevice(options.clientDevice)
   const headerSets: Array<{ args: string[]; suffix: string }> = [
-    { args: subscriptionCommonCurlArgs(), suffix: '' },
+    { args: subscriptionCommonCurlArgs(clientDevice), suffix: '' },
     { args: subscriptionFallbackCurlArgs(), suffix: ' [no-hwid]' }
   ]
   const proxyCandidates: Array<{ addr: string; type: 'socks5' | 'http'; label: string }> = []
@@ -1286,7 +1396,7 @@ function buildFetchAttempts(options: SubscriptionFetchOptions = {}): FetchAttemp
   // Try with HWID first (Marzban/Sosa-style panels require it). Only if every
   // HWID-bearing attempt produces an empty body do we fall back to bare attempts.
   for (const headerSet of headerSets) {
-    for (const ua of SUBSCRIPTION_USER_AGENTS) {
+    for (const ua of getSubscriptionUserAgents(clientDevice)) {
       attempts.push({
         label: `напрямую (${ua})${headerSet.suffix}`,
         args: ['--noproxy', '*', '--compressed', '-A', ua, ...headerSet.args]
@@ -1357,7 +1467,7 @@ async function resolveHostWithDoh(host: string): Promise<string[]> {
   return ips
 }
 
-async function buildDnsBypassAttempts(url: string): Promise<FetchAttempt[]> {
+async function buildDnsBypassAttempts(url: string, options: SubscriptionFetchOptions = {}): Promise<FetchAttempt[]> {
   let parsed: URL
   try {
     parsed = new URL(url)
@@ -1371,13 +1481,14 @@ async function buildDnsBypassAttempts(url: string): Promise<FetchAttempt[]> {
   const ips = (await resolveHostWithDoh(host)).slice(0, 3)
   if (!ips.length) return []
   const port = parsed.port || (parsed.protocol === 'https:' ? '443' : '80')
+  const clientDevice = normalizeClientDevice(options.clientDevice)
   const headerSets: Array<{ args: string[]; suffix: string }> = [
-    { args: subscriptionCommonCurlArgs(), suffix: '' },
+    { args: subscriptionCommonCurlArgs(clientDevice), suffix: '' },
     { args: subscriptionFallbackCurlArgs(), suffix: ' [no-hwid]' }
   ]
   const attempts: FetchAttempt[] = []
   for (const headerSet of headerSets) {
-    for (const ua of SUBSCRIPTION_USER_AGENTS) {
+    for (const ua of getSubscriptionUserAgents(clientDevice)) {
       for (const ip of ips) {
         attempts.push({
           label: `напрямую через DoH ${ip} (${ua})${headerSet.suffix}`,
@@ -1607,7 +1718,7 @@ async function fetchAndParseSubscription(url: string, options?: SubscriptionFetc
   const directResult = await runAttempts(buildFetchAttempts(options))
   if (directResult) return directResult
 
-  const dnsBypassAttempts = await buildDnsBypassAttempts(url)
+  const dnsBypassAttempts = await buildDnsBypassAttempts(url, options)
   if (dnsBypassAttempts.length) {
     const dnsBypassResult = await runAttempts(dnsBypassAttempts)
     if (dnsBypassResult) return dnsBypassResult

@@ -17,6 +17,26 @@
     "killSwitchStatus": "Kill-Switch",
     "speedTestLast": "Last speed test"
   },
+  "dashboardWidgets": {
+    "noSpeedTests": "No tests yet",
+    "scheduleConnect": "Connect",
+    "scheduleDisconnect": "Disconnect",
+    "scheduleAt": "{{action}} at {{time}} ({{until}})",
+    "scheduleAction": "Action",
+    "scheduleTime": "Time",
+    "scheduleIn": "In",
+    "scheduleMode": "Mode",
+    "rotationDisabled": "Rotation disabled",
+    "unknownProfile": "Unknown profile",
+    "interval": "Interval",
+    "minutesShort": "min",
+    "killSwitchLevel": "Level",
+    "killSwitchStatus": "Status",
+    "killSwitchBlocking": "Blocking",
+    "killSwitchDisabled": "Disabled",
+    "killSwitchStandby": "Standby",
+    "killSwitchBlockingDetail": "Traffic is being blocked by kill-switch rules"
+  },
   "sidebar": {
     "dashboard": "Dashboard",
     "apps": "Applications",

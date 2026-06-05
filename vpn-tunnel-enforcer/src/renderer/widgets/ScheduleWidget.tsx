@@ -1,6 +1,6 @@
 /**
  * ScheduleWidget — Shows next scheduled event (time, profile, action)
- * or "No schedules" placeholder. Will read from IPC later.
+ * or "No schedules" placeholder.
  */
 
 import React, { useEffect, useState } from 'react'
@@ -34,17 +34,16 @@ export const ScheduleWidget: React.FC<ScheduleWidgetProps> = ({ size }) => {
   const { t } = useTranslation()
   const [nextEvent, setNextEvent] = useState<NextEvent | null>(null)
 
-  // Attempt to fetch next scheduled event from IPC
   useEffect(() => {
     const fetchNext = async () => {
       try {
         const api = (window as any).electronAPI
-        if (api?.getNextScheduleEvent) {
-          const event = await api.getNextScheduleEvent()
+        if (api?.schedulerNextEvent) {
+          const event = await api.schedulerNextEvent()
           setNextEvent(event)
         }
       } catch {
-        // IPC not yet wired — show placeholder
+        // Keep the widget quiet; the full Schedule page surfaces errors.
       }
     }
     fetchNext()
@@ -78,7 +77,9 @@ export const ScheduleWidget: React.FC<ScheduleWidgetProps> = ({ size }) => {
       <Square size={14} className="text-red-500" />
     )
 
-  const eventLabel = nextEvent.type === 'start' ? 'Connect' : 'Disconnect'
+  const eventLabel = nextEvent.type === 'start'
+    ? t('dashboardWidgets.scheduleConnect')
+    : t('dashboardWidgets.scheduleDisconnect')
   const timeStr = new Date(nextEvent.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 
   if (size === 'compact') {
@@ -90,7 +91,11 @@ export const ScheduleWidget: React.FC<ScheduleWidgetProps> = ({ size }) => {
             {nextEvent.schedule.name}
           </p>
           <p className="text-xs text-[var(--color-text-secondary)]">
-            {eventLabel} at {timeStr} ({formatTimeUntil(nextEvent.at)})
+            {t('dashboardWidgets.scheduleAt', {
+              action: eventLabel,
+              time: timeStr,
+              until: formatTimeUntil(nextEvent.at)
+            })}
           </p>
         </div>
         {eventIcon}
@@ -116,19 +121,19 @@ export const ScheduleWidget: React.FC<ScheduleWidgetProps> = ({ size }) => {
         </div>
         <div className="grid grid-cols-2 gap-2 text-xs text-[var(--color-text-secondary)]">
           <div>
-            <p className="opacity-70">Action</p>
+            <p className="opacity-70">{t('dashboardWidgets.scheduleAction')}</p>
             <p className="text-[var(--color-text)]">{eventLabel}</p>
           </div>
           <div>
-            <p className="opacity-70">Time</p>
+            <p className="opacity-70">{t('dashboardWidgets.scheduleTime')}</p>
             <p className="text-[var(--color-text)] tabular-nums">{timeStr}</p>
           </div>
           <div>
-            <p className="opacity-70">In</p>
+            <p className="opacity-70">{t('dashboardWidgets.scheduleIn')}</p>
             <p className="text-[var(--color-text)] tabular-nums">{formatTimeUntil(nextEvent.at)}</p>
           </div>
           <div>
-            <p className="opacity-70">Mode</p>
+            <p className="opacity-70">{t('dashboardWidgets.scheduleMode')}</p>
             <p className="text-[var(--color-text)]">{nextEvent.schedule.mode}</p>
           </div>
         </div>

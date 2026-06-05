@@ -35,7 +35,7 @@ export function DiagnosticsCard() {
     try {
       const result = await window.electronAPI.runLeakSelfTest()
       setLeakResult(result)
-      const level = result.physicalAdapterReached || result.publicIpMismatch ? 'error' : 'info'
+      const level = result.physicalAdapterReached || result.publicIpMismatch || result.dnsLeakDetected ? 'error' : 'info'
       addLog(level, `Результат проверки: ${result.summary}`)
     } catch (err: any) {
       addLog('error', `Не удалось запустить проверку утечки: ${err.message ?? err}`)
@@ -137,7 +137,7 @@ export function DiagnosticsCard() {
 }
 
 function LeakResultPanel({ result }: { result: LeakSelfTestResultClient }) {
-  const isLeak = result.physicalAdapterReached || result.publicIpMismatch
+  const isLeak = result.physicalAdapterReached || result.publicIpMismatch || result.dnsLeakDetected
   const Icon = isLeak ? ShieldAlert : CheckCircle2
   // Tailwind cannot resolve dynamic class names like `bg-${color}/10` because
   // it purges unused classes at build time, so we hard-code the two variants.

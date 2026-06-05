@@ -242,6 +242,8 @@ export interface LeakSelfTestResultClient {
   physicalAdapterReached: boolean
   publicIpMismatch: boolean
   defaultRoutePublicIp: string | null
+  dnsLeakDetected?: boolean
+  dnsLeakDetail?: string
   perAdapter: Array<{
     alias: string
     ipv4: string | null

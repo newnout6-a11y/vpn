@@ -17,6 +17,26 @@
     "killSwitchStatus": "Kill-Switch",
     "speedTestLast": "Последний тест скорости"
   },
+  "dashboardWidgets": {
+    "noSpeedTests": "Тесты ещё не запускались",
+    "scheduleConnect": "Подключить",
+    "scheduleDisconnect": "Отключить",
+    "scheduleAt": "{{action}} в {{time}} (через {{until}})",
+    "scheduleAction": "Действие",
+    "scheduleTime": "Время",
+    "scheduleIn": "Через",
+    "scheduleMode": "Режим",
+    "rotationDisabled": "Ротация выключена",
+    "unknownProfile": "Неизвестный профиль",
+    "interval": "Интервал",
+    "minutesShort": "мин",
+    "killSwitchLevel": "Уровень",
+    "killSwitchStatus": "Статус",
+    "killSwitchBlocking": "Блокирует",
+    "killSwitchDisabled": "Выключен",
+    "killSwitchStandby": "Ожидает",
+    "killSwitchBlockingDetail": "Трафик заблокирован правилами kill-switch"
+  },
   "sidebar": {
     "dashboard": "Панель",
     "apps": "Приложения",

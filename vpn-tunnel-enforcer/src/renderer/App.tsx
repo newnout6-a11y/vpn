@@ -15,7 +15,7 @@ import { Settings } from './pages/Settings'
 import { Logs } from './pages/Logs'
 import { Maintenance } from './pages/Maintenance'
 import type { AppSettings, LeakCheckResult, TrafficStats } from './store'
-import { NAV_EVENT, type AppPage } from './nav'
+import { emitServerChanged, NAV_EVENT, type AppPage } from './nav'
 
 declare global {
   interface Window {
@@ -81,7 +81,17 @@ declare global {
       serversGetActive: () => Promise<{ profile: import('../shared/ipc-types').ServerProfile | null; activeId: string | null }>
       serversPingAll: () => Promise<import('../shared/ipc-types').ServerProfile[]>
       serversPingOne: (host: string, port: number) => Promise<number | null>
-      serversAdd: (input: string) => Promise<import('../shared/ipc-types').ServerProfile[]>
+      serversVerifyActiveCountry: (ip: string) => Promise<
+        | { ok: true; country: string; profile: import('../shared/ipc-types').ServerProfile }
+        | { ok: false; reason: string; country?: string }
+      >
+      serversVerifyCountry: (id: string) => Promise<
+        | { ok: true; country: string; profile: import('../shared/ipc-types').ServerProfile }
+        | { ok: false; reason: string; country?: string }
+      >
+      serversAdd: (input: string, options?: { clientDevice?: import('../shared/ipc-types').ClientDevice }) => Promise<import('../shared/ipc-types').ServerProfile[]>
+      serversAddToGroup?: (input: string, groupId: string | null, options?: { clientDevice?: import('../shared/ipc-types').ClientDevice }) => Promise<import('../shared/ipc-types').ServerProfile[]>
+      serversSetClientDevice: (id: string, clientDevice: import('../shared/ipc-types').ClientDevice) => Promise<import('../shared/ipc-types').ServerProfile>
       serversRemove: (id: string) => Promise<void>
       serversExportKey: (id: string) => Promise<
         | { ok: true; uri: string; name: string; protocol: string }
@@ -200,6 +210,8 @@ export interface LeakSelfTestResult {
   defaultRoutePublicIp: string | null
   perAdapter: LeakSelfTestAdapter[]
   summary: string
+  dnsLeakDetected?: boolean
+  dnsLeakDetail?: string
 }
 
 type Page = SidebarPage | 'maintenance'
@@ -214,6 +226,18 @@ function proxyFromOverride(settings: AppSettings) {
   const port = parseInt(raw.slice(separator + 1), 10)
   if (!host || !Number.isInteger(port) || port <= 0 || port > 65535) return null
   return { host, port, type: settings.proxyType, verified: true, publicIpViaProxy: null }
+}
+
+async function verifyActiveServerCountry(ip: string | null | undefined): Promise<void> {
+  if (!ip) return
+  try {
+    const result = await window.electronAPI.serversVerifyActiveCountry(ip)
+    if (result.ok) {
+      emitServerChanged()
+    }
+  } catch {
+    // Best-effort UI metadata only. Never disturb connection state.
+  }
 }
 
 export default function App() {
@@ -248,6 +272,7 @@ export default function App() {
         addLog('error', `ОБНАРУЖЕНА УТЕЧКА IP! Текущий: ${ip}`)
       } else {
         addLog('info', `Публичный IP: ${ip}`)
+        void verifyActiveServerCountry(ip)
       }
     })
 
@@ -266,6 +291,17 @@ export default function App() {
       const isCompetingTun = status.startsWith('competing-tun:')
       const tunUp = status === 'running' || status === 'proxy-down' || isCompetingTun
       const isStopping = status === 'stopping'
+      const busy = store.connectionBusy
+
+      // IPC status events can arrive slightly out of order around start/stop:
+      // e.g. a delayed "running" from the previous health poll while the user
+      // has already clicked Stop. Keep transition states monotonic so the UI
+      // does not flicker from "stopping" back to "connected".
+      if ((busy === 'disconnecting' && (status === 'running' || status === 'proxy-down' || isCompetingTun)) ||
+          (busy === 'connecting' && status === 'stopped')) {
+        addLog('warn', `Ignored stale TUN status during ${busy}: ${status}`)
+        return
+      }
 
       // Flip the ref BEFORE we run any callbacks-that-flush so the leak/ip
       // callbacks above can read the latest value.
@@ -453,6 +489,7 @@ export default function App() {
         const ipInfo = await window.electronAPI.getPublicIp()
         store.setPublicIp(ipInfo.ip, ipInfo.isLeak)
         if (ipInfo.ip) addLog('info', `Текущий публичный IP: ${ipInfo.ip}`)
+        if (ipInfo.ip && !ipInfo.isLeak) void verifyActiveServerCountry(ipInfo.ip)
       } catch (err: any) {
         addLog('error', `Ошибка проверки IP: ${err.message}`)
       }

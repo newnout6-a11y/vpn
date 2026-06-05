@@ -266,6 +266,25 @@ describe('generateSingboxConfig stealth mode', () => {
       expect(['chrome', 'firefox', 'edge']).toContain(out.tls.utls.fingerprint)
     }
   })
+
+  it('does not overwrite explicit client-device fingerprints in stealth mode', () => {
+    for (const [clientDevice, fingerprint] of [
+      ['pc', 'chrome'],
+      ['android', 'android'],
+      ['ios', 'ios'],
+      ['mac', 'safari']
+    ] as const) {
+      const cfg = gen(
+        { outbound: { ...plainTlsOutbound }, clientDevice },
+        'socks5',
+        [],
+        { stealthMode: true }
+      )
+      const out = cfg.outbounds.find((o) => o.tag === 'proxy-out')!
+      expect(out.tls.utls.fingerprint).toBe(fingerprint)
+      expect(out.tls.record_fragment).toBe(true)
+    }
+  })
 })
 
 // ─── UDP blocking ─────────────────────────────────────────────────────────────
