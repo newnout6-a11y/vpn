@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest'
 import {
   applyClientDeviceToOutbound,
   buildSubscriptionHwid,
-  getSubscriptionUserAgents
+  getSubscriptionUserAgents,
+  normalizeSubscriptionRedirectLocation
 } from './vpnProfiles'
 
 describe('client device identity', () => {
@@ -35,5 +36,15 @@ describe('client device identity', () => {
 
     const plain = { type: 'shadowsocks', server: '1.2.3.4', server_port: 8388 }
     expect(applyClientDeviceToOutbound(plain, 'android')).toEqual(plain)
+  })
+
+  it('normalizes subscription redirect locations that curl -L cannot follow', () => {
+    const base = 'https://sub.example.com/a/b?token=1'
+
+    expect(normalizeSubscriptionRedirectLocation('URL: https://panel.example.com/sub', base)).toBe('https://panel.example.com/sub')
+    expect(normalizeSubscriptionRedirectLocation('URL%3A%20https%3A%2F%2Fpanel.example.com%2Fsub', base)).toBe('https://panel.example.com/sub')
+    expect(normalizeSubscriptionRedirectLocation('happ%3A%2F%2Fadd%2Fhttps%253A%252F%252Fsub.example.com%252Freal', base)).toBe('happ://add/https%3A%2F%2Fsub.example.com%2Freal')
+    expect(normalizeSubscriptionRedirectLocation('//cdn.example.com/sub', base)).toBe('https://cdn.example.com/sub')
+    expect(normalizeSubscriptionRedirectLocation('../real-sub', base)).toBe('https://sub.example.com/real-sub')
   })
 })

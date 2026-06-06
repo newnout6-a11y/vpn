@@ -64,6 +64,11 @@ interface FetchAttempt {
   args: string[]
 }
 
+interface SubscriptionHttpResponse {
+  headers: Record<string, string>
+  body: string
+}
+
 const SUPPORTED_OUTBOUND_TYPES = new Set(['vless', 'trojan', 'shadowsocks', 'vmess', 'hysteria2'])
 const HAPP_VERSION = '3.22.1'
 const SUBSCRIPTION_USER_AGENTS = ['sing-box/1.13.8', 'v2RayTun/1.0', 'v2rayN/7.0']
@@ -1614,6 +1619,100 @@ function parseHttpHeaders(text: string): Record<string, string> {
   return headers
 }
 
+function parseHttpStatusCode(text: string): number | null {
+  const firstLine = text.replace(/\r/g, '').split('\n').find(Boolean)
+  const match = firstLine?.match(/^HTTP\/[0-9.]+\s+(\d{3})\b/i)
+  if (!match) return null
+  const code = Number(match[1])
+  return Number.isInteger(code) ? code : null
+}
+
+export function normalizeSubscriptionRedirectLocation(location: string, baseUrl: string): string | null {
+  let value = location.trim()
+  if (!value) return null
+  value = value.replace(/^<(.+)>$/, '$1').replace(/^["'](.+)["']$/, '$1').trim()
+  value = value.replace(/^url\s*[:=]\s*/i, '').trim()
+
+  const decoded = safeDecode(value).trim().replace(/^url\s*[:=]\s*/i, '').trim()
+  if (/^(?:https?|happ):\/\//i.test(decoded)) value = decoded
+
+  if (/^\/\//.test(value)) {
+    try {
+      return `${new URL(baseUrl).protocol}${value}`
+    } catch {
+      return value
+    }
+  }
+
+  if (/^https?:\/\//i.test(value) || /^happ:\/\//i.test(value)) return value
+
+  try {
+    return new URL(value, baseUrl).toString()
+  } catch {
+    return value
+  }
+}
+
+async function fetchSubscriptionHttpResponse(url: string, attempt: FetchAttempt): Promise<SubscriptionHttpResponse> {
+  let currentUrl = url
+  const visited = new Set<string>()
+
+  for (let hop = 0; hop < 6; hop++) {
+    if (visited.has(currentUrl)) throw new Error('redirect loop while fetching subscription')
+    visited.add(currentUrl)
+
+    const { stdout } = await execFile('curl.exe', [
+      '-sS',
+      '--fail',
+      // We follow redirects ourselves because some panels redirect to
+      // happ://add/... or malformed "URL: https://..." targets that make
+      // curl -L abort before we can inspect Location.
+      '-D',
+      '-',
+      '--max-time',
+      '25',
+      ...attempt.args,
+      currentUrl
+    ], {
+      windowsHide: true,
+      timeout: 30000,
+      encoding: 'buffer',
+      maxBuffer: 1024 * 1024 * 16
+    })
+
+    const raw = stdout as Buffer
+    const splitIdx = lastIndexOfHeaderTerminator(raw)
+    const headerBytes = splitIdx >= 0 ? raw.subarray(0, splitIdx) : Buffer.alloc(0)
+    const bodyBytes = splitIdx >= 0 ? raw.subarray(splitIdx + 4) : raw
+    const headerText = headerBytes.toString('utf8')
+    const headers = parseHttpHeaders(headerText)
+    const statusCode = parseHttpStatusCode(headerText)
+
+    if (statusCode !== null && statusCode >= 300 && statusCode < 400 && headers.location) {
+      const next = normalizeSubscriptionRedirectLocation(headers.location, currentUrl)
+      if (!next) throw new Error('redirect without a usable Location header')
+
+      const unwrapped = unwrapHappAddLink(next)
+      const effectiveNext = unwrapped ?? next
+      if (/^https?:\/\//i.test(effectiveNext)) {
+        currentUrl = effectiveNext
+        continue
+      }
+      if (/^(?:vless|trojan|ss|vmess|hysteria2|hy2):\/\//i.test(effectiveNext)) {
+        return { headers, body: effectiveNext }
+      }
+
+      const body = decodeSubscriptionBody(bodyBytes)
+      if (body.trim()) return { headers, body }
+      throw new Error(`unsupported subscription redirect target: ${redactSensitiveText(effectiveNext).slice(0, 120)}`)
+    }
+
+    return { headers, body: decodeSubscriptionBody(bodyBytes) }
+  }
+
+  throw new Error('too many redirects while fetching subscription')
+}
+
 function parseSubscriptionUserInfo(headers: Record<string, string>): SubscriptionUserInfo | undefined {
   const result: SubscriptionUserInfo = {}
   let touched = false
@@ -1678,33 +1777,9 @@ async function fetchAndParseSubscription(url: string, options?: SubscriptionFetc
   const runAttempts = async (attempts: FetchAttempt[]) => {
     for (const attempt of attempts) {
       try {
-        const { stdout } = await execFile('curl.exe', [
-          '-L',
-          '-sS',
-          '--fail',
-          // Dump response headers to stdout alongside the body. With -L, curl
-          // emits a header block per redirect hop separated by an empty CRLF
-          // line. We keep the LAST block — that's the final response — and
-          // discard the rest. The body always follows the last \r\n\r\n.
-          '-D',
-          '-',
-          '--max-time',
-          '25',
-          ...attempt.args,
-          url
-        ], {
-          windowsHide: true,
-          timeout: 30000,
-          encoding: 'buffer',
-          maxBuffer: 1024 * 1024 * 16
-        })
-        const raw = stdout as Buffer
-        const splitIdx = lastIndexOfHeaderTerminator(raw)
-        const headerBytes = splitIdx >= 0 ? raw.subarray(0, splitIdx) : Buffer.alloc(0)
-        const bodyBytes = splitIdx >= 0 ? raw.subarray(splitIdx + 4) : raw
-        const headers = parseHttpHeaders(headerBytes.toString('utf8'))
-        const userInfo = parseSubscriptionUserInfo(headers)
-        const body = decodeSubscriptionBody(bodyBytes)
+        const response = await fetchSubscriptionHttpResponse(url, attempt)
+        const userInfo = parseSubscriptionUserInfo(response.headers)
+        const body = response.body
         const profiles = parseVpnProfiles(body)
         if (profiles.length) return { profiles, source: attempt.label, userInfo }
         errors.push(`${attempt.label}: скачано (${describeSubscriptionBody(body)}), но VLESS/Trojan/SS/VMess/Hysteria2 не найдены`)
@@ -1728,7 +1803,6 @@ async function fetchAndParseSubscription(url: string, options?: SubscriptionFetc
 
   throw new Error(`Не удалось скачать или распознать subscription. ${summarizeSubscriptionErrors(errors)}`)
 }
-
 /**
  * Unwraps a Happ deep-link to extract a usable subscription URL or VPN-link.
  *

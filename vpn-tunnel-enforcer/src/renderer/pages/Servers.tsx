@@ -932,9 +932,10 @@ export function Servers() {
 
       {/* Add card */}
       <MacCard>
-        <div className="flex flex-col md:flex-row md:items-end gap-3">
-          <div className="flex-1 min-w-0">
+        <div className="grid grid-cols-1 gap-3 xl:grid-cols-[minmax(360px,1fr)_minmax(220px,0.55fr)_9rem_auto] xl:items-end">
+          <div className="min-w-0">
             <MacInput
+              label={t('servers.add.keyLabel', 'Ключ / подписка')}
               placeholder={t('servers.addPlaceholder')}
               value={addInput}
               onChange={(e) => {
@@ -947,7 +948,7 @@ export function Servers() {
               }}
             />
           </div>
-          <div className="md:w-72">
+          <div className="min-w-0">
             <MacSelect
               label={t('servers.add.selectGroup')}
               options={groupOptions}
@@ -956,7 +957,7 @@ export function Servers() {
               disabled={!groupsAvailable && groupOptions.length === 1}
             />
           </div>
-          <div className="md:w-36">
+          <div className="min-w-0">
             <MacSelect
               label="Device"
               options={CLIENT_DEVICE_OPTIONS}
@@ -964,7 +965,12 @@ export function Servers() {
               onChange={(v) => setAddClientDevice((v === 'android' || v === 'ios' || v === 'mac') ? v : 'pc')}
             />
           </div>
-          <MacButton onClick={handleAdd} loading={adding} disabled={!addInput.trim()}>
+          <MacButton
+            className="w-full xl:w-auto xl:min-w-40 whitespace-nowrap"
+            onClick={handleAdd}
+            loading={adding}
+            disabled={!addInput.trim()}
+          >
             <Plus className="w-4 h-4 mr-1" />
             {t('servers.addServer')}
           </MacButton>
