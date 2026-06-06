@@ -3,7 +3,8 @@ import {
   applyClientDeviceToOutbound,
   buildSubscriptionHwid,
   getSubscriptionUserAgents,
-  normalizeSubscriptionRedirectLocation
+  normalizeSubscriptionRedirectLocation,
+  resolveVpnProfiles
 } from './vpnProfiles'
 
 describe('client device identity', () => {
@@ -44,7 +45,13 @@ describe('client device identity', () => {
     expect(normalizeSubscriptionRedirectLocation('URL: https://panel.example.com/sub', base)).toBe('https://panel.example.com/sub')
     expect(normalizeSubscriptionRedirectLocation('URL%3A%20https%3A%2F%2Fpanel.example.com%2Fsub', base)).toBe('https://panel.example.com/sub')
     expect(normalizeSubscriptionRedirectLocation('happ%3A%2F%2Fadd%2Fhttps%253A%252F%252Fsub.example.com%252Freal', base)).toBe('happ://add/https%3A%2F%2Fsub.example.com%2Freal')
+    expect(normalizeSubscriptionRedirectLocation('mantaray%3A%2F%2Fcrypt%2Fsecret-payload', base)).toBe('mantaray://crypt/secret-payload')
     expect(normalizeSubscriptionRedirectLocation('//cdn.example.com/sub', base)).toBe('https://cdn.example.com/sub')
     expect(normalizeSubscriptionRedirectLocation('../real-sub', base)).toBe('https://sub.example.com/real-sub')
+  })
+
+  it('rejects encrypted MantaRay links without leaking the crypt payload', async () => {
+    await expect(resolveVpnProfiles('mantaray://crypt/super-secret-payload')).rejects.toThrow(/зашифрованная подписка MantaRay/i)
+    await expect(resolveVpnProfiles('mantaray://crypt/super-secret-payload')).rejects.not.toThrow(/super-secret-payload/)
   })
 })

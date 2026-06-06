@@ -1634,7 +1634,7 @@ export function normalizeSubscriptionRedirectLocation(location: string, baseUrl:
   value = value.replace(/^url\s*[:=]\s*/i, '').trim()
 
   const decoded = safeDecode(value).trim().replace(/^url\s*[:=]\s*/i, '').trim()
-  if (/^(?:https?|happ):\/\//i.test(decoded)) value = decoded
+  if (/^(?:https?|happ|mantaray):\/\//i.test(decoded)) value = decoded
 
   if (/^\/\//.test(value)) {
     try {
@@ -1644,7 +1644,7 @@ export function normalizeSubscriptionRedirectLocation(location: string, baseUrl:
     }
   }
 
-  if (/^https?:\/\//i.test(value) || /^happ:\/\//i.test(value)) return value
+  if (/^https?:\/\//i.test(value) || /^happ:\/\//i.test(value) || /^mantaray:\/\//i.test(value)) return value
 
   try {
     return new URL(value, baseUrl).toString()
@@ -1692,7 +1692,7 @@ async function fetchSubscriptionHttpResponse(url: string, attempt: FetchAttempt)
       const next = normalizeSubscriptionRedirectLocation(headers.location, currentUrl)
       if (!next) throw new Error('redirect without a usable Location header')
 
-      const unwrapped = unwrapHappAddLink(next)
+      const unwrapped = unwrapClientDeepLink(next)
       const effectiveNext = unwrapped ?? next
       if (/^https?:\/\//i.test(effectiveNext)) {
         currentUrl = effectiveNext
@@ -1874,13 +1874,54 @@ function unwrapHappAddLink(input: string): string | null {
   )
 }
 
+function unwrapMantarayLink(input: string): string | null {
+  const match = input.match(/^mantaray:\/\/([^/]+)(?:\/(.*))?$/i)
+  if (!match) return null
+  const host = match[1].toLowerCase()
+  const rest = match[2] ?? ''
+
+  if (host === 'crypt' || host === 'crypto' || host === 'crypt3' || host === 'crypt4' || host === 'crypt5') {
+    throw new Error(
+      'Это зашифрованная подписка MantaRay (mantaray://' + host + '/...). VPNTE не может расшифровать ее без ключей приложения MantaRay. ' +
+      'Попросите у провайдера обычный subscription URL (https://...) или прямую ссылку ключа (vless://, trojan://, ss://, vmess://, hysteria2://).'
+    )
+  }
+
+  if (host === 'add' || host === 'import' || host === 'sub' || host === 'subscription') {
+    const candidates: string[] = []
+    const decoded = safeDecode(rest).trim()
+    if (decoded) candidates.push(decoded)
+    if (/^https?:\/\//i.test(rest)) candidates.push(rest)
+    const base64 = decodeBase64Text(rest)
+    if (base64) candidates.push(base64.trim())
+
+    for (const candidate of candidates) {
+      if (/^https?:\/\//i.test(candidate)) return candidate
+      if (/^(?:vless|trojan|ss|vmess|hysteria2|hy2):\/\//i.test(candidate)) return candidate
+      if (/(?:vless|trojan|ss|vmess|hysteria2|hy2):\/\//i.test(candidate)) return candidate
+    }
+
+    throw new Error(
+      'Не удалось разобрать ссылку mantaray://' + host + '/... — внутри ожидается обычный subscription URL или ключ протокола.'
+    )
+  }
+
+  throw new Error(
+    'Неизвестная схема mantaray://' + host + '/. Вставьте обычный subscription URL (https://...) или ключ протокола.'
+  )
+}
+
+function unwrapClientDeepLink(input: string): string | null {
+  return unwrapHappAddLink(input) ?? unwrapMantarayLink(input)
+}
+
 export async function resolveVpnProfiles(input: string, options?: SubscriptionFetchOptions): Promise<{ profiles: VpnProfile[]; source: string; fetched: boolean; userInfo?: SubscriptionUserInfo }> {
   const trimmed = input.trim()
   if (!trimmed) throw new Error('Вставьте VPN-ссылку, subscription URL или sing-box outbound JSON')
 
   // Auto-unwrap `happ://add/<encoded-url>` etc. before hitting the regular pipeline.
   // This is the format VPN providers (Sosa, Marzban, …) put into their share buttons.
-  const unwrapped = unwrapHappAddLink(trimmed)
+  const unwrapped = unwrapClientDeepLink(trimmed)
   const effective = unwrapped ?? trimmed
 
   if (/^https?:\/\//i.test(effective)) {
