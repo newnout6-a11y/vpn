@@ -53,6 +53,11 @@ extraResources:
     to: geoip-ru.srs
   - from: resources/geosite-category-gov-ru.srs
     to: geosite-category-gov-ru.srs
+extraFiles:
+  - from: resources/vpnte-proxy.ps1
+    to: vpnte-proxy.ps1
+  - from: resources/vpnte-proxy.cmd
+    to: vpnte-proxy.cmd
 files:
   - out/**/*
   - package.json

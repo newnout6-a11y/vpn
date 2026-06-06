@@ -62,6 +62,7 @@ import { registerNotificationPrefsIpcHandlers } from './notificationPrefs'
 import { registerI18nIpcHandlers } from './i18n'
 import { registerThemeIpcHandlers } from './themeManager'
 import { registerWidgetLayoutIpcHandlers } from './widgetLayout'
+import { externalProxy } from './externalProxy'
 
 const exec = promisify(execCb)
 
@@ -1307,6 +1308,7 @@ app.whenReady().then(async () => {
   granularKillSwitch.init(singboxExePath)
   initDnsProfiles()
   initProfileRotation()
+  externalProxy.registerControlServer()
   schedulerService.init({
     onConnect: (schedule) => {
       logEvent('info', 'scheduler', `schedule "${schedule.name}" triggered connect`, { profileId: schedule.profileId, mode: schedule.mode })
