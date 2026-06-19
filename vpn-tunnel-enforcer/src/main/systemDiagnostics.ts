@@ -8,10 +8,14 @@ import { getAppLogPath, getLogDir, logEvent } from './appLogger'
 import { getRoutingPlan } from './connectionPlanner'
 import { runLeakCheck, type CheckStatus } from './leakDiagnostics'
 import { settingsStore } from './settings'
-import { redactSensitiveText, redactSettingsForDiagnostics } from './vpnProfiles'
+import { describeVpnProfileCapabilities, redactSensitiveText, redactSettingsForDiagnostics } from './vpnProfiles'
 import { runStoreDiagnostics } from './storeDiagnostics'
+import { getSmartRouteRuleSetState } from './ruleSetManager'
+import { getTrafficForensicsStatus } from './trafficForensics'
 import { getTunRuntimeDir, parseProxyAddress, probeTcp, tunController } from './tunController'
 import { TUN_ADAPTER_ALIAS } from './tunAdapter'
+import { getActiveProfile } from './serverPicker'
+import type { ServerProfile } from '../shared/ipc-types'
 
 const exec = promisify(execCb)
 const execFile = promisify(execFileCb)
@@ -170,7 +174,7 @@ async function getRuntimeItems(): Promise<SystemDiagnosticItem[]> {
       'App',
       'Current settings',
       'info',
-      `proxyType=${settings.proxyType}, interval=${settings.checkInterval}ms`,
+      `proxyType=${settings.proxyType}, bootstrapRoute=${settings.bootstrapRouteMode}, interval=${settings.checkInterval}ms`,
       JSON.stringify(redactSettingsForDiagnostics(settings))
     ),
     item(
@@ -188,10 +192,12 @@ async function getBinaryItems(): Promise<SystemDiagnosticItem[]> {
   const resourceDir = app.isPackaged ? process.resourcesPath : join(app.getAppPath(), 'resources')
   const singBox = join(resourceDir, 'sing-box.exe')
   const wintun = join(resourceDir, 'wintun.dll')
+  const cronet = join(resourceDir, 'libcronet.dll')
+  const runtimeSingBox = join(getTunRuntimeDir(), 'vpnte-sing-box.exe')
   const rows: string[] = []
   let missing = false
 
-  for (const file of [singBox, wintun]) {
+  for (const file of [singBox, wintun, cronet]) {
     try {
       const info = await stat(file)
       rows.push(`${file} (${Math.round(info.size / 1024)} KB)`)
@@ -208,9 +214,23 @@ async function getBinaryItems(): Promise<SystemDiagnosticItem[]> {
       maxBuffer: MAX_BUFFER,
       encoding: 'utf8'
     })
-    rows.push(`sing-box version: ${(stdout || stderr).trim().replace(/\s+/g, ' ')}`)
+    rows.push(`bundled sing-box version: ${(stdout || stderr).trim().replace(/\s+/g, ' ')}`)
   } catch (err: any) {
-    rows.push(`sing-box version failed: ${shortError(err)}`)
+    rows.push(`bundled sing-box version failed: ${shortError(err)}`)
+  }
+
+  try {
+    await stat(runtimeSingBox)
+    const { stdout, stderr } = await execFile(runtimeSingBox, ['version'], {
+      windowsHide: true,
+      timeout: 5000,
+      maxBuffer: MAX_BUFFER,
+      encoding: 'utf8',
+      cwd: getTunRuntimeDir()
+    })
+    rows.push(`runtime sing-box version: ${(stdout || stderr).trim().replace(/\s+/g, ' ')}`)
+  } catch (err: any) {
+    rows.push(`runtime sing-box version: not staged or failed: ${shortError(err)}`)
   }
 
   const config = join(getTunRuntimeDir(), 'sing-box.json')
@@ -224,6 +244,7 @@ async function getBinaryItems(): Promise<SystemDiagnosticItem[]> {
 async function getProxyItems(): Promise<SystemDiagnosticItem[]> {
   const settings = settingsStore.get()
   const tun = tunController.getStatus()
+  const isDirectVpn = settings.connectionMode === 'directVpn'
   const proxyAddr = tun.proxyAddr || settings.proxyOverride.trim()
   const rows: string[] = []
   const plan = await getRoutingPlan().catch(() => null)
@@ -259,6 +280,21 @@ $p=Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Intern
     } catch (err: any) {
       rows.push(`WinINet failed=${shortError(err)}`)
     }
+  }
+
+  if (isDirectVpn) {
+    rows.unshift(`mode=directVpn target=${tun.vpnProfileName || 'unknown'}`)
+    return [item(
+      'proxy-current',
+      'Proxy',
+      'Current proxy',
+      tun.running ? 'info' : 'warn',
+      tun.running ? 'not used in directVpn mode' : 'directVpn idle',
+      joinRows([
+        'Direct VPN uses sing-box as the tunnel core; a local SOCKS/HTTP listener is not required.',
+        ...rows
+      ])
+    )]
   }
 
   if (!proxyAddr) {
@@ -573,11 +609,14 @@ async function getLogItems(): Promise<SystemDiagnosticItem[]> {
 async function getRoutingItems(): Promise<SystemDiagnosticItem[]> {
   const settings = settingsStore.get()
   const tun = tunController.getStatus()
-  const proxyAddr = settings.proxyOverride.trim() || tun.proxyAddr || undefined
+  const isDirectVpn = settings.connectionMode === 'directVpn'
+  const proxyAddr = isDirectVpn ? undefined : (tun.proxyAddr || settings.proxyOverride.trim() || undefined)
   const checks = await runLeakCheck({
     proxyAddr,
     proxyType: tun.proxyType || settings.proxyType,
-    tunRunning: tun.running
+    tunRunning: tun.running,
+    connectionMode: settings.connectionMode,
+    smartRuSplit: settings.smartRuSplit
   })
   return checks.items.map(row => ({
     id: `routing-${row.id}`,
@@ -587,6 +626,114 @@ async function getRoutingItems(): Promise<SystemDiagnosticItem[]> {
     value: row.value,
     details: row.details
   }))
+}
+
+async function getSmartRouteRuleSetItems(): Promise<SystemDiagnosticItem[]> {
+  try {
+    const state = await getSmartRouteRuleSetState()
+    const fileRows = state.files.map(file => {
+      const size = file.size !== null ? `${Math.round(file.size / 1024)} KB` : 'n/a'
+      const hash = file.sha256 ? file.sha256.slice(0, 12) : 'no-hash'
+      const updated = file.lastUpdatedAt ? new Date(file.lastUpdatedAt).toISOString() : 'never'
+      const route = file.lastRoute ? ` route=${file.lastRoute}` : ''
+      const err = file.lastError ? ` err=${file.lastError}` : ''
+      return `${file.fileName}: exists=${file.exists} size=${size} sha256=${hash} updated=${updated}${route}${err}`
+    })
+    return [
+      item(
+        'smart-route-rule-sets',
+        'Routing',
+        'Smart-RU rule-sets',
+        state.mode === 'managed' && !state.managedComplete ? 'warn' : 'info',
+        `mode=${state.mode}, active=${state.activeSource}, complete=${state.managedComplete}`,
+        joinRows([
+          `autoUpdate=${state.autoUpdate}`,
+          `useProxy=${state.useProxy}`,
+          `intervalHours=${state.updateIntervalHours}`,
+          `managedDir=${state.managedDir}`,
+          `bundledDir=${state.bundledDir}`,
+          `lastRefreshOk=${state.lastRefreshOk}`,
+          `lastRefreshFinishedAt=${state.lastRefreshFinishedAt ? new Date(state.lastRefreshFinishedAt).toISOString() : 'never'}`,
+          state.lastRefreshError ? `lastRefreshError=${state.lastRefreshError}` : '',
+          ...fileRows
+        ].filter(Boolean), 16)
+      )
+    ]
+  } catch (err: any) {
+    return [item('smart-route-rule-sets', 'Routing', 'Smart-RU rule-sets', 'warn', 'failed', shortError(err))]
+  }
+}
+
+export function buildActiveProfileDiagnosticItems(activeProfile: ServerProfile | null = getActiveProfile()): SystemDiagnosticItem[] {
+  if (!activeProfile) {
+    return [
+      item(
+        'active-profile-capabilities',
+        'Profile',
+        'Active profile capabilities',
+        'info',
+        'no active profile',
+        'Server picker has no selected profile yet.'
+      )
+    ]
+  }
+
+  if (!activeProfile.outbound || typeof activeProfile.outbound !== 'object') {
+    return [
+      item(
+        'active-profile-capabilities',
+        'Profile',
+        'Active profile capabilities',
+        'warn',
+        `${activeProfile.protocol || 'unknown'} without outbound`,
+        joinRows([
+          `id=${activeProfile.id}`,
+          `name=${redactSensitiveText(activeProfile.name || 'unnamed')}`,
+          `server=${redactSensitiveText(activeProfile.server || 'unknown')}:${activeProfile.port || 'n/a'}`,
+          'Cannot inspect stealth/ECH/Hysteria2 options because outbound config is missing.'
+        ], 12)
+      )
+    ]
+  }
+
+  const capabilities = describeVpnProfileCapabilities({
+    protocol: activeProfile.protocol,
+    outbound: activeProfile.outbound
+  })
+  const outbound = activeProfile.outbound
+  const isHysteria2 = capabilities.protocol === 'hysteria2'
+  const warnings = capabilities.warnings
+  const detailRows = [
+    `id=${activeProfile.id}`,
+    `name=${redactSensitiveText(activeProfile.name || 'unnamed')}`,
+    `server=${redactSensitiveText(activeProfile.server || outbound.server || 'unknown')}:${activeProfile.port || outbound.server_port || 'n/a'}`,
+    `protocol=${capabilities.protocol}`,
+    `stealthPreset=${capabilities.stealthPreset}`,
+    `tlsConfigured=${capabilities.tlsConfigured}`,
+    `echConfigured=${capabilities.echConfigured}`,
+    isHysteria2 ? 'hy2Transport=QUIC/UDP' : '',
+    isHysteria2 && outbound.obfs && typeof outbound.obfs === 'object'
+      ? `hy2Obfs=${String(outbound.obfs.type || 'configured')}`
+      : '',
+    isHysteria2 && typeof outbound.server_ports === 'string' && outbound.server_ports
+      ? `hy2ServerPorts=${outbound.server_ports}`
+      : '',
+    isHysteria2 && typeof outbound.hop_interval === 'string' && outbound.hop_interval
+      ? `hy2HopInterval=${outbound.hop_interval}`
+      : '',
+    ...warnings.map(warning => `warning=${warning}`)
+  ].filter(Boolean)
+
+  return [
+    item(
+      'active-profile-capabilities',
+      'Profile',
+      'Active profile capabilities',
+      warnings.length > 0 ? 'warn' : 'info',
+      `${capabilities.protocol}, stealth=${capabilities.stealthPreset}${warnings.length > 0 ? `, warnings=${warnings.length}` : ''}`,
+      joinRows(detailRows, 16)
+    )
+  ]
 }
 
 async function getStoreItems(): Promise<SystemDiagnosticItem[]> {
@@ -599,6 +746,57 @@ async function getStoreItems(): Promise<SystemDiagnosticItem[]> {
     value: row.value,
     details: row.details
   }))
+}
+
+async function getTrafficForensicsItems(): Promise<SystemDiagnosticItem[]> {
+  const status = await getTrafficForensicsStatus()
+  if (!status.enabled) {
+    return [item('traffic-forensics', 'Network', 'Deep traffic capture', 'info', 'disabled', 'Deep packet capture is disabled in settings')]
+  }
+
+  const state = status.running ? 'running' : (status.sessionId ? 'idle' : 'ready')
+  const details = [
+    `engine=${status.engine || 'n/a'}`,
+    `mode=${status.mode || 'n/a'}`,
+    `target=${status.target || 'n/a'}`,
+    `maxSizeMb=${status.maxSizeMb}`,
+    `retainSessions=${status.retainSessions}`,
+    `startedAt=${status.startedAt ? new Date(status.startedAt).toISOString() : 'n/a'}`,
+    `stoppedAt=${status.stoppedAt ? new Date(status.stoppedAt).toISOString() : 'n/a'}`,
+    `stopReason=${status.stopReason || 'n/a'}`,
+    `sidecar=${status.sidecar?.running ? 'running' : status.sidecar?.available ? 'available' : 'unavailable'}`,
+    `sidecarEvents=${status.summary?.counts?.sidecarEvents ?? 0}`,
+    `packetMetrics=${status.summary?.counts?.packetMetrics ?? 0}`,
+    `summary=${status.summaryPath || 'n/a'}`,
+    `sessionDir=${status.sessionDir || 'n/a'}`,
+    `artifacts=${status.artifactFiles.map(file => `${file.name}:${Math.round(file.size / 1024)}KB`).join(', ') || 'none'}`
+  ]
+  const verdicts = status.summary?.verdicts
+  if (verdicts) {
+    const activeVerdicts = Object.entries(verdicts)
+      .filter(([, value]) => value === true)
+      .map(([key]) => key)
+    details.push(`verdicts=${activeVerdicts.join(', ') || 'none'}`)
+  }
+  if (status.summary?.counts) {
+    details.push(`counts=${Object.entries(status.summary.counts).map(([key, value]) => `${key}:${value}`).join(', ')}`)
+  }
+  if (status.summary?.parserErrors?.length) {
+    details.push(`parserErrors=${status.summary.parserErrors.slice(0, 5).join(' | ')}`)
+  }
+  if (status.sidecar?.lastError) details.push(`sidecarLastError=${status.sidecar.lastError}`)
+  if (status.lastError) details.push(`lastError=${status.lastError}`)
+
+  return [
+    item(
+      'traffic-forensics',
+      'Network',
+      'Deep traffic capture',
+      status.lastError ? 'warn' : (status.running ? 'ok' : 'info'),
+      `${state}${status.engine ? ` via ${status.engine}` : ''}`,
+      joinRows(details, 24)
+    )
+  ]
 }
 
 export async function runSystemDiagnostics(): Promise<SystemDiagnosticResult> {
@@ -618,6 +816,9 @@ export async function runSystemDiagnostics(): Promise<SystemDiagnosticResult> {
       getEventLogItem('Microsoft-Windows-DNS-Client/Operational', 'event-dns-client', 'DNS Client event log')
     ]),
     getLogItems(),
+    getTrafficForensicsItems(),
+    getSmartRouteRuleSetItems(),
+    buildActiveProfileDiagnosticItems(),
     getRoutingItems(),
     getStoreItems()
   ])

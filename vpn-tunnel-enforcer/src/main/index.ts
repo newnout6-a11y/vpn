@@ -39,6 +39,7 @@ import { notify, setInAppFallbackCallback } from './notifications'
 import { exportDiagnosticsZip } from './diagnosticsExport'
 import { captureSnapshot, getSnapshotsDir, startPeriodicSnapshots, stopPeriodicSnapshots } from './systemSnapshot'
 import { runLeakSelfTest, startPeriodicLeakTest, stopPeriodicLeakTest, setLeakDetectedCallback, startNetworkChangeWatcher, stopNetworkChangeWatcher } from './leakSelfTest'
+import { getTrafficForensicsStatus, startTrafficForensicsSession, stopTrafficForensicsSession } from './trafficForensics'
 import { trafficMonitor, type TrafficStats } from './trafficMonitor'
 import { applyBrowserLeakProtection, rollbackBrowserLeakProtection } from './browserHardening'
 import { resolveVpnProfile, resolveVpnProfiles, redactSensitiveConfig, type VpnProfile } from './vpnProfiles'
@@ -62,6 +63,7 @@ import { registerNotificationPrefsIpcHandlers } from './notificationPrefs'
 import { registerI18nIpcHandlers } from './i18n'
 import { registerThemeIpcHandlers } from './themeManager'
 import { registerWidgetLayoutIpcHandlers } from './widgetLayout'
+import { externalProxy } from './externalProxy'
 
 const exec = promisify(execCb)
 
@@ -510,6 +512,11 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
     return result
   }
 
+  // Start traffic forensics session in background (non-blocking)
+  startTrafficForensicsSession({ mode: 'localProxy', target: proxyAddr }).catch(err => {
+    logEvent('warn', 'app', 'failed to start traffic forensics session', err)
+  })
+
   const ipInfo = await ipMonitor.getCurrentIp()
   if (ipInfo.ip) {
     ipMonitor.setVpnIp(ipInfo.ip)
@@ -590,12 +597,16 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
       profile = {
         name: activeServer.name,
         protocol: activeServer.protocol as VpnProfile['protocol'],
-        outbound
+        outbound,
+        clientDevice: activeServer.clientDevice,
+        clientFingerprint: activeServer.clientFingerprint
       }
       logEvent('info', 'tun', 'using server-picker active profile', {
         id: activeServer.id,
         protocol: activeServer.protocol,
-        name: activeServer.name
+        name: activeServer.name,
+        clientDevice: activeServer.clientDevice ?? 'pc',
+        clientFingerprint: activeServer.clientFingerprint ?? null
       })
     } else {
       captureSnapshot('tun-start-failed').catch(() => undefined)
@@ -655,6 +666,11 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
     captureSnapshot('tun-start-failed').catch(() => undefined)
     return result
   }
+
+  // Start traffic forensics session in background (non-blocking)
+  startTrafficForensicsSession({ mode: 'directVpn', target: profile.name }).catch(err => {
+    logEvent('warn', 'app', 'failed to start traffic forensics session', err)
+  })
 
   const ipInfo = await ipMonitor.getCurrentIp()
   if (ipInfo.ip) {
@@ -721,6 +737,12 @@ async function stopProtection(): Promise<{ success: boolean; error?: string }> {
   stopPeriodicSnapshots()
   stopPeriodicLeakTest()
   stopNetworkChangeWatcher()
+
+  // Stop traffic forensics session in background (non-blocking)
+  stopTrafficForensicsSession('vpn-stop').catch(err => {
+    logEvent('warn', 'app', 'failed to stop traffic forensics session', err)
+  })
+
   const result = await tunController.stop()
   ipMonitor.clearVpnIp()
   trafficMonitor.stop()
@@ -1239,6 +1261,10 @@ app.whenReady().then(async () => {
     }
   })
 
+  handleLogged('get-traffic-forensics-status', async () => {
+    return getTrafficForensicsStatus()
+  })
+
   // ─── V2 Feature Module Registration ──────────────────────────────────────────
   // Order: infrastructure (settings already loaded above) → i18n/theme → feature services → widgets
 
@@ -1277,10 +1303,9 @@ app.whenReady().then(async () => {
   // We clear them on startup so the user starts every session from a clean
   // baseline; the next offline pingAll repopulates with real numbers.
   serverPicker.clearStaleStoredPings()
-  // Fire-and-forget background geolocation pass for any profile that doesn't
-  // already have a country tag. This makes country labels appear on the
-  // dashboard without the user having to ping every server manually.
-  void serverPicker.geolocateAll().catch(() => undefined)
+  // Country geolocation is intentionally manual now: subscriptions can carry
+  // many servers, and automatically querying several public geo databases for
+  // every missing entry makes refresh/startup slow and burns external limits.
   registerServerProbeIpcHandlers()
   registerUrlAvailabilityHandlers()
   registerSpeedTestHandlers()
@@ -1304,6 +1329,7 @@ app.whenReady().then(async () => {
   granularKillSwitch.init(singboxExePath)
   initDnsProfiles()
   initProfileRotation()
+  externalProxy.registerControlServer()
   schedulerService.init({
     onConnect: (schedule) => {
       logEvent('info', 'scheduler', `schedule "${schedule.name}" triggered connect`, { profileId: schedule.profileId, mode: schedule.mode })
@@ -1358,6 +1384,10 @@ app.whenReady().then(async () => {
       trafficMonitor.start()
     } else {
       trafficMonitor.stop()
+      // Stop traffic forensics session if it was running (status became stopped/killswitch-active/restarting)
+      stopTrafficForensicsSession(`status:${status}`).catch(err => {
+        logEvent('warn', 'app', 'failed to stop traffic forensics session on status change', err)
+      })
     }
 
     // Record connection-history entry on terminal/error transitions if we

@@ -13,6 +13,7 @@ let isLeak = false
 let intervalId: ReturnType<typeof setInterval> | null = null
 let ipCallbacks: ((ip: string, isLeak: boolean) => void)[] = []
 let checkInterval = 30000 // 30 seconds
+let lastSuccessAt = 0
 
 // ─── suspended state ──────────────────────────────────────────────────────
 // While `suppressed === true`, every public surface that could compute or emit
@@ -29,21 +30,29 @@ let checkInterval = 30000 // 30 seconds
 // the rollback has finished or a new tunnel is established.
 let suppressed = false
 
-async function fetchPublicIp(): Promise<string | null> {
-  for (const url of IP_CHECK_URLS) {
-    try {
-      const resp = await axios.get(url, { timeout: 8000 })
-      const ip = resp.data?.ip || resp.data?.query || null
-      if (ip) {
-        logEvent('debug', 'ip-monitor', 'public IP endpoint succeeded', { url, ip })
-        return ip
-      }
-    } catch (err: any) {
-      logEvent('debug', 'ip-monitor', 'public IP endpoint failed', { url, error: err.message || String(err) })
+async function fetchPublicIpFrom(url: string): Promise<string> {
+  try {
+    const resp = await axios.get(url, { timeout: 6000 })
+    const ip = resp.data?.ip || resp.data?.query || null
+    if (ip) {
+      lastSuccessAt = Date.now()
+      logEvent('debug', 'ip-monitor', 'public IP endpoint succeeded', { url, ip })
+      return ip
     }
+    throw new Error('response did not contain an IP')
+  } catch (err: any) {
+    logEvent('debug', 'ip-monitor', 'public IP endpoint failed', { url, error: err.message || String(err) })
+    throw err
   }
-  logEvent('warn', 'ip-monitor', 'all public IP endpoints failed')
-  return null
+}
+
+async function fetchPublicIp(): Promise<string | null> {
+  try {
+    return await Promise.any(IP_CHECK_URLS.map(fetchPublicIpFrom))
+  } catch {
+    logEvent('warn', 'ip-monitor', 'all public IP endpoints failed')
+    return null
+  }
 }
 
 function notifyCallbacks(ip: string, leak: boolean) {
@@ -120,6 +129,7 @@ export const ipMonitor = {
       if (rebaseline) {
         vpnIp = ip
         isLeak = false
+        startMonitoring()
       } else if (vpnIp) {
         isLeak = ip !== vpnIp
       }
@@ -150,6 +160,10 @@ export const ipMonitor = {
 
   onIpChange(callback: (ip: string, isLeak: boolean) => void) {
     ipCallbacks.push(callback)
+  },
+
+  getLastSuccessAt() {
+    return lastSuccessAt
   },
 
   /**

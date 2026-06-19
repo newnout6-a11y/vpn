@@ -1,6 +1,5 @@
 /**
- * SpeedTestWidget — Shows last speed test result (download Mbps, upload Mbps, latency ms)
- * or "No tests yet" placeholder. Will read from IPC later.
+ * SpeedTestWidget — Shows last speed test result or an empty placeholder.
  */
 
 import React, { useEffect, useState } from 'react'
@@ -22,7 +21,6 @@ export const SpeedTestWidget: React.FC<SpeedTestWidgetProps> = ({ size }) => {
   const { t } = useTranslation()
   const [lastResult, setLastResult] = useState<SpeedTestResult | null>(null)
 
-  // Attempt to fetch last speed test result from IPC
   useEffect(() => {
     const fetchResult = async () => {
       try {
@@ -40,7 +38,7 @@ export const SpeedTestWidget: React.FC<SpeedTestWidgetProps> = ({ size }) => {
           }
         }
       } catch {
-        // IPC not yet wired — show placeholder
+        // Keep the dashboard quiet; the full Speed Test page surfaces errors.
       }
     }
     fetchResult()
@@ -60,7 +58,7 @@ export const SpeedTestWidget: React.FC<SpeedTestWidgetProps> = ({ size }) => {
     return (
       <div className="flex flex-col items-center justify-center py-4 text-[var(--color-text-secondary)]">
         <Zap size={24} className="mb-2 opacity-50" />
-        <p className="text-sm">No tests yet</p>
+        <p className="text-sm">{t('dashboardWidgets.noSpeedTests')}</p>
       </div>
     )
   }
@@ -72,15 +70,15 @@ export const SpeedTestWidget: React.FC<SpeedTestWidgetProps> = ({ size }) => {
         <div className="flex items-center gap-3 text-xs">
           <span className="flex items-center gap-1">
             <ArrowDown size={12} className="text-blue-500" />
-            {lastResult.downloadMbps.toFixed(1)} Mbps
+            {lastResult.downloadMbps.toFixed(1)} {t('speedTest.mbps')}
           </span>
           <span className="flex items-center gap-1">
             <ArrowUp size={12} className="text-emerald-500" />
-            {lastResult.uploadMbps.toFixed(1)} Mbps
+            {lastResult.uploadMbps.toFixed(1)} {t('speedTest.mbps')}
           </span>
           <span className="flex items-center gap-1">
             <Clock size={12} className="text-[var(--color-text-secondary)]" />
-            {lastResult.latencyMs} ms
+            {lastResult.latencyMs} {t('speedTest.ms')}
           </span>
         </div>
       </div>
@@ -102,21 +100,21 @@ export const SpeedTestWidget: React.FC<SpeedTestWidgetProps> = ({ size }) => {
           <p className="text-lg font-semibold text-[var(--color-text)] tabular-nums">
             {lastResult.downloadMbps.toFixed(1)}
           </p>
-          <p className="text-xs text-[var(--color-text-secondary)]">Mbps ↓</p>
+          <p className="text-xs text-[var(--color-text-secondary)]">{t('speedTest.mbps')} ↓</p>
         </div>
         <div className="rounded-[var(--radius-sm)] bg-[var(--color-bg)] p-2.5 border border-[var(--color-border)] text-center">
           <ArrowUp size={16} className="mx-auto text-emerald-500 mb-1" />
           <p className="text-lg font-semibold text-[var(--color-text)] tabular-nums">
             {lastResult.uploadMbps.toFixed(1)}
           </p>
-          <p className="text-xs text-[var(--color-text-secondary)]">Mbps ↑</p>
+          <p className="text-xs text-[var(--color-text-secondary)]">{t('speedTest.mbps')} ↑</p>
         </div>
         <div className="rounded-[var(--radius-sm)] bg-[var(--color-bg)] p-2.5 border border-[var(--color-border)] text-center">
           <Clock size={16} className="mx-auto text-[var(--color-text-secondary)] mb-1" />
           <p className="text-lg font-semibold text-[var(--color-text)] tabular-nums">
             {lastResult.latencyMs}
           </p>
-          <p className="text-xs text-[var(--color-text-secondary)]">ms</p>
+          <p className="text-xs text-[var(--color-text-secondary)]">{t('speedTest.ms')}</p>
         </div>
       </div>
       <p className="text-xs text-[var(--color-text-secondary)] text-right">

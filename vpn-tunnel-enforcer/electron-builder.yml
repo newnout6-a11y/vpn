@@ -9,6 +9,7 @@ productName: VPN Tunnel Enforcer
 directories:
   output: dist
 electronDist: node_modules/electron/dist
+publish: null
 win:
   target:
     - target: nsis
@@ -41,6 +42,8 @@ portable:
 extraResources:
   - from: resources/sing-box.exe
     to: sing-box.exe
+  - from: resources/libcronet.dll
+    to: libcronet.dll
   - from: resources/wintun.dll
     to: wintun.dll
   - from: resources/icon.ico
@@ -53,6 +56,15 @@ extraResources:
     to: geoip-ru.srs
   - from: resources/geosite-category-gov-ru.srs
     to: geosite-category-gov-ru.srs
+extraFiles:
+  - from: resources/vpnte-proxy.ps1
+    to: vpnte-proxy.ps1
+  - from: resources/vpnte-proxy.cmd
+    to: vpnte-proxy.cmd
+  - from: resources/vpnte-etw-sidecar.ps1
+    to: vpnte-etw-sidecar.ps1
+  - from: resources/vpnte-etw-sidecar.cmd
+    to: vpnte-etw-sidecar.cmd
 files:
   - out/**/*
   - package.json

@@ -1,6 +1,5 @@
 /**
  * RotationWidget — Shows current rotation profile and countdown to next rotation.
- * Will read from IPC later.
  */
 
 import React, { useEffect, useState } from 'react'
@@ -34,7 +33,6 @@ export const RotationWidget: React.FC<RotationWidgetProps> = ({ size }) => {
   const [rotation, setRotation] = useState<RotationInfo | null>(null)
   const [, setTick] = useState(0)
 
-  // Attempt to fetch rotation config from IPC
   useEffect(() => {
     const fetchRotation = async () => {
       try {
@@ -43,7 +41,7 @@ export const RotationWidget: React.FC<RotationWidgetProps> = ({ size }) => {
           const config = await api.rotationGetConfig()
           if (config) {
             // Resolve current profile name from servers list
-            let profileName = 'Unknown'
+            let profileName = t('dashboardWidgets.unknownProfile')
             if (config.profileIds?.length > 0 && api.serversList) {
               try {
                 const profiles = await api.serversList()
@@ -64,13 +62,13 @@ export const RotationWidget: React.FC<RotationWidgetProps> = ({ size }) => {
           }
         }
       } catch {
-        // IPC not yet wired
+        // Keep the dashboard quiet; the full Settings page surfaces errors.
       }
     }
     fetchRotation()
     const interval = setInterval(fetchRotation, 10_000)
     return () => clearInterval(interval)
-  }, [])
+  }, [t])
 
   // Tick every second for countdown
   useEffect(() => {
@@ -93,7 +91,7 @@ export const RotationWidget: React.FC<RotationWidgetProps> = ({ size }) => {
     return (
       <div className="flex flex-col items-center justify-center py-4 text-[var(--color-text-secondary)]">
         <RefreshCw size={24} className="mb-2 opacity-50" />
-        <p className="text-sm">Rotation disabled</p>
+        <p className="text-sm">{t('dashboardWidgets.rotationDisabled')}</p>
       </div>
     )
   }
@@ -141,9 +139,11 @@ export const RotationWidget: React.FC<RotationWidgetProps> = ({ size }) => {
           </p>
         </div>
         <div className="rounded-[var(--radius-sm)] bg-[var(--color-bg)] p-2.5 border border-[var(--color-border)]">
-          <p className="text-xs text-[var(--color-text-secondary)] mb-0.5">Interval</p>
+          <p className="text-xs text-[var(--color-text-secondary)] mb-0.5">
+            {t('dashboardWidgets.interval')}
+          </p>
           <p className="text-sm font-medium text-[var(--color-text)]">
-            {rotation.intervalMinutes} min
+            {rotation.intervalMinutes} {t('dashboardWidgets.minutesShort')}
           </p>
         </div>
         <div className="rounded-[var(--radius-sm)] bg-[var(--color-bg)] p-2.5 border border-[var(--color-border)]">

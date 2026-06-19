@@ -15,7 +15,7 @@ import { Settings } from './pages/Settings'
 import { Logs } from './pages/Logs'
 import { Maintenance } from './pages/Maintenance'
 import type { AppSettings, LeakCheckResult, TrafficStats } from './store'
-import { NAV_EVENT, type AppPage } from './nav'
+import { emitServerChanged, NAV_EVENT, type AppPage } from './nav'
 
 declare global {
   interface Window {
@@ -32,11 +32,14 @@ declare global {
       getAutoconfigStatus: () => Promise<any[]>
       getSettings: () => Promise<AppSettings>
       saveSettings: (settings: Partial<AppSettings>) => Promise<AppSettings>
+      smartRouteRuleSetsGetState: () => Promise<any>
+      smartRouteRuleSetsRefresh: (force?: boolean) => Promise<any>
       inspectVpnInput: (input: string) => Promise<{ count: number; protocols: Record<string, number>; profiles: Array<{ index: number; name: string; protocol: string }>; fetched: boolean; source: string }>
       setLoginItem: (openAtLogin: boolean) => Promise<AppSettings>
       runLeakCheck: (options?: { proxyAddr?: string; proxyType?: 'socks5' | 'http' }) => Promise<LeakCheckResult>
       runStoreRepair: (action: string) => Promise<{ success: boolean; message: string; details?: string }>
       runStoreDiagnostics: () => Promise<any>
+
       runSystemDiagnostics: () => Promise<any>
       getRoutingPlan: () => Promise<any>
       applyBrowserLeakProtection: () => Promise<any>
@@ -57,6 +60,7 @@ declare global {
       openTunLogFolder: () => Promise<string>
       openLogFolder: () => Promise<string>
       exportDiagnostics: () => Promise<{ success: boolean; path?: string; error?: string; cancelled?: boolean }>
+      getTrafficForensicsStatus: () => Promise<{ running: boolean, lastError: string | null }>
       runLeakSelfTest: () => Promise<LeakSelfTestResult>
       runRoutingSelfTest: () => Promise<{
         ranAt: number
@@ -81,7 +85,17 @@ declare global {
       serversGetActive: () => Promise<{ profile: import('../shared/ipc-types').ServerProfile | null; activeId: string | null }>
       serversPingAll: () => Promise<import('../shared/ipc-types').ServerProfile[]>
       serversPingOne: (host: string, port: number) => Promise<number | null>
-      serversAdd: (input: string) => Promise<import('../shared/ipc-types').ServerProfile[]>
+      serversVerifyActiveCountry: (ip: string) => Promise<
+        | { ok: true; country: string; profile: import('../shared/ipc-types').ServerProfile }
+        | { ok: false; reason: string; country?: string }
+      >
+      serversVerifyCountry: (id: string) => Promise<
+        | { ok: true; country: string; profile: import('../shared/ipc-types').ServerProfile }
+        | { ok: false; reason: string; country?: string }
+      >
+      serversAdd: (input: string, options?: { clientDevice?: import('../shared/ipc-types').ClientDevice }) => Promise<import('../shared/ipc-types').ServerProfile[]>
+      serversAddToGroup?: (input: string, groupId: string | null, options?: { clientDevice?: import('../shared/ipc-types').ClientDevice }) => Promise<import('../shared/ipc-types').ServerProfile[]>
+      serversSetClientDevice: (id: string, clientDevice: import('../shared/ipc-types').ClientDevice) => Promise<import('../shared/ipc-types').ServerProfile>
       serversRemove: (id: string) => Promise<void>
       serversExportKey: (id: string) => Promise<
         | { ok: true; uri: string; name: string; protocol: string }
@@ -200,6 +214,8 @@ export interface LeakSelfTestResult {
   defaultRoutePublicIp: string | null
   perAdapter: LeakSelfTestAdapter[]
   summary: string
+  dnsLeakDetected?: boolean
+  dnsLeakDetail?: string
 }
 
 type Page = SidebarPage | 'maintenance'
@@ -214,6 +230,18 @@ function proxyFromOverride(settings: AppSettings) {
   const port = parseInt(raw.slice(separator + 1), 10)
   if (!host || !Number.isInteger(port) || port <= 0 || port > 65535) return null
   return { host, port, type: settings.proxyType, verified: true, publicIpViaProxy: null }
+}
+
+async function verifyActiveServerCountry(ip: string | null | undefined): Promise<void> {
+  if (!ip) return
+  try {
+    const result = await window.electronAPI.serversVerifyActiveCountry(ip)
+    if (result.ok) {
+      emitServerChanged()
+    }
+  } catch {
+    // Best-effort UI metadata only. Never disturb connection state.
+  }
 }
 
 export default function App() {
@@ -232,6 +260,7 @@ export default function App() {
   // IPC callbacks below can read the live value without re-subscribing
   // every time it flips.
   const stoppingNowRef = useRef(false)
+  const tunEventSeqRef = useRef(0)
 
   // Listen for IPC events
   useEffect(() => {
@@ -248,10 +277,12 @@ export default function App() {
         addLog('error', `ОБНАРУЖЕНА УТЕЧКА IP! Текущий: ${ip}`)
       } else {
         addLog('info', `Публичный IP: ${ip}`)
+        void verifyActiveServerCountry(ip)
       }
     })
 
     const unsubTun = window.electronAPI.onTunStatusChanged((status) => {
+      tunEventSeqRef.current += 1
       const store = useAppStore.getState()
       // 'proxy-down' means TUN is still up but upstream proxy is unreachable — we keep
       // tunRunning=true so the kill-switch state is reflected (traffic blocked, not leaked).
@@ -266,6 +297,17 @@ export default function App() {
       const isCompetingTun = status.startsWith('competing-tun:')
       const tunUp = status === 'running' || status === 'proxy-down' || isCompetingTun
       const isStopping = status === 'stopping'
+      const busy = store.connectionBusy
+
+      // IPC status events can arrive slightly out of order around start/stop:
+      // e.g. a delayed "running" from the previous health poll while the user
+      // has already clicked Stop. Keep transition states monotonic so the UI
+      // does not flicker from "stopping" back to "connected".
+      if ((busy === 'disconnecting' && (status === 'running' || status === 'proxy-down' || isCompetingTun)) ||
+          (busy === 'connecting' && status === 'stopped')) {
+        addLog('warn', `Ignored stale TUN status during ${busy}: ${status}`)
+        return
+      }
 
       // Flip the ref BEFORE we run any callbacks-that-flush so the leak/ip
       // callbacks above can read the latest value.
@@ -392,6 +434,7 @@ export default function App() {
   useEffect(() => {
     async function init() {
       const store = useAppStore.getState()
+      const initTunEventSeq = tunEventSeqRef.current
       store.setDetecting(true)
 
       let settings = store.settings
@@ -449,21 +492,43 @@ export default function App() {
         }
       }
 
-      try {
-        const ipInfo = await window.electronAPI.getPublicIp()
-        store.setPublicIp(ipInfo.ip, ipInfo.isLeak)
-        if (ipInfo.ip) addLog('info', `Текущий публичный IP: ${ipInfo.ip}`)
-      } catch (err: any) {
-        addLog('error', `Ошибка проверки IP: ${err.message}`)
-      }
+      void (async () => {
+        try {
+          const ipInfo = await window.electronAPI.getPublicIp()
+          const liveStore = useAppStore.getState()
+          const staleInitialIp =
+            tunEventSeqRef.current !== initTunEventSeq ||
+            Boolean(liveStore.connectionBusy)
+          if (staleInitialIp) {
+            addLog('warn', 'Ignored stale initial IP check after a newer transition')
+            return
+          }
+          liveStore.setPublicIp(ipInfo.ip, ipInfo.isLeak)
+          if (ipInfo.ip) addLog('info', `Текущий публичный IP: ${ipInfo.ip}`)
+          if (ipInfo.ip && !ipInfo.isLeak) void verifyActiveServerCountry(ipInfo.ip)
+        } catch (err: any) {
+          addLog('error', `Ошибка проверки IP: ${err.message}`)
+        }
+      })()
 
       try {
         const tunStatus = await window.electronAPI.getTunStatus()
-        store.setTunRunning(tunStatus.running)
-        store.setTunStartedAt(tunStatus.startedAt ?? null)
-        if (tunStatus.running) store.setMode('hard')
-        else if (useAppStore.getState().mode === 'hard' && settings.autoPilotEnabled) store.setMode('off')
+        const liveStore = useAppStore.getState()
+        const staleInitialStatus =
+          tunEventSeqRef.current !== initTunEventSeq ||
+          Boolean(liveStore.connectionBusy) ||
+          (liveStore.tunRunning && !tunStatus.running)
+        if (!staleInitialStatus) {
+          liveStore.setTunRunning(tunStatus.running)
+          liveStore.setTunStartedAt(tunStatus.startedAt ?? null)
+          if (tunStatus.running) liveStore.setMode('hard')
+          else if (liveStore.mode === 'hard' && settings.autoPilotEnabled) liveStore.setMode('off')
+        } else {
+          addLog('warn', 'Ignored stale initial TUN status after a newer transition')
+        }
       } catch { /* */ }
+
+      store.setDetecting(false)
 
       try {
         const traffic = await window.electronAPI.getTrafficStats()

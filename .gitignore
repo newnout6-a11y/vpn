@@ -17,6 +17,8 @@ diag-extract/
 diag-extract-new/
 _diag*/
 *-diagnostics-*.zip
+.tmp/
+zips/
 .kiro/
 .vscode/
 vpn-tunnel-enforcer/scripts/probe-subscription.mjs

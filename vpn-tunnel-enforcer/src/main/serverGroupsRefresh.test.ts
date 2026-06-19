@@ -50,6 +50,20 @@ vi.mock('./settings', () => ({
 // resolveVpnProfiles is the network boundary — we stub it per test.
 const resolveVpnProfilesMock = vi.fn()
 vi.mock('./vpnProfiles', () => ({
+  applyClientDeviceToOutbound: (outbound: Record<string, any>, device: 'pc' | 'android' | 'ios' | 'mac' = 'pc') => {
+    const result = JSON.parse(JSON.stringify(outbound || {}))
+    if (result.tls && typeof result.tls === 'object' && result.tls.enabled !== false) {
+      result.tls.utls = {
+        ...(result.tls.utls && typeof result.tls.utls === 'object' ? result.tls.utls : {}),
+        enabled: true,
+        fingerprint: device === 'android' ? 'android' : device === 'ios' ? 'ios' : device === 'mac' ? 'safari' : 'chrome'
+      }
+    }
+    return result
+  },
+  clientFingerprintForDevice: (device: 'pc' | 'android' | 'ios' | 'mac' = 'pc') =>
+    device === 'android' ? 'android' : device === 'ios' ? 'ios' : device === 'mac' ? 'safari' : 'chrome',
+  normalizeClientDevice: (value: unknown) => value === 'android' || value === 'ios' || value === 'mac' ? value : 'pc',
   resolveVpnProfiles: (...args: any[]) => resolveVpnProfilesMock(...args)
 }))
 
@@ -226,6 +240,174 @@ describe('refreshGroup dedup-merge', () => {
     expect(afterSecond).toBe(3)
   })
 
+  it('refreshes existing mixed-device profiles with their own device identity', async () => {
+    const group = serverGroups.createGroup({
+      name: 'mixed.example.com',
+      source: 'subscription',
+      sourceUrl: 'https://sub.example.com/mixed',
+      importedAt: Date.now(),
+      status: 'unknown'
+    })
+
+    storeData.current['server-picker'].profiles = [
+      {
+        id: 'pc-de',
+        name: 'DE',
+        protocol: 'vless',
+        server: 'de.example.com',
+        port: 443,
+        groupId: group.id,
+        clientDevice: 'pc',
+        outbound: { type: 'vless', server: 'de.example.com', server_port: 443, uuid: 'old-pc', tls: { enabled: true } },
+        enabled: true
+      },
+      {
+        id: 'android-nl',
+        name: 'NL',
+        protocol: 'vless',
+        server: 'nl.example.com',
+        port: 443,
+        groupId: group.id,
+        clientDevice: 'android',
+        outbound: { type: 'vless', server: 'nl.example.com', server_port: 443, uuid: 'old-android', tls: { enabled: true } },
+        enabled: true
+      }
+    ]
+
+    resolveVpnProfilesMock.mockImplementation((_url: string, options: { clientDevice?: 'pc' | 'android' }) => ({
+      profiles: [
+        { ...makeVpnProfile('de.example.com', 443, 'DE'), outbound: { ...makeVpnProfile('de.example.com', 443, 'DE').outbound, uuid: `${options.clientDevice}-de` } },
+        { ...makeVpnProfile('nl.example.com', 443, 'NL'), outbound: { ...makeVpnProfile('nl.example.com', 443, 'NL').outbound, uuid: `${options.clientDevice}-nl` } }
+      ],
+      source: 'subscription',
+      fetched: true,
+      userInfo: undefined
+    }))
+
+    const res = await refreshGroup(group.id)
+    expect(res.ok).toBe(true)
+
+    const inGroup = pickerProfiles().filter((p) => p.groupId === group.id)
+    expect(inGroup).toHaveLength(2)
+    expect(resolveVpnProfilesMock).toHaveBeenCalledTimes(2)
+    expect(resolveVpnProfilesMock.mock.calls.map((call) => call[1].clientDevice).sort()).toEqual(['android', 'pc'])
+    expect(inGroup.find((p) => p.id === 'pc-de')?.outbound.uuid).toBe('pc-de')
+    expect(inGroup.find((p) => p.id === 'android-nl')?.outbound.uuid).toBe('android-nl')
+    expect(inGroup.find((p) => p.id === 'android-nl')?.clientFingerprint).toBe('android')
+  })
+
+  it('keeps same-tuple profiles for different devices as separate records', async () => {
+    const group = serverGroups.createGroup({
+      name: 'shared.example.com',
+      source: 'subscription',
+      sourceUrl: 'https://sub.example.com/shared',
+      importedAt: Date.now(),
+      status: 'unknown'
+    })
+
+    storeData.current['server-picker'].profiles = [
+      {
+        id: 'pc-shared',
+        name: 'Shared',
+        protocol: 'vless',
+        server: 'shared.example.com',
+        port: 443,
+        groupId: group.id,
+        clientDevice: 'pc',
+        outbound: { type: 'vless', server: 'shared.example.com', server_port: 443, uuid: 'old-pc', tls: { enabled: true } },
+        enabled: true
+      },
+      {
+        id: 'android-shared',
+        name: 'Shared',
+        protocol: 'vless',
+        server: 'shared.example.com',
+        port: 443,
+        groupId: group.id,
+        clientDevice: 'android',
+        outbound: { type: 'vless', server: 'shared.example.com', server_port: 443, uuid: 'old-android', tls: { enabled: true } },
+        enabled: true
+      }
+    ]
+
+    resolveVpnProfilesMock.mockImplementation((_url: string, options: { clientDevice?: 'pc' | 'android' }) => ({
+      profiles: [
+        {
+          ...makeVpnProfile('shared.example.com', 443, 'Shared'),
+          outbound: { ...makeVpnProfile('shared.example.com', 443, 'Shared').outbound, uuid: `${options.clientDevice}-shared` }
+        }
+      ],
+      source: 'subscription',
+      fetched: true,
+      userInfo: undefined
+    }))
+
+    const res = await refreshGroup(group.id)
+    expect(res.ok).toBe(true)
+
+    const inGroup = pickerProfiles().filter((p) => p.groupId === group.id)
+    expect(inGroup).toHaveLength(2)
+    expect(inGroup.find((p) => p.id === 'pc-shared')?.outbound.uuid).toBe('pc-shared')
+    expect(inGroup.find((p) => p.id === 'android-shared')?.outbound.uuid).toBe('android-shared')
+  })
+
+  it('adds profiles that appear only for a secondary device refresh', async () => {
+    const group = serverGroups.createGroup({
+      name: 'device-delta.example.com',
+      source: 'subscription',
+      sourceUrl: 'https://sub.example.com/device-delta',
+      importedAt: Date.now(),
+      status: 'unknown'
+    })
+
+    storeData.current['server-picker'].profiles = [
+      {
+        id: 'pc-de',
+        name: 'DE',
+        protocol: 'vless',
+        server: 'de.example.com',
+        port: 443,
+        groupId: group.id,
+        clientDevice: 'pc',
+        outbound: { type: 'vless', server: 'de.example.com', server_port: 443, uuid: 'old-pc', tls: { enabled: true } },
+        enabled: true
+      },
+      {
+        id: 'android-de',
+        name: 'DE',
+        protocol: 'vless',
+        server: 'de.example.com',
+        port: 443,
+        groupId: group.id,
+        clientDevice: 'android',
+        outbound: { type: 'vless', server: 'de.example.com', server_port: 443, uuid: 'old-android', tls: { enabled: true } },
+        enabled: true
+      }
+    ]
+
+    resolveVpnProfilesMock.mockImplementation((_url: string, options: { clientDevice?: 'pc' | 'android' }) => ({
+      profiles: options.clientDevice === 'android'
+        ? [
+            { ...makeVpnProfile('de.example.com', 443, 'DE'), outbound: { ...makeVpnProfile('de.example.com', 443, 'DE').outbound, uuid: 'android-de' } },
+            { ...makeVpnProfile('jp.example.com', 443, 'JP'), outbound: { ...makeVpnProfile('jp.example.com', 443, 'JP').outbound, uuid: 'android-jp' } }
+          ]
+        : [
+            { ...makeVpnProfile('de.example.com', 443, 'DE'), outbound: { ...makeVpnProfile('de.example.com', 443, 'DE').outbound, uuid: 'pc-de' } }
+          ],
+      source: 'subscription',
+      fetched: true,
+      userInfo: undefined
+    }))
+
+    const res = await refreshGroup(group.id)
+    expect(res.ok).toBe(true)
+
+    const inGroup = pickerProfiles().filter((p) => p.groupId === group.id)
+    expect(inGroup).toHaveLength(3)
+    expect(inGroup.find((p) => p.server === 'jp.example.com')?.clientDevice).toBe('android')
+    expect(inGroup.find((p) => p.server === 'jp.example.com')?.outbound.uuid).toBe('android-jp')
+  })
+
   it('marks group expired when the subscription returns zero profiles', async () => {
     const group = serverGroups.createGroup({
       name: 'feodorn.com',
@@ -245,5 +427,33 @@ describe('refreshGroup dedup-merge', () => {
     await refreshGroup(group.id)
     const updated = serverGroups.getGroup(group.id)
     expect(updated?.status).toBe('expired')
+  })
+
+  it('marks elapsed subscriptions expired without hiding saved profiles', async () => {
+    const group = serverGroups.createGroup({
+      name: 'expired.example.com',
+      source: 'subscription',
+      sourceUrl: 'https://sub.example.com/expired',
+      importedAt: Date.now() - 30 * 24 * 60 * 60 * 1000,
+      status: 'active',
+      expiresAt: Date.now() - 60_000
+    })
+
+    storeData.current['server-picker'].profiles = [
+      {
+        id: 'p1',
+        name: 'US',
+        protocol: 'vless',
+        server: 'us.example.com',
+        port: 443,
+        groupId: group.id,
+        outbound: { type: 'vless', server: 'us.example.com', server_port: 443 },
+        enabled: true
+      }
+    ]
+
+    const updated = serverGroups.getGroup(group.id)
+    expect(updated?.status).toBe('expired')
+    expect(pickerProfiles().filter((p) => p.groupId === group.id)).toHaveLength(1)
   })
 })

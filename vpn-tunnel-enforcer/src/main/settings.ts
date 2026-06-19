@@ -7,6 +7,7 @@ export interface AppSettings {
   connectionMode: 'localProxy' | 'directVpn'
   proxyOverride: string
   proxyType: 'socks5' | 'http'
+  bootstrapRouteMode: 'auto' | 'direct' | 'localProxy'
   directVpnInput: string
   directVpnSelectedIndex: number
   directVpnCachedInput: string
@@ -39,9 +40,11 @@ export interface AppSettings {
   // Show Windows toast notifications on state changes (TUN up/down, leak,
   // kill-switch engaged). On by default.
   desktopNotifications: boolean
-  // Public/captive Wi-Fi compatibility: do not rewrite physical adapter DNS.
-  // Captive portals often decide "no internet" if Wi-Fi DNS is forced to the
-  // TUN resolver before the portal is authorized.
+  // Public/captive Wi-Fi compatibility: do not rewrite physical adapter DNS
+  // and use a safer TUN MTU for hotspot-like networks. Captive portals often
+  // decide "no internet" if Wi-Fi DNS is forced to the TUN resolver before
+  // the portal is authorized, and mobile/public networks often blackhole
+  // larger TLS packets during PMTU discovery.
   publicWifiCompatibility: boolean
   // Hard adapter lockdown: while TUN is up, disable IPv6 + force IPv4 DNS to
   // the TUN resolver on every physical (Wired/Wireless) adapter. Catches
@@ -50,6 +53,12 @@ export interface AppSettings {
   // invasive but reverted on stop, and without it real-world users still see
   // their original ISP IP in some apps.
   strictAdapterLockdown: boolean
+  // Packet-level diagnostics capture. Keeps a rolling OS packet trace while
+  // VPN protection is active so exported diagnostics can be inspected down to
+  // drops, resets, timings and packet payload boundaries.
+  deepTrafficInspectionEnabled: boolean
+  deepTrafficInspectionMaxSizeMb: number
+  deepTrafficInspectionRetainSessions: number
   // Anti-DPI / "stealth" mode against ISP-level traffic-shaping (TSPU and
   // similar). When ON we apply a bundle of mitigations that reduce VPN
   // signature visibility:
@@ -79,6 +88,16 @@ export interface AppSettings {
   // direct so they resolve to the user's real location. Only meaningful when
   // smartRuSplit is ON ("карты по желанию").
   smartRuMapsDirect: boolean
+  // Smart-RU rule-set source. `bundled` keeps the current safe app-shipped
+  // files; `managed` prefers an app-owned cache under userData and falls back
+  // to bundled files when the cache is incomplete.
+  smartRuRuleSetMode: 'bundled' | 'managed'
+  // Background refresh for the managed rule-set cache.
+  smartRuRuleSetAutoUpdate: boolean
+  // Try to use the configured proxy override for managed rule-set downloads.
+  smartRuRuleSetUseProxy: boolean
+  // Managed rule-set refresh cadence.
+  smartRuRuleSetUpdateIntervalHours: number
 }
 
 const defaults: AppSettings = {
@@ -86,6 +105,7 @@ const defaults: AppSettings = {
   connectionMode: 'localProxy',
   proxyOverride: '',
   proxyType: 'socks5',
+  bootstrapRouteMode: 'auto',
   directVpnInput: '',
   directVpnSelectedIndex: 0,
   directVpnCachedInput: '',
@@ -110,9 +130,16 @@ const defaults: AppSettings = {
   desktopNotifications: true,
   publicWifiCompatibility: true,
   strictAdapterLockdown: true,
+  deepTrafficInspectionEnabled: true,
+  deepTrafficInspectionMaxSizeMb: 512,
+  deepTrafficInspectionRetainSessions: 3,
   stealthMode: false,
   smartRuSplit: false,
-  smartRuMapsDirect: false
+  smartRuMapsDirect: false,
+  smartRuRuleSetMode: 'bundled',
+  smartRuRuleSetAutoUpdate: true,
+  smartRuRuleSetUseProxy: true,
+  smartRuRuleSetUpdateIntervalHours: 24
 }
 
 const store = new Store<{ settings: AppSettings }>({
@@ -136,6 +163,9 @@ function normalizeSettings(input: Partial<AppSettings> | undefined): AppSettings
     connectionMode: merged.connectionMode === 'directVpn' ? 'directVpn' : 'localProxy',
     proxyOverride: typeof merged.proxyOverride === 'string' ? merged.proxyOverride.trim() : '',
     proxyType: merged.proxyType === 'http' ? 'http' : 'socks5',
+    bootstrapRouteMode: merged.bootstrapRouteMode === 'direct' || merged.bootstrapRouteMode === 'localProxy'
+      ? merged.bootstrapRouteMode
+      : 'auto',
     directVpnInput: typeof merged.directVpnInput === 'string' ? merged.directVpnInput.trim() : '',
     directVpnSelectedIndex: Math.max(0, Math.floor(Number(merged.directVpnSelectedIndex) || 0)),
     directVpnCachedInput: typeof merged.directVpnCachedInput === 'string' ? merged.directVpnCachedInput.trim() : '',
@@ -155,6 +185,15 @@ function normalizeSettings(input: Partial<AppSettings> | undefined): AppSettings
     desktopNotifications: merged.desktopNotifications !== false,
     publicWifiCompatibility: merged.publicWifiCompatibility !== false,
     strictAdapterLockdown: merged.strictAdapterLockdown !== false,
+    deepTrafficInspectionEnabled: merged.deepTrafficInspectionEnabled !== false,
+    deepTrafficInspectionMaxSizeMb: Math.min(
+      2048,
+      Math.max(128, Math.floor(Number(merged.deepTrafficInspectionMaxSizeMb) || defaults.deepTrafficInspectionMaxSizeMb))
+    ),
+    deepTrafficInspectionRetainSessions: Math.min(
+      10,
+      Math.max(1, Math.floor(Number(merged.deepTrafficInspectionRetainSessions) || defaults.deepTrafficInspectionRetainSessions))
+    ),
     // stealthMode is OFF by default — its mitigations (smaller MTU, TLS
     // fragmentation) cost a few % bandwidth and extra round-trips, only
     // worth paying on networks that actively shape VPN traffic. Without
@@ -162,7 +201,14 @@ function normalizeSettings(input: Partial<AppSettings> | undefined): AppSettings
     // the existing UI toggle had no effect.
     stealthMode: Boolean(merged.stealthMode),
     smartRuSplit: Boolean(merged.smartRuSplit),
-    smartRuMapsDirect: Boolean(merged.smartRuMapsDirect)
+    smartRuMapsDirect: Boolean(merged.smartRuMapsDirect),
+    smartRuRuleSetMode: merged.smartRuRuleSetMode === 'managed' ? 'managed' : 'bundled',
+    smartRuRuleSetAutoUpdate: merged.smartRuRuleSetAutoUpdate !== false,
+    smartRuRuleSetUseProxy: merged.smartRuRuleSetUseProxy !== false,
+    smartRuRuleSetUpdateIntervalHours: Math.min(
+      720,
+      Math.max(1, Math.floor(Number(merged.smartRuRuleSetUpdateIntervalHours) || defaults.smartRuRuleSetUpdateIntervalHours))
+    )
   }
 }
 

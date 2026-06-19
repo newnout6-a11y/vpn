@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useAppStore, type LeakSelfTestResultClient } from '../store'
 import { AlertTriangle, CheckCircle2, FileArchive, FolderOpen, Loader2, Radar, Send, ShieldAlert } from 'lucide-react'
 
@@ -28,6 +28,25 @@ export function DiagnosticsCard() {
   const [testing, setTesting] = useState(false)
   const [exporting, setExporting] = useState(false)
   const [exportPath, setExportPath] = useState<string | null>(null)
+  const [forensicsStatus, setForensicsStatus] = useState<any>(null)
+
+  useEffect(() => {
+    let mounted = true
+    const checkStatus = async () => {
+      try {
+        const status = await window.electronAPI.getTrafficForensicsStatus()
+        if (mounted) setForensicsStatus(status)
+      } catch (err) {
+        // Status is best-effort UI telemetry; the export button remains usable.
+      }
+    }
+    checkStatus()
+    const interval = setInterval(checkStatus, 3000)
+    return () => {
+      mounted = false
+      clearInterval(interval)
+    }
+  }, [])
 
   const handleSelfTest = async () => {
     setTesting(true)
@@ -35,7 +54,7 @@ export function DiagnosticsCard() {
     try {
       const result = await window.electronAPI.runLeakSelfTest()
       setLeakResult(result)
-      const level = result.physicalAdapterReached || result.publicIpMismatch ? 'error' : 'info'
+      const level = result.physicalAdapterReached || result.publicIpMismatch || result.dnsLeakDetected ? 'error' : 'info'
       addLog(level, `Результат проверки: ${result.summary}`)
     } catch (err: any) {
       addLog('error', `Не удалось запустить проверку утечки: ${err.message ?? err}`)
@@ -73,10 +92,73 @@ export function DiagnosticsCard() {
     }
   }
 
+  const isForensicsRunning = forensicsStatus?.running
+  const isForensicsFailed = !isForensicsRunning && forensicsStatus?.stopReason === 'start-failed'
+  const forensicsHealth = forensicsStatus?.health
+  const formatBytes = (bytes?: number) => {
+    if (!bytes) return '0 KB'
+    if (bytes >= 1024 * 1024) return `${Math.round(bytes / 1024 / 1024)} MB`
+    return `${Math.round(bytes / 1024)} KB`
+  }
+  const liveSnapshotText = forensicsHealth?.liveSnapshotAt
+    ? new Date(forensicsHealth.liveSnapshotAt).toLocaleTimeString('ru-RU')
+    : 'none'
+
+  let forensicsDotColor = 'bg-gray-500'
+  let forensicsText = 'СБОР ОСТАНОВЛЕН'
+  let forensicsTooltip = 'Сбор пакетов остановлен'
+
+  if (isForensicsRunning) {
+    forensicsDotColor = 'bg-success animate-pulse'
+    forensicsText = 'СБОР ПАКЕТОВ'
+    forensicsTooltip = 'Идёт сбор пакетов'
+  } else if (isForensicsFailed) {
+    forensicsDotColor = 'bg-danger'
+    forensicsText = 'ОШИБКА СБОРА'
+    forensicsTooltip = forensicsStatus?.lastError || 'Не удалось запустить сбор пакетов'
+  }
+
   return (
     <div className="card space-y-4">
       <div>
-        <h3 className="text-sm font-semibold text-gray-300 uppercase tracking-wider">Диагностика</h3>
+        <div className="flex items-center gap-2">
+          <h3 className="text-sm font-semibold text-gray-300 uppercase tracking-wider">Диагностика</h3>
+          {forensicsStatus && (
+            <div className="flex items-center gap-1.5 bg-surface/50 px-2 py-0.5 rounded-full border border-surface-lighter/20" title={forensicsTooltip}>
+              <div className={`w-2 h-2 rounded-full ${forensicsDotColor}`} />
+              <span className="text-[10px] text-gray-400 font-medium tracking-wide">
+                {forensicsText}
+              </span>
+            </div>
+          )}
+        </div>
+        {forensicsStatus && (
+          <div className="mt-2 grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]">
+            <div className="rounded border border-surface-lighter/20 bg-surface/40 px-2 py-1">
+              <p className="text-gray-500">pktmon</p>
+              <p className="text-gray-300 font-mono">{forensicsStatus.engine ?? 'off'} · {formatBytes(forensicsHealth?.etlBytes)}</p>
+            </div>
+            <div className="rounded border border-surface-lighter/20 bg-surface/40 px-2 py-1">
+              <p className="text-gray-500">live</p>
+              <p className="text-gray-300 font-mono">{liveSnapshotText}</p>
+            </div>
+            <div className={`rounded border px-2 py-1 ${forensicsHealth?.sidecarOnlyLifecycle ? 'border-warning/40 bg-warning/10' : 'border-surface-lighter/20 bg-surface/40'}`}>
+              <p className="text-gray-500">sidecar</p>
+              <p className="text-gray-300 font-mono">
+                {forensicsHealth?.sidecarWarmingUp ? 'warming up' : forensicsStatus.sidecar?.running ? 'running' : 'off'} · {forensicsHealth?.sidecarEvents ?? 0} events
+              </p>
+            </div>
+            <div className="rounded border border-surface-lighter/20 bg-surface/40 px-2 py-1">
+              <p className="text-gray-500">artifacts</p>
+              <p className="text-gray-300 font-mono">{forensicsHealth?.artifactCount ?? 0} files</p>
+            </div>
+          </div>
+        )}
+        {forensicsHealth?.warnings?.length > 0 && (
+          <p className="text-[11px] text-warning mt-1">
+            {forensicsHealth.warnings[0]}
+          </p>
+        )}
         <p className="text-xs text-gray-500 mt-1">
           Если что-то не так — нажмите «Отправить логи разработчику» и пришлите ZIP. Внутри уже есть все
           снимки сетевого состояния, конфиги и логи за последние сессии.
@@ -137,7 +219,7 @@ export function DiagnosticsCard() {
 }
 
 function LeakResultPanel({ result }: { result: LeakSelfTestResultClient }) {
-  const isLeak = result.physicalAdapterReached || result.publicIpMismatch
+  const isLeak = result.physicalAdapterReached || result.publicIpMismatch || result.dnsLeakDetected
   const Icon = isLeak ? ShieldAlert : CheckCircle2
   // Tailwind cannot resolve dynamic class names like `bg-${color}/10` because
   // it purges unused classes at build time, so we hard-code the two variants.

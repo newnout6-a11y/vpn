@@ -34,7 +34,7 @@ vi.mock('./firewallKillSwitch', () => ({
   isKillSwitchActive: vi.fn().mockResolvedValue(false)
 }))
 vi.mock('./physicalAdapterLockdown', () => ({
-  applyPhysicalAdapterLockdown: vi.fn(), isPhysicalAdapterLockdownApplied: vi.fn().mockResolvedValue(false),
+  applyPhysicalAdapterLockdown: vi.fn(), getPhysicalAdapterDnsSources: vi.fn().mockResolvedValue([]), isPhysicalAdapterLockdownApplied: vi.fn().mockResolvedValue(false),
   repairOrphanedPhysicalAdapterDns: vi.fn(), rollbackPhysicalAdapterLockdownIfApplied: vi.fn()
 }))
 vi.mock('./systemNetwork', () => ({ rollbackTunNetworkBaselineIfApplied: vi.fn().mockResolvedValue({ success: true }) }))

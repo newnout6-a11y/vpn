@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { motion } from 'framer-motion'
 import { PageTip } from '../components/PageTip'
@@ -119,6 +119,7 @@ export function Dashboard() {
   const [disengaging, setDisengaging] = useState(false)
   const [nuclearResetting, setNuclearResetting] = useState(false)
   const [ipGeo, setIpGeo] = useState<{ country: string | null; city: string | null }>({ country: null, city: null })
+  const transitionSeqRef = useRef(0)
 
   // Uptime ticker
   const [now, setNow] = useState(() => Date.now())
@@ -145,6 +146,9 @@ export function Dashboard() {
             country: data.country_name || null,
             city: data.city || null
           })
+          if (data.country_name) {
+            window.electronAPI.serversVerifyActiveCountry(publicIp).catch(() => undefined)
+          }
         }
       } catch {
         // silent — chip will just show IP without country
@@ -185,6 +189,7 @@ export function Dashboard() {
     // flight. Without this the user could double-start the tunnel (main does
     // guard it, but the UI used to still allow the click and then "broke").
     if (connectionBusy) return
+    const transitionSeq = ++transitionSeqRef.current
     setConnectionBusy('connecting')
     addLog('info', t('dashboard.connecting'))
 
@@ -205,6 +210,7 @@ export function Dashboard() {
         const saved = await window.electronAPI.saveSettings(settings)
         setSettings(saved)
         const result = await window.electronAPI.startDirectVpn()
+        if (transitionSeq !== transitionSeqRef.current) return
         if (result.success) {
           setMode('hard')
           setTunRunning(true)
@@ -234,6 +240,7 @@ export function Dashboard() {
           return
         }
         const result = await window.electronAPI.startTun(proxyAddr, proxyType)
+        if (transitionSeq !== transitionSeqRef.current) return
         if (result.success) {
           setMode('hard')
           setTunRunning(true)
@@ -263,17 +270,21 @@ export function Dashboard() {
       addLog('error', `Ошибка запуска: ${errorMsg}`)
     } finally {
       refreshKillSwitchState()
-      setConnectionBusy(null)
+      if (transitionSeq === transitionSeqRef.current) {
+        setConnectionBusy(null)
+      }
     }
   }
 
   const handleDisconnect = async () => {
     if (connectionBusy) return
+    const transitionSeq = ++transitionSeqRef.current
     setConnectionBusy('disconnecting')
     addLog('info', 'Выключаем защиту…')
 
     try {
       const result = await window.electronAPI.stopTun()
+      if (transitionSeq !== transitionSeqRef.current) return
       if (result.success) {
         setMode('off')
         setTunRunning(false)
@@ -289,7 +300,9 @@ export function Dashboard() {
       showToast('error', t('dashboard.connectionError'), errorMsg)
       addLog('error', `Ошибка остановки: ${errorMsg}`)
     } finally {
-      setConnectionBusy(null)
+      if (transitionSeq === transitionSeqRef.current) {
+        setConnectionBusy(null)
+      }
     }
   }
 

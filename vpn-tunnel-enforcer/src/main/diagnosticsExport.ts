@@ -19,6 +19,7 @@ import { promisify } from 'util'
 import { logEvent, getFullLogs } from './appLogger'
 import { settingsStore } from './settings'
 import { runSystemDiagnostics } from './systemDiagnostics'
+import { stageTrafficForensicsArtifacts } from './trafficForensics'
 import { getTunRuntimeDir } from './tunController'
 import { redactSensitiveConfig, redactSensitiveText, redactSettingsForDiagnostics } from './vpnProfiles'
 
@@ -64,7 +65,7 @@ export async function exportDiagnosticsZip(): Promise<ExportResult> {
   // Ask the user where to drop the zip.
   const defaultName = `vpn-tunnel-enforcer-diagnostics-${new Date().toISOString().replace(/[:.]/g, '-')}.zip`
   const choice = await dialog.showSaveDialog({
-    title: 'Сохранить диагностику',
+    title: 'РЎРѕС…СЂР°РЅРёС‚СЊ РґРёР°РіРЅРѕСЃС‚РёРєСѓ',
     defaultPath: join(app.getPath('desktop'), defaultName),
     filters: [{ name: 'ZIP archive', extensions: ['zip'] }]
   })
@@ -102,7 +103,7 @@ export async function exportDiagnosticsZip(): Promise<ExportResult> {
       try {
         const entries = await readdir(runtime)
         for (const name of entries) {
-          // Skip the binaries themselves — they're huge and the user already
+          // Skip the binaries themselves - they're huge and the user already
           // has them. Only ship configs/logs/manifests.
           if (/\.(json|log|txt|manifest)$/i.test(name)) {
             const src = join(runtime, name)
@@ -129,15 +130,15 @@ export async function exportDiagnosticsZip(): Promise<ExportResult> {
     }
 
     // 6. Baseline manifest (so support can see what we changed in the registry).
-    // NOTE: these manifests live in SUBDIRECTORIES, not the userData root.
-    // network baseline → network-backups/, kill-switch → firewall-killswitch/.
+    // NOTE: these manifests live in subdirectories, not the userData root.
+    // network baseline -> network-backups/, kill-switch -> firewall-killswitch/.
     // The old root-level paths never matched, so the ZIP shipped without them.
     const userData = app.getPath('userData')
     await copyIfExists(join(userData, 'network-backups', 'latest-tun-network-baseline.json'), join(stage, 'baseline-manifest.json'))
     await copyIfExists(join(userData, 'firewall-killswitch', 'manifest.json'), join(stage, 'killswitch-manifest.json'))
     await copyIfExists(join(userData, 'latest-physical-adapter-lockdown.json'), join(stage, 'adapter-lockdown-manifest.json'))
 
-    // 6b. Snapshots dir — every captured network/system snapshot from app
+    // 6b. Snapshots dir - every captured network/system snapshot from app
     // start, every TUN start/stop, periodic 60s captures, and any
     // leak-detected event. This is the bulk of the support-relevant data.
     const snapshotsDir = join(userData, 'snapshots')
@@ -164,23 +165,49 @@ export async function exportDiagnosticsZip(): Promise<ExportResult> {
       }
     }
 
+    try {
+      await stageTrafficForensicsArtifacts(stage)
+    } catch (err) {
+      logEvent('warn', 'diag-export', 'failed to stage traffic forensics artifacts', { err: (err as Error)?.message })
+    }
+
+    try {
+      const refreshedLogs = await getFullLogs()
+      await writeFile(join(stage, 'app-log.json'), JSON.stringify(redactSensitiveConfig(refreshedLogs), null, 2), 'utf-8')
+    } catch (err) {
+      logEvent('warn', 'diag-export', 'failed to refresh app log after traffic forensics staging', { err: (err as Error)?.message })
+    }
+
     // 7. README so the user/support knows what's inside.
-    const readme = `Диагностика VPN Tunnel Enforcer
-Создано: ${new Date().toISOString()}
+    const readme = `Р”РёР°РіРЅРѕСЃС‚РёРєР° VPN Tunnel Enforcer
+РЎРѕР·РґР°РЅРѕ: ${new Date().toISOString()}
 
-Содержимое:
-  settings.json              — текущие настройки приложения
-  app-log.json               — последние записи лога приложения
-  system-info.json           — версия Windows, ОЗУ, ЦП
-  system-diagnostics.json    — снимок маршрутов, ipconfig, netsh interface
-  runtime-*.json/log         — конфиг и логи sing-box
-  baseline-manifest.json     — что было изменено в proxy-настройках Windows (если применялось)
-  killswitch-manifest.json   — установленные правила Windows Firewall (если применялись)
-  adapter-lockdown-manifest.json — что было изменено на физических адаптерах (IPv6/DNS), если применялось
-  snapshots/                 — снимки сетевого состояния (адаптеры/маршруты/DNS/firewall) на каждом важном
-                               событии (старт app, пред-/пост-старт TUN, краш sing-box, утечка, периодика 60с)
+РЎРѕРґРµСЂР¶РёРјРѕРµ:
+  settings.json                     - С‚РµРєСѓС‰РёРµ РЅР°СЃС‚СЂРѕР№РєРё РїСЂРёР»РѕР¶РµРЅРёСЏ
+  app-log.json                      - РїРѕСЃР»РµРґРЅРёРµ Р·Р°РїРёСЃРё Р»РѕРіР° РїСЂРёР»РѕР¶РµРЅРёСЏ
+  system-info.json                  - РІРµСЂСЃРёСЏ Windows, РїР°РјСЏС‚СЊ, CPU
+  system-diagnostics.json           - СЃРЅРёРјРѕРє РјР°СЂС€СЂСѓС‚РѕРІ, ipconfig, netsh Рё РёС‚РѕРіРѕРІР°СЏ СЃРІРѕРґРєР° РїСЂРѕРІРµСЂРѕРє
+  runtime-*.json/log                - РєРѕРЅС„РёРі Рё Р»РѕРіРё sing-box
+  baseline-manifest.json            - РєР°РєРёРµ proxy-РЅР°СЃС‚СЂРѕР№РєРё Windows Р±С‹Р»Рё РёР·РјРµРЅРµРЅС‹
+  killswitch-manifest.json          - РєР°РєРёРµ РїСЂР°РІРёР»Р° Windows Firewall Р±С‹Р»Рё РїСЂРёРјРµРЅРµРЅС‹
+  adapter-lockdown-manifest.json    - РєР°РєРёРµ РёР·РјРµРЅРµРЅРёСЏ РІРЅРѕСЃРёР»РёСЃСЊ РІ С„РёР·РёС‡РµСЃРєРёРµ Р°РґР°РїС‚РµСЂС‹ (IPv6/DNS)
+  snapshots/                        - СЃРЅРёРјРєРё СЃРѕСЃС‚РѕСЏРЅРёСЏ СЃРµС‚Рё Рё СЃРёСЃС‚РµРјС‹ РЅР° РєР»СЋС‡РµРІС‹С… СЌС‚Р°РїР°С… СЂР°Р±РѕС‚С‹ РїСЂРёР»РѕР¶РµРЅРёСЏ
+  traffic-forensics/                - РіР»СѓР±РѕРєР°СЏ packet-level С‚СЂР°СЃСЃР°: ETL/PCAP/TXT, СЃС‡С‘С‚С‡РёРєРё pktmon,
+                                      РїСЂРёС‡РёРЅС‹ drop/reset, WFP netevents/state, manifest РїРѕ СЃРµСЃСЃРёСЏРј
+                                      Рё РЅРѕСЂРјР°Р»РёР·РѕРІР°РЅРЅР°СЏ СЃРІРѕРґРєР° summary.json/timeline.ndjson
+  traffic-forensics/*/summary.json  - evidence-linked РІС‹РІРѕРґС‹: TUN path, WFP/firewall block,
+                                      DNS/TCP/drop СЃРёРіРЅР°Р»С‹ Рё СѓСЂРѕРІРµРЅСЊ РґРѕСЃС‚Р°С‚РѕС‡РЅРѕСЃС‚Рё РґРѕРєР°Р·Р°С‚РµР»СЊСЃС‚РІ
+  traffic-forensics/*/*.ndjson      - timeline, dns, drops, tcp-health, packet-metrics, flows, app-events РґР»СЏ РєРѕСЂСЂРµР»СЏС†РёРё
+  traffic-forensics/*/events.ndjson - optional ETW sidecar input: TCPIP/DNS/WFP/Winsock/WebIO normalized events
 
-Файл предназначен для отправки в поддержку.
+traffic-forensics РѕСЃРѕР±РµРЅРЅРѕ РїРѕР»РµР·РµРЅ РґР»СЏ СЂР°Р·Р±РѕСЂР°:
+  - ERR_CONNECTION_CLOSED / reset / timeout РІРЅРµ РїСЂРёР»РѕР¶РµРЅРёСЏ
+  - РґРѕР»РіРёС… Р·Р°РіСЂСѓР·РѕРє Рё Р·Р°РІРёСЃР°СЋС‰РёС… СЃР°Р№С‚РѕРІ
+  - РІРЅРµС€РЅРµР№ С„РёР»СЊС‚СЂР°С†РёРё, РѕР±СЂС‹РІРѕРІ РїРѕ РїСѓС‚Рё Рё СЃРїРѕСЂРЅС‹С… РїСЂРѕР±Р»РµРј Windows-СЃРµС‚Рё
+
+Р’Р°Р¶РЅРѕ: raw ETL/PCAP/TXT РјРѕРіСѓС‚ СЃРѕРґРµСЂР¶Р°С‚СЊ С‡СѓРІСЃС‚РІРёС‚РµР»СЊРЅС‹Р№ СЃРµС‚РµРІРѕР№ С‚СЂР°С„РёРє.
+
+РђСЂС…РёРІ РїРѕРґРіРѕС‚РѕРІР»РµРЅ РґР»СЏ РѕС‚РїСЂР°РІРєРё РІ РїРѕРґРґРµСЂР¶РєСѓ РёР»Рё РґР»СЏ РїРѕРІС‚РѕСЂРЅРѕРіРѕ СЂР°Р·Р±РѕСЂР° РїРѕР·Р¶Рµ.
 `
     await writeFile(join(stage, 'README.txt'), readme, 'utf-8')
 

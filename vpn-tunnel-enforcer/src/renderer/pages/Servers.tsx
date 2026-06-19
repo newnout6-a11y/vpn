@@ -13,10 +13,10 @@ import {
   Copy,
   Download,
   ChevronRight,
-  ChevronDown,
   HeartPulse,
   ExternalLink,
-  AlertCircle
+  AlertCircle,
+  Globe2
 } from 'lucide-react'
 import {
   MacCard,
@@ -33,38 +33,13 @@ import {
 } from '../design-system'
 import { PageTip } from '../components/PageTip'
 import { ServerDetailModal } from '../components/ServerDetailModal'
-import { detectCountry } from '../components/countryGlyph'
+import { countryFlagFromCountryOrName } from '../components/countryGlyph'
 import { ForeignVpnBanner } from '../components/ForeignVpnBanner'
 import { emitServerChanged } from '../nav'
 import { useAppStore } from '../store'
-import type { ServerProfile } from '../../shared/ipc-types'
+import type { ClientDevice, ServerGroup, ServerProfile } from '../../shared/ipc-types'
 
 // ─── Types ─────────────────────────────────────────────────────────────────
-
-/**
- * Mirrors the future shared `ServerGroup` shape from ipc-types. Defined
- * locally so this file compiles before Agent A merges the type addition;
- * once that lands, this can be deleted in favour of the import.
- */
-interface ServerGroup {
-  id: string
-  name: string
-  source: 'subscription' | 'manual'
-  sourceUrl?: string
-  importedAt: number
-  lastFetchedAt?: number
-  lastFetchAttemptAt?: number
-  lastFetchError?: string
-  status: 'active' | 'expired' | 'unreachable' | 'unknown'
-  trafficUsedBytes?: number
-  trafficUploadBytes?: number
-  trafficDownloadBytes?: number
-  trafficTotalBytes?: number
-  expiresAt?: number
-  refreshIntervalSeconds?: number
-  webPageUrl?: string
-  lastRefreshProfilesCount?: number
-}
 
 interface PerRowPing {
   ping: number | null
@@ -78,9 +53,24 @@ interface HealthRow {
   reason?: string
 }
 
+export function displayedServerPing(profile: Pick<ServerProfile, 'ping'>, perRowPing?: Pick<PerRowPing, 'ping'>): number | null {
+  return perRowPing?.ping ?? profile.ping ?? null
+}
+
 const VIRTUAL_ALL_GROUP_ID = '__virtual_all__'
 const EXPANDED_STORAGE_KEY = 'vpnte:expanded-groups'
 const NEW_GROUP_OPTION = '__new__'
+
+const CLIENT_DEVICE_OPTIONS: SelectOption[] = [
+  { value: 'pc', label: 'PC' },
+  { value: 'android', label: 'Android' },
+  { value: 'ios', label: 'iOS' },
+  { value: 'mac', label: 'Mac' }
+]
+
+function clientDeviceLabel(device?: ClientDevice): string {
+  return CLIENT_DEVICE_OPTIONS.find(option => option.value === (device ?? 'pc'))?.label ?? 'PC'
+}
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
@@ -105,6 +95,38 @@ function formatHappType(profile: ServerProfile): string {
   const proto = (profile.protocol || 'unknown').toUpperCase()
   const hasJson = !!profile.outbound && typeof profile.outbound === 'object'
   return hasJson ? `${proto} | JSON` : proto
+}
+
+function profileStealthBadge(profile: ServerProfile): { label: string; title: string; variant: BadgeVariant } | null {
+  const outbound = profile.outbound && typeof profile.outbound === 'object' ? profile.outbound : null
+  const protocol = (profile.protocol || outbound?.type || '').toLowerCase()
+  const tls = outbound?.tls && typeof outbound.tls === 'object' && outbound.tls.enabled !== false
+    ? outbound.tls
+    : null
+  const ech = tls?.ech && typeof tls.ech === 'object' && tls.ech.enabled !== false ? tls.ech : null
+
+  if (ech && (Array.isArray(ech.config) || ech.config_path || ech.query_server_name)) {
+    return { label: 'ECH', title: 'Encrypted ClientHello configured', variant: 'info' }
+  }
+  if (tls?.reality && typeof tls.reality === 'object' && tls.reality.enabled !== false) {
+    return { label: 'Reality', title: 'Reality TLS camouflage', variant: 'info' }
+  }
+  if (protocol === 'naive') {
+    return { label: 'Naive', title: 'NaiveProxy-style TLS profile', variant: 'neutral' }
+  }
+  if (protocol === 'hysteria2' && outbound?.obfs && typeof outbound.obfs === 'object') {
+    return { label: 'OBFS', title: 'Hysteria2 obfuscation configured', variant: 'info' }
+  }
+  if (tls?.utls && typeof tls.utls === 'object' && tls.utls.enabled !== false) {
+    return { label: 'uTLS', title: 'Browser-like TLS fingerprint', variant: 'neutral' }
+  }
+  if (tls) {
+    return { label: 'TLS', title: 'TLS profile without explicit uTLS/Reality marker', variant: 'neutral' }
+  }
+  if (protocol === 'vless' || protocol === 'vmess' || protocol === 'trojan') {
+    return { label: 'Plain', title: 'No TLS/Reality/uTLS marker detected', variant: 'warning' }
+  }
+  return null
 }
 
 function statusVariant(status: ServerProfile['status']): BadgeVariant {
@@ -212,9 +234,11 @@ export function Servers() {
   const [pinging, setPinging] = useState(false)
   const [addInput, setAddInput] = useState('')
   const [addGroupId, setAddGroupId] = useState<string>(NEW_GROUP_OPTION)
+  const [addClientDevice, setAddClientDevice] = useState<ClientDevice>('pc')
   const [adding, setAdding] = useState(false)
   const [addError, setAddError] = useState('')
   const [perRowPings, setPerRowPings] = useState<Record<string, PerRowPing>>({})
+  const [verifyingCountryById, setVerifyingCountryById] = useState<Record<string, boolean>>({})
   const [detailProfile, setDetailProfile] = useState<ServerProfile | null>(null)
   const [exportFlash, setExportFlash] = useState<Record<string, 'copied' | 'saved' | 'failed'>>({})
   const [exportingAll, setExportingAll] = useState(false)
@@ -442,6 +466,44 @@ export function Servers() {
     probeRow(profile.id, profile.server, profile.port)
   }
 
+  const handleVerifyCountry = async (profile: ServerProfile) => {
+    if (!profile.id || !profile.server) return
+    setVerifyingCountryById((prev) => ({ ...prev, [profile.id]: true }))
+    try {
+      const api = window.electronAPI as unknown as {
+        serversVerifyCountry?: (id: string) => Promise<
+          | { ok: true; country: string; profile: ServerProfile }
+          | { ok: false; reason: string; country?: string }
+        >
+      }
+      if (!api.serversVerifyCountry) throw new Error('servers:verify-country unavailable')
+      const result = await api.serversVerifyCountry(profile.id)
+      if (result.ok) {
+        setProfiles((prev) => prev.map((p) => (p.id === result.profile.id ? result.profile : p)))
+        setDetailProfile((prev) => (prev?.id === result.profile.id ? result.profile : prev))
+        setPerRowPings((prev) => ({
+          ...prev,
+          [result.profile.id]: {
+            ping: prev[result.profile.id]?.ping ?? result.profile.ping ?? null,
+            country: result.profile.country ?? result.country ?? null,
+            loading: false
+          }
+        }))
+        showToast('success', result.profile.name, result.country)
+      } else {
+        showToast('warning', profile.name, result.reason)
+      }
+    } catch (err: any) {
+      showToast('error', profile.name, err?.message ?? String(err))
+    } finally {
+      setVerifyingCountryById((prev) => {
+        const next = { ...prev }
+        delete next[profile.id]
+        return next
+      })
+    }
+  }
+
   const handlePingAll = async () => {
     setPinging(true)
     try {
@@ -477,12 +539,16 @@ export function Servers() {
     setAddError('')
     try {
       const api = window.electronAPI as unknown as {
-        serversAddToGroup?: (input: string, groupId: string | null) => Promise<ServerProfile[]>
+        serversAddToGroup?: (
+          input: string,
+          groupId: string | null,
+          options?: { clientDevice?: ClientDevice }
+        ) => Promise<ServerProfile[]>
       }
       if (addGroupId !== NEW_GROUP_OPTION && groupsAvailable && api.serversAddToGroup) {
-        await api.serversAddToGroup(trimmed, addGroupId)
+        await api.serversAddToGroup(trimmed, addGroupId, { clientDevice: addClientDevice })
       } else {
-        await window.electronAPI.serversAdd(trimmed)
+        await window.electronAPI.serversAdd(trimmed, { clientDevice: addClientDevice })
       }
       setAddInput('')
       // Reset selection to "create new" so the user's next paste also creates
@@ -902,9 +968,10 @@ export function Servers() {
 
       {/* Add card */}
       <MacCard>
-        <div className="flex flex-col md:flex-row md:items-end gap-3">
-          <div className="flex-1 min-w-0">
+        <div className="grid grid-cols-1 gap-3 xl:grid-cols-[minmax(360px,1fr)_minmax(220px,0.55fr)_9rem_auto] xl:items-end">
+          <div className="min-w-0">
             <MacInput
+              label={t('servers.add.keyLabel', 'Ключ / подписка')}
               placeholder={t('servers.addPlaceholder')}
               value={addInput}
               onChange={(e) => {
@@ -917,7 +984,7 @@ export function Servers() {
               }}
             />
           </div>
-          <div className="md:w-72">
+          <div className="min-w-0">
             <MacSelect
               label={t('servers.add.selectGroup')}
               options={groupOptions}
@@ -926,7 +993,20 @@ export function Servers() {
               disabled={!groupsAvailable && groupOptions.length === 1}
             />
           </div>
-          <MacButton onClick={handleAdd} loading={adding} disabled={!addInput.trim()}>
+          <div className="min-w-0">
+            <MacSelect
+              label="Device"
+              options={CLIENT_DEVICE_OPTIONS}
+              value={addClientDevice}
+              onChange={(v) => setAddClientDevice((v === 'android' || v === 'ios' || v === 'mac') ? v : 'pc')}
+            />
+          </div>
+          <MacButton
+            className="w-full xl:w-auto xl:min-w-40 whitespace-nowrap"
+            onClick={handleAdd}
+            loading={adding}
+            disabled={!addInput.trim()}
+          >
             <Plus className="w-4 h-4 mr-1" />
             {t('servers.addServer')}
           </MacButton>
@@ -973,10 +1053,12 @@ export function Servers() {
                 healthByProfile={healthByProfile}
                 activeId={activeId}
                 perRowPings={perRowPings}
+                verifyingCountryById={verifyingCountryById}
                 exportFlash={exportFlash}
                 onSelectProfile={handleSelect}
                 onRemoveProfile={handleRemove}
                 onPingProfile={handlePingOne}
+                onVerifyCountryProfile={handleVerifyCountry}
                 onExportProfile={handleExport}
                 onExportProfileToFile={handleExportToFile}
                 onOpenDetail={setDetailProfile}
@@ -993,6 +1075,11 @@ export function Servers() {
         open={!!detailProfile}
         profile={detailProfile}
         onClose={() => setDetailProfile(null)}
+        onProfileUpdated={(updated) => {
+          setProfiles((prev) => prev.map((p) => (p.id === updated.id ? updated : p)))
+          setDetailProfile(updated)
+          emitServerChanged()
+        }}
       />
 
       {/* Delete group confirmation */}
@@ -1082,10 +1169,12 @@ interface GroupCardProps {
   healthByProfile: Record<string, HealthRow>
   activeId: string | null
   perRowPings: Record<string, PerRowPing>
+  verifyingCountryById: Record<string, boolean>
   exportFlash: Record<string, 'copied' | 'saved' | 'failed'>
   onSelectProfile: (id: string) => void
   onRemoveProfile: (id: string) => void
   onPingProfile: (p: ServerProfile) => void
+  onVerifyCountryProfile: (p: ServerProfile) => void
   onExportProfile: (id: string) => void
   onExportProfileToFile: (id: string) => void
   onOpenDetail: (p: ServerProfile) => void
@@ -1115,10 +1204,12 @@ function GroupCard(props: GroupCardProps) {
     healthByProfile,
     activeId,
     perRowPings,
+    verifyingCountryById,
     exportFlash,
     onSelectProfile,
     onRemoveProfile,
     onPingProfile,
+    onVerifyCountryProfile,
     onExportProfile,
     onExportProfileToFile,
     onOpenDetail,
@@ -1299,11 +1390,13 @@ function GroupCard(props: GroupCardProps) {
                             group={isVirtual ? null : group}
                             isActive={profile.id === activeId}
                             perRowPing={perRowPings[profile.id]}
+                            verifyingCountry={!!verifyingCountryById[profile.id]}
                             health={healthByProfile[profile.id]}
                             exportFlash={exportFlash[profile.id]}
                             onSelect={onSelectProfile}
                             onRemove={onRemoveProfile}
                             onPing={onPingProfile}
+                            onVerifyCountry={onVerifyCountryProfile}
                             onExport={onExportProfile}
                             onExportToFile={onExportProfileToFile}
                             onOpenDetail={onOpenDetail}
@@ -1442,9 +1535,11 @@ interface ServerProfileCardProps {
   onSelect: (id: string) => void
   onRemove: (id: string) => void
   onPing: (profile: ServerProfile) => void
+  onVerifyCountry: (profile: ServerProfile) => void
   onExport: (id: string) => void
   onExportToFile: (id: string) => void
   onOpenDetail: (profile: ServerProfile) => void
+  verifyingCountry?: boolean
 }
 
 function ServerProfileCard({
@@ -1457,16 +1552,18 @@ function ServerProfileCard({
   onSelect,
   onRemove,
   onPing,
+  onVerifyCountry,
   onExport,
   onExportToFile,
-  onOpenDetail
+  onOpenDetail,
+  verifyingCountry
 }: ServerProfileCardProps) {
   const { t } = useTranslation()
 
-  const country = perRowPing?.country || profile.country || null
-  const recognised = detectCountry(profile.name)
-  const flag = recognised?.flag || '🌐'
-  const ping = perRowPing?.ping ?? profile.ping
+  const country = profile.country || perRowPing?.country || null
+  const flag = countryFlagFromCountryOrName(country, profile.name)
+  const ping = displayedServerPing(profile, perRowPing)
+  const stealthBadge = profileStealthBadge(profile)
 
   // Stale-from-subscription marker: lastSeenInSubscriptionAt is older than
   // group.lastFetchedAt by at least one minute. The fields are optional —
@@ -1512,6 +1609,9 @@ function ServerProfileCard({
             {isActive && (
               <MacBadge variant="success">{t('servers.active')}</MacBadge>
             )}
+            <MacBadge variant="neutral" className="!text-[10px]">
+              {clientDeviceLabel(profile.clientDevice)}
+            </MacBadge>
             {country && (
               <span className="text-xs text-[var(--color-text-secondary)]">{country}</span>
             )}
@@ -1522,6 +1622,13 @@ function ServerProfileCard({
             <span className="text-[11px] font-medium uppercase tracking-wide text-[var(--color-text-secondary)]">
               {formatHappType(profile)}
             </span>
+            {stealthBadge && (
+              <span title={stealthBadge.title}>
+                <MacBadge variant={stealthBadge.variant} className="!text-[10px] !px-1.5 !py-0">
+                  {stealthBadge.label}
+                </MacBadge>
+              </span>
+            )}
             <span className="text-[11px] text-[var(--color-text-muted)] truncate font-mono">
               {profile.server}:{profile.port}
             </span>
@@ -1529,36 +1636,28 @@ function ServerProfileCard({
         </div>
 
         {/* Status / ping cluster.
-            When a fresh health-check result exists we replace the legacy
-            online/offline icon + ping ms with a coloured dot + latency. */}
+            Health-check only shows whether the key is alive. The number stays
+            the real per-server ping; health latency is a different metric and
+            must not be displayed as geographical RTT. */}
         <div className="flex items-center gap-1 min-w-[64px] justify-end">
           {health ? (
             health.online ? (
-              <span className="inline-flex items-center gap-1 text-xs tabular-nums text-[var(--color-success)]">
-                <Check className="w-3.5 h-3.5" />
-                {health.latencyMs != null ? `${health.latencyMs} ms` : ''}
+              <span title="Health check: key is alive">
+                <Check className="w-3.5 h-3.5 text-[var(--color-success)]" />
               </span>
             ) : (
-              <span
-                className="inline-flex items-center gap-1 text-xs text-[var(--color-danger)]"
-                title={health.reason}
-              >
-                <AlertCircle className="w-3.5 h-3.5" />
-                {t('servers.health.dead')}
+              <span title={health.reason || t('servers.health.dead')}>
+                <AlertCircle className="w-3.5 h-3.5 text-[var(--color-danger)]" />
               </span>
             )
-          ) : (
-            <>
-              {profile.status === 'online' ? (
-                <Wifi className="w-3.5 h-3.5 text-[var(--color-success)]" />
-              ) : profile.status === 'offline' ? (
-                <WifiOff className="w-3.5 h-3.5 text-[var(--color-danger)]" />
-              ) : null}
-              <span className="text-xs text-[var(--color-text-secondary)] tabular-nums">
-                {ping != null ? `${ping} ms` : '—'}
-              </span>
-            </>
-          )}
+          ) : profile.status === 'online' ? (
+            <Wifi className="w-3.5 h-3.5 text-[var(--color-success)]" />
+          ) : profile.status === 'offline' ? (
+            <WifiOff className="w-3.5 h-3.5 text-[var(--color-danger)]" />
+          ) : null}
+          <span className="text-xs text-[var(--color-text-secondary)] tabular-nums">
+            {ping != null ? `${ping} ms` : '—'}
+          </span>
         </div>
 
         <div className="flex items-center gap-1.5">
@@ -1576,6 +1675,23 @@ function ServerProfileCard({
               <Loader2 size={12} className="animate-spin" />
             ) : (
               <Wifi size={12} />
+            )}
+          </MacButton>
+          <MacButton
+            size="sm"
+            variant="ghost"
+            disabled={!profile.server || verifyingCountry}
+            onClick={(e) => {
+              e.stopPropagation()
+              onVerifyCountry(profile)
+            }}
+            aria-label="Проверить страну"
+            title="Проверить страну"
+          >
+            {verifyingCountry ? (
+              <Loader2 size={12} className="animate-spin" />
+            ) : (
+              <Globe2 size={12} />
             )}
           </MacButton>
           <MacButton
@@ -1650,7 +1766,3 @@ function ServerProfileCard({
   )
 }
 
-// Quiet TS about the imported but currently-unused ChevronDown — keeping it
-// available so future variants of the chevron animation can swap in without
-// touching imports. eslint-disable-next-line @typescript-eslint/no-unused-vars
-void ChevronDown

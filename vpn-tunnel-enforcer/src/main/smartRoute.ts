@@ -96,6 +96,30 @@ const RULESET_LOCAL_FILES: Record<string, string> = {
   [RU_GOV_GEOSITE_RULESET]: 'geosite-category-gov-ru.srs'
 }
 
+export interface SmartRouteRuleSetDescriptor {
+  tag: string
+  url: string
+  fileName: string
+  label: string
+}
+
+export function smartRouteRuleSetCatalog(): SmartRouteRuleSetDescriptor[] {
+  return [
+    {
+      tag: RU_GEOIP_RULESET,
+      url: RULESET_URLS[RU_GEOIP_RULESET],
+      fileName: RULESET_LOCAL_FILES[RU_GEOIP_RULESET],
+      label: 'RU GeoIP'
+    },
+    {
+      tag: RU_GOV_GEOSITE_RULESET,
+      url: RULESET_URLS[RU_GOV_GEOSITE_RULESET],
+      fileName: RULESET_LOCAL_FILES[RU_GOV_GEOSITE_RULESET],
+      label: 'RU gov geosite'
+    }
+  ]
+}
+
 /** The bundled .srs filenames the caller must stage into the runtime dir. */
 export function smartRouteLocalRuleSetFiles(): string[] {
   return [RU_GEOIP_RULESET, ...ruDomainRuleSets()].map((tag) => RULESET_LOCAL_FILES[tag])
@@ -121,6 +145,32 @@ const MAPS_DOMAIN_SUFFIXES = [
   '.2gis.ru',
   '.maps.googleapis.com',
   '.maps.gstatic.com'
+]
+
+/**
+ * Media/CDN domains that must stay on the VPN even when their resolved IP is
+ * in Russia.
+ *
+ * Why: YouTube and adjacent Google media CDNs regularly resolve to RU-hosted
+ * cache nodes (`80.77.175.44-47` in the latest diagnostic dump). If those
+ * flows hit the Smart RU `geoip-ru -> direct-out` rule, they leave through the
+ * ISP path, get throttled / reset, and playback stalls on a black screen for a
+ * few seconds before Chromium retries elsewhere. We pin the domains to
+ * `proxy-out` / `dns-remote` BEFORE the RU-direct rules so the sniffed SNI/Host
+ * wins over the IP-country match.
+ *
+ * Keep this list intentionally narrow: broad Google suffixes like
+ * `.googleapis.com` or `.gstatic.com` would collide with `mapsDirect`.
+ */
+const VPN_PINNED_MEDIA_SUFFIXES = [
+  '.youtube.com',
+  '.youtu.be',
+  '.youtube-nocookie.com',
+  '.googlevideo.com',
+  '.ytimg.com',
+  '.ggpht.com',
+  '.youtubei.googleapis.com',
+  '.youtube-ui.l.google.com'
 ]
 
 /**
@@ -262,6 +312,10 @@ export function smartRouteRules(opts: SmartRouteOptions): Array<Record<string, a
   //    case: users open `2ip.ru`, not `www.2ip.ru`).
   rules.push({ ...suffixListToMatcher(IP_CHECKER_SUFFIXES), outbound: 'proxy-out' })
 
+  // 0.5. Media/CDN domains that often resolve to RU caches MUST still use the
+  // VPN. Otherwise the later geoip-ru direct rule steals them and breaks video.
+  rules.push({ ...suffixListToMatcher(VPN_PINNED_MEDIA_SUFFIXES), outbound: 'proxy-out' })
+
   // 1. Curated RU domain lists → direct.
   rules.push({ rule_set: ruDomainRuleSets(), outbound: 'direct-out' })
 
@@ -289,6 +343,9 @@ export function smartRouteDnsRules(opts: SmartRouteOptions): Array<Record<string
   // direct one — matched first so an RU-hosted checker doesn't fall into the
   // RU-direct DNS rule below and resolve to its RU node. Apex + subdomains.
   rules.push({ ...suffixListToMatcher(IP_CHECKER_SUFFIXES), server: 'dns-remote' })
+  // Media/CDN domains: same story as route rules above — keep them on the
+  // tunnelled resolver so we don't prefer RU CDN nodes for throttled media.
+  rules.push({ ...suffixListToMatcher(VPN_PINNED_MEDIA_SUFFIXES), server: 'dns-remote' })
   // RU domains → direct resolver (real RU IPs, so geoip-ru matches).
   rules.push({ rule_set: ruDomainRuleSets(), server })
   if (opts.mapsDirect) {

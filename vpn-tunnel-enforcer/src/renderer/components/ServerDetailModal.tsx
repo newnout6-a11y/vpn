@@ -17,20 +17,9 @@ import {
   Check,
   Download
 } from 'lucide-react'
-import { MacModal, MacButton, MacCard, MacBadge } from '../design-system'
-import { detectCountry } from './countryGlyph'
-import type { ServerProfile } from '../../shared/ipc-types'
-
-// Local mirror of the upcoming `ServerGroup` shape. See Servers.tsx for the
-// rationale — once Agent A merges the type into shared/ipc-types this can
-// be replaced with a direct import.
-interface ServerGroupLite {
-  id: string
-  name: string
-  source: 'subscription' | 'manual'
-  status: 'active' | 'expired' | 'unreachable' | 'unknown'
-  lastFetchedAt?: number
-}
+import { MacModal, MacButton, MacCard, MacBadge, MacSelect } from '../design-system'
+import { countryFlagFromCountryOrName, detectCountry } from './countryGlyph'
+import type { ClientDevice, ServerGroup, ServerProfile } from '../../shared/ipc-types'
 
 interface IpInfo {
   ip: string
@@ -97,6 +86,18 @@ interface ServerDetailModalProps {
   open: boolean
   profile: AnyProfile | null
   onClose: () => void
+  onProfileUpdated?: (profile: ServerProfile) => void
+}
+
+const CLIENT_DEVICE_OPTIONS = [
+  { value: 'pc', label: 'PC' },
+  { value: 'android', label: 'Android' },
+  { value: 'ios', label: 'iOS' },
+  { value: 'mac', label: 'Mac' }
+]
+
+function normalizeClientDevice(value: unknown): ClientDevice {
+  return value === 'android' || value === 'ios' || value === 'mac' ? value : 'pc'
 }
 
 /**
@@ -109,7 +110,7 @@ interface ServerDetailModalProps {
  *      scan, TLS cert inspection, HTTP banner. Anything that can't be
  *      reached is just hidden — we never show error spinners forever.
  */
-export function ServerDetailModal({ open, profile, onClose }: ServerDetailModalProps) {
+export function ServerDetailModal({ open, profile, onClose, onProfileUpdated }: ServerDetailModalProps) {
   const { t } = useTranslation()
   const [ipInfo, setIpInfo] = useState<IpInfo | null>(null)
   const [loading, setLoading] = useState(false)
@@ -117,10 +118,32 @@ export function ServerDetailModal({ open, profile, onClose }: ServerDetailModalP
   const [probing, setProbing] = useState(false)
   const [probeError, setProbeError] = useState(false)
   const [exportState, setExportState] = useState<'idle' | 'copied' | 'saved' | 'failed'>('idle')
-  const [group, setGroup] = useState<ServerGroupLite | null>(null)
+  const [group, setGroup] = useState<ServerGroup | null>(null)
+  const [deviceSaving, setDeviceSaving] = useState(false)
+  const [deviceError, setDeviceError] = useState(false)
 
   // Reset the export status pill whenever the user opens a different server.
-  useEffect(() => { setExportState('idle') }, [profile])
+  useEffect(() => {
+    setExportState('idle')
+    setDeviceError(false)
+    setDeviceSaving(false)
+  }, [profile])
+
+  const handleClientDeviceChange = async (value: string) => {
+    const id = (profile as ServerProfile | null)?.id
+    if (!id) return
+    const clientDevice = normalizeClientDevice(value)
+    setDeviceSaving(true)
+    setDeviceError(false)
+    try {
+      const updated = await window.electronAPI.serversSetClientDevice(id, clientDevice)
+      onProfileUpdated?.(updated)
+    } catch {
+      setDeviceError(true)
+    } finally {
+      setDeviceSaving(false)
+    }
+  }
 
   const handleCopyKey = async () => {
     const id = (profile as ServerProfile | null)?.id
@@ -176,7 +199,7 @@ export function ServerDetailModal({ open, profile, onClose }: ServerDetailModalP
     const groupId = (profile as ServerProfile & { groupId?: string }).groupId
     if (groupId) {
       const api = window.electronAPI as unknown as {
-        groupsGet?: (id: string) => Promise<ServerGroupLite | null>
+        groupsGet?: (id: string) => Promise<ServerGroup | null>
       }
       if (typeof api.groupsGet === 'function') {
         api.groupsGet(groupId)
@@ -246,10 +269,18 @@ export function ServerDetailModal({ open, profile, onClose }: ServerDetailModalP
   const host = (profile as any).server as string | undefined
   const port = (profile as any).port as number | undefined
   const ping = (profile as any).ping as number | null | undefined
+  const profileId = (profile as ServerProfile | null)?.id
+  const clientDevice = normalizeClientDevice((profile as ServerProfile | null)?.clientDevice)
+  const clientFingerprint =
+    (profile as ServerProfile | null)?.clientFingerprint ||
+    ((profile as ServerProfile | null)?.outbound as any)?.tls?.utls?.fingerprint ||
+    (clientDevice === 'android' ? 'android' : clientDevice === 'ios' ? 'ios' : clientDevice === 'mac' ? 'safari' : 'chrome')
   // Name-based country recognition is used as the universal fallback. ASN
   // lookups are rate-limited (free ipapi.co tier) and reverse DNS rarely
   // returns geo info — but the profile name almost always names the country.
   const recognised = detectCountry(profile.name)
+  const fallbackCountry = profile.country || recognised?.label || null
+  const flag = countryFlagFromCountryOrName(profile.country, profile.name)
   const lat = ipInfo?.loc?.split(',')[0]
   const lon = ipInfo?.loc?.split(',')[1]
   const mapUrl =
@@ -266,7 +297,7 @@ export function ServerDetailModal({ open, profile, onClose }: ServerDetailModalP
   })
 
   return (
-    <MacModal open={open} onClose={onClose} title={`${recognised?.flag ?? '🌐'}  ${profile.name}`} size="lg">
+    <MacModal open={open} onClose={onClose} title={`${flag}  ${profile.name}`} size="lg">
       <div className="space-y-4">
         {/* Protocol & Host */}
         <div className="grid grid-cols-2 gap-3">
@@ -295,6 +326,32 @@ export function ServerDetailModal({ open, profile, onClose }: ServerDetailModalP
         {/* Group context — shown only when the profile belongs to a known
             group. Surfaces a subtle hint when the source subscription is
             expired so the user understands why connecting may be flaky. */}
+        {profileId && (
+          <MacCard className="!p-3">
+            <div className="grid grid-cols-1 sm:grid-cols-[minmax(0,180px)_1fr] gap-3 items-end">
+              <MacSelect
+                label="Device identity"
+                options={CLIENT_DEVICE_OPTIONS}
+                value={clientDevice}
+                onChange={handleClientDeviceChange}
+                disabled={deviceSaving}
+              />
+              <div className="min-w-0">
+                <div className="text-[11px] text-[var(--color-text-secondary)] mb-1">uTLS fingerprint</div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <MacBadge variant={deviceError ? 'danger' : 'neutral'}>{clientFingerprint}</MacBadge>
+                  {deviceSaving && (
+                    <span className="text-[11px] text-[var(--color-text-secondary)]">Saving...</span>
+                  )}
+                  {deviceError && (
+                    <span className="text-[11px] text-[var(--color-danger)]">Save failed</span>
+                  )}
+                </div>
+              </div>
+            </div>
+          </MacCard>
+        )}
+
         {group && (
           <MacCard className="!p-3">
             <div className="flex items-center justify-between gap-3">
@@ -366,7 +423,7 @@ export function ServerDetailModal({ open, profile, onClose }: ServerDetailModalP
             {t('serverDetail.loading')}
           </p>
         )}
-        {(ipInfo || recognised) && (
+        {(ipInfo || fallbackCountry) && (
           <MacCard className="!p-3">
             <h4 className="text-xs font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider mb-2">
               {t('serverDetail.location')}
@@ -375,7 +432,7 @@ export function ServerDetailModal({ open, profile, onClose }: ServerDetailModalP
               <DetailField
                 icon={<MapPin size={12} />}
                 label={t('serverDetail.country')}
-                value={ipInfo?.country || recognised?.label || '—'}
+                value={ipInfo?.country || fallbackCountry || '—'}
               />
               <DetailField
                 icon={<MapPin size={12} />}

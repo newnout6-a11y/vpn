@@ -10,6 +10,18 @@
  * the same way tunControllerConfig.test.ts does — the helpers under test are
  * pure and don't touch any of it.
  */
+/**
+ * Tests for the pure sing-box-log classifiers used by the route-diagnostics
+ * card. These pin down the false-positive fixes from finding F9:
+ *   - RU public IPs going direct-out under smart-RU split are EXPECTED, not a
+ *     leak (geoip-ru / geosite-category-gov-ru matches).
+ *   - "block-out: operation not permitted" (UDP/QUIC on a tcp-only Reality
+ *     outbound) is benign noise, not a real error.
+ *
+ * The module imports tunController (which imports electron) so we mock electron
+ * the same way tunControllerConfig.test.ts does — the helpers under test are
+ * pure and don't touch any of it.
+ */
 
 import { describe, it, expect, vi } from 'vitest'
 
@@ -23,10 +35,39 @@ vi.mock('electron-store', () => ({
     set(k: string, v: any) { this.d[k] = v }
   }
 }))
+vi.mock('axios', () => ({
+  default: { get: vi.fn(async () => ({ data: { ip: '198.51.100.1' } })) },
+  get: vi.fn(async () => ({ data: { ip: '198.51.100.1' } }))
+}))
+vi.mock('child_process', () => ({
+  default: {
+    exec: vi.fn((_cmd: string, _opts: any, cb: Function) => {
+      if (cb) cb(null, { stdout: '[]', stderr: '' })
+      return { stdout: '[]', stderr: '' }
+    })
+  },
+  exec: vi.fn((_cmd: string, _opts: any, cb: Function) => {
+    if (cb) cb(null, { stdout: '[]', stderr: '' })
+    return { stdout: '[]', stderr: '' }
+  })
+}))
+vi.mock('fs/promises', () => ({
+  default: { readFile: vi.fn(async () => '') },
+  readFile: vi.fn(async () => '')
+}))
 vi.mock('sudo-prompt', () => ({ default: { exec: vi.fn() }, exec: vi.fn() }))
 vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
+vi.mock('./tunController', () => ({
+  detectForeignTun: vi.fn(() => null),
+  getTunRuntimeDir: vi.fn(() => '/tmp/vpnte-test/tun-runtime'),
+  parseProxyAddress: vi.fn((value: string) => {
+    const [host, port] = value.split(':')
+    return { host, port: Number(port) }
+  }),
+  probeTcp: vi.fn(async () => false)
+}))
 
-import { classifyDirectPublic, isBenignBlockLine, extractRealErrors, summarizeSingboxLog, dnsTypeName } from './leakDiagnostics'
+import { classifyDirectPublic, isBenignBlockLine, extractRealErrors, summarizeSingboxLog, dnsTypeName, runLeakCheck } from './leakDiagnostics'
 
 // Real-shaped excerpt from the user's 16-20 diagnostic: Yandex/VK going direct
 // via geoip-ru, and a benign block-out UDP error.
@@ -159,5 +200,21 @@ describe('dnsTypeName', () => {
 
   it('falls back to "type N" for unknown numeric codes', () => {
     expect(dnsTypeName(999)).toBe('type 999')
+  })
+})
+
+describe('runLeakCheck', () => {
+  it('does not flag a stale local proxy as failed in directVpn mode', async () => {
+    const result = await runLeakCheck({
+      connectionMode: 'directVpn',
+      proxyAddr: '127.0.0.1:10808',
+      proxyType: 'socks5',
+      tunRunning: true
+    })
+
+    const proxyItem = result.items.find(item => item.id === 'proxy')
+    expect(proxyItem?.status).toBe('info')
+    expect(proxyItem?.value).toBe('Direct VPN (sing-box)')
+    expect(proxyItem?.details).toMatch(/локальный proxy не используется/i)
   })
 })
