@@ -189,15 +189,29 @@ fn make_callback(
         let mut fields = serde_json::Map::new();
         let mut task = String::new();
         let mut opcode = String::new();
-
-        if let Ok(schema) = locator.event_schema(record) {
+        let schema = locator.event_schema(record).ok();
+        if let Some(schema) = &schema {
             task = schema.task_name();
             opcode = schema.opcode_name();
-            let parser = Parser::create(record, &schema);
-            extract_fields(&parser, category, &mut fields);
+        }
+
+        // Drop the high-volume data-path / rundown firehose at the source so the
+        // timeline stays meaningful and the data-event cap is not exhausted in
+        // seconds. Counted (not written) for visibility in the heartbeat. Decided
+        // before property parsing so dropped events cost almost nothing. Keyed on
+        // the task name only (see classify::is_significant).
+        if !classify::is_significant(category, &task.to_lowercase()) {
+            sink.lock().unwrap().note_filtered();
+            return;
         }
 
         let kind = format!("{provider_label} {task} {opcode}").to_lowercase();
+
+        if let Some(schema) = &schema {
+            let parser = Parser::create(record, schema);
+            extract_fields(&parser, category, &mut fields);
+        }
+
         let (event, reason) = classify::derive_event_and_reason(category, &kind, &opcode);
 
         let mut row = serde_json::Map::new();
@@ -430,6 +444,7 @@ struct Sink {
     session: String,
     total: AtomicU64,
     data: AtomicU64,
+    filtered: AtomicU64,
     cap_reported: bool,
 }
 
@@ -441,8 +456,13 @@ impl Sink {
             session,
             total: AtomicU64::new(0),
             data: AtomicU64::new(0),
+            filtered: AtomicU64::new(0),
             cap_reported: false,
         })
+    }
+
+    fn note_filtered(&self) {
+        self.filtered.fetch_add(1, Ordering::Relaxed);
     }
 
     fn write_row(&mut self, mut row: serde_json::Map<String, serde_json::Value>, ts: Option<String>) {
@@ -483,6 +503,7 @@ impl Sink {
         row.insert("event".into(), "heartbeat".into());
         row.insert("observedEvents".into(), self.total.load(Ordering::Relaxed).into());
         row.insert("dataEvents".into(), self.data.load(Ordering::Relaxed).into());
+        row.insert("filteredNoise".into(), self.filtered.load(Ordering::Relaxed).into());
         row.insert("enabledProviders".into(), providers.join(",").into());
         row.insert(
             "note".into(),
