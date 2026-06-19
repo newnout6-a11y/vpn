@@ -79,6 +79,12 @@ const PKTMON_WEBIO_LEVEL = 255
 let runtimeState: SessionManifest | null = null
 let sidecarProcess: ChildProcessWithoutNullStreams | null = null
 
+// When this main process started. A persisted session whose `startedAt` predates
+// this is a leftover from a previous app run (or survives an app reinstall, since
+// userData is not removed on uninstall). We must not surface such a session's old
+// events.ndjson as live diagnostics — see getTrafficForensicsStatus.
+const PROCESS_START_MS = Date.now()
+
 export interface TrafficForensicsAppEventInput {
   source: string
   event: string
@@ -1108,7 +1114,16 @@ export async function getTrafficForensicsStatus(): Promise<TrafficForensicsStatu
   manifest = await reconcileStoppedCaptureManifest(manifest, artifactFiles)
   const summary = await readSummaryForStatus(manifest?.summaryPath)
   const sidecar = manifest?.sidecar ?? null
-  const sidecarProbe = await readSidecarEventProbe(manifest?.sessionDir)
+  // Only surface the live ETW digest (categories, top domains/endpoints, data
+  // counts) for the session that belongs to this run. A stopped session left
+  // over from a previous launch/reinstall must not show its stale events.ndjson
+  // as if it were current — the persisted summary still carries finalized counts.
+  const isCurrentSession =
+    Boolean(manifest?.running) ||
+    (typeof manifest?.startedAt === 'number' && manifest.startedAt >= PROCESS_START_MS)
+  const sidecarProbe = isCurrentSession
+    ? await readSidecarEventProbe(manifest?.sessionDir)
+    : emptySidecarEventProbe()
   return {
     enabled: settings.enabled,
     running: Boolean(manifest?.running),
