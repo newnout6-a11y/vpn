@@ -39,6 +39,7 @@ import { notify, setInAppFallbackCallback } from './notifications'
 import { exportDiagnosticsZip } from './diagnosticsExport'
 import { captureSnapshot, getSnapshotsDir, startPeriodicSnapshots, stopPeriodicSnapshots } from './systemSnapshot'
 import { runLeakSelfTest, startPeriodicLeakTest, stopPeriodicLeakTest, setLeakDetectedCallback, startNetworkChangeWatcher, stopNetworkChangeWatcher } from './leakSelfTest'
+import { getTrafficForensicsStatus, startTrafficForensicsSession, stopTrafficForensicsSession } from './trafficForensics'
 import { trafficMonitor, type TrafficStats } from './trafficMonitor'
 import { applyBrowserLeakProtection, rollbackBrowserLeakProtection } from './browserHardening'
 import { resolveVpnProfile, resolveVpnProfiles, redactSensitiveConfig, type VpnProfile } from './vpnProfiles'
@@ -511,6 +512,11 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
     return result
   }
 
+  // Start traffic forensics session in background (non-blocking)
+  startTrafficForensicsSession({ mode: 'localProxy', target: proxyAddr }).catch(err => {
+    logEvent('warn', 'app', 'failed to start traffic forensics session', err)
+  })
+
   const ipInfo = await ipMonitor.getCurrentIp()
   if (ipInfo.ip) {
     ipMonitor.setVpnIp(ipInfo.ip)
@@ -661,6 +667,11 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
     return result
   }
 
+  // Start traffic forensics session in background (non-blocking)
+  startTrafficForensicsSession({ mode: 'directVpn', target: profile.name }).catch(err => {
+    logEvent('warn', 'app', 'failed to start traffic forensics session', err)
+  })
+
   const ipInfo = await ipMonitor.getCurrentIp()
   if (ipInfo.ip) {
     ipMonitor.setVpnIp(ipInfo.ip)
@@ -726,6 +737,12 @@ async function stopProtection(): Promise<{ success: boolean; error?: string }> {
   stopPeriodicSnapshots()
   stopPeriodicLeakTest()
   stopNetworkChangeWatcher()
+
+  // Stop traffic forensics session in background (non-blocking)
+  stopTrafficForensicsSession('vpn-stop').catch(err => {
+    logEvent('warn', 'app', 'failed to stop traffic forensics session', err)
+  })
+
   const result = await tunController.stop()
   ipMonitor.clearVpnIp()
   trafficMonitor.stop()
@@ -1244,6 +1261,10 @@ app.whenReady().then(async () => {
     }
   })
 
+  handleLogged('get-traffic-forensics-status', async () => {
+    return getTrafficForensicsStatus()
+  })
+
   // ─── V2 Feature Module Registration ──────────────────────────────────────────
   // Order: infrastructure (settings already loaded above) → i18n/theme → feature services → widgets
 
@@ -1363,6 +1384,10 @@ app.whenReady().then(async () => {
       trafficMonitor.start()
     } else {
       trafficMonitor.stop()
+      // Stop traffic forensics session if it was running (status became stopped/killswitch-active/restarting)
+      stopTrafficForensicsSession(`status:${status}`).catch(err => {
+        logEvent('warn', 'app', 'failed to stop traffic forensics session on status change', err)
+      })
     }
 
     // Record connection-history entry on terminal/error transitions if we

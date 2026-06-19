@@ -15,6 +15,8 @@ export interface ElectronAPI {
   getAutoconfigStatus: () => Promise<any[]>
   getSettings: () => Promise<any>
   saveSettings: (settings: any) => Promise<any>
+  smartRouteRuleSetsGetState: () => Promise<any>
+  smartRouteRuleSetsRefresh: (force?: boolean) => Promise<any>
   inspectVpnInput: (input: string) => Promise<{ count: number; protocols: Record<string, number>; profiles: Array<{ index: number; name: string; protocol: string }>; fetched: boolean; source: string }>
   setLoginItem: (openAtLogin: boolean) => Promise<any>
   runLeakCheck: (options?: { proxyAddr?: string; proxyType?: 'socks5' | 'http' }) => Promise<any>
@@ -52,6 +54,7 @@ export interface ElectronAPI {
     message: string
   }>
   openSnapshotsFolder: () => Promise<{ success: boolean; path?: string; error?: string }>
+  getTrafficForensicsStatus: () => Promise<any>
   // Config Import/Export
   configExport: () => Promise<{ success: boolean; path?: string; error?: string }>
   configBrowseImport: () => Promise<string | null>
@@ -244,6 +247,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getAutoconfigStatus: () => ipcRenderer.invoke('get-autoconfig-status'),
   getSettings: () => ipcRenderer.invoke('get-settings'),
   saveSettings: (settings: any) => ipcRenderer.invoke('save-settings', settings),
+  smartRouteRuleSetsGetState: () => ipcRenderer.invoke('smart-route:rule-sets-state'),
+  smartRouteRuleSetsRefresh: (force?: boolean) => ipcRenderer.invoke('smart-route:rule-sets-refresh', force === true),
   inspectVpnInput: (input: string) => ipcRenderer.invoke('inspect-vpn-input', input),
   setLoginItem: (openAtLogin: boolean) => ipcRenderer.invoke('set-login-item', openAtLogin),
   runLeakCheck: (options?: { proxyAddr?: string; proxyType?: 'socks5' | 'http' }) => ipcRenderer.invoke('run-leak-check', options),
@@ -272,6 +277,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   runLeakSelfTest: () => ipcRenderer.invoke('run-leak-self-test'),
   runRoutingSelfTest: () => ipcRenderer.invoke('run-routing-self-test'),
   openSnapshotsFolder: () => ipcRenderer.invoke('open-snapshots-folder'),
+  getTrafficForensicsStatus: () => ipcRenderer.invoke('get-traffic-forensics-status'),
   // Split Tunneling
   splitTunnelGetApps: () => ipcRenderer.invoke('split-tunnel:get-apps'),
   splitTunnelGetConfig: () => ipcRenderer.invoke('split-tunnel:get-config'),

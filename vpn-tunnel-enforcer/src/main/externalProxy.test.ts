@@ -20,7 +20,11 @@ vi.mock('./serverPicker', () => ({
   }
 }))
 
-import { buildExternalProxyConfig } from './externalProxy'
+import {
+  buildExternalProxyConfig,
+  isExternalProxyMutationPath,
+  isValidExternalProxyControlToken
+} from './externalProxy'
 
 function sampleProfile(): ServerProfile {
   return {
@@ -57,5 +61,24 @@ describe('buildExternalProxyConfig', () => {
     expect(config.route.rules[0]).toEqual({ action: 'sniff' })
     expect(config.route.final).toBe('proxy-out')
     expect(config.outbounds[0].tag).toBe('proxy-out')
+  })
+})
+
+describe('external proxy control auth helpers', () => {
+  it('classifies state-changing control paths', () => {
+    expect(isExternalProxyMutationPath('/start')).toBe(true)
+    expect(isExternalProxyMutationPath('/rotate')).toBe(true)
+    expect(isExternalProxyMutationPath('/connect')).toBe(true)
+    expect(isExternalProxyMutationPath('/trigger')).toBe(true)
+    expect(isExternalProxyMutationPath('/stop')).toBe(true)
+    expect(isExternalProxyMutationPath('/status')).toBe(false)
+    expect(isExternalProxyMutationPath('/list')).toBe(false)
+  })
+
+  it('requires an exact session token for protected control calls', () => {
+    expect(isValidExternalProxyControlToken('abc123', 'abc123')).toBe(true)
+    expect(isValidExternalProxyControlToken('abc123', 'abc124')).toBe(false)
+    expect(isValidExternalProxyControlToken('abc123', '')).toBe(false)
+    expect(isValidExternalProxyControlToken(null, 'abc123')).toBe(false)
   })
 })

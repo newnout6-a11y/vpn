@@ -21,6 +21,7 @@ import axios from 'axios'
 import { randomUUID } from 'crypto'
 import Store from 'electron-store'
 import { logEvent } from './appLogger'
+import { buildBootstrapRouteAttempts, type BootstrapRouteAttempt } from './bootstrapRoute'
 import {
   applyClientDeviceToOutbound,
   clientFingerprintForDevice,
@@ -50,6 +51,7 @@ const exec = promisify(execCb)
 // strings, which matters because we feed `--resolve <host>:443:<ip>` as a
 // raw arg and don't want any cmd.exe to ever see it.
 const execFile = promisify(execFileCb)
+const CURL_BIN = process.platform === 'win32' ? 'curl.exe' : 'curl'
 
 // ─── Persistent Store ────────────────────────────────────────────────────────
 
@@ -684,6 +686,57 @@ function addGeoVote(votes: GeoVote[], source: string, country: unknown, countryC
   votes.push({ source, country: finalCountry, countryCode: code ?? undefined })
 }
 
+function currentBootstrapRoutes(): BootstrapRouteAttempt[] {
+  try {
+    const settings = settingsStore.get()
+    return buildBootstrapRouteAttempts({
+      mode: settings.bootstrapRouteMode,
+      proxyAddr: settings.proxyOverride,
+      proxyType: settings.proxyType
+    })
+  } catch {
+    return buildBootstrapRouteAttempts({ mode: 'auto' })
+  }
+}
+
+async function fetchGeoJson<T>(
+  url: string,
+  options: { method?: 'GET' | 'POST'; body?: unknown; headers?: string[]; timeoutSeconds?: number } = {}
+): Promise<{ data: T; route: string } | null> {
+  const errors: string[] = []
+  const method = options.method ?? 'GET'
+  for (const route of currentBootstrapRoutes()) {
+    const args = [
+      '-sS',
+      '--fail',
+      '--max-time',
+      String(options.timeoutSeconds ?? 8),
+      ...route.curlArgs,
+      ...(options.headers ?? []).flatMap(header => ['-H', header]),
+      ...(method === 'POST' ? ['-X', 'POST'] : []),
+      ...(options.body !== undefined ? ['--data-binary', JSON.stringify(options.body)] : []),
+      url
+    ]
+    try {
+      const { stdout } = await execFile(CURL_BIN, args, {
+        windowsHide: true,
+        timeout: (options.timeoutSeconds ?? 8) * 1000 + 2000,
+        encoding: 'utf8',
+        maxBuffer: 1024 * 1024 * 4
+      })
+      return { data: JSON.parse(stdout) as T, route: route.label }
+    } catch (err: any) {
+      const stderr = typeof err?.stderr === 'string' ? err.stderr.trim() : ''
+      errors.push(`${route.label}: ${stderr || err?.message || String(err)}`)
+    }
+  }
+  logEvent('debug', 'server-picker', 'geo bootstrap lookup failed on all routes', {
+    url: url.replace(/\?.*/, '?...'),
+    errors: errors.slice(-4)
+  })
+  return null
+}
+
 function chooseGeoCountry(ip: string, votes: GeoVote[]): string | null {
   if (!votes.length) return null
   const byKey = new Map<string, { country: string; count: number; sources: string[] }>()
@@ -709,14 +762,15 @@ function chooseGeoCountry(ip: string, votes: GeoVote[]): string | null {
 async function fetchSecondaryGeoVote(ip: string, source: 'ipwho.is' | 'ipinfo.is' | 'ipinfo.io' | 'iplocation.net'): Promise<GeoVote | null> {
   try {
     if (source === 'ipwho.is') {
-      const resp = await axios.get(`https://ipwho.is/${encodeURIComponent(ip)}`, { timeout: 5000 })
-      if (resp.data?.success === false) return null
+      const resp = await fetchGeoJson<any>(`https://ipwho.is/${encodeURIComponent(ip)}`, { timeoutSeconds: 5 })
+      if (!resp || resp.data?.success === false) return null
       const votes: GeoVote[] = []
       addGeoVote(votes, source, resp.data?.country, resp.data?.country_code)
       return votes[0] ?? null
     }
     if (source === 'ipinfo.is') {
-      const resp = await axios.get(`https://ipinfo.is/${encodeURIComponent(ip)}`, { timeout: 5000 })
+      const resp = await fetchGeoJson<any>(`https://ipinfo.is/${encodeURIComponent(ip)}`, { timeoutSeconds: 5 })
+      if (!resp) return null
       const votes: GeoVote[] = []
       addGeoVote(
         votes,
@@ -727,15 +781,16 @@ async function fetchSecondaryGeoVote(ip: string, source: 'ipwho.is' | 'ipinfo.is
       return votes[0] ?? null
     }
     if (source === 'ipinfo.io') {
-      const resp = await axios.get(`https://ipinfo.io/${encodeURIComponent(ip)}/json`, { timeout: 5000 })
+      const resp = await fetchGeoJson<any>(`https://ipinfo.io/${encodeURIComponent(ip)}/json`, { timeoutSeconds: 5 })
+      if (!resp) return null
       const votes: GeoVote[] = []
       addGeoVote(votes, source, undefined, resp.data?.country)
       return votes[0] ?? null
     }
-    const resp = await axios.get('https://api.iplocation.net/', {
-      timeout: 5000,
-      params: { ip }
-    })
+    const url = new URL('https://api.iplocation.net/')
+    url.searchParams.set('ip', ip)
+    const resp = await fetchGeoJson<any>(url.toString(), { timeoutSeconds: 5 })
+    if (!resp) return null
     if (String(resp.data?.response_code ?? '') !== '200') return null
     const votes: GeoVote[] = []
     addGeoVote(votes, source, resp.data?.country_name, resp.data?.country_code2)
@@ -775,12 +830,11 @@ async function batchGeolocateIps(ips: string[]): Promise<Map<string, string>> {
     try {
       // `fields` trims the response to just what we need. `query` echoes the
       // IP back so we can map results to inputs regardless of order.
-      const resp = await axios.post(
+      const resp = await fetchGeoJson<any[]>(
         'http://ip-api.com/batch?fields=status,country,countryCode,query',
-        chunk,
-        { timeout: 10000, headers: { 'Content-Type': 'application/json' } }
+        { method: 'POST', body: chunk, timeoutSeconds: 10, headers: ['Content-Type: application/json'] }
       )
-      const rows = Array.isArray(resp.data) ? resp.data : []
+      const rows = Array.isArray(resp?.data) ? resp.data : []
       for (const row of rows) {
         if (row && row.status === 'success' && row.query) {
           const votes = votesByIp.get(String(row.query))
@@ -1694,10 +1748,12 @@ export async function addFromInput(input: string, options: AddProfilesOptions = 
     // First-time subscription import — fetch + create the group + persist.
     let proxyAddr: string | undefined
     let proxyType: 'socks5' | 'http' | undefined
+    let bootstrapRouteMode: 'auto' | 'direct' | 'localProxy' | undefined
     try {
       const settings = settingsStore.get()
       proxyAddr = settings.proxyOverride?.trim() || undefined
       proxyType = settings.proxyType
+      bootstrapRouteMode = settings.bootstrapRouteMode
     } catch {
       /* fall through with no proxy override */
     }
@@ -1705,7 +1761,7 @@ export async function addFromInput(input: string, options: AddProfilesOptions = 
     // We hand the resolver the original (possibly happ://) input because
     // `resolveVpnProfiles` already knows how to unwrap it; reusing that
     // single code path avoids drift between two unwrap implementations.
-    const resolved = await resolveVpnProfiles(trimmed, { proxyAddr, proxyType, clientDevice })
+    const resolved = await resolveVpnProfiles(trimmed, { proxyAddr, proxyType, clientDevice, bootstrapRouteMode })
     if (!resolved.profiles.length) {
       throw new Error('Не найдено поддерживаемых профилей в указанном источнике')
     }
@@ -1802,15 +1858,17 @@ export async function addFromInputToGroup(input: string, groupId: string, option
 
   let proxyAddr: string | undefined
   let proxyType: 'socks5' | 'http' | undefined
+  let bootstrapRouteMode: 'auto' | 'direct' | 'localProxy' | undefined
   try {
     const settings = settingsStore.get()
     proxyAddr = settings.proxyOverride?.trim() || undefined
     proxyType = settings.proxyType
+    bootstrapRouteMode = settings.bootstrapRouteMode
   } catch {
     /* fall through */
   }
 
-  const resolved = await resolveVpnProfiles(trimmed, { proxyAddr, proxyType, clientDevice })
+  const resolved = await resolveVpnProfiles(trimmed, { proxyAddr, proxyType, clientDevice, bootstrapRouteMode })
   if (!resolved.profiles.length) {
     throw new Error('Не найдено поддерживаемых профилей в указанном источнике')
   }

@@ -1,0 +1,21 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "huggingface": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "HuggingFace",
+      "options": {
+        "baseURL": "https://router.huggingface.co/v1",
+        "apiKey": "{env:HF_TOKEN}"
+      },
+      "models": {
+        "zai-org/GLM-5.2": {
+          "name": "GLM-5.2"
+        },
+        "zai-org/GLM-5.2-FP8": {
+          "name": "GLM-5.2-FP8"
+        }
+      }
+    }
+  }
+}

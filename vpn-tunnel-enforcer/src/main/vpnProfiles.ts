@@ -4,10 +4,21 @@ import { hostname, userInfo } from 'os'
 import { promisify } from 'util'
 import { brotliDecompressSync, gunzipSync, inflateRawSync, inflateSync } from 'zlib'
 import type { ClientDevice } from '../shared/ipc-types'
+import { buildBootstrapRouteAttempts, type BootstrapRouteMode } from './bootstrapRoute'
 
 const execFile = promisify(execFileCb)
 
-export type VpnProtocol = 'vless' | 'trojan' | 'shadowsocks' | 'vmess' | 'hysteria2' | 'sing-box'
+export type VpnProtocol =
+  | 'vless'
+  | 'trojan'
+  | 'shadowsocks'
+  | 'vmess'
+  | 'hysteria2'
+  | 'naive'
+  | 'anytls'
+  | 'shadowtls'
+  | 'tuic'
+  | 'sing-box'
 
 export interface VpnProfile {
   name: string
@@ -35,6 +46,23 @@ export interface SubscriptionFetchOptions {
   proxyAddr?: string
   proxyType?: 'socks5' | 'http'
   clientDevice?: ClientDevice
+  bootstrapRouteMode?: BootstrapRouteMode
+}
+
+export type VpnProfileStealthPreset =
+  | 'reality-utls'
+  | 'naive-ech'
+  | 'naive'
+  | 'hysteria2-obfs'
+  | 'tls-utls'
+  | 'plain'
+
+export interface VpnProfileCapabilitySummary {
+  protocol: string
+  stealthPreset: VpnProfileStealthPreset
+  tlsConfigured: boolean
+  echConfigured: boolean
+  warnings: string[]
 }
 
 /**
@@ -69,7 +97,17 @@ interface SubscriptionHttpResponse {
   body: string
 }
 
-const SUPPORTED_OUTBOUND_TYPES = new Set(['vless', 'trojan', 'shadowsocks', 'vmess', 'hysteria2'])
+const SUPPORTED_OUTBOUND_TYPES = new Set([
+  'vless',
+  'trojan',
+  'shadowsocks',
+  'vmess',
+  'hysteria2',
+  'naive',
+  'anytls',
+  'shadowtls',
+  'tuic'
+])
 const HAPP_VERSION = '3.22.1'
 const SUBSCRIPTION_USER_AGENTS = ['sing-box/1.13.8', 'v2RayTun/1.0', 'v2rayN/7.0']
 const DEVICE_FINGERPRINTS: Record<ClientDevice, string> = {
@@ -185,7 +223,7 @@ const SECRET_KEYS = new Set([
 
 export function redactSensitiveText(value: string): string {
   return value
-    .replace(/\b(?:vless|trojan|ss|vmess|hysteria2|hy2):\/\/\S+/gi, '<redacted-vpn-uri>')
+    .replace(/\b(?:vless|trojan|ss|vmess|hysteria2|hy2|naive|anytls|shadowtls|tuic):\/\/\S+/gi, '<redacted-vpn-uri>')
     .replace(/\bhttps?:\/\/[^\s"'<>]{8,}/gi, '<redacted-url>')
     .replace(/\b(Could not resolve host|No such host is known|resolve host):\s*[^\s"'<>]+/gi, '$1: <redacted-host>')
     .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi, '<redacted-uuid>')
@@ -309,6 +347,85 @@ function splitCsv(value: string | null): string[] | undefined {
   return items.length ? items : undefined
 }
 
+function positiveNumberParam(params: URLSearchParams, ...names: string[]): number | undefined {
+  const raw = param(params, ...names)
+  if (!raw) return undefined
+  const value = Number(raw)
+  return Number.isFinite(value) && value > 0 ? value : undefined
+}
+
+function firstPortFromRangeList(value: string | null): string | null {
+  if (!value) return null
+  const first = value.split(',').map(item => item.trim()).find(Boolean)
+  if (!first) return null
+  return first.split(/[-:]/)[0]?.trim() || null
+}
+
+function normalizeHysteria2ServerPorts(value: string | null): string | undefined {
+  if (!value) return undefined
+  const trimmed = value.trim()
+  if (!trimmed || trimmed.includes(',')) return undefined
+  const match = trimmed.match(/^(\d{1,5})\s*[-:]\s*(\d{1,5})$/)
+  if (!match) return undefined
+  const start = Number(match[1])
+  const end = Number(match[2])
+  if (!Number.isInteger(start) || !Number.isInteger(end) || start <= 0 || end <= 0 || start > 65535 || end > 65535 || end < start) {
+    return undefined
+  }
+  return `${start}:${end}`
+}
+
+function hysteria2ServerPortsToUri(value: string): string {
+  return value.replace(/^(\d{1,5}):(\d{1,5})$/, '$1-$2')
+}
+
+function buildEchFromParams(params: URLSearchParams): Record<string, any> | undefined {
+  const config = splitCsv(param(params, 'echConfig', 'ech_config', 'ech-config'))
+  const configPath = param(params, 'echConfigPath', 'ech_config_path', 'ech-config-path')
+  const queryServerName = param(params, 'echQueryServerName', 'ech_query_server_name', 'ech-query-server-name')
+  const enabled = boolParam(params, 'ech', 'echEnabled', 'ech_enabled', 'ech-enabled')
+  if (!enabled && !config && !configPath && !queryServerName) return undefined
+
+  const ech: Record<string, any> = { enabled: enabled || Boolean(config || configPath || queryServerName) }
+  if (config) ech.config = config
+  if (configPath) ech.config_path = configPath
+  if (queryServerName) ech.query_server_name = queryServerName
+  return ech
+}
+
+function buildEchFromObject(source: Record<string, any>): Record<string, any> | undefined {
+  const raw =
+    source.ech && typeof source.ech === 'object' ? source.ech :
+    source.echSettings && typeof source.echSettings === 'object' ? source.echSettings :
+    source['ech-settings'] && typeof source['ech-settings'] === 'object' ? source['ech-settings'] :
+    source['ech-opts'] && typeof source['ech-opts'] === 'object' ? source['ech-opts'] :
+    null
+  const config = stringListValue(raw?.config) || stringListValue(source.echConfig) || stringListValue(source['ech-config'])
+  const configPath =
+    stringValue(raw?.config_path) ||
+    stringValue(raw?.configPath) ||
+    stringValue(source.echConfigPath) ||
+    stringValue(source['ech-config-path'])
+  const queryServerName =
+    stringValue(raw?.query_server_name) ||
+    stringValue(raw?.queryServerName) ||
+    stringValue(source.echQueryServerName) ||
+    stringValue(source['ech-query-server-name'])
+  const explicitEnabled =
+    raw && ('enabled' in raw) ? boolValue(raw.enabled) :
+    'ech' in source ? boolValue(source.ech) :
+    'ech-enabled' in source ? boolValue(source['ech-enabled']) :
+    'echEnabled' in source ? boolValue(source.echEnabled) :
+    false
+  if (!explicitEnabled && !config && !configPath && !queryServerName) return undefined
+
+  const ech: Record<string, any> = { enabled: explicitEnabled || Boolean(config || configPath || queryServerName) }
+  if (config) ech.config = config
+  if (configPath) ech.config_path = configPath
+  if (queryServerName) ech.query_server_name = queryServerName
+  return ech
+}
+
 function buildTls(params: URLSearchParams, host: string, defaultEnabled = false): Record<string, any> | undefined {
   const security = (param(params, 'security', 'tls') || '').toLowerCase()
   const enabled = defaultEnabled || security === 'tls' || security === 'reality'
@@ -321,6 +438,8 @@ function buildTls(params: URLSearchParams, host: string, defaultEnabled = false)
   const alpn = splitCsv(param(params, 'alpn'))
   if (alpn) tls.alpn = alpn
   if (boolParam(params, 'allowInsecure', 'insecure', 'skip-cert-verify')) tls.insecure = true
+  const ech = buildEchFromParams(params)
+  if (ech) tls.ech = ech
 
   const fp = param(params, 'fp', 'fingerprint')
   if (fp && fp.toLowerCase() !== 'none') {
@@ -419,6 +538,9 @@ function finishOutbound(outbound: Record<string, any>): Record<string, any> {
   // values on the user's outbound are preserved.
   if (result.tls && typeof result.tls === 'object') {
     const tls = result.tls as Record<string, any>
+    if (result.type === 'naive') {
+      delete tls.insecure
+    }
     if (tls.enabled !== false) {
       if (!tls.utls || typeof tls.utls !== 'object' || tls.utls.enabled === false) {
         tls.utls = { enabled: true, fingerprint: 'chrome' }
@@ -449,8 +571,7 @@ function parseVless(line: string): VpnProfile {
     tag: 'proxy-out',
     server: url.hostname,
     server_port: numberPort(url.port),
-    uuid: safeDecode(url.username),
-    network: 'tcp'
+    uuid: safeDecode(url.username)
   }
   const flow = param(params, 'flow')
   if (flow) outbound.flow = flow
@@ -471,8 +592,7 @@ function parseTrojan(line: string): VpnProfile {
     tag: 'proxy-out',
     server: url.hostname,
     server_port: numberPort(url.port),
-    password: safeDecode(url.username),
-    network: 'tcp'
+    password: safeDecode(url.username)
   }
   const tls = buildTls(params, url.hostname, (param(params, 'security') || 'tls').toLowerCase() !== 'none')
   if (tls) outbound.tls = tls
@@ -553,8 +673,7 @@ function parseVmess(line: string): VpnProfile {
     server_port: numberPort(String(raw.port || raw.server_port || '')),
     uuid: String(raw.id || raw.uuid || ''),
     security: String(raw.scy || raw.security || 'auto'),
-    alter_id: Number(raw.aid || raw.alterId || 0),
-    network: 'tcp'
+    alter_id: Number(raw.aid || raw.alterId || 0)
   }
   const tls = buildTls(params, outbound.server)
   if (tls) outbound.tls = tls
@@ -567,19 +686,94 @@ function parseHysteria2(line: string): VpnProfile {
   const normalized = line.replace(/^hy2:\/\//i, 'hysteria2://')
   const url = parseStandardUrl(normalized)
   const params = url.searchParams
+  const rawServerPorts = param(params, 'mport', 'server_ports', 'serverPorts')
+  const serverPorts = normalizeHysteria2ServerPorts(rawServerPorts)
   const outbound: Record<string, any> = {
     type: 'hysteria2',
     tag: 'proxy-out',
     server: url.hostname,
-    server_port: numberPort(url.port),
+    server_port: numberPort(url.port || firstPortFromRangeList(rawServerPorts)),
     password: safeDecode(url.username || param(params, 'password') || ''),
-    network: 'tcp',
     tls: buildTls(params, url.hostname, true)
   }
   const obfsType = param(params, 'obfs')
   const obfsPassword = param(params, 'obfs-password', 'obfs_password')
   if (obfsType) outbound.obfs = { type: obfsType, password: obfsPassword || '' }
+  if (serverPorts) outbound.server_ports = serverPorts
+  const hopInterval = param(params, 'hop_interval', 'hopInterval', 'hop-interval')
+  if (hopInterval) outbound.hop_interval = hopInterval
+  const upMbps = positiveNumberParam(params, 'up_mbps', 'upMbps', 'upmbps')
+  if (upMbps !== undefined) outbound.up_mbps = upMbps
+  const downMbps = positiveNumberParam(params, 'down_mbps', 'downMbps', 'downmbps')
+  if (downMbps !== undefined) outbound.down_mbps = downMbps
   return { name: safeDecode(url.hash.slice(1)) || 'Hysteria2', protocol: 'hysteria2', outbound: finishOutbound(outbound) }
+}
+
+function parseNaive(line: string): VpnProfile {
+  const url = parseStandardUrl(line)
+  const params = url.searchParams
+  const outbound: Record<string, any> = {
+    type: 'naive',
+    tag: 'proxy-out',
+    server: url.hostname,
+    server_port: numberPort(url.port || '443'),
+    username: safeDecode(url.username),
+    password: safeDecode(url.password)
+  }
+  const tls = buildTls(params, url.hostname, true)
+  if (tls) outbound.tls = tls
+  return { name: safeDecode(url.hash.slice(1)) || 'Naive', protocol: 'naive', outbound: finishOutbound(outbound) }
+}
+
+function parseAnyTls(line: string): VpnProfile {
+  const url = parseStandardUrl(line)
+  const params = url.searchParams
+  const outbound: Record<string, any> = {
+    type: 'anytls',
+    tag: 'proxy-out',
+    server: url.hostname,
+    server_port: numberPort(url.port || '443'),
+    password: safeDecode(url.username || param(params, 'password') || '')
+  }
+  const tls = buildTls(params, url.hostname, true)
+  if (tls) outbound.tls = tls
+  return { name: safeDecode(url.hash.slice(1)) || 'AnyTLS', protocol: 'anytls', outbound: finishOutbound(outbound) }
+}
+
+function parseShadowTls(line: string): VpnProfile {
+  const url = parseStandardUrl(line)
+  const params = url.searchParams
+  const outbound: Record<string, any> = {
+    type: 'shadowtls',
+    tag: 'proxy-out',
+    server: url.hostname,
+    server_port: numberPort(url.port || '443'),
+    password: safeDecode(url.username || param(params, 'password') || ''),
+    version: Number(param(params, 'version') || 3)
+  }
+  const tls = buildTls(params, url.hostname, true)
+  if (tls) outbound.tls = tls
+  return { name: safeDecode(url.hash.slice(1)) || 'ShadowTLS', protocol: 'shadowtls', outbound: finishOutbound(outbound) }
+}
+
+function parseTuic(line: string): VpnProfile {
+  const url = parseStandardUrl(line)
+  const params = url.searchParams
+  const outbound: Record<string, any> = {
+    type: 'tuic',
+    tag: 'proxy-out',
+    server: url.hostname,
+    server_port: numberPort(url.port),
+    uuid: safeDecode(url.username || param(params, 'uuid') || ''),
+    password: safeDecode(url.password || param(params, 'password') || '')
+  }
+  const congestionControl = param(params, 'congestion_control', 'congestionControl', 'congestion')
+  if (congestionControl) outbound.congestion_control = congestionControl
+  const udpRelayMode = param(params, 'udp_relay_mode', 'udpRelayMode')
+  if (udpRelayMode) outbound.udp_relay_mode = udpRelayMode
+  const tls = buildTls(params, url.hostname, true)
+  if (tls) outbound.tls = tls
+  return { name: safeDecode(url.hash.slice(1)) || 'TUIC', protocol: 'tuic', outbound: finishOutbound(outbound) }
 }
 
 function xrayProtocol(value: unknown): VpnProtocol | null {
@@ -587,6 +781,7 @@ function xrayProtocol(value: unknown): VpnProtocol | null {
   if (protocol === 'vless' || protocol === 'trojan' || protocol === 'vmess') return protocol
   if (protocol === 'shadowsocks' || protocol === 'ss') return 'shadowsocks'
   if (protocol === 'hysteria2' || protocol === 'hy2') return 'hysteria2'
+  if (protocol === 'naive' || protocol === 'anytls' || protocol === 'shadowtls' || protocol === 'tuic') return protocol
   return null
 }
 
@@ -604,6 +799,8 @@ function buildTlsFromXrayStream(stream: Record<string, any>, server: string): Re
   const alpn = stringListValue(source.alpn)
   if (alpn) tls.alpn = alpn
   if (boolValue(source.allowInsecure) || boolValue(source.insecure)) tls.insecure = true
+  const ech = buildEchFromObject(source)
+  if (ech) tls.ech = ech
   const fingerprint = stringValue(source.fingerprint) || stringValue(source.fp)
   if (fingerprint && fingerprint.toLowerCase() !== 'none') {
     tls.utls = { enabled: true, fingerprint }
@@ -707,8 +904,7 @@ function xrayOutboundToProfiles(raw: Record<string, any>): VpnProfile[] {
           tag: 'proxy-out',
           server,
           server_port: port,
-          uuid: stringValue(user.id) || stringValue(user.uuid) || '',
-          network: 'tcp'
+          uuid: stringValue(user.id) || stringValue(user.uuid) || ''
         }
         if (protocol === 'vmess') {
           outbound.security = stringValue(user.security) || 'auto'
@@ -741,9 +937,36 @@ function xrayOutboundToProfiles(raw: Record<string, any>): VpnProfile[] {
       server,
       server_port: port
     }
-    if (protocol === 'trojan' || protocol === 'hysteria2') {
+    if (protocol === 'trojan' || protocol === 'hysteria2' || protocol === 'naive' || protocol === 'anytls' || protocol === 'shadowtls') {
       outbound.password = stringValue(node.password) || ''
-      outbound.network = 'tcp'
+      if (protocol === 'naive') outbound.username = stringValue(node.username) || stringValue(node.user) || ''
+      if (protocol === 'shadowtls') outbound.version = Number(node.version || 3)
+      if (protocol === 'hysteria2') {
+        const obfs = node.obfs && typeof node.obfs === 'object' ? node.obfs : null
+        const obfsType = stringValue(obfs?.type) || stringValue(node.obfs)
+        const obfsPassword =
+          stringValue(obfs?.password) ||
+          stringValue(node.obfs_password) ||
+          stringValue(node['obfs-password'])
+        if (obfsType) outbound.obfs = { type: obfsType, password: obfsPassword || '' }
+        const serverPorts = normalizeHysteria2ServerPorts(
+          stringValue(node.server_ports) || stringValue(node.serverPorts) || stringValue(node.mport)
+        )
+        if (serverPorts) outbound.server_ports = serverPorts
+        const hopInterval = stringValue(node.hop_interval) || stringValue(node.hopInterval)
+        if (hopInterval) outbound.hop_interval = hopInterval
+        const upMbps = Number(node.up_mbps ?? node.upMbps ?? node.upmbps)
+        if (Number.isFinite(upMbps) && upMbps > 0) outbound.up_mbps = upMbps
+        const downMbps = Number(node.down_mbps ?? node.downMbps ?? node.downmbps)
+        if (Number.isFinite(downMbps) && downMbps > 0) outbound.down_mbps = downMbps
+      }
+    } else if (protocol === 'tuic') {
+      outbound.uuid = stringValue(node.uuid) || stringValue(node.id) || ''
+      outbound.password = stringValue(node.password) || ''
+      const congestionControl = stringValue(node.congestion_control) || stringValue(node.congestionControl)
+      if (congestionControl) outbound.congestion_control = congestionControl
+      const udpRelayMode = stringValue(node.udp_relay_mode) || stringValue(node.udpRelayMode)
+      if (udpRelayMode) outbound.udp_relay_mode = udpRelayMode
     } else if (protocol === 'shadowsocks') {
       outbound.method = stringValue(node.method) || stringValue(node.cipher) || ''
       outbound.password = stringValue(node.password) || ''
@@ -881,10 +1104,10 @@ function parseUriProfilesFromText(text: string): VpnProfile[] {
 
   for (const line of text.replace(/\r/g, '\n').split('\n')) {
     const trimmed = line.trim()
-    if (/^(vless|trojan|ss|vmess|hysteria2|hy2):\/\//i.test(trimmed)) addCandidate(trimmed)
+    if (/^(vless|trojan|ss|vmess|hysteria2|hy2|naive|anytls|shadowtls|tuic):\/\//i.test(trimmed)) addCandidate(trimmed)
   }
 
-  const uriPattern = /\b(?:vless|trojan|ss|vmess|hysteria2|hy2):\/\/[^\s"'<>`\\]+/gi
+  const uriPattern = /\b(?:vless|trojan|ss|vmess|hysteria2|hy2|naive|anytls|shadowtls|tuic):\/\/[^\s"'<>`\\]+/gi
   for (const match of text.matchAll(uriPattern)) addCandidate(match[0])
   return profiles
 }
@@ -1135,6 +1358,8 @@ function buildTlsFromClash(raw: Record<string, any>, server: string): Record<str
   if (fp && fp.toLowerCase() !== 'none') tls.utls = { enabled: true, fingerprint: fp }
   const alpn = stringListValue(raw.alpn)
   if (alpn) tls.alpn = alpn
+  const ech = buildEchFromObject(raw)
+  if (ech) tls.ech = ech
 
   if (realityOpts) {
     const publicKey = stringValue(realityOpts['public-key']) || stringValue(realityOpts.public_key) || stringValue(raw['reality-public-key'])
@@ -1229,16 +1454,42 @@ function clashProxyToProfile(raw: Record<string, any>): VpnProfile | null {
 
   if (type === 'vless' || type === 'vmess') {
     outbound.uuid = stringValue(raw.uuid) || stringValue(raw.id) || ''
-    outbound.network = 'tcp'
     if (type === 'vmess') {
       outbound.security = stringValue(raw.cipher) || stringValue(raw.security) || 'auto'
       outbound.alter_id = Number(raw.alterId || raw.alter_id || 0)
     }
     const flow = stringValue(raw.flow)
     if (flow) outbound.flow = flow
-  } else if (type === 'trojan' || type === 'hysteria2') {
+  } else if (type === 'trojan' || type === 'hysteria2' || type === 'naive' || type === 'anytls' || type === 'shadowtls') {
     outbound.password = stringValue(raw.password) || ''
-    outbound.network = 'tcp'
+    if (type === 'naive') outbound.username = stringValue(raw.username) || stringValue(raw.user) || ''
+    if (type === 'shadowtls') outbound.version = Number(raw.version || 3)
+    if (type === 'hysteria2') {
+      const obfs = raw.obfs && typeof raw.obfs === 'object' ? raw.obfs : null
+      const obfsType = stringValue(obfs?.type) || stringValue(raw.obfs)
+      const obfsPassword =
+        stringValue(obfs?.password) ||
+        stringValue(raw['obfs-password']) ||
+        stringValue(raw.obfs_password)
+      if (obfsType) outbound.obfs = { type: obfsType, password: obfsPassword || '' }
+      const serverPorts = normalizeHysteria2ServerPorts(
+        stringValue(raw.server_ports) || stringValue(raw['server-ports']) || stringValue(raw.mport)
+      )
+      if (serverPorts) outbound.server_ports = serverPorts
+      const hopInterval = stringValue(raw.hop_interval) || stringValue(raw['hop-interval'])
+      if (hopInterval) outbound.hop_interval = hopInterval
+      const upMbps = Number(raw.up_mbps ?? raw['up-mbps'] ?? raw.upmbps)
+      if (Number.isFinite(upMbps) && upMbps > 0) outbound.up_mbps = upMbps
+      const downMbps = Number(raw.down_mbps ?? raw['down-mbps'] ?? raw.downmbps)
+      if (Number.isFinite(downMbps) && downMbps > 0) outbound.down_mbps = downMbps
+    }
+  } else if (type === 'tuic') {
+    outbound.uuid = stringValue(raw.uuid) || stringValue(raw.id) || ''
+    outbound.password = stringValue(raw.password) || ''
+    const congestionControl = stringValue(raw.congestion_control) || stringValue(raw['congestion-control'])
+    if (congestionControl) outbound.congestion_control = congestionControl
+    const udpRelayMode = stringValue(raw.udp_relay_mode) || stringValue(raw['udp-relay-mode'])
+    if (udpRelayMode) outbound.udp_relay_mode = udpRelayMode
   } else if (type === 'shadowsocks') {
     outbound.method = stringValue(raw.cipher) || stringValue(raw.method) || ''
     outbound.password = stringValue(raw.password) || ''
@@ -1280,6 +1531,10 @@ function parseLine(line: string): VpnProfile | null {
   if (scheme === 'ss') return parseShadowsocks(trimmed)
   if (scheme === 'vmess') return parseVmess(trimmed)
   if (scheme === 'hysteria2' || scheme === 'hy2') return parseHysteria2(trimmed)
+  if (scheme === 'naive') return parseNaive(trimmed)
+  if (scheme === 'anytls') return parseAnyTls(trimmed)
+  if (scheme === 'shadowtls') return parseShadowTls(trimmed)
+  if (scheme === 'tuic') return parseTuic(trimmed)
   return null
 }
 
@@ -1303,21 +1558,6 @@ export function parseVpnProfiles(text: string): VpnProfile[] {
     if (uriProfiles.length) return uriProfiles
   }
   return []
-}
-
-function normalizeProxyAddress(raw: string | null | undefined): string | null {
-  const value = (raw || '').trim().replace(/^(socks5h?|https?):\/\//i, '')
-  if (!value) return null
-  const sep = value.lastIndexOf(':')
-  if (sep <= 0) return null
-  const host = value.slice(0, sep).trim()
-  const port = Number(value.slice(sep + 1))
-  if (!host || !Number.isInteger(port) || port <= 0 || port > 65535) return null
-  return `${host}:${port}`
-}
-
-function proxyUrl(addr: string, type: 'socks5' | 'http'): string {
-  return type === 'http' ? `http://${addr}` : `socks5h://${addr}`
 }
 
 export function buildSubscriptionHwid(device: ClientDevice = 'pc'): string {
@@ -1383,33 +1623,21 @@ function buildFetchAttempts(options: SubscriptionFetchOptions = {}): FetchAttemp
     { args: subscriptionCommonCurlArgs(clientDevice), suffix: '' },
     { args: subscriptionFallbackCurlArgs(), suffix: ' [no-hwid]' }
   ]
-  const proxyCandidates: Array<{ addr: string; type: 'socks5' | 'http'; label: string }> = []
-  const seen = new Set<string>()
-  const addProxy = (addr: string | null, type: 'socks5' | 'http', label: string) => {
-    if (!addr) return
-    const key = `${type}:${addr}`
-    if (seen.has(key)) return
-    seen.add(key)
-    proxyCandidates.push({ addr, type, label })
-  }
-
-  addProxy(normalizeProxyAddress(options.proxyAddr), options.proxyType ?? 'socks5', 'через выбранный локальный proxy')
-  addProxy('127.0.0.1:10808', 'socks5', 'через Happ SOCKS 127.0.0.1:10808')
-  addProxy('127.0.0.1:10809', 'http', 'через Happ HTTP 127.0.0.1:10809')
+  const bootstrapAttempts = buildBootstrapRouteAttempts({
+    mode: options.bootstrapRouteMode,
+    proxyAddr: options.proxyAddr,
+    proxyType: options.proxyType
+  })
 
   const attempts: FetchAttempt[] = []
   // Try with HWID first (Marzban/Sosa-style panels require it). Only if every
   // HWID-bearing attempt produces an empty body do we fall back to bare attempts.
   for (const headerSet of headerSets) {
     for (const ua of getSubscriptionUserAgents(clientDevice)) {
-      attempts.push({
-        label: `напрямую (${ua})${headerSet.suffix}`,
-        args: ['--noproxy', '*', '--compressed', '-A', ua, ...headerSet.args]
-      })
-      for (const proxy of proxyCandidates) {
+      for (const route of bootstrapAttempts) {
         attempts.push({
-          label: `${proxy.label} (${ua})${headerSet.suffix}`,
-          args: ['--compressed', '-A', ua, ...headerSet.args, '--proxy', proxyUrl(proxy.addr, proxy.type)]
+          label: `${route.label} (${ua})${headerSet.suffix}`,
+          args: [...route.curlArgs, '--compressed', '-A', ua, ...headerSet.args]
         })
       }
     }
@@ -1473,6 +1701,7 @@ async function resolveHostWithDoh(host: string): Promise<string[]> {
 }
 
 async function buildDnsBypassAttempts(url: string, options: SubscriptionFetchOptions = {}): Promise<FetchAttempt[]> {
+  if (options.bootstrapRouteMode === 'localProxy') return []
   let parsed: URL
   try {
     parsed = new URL(url)
@@ -1698,7 +1927,7 @@ async function fetchSubscriptionHttpResponse(url: string, attempt: FetchAttempt)
         currentUrl = effectiveNext
         continue
       }
-      if (/^(?:vless|trojan|ss|vmess|hysteria2|hy2):\/\//i.test(effectiveNext)) {
+      if (/^(?:vless|trojan|ss|vmess|hysteria2|hy2|naive|anytls|shadowtls|tuic):\/\//i.test(effectiveNext)) {
         return { headers, body: effectiveNext }
       }
 
@@ -1836,7 +2065,7 @@ function unwrapHappAddLink(input: string): string | null {
   if (host === 'routing') {
     throw new Error(
       'Это правило маршрутизации Happ (happ://routing/…), а не VPN-подписка. ' +
-      'Вставьте ссылку на подписку или ключ протокола (vless://, trojan://, ss://, vmess://, hysteria2://).'
+      'Вставьте ссылку на подписку или ключ протокола (vless://, trojan://, ss://, vmess://, hysteria2://, naive://, anytls://, shadowtls://, tuic://).'
     )
   }
 
@@ -1856,9 +2085,9 @@ function unwrapHappAddLink(input: string): string | null {
 
     for (const candidate of candidates) {
       if (/^https?:\/\//i.test(candidate)) return candidate
-      if (/^(?:vless|trojan|ss|vmess|hysteria2|hy2):\/\//i.test(candidate)) return candidate
+      if (/^(?:vless|trojan|ss|vmess|hysteria2|hy2|naive|anytls|shadowtls|tuic):\/\//i.test(candidate)) return candidate
       // Could be a base64 blob with multiple vless:// lines — let parseVpnProfiles handle it.
-      if (/(?:vless|trojan|ss|vmess|hysteria2|hy2):\/\//i.test(candidate)) return candidate
+      if (/(?:vless|trojan|ss|vmess|hysteria2|hy2|naive|anytls|shadowtls|tuic):\/\//i.test(candidate)) return candidate
     }
 
     throw new Error(
@@ -1870,7 +2099,7 @@ function unwrapHappAddLink(input: string): string | null {
   // Unknown happ:// host — bail out loudly instead of silently producing 0 profiles.
   throw new Error(
     'Неизвестная схема happ://' + host + '/. Вставьте обычную ссылку подписки (https://…) ' +
-    'или ключ протокола (vless://, trojan://, ss://, vmess://, hysteria2://).'
+    'или ключ протокола (vless://, trojan://, ss://, vmess://, hysteria2://, naive://, anytls://, shadowtls://, tuic://).'
   )
 }
 
@@ -1883,7 +2112,7 @@ function unwrapMantarayLink(input: string): string | null {
   if (host === 'crypt' || host === 'crypto' || host === 'crypt3' || host === 'crypt4' || host === 'crypt5') {
     throw new Error(
       'Это зашифрованная подписка MantaRay (mantaray://' + host + '/...). VPNTE не может расшифровать ее без ключей приложения MantaRay. ' +
-      'Попросите у провайдера обычный subscription URL (https://...) или прямую ссылку ключа (vless://, trojan://, ss://, vmess://, hysteria2://).'
+      'Попросите у провайдера обычный subscription URL (https://...) или прямую ссылку ключа (vless://, trojan://, ss://, vmess://, hysteria2://, naive://, anytls://, shadowtls://, tuic://).'
     )
   }
 
@@ -1897,8 +2126,8 @@ function unwrapMantarayLink(input: string): string | null {
 
     for (const candidate of candidates) {
       if (/^https?:\/\//i.test(candidate)) return candidate
-      if (/^(?:vless|trojan|ss|vmess|hysteria2|hy2):\/\//i.test(candidate)) return candidate
-      if (/(?:vless|trojan|ss|vmess|hysteria2|hy2):\/\//i.test(candidate)) return candidate
+      if (/^(?:vless|trojan|ss|vmess|hysteria2|hy2|naive|anytls|shadowtls|tuic):\/\//i.test(candidate)) return candidate
+      if (/(?:vless|trojan|ss|vmess|hysteria2|hy2|naive|anytls|shadowtls|tuic):\/\//i.test(candidate)) return candidate
     }
 
     throw new Error(
@@ -1936,7 +2165,7 @@ export async function resolveVpnProfiles(input: string, options?: SubscriptionFe
 export async function resolveVpnProfile(input: string, selectedIndex = 0, options?: SubscriptionFetchOptions): Promise<VpnProfile> {
   const { profiles } = await resolveVpnProfiles(input, options)
   if (!profiles.length) {
-    throw new Error('В подписке/ключе не найдено поддерживаемых профилей (VLESS, Trojan, Shadowsocks, VMess, Hysteria2 или sing-box outbound JSON)')
+    throw new Error('В подписке/ключе не найдено поддерживаемых профилей (VLESS, Trojan, Shadowsocks, VMess, Hysteria2, Naive, AnyTLS, ShadowTLS, TUIC или sing-box outbound JSON)')
   }
   return profiles[Math.min(Math.max(0, selectedIndex), profiles.length - 1)]
 }
@@ -2061,7 +2290,71 @@ function appendTlsParams(params: URLSearchParams, tls: Record<string, any> | und
     if (typeof tls.reality.public_key === 'string' && tls.reality.public_key) params.set('pbk', tls.reality.public_key)
     if (typeof tls.reality.short_id === 'string' && tls.reality.short_id) params.set('sid', tls.reality.short_id)
   }
+  const ech = tls.ech && typeof tls.ech === 'object' && tls.ech.enabled !== false ? tls.ech : null
+  if (ech) {
+    params.set('ech', '1')
+    if (Array.isArray(ech.config) && ech.config.length) params.set('echConfig', ech.config.join(','))
+    if (typeof ech.config_path === 'string' && ech.config_path) params.set('echConfigPath', ech.config_path)
+    if (typeof ech.query_server_name === 'string' && ech.query_server_name) {
+      params.set('echQueryServerName', ech.query_server_name)
+    }
+  }
   return true
+}
+
+export function describeVpnProfileCapabilities(
+  profileOrOutbound: { protocol?: string; outbound?: Record<string, any> } | Record<string, any>
+): VpnProfileCapabilitySummary {
+  const maybeProfile = profileOrOutbound as { protocol?: string; outbound?: Record<string, any> }
+  const outbound = maybeProfile.outbound && typeof maybeProfile.outbound === 'object'
+    ? maybeProfile.outbound
+    : profileOrOutbound as Record<string, any>
+  const protocol = String(maybeProfile.protocol || outbound.type || 'unknown').toLowerCase()
+  const tls = outbound.tls && typeof outbound.tls === 'object' && outbound.tls.enabled !== false
+    ? outbound.tls as Record<string, any>
+    : null
+  const ech = tls?.ech && typeof tls.ech === 'object' && tls.ech.enabled !== false
+    ? tls.ech as Record<string, any>
+    : null
+  const echHasConfig =
+    !!ech &&
+    ((Array.isArray(ech.config) && ech.config.length > 0) ||
+      Boolean(ech.config_path) ||
+      Boolean(ech.query_server_name))
+  const warnings: string[] = []
+
+  if (tls?.insecure === true) warnings.push('TLS certificate verification is disabled')
+  if (protocol === 'naive' && tls?.insecure === true) warnings.push('Naive in sing-box does not support tls.insecure')
+  if (ech && !echHasConfig) warnings.push('ECH is enabled but no config, config_path, or query_server_name is set')
+  if (protocol === 'hysteria2') {
+    const obfsType = outbound.obfs && typeof outbound.obfs === 'object'
+      ? String(outbound.obfs.type || '').toLowerCase()
+      : ''
+    if (!obfsType) warnings.push('Hysteria2 obfs is not configured')
+    if (obfsType === 'gecko') warnings.push('Hysteria2 gecko obfs requires sing-box 1.14+')
+    if (outbound.network === 'tcp') warnings.push('Hysteria2 uses QUIC/UDP; tcp-only routing can block it')
+  }
+
+  let stealthPreset: VpnProfileStealthPreset = 'plain'
+  if (tls?.reality && typeof tls.reality === 'object' && tls.reality.enabled !== false) {
+    stealthPreset = 'reality-utls'
+  } else if (protocol === 'naive' && echHasConfig) {
+    stealthPreset = 'naive-ech'
+  } else if (protocol === 'naive') {
+    stealthPreset = 'naive'
+  } else if (protocol === 'hysteria2' && outbound.obfs && typeof outbound.obfs === 'object') {
+    stealthPreset = 'hysteria2-obfs'
+  } else if (tls?.utls && typeof tls.utls === 'object' && tls.utls.enabled !== false) {
+    stealthPreset = 'tls-utls'
+  }
+
+  return {
+    protocol,
+    stealthPreset,
+    tlsConfigured: Boolean(tls),
+    echConfigured: echHasConfig,
+    warnings
+  }
 }
 
 function buildHostPort(server: string, port: unknown): string {
@@ -2164,10 +2457,61 @@ function hysteria2ToUri(name: string, outbound: Record<string, any>): string {
     if (typeof outbound.obfs.type === 'string' && outbound.obfs.type) params.set('obfs', outbound.obfs.type)
     if (typeof outbound.obfs.password === 'string' && outbound.obfs.password) params.set('obfs-password', outbound.obfs.password)
   }
+  if (typeof outbound.server_ports === 'string' && outbound.server_ports) {
+    params.set('mport', hysteria2ServerPortsToUri(outbound.server_ports))
+  }
+  if (typeof outbound.hop_interval === 'string' && outbound.hop_interval) params.set('hop_interval', outbound.hop_interval)
+  if (Number.isFinite(Number(outbound.up_mbps)) && Number(outbound.up_mbps) > 0) {
+    params.set('upmbps', String(Number(outbound.up_mbps)))
+  }
+  if (Number.isFinite(Number(outbound.down_mbps)) && Number(outbound.down_mbps) > 0) {
+    params.set('downmbps', String(Number(outbound.down_mbps)))
+  }
   const password = encodeURIComponent(String(outbound.password || ''))
   const authority = buildHostPort(String(outbound.server || ''), outbound.server_port)
   const query = params.toString()
   return `hysteria2://${password}@${authority}${query ? `?${query}` : ''}${nameToFragment(name)}`
+}
+
+function naiveToUri(name: string, outbound: Record<string, any>): string {
+  const params = new URLSearchParams()
+  appendTlsParams(params, outbound.tls, String(outbound.server || ''))
+  const username = encodeURIComponent(String(outbound.username || ''))
+  const password = encodeURIComponent(String(outbound.password || ''))
+  const authority = buildHostPort(String(outbound.server || ''), outbound.server_port)
+  return `naive://${username}:${password}@${authority}?${params.toString()}${nameToFragment(name)}`
+}
+
+function anyTlsToUri(name: string, outbound: Record<string, any>): string {
+  const params = new URLSearchParams()
+  appendTlsParams(params, outbound.tls, String(outbound.server || ''))
+  const password = encodeURIComponent(String(outbound.password || ''))
+  const authority = buildHostPort(String(outbound.server || ''), outbound.server_port)
+  return `anytls://${password}@${authority}?${params.toString()}${nameToFragment(name)}`
+}
+
+function shadowTlsToUri(name: string, outbound: Record<string, any>): string {
+  const params = new URLSearchParams()
+  appendTlsParams(params, outbound.tls, String(outbound.server || ''))
+  if (outbound.version) params.set('version', String(outbound.version))
+  const password = encodeURIComponent(String(outbound.password || ''))
+  const authority = buildHostPort(String(outbound.server || ''), outbound.server_port)
+  return `shadowtls://${password}@${authority}?${params.toString()}${nameToFragment(name)}`
+}
+
+function tuicToUri(name: string, outbound: Record<string, any>): string {
+  const params = new URLSearchParams()
+  appendTlsParams(params, outbound.tls, String(outbound.server || ''))
+  if (typeof outbound.congestion_control === 'string' && outbound.congestion_control) {
+    params.set('congestion_control', outbound.congestion_control)
+  }
+  if (typeof outbound.udp_relay_mode === 'string' && outbound.udp_relay_mode) {
+    params.set('udp_relay_mode', outbound.udp_relay_mode)
+  }
+  const uuid = encodeURIComponent(String(outbound.uuid || ''))
+  const password = encodeURIComponent(String(outbound.password || ''))
+  const authority = buildHostPort(String(outbound.server || ''), outbound.server_port)
+  return `tuic://${uuid}:${password}@${authority}?${params.toString()}${nameToFragment(name)}`
 }
 
 /**
@@ -2187,6 +2531,10 @@ export function exportOutboundToUri(profile: { name: string; protocol: string; o
     case 'shadowsocks': return shadowsocksToUri(profile.name, out)
     case 'vmess':       return vmessToUri(profile.name, out)
     case 'hysteria2':   return hysteria2ToUri(profile.name, out)
+    case 'naive':       return naiveToUri(profile.name, out)
+    case 'anytls':      return anyTlsToUri(profile.name, out)
+    case 'shadowtls':   return shadowTlsToUri(profile.name, out)
+    case 'tuic':        return tuicToUri(profile.name, out)
     default:            return null
   }
 }

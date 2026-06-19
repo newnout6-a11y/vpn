@@ -290,18 +290,18 @@ describe('generateSingboxConfig stealth mode', () => {
 // ─── UDP blocking ─────────────────────────────────────────────────────────────
 
 describe('generateSingboxConfig UDP rules', () => {
-  it('blocks all UDP for tcp-only outbounds', () => {
+  it('does not blanket-block UDP for imported VLESS Reality profiles carrying stale network=tcp', () => {
     const cfg = gen({ outbound: { ...realityOutbound, network: 'tcp' } })
     const udpBlockAll = cfg.route.rules.some(
-      (r) => r.network === 'udp' && r.outbound === 'block-out' && r.port === undefined
+      (r) => r.network === 'udp' && r.action === 'reject' && r.port === undefined
     )
-    expect(udpBlockAll).toBe(true)
+    expect(udpBlockAll).toBe(false)
   })
 
   it('blocks UDP/443 (QUIC) for HTTP proxy mode', () => {
     const cfg = gen('127.0.0.1:8080', 'http')
     const quicBlock = cfg.route.rules.some(
-      (r) => r.network === 'udp' && r.port === 443 && r.outbound === 'block-out'
+      (r) => r.network === 'udp' && r.port === 443 && r.action === 'reject'
     )
     expect(quicBlock).toBe(true)
   })
@@ -338,7 +338,7 @@ describe('generateSingboxConfig DNS profile', () => {
     dnsState.active = null
   })
 
-  it('uses Cloudflare/Google DoT fallback when no profile is active', () => {
+  it('uses Cloudflare/Google UDP fallback when no profile is active', () => {
     dnsState.active = null
     const cfg = gen({ outbound: { ...plainTlsOutbound, server: '1.2.3.4' } })
     const remote = cfg.dns.servers.find((s: any) => s.tag === 'dns-remote') as any
@@ -346,7 +346,7 @@ describe('generateSingboxConfig DNS profile', () => {
     // DoT (tls) — the known-working tunnelled resolver. A DoH (https) attempt
     // (F11) timed out almost every query through the Reality tunnel in the
     // field and was reverted.
-    expect(remote.type).toBe('tls')
+    expect(remote.type).toBe('udp')
   })
 
   it('applies a plain DNS profile as udp servers through proxy-out', () => {

@@ -53,6 +53,10 @@ interface HealthRow {
   reason?: string
 }
 
+export function displayedServerPing(profile: Pick<ServerProfile, 'ping'>, perRowPing?: Pick<PerRowPing, 'ping'>): number | null {
+  return perRowPing?.ping ?? profile.ping ?? null
+}
+
 const VIRTUAL_ALL_GROUP_ID = '__virtual_all__'
 const EXPANDED_STORAGE_KEY = 'vpnte:expanded-groups'
 const NEW_GROUP_OPTION = '__new__'
@@ -91,6 +95,38 @@ function formatHappType(profile: ServerProfile): string {
   const proto = (profile.protocol || 'unknown').toUpperCase()
   const hasJson = !!profile.outbound && typeof profile.outbound === 'object'
   return hasJson ? `${proto} | JSON` : proto
+}
+
+function profileStealthBadge(profile: ServerProfile): { label: string; title: string; variant: BadgeVariant } | null {
+  const outbound = profile.outbound && typeof profile.outbound === 'object' ? profile.outbound : null
+  const protocol = (profile.protocol || outbound?.type || '').toLowerCase()
+  const tls = outbound?.tls && typeof outbound.tls === 'object' && outbound.tls.enabled !== false
+    ? outbound.tls
+    : null
+  const ech = tls?.ech && typeof tls.ech === 'object' && tls.ech.enabled !== false ? tls.ech : null
+
+  if (ech && (Array.isArray(ech.config) || ech.config_path || ech.query_server_name)) {
+    return { label: 'ECH', title: 'Encrypted ClientHello configured', variant: 'info' }
+  }
+  if (tls?.reality && typeof tls.reality === 'object' && tls.reality.enabled !== false) {
+    return { label: 'Reality', title: 'Reality TLS camouflage', variant: 'info' }
+  }
+  if (protocol === 'naive') {
+    return { label: 'Naive', title: 'NaiveProxy-style TLS profile', variant: 'neutral' }
+  }
+  if (protocol === 'hysteria2' && outbound?.obfs && typeof outbound.obfs === 'object') {
+    return { label: 'OBFS', title: 'Hysteria2 obfuscation configured', variant: 'info' }
+  }
+  if (tls?.utls && typeof tls.utls === 'object' && tls.utls.enabled !== false) {
+    return { label: 'uTLS', title: 'Browser-like TLS fingerprint', variant: 'neutral' }
+  }
+  if (tls) {
+    return { label: 'TLS', title: 'TLS profile without explicit uTLS/Reality marker', variant: 'neutral' }
+  }
+  if (protocol === 'vless' || protocol === 'vmess' || protocol === 'trojan') {
+    return { label: 'Plain', title: 'No TLS/Reality/uTLS marker detected', variant: 'warning' }
+  }
+  return null
 }
 
 function statusVariant(status: ServerProfile['status']): BadgeVariant {
@@ -1526,7 +1562,8 @@ function ServerProfileCard({
 
   const country = profile.country || perRowPing?.country || null
   const flag = countryFlagFromCountryOrName(country, profile.name)
-  const ping = perRowPing?.ping ?? profile.ping
+  const ping = displayedServerPing(profile, perRowPing)
+  const stealthBadge = profileStealthBadge(profile)
 
   // Stale-from-subscription marker: lastSeenInSubscriptionAt is older than
   // group.lastFetchedAt by at least one minute. The fields are optional —
@@ -1585,6 +1622,13 @@ function ServerProfileCard({
             <span className="text-[11px] font-medium uppercase tracking-wide text-[var(--color-text-secondary)]">
               {formatHappType(profile)}
             </span>
+            {stealthBadge && (
+              <span title={stealthBadge.title}>
+                <MacBadge variant={stealthBadge.variant} className="!text-[10px] !px-1.5 !py-0">
+                  {stealthBadge.label}
+                </MacBadge>
+              </span>
+            )}
             <span className="text-[11px] text-[var(--color-text-muted)] truncate font-mono">
               {profile.server}:{profile.port}
             </span>
@@ -1592,36 +1636,28 @@ function ServerProfileCard({
         </div>
 
         {/* Status / ping cluster.
-            When a fresh health-check result exists we replace the legacy
-            online/offline icon + ping ms with a coloured dot + latency. */}
+            Health-check only shows whether the key is alive. The number stays
+            the real per-server ping; health latency is a different metric and
+            must not be displayed as geographical RTT. */}
         <div className="flex items-center gap-1 min-w-[64px] justify-end">
           {health ? (
             health.online ? (
-              <span className="inline-flex items-center gap-1 text-xs tabular-nums text-[var(--color-success)]">
-                <Check className="w-3.5 h-3.5" />
-                {health.latencyMs != null ? `${health.latencyMs} ms` : ''}
+              <span title="Health check: key is alive">
+                <Check className="w-3.5 h-3.5 text-[var(--color-success)]" />
               </span>
             ) : (
-              <span
-                className="inline-flex items-center gap-1 text-xs text-[var(--color-danger)]"
-                title={health.reason}
-              >
-                <AlertCircle className="w-3.5 h-3.5" />
-                {t('servers.health.dead')}
+              <span title={health.reason || t('servers.health.dead')}>
+                <AlertCircle className="w-3.5 h-3.5 text-[var(--color-danger)]" />
               </span>
             )
-          ) : (
-            <>
-              {profile.status === 'online' ? (
-                <Wifi className="w-3.5 h-3.5 text-[var(--color-success)]" />
-              ) : profile.status === 'offline' ? (
-                <WifiOff className="w-3.5 h-3.5 text-[var(--color-danger)]" />
-              ) : null}
-              <span className="text-xs text-[var(--color-text-secondary)] tabular-nums">
-                {ping != null ? `${ping} ms` : '—'}
-              </span>
-            </>
-          )}
+          ) : profile.status === 'online' ? (
+            <Wifi className="w-3.5 h-3.5 text-[var(--color-success)]" />
+          ) : profile.status === 'offline' ? (
+            <WifiOff className="w-3.5 h-3.5 text-[var(--color-danger)]" />
+          ) : null}
+          <span className="text-xs text-[var(--color-text-secondary)] tabular-nums">
+            {ping != null ? `${ping} ms` : '—'}
+          </span>
         </div>
 
         <div className="flex items-center gap-1.5">

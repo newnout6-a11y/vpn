@@ -73,6 +73,12 @@ interface RollbackOptions {
   resetDnsToDhcp?: boolean
 }
 
+export interface PhysicalAdapterDnsSource {
+  ifIndex: number
+  alias: string
+  ipv4DnsServers: string[]
+}
+
 function manifestPath(): string {
   return join(app.getPath('userData'), MANIFEST_BASENAME)
 }
@@ -85,6 +91,29 @@ async function readManifest(): Promise<LockdownManifest | null> {
   } catch {
     return null
   }
+}
+
+function sanitizeDnsServers(values: unknown): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const raw of Array.isArray(values) ? values : []) {
+    const value = String(raw ?? '').trim()
+    if (!value || value === TUN_IPV4_GATEWAY || value === TUN_IPV4_RESOLVER) continue
+    if (seen.has(value)) continue
+    seen.add(value)
+    out.push(value)
+  }
+  return out
+}
+
+function summarizeDnsSources(adapters: AdapterSnapshot[]): PhysicalAdapterDnsSource[] {
+  return adapters
+    .map((adapter) => ({
+      ifIndex: adapter.ifIndex,
+      alias: adapter.alias,
+      ipv4DnsServers: sanitizeDnsServers(adapter.ipv4DnsServers)
+    }))
+    .filter((adapter) => adapter.ipv4DnsServers.length > 0)
 }
 
 async function writeManifest(m: LockdownManifest): Promise<void> {
@@ -453,4 +482,14 @@ try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}
 
 export async function isPhysicalAdapterLockdownApplied(): Promise<boolean> {
   return (await readManifest()) !== null
+}
+
+export async function getPhysicalAdapterDnsSources(): Promise<PhysicalAdapterDnsSource[]> {
+  if (process.platform !== 'win32') return []
+  const manifest = await readManifest()
+  if (manifest?.adapters?.length) {
+    return summarizeDnsSources(manifest.adapters)
+  }
+  const snapshot = await snapshotPhysicalAdapters()
+  return summarizeDnsSources(snapshot)
 }

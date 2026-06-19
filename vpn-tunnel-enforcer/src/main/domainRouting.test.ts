@@ -152,7 +152,7 @@ describe('domainRulesToSingboxRules', () => {
     const out = domainRulesToSingboxRules(rules)
     expect(out[0].outbound).toBe('proxy-out')
     expect(out[1].outbound).toBe('direct-out')
-    expect(out[2].outbound).toBe('block-out')
+    expect(out[2].action).toBe('reject')
   })
 
   it('maps *.x.com to domain_suffix .x.com (subdomains only)', () => {

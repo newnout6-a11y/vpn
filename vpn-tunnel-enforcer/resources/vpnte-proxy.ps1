@@ -8,6 +8,7 @@ param(
 
 $control = "http://127.0.0.1:17873"
 $format = if ($Json) { "" } else { "&format=text" }
+$tokenFile = Join-Path $env:APPDATA "VPN Tunnel Enforcer\external-proxy-control-token"
 
 function Test-VpnteApi {
   try {
@@ -31,10 +32,29 @@ function Start-VpnteIfNeeded {
   }
 }
 
-function Invoke-VpnteProxy($path) {
+function Get-VpnteControlToken {
+  if ($env:VPNTE_CONTROL_TOKEN) {
+    return $env:VPNTE_CONTROL_TOKEN.Trim()
+  }
+  if (Test-Path $tokenFile) {
+    return (Get-Content -LiteralPath $tokenFile -Raw).Trim()
+  }
+  return ""
+}
+
+function Invoke-VpnteProxy($path, [string]$Method = 'GET') {
   Start-VpnteIfNeeded
+  $headers = @{}
+  if ($Method -ne 'GET') {
+    $token = Get-VpnteControlToken
+    if (!$token) {
+      Write-Error "External proxy control token was not found. Start VPN Tunnel Enforcer and try again."
+      exit 1
+    }
+    $headers['X-VPNTE-Control-Token'] = $token
+  }
   try {
-    $response = Invoke-WebRequest -UseBasicParsing -Method Get -Uri $path -TimeoutSec 30
+    $response = Invoke-WebRequest -UseBasicParsing -Method $Method -Uri $path -Headers $headers -TimeoutSec 30
     return $response.Content.TrimEnd()
   } catch {
     Write-Error "VPN Tunnel Enforcer is not running or external proxy API is unavailable: $($_.Exception.Message)"
@@ -58,7 +78,7 @@ switch ($Action) {
       exit 2
     }
     $query = "?port=$Port$format&id=$([uri]::EscapeDataString($Target.Trim()))"
-    Invoke-VpnteProxy "$control/$Action$query"
+    Invoke-VpnteProxy "$control/$Action$query" 'POST'
     break
   }
   'status' {
@@ -68,7 +88,7 @@ switch ($Action) {
   }
   'stop' {
     $suffix = if ($Json) { "" } else { "?format=text" }
-    Invoke-VpnteProxy "$control/stop$suffix"
+    Invoke-VpnteProxy "$control/stop$suffix" 'POST'
     break
   }
   default {
@@ -76,6 +96,6 @@ switch ($Action) {
     if ($Target.Trim()) {
       $query += "&country=$([uri]::EscapeDataString($Target.Trim()))"
     }
-    Invoke-VpnteProxy "$control/$Action$query"
+    Invoke-VpnteProxy "$control/$Action$query" 'POST'
   }
 }

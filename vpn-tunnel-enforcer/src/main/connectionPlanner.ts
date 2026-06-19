@@ -1,6 +1,7 @@
 import { exec as execCb } from 'child_process'
 import { promisify } from 'util'
 import { happDetector, type ProxyInfo } from './happDetector'
+import { getActiveProfile } from './serverPicker'
 import { settingsStore } from './settings'
 import { parseProxyAddress, probeTcp, tunController } from './tunController'
 import { logEvent } from './appLogger'
@@ -206,12 +207,15 @@ function tunnelLabel(tunnel: TunnelInfo) {
 }
 
 export async function getRoutingPlan(): Promise<RoutingPlan> {
+  const settings = settingsStore.get()
+  const isDirectVpn = settings.connectionMode === 'directVpn'
   const [activeTunnels, proxyListeners, proxy] = await Promise.all([
     getActiveTunnels(),
     getProxyListeners(),
-    detectProxy()
+    isDirectVpn ? Promise.resolve<ProxyInfo | null>(null) : detectProxy()
   ])
 
+  const activeProfile = isDirectVpn ? getActiveProfile() : null
   const tunStatus = tunController.getStatus()
   const vpnteTunnels = activeTunnels.filter(tunnel => tunnel.isVpnte)
   const foreignTunnels = activeTunnels.filter(tunnel => !tunnel.isVpnte)
@@ -275,6 +279,63 @@ export async function getRoutingPlan(): Promise<RoutingPlan> {
       explanation: 'Hard mode здесь не нужен и будет вреден. Система уже видит активный туннель, поэтому приложение должно не плодить второй.',
       before: `Было: активный системный туннель ${foreignText}.`,
       after: 'Станет: текущий VPN остается главным маршрутом; VPNTE только показывает статус и помогает настроить приложения при необходимости.',
+      canStartHard: true,
+      proxy,
+      activeTunnels,
+      proxyListeners,
+      blockers,
+      steps
+    }
+  }
+
+  if (isDirectVpn) {
+    if (!activeProfile) {
+      blockers.push('Не выбран активный Direct VPN профиль.')
+      steps.push({
+        label: 'Выбрать VPN-профиль',
+        before: 'Сейчас Direct VPN включать некуда: активный профиль не выбран.',
+        after: 'После выбора профиля приложение сможет поднять TUN напрямую на этот сервер.',
+        status: 'fail'
+      })
+
+      return {
+        ranAt: Date.now(),
+        status: 'blocked',
+        recommendedMode: 'off',
+        title: 'Не выбран VPN-профиль',
+        explanation: 'В режиме Direct VPN локальный proxy не нужен, но нужен активный серверный профиль.',
+        before: 'Было: Direct VPN включен в настройках, но сервер не выбран.',
+        after: 'Станет: после выбора профиля приложение поднимет TUN прямо на VPN-сервер.',
+        canStartHard: false,
+        proxy,
+        activeTunnels,
+        proxyListeners,
+        blockers,
+        steps
+      }
+    }
+
+    steps.push({
+      label: 'Подключить Direct VPN профиль',
+      before: `Сейчас системного ${TUN_ADAPTER_ALIAS} нет, активный профиль ${activeProfile.name} готов к запуску.`,
+      after: 'VPNTE поднимет один системный туннель напрямую на выбранный VPN-сервер.',
+      status: 'ok'
+    })
+    steps.push({
+      label: 'Оставить локальную сеть напрямую',
+      before: 'Локальные адреса и localhost не должны уходить в VPN-сервер.',
+      after: 'Локальная сеть останется напрямую, а внешний интернет пойдет через Direct VPN.',
+      status: 'ok'
+    })
+
+    return {
+      ranAt: Date.now(),
+      status: 'ready',
+      recommendedMode: 'hard',
+      title: 'Можно включать Direct VPN',
+      explanation: 'В Direct VPN режиме локальный proxy не требуется: приложению нужен только активный профиль и отсутствие конфликта с чужим TUN.',
+      before: `Было: интернет идет обычным маршрутом, активный профиль ${activeProfile.name} выбран.`,
+      after: `Станет: внешний интернет пойдет через ${TUN_ADAPTER_ALIAS} напрямую на ${activeProfile.name}.`,
       canStartHard: true,
       proxy,
       activeTunnels,

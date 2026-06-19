@@ -21,6 +21,16 @@ if errorlevel 1 (
 )
 
 :api_ready
+set "TOKEN=%VPNTE_CONTROL_TOKEN%"
+if "%TOKEN%"=="" if exist "%APPDATA%\VPN Tunnel Enforcer\external-proxy-control-token" (
+  set /p TOKEN=<"%APPDATA%\VPN Tunnel Enforcer\external-proxy-control-token"
+)
+
+set "ENC_TARGET=%TARGET%"
+if not "%TARGET%"=="" (
+  for /f "delims=" %%A in ('powershell -NoProfile -Command "[uri]::EscapeDataString($env:TARGET)" 2^>nul') do set "ENC_TARGET=%%A"
+)
+
 set "URL=http://127.0.0.1:17873/%ACTION%?format=text"
 
 if "%ACTION%"=="connect" (
@@ -28,13 +38,27 @@ if "%ACTION%"=="connect" (
     echo Usage: vpnte-proxy.cmd connect PROFILE_ID 1>&2
     exit /b 2
   )
-  set "URL=%URL%&port=%PORT%&id=%TARGET%"
+  set "URL=%URL%&port=%PORT%&id=%ENC_TARGET%"
 ) else (
   if not "%ACTION%"=="status" if not "%ACTION%"=="stop" if not "%ACTION%"=="list" set "URL=%URL%&port=%PORT%"
-  if not "%TARGET%"=="" if not "%ACTION%"=="status" if not "%ACTION%"=="stop" set "URL=%URL%&country=%TARGET%"
+  if not "%TARGET%"=="" if not "%ACTION%"=="status" if not "%ACTION%"=="stop" set "URL=%URL%&country=%ENC_TARGET%"
 )
 
+if "%ACTION%"=="status" goto :get_request
+if "%ACTION%"=="list" goto :get_request
+
+if "%TOKEN%"=="" (
+  echo External proxy control token was not found. Start VPN Tunnel Enforcer and try again. 1>&2
+  exit /b 1
+)
+
+curl -fsS -X POST -H "X-VPNTE-Control-Token: %TOKEN%" "%URL%"
+goto :after_request
+
+:get_request
 curl -fsS "%URL%"
+
+:after_request
 if errorlevel 1 (
   echo VPN Tunnel Enforcer is not running or external proxy API is unavailable. 1>&2
   exit /b 1

@@ -23,22 +23,30 @@
  * it consistent with the OS routing state while TUN owns the default route.
  */
 
+import { spawn } from 'child_process'
+import { mkdtemp, readFile, rm, writeFile } from 'fs/promises'
 import { Socket } from 'net'
+import { tmpdir } from 'os'
+import { join } from 'path'
 import { connect as tlsConnect } from 'tls'
 import Store from 'electron-store'
 import { SocksClient } from 'socks'
 import { logEvent } from './appLogger'
-import { tunController, getDirectProxyPort } from './tunController'
+import { buildBootstrapRouteAttempts, type BootstrapRouteAttempt } from './bootstrapRoute'
+import { settingsStore } from './settings'
+import { getBundledResource, getDirectProxyPort, pickFreeLocalPort, sanitizeProxyOutbound, tunController } from './tunController'
 import type { ServerProfile } from '../shared/ipc-types'
 
 const PROBE_TIMEOUT_MS = 4000
+const HY2_PROBE_TIMEOUT_MS = 8000
+const HY2_PROBE_DESTINATION = { host: '1.1.1.1', port: 443 }
 const HEALTH_CHECK_CONCURRENCY = 5
 
 export interface KeyHealthResult {
   profileId: string
   online: boolean
   latencyMs: number | null
-  /** 'tcp-failed' | 'tls-failed' | 'timeout' | 'no-host' | etc. */
+  /** 'tcp-failed' | 'tls-failed' | 'hy2-udp-blocked' | 'hy2-auth-failed' | etc. */
   reason?: string
 }
 
@@ -111,6 +119,19 @@ function shouldProbeViaTunnel(): { host: string; port: number } | null {
   }
 }
 
+function currentHealthProbeRoutes(): BootstrapRouteAttempt[] {
+  try {
+    const settings = settingsStore.get()
+    return buildBootstrapRouteAttempts({
+      mode: settings.bootstrapRouteMode,
+      proxyAddr: settings.proxyOverride,
+      proxyType: settings.proxyType
+    })
+  } catch {
+    return buildBootstrapRouteAttempts({ mode: 'auto' })
+  }
+}
+
 async function openTcpDirect(host: string, port: number, timeoutMs: number): Promise<Socket> {
   return new Promise<Socket>((resolve, reject) => {
     const socket = new Socket()
@@ -151,6 +172,188 @@ async function openTcpViaSocks(socks: { host: string; port: number }, host: stri
   return Promise.race([connectPromise, timeoutPromise])
 }
 
+async function openTcpViaHttpProxy(proxy: { host: string; port: number }, host: string, port: number, timeoutMs: number): Promise<Socket> {
+  return new Promise<Socket>((resolve, reject) => {
+    const socket = new Socket()
+    let settled = false
+    let buffer = ''
+    const finish = (err: Error | null) => {
+      if (settled) return
+      settled = true
+      socket.removeAllListeners('data')
+      if (err) {
+        try { socket.destroy() } catch { /* ignore */ }
+        reject(err)
+      } else {
+        resolve(socket)
+      }
+    }
+    socket.setTimeout(timeoutMs)
+    socket.once('connect', () => {
+      socket.write(`CONNECT ${host}:${port} HTTP/1.1\r\nHost: ${host}:${port}\r\nProxy-Connection: keep-alive\r\n\r\n`)
+    })
+    socket.on('data', (chunk) => {
+      buffer += chunk.toString('latin1')
+      if (!buffer.includes('\r\n\r\n')) return
+      if (/^HTTP\/1\.[01] 2\d\d\b/i.test(buffer)) finish(null)
+      else finish(new Error(buffer.split(/\r?\n/, 1)[0] || 'http proxy connect failed'))
+    })
+    socket.once('error', err => finish(err))
+    socket.once('timeout', () => finish(new Error('timeout')))
+    socket.connect(proxy.port, proxy.host)
+  })
+}
+
+function parseProxyEndpoint(addr: string | undefined): { host: string; port: number } | null {
+  if (!addr) return null
+  const sep = addr.lastIndexOf(':')
+  if (sep <= 0) return null
+  const host = addr.slice(0, sep)
+  const port = Number(addr.slice(sep + 1))
+  if (!host || !Number.isInteger(port) || port <= 0 || port > 65535) return null
+  return { host, port }
+}
+
+async function openTcpForRoute(route: BootstrapRouteAttempt, host: string, port: number, timeoutMs: number): Promise<Socket> {
+  if (route.kind === 'direct') return openTcpDirect(host, port, timeoutMs)
+  const proxy = parseProxyEndpoint(route.proxyAddr)
+  if (!proxy) throw new Error('invalid proxy endpoint')
+  if (route.proxyType === 'http') return openTcpViaHttpProxy(proxy, host, port, timeoutMs)
+  return openTcpViaSocks(proxy, host, port, timeoutMs)
+}
+
+function isHysteria2Profile(profile: ServerProfile): boolean {
+  const outboundType = profile.outbound && typeof profile.outbound === 'object'
+    ? String(profile.outbound.type || '').toLowerCase()
+    : ''
+  return outboundType === 'hysteria2' || String(profile.protocol || '').toLowerCase() === 'hysteria2'
+}
+
+export function classifyHysteria2ProbeFailure(logText: string, errorText = ''): string {
+  const text = `${logText}\n${errorText}`.toLowerCase()
+  if (!text.trim()) return 'hy2-handshake-failed'
+  if (/unknown field|decode config|parse config|invalid|unsupported|missing required|check outbound/.test(text)) {
+    return 'hy2-config-failed'
+  }
+  if (/auth|authentication|unauthori[sz]ed|password|bad key|permission denied|obfs|salamander/.test(text)) {
+    return 'hy2-auth-failed'
+  }
+  if (/no recent network activity|handshake.*timeout|timeout|deadline exceeded|i\/o timeout|network is unreachable|host unreachable|operation timed out|udp/.test(text)) {
+    return 'hy2-udp-blocked'
+  }
+  if (/tls|certificate|x509|server name|sni/.test(text)) {
+    return 'hy2-tls-failed'
+  }
+  return 'hy2-handshake-failed'
+}
+
+async function waitForLocalSocks(port: number, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  let lastError: unknown = null
+  while (Date.now() < deadline) {
+    try {
+      const socket = await openTcpDirect('127.0.0.1', port, 300)
+      try { socket.destroy() } catch { /* ignore */ }
+      return
+    } catch (err) {
+      lastError = err
+      await new Promise(resolve => setTimeout(resolve, 100))
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error('local probe inbound did not start')
+}
+
+async function readProbeLog(logPath: string): Promise<string> {
+  try {
+    return await readFile(logPath, 'utf8')
+  } catch {
+    return ''
+  }
+}
+
+async function checkHysteria2Health(profile: ServerProfile): Promise<KeyHealthResult> {
+  if (!profile.outbound || typeof profile.outbound !== 'object') {
+    return { profileId: profile.id, online: false, latencyMs: null, reason: 'no-outbound' }
+  }
+
+  const startedAt = Date.now()
+  const workDir = await mkdtemp(join(tmpdir(), 'vpnte-hy2-probe-'))
+  const logPath = join(workDir, 'sing-box.log')
+  const configPath = join(workDir, 'sing-box.json')
+  let child: ReturnType<typeof spawn> | null = null
+  let childOutput = ''
+
+  try {
+    const inboundPort = await pickFreeLocalPort()
+    const { outbound, needsBootstrapDns } = sanitizeProxyOutbound({ ...profile.outbound, tag: 'proxy-out' })
+    const config = {
+      log: { level: 'debug', timestamp: true, output: logPath.replace(/\\/g, '/') },
+      ...(needsBootstrapDns
+        ? {
+            dns: {
+              servers: [{ type: 'local', tag: 'dns-bootstrap' }],
+              strategy: 'ipv4_only'
+            }
+          }
+        : {}),
+      inbounds: [
+        { type: 'mixed', tag: 'probe-in', listen: '127.0.0.1', listen_port: inboundPort }
+      ],
+      outbounds: [
+        outbound,
+        { type: 'direct', tag: 'direct-out' }
+      ],
+      route: {
+        final: 'proxy-out',
+        auto_detect_interface: true,
+        ...(needsBootstrapDns ? { default_domain_resolver: 'dns-bootstrap' } : {})
+      }
+    }
+
+    await writeFile(configPath, JSON.stringify(config, null, 2), 'utf8')
+    child = spawn(getBundledResource('sing-box.exe'), ['run', '-c', configPath], {
+      cwd: workDir,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe']
+    })
+    child.stdout?.on('data', chunk => { childOutput += chunk.toString() })
+    child.stderr?.on('data', chunk => { childOutput += chunk.toString() })
+    child.on('error', err => { childOutput += `\n${err.message}` })
+
+    await waitForLocalSocks(inboundPort, 2500)
+    const socket = await openTcpViaSocks(
+      { host: '127.0.0.1', port: inboundPort },
+      HY2_PROBE_DESTINATION.host,
+      HY2_PROBE_DESTINATION.port,
+      HY2_PROBE_TIMEOUT_MS
+    )
+    try { socket.destroy() } catch { /* ignore */ }
+
+    const latencyMs = Date.now() - startedAt
+    logEvent('debug', 'key-health', 'HY2 probe ok', {
+      profileId: profile.id,
+      latencyMs,
+      destination: `${HY2_PROBE_DESTINATION.host}:${HY2_PROBE_DESTINATION.port}`
+    })
+    return { profileId: profile.id, online: true, latencyMs }
+  } catch (err: any) {
+    const logText = await readProbeLog(logPath)
+    const errorText = `${childOutput}\n${err?.message ?? String(err)}`
+    const reason = classifyHysteria2ProbeFailure(logText, errorText)
+    logEvent('debug', 'key-health', 'HY2 probe failed', {
+      profileId: profile.id,
+      reason,
+      error: err?.message ?? String(err)
+    })
+    return { profileId: profile.id, online: false, latencyMs: null, reason }
+  } finally {
+    if (child && !child.killed) {
+      try { child.kill() } catch { /* ignore */ }
+    }
+    await rm(workDir, { recursive: true, force: true }).catch(() => undefined)
+  }
+}
+
 async function tlsHandshake(socket: Socket, serverName: string, timeoutMs: number): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     let settled = false
@@ -177,6 +380,10 @@ async function tlsHandshake(socket: Socket, serverName: string, timeoutMs: numbe
 
 /** Probe a single ServerProfile's outbound. Always resolves; never throws. */
 export async function checkProfileHealth(profile: ServerProfile): Promise<KeyHealthResult> {
+  if (isHysteria2Profile(profile)) {
+    return checkHysteria2Health(profile)
+  }
+
   const target = describeProbeTarget(profile)
   if (!target) {
     return { profileId: profile.id, online: false, latencyMs: null, reason: 'no-host' }
@@ -184,19 +391,40 @@ export async function checkProfileHealth(profile: ServerProfile): Promise<KeyHea
 
   const tunnel = shouldProbeViaTunnel()
   const start = Date.now()
-  let socket: Socket
+  let socket: Socket | null = null
+  let usedRoute: BootstrapRouteAttempt | null = null
+  const errors: string[] = []
   try {
-    socket = tunnel
-      ? await openTcpViaSocks(tunnel, target.host, target.port, PROBE_TIMEOUT_MS)
-      : await openTcpDirect(target.host, target.port, PROBE_TIMEOUT_MS)
+    for (const route of currentHealthProbeRoutes()) {
+      const effectiveRoute: BootstrapRouteAttempt =
+        route.kind === 'direct' && tunnel
+          ? {
+              ...route,
+              id: 'direct-out',
+              kind: 'localProxy',
+              label: 'через sing-box direct-out',
+              proxyAddr: `${tunnel.host}:${tunnel.port}`,
+              proxyType: 'socks5'
+            }
+          : route
+      try {
+        socket = await openTcpForRoute(effectiveRoute, target.host, target.port, PROBE_TIMEOUT_MS)
+        usedRoute = effectiveRoute
+        break
+      } catch (err: any) {
+        errors.push(`${effectiveRoute.label}: ${err?.message ?? String(err)}`)
+      }
+    }
+    if (!usedRoute || !socket) throw new Error(errors.join(' | ') || 'no bootstrap route succeeded')
   } catch (err: any) {
-    const reason = /timeout/i.test(err?.message ?? '') ? 'timeout' : 'tcp-failed'
+    const reason = errors.some(line => /timeout/i.test(line)) ? 'timeout' : 'tcp-failed'
     logEvent('debug', 'key-health', 'probe TCP failed', {
       profileId: profile.id, host: target.host, port: target.port,
-      viaTunnel: Boolean(tunnel), error: err?.message ?? String(err)
+      viaTunnel: Boolean(tunnel), route: usedRoute?.label ?? null, errors
     })
     return { profileId: profile.id, online: false, latencyMs: null, reason }
   }
+  if (!socket) return { profileId: profile.id, online: false, latencyMs: null, reason: 'tcp-failed' }
 
   // Decide whether to run the TLS rung. We skip it when the handshake would
   // leak the provider's real front SNI over a direct path (tlsLeaksSni) —
@@ -208,10 +436,10 @@ export async function checkProfileHealth(profile: ServerProfile): Promise<KeyHea
 
   if (!runTls) {
     const latency = Date.now() - start
-    try { socket.destroy() } catch { /* ignore */ }
+    try { socket?.destroy() } catch { /* ignore */ }
     logEvent('debug', 'key-health', 'probe ok (tcp-only)', {
       profileId: profile.id, host: target.host, port: target.port,
-      latencyMs: latency, viaTunnel: Boolean(tunnel),
+      latencyMs: latency, viaTunnel: Boolean(tunnel), route: usedRoute?.label ?? null,
       tlsSkipped: target.needsTls && target.tlsLeaksSni ? 'sni-leak-guard' : 'no-tls'
     })
     return { profileId: profile.id, online: true, latencyMs: latency }
@@ -223,7 +451,7 @@ export async function checkProfileHealth(profile: ServerProfile): Promise<KeyHea
     const reason = /timeout/i.test(err?.message ?? '') ? 'timeout' : 'tls-failed'
     logEvent('debug', 'key-health', 'probe TLS failed', {
       profileId: profile.id, host: target.host, port: target.port,
-      serverName: target.serverName, viaTunnel: Boolean(tunnel),
+      serverName: target.serverName, viaTunnel: Boolean(tunnel), route: usedRoute?.label ?? null,
       error: err?.message ?? String(err)
     })
     return { profileId: profile.id, online: false, latencyMs: null, reason }
@@ -232,7 +460,7 @@ export async function checkProfileHealth(profile: ServerProfile): Promise<KeyHea
   const latency = Date.now() - start
   logEvent('debug', 'key-health', 'probe ok', {
     profileId: profile.id, host: target.host, port: target.port,
-    serverName: target.serverName, latencyMs: latency, viaTunnel: Boolean(tunnel)
+    serverName: target.serverName, latencyMs: latency, viaTunnel: Boolean(tunnel), route: usedRoute?.label ?? null
   })
   return { profileId: profile.id, online: true, latencyMs: latency }
 }

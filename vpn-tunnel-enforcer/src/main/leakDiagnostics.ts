@@ -9,6 +9,16 @@ import { TUN_ADAPTER_ALIAS } from './tunAdapter'
 
 const exec = promisify(execCb)
 
+function recordForensicLeakCheckEvent(event: string, details: Record<string, unknown>): void {
+  import('./trafficForensics')
+    .then(({ recordTrafficForensicsAppEvent }) => recordTrafficForensicsAppEvent({
+      source: 'leak-diagnostics',
+      event,
+      details
+    }))
+    .catch(() => undefined)
+}
+
 export type CheckStatus = 'ok' | 'warn' | 'fail' | 'info'
 
 export interface LeakCheckItem {
@@ -489,9 +499,19 @@ export async function runLeakCheck(options: RunLeakCheckOptions = {}): Promise<L
           : 'Публичный direct-out по текущему логу не найден'
   })
 
-  return {
+  const result = {
     ranAt: Date.now(),
     summary: combineStatus(items),
     items
   }
+  recordForensicLeakCheckEvent('leak-diagnostics-result', {
+    summary: result.summary,
+    items: result.items,
+    options: {
+      tunRunning: options.tunRunning === true,
+      connectionMode: options.connectionMode ?? null,
+      smartRuSplit: options.smartRuSplit === true
+    }
+  })
+  return result
 }

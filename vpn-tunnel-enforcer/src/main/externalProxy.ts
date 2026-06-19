@@ -3,6 +3,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'child_process'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'http'
 import { access, copyFile, mkdir, stat, writeFile } from 'fs/promises'
 import { join } from 'path'
+import { randomBytes, timingSafeEqual } from 'crypto'
 import { serverPicker } from './serverPicker'
 import { logEvent } from './appLogger'
 import type { ServerProfile } from '../shared/ipc-types'
@@ -11,6 +12,8 @@ const CONTROL_HOST = '127.0.0.1'
 export const EXTERNAL_PROXY_CONTROL_PORT = 17873
 const DEFAULT_PROXY_PORT = 17990
 const RUNTIME_EXE_NAME = 'vpnte-external-proxy.exe'
+export const EXTERNAL_PROXY_CONTROL_TOKEN_HEADER = 'x-vpnte-control-token'
+const CONTROL_TOKEN_FILE = 'external-proxy-control-token'
 
 type ExternalProxyAction = 'start' | 'rotate' | 'connect' | 'trigger'
 
@@ -65,9 +68,24 @@ const state: ExternalProxyState = {
 }
 
 let controlServer: Server | null = null
+let controlToken: string | null = null
+let operationLock: Promise<void> = Promise.resolve()
+let controlServerStarting = false
 
 function externalRuntimeDir(): string {
   return join(app.getPath('userData'), 'external-proxy-runtime')
+}
+
+function controlTokenPath(): string {
+  return join(app.getPath('userData'), CONTROL_TOKEN_FILE)
+}
+
+async function ensureControlToken(): Promise<string> {
+  if (controlToken) return controlToken
+  controlToken = randomBytes(32).toString('hex')
+  await mkdir(app.getPath('userData'), { recursive: true })
+  await writeFile(controlTokenPath(), controlToken + '\n', { encoding: 'utf8', mode: 0o600 })
+  return controlToken
 }
 
 function bundledResource(name: string): string {
@@ -218,7 +236,21 @@ function parsePort(raw: unknown): number {
   return n
 }
 
-async function stopExternalProxy(reason = 'requested'): Promise<ExternalProxyStatus> {
+async function withExternalProxyOperation<T>(fn: () => Promise<T>): Promise<T> {
+  const previous = operationLock
+  let release!: () => void
+  operationLock = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  await previous.catch(() => undefined)
+  try {
+    return await fn()
+  } finally {
+    release()
+  }
+}
+
+async function stopExternalProxyUnlocked(reason = 'requested'): Promise<ExternalProxyStatus> {
   const proc = state.process
   state.process = null
   if (proc && !proc.killed) {
@@ -246,7 +278,11 @@ async function stopExternalProxy(reason = 'requested'): Promise<ExternalProxySta
   return getExternalProxyStatus()
 }
 
-async function startExternalProxy(options: StartExternalProxyOptions = {}): Promise<ExternalProxyStatus> {
+async function stopExternalProxy(reason = 'requested'): Promise<ExternalProxyStatus> {
+  return withExternalProxyOperation(() => stopExternalProxyUnlocked(reason))
+}
+
+async function startExternalProxyUnlocked(options: StartExternalProxyOptions = {}): Promise<ExternalProxyStatus> {
   const port = parsePort(options.port ?? state.port ?? DEFAULT_PROXY_PORT)
   const country = options.country ?? state.lastCountryQuery
   const profiles = usableProfiles(country)
@@ -263,10 +299,6 @@ async function startExternalProxy(options: StartExternalProxyOptions = {}): Prom
     throw new Error(country ? `No VPN profiles found for country: ${country}` : 'No VPN profiles with outbound config found')
   }
 
-  if (state.process) {
-    await stopExternalProxy(options.action === 'rotate' ? 'rotate' : options.action === 'connect' || options.action === 'trigger' ? 'trigger' : 'restart')
-  }
-
   const runtime = await stageRuntime(profile, port)
   await new Promise<void>((resolve, reject) => {
     const check = spawn(runtime.exe, ['check', '-c', runtime.config], { cwd: runtime.cwd, windowsHide: true })
@@ -278,6 +310,10 @@ async function startExternalProxy(options: StartExternalProxyOptions = {}): Prom
       else reject(new Error(stderr.trim() || `sing-box check failed with exit code ${code}`))
     })
   })
+
+  if (state.process) {
+    await stopExternalProxyUnlocked(options.action === 'rotate' ? 'rotate' : options.action === 'connect' || options.action === 'trigger' ? 'trigger' : 'restart')
+  }
 
   const proc = spawn(runtime.exe, ['run', '-c', runtime.config], { cwd: runtime.cwd, windowsHide: true })
   state.process = proc
@@ -317,6 +353,10 @@ async function startExternalProxy(options: StartExternalProxyOptions = {}): Prom
   })
 
   return getExternalProxyStatus()
+}
+
+async function startExternalProxy(options: StartExternalProxyOptions = {}): Promise<ExternalProxyStatus> {
+  return withExternalProxyOperation(() => startExternalProxyUnlocked(options))
 }
 
 function getExternalProxyStatus(): ExternalProxyStatus {
@@ -372,9 +412,33 @@ function send(res: ServerResponse, status: number, payload: unknown, text = fals
     'Content-Type': text ? 'text/plain; charset=utf-8' : 'application/json; charset=utf-8',
     'Access-Control-Allow-Origin': 'http://127.0.0.1',
     'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type'
+    'Access-Control-Allow-Headers': `Content-Type, ${EXTERNAL_PROXY_CONTROL_TOKEN_HEADER}, Authorization`,
+    'Vary': 'Origin'
   })
   res.end(body + (text ? '\n' : ''))
+}
+
+export function isExternalProxyMutationPath(path: string): boolean {
+  return path === '/start' || path === '/rotate' || path === '/connect' || path === '/trigger' || path === '/stop'
+}
+
+export function isValidExternalProxyControlToken(expected: string | null, provided: string | null | undefined): boolean {
+  if (!expected || !provided) return false
+  const expectedBuffer = Buffer.from(expected)
+  const providedBuffer = Buffer.from(provided)
+  return expectedBuffer.length === providedBuffer.length && timingSafeEqual(expectedBuffer, providedBuffer)
+}
+
+function requestControlToken(req: IncomingMessage): string | null {
+  const header = req.headers[EXTERNAL_PROXY_CONTROL_TOKEN_HEADER]
+  if (Array.isArray(header)) return header[0] ?? null
+  if (typeof header === 'string' && header.trim()) return header.trim()
+  const auth = req.headers.authorization
+  if (typeof auth === 'string') {
+    const match = auth.match(/^Bearer\s+(.+)$/i)
+    if (match) return match[1].trim()
+  }
+  return null
 }
 
 async function handleControlRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -382,6 +446,18 @@ async function handleControlRequest(req: IncomingMessage, res: ServerResponse): 
   const url = new URL(req.url ?? '/', `http://${CONTROL_HOST}:${EXTERNAL_PROXY_CONTROL_PORT}`)
   const path = url.pathname.replace(/^\/api\/external-proxy/, '')
   const wantsText = url.searchParams.get('format') === 'text' || url.searchParams.get('text') === '1'
+
+  if (isExternalProxyMutationPath(path)) {
+    if (req.method !== 'POST') {
+      return send(res, 405, wantsText ? 'method-not-allowed' : { ok: false, error: 'method-not-allowed' }, wantsText)
+    }
+    if (!isValidExternalProxyControlToken(controlToken, requestControlToken(req))) {
+      return send(res, 401, wantsText ? 'unauthorized' : { ok: false, error: 'unauthorized' }, wantsText)
+    }
+  } else if (req.method !== 'GET') {
+    return send(res, 405, wantsText ? 'method-not-allowed' : { ok: false, error: 'method-not-allowed' }, wantsText)
+  }
+
   const body = req.method === 'POST' ? await readBody(req) : {}
   const param = (name: string): string | null => {
     const fromQuery = url.searchParams.get(name)
@@ -420,17 +496,27 @@ async function handleControlRequest(req: IncomingMessage, res: ServerResponse): 
 }
 
 export function registerExternalProxyControlServer(): void {
-  if (controlServer) return
+  if (controlServer || controlServerStarting) return
+  controlServerStarting = true
   const port = Number(process.env.VPNTE_CONTROL_PORT || EXTERNAL_PROXY_CONTROL_PORT)
-  controlServer = createServer((req, res) => {
-    void handleControlRequest(req, res)
-  })
-  controlServer.listen(port, CONTROL_HOST, () => {
-    logEvent('info', 'external-proxy', 'control server listening', { host: CONTROL_HOST, port })
-  })
-  controlServer.on('error', (err) => {
-    logEvent('warn', 'external-proxy', 'control server failed', err)
-    controlServer = null
+  ensureControlToken().then(() => {
+    controlServer = createServer((req, res) => {
+      handleControlRequest(req, res).catch((err) => {
+        send(res, 500, { ok: false, error: err?.message || String(err) })
+      })
+    })
+    controlServer.listen(port, CONTROL_HOST, () => {
+      controlServerStarting = false
+      logEvent('info', 'external-proxy', 'control server listening', { host: CONTROL_HOST, port, tokenFile: controlTokenPath() })
+    })
+    controlServer.on('error', (err) => {
+      controlServerStarting = false
+      logEvent('warn', 'external-proxy', 'control server failed', err)
+      controlServer = null
+    })
+  }).catch((err) => {
+    controlServerStarting = false
+    logEvent('warn', 'external-proxy', 'failed to initialize control token', { error: (err as Error).message })
   })
 }
 

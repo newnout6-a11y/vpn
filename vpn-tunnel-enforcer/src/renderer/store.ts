@@ -67,6 +67,7 @@ export interface AppSettings {
   connectionMode: 'localProxy' | 'directVpn'
   proxyOverride: string
   proxyType: 'socks5' | 'http'
+  bootstrapRouteMode: 'auto' | 'direct' | 'localProxy'
   directVpnInput: string
   directVpnSelectedIndex: number
   directVpnCachedInput: string
@@ -90,6 +91,9 @@ export interface AppSettings {
   desktopNotifications: boolean
   publicWifiCompatibility: boolean
   strictAdapterLockdown: boolean
+  deepTrafficInspectionEnabled: boolean
+  deepTrafficInspectionMaxSizeMb: number
+  deepTrafficInspectionRetainSessions: number
   // Anti-DPI / TSPU bypass mode. When true the main process lowers TUN
   // MTU and adds TLS ClientHello fragmentation to non-Reality outbounds
   // to make the encrypted flow harder to fingerprint.
@@ -99,6 +103,10 @@ export interface AppSettings {
   smartRuSplit: boolean
   // Optional: route online maps direct for real-location results.
   smartRuMapsDirect: boolean
+  smartRuRuleSetMode: 'bundled' | 'managed'
+  smartRuRuleSetAutoUpdate: boolean
+  smartRuRuleSetUseProxy: boolean
+  smartRuRuleSetUpdateIntervalHours: number
 }
 
 export interface LeakCheckItem {
@@ -289,6 +297,7 @@ export const useAppStore = create<AppState>((set) => ({
     connectionMode: 'localProxy',
     proxyOverride: '',
     proxyType: 'socks5',
+    bootstrapRouteMode: 'auto',
     directVpnInput: '',
     directVpnSelectedIndex: 0,
     directVpnCachedInput: '',
@@ -308,9 +317,16 @@ export const useAppStore = create<AppState>((set) => ({
     desktopNotifications: true,
     publicWifiCompatibility: true,
     strictAdapterLockdown: true,
+    deepTrafficInspectionEnabled: true,
+    deepTrafficInspectionMaxSizeMb: 512,
+    deepTrafficInspectionRetainSessions: 3,
     stealthMode: false,
     smartRuSplit: false,
-    smartRuMapsDirect: false
+    smartRuMapsDirect: false,
+    smartRuRuleSetMode: 'bundled',
+    smartRuRuleSetAutoUpdate: true,
+    smartRuRuleSetUseProxy: true,
+    smartRuRuleSetUpdateIntervalHours: 24
   },
 
   setMode: (mode) => set({ mode }),

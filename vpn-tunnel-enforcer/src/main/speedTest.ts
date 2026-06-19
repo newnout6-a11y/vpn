@@ -14,6 +14,7 @@
 import { ipcMain, BrowserWindow, type IpcMainInvokeEvent } from 'electron'
 import axios from 'axios'
 import { randomUUID, randomBytes } from 'crypto'
+import type { Readable } from 'stream'
 import Store from 'electron-store'
 import { logEvent } from './appLogger'
 import { tunController } from './tunController'
@@ -40,16 +41,32 @@ const LATENCY_URLS = [
   'https://www.google.com/generate_204',
   'https://detectportal.firefox.com/success.txt'
 ]
-/** Download endpoints. Tried in order. Each one is ~10 MB. */
+/** Download endpoints. Tried in order. Cloudflare supports dynamic payload size. */
 const DOWNLOAD_URLS = [
-  { url: 'https://speed.cloudflare.com/__down?bytes=10000000', name: 'Cloudflare' },
-  { url: 'https://proof.ovh.net/files/10Mb.dat', name: 'OVH' },
-  { url: 'https://speedtest.tele2.net/10MB.zip', name: 'Tele2' }
+  {
+    name: 'Cloudflare',
+    url: 'https://speed.cloudflare.com/__down?bytes=10000000'
+  },
+  {
+    name: 'OVH',
+    url: 'https://proof.ovh.net/files/100Mb.dat'
+  },
+  {
+    name: 'Tele2',
+    url: 'https://speedtest.tele2.net/100MB.zip'
+  }
 ]
 /** Cloudflare speed test upload endpoint */
 const UPLOAD_URL = 'https://speed.cloudflare.com/__up'
-/** Upload payload size in bytes (2 MB) */
 const UPLOAD_SIZE = 2 * 1024 * 1024
+const DOWNLOAD_PROBE_BYTES = 10 * 1024 * 1024
+const DOWNLOAD_FAST_BYTES_PER_STREAM = 50 * 1024 * 1024
+const DOWNLOAD_FAST_STREAMS = 4
+const DOWNLOAD_FAST_THRESHOLD_MBPS = 80
+const UPLOAD_PROBE_BYTES = 8 * 1024 * 1024
+const UPLOAD_FAST_BYTES_PER_STREAM = 16 * 1024 * 1024
+const UPLOAD_FAST_STREAMS = 4
+const UPLOAD_FAST_THRESHOLD_MBPS = 40
 /** Maximum history entries to keep */
 const MAX_HISTORY = 50
 
@@ -68,6 +85,18 @@ function sendProgress(percent: number, phase: string): void {
       win.webContents.send('speed-test:progress', { percent, phase })
     }
   }
+}
+
+function mbpsFromBytes(bytes: number, startedAt: number): number {
+  const elapsed = Math.max((Date.now() - startedAt) / 1000, 0.001)
+  const bitsPerSecond = (bytes * 8) / elapsed
+  return Math.round((bitsPerSecond / 1_000_000) * 100) / 100
+}
+
+function progressPercent(phase: 'download' | 'upload', loaded: number, total: number): number {
+  if (total <= 0) return phase === 'download' ? 5 : 55
+  const ratio = Math.min(1, Math.max(0, loaded / total))
+  return phase === 'download' ? 5 + Math.round(ratio * 45) : 50 + Math.round(ratio * 50)
 }
 
 // ─── Latency Measurement ─────────────────────────────────────────────────────
@@ -195,6 +224,125 @@ async function measureUpload(): Promise<number> {
  * Checks VPN status before starting.
  * Returns a SpeedTestResult.
  */
+async function readResponseStream(stream: Readable, onChunk: (bytes: number) => void): Promise<number> {
+  return await new Promise((resolve, reject) => {
+    let bytes = 0
+    stream.on('data', (chunk: Buffer) => {
+      bytes += chunk.length
+      onChunk(chunk.length)
+    })
+    stream.on('end', () => resolve(bytes))
+    stream.on('error', reject)
+  })
+}
+
+function downloadUrl(target: typeof DOWNLOAD_URLS[number], bytes: number, runId: string, streamIndex: number): string {
+  if (target.name === 'Cloudflare') {
+    return `https://speed.cloudflare.com/__down?bytes=${bytes}&run=${encodeURIComponent(runId)}&stream=${streamIndex}`
+  }
+  const separator = target.url.includes('?') ? '&' : '?'
+  return `${target.url}${separator}run=${encodeURIComponent(runId)}&stream=${streamIndex}`
+}
+
+async function downloadOne(url: string, onChunk: (bytes: number) => void): Promise<number> {
+  const response = await axios.get(url, {
+    responseType: 'stream',
+    timeout: 45000,
+    headers: { 'Cache-Control': 'no-cache' },
+    maxContentLength: Infinity,
+    maxBodyLength: Infinity,
+    validateStatus: (status) => status >= 200 && status < 300
+  })
+  return await readResponseStream(response.data as Readable, onChunk)
+}
+
+async function measureDownloadRound(target: typeof DOWNLOAD_URLS[number], bytesPerStream: number, streams: number): Promise<number> {
+  const runId = randomUUID()
+  const expectedBytes = bytesPerStream * streams
+  let receivedBytes = 0
+  let startedAt = 0
+
+  await Promise.all(Array.from({ length: streams }, (_, index) => {
+    const url = downloadUrl(target, bytesPerStream, runId, index)
+    return downloadOne(url, (bytes) => {
+      if (startedAt === 0) startedAt = Date.now()
+      receivedBytes += bytes
+      sendProgress(progressPercent('download', receivedBytes, expectedBytes), 'download')
+    })
+  }))
+
+  return mbpsFromBytes(receivedBytes, startedAt || Date.now())
+}
+
+async function measureAccurateDownload(): Promise<{ mbps: number; name: string }> {
+  let lastErr: Error | null = null
+
+  for (const target of DOWNLOAD_URLS) {
+    try {
+      const probeMbps = await measureDownloadRound(target, DOWNLOAD_PROBE_BYTES, 2)
+      if (probeMbps <= 0) {
+        lastErr = new Error('Empty response from speed test server')
+        continue
+      }
+
+      if (probeMbps < DOWNLOAD_FAST_THRESHOLD_MBPS) return { mbps: probeMbps, name: target.name }
+
+      const sustainedMbps = await measureDownloadRound(target, DOWNLOAD_FAST_BYTES_PER_STREAM, DOWNLOAD_FAST_STREAMS)
+      return { mbps: Math.max(probeMbps, sustainedMbps), name: target.name }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      lastErr = err instanceof Error ? err : new Error(message)
+      logEvent('warn', 'speed-test', `download endpoint ${target.name} failed, trying next`, { error: message })
+    }
+  }
+
+  throw new Error(`Failed to measure download speed. All speed test servers are unavailable.${lastErr ? ` Last error: ${lastErr.message}` : ''}`)
+}
+
+async function uploadOne(payload: Buffer, onProgress: (bytes: number) => void): Promise<number> {
+  await axios.post(UPLOAD_URL, payload, {
+    timeout: 30000,
+    headers: {
+      'Content-Type': 'application/octet-stream'
+    },
+    maxBodyLength: Infinity,
+    maxContentLength: Infinity,
+    onUploadProgress: (progressEvent) => {
+      onProgress(progressEvent.loaded)
+    }
+  })
+  return payload.length
+}
+
+async function measureUploadRound(bytesPerStream: number, streams: number): Promise<number> {
+  const payloads = Array.from({ length: streams }, () => randomBytes(bytesPerStream))
+  const expectedBytes = bytesPerStream * streams
+  const uploadedByStream = new Array(streams).fill(0)
+  let start = 0
+
+  await Promise.all(payloads.map((payload, index) => uploadOne(payload, (loaded) => {
+    if (start === 0 && loaded > 0) start = Date.now()
+    uploadedByStream[index] = loaded
+    const uploadedBytes = uploadedByStream.reduce((sum, bytes) => sum + bytes, 0)
+    sendProgress(progressPercent('upload', uploadedBytes, expectedBytes), 'upload')
+  })))
+
+  return mbpsFromBytes(expectedBytes, start || Date.now())
+}
+
+async function measureAccurateUpload(): Promise<number> {
+  const probeMbps = await measureUploadRound(UPLOAD_PROBE_BYTES, 1)
+
+  if (probeMbps <= 0) {
+    throw new Error('Failed to measure upload speed')
+  }
+
+  if (probeMbps < UPLOAD_FAST_THRESHOLD_MBPS) return probeMbps
+
+  const sustainedMbps = await measureUploadRound(UPLOAD_FAST_BYTES_PER_STREAM, UPLOAD_FAST_STREAMS)
+  return Math.max(probeMbps, sustainedMbps)
+}
+
 async function runSpeedTest(): Promise<SpeedTestResult> {
   // Check if VPN is active
   const status = tunController.getStatus()
@@ -218,13 +366,13 @@ async function runSpeedTest(): Promise<SpeedTestResult> {
 
     // Phase 2: Download
     sendProgress(5, 'download')
-    const download = await measureDownload()
+    const download = await measureAccurateDownload()
     const downloadMbps = download.mbps
     logEvent('info', 'speed-test', 'download measured', { downloadMbps, server: download.name })
 
     // Phase 3: Upload
     sendProgress(50, 'upload')
-    const uploadMbps = await measureUpload()
+    const uploadMbps = await measureAccurateUpload()
     logEvent('info', 'speed-test', 'upload measured', { uploadMbps })
 
     sendProgress(100, 'complete')

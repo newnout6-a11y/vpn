@@ -104,6 +104,9 @@ const TABLE: ReadonlyArray<{ rx: RegExp; hit: CountryHit }> = [
  */
 export function detectCountry(name: string | null | undefined): CountryHit | null {
   if (!name) return null
+  if (/\b(?:hong\s*kong|hk\b)/i.test(name)) {
+    return { flag: '🇭🇰', iso2: 'HK', label: 'Hong Kong' }
+  }
   for (const { rx, hit } of TABLE) {
     if (rx.test(name)) return hit
   }

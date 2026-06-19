@@ -1,5 +1,5 @@
 import { useAppStore } from '../store'
-import { Bell, EyeOff, FileArchive, FolderOpen, Globe2, Loader2, MapPin, Network, Palette, RefreshCw, Save, Settings2, ShieldAlert, ShieldCheck, Wand2, Languages } from 'lucide-react'
+import { Bell, EyeOff, FileArchive, FolderOpen, Globe2, Languages, Loader2, MapPin, Network, Palette, RefreshCw, Save, Settings2, ShieldAlert, ShieldCheck, Wand2 } from 'lucide-react'
 import { ReactNode, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { KillSwitchSettings } from '../components/KillSwitchSettings'
@@ -39,6 +39,18 @@ function ToggleRow({ title, description, checked, onChange, icon }: ToggleRowPro
 }
 
 /* ─── Language Selector Section ─────────────────────────────────────────────── */
+
+interface SmartRouteRuleSetState {
+  managedComplete: boolean
+  lastRefreshFinishedAt: number | null
+  lastRefreshOk: boolean | null
+  lastRefreshError: string | null
+}
+
+function formatRuleSetTime(value: number | null | undefined): string {
+  if (!value) return 'никогда'
+  return new Date(value).toLocaleString()
+}
 
 function LanguageSettings() {
   const { t, i18n } = useTranslation()
@@ -152,6 +164,8 @@ export function Settings() {
   const [openingLogs, setOpeningLogs] = useState(false)
   const [exporting, setExporting] = useState(false)
   const [osNotificationsBlocked, setOsNotificationsBlocked] = useState(false)
+  const [ruleSetState, setRuleSetState] = useState<SmartRouteRuleSetState | null>(null)
+  const [ruleSetRefreshing, setRuleSetRefreshing] = useState(false)
 
   useEffect(() => {
     ;(async () => {
@@ -163,6 +177,17 @@ export function Settings() {
       }
     })()
   }, [])
+
+  useEffect(() => {
+    ;(async () => {
+      try {
+        const state = await window.electronAPI.smartRouteRuleSetsGetState()
+        setRuleSetState(state)
+      } catch (err: any) {
+        addLog('warn', `Не удалось прочитать статус Smart-RU списков: ${err.message}`)
+      }
+    })()
+  }, [addLog])
 
   const handleSave = async () => {
     setSaving(true)
@@ -185,6 +210,26 @@ export function Settings() {
       addLog('error', `Не удалось сохранить настройки: ${err.message}`)
     } finally {
       setSaving(false)
+    }
+  }
+
+  const handleRefreshRuleSets = async () => {
+    setRuleSetRefreshing(true)
+    try {
+      const savedSettings = await window.electronAPI.saveSettings(settings)
+      setSettings(savedSettings)
+      const state = await window.electronAPI.smartRouteRuleSetsRefresh(true)
+      setRuleSetState(state)
+      addLog(
+        state.managedComplete ? 'info' : 'warn',
+        state.managedComplete
+          ? 'Smart-RU списки обновлены и готовы.'
+          : 'Smart-RU списки обновились не полностью. Приложение продолжит использовать встроенный резерв.'
+      )
+    } catch (err: any) {
+      addLog('error', `Не удалось обновить Smart-RU списки: ${err.message}`)
+    } finally {
+      setRuleSetRefreshing(false)
     }
   }
 
@@ -447,6 +492,7 @@ export function Settings() {
           />
 
           {settings.smartRuSplit && (
+            <>
             <ToggleRow
               icon={<MapPin className="w-4 h-4 text-[var(--color-accent)]" />}
               title="Карты с реальным местоположением"
@@ -454,6 +500,52 @@ export function Settings() {
               checked={settings.smartRuMapsDirect}
               onChange={(next) => updateSettings({ smartRuMapsDirect: next })}
             />
+
+            <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-secondary)]/50 p-4 space-y-4">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div>
+                  <p className="text-sm font-medium text-[var(--color-text)]">Списки Smart-RU</p>
+                  <p className="text-xs text-[var(--color-text-secondary)] mt-1">
+                    Приложение использует готовые списки из установщика. Можно обновлять их автоматически, но если обновление не получится, защита продолжит работать на встроенных списках.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleRefreshRuleSets}
+                  disabled={ruleSetRefreshing}
+                  className="inline-flex min-w-[150px] items-center justify-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-text)] transition hover:bg-[var(--color-hover)] disabled:cursor-not-allowed disabled:opacity-60"
+                  title="Обновить списки Smart-RU сейчас"
+                >
+                  {ruleSetRefreshing ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+                  Обновить сейчас
+                </button>
+              </div>
+
+              <ToggleRow
+                title="Автообновлять списки"
+                description="Раз в сутки пробовать скачать свежие правила через выбранный proxy. При ошибке останутся встроенные списки."
+                checked={settings.smartRuRuleSetMode === 'managed' && settings.smartRuRuleSetAutoUpdate}
+                onChange={(next) => updateSettings({
+                  smartRuRuleSetMode: next ? 'managed' : 'bundled',
+                  smartRuRuleSetAutoUpdate: next,
+                  smartRuRuleSetUseProxy: true,
+                  smartRuRuleSetUpdateIntervalHours: 24
+                })}
+              />
+
+              <div className="rounded-md bg-[var(--color-surface)] px-3 py-2 text-xs text-[var(--color-text-secondary)]">
+                {ruleSetRefreshing ? (
+                  <span className="text-[var(--color-text)]">Обновляем списки...</span>
+                ) : ruleSetState?.lastRefreshOk ? (
+                  <span>Списки обновлены: <span className="text-[var(--color-text)]">{formatRuleSetTime(ruleSetState.lastRefreshFinishedAt)}</span></span>
+                ) : ruleSetState?.lastRefreshError ? (
+                  <span className="text-[var(--color-warning)]">Не удалось обновить списки. Используются встроенные.</span>
+                ) : (
+                  <span>Используются встроенные списки.</span>
+                )}
+              </div>
+            </div>
+            </>
           )}
         </div>
       </MacCard>
@@ -590,6 +682,24 @@ export function Settings() {
             </div>
 
             <div>
+              <label className="block text-xs text-[var(--color-text-secondary)] mb-1.5">Маршрут служебных загрузок</label>
+              <MacSelect
+                options={[
+                  { value: 'auto', label: 'Авто: напрямую, потом локальный proxy' },
+                  { value: 'direct', label: 'Только напрямую' },
+                  { value: 'localProxy', label: 'Только через локальный proxy' }
+                ]}
+                value={settings.bootstrapRouteMode ?? 'auto'}
+                onChange={(val) => updateSettings({
+                  bootstrapRouteMode: val === 'direct' || val === 'localProxy' ? val : 'auto'
+                })}
+              />
+              <p className="text-xs text-[var(--color-text-secondary)] mt-1">
+                Используется для обновления подписок и Smart-RU списков. Трафик пользователя через VPN этот выбор не меняет.
+              </p>
+            </div>
+
+            <div>
               <label className="block text-xs text-[var(--color-text-secondary)] mb-1.5">Интервал проверки IP (секунды)</label>
               <input
                 type="number"
@@ -612,6 +722,66 @@ export function Settings() {
               checked={settings.autoNetworkBaseline}
               onChange={(next) => updateSettings({ autoNetworkBaseline: next })}
             />
+
+            <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-secondary)]/50 p-4 space-y-4">
+              <ToggleRow
+                icon={<FileArchive className="w-4 h-4 text-[var(--color-accent)]" />}
+                title={<>Глубокий захват трафика <span className="text-[var(--color-accent)]">(packet-level)</span></>}
+                description={
+                  <>
+                    Пишет расширенную сетевую трассу Windows через <span className="font-mono">pktmon</span>, а при
+                    недоступности переключается на <span className="font-mono">netsh trace</span>. Это нужно для
+                    разбора ошибок вне приложения: обрывов, долгих загрузок, неожиданных reset/close и
+                    фильтрации по пути.
+                  </>
+                }
+                checked={settings.deepTrafficInspectionEnabled}
+                onChange={(next) => updateSettings({ deepTrafficInspectionEnabled: next })}
+              />
+
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                <div>
+                  <label className="block text-xs text-[var(--color-text-secondary)] mb-1.5">
+                    Лимит размера сессии (МБ)
+                  </label>
+                  <input
+                    type="number"
+                    value={settings.deepTrafficInspectionMaxSizeMb}
+                    onChange={e => updateSettings({
+                      deepTrafficInspectionMaxSizeMb: Math.max(128, Math.min(2048, parseInt(e.target.value, 10) || 512))
+                    })}
+                    min={128}
+                    max={2048}
+                    step={64}
+                    disabled={!settings.deepTrafficInspectionEnabled}
+                    className="w-full max-w-[220px] bg-[var(--color-card)] border border-[var(--color-border)] rounded-[var(--radius-sm)] px-3 py-2 text-sm text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-accent)] transition-all duration-[var(--transition-fast)] disabled:opacity-50"
+                  />
+                  <p className="text-xs text-[var(--color-text-secondary)] mt-1">
+                    Кольцевой буфер. При достижении лимита старые пакеты перезаписываются.
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-xs text-[var(--color-text-secondary)] mb-1.5">
+                    Хранить последних сессий
+                  </label>
+                  <input
+                    type="number"
+                    value={settings.deepTrafficInspectionRetainSessions}
+                    onChange={e => updateSettings({
+                      deepTrafficInspectionRetainSessions: Math.max(1, Math.min(10, parseInt(e.target.value, 10) || 3))
+                    })}
+                    min={1}
+                    max={10}
+                    disabled={!settings.deepTrafficInspectionEnabled}
+                    className="w-full max-w-[220px] bg-[var(--color-card)] border border-[var(--color-border)] rounded-[var(--radius-sm)] px-3 py-2 text-sm text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-accent)] transition-all duration-[var(--transition-fast)] disabled:opacity-50"
+                  />
+                  <p className="text-xs text-[var(--color-text-secondary)] mt-1">
+                    Эти сессии попадут и в ZIP-экспорт диагностики вместе с манифестом артефактов.
+                  </p>
+                </div>
+              </div>
+            </div>
           </div>
         </MacCard>
       )}

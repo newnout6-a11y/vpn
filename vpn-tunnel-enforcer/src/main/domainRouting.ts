@@ -284,7 +284,9 @@ export function domainRulesToSingboxRules(input: DomainRule[]): Array<Record<str
   const result: Array<Record<string, any>> = []
   for (const rule of rules) {
     const pattern = rule.pattern.trim().toLowerCase()
-    const rb: Record<string, any> = { outbound: outboundFor(rule.action) }
+    const rb: Record<string, any> = rule.action === 'block'
+      ? { action: 'reject', method: 'default', no_drop: true }
+      : { outbound: outboundFor(rule.action) }
 
     if (pattern.startsWith('*.')) {
       const base = pattern.slice(2)

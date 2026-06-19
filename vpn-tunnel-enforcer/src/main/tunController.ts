@@ -19,6 +19,7 @@ import {
 } from './firewallKillSwitch'
 import {
   applyPhysicalAdapterLockdown,
+  getPhysicalAdapterDnsSources,
   isPhysicalAdapterLockdownApplied,
   repairOrphanedPhysicalAdapterDns,
   rollbackPhysicalAdapterLockdownIfApplied
@@ -42,9 +43,22 @@ import {
   smartRouteLocalRuleSetFiles,
   type SmartRouteOptions
 } from './smartRoute'
+import { getPreferredSmartRouteRuleSetSourceDir } from './ruleSetManager'
+import { selectTunMtu } from './networkCompatibility'
+import type { PhysicalAdapterDnsSource } from './physicalAdapterLockdown'
 
 const exec = promisify(execCb)
 const execFile = promisify(execFileCb)
+
+function recordForensicTunEvent(event: string, details: Record<string, unknown> = {}): void {
+  import('./trafficForensics')
+    .then(({ recordTrafficForensicsAppEvent }) => recordTrafficForensicsAppEvent({
+      source: 'tun',
+      event,
+      details
+    }))
+    .catch(() => undefined)
+}
 
 export interface TunStatus {
   running: boolean
@@ -119,7 +133,7 @@ function randomLocalPort(): number {
 // signal that the port is bindable from user-space. We close immediately —
 // there is a tiny TOCTOU window between close and sing-box's bind, but in
 // practice the OS does not hand the same port to a second listener that fast.
-function pickFreeLocalPort(exclude: number[] = []): Promise<number> {
+export function pickFreeLocalPort(exclude: number[] = []): Promise<number> {
   const excludeSet = new Set(exclude)
   const tryOnce = (): Promise<number> => new Promise((resolve, reject) => {
     const server = createServer()
@@ -191,6 +205,7 @@ let statusCallbacks: ((status: string) => void)[] = []
 let watchdogTimer: ReturnType<typeof setInterval> | null = null
 let watchdogFailures = 0
 let startInProgress = false
+const DIRECT_VPN_WATCHDOG_SUPPRESS_MS = 45000
 
 // Auto-restart bookkeeping. We remember the last successful start params so we
 // can replay them after an unexpected sing-box crash without asking the user.
@@ -227,6 +242,7 @@ function clearRestartTimers() {
 }
 
 const RUNTIME_EXE_NAME = 'vpnte-sing-box.exe'
+const CRONET_DLL_NAME = 'libcronet.dll'
 const PROXY_CORE_PROCESS_NAMES = [
   'Happ.exe',
   'happd.exe',
@@ -255,7 +271,7 @@ export function getTunRuntimeDir(): string {
   return join(app.getPath('userData'), 'tun-runtime')
 }
 
-function getBundledResource(name: string): string {
+export function getBundledResource(name: string): string {
   if (app.isPackaged) {
     return join(process.resourcesPath, name)
   }
@@ -352,6 +368,18 @@ const BOOTSTRAP_DNS_TAG = 'dns-bootstrap'
 // DNS server tag for the direct (RU-visible) resolver used by smart RU split.
 const SMART_DIRECT_DNS_TAG = 'dns-direct'
 
+function uniqueNonEmpty(values: Array<string | null | undefined>): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const value of values) {
+    const normalized = String(value ?? '').trim()
+    if (!normalized || seen.has(normalized)) continue
+    seen.add(normalized)
+    out.push(normalized)
+  }
+  return out
+}
+
 /**
  * Build the remote DNS server list for the sing-box config from the user's
  * active DNS profile (Settings → DNS). Falls back to Cloudflare + Google when
@@ -361,13 +389,12 @@ const SMART_DIRECT_DNS_TAG = 'dns-direct'
  * The first server MUST keep the tag `dns-remote` because the route block's
  * `default_domain_resolver` references it by name.
  *
- * NOTE (reverted F11): an attempt to switch the tunnelled resolver from DoT
- * (`type: tls`) to DoH (`type: https`) for fewer handshakes BROKE resolving in
- * the field — DoH-over-IP through the Reality tunnel timed out almost every
- * query (measured 24 ok / 2184 fail vs 289 ok on DoT), killing all browsing
- * until the user disabled the VPN. We are back on DoT, which is the
- * known-working path. Do NOT change this to https without real on-device
- * verification first.
+ * Default fallback is plain UDP-through-proxy-out. In the latest field logs,
+ * the no-profile DoT fallback was returning repeated `read response: EOF` and
+ * 10–40s query latencies, while the plain-IP tunnel path stayed healthy.
+ * User-selected DoT profiles remain DoT, but now get an explicit bootstrap
+ * resolver and TLS server_name so hostname-based resolvers survive the new
+ * sing-box DNS-server model.
  *
  * sing-box 1.13 server types:
  *   - plain IP  → { type: 'udp', server: '1.1.1.1' }
@@ -380,8 +407,8 @@ const SMART_DIRECT_DNS_TAG = 'dns-direct'
  */
 function buildRemoteDnsServers(): Array<Record<string, any>> {
   const fallback = [
-    { type: 'tls', tag: 'dns-remote', server: '1.1.1.1', detour: 'proxy-out' },
-    { type: 'tls', tag: 'dns-backup', server: '8.8.8.8', detour: 'proxy-out' }
+    { type: 'udp', tag: 'dns-remote', server: '1.1.1.1', detour: 'proxy-out' },
+    { type: 'udp', tag: 'dns-backup', server: '8.8.8.8', detour: 'proxy-out' }
   ]
   try {
     const profile = dnsProfiles.getActiveDnsProfile()
@@ -399,7 +426,19 @@ function buildRemoteDnsServers(): Array<Record<string, any>> {
       if (profile.type === 'dot') {
         const host = addr.replace(/^tls:\/\//i, '').split('/')[0].split(':')[0]
         if (!host) return null
-        return { type: 'tls', tag, server: host, detour: 'proxy-out' }
+        return {
+          type: 'tls',
+          tag,
+          server: host,
+          detour: 'proxy-out',
+          domain_resolver: {
+            server: 'dns-remote-bootstrap',
+            strategy: DNS_STRATEGY
+          },
+          tls: {
+            server_name: host
+          }
+        }
       }
       // plain IPv4/IPv6 → DoT-style udp resolver detoured through the tunnel
       // (reverted from the broken tcp experiment).
@@ -420,6 +459,28 @@ function buildRemoteDnsServers(): Array<Record<string, any>> {
   }
 }
 
+function buildDnsBootstrapServers(): Array<Record<string, any>> {
+  return [
+    { type: 'udp', tag: 'dns-remote-bootstrap', server: '1.1.1.1', detour: 'proxy-out' },
+    { type: 'udp', tag: 'dns-remote-bootstrap-backup', server: '8.8.8.8', detour: 'proxy-out' }
+  ]
+}
+
+function buildSmartDirectDnsServers(
+  sources: PhysicalAdapterDnsSource[] | undefined,
+  tag = SMART_DIRECT_DNS_TAG
+): Array<Record<string, any>> {
+  const upstreams = uniqueNonEmpty(
+    (sources ?? []).flatMap((source) => source.ipv4DnsServers)
+  )
+  if (upstreams.length === 0) return [{ type: 'dhcp', tag }]
+  return upstreams.map((server, index) => ({
+    type: 'udp',
+    tag: index === 0 ? tag : `${tag}-${index + 1}`,
+    server
+  }))
+}
+
 function isDomainServer(server: unknown): boolean {
   if (typeof server !== 'string') return false
   const trimmed = server.trim()
@@ -430,7 +491,7 @@ function isDomainServer(server: unknown): boolean {
   return isIP(unbracketed) === 0
 }
 
-function sanitizeProxyOutbound(outbound: Record<string, any>): { outbound: Record<string, any>; needsBootstrapDns: boolean } {
+export function sanitizeProxyOutbound(outbound: Record<string, any>): { outbound: Record<string, any>; needsBootstrapDns: boolean } {
   const result = JSON.parse(JSON.stringify(outbound))
   const legacyStrategy = typeof result.domain_strategy === 'string' && result.domain_strategy.trim()
     ? result.domain_strategy.trim()
@@ -456,6 +517,50 @@ function sanitizeProxyOutbound(outbound: Record<string, any>): { outbound: Recor
   if (result.multiplex !== undefined) delete result.multiplex
   if (result.mux !== undefined) delete result.mux
 
+  const outboundType = String(result.type || '').toLowerCase()
+
+  if ((outboundType === 'vless' || outboundType === 'vmess') && result.network === 'tcp') {
+    // Imported VLESS/VMess profiles can carry a stale tcp-only marker from
+    // older builds even when the source profile never requested it. Keeping
+    // that marker makes directVpn install QUIC/UDP guards and reproduces the
+    // long browser fallback stalls seen in diagnostics.
+    delete result.network
+  }
+
+  if (outboundType === 'hysteria2') {
+    // Hysteria2 is QUIC-based. Older imports saved `network: "tcp"` because
+    // other TLS protocols were tcp-only; keeping it here makes our UDP guard
+    // block the very transport HY2 needs.
+    if (result.network === 'tcp') delete result.network
+
+    // sing-box 1.13 accepts salamander obfs and port hopping, but not the 1.14
+    // HY2 additions such as gecko/realm/bbr_profile/packet-size knobs. Strip
+    // unsupported fields at runtime so an imported future-profile cannot make
+    // the whole tunnel fail at `sing-box check`.
+    if (result.obfs && typeof result.obfs === 'object') {
+      if (String(result.obfs.type || '').toLowerCase() === 'gecko') {
+        delete result.obfs
+      } else {
+        delete result.obfs.min_packet_size
+        delete result.obfs.max_packet_size
+      }
+    }
+    delete result.hop_interval_max
+    delete result.realm
+    delete result.bbr_profile
+    delete result.min_packet_size
+    delete result.max_packet_size
+
+    if (result.server_ports !== undefined) {
+      const serverPorts = normalizeHysteria2ServerPortsForSingbox(result.server_ports)
+      if (serverPorts) result.server_ports = serverPorts
+      else delete result.server_ports
+    }
+    if (typeof result.server_ports === 'string' && result.server_ports.trim()) {
+      delete result.server_port
+    }
+  }
+
   const needsBootstrapDns = isDomainServer(result.server)
   if (needsBootstrapDns) {
     result.domain_resolver = {
@@ -467,23 +572,74 @@ function sanitizeProxyOutbound(outbound: Record<string, any>): { outbound: Recor
   return { outbound: result, needsBootstrapDns }
 }
 
+function normalizeHysteria2ServerPortsForSingbox(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const match = value.trim().match(/^(\d{1,5})\s*[-:]\s*(\d{1,5})$/)
+  if (!match) return null
+  const start = Number(match[1])
+  const end = Number(match[2])
+  if (!Number.isInteger(start) || !Number.isInteger(end) || start <= 0 || end <= 0 || start > 65535 || end > 65535 || end < start) {
+    return null
+  }
+  return `${start}:${end}`
+}
+
+function isTcpOnlyNetworkOutbound(outbound: Record<string, any>): boolean {
+  const type = String(outbound.type || '').toLowerCase()
+  if (type === 'hysteria2' || type === 'tuic') return false
+  return typeof outbound.network === 'string' && outbound.network === 'tcp'
+}
+
+function shouldBlockQuicUdp443(
+  proxyOutbound: Record<string, any>,
+  proxyType: 'socks5' | 'http',
+  isDirectVpn: boolean
+): boolean {
+  if (proxyType === 'http') return true
+  if (isDirectVpn) {
+    // Hysteria2 and TUIC are native UDP protocols, they carry QUIC properly.
+    // All others (VLESS, VMess, Trojan, Shadowsocks) run over TCP — encapsulating
+    // UDP-in-TCP creates Head-of-Line blocking, which makes Chrome stall on
+    // QUIC instead of fast-failing to TCP TLS.
+    const type = String(proxyOutbound.type || '').toLowerCase()
+    if (type === 'hysteria2' || type === 'tuic') return false
+    return true
+  }
+  // Local proxy mode always forwards the captured traffic into a loopback
+  // SOCKS/HTTP hop that ultimately rides whatever upstream transport the app
+  // selected. In practice Chromium will happily keep retrying HTTP/3 over
+  // UDP/443 when that chain cannot carry QUIC reliably, which surfaces as
+  // ERR_CONNECTION_CLOSED / stalled first loads on arbitrary sites.
+  //
+  // Block only UDP/443 here (not all UDP) so browsers fail fast on QUIC and
+  // immediately fall back to TCP TLS, while non-browser UDP traffic on other
+  // ports keeps its previous behaviour.
+  return true
+}
+
 export function generateSingboxConfig(
   upstream: string | { outbound: Record<string, any>; proxyType?: 'socks5' | 'http'; clientDevice?: ClientDevice },
   proxyType: 'socks5' | 'http' = 'socks5',
   directProcessNames: string[] = [],
   options: {
     stealthMode?: boolean
+    publicWifiCompatibility?: boolean
     directProxyPortOverride?: number
     clashPortOverride?: number
     smartRuSplit?: boolean
     smartRuMapsDirect?: boolean
     smartRuRuleSetDir?: string
+    smartRuDirectDnsSources?: PhysicalAdapterDnsSource[]
   } = {}
 ): object {
-  // Stealth mode (TSPU/DPI bypass) toggles two knobs:
-  //   1. TUN MTU 1500 → 1280 — encrypted payload sizes drift away from
-  //      values DPI signature databases pattern-match for VPN traffic, and
-  //      1280 is the IPv6-min-MTU floor so it always negotiates cleanly.
+  // Network-compatibility knobs adjust the TUN MTU:
+  //   1. publicWifiCompatibility uses a safer 1380-byte MTU, which is much
+  //      more tolerant of mobile-hotspot / public-Wi-Fi PMTU blackholes where
+  //      some HTTPS sites stall on the first large TLS packets.
+  //   2. stealthMode goes further down to 1280 so encrypted payload sizes
+  //      drift away from values DPI signature databases pattern-match for VPN
+  //      traffic, and 1280 is the IPv6-min-MTU floor so it always negotiates
+  //      cleanly.
   //   2. tls.record_fragment on the proxy outbound (when the outbound has
   //      regular TLS, NOT Reality — Reality has its own ClientHello
   //      mimicry and fragmenting on top can break the auth handshake).
@@ -491,7 +647,10 @@ export function generateSingboxConfig(
   //      offered by sing-box 1.12+; the docs explicitly recommend it as
   //      the first thing to try.
   const stealthMode = options.stealthMode === true
-  const tunMtu = stealthMode ? 1280 : 1500
+  const tunMtu = selectTunMtu({
+    stealthMode,
+    publicWifiCompatibility: options.publicWifiCompatibility === true
+  })
   const isDirectVpn = typeof upstream !== 'string'
   const explicitClientDevice = isDirectVpn && upstream.clientDevice
     ? normalizeClientDevice(upstream.clientDevice)
@@ -619,6 +778,21 @@ export function generateSingboxConfig(
     }
   }
   directProxyPort = dPort
+  const domainRouteRules = buildDomainRouteRules()
+  const smartRouteRouteRules = smartRouteRules(smartRoute)
+  const smartRouteRuleSetDefs = smartRouteRuleSets(smartRoute)
+  const smartDirectDnsServers = smartRoute.enabled
+    ? buildSmartDirectDnsServers(options.smartRuDirectDnsSources, SMART_DIRECT_DNS_TAG)
+    : []
+  const quicUdp443BlockRules =
+    shouldBlockQuicUdp443(proxyOutbound, proxyType, isDirectVpn)
+      ? [{ network: 'udp', port: 443, action: 'reject', method: 'default', no_drop: true }]
+      : []
+  const allUdpBlockRules =
+    isTcpOnlyNetworkOutbound(proxyOutbound) && isDirectVpn
+      ? [{ network: 'udp', action: 'reject', method: 'default', no_drop: true }]
+      : []
+  const needsSniff = domainRouteRules.length > 0 || smartRoute.enabled
 
   return {
     log: { level: 'debug', timestamp: true, output: logPath },
@@ -636,18 +810,17 @@ export function generateSingboxConfig(
       // Google. Every remote server detours through proxy-out so DNS is
       // tunnelled and can't leak to the ISP resolver.
       servers: [
+        ...buildDnsBootstrapServers(),
         ...buildRemoteDnsServers(),
         ...(needsBootstrapDns
           ? [{ type: 'local', tag: BOOTSTRAP_DNS_TAG }]
           : []),
-        // Smart RU split: a DIRECT (non-detoured) resolver so RU domains
-        // resolve to their real RU IPs. Without this the tunnelled DNS would
-        // return the site's nearest-to-the-VPN CDN node, the IP wouldn't be
-        // in geoip-ru, and the connection would wrongly take the VPN. `local`
-        // delegates to the platform resolver over the physical interface.
-        ...(smartRoute.enabled
-          ? [{ type: 'local', tag: SMART_DIRECT_DNS_TAG }]
-          : [])
+        // Smart RU split: use the physical adapter's pre-lockdown upstream DNS
+        // servers directly, instead of `type: local`. Under strict_route + our
+        // adapter DNS pinning, `local` loops back into the TUN resolver and
+        // times out. Explicit UDP servers keep RU-visible resolution direct
+        // without recursing into sing-box itself.
+        ...smartDirectDnsServers
       ],
       // DNS rules: bind RU domain rule-sets to the direct resolver. Only
       // present when smart-route is on; empty otherwise so default behaviour
@@ -684,7 +857,7 @@ export function generateSingboxConfig(
     route: {
       rules: [
         { inbound: 'mixed-direct-in', outbound: 'direct-out' },
-        ...(
+        ...( 
           proxyCoreProcesses.length > 0
             ? [{
                 process_name: proxyCoreProcesses,
@@ -692,46 +865,44 @@ export function generateSingboxConfig(
               }]
             : []
         ),
-        { action: 'sniff' },
+        // Browser-safe QUIC fallback: on chains that cannot carry QUIC
+        // reliably, drop UDP/443 BEFORE sniffing. Otherwise Chromium can
+        // still spend the default 300ms sniff timeout on each failed QUIC
+        // attempt before it falls back to TCP TLS, which shows up as stalled
+        // first loads / ERR_CONNECTION_CLOSED on arbitrary sites.
+        ...quicUdp443BlockRules,
+        ...(needsSniff ? [{ action: 'sniff' }] : []),
+        // DNS from captured apps must be hijacked BEFORE any blanket UDP
+        // block. In directVpn+tpc-only mode we intentionally block the rest
+        // of UDP, but if that rule runs first Windows DNS probes never reach
+        // sing-box's resolver and the browser falls into DNS_PROBE failures.
         { protocol: 'dns', action: 'hijack-dns' },
+        // Direct VPN outbounds that are genuinely TCP-only cannot carry any
+        // other UDP at all. Keep this AFTER hijack-dns so DNS still resolves
+        // through sing-box, then fail-closed for the remaining UDP traffic.
+        ...allUdpBlockRules,
         // User-defined per-domain rules (Settings → Domain Routing). Injected
         // AFTER sniff (so the SNI/Host is available to match on) and the DNS
         // hijack, but BEFORE the private-range and catch-all rules so an
         // explicit "block youtube.com" / "route netflix direct" actually wins.
         // Empty array when the user has no rules — zero overhead.
-        ...buildDomainRouteRules(),
+        ...domainRouteRules,
         // Smart RU split-routing. RU domains (curated geosite) + RU-hosted
         // IPs (geoip-ru) go direct so banks/gov/shops see the real IP, while
         // everything else falls through to proxy-out. Placed AFTER the user's
         // own domain rules (explicit overrides win) and BEFORE private/catch-
         // all. Empty when the feature is off.
-        ...smartRouteRules(smartRoute),
+        ...smartRouteRouteRules,
         { ip_cidr: privateRanges, outbound: 'direct-out' },
-        { ip_cidr: ['::/0'], outbound: 'block-out' },
-        // HTTP proxy outbound has no UDP transport at all, so every UDP packet
-        // (QUIC/HTTP3, gaming, raw DNS that escaped hijack) would silently time
-        // out. Explicitly block UDP/443 so browsers fail fast on QUIC and fall
-        // back to TCP TLS instead of waiting for QUIC to time out on each load.
-        ...(proxyType === 'http'
-          ? [{ network: 'udp', port: 443, outbound: 'block-out' }]
-          : []),
-        // VLESS+Reality with `network: tcp` cannot carry UDP at all — sing-box
-        // would otherwise let UDP fall through to `final: proxy-out` and stall
-        // until the per-flow timeout. Blocking all UDP up front fails fast and,
-        // more importantly, prevents UDP-only protocols (QUIC, gaming) from
-        // looking "open" while actually being a leak/blackhole. We only insert
-        // this for tcp-only outbounds; UDP-capable outbounds keep UDP routed.
-        ...(typeof proxyOutbound.network === 'string' && proxyOutbound.network === 'tcp'
-          ? [{ network: 'udp', outbound: 'block-out' }]
-          : [])
+        { ip_cidr: ['::/0'], action: 'reject', method: 'default', no_drop: true }
       ],
       // Rule-sets for smart RU split (geoip-ru + geosite gov-ru). Loaded
       // LOCALLY from bundled .srs files (type: local) so a slow/blocked GitHub
       // fetch can never make sing-box fail to start — a remote rule-set whose
       // initial download times out is FATAL in sing-box and used to take the
       // whole tunnel down (exposing the real IP). Empty when feature is off.
-      ...(smartRoute.enabled && (smartRouteRuleSets(smartRoute).length > 0)
-        ? { rule_set: smartRouteRuleSets(smartRoute) }
+      ...(smartRoute.enabled && (smartRouteRuleSetDefs.length > 0)
+        ? { rule_set: smartRouteRuleSetDefs }
         : {}),
       final: 'proxy-out',
       auto_detect_interface: true,
@@ -1005,6 +1176,11 @@ function markProxyRecovered(): void {
   notifyStatus('running')
 }
 
+function hasRecentPublicIpConfirmation(maxAgeMs: number): boolean {
+  const lastSuccessAt = ipMonitor.getLastSuccessAt()
+  return lastSuccessAt > 0 && Date.now() - lastSuccessAt <= maxAgeMs
+}
+
 function stopProxyWatchdog() {
   if (watchdogTimer) {
     clearInterval(watchdogTimer)
@@ -1038,6 +1214,17 @@ function startProxyWatchdog(proxyAddr: string) {
     }
 
     watchdogFailures += 1
+    if (hasRecentPublicIpConfirmation(DIRECT_VPN_WATCHDOG_SUPPRESS_MS)) {
+      watchdogFailures = 0
+      logEvent('info', 'tun-watchdog', 'suppressing direct VPN probe failure because tunnel egress was recently confirmed', {
+        host: parsed.host,
+        port: parsed.port,
+        proxyAddr,
+        watchdogFailures,
+        suppressWindowMs: DIRECT_VPN_WATCHDOG_SUPPRESS_MS
+      })
+      return
+    }
     if (watchdogFailures >= 3) {
       // Kill-switch: do NOT stop sing-box. The TUN keeps blocking traffic until proxy returns.
       markProxyUnreachable(
@@ -1333,15 +1520,23 @@ async function prepareRuntime(
   upstream: string | { outbound: Record<string, any>; proxyType?: 'socks5' | 'http'; clientDevice?: ClientDevice },
   proxyType: 'socks5' | 'http',
   directProcessNames: string[],
-  options: { stealthMode?: boolean; smartRuSplit?: boolean; smartRuMapsDirect?: boolean } = {}
+  options: {
+    stealthMode?: boolean
+    publicWifiCompatibility?: boolean
+    smartRuSplit?: boolean
+    smartRuMapsDirect?: boolean
+    smartRuDirectDnsSources?: PhysicalAdapterDnsSource[]
+  } = {}
 ): Promise<{ singbox: string; config: string }> {
   const runtimeDir = getTunRuntimeDir()
   await mkdir(runtimeDir, { recursive: true })
 
   const singboxSrc = getBundledResource('sing-box.exe')
   const wintunSrc = getBundledResource('wintun.dll')
+  const cronetSrc = getBundledResource(CRONET_DLL_NAME)
   const singboxDst = join(runtimeDir, RUNTIME_EXE_NAME)
   const wintunDst = join(runtimeDir, 'wintun.dll')
+  const cronetDst = join(runtimeDir, CRONET_DLL_NAME)
   const configPath = join(runtimeDir, 'sing-box.json')
   const logPath = join(runtimeDir, 'sing-box.log')
   const logPrevPath = join(runtimeDir, 'sing-box.prev.log')
@@ -1382,19 +1577,22 @@ async function prepareRuntime(
   }
 
   // Copy binaries to a writable runtime dir (Program Files is read-only for normal users;
-  // also ensures sing-box.exe and wintun.dll are in the same directory).
+  // also ensures sing-box.exe, libcronet.dll and wintun.dll are in the same directory).
   // copyResourceIfStale skips the ~30 MB sing-box.exe copy when an identical
   // file already exists in the runtime dir — by far the common case after
   // first install.
   await access(singboxSrc)
   await access(wintunSrc)
-  const [singboxCopied, wintunCopied] = await Promise.all([
+  await access(cronetSrc)
+  const [singboxCopied, wintunCopied, cronetCopied] = await Promise.all([
     copyResourceIfStale(singboxSrc, singboxDst),
-    copyResourceIfStale(wintunSrc, wintunDst)
+    copyResourceIfStale(wintunSrc, wintunDst),
+    copyResourceIfStale(cronetSrc, cronetDst)
   ])
   logEvent('debug', 'tun', 'runtime binaries staged', {
     singbox: singboxCopied ? 'copied' : 'reused',
-    wintun: wintunCopied ? 'copied' : 'reused'
+    wintun: wintunCopied ? 'copied' : 'reused',
+    cronet: cronetCopied ? 'copied' : 'reused'
   })
 
   // Smart-RU split: stage the bundled .srs rule-sets into the runtime dir so
@@ -1410,9 +1608,10 @@ async function prepareRuntime(
   let smartRuRuleSetDir: string | undefined
   if (options.smartRuSplit === true) {
     try {
+      const source = await getPreferredSmartRouteRuleSetSourceDir()
       const staged = await Promise.all(
         smartRouteLocalRuleSetFiles().map(async (file) => {
-          const src = getBundledResource(file)
+          const src = join(source.dir, file)
           const dst = join(runtimeDir, file)
           await access(src) // throws if the file isn't bundled → caught below
           await copyResourceIfStale(src, dst)
@@ -1421,7 +1620,12 @@ async function prepareRuntime(
       )
       if (staged.length > 0 && staged.every(Boolean)) {
         smartRuRuleSetDir = runtimeDir
-        logEvent('debug', 'tun', 'smart-RU rule-sets staged (local)', { dir: runtimeDir, files: smartRouteLocalRuleSetFiles() })
+        logEvent('debug', 'tun', 'smart-RU rule-sets staged (local)', {
+          dir: runtimeDir,
+          source: source.source,
+          managedComplete: source.managedComplete,
+          files: smartRouteLocalRuleSetFiles()
+        })
       }
     } catch (err) {
       logEvent('warn', 'tun', 'smart-RU rule-sets could not be staged — starting WITHOUT split-routing (all traffic via VPN)', err)
@@ -1627,13 +1831,48 @@ export const tunController = {
       return result
     }
 
-    // Phase timing: lightweight, in-process, written to the diagnostic dump
-    // on success. Each phase is wall-clock ms since `tStart`. The next
-    // regression in TUN startup latency should be obvious from the dump
-    // without having to instrument anything else.
+    // Phase timing: lightweight, in-process, written to the diagnostic dump.
+    // `phases` preserves the old cumulative checkpoints; `phaseDurations`
+    // shows the actual wall-clock cost of each expensive step.
     const phases: Record<string, number> = {}
+    const phaseDurations: Record<string, Record<string, unknown>> = {}
     const tStart = Date.now()
     const mark = (name: string) => { phases[name] = Date.now() - tStart }
+    const phaseStart = () => Date.now()
+    const endPhase = (name: string, startedAt: number, meta: Record<string, unknown> = {}) => {
+      const endedAt = Date.now()
+      phases[name] = endedAt - tStart
+      phaseDurations[name] = {
+        startMs: startedAt - tStart,
+        endMs: endedAt - tStart,
+        durationMs: endedAt - startedAt,
+        ...meta
+      }
+    }
+    const timeAsync = async <T>(name: string, fn: () => Promise<T>, meta: Record<string, unknown> = {}): Promise<T> => {
+      const startedAt = phaseStart()
+      try {
+        const result = await fn()
+        endPhase(name, startedAt, meta)
+        return result
+      } catch (err) {
+        endPhase(name, startedAt, { ...meta, failed: true })
+        throw err
+      }
+    }
+    const timePromise = <T>(name: string, promise: Promise<T>, meta: Record<string, unknown> = {}): Promise<T> => {
+      const startedAt = phaseStart()
+      return promise.then(
+        (result) => {
+          endPhase(name, startedAt, meta)
+          return result
+        },
+        (err) => {
+          endPhase(name, startedAt, { ...meta, failed: true })
+          throw err
+        }
+      )
+    }
 
     // A new start() always reopens the auto-restart window. If a pending
     // restart timer is still ticking from a crash recovery, cancel it — the
@@ -1660,6 +1899,15 @@ export const tunController = {
       startOptions.enableAdapterLockdown === true
     const publicWifiCompatibility =
       startOptions.publicWifiCompatibility ?? settingsStore.get().publicWifiCompatibility
+    recordForensicTunEvent('tun-start-requested', {
+      mode,
+      proxyType,
+      proxyAddr: mode === 'localProxy' ? proxyAddr : null,
+      vpnProfileName: vpnProfile?.name ?? null,
+      vpnProtocol: vpnProfile?.protocol ?? null,
+      wantKillSwitch,
+      wantAdapterLockdown
+    })
 
     // Smart RU split-routing flags, read from settings on every start so
     // toggling the UI takes effect on the next (re)connect. Passed through
@@ -1667,7 +1915,13 @@ export const tunController = {
     // unless the master switch is on, so gate it.
     const smartRuSplit = settingsStore.get().smartRuSplit === true
     const smartRuMapsDirect = smartRuSplit && settingsStore.get().smartRuMapsDirect === true
-    const smartRouteRuntimeOpts = { smartRuSplit, smartRuMapsDirect }
+    const smartRuDirectDnsSources = smartRuSplit
+      ? await getPhysicalAdapterDnsSources().catch((err) => {
+          logEvent('warn', 'tun', 'failed to read physical adapter DNS sources for smart-RU', err)
+          return [] as PhysicalAdapterDnsSource[]
+        })
+      : []
+    const smartRouteRuntimeOpts = { smartRuSplit, smartRuMapsDirect, smartRuDirectDnsSources }
 
     if (mode === 'localProxy' && !proxyAddr) {
       return finishStart({ success: false, error: 'Не указан upstream proxy' })
@@ -1679,7 +1933,9 @@ export const tunController = {
     // ---------- Pre-flight 1: detect another VPN/TUN ----------
     // We no longer abort here: Happ often exposes both a local proxy and its own TUN.
     // Instead we exclude known Happ core processes from this TUN to avoid proxy loops.
+    const foreignPreflightStarted = phaseStart()
     const foreign = detectForeignTun()
+    endPhase('foreign-tun-preflight', foreignPreflightStarted, { found: Boolean(foreign) })
     if (foreign) {
       const message =
         `Уже активен другой системный туннель: ${foreign}. Второй TUN поверх него не запускается, ` +
@@ -1696,11 +1952,14 @@ export const tunController = {
     // was never wired into config generation. Lazy import avoids the
     // tunController↔splitTunneling circular dependency.
     let splitTunnelDirectNames: string[] = []
+    const splitTunnelStarted = phaseStart()
     try {
       const { splitTunneling } = await import('./splitTunneling')
       splitTunnelDirectNames = splitTunneling.getDirectProcessNames()
     } catch (err) {
       logEvent('debug', 'tun', 'could not read split-tunnel direct names', err)
+    } finally {
+      endPhase('split-tunnel-rules', splitTunnelStarted, { count: splitTunnelDirectNames.length })
     }
 
     let proxyOwnerProcessNames: string[] = [...splitTunnelDirectNames]
@@ -1728,10 +1987,15 @@ export const tunController = {
       // need until we generate the sing-box config later — running it in
       // parallel with the TCP probe gets it for free. Errors are non-fatal
       // by design (the path is already best-effort), so we swallow them.
+      const proxyProbeStarted = phaseStart()
       const [proxyAlive, proxyOwnerProcesses] = await Promise.all([
         probeTcp(host, port, 2000),
         getProxyOwnerProcesses(host, port).catch(() => [] as Array<{ name: string; path: string | null }>)
       ])
+      endPhase('proxy-listen-and-owner-lookup', proxyProbeStarted, {
+        proxyAlive,
+        ownerProcessCount: proxyOwnerProcesses.length
+      })
       if (!proxyAlive) {
         logEvent('error', 'tun', 'start refused because upstream proxy is not reachable', { proxyAddr, proxyType })
         return finishStart({
@@ -1759,15 +2023,23 @@ export const tunController = {
       // Kick off prepareRuntime NOW — it doesn't depend on the validation
       // result. If validate fails we throw away the runtime; that's just a
       // file overwrite on next start, no rollback needed.
-      runtimePromise = prepareRuntime(
+      runtimePromise = timePromise('prepare-runtime', prepareRuntime(
         proxyAddr,
         proxyType,
         proxyOwnerProcessNames,
-        { stealthMode: startOptions.stealthMode === true, ...smartRouteRuntimeOpts }
-      )
+        {
+          stealthMode: startOptions.stealthMode === true,
+          publicWifiCompatibility,
+          ...smartRouteRuntimeOpts
+        }
+      ), { mode })
 
       // Now do the slower full-tunnel check in parallel with prepareRuntime.
-      const proxyFullTunnel = await validateProxyFullTunnel(host, port, proxyType)
+      const proxyFullTunnel = await timeAsync(
+        'proxy-full-tunnel-check',
+        () => validateProxyFullTunnel(host, port, proxyType),
+        { proxyType }
+      )
       logEvent(proxyFullTunnel.ok ? 'info' : 'error', 'tun', 'upstream proxy full-tunnel check', proxyFullTunnel)
       if (!proxyFullTunnel.ok) {
         // Make sure the eagerly-started prepareRuntime doesn't reject in the
@@ -1785,30 +2057,107 @@ export const tunController = {
       // Direct VPN mode has no validation step — we can start prepareRuntime
       // immediately from the vpnProfile we already have in hand.
       if (vpnProfile) {
-        runtimePromise = prepareRuntime(
+        runtimePromise = timePromise('prepare-runtime', prepareRuntime(
           { outbound: vpnProfile.outbound, proxyType, clientDevice: vpnProfile.clientDevice },
           proxyType,
           proxyOwnerProcessNames,
-          { stealthMode: startOptions.stealthMode === true, ...smartRouteRuntimeOpts }
-        )
+          {
+            stealthMode: startOptions.stealthMode === true,
+            publicWifiCompatibility,
+            ...smartRouteRuntimeOpts
+          }
+        ), { mode })
       }
       mark('proxy-validated')
     }
 
+    // Adapter lockdown can run while we clean stale runtime/config state. It
+    // does not depend on the new TUN interface, and we still await it before
+    // launching sing-box/firewall so a failed lockdown fails the start as before.
+    let adapterLockdownEngaged = false
+    let adapterLockdownWarning: string | null = null
+    logEvent('info', 'tun', 'adapter lockdown decision', {
+      wantAdapterLockdown,
+      publicWifiCompatibility,
+      reason: wantAdapterLockdown
+        ? 'strictAdapterLockdown is ON in settings - will apply'
+        : 'strictAdapterLockdown is OFF in settings - will not apply'
+    })
+    const adapterLockdownPromise: Promise<void> | null = wantAdapterLockdown
+      ? (async () => {
+          try {
+            const lock = await timeAsync(
+              'adapter-lockdown',
+              () => applyPhysicalAdapterLockdown(TUN_IPV4_RESOLVER, {
+                // Keep physical-adapter DNS pinned to the TUN resolver even on
+                // "public Wi-Fi compatibility" runs. Leaving DHCP-pushed DNS on
+                // the physical NIC created real leaks in diagnostics: Windows
+                // kept sending queries to 77.88.8.7 outside the tunnel, which
+                // then fed Smart RU with ISP-visible answers and broke sites.
+                // publicWifiCompatibility still affects MTU selection; it no
+                // longer weakens DNS lockdown.
+                forceDns: true
+              }),
+              { forceDns: true, parallel: true }
+            )
+            logEvent('info', 'tun', 'adapter lockdown result', {
+              applied: lock.applied,
+              adapters: lock.adapters,
+              warnings: lock.warnings
+            })
+            if (lock.applied) {
+              adapterLockdownEngaged = true
+              if (lock.warnings.length > 0) {
+                adapterLockdownWarning = `Lockdown with warnings: ${lock.warnings.join('; ')}`
+                await rollbackPhysicalAdapterLockdownIfApplied('adapter lockdown warnings before start').catch(() => undefined)
+                adapterLockdownEngaged = false
+                throw new Error(adapterLockdownWarning)
+              }
+              return
+            }
+            adapterLockdownWarning = `Lockdown did not apply: ${lock.warnings.join('; ') || 'no physical adapters'}`
+            logEvent('warn', 'tun', 'physical adapter lockdown did not apply', lock)
+            throw new Error(adapterLockdownWarning)
+          } catch (err: any) {
+            if (!adapterLockdownWarning) {
+              adapterLockdownWarning = `Lockdown failed: ${err?.message ?? String(err)}`
+            }
+            logEvent('warn', 'tun', 'physical adapter lockdown threw', err)
+            throw err
+          }
+        })()
+      : null
+    adapterLockdownPromise?.catch(() => undefined)
+
+    const rollbackEarlyAdapterLockdown = async (reason: string) => {
+      if (!adapterLockdownPromise) return
+      await adapterLockdownPromise.catch(() => undefined)
+      if (adapterLockdownEngaged) {
+        await rollbackPhysicalAdapterLockdownIfApplied(reason).catch(err =>
+          logEvent('warn', 'tun', 'early adapter lockdown rollback failed', err)
+        )
+        adapterLockdownEngaged = false
+      }
+    }
+
     // Kill only VPNTE-owned runtime binaries. Never kill generic sing-box.exe elsewhere:
     // Happ may use its own sing-box/xray core.
+    const runtimeCleanupStarted = phaseStart()
     if (await isSingboxRunning()) {
       await killOwnedRuntimeProcesses()
       if (!(await waitForOwnedRuntimeToExit())) {
+        endPhase('owned-runtime-cleanup', runtimeCleanupStarted, { failed: true, previousRuntimeRunning: true })
         // Same harmless-throwaway dance as on validate failure: the eager
         // prepareRuntime is already running, drop its rejection on the floor
         // so it doesn't bubble as an unhandled rejection.
         if (runtimePromise) runtimePromise.catch(() => undefined)
+        await rollbackEarlyAdapterLockdown('owned runtime cleanup failed after adapter lockdown')
         return finishStart({ success: false, error: 'Не удалось остановить предыдущий vpnte-sing-box.exe. Завершите его в Диспетчере задач и повторите.' })
       }
     } else {
       await killRuntimeProcess('sing-box.exe', join(getTunRuntimeDir(), 'sing-box.exe'))
     }
+    endPhase('owned-runtime-cleanup', runtimeCleanupStarted)
 
     // Smart stale-cleanup gate: only walk the per-alias cleanup loop when at
     // least one of our well-known TUN aliases is currently present. After a
@@ -1819,14 +2168,14 @@ export const tunController = {
     // We kick the cleanup off BUT DON'T AWAIT IT YET — it can run in
     // parallel with the sing-box config-check, since the cleanup never
     // touches our newly-copied binary or config in userData.
-    const cleanupPromise: Promise<void> = (async () => {
+    const cleanupPromise: Promise<void> = timeAsync('stale-tun-cleanup', async () => {
       const needsCleanup = await fastTunPresenceProbe()
       if (needsCleanup) {
         await removeStaleTunInterface()
       } else {
         logEvent('debug', 'tun', 'skipping stale TUN cleanup — no aliases present')
       }
-    })()
+    })
 
     // prepareRuntime was kicked off as soon as we knew the tunnel was viable.
     // Wait for it now and run the sing-box config check in parallel with the
@@ -1836,25 +2185,30 @@ export const tunController = {
     let runtime: { singbox: string; config: string }
     try {
       if (!runtimePromise) {
-        runtimePromise = prepareRuntime(
+        runtimePromise = timePromise('prepare-runtime', prepareRuntime(
           mode === 'directVpn' && vpnProfile
             ? { outbound: vpnProfile.outbound, proxyType, clientDevice: vpnProfile.clientDevice }
             : proxyAddr,
           proxyType,
           proxyOwnerProcessNames,
-          { stealthMode: startOptions.stealthMode === true, ...smartRouteRuntimeOpts }
-        )
+          {
+            stealthMode: startOptions.stealthMode === true,
+            publicWifiCompatibility,
+            ...smartRouteRuntimeOpts
+          }
+        ), { mode, fallback: true })
       }
       runtime = await runtimePromise
       // Run sing-box check in parallel with the stale-cleanup. Both are
       // independent and the check is the longer of the two on a clean box.
       await Promise.all([
-        exec(`"${runtime.singbox}" check -c "${runtime.config}"`),
+        timeAsync('singbox-config-check', () => exec(`"${runtime.singbox}" check -c "${runtime.config}"`)),
         cleanupPromise
       ])
     } catch (err: any) {
       // Make sure we don't leave the cleanup dangling as an unhandled rejection.
       cleanupPromise.catch(() => undefined)
+      await rollbackEarlyAdapterLockdown('runtime prepare failed after adapter lockdown')
       logEvent('error', 'tun', 'failed to prepare TUN runtime', err)
       return finishStart({ success: false, error: `Не удалось подготовить TUN-окружение: ${err.stderr || err.message || err}` })
     }
@@ -1875,53 +2229,14 @@ export const tunController = {
     let killSwitchEngaged = false
     let killSwitchWarning: string | null = null
 
-    // Adapter lockdown: disable IPv6 + force DNS to TUN on every physical
-    // adapter. This is the only thing that catches DNS-over-HTTPS leaks (a
-    // browser that bypasses NRPT) and IPv6 default-route leaks (a browser
-    // that prefers a physical adapter's IPv6 default route over our TUN's
-    // split-default IPv6 routes). Reverted on stop (and on crash recovery).
-    let adapterLockdownEngaged = false
-    let adapterLockdownWarning: string | null = null
-    logEvent('info', 'tun', 'adapter lockdown decision', {
-      wantAdapterLockdown,
-      publicWifiCompatibility,
-      reason: wantAdapterLockdown
-        ? 'strictAdapterLockdown is ON in settings — will apply'
-        : 'strictAdapterLockdown is OFF in settings — will not apply'
-    })
-    if (wantAdapterLockdown) {
+    if (adapterLockdownPromise) {
       try {
-        const lock = await applyPhysicalAdapterLockdown(TUN_IPV4_RESOLVER, {
-          forceDns: !publicWifiCompatibility
-        })
-        logEvent('info', 'tun', 'adapter lockdown result', {
-          applied: lock.applied,
-          adapters: lock.adapters,
-          warnings: lock.warnings
-        })
-        if (lock.applied) {
-          adapterLockdownEngaged = true
-          if (lock.warnings.length > 0) {
-            adapterLockdownWarning = `Lockdown с замечаниями: ${lock.warnings.join('; ')}`
-            if (killSwitchEngaged) await disableKillSwitch('adapter lockdown warnings before start').catch(() => undefined)
-            await rollbackPhysicalAdapterLockdownIfApplied('adapter lockdown warnings before start').catch(() => undefined)
-            return finishStart({ success: false, error: adapterLockdownWarning })
-          }
-        } else {
-          adapterLockdownWarning = `Lockdown не применился: ${lock.warnings.join('; ') || 'нет физических адаптеров'}`
-          logEvent('warn', 'tun', 'physical adapter lockdown did not apply', lock)
-          if (killSwitchEngaged) await disableKillSwitch('adapter lockdown did not apply before start').catch(() => undefined)
-          return finishStart({ success: false, error: adapterLockdownWarning })
-        }
-      } catch (err: any) {
-        adapterLockdownWarning = `Lockdown упал: ${err?.message ?? String(err)}`
-        logEvent('warn', 'tun', 'physical adapter lockdown threw', err)
-        if (killSwitchEngaged) await disableKillSwitch('adapter lockdown threw before start').catch(() => undefined)
-        return finishStart({ success: false, error: adapterLockdownWarning })
+        await adapterLockdownPromise
+        mark('lockdown-done')
+      } catch {
+        return finishStart({ success: false, error: adapterLockdownWarning || 'Adapter lockdown failed' })
       }
     }
-    if (wantAdapterLockdown) mark('lockdown-done')
-
     // sudo-prompt's callback fires on child exit. For a long-running daemon we:
     // 1. Fire-and-forget the sudo.exec call, using its callback to mark "stopped" on exit.
     // 2. Poll tasklist for sing-box.exe to determine if it actually started.
@@ -1969,6 +2284,12 @@ export const tunController = {
           const canRetryPortBind =
             isPortAccessForbidden && !userInitiatedStop && restartAttempt === 0
           logEvent('error', 'tun', 'sing-box exited before startup completed', { message: msg, stderr })
+          recordForensicTunEvent('sing-box-start-failed', {
+            message: msg,
+            stderr,
+            canRetryPortBind,
+            restartAttempt
+          })
           if (canRetryPortBind) {
             logEvent(
               'warn',
@@ -2025,8 +2346,14 @@ export const tunController = {
           // "errors:" summary and alarmed the user). Real unexpected crashes
           // (userInitiatedStop === false) still log at error.
           logEvent(userInitiatedStop ? 'info' : (error ? 'error' : 'warn'), 'tun', 'sing-box process exited', { error: error?.message, stderr, userInitiatedStop })
+          recordForensicTunEvent(userInitiatedStop ? 'sing-box-exited-after-user-stop' : 'sing-box-process-exited', {
+            error: error?.message,
+            stderr,
+            userInitiatedStop
+          })
         } else {
           logEvent('info', 'tun', 'sing-box process exited')
+          recordForensicTunEvent('sing-box-process-exited')
         }
         // sing-box died unexpectedly while we believed TUN was up. Three things to do:
         //  1. Restore proxy baseline (if applied) so we don't leave the user with
@@ -2072,6 +2399,11 @@ export const tunController = {
             const delay = RESTART_BACKOFF_MS[restartAttempt]
             restartAttempt = attempt
             logEvent('warn', 'tun', 'sing-box crashed — scheduling auto-restart', {
+              attempt,
+              maxAttempts: RESTART_BACKOFF_MS.length,
+              delayMs: delay
+            })
+            recordForensicTunEvent('sing-box-crashed-auto-restart-scheduled', {
               attempt,
               maxAttempts: RESTART_BACKOFF_MS.length,
               delayMs: delay
@@ -2135,6 +2467,10 @@ export const tunController = {
                   attempts: restartAttempt,
                   failoverTried: res.tried
                 })
+                recordForensicTunEvent('sing-box-auto-restart-exhausted', {
+                  attempts: restartAttempt,
+                  failoverTried: res.tried
+                })
                 notify('error', 'Защита остановилась', 'Превышено число попыток перезапуска. Включите защиту вручную.', 'connectionError')
                 disableKillSwitchIfActive('auto-restart exhausted — restoring internet').catch(err =>
                   logEvent('warn', 'tun', 'kill-switch disable after exhausted retries failed', err)
@@ -2160,6 +2496,10 @@ export const tunController = {
               'tun',
               'sing-box exited unexpectedly — keeping firewall kill-switch active'
             )
+            recordForensicTunEvent('sing-box-exited-killswitch-active', {
+              restartAttempt,
+              maxAttempts: RESTART_BACKOFF_MS.length
+            })
             notify('warn', 'sing-box упал', 'Файрвол блокирует трафик, чтобы не было утечки IP. Включите защиту заново.', 'connectionError')
             // Tell the UI traffic is now firewall-blocked, not just "stopped".
             notifyStatus('killswitch-active')
@@ -2170,6 +2510,7 @@ export const tunController = {
         }
       }
 
+      const launchStarted = phaseStart()
       mark('singbox-spawned')
       isProcessElevated().then((elevated) => {
         if (elevated) {
@@ -2177,12 +2518,17 @@ export const tunController = {
         } else {
           sudo.exec(cmd, { name: 'VPN Tunnel Enforcer' }, (error, _stdout, stderr) => onExit(error, String(stderr || '')))
         }
-      }).catch((error) => onExit(error))
+        endPhase('singbox-launch-submit', launchStarted, { elevated })
+      }).catch((error) => {
+        endPhase('singbox-launch-submit', launchStarted, { failed: true })
+        onExit(error)
+      })
 
       // Poll for sing-box.exe presence.
       let attempts = 0
       const maxAttempts = 15 // 15 * 500ms = 7.5s
       let successHandled = false
+      const processWaitStarted = phaseStart()
       const poller = setInterval(async () => {
         if (resolved || successHandled) {
           clearInterval(poller)
@@ -2194,6 +2540,7 @@ export const tunController = {
           if (successHandled) return
           successHandled = true
           clearInterval(poller)
+          endPhase('wait-singbox-process', processWaitStarted, { attempts })
 
           // Engage the firewall kill-switch NOW, after sing-box is up. The
           // kill-switch installs an Allow rule scoped to -InterfaceAlias
@@ -2205,7 +2552,7 @@ export const tunController = {
           // so wait for it unconditionally — this is a couple of hundred ms in
           // the steady-state and prevents a leak window where Wi-Fi outranks
           // our TUN on the default-route tiebreak.
-          const tunReady = await waitForTunInterface(5000)
+          const tunReady = await timeAsync('wait-tun-interface', () => waitForTunInterface(5000))
 
           // Lock in our TUN's InterfaceMetric BEFORE the kill-switch comes up. The
           // kill-switch installs an InterfaceAlias-scoped allow rule that needs the
@@ -2216,22 +2563,31 @@ export const tunController = {
           // traffic leaks via the physical adapter despite strict_route. Best-effort
           // — failure to set the metric does NOT fail the start.
           if (tunReady) {
-            await applyLowTunInterfaceMetric()
+            await timeAsync('tun-interface-metric-set', () => applyLowTunInterfaceMetric())
 
-            // Sanity-check: read the metric back. If Windows refused our Set-NetIPInterface
-            // for any reason (rare, usually GPO), the kill-switch can still help (firewall
-            // blocks fall-through), but the user should know.
-            try {
-              const script = `(Get-NetIPInterface -InterfaceAlias '${TUN_ADAPTER_ALIAS}' -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty InterfaceMetric)`
-              const out = String(await runPowerShell(script, 4000)).trim()
-              const metric = parseInt(out, 10)
-              if (Number.isFinite(metric) && metric > 50) {
-                logEvent('warn', 'tun', `TUN InterfaceMetric is high (${metric}) — possible route-priority leak`, { metric })
-              }
-            } catch { /* not fatal */ }
+            // Diagnostic readback only. The protection-critical part is the
+            // metric write above, so do not hold startup/firewall on this
+            // extra PowerShell round-trip.
+            const readbackStarted = phaseStart()
+            const script = `(Get-NetIPInterface -InterfaceAlias '${TUN_ADAPTER_ALIAS}' -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty InterfaceMetric)`
+            void runPowerShell(script, 4000)
+              .then(out => {
+                endPhase('tun-interface-metric-readback', readbackStarted, { background: true })
+                const metric = parseInt(String(out).trim(), 10)
+                if (Number.isFinite(metric) && metric > 50) {
+                  logEvent('warn', 'tun', `TUN InterfaceMetric is high (${metric}) — possible route-priority leak`, { metric })
+                }
+              })
+              .catch(err => {
+                endPhase('tun-interface-metric-readback', readbackStarted, { background: true, failed: true })
+                logEvent('debug', 'tun', 'TUN InterfaceMetric readback failed', {
+                  error: err?.message || String(err)
+                })
+              })
           }
 
           if (wantKillSwitch) {
+            const killSwitchStarted = phaseStart()
             if (!tunReady) {
               logEvent(
                 'warn',
@@ -2240,12 +2596,14 @@ export const tunController = {
               )
               killSwitchWarning =
                 'TUN-адаптер не поднялся за 5 с — kill-switch пропущен, чтобы не блокировать интернет.'
+              endPhase('firewall-kill-switch', killSwitchStarted, { skipped: true, reason: 'tun-not-ready' })
             } else if (await isKillSwitchActive()) {
               // Auto-restart path: rules left in place by the previous run are
               // still doing their job, no need to reinstall (which would also
               // briefly drop and re-add allow rules). Just take ownership.
               killSwitchEngaged = true
               logEvent('info', 'tun', 'kill-switch already active — reusing existing rules')
+              endPhase('firewall-kill-switch', killSwitchStarted, { reused: true })
             } else {
               const ks = await enableKillSwitch({
                 singboxExePath: runtime.singbox,
@@ -2255,6 +2613,11 @@ export const tunController = {
               if (ks.success) {
                 killSwitchEngaged = true
                 logEvent('info', 'tun', 'kill-switch engaged after TUN interface came up')
+                recordForensicTunEvent('kill-switch-engaged', {
+                  reason: 'tun-interface-up',
+                  singboxExePath: runtime.singbox
+                })
+                endPhase('firewall-kill-switch', killSwitchStarted, { engaged: true })
               } else {
                 logEvent(
                   'warn',
@@ -2263,8 +2626,11 @@ export const tunController = {
                   ks
                 )
                 killSwitchWarning = `Kill-switch не включился: ${ks.message}. VPN работает без дополнительной защиты от утечек.`
+                endPhase('firewall-kill-switch', killSwitchStarted, { failed: true, message: ks.message })
               }
             }
+          } else {
+            endPhase('firewall-kill-switch', phaseStart(), { skipped: true, reason: 'disabled' })
           }
 
           const combinedWarning = [warning, killSwitchWarning].filter(Boolean).join(' | ') || null
@@ -2307,10 +2673,24 @@ export const tunController = {
             killSwitch: killSwitchEngaged,
             restartAttempt
           })
+          recordForensicTunEvent('tun-started', {
+            mode,
+            proxyAddr: mode === 'localProxy' ? proxyAddr : null,
+            proxyType,
+            vpnProfileName: vpnProfile?.name ?? null,
+            vpnProtocol: vpnProfile?.protocol ?? null,
+            warning: combinedWarning,
+            killSwitch: killSwitchEngaged,
+            restartAttempt
+          })
           // Phase timing summary — gold for the diagnostic dump. If TUN
           // startup ever regresses, the phase deltas in this single log line
           // will pinpoint which step got slower.
-          logEvent('info', 'tun', 'start timing', { phases, totalMs: Date.now() - tStart })
+          logEvent('info', 'tun', 'start timing', {
+            phases,
+            phaseDurations,
+            totalMs: Date.now() - tStart
+          })
 
           // Remember the start params so we can replay them after a crash.
           // Mark the run as "user-initiated" while we hold the line —
@@ -2358,7 +2738,15 @@ export const tunController = {
         } else if (attempts >= maxAttempts) {
           clearInterval(poller)
           if (!resolved) {
+            endPhase('wait-singbox-process', processWaitStarted, { failed: true, attempts })
+            logEvent('info', 'tun', 'start timing', {
+              phases,
+              phaseDurations,
+              totalMs: Date.now() - tStart,
+              failedAt: 'wait-singbox-process'
+            })
             logEvent('error', 'tun', 'sing-box did not start within timeout', { proxyAddr, proxyType })
+            recordForensicTunEvent('sing-box-start-timeout', { proxyAddr, proxyType, attempts })
             // sing-box never reported running. Drop the kill-switch we installed
             // pre-flight so the user isn't stuck offline because of UAC denial.
             if (killSwitchEngaged) {
@@ -2386,6 +2774,11 @@ export const tunController = {
     // exit handler doesn't kick off auto-restart. Also clear any pending
     // restart timer from a previous crash so we don't fight ourselves.
     userInitiatedStop = true
+    recordForensicTunEvent('tun-stop-requested', {
+      wasRunning: currentStatus.running,
+      mode: currentStatus.mode ?? null,
+      restartAttempt
+    })
     lastStartOptions = null
     restartAttempt = 0
     clearRestartTimers()
@@ -2448,6 +2841,9 @@ export const tunController = {
     clashApiInfo = null
     directProxyPort = null
     logEvent('info', 'tun', 'TUN stopped')
+    recordForensicTunEvent('tun-stopped', {
+      cleanupErrors
+    })
     notify('info', 'Защита выключена', 'Трафик идёт по обычному маршруту.', 'vpnDisconnect')
     notifyStatus('stopped')
 

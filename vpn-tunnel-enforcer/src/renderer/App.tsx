@@ -32,11 +32,14 @@ declare global {
       getAutoconfigStatus: () => Promise<any[]>
       getSettings: () => Promise<AppSettings>
       saveSettings: (settings: Partial<AppSettings>) => Promise<AppSettings>
+      smartRouteRuleSetsGetState: () => Promise<any>
+      smartRouteRuleSetsRefresh: (force?: boolean) => Promise<any>
       inspectVpnInput: (input: string) => Promise<{ count: number; protocols: Record<string, number>; profiles: Array<{ index: number; name: string; protocol: string }>; fetched: boolean; source: string }>
       setLoginItem: (openAtLogin: boolean) => Promise<AppSettings>
       runLeakCheck: (options?: { proxyAddr?: string; proxyType?: 'socks5' | 'http' }) => Promise<LeakCheckResult>
       runStoreRepair: (action: string) => Promise<{ success: boolean; message: string; details?: string }>
       runStoreDiagnostics: () => Promise<any>
+
       runSystemDiagnostics: () => Promise<any>
       getRoutingPlan: () => Promise<any>
       applyBrowserLeakProtection: () => Promise<any>
@@ -57,6 +60,7 @@ declare global {
       openTunLogFolder: () => Promise<string>
       openLogFolder: () => Promise<string>
       exportDiagnostics: () => Promise<{ success: boolean; path?: string; error?: string; cancelled?: boolean }>
+      getTrafficForensicsStatus: () => Promise<{ running: boolean, lastError: string | null }>
       runLeakSelfTest: () => Promise<LeakSelfTestResult>
       runRoutingSelfTest: () => Promise<{
         ranAt: number
@@ -256,6 +260,7 @@ export default function App() {
   // IPC callbacks below can read the live value without re-subscribing
   // every time it flips.
   const stoppingNowRef = useRef(false)
+  const tunEventSeqRef = useRef(0)
 
   // Listen for IPC events
   useEffect(() => {
@@ -277,6 +282,7 @@ export default function App() {
     })
 
     const unsubTun = window.electronAPI.onTunStatusChanged((status) => {
+      tunEventSeqRef.current += 1
       const store = useAppStore.getState()
       // 'proxy-down' means TUN is still up but upstream proxy is unreachable — we keep
       // tunRunning=true so the kill-switch state is reflected (traffic blocked, not leaked).
@@ -428,6 +434,7 @@ export default function App() {
   useEffect(() => {
     async function init() {
       const store = useAppStore.getState()
+      const initTunEventSeq = tunEventSeqRef.current
       store.setDetecting(true)
 
       let settings = store.settings
@@ -485,22 +492,43 @@ export default function App() {
         }
       }
 
-      try {
-        const ipInfo = await window.electronAPI.getPublicIp()
-        store.setPublicIp(ipInfo.ip, ipInfo.isLeak)
-        if (ipInfo.ip) addLog('info', `Текущий публичный IP: ${ipInfo.ip}`)
-        if (ipInfo.ip && !ipInfo.isLeak) void verifyActiveServerCountry(ipInfo.ip)
-      } catch (err: any) {
-        addLog('error', `Ошибка проверки IP: ${err.message}`)
-      }
+      void (async () => {
+        try {
+          const ipInfo = await window.electronAPI.getPublicIp()
+          const liveStore = useAppStore.getState()
+          const staleInitialIp =
+            tunEventSeqRef.current !== initTunEventSeq ||
+            Boolean(liveStore.connectionBusy)
+          if (staleInitialIp) {
+            addLog('warn', 'Ignored stale initial IP check after a newer transition')
+            return
+          }
+          liveStore.setPublicIp(ipInfo.ip, ipInfo.isLeak)
+          if (ipInfo.ip) addLog('info', `Текущий публичный IP: ${ipInfo.ip}`)
+          if (ipInfo.ip && !ipInfo.isLeak) void verifyActiveServerCountry(ipInfo.ip)
+        } catch (err: any) {
+          addLog('error', `Ошибка проверки IP: ${err.message}`)
+        }
+      })()
 
       try {
         const tunStatus = await window.electronAPI.getTunStatus()
-        store.setTunRunning(tunStatus.running)
-        store.setTunStartedAt(tunStatus.startedAt ?? null)
-        if (tunStatus.running) store.setMode('hard')
-        else if (useAppStore.getState().mode === 'hard' && settings.autoPilotEnabled) store.setMode('off')
+        const liveStore = useAppStore.getState()
+        const staleInitialStatus =
+          tunEventSeqRef.current !== initTunEventSeq ||
+          Boolean(liveStore.connectionBusy) ||
+          (liveStore.tunRunning && !tunStatus.running)
+        if (!staleInitialStatus) {
+          liveStore.setTunRunning(tunStatus.running)
+          liveStore.setTunStartedAt(tunStatus.startedAt ?? null)
+          if (tunStatus.running) liveStore.setMode('hard')
+          else if (liveStore.mode === 'hard' && settings.autoPilotEnabled) liveStore.setMode('off')
+        } else {
+          addLog('warn', 'Ignored stale initial TUN status after a newer transition')
+        }
       } catch { /* */ }
+
+      store.setDetecting(false)
 
       try {
         const traffic = await window.electronAPI.getTrafficStats()

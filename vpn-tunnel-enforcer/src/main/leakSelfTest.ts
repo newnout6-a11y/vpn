@@ -22,18 +22,27 @@
  * red banner "УТЕЧКА: kill-switch не блокирует Wi-Fi".
  *
  * ─── Cancellation ─────────────────────────────────────────────────────────
- * Each call to `runLeakSelfTest()` reserves a session id. Whenever the
- * caller (or `cancelLeakSelfTest()`) bumps `activeSessionId`, every await
- * boundary inside the in-flight run checks `mySession !== activeSessionId`
- * and bails out with a sanitized cancelled result. This kills the false-
- * positive "physicalAdapterReached:true" report that used to fire 8-10s
- * after a user-initiated stop, when the curl probes outlived the rollback
- * and saw the real public IP through a now-unblocked adapter.
+ * Concurrent `runLeakSelfTest()` callers share the same in-flight run instead
+ * of cancelling each other. `cancelLeakSelfTest()` still bumps
+ * `activeSessionId`; every await boundary inside the active run checks
+ * `mySession !== activeSessionId` and bails out with a sanitized cancelled
+ * result. This kills false positives after user-initiated stop without making
+ * manual checks race the periodic timer.
  */
 import { exec as execCb, execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import { networkInterfaces } from 'os'
 import { logEvent } from './appLogger'
+
+function recordForensicLeakSelfTestEvent(event: string, details: Record<string, unknown>): void {
+  import('./trafficForensics')
+    .then(({ recordTrafficForensicsAppEvent }) => recordTrafficForensicsAppEvent({
+      source: 'leak-self-test',
+      event,
+      details
+    }))
+    .catch(() => undefined)
+}
 
 const exec = promisify(execCb)
 const execFile = promisify(execFileCb)
@@ -77,6 +86,8 @@ const IP_ENDPOINT = 'https://api.ipify.org'
 // the value at start (`mySession`) and bail at every await boundary if the
 // global has moved past them.
 let activeSessionId = 0
+let inFlightLeakTest: Promise<LeakSelfTestResult> | null = null
+let inFlightSessionId = 0
 
 function cancelledResult(): LeakSelfTestResult {
   return {
@@ -163,11 +174,20 @@ $rows | ConvertTo-Json -Compress
 }
 
 export async function runLeakSelfTest(): Promise<LeakSelfTestResult> {
-  // Reserve a session id for this run. Any prior in-flight run will see
-  // `mySession !== activeSessionId` at its next await and bail.
+  if (inFlightLeakTest && inFlightSessionId === activeSessionId) return inFlightLeakTest
+
   activeSessionId += 1
   const mySession = activeSessionId
+  inFlightSessionId = mySession
 
+  const run = runLeakSelfTestOnce(mySession).finally(() => {
+    if (inFlightLeakTest === run) inFlightLeakTest = null
+  })
+  inFlightLeakTest = run
+  return run
+}
+
+async function runLeakSelfTestOnce(mySession: number): Promise<LeakSelfTestResult> {
   const ts = Date.now()
 
   // 1. Public IP via the default route (which should be the TUN). Use plain
@@ -286,6 +306,15 @@ export async function runLeakSelfTest(): Promise<LeakSelfTestResult> {
     defaultRoutePublicIp,
     perAdapter
   })
+  recordForensicLeakSelfTestEvent('leak-self-test-result', {
+    physicalAdapterReached,
+    publicIpMismatch,
+    dnsLeakDetected,
+    dnsLeakDetail,
+    defaultRoutePublicIp,
+    perAdapter,
+    summary
+  })
 
   return result
 }
@@ -323,8 +352,11 @@ export function triggerLeakCheckNow(reason: string): void {
   if (now - lastTriggerAt < 5_000) return
   lastTriggerAt = now
   logEvent('debug', 'leak-test', 'event-triggered run', { reason })
-  runLeakSelfTest()
+  const run = runLeakSelfTest()
+  const runSession = inFlightSessionId
+  run
     .then((r) => {
+      if (runSession !== activeSessionId) return
       if (r.physicalAdapterReached || r.publicIpMismatch || r.dnsLeakDetected) {
         onLeakDetectedCb?.(r)
       }
@@ -399,13 +431,14 @@ export function startPeriodicLeakTest(
   stopPeriodicLeakTest()
   periodicLeakTimer = setInterval(() => {
     if (!shouldRun()) return
-    const tickSession = activeSessionId + 1 // what runLeakSelfTest will reserve
-    runLeakSelfTest()
+    const run = runLeakSelfTest()
+    const runSession = inFlightSessionId
+    run
       .then((r) => {
         // Only fire the leak callback if the run we kicked off is still the
         // active one. A stop-tun that bumps activeSessionId between scheduling
         // and resolution must not trigger the renderer leak banner.
-        if (tickSession !== activeSessionId) return
+        if (runSession !== activeSessionId) return
         if (r.physicalAdapterReached || r.publicIpMismatch || r.dnsLeakDetected) {
           onLeakDetectedCb?.(r)
         }

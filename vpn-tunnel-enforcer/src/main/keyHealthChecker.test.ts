@@ -13,10 +13,13 @@ vi.mock('socks', () => ({ SocksClient: { createConnection: vi.fn() } }))
 vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
 vi.mock('./tunController', () => ({
   tunController: { getStatus: () => ({ running: false }) },
-  getDirectProxyPort: () => null
+  getDirectProxyPort: () => null,
+  getBundledResource: () => '/tmp/vpnte-test/sing-box.exe',
+  pickFreeLocalPort: vi.fn(async () => 50123),
+  sanitizeProxyOutbound: (outbound: Record<string, any>) => ({ outbound, needsBootstrapDns: false })
 }))
 
-import { describeProbeTarget } from './keyHealthChecker'
+import { classifyHysteria2ProbeFailure, describeProbeTarget } from './keyHealthChecker'
 import type { ServerProfile } from '../shared/ipc-types'
 
 function profile(outbound: Record<string, any>): ServerProfile {
@@ -64,5 +67,21 @@ describe('describeProbeTarget tlsLeaksSni', () => {
 
   it('returns null when host/port missing', () => {
     expect(describeProbeTarget(profile({ server: '', server_port: 0 }))).toBeNull()
+  })
+})
+
+describe('classifyHysteria2ProbeFailure', () => {
+  it('classifies auth/password errors separately from UDP blocks', () => {
+    expect(classifyHysteria2ProbeFailure('client: authentication failed: wrong password')).toBe('hy2-auth-failed')
+    expect(classifyHysteria2ProbeFailure('hysteria2: salamander obfs password mismatch')).toBe('hy2-auth-failed')
+  })
+
+  it('classifies QUIC timeout/no activity as UDP blocked', () => {
+    expect(classifyHysteria2ProbeFailure('timeout: no recent network activity')).toBe('hy2-udp-blocked')
+    expect(classifyHysteria2ProbeFailure('', 'context deadline exceeded during QUIC handshake')).toBe('hy2-udp-blocked')
+  })
+
+  it('classifies config/runtime incompatibility before generic handshake failure', () => {
+    expect(classifyHysteria2ProbeFailure('decode config at /outbounds/0: unknown field gecko')).toBe('hy2-config-failed')
   })
 })
