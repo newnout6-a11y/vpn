@@ -11,9 +11,10 @@
     "test:coverage": "vitest --run --coverage",
     "test:vpn-profiles": "node scripts/test-vpn-profiles.mjs",
     "preview": "electron-vite preview",
-    "dist": "npm run build && electron-builder",
-    "dist:win": "npm run build && electron-builder --win nsis",
-    "dist:portable": "npm run build && electron-builder --win portable"
+    "build:sidecar": "node scripts/build-sidecar.mjs",
+    "dist": "npm run build:sidecar && npm run build && electron-builder",
+    "dist:win": "npm run build:sidecar && npm run build && electron-builder --win nsis",
+    "dist:portable": "npm run build:sidecar && npm run build && electron-builder --win portable"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

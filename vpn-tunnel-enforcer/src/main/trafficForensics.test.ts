@@ -259,6 +259,58 @@ describe('trafficForensics', () => {
     }
   })
 
+  it('counts native ETW data events and clears the lifecycle-only warning', async () => {
+    await resetForensicsState()
+    execElevatedMock.mockResolvedValue({ stdout: '', stderr: '' })
+    const sidecarPath = 'C:/Users/Redmi/CascadeProjects/vpn/.tmp/vpnte-test-sidecar/vpnte-etw-sidecar.cmd'
+    rmSync(dirname(sidecarPath), { recursive: true, force: true })
+    mkdirSync(dirname(sidecarPath), { recursive: true })
+    writeFileSync(sidecarPath, '@echo off\r\n')
+    process.env.VPNTE_TRAFFIC_FORENSICS_SIDECAR = sidecarPath
+    spawnMock.mockReturnValue(mockChildProcess())
+
+    const status = await startTrafficForensicsSession({
+      mode: 'directVpn',
+      target: 'poland1'
+    })
+    writeFileSync(join(status.sessionDir!, 'pktmon.etl'), Buffer.alloc(4096))
+    // A realistic NDJSON stream from the native ferrisetw sidecar: lifecycle +
+    // health (non-data) plus tcp/dns/wfp rows (data events).
+    const rows = [
+      { provider: 'sidecar', category: 'lifecycle', event: 'started', engine: 'ferrisetw-realtime' },
+      {
+        provider: 'Microsoft-Windows-TCPIP',
+        category: 'tcp',
+        event: 'observed',
+        protocol: 'tcp',
+        localAddress: '10.8.0.2',
+        localPort: 50123,
+        remoteAddress: '142.250.1.2',
+        remotePort: 443
+      },
+      {
+        provider: 'Microsoft-Windows-DNS-Client',
+        category: 'dns',
+        event: 'query',
+        queryName: 'youtube.com',
+        remoteAddress: '142.250.1.2'
+      },
+      { provider: 'Microsoft-Windows-WFP', category: 'wfp', event: 'block', reason: 'wfp-block-observed' },
+      { provider: 'sidecar', category: 'health', event: 'heartbeat', observedEvents: 3 }
+    ]
+    writeFileSync(
+      join(status.sessionDir!, 'events.ndjson'),
+      rows.map(row => JSON.stringify({ ...row, session: status.sessionId, sidecar: 'vpnte-etw-sidecar.exe', ts: '2026-06-19T00:00:00.000Z' })).join('\n') + '\n'
+    )
+
+    const refreshed = await getTrafficForensicsStatus()
+    expect(refreshed.health.sidecarEvents).toBe(5)
+    expect(refreshed.health.sidecarDataEvents).toBe(3)
+    expect(refreshed.health.sidecarWarmingUp).toBe(false)
+    expect(refreshed.health.sidecarOnlyLifecycle).toBe(false)
+    expect(refreshed.health.warnings).toEqual([])
+  })
+
   it('clears running status when stop artifacts already exist', async () => {
     await resetForensicsState()
     execElevatedMock.mockResolvedValue({ stdout: '', stderr: '' })

@@ -61,6 +61,10 @@ extraFiles:
     to: vpnte-proxy.ps1
   - from: resources/vpnte-proxy.cmd
     to: vpnte-proxy.cmd
+  # Native real-time ETW consumer (Rust/ferrisetw). Preferred over the
+  # PowerShell poller below: trafficForensics.ts probes for the .exe first.
+  - from: resources/vpnte-etw-sidecar.exe
+    to: vpnte-etw-sidecar.exe
   - from: resources/vpnte-etw-sidecar.ps1
     to: vpnte-etw-sidecar.ps1
   - from: resources/vpnte-etw-sidecar.cmd

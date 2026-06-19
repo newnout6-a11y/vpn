@@ -86,6 +86,26 @@ Portable build:
 npm run dist:portable
 ```
 
+### Native ETW sidecar (`vpnte-etw-sidecar.exe`)
+
+Traffic forensics uses a native real-time ETW consumer written in Rust
+(`native/vpnte-etw-sidecar/`, built on the `ferrisetw` crate). It subscribes to
+the TCPIP, DNS-Client, WFP, Winsock-AFD, and WebIO providers and appends
+normalized NDJSON traffic events to the session's `events.ndjson`. The Electron
+app prefers this binary and falls back to the bundled PowerShell poller
+(`vpnte-etw-sidecar.ps1`) when it is absent.
+
+The `dist*` scripts build it automatically via `npm run build:sidecar`, which
+requires the Rust toolchain (install from <https://rustup.rs>, target
+`x86_64-pc-windows-msvc`). It is a no-op (with a warning) when Rust is not
+installed or the host is not Windows. To build it on its own:
+
+```bash
+npm run build:sidecar
+# or directly:
+cd native/vpnte-etw-sidecar && cargo build --release
+```
+
 ## Test
 
 ```bash
