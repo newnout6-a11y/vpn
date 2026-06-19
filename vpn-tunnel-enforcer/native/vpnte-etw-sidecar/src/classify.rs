@@ -76,6 +76,50 @@ pub fn derive_event_and_reason(category: &str, kind: &str, opcode: &str) -> (Str
     }
 }
 
+/// Decide whether an event carries enough signal to be worth emitting, based on
+/// its (lowercased) ETW **task name**.
+///
+/// Enabling the TCPIP/AFD providers with every keyword at max verbosity makes
+/// ETW deliver a firehose: per-packet data-transfer rows (`TcpDataTransfer*`,
+/// `AfdSend`/`AfdReceive`), and — worst of all — `TcpConnectionRundown`, which
+/// enumerates *every* existing connection whenever the session (re)starts. That
+/// floods the NDJSON timeline and slams the data-event cap within seconds
+/// without adding insight.
+///
+/// We keep connection-lifecycle and security-relevant events (what a user
+/// debugging a tunnel actually cares about) and drop the high-volume data path.
+/// DNS / WFP / WebIO are naturally low-volume, so they pass through untouched.
+///
+/// Matching is on the task name only — NOT the opcode — because AFD data-path
+/// events carry the opcode `Connected` (a socket-state qualifier), which would
+/// otherwise falsely match a "connect" substring and defeat the filter.
+pub fn is_significant(category: &str, task: &str) -> bool {
+    // Connection rundown / capture-state enumeration is pure noise for a live
+    // timeline regardless of provider.
+    if task.contains("rundown") {
+        return false;
+    }
+    match category {
+        "dns" | "wfp" | "webio" | "event" => true,
+        "tcp" => contains_any(
+            task,
+            &[
+                "connect", "accept", "disconnect", "close", "reset", "rst", "retrans",
+                "timeout", "loss", "mtu", "fragment", "establish", "abort", "shutdown",
+                "fin", "syn", "fail",
+            ],
+        ),
+        "afd" => contains_any(
+            task,
+            &[
+                "connect", "accept", "disconnect", "close", "abort", "shutdown", "bind",
+                "listen", "fail",
+            ],
+        ),
+        _ => true,
+    }
+}
+
 fn default_event(opcode: &str) -> String {
     let trimmed = opcode.trim();
     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("info") {
@@ -142,6 +186,33 @@ mod tests {
             derive_event_and_reason("tcp", "tcpip path mtu changed", "").1.as_deref(),
             Some("mtu-or-fragmentation-observed")
         );
+    }
+
+    #[test]
+    fn drops_rundown_and_data_path_noise_keeps_connection_events() {
+        // Matching is on the task name only. The biggest noise sources observed
+        // in the field (real ETW task names):
+        assert!(!is_significant("tcp", "tcpconnectionrundown"));
+        assert!(!is_significant("tcp", "tcpdatatransferreceive"));
+        assert!(!is_significant("tcp", "tcpdatatransfersend"));
+        assert!(!is_significant("afd", "afdsend"));
+        assert!(!is_significant("afd", "afdreceive"));
+        assert!(!is_significant("afd", "afddataindication"));
+
+        // Connection-lifecycle and fault events are kept (real task names).
+        assert!(is_significant("tcp", "tcprequestconnect"));
+        assert!(is_significant("tcp", "tcpclosetcbrequest"));
+        assert!(is_significant("tcp", "tcpconnectionterminatedrcvdrst"));
+        assert!(is_significant("tcp", "tcptaillossprobe"));
+        assert!(is_significant("tcp", "tcprecentconnectionfailure"));
+        assert!(is_significant("afd", "afdconnect"));
+        assert!(is_significant("afd", "afdclose"));
+        assert!(is_significant("afd", "afdbindwithaddress"));
+
+        // Low-volume providers always pass.
+        assert!(is_significant("dns", "dnsqueryresolution"));
+        assert!(is_significant("wfp", "filterevent"));
+        assert!(is_significant("webio", "request"));
     }
 
     #[test]
