@@ -53,6 +53,12 @@ export interface TrafficForensicsStatus {
     sidecarWarmingUp: boolean
     pktmonStatusBytes: number
     pktmonLiveCountersBytes: number
+    sidecarEngine: string | null
+    sidecarCategoryCounts: Record<string, number>
+    sidecarWfpBlocks: number
+    sidecarTopDomains: Array<{ name: string; count: number }>
+    sidecarTopRemotes: Array<{ address: string; count: number }>
+    sidecarLastEventAt: number | null
     warnings: string[]
   }
 }
@@ -323,26 +329,88 @@ function artifactMtime(files: TrafficForensicsArtifactFile[], name: string): num
   return files.find(file => file.name === name)?.mtimeMs ?? null
 }
 
-async function readSidecarEventProbe(sessionDir: string | null | undefined): Promise<{ events: number; dataEvents: number }> {
-  if (!sessionDir) return { events: 0, dataEvents: 0 }
+interface SidecarEventProbe {
+  events: number
+  dataEvents: number
+  engine: string | null
+  categoryCounts: Record<string, number>
+  wfpBlocks: number
+  topDomains: Array<{ name: string; count: number }>
+  topRemotes: Array<{ address: string; count: number }>
+  lastDataEventAt: number | null
+}
+
+function emptySidecarEventProbe(): SidecarEventProbe {
+  return {
+    events: 0,
+    dataEvents: 0,
+    engine: null,
+    categoryCounts: {},
+    wfpBlocks: 0,
+    topDomains: [],
+    topRemotes: [],
+    lastDataEventAt: null
+  }
+}
+
+async function readSidecarEventProbe(sessionDir: string | null | undefined): Promise<SidecarEventProbe> {
+  if (!sessionDir) return emptySidecarEventProbe()
   try {
     const text = await readFile(join(sessionDir, 'events.ndjson'), 'utf-8')
     let events = 0
     let dataEvents = 0
+    let wfpBlocks = 0
+    let engine: string | null = null
+    let lastDataEventAt: number | null = null
+    const categoryCounts: Record<string, number> = {}
+    const domainCounts = new Map<string, number>()
+    const remoteCounts = new Map<string, number>()
     for (const line of text.split(/\r?\n/)) {
       const trimmed = line.trim()
       if (!trimmed) continue
       events++
+      let row: any
       try {
-        const row = JSON.parse(trimmed)
-        if (row?.category !== 'lifecycle' && row?.category !== 'health') dataEvents++
+        row = JSON.parse(trimmed)
       } catch {
         dataEvents++
+        continue
+      }
+      const category = typeof row?.category === 'string' ? row.category : undefined
+      if (category === 'lifecycle') {
+        if (typeof row?.engine === 'string' && row.engine) engine = row.engine
+        continue
+      }
+      if (category === 'health') continue
+      dataEvents++
+      const key = category || 'other'
+      categoryCounts[key] = (categoryCounts[key] ?? 0) + 1
+      if (category === 'wfp' && (row?.event === 'block' || row?.action === 'block' || row?.action === 'drop')) {
+        wfpBlocks++
+      }
+      if (typeof row?.queryName === 'string' && row.queryName) {
+        domainCounts.set(row.queryName, (domainCounts.get(row.queryName) ?? 0) + 1)
+      }
+      if (typeof row?.remoteAddress === 'string' && row.remoteAddress) {
+        const addr = row?.remotePort ? `${row.remoteAddress}:${row.remotePort}` : row.remoteAddress
+        remoteCounts.set(addr, (remoteCounts.get(addr) ?? 0) + 1)
+      }
+      if (typeof row?.ts === 'string') {
+        const parsed = Date.parse(row.ts)
+        if (Number.isFinite(parsed)) lastDataEventAt = parsed
       }
     }
-    return { events, dataEvents }
+    const topDomains = Array.from(domainCounts.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5)
+      .map(([name, count]) => ({ name, count }))
+    const topRemotes = Array.from(remoteCounts.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5)
+      .map(([address, count]) => ({ address, count }))
+    return { events, dataEvents, engine, categoryCounts, wfpBlocks, topDomains, topRemotes, lastDataEventAt }
   } catch {
-    return { events: 0, dataEvents: 0 }
+    return emptySidecarEventProbe()
   }
 }
 
@@ -386,11 +454,34 @@ async function reconcileStoppedCaptureManifest(
   return next
 }
 
+function emptyHealth(): TrafficForensicsStatus['health'] {
+  return {
+    artifactCount: 0,
+    etlBytes: 0,
+    liveEtlBytes: 0,
+    eventsBytes: 0,
+    liveSnapshotAt: null,
+    sidecarEvents: 0,
+    sidecarDataEvents: 0,
+    sidecarOnlyLifecycle: false,
+    sidecarWarmingUp: false,
+    pktmonStatusBytes: 0,
+    pktmonLiveCountersBytes: 0,
+    sidecarEngine: null,
+    sidecarCategoryCounts: {},
+    sidecarWfpBlocks: 0,
+    sidecarTopDomains: [],
+    sidecarTopRemotes: [],
+    sidecarLastEventAt: null,
+    warnings: []
+  }
+}
+
 function buildTrafficForensicsHealth(
   files: TrafficForensicsArtifactFile[],
   summary: TrafficForensicsStatus['summary'],
   sidecar: SessionManifest['sidecar'] | null,
-  sidecarProbe: { events: number; dataEvents: number },
+  sidecarProbe: SidecarEventProbe,
   startedAt: number | null | undefined
 ): TrafficForensicsStatus['health'] {
   const sidecarEvents = Math.max(Number(summary?.counts?.sidecarEvents ?? 0), sidecarProbe.events)
@@ -421,6 +512,12 @@ function buildTrafficForensicsHealth(
     pktmonStatusBytes: artifactSize(files, 'pktmon-live-status.txt'),
     pktmonLiveCountersBytes: artifactSize(files, 'pktmon-live-counters.json'),
     sidecarDataEvents,
+    sidecarEngine: sidecarProbe.engine,
+    sidecarCategoryCounts: sidecarProbe.categoryCounts,
+    sidecarWfpBlocks: sidecarProbe.wfpBlocks,
+    sidecarTopDomains: sidecarProbe.topDomains,
+    sidecarTopRemotes: sidecarProbe.topRemotes,
+    sidecarLastEventAt: sidecarProbe.lastDataEventAt,
     warnings
   }
 }
@@ -836,7 +933,8 @@ export async function startTrafficForensicsSession(
       summaryGeneratedAt: null,
       summary: null,
       sidecar: null,
-      artifactFiles: []
+      artifactFiles: [],
+      health: emptyHealth()
     }
   }
 
