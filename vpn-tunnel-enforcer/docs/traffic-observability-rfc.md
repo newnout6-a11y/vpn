@@ -165,9 +165,9 @@ Collector 3: app events
 - traffic monitor results
 - sing-box process lifecycle and logs
 
-Collector 4: future real-time ETW sidecar
+Collector 4: real-time ETW sidecar (implemented — `vpnte-etw-sidecar.exe`)
 
-The sidecar should subscribe to high-value providers and write normalized NDJSON
+The sidecar subscribes to high-value providers and writes normalized NDJSON
 events without blocking traffic:
 
 - `Microsoft-Windows-TCPIP`
@@ -176,8 +176,9 @@ events without blocking traffic:
 - `Microsoft-Windows-Winsock-AFD`
 - `Microsoft-Windows-WebIO`
 
-The sidecar can be Rust, C++, or another small native component. Node/Electron
-should control it, not become the ETW parser itself.
+It is a small native Rust component (`native/vpnte-etw-sidecar/`, `ferrisetw`).
+Node/Electron controls its lifecycle and parses the NDJSON it emits, rather than
+becoming the ETW parser itself. See Phase 4 below for the full implementation.
 
 ## Artifact contract
 
@@ -494,7 +495,7 @@ Output:
 
 - Windows evidence can be correlated with app decisions
 
-### Phase 4: real-time ETW sidecar
+### Phase 4: real-time ETW sidecar — implemented
 
 Scope:
 
@@ -506,6 +507,33 @@ Scope:
 Output:
 
 - better timestamp precision and richer TCP/DNS/WFP timelines
+
+Implementation:
+
+- Native Rust binary `vpnte-etw-sidecar.exe` built from
+  `native/vpnte-etw-sidecar/` using the `ferrisetw` crate (a safe wrapper over
+  `StartTrace` / `EnableTraceEx2` / `ProcessTrace` + TDH parsing). Target
+  `x86_64-pc-windows-msvc`, single static executable, no runtime dependency.
+- CLI contract matches `trafficForensics.ts`:
+  `--events <path> --session <id> --providers <csv>`. It opens a real-time trace
+  session named `VPNTE-ETW` (a stable name so an orphan from an abruptly-killed
+  prior run is reclaimed before start, bounding orphans to at most one),
+  enables the requested providers by name (falling back to a known-GUID table),
+  and appends one normalized NDJSON row per event, flushing after each line.
+- Normalization mirrors the previous PowerShell poller's `Convert-Event`:
+  `category` ∈ {`tcp`,`dns`,`wfp`,`afd`,`webio`}; TCP rows carry the 5-tuple
+  (`localAddress`/`localPort`/`remoteAddress`/`remotePort`, decoded from
+  `SOCKADDR`/`IN_ADDR` blobs); DNS rows carry `queryName`/`queryResults`. WFP
+  block/drop events map to `event:"block"`, `reason:"wfp-block-observed"`.
+- Health: a `category:"health"` heartbeat (with `observedEvents`/`dataEvents`
+  counters) every 30s, plus an `event-cap-reached` health row once a per-session
+  data-event cap is hit (back-pressure guard). Only metadata is recorded — never
+  packet payloads (see Privacy).
+- Lifecycle: `category:"lifecycle"` `started`/`stopped` rows; the process exits
+  cleanly when stdin closes (the Electron integration also kills it on stop).
+- The binary is built by `npm run build:sidecar` (invoked automatically by
+  `dist*`) and bundled next to `vpnte-etw-sidecar.ps1` via `electron-builder.yml`.
+  The PowerShell poller remains a fallback for environments without the binary.
 
 ### Phase 5: flow correlation
 

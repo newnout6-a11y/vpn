@@ -1,0 +1,23 @@
+[package]
+name = "vpnte-etw-sidecar"
+version = "1.0.0"
+edition = "2021"
+description = "Native real-time ETW consumer for VPN Tunnel Enforcer traffic forensics"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "vpnte-etw-sidecar"
+path = "src/main.rs"
+
+[dependencies]
+ferrisetw = { version = "1.2.0", features = ["time_rs"] }
+time = { version = "0.3", features = ["formatting"] }
+serde_json = "1.0"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
