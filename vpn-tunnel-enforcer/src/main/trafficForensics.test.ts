@@ -318,6 +318,46 @@ describe('trafficForensics', () => {
     expect(refreshed.health.sidecarLastEventAt).toBe(Date.parse('2026-06-19T00:00:00.000Z'))
   })
 
+  it('does not surface a stopped previous-run session\'s stale ETW data as live', async () => {
+    await resetForensicsState()
+    vi.useFakeTimers()
+    const sidecarPath = 'C:/Users/Redmi/CascadeProjects/vpn/.tmp/vpnte-test-sidecar/vpnte-etw-sidecar.cmd'
+    try {
+      // A session that started long before this process did — i.e. a leftover
+      // from a previous launch or an app reinstall (userData survives uninstall).
+      vi.setSystemTime(new Date('2020-01-01T00:00:00.000Z'))
+      execElevatedMock.mockResolvedValue({ stdout: '', stderr: '' })
+      rmSync(dirname(sidecarPath), { recursive: true, force: true })
+      mkdirSync(dirname(sidecarPath), { recursive: true })
+      writeFileSync(sidecarPath, '@echo off\r\n')
+      process.env.VPNTE_TRAFFIC_FORENSICS_SIDECAR = sidecarPath
+      spawnMock.mockReturnValue(mockChildProcess())
+
+      const status = await startTrafficForensicsSession({ mode: 'directVpn', target: 'poland1' })
+      writeFileSync(
+        join(status.sessionDir!, 'events.ndjson'),
+        [
+          { provider: 'sidecar', category: 'lifecycle', event: 'started', engine: 'ferrisetw-realtime' },
+          { provider: 'Microsoft-Windows-DNS-Client', category: 'dns', event: 'query', queryName: 'youtube.com' },
+          { provider: 'Microsoft-Windows-TCPIP', category: 'tcp', event: 'observed', remoteAddress: '142.250.1.2', remotePort: 443 }
+        ].map(row => JSON.stringify({ ...row, session: status.sessionId })).join('\n') + '\n'
+      )
+      await stopTrafficForensicsSession('test-stop')
+
+      const stopped = await getTrafficForensicsStatus()
+      expect(stopped.running).toBe(false)
+      // The events.ndjson still exists on disk, but because the session predates
+      // this process it must NOT be re-read into the live diagnostics digest.
+      expect(stopped.health.sidecarDataEvents).toBe(0)
+      expect(stopped.health.sidecarCategoryCounts).toEqual({})
+      expect(stopped.health.sidecarTopDomains).toEqual([])
+      expect(stopped.health.sidecarTopRemotes).toEqual([])
+      expect(stopped.health.sidecarEngine).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('clears running status when stop artifacts already exist', async () => {
     await resetForensicsState()
     execElevatedMock.mockResolvedValue({ stdout: '', stderr: '' })
