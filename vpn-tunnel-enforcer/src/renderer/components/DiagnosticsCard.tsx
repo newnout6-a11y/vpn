@@ -104,6 +104,32 @@ export function DiagnosticsCard() {
     ? new Date(forensicsHealth.liveSnapshotAt).toLocaleTimeString('ru-RU')
     : 'none'
 
+  const sidecarEngine: string | null = forensicsHealth?.sidecarEngine ?? null
+  const engineLabel =
+    sidecarEngine === 'ferrisetw-realtime'
+      ? 'ETW real-time'
+      : sidecarEngine === 'powershell-poller'
+        ? 'poller (fallback)'
+        : sidecarEngine ?? '—'
+  const categoryCounts: Record<string, number> = forensicsHealth?.sidecarCategoryCounts ?? {}
+  const categoryOrder = ['tcp', 'dns', 'wfp', 'afd', 'webio', 'udp']
+  const categoryEntries = Object.entries(categoryCounts).sort((a, b) => {
+    const ai = categoryOrder.indexOf(a[0])
+    const bi = categoryOrder.indexOf(b[0])
+    if (ai !== -1 && bi !== -1) return ai - bi
+    if (ai !== -1) return -1
+    if (bi !== -1) return 1
+    return b[1] - a[1]
+  })
+  const topDomains: Array<{ name: string; count: number }> = forensicsHealth?.sidecarTopDomains ?? []
+  const topRemotes: Array<{ address: string; count: number }> = forensicsHealth?.sidecarTopRemotes ?? []
+  const wfpBlocks: number = forensicsHealth?.sidecarWfpBlocks ?? 0
+  const dataEvents: number = forensicsHealth?.sidecarDataEvents ?? 0
+  const lastEventText = forensicsHealth?.sidecarLastEventAt
+    ? new Date(forensicsHealth.sidecarLastEventAt).toLocaleTimeString('ru-RU')
+    : '—'
+  const showSidecarDetails = Boolean(forensicsStatus?.sidecar?.running || dataEvents > 0)
+
   let forensicsDotColor = 'bg-gray-500'
   let forensicsText = 'СБОР ОСТАНОВЛЕН'
   let forensicsTooltip = 'Сбор пакетов остановлен'
@@ -143,15 +169,76 @@ export function DiagnosticsCard() {
               <p className="text-gray-300 font-mono">{liveSnapshotText}</p>
             </div>
             <div className={`rounded border px-2 py-1 ${forensicsHealth?.sidecarOnlyLifecycle ? 'border-warning/40 bg-warning/10' : 'border-surface-lighter/20 bg-surface/40'}`}>
-              <p className="text-gray-500">sidecar</p>
+              <p className="text-gray-500">sidecar · {engineLabel}</p>
               <p className="text-gray-300 font-mono">
-                {forensicsHealth?.sidecarWarmingUp ? 'warming up' : forensicsStatus.sidecar?.running ? 'running' : 'off'} · {forensicsHealth?.sidecarEvents ?? 0} events
+                {forensicsHealth?.sidecarWarmingUp ? 'warming up' : forensicsStatus.sidecar?.running ? 'running' : 'off'} · {dataEvents} data
               </p>
             </div>
             <div className="rounded border border-surface-lighter/20 bg-surface/40 px-2 py-1">
               <p className="text-gray-500">artifacts</p>
               <p className="text-gray-300 font-mono">{forensicsHealth?.artifactCount ?? 0} files</p>
             </div>
+          </div>
+        )}
+        {forensicsStatus && showSidecarDetails && (
+          <div className="mt-2 rounded border border-surface-lighter/20 bg-surface/30 px-2.5 py-2 space-y-2 text-[11px]">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-gray-400 font-medium">Что видит ETW-сборщик</span>
+              <span className="text-gray-500 font-mono">посл. событие: {lastEventText}</span>
+            </div>
+            {categoryEntries.length > 0 ? (
+              <div className="flex flex-wrap gap-1.5">
+                {categoryEntries.map(([cat, count]) => (
+                  <span
+                    key={cat}
+                    className="inline-flex items-center gap-1 rounded bg-surface/60 border border-surface-lighter/20 px-1.5 py-0.5 font-mono text-gray-300"
+                  >
+                    <span className="uppercase text-gray-500">{cat}</span>
+                    {count}
+                  </span>
+                ))}
+                {wfpBlocks > 0 && (
+                  <span className="inline-flex items-center gap-1 rounded bg-danger/10 border border-danger/30 px-1.5 py-0.5 font-mono text-danger">
+                    <span className="uppercase">wfp-block</span>
+                    {wfpBlocks}
+                  </span>
+                )}
+              </div>
+            ) : (
+              <p className="text-gray-500">
+                {forensicsHealth?.sidecarWarmingUp ? 'прогрев — события вот-вот пойдут…' : 'пока нет data-событий'}
+              </p>
+            )}
+            {(topDomains.length > 0 || topRemotes.length > 0) && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+                {topDomains.length > 0 && (
+                  <div>
+                    <p className="text-gray-500 mb-0.5">Топ доменов (DNS)</p>
+                    <ul className="space-y-0.5">
+                      {topDomains.map((d) => (
+                        <li key={d.name} className="flex justify-between gap-2 font-mono text-gray-300">
+                          <span className="truncate">{d.name}</span>
+                          <span className="text-gray-500">{d.count}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {topRemotes.length > 0 && (
+                  <div>
+                    <p className="text-gray-500 mb-0.5">Топ эндпоинтов</p>
+                    <ul className="space-y-0.5">
+                      {topRemotes.map((r) => (
+                        <li key={r.address} className="flex justify-between gap-2 font-mono text-gray-300">
+                          <span className="truncate">{r.address}</span>
+                          <span className="text-gray-500">{r.count}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
         {forensicsHealth?.warnings?.length > 0 && (

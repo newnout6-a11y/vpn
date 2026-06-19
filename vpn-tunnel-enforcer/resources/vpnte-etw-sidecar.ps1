@@ -99,6 +99,7 @@ Write-NdjsonEvent @{
   provider = 'sidecar'
   category = 'lifecycle'
   event = 'started'
+  engine = 'powershell-poller'
   providers = $Providers
   eventsPath = $Events
 }

@@ -309,6 +309,13 @@ describe('trafficForensics', () => {
     expect(refreshed.health.sidecarWarmingUp).toBe(false)
     expect(refreshed.health.sidecarOnlyLifecycle).toBe(false)
     expect(refreshed.health.warnings).toEqual([])
+    // Rich diagnostics derived from the native ETW stream for the UI.
+    expect(refreshed.health.sidecarEngine).toBe('ferrisetw-realtime')
+    expect(refreshed.health.sidecarCategoryCounts).toEqual({ tcp: 1, dns: 1, wfp: 1 })
+    expect(refreshed.health.sidecarWfpBlocks).toBe(1)
+    expect(refreshed.health.sidecarTopDomains).toEqual([{ name: 'youtube.com', count: 1 }])
+    expect(refreshed.health.sidecarTopRemotes).toContainEqual({ address: '142.250.1.2:443', count: 1 })
+    expect(refreshed.health.sidecarLastEventAt).toBe(Date.parse('2026-06-19T00:00:00.000Z'))
   })
 
   it('clears running status when stop artifacts already exist', async () => {
