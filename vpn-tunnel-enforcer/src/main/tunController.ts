@@ -30,7 +30,7 @@ import {
   type VpnProfile
 } from './vpnProfiles'
 import type { ClientDevice } from '../shared/ipc-types'
-import { TUN_ADAPTER_ALIAS, TUN_IPV4_ADDRESS_CIDR, TUN_IPV6_ADDRESS_CIDR, TUN_IPV4_RESOLVER, TUN_IPV4_PREFIX, TUN_INTERFACE_METRIC, isOwnTunAddress, ALL_KNOWN_ALIASES } from './tunAdapter'
+import { TUN_ADAPTER_ALIAS, TUN_IPV4_ADDRESS_CIDR, TUN_IPV4_RESOLVER, TUN_IPV4_PREFIX, TUN_INTERFACE_METRIC, isOwnTunAddress, ALL_KNOWN_ALIASES } from './tunAdapter'
 import { ipMonitor } from './ipMonitor'
 import { cancelLeakSelfTest } from './leakSelfTest'
 import { startCompetingTunWatch, stopCompetingTunWatch } from './competingTunDetector'
@@ -841,11 +841,25 @@ export function generateSingboxConfig(
         type: 'tun',
         tag: 'tun-in',
         interface_name: TUN_ADAPTER_ALIAS,
-        address: [TUN_IPV4_ADDRESS_CIDR, TUN_IPV6_ADDRESS_CIDR],
+        // IPv4-only TUN. We deliberately do NOT give the TUN an IPv6 address
+        // or capture IPv6 (no ::/1, 8000::/1 in route_address). Reason: the
+        // whole stack is already IPv4-only — DNS strategy is ipv4_only and the
+        // firewall kill-switch's LAN bypass is IPv4-only (it assumes IPv6 is
+        // disabled). If the TUN advertises IPv6, Windows tells apps "IPv6 is
+        // available" and Chrome/Yandex try YouTube/Google over IPv6 first
+        // (Happy Eyeballs, using their own DoH so our ipv4_only DNS can't stop
+        // them). Those IPv6 packets are then silently dropped by the WFP
+        // kill-switch, so the browser waits the full Happy-Eyeballs timeout
+        // (~5-10s) before falling back to IPv4 — exactly the "YouTube hangs
+        // then springs to life" symptom. With no IPv6 on the TUN, apps see no
+        // IPv6 route and go straight to IPv4. IPv6 leak prevention is handled
+        // by the kill-switch (blocks all outbound IPv6) and adapter lockdown
+        // (disables IPv6 on physical NICs), not by black-holing it in the TUN.
+        address: [TUN_IPV4_ADDRESS_CIDR],
         mtu: tunMtu,
         auto_route: true,
         strict_route: true,
-        route_address: ['0.0.0.0/1', '128.0.0.0/1', '::/1', '8000::/1'],
+        route_address: ['0.0.0.0/1', '128.0.0.0/1'],
         stack: 'gvisor'
       },
       {
@@ -899,8 +913,7 @@ export function generateSingboxConfig(
         // own domain rules (explicit overrides win) and BEFORE private/catch-
         // all. Empty when the feature is off.
         ...smartRouteRouteRules,
-        { ip_cidr: privateRanges, outbound: 'direct-out' },
-        { ip_cidr: ['::/0'], action: 'reject', method: 'default', no_drop: true }
+        { ip_cidr: privateRanges, outbound: 'direct-out' }
       ],
       // Rule-sets for smart RU split (geoip-ru + geosite gov-ru). Loaded
       // LOCALLY from bundled .srs files (type: local) so a slow/blocked GitHub
@@ -1039,9 +1052,8 @@ async function waitForTunInterface(timeoutMs = 5000): Promise<boolean> {
  * Metric 5 is well below typical wired (5-10) and Wi-Fi (35-50) auto values
  * but high enough to lose to localhost (1) and explicit user overrides.
  *
- * IPv6 metric is set the same way for symmetry — even though our adapter
- * lockdown disables IPv6 on physical adapters in many configs, the TUN
- * adapter itself carries IPv6 routes and they should also win.
+ * IPv4-only: the TUN no longer carries IPv6 routes (see the tun inbound
+ * config), so we only set the IPv4 interface metric here.
  *
  * Best-effort: if the call fails (PowerShell unavailable, adapter alias
  * not found), we log a warning but don't fail the start. The leak window
@@ -1060,12 +1072,6 @@ try {
   Write-Host 'ipv4:set'
 } catch {
   Write-Host "ipv4:err: $_"
-}
-try {
-  Set-NetIPInterface -InterfaceAlias $alias -AddressFamily IPv6 -InterfaceMetric ${TUN_INTERFACE_METRIC} -ErrorAction Stop
-  Write-Host 'ipv6:set'
-} catch {
-  Write-Host "ipv6:err: $_"
 }
 `
     const stdout = await runPowerShell(script, 8000, true)
