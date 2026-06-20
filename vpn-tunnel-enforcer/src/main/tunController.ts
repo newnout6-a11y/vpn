@@ -840,7 +840,7 @@ export function generateSingboxConfig(
         auto_route: true,
         strict_route: true,
         route_address: ['0.0.0.0/1', '128.0.0.0/1', '::/1', '8000::/1'],
-        stack: 'system'
+        stack: 'gvisor'
       },
       {
         type: 'mixed',

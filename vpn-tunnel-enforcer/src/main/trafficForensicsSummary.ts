@@ -256,12 +256,25 @@ function firstLineMatch(text: string, patterns: RegExp[]): string | undefined {
   return lines.find(line => patterns.some(pattern => pattern.test(line)))
 }
 
-function looksTunnel(value: string): boolean {
-  return /wintun|wireguard|tun\b|tunnel|vpn|sing-box|vpnte/i.test(value)
+function looksTunnel(value: string, tunnelAliases?: Set<string>): boolean {
+  if (/wintun|wireguard|tun\b|tunnel|vpn|sing-box|vpnte/i.test(value)) {
+    return true
+  }
+  if (tunnelAliases) {
+    const lower = value.toLowerCase()
+    for (const alias of tunnelAliases) {
+      if (lower.includes(alias)) {
+        return true
+      }
+    }
+  }
+  return false
 }
 
-function looksPhysical(value: string): boolean {
-  return /ethernet|wi-?fi|wireless|realtek|intel|qualcomm|mediatek|killer|physical|lan/i.test(value) && !looksTunnel(value)
+function looksPhysical(value: string, tunnelAliases?: Set<string>): boolean {
+  if (looksTunnel(value, tunnelAliases)) return false
+  if (/vethernet|hyper-?v|wsl|virtual switch|vmware|virtualbox|docker/i.test(value)) return false
+  return /ethernet|wi-?fi|wireless|realtek|intel|qualcomm|mediatek|killer|physical|lan/i.test(value)
 }
 
 function parseSnapshotRows(text: string): any[] {
@@ -284,7 +297,7 @@ function recordValues(record: any): string {
     .join(' ')
 }
 
-function extractLeakSignals(artifact: string, text: string, timestamp: number): LeakSignal[] {
+function extractLeakSignals(artifact: string, text: string, timestamp: number, tunnelAliases?: Set<string>): LeakSignal[] {
   const signals: LeakSignal[] = []
   const rows = parseSnapshotRows(text)
   for (const row of rows) {
@@ -292,7 +305,7 @@ function extractLeakSignals(artifact: string, text: string, timestamp: number): 
     const lowerArtifact = artifact.toLowerCase()
     const isDnsArtifact = lowerArtifact.includes('dns-client-servers') || lowerArtifact.includes('dns-client') || lowerArtifact.includes('ipconfig')
     const isRouteArtifact = lowerArtifact.includes('routes') || lowerArtifact.includes('route-print') || lowerArtifact.includes('interfaces')
-    if (isDnsArtifact && (lowerArtifact.includes('dns-client-servers') || /server|resolver|dns/i.test(values)) && looksPhysical(values)) {
+    if (isDnsArtifact && (lowerArtifact.includes('dns-client-servers') || /server|resolver|dns/i.test(values)) && looksPhysical(values, tunnelAliases)) {
       signals.push({
         key: 'dnsLeakDetected',
         ref: {
@@ -302,7 +315,7 @@ function extractLeakSignals(artifact: string, text: string, timestamp: number): 
         }
       })
     }
-    if (isRouteArtifact && /0\.0\.0\.0\/0|::\/0|default|destinationprefix/i.test(values) && looksPhysical(values)) {
+    if (isRouteArtifact && /0\.0\.0\.0\/0|::\/0|default|destinationprefix/i.test(values) && looksPhysical(values, tunnelAliases)) {
       signals.push({
         key: 'trafficLeakDetected',
         ref: {
@@ -312,7 +325,7 @@ function extractLeakSignals(artifact: string, text: string, timestamp: number): 
         }
       })
     }
-    if (isRouteArtifact && /0\.0\.0\.0\/0|::\/0|default|destinationprefix/i.test(values) && looksTunnel(values)) {
+    if (isRouteArtifact && /0\.0\.0\.0\/0|::\/0|default|destinationprefix/i.test(values) && looksTunnel(values, tunnelAliases)) {
       signals.push({
         key: 'trafficLeakDetected',
         ref: {
@@ -845,6 +858,30 @@ export async function generateTrafficForensicsSummary(manifest: TrafficForensics
   }
 
   const files = await listTrafficForensicsArtifacts(manifest.sessionDir)
+  const tunnelAliases = new Set<string>()
+  for (const file of files) {
+    if (file.name.includes('adapters') && file.name.endsWith('.txt')) {
+      try {
+        const text = await readTextIfExists(join(manifest.sessionDir, file.name))
+        if (text) {
+          const rows = parseJsonArray(text)
+          for (const row of rows) {
+            const alias = row.InterfaceAlias ?? row.Name ?? row.Value
+            const desc = row.InterfaceDescription ?? row.Description ?? row.Name
+            if (typeof alias === 'string' && typeof desc === 'string') {
+              const isTunnel = /wintun|wireguard|tun\b|tunnel|vpn|sing-box|vpnte/i.test(desc) || /wintun|wireguard|tun\b|tunnel|vpn|sing-box|vpnte/i.test(alias)
+              if (isTunnel) {
+                tunnelAliases.add(alias.trim().toLowerCase())
+              }
+            }
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }
+  }
+
   const artifactNames = new Set(files.map(file => file.name))
   for (const expected of expectedArtifactsFor(manifest)) {
     if (!artifactNames.has(expected)) {
@@ -993,7 +1030,7 @@ export async function generateTrafficForensicsSummary(manifest: TrafficForensics
       }
     }
 
-    for (const signal of extractLeakSignals(artifact.name, text, artifact.mtimeMs || generatedAt)) {
+    for (const signal of extractLeakSignals(artifact.name, text, artifact.mtimeMs || generatedAt, tunnelAliases)) {
       addEvidence(evidence, signal.key, signal.ref)
       appEvents.push({
         timestamp: artifact.mtimeMs || generatedAt,

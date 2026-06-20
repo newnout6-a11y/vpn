@@ -39,7 +39,7 @@ import { notify, setInAppFallbackCallback } from './notifications'
 import { exportDiagnosticsZip } from './diagnosticsExport'
 import { captureSnapshot, getSnapshotsDir, startPeriodicSnapshots, stopPeriodicSnapshots } from './systemSnapshot'
 import { runLeakSelfTest, startPeriodicLeakTest, stopPeriodicLeakTest, setLeakDetectedCallback, startNetworkChangeWatcher, stopNetworkChangeWatcher } from './leakSelfTest'
-import { getTrafficForensicsStatus, startTrafficForensicsSession, stopTrafficForensicsSession } from './trafficForensics'
+import { getTrafficForensicsStatus, restartTrafficForensicsSession, startTrafficForensicsSession, stopTrafficForensicsSession } from './trafficForensics'
 import { trafficMonitor, type TrafficStats } from './trafficMonitor'
 import { applyBrowserLeakProtection, rollbackBrowserLeakProtection } from './browserHardening'
 import { resolveVpnProfile, resolveVpnProfiles, redactSensitiveConfig, type VpnProfile } from './vpnProfiles'
@@ -1263,6 +1263,10 @@ app.whenReady().then(async () => {
 
   handleLogged('get-traffic-forensics-status', async () => {
     return getTrafficForensicsStatus()
+  })
+
+  handleLogged('restart-traffic-forensics', async () => {
+    return restartTrafficForensicsSession('manual-ui-restart')
   })
 
   // ─── V2 Feature Module Registration ──────────────────────────────────────────

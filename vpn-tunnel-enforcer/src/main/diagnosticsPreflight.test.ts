@@ -137,9 +137,9 @@ describe('Diagnostics Preflight', () => {
       expect(script).toContain('traffic-forensics-stop-errors.txt')
       
       // Telemetry (just checking a few key ones)
-      expect(script).toContain('nettcp-live.txt')
-      expect(script).toContain('routes-live.txt')
-      expect(script).toContain('dns-cache-live.txt')
+      expect(script).toContain('nettcp-stop.txt')
+      expect(script).toContain('routes-stop.txt')
+      expect(script).toContain('dns-cache-stop.txt')
     })
   })
 

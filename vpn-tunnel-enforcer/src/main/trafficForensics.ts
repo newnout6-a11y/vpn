@@ -130,25 +130,25 @@ function bestEffortPowerShellScript(errorPath: string, commands: Array<{ label: 
   ].join('; ')
 }
 
-export function telemetrySnapshotCommands(sessionDir: string): string[] {
-  const tcpPath = join(sessionDir, 'nettcp-live.txt')
-  const udpPath = join(sessionDir, 'netudp-live.txt')
-  const ipConfigPath = join(sessionDir, 'ipconfig-live.txt')
-  const routesPath = join(sessionDir, 'routes-live.txt')
-  const routePrintPath = join(sessionDir, 'route-print-live.txt')
-  const arpPath = join(sessionDir, 'arp-live.txt')
-  const dnsCachePath = join(sessionDir, 'dns-cache-live.txt')
-  const netstatPath = join(sessionDir, 'netstat-live.txt')
-  const adaptersPath = join(sessionDir, 'adapters-live.txt')
-  const adapterStatsPath = join(sessionDir, 'adapter-stats-live.txt')
-  const interfacePath = join(sessionDir, 'interfaces-live.txt')
-  const dnsClientServerPath = join(sessionDir, 'dns-client-servers-live.txt')
-  const dnsClientPath = join(sessionDir, 'dns-client-live.txt')
-  const firewallPath = join(sessionDir, 'firewall-rules-live.txt')
-  const firewallProfilePath = join(sessionDir, 'firewall-profiles-live.txt')
-  const dnsEventsPath = join(sessionDir, 'dnsclient-events-live.txt')
-  const tcpEventsPath = join(sessionDir, 'tcpip-events-live.txt')
-  const chromeNetPath = join(sessionDir, 'chromium-policy-live.txt')
+export function telemetrySnapshotCommands(sessionDir: string, suffix: string = 'live'): string[] {
+  const tcpPath = join(sessionDir, `nettcp-${suffix}.txt`)
+  const udpPath = join(sessionDir, `netudp-${suffix}.txt`)
+  const ipConfigPath = join(sessionDir, `ipconfig-${suffix}.txt`)
+  const routesPath = join(sessionDir, `routes-${suffix}.txt`)
+  const routePrintPath = join(sessionDir, `route-print-${suffix}.txt`)
+  const arpPath = join(sessionDir, `arp-${suffix}.txt`)
+  const dnsCachePath = join(sessionDir, `dns-cache-${suffix}.txt`)
+  const netstatPath = join(sessionDir, `netstat-${suffix}.txt`)
+  const adaptersPath = join(sessionDir, `adapters-${suffix}.txt`)
+  const adapterStatsPath = join(sessionDir, `adapter-stats-${suffix}.txt`)
+  const interfacePath = join(sessionDir, `interfaces-${suffix}.txt`)
+  const dnsClientServerPath = join(sessionDir, `dns-client-servers-${suffix}.txt`)
+  const dnsClientPath = join(sessionDir, `dns-client-${suffix}.txt`)
+  const firewallPath = join(sessionDir, `firewall-rules-${suffix}.txt`)
+  const firewallProfilePath = join(sessionDir, `firewall-profiles-${suffix}.txt`)
+  const dnsEventsPath = join(sessionDir, `dnsclient-events-${suffix}.txt`)
+  const tcpEventsPath = join(sessionDir, `tcpip-events-${suffix}.txt`)
+  const chromeNetPath = join(sessionDir, `chromium-policy-${suffix}.txt`)
 
   return [
     `Get-NetTCPConnection | Sort-Object State, RemotePort, RemoteAddress | ConvertTo-Json -Depth 4 | Out-File -FilePath ${quoted(tcpPath)} -Encoding utf8`,
@@ -745,15 +745,32 @@ function stopSidecar(manifest: SessionManifest, reason: string): SessionManifest
 }
 
 async function pruneOldSessions(keep: number, currentSessionId?: string | null): Promise<void> {
-  await ensureLayout()
-  const entries = await readdir(getSessionsDir(), { withFileTypes: true })
-  const dirs = entries
-    .filter((entry) => entry.isDirectory())
-    .map((entry) => entry.name)
-    .sort((a, b) => b.localeCompare(a))
+  try {
+    await ensureLayout()
+    const entries = await readdir(getSessionsDir(), { withFileTypes: true })
+    const dirs = entries
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort((a, b) => b.localeCompare(a))
 
-  const removable = dirs.filter((name) => name !== currentSessionId).slice(Math.max(0, keep - (currentSessionId ? 1 : 0)))
-  await Promise.all(removable.map((name) => rm(join(getSessionsDir(), name), { recursive: true, force: true })))
+    const removable = dirs.filter((name) => name !== currentSessionId).slice(Math.max(0, keep - (currentSessionId ? 1 : 0)))
+    for (const name of removable) {
+      const dirPath = join(getSessionsDir(), name)
+      try {
+        await rm(dirPath, { recursive: true, force: true })
+      } catch (err: any) {
+        logEvent('warn', 'traffic-forensics', 'failed to prune old traffic-forensics session', {
+          sessionId: name,
+          path: dirPath,
+          error: err?.message || String(err)
+        })
+      }
+    }
+  } catch (err: any) {
+    logEvent('warn', 'traffic-forensics', 'failed to list or prune sessions', {
+      error: err?.message || String(err)
+    })
+  }
 }
 
 export function buildPktmonStartScript(etlPath: string, sizeMb: number): string {
@@ -798,7 +815,7 @@ export function buildPktmonStopScript(sessionDir: string, etlPath: string): stri
     { label: 'pktmon-etl2pcap', command: `if (Test-Path ${quoted(etlPath)}) { pktmon etl2pcap ${quoted(etlPath)} --out ${quoted(pcapPath)} | Out-Null }` },
     { label: 'wfp-netevents', command: `netsh wfp show netevents file=${quoted(wfpEventsPath)} timewindow=900 | Out-Null` },
     { label: 'wfp-state', command: `netsh wfp show state file=${quoted(wfpStatePath)} | Out-Null` },
-    ...telemetrySnapshotCommands(sessionDir).map((command, index) => ({ label: `telemetry-${index + 1}`, command }))
+    ...telemetrySnapshotCommands(sessionDir, 'stop').map((command, index) => ({ label: `telemetry-${index + 1}`, command }))
   ])
 }
 
@@ -818,7 +835,7 @@ export function buildPktmonLiveSnapshotScript(sessionDir: string, etlPath: strin
     { label: 'pktmon-live-etl-copy', command: `if (Test-Path ${quoted(etlPath)}) { Copy-Item -LiteralPath ${quoted(etlPath)} -Destination ${quoted(snapshotEtlPath)} -Force }` },
     { label: 'wfp-live-netevents', command: `netsh wfp show netevents file=${quoted(wfpEventsPath)} timewindow=900 | Out-Null` },
     { label: 'wfp-live-state', command: `netsh wfp show state file=${quoted(wfpStatePath)} | Out-Null` },
-    ...telemetrySnapshotCommands(sessionDir).map((command, index) => ({ label: `telemetry-live-${index + 1}`, command }))
+    ...telemetrySnapshotCommands(sessionDir, 'live').map((command, index) => ({ label: `telemetry-live-${index + 1}`, command }))
   ])
 }
 
@@ -1107,6 +1124,22 @@ export async function stopTrafficForensicsSession(reason: string): Promise<Traff
   })
 }
 
+export async function restartTrafficForensicsSession(reason = 'manual-restart'): Promise<TrafficForensicsStatus> {
+  const current = await readLatestManifest()
+  const mode = current?.mode
+  const target = current?.target
+  await stopTrafficForensicsSession(reason).catch(err => {
+    logEvent('warn', 'traffic-forensics', 'forced traffic-forensics restart hit stop error', {
+      reason,
+      error: (err as Error)?.message || String(err)
+    })
+  })
+  if ((mode !== 'localProxy' && mode !== 'directVpn') || !target) {
+    return getTrafficForensicsStatus()
+  }
+  return startTrafficForensicsSession({ mode, target })
+}
+
 export async function getTrafficForensicsStatus(): Promise<TrafficForensicsStatus> {
   const settings = getSettings()
   let manifest = await reconcileStaleRunningManifest(await readLatestManifest())
@@ -1148,11 +1181,37 @@ export async function getTrafficForensicsStatus(): Promise<TrafficForensicsStatu
   }
 }
 
+async function copyDirBestEffort(src: string, dest: string): Promise<void> {
+  const SKIP_FOR_EXPORT = /\.(etl|pcapng)(\.tmp)?$|^pktmon-trace\.txt$/i
+  await mkdir(dest, { recursive: true })
+  const entries = await readdir(src, { withFileTypes: true })
+  for (const entry of entries) {
+    const srcPath = join(src, entry.name)
+    const destPath = join(dest, entry.name)
+    if (entry.isDirectory()) {
+      await copyDirBestEffort(srcPath, destPath).catch((err: any) => {
+        logEvent('warn', 'traffic-forensics', `failed to stage directory: ${entry.name}`, {
+          error: err?.message || String(err)
+        })
+      })
+    } else {
+      if (SKIP_FOR_EXPORT.test(entry.name)) continue
+      await cp(srcPath, destPath, { force: true }).catch((err: any) => {
+        logEvent('warn', 'traffic-forensics', `failed to stage file: ${entry.name}`, {
+          error: err?.message || String(err)
+        })
+      })
+    }
+  }
+}
+
 export async function stageTrafficForensicsArtifacts(stageDir: string): Promise<boolean> {
   const rootDir = getRootDir()
   if (!existsSync(rootDir)) return false
+  const settings = getSettings()
   await refreshTrafficForensicsArtifacts()
   const manifest = await readLatestManifest()
+  await pruneOldSessions(settings.retainSessions, manifest?.sessionId)
   if (manifest?.sessionDir) {
     const next = await generateTrafficForensicsSummary(manifest).catch((err: any) => ({
       ...manifest,
@@ -1164,9 +1223,10 @@ export async function stageTrafficForensicsArtifacts(stageDir: string): Promise<
     await writeManifest(next)
   }
   await mkdir(stageDir, { recursive: true })
-  await cp(rootDir, join(stageDir, 'traffic-forensics'), {
-    recursive: true,
-    force: true
+  await copyDirBestEffort(rootDir, join(stageDir, 'traffic-forensics')).catch((err: any) => {
+    logEvent('warn', 'traffic-forensics', 'failed to complete traffic forensics staging', {
+      error: err?.message || String(err)
+    })
   })
   return true
 }

@@ -55,6 +55,7 @@ export interface ElectronAPI {
   }>
   openSnapshotsFolder: () => Promise<{ success: boolean; path?: string; error?: string }>
   getTrafficForensicsStatus: () => Promise<any>
+  restartTrafficForensics: () => Promise<any>
   // Config Import/Export
   configExport: () => Promise<{ success: boolean; path?: string; error?: string }>
   configBrowseImport: () => Promise<string | null>
@@ -278,6 +279,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   runRoutingSelfTest: () => ipcRenderer.invoke('run-routing-self-test'),
   openSnapshotsFolder: () => ipcRenderer.invoke('open-snapshots-folder'),
   getTrafficForensicsStatus: () => ipcRenderer.invoke('get-traffic-forensics-status'),
+  restartTrafficForensics: () => ipcRenderer.invoke('restart-traffic-forensics'),
   // Split Tunneling
   splitTunnelGetApps: () => ipcRenderer.invoke('split-tunnel:get-apps'),
   splitTunnelGetConfig: () => ipcRenderer.invoke('split-tunnel:get-config'),

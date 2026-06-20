@@ -8,6 +8,7 @@
 // and packaging continues with the PowerShell fallback.
 import { spawnSync } from 'child_process'
 import { copyFileSync, existsSync, mkdirSync } from 'fs'
+import { homedir } from 'os'
 import { dirname, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
 
@@ -16,6 +17,10 @@ const crateDir = join(root, 'native', 'vpnte-etw-sidecar')
 const builtExe = join(crateDir, 'target', 'release', 'vpnte-etw-sidecar.exe')
 const destDir = join(root, 'resources')
 const destExe = join(destDir, 'vpnte-etw-sidecar.exe')
+const cargoCandidates = [
+  'cargo',
+  join(homedir(), '.cargo', 'bin', process.platform === 'win32' ? 'cargo.exe' : 'cargo')
+]
 
 function warn(message) {
   console.warn(`[build-sidecar] ${message}`)
@@ -26,7 +31,11 @@ if (process.platform !== 'win32') {
   process.exit(0)
 }
 
-const cargoProbe = spawnSync('cargo', ['--version'], { stdio: 'ignore', shell: true })
+const cargoPath = cargoCandidates.find((candidate) => {
+  const probe = spawnSync(candidate, ['--version'], { stdio: 'ignore', shell: true })
+  return probe.status === 0
+})
+const cargoProbe = cargoPath ? { status: 0 } : { status: 1 }
 if (cargoProbe.status !== 0) {
   warn('cargo (Rust toolchain) not found on PATH; skipping native ETW sidecar build (PowerShell fallback will be used).')
   warn('Install it via https://rustup.rs (target x86_64-pc-windows-msvc) to ship the native sidecar.')
@@ -34,7 +43,7 @@ if (cargoProbe.status !== 0) {
 }
 
 console.log('[build-sidecar] building native ETW sidecar (cargo build --release)...')
-const build = spawnSync('cargo', ['build', '--release'], {
+const build = spawnSync(cargoPath, ['build', '--release'], {
   cwd: crateDir,
   stdio: 'inherit',
   shell: true

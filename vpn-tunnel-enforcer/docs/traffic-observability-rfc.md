@@ -257,6 +257,11 @@ Lifecycle invariant:
   `pktmon-trace.*`, or equivalent stop outputs already exist, the status read
   must finalize the session as stopped. A stale manifest must not keep the UI
   badge on "packet collection" after capture has stopped.
+- Old session pruning is best-effort only. A locked historical `pktmon.etl`
+  must be logged as cleanup debt, but it must not fail a new capture start.
+- Diagnostics export must be self-consistent: `latest-session.json` must not
+  point at a session directory that is missing from the exported
+  `traffic-forensics/sessions/` tree.
 
 ### `timeline.ndjson`
 

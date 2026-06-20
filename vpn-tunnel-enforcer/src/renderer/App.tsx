@@ -61,6 +61,7 @@ declare global {
       openLogFolder: () => Promise<string>
       exportDiagnostics: () => Promise<{ success: boolean; path?: string; error?: string; cancelled?: boolean }>
       getTrafficForensicsStatus: () => Promise<{ running: boolean, lastError: string | null }>
+      restartTrafficForensics: () => Promise<any>
       runLeakSelfTest: () => Promise<LeakSelfTestResult>
       runRoutingSelfTest: () => Promise<{
         ranAt: number

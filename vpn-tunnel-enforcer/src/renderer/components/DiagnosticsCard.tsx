@@ -1,23 +1,15 @@
 import { useEffect, useState } from 'react'
 import { useAppStore, type LeakSelfTestResultClient } from '../store'
-import { AlertTriangle, CheckCircle2, FileArchive, FolderOpen, Loader2, Radar, Send, ShieldAlert } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, FileArchive, FolderOpen, Loader2, Radar, RefreshCw, Send, ShieldAlert } from 'lucide-react'
 
 /**
  * The "everything you need to debug a not-working app" surface.
  *
- * Three buttons:
- *   1. Активная проверка утечки  — runs the curl-bound-to-physical-adapter
- *      probe and tells the user RIGHT NOW if the kill-switch is sealing
- *      the physical interface.
- *   2. Открыть папку снимков — opens File Explorer at the snapshots dir so
- *      the user can see what's being captured.
- *   3. Отправить логи разработчику — bundles app log, sing-box log,
- *      manifests, all snapshots, system info into one ZIP and opens
- *      Explorer at the file. The user just drags the ZIP into the chat.
- *
- * Plus: rolling display of the most recent leak self-test result and the
- * most recent uncaught error caught by main process (so the user can see
- * "the app didn't crash but something happened").
+ * Three primary actions:
+ *   1. Active leak test: checks whether the physical adapter can still reach
+ *      the internet outside the tunnel.
+ *   2. Open snapshots folder: shows the raw captured artifacts.
+ *   3. Export diagnostics: bundles logs and artifacts into a ZIP for support.
  */
 export function DiagnosticsCard() {
   const leakResult = useAppStore((s) => s.leakSelfTestResult)
@@ -27,8 +19,18 @@ export function DiagnosticsCard() {
 
   const [testing, setTesting] = useState(false)
   const [exporting, setExporting] = useState(false)
+  const [restartingForensics, setRestartingForensics] = useState(false)
   const [exportPath, setExportPath] = useState<string | null>(null)
   const [forensicsStatus, setForensicsStatus] = useState<any>(null)
+
+  const checkForensicsStatus = async () => {
+    try {
+      const status = await window.electronAPI.getTrafficForensicsStatus()
+      setForensicsStatus(status)
+    } catch (err) {
+      // Status is best-effort UI telemetry; the export button remains usable.
+    }
+  }
 
   useEffect(() => {
     let mounted = true
@@ -60,6 +62,25 @@ export function DiagnosticsCard() {
       addLog('error', `Не удалось запустить проверку утечки: ${err.message ?? err}`)
     } finally {
       setTesting(false)
+    }
+  }
+
+  const handleRestartForensics = async () => {
+    setRestartingForensics(true)
+    addLog('info', 'Перезапускаю сбор пакетов и ETW-логи…')
+    try {
+      const status = await window.electronAPI.restartTrafficForensics()
+      setForensicsStatus(status)
+      if (status?.running) {
+        addLog('info', 'Сбор пакетов перезапущен.')
+      } else {
+        addLog('warn', `Сбор пакетов не запустился: ${status?.lastError ?? 'нет активного VPN-контекста'}`)
+      }
+    } catch (err: any) {
+      addLog('error', `Не удалось перезапустить сбор пакетов: ${err.message ?? err}`)
+    } finally {
+      setRestartingForensics(false)
+      await checkForensicsStatus()
     }
   }
 
@@ -252,7 +273,15 @@ export function DiagnosticsCard() {
         </p>
       </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+      <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
+        <button
+          onClick={handleRestartForensics}
+          disabled={restartingForensics}
+          className="btn-secondary flex items-center justify-center gap-2 text-sm disabled:opacity-50"
+        >
+          {restartingForensics ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+          Перезапустить сбор
+        </button>
         <button
           onClick={handleSelfTest}
           disabled={testing}
