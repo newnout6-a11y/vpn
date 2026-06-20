@@ -64,6 +64,13 @@ pub fn derive_event_and_reason(category: &str, kind: &str, opcode: &str) -> (Str
         "tcp" => {
             if contains_any(kind, &["reset", "rst"]) {
                 ("reset".to_string(), Some("reset-observed".to_string()))
+            } else if kind.contains("taillossprobe") {
+                // A Tail Loss Probe (TLP) is a *proactive* probe TCP sends when
+                // an ACK is outstanding, to avoid waiting for a full RTO. It
+                // fires routinely on perfectly healthy connections and despite
+                // the "loss" in its name is NOT a retransmission or packet loss,
+                // so it must not be reported as one.
+                ("observed".to_string(), None)
             } else if contains_any(kind, &["timeout", "retrans", "retransmit", "loss"]) {
                 ("loss".to_string(), Some("timeout-or-retransmit-observed".to_string()))
             } else if contains_any(kind, &["mtu", "fragment", "packet too big"]) {
@@ -97,6 +104,13 @@ pub fn is_significant(category: &str, task: &str) -> bool {
     // Connection rundown / capture-state enumeration is pure noise for a live
     // timeline regardless of provider.
     if task.contains("rundown") {
+        return false;
+    }
+    // Tail Loss Probe fires routinely on healthy connections and is by far the
+    // highest-volume TCPIP task in the field (it alone can be ~98% of rows and
+    // slams the data-event cap). It is a proactive probe, not a fault, so drop
+    // it instead of mislabeling every probe as a retransmission.
+    if task.contains("taillossprobe") {
         return false;
     }
     match category {
@@ -189,12 +203,34 @@ mod tests {
     }
 
     #[test]
+    fn tail_loss_probe_is_not_a_retransmit() {
+        // TLP carries "loss" in its name but is a proactive probe, not a fault:
+        // it must never be reported as a retransmission/timeout.
+        let (event, reason) = derive_event_and_reason("tcp", "tcpip tcptaillossprobe", "");
+        assert_eq!(event, "observed");
+        assert_eq!(reason, None);
+
+        // Genuine loss-recovery / retransmit tasks are still classified as loss.
+        assert_eq!(
+            derive_event_and_reason("tcp", "tcpip tcplossrecoverysend", "").1.as_deref(),
+            Some("timeout-or-retransmit-observed")
+        );
+        assert_eq!(
+            derive_event_and_reason("tcp", "tcpip tcpdatatransferretransmitround", "").1.as_deref(),
+            Some("timeout-or-retransmit-observed")
+        );
+    }
+
+    #[test]
     fn drops_rundown_and_data_path_noise_keeps_connection_events() {
         // Matching is on the task name only. The biggest noise sources observed
         // in the field (real ETW task names):
         assert!(!is_significant("tcp", "tcpconnectionrundown"));
         assert!(!is_significant("tcp", "tcpdatatransferreceive"));
         assert!(!is_significant("tcp", "tcpdatatransfersend"));
+        // Tail Loss Probe is proactive, fires on healthy connections, and is the
+        // single highest-volume task — drop it so it can't masquerade as loss.
+        assert!(!is_significant("tcp", "tcptaillossprobe"));
         assert!(!is_significant("afd", "afdsend"));
         assert!(!is_significant("afd", "afdreceive"));
         assert!(!is_significant("afd", "afddataindication"));
@@ -203,7 +239,8 @@ mod tests {
         assert!(is_significant("tcp", "tcprequestconnect"));
         assert!(is_significant("tcp", "tcpclosetcbrequest"));
         assert!(is_significant("tcp", "tcpconnectionterminatedrcvdrst"));
-        assert!(is_significant("tcp", "tcptaillossprobe"));
+        assert!(is_significant("tcp", "tcplossrecoverysend"));
+        assert!(is_significant("tcp", "tcpdatatransferretransmitround"));
         assert!(is_significant("tcp", "tcprecentconnectionfailure"));
         assert!(is_significant("afd", "afdconnect"));
         assert!(is_significant("afd", "afdclose"));
