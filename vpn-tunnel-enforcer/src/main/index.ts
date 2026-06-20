@@ -34,6 +34,7 @@ import { relaunchElevatedIfNeeded } from './admin'
 import { clearAppLog, getFullLogs, logEvent, openLogFolder, type AppLogLevel } from './appLogger'
 import { runSystemDiagnostics } from './systemDiagnostics'
 import { getRoutingPlan } from './connectionPlanner'
+import { getSmartRouteRuleSetState, refreshSmartRouteRuleSets } from './ruleSetManager'
 import { runAutoPilot } from './autoPilot'
 import { notify, setInAppFallbackCallback } from './notifications'
 import { exportDiagnosticsZip } from './diagnosticsExport'
@@ -1122,6 +1123,14 @@ app.whenReady().then(async () => {
 
   handleLogged('get-routing-plan', async () => {
     return getRoutingPlan()
+  })
+
+  handleLogged('smart-route:rule-sets-state', async () => {
+    return getSmartRouteRuleSetState()
+  })
+
+  handleLogged('smart-route:rule-sets-refresh', async (_e, force?: boolean) => {
+    return refreshSmartRouteRuleSets(force === true)
   })
 
   handleLogged('apply-browser-leak-protection', async () => {
