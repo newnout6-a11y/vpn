@@ -325,6 +325,35 @@ describe('generateSingboxConfig UDP rules', () => {
   })
 })
 
+// ─── IPv4-only TUN (Happy Eyeballs stall fix) ────────────────────────────────
+
+describe('generateSingboxConfig TUN is IPv4-only', () => {
+  // Advertising IPv6 on the TUN made Windows tell apps "IPv6 is available";
+  // Chrome/Yandex then tried YouTube/Google over IPv6 first, the WFP kill-switch
+  // silently dropped those packets, and the browser waited the full Happy-Eyeballs
+  // timeout (~5-10s) before falling back to IPv4 — the "YouTube hangs then springs
+  // to life" symptom. The TUN must therefore expose no IPv6 at all.
+  const tunOf = (cfg: SingboxConfig) => cfg.inbounds.find((i) => i.tag === 'tun-in')!
+
+  it('does not assign an IPv6 address to the TUN', () => {
+    const tun = tunOf(gen({ outbound: { ...realityOutbound } }))
+    expect((tun.address as string[]).some((a) => a.includes(':'))).toBe(false)
+  })
+
+  it('does not capture IPv6 (no ::/1, 8000::/1) in route_address', () => {
+    const tun = tunOf(gen({ outbound: { ...realityOutbound } }))
+    expect((tun.route_address as string[]).some((a) => a.includes(':'))).toBe(false)
+  })
+
+  it('has no IPv6 reject rule (nothing to reject once IPv6 is not captured)', () => {
+    const cfg = gen({ outbound: { ...realityOutbound } })
+    const ipv6Reject = cfg.route.rules.some(
+      (r) => Array.isArray(r.ip_cidr) && r.ip_cidr.includes('::/0') && r.action === 'reject'
+    )
+    expect(ipv6Reject).toBe(false)
+  })
+})
+
 // ─── Direct process routing (split-tunnel core processes) ────────────────────
 
 describe('generateSingboxConfig process routing', () => {
