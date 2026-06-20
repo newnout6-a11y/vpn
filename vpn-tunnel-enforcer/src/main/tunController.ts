@@ -597,13 +597,19 @@ function shouldBlockQuicUdp443(
 ): boolean {
   if (proxyType === 'http') return true
   if (isDirectVpn) {
-    // Hysteria2 and TUIC are native UDP protocols, they carry QUIC properly.
-    // All others (VLESS, VMess, Trojan, Shadowsocks) run over TCP — encapsulating
-    // UDP-in-TCP creates Head-of-Line blocking, which makes Chrome stall on
-    // QUIC instead of fast-failing to TCP TLS.
-    const type = String(proxyOutbound.type || '').toLowerCase()
-    if (type === 'hysteria2' || type === 'tuic') return false
-    return true
+    // For a native TUN tunnel (directVpn) we carry QUIC through the proxy
+    // instead of rejecting UDP/443. Rejecting it does NOT make Chromium fail
+    // over to TCP quickly: because of cached Alt-Svc (h3) advertisements and
+    // QUIC connection timeouts, the browser stalls ~5–10s before falling back
+    // — exactly the "YouTube hangs then springs to life" symptom, and it also
+    // breaks HTTP/3-heavy flows like speedtest.net's server discovery.
+    //
+    // Letting UDP/443 ride the tunnel is never worse than rejecting it: if the
+    // upstream relays UDP (standard for Xray/sing-box VLESS/VMess/Trojan/SS)
+    // HTTP/3 works natively with no stall; if it does not, the browser falls
+    // back to TCP just as it does today. Hysteria2/TUIC are native-UDP and
+    // already carry QUIC, so they were never blocked here either.
+    return false
   }
   // Local proxy mode always forwards the captured traffic into a loopback
   // SOCKS/HTTP hop that ultimately rides whatever upstream transport the app
@@ -865,11 +871,11 @@ export function generateSingboxConfig(
               }]
             : []
         ),
-        // Browser-safe QUIC fallback: on chains that cannot carry QUIC
-        // reliably, drop UDP/443 BEFORE sniffing. Otherwise Chromium can
-        // still spend the default 300ms sniff timeout on each failed QUIC
-        // attempt before it falls back to TCP TLS, which shows up as stalled
-        // first loads / ERR_CONNECTION_CLOSED on arbitrary sites.
+        // QUIC handling (see shouldBlockQuicUdp443): for local HTTP-proxy
+        // chains we still drop UDP/443 before sniffing. For a native tunnel
+        // (directVpn) this list is empty so QUIC rides the tunnel instead —
+        // rejecting it there does not fast-fail the browser to TCP and instead
+        // causes the multi-second "YouTube hangs then springs to life" stalls.
         ...quicUdp443BlockRules,
         ...(needsSniff ? [{ action: 'sniff' }] : []),
         // DNS from captured apps must be hijacked BEFORE any blanket UDP
