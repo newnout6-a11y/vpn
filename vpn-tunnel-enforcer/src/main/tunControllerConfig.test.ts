@@ -306,6 +306,19 @@ describe('generateSingboxConfig UDP rules', () => {
     expect(quicBlock).toBe(true)
   })
 
+  it('does not block UDP/443 (QUIC) for directVpn so HTTP/3 rides the tunnel', () => {
+    // Rejecting QUIC on a native tunnel does not fast-fail the browser to TCP;
+    // it stalls ~5–10s (the YouTube/Speedtest symptom). Let it ride the tunnel.
+    for (const outbound of [realityOutbound, plainTlsOutbound]) {
+      const cfg = gen({ outbound: { ...outbound } })
+      const quicBlock = cfg.route.rules.some(
+        (r) => r.network === 'udp' && r.port === 443 && r.action === 'reject'
+      )
+      expect(quicBlock).toBe(false)
+      expect(cfg.route.final).toBe('proxy-out')
+    }
+  })
+
   it('routes final traffic through proxy-out', () => {
     const cfg = gen({ outbound: { ...plainTlsOutbound } })
     expect(cfg.route.final).toBe('proxy-out')
