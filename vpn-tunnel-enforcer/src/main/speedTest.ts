@@ -61,11 +61,11 @@ const UPLOAD_URL = 'https://speed.cloudflare.com/__up'
 const UPLOAD_SIZE = 2 * 1024 * 1024
 const DOWNLOAD_PROBE_BYTES = 10 * 1024 * 1024
 const DOWNLOAD_FAST_BYTES_PER_STREAM = 50 * 1024 * 1024
-const DOWNLOAD_FAST_STREAMS = 4
+const DOWNLOAD_FAST_STREAMS = 6
 const DOWNLOAD_FAST_THRESHOLD_MBPS = 80
 const UPLOAD_PROBE_BYTES = 8 * 1024 * 1024
 const UPLOAD_FAST_BYTES_PER_STREAM = 16 * 1024 * 1024
-const UPLOAD_FAST_STREAMS = 4
+const UPLOAD_FAST_STREAMS = 6
 const UPLOAD_FAST_THRESHOLD_MBPS = 40
 /** Maximum history entries to keep */
 const MAX_HISTORY = 50
@@ -76,10 +76,19 @@ let testInProgress = false
 
 // ─── Progress Reporting ──────────────────────────────────────────────────────
 
+let lastReportedPercent = -1
+let lastReportedPhase = ''
+
 /**
  * Sends progress events to all renderer windows.
+ * Deduplicates calls to prevent flooding the IPC bridge and blocking the
+ * Node.js event loop during high-speed multi-stream downloads.
  */
 function sendProgress(percent: number, phase: string): void {
+  if (percent === lastReportedPercent && phase === lastReportedPhase) return
+  lastReportedPercent = percent
+  lastReportedPhase = phase
+
   for (const win of BrowserWindow.getAllWindows()) {
     if (!win.isDestroyed()) {
       win.webContents.send('speed-test:progress', { percent, phase })
@@ -247,7 +256,7 @@ function downloadUrl(target: typeof DOWNLOAD_URLS[number], bytes: number, runId:
 async function downloadOne(url: string, onChunk: (bytes: number) => void): Promise<number> {
   const response = await axios.get(url, {
     responseType: 'stream',
-    timeout: 45000,
+    timeout: 60000,
     headers: { 'Cache-Control': 'no-cache' },
     maxContentLength: Infinity,
     maxBodyLength: Infinity,
@@ -301,7 +310,7 @@ async function measureAccurateDownload(): Promise<{ mbps: number; name: string }
 
 async function uploadOne(payload: Buffer, onProgress: (bytes: number) => void): Promise<number> {
   await axios.post(UPLOAD_URL, payload, {
-    timeout: 30000,
+    timeout: 60000,
     headers: {
       'Content-Type': 'application/octet-stream'
     },
@@ -399,6 +408,8 @@ async function runSpeedTest(): Promise<SpeedTestResult> {
     throw err
   } finally {
     testInProgress = false
+    lastReportedPercent = -1
+    lastReportedPhase = ''
   }
 }
 
