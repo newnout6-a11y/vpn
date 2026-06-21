@@ -267,7 +267,20 @@ async function ensureLayout(): Promise<void> {
 }
 
 async function writeJson(path: string, value: unknown): Promise<void> {
-  await writeFile(path, JSON.stringify(value, null, 2), 'utf-8')
+  try {
+    await writeFile(path, JSON.stringify(value, null, 2), 'utf-8')
+  } catch (err: any) {
+    if (err?.code === 'ENOENT') {
+      try {
+        await mkdir(dirname(path), { recursive: true })
+        await writeFile(path, JSON.stringify(value, null, 2), 'utf-8')
+      } catch (innerErr) {
+        logEvent('warn', 'traffic-forensics', 'failed to write json even after mkdir', { path, error: String(innerErr) })
+      }
+    } else {
+      logEvent('warn', 'traffic-forensics', 'failed to write json', { path, error: String(err) })
+    }
+  }
 }
 
 async function readJson<T>(path: string): Promise<T | null> {
@@ -488,7 +501,8 @@ function buildTrafficForensicsHealth(
   summary: TrafficForensicsStatus['summary'],
   sidecar: SessionManifest['sidecar'] | null,
   sidecarProbe: SidecarEventProbe,
-  startedAt: number | null | undefined
+  startedAt: number | null | undefined,
+  enabled: boolean
 ): TrafficForensicsStatus['health'] {
   const sidecarEvents = Math.max(Number(summary?.counts?.sidecarEvents ?? 0), sidecarProbe.events)
   const sidecarDataEvents = sidecarProbe.dataEvents
@@ -500,11 +514,13 @@ function buildTrafficForensicsHealth(
   const ageMs = startedAt ? Date.now() - startedAt : Number.POSITIVE_INFINITY
   const sidecarWarmingUp = Boolean(sidecar?.running && sidecarDataEvents === 0 && ageMs < 30000)
   const sidecarOnlyLifecycle = Boolean(sidecar?.running && sidecarDataEvents === 0 && !sidecarWarmingUp)
-  if (sidecarOnlyLifecycle) {
-    warnings.push('sidecar is running but has no TCP/DNS/WFP data events')
-  }
-  if (etlBytes === 0 && liveEtlBytes === 0) {
-    warnings.push('pktmon ETL artifact is empty or missing')
+  if (enabled) {
+    if (sidecarOnlyLifecycle) {
+      warnings.push('sidecar is running but has no TCP/DNS/WFP data events')
+    }
+    if (etlBytes === 0 && liveEtlBytes === 0) {
+      warnings.push('pktmon ETL artifact is empty or missing')
+    }
   }
   return {
     artifactCount: files.length,
@@ -1177,7 +1193,7 @@ export async function getTrafficForensicsStatus(): Promise<TrafficForensicsStatu
     summary,
     sidecar,
     artifactFiles,
-    health: buildTrafficForensicsHealth(artifactFiles, summary, sidecar, sidecarProbe, manifest?.startedAt)
+    health: buildTrafficForensicsHealth(artifactFiles, summary, sidecar, sidecarProbe, manifest?.startedAt, settings.enabled)
   }
 }
 

@@ -798,7 +798,7 @@ export function generateSingboxConfig(
     isTcpOnlyNetworkOutbound(proxyOutbound) && isDirectVpn
       ? [{ network: 'udp', action: 'reject', method: 'default', no_drop: true }]
       : []
-  const needsSniff = domainRouteRules.length > 0 || smartRoute.enabled
+  const needsSniff = true // Always sniff so that SNI and HTTP Host are available for routing and proxying
 
   return {
     log: { level: 'debug', timestamp: true, output: logPath },

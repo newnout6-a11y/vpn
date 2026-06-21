@@ -319,9 +319,15 @@ export function smartRouteRules(opts: SmartRouteOptions): Array<Record<string, a
   // 1. Curated RU domain lists → direct.
   rules.push({ rule_set: ruDomainRuleSets(), outbound: 'direct-out' })
 
-  // 2. Optional: online maps → direct (real location).
+  // 2. Optional: online maps → direct (real location) or proxy-out (VPN location).
+  //    MUST be explicit in both cases because the RU domain rule-set (geosite-ru)
+  //    already includes maps.yandex.* and 2gis.*. If we don't explicitly send
+  //    them to proxy-out here when the toggle is off, they fall through to
+  //    rule 1 (ruDomainRuleSets) and egress direct anyway.
   if (opts.mapsDirect) {
     rules.push({ ...suffixListToMatcher(MAPS_DOMAIN_SUFFIXES), outbound: 'direct-out' })
+  } else {
+    rules.push({ ...suffixListToMatcher(MAPS_DOMAIN_SUFFIXES), outbound: 'proxy-out' })
   }
 
   // 3. RU-hosted IPs → direct (catches services regardless of domain/TLD).
@@ -346,6 +352,10 @@ export function smartRouteDnsRules(opts: SmartRouteOptions): Array<Record<string
   // Media/CDN domains: same story as route rules above — keep them on the
   // tunnelled resolver so we don't prefer RU CDN nodes for throttled media.
   rules.push({ ...suffixListToMatcher(VPN_PINNED_MEDIA_SUFFIXES), server: 'dns-remote' })
+  // Maps: same story, explicit proxy DNS if toggle is off so geosite-ru doesn't match them.
+  if (!opts.mapsDirect) {
+    rules.push({ ...suffixListToMatcher(MAPS_DOMAIN_SUFFIXES), server: 'dns-remote' })
+  }
   // RU domains → direct resolver (real RU IPs, so geoip-ru matches).
   rules.push({ rule_set: ruDomainRuleSets(), server })
   if (opts.mapsDirect) {

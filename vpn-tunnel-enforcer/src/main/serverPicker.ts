@@ -15,6 +15,7 @@ import { Socket } from 'net'
 import { promises as dns } from 'dns'
 import { writeFile } from 'fs/promises'
 import { join } from 'path'
+import { performance } from 'perf_hooks'
 import { exec as execCb, execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import axios from 'axios'
@@ -217,7 +218,7 @@ export async function tunnelHttpProbe(): Promise<number | null> {
   // the trace endpoint returns 200, favicons return 200 — all count as
   // "the tunnel made it through". `Connection: close` ensures we measure
   // a fresh round-trip rather than the warmth of a pooled TLS session.
-  const start = Date.now()
+  const start = performance.now()
   const races = TUNNEL_PROBE_URLS.map(url =>
     axios
       .get(url, {
@@ -225,7 +226,7 @@ export async function tunnelHttpProbe(): Promise<number | null> {
         validateStatus: status => status < 500,
         headers: { 'Cache-Control': 'no-cache', Connection: 'close' }
       })
-      .then(() => Date.now() - start)
+      .then(() => Math.round(performance.now() - start))
   )
 
   try {
@@ -285,6 +286,8 @@ export async function tunnelHttpProbe(): Promise<number | null> {
  * afford to block.)
  */
 async function smartOfflinePing(host: string, port: number): Promise<number | null> {
+  const isLoopback = /^127\./.test(host) || host === '::1' || host === 'localhost'
+
   // Rung order is chosen so the number the user sees reflects REAL endpoint
   // reachability under RU conditions, not a meaningless router echo.
   //
@@ -293,16 +296,23 @@ async function smartOfflinePing(host: string, port: number): Promise<number | nu
   //    network. If TSPU has IP-blackholed the server (the common RU failure),
   //    the SYN gets no SYN-ACK and this fails — correctly reporting the
   //    server as unreachable. No SNI/TLS on the wire, so it's DPI-safe.
-  //    (ICMP used to be first, but routers answer ICMP on behalf of dead
-  //    hosts and return bogus "<1 ms" for servers the VPN port can't reach —
-  //    that's the fake "1 ms на всех серверах" the user reported.)
-  const tcp = await plainTcpPing(host, port)
+  let tcp = await plainTcpPing(host, port)
+  
+  // Anti-fake gate: some mobile and TSPU networks transparently intercept port
+  // 443, spoofing the SYN-ACK locally in 1-3ms so they can inspect the SNI.
+  // We reject impossibly fast pings for remote servers and fall through.
+  if (tcp != null && tcp <= 3 && !isLoopback) {
+    tcp = null
+  }
   if (tcp != null) return tcp
 
   // 2. Disguised HTTPS to yandex.ru that actually targets our VPN host.
   //    Works on hostile nets that blackhole direct TCP to the VPN port but
   //    let port-443 traffic through because the SNI says yandex.ru.
-  const stealth = await stealthTcpProbe(host, port)
+  let stealth = await stealthTcpProbe(host, port)
+  if (stealth != null && stealth <= 3 && !isLoopback) {
+    stealth = null
+  }
   if (stealth != null) return stealth
 
   // 3. ICMP echo — last resort. Weakest signal (routers answer for dead
@@ -460,7 +470,7 @@ function decodeMaybeCp866(buf: Buffer): string {
 function plainTcpPing(host: string, port: number): Promise<number | null> {
   return new Promise((resolve) => {
     const socket = new Socket()
-    const start = Date.now()
+    const start = performance.now()
     let done = false
     const finish = (value: number | null) => {
       if (done) return
@@ -470,7 +480,7 @@ function plainTcpPing(host: string, port: number): Promise<number | null> {
       resolve(value)
     }
     socket.setTimeout(PING_TIMEOUT_MS)
-    socket.once('connect', () => finish(Date.now() - start))
+    socket.once('connect', () => finish(Math.max(1, Math.round(performance.now() - start))))
     socket.once('timeout', () => finish(null))
     socket.once('error', () => finish(null))
     socket.connect(port, host)

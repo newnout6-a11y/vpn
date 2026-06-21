@@ -537,16 +537,16 @@ describe('generateSingboxConfig smart RU split', () => {
 
   it('adds maps domains direct ONLY when mapsDirect is on', () => {
     const off = genSmart({ smartRuSplit: true, smartRuMapsDirect: false })
-    const offHasMaps = off.route.rules.some(
-      (r: any) => Array.isArray(r.domain_suffix) && r.domain_suffix.some((d: string) => d.includes('2gis'))
+    const offHasMapsProxy = off.route.rules.some(
+      (r: any) => Array.isArray(r.domain_suffix) && r.domain_suffix.some((d: string) => d.includes('2gis')) && r.outbound === 'proxy-out'
     )
-    expect(offHasMaps).toBe(false)
+    expect(offHasMapsProxy).toBe(true)
 
     const on = genSmart({ smartRuSplit: true, smartRuMapsDirect: true })
-    const onHasMaps = on.route.rules.some(
-      (r: any) => Array.isArray(r.domain_suffix) && r.domain_suffix.some((d: string) => d.includes('2gis'))
+    const onHasMapsDirect = on.route.rules.some(
+      (r: any) => Array.isArray(r.domain_suffix) && r.domain_suffix.some((d: string) => d.includes('2gis')) && r.outbound === 'direct-out'
     )
-    expect(onHasMaps).toBe(true)
+    expect(onHasMapsDirect).toBe(true)
   })
 
   it('keeps user domain rules BEFORE the smart-route rules (user override wins)', () => {
