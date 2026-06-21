@@ -18,7 +18,8 @@ export function DiagnosticsCard() {
   const addLog = useAppStore((s) => s.addLog)
 
   const [testing, setTesting] = useState(false)
-  const [exporting, setExporting] = useState(false)
+  const exporting = useAppStore((s) => s.exportingDiagnostics)
+  const setExporting = useAppStore((s) => s.setExportingDiagnostics)
   const [restartingForensics, setRestartingForensics] = useState(false)
   const [exportPath, setExportPath] = useState<string | null>(null)
   const [forensicsStatus, setForensicsStatus] = useState<any>(null)

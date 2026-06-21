@@ -243,6 +243,10 @@ interface AppState {
   // something happened.
   lastMainError: { code: string; message: string; ts: number } | null
   setLastMainError: (e: { code: string; message: string; ts: number } | null) => void
+
+  // Persists the diagnostic export state across tab changes
+  exportingDiagnostics: boolean
+  setExportingDiagnostics: (e: boolean) => void
 }
 
 export interface LeakSelfTestResultClient {
@@ -277,6 +281,7 @@ export const useAppStore = create<AppState>((set) => ({
   competingTun: null,
   leakSelfTestResult: null,
   lastMainError: null,
+  exportingDiagnostics: false,
   autoconfigTargets: [
     { id: 'android-studio', name: 'Android Studio', applied: false, enabled: true },
     { id: 'gradle', name: 'Gradle', applied: false, enabled: true },
@@ -379,5 +384,6 @@ export const useAppStore = create<AppState>((set) => ({
     settings: { ...s.settings, ...partial }
   })),
   setLeakSelfTestResult: (r) => set({ leakSelfTestResult: r }),
-  setLastMainError: (e) => set({ lastMainError: e })
+  setLastMainError: (e) => set({ lastMainError: e }),
+  setExportingDiagnostics: (e) => set({ exportingDiagnostics: e })
 }))
