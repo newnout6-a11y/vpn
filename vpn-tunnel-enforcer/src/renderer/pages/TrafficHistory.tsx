@@ -24,6 +24,40 @@ function formatDateTime(ts: number): string {
   })
 }
 
+type BadgeVariant = 'neutral' | 'success' | 'warning' | 'danger' | 'accent'
+
+function categorizeDomain(domain: string): { label: string, variant: BadgeVariant } | null {
+  const d = domain.toLowerCase()
+  if (/telemetry|metrics|analytics|events\.data|app-measurement|beacons|doubleclick\.net|track|crashlytics|flurry|appsflyer|appcenter/.test(d)) {
+    return { label: 'Телеметрия / Трекинг', variant: 'danger' }
+  }
+  if (/adsystem|adservice|ads\.|ad\.|googlesyndication|criteo|taboola|outbrain|appnexus|pubmatic/.test(d)) {
+    return { label: 'Реклама', variant: 'danger' }
+  }
+  if (/cloudflare|akamai|fastly|cloudfront|cdn|1e100\.net|gvt1|gvt2|googleapis|gstatic|edgecast|incapdns|akadns/.test(d)) {
+    return { label: 'CDN / Инфраструктура', variant: 'neutral' }
+  }
+  if (/whatsapp|telegram|t\.me|viber|discord|slack|skype|teams/.test(d)) {
+    return { label: 'Мессенджеры', variant: 'accent' }
+  }
+  if (/facebook|instagram|twitter|twimg|tiktok|vk\.com|linkedin|snapchat|pinterest/.test(d)) {
+    return { label: 'Соцсети', variant: 'accent' }
+  }
+  if (/youtube|googlevideo|netflix|hulu|disney|primevideo|twitch|vimeo|spotify|apple\.music/.test(d)) {
+    return { label: 'Медиа / Стриминг', variant: 'accent' }
+  }
+  if (/github|gitlab|bitbucket|npm|docker|huggingface|openai|anthropic|claude|api\./.test(d)) {
+    return { label: 'Разработка / AI', variant: 'success' }
+  }
+  if (/mail|smtp|imap|pop|outlook|yandex|gmail/.test(d)) {
+    return { label: 'Почта', variant: 'warning' }
+  }
+  if (/apple\.com|icloud|microsoft\.com|windowsupdate|mzstatic/.test(d)) {
+    return { label: 'Системные сервисы', variant: 'neutral' }
+  }
+  return null
+}
+
 export function TrafficHistory() {
   const { t } = useTranslation()
   const publicIp = useAppStore(s => s.publicIp)
@@ -160,8 +194,12 @@ export function TrafficHistory() {
                               {entry.domain}
                             </span>
                             <MacBadge variant="neutral">×{entry.count}</MacBadge>
+                            {(() => {
+                              const cat = categorizeDomain(entry.domain)
+                              return cat ? <MacBadge variant={cat.variant}>{cat.label}</MacBadge> : null
+                            })()}
                             {entry.vpnIp && (
-                              <span className="text-xs text-[var(--color-text-secondary)] font-mono">
+                              <span className="text-xs text-[var(--color-text-secondary)] font-mono ml-auto">
                                 IP: {entry.vpnIp}
                               </span>
                             )}
