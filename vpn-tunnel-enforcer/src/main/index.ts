@@ -518,14 +518,18 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
     logEvent('warn', 'app', 'failed to start traffic forensics session', err)
   })
 
-  const ipInfo = await ipMonitor.getCurrentIp()
-  if (ipInfo.ip) {
-    ipMonitor.setVpnIp(ipInfo.ip)
-    try {
-      mainWindow?.webContents.send('ip-changed', { ip: ipInfo.ip, isLeak: false })
-    } catch {}
-  }
-  refreshTrayState({ status: 'protected', publicIp: ipInfo.ip ?? latestPublicIp, proxyAddr })
+  // Fire off the IP check asynchronously so we don't block the UI's "Connected" state.
+  ipMonitor.getCurrentIp().then(ipInfo => {
+    if (ipInfo.ip) {
+      ipMonitor.setVpnIp(ipInfo.ip)
+      try {
+        mainWindow?.webContents.send('ip-changed', { ip: ipInfo.ip, isLeak: false })
+      } catch {}
+    }
+    refreshTrayState({ status: 'protected', publicIp: ipInfo.ip ?? latestPublicIp, proxyAddr })
+  }).catch(() => undefined)
+
+  refreshTrayState({ status: 'protected', publicIp: latestPublicIp, proxyAddr })
 
   // Open a connection-history record. Closed by stopProtection() or by the
   // tunController.onStatusChange handler if the tunnel dies on its own.
@@ -558,7 +562,7 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
   return {
     ...result,
     warning: [baselineWarning, result.warning].filter(Boolean).join(' | ') || null,
-    vpnIp: ipInfo.ip ?? null
+    vpnIp: null
   }
 }
 
@@ -673,14 +677,18 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
     logEvent('warn', 'app', 'failed to start traffic forensics session', err)
   })
 
-  const ipInfo = await ipMonitor.getCurrentIp()
-  if (ipInfo.ip) {
-    ipMonitor.setVpnIp(ipInfo.ip)
-    try {
-      mainWindow?.webContents.send('ip-changed', { ip: ipInfo.ip, isLeak: false })
-    } catch {}
-  }
-  refreshTrayState({ status: 'protected', publicIp: ipInfo.ip ?? latestPublicIp, proxyAddr: profile.name })
+  // Fire off the IP check asynchronously so we don't block the UI's "Connected" state.
+  ipMonitor.getCurrentIp().then(ipInfo => {
+    if (ipInfo.ip) {
+      ipMonitor.setVpnIp(ipInfo.ip)
+      try {
+        mainWindow?.webContents.send('ip-changed', { ip: ipInfo.ip, isLeak: false })
+      } catch {}
+    }
+    refreshTrayState({ status: 'protected', publicIp: ipInfo.ip ?? latestPublicIp, proxyAddr: profile.name })
+  }).catch(() => undefined)
+
+  refreshTrayState({ status: 'protected', publicIp: latestPublicIp, proxyAddr: profile.name })
 
   // Open a connection-history record (Direct VPN variant).
   currentConnectionStart = Date.now()
@@ -706,7 +714,7 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
   return {
     ...result,
     warning: [baselineWarning, result.warning].filter(Boolean).join(' | ') || null,
-    vpnIp: ipInfo.ip ?? null
+    vpnIp: null
   }
 }
 
