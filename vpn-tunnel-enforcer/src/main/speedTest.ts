@@ -14,7 +14,7 @@
 import { ipcMain, BrowserWindow, type IpcMainInvokeEvent } from 'electron'
 import axios from 'axios'
 import { randomUUID, randomBytes } from 'crypto'
-import type { Readable } from 'stream'
+import { Readable } from 'stream'
 import Store from 'electron-store'
 import { logEvent } from './appLogger'
 import { tunController } from './tunController'
@@ -64,8 +64,8 @@ const DOWNLOAD_FAST_BYTES_PER_STREAM = 50 * 1024 * 1024
 const DOWNLOAD_FAST_STREAMS = 6
 const DOWNLOAD_FAST_THRESHOLD_MBPS = 80
 const UPLOAD_PROBE_BYTES = 8 * 1024 * 1024
-const UPLOAD_FAST_BYTES_PER_STREAM = 16 * 1024 * 1024
-const UPLOAD_FAST_STREAMS = 6
+const UPLOAD_FAST_BYTES_PER_STREAM = 4 * 1024 * 1024 // 4 MB per stream
+const UPLOAD_FAST_STREAMS = 20 // 20 streams total = 80 MB. Required to max out Cloudflare HTTP/1.1 upload.
 const UPLOAD_FAST_THRESHOLD_MBPS = 40
 /** Maximum history entries to keep */
 const MAX_HISTORY = 50
@@ -198,21 +198,14 @@ async function measureDownload(): Promise<{ mbps: number; name: string }> {
  * Returns speed in Mbps.
  */
 async function measureUpload(): Promise<number> {
-  const payload = randomBytes(UPLOAD_SIZE)
   const start = Date.now()
+  let uploaded = 0
 
-  await axios.post(UPLOAD_URL, payload, {
-    timeout: 30000,
-    headers: {
-      'Content-Type': 'application/octet-stream'
-    },
-    onUploadProgress: (progressEvent) => {
-      if (progressEvent.total) {
-        // Upload progress is 50-100% of total test
-        const percent = 50 + Math.round((progressEvent.loaded / progressEvent.total) * 50)
-        sendProgress(percent, 'upload')
-      }
-    }
+  await uploadOne(UPLOAD_SIZE, (loaded) => {
+    uploaded = loaded
+    // Upload progress is 50-100% of total test
+    const percent = 50 + Math.round((loaded / UPLOAD_SIZE) * 50)
+    sendProgress(percent, 'upload')
   })
 
   const elapsed = (Date.now() - start) / 1000 // seconds
@@ -225,6 +218,7 @@ async function measureUpload(): Promise<number> {
   const bitsPerSecond = (UPLOAD_SIZE * 8) / elapsed
   return Math.round((bitsPerSecond / 1_000_000) * 100) / 100
 }
+
 
 // ─── Main Test Runner ────────────────────────────────────────────────────────
 
@@ -308,28 +302,39 @@ async function measureAccurateDownload(): Promise<{ mbps: number; name: string }
   throw new Error(`Failed to measure download speed. All speed test servers are unavailable.${lastErr ? ` Last error: ${lastErr.message}` : ''}`)
 }
 
-async function uploadOne(payload: Buffer, onProgress: (bytes: number) => void): Promise<number> {
-  await axios.post(UPLOAD_URL, payload, {
-    timeout: 60000,
-    headers: {
-      'Content-Type': 'application/octet-stream'
-    },
-    maxBodyLength: Infinity,
-    maxContentLength: Infinity,
-    onUploadProgress: (progressEvent) => {
-      onProgress(progressEvent.loaded)
+async function uploadOne(payloadBytes: number, onProgress: (bytes: number) => void): Promise<number> {
+  const stream = new Readable({
+    read(size) {
+      const chunk = Math.min(size || 65536, payloadBytes - (this as any).bytesRead)
+      if (chunk > 0) {
+        this.push(Buffer.alloc(chunk))
+        ;(this as any).bytesRead += chunk
+        onProgress((this as any).bytesRead)
+      } else {
+        this.push(null)
+      }
     }
   })
-  return payload.length
+  ;(stream as any).bytesRead = 0
+
+  await axios.post(UPLOAD_URL, stream, {
+    timeout: 60000,
+    headers: {
+      'Content-Type': 'application/octet-stream',
+      'Content-Length': payloadBytes.toString()
+    },
+    maxBodyLength: Infinity,
+    maxContentLength: Infinity
+  })
+  return payloadBytes
 }
 
 async function measureUploadRound(bytesPerStream: number, streams: number): Promise<number> {
-  const payloads = Array.from({ length: streams }, () => randomBytes(bytesPerStream))
   const expectedBytes = bytesPerStream * streams
   const uploadedByStream = new Array(streams).fill(0)
   let start = 0
 
-  await Promise.all(payloads.map((payload, index) => uploadOne(payload, (loaded) => {
+  await Promise.all(Array.from({ length: streams }).map((_, index) => uploadOne(bytesPerStream, (loaded) => {
     if (start === 0 && loaded > 0) start = Date.now()
     uploadedByStream[index] = loaded
     const uploadedBytes = uploadedByStream.reduce((sum, bytes) => sum + bytes, 0)

@@ -77,8 +77,11 @@ describe('speedTest', () => {
       const bytes = Number(new URL(url).searchParams.get('bytes')) || 10 * 1024 * 1024
       return { data: streamOfSize(bytes) }
     })
-    axiosPostMock.mockImplementation(async (_url, payload, options) => {
-      options?.onUploadProgress?.({ loaded: payload.length, total: payload.length })
+    axiosPostMock.mockImplementation(async (_url, payloadStream, options) => {
+      if (payloadStream && typeof payloadStream.on === 'function') {
+        payloadStream.on('data', () => {})
+        await new Promise(r => payloadStream.on('end', r))
+      }
       return { status: 200 }
     })
 
@@ -89,7 +92,7 @@ describe('speedTest', () => {
     expect(result.uploadMbps).toBeGreaterThan(0)
     expect(axiosGetMock).toHaveBeenCalled()
     expect(axiosGetMock.mock.calls.some(([url]) => String(url).includes('bytes=52428800'))).toBe(true)
-    expect(axiosPostMock.mock.calls.some(([, payload]) => payload.length === 16 * 1024 * 1024)).toBe(true)
+    expect(axiosPostMock.mock.calls.some(([, , options]) => options?.headers?.['Content-Length'] === String(4 * 1024 * 1024))).toBe(true)
     expect(sendMock).toHaveBeenCalledWith('speed-test:progress', expect.objectContaining({ phase: 'complete', percent: 100 }))
   })
 })

@@ -309,8 +309,10 @@ export async function applyPhysicalAdapterLockdown(tunDnsIpv4: string, options: 
     return { applied: true, adapters: existing.adapters.length, warnings: [] }
   }
 
-  const adapters = await snapshotPhysicalAdapters()
-  const transitionAdapters = await snapshotTransitionAdapters()
+  const [adapters, transitionAdapters] = await Promise.all([
+    snapshotPhysicalAdapters(),
+    snapshotTransitionAdapters()
+  ])
   if (adapters.length === 0) {
     logEvent('warn', 'phys-lockdown', 'no physical adapters to lock down — nothing to do')
     const transitionWarnings = await applyTransitionAdapterLockdown(transitionAdapters)
@@ -347,7 +349,7 @@ export async function applyPhysicalAdapterLockdown(tunDnsIpv4: string, options: 
   })
 
   const warnings: string[] = []
-  for (const a of adapters) {
+  const adapterTasks = adapters.map(async (a) => {
     try {
       const dnsLine = forceDns
         ? `try { Set-DnsClientServerAddress -InterfaceAlias ${psSingleQuote(a.alias)} -ServerAddresses ${psSingleQuote(tunDnsIpv4)} -ErrorAction Stop; Write-Host 'dns:set' } catch { Write-Host "dns:err: $_" }`
@@ -372,8 +374,9 @@ try { Clear-DnsClientCache -ErrorAction Stop; Write-Host 'cache:clear' } catch {
       warnings.push(`${a.alias}: ${err?.message ?? String(err)}`)
       logEvent('warn', 'phys-lockdown', `lockdown failed for ${a.alias}`, err)
     }
-  }
-  warnings.push(...await applyTransitionAdapterLockdown(transitionAdapters))
+  })
+  const transitionTask = applyTransitionAdapterLockdown(transitionAdapters).then(w => warnings.push(...w))
+  await Promise.all([...adapterTasks, transitionTask])
 
   // Overwrite the pending manifest with the ACTUAL outcome per adapter (some
   // may have only partially applied). Rollback now restores exactly what was
@@ -401,7 +404,7 @@ export async function rollbackPhysicalAdapterLockdownIfApplied(reason: string, o
   const m = await readManifest()
   if (!m) return { rolledBack: false }
 
-  for (const a of m.adapters) {
+  const rollbackTasks = m.adapters.map(async (a) => {
     try {
       const shouldTouchDns = Array.isArray(a.forcedDnsTo) && a.forcedDnsTo.length > 0
       const dnsRestoreLine = !shouldTouchDns
@@ -423,10 +426,12 @@ try { Clear-DnsClientCache -ErrorAction Stop } catch {}
     } catch (err) {
       logEvent('warn', 'phys-lockdown', `rollback failed for ${a.alias}`, err)
     }
-  }
+  })
+  const tasks: Promise<void>[] = [...rollbackTasks]
   if (m.transitionAdapters) {
-    await restoreTransitionAdapters(m.transitionAdapters, reason)
+    tasks.push(restoreTransitionAdapters(m.transitionAdapters, reason))
   }
+  await Promise.all(tasks)
 
   await deleteManifest()
   return { rolledBack: true }
