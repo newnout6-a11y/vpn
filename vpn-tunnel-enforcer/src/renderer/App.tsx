@@ -1,19 +1,19 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, lazy, Suspense } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useAppStore } from './store'
 import { Sidebar, type SidebarPage } from './components/Sidebar'
 import { FirstRunWizard } from './components/FirstRunWizard'
 import { ThemeProvider } from './providers/ThemeProvider'
-import { Dashboard } from './pages/Dashboard'
-import { SplitTunnel } from './pages/SplitTunnel'
-import { Servers } from './pages/Servers'
-import { SpeedTest } from './pages/SpeedTest'
-import { Availability } from './pages/Availability'
-import { TrafficHistory } from './pages/TrafficHistory'
-import { Schedule } from './pages/Schedule'
-import { Settings } from './pages/Settings'
-import { Logs } from './pages/Logs'
-import { Maintenance } from './pages/Maintenance'
+const Dashboard = lazy(() => import('./pages/Dashboard').then(m => ({ default: m.Dashboard })))
+const SplitTunnel = lazy(() => import('./pages/SplitTunnel').then(m => ({ default: m.SplitTunnel })))
+const Servers = lazy(() => import('./pages/Servers').then(m => ({ default: m.Servers })))
+const SpeedTest = lazy(() => import('./pages/SpeedTest').then(m => ({ default: m.SpeedTest })))
+const Availability = lazy(() => import('./pages/Availability').then(m => ({ default: m.Availability })))
+const TrafficHistory = lazy(() => import('./pages/TrafficHistory').then(m => ({ default: m.TrafficHistory })))
+const Schedule = lazy(() => import('./pages/Schedule').then(m => ({ default: m.Schedule })))
+const Settings = lazy(() => import('./pages/Settings').then(m => ({ default: m.Settings })))
+const Logs = lazy(() => import('./pages/Logs').then(m => ({ default: m.Logs })))
+const Maintenance = lazy(() => import('./pages/Maintenance').then(m => ({ default: m.Maintenance })))
 import type { AppSettings, LeakCheckResult, TrafficStats } from './store'
 import { emitServerChanged, NAV_EVENT, type AppPage } from './nav'
 
@@ -194,9 +194,6 @@ declare global {
       // i18n
       i18nGetLocale: () => Promise<string>
       i18nSetLocale: (locale: string) => Promise<void>
-      // Widgets
-      getWidgetLayout: () => Promise<import('../shared/ipc-types').WidgetLayout[]>
-      setWidgetLayout: (layout: import('../shared/ipc-types').WidgetLayout[]) => Promise<void>
     }
   }
 }
@@ -657,7 +654,9 @@ export default function App() {
             transition={{ duration: 0.18, ease: [0.4, 0, 0.2, 1] }}
             className="flex-1 overflow-y-auto p-6 tabular"
           >
-            {renderPage()}
+            <Suspense fallback={<div className="flex items-center justify-center h-full text-zinc-400">Загрузка...</div>}>
+              {renderPage()}
+            </Suspense>
           </motion.main>
         </AnimatePresence>
         {!settings.firstRunComplete && (

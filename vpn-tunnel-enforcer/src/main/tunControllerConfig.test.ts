@@ -430,16 +430,26 @@ describe('generateSingboxConfig domain routing', () => {
     domainState.rules = []
   })
 
-  it('injects domain rules into route.rules after hijack-dns, before private ranges', () => {
+  it('injects domain rules into route.rules after hijack-dns', () => {
     domainState.rules = [{ outbound: 'block-out', domain: ['ads.example.com'] }]
     const cfg = gen({ outbound: { ...plainTlsOutbound, server: '1.2.3.4' } })
     const rules = cfg.route.rules
     const hijackIdx = rules.findIndex((r) => r.action === 'hijack-dns')
     const domainIdx = rules.findIndex((r) => Array.isArray(r.domain) && r.domain.includes('ads.example.com'))
-    const privateIdx = rules.findIndex((r) => Array.isArray(r.ip_cidr) && r.ip_cidr.includes('127.0.0.0/8'))
     expect(domainIdx).toBeGreaterThan(hijackIdx)
-    expect(domainIdx).toBeLessThan(privateIdx)
     expect(rules[domainIdx].outbound).toBe('block-out')
+  })
+
+  it('moves private ranges to route_exclude_address on TUN inbound', () => {
+    const cfg = gen({ outbound: { ...plainTlsOutbound, server: '1.2.3.4' } })
+    const tunInbound = cfg.inbounds.find((i: any) => i.type === 'tun')
+    expect(tunInbound).toBeTruthy()
+    expect(tunInbound.route_exclude_address).toBeDefined()
+    expect(tunInbound.route_exclude_address).toContain('127.0.0.0/8')
+    expect(tunInbound.route_exclude_address).toContain('192.168.0.0/16')
+    const rules = cfg.route.rules
+    const hasPrivateRule = rules.some((r: any) => Array.isArray(r.ip_cidr) && r.ip_cidr.includes('127.0.0.0/8'))
+    expect(hasPrivateRule).toBe(false)
   })
 
   it('adds no domain rules when the user has none', () => {

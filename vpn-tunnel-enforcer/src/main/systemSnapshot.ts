@@ -136,15 +136,18 @@ async function tryReadJsonFile(path: string): Promise<object | null> {
 const PS_EMPTY_MARKER = '__VPNTE_EMPTY__'
 
 /**
- * Run a PS script that's expected to either emit the empty marker or some
- * stdout. Returns:
- *   - { empty: true } when the script reported no rows (common case).
- *   - the trimmed stdout string otherwise.
- *   - { error } if the PS process itself failed (rare — only for unrelated
- *     issues like timeout or missing cmdlet).
+ * Build the combined PowerShell script that runs ALL diagnostic commands in a
+ * single powershell.exe process. Each section is tagged with a ###MARKER###
+ * delimiter and wrapped in try/catch so one failing cmdlet (e.g. missing on
+ * an old Windows build) never aborts the rest. $ErrorActionPreference is set
+ * to 'Continue' so non-terminating errors are also tolerated.
+ *
+ * This replaces the old pattern of ~14 separate tryPS() calls (each spawning
+ * its own powershell.exe) — at 60s periodic intervals that was ~900 PS
+ * spawns/hour. Now it's 1 spawn per snapshot.
  */
-async function tryProxyOwnersPS(port: number): Promise<string | { empty: true } | { error: string }> {
-  const script = `
+function buildCombinedPSScript(): string {
+  const proxyBlock = (port: number) => `
 try {
   $rows = Get-NetTCPConnection -State Listen -LocalPort ${port} -ErrorAction Stop |
     ForEach-Object {
@@ -158,15 +161,96 @@ try {
   }
 } catch {
   Write-Output '${PS_EMPTY_MARKER}'
+}`
+
+  return `
+$ErrorActionPreference = 'Continue'
+
+Write-Output '###ADAPTERS###'
+try { Get-NetAdapter | Format-Table -AutoSize -Wrap | Out-String -Width 4096 } catch { Write-Output "ERROR: $_" }
+
+Write-Output '###IPCONFIG###'
+try { Get-NetIPConfiguration -All -Detailed | Out-String -Width 4096 } catch { Write-Output "ERROR: $_" }
+
+Write-Output '###ROUTES4###'
+try { Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue | Sort-Object InterfaceMetric | Format-Table -AutoSize -Wrap | Out-String -Width 4096 } catch { Write-Output "ERROR: $_" }
+
+Write-Output '###ROUTES6###'
+try { Get-NetRoute -AddressFamily IPv6 -ErrorAction SilentlyContinue | Sort-Object InterfaceMetric | Format-Table -AutoSize -Wrap | Out-String -Width 4096 } catch { Write-Output "ERROR: $_" }
+
+Write-Output '###DNS_SERVERS###'
+try { Get-DnsClientServerAddress | Format-Table -AutoSize -Wrap | Out-String -Width 4096 } catch { Write-Output "ERROR: $_" }
+
+Write-Output '###NRPT###'
+try { Get-DnsClientNrptRule -ErrorAction SilentlyContinue | Format-List | Out-String -Width 4096 } catch { Write-Output "ERROR: $_" }
+
+Write-Output '###DNS_CACHE###'
+try { Get-DnsClientCache -ErrorAction SilentlyContinue | Format-Table -AutoSize -Wrap | Out-String -Width 4096 } catch { Write-Output "ERROR: $_" }
+
+Write-Output '###BINDING_IPV6###'
+try { Get-NetAdapterBinding -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue | Format-Table -AutoSize -Wrap | Out-String -Width 4096 } catch { Write-Output "ERROR: $_" }
+
+Write-Output '###FIREWALL_RULES###'
+try { Get-NetFirewallRule -DisplayName 'VPNTE-*' -ErrorAction SilentlyContinue | Format-List Name, DisplayName, Enabled, Direction, Action, Profile, EdgeTraversalPolicy, InterfaceType, Description | Out-String -Width 4096 } catch { Write-Output "ERROR: $_" }
+
+Write-Output '###FIREWALL_PROFILES###'
+try { Get-NetFirewallProfile | Format-Table -AutoSize -Wrap | Out-String -Width 4096 } catch { Write-Output "ERROR: $_" }
+
+Write-Output '###WINHTTP_PROXY###'
+try { netsh winhttp show proxy 2>&1 | Out-String } catch { Write-Output "ERROR: $_" }
+
+Write-Output '###PROXY_10808###'
+${proxyBlock(10808)}
+
+Write-Output '###PROXY_10809###'
+${proxyBlock(10809)}
+
+Write-Output '###ELEVATED###'
+try {
+  ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+} catch {
+  Write-Output 'ERROR'
 }
 `
-  const result = await tryPS(script)
-  if (typeof result !== 'string') return result
-  const trimmed = result.trim()
-  if (!trimmed || trimmed === PS_EMPTY_MARKER || trimmed.includes(PS_EMPTY_MARKER)) {
-    return { empty: true }
+}
+
+/**
+ * Parse the combined PS output by splitting on ###MARKER### delimiters.
+ * Returns a map of section name (without the ###) → trimmed content.
+ */
+function parseCombinedPSSections(output: string): Map<string, string> {
+  const sections = new Map<string, string>()
+  const parts = output.split(/^###(\w+)###$/m)
+  for (let i = 1; i < parts.length; i += 2) {
+    const name = parts[i]
+    const content = (parts[i + 1] || '').trim()
+    sections.set(name, content)
   }
-  return trimmed
+  return sections
+}
+
+/** Convert a section's content to string | { error }. Sections that start
+ *  with "ERROR: " (emitted by the try/catch wrapper) are treated as errors. */
+function sectionToStringOrError(content: string | undefined): string | { error: string } {
+  if (content === undefined || !content) return { error: 'no output' }
+  if (content.startsWith('ERROR: ')) return { error: content.slice(7).trim() }
+  return content
+}
+
+/** Convert a proxy-owner section to string | { empty: true } | { error }.
+ *  The PS proxy blocks emit __VPNTE_EMPTY__ for both "no listener" and
+ *  command errors (same semantics as the old tryProxyOwnersPS helper). */
+function sectionToProxyResult(content: string | undefined): string | { empty: true } | { error: string } {
+  if (content === undefined || !content) return { empty: true }
+  if (content === PS_EMPTY_MARKER || content.includes(PS_EMPTY_MARKER)) return { empty: true }
+  if (content.startsWith('ERROR: ')) return { error: content.slice(7).trim() }
+  return content
+}
+
+/** Convert the elevated section's content to boolean | null. */
+function sectionToElevated(content: string | undefined): boolean | null {
+  if (content === undefined || !content || content === 'ERROR') return null
+  return /true/i.test(content.trim())
 }
 
 /**
@@ -200,74 +284,70 @@ async function tryGetSingboxRunning(): Promise<{ running: boolean; pid?: number 
 
 /**
  * The Windows-y bits. We pull EVERYTHING here so support has zero questions
- * to ask back. Each PS command is independent — one failure (e.g. missing
+ * to ask back. ALL PowerShell diagnostic commands are combined into a single
+ * powershell.exe invocation (buildCombinedPSScript) to avoid spawning ~14
+ * separate PS processes per snapshot. The tasklist-based sing-box check
+ * stays separate because it's not PowerShell. Each PS command inside the
+ * combined script is independently try/caught so one failure (e.g. missing
  * cmdlet on an old Windows version) never blocks the rest.
  */
 async function capturePlatformDumps(): Promise<Partial<SystemSnapshot>> {
   if (process.platform !== 'win32') {
     return {
       netAdapters: { error: 'not Windows' },
-      netIPConfiguration: { error: 'not Windows' }
+      netIPConfiguration: { error: 'not Windows' },
+      isElevated: null
     }
   }
 
-  // We run them in parallel. Each tryPS catches its own errors so we don't
-  // need a try/catch around Promise.all.
-  const [
-    netAdapters,
-    netIPConfiguration,
-    netRouteIPv4,
-    netRouteIPv6,
-    dnsClientServerAddresses,
-    dnsClientNrptRules,
-    dnsClientCache,
-    netAdapterBindingsIPv6,
-    firewallVpnteRules,
-    firewallProfile,
-    netshWinhttp,
-    proxyOwnersPort10808,
-    proxyOwnersPort10809,
-    singboxRunning
-  ] = await Promise.all([
-    tryPS('Get-NetAdapter | Format-Table -AutoSize -Wrap | Out-String -Width 4096'),
-    tryPS('Get-NetIPConfiguration -All -Detailed | Out-String -Width 4096'),
-    tryPS('Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue | Sort-Object InterfaceMetric | Format-Table -AutoSize -Wrap | Out-String -Width 4096'),
-    tryPS('Get-NetRoute -AddressFamily IPv6 -ErrorAction SilentlyContinue | Sort-Object InterfaceMetric | Format-Table -AutoSize -Wrap | Out-String -Width 4096'),
-    tryPS('Get-DnsClientServerAddress | Format-Table -AutoSize -Wrap | Out-String -Width 4096'),
-    tryPS('Get-DnsClientNrptRule -ErrorAction SilentlyContinue | Format-List | Out-String -Width 4096'),
-    tryPS('Get-DnsClientCache -ErrorAction SilentlyContinue | Format-Table -AutoSize -Wrap | Out-String -Width 4096'),
-    tryPS('Get-NetAdapterBinding -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue | Format-Table -AutoSize -Wrap | Out-String -Width 4096'),
-    tryPS("Get-NetFirewallRule -DisplayName 'VPNTE-*' -ErrorAction SilentlyContinue | Format-List Name, DisplayName, Enabled, Direction, Action, Profile, EdgeTraversalPolicy, InterfaceType, Description | Out-String -Width 4096"),
-    tryPS('Get-NetFirewallProfile | Format-Table -AutoSize -Wrap | Out-String -Width 4096'),
-    tryPS('netsh winhttp show proxy 2>&1 | Out-String'),
-    tryProxyOwnersPS(10808),
-    tryProxyOwnersPS(10809),
+  // Run the combined PS script and the tasklist check in parallel.
+  // The combined script gets a 30s timeout (it does more work than any
+  // single command did before at 15s).
+  const [combinedResult, singboxRunning] = await Promise.all([
+    tryPS(buildCombinedPSScript(), 30000),
     tryGetSingboxRunning()
   ])
 
+  // If the entire PS process failed, propagate the error to every PS section.
+  if (typeof combinedResult !== 'string') {
+    return {
+      netAdapters: combinedResult,
+      netIPConfiguration: combinedResult,
+      netRouteIPv4: combinedResult,
+      netRouteIPv6: combinedResult,
+      dnsClientServerAddresses: combinedResult,
+      dnsClientNrptRules: combinedResult,
+      dnsClientCache: combinedResult,
+      netAdapterBindingsIPv6: combinedResult,
+      firewallVpnteRules: combinedResult,
+      firewallProfile: combinedResult,
+      netshWinhttp: combinedResult,
+      proxyOwnersPort10808: combinedResult,
+      proxyOwnersPort10809: combinedResult,
+      isElevated: null,
+      singboxRunning
+    }
+  }
+
+  const sections = parseCombinedPSSections(combinedResult)
+
   return {
-    netAdapters,
-    netIPConfiguration,
-    netRouteIPv4,
-    netRouteIPv6,
-    dnsClientServerAddresses,
-    dnsClientNrptRules,
-    dnsClientCache,
-    netAdapterBindingsIPv6,
-    firewallVpnteRules,
-    firewallProfile,
-    netshWinhttp,
-    proxyOwnersPort10808,
-    proxyOwnersPort10809,
+    netAdapters: sectionToStringOrError(sections.get('ADAPTERS')),
+    netIPConfiguration: sectionToStringOrError(sections.get('IPCONFIG')),
+    netRouteIPv4: sectionToStringOrError(sections.get('ROUTES4')),
+    netRouteIPv6: sectionToStringOrError(sections.get('ROUTES6')),
+    dnsClientServerAddresses: sectionToStringOrError(sections.get('DNS_SERVERS')),
+    dnsClientNrptRules: sectionToStringOrError(sections.get('NRPT')),
+    dnsClientCache: sectionToStringOrError(sections.get('DNS_CACHE')),
+    netAdapterBindingsIPv6: sectionToStringOrError(sections.get('BINDING_IPV6')),
+    firewallVpnteRules: sectionToStringOrError(sections.get('FIREWALL_RULES')),
+    firewallProfile: sectionToStringOrError(sections.get('FIREWALL_PROFILES')),
+    netshWinhttp: sectionToStringOrError(sections.get('WINHTTP_PROXY')),
+    proxyOwnersPort10808: sectionToProxyResult(sections.get('PROXY_10808')),
+    proxyOwnersPort10809: sectionToProxyResult(sections.get('PROXY_10809')),
+    isElevated: sectionToElevated(sections.get('ELEVATED')),
     singboxRunning
   }
-}
-
-async function isElevated(): Promise<boolean | null> {
-  if (process.platform !== 'win32') return null
-  const result = await tryPS('([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)', 5000)
-  if (typeof result === 'string') return /true/i.test(result.trim())
-  return null
 }
 
 /**
@@ -279,9 +359,8 @@ export async function captureSnapshot(reason: SnapshotReason): Promise<string | 
   const fileName = `snapshot-${ts}-${reason}.json`
 
   const userData = app.getPath('userData')
-  const [platform, elevated, baseline, killSwitch, adapterLockdown] = await Promise.all([
+  const [platform, baseline, killSwitch, adapterLockdown] = await Promise.all([
     capturePlatformDumps(),
-    isElevated(),
     // Network baseline manifest lives under network-backups/ (systemNetwork.ts),
     // not the userData root — the old path was always null.
     tryReadJsonFile(join(userData, 'network-backups', 'latest-tun-network-baseline.json')),
@@ -299,7 +378,6 @@ export async function captureSnapshot(reason: SnapshotReason): Promise<string | 
     osType: osType(),
     osRelease: release(),
     appVersion: app.getVersion(),
-    isElevated: elevated,
     memMB: {
       total: Math.round(totalmem() / 1024 / 1024),
       free: Math.round(freemem() / 1024 / 1024)
@@ -310,7 +388,8 @@ export async function captureSnapshot(reason: SnapshotReason): Promise<string | 
       killSwitch,
       adapterLockdown
     },
-    ...platform
+    ...platform,
+    isElevated: platform.isElevated ?? null
   }
 
   try {

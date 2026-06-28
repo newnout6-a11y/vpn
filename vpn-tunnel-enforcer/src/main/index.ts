@@ -63,7 +63,6 @@ import { registerConfigManagerIpcHandlers } from './configManager'
 import { registerNotificationPrefsIpcHandlers } from './notificationPrefs'
 import { registerI18nIpcHandlers } from './i18n'
 import { registerThemeIpcHandlers } from './themeManager'
-import { registerWidgetLayoutIpcHandlers } from './widgetLayout'
 import { externalProxy } from './externalProxy'
 
 const exec = promisify(execCb)
@@ -1344,9 +1343,6 @@ app.whenReady().then(async () => {
   registerDomainRoutingIpcHandlers()
   registerConfigManagerIpcHandlers()
   registerNotificationPrefsIpcHandlers()
-
-  // Widget layout (depends on feature services being registered)
-  registerWidgetLayoutIpcHandlers()
 
   // Initialize services that need startup logic
   const singboxExePath = app.isPackaged

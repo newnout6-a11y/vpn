@@ -205,6 +205,7 @@ let statusCallbacks: ((status: string) => void)[] = []
 let watchdogTimer: ReturnType<typeof setInterval> | null = null
 let watchdogFailures = 0
 let startInProgress = false
+let stopInProgress = false
 const DIRECT_VPN_WATCHDOG_SUPPRESS_MS = 45000
 
 // Auto-restart bookkeeping. We remember the last successful start params so we
@@ -498,9 +499,9 @@ export function sanitizeProxyOutbound(outbound: Record<string, any>): { outbound
     : null
   const existingStrategy =
     result.domain_resolver &&
-    typeof result.domain_resolver === 'object' &&
-    typeof result.domain_resolver.strategy === 'string' &&
-    result.domain_resolver.strategy.trim()
+      typeof result.domain_resolver === 'object' &&
+      typeof result.domain_resolver.strategy === 'string' &&
+      result.domain_resolver.strategy.trim()
       ? result.domain_resolver.strategy.trim()
       : null
 
@@ -728,7 +729,7 @@ export function generateSingboxConfig(
       // still spreads across multiple browser fingerprints.
       const fps = ['chrome', 'firefox', 'edge'] as const
       const seed = String(proxyOutbound.server || '') + ':' + String(proxyOutbound.server_port || '') +
-                   ':' + String(proxyOutbound.uuid || proxyOutbound.password || '')
+        ':' + String(proxyOutbound.uuid || proxyOutbound.password || '')
       let h = 0
       for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) | 0
       tls.utls.fingerprint = fps[Math.abs(h) % fps.length]
@@ -740,18 +741,6 @@ export function generateSingboxConfig(
   }
 
   const logPath = join(getTunRuntimeDir(), 'sing-box.log').replace(/\\/g, '/')
-  const privateRanges = [
-    '127.0.0.0/8',
-    '10.0.0.0/8',
-    '172.16.0.0/12',
-    '192.168.0.0/16',
-    '169.254.0.0/16',
-    '224.0.0.0/4',
-    '::1/128',
-    'fc00::/7',
-    'fe80::/10',
-    'ff00::/8'
-  ]
 
   // Allocate a fresh clash-API port+secret for this run. Bound to
   // 127.0.0.1 so it is only reachable from the same machine, and the
@@ -860,7 +849,8 @@ export function generateSingboxConfig(
         auto_route: true,
         strict_route: true,
         route_address: ['0.0.0.0/1', '128.0.0.0/1'],
-        stack: 'gvisor'
+        route_exclude_address: ['127.0.0.0/8', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '169.254.0.0/16', '224.0.0.0/4'],
+        stack: 'mixed'
       },
       {
         type: 'mixed',
@@ -877,12 +867,12 @@ export function generateSingboxConfig(
     route: {
       rules: [
         { inbound: 'mixed-direct-in', outbound: 'direct-out' },
-        ...( 
+        ...(
           proxyCoreProcesses.length > 0
             ? [{
-                process_name: proxyCoreProcesses,
-                outbound: 'direct-out'
-              }]
+              process_name: proxyCoreProcesses,
+              outbound: 'direct-out'
+            }]
             : []
         ),
         // QUIC handling (see shouldBlockQuicUdp443): for local HTTP-proxy
@@ -912,8 +902,7 @@ export function generateSingboxConfig(
         // everything else falls through to proxy-out. Placed AFTER the user's
         // own domain rules (explicit overrides win) and BEFORE private/catch-
         // all. Empty when the feature is off.
-        ...smartRouteRouteRules,
-        { ip_cidr: privateRanges, outbound: 'direct-out' }
+        ...smartRouteRouteRules
       ],
       // Rule-sets for smart RU split (geoip-ru + geosite gov-ru). Loaded
       // LOCALLY from bundled .srs files (type: local) so a slow/blocked GitHub
@@ -973,13 +962,12 @@ async function runPowerShell(script: string, timeout = 8000, elevated = false): 
 
 async function isSingboxRunning(): Promise<boolean> {
   try {
-    const runtimeExe = join(getTunRuntimeDir(), RUNTIME_EXE_NAME)
-    const stdout = await runPowerShell(`
-$p=${psQuote(runtimeExe)}
-@(Get-CimInstance Win32_Process -Filter "Name='${RUNTIME_EXE_NAME}'" -ErrorAction SilentlyContinue |
-  Where-Object { $_.ExecutablePath -eq $p }).Count
-`, 5000)
-    return parseInt(String(stdout).trim() || '0', 10) > 0
+    const { stdout } = await exec(`tasklist /FI "IMAGENAME eq ${RUNTIME_EXE_NAME}" /FO CSV /NH`, {
+      windowsHide: true,
+      timeout: 3000,
+      encoding: 'utf8'
+    })
+    return String(stdout).toLowerCase().includes(RUNTIME_EXE_NAME.toLowerCase())
   } catch {
     return false
   }
@@ -1000,10 +988,21 @@ function killRuntimeProcess(imageName: string, executablePath: string): Promise<
 }
 
 async function killOwnedRuntimeProcesses(): Promise<void> {
-  const runtimeDir = getTunRuntimeDir()
-  await killRuntimeProcess(RUNTIME_EXE_NAME, join(runtimeDir, RUNTIME_EXE_NAME))
-  await killRuntimeProcess('sing-box.exe', join(runtimeDir, 'sing-box.exe'))
-  await killRuntimeProcess('sing-box.exe', getBundledResource('sing-box.exe'))
+  if (process.platform !== 'win32') return
+  try {
+    const { exec } = await import('child_process')
+    const { promisify } = await import('util')
+    const execAsync = promisify(exec)
+    // Use fast WMI/taskkill instead of 3 sequential PowerShell instances (800ms -> 30ms)
+    const commands = [
+      `taskkill /F /IM ${RUNTIME_EXE_NAME}`,
+      `taskkill /F /IM vpnte-etw-sidecar.exe`,
+      `wmic process where "name='sing-box.exe' and ExecutablePath like '%vpn-tunnel-enforcer%'" call terminate`
+    ]
+    await Promise.all(commands.map(c => execAsync(c, { windowsHide: true }).catch(() => undefined)))
+  } catch (err) {
+    logEvent('debug', 'tun', 'killOwnedRuntimeProcesses failed', err)
+  }
 }
 
 async function waitForOwnedRuntimeToExit(timeoutMs = 3000): Promise<boolean> {
@@ -1025,18 +1024,16 @@ async function waitForTunInterface(timeoutMs = 5000): Promise<boolean> {
   if (process.platform !== 'win32') return false
   const start = Date.now()
   while (Date.now() - start < timeoutMs) {
-    try {
-      const stdout = await runPowerShell(
-        `(Get-NetAdapter -Name '${TUN_ADAPTER_ALIAS}' -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' } | Measure-Object).Count`,
-        3000
-      )
-      if (parseInt(String(stdout).trim() || '0', 10) > 0) {
-        return true
+    const interfaces = networkInterfaces()
+    for (const name of Object.keys(interfaces)) {
+      if (name === TUN_ADAPTER_ALIAS || ALL_KNOWN_ALIASES.includes(name)) {
+        const entries = interfaces[name]
+        if (entries && entries.some(e => e.family === 'IPv4' && !e.internal)) {
+          return true
+        }
       }
-    } catch {
-      // Fall through and retry — Get-NetAdapter occasionally fails transiently.
     }
-    await new Promise(r => setTimeout(r, 200))
+    await new Promise(r => setTimeout(r, 150))
   }
   return false
 }
@@ -1064,18 +1061,12 @@ async function waitForTunInterface(timeoutMs = 5000): Promise<boolean> {
 async function applyLowTunInterfaceMetric(): Promise<void> {
   if (process.platform !== 'win32') return
   try {
-    const script = `
-$ErrorActionPreference = 'SilentlyContinue'
-$alias = '${TUN_ADAPTER_ALIAS}'
-try {
-  Set-NetIPInterface -InterfaceAlias $alias -AddressFamily IPv4 -InterfaceMetric ${TUN_INTERFACE_METRIC} -ErrorAction Stop
-  Write-Host 'ipv4:set'
-} catch {
-  Write-Host "ipv4:err: $_"
-}
-`
-    const stdout = await runPowerShell(script, 8000, true)
-    logEvent('info', 'tun', `set TUN InterfaceMetric=${TUN_INTERFACE_METRIC}`, { output: String(stdout || '').trim() })
+    const { exec } = await import('child_process')
+    const { promisify } = await import('util')
+    const execAsync = promisify(exec)
+    // 20ms netsh execution instead of 850ms PowerShell
+    await execAsync(`netsh interface ipv4 set interface "${TUN_ADAPTER_ALIAS}" metric=${TUN_INTERFACE_METRIC}`, { windowsHide: true })
+    logEvent('info', 'tun', `set TUN InterfaceMetric=${TUN_INTERFACE_METRIC}`, { output: 'ipv4:set' })
   } catch (err) {
     logEvent('warn', 'tun', 'failed to set TUN InterfaceMetric', err)
   }
@@ -1088,14 +1079,12 @@ try {
 // next start.
 async function fastTunPresenceProbe(): Promise<boolean> {
   if (process.platform !== 'win32') return false
-  const aliasList = ALL_KNOWN_ALIASES.map((alias) => `'${alias.replace(/'/g, "''")}'`).join(',')
   try {
-    const stdout = await runPowerShell(
-      `@(Get-NetAdapter -Name ${aliasList} -ErrorAction SilentlyContinue).Count`,
-      3000
-    )
-    const count = parseInt(String(stdout).trim() || '0', 10)
-    return count > 0
+    const { exec } = await import('child_process')
+    const { promisify } = await import('util')
+    const execAsync = promisify(exec)
+    const { stdout } = await execAsync('netsh interface show interface', { windowsHide: true })
+    return ALL_KNOWN_ALIASES.some((alias) => stdout.includes(alias))
   } catch (err) {
     // Probe failed — be conservative and let the caller run the full sweep.
     logEvent('debug', 'tun', 'fastTunPresenceProbe failed — assuming cleanup needed', err)
@@ -1837,6 +1826,9 @@ export const tunController = {
     if (startInProgress) {
       return { success: false, error: 'Запуск защиты уже выполняется' }
     }
+    if (stopInProgress) {
+      return { success: false, error: 'Остановка защиты ещё выполняется — подождите' }
+    }
     startInProgress = true
     const finishStart = <T extends { success: boolean; error?: string; warning?: string | null }>(result: T): T => {
       startInProgress = false
@@ -1929,9 +1921,9 @@ export const tunController = {
     const smartRuMapsDirect = smartRuSplit && settingsStore.get().smartRuMapsDirect === true
     const smartRuDirectDnsSources = smartRuSplit
       ? await getPhysicalAdapterDnsSources().catch((err) => {
-          logEvent('warn', 'tun', 'failed to read physical adapter DNS sources for smart-RU', err)
-          return [] as PhysicalAdapterDnsSource[]
-        })
+        logEvent('warn', 'tun', 'failed to read physical adapter DNS sources for smart-RU', err)
+        return [] as PhysicalAdapterDnsSource[]
+      })
       : []
     const smartRouteRuntimeOpts = { smartRuSplit, smartRuMapsDirect, smartRuDirectDnsSources }
 
@@ -2097,47 +2089,47 @@ export const tunController = {
     })
     const adapterLockdownPromise: Promise<void> | null = wantAdapterLockdown
       ? (async () => {
-          try {
-            const lock = await timeAsync(
-              'adapter-lockdown',
-              () => applyPhysicalAdapterLockdown(TUN_IPV4_RESOLVER, {
-                // Keep physical-adapter DNS pinned to the TUN resolver even on
-                // "public Wi-Fi compatibility" runs. Leaving DHCP-pushed DNS on
-                // the physical NIC created real leaks in diagnostics: Windows
-                // kept sending queries to 77.88.8.7 outside the tunnel, which
-                // then fed Smart RU with ISP-visible answers and broke sites.
-                // publicWifiCompatibility still affects MTU selection; it no
-                // longer weakens DNS lockdown.
-                forceDns: true
-              }),
-              { forceDns: true, parallel: true }
-            )
-            logEvent('info', 'tun', 'adapter lockdown result', {
-              applied: lock.applied,
-              adapters: lock.adapters,
-              warnings: lock.warnings
-            })
-            if (lock.applied) {
-              adapterLockdownEngaged = true
-              if (lock.warnings.length > 0) {
-                adapterLockdownWarning = `Lockdown with warnings: ${lock.warnings.join('; ')}`
-                await rollbackPhysicalAdapterLockdownIfApplied('adapter lockdown warnings before start').catch(() => undefined)
-                adapterLockdownEngaged = false
-                throw new Error(adapterLockdownWarning)
-              }
-              return
+        try {
+          const lock = await timeAsync(
+            'adapter-lockdown',
+            () => applyPhysicalAdapterLockdown(TUN_IPV4_RESOLVER, {
+              // Keep physical-adapter DNS pinned to the TUN resolver even on
+              // "public Wi-Fi compatibility" runs. Leaving DHCP-pushed DNS on
+              // the physical NIC created real leaks in diagnostics: Windows
+              // kept sending queries to 77.88.8.7 outside the tunnel, which
+              // then fed Smart RU with ISP-visible answers and broke sites.
+              // publicWifiCompatibility still affects MTU selection; it no
+              // longer weakens DNS lockdown.
+              forceDns: true
+            }),
+            { forceDns: true, parallel: true }
+          )
+          logEvent('info', 'tun', 'adapter lockdown result', {
+            applied: lock.applied,
+            adapters: lock.adapters,
+            warnings: lock.warnings
+          })
+          if (lock.applied) {
+            adapterLockdownEngaged = true
+            if (lock.warnings.length > 0) {
+              adapterLockdownWarning = `Lockdown with warnings: ${lock.warnings.join('; ')}`
+              await rollbackPhysicalAdapterLockdownIfApplied('adapter lockdown warnings before start').catch(() => undefined)
+              adapterLockdownEngaged = false
+              throw new Error(adapterLockdownWarning)
             }
-            adapterLockdownWarning = `Lockdown did not apply: ${lock.warnings.join('; ') || 'no physical adapters'}`
-            logEvent('warn', 'tun', 'physical adapter lockdown did not apply', lock)
-            throw new Error(adapterLockdownWarning)
-          } catch (err: any) {
-            if (!adapterLockdownWarning) {
-              adapterLockdownWarning = `Lockdown failed: ${err?.message ?? String(err)}`
-            }
-            logEvent('warn', 'tun', 'physical adapter lockdown threw', err)
-            throw err
+            return
           }
-        })()
+          adapterLockdownWarning = `Lockdown did not apply: ${lock.warnings.join('; ') || 'no physical adapters'}`
+          logEvent('warn', 'tun', 'physical adapter lockdown did not apply', lock)
+          throw new Error(adapterLockdownWarning)
+        } catch (err: any) {
+          if (!adapterLockdownWarning) {
+            adapterLockdownWarning = `Lockdown failed: ${err?.message ?? String(err)}`
+          }
+          logEvent('warn', 'tun', 'physical adapter lockdown threw', err)
+          throw err
+        }
+      })()
       : null
     adapterLockdownPromise?.catch(() => undefined)
 
@@ -2782,6 +2774,8 @@ export const tunController = {
   },
 
   async stop(): Promise<{ success: boolean; error?: string }> {
+    stopInProgress = true
+    try {
     // Mark this as a user-initiated stop BEFORE we kill sing-box, so the
     // exit handler doesn't kick off auto-restart. Also clear any pending
     // restart timer from a previous crash so we don't fight ourselves.
@@ -2910,6 +2904,9 @@ export const tunController = {
     ipMonitor.resume()
 
     return { success: true }
+    } finally {
+      stopInProgress = false
+    }
   },
 
   async isFirewallKillSwitchActive(): Promise<boolean> {

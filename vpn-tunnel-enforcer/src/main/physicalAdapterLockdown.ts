@@ -168,15 +168,17 @@ async function runPS(script: string, timeoutMs = 30000): Promise<string> {
  * Note: PS arrays of single objects deserialize as the object itself, so we
  * normalize that on the JS side.
  */
+let snapshotPromise: Promise<AdapterSnapshot[]> | null = null
+let snapshotPromiseTime = 0
+
 async function snapshotPhysicalAdapters(): Promise<AdapterSnapshot[]> {
-  // We DON'T filter by HardwareInterface=$true because some real Wi-Fi
-  // adapters (especially on laptops with funky drivers) report it as $false
-  // and we'd otherwise skip them and leak. Instead we filter by adapter
-  // description against the known virtual/loopback families. If a real
-  // adapter has a description matching one of those, we want it skipped
-  // anyway. We additionally require a physical MAC address (LinkLayerAddress
-  // present and not all-zeros) to dodge purely-software adapters.
-  const script = `
+  if (snapshotPromise && Date.now() - snapshotPromiseTime < 10000) {
+    return snapshotPromise
+  }
+
+  snapshotPromiseTime = Date.now()
+  snapshotPromise = (async () => {
+    const script = `
 $ErrorActionPreference = 'SilentlyContinue'
 $rows = @()
 $adapters = Get-NetAdapter |
@@ -217,6 +219,14 @@ $rows | ConvertTo-Json -Compress -Depth 4
     forcedDnsTo: null,
     forcedIpv6Off: false
   }))
+  })()
+
+  try {
+    return await snapshotPromise
+  } catch (err) {
+    snapshotPromise = null
+    throw err
+  }
 }
 
 function netshValue(raw: string, label: string): string | null {
@@ -349,34 +359,63 @@ export async function applyPhysicalAdapterLockdown(tunDnsIpv4: string, options: 
   })
 
   const warnings: string[] = []
-  const adapterTasks = adapters.map(async (a) => {
-    try {
-      const dnsLine = forceDns
-        ? `try { Set-DnsClientServerAddress -InterfaceAlias ${psSingleQuote(a.alias)} -ServerAddresses ${psSingleQuote(tunDnsIpv4)} -ErrorAction Stop; Write-Host 'dns:set' } catch { Write-Host "dns:err: $_" }`
-        : `Write-Host 'dns:skip'`
-      const script = `
-$ErrorActionPreference = 'Stop'
-try { Disable-NetAdapterBinding -InterfaceAlias ${psSingleQuote(a.alias)} -ComponentID ms_tcpip6 -ErrorAction Stop; Write-Host 'ipv6:off' } catch { Write-Host "ipv6:err: $_" }
+  
+  let combinedScript = `$ErrorActionPreference = 'Continue'\n`
+  for (let i = 0; i < adapters.length; i++) {
+    const a = adapters[i]
+    const dnsLine = forceDns
+      ? `try { Set-DnsClientServerAddress -InterfaceAlias ${psSingleQuote(a.alias)} -ServerAddresses ${psSingleQuote(tunDnsIpv4)} -ErrorAction Stop; Write-Host "A${i}_dns:set" } catch { Write-Host "A${i}_dns_err: $_" }`
+      : `Write-Host "A${i}_dns:skip"`
+    combinedScript += `
+try { Disable-NetAdapterBinding -InterfaceAlias ${psSingleQuote(a.alias)} -ComponentID ms_tcpip6 -ErrorAction Stop; Write-Host "A${i}_ipv6:off" } catch { Write-Host "A${i}_ipv6_err: $_" }
 ${dnsLine}
-try { Clear-DnsClientCache -ErrorAction Stop; Write-Host 'cache:clear' } catch {}
 `
-      const out = await runPS(script, 15000)
-      const ipv6Off = /ipv6:off/.test(out)
-      const dnsSet = /dns:set/.test(out)
-      const dnsSkipped = /dns:skip/.test(out)
-      a.forcedIpv6Off = ipv6Off
-      a.forcedDnsTo = dnsSet ? [tunDnsIpv4] : null
-      if (!ipv6Off || (forceDns && !dnsSet)) {
-        warnings.push(`${a.alias}: ${out.trim().split('\n').filter((l) => /err/.test(l)).join('; ') || 'partial'}`)
+  }
+
+  // Also include the transition adapters in the same script
+  combinedScript += `
+try { netsh interface teredo set state type=disabled | Out-Null; Write-Host 'TRANS_teredo:disabled' } catch { Write-Host "TRANS_teredo_err: $_" }
+try { netsh interface 6to4 set state state=disabled | Out-Null; Write-Host 'TRANS_6to4:disabled' } catch { Write-Host "TRANS_6to4_err: $_" }
+try { netsh interface isatap set state state=disabled | Out-Null; Write-Host 'TRANS_isatap:disabled' } catch { Write-Host "TRANS_isatap_err: $_" }
+try { reg add "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\DNSClient" /v DisableSmartNameResolution /t REG_DWORD /d 1 /f | Out-Null; Write-Host 'DNS_SMNR:off' } catch { Write-Host "DNS_SMNR_err: $_" }
+try { reg add "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Dnscache\\Parameters" /v DisableParallelAandAAAA /t REG_DWORD /d 1 /f | Out-Null; Write-Host 'DNS_PARALLEL:off' } catch { Write-Host "DNS_PARALLEL_err: $_" }
+try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}
+`
+
+  try {
+    const out = await runPS(combinedScript, 30000)
+    
+    // Parse results for physical adapters
+    for (let i = 0; i < adapters.length; i++) {
+      const a = adapters[i]
+      try {
+        const ipv6Off = new RegExp(`A${i}_ipv6:off`).test(out)
+        const dnsSet = new RegExp(`A${i}_dns:set`).test(out)
+        const dnsSkipped = new RegExp(`A${i}_dns:skip`).test(out)
+        
+        a.forcedIpv6Off = ipv6Off
+        a.forcedDnsTo = dnsSet ? [tunDnsIpv4] : null
+        
+        if (!ipv6Off || (forceDns && !dnsSet)) {
+          const errs = out.trim().split(/\r?\n/).filter(l => new RegExp(`A${i}_.*err:`).test(l)).join('; ')
+          warnings.push(`${a.alias}: ${errs || 'partial'}`)
+        }
+        logEvent('info', 'phys-lockdown', `locked down ${a.alias}`, { ipv6Off, dnsSet, dnsSkipped })
+      } catch (err: any) {
+        warnings.push(`${a.alias}: ${err?.message ?? String(err)}`)
+        logEvent('warn', 'phys-lockdown', `lockdown failed for ${a.alias}`, err)
       }
-      logEvent('info', 'phys-lockdown', `locked down ${a.alias}`, { ipv6Off, dnsSet, dnsSkipped })
-    } catch (err: any) {
-      warnings.push(`${a.alias}: ${err?.message ?? String(err)}`)
-      logEvent('warn', 'phys-lockdown', `lockdown failed for ${a.alias}`, err)
     }
-  })
-  const transitionTask = applyTransitionAdapterLockdown(transitionAdapters).then(w => warnings.push(...w))
-  await Promise.all([...adapterTasks, transitionTask])
+
+    // Parse results for transition adapters
+    for (const line of out.trim().split(/\r?\n/).filter(x => /TRANS_.*_err/.test(x))) {
+      warnings.push(line)
+    }
+    logEvent('info', 'phys-lockdown', 'transition adapters disabled', { snapshot: transitionAdapters, out: out.trim() })
+  } catch (err: any) {
+    warnings.push(`Batch PS error: ${err?.message ?? String(err)}`)
+    logEvent('warn', 'phys-lockdown', 'batch lockdown failed', err)
+  }
 
   // Overwrite the pending manifest with the ACTUAL outcome per adapter (some
   // may have only partially applied). Rollback now restores exactly what was
@@ -404,34 +443,52 @@ export async function rollbackPhysicalAdapterLockdownIfApplied(reason: string, o
   const m = await readManifest()
   if (!m) return { rolledBack: false }
 
-  const rollbackTasks = m.adapters.map(async (a) => {
-    try {
-      const shouldTouchDns = Array.isArray(a.forcedDnsTo) && a.forcedDnsTo.length > 0
-      const dnsRestoreLine = !shouldTouchDns
-        ? `Write-Host 'dns:noop'`
-        : (options.resetDnsToDhcp || a.ipv4DnsServers.length === 0)
-          ? `try { Set-DnsClientServerAddress -InterfaceAlias ${psSingleQuote(a.alias)} -ResetServerAddresses -ErrorAction Stop; Write-Host 'dns:reset' } catch { Write-Host "dns:err: $_" }`
-          : `try { Set-DnsClientServerAddress -InterfaceAlias ${psSingleQuote(a.alias)} -ServerAddresses ${a.ipv4DnsServers.map(psSingleQuote).join(',')} -ErrorAction Stop; Write-Host 'dns:restore' } catch { Write-Host "dns:err: $_" }`
-      const ipv6RestoreLine = a.forcedIpv6Off && a.ipv6Enabled
-        ? `try { Enable-NetAdapterBinding -InterfaceAlias ${psSingleQuote(a.alias)} -ComponentID ms_tcpip6 -ErrorAction Stop; Write-Host 'ipv6:on' } catch { Write-Host "ipv6:err: $_" }`
-        : `Write-Host 'ipv6:noop'`
-      const script = `
-$ErrorActionPreference = 'Continue'
+  let combinedScript = `$ErrorActionPreference = 'Continue'\n`
+  
+  for (let i = 0; i < m.adapters.length; i++) {
+    const a = m.adapters[i]
+    const shouldTouchDns = Array.isArray(a.forcedDnsTo) && a.forcedDnsTo.length > 0
+    const dnsRestoreLine = !shouldTouchDns
+      ? `Write-Host 'A${i}_dns:noop'`
+      : (options.resetDnsToDhcp || a.ipv4DnsServers.length === 0)
+        ? `try { Set-DnsClientServerAddress -InterfaceAlias ${psSingleQuote(a.alias)} -ResetServerAddresses -ErrorAction Stop; Write-Host 'A${i}_dns:reset' } catch { Write-Host "A${i}_dns_err: $_" }`
+        : `try { Set-DnsClientServerAddress -InterfaceAlias ${psSingleQuote(a.alias)} -ServerAddresses ${a.ipv4DnsServers.map(psSingleQuote).join(',')} -ErrorAction Stop; Write-Host 'A${i}_dns:restore' } catch { Write-Host "A${i}_dns_err: $_" }`
+    const ipv6RestoreLine = a.forcedIpv6Off && a.ipv6Enabled
+      ? `try { Enable-NetAdapterBinding -InterfaceAlias ${psSingleQuote(a.alias)} -ComponentID ms_tcpip6 -ErrorAction Stop; Write-Host 'A${i}_ipv6:on' } catch { Write-Host "A${i}_ipv6_err: $_" }`
+      : `Write-Host 'A${i}_ipv6:noop'`
+    combinedScript += `
 ${ipv6RestoreLine}
 ${dnsRestoreLine}
-try { Clear-DnsClientCache -ErrorAction Stop } catch {}
 `
-      const out = await runPS(script, 15000)
-      logEvent('info', 'phys-lockdown', `rolled back ${a.alias}`, { reason, out: out.trim() })
-    } catch (err) {
-      logEvent('warn', 'phys-lockdown', `rollback failed for ${a.alias}`, err)
-    }
-  })
-  const tasks: Promise<void>[] = [...rollbackTasks]
-  if (m.transitionAdapters) {
-    tasks.push(restoreTransitionAdapters(m.transitionAdapters, reason))
   }
-  await Promise.all(tasks)
+
+  if (m.transitionAdapters) {
+    const teredoType = netshState(m.transitionAdapters.teredoType)
+    const sixToFourState = netshState(m.transitionAdapters.sixToFourState)
+    const isatapState = netshState(m.transitionAdapters.isatapState)
+    combinedScript += `
+try { netsh interface teredo set state type=${teredoType} | Out-Null; Write-Host 'TRANS_teredo:restore' } catch { Write-Host "TRANS_teredo_err: $_" }
+try { netsh interface 6to4 set state state=${sixToFourState} | Out-Null; Write-Host 'TRANS_6to4:restore' } catch { Write-Host "TRANS_6to4_err: $_" }
+try { netsh interface isatap set state state=${isatapState} | Out-Null; Write-Host 'TRANS_isatap:restore' } catch { Write-Host "TRANS_isatap_err: $_" }
+`
+  }
+  combinedScript += `
+try { reg delete "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\DNSClient" /v DisableSmartNameResolution /f | Out-Null; Write-Host 'DNS_SMNR:restore' } catch { Write-Host "DNS_SMNR_err: $_" }
+try { reg delete "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Dnscache\\Parameters" /v DisableParallelAandAAAA /f | Out-Null; Write-Host 'DNS_PARALLEL:restore' } catch { Write-Host "DNS_PARALLEL_err: $_" }
+try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}`
+
+  try {
+    const out = await runPS(combinedScript, 30000)
+    for (let i = 0; i < m.adapters.length; i++) {
+      const a = m.adapters[i]
+      logEvent('info', 'phys-lockdown', `rolled back ${a.alias}`, { reason })
+    }
+    if (m.transitionAdapters) {
+      logEvent('info', 'phys-lockdown', 'transition adapters restored', { reason })
+    }
+  } catch (err) {
+    logEvent('warn', 'phys-lockdown', `batch rollback failed`, err)
+  }
 
   await deleteManifest()
   return { rolledBack: true }

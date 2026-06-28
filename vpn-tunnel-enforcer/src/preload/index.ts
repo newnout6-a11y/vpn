@@ -184,9 +184,6 @@ export interface ElectronAPI {
   speedTestRun: () => Promise<any>
   speedTestHistory: () => Promise<any[]>
   onSpeedTestProgress: (callback: (data: { percent: number; phase: string }) => void) => () => void
-  // Widgets
-  getWidgetLayout: () => Promise<any[]>
-  setWidgetLayout: (layout: any[]) => Promise<void>
   // Event listeners
   onIpChanged: (callback: (data: { ip: string; isLeak: boolean }) => void) => () => void
   onTunStatusChanged: (callback: (status: string) => void) => () => void
@@ -407,9 +404,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('speed-test:progress', handler)
     return () => ipcRenderer.removeListener('speed-test:progress', handler)
   },
-  // Widgets
-  getWidgetLayout: () => ipcRenderer.invoke('widgets:get-layout'),
-  setWidgetLayout: (layout: any[]) => ipcRenderer.invoke('widgets:set-layout', layout),
   // Event listeners
   onIpChanged: (callback: (data: { ip: string; isLeak: boolean }) => void) => {
     const handler = (_event: any, data: { ip: string; isLeak: boolean }) => callback(data)
