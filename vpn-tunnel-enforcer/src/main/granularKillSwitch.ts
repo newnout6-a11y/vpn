@@ -301,40 +301,6 @@ export const granularKillSwitch = {
       type: removed.type,
       value: removed.value
     })
-  },
-
-  /**
-   * Notify the service that VPN has connected.
-   * Called by the TUN controller when VPN comes up.
-   */
-  async onVpnConnected(): Promise<void> {
-    vpnConnected = true
-    logEvent('info', 'granular-kill-switch', 'VPN connected event received')
-    await applyPolicy()
-  },
-
-  /**
-   * Notify the service that VPN has disconnected.
-   * Called by the TUN controller when VPN goes down.
-   */
-  async onVpnDisconnected(): Promise<void> {
-    vpnConnected = false
-    logEvent('info', 'granular-kill-switch', 'VPN disconnected event received')
-    await applyPolicy()
-  },
-
-  /**
-   * Check if the kill-switch is currently blocking traffic.
-   */
-  async isActive(): Promise<boolean> {
-    return isKillSwitchActive()
-  },
-
-  /**
-   * Get the current VPN connection state as known by this service.
-   */
-  isVpnConnected(): boolean {
-    return vpnConnected
   }
 }
 

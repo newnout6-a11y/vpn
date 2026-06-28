@@ -871,12 +871,3 @@ export async function probePageSignal(url: string, proxyRules?: string): Promise
   })
 }
 
-/**
- * Back-compat boolean wrapper around the new signal probe + single-page
- * scorer. Kept for any caller that just wants "is this one render blocked".
- */
-export async function probeBrowserGeoBlock(url: string, proxyRules?: string): Promise<boolean> {
-  const sig = await probePageSignal(url, proxyRules)
-  if (!sig) return false
-  return scoreSinglePage(sig).blocked
-}

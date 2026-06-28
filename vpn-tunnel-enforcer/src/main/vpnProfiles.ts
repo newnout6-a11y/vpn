@@ -171,19 +171,6 @@ export function applyClientDeviceToOutbound(outbound: Record<string, any>, devic
   return result
 }
 
-export function applyClientDeviceToProfile(profile: VpnProfile, device: ClientDevice): VpnProfile {
-  const clientDevice = normalizeClientDevice(device)
-  const outbound = applyClientDeviceToOutbound(profile.outbound, clientDevice)
-  return {
-    ...profile,
-    outbound,
-    clientDevice,
-    clientFingerprint: outbound.tls && typeof outbound.tls === 'object'
-      ? clientFingerprintForDevice(clientDevice)
-      : undefined
-  }
-}
-
 export function getSubscriptionUserAgents(device: ClientDevice = 'pc'): string[] {
   const clientDevice = normalizeClientDevice(device)
   if (clientDevice === 'pc') {

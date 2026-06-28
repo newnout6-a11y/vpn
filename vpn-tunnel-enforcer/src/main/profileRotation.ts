@@ -17,6 +17,7 @@ import Store from 'electron-store'
 import { logEvent } from './appLogger'
 import { notify } from './notifications'
 import { serverPicker, pingServer } from './serverPicker'
+import { settingsStore } from './settings'
 import type { RotationConfig } from '../shared/ipc-types'
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -207,6 +208,7 @@ async function performRotation(): Promise<{ success: boolean; newProfile: string
       const profile = serverPicker.getProfiles().find((p) => p.id === nextProfileId)
       const outbound = profile && (profile as any).outbound
       if (outbound && typeof outbound === 'object') {
+        const settings = settingsStore.get()
         logEvent('info', 'profile-rotation', 'reconnecting live tunnel to rotated profile', {
           profileId: nextProfileId
         })
@@ -222,7 +224,11 @@ async function performRotation(): Promise<{ success: boolean; newProfile: string
             name: profile!.name,
             protocol: profile!.protocol as any,
             outbound
-          }
+          },
+          enableFirewallKillSwitch: settings.firewallKillSwitch === true,
+          enableAdapterLockdown: settings.strictAdapterLockdown === true,
+          publicWifiCompatibility: settings.publicWifiCompatibility,
+          stealthMode: settings.stealthMode === true
         }).catch((err) =>
           logEvent('warn', 'profile-rotation', 'start after rotate-reconnect failed', err)
         )

@@ -19,6 +19,8 @@ import { ipcMain, dialog } from 'electron'
 import Store from 'electron-store'
 import { randomUUID } from 'crypto'
 import { readFileSync } from 'fs'
+import { logEvent } from './appLogger'
+import { tunController } from './tunController'
 import type { DomainRule, DomainAction } from '../shared/ipc-types'
 
 // ─── Store ───────────────────────────────────────────────────────────────────
@@ -331,6 +333,20 @@ export const domainRoutingService = {
 
 // ─── IPC Registration ────────────────────────────────────────────────────────
 
+async function hotReloadIfActive(): Promise<void> {
+  const status = tunController.getStatus()
+  if (!status.running) return
+  logEvent('info', 'domain-routing', 'hot-reloading domain rules while TUN is active')
+  try {
+    const result = await tunController.restartWithLastOptions('domain-routing rule change')
+    if (!result.success) {
+      logEvent('warn', 'domain-routing', 'hot-reload restart failed', { error: result.error })
+    }
+  } catch (err) {
+    logEvent('warn', 'domain-routing', 'hot-reload failed', err)
+  }
+}
+
 export function registerDomainRoutingIpcHandlers(): void {
   ipcMain.handle('domain-routing:list', () => {
     return domainRoutingService.getRules()
@@ -338,28 +354,37 @@ export function registerDomainRoutingIpcHandlers(): void {
 
   ipcMain.handle(
     'domain-routing:add',
-    (_event, rule: Omit<DomainRule, 'id' | 'hitCount'>) => {
-      return domainRoutingService.addRule(rule)
+    async (_event, rule: Omit<DomainRule, 'id' | 'hitCount'>) => {
+      const result = domainRoutingService.addRule(rule)
+      await hotReloadIfActive()
+      return result
     }
   )
 
   ipcMain.handle(
     'domain-routing:update',
-    (_event, id: string, patch: Partial<DomainRule>) => {
-      return domainRoutingService.updateRule(id, patch)
+    async (_event, id: string, patch: Partial<DomainRule>) => {
+      const result = domainRoutingService.updateRule(id, patch)
+      await hotReloadIfActive()
+      return result
     }
   )
 
-  ipcMain.handle('domain-routing:delete', (_event, id: string) => {
+  ipcMain.handle('domain-routing:delete', async (_event, id: string) => {
     domainRoutingService.deleteRule(id)
+    await hotReloadIfActive()
   })
 
-  ipcMain.handle('domain-routing:reorder', (_event, ids: string[]) => {
-    return domainRoutingService.reorderRules(ids)
+  ipcMain.handle('domain-routing:reorder', async (_event, ids: string[]) => {
+    const result = domainRoutingService.reorderRules(ids)
+    await hotReloadIfActive()
+    return result
   })
 
-  ipcMain.handle('domain-routing:import', (_event, filePath: string) => {
-    return domainRoutingService.importFromFile(filePath)
+  ipcMain.handle('domain-routing:import', async (_event, filePath: string) => {
+    const result = domainRoutingService.importFromFile(filePath)
+    await hotReloadIfActive()
+    return result
   })
 
   ipcMain.handle('domain-routing:reset-hits', () => {

@@ -1356,6 +1356,9 @@ app.whenReady().then(async () => {
     onConnect: (schedule) => {
       logEvent('info', 'scheduler', `schedule "${schedule.name}" triggered connect`, { profileId: schedule.profileId, mode: schedule.mode })
       notify('info', 'Расписание', `VPN включён по расписанию: ${schedule.name}`, 'scheduleTriggered').catch(() => undefined)
+      if (schedule.profileId) {
+        try { serverPicker.selectProfile(schedule.profileId) } catch { /* profile may have been removed */ }
+      }
       if (schedule.mode === 'direct') {
         startDirectVpnProtection().catch(err =>
           logEvent('error', 'scheduler', 'scheduled direct VPN start failed', err)

@@ -317,18 +317,3 @@ export async function refreshSmartRouteRuleSets(force = false): Promise<SmartRou
   })
   return refreshInFlight
 }
-
-export async function maybeAutoRefreshSmartRouteRuleSets(reason: string): Promise<void> {
-  const settings = settingsStore.get()
-  if (!settings.smartRuSplit) return
-  if (settings.smartRuRuleSetMode !== 'managed') return
-  if (!settings.smartRuRuleSetAutoUpdate) return
-  const state = await getSmartRouteRuleSetState()
-  const last = state.lastRefreshFinishedAt || Math.max(...state.files.map((file) => file.lastUpdatedAt || 0), 0)
-  const intervalMs = settings.smartRuRuleSetUpdateIntervalHours * 60 * 60 * 1000
-  if (state.managedComplete && last > 0 && Date.now() - last < intervalMs) return
-  logEvent('info', 'smart-route', 'managed rule-set auto-refresh scheduled', { reason })
-  refreshSmartRouteRuleSets(false).catch((err) => {
-    logEvent('warn', 'smart-route', 'managed rule-set auto-refresh failed', err)
-  })
-}

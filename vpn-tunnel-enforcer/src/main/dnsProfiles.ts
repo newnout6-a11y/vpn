@@ -263,54 +263,6 @@ function generateId(): string {
   return `dns-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
 }
 
-// ─── Sing-box Config Integration ─────────────────────────────────────────────
-
-/**
- * Applies the active DNS profile to a sing-box configuration object.
- * Modifies the config's DNS section with the active profile's servers.
- *
- * If no active profile is selected, the config is returned unchanged.
- */
-export function applyToSingboxConfig(config: Record<string, any>): Record<string, any> {
-  const profile = getActiveDnsProfile()
-  if (!profile) return config
-
-  const servers: Array<{ address: string; tag: string }> = []
-
-  // Build server entries based on profile type
-  if (profile.type === 'doh') {
-    servers.push({ address: profile.primary, tag: 'dns-primary' })
-    if (profile.secondary) {
-      servers.push({ address: profile.secondary, tag: 'dns-secondary' })
-    }
-  } else if (profile.type === 'dot') {
-    servers.push({ address: profile.primary, tag: 'dns-primary' })
-    if (profile.secondary) {
-      servers.push({ address: profile.secondary, tag: 'dns-secondary' })
-    }
-  } else {
-    // Plain IPv4/IPv6
-    servers.push({ address: profile.primary, tag: 'dns-primary' })
-    if (profile.secondary) {
-      servers.push({ address: profile.secondary, tag: 'dns-secondary' })
-    }
-  }
-
-  return {
-    ...config,
-    dns: {
-      ...(config.dns ?? {}),
-      servers,
-      rules: [
-        {
-          server: 'dns-primary',
-          outbound: 'any'
-        }
-      ]
-    }
-  }
-}
-
 // ─── IPC Handlers ────────────────────────────────────────────────────────────
 
 function handleLogged<T>(
@@ -459,7 +411,6 @@ export function initDnsProfiles(): void {
 export const dnsProfiles = {
   getAllProfiles,
   getActiveDnsProfile,
-  applyToSingboxConfig,
   registerHandlers: registerDnsHandlers,
   init: initDnsProfiles
 }
