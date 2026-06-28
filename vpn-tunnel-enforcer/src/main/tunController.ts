@@ -2724,9 +2724,9 @@ export const tunController = {
             enableAdapterLockdown: wantAdapterLockdown,
             publicWifiCompatibility
           }
-    if (!stopInProgress) {
-      userInitiatedStop = false
-    }
+          if (!stopInProgress) {
+            userInitiatedStop = false
+          }
 
           // If the run survives STABLE_RESET_MS we consider it healthy again
           // and zero the retry counter. Without this, the user would burn

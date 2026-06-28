@@ -2018,6 +2018,16 @@ export function registerServerPickerHandlers(): void {
   handleLogged('servers:set-client-device', async (_event, id: string, clientDevice: ClientDevice) => {
     const profile = setProfileClientDevice(id, clientDevice)
     if (!profile) throw new Error('Profile not found')
+    const { tunController } = await import('./tunController')
+    if (tunController.getStatus().running) {
+      const activeId = store.get('activeProfileId')
+      if (activeId === id) {
+        logEvent('info', 'server-picker', 'active profile device changed — hot-reloading tunnel')
+        tunController.restartWithLastOptions('client device change').catch(err =>
+          logEvent('warn', 'server-picker', 'hot-reload after device change failed', err)
+        )
+      }
+    }
     return profile
   })
 

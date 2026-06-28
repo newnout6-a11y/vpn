@@ -634,11 +634,8 @@ export async function nuclearFirewallReset(): Promise<{ success: boolean; messag
     return { success: false, message: 'Only supported on Windows' }
   }
   try {
-    const { exec } = await import('child_process')
-    const { promisify } = await import('util')
-    const execAsync = promisify(exec)
-    await execAsync('netsh advfirewall reset', { windowsHide: true, timeout: 10000 })
-    await execAsync('netsh advfirewall set allprofiles firewallpolicy blockinbound,allowoutbound', { windowsHide: true, timeout: 10000 })
+    await execElevated('netsh advfirewall reset', { timeout: 10000 })
+    await execElevated('netsh advfirewall set allprofiles firewallpolicy blockinbound,allowoutbound', { timeout: 10000 })
     // After a full reset our manifest no longer reflects reality — clear it.
     await clearManifest()
     logEvent('info', 'firewall-killswitch', 'nuclear firewall reset completed')

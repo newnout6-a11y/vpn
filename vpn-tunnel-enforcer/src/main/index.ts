@@ -880,6 +880,13 @@ async function performCrashRecovery(): Promise<void> {
   } catch (err) {
     logEvent('warn', 'app', 'env autoconfig rollback during crash recovery failed', err)
   }
+
+  try {
+    const { tunController } = await import('./tunController')
+    if (tunController && !tunController.getStatus().running) {
+      logEvent('info', 'app', 'checking for stale TUN adapter during crash recovery')
+    }
+  } catch { /* non-critical */ }
 }
 
 app.whenReady().then(async () => {

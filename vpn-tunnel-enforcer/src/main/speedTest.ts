@@ -121,7 +121,9 @@ function progressPercent(phase: 'download' | 'upload', loaded: number, total: nu
 async function measureLatency(): Promise<number> {
   for (const url of LATENCY_URLS) {
     const pings: number[] = []
-    for (let i = 0; i < 3; i++) {
+    // Warmup ping (discarded) — avoids cold DNS cache miss skewing the median.
+    try { await axios.get(url, { timeout: 5000, headers: { 'Cache-Control': 'no-cache' } }) } catch {}
+    for (let i = 0; i < 5; i++) {
       const start = Date.now()
       try {
         await axios.get(url, {
@@ -133,7 +135,12 @@ async function measureLatency(): Promise<number> {
         // Skip failed pings — try the next iteration / URL.
       }
     }
-    if (pings.length > 0) {
+    if (pings.length >= 3) {
+      pings.sort((a, b) => a - b)
+      // Drop min and max, return median of the remaining samples.
+      const trimmed = pings.slice(1, -1)
+      return trimmed[Math.floor(trimmed.length / 2)]
+    } else if (pings.length > 0) {
       pings.sort((a, b) => a - b)
       return pings[Math.floor(pings.length / 2)]
     }
@@ -169,8 +176,12 @@ function downloadUrl(target: typeof DOWNLOAD_URLS[number], bytes: number, runId:
   if (target.name === 'Cloudflare') {
     return `https://speed.cloudflare.com/__down?bytes=${bytes}&run=${encodeURIComponent(runId)}&stream=${streamIndex}`
   }
+  // For static-file endpoints (OVH, Tele2), append a unique cache-buster
+  // so each stream gets a separate download. The ?run=&stream= params are
+  // ignored by the server but prevent CDN/proxy caching from returning the
+  // same response for parallel streams.
   const separator = target.url.includes('?') ? '&' : '?'
-  return `${target.url}${separator}run=${encodeURIComponent(runId)}&stream=${streamIndex}`
+  return `${target.url}${separator}cb=${encodeURIComponent(runId)}${streamIndex}`
 }
 
 async function downloadOne(url: string, onChunk: (bytes: number) => void): Promise<number> {
