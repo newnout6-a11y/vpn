@@ -309,6 +309,11 @@ function boolValue(value: unknown): boolean {
   return /^(1|true|yes|on)$/i.test(value.trim())
 }
 
+function ensureLeadingSlash(path: string): string {
+  if (!path) return '/'
+  return path.startsWith('/') ? path : '/' + path
+}
+
 function stringValue(value: unknown): string | null {
   if (value === null || value === undefined) return null
   const text = String(value).trim()
@@ -473,7 +478,7 @@ function buildTransport(params: URLSearchParams): Record<string, any> | undefine
     if (host) headers.Host = host
     const transport: Record<string, any> = {
       type: 'ws',
-      path: param(params, 'path') || '/'
+      path: ensureLeadingSlash(param(params, 'path') || '/')
     }
     if (Object.keys(headers).length) transport.headers = headers
     const earlyData = Number(param(params, 'ed', 'max_early_data') || 0)
@@ -494,7 +499,7 @@ function buildTransport(params: URLSearchParams): Record<string, any> | undefine
     const transport: Record<string, any> = {
       type: 'httpupgrade',
       host: param(params, 'host') || '',
-      path: param(params, 'path') || '/'
+      path: ensureLeadingSlash(param(params, 'path') || '/')
     }
     return transport
   }
@@ -504,7 +509,7 @@ function buildTransport(params: URLSearchParams): Record<string, any> | undefine
     return {
       type: 'http',
       host: host ? [host] : [],
-      path: param(params, 'path') || '/'
+      path: ensureLeadingSlash(param(params, 'path') || '/')
     }
   }
 
@@ -831,7 +836,7 @@ function buildTransportFromXrayStream(stream: Record<string, any>): Record<strin
     const ws = stream.wsSettings && typeof stream.wsSettings === 'object' ? stream.wsSettings : {}
     const transport: Record<string, any> = {
       type: 'ws',
-      path: stringValue(ws.path) || '/'
+      path: ensureLeadingSlash(stringValue(ws.path) || '/')
     }
     if (ws.headers && typeof ws.headers === 'object' && Object.keys(ws.headers).length) {
       transport.headers = ws.headers
@@ -852,7 +857,7 @@ function buildTransportFromXrayStream(stream: Record<string, any>): Record<strin
     return {
       type: 'httpupgrade',
       host: stringValue(http.host) || '',
-      path: stringValue(http.path) || '/'
+      path: ensureLeadingSlash(stringValue(http.path) || '/')
     }
   }
 
@@ -862,7 +867,7 @@ function buildTransportFromXrayStream(stream: Record<string, any>): Record<strin
     return {
       type: 'http',
       host: host || [],
-      path: stringValue(http.path) || '/'
+      path: ensureLeadingSlash(stringValue(http.path) || '/')
     }
   }
 
@@ -1388,7 +1393,7 @@ function buildTransportFromClash(raw: Record<string, any>): Record<string, any> 
     const headers = ws.headers && typeof ws.headers === 'object' ? ws.headers : {}
     const transport: Record<string, any> = {
       type: 'ws',
-      path: stringValue(ws.path) || stringValue(raw.path) || '/'
+      path: ensureLeadingSlash(stringValue(ws.path) || stringValue(raw.path) || '/')
     }
     if (Object.keys(headers).length) transport.headers = headers
     return transport
@@ -1407,7 +1412,7 @@ function buildTransportFromClash(raw: Record<string, any>): Record<string, any> 
     return {
       type: 'httpupgrade',
       host: stringValue(http.host) || stringValue(raw.host) || '',
-      path: stringValue(http.path) || stringValue(raw.path) || '/'
+      path: ensureLeadingSlash(stringValue(http.path) || stringValue(raw.path) || '/')
     }
   }
 
@@ -1417,7 +1422,7 @@ function buildTransportFromClash(raw: Record<string, any>): Record<string, any> 
     return {
       type: 'http',
       host: host ? [host] : [],
-      path: stringValue(http.path) || stringValue(raw.path) || '/'
+      path: ensureLeadingSlash(stringValue(http.path) || stringValue(raw.path) || '/')
     }
   }
 

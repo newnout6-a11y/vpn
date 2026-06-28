@@ -575,6 +575,9 @@ export function sanitizeProxyOutbound(outbound: Record<string, any>): { outbound
 }
 
 function normalizeHysteria2ServerPortsForSingbox(value: unknown): string | null {
+  if (Array.isArray(value) && value.length > 0) {
+    return normalizeHysteria2ServerPortsForSingbox(value[0])
+  }
   if (typeof value !== 'string') return null
   const match = value.trim().match(/^(\d{1,5})\s*[-:]\s*(\d{1,5})$/)
   if (!match) return null
@@ -809,7 +812,7 @@ export function generateSingboxConfig(
         ...buildDnsBootstrapServers(),
         ...buildRemoteDnsServers(),
         ...(needsBootstrapDns
-          ? [{ type: 'local', tag: BOOTSTRAP_DNS_TAG }]
+          ? [{ type: 'udp', tag: BOOTSTRAP_DNS_TAG, server: '1.1.1.1' }]
           : []),
         // Smart RU split: use the physical adapter's pre-lockdown upstream DNS
         // servers directly, instead of `type: local`. Under strict_route + our
@@ -2364,7 +2367,8 @@ export const tunController = {
         //     scheduled, we leave the lockdown in place — start() is idempotent
         //     and will skip it when the manifest already exists.
         if (wasRunning) {
-          if (userInitiatedStop) {
+          try {
+            if (userInitiatedStop) {
             logEvent('info', 'tun', 'sing-box exited after user stop')
             return
           }
@@ -2411,6 +2415,10 @@ export const tunController = {
             const optsSnapshot = lastStartOptions
             restartTimer = setTimeout(() => {
               restartTimer = null
+              if (userInitiatedStop || stopInProgress) {
+                logEvent('info', 'tun', 'auto-restart cancelled — user initiated stop', { attempt })
+                return
+              }
               tunController.start(optsSnapshot).then((res) => {
                 if (!res.success) {
                   logEvent('error', 'tun', 'auto-restart attempt failed', { attempt, error: res.error })
@@ -2421,6 +2429,7 @@ export const tunController = {
               }).catch((err) => {
                 logEvent('error', 'tun', 'auto-restart attempt threw', err)
                 notify('error', 'Не удалось перезапустить защиту', err?.message || String(err), 'connectionError')
+                notifyStatus('stopped')
               })
             }, delay)
             return
@@ -2495,18 +2504,33 @@ export const tunController = {
               maxAttempts: RESTART_BACKOFF_MS.length
             })
             notify('warn', 'sing-box упал', 'Файрвол блокирует трафик, чтобы не было утечки IP. Включите защиту заново.', 'connectionError')
-            // Tell the UI traffic is now firewall-blocked, not just "stopped".
+            try {
+              import('electron').then(({ BrowserWindow }) => {
+                BrowserWindow.getAllWindows().forEach(win => {
+                  try { if (win.isMinimized()) win.restore(); win.show(); win.focus() } catch {}
+                })
+              }).catch(() => undefined)
+            } catch {}
             notifyStatus('killswitch-active')
             return
           }
           notify('warn', 'Защита остановилась', 'sing-box завершил работу.', 'vpnDisconnect')
           notifyStatus('stopped')
+        } catch (onExitErr) {
+          logEvent('error', 'tun', 'onExit handler threw — performing emergency cleanup', onExitErr)
+          rollbackTunNetworkBaselineIfApplied('onExit emergency').catch(() => undefined)
+          disableKillSwitchIfActive('onExit emergency').catch(() => undefined)
+          rollbackPhysicalAdapterLockdownIfApplied('onExit emergency').catch(() => undefined)
+          repairOrphanedPhysicalAdapterDns('onExit emergency').catch(() => undefined)
+          notifyStatus('stopped')
+        }
         }
       }
 
       const launchStarted = phaseStart()
       mark('singbox-spawned')
       isProcessElevated().then((elevated) => {
+        if (resolved) return
         if (elevated) {
           execCb(cmd, { windowsHide: true, maxBuffer: 1024 * 1024 }, (error, _stdout, stderr) => onExit(error, stderr))
         } else {
@@ -2514,6 +2538,7 @@ export const tunController = {
         }
         endPhase('singbox-launch-submit', launchStarted, { elevated })
       }).catch((error) => {
+        if (resolved) return
         endPhase('singbox-launch-submit', launchStarted, { failed: true })
         onExit(error)
       })
@@ -2699,7 +2724,9 @@ export const tunController = {
             enableAdapterLockdown: wantAdapterLockdown,
             publicWifiCompatibility
           }
-          userInitiatedStop = false
+    if (!stopInProgress) {
+      userInitiatedStop = false
+    }
 
           // If the run survives STABLE_RESET_MS we consider it healthy again
           // and zero the retry counter. Without this, the user would burn

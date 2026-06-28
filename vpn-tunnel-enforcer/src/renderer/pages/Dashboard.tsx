@@ -194,6 +194,15 @@ export function Dashboard() {
     setConnectionBusy('connecting')
     addLog('info', t('dashboard.connecting'))
 
+    // Safety timeout: if the IPC never resolves (main process hung), clear
+    // the busy state after 30s so the power button is not stuck spinning.
+    const busyTimeout = setTimeout(() => {
+      if (transitionSeq === transitionSeqRef.current) {
+        setConnectionBusy(null)
+        addLog('warn', 'Превышено время ожидания запуска. Попробуйте снова.')
+      }
+    }, 30000)
+
     const refreshKillSwitchState = () => {
       window.electronAPI.getFirewallKillSwitchStatus()
         .then(({ active }) => setFirewallKillSwitchActive(active))
@@ -270,6 +279,7 @@ export function Dashboard() {
       showToast('error', t('dashboard.connectionError'), errorMsg)
       addLog('error', `Ошибка запуска: ${errorMsg}`)
     } finally {
+      clearTimeout(busyTimeout)
       refreshKillSwitchState()
       if (transitionSeq === transitionSeqRef.current) {
         setConnectionBusy(null)
@@ -282,6 +292,13 @@ export function Dashboard() {
     const transitionSeq = ++transitionSeqRef.current
     setConnectionBusy('disconnecting')
     addLog('info', 'Выключаем защиту…')
+
+    const busyTimeout = setTimeout(() => {
+      if (transitionSeq === transitionSeqRef.current) {
+        setConnectionBusy(null)
+        addLog('warn', 'Превышено время ожидания остановки. Попробуйте снова.')
+      }
+    }, 30000)
 
     try {
       const result = await window.electronAPI.stopTun()
@@ -301,6 +318,7 @@ export function Dashboard() {
       showToast('error', t('dashboard.connectionError'), errorMsg)
       addLog('error', `Ошибка остановки: ${errorMsg}`)
     } finally {
+      clearTimeout(busyTimeout)
       if (transitionSeq === transitionSeqRef.current) {
         setConnectionBusy(null)
       }
