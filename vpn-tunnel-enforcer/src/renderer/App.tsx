@@ -274,7 +274,7 @@ export default function App() {
         return
       }
       useAppStore.getState().setPublicIp(ip, isLeak)
-      if (!isLeak) {
+      if (!isLeak && useAppStore.getState().tunRunning) {
         useAppStore.getState().setVpnIp(ip)
       }
       if (isLeak) {

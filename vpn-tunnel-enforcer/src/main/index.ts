@@ -521,21 +521,40 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
   // propagate within a few hundred ms on most systems, so polling every 500ms
   // shows the VPN IP much sooner than a fixed 4s delay. We verify TUN is
   // running on each attempt and stop after 8 tries (4s max) as a safety net.
+  // CRITICAL: we must NOT rebaseline (recheck(true)) until the IP has actually
+  // changed from the pre-VPN value. If we rebaseline too early (before TUN
+  // routes propagate), we'd set vpnIp = realIP, permanently breaking leak
+  // detection. So we use recheck(false) first, and only rebaseline once the
+  // IP differs from the pre-VPN baseline.
+  const preVpnIp = ipMonitor.getCurrentIp().ip
   const pollVpnIp = async () => {
     for (let attempt = 0; attempt < 8; attempt++) {
       await new Promise(r => setTimeout(r, 500))
       if (!tunController.getStatus().running) return
       try {
-        const ipInfo = await ipMonitor.recheck(true)
-        if (ipInfo.ip) {
+        const ipInfo = await ipMonitor.recheck(false)
+        if (ipInfo.ip && ipInfo.ip !== preVpnIp) {
+          // IP changed — this is the VPN exit IP. Rebaseline now.
+          const rebased = await ipMonitor.recheck(true)
           try {
-            mainWindow?.webContents.send('ip-changed', { ip: ipInfo.ip, isLeak: ipInfo.isLeak })
+            mainWindow?.webContents.send('ip-changed', { ip: rebased.ip, isLeak: rebased.isLeak })
           } catch {}
-          refreshTrayState({ status: 'protected', publicIp: ipInfo.ip, proxyAddr })
+          refreshTrayState({ status: 'protected', publicIp: rebased.ip, proxyAddr })
           return
         }
       } catch { /* retry on next interval */ }
     }
+    // Fallback: IP never changed after 4s. Rebaseline anyway — TUN is up,
+    // so even if the IP is the same as pre-VPN, it's now routed through VPN.
+    try {
+      const ipInfo = await ipMonitor.recheck(true)
+      if (ipInfo.ip) {
+        try {
+          mainWindow?.webContents.send('ip-changed', { ip: ipInfo.ip, isLeak: ipInfo.isLeak })
+        } catch {}
+        refreshTrayState({ status: 'protected', publicIp: ipInfo.ip, proxyAddr })
+      }
+    } catch {}
   }
   void pollVpnIp()
 
@@ -690,21 +709,34 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
   }
 
   // Poll for the VPN IP instead of waiting a fixed 4s (see startProtection).
+  // Same logic: use recheck(false) first, only rebaseline once IP changes.
+  const preVpnIpDirect = ipMonitor.getCurrentIp().ip
   const pollVpnIpDirect = async () => {
     for (let attempt = 0; attempt < 8; attempt++) {
       await new Promise(r => setTimeout(r, 500))
       if (!tunController.getStatus().running) return
       try {
-        const ipInfo = await ipMonitor.recheck(true)
-        if (ipInfo.ip) {
+        const ipInfo = await ipMonitor.recheck(false)
+        if (ipInfo.ip && ipInfo.ip !== preVpnIpDirect) {
+          const rebased = await ipMonitor.recheck(true)
           try {
-            mainWindow?.webContents.send('ip-changed', { ip: ipInfo.ip, isLeak: ipInfo.isLeak })
+            mainWindow?.webContents.send('ip-changed', { ip: rebased.ip, isLeak: rebased.isLeak })
           } catch {}
-          refreshTrayState({ status: 'protected', publicIp: ipInfo.ip, proxyAddr: profile.name })
+          refreshTrayState({ status: 'protected', publicIp: rebased.ip, proxyAddr: profile.name })
           return
         }
       } catch { /* retry on next interval */ }
     }
+    // Fallback: rebaseline after 4s even if IP didn't change.
+    try {
+      const ipInfo = await ipMonitor.recheck(true)
+      if (ipInfo.ip) {
+        try {
+          mainWindow?.webContents.send('ip-changed', { ip: ipInfo.ip, isLeak: ipInfo.isLeak })
+        } catch {}
+        refreshTrayState({ status: 'protected', publicIp: ipInfo.ip, proxyAddr: profile.name })
+      }
+    } catch {}
   }
   void pollVpnIpDirect()
 
