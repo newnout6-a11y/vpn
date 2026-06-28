@@ -130,7 +130,7 @@ const defaults: AppSettings = {
   desktopNotifications: true,
   publicWifiCompatibility: true,
   strictAdapterLockdown: true,
-  deepTrafficInspectionEnabled: true,
+  deepTrafficInspectionEnabled: false,
   deepTrafficInspectionMaxSizeMb: 512,
   deepTrafficInspectionRetainSessions: 3,
   stealthMode: false,
