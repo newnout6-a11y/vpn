@@ -246,27 +246,52 @@ function clearRestartTimers() {
 const RUNTIME_EXE_NAME = 'vpnte-sing-box.exe'
 const CRONET_DLL_NAME = 'libcronet.dll'
 const PROXY_CORE_PROCESS_NAMES = [
+  // Happ
   'Happ.exe',
   'happd.exe',
+  // Xray / V2Ray
   'xray.exe',
   'v2ray.exe',
+  'v2rayN.exe',
+  // sing-box
   'sing-box.exe',
   'singbox.exe',
+  'sing-tun.exe',
+  // Clash family
   'mihomo.exe',
   'clash.exe',
   'clash-meta.exe',
   'clash-verge.exe',
+  'clash-verge-service.exe',
+  'flclash.exe',
+  'FlClash.exe',
+  'mihomo-party.exe',
+  'verge-mihomo.exe',
+  // Hiddify
   'hiddify.exe',
   'Hiddify.exe',
+  'HiddifyN.exe',
+  // NekoRay / NekoBox
   'nekoray.exe',
   'nekobox.exe',
+  // Shadowsocks
   'shadowsocks.exe',
   'ss-local.exe',
+  'shadowsocks-rust.exe',
+  // Trojan
   'trojan.exe',
+  // Outline
   'outline.exe',
   'Outline.exe',
+  // WireGuard / OpenVPN
   'wireguard.exe',
-  'openvpn.exe'
+  'openvpn.exe',
+  // Karing
+  'karing.exe',
+  // Streisand
+  'streisand.exe',
+  // Surfboard
+  'surfboard.exe',
 ]
 
 export function getTunRuntimeDir(): string {

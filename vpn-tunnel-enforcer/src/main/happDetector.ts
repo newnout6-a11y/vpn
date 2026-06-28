@@ -15,7 +15,24 @@ export interface ProxyInfo {
   publicIpViaProxy: string | null
 }
 
-const TYPICAL_PORTS = [2080, 1080, 10808, 10809, 7890, 7891, 8080, 1087, 1081, 20170, 20171, 9090]
+const TYPICAL_PORTS = [
+  // V2RayN / Xray
+  10808, 10809, 1080, 1081, 1087,
+  // Clash / Clash Verge / FlClash / Mihomo
+  7890, 7891, 7892, 7893,
+  // sing-box / Happ
+  2080, 2081,
+  // Hiddify
+  6450, 6451,
+  // NekoRay / NekoBox
+  2080, 1080,
+  // Karing / Streisand / general
+  8080, 9090, 20170, 20171,
+  // Surfboard / Shadowsocks
+  1080, 1081, 8388,
+  // Mihomo Party
+  7897,
+]
 const IP_CHECK_URL = 'https://api.ipify.org?format=json'
 const exec = promisify(execCb)
 
@@ -265,12 +282,47 @@ async function scanHappConfig(): Promise<ProxyInfo | null> {
   const localAppData = process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local')
 
   const searchDirs = [
+    // Happ
     join(appData, 'Happ'),
     join(localAppData, 'Happ'),
     join(appData, 'happ'),
     join(localAppData, 'happ'),
     join(appData, 'Happ VPN'),
     join(localAppData, 'Happ VPN'),
+    // V2RayN / HiddifyN (uses V2RayN core)
+    join(appData, 'v2rayN'),
+    join(localAppData, 'v2rayN'),
+    join(appData, 'HiddifyN'),
+    join(localAppData, 'HiddifyN'),
+    // Clash Verge Rev
+    join(appData, 'io.github.clash-verge-rev.clash-verge-rev'),
+    join(localAppData, 'clash-verge'),
+    join(appData, 'clash-verge'),
+    // FlClash
+    join(appData, 'FlClash'),
+    join(localAppData, 'FlClash'),
+    // NekoRay / NekoBox
+    join(appData, 'nekoray'),
+    join(localAppData, 'nekoray'),
+    join(appData, 'NekoRay'),
+    join(localAppData, 'NekoRay'),
+    join(appData, 'nekobox'),
+    join(localAppData, 'nekobox'),
+    // Hiddify Next
+    join(appData, 'Hiddify'),
+    join(localAppData, 'Hiddify'),
+    // Karing
+    join(appData, 'Karing'),
+    join(localAppData, 'Karing'),
+    // Mihomo Party
+    join(appData, 'mihomo-party'),
+    join(localAppData, 'mihomo-party'),
+    // sing-box
+    join(appData, 'sing-box'),
+    join(localAppData, 'sing-box'),
+    // Streisand
+    join(appData, 'Streisand'),
+    join(localAppData, 'Streisand'),
   ]
 
   for (const dir of searchDirs) {

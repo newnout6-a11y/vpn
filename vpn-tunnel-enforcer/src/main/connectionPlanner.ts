@@ -163,14 +163,14 @@ async function getProxyListeners(): Promise<ProxyListenerInfo[]> {
 
   try {
     const raw = await ps(`
-$rx='(?i)happ|hiddify|nekoray|nekobox|v2ray|xray|sing-box|singbox|clash|mihomo|shadowsocks|ss-local|trojan|outline|wireguard|openvpn|vpn';
+$rx='(?i)happ|hiddify|nekoray|nekobox|v2ray|xray|sing-box|singbox|sing-tun|clash|clash-verge|flclash|mihomo|mihomo-party|shadowsocks|ss-local|trojan|outline|wireguard|openvpn|karing|streisand|surfboard|vpn';
 Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
   Where-Object { $_.LocalAddress -in @('127.0.0.1','::1','0.0.0.0','::') } |
   ForEach-Object {
     $p=Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue;
     [pscustomobject]@{Host=$_.LocalAddress;Port=$_.LocalPort;Process=$p.ProcessName;Pid=$_.OwningProcess}
   } |
-  Where-Object { ($_.Process -match $rx) -or ($_.Port -in @(1080,10808,10809,7890,7891,8080,2080,2081,1087,1081,20170,20171,9090)) } |
+  Where-Object { ($_.Process -match $rx) -or ($_.Port -in @(1080,1081,1087,10808,10809,7890,7891,7892,7893,7897,8080,2080,2081,6450,6451,9090,20170,20171,8388)) } |
   Sort-Object Process,Port -Unique |
   ConvertTo-Json -Compress
 `)
