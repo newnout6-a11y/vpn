@@ -835,6 +835,50 @@ async function quitFromTray(): Promise<void> {
   app.quit()
 }
 
+async function performCrashRecovery(): Promise<void> {
+  if (process.platform !== 'win32') return
+
+  await recoverStaleBaseline()
+
+  await recoverStaleKillSwitch(async () => {
+    try {
+      const { stdout } = await exec('tasklist /FI "IMAGENAME eq vpnte-sing-box.exe" /FO CSV /NH', {
+        windowsHide: true,
+        timeout: 5000,
+        encoding: 'utf8'
+      })
+      return String(stdout).toLowerCase().includes('vpnte-sing-box.exe')
+    } catch {
+      return false
+    }
+  })
+
+  if (await isPhysicalAdapterLockdownApplied()) {
+    let singboxRunning = false
+    try {
+      const { stdout } = await exec('tasklist /FI "IMAGENAME eq vpnte-sing-box.exe" /FO CSV /NH', {
+        windowsHide: true,
+        timeout: 5000,
+        encoding: 'utf8'
+      })
+      singboxRunning = String(stdout).toLowerCase().includes('vpnte-sing-box.exe')
+    } catch {
+      // If tasklist fails we assume sing-box is not running and roll back.
+    }
+    if (!singboxRunning) {
+      logEvent('warn', 'phys-lockdown', 'recovering stale adapter lockdown — sing-box not running')
+      try {
+        await rollbackPhysicalAdapterLockdownIfApplied('startup recovery — sing-box not running')
+      } catch (err) {
+        logEvent('warn', 'phys-lockdown', 'startup rollback failed', err)
+      }
+    }
+  }
+
+  await repairOrphanedPhysicalAdapterDns('startup orphaned DNS repair')
+    .catch(err => logEvent('warn', 'phys-lockdown', 'startup orphaned DNS repair failed', err))
+}
+
 app.whenReady().then(async () => {
   logEvent('info', 'app', 'application ready', {
     version: app.getVersion(),
@@ -878,48 +922,6 @@ app.whenReady().then(async () => {
     return
   }
 
-  await recoverStaleBaseline()
-  await recoverStaleKillSwitch(async () => {
-    try {
-      const { stdout } = await exec('tasklist /FI "IMAGENAME eq vpnte-sing-box.exe" /FO CSV /NH', {
-        windowsHide: true,
-        timeout: 5000,
-        encoding: 'utf8'
-      })
-      return String(stdout).toLowerCase().includes('vpnte-sing-box.exe')
-    } catch {
-      return false
-    }
-  })
-
-  // Same crash-recovery story for the physical-adapter lockdown: if a previous
-  // run left IPv6 disabled / DNS overridden on real adapters, the user is now
-  // looking at a half-broken network and there's no sing-box to enforce
-  // anything. Roll back to whatever we snapshotted.
-  if (await isPhysicalAdapterLockdownApplied()) {
-    let singboxRunning = false
-    try {
-      const { stdout } = await exec('tasklist /FI "IMAGENAME eq vpnte-sing-box.exe" /FO CSV /NH', {
-        windowsHide: true,
-        timeout: 5000,
-        encoding: 'utf8'
-      })
-      singboxRunning = String(stdout).toLowerCase().includes('vpnte-sing-box.exe')
-    } catch {
-      // If tasklist fails we assume sing-box is not running and roll back.
-    }
-    if (!singboxRunning) {
-      logEvent('warn', 'phys-lockdown', 'recovering stale adapter lockdown — sing-box not running')
-      try {
-        await rollbackPhysicalAdapterLockdownIfApplied('startup recovery — sing-box not running')
-      } catch (err) {
-        logEvent('warn', 'phys-lockdown', 'startup rollback failed', err)
-      }
-    }
-  }
-  await repairOrphanedPhysicalAdapterDns('startup orphaned DNS repair')
-    .catch(err => logEvent('warn', 'phys-lockdown', 'startup orphaned DNS repair failed', err))
-
   const initialSettings = settingsStore.get()
   settingsStore.syncLoginItem()
   ipMonitor.setCheckInterval(initialSettings.checkInterval)
@@ -933,9 +935,17 @@ app.whenReady().then(async () => {
     onQuit: quitFromTray
   })
   refreshTrayState()
-  isKillSwitchActive()
-    .then(active => refreshTrayState({ killSwitchActive: active, status: active && !tunController.getStatus().running ? 'killswitch' : latestTrayStatus }))
-    .catch(() => undefined)
+
+  void performCrashRecovery().catch(err =>
+    logEvent('warn', 'app', 'crash recovery failed', err)
+  )
+
+  setTimeout(() => {
+    isKillSwitchActive()
+      .then(active => refreshTrayState({ killSwitchActive: active, status: active && !tunController.getStatus().running ? 'killswitch' : latestTrayStatus }))
+      .catch(() => undefined)
+    captureSnapshot('app-start').catch(() => undefined)
+  }, 5000)
 
   // In-app notification fallback. When `notify()` cannot deliver a Windows
   // toast (Windows blocks the AUMID, or Notification.isSupported() === false
@@ -951,11 +961,6 @@ app.whenReady().then(async () => {
       // Window may be torn down (close-on-quit race). Nothing to recover from.
     }
   })
-
-  // Capture a snapshot of the system state on every app launch — gives us a
-  // "what does the network look like before the user clicks anything" record
-  // for free, in case they later report "doesn't work" without ever clicking.
-  captureSnapshot('app-start').catch(() => undefined)
 
   // When the periodic leak self-test (started at TUN start) detects a leak,
   // bubble that to the renderer so the UI can show a giant red banner, AND

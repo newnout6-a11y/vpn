@@ -297,8 +297,28 @@ async function scanHappConfig(): Promise<ProxyInfo | null> {
   return null
 }
 
+let detectCache: { promise: Promise<ProxyInfo | null>; ts: number } | null = null
+const DETECT_CACHE_TTL = 8000
+
 export const happDetector = {
   async detect(): Promise<ProxyInfo | null> {
+    const now = Date.now()
+    if (detectCache && now - detectCache.ts < DETECT_CACHE_TTL) {
+      return detectCache.promise
+    }
+    const promise = this._detectUncached()
+    detectCache = { promise, ts: now }
+    promise.finally(() => {
+      if (detectCache && detectCache.promise === promise) {
+        setTimeout(() => {
+          if (detectCache && detectCache.promise === promise) detectCache = null
+        }, DETECT_CACHE_TTL)
+      }
+    })
+    return promise
+  },
+
+  async _detectUncached(): Promise<ProxyInfo | null> {
     // 1. Try reading Happ config
     const configProxy = await scanHappConfig()
     if (configProxy) {

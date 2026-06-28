@@ -565,8 +565,9 @@ async function probeFirewallForOurRules(): Promise<boolean> {
  */
 export async function recoverStaleKillSwitch(isSingboxRunning: () => Promise<boolean>): Promise<void> {
   if (process.platform !== 'win32') return
-  const manifestSaysActive = await isKillSwitchActive()
-  const firewallSaysActive = manifestSaysActive ? true : await probeFirewallForOurRules()
+  const manifest = await readManifest()
+  const manifestSaysActive = manifest !== null
+  const firewallSaysActive = manifestSaysActive || await probeFirewallForOurRules()
   if (!manifestSaysActive && !firewallSaysActive) return
   if (await isSingboxRunning()) {
     logEvent(

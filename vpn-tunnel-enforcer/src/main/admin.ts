@@ -4,7 +4,8 @@ import sudo from 'sudo-prompt'
 
 const exec = promisify(execCb)
 
-const ADMIN_CHECK =
+const ADMIN_CHECK_FAST = 'cmd /c "net session >nul 2>&1 && echo true || echo false"'
+const ADMIN_CHECK_PS =
   'powershell -NoProfile -ExecutionPolicy Bypass -Command ' +
   '"[Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent()).' +
   'IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)"'
@@ -16,7 +17,19 @@ export async function isProcessElevated(): Promise<boolean> {
   if (elevatedCache !== null) return elevatedCache
 
   try {
-    const { stdout } = await exec(ADMIN_CHECK, {
+    const { stdout } = await exec(ADMIN_CHECK_FAST, {
+      windowsHide: true,
+      timeout: 3000,
+      encoding: 'utf8'
+    })
+    elevatedCache = stdout.trim().toLowerCase().includes('true')
+    if (elevatedCache) return elevatedCache
+  } catch {
+    // Fast check failed — fall through to PowerShell for a definitive answer.
+  }
+
+  try {
+    const { stdout } = await exec(ADMIN_CHECK_PS, {
       windowsHide: true,
       timeout: 5000,
       encoding: 'utf8'

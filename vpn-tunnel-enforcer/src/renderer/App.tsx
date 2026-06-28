@@ -455,42 +455,39 @@ export default function App() {
         addLog('info', `Используется ручной прокси: ${manualProxy.host}:${manualProxy.port} (${manualProxy.type})`)
       } else {
         addLog('info', 'Поиск прокси Happ...')
-
-        try {
-          const proxy = await window.electronAPI.detectHapp()
-          if (proxy) {
-            store.setProxy(proxy)
-            addLog('info', `Прокси Happ найдено: ${proxy.host}:${proxy.port} (${proxy.type})`)
-          } else {
-            addLog('warn', 'Прокси Happ не найдено автоматически')
-          }
-        } catch (err: any) {
-          addLog('error', `Ошибка поиска: ${err.message}`)
-        }
+        void window.electronAPI.detectHapp()
+          .then(proxy => {
+            if (proxy) {
+              useAppStore.getState().setProxy(proxy)
+              addLog('info', `Прокси Happ найдено: ${proxy.host}:${proxy.port} (${proxy.type})`)
+            } else {
+              addLog('warn', 'Прокси Happ не найдено автоматически')
+            }
+          })
+          .catch((err: any) => addLog('error', `Ошибка поиска: ${err.message}`))
       }
 
       if (settings.autoPilotEnabled && settings.connectionMode !== 'directVpn') {
-        try {
-          addLog('info', 'Автопилот маршрута включен: приложение само выберет безопасный режим.')
-          const autoPilot = await window.electronAPI.runAutoPilot()
-          store.setMode(autoPilot.mode)
-          store.setTunRunning(autoPilot.mode === 'hard')
-          if (autoPilot.mode !== 'hard') store.setVpnIp(null)
-          addLog(
-            autoPilot.summary === 'fail' ? 'error' : autoPilot.summary === 'warn' ? 'warn' : 'info',
-            `${autoPilot.title}: ${autoPilot.message}`
-          )
-        } catch (err: any) {
-          addLog('error', `Автопилот маршрута не сработал: ${err.message}`)
-        }
+        addLog('info', 'Автопилот маршрута включен: приложение само выберет безопасный режим.')
+        void window.electronAPI.runAutoPilot()
+          .then(autoPilot => {
+            const liveStore = useAppStore.getState()
+            liveStore.setMode(autoPilot.mode)
+            liveStore.setTunRunning(autoPilot.mode === 'hard')
+            if (autoPilot.mode !== 'hard') liveStore.setVpnIp(null)
+            addLog(
+              autoPilot.summary === 'fail' ? 'error' : autoPilot.summary === 'warn' ? 'warn' : 'info',
+              `${autoPilot.title}: ${autoPilot.message}`
+            )
+          })
+          .catch((err: any) => addLog('error', `Автопилот маршрута не сработал: ${err.message}`))
       } else {
-        try {
-          const plan = await window.electronAPI.getRoutingPlan()
-          if (plan.recommendedMode === 'external') store.setMode('external')
-          addLog(plan.status === 'broken' || plan.status === 'blocked' ? 'warn' : 'info', `План маршрута: ${plan.title}`)
-        } catch (err: any) {
-          addLog('warn', `Не удалось построить план маршрута: ${err.message}`)
-        }
+        void window.electronAPI.getRoutingPlan()
+          .then(plan => {
+            if (plan.recommendedMode === 'external') useAppStore.getState().setMode('external')
+            addLog(plan.status === 'broken' || plan.status === 'blocked' ? 'warn' : 'info', `План маршрута: ${plan.title}`)
+          })
+          .catch((err: any) => addLog('warn', `Не удалось построить план маршрута: ${err.message}`))
       }
 
       void (async () => {
@@ -512,8 +509,16 @@ export default function App() {
         }
       })()
 
-      try {
-        const tunStatus = await window.electronAPI.getTunStatus()
+      const [tunStatusRes, trafficRes, ksRes, targetsRes, privacyRes] = await Promise.allSettled([
+        window.electronAPI.getTunStatus(),
+        window.electronAPI.getTrafficStats(),
+        window.electronAPI.getFirewallKillSwitchStatus(),
+        window.electronAPI.getAutoconfigStatus(),
+        window.electronAPI.getLocationPrivacy()
+      ])
+
+      if (tunStatusRes.status === 'fulfilled') {
+        const tunStatus = tunStatusRes.value
         const liveStore = useAppStore.getState()
         const staleInitialStatus =
           tunEventSeqRef.current !== initTunEventSeq ||
@@ -527,22 +532,18 @@ export default function App() {
         } else {
           addLog('warn', 'Ignored stale initial TUN status after a newer transition')
         }
-      } catch { /* */ }
+      }
 
-      store.setDetecting(false)
+      if (trafficRes.status === 'fulfilled') {
+        store.setTrafficStats(trafficRes.value)
+      }
 
-      try {
-        const traffic = await window.electronAPI.getTrafficStats()
-        store.setTrafficStats(traffic)
-      } catch { /* */ }
+      if (ksRes.status === 'fulfilled') {
+        store.setFirewallKillSwitchActive(ksRes.value.active)
+      }
 
-      try {
-        const ks = await window.electronAPI.getFirewallKillSwitchStatus()
-        store.setFirewallKillSwitchActive(ks.active)
-      } catch { /* */ }
-
-      try {
-        const targets = await window.electronAPI.getAutoconfigStatus()
+      if (targetsRes.status === 'fulfilled') {
+        const targets = targetsRes.value
         if (targets.length > 0) {
           const current = store.autoconfigTargets
           store.setAutoconfigTargets(current.map(t => {
@@ -550,12 +551,11 @@ export default function App() {
             return { ...t, applied: found?.applied ?? false }
           }))
         }
-      } catch { /* */ }
+      }
 
-      try {
-        const privacy = await window.electronAPI.getLocationPrivacy()
-        store.updateSettings({ locationPrivacyEnabled: Boolean(privacy?.applied) })
-      } catch { /* */ }
+      if (privacyRes.status === 'fulfilled') {
+        store.updateSettings({ locationPrivacyEnabled: Boolean(privacyRes.value?.applied) })
+      }
 
       store.setDetecting(false)
     }
