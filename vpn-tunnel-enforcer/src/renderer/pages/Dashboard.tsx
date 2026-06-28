@@ -585,7 +585,7 @@ export function Dashboard() {
         {/* Connection info chips */}
         {isConnected && (
           <div className="flex flex-wrap items-center justify-center gap-2 text-xs">
-            {publicIp && !isLeak && vpnIp ? (
+            {publicIp && !isLeak && vpnIp && publicIp === vpnIp ? (
               <span className="flex items-center gap-1.5 rounded-full bg-[var(--color-success)]/10 px-3 py-1.5 text-[var(--color-success)]">
                 <CheckCircle2 className="w-3.5 h-3.5" />
                 {ipGeo.country && (
@@ -598,8 +598,8 @@ export function Dashboard() {
                   </span>
                 )}
               </span>
-            ) : !vpnIp ? (
-              <span className="flex items-center gap-1.5 rounded-full bg-[var(--color-bg)] px-3 py-1.5 text-[var(--color-text-secondary)]">
+            ) : isConnected ? (
+              <span className="flex items-center gap-1.5 rounded-full glass px-3 py-1.5 text-[var(--color-text-secondary)]">
                 <Loader2 className="w-3.5 h-3.5 animate-spin" />
                 Определяем IP...
               </span>

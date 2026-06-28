@@ -18,20 +18,20 @@
 
 :root {
   /* Light theme — soft, muted, easy on the eyes (not pure white) */
-  --rgb-bg: 238 240 244;
-  --rgb-card: 248 249 252;
-  --rgb-card-elevated: 252 253 255;
-  --rgb-accent: 0 102 204;
-  --rgb-accent-hover: 0 85 170;
-  --rgb-text: 30 32 40;
-  --rgb-text-secondary: 100 104 116;
-  --rgb-text-muted: 156 160 172;
-  --rgb-sidebar: 232 234 240;
-  --rgb-border: 218 222 230;
-  --rgb-border-strong: 200 205 215;
-  --rgb-success: 34 170 68;
-  --rgb-warning: 230 145 0;
-  --rgb-danger: 220 50 40;
+  --rgb-bg: 228 230 235;
+  --rgb-card: 238 240 245;
+  --rgb-card-elevated: 244 246 250;
+  --rgb-accent: 0 90 170;
+  --rgb-accent-hover: 0 75 140;
+  --rgb-text: 28 30 38;
+  --rgb-text-secondary: 95 99 112;
+  --rgb-text-muted: 148 152 165;
+  --rgb-sidebar: 222 225 231;
+  --rgb-border: 210 214 222;
+  --rgb-border-strong: 192 197 207;
+  --rgb-success: 30 155 60;
+  --rgb-warning: 210 130 0;
+  --rgb-danger: 200 45 35;
 
   /* CSS-ready aliases */
   --color-bg: rgb(var(--rgb-bg));
