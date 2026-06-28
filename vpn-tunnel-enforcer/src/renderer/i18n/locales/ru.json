@@ -18,24 +18,9 @@
     "speedTestLast": "Последний тест скорости"
   },
   "dashboardWidgets": {
-    "noSpeedTests": "Тесты ещё не запускались",
     "scheduleConnect": "Подключить",
     "scheduleDisconnect": "Отключить",
-    "scheduleAt": "{{action}} в {{time}} (через {{until}})",
-    "scheduleAction": "Действие",
-    "scheduleTime": "Время",
-    "scheduleIn": "Через",
-    "scheduleMode": "Режим",
-    "rotationDisabled": "Ротация выключена",
-    "unknownProfile": "Неизвестный профиль",
-    "interval": "Интервал",
-    "minutesShort": "мин",
-    "killSwitchLevel": "Уровень",
-    "killSwitchStatus": "Статус",
-    "killSwitchBlocking": "Блокирует",
-    "killSwitchDisabled": "Выключен",
-    "killSwitchStandby": "Ожидает",
-    "killSwitchBlockingDetail": "Трафик заблокирован правилами kill-switch"
+    "scheduleAt": "{{action}} в {{time}} (через {{until}})"
   },
   "sidebar": {
     "dashboard": "Панель",
@@ -52,7 +37,6 @@
   },
   "settings": {
     "title": "Настройки",
-    "general": "Общие",
     "language": "Язык",
     "languageDescription": "Выберите язык интерфейса",
     "theme": "Тема",
@@ -107,20 +91,13 @@
     "exportSettings": "Экспорт настроек",
     "importSettings": "Импорт настроек",
     "importExportDescription": "Экспорт или импорт конфигурации приложения",
-    "exportDescription": "Сохранить все настройки в JSON-файл",
-    "importDescription": "Загрузить настройки из JSON-файла",
-    "exporting": "Экспорт...",
-    "importing": "Проверка...",
     "exportSuccess": "Настройки успешно экспортированы",
-    "importValidation": "Валидация импорта",
     "importSections": "Разделы для импорта",
     "importConflicts": "Обнаружены конфликты",
     "importConflictsDescription": "Эти разделы уже содержат данные. Выберите способ разрешения:",
-    "conflictResolution": "Разрешение конфликтов",
     "conflictReplace": "Заменить существующие",
     "conflictMerge": "Объединить с существующими",
     "applyImport": "Применить импорт",
-    "applying": "Применение...",
     "importSuccess": "Настройки успешно импортированы",
     "importError": "Ошибка импорта",
     "importErrorDescription": "Выбранный файл не удалось импортировать",
@@ -133,11 +110,7 @@
     "sectionWidgets": "Виджеты",
     "sectionRotation": "Ротация профилей",
     "sectionKillSwitch": "Kill-Switch",
-    "sectionNotifications": "Уведомления",
-    "desktopNotifications": "Уведомления на рабочем столе",
-    "autoRestart": "Автоперезапуск при сбое",
-    "publicWifi": "Совместимость с публичным Wi-Fi",
-    "strictLockdown": "Строгая блокировка адаптеров"
+    "sectionNotifications": "Уведомления"
   },
   "splitTunneling": {
     "title": "Split Tunneling",
@@ -161,7 +134,6 @@
   },
   "servers": {
     "title": "Серверы",
-    "comingSoon": "Управление серверами скоро будет доступно",
     "description": "Управление VPN-профилями и серверами",
     "pingAll": "Проверить все",
     "addServer": "Добавить",
@@ -327,7 +299,6 @@
   },
   "schedule": {
     "title": "Расписание",
-    "comingSoon": "Расписание скоро будет доступно",
     "description": "Автоматизация VPN-подключений по времени",
     "create": "Создать расписание",
     "name": "Название",
@@ -417,22 +388,10 @@
     "openWindowsSettings": "Открыть Параметры Windows"
   },
   "themes": {
-    "title": "Темы",
-    "description": "Настройка внешнего вида приложения",
     "light": "Светлая",
     "dark": "Тёмная",
     "system": "Системная",
-    "custom": "Пользовательская",
-    "createTheme": "Создать тему",
-    "background": "Фон",
-    "cardBackground": "Фон карточек",
-    "accent": "Акцент",
-    "text": "Текст",
-    "textSecondary": "Вторичный текст",
-    "sidebarColor": "Боковая панель",
-    "border": "Граница",
-    "delete": "Удалить тему",
-    "apply": "Применить"
+    "custom": "Пользовательская"
   },
   "onboarding": {
     "welcome": "Добро пожаловать в VPN Tunnel Enforcer",
@@ -495,7 +454,6 @@
     "next": "Далее",
     "search": "Поиск",
     "noResults": "Ничего не найдено",
-    "confirmAction": "Вы уверены?",
     "switchModeWarning": "Переключение режима разорвёт текущее VPN-соединение. Продолжить?"
   },
   "killSwitch": {
@@ -546,11 +504,8 @@
     "actionDirect": "Напрямую",
     "actionBlock": "Блокировать",
     "priority": "Приоритет",
-    "hitCount": "Срабатывания",
     "import": "Импорт списка",
     "importDescription": "Импорт списка доменов из текстового файла (один домен на строку)",
-    "resetHits": "Сбросить счётчики",
-    "resetHitsConfirm": "Сбросить все счётчики срабатываний?",
     "deleteConfirm": "Удалить это правило маршрутизации?",
     "dragHint": "Перетащите для изменения приоритета"
   },

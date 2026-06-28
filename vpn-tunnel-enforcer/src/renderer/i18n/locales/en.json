@@ -18,24 +18,9 @@
     "speedTestLast": "Last speed test"
   },
   "dashboardWidgets": {
-    "noSpeedTests": "No tests yet",
     "scheduleConnect": "Connect",
     "scheduleDisconnect": "Disconnect",
-    "scheduleAt": "{{action}} at {{time}} ({{until}})",
-    "scheduleAction": "Action",
-    "scheduleTime": "Time",
-    "scheduleIn": "In",
-    "scheduleMode": "Mode",
-    "rotationDisabled": "Rotation disabled",
-    "unknownProfile": "Unknown profile",
-    "interval": "Interval",
-    "minutesShort": "min",
-    "killSwitchLevel": "Level",
-    "killSwitchStatus": "Status",
-    "killSwitchBlocking": "Blocking",
-    "killSwitchDisabled": "Disabled",
-    "killSwitchStandby": "Standby",
-    "killSwitchBlockingDetail": "Traffic is being blocked by kill-switch rules"
+    "scheduleAt": "{{action}} at {{time}} ({{until}})"
   },
   "sidebar": {
     "dashboard": "Dashboard",
@@ -52,7 +37,6 @@
   },
   "settings": {
     "title": "Settings",
-    "general": "General",
     "language": "Language",
     "languageDescription": "Select interface language",
     "theme": "Theme",
@@ -107,20 +91,13 @@
     "exportSettings": "Export Settings",
     "importSettings": "Import Settings",
     "importExportDescription": "Export or import application configuration",
-    "exportDescription": "Save all settings to a JSON file",
-    "importDescription": "Load settings from a JSON file",
-    "exporting": "Exporting...",
-    "importing": "Validating...",
     "exportSuccess": "Settings exported successfully",
-    "importValidation": "Import Validation",
     "importSections": "Sections to import",
     "importConflicts": "Conflicts detected",
     "importConflictsDescription": "These sections already have data. Choose how to resolve:",
-    "conflictResolution": "Conflict resolution",
     "conflictReplace": "Replace existing",
     "conflictMerge": "Merge with existing",
     "applyImport": "Apply Import",
-    "applying": "Applying...",
     "importSuccess": "Settings imported successfully",
     "importError": "Import Error",
     "importErrorDescription": "The selected file could not be imported",
@@ -133,11 +110,7 @@
     "sectionWidgets": "Widgets",
     "sectionRotation": "Profile Rotation",
     "sectionKillSwitch": "Kill-Switch",
-    "sectionNotifications": "Notifications",
-    "desktopNotifications": "Desktop notifications",
-    "autoRestart": "Auto-restart on crash",
-    "publicWifi": "Public Wi-Fi compatibility",
-    "strictLockdown": "Strict adapter lockdown"
+    "sectionNotifications": "Notifications"
   },
   "splitTunneling": {
     "title": "Split Tunneling",
@@ -161,7 +134,6 @@
   },
   "servers": {
     "title": "Servers",
-    "comingSoon": "Server management coming soon",
     "description": "Manage VPN profiles and servers",
     "pingAll": "Ping All",
     "addServer": "Add",
@@ -325,7 +297,6 @@
   },
   "schedule": {
     "title": "Schedule",
-    "comingSoon": "Scheduling coming soon",
     "description": "Automate VPN connections by time",
     "create": "Create Schedule",
     "name": "Name",
@@ -415,22 +386,10 @@
     "openWindowsSettings": "Open Windows Settings"
   },
   "themes": {
-    "title": "Themes",
-    "description": "Customize application appearance",
     "light": "Light",
     "dark": "Dark",
     "system": "System",
-    "custom": "Custom",
-    "createTheme": "Create Theme",
-    "background": "Background",
-    "cardBackground": "Card Background",
-    "accent": "Accent",
-    "text": "Text",
-    "textSecondary": "Secondary Text",
-    "sidebarColor": "Sidebar",
-    "border": "Border",
-    "delete": "Delete Theme",
-    "apply": "Apply"
+    "custom": "Custom"
   },
   "onboarding": {
     "welcome": "Welcome to VPN Tunnel Enforcer",
@@ -493,7 +452,6 @@
     "next": "Next",
     "search": "Search",
     "noResults": "No results found",
-    "confirmAction": "Are you sure?",
     "switchModeWarning": "Switching mode will disconnect the current VPN session. Continue?"
   },
   "killSwitch": {
@@ -544,11 +502,8 @@
     "actionDirect": "Direct",
     "actionBlock": "Block",
     "priority": "Priority",
-    "hitCount": "Hits",
     "import": "Import List",
     "importDescription": "Import domain list from a text file (one domain per line)",
-    "resetHits": "Reset Hits",
-    "resetHitsConfirm": "Reset all hit counters to zero?",
     "deleteConfirm": "Delete this domain rule?",
     "dragHint": "Drag to reorder priority"
   },
