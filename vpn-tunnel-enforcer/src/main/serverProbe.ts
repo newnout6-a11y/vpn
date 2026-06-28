@@ -3,6 +3,7 @@ import { promises as dns } from 'dns'
 import { Socket } from 'net'
 import axios from 'axios'
 import { logEvent } from './appLogger'
+import { tunController } from './tunController'
 
 export interface ServerProbeResult {
   host: string
@@ -194,12 +195,17 @@ export async function probeServer(host: string, knownPort?: number): Promise<Ser
 
   const resolvedIps = await resolveHost(host)
   const primaryIp = resolvedIps[0] || host
+  const tunRunning = tunController.getStatus().running
 
-  // Run all probes in parallel
+  // When TUN is active, TCP probes go through the tunnel — latency would be
+  // tunnel RTT, not direct RTT. Skip latency measurement to avoid misleading
+  // values (the active server self-loops, others show tunnel RTT as "direct").
+  const port = knownPort && knownPort > 0 ? knownPort : 443
+
   const [reverseDns, asn, latency, openPorts, tlsCert, httpBanner] = await Promise.all([
     reverseDnsLookup(primaryIp),
     getAsnInfo(primaryIp),
-    measureLatency(host, knownPort && knownPort > 0 ? knownPort : 443),
+    tunRunning ? Promise.resolve({ samples: [], min: null, avg: null, max: null, jitter: null, loss: 1 }) : measureLatency(host, port),
     scanPorts(host, knownPort),
     getTlsCert(host, knownPort && [443, 8443, 4433].includes(knownPort) ? knownPort : 443),
     getHttpBanner(host, 80)

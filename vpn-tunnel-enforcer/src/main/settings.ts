@@ -1,5 +1,6 @@
 import { app } from 'electron'
 import Store from 'electron-store'
+import { join } from 'path'
 import { execElevated } from './admin'
 
 export interface AppSettings {
@@ -223,6 +224,15 @@ function applyLoginItem(autoStart: boolean) {
       : `schtasks /Delete /TN "${taskName}" /F`
 
     execElevated(command, { timeout: 15000 }).catch(() => undefined)
+
+    // Always register boot-time recovery task (independent of autoStart).
+    // This runs at system startup (before logon) as SYSTEM, restoring
+    // network settings if a BSOD left the firewall blocking / DNS pinned.
+    const recoverScript = join(app.isPackaged ? process.resourcesPath : process.cwd(), 'resources', 'vpnte-recover.ps1')
+    const recoverCmd = `powershell -NoProfile -ExecutionPolicy Bypass -File "${recoverScript}"`
+    const recoverTask = `schtasks /Create /TN "VPNTE Boot Recovery" /SC ONSTART /RU SYSTEM /RP "" /TR "${recoverCmd}" /F`
+    execElevated(recoverTask, { timeout: 15000 }).catch(() => undefined)
+
     return
   }
 

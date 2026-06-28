@@ -1,5 +1,5 @@
 import { app } from 'electron'
-import { mkdir, readFile, writeFile, unlink, stat } from 'fs/promises'
+import { mkdir, readFile, writeFile, unlink, stat, rename } from 'fs/promises'
 import { join } from 'path'
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
@@ -73,7 +73,9 @@ async function readManifest(): Promise<FirewallManifest | null> {
 
 async function writeManifest(m: FirewallManifest): Promise<void> {
   await mkdir(backupDir(), { recursive: true })
-  await writeFile(manifestPath(), JSON.stringify(m, null, 2), 'utf-8')
+  const tmp = manifestPath() + '.tmp'
+  await writeFile(tmp, JSON.stringify(m, null, 2), 'utf-8')
+  await rename(tmp, manifestPath())
 }
 
 async function clearManifest(): Promise<void> {
@@ -502,9 +504,6 @@ export async function disableKillSwitch(reason: string): Promise<FirewallKillSwi
     await restoreAndCleanup()
   } catch (err: any) {
     logEvent('warn', 'firewall-killswitch', 'failed to fully restore kill-switch', err)
-    // Still clear manifest so the app doesn't get stuck thinking kill-switch is
-    // active. The rules will still be removed by the next successful disable.
-    await clearManifest()
     return {
       success: false,
       message: 'Часть правил kill-switch не снялась — проверьте Windows Firewall вручную',
@@ -539,6 +538,21 @@ export async function disableKillSwitchIfActive(
   return disableKillSwitch(reason)
 }
 
+async function probeForStuckBlockDefault(): Promise<boolean> {
+  if (process.platform !== 'win32') return false
+  try {
+    const { stdout } = await ps(
+      `(Get-NetFirewallProfile -Profile Domain,Private,Public -ErrorAction SilentlyContinue | Where-Object { $_.DefaultOutboundAction -eq 'Block' } | Measure-Object).Count`,
+      false,
+      15000
+    )
+    const count = parseInt(String(stdout || '0').trim(), 10)
+    return Number.isFinite(count) && count > 0
+  } catch {
+    return false
+  }
+}
+
 async function probeFirewallForOurRules(): Promise<boolean> {
   if (process.platform !== 'win32') return false
   try {
@@ -568,13 +582,14 @@ export async function recoverStaleKillSwitch(isSingboxRunning: () => Promise<boo
   const manifest = await readManifest()
   const manifestSaysActive = manifest !== null
   const firewallSaysActive = manifestSaysActive || await probeFirewallForOurRules()
-  if (!manifestSaysActive && !firewallSaysActive) return
+  const stuckBlockDefault = !manifestSaysActive && !firewallSaysActive && await probeForStuckBlockDefault()
+  if (!manifestSaysActive && !firewallSaysActive && !stuckBlockDefault) return
   if (await isSingboxRunning()) {
     logEvent(
       'info',
       'firewall-killswitch',
       'kill-switch rules found and sing-box is still running — keeping kill-switch',
-      { manifestSaysActive, firewallSaysActive }
+      { manifestSaysActive, firewallSaysActive, stuckBlockDefault }
     )
     return
   }
@@ -582,11 +597,23 @@ export async function recoverStaleKillSwitch(isSingboxRunning: () => Promise<boo
     'warn',
     'firewall-killswitch',
     'stale kill-switch detected on startup (sing-box not running) — clearing',
-    { manifestSaysActive, firewallSaysActive }
+    { manifestSaysActive, firewallSaysActive, stuckBlockDefault }
   )
   await disableKillSwitch('crash recovery on startup').catch((err) =>
     logEvent('warn', 'firewall-killswitch', 'crash-recovery disable failed', err)
   )
+  if (stuckBlockDefault) {
+    logEvent('warn', 'firewall-killswitch', 'restoring DefaultOutboundAction to Allow — was stuck on Block with no rules')
+    try {
+      await ps(
+        `Set-NetFirewallProfile -Profile Domain,Private,Public -DefaultOutboundAction Allow -ErrorAction SilentlyContinue`,
+        true,
+        15000
+      )
+    } catch (err) {
+      logEvent('error', 'firewall-killswitch', 'failed to restore DefaultOutboundAction after stuck Block', err)
+    }
+  }
 }
 
 /**

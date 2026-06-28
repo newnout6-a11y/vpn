@@ -369,7 +369,9 @@ function QuickServers() {
                             ? '…'
                             : pingValue == null
                               ? '—'
-                              : `${pingValue}`}
+                              : tunRunning
+                                ? `≈${pingValue}`
+                                : `${pingValue}`}
                         </span>
                         {row.selected && (
                           <Check className="w-3.5 h-3.5 text-[var(--color-accent)] flex-shrink-0" />

@@ -517,16 +517,21 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
     logEvent('warn', 'app', 'failed to start traffic forensics session', err)
   })
 
-  // Fire off the IP check asynchronously so we don't block the UI's "Connected" state.
-  ipMonitor.getCurrentIp().then(ipInfo => {
-    if (ipInfo.ip) {
-      ipMonitor.setVpnIp(ipInfo.ip)
-      try {
-        mainWindow?.webContents.send('ip-changed', { ip: ipInfo.ip, isLeak: false })
-      } catch {}
-    }
-    refreshTrayState({ status: 'protected', publicIp: ipInfo.ip ?? latestPublicIp, proxyAddr })
-  }).catch(() => undefined)
+  // Schedule IP recheck after TUN routes have propagated. The immediate check
+  // used to race with route propagation and could capture the real IP as the
+  // VPN baseline, making leak detection permanently broken. Now we wait 4s
+  // and verify TUN is actually running before rebaselining.
+  setTimeout(() => {
+    if (!tunController.getStatus().running) return
+    ipMonitor.recheck(true).then(ipInfo => {
+      if (ipInfo.ip) {
+        try {
+          mainWindow?.webContents.send('ip-changed', { ip: ipInfo.ip, isLeak: ipInfo.isLeak })
+        } catch {}
+        refreshTrayState({ status: 'protected', publicIp: ipInfo.ip, proxyAddr })
+      }
+    }).catch(() => undefined)
+  }, 4000)
 
   refreshTrayState({ status: 'protected', publicIp: latestPublicIp, proxyAddr })
 
@@ -538,14 +543,6 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
     name: `Proxy ${proxyAddr}`,
     mode: 'hard'
   }
-
-  // Schedule a follow-up IP recheck after the tunnel is fully ready. The first
-  // check above can race with route propagation, leaving `isLeak` stale on the
-  // renderer until the periodic monitor catches up. Re-baselining the VPN IP
-  // 2.5s later ensures the leak banner clears once routes settle.
-  setTimeout(() => {
-    ipMonitor.recheck(true).catch(() => undefined)
-  }, 2500)
 
   // Snapshot AFTER everything is applied (TUN up, kill-switch up,
   // adapter lockdown up). Then start the periodic snapshot timer +
@@ -676,17 +673,6 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
     logEvent('warn', 'app', 'failed to start traffic forensics session', err)
   })
 
-  // Fire off the IP check asynchronously so we don't block the UI's "Connected" state.
-  ipMonitor.getCurrentIp().then(ipInfo => {
-    if (ipInfo.ip) {
-      ipMonitor.setVpnIp(ipInfo.ip)
-      try {
-        mainWindow?.webContents.send('ip-changed', { ip: ipInfo.ip, isLeak: false })
-      } catch {}
-    }
-    refreshTrayState({ status: 'protected', publicIp: ipInfo.ip ?? latestPublicIp, proxyAddr: profile.name })
-  }).catch(() => undefined)
-
   refreshTrayState({ status: 'protected', publicIp: latestPublicIp, proxyAddr: profile.name })
 
   // Open a connection-history record (Direct VPN variant).
@@ -697,11 +683,18 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
     mode: 'direct'
   }
 
-  // Schedule a follow-up IP recheck after the tunnel is fully ready (see
-  // matching comment in `startProtection`).
+  // Schedule IP recheck after TUN routes have propagated (see startProtection).
   setTimeout(() => {
-    ipMonitor.recheck(true).catch(() => undefined)
-  }, 2500)
+    if (!tunController.getStatus().running) return
+    ipMonitor.recheck(true).then(ipInfo => {
+      if (ipInfo.ip) {
+        try {
+          mainWindow?.webContents.send('ip-changed', { ip: ipInfo.ip, isLeak: ipInfo.isLeak })
+        } catch {}
+        refreshTrayState({ status: 'protected', publicIp: ipInfo.ip, proxyAddr: profile.name })
+      }
+    }).catch(() => undefined)
+  }, 4000)
 
   captureSnapshot('tun-post-start').catch(() => undefined)
   startPeriodicSnapshots(60_000)
@@ -876,6 +869,17 @@ async function performCrashRecovery(): Promise<void> {
 
   await repairOrphanedPhysicalAdapterDns('startup orphaned DNS repair')
     .catch(err => logEvent('warn', 'phys-lockdown', 'startup orphaned DNS repair failed', err))
+
+  try {
+    const status = await autoconfig.getStatus()
+    const envApplied = status.find(t => t.id === 'env')?.applied
+    if (envApplied) {
+      logEvent('info', 'app', 'rolling back env autoconfig (setx HTTP_PROXY) on crash recovery')
+      await autoconfig.rollback(['env'])
+    }
+  } catch (err) {
+    logEvent('warn', 'app', 'env autoconfig rollback during crash recovery failed', err)
+  }
 }
 
 app.whenReady().then(async () => {

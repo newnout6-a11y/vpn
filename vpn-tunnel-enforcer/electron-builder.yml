@@ -56,6 +56,8 @@ extraResources:
     to: geoip-ru.srs
   - from: resources/geosite-category-gov-ru.srs
     to: geosite-category-gov-ru.srs
+  - from: resources/vpnte-recover.ps1
+    to: vpnte-recover.ps1
 extraFiles:
   - from: resources/vpnte-proxy.ps1
     to: vpnte-proxy.ps1

@@ -130,8 +130,9 @@ export function Dashboard() {
   }, [tunRunning, tunStartedAt])
 
   // Fetch country/city for the current public IP via ipapi.co
+  // Only after VPN IP is confirmed — avoids geolocating the user's real IP
   useEffect(() => {
-    if (!publicIp || isLeak || !tunRunning) {
+    if (!publicIp || isLeak || !tunRunning || !vpnIp) {
       setIpGeo({ country: null, city: null })
       return
     }
@@ -558,7 +559,7 @@ export function Dashboard() {
         {/* Connection info chips */}
         {isConnected && (
           <div className="flex flex-wrap items-center justify-center gap-2 text-xs">
-            {publicIp && !isLeak && (
+            {publicIp && !isLeak && vpnIp ? (
               <span className="flex items-center gap-1.5 rounded-full bg-[var(--color-success)]/10 px-3 py-1.5 text-[var(--color-success)]">
                 <CheckCircle2 className="w-3.5 h-3.5" />
                 {ipGeo.country && (
@@ -571,7 +572,12 @@ export function Dashboard() {
                   </span>
                 )}
               </span>
-            )}
+            ) : !vpnIp ? (
+              <span className="flex items-center gap-1.5 rounded-full bg-[var(--color-bg)] px-3 py-1.5 text-[var(--color-text-secondary)]">
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                Определяем IP...
+              </span>
+            ) : null}
             <span className="flex items-center gap-1.5 rounded-full bg-[var(--color-bg)] px-3 py-1.5 text-[var(--color-text-secondary)]">
               <Download className="w-3.5 h-3.5 text-[var(--color-success)]" />
               ↓ <span className="font-mono">{formatSpeed(traffic.downloadBps)}</span>

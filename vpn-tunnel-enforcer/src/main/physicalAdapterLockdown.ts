@@ -31,7 +31,7 @@
  */
 import { app } from 'electron'
 import { existsSync } from 'fs'
-import { readFile, writeFile, unlink } from 'fs/promises'
+import { readFile, writeFile, unlink, rename } from 'fs/promises'
 import { join } from 'path'
 import { execElevated } from './admin'
 import { logEvent } from './appLogger'
@@ -117,7 +117,9 @@ function summarizeDnsSources(adapters: AdapterSnapshot[]): PhysicalAdapterDnsSou
 }
 
 async function writeManifest(m: LockdownManifest): Promise<void> {
-  await writeFile(manifestPath(), JSON.stringify(m, null, 2), 'utf-8')
+  const tmp = manifestPath() + '.tmp'
+  await writeFile(tmp, JSON.stringify(m, null, 2), 'utf-8')
+  await rename(tmp, manifestPath())
 }
 
 async function deleteManifest(): Promise<void> {
@@ -460,21 +462,42 @@ try { reg delete "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\DNSClient" /v
 try { reg delete "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Dnscache\\Parameters" /v DisableParallelAandAAAA /f | Out-Null; Write-Host 'DNS_PARALLEL:restore' } catch { Write-Host "DNS_PARALLEL_err: $_" }
 try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}`
 
+  let rollbackSuccess = true
   try {
     const out = await runPS(combinedScript, 30000)
     for (let i = 0; i < m.adapters.length; i++) {
       const a = m.adapters[i]
-      logEvent('info', 'phys-lockdown', `rolled back ${a.alias}`, { reason })
+      const ipv6Ok = new RegExp(`A${i}_ipv6:on|A${i}_ipv6:noop`).test(out)
+      const dnsOk = new RegExp(`A${i}_dns:restore|A${i}_dns:reset|A${i}_dns:noop`).test(out)
+      if (!ipv6Ok || !dnsOk) {
+        logEvent('warn', 'phys-lockdown', `partial rollback failure for ${a.alias}`, { reason, ipv6Ok, dnsOk })
+        rollbackSuccess = false
+      } else {
+        logEvent('info', 'phys-lockdown', `rolled back ${a.alias}`, { reason })
+      }
     }
     if (m.transitionAdapters) {
-      logEvent('info', 'phys-lockdown', 'transition adapters restored', { reason })
+      const teredoOk = /TRANS_teredo:restore/.test(out)
+      const sixTo4Ok = /TRANS_6to4:restore/.test(out)
+      const isatapOk = /TRANS_isatap:restore/.test(out)
+      if (!teredoOk || !sixTo4Ok || !isatapOk) {
+        logEvent('warn', 'phys-lockdown', 'partial transition adapter rollback', { reason, teredoOk, sixTo4Ok, isatapOk })
+        rollbackSuccess = false
+      } else {
+        logEvent('info', 'phys-lockdown', 'transition adapters restored', { reason })
+      }
     }
   } catch (err) {
     logEvent('warn', 'phys-lockdown', `batch rollback failed`, err)
+    rollbackSuccess = false
   }
 
-  await deleteManifest()
-  return { rolledBack: true }
+  if (rollbackSuccess) {
+    await deleteManifest()
+  } else {
+    logEvent('warn', 'phys-lockdown', 'manifest kept for retry on next startup — rollback was incomplete', { reason })
+  }
+  return { rolledBack: rollbackSuccess }
 }
 
 export async function repairOrphanedPhysicalAdapterDns(reason: string): Promise<{ repaired: boolean; adapters: string[] }> {

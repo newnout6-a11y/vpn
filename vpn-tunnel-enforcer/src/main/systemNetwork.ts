@@ -1,5 +1,5 @@
 import { app } from 'electron'
-import { mkdir, readFile, writeFile, unlink } from 'fs/promises'
+import { mkdir, readFile, writeFile, unlink, rename } from 'fs/promises'
 import { join } from 'path'
 import { exec as execCb } from 'child_process'
 import { promisify } from 'util'
@@ -93,7 +93,9 @@ async function createBackup(): Promise<NetworkBackupManifest> {
     environmentBackup: await exportKey(USER_ENVIRONMENT, join(backupDir(), `hkcu-environment-${stamp}.reg`)),
     hklmConnectionsBackup: await exportKey(HKLM_CONNECTIONS, join(backupDir(), `hklm-connections-${stamp}.reg`), true)
   }
-  await writeFile(manifestPath(), JSON.stringify(manifest, null, 2), 'utf-8')
+  const tmpPath = manifestPath() + '.tmp'
+  await writeFile(tmpPath, JSON.stringify(manifest, null, 2), 'utf-8')
+  await rename(tmpPath, manifestPath())
   return manifest
 }
 
@@ -135,22 +137,23 @@ export async function applyTunNetworkBaseline(): Promise<SystemNetworkResult> {
 
   try {
     const manifest = await createBackup()
-    await ps(`
-netsh winhttp reset proxy | Out-Null
-$internet='HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings'
-New-Item -Path $internet -Force | Out-Null
-Set-ItemProperty -Path $internet -Name ProxyEnable -Type DWord -Value 0
-Remove-ItemProperty -Path $internet -Name ProxyServer -ErrorAction SilentlyContinue
-Remove-ItemProperty -Path $internet -Name AutoConfigURL -ErrorAction SilentlyContinue
-Set-ItemProperty -Path $internet -Name AutoDetect -Type DWord -Value 0
-$envKey='HKCU:\\Environment'
-New-Item -Path $envKey -Force | Out-Null
-@('HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY','http_proxy','https_proxy','all_proxy','no_proxy') |
-  ForEach-Object {
-    Remove-ItemProperty -Path $envKey -Name $_ -ErrorAction SilentlyContinue
-    [Environment]::SetEnvironmentVariable($_, $null, 'User')
-  }
-`, true, 30000)
+
+    // 1. Reset WinHTTP proxy (requires elevation)
+    await execElevated('netsh winhttp reset proxy', { timeout: 10000 }).catch(() => undefined)
+
+    // 2. Clear WinINet proxy & environment vars in HKCU (fast native reg commands, no broadcasting deadlock)
+    const commands = [
+      'reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyEnable /t REG_DWORD /d 0 /f',
+      'reg delete "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyServer /f',
+      'reg delete "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v AutoConfigURL /f',
+      'reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v AutoDetect /t REG_DWORD /d 0 /f'
+    ]
+    for (const key of PROXY_ENV_KEYS) {
+      commands.push(`reg delete "HKCU\\Environment" /v ${key} /f`)
+    }
+
+    await Promise.all(commands.map(cmd => exec(cmd, { windowsHide: true, timeout: 5000 }).catch(() => undefined)))
+
     clearCurrentProcessProxyEnv()
     await notifyWinInetSettingsChanged()
     return {
