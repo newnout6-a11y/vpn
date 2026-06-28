@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { useAppStore } from './store'
 import { Sidebar, type SidebarPage } from './components/Sidebar'
 import { FirstRunWizard } from './components/FirstRunWizard'
+import { MacToast } from './design-system'
 import { ThemeProvider } from './providers/ThemeProvider'
 const Dashboard = lazy(() => import('./pages/Dashboard').then(m => ({ default: m.Dashboard })))
 const SplitTunnel = lazy(() => import('./pages/SplitTunnel').then(m => ({ default: m.SplitTunnel })))
@@ -250,6 +251,8 @@ export default function App() {
   // user can still click around for the 5–15s the cleanup takes.
   const [shuttingDown, setShuttingDown] = useState(false)
   const addLog = useAppStore(s => s.addLog)
+  const globalToasts = useAppStore(s => s.globalToasts)
+  const dismissGlobalToast = useAppStore(s => s.dismissGlobalToast)
 
   // True while the TUN status is 'stopping' — i.e. main is mid-rollback of
   // firewall / adapter lockdown / DNS. During that window any leak event or
@@ -677,6 +680,14 @@ export default function App() {
             </div>
           </div>
         )}
+
+        {/* Global toast notifications — visible on all pages */}
+        <MacToast toasts={globalToasts.map(t => ({
+          id: t.id,
+          variant: t.variant,
+          title: t.title,
+          description: t.description,
+        }))} onDismiss={(id) => dismissGlobalToast(id)} />
       </div>
     </ThemeProvider>
   )

@@ -13,7 +13,7 @@
 
 import { ipcMain, BrowserWindow, type IpcMainInvokeEvent } from 'electron'
 import axios from 'axios'
-import { randomUUID } from 'crypto'
+import { randomUUID, randomBytes } from 'crypto'
 import { Readable } from 'stream'
 import Store from 'electron-store'
 import { logEvent } from './appLogger'
@@ -176,7 +176,7 @@ function downloadUrl(target: typeof DOWNLOAD_URLS[number], bytes: number, runId:
 async function downloadOne(url: string, onChunk: (bytes: number) => void): Promise<number> {
   const response = await axios.get(url, {
     responseType: 'stream',
-    timeout: 60000,
+    timeout: 180000,
     headers: { 'Cache-Control': 'no-cache' },
     maxContentLength: Infinity,
     maxBodyLength: Infinity,
@@ -227,24 +227,37 @@ async function measureAccurateDownload(): Promise<{ mbps: number; name: string }
 
   throw new Error(`Failed to measure download speed. All speed test servers are unavailable.${lastErr ? ` Last error: ${lastErr.message}` : ''}`)
 }
-
 async function uploadOne(payloadBytes: number, onProgress: (bytes: number) => void): Promise<number> {
+  // Generate random data (not zeros) to prevent compression from inflating
+  // the measured throughput. Zeros are highly compressible — if any hop
+  // applies transparent compression, fewer bytes travel over the wire while
+  // we report the full count, overstating speed.
+  const chunks: Buffer[] = []
+  const chunkSize = 65536
+  let remaining = payloadBytes
+  while (remaining > 0) {
+    const sz = Math.min(chunkSize, remaining)
+    chunks.push(randomBytes(sz))
+    remaining -= sz
+  }
+  const fullPayload = Buffer.concat(chunks)
+
+  let uploadedBytes = 0
   const stream = new Readable({
     read(size) {
-      const chunk = Math.min(size || 65536, payloadBytes - (this as any).bytesRead)
+      const chunk = Math.min(size || 65536, payloadBytes - uploadedBytes)
       if (chunk > 0) {
-        this.push(Buffer.alloc(chunk))
-        ;(this as any).bytesRead += chunk
-        onProgress((this as any).bytesRead)
+        this.push(fullPayload.subarray(uploadedBytes, uploadedBytes + chunk))
+        uploadedBytes += chunk
+        onProgress(uploadedBytes)
       } else {
         this.push(null)
       }
     }
   })
-  ;(stream as any).bytesRead = 0
 
   await axios.post(UPLOAD_URL, stream, {
-    timeout: 60000,
+    timeout: 180000,
     headers: {
       'Content-Type': 'application/octet-stream',
       'Content-Length': payloadBytes.toString()
@@ -252,7 +265,8 @@ async function uploadOne(payloadBytes: number, onProgress: (bytes: number) => vo
     maxBodyLength: Infinity,
     maxContentLength: Infinity
   })
-  return payloadBytes
+
+  return uploadedBytes
 }
 
 async function measureUploadRound(bytesPerStream: number, streams: number): Promise<number> {
@@ -267,7 +281,10 @@ async function measureUploadRound(bytesPerStream: number, streams: number): Prom
     sendProgress(progressPercent('upload', uploadedBytes, expectedBytes), 'upload')
   })))
 
-  return mbpsFromBytes(expectedBytes, start || Date.now())
+  // Compute Mbps from actual uploaded bytes, not expected — a stalled stream
+  // would otherwise overstate throughput.
+  const actualUploaded = uploadedByStream.reduce((sum, bytes) => sum + bytes, 0)
+  return mbpsFromBytes(actualUploaded, start || Date.now())
 }
 
 async function measureAccurateUpload(): Promise<number> {
@@ -284,7 +301,6 @@ async function measureAccurateUpload(): Promise<number> {
 }
 
 async function runSpeedTest(): Promise<SpeedTestResult> {
-  // Check if VPN is active
   const status = tunController.getStatus()
   if (!status.running) {
     throw new Error('VPN не подключён. Подключите VPN перед запуском теста скорости.')
@@ -314,6 +330,22 @@ async function runSpeedTest(): Promise<SpeedTestResult> {
     sendProgress(50, 'upload')
     const uploadMbps = await measureAccurateUpload()
     logEvent('info', 'speed-test', 'upload measured', { uploadMbps })
+
+    // Verify VPN egress IP — if the tunnel is leaking, the test measured
+    // the direct connection, not VPN performance. Log a warning.
+    try {
+      const ipResp = await axios.get('https://api.ipify.org?format=json', { timeout: 6000 })
+      const testIp = ipResp.data?.ip
+      if (testIp) {
+        const { ipMonitor } = await import('./ipMonitor')
+        const currentIp = ipMonitor.getCurrentIp()
+        if (currentIp.ip && testIp !== currentIp.ip) {
+          logEvent('warn', 'speed-test', 'egress IP mismatch — test may have measured direct connection', {
+            testIp, vpnIp: currentIp.ip
+          })
+        }
+      }
+    } catch { /* non-critical verification */ }
 
     sendProgress(100, 'complete')
 

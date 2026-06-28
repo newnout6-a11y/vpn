@@ -188,13 +188,23 @@ async function performRotation(): Promise<{ success: boolean; newProfile: string
   }
 
   // Switch the active profile using serverPicker
+  const rotatedProfile = serverPicker.getProfiles().find(p => p.id === nextProfileId)
+  const profileName = rotatedProfile?.name || nextProfileId
   serverPicker.selectProfile(nextProfileId)
 
   logEvent('info', 'profile-rotation', 'rotated to new profile', {
     profileId: nextProfileId,
     index: updatedConfig.currentIndex
   })
-  notify('info', 'Ротация', `Переключение на профиль ${nextProfileId}`, 'profileRotation').catch(() => undefined)
+  notify('info', 'Ротация', `Переключение на профиль ${profileName}`, 'profileRotation').catch(() => undefined)
+
+  // Notify renderer so the Dashboard updates the active profile display
+  try {
+    const { BrowserWindow } = await import('electron')
+    BrowserWindow.getAllWindows().forEach(win => {
+      try { win.webContents.send('server-active-changed', { profileId: nextProfileId, profileName }) } catch {}
+    })
+  } catch { /* non-critical */ }
 
   // If the tunnel is currently UP, selecting a new profile is not enough —
   // sing-box keeps using the old server until it restarts, so the egress IP

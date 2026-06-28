@@ -412,10 +412,17 @@ export function parseIcmpReply(text: string, host: string): number | null {
   // English: "time=53ms" / "time<1ms" / "time=1.2 ms"
   // Russian: "время=53мс" / "время<1мс"
   const m = text.match(/(?:time|время)\s*[<=]\s*([0-9.]+)\s*(?:ms|мс)/i)
-  if (m) return Math.max(1, Math.round(Number(m[1])))
-  // Some Russian locales emit a comma decimal separator.
+  if (m) {
+    const ms = Math.max(1, Math.round(Number(m[1])))
+    if (!isLoopback && ms <= 3) return null
+    return ms
+  }
   const m2 = text.match(/(?:time|время)\s*[<=]\s*([0-9,]+)\s*(?:ms|мс)/i)
-  if (m2) return Math.max(1, Math.round(Number(m2[1].replace(',', '.'))))
+  if (m2) {
+    const ms = Math.max(1, Math.round(Number(m2[1].replace(',', '.'))))
+    if (!isLoopback && ms <= 3) return null
+    return ms
+  }
   return null
 }
 
@@ -522,16 +529,23 @@ function plainTcpPing(host: string, port: number): Promise<number | null> {
  */
 async function stealthTcpProbe(host: string, port: number): Promise<number | null> {
   if (process.platform !== 'win32') return null
-  // We always disguise as yandex.ru:443 regardless of the VPN's actual
-  // port. The firewall's stateful inspection only allows port 443 for
-  // "ordinary" HTTPS anyway, so probing on 443 (and getting back a
-  // truthful TCP-connect time to the VPN host's IP on 443) is the most
-  // permissive path and the closest analogue to a real ClientHello
-  // request. We accept the small caveat that we measure host:443 even
-  // when the VPN listens on, say, 8443 — for the purpose of "is this
-  // host reachable from this hostile network at all" that's still a
-  // strictly better signal than null.
   void port
+
+  // curl's --resolve requires an IP address, not a hostname. If the profile
+  // has a domain (the common case), resolve it to an IP first.
+  let resolveIp = host
+  if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(host) && !host.includes(':')) {
+    try {
+      const ips = await dns.resolve4(host)
+      if (ips.length > 0) resolveIp = ips[0]
+    } catch {
+      try {
+        const lookup = await dns.lookup(host, { family: 4 })
+        if (lookup?.address) resolveIp = lookup.address
+      } catch { /* fall through with hostname — curl will fail gracefully */ }
+    }
+  }
+
   try {
     const args = [
       '-sS',
@@ -539,7 +553,7 @@ async function stealthTcpProbe(host: string, port: number): Promise<number | nul
       '-w', '%{time_connect}',
       '--max-time', '2.5',
       '--connect-timeout', '2',
-      '--resolve', `yandex.ru:443:${host}`,
+      '--resolve', `yandex.ru:443:${resolveIp}`,
       'https://yandex.ru:443'
     ]
     const { stdout, stderr } = await execFile('curl.exe', args, {

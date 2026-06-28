@@ -245,6 +245,19 @@ interface AppState {
   // Persists the diagnostic export state across tab changes
   exportingDiagnostics: boolean
   setExportingDiagnostics: (e: boolean) => void
+
+  // Global toast notifications — visible on all pages
+  globalToasts: GlobalToast[]
+  addGlobalToast: (variant: GlobalToast['variant'], title: string, description?: string) => void
+  dismissGlobalToast: (id: string) => void
+}
+
+export interface GlobalToast {
+  id: string
+  variant: 'success' | 'error' | 'warning' | 'info'
+  title: string
+  description?: string
+  ts: number
 }
 
 export interface LeakSelfTestResultClient {
@@ -377,5 +390,16 @@ export const useAppStore = create<AppState>((set) => ({
   })),
   setLeakSelfTestResult: (r) => set({ leakSelfTestResult: r }),
   setLastMainError: (e) => set({ lastMainError: e }),
-  setExportingDiagnostics: (e) => set({ exportingDiagnostics: e })
+  setExportingDiagnostics: (e) => set({ exportingDiagnostics: e }),
+  globalToasts: [],
+  addGlobalToast: (variant, title, description) => {
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+    set((s) => ({
+      globalToasts: [...s.globalToasts, { id, variant, title, description, ts: Date.now() }]
+    }))
+    setTimeout(() => {
+      set((s) => ({ globalToasts: s.globalToasts.filter(t => t.id !== id) }))
+    }, 4000)
+  },
+  dismissGlobalToast: (id) => set((s) => ({ globalToasts: s.globalToasts.filter(t => t.id !== id) }))
 }))

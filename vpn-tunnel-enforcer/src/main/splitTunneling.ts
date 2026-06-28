@@ -369,12 +369,10 @@ async function hotReloadIfActive(): Promise<void> {
   logEvent('info', 'split-tunnel', 'hot-reloading split tunnel rules while TUN is active')
 
   try {
-    // Restart the tunnel reusing the last start options. The new split-tunnel
-    // rules are picked up via getDirectProcessNames() during config
-    // regeneration on the restart. Previously this only called stop() and
-    // logged "renderer should re-trigger start" — but nothing did, so changing
-    // a split-tunnel rule (or removing an app) while connected silently killed
-    // the VPN and left it down. restartWithLastOptions stops AND starts again.
+    const { BrowserWindow } = await import('electron')
+    BrowserWindow.getAllWindows().forEach(win => {
+      try { win.webContents.send('inapp-notification', { level: 'info', title: 'Применяем изменения', body: 'Перезапускаем защиту с обновлёнными правилами split tunneling', ts: Date.now() }) } catch {}
+    })
     const result = await tunController.restartWithLastOptions('split-tunnel rule change')
     if (!result.success) {
       logEvent('warn', 'split-tunnel', 'hot-reload restart failed — tunnel may be down', {

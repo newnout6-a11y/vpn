@@ -1,6 +1,6 @@
 import { useAppStore } from '../store'
 import { Bell, EyeOff, FileArchive, FolderOpen, Globe2, Languages, Loader2, MapPin, Network, Palette, RefreshCw, Save, Settings2, ShieldAlert, ShieldCheck, Wand2 } from 'lucide-react'
-import { ReactNode, useEffect, useState } from 'react'
+import { ReactNode, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { KillSwitchSettings } from '../components/KillSwitchSettings'
 import { RotationSettings } from '../components/RotationSettings'
@@ -162,6 +162,18 @@ export function Settings() {
   const [saved, setSaved] = useState(false)
   const [saving, setSaving] = useState(false)
   const [openingLogs, setOpeningLogs] = useState(false)
+
+  // Auto-save: debounced persistence so toggle changes don't get lost if the
+  // user navigates away without clicking "Save and Apply". The explicit Save
+  // button still applies live changes (kill-switch reconnect, etc).
+  const autoSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => {
+    if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current)
+    autoSaveTimer.current = setTimeout(() => {
+      window.electronAPI.saveSettings(settings).catch(() => undefined)
+    }, 1500)
+    return () => { if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current) }
+  }, [settings])
   const [exporting, setExporting] = useState(false)
   const [osNotificationsBlocked, setOsNotificationsBlocked] = useState(false)
   const [ruleSetState, setRuleSetState] = useState<SmartRouteRuleSetState | null>(null)

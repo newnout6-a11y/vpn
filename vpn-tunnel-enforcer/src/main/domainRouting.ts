@@ -338,6 +338,10 @@ async function hotReloadIfActive(): Promise<void> {
   if (!status.running) return
   logEvent('info', 'domain-routing', 'hot-reloading domain rules while TUN is active')
   try {
+    const { BrowserWindow } = await import('electron')
+    BrowserWindow.getAllWindows().forEach(win => {
+      try { win.webContents.send('inapp-notification', { level: 'info', title: 'Применяем изменения', body: 'Перезапускаем защиту с обновлёнными правилами маршрутизации', ts: Date.now() }) } catch {}
+    })
     const result = await tunController.restartWithLastOptions('domain-routing rule change')
     if (!result.success) {
       logEvent('warn', 'domain-routing', 'hot-reload restart failed', { error: result.error })
