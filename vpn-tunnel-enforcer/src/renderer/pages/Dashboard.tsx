@@ -549,8 +549,8 @@ export function Dashboard() {
             relative w-36 h-36 rounded-full flex items-center justify-center z-10
             transition-all duration-300 ease-out
             ${isConnected
-              ? 'bg-[var(--color-success)] shadow-[0_0_60px_rgb(var(--rgb-success)/0.4),0_8px_32px_rgba(0,0,0,0.3)]'
-              : 'bg-[var(--color-accent)] shadow-[0_0_40px_rgb(var(--rgb-accent)/0.25),0_8px_32px_rgba(0,0,0,0.3)]'
+              ? 'bg-[var(--color-success)] shadow-[0_0_60px_rgb(var(--rgb-success)/0.35),0_8px_32px_rgba(0,0,0,0.25)]'
+              : 'bg-[var(--color-accent)] shadow-[0_0_40px_rgb(var(--rgb-accent)/0.2),0_8px_32px_rgba(0,0,0,0.25)]'
             }
             ${isBusy ? 'opacity-70 cursor-wait' : 'cursor-pointer'}
           `}
