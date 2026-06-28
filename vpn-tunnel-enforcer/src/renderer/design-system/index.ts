@@ -8,7 +8,6 @@
 
 export { MacButton, type MacButtonProps } from './MacButton'
 export { MacCard, type MacCardProps } from './MacCard'
-export { MacToggle, type MacToggleProps } from './MacToggle'
 export {
   MacSegmentedControl,
   type MacSegmentedControlProps,

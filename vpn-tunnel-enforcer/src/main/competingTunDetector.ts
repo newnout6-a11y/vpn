@@ -87,11 +87,3 @@ export function stopCompetingTunWatch(): void {
   emitStatus = null
   lastForeign = null
 }
-
-/**
- * Test-only — read the watchdog's current view of the foreign TUN. Returns
- * null when nothing is detected.
- */
-export function getCurrentForeignTun(): string | null {
-  return lastForeign
-}

@@ -2,7 +2,7 @@
  * Tests for the global `connectionBusy` flag in the app store.
  *
  * Regression context (finding U1): `connecting`/`disconnecting` used to be
- * LOCAL React useState inside Dashboard/HeroStatus. Switching tabs mid-connect
+ * LOCAL React useState inside Dashboard. Switching tabs mid-connect
  * unmounted those components and the busy state was lost. On return the power
  * button re-enabled while the tunnel was still starting → a second click
  * double-started the tunnel and broke routing.

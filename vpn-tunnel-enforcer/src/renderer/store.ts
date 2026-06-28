@@ -228,9 +228,7 @@ interface AppState {
   setLeakChecks: (checks: LeakCheckResult | null) => void
   setTrafficStats: (stats: TrafficStats) => void
   setBrowserIpCheck: (check: BrowserIpCheck | null) => void
-  toggleTarget: (id: string) => void
   addLog: (level: LogEntry['level'], message: string) => void
-  clearLogs: () => void
   setSettings: (s: AppSettings) => void
   updateSettings: (s: Partial<AppSettings>) => void
 
@@ -367,18 +365,12 @@ export const useAppStore = create<AppState>((set) => ({
   }),
   setTrafficStats: (traffic) => set({ traffic }),
   setBrowserIpCheck: (browserIpCheck) => set({ browserIpCheck }),
-  toggleTarget: (id) => set((s) => ({
-    autoconfigTargets: s.autoconfigTargets.map(t =>
-      t.id === id ? { ...t, enabled: !t.enabled } : t
-    )
-  })),
   addLog: (level, message) => {
     persistRendererLog(level, message)
     set((s) => ({
       logs: [...s.logs.slice(-500), { timestamp: Date.now(), level, message }]
     }))
   },
-  clearLogs: () => set({ logs: [] }),
   setSettings: (settings) => set({ settings }),
   updateSettings: (partial) => set((s) => ({
     settings: { ...s.settings, ...partial }

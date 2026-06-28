@@ -41,9 +41,9 @@ export function navigateTo(page: AppPage): void {
 
 /**
  * Broadcast that the active server changed. Components that surface the
- * current profile name (HeroStatus, StatusWidget, ProfileSelectorInline,
- * DashboardSide) listen for this and re-fetch from the picker store
- * immediately, so the UI updates as soon as the user clicks Select.
+ * current profile name (ProfileSelectorInline, DashboardSide) listen for
+ * this and re-fetch from the picker store immediately, so the UI updates
+ * as soon as the user clicks Select.
  */
 export const SERVER_CHANGED_EVENT = 'vpnte:server-changed'
 

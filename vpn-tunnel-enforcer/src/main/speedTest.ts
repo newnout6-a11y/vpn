@@ -13,7 +13,7 @@
 
 import { ipcMain, BrowserWindow, type IpcMainInvokeEvent } from 'electron'
 import axios from 'axios'
-import { randomUUID, randomBytes } from 'crypto'
+import { randomUUID } from 'crypto'
 import { Readable } from 'stream'
 import Store from 'electron-store'
 import { logEvent } from './appLogger'
@@ -63,7 +63,8 @@ const DOWNLOAD_PROBE_BYTES = 10 * 1024 * 1024
 const DOWNLOAD_FAST_BYTES_PER_STREAM = 50 * 1024 * 1024
 const DOWNLOAD_FAST_STREAMS = 6
 const DOWNLOAD_FAST_THRESHOLD_MBPS = 80
-const UPLOAD_PROBE_BYTES = 8 * 1024 * 1024
+const UPLOAD_PROBE_BYTES_PER_STREAM = 2 * 1024 * 1024 // 2 MB per stream for probe
+const UPLOAD_PROBE_STREAMS = 4 // 4 streams * 2 MB = 8 MB total probe
 const UPLOAD_FAST_BYTES_PER_STREAM = 4 * 1024 * 1024 // 4 MB per stream
 const UPLOAD_FAST_STREAMS = 20 // 20 streams total = 80 MB. Required to max out Cloudflare HTTP/1.1 upload.
 const UPLOAD_FAST_THRESHOLD_MBPS = 40
@@ -143,81 +144,6 @@ async function measureLatency(): Promise<number> {
 
 // ─── Download Speed Measurement ──────────────────────────────────────────────
 
-/**
- * Measures download speed by fetching a test file.
- * Tries each DOWNLOAD_URL in order until one succeeds, so a single blocked
- * CDN doesn't fail the whole test. Reports progress during download.
- * Returns the speed in Mbps along with the name of the server that worked.
- */
-async function measureDownload(): Promise<{ mbps: number; name: string }> {
-  let lastErr: Error | null = null
-
-  for (const target of DOWNLOAD_URLS) {
-    const start = Date.now()
-    let receivedBytes = 0
-
-    try {
-      const response = await axios.get(target.url, {
-        responseType: 'arraybuffer',
-        timeout: 30000,
-        onDownloadProgress: (progressEvent) => {
-          if (progressEvent.total) {
-            const percent = Math.round((progressEvent.loaded / progressEvent.total) * 50)
-            sendProgress(percent, 'download')
-          }
-          receivedBytes = progressEvent.loaded
-        }
-      })
-
-      const elapsed = (Date.now() - start) / 1000 // seconds
-      const bytes = response.data.byteLength || receivedBytes
-
-      if (elapsed === 0 || bytes === 0) {
-        lastErr = new Error('Сервер вернул пустой ответ')
-        continue
-      }
-
-      // Convert bytes/sec to Mbps (megabits per second)
-      const bitsPerSecond = (bytes * 8) / elapsed
-      const mbps = Math.round((bitsPerSecond / 1_000_000) * 100) / 100
-      return { mbps, name: target.name }
-    } catch (err: any) {
-      lastErr = err
-      logEvent('warn', 'speed-test', `download endpoint ${target.name} failed, trying next`, { error: err.message || String(err) })
-    }
-  }
-
-  throw new Error(`Не удалось измерить скорость загрузки. Все тестовые серверы недоступны.${lastErr ? ` Последняя ошибка: ${lastErr.message}` : ''}`)
-}
-
-// ─── Upload Speed Measurement ────────────────────────────────────────────────
-
-/**
- * Measures upload speed by POSTing random data.
- * Reports progress during upload.
- * Returns speed in Mbps.
- */
-async function measureUpload(): Promise<number> {
-  const start = Date.now()
-  let uploaded = 0
-
-  await uploadOne(UPLOAD_SIZE, (loaded) => {
-    uploaded = loaded
-    // Upload progress is 50-100% of total test
-    const percent = 50 + Math.round((loaded / UPLOAD_SIZE) * 50)
-    sendProgress(percent, 'upload')
-  })
-
-  const elapsed = (Date.now() - start) / 1000 // seconds
-
-  if (elapsed === 0) {
-    throw new Error('Не удалось измерить скорость отдачи')
-  }
-
-  // Convert bytes/sec to Mbps
-  const bitsPerSecond = (UPLOAD_SIZE * 8) / elapsed
-  return Math.round((bitsPerSecond / 1_000_000) * 100) / 100
-}
 
 
 // ─── Main Test Runner ────────────────────────────────────────────────────────
@@ -345,7 +271,7 @@ async function measureUploadRound(bytesPerStream: number, streams: number): Prom
 }
 
 async function measureAccurateUpload(): Promise<number> {
-  const probeMbps = await measureUploadRound(UPLOAD_PROBE_BYTES, 1)
+  const probeMbps = await measureUploadRound(UPLOAD_PROBE_BYTES_PER_STREAM, UPLOAD_PROBE_STREAMS)
 
   if (probeMbps <= 0) {
     throw new Error('Failed to measure upload speed')

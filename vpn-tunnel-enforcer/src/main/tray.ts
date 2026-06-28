@@ -170,10 +170,6 @@ export function createTray(mainWindow: BrowserWindow, actions: TrayActions = {})
   return tray
 }
 
-export function updateTrayIcon(tray: Tray, status: 'protected' | 'leak' | 'off') {
-  updateTrayState(tray, { status })
-}
-
 export function updateTrayState(tray: Tray, patch: Partial<TrayState>) {
   trayState = { ...trayState, ...patch }
   tray.setImage(createTrayIcon(trayState.status))

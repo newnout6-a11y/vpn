@@ -284,23 +284,6 @@ function netshState(value: string | null, fallback = 'default'): string {
   return /^[a-z]+$/.test(normalized) ? normalized : fallback
 }
 
-async function restoreTransitionAdapters(snapshot: TransitionAdapterSnapshot, reason: string): Promise<void> {
-  const teredoType = netshState(snapshot.teredoType)
-  const sixToFourState = netshState(snapshot.sixToFourState)
-  const isatapState = netshState(snapshot.isatapState)
-  try {
-    const out = await runPS(`
-$ErrorActionPreference = 'Continue'
-try { netsh interface teredo set state type=${teredoType} | Out-Null; Write-Host 'teredo:restore' } catch { Write-Host "teredo:err: $_" }
-try { netsh interface 6to4 set state state=${sixToFourState} | Out-Null; Write-Host '6to4:restore' } catch { Write-Host "6to4:err: $_" }
-try { netsh interface isatap set state state=${isatapState} | Out-Null; Write-Host 'isatap:restore' } catch { Write-Host "isatap:err: $_" }
-`, 15000)
-    logEvent('info', 'phys-lockdown', 'transition adapters restored', { reason, snapshot, out: out.trim() })
-  } catch (err) {
-    logEvent('warn', 'phys-lockdown', 'transition adapter restore failed', err)
-  }
-}
-
 /**
  * Apply the lockdown: disable IPv6 on each physical adapter and, unless public
  * Wi-Fi compatibility is enabled, force IPv4 DNS to the TUN's resolver. Each

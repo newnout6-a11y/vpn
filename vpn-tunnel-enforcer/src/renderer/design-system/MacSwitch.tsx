@@ -12,7 +12,7 @@ export interface MacSwitchProps {
 }
 
 /**
- * Small on/off switch (standard size, unlike the large MacToggle).
+ * Small on/off switch (standard size).
  * Used for settings toggles throughout the app.
  */
 export const MacSwitch: React.FC<MacSwitchProps> = ({
