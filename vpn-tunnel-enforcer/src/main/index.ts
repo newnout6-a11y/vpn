@@ -1355,6 +1355,7 @@ app.whenReady().then(async () => {
   schedulerService.init({
     onConnect: (schedule) => {
       logEvent('info', 'scheduler', `schedule "${schedule.name}" triggered connect`, { profileId: schedule.profileId, mode: schedule.mode })
+      notify('info', 'Расписание', `VPN включён по расписанию: ${schedule.name}`, 'scheduleTriggered').catch(() => undefined)
       if (schedule.mode === 'direct') {
         startDirectVpnProtection().catch(err =>
           logEvent('error', 'scheduler', 'scheduled direct VPN start failed', err)
@@ -1373,6 +1374,7 @@ app.whenReady().then(async () => {
     },
     onDisconnect: (schedule) => {
       logEvent('info', 'scheduler', `schedule "${schedule.name}" triggered disconnect`)
+      notify('info', 'Расписание', `VPN выключен по расписанию: ${schedule.name}`, 'scheduleTriggered').catch(() => undefined)
       stopProtection().catch(err =>
         logEvent('error', 'scheduler', 'scheduled stop failed', err)
       )

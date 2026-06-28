@@ -15,6 +15,7 @@
 import { ipcMain, type IpcMainInvokeEvent } from 'electron'
 import Store from 'electron-store'
 import { logEvent } from './appLogger'
+import { notify } from './notifications'
 import { serverPicker, pingServer } from './serverPicker'
 import type { RotationConfig } from '../shared/ipc-types'
 
@@ -192,6 +193,7 @@ async function performRotation(): Promise<{ success: boolean; newProfile: string
     profileId: nextProfileId,
     index: updatedConfig.currentIndex
   })
+  notify('info', 'Ротация', `Переключение на профиль ${nextProfileId}`, 'profileRotation').catch(() => undefined)
 
   // If the tunnel is currently UP, selecting a new profile is not enough —
   // sing-box keeps using the old server until it restarts, so the egress IP

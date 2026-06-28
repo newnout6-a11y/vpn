@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Globe, Plus, Upload, RotateCcw, Pencil, Trash2, X, Check } from 'lucide-react'
+import { Globe, Plus, Upload, Pencil, Trash2, X, Check } from 'lucide-react'
 import { MacCard, MacButton, MacInput, MacSelect, MacBadge, MacDragList } from '../design-system'
 import type { DragItem } from '../design-system/MacDragList'
 
@@ -11,7 +11,6 @@ interface DomainRule {
   pattern: string
   action: DomainAction
   priority: number
-  hitCount: number
 }
 
 type DomainRuleDragItem = DomainRule & DragItem
@@ -135,15 +134,6 @@ export function DomainRouting() {
     }
   }
 
-  const handleResetHits = async () => {
-    try {
-      await window.electronAPI.domainRoutingResetHits()
-      loadRules()
-    } catch (err) {
-      console.error('Failed to reset hits:', err)
-    }
-  }
-
   const startEdit = (rule: DomainRule) => {
     setEditingId(rule.id)
     setFormPattern(rule.pattern)
@@ -230,9 +220,6 @@ export function DomainRouting() {
         <span className="text-xs text-[var(--color-text-secondary)] w-8 text-center shrink-0">
           #{rule.priority + 1}
         </span>
-        <span className="text-xs text-[var(--color-text-secondary)] w-12 text-right shrink-0">
-          {rule.hitCount} {t('domainRouting.hitCount').toLowerCase()}
-        </span>
         <div className="flex items-center gap-1 shrink-0">
           <MacButton size="sm" variant="ghost" onClick={() => startEdit(rule)}>
             <Pencil size={14} />
@@ -255,9 +242,6 @@ export function DomainRouting() {
           </h3>
         </div>
         <div className="flex items-center gap-2">
-          <MacButton size="sm" variant="ghost" onClick={handleResetHits} title={t('domainRouting.resetHits')}>
-            <RotateCcw size={14} />
-          </MacButton>
           <MacButton size="sm" variant="secondary" onClick={handleImport}>
             <Upload size={14} className="mr-1" />
             {t('domainRouting.import')}
