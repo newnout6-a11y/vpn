@@ -164,9 +164,9 @@ const ICMP_PROBE_TIMEOUT_MS = 1500
  *
  * Returns latency in ms or null if the server is fully unreachable.
  */
-export function pingServer(host: string, port: number): Promise<number | null> {
+export function pingServer(host: string, port: number, opts?: { skipCache?: boolean }): Promise<number | null> {
   return tunController.getStatus().running
-    ? tunnelHttpProbe()
+    ? tunnelHttpProbe(opts?.skipCache === true)
     : smartOfflinePing(host, port)
 }
 
@@ -200,9 +200,9 @@ export function pingServer(host: string, port: number): Promise<number | null> {
  * itself is the bottleneck — every profile would return the same number
  * anyway).
  */
-export async function tunnelHttpProbe(): Promise<number | null> {
+export async function tunnelHttpProbe(skipCache = false): Promise<number | null> {
   const cached = tunnelProbeCache
-  if (cached) {
+  if (cached && !skipCache) {
     // Asymmetric TTL: short window for a cached failure (so we react
     // quickly when the network recovers), longer window for a cached
     // success (so a pingAll sweep doesn't fan out into N identical
@@ -1982,7 +1982,7 @@ export function registerServerPickerHandlers(): void {
   // measure latency to whatever profile the user currently has chosen, without
   // forcing a full pingAll across every saved server.
   handleLogged('servers:ping-one', async (_event, host: string, port: number) => {
-    return await pingServer(host, port)
+    return await pingServer(host, port, { skipCache: true })
   })
 
   handleLogged('servers:verify-active-country', async (_event, ip: string) => {
