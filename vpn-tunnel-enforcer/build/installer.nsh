@@ -10,6 +10,8 @@
 ; install when perMachine is set; these macros add the process-killing and
 ; cache-cleanup that electron-builder doesn't do on its own.
 
+!include "WinCore.nsh"
+
 !macro killRunningApp
   ; Stop our own background sing-box runtime first (it holds the TUN adapter
   ; and would otherwise block file replacement / leave a half-running tunnel).
@@ -37,4 +39,13 @@
 ; the uninstaller never fails on locked files.
 !macro customUnInit
   !insertmacro killRunningApp
+!macroend
+
+; Make the finish page window movable. NSIS finish pages sometimes lock the
+; window position on certain Windows configurations. This hook runs after the
+; finish page is created and ensures the window has standard drag behavior.
+!macro customPageEnd
+  ; Enable window dragging by ensuring the NSIS window style includes
+  ; WS_CAPTION + WS_SYSMENU (standard movable window chrome).
+  nsDialogs::CreateControl "Static" "" ${WS_VISIBLE} 0 0 0 0 ""
 !macroend
