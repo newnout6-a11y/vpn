@@ -33,24 +33,18 @@ import {
   type VpnProfile
 } from './vpnProfiles'
 import { settingsStore } from './settings'
+import { serverPickerStore, serverGroupsStore, type ServerPickerStoreShape } from './sharedStores'
 import type { ClientDevice, ServerGroup, ServerProfile } from '../shared/ipc-types'
 
 // ─── Persistent Store ────────────────────────────────────────────────────────
 
-interface ServerGroupsStore {
-  groups: ServerGroup[]
-}
+type ServerGroupsStore = typeof serverGroupsStore extends Store<infer T> ? T : never
 
 interface RefreshGroupOptions {
   clientDevice?: ClientDevice
 }
 
-const store = new Store<ServerGroupsStore>({
-  name: 'server-groups',
-  defaults: {
-    groups: []
-  }
-})
+const store = serverGroupsStore
 
 // Auto-created default group names. We keep them as constants so the
 // picker-side code that creates them on demand uses the exact same string.
@@ -322,14 +316,7 @@ function vpnProfileToServerProfile(
  *
  * Mirror of {@link ServerPickerStore} from `serverPicker.ts`.
  */
-interface PickerStoreShape {
-  profiles: ServerProfile[]
-  activeProfileId: string | null
-}
-const pickerStore = new Store<PickerStoreShape>({
-  name: 'server-picker',
-  defaults: { profiles: [], activeProfileId: null }
-})
+const pickerStore = serverPickerStore
 
 function getPickerProfiles(): ServerProfile[] {
   return pickerStore.get('profiles') ?? []

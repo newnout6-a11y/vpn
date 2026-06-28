@@ -23,6 +23,7 @@ import { ipcMain, dialog, type IpcMainInvokeEvent } from 'electron'
 import { readFileSync, writeFileSync } from 'fs'
 import Store from 'electron-store'
 import { logEvent } from './appLogger'
+import { serverPickerStore, serverGroupsStore, granularKillSwitchStore } from './sharedStores'
 import type {
   SplitTunnelApp,
   ServerProfile,
@@ -86,15 +87,7 @@ const splitTunnelStore = new Store<{ splitTunnelApps: SplitTunnelApp[] }>({
   defaults: { splitTunnelApps: [] }
 })
 
-const serverPickerStore = new Store<{ profiles: ServerProfile[] }>({
-  name: 'server-picker',
-  defaults: { profiles: [] }
-})
-
-const serverGroupsStore = new Store<{ groups: ServerGroup[] }>({
-  name: 'server-groups',
-  defaults: { groups: [] }
-})
+// server-picker, server-groups, granular-kill-switch use shared singletons
 
 const schedulerStore = new Store<{ schedules: ScheduleEntry[] }>({
   name: 'scheduler',
@@ -116,11 +109,6 @@ const themeStore = new Store<{ activeThemeId: string; customThemes: ThemeConfig[
   defaults: { activeThemeId: 'builtin-system', customThemes: [] }
 })
 
-const widgetStore = new Store<{ widgetLayout: WidgetLayout[] }>({
-  name: 'widget-layout',
-  defaults: { widgetLayout: [] }
-})
-
 const rotationStore = new Store<{ rotation: RotationConfig }>({
   name: 'profile-rotation',
   defaults: {
@@ -135,13 +123,7 @@ const rotationStore = new Store<{ rotation: RotationConfig }>({
   }
 })
 
-const killSwitchStore = new Store<{
-  killSwitchLevel: KillSwitchLevel
-  killSwitchExceptions: KillSwitchException[]
-}>({
-  name: 'granular-kill-switch',
-  defaults: { killSwitchLevel: 'off', killSwitchExceptions: [] }
-})
+// granular-kill-switch uses shared singleton from sharedStores.ts
 
 // ─── Default Notification Preferences ────────────────────────────────────────
 
@@ -510,7 +492,7 @@ export function collectCurrentConfig(): ConfigExportData {
     dns: allDns,
     domainRouting: domainRoutingStore.get('domainRules') ?? [],
     themes: themeStore.get('customThemes') ?? [],
-    widgets: widgetStore.get('widgetLayout') ?? [],
+    widgets: [],
     rotation: rotationStore.get('rotation') ?? {
       enabled: false,
       intervalMinutes: 30,
@@ -520,8 +502,8 @@ export function collectCurrentConfig(): ConfigExportData {
       nextRotationAt: null
     },
     killSwitch: {
-      level: killSwitchStore.get('killSwitchLevel') ?? 'off',
-      exceptions: killSwitchStore.get('killSwitchExceptions') ?? []
+      level: granularKillSwitchStore.get('killSwitchLevel') ?? 'off',
+      exceptions: granularKillSwitchStore.get('killSwitchExceptions') ?? []
     },
     notifications: notificationStore.get('notificationPrefs') ?? DEFAULT_NOTIFICATION_PREFS
   }
@@ -558,14 +540,13 @@ function writeConfigToStores(config: ConfigExportData, sections: ConfigSection[]
         themeStore.set('customThemes', config.themes)
         break
       case 'widgets':
-        widgetStore.set('widgetLayout', config.widgets)
         break
       case 'rotation':
         rotationStore.set('rotation', config.rotation)
         break
       case 'killSwitch':
-        killSwitchStore.set('killSwitchLevel', config.killSwitch.level)
-        killSwitchStore.set('killSwitchExceptions', config.killSwitch.exceptions)
+        granularKillSwitchStore.set('killSwitchLevel', config.killSwitch.level)
+        granularKillSwitchStore.set('killSwitchExceptions', config.killSwitch.exceptions)
         break
       case 'notifications':
         notificationStore.set('notificationPrefs', config.notifications)

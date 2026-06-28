@@ -29,11 +29,11 @@ import { Socket } from 'net'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { connect as tlsConnect } from 'tls'
-import Store from 'electron-store'
 import { SocksClient } from 'socks'
 import { logEvent } from './appLogger'
 import { buildBootstrapRouteAttempts, type BootstrapRouteAttempt } from './bootstrapRoute'
 import { settingsStore } from './settings'
+import { serverPickerStore, serverGroupsStore } from './sharedStores'
 import { getBundledResource, getDirectProxyPort, pickFreeLocalPort, sanitizeProxyOutbound, tunController } from './tunController'
 import type { ServerProfile } from '../shared/ipc-types'
 
@@ -465,20 +465,12 @@ export async function checkProfileHealth(profile: ServerProfile): Promise<KeyHea
   return { profileId: profile.id, online: true, latencyMs: latency }
 }
 
-interface ServerPickerStoreShape { profiles?: ServerProfile[] }
-interface ServerGroupsStoreShape { groups?: Array<{ id: string; status?: string; [key: string]: any }> }
-
-let pickerStoreCache: Store<ServerPickerStoreShape> | null = null
-let groupsStoreCache: Store<ServerGroupsStoreShape> | null = null
-
-function getPickerStore(): Store<ServerPickerStoreShape> {
-  if (!pickerStoreCache) pickerStoreCache = new Store<ServerPickerStoreShape>({ name: 'server-picker' })
-  return pickerStoreCache
+function getPickerStore() {
+  return serverPickerStore
 }
 
-function getGroupsStore(): Store<ServerGroupsStoreShape> {
-  if (!groupsStoreCache) groupsStoreCache = new Store<ServerGroupsStoreShape>({ name: 'server-groups' })
-  return groupsStoreCache
+function getGroupsStore() {
+  return serverGroupsStore
 }
 
 /** Probe every profile in a group, max 5 in flight. */

@@ -35,6 +35,7 @@ import { ipMonitor } from './ipMonitor'
 import { cancelLeakSelfTest } from './leakSelfTest'
 import { startCompetingTunWatch, stopCompetingTunWatch } from './competingTunDetector'
 import { dnsProfiles } from './dnsProfiles'
+import { granularKillSwitchStore, serverPickerStore, serverGroupsStore } from './sharedStores'
 import { generateDomainRouteRules } from './domainRouting'
 import {
   smartRouteRules,
@@ -1481,11 +1482,7 @@ async function getProxyOwnerProcesses(host: string, port: number): Promise<Array
 // use, so a malformed entry here is harmless.
 function readGranularKillSwitchIpExceptions(): string[] {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    let StoreCtor: any = require('electron-store')
-    if (StoreCtor && StoreCtor.default) StoreCtor = StoreCtor.default
-    const ksStore = new StoreCtor({ name: 'granular-kill-switch' })
-    const exceptions = ksStore.get('killSwitchExceptions', []) as Array<{ type?: string; value?: string }>
+    const exceptions = granularKillSwitchStore.get('killSwitchExceptions', []) as Array<{ type?: string; value?: string }>
     if (!Array.isArray(exceptions)) return []
     return exceptions
       .filter((e) => e && e.type === 'ip' && typeof e.value === 'string' && e.value.trim())
@@ -1681,27 +1678,20 @@ export async function attemptPostTrialFailover(): Promise<{ tried: number; succe
     // Lazy-import the health checker via dynamic ESM `import()` so the
     // bundler still resolves it (unlike `require()` which electron-vite
     // tree-shook in production and broke "Проверить ключи").
-    let StoreCtor: any
     let checkProfileHealth: ((profile: any) => Promise<{ online: boolean; latencyMs: number | null; reason?: string }>) | null = null
     try {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      StoreCtor = require('electron-store')
-      if (StoreCtor && StoreCtor.default) StoreCtor = StoreCtor.default
       const mod = await import('./keyHealthChecker')
       checkProfileHealth = mod.checkProfileHealth
     } catch (err) {
       logEvent('warn', 'tun', 'post-trial failover: failed to load dependencies', err)
       return { tried: 0, succeeded: false }
     }
-    if (!StoreCtor || !checkProfileHealth) {
+    if (!checkProfileHealth) {
       return { tried: 0, succeeded: false }
     }
 
-    const pickerStore = new StoreCtor({ name: 'server-picker' })
-    const groupsStore = new StoreCtor({ name: 'server-groups' })
-
-    const profiles: any[] = pickerStore.get('profiles', []) || []
-    const activeId: string | null = pickerStore.get('activeProfileId', null) || null
+    const profiles: any[] = serverPickerStore.get('profiles', []) || []
+    const activeId: string | null = serverPickerStore.get('activeProfileId', null) || null
     if (!Array.isArray(profiles) || !activeId) {
       return { tried: 0, succeeded: false }
     }
@@ -1715,7 +1705,7 @@ export async function attemptPostTrialFailover(): Promise<{ tried: number; succe
       return { tried: 0, succeeded: false }
     }
 
-    const groups: any[] = groupsStore.get('groups', []) || []
+    const groups: any[] = serverGroupsStore.get('groups', []) || []
     const group = Array.isArray(groups) ? groups.find(g => g && g.id === activeGroupId) : null
     if (!group || group.status !== 'expired') {
       // Failover only makes sense for post-trial groups. Healthy subscriptions
@@ -1757,7 +1747,7 @@ export async function attemptPostTrialFailover(): Promise<{ tried: number; succe
       // Promote the candidate to active BEFORE we restart so the next
       // start() picks it up via lastStartOptions / the renderer state.
       try {
-        pickerStore.set('activeProfileId', candidate.id)
+        serverPickerStore.set('activeProfileId', candidate.id)
       } catch (err) {
         logEvent('warn', 'tun', 'post-trial failover: failed to set active profile', err)
       }
