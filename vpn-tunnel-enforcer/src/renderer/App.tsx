@@ -274,6 +274,9 @@ export default function App() {
         return
       }
       useAppStore.getState().setPublicIp(ip, isLeak)
+      if (!isLeak) {
+        useAppStore.getState().setVpnIp(ip)
+      }
       if (isLeak) {
         addLog('error', `ОБНАРУЖЕНА УТЕЧКА IP! Текущий: ${ip}`)
       } else {
@@ -503,7 +506,7 @@ export default function App() {
           }
           liveStore.setPublicIp(ipInfo.ip, ipInfo.isLeak)
           if (ipInfo.ip) addLog('info', `Текущий публичный IP: ${ipInfo.ip}`)
-          if (ipInfo.ip && !ipInfo.isLeak) void verifyActiveServerCountry(ipInfo.ip)
+          if (ipInfo.ip && !ipInfo.isLeak && ipInfo.vpnIp) void verifyActiveServerCountry(ipInfo.ip)
         } catch (err: any) {
           addLog('error', `Ошибка проверки IP: ${err.message}`)
         }

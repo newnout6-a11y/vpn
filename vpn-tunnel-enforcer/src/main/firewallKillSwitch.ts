@@ -340,15 +340,30 @@ ${proxyAllowParts.join('\n')}
 # DefaultOutboundAction=Block blocks the browser before Windows can route the
 # packet into the TUN, which looks like "internet is blocked" even though
 # sing-box itself is allowed.
-try {
-  New-NetFirewallRule \`
-    -DisplayName ${psSingleQuote(tunInterfaceAllow)} \`
-    -Description 'VPN Tunnel Enforcer kill-switch: allow captured app traffic through ${TUN_ADAPTER_ALIAS}.' \`
-    -Direction Outbound -Action Allow \`
-    -InterfaceAlias '${TUN_ADAPTER_ALIAS}' \`
-    -Profile Any -Enabled True | Out-Null
-  $rules += ${psSingleQuote(tunInterfaceAllow)}
-} catch { Write-Host "WARN allow-tun-interface: $_" }
+# The -InterfaceAlias rule requires the TUN adapter to exist. We poll for it
+# here (up to ~5s) so the entire kill-switch script can be kicked off in
+# parallel with the JS-side waitForTunInterface, saving ~2-3s of sequential
+# waiting. If the adapter never appears, we skip this rule rather than
+# blocking the whole script.
+$tunAliasFound = $false
+for ($i = 0; $i -lt 50; $i++) {
+  $a = Get-NetAdapter -Name '${TUN_ADAPTER_ALIAS}' -ErrorAction SilentlyContinue
+  if ($a -and $a.Status -eq 'Up') { $tunAliasFound = $true; break }
+  Start-Sleep -Milliseconds 100
+}
+if ($tunAliasFound) {
+  try {
+    New-NetFirewallRule \`
+      -DisplayName ${psSingleQuote(tunInterfaceAllow)} \`
+      -Description 'VPN Tunnel Enforcer kill-switch: allow captured app traffic through ${TUN_ADAPTER_ALIAS}.' \`
+      -Direction Outbound -Action Allow \`
+      -InterfaceAlias '${TUN_ADAPTER_ALIAS}' \`
+      -Profile Any -Enabled True | Out-Null
+    $rules += ${psSingleQuote(tunInterfaceAllow)}
+  } catch { Write-Host "WARN allow-tun-interface: $_" }
+} else {
+  Write-Host "WARN allow-tun-interface: adapter not found after 5s"
+}
 
 # 3d. Allow IPv4 LAN ranges outbound (printers, NAS, router, mDNS).
 try {

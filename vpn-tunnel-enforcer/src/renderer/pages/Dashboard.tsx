@@ -156,7 +156,7 @@ export function Dashboard() {
       }
     })()
     return () => { cancelled = true }
-  }, [publicIp, isLeak, tunRunning])
+  }, [publicIp, isLeak, tunRunning, vpnIp])
 
   // ─── Toast management ───────────────────────────────────────────────────
 

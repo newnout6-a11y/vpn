@@ -517,21 +517,27 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
     logEvent('warn', 'app', 'failed to start traffic forensics session', err)
   })
 
-  // Schedule IP recheck after TUN routes have propagated. The immediate check
-  // used to race with route propagation and could capture the real IP as the
-  // VPN baseline, making leak detection permanently broken. Now we wait 4s
-  // and verify TUN is actually running before rebaselining.
-  setTimeout(() => {
-    if (!tunController.getStatus().running) return
-    ipMonitor.recheck(true).then(ipInfo => {
-      if (ipInfo.ip) {
-        try {
-          mainWindow?.webContents.send('ip-changed', { ip: ipInfo.ip, isLeak: ipInfo.isLeak })
-        } catch {}
-        refreshTrayState({ status: 'protected', publicIp: ipInfo.ip, proxyAddr })
-      }
-    }).catch(() => undefined)
-  }, 4000)
+  // Poll for the VPN IP instead of waiting a fixed 4s. The TUN routes
+  // propagate within a few hundred ms on most systems, so polling every 500ms
+  // shows the VPN IP much sooner than a fixed 4s delay. We verify TUN is
+  // running on each attempt and stop after 8 tries (4s max) as a safety net.
+  const pollVpnIp = async () => {
+    for (let attempt = 0; attempt < 8; attempt++) {
+      await new Promise(r => setTimeout(r, 500))
+      if (!tunController.getStatus().running) return
+      try {
+        const ipInfo = await ipMonitor.recheck(true)
+        if (ipInfo.ip) {
+          try {
+            mainWindow?.webContents.send('ip-changed', { ip: ipInfo.ip, isLeak: ipInfo.isLeak })
+          } catch {}
+          refreshTrayState({ status: 'protected', publicIp: ipInfo.ip, proxyAddr })
+          return
+        }
+      } catch { /* retry on next interval */ }
+    }
+  }
+  void pollVpnIp()
 
   refreshTrayState({ status: 'protected', publicIp: latestPublicIp, proxyAddr })
 
@@ -683,18 +689,24 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
     mode: 'direct'
   }
 
-  // Schedule IP recheck after TUN routes have propagated (see startProtection).
-  setTimeout(() => {
-    if (!tunController.getStatus().running) return
-    ipMonitor.recheck(true).then(ipInfo => {
-      if (ipInfo.ip) {
-        try {
-          mainWindow?.webContents.send('ip-changed', { ip: ipInfo.ip, isLeak: ipInfo.isLeak })
-        } catch {}
-        refreshTrayState({ status: 'protected', publicIp: ipInfo.ip, proxyAddr: profile.name })
-      }
-    }).catch(() => undefined)
-  }, 4000)
+  // Poll for the VPN IP instead of waiting a fixed 4s (see startProtection).
+  const pollVpnIpDirect = async () => {
+    for (let attempt = 0; attempt < 8; attempt++) {
+      await new Promise(r => setTimeout(r, 500))
+      if (!tunController.getStatus().running) return
+      try {
+        const ipInfo = await ipMonitor.recheck(true)
+        if (ipInfo.ip) {
+          try {
+            mainWindow?.webContents.send('ip-changed', { ip: ipInfo.ip, isLeak: ipInfo.isLeak })
+          } catch {}
+          refreshTrayState({ status: 'protected', publicIp: ipInfo.ip, proxyAddr: profile.name })
+          return
+        }
+      } catch { /* retry on next interval */ }
+    }
+  }
+  void pollVpnIpDirect()
 
   captureSnapshot('tun-post-start').catch(() => undefined)
   startPeriodicSnapshots(60_000)

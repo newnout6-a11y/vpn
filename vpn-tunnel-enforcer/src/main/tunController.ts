@@ -2251,14 +2251,13 @@ export const tunController = {
     let killSwitchEngaged = false
     let killSwitchWarning: string | null = null
 
-    if (adapterLockdownPromise) {
-      try {
-        await adapterLockdownPromise
-        mark('lockdown-done')
-      } catch {
-        return finishStart({ success: false, error: adapterLockdownWarning || 'Adapter lockdown failed' })
-      }
-    }
+    // Adapter lockdown is NOT awaited here — it runs in parallel with sing-box
+    // startup. The lockdown modifies physical adapters (IPv6 off, DNS pin) and
+    // does not affect sing-box's ability to create the TUN. We await it inside
+    // the poller success handler instead, overlapping the ~3-5s lockdown with
+    // sing-box's ~0.5s startup + TUN wait. If lockdown fails there, we tear
+    // down sing-box at that point.
+    mark('lockdown-kicked-off')
     // sudo-prompt's callback fires on child exit. For a long-running daemon we:
     // 1. Fire-and-forget the sudo.exec call, using its callback to mark "stopped" on exit.
     // 2. Poll tasklist for sing-box.exe to determine if it actually started.
@@ -2586,6 +2585,24 @@ export const tunController = {
           clearInterval(poller)
           endPhase('wait-singbox-process', processWaitStarted, { attempts })
 
+          // Await the adapter lockdown NOW — it was kicked off ~3-4s ago and
+          // is very likely already done by this point. If it hasn't finished
+          // yet, we overlap the remaining few hundred ms with the TUN wait
+          // below. If lockdown fails, we must tear down sing-box since we
+          // already launched it.
+          if (adapterLockdownPromise) {
+            try {
+              await timeAsync('adapter-lockdown-await', () => adapterLockdownPromise!)
+              mark('lockdown-done')
+            } catch {
+              // Lockdown failed after sing-box started — kill it and abort.
+              killOwnedRuntimeProcesses()
+              await rollbackEarlyAdapterLockdown('lockdown failed after sing-box started')
+              finish({ success: false, error: adapterLockdownWarning || 'Adapter lockdown failed' })
+              return
+            }
+          }
+
           // Engage the firewall kill-switch NOW, after sing-box is up. The
           // kill-switch installs an Allow rule scoped to -InterfaceAlias
           // TUN_ADAPTER_ALIAS, and Windows Firewall validates that alias when the
@@ -2596,22 +2613,56 @@ export const tunController = {
           // so wait for it unconditionally — this is a couple of hundred ms in
           // the steady-state and prevents a leak window where Wi-Fi outranks
           // our TUN on the default-route tiebreak.
+          // Run waitForTunInterface and the kill-switch IN PARALLEL. The
+          // kill-switch PS script now internally polls for the TUN adapter
+          // before creating the -InterfaceAlias rule, so it no longer needs
+          // the JS-side wait to complete first. This overlaps the ~2-3s
+          // kill-switch PS script with the ~300-3000ms TUN wait, saving
+          // ~2-3s on the critical path.
+          //
+          // The TUN metric set (netsh, ~20ms) runs after waitForTunInterface
+          // completes — it's negligible and needs the adapter present.
+          const parallelStarted = phaseStart()
+
+          // Kick off the kill-switch immediately (if enabled and not already
+          // active). The script handles TUN adapter polling internally.
+          let killSwitchPromise: Promise<{ engaged: boolean; warning: string | null }> | null = null
+          if (wantKillSwitch) {
+            killSwitchPromise = (async () => {
+              if (await isKillSwitchActive()) {
+                logEvent('info', 'tun', 'kill-switch already active — reusing existing rules')
+                return { engaged: true, warning: null }
+              }
+              const ks = await enableKillSwitch({
+                singboxExePath: runtime.singbox,
+                proxyOwnerProgramPaths,
+                extraAllowedRemoteCidrs: readGranularKillSwitchIpExceptions()
+              })
+              if (ks.success) {
+                logEvent('info', 'tun', 'kill-switch engaged (parallel with TUN wait)')
+                recordForensicTunEvent('kill-switch-engaged', {
+                  reason: 'parallel-with-tun-wait',
+                  singboxExePath: runtime.singbox
+                })
+                return { engaged: true, warning: null }
+              }
+              logEvent('warn', 'tun', 'firewall kill-switch failed — continuing without it', ks)
+              return { engaged: false, warning: `Kill-switch не включился: ${ks.message}. VPN работает без дополнительной защиты от утечек.` }
+            })().catch(err => {
+              logEvent('warn', 'tun', 'kill-switch promise rejected', err)
+              return { engaged: false, warning: `Kill-switch error: ${err?.message || String(err)}` }
+            })
+          }
+
+          // Wait for the TUN adapter (JS-side) in parallel with the kill-switch.
           const tunReady = await timeAsync('wait-tun-interface', () => waitForTunInterface(5000))
 
-          // Lock in our TUN's InterfaceMetric BEFORE the kill-switch comes up. The
-          // kill-switch installs an InterfaceAlias-scoped allow rule that needs the
-          // adapter present (already verified by waitForTunInterface above), but the
-          // metric tweak is independent of firewall state and should always run when
-          // the adapter is up. Without it, Wi-Fi (auto-metric 35-50) beats our TUN
-          // (auto-metric 256 on sing-tun/Wintun) on the InterfaceMetric tiebreak and
-          // traffic leaks via the physical adapter despite strict_route. Best-effort
-          // — failure to set the metric does NOT fail the start.
+          // Lock in our TUN's InterfaceMetric as soon as the adapter is up.
+          // This is a ~20ms netsh call and is independent of the kill-switch.
           if (tunReady) {
             await timeAsync('tun-interface-metric-set', () => applyLowTunInterfaceMetric())
 
-            // Diagnostic readback only. The protection-critical part is the
-            // metric write above, so do not hold startup/firewall on this
-            // extra PowerShell round-trip.
+            // Diagnostic readback only — background, non-blocking.
             const readbackStarted = phaseStart()
             const script = `(Get-NetIPInterface -InterfaceAlias '${TUN_ADAPTER_ALIAS}' -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty InterfaceMetric)`
             void runPowerShell(script, 4000)
@@ -2630,51 +2681,34 @@ export const tunController = {
               })
           }
 
-          if (wantKillSwitch) {
-            const killSwitchStarted = phaseStart()
-            if (!tunReady) {
+          // Collect the kill-switch result (it was started in parallel above
+          // and is likely already done by now, since the TUN wait + metric
+          // set took at least a few hundred ms).
+          if (killSwitchPromise) {
+            if (!tunReady && !(await isKillSwitchActive())) {
+              // TUN didn't come up — the kill-switch script's internal poll
+              // also failed to find the adapter, so it skipped the
+              // InterfaceAlias rule. Warn the user.
               logEvent(
                 'warn',
                 'tun',
-                `${TUN_ADAPTER_ALIAS} did not reach Status=Up within 5s — skipping kill-switch to avoid blocking traffic`
+                `${TUN_ADAPTER_ALIAS} did not reach Status=Up within 5s — kill-switch may be incomplete`
               )
               killSwitchWarning =
-                'TUN-адаптер не поднялся за 5 с — kill-switch пропущен, чтобы не блокировать интернет.'
-              endPhase('firewall-kill-switch', killSwitchStarted, { skipped: true, reason: 'tun-not-ready' })
-            } else if (await isKillSwitchActive()) {
-              // Auto-restart path: rules left in place by the previous run are
-              // still doing their job, no need to reinstall (which would also
-              // briefly drop and re-add allow rules). Just take ownership.
+                'TUN-адаптер не поднялся за 5 с — kill-switch может быть неполным.'
+            }
+            const ksResult = await timeAsync('firewall-kill-switch-await', () => killSwitchPromise!)
+            endPhase('firewall-kill-switch', parallelStarted, {
+              engaged: ksResult.engaged,
+              parallel: true
+            })
+            if (ksResult.engaged) {
               killSwitchEngaged = true
-              logEvent('info', 'tun', 'kill-switch already active — reusing existing rules')
-              endPhase('firewall-kill-switch', killSwitchStarted, { reused: true })
             } else {
-              const ks = await enableKillSwitch({
-                singboxExePath: runtime.singbox,
-                proxyOwnerProgramPaths,
-                extraAllowedRemoteCidrs: readGranularKillSwitchIpExceptions()
-              })
-              if (ks.success) {
-                killSwitchEngaged = true
-                logEvent('info', 'tun', 'kill-switch engaged after TUN interface came up')
-                recordForensicTunEvent('kill-switch-engaged', {
-                  reason: 'tun-interface-up',
-                  singboxExePath: runtime.singbox
-                })
-                endPhase('firewall-kill-switch', killSwitchStarted, { engaged: true })
-              } else {
-                logEvent(
-                  'warn',
-                  'tun',
-                  'firewall kill-switch failed to engage after TUN came up — continuing without it',
-                  ks
-                )
-                killSwitchWarning = `Kill-switch не включился: ${ks.message}. VPN работает без дополнительной защиты от утечек.`
-                endPhase('firewall-kill-switch', killSwitchStarted, { failed: true, message: ks.message })
-              }
+              killSwitchWarning = ksResult.warning
             }
           } else {
-            endPhase('firewall-kill-switch', phaseStart(), { skipped: true, reason: 'disabled' })
+            endPhase('firewall-kill-switch', parallelStarted, { skipped: true, reason: 'disabled' })
           }
 
           const combinedWarning = [warning, killSwitchWarning].filter(Boolean).join(' | ') || null
