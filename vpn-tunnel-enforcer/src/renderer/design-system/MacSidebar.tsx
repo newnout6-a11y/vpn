@@ -49,8 +49,7 @@ export const MacSidebar: React.FC<MacSidebarProps> = ({
   return (
     <aside
       className={cn(
-        'flex flex-col w-[220px] h-full',
-        'bg-[var(--color-sidebar)] border-r border-[var(--color-border)]',
+        'flex flex-col w-[220px] h-full glass border-r border-[var(--glass-border,var(--color-border))]',
         'py-4 px-3',
         className
       )}

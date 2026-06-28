@@ -6,8 +6,9 @@ const buttonVariants = cva(
   [
     'inline-flex items-center justify-center font-medium select-none',
     'transition-all duration-[var(--transition-fast)]',
-    'active:scale-[0.97] active:transition-[transform] active:duration-75',
-    'disabled:opacity-50 disabled:pointer-events-none',
+    'active:scale-[0.96] active:transition-[transform] active:duration-100',
+    'hover:scale-[1.02] hover:transition-[transform] hover:duration-150',
+    'disabled:opacity-50 disabled:pointer-events-none disabled:hover:scale-100',
     'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-bg)]',
   ].join(' '),
   {
@@ -17,21 +18,23 @@ const buttonVariants = cva(
           'bg-[var(--color-accent)] text-white',
           'hover:bg-[var(--color-accent-hover)]',
           'shadow-[var(--shadow-button)] hover:shadow-[var(--shadow-button-hover)]',
+          'hover:shadow-[0_0_20px_rgb(var(--rgb-accent)/0.3)]',
         ].join(' '),
         secondary: [
-          'bg-[var(--color-card)] text-[var(--color-text)]',
-          'border border-[var(--color-border)]',
-          'hover:bg-[color-mix(in_srgb,var(--color-border)_60%,transparent)]',
+          'glass text-[var(--color-text)]',
+          'hover:bg-[color-mix(in_srgb,var(--rgb-accent)_8%,var(--rgb-card))]',
           'shadow-[var(--shadow-button)] hover:shadow-[var(--shadow-button-hover)]',
         ].join(' '),
         ghost: [
           'text-[var(--color-text)]',
           'hover:bg-[color-mix(in_srgb,var(--color-border)_60%,transparent)]',
+          'hover:scale-[1.01]',
         ].join(' '),
         danger: [
           'bg-[var(--color-danger)] text-white',
           'hover:opacity-90',
           'shadow-[var(--shadow-button)] hover:shadow-[var(--shadow-button-hover)]',
+          'hover:shadow-[0_0_20px_rgb(var(--rgb-danger)/0.3)]',
         ].join(' '),
       },
       size: {

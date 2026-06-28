@@ -69,27 +69,41 @@
 }
 
 [data-theme="dark"] {
-  --rgb-bg: 28 28 30;
-  --rgb-card: 44 44 46;
-  --rgb-card-elevated: 58 58 60;
+  --rgb-bg: 13 13 17;
+  --rgb-card: 28 28 34;
+  --rgb-card-elevated: 38 38 46;
   --rgb-accent: 10 132 255;
   --rgb-accent-hover: 64 156 255;
   --rgb-text: 245 245 247;
   --rgb-text-secondary: 152 152 157;
   --rgb-text-muted: 99 99 102;
-  --rgb-sidebar: 28 28 30;
-  --rgb-border: 56 56 58;
-  --rgb-border-strong: 72 72 74;
+  --rgb-sidebar: 18 18 22;
+  --rgb-border: 48 48 56;
+  --rgb-border-strong: 64 64 72;
   --rgb-success: 48 209 88;
   --rgb-warning: 255 214 10;
   --rgb-danger: 255 69 58;
 
-  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.2), 0 2px 8px rgba(0, 0, 0, 0.32);
-  --shadow-card-hover: 0 2px 4px rgba(0, 0, 0, 0.24), 0 8px 24px rgba(0, 0, 0, 0.4);
-  --shadow-modal: 0 8px 32px rgba(0, 0, 0, 0.5);
-  --shadow-toast: 0 4px 16px rgba(0, 0, 0, 0.4);
-  --shadow-button: 0 1px 0 rgba(255, 255, 255, 0.06) inset, 0 1px 2px rgba(0, 0, 0, 0.4);
-  --shadow-button-hover: 0 1px 0 rgba(255, 255, 255, 0.1) inset, 0 4px 8px rgba(0, 0, 0, 0.5);
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3), 0 4px 12px rgba(0, 0, 0, 0.4);
+  --shadow-card-hover: 0 2px 8px rgba(0, 0, 0, 0.3), 0 12px 32px rgba(0, 0, 0, 0.5);
+  --shadow-modal: 0 12px 40px rgba(0, 0, 0, 0.6);
+  --shadow-toast: 0 6px 20px rgba(0, 0, 0, 0.5);
+  --shadow-button: 0 1px 0 rgba(255, 255, 255, 0.08) inset, 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-button-hover: 0 1px 0 rgba(255, 255, 255, 0.12) inset, 0 4px 12px rgba(0, 0, 0, 0.5);
+
+  /* Glassmorphism: frosted glass effect for cards and panels */
+  --glass-bg: rgb(var(--rgb-card) / 0.72);
+  --glass-border: rgb(255 255 255 / 0.08);
+  --glass-blur: 20px;
+
+  /* Accent glow for connected/active states */
+  --glow-accent: 0 0 24px rgb(var(--rgb-accent) / 0.35);
+  --glow-success: 0 0 24px rgb(var(--rgb-success) / 0.3);
+  --glow-danger: 0 0 24px rgb(var(--rgb-danger) / 0.3);
+
+  /* Animated gradient for background depth */
+  --gradient-bg: radial-gradient(ellipse 80% 60% at 50% -10%, rgb(var(--rgb-accent) / 0.06), transparent),
+                 radial-gradient(ellipse 60% 50% at 80% 110%, rgb(var(--rgb-success) / 0.04), transparent);
 }
 
 /* ─── End Theme CSS Custom Properties ─────────────────────────────────────── */
@@ -179,6 +193,56 @@
   }
   .no-drag {
     -webkit-app-region: no-drag;
+  }
+
+  /* Glassmorphism: frosted glass surface for cards, panels, modals */
+  .glass {
+    background: var(--glass-bg, rgb(var(--rgb-card) / 0.72));
+    backdrop-filter: blur(var(--glass-blur, 20px));
+    -webkit-backdrop-filter: blur(var(--glass-blur, 20px));
+    border: 1px solid var(--glass-border, rgb(255 255 255 / 0.08));
+  }
+
+  /* Accent glow for connected/active VPN states */
+  .glow-accent {
+    box-shadow: var(--glow-accent, 0 0 24px rgb(var(--rgb-accent) / 0.35));
+  }
+  .glow-success {
+    box-shadow: var(--glow-success, 0 0 24px rgb(var(--rgb-success) / 0.3));
+  }
+  .glow-danger {
+    box-shadow: var(--glow-danger, 0 0 24px rgb(var(--rgb-danger) / 0.3));
+  }
+
+  /* Gradient text for headings and emphasis */
+  .gradient-text {
+    background: linear-gradient(135deg, rgb(var(--rgb-accent)), rgb(var(--rgb-success)));
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+
+  /* Animated gradient background for the app body */
+  .gradient-bg {
+    background: var(--color-bg);
+    background-image: var(--gradient-bg);
+    background-attachment: fixed;
+  }
+
+  /* Shimmer effect for loading states */
+  .shimmer {
+    background: linear-gradient(
+      90deg,
+      rgb(var(--rgb-card) / 0.4) 0%,
+      rgb(var(--rgb-card) / 0.7) 50%,
+      rgb(var(--rgb-card) / 0.4) 100%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 1.5s ease-in-out infinite;
+  }
+  @keyframes shimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
   }
 
   /* Legacy utility classes — kept for any place still referencing them.

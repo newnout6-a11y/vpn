@@ -525,12 +525,20 @@ export function Dashboard() {
       )}
 
       {/* Main VPN Toggle Card */}
-      <MacCard className="flex flex-col items-center justify-center py-10 gap-6">
-        <h2 className="text-lg font-semibold text-[var(--color-text)]">
+      <MacCard className="flex flex-col items-center justify-center py-10 gap-6 relative overflow-hidden">
+        {/* Subtle gradient backdrop inside the card */}
+        <div className="absolute inset-0 pointer-events-none opacity-50"
+          style={{
+            background: isConnected
+              ? 'radial-gradient(ellipse 60% 60% at 50% 50%, rgb(var(--rgb-success) / 0.08), transparent)'
+              : 'radial-gradient(ellipse 60% 60% at 50% 50%, rgb(var(--rgb-accent) / 0.06), transparent)'
+          }}
+        />
+        <h2 className="text-lg font-semibold text-[var(--color-text)] relative z-10">
           {t('dashboard.vpnToggle')}
         </h2>
 
-        {/* Large circular power button */}
+        {/* Large circular power button with glow */}
         <motion.button
           onClick={() => handleToggleChange(!isConnected)}
           disabled={isBusy}
@@ -538,11 +546,11 @@ export function Dashboard() {
           whileTap={!isBusy ? { scale: 0.97 } : {}}
           aria-label={statusLabel}
           className={`
-            relative w-36 h-36 rounded-full flex items-center justify-center
+            relative w-36 h-36 rounded-full flex items-center justify-center z-10
             transition-all duration-300 ease-out
             ${isConnected
-              ? 'bg-[var(--color-success)] shadow-[0_0_60px_rgba(52,199,89,0.4)]'
-              : 'bg-[var(--color-accent)] shadow-[0_0_30px_rgba(0,122,255,0.2)]'
+              ? 'bg-[var(--color-success)] shadow-[0_0_60px_rgb(var(--rgb-success)/0.4),0_8px_32px_rgba(0,0,0,0.3)]'
+              : 'bg-[var(--color-accent)] shadow-[0_0_40px_rgb(var(--rgb-accent)/0.25),0_8px_32px_rgba(0,0,0,0.3)]'
             }
             ${isBusy ? 'opacity-70 cursor-wait' : 'cursor-pointer'}
           `}

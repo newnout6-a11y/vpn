@@ -14,11 +14,9 @@ export const MacCard = React.forwardRef<HTMLDivElement, MacCardProps>(
       <div
         ref={ref}
         className={cn(
-          'bg-[var(--color-card)] rounded-[var(--radius-md)]',
-          'border border-[var(--color-border)]',
-          'shadow-[var(--shadow-card)]',
+          'glass rounded-[var(--radius-md)]',
           'transition-all duration-[var(--transition-normal)]',
-          hoverable && 'hover:shadow-[var(--shadow-card-hover)] hover:-translate-y-px hover:border-[color-mix(in_srgb,var(--color-accent)_25%,var(--color-border))]',
+          hoverable && 'hover:shadow-[var(--shadow-card-hover)] hover:-translate-y-px hover:border-[color-mix(in_srgb,var(--color-accent)_30%,var(--color-border))]',
           !noPadding && 'p-5',
           className
         )}

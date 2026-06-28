@@ -646,7 +646,7 @@ export default function App() {
 
   return (
     <ThemeProvider>
-      <div className="flex h-screen">
+      <div className="flex h-screen gradient-bg">
         <Sidebar currentPage={page} onNavigate={setPage} />
         <AnimatePresence mode="wait">
           <motion.main
