@@ -474,10 +474,14 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
   // support/diagnostics will compare against.
   captureSnapshot('tun-pre-start').catch(() => undefined)
 
-  const staleKillSwitch = await clearStaleKillSwitchBeforeStart('local proxy start')
+  // Run the stale kill-switch check and the routing plan IN PARALLEL — they
+  // are independent and each takes ~1-2s of PowerShell. Previously these were
+  // sequential, adding ~2s to the critical path.
+  const [staleKillSwitch, plan] = await Promise.all([
+    clearStaleKillSwitchBeforeStart('local proxy start'),
+    getRoutingPlan()
+  ])
   if (!staleKillSwitch.success) return { success: false, error: staleKillSwitch.error }
-
-  const plan = await getRoutingPlan()
   if (!plan.canStartHard) {
     return {
       success: false,
@@ -485,12 +489,22 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
     }
   }
 
+  // Kick off the network baseline IN PARALLEL with tunController.start().
+  // The baseline resets system proxy settings (WinHTTP/WinINet/env vars)
+  // which sing-box does NOT need to create the TUN — it only matters for
+  // UWP/Store app traffic capture. Running it concurrently saves ~2-4s.
   let baselineWarning: string | null = null
+  let baselinePromise: Promise<void> | null = null
   if (settingsStore.get().autoNetworkBaseline) {
-    const baseline = await applyTunNetworkBaseline()
-    if (!baseline.success) {
-      baselineWarning = `Не удалось применить сетевой baseline: ${baseline.message}`
-    }
+    baselinePromise = applyTunNetworkBaseline()
+      .then(baseline => {
+        if (!baseline.success) {
+          baselineWarning = `Не удалось применить сетевой baseline: ${baseline.message}`
+        }
+      })
+      .catch(err => {
+        baselineWarning = `Не удалось применить сетевой baseline: ${err?.message || String(err)}`
+      })
   }
 
   const result = await tunController.start({
@@ -502,15 +516,19 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
     stealthMode: settingsStore.get().stealthMode
   })
   if (!result.success) {
-    // TUN failed to start. If we wiped the user's proxy settings to prepare for it,
-    // restore them now so we don't leave the system worse than we found it. The
-    // kill-switch is dropped by tunController itself in this path — see start().
+    // Wait for the baseline to finish before rolling back so the manifest
+    // exists for rollbackTunNetworkBaselineIfApplied to find.
+    if (baselinePromise) await baselinePromise
     await rollbackTunNetworkBaselineIfApplied('start-tun failed').catch(err =>
       logEvent('warn', 'app', 'rollback after start-tun failure failed', err)
     )
     captureSnapshot('tun-start-failed').catch(() => undefined)
     return result
   }
+
+  // The baseline is very likely already done (start() took several seconds),
+  // but await it to be sure before we report final status.
+  if (baselinePromise) await baselinePromise
 
   // Start traffic forensics session in background (non-blocking)
   startTrafficForensicsSession({ mode: 'localProxy', target: proxyAddr }).catch(err => {
@@ -664,11 +682,17 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
   }
 
   let baselineWarning: string | null = null
+  let baselinePromise: Promise<void> | null = null
   if (settings.autoNetworkBaseline) {
-    const baseline = await applyTunNetworkBaseline()
-    if (!baseline.success) {
-      baselineWarning = `Не удалось применить сетевой baseline: ${baseline.message}`
-    }
+    baselinePromise = applyTunNetworkBaseline()
+      .then(baseline => {
+        if (!baseline.success) {
+          baselineWarning = `Не удалось применить сетевой baseline: ${baseline.message}`
+        }
+      })
+      .catch(err => {
+        baselineWarning = `Не удалось применить сетевой baseline: ${err?.message || String(err)}`
+      })
   }
 
   logEvent('info', 'tun', 'direct VPN profile selected', {
@@ -686,12 +710,14 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
     stealthMode: settings.stealthMode
   })
   if (!result.success) {
+    if (baselinePromise) await baselinePromise
     await rollbackTunNetworkBaselineIfApplied('direct-vpn start failed').catch(err =>
       logEvent('warn', 'app', 'rollback after direct-vpn start failure failed', err)
     )
     captureSnapshot('tun-start-failed').catch(() => undefined)
     return result
   }
+  if (baselinePromise) await baselinePromise
 
   // Start traffic forensics session in background (non-blocking)
   startTrafficForensicsSession({ mode: 'directVpn', target: profile.name }).catch(err => {

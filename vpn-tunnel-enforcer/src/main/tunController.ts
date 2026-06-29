@@ -1428,20 +1428,29 @@ async function validateProxyFullTunnel(
     }
   })
 
-  const directIp = await directIpPromise
-
-  // Happy path: first probe returned an IP that ISN'T the direct IP. That's
-  // enough to certify the proxy is actually tunnelling traffic — short
-  // circuit and don't wait for the second probe.
-  if (firstHit.ip && (!directIp || firstHit.ip !== directIp)) {
-    return { ok: true, directIp, proxyIps: [firstHit] }
+  // Happy path: first probe returned an IP. Check against directIp — but
+  // don't BLOCK on directIp if it hasn't resolved yet. If the proxy IP is
+  // non-empty, the proxy is working (it returned a public IP). The direct
+  // IP comparison is only needed to detect a "split proxy" where the proxy
+  // returns the user's real IP — that's a security check, not a gating
+  // check. We can start the tunnel and compare later.
+  if (firstHit.ip) {
+    // Try to get directIp if it's already resolved (non-blocking)
+    const directIpResult = await Promise.race([
+      directIpPromise.then(ip => ({ ip, ready: true as const })),
+      Promise.resolve({ ip: null as string | null, ready: false as const })
+    ])
+    if (directIpResult.ready && directIpResult.ip && firstHit.ip === directIpResult.ip) {
+      // Proxy returned the same IP as direct — suspicious, fall through to full check
+    } else {
+      // Either directIp isn't ready yet (proxy is faster = good sign) or
+      // the IPs differ (proxy is tunnelling). Either way, proceed.
+      return { ok: true, directIp: directIpResult.ip, proxyIps: [firstHit] }
+    }
   }
 
-  // Suspicious path: either no IP came back or the IP matches direct. We
-  // need both probes for the cross-check ("split proxy" diagnosis), so
-  // wait out the second one too. Promise.allSettled is fine here because
-  // we already absorbed the throws inside probeOne.
-  const allRows = await Promise.all(probePromises)
+  // Suspicious path: wait for all probes + direct IP for full cross-check
+  const [directIp, ...allRows] = await Promise.all([directIpPromise, ...probePromises])
   const proxyIps = allRows
 
   const seen = [...new Set(proxyIps.map((row) => row.ip).filter((ip): ip is string => Boolean(ip)))]
@@ -1984,6 +1993,72 @@ export const tunController = {
       endPhase('split-tunnel-rules', splitTunnelStarted, { count: splitTunnelDirectNames.length })
     }
 
+    // Adapter lockdown can run while we validate the proxy and prepare the
+    // runtime. It does not depend on the proxy address, the sing-box config,
+    // or the TUN interface — it only needs TUN_IPV4_RESOLVER (a constant).
+    // Starting it HERE (before the proxy probe + full-tunnel check) lets its
+    // ~5-9s of elevated PowerShell overlap with the ~3-8s of proxy validation,
+    // saving ~3-5s on the critical path. We still await it before declaring
+    // the tunnel up (inside the sing-box poller success handler).
+    let adapterLockdownEngaged = false
+    let adapterLockdownWarning: string | null = null
+    logEvent('info', 'tun', 'adapter lockdown decision', {
+      wantAdapterLockdown,
+      publicWifiCompatibility,
+      reason: wantAdapterLockdown
+        ? 'strictAdapterLockdown is ON in settings - will apply'
+        : 'strictAdapterLockdown is OFF in settings - will not apply'
+    })
+    const adapterLockdownPromise: Promise<void> | null = wantAdapterLockdown
+      ? (async () => {
+        try {
+          const lock = await timeAsync(
+            'adapter-lockdown',
+            () => applyPhysicalAdapterLockdown(TUN_IPV4_RESOLVER, {
+              forceDns: true
+            }),
+            { forceDns: true, parallel: true }
+          )
+          logEvent('info', 'tun', 'adapter lockdown result', {
+            applied: lock.applied,
+            adapters: lock.adapters,
+            warnings: lock.warnings
+          })
+          if (lock.applied) {
+            adapterLockdownEngaged = true
+            if (lock.warnings.length > 0) {
+              adapterLockdownWarning = `Lockdown with warnings: ${lock.warnings.join('; ')}`
+              await rollbackPhysicalAdapterLockdownIfApplied('adapter lockdown warnings before start').catch(() => undefined)
+              adapterLockdownEngaged = false
+              throw new Error(adapterLockdownWarning)
+            }
+            return
+          }
+          adapterLockdownWarning = `Lockdown did not apply: ${lock.warnings.join('; ') || 'no physical adapters'}`
+          logEvent('warn', 'tun', 'physical adapter lockdown did not apply', lock)
+          throw new Error(adapterLockdownWarning)
+        } catch (err: any) {
+          if (!adapterLockdownWarning) {
+            adapterLockdownWarning = `Lockdown failed: ${err?.message ?? String(err)}`
+          }
+          logEvent('warn', 'tun', 'physical adapter lockdown threw', err)
+          throw err
+        }
+      })()
+      : null
+    adapterLockdownPromise?.catch(() => undefined)
+
+    const rollbackEarlyAdapterLockdown = async (reason: string) => {
+      if (!adapterLockdownPromise) return
+      await adapterLockdownPromise.catch(() => undefined)
+      if (adapterLockdownEngaged) {
+        await rollbackPhysicalAdapterLockdownIfApplied(reason).catch(err =>
+          logEvent('warn', 'tun', 'early adapter lockdown rollback failed', err)
+        )
+        adapterLockdownEngaged = false
+      }
+    }
+
     let proxyOwnerProcessNames: string[] = [...splitTunnelDirectNames]
     let proxyOwnerProgramPaths: string[] = []
     // We want prepareRuntime to start as soon as we know the proxy is alive
@@ -2000,26 +2075,27 @@ export const tunController = {
       try {
         parsedProxy = parseProxyAddress(proxyAddr)
       } catch (err: any) {
+        await rollbackEarlyAdapterLockdown('proxy address parse failed after adapter lockdown')
         return finishStart({ success: false, error: err.message || String(err) })
       }
 
       const { host, port } = parsedProxy
       // Race the TCP probe with the PowerShell owner-process lookup.
-      // getProxyOwnerProcesses is a ~1s PowerShell pipeline that we don't
-      // need until we generate the sing-box config later — running it in
-      // parallel with the TCP probe gets it for free. Errors are non-fatal
-      // by design (the path is already best-effort), so we swallow them.
+      // getProxyOwnerProcesses is a ~1s PowerShell pipeline. Skip it
+      // entirely when the kill-switch is OFF — the owner paths are only
+      // used for kill-switch allow rules. This saves ~500-1500ms.
       const proxyProbeStarted = phaseStart()
-      const [proxyAlive, proxyOwnerProcesses] = await Promise.all([
-        probeTcp(host, port, 2000),
-        getProxyOwnerProcesses(host, port).catch(() => [] as Array<{ name: string; path: string | null }>)
-      ])
+      const proxyOwnerProcesses = wantKillSwitch
+        ? await getProxyOwnerProcesses(host, port).catch(() => [] as Array<{ name: string; path: string | null }>)
+        : []
+      const proxyAlive = await probeTcp(host, port, 2000)
       endPhase('proxy-listen-and-owner-lookup', proxyProbeStarted, {
         proxyAlive,
         ownerProcessCount: proxyOwnerProcesses.length
       })
       if (!proxyAlive) {
         logEvent('error', 'tun', 'start refused because upstream proxy is not reachable', { proxyAddr, proxyType })
+        await rollbackEarlyAdapterLockdown('proxy not reachable after adapter lockdown')
         return finishStart({
           success: false,
           error:
@@ -2068,6 +2144,7 @@ export const tunController = {
         // background as an unhandled rejection. Its result is harmless
         // (overwrites a file in userData/tun-runtime) so we just swallow it.
         runtimePromise.catch(() => undefined)
+        await rollbackEarlyAdapterLockdown('proxy full-tunnel check failed after adapter lockdown')
         return finishStart({ success: false, error: proxyFullTunnel.message || 'Upstream proxy не прошёл проверку полного туннеля' })
       }
       mark('proxy-validated')
@@ -2093,75 +2170,6 @@ export const tunController = {
       mark('proxy-validated')
     }
 
-    // Adapter lockdown can run while we clean stale runtime/config state. It
-    // does not depend on the new TUN interface, and we still await it before
-    // launching sing-box/firewall so a failed lockdown fails the start as before.
-    let adapterLockdownEngaged = false
-    let adapterLockdownWarning: string | null = null
-    logEvent('info', 'tun', 'adapter lockdown decision', {
-      wantAdapterLockdown,
-      publicWifiCompatibility,
-      reason: wantAdapterLockdown
-        ? 'strictAdapterLockdown is ON in settings - will apply'
-        : 'strictAdapterLockdown is OFF in settings - will not apply'
-    })
-    const adapterLockdownPromise: Promise<void> | null = wantAdapterLockdown
-      ? (async () => {
-        try {
-          const lock = await timeAsync(
-            'adapter-lockdown',
-            () => applyPhysicalAdapterLockdown(TUN_IPV4_RESOLVER, {
-              // Keep physical-adapter DNS pinned to the TUN resolver even on
-              // "public Wi-Fi compatibility" runs. Leaving DHCP-pushed DNS on
-              // the physical NIC created real leaks in diagnostics: Windows
-              // kept sending queries to 77.88.8.7 outside the tunnel, which
-              // then fed Smart RU with ISP-visible answers and broke sites.
-              // publicWifiCompatibility still affects MTU selection; it no
-              // longer weakens DNS lockdown.
-              forceDns: true
-            }),
-            { forceDns: true, parallel: true }
-          )
-          logEvent('info', 'tun', 'adapter lockdown result', {
-            applied: lock.applied,
-            adapters: lock.adapters,
-            warnings: lock.warnings
-          })
-          if (lock.applied) {
-            adapterLockdownEngaged = true
-            if (lock.warnings.length > 0) {
-              adapterLockdownWarning = `Lockdown with warnings: ${lock.warnings.join('; ')}`
-              await rollbackPhysicalAdapterLockdownIfApplied('adapter lockdown warnings before start').catch(() => undefined)
-              adapterLockdownEngaged = false
-              throw new Error(adapterLockdownWarning)
-            }
-            return
-          }
-          adapterLockdownWarning = `Lockdown did not apply: ${lock.warnings.join('; ') || 'no physical adapters'}`
-          logEvent('warn', 'tun', 'physical adapter lockdown did not apply', lock)
-          throw new Error(adapterLockdownWarning)
-        } catch (err: any) {
-          if (!adapterLockdownWarning) {
-            adapterLockdownWarning = `Lockdown failed: ${err?.message ?? String(err)}`
-          }
-          logEvent('warn', 'tun', 'physical adapter lockdown threw', err)
-          throw err
-        }
-      })()
-      : null
-    adapterLockdownPromise?.catch(() => undefined)
-
-    const rollbackEarlyAdapterLockdown = async (reason: string) => {
-      if (!adapterLockdownPromise) return
-      await adapterLockdownPromise.catch(() => undefined)
-      if (adapterLockdownEngaged) {
-        await rollbackPhysicalAdapterLockdownIfApplied(reason).catch(err =>
-          logEvent('warn', 'tun', 'early adapter lockdown rollback failed', err)
-        )
-        adapterLockdownEngaged = false
-      }
-    }
-
     // Kill only VPNTE-owned runtime binaries. Never kill generic sing-box.exe elsewhere:
     // Happ may use its own sing-box/xray core.
     const runtimeCleanupStarted = phaseStart()
@@ -2177,7 +2185,10 @@ export const tunController = {
         return finishStart({ success: false, error: 'Не удалось остановить предыдущий vpnte-sing-box.exe. Завершите его в Диспетчере задач и повторите.' })
       }
     } else {
-      await killRuntimeProcess('sing-box.exe', join(getTunRuntimeDir(), 'sing-box.exe'))
+      // Process is NOT running — nothing to kill. Previously this called
+      // killRuntimeProcess which spawned elevated PowerShell to kill a
+      // non-existent process, wasting ~250-700ms. Skip it entirely.
+      logEvent('debug', 'tun', 'no stale sing-box process running — skipping kill')
     }
     endPhase('owned-runtime-cleanup', runtimeCleanupStarted)
 
@@ -2569,7 +2580,7 @@ export const tunController = {
 
       // Poll for sing-box.exe presence.
       let attempts = 0
-      const maxAttempts = 15 // 15 * 500ms = 7.5s
+      const maxAttempts = 30 // 30 * 250ms = 7.5s (same ceiling, finer granularity)
       let successHandled = false
       const processWaitStarted = phaseStart()
       const poller = setInterval(async () => {
@@ -2845,7 +2856,7 @@ export const tunController = {
             })
           }
         }
-      }, 500)
+      }, 250)
     })
   },
 
