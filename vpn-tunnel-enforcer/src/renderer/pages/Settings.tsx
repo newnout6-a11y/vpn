@@ -1,5 +1,5 @@
 import { useAppStore } from '../store'
-import { Bell, Eye, EyeOff, FileArchive, FolderOpen, Globe2, Languages, Loader2, MapPin, Network, Palette, RefreshCw, Save, Settings2, ShieldAlert, ShieldCheck, Wand2 } from 'lucide-react'
+import { Bell, Eye, EyeOff, FileArchive, FolderOpen, Globe2, Languages, Loader2, MapPin, Network, Palette, RefreshCw, Settings2, ShieldAlert, ShieldCheck, Wand2 } from 'lucide-react'
 import { ReactNode, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { KillSwitchSettings } from '../components/KillSwitchSettings'
@@ -159,8 +159,7 @@ export function Settings() {
   const setSettings = useAppStore(s => s.setSettings)
   const setProxy = useAppStore(s => s.setProxy)
   const addLog = useAppStore(s => s.addLog)
-  const [saved, setSaved] = useState(false)
-  const [saving, setSaving] = useState(false)
+  const [exporting, setExporting] = useState(false)
   const [openingLogs, setOpeningLogs] = useState(false)
 
   // Auto-save: debounced persistence so toggle changes don't get lost if the
@@ -174,7 +173,6 @@ export function Settings() {
     }, 1500)
     return () => { if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current) }
   }, [settings])
-  const [exporting, setExporting] = useState(false)
   const [osNotificationsBlocked, setOsNotificationsBlocked] = useState(false)
   const [ruleSetState, setRuleSetState] = useState<SmartRouteRuleSetState | null>(null)
   const [ruleSetRefreshing, setRuleSetRefreshing] = useState(false)
@@ -200,30 +198,6 @@ export function Settings() {
       }
     })()
   }, [addLog])
-
-  const handleSave = async () => {
-    setSaving(true)
-    try {
-      const result = await window.electronAPI.saveSettings(settings)
-      setSettings(result)
-      const override = result.proxyOverride.trim()
-      if (result.connectionMode !== 'directVpn' && override) {
-        const separator = override.lastIndexOf(':')
-        const host = override.slice(0, separator).trim()
-        const port = parseInt(override.slice(separator + 1), 10)
-        if (separator > 0 && host && Number.isInteger(port)) {
-          setProxy({ host, port, type: result.proxyType, verified: true, publicIpViaProxy: null })
-        }
-      }
-      setSaved(true)
-      addLog('info', 'Настройки сохранены и применены к активной сессии')
-      setTimeout(() => setSaved(false), 2000)
-    } catch (err: any) {
-      addLog('error', `Не удалось сохранить настройки: ${err.message}`)
-    } finally {
-      setSaving(false)
-    }
-  }
 
   const handleRefreshRuleSets = async () => {
     setRuleSetRefreshing(true)

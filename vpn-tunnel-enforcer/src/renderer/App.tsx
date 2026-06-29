@@ -158,7 +158,6 @@ declare global {
       domainRoutingDelete: (id: string) => Promise<void>
       domainRoutingReorder: (ids: string[]) => Promise<import('../shared/ipc-types').DomainRule[]>
       domainRoutingImport: (filePath: string) => Promise<import('../shared/ipc-types').DomainRule[]>
-      domainRoutingResetHits: () => Promise<void>
       domainRoutingBrowseFile: () => Promise<string | null>
       // Scheduler
       schedulerList: () => Promise<import('../shared/ipc-types').ScheduleEntry[]>
@@ -193,6 +192,9 @@ declare global {
       themeList: () => Promise<import('../shared/ipc-types').ThemeConfig[]>
       themeSetActive: (id: string) => Promise<void>
       onThemeChanged: (callback: (theme: import('../shared/ipc-types').ThemeConfig) => void) => () => void
+      onServerActiveChanged: (callback: (data: { profileId: string; profileName: string; nextProfileId?: string }) => void) => () => void
+      onKillSwitchTrafficBlocked: (callback: (data: { reason: string; steps?: string[] }) => void) => () => void
+      onI18nLocaleChanged: (callback: (locale: string) => void) => () => void
       // i18n
       i18nGetLocale: () => Promise<string>
       i18nSetLocale: (locale: string) => Promise<void>
@@ -202,6 +204,10 @@ declare global {
       externalProxyStop: () => Promise<import('../shared/ipc-types').ExternalProxyStatus>
       externalProxyList: () => Promise<import('../shared/ipc-types').ExternalProxyProfileRow[]>
       externalProxyRotate: () => Promise<import('../shared/ipc-types').ExternalProxyStatus>
+      // VPN Repair
+      repairOrphanedDns: () => Promise<any>
+      rollbackAdapterLockdown: () => Promise<any>
+      killStaleSingbox: () => Promise<{ success: boolean; message: string }>
     }
   }
 }

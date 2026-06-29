@@ -405,8 +405,7 @@ export const useAppStore = create<AppState>((set) => ({
     proxyDown: false,
     leakSelfTestResult: null,
     leakChecks: null,
-    ipGeo: { country: null, city: null },
-    traffic: { downloadBps: 0, uploadBps: 0, running: false, connectedAt: null, peakDownloadBps: 0, peakUploadBps: 0 },
+    traffic: emptyTrafficStats,
     browserIpCheck: null,
   }),
   addLog: (level, message) => {

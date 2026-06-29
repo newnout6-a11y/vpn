@@ -573,7 +573,7 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
   // routes propagate), we'd set vpnIp = realIP, permanently breaking leak
   // detection. So we use recheck(false) first, and only rebaseline once the
   // IP differs from the pre-VPN baseline.
-  const preVpnIp = ipMonitor.getCurrentIp().ip
+  const preVpnIp = (await ipMonitor.getCurrentIp()).ip
   const pollVpnIp = async () => {
     for (let attempt = 0; attempt < 8; attempt++) {
       await new Promise(r => setTimeout(r, 500))
@@ -765,7 +765,7 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
 
   // Poll for the VPN IP instead of waiting a fixed 4s (see startProtection).
   // Same logic: use recheck(false) first, only rebaseline once IP changes.
-  const preVpnIpDirect = ipMonitor.getCurrentIp().ip
+  const preVpnIpDirect = (await ipMonitor.getCurrentIp()).ip
   const pollVpnIpDirect = async () => {
     for (let attempt = 0; attempt < 8; attempt++) {
       await new Promise(r => setTimeout(r, 500))

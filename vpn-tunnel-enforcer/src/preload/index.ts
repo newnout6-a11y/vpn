@@ -30,7 +30,6 @@ export interface ElectronAPI {
   repairOrphanedDns: () => Promise<any>
   rollbackAdapterLockdown: () => Promise<any>
   killStaleSingbox: () => Promise<{ success: boolean; message: string }>
-  runLeakCheck: () => Promise<any>
   logRenderer: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => Promise<any>
   getFullLogs: () => Promise<any>
   clearAppLog: () => Promise<any>
@@ -269,7 +268,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   repairOrphanedDns: () => ipcRenderer.invoke('network:repair-orphaned-dns'),
   rollbackAdapterLockdown: () => ipcRenderer.invoke('network:rollback-adapter-lockdown'),
   killStaleSingbox: () => ipcRenderer.invoke('tun:kill-stale-singbox'),
-  runLeakCheck: () => ipcRenderer.invoke('diagnostics:run-leak-check'),
   logRenderer: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => ipcRenderer.invoke('renderer-log', level, message),
   getFullLogs: () => ipcRenderer.invoke('get-full-logs'),
   clearAppLog: () => ipcRenderer.invoke('clear-app-log'),

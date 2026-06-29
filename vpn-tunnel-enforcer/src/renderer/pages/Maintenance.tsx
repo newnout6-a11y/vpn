@@ -212,7 +212,7 @@ export function Maintenance() {
           break
         case 'leak-check':
           addLog('info', 'Запуск проверки утечек...')
-          result = await window.electronAPI.runLeakCheck()
+          result = await window.electronAPI.runLeakCheck({})
           if (result) {
             useAppStore.getState().setLeakSelfTestResult(result)
           }
