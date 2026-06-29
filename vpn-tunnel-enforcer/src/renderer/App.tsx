@@ -1,5 +1,6 @@
 import { useEffect, useRef, lazy, Suspense } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
+import i18n from 'i18next'
 import { useAppStore } from './store'
 import { Sidebar, type SidebarPage } from './components/Sidebar'
 import { FirstRunWizard } from './components/FirstRunWizard'
@@ -342,6 +343,7 @@ export default function App() {
       // the stopped state until tunController emits 'stopped'.
       if (!isStopping) {
         store.setTunRunning(tunUp)
+        store.setProxyDown(status === 'proxy-down')
       }
       // Self-healing backstop for the global connect/disconnect busy flag.
       // Normally handleConnect/handleStart clears it in their finally (which
@@ -429,6 +431,30 @@ export default function App() {
     const unsubInApp = window.electronAPI.onInAppNotification?.(({ level, title, body }) => {
       const logLevel: 'info' | 'warn' | 'error' = level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'info'
       addLog(logLevel, `[уведомление] ${title}: ${body}`)
+      // Also show a visible toast — previously only logged, user never saw it
+      const toastVariant = level === 'error' ? 'error' : level === 'warn' ? 'warning' : 'info'
+      useAppStore.getState().addGlobalToast(toastVariant, title, body)
+    })
+
+    // Server-active-changed: profile rotation switched the active server.
+    // Refresh the inline selector and sidebar.
+    const unsubServerActive = window.electronAPI.onServerActiveChanged?.((data) => {
+      addLog('info', `Сервер сменился автоматически: ${data.profileName ?? data.profileId}`)
+      useAppStore.getState().addGlobalToast('info', 'Сервер сменился', data.profileName ?? data.profileId)
+      // Trigger a refresh of server state in the renderer
+      emitServerChanged()
+    })
+
+    // Kill-switch traffic blocked: real-time notification when the granular
+    // kill-switch blocks traffic for a specific app.
+    const unsubKsBlocked = window.electronAPI.onKillSwitchTrafficBlocked?.((data) => {
+      addLog('warn', `Kill-Switch: трафик заблокирован — ${data.reason}`)
+      useAppStore.getState().addGlobalToast('warning', 'Трафик заблокирован', data.reason)
+    })
+
+    // i18n locale changed: apply the new locale reactively
+    const unsubI18n = window.electronAPI.onI18nLocaleChanged?.((locale) => {
+      i18n.changeLanguage(locale).catch(() => undefined)
     })
 
     return () => {
@@ -439,6 +465,9 @@ export default function App() {
       unsubMainErr()
       unsubShutdown()
       unsubInApp?.()
+      unsubServerActive?.()
+      unsubKsBlocked?.()
+      unsubI18n?.()
     }
   }, [addLog])
 
@@ -482,6 +511,7 @@ export default function App() {
 
       if (settings.autoPilotEnabled && settings.connectionMode !== 'directVpn') {
         addLog('info', 'Автопилот маршрута включен: приложение само выберет безопасный режим.')
+        useAppStore.getState().addGlobalToast('info', 'Автопилот', 'Подбираем безопасный режим подключения...')
         // AutoPilot may auto-CONNECT the VPN — don't defer too long or the user
         // sees a delay before auto-connect starts. Use a short 500ms timeout.
         setTimeout(() => {

@@ -162,7 +162,7 @@ export function registerThemeIpcHandlers(): void {
     const activeTheme = themeManager.getActiveTheme()
     for (const win of BrowserWindow.getAllWindows()) {
       if (!win.isDestroyed()) {
-        win.webContents.send('theme:changed', activeTheme)
+        win.webContents.send('theme-changed', activeTheme)
       }
     }
   })
@@ -182,7 +182,7 @@ export function registerThemeIpcHandlers(): void {
       const activeTheme = themeManager.getActiveTheme()
       for (const win of BrowserWindow.getAllWindows()) {
         if (!win.isDestroyed()) {
-          win.webContents.send('theme:changed', activeTheme)
+          win.webContents.send('theme-changed', activeTheme)
         }
       }
     }

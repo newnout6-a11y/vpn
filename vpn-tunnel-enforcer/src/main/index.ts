@@ -1096,11 +1096,13 @@ app.whenReady().then(async () => {
     } catch {}
     try {
       if (r.physicalAdapterReached) {
-        notify('warn', 'УТЕЧКА обнаружена', r.summary, 'leakDetected')
+        notify('error', 'УТЕЧКА обнаружена', r.summary, 'leakDetected')
       } else if ((r as any).dnsLeakDetected) {
-        notify('warn', 'УТЕЧКА DNS', r.summary, 'leakDetected')
+        notify('error', 'УТЕЧКА DNS', r.summary, 'leakDetected')
       }
-    } catch {}
+    } catch (err: any) {
+      logEvent('error', 'app', 'leak notification failed — user may not be alerted', { error: err?.message || String(err), summary: r.summary })
+    }
   })
 
   // IPC handlers
@@ -1649,7 +1651,11 @@ async function performShutdownCleanup(reason: string): Promise<void> {
 }
 
 app.on('before-quit', async (event) => {
-  if (shutdownInProgress) return
+  if (shutdownInProgress) {
+    // Already cleaning up — prevent Electron from quitting mid-cleanup.
+    event.preventDefault()
+    return
+  }
   isQuitting = true
   logEvent('info', 'app', 'before quit')
   event.preventDefault()
@@ -1660,7 +1666,8 @@ app.on('before-quit', async (event) => {
 app.on('window-all-closed', async () => {
   if (process.platform !== 'darwin') {
     logEvent('info', 'app', 'all windows closed')
-    await performShutdownCleanup('window-all-closed')
-    app.quit()
+    if (!shutdownInProgress && !isQuitting) {
+      app.quit()
+    }
   }
 })

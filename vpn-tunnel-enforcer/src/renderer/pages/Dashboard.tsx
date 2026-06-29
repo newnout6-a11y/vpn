@@ -12,6 +12,8 @@ import { ForeignVpnBanner } from '../components/ForeignVpnBanner'
 import { DashboardSide } from '../components/DashboardSide'
 import {
   CheckCircle2,
+  AlertTriangle,
+  CheckCircle2,
   Clock,
   Download,
   Info,
@@ -82,6 +84,7 @@ export function Dashboard() {
 
   // Store state
   const tunRunning = useAppStore(s => s.tunRunning)
+  const proxyDown = useAppStore(s => s.proxyDown)
   const tunStartedAt = useAppStore(s => s.tunStartedAt)
   const proxy = useAppStore(s => s.proxy)
   const settings = useAppStore(s => s.settings)
@@ -428,14 +431,16 @@ export function Dashboard() {
 
   const statusLabel = (() => {
     if (connecting) return t('dashboard.connecting')
-    if (disconnecting) return t('dashboard.connecting')
+    if (disconnecting) return t('dashboard.disconnecting', 'Отключение...')
     if (restartingProgress) return `Перезапуск ${restartingProgress}`
+    if (isConnected && proxyDown) return 'Сервер не отвечает — трафик заблокирован'
     if (isConnected) return t('dashboard.connected')
     return t('dashboard.disconnected')
   })()
 
   const statusColor = (() => {
     if (connecting || disconnecting || restartingProgress) return 'text-[var(--color-warning)]'
+    if (isConnected && proxyDown) return 'text-[var(--color-warning)]'
     if (isConnected) return 'text-[var(--color-success)]'
     return 'text-[var(--color-text-secondary)]'
   })()
@@ -598,6 +603,12 @@ export function Dashboard() {
                   </span>
                 )}
               </span>
+            ) : publicIp && isLeak ? (
+              <span className="flex items-center gap-1.5 rounded-full bg-[var(--color-danger)]/10 px-3 py-1.5 text-[var(--color-danger)]">
+                <AlertTriangle className="w-3.5 h-3.5" />
+                <span className="font-mono">{publicIp}</span>
+                <span className="opacity-80">— утечка</span>
+              </span>
             ) : isConnected ? (
               <span className="flex items-center gap-1.5 rounded-full glass px-3 py-1.5 text-[var(--color-text-secondary)]">
                 <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -644,40 +655,7 @@ export function Dashboard() {
 
       <BrowserIpCard />
 
-      {/* Firewall kill-switch banner */}
-      {showKillSwitchBanner && (
-        <MacCard className="!border-[var(--color-warning)]/40 !bg-[var(--color-warning)]/10">
-          <div className="flex items-start gap-3">
-            <Lock className="w-6 h-6 text-[var(--color-warning)] flex-shrink-0 mt-0.5" />
-            <div className="flex-1">
-              <p className="text-sm font-bold text-[var(--color-warning)]">VPN отключён, файрвол блокирует трафик</p>
-              <p className="text-xs text-[var(--color-warning)]/90 mt-1">
-                sing-box не работает, но правила Windows Firewall защищают от утечки IP. Включите защиту заново
-                чтобы вернуть интернет через VPN, либо снимите блокировку вручную.
-              </p>
-              <div className="flex flex-wrap gap-2 mt-2">
-                <button
-                  onClick={handleDisengageKillSwitch}
-                  disabled={disengaging || nuclearResetting}
-                  className="text-xs flex items-center gap-2 px-3 py-1.5 rounded-[var(--radius-sm)] bg-[var(--color-warning)]/20 text-[var(--color-warning)] hover:bg-[var(--color-warning)]/30 transition-colors duration-[var(--transition-fast)] disabled:opacity-50"
-                >
-                  {disengaging ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ShieldOff className="w-3.5 h-3.5" />}
-                  Снять блокировку вручную
-                </button>
-                <button
-                  onClick={handleNuclearFirewallReset}
-                  disabled={disengaging || nuclearResetting}
-                  className="text-xs flex items-center gap-2 px-3 py-1.5 rounded-[var(--radius-sm)] border border-[var(--color-warning)]/40 text-[var(--color-warning)] hover:bg-[var(--color-warning)]/10 transition-colors duration-[var(--transition-fast)] disabled:opacity-50"
-                  title="Полностью сбросить Windows Firewall к настройкам по умолчанию"
-                >
-                  {nuclearResetting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <TriangleAlert className="w-3.5 h-3.5" />}
-                  Сбросить firewall (если интернет не работает)
-                </button>
-              </div>
-            </div>
-          </div>
-        </MacCard>
-      )}
+      {/* Diagnostics */}
 
       {/* Route diagnostics card */}
       <MacCard>

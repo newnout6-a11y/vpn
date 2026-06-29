@@ -396,6 +396,21 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('theme-changed', handler)
     return () => ipcRenderer.removeListener('theme-changed', handler)
   },
+  onServerActiveChanged: (callback: (data: { profileId: string; profileName: string; nextProfileId?: string }) => void) => {
+    const handler = (_event: any, data: any) => callback(data)
+    ipcRenderer.on('server-active-changed', handler)
+    return () => ipcRenderer.removeListener('server-active-changed', handler)
+  },
+  onKillSwitchTrafficBlocked: (callback: (data: { reason: string; steps?: string[] }) => void) => {
+    const handler = (_event: any, data: any) => callback(data)
+    ipcRenderer.on('kill-switch:traffic-blocked', handler)
+    return () => ipcRenderer.removeListener('kill-switch:traffic-blocked', handler)
+  },
+  onI18nLocaleChanged: (callback: (locale: string) => void) => {
+    const handler = (_event: any, locale: string) => callback(locale)
+    ipcRenderer.on('i18n:locale-changed', handler)
+    return () => ipcRenderer.removeListener('i18n:locale-changed', handler)
+  },
   // Speed Test
   speedTestRun: () => ipcRenderer.invoke('speed-test:run'),
   speedTestHistory: () => ipcRenderer.invoke('speed-test:history'),

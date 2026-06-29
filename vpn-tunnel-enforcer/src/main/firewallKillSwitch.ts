@@ -71,7 +71,18 @@ async function readManifest(): Promise<FirewallManifest | null> {
   try {
     const raw = await readFile(manifestPath(), 'utf-8')
     return JSON.parse(raw) as FirewallManifest
-  } catch {
+  } catch (err: any) {
+    if (err?.code === 'ENOENT') {
+      // File doesn't exist — normal state, no manifest = no active kill-switch
+      return null
+    }
+    // File exists but is corrupt (partial write during crash). Log it —
+    // this is important because a corrupt manifest means the kill-switch
+    // may actually be active but we can't read its state. The caller
+    // falls through to probeFirewallForOurRules() as a safety net.
+    logEvent('warn', 'firewall-killswitch', 'manifest file is corrupt — treating as no manifest', {
+      error: err?.message || String(err)
+    })
     return null
   }
 }

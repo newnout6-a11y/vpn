@@ -2870,6 +2870,16 @@ export const tunController = {
   },
 
   async stop(): Promise<{ success: boolean; error?: string }> {
+    // If start() is mid-flight, wait for it to finish before stopping.
+    // Without this, stop() kills sing-box while start() is still polling
+    // for it, leaving the app in an inconsistent state.
+    if (startInProgress) {
+      logEvent('info', 'tun', 'stop() called while start() in progress — waiting for start to finish')
+      // Give start() up to 2s to complete, then proceed anyway
+      for (let i = 0; i < 20 && startInProgress; i++) {
+        await new Promise(r => setTimeout(r, 100))
+      }
+    }
     stopInProgress = true
     try {
     // Mark this as a user-initiated stop BEFORE we kill sing-box, so the

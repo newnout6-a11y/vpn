@@ -168,6 +168,7 @@ export function ProfileSelectorInline() {
   const handleSelect = async (id: string) => {
     setOpen(false)
     if (id === current?.id) return
+    const wasConnected = tunRunning
     setActiveId(id)
     setPingMs(null)
     try {
@@ -175,9 +176,18 @@ export function ProfileSelectorInline() {
       const profile = profiles.find(p => p.id === id)
       addLog('info', `Сервер выбран: ${profile?.name ?? id}`)
       emitServerChanged()
-      // Pull a one-time warning when the user picks something out of an
-      // expired group. We do this AFTER serversSelect resolves so failures
-      // don't leave a confusing log line.
+      if (wasConnected) {
+        addLog('info', `Переподключаемся через новый сервер: ${profile?.name ?? id}…`)
+        useAppStore.getState().addGlobalToast('info', 'Переподключение', `Через ${profile?.name ?? id}`)
+        // Trigger reconnect via IPC — the main process will stop and restart
+        try {
+          await window.electronAPI.startTun(useAppStore.getState().proxy?.host
+            ? `${useAppStore.getState().proxy!.host}:${useAppStore.getState().proxy!.port}`
+            : '', useAppStore.getState().proxy?.type)
+        } catch {
+          // If reconnect fails, the user can manually connect
+        }
+      }
       if (profile) {
         const gid = (profile as ServerProfile & { groupId?: string }).groupId
         const group = gid ? groupById.get(gid) : null

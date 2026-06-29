@@ -1,9 +1,9 @@
-import { LayoutDashboard, AppWindow, Server, Calendar, FileText, Settings, Zap, Globe, Search } from 'lucide-react'
+import { LayoutDashboard, AppWindow, Server, Calendar, FileText, Settings, Zap, Globe, Search, Wrench } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { MacSidebar, type ConnectionStatus, type SidebarItem } from '../design-system'
 import { useAppStore } from '../store'
 
-export type SidebarPage = 'dashboard' | 'apps' | 'servers' | 'speedtest' | 'availability' | 'trafficHistory' | 'schedule' | 'logs' | 'settings'
+export type SidebarPage = 'dashboard' | 'apps' | 'servers' | 'speedtest' | 'availability' | 'trafficHistory' | 'schedule' | 'logs' | 'settings' | 'maintenance'
 
 interface SidebarProps {
   currentPage: string
@@ -15,6 +15,7 @@ export function Sidebar({ currentPage, onNavigate }: SidebarProps) {
   const tunRunning = useAppStore(s => s.tunRunning)
   const restartingProgress = useAppStore(s => s.restartingProgress)
   const detecting = useAppStore(s => s.detecting)
+  const advancedMode = useAppStore(s => s.settings?.advancedMode === true)
 
   // Derive connection status for the MacSidebar indicator
   const connectionStatus: ConnectionStatus = (() => {
@@ -33,6 +34,9 @@ export function Sidebar({ currentPage, onNavigate }: SidebarProps) {
     { id: 'schedule', label: t('sidebar.schedule'), icon: <Calendar className="w-5 h-5" /> },
     { id: 'logs', label: t('sidebar.logs'), icon: <FileText className="w-5 h-5" /> },
     { id: 'settings', label: t('sidebar.settings'), icon: <Settings className="w-5 h-5" /> },
+    ...(advancedMode ? [
+      { id: 'maintenance', label: t('sidebar.maintenance', 'Починка'), icon: <Wrench className="w-5 h-5" /> }
+    ] : [])
   ]
 
   const statusLabels = {

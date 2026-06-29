@@ -224,6 +224,8 @@ interface AppState {
   setConnectionBusy: (busy: 'connecting' | 'disconnecting' | null) => void
   setFirewallKillSwitchActive: (active: boolean) => void
   setCompetingTun: (name: string | null) => void
+  proxyDown: boolean
+  setProxyDown: (v: boolean) => void
   setAutoconfigTargets: (targets: AutoconfigTarget[]) => void
   setLeakChecks: (checks: LeakCheckResult | null) => void
   setTrafficStats: (stats: TrafficStats) => void
@@ -290,6 +292,7 @@ export const useAppStore = create<AppState>((set) => ({
   connectionBusy: null,
   firewallKillSwitchActive: false,
   competingTun: null,
+  proxyDown: false,
   leakSelfTestResult: null,
   lastMainError: null,
   exportingDiagnostics: false,
@@ -360,6 +363,7 @@ export const useAppStore = create<AppState>((set) => ({
   setConnectionBusy: (busy) => set({ connectionBusy: busy }),
   setFirewallKillSwitchActive: (active) => set({ firewallKillSwitchActive: active }),
   setCompetingTun: (name) => set({ competingTun: name }),
+  setProxyDown: (v) => set({ proxyDown: v }),
   setAutoconfigTargets: (targets) => set({ autoconfigTargets: targets }),
   setLeakChecks: (checks) => set({
     leakChecks: checks,
