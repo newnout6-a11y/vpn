@@ -249,6 +249,13 @@ interface AppState {
   exportingDiagnostics: boolean
   setExportingDiagnostics: (e: boolean) => void
 
+  // Maintenance page state — persisted in global store so results survive
+  // tab switches (component unmount/remount).
+  maintenanceLastResult: string | null
+  setMaintenanceLastResult: (r: string | null) => void
+  maintenanceRunningAction: string | null
+  setMaintenanceRunningAction: (a: string | null) => void
+
   // Global toast notifications — visible on all pages
   globalToasts: GlobalToast[]
   addGlobalToast: (variant: GlobalToast['variant'], title: string, description?: string) => void
@@ -409,6 +416,10 @@ export const useAppStore = create<AppState>((set) => ({
   setLeakSelfTestResult: (r) => set({ leakSelfTestResult: r }),
   setLastMainError: (e) => set({ lastMainError: e }),
   setExportingDiagnostics: (e) => set({ exportingDiagnostics: e }),
+  maintenanceLastResult: null,
+  setMaintenanceLastResult: (r) => set({ maintenanceLastResult: r }),
+  maintenanceRunningAction: null,
+  setMaintenanceRunningAction: (a) => set({ maintenanceRunningAction: a }),
   globalToasts: [],
   addGlobalToast: (variant, title, description) => {
     const id = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`

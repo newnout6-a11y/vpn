@@ -2057,6 +2057,10 @@ export const tunController = {
     // so both branches below can populate it; the await happens after the
     // stale-cleanup gate.
     let runtimePromise: Promise<{ singbox: string; config: string }> | null = null
+    // Await DNS sources before branching into mode-specific logic — both
+    // localProxy and directVpn paths need smartRouteRuntimeOpts.
+    const smartRuDirectDnsSources = await dnsSourcesPromise
+    const smartRouteRuntimeOpts = { smartRuSplit, smartRuMapsDirect, smartRuDirectDnsSources }
     if (mode === 'localProxy') {
       // ---------- Pre-flight 2: proxy must actually be listening ----------
       // If Happ is closed or in TUN mode, port 10808 isn't listening — without this check
@@ -2114,11 +2118,6 @@ export const tunController = {
       // Kick off prepareRuntime NOW — it doesn't depend on the validation
       // result. If validate fails we throw away the runtime; that's just a
       // file overwrite on next start, no rollback needed.
-      // Await the DNS sources promise here (it was kicked off ~2s ago in
-      // parallel with foreign-tun detection and adapter lockdown kickoff,
-      // so it's very likely already resolved by now).
-      const smartRuDirectDnsSources = await dnsSourcesPromise
-      const smartRouteRuntimeOpts = { smartRuSplit, smartRuMapsDirect, smartRuDirectDnsSources }
       runtimePromise = timePromise('prepare-runtime', prepareRuntime(
         proxyAddr,
         proxyType,

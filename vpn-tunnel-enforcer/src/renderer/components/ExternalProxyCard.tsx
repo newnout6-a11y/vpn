@@ -121,6 +121,9 @@ export function ExternalProxyCard() {
             <Globe2 className="w-4 h-4 text-[var(--color-accent)]" />
             Внешний прокси
           </h3>
+          <p className="text-xs text-[var(--color-text-muted)] mt-1">
+            Запускает отдельный sing-box с HTTP/SOCKS прокси для других устройств в локальной сети.
+          </p>
           <p className={`text-sm mt-1 ${running ? 'text-[var(--color-success)]' : 'text-[var(--color-text-secondary)]'}`}>
             {running ? 'Запущен' : 'Остановлен'}
             {running && status.profileName ? ` — ${status.profileName}` : ''}

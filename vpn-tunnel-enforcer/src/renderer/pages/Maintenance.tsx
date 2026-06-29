@@ -72,8 +72,10 @@ const repairActions: { id: RepairAction; label: string; icon: any; danger?: bool
 export function Maintenance() {
   const addLog = useAppStore(s => s.addLog)
   const updateSettings = useAppStore(s => s.updateSettings)
-  const [runningAction, setRunningAction] = useState<string | null>(null)
-  const [lastResult, setLastResult] = useState<string | null>(null)
+  const lastResult = useAppStore(s => s.maintenanceLastResult)
+  const setLastResult = useAppStore(s => s.setMaintenanceLastResult)
+  const runningAction = useAppStore(s => s.maintenanceRunningAction)
+  const setRunningAction = useAppStore(s => s.setMaintenanceRunningAction)
   const [autoPilotRunning, setAutoPilotRunning] = useState(false)
   const [privacy, setPrivacy] = useState<PrivacyStatus | null>(null)
   const [storeDiagnostics, setStoreDiagnostics] = useState<StoreDiagnosticResult | null>(null)
