@@ -4,7 +4,6 @@ import { join } from 'path'
 import { execElevated } from './admin'
 
 export interface AppSettings {
-  routingMode: 'compatible'
   connectionMode: 'localProxy' | 'directVpn'
   proxyOverride: string
   proxyType: 'socks5' | 'http'
@@ -68,9 +67,8 @@ export interface AppSettings {
   //   2. Enable TLS ClientHello fragmentation in the proxy outbound (only
   //      for non-Reality outbounds — Reality embeds auth in ClientHello and
   //      breaks if fragmented).
-  //   3. Activate the auto-failover watchdog: if the active server starts
-  //      timing out (3+ consecutive TLS pings fail within 2 minutes), the
-  //      next picker profile is selected and the tunnel is restarted.
+  // Note: the auto-failover watchdog runs unconditionally (regardless of
+  // stealthMode) — it is always active for safety.
   // Safe to leave ON outside of restrictive networks too — costs ~5% extra
   // bandwidth from MTU overhead and a handful of extra TLS roundtrips.
   stealthMode: boolean
@@ -102,7 +100,6 @@ export interface AppSettings {
 }
 
 const defaults: AppSettings = {
-  routingMode: 'compatible',
   connectionMode: 'localProxy',
   proxyOverride: '',
   proxyType: 'socks5',
@@ -160,7 +157,6 @@ function normalizeSettings(input: Partial<AppSettings> | undefined): AppSettings
         }))
     : []
   return {
-    routingMode: 'compatible',
     connectionMode: merged.connectionMode === 'directVpn' ? 'directVpn' : 'localProxy',
     proxyOverride: typeof merged.proxyOverride === 'string' ? merged.proxyOverride.trim() : '',
     proxyType: merged.proxyType === 'http' ? 'http' : 'socks5',

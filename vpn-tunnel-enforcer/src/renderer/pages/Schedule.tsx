@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Calendar, Plus, Trash2, Edit2, Clock, Play, Square } from 'lucide-react'
+import { useAppStore } from '../store'
 import {
   MacCard,
   MacInput,
@@ -143,8 +144,9 @@ export function Schedule() {
         await fetchSchedules()
         await fetchNextEvent()
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to create schedule:', err)
+      useAppStore.getState().addGlobalToast('error', 'Ошибка', `Не удалось создать расписание: ${err?.message || err}`)
     }
   }
 
@@ -168,8 +170,9 @@ export function Schedule() {
         await fetchSchedules()
         await fetchNextEvent()
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to update schedule:', err)
+      useAppStore.getState().addGlobalToast('error', 'Ошибка', `Не удалось обновить расписание: ${err?.message || err}`)
     }
   }
 
@@ -181,8 +184,9 @@ export function Schedule() {
         setSchedules((prev) => prev.filter((s) => s.id !== id))
         await fetchNextEvent()
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to delete schedule:', err)
+      useAppStore.getState().addGlobalToast('error', 'Ошибка', `Не удалось удалить расписание: ${err?.message || err}`)
     }
   }
 
@@ -196,8 +200,9 @@ export function Schedule() {
         )
         await fetchNextEvent()
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to toggle schedule:', err)
+      useAppStore.getState().addGlobalToast('error', 'Ошибка', `Не удалось переключить расписание: ${err?.message || err}`)
     }
   }
 

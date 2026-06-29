@@ -52,8 +52,9 @@ export function SplitTunnel() {
       setApps((prev) =>
         prev.map((app) => (app.id === appId ? { ...app, rule } : app))
       )
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to set split tunnel rule:', err)
+      useAppStore.getState().addGlobalToast('error', 'Ошибка', `Не удалось изменить правило: ${err?.message || err}`)
     }
   }, [])
 
@@ -69,8 +70,9 @@ export function SplitTunnel() {
           return [...prev, result]
         })
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to add app:', err)
+      useAppStore.getState().addGlobalToast('error', 'Ошибка', `Не удалось добавить приложение: ${err?.message || err}`)
     } finally {
       setAddingApp(false)
     }
@@ -81,8 +83,9 @@ export function SplitTunnel() {
     try {
       await window.electronAPI.splitTunnelRemoveApp(appId)
       setApps((prev) => prev.filter((app) => app.id !== appId))
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to remove app:', err)
+      useAppStore.getState().addGlobalToast('error', 'Ошибка', `Не удалось удалить приложение: ${err?.message || err}`)
     }
   }, [])
 

@@ -1,5 +1,6 @@
 import { useEffect, useState, useMemo, useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
+import { useAppStore } from '../store'
 import {
   Search,
   Download,
@@ -198,8 +199,9 @@ export function Logs() {
       a.download = `connection-history-${new Date().toISOString().slice(0, 10)}.csv`
       a.click()
       URL.revokeObjectURL(url)
-    } catch {
-      // silently fail
+    } catch (err: any) {
+      console.error('CSV export failed:', err)
+      useAppStore.getState().addGlobalToast('error', 'Экспорт не удался', err?.message || 'Ошибка экспорта CSV')
     }
   }
 
@@ -213,8 +215,9 @@ export function Logs() {
       a.download = `connection-history-${new Date().toISOString().slice(0, 10)}.json`
       a.click()
       URL.revokeObjectURL(url)
-    } catch {
-      // silently fail
+    } catch (err: any) {
+      console.error('JSON export failed:', err)
+      useAppStore.getState().addGlobalToast('error', 'Экспорт не удался', err?.message || 'Ошибка экспорта JSON')
     }
   }
 

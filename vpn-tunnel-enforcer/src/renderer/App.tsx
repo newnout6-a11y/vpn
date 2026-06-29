@@ -355,6 +355,12 @@ export default function App() {
       if (status === 'running' || status === 'stopped' || status === 'killswitch-active') {
         store.setConnectionBusy(null)
       }
+      // Reset stale connection state on terminal transitions so the UI
+      // doesn't show old VPN IP, leak results, or traffic stats after
+      // a crash or disconnect.
+      if (status === 'stopped' || status === 'killswitch-active') {
+        store.resetConnectionState()
+      }
       store.setRestarting(isRestarting ? status.slice('restarting:'.length) : null)
       if (!tunUp && !isRestarting && !isStopping && store.mode === 'hard') store.setMode('off')
       if (status === 'running') {

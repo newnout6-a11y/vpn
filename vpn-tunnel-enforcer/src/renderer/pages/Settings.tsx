@@ -636,7 +636,7 @@ export function Settings() {
           <ToggleRow
             icon={<Settings2 className="w-4 h-4 text-amber-500" />}
             title={<>Расширенный режим <span className="text-amber-500">(для опытных)</span></>}
-            description="Открывает страницы Приложения и Диагностика, разрешает менять ручной адрес прокси и потенциально опасные параметры."
+            description="Открывает страницы Приложения и Починка, разрешает менять ручной адрес прокси и потенциально опасные параметры."
             checked={settings.advancedMode}
             onChange={(next) => updateSettings({ advancedMode: next })}
           />

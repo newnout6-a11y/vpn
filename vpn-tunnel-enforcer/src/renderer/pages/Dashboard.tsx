@@ -310,6 +310,7 @@ export function Dashboard() {
         setMode('off')
         setTunRunning(false)
         setVpnIp(null)
+        useAppStore.getState().resetConnectionState()
         addLog('info', 'Защита выключена. Возвращаем обычный маршрут.')
       } else {
         const errorMsg = result.error || 'Unknown error'

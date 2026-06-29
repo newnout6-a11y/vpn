@@ -63,7 +63,6 @@ function persistRendererLog(level: LogEntry['level'], message: string) {
 }
 
 export interface AppSettings {
-  routingMode: 'compatible'
   connectionMode: 'localProxy' | 'directVpn'
   proxyOverride: string
   proxyType: 'socks5' | 'http'
@@ -230,6 +229,7 @@ interface AppState {
   setLeakChecks: (checks: LeakCheckResult | null) => void
   setTrafficStats: (stats: TrafficStats) => void
   setBrowserIpCheck: (check: BrowserIpCheck | null) => void
+  resetConnectionState: () => void
   addLog: (level: LogEntry['level'], message: string) => void
   setSettings: (s: AppSettings) => void
   updateSettings: (s: Partial<AppSettings>) => void
@@ -312,7 +312,6 @@ export const useAppStore = create<AppState>((set) => ({
   browserIpCheck: null,
   logs: [],
   settings: {
-    routingMode: 'compatible',
     connectionMode: 'localProxy',
     proxyOverride: '',
     proxyType: 'socks5',
@@ -382,6 +381,19 @@ export const useAppStore = create<AppState>((set) => ({
   }),
   setTrafficStats: (traffic) => set({ traffic }),
   setBrowserIpCheck: (browserIpCheck) => set({ browserIpCheck }),
+  // Reset all connection-related state — called on crash/killswitch/disconnect
+  // to prevent stale data from misleading the user.
+  resetConnectionState: () => set({
+    vpnIp: null,
+    publicIp: null,
+    isLeak: false,
+    proxyDown: false,
+    leakSelfTestResult: null,
+    leakChecks: null,
+    ipGeo: { country: null, city: null },
+    traffic: { downloadBps: 0, uploadBps: 0, running: false, connectedAt: null, peakDownloadBps: 0, peakUploadBps: 0 },
+    browserIpCheck: null,
+  }),
   addLog: (level, message) => {
     persistRendererLog(level, message)
     set((s) => ({

@@ -130,7 +130,7 @@ export function TrafficHistory() {
         <div className="flex gap-2">
           <MacButton variant="secondary" onClick={fetchHistory} loading={loading}>
             <RefreshCw className="w-4 h-4 mr-1.5" />
-            {t('common.search')}
+            {t('common.refresh', 'Обновить')}
           </MacButton>
           <MacButton variant="ghost" onClick={handleClear} loading={clearing} disabled={entries.length === 0}>
             <Trash2 className="w-4 h-4 mr-1.5" />

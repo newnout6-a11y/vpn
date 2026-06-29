@@ -101,7 +101,12 @@ function showWindow() {
 
 function runAction(action?: () => unknown | Promise<unknown>) {
   if (!action) return
-  Promise.resolve(action()).catch(() => undefined)
+  Promise.resolve(action()).catch((err: any) => {
+    // Log the error so support/diagnostics can see it — previously all
+    // tray action errors were completely silently discarded.
+    const { logEvent } = require('./appLogger')
+    logEvent('error', 'tray', 'tray action failed', { error: err?.message || String(err) })
+  })
 }
 
 function buildTooltip(): string {

@@ -1006,16 +1006,6 @@ function psQuote(value: string): string {
   return `'${value.replace(/'/g, "''")}'`
 }
 
-function killRuntimeProcess(imageName: string, executablePath: string): Promise<void> {
-  const command =
-    'powershell -NoProfile -ExecutionPolicy Bypass -Command ' +
-    `"Get-CimInstance Win32_Process -Filter \\\"Name='${imageName}'\\\" | ` +
-    `Where-Object { $_.ExecutablePath -eq ${psQuote(executablePath)} } | ` +
-    `ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"`
-
-  return execElevated(command, { timeout: 15000 }).then(() => undefined).catch(() => undefined)
-}
-
 async function killOwnedRuntimeProcesses(): Promise<void> {
   if (process.platform !== 'win32') return
   try {

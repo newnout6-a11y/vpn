@@ -1017,64 +1017,6 @@ export function setProfileClientDevice(id: string, device: ClientDevice): Server
  * Triggered after addFromInput() and on app start.
  */
 let geolocateInFlight = false
-export async function geolocateAll(opts: { force?: boolean } = {}): Promise<void> {
-  if (geolocateInFlight) return
-  geolocateInFlight = true
-  try {
-    const todo = getProfiles().filter(p => opts.force || !p.country)
-    if (!todo.length) return
-
-    logEvent('info', 'server-picker', 'geolocate pass started', {
-      total: getProfiles().length,
-      pending: todo.length,
-      force: Boolean(opts.force)
-    })
-
-    // 1. host → ip for every pending profile.
-    const hostToIp = await resolveHostsToIps(todo.map(p => p.server))
-    // 2. ip → country in bulk.
-    const ipToCountry = await batchGeolocateIps([...hostToIp.values()])
-
-    // 3. Write back in one pass. Re-read the store first — pingAll/select
-    //    can mutate concurrently while we were on the network.
-    const current = getProfiles()
-    let updated = 0
-    let dirty = false
-    for (const profile of todo) {
-      const ip = hostToIp.get(profile.server)
-      if (!ip) continue
-      const country = ipToCountry.get(ip)
-      if (!country) continue
-      const idx = current.findIndex(p => p.id === profile.id)
-      if (idx === -1) continue
-      if (
-        current[idx].country !== country ||
-        current[idx].countryVerifiedIp !== ip ||
-        opts.force
-      ) {
-        current[idx] = {
-          ...current[idx],
-          country,
-          countryVerifiedAt: Date.now(),
-          countryVerifiedIp: ip,
-          countryGeoVersion: COUNTRY_GEO_VERSION
-        }
-        dirty = true
-        updated++
-      }
-    }
-    if (dirty) saveProfiles(current)
-
-    logEvent('info', 'server-picker', 'geolocate pass finished', {
-      pending: todo.length,
-      updated
-    })
-  } catch (err) {
-    logEvent('warn', 'server-picker', 'geolocate pass failed', err)
-  } finally {
-    geolocateInFlight = false
-  }
-}
 
 // ─── Profile Management ──────────────────────────────────────────────────────
 
@@ -1916,26 +1858,6 @@ export async function addFromInputToGroup(input: string, groupId: string, option
 
 // ─── Grouping ────────────────────────────────────────────────────────────────
 
-/**
- * Groups profiles by their protocol field.
- * Returns a record where keys are protocol names and values are arrays of profiles.
- */
-export function groupByProtocol(
-  profiles: ServerProfile[]
-): Record<string, ServerProfile[]> {
-  const groups: Record<string, ServerProfile[]> = {}
-
-  for (const profile of profiles) {
-    const key = profile.protocol || 'unknown'
-    if (!groups[key]) {
-      groups[key] = []
-    }
-    groups[key].push(profile)
-  }
-
-  return groups
-}
-
 // ─── IPC Handlers ────────────────────────────────────────────────────────────
 
 function handleLogged<T>(
@@ -2204,14 +2126,12 @@ export const serverPicker = {
   pingAll,
   addFromInput,
   addFromInputToGroup,
-  groupByProtocol,
   migrateLegacyDirectVpnProfiles,
   backfillMissingOutbounds,
   migrateProfilesIntoGroups,
   consolidateBogusSniGroups,
   backfillProfileSourceUris,
   clearStaleStoredPings,
-  geolocateAll,
   geolocateIp,
   updateActiveProfileCountry,
   verifyProfileCountry,
