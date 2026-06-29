@@ -38,9 +38,8 @@
   ; spawns PowerShell 5-10 times during a connect cycle, so this saves
   ; ~200-500ms per spawn. Safe: ngen is a standard Windows tool; if it
   ; fails (non-admin, missing .NET), the install continues normally.
-  nsExec::ExecToLog 'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& { try { [Environment]::SetEnvironmentVariable("DOTNET_NGEN_OPT", "1", "Machine"); $asm = [System.Reflection.Assembly]::LoadWithPartialName("System.Management.Automation"); if ($asm) { $ngen = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\ngen.exe"; if (Test-Path $ngen) { & $ngen install $asm.Location /nologo /silent; & $ngen update /nologo /silent } } } catch {} }"'
-  ; Also ngen the .NET assemblies that PowerShell's CLR host loads
-  nsExec::ExecToLog '$%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\ngen.exe update /nologo /silent'
+  ; Note: NSIS treats $$ as literal $, so PS variables need double-$.
+  nsExec::ExecToLog 'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "try { [Environment]::SetEnvironmentVariable("DOTNET_NGEN_OPT","1","Machine"); $${asm}=[System.Reflection.Assembly]::LoadWithPartialName("System.Management.Automation"); if($${asm}){ $${ng}=Join-Path $${env:WINDIR} "Microsoft.NET\Framework64\v4.0.30319\ngen.exe"; if(Test-Path $${ng}){ & $${ng} install $${asm}.Location /nologo /silent; & $${ng} update /nologo /silent } } } catch {}"'
 !macroend
 
 ; Runs at the start of uninstall (both the standalone uninstaller and the
