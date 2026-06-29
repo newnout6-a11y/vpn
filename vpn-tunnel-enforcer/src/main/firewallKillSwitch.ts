@@ -14,6 +14,10 @@ const execFile = promisify(execFileCb)
 // (e.g. user wiped %APPDATA% manually after a crash).
 const RULE_PREFIX = 'VPNTE-killswitch'
 
+// Exported for combinedPreStartProbe in connectionPlanner.ts so it can build
+// the firewall rule query without spawning a separate PowerShell process.
+export const KILL_SWITCH_RULE_PREFIX = RULE_PREFIX
+
 // Outbound traffic that must keep flowing while the kill-switch is engaged so
 // the box stays usable but can never reach the public internet by accident.
 // Localhost — sing-box ↔ Happ proxy on 127.0.0.1 lives here.
@@ -69,6 +73,12 @@ async function readManifest(): Promise<FirewallManifest | null> {
   } catch {
     return null
   }
+}
+
+// Exported for combinedPreStartProbe: a file-read-only check that determines
+// whether the firewall rule probe should be included in the combined PS script.
+export async function killSwitchManifestExists(): Promise<boolean> {
+  return (await readManifest()) !== null
 }
 
 async function writeManifest(m: FirewallManifest): Promise<void> {

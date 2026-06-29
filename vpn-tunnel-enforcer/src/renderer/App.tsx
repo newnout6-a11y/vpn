@@ -243,6 +243,14 @@ async function verifyActiveServerCountry(ip: string | null | undefined): Promise
   }
 }
 
+const scheduleIdle = (fn: () => void) => {
+  if ('requestIdleCallback' in window) {
+    requestIdleCallback(fn, { timeout: 2000 })
+  } else {
+    setTimeout(fn, 100)
+  }
+}
+
 export default function App() {
   const [page, setPage] = useState<Page>('dashboard')
   // Set to true when the main process tells us it's running shutdown cleanup
@@ -457,60 +465,70 @@ export default function App() {
         store.setProxy(manualProxy)
         addLog('info', `Используется ручной прокси: ${manualProxy.host}:${manualProxy.port} (${manualProxy.type})`)
       } else {
-        addLog('info', 'Поиск прокси Happ...')
-        void window.electronAPI.detectHapp()
-          .then(proxy => {
-            if (proxy) {
-              useAppStore.getState().setProxy(proxy)
-              addLog('info', `Прокси Happ найдено: ${proxy.host}:${proxy.port} (${proxy.type})`)
-            } else {
-              addLog('warn', 'Прокси Happ не найдено автоматически')
-            }
-          })
-          .catch((err: any) => addLog('error', `Ошибка поиска: ${err.message}`))
+        scheduleIdle(() => {
+          addLog('info', 'Поиск прокси Happ...')
+          void window.electronAPI.detectHapp()
+            .then(proxy => {
+              if (proxy) {
+                useAppStore.getState().setProxy(proxy)
+                addLog('info', `Прокси Happ найдено: ${proxy.host}:${proxy.port} (${proxy.type})`)
+              } else {
+                addLog('warn', 'Прокси Happ не найдено автоматически')
+              }
+            })
+            .catch((err: any) => addLog('error', `Ошибка поиска: ${err.message}`))
+        })
       }
 
       if (settings.autoPilotEnabled && settings.connectionMode !== 'directVpn') {
         addLog('info', 'Автопилот маршрута включен: приложение само выберет безопасный режим.')
-        void window.electronAPI.runAutoPilot()
-          .then(autoPilot => {
-            const liveStore = useAppStore.getState()
-            liveStore.setMode(autoPilot.mode)
-            liveStore.setTunRunning(autoPilot.mode === 'hard')
-            if (autoPilot.mode !== 'hard') liveStore.setVpnIp(null)
-            addLog(
-              autoPilot.summary === 'fail' ? 'error' : autoPilot.summary === 'warn' ? 'warn' : 'info',
-              `${autoPilot.title}: ${autoPilot.message}`
-            )
-          })
-          .catch((err: any) => addLog('error', `Автопилот маршрута не сработал: ${err.message}`))
+        // AutoPilot may auto-CONNECT the VPN — don't defer too long or the user
+        // sees a delay before auto-connect starts. Use a short 500ms timeout.
+        setTimeout(() => {
+          void window.electronAPI.runAutoPilot()
+            .then(autoPilot => {
+              const liveStore = useAppStore.getState()
+              liveStore.setMode(autoPilot.mode)
+              liveStore.setTunRunning(autoPilot.mode === 'hard')
+              if (autoPilot.mode !== 'hard') liveStore.setVpnIp(null)
+              addLog(
+                autoPilot.summary === 'fail' ? 'error' : autoPilot.summary === 'warn' ? 'warn' : 'info',
+                `${autoPilot.title}: ${autoPilot.message}`
+              )
+            })
+            .catch((err: any) => addLog('error', `Автопилот маршрута не сработал: ${err.message}`))
+        }, 500)
       } else {
-        void window.electronAPI.getRoutingPlan()
-          .then(plan => {
-            if (plan.recommendedMode === 'external') useAppStore.getState().setMode('external')
-            addLog(plan.status === 'broken' || plan.status === 'blocked' ? 'warn' : 'info', `План маршрута: ${plan.title}`)
-          })
-          .catch((err: any) => addLog('warn', `Не удалось построить план маршрута: ${err.message}`))
+        scheduleIdle(() => {
+          void window.electronAPI.getRoutingPlan()
+            .then(plan => {
+              if (plan.recommendedMode === 'external') useAppStore.getState().setMode('external')
+              addLog(plan.status === 'broken' || plan.status === 'blocked' ? 'warn' : 'info', `План маршрута: ${plan.title}`)
+            })
+            .catch((err: any) => addLog('warn', `Не удалось построить план маршрута: ${err.message}`))
+        })
       }
 
-      void (async () => {
-        try {
-          const ipInfo = await window.electronAPI.getPublicIp()
-          const liveStore = useAppStore.getState()
-          const staleInitialIp =
-            tunEventSeqRef.current !== initTunEventSeq ||
-            Boolean(liveStore.connectionBusy)
-          if (staleInitialIp) {
-            addLog('warn', 'Ignored stale initial IP check after a newer transition')
-            return
+      scheduleIdle(() => {
+        void (async () => {
+          try {
+            const ipInfo = await window.electronAPI.getPublicIp()
+            const liveStore = useAppStore.getState()
+            const staleInitialIp =
+              tunEventSeqRef.current !== initTunEventSeq ||
+              Boolean(liveStore.connectionBusy)
+            if (staleInitialIp) {
+              addLog('warn', 'Ignored stale initial IP check after a newer transition')
+              return
+            }
+            liveStore.setPublicIp(ipInfo.ip, ipInfo.isLeak)
+            if (ipInfo.ip) addLog('info', `Текущий публичный IP: ${ipInfo.ip}`)
+            if (ipInfo.ip && !ipInfo.isLeak && ipInfo.vpnIp) void verifyActiveServerCountry(ipInfo.ip)
+          } catch (err: any) {
+            addLog('error', `Ошибка проверки IP: ${err.message}`)
           }
-          liveStore.setPublicIp(ipInfo.ip, ipInfo.isLeak)
-          if (ipInfo.ip) addLog('info', `Текущий публичный IP: ${ipInfo.ip}`)
-          if (ipInfo.ip && !ipInfo.isLeak && ipInfo.vpnIp) void verifyActiveServerCountry(ipInfo.ip)
-        } catch (err: any) {
-          addLog('error', `Ошибка проверки IP: ${err.message}`)
-        }
-      })()
+        })()
+      })
 
       const [tunStatusRes, trafficRes, ksRes, targetsRes, privacyRes] = await Promise.allSettled([
         window.electronAPI.getTunStatus(),

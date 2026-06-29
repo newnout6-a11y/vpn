@@ -101,6 +101,7 @@ function proxyFromOverride(): ProxyInfo | null {
 // future regressions show up as a single explicit line in app.log instead of
 // silent empty results (which is exactly how FIX C1's regression hid).
 let activeTunnelsScriptLogged = false
+let combinedProbeScriptLogged = false
 
 async function getActiveTunnels(): Promise<TunnelInfo[]> {
   if (process.platform !== 'win32') return []
@@ -192,6 +193,132 @@ Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
   }
 }
 
+export interface CombinedPreStartProbeResult {
+  manifestExists: boolean
+  firewallRulesExist: boolean
+  tunnels: TunnelInfo[]
+  listeners: ProxyListenerInfo[]
+}
+
+/**
+ * Combined pre-start probe: runs ONE PowerShell process that collects all
+ * three pieces of data needed by startProtection() — active TUN adapters,
+ * loopback proxy listeners, and (optionally) VPNTE firewall rule count.
+ *
+ * Previously these were gathered by 2-3 separate PowerShell processes:
+ *   - probeFirewallForOurRules (Get-NetFirewallRule)
+ *   - getActiveTunnels (Get-NetAdapter | Get-NetIPAddress)
+ *   - getProxyListeners (Get-NetTCPConnection | Get-Process)
+ *
+ * The firewall probe is ONLY included when the kill-switch manifest exists
+ * (a file-read check done by the caller). If there is no manifest, the
+ * firewall count is set to 0 in the PS script without running Get-NetFirewallRule.
+ *
+ * Output is line-based (TUNNELS:json / LISTENERS:json / FIREWALL:count) so
+ * each section can be parsed independently and empty arrays are handled
+ * correctly (ConvertTo-Json on an empty pipeline produces no output, so
+ * we substitute '[]' in PS before writing).
+ */
+export async function combinedPreStartProbe(opts: {
+  manifestExists: boolean
+  killSwitchRulePrefix: string
+}): Promise<CombinedPreStartProbeResult> {
+  if (process.platform !== 'win32') {
+    return { manifestExists: opts.manifestExists, firewallRulesExist: false, tunnels: [], listeners: [] }
+  }
+
+  const { manifestExists, killSwitchRulePrefix } = opts
+
+  const prefixRegex = '^' + TUN_IPV4_PREFIX.replace(/\./g, '\\.')
+  const aliasLiteral = `'${TUN_ADAPTER_ALIAS.replace(/'/g, "''")}'`
+  const rulePattern = `'${killSwitchRulePrefix.replace(/'/g, "''")}*'`
+
+  const firewallPart = manifestExists
+    ? `$fwCount = (Get-NetFirewallRule -DisplayName ${rulePattern} -ErrorAction SilentlyContinue | Measure-Object).Count`
+    : '$fwCount = 0'
+
+  const script = `
+$tunnelRx='(?i)wintun|\\btun\\b|wireguard|openvpn|tap-windows|happ|hiddify|singbox|sing-tun|v2ray|xray|vpn';
+$tunnels = @(Get-NetAdapter -ErrorAction SilentlyContinue |
+  Where-Object { $_.Status -eq 'Up' -and ($_.Name -match $tunnelRx -or $_.InterfaceDescription -match $tunnelRx) } |
+  ForEach-Object {
+    $adapter=$_;
+    $ips=Get-NetIPAddress -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+      Where-Object { $_.IPAddress } |
+      Select-Object -ExpandProperty IPAddress;
+    [pscustomobject]@{
+      Name=$adapter.Name;
+      Description=$adapter.InterfaceDescription;
+      Address=($ips -join ', ');
+      IsVpnte=($adapter.Name -eq ${aliasLiteral} -or ($ips -join ',') -match '${prefixRegex}')
+    }
+  });
+
+$listenerRx='(?i)happ|hiddify|nekoray|nekobox|v2ray|xray|sing-box|singbox|sing-tun|clash|clash-verge|flclash|mihomo|mihomo-party|shadowsocks|ss-local|trojan|outline|wireguard|openvpn|karing|streisand|surfboard|vpn';
+$listeners = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
+  Where-Object { $_.LocalAddress -in @('127.0.0.1','::1','0.0.0.0','::') } |
+  ForEach-Object {
+    $p=Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue;
+    [pscustomobject]@{Host=$_.LocalAddress;Port=$_.LocalPort;Process=$p.ProcessName;Pid=$_.OwningProcess}
+  } |
+  Where-Object { ($_.Process -match $listenerRx) -or ($_.Port -in @(1080,1081,1087,10808,10809,7890,7891,7892,7893,7897,8080,2080,2081,6450,6451,9090,20170,20171,8388)) } |
+  Sort-Object Process,Port -Unique);
+
+${firewallPart}
+
+$tunnelsJ = $tunnels | ConvertTo-Json -Compress -Depth 3
+$listenersJ = $listeners | ConvertTo-Json -Compress -Depth 3
+if (-not $tunnelsJ) { $tunnelsJ = '[]' }
+if (-not $listenersJ) { $listenersJ = '[]' }
+Write-Host "TUNNELS:$tunnelsJ"
+Write-Host "LISTENERS:$listenersJ"
+Write-Host "FIREWALL:$fwCount"
+`
+
+  if (!combinedProbeScriptLogged) {
+    combinedProbeScriptLogged = true
+    logEvent('debug', 'planner', 'combinedPreStartProbe PS script', {
+      preview: script.replace(/\s+/g, ' ').trim().slice(0, 200)
+    })
+  }
+
+  try {
+    const raw = await ps(script, 15000)
+    const lines = raw.split('\n').map(l => l.trim()).filter(l => l)
+
+    const tunnelsLine = lines.find(l => l.startsWith('TUNNELS:'))
+    const listenersLine = lines.find(l => l.startsWith('LISTENERS:'))
+    const firewallLine = lines.find(l => l.startsWith('FIREWALL:'))
+
+    const tunnelsRaw = tunnelsLine ? tunnelsLine.slice('TUNNELS:'.length) : '[]'
+    const listenersRaw = listenersLine ? listenersLine.slice('LISTENERS:'.length) : '[]'
+    const fwCount = firewallLine
+      ? parseInt(firewallLine.slice('FIREWALL:'.length), 10)
+      : 0
+
+    const tunnels = asArray<any>(parseJson(tunnelsRaw)).map(row => ({
+      name: String(row.Name || ''),
+      description: String(row.Description || ''),
+      address: String(row.Address || ''),
+      isVpnte: Boolean(row.IsVpnte)
+    })).filter(row => row.name)
+
+    const listeners = asArray<any>(parseJson(listenersRaw)).map(row => ({
+      host: String(row.Host || '127.0.0.1'),
+      port: Number(row.Port),
+      process: String(row.Process || 'unknown'),
+      pid: Number(row.Pid || 0)
+    })).filter(row => Number.isInteger(row.port))
+
+    const firewallRulesExist = Number.isFinite(fwCount) && fwCount > 0
+
+    return { manifestExists, firewallRulesExist, tunnels, listeners }
+  } catch (err) {
+    logEvent('warn', 'planner', 'combinedPreStartProbe failed', err)
+    return { manifestExists, firewallRulesExist: false, tunnels: [], listeners: [] }
+  }
+}
+
 async function detectProxy(): Promise<ProxyInfo | null> {
   const manual = proxyFromOverride()
   if (manual) {
@@ -206,12 +333,15 @@ function tunnelLabel(tunnel: TunnelInfo) {
   return `${tunnel.name}${address}`.trim()
 }
 
-export async function getRoutingPlan(): Promise<RoutingPlan> {
+export async function getRoutingPlan(opts?: {
+  activeTunnels?: TunnelInfo[]
+  proxyListeners?: ProxyListenerInfo[]
+}): Promise<RoutingPlan> {
   const settings = settingsStore.get()
   const isDirectVpn = settings.connectionMode === 'directVpn'
   const [activeTunnels, proxyListeners, proxy] = await Promise.all([
-    getActiveTunnels(),
-    getProxyListeners(),
+    opts?.activeTunnels ?? getActiveTunnels(),
+    opts?.proxyListeners ?? getProxyListeners(),
     isDirectVpn ? Promise.resolve<ProxyInfo | null>(null) : detectProxy()
   ])
 

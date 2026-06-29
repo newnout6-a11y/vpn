@@ -12,9 +12,10 @@
     "test:vpn-profiles": "node scripts/test-vpn-profiles.mjs",
     "preview": "electron-vite preview",
     "build:sidecar": "node scripts/build-sidecar.mjs",
-    "dist": "npm run build:sidecar && npm run build && electron-builder",
-    "dist:win": "npm run build:sidecar && npm run build && electron-builder --win nsis",
-    "dist:portable": "npm run build:sidecar && npm run build && electron-builder --win portable"
+    "build:snapshot": "node scripts/generate-v8-snapshot.mjs",
+    "dist": "npm run build:sidecar && npm run build:snapshot && npm run build && electron-builder",
+    "dist:win": "npm run build:sidecar && npm run build:snapshot && npm run build && electron-builder --win nsis",
+    "dist:portable": "npm run build:sidecar && npm run build:snapshot && npm run build && electron-builder --win portable"
   },
   "dependencies": {
     "axios": "^1.7.2",

@@ -1,4 +1,6 @@
-import { app, BrowserWindow, dialog, ipcMain, Tray, shell, session, type IpcMainInvokeEvent } from 'electron'
+import './snapshotBootstrap'
+import { startElevatedPsHelper, stopElevatedPsHelper } from './elevatedPsHelper'
+import { app, BrowserWindow, dialog, ipcMain, Tray, shell, session, Menu, type IpcMainInvokeEvent } from 'electron'
 import { exec as execCb } from 'child_process'
 import { promisify } from 'util'
 import { join } from 'path'
@@ -22,6 +24,8 @@ import {
 import {
   disableKillSwitchIfActive,
   isKillSwitchActive,
+  KILL_SWITCH_RULE_PREFIX,
+  killSwitchManifestExists,
   nuclearFirewallReset,
   recoverStaleKillSwitch
 } from './firewallKillSwitch'
@@ -33,7 +37,7 @@ import {
 import { relaunchElevatedIfNeeded } from './admin'
 import { clearAppLog, getFullLogs, logEvent, openLogFolder, type AppLogLevel } from './appLogger'
 import { runSystemDiagnostics } from './systemDiagnostics'
-import { getRoutingPlan } from './connectionPlanner'
+import { combinedPreStartProbe, getRoutingPlan } from './connectionPlanner'
 import { getSmartRouteRuleSetState, refreshSmartRouteRuleSets } from './ruleSetManager'
 import { runAutoPilot } from './autoPilot'
 import { notify, setInAppFallbackCallback } from './notifications'
@@ -474,14 +478,39 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
   // support/diagnostics will compare against.
   captureSnapshot('tun-pre-start').catch(() => undefined)
 
-  // Run the stale kill-switch check and the routing plan IN PARALLEL — they
-  // are independent and each takes ~1-2s of PowerShell. Previously these were
-  // sequential, adding ~2s to the critical path.
-  const [staleKillSwitch, plan] = await Promise.all([
-    clearStaleKillSwitchBeforeStart('local proxy start'),
-    getRoutingPlan()
-  ])
-  if (!staleKillSwitch.success) return { success: false, error: staleKillSwitch.error }
+  // Combined pre-start probe: runs ONE PowerShell process instead of 2-3
+  // separate ones (firewall rule check + active tunnels + proxy listeners).
+  // The manifest read (file I/O) determines whether the firewall probe is
+  // included in the PS script at all — if no manifest, we skip it entirely.
+  const manifestExists = await killSwitchManifestExists()
+  const probe = await combinedPreStartProbe({
+    manifestExists,
+    killSwitchRulePrefix: KILL_SWITCH_RULE_PREFIX
+  })
+
+  // Clear stale kill-switch if active. Uses the probe result instead of
+  // calling isKillSwitchActive() again (which would spawn another PS process).
+  if (!tunController.getStatus().running) {
+    const killSwitchActive = probe.manifestExists || probe.firewallRulesExist
+    if (killSwitchActive) {
+      logEvent('info', 'firewall-killswitch', 'restart preflight: clearing stale kill-switch before local proxy start')
+      const ksResult = await disableKillSwitchIfActive('restart preflight: local proxy start')
+      refreshTrayState({ killSwitchActive: await isKillSwitchActive().catch(() => false) })
+      if (!ksResult.success) {
+        return {
+          success: false,
+          error: `Не удалось снять старую блокировку перед перезапуском: ${ksResult.message}`
+        }
+      }
+    }
+  }
+
+  // Build routing plan from pre-computed probe data (skips 2 PS calls,
+  // only runs proxy detection which is TCP-based, not PowerShell).
+  const plan = await getRoutingPlan({
+    activeTunnels: probe.tunnels,
+    proxyListeners: probe.listeners
+  })
   if (!plan.canStartHard) {
     return {
       success: false,
@@ -959,6 +988,11 @@ async function performCrashRecovery(): Promise<void> {
   } catch { /* non-critical */ }
 }
 
+// Disable the default application menu before app.ready — we use a
+// frameless window with no native menu, so Electron's default menu
+// setup is wasted work that adds ~50-100ms to startup.
+Menu.setApplicationMenu(null)
+
 app.whenReady().then(async () => {
   logEvent('info', 'app', 'application ready', {
     version: app.getVersion(),
@@ -1005,6 +1039,13 @@ app.whenReady().then(async () => {
   const initialSettings = settingsStore.get()
   settingsStore.syncLoginItem()
   ipMonitor.setCheckInterval(initialSettings.checkInterval)
+
+  // Start the persistent elevated PowerShell helper — one long-running
+  // PS process that accepts JSON commands via stdin, eliminating the
+  // 300-800ms process-creation overhead per elevated PS call.
+  void startElevatedPsHelper().catch(err =>
+    logEvent('warn', 'app', 'failed to start elevated PS helper', err)
+  )
 
   createWindow()
   tray = createTray(mainWindow!, {
@@ -1600,6 +1641,11 @@ async function performShutdownCleanup(reason: string): Promise<void> {
   } catch (err) {
     logEvent('warn', 'app', 'env autoconfig rollback during shutdown failed', err)
   }
+
+  // Stop the persistent elevated PS helper process.
+  try {
+    stopElevatedPsHelper()
+  } catch {}
 }
 
 app.on('before-quit', async (event) => {
