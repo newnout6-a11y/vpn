@@ -617,7 +617,7 @@ export function Dashboard() {
             className="flex flex-col items-center gap-2 z-10"
           >
             <p className="text-sm text-[var(--color-warning)] font-medium text-center">
-              Отключить VPN? Ваш реальный IP будет виден.
+              Отключить VPN? Интернет будет заблокирован до следующего включения.
             </p>
             <div className="flex gap-2">
               <button
