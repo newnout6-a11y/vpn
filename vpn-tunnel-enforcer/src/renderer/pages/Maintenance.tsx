@@ -77,9 +77,12 @@ export function Maintenance() {
   const runningAction = useAppStore(s => s.maintenanceRunningAction)
   const setRunningAction = useAppStore(s => s.setMaintenanceRunningAction)
   const [autoPilotRunning, setAutoPilotRunning] = useState(false)
-  const [privacy, setPrivacy] = useState<PrivacyStatus | null>(null)
-  const [storeDiagnostics, setStoreDiagnostics] = useState<StoreDiagnosticResult | null>(null)
-  const [systemDiagnostics, setSystemDiagnostics] = useState<SystemDiagnosticResult | null>(null)
+  const privacy = useAppStore(s => s.maintenancePrivacy)
+  const setPrivacy = useAppStore(s => s.setMaintenancePrivacy)
+  const storeDiagnostics = useAppStore(s => s.maintenanceStoreDiagnostics)
+  const setStoreDiagnostics = useAppStore(s => s.setMaintenanceStoreDiagnostics)
+  const systemDiagnostics = useAppStore(s => s.maintenanceSystemDiagnostics)
+  const setSystemDiagnostics = useAppStore(s => s.setMaintenanceSystemDiagnostics)
 
   const refreshPrivacy = async () => {
     try {

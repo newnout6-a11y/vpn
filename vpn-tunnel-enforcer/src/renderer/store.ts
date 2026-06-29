@@ -255,6 +255,12 @@ interface AppState {
   setMaintenanceLastResult: (r: string | null) => void
   maintenanceRunningAction: string | null
   setMaintenanceRunningAction: (a: string | null) => void
+  maintenanceStoreDiagnostics: any | null
+  setMaintenanceStoreDiagnostics: (r: any | null) => void
+  maintenanceSystemDiagnostics: any | null
+  setMaintenanceSystemDiagnostics: (r: any | null) => void
+  maintenancePrivacy: any | null
+  setMaintenancePrivacy: (p: any | null) => void
 
   // Global toast notifications — visible on all pages
   globalToasts: GlobalToast[]
@@ -420,6 +426,12 @@ export const useAppStore = create<AppState>((set) => ({
   setMaintenanceLastResult: (r) => set({ maintenanceLastResult: r }),
   maintenanceRunningAction: null,
   setMaintenanceRunningAction: (a) => set({ maintenanceRunningAction: a }),
+  maintenanceStoreDiagnostics: null,
+  setMaintenanceStoreDiagnostics: (r) => set({ maintenanceStoreDiagnostics: r }),
+  maintenanceSystemDiagnostics: null,
+  setMaintenanceSystemDiagnostics: (r) => set({ maintenanceSystemDiagnostics: r }),
+  maintenancePrivacy: null,
+  setMaintenancePrivacy: (p) => set({ maintenancePrivacy: p }),
   globalToasts: [],
   addGlobalToast: (variant, title, description) => {
     const id = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
