@@ -385,7 +385,7 @@ function QuickServers() {
                             }}
                             aria-label={t('dashboardSide.pingOne', 'Пингануть профиль')}
                             className={cn(
-                              'opacity-0 group-hover:opacity-100',
+                              'opacity-60 hover:opacity-100',
                               'p-1 rounded-[4px] transition-opacity duration-[var(--transition-fast)]',
                               'text-[var(--color-text-secondary)] hover:text-[var(--color-accent)]',
                               'hover:bg-[var(--color-card-elevated)]'

@@ -123,6 +123,7 @@ export function Dashboard() {
   const [disengaging, setDisengaging] = useState(false)
   const [nuclearResetting, setNuclearResetting] = useState(false)
   const [ipGeo, setIpGeo] = useState<{ country: string | null; city: string | null }>({ country: null, city: null })
+  const [confirmDisconnect, setConfirmDisconnect] = useState(false)
   const transitionSeqRef = useRef(0)
 
   // Uptime ticker
@@ -469,6 +470,26 @@ export function Dashboard() {
       {/* Toast notifications */}
       <MacToast toasts={toasts} onDismiss={dismissToast} position="top-right" />
 
+      {restartingProgress && (
+        <motion.div
+          initial={{ opacity: 0, y: -20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="rounded-[var(--radius-md)] border-2 border-[var(--color-warning)]/60 bg-[var(--color-warning)]/10 p-4 shadow-[0_0_20px_rgba(255,165,0,0.15)]"
+          role="alert"
+        >
+          <div className="flex items-center gap-3">
+            <Loader2 className="w-6 h-6 text-[var(--color-warning)] animate-spin flex-shrink-0" />
+            <div>
+              <p className="text-sm font-bold text-[var(--color-warning)]">
+                VPN соединение потеряно — авто-перезапуск {restartingProgress}
+              </p>
+              <p className="text-xs text-[var(--color-warning)]/80 mt-0.5">
+                Пытаемся восстановить подключение автоматически. Если не получится — включите защиту вручную.
+              </p>
+            </div>
+          </div>
+        </motion.div>
+      )}
       {/* Top-of-page kill-switch alert — shown when sing-box is dead but the
           firewall still blocks outbound traffic. Made deliberately loud and
           above-the-fold so users don't miss it when their browser stops
@@ -548,7 +569,16 @@ export function Dashboard() {
 
         {/* Large circular power button with glow */}
         <motion.button
-          onClick={() => handleToggleChange(!isConnected)}
+          onClick={() => {
+            if (isConnected && !confirmDisconnect && !isBusy) {
+              setConfirmDisconnect(true)
+              // Auto-cancel confirmation after 3s
+              setTimeout(() => setConfirmDisconnect(false), 3000)
+              return
+            }
+            setConfirmDisconnect(false)
+            handleToggleChange(!isConnected)
+          }}
           disabled={isBusy}
           whileHover={!isBusy ? { scale: 1.03 } : {}}
           whileTap={!isBusy ? { scale: 0.97 } : {}}
@@ -578,6 +608,33 @@ export function Dashboard() {
             )}
           </div>
         </motion.button>
+
+        {/* Disconnect confirmation */}
+        {confirmDisconnect && (
+          <motion.div
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="flex flex-col items-center gap-2 z-10"
+          >
+            <p className="text-sm text-[var(--color-warning)] font-medium text-center">
+              Отключить VPN? Ваш реальный IP будет виден.
+            </p>
+            <div className="flex gap-2">
+              <button
+                onClick={() => { setConfirmDisconnect(false); handleToggleChange(false) }}
+                className="px-4 py-1.5 text-sm font-medium rounded-[var(--radius-sm)] bg-[var(--color-danger)] text-white hover:opacity-90 transition-opacity"
+              >
+                Да, отключить
+              </button>
+              <button
+                onClick={() => setConfirmDisconnect(false)}
+                className="px-4 py-1.5 text-sm font-medium rounded-[var(--radius-sm)] border border-[var(--color-border)] text-[var(--color-text)] hover:border-[var(--color-accent)]/50 transition-all"
+              >
+                Отмена
+              </button>
+            </div>
+          </motion.div>
+        )}
 
         {/* Status text */}
         <p className={`text-sm font-medium ${statusColor}`}>

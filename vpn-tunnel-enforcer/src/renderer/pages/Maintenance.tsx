@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Activity, CheckCircle2, ExternalLink, Info, Loader2, MapPinOff, RotateCcw, Store, Trash2, TriangleAlert, Wrench } from 'lucide-react'
+import { Activity, CheckCircle2, ExternalLink, Info, Loader2, MapPinOff, RotateCcw, Store, Trash2, TriangleAlert, Wrench, Zap } from 'lucide-react'
 import { useAppStore } from '../store'
 import { MacCard, MacButton } from '../design-system'
 
@@ -74,6 +74,7 @@ export function Maintenance() {
   const updateSettings = useAppStore(s => s.updateSettings)
   const [runningAction, setRunningAction] = useState<string | null>(null)
   const [lastResult, setLastResult] = useState<string | null>(null)
+  const [autoPilotRunning, setAutoPilotRunning] = useState(false)
   const [privacy, setPrivacy] = useState<PrivacyStatus | null>(null)
   const [storeDiagnostics, setStoreDiagnostics] = useState<StoreDiagnosticResult | null>(null)
   const [systemDiagnostics, setSystemDiagnostics] = useState<SystemDiagnosticResult | null>(null)
@@ -151,6 +152,35 @@ export function Maintenance() {
       addLog('error', `Не удалось откатить сетевой baseline: ${err.message}`)
     } finally {
       setRunningAction(null)
+    }
+  }
+
+  const runManualAutoPilot = async () => {
+    setAutoPilotRunning(true)
+    addLog('info', 'Запуск автопилота вручную...')
+    try {
+      const autoPilot = await window.electronAPI.runAutoPilot()
+      const liveStore = useAppStore.getState()
+      liveStore.setMode(autoPilot.mode)
+      liveStore.setTunRunning(autoPilot.mode === 'hard')
+      if (autoPilot.mode !== 'hard') liveStore.setVpnIp(null)
+      addLog(
+        autoPilot.summary === 'fail' ? 'error' : autoPilot.summary === 'warn' ? 'warn' : 'info',
+        `${autoPilot.title}: ${autoPilot.message}`
+      )
+      if (autoPilot.steps && Array.isArray(autoPilot.steps)) {
+        for (const step of autoPilot.steps) {
+          const stepLevel = step.status === 'fail' ? 'error' : step.status === 'warn' ? 'warn' : 'info'
+          addLog(stepLevel, `Автопилот: ${step.label}${step.after ? ` → ${step.after}` : ''}`)
+        }
+      }
+      const toastVariant = autoPilot.summary === 'fail' ? 'error' : autoPilot.summary === 'warn' ? 'warning' : 'success'
+      useAppStore.getState().addGlobalToast(toastVariant, autoPilot.title, autoPilot.message)
+    } catch (err: any) {
+      addLog('error', `Автопилот не сработал: ${err.message}`)
+      useAppStore.getState().addGlobalToast('error', 'Автопилот', `Ошибка: ${err.message}`)
+    } finally {
+      setAutoPilotRunning(false)
     }
   }
 
@@ -383,6 +413,23 @@ export function Maintenance() {
             Rollback сети
           </MacButton>
         </div>
+
+        {/* AutoPilot manual trigger */}
+        <div className="pt-2 border-t border-[var(--color-card-elevated)]/40">
+          <p className="text-xs text-[var(--color-text-secondary)] mb-2">
+            Автопилот определяет безопасный режим подключения (TUN / внешний прокси / soft mode).
+          </p>
+          <MacButton
+            variant="primary"
+            onClick={runManualAutoPilot}
+            disabled={Boolean(runningAction) || autoPilotRunning}
+            className="w-full flex items-center justify-center gap-2"
+          >
+            {autoPilotRunning ? <Loader2 className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
+            {autoPilotRunning ? 'Автопилот работает...' : 'Запустить автопилот вручную'}
+          </MacButton>
+        </div>
+
         {lastResult && <p className="text-xs text-[var(--color-text-secondary)] break-words">{lastResult}</p>}
         {storeDiagnostics && (
           <div className="space-y-2">

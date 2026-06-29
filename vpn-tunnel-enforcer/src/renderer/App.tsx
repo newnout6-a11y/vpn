@@ -524,8 +524,6 @@ export default function App() {
       if (settings.autoPilotEnabled && settings.connectionMode !== 'directVpn') {
         addLog('info', 'Автопилот маршрута включен: приложение само выберет безопасный режим.')
         useAppStore.getState().addGlobalToast('info', 'Автопилот', 'Подбираем безопасный режим подключения...')
-        // AutoPilot may auto-CONNECT the VPN — don't defer too long or the user
-        // sees a delay before auto-connect starts. Use a short 500ms timeout.
         setTimeout(() => {
           void window.electronAPI.runAutoPilot()
             .then(autoPilot => {
@@ -537,8 +535,22 @@ export default function App() {
                 autoPilot.summary === 'fail' ? 'error' : autoPilot.summary === 'warn' ? 'warn' : 'info',
                 `${autoPilot.title}: ${autoPilot.message}`
               )
+              // Show steps as individual log entries so the user can see
+              // what autopilot decided and did.
+              if (autoPilot.steps && Array.isArray(autoPilot.steps)) {
+                for (const step of autoPilot.steps) {
+                  const stepLevel = step.status === 'fail' ? 'error' : step.status === 'warn' ? 'warn' : 'info'
+                  addLog(stepLevel, `Автопилот: ${step.label}${step.after ? ` → ${step.after}` : ''}`)
+                }
+              }
+              // Show toast with the result
+              const toastVariant = autoPilot.summary === 'fail' ? 'error' : autoPilot.summary === 'warn' ? 'warning' : 'success'
+              useAppStore.getState().addGlobalToast(toastVariant, autoPilot.title, autoPilot.message)
             })
-            .catch((err: any) => addLog('error', `Автопилот маршрута не сработал: ${err.message}`))
+            .catch((err: any) => {
+              addLog('error', `Автопилот маршрута не сработал: ${err.message}`)
+              useAppStore.getState().addGlobalToast('error', 'Автопилот', `Ошибка: ${err.message}`)
+            })
         }, 500)
       } else {
         scheduleIdle(() => {

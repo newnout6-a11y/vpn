@@ -5,6 +5,7 @@ import {
   Server,
   Wifi,
   WifiOff,
+  Activity,
   Plus,
   Trash2,
   Check,
@@ -995,7 +996,7 @@ export function Servers() {
           </div>
           <div className="min-w-0">
             <MacSelect
-              label="Device"
+              label={t('servers.device', 'Устройство')}
               options={CLIENT_DEVICE_OPTIONS}
               value={addClientDevice}
               onChange={(v) => setAddClientDevice((v === 'android' || v === 'ios' || v === 'mac') ? v : 'pc')}
@@ -1674,7 +1675,7 @@ function ServerProfileCard({
             {perRowPing?.loading ? (
               <Loader2 size={12} className="animate-spin" />
             ) : (
-              <Wifi size={12} />
+              <Activity size={12} />
             )}
           </MacButton>
           <MacButton

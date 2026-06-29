@@ -651,8 +651,10 @@ export function Settings() {
 
           <ToggleRow
             icon={<Wand2 className="w-4 h-4 text-[var(--color-accent)]" />}
-            title="Показывать мастер первого запуска"
-            description="Снимите галочку чтобы скрыть мастер. Включите чтобы запустить его снова при следующем открытии."
+            title="Мастер первого запуска"
+            description={settings.firstRunComplete
+              ? 'Мастер пройден. Включите чтобы запустить его снова при следующем открытии.'
+              : 'Мастер будет показан при следующем запуске.'}
             checked={!settings.firstRunComplete}
             onChange={(next) => {
               if (next) {
@@ -807,14 +809,6 @@ export function Settings() {
       )}
 
       <div className="flex flex-wrap gap-3">
-        <button
-          onClick={handleSave}
-          disabled={saving}
-          className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-[var(--radius-sm)] bg-[var(--color-accent)] text-white hover:opacity-90 transition-opacity duration-[var(--transition-fast)] disabled:opacity-50"
-        >
-          {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-          {saved ? 'Сохранено!' : saving ? 'Сохранение...' : 'Сохранить и применить'}
-        </button>
         <button
           onClick={handleOpenLogs}
           disabled={openingLogs}

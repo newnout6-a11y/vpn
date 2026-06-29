@@ -9,7 +9,8 @@ import {
   ArrowDown,
   Clock,
   Activity,
-  FileText
+  FileText,
+  Trash2
 } from 'lucide-react'
 import { MacCard, MacInput, MacButton, MacSelect } from '../design-system'
 import { PageTip } from '../components/PageTip'
@@ -71,6 +72,9 @@ export function Logs() {
   // ─── State ─────────────────────────────────────────────────────────────────
   const [entries, setEntries] = useState<ConnectionLogEntry[]>([])
   const [loading, setLoading] = useState(false)
+  const [clearingLogs, setClearingLogs] = useState(false)
+  const [showRawLogs, setShowRawLogs] = useState(false)
+  const [rawLogs, setRawLogs] = useState<string[]>([])
 
   // Filters
   const [selectedReasons, setSelectedReasons] = useState<DisconnectReason[]>([])
@@ -231,8 +235,33 @@ export function Logs() {
       schedule: t('logs.reasonSchedule'),
       crash: t('logs.reasonCrash')
     }
-    return map[reason] || reason
   }
+
+  const handleClearLogs = async () => {
+    setClearingLogs(true)
+    try {
+      await window.electronAPI.clearAppLog()
+      setEntries([])
+      setStats(null)
+      useAppStore.getState().addGlobalToast('success', 'Логи очищены', 'История подключений удалена')
+    } catch (err: any) {
+      useAppStore.getState().addGlobalToast('error', 'Ошибка', `Не удалось очистить: ${err?.message || err}`)
+    } finally {
+      setClearingLogs(false)
+    }
+  }
+
+  const loadRawLogs = async () => {
+    try {
+      const logs = await window.electronAPI.getFullLogs()
+      if (Array.isArray(logs)) {
+        setRawLogs(logs.map((l: any) => typeof l === 'string' ? l : JSON.stringify(l)))
+      }
+    } catch (err: any) {
+      useAppStore.getState().addGlobalToast('error', 'Ошибка', `Не удалось загрузить логи: ${err?.message || err}`)
+    }
+  }
+
 
   const reasonColor = (reason: DisconnectReason): string => {
     switch (reason) {
@@ -270,6 +299,14 @@ export function Logs() {
           <MacButton variant="secondary" size="sm" onClick={handleExportJson}>
             <FileText size={14} className="mr-1.5" />
             {t('logs.exportJson')}
+          </MacButton>
+          <MacButton variant="ghost" size="sm" onClick={handleClearLogs} loading={clearingLogs}>
+            <Trash2 size={14} className="mr-1.5" />
+            {t('logs.clear', 'Очистить')}
+          </MacButton>
+          <MacButton variant="ghost" size="sm" onClick={() => setShowRawLogs(!showRawLogs)}>
+            <FileText size={14} className="mr-1.5" />
+            {showRawLogs ? 'Скрыть логи' : 'Показать логи'}
           </MacButton>
         </div>
       </div>
@@ -467,6 +504,27 @@ export function Logs() {
           </table>
         </div>
       </MacCard>
+
+      {/* Raw app logs viewer */}
+      {showRawLogs && (
+        <MacCard>
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-semibold text-[var(--color-text)]">Логи приложения</h3>
+            <MacButton variant="ghost" size="sm" onClick={loadRawLogs}>
+              <Activity size={12} className="mr-1" /> Обновить
+            </MacButton>
+          </div>
+          <div className="max-h-96 overflow-y-auto rounded-[var(--radius-sm)] bg-[var(--color-bg)] p-3 font-mono text-xs text-[var(--color-text-secondary)]">
+            {rawLogs.length === 0 ? (
+              <p className="text-[var(--color-text-muted)]">Нажмите «Обновить» для загрузки логов</p>
+            ) : (
+              rawLogs.slice(-200).map((line, i) => (
+                <div key={i} className="whitespace-pre-wrap break-all py-0.5">{line}</div>
+              ))
+            )}
+          </div>
+        </MacCard>
+      )}
     </div>
   )
 }
