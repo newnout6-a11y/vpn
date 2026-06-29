@@ -189,6 +189,59 @@ export function Maintenance() {
     }
   }
 
+  const handleVpnRepair = async (action: string) => {
+    setRunningAction(action)
+    try {
+      let result: any
+      switch (action) {
+        case 'nuclear-reset':
+          addLog('warn', 'Сброс Windows Firewall к настройкам по умолчанию...')
+          result = await window.electronAPI.firewallNuclearReset()
+          break
+        case 'repair-dns':
+          addLog('info', 'Починка DNS физических адаптеров...')
+          result = await window.electronAPI.repairOrphanedDns()
+          break
+        case 'rollback-lockdown':
+          addLog('info', 'Откат блокировки адаптеров (IPv6/DNS)...')
+          result = await window.electronAPI.rollbackAdapterLockdown()
+          break
+        case 'kill-singbox':
+          addLog('info', 'Завершение зависших процессов sing-box...')
+          result = await window.electronAPI.killStaleSingbox()
+          break
+        case 'leak-check':
+          addLog('info', 'Запуск проверки утечек...')
+          result = await window.electronAPI.runLeakCheck()
+          if (result) {
+            useAppStore.getState().setLeakSelfTestResult(result)
+          }
+          break
+        case 'export-zip':
+          addLog('info', 'Экспорт диагностики в ZIP...')
+          result = await window.electronAPI.exportDiagnostics()
+          if (result?.success && result?.path) {
+            useAppStore.getState().addGlobalToast('success', 'Диагностика', `Сохранено: ${result.path}`)
+          }
+          break
+      }
+      if (result?.message) {
+        setLastResult(result.message)
+        addLog(result.success === false ? 'error' : 'info', result.message)
+        if (result.success === false) {
+          useAppStore.getState().addGlobalToast('error', 'Ошибка', result.message)
+        } else if (action !== 'export-zip') {
+          useAppStore.getState().addGlobalToast('success', 'Готово', result.message)
+        }
+      }
+    } catch (err: any) {
+      addLog('error', `VPN repair failed: ${err?.message || err}`)
+      useAppStore.getState().addGlobalToast('error', 'Ошибка', err?.message || String(err))
+    } finally {
+      setRunningAction(null)
+    }
+  }
+
   const runStoreDiagnostics = async () => {
     setRunningAction('store-diagnostics')
     addLog('info', 'Запуск глубокой диагностики Microsoft Store...')
@@ -294,7 +347,7 @@ export function Maintenance() {
     <div className="space-y-6 max-w-4xl">
       <div>
         <h2 className="text-2xl font-bold text-[var(--color-text)]">Починка</h2>
-        <p className="text-sm text-[var(--color-text-secondary)] mt-1">Microsoft Store, регион Windows и системная геолокация</p>
+        <p className="text-sm text-[var(--color-text-secondary)] mt-1">VPN сеть, Microsoft Store, системная геолокация и автопилот</p>
       </div>
 
       <MacCard className="space-y-4">
@@ -359,6 +412,73 @@ export function Maintenance() {
             ))}
           </div>
         )}
+      </MacCard>
+
+      {/* VPN Network Repair */}
+      <MacCard className="space-y-4">
+        <div className="flex items-center gap-2">
+          <Wrench className="w-5 h-5 text-[var(--color-warning)]" />
+          <h3 className="text-sm font-semibold text-[var(--color-text)] uppercase tracking-wider">VPN сеть</h3>
+        </div>
+        <p className="text-xs text-[var(--color-text-secondary)]">
+          Экстренный ремонт: сброс файрвола, починка DNS, откат блокировки адаптеров, завершение зависших процессов.
+        </p>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <MacButton
+            variant="danger"
+            onClick={() => { if (window.confirm('Полностью сбросить Windows Firewall к настройкам по умолчанию? Это удалит ВСЕ правила VPNTE и вернёт файрвол в исходное состояние.')) void handleVpnRepair('nuclear-reset') }}
+            disabled={Boolean(runningAction)}
+            className="flex items-center justify-center gap-2 text-sm"
+          >
+            {runningAction === 'nuclear-reset' ? <Loader2 className="w-4 h-4 animate-spin" /> : <TriangleAlert className="w-4 h-4" />}
+            Сбросить файрвол
+          </MacButton>
+          <MacButton
+            variant="secondary"
+            onClick={() => void handleVpnRepair('repair-dns')}
+            disabled={Boolean(runningAction)}
+            className="flex items-center justify-center gap-2 text-sm"
+          >
+            {runningAction === 'repair-dns' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wrench className="w-4 h-4" />}
+            Починить DNS адаптеров
+          </MacButton>
+          <MacButton
+            variant="secondary"
+            onClick={() => void handleVpnRepair('rollback-lockdown')}
+            disabled={Boolean(runningAction)}
+            className="flex items-center justify-center gap-2 text-sm"
+          >
+            {runningAction === 'rollback-lockdown' ? <Loader2 className="w-4 h-4 animate-spin" /> : <RotateCcw className="w-4 h-4" />}
+            Откатить блокировку адаптеров
+          </MacButton>
+          <MacButton
+            variant="secondary"
+            onClick={() => void handleVpnRepair('kill-singbox')}
+            disabled={Boolean(runningAction)}
+            className="flex items-center justify-center gap-2 text-sm"
+          >
+            {runningAction === 'kill-singbox' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+            Завершить зависший sing-box
+          </MacButton>
+          <MacButton
+            variant="secondary"
+            onClick={() => void handleVpnRepair('leak-check')}
+            disabled={Boolean(runningAction)}
+            className="flex items-center justify-center gap-2 text-sm"
+          >
+            {runningAction === 'leak-check' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Activity className="w-4 h-4" />}
+            Проверить утечки
+          </MacButton>
+          <MacButton
+            variant="secondary"
+            onClick={() => void handleVpnRepair('export-zip')}
+            disabled={Boolean(runningAction)}
+            className="flex items-center justify-center gap-2 text-sm"
+          >
+            {runningAction === 'export-zip' ? <Loader2 className="w-4 h-4 animate-spin" /> : <ExternalLink className="w-4 h-4" />}
+            Экспорт диагностики (ZIP)
+          </MacButton>
+        </div>
       </MacCard>
 
       <MacCard className="space-y-4">

@@ -24,7 +24,9 @@ export interface LocationPrivacyStatus {
 }
 
 function backupDir() {
-  return join(app.getPath('userData'), 'privacy-backups')
+  // Store backups in ProgramData (survives app uninstall) instead of userData
+  // (which is removed on uninstall, making rollback impossible).
+  return join(app.getPath('programData') || 'C:\\ProgramData', 'VPN-Tunnel-Enforcer', 'privacy-backups')
 }
 
 function manifestPath() {
@@ -106,7 +108,12 @@ export async function getLocationPrivacyStatus(): Promise<LocationPrivacyStatus>
 }
 
 export async function applyLocationPrivacy(): Promise<LocationPrivacyStatus> {
-  await createBackup()
+  const manifest = await createBackup()
+  // Validate backup succeeded before modifying — if backup failed, abort.
+  // Without a backup, rollback is impossible and Location stays disabled forever.
+  if (!manifest.hkcuBackup) {
+    throw new Error('Не удалось создать backup. Настройки местоположения не были изменены.')
+  }
   await run(`reg add "${HKCU_LOCATION}" /v Value /t REG_SZ /d Deny /f`)
   await runElevated(
     `reg add "${HKLM_LOCATION}" /v DisableLocation /t REG_DWORD /d 1 /f && ` +

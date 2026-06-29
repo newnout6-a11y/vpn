@@ -1360,6 +1360,33 @@ app.whenReady().then(async () => {
     return folder
   })
 
+  // ─── VPN Network Repair (Maintenance page) ───────────────────────────────
+  handleLogged('network:repair-orphaned-dns', async () => {
+    return repairOrphanedPhysicalAdapterDns('manual maintenance trigger')
+  })
+
+  handleLogged('network:rollback-adapter-lockdown', async () => {
+    return rollbackPhysicalAdapterLockdownIfApplied('manual maintenance trigger')
+  })
+
+  handleLogged('tun:kill-stale-singbox', async () => {
+    // Kill any VPNTE-owned sing-box processes that are still running
+    try {
+      const { exec: execAsync } = await import('child_process')
+      const { promisify } = await import('util')
+      const execP = promisify(execAsync)
+      await execP('taskkill /F /IM vpnte-sing-box.exe /T', { windowsHide: true }).catch(() => undefined)
+      await execP('taskkill /F /IM vpnte-etw-sidecar.exe /T', { windowsHide: true }).catch(() => undefined)
+      return { success: true, message: 'Завершены зависшие процессы sing-box' }
+    } catch (err: any) {
+      return { success: false, message: `Не удалось завершить процессы: ${err?.message || err}` }
+    }
+  })
+
+  handleLogged('diagnostics:run-leak-check', async () => {
+    return runLeakCheck()
+  })
+
   handleLogged('open-log-folder', async () => {
     return openLogFolder()
   })

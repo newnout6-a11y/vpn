@@ -191,6 +191,9 @@ export async function runAutoPilot(): Promise<AutoPilotResult> {
   }
 
   if (settingsStore.get().autoNetworkBaseline) {
+    // Only apply network baseline if the user has it enabled in settings.
+    // The manual trigger from Maintenance already showed a confirmation dialog
+    // in the renderer before calling runAutoPilot, so this is safe.
     const baseline = await applyTunNetworkBaseline()
     changed = true
     steps.push({

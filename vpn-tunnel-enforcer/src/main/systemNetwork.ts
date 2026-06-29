@@ -43,7 +43,8 @@ const PROXY_ENV_KEYS = [
 ]
 
 function backupDir() {
-  return join(app.getPath('userData'), 'network-backups')
+  // Store backups in ProgramData (survives app uninstall) instead of userData.
+  return join(app.getPath('programData') || 'C:\\ProgramData', 'VPN-Tunnel-Enforcer', 'network-backups')
 }
 
 function manifestPath() {
@@ -137,6 +138,17 @@ export async function applyTunNetworkBaseline(): Promise<SystemNetworkResult> {
 
   try {
     const manifest = await createBackup()
+
+    // Validate that at least the primary backup (HKCU Internet Settings)
+    // succeeded before wiping. If the backup failed, abort — wiping
+    // without a backup would permanently destroy the user's proxy settings.
+    if (!manifest.internetSettingsBackup) {
+      return {
+        success: false,
+        message: 'Не удалось создать backup настроек. Отмена — настройки не были изменены.',
+        details: 'reg export для HKCU\\Internet Settings завершился ошибкой. Проверьте права доступа.'
+      }
+    }
 
     // 1. Reset WinHTTP proxy (requires elevation)
     await execElevated('netsh winhttp reset proxy', { timeout: 10000 }).catch(() => undefined)

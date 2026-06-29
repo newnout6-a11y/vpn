@@ -3,6 +3,7 @@ import { exec as execCb } from 'child_process'
 import { mkdir, rename, stat } from 'fs/promises'
 import { join } from 'path'
 import { promisify } from 'util'
+import { execElevated } from './admin'
 
 const exec = promisify(execCb)
 
@@ -70,11 +71,15 @@ export async function runStoreRepair(action: StoreRepairAction): Promise<StoreRe
         return { success: true, message: 'Открыты параметры приложений Windows' }
 
       case 'reset-package': {
-        const { stdout, stderr } = await ps('Get-AppxPackage Microsoft.WindowsStore | Reset-AppxPackage')
+        // Reset-AppxPackage requires elevation — use execElevated
+        const result = await execElevated(
+          `powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-AppxPackage Microsoft.WindowsStore | Reset-AppxPackage"`,
+          { timeout: 60000 }
+        )
         return {
           success: true,
           message: 'Reset-AppxPackage выполнен для Microsoft Store',
-          details: (stdout || stderr || '').trim()
+          details: (result.stdout || result.stderr || '').trim()
         }
       }
 
