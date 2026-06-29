@@ -22,6 +22,13 @@ type DisconnectReason = ConnectionLogEntry['disconnectReason']
 type SortField = 'startedAt' | 'endedAt' | 'profileName' | 'mode' | 'duration' | 'traffic' | 'disconnectReason'
 type SortDirection = 'asc' | 'desc'
 
+interface ParsedLogEntry {
+  ts: string
+  level: string
+  scope: string
+  msg: string
+}
+
 interface AggregatedStats {
   totalTimeMs: number
   totalBytesDown: number
@@ -74,7 +81,8 @@ export function Logs() {
   const [loading, setLoading] = useState(false)
   const [clearingLogs, setClearingLogs] = useState(false)
   const [showRawLogs, setShowRawLogs] = useState(false)
-  const [rawLogs, setRawLogs] = useState<string[]>([])
+  const [rawLogs, setRawLogs] = useState<ParsedLogEntry[]>([])
+  const rendererLogs = useAppStore(s => s.logs)
 
   // Filters
   const [selectedReasons, setSelectedReasons] = useState<DisconnectReason[]>([])
@@ -253,9 +261,32 @@ export function Logs() {
 
   const loadRawLogs = async () => {
     try {
-      const logs = await window.electronAPI.getFullLogs()
-      if (Array.isArray(logs)) {
-        setRawLogs(logs.map((l: any) => typeof l === 'string' ? l : JSON.stringify(l)))
+      const snapshots = await window.electronAPI.getFullLogs()
+      if (Array.isArray(snapshots)) {
+        // Find app.log (current session)
+        const appLog = snapshots.find((s: any) => s.name === 'app.log')
+        if (appLog?.content) {
+          // Parse each JSON line into a readable format
+          const lines = appLog.content.split('\n').filter(Boolean).slice(-300)
+          const parsed: ParsedLogEntry[] = []
+          for (const line of lines) {
+            try {
+              const entry = JSON.parse(line)
+              const ts = entry.ts ? new Date(entry.ts).toLocaleTimeString('ru-RU') : ''
+              const level = entry.level || 'info'
+              const scope = entry.scope || ''
+              const msg = entry.message || ''
+              // Skip IPC debug noise (get-traffic-forensics-status, etc.)
+              if (level === 'debug' && scope === 'ipc') continue
+              if (msg.includes('traffic-forensics-status')) continue
+              parsed.push({ ts, level, scope, msg })
+            } catch {
+              // Non-JSON line (sing-box log, etc.)
+              parsed.push({ ts: '', level: 'info', scope: '', msg: line.slice(0, 200) })
+            }
+          }
+          setRawLogs(parsed)
+        }
       }
     } catch (err: any) {
       useAppStore.getState().addGlobalToast('error', 'Ошибка', `Не удалось загрузить логи: ${err?.message || err}`)
@@ -509,19 +540,55 @@ export function Logs() {
       {showRawLogs && (
         <MacCard>
           <div className="flex items-center justify-between mb-3">
-            <h3 className="text-sm font-semibold text-[var(--color-text)]">Логи приложения</h3>
+            <div className="flex gap-2">
+              <button onClick={loadRawLogs} className="text-xs px-2 py-1 rounded-[var(--radius-sm)] bg-[var(--color-accent)]/10 text-[var(--color-accent)]">
+                Логи main
+              </button>
+              <span className="text-xs text-[var(--color-text-muted)] px-2 py-1">
+                Логи UI ({rendererLogs.length})
+              </span>
+            </div>
             <MacButton variant="ghost" size="sm" onClick={loadRawLogs}>
-              <Activity size={12} className="mr-1" /> Обновить
+              <Activity size={12} className="mr-1" /> Обновить main
             </MacButton>
           </div>
-          <div className="max-h-96 overflow-y-auto rounded-[var(--radius-sm)] bg-[var(--color-bg)] p-3 font-mono text-xs text-[var(--color-text-secondary)]">
+          {/* Main process logs */}
+          <div className="max-h-96 overflow-y-auto rounded-[var(--radius-sm)] bg-[var(--color-bg)] p-3 font-mono text-xs space-y-0.5">
             {rawLogs.length === 0 ? (
-              <p className="text-[var(--color-text-muted)]">Нажмите «Обновить» для загрузки логов</p>
+              <p className="text-[var(--color-text-muted)]">Нажмите «Обновить main» для загрузки</p>
             ) : (
-              rawLogs.slice(-200).map((line, i) => (
-                <div key={i} className="whitespace-pre-wrap break-all py-0.5">{line}</div>
+              rawLogs.map((entry, i) => (
+                <div key={i} className="flex gap-2 py-0.5">
+                  {entry.ts && <span className="text-[var(--color-text-muted)] flex-shrink-0">{entry.ts}</span>}
+                  <span className={`flex-shrink-0 font-semibold ${
+                    entry.level === 'error' ? 'text-[var(--color-danger)]' :
+                    entry.level === 'warn' ? 'text-[var(--color-warning)]' :
+                    'text-[var(--color-text-secondary)]'
+                  }`}>{entry.level}</span>
+                  {entry.scope && <span className="text-[var(--color-accent)] flex-shrink-0">[{entry.scope}]</span>}
+                  <span className="text-[var(--color-text)] break-all">{entry.msg}</span>
+                </div>
               ))
             )}
+          </div>
+          {/* Renderer/UI logs (already in store, human-readable) */}
+          <div className="mt-3 pt-3 border-t border-[var(--color-card-elevated)]/40">
+            <p className="text-xs font-semibold text-[var(--color-text-secondary)] mb-2">UI логи</p>
+            <div className="max-h-48 overflow-y-auto rounded-[var(--radius-sm)] bg-[var(--color-bg)] p-3 font-mono text-xs space-y-0.5">
+              {rendererLogs.slice(-100).map((entry, i) => (
+                <div key={i} className="flex gap-2 py-0.5">
+                  <span className="text-[var(--color-text-muted)] flex-shrink-0">
+                    {new Date(entry.timestamp).toLocaleTimeString('ru-RU')}
+                  </span>
+                  <span className={`flex-shrink-0 font-semibold ${
+                    entry.level === 'error' ? 'text-[var(--color-danger)]' :
+                    entry.level === 'warn' ? 'text-[var(--color-warning)]' :
+                    'text-[var(--color-text-secondary)]'
+                  }`}>{entry.level}</span>
+                  <span className="text-[var(--color-text)] break-all">{entry.message}</span>
+                </div>
+              ))}
+            </div>
           </div>
         </MacCard>
       )}
