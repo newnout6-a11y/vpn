@@ -4,6 +4,7 @@ import { join } from 'path'
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import { execElevated } from './admin'
+import { execElevatedPs, isElevatedPsHelperRunning } from './elevatedPsHelper'
 import { logEvent } from './appLogger'
 import { TUN_ADAPTER_ALIAS, TUN_IPV4_NETWORK_CIDR } from './tunAdapter'
 
@@ -123,6 +124,16 @@ async function ps(script: string, elevated = false, timeout = 30000) {
 
   try {
     if (elevated) {
+      // Use persistent PS helper if available — avoids 300-800ms
+      // powershell.exe startup overhead per call.
+      if (isElevatedPsHelperRunning()) {
+        try {
+          const result = await execElevatedPs(script, timeout)
+          return { stdout: result.stdout, stderr: result.stderr }
+        } catch (err: any) {
+          // PS helper failed — fall back to execElevated
+        }
+      }
       const command = `powershell -NoProfile -ExecutionPolicy Bypass -File ${cmdDoubleQuote(scriptPath)}`
       return execElevated(command, { timeout, maxBuffer: 1024 * 1024 * 4 })
     }

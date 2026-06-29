@@ -34,6 +34,7 @@ import { existsSync } from 'fs'
 import { readFile, writeFile, unlink, rename } from 'fs/promises'
 import { join } from 'path'
 import { execElevated } from './admin'
+import { execElevatedPs, isElevatedPsHelperRunning } from './elevatedPsHelper'
 import { logEvent } from './appLogger'
 import { TUN_ADAPTER_ALIAS, TUN_IPV4_GATEWAY, TUN_IPV4_RESOLVER } from './tunAdapter'
 
@@ -151,6 +152,16 @@ async function runPS(script: string, timeoutMs = 30000): Promise<string> {
     "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;$OutputEncoding=[System.Text.Encoding]::UTF8;$ProgressPreference='SilentlyContinue';"
   const encoded = Buffer.from(utf8Prefix + script, 'utf-16le').toString('base64')
   const cmd = `powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded}`
+  // Use persistent PS helper if available — avoids 300-800ms
+  // powershell.exe startup overhead per call.
+  if (isElevatedPsHelperRunning()) {
+    try {
+      const result = await execElevatedPs(utf8Prefix + script, timeoutMs)
+      return result.stdout
+    } catch {
+      // PS helper failed — fall back to execElevated
+    }
+  }
   const { stdout } = await execElevated(cmd, { timeout: timeoutMs })
   return stdout.toString()
 }
@@ -552,12 +563,25 @@ export async function isPhysicalAdapterLockdownApplied(): Promise<boolean> {
   return (await readManifest()) !== null
 }
 
+let dnsSourcesCache: { value: PhysicalAdapterDnsSource[]; at: number } | null = null
+const DNS_SOURCES_CACHE_MS = 60000
+
 export async function getPhysicalAdapterDnsSources(): Promise<PhysicalAdapterDnsSource[]> {
   if (process.platform !== 'win32') return []
+  // Cache for 60s — adapter DNS sources don't change frequently and the
+  // PowerShell snapshot takes ~1-2s. This is only used for smart-RU split
+  // routing config generation, not for the actual lockdown.
+  if (dnsSourcesCache && Date.now() - dnsSourcesCache.at < DNS_SOURCES_CACHE_MS) {
+    return dnsSourcesCache.value
+  }
   const manifest = await readManifest()
   if (manifest?.adapters?.length) {
-    return summarizeDnsSources(manifest.adapters)
+    const result = summarizeDnsSources(manifest.adapters)
+    dnsSourcesCache = { value: result, at: Date.now() }
+    return result
   }
   const snapshot = await snapshotPhysicalAdapters()
-  return summarizeDnsSources(snapshot)
+  const result = summarizeDnsSources(snapshot)
+  dnsSourcesCache = { value: result, at: Date.now() }
+  return result
 }

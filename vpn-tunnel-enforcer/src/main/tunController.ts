@@ -1946,13 +1946,14 @@ export const tunController = {
     // unless the master switch is on, so gate it.
     const smartRuSplit = settingsStore.get().smartRuSplit === true
     const smartRuMapsDirect = smartRuSplit && settingsStore.get().smartRuMapsDirect === true
-    const smartRuDirectDnsSources = smartRuSplit
-      ? await getPhysicalAdapterDnsSources().catch((err) => {
+    // Kick off DNS sources lookup IN PARALLEL with foreign-tun detection
+    // below — they're independent. Result is consumed by prepareRuntime.
+    const dnsSourcesPromise = smartRuSplit
+      ? getPhysicalAdapterDnsSources().catch((err) => {
         logEvent('warn', 'tun', 'failed to read physical adapter DNS sources for smart-RU', err)
         return [] as PhysicalAdapterDnsSource[]
       })
-      : []
-    const smartRouteRuntimeOpts = { smartRuSplit, smartRuMapsDirect, smartRuDirectDnsSources }
+      : Promise.resolve([] as PhysicalAdapterDnsSource[])
 
     if (mode === 'localProxy' && !proxyAddr) {
       return finishStart({ success: false, error: 'Не указан upstream proxy' })
@@ -2083,12 +2084,15 @@ export const tunController = {
       // Race the TCP probe with the PowerShell owner-process lookup.
       // getProxyOwnerProcesses is a ~1s PowerShell pipeline. Skip it
       // entirely when the kill-switch is OFF — the owner paths are only
-      // used for kill-switch allow rules. This saves ~500-1500ms.
+      // used for kill-switch allow rules. Run them IN PARALLEL via
+      // Promise.all so the PS spawn overlaps with the TCP connect.
       const proxyProbeStarted = phaseStart()
-      const proxyOwnerProcesses = wantKillSwitch
-        ? await getProxyOwnerProcesses(host, port).catch(() => [] as Array<{ name: string; path: string | null }>)
-        : []
-      const proxyAlive = await probeTcp(host, port, 2000)
+      const [proxyOwnerProcesses, proxyAlive] = await Promise.all([
+        wantKillSwitch
+          ? getProxyOwnerProcesses(host, port).catch(() => [] as Array<{ name: string; path: string | null }>)
+          : Promise.resolve([] as Array<{ name: string; path: string | null }>),
+        probeTcp(host, port, 2000)
+      ])
       endPhase('proxy-listen-and-owner-lookup', proxyProbeStarted, {
         proxyAlive,
         ownerProcessCount: proxyOwnerProcesses.length
@@ -2121,6 +2125,11 @@ export const tunController = {
       // Kick off prepareRuntime NOW — it doesn't depend on the validation
       // result. If validate fails we throw away the runtime; that's just a
       // file overwrite on next start, no rollback needed.
+      // Await the DNS sources promise here (it was kicked off ~2s ago in
+      // parallel with foreign-tun detection and adapter lockdown kickoff,
+      // so it's very likely already resolved by now).
+      const smartRuDirectDnsSources = await dnsSourcesPromise
+      const smartRouteRuntimeOpts = { smartRuSplit, smartRuMapsDirect, smartRuDirectDnsSources }
       runtimePromise = timePromise('prepare-runtime', prepareRuntime(
         proxyAddr,
         proxyType,
