@@ -7,6 +7,7 @@ import { MacToast, ToastData } from '../design-system/MacToast'
 import { useAppStore } from '../store'
 import { DiagnosticsCard } from '../components/DiagnosticsCard'
 import { BrowserIpCard } from '../components/BrowserIpCard'
+import { ExternalProxyCard } from '../components/ExternalProxyCard'
 import { ProfileSelectorInline } from '../components/ProfileSelectorInline'
 import { ForeignVpnBanner } from '../components/ForeignVpnBanner'
 import { DashboardSide } from '../components/DashboardSide'
@@ -133,9 +134,10 @@ export function Dashboard() {
   }, [tunRunning, tunStartedAt])
 
   // Fetch country/city for the current public IP via ipapi.co
-  // Only after VPN IP is confirmed — avoids geolocating the user's real IP
+  // Only after VPN IP is confirmed — avoids geolocating the user's real IP.
+  // Skipped entirely when disableGeoLookup is ON (privacy setting).
   useEffect(() => {
-    if (!publicIp || isLeak || !tunRunning || !vpnIp) {
+    if (!publicIp || isLeak || !tunRunning || !vpnIp || settings?.disableGeoLookup) {
       setIpGeo({ country: null, city: null })
       return
     }
@@ -655,6 +657,8 @@ export function Dashboard() {
       )}
 
       <BrowserIpCard />
+
+      <ExternalProxyCard />
 
       {/* Diagnostics */}
 

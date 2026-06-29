@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Activity, CheckCircle2, ExternalLink, Info, Loader2, MapPinOff, RotateCcw, Store, Trash2, TriangleAlert, Wrench } from 'lucide-react'
 import { useAppStore } from '../store'
+import { MacCard, MacButton } from '../design-system'
 
 type RepairAction =
   | 'wsreset'
@@ -224,17 +225,17 @@ export function Maintenance() {
   }
 
   const statusClass = (status: string) => {
-    if (status === 'ok') return 'text-success'
-    if (status === 'warn') return 'text-warning'
-    if (status === 'fail') return 'text-danger'
-    return 'text-gray-400'
+    if (status === 'ok') return 'text-[var(--color-success)]'
+    if (status === 'warn') return 'text-[var(--color-warning)]'
+    if (status === 'fail') return 'text-[var(--color-danger)]'
+    return 'text-[var(--color-text-secondary)]'
   }
 
   const statusIcon = (status: string) => {
-    if (status === 'ok') return <CheckCircle2 className="w-4 h-4 text-success flex-shrink-0" />
-    if (status === 'fail') return <TriangleAlert className="w-4 h-4 text-danger flex-shrink-0" />
-    if (status === 'warn') return <TriangleAlert className="w-4 h-4 text-warning flex-shrink-0" />
-    return <Info className="w-4 h-4 text-gray-400 flex-shrink-0" />
+    if (status === 'ok') return <CheckCircle2 className="w-4 h-4 text-[var(--color-success)] flex-shrink-0" />
+    if (status === 'fail') return <TriangleAlert className="w-4 h-4 text-[var(--color-danger)] flex-shrink-0" />
+    if (status === 'warn') return <TriangleAlert className="w-4 h-4 text-[var(--color-warning)] flex-shrink-0" />
+    return <Info className="w-4 h-4 text-[var(--color-text-secondary)] flex-shrink-0" />
   }
 
   const groupedSystemDiagnostics = systemDiagnostics
@@ -257,15 +258,15 @@ export function Maintenance() {
   return (
     <div className="space-y-6 max-w-4xl">
       <div>
-        <h2 className="text-2xl font-bold text-gray-100">Починка</h2>
-        <p className="text-sm text-gray-400 mt-1">Microsoft Store, регион Windows и системная геолокация</p>
+        <h2 className="text-2xl font-bold text-[var(--color-text)]">Починка</h2>
+        <p className="text-sm text-[var(--color-text-secondary)] mt-1">Microsoft Store, регион Windows и системная геолокация</p>
       </div>
 
-      <div className="card space-y-4">
+      <MacCard className="space-y-4">
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-2">
-            <Activity className="w-5 h-5 text-accent" />
-            <h3 className="text-sm font-semibold text-gray-300 uppercase tracking-wider">Full diagnostics</h3>
+            <Activity className="w-5 h-5 text-[var(--color-accent)]" />
+            <h3 className="text-sm font-semibold text-[var(--color-text)] uppercase tracking-wider">Full diagnostics</h3>
           </div>
           {systemDiagnostics && (
             <span className={`text-xs font-semibold ${statusClass(systemDiagnostics.summary)}`}>
@@ -273,170 +274,178 @@ export function Maintenance() {
             </span>
           )}
         </div>
-        <button
+        <MacButton
+          variant="primary"
           onClick={runSystemDiagnostics}
           disabled={Boolean(runningAction)}
-          className="btn-primary w-full flex items-center justify-center gap-2 disabled:opacity-50"
+          className="w-full flex items-center justify-center gap-2"
         >
           {runningAction === 'system-diagnostics' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Activity className="w-4 h-4" />}
           Run full system diagnostics
-        </button>
+        </MacButton>
         {systemDiagnostics && groupedSystemDiagnostics && (
           <div className="space-y-4">
-            <p className="text-xs text-gray-500">Last run: {new Date(systemDiagnostics.ranAt).toLocaleString()}</p>
+            <p className="text-xs text-[var(--color-text-secondary)]">Last run: {new Date(systemDiagnostics.ranAt).toLocaleString()}</p>
             <div className={`rounded-lg border p-3 space-y-2 ${
-              importantSystemItems.length > 0 ? 'border-warning/30 bg-warning/10' : 'border-success/30 bg-success/10'
+              importantSystemItems.length > 0 ? 'border-[var(--color-warning)]/30 bg-[var(--color-warning)]/10' : 'border-[var(--color-success)]/30 bg-[var(--color-success)]/10'
             }`}>
-              <p className={`text-sm font-semibold ${importantSystemItems.length > 0 ? 'text-warning' : 'text-success'}`}>
+              <p className={`text-sm font-semibold ${importantSystemItems.length > 0 ? 'text-[var(--color-warning)]' : 'text-[var(--color-success)]'}`}>
                 Что важно сейчас
               </p>
               {importantSystemItems.length > 0 ? (
                 importantSystemItems.map(item => (
-                  <div key={item.id} className="text-xs text-gray-300">
+                  <div key={item.id} className="text-xs text-[var(--color-text)]">
                     <span className={`font-semibold ${statusClass(item.status)}`}>{item.label}:</span> {item.value}
-                    {item.details && <p className="text-gray-500 mt-0.5 break-words">{item.details}</p>}
+                    {item.details && <p className="text-[var(--color-text-secondary)] mt-0.5 break-words">{item.details}</p>}
                   </div>
                 ))
               ) : (
-                <p className="text-xs text-gray-300">
+                <p className="text-xs text-[var(--color-text)]">
                   Критичных проблем маршрута не видно. Windows-события и старые логи ниже оставлены для истории, но они не означают, что VPNTE сейчас ломает интернет.
                 </p>
               )}
             </div>
             {Object.entries(groupedSystemDiagnostics).map(([category, items]) => (
               <div key={category} className="space-y-2">
-                <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider">{category}</p>
+                <p className="text-xs font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider">{category}</p>
                 {items.map(item => (
-                  <div key={item.id} className="bg-surface/60 border border-surface-lighter/40 rounded-lg px-3 py-2">
+                  <div key={item.id} className="bg-[var(--color-bg)]/60 border border-[var(--color-card-elevated)]/40 rounded-lg px-3 py-2">
                     <div className="flex items-start justify-between gap-3">
                       <div className="flex items-center gap-2 min-w-0">
                         {statusIcon(item.status)}
-                        <span className="text-sm text-gray-200 break-words">{item.label}</span>
+                        <span className="text-sm text-[var(--color-text)] break-words">{item.label}</span>
                       </div>
                       <span className={`text-xs font-mono text-right break-words max-w-[55%] ${statusClass(item.status)}`}>{item.value}</span>
                     </div>
-                    {item.details && <p className="text-xs text-gray-500 mt-1 break-words font-mono">{item.details}</p>}
+                    {item.details && <p className="text-xs text-[var(--color-text-secondary)] mt-1 break-words font-mono">{item.details}</p>}
                   </div>
                 ))}
               </div>
             ))}
           </div>
         )}
-      </div>
+      </MacCard>
 
-      <div className="card space-y-4">
+      <MacCard className="space-y-4">
         <div className="flex items-center gap-2">
-          <Store className="w-5 h-5 text-accent" />
-          <h3 className="text-sm font-semibold text-gray-300 uppercase tracking-wider">Microsoft Store</h3>
+          <Store className="w-5 h-5 text-[var(--color-accent)]" />
+          <h3 className="text-sm font-semibold text-[var(--color-text)] uppercase tracking-wider">Microsoft Store</h3>
         </div>
-        <button
+        <MacButton
+          variant="secondary"
           onClick={runStoreDiagnostics}
           disabled={Boolean(runningAction)}
-          className="btn-secondary w-full flex items-center justify-center gap-2 disabled:opacity-50"
+          className="w-full flex items-center justify-center gap-2"
         >
           {runningAction === 'store-diagnostics' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Activity className="w-4 h-4" />}
           Глубокая диагностика Store
-        </button>
-        <button
+        </MacButton>
+        <MacButton
+          variant="primary"
           onClick={runQuickStoreFix}
           disabled={Boolean(runningAction)}
-          className="btn-primary w-full flex items-center justify-center gap-2 disabled:opacity-50"
+          className="w-full flex items-center justify-center gap-2"
         >
           {runningAction === 'store-quick' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wrench className="w-4 h-4" />}
           Быстрая починка Store
-        </button>
+        </MacButton>
         <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
           {repairActions.map(({ id, label, icon: Icon, danger, confirm }) => (
-            <button
+            <MacButton
               key={id}
+              variant={danger ? 'danger' : 'secondary'}
               onClick={() => runRepair(id, confirm)}
               disabled={Boolean(runningAction)}
-              className={`${danger ? 'btn-danger' : 'btn-secondary'} flex items-center justify-center gap-2 text-sm disabled:opacity-50`}
+              className="flex items-center justify-center gap-2 text-sm"
             >
               {runningAction === id ? <Loader2 className="w-4 h-4 animate-spin" /> : <Icon className="w-4 h-4" />}
               {label}
-            </button>
+            </MacButton>
           ))}
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          <button
+          <MacButton
+            variant="primary"
             onClick={applyNetworkBaseline}
             disabled={Boolean(runningAction)}
-            className="btn-primary flex items-center justify-center gap-2 disabled:opacity-50"
+            className="flex items-center justify-center gap-2"
           >
             {runningAction === 'network-baseline' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wrench className="w-4 h-4" />}
             Нормализовать сеть для TUN
-          </button>
-          <button
+          </MacButton>
+          <MacButton
+            variant="secondary"
             onClick={rollbackNetworkBaseline}
             disabled={Boolean(runningAction)}
-            className="btn-secondary flex items-center justify-center gap-2 disabled:opacity-50"
+            className="flex items-center justify-center gap-2"
           >
             {runningAction === 'network-rollback' ? <Loader2 className="w-4 h-4 animate-spin" /> : <RotateCcw className="w-4 h-4" />}
             Rollback сети
-          </button>
+          </MacButton>
         </div>
-        {lastResult && <p className="text-xs text-gray-500 break-words">{lastResult}</p>}
+        {lastResult && <p className="text-xs text-[var(--color-text-secondary)] break-words">{lastResult}</p>}
         {storeDiagnostics && (
           <div className="space-y-2">
             <div className="flex items-center justify-between gap-3">
-              <p className="text-xs text-gray-500">Последняя проверка: {new Date(storeDiagnostics.ranAt).toLocaleString()}</p>
+              <p className="text-xs text-[var(--color-text-secondary)]">Последняя проверка: {new Date(storeDiagnostics.ranAt).toLocaleString()}</p>
               <span className={`text-xs font-semibold ${statusClass(storeDiagnostics.summary)}`}>
                 {storeDiagnostics.summary === 'fail' ? 'Есть ошибки' : storeDiagnostics.summary === 'warn' ? 'Есть предупреждения' : 'OK'}
               </span>
             </div>
             {storeDiagnostics.items.map(item => (
-              <div key={item.id} className="bg-surface/60 border border-surface-lighter/40 rounded-lg px-3 py-2">
+              <div key={item.id} className="bg-[var(--color-bg)]/60 border border-[var(--color-card-elevated)]/40 rounded-lg px-3 py-2">
                 <div className="flex items-start justify-between gap-3">
                   <div className="flex items-center gap-2 min-w-0">
                     {statusIcon(item.status)}
-                    <span className="text-sm text-gray-200 break-words">{item.label}</span>
+                    <span className="text-sm text-[var(--color-text)] break-words">{item.label}</span>
                   </div>
                   <span className={`text-xs font-mono text-right break-words max-w-[55%] ${statusClass(item.status)}`}>{item.value}</span>
                 </div>
-                {item.details && <p className="text-xs text-gray-500 mt-1 break-words font-mono">{item.details}</p>}
+                {item.details && <p className="text-xs text-[var(--color-text-secondary)] mt-1 break-words font-mono">{item.details}</p>}
               </div>
             ))}
           </div>
         )}
-      </div>
+      </MacCard>
 
-      <div className="card space-y-4">
+      <MacCard className="space-y-4">
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-2">
-            <MapPinOff className="w-5 h-5 text-warning" />
-            <h3 className="text-sm font-semibold text-gray-300 uppercase tracking-wider">Location privacy</h3>
+            <MapPinOff className="w-5 h-5 text-[var(--color-warning)]" />
+            <h3 className="text-sm font-semibold text-[var(--color-text)] uppercase tracking-wider">Location privacy</h3>
           </div>
-          <span className={`text-sm font-semibold ${privacy?.applied ? 'text-success' : 'text-gray-500'}`}>
+          <span className={`text-sm font-semibold ${privacy?.applied ? 'text-[var(--color-success)]' : 'text-[var(--color-text-secondary)]'}`}>
             {privacy?.applied ? 'Ограничено' : 'Не ограничено'}
           </span>
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          <button
+          <MacButton
+            variant="primary"
             onClick={applyPrivacy}
             disabled={Boolean(runningAction)}
-            className="btn-primary flex items-center justify-center gap-2 disabled:opacity-50"
+            className="flex items-center justify-center gap-2"
           >
             {runningAction === 'privacy-apply' ? <Loader2 className="w-4 h-4 animate-spin" /> : <MapPinOff className="w-4 h-4" />}
             Отключить Location API
-          </button>
-          <button
+          </MacButton>
+          <MacButton
+            variant="secondary"
             onClick={rollbackPrivacy}
             disabled={Boolean(runningAction)}
-            className="btn-secondary flex items-center justify-center gap-2 disabled:opacity-50"
+            className="flex items-center justify-center gap-2"
           >
             {runningAction === 'privacy-rollback' ? <Loader2 className="w-4 h-4 animate-spin" /> : <RotateCcw className="w-4 h-4" />}
             Rollback privacy
-          </button>
+          </MacButton>
         </div>
         {privacy && (
           <div className="space-y-1">
             {privacy.details.map((line, index) => (
-              <p key={index} className="text-xs text-gray-500 font-mono break-words">{line}</p>
+              <p key={index} className="text-xs text-[var(--color-text-secondary)] font-mono break-words">{line}</p>
             ))}
           </div>
         )}
-      </div>
+      </MacCard>
     </div>
   )
 }

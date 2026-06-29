@@ -53,6 +53,10 @@ export interface AppSettings {
   // invasive but reverted on stop, and without it real-world users still see
   // their original ISP IP in some apps.
   strictAdapterLockdown: boolean
+  // Disable IP geolocation lookup. When ON, the app does NOT send the VPN
+  // exit IP to ipapi.co for country/city display. Privacy-conscious users
+  // may prefer this since the third-party service can log the request.
+  disableGeoLookup: boolean
   // Packet-level diagnostics capture. Keeps a rolling OS packet trace while
   // VPN protection is active so exported diagnostics can be inspected down to
   // drops, resets, timings and packet payload boundaries.
@@ -111,6 +115,7 @@ const defaults: AppSettings = {
   directVpnCachedAt: null,
   directVpnCachedProfiles: [],
   checkInterval: 30000,
+  disableGeoLookup: false,
   autoStart: false,
   autoPilotEnabled: true,
   minimizeToTray: true,
@@ -197,6 +202,7 @@ function normalizeSettings(input: Partial<AppSettings> | undefined): AppSettings
     // this line the field was silently dropped on every save/load, so
     // the existing UI toggle had no effect.
     stealthMode: Boolean(merged.stealthMode),
+    disableGeoLookup: Boolean(merged.disableGeoLookup),
     smartRuSplit: Boolean(merged.smartRuSplit),
     smartRuMapsDirect: Boolean(merged.smartRuMapsDirect),
     smartRuRuleSetMode: merged.smartRuRuleSetMode === 'managed' ? 'managed' : 'bundled',

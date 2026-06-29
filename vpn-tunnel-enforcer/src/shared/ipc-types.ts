@@ -196,6 +196,31 @@ export interface RotationConfig {
   nextRotationAt: number | null
 }
 
+/** External proxy status — sing-box mixed-inbound running on a local port */
+export interface ExternalProxyStatus {
+  running: boolean
+  host: string
+  port: number | null
+  proxyUrl: string | null
+  profileId: string | null
+  profileName: string | null
+  country: string | null
+  pid: number | null
+  startedAt: number | null
+}
+
+/** External proxy profile row (picker entry) */
+export interface ExternalProxyProfileRow {
+  id: string
+  name: string
+  country: string | null
+  protocol: string
+  server: string
+  port: number
+  groupId: string | null
+  active: boolean
+}
+
 /** Schedule entry for automated connect/disconnect */
 export interface ScheduleEntry {
   id: string

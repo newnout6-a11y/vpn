@@ -1414,6 +1414,27 @@ app.whenReady().then(async () => {
     return restartTrafficForensicsSession('manual-ui-restart')
   })
 
+  // ─── External Proxy (sing-box mixed-inbound on 127.0.0.1:17990) ──────────────
+  handleLogged('external-proxy:status', async () => {
+    return externalProxy.status()
+  })
+
+  handleLogged('external-proxy:start', async () => {
+    return externalProxy.start({ action: 'start' })
+  })
+
+  handleLogged('external-proxy:stop', async () => {
+    return externalProxy.stop('ui')
+  })
+
+  handleLogged('external-proxy:list', async (_e, country?: string) => {
+    return externalProxy.list(country ?? null)
+  })
+
+  handleLogged('external-proxy:rotate', async () => {
+    return externalProxy.start({ action: 'rotate' })
+  })
+
   // ─── V2 Feature Module Registration ──────────────────────────────────────────
   // Order: infrastructure (settings already loaded above) → i18n/theme → feature services → widgets
 

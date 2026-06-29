@@ -196,6 +196,12 @@ declare global {
       // i18n
       i18nGetLocale: () => Promise<string>
       i18nSetLocale: (locale: string) => Promise<void>
+      // External Proxy
+      externalProxyStatus: () => Promise<import('../shared/ipc-types').ExternalProxyStatus>
+      externalProxyStart: () => Promise<import('../shared/ipc-types').ExternalProxyStatus>
+      externalProxyStop: () => Promise<import('../shared/ipc-types').ExternalProxyStatus>
+      externalProxyList: () => Promise<import('../shared/ipc-types').ExternalProxyProfileRow[]>
+      externalProxyRotate: () => Promise<import('../shared/ipc-types').ExternalProxyStatus>
     }
   }
 }

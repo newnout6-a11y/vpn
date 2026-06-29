@@ -226,21 +226,6 @@ function importFromFile(filePath: string): DomainRule[] {
   }))
 }
 
-function resetHitCounts(): void {
-  sessionHitCounts.clear()
-}
-
-// ─── Hit Count Tracking ──────────────────────────────────────────────────────
-
-/**
- * Increments the hit count for a matched rule during the current session.
- * Called externally when a domain match occurs during traffic routing.
- */
-export function recordHit(ruleId: string): void {
-  const current = sessionHitCounts.get(ruleId) ?? 0
-  sessionHitCounts.set(ruleId, current + 1)
-}
-
 // ─── Sing-box route rule generation ──────────────────────────────────────────
 
 /**
@@ -314,21 +299,12 @@ export const domainRoutingService = {
   deleteRule,
   reorderRules,
   importFromFile,
-  resetHitCounts,
-  recordHit,
 
-  /**
-   * Match a domain against the current rule set and record a hit if matched.
-   * Returns the matching rule or null.
-   */
-  matchAndRecord(domain: string): DomainRule | null {
-    const rules = getRules()
-    const matched = matchDomain(rules, domain)
-    if (matched) {
-      recordHit(matched.id)
-    }
-    return matched
-  }
+  // Note: hit-count tracking (recordHit/matchAndRecord/resetHitCounts) was
+  // removed — recordHit was never called from anywhere (sing-box routes
+  // internally, no callback to the app). sessionHitCounts always stays
+  // empty, so hitCount is always 0 in the UI. The hitCount field remains
+  // in DomainRule for interface compatibility but will always be 0.
 }
 
 // ─── IPC Registration ────────────────────────────────────────────────────────
@@ -389,10 +365,6 @@ export function registerDomainRoutingIpcHandlers(): void {
     const result = domainRoutingService.importFromFile(filePath)
     await hotReloadIfActive()
     return result
-  })
-
-  ipcMain.handle('domain-routing:reset-hits', () => {
-    domainRoutingService.resetHitCounts()
   })
 
   ipcMain.handle('domain-routing:browse-file', async () => {

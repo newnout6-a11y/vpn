@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { ClientDevice } from '../shared/ipc-types'
+import type { ClientDevice, ExternalProxyStatus, ExternalProxyProfileRow } from '../shared/ipc-types'
 
 export interface ElectronAPI {
   detectHapp: () => Promise<any>
@@ -148,7 +148,6 @@ export interface ElectronAPI {
   domainRoutingDelete: (id: string) => Promise<void>
   domainRoutingReorder: (ids: string[]) => Promise<any[]>
   domainRoutingImport: (filePath: string) => Promise<any[]>
-  domainRoutingResetHits: () => Promise<void>
   domainRoutingBrowseFile: () => Promise<string | null>
   // Connection History
   connectionHistoryList: () => Promise<any[]>
@@ -184,6 +183,12 @@ export interface ElectronAPI {
   speedTestRun: () => Promise<any>
   speedTestHistory: () => Promise<any[]>
   onSpeedTestProgress: (callback: (data: { percent: number; phase: string }) => void) => () => void
+  // External Proxy
+  externalProxyStatus: () => Promise<ExternalProxyStatus>
+  externalProxyStart: () => Promise<ExternalProxyStatus>
+  externalProxyStop: () => Promise<ExternalProxyStatus>
+  externalProxyList: () => Promise<ExternalProxyProfileRow[]>
+  externalProxyRotate: () => Promise<ExternalProxyStatus>
   // Event listeners
   onIpChanged: (callback: (data: { ip: string; isLeak: boolean }) => void) => () => void
   onTunStatusChanged: (callback: (status: string) => void) => () => void
@@ -343,7 +348,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   domainRoutingDelete: (id: string) => ipcRenderer.invoke('domain-routing:delete', id),
   domainRoutingReorder: (ids: string[]) => ipcRenderer.invoke('domain-routing:reorder', ids),
   domainRoutingImport: (filePath: string) => ipcRenderer.invoke('domain-routing:import', filePath),
-  domainRoutingResetHits: () => ipcRenderer.invoke('domain-routing:reset-hits'),
   domainRoutingBrowseFile: () => ipcRenderer.invoke('domain-routing:browse-file'),
   // Connection History
   connectionHistoryList: () => ipcRenderer.invoke('connection-history:list'),
@@ -419,6 +423,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('speed-test:progress', handler)
     return () => ipcRenderer.removeListener('speed-test:progress', handler)
   },
+  // External Proxy
+  externalProxyStatus: () => ipcRenderer.invoke('external-proxy:status'),
+  externalProxyStart: () => ipcRenderer.invoke('external-proxy:start'),
+  externalProxyStop: () => ipcRenderer.invoke('external-proxy:stop'),
+  externalProxyList: () => ipcRenderer.invoke('external-proxy:list'),
+  externalProxyRotate: () => ipcRenderer.invoke('external-proxy:rotate'),
   // Event listeners
   onIpChanged: (callback: (data: { ip: string; isLeak: boolean }) => void) => {
     const handler = (_event: any, data: { ip: string; isLeak: boolean }) => callback(data)

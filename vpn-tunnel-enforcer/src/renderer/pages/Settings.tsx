@@ -1,5 +1,5 @@
 import { useAppStore } from '../store'
-import { Bell, EyeOff, FileArchive, FolderOpen, Globe2, Languages, Loader2, MapPin, Network, Palette, RefreshCw, Save, Settings2, ShieldAlert, ShieldCheck, Wand2 } from 'lucide-react'
+import { Bell, Eye, EyeOff, FileArchive, FolderOpen, Globe2, Languages, Loader2, MapPin, Network, Palette, RefreshCw, Save, Settings2, ShieldAlert, ShieldCheck, Wand2 } from 'lucide-react'
 import { ReactNode, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { KillSwitchSettings } from '../components/KillSwitchSettings'
@@ -473,6 +473,14 @@ export function Settings() {
             }
             checked={settings.stealthMode}
             onChange={(next) => updateSettings({ stealthMode: next })}
+          />
+
+          <ToggleRow
+            icon={<Eye className="w-4 h-4 text-[var(--color-warning)]" />}
+            title="Отключить гео-определение IP"
+            description="Не отправлять VPN IP на сторонний сервис (ipapi.co) для определения страны. Включите для максимальной приватности — флаг страны и город показываться не будут."
+            checked={settings.disableGeoLookup}
+            onChange={(next) => updateSettings({ disableGeoLookup: next })}
           />
 
           <ToggleRow

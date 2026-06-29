@@ -17,7 +17,6 @@ import Store from 'electron-store'
 import { randomUUID } from 'crypto'
 import {
   enableKillSwitch,
-  disableKillSwitch,
   disableKillSwitchIfActive,
   isKillSwitchActive
 } from './firewallKillSwitch'

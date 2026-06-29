@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { CheckCircle2, Eye, Globe2, Loader2, RadioTower, RefreshCw, ShieldAlert, TriangleAlert } from 'lucide-react'
 import { useAppStore, type BrowserIpCheck } from '../store'
+import { MacCard, MacButton } from '../design-system'
 
 interface WebRtcCandidate {
   type: string
@@ -202,17 +203,17 @@ function summarize(args: {
 }
 
 function statusClass(status: BrowserIpCheck['summary'] | 'unknown'): string {
-  if (status === 'ok') return 'text-success'
-  if (status === 'warn') return 'text-warning'
-  if (status === 'fail') return 'text-danger'
-  return 'text-gray-400'
+  if (status === 'ok') return 'text-[var(--color-success)]'
+  if (status === 'warn') return 'text-[var(--color-warning)]'
+  if (status === 'fail') return 'text-[var(--color-danger)]'
+  return 'text-[var(--color-text-secondary)]'
 }
 
 function statusIcon(status: BrowserIpCheck['summary'] | 'unknown') {
-  if (status === 'ok') return <CheckCircle2 className="w-4 h-4 text-success" />
-  if (status === 'fail') return <ShieldAlert className="w-4 h-4 text-danger" />
-  if (status === 'warn') return <TriangleAlert className="w-4 h-4 text-warning" />
-  return <Eye className="w-4 h-4 text-gray-400" />
+  if (status === 'ok') return <CheckCircle2 className="w-4 h-4 text-[var(--color-success)]" />
+  if (status === 'fail') return <ShieldAlert className="w-4 h-4 text-[var(--color-danger)]" />
+  if (status === 'warn') return <TriangleAlert className="w-4 h-4 text-[var(--color-warning)]" />
+  return <Eye className="w-4 h-4 text-[var(--color-text-secondary)]" />
 }
 
 export function BrowserIpCard() {
@@ -325,19 +326,19 @@ export function BrowserIpCard() {
           : 'Браузер ещё не проверялся'
 
   return (
-    <div className="card space-y-4">
+    <MacCard className="space-y-4">
       <div className="flex items-center justify-between gap-3">
         <div>
-          <h3 className="text-sm font-semibold text-gray-300 uppercase tracking-wider flex items-center gap-2">
-            <Globe2 className="w-4 h-4 text-accent" />
+          <h3 className="text-sm font-semibold text-[var(--color-text)] uppercase tracking-wider flex items-center gap-2">
+            <Globe2 className="w-4 h-4 text-[var(--color-accent)]" />
             Что видят сайты
           </h3>
           <p className={`text-sm mt-1 ${statusClass(status)}`}>{title}</p>
         </div>
-        <button onClick={() => runCheck(false)} disabled={running} className="btn-secondary flex items-center gap-2 text-sm disabled:opacity-50">
+        <MacButton variant="secondary" onClick={() => runCheck(false)} disabled={running} className="flex items-center gap-2 text-sm">
           {running ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
           Проверить браузер
-        </button>
+        </MacButton>
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
@@ -365,44 +366,44 @@ export function BrowserIpCard() {
       {check && (
         <div className="space-y-1.5">
           {check.details.map((detail, index) => (
-            <div key={index} className="flex items-start gap-2 text-xs text-gray-500">
+            <div key={index} className="flex items-start gap-2 text-xs text-[var(--color-text-secondary)]">
               {statusIcon(index === 0 ? check.summary : 'info')}
               <span className="break-words">{detail}</span>
             </div>
           ))}
-          <p className="text-[10px] text-gray-600 pt-1">Проверено: {new Date(check.ranAt).toLocaleTimeString('ru-RU')}</p>
+          <p className="text-[10px] text-[var(--color-text-muted)] pt-1">Проверено: {new Date(check.ranAt).toLocaleTimeString('ru-RU')}</p>
         </div>
       )}
 
-      <div className={`${browserProtectionAttention ? 'bg-warning/10 border-warning/30' : 'bg-surface/60 border-surface-lighter/40'} border rounded-lg p-3 space-y-2`}>
+      <div className={`${browserProtectionAttention ? 'bg-[var(--color-warning)]/10 border-[var(--color-warning)]/30' : 'bg-[var(--color-bg)]/60 border-[var(--color-card-elevated)]/40'} border rounded-lg p-3 space-y-2`}>
         <div className="flex items-start gap-2">
-          <ShieldAlert className={`w-4 h-4 ${browserProtectionAttention ? 'text-warning' : 'text-accent'} flex-shrink-0 mt-0.5`} />
-          <div className={`text-xs ${browserProtectionAttention ? 'text-warning/90' : 'text-gray-400'}`}>
+          <ShieldAlert className={`w-4 h-4 ${browserProtectionAttention ? 'text-[var(--color-warning)]' : 'text-[var(--color-accent)]'} flex-shrink-0 mt-0.5`} />
+          <div className={`text-xs ${browserProtectionAttention ? 'text-[var(--color-warning)]/90' : 'text-[var(--color-text-secondary)]'}`}>
             <p className="font-semibold">{browserProtectionAttention ? 'Если внешний Яндекс/Chrome всё ещё показывает реальный IP — это WebRTC leak самого браузера.' : 'Защита внешних браузеров от WebRTC leak'}</p>
-            <p className={`${browserProtectionAttention ? 'text-warning/75' : 'text-gray-500'} mt-1`}>Нажмите защиту, закройте все окна браузера и откройте его заново. Backup сохраняется для отката.</p>
+            <p className={`${browserProtectionAttention ? 'text-[var(--color-warning)]/75' : 'text-[var(--color-text-secondary)]'} mt-1`}>Нажмите защиту, закройте все окна браузера и откройте его заново. Backup сохраняется для отката.</p>
           </div>
         </div>
         <div className="flex flex-wrap gap-2">
-          <button onClick={applyHardening} disabled={hardening || rollingBack} className="btn-secondary flex items-center gap-2 text-sm disabled:opacity-50">
+          <MacButton variant="secondary" onClick={applyHardening} disabled={hardening || rollingBack} className="flex items-center gap-2 text-sm">
             {hardening ? <Loader2 className="w-4 h-4 animate-spin" /> : <ShieldAlert className="w-4 h-4" />}
             Защитить браузеры от WebRTC
-          </button>
-          <button onClick={rollbackHardening} disabled={hardening || rollingBack} className="btn-secondary flex items-center gap-2 text-sm disabled:opacity-50">
+          </MacButton>
+          <MacButton variant="secondary" onClick={rollbackHardening} disabled={hardening || rollingBack} className="flex items-center gap-2 text-sm">
             {rollingBack ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
             Откатить
-          </button>
+          </MacButton>
         </div>
-        {hardeningMessage && <p className="text-xs text-gray-400">{hardeningMessage}</p>}
+        {hardeningMessage && <p className="text-xs text-[var(--color-text-secondary)]">{hardeningMessage}</p>}
       </div>
-    </div>
+    </MacCard>
   )
 }
 
 function Metric({ label, value, status, icon }: { label: string; value: string; status: BrowserIpCheck['summary']; icon?: JSX.Element }) {
   return (
-    <div className="bg-surface/60 border border-surface-lighter/40 rounded-lg px-3 py-2">
+    <div className="bg-[var(--color-bg)]/60 border border-[var(--color-card-elevated)]/40 rounded-lg px-3 py-2">
       <div className="flex items-center justify-between gap-3">
-        <span className="text-xs text-gray-500 flex items-center gap-1.5">
+        <span className="text-xs text-[var(--color-text-secondary)] flex items-center gap-1.5">
           {icon}
           {label}
         </span>

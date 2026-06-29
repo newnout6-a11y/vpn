@@ -16,7 +16,7 @@ import { promises as dns } from 'dns'
 import { writeFile } from 'fs/promises'
 import { join } from 'path'
 import { performance } from 'perf_hooks'
-import { exec as execCb, execFile as execFileCb } from 'child_process'
+import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import axios from 'axios'
 import { randomUUID } from 'crypto'
@@ -41,11 +41,6 @@ import {
   refreshGroup as refreshSubscriptionGroup
 } from './serverGroups'
 import type { ClientDevice, ServerProfile } from '../shared/ipc-types'
-
-// Promisified `exec` is used by the ICMP probe (Windows `ping.exe`). We
-// take the buffer form because Russian Windows prints CP866-encoded output
-// and we need the raw bytes for the locale-tolerant decoder below.
-const exec = promisify(execCb)
 
 // `execFile` is what we want for the stealth-curl probe — argv-style
 // invocation avoids any shell-quoting issues with hostnames or query

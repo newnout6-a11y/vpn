@@ -20,7 +20,6 @@ import {
 import {
   applyPhysicalAdapterLockdown,
   getPhysicalAdapterDnsSources,
-  isPhysicalAdapterLockdownApplied,
   repairOrphanedPhysicalAdapterDns,
   rollbackPhysicalAdapterLockdownIfApplied
 } from './physicalAdapterLockdown'
@@ -30,7 +29,7 @@ import {
   type VpnProfile
 } from './vpnProfiles'
 import type { ClientDevice } from '../shared/ipc-types'
-import { TUN_ADAPTER_ALIAS, TUN_IPV4_ADDRESS_CIDR, TUN_IPV4_RESOLVER, TUN_IPV4_PREFIX, TUN_INTERFACE_METRIC, isOwnTunAddress, ALL_KNOWN_ALIASES } from './tunAdapter'
+import { TUN_ADAPTER_ALIAS, TUN_IPV4_ADDRESS_CIDR, TUN_IPV4_RESOLVER, TUN_INTERFACE_METRIC, isOwnTunAddress, ALL_KNOWN_ALIASES } from './tunAdapter'
 import { ipMonitor } from './ipMonitor'
 import { cancelLeakSelfTest } from './leakSelfTest'
 import { startCompetingTunWatch, stopCompetingTunWatch } from './competingTunDetector'
