@@ -2331,11 +2331,15 @@ export const tunController = {
             // also fails we surface that error to the user via finish().
             restartAttempt = 1
           }
-          // sing-box never came up. Tear down the kill-switch we just installed
+          // sing-box never came up. Tear down the kill-switch unconditionally
           // — otherwise the user is locked out of the internet for no reason.
+          // We use disableKillSwitchIfActive (self-checks) instead of gating
+          // on killSwitchEngaged, because the kill-switch may have completed
+          // in the parallel IIFE before this onExit fires, but before
+          // killSwitchEngaged is set in the success path.
           // Skip the teardown when we are about to retry: the next attempt
           // benefits from the rules already being in place.
-          if (killSwitchEngaged && !canRetryPortBind) {
+          if (!canRetryPortBind) {
             disableKillSwitchIfActive('sing-box never started').catch(err =>
               logEvent('warn', 'tun', 'kill-switch disable after start failure failed', err)
             )
@@ -2604,7 +2608,7 @@ export const tunController = {
               mark('lockdown-done')
             } catch {
               // Lockdown failed after sing-box started — kill it and abort.
-              killOwnedRuntimeProcesses()
+              await killOwnedRuntimeProcesses()
               await rollbackEarlyAdapterLockdown('lockdown failed after sing-box started')
               finish({ success: false, error: adapterLockdownWarning || 'Adapter lockdown failed' })
               return

@@ -349,7 +349,7 @@ async function runSpeedTest(): Promise<SpeedTestResult> {
       const testIp = ipResp.data?.ip
       if (testIp) {
         const { ipMonitor } = await import('./ipMonitor')
-        const currentIp = ipMonitor.getCurrentIp()
+        const currentIp = await ipMonitor.getCurrentIp()
         if (currentIp.ip && testIp !== currentIp.ip) {
           logEvent('warn', 'speed-test', 'egress IP mismatch — test may have measured direct connection', {
             testIp, vpnIp: currentIp.ip

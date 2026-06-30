@@ -16,7 +16,7 @@ import { ipcMain, type IpcMainInvokeEvent } from 'electron'
 import Store from 'electron-store'
 import { logEvent } from './appLogger'
 import { notify } from './notifications'
-import { serverPicker, pingServer } from './serverPicker'
+import { serverPicker, smartOfflinePing } from './serverPicker'
 import { settingsStore } from './settings'
 import type { RotationConfig } from '../shared/ipc-types'
 
@@ -150,8 +150,9 @@ async function buildAvailabilityMap(profileIds: string[]): Promise<Record<string
       continue
     }
 
-    // Ping the server
-    const latency = await pingServer(profile.server, profile.port)
+    // Ping the server directly (not through tunnel) — rotation needs
+    // per-server reachability, not tunnel RTT which is the same for all.
+    const latency = await smartOfflinePing(profile.server, profile.port)
     map[id] = latency !== null
   }
 

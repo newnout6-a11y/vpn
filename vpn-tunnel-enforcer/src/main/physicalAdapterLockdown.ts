@@ -279,9 +279,9 @@ async function applyTransitionAdapterLockdown(snapshot: TransitionAdapterSnapsho
   try {
     const out = await runPS(`
 $ErrorActionPreference = 'Continue'
-try { netsh interface teredo set state type=disabled | Out-Null; Write-Host 'teredo:disabled' } catch { Write-Host "teredo:err: $_" }
-try { netsh interface 6to4 set state state=disabled | Out-Null; Write-Host '6to4:disabled' } catch { Write-Host "6to4:err: $_" }
-try { netsh interface isatap set state state=disabled | Out-Null; Write-Host 'isatap:disabled' } catch { Write-Host "isatap:err: $_" }
+try { netsh interface teredo set state type=disabled | Out-Null; Write-Output 'teredo:disabled' } catch { Write-Output "teredo:err: $_" }
+try { netsh interface 6to4 set state state=disabled | Out-Null; Write-Output '6to4:disabled' } catch { Write-Output "6to4:err: $_" }
+try { netsh interface isatap set state state=disabled | Out-Null; Write-Output 'isatap:disabled' } catch { Write-Output "isatap:err: $_" }
 `, 15000)
     for (const line of out.trim().split(/\r?\n/).filter(x => /err/.test(x))) warnings.push(line)
     logEvent('info', 'phys-lockdown', 'transition adapters disabled', { snapshot, out: out.trim() })
@@ -360,21 +360,21 @@ export async function applyPhysicalAdapterLockdown(tunDnsIpv4: string, options: 
   for (let i = 0; i < adapters.length; i++) {
     const a = adapters[i]
     const dnsLine = forceDns
-      ? `try { Set-DnsClientServerAddress -InterfaceAlias ${psSingleQuote(a.alias)} -ServerAddresses ${psSingleQuote(tunDnsIpv4)} -ErrorAction Stop; Write-Host "A${i}_dns:set" } catch { Write-Host "A${i}_dns_err: $_" }`
-      : `Write-Host "A${i}_dns:skip"`
+      ? `try { Set-DnsClientServerAddress -InterfaceAlias ${psSingleQuote(a.alias)} -ServerAddresses ${psSingleQuote(tunDnsIpv4)} -ErrorAction Stop; Write-Output "A${i}_dns:set" } catch { Write-Output "A${i}_dns_err: $_" }`
+      : `Write-Output "A${i}_dns:skip"`
     combinedScript += `
-try { Disable-NetAdapterBinding -InterfaceAlias ${psSingleQuote(a.alias)} -ComponentID ms_tcpip6 -ErrorAction Stop; Write-Host "A${i}_ipv6:off" } catch { Write-Host "A${i}_ipv6_err: $_" }
+try { Disable-NetAdapterBinding -InterfaceAlias ${psSingleQuote(a.alias)} -ComponentID ms_tcpip6 -ErrorAction Stop; Write-Output "A${i}_ipv6:off" } catch { Write-Output "A${i}_ipv6_err: $_" }
 ${dnsLine}
 `
   }
 
   // Also include the transition adapters in the same script
   combinedScript += `
-try { netsh interface teredo set state type=disabled | Out-Null; Write-Host 'TRANS_teredo:disabled' } catch { Write-Host "TRANS_teredo_err: $_" }
-try { netsh interface 6to4 set state state=disabled | Out-Null; Write-Host 'TRANS_6to4:disabled' } catch { Write-Host "TRANS_6to4_err: $_" }
-try { netsh interface isatap set state state=disabled | Out-Null; Write-Host 'TRANS_isatap:disabled' } catch { Write-Host "TRANS_isatap_err: $_" }
-try { reg add "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\DNSClient" /v DisableSmartNameResolution /t REG_DWORD /d 1 /f | Out-Null; Write-Host 'DNS_SMNR:off' } catch { Write-Host "DNS_SMNR_err: $_" }
-try { reg add "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Dnscache\\Parameters" /v DisableParallelAandAAAA /t REG_DWORD /d 1 /f | Out-Null; Write-Host 'DNS_PARALLEL:off' } catch { Write-Host "DNS_PARALLEL_err: $_" }
+try { netsh interface teredo set state type=disabled | Out-Null; Write-Output 'TRANS_teredo:disabled' } catch { Write-Output "TRANS_teredo_err: $_" }
+try { netsh interface 6to4 set state state=disabled | Out-Null; Write-Output 'TRANS_6to4:disabled' } catch { Write-Output "TRANS_6to4_err: $_" }
+try { netsh interface isatap set state state=disabled | Out-Null; Write-Output 'TRANS_isatap:disabled' } catch { Write-Output "TRANS_isatap_err: $_" }
+try { reg add "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\DNSClient" /v DisableSmartNameResolution /t REG_DWORD /d 1 /f | Out-Null; Write-Output 'DNS_SMNR:off' } catch { Write-Output "DNS_SMNR_err: $_" }
+try { reg add "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Dnscache\\Parameters" /v DisableParallelAandAAAA /t REG_DWORD /d 1 /f | Out-Null; Write-Output 'DNS_PARALLEL:off' } catch { Write-Output "DNS_PARALLEL_err: $_" }
 try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}
 `
 
@@ -411,11 +411,18 @@ try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}
   } catch (err: any) {
     warnings.push(`Batch PS error: ${err?.message ?? String(err)}`)
     logEvent('warn', 'phys-lockdown', 'batch lockdown failed', err)
+    // CRITICAL: Do NOT overwrite the pending manifest with unmutated adapters.
+    // The PS script may have partially executed (e.g., adapter 0 got
+    // Disable-NetAdapterBinding before timeout). If we overwrite the manifest
+    // with "nothing changed", rollback will do nothing and the user's IPv6
+    // stays disabled + DNS pinned to dead TUN resolver.
+    // Instead, keep the pending manifest (which assumes all changes were made)
+    // so rollback will attempt to restore everything.
+    return { applied: true, adapters: adapters.length, warnings }
   }
 
-  // Overwrite the pending manifest with the ACTUAL outcome per adapter (some
-  // may have only partially applied). Rollback now restores exactly what was
-  // really changed.
+  // Only overwrite the pending manifest if the PS script completed
+  // successfully — we can trust the parsed markers to reflect actual state.
   const manifest: LockdownManifest = {
     appliedAt: Date.now(),
     tunDnsIpv4,
@@ -445,13 +452,13 @@ export async function rollbackPhysicalAdapterLockdownIfApplied(reason: string, o
     const a = m.adapters[i]
     const shouldTouchDns = Array.isArray(a.forcedDnsTo) && a.forcedDnsTo.length > 0
     const dnsRestoreLine = !shouldTouchDns
-      ? `Write-Host 'A${i}_dns:noop'`
+      ? `Write-Output 'A${i}_dns:noop'`
       : (options.resetDnsToDhcp || a.ipv4DnsServers.length === 0)
-        ? `try { Set-DnsClientServerAddress -InterfaceAlias ${psSingleQuote(a.alias)} -ResetServerAddresses -ErrorAction Stop; Write-Host 'A${i}_dns:reset' } catch { Write-Host "A${i}_dns_err: $_" }`
-        : `try { Set-DnsClientServerAddress -InterfaceAlias ${psSingleQuote(a.alias)} -ServerAddresses ${a.ipv4DnsServers.map(psSingleQuote).join(',')} -ErrorAction Stop; Write-Host 'A${i}_dns:restore' } catch { Write-Host "A${i}_dns_err: $_" }`
+        ? `try { Set-DnsClientServerAddress -InterfaceAlias ${psSingleQuote(a.alias)} -ResetServerAddresses -ErrorAction Stop; Write-Output 'A${i}_dns:reset' } catch { Write-Output "A${i}_dns_err: $_" }`
+        : `try { Set-DnsClientServerAddress -InterfaceAlias ${psSingleQuote(a.alias)} -ServerAddresses ${a.ipv4DnsServers.map(psSingleQuote).join(',')} -ErrorAction Stop; Write-Output 'A${i}_dns:restore' } catch { Write-Output "A${i}_dns_err: $_" }`
     const ipv6RestoreLine = a.forcedIpv6Off && a.ipv6Enabled
-      ? `try { Enable-NetAdapterBinding -InterfaceAlias ${psSingleQuote(a.alias)} -ComponentID ms_tcpip6 -ErrorAction Stop; Write-Host 'A${i}_ipv6:on' } catch { Write-Host "A${i}_ipv6_err: $_" }`
-      : `Write-Host 'A${i}_ipv6:noop'`
+      ? `try { Enable-NetAdapterBinding -InterfaceAlias ${psSingleQuote(a.alias)} -ComponentID ms_tcpip6 -ErrorAction Stop; Write-Output 'A${i}_ipv6:on' } catch { Write-Output "A${i}_ipv6_err: $_" }`
+      : `Write-Output 'A${i}_ipv6:noop'`
     combinedScript += `
 ${ipv6RestoreLine}
 ${dnsRestoreLine}
@@ -463,14 +470,14 @@ ${dnsRestoreLine}
     const sixToFourState = netshState(m.transitionAdapters.sixToFourState)
     const isatapState = netshState(m.transitionAdapters.isatapState)
     combinedScript += `
-try { netsh interface teredo set state type=${teredoType} | Out-Null; Write-Host 'TRANS_teredo:restore' } catch { Write-Host "TRANS_teredo_err: $_" }
-try { netsh interface 6to4 set state state=${sixToFourState} | Out-Null; Write-Host 'TRANS_6to4:restore' } catch { Write-Host "TRANS_6to4_err: $_" }
-try { netsh interface isatap set state state=${isatapState} | Out-Null; Write-Host 'TRANS_isatap:restore' } catch { Write-Host "TRANS_isatap_err: $_" }
+try { netsh interface teredo set state type=${teredoType} | Out-Null; Write-Output 'TRANS_teredo:restore' } catch { Write-Output "TRANS_teredo_err: $_" }
+try { netsh interface 6to4 set state state=${sixToFourState} | Out-Null; Write-Output 'TRANS_6to4:restore' } catch { Write-Output "TRANS_6to4_err: $_" }
+try { netsh interface isatap set state state=${isatapState} | Out-Null; Write-Output 'TRANS_isatap:restore' } catch { Write-Output "TRANS_isatap_err: $_" }
 `
   }
   combinedScript += `
-try { reg delete "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\DNSClient" /v DisableSmartNameResolution /f | Out-Null; Write-Host 'DNS_SMNR:restore' } catch { Write-Host "DNS_SMNR_err: $_" }
-try { reg delete "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Dnscache\\Parameters" /v DisableParallelAandAAAA /f | Out-Null; Write-Host 'DNS_PARALLEL:restore' } catch { Write-Host "DNS_PARALLEL_err: $_" }
+try { reg delete "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\DNSClient" /v DisableSmartNameResolution /f | Out-Null; Write-Output 'DNS_SMNR:restore' } catch { Write-Output "DNS_SMNR_err: $_" }
+try { reg delete "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Dnscache\\Parameters" /v DisableParallelAandAAAA /f | Out-Null; Write-Output 'DNS_PARALLEL:restore' } catch { Write-Output "DNS_PARALLEL_err: $_" }
 try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}`
 
   let rollbackSuccess = true
@@ -523,7 +530,7 @@ $tunUp = Get-NetAdapter -ErrorAction SilentlyContinue |
   Select-Object -First 1
 if ($tunUp) {
   [pscustomobject]@{ skipped = 'tun-up'; adapters = @() } | ConvertTo-Json -Compress
-  exit 0
+  return
 }
 $fixed = @()
 $adapters = Get-NetAdapter |

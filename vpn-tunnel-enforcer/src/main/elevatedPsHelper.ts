@@ -19,6 +19,7 @@ const MAX_RESTARTS = 3
 const PS_RUNNER_SCRIPT = `
 $ErrorActionPreference = 'Continue'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+[Console]::InputEncoding = [System.Text.Encoding]::UTF8
 while ($line = [Console]::In.ReadLine()) {
   if ($line -eq '__EXIT__') { break }
   try {
@@ -27,7 +28,7 @@ while ($line = [Console]::In.ReadLine()) {
     $stderr = [string]::Empty
     $exitCode = 0
     try {
-      $output = Invoke-Expression $cmd.script 2>&1
+      $output = Invoke-Expression $cmd.script *>&1 | Where-Object { $_ -isnot [System.Management.Automation.VerboseRecord] -and $_ -isnot [System.Management.Automation.DebugRecord] }
       $stdout = ($output | Out-String)
     } catch {
       $stderr = $_.Exception.Message

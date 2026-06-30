@@ -311,7 +311,7 @@ try {
     -Program ${psSingleQuote(proxyPaths[i])} \`
     -Profile Any -Enabled True | Out-Null
   $rules += ${psSingleQuote(ruleName)}
-} catch { Write-Host "WARN allow-proxy-${i}: $_" }`)
+} catch { Write-Output "WARN allow-proxy-${i}: $_" }`)
   }
 
   // User-defined IP/CIDR exceptions (from the granular kill-switch UI). These
@@ -332,7 +332,7 @@ try {
     -RemoteAddress ${addressList} \`
     -Profile Any -Enabled True | Out-Null
   $rules += ${psSingleQuote(extraIpAllow)}
-} catch { Write-Host "WARN allow-extra-ip: $_" }`
+} catch { Write-Output "WARN allow-extra-ip: $_" }`
   }
 
   // One atomic elevated PowerShell script: save defaults → add allows → set block.
@@ -363,7 +363,7 @@ try {
     -Program ${psSingleQuote(opts.singboxExePath)} \`
     -Profile Any -Enabled True | Out-Null
   $rules += ${psSingleQuote(singboxAllow)}
-} catch { Write-Host "WARN allow-singbox: $_" }
+} catch { Write-Output "WARN allow-singbox: $_" }
 
 # 3b. Allow proxy owner processes (Happ xray.exe, etc.)
 ${proxyAllowParts.join('\n')}
@@ -392,9 +392,9 @@ if ($tunAliasFound) {
       -InterfaceAlias '${TUN_ADAPTER_ALIAS}' \`
       -Profile Any -Enabled True | Out-Null
     $rules += ${psSingleQuote(tunInterfaceAllow)}
-  } catch { Write-Host "WARN allow-tun-interface: $_" }
+  } catch { Write-Output "WARN allow-tun-interface: $_" }
 } else {
-  Write-Host "WARN allow-tun-interface: adapter not found after 5s"
+  Write-Output "WARN allow-tun-interface: adapter not found after 5s"
 }
 
 # 3d. Allow IPv4 LAN ranges outbound (printers, NAS, router, mDNS).
@@ -406,7 +406,7 @@ try {
     -RemoteAddress ${lanRemoteAddresses} \`
     -Profile Any -Enabled True | Out-Null
   $rules += ${psSingleQuote(lanAllow)}
-} catch { Write-Host "WARN allow-lan: $_" }
+} catch { Write-Output "WARN allow-lan: $_" }
 
 # 3e. Allow TUN subnet (${TUN_IPV4_NETWORK_CIDR}) so sing-box TUN traffic works.
 try {
@@ -417,7 +417,7 @@ try {
     -RemoteAddress '${TUN_IPV4_NETWORK_CIDR}' \`
     -Profile Any -Enabled True | Out-Null
   $rules += ${psSingleQuote(tunAllow)}
-} catch { Write-Host "WARN allow-tun: $_" }
+} catch { Write-Output "WARN allow-tun: $_" }
 
 # 3f. Allow DHCP (UDP 67/68) so Wi-Fi lease renewal works.
 try {
@@ -428,16 +428,23 @@ try {
     -Protocol UDP -RemotePort 67,68 \`
     -Profile Any -Enabled True | Out-Null
   $rules += ${psSingleQuote(dhcpAllow)}
-} catch { Write-Host "WARN allow-dhcp: $_" }
+} catch { Write-Output "WARN allow-dhcp: $_" }
 
 # 3g. Allow user-defined IP/CIDR exceptions (granular kill-switch UI).
 ${extraIpAllowPart}
 
 # --- Step 4: Set DefaultOutboundAction=Block ---
+# Only set Block if at least one Allow rule was created. If all rule
+# creations failed, setting Block would lock the user out of the internet
+# with no Allow rules — a dangerous state with no recovery.
+if ($rules.Count -eq 0) {
+  Write-Output "FATAL: no allow rules created — aborting before Block"
+  throw "No allow rules were created. Aborting to prevent total internet lockdown."
+}
 try {
   Set-NetFirewallProfile -Profile Domain,Private,Public -DefaultOutboundAction Block
 } catch {
-  Write-Host "FATAL set-block: $_"
+  Write-Output "FATAL set-block: $_"
   # Rollback: remove rules we just added
   Get-NetFirewallRule -DisplayName '${RULE_PREFIX}*' -ErrorAction SilentlyContinue |
     Remove-NetFirewallRule -ErrorAction SilentlyContinue
@@ -446,8 +453,8 @@ try {
 
 # Output: JSON with rules + saved profiles
 $rulesCsv = ($rules -join ',')
-Write-Host "RULES:$rulesCsv"
-Write-Host "SAVED:$savedJson"
+Write-Output "RULES:$rulesCsv"
+Write-Output "SAVED:$savedJson"
 `
 
   let installedRules: string[] = []

@@ -280,7 +280,7 @@ export async function tunnelHttpProbe(skipCache = false): Promise<number | null>
  * because the SNI it leaks is `yandex.ru` — a domain no operator can
  * afford to block.)
  */
-async function smartOfflinePing(host: string, port: number): Promise<number | null> {
+export async function smartOfflinePing(host: string, port: number): Promise<number | null> {
   const isLoopback = /^127\./.test(host) || host === '::1' || host === 'localhost'
 
   // Rung order is chosen so the number the user sees reflects REAL endpoint
