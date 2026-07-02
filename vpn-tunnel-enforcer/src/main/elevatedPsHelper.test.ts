@@ -101,4 +101,35 @@ describe('elevated PS helper errors', () => {
       code: 'elevated-helper-script-rejected'
     })
   })
+
+  it('rejects PowerShell call/chaining operators before helper execution', async () => {
+    ;(globalThis as any).__elevatedPsHelperMock = { elevated: true }
+    const { execElevatedPs } = await import('./elevatedPsHelper')
+
+    for (const script of [
+      'Get-NetFirewallRule; & calc.exe',
+      'Get-NetFirewallRule && Get-Process',
+      'Get-NetFirewallRule || Get-Process',
+      'Get-NetFirewallRule | powershell.exe -NoProfile'
+    ]) {
+      await expect(execElevatedPs(script, 5000, 'firewall-killswitch')).rejects.toMatchObject({
+        name: 'ElevatedPsHelperError',
+        code: 'elevated-helper-script-rejected'
+      })
+    }
+  })
+
+  it('still allows the firewall policy to use native PowerShell pipelines', async () => {
+    ;(globalThis as any).__elevatedPsHelperMock = { elevated: false }
+    const { execElevatedPs } = await import('./elevatedPsHelper')
+
+    await expect(execElevatedPs(
+      "Get-NetFirewallRule -DisplayName 'VPNTE*' | Remove-NetFirewallRule -ErrorAction SilentlyContinue",
+      5000,
+      'firewall-killswitch'
+    )).rejects.toMatchObject({
+      name: 'ElevatedPsHelperError',
+      code: 'elevated-helper-unavailable'
+    })
+  })
 })

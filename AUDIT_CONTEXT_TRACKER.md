@@ -109,6 +109,12 @@ npm test -- mainIpcRegression.test.ts traySource.test.ts notificationsReset.test
 
 npm run build
 # passed
+
+npm test -- elevatedPsHelper.test.ts --reporter=dot
+# 1 test file passed, 7 tests passed
+
+npm run build
+# passed
 ```
 
 Known pre-existing full-suite blocker: full `npm test` has an older `src/main/appLoggerRotation.test.ts` timeout/noisy stdout issue.
@@ -782,6 +788,29 @@ Windows-only gap:
 
 Notes:
 - Source-level regression tests are used for Electron tray/App ordering where full runtime UI automation would be heavier than the bug surface.
+```
+
+```text
+2026-07-02 - MEDIUM RE-REVIEW SECURITY BATCH 6 DONE
+Files:
+- vpn-tunnel-enforcer/src/main/elevatedPsHelper.ts
+- vpn-tunnel-enforcer/src/main/elevatedPsHelper.test.ts
+
+Items:
+- S2 DONE: elevated PS helper policy now rejects PowerShell call/chaining operators (`&`, `&&`, `||`) and pipes into external interpreters (`cmd`, `powershell`, `pwsh`, `wscript`, `cscript`, `mshta`) before helper execution.
+- S2 SAFE PIPELINE VERIFIED: native PowerShell pipelines such as `Get-NetFirewallRule | Remove-NetFirewallRule` remain allowed for the firewall policy.
+
+Verification:
+- npm test -- elevatedPsHelper.test.ts --reporter=dot
+- Result: 1 test file passed, 7 tests passed.
+- npm run build
+- Result: passed.
+
+Windows-only gap:
+- Real Windows smoke should verify persistent helper still accepts real firewall and physical-adapter scripts after the additional operator guard.
+
+Notes:
+- The guard intentionally does not block all `|` usage because the app's allowed elevated scripts legitimately use PowerShell pipelines.
 ```
 
 ## Update Template
