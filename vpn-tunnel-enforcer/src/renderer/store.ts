@@ -297,6 +297,8 @@ export interface LeakSelfTestResultClient {
   summary: string
 }
 
+const globalToastTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
 export const useAppStore = create<AppState>((set) => ({
   mode: 'off',
   publicIp: null,
@@ -377,8 +379,13 @@ export const useAppStore = create<AppState>((set) => ({
     restartingProgress: r ? null : state.restartingProgress
   })),
   setTunStartedAt: (ts) => set({ tunStartedAt: ts }),
-  setRestarting: (progress) => set({ restartingProgress: progress }),
-  setConnectionBusy: (busy) => set({ connectionBusy: busy }),
+  setRestarting: (progress) => set((state) => ({
+    restartingProgress: progress,
+    connectionBusy: progress ? (state.connectionBusy ?? 'connecting') : state.connectionBusy
+  })),
+  setConnectionBusy: (busy) => set((state) => ({
+    connectionBusy: busy === null && state.restartingProgress ? (state.connectionBusy ?? 'connecting') : busy
+  })),
   setFirewallKillSwitchActive: (active) => set({ firewallKillSwitchActive: active }),
   setCompetingTun: (name) => set({ competingTun: name }),
   setProxyDown: (v) => set({ proxyDown: v }),
@@ -439,11 +446,28 @@ export const useAppStore = create<AppState>((set) => ({
   addGlobalToast: (variant, title, description) => {
     const id = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
     set((s) => ({
-      globalToasts: [...s.globalToasts, { id, variant, title, description, ts: Date.now() }]
+      globalToasts: [
+        ...s.globalToasts.slice(-19).map((toast) => toast),
+        { id, variant, title, description, ts: Date.now() }
+      ]
     }))
-    setTimeout(() => {
+    for (const [toastId, timer] of globalToastTimers) {
+      const stillVisible = useAppStore.getState().globalToasts.some((toast) => toast.id === toastId)
+      if (!stillVisible) {
+        clearTimeout(timer)
+        globalToastTimers.delete(toastId)
+      }
+    }
+    const timer = setTimeout(() => {
+      globalToastTimers.delete(id)
       set((s) => ({ globalToasts: s.globalToasts.filter(t => t.id !== id) }))
     }, 4000)
+    globalToastTimers.set(id, timer)
   },
-  dismissGlobalToast: (id) => set((s) => ({ globalToasts: s.globalToasts.filter(t => t.id !== id) }))
+  dismissGlobalToast: (id) => {
+    const timer = globalToastTimers.get(id)
+    if (timer) clearTimeout(timer)
+    globalToastTimers.delete(id)
+    set((s) => ({ globalToasts: s.globalToasts.filter(t => t.id !== id) }))
+  }
 }))

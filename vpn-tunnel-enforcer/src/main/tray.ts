@@ -120,9 +120,15 @@ function buildTooltip(): string {
 }
 
 function buildMenu(): Menu {
-  const isActive = trayState.tunRunning || trayState.status === 'proxy-down' || trayState.status === 'protected' || trayState.status === 'leak'
+  const isActive =
+    trayState.tunRunning ||
+    trayState.firewallKillSwitchActive ||
+    trayState.status === 'proxy-down' ||
+    trayState.status === 'protected' ||
+    trayState.status === 'leak' ||
+    trayState.status === 'killswitch'
   const canStart = !isActive && trayState.status !== 'starting' && trayState.status !== 'restarting'
-  const canStop = isActive || trayState.status === 'killswitch' || trayState.status === 'restarting'
+  const canStop = isActive || trayState.status === 'restarting'
   const template: MenuItemConstructorOptions[] = [
     { label: `Статус: ${statusLabel(trayState.status)}`, enabled: false },
     { label: trayState.publicIp ? `IP: ${trayState.publicIp}` : 'IP: неизвестен', enabled: false },

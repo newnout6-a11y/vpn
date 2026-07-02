@@ -25,4 +25,15 @@ describe('main IPC regressions', () => {
     expect(handler).toContain("execFile('taskkill'")
     expect(handler).not.toContain("await import('child_process')")
   })
+
+  it('validates save-settings payload before persisting', () => {
+    const source = mainIndexSource()
+    const handlerStart = source.indexOf("handleLogged('save-settings'")
+    const saveCall = source.indexOf('settingsStore.save(settings)', handlerStart)
+    const validation = source.indexOf("requirePlainObject(settings, 'settings')", handlerStart)
+
+    expect(handlerStart).toBeGreaterThanOrEqual(0)
+    expect(validation).toBeGreaterThan(handlerStart)
+    expect(validation).toBeLessThan(saveCall)
+  })
 })

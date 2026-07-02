@@ -172,9 +172,9 @@ export function invalidateOsNotificationStateCache(): void {
  * We clear values for EVERY known AUMID candidate so old blocks from previous
  * builds (back when Electron auto-generated the AUMID) are also cleared.
  *
- * Implementation note: we use `reg delete ... /va /f` (delete all values)
- * rather than deleting the entire key, so any other settings Windows might
- * have stored under that AUMID node stay intact.
+ * Implementation note: we delete only `Enabled` when it is explicitly `0`.
+ * That clears the block without erasing an explicit allow-state or any other
+ * settings Windows might have stored under that AUMID node.
  *
  * After this, the OS treats us as default-allowed; Windows Settings will
  * repopulate our entry the next time we show a toast.
@@ -190,11 +190,17 @@ export async function resetWindowsNotificationBlock(): Promise<{ cleared: string
   for (const modelId of candidateModelIds()) {
     const regPath = `HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Notifications\\Settings\\${modelId}`
     try {
-      // /va = delete all values; /f = no prompt. Using /va rather than
-      // deleting the whole key preserves any subkeys Windows might have
-      // created under this AUMID (sound overrides, etc.).
+      const { stdout } = await execAsync(
+        `reg query "${regPath}" /v Enabled`,
+        { timeout: 3000, windowsHide: true }
+      )
+      const match = stdout.match(/Enabled\s+REG_DWORD\s+(0x[0-9a-f]+)/i)
+      if (!match || parseInt(match[1], 16) !== 0) continue
+      // Delete only the block value. /va would also erase a current build's
+      // explicit Enabled=1 allow-state and unrelated Windows notification
+      // preferences under the same AUMID.
       await execAsync(
-        `reg delete "${regPath}" /va /f`,
+        `reg delete "${regPath}" /v Enabled /f`,
         { timeout: 5000, windowsHide: true }
       )
       cleared.push(modelId)

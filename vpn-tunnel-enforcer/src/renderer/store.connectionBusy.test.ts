@@ -15,10 +15,11 @@
  *      while tunRunning is still false during a start)
  */
 
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { useAppStore } from './store'
 
 function reset() {
+  useAppStore.setState({ globalToasts: [], restartingProgress: null })
   useAppStore.getState().setConnectionBusy(null)
   useAppStore.getState().setTunRunning(false)
 }
@@ -65,5 +66,36 @@ describe('store.connectionBusy', () => {
     useAppStore.getState().setConnectionBusy('connecting')
     useAppStore.getState().setTunRunning(true)
     expect(useAppStore.getState().connectionBusy).toBe('connecting')
+  })
+
+  it('keeps the UI busy while auto-restart progress is active', () => {
+    useAppStore.getState().setConnectionBusy('connecting')
+    useAppStore.getState().setRestarting('1/3')
+    useAppStore.getState().setConnectionBusy(null)
+
+    expect(useAppStore.getState().connectionBusy).toBe('connecting')
+
+    useAppStore.getState().setRestarting(null)
+    useAppStore.getState().setConnectionBusy(null)
+    expect(useAppStore.getState().connectionBusy).toBeNull()
+  })
+
+  it('caps global toasts and clears dismissed toast timers', () => {
+    vi.useFakeTimers()
+    try {
+      for (let i = 0; i < 25; i++) {
+        useAppStore.getState().addGlobalToast('info', `Toast ${i}`)
+      }
+
+      expect(useAppStore.getState().globalToasts).toHaveLength(20)
+      const id = useAppStore.getState().globalToasts[0].id
+      useAppStore.getState().dismissGlobalToast(id)
+      expect(useAppStore.getState().globalToasts.some((toast) => toast.id === id)).toBe(false)
+
+      vi.advanceTimersByTime(4000)
+      expect(useAppStore.getState().globalToasts).toHaveLength(0)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

@@ -103,6 +103,12 @@ npm test -- splitTunnelProcess.test.ts splitTunneling.test.ts --reporter=dot
 
 npm run build
 # passed
+
+npm test -- mainIpcRegression.test.ts traySource.test.ts notificationsReset.test.ts notificationsGating.test.ts trafficMonitor.test.ts store.connectionBusy.test.ts AppSource.test.ts --reporter=dot
+# 7 test files passed, 24 tests passed
+
+npm run build
+# passed
 ```
 
 Known pre-existing full-suite blocker: full `npm test` has an older `src/main/appLoggerRotation.test.ts` timeout/noisy stdout issue.
@@ -737,6 +743,45 @@ Windows-only gap:
 Notes:
 - The failover source-level regression test intentionally checks cancellation invariants because fully exercising sing-box crash recovery requires a real Windows runtime.
 - splitTunneling.addProcessName is now async; IPC already awaited it and tests were updated.
+```
+
+```text
+2026-07-02 - MEDIUM RE-REVIEW UI/IPC BATCH 5 DONE
+Files:
+- vpn-tunnel-enforcer/src/main/index.ts
+- vpn-tunnel-enforcer/src/main/mainIpcRegression.test.ts
+- vpn-tunnel-enforcer/src/main/tray.ts
+- vpn-tunnel-enforcer/src/main/traySource.test.ts
+- vpn-tunnel-enforcer/src/main/notifications.ts
+- vpn-tunnel-enforcer/src/main/notificationsReset.test.ts
+- vpn-tunnel-enforcer/src/main/trafficMonitor.ts
+- vpn-tunnel-enforcer/src/main/trafficMonitor.test.ts
+- vpn-tunnel-enforcer/src/renderer/App.tsx
+- vpn-tunnel-enforcer/src/renderer/AppSource.test.ts
+- vpn-tunnel-enforcer/src/renderer/store.ts
+- vpn-tunnel-enforcer/src/renderer/store.connectionBusy.test.ts
+
+Items:
+- U-medium save-settings DONE: main-side save-settings now requires a plain object payload before settingsStore.save, covering bypasses around preload validation.
+- U-medium tray DONE: tray active-state now treats firewallKillSwitchActive and killswitch status as active protection, so "Enable protection" is not available while firewall rules are blocking.
+- U-medium notifications DONE: resetWindowsNotificationBlock now deletes only blocked Enabled=0 values and preserves Enabled=1/current AUMID allow-state; it no longer uses /va.
+- U-medium App restarting DONE: renderer applies restartingProgress before busy clear and store refuses to clear connectionBusy while auto-restart progress is active.
+- U-medium detectHapp DONE: periodic Happ re-detection now has exponential backoff on detector errors and resets the backoff after a successful detect call.
+- U-medium store toasts DONE: global toasts are capped at 20 and timers are tracked/cleared when a toast is dismissed or displaced.
+- U-medium trafficMonitor DONE: non-Windows dev fallback publishes running=false/adapterFound=false instead of a misleading running=true no-adapter state.
+
+Verification:
+- npm test -- mainIpcRegression.test.ts traySource.test.ts notificationsReset.test.ts notificationsGating.test.ts trafficMonitor.test.ts store.connectionBusy.test.ts AppSource.test.ts --reporter=dot
+- Result: 7 test files passed, 24 tests passed.
+- npm run build
+- Result: passed.
+
+Windows-only gap:
+- Real Windows smoke should open the tray while kill-switch is active and verify only "Disable protection" is actionable.
+- Real Windows smoke should block/unblock notifications in Windows Settings and confirm reset clears only explicit blocks.
+
+Notes:
+- Source-level regression tests are used for Electron tray/App ordering where full runtime UI automation would be heavier than the bug surface.
 ```
 
 ## Update Template

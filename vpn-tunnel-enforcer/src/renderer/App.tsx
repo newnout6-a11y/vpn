@@ -284,6 +284,8 @@ export default function App() {
   // every time it flips.
   const stoppingNowRef = useRef(false)
   const tunEventSeqRef = useRef(0)
+  const detectHappFailureCountRef = useRef(0)
+  const detectHappNextAllowedAtRef = useRef(0)
 
   // Listen for IPC events
   useEffect(() => {
@@ -358,6 +360,7 @@ export default function App() {
         store.setTunRunning(tunUp)
         store.setProxyDown(status === 'proxy-down')
       }
+      store.setRestarting(isRestarting ? status.slice('restarting:'.length) : null)
       // Self-healing backstop for the global connect/disconnect busy flag.
       // Normally handleConnect/handleStart clears it in their finally (which
       // still runs even after the Dashboard unmounts on a tab switch), but if
@@ -374,7 +377,6 @@ export default function App() {
       if (status === 'stopped' || status === 'killswitch-active') {
         store.resetConnectionState()
       }
-      store.setRestarting(isRestarting ? status.slice('restarting:'.length) : null)
       if (!tunUp && !isRestarting && !isStopping && store.mode === 'hard') store.setMode('off')
       if (status === 'running') {
         addLog('info', 'Защита включена — весь трафик идёт через VPN.')
@@ -664,8 +666,11 @@ export default function App() {
       if (state.restartingProgress !== null) return
       if (state.settings.connectionMode === 'directVpn') return
       if (state.settings.proxyOverride.trim()) return
+      if (Date.now() < detectHappNextAllowedAtRef.current) return
       try {
         const fresh = await window.electronAPI.detectHapp()
+        detectHappFailureCountRef.current = 0
+        detectHappNextAllowedAtRef.current = 0
         if (!fresh) return
         const current = useAppStore.getState().proxy
         const changed =
@@ -678,6 +683,9 @@ export default function App() {
           addLog('info', `Happ переехал — обновили адрес: ${fresh.host}:${fresh.port} (${fresh.type})`)
         }
       } catch {
+        const failures = Math.min(detectHappFailureCountRef.current + 1, 5)
+        detectHappFailureCountRef.current = failures
+        detectHappNextAllowedAtRef.current = Date.now() + Math.min(15 * 60_000, 90_000 * (2 ** failures))
         // Stay quiet: Happ может быть просто выключен.
       }
     }, 90000)

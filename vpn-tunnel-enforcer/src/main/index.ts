@@ -11,7 +11,7 @@ import { classifyNavigation } from './navigationPolicy'
 import { ipMonitor } from './ipMonitor'
 import { autoconfig } from './autoconfig'
 import { createTray, updateTrayState, type TrayStatus } from './tray'
-import { settingsStore } from './settings'
+import { settingsStore, type AppSettings } from './settings'
 import { runLeakCheck } from './leakDiagnostics'
 import { runStoreRepair, type StoreRepairAction } from './storeRepair'
 import { runStoreDiagnostics } from './storeDiagnostics'
@@ -69,6 +69,7 @@ import { registerNotificationPrefsIpcHandlers } from './notificationPrefs'
 import { registerI18nIpcHandlers } from './i18n'
 import { registerThemeIpcHandlers } from './themeManager'
 import { externalProxy } from './externalProxy'
+import { requirePlainObject } from './ipcValidation'
 
 const exec = promisify(execCb)
 const execFile = promisify(execFileCb)
@@ -1158,6 +1159,7 @@ app.whenReady().then(async () => {
   })
 
   handleLogged('save-settings', async (_e, settings) => {
+    settings = requirePlainObject(settings, 'settings') as Partial<AppSettings>
     const previous = settingsStore.get()
     const saved = settingsStore.save(settings)
     ipMonitor.setCheckInterval(saved.checkInterval)

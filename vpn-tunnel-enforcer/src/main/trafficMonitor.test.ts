@@ -106,4 +106,18 @@ describe('trafficMonitor persistent reader', () => {
       vi.useRealTimers()
     }
   })
+
+  it('publishes a neutral non-running fallback on non-Windows dev hosts', () => {
+    const seen: Array<{ running: boolean; adapterFound: boolean }> = []
+    const off = trafficMonitor.onStatsChange((s) =>
+      seen.push({ running: s.running, adapterFound: s.adapterFound })
+    )
+
+    setPlatform('linux')
+    trafficMonitor.start('VPNTE-TUN')
+    off()
+
+    expect(spawnMock).not.toHaveBeenCalled()
+    expect(seen.at(-1)).toEqual({ running: false, adapterFound: false })
+  })
 })

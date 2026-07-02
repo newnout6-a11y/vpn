@@ -64,7 +64,8 @@ let readerProc: ChildProcessWithoutNullStreams | null = null
 let readerStdoutBuf = ''
 let respawnTimer: ReturnType<typeof setTimeout> | null = null
 // Non-Windows dev/test fallback: there is no Get-NetAdapterStatistics, so we
-// just keep publishing "running but adapter not found" on a JS timer.
+// publish a neutral no-adapter state on a JS timer without pretending the TUN
+// interface is running.
 let fallbackTimer: ReturnType<typeof setInterval> | null = null
 let adapterName = TUN_ADAPTER_ALIAS
 let baseCounters: AdapterCounters | null = null
@@ -90,11 +91,11 @@ function publish(stats: TrafficStats) {
   notify(stats)
 }
 
-function publishAdapterNotFound() {
+function publishAdapterNotFound(runningOverride = running) {
   publish({
     ...currentStats,
     ts: Date.now(),
-    running,
+    running: runningOverride,
     adapterName,
     adapterFound: false,
     downloadBps: 0,
@@ -203,12 +204,13 @@ function clearRespawnTimer() {
 }
 
 function spawnReader() {
-  // Dev/test on non-Windows: no Get-NetAdapterStatistics. Keep publishing
-  // "running but adapter not found" so start()/stop() semantics are intact.
+  // Dev/test on non-Windows: no Get-NetAdapterStatistics. Keep publishing a
+  // neutral no-adapter state so dev UIs do not show a false live tunnel.
   if (process.platform !== 'win32') {
     if (!fallbackTimer) {
-      fallbackTimer = setInterval(publishAdapterNotFound, SAMPLE_INTERVAL_MS)
+      fallbackTimer = setInterval(() => publishAdapterNotFound(false), SAMPLE_INTERVAL_MS)
     }
+    publishAdapterNotFound(false)
     return
   }
 
