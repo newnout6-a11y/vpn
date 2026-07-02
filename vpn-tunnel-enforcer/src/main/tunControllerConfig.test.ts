@@ -212,6 +212,14 @@ describe('generateSingboxConfig DNS bootstrap', () => {
     expect(tags).toContain('dns-bootstrap')
   })
 
+  it('resolves remote DNS bootstrap directly to avoid proxy hostname circular dependency', () => {
+    const cfg = gen({ outbound: { ...plainTlsOutbound, server: 'sub.example.com' } })
+    const bootstrapServers = (cfg.dns.servers as any[]).filter((s) => String(s.tag).startsWith('dns-remote-bootstrap'))
+
+    expect(bootstrapServers).toHaveLength(2)
+    expect(bootstrapServers.every((s) => s.detour === 'direct-out')).toBe(true)
+  })
+
   it('omits bootstrap DNS when the endpoint is a bare IP', () => {
     const cfg = gen({ outbound: { ...plainTlsOutbound, server: '1.2.3.4' } })
     const tags = cfg.dns.servers.map((s) => s.tag)

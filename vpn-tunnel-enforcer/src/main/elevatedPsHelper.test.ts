@@ -77,4 +77,28 @@ describe('elevated PS helper errors', () => {
       code: 'elevated-helper-script-rejected'
     })
   })
+
+  it('does not let physical-adapter commands authorize firewall reset payloads', async () => {
+    ;(globalThis as any).__elevatedPsHelperMock = { elevated: true }
+    const { execElevatedPs } = await import('./elevatedPsHelper')
+
+    await expect(
+      execElevatedPs('Get-NetAdapter; netsh advfirewall reset', 5000, 'physical-adapter-lockdown')
+    ).rejects.toMatchObject({
+      name: 'ElevatedPsHelperError',
+      code: 'elevated-helper-script-rejected'
+    })
+  })
+
+  it('does not let firewall commands authorize HKLM Run persistence payloads', async () => {
+    ;(globalThis as any).__elevatedPsHelperMock = { elevated: true }
+    const { execElevatedPs } = await import('./elevatedPsHelper')
+
+    await expect(
+      execElevatedPs('Get-NetFirewallRule; reg add HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Run /v x /d calc.exe /f', 5000, 'firewall-killswitch')
+    ).rejects.toMatchObject({
+      name: 'ElevatedPsHelperError',
+      code: 'elevated-helper-script-rejected'
+    })
+  })
 })

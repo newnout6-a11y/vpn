@@ -4,7 +4,8 @@
  * "RU goes direct" assertion.
  */
 
-import { describe, it, expect, vi } from 'vitest'
+import axios from 'axios'
+import { beforeEach, describe, it, expect, vi } from 'vitest'
 
 // routingSelfTest imports tunController/settings/socks/axios at module load.
 // Stub them so the pure verdict fn can be imported in isolation.
@@ -17,7 +18,11 @@ vi.mock('./tunController', () => ({
 }))
 vi.mock('./settings', () => ({ settingsStore: { get: () => ({ smartRuSplit: false }) } }))
 
-import { deriveRoutingVerdict } from './routingSelfTest'
+import { deriveRoutingVerdict, ruEgressIp } from './routingSelfTest'
+
+beforeEach(() => {
+  vi.mocked(axios.get).mockReset()
+})
 
 describe('deriveRoutingVerdict', () => {
   it('reports tunnel-off when not active', () => {
@@ -64,5 +69,14 @@ describe('deriveRoutingVerdict', () => {
     })
     expect(v.verdict).toBe('partial')
     expect(v.splitWorks).toBe(true)
+  })
+
+  it('measures Smart-RU egress through an RU-domain echo page', async () => {
+    vi.mocked(axios.get).mockResolvedValueOnce({ data: 'Ваш IP: 5.5.5.5' })
+
+    await expect(ruEgressIp()).resolves.toBe('5.5.5.5')
+    expect(axios.get).toHaveBeenCalledWith('https://2ip.ru/', expect.objectContaining({
+      responseType: 'text'
+    }))
   })
 })

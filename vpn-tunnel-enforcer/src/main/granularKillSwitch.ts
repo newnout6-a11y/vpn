@@ -47,6 +47,7 @@ let currentLevel: KillSwitchLevel = store.get('killSwitchLevel', 'off')
 let exceptions: KillSwitchException[] = store.get('killSwitchExceptions', [])
 let vpnConnected = false
 let singboxExePath: string | null = null
+let initialized = false
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -186,6 +187,7 @@ export const granularKillSwitch = {
    */
   init(exePath: string): void {
     singboxExePath = exePath
+    initialized = true
     currentLevel = store.get('killSwitchLevel', 'off')
     exceptions = store.get('killSwitchExceptions', [])
 
@@ -239,6 +241,9 @@ export const granularKillSwitch = {
    * Set the kill-switch level and apply the policy.
    */
   async setLevel(level: KillSwitchLevel): Promise<void> {
+    if (!initialized && level !== 'off') {
+      throw new Error('Cannot enable kill-switch before sing-box path is initialized')
+    }
     const previousLevel = currentLevel
     currentLevel = level
     store.set('killSwitchLevel', level)

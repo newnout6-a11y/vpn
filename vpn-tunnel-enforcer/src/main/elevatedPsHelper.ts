@@ -42,6 +42,7 @@ const BLOCKED_SCRIPT_TOKENS = [
   /\bAdd-Type\b/i,
   /\bSet-ExecutionPolicy\b/i,
   /\bStart-BitsTransfer\b/i,
+  /\bcmd(?:\.exe)?\b/i,
   /\bRemove-Item\b/i,
   /\bdel\b/i,
   /\brm\b/i
@@ -64,6 +65,28 @@ const POLICY_REQUIRED_TOKENS: Record<ElevatedPsPolicy, RegExp[]> = {
     /\bClear-DnsClientCache\b/i,
     /\bnetsh\b/i,
     /\breg\s+add\b/i
+  ]
+}
+
+const POLICY_FORBIDDEN_TOKENS: Record<ElevatedPsPolicy, RegExp[]> = {
+  'firewall-killswitch': [
+    /\bGet-NetAdapter\b/i,
+    /\bGet-NetAdapterBinding\b/i,
+    /\bDisable-NetAdapterBinding\b/i,
+    /\bEnable-NetAdapterBinding\b/i,
+    /\bSet-DnsClientServerAddress\b/i,
+    /\bnetsh\b/i,
+    /\breg\s+add\b/i,
+    /\broute\s+(?:add|change|delete)\b/i
+  ],
+  'physical-adapter-lockdown': [
+    /\bGet-NetFirewallProfile\b/i,
+    /\bSet-NetFirewallProfile\b/i,
+    /\bNew-NetFirewallRule\b/i,
+    /\bRemove-NetFirewallRule\b/i,
+    /\bnetsh\s+advfirewall\b/i,
+    /\breg\s+add\s+(?:HKLM|HKEY_LOCAL_MACHINE)\\.*\\Run\b/i,
+    /\broute\s+(?:add|change|delete)\b/i
   ]
 }
 
@@ -263,6 +286,14 @@ function validateScriptPolicy(script: string, policy: ElevatedPsPolicy): void {
       throw new ElevatedPsHelperError(
         'elevated-helper-script-rejected',
         `PS helper script rejected by ${policy} policy: blocked token ${token.source}`
+      )
+    }
+  }
+  for (const token of POLICY_FORBIDDEN_TOKENS[policy]) {
+    if (token.test(script)) {
+      throw new ElevatedPsHelperError(
+        'elevated-helper-script-rejected',
+        `PS helper script rejected by ${policy} policy: forbidden command ${token.source}`
       )
     }
   }

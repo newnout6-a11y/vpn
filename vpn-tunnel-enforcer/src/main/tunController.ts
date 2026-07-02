@@ -487,8 +487,8 @@ function buildRemoteDnsServers(): Array<Record<string, any>> {
 
 function buildDnsBootstrapServers(): Array<Record<string, any>> {
   return [
-    { type: 'udp', tag: 'dns-remote-bootstrap', server: '1.1.1.1', detour: 'proxy-out' },
-    { type: 'udp', tag: 'dns-remote-bootstrap-backup', server: '8.8.8.8', detour: 'proxy-out' }
+    { type: 'udp', tag: 'dns-remote-bootstrap', server: '1.1.1.1', detour: 'direct-out' },
+    { type: 'udp', tag: 'dns-remote-bootstrap-backup', server: '8.8.8.8', detour: 'direct-out' }
   ]
 }
 
@@ -2902,6 +2902,13 @@ export const tunController = {
       }
     }
     stopInProgress = true
+    let leakMonitorSuspended = false
+    let leakMonitorResumed = false
+    const resumeLeakMonitor = () => {
+      if (!leakMonitorSuspended || leakMonitorResumed) return
+      ipMonitor.resume()
+      leakMonitorResumed = true
+    }
     try {
     // Mark this as a user-initiated stop BEFORE we kill sing-box, so the
     // exit handler doesn't kick off auto-restart. Also clear any pending
@@ -2934,6 +2941,7 @@ export const tunController = {
     // suppression takes effect even if the renderer hasn't received the
     // status event yet (or isn't running, e.g. during shutdown).
     ipMonitor.suspend()
+    leakMonitorSuspended = true
     cancelLeakSelfTest()
     stopCompetingTunWatch()
 
@@ -2977,8 +2985,6 @@ export const tunController = {
     recordForensicTunEvent('tun-stopped', {
       cleanupErrors
     })
-    notify('info', 'Защита выключена', 'Трафик идёт по обычному маршруту.', 'vpnDisconnect')
-    notifyStatus('stopped')
 
     // Every cleanup step is independent. A failed taskkill or baseline rollback
     // must not prevent us from removing firewall/DNS changes; that is exactly how
@@ -3022,16 +3028,19 @@ export const tunController = {
       // exactly when the user most needs it, because teardown already went
       // wrong. Resume here so the periodic monitor can re-evaluate against a
       // fresh baseline.
-      ipMonitor.resume()
+      resumeLeakMonitor()
       return { success: false, error: cleanupErrors.join(' | ') }
     }
 
     // Cleanup finished — let the leak-detector run again. The next tunnel
     // start (or a manual recheck) will set a fresh vpnIp baseline.
-    ipMonitor.resume()
+    resumeLeakMonitor()
+    notify('info', 'Защита выключена', 'Трафик идёт по обычному маршруту.', 'vpnDisconnect')
+    notifyStatus('stopped')
 
     return { success: true }
     } finally {
+      resumeLeakMonitor()
       stopInProgress = false
     }
   },

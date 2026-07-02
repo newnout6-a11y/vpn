@@ -215,7 +215,9 @@ function normalizeSettings(input: Partial<AppSettings> | undefined): AppSettings
   }
 }
 
-function applyLoginItem(autoStart: boolean) {
+let bootRecoveryTaskEnsured = false
+
+function applyLoginItem(autoStart: boolean, options: { ensureBootRecovery?: boolean } = {}) {
   if (process.platform === 'win32' && app.isPackaged) {
     const taskName = 'VPN Tunnel Enforcer'
     const exe = `\\"${process.execPath.replace(/"/g, '\\"')}\\"`
@@ -227,13 +229,16 @@ function applyLoginItem(autoStart: boolean) {
 
     execElevated(command, { timeout: 15000 }).catch(() => undefined)
 
-    // Always register boot-time recovery task (independent of autoStart).
-    // This runs at system startup (before logon) as SYSTEM, restoring
-    // network settings if a BSOD left the firewall blocking / DNS pinned.
-    const recoverScript = join(app.isPackaged ? process.resourcesPath : process.cwd(), 'resources', 'vpnte-recover.ps1')
-    const recoverCmd = `powershell -NoProfile -ExecutionPolicy Bypass -File "${recoverScript}"`
-    const recoverTask = `schtasks /Create /TN "VPNTE Boot Recovery" /SC ONSTART /RU SYSTEM /RP "" /TR "${recoverCmd}" /F`
-    execElevated(recoverTask, { timeout: 15000 }).catch(() => undefined)
+    if (options.ensureBootRecovery && !bootRecoveryTaskEnsured) {
+      bootRecoveryTaskEnsured = true
+      // Register boot-time recovery task once per app process. It is
+      // independent of autoStart and restores network settings if a crash or
+      // BSOD left firewall/DNS state pinned.
+      const recoverScript = join(app.isPackaged ? process.resourcesPath : process.cwd(), 'resources', 'vpnte-recover.ps1')
+      const recoverCmd = `powershell -NoProfile -ExecutionPolicy Bypass -File "${recoverScript}"`
+      const recoverTask = `schtasks /Create /TN "VPNTE Boot Recovery" /SC ONSTART /RU SYSTEM /RP "" /TR "${recoverCmd}" /F`
+      execElevated(recoverTask, { timeout: 15000 }).catch(() => undefined)
+    }
 
     return
   }
@@ -251,20 +256,23 @@ export const settingsStore = {
   },
 
   save(partial: Partial<AppSettings>): AppSettings {
-    const settings = normalizeSettings({ ...normalizeSettings(store.get('settings')), ...partial })
+    const previous = normalizeSettings(store.get('settings'))
+    const settings = normalizeSettings({ ...previous, ...partial })
     store.set('settings', settings)
-    applyLoginItem(settings.autoStart)
+    if (settings.autoStart !== previous.autoStart) {
+      applyLoginItem(settings.autoStart, { ensureBootRecovery: true })
+    }
     return settings
   },
 
   setLoginItem(openAtLogin: boolean): AppSettings {
     const settings = normalizeSettings({ ...normalizeSettings(store.get('settings')), autoStart: openAtLogin })
     store.set('settings', settings)
-    applyLoginItem(settings.autoStart)
+    applyLoginItem(settings.autoStart, { ensureBootRecovery: true })
     return settings
   },
 
   syncLoginItem() {
-    applyLoginItem(this.get().autoStart)
+    applyLoginItem(this.get().autoStart, { ensureBootRecovery: true })
   }
 }

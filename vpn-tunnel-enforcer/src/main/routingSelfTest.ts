@@ -59,6 +59,11 @@ const IP_ECHO_HOSTS = [
   { host: 'ifconfig.me', path: '/ip', port: 80 }
 ]
 
+const RU_IP_ECHO_URLS = [
+  'https://2ip.ru/',
+  'https://yandex.ru/internet/'
+] as const
+
 const IPV4_RE = /\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b/
 
 function extractIpv4(text: string): string | null {
@@ -256,12 +261,20 @@ export async function runRoutingSelfTest(): Promise<RoutingSelfTestResult> {
   return result
 }
 
-/**
- * Egress IP for a request that SHOULD be classified RU-direct. Intentionally
- * returns null until we have a reliable RU-domain IP echo that can be reached
- * through the normal TUN path. A direct SOCKS measurement would be a no-op
- * for Smart-RU and must not be reported as proof.
- */
-async function ruEgressIp(): Promise<string | null> {
+export async function ruEgressIp(): Promise<string | null> {
+  for (const url of RU_IP_ECHO_URLS) {
+    try {
+      const resp = await axios.get(url, {
+        timeout: 8000,
+        responseType: 'text',
+        transformResponse: (d) => d,
+        headers: { Connection: 'close' }
+      })
+      const ip = extractIpv4(String(resp.data))
+      if (ip) return ip
+    } catch {
+      /* try next */
+    }
+  }
   return null
 }

@@ -626,6 +626,42 @@ Notes:
 - The resolveVpnProfiles in-flight guard is option-sensitive so different client-device/HWID fetches do not collapse into one request.
 ```
 
+```text
+2026-07-02 - HIGH RE-REVIEW BATCH 2 DONE
+Files:
+- vpn-tunnel-enforcer/src/main/tunController.ts
+- vpn-tunnel-enforcer/src/main/routingSelfTest.ts
+- vpn-tunnel-enforcer/src/main/granularKillSwitch.ts
+- vpn-tunnel-enforcer/src/main/elevatedPsHelper.ts
+- vpn-tunnel-enforcer/src/main/settings.ts
+- vpn-tunnel-enforcer/src/main/tunControllerConfig.test.ts
+- vpn-tunnel-enforcer/src/main/routingSelfTest.test.ts
+- vpn-tunnel-enforcer/src/main/granularKillSwitchInit.test.ts
+- vpn-tunnel-enforcer/src/main/elevatedPsHelper.test.ts
+- vpn-tunnel-enforcer/src/main/settingsLoginItem.test.ts
+
+Items:
+- N1 DONE: remote DNS bootstrap resolvers now use direct-out, avoiding proxy-out circular dependency when the VPN/proxy endpoint itself is hostname-based.
+- N2 DONE: tunController.stop() no longer emits stopped/desktop disconnect notification before baseline/kill-switch/adapter rollback finishes.
+- N3 DONE: tunController.stop() resumes ipMonitor through a guarded finally path, so teardown exceptions cannot leave leak monitoring suspended forever.
+- N12 DONE: routingSelfTest.ruEgressIp is no longer a dead stub; Smart-RU self-test now probes RU-domain echo pages through the normal TUN path.
+- N14 DONE: granularKillSwitch.setLevel rejects standard/strict before init(singboxExePath), without mutating store/settings first.
+- S1 PARTIAL DONE: elevatedPsHelper now has policy-forbidden command patterns so required tokens cannot authorize cross-policy payloads like netsh advfirewall reset or HKLM Run persistence.
+- U4 DONE: settingsStore.save no longer applies login item / boot-recovery schtask on unrelated settings saves; boot recovery is ensured at most once per app process via sync/login changes.
+- S32 ALREADY DONE BEFORE THIS BATCH: autoconfig/env.ts already uses socks5h:// plus ALL_PROXY for SOCKS5 env-mode proxying.
+- V1/V2 ALREADY DONE BEFORE THIS BATCH: see VPN PROFILES REVIEW BATCH 1 and commit 5c7751e.
+
+Verification:
+- npm test -- tunControllerConfig.test.ts routingSelfTest.test.ts elevatedPsHelper.test.ts granularKillSwitchInit.test.ts settingsLoginItem.test.ts --reporter=dot
+- Result: 5 test files passed, 61 tests passed.
+- npm run build
+- Result: passed.
+
+Windows-only gap:
+- Real Windows smoke should stop a live TUN and verify DNS/firewall rollback completes before UI settles on stopped; verify Boot Recovery task is present once after startup and not recreated on ordinary settings saves.
+- Smart-RU live self-test depends on RU echo pages being reachable from the user's network; if both pages are blocked it will still return partial.
+```
+
 ## Update Template
 
 When finishing a point, update its row and append a short note here:
