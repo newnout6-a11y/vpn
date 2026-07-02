@@ -94,6 +94,15 @@ npm test -- profileRotation.test.ts serverPickerPingPoisoning.test.ts --reporter
 
 npm run build
 # passed
+
+npm test -- tunControllerRecoverySource.test.ts splitTunneling.test.ts splitTunnelProcess.test.ts systemNetwork.test.ts granularKillSwitch.test.ts granularKillSwitchInit.test.ts --reporter=dot
+# 6 test files passed, 26 tests passed
+
+npm test -- splitTunnelProcess.test.ts splitTunneling.test.ts --reporter=dot
+# 2 test files passed, 16 tests passed
+
+npm run build
+# passed
 ```
 
 Known pre-existing full-suite blocker: full `npm test` has an older `src/main/appLoggerRotation.test.ts` timeout/noisy stdout issue.
@@ -687,6 +696,47 @@ Verification:
 Windows-only gap:
 - Real Windows smoke should click the maintenance stale-process cleanup and confirm taskkill argv execution succeeds without shell quoting regressions.
 - Preload validation is covered by unit tests; a renderer smoke should still exercise common flows (settings save, server add, split tunnel rule, DNS edit) to catch any too-strict validator in daily use.
+```
+
+```text
+2026-07-02 - MEDIUM RE-REVIEW NETWORKING/UI BATCH 4 DONE
+Files:
+- vpn-tunnel-enforcer/src/main/tunController.ts
+- vpn-tunnel-enforcer/src/main/tunControllerRecoverySource.test.ts
+- vpn-tunnel-enforcer/src/main/systemNetwork.ts
+- vpn-tunnel-enforcer/src/main/systemNetwork.test.ts
+- vpn-tunnel-enforcer/src/main/granularKillSwitch.ts
+- vpn-tunnel-enforcer/src/main/granularKillSwitch.test.ts
+- vpn-tunnel-enforcer/src/main/splitTunneling.ts
+- vpn-tunnel-enforcer/src/main/splitTunneling.test.ts
+- vpn-tunnel-enforcer/src/main/splitTunnelProcess.test.ts
+
+Items:
+- N4/N5 DONE: WSAEACCES startup retry now uses the shared restartTimer and checks userInitiatedStop/stopInProgress before retrying; post-trial failover captures a stop-cancel generation and exits before health promotion/restart after Stop.
+- N6 DONE: localProxy no longer starts prepareRuntime before validateProxyFullTunnel passes; runtime files are prepared only after validation.
+- N10 DONE: systemNetwork baseline apply/rollback/auto-rollback now run through one module-level queue; manifest temp writes use unique temp paths.
+- N15 VERIFIED: granularKillSwitch.setLevel already awaits firewall installation and rolls back store/settings on install failure.
+- N16 DONE: granular kill-switch notification target now prefers the focused non-destroyed window instead of BrowserWindow.getAllWindows()[0].
+- N18 DONE: split-tunnel registry discovery string-casts DisplayName/Path before JSON output.
+- N19 DONE: split-tunnel store mutations for setRule/addApp/addProcessName/removeApp are serialized through one write queue.
+- N20 DONE: split-tunnel route generation no longer emits redundant vpn->proxy-out rules; vpn/none follow the default proxy-out route.
+- S7 VERIFIED: firewallKillSwitch already requires all core allow rules before DefaultOutboundAction=Block, so partial "any rule exists" success is not present.
+
+Verification:
+- npm test -- tunControllerRecoverySource.test.ts splitTunneling.test.ts splitTunnelProcess.test.ts systemNetwork.test.ts granularKillSwitch.test.ts granularKillSwitchInit.test.ts --reporter=dot
+- Result: 6 test files passed, 26 tests passed.
+- npm test -- splitTunnelProcess.test.ts splitTunneling.test.ts --reporter=dot
+- Result: 2 test files passed, 16 tests passed.
+- npm run build
+- Result: passed.
+
+Windows-only gap:
+- Real Windows smoke should trigger a WSAEACCES/startup retry if possible, press Stop while retry/failover is pending, and verify no delayed reconnect happens.
+- Real Windows smoke should apply/rollback the system-network baseline around an active TUN session and confirm DNS/proxy state remains consistent.
+
+Notes:
+- The failover source-level regression test intentionally checks cancellation invariants because fully exercising sing-box crash recovery requires a real Windows runtime.
+- splitTunneling.addProcessName is now async; IPC already awaited it and tests were updated.
 ```
 
 ## Update Template

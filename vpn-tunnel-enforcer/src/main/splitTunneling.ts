@@ -43,6 +43,22 @@ const store = new Store<SplitTunnelStore>({
   }
 })
 
+let appsWriteQueue: Promise<void> = Promise.resolve()
+
+async function withAppsWriteLock<T>(operation: () => Promise<T> | T): Promise<T> {
+  const previous = appsWriteQueue
+  let release!: () => void
+  appsWriteQueue = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  await previous.catch(() => undefined)
+  try {
+    return await operation()
+  } finally {
+    release()
+  }
+}
+
 // ─── App Discovery ───────────────────────────────────────────────────────────
 
 /**
@@ -112,11 +128,11 @@ Get-ChildItem $basePath -ErrorAction SilentlyContinue | ForEach-Object {
       if($icon -match '\\.exe$'){$exe=$icon}
     }
     if($exe -and (Test-Path $exe -ErrorAction SilentlyContinue)){
-      $results+=[pscustomobject]@{Name=$props.DisplayName;Path=$exe}
+      $results+=[pscustomobject]@{Name=[string]$props.DisplayName;Path=[string]$exe}
     }
   }
 }
-$results | ConvertTo-Json -Compress
+$results | ConvertTo-Json -Compress -Depth 3
 `
 
   const { stdout } = await execFile(
@@ -171,43 +187,47 @@ function getConfig(): SplitTunnelConfig {
   }
 }
 
-function setRule(appId: string, rule: 'vpn' | 'direct' | 'none'): void {
-  const apps = getApps()
-  const index = apps.findIndex((a) => a.id === appId)
-  if (index === -1) {
-    logEvent('warn', 'split-tunnel', `setRule: app not found`, { appId, rule })
-    return
-  }
-  apps[index] = { ...apps[index], rule }
-  saveApps(apps)
-  logEvent('info', 'split-tunnel', `rule set`, { appId, name: apps[index].name, rule })
+async function setRule(appId: string, rule: 'vpn' | 'direct' | 'none'): Promise<void> {
+  await withAppsWriteLock(() => {
+    const apps = getApps()
+    const index = apps.findIndex((a) => a.id === appId)
+    if (index === -1) {
+      logEvent('warn', 'split-tunnel', `setRule: app not found`, { appId, rule })
+      return
+    }
+    apps[index] = { ...apps[index], rule }
+    saveApps(apps)
+    logEvent('info', 'split-tunnel', `rule set`, { appId, name: apps[index].name, rule })
+  })
 }
 
 async function addApp(exePath: string): Promise<SplitTunnelApp> {
   // Validate the path exists
   await access(exePath)
 
-  const name = basename(exePath, extname(exePath))
-  const app: SplitTunnelApp = {
-    id: randomUUID(),
-    name,
-    path: exePath,
-    icon: null,
-    rule: 'none',
-    kind: 'app'
-  }
+  return withAppsWriteLock(() => {
+    const name = basename(exePath, extname(exePath))
+    const app: SplitTunnelApp = {
+      id: randomUUID(),
+      name,
+      path: exePath,
+      icon: null,
+      rule: 'none',
+      kind: 'app'
+    }
 
-  const apps = getApps()
-  // Check for duplicate path
-  const existing = apps.find((a) => a.path.toLowerCase() === exePath.toLowerCase())
-  if (existing) {
-    return existing
-  }
+    const apps = getApps()
+    // Check for duplicate path
+    const existing = apps.find((a) => a.path.toLowerCase() === exePath.toLowerCase())
+    if (existing) {
+      return existing
+    }
 
-  apps.push(app)
-  saveApps(apps)
-  logEvent('info', 'split-tunnel', `app added`, { id: app.id, name: app.name, path: app.path })
-  return app
+    apps.push(app)
+    saveApps(apps)
+    logEvent('info', 'split-tunnel', `app added`, { id: app.id, name: app.name, path: app.path })
+    return app
+  })
 }
 
 /**
@@ -248,47 +268,51 @@ export function normalizeProcessName(input: string): string | null {
  * PATH or invoked transiently from a terminal. The entry is created already
  * set to 'direct' because that's the only reason to add a command by name.
  */
-export function addProcessName(rawName: string): SplitTunnelApp {
+export async function addProcessName(rawName: string): Promise<SplitTunnelApp> {
   const proc = normalizeProcessName(rawName)
   if (!proc) {
     throw new Error('Некорректное имя процесса. Пример: curl.exe или yt-dlp')
   }
-  const apps = getApps()
-  // De-dupe by process name (case-insensitive — already lower-cased).
-  const existing = apps.find(
-    (a) => a.kind === 'process' && a.path.toLowerCase() === proc
-  )
-  if (existing) {
-    // Make sure it's actually bypassing — a previous 'none' would be a no-op.
-    if (existing.rule !== 'direct') {
-      setRule(existing.id, 'direct')
-      return { ...existing, rule: 'direct' }
+  return withAppsWriteLock(() => {
+    const apps = getApps()
+    const existing = apps.find(
+      (a) => a.kind === 'process' && a.path.toLowerCase() === proc
+    )
+    if (existing) {
+      if (existing.rule !== 'direct') {
+        const index = apps.findIndex((a) => a.id === existing.id)
+        apps[index] = { ...existing, rule: 'direct' }
+        saveApps(apps)
+        return { ...existing, rule: 'direct' }
+      }
+      return existing
     }
-    return existing
-  }
-  const entry: SplitTunnelApp = {
-    id: randomUUID(),
-    name: proc,
-    path: proc,
-    icon: null,
-    rule: 'direct',
-    kind: 'process'
-  }
-  apps.push(entry)
-  saveApps(apps)
-  logEvent('info', 'split-tunnel', 'process-name bypass added', { name: proc })
-  return entry
+    const entry: SplitTunnelApp = {
+      id: randomUUID(),
+      name: proc,
+      path: proc,
+      icon: null,
+      rule: 'direct',
+      kind: 'process'
+    }
+    apps.push(entry)
+    saveApps(apps)
+    logEvent('info', 'split-tunnel', 'process-name bypass added', { name: proc })
+    return entry
+  })
 }
 
-function removeApp(appId: string): void {
-  const apps = getApps()
-  const filtered = apps.filter((a) => a.id !== appId)
-  if (filtered.length === apps.length) {
-    logEvent('warn', 'split-tunnel', `removeApp: app not found`, { appId })
-    return
-  }
-  saveApps(filtered)
-  logEvent('info', 'split-tunnel', `app removed`, { appId })
+async function removeApp(appId: string): Promise<void> {
+  await withAppsWriteLock(() => {
+    const apps = getApps()
+    const filtered = apps.filter((a) => a.id !== appId)
+    if (filtered.length === apps.length) {
+      logEvent('warn', 'split-tunnel', `removeApp: app not found`, { appId })
+      return
+    }
+    saveApps(filtered)
+    logEvent('info', 'split-tunnel', `app removed`, { appId })
+  })
 }
 
 // ─── Sing-box Route Rule Generation ─────────────────────────────────────────
@@ -297,8 +321,7 @@ function removeApp(appId: string): void {
  * Generates sing-box route rules for split tunnel configuration.
  *
  * - Apps with 'direct' rule → route through 'direct-out' (bypass VPN)
- * - Apps with 'vpn' rule → route through 'proxy-out' (force through VPN)
- * - Apps with 'none' → no special rule (follow default routing, which is proxy-out)
+ * - Apps with 'vpn' / 'none' -> no special rule (follow default proxy-out)
  *
  * Returns an array of sing-box route rule objects to be inserted into the config.
  */
@@ -314,23 +337,10 @@ export function generateSplitTunnelRouteRules(): Array<Record<string, any>> {
     .map((a) => normalizeProcessName(a.path))
     .filter((name): name is string => Boolean(name))
 
-  // Collect process names for explicit VPN routing
-  const vpnProcessNames = apps
-    .filter((a) => a.rule === 'vpn')
-    .map((a) => normalizeProcessName(a.path))
-    .filter((name): name is string => Boolean(name))
-
   if (directProcessNames.length > 0) {
     rules.push({
       process_name: directProcessNames,
       outbound: 'direct-out'
-    })
-  }
-
-  if (vpnProcessNames.length > 0) {
-    rules.push({
-      process_name: vpnProcessNames,
-      outbound: 'proxy-out'
     })
   }
 
@@ -452,7 +462,7 @@ export function registerSplitTunnelHandlers(): void {
   handleLogged('split-tunnel:set-rule', async (_event, appId: string, rule: 'vpn' | 'direct' | 'none') => {
     appId = requireString(appId, 'appId', { maxLength: 200 })
     rule = requireEnum(rule, 'rule', ['vpn', 'direct', 'none'])
-    setRule(appId, rule)
+    await setRule(appId, rule)
     // Hot-reload if TUN is active
     await hotReloadIfActive()
   })
@@ -481,14 +491,14 @@ export function registerSplitTunnelHandlers(): void {
   // the bypass takes effect without a manual reconnect.
   handleLogged('split-tunnel:add-process', async (_event, rawName: string) => {
     rawName = requireString(rawName, 'rawName', { maxLength: 260 })
-    const entry = addProcessName(rawName)
+    const entry = await addProcessName(rawName)
     await hotReloadIfActive()
     return entry
   })
 
   handleLogged('split-tunnel:remove-app', async (_event, appId: string) => {
     appId = requireString(appId, 'appId', { maxLength: 200 })
-    removeApp(appId)
+    await removeApp(appId)
     // Hot-reload if TUN is active (in case removed app had a rule)
     await hotReloadIfActive()
   })

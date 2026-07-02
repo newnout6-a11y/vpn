@@ -85,8 +85,8 @@ describe('addProcessName', () => {
     storeData = { splitTunnelApps: [], splitTunnelEnabled: true }
   })
 
-  it('adds a command entry already routed direct, kind=process', () => {
-    const entry = addProcessName('curl')
+  it('adds a command entry already routed direct, kind=process', async () => {
+    const entry = await addProcessName('curl')
     expect(entry.kind).toBe('process')
     expect(entry.rule).toBe('direct')
     expect(entry.path).toBe('curl.exe')
@@ -94,29 +94,29 @@ describe('addProcessName', () => {
     expect(storeData.splitTunnelApps).toHaveLength(1)
   })
 
-  it('makes the new command show up in getDirectProcessNames', () => {
-    addProcessName('yt-dlp')
+  it('makes the new command show up in getDirectProcessNames', async () => {
+    await addProcessName('yt-dlp')
     expect(getDirectProcessNames()).toContain('yt-dlp.exe')
   })
 
-  it('de-dupes case-insensitively without adding a second entry', () => {
-    const first = addProcessName('curl.exe')
-    const second = addProcessName('CURL.EXE')
+  it('de-dupes case-insensitively without adding a second entry', async () => {
+    const first = await addProcessName('curl.exe')
+    const second = await addProcessName('CURL.EXE')
     expect(second.id).toBe(first.id)
     expect(storeData.splitTunnelApps).toHaveLength(1)
   })
 
-  it('re-arms an existing entry that was set to none back to direct', () => {
-    addProcessName('git')
+  it('re-arms an existing entry that was set to none back to direct', async () => {
+    await addProcessName('git')
     // Simulate the user having toggled it off.
     storeData.splitTunnelApps[0].rule = 'none'
-    const again = addProcessName('git')
+    const again = await addProcessName('git')
     expect(again.rule).toBe('direct')
     expect(storeData.splitTunnelApps[0].rule).toBe('direct')
   })
 
-  it('throws on invalid input', () => {
-    expect(() => addProcessName('')).toThrow()
-    expect(() => addProcessName('bad name')).toThrow()
+  it('throws on invalid input', async () => {
+    await expect(addProcessName('')).rejects.toThrow()
+    await expect(addProcessName('bad name')).rejects.toThrow()
   })
 })

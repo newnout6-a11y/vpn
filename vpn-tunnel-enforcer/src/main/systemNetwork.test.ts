@@ -106,4 +106,16 @@ describe('systemNetwork baseline manifest', () => {
     ]))
     expect(result.details).toContain('warnings:')
   })
+
+  it('serializes concurrent baseline applications without sharing a temp manifest path', async () => {
+    ;(globalThis as any).__systemNetworkMock = { failRegExport: false }
+    const { applyTunNetworkBaseline } = await import('./systemNetwork')
+
+    const results = await Promise.all([
+      applyTunNetworkBaseline(),
+      applyTunNetworkBaseline()
+    ])
+
+    expect(results.every((result) => result.success)).toBe(true)
+  })
 })

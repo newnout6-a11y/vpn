@@ -47,7 +47,8 @@ import {
   generateSplitTunnelRouteRules,
   getDirectProcessNames,
   getVpnProcessNames,
-  normalizeProcessName
+  normalizeProcessName,
+  splitTunneling
 } from './splitTunneling'
 
 describe('splitTunneling', () => {
@@ -73,15 +74,23 @@ describe('splitTunneling', () => {
   })
 
   describe('process name normalization', () => {
-    it('appends .exe for bare command entries and uses normalized names in rules', () => {
+    it('appends .exe for bare command entries and uses normalized names in rules', async () => {
       expect(normalizeProcessName('curl')).toBe('curl.exe')
-      const entry = addProcessName('yt-dlp')
+      const entry = await addProcessName('yt-dlp')
 
       expect(entry.path).toBe('yt-dlp.exe')
       expect(getDirectProcessNames()).toContain('yt-dlp.exe')
       expect(generateSplitTunnelRouteRules()).toEqual([
         { process_name: ['yt-dlp.exe'], outbound: 'direct-out' }
       ])
+    })
+
+    it('does not emit redundant proxy-out rules for vpn entries', async () => {
+      const entry = await addProcessName('curl')
+      await splitTunneling.setRule(entry.id, 'vpn')
+
+      expect(getVpnProcessNames()).toEqual(['curl.exe'])
+      expect(generateSplitTunnelRouteRules().some((rule) => rule.outbound === 'proxy-out')).toBe(false)
     })
   })
 })

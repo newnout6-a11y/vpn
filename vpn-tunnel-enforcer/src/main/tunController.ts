@@ -216,6 +216,7 @@ let lastStartOptions: StartOptions | null = null
 let restartAttempt = 0
 let restartTimer: ReturnType<typeof setTimeout> | null = null
 let stableTimer: ReturnType<typeof setTimeout> | null = null
+let recoveryCancelGeneration = 0
 // Set to true while inside `stop()` (and right after `start()` returns failure)
 // so the onExit handler doesn't kick off a recovery loop.
 let userInitiatedStop = false
@@ -1725,6 +1726,8 @@ export async function attemptPostTrialFailover(): Promise<{ tried: number; succe
     return { tried: 0, succeeded: false }
   }
   postTrialFailoverInProgress = true
+  const generation = recoveryCancelGeneration
+  const cancelled = () => userInitiatedStop || stopInProgress || generation !== recoveryCancelGeneration
   try {
     // Lazy-import the health checker via dynamic ESM `import()` so the
     // bundler still resolves it (unlike `require()` which electron-vite
@@ -1785,6 +1788,10 @@ export async function attemptPostTrialFailover(): Promise<{ tried: number; succe
 
     let tried = 0
     for (const candidate of candidates) {
+      if (cancelled()) {
+        logEvent('info', 'tun', 'post-trial failover cancelled')
+        return { tried, succeeded: false }
+      }
       tried += 1
       let result: { online: boolean; latencyMs: number | null; reason?: string }
       try {
@@ -1794,6 +1801,10 @@ export async function attemptPostTrialFailover(): Promise<{ tried: number; succe
         continue
       }
       if (!result.online) continue
+      if (cancelled()) {
+        logEvent('info', 'tun', 'post-trial failover cancelled before promotion')
+        return { tried, succeeded: false }
+      }
 
       // Promote the candidate to active BEFORE we restart so the next
       // start() picks it up via lastStartOptions / the renderer state.
@@ -1823,6 +1834,10 @@ export async function attemptPostTrialFailover(): Promise<{ tried: number; succe
       // from the last successful start so the user doesn't have to re-tick
       // kill-switch / lockdown / stealth mode toggles.
       try {
+        if (cancelled()) {
+          logEvent('info', 'tun', 'post-trial failover cancelled before restart')
+          return { tried, succeeded: false }
+        }
         const settings: any = settingsStore.get()
         const outbound = candidate.outbound && typeof candidate.outbound === 'object' ? candidate.outbound : null
         if (!outbound) {
@@ -2073,11 +2088,9 @@ export const tunController = {
 
     let proxyOwnerProcessNames: string[] = [...splitTunnelDirectNames]
     let proxyOwnerProgramPaths: string[] = []
-    // We want prepareRuntime to start as soon as we know the proxy is alive
-    // (or, in directVpn mode, immediately) so its file IO + sing-box check
-    // can overlap with the rest of the start sequence. We declare it here
-    // so both branches below can populate it; the await happens after the
-    // stale-cleanup gate.
+    // directVpn can prepare runtime immediately. localProxy waits until the
+    // full-tunnel validation passes, so a bad upstream cannot write a broken
+    // runtime config before we reject the start.
     let runtimePromise: Promise<{ singbox: string; config: string }> | null = null
     // Await DNS sources before branching into mode-specific logic — both
     // localProxy and directVpn paths need smartRouteRuntimeOpts.
@@ -2137,21 +2150,7 @@ export const tunController = {
         })
       }
 
-      // Kick off prepareRuntime NOW — it doesn't depend on the validation
-      // result. If validate fails we throw away the runtime; that's just a
-      // file overwrite on next start, no rollback needed.
-      runtimePromise = timePromise('prepare-runtime', prepareRuntime(
-        proxyAddr,
-        proxyType,
-        proxyOwnerProcessNames,
-        {
-          stealthMode: startOptions.stealthMode === true,
-          publicWifiCompatibility,
-          ...smartRouteRuntimeOpts
-        }
-      ), { mode })
-
-      // Now do the slower full-tunnel check in parallel with prepareRuntime.
+      // Run the slower full-tunnel check before preparing runtime files.
       const proxyFullTunnel = await timeAsync(
         'proxy-full-tunnel-check',
         () => validateProxyFullTunnel(host, port, proxyType),
@@ -2159,10 +2158,6 @@ export const tunController = {
       )
       logEvent(proxyFullTunnel.ok ? 'info' : 'error', 'tun', 'upstream proxy full-tunnel check', proxyFullTunnel)
       if (!proxyFullTunnel.ok) {
-        // Make sure the eagerly-started prepareRuntime doesn't reject in the
-        // background as an unhandled rejection. Its result is harmless
-        // (overwrites a file in userData/tun-runtime) so we just swallow it.
-        runtimePromise.catch(() => undefined)
         await rollbackEarlyAdapterLockdown('proxy full-tunnel check failed after adapter lockdown')
         return finishStart({ success: false, error: proxyFullTunnel.message || 'Upstream proxy не прошёл проверку полного туннеля' })
       }
@@ -2229,11 +2224,10 @@ export const tunController = {
       }
     })
 
-    // prepareRuntime was kicked off as soon as we knew the tunnel was viable.
-    // Wait for it now and run the sing-box config check in parallel with the
-    // stale-cleanup that's still in flight above. If prepareRuntime didn't
-    // start (defensive — directVpn without a profile is rejected above),
-    // fall back to the original sequential path.
+    // Wait for runtime preparation now and run the sing-box config check in
+    // parallel with the stale-cleanup that's still in flight above. localProxy
+    // starts preparation here, after validation; directVpn usually started it
+    // earlier.
     let runtime: { singbox: string; config: string }
     try {
       if (!runtimePromise) {
@@ -2386,7 +2380,12 @@ export const tunController = {
             // Schedule the retry on next tick so the current start() call
             // unwinds cleanly (startInProgress cleared, callbacks fired) before
             // we kick off another full attempt.
-            setTimeout(() => {
+            restartTimer = setTimeout(() => {
+              restartTimer = null
+              if (userInitiatedStop || stopInProgress) {
+                logEvent('info', 'tun', 'WSAEACCES retry cancelled by stop')
+                return
+              }
               tunController.start(retryOpts).then((res) => {
                 if (!res.success) {
                   logEvent('error', 'tun', 'WSAEACCES retry failed', { error: res.error })
@@ -2914,6 +2913,7 @@ export const tunController = {
     // exit handler doesn't kick off auto-restart. Also clear any pending
     // restart timer from a previous crash so we don't fight ourselves.
     userInitiatedStop = true
+    recoveryCancelGeneration += 1
     recordForensicTunEvent('tun-stop-requested', {
       wasRunning: currentStatus.running,
       mode: currentStatus.mode ?? null,

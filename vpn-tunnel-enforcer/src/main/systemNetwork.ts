@@ -43,6 +43,22 @@ const PROXY_ENV_KEYS = [
   'no_proxy'
 ]
 
+let baselineOpQueue: Promise<void> = Promise.resolve()
+
+async function withBaselineOpLock<T>(operation: () => Promise<T>): Promise<T> {
+  const previous = baselineOpQueue
+  let release!: () => void
+  baselineOpQueue = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  await previous.catch(() => undefined)
+  try {
+    return await operation()
+  } finally {
+    release()
+  }
+}
+
 function backupDir() {
   // Store backups in ProgramData (survives app uninstall) instead of userData.
   return join(app.getPath('programData') || 'C:\\ProgramData', 'VPN-Tunnel-Enforcer', 'network-backups')
@@ -103,7 +119,7 @@ async function createBackup(): Promise<NetworkBackupManifest> {
     environmentBackup: await exportKey(USER_ENVIRONMENT, join(backupDir(), `hkcu-environment-${stamp}.reg`)),
     hklmConnectionsBackup: await exportKey(HKLM_CONNECTIONS, join(backupDir(), `hklm-connections-${stamp}.reg`), true)
   }
-  const tmpPath = manifestPath() + '.tmp'
+  const tmpPath = `${manifestPath()}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`
   await writeFile(tmpPath, JSON.stringify(manifest, null, 2), 'utf-8')
   await rename(tmpPath, manifestPath())
   return manifest
@@ -141,6 +157,10 @@ $null=$type::InternetSetOption([IntPtr]::Zero, 37, [IntPtr]::Zero, 0)
 }
 
 export async function applyTunNetworkBaseline(): Promise<SystemNetworkResult> {
+  return withBaselineOpLock(applyTunNetworkBaselineUnlocked)
+}
+
+async function applyTunNetworkBaselineUnlocked(): Promise<SystemNetworkResult> {
   if (process.platform !== 'win32') {
     return { success: false, message: 'Сетевой baseline доступен только на Windows' }
   }
@@ -213,6 +233,10 @@ export async function applyTunNetworkBaseline(): Promise<SystemNetworkResult> {
 }
 
 export async function rollbackTunNetworkBaseline(): Promise<SystemNetworkResult> {
+  return withBaselineOpLock(rollbackTunNetworkBaselineUnlocked)
+}
+
+async function rollbackTunNetworkBaselineUnlocked(): Promise<SystemNetworkResult> {
   if (process.platform !== 'win32') {
     return { success: false, message: 'Rollback доступен только на Windows' }
   }
@@ -256,13 +280,15 @@ export async function rollbackTunNetworkBaselineIfApplied(
   if (process.platform !== 'win32') {
     return { success: true, skipped: true, message: 'Rollback недоступен (не Windows)' }
   }
-  if (!(await isBaselineApplied())) {
-    return { success: true, skipped: true, message: 'Baseline не был применён — откатывать нечего' }
-  }
-  logEvent('info', 'system-network', `auto-rollback baseline: ${reason}`)
-  const result = await rollbackTunNetworkBaseline()
-  if (!result.success) {
-    logEvent('warn', 'system-network', 'auto-rollback failed', result)
-  }
-  return result
+  return withBaselineOpLock(async () => {
+    if (!(await isBaselineApplied())) {
+      return { success: true, skipped: true, message: 'Baseline не был применён - откатывать нечего' }
+    }
+    logEvent('info', 'system-network', `auto-rollback baseline: ${reason}`)
+    const result = await rollbackTunNetworkBaselineUnlocked()
+    if (!result.success) {
+      logEvent('warn', 'system-network', 'auto-rollback failed', result)
+    }
+    return result
+  })
 }

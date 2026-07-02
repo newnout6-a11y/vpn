@@ -67,8 +67,8 @@ describe('granularKillSwitch level application', () => {
     await expect(granularKillSwitch.setLevel('standard')).rejects.toThrow(/sing-box path is initialized/)
 
     expect(granularKillSwitch.getLevel()).toBe('off')
-    expect(storeData.get('killSwitchLevel')).toBe('off')
-    expect(settingsSaveMock).toHaveBeenLastCalledWith({ firewallKillSwitch: false })
+    expect(storeData.get('killSwitchLevel')).toBeUndefined()
+    expect(settingsSaveMock).not.toHaveBeenCalled()
     expect(enableKillSwitchMock).not.toHaveBeenCalled()
   })
 

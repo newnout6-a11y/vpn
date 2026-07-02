@@ -52,8 +52,9 @@ let initialized = false
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function getMainWindow(): BrowserWindow | null {
-  const windows = BrowserWindow.getAllWindows()
-  return windows.length > 0 ? windows[0] : null
+  const focused = BrowserWindow.getFocusedWindow?.()
+  if (focused && !focused.isDestroyed()) return focused
+  return BrowserWindow.getAllWindows().find((win) => !win.isDestroyed()) ?? null
 }
 
 function sendNotification(reason: string, steps: string): void {
