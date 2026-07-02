@@ -117,11 +117,37 @@ npm run build
 # passed
 ```
 
-Known pre-existing full-suite blocker: full `npm test` has an older `src/main/appLoggerRotation.test.ts` timeout/noisy stdout issue.
+Known pre-existing full-suite blocker: full `npm test` has an older logger-test isolation issue. In the full parallel suite, `src/main/appLoggerRotation.test.ts` times out with noisy stdout and `src/main/appLoggerRedaction.test.ts` can fail with a temp `app.log` ENOENT; the redaction test passes when run alone.
 
 Latest verification after current work:
 
 ```powershell
+npm test -- --reporter=dot
+# failed only in logger isolation/full-suite area:
+# - appLoggerRedaction.test.ts ENOENT reading temp app.log during full parallel run
+# - appLoggerRotation.test.ts timeout/noisy stdout
+
+npm test -- preloadValidation.test.ts mainIpcRegression.test.ts elevatedPsHelper.test.ts vpnProfilesRegression.test.ts serverPickerPingPoisoning.test.ts --reporter=dot
+# 5 test files passed, 26 tests passed
+
+npm test -- tunControllerConfig.test.ts routingSelfTest.test.ts granularKillSwitchInit.test.ts settingsLoginItem.test.ts tunControllerRecoverySource.test.ts --reporter=dot
+# 5 test files passed, 58 tests passed
+
+npm test -- splitTunneling.test.ts splitTunnelProcess.test.ts systemNetwork.test.ts granularKillSwitch.test.ts firewallKillSwitchValidation.test.ts leakDiagnostics.test.ts --reporter=dot
+# 6 test files passed, 51 tests passed
+
+npm test -- traySource.test.ts notificationsReset.test.ts notificationsGating.test.ts trafficMonitor.test.ts store.connectionBusy.test.ts AppSource.test.ts externalProxy.test.ts keyHealthChecker.test.ts --reporter=dot
+# 8 test files passed, 33 tests passed
+
+npm test -- vpnProfilesProtocolCoverage.test.ts urlAvailabilityVerdict.test.ts profileRotation.test.ts serverPickerConsolidate.test.ts dnsProfiles.test.ts leakSelfTest.test.ts happDetector.test.ts serverGroupsRefresh.test.ts speedTest.test.ts --reporter=dot
+# 9 test files passed, 77 tests passed
+
+npm test -- appLoggerRedaction.test.ts --reporter=dot
+# 1 test file passed, 1 test passed
+
+npm run build
+# passed
+
 npm test -- firewallKillSwitchValidation.test.ts leakDiagnostics.test.ts systemNetwork.test.ts elevatedPsHelper.test.ts vpnProfilesProtocolCoverage.test.ts urlAvailabilityVerdict.test.ts --reporter=dot
 # 6 test files passed, 55 tests passed
 
@@ -598,10 +624,11 @@ Items:
 - RB-3 DONE: Direct VPN server selection now hot-reloads the running tunnel from main-side servers:select.
   Files: vpn-tunnel-enforcer/src/main/serverPicker.ts, vpn-tunnel-enforcer/src/renderer/components/ProfileSelectorInline.tsx
   Note: renderer no longer tries startTun() against an already-running tunnel; main stops/starts directVpn with the selected outbound.
-- DPI-1 DESIGN TODO: ByeDPI-like improvement should be a separate staged design, not a second TUN stacked on the existing TUN.
+- DPI-1 FUTURE IDEA ONLY: ByeDPI-like improvement is parked for the future and is not part of the current audit-fix scope.
+  Do not implement this now unless the user explicitly reopens it as a feature task.
   Current base: settings.stealthMode already lowers TUN MTU and enables sing-box TLS fragmentation where safe.
-  Proposed direction: add an explicit anti-DPI profile that can tune sing-box fragmentation/utls/ALPN/transport parameters per outbound and optionally run a local pre-upstream proxy only in modes where it does not create TUN-over-TUN loops.
-  Windows-only gap: must be tested against real blocked/slow sites and Russian-IP-preserving smartRuSplit paths on Windows.
+  Future direction: an explicit anti-DPI profile could tune sing-box fragmentation/utls/ALPN/transport parameters per outbound and optionally run a local pre-upstream proxy only in modes where it does not create TUN-over-TUN loops.
+  Future Windows-only proof: test against real blocked/slow sites and Russian-IP-preserving smartRuSplit paths on Windows.
 
 Verification:
 - npm test -- externalProxy.test.ts serverPickerConsolidate.test.ts serverPickerPingPoisoning.test.ts tunControllerConfig.test.ts --reporter=dot
