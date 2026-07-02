@@ -23,8 +23,10 @@ vi.mock('./serverPicker', () => ({
 import {
   buildExternalProxyConfig,
   isExternalProxyMutationPath,
-  isValidExternalProxyControlToken
+  isValidExternalProxyControlToken,
+  listExternalProxyProfiles
 } from './externalProxy'
+import { serverPicker } from './serverPicker'
 
 function sampleProfile(): ServerProfile {
   return {
@@ -61,6 +63,17 @@ describe('buildExternalProxyConfig', () => {
     expect(config.route.rules[0]).toEqual({ action: 'sniff' })
     expect(config.route.final).toBe('proxy-out')
     expect(config.outbounds[0].tag).toBe('proxy-out')
+  })
+})
+
+describe('listExternalProxyProfiles', () => {
+  it('does not treat the main active VPN profile as the external proxy selection', () => {
+    vi.mocked(serverPicker.getProfiles).mockReturnValue([sampleProfile()])
+    vi.mocked(serverPicker.getActiveProfileId).mockReturnValue('profile-1')
+
+    expect(listExternalProxyProfiles()).toMatchObject([
+      { id: 'profile-1', active: false }
+    ])
   })
 })
 

@@ -165,8 +165,8 @@ function usableProfiles(countryQuery?: string | null): ServerProfile[] {
     .filter((profile) => profileMatchesCountry(profile, countryQuery))
 }
 
-function listExternalProxyProfiles(countryQuery?: string | null): ExternalProxyProfileRow[] {
-  const activeId = serverPicker.getActiveProfileId()
+export function listExternalProxyProfiles(countryQuery?: string | null): ExternalProxyProfileRow[] {
+  const activeId = state.profileId
   return usableProfiles(countryQuery).map((profile) => ({
     id: profile.id,
     name: profile.name,
@@ -374,12 +374,6 @@ async function startExternalProxyUnlocked(options: StartExternalProxyOptions = {
     }
     void removeManagedChildPidFile(externalProxyPidFilePath(), proc.pid)
   })
-
-  try {
-    serverPicker.selectProfile(profile.id)
-  } catch {
-    // Selection is a UI convenience only; the proxy already has its config.
-  }
 
   logEvent('info', 'external-proxy', 'started', {
     port,

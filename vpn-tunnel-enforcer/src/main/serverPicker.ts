@@ -1511,6 +1511,57 @@ export function selectProfile(id: string): void {
   logEvent('info', 'server-picker', 'profile selected', { id })
 }
 
+function toVpnProfile(profile: ServerProfile): VpnProfile {
+  if (!profile.outbound || typeof profile.outbound !== 'object') {
+    throw new Error('Selected profile has no outbound config')
+  }
+  return {
+    name: profile.name,
+    protocol: profile.protocol as VpnProfile['protocol'],
+    outbound: profile.outbound,
+    clientDevice: profile.clientDevice,
+    clientFingerprint: profile.clientFingerprint
+  }
+}
+
+async function restartDirectVpnForSelectedProfile(profile: ServerProfile): Promise<void> {
+  const status = tunController.getStatus()
+  if (!status.running) return
+  if (status.mode !== 'directVpn') {
+    logEvent('info', 'server-picker', 'profile selected while local-proxy tunnel is running; tunnel left unchanged', {
+      id: profile.id,
+      mode: status.mode ?? null
+    })
+    return
+  }
+
+  const settings = settingsStore.get()
+  const vpnProfile = toVpnProfile(profile)
+  logEvent('info', 'server-picker', 'hot-reloading direct VPN after profile selection', {
+    id: profile.id,
+    name: profile.name,
+    protocol: profile.protocol
+  })
+
+  const stopped = await tunController.stop()
+  if (!stopped.success) {
+    throw new Error(stopped.error || 'Failed to stop tunnel before server switch')
+  }
+  await new Promise((resolve) => setTimeout(resolve, 500))
+  const started = await tunController.start({
+    mode: 'directVpn',
+    vpnProfile,
+    proxyType: 'socks5',
+    enableFirewallKillSwitch: settings.firewallKillSwitch,
+    enableAdapterLockdown: settings.strictAdapterLockdown,
+    publicWifiCompatibility: settings.publicWifiCompatibility,
+    stealthMode: settings.stealthMode
+  })
+  if (!started.success) {
+    throw new Error(started.error || 'Failed to start tunnel with selected server')
+  }
+}
+
 /**
  * Returns the currently active profile (the one VPN dials when started).
  * If no profile was explicitly selected but profiles exist, falls back to
@@ -1914,7 +1965,10 @@ export function registerServerPickerHandlers(): void {
 
   handleLogged('servers:select', async (_event, id: string) => {
     id = requireString(id, 'id', { maxLength: 200 })
+    const profile = getProfiles().find((p) => p.id === id)
+    if (!profile) throw new Error('Profile not found')
     selectProfile(id)
+    await restartDirectVpnForSelectedProfile(profile)
   })
 
   handleLogged('servers:get-active', async () => {

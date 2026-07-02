@@ -562,6 +562,38 @@ Notes:
 - Existing size and queue limits remain in place.
 ```
 
+```text
+2026-07-02 - REAL-BUGS BATCH 1
+Commit checkpoint:
+- Stabilization/audit hardening committed as 0520d9b Hardening stability and audit fixes.
+
+Items:
+- RB-1 DONE: Renderer tab/page state no longer resets just because the user switches sidebar tabs.
+  Files: vpn-tunnel-enforcer/src/renderer/App.tsx
+  Note: App now keeps visited pages mounted and hides inactive pages instead of replacing one keyed page subtree.
+- RB-2 DONE: External proxy no longer steals the main VPN selected-server name/right-panel active marker.
+  Files: vpn-tunnel-enforcer/src/main/externalProxy.ts, vpn-tunnel-enforcer/src/main/externalProxy.test.ts
+  Note: external proxy selection is tracked by external proxy runtime state, not server-picker activeProfileId.
+- RB-3 DONE: Direct VPN server selection now hot-reloads the running tunnel from main-side servers:select.
+  Files: vpn-tunnel-enforcer/src/main/serverPicker.ts, vpn-tunnel-enforcer/src/renderer/components/ProfileSelectorInline.tsx
+  Note: renderer no longer tries startTun() against an already-running tunnel; main stops/starts directVpn with the selected outbound.
+- DPI-1 DESIGN TODO: ByeDPI-like improvement should be a separate staged design, not a second TUN stacked on the existing TUN.
+  Current base: settings.stealthMode already lowers TUN MTU and enables sing-box TLS fragmentation where safe.
+  Proposed direction: add an explicit anti-DPI profile that can tune sing-box fragmentation/utls/ALPN/transport parameters per outbound and optionally run a local pre-upstream proxy only in modes where it does not create TUN-over-TUN loops.
+  Windows-only gap: must be tested against real blocked/slow sites and Russian-IP-preserving smartRuSplit paths on Windows.
+
+Verification:
+- npm test -- externalProxy.test.ts serverPickerConsolidate.test.ts serverPickerPingPoisoning.test.ts tunControllerConfig.test.ts --reporter=dot
+- Result: 4 test files passed, 58 tests passed.
+- npm run build
+- Result: passed.
+
+Subagent findings used:
+- tab state resets because App keyed/remounted one page subtree per sidebar page.
+- external proxy wrote serverPicker.selectProfile(profile.id), overwriting the main selected profile.
+- server selection only changed activeProfileId; live sing-box kept the old outbound until manual stop/start.
+```
+
 ## Update Template
 
 When finishing a point, update its row and append a short note here:

@@ -47,6 +47,7 @@ export function ProfileSelectorInline() {
   // surface different copy ("Тоннель: 87 ms" vs "Сервер: 87 ms") to avoid
   // misleading the user.
   const tunRunning = useAppStore(s => s.tunRunning)
+  const connectionMode = useAppStore(s => s.settings.connectionMode)
 
   const [open, setOpen] = useState(false)
   const [profiles, setProfiles] = useState<ServerProfile[]>([])
@@ -176,17 +177,9 @@ export function ProfileSelectorInline() {
       const profile = profiles.find(p => p.id === id)
       addLog('info', `Сервер выбран: ${profile?.name ?? id}`)
       emitServerChanged()
-      if (wasConnected) {
+      if (wasConnected && connectionMode === 'directVpn') {
         addLog('info', `Переподключаемся через новый сервер: ${profile?.name ?? id}…`)
         useAppStore.getState().addGlobalToast('info', 'Переподключение', `Через ${profile?.name ?? id}`)
-        // Trigger reconnect via IPC — the main process will stop and restart
-        try {
-          await window.electronAPI.startTun(useAppStore.getState().proxy?.host
-            ? `${useAppStore.getState().proxy!.host}:${useAppStore.getState().proxy!.port}`
-            : '', useAppStore.getState().proxy?.type)
-        } catch {
-          // If reconnect fails, the user can manually connect
-        }
       }
       if (profile) {
         const gid = (profile as ServerProfile & { groupId?: string }).groupId

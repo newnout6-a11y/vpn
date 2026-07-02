@@ -1,4 +1,4 @@
-import { useEffect, useRef, lazy, Suspense } from 'react'
+import { useEffect, useMemo, useRef, lazy, Suspense } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import i18n from 'i18next'
 import { useAppStore } from './store'
@@ -266,6 +266,7 @@ const scheduleIdle = (fn: () => void) => {
 
 export default function App() {
   const [page, setPage] = useState<Page>('dashboard')
+  const [visitedPages, setVisitedPages] = useState<Set<Page>>(() => new Set(['dashboard']))
   // Set to true when the main process tells us it's running shutdown cleanup
   // (the user just confirmed "Отключить и закрыть"). Locks the UI behind a
   // full-screen overlay until the window itself goes away — without it the
@@ -706,8 +707,19 @@ export default function App() {
     }
   }, [settings.advancedMode, page])
 
-  const renderPage = () => {
-    switch (page) {
+  useEffect(() => {
+    setVisitedPages(prev => {
+      if (prev.has(page)) return prev
+      const next = new Set(prev)
+      next.add(page)
+      return next
+    })
+  }, [page])
+
+  const mountedPages = useMemo(() => Array.from(visitedPages), [visitedPages])
+
+  const renderPage = (pageId: Page) => {
+    switch (pageId) {
       case 'dashboard': return <Dashboard />
       case 'apps': return <SplitTunnel />
       case 'servers': return <Servers />
@@ -736,20 +748,31 @@ export default function App() {
     <ThemeProvider>
       <div className="flex h-screen gradient-bg">
         <Sidebar currentPage={page} onNavigate={setPage} />
-        <AnimatePresence mode="wait">
-          <motion.main
-            key={page}
-            initial={{ opacity: 0, y: 8 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -8 }}
-            transition={{ duration: 0.18, ease: [0.4, 0, 0.2, 1] }}
-            className="flex-1 overflow-y-auto p-6 tabular"
-          >
-            <Suspense fallback={<div className="flex items-center justify-center h-full text-zinc-400">Загрузка...</div>}>
-              {renderPage()}
-            </Suspense>
-          </motion.main>
-        </AnimatePresence>
+        <div className="flex-1 min-w-0 relative">
+          <AnimatePresence initial={false}>
+            {mountedPages.map((pageId) => {
+              const active = pageId === page
+              return (
+                <motion.main
+                  key={pageId}
+                  initial={active ? { opacity: 0, y: 8 } : false}
+                  animate={active ? { opacity: 1, y: 0 } : { opacity: 0, y: 0 }}
+                  transition={{ duration: 0.18, ease: [0.4, 0, 0.2, 1] }}
+                  aria-hidden={!active}
+                  className={
+                    'absolute inset-0 overflow-y-auto p-6 tabular ' +
+                    (active ? 'pointer-events-auto' : 'pointer-events-none')
+                  }
+                  style={{ display: active ? undefined : 'none' }}
+                >
+                  <Suspense fallback={<div className="flex items-center justify-center h-full text-zinc-400">Загрузка...</div>}>
+                    {renderPage(pageId)}
+                  </Suspense>
+                </motion.main>
+              )
+            })}
+          </AnimatePresence>
+        </div>
         {!settings.firstRunComplete && (
           <FirstRunWizard onComplete={handleWizardComplete} onSkip={handleWizardComplete} />
         )}
