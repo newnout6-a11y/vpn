@@ -29,6 +29,7 @@ let mockStoreData: { profiles: any[]; activeProfileId: string | null } = {
   activeProfileId: null
 }
 let tunnelRunning = false
+let tunnelStartedAt = 1000
 
 vi.mock('electron', () => ({
   app: { getPath: () => '/tmp/vpnte-test', getAppPath: () => '/tmp/vpnte-test' },
@@ -58,7 +59,15 @@ vi.mock('./vpnProfiles', () => ({
 }))
 vi.mock('./tunController', () => ({
   tunController: {
-    getStatus: () => ({ running: tunnelRunning })
+    getStatus: () => ({
+      running: tunnelRunning,
+      startedAt: tunnelRunning ? tunnelStartedAt : null,
+      pid: tunnelRunning ? 1234 : null,
+      mode: 'directVpn',
+      proxyAddr: null,
+      proxyType: null,
+      vpnProfileName: 'Test'
+    })
   },
   getDirectProxyPort: () => null
 }))
@@ -100,6 +109,8 @@ describe('pingAll while tunnel is UP', () => {
       activeProfileId: 'p-active'
     }
     tunnelRunning = false
+    tunnelStartedAt = 1000
+    vi.clearAllMocks()
     vi.resetModules()
   })
 
@@ -137,6 +148,8 @@ describe('clearStaleStoredPings', () => {
       activeProfileId: 'p-active'
     }
     tunnelRunning = false
+    tunnelStartedAt = 1000
+    vi.clearAllMocks()
     vi.resetModules()
   })
 
@@ -172,5 +185,33 @@ describe('clearStaleStoredPings', () => {
     mockStoreData = { profiles: [], activeProfileId: null }
     const { clearStaleStoredPings } = await import('./serverPicker')
     expect(() => clearStaleStoredPings()).not.toThrow()
+  })
+})
+
+describe('tunnelHttpProbe cache', () => {
+  beforeEach(() => {
+    mockStoreData = {
+      profiles: JSON.parse(JSON.stringify(SAMPLE_PROFILES)),
+      activeProfileId: 'p-active'
+    }
+    tunnelRunning = true
+    tunnelStartedAt = 1000
+    vi.clearAllMocks()
+    vi.resetModules()
+  })
+
+  it('does not reuse a cached probe result after the tunnel session changes', async () => {
+    const axios = (await import('axios')).default as any
+    const { tunnelHttpProbe } = await import('./serverPicker')
+
+    await tunnelHttpProbe()
+    const firstCallCount = axios.get.mock.calls.length
+
+    await tunnelHttpProbe()
+    expect(axios.get.mock.calls).toHaveLength(firstCallCount)
+
+    tunnelStartedAt = 2000
+    await tunnelHttpProbe()
+    expect(axios.get.mock.calls.length).toBeGreaterThan(firstCallCount)
   })
 })

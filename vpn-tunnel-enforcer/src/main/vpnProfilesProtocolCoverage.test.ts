@@ -62,6 +62,13 @@ describe('phase 3 protocol URI coverage', () => {
     })
   })
 
+  it('does not accept passwordless authenticated protocol links', () => {
+    expect(parseVpnProfiles('trojan://@trojan.example.com:443?sni=front.example.com#Trojan')).toEqual([])
+    expect(parseVpnProfiles('hy2://hy2.example.com:443?sni=front.example.com#HY2')).toEqual([])
+    expect(parseVpnProfiles('anytls://any.example.com:443?sni=front.example.com#AnyTLS')).toEqual([])
+    expect(parseVpnProfiles('shadowtls://shadow.example.com:443?version=3&sni=front.example.com#ShadowTLS')).toEqual([])
+  })
+
   it('parses tuic:// links with congestion options', () => {
     const [profile] = parseVpnProfiles('tuic://550e8400-e29b-41d4-a716-446655440000:secret@tuic.example.com:443?sni=front.example.com&congestion_control=bbr&udp_relay_mode=native#TUIC')
 

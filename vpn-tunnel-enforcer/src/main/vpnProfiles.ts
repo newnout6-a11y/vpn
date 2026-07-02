@@ -128,6 +128,10 @@ const DEVICE_HEADER_PROFILES: Record<ClientDevice, {
   mac: { os: 'macOS', osVersion: '15.3', model: 'MacBookPro18,3' }
 }
 
+const VPN_URI_SCHEMES = 'vless|trojan|ss|vmess|hysteria2|hy2|naive|anytls|shadowtls|tuic'
+const VPN_URI_PREFIX_RE = new RegExp(`^(?:${VPN_URI_SCHEMES}):\\/\\/`, 'i')
+const VPN_URI_IN_TEXT_RE = new RegExp(`\\b(?:${VPN_URI_SCHEMES}):\\/\\/[^\\s"'<>\\\`\\\\]+`, 'i')
+
 export function normalizeClientDevice(value: unknown): ClientDevice {
   return value === 'android' || value === 'ios' || value === 'mac' || value === 'pc' ? value : 'pc'
 }
@@ -590,12 +594,14 @@ function parseVless(line: string): VpnProfile {
 function parseTrojan(line: string): VpnProfile {
   const url = parseStandardUrl(line)
   const params = url.searchParams
+  const password = safeDecode(url.username)
+  if (!password) throw new Error('Trojan link is missing password')
   const outbound: Record<string, any> = {
     type: 'trojan',
     tag: 'proxy-out',
     server: url.hostname,
     server_port: numberPort(url.port),
-    password: safeDecode(url.username)
+    password
   }
   const tls = buildTls(params, url.hostname, (param(params, 'security') || 'tls').toLowerCase() !== 'none')
   if (tls) outbound.tls = tls
@@ -691,12 +697,14 @@ function parseHysteria2(line: string): VpnProfile {
   const params = url.searchParams
   const rawServerPorts = param(params, 'mport', 'server_ports', 'serverPorts')
   const serverPorts = normalizeHysteria2ServerPorts(rawServerPorts)
+  const password = safeDecode(url.username || param(params, 'password') || '')
+  if (!password) throw new Error('Hysteria2 link is missing password')
   const outbound: Record<string, any> = {
     type: 'hysteria2',
     tag: 'proxy-out',
     server: url.hostname,
     server_port: numberPort(url.port || firstPortFromRangeList(rawServerPorts)),
-    password: safeDecode(url.username || param(params, 'password') || ''),
+    password,
     tls: buildTls(params, url.hostname, true)
   }
   const obfsType = param(params, 'obfs')
@@ -731,12 +739,14 @@ function parseNaive(line: string): VpnProfile {
 function parseAnyTls(line: string): VpnProfile {
   const url = parseStandardUrl(line)
   const params = url.searchParams
+  const password = safeDecode(url.username || param(params, 'password') || '')
+  if (!password) throw new Error('AnyTLS link is missing password')
   const outbound: Record<string, any> = {
     type: 'anytls',
     tag: 'proxy-out',
     server: url.hostname,
     server_port: numberPort(url.port || '443'),
-    password: safeDecode(url.username || param(params, 'password') || '')
+    password
   }
   const tls = buildTls(params, url.hostname, true)
   if (tls) outbound.tls = tls
@@ -746,12 +756,14 @@ function parseAnyTls(line: string): VpnProfile {
 function parseShadowTls(line: string): VpnProfile {
   const url = parseStandardUrl(line)
   const params = url.searchParams
+  const password = safeDecode(url.username || param(params, 'password') || '')
+  if (!password) throw new Error('ShadowTLS link is missing password')
   const outbound: Record<string, any> = {
     type: 'shadowtls',
     tag: 'proxy-out',
     server: url.hostname,
     server_port: numberPort(url.port || '443'),
-    password: safeDecode(url.username || param(params, 'password') || ''),
+    password,
     version: Number(param(params, 'version') || 3)
   }
   const tls = buildTls(params, url.hostname, true)
@@ -1090,6 +1102,14 @@ function cleanExtractedUri(raw: string): string {
   return value
 }
 
+function firstVpnUriFromText(text: string): string | null {
+  const direct = text.trim()
+  const match = direct.match(VPN_URI_IN_TEXT_RE)
+  if (match) return cleanExtractedUri(match[0])
+  if (VPN_URI_PREFIX_RE.test(direct)) return cleanExtractedUri(direct)
+  return null
+}
+
 function parseUriProfilesFromText(text: string): VpnProfile[] {
   const profiles: VpnProfile[] = []
   const seen = new Set<string>()
@@ -1107,7 +1127,7 @@ function parseUriProfilesFromText(text: string): VpnProfile[] {
 
   for (const line of text.replace(/\r/g, '\n').split('\n')) {
     const trimmed = line.trim()
-    if (/^(vless|trojan|ss|vmess|hysteria2|hy2|naive|anytls|shadowtls|tuic):\/\//i.test(trimmed)) addCandidate(trimmed)
+    if (VPN_URI_PREFIX_RE.test(trimmed)) addCandidate(trimmed)
   }
 
   const uriPattern = /\b(?:vless|trojan|ss|vmess|hysteria2|hy2|naive|anytls|shadowtls|tuic):\/\/[^\s"'<>`\\]+/gi
@@ -1920,7 +1940,10 @@ async function fetchSubscriptionHttpResponse(url: string, attempt: FetchAttempt)
     const headers = parseHttpHeaders(headerText)
     const statusCode = parseHttpStatusCode(headerText)
 
-    if (statusCode !== null && statusCode >= 300 && statusCode < 400 && headers.location) {
+    if (statusCode !== null && statusCode >= 300 && statusCode < 400) {
+      if (!headers.location) {
+        throw new Error(`subscription redirect returned HTTP ${statusCode} without a Location header`)
+      }
       const next = normalizeSubscriptionRedirectLocation(headers.location, currentUrl)
       if (!next) throw new Error('redirect without a usable Location header')
 
@@ -2088,9 +2111,8 @@ function unwrapHappAddLink(input: string): string | null {
 
     for (const candidate of candidates) {
       if (/^https?:\/\//i.test(candidate)) return candidate
-      if (/^(?:vless|trojan|ss|vmess|hysteria2|hy2|naive|anytls|shadowtls|tuic):\/\//i.test(candidate)) return candidate
-      // Could be a base64 blob with multiple vless:// lines — let parseVpnProfiles handle it.
-      if (/(?:vless|trojan|ss|vmess|hysteria2|hy2|naive|anytls|shadowtls|tuic):\/\//i.test(candidate)) return candidate
+      const uri = firstVpnUriFromText(candidate)
+      if (uri) return uri
     }
 
     throw new Error(
@@ -2129,8 +2151,8 @@ function unwrapMantarayLink(input: string): string | null {
 
     for (const candidate of candidates) {
       if (/^https?:\/\//i.test(candidate)) return candidate
-      if (/^(?:vless|trojan|ss|vmess|hysteria2|hy2|naive|anytls|shadowtls|tuic):\/\//i.test(candidate)) return candidate
-      if (/(?:vless|trojan|ss|vmess|hysteria2|hy2|naive|anytls|shadowtls|tuic):\/\//i.test(candidate)) return candidate
+      const uri = firstVpnUriFromText(candidate)
+      if (uri) return uri
     }
 
     throw new Error(
@@ -2147,10 +2169,38 @@ function unwrapClientDeepLink(input: string): string | null {
   return unwrapHappAddLink(input) ?? unwrapMantarayLink(input)
 }
 
-export async function resolveVpnProfiles(input: string, options?: SubscriptionFetchOptions): Promise<{ profiles: VpnProfile[]; source: string; fetched: boolean; userInfo?: SubscriptionUserInfo }> {
+type ResolveVpnProfilesResult = { profiles: VpnProfile[]; source: string; fetched: boolean; userInfo?: SubscriptionUserInfo }
+
+const resolveVpnProfilesLocks = new Map<string, Promise<ResolveVpnProfilesResult>>()
+
+function resolveVpnProfilesLockKey(input: string, options?: SubscriptionFetchOptions): string {
+  return JSON.stringify({
+    input,
+    proxyAddr: options?.proxyAddr || '',
+    proxyType: options?.proxyType || '',
+    clientDevice: normalizeClientDevice(options?.clientDevice),
+    bootstrapRouteMode: options?.bootstrapRouteMode || ''
+  })
+}
+
+export async function resolveVpnProfiles(input: string, options?: SubscriptionFetchOptions): Promise<ResolveVpnProfilesResult> {
   const trimmed = input.trim()
   if (!trimmed) throw new Error('Вставьте VPN-ссылку, subscription URL или sing-box outbound JSON')
 
+  const lockKey = resolveVpnProfilesLockKey(trimmed, options)
+  const inFlight = resolveVpnProfilesLocks.get(lockKey)
+  if (inFlight) return inFlight
+
+  const promise = resolveVpnProfilesUnlocked(trimmed, options).finally(() => {
+    if (resolveVpnProfilesLocks.get(lockKey) === promise) {
+      resolveVpnProfilesLocks.delete(lockKey)
+    }
+  })
+  resolveVpnProfilesLocks.set(lockKey, promise)
+  return promise
+}
+
+async function resolveVpnProfilesUnlocked(trimmed: string, options?: SubscriptionFetchOptions): Promise<ResolveVpnProfilesResult> {
   // Auto-unwrap `happ://add/<encoded-url>` etc. before hitting the regular pipeline.
   // This is the format VPN providers (Sosa, Marzban, …) put into their share buttons.
   const unwrapped = unwrapClientDeepLink(trimmed)

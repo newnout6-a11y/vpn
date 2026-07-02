@@ -131,7 +131,19 @@ const TUNNEL_PROBE_URLS = [
 // than one extra click to see "the network is back".
 const TUNNEL_PROBE_SUCCESS_CACHE_MS = 3500
 const TUNNEL_PROBE_FAILURE_CACHE_MS = 1500
-let tunnelProbeCache: { value: number | null; at: number } | null = null
+let tunnelProbeCache: { value: number | null; at: number; sessionKey: string } | null = null
+
+function currentTunnelProbeSessionKey(): string | null {
+  const status = tunController.getStatus()
+  if (!status.running) return null
+  return [
+    status.startedAt ?? 'no-start',
+    status.pid ?? 'no-pid',
+    status.mode ?? 'unknown',
+    status.proxyAddr ?? '',
+    status.vpnProfileName ?? ''
+  ].join('|')
+}
 
 // Per-URL timeout for the tunnel probe race. 4 s covers any reasonable
 // global RTT plus TLS handshake jitter — anything longer means the URL is
@@ -200,8 +212,11 @@ export function pingServer(host: string, port: number, opts?: { skipCache?: bool
  * anyway).
  */
 export async function tunnelHttpProbe(skipCache = false): Promise<number | null> {
+  const sessionKey = currentTunnelProbeSessionKey()
+  if (!sessionKey) return null
+
   const cached = tunnelProbeCache
-  if (cached && !skipCache) {
+  if (cached && cached.sessionKey === sessionKey && !skipCache) {
     // Asymmetric TTL: short window for a cached failure (so we react
     // quickly when the network recovers), longer window for a cached
     // success (so a pingAll sweep doesn't fan out into N identical
@@ -233,7 +248,7 @@ export async function tunnelHttpProbe(skipCache = false): Promise<number | null>
     // Node ≥ 18, so no polyfill needed. First successful response wins; the
     // rest keep going harmlessly until their per-request timeout fires.
     const ms = await Promise.any(races)
-    tunnelProbeCache = { value: ms, at: Date.now() }
+    tunnelProbeCache = { value: ms, at: Date.now(), sessionKey }
     return ms
   } catch {
     // All racers rejected — Promise.any throws AggregateError. The tunnel
@@ -241,7 +256,7 @@ export async function tunnelHttpProbe(skipCache = false): Promise<number | null>
     // network (vanishingly unlikely with four geographically diverse
     // anchors, but we cache the negative result either way so we don't
     // hammer the network repeatedly).
-    tunnelProbeCache = { value: null, at: Date.now() }
+    tunnelProbeCache = { value: null, at: Date.now(), sessionKey }
     return null
   }
 }
@@ -1576,6 +1591,13 @@ export function getActiveProfile(): ServerProfile | null {
 }
 
 const addFromInputLocks = new Map<string, Promise<ServerProfile[]>>()
+let profileStoreWriteQueue: Promise<void> = Promise.resolve()
+
+function withProfileStoreWriteLock<T>(operation: () => T | Promise<T>): Promise<T> {
+  const run = profileStoreWriteQueue.then(operation, operation)
+  profileStoreWriteQueue = run.then(() => undefined, () => undefined)
+  return run
+}
 
 /**
  * Removes a profile by ID.
@@ -1682,31 +1704,33 @@ function deriveSubscriptionGroupName(input: string, webPageUrl?: string): string
  * Shared between {@link addFromInput} and {@link addFromInputToGroup} so
  * both paths get identical merge semantics.
  */
-function appendProfilesToGroup(
+async function appendProfilesToGroup(
   vpnProfiles: VpnProfile[],
   groupId: string,
   sourceUriPerProfile: (vp: VpnProfile, index: number) => string | undefined,
   options: AddProfilesOptions = {}
-): ServerProfile[] {
-  const existingProfiles = getProfiles()
-  const newProfiles: ServerProfile[] = []
+): Promise<ServerProfile[]> {
+  return withProfileStoreWriteLock(() => {
+    const existingProfiles = getProfiles()
+    const newProfiles: ServerProfile[] = []
 
-  vpnProfiles.forEach((vpnProfile, index) => {
-    const sourceUri = sourceUriPerProfile(vpnProfile, index)
-    const candidate = vpnProfileToServerProfile(vpnProfile, groupId, sourceUri, options)
-    const isDuplicate =
-      existingProfiles.some(p => isSameServerProfile(p, candidate)) ||
-      newProfiles.some(p => isSameServerProfile(p, candidate))
-    if (!isDuplicate) newProfiles.push(candidate)
-  })
+    vpnProfiles.forEach((vpnProfile, index) => {
+      const sourceUri = sourceUriPerProfile(vpnProfile, index)
+      const candidate = vpnProfileToServerProfile(vpnProfile, groupId, sourceUri, options)
+      const isDuplicate =
+        existingProfiles.some(p => isSameServerProfile(p, candidate)) ||
+        newProfiles.some(p => isSameServerProfile(p, candidate))
+      if (!isDuplicate) newProfiles.push(candidate)
+    })
 
-  if (newProfiles.length > 0) {
-    saveProfiles([...existingProfiles, ...newProfiles])
-    if (!getActiveProfileId()) {
-      store.set('activeProfileId', newProfiles[0].id)
+    if (newProfiles.length > 0) {
+      saveProfiles([...existingProfiles, ...newProfiles])
+      if (!getActiveProfileId()) {
+        store.set('activeProfileId', newProfiles[0].id)
+      }
     }
-  }
-  return newProfiles
+    return newProfiles
+  })
 }
 
 /**
@@ -1725,11 +1749,14 @@ function appendProfilesToGroup(
  *   `sourceUri` for lossless re-export.
  */
 export async function addFromInput(input: string, options: AddProfilesOptions = {}): Promise<ServerProfile[]> {
-  const lockKey = canonicalizeSubscriptionUrl(input.trim())
+  const trimmed = input.trim()
+  const canonical = canonicalizeSubscriptionUrl(trimmed)
+  const clientDevice = normalizeClientDevice(options.clientDevice)
+  const lockKey = `${canonical}\u0000${clientDevice}`
   const inFlight = addFromInputLocks.get(lockKey)
   if (inFlight) return inFlight
 
-  const promise = addFromInputUnlocked(input, options).finally(() => {
+  const promise = addFromInputUnlocked(trimmed, canonical, options).finally(() => {
     if (addFromInputLocks.get(lockKey) === promise) {
       addFromInputLocks.delete(lockKey)
     }
@@ -1738,8 +1765,7 @@ export async function addFromInput(input: string, options: AddProfilesOptions = 
   return promise
 }
 
-async function addFromInputUnlocked(input: string, options: AddProfilesOptions = {}): Promise<ServerProfile[]> {
-  const trimmed = input.trim()
+async function addFromInputUnlocked(trimmed: string, canonical: string, options: AddProfilesOptions = {}): Promise<ServerProfile[]> {
   const clientDevice = normalizeClientDevice(options.clientDevice)
   if (!trimmed) {
     throw new Error('Введите ссылку подписки или VPN-ссылку')
@@ -1752,7 +1778,6 @@ async function addFromInputUnlocked(input: string, options: AddProfilesOptions =
   // user pasting the same logical subscription in two different forms
   // (raw URL on one device, happ link on another) hits the existing
   // group on the second paste instead of creating a duplicate.
-  const canonical = canonicalizeSubscriptionUrl(trimmed)
   const isSubscriptionUrl = /^https?:\/\//i.test(canonical)
 
   if (isSubscriptionUrl) {
@@ -1828,7 +1853,7 @@ async function addFromInputUnlocked(input: string, options: AddProfilesOptions =
       webPageUrl: userInfo?.webPageUrl ?? undefined
     })
 
-    const newProfiles = appendProfilesToGroup(
+    const newProfiles = await appendProfilesToGroup(
       resolved.profiles,
       group.id,
       // We don't have per-profile URIs from a subscription resolver
@@ -1858,7 +1883,7 @@ async function addFromInputUnlocked(input: string, options: AddProfilesOptions =
   // first profile only, since we can't reliably split a multi-line paste
   // back into per-profile lines from here. Single-key (the dominant case)
   // gets the source URI; bulk paste falls back to undefined.
-  const newProfiles = appendProfilesToGroup(
+  const newProfiles = await appendProfilesToGroup(
     resolved.profiles,
     groupId,
     (_vp, index) => (resolved.profiles.length === 1 && index === 0 ? trimmed : undefined),
@@ -1906,7 +1931,7 @@ export async function addFromInputToGroup(input: string, groupId: string, option
   }
 
   const isSubscriptionUrl = /^https?:\/\//i.test(trimmed)
-  const newProfiles = appendProfilesToGroup(
+  const newProfiles = await appendProfilesToGroup(
     resolved.profiles,
     groupId,
     (_vp, index) =>

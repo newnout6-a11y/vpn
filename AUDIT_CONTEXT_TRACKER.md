@@ -594,6 +594,38 @@ Subagent findings used:
 - server selection only changed activeProfileId; live sing-box kept the old outbound until manual stop/start.
 ```
 
+```text
+2026-07-02 - VPN PROFILES REVIEW BATCH 1 DONE
+Files:
+- vpn-tunnel-enforcer/src/main/vpnProfiles.ts
+- vpn-tunnel-enforcer/src/main/serverPicker.ts
+- vpn-tunnel-enforcer/src/main/vpnProfilesRegression.test.ts
+- vpn-tunnel-enforcer/src/main/vpnProfilesProtocolCoverage.test.ts
+- vpn-tunnel-enforcer/src/main/serverPickerPingPoisoning.test.ts
+
+Items:
+- VP-H1 DONE: happ://add and mantaray://add base64 blobs with multiple glued VPN URIs now unwrap to the first extracted URI instead of returning the whole blob to parseVpnProfiles.
+- VP-H2 DONE: appendProfilesToGroup now serializes the read-dedupe-save critical section so parallel imports from different subscription URLs do not overwrite each other's saved profiles.
+- VP-M1 DONE: HTTP 3xx subscription responses without Location now throw a clear redirect error instead of falling through as an empty final body.
+- VP-M2 DONE: resolveVpnProfiles now has a module-level in-flight guard keyed by input plus fetch/client-device options, covering direct callers such as inspectVpnInput.
+- VP-M3 DONE: addFromInput computes trimmed/canonical/clientDevice once for its lock key and passes the same canonical value into addFromInputUnlocked.
+- VP-L1 DONE: trojan, hysteria2/hy2, anytls, and shadowtls URI parsing rejects empty passwords instead of producing invalid sing-box outbounds.
+- VP-L2 DONE: tunnelHttpProbe cache is tied to the current tunnel session key (startedAt/pid/mode/proxy/profile), so reconnects cannot reuse stale success/failure values.
+
+Verification:
+- npm test -- vpnProfilesRegression.test.ts vpnProfilesProtocolCoverage.test.ts serverPickerPingPoisoning.test.ts serverGroupsRefresh.test.ts --reporter=dot
+- Result: 4 test files passed, 36 tests passed.
+- npm run build
+- Result: passed.
+
+Windows-only gap:
+- Real Windows smoke should import two different subscriptions concurrently, verify both groups/profiles remain, reconnect TUN, and confirm live ping probes are not reused across the old/new tunnel session.
+
+Notes:
+- The profile-store write queue only wraps the store mutation section; subscription fetches still run concurrently.
+- The resolveVpnProfiles in-flight guard is option-sensitive so different client-device/HWID fetches do not collapse into one request.
+```
+
 ## Update Template
 
 When finishing a point, update its row and append a short note here:
