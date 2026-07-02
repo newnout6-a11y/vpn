@@ -6,6 +6,7 @@ import { join } from 'path'
 import { randomBytes, timingSafeEqual } from 'crypto'
 import { serverPicker } from './serverPicker'
 import { logEvent } from './appLogger'
+import { cleanupManagedChildPidFile, removeManagedChildPidFile, writeManagedChildPidFile } from './managedChildProcess'
 import type { ServerProfile } from '../shared/ipc-types'
 
 const CONTROL_HOST = '127.0.0.1'
@@ -14,6 +15,8 @@ const DEFAULT_PROXY_PORT = 17990
 const RUNTIME_EXE_NAME = 'vpnte-external-proxy.exe'
 export const EXTERNAL_PROXY_CONTROL_TOKEN_HEADER = 'x-vpnte-control-token'
 const CONTROL_TOKEN_FILE = 'external-proxy-control-token'
+const CONTROL_ENDPOINT_FILE = 'external-proxy-control-endpoint.json'
+const EXTERNAL_PROXY_PID_FILE = 'external-proxy.pid'
 
 type ExternalProxyAction = 'start' | 'rotate' | 'connect' | 'trigger'
 
@@ -76,8 +79,16 @@ function externalRuntimeDir(): string {
   return join(app.getPath('userData'), 'external-proxy-runtime')
 }
 
+function externalProxyPidFilePath(): string {
+  return join(externalRuntimeDir(), EXTERNAL_PROXY_PID_FILE)
+}
+
 function controlTokenPath(): string {
   return join(app.getPath('userData'), CONTROL_TOKEN_FILE)
+}
+
+function controlEndpointPath(): string {
+  return join(app.getPath('userData'), CONTROL_ENDPOINT_FILE)
 }
 
 async function ensureControlToken(): Promise<string> {
@@ -86,6 +97,17 @@ async function ensureControlToken(): Promise<string> {
   await mkdir(app.getPath('userData'), { recursive: true })
   await writeFile(controlTokenPath(), controlToken + '\n', { encoding: 'utf8', mode: 0o600 })
   return controlToken
+}
+
+async function writeControlEndpoint(port: number): Promise<void> {
+  await mkdir(app.getPath('userData'), { recursive: true })
+  await writeFile(controlEndpointPath(), JSON.stringify({
+    host: CONTROL_HOST,
+    port,
+    url: `http://${CONTROL_HOST}:${port}`,
+    tokenFile: controlTokenPath(),
+    updatedAt: Date.now()
+  }, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 })
 }
 
 function bundledResource(name: string): string {
@@ -269,6 +291,7 @@ async function stopExternalProxyUnlocked(reason = 'requested'): Promise<External
       }
     })
   }
+  await removeManagedChildPidFile(externalProxyPidFilePath(), proc?.pid)
   logEvent('info', 'external-proxy', 'stopped', { reason })
   state.port = null
   state.profileId = null
@@ -299,6 +322,10 @@ async function startExternalProxyUnlocked(options: StartExternalProxyOptions = {
     throw new Error(country ? `No VPN profiles found for country: ${country}` : 'No VPN profiles with outbound config found')
   }
 
+  await cleanupManagedChildPidFile(externalProxyPidFilePath(), 'external-proxy', (message, details) => {
+    logEvent('warn', 'external-proxy', message, details)
+  })
+
   const runtime = await stageRuntime(profile, port)
   await new Promise<void>((resolve, reject) => {
     const check = spawn(runtime.exe, ['check', '-c', runtime.config], { cwd: runtime.cwd, windowsHide: true })
@@ -316,6 +343,15 @@ async function startExternalProxyUnlocked(options: StartExternalProxyOptions = {
   }
 
   const proc = spawn(runtime.exe, ['run', '-c', runtime.config], { cwd: runtime.cwd, windowsHide: true })
+  await writeManagedChildPidFile(externalProxyPidFilePath(), {
+    owner: 'external-proxy',
+    pid: proc.pid ?? 0,
+    exePath: runtime.exe,
+    configPath: runtime.config,
+    createdAt: Date.now()
+  }).catch((err) => {
+    logEvent('warn', 'external-proxy', 'failed to write pidfile', err)
+  })
   state.process = proc
   state.port = port
   state.profileId = profile.id
@@ -336,6 +372,7 @@ async function startExternalProxyUnlocked(options: StartExternalProxyOptions = {
       state.country = null
       state.startedAt = null
     }
+    void removeManagedChildPidFile(externalProxyPidFilePath(), proc.pid)
   })
 
   try {
@@ -498,21 +535,63 @@ async function handleControlRequest(req: IncomingMessage, res: ServerResponse): 
 export function registerExternalProxyControlServer(): void {
   if (controlServer || controlServerStarting) return
   controlServerStarting = true
-  const port = Number(process.env.VPNTE_CONTROL_PORT || EXTERNAL_PROXY_CONTROL_PORT)
-  ensureControlToken().then(() => {
-    controlServer = createServer((req, res) => {
+  const configuredPort = Number(process.env.VPNTE_CONTROL_PORT || EXTERNAL_PROXY_CONTROL_PORT)
+  const port = Number.isInteger(configuredPort) && configuredPort > 0 && configuredPort <= 65535
+    ? configuredPort
+    : EXTERNAL_PROXY_CONTROL_PORT
+  const allowEphemeralFallback = !process.env.VPNTE_CONTROL_PORT
+
+  const createControlServer = (): Server => createServer((req, res) => {
       handleControlRequest(req, res).catch((err) => {
         send(res, 500, { ok: false, error: err?.message || String(err) })
       })
     })
-    controlServer.listen(port, CONTROL_HOST, () => {
-      controlServerStarting = false
-      logEvent('info', 'external-proxy', 'control server listening', { host: CONTROL_HOST, port, tokenFile: controlTokenPath() })
+
+  const listen = (server: Server, listenPort: number): Promise<number> => new Promise((resolve, reject) => {
+    const onError = (err: NodeJS.ErrnoException) => {
+      server.off('listening', onListening)
+      reject(err)
+    }
+    const onListening = () => {
+      server.off('error', onError)
+      const address = server.address()
+      resolve(typeof address === 'object' && address ? address.port : listenPort)
+    }
+    server.once('error', onError)
+    server.once('listening', onListening)
+    server.listen(listenPort, CONTROL_HOST)
+  })
+
+  ensureControlToken().then(async () => {
+    let server = createControlServer()
+    let actualPort = port
+    try {
+      actualPort = await listen(server, port)
+    } catch (err: any) {
+      if (err?.code !== 'EADDRINUSE' || !allowEphemeralFallback) throw err
+      logEvent('warn', 'external-proxy', 'control port is busy, falling back to an ephemeral port', {
+        host: CONTROL_HOST,
+        port
+      })
+      try { server.close() } catch { /* ignore */ }
+      server = createControlServer()
+      actualPort = await listen(server, 0)
+    }
+
+    controlServer = server
+    controlServerStarting = false
+    await writeControlEndpoint(actualPort).catch((err) => {
+      logEvent('warn', 'external-proxy', 'failed to write control endpoint file', err)
     })
     controlServer.on('error', (err) => {
-      controlServerStarting = false
       logEvent('warn', 'external-proxy', 'control server failed', err)
       controlServer = null
+    })
+    logEvent('info', 'external-proxy', 'control server listening', {
+      host: CONTROL_HOST,
+      port: actualPort,
+      tokenFile: controlTokenPath(),
+      endpointFile: controlEndpointPath()
     })
   }).catch((err) => {
     controlServerStarting = false

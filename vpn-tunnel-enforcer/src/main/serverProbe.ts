@@ -80,13 +80,21 @@ function probePort(host: string, port: number, timeoutMs = 1500): Promise<boolea
 async function measureLatency(host: string, port = 443, samples = 5): Promise<LatencyStats> {
   const results: number[] = []
   let lost = 0
+  const deadline = Date.now() + 7000
   for (let i = 0; i < samples; i++) {
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) {
+      lost += samples - i
+      break
+    }
     const start = Date.now()
-    const ok = await probePort(host, port, 3000)
+    const ok = await probePort(host, port, Math.min(3000, Math.max(500, remaining)))
     if (ok) results.push(Date.now() - start)
     else lost++
     // small delay between probes
-    await new Promise(r => setTimeout(r, 80))
+    if (i < samples - 1 && Date.now() + 80 < deadline) {
+      await new Promise(r => setTimeout(r, 80))
+    }
   }
   if (results.length === 0) {
     return { min: 0, avg: 0, max: 0, jitter: 0, loss: 1, samples: [] }

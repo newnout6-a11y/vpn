@@ -4,6 +4,17 @@ const execMock = vi.hoisted(() => vi.fn())
 const execFileMock = vi.hoisted(() => vi.fn())
 const logEventMock = vi.hoisted(() => vi.fn())
 
+;(execMock as any)[Symbol.for('nodejs.util.promisify.custom')] = (cmd: string, opts: unknown) =>
+  new Promise((resolve, reject) => {
+    execMock(cmd, opts, (err: Error | null, stdout: string, stderr: string) => {
+      if (err) {
+        reject(Object.assign(err, { stdout, stderr }))
+        return
+      }
+      resolve({ stdout, stderr })
+    })
+  })
+
 vi.mock('child_process', () => ({
   default: { exec: execMock, execFile: execFileMock },
   exec: execMock,
@@ -41,5 +52,28 @@ describe('runLeakSelfTest coalescing', () => {
 
     expect(a.summary).toBe(b.summary)
     expect(execMock).toHaveBeenCalledTimes(process.platform === 'win32' ? 3 : 2)
+  })
+
+  it('tries another DNS trace endpoint when the first one fails', async () => {
+    execMock.mockImplementation((cmd: string, _opts: unknown, cb: (err: Error | null, stdout: string, stderr: string) => void) => {
+      setTimeout(() => {
+        if (cmd.includes('Get-NetAdapter')) cb(null, '[]', '')
+        else if (cmd.includes('cloudflare.com/cdn-cgi/trace')) cb(new Error('blocked'), '', 'blocked')
+        else if (cmd.includes('one.one.one.one/cdn-cgi/trace')) cb(null, 'ip=1.2.3.4\n', '')
+        else cb(null, '1.2.3.4', '')
+      }, 5)
+      return {}
+    })
+    const { runLeakSelfTest } = await import('./leakSelfTest')
+
+    const result = await runLeakSelfTest()
+
+    expect(result.dnsLeakDetected).toBe(false)
+    expect(execMock.mock.calls.map(([cmd]) => String(cmd))).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('cloudflare.com/cdn-cgi/trace'),
+        expect.stringContaining('one.one.one.one/cdn-cgi/trace')
+      ])
+    )
   })
 })

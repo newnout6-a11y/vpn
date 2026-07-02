@@ -32,6 +32,7 @@ import { connect as tlsConnect } from 'tls'
 import { SocksClient } from 'socks'
 import { logEvent } from './appLogger'
 import { buildBootstrapRouteAttempts, type BootstrapRouteAttempt } from './bootstrapRoute'
+import { cleanupManagedChildPidDirs, removeManagedChildPidFile, writeManagedChildPidFile } from './managedChildProcess'
 import { settingsStore } from './settings'
 import { serverPickerStore, serverGroupsStore } from './sharedStores'
 import { getBundledResource, getDirectProxyPort, pickFreeLocalPort, sanitizeProxyOutbound, tunController } from './tunController'
@@ -41,6 +42,8 @@ const PROBE_TIMEOUT_MS = 4000
 const HY2_PROBE_TIMEOUT_MS = 8000
 const HY2_PROBE_DESTINATION = { host: '1.1.1.1', port: 443 }
 const HEALTH_CHECK_CONCURRENCY = 5
+const HY2_PROBE_DIR_PREFIX = 'vpnte-hy2-probe-'
+const HY2_PROBE_PID_FILE = 'sing-box.pid'
 
 export interface KeyHealthResult {
   profileId: string
@@ -277,9 +280,13 @@ async function checkHysteria2Health(profile: ServerProfile): Promise<KeyHealthRe
   }
 
   const startedAt = Date.now()
-  const workDir = await mkdtemp(join(tmpdir(), 'vpnte-hy2-probe-'))
+  await cleanupManagedChildPidDirs(tmpdir(), HY2_PROBE_DIR_PREFIX, HY2_PROBE_PID_FILE, 'hy2-health-probe', (message, details) => {
+    logEvent('warn', 'key-health', message, details)
+  })
+  const workDir = await mkdtemp(join(tmpdir(), HY2_PROBE_DIR_PREFIX))
   const logPath = join(workDir, 'sing-box.log')
   const configPath = join(workDir, 'sing-box.json')
+  const pidPath = join(workDir, HY2_PROBE_PID_FILE)
   let child: ReturnType<typeof spawn> | null = null
   let childOutput = ''
 
@@ -316,6 +323,15 @@ async function checkHysteria2Health(profile: ServerProfile): Promise<KeyHealthRe
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe']
     })
+    await writeManagedChildPidFile(pidPath, {
+      owner: 'hy2-health-probe',
+      pid: child.pid ?? 0,
+      exePath: getBundledResource('sing-box.exe'),
+      configPath,
+      createdAt: Date.now()
+    }).catch((err) => {
+      logEvent('warn', 'key-health', 'failed to write HY2 probe pidfile', err)
+    })
     child.stdout?.on('data', chunk => { childOutput += chunk.toString() })
     child.stderr?.on('data', chunk => { childOutput += chunk.toString() })
     child.on('error', err => { childOutput += `\n${err.message}` })
@@ -350,6 +366,7 @@ async function checkHysteria2Health(profile: ServerProfile): Promise<KeyHealthRe
     if (child && !child.killed) {
       try { child.kill() } catch { /* ignore */ }
     }
+    await removeManagedChildPidFile(pidPath, child?.pid)
     await rm(workDir, { recursive: true, force: true }).catch(() => undefined)
   }
 }

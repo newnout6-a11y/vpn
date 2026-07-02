@@ -161,7 +161,7 @@ export function deriveRoutingVerdict(input: {
     if (!input.ruHostIp) {
       return {
         verdict: 'partial',
-        message: `Туннель работает (VPN ${input.vpnIp} ≠ прямой ${input.directIp}), но РФ-проверку завершить не удалось — РФ-хост не ответил. Сами по себе зарубежные сайты идут через VPN.`,
+        message: `Туннель работает (VPN ${input.vpnIp} ≠ прямой ${input.directIp}), но Smart-RU runtime-проверка не завершена: нет надежного РФ echo через TUN. Правила маршрутизации проверяются конфиг-тестами, но этот live self-test подтверждает только общий VPN/direct split.`,
         splitWorks: true,
         ruGoesDirect: null
       }
@@ -223,22 +223,13 @@ export async function runRoutingSelfTest(): Promise<RoutingSelfTestResult> {
     socksPort ? directEgressIp(socksPort, 'api.ipify.org', '/') : Promise.resolve(null)
   ])
 
-  // Smart-route check: a known RU host through the SMART (TUN) path. We do this
-  // by resolving the egress IP that gosuslugi/yandex sees. But we can't ask a
-  // pinned IP-checker (those force proxy-out) — instead we read the egress via
-  // the direct SOCKS to a NON-pinned RU echo is unreliable, so we approximate:
-  // the strongest signal we already have is "RU domain → direct-out". We verify
-  // that by routing an IP echo through the TUN while pretending to be an RU
-  // host is not possible per-request. So we compare: an RU-classified request
-  // should match directIp. We use the clash API delay as a reachability proof
-  // and rely on the direct/vpn IP split as the core evidence.
+  // Smart-route check: keep this honest. A real proof needs an RU-domain IP
+  // echo reached through the normal TUN path. Reusing the direct SOCKS path
+  // only proves direct-out works and used to create false "smart RU ok"
+  // confidence, so we return null when no reliable runtime echo is available.
   let ruHostIp: string | null = null
-  if (smartEnabled && socksPort) {
-    // Best-effort: fetch through the direct path to confirm the real IP is
-    // stable, and (separately) confirm an RU host is reachable. The per-site
-    // routing guarantee comes from the config rules (unit-tested); here we
-    // surface the measured RU egress when an RU echo is available.
-    ruHostIp = await ruEgressIp(socksPort)
+  if (smartEnabled) {
+    ruHostIp = await ruEgressIp()
   }
 
   const v = deriveRoutingVerdict({ tunnelActive, vpnIp, directIp, smartEnabled, ruHostIp })
@@ -266,16 +257,11 @@ export async function runRoutingSelfTest(): Promise<RoutingSelfTestResult> {
 }
 
 /**
- * Egress IP for a request that SHOULD be classified RU-direct. We send it
- * through the direct SOCKS port to an RU-hosted plain IP echo (ip-api.com is
- * not RU; we use a small RU echo). Returns the IP the RU echo reports, which —
- * if smart routing works — equals the direct IP. Best-effort: returns null if
- * the RU echo is unreachable.
+ * Egress IP for a request that SHOULD be classified RU-direct. Intentionally
+ * returns null until we have a reliable RU-domain IP echo that can be reached
+ * through the normal TUN path. A direct SOCKS measurement would be a no-op
+ * for Smart-RU and must not be reported as proof.
  */
-async function ruEgressIp(socksPort: number): Promise<string | null> {
-  // 2ip.ru's plain echo and ip.ru-style endpoints are unstable; use the direct
-  // path to api.ipify again as the "real IP" reference. The per-domain routing
-  // correctness is asserted by the config unit tests; this run-time value just
-  // confirms the direct path is consistent.
-  return directEgressIp(socksPort, 'ifconfig.me', '/ip')
+async function ruEgressIp(): Promise<string | null> {
+  return null
 }

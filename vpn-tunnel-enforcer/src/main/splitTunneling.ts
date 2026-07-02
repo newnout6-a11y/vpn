@@ -9,7 +9,7 @@
  * - Register IPC handlers for all SplitTunnelChannels
  */
 
-import { exec as execCb } from 'child_process'
+import { execFile as execFileCb } from 'child_process'
 import { ipcMain, dialog, type IpcMainInvokeEvent } from 'electron'
 import { basename, extname } from 'path'
 import { access } from 'fs/promises'
@@ -17,10 +17,16 @@ import { promisify } from 'util'
 import { randomUUID } from 'crypto'
 import Store from 'electron-store'
 import { logEvent } from './appLogger'
+import { compactForIpcLog } from './ipcLogging'
+import { requireEnum, requireString } from './ipcValidation'
 import { tunController } from './tunController'
 import type { SplitTunnelApp, SplitTunnelConfig } from '../shared/ipc-types'
 
-const exec = promisify(execCb)
+const execFile = promisify(execFileCb)
+
+function encodedPowerShell(script: string): string {
+  return Buffer.from(script, 'utf-16le').toString('base64')
+}
 
 // ─── Persistent Store ────────────────────────────────────────────────────────
 
@@ -113,8 +119,9 @@ Get-ChildItem $basePath -ErrorAction SilentlyContinue | ForEach-Object {
 $results | ConvertTo-Json -Compress
 `
 
-  const { stdout } = await exec(
-    `powershell -NoProfile -ExecutionPolicy Bypass -Command "${psScript.replace(/"/g, '\\"').replace(/\n/g, ' ')}"`,
+  const { stdout } = await execFile(
+    'powershell.exe',
+    ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encodedPowerShell(psScript)],
     { windowsHide: true, timeout: 15000, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 }
   )
 
@@ -304,12 +311,14 @@ export function generateSplitTunnelRouteRules(): Array<Record<string, any>> {
   // Collect process names for direct routing
   const directProcessNames = apps
     .filter((a) => a.rule === 'direct')
-    .map((a) => basename(a.path))
+    .map((a) => normalizeProcessName(a.path))
+    .filter((name): name is string => Boolean(name))
 
   // Collect process names for explicit VPN routing
   const vpnProcessNames = apps
     .filter((a) => a.rule === 'vpn')
-    .map((a) => basename(a.path))
+    .map((a) => normalizeProcessName(a.path))
+    .filter((name): name is string => Boolean(name))
 
   if (directProcessNames.length > 0) {
     rules.push({
@@ -335,7 +344,10 @@ export function generateSplitTunnelRouteRules(): Array<Record<string, any>> {
 export function getDirectProcessNames(): string[] {
   if (!isEnabled()) return []
   const apps = getApps()
-  return apps.filter((a) => a.rule === 'direct').map((a) => basename(a.path))
+  return apps
+    .filter((a) => a.rule === 'direct')
+    .map((a) => normalizeProcessName(a.path))
+    .filter((name): name is string => Boolean(name))
 }
 
 /**
@@ -347,7 +359,10 @@ export function getDirectProcessNames(): string[] {
 export function getVpnProcessNames(): string[] {
   if (!isEnabled()) return []
   const apps = getApps()
-  return apps.filter((a) => a.rule === 'vpn').map((a) => basename(a.path))
+  return apps
+    .filter((a) => a.rule === 'vpn')
+    .map((a) => normalizeProcessName(a.path))
+    .filter((name): name is string => Boolean(name))
 }
 
 // ─── Hot-Reload ──────────────────────────────────────────────────────────────
@@ -392,7 +407,7 @@ function handleLogged<T>(
 ): void {
   ipcMain.handle(channel, async (event, ...args) => {
     const started = Date.now()
-    logEvent('debug', 'ipc', `${channel} started`, { args })
+    logEvent('debug', 'ipc', `${channel} started`, { args: compactForIpcLog(args) })
     try {
       const result = await listener(event, ...args)
       logEvent('debug', 'ipc', `${channel} finished`, { ms: Date.now() - started })
@@ -435,13 +450,15 @@ export function registerSplitTunnelHandlers(): void {
   })
 
   handleLogged('split-tunnel:set-rule', async (_event, appId: string, rule: 'vpn' | 'direct' | 'none') => {
+    appId = requireString(appId, 'appId', { maxLength: 200 })
+    rule = requireEnum(rule, 'rule', ['vpn', 'direct', 'none'])
     setRule(appId, rule)
     // Hot-reload if TUN is active
     await hotReloadIfActive()
   })
 
   handleLogged('split-tunnel:add-app', async (_event, exePath: string) => {
-    let targetPath = exePath
+    let targetPath = typeof exePath === 'string' ? exePath.trim() : ''
     // If no path provided, open a file dialog for the user to select an exe
     if (!targetPath) {
       const { canceled, filePaths } = await dialog.showOpenDialog({
@@ -452,6 +469,7 @@ export function registerSplitTunnelHandlers(): void {
       if (canceled || filePaths.length === 0) return null
       targetPath = filePaths[0]
     }
+    targetPath = requireString(targetPath, 'exePath', { maxLength: 4096 })
     const app = await addApp(targetPath)
     return app
   })
@@ -462,12 +480,14 @@ export function registerSplitTunnelHandlers(): void {
   // The entry is created already set to 'direct'. Hot-reloads if connected so
   // the bypass takes effect without a manual reconnect.
   handleLogged('split-tunnel:add-process', async (_event, rawName: string) => {
+    rawName = requireString(rawName, 'rawName', { maxLength: 260 })
     const entry = addProcessName(rawName)
     await hotReloadIfActive()
     return entry
   })
 
   handleLogged('split-tunnel:remove-app', async (_event, appId: string) => {
+    appId = requireString(appId, 'appId', { maxLength: 200 })
     removeApp(appId)
     // Hot-reload if TUN is active (in case removed app had a rule)
     await hotReloadIfActive()

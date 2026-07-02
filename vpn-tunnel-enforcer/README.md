@@ -8,7 +8,7 @@ Windows Electron app that forces all traffic through a controlled VPN path. Runs
 - **Direct VPN**: imports `vless://`, `trojan://`, `ss://`, `vmess://`, `hysteria2://`, `naive://`, `anytls://`, `shadowtls://`, `tuic://`, sing-box outbound JSON, Clash YAML, Xray JSON, subscription URLs, and `happ://add/...` deep links
 - **Hard mode (TUN)**: Wintun adapter via sing-box with `mixed` TCP stack (native Windows kernel + gVisor UDP), `strict_route` DNS hijack, `route_exclude_address` for private ranges, firewall kill-switch, physical adapter lockdown (IPv6 off + DNS pinning), and `DisableSmartNameResolution` registry hardening
 - **Soft mode (Autoconfig)**: configures Android Studio, Gradle, Git, and `HTTP_PROXY` / `HTTPS_PROXY` environment variables via `setx` (uses `socks5h://` to force DNS through proxy), with rollback support
-- **External proxy mode**: separate sing-box process exposing a mixed HTTP/SOCKS proxy on `127.0.0.1:17990`, controlled via HTTP API on port 17873
+- **External proxy mode**: separate sing-box process exposing a mixed HTTP/SOCKS proxy on `127.0.0.1:17990`, controlled via HTTP API on port 17873 by default
 
 ### Proxy Client Detection
 Automatically detects local proxies from:
@@ -146,7 +146,7 @@ npm test
 
 ## External Proxy Control API
 
-Packaged builds include `vpnte-proxy.ps1` and `vpnte-proxy.cmd`. The app listens on `127.0.0.1:17873`:
+Packaged builds include `vpnte-proxy.ps1` and `vpnte-proxy.cmd`. The app listens on `127.0.0.1:17873` by default. If that port is busy, it falls back to a free loopback port and writes the actual URL to `%APPDATA%\VPN Tunnel Enforcer\external-proxy-control-endpoint.json`.
 
 | Endpoint | Method | Auth | Purpose |
 |---|---|---|---|
@@ -158,7 +158,7 @@ Packaged builds include `vpnte-proxy.ps1` and `vpnte-proxy.cmd`. The app listens
 | `/trigger` | POST | Yes | Fire-and-forget reconnect |
 | `/stop` | POST | Yes | Kill proxy process |
 
-Token: `X-VPNTE-Control-Token` header, generated per session, written to `%APPDATA%\VPN Tunnel Enforcer\external-proxy-control-token`.
+Token: `X-VPNTE-Control-Token` header, generated per session, written to `%APPDATA%\VPN Tunnel Enforcer\external-proxy-control-token`. `vpnte-proxy.ps1` reads the endpoint file automatically and also accepts `VPNTE_CONTROL_URL` as an override.
 
 ## Boot-Time Recovery
 

@@ -9,12 +9,63 @@ interface PendingCommand {
   script: string
 }
 
+export class ElevatedPsHelperError extends Error {
+  constructor(
+    public readonly code: 'elevated-helper-unavailable' | 'elevated-helper-stopped' | 'elevated-helper-exited' | 'elevated-helper-timeout' | 'elevated-helper-script-rejected',
+    message: string
+  ) {
+    super(message)
+    this.name = 'ElevatedPsHelperError'
+  }
+}
+
 let helperProcess: ChildProcess | null = null
 let helperStarting: Promise<void> | null = null
 let commandId = 0
 const pendingCommands = new Map<number, PendingCommand>()
 let restartCount = 0
 const MAX_RESTARTS = 3
+const MAX_SCRIPT_CHARS = 64 * 1024
+const MAX_PENDING_COMMANDS = 8
+
+export type ElevatedPsPolicy = 'firewall-killswitch' | 'physical-adapter-lockdown'
+
+const BLOCKED_SCRIPT_TOKENS = [
+  /\bInvoke-Expression\b/i,
+  /\biex\b/i,
+  /\bStart-Process\b/i,
+  /\bInvoke-WebRequest\b/i,
+  /\biwr\b/i,
+  /\bInvoke-RestMethod\b/i,
+  /\birm\b/i,
+  /\bNew-Object\s+Net\.WebClient\b/i,
+  /\bAdd-Type\b/i,
+  /\bSet-ExecutionPolicy\b/i,
+  /\bStart-BitsTransfer\b/i,
+  /\bRemove-Item\b/i,
+  /\bdel\b/i,
+  /\brm\b/i
+]
+
+const POLICY_REQUIRED_TOKENS: Record<ElevatedPsPolicy, RegExp[]> = {
+  'firewall-killswitch': [
+    /\bGet-NetFirewallProfile\b/i,
+    /\bSet-NetFirewallProfile\b/i,
+    /\bNew-NetFirewallRule\b/i,
+    /\bGet-NetFirewallRule\b/i,
+    /\bRemove-NetFirewallRule\b/i
+  ],
+  'physical-adapter-lockdown': [
+    /\bGet-NetAdapter\b/i,
+    /\bGet-NetAdapterBinding\b/i,
+    /\bDisable-NetAdapterBinding\b/i,
+    /\bEnable-NetAdapterBinding\b/i,
+    /\bSet-DnsClientServerAddress\b/i,
+    /\bClear-DnsClientCache\b/i,
+    /\bnetsh\b/i,
+    /\breg\s+add\b/i
+  ]
+}
 
 const PS_RUNNER_SCRIPT = `
 $ErrorActionPreference = 'Continue'
@@ -115,7 +166,7 @@ export async function startElevatedPsHelper(): Promise<void> {
         for (const [id, pending] of pendingCommands) {
           clearTimeout(pending.timer)
           pendingCommands.delete(id)
-          pending.reject(new Error(`PS helper exited (code=${code}, signal=${signal})`))
+          pending.reject(new ElevatedPsHelperError('elevated-helper-exited', `PS helper exited (code=${code}, signal=${signal})`))
         }
       })
 
@@ -155,17 +206,25 @@ export function stopElevatedPsHelper(): void {
   for (const [id, pending] of pendingCommands) {
     clearTimeout(pending.timer)
     pendingCommands.delete(id)
-    pending.reject(new Error('PS helper stopped'))
+    pending.reject(new ElevatedPsHelperError('elevated-helper-stopped', 'PS helper stopped'))
   }
 }
 
 export async function execElevatedPs(
   script: string,
-  timeoutMs = 30000
+  timeoutMs = 30000,
+  policy: ElevatedPsPolicy
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   if (process.platform !== 'win32') {
     throw new Error('execElevatedPs is only available on Windows')
   }
+  if (script.length > MAX_SCRIPT_CHARS) {
+    throw new Error(`PS helper script is too large (${script.length} chars)`)
+  }
+  if (pendingCommands.size >= MAX_PENDING_COMMANDS) {
+    throw new Error(`PS helper queue is full (${pendingCommands.size} pending)`)
+  }
+  validateScriptPolicy(script, policy)
 
   if (!isElevatedPsHelperRunning()) {
     if (restartCount < MAX_RESTARTS) {
@@ -173,7 +232,7 @@ export async function execElevatedPs(
       await startElevatedPsHelper()
     }
     if (!isElevatedPsHelperRunning()) {
-      throw new Error('PS helper is not running and could not be started')
+      throw new ElevatedPsHelperError('elevated-helper-unavailable', 'PS helper is not running and could not be started')
     }
   }
 
@@ -182,7 +241,7 @@ export async function execElevatedPs(
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       pendingCommands.delete(id)
-      reject(new Error(`PS command timed out after ${timeoutMs}ms: ${script.slice(0, 100)}`))
+      reject(new ElevatedPsHelperError('elevated-helper-timeout', `PS command timed out after ${timeoutMs}ms: ${script.slice(0, 100)}`))
     }, timeoutMs)
 
     pendingCommands.set(id, { resolve, reject, timer, script })
@@ -196,4 +255,21 @@ export async function execElevatedPs(
       reject(new Error(`Failed to write to PS helper stdin: ${err?.message || String(err)}`))
     }
   })
+}
+
+function validateScriptPolicy(script: string, policy: ElevatedPsPolicy): void {
+  for (const token of BLOCKED_SCRIPT_TOKENS) {
+    if (token.test(script)) {
+      throw new ElevatedPsHelperError(
+        'elevated-helper-script-rejected',
+        `PS helper script rejected by ${policy} policy: blocked token ${token.source}`
+      )
+    }
+  }
+  if (!POLICY_REQUIRED_TOKENS[policy].some(token => token.test(script))) {
+    throw new ElevatedPsHelperError(
+      'elevated-helper-script-rejected',
+      `PS helper script rejected by ${policy} policy: no allowed command token found`
+    )
+  }
 }

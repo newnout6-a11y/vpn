@@ -21,6 +21,7 @@ import {
   isKillSwitchActive
 } from './firewallKillSwitch'
 import { logEvent } from './appLogger'
+import { requireEnum, requirePlainObject, requireString } from './ipcValidation'
 import { notify } from './notifications'
 import { settingsStore } from './settings'
 import type { KillSwitchLevel, KillSwitchException } from '../shared/ipc-types'
@@ -90,7 +91,7 @@ function getExceptionIpCidrs(): string[] {
 async function engageKillSwitch(reason: string): Promise<boolean> {
   if (!singboxExePath) {
     logEvent('warn', 'granular-kill-switch', 'cannot engage kill-switch: singboxExePath not set')
-    return false
+    throw new Error('Cannot engage kill-switch before sing-box path is initialized')
   }
 
   const appExceptions = getExceptionAppPaths()
@@ -120,7 +121,7 @@ async function engageKillSwitch(reason: string): Promise<boolean> {
   logEvent('error', 'granular-kill-switch', `failed to engage kill-switch: ${result.message}`, {
     details: result.details
   })
-  return false
+  throw new Error(`Failed to engage kill-switch: ${result.message}`)
 }
 
 /**
@@ -251,7 +252,19 @@ export const granularKillSwitch = {
     }
 
     logEvent('info', 'granular-kill-switch', `level changed: ${previousLevel} → ${level}`)
-    await applyPolicy()
+    try {
+      await applyPolicy()
+    } catch (err) {
+      currentLevel = previousLevel
+      store.set('killSwitchLevel', previousLevel)
+      try {
+        settingsStore.save({ firewallKillSwitch: previousLevel !== 'off' })
+      } catch (rollbackErr) {
+        logEvent('warn', 'granular-kill-switch', 'failed to roll back legacy firewallKillSwitch setting', rollbackErr)
+      }
+      logEvent('error', 'granular-kill-switch', `level change rolled back: failed to apply ${level}`, err)
+      throw err
+    }
   },
 
   /**
@@ -346,6 +359,7 @@ export function registerKillSwitchIpc(): void {
   })
 
   handleLogged('kill-switch:set-level', async (_e, level: KillSwitchLevel) => {
+    level = requireEnum(level, 'level', ['off', 'standard', 'strict'])
     await granularKillSwitch.setLevel(level)
     return { success: true, level }
   })
@@ -355,10 +369,16 @@ export function registerKillSwitchIpc(): void {
   })
 
   handleLogged('kill-switch:add-exception', async (_e, exception: Omit<KillSwitchException, 'id'>) => {
-    return granularKillSwitch.addException(exception)
+    const raw = requirePlainObject(exception, 'exception')
+    return granularKillSwitch.addException({
+      type: requireEnum(raw.type, 'exception.type', ['app', 'ip']),
+      value: requireString(raw.value, 'exception.value', { maxLength: 2048 }),
+      label: requireString(raw.label, 'exception.label', { maxLength: 200 })
+    })
   })
 
   handleLogged('kill-switch:remove-exception', async (_e, id: string) => {
+    id = requireString(id, 'id', { maxLength: 200 })
     granularKillSwitch.removeException(id)
     return { success: true }
   })

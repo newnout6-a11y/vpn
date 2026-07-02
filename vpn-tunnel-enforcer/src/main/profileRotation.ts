@@ -15,6 +15,8 @@
 import { ipcMain, type IpcMainInvokeEvent } from 'electron'
 import Store from 'electron-store'
 import { logEvent } from './appLogger'
+import { compactForIpcLog } from './ipcLogging'
+import { requireBoolean, requireEnum, requireNumber, requirePlainObject, requireStringArray } from './ipcValidation'
 import { notify } from './notifications'
 import { serverPicker, smartOfflinePing } from './serverPicker'
 import { settingsStore } from './settings'
@@ -24,6 +26,7 @@ import type { RotationConfig } from '../shared/ipc-types'
 
 const MIN_INTERVAL_MINUTES = 5
 const MAX_INTERVAL_MINUTES = 1440
+const ROTATION_ORDERS = ['sequential', 'random'] as const
 
 // ─── Pure Functions (exported for testing) ───────────────────────────────────
 
@@ -112,6 +115,7 @@ const store = new Store<RotationStore>({
 // ─── Timer State ─────────────────────────────────────────────────────────────
 
 let rotationTimer: ReturnType<typeof setTimeout> | null = null
+let rotationInProgress = false
 
 // ─── Config Access ───────────────────────────────────────────────────────────
 
@@ -136,6 +140,13 @@ function saveConfig(config: RotationConfig): void {
 async function buildAvailabilityMap(profileIds: string[]): Promise<Record<string, boolean>> {
   const profiles = serverPicker.getProfiles()
   const map: Record<string, boolean> = {}
+  let tunnelRunning = false
+  try {
+    const { tunController } = await import('./tunController')
+    tunnelRunning = tunController.getStatus().running === true
+  } catch {
+    tunnelRunning = false
+  }
 
   for (const id of profileIds) {
     const profile = profiles.find((p) => p.id === id)
@@ -152,6 +163,16 @@ async function buildAvailabilityMap(profileIds: string[]): Promise<Record<string
 
     // Ping the server directly (not through tunnel) — rotation needs
     // per-server reachability, not tunnel RTT which is the same for all.
+    if (tunnelRunning) {
+      logEvent('debug', 'profile-rotation', 'skipping live availability probe while TUN is active', {
+        profileId: id,
+        status: profile.status,
+        lastChecked: profile.lastChecked ?? null
+      })
+      map[id] = false
+      continue
+    }
+
     const latency = await smartOfflinePing(profile.server, profile.port)
     map[id] = latency !== null
   }
@@ -165,6 +186,19 @@ async function buildAvailabilityMap(profileIds: string[]): Promise<Record<string
  * Performs the actual rotation: finds the next available profile and switches to it.
  */
 async function performRotation(): Promise<{ success: boolean; newProfile: string }> {
+  if (rotationInProgress) {
+    logEvent('warn', 'profile-rotation', 'rotation already in progress')
+    return { success: false, newProfile: '' }
+  }
+  rotationInProgress = true
+  try {
+    return await performRotationOnce()
+  } finally {
+    rotationInProgress = false
+  }
+}
+
+async function performRotationOnce(): Promise<{ success: boolean; newProfile: string }> {
   const config = getConfig()
 
   if (config.profileIds.length === 0) {
@@ -314,7 +348,7 @@ function handleLogged<T>(
 ): void {
   ipcMain.handle(channel, async (event, ...args) => {
     const started = Date.now()
-    logEvent('debug', 'ipc', `${channel} started`, { args })
+    logEvent('debug', 'ipc', `${channel} started`, { args: compactForIpcLog(args) })
     try {
       const result = await listener(event, ...args)
       logEvent('debug', 'ipc', `${channel} finished`, { ms: Date.now() - started })
@@ -324,6 +358,37 @@ function handleLogged<T>(
       throw err
     }
   })
+}
+
+function sanitizeRotationConfigPatch(value: unknown): Partial<RotationConfig> {
+  const raw = requirePlainObject(value, 'partial')
+  const patch: Partial<RotationConfig> = {}
+
+  if ('enabled' in raw) patch.enabled = requireBoolean(raw.enabled, 'partial.enabled')
+  if ('intervalMinutes' in raw) {
+    patch.intervalMinutes = requireNumber(raw.intervalMinutes, 'partial.intervalMinutes')
+  }
+  if ('order' in raw) patch.order = requireEnum(raw.order, 'partial.order', ROTATION_ORDERS)
+  if ('profileIds' in raw) {
+    patch.profileIds = requireStringArray(raw.profileIds, 'partial.profileIds', {
+      maxItems: 1000,
+      itemMaxLength: 200
+    })
+  }
+  if ('currentIndex' in raw) {
+    patch.currentIndex = requireNumber(raw.currentIndex, 'partial.currentIndex', {
+      integer: true,
+      min: 0
+    })
+  }
+  if ('nextRotationAt' in raw) {
+    patch.nextRotationAt =
+      raw.nextRotationAt === null
+        ? null
+        : requireNumber(raw.nextRotationAt, 'partial.nextRotationAt', { min: 0 })
+  }
+
+  return patch
 }
 
 /**
@@ -336,6 +401,7 @@ export function registerRotationHandlers(): void {
   })
 
   handleLogged('rotation:set-config', async (_event, partial: Partial<RotationConfig>) => {
+    partial = sanitizeRotationConfigPatch(partial)
     const current = getConfig()
     const updated: RotationConfig = {
       ...current,

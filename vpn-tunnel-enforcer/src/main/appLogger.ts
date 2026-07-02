@@ -16,6 +16,10 @@ export interface LogFileSnapshot {
 
 const MAX_DETAIL_CHARS = 4000
 const MAX_READ_BYTES = 1024 * 1024
+const TOPOLOGY_KEY_RE = /ip|ipv4|ipv6|address|addr|host|hostname|server|proxy|dns|adapter|alias|interface|ifindex|gateway|route|mac|endpoint|url|path/i
+const IPV4_RE = /\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b/g
+const IPV6_RE = /\b(?:[0-9a-f]{1,4}:){2,}[0-9a-f]{1,4}(?:%\w+)?\b/gi
+const MAC_RE = /\b[0-9a-f]{2}(?::[0-9a-f]{2}){5}\b/gi
 
 // Size-based rotation for app.log. Without this the file grows forever —
 // every IPC call logs at debug level, so over weeks of uptime the log can
@@ -75,24 +79,51 @@ function getTunLogDir(): string {
   return join(app.getPath('userData'), 'tun-runtime')
 }
 
+function redactTopologyText(value: string): string {
+  return value
+    .replace(IPV4_RE, '<redacted-ip>')
+    .replace(MAC_RE, '<redacted-mac>')
+    .replace(IPV6_RE, '<redacted-ipv6>')
+}
+
+function redactTopologyValue(value: unknown, key?: string): unknown {
+  const keyLooksSensitive = key ? TOPOLOGY_KEY_RE.test(key) : false
+  if (typeof value === 'string') {
+    const redacted = redactTopologyText(value)
+    return keyLooksSensitive && redacted === value && value.trim() ? '<redacted-topology>' : redacted
+  }
+  if (typeof value === 'number') {
+    return keyLooksSensitive ? '<redacted-topology>' : value
+  }
+  if (Array.isArray(value)) return value.map(item => redactTopologyValue(item, key))
+  if (value && typeof value === 'object') {
+    const result: Record<string, unknown> = {}
+    for (const [childKey, raw] of Object.entries(value as Record<string, unknown>)) {
+      result[childKey] = redactTopologyValue(raw, childKey)
+    }
+    return result
+  }
+  return value
+}
+
 function normalizeDetail(value: unknown): unknown {
   if (value instanceof Error) {
-    return redactSensitiveConfig({
+    return redactTopologyValue(redactSensitiveConfig({
       name: value.name,
       message: value.message,
       stack: value.stack
-    })
+    }))
   }
 
   if (typeof value === 'string') {
-    const redacted = redactSensitiveText(value)
+    const redacted = redactTopologyText(redactSensitiveText(value))
     return redacted.length > MAX_DETAIL_CHARS ? `${redacted.slice(0, MAX_DETAIL_CHARS)}...<truncated>` : redacted
   }
 
   try {
     const raw = JSON.stringify(value)
     if (!raw) return value
-    const redacted = redactSensitiveConfig(value)
+    const redacted = redactTopologyValue(redactSensitiveConfig(value))
     const redactedRaw = JSON.stringify(redacted)
     if (!redactedRaw) return redacted
     if (redactedRaw.length <= MAX_DETAIL_CHARS) return redacted
@@ -103,18 +134,20 @@ function normalizeDetail(value: unknown): unknown {
 }
 
 function formatLine(level: AppLogLevel, scope: string, message: string, details?: unknown): string {
+  const normalizedMessage = redactTopologyText(redactSensitiveText(message))
   return JSON.stringify({
     ts: new Date().toISOString(),
     level,
     scope,
-    message,
+    message: normalizedMessage,
     details
   }) + '\n'
 }
 
 export function logEvent(level: AppLogLevel, scope: string, message: string, details?: unknown): void {
   const normalizedDetails = details === undefined ? undefined : normalizeDetail(details)
-  const line = formatLine(level, scope, message, normalizedDetails)
+  const normalizedMessage = redactTopologyText(redactSensitiveText(message))
+  const line = formatLine(level, scope, normalizedMessage, normalizedDetails)
   const lineBytes = Buffer.byteLength(line, 'utf8')
   queue = queue
     .then(async () => {
@@ -126,7 +159,7 @@ export function logEvent(level: AppLogLevel, scope: string, message: string, det
     })
     .catch(() => undefined)
 
-  const consoleLine = `[${scope}] ${message}`
+  const consoleLine = `[${scope}] ${normalizedMessage}`
   if (level === 'error') console.error(consoleLine, normalizedDetails ?? '')
   else if (level === 'warn') console.warn(consoleLine, normalizedDetails ?? '')
   else console.log(consoleLine, normalizedDetails ?? '')
@@ -181,7 +214,7 @@ function redactJsonLines(content: string): string {
       try {
         return JSON.stringify(redactSensitiveConfig(JSON.parse(line)))
       } catch {
-        return redactSensitiveText(line)
+        return redactTopologyText(redactSensitiveText(line))
       }
     })
     .join('\n')
@@ -202,10 +235,21 @@ function redactSnapshot(snapshot: LogFileSnapshot): LogFileSnapshot {
   }
 
   if (/app(?:\.prev)?\.log$/i.test(snapshot.path)) {
-    return { ...snapshot, content: redactJsonLines(snapshot.content) }
+    const content = redactJsonLines(snapshot.content)
+      .split(/\r?\n/)
+      .map(line => {
+        if (!line.trim()) return line
+        try {
+          return JSON.stringify(redactTopologyValue(JSON.parse(line)))
+        } catch {
+          return redactTopologyText(line)
+        }
+      })
+      .join('\n')
+    return { ...snapshot, content }
   }
 
-  return { ...snapshot, content: redactSensitiveText(snapshot.content) }
+  return { ...snapshot, content: redactTopologyText(redactSensitiveText(snapshot.content)) }
 }
 
 export async function getFullLogs(): Promise<LogFileSnapshot[]> {

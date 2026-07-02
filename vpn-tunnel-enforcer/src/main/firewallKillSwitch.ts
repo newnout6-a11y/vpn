@@ -2,6 +2,7 @@ import { app } from 'electron'
 import { mkdir, readFile, writeFile, unlink, stat, rename } from 'fs/promises'
 import { join } from 'path'
 import { execFile as execFileCb } from 'child_process'
+import { isIP } from 'net'
 import { promisify } from 'util'
 import { execElevated } from './admin'
 import { execElevatedPs, isElevatedPsHelperRunning } from './elevatedPsHelper'
@@ -139,7 +140,7 @@ async function ps(script: string, elevated = false, timeout = 30000) {
       // powershell.exe startup overhead per call.
       if (isElevatedPsHelperRunning()) {
         try {
-          const result = await execElevatedPs(script, timeout)
+          const result = await execElevatedPs(script, timeout, 'firewall-killswitch')
           return { stdout: result.stdout, stderr: result.stderr }
         } catch (err: any) {
           // PS helper failed — fall back to execElevated
@@ -226,23 +227,21 @@ export function isValidIpOrCidr(value: string): boolean {
   const [addr, prefix, ...rest] = v.split('/')
   if (rest.length > 0) return false
 
-  const isIpv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.test(addr)
-  if (isIpv4) {
-    const octets = addr.split('.').map(Number)
-    if (!octets.every((o) => o >= 0 && o <= 255)) return false
+  const ipVersion = isIP(addr)
+  if (ipVersion === 4) {
+    if (addr === '0.0.0.0') return false
     if (prefix !== undefined) {
       const p = Number(prefix)
-      if (!Number.isInteger(p) || p < 0 || p > 32) return false
+      if (!Number.isInteger(p) || p < 1 || p > 32) return false
     }
     return true
   }
 
-  // IPv6: conservative shape check (hex groups + optional :: compression).
-  const isIpv6 = /^[0-9a-fA-F:]+$/.test(addr) && addr.includes(':') && (addr.match(/::/g) || []).length <= 1
-  if (isIpv6) {
+  if (ipVersion === 6) {
+    if (addr === '::') return false
     if (prefix !== undefined) {
       const p = Number(prefix)
-      if (!Number.isInteger(p) || p < 0 || p > 128) return false
+      if (!Number.isInteger(p) || p < 1 || p > 128) return false
     }
     return true
   }
@@ -373,12 +372,12 @@ ${proxyAllowParts.join('\n')}
 # packet into the TUN, which looks like "internet is blocked" even though
 # sing-box itself is allowed.
 # The -InterfaceAlias rule requires the TUN adapter to exist. We poll for it
-# here (up to ~5s) so the entire kill-switch script can be kicked off in
+# here (up to ~15s) so the entire kill-switch script can be kicked off in
 # parallel with the JS-side waitForTunInterface, saving ~2-3s of sequential
 # waiting. If the adapter never appears, we skip this rule rather than
 # blocking the whole script.
 $tunAliasFound = $false
-for ($i = 0; $i -lt 50; $i++) {
+for ($i = 0; $i -lt 150; $i++) {
   $a = Get-NetAdapter -Name '${TUN_ADAPTER_ALIAS}' -ErrorAction SilentlyContinue
   if ($a -and $a.Status -eq 'Up') { $tunAliasFound = $true; break }
   Start-Sleep -Milliseconds 100
@@ -394,7 +393,7 @@ if ($tunAliasFound) {
     $rules += ${psSingleQuote(tunInterfaceAllow)}
   } catch { Write-Output "WARN allow-tun-interface: $_" }
 } else {
-  Write-Output "WARN allow-tun-interface: adapter not found after 5s"
+  Write-Output "WARN allow-tun-interface: adapter not found after 15s"
 }
 
 # 3d. Allow IPv4 LAN ranges outbound (printers, NAS, router, mDNS).
@@ -434,12 +433,22 @@ try {
 ${extraIpAllowPart}
 
 # --- Step 4: Set DefaultOutboundAction=Block ---
-# Only set Block if at least one Allow rule was created. If all rule
-# creations failed, setting Block would lock the user out of the internet
-# with no Allow rules — a dangerous state with no recovery.
-if ($rules.Count -eq 0) {
-  Write-Output "FATAL: no allow rules created — aborting before Block"
-  throw "No allow rules were created. Aborting to prevent total internet lockdown."
+# Only set Block if the required allow-list core exists. A single optional
+# Allow rule is not enough: with DefaultOutboundAction=Block, missing sing-box
+# or TUN-interface allows can wedge all app traffic until recovery runs.
+$requiredRules = @(
+  ${psSingleQuote(singboxAllow)},
+  ${psSingleQuote(tunInterfaceAllow)},
+  ${psSingleQuote(lanAllow)},
+  ${psSingleQuote(tunAllow)},
+  ${psSingleQuote(dhcpAllow)}
+)
+$missingRequired = @($requiredRules | Where-Object { $rules -notcontains $_ })
+if ($missingRequired.Count -gt 0) {
+  Write-Output ("FATAL: missing required allow rules before Block: " + ($missingRequired -join ','))
+  Get-NetFirewallRule -DisplayName '${RULE_PREFIX}*' -ErrorAction SilentlyContinue |
+    Remove-NetFirewallRule -ErrorAction SilentlyContinue
+  throw ("Missing required allow rules before DefaultOutboundAction=Block: " + ($missingRequired -join ','))
 }
 try {
   Set-NetFirewallProfile -Profile Domain,Private,Public -DefaultOutboundAction Block

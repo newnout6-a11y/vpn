@@ -43,9 +43,11 @@ vi.mock('./tunController', () => ({
 
 // Import after mocks
 import {
+  addProcessName,
   generateSplitTunnelRouteRules,
   getDirectProcessNames,
-  getVpnProcessNames
+  getVpnProcessNames,
+  normalizeProcessName
 } from './splitTunneling'
 
 describe('splitTunneling', () => {
@@ -67,6 +69,19 @@ describe('splitTunneling', () => {
     it('returns empty array when no apps have vpn rule', () => {
       const names = getVpnProcessNames()
       expect(names).toEqual([])
+    })
+  })
+
+  describe('process name normalization', () => {
+    it('appends .exe for bare command entries and uses normalized names in rules', () => {
+      expect(normalizeProcessName('curl')).toBe('curl.exe')
+      const entry = addProcessName('yt-dlp')
+
+      expect(entry.path).toBe('yt-dlp.exe')
+      expect(getDirectProcessNames()).toContain('yt-dlp.exe')
+      expect(generateSplitTunnelRouteRules()).toEqual([
+        { process_name: ['yt-dlp.exe'], outbound: 'direct-out' }
+      ])
     })
   })
 })

@@ -23,7 +23,9 @@
  * pure and don't touch any of it.
  */
 
-import { describe, it, expect, vi } from 'vitest'
+import { beforeEach, describe, it, expect, vi } from 'vitest'
+import axios from 'axios'
+import { exec as childExec } from 'child_process'
 
 vi.mock('electron', () => ({
   app: { getPath: () => '/tmp/vpnte-test', getAppPath: () => '/tmp/vpnte-test/app', isPackaged: false }
@@ -39,18 +41,24 @@ vi.mock('axios', () => ({
   default: { get: vi.fn(async () => ({ data: { ip: '198.51.100.1' } })) },
   get: vi.fn(async () => ({ data: { ip: '198.51.100.1' } }))
 }))
-vi.mock('child_process', () => ({
-  default: {
-    exec: vi.fn((_cmd: string, _opts: any, cb: Function) => {
-      if (cb) cb(null, { stdout: '[]', stderr: '' })
-      return { stdout: '[]', stderr: '' }
-    })
-  },
-  exec: vi.fn((_cmd: string, _opts: any, cb: Function) => {
-    if (cb) cb(null, { stdout: '[]', stderr: '' })
-    return { stdout: '[]', stderr: '' }
+vi.mock('child_process', () => {
+  const exec = vi.fn((_cmd: string, _opts: any, cb: Function) => {
+    if (cb) cb(null, '[]', '')
+    return {} as any
   })
-}))
+  ;(exec as any)[Symbol.for('nodejs.util.promisify.custom')] = (cmd: string, opts: any) =>
+    new Promise((resolve, reject) => {
+      exec(cmd, opts, (err: any, stdout: string, stderr: string) => {
+        if (err) {
+          err.stderr = stderr
+          reject(err)
+          return
+        }
+        resolve({ stdout, stderr })
+      })
+    })
+  return { default: { exec }, exec }
+})
 vi.mock('fs/promises', () => ({
   default: { readFile: vi.fn(async () => '') },
   readFile: vi.fn(async () => '')
@@ -67,7 +75,17 @@ vi.mock('./tunController', () => ({
   probeTcp: vi.fn(async () => false)
 }))
 
-import { classifyDirectPublic, isBenignBlockLine, extractRealErrors, summarizeSingboxLog, dnsTypeName, runLeakCheck } from './leakDiagnostics'
+import { classifyDirectPublic, isBenignBlockLine, extractRealErrors, summarizeSingboxLog, dnsTypeName, getPublicIpV4, getPublicIpV6, runLeakCheck } from './leakDiagnostics'
+
+beforeEach(() => {
+  vi.mocked(axios.get).mockReset()
+  vi.mocked(axios.get).mockResolvedValue({ data: { ip: '198.51.100.1' } })
+  vi.mocked(childExec).mockReset()
+  vi.mocked(childExec).mockImplementation((_cmd: string, _opts: any, cb: Function) => {
+    if (cb) cb(null, '[]', '')
+    return {} as any
+  })
+})
 
 // Real-shaped excerpt from the user's 16-20 diagnostic: Yandex/VK going direct
 // via geoip-ru, and a benign block-out UDP error.
@@ -121,6 +139,15 @@ describe('classifyDirectPublic', () => {
     expect(r.smartRuCount).toBe(0)
     expect(r.allowedCoreCount).toBe(0)
   })
+
+  it('reports unparsed direct-out lines so log format drift is not silently green', () => {
+    const log = [
+      '+0300 x INFO [999 0ms] outbound/direct[direct-out]: dial tcp example.com:443'
+    ].join('\n')
+    const r = classifyDirectPublic(log)
+    expect(r.leakedCount).toBe(0)
+    expect(r.unparsedDirectCount).toBe(1)
+  })
 })
 
 describe('isBenignBlockLine / extractRealErrors', () => {
@@ -148,6 +175,14 @@ describe('isBenignBlockLine / extractRealErrors', () => {
   it('returns [] for a clean log', () => {
     const log = [
       '+0300 x INFO [1 0ms] outbound/direct[direct-out]: outbound connection to 77.88.21.24:443'
+    ].join('\n')
+    expect(extractRealErrors(log)).toEqual([])
+  })
+
+  it('does not treat plain INFO text containing timeout/failed as a real error', () => {
+    const log = [
+      '+0300 x INFO [1 0ms] health: last timeout was recovered',
+      '+0300 x INFO [2 0ms] route: failed probes from previous session ignored'
     ].join('\n')
     expect(extractRealErrors(log)).toEqual([])
   })
@@ -200,6 +235,40 @@ describe('dnsTypeName', () => {
 
   it('falls back to "type N" for unknown numeric codes', () => {
     expect(dnsTypeName(999)).toBe('type 999')
+  })
+})
+
+describe('getPublicIpV6', () => {
+  it('falls back to the next IPv6 endpoint when api6.ipify is blocked', async () => {
+    vi.mocked(axios.get)
+      .mockRejectedValueOnce(new Error('blocked'))
+      .mockResolvedValueOnce({ data: { address: '2001:db8::42' } })
+
+    await expect(getPublicIpV6()).resolves.toBe('2001:db8::42')
+  })
+})
+
+describe('getPublicIpV4', () => {
+  it('falls back to PowerShell Invoke-RestMethod when axios and curl fail', async () => {
+    vi.mocked(axios.get).mockRejectedValue(new Error('blocked'))
+    vi.mocked(childExec).mockImplementation((cmd: string, _opts: any, cb: Function) => {
+      if (String(cmd).toLowerCase().includes('powershell')) {
+        cb(null, '198.51.100.77\n', '')
+        return {} as any
+      }
+      cb(new Error('curl missing'), '', 'curl missing')
+      return {} as any
+    })
+
+    const ip = await getPublicIpV4()
+    const commands = vi.mocked(childExec).mock.calls.map(([cmd]) => String(cmd))
+    expect(commands).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('curl.exe'),
+        expect.stringContaining('powershell')
+      ])
+    )
+    expect(ip).toBe('198.51.100.77')
   })
 })
 

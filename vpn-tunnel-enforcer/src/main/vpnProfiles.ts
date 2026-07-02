@@ -356,19 +356,30 @@ function firstPortFromRangeList(value: string | null): string | null {
 function normalizeHysteria2ServerPorts(value: string | null): string | undefined {
   if (!value) return undefined
   const trimmed = value.trim()
-  if (!trimmed || trimmed.includes(',')) return undefined
-  const match = trimmed.match(/^(\d{1,5})\s*[-:]\s*(\d{1,5})$/)
-  if (!match) return undefined
-  const start = Number(match[1])
-  const end = Number(match[2])
-  if (!Number.isInteger(start) || !Number.isInteger(end) || start <= 0 || end <= 0 || start > 65535 || end > 65535 || end < start) {
-    return undefined
-  }
-  return `${start}:${end}`
+  if (!trimmed) return undefined
+  const normalized = trimmed.split(',').map((part) => {
+    const item = part.trim()
+    if (!item) return null
+    const single = item.match(/^(\d{1,5})$/)
+    if (single) {
+      const port = Number(single[1])
+      return Number.isInteger(port) && port > 0 && port <= 65535 ? String(port) : null
+    }
+    const range = item.match(/^(\d{1,5})\s*[-:]\s*(\d{1,5})$/)
+    if (!range) return null
+    const start = Number(range[1])
+    const end = Number(range[2])
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start <= 0 || end <= 0 || start > 65535 || end > 65535 || end < start) {
+      return null
+    }
+    return `${start}:${end}`
+  })
+  if (normalized.some(item => !item)) return undefined
+  return normalized.join(',')
 }
 
 function hysteria2ServerPortsToUri(value: string): string {
-  return value.replace(/^(\d{1,5}):(\d{1,5})$/, '$1-$2')
+  return value.split(',').map(part => part.trim().replace(/^(\d{1,5}):(\d{1,5})$/, '$1-$2')).join(',')
 }
 
 function buildEchFromParams(params: URLSearchParams): Record<string, any> | undefined {

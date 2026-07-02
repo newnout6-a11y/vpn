@@ -1,4 +1,4 @@
-import { exec as execCb } from 'child_process'
+import { execFile as execFileCb } from 'child_process'
 import { existsSync } from 'fs'
 import { copyFile, mkdir, readFile, readdir, unlink, writeFile } from 'fs/promises'
 import { app } from 'electron'
@@ -6,7 +6,7 @@ import { basename, dirname, join } from 'path'
 import { promisify } from 'util'
 import { logEvent } from './appLogger'
 
-const exec = promisify(execCb)
+const execFile = promisify(execFileCb)
 
 export interface BrowserHardeningResult {
   success: boolean
@@ -118,8 +118,8 @@ function chromiumTargets(): ChromiumTarget[] {
   ]
 }
 
-async function run(command: string): Promise<{ stdout: string; stderr: string }> {
-  return exec(command, {
+async function reg(args: string[]): Promise<{ stdout: string; stderr: string }> {
+  return execFile('reg.exe', args, {
     windowsHide: true,
     timeout: 15000,
     maxBuffer: 1024 * 1024,
@@ -129,7 +129,7 @@ async function run(command: string): Promise<{ stdout: string; stderr: string }>
 
 async function exportKey(key: string, file: string): Promise<string | null> {
   try {
-    await run(`reg export "${key}" "${file}" /y`)
+    await reg(['export', key, file, '/y'])
     return file
   } catch {
     return null
@@ -138,7 +138,7 @@ async function exportKey(key: string, file: string): Promise<string | null> {
 
 async function queryValue(key: string, value: string): Promise<string | null> {
   try {
-    const { stdout } = await run(`reg query "${key}" /v ${value}`)
+    const { stdout } = await reg(['query', key, '/v', value])
     const line = stdout.split(/\r?\n/).find(l => l.includes(value))
     if (!line) return null
     const parts = line.trim().split(/\s{2,}/)
@@ -218,21 +218,44 @@ async function activeChromiumTargets(): Promise<ChromiumTarget[]> {
 
 async function applyChromiumPolicy(target: ChromiumTarget, details: string[]): Promise<boolean> {
   let changed = false
+  const verifiedKeys: string[] = []
   for (const key of target.policyKeys) {
     try {
       const current = await queryValue(key, WEBRTC_POLICY.name)
       if (current === WEBRTC_POLICY.data) {
+        verifiedKeys.push(key)
         details.push(`${target.name}: policy ${key}\\${WEBRTC_POLICY.name} уже применена`)
         continue
       }
-      await run(`reg add "${key}" /v ${WEBRTC_POLICY.name} /t ${WEBRTC_POLICY.type} /d ${WEBRTC_POLICY.data} /f`)
-      details.push(`${target.name}: policy ${key}\\${WEBRTC_POLICY.name}=${WEBRTC_POLICY.data}`)
+      await reg(['add', key, '/v', WEBRTC_POLICY.name, '/t', WEBRTC_POLICY.type, '/d', WEBRTC_POLICY.data, '/f'])
+      const verified = await queryValue(key, WEBRTC_POLICY.name)
+      if (verified === WEBRTC_POLICY.data) {
+        verifiedKeys.push(key)
+        details.push(`${target.name}: policy ${key}\\${WEBRTC_POLICY.name}=${WEBRTC_POLICY.data}`)
+      } else {
+        details.push(`${target.name}: policy ${key}\\${WEBRTC_POLICY.name} write was not confirmed by read-back`)
+      }
       changed = true
     } catch (err: any) {
       details.push(`${target.name}: не удалось записать policy ${key}: ${err?.message || String(err)}`)
     }
   }
+  if (
+    verifiedKeys.some(key => key.startsWith('HKCU\\')) &&
+    !verifiedKeys.some(key => key.startsWith('HKLM\\'))
+  ) {
+    details.push(`${target.name}: only HKCU WebRTC policy was confirmed; HKLM policy was not confirmed`)
+  }
   return changed
+}
+
+function stringifyJsonLikeOriginal(data: unknown, original: string): string {
+  const hasNewlines = /\r?\n/.test(original)
+  const trailingNewline = original.endsWith('\n') || original.endsWith('\r\n')
+  if (!hasNewlines) return JSON.stringify(data)
+  const indentMatch = original.match(/\n([ \t]+)"/)
+  const indent: string | number = indentMatch ? indentMatch[1] : 2
+  return JSON.stringify(data, null, indent) + (trailingNewline ? '\n' : '')
 }
 
 async function applyChromiumPreferences(target: ChromiumTarget, manifest: BackupManifest, details: string[]): Promise<boolean> {
@@ -255,7 +278,7 @@ async function applyChromiumPreferences(target: ChromiumTarget, manifest: Backup
         continue
       }
       await addFileBackup(manifest, prefsPath)
-      await writeFile(prefsPath, JSON.stringify(data), 'utf8')
+      await writeFile(prefsPath, stringifyJsonLikeOriginal(data, raw), 'utf8')
       details.push(`${target.name}: обновлён ${prefsPath}`)
       changed = true
     } catch (err: any) {
@@ -380,9 +403,9 @@ export async function rollbackBrowserLeakProtection(): Promise<BrowserHardeningR
   const details: string[] = []
   for (const item of manifest.registryBackups) {
     try {
-      await run(`reg delete "${item.key}" /v ${WEBRTC_POLICY.name} /f`).catch(() => ({ stdout: '', stderr: '' }))
+      await reg(['delete', item.key, '/v', WEBRTC_POLICY.name, '/f']).catch(() => ({ stdout: '', stderr: '' }))
       if (item.backupPath && existsSync(item.backupPath)) {
-        await run(`reg import "${item.backupPath}"`)
+        await reg(['import', item.backupPath])
         details.push(`Registry восстановлен: ${item.key}`)
       } else {
         details.push(`Registry policy удалена: ${item.key}\\${WEBRTC_POLICY.name}`)
@@ -393,6 +416,10 @@ export async function rollbackBrowserLeakProtection(): Promise<BrowserHardeningR
   }
   for (const item of manifest.fileBackups) {
     try {
+      if (item.existed && (!item.backupPath || !existsSync(item.backupPath))) {
+        details.push(`Skipped restore for existing file without backup: ${item.path}`)
+        continue
+      }
       if (item.existed && item.backupPath && existsSync(item.backupPath)) {
         await copyFile(item.backupPath, item.path)
         details.push(`Файл восстановлен: ${item.path}`)

@@ -1,7 +1,7 @@
-import { exec } from 'child_process'
+import { execFile } from 'child_process'
 import { promisify } from 'util'
 
-const execAsync = promisify(exec)
+const execFileAsync = promisify(execFile)
 
 function proxyUrl(proxyAddr: string, proxyType: 'socks5' | 'http'): string {
   const [host, port] = proxyAddr.split(':')
@@ -12,6 +12,26 @@ function proxyUrl(proxyAddr: string, proxyType: 'socks5' | 'http'): string {
   return proxyType === 'socks5' ? `socks5h://${host}:${port}` : `http://${host}:${port}`
 }
 
+async function broadcastEnvironmentChanged(): Promise<void> {
+  const script = [
+    '$sig = \'[DllImport("user32.dll", SetLastError=true, CharSet=CharSet.Auto)] public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);\'',
+    '$type = Add-Type -MemberDefinition $sig -Name Win32SendMessageTimeout -Namespace Native -PassThru',
+    '$result = [UIntPtr]::Zero',
+    '$null = $type::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, "Environment", 2, 5000, [ref]$result)'
+  ].join(';')
+  await execFileAsync('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], {
+    windowsHide: true,
+    timeout: 10000
+  }).catch(() => undefined)
+}
+
+async function deleteUserEnvValue(name: string): Promise<void> {
+  await execFileAsync('reg', ['delete', 'HKCU\\Environment', '/v', name, '/f'], {
+    windowsHide: true,
+    timeout: 10000
+  }).catch(() => undefined)
+}
+
 export const env = {
   name: 'Environment Variables',
 
@@ -19,10 +39,15 @@ export const env = {
     const url = proxyUrl(proxyAddr, proxyType)
     try {
       // Set user-level environment variables (survives reboot)
-      await execAsync(`setx HTTP_PROXY "${url}"`)
-      await execAsync(`setx HTTPS_PROXY "${url}"`)
-      await execAsync(`setx ALL_PROXY "${url}"`)
-      await execAsync(`setx NO_PROXY "localhost,127.0.0.1,::1"`)
+      await execFileAsync('setx', ['HTTP_PROXY', url], { windowsHide: true, timeout: 10000 })
+      await execFileAsync('setx', ['HTTPS_PROXY', url], { windowsHide: true, timeout: 10000 })
+      await execFileAsync('setx', ['ALL_PROXY', url], { windowsHide: true, timeout: 10000 })
+      await execFileAsync('setx', ['NO_PROXY', 'localhost,127.0.0.1,::1'], { windowsHide: true, timeout: 10000 })
+      process.env.HTTP_PROXY = url
+      process.env.HTTPS_PROXY = url
+      process.env.ALL_PROXY = url
+      process.env.NO_PROXY = 'localhost,127.0.0.1,::1'
+      await broadcastEnvironmentChanged()
       return true
     } catch {
       return false
@@ -32,10 +57,15 @@ export const env = {
   async rollback(): Promise<boolean> {
     try {
       // Delete user-level environment variables
-      await execAsync('reg delete "HKCU\\Environment" /v HTTP_PROXY /f 2>nul || echo ok')
-      await execAsync('reg delete "HKCU\\Environment" /v HTTPS_PROXY /f 2>nul || echo ok')
-      await execAsync('reg delete "HKCU\\Environment" /v ALL_PROXY /f 2>nul || echo ok')
-      await execAsync('reg delete "HKCU\\Environment" /v NO_PROXY /f 2>nul || echo ok')
+      await deleteUserEnvValue('HTTP_PROXY')
+      await deleteUserEnvValue('HTTPS_PROXY')
+      await deleteUserEnvValue('ALL_PROXY')
+      await deleteUserEnvValue('NO_PROXY')
+      delete process.env.HTTP_PROXY
+      delete process.env.HTTPS_PROXY
+      delete process.env.ALL_PROXY
+      delete process.env.NO_PROXY
+      await broadcastEnvironmentChanged()
       return true
     } catch {
       return false
@@ -44,7 +74,11 @@ export const env = {
 
   async isApplied(): Promise<boolean> {
     try {
-      const { stdout } = await execAsync('reg query "HKCU\\Environment" /v HTTP_PROXY 2>nul')
+      const { stdout } = await execFileAsync('reg', ['query', 'HKCU\\Environment', '/v', 'HTTP_PROXY'], {
+        windowsHide: true,
+        timeout: 10000,
+        encoding: 'utf8'
+      }) as { stdout: string; stderr: string }
       return stdout.includes('HTTP_PROXY')
     } catch {
       return false

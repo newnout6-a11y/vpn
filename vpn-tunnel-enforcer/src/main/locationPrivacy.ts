@@ -1,11 +1,11 @@
 import { app } from 'electron'
-import { exec as execCb } from 'child_process'
+import { execFile as execFileCb } from 'child_process'
 import { mkdir, readFile, writeFile } from 'fs/promises'
 import { join } from 'path'
 import { promisify } from 'util'
 import { execElevated } from './admin'
 
-const exec = promisify(execCb)
+const execFile = promisify(execFileCb)
 
 const HKCU_LOCATION = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\location'
 const HKLM_LOCATION = 'HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\LocationAndSensors'
@@ -39,8 +39,13 @@ function timestamp() {
   return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`
 }
 
-async function run(command: string): Promise<{ stdout: string; stderr: string }> {
-  return exec(command, { windowsHide: true, timeout: 30000, maxBuffer: 1024 * 1024 })
+async function reg(args: string[]): Promise<{ stdout: string; stderr: string }> {
+  return execFile('reg.exe', args, {
+    windowsHide: true,
+    timeout: 30000,
+    maxBuffer: 1024 * 1024,
+    encoding: 'utf8'
+  }) as Promise<{ stdout: string; stderr: string }>
 }
 
 function runElevated(command: string): Promise<void> {
@@ -49,7 +54,7 @@ function runElevated(command: string): Promise<void> {
 
 async function exportKey(key: string, file: string): Promise<string | null> {
   try {
-    await run(`reg export "${key}" "${file}" /y`)
+    await reg(['export', key, file, '/y'])
     return file
   } catch {
     return null
@@ -76,7 +81,7 @@ async function readManifest(): Promise<BackupManifest | null> {
 
 async function queryValue(key: string, value: string): Promise<string | null> {
   try {
-    const { stdout } = await run(`reg query "${key}" /v ${value}`)
+    const { stdout } = await reg(['query', key, '/v', value])
     const line = stdout.split(/\r?\n/).find(l => l.includes(value))
     if (!line) return null
     const parts = line.trim().split(/\s{2,}/)
@@ -114,7 +119,7 @@ export async function applyLocationPrivacy(): Promise<LocationPrivacyStatus> {
   if (!manifest.hkcuBackup) {
     throw new Error('Не удалось создать backup. Настройки местоположения не были изменены.')
   }
-  await run(`reg add "${HKCU_LOCATION}" /v Value /t REG_SZ /d Deny /f`)
+  await reg(['add', HKCU_LOCATION, '/v', 'Value', '/t', 'REG_SZ', '/d', 'Deny', '/f'])
   await runElevated(
     `reg add "${HKLM_LOCATION}" /v DisableLocation /t REG_DWORD /d 1 /f && ` +
     `reg add "${HKLM_LOCATION}" /v DisableWindowsLocationProvider /t REG_DWORD /d 1 /f`
@@ -126,9 +131,9 @@ export async function rollbackLocationPrivacy(): Promise<LocationPrivacyStatus> 
   const manifest = await readManifest()
 
   if (manifest?.hkcuBackup) {
-    await run(`reg import "${manifest.hkcuBackup}"`).catch(() => undefined)
+    await reg(['import', manifest.hkcuBackup]).catch(() => undefined)
   } else {
-    await run(`reg delete "${HKCU_LOCATION}" /v Value /f`).catch(() => undefined)
+    await reg(['delete', HKCU_LOCATION, '/v', 'Value', '/f']).catch(() => undefined)
   }
 
   if (manifest?.hklmBackup) {

@@ -6,11 +6,33 @@ param(
   [switch]$Json
 )
 
-$control = "http://127.0.0.1:17873"
 $format = if ($Json) { "" } else { "&format=text" }
 $tokenFile = Join-Path $env:APPDATA "VPN Tunnel Enforcer\external-proxy-control-token"
+$endpointFile = Join-Path $env:APPDATA "VPN Tunnel Enforcer\external-proxy-control-endpoint.json"
+$control = "http://127.0.0.1:17873"
+
+function Get-VpnteControlUrl {
+  if ($env:VPNTE_CONTROL_URL) {
+    return $env:VPNTE_CONTROL_URL.TrimEnd("/")
+  }
+  if (Test-Path $endpointFile) {
+    try {
+      $endpoint = Get-Content -LiteralPath $endpointFile -Raw | ConvertFrom-Json
+      if ($endpoint.url) {
+        return ([string]$endpoint.url).TrimEnd("/")
+      }
+      if ($endpoint.host -and $endpoint.port) {
+        return "http://$($endpoint.host):$($endpoint.port)"
+      }
+    } catch {
+      # Fall back to the default control port below.
+    }
+  }
+  return "http://127.0.0.1:17873"
+}
 
 function Test-VpnteApi {
+  $script:control = Get-VpnteControlUrl
   try {
     Invoke-RestMethod -Method Get -Uri "$control/status?format=text" -TimeoutSec 2 | Out-Null
     return $true

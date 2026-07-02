@@ -36,7 +36,7 @@ import { join } from 'path'
 import { execElevated } from './admin'
 import { execElevatedPs, isElevatedPsHelperRunning } from './elevatedPsHelper'
 import { logEvent } from './appLogger'
-import { TUN_ADAPTER_ALIAS, TUN_IPV4_GATEWAY, TUN_IPV4_RESOLVER } from './tunAdapter'
+import { LEGACY_TUN_IPV4_PREFIX, TUN_ADAPTER_ALIAS, TUN_IPV4_GATEWAY, TUN_IPV4_PREFIX, TUN_IPV4_RESOLVER } from './tunAdapter'
 
 const MANIFEST_BASENAME = 'latest-physical-adapter-lockdown.json'
 
@@ -156,7 +156,7 @@ async function runPS(script: string, timeoutMs = 30000): Promise<string> {
   // powershell.exe startup overhead per call.
   if (isElevatedPsHelperRunning()) {
     try {
-      const result = await execElevatedPs(utf8Prefix + script, timeoutMs)
+      const result = await execElevatedPs(utf8Prefix + script, timeoutMs, 'physical-adapter-lockdown')
       return result.stdout
     } catch {
       // PS helper failed — fall back to execElevated
@@ -292,9 +292,15 @@ try { netsh interface isatap set state state=disabled | Out-Null; Write-Output '
   return warnings
 }
 
-function netshState(value: string | null, fallback = 'default'): string {
-  const normalized = (value || fallback).toLowerCase()
-  return /^[a-z]+$/.test(normalized) ? normalized : fallback
+function netshState(value: string | null): string | null {
+  const normalized = String(value || '').trim().toLowerCase()
+  return /^[a-z]+$/.test(normalized) ? normalized : null
+}
+
+function netshRestoreLine(tag: string, command: string, value: string | null): string {
+  const state = netshState(value)
+  if (!state) return `Write-Output '${tag}:unknown'`
+  return `try { ${command}${state} | Out-Null; Write-Output '${tag}:restore' } catch { Write-Output "${tag}_err: $_" }`
 }
 
 /**
@@ -466,13 +472,10 @@ ${dnsRestoreLine}
   }
 
   if (m.transitionAdapters) {
-    const teredoType = netshState(m.transitionAdapters.teredoType)
-    const sixToFourState = netshState(m.transitionAdapters.sixToFourState)
-    const isatapState = netshState(m.transitionAdapters.isatapState)
     combinedScript += `
-try { netsh interface teredo set state type=${teredoType} | Out-Null; Write-Output 'TRANS_teredo:restore' } catch { Write-Output "TRANS_teredo_err: $_" }
-try { netsh interface 6to4 set state state=${sixToFourState} | Out-Null; Write-Output 'TRANS_6to4:restore' } catch { Write-Output "TRANS_6to4_err: $_" }
-try { netsh interface isatap set state state=${isatapState} | Out-Null; Write-Output 'TRANS_isatap:restore' } catch { Write-Output "TRANS_isatap_err: $_" }
+${netshRestoreLine('TRANS_teredo', 'netsh interface teredo set state type=', m.transitionAdapters.teredoType)}
+${netshRestoreLine('TRANS_6to4', 'netsh interface 6to4 set state state=', m.transitionAdapters.sixToFourState)}
+${netshRestoreLine('TRANS_isatap', 'netsh interface isatap set state state=', m.transitionAdapters.isatapState)}
 `
   }
   combinedScript += `
@@ -495,12 +498,17 @@ try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}`
       }
     }
     if (m.transitionAdapters) {
-      const teredoOk = /TRANS_teredo:restore/.test(out)
-      const sixTo4Ok = /TRANS_6to4:restore/.test(out)
-      const isatapOk = /TRANS_isatap:restore/.test(out)
+      const teredoUnknown = /TRANS_teredo:unknown/.test(out)
+      const sixTo4Unknown = /TRANS_6to4:unknown/.test(out)
+      const isatapUnknown = /TRANS_isatap:unknown/.test(out)
+      const teredoOk = /TRANS_teredo:restore/.test(out) || teredoUnknown
+      const sixTo4Ok = /TRANS_6to4:restore/.test(out) || sixTo4Unknown
+      const isatapOk = /TRANS_isatap:restore/.test(out) || isatapUnknown
       if (!teredoOk || !sixTo4Ok || !isatapOk) {
         logEvent('warn', 'phys-lockdown', 'partial transition adapter rollback', { reason, teredoOk, sixTo4Ok, isatapOk })
         rollbackSuccess = false
+      } else if (teredoUnknown || sixTo4Unknown || isatapUnknown) {
+        logEvent('warn', 'phys-lockdown', 'transition adapter prior state unknown; left disabled instead of restoring default', { reason, teredoUnknown, sixTo4Unknown, isatapUnknown })
       } else {
         logEvent('info', 'phys-lockdown', 'transition adapters restored', { reason })
       }
@@ -525,6 +533,7 @@ export async function repairOrphanedPhysicalAdapterDns(reason: string): Promise<
   const script = `
 $ErrorActionPreference = 'SilentlyContinue'
 $vpnteDns = @('${TUN_IPV4_GATEWAY}', '${TUN_IPV4_RESOLVER}')
+$vpnteDnsPrefixes = @('${TUN_IPV4_PREFIX}', '${LEGACY_TUN_IPV4_PREFIX}')
 $tunUp = Get-NetAdapter -ErrorAction SilentlyContinue |
   Where-Object { $_.Status -eq 'Up' -and ($_.Name -eq '${TUN_ADAPTER_ALIAS}' -or $_.InterfaceDescription -match 'VPNTE') } |
   Select-Object -First 1
@@ -541,7 +550,11 @@ $adapters = Get-NetAdapter |
   }
 foreach ($a in $adapters) {
   $dns4 = @((Get-DnsClientServerAddress -InterfaceAlias $a.Name -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses)
-  if ($dns4 | Where-Object { $vpnteDns -contains $_ }) {
+  $staleVpnteDns = @($dns4 | Where-Object {
+    $addr = [string]$_
+    ($vpnteDns -contains $addr) -or (($vpnteDnsPrefixes | Where-Object { $addr.StartsWith($_) }).Count -gt 0)
+  })
+  if ($staleVpnteDns.Count -gt 0) {
     try {
       Set-DnsClientServerAddress -InterfaceAlias $a.Name -ResetServerAddresses -ErrorAction Stop
       $fixed += [pscustomobject]@{ alias = [string]$a.Name; oldDns = @($dns4) }

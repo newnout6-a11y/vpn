@@ -1,11 +1,11 @@
 import { shell } from 'electron'
-import { exec as execCb } from 'child_process'
+import { execFile as execFileCb } from 'child_process'
 import { mkdir, rename, stat } from 'fs/promises'
 import { join } from 'path'
 import { promisify } from 'util'
 import { execElevated } from './admin'
 
-const exec = promisify(execCb)
+const execFile = promisify(execFileCb)
 
 export type StoreRepairAction =
   | 'wsreset'
@@ -22,7 +22,8 @@ export interface StoreRepairResult {
 }
 
 function ps(command: string) {
-  return exec(`powershell -NoProfile -ExecutionPolicy Bypass -Command "${command}"`, {
+  const encoded = Buffer.from(command, 'utf-16le').toString('base64')
+  return execFile('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded], {
     windowsHide: true,
     timeout: 60000,
     maxBuffer: 1024 * 1024

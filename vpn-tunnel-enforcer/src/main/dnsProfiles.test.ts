@@ -62,6 +62,14 @@ describe('validateDnsAddress', () => {
     it('accepts all-zeros abbreviated', () => {
       expect(validateDnsAddress('::')).toEqual({ valid: true, type: 'plain' })
     })
+
+    it('accepts IPv6 boundary forms', () => {
+      expect(validateDnsAddress('::1')).toEqual({ valid: true, type: 'plain' })
+      expect(validateDnsAddress('fe80::1%14')).toEqual({ valid: true, type: 'plain' })
+      expect(validateDnsAddress('2001:db8::1')).toEqual({ valid: true, type: 'plain' })
+      expect(validateDnsAddress('1234::')).toEqual({ valid: true, type: 'plain' })
+      expect(validateDnsAddress('::ffff:1.2.3.4')).toEqual({ valid: true, type: 'plain' })
+    })
   })
 
   describe('invalid IPv6 addresses', () => {

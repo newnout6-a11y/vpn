@@ -14,7 +14,6 @@ import { DashboardSide } from '../components/DashboardSide'
 import {
   CheckCircle2,
   AlertTriangle,
-  CheckCircle2,
   Clock,
   Download,
   Info,
@@ -372,6 +371,10 @@ export function Dashboard() {
   // succeeded but DefaultOutboundAction stayed Block, or third-party rules
   // still block all outbound). Wipes Windows Firewall to defaults.
   const handleNuclearFirewallReset = async () => {
+    const confirmed = window.confirm(
+      'Полностью сбросить Windows Firewall к настройкам по умолчанию? Это удалит ВСЕ правила firewall, включая правила других приложений.'
+    )
+    if (!confirmed) return
     setNuclearResetting(true)
     try {
       const result = await window.electronAPI.firewallNuclearReset()

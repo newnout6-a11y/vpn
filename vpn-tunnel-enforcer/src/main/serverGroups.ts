@@ -23,6 +23,7 @@
 
 import { ipcMain, type IpcMainInvokeEvent } from 'electron'
 import { randomUUID } from 'crypto'
+import { compactForIpcLog } from './ipcLogging'
 import Store from 'electron-store'
 import { logEvent } from './appLogger'
 import {
@@ -633,7 +634,7 @@ function handleLogged<T>(
 ): void {
   ipcMain.handle(channel, async (event, ...args) => {
     const started = Date.now()
-    logEvent('debug', 'ipc', `${channel} started`, { args })
+    logEvent('debug', 'ipc', `${channel} started`, { args: compactForIpcLog(args) })
     try {
       const result = await listener(event, ...args)
       logEvent('debug', 'ipc', `${channel} finished`, { ms: Date.now() - started })

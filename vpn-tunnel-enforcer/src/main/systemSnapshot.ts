@@ -27,6 +27,7 @@ import { join } from 'path'
 import { exec as execCb } from 'child_process'
 import { promisify } from 'util'
 import { logEvent } from './appLogger'
+import { getTunNetworkBaselineManifestPath } from './systemNetwork'
 
 const exec = promisify(execCb)
 
@@ -361,9 +362,7 @@ export async function captureSnapshot(reason: SnapshotReason): Promise<string | 
   const userData = app.getPath('userData')
   const [platform, baseline, killSwitch, adapterLockdown] = await Promise.all([
     capturePlatformDumps(),
-    // Network baseline manifest lives under network-backups/ (systemNetwork.ts),
-    // not the userData root — the old path was always null.
-    tryReadJsonFile(join(userData, 'network-backups', 'latest-tun-network-baseline.json')),
+    tryReadJsonFile(getTunNetworkBaselineManifestPath()),
     // The kill-switch manifest lives under firewall-killswitch/manifest.json
     // (see firewallKillSwitch.ts), NOT latest-firewall-killswitch.json in the
     // userData root — that file never existed, so this section was always null.

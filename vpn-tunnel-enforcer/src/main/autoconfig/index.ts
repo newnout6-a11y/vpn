@@ -7,10 +7,18 @@ export interface AutoconfigTarget {
   id: string
   name: string
   applied: boolean
+  scope?: 'user-global' | 'app-global' | 'project-local'
+  warning?: string
+  managedPath?: string
+  backupPath?: string
 }
 
 const targets: Record<string, {
   name: string
+  scope?: 'user-global' | 'app-global' | 'project-local'
+  warning?: string
+  managedPath?: () => string | null
+  backupPath?: () => string | null
   apply: (proxyAddr: string, proxyType: 'socks5' | 'http') => Promise<boolean>
   rollback: () => Promise<boolean>
   isApplied: () => Promise<boolean>
@@ -63,7 +71,15 @@ export const autoconfig = {
       try {
         applied = await target.isApplied()
       } catch { /* */ }
-      result.push({ id, name: target.name, applied })
+      result.push({
+        id,
+        name: target.name,
+        applied,
+        scope: target.scope,
+        warning: target.warning,
+        managedPath: target.managedPath?.() ?? undefined,
+        backupPath: target.backupPath?.() ?? undefined
+      })
     }
     return result
   }

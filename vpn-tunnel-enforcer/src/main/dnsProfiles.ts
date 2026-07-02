@@ -12,8 +12,11 @@
  */
 
 import { ipcMain, type IpcMainInvokeEvent } from 'electron'
+import { isIP } from 'net'
 import Store from 'electron-store'
 import { logEvent } from './appLogger'
+import { compactForIpcLog } from './ipcLogging'
+import { optionalString, requireEnum, requirePlainObject, requireString } from './ipcValidation'
 import type { DnsProfile } from '../shared/ipc-types'
 
 // ─── Built-in Profiles ───────────────────────────────────────────────────────
@@ -172,34 +175,7 @@ function isValidIPv6(address: string): boolean {
   const zoneIdx = address.indexOf('%')
   const addr = zoneIdx >= 0 ? address.slice(0, zoneIdx) : address
 
-  // Check for :: abbreviation
-  const doubleColonCount = (addr.match(/::/g) || []).length
-  if (doubleColonCount > 1) return false
-
-  if (doubleColonCount === 1) {
-    const parts = addr.split('::')
-    const left = parts[0] ? parts[0].split(':') : []
-    const right = parts[1] ? parts[1].split(':') : []
-
-    // Total groups must be <= 8
-    if (left.length + right.length > 7) return false
-
-    for (const group of [...left, ...right]) {
-      if (!isValidIPv6Group(group)) return false
-    }
-
-    return true
-  }
-
-  // Full form: exactly 8 groups
-  const groups = addr.split(':')
-  if (groups.length !== 8) return false
-
-  for (const group of groups) {
-    if (!isValidIPv6Group(group)) return false
-  }
-
-  return true
+  return isIP(addr) === 6
 }
 
 /**
@@ -271,7 +247,7 @@ function handleLogged<T>(
 ): void {
   ipcMain.handle(channel, async (event, ...args) => {
     const started = Date.now()
-    logEvent('debug', 'ipc', `${channel} started`, { args })
+    logEvent('debug', 'ipc', `${channel} started`, { args: compactForIpcLog(args) })
     try {
       const result = await listener(event, ...args)
       logEvent('debug', 'ipc', `${channel} finished`, { ms: Date.now() - started })
@@ -295,8 +271,12 @@ export function registerDnsHandlers(): void {
 
   // dns:create — creates a new custom DNS profile
   handleLogged('dns:create', async (_event, profile: Omit<DnsProfile, 'id' | 'isBuiltin'>) => {
+    const raw = requirePlainObject(profile, 'profile')
     const newProfile: DnsProfile = {
-      ...profile,
+      name: requireString(raw.name, 'profile.name', { maxLength: 120 }),
+      primary: requireString(raw.primary, 'profile.primary', { maxLength: 2048 }),
+      secondary: optionalString(raw.secondary, 'profile.secondary', { allowEmpty: true, maxLength: 2048 }) ?? '',
+      type: requireEnum(raw.type, 'profile.type', ['plain', 'doh', 'dot']),
       id: generateId(),
       isBuiltin: false
     }
@@ -316,6 +296,13 @@ export function registerDnsHandlers(): void {
 
   // dns:update — updates an existing custom DNS profile
   handleLogged('dns:update', async (_event, id: string, patch: Partial<DnsProfile>) => {
+    id = requireString(id, 'id', { maxLength: 200 })
+    const rawPatch = requirePlainObject(patch, 'patch')
+    patch = {}
+    if ('name' in rawPatch) patch.name = requireString(rawPatch.name, 'patch.name', { maxLength: 120 })
+    if ('primary' in rawPatch) patch.primary = requireString(rawPatch.primary, 'patch.primary', { maxLength: 2048 })
+    if ('secondary' in rawPatch) patch.secondary = optionalString(rawPatch.secondary, 'patch.secondary', { allowEmpty: true, maxLength: 2048 }) ?? ''
+    if ('type' in rawPatch) patch.type = requireEnum(rawPatch.type, 'patch.type', ['plain', 'doh', 'dot'])
     const custom = getCustomProfiles()
     const index = custom.findIndex((p) => p.id === id)
 
@@ -348,6 +335,7 @@ export function registerDnsHandlers(): void {
 
   // dns:delete — deletes a custom DNS profile
   handleLogged('dns:delete', async (_event, id: string) => {
+    id = requireString(id, 'id', { maxLength: 200 })
     // Cannot delete builtin profiles
     if (id.startsWith('builtin-')) {
       throw new Error('Cannot delete built-in DNS profiles')
@@ -372,6 +360,7 @@ export function registerDnsHandlers(): void {
 
   // dns:select — sets the active DNS profile
   handleLogged('dns:select', async (_event, id: string) => {
+    id = requireString(id, 'id', { maxLength: 200 })
     const all = getAllProfiles()
     const profile = all.find((p) => p.id === id)
 
@@ -389,6 +378,7 @@ export function registerDnsHandlers(): void {
 
   // dns:validate — validates a DNS address
   handleLogged('dns:validate', async (_event, address: string) => {
+    address = requireString(address, 'address', { maxLength: 2048 })
     return validateDnsAddress(address)
   })
 }

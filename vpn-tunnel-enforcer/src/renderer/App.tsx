@@ -629,7 +629,14 @@ export default function App() {
           const current = store.autoconfigTargets
           store.setAutoconfigTargets(current.map(t => {
             const found = targets.find((x: any) => x.id === t.id)
-            return { ...t, applied: found?.applied ?? false }
+            return {
+              ...t,
+              applied: found?.applied ?? false,
+              scope: found?.scope ?? t.scope,
+              warning: found?.warning ?? t.warning,
+              managedPath: found?.managedPath ?? t.managedPath,
+              backupPath: found?.backupPath ?? t.backupPath
+            }
           }))
         }
       }

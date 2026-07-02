@@ -63,7 +63,7 @@ async function fetchJson(url: string, timeout = 8000): Promise<any | null> {
   }
 }
 
-async function getPublicIpV4(): Promise<string | null> {
+export async function getPublicIpV4(): Promise<string | null> {
   const urls = [
     'https://api.ipify.org?format=json',
     'https://api.myip.com',
@@ -73,8 +73,8 @@ async function getPublicIpV4(): Promise<string | null> {
 
   for (const url of urls) {
     const data = await fetchJson(url)
-    const ip = data?.ip || data?.query
-    if (ip && /^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) return ip
+    const ip = extractIpv4(data)
+    if (ip) return ip
   }
 
   try {
@@ -82,8 +82,30 @@ async function getPublicIpV4(): Promise<string | null> {
       windowsHide: true,
       timeout: 10000
     })
-    const ip = stdout.trim()
-    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) return ip
+    const ip = extractIpv4(stdout)
+    if (ip) return ip
+  } catch {
+    // fall through
+  }
+
+  try {
+    const ps = Buffer.from(
+      '$ProgressPreference="SilentlyContinue";' +
+      '$urls=@("https://api.ipify.org","https://ifconfig.me/ip","https://ipv4.icanhazip.com");' +
+      'foreach ($u in $urls) {' +
+      '  try {' +
+      '    $r=(Invoke-RestMethod -Uri $u -TimeoutSec 8 -ErrorAction Stop);' +
+      '    if ($r) { [string]$r; break }' +
+      '  } catch {}' +
+      '}',
+      'utf16le'
+    ).toString('base64')
+    const { stdout } = await exec(`powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${ps}`, {
+      windowsHide: true,
+      timeout: 12000
+    })
+    const ip = extractIpv4(stdout)
+    if (ip) return ip
   } catch {
     // fall through
   }
@@ -91,13 +113,65 @@ async function getPublicIpV4(): Promise<string | null> {
   return null
 }
 
-async function getPublicIpV6(): Promise<string | null> {
-  const data = await fetchJson('https://api6.ipify.org?format=json', 6000)
-  return data?.ip ?? null
+function extractIpv4(value: unknown): string | null {
+  const raw = typeof value === 'string'
+    ? value
+    : typeof (value as any)?.ip === 'string'
+      ? (value as any).ip
+      : typeof (value as any)?.query === 'string'
+        ? (value as any).query
+        : typeof (value as any)?.address === 'string'
+          ? (value as any).address
+          : ''
+  const match = raw.trim().match(/\b(\d{1,3}(?:\.\d{1,3}){3})\b/)
+  if (!match) return null
+  const octets = match[1].split('.').map(Number)
+  if (!octets.every(o => Number.isInteger(o) && o >= 0 && o <= 255)) return null
+  return match[1]
+}
+
+function extractIpv6(value: unknown): string | null {
+  const raw = typeof value === 'string'
+    ? value
+    : typeof (value as any)?.ip === 'string'
+      ? (value as any).ip
+      : typeof (value as any)?.query === 'string'
+        ? (value as any).query
+        : typeof (value as any)?.address === 'string'
+          ? (value as any).address
+          : ''
+  const candidate = raw.trim()
+  if (!candidate || !candidate.includes(':')) return null
+  if (!/^[0-9a-fA-F:.]+$/.test(candidate)) return null
+  return candidate
+}
+
+export async function getPublicIpV6(): Promise<string | null> {
+  const urls = [
+    'https://api6.ipify.org?format=json',
+    'https://v6.ident.me/.json',
+    'https://ipv6.icanhazip.com'
+  ]
+
+  for (const url of urls) {
+    const data = await fetchJson(url, 6000)
+    const ip = extractIpv6(data)
+    if (ip) return ip
+  }
+
+  try {
+    const { stdout } = await exec('curl.exe -6 -sS --max-time 8 https://api6.ipify.org', {
+      windowsHide: true,
+      timeout: 10000
+    })
+    return extractIpv6(stdout)
+  } catch {
+    return null
+  }
 }
 
 function getVpnLikeAdapters(): string[] {
-  const vpnNameRx = /wintun|\btun\b|wireguard|\bwg\d*\b|openvpn|tap-windows|happ|hiddify|singbox|v2ray|xray/i
+  const vpnNameRx = /wintun|tun|wireguard|wg\d*|openvpn|tap-windows|happ|hiddify|sing-?box|v2ray|xray|vpn|впн|туннел|тунель/i
   const result: string[] = []
   for (const [name, addrs] of Object.entries(networkInterfaces())) {
     if (!addrs || !vpnNameRx.test(name)) continue
@@ -128,7 +202,7 @@ async function getVpnLikeAdaptersFromWindows(): Promise<string[]> {
   try {
     const command =
       "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$OutputEncoding=[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new();" +
-      "Get-NetAdapter | Where-Object { $_.Status -eq 'Up' -and ($_.InterfaceDescription -match '(?i)wintun|tun|wireguard|openvpn|tap-windows|happ|singbox|sing-tun|vpn') } | " +
+      "Get-NetAdapter | Where-Object { $_.Status -eq 'Up' -and (($_.Name + ' ' + $_.InterfaceDescription) -match '(?i)wintun|tun|wireguard|openvpn|tap-windows|happ|hiddify|sing-?box|sing-tun|vpn|впн|туннел|тунель') } | " +
       "Select-Object Name,InterfaceDescription,ifIndex | ConvertTo-Json -Compress\""
     const { stdout } = await exec(command, { windowsHide: true, timeout: 8000, encoding: 'utf8' })
     const raw = stdout.trim()
@@ -245,7 +319,11 @@ export function extractRealErrors(logText: string): string[] {
   return logText
     .split(/\r?\n/)
     .filter(Boolean)
-    .filter(line => /\b(fatal|error|panic|failed|timeout|refused)\b/i.test(line))
+    .filter(line => {
+      const hasErrorLevel = /\b(FATAL|ERROR|PANIC)\b/.test(line)
+      const hasSingboxFailure = /\b(?:connection|dns|router|inbound|outbound)[:/].*\b(?:failed|timeout|refused|reset by peer|no such host|network is unreachable)\b/i.test(line)
+      return hasErrorLevel || hasSingboxFailure
+    })
     .filter(line => !isBenignBlockLine(line))
     .slice(-5)
 }
@@ -305,14 +383,19 @@ async function getTunLogItem(tunRunning: boolean): Promise<LeakCheckItem> {
  * the file and delegates here).
  */
 export function classifyDirectPublic(logText: string): {
-  leakedCount: number; allowedCoreCount: number; smartRuCount: number
+  leakedCount: number; allowedCoreCount: number; smartRuCount: number; unparsedDirectCount: number
   leakedExamples: string[]; allowedExamples: string[]; smartRuExamples: string[]
 } {
   const byId = new Map<string, { allowedCore: boolean; smartRu: boolean; directIps: string[] }>()
+  let unparsedDirectCount = 0
 
   for (const line of logText.split(/\r?\n/)) {
     const id = line.match(/\[(\d+)\s/)?.[1]
-    if (!id) continue
+    const hasDirectOutbound = /outbound\/direct\[direct-out]/i.test(line) || /\bdirect-out\b/i.test(line)
+    if (!id) {
+      if (hasDirectOutbound) unparsedDirectCount++
+      continue
+    }
 
     const entry = byId.get(id) ?? { allowedCore: false, smartRu: false, directIps: [] }
     if (/router: match\[\d+].*process_name=\[/i.test(line)) {
@@ -325,9 +408,13 @@ export function classifyDirectPublic(logText: string): {
       entry.smartRu = true
     }
 
-    const direct = line.match(/outbound\/direct\[direct-out\].*?(?:to|connection to) ([0-9a-fA-F:.]+):\d+/)
-    if (direct && !isPrivateIp(direct[1])) {
-      entry.directIps.push(direct[1])
+    const direct = line.match(/outbound\/direct\[direct-out\].*?(?:to|connection to) ([0-9a-fA-F:.]+):\d+/i)
+    if (direct) {
+      if (!isPrivateIp(direct[1])) {
+        entry.directIps.push(direct[1])
+      }
+    } else if (hasDirectOutbound) {
+      unparsedDirectCount++
     }
 
     byId.set(id, entry)
@@ -348,18 +435,19 @@ export function classifyDirectPublic(logText: string): {
     leakedCount: leaked.length,
     allowedCoreCount: allowed.length,
     smartRuCount: smartRu.length,
+    unparsedDirectCount,
     leakedExamples: [...new Set(leaked)].slice(0, 5),
     allowedExamples: [...new Set(allowed)].slice(0, 5),
     smartRuExamples: [...new Set(smartRu)].slice(0, 5)
   }
 }
 
-async function getDirectPublicSummary(): Promise<{ leakedCount: number; allowedCoreCount: number; smartRuCount: number; leakedExamples: string[]; allowedExamples: string[]; smartRuExamples: string[] }> {
+async function getDirectPublicSummary(): Promise<{ leakedCount: number; allowedCoreCount: number; smartRuCount: number; unparsedDirectCount: number; leakedExamples: string[]; allowedExamples: string[]; smartRuExamples: string[] }> {
   try {
     const log = await readFile(join(getTunRuntimeDir(), 'sing-box.log'), 'utf-8')
     return classifyDirectPublic(log)
   } catch {
-    return { leakedCount: 0, allowedCoreCount: 0, smartRuCount: 0, leakedExamples: [], allowedExamples: [], smartRuExamples: [] }
+    return { leakedCount: 0, allowedCoreCount: 0, smartRuCount: 0, unparsedDirectCount: 0, leakedExamples: [], allowedExamples: [], smartRuExamples: [] }
   }
 }
 
@@ -472,6 +560,7 @@ export async function runLeakCheck(options: RunLeakCheckOptions = {}): Promise<L
 
   const directPublic = await getDirectPublicSummary()
   const suspiciousCoreDirect = directPublic.allowedCoreCount > 10 || directPublic.allowedExamples.length > 1
+  const parserDrift = directPublic.unparsedDirectCount > 0 && directPublic.leakedCount === 0 && directPublic.allowedCoreCount === 0 && directPublic.smartRuCount === 0
   // When smart-RU split is ON, RU-hosted public IPs routed direct are the
   // feature working as intended (banks/gov/VK/Yandex see the real IP) — show
   // them as informational, never a leak.
@@ -479,11 +568,15 @@ export async function runLeakCheck(options: RunLeakCheckOptions = {}): Promise<L
   items.push({
     id: 'direct-public',
     label: 'Direct-out приложений',
-    status: directPublic.leakedCount > 0 ? 'fail' : suspiciousCoreDirect ? 'warn' : 'ok',
+    status: directPublic.leakedCount > 0 ? 'fail' : parserDrift || suspiciousCoreDirect ? 'warn' : 'ok',
     value: directPublic.leakedCount > 0
       ? `${directPublic.leakedCount} записей`
+      : parserDrift
+        ? `${directPublic.unparsedDirectCount} direct-out without IP`
       : smartRuDirectInfo
         ? `${directPublic.smartRuCount} RU-направлений (smart-RU)`
+        : parserDrift
+          ? 'sing-box log contains direct-out lines, but diagnostics could not extract an IP. The log format may have changed.'
         : suspiciousCoreDirect
           ? `${directPublic.allowedCoreCount} VPN-core direct-out`
           : 'Утечек не найдено',

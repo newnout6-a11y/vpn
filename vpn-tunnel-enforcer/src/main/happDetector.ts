@@ -16,6 +16,9 @@ export interface ProxyInfo {
 }
 
 const TYPICAL_PORTS = [
+  // Some local proxy apps expose a loopback proxy on 443. The port is only
+  // accepted after HTTP/SOCKS protocol probing, never by number alone.
+  443,
   // V2RayN / Xray
   10808, 10809, 1080, 1081, 1087,
   // Clash / Clash Verge / FlClash / Mihomo
@@ -205,7 +208,7 @@ async function getLoopbackListenerCandidates(): Promise<ProxyCandidate[]> {
       "Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | " +
       "Where-Object { $_.LocalAddress -in @('127.0.0.1','::1','0.0.0.0','::') } | " +
       "ForEach-Object { $p=Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue; [pscustomobject]@{Address=$_.LocalAddress;Port=$_.LocalPort;Process=$p.ProcessName} } | " +
-      "Where-Object { ($_.Port -notin @(135,139,445,3389,5985,5986,5040,5357,49664,49665,49666,49667,49668,49669,49670,49671,49672,49673,80,443,3306,5432,6379,27017,11211,8443,8888,9000)) -and ($_.Process -notmatch '(?i)^(svchost|System|wininit|services|lsass|csrss|smss|winlogon|spoolsv|RuntimeBroker|SearchHost|SearchApp|StartMenuExperienceHost|TextInputHost|ShellExperienceHost|ApplicationFrameHost|Explorer|Taskmgr|dllhost|conhost|fontdrvhost|sihost|ctfmon|dwm|audiodg)$') -and ($_.Port -ge 1024) } | " +
+      "Where-Object { ($_.Port -notin @(135,139,445,3389,5985,5986,5040,5357,49664,49665,49666,49667,49668,49669,49670,49671,49672,49673,80,3306,5432,6379,27017,11211,8443,8888,9000)) -and ($_.Process -notmatch '(?i)^(svchost|System|wininit|services|lsass|csrss|smss|winlogon|spoolsv|RuntimeBroker|SearchHost|SearchApp|StartMenuExperienceHost|TextInputHost|ShellExperienceHost|ApplicationFrameHost|Explorer|Taskmgr|dllhost|conhost|fontdrvhost|sihost|ctfmon|dwm|audiodg)$') -and (($_.Port -ge 1024) -or ($_.Port -eq 443)) } | " +
       "Sort-Object Port -Unique | ConvertTo-Json -Compress\""
     const { stdout } = await exec(command, {
       windowsHide: true,
@@ -277,9 +280,51 @@ async function verifyCandidate(candidate: ProxyCandidate): Promise<ProxyInfo | n
   return null
 }
 
-async function scanHappConfig(): Promise<ProxyInfo | null> {
+function stripInlineConfigComment(line: string): string {
+  let quote: string | null = null
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]
+    if ((ch === '"' || ch === "'") && line[i - 1] !== '\\') {
+      quote = quote === ch ? null : quote ?? ch
+      continue
+    }
+    if (quote) continue
+    if (ch === '#' || ch === ';') return line.slice(0, i)
+    if (ch === '/' && line[i + 1] === '/') return line.slice(0, i)
+  }
+  return line
+}
+
+function extractConfigProxyCandidates(content: string, source: string): ProxyCandidate[] {
+  const candidates: ProxyCandidate[] = []
+  const portKeyRx = /^\s*["']?(mixed-port|socks-port|http-port|redir-port|tproxy-port|local[-_]port|listen[-_]port|port)["']?\s*[:=]\s*["']?(\d{2,5})\b/i
+  const endpointKeyRx = /^\s*["']?(listen|bind)["']?\s*[:=]\s*["']?(?:[a-z][\w+.-]*:\/\/)?(?:\[[^\]]+\]|localhost|127\.0\.0\.1|0\.0\.0\.0|::1|::)?(?::)(\d{2,5})\b/i
+
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = stripInlineConfigComment(rawLine).trim()
+    if (!line) continue
+
+    const portMatch = line.match(portKeyRx)
+    const endpointMatch = portMatch ? null : line.match(endpointKeyRx)
+    const key = (portMatch?.[1] ?? endpointMatch?.[1] ?? '').toLowerCase()
+    const port = Number(portMatch?.[2] ?? endpointMatch?.[2])
+    if (!Number.isInteger(port) || port <= 0 || port > 65535) continue
+
+    candidates.push({
+      host: '127.0.0.1',
+      port,
+      source,
+      typeHint: key.includes('http') ? 'http' : key.includes('socks') ? 'socks5' : undefined
+    })
+  }
+
+  return candidates
+}
+
+async function scanHappConfig(): Promise<ProxyCandidate[]> {
   const appData = process.env.APPDATA || join(homedir(), 'AppData', 'Roaming')
   const localAppData = process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local')
+  const candidates: ProxyCandidate[] = []
 
   const searchDirs = [
     // Happ
@@ -333,20 +378,14 @@ async function scanHappConfig(): Promise<ProxyInfo | null> {
         if (entry.isFile() && (entry.name.endsWith('.json') || entry.name.endsWith('.yaml') || entry.name.endsWith('.yml') || entry.name.endsWith('.conf') || entry.name.endsWith('.ini') || entry.name.endsWith('.toml'))) {
           try {
             const content = await readFile(join(dir, entry.name), 'utf-8')
-            const portMatch = content.match(/(?:port|listen|socks-port|http-port|mixed-port)['":\s]+(\d{2,5})/i)
-            if (portMatch) {
-              const port = parseInt(portMatch[1], 10)
-              if (port > 0 && port < 65536) {
-                return { host: '127.0.0.1', port, type: 'socks5', verified: false, publicIpViaProxy: null }
-              }
-            }
+            candidates.push(...extractConfigProxyCandidates(content, `config:${entry.name}`))
           } catch { /* skip unreadable */ }
         }
       }
     } catch { /* dir not found */ }
   }
 
-  return null
+  return uniqueCandidates(candidates)
 }
 
 let detectCache: { promise: Promise<ProxyInfo | null>; ts: number } | null = null
@@ -372,13 +411,10 @@ export const happDetector = {
 
   async _detectUncached(): Promise<ProxyInfo | null> {
     // 1. Try reading Happ config
-    const configProxy = await scanHappConfig()
-    if (configProxy) {
-      const verified = await probeSocks5(configProxy.host, configProxy.port)
-      if (verified) {
-        const ip = await getPublicIpViaSocks5(configProxy.host, configProxy.port)
-        return { ...configProxy, verified: true, publicIpViaProxy: ip }
-      }
+    const configProxies = await scanHappConfig()
+    for (const candidate of configProxies) {
+      const verified = await verifyCandidate(candidate)
+      if (verified) return verified
     }
 
     // 2. Check existing system proxy settings and live loopback listeners from VPN/proxy apps

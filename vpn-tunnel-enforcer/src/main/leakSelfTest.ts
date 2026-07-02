@@ -81,6 +81,11 @@ export interface LeakSelfTestResult {
 
 const PROBE_URL = 'https://1.1.1.1'
 const IP_ENDPOINT = 'https://api.ipify.org'
+const DNS_TRACE_ENDPOINTS = [
+  'https://cloudflare.com/cdn-cgi/trace',
+  'https://one.one.one.one/cdn-cgi/trace',
+  'https://icanhazip.com'
+]
 
 // Bumped on every new run AND every explicit cancel. In-flight runs snapshot
 // the value at start (`mySession`) and bail at every await boundary if the
@@ -102,7 +107,25 @@ function cancelledResult(): LeakSelfTestResult {
 
 function parseIp(stdout: string): string | null {
   const trimmed = String(stdout).trim()
-  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(trimmed)) return trimmed
+  const trace = trimmed.match(/^ip=(\S+)/m)?.[1]?.trim()
+  const candidate = trace || trimmed
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(candidate)) return candidate
+  return null
+}
+
+async function fetchDnsTracePublicIp(): Promise<string | null> {
+  for (const endpoint of DNS_TRACE_ENDPOINTS) {
+    try {
+      const { stdout } = await exec(
+        `curl.exe -4 -sS --max-time 4 --connect-timeout 4 ${endpoint}`,
+        { windowsHide: true, timeout: 6000, encoding: 'utf8' }
+      )
+      const ip = parseIp(stdout)
+      if (ip) return ip
+    } catch {
+      // try next endpoint
+    }
+  }
   return null
 }
 
@@ -246,17 +269,12 @@ async function runLeakSelfTestOnce(mySession: number): Promise<LeakSelfTestResul
   let dnsLeakDetected = false
   let dnsLeakDetail: string | null = null
   try {
-    const { stdout } = await exec(
-      'curl.exe -4 -sS --max-time 4 --connect-timeout 4 https://cloudflare.com/cdn-cgi/trace',
-      { windowsHide: true, timeout: 6000, encoding: 'utf8' }
-    )
+    const cfIp = await fetchDnsTracePublicIp()
     if (mySession !== activeSessionId) return cancelledResult()
     // The trace returns lines like `ip=...`, `colo=...`, `warp=on/off`.
     // We don't actually need to parse the resolver — `ip=` is the visible
     // public IP. If it equals defaultRoutePublicIp, no leak; if it's
     // different from the VPN egress, that's the leak.
-    const m = String(stdout).match(/^ip=(\S+)/m)
-    const cfIp = m ? m[1].trim() : null
     if (cfIp && defaultRoutePublicIp && cfIp !== defaultRoutePublicIp) {
       dnsLeakDetected = true
       dnsLeakDetail = `Cloudflare видит ${cfIp}, наш default-route отдаёт ${defaultRoutePublicIp}`

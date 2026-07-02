@@ -23,6 +23,8 @@ import { ipcMain, dialog, type IpcMainInvokeEvent } from 'electron'
 import { readFileSync, writeFileSync } from 'fs'
 import Store from 'electron-store'
 import { logEvent } from './appLogger'
+import { compactForIpcLog } from './ipcLogging'
+import { requireEnum, requireString, requireStringArray } from './ipcValidation'
 import { serverPickerStore, serverGroupsStore, granularKillSwitchStore } from './sharedStores'
 import type {
   SplitTunnelApp,
@@ -729,7 +731,7 @@ function handleLogged<T>(
 ): void {
   ipcMain.handle(channel, async (event, ...args) => {
     const started = Date.now()
-    logEvent('debug', 'ipc', `${channel} started`, { args })
+    logEvent('debug', 'ipc', `${channel} started`, { args: compactForIpcLog(args) })
     try {
       const result = await listener(event, ...args)
       logEvent('debug', 'ipc', `${channel} finished`, { ms: Date.now() - started })
@@ -753,6 +755,7 @@ export function registerConfigManagerIpcHandlers(): void {
 
   // config:import — validates a file and returns sections/conflicts
   handleLogged('config:import', async (_event, filePath: string) => {
+    filePath = requireString(filePath, 'filePath', { maxLength: 4096 })
     return configManager.importValidate(filePath)
   })
 
@@ -760,6 +763,9 @@ export function registerConfigManagerIpcHandlers(): void {
   handleLogged(
     'config:import-apply',
     async (_event, filePath: string, sections: string[], conflictResolution: 'replace' | 'merge') => {
+      filePath = requireString(filePath, 'filePath', { maxLength: 4096 })
+      sections = requireStringArray(sections, 'sections', { maxItems: 32, itemMaxLength: 80 })
+      conflictResolution = requireEnum(conflictResolution, 'conflictResolution', ['replace', 'merge'])
       return configManager.importApply(filePath, sections, conflictResolution)
     }
   )

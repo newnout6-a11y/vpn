@@ -811,9 +811,9 @@ export async function probePageSignal(url: string, proxyRules?: string): Promise
 
     const timeoutId = setTimeout(() => finish(null), 12000)
 
-    win.webContents.session
+    const proxyReady = win.webContents.session
       .setProxy({ proxyRules: proxyRules || 'direct://' })
-      .catch(() => {})
+      .catch(() => undefined)
 
     // Capture the main-frame HTTP status. did-navigate fires with the response
     // code for the top-level document.
@@ -867,7 +867,9 @@ export async function probePageSignal(url: string, proxyRules?: string): Promise
       }
     })
 
-    win.loadURL(url).catch(() => { /* finish via timeout/fail-load */ })
+    proxyReady
+      .then(() => win.loadURL(url))
+      .catch(() => { /* finish via timeout/fail-load */ })
   })
 }
 

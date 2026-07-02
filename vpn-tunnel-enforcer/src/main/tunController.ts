@@ -979,7 +979,13 @@ async function runPowerShell(script: string, timeout = 8000, elevated = false): 
     const { stdout } = await execElevated(command, { timeout, maxBuffer: 1024 * 1024 })
     return stdout.toString()
   }
-  const { stdout } = await exec(command, {
+  const { stdout } = await execFile('powershell.exe', [
+    '-NoProfile',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-EncodedCommand',
+    Buffer.from(prelude + script, 'utf16le').toString('base64')
+  ], {
     windowsHide: true,
     timeout,
     encoding: 'utf8',
@@ -990,7 +996,7 @@ async function runPowerShell(script: string, timeout = 8000, elevated = false): 
 
 async function isSingboxRunning(): Promise<boolean> {
   try {
-    const { stdout } = await exec(`tasklist /FI "IMAGENAME eq ${RUNTIME_EXE_NAME}" /FO CSV /NH`, {
+    const { stdout } = await execFile('tasklist.exe', ['/FI', `IMAGENAME eq ${RUNTIME_EXE_NAME}`, '/FO', 'CSV', '/NH'], {
       windowsHide: true,
       timeout: 3000,
       encoding: 'utf8'
@@ -1144,7 +1150,13 @@ try {
     } catch {
       try {
         Disable-NetAdapter -Name '${alias}' -Confirm:$false -ErrorAction Stop
-        Write-Host '__VPNTE_DONE__ disabled'
+        $staleName = '${alias}-stale-' + (Get-Date -Format 'yyyyMMddHHmmss')
+        try {
+          Rename-NetAdapter -Name '${alias}' -NewName $staleName -Confirm:$false -ErrorAction Stop
+          Write-Host "__VPNTE_DONE__ disabled-renamed $staleName"
+        } catch {
+          Write-Host "__VPNTE_ERR__ disabled-not-renamed $_"
+        }
       } catch {
         Write-Host "__VPNTE_ERR__ $_"
       }
@@ -1369,6 +1381,20 @@ async function fetchPublicIpDirect(): Promise<string | null> {
   }
 }
 
+async function waitForDirectIpGrace(directIpPromise: Promise<string | null>, timeoutMs: number): Promise<{ ip: string | null; ready: boolean }> {
+  let timer: NodeJS.Timeout | null = null
+  try {
+    return await Promise.race([
+      directIpPromise.then(ip => ({ ip, ready: true })),
+      new Promise<{ ip: string | null; ready: false }>((resolve) => {
+        timer = setTimeout(() => resolve({ ip: null, ready: false }), timeoutMs)
+      })
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
 async function validateProxyFullTunnel(
   host: string,
   port: number,
@@ -1424,11 +1450,10 @@ async function validateProxyFullTunnel(
   // returns the user's real IP — that's a security check, not a gating
   // check. We can start the tunnel and compare later.
   if (firstHit.ip) {
-    // Try to get directIp if it's already resolved (non-blocking)
-    const directIpResult = await Promise.race([
-      directIpPromise.then(ip => ({ ip, ready: true as const })),
-      Promise.resolve({ ip: null as string | null, ready: false as const })
-    ])
+    // Give the direct-IP probe a short grace window. A zero-timeout race made
+    // this cross-check practically unreachable on normal networks, masking
+    // proxies that simply return the user's direct public IP.
+    const directIpResult = await waitForDirectIpGrace(directIpPromise, 1200)
     if (directIpResult.ready && directIpResult.ip && firstHit.ip === directIpResult.ip) {
       // Proxy returned the same IP as direct — suspicious, fall through to full check
     } else {
@@ -1898,10 +1923,7 @@ export const tunController = {
     // restart timer is still ticking from a crash recovery, cancel it — the
     // user (or the recovery loop) is taking matters into their own hands.
     userInitiatedStop = false
-    if (restartTimer) {
-      clearTimeout(restartTimer)
-      restartTimer = null
-    }
+    clearRestartTimers()
 
     const startOptions: StartOptions =
       typeof proxyAddrOrOpts === 'string'
@@ -2232,7 +2254,14 @@ export const tunController = {
       // Run sing-box check in parallel with the stale-cleanup. Both are
       // independent and the check is the longer of the two on a clean box.
       await Promise.all([
-        timeAsync('singbox-config-check', () => exec(`"${runtime.singbox}" check -c "${runtime.config}"`)),
+        timeAsync('singbox-config-check', () =>
+          execFile(runtime.singbox, ['check', '-c', runtime.config], {
+            windowsHide: true,
+            timeout: 10000,
+            encoding: 'utf8',
+            maxBuffer: 1024 * 1024
+          })
+        ),
         cleanupPromise
       ])
     } catch (err: any) {
@@ -2568,7 +2597,12 @@ export const tunController = {
       isProcessElevated().then((elevated) => {
         if (resolved) return
         if (elevated) {
-          execCb(cmd, { windowsHide: true, maxBuffer: 1024 * 1024 }, (error, _stdout, stderr) => onExit(error, stderr))
+          execFileCb(
+            runtime.singbox,
+            ['run', '-c', runtime.config],
+            { cwd: runtimeDir, windowsHide: true, maxBuffer: 1024 * 1024 },
+            (error, _stdout, stderr) => onExit(error, stderr)
+          )
         } else {
           sudo.exec(cmd, { name: 'VPN Tunnel Enforcer' }, (error, _stdout, stderr) => onExit(error, String(stderr || '')))
         }
@@ -2697,18 +2731,6 @@ export const tunController = {
           // and is likely already done by now, since the TUN wait + metric
           // set took at least a few hundred ms).
           if (killSwitchPromise) {
-            if (!tunReady && !(await isKillSwitchActive())) {
-              // TUN didn't come up — the kill-switch script's internal poll
-              // also failed to find the adapter, so it skipped the
-              // InterfaceAlias rule. Warn the user.
-              logEvent(
-                'warn',
-                'tun',
-                `${TUN_ADAPTER_ALIAS} did not reach Status=Up within 5s — kill-switch may be incomplete`
-              )
-              killSwitchWarning =
-                'TUN-адаптер не поднялся за 5 с — kill-switch может быть неполным.'
-            }
             const ksResult = await timeAsync('firewall-kill-switch-await', () => killSwitchPromise!)
             endPhase('firewall-kill-switch', parallelStarted, {
               engaged: ksResult.engaged,
@@ -2717,6 +2739,13 @@ export const tunController = {
             if (ksResult.engaged) {
               killSwitchEngaged = true
             } else {
+              if (!tunReady) {
+                logEvent(
+                  'warn',
+                  'tun',
+                  `${TUN_ADAPTER_ALIAS} did not reach Status=Up before kill-switch allow-rule polling completed`
+                )
+              }
               killSwitchWarning = ksResult.warning
             }
           } else {

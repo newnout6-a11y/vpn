@@ -12,6 +12,7 @@ export interface SystemNetworkResult {
   success: boolean
   message: string
   details?: string
+  warnings?: string[]
 }
 
 // Presence of the manifest file is the source of truth that baseline is currently applied.
@@ -47,8 +48,12 @@ function backupDir() {
   return join(app.getPath('programData') || 'C:\\ProgramData', 'VPN-Tunnel-Enforcer', 'network-backups')
 }
 
-function manifestPath() {
+export function getTunNetworkBaselineManifestPath() {
   return join(backupDir(), 'latest-tun-network-baseline.json')
+}
+
+function manifestPath() {
+  return getTunNetworkBaselineManifestPath()
 }
 
 function timestamp() {
@@ -83,6 +88,10 @@ async function exportKey(key: string, file: string, elevated = false): Promise<s
   } catch {
     return null
   }
+}
+
+function errorText(err: any): string {
+  return String(err?.stderr || err?.stdout || err?.message || err || 'unknown error').replace(/\s+/g, ' ').trim()
 }
 
 async function createBackup(): Promise<NetworkBackupManifest> {
@@ -138,11 +147,13 @@ export async function applyTunNetworkBaseline(): Promise<SystemNetworkResult> {
 
   try {
     const manifest = await createBackup()
+    const warnings: string[] = []
 
     // Validate that at least the primary backup (HKCU Internet Settings)
     // succeeded before wiping. If the backup failed, abort — wiping
     // without a backup would permanently destroy the user's proxy settings.
     if (!manifest.internetSettingsBackup) {
+      await clearManifest()
       return {
         success: false,
         message: 'Не удалось создать backup настроек. Отмена — настройки не были изменены.',
@@ -151,7 +162,11 @@ export async function applyTunNetworkBaseline(): Promise<SystemNetworkResult> {
     }
 
     // 1. Reset WinHTTP proxy (requires elevation)
-    await execElevated('netsh winhttp reset proxy', { timeout: 10000 }).catch(() => undefined)
+    await execElevated('netsh winhttp reset proxy', { timeout: 10000 }).catch((err) => {
+      const warning = `netsh winhttp reset proxy failed: ${errorText(err)}`
+      warnings.push(warning)
+      logEvent('warn', 'system-network', warning)
+    })
 
     // 2. Clear WinINet proxy & environment vars in HKCU (fast native reg commands, no broadcasting deadlock)
     const commands = [
@@ -164,7 +179,18 @@ export async function applyTunNetworkBaseline(): Promise<SystemNetworkResult> {
       commands.push(`reg delete "HKCU\\Environment" /v ${key} /f`)
     }
 
-    await Promise.all(commands.map(cmd => exec(cmd, { windowsHide: true, timeout: 5000 }).catch(() => undefined)))
+    await Promise.all(commands.map(async (cmd) => {
+      try {
+        await exec(cmd, { windowsHide: true, timeout: 5000 })
+      } catch (err: any) {
+        const text = errorText(err)
+        const missingValue = /reg delete/i.test(cmd) && /unable to find|cannot find|system was unable to find|не удается найти/i.test(text)
+        if (missingValue) return
+        const warning = `${cmd.split(' /v ')[0]} failed: ${text}`
+        warnings.push(warning)
+        logEvent('warn', 'system-network', 'baseline command failed', { command: cmd, error: text })
+      }
+    }))
 
     clearCurrentProcessProxyEnv()
     await notifyWinInetSettingsChanged()
@@ -173,7 +199,9 @@ export async function applyTunNetworkBaseline(): Promise<SystemNetworkResult> {
       message: 'Сеть нормализована для TUN',
       details:
         'WinHTTP proxy сброшен, WinINet/User proxy и PAC отключены, env proxy удалены. ' +
-        `Backup: ${manifestPath()}`
+        `Backup: ${manifestPath()}` +
+        (warnings.length > 0 ? `; warnings: ${warnings.join(' | ')}` : ''),
+      warnings
     }
   } catch (err: any) {
     return {

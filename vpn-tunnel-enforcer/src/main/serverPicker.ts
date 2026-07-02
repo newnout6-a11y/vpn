@@ -22,6 +22,8 @@ import axios from 'axios'
 import { randomUUID } from 'crypto'
 import Store from 'electron-store'
 import { logEvent } from './appLogger'
+import { compactForIpcLog } from './ipcLogging'
+import { optionalPlainObject, optionalString, requireEnum, requirePort, requireString } from './ipcValidation'
 import { buildBootstrapRouteAttempts, type BootstrapRouteAttempt } from './bootstrapRoute'
 import {
   applyClientDeviceToOutbound,
@@ -59,6 +61,8 @@ interface ServerPickerStore {
 interface AddProfilesOptions {
   clientDevice?: ClientDevice
 }
+
+const CLIENT_DEVICES = ['pc', 'android', 'ios', 'mac'] as const
 
 const COUNTRY_GEO_VERSION = 3
 
@@ -1520,6 +1524,8 @@ export function getActiveProfile(): ServerProfile | null {
   return found ?? profiles[0]
 }
 
+const addFromInputLocks = new Map<string, Promise<ServerProfile[]>>()
+
 /**
  * Removes a profile by ID.
  */
@@ -1668,6 +1674,20 @@ function appendProfilesToGroup(
  *   `sourceUri` for lossless re-export.
  */
 export async function addFromInput(input: string, options: AddProfilesOptions = {}): Promise<ServerProfile[]> {
+  const lockKey = canonicalizeSubscriptionUrl(input.trim())
+  const inFlight = addFromInputLocks.get(lockKey)
+  if (inFlight) return inFlight
+
+  const promise = addFromInputUnlocked(input, options).finally(() => {
+    if (addFromInputLocks.get(lockKey) === promise) {
+      addFromInputLocks.delete(lockKey)
+    }
+  })
+  addFromInputLocks.set(lockKey, promise)
+  return promise
+}
+
+async function addFromInputUnlocked(input: string, options: AddProfilesOptions = {}): Promise<ServerProfile[]> {
   const trimmed = input.trim()
   const clientDevice = normalizeClientDevice(options.clientDevice)
   if (!trimmed) {
@@ -1861,7 +1881,7 @@ function handleLogged<T>(
 ): void {
   ipcMain.handle(channel, async (event, ...args) => {
     const started = Date.now()
-    logEvent('debug', 'ipc', `${channel} started`, { args })
+    logEvent('debug', 'ipc', `${channel} started`, { args: compactForIpcLog(args) })
     try {
       const result = await listener(event, ...args)
       logEvent('debug', 'ipc', `${channel} finished`, { ms: Date.now() - started })
@@ -1871,6 +1891,16 @@ function handleLogged<T>(
       throw err
     }
   })
+}
+
+function sanitizeAddProfilesOptions(value: unknown): AddProfilesOptions | undefined {
+  const raw = optionalPlainObject(value, 'options')
+  if (!raw) return undefined
+  const clientDevice =
+    raw.clientDevice === undefined || raw.clientDevice === null
+      ? undefined
+      : requireEnum(raw.clientDevice, 'options.clientDevice', CLIENT_DEVICES)
+  return clientDevice ? { clientDevice } : undefined
 }
 
 /**
@@ -1883,6 +1913,7 @@ export function registerServerPickerHandlers(): void {
   })
 
   handleLogged('servers:select', async (_event, id: string) => {
+    id = requireString(id, 'id', { maxLength: 200 })
     selectProfile(id)
   })
 
@@ -1899,11 +1930,13 @@ export function registerServerPickerHandlers(): void {
   // measure latency to whatever profile the user currently has chosen, without
   // forcing a full pingAll across every saved server.
   handleLogged('servers:ping-one', async (_event, host: string, port: number) => {
+    host = requireString(host, 'host', { maxLength: 255 })
+    port = requirePort(port, 'port')
     return await pingServer(host, port, { skipCache: true })
   })
 
   handleLogged('servers:verify-active-country', async (_event, ip: string) => {
-    const cleanIp = typeof ip === 'string' ? ip.trim() : ''
+    const cleanIp = requireString(ip, 'ip', { allowEmpty: true, maxLength: 128 })
     if (!cleanIp) return { ok: false as const, reason: 'missing-ip' }
     const country = await geolocateIp(cleanIp)
     if (!country) return { ok: false as const, reason: 'geo-lookup-failed' }
@@ -1913,7 +1946,7 @@ export function registerServerPickerHandlers(): void {
   })
 
   handleLogged('servers:verify-country', async (_event, id: string) => {
-    const cleanId = typeof id === 'string' ? id.trim() : ''
+    const cleanId = requireString(id, 'id', { allowEmpty: true, maxLength: 200 })
     if (!cleanId) return { ok: false as const, reason: 'missing-id' }
     const profile = await verifyProfileCountry(cleanId)
     if (!profile) return { ok: false as const, reason: 'geo-lookup-failed' }
@@ -1921,18 +1954,24 @@ export function registerServerPickerHandlers(): void {
   })
 
   handleLogged('servers:add', async (_event, input: string, options?: AddProfilesOptions) => {
-    return await addFromInput(input, options)
+    input = requireString(input, 'input', { maxLength: 200000 })
+    return await addFromInput(input, sanitizeAddProfilesOptions(options))
   })
 
   // Append profiles to a specific group. When `groupId` is null, fall back
   // to the same defaults as `servers:add`: subscription URLs create their
   // own group; single URIs land in "Ручные ключи".
   handleLogged('servers:add-to-group', async (_event, input: string, groupId: string | null, options?: AddProfilesOptions) => {
-    if (groupId) return await addFromInputToGroup(input, groupId, options)
-    return await addFromInput(input, options)
+    input = requireString(input, 'input', { maxLength: 200000 })
+    const cleanGroupId = optionalString(groupId, 'groupId', { allowEmpty: true, maxLength: 200 })
+    const cleanOptions = sanitizeAddProfilesOptions(options)
+    if (cleanGroupId) return await addFromInputToGroup(input, cleanGroupId, cleanOptions)
+    return await addFromInput(input, cleanOptions)
   })
 
   handleLogged('servers:set-client-device', async (_event, id: string, clientDevice: ClientDevice) => {
+    id = requireString(id, 'id', { maxLength: 200 })
+    clientDevice = requireEnum(clientDevice, 'clientDevice', CLIENT_DEVICES)
     const profile = setProfileClientDevice(id, clientDevice)
     if (!profile) throw new Error('Profile not found')
     const { tunController } = await import('./tunController')
@@ -1949,6 +1988,7 @@ export function registerServerPickerHandlers(): void {
   })
 
   handleLogged('servers:remove', async (_event, id: string) => {
+    id = requireString(id, 'id', { maxLength: 200 })
     removeProfile(id)
   })
 
@@ -1958,6 +1998,7 @@ export function registerServerPickerHandlers(): void {
   // outbound shape isn't representable as a single-line URI (custom
   // sing-box JSON profiles fall in that bucket).
   handleLogged('servers:export-key', async (_event, id: string) => {
+    id = requireString(id, 'id', { maxLength: 200 })
     const profile = getProfiles().find(p => p.id === id)
     if (!profile) return { ok: false as const, reason: 'profile-not-found' }
     if (!profile.outbound || typeof profile.outbound !== 'object') {
@@ -1980,6 +2021,7 @@ export function registerServerPickerHandlers(): void {
   //   {ok: false, cancelled: true} — user dismissed the dialog
   //   {ok: false, reason}          — anything else (no profile, write failed, …)
   handleLogged('servers:export-key-file', async (_event, id: string) => {
+    id = requireString(id, 'id', { maxLength: 200 })
     const profile = getProfiles().find(p => p.id === id)
     if (!profile) return { ok: false as const, reason: 'profile-not-found' }
     if (!profile.outbound || typeof profile.outbound !== 'object') {

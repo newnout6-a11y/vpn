@@ -9,7 +9,7 @@
  * Output: `%USERPROFILE%/Desktop/vpn-tunnel-enforcer-diagnostics-<ts>.zip`
  *  (or whichever directory the user picks via the save dialog).
  */
-import { exec as execCb } from 'child_process'
+import { execFile as execFileCb } from 'child_process'
 import { dialog, app } from 'electron'
 import { mkdtemp, writeFile, copyFile, readdir, rm, readFile } from 'fs/promises'
 import { existsSync } from 'fs'
@@ -22,8 +22,17 @@ import { runSystemDiagnostics } from './systemDiagnostics'
 import { stageTrafficForensicsArtifacts } from './trafficForensics'
 import { getTunRuntimeDir } from './tunController'
 import { redactSensitiveConfig, redactSensitiveText, redactSettingsForDiagnostics } from './vpnProfiles'
+import { getTunNetworkBaselineManifestPath } from './systemNetwork'
 
-const exec = promisify(execCb)
+const execFile = promisify(execFileCb)
+
+function encodedPowerShell(script: string): string {
+  return Buffer.from(script, 'utf-16le').toString('base64')
+}
+
+function psQuote(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`
+}
 
 interface ExportResult {
   success: boolean
@@ -130,11 +139,8 @@ export async function exportDiagnosticsZip(): Promise<ExportResult> {
     }
 
     // 6. Baseline manifest (so support can see what we changed in the registry).
-    // NOTE: these manifests live in subdirectories, not the userData root.
-    // network baseline -> network-backups/, kill-switch -> firewall-killswitch/.
-    // The old root-level paths never matched, so the ZIP shipped without them.
     const userData = app.getPath('userData')
-    await copyIfExists(join(userData, 'network-backups', 'latest-tun-network-baseline.json'), join(stage, 'baseline-manifest.json'))
+    await copyIfExists(getTunNetworkBaselineManifestPath(), join(stage, 'baseline-manifest.json'))
     await copyIfExists(join(userData, 'firewall-killswitch', 'manifest.json'), join(stage, 'killswitch-manifest.json'))
     await copyIfExists(join(userData, 'latest-physical-adapter-lockdown.json'), join(stage, 'adapter-lockdown-manifest.json'))
 
@@ -211,10 +217,17 @@ traffic-forensics РѕСЃРѕР±РµРЅРЅРѕ РїРѕР»РµР·РµРЅ 
 `
     await writeFile(join(stage, 'README.txt'), readme, 'utf-8')
 
-    // 8. Compress-Archive expects forward slashes to be quoted on PS5; use \"
-    // and -Force to overwrite if the user picks an existing file.
-    const psCmd = `powershell -NoProfile -ExecutionPolicy Bypass -Command "Compress-Archive -Path '${stage.replace(/'/g, "''")}\\*' -DestinationPath '${targetZip.replace(/'/g, "''")}' -Force"`
-    await exec(psCmd, { windowsHide: true })
+    const compressScript = `
+$ErrorActionPreference='Stop'
+$stage=${psQuote(stage)}
+$target=${psQuote(targetZip)}
+Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $target -Force
+`
+    await execFile(
+      'powershell.exe',
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encodedPowerShell(compressScript)],
+      { windowsHide: true }
+    )
 
     logEvent('info', 'diag-export', 'diagnostics zip written', { path: targetZip })
     return { success: true, path: targetZip }

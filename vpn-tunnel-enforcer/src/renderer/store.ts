@@ -45,6 +45,10 @@ export interface AutoconfigTarget {
   name: string
   applied: boolean
   enabled: boolean
+  scope?: 'user-global' | 'app-global' | 'project-local'
+  warning?: string
+  managedPath?: string
+  backupPath?: string
 }
 
 export interface LogEntry {

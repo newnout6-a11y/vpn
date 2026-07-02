@@ -25,7 +25,6 @@ describe('isValidIpOrCidr', () => {
   it('accepts IPv4 CIDR', () => {
     expect(isValidIpOrCidr('203.0.113.0/24')).toBe(true)
     expect(isValidIpOrCidr('10.0.0.0/8')).toBe(true)
-    expect(isValidIpOrCidr('0.0.0.0/0')).toBe(true)
     expect(isValidIpOrCidr('192.168.1.1/32')).toBe(true)
   })
 
@@ -33,6 +32,15 @@ describe('isValidIpOrCidr', () => {
     expect(isValidIpOrCidr('2001:db8::1')).toBe(true)
     expect(isValidIpOrCidr('2001:db8::/32')).toBe(true)
     expect(isValidIpOrCidr('::1')).toBe(true)
+  })
+
+  it('rejects wildcard and unspecified exceptions', () => {
+    expect(isValidIpOrCidr('0.0.0.0')).toBe(false)
+    expect(isValidIpOrCidr('0.0.0.0/0')).toBe(false)
+    expect(isValidIpOrCidr('203.0.113.0/0')).toBe(false)
+    expect(isValidIpOrCidr('::')).toBe(false)
+    expect(isValidIpOrCidr('::/0')).toBe(false)
+    expect(isValidIpOrCidr('2001:db8::/0')).toBe(false)
   })
 
   it('rejects out-of-range IPv4 octets', () => {

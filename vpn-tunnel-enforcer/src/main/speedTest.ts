@@ -17,6 +17,7 @@ import { randomUUID, randomBytes } from 'crypto'
 import { Readable } from 'stream'
 import Store from 'electron-store'
 import { logEvent } from './appLogger'
+import { compactForIpcLog } from './ipcLogging'
 import { tunController } from './tunController'
 import type { SpeedTestResult } from '../shared/ipc-types'
 
@@ -419,7 +420,7 @@ function handleLogged<T>(
 ): void {
   ipcMain.handle(channel, async (event, ...args) => {
     const started = Date.now()
-    logEvent('debug', 'ipc', `${channel} started`, { args })
+    logEvent('debug', 'ipc', `${channel} started`, { args: compactForIpcLog(args) })
     try {
       const result = await listener(event, ...args)
       logEvent('debug', 'ipc', `${channel} finished`, { ms: Date.now() - started })

@@ -198,6 +198,18 @@ describe('phase 3 protocol URI coverage', () => {
     })
   })
 
+  it('preserves Hysteria2 comma-separated server_ports', () => {
+    const [profile] = parseVpnProfiles(
+      'hy2://secret@hy2.example.com:443?mport=8443-8450,9443,10443-10445#HY2'
+    )
+    const exported = exportOutboundToUri(profile)
+    const reparsed = parseVpnProfiles(exported || '')[0]
+
+    expect(profile.outbound.server_ports).toBe('8443:8450,9443,10443:10445')
+    expect(exported).toContain('mport=8443-8450%2C9443%2C10443-10445')
+    expect(reparsed.outbound.server_ports).toBe('8443:8450,9443,10443:10445')
+  })
+
   it('summarizes Hysteria2 obfs and unsafe imported tcp-only routing', () => {
     const profile = {
       name: 'HY2',
