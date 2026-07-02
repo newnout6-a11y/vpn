@@ -2,6 +2,7 @@ import './snapshotBootstrap'
 import { startElevatedPsHelper, stopElevatedPsHelper } from './elevatedPsHelper'
 import { app, BrowserWindow, dialog, ipcMain, Tray, shell, session, Menu, type IpcMainInvokeEvent } from 'electron'
 import { exec as execCb } from 'child_process'
+import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import { join } from 'path'
 import { happDetector } from './happDetector'
@@ -70,6 +71,8 @@ import { registerThemeIpcHandlers } from './themeManager'
 import { externalProxy } from './externalProxy'
 
 const exec = promisify(execCb)
+const execFile = promisify(execFileCb)
+const MAX_INSPECT_VPN_INPUT_CHARS = 256 * 1024
 
 let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
@@ -1192,6 +1195,10 @@ app.whenReady().then(async () => {
   })
 
   handleLogged('inspect-vpn-input', async (_e, input: string) => {
+    if (typeof input !== 'string') throw new Error('VPN input must be a string')
+    if (input.length > MAX_INSPECT_VPN_INPUT_CHARS) {
+      throw new Error(`VPN input is too large (${input.length} chars, max ${MAX_INSPECT_VPN_INPUT_CHARS})`)
+    }
     const settings = settingsStore.get()
     const resolved = await resolveVpnProfiles(input, {
       proxyAddr: settings.proxyOverride,
@@ -1372,11 +1379,8 @@ app.whenReady().then(async () => {
   handleLogged('tun:kill-stale-singbox', async () => {
     // Kill any VPNTE-owned sing-box processes that are still running
     try {
-      const { exec: execAsync } = await import('child_process')
-      const { promisify } = await import('util')
-      const execP = promisify(execAsync)
-      await execP('taskkill /F /IM vpnte-sing-box.exe /T', { windowsHide: true }).catch(() => undefined)
-      await execP('taskkill /F /IM vpnte-etw-sidecar.exe /T', { windowsHide: true }).catch(() => undefined)
+      await execFile('taskkill', ['/F', '/IM', 'vpnte-sing-box.exe', '/T'], { windowsHide: true }).catch(() => undefined)
+      await execFile('taskkill', ['/F', '/IM', 'vpnte-etw-sidecar.exe', '/T'], { windowsHide: true }).catch(() => undefined)
       return { success: true, message: 'Завершены зависшие процессы sing-box' }
     } catch (err: any) {
       return { success: false, message: `Не удалось завершить процессы: ${err?.message || err}` }

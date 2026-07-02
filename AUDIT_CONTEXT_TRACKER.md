@@ -662,6 +662,33 @@ Windows-only gap:
 - Smart-RU live self-test depends on RU echo pages being reachable from the user's network; if both pages are blocked it will still return partial.
 ```
 
+```text
+2026-07-02 - HIGH RE-REVIEW BATCH 3 DONE
+Files:
+- vpn-tunnel-enforcer/src/preload/index.ts
+- vpn-tunnel-enforcer/src/preload/preloadValidation.test.ts
+- vpn-tunnel-enforcer/src/main/index.ts
+- vpn-tunnel-enforcer/src/main/mainIpcRegression.test.ts
+- vpn-tunnel-enforcer/src/main/elevatedPsHelper.ts
+- vpn-tunnel-enforcer/src/main/elevatedPsHelper.test.ts
+
+Items:
+- U1 DONE: preload wrappers with renderer-controlled arguments now validate type/shape/enum/size before ipcRenderer.invoke; oversized VPN/subscription payloads are capped at 256 KiB.
+- U2 DONE: main-side inspect-vpn-input rejects non-string and oversized input before resolveVpnProfiles/settingsStore.save, preventing disk bloat even if preload is bypassed.
+- U3 DONE: tun:kill-stale-singbox uses top-level execFile(taskkill, argv) instead of dynamic child_process/promisify imports and shell command strings.
+- S1 DONE+: elevatedPsHelper policy now rejects cross-policy payloads such as physical-adapter token + netsh advfirewall reset, firewall token + HKLM Run persistence, cmd invocation, and route table mutation.
+
+Verification:
+- npm test -- preloadValidation.test.ts mainIpcRegression.test.ts elevatedPsHelper.test.ts vpnProfilesRegression.test.ts serverPickerPingPoisoning.test.ts --reporter=dot
+- Result: 5 test files passed, 22 tests passed.
+- npm run build
+- Result: passed.
+
+Windows-only gap:
+- Real Windows smoke should click the maintenance stale-process cleanup and confirm taskkill argv execution succeeds without shell quoting regressions.
+- Preload validation is covered by unit tests; a renderer smoke should still exercise common flows (settings save, server add, split tunnel rule, DNS edit) to catch any too-strict validator in daily use.
+```
+
 ## Update Template
 
 When finishing a point, update its row and append a short note here:

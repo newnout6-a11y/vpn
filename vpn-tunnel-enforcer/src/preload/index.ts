@@ -239,26 +239,116 @@ export interface LeakSelfTestResult {
   dnsLeakDetail?: string
 }
 
+const MAX_TEXT_ARG_CHARS = 4096
+const MAX_VPN_INPUT_CHARS = 256 * 1024
+const MAX_OBJECT_JSON_CHARS = 256 * 1024
+const MAX_STRING_ARRAY_ITEMS = 500
+
+function assertString(value: unknown, name: string, maxChars = MAX_TEXT_ARG_CHARS): string {
+  if (typeof value !== 'string') throw new TypeError(`${name} must be a string`)
+  if (value.length > maxChars) throw new RangeError(`${name} is too large`)
+  return value
+}
+
+function assertOptionalString(value: unknown, name: string, maxChars = MAX_TEXT_ARG_CHARS): string | undefined {
+  if (value === undefined || value === null) return undefined
+  return assertString(value, name, maxChars)
+}
+
+function assertNullableString(value: unknown, name: string, maxChars = MAX_TEXT_ARG_CHARS): string | null {
+  if (value === null) return null
+  return assertString(value, name, maxChars)
+}
+
+function assertBoolean(value: unknown, name: string): boolean {
+  if (typeof value !== 'boolean') throw new TypeError(`${name} must be a boolean`)
+  return value
+}
+
+function assertOptionalBoolean(value: unknown, name: string): boolean | undefined {
+  if (value === undefined || value === null) return undefined
+  return assertBoolean(value, name)
+}
+
+function assertEnum<T extends string>(value: unknown, allowed: readonly T[], name: string): T {
+  if (typeof value !== 'string' || !allowed.includes(value as T)) {
+    throw new TypeError(`${name} is invalid`)
+  }
+  return value as T
+}
+
+function assertPort(value: unknown, name: string): number | undefined {
+  if (value === undefined || value === null) return undefined
+  const port = Number(value)
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new TypeError(`${name} must be a valid TCP port`)
+  return port
+}
+
+function assertRequiredPort(value: unknown, name: string): number {
+  const port = assertPort(value, name)
+  if (port === undefined) throw new TypeError(`${name} must be a valid TCP port`)
+  return port
+}
+
+function assertStringArray(value: unknown, name: string, maxItems = MAX_STRING_ARRAY_ITEMS): string[] {
+  if (!Array.isArray(value)) throw new TypeError(`${name} must be an array`)
+  if (value.length > maxItems) throw new RangeError(`${name} has too many items`)
+  return value.map((item, index) => assertString(item, `${name}[${index}]`))
+}
+
+function assertPlainObject<T extends Record<string, any>>(value: unknown, name: string, maxJsonChars = MAX_OBJECT_JSON_CHARS): T {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new TypeError(`${name} must be an object`)
+  const json = JSON.stringify(value)
+  if (json.length > maxJsonChars) throw new RangeError(`${name} is too large`)
+  return value as T
+}
+
+function assertOptionalPlainObject<T extends Record<string, any>>(value: unknown, name: string, maxJsonChars = MAX_OBJECT_JSON_CHARS): T | undefined {
+  if (value === undefined || value === null) return undefined
+  return assertPlainObject<T>(value, name, maxJsonChars)
+}
+
+function assertClientDevice(value: unknown): ClientDevice {
+  return assertEnum(value, ['pc', 'android', 'ios', 'mac'] as const, 'clientDevice')
+}
+
+function assertClientDeviceOptions(value: unknown): { clientDevice?: ClientDevice } | undefined {
+  const options = assertOptionalPlainObject<{ clientDevice?: ClientDevice }>(value, 'options')
+  if (!options) return undefined
+  return options.clientDevice === undefined ? {} : { clientDevice: assertClientDevice(options.clientDevice) }
+}
+
+function assertLeakOptions(value: unknown): { proxyAddr?: string; proxyType?: 'socks5' | 'http' } | undefined {
+  const options = assertOptionalPlainObject<{ proxyAddr?: unknown; proxyType?: unknown }>(value, 'options')
+  if (!options) return undefined
+  return {
+    proxyAddr: assertOptionalString(options.proxyAddr, 'options.proxyAddr'),
+    proxyType: options.proxyType === undefined ? undefined : assertEnum(options.proxyType, ['socks5', 'http'] as const, 'options.proxyType')
+  }
+}
+
 contextBridge.exposeInMainWorld('electronAPI', {
   detectHapp: () => ipcRenderer.invoke('detect-happ'),
   getPublicIp: () => ipcRenderer.invoke('get-public-ip'),
-  recheckPublicIp: (rebaseline?: boolean) => ipcRenderer.invoke('recheck-public-ip', rebaseline === true),
-  startTun: (proxyAddr: string, proxyType?: 'socks5' | 'http') => ipcRenderer.invoke('start-tun', proxyAddr, proxyType),
+  recheckPublicIp: (rebaseline?: boolean) => ipcRenderer.invoke('recheck-public-ip', assertOptionalBoolean(rebaseline, 'rebaseline') === true),
+  startTun: (proxyAddr: string, proxyType?: 'socks5' | 'http') =>
+    ipcRenderer.invoke('start-tun', assertString(proxyAddr, 'proxyAddr'), proxyType === undefined ? undefined : assertEnum(proxyType, ['socks5', 'http'] as const, 'proxyType')),
   startDirectVpn: () => ipcRenderer.invoke('start-direct-vpn'),
   stopTun: () => ipcRenderer.invoke('stop-tun'),
   getTunStatus: () => ipcRenderer.invoke('get-tun-status'),
   getTrafficStats: () => ipcRenderer.invoke('get-traffic-stats'),
-  applyAutoconfig: (targets: string[], proxyAddr: string, proxyType?: 'socks5' | 'http') => ipcRenderer.invoke('apply-autoconfig', targets, proxyAddr, proxyType),
-  rollbackAutoconfig: (targets: string[]) => ipcRenderer.invoke('rollback-autoconfig', targets),
+  applyAutoconfig: (targets: string[], proxyAddr: string, proxyType?: 'socks5' | 'http') =>
+    ipcRenderer.invoke('apply-autoconfig', assertStringArray(targets, 'targets'), assertString(proxyAddr, 'proxyAddr'), proxyType === undefined ? undefined : assertEnum(proxyType, ['socks5', 'http'] as const, 'proxyType')),
+  rollbackAutoconfig: (targets: string[]) => ipcRenderer.invoke('rollback-autoconfig', assertStringArray(targets, 'targets')),
   getAutoconfigStatus: () => ipcRenderer.invoke('get-autoconfig-status'),
   getSettings: () => ipcRenderer.invoke('get-settings'),
-  saveSettings: (settings: any) => ipcRenderer.invoke('save-settings', settings),
+  saveSettings: (settings: any) => ipcRenderer.invoke('save-settings', assertPlainObject(settings, 'settings')),
   smartRouteRuleSetsGetState: () => ipcRenderer.invoke('smart-route:rule-sets-state'),
-  smartRouteRuleSetsRefresh: (force?: boolean) => ipcRenderer.invoke('smart-route:rule-sets-refresh', force === true),
-  inspectVpnInput: (input: string) => ipcRenderer.invoke('inspect-vpn-input', input),
-  setLoginItem: (openAtLogin: boolean) => ipcRenderer.invoke('set-login-item', openAtLogin),
-  runLeakCheck: (options?: { proxyAddr?: string; proxyType?: 'socks5' | 'http' }) => ipcRenderer.invoke('run-leak-check', options),
-  runStoreRepair: (action: string) => ipcRenderer.invoke('run-store-repair', action),
+  smartRouteRuleSetsRefresh: (force?: boolean) => ipcRenderer.invoke('smart-route:rule-sets-refresh', assertOptionalBoolean(force, 'force') === true),
+  inspectVpnInput: (input: string) => ipcRenderer.invoke('inspect-vpn-input', assertString(input, 'input', MAX_VPN_INPUT_CHARS)),
+  setLoginItem: (openAtLogin: boolean) => ipcRenderer.invoke('set-login-item', assertBoolean(openAtLogin, 'openAtLogin')),
+  runLeakCheck: (options?: { proxyAddr?: string; proxyType?: 'socks5' | 'http' }) => ipcRenderer.invoke('run-leak-check', assertLeakOptions(options)),
+  runStoreRepair: (action: string) => ipcRenderer.invoke('run-store-repair', assertString(action, 'action')),
   runStoreDiagnostics: () => ipcRenderer.invoke('run-store-diagnostics'),
   runSystemDiagnostics: () => ipcRenderer.invoke('run-system-diagnostics'),
   getRoutingPlan: () => ipcRenderer.invoke('get-routing-plan'),
@@ -268,7 +358,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   repairOrphanedDns: () => ipcRenderer.invoke('network:repair-orphaned-dns'),
   rollbackAdapterLockdown: () => ipcRenderer.invoke('network:rollback-adapter-lockdown'),
   killStaleSingbox: () => ipcRenderer.invoke('tun:kill-stale-singbox'),
-  logRenderer: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => ipcRenderer.invoke('renderer-log', level, message),
+  logRenderer: (level: 'debug' | 'info' | 'warn' | 'error', message: string) =>
+    ipcRenderer.invoke('renderer-log', assertEnum(level, ['debug', 'info', 'warn', 'error'] as const, 'level'), assertString(message, 'message', 16 * 1024)),
   getFullLogs: () => ipcRenderer.invoke('get-full-logs'),
   clearAppLog: () => ipcRenderer.invoke('clear-app-log'),
   applyTunNetworkBaseline: () => ipcRenderer.invoke('apply-tun-network-baseline'),
@@ -291,87 +382,90 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Split Tunneling
   splitTunnelGetApps: () => ipcRenderer.invoke('split-tunnel:get-apps'),
   splitTunnelGetConfig: () => ipcRenderer.invoke('split-tunnel:get-config'),
-  splitTunnelSetRule: (appId: string, rule: 'vpn' | 'direct' | 'none') => ipcRenderer.invoke('split-tunnel:set-rule', appId, rule),
-  splitTunnelAddApp: (exePath: string) => ipcRenderer.invoke('split-tunnel:add-app', exePath),
-  splitTunnelAddProcess: (name: string) => ipcRenderer.invoke('split-tunnel:add-process', name),
-  splitTunnelRemoveApp: (appId: string) => ipcRenderer.invoke('split-tunnel:remove-app', appId),
+  splitTunnelSetRule: (appId: string, rule: 'vpn' | 'direct' | 'none') =>
+    ipcRenderer.invoke('split-tunnel:set-rule', assertString(appId, 'appId'), assertEnum(rule, ['vpn', 'direct', 'none'] as const, 'rule')),
+  splitTunnelAddApp: (exePath: string) => ipcRenderer.invoke('split-tunnel:add-app', assertString(exePath, 'exePath')),
+  splitTunnelAddProcess: (name: string) => ipcRenderer.invoke('split-tunnel:add-process', assertString(name, 'name')),
+  splitTunnelRemoveApp: (appId: string) => ipcRenderer.invoke('split-tunnel:remove-app', assertString(appId, 'appId')),
   // Server Picker
   serversList: () => ipcRenderer.invoke('servers:list'),
-  serversSelect: (id: string) => ipcRenderer.invoke('servers:select', id),
+  serversSelect: (id: string) => ipcRenderer.invoke('servers:select', assertString(id, 'id')),
   serversGetActive: () => ipcRenderer.invoke('servers:get-active'),
   serversPingAll: () => ipcRenderer.invoke('servers:ping-all'),
-  serversPingOne: (host: string, port: number) => ipcRenderer.invoke('servers:ping-one', host, port),
-  serversVerifyActiveCountry: (ip: string) => ipcRenderer.invoke('servers:verify-active-country', ip),
-  serversVerifyCountry: (id: string) => ipcRenderer.invoke('servers:verify-country', id),
-  serversAdd: (input: string, options?: { clientDevice?: ClientDevice }) => ipcRenderer.invoke('servers:add', input, options),
-  serversAddToGroup: (input: string, groupId: string | null, options?: { clientDevice?: ClientDevice }) => ipcRenderer.invoke('servers:add-to-group', input, groupId, options),
-  serversSetClientDevice: (id: string, clientDevice: ClientDevice) => ipcRenderer.invoke('servers:set-client-device', id, clientDevice),
-  serversRemove: (id: string) => ipcRenderer.invoke('servers:remove', id),
-  serversExportKey: (id: string) => ipcRenderer.invoke('servers:export-key', id),
-  serversExportKeyToFile: (id: string) => ipcRenderer.invoke('servers:export-key-file', id),
+  serversPingOne: (host: string, port: number) => ipcRenderer.invoke('servers:ping-one', assertString(host, 'host'), assertRequiredPort(port, 'port')),
+  serversVerifyActiveCountry: (ip: string) => ipcRenderer.invoke('servers:verify-active-country', assertString(ip, 'ip')),
+  serversVerifyCountry: (id: string) => ipcRenderer.invoke('servers:verify-country', assertString(id, 'id')),
+  serversAdd: (input: string, options?: { clientDevice?: ClientDevice }) => ipcRenderer.invoke('servers:add', assertString(input, 'input', MAX_VPN_INPUT_CHARS), assertClientDeviceOptions(options)),
+  serversAddToGroup: (input: string, groupId: string | null, options?: { clientDevice?: ClientDevice }) =>
+    ipcRenderer.invoke('servers:add-to-group', assertString(input, 'input', MAX_VPN_INPUT_CHARS), assertNullableString(groupId, 'groupId'), assertClientDeviceOptions(options)),
+  serversSetClientDevice: (id: string, clientDevice: ClientDevice) => ipcRenderer.invoke('servers:set-client-device', assertString(id, 'id'), assertClientDevice(clientDevice)),
+  serversRemove: (id: string) => ipcRenderer.invoke('servers:remove', assertString(id, 'id')),
+  serversExportKey: (id: string) => ipcRenderer.invoke('servers:export-key', assertString(id, 'id')),
+  serversExportKeyToFile: (id: string) => ipcRenderer.invoke('servers:export-key-file', assertString(id, 'id')),
   serversExportAllKeysToFile: () => ipcRenderer.invoke('servers:export-all-keys-file'),
   // Server Groups — origin tracking and post-trial-aware refresh.
   groupsList: () => ipcRenderer.invoke('groups:list'),
-  groupsGet: (id: string) => ipcRenderer.invoke('groups:get', id),
-  groupsRename: (id: string, name: string) => ipcRenderer.invoke('groups:rename', id, name),
-  groupsDelete: (id: string, deleteServers: boolean) => ipcRenderer.invoke('groups:delete', id, deleteServers),
-  groupsRefresh: (id: string) => ipcRenderer.invoke('groups:refresh', id),
-  groupsCheckHealth: (id: string) => ipcRenderer.invoke('groups:check-health', id),
-  serverProbe: (host: string, knownPort?: number) => ipcRenderer.invoke('server:probe', host, knownPort),
+  groupsGet: (id: string) => ipcRenderer.invoke('groups:get', assertString(id, 'id')),
+  groupsRename: (id: string, name: string) => ipcRenderer.invoke('groups:rename', assertString(id, 'id'), assertString(name, 'name')),
+  groupsDelete: (id: string, deleteServers: boolean) => ipcRenderer.invoke('groups:delete', assertString(id, 'id'), assertBoolean(deleteServers, 'deleteServers')),
+  groupsRefresh: (id: string) => ipcRenderer.invoke('groups:refresh', assertString(id, 'id')),
+  groupsCheckHealth: (id: string) => ipcRenderer.invoke('groups:check-health', assertString(id, 'id')),
+  serverProbe: (host: string, knownPort?: number) => ipcRenderer.invoke('server:probe', assertString(host, 'host'), assertPort(knownPort, 'knownPort')),
   // URL Availability — paste a link, get verdict + diagnostics for both
   // the tunnel path and the direct path (clash-direct-out when VPN is on).
-  urlAvailabilityCheck: (url: string) => ipcRenderer.invoke('url-availability:check', url),
+  urlAvailabilityCheck: (url: string) => ipcRenderer.invoke('url-availability:check', assertString(url, 'url', MAX_VPN_INPUT_CHARS)),
   urlAvailabilityHistory: () => ipcRenderer.invoke('url-availability:history'),
   urlAvailabilityClearHistory: () => ipcRenderer.invoke('url-availability:clear-history'),
   // Scheduler
   schedulerList: () => ipcRenderer.invoke('scheduler:list'),
-  schedulerCreate: (entry: any) => ipcRenderer.invoke('scheduler:create', entry),
-  schedulerUpdate: (id: string, patch: any) => ipcRenderer.invoke('scheduler:update', id, patch),
-  schedulerDelete: (id: string) => ipcRenderer.invoke('scheduler:delete', id),
+  schedulerCreate: (entry: any) => ipcRenderer.invoke('scheduler:create', assertPlainObject(entry, 'entry')),
+  schedulerUpdate: (id: string, patch: any) => ipcRenderer.invoke('scheduler:update', assertString(id, 'id'), assertPlainObject(patch, 'patch')),
+  schedulerDelete: (id: string) => ipcRenderer.invoke('scheduler:delete', assertString(id, 'id')),
   schedulerNextEvent: () => ipcRenderer.invoke('scheduler:next-event'),
   // Kill-Switch
   killSwitchGetLevel: () => ipcRenderer.invoke('kill-switch:get-level'),
-  killSwitchSetLevel: (level: 'off' | 'standard' | 'strict') => ipcRenderer.invoke('kill-switch:set-level', level),
+  killSwitchSetLevel: (level: 'off' | 'standard' | 'strict') => ipcRenderer.invoke('kill-switch:set-level', assertEnum(level, ['off', 'standard', 'strict'] as const, 'level')),
   killSwitchGetExceptions: () => ipcRenderer.invoke('kill-switch:get-exceptions'),
-  killSwitchAddException: (exception: { type: 'app' | 'ip'; value: string; label: string }) => ipcRenderer.invoke('kill-switch:add-exception', exception),
-  killSwitchRemoveException: (id: string) => ipcRenderer.invoke('kill-switch:remove-exception', id),
+  killSwitchAddException: (exception: { type: 'app' | 'ip'; value: string; label: string }) => ipcRenderer.invoke('kill-switch:add-exception', assertPlainObject(exception, 'exception')),
+  killSwitchRemoveException: (id: string) => ipcRenderer.invoke('kill-switch:remove-exception', assertString(id, 'id')),
   killSwitchBrowseApp: () => ipcRenderer.invoke('kill-switch:browse-app'),
   // Profile Rotation
   rotationGetConfig: () => ipcRenderer.invoke('rotation:get-config'),
-  rotationSetConfig: (config: any) => ipcRenderer.invoke('rotation:set-config', config),
+  rotationSetConfig: (config: any) => ipcRenderer.invoke('rotation:set-config', assertPlainObject(config, 'config')),
   rotationRotateNow: () => ipcRenderer.invoke('rotation:rotate-now'),
   // DNS Profiles
   dnsList: () => ipcRenderer.invoke('dns:list'),
-  dnsCreate: (profile: { name: string; primary: string; secondary: string; type: 'plain' | 'doh' | 'dot' }) => ipcRenderer.invoke('dns:create', profile),
-  dnsUpdate: (id: string, patch: any) => ipcRenderer.invoke('dns:update', id, patch),
-  dnsDelete: (id: string) => ipcRenderer.invoke('dns:delete', id),
-  dnsSelect: (id: string) => ipcRenderer.invoke('dns:select', id),
-  dnsValidate: (address: string) => ipcRenderer.invoke('dns:validate', address),
+  dnsCreate: (profile: { name: string; primary: string; secondary: string; type: 'plain' | 'doh' | 'dot' }) => ipcRenderer.invoke('dns:create', assertPlainObject(profile, 'profile')),
+  dnsUpdate: (id: string, patch: any) => ipcRenderer.invoke('dns:update', assertString(id, 'id'), assertPlainObject(patch, 'patch')),
+  dnsDelete: (id: string) => ipcRenderer.invoke('dns:delete', assertString(id, 'id')),
+  dnsSelect: (id: string) => ipcRenderer.invoke('dns:select', assertString(id, 'id')),
+  dnsValidate: (address: string) => ipcRenderer.invoke('dns:validate', assertString(address, 'address')),
   // Domain Routing
   domainRoutingList: () => ipcRenderer.invoke('domain-routing:list'),
-  domainRoutingAdd: (rule: { pattern: string; action: 'vpn' | 'direct' | 'block'; priority: number }) => ipcRenderer.invoke('domain-routing:add', rule),
-  domainRoutingUpdate: (id: string, patch: any) => ipcRenderer.invoke('domain-routing:update', id, patch),
-  domainRoutingDelete: (id: string) => ipcRenderer.invoke('domain-routing:delete', id),
-  domainRoutingReorder: (ids: string[]) => ipcRenderer.invoke('domain-routing:reorder', ids),
-  domainRoutingImport: (filePath: string) => ipcRenderer.invoke('domain-routing:import', filePath),
+  domainRoutingAdd: (rule: { pattern: string; action: 'vpn' | 'direct' | 'block'; priority: number }) => ipcRenderer.invoke('domain-routing:add', assertPlainObject(rule, 'rule')),
+  domainRoutingUpdate: (id: string, patch: any) => ipcRenderer.invoke('domain-routing:update', assertString(id, 'id'), assertPlainObject(patch, 'patch')),
+  domainRoutingDelete: (id: string) => ipcRenderer.invoke('domain-routing:delete', assertString(id, 'id')),
+  domainRoutingReorder: (ids: string[]) => ipcRenderer.invoke('domain-routing:reorder', assertStringArray(ids, 'ids')),
+  domainRoutingImport: (filePath: string) => ipcRenderer.invoke('domain-routing:import', assertString(filePath, 'filePath')),
   domainRoutingBrowseFile: () => ipcRenderer.invoke('domain-routing:browse-file'),
   // Connection History
   connectionHistoryList: () => ipcRenderer.invoke('connection-history:list'),
-  connectionHistoryFilter: (filters: any) => ipcRenderer.invoke('connection-history:filter', filters),
-  connectionHistoryStats: (period: 'day' | 'week' | 'month') => ipcRenderer.invoke('connection-history:stats', period),
+  connectionHistoryFilter: (filters: any) => ipcRenderer.invoke('connection-history:filter', assertPlainObject(filters, 'filters')),
+  connectionHistoryStats: (period: 'day' | 'week' | 'month') => ipcRenderer.invoke('connection-history:stats', assertEnum(period, ['day', 'week', 'month'] as const, 'period')),
   connectionHistoryExportCsv: () => ipcRenderer.invoke('connection-history:export-csv'),
   connectionHistoryExportJson: () => ipcRenderer.invoke('connection-history:export-json'),
   // Traffic History
-  trafficHistoryList: (vpnIp?: string) => ipcRenderer.invoke('traffic-history:list', vpnIp),
+  trafficHistoryList: (vpnIp?: string) => ipcRenderer.invoke('traffic-history:list', assertOptionalString(vpnIp, 'vpnIp')),
   trafficHistoryClear: () => ipcRenderer.invoke('traffic-history:clear'),
   // Config Import/Export
   configExport: () => ipcRenderer.invoke('config:export'),
   configBrowseImport: () => ipcRenderer.invoke('config:browse-import'),
-  configImport: (filePath: string) => ipcRenderer.invoke('config:import', filePath),
-  configImportApply: (filePath: string, sections: string[], conflictResolution: 'replace' | 'merge') => ipcRenderer.invoke('config:import-apply', filePath, sections, conflictResolution),
+  configImport: (filePath: string) => ipcRenderer.invoke('config:import', assertString(filePath, 'filePath')),
+  configImportApply: (filePath: string, sections: string[], conflictResolution: 'replace' | 'merge') =>
+    ipcRenderer.invoke('config:import-apply', assertString(filePath, 'filePath'), assertStringArray(sections, 'sections'), assertEnum(conflictResolution, ['replace', 'merge'] as const, 'conflictResolution')),
   // Notification Preferences
   notificationsGetPrefs: () => ipcRenderer.invoke('notifications:get-prefs'),
-  notificationsSetPrefs: (prefs: any) => ipcRenderer.invoke('notifications:set-prefs', prefs),
+  notificationsSetPrefs: (prefs: any) => ipcRenderer.invoke('notifications:set-prefs', assertPlainObject(prefs, 'prefs')),
   checkOsNotificationState: () => ipcRenderer.invoke('notifications:check-os-state'),
   // Clear the Windows-side notification block (registry "Enabled = 0" set
   // when the user clicked "Don't show notifications" on a toast). Returns
@@ -393,14 +487,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   ipMonitorResume: () => ipcRenderer.invoke('ip-monitor:resume'),
   // i18n
   i18nGetLocale: () => ipcRenderer.invoke('i18n:get-locale'),
-  i18nSetLocale: (locale: string) => ipcRenderer.invoke('i18n:set-locale', locale),
+  i18nSetLocale: (locale: string) => ipcRenderer.invoke('i18n:set-locale', assertString(locale, 'locale')),
   i18nGetSystemLocale: () => ipcRenderer.invoke('i18n:get-system-locale'),
   // Theme
   themeList: () => ipcRenderer.invoke('theme:list'),
   themeGetActive: () => ipcRenderer.invoke('theme:get-active'),
-  themeSetActive: (id: string) => ipcRenderer.invoke('theme:set-active', id),
-  themeCreate: (theme: any) => ipcRenderer.invoke('theme:create', theme),
-  themeDelete: (id: string) => ipcRenderer.invoke('theme:delete', id),
+  themeSetActive: (id: string) => ipcRenderer.invoke('theme:set-active', assertString(id, 'id')),
+  themeCreate: (theme: any) => ipcRenderer.invoke('theme:create', assertPlainObject(theme, 'theme')),
+  themeDelete: (id: string) => ipcRenderer.invoke('theme:delete', assertString(id, 'id')),
   onThemeChanged: (callback: (theme: any) => void) => {
     const handler = (_event: any, theme: any) => callback(theme)
     ipcRenderer.on('theme-changed', handler)
