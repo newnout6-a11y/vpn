@@ -689,7 +689,7 @@ Files:
 - vpn-tunnel-enforcer/src/main/settingsLoginItem.test.ts
 
 Items:
-- N1 DONE: remote DNS bootstrap resolvers now use direct-out, avoiding proxy-out circular dependency when the VPN/proxy endpoint itself is hostname-based.
+- N1 DONE + RUNTIME HOTFIX: remote DNS bootstrap resolvers now use `type: local` with no detour. The earlier `type: udp` + `detour: direct-out` avoided the proxy hostname circular dependency but sing-box 1.13 rejects it at runtime with `detour to an empty direct outbound makes no sense`.
 - N2 DONE: tunController.stop() no longer emits stopped/desktop disconnect notification before baseline/kill-switch/adapter rollback finishes.
 - N3 DONE: tunController.stop() resumes ipMonitor through a guarded finally path, so teardown exceptions cannot leave leak monitoring suspended forever.
 - N12 DONE: routingSelfTest.ruEgressIp is no longer a dead stub; Smart-RU self-test now probes RU-domain echo pages through the normal TUN path.
@@ -702,6 +702,8 @@ Items:
 Verification:
 - npm test -- tunControllerConfig.test.ts routingSelfTest.test.ts elevatedPsHelper.test.ts granularKillSwitchInit.test.ts settingsLoginItem.test.ts --reporter=dot
 - Result: 5 test files passed, 61 tests passed.
+- npm test -- tunControllerConfig.test.ts --reporter=dot
+- Result after runtime hotfix: 1 test file passed, 44 tests passed.
 - npm run build
 - Result: passed.
 

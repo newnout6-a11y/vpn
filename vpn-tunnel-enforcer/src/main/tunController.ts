@@ -488,8 +488,8 @@ function buildRemoteDnsServers(): Array<Record<string, any>> {
 
 function buildDnsBootstrapServers(): Array<Record<string, any>> {
   return [
-    { type: 'udp', tag: 'dns-remote-bootstrap', server: '1.1.1.1', detour: 'direct-out' },
-    { type: 'udp', tag: 'dns-remote-bootstrap-backup', server: '8.8.8.8', detour: 'direct-out' }
+    { type: 'local', tag: 'dns-remote-bootstrap' },
+    { type: 'local', tag: 'dns-remote-bootstrap-backup' }
   ]
 }
 
