@@ -202,7 +202,7 @@ declare global {
       externalProxyStatus: () => Promise<import('../shared/ipc-types').ExternalProxyStatus>
       externalProxyStart: () => Promise<import('../shared/ipc-types').ExternalProxyStatus>
       externalProxyStop: () => Promise<import('../shared/ipc-types').ExternalProxyStatus>
-      externalProxyList: () => Promise<import('../shared/ipc-types').ExternalProxyProfileRow[]>
+      externalProxyList: (country?: string) => Promise<import('../shared/ipc-types').ExternalProxyProfileRow[]>
       externalProxyRotate: () => Promise<import('../shared/ipc-types').ExternalProxyStatus>
       // VPN Repair
       repairOrphanedDns: () => Promise<any>

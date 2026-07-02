@@ -58,4 +58,12 @@ describe('preload IPC argument validation', () => {
 
     expect(invokeMock).toHaveBeenCalledWith('servers:add', 'vless://u@example.com:443', { clientDevice: 'android' })
   })
+
+  it('passes the optional external proxy country filter through preload', async () => {
+    const api = await loadApi()
+
+    await api.externalProxyList('Netherlands')
+
+    expect(invokeMock).toHaveBeenCalledWith('external-proxy:list', 'Netherlands')
+  })
 })

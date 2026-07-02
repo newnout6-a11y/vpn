@@ -775,10 +775,14 @@ Items:
 - U-medium detectHapp DONE: periodic Happ re-detection now has exponential backoff on detector errors and resets the backoff after a successful detect call.
 - U-medium store toasts DONE: global toasts are capped at 20 and timers are tracked/cleared when a toast is dismissed or displaced.
 - U-medium trafficMonitor DONE: non-Windows dev fallback publishes running=false/adapterFound=false instead of a misleading running=true no-adapter state.
+- U-medium externalProxyList DONE: preload/API typings now accept an optional country filter and pass it to `external-proxy:list`; main already supported this argument.
+- U-medium before-quit cleanup VERIFIED: `performShutdownCleanup()` is guarded by `shutdownInProgress`, and `before-quit` prevents re-entry while cleanup is already running.
 
 Verification:
 - npm test -- mainIpcRegression.test.ts traySource.test.ts notificationsReset.test.ts notificationsGating.test.ts trafficMonitor.test.ts store.connectionBusy.test.ts AppSource.test.ts --reporter=dot
 - Result: 7 test files passed, 24 tests passed.
+- npm test -- preloadValidation.test.ts --reporter=dot
+- Result: 1 test file passed, 5 tests passed.
 - npm run build
 - Result: passed.
 

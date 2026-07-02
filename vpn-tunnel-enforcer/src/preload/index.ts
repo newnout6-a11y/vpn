@@ -190,7 +190,7 @@ export interface ElectronAPI {
   externalProxyStatus: () => Promise<ExternalProxyStatus>
   externalProxyStart: () => Promise<ExternalProxyStatus>
   externalProxyStop: () => Promise<ExternalProxyStatus>
-  externalProxyList: () => Promise<ExternalProxyProfileRow[]>
+  externalProxyList: (country?: string) => Promise<ExternalProxyProfileRow[]>
   externalProxyRotate: () => Promise<ExternalProxyStatus>
   // Event listeners
   onIpChanged: (callback: (data: { ip: string; isLeak: boolean }) => void) => () => void
@@ -527,7 +527,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   externalProxyStatus: () => ipcRenderer.invoke('external-proxy:status'),
   externalProxyStart: () => ipcRenderer.invoke('external-proxy:start'),
   externalProxyStop: () => ipcRenderer.invoke('external-proxy:stop'),
-  externalProxyList: () => ipcRenderer.invoke('external-proxy:list'),
+  externalProxyList: (country?: string) => ipcRenderer.invoke('external-proxy:list', assertOptionalString(country, 'country')),
   externalProxyRotate: () => ipcRenderer.invoke('external-proxy:rotate'),
   // Event listeners
   onIpChanged: (callback: (data: { ip: string; isLeak: boolean }) => void) => {
