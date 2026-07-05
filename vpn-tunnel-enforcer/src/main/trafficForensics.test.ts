@@ -448,6 +448,7 @@ describe('trafficForensics', () => {
     const staged = await stageTrafficForensicsArtifacts('C:/Users/Redmi/CascadeProjects/vpn/.tmp/vpnte-traffic-stage')
     expect(staged).toBe(true)
     expect(existsSync('C:/Users/Redmi/CascadeProjects/vpn/.tmp/vpnte-traffic-stage/traffic-forensics/latest-session.json')).toBe(true)
+    expect(existsSync(`C:/Users/Redmi/CascadeProjects/vpn/.tmp/vpnte-traffic-stage/traffic-forensics/sessions/${started.sessionId}/session-manifest.json`)).toBe(true)
     expect(existsSync(join(started.sessionDir!, 'summary.json'))).toBe(true)
     expect(existsSync(join(started.sessionDir!, 'timeline.ndjson'))).toBe(true)
     expect(existsSync(join(started.sessionDir!, 'drops.ndjson'))).toBe(true)
@@ -479,6 +480,7 @@ describe('trafficForensics', () => {
     const staged = await stageTrafficForensicsArtifacts('C:/Users/Redmi/CascadeProjects/vpn/.tmp/vpnte-traffic-stage')
     expect(staged).toBe(true)
     expect(execElevatedMock).toHaveBeenCalledTimes(2)
+    expect(existsSync(`C:/Users/Redmi/CascadeProjects/vpn/.tmp/vpnte-traffic-stage/traffic-forensics/sessions/${started.sessionId}/session-manifest.json`)).toBe(true)
 
     const execCommand = execElevatedMock.mock.calls[1][0]
     expect(execCommand).toContain('-File')

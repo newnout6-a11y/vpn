@@ -193,6 +193,16 @@ describe('Diagnostics Preflight', () => {
       expect(sourceCode).toContain('known secrets are redacted')
       expect(sourceCode).toContain('topLevelFiles')
     })
+
+    it('should limit exported snapshots to a recent bounded set', () => {
+      const exportTsPath = join(process.cwd(), 'src', 'main', 'diagnosticsExport.ts')
+      const sourceCode = readFileSync(exportTsPath, 'utf-8')
+
+      expect(sourceCode).toContain('DIAGNOSTICS_SNAPSHOT_RECENT_MS')
+      expect(sourceCode).toContain('DIAGNOSTICS_SNAPSHOT_MAX_FILES')
+      expect(sourceCode).toContain('snapshotTimeFromName')
+      expect(sourceCode).toContain('now - item.time <= DIAGNOSTICS_SNAPSHOT_RECENT_MS')
+    })
   })
 
   describe('7. Manifest initialization', () => {

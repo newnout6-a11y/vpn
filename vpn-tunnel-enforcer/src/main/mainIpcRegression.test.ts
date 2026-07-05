@@ -22,6 +22,11 @@ describe('main IPC regressions', () => {
     const handlerEnd = source.indexOf("handleLogged('diagnostics:run-leak-check'", handlerStart)
     const handler = source.slice(handlerStart, handlerEnd)
 
+    expect(handler).toContain('if (tunController.getStatus().running)')
+    expect(handler.indexOf('if (tunController.getStatus().running)')).toBeLessThan(
+      handler.indexOf('killOwnedTunRuntimeProcesses()')
+    )
+    expect(handler).toContain('Отключите VPN перед завершением зависших процессов')
     expect(handler).toContain('killOwnedTunRuntimeProcesses()')
     expect(source).toContain('killOwnedTunRuntimeProcesses')
     expect(handler).not.toContain("await import('child_process')")

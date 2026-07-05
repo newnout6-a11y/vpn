@@ -1161,6 +1161,34 @@ Verification:
 Windows-only gap:
 - Needs live packaged smoke for Direct VPN watchdog recovery, Stop UI state after runtime cleanup warnings, and Maintenance repair behavior while TUN is active.
 
+2026-07-05 - RUNTIME-DIAG-MAINT-ZIP-2 DONE
+Files:
+- `vpn-tunnel-enforcer/src/main/index.ts`
+- `vpn-tunnel-enforcer/src/renderer/pages/Maintenance.tsx`
+- `vpn-tunnel-enforcer/src/main/diagnosticsExport.ts`
+- `vpn-tunnel-enforcer/src/main/trafficForensics.ts`
+- `vpn-tunnel-enforcer/src/main/mainIpcRegression.test.ts`
+- `vpn-tunnel-enforcer/src/renderer/MaintenanceSource.test.ts`
+- `vpn-tunnel-enforcer/src/main/diagnosticsPreflight.test.ts`
+- `vpn-tunnel-enforcer/src/main/trafficForensics.test.ts`
+Findings from fresh post-reinstall ZIP:
+- `vpn-tunnel-enforcer-diagnostics-2026-07-05T14-00-56-621Z.zip` was created by the rebuilt app, but its diagnostics bundle still included older `snapshots` from `2026-07-05T08:41Z..09:28Z` and traffic-forensics sessions from `2026-06-20/21`; this was an export/staging bug, not a user mistake.
+- Maintenance auto-repair was run while TUN was active. Firewall repair skipped safely, but the runtime cleanup step still killed the live `vpnte-sing-box.exe`, causing a crash and auto-restart.
+Fixes:
+- `tun:kill-stale-singbox` now refuses to kill runtime while TUN is running and returns a skipped/no-op result.
+- `firewall:repair-vpnte-rules` active-TUN guard now returns skipped success instead of a hard failure.
+- Maintenance renderer maps skipped/no-op repair results to warning instead of error.
+- Diagnostics ZIP now exports a bounded recent snapshot set instead of every historical snapshot in `userData`.
+- Traffic-forensics staging now exports only the latest/current session and skips stale historical sessions when deep traffic inspection is disabled.
+Verification:
+- `npm test -- mainIpcRegression.test.ts MaintenanceSource.test.ts diagnosticsPreflight.test.ts trafficForensics.test.ts -- --reporter=dot` passed: 4 files / 42 tests.
+- `npm test -- --reporter=dot` passed: 61 files / 505 tests.
+- `npm run build` passed.
+- `git diff --check` passed.
+Windows-only gap:
+- Needs live packaged smoke: run Maintenance auto-repair while Direct VPN is active; firewall/runtime steps should show skipped/warn and must not kill sing-box.
+- Needs live packaged smoke: export ZIP after reinstall/start; snapshots should be recent/bounded and old June traffic-forensics sessions should not appear unless they are the current/latest active session.
+
 Live smoke still needed before the whole goal can honestly be marked complete:
 - Safe packaged UI smoke: open Maintenance, switch tabs away/back, verify health/firewall/repair results stay visible.
 - Safe packaged UI smoke: clear logs, restart/reinstall, verify connection history, app logs, rotated logs, snapshots, and traffic-forensics artifacts do not repopulate from old files.

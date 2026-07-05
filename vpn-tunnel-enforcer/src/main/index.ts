@@ -1362,7 +1362,7 @@ app.whenReady().then(async () => {
   handleLogged('firewall:repair-vpnte-rules', async () => {
     if (tunController.getStatus().running) {
       return {
-        success: false,
+        success: true,
         skipped: true,
         message: 'Отключите VPN перед починкой firewall-правил: во время активного TUN kill-switch нельзя снимать безопасно.',
         health: await getFirewallRepairHealth()
@@ -1403,6 +1403,16 @@ app.whenReady().then(async () => {
   })
 
   handleLogged('tun:kill-stale-singbox', async () => {
+    if (tunController.getStatus().running) {
+      return {
+        success: true,
+        skipped: true,
+        candidates: 0,
+        killed: 0,
+        names: [],
+        message: 'Отключите VPN перед завершением зависших процессов: сейчас runtime активен и обслуживает TUN.'
+      }
+    }
     try {
       const result = await killOwnedTunRuntimeProcesses()
       if (!result.success) {

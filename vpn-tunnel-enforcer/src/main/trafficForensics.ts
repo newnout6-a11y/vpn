@@ -3,7 +3,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'child_process'
 import { existsSync } from 'fs'
 import { appendFile, cp, mkdir, readdir, readFile, rm, writeFile } from 'fs/promises'
 import { release as osRelease, type as osType, version as osVersion } from 'os'
-import { dirname, join } from 'path'
+import { basename, dirname, join } from 'path'
 import { execElevated } from './admin'
 import { logEvent } from './appLogger'
 import { settingsStore } from './settings'
@@ -1228,6 +1228,9 @@ export async function stageTrafficForensicsArtifacts(stageDir: string): Promise<
   await refreshTrafficForensicsArtifacts()
   const manifest = await readLatestManifest()
   await pruneOldSessions(settings.retainSessions, manifest?.sessionId)
+  if (!settings.enabled && !manifest?.running) {
+    return false
+  }
   if (manifest?.sessionDir) {
     const next = await generateTrafficForensicsSummary(manifest).catch((err: any) => ({
       ...manifest,
@@ -1238,11 +1241,24 @@ export async function stageTrafficForensicsArtifacts(stageDir: string): Promise<
     }))
     await writeManifest(next)
   }
-  await mkdir(stageDir, { recursive: true })
-  await copyDirBestEffort(rootDir, join(stageDir, 'traffic-forensics')).catch((err: any) => {
-    logEvent('warn', 'traffic-forensics', 'failed to complete traffic forensics staging', {
-      error: err?.message || String(err)
+  const exportRoot = join(stageDir, 'traffic-forensics')
+  await mkdir(exportRoot, { recursive: true })
+  const latestManifest = getLatestManifestPath()
+  if (existsSync(latestManifest)) {
+    await cp(latestManifest, join(exportRoot, 'latest-session.json'), { force: true }).catch((err: any) => {
+      logEvent('warn', 'traffic-forensics', 'failed to stage latest-session.json', {
+        error: err?.message || String(err)
+      })
     })
-  })
+  }
+  if (manifest?.sessionDir && existsSync(manifest.sessionDir)) {
+    const sessionName = manifest.sessionId || basename(manifest.sessionDir)
+    await copyDirBestEffort(manifest.sessionDir, join(exportRoot, 'sessions', sessionName)).catch((err: any) => {
+      logEvent('warn', 'traffic-forensics', 'failed to stage current traffic forensics session', {
+        sessionId: manifest.sessionId,
+        error: err?.message || String(err)
+      })
+    })
+  }
   return true
 }

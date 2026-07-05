@@ -11,7 +11,7 @@
  */
 import { execFile as execFileCb } from 'child_process'
 import { dialog, app } from 'electron'
-import { mkdtemp, writeFile, copyFile, readdir, rm, readFile } from 'fs/promises'
+import { mkdtemp, writeFile, copyFile, readdir, rm, readFile, mkdir, stat } from 'fs/promises'
 import { existsSync } from 'fs'
 import { tmpdir, hostname, release, type as osType, arch as osArch, totalmem, freemem, cpus } from 'os'
 import { join } from 'path'
@@ -25,6 +25,8 @@ import { redactSensitiveConfig, redactSensitiveText, redactSettingsForDiagnostic
 import { getTunNetworkBaselineManifestPath } from './systemNetwork'
 
 const execFile = promisify(execFileCb)
+const DIAGNOSTICS_SNAPSHOT_RECENT_MS = 2 * 60 * 60 * 1000
+const DIAGNOSTICS_SNAPSHOT_MAX_FILES = 40
 
 function encodedPowerShell(script: string): string {
   return Buffer.from(script, 'utf-16le').toString('base64')
@@ -68,6 +70,13 @@ async function copyIfExists(src: string, dst: string): Promise<boolean> {
     logEvent('warn', 'diag-export', 'failed to copy file', { src, err: (err as Error)?.message })
     return false
   }
+}
+
+function snapshotTimeFromName(name: string): number | null {
+  const match = name.match(/^snapshot-(\d{4}-\d{2}-\d{2}T\d{2})-(\d{2})-(\d{2})-(\d{3}Z)-/)
+  if (!match) return null
+  const parsed = Date.parse(`${match[1]}:${match[2]}:${match[3]}.${match[4]}`)
+  return Number.isFinite(parsed) ? parsed : null
 }
 
 export async function exportDiagnosticsZip(): Promise<ExportResult> {
@@ -151,19 +160,30 @@ export async function exportDiagnosticsZip(): Promise<ExportResult> {
     if (existsSync(snapshotsDir)) {
       try {
         const stagedSnaps = join(stage, 'snapshots')
-        await import('fs/promises').then((fp) => fp.mkdir(stagedSnaps, { recursive: true }))
-        const entries = await readdir(snapshotsDir)
-        for (const name of entries) {
-          if (/\.json$/i.test(name)) {
+        await mkdir(stagedSnaps, { recursive: true })
+        const now = Date.now()
+        const candidates = await Promise.all((await readdir(snapshotsDir))
+          .filter(name => /\.json$/i.test(name))
+          .map(async (name) => {
             const src = join(snapshotsDir, name)
-            const dst = join(stagedSnaps, name)
-            const raw = await readFile(src, 'utf-8')
-            try {
-              const parsed = JSON.parse(raw)
-              await writeFile(dst, JSON.stringify(redactSensitiveConfig(parsed), null, 2), 'utf-8')
-            } catch {
-              await writeFile(dst, redactSensitiveText(raw), 'utf-8')
-            }
+            const mtime = await stat(src).then(s => s.mtimeMs).catch(() => 0)
+            return { name, src, time: snapshotTimeFromName(name) ?? mtime }
+          }))
+        const recent = candidates
+          .sort((a, b) => b.time - a.time)
+          .filter(item => item.time > 0 && now - item.time <= DIAGNOSTICS_SNAPSHOT_RECENT_MS)
+          .slice(0, DIAGNOSTICS_SNAPSHOT_MAX_FILES)
+        const selected = recent.length > 0
+          ? recent
+          : candidates.sort((a, b) => b.time - a.time).slice(0, Math.min(12, DIAGNOSTICS_SNAPSHOT_MAX_FILES))
+        for (const { name, src } of selected.sort((a, b) => a.time - b.time)) {
+          const dst = join(stagedSnaps, name)
+          const raw = await readFile(src, 'utf-8')
+          try {
+            const parsed = JSON.parse(raw)
+            await writeFile(dst, JSON.stringify(redactSensitiveConfig(parsed), null, 2), 'utf-8')
+          } catch {
+            await writeFile(dst, redactSensitiveText(raw), 'utf-8')
           }
         }
       } catch (err) {

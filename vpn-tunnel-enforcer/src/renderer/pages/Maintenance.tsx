@@ -84,8 +84,8 @@ function statusIcon(status: HealthStatus | RepairStep['status']) {
 }
 
 function stepStatusFromResult(result: any): RepairStep['status'] {
-  if (result?.success === false) return 'fail'
   if (result?.skipped || result?.rolledBack === false || result?.repaired === false) return 'warn'
+  if (result?.success === false) return 'fail'
   return 'ok'
 }
 

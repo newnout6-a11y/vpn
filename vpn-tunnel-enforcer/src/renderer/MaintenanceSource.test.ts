@@ -47,4 +47,15 @@ describe('Maintenance source regressions', () => {
     expect(source).toContain('maintenanceRepairSteps')
     expect(source).toContain('setMaintenanceRepairSteps')
   })
+
+  it('shows skipped repair steps as warnings instead of failures', () => {
+    const source = maintenanceSource()
+    const functionStart = source.indexOf('function stepStatusFromResult')
+    const functionEnd = source.indexOf('\n}', functionStart)
+    const body = source.slice(functionStart, functionEnd)
+
+    expect(functionStart).toBeGreaterThanOrEqual(0)
+    expect(body).toContain('result?.skipped')
+    expect(body.indexOf('result?.skipped')).toBeLessThan(body.indexOf("result?.success === false"))
+  })
 })
