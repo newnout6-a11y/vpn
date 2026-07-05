@@ -1189,6 +1189,35 @@ Windows-only gap:
 - Needs live packaged smoke: run Maintenance auto-repair while Direct VPN is active; firewall/runtime steps should show skipped/warn and must not kill sing-box.
 - Needs live packaged smoke: export ZIP after reinstall/start; snapshots should be recent/bounded and old June traffic-forensics sessions should not appear unless they are the current/latest active session.
 
+2026-07-05 - RUNTIME-DIAG-MAINT-ZIP-3 DONE
+Files:
+- `vpn-tunnel-enforcer/src/main/index.ts`
+- `vpn-tunnel-enforcer/src/renderer/pages/Maintenance.tsx`
+- `vpn-tunnel-enforcer/src/main/systemDiagnostics.ts`
+- `vpn-tunnel-enforcer/src/main/diagnosticsExport.ts`
+- `vpn-tunnel-enforcer/src/main/mainIpcRegression.test.ts`
+- `vpn-tunnel-enforcer/src/renderer/MaintenanceSource.test.ts`
+- `vpn-tunnel-enforcer/src/main/systemDiagnostics.test.ts`
+- `vpn-tunnel-enforcer/src/main/diagnosticsPreflight.test.ts`
+Findings from fresh ZIP/screenshots:
+- `vpn-tunnel-enforcer-diagnostics-2026-07-05T14-17-07-690Z.zip` no longer included old June traffic-forensics sessions, but snapshots still included a previous app run inside the 2h recent window.
+- Maintenance auto-repair after a clean state displayed clean no-op steps as yellow warnings (`already clean`, `manifest not found`, `changes not needed`).
+- Health-check showed `Current proxy: directvpn idle` as WARN even though Direct VPN does not need a local proxy when stopped.
+- `sing-box log` treated benign `ERROR ... connection upload closed` lines as health warnings.
+Fixes:
+- Maintenance now distinguishes blocked actions from clean no-op actions: blocked active-TUN repair remains WARN, clean no-op repair steps become OK.
+- Active-TUN firewall/runtime maintenance guard results now include `blocked: true`.
+- Direct VPN idle proxy diagnostic is INFO instead of WARN.
+- Sing-box log health ignores benign `connection upload closed` noise while preserving real fatal/error/timeout/refused signals.
+- Diagnostics ZIP snapshot export now starts at the latest `app-start` snapshot inside the recent window.
+Verification:
+- `npm test -- mainIpcRegression.test.ts MaintenanceSource.test.ts diagnosticsPreflight.test.ts systemDiagnostics.test.ts -- --reporter=dot` passed: 4 files / 29 tests.
+- `npm test -- --reporter=dot` passed: 61 files / 507 tests.
+- `npm run build` passed.
+- `git diff --check` passed.
+Windows-only gap:
+- Needs live packaged smoke: after fresh install/start, export ZIP should include snapshots only from the latest app run, and Maintenance clean no-op repair should be green/OK.
+
 Live smoke still needed before the whole goal can honestly be marked complete:
 - Safe packaged UI smoke: open Maintenance, switch tabs away/back, verify health/firewall/repair results stay visible.
 - Safe packaged UI smoke: clear logs, restart/reinstall, verify connection history, app logs, rotated logs, snapshots, and traffic-forensics artifacts do not repopulate from old files.

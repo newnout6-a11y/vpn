@@ -54,6 +54,27 @@ describe('buildActiveProfileDiagnosticItems', () => {
     expect(source).not.toContain("category: 'Store'")
   })
 
+  it('does not treat directVpn idle as a proxy warning', () => {
+    const source = systemDiagnosticsSource()
+    const proxyStart = source.indexOf('async function getProxyItems')
+    const directStart = source.indexOf('if (isDirectVpn)', proxyStart)
+    const directEnd = source.indexOf('if (!proxyAddr)', directStart)
+    const directBlock = source.slice(directStart, directEnd)
+
+    expect(directBlock).toContain("'proxy-current'")
+    expect(directBlock).toContain("'info'")
+    expect(directBlock).toContain("'directVpn idle'")
+    expect(directBlock).not.toContain("tun.running ? 'info' : 'warn'")
+  })
+
+  it('filters benign sing-box upload-close noise from log warnings', () => {
+    const source = systemDiagnosticsSource()
+
+    expect(source).toContain('function isBenignSingBoxLogNoise')
+    expect(source).toContain('connection upload closed')
+    expect(source).toContain('!isBenignSingBoxLogNoise(line)')
+  })
+
   it('reports missing active profile without warning', () => {
     const [item] = buildActiveProfileDiagnosticItems(null)
     expect(item.id).toBe('active-profile-capabilities')

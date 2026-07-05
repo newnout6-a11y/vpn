@@ -201,7 +201,9 @@ describe('Diagnostics Preflight', () => {
       expect(sourceCode).toContain('DIAGNOSTICS_SNAPSHOT_RECENT_MS')
       expect(sourceCode).toContain('DIAGNOSTICS_SNAPSHOT_MAX_FILES')
       expect(sourceCode).toContain('snapshotTimeFromName')
+      expect(sourceCode).toContain('latestAppStart')
       expect(sourceCode).toContain('now - item.time <= DIAGNOSTICS_SNAPSHOT_RECENT_MS')
+      expect(sourceCode).toContain('item.time >= latestAppStart')
     })
   })
 

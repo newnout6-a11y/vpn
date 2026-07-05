@@ -111,6 +111,10 @@ function joinRows(rows: string[], limit = 18): string {
   return visible.join(' | ') + suffix
 }
 
+function isBenignSingBoxLogNoise(line: string): boolean {
+  return /\bERROR\b.*connection upload closed\b/i.test(line)
+}
+
 async function getLogSummary(
   path: string,
   options: { structuredApp?: boolean; includeErrors?: boolean; freshMs?: number } = {}
@@ -139,6 +143,7 @@ async function getLogSummary(
     } else if (includeErrors) {
       errors = lines
         .filter(line => /\b(fatal|error|panic|failed|timeout|refused|denied)\b/i.test(line))
+        .filter(line => !isBenignSingBoxLogNoise(line))
         .map(redactSensitiveText)
         .slice(-8)
     }
@@ -287,7 +292,7 @@ $p=Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Intern
       'proxy-current',
       'Proxy',
       'Current proxy',
-      tun.running ? 'info' : 'warn',
+      'info',
       tun.running ? 'not used in directVpn mode' : 'directVpn idle',
       joinRows([
         'Direct VPN uses sing-box as the tunnel core; a local SOCKS/HTTP listener is not required.',

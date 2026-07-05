@@ -26,6 +26,7 @@ describe('main IPC regressions', () => {
     expect(handler.indexOf('if (tunController.getStatus().running)')).toBeLessThan(
       handler.indexOf('killOwnedTunRuntimeProcesses()')
     )
+    expect(handler).toContain('blocked: true')
     expect(handler).toContain('Отключите VPN перед завершением зависших процессов')
     expect(handler).toContain('killOwnedTunRuntimeProcesses()')
     expect(source).toContain('killOwnedTunRuntimeProcesses')
@@ -41,6 +42,7 @@ describe('main IPC regressions', () => {
 
     expect(handlerStart).toBeGreaterThanOrEqual(0)
     expect(handler).toContain('if (tunController.getStatus().running)')
+    expect(handler).toContain('blocked: true')
     expect(handler).toContain('getFirewallRepairHealth()')
     expect(handler).toContain('return repairVpnteFirewallRules()')
     expect(handler.indexOf('if (tunController.getStatus().running)')).toBeLessThan(

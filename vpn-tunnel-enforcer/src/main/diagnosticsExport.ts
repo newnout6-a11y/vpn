@@ -169,9 +169,16 @@ export async function exportDiagnosticsZip(): Promise<ExportResult> {
             const mtime = await stat(src).then(s => s.mtimeMs).catch(() => 0)
             return { name, src, time: snapshotTimeFromName(name) ?? mtime }
           }))
+        const latestAppStart = candidates
+          .filter(item => /-app-start\.json$/i.test(item.name))
+          .sort((a, b) => b.time - a.time)[0]?.time ?? 0
         const recent = candidates
           .sort((a, b) => b.time - a.time)
-          .filter(item => item.time > 0 && now - item.time <= DIAGNOSTICS_SNAPSHOT_RECENT_MS)
+          .filter(item =>
+            item.time > 0 &&
+            now - item.time <= DIAGNOSTICS_SNAPSHOT_RECENT_MS &&
+            (!latestAppStart || item.time >= latestAppStart)
+          )
           .slice(0, DIAGNOSTICS_SNAPSHOT_MAX_FILES)
         const selected = recent.length > 0
           ? recent

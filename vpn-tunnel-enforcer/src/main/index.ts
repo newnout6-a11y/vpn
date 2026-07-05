@@ -1364,6 +1364,7 @@ app.whenReady().then(async () => {
       return {
         success: true,
         skipped: true,
+        blocked: true,
         message: 'Отключите VPN перед починкой firewall-правил: во время активного TUN kill-switch нельзя снимать безопасно.',
         health: await getFirewallRepairHealth()
       }
@@ -1407,6 +1408,7 @@ app.whenReady().then(async () => {
       return {
         success: true,
         skipped: true,
+        blocked: true,
         candidates: 0,
         killed: 0,
         names: [],
