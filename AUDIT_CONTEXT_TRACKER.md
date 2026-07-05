@@ -1136,6 +1136,31 @@ Source-level evidence already rechecked after the Maintenance/repair pass:
 - Latest full suite: `npm test -- --reporter=dot` passed with 61 files / 499 tests.
 - Latest packaged build: `npm run dist:win` passed and rebuilt `vpn-tunnel-enforcer/dist/VPN-Tunnel-Enforcer-Setup-1.1.0.exe`.
 
+2026-07-05 - RUNTIME-DIAG-STOP-WATCHDOG-MAINT DONE
+Files:
+- `vpn-tunnel-enforcer/src/main/tunController.ts`
+- `vpn-tunnel-enforcer/src/main/index.ts`
+- `vpn-tunnel-enforcer/src/preload/index.ts`
+- `vpn-tunnel-enforcer/src/renderer/App.tsx`
+- `vpn-tunnel-enforcer/src/renderer/pages/Dashboard.tsx`
+- `vpn-tunnel-enforcer/src/main/tunControllerRecoverySource.test.ts`
+- `vpn-tunnel-enforcer/src/main/mainIpcRegression.test.ts`
+Fixes:
+- Diagnostics ZIPs `vpn-tunnel-enforcer-diagnostics-2026-07-05T09-25-21-556Z.zip` and `vpn-tunnel-enforcer-diagnostics-2026-07-05T09-28-20-595Z.zip` showed `TUN stopped` followed by renderer `Не удалось выключить защиту: runtime process stop: vpnte-sing-box.exe is still running`; `tunController.stop()` now publishes final `stopped` and returns `success: true` with `warning` when the runtime is already stopped but cleanup has warnings.
+- Direct VPN server watchdog now suppresses false `proxy-down` if `ipMonitor` recently confirmed public VPN egress, matching the ZIP sequence where public IP checks were succeeding while the UI showed `Сервер не отвечает`.
+- Maintenance stale-runtime cleanup now uses the actual local `psSingleQuote` helper instead of undefined `psSingleQuote`/old `psQuote` mismatch.
+- Targeted Maintenance firewall repair refuses to disable VPNTE firewall rules while TUN is running; health-check remains available, but repair requires VPN off.
+Verification:
+- `npm test -- tunControllerRecoverySource.test.ts mainIpcRegression.test.ts AppSource.test.ts -- --reporter=dot` passed: 3 files / 15 tests.
+- `npm test -- --reporter=dot` passed: 61 files / 503 tests.
+- `npm run build` passed.
+- `git diff --check` passed.
+- `npm run dist:win` passed; installer rebuilt at `vpn-tunnel-enforcer/dist/VPN-Tunnel-Enforcer-Setup-1.1.0.exe` (117450488 bytes, 2026-07-05 16:54:25 local time).
+- `Get-AuthenticodeSignature` on the rebuilt installer: `NotSigned`; no real Authenticode publisher certificate is available in this environment.
+- Codebase index refreshed with `index_repository(mode=fast, persistence=true)`.
+Windows-only gap:
+- Needs live packaged smoke for Direct VPN watchdog recovery, Stop UI state after runtime cleanup warnings, and Maintenance repair behavior while TUN is active.
+
 Live smoke still needed before the whole goal can honestly be marked complete:
 - Safe packaged UI smoke: open Maintenance, switch tabs away/back, verify health/firewall/repair results stay visible.
 - Safe packaged UI smoke: clear logs, restart/reinstall, verify connection history, app logs, rotated logs, snapshots, and traffic-forensics artifacts do not repopulate from old files.

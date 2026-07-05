@@ -7,7 +7,7 @@ export interface ElectronAPI {
   recheckPublicIp: (rebaseline?: boolean) => Promise<{ ip: string | null; isLeak: boolean; vpnIp: string | null }>
   startTun: (proxyAddr: string, proxyType?: 'socks5' | 'http') => Promise<{ success: boolean; error?: string; warning?: string | null; vpnIp?: string | null }>
   startDirectVpn: () => Promise<{ success: boolean; error?: string; warning?: string | null; vpnIp?: string | null }>
-  stopTun: () => Promise<{ success: boolean; error?: string }>
+  stopTun: () => Promise<{ success: boolean; error?: string; warning?: string }>
   getTunStatus: () => Promise<{ running: boolean; proxyAddr: string | null; proxyType: 'socks5' | 'http' | null; pid: number | null; warning?: string | null; startedAt?: number | null; restartAttempt?: number }>
   getTrafficStats: () => Promise<TrafficStats>
   applyAutoconfig: (targets: string[], proxyAddr: string, proxyType?: 'socks5' | 'http') => Promise<Record<string, boolean>>

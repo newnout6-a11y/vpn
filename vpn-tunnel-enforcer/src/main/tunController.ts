@@ -1077,7 +1077,7 @@ async function isSingboxRunning(): Promise<boolean> {
   }
 }
 
-function psQuote(value: string): string {
+function psSingleQuote(value: string): string {
   return `'${value.replace(/'/g, "''")}'`
 }
 
@@ -1373,6 +1373,7 @@ function startProxyWatchdog(proxyAddr: string) {
         watchdogFailures,
         suppressWindowMs: DIRECT_VPN_WATCHDOG_SUPPRESS_MS
       })
+      markProxyRecovered()
       return
     }
     if (watchdogFailures >= 3) {
@@ -1415,6 +1416,17 @@ function startServerWatchdog(host: string, port: number, label: string) {
     }
 
     watchdogFailures += 1
+    if (hasRecentPublicIpConfirmation(DIRECT_VPN_WATCHDOG_SUPPRESS_MS)) {
+      watchdogFailures = 0
+      logEvent('info', 'tun-watchdog', 'suppressing direct VPN server probe failure because tunnel egress was recently confirmed', {
+        host,
+        port,
+        label,
+        suppressWindowMs: DIRECT_VPN_WATCHDOG_SUPPRESS_MS
+      })
+      markProxyRecovered()
+      return
+    }
     if (watchdogFailures >= 3) {
       markProxyUnreachable(
         `Сервер «${label}» не отвечает. Трафик блокируется в TUN (реальный IP не утекает). Выберите другой сервер.`
@@ -3007,7 +3019,7 @@ export const tunController = {
     })
   },
 
-  async stop(): Promise<{ success: boolean; error?: string }> {
+  async stop(): Promise<{ success: boolean; error?: string; warning?: string }> {
     // If start() is mid-flight, wait for it to finish before stopping.
     // Without this, stop() kills sing-box while start() is still polling
     // for it, leaving the app in an inconsistent state.
@@ -3147,7 +3159,10 @@ export const tunController = {
       // wrong. Resume here so the periodic monitor can re-evaluate against a
       // fresh baseline.
       resumeLeakMonitor()
-      return { success: false, error: cleanupErrors.join(' | ') }
+      const warning = cleanupErrors.join(' | ')
+      notify('warn', 'Защита отключена с предупреждениями', warning, 'vpnDisconnect')
+      notifyStatus('stopped')
+      return { success: true, warning }
     }
 
     // Cleanup finished — let the leak-detector run again. The next tunnel

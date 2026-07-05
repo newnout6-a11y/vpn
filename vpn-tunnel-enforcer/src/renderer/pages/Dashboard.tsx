@@ -317,6 +317,10 @@ export function Dashboard() {
         setVpnIp(null)
         useAppStore.getState().resetConnectionState()
         addLog('info', 'Защита выключена. Возвращаем обычный маршрут.')
+        if (result.warning) {
+          showToast('warning', 'Защита выключена с предупреждениями', result.warning)
+          addLog('warn', `Предупреждение при отключении: ${result.warning}`)
+        }
       } else {
         const errorMsg = result.error || 'Unknown error'
         showToast('error', t('dashboard.connectionError'), errorMsg)

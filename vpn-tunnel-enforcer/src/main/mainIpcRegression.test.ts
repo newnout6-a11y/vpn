@@ -28,6 +28,21 @@ describe('main IPC regressions', () => {
     expect(handler).not.toContain("taskkill', ['/F', '/IM'")
   })
 
+  it('does not run targeted firewall repair while TUN is active', () => {
+    const source = mainIndexSource()
+    const handlerStart = source.indexOf("handleLogged('firewall:repair-vpnte-rules'")
+    const handlerEnd = source.indexOf("handleLogged('get-location-privacy'", handlerStart)
+    const handler = source.slice(handlerStart, handlerEnd)
+
+    expect(handlerStart).toBeGreaterThanOrEqual(0)
+    expect(handler).toContain('if (tunController.getStatus().running)')
+    expect(handler).toContain('getFirewallRepairHealth()')
+    expect(handler).toContain('return repairVpnteFirewallRules()')
+    expect(handler.indexOf('if (tunController.getStatus().running)')).toBeLessThan(
+      handler.indexOf('return repairVpnteFirewallRules()')
+    )
+  })
+
   it('exposes targeted firewall repair separately from full firewall reset', () => {
     const source = mainIndexSource()
     const healthStart = source.indexOf("handleLogged('firewall:repair-health'")

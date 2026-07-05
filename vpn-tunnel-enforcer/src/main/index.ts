@@ -814,7 +814,7 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
   }
 }
 
-async function stopProtection(): Promise<{ success: boolean; error?: string }> {
+async function stopProtection(): Promise<{ success: boolean; error?: string; warning?: string }> {
   // Record the connection BEFORE we stop, so traffic counters are still valid.
   // `stopInProgress` ensures the status-change handler doesn't double-record
   // when tunController emits 'stopped' as a result of the call below.
@@ -1360,6 +1360,14 @@ app.whenReady().then(async () => {
   })
 
   handleLogged('firewall:repair-vpnte-rules', async () => {
+    if (tunController.getStatus().running) {
+      return {
+        success: false,
+        skipped: true,
+        message: 'Отключите VPN перед починкой firewall-правил: во время активного TUN kill-switch нельзя снимать безопасно.',
+        health: await getFirewallRepairHealth()
+      }
+    }
     return repairVpnteFirewallRules()
   })
 
