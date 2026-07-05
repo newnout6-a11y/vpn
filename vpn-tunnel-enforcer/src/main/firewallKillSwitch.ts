@@ -679,6 +679,145 @@ export async function recoverStaleKillSwitch(isSingboxRunning: () => Promise<boo
   }
 }
 
+export interface FirewallRepairHealth {
+  platform: 'win32' | 'other'
+  manifestPresent: boolean
+  ourRuleCount: number
+  stuckBlockDefault: boolean
+  services: Array<{ name: string; status: string }>
+  profiles: Array<{ name: string; enabled: string; defaultInbound: string; defaultOutbound: string }>
+  summary: 'ok' | 'warn' | 'fail'
+  message: string
+  recommendedActions: string[]
+}
+
+export async function getFirewallRepairHealth(): Promise<FirewallRepairHealth> {
+  if (process.platform !== 'win32') {
+    return {
+      platform: 'other',
+      manifestPresent: false,
+      ourRuleCount: 0,
+      stuckBlockDefault: false,
+      services: [],
+      profiles: [],
+      summary: 'ok',
+      message: 'Windows Firewall checks are not available on this platform',
+      recommendedActions: []
+    }
+  }
+
+  const manifestPresent = await killSwitchManifestExists()
+  const stuckBlockDefault = await probeForStuckBlockDefault()
+  let ourRuleCount = 0
+  let services: FirewallRepairHealth['services'] = []
+  let profiles: FirewallRepairHealth['profiles'] = []
+
+  try {
+    const { stdout } = await ps(`
+$rules = (Get-NetFirewallRule -DisplayName '${RULE_PREFIX}*' -ErrorAction SilentlyContinue | Measure-Object).Count
+$services = @(Get-Service -Name BFE,MpsSvc -ErrorAction SilentlyContinue | ForEach-Object {
+  [pscustomobject]@{ name = [string]$_.Name; status = [string]$_.Status }
+})
+$profiles = @(Get-NetFirewallProfile -Profile Domain,Private,Public -ErrorAction SilentlyContinue | ForEach-Object {
+  [pscustomobject]@{
+    name = [string]$_.Name
+    enabled = [string]$_.Enabled
+    defaultInbound = [string]$_.DefaultInboundAction
+    defaultOutbound = [string]$_.DefaultOutboundAction
+  }
+})
+[pscustomobject]@{
+  rules = [int]$rules
+  services = $services
+  profiles = $profiles
+} | ConvertTo-Json -Compress -Depth 4
+`, false, 15000)
+    const parsed = JSON.parse(String(stdout || '{}').trim() || '{}')
+    ourRuleCount = Number(parsed.rules) || 0
+    services = Array.isArray(parsed.services)
+      ? parsed.services.map((service: any) => ({
+          name: String(service.name || ''),
+          status: String(service.status || 'Unknown')
+        })).filter((service: any) => service.name)
+      : []
+    profiles = Array.isArray(parsed.profiles)
+      ? parsed.profiles.map((profile: any) => ({
+          name: String(profile.name || ''),
+          enabled: String(profile.enabled || 'Unknown'),
+          defaultInbound: String(profile.defaultInbound || 'Unknown'),
+          defaultOutbound: String(profile.defaultOutbound || 'Unknown')
+        })).filter((profile: any) => profile.name)
+      : []
+  } catch (err) {
+    logEvent('warn', 'firewall-killswitch', 'firewall health probe failed', err)
+  }
+
+  const serviceDown = services.some((service) => service.status.toLowerCase() !== 'running')
+  const recommendedActions: string[] = []
+  if (ourRuleCount > 0 || manifestPresent) {
+    recommendedActions.push('Remove VPNTE firewall rules and restore saved outbound policy')
+  }
+  if (stuckBlockDefault) {
+    recommendedActions.push('Restore firewall DefaultOutboundAction from VPNTE backup or Windows safe default')
+  }
+  if (serviceDown) {
+    recommendedActions.push('Check Windows services BFE and MpsSvc')
+  }
+
+  const summary: FirewallRepairHealth['summary'] = serviceDown
+    ? 'fail'
+    : (ourRuleCount > 0 || manifestPresent || stuckBlockDefault)
+      ? 'warn'
+      : 'ok'
+
+  return {
+    platform: 'win32',
+    manifestPresent,
+    ourRuleCount,
+    stuckBlockDefault,
+    services,
+    profiles,
+    summary,
+    message: summary === 'ok'
+      ? 'VPNTE firewall state looks clean'
+      : summary === 'fail'
+        ? 'Windows Firewall services need attention'
+        : 'VPNTE firewall cleanup is recommended',
+    recommendedActions
+  }
+}
+
+export async function repairVpnteFirewallRules(): Promise<FirewallKillSwitchResult & { health: FirewallRepairHealth }> {
+  if (process.platform !== 'win32') {
+    return {
+      success: true,
+      skipped: true,
+      message: 'Windows Firewall repair is not available on this platform',
+      health: await getFirewallRepairHealth()
+    }
+  }
+
+  const before = await getFirewallRepairHealth()
+  if (!before.manifestPresent && before.ourRuleCount === 0 && !before.stuckBlockDefault) {
+    return {
+      success: true,
+      skipped: true,
+      message: 'VPNTE firewall rules are already clean',
+      health: before
+    }
+  }
+
+  const result = await disableKillSwitch('manual targeted maintenance repair')
+  const after = await getFirewallRepairHealth()
+  return {
+    ...result,
+    message: result.success
+      ? `VPNTE firewall cleanup completed. Rules left: ${after.ourRuleCount}`
+      : result.message,
+    health: after
+  }
+}
+
 /**
  * Nuclear option: reset Windows Firewall back to factory defaults.
  *
@@ -692,17 +831,29 @@ export async function recoverStaleKillSwitch(isSingboxRunning: () => Promise<boo
  * reset itself usually unblocks things. Returns success=false only if the
  * reset itself errors out (typically a privilege failure).
  */
-export async function nuclearFirewallReset(): Promise<{ success: boolean; message: string }> {
+function firewallBackupPath(): string {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+  return join(backupDir(), `windows-firewall-before-reset-${stamp}.wfw`)
+}
+
+export async function nuclearFirewallReset(): Promise<{ success: boolean; message: string; backupPath?: string }> {
   if (process.platform !== 'win32') {
     return { success: false, message: 'Only supported on Windows' }
   }
+  const backupPath = firewallBackupPath()
   try {
+    await mkdir(backupDir(), { recursive: true })
+    await execElevated(`netsh advfirewall export "${backupPath}"`, { timeout: 15000 })
     await execElevated('netsh advfirewall reset', { timeout: 10000 })
     await execElevated('netsh advfirewall set allprofiles firewallpolicy blockinbound,allowoutbound', { timeout: 10000 })
     // After a full reset our manifest no longer reflects reality — clear it.
     await clearManifest()
-    logEvent('info', 'firewall-killswitch', 'nuclear firewall reset completed')
-    return { success: true, message: 'Firewall сброшен к настройкам по умолчанию' }
+    logEvent('info', 'firewall-killswitch', 'nuclear firewall reset completed', { backupPath })
+    return {
+      success: true,
+      message: `Windows Firewall сброшен. Backup правил сохранён: ${backupPath}`,
+      backupPath
+    }
   } catch (err: any) {
     logEvent('error', 'firewall-killswitch', 'nuclear firewall reset failed', err)
     return { success: false, message: err.message || String(err) }

@@ -3,18 +3,17 @@ import { startElevatedPsHelper, stopElevatedPsHelper } from './elevatedPsHelper'
 import { app, BrowserWindow, dialog, ipcMain, Tray, shell, session, Menu, type IpcMainInvokeEvent } from 'electron'
 import { exec as execCb } from 'child_process'
 import { execFile as execFileCb } from 'child_process'
+import { rm } from 'fs/promises'
 import { promisify } from 'util'
 import { join } from 'path'
 import { happDetector } from './happDetector'
-import { tunController, detectForeignTun } from './tunController'
+import { tunController, detectForeignTun, killOwnedTunRuntimeProcesses } from './tunController'
 import { classifyNavigation } from './navigationPolicy'
 import { ipMonitor } from './ipMonitor'
 import { autoconfig } from './autoconfig'
 import { createTray, updateTrayState, type TrayStatus } from './tray'
 import { settingsStore, type AppSettings } from './settings'
 import { runLeakCheck } from './leakDiagnostics'
-import { runStoreRepair, type StoreRepairAction } from './storeRepair'
-import { runStoreDiagnostics } from './storeDiagnostics'
 import { applyLocationPrivacy, getLocationPrivacyStatus, rollbackLocationPrivacy } from './locationPrivacy'
 import {
   applyTunNetworkBaseline,
@@ -24,10 +23,12 @@ import {
 } from './systemNetwork'
 import {
   disableKillSwitchIfActive,
+  getFirewallRepairHealth,
   isKillSwitchActive,
   KILL_SWITCH_RULE_PREFIX,
   killSwitchManifestExists,
   nuclearFirewallReset,
+  repairVpnteFirewallRules,
   recoverStaleKillSwitch
 } from './firewallKillSwitch'
 import {
@@ -1254,14 +1255,6 @@ app.whenReady().then(async () => {
     })
   })
 
-  handleLogged('run-store-repair', async (_e, action: StoreRepairAction) => {
-    return runStoreRepair(action)
-  })
-
-  handleLogged('run-store-diagnostics', async () => {
-    return runStoreDiagnostics()
-  })
-
   handleLogged('run-system-diagnostics', async () => {
     return runSystemDiagnostics()
   })
@@ -1306,8 +1299,20 @@ app.whenReady().then(async () => {
     return { success: true }
   })
 
-  handleLogged('apply-tun-network-baseline', async () => {
-    return applyTunNetworkBaseline()
+  handleLogged('clear-diagnostic-artifacts', async () => {
+    const targets = [
+      getSnapshotsDir(),
+      join(app.getPath('userData'), 'traffic-forensics')
+    ]
+    await stopTrafficForensicsSession('manual diagnostics artifact clear').catch(() => undefined)
+    await Promise.all(targets.map(path => rm(path, { recursive: true, force: true }).catch(() => undefined)))
+    await clearAppLog()
+    logEvent('info', 'app', 'diagnostic artifacts cleared', { targets })
+    return {
+      success: true,
+      message: 'Диагностические артефакты очищены',
+      cleared: targets
+    }
   })
 
   handleLogged('rollback-tun-network-baseline', async () => {
@@ -1343,8 +1348,19 @@ app.whenReady().then(async () => {
   // Nuclear option for stuck firewalls: reset Windows Firewall to defaults if
   // even disable-firewall-kill-switch can't restore connectivity (e.g. the user
   // accumulated other rules or DefaultOutboundAction got stuck on Block).
-  handleLogged('firewall:nuclear-reset', async () => {
+  handleLogged('firewall:nuclear-reset', async (_e, confirmationToken?: string) => {
+    if (confirmationToken !== 'RESET_WINDOWS_FIREWALL_CONFIRMED') {
+      throw new Error('Full Windows Firewall reset requires explicit confirmation token')
+    }
     return nuclearFirewallReset()
+  })
+
+  handleLogged('firewall:repair-health', async () => {
+    return getFirewallRepairHealth()
+  })
+
+  handleLogged('firewall:repair-vpnte-rules', async () => {
+    return repairVpnteFirewallRules()
   })
 
   handleLogged('get-location-privacy', async () => {
@@ -1379,11 +1395,22 @@ app.whenReady().then(async () => {
   })
 
   handleLogged('tun:kill-stale-singbox', async () => {
-    // Kill any VPNTE-owned sing-box processes that are still running
     try {
-      await execFile('taskkill', ['/F', '/IM', 'vpnte-sing-box.exe', '/T'], { windowsHide: true }).catch(() => undefined)
-      await execFile('taskkill', ['/F', '/IM', 'vpnte-etw-sidecar.exe', '/T'], { windowsHide: true }).catch(() => undefined)
-      return { success: true, message: 'Завершены зависшие процессы sing-box' }
+      const result = await killOwnedTunRuntimeProcesses()
+      if (!result.success) {
+        return {
+          success: false,
+          message: `Не удалось проверить процессы VPNTE runtime: ${result.error || 'unknown error'}`,
+          ...result
+        }
+      }
+      return {
+        success: true,
+        message: result.killed > 0
+          ? `Завершены процессы VPNTE runtime: ${result.killed}`
+          : 'Зависшие процессы VPNTE runtime не найдены',
+        ...result
+      }
     } catch (err: any) {
       return { success: false, message: `Не удалось завершить процессы: ${err?.message || err}` }
     }

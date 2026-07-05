@@ -13,6 +13,7 @@ export interface SystemNetworkResult {
   message: string
   details?: string
   warnings?: string[]
+  skipped?: boolean
 }
 
 // Presence of the manifest file is the source of truth that baseline is currently applied.
@@ -61,7 +62,15 @@ async function withBaselineOpLock<T>(operation: () => Promise<T>): Promise<T> {
 
 function backupDir() {
   // Store backups in ProgramData (survives app uninstall) instead of userData.
-  return join(app.getPath('programData') || 'C:\\ProgramData', 'VPN-Tunnel-Enforcer', 'network-backups')
+  return join(getProgramDataPath(), 'VPN-Tunnel-Enforcer', 'network-backups')
+}
+
+function getProgramDataPath(): string {
+  try {
+    return app.getPath('programData')
+  } catch {
+    return process.env.ProgramData || 'C:\\ProgramData'
+  }
 }
 
 export function getTunNetworkBaselineManifestPath() {
@@ -243,7 +252,12 @@ async function rollbackTunNetworkBaselineUnlocked(): Promise<SystemNetworkResult
 
   const manifest = await readManifest()
   if (!manifest) {
-    return { success: false, message: 'Backup сетевых настроек не найден' }
+    return {
+      success: true,
+      skipped: true,
+      message: 'Активный VPNTE network baseline не найден',
+      details: 'Откат не требуется: VPNTE не нашёл backup/manifest изменений.'
+    }
   }
 
   try {

@@ -246,12 +246,19 @@ export function Logs() {
   }
 
   const handleClearLogs = async () => {
+    if (!window.confirm('Очистить историю подключений, app/sing-box логи, snapshots и traffic-forensics артефакты?')) return
     setClearingLogs(true)
     try {
-      await window.electronAPI.clearAppLog()
+      await Promise.all([
+        window.electronAPI.clearAppLog(),
+        window.electronAPI.connectionHistoryClear(),
+        window.electronAPI.trafficHistoryClear(),
+        window.electronAPI.clearDiagnosticArtifacts()
+      ])
       setEntries([])
+      setRawLogs([])
       setStats(null)
-      useAppStore.getState().addGlobalToast('success', 'Логи очищены', 'История подключений удалена')
+      useAppStore.getState().addGlobalToast('success', 'Логи очищены', 'История, runtime-логи и диагностические артефакты удалены')
     } catch (err: any) {
       useAppStore.getState().addGlobalToast('error', 'Ошибка', `Не удалось очистить: ${err?.message || err}`)
     } finally {

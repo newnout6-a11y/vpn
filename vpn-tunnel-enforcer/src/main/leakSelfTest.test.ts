@@ -76,4 +76,24 @@ describe('runLeakSelfTest coalescing', () => {
       ])
     )
   })
+
+  it('does not report a DNS leak from a DNS trace IP mismatch alone', async () => {
+    execMock.mockImplementation((cmd: string, _opts: unknown, cb: (err: Error | null, stdout: string, stderr: string) => void) => {
+      setTimeout(() => {
+        if (cmd.includes('Get-NetAdapter')) cb(null, '[]', '')
+        else if (cmd.includes('cloudflare.com/cdn-cgi/trace')) cb(null, 'ip=5.6.7.8\n', '')
+        else cb(null, '1.2.3.4', '')
+      }, 5)
+      return {}
+    })
+    const { runLeakSelfTest } = await import('./leakSelfTest')
+
+    const result = await runLeakSelfTest()
+
+    expect(result.physicalAdapterReached).toBe(false)
+    expect(result.publicIpMismatch).toBe(false)
+    expect(result.dnsLeakDetected).toBe(false)
+    expect(result.dnsLeakDetail).toContain('5.6.7.8')
+    expect(result.summary).toContain('OK:')
+  })
 })

@@ -47,6 +47,7 @@ interface AdapterSnapshot {
   // What we found before we touched it. We restore exactly these.
   ipv6Enabled: boolean
   ipv4DnsServers: string[]
+  ipv4DnsSource?: 'dhcp' | 'static' | 'unknown'
   // What we set it to (or null if we left it alone for that field).
   forcedDnsTo: string[] | null
   forcedIpv6Off: boolean
@@ -204,11 +205,17 @@ foreach ($a in $adapters) {
   $bind6 = Get-NetAdapterBinding -InterfaceAlias $a.Name -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue
   $dns4 = (Get-DnsClientServerAddress -InterfaceAlias $a.Name -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses
   if ($null -eq $dns4) { $dns4 = @() }
+  $nameServer = ''
+  try {
+    $regPath = "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\$($a.InterfaceGuid)"
+    $nameServer = [string]((Get-ItemProperty -Path $regPath -Name NameServer -ErrorAction SilentlyContinue).NameServer)
+  } catch {}
   $rows += [pscustomobject]@{
     ifIndex      = [int]$a.ifIndex
     alias        = [string]$a.Name
     ipv6Enabled  = [bool]($bind6 -and $bind6.Enabled)
     ipv4Dns      = @($dns4)
+    ipv4DnsSource = $(if ([string]::IsNullOrWhiteSpace($nameServer)) { 'dhcp' } else { 'static' })
   }
 }
 $rows | ConvertTo-Json -Compress -Depth 4
@@ -229,6 +236,7 @@ $rows | ConvertTo-Json -Compress -Depth 4
     alias: String(row.alias),
     ipv6Enabled: Boolean(row.ipv6Enabled),
     ipv4DnsServers: Array.isArray(row.ipv4Dns) ? row.ipv4Dns.map((x: any) => String(x)) : [],
+    ipv4DnsSource: row.ipv4DnsSource === 'static' || row.ipv4DnsSource === 'dhcp' ? row.ipv4DnsSource : 'unknown',
     forcedDnsTo: null,
     forcedIpv6Off: false
   }))
@@ -459,7 +467,7 @@ export async function rollbackPhysicalAdapterLockdownIfApplied(reason: string, o
     const shouldTouchDns = Array.isArray(a.forcedDnsTo) && a.forcedDnsTo.length > 0
     const dnsRestoreLine = !shouldTouchDns
       ? `Write-Output 'A${i}_dns:noop'`
-      : (options.resetDnsToDhcp || a.ipv4DnsServers.length === 0)
+      : (options.resetDnsToDhcp || a.ipv4DnsSource !== 'static')
         ? `try { Set-DnsClientServerAddress -InterfaceAlias ${psSingleQuote(a.alias)} -ResetServerAddresses -ErrorAction Stop; Write-Output 'A${i}_dns:reset' } catch { Write-Output "A${i}_dns_err: $_" }`
         : `try { Set-DnsClientServerAddress -InterfaceAlias ${psSingleQuote(a.alias)} -ServerAddresses ${a.ipv4DnsServers.map(psSingleQuote).join(',')} -ErrorAction Stop; Write-Output 'A${i}_dns:restore' } catch { Write-Output "A${i}_dns_err: $_" }`
     const ipv6RestoreLine = a.forcedIpv6Off && a.ipv6Enabled
@@ -550,11 +558,20 @@ $adapters = Get-NetAdapter |
   }
 foreach ($a in $adapters) {
   $dns4 = @((Get-DnsClientServerAddress -InterfaceAlias $a.Name -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses)
+  $nameServer = ''
+  try {
+    $regPath = "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\$($a.InterfaceGuid)"
+    $nameServer = [string]((Get-ItemProperty -Path $regPath -Name NameServer -ErrorAction SilentlyContinue).NameServer)
+  } catch {}
   $staleVpnteDns = @($dns4 | Where-Object {
     $addr = [string]$_
     ($vpnteDns -contains $addr) -or (($vpnteDnsPrefixes | Where-Object { $addr.StartsWith($_) }).Count -gt 0)
   })
-  if ($staleVpnteDns.Count -gt 0) {
+  $manualVpnteDns = @($nameServer -split '[, ]+' | Where-Object {
+    $addr = [string]$_
+    ($vpnteDns -contains $addr) -or (($vpnteDnsPrefixes | Where-Object { $addr.StartsWith($_) }).Count -gt 0)
+  })
+  if ($staleVpnteDns.Count -gt 0 -and $manualVpnteDns.Count -gt 0) {
     try {
       Set-DnsClientServerAddress -InterfaceAlias $a.Name -ResetServerAddresses -ErrorAction Stop
       $fixed += [pscustomobject]@{ alias = [string]$a.Name; oldDns = @($dns4) }

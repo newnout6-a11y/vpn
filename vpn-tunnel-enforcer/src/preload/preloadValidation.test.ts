@@ -66,4 +66,25 @@ describe('preload IPC argument validation', () => {
 
     expect(invokeMock).toHaveBeenCalledWith('external-proxy:list', 'Netherlands')
   })
+
+  it('does not expose legacy Store repair buttons through the renderer bridge', async () => {
+    const api = await loadApi()
+
+    expect(api.runStoreRepair).toBeUndefined()
+    expect(api.runStoreDiagnostics).toBeUndefined()
+  })
+
+  it('does not expose direct TUN baseline apply through the renderer bridge', async () => {
+    const api = await loadApi()
+
+    expect(api.applyTunNetworkBaseline).toBeUndefined()
+  })
+
+  it('requires the firewall reset confirmation token to be passed through preload', async () => {
+    const api = await loadApi()
+
+    await api.firewallNuclearReset('RESET_WINDOWS_FIREWALL_CONFIRMED')
+
+    expect(invokeMock).toHaveBeenCalledWith('firewall:nuclear-reset', 'RESET_WINDOWS_FIREWALL_CONFIRMED')
+  })
 })

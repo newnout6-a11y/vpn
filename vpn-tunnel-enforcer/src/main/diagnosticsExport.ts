@@ -217,6 +217,44 @@ traffic-forensics РѕСЃРѕР±РµРЅРЅРѕ РїРѕР»РµР·РµРЅ 
 `
     await writeFile(join(stage, 'README.txt'), readme, 'utf-8')
 
+    const cleanReadme = `Диагностика VPN Tunnel Enforcer
+Создано: ${new Date().toISOString()}
+
+Содержимое:
+  diagnostics-manifest.json         - версия приложения, runtime и политика редактирования секретов
+  settings.json                     - текущие настройки приложения, секреты скрыты
+  app-log.json                      - последние записи app/sing-box логов
+  system-info.json                  - версия Windows, память, CPU, Electron/Node
+  system-diagnostics.json           - маршруты, proxy, DNS, firewall и итог проверок
+  runtime-*.json/log                - конфиг и логи sing-box, секреты скрыты
+  baseline-manifest.json            - изменения WinHTTP/WinINet/env proxy
+  killswitch-manifest.json          - правила Windows Firewall, созданные VPNTE
+  adapter-lockdown-manifest.json    - изменения физических адаптеров (IPv6/DNS)
+  snapshots/                        - снимки состояния сети и системы
+  traffic-forensics/                - packet/WFP/DNS/TCP артефакты для глубокого разбора
+
+Важно: raw ETL/PCAP/TXT могут содержать чувствительный сетевой трафик.
+Архив подготовлен для поддержки или повторного локального разбора.
+`
+    const topLevelFiles = await readdir(stage).catch(() => [])
+    const diagnosticsManifest = {
+      schemaVersion: 1,
+      createdAt: new Date().toISOString(),
+      appVersion: app.getVersion(),
+      electronVersion: process.versions.electron,
+      nodeVersion: process.versions.node,
+      platform: process.platform,
+      arch: process.arch,
+      redaction: {
+        settings: 'subscriptions, profile links and known secrets are redacted',
+        runtimeJson: 'runtime JSON is parsed and sensitive values are redacted',
+        logs: 'text logs are redacted with the same sensitive-pattern scrubber'
+      },
+      topLevelFiles: topLevelFiles.sort()
+    }
+    await writeFile(join(stage, 'diagnostics-manifest.json'), JSON.stringify(diagnosticsManifest, null, 2), 'utf-8')
+    await writeFile(join(stage, 'README.txt'), cleanReadme, 'utf-8')
+
     const compressScript = `
 $ErrorActionPreference='Stop'
 $stage=${psQuote(stage)}

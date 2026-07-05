@@ -176,6 +176,23 @@ describe('Diagnostics Preflight', () => {
       const rewriteAppLogIndex = sourceCode.indexOf('writeFile(join(stage, \'app-log.json\')', refreshLogsIndex)
       expect(rewriteAppLogIndex).toBeGreaterThan(refreshLogsIndex)
     })
+
+    it('should include support-facing README and redaction manifest in the final ZIP stage', () => {
+      const exportTsPath = join(process.cwd(), 'src', 'main', 'diagnosticsExport.ts')
+      const sourceCode = readFileSync(exportTsPath, 'utf-8')
+
+      const manifestWrite = sourceCode.indexOf("writeFile(join(stage, 'diagnostics-manifest.json')")
+      const readmeWrite = sourceCode.indexOf("writeFile(join(stage, 'README.txt'), cleanReadme")
+      const archiveInput = sourceCode.indexOf("Compress-Archive -Path (Join-Path $stage '*')")
+
+      expect(manifestWrite).toBeGreaterThan(-1)
+      expect(readmeWrite).toBeGreaterThan(-1)
+      expect(archiveInput).toBeGreaterThan(readmeWrite)
+      expect(archiveInput).toBeGreaterThan(manifestWrite)
+      expect(sourceCode).toContain('redaction')
+      expect(sourceCode).toContain('known secrets are redacted')
+      expect(sourceCode).toContain('topLevelFiles')
+    })
   })
 
   describe('7. Manifest initialization', () => {

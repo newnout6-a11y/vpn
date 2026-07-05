@@ -259,25 +259,17 @@ async function runLeakSelfTestOnce(mySession: number): Promise<LeakSelfTestResul
     (a) => a.publicIpViaThisAdapter !== null && a.publicIpViaThisAdapter !== defaultRoutePublicIp
   )
 
-  // 3. DNS-leak side-channel. We grab the Cloudflare trace via the default
-  //    route (which is TUN when the tunnel is up). The `ip=` line is the
-  //    public IP Cloudflare's anycast saw for our request — if that doesn't
-  //    match `defaultRoutePublicIp`, traffic for that hostname egressed
-  //    somewhere else (DNS-only resolver leak, split-tunnel rule, captive
-  //    portal hijack). Wrapped in try/catch — adding this probe must never
-  //    break the existing test.
+  // 3. DNS/IP side-channel. This is useful evidence, but not a standalone
+  //    leak verdict: different public-IP services can disagree because of
+  //    anycast, CDN routing, cached routes, or split rules. A real red leak
+  //    still requires the physical-adapter probe above to reach the outside.
   let dnsLeakDetected = false
   let dnsLeakDetail: string | null = null
   try {
     const cfIp = await fetchDnsTracePublicIp()
     if (mySession !== activeSessionId) return cancelledResult()
-    // The trace returns lines like `ip=...`, `colo=...`, `warp=on/off`.
-    // We don't actually need to parse the resolver — `ip=` is the visible
-    // public IP. If it equals defaultRoutePublicIp, no leak; if it's
-    // different from the VPN egress, that's the leak.
     if (cfIp && defaultRoutePublicIp && cfIp !== defaultRoutePublicIp) {
-      dnsLeakDetected = true
-      dnsLeakDetail = `Cloudflare видит ${cfIp}, наш default-route отдаёт ${defaultRoutePublicIp}`
+      dnsLeakDetail = `Cloudflare видит ${cfIp}, default-route отдаёт ${defaultRoutePublicIp}`
     }
   } catch {
     // Silent — adding a DNS-leak probe should never break the existing test.
@@ -289,12 +281,10 @@ async function runLeakSelfTestOnce(mySession: number): Promise<LeakSelfTestResul
     summary = `УТЕЧКА: физический адаптер виден из интернета как ${leakedIp} (TUN отдаёт ${defaultRoutePublicIp ?? 'неизвестно'})`
   } else if (physicalAdapterReached) {
     summary = `УТЕЧКА: kill-switch не блокирует физический адаптер (curl до 1.1.1.1 прошёл)`
-  } else if (dnsLeakDetected) {
-    // Physical adapter looks sealed but Cloudflare disagrees with the
-    // default-route IP — DNS-side leak.
-    summary = `УТЕЧКА DNS: ${dnsLeakDetail}`
   } else if (defaultRoutePublicIp) {
-    summary = `OK: физические адаптеры заблокированы, TUN отдаёт публичный IP ${defaultRoutePublicIp}`
+    summary = dnsLeakDetail
+      ? `OK: физические адаптеры заблокированы, TUN отдаёт публичный IP ${defaultRoutePublicIp} (IP-проверки расходятся: ${dnsLeakDetail})`
+      : `OK: физические адаптеры заблокированы, TUN отдаёт публичный IP ${defaultRoutePublicIp}`
   } else {
     summary = `Не удалось определить публичный IP через TUN (curl не дошёл)`
   }

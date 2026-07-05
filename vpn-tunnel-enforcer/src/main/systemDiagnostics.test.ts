@@ -1,4 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
+import { readFileSync } from 'fs'
+import { join } from 'path'
 import type { ServerProfile } from '../shared/ipc-types'
 
 vi.mock('electron', () => ({
@@ -17,7 +19,6 @@ vi.mock('./appLogger', () => ({
 vi.mock('./connectionPlanner', () => ({ getRoutingPlan: vi.fn(() => ({ verdict: 'unknown' })) }))
 vi.mock('./leakDiagnostics', () => ({ runLeakCheck: vi.fn(async () => ({ items: [] })) }))
 vi.mock('./settings', () => ({ settingsStore: { get: () => ({ proxyOverride: '', proxyType: 'socks5' }) } }))
-vi.mock('./storeDiagnostics', () => ({ runStoreDiagnostics: vi.fn(async () => ({ items: [] })) }))
 vi.mock('./ruleSetManager', () => ({ getSmartRouteRuleSetState: vi.fn() }))
 vi.mock('./tunController', () => ({
   getTunRuntimeDir: () => '/tmp/vpnte-test/tun',
@@ -28,6 +29,8 @@ vi.mock('./tunController', () => ({
 vi.mock('./serverPicker', () => ({ getActiveProfile: vi.fn(() => null) }))
 
 import { buildActiveProfileDiagnosticItems } from './systemDiagnostics'
+
+const systemDiagnosticsSource = () => readFileSync(join(process.cwd(), 'src', 'main', 'systemDiagnostics.ts'), 'utf8')
 
 function profile(partial: Partial<ServerProfile> & { outbound?: Record<string, any> }): ServerProfile {
   return {
@@ -43,6 +46,14 @@ function profile(partial: Partial<ServerProfile> & { outbound?: Record<string, a
 }
 
 describe('buildActiveProfileDiagnosticItems', () => {
+  it('does not include legacy Microsoft Store repair diagnostics in the VPN system report', () => {
+    const source = systemDiagnosticsSource()
+
+    expect(source).not.toContain('storeDiagnostics')
+    expect(source).not.toContain('runStoreDiagnostics')
+    expect(source).not.toContain("category: 'Store'")
+  })
+
   it('reports missing active profile without warning', () => {
     const [item] = buildActiveProfileDiagnosticItems(null)
     expect(item.id).toBe('active-profile-capabilities')

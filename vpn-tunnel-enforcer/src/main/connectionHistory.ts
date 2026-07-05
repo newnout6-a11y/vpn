@@ -273,6 +273,11 @@ export function registerConnectionHistoryIpcHandlers(): void {
     return connectionHistoryService.getEntries()
   })
 
+  ipcMain.handle('connection-history:clear', () => {
+    connectionHistoryService.clearHistory()
+    return { success: true }
+  })
+
   ipcMain.handle(
     'connection-history:add',
     (_event, entry: Omit<ConnectionLogEntry, 'id'>) => {

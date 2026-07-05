@@ -392,6 +392,8 @@ function buildDomainRouteRules(): Array<Record<string, any>> {
 
 const DNS_STRATEGY = 'ipv4_only'
 const BOOTSTRAP_DNS_TAG = 'dns-bootstrap'
+const REMOTE_DNS_TAG = 'dns-remote'
+const REMOTE_DNS_BACKUP_TAG = 'dns-backup'
 // DNS server tag for the direct (RU-visible) resolver used by smart RU split.
 const SMART_DIRECT_DNS_TAG = 'dns-direct'
 
@@ -407,6 +409,65 @@ function uniqueNonEmpty(values: Array<string | null | undefined>): string[] {
   return out
 }
 
+function maybeServerPort(port: number | null | undefined): Record<string, number> {
+  return port && Number.isInteger(port) && port > 0 && port <= 65535
+    ? { server_port: port }
+    : {}
+}
+
+function stripIpv6Brackets(host: string): string {
+  return host.startsWith('[') && host.endsWith(']')
+    ? host.slice(1, -1)
+    : host
+}
+
+function parseDnsUrl(raw: string, scheme: 'https' | 'tls'): { host: string; port: number | null; path?: string } | null {
+  try {
+    const normalized = scheme === 'tls'
+      ? raw.replace(/^tls:\/\//i, 'https://')
+      : raw
+    const url = new URL(normalized)
+    if (url.protocol !== 'https:') return null
+    const host = stripIpv6Brackets(url.hostname)
+    if (!host) return null
+    const port = url.port ? Number(url.port) : null
+    return {
+      host,
+      port: Number.isInteger(port) ? port : null,
+      ...(scheme === 'https'
+        ? { path: url.pathname && url.pathname !== '/' ? url.pathname : '/dns-query' }
+        : {})
+    }
+  } catch {
+    return null
+  }
+}
+
+function tlsServerNameFor(host: string): Record<string, any> | undefined {
+  return isIP(stripIpv6Brackets(host)) === 0
+    ? { server_name: host }
+    : undefined
+}
+
+function buildDohServer(
+  tag: string,
+  server: string,
+  options: { path?: string; port?: number | null; serverName?: string } = {}
+): Record<string, any> {
+  const tls = options.serverName
+    ? { server_name: options.serverName }
+    : tlsServerNameFor(server)
+  return {
+    type: 'https',
+    tag,
+    server,
+    ...maybeServerPort(options.port ?? null),
+    path: options.path || '/dns-query',
+    detour: 'proxy-out',
+    ...(tls ? { tls } : {})
+  }
+}
+
 /**
  * Build the remote DNS server list for the sing-box config from the user's
  * active DNS profile (Settings → DNS). Falls back to Cloudflare + Google when
@@ -416,15 +477,14 @@ function uniqueNonEmpty(values: Array<string | null | undefined>): string[] {
  * The first server MUST keep the tag `dns-remote` because the route block's
  * `default_domain_resolver` references it by name.
  *
- * Default fallback is plain UDP-through-proxy-out. In the latest field logs,
- * the no-profile DoT fallback was returning repeated `read response: EOF` and
- * 10–40s query latencies, while the plain-IP tunnel path stayed healthy.
- * User-selected DoT profiles remain DoT, but now get an explicit bootstrap
- * resolver and TLS server_name so hostname-based resolvers survive the new
- * sing-box DNS-server model.
+ * Default fallback is DoH-over-HTTPS through `proxy-out`, not UDP/53. Field
+ * diagnostics showed TCP over the VLESS/Reality tunnel still worked while DNS
+ * timed out, so the default DNS path must not depend on VLESS UDP/XUDP health.
+ * User-selected plain DNS profiles are sent as TCP/53 through the tunnel for
+ * the same reason; user-selected DoH/DoT profiles keep their chosen transport.
  *
  * sing-box 1.13 server types:
- *   - plain IP  → { type: 'udp', server: '1.1.1.1' }
+ *   - plain IP  → { type: 'tcp', server: '1.1.1.1' }
  *   - DoH       → { type: 'https', server: 'dns.google', ... }
  *   - DoT       → { type: 'tls', server: 'dns.google', ... }
  *
@@ -434,8 +494,8 @@ function uniqueNonEmpty(values: Array<string | null | undefined>): string[] {
  */
 function buildRemoteDnsServers(): Array<Record<string, any>> {
   const fallback = [
-    { type: 'udp', tag: 'dns-remote', server: '1.1.1.1', detour: 'proxy-out' },
-    { type: 'udp', tag: 'dns-backup', server: '8.8.8.8', detour: 'proxy-out' }
+    buildDohServer(REMOTE_DNS_TAG, 'cloudflare-dns.com'),
+    buildDohServer(REMOTE_DNS_BACKUP_TAG, 'dns.google')
   ]
   try {
     const profile = dnsProfiles.getActiveDnsProfile()
@@ -445,39 +505,36 @@ function buildRemoteDnsServers(): Array<Record<string, any>> {
       const addr = String(address || '').trim()
       if (!addr) return null
       if (profile.type === 'doh') {
-        // strip scheme + path → bare host for sing-box `server`
-        const host = addr.replace(/^https:\/\//i, '').split('/')[0].split(':')[0]
-        if (!host) return null
-        return { type: 'https', tag, server: host, detour: 'proxy-out' }
+        const parsed = parseDnsUrl(addr, 'https')
+        if (!parsed) return null
+        return buildDohServer(tag, parsed.host, {
+          path: parsed.path,
+          port: parsed.port,
+          serverName: isIP(parsed.host) === 0 ? parsed.host : undefined
+        })
       }
       if (profile.type === 'dot') {
-        const host = addr.replace(/^tls:\/\//i, '').split('/')[0].split(':')[0]
-        if (!host) return null
+        const parsed = parseDnsUrl(addr, 'tls')
+        if (!parsed) return null
+        const tls = tlsServerNameFor(parsed.host)
         return {
           type: 'tls',
           tag,
-          server: host,
+          server: parsed.host,
+          ...maybeServerPort(parsed.port),
           detour: 'proxy-out',
-          domain_resolver: {
-            server: 'dns-remote-bootstrap',
-            strategy: DNS_STRATEGY
-          },
-          tls: {
-            server_name: host
-          }
+          ...(tls ? { tls } : {})
         }
       }
-      // plain IPv4/IPv6 → DoT-style udp resolver detoured through the tunnel
-      // (reverted from the broken tcp experiment).
-      return { type: 'udp', tag, server: addr, detour: 'proxy-out' }
+      return { type: 'tcp', tag, server: addr, detour: 'proxy-out' }
     }
 
     const servers: Array<Record<string, any>> = []
-    const primary = toServer(profile.primary, 'dns-remote')
+    const primary = toServer(profile.primary, REMOTE_DNS_TAG)
     if (!primary) return fallback
     servers.push(primary)
     if (profile.secondary) {
-      const secondary = toServer(profile.secondary, 'dns-backup')
+      const secondary = toServer(profile.secondary, REMOTE_DNS_BACKUP_TAG)
       if (secondary) servers.push(secondary)
     }
     return servers
@@ -488,8 +545,8 @@ function buildRemoteDnsServers(): Array<Record<string, any>> {
 
 function buildDnsBootstrapServers(): Array<Record<string, any>> {
   return [
-    { type: 'local', tag: 'dns-remote-bootstrap' },
-    { type: 'local', tag: 'dns-remote-bootstrap-backup' }
+    { type: 'udp', tag: 'dns-remote-bootstrap', server: '1.1.1.1' },
+    { type: 'udp', tag: 'dns-remote-bootstrap-backup', server: '8.8.8.8' }
   ]
 }
 
@@ -817,17 +874,20 @@ export function generateSingboxConfig(
       ? [{ network: 'udp', action: 'reject', method: 'default', no_drop: true }]
       : []
   const needsSniff = true // Always sniff so that SNI and HTTP Host are available for routing and proxying
+  const directVpnEndpointRouteExcludes =
+    isDirectVpn && typeof proxyOutbound.server === 'string' && isIP(proxyOutbound.server) === 4
+      ? [`${proxyOutbound.server}/32`]
+      : []
 
   return {
     log: { level: 'debug', timestamp: true, output: logPath },
     dns: {
       // sing-box 1.13.x rejects `detour: direct-out` on DNS servers when the
       // direct outbound has no explicit override/bind options ("detour to an
-      // empty direct outbound makes no sense"). The recommended replacement
-      // for bootstrap DNS (resolving the proxy hostname before the tunnel
-      // is up) is `type: local` — sing-box delegates the lookup to the
-      // platform native resolver, which still uses the physical interface
-      // because we ask it before strict_route hijacks the system DNS.
+      // empty direct outbound makes no sense"). Bootstrap DNS therefore uses
+      // the DNS server's own default direct dialer (no detour), not a detour to
+      // direct-out and not `type: local`. `local` can recurse into the TUN
+      // resolver after adapter lockdown pins physical DNS to 192.168.250.254.
       //
       // The remote resolvers come from the user's selected DNS profile
       // (Settings → DNS) when one is active, falling back to Cloudflare +
@@ -852,6 +912,7 @@ export function generateSingboxConfig(
       ...(smartRoute.enabled
         ? { rules: smartRouteDnsRules(smartRoute) }
         : {}),
+      final: REMOTE_DNS_TAG,
       strategy: DNS_STRATEGY
     },
     inbounds: [
@@ -878,7 +939,15 @@ export function generateSingboxConfig(
         auto_route: true,
         strict_route: true,
         route_address: ['0.0.0.0/1', '128.0.0.0/1'],
-        route_exclude_address: ['127.0.0.0/8', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '169.254.0.0/16', '224.0.0.0/4'],
+        route_exclude_address: [
+          '127.0.0.0/8',
+          '10.0.0.0/8',
+          '172.16.0.0/12',
+          '192.168.0.0/16',
+          '169.254.0.0/16',
+          '224.0.0.0/4',
+          ...directVpnEndpointRouteExcludes
+        ],
         stack: 'mixed'
       },
       {
@@ -1012,31 +1081,80 @@ function psQuote(value: string): string {
   return `'${value.replace(/'/g, "''")}'`
 }
 
-async function killOwnedRuntimeProcesses(): Promise<void> {
-  if (process.platform !== 'win32') return
+export async function killOwnedTunRuntimeProcesses(): Promise<{ success: boolean; candidates: number; killed: number; names: string[]; error?: string }> {
+  if (process.platform !== 'win32') return { success: true, candidates: 0, killed: 0, names: [] }
   try {
-    const { exec } = await import('child_process')
-    const { promisify } = await import('util')
-    const execAsync = promisify(exec)
-    // Use fast WMI/taskkill instead of 3 sequential PowerShell instances (800ms -> 30ms)
-    const commands = [
-      `taskkill /F /IM ${RUNTIME_EXE_NAME}`,
-      `taskkill /F /IM vpnte-etw-sidecar.exe`,
-      `wmic process where "name='sing-box.exe' and ExecutablePath like '%vpn-tunnel-enforcer%'" call terminate`
-    ]
-    await Promise.all(commands.map(c => execAsync(c, { windowsHide: true }).catch(() => undefined)))
-  } catch (err) {
+    const runtimeDir = getTunRuntimeDir()
+    const stdout = await runPowerShell(`
+$runtimeDir = ${psSingleQuote(runtimeDir)}
+$names = @(${psSingleQuote(RUNTIME_EXE_NAME)}, 'vpnte-etw-sidecar.exe')
+$rows = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+  Where-Object {
+    ($names -contains $_.Name) -and
+    $_.ExecutablePath -and
+    $_.ExecutablePath.StartsWith($runtimeDir, [System.StringComparison]::OrdinalIgnoreCase)
+  })
+$killed = @()
+foreach ($p in $rows) {
+  try {
+    Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop
+    $killed += [pscustomobject]@{ name = [string]$p.Name; pid = [int]$p.ProcessId }
+  } catch {}
+}
+[pscustomobject]@{
+  candidates = [int]$rows.Count
+  killed = [int]$killed.Count
+  names = @($killed | ForEach-Object { $_.name })
+} | ConvertTo-Json -Compress -Depth 3
+`, 8000)
+    const parsed = JSON.parse(String(stdout || '{}').trim() || '{}')
+    const names = Array.isArray(parsed.names) ? parsed.names.map((name: any) => String(name)) : []
+    return {
+      success: true,
+      candidates: Number(parsed.candidates) || 0,
+      killed: Number(parsed.killed) || 0,
+      names
+    }
+  } catch (err: any) {
     logEvent('debug', 'tun', 'killOwnedRuntimeProcesses failed', err)
+    return { success: false, candidates: 0, killed: 0, names: [], error: err?.message || String(err) }
   }
+}
+
+async function killOwnedRuntimeProcesses(): Promise<void> {
+  await killOwnedTunRuntimeProcesses()
 }
 
 async function waitForOwnedRuntimeToExit(timeoutMs = 3000): Promise<boolean> {
   const started = Date.now()
   while (Date.now() - started < timeoutMs) {
-    if (!(await isSingboxRunning())) return true
+    if (!(await isOwnedTunRuntimeRunning())) return true
     await new Promise((resolve) => setTimeout(resolve, 250))
   }
-  return !(await isSingboxRunning())
+  return !(await isOwnedTunRuntimeRunning())
+}
+
+async function isOwnedTunRuntimeRunning(): Promise<boolean> {
+  if (process.platform !== 'win32') return false
+  try {
+    const runtimeDir = getTunRuntimeDir()
+    const stdout = await runPowerShell(`
+$runtimeDir = ${psSingleQuote(runtimeDir)}
+$names = @(${psSingleQuote(RUNTIME_EXE_NAME)}, 'vpnte-etw-sidecar.exe')
+$found = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+  Where-Object {
+    ($names -contains $_.Name) -and
+    $_.ExecutablePath -and
+    $_.ExecutablePath.StartsWith($runtimeDir, [System.StringComparison]::OrdinalIgnoreCase)
+  } |
+  Select-Object -First 1)
+if ($found.Count -gt 0) { 'true' } else { 'false' }
+`, 5000)
+    return String(stdout || '').toLowerCase().includes('true')
+  } catch (err) {
+    logEvent('debug', 'tun', 'owned runtime status probe failed', err)
+    return await isSingboxRunning()
+  }
 }
 
 // Polls Get-NetAdapter until VPNTE-TUN reports Status=Up. Wintun creates the

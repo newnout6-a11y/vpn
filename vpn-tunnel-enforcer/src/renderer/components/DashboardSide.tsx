@@ -79,6 +79,8 @@ function QuickServers() {
   const { t } = useTranslation()
   const addLog = useAppStore(s => s.addLog)
   const tunRunning = useAppStore(s => s.tunRunning)
+  const connectionMode = useAppStore(s => s.settings.connectionMode)
+  const setServerSwitchingName = useAppStore(s => s.setServerSwitchingName)
 
   const [profiles, setProfiles] = useState<ServerProfile[]>([])
   const [groups, setGroups] = useState<ServerGroup[]>([])
@@ -164,6 +166,9 @@ function QuickServers() {
       country: profile.country || null,
       selected: profile.id === activeId,
       onSelect: async () => {
+        if (profile.id === activeId) return
+        const shouldAnimateSwitch = tunRunning && connectionMode === 'directVpn'
+        if (shouldAnimateSwitch) setServerSwitchingName(profile.name)
         setActiveId(profile.id)
         try {
           await window.electronAPI.serversSelect(profile.id)
@@ -173,6 +178,8 @@ function QuickServers() {
           const message = err instanceof Error ? err.message : String(err)
           addLog('error', `Не удалось выбрать сервер: ${message}`)
           refresh()
+        } finally {
+          if (shouldAnimateSwitch) setServerSwitchingName(null)
         }
       }
     })
@@ -199,7 +206,7 @@ function QuickServers() {
     }
     if (orphans.length > 0) out.push({ group: null, rows: orphans })
     return out
-  }, [profiles, groups, groupsAvailable, activeId, addLog, refresh])
+  }, [profiles, groups, groupsAvailable, activeId, addLog, refresh, tunRunning, connectionMode, setServerSwitchingName])
 
   const totalRows = useMemo(
     () => clusters.reduce((sum, c) => sum + c.rows.length, 0),

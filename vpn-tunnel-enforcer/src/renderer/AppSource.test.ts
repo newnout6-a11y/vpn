@@ -24,4 +24,13 @@ describe('App source regressions', () => {
     expect(source).toContain('Date.now() < detectHappNextAllowedAtRef.current')
     expect(source).toContain('90_000 * (2 ** failures)')
   })
+
+  it('keeps server-switch stop/start transitions from surfacing leak and disconnect UI', () => {
+    const source = appSource()
+
+    expect(source).toContain('store.serverSwitchingName && isLeak')
+    expect(source).toContain("isServerSwitching && status === 'stopped'")
+    expect(source).toContain("status === 'stopped' && !isServerSwitching")
+    expect(source).toContain('stoppingNowRef.current || useAppStore.getState().serverSwitchingName')
+  })
 })

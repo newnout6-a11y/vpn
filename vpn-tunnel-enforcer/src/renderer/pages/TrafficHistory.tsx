@@ -5,6 +5,7 @@ import { Globe, Search, Trash2, RefreshCw, Loader2, ExternalLink } from 'lucide-
 import { MacCard, MacInput, MacButton, MacBadge } from '../design-system'
 import { PageTip } from '../components/PageTip'
 import { useAppStore } from '../store'
+import { categorizeTrafficDomain } from '../trafficCategory'
 
 interface TrafficEntry {
   domain: string
@@ -195,7 +196,7 @@ export function TrafficHistory() {
                             </span>
                             <MacBadge variant="neutral">×{entry.count}</MacBadge>
                             {(() => {
-                              const cat = categorizeDomain(entry.domain)
+                              const cat = categorizeTrafficDomain(entry.domain)
                               return cat ? <MacBadge variant={cat.variant}>{cat.label}</MacBadge> : null
                             })()}
                             {entry.vpnIp && (

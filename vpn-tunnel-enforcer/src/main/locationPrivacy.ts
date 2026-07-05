@@ -26,7 +26,15 @@ export interface LocationPrivacyStatus {
 function backupDir() {
   // Store backups in ProgramData (survives app uninstall) instead of userData
   // (which is removed on uninstall, making rollback impossible).
-  return join(app.getPath('programData') || 'C:\\ProgramData', 'VPN-Tunnel-Enforcer', 'privacy-backups')
+  return join(getProgramDataPath(), 'VPN-Tunnel-Enforcer', 'privacy-backups')
+}
+
+function getProgramDataPath(): string {
+  try {
+    return app.getPath('programData')
+  } catch {
+    return process.env.ProgramData || 'C:\\ProgramData'
+  }
 }
 
 function manifestPath() {

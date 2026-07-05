@@ -199,6 +199,7 @@ interface AppState {
   // return, the power button re-enabled, and a second click double-started the
   // tunnel and broke routing. null = idle.
   connectionBusy: 'connecting' | 'disconnecting' | null
+  serverSwitchingName: string | null
   // True iff the firewall kill-switch rules are currently installed. Used to
   // drive the Dashboard banner that appears when sing-box died but the rules
   // are still in place — the user has to either restart TUN or manually drop
@@ -226,6 +227,7 @@ interface AppState {
   setTunStartedAt: (ts: number | null) => void
   setRestarting: (progress: string | null) => void
   setConnectionBusy: (busy: 'connecting' | 'disconnecting' | null) => void
+  setServerSwitchingName: (name: string | null) => void
   setFirewallKillSwitchActive: (active: boolean) => void
   setCompetingTun: (name: string | null) => void
   proxyDown: boolean
@@ -259,12 +261,12 @@ interface AppState {
   setMaintenanceLastResult: (r: string | null) => void
   maintenanceRunningAction: string | null
   setMaintenanceRunningAction: (a: string | null) => void
-  maintenanceStoreDiagnostics: any | null
-  setMaintenanceStoreDiagnostics: (r: any | null) => void
   maintenanceSystemDiagnostics: any | null
   setMaintenanceSystemDiagnostics: (r: any | null) => void
-  maintenancePrivacy: any | null
-  setMaintenancePrivacy: (p: any | null) => void
+  maintenanceFirewallHealth: any | null
+  setMaintenanceFirewallHealth: (r: any | null) => void
+  maintenanceRepairSteps: any[] | null
+  setMaintenanceRepairSteps: (steps: any[] | null) => void
 
   // Global toast notifications — visible on all pages
   globalToasts: GlobalToast[]
@@ -310,6 +312,7 @@ export const useAppStore = create<AppState>((set) => ({
   tunStartedAt: null,
   restartingProgress: null,
   connectionBusy: null,
+  serverSwitchingName: null,
   firewallKillSwitchActive: false,
   competingTun: null,
   proxyDown: false,
@@ -386,6 +389,7 @@ export const useAppStore = create<AppState>((set) => ({
   setConnectionBusy: (busy) => set((state) => ({
     connectionBusy: busy === null && state.restartingProgress ? (state.connectionBusy ?? 'connecting') : busy
   })),
+  setServerSwitchingName: (name) => set({ serverSwitchingName: name }),
   setFirewallKillSwitchActive: (active) => set({ firewallKillSwitchActive: active }),
   setCompetingTun: (name) => set({ competingTun: name }),
   setProxyDown: (v) => set({ proxyDown: v }),
@@ -436,12 +440,12 @@ export const useAppStore = create<AppState>((set) => ({
   setMaintenanceLastResult: (r) => set({ maintenanceLastResult: r }),
   maintenanceRunningAction: null,
   setMaintenanceRunningAction: (a) => set({ maintenanceRunningAction: a }),
-  maintenanceStoreDiagnostics: null,
-  setMaintenanceStoreDiagnostics: (r) => set({ maintenanceStoreDiagnostics: r }),
   maintenanceSystemDiagnostics: null,
   setMaintenanceSystemDiagnostics: (r) => set({ maintenanceSystemDiagnostics: r }),
-  maintenancePrivacy: null,
-  setMaintenancePrivacy: (p) => set({ maintenancePrivacy: p }),
+  maintenanceFirewallHealth: null,
+  setMaintenanceFirewallHealth: (r) => set({ maintenanceFirewallHealth: r }),
+  maintenanceRepairSteps: null,
+  setMaintenanceRepairSteps: (steps) => set({ maintenanceRepairSteps: steps }),
   globalToasts: [],
   addGlobalToast: (variant, title, description) => {
     const id = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`

@@ -1,6 +1,6 @@
 # VPN Tunnel Enforcer Audit Tracker
 
-Last updated: 2026-07-02
+Last updated: 2026-07-04
 
 Purpose: durable context for Codex context compaction. Keep this file current while fixing audit findings. When a point is implemented, change its `Status` to `DONE`, add changed files and verification evidence. Do not rely on chat history alone.
 
@@ -117,48 +117,26 @@ npm run build
 # passed
 ```
 
-Known pre-existing full-suite blocker: full `npm test` has an older logger-test isolation issue. In the full parallel suite, `src/main/appLoggerRotation.test.ts` times out with noisy stdout and `src/main/appLoggerRedaction.test.ts` can fail with a temp `app.log` ENOENT; the redaction test passes when run alone.
+Known previous full-suite blocker: resolved. Full `npm test -- --reporter=dot` now passes after logger isolation fixes.
 
 Latest verification after current work:
 
 ```powershell
+npm test -- LogsSource.test.ts diagnosticsPreflight.test.ts MaintenanceSource.test.ts preloadValidation.test.ts mainIpcRegression.test.ts systemDiagnostics.test.ts -- --reporter=dot
+# 6 test files passed, 33 tests passed
+
 npm test -- --reporter=dot
-# failed only in logger isolation/full-suite area:
-# - appLoggerRedaction.test.ts ENOENT reading temp app.log during full parallel run
-# - appLoggerRotation.test.ts timeout/noisy stdout
-
-npm test -- preloadValidation.test.ts mainIpcRegression.test.ts elevatedPsHelper.test.ts vpnProfilesRegression.test.ts serverPickerPingPoisoning.test.ts --reporter=dot
-# 5 test files passed, 26 tests passed
-
-npm test -- tunControllerConfig.test.ts routingSelfTest.test.ts granularKillSwitchInit.test.ts settingsLoginItem.test.ts tunControllerRecoverySource.test.ts --reporter=dot
-# 5 test files passed, 58 tests passed
-
-npm test -- splitTunneling.test.ts splitTunnelProcess.test.ts systemNetwork.test.ts granularKillSwitch.test.ts firewallKillSwitchValidation.test.ts leakDiagnostics.test.ts --reporter=dot
-# 6 test files passed, 51 tests passed
-
-npm test -- traySource.test.ts notificationsReset.test.ts notificationsGating.test.ts trafficMonitor.test.ts store.connectionBusy.test.ts AppSource.test.ts externalProxy.test.ts keyHealthChecker.test.ts --reporter=dot
-# 8 test files passed, 33 tests passed
-
-npm test -- vpnProfilesProtocolCoverage.test.ts urlAvailabilityVerdict.test.ts profileRotation.test.ts serverPickerConsolidate.test.ts dnsProfiles.test.ts leakSelfTest.test.ts happDetector.test.ts serverGroupsRefresh.test.ts speedTest.test.ts --reporter=dot
-# 9 test files passed, 77 tests passed
-
-npm test -- appLoggerRedaction.test.ts --reporter=dot
-# 1 test file passed, 1 test passed
+# 61 test files passed, 499 tests passed
 
 npm run build
 # passed
 
-npm test -- firewallKillSwitchValidation.test.ts leakDiagnostics.test.ts systemNetwork.test.ts elevatedPsHelper.test.ts vpnProfilesProtocolCoverage.test.ts urlAvailabilityVerdict.test.ts --reporter=dot
-# 6 test files passed, 55 tests passed
+npm run dist:win
+# passed; installer rebuilt at `vpn-tunnel-enforcer/dist/VPN-Tunnel-Enforcer-Setup-1.1.0.exe` (117450296 bytes, 2026-07-04 18:51:23 local time)
 
-npm run build
-# passed
-
-npm test -- appLoggerRedaction.test.ts elevatedPsHelper.test.ts firewallKillSwitchValidation.test.ts tunControllerConfig.test.ts splitTunneling.test.ts granularKillSwitch.test.ts dnsProfiles.test.ts profileRotation.test.ts serverPickerConsolidate.test.ts serverPickerPingPoisoning.test.ts --reporter=dot
-# 10 test files passed, 112 tests passed
-
-npm run build
-# passed
+Get-AuthenticodeSignature .\dist\VPN-Tunnel-Enforcer-Setup-1.1.0.exe
+Get-AuthenticodeSignature ".\dist\win-unpacked\VPN Tunnel Enforcer.exe"
+# both NotSigned; no real Authenticode publisher certificate is present
 ```
 
 ## MEDIUM Audit Tracker
@@ -227,7 +205,7 @@ npm run build
 | --- | --- | --- | --- | --- | --- |
 | M-X1 | DONE | No unified IPC payload validation. | Added shared IPC payload validators and applied focused validation/field allowlists to high-risk config, DNS, kill-switch, split-tunnel, server-picker, and rotation IPC boundaries. Full schema-library migration is not required for this audit item. | `vpn-tunnel-enforcer/src/main/ipcValidation.ts`, `configManager.ts`, `dnsProfiles.ts`, `granularKillSwitch.ts`, `splitTunneling.ts`, `serverPicker.ts`, `profileRotation.ts` | `npm test -- granularKillSwitch.test.ts dnsProfiles.test.ts splitTunneling.test.ts serverPickerConsolidate.test.ts serverPickerPingPoisoning.test.ts profileRotation.test.ts --reporter=dot` passed: 55 tests; `npm run build` passed. |
 | M-X2 | DONE | Sensitive network topology data in logs. | IPC args use compact redaction and `appLogger` now centrally redacts IP/MAC/topology-like fields in messages, details, console output, and exported app log snapshots. | `vpn-tunnel-enforcer/src/main/ipcLogging.ts`, `vpn-tunnel-enforcer/src/main/appLogger.ts`, feature IPC wrappers | `npm test -- appLoggerRedaction.test.ts --reporter=dot` passed: 1 test; earlier IPC redaction test batch passed 55 tests; `npm run build` passed. |
-| M-X3 | DONE | Shell-string `exec` pattern is widespread. | High-risk shell-string paths now use `execFile`/argv or encoded PowerShell: autoconfig Git/env, diagnostics ZIP compression, split-tunnel registry scan, Store repair PS helper, browser/location registry operations, and TUN normal config/probe launch paths. Remaining `exec` uses are static diagnostics or the `sudo-prompt` UAC command-string boundary. | `vpn-tunnel-enforcer/src/main/autoconfig/git.ts`, `autoconfig/env.ts`, `admin.ts`, `diagnosticsExport.ts`, `splitTunneling.ts`, `storeRepair.ts`, `browserHardening.ts`, `locationPrivacy.ts`, `tunController.ts` | `npm test -- tunControllerConfig.test.ts splitTunneling.test.ts --reporter=dot` passed: 47 tests; `npm run build` passed. |
+| M-X3 | DONE | Shell-string `exec` pattern is widespread. | High-risk shell-string paths now use `execFile`/argv or encoded PowerShell: autoconfig Git/env, diagnostics ZIP compression, split-tunnel registry scan, browser/location registry operations, and TUN normal config/probe launch paths. The old Store repair helper hardened in this batch was later removed from the app. Remaining `exec` uses are static diagnostics or the `sudo-prompt` UAC command-string boundary. | `vpn-tunnel-enforcer/src/main/autoconfig/git.ts`, `autoconfig/env.ts`, `admin.ts`, `diagnosticsExport.ts`, `splitTunneling.ts`, `browserHardening.ts`, `locationPrivacy.ts`, `tunController.ts` | `npm test -- tunControllerConfig.test.ts splitTunneling.test.ts --reporter=dot` passed: 47 tests; `npm run build` passed. |
 | X-extra-1 | DONE | Several feature-local IPC wrappers log raw `args`. | Added shared `compactForIpcLog()` and replaced raw args logging in config, DNS, rotation, groups, split tunneling, speed test, and server picker wrappers. | `vpn-tunnel-enforcer/src/main/ipcLogging.ts`, `configManager.ts`, `dnsProfiles.ts`, `profileRotation.ts`, `serverGroups.ts`, `splitTunneling.ts`, `speedTest.ts`, `serverPicker.ts` | `npm test -- splitTunneling.test.ts dnsProfiles.test.ts profileRotation.test.ts serverGroupsRefresh.test.ts serverPickerConsolidate.test.ts speedTest.test.ts --reporter=dot` passed: 55 tests; `npm run build` passed. |
 
 ## Recommended Fix Order
@@ -533,7 +511,7 @@ Files:
 - vpn-tunnel-enforcer/src/main/admin.ts
 - vpn-tunnel-enforcer/src/main/diagnosticsExport.ts
 - vpn-tunnel-enforcer/src/main/splitTunneling.ts
-- vpn-tunnel-enforcer/src/main/storeRepair.ts
+- vpn-tunnel-enforcer/src/main/storeRepair.ts (historical; deleted later in MAINTENANCE REPAIR AUDIT/FIX PASS)
 - vpn-tunnel-enforcer/src/main/browserHardening.ts
 - vpn-tunnel-enforcer/src/main/locationPrivacy.ts
 - vpn-tunnel-enforcer/src/main/tunController.ts
@@ -543,7 +521,8 @@ Verification:
 - npm run build
 - Result: passed.
 Windows-only gap:
-- Real Windows smoke should cover diagnostics ZIP export, browser/location rollback, Store repair actions, and elevated TUN launch.
+- Real Windows smoke should cover diagnostics ZIP export, browser/location rollback, and elevated TUN launch.
+- Store repair actions are no longer in scope here: the Store repair/diagnostics implementation and renderer IPC were deleted in the Maintenance repair audit pass.
 Notes:
 - Converted high-risk shell-string invocations with paths/user-adjacent data to execFile argv or EncodedCommand PowerShell.
 - TUN normal config check/probe launch no longer shells through quoted paths; sudo-prompt remains a command-string boundary by API design.
@@ -694,7 +673,7 @@ Items:
 - N3 DONE: tunController.stop() resumes ipMonitor through a guarded finally path, so teardown exceptions cannot leave leak monitoring suspended forever.
 - N12 DONE: routingSelfTest.ruEgressIp is no longer a dead stub; Smart-RU self-test now probes RU-domain echo pages through the normal TUN path.
 - N14 DONE: granularKillSwitch.setLevel rejects standard/strict before init(singboxExePath), without mutating store/settings first.
-- S1 PARTIAL DONE: elevatedPsHelper now has policy-forbidden command patterns so required tokens cannot authorize cross-policy payloads like netsh advfirewall reset or HKLM Run persistence.
+- S1 DONE (superseded by BATCH 3): elevatedPsHelper now has policy-forbidden command patterns so required tokens cannot authorize cross-policy payloads like netsh advfirewall reset or HKLM Run persistence. BATCH 3 later tightened this further for cross-policy payloads, cmd invocation, and route table mutation.
 - U4 DONE: settingsStore.save no longer applies login item / boot-recovery schtask on unrelated settings saves; boot recovery is ensured at most once per app process via sync/login changes.
 - S32 ALREADY DONE BEFORE THIS BATCH: autoconfig/env.ts already uses socks5h:// plus ALL_PROXY for SOCKS5 env-mode proxying.
 - V1/V2 ALREADY DONE BEFORE THIS BATCH: see VPN PROFILES REVIEW BATCH 1 and commit 5c7751e.
@@ -846,9 +825,330 @@ Notes:
 - The guard intentionally does not block all `|` usage because the app's allowed elevated scripts legitimately use PowerShell pipelines.
 ```
 
+```text
+2026-07-04 - DNS RUNTIME HOTFIX DONE
+Files:
+- vpn-tunnel-enforcer/src/main/tunController.ts
+- vpn-tunnel-enforcer/src/main/tunControllerConfig.test.ts
+- vpn-tunnel-enforcer/src/main/systemNetwork.ts
+- vpn-tunnel-enforcer/src/main/systemNetwork.test.ts
+- vpn-tunnel-enforcer/src/main/locationPrivacy.ts
+
+Items:
+- DNS-H1 DONE: sing-box DNS now sets `dns.final = dns-remote`, so normal hijacked app DNS cannot silently use the first bootstrap resolver. This fixes the likely recursion path where bootstrap/local DNS hit the TUN resolver `192.168.250.254` and timed out.
+- DNS-H2 DONE: remote bootstrap resolvers no longer use `type: local` and no longer detour to `direct-out`; they are direct UDP DNS servers with no detour. This avoids both sing-box 1.13's `detour to an empty direct outbound makes no sense` fatal and the local-resolver recursion under adapter DNS pinning.
+- DNS-H3 DONE: default remote DNS no longer depends on UDP/XUDP through VLESS/Reality. No-profile fallback is DoH over HTTPS/443 through `proxy-out`; user plain DNS profiles are sent as TCP/53 through `proxy-out`; user DoH/DoT profiles preserve host/path/port/SNI.
+- PROGDATA-H1 DONE: ProgramData backup paths now catch Electron `app.getPath('programData')` failures and fall back to `%ProgramData%` / `C:\ProgramData`, restoring baseline/diagnostics/export paths on Electron builds that throw for `programData`.
+- DPI-1 STILL FUTURE: ByeDPI/zapret/WinDivert-style packet desync is intentionally not implemented in this hotfix. Current work only uses built-in sing-box/VLESS DNS and transport-shape changes.
+
+Verification:
+- npm test -- tunControllerConfig.test.ts systemNetwork.test.ts --reporter=dot
+- Result: 2 test files passed, 50 tests passed.
+- npm run build
+- Result: passed.
+- resources/sing-box.exe check -c %TEMP%/vpnte-dns-check.json
+- Result: passed for representative VLESS Reality + DoH `dns-remote` + direct UDP bootstrap + `dns.final=dns-remote` config.
+
+Windows-only gap:
+- Real Windows smoke still needs to start Direct VPN, verify `Resolve-DnsName example.com -Server 192.168.250.254` succeeds, verify public IP remains VPN, export diagnostics ZIP, and stop TUN to confirm DNS/firewall/baseline rollback.
+
+Notes:
+- This is a targeted DNS/runtime recovery patch, not a broad security-hardening batch.
+- If a specific server still has DNS failures after this, the next investigation should compare DoH/TCP/DoT per-profile at runtime rather than reverting the whole audit series.
+```
+
+```text
+2026-07-04 - UI SERVER/SPLIT-TUNNEL POLISH DONE
+Files:
+- vpn-tunnel-enforcer/src/renderer/pages/Servers.tsx
+- vpn-tunnel-enforcer/src/renderer/pages/SplitTunnel.tsx
+
+Items:
+- UI-SRV-1 DONE: server selection now has an explicit in-row switching state. The target row animates, shows a pulsing "switching" badge and spinner, and other select buttons are locked until the IPC completes to avoid jitter/double-click races.
+- UI-APP-1 DONE: split-tunnel app rules now render as a single table-like list with visible "Application" and "Route" columns instead of separated cards.
+- UI-APP-2 DONE: per-app route selection is now a segmented control with pending state/spinner for the row being applied.
+
+Verification:
+- npm run build
+- Result: passed.
+
+Windows-only gap:
+- Real UI smoke still should click several servers and split-tunnel app rules in the packaged app to confirm the motion feels smooth with real IPC latency.
+
+Notes:
+- No TUN/firewall/DNS runtime behavior changed in this UI pass.
+```
+
+```text
+2026-07-04 - LOG CLEAR PERSISTENCE FIX DONE
+Files:
+- vpn-tunnel-enforcer/src/main/appLogger.ts
+- vpn-tunnel-enforcer/src/main/connectionHistory.ts
+- vpn-tunnel-enforcer/src/preload/index.ts
+- vpn-tunnel-enforcer/src/renderer/App.tsx
+- vpn-tunnel-enforcer/src/renderer/pages/Logs.tsx
+
+Items:
+- LOG-H1 DONE: the Logs page clear button now clears the persistent connection-history electron-store, not only the visible UI state / app.log file.
+- LOG-H2 DONE: app log cleanup now also clears previous rotated app log and sing-box log files, so raw logs do not come back from leftover files after reinstall/restart.
+- LOG-H3 DONE: preload exposes `connectionHistoryClear`, and renderer types know about it.
+
+Verification:
+- npm test -- connectionHistory.test.ts --reporter=dot
+- Result: 1 test file passed, 30 tests passed.
+- npm run build
+- Result: passed.
+
+Windows-only gap:
+- Real packaged-app smoke should click Logs -> Clear, reopen the app/reinstall over it, and confirm connection history/raw logs do not reappear except for new startup log lines.
+
+Notes:
+- `sing-box.json` is intentionally not deleted by log clearing because it is runtime config, not a log file.
+```
+
+```text
+2026-07-04 - TRAFFIC CATEGORY DETECTION IMPROVED
+Files:
+- vpn-tunnel-enforcer/src/renderer/trafficCategory.ts
+- vpn-tunnel-enforcer/src/renderer/trafficCategory.test.ts
+- vpn-tunnel-enforcer/src/renderer/pages/TrafficHistory.tsx
+
+Items:
+- TRAFFIC-CAT-1 DONE: traffic category detection moved out of `TrafficHistory.tsx` into a dedicated tested module.
+- TRAFFIC-CAT-2 DONE: domains are normalized before classification, including URLs, ports, wildcards, trailing dots, and common multi-label public suffixes like `co.uk`.
+- TRAFFIC-CAT-3 DONE: classification no longer treats every `api.*` host as Development/AI. Known providers are matched by exact/base domain instead.
+- TRAFFIC-CAT-4 DONE: added higher-quality categories inspired by current public datasets: ads/RTB, analytics/tracking, telemetry, messengers, social, streaming/media, dev/AI, cloud/CDN, system updates, mail, payments, auth/SSO, marketplaces, and suspicious/threat keywords.
+- TRAFFIC-CAT-5 DONE: rule order now prefers product/security meaning before generic infrastructure, e.g. `cloudflareinsights.com` is analytics/tracking, while `cloudflare.com` remains cloud/CDN; `cdn.discordapp.com` remains messenger, not CDN.
+
+Verification:
+- npm test -- trafficCategory.test.ts --reporter=dot
+- Result: 1 test file passed, 7 tests passed.
+- npm run build
+- Result: passed.
+
+Research:
+- Used Tavily search/extract (not tavily_research).
+- DuckDuckGo Tracker Radar confirmed useful category families such as Analytics, CDN, Advertising, Ad Motivated Tracking, Session Replay, SSO, Fraud Prevention, Social Network, Malware.
+- Public Suffix List docs confirmed why site grouping needs public-suffix/eTLD-style handling.
+- HaGeZi DNS blocklists confirmed modern DNS filtering categories: ads, tracking, analytics, metrics, telemetry, phishing, malware, scam, cryptojacking.
+
+Windows-only gap:
+- Real packaged-app smoke should open Traffic History on real captured traffic and sanity-check category badges against known domains.
+
+Notes:
+- This is offline deterministic classification, not a cloud lookup. It avoids runtime API/privacy dependencies.
+```
+
+```text
+2026-07-04 - DIAGNOSTICS ZIP REGRESSION PASS DONE
+Source:
+- C:\Users\Redmi\Downloads\vpn-tunnel-enforcer-diagnostics-2026-07-04T11-43-24-877Z.zip
+
+Files:
+- vpn-tunnel-enforcer/src/renderer/pages/Servers.tsx
+- vpn-tunnel-enforcer/src/main/leakSelfTest.ts
+- vpn-tunnel-enforcer/src/main/leakSelfTest.test.ts
+- vpn-tunnel-enforcer/src/main/trafficForensicsSummary.ts
+- vpn-tunnel-enforcer/src/main/trafficForensics.test.ts
+- vpn-tunnel-enforcer/src/renderer/store.ts
+- vpn-tunnel-enforcer/src/renderer/pages/Dashboard.tsx
+- vpn-tunnel-enforcer/src/renderer/components/ProfileSelectorInline.tsx
+- vpn-tunnel-enforcer/src/renderer/components/DashboardSide.tsx
+
+Items:
+- ZIP-R1 DONE: fixed Servers page runtime crash from `GroupCard` using `switchingId` without receiving it as a prop.
+- ZIP-R2 DONE: traffic-forensics now reads runtime TUN `interface_name` from `<userData>/tun-runtime/sing-box.json`, so a TUN named `Ethernet 5` is not misclassified as a physical Ethernet adapter.
+- ZIP-R3 DONE: leak self-test no longer raises a red DNS leak solely because Cloudflare trace IP differs from `api.ipify.org`; that mismatch is now diagnostic detail unless a physical adapter actually reaches the internet.
+- ZIP-R4 DONE: central Dashboard power circle now has a separate animated "server switching" state when a live Direct VPN server is changed from the inline selector or right-side quick picker.
+
+Verification:
+- npm test -- leakSelfTest.test.ts trafficForensics.test.ts Servers.test.ts trafficCategory.test.ts --reporter=dot
+- Result: 4 test files passed, 32 tests passed.
+- npm run build
+- Result: passed.
+
+Windows-only gap:
+- Need live packaged smoke: start Direct VPN, switch active server from Dashboard selector/right picker, confirm central circle shows switching animation and that post-switch public IP/DNS check is stable.
+
+Notes:
+- The ZIP showed sing-box DNS hijack working and `runtime-sing-box.json` using `interface_name: Ethernet 5`; the previous forensic heuristic treated the name `Ethernet` as physical and produced a false DNS leak verdict.
+```
+
+```text
+2026-07-04 - SERVER SWITCH FALSE LEAK/BANNER FIX DONE
+Source:
+- C:\Users\Redmi\Downloads\vpn-tunnel-enforcer-diagnostics-2026-07-04T12-08-09-597Z.zip
+- Screenshot: C:\Users\Redmi\AppData\Local\Temp\codex-clipboard-063756a0-19e2-4ae7-8831-1f9f92289afd.png
+
+Files:
+- vpn-tunnel-enforcer/src/main/serverPicker.ts
+- vpn-tunnel-enforcer/src/main/serverPickerSource.test.ts
+- vpn-tunnel-enforcer/src/renderer/App.tsx
+- vpn-tunnel-enforcer/src/renderer/AppSource.test.ts
+- vpn-tunnel-enforcer/src/renderer/pages/Dashboard.tsx
+
+Items:
+- SW-IP-1 DONE: after a live Direct VPN profile switch, `serverPicker` resumes `ipMonitor` and rebaselines the fresh public IP after `tunController.start()` succeeds, so the new VPN server IP is not compared against the old VPN IP as a leak.
+- SW-UI-1 DONE: renderer suppresses stale leak/self-test events while `serverSwitchingName` is active.
+- SW-UI-2 DONE: transient `stopped` status during internal server switch no longer resets connection state, flips Hard mode off, or logs the user-facing "protection disabled" path.
+- SW-UI-3 DONE: Dashboard hides leak/firewall banners during the explicit server-switch transition.
+
+Verification:
+- npm test -- AppSource.test.ts serverPickerSource.test.ts leakSelfTest.test.ts trafficForensics.test.ts Servers.test.ts trafficCategory.test.ts --reporter=dot
+- Result: 6 test files passed, 36 tests passed.
+- npm run build
+- Result: passed.
+- npm run dist:win
+- Result: passed; installer rebuilt at `vpn-tunnel-enforcer/dist/VPN-Tunnel-Enforcer-Setup-1.1.0.exe` (117452957 bytes, 2026-07-04 15:24:14 local time).
+
+Windows-only gap:
+- Need live packaged smoke: connect Direct VPN, switch from `polandvless3` to `poland2`, confirm no red "uteka" chip/banner for the selected server IP and no firewall-blocked banner during the switch.
+
+Notes:
+- Root cause: hot switch uses stop/start internally; before this patch the IP monitor baseline stayed on the old VPN IP, so the new VPN IP could be marked as `isLeak=true`.
+```
+
+```text
+2026-07-04 - DIRECT VPN ENDPOINT ROUTE FIX DONE
+Source:
+- Runtime error shown by user: `vpnte-sing-box.exe run -c ... sing-box.json`
+- Runtime log: C:\Users\Redmi\AppData\Roaming\vpn-tunnel-enforcer\tun-runtime\sing-box.log
+
+Files:
+- vpn-tunnel-enforcer/src/main/tunController.ts
+- vpn-tunnel-enforcer/src/main/tunControllerConfig.test.ts
+
+Items:
+- ROUTE-ENDPOINT-1 DONE: Direct VPN configs now add the IPv4 server endpoint itself to TUN `route_exclude_address` as `/32`.
+- ROUTE-ENDPOINT-2 DONE: hostnames are not blindly added to `route_exclude_address`; only concrete IPv4 endpoints are excluded.
+
+Verification:
+- Runtime `sing-box.log` showed `dial tcp 91.224.75.185:443: no route to internet`, while `sing-box check -c` on the original config passed, proving this was route reachability, not JSON/schema syntax.
+- npm test -- tunControllerConfig.test.ts --reporter=dot
+- Result: 1 test file passed, 47 tests passed.
+- npm run build
+- Result: passed.
+- `vpnte-sing-box.exe check -c` against a temp no-BOM copy of the live config plus `91.224.75.185/32`
+- Result: passed with exit code 0.
+- npm run dist:win
+- Result: passed; installer rebuilt at `vpn-tunnel-enforcer/dist/VPN-Tunnel-Enforcer-Setup-1.1.0.exe` (117453107 bytes, 2026-07-04 17:43:58 local time).
+
+Windows-only gap:
+- Need live packaged smoke after installing rebuilt EXE: start Direct VPN on `poland2` / `91.224.75.185`, confirm `sing-box.log` no longer reports `no route to internet` for the VPN endpoint and that public IP resolves through the selected server.
+
+Notes:
+- Root cause: full-tunnel routes (`0.0.0.0/1`, `128.0.0.0/1`) captured the connection to the VPN server itself. The underlay TCP connection to the VPN endpoint must stay outside the TUN; all normal app traffic still uses `proxy-out`.
+```
+
 ## Update Template
 
 When finishing a point, update its row and append a short note here:
+
+```text
+2026-07-04 - MAINTENANCE REPAIR AUDIT/FIX PASS DONE
+Source:
+- User request: audit and improve "Починка" functions, verify fake/legacy items, mandatory Tavily 2026 research.
+- Subagents: repair map, repair quality audit, Tavily best-practices research.
+
+Files:
+- vpn-tunnel-enforcer/src/main/firewallKillSwitch.ts
+- vpn-tunnel-enforcer/src/main/tunController.ts
+- vpn-tunnel-enforcer/src/main/index.ts
+- vpn-tunnel-enforcer/src/main/systemDiagnostics.ts
+- vpn-tunnel-enforcer/src/main/systemDiagnostics.test.ts
+- vpn-tunnel-enforcer/src/main/systemNetwork.ts
+- vpn-tunnel-enforcer/src/main/systemNetwork.test.ts
+- vpn-tunnel-enforcer/src/main/physicalAdapterLockdown.ts
+- vpn-tunnel-enforcer/src/main/diagnosticsExport.ts
+- vpn-tunnel-enforcer/src/main/mainIpcRegression.test.ts
+- vpn-tunnel-enforcer/src/preload/index.ts
+- vpn-tunnel-enforcer/src/preload/preloadValidation.test.ts
+- vpn-tunnel-enforcer/src/renderer/App.tsx
+- vpn-tunnel-enforcer/src/renderer/store.ts
+- vpn-tunnel-enforcer/src/renderer/pages/Logs.tsx
+- vpn-tunnel-enforcer/src/renderer/pages/Maintenance.tsx
+- vpn-tunnel-enforcer/src/renderer/MaintenanceSource.test.ts
+- deleted: vpn-tunnel-enforcer/src/main/storeDiagnostics.ts
+- deleted: vpn-tunnel-enforcer/src/main/storeRepair.ts
+
+Items:
+- REPAIR-FW-1 DONE: full Windows Firewall reset now exports a `.wfw` backup before `netsh advfirewall reset` and reports the backup path.
+- REPAIR-FW-2 DONE: Maintenance UI now labels full firewall reset as an emergency action and warns that it deletes all Windows Firewall rules, not only VPNTE rules.
+- REPAIR-FW-3 DONE: full Windows Firewall reset now requires a main-side confirmation token; renderer `confirm()` is no longer the only guard.
+- REPAIR-FW-4 DONE: normal Maintenance auto-repair uses targeted `repairVpnteFirewallRules()` and does not call `netsh advfirewall reset`.
+- REPAIR-PROC-1 DONE: stale runtime kill now terminates only VPNTE-owned binaries whose executable path is inside the app `tun-runtime`.
+- REPAIR-PROC-2 DONE: stale runtime cleanup reports PowerShell/process-query failure as `success:false` instead of pretending "0 killed"; owned-runtime wait now checks executable path, not only process name.
+- REPAIR-DNS-1 DONE: physical adapter lockdown manifest records DNS source (`dhcp/static/unknown`) and rollback avoids turning DHCP-provided DNS into a static override.
+- REPAIR-DNS-2 DONE: orphaned DNS repair without manifest only resets explicit manual VPNTE DNS, reducing accidental DHCP/static damage.
+- REPAIR-NET-1 DONE: TUN network baseline rollback is idempotent; missing manifest is a skipped no-op, not an auto-repair failure.
+- REPAIR-LOGS-1 DONE: Logs clear now also clears traffic history, snapshots and traffic-forensics artifacts through a dedicated IPC.
+- REPAIR-ZIP-1 DONE: diagnostics ZIP now includes a clean README and `diagnostics-manifest.json` with version/runtime/redaction metadata.
+- REPAIR-ZIP-2 DONE: diagnostics ZIP/health-check active path no longer includes Microsoft Store repair diagnostics or Store category noise.
+- REPAIR-UI-1 DONE: Microsoft Store repair block, preload IPC, main IPC, renderer store state, and legacy implementation files were removed from the active app.
+- REPAIR-UI-2 DONE: Maintenance visible summary is based only on visible VPN/network categories, so hidden/non-VPN checks cannot turn the screen warn/fail.
+- REPAIR-UI-3 DONE: Maintenance now has three primary actions (`Проверить`, `Починить`, `ZIP`) plus one clearly separated emergency firewall reset.
+- REPAIR-UI-4 DONE: Maintenance firewall health and auto-repair step results now live in global renderer store, so leaving and returning to the tab does not wipe the repair result view.
+- REPAIR-TRACE-1 NOFIX: `pktmon`, `netsh trace`, and WFP capture are already implemented in `trafficForensics` and staged into diagnostics ZIP; Tavily/Microsoft docs confirm these are current diagnostics tools, not repair buttons.
+- REPAIR-CRASH-1 NOFIX: Crashpad is not advertised in the repaired Maintenance/ZIP flow; local search found no `crashReporter`/Crashpad implementation, so no fake crash-dump promise remains in this pass.
+
+Verification:
+- Tavily sources reviewed: Microsoft netsh winhttp, Set-DnsClientServerAddress, Windows Firewall command-line docs, netsh advfirewall/WFP, taskkill, Electron diagnostics/security docs.
+- Tavily 2026/current-source conclusion: targeted PowerShell firewall/DNS rollback is appropriate for repair; `pktmon`/`netsh trace`/`netsh wfp` belong to diagnostics; `netsh advfirewall reset` remains emergency-only.
+- Subagent review findings addressed: idempotent baseline rollback, hidden Store warning, destructive `apply-tun-network-baseline` renderer IPC removal, main-side reset token, Store deletion from active diagnostics, runtime cleanup error semantics.
+- PowerShell syntax smoke for snapshot DNS source subexpression passed.
+- npm test -- diagnosticsPreflight.test.ts firewallKillSwitchValidation.test.ts tunControllerConfig.test.ts --reporter=dot
+- Result: 3 test files passed, 65 tests passed.
+- npm test -- appLoggerRotation.test.ts mainIpcRegression.test.ts --reporter=dot
+- Result: 2 test files passed, 5 tests passed.
+- npm test -- MaintenanceSource.test.ts preloadValidation.test.ts mainIpcRegression.test.ts ipcChannelContract.test.ts systemNetwork.test.ts systemDiagnostics.test.ts diagnosticsPreflight.test.ts firewallKillSwitchValidation.test.ts tunControllerConfig.test.ts -- --reporter=dot
+- Result: 9 test files passed, 94 tests passed.
+- npm test -- MaintenanceSource.test.ts store.connectionBusy.test.ts preloadValidation.test.ts mainIpcRegression.test.ts systemDiagnostics.test.ts -- --reporter=dot
+- Result: 5 test files passed, 29 tests passed.
+- npm test -- --reporter=dot
+- Result: 60 test files passed, 497 tests passed.
+- npm run build
+- Result: passed.
+- npm run dist:win
+- Result: passed; installer rebuilt at `vpn-tunnel-enforcer/dist/VPN-Tunnel-Enforcer-Setup-1.1.0.exe` (117450296 bytes, 2026-07-04 18:51:23 local time).
+- Get-AuthenticodeSignature on installer and unpacked app
+- Result: `NotSigned`; no real Authenticode publisher certificate is present in this environment.
+
+Windows-only gap:
+- Need live packaged smoke: Maintenance -> clear logs, export ZIP, emergency firewall backup path creation, manual orphaned DNS repair no-op/success on a real adapter, stale runtime kill while a VPNTE runtime process is present.
+- Need live packaged smoke: start Direct VPN, run Maintenance health-check/auto-repair in a clean state, confirm missing baseline manifest is shown as skipped/no-op rather than failure.
+
+Notes:
+- Full firewall reset remains available by design, but is last resort with backup and a main-side confirmation token. The normal repair path is diagnostics, targeted VPNTE firewall cleanup, network-baseline rollback, DNS/adapter rollback, and owned runtime cleanup.
+- Store repair was removed as irrelevant to the VPN app repair surface. If Store support is ever needed, it should return as a separate explicit feature, not under VPN Maintenance.
+```
+
+## Current Remaining Verification Matrix
+
+As of 2026-07-04, there are no active `TODO`, `PARTIAL`, or `VERIFY` audit rows left in this tracker outside the status legend and historical notes. The remaining work is live packaged Windows smoke verification, not unimplemented source-code items.
+
+Source-level evidence already rechecked after the Maintenance/repair pass:
+- `rg "storeRepair|storeDiagnostics|maintenanceStore|runStore" vpn-tunnel-enforcer/src` returns only regression tests that assert legacy Store repair is absent.
+- `rg "apply-tun-network-baseline" vpn-tunnel-enforcer/src` returns only the regression test that asserts the destructive renderer IPC is absent.
+- Targeted Maintenance tests assert targeted firewall repair appears before emergency full reset, the reset passes `RESET_WINDOWS_FIREWALL_CONFIRMED`, and repair UI state survives tab switches.
+- Fresh tracker-audit regression check: `npm test -- LogsSource.test.ts diagnosticsPreflight.test.ts MaintenanceSource.test.ts preloadValidation.test.ts mainIpcRegression.test.ts systemDiagnostics.test.ts -- --reporter=dot` passed with 6 files / 33 tests.
+- ZIP README/manifest presence is now pinned by `diagnosticsPreflight.test.ts`: `diagnostics-manifest.json` and clean `README.txt` must be staged before `Compress-Archive`, with redaction metadata present.
+- Logs clear persistence is now pinned by `LogsSource.test.ts`: the visible clear action must clear app logs, connection history, traffic history, diagnostic artifacts, and renderer state together.
+- Latest full suite: `npm test -- --reporter=dot` passed with 61 files / 499 tests.
+- Latest packaged build: `npm run dist:win` passed and rebuilt `vpn-tunnel-enforcer/dist/VPN-Tunnel-Enforcer-Setup-1.1.0.exe`.
+
+Live smoke still needed before the whole goal can honestly be marked complete:
+- Safe packaged UI smoke: open Maintenance, switch tabs away/back, verify health/firewall/repair results stay visible.
+- Safe packaged UI smoke: clear logs, restart/reinstall, verify connection history, app logs, rotated logs, snapshots, and traffic-forensics artifacts do not repopulate from old files.
+- Safe packaged UI smoke: export diagnostics ZIP and verify `README` plus `diagnostics-manifest.json` are included and no Store category/report is present.
+- Network runtime smoke: start Direct VPN on a known working profile, switch to another server, verify the center power circle enters the server-switching animation, no false leak banner appears, and no firewall-disabled banner appears during the internal switch.
+- Network runtime smoke: after server switch, verify public IP is rebaselined to the new VPN IP and `run-leak-self-test` does not flag Cloudflare/API public-IP mismatch as a DNS leak unless a physical adapter is actually reachable.
+- TUN route smoke: verify the selected profile endpoint IPv4 is present as `/32` in `route_exclude_address`, sing-box starts cleanly, and the endpoint no longer falls into `no route to internet`.
+- Maintenance runtime smoke: run health-check and auto-repair in a clean state; missing network-baseline manifest should show skipped/no-op, not fail.
+- Windows repair smoke requiring care: emergency full firewall reset should create a `.wfw` backup before `netsh advfirewall reset`. This is destructive and must be run only with explicit approval.
+- Windows repair smoke requiring care: orphaned DNS repair and adapter lockdown rollback should be tested on a real adapter with known DNS state, confirming DHCP DNS is not converted into static DNS.
+- Windows repair smoke requiring care: stale runtime cleanup should kill only VPNTE-owned `tun-runtime` processes and report process-query failures as errors.
+
+Do not mark the thread goal complete until the live smoke items above are either executed successfully on the real Windows environment or explicitly waived by the user.
 
 ```text
 YYYY-MM-DD - <ID> DONE

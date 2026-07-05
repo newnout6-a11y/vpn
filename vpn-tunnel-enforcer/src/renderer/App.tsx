@@ -39,9 +39,6 @@ declare global {
       inspectVpnInput: (input: string) => Promise<{ count: number; protocols: Record<string, number>; profiles: Array<{ index: number; name: string; protocol: string }>; fetched: boolean; source: string }>
       setLoginItem: (openAtLogin: boolean) => Promise<AppSettings>
       runLeakCheck: (options?: { proxyAddr?: string; proxyType?: 'socks5' | 'http' }) => Promise<LeakCheckResult>
-      runStoreRepair: (action: string) => Promise<{ success: boolean; message: string; details?: string }>
-      runStoreDiagnostics: () => Promise<any>
-
       runSystemDiagnostics: () => Promise<any>
       getRoutingPlan: () => Promise<any>
       applyBrowserLeakProtection: () => Promise<any>
@@ -50,11 +47,13 @@ declare global {
       logRenderer: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => Promise<any>
       getFullLogs: () => Promise<any>
       clearAppLog: () => Promise<any>
-      applyTunNetworkBaseline: () => Promise<any>
+      clearDiagnosticArtifacts: () => Promise<{ success: boolean; message: string; cleared: string[] }>
       rollbackTunNetworkBaseline: () => Promise<any>
       disableFirewallKillSwitch: () => Promise<{ success: boolean; message: string; skipped?: boolean }>
       getFirewallKillSwitchStatus: () => Promise<{ active: boolean }>
-      firewallNuclearReset: () => Promise<{ success: boolean; message: string }>
+      firewallNuclearReset: (confirmationToken: string) => Promise<{ success: boolean; message: string }>
+      firewallRepairHealth: () => Promise<any>
+      firewallRepairVpnteRules: () => Promise<any>
       detectForeignVpn: () => Promise<{ foreign: string | null }>
       getLocationPrivacy: () => Promise<any>
       applyLocationPrivacy: () => Promise<any>
@@ -148,6 +147,7 @@ declare global {
       connectionHistoryStats: (period: 'day' | 'week' | 'month') => Promise<{ totalTimeMs: number; totalBytesDown: number; totalBytesUp: number; entryCount: number }>
       connectionHistoryExportCsv: () => Promise<string>
       connectionHistoryExportJson: () => Promise<string>
+      connectionHistoryClear: () => Promise<{ success: boolean }>
       // Traffic History
       trafficHistoryList: (vpnIp?: string) => Promise<Array<{ domain: string; firstSeen: number; lastSeen: number; count: number; vpnIp: string | null }>>
       trafficHistoryClear: () => Promise<{ success: boolean }>
@@ -297,9 +297,13 @@ export default function App() {
         // authoritative defense.
         return
       }
-      useAppStore.getState().setPublicIp(ip, isLeak)
-      if (!isLeak && useAppStore.getState().tunRunning) {
-        useAppStore.getState().setVpnIp(ip)
+      const store = useAppStore.getState()
+      if (store.serverSwitchingName && isLeak) {
+        return
+      }
+      store.setPublicIp(ip, isLeak)
+      if (!isLeak && store.tunRunning) {
+        store.setVpnIp(ip)
       }
       if (isLeak) {
         addLog('error', `ОБНАРУЖЕНА УТЕЧКА IP! Текущий: ${ip}`)
@@ -326,6 +330,7 @@ export default function App() {
       const tunUp = status === 'running' || status === 'proxy-down' || isCompetingTun
       const isStopping = status === 'stopping'
       const busy = store.connectionBusy
+      const isServerSwitching = Boolean(store.serverSwitchingName)
 
       // IPC status events can arrive slightly out of order around start/stop:
       // e.g. a delayed "running" from the previous health poll while the user
@@ -356,7 +361,7 @@ export default function App() {
       // Don't flip tunRunning to false purely on 'stopping' — the rollback is
       // still in progress and other UI (e.g. uptime pill) shouldn't snap to
       // the stopped state until tunController emits 'stopped'.
-      if (!isStopping) {
+      if (!isStopping && !(isServerSwitching && status === 'stopped')) {
         store.setTunRunning(tunUp)
         store.setProxyDown(status === 'proxy-down')
       }
@@ -374,13 +379,13 @@ export default function App() {
       // Reset stale connection state on terminal transitions so the UI
       // doesn't show old VPN IP, leak results, or traffic stats after
       // a crash or disconnect.
-      if (status === 'stopped' || status === 'killswitch-active') {
+      if ((status === 'stopped' || status === 'killswitch-active') && !isServerSwitching) {
         store.resetConnectionState()
       }
-      if (!tunUp && !isRestarting && !isStopping && store.mode === 'hard') store.setMode('off')
+      if (!tunUp && !isRestarting && !isStopping && !isServerSwitching && store.mode === 'hard') store.setMode('off')
       if (status === 'running') {
         addLog('info', 'Защита включена — весь трафик идёт через VPN.')
-      } else if (status === 'stopped') {
+      } else if (status === 'stopped' && !isServerSwitching) {
         addLog('info', 'Защита выключена. Трафик идёт по обычному маршруту.')
       } else if (isStopping) {
         addLog('info', 'Останавливаем защиту — откатываем DNS, IPv6, файрвол…')
@@ -420,7 +425,7 @@ export default function App() {
     })
 
     const unsubLeak = window.electronAPI.onLeakDetected((result) => {
-      if (stoppingNowRef.current) {
+      if (stoppingNowRef.current || useAppStore.getState().serverSwitchingName) {
         // Same reason as onIpChanged — a leak verdict produced during
         // user-initiated rollback is false positive. The leakSelfTest in
         // main also self-cancels via its session-id guard, but this is

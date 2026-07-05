@@ -20,8 +20,6 @@ export interface ElectronAPI {
   inspectVpnInput: (input: string) => Promise<{ count: number; protocols: Record<string, number>; profiles: Array<{ index: number; name: string; protocol: string }>; fetched: boolean; source: string }>
   setLoginItem: (openAtLogin: boolean) => Promise<any>
   runLeakCheck: (options?: { proxyAddr?: string; proxyType?: 'socks5' | 'http' }) => Promise<any>
-  runStoreRepair: (action: string) => Promise<any>
-  runStoreDiagnostics: () => Promise<any>
   runSystemDiagnostics: () => Promise<any>
   getRoutingPlan: () => Promise<any>
   applyBrowserLeakProtection: () => Promise<any>
@@ -33,11 +31,13 @@ export interface ElectronAPI {
   logRenderer: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => Promise<any>
   getFullLogs: () => Promise<any>
   clearAppLog: () => Promise<any>
-  applyTunNetworkBaseline: () => Promise<any>
+  clearDiagnosticArtifacts: () => Promise<{ success: boolean; message: string; cleared: string[] }>
   rollbackTunNetworkBaseline: () => Promise<any>
   disableFirewallKillSwitch: () => Promise<{ success: boolean; message: string }>
   getFirewallKillSwitchStatus: () => Promise<{ active: boolean }>
-  firewallNuclearReset: () => Promise<{ success: boolean; message: string }>
+  firewallNuclearReset: (confirmationToken: string) => Promise<{ success: boolean; message: string }>
+  firewallRepairHealth: () => Promise<any>
+  firewallRepairVpnteRules: () => Promise<any>
   detectForeignVpn: () => Promise<{ foreign: string | null }>
   getLocationPrivacy: () => Promise<any>
   applyLocationPrivacy: () => Promise<any>
@@ -158,6 +158,7 @@ export interface ElectronAPI {
   connectionHistoryStats: (period: 'day' | 'week' | 'month') => Promise<any>
   connectionHistoryExportCsv: () => Promise<string>
   connectionHistoryExportJson: () => Promise<string>
+  connectionHistoryClear: () => Promise<{ success: boolean }>
   // Traffic History
   trafficHistoryList: (vpnIp?: string) => Promise<any[]>
   trafficHistoryClear: () => Promise<{ success: boolean }>
@@ -348,8 +349,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   inspectVpnInput: (input: string) => ipcRenderer.invoke('inspect-vpn-input', assertString(input, 'input', MAX_VPN_INPUT_CHARS)),
   setLoginItem: (openAtLogin: boolean) => ipcRenderer.invoke('set-login-item', assertBoolean(openAtLogin, 'openAtLogin')),
   runLeakCheck: (options?: { proxyAddr?: string; proxyType?: 'socks5' | 'http' }) => ipcRenderer.invoke('run-leak-check', assertLeakOptions(options)),
-  runStoreRepair: (action: string) => ipcRenderer.invoke('run-store-repair', assertString(action, 'action')),
-  runStoreDiagnostics: () => ipcRenderer.invoke('run-store-diagnostics'),
   runSystemDiagnostics: () => ipcRenderer.invoke('run-system-diagnostics'),
   getRoutingPlan: () => ipcRenderer.invoke('get-routing-plan'),
   applyBrowserLeakProtection: () => ipcRenderer.invoke('apply-browser-leak-protection'),
@@ -362,11 +361,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('renderer-log', assertEnum(level, ['debug', 'info', 'warn', 'error'] as const, 'level'), assertString(message, 'message', 16 * 1024)),
   getFullLogs: () => ipcRenderer.invoke('get-full-logs'),
   clearAppLog: () => ipcRenderer.invoke('clear-app-log'),
-  applyTunNetworkBaseline: () => ipcRenderer.invoke('apply-tun-network-baseline'),
+  clearDiagnosticArtifacts: () => ipcRenderer.invoke('clear-diagnostic-artifacts'),
   rollbackTunNetworkBaseline: () => ipcRenderer.invoke('rollback-tun-network-baseline'),
   disableFirewallKillSwitch: () => ipcRenderer.invoke('disable-firewall-kill-switch'),
   getFirewallKillSwitchStatus: () => ipcRenderer.invoke('get-firewall-kill-switch-status'),
-  firewallNuclearReset: () => ipcRenderer.invoke('firewall:nuclear-reset'),
+  firewallNuclearReset: (confirmationToken: string) => ipcRenderer.invoke('firewall:nuclear-reset', assertString(confirmationToken, 'confirmationToken', 80)),
+  firewallRepairHealth: () => ipcRenderer.invoke('firewall:repair-health'),
+  firewallRepairVpnteRules: () => ipcRenderer.invoke('firewall:repair-vpnte-rules'),
   detectForeignVpn: () => ipcRenderer.invoke('system:detect-foreign-vpn'),
   getLocationPrivacy: () => ipcRenderer.invoke('get-location-privacy'),
   applyLocationPrivacy: () => ipcRenderer.invoke('apply-location-privacy'),
@@ -454,6 +455,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   connectionHistoryStats: (period: 'day' | 'week' | 'month') => ipcRenderer.invoke('connection-history:stats', assertEnum(period, ['day', 'week', 'month'] as const, 'period')),
   connectionHistoryExportCsv: () => ipcRenderer.invoke('connection-history:export-csv'),
   connectionHistoryExportJson: () => ipcRenderer.invoke('connection-history:export-json'),
+  connectionHistoryClear: () => ipcRenderer.invoke('connection-history:clear'),
   // Traffic History
   trafficHistoryList: (vpnIp?: string) => ipcRenderer.invoke('traffic-history:list', assertOptionalString(vpnIp, 'vpnIp')),
   trafficHistoryClear: () => ipcRenderer.invoke('traffic-history:clear'),

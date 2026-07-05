@@ -90,7 +90,7 @@ import { generateSingboxConfig, parseProxyAddress } from './tunController'
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 interface SingboxConfig {
-  dns: { servers: Array<{ tag: string; type: string }> }
+  dns: { servers: Array<{ tag: string; type: string }>; final?: string }
   inbounds: Array<Record<string, any>>
   outbounds: Array<Record<string, any>>
   route: { rules: Array<Record<string, any>>; final: string }
@@ -206,19 +206,26 @@ describe('generateSingboxConfig port selection', () => {
 // ─── DNS bootstrap ────────────────────────────────────────────────────────────
 
 describe('generateSingboxConfig DNS bootstrap', () => {
-  it('adds a local bootstrap DNS server when the endpoint is a hostname', () => {
+  it('adds a bootstrap DNS server when the endpoint is a hostname', () => {
     const cfg = gen({ outbound: { ...plainTlsOutbound, server: 'sub.example.com' } })
     const tags = cfg.dns.servers.map((s) => s.tag)
     expect(tags).toContain('dns-bootstrap')
   })
 
-  it('uses local remote DNS bootstrap resolvers without invalid direct-out detours', () => {
+  it('uses direct UDP remote DNS bootstrap resolvers without invalid direct-out detours or local recursion', () => {
     const cfg = gen({ outbound: { ...plainTlsOutbound, server: 'sub.example.com' } })
     const bootstrapServers = (cfg.dns.servers as any[]).filter((s) => String(s.tag).startsWith('dns-remote-bootstrap'))
 
     expect(bootstrapServers).toHaveLength(2)
-    expect(bootstrapServers.every((s) => s.type === 'local')).toBe(true)
+    expect(bootstrapServers[0]).toMatchObject({ type: 'udp', server: '1.1.1.1' })
+    expect(bootstrapServers[1]).toMatchObject({ type: 'udp', server: '8.8.8.8' })
     expect(bootstrapServers.every((s) => s.detour === undefined)).toBe(true)
+  })
+
+  it('sets dns.final to dns-remote so app DNS never falls through to bootstrap', () => {
+    const cfg = gen({ outbound: { ...plainTlsOutbound, server: 'sub.example.com' } })
+    expect(cfg.dns.servers[0].tag).toBe('dns-remote-bootstrap')
+    expect(cfg.dns.final).toBe('dns-remote')
   })
 
   it('omits bootstrap DNS when the endpoint is a bare IP', () => {
@@ -389,39 +396,61 @@ describe('generateSingboxConfig DNS profile', () => {
     dnsState.active = null
   })
 
-  it('uses Cloudflare/Google UDP fallback when no profile is active', () => {
+  it('uses Cloudflare/Google DoH fallback when no profile is active', () => {
     dnsState.active = null
     const cfg = gen({ outbound: { ...plainTlsOutbound, server: '1.2.3.4' } })
     const remote = cfg.dns.servers.find((s: any) => s.tag === 'dns-remote') as any
-    expect(remote.server).toBe('1.1.1.1')
-    // DoT (tls) — the known-working tunnelled resolver. A DoH (https) attempt
-    // (F11) timed out almost every query through the Reality tunnel in the
-    // field and was reverted.
-    expect(remote.type).toBe('udp')
+    const backup = cfg.dns.servers.find((s: any) => s.tag === 'dns-backup') as any
+    expect(remote).toMatchObject({
+      type: 'https',
+      server: 'cloudflare-dns.com',
+      path: '/dns-query',
+      detour: 'proxy-out',
+      tls: { server_name: 'cloudflare-dns.com' }
+    })
+    expect(backup).toMatchObject({
+      type: 'https',
+      server: 'dns.google',
+      path: '/dns-query',
+      detour: 'proxy-out',
+      tls: { server_name: 'dns.google' }
+    })
   })
 
-  it('applies a plain DNS profile as udp servers through proxy-out', () => {
+  it('applies a plain DNS profile as tcp servers through proxy-out', () => {
     dnsState.active = { id: 'x', name: 'Quad9', primary: '9.9.9.9', secondary: '149.112.112.112', type: 'plain' }
     const cfg = gen({ outbound: { ...plainTlsOutbound, server: '1.2.3.4' } })
     const servers = cfg.dns.servers as any[]
     const remote = servers.find((s) => s.tag === 'dns-remote')
     const backup = servers.find((s) => s.tag === 'dns-backup')
-    expect(remote).toMatchObject({ type: 'udp', server: '9.9.9.9', detour: 'proxy-out' })
-    expect(backup).toMatchObject({ type: 'udp', server: '149.112.112.112', detour: 'proxy-out' })
+    expect(remote).toMatchObject({ type: 'tcp', server: '9.9.9.9', detour: 'proxy-out' })
+    expect(backup).toMatchObject({ type: 'tcp', server: '149.112.112.112', detour: 'proxy-out' })
   })
 
-  it('applies a DoH profile as https server with bare host', () => {
-    dnsState.active = { id: 'x', name: 'DoH', primary: 'https://dns.google/dns-query', type: 'doh' }
+  it('applies a DoH profile as https server preserving host, path, port and SNI', () => {
+    dnsState.active = { id: 'x', name: 'DoH', primary: 'https://dns.google:443/dns-query', type: 'doh' }
     const cfg = gen({ outbound: { ...plainTlsOutbound, server: '1.2.3.4' } })
     const remote = cfg.dns.servers.find((s: any) => s.tag === 'dns-remote') as any
-    expect(remote).toMatchObject({ type: 'https', server: 'dns.google', detour: 'proxy-out' })
+    expect(remote).toMatchObject({
+      type: 'https',
+      server: 'dns.google',
+      path: '/dns-query',
+      detour: 'proxy-out',
+      tls: { server_name: 'dns.google' }
+    })
   })
 
-  it('applies a DoT profile as tls server with bare host', () => {
-    dnsState.active = { id: 'x', name: 'DoT', primary: 'tls://dns.google', type: 'dot' }
+  it('applies a DoT profile as tls server preserving host, port and SNI', () => {
+    dnsState.active = { id: 'x', name: 'DoT', primary: 'tls://dns.google:853', type: 'dot' }
     const cfg = gen({ outbound: { ...plainTlsOutbound, server: '1.2.3.4' } })
     const remote = cfg.dns.servers.find((s: any) => s.tag === 'dns-remote') as any
-    expect(remote).toMatchObject({ type: 'tls', server: 'dns.google', detour: 'proxy-out' })
+    expect(remote).toMatchObject({
+      type: 'tls',
+      server: 'dns.google',
+      server_port: 853,
+      detour: 'proxy-out',
+      tls: { server_name: 'dns.google' }
+    })
   })
 
   it('keeps the dns-remote tag so default_domain_resolver resolves', () => {
@@ -459,6 +488,18 @@ describe('generateSingboxConfig domain routing', () => {
     const rules = cfg.route.rules
     const hasPrivateRule = rules.some((r: any) => Array.isArray(r.ip_cidr) && r.ip_cidr.includes('127.0.0.0/8'))
     expect(hasPrivateRule).toBe(false)
+  })
+
+  it('excludes the direct VPN server IP from TUN auto-route so the tunnel can dial its endpoint', () => {
+    const cfg = gen({ outbound: { ...plainTlsOutbound, server: '91.224.75.185' } })
+    const tunInbound = cfg.inbounds.find((i: any) => i.type === 'tun')
+    expect(tunInbound.route_exclude_address).toContain('91.224.75.185/32')
+  })
+
+  it('does not add a hostname VPN endpoint to route_exclude_address', () => {
+    const cfg = gen({ outbound: { ...plainTlsOutbound, server: 'example.com' } })
+    const tunInbound = cfg.inbounds.find((i: any) => i.type === 'tun')
+    expect(tunInbound.route_exclude_address).not.toContain('example.com/32')
   })
 
   it('adds no domain rules when the user has none', () => {

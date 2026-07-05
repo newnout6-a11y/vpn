@@ -35,6 +35,7 @@ import {
 } from './vpnProfiles'
 import { settingsStore } from './settings'
 import { tunController } from './tunController'
+import { ipMonitor } from './ipMonitor'
 import {
   serverGroups,
   ensureManualKeysGroup,
@@ -50,6 +51,8 @@ import type { ClientDevice, ServerProfile } from '../shared/ipc-types'
 // raw arg and don't want any cmd.exe to ever see it.
 const execFile = promisify(execFileCb)
 const CURL_BIN = process.platform === 'win32' ? 'curl.exe' : 'curl'
+
+const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 // ─── Persistent Store ────────────────────────────────────────────────────────
 
@@ -1552,6 +1555,7 @@ async function restartDirectVpnForSelectedProfile(profile: ServerProfile): Promi
 
   const settings = settingsStore.get()
   const vpnProfile = toVpnProfile(profile)
+  const previousIp = await ipMonitor.getCurrentIp().then((info) => info.ip).catch(() => null)
   logEvent('info', 'server-picker', 'hot-reloading direct VPN after profile selection', {
     id: profile.id,
     name: profile.name,
@@ -1562,7 +1566,7 @@ async function restartDirectVpnForSelectedProfile(profile: ServerProfile): Promi
   if (!stopped.success) {
     throw new Error(stopped.error || 'Failed to stop tunnel before server switch')
   }
-  await new Promise((resolve) => setTimeout(resolve, 500))
+  await wait(500)
   const started = await tunController.start({
     mode: 'directVpn',
     vpnProfile,
@@ -1575,6 +1579,38 @@ async function restartDirectVpnForSelectedProfile(profile: ServerProfile): Promi
   if (!started.success) {
     throw new Error(started.error || 'Failed to start tunnel with selected server')
   }
+
+  ipMonitor.resume()
+  for (let attempt = 1; attempt <= 6; attempt++) {
+    try {
+      const current = await ipMonitor.getCurrentIp()
+      const shouldRebaseline = Boolean(current.ip && (current.ip !== previousIp || attempt === 6))
+      if (shouldRebaseline) {
+        const ipInfo = await ipMonitor.recheck(true)
+        logEvent('info', 'server-picker', 'direct VPN IP baseline refreshed after profile switch', {
+          id: profile.id,
+          name: profile.name,
+          ip: ipInfo.ip,
+          previousIp,
+          attempt
+        })
+        return
+      }
+    } catch (err) {
+      logEvent('warn', 'server-picker', 'direct VPN IP rebaseline after profile switch failed', {
+        id: profile.id,
+        name: profile.name,
+        attempt,
+        error: (err as Error)?.message || String(err)
+      })
+    }
+    await wait(500)
+  }
+
+  logEvent('warn', 'server-picker', 'direct VPN profile switch finished without a fresh public IP baseline', {
+    id: profile.id,
+    name: profile.name
+  })
 }
 
 /**

@@ -1,6 +1,7 @@
 import { existsSync } from 'fs'
 import * as fsp from 'fs/promises'
 import { join } from 'path'
+import { app } from 'electron'
 
 export type TrafficForensicsSummaryEngine = 'pktmon' | 'netsh'
 
@@ -275,6 +276,26 @@ function looksPhysical(value: string, tunnelAliases?: Set<string>): boolean {
   if (looksTunnel(value, tunnelAliases)) return false
   if (/vethernet|hyper-?v|wsl|virtual switch|vmware|virtualbox|docker/i.test(value)) return false
   return /ethernet|wi-?fi|wireless|realtek|intel|qualcomm|mediatek|killer|physical|lan/i.test(value)
+}
+
+async function readRuntimeTunnelAliases(): Promise<Set<string>> {
+  const aliases = new Set<string>()
+  try {
+    const runtimeConfigPath = join(app.getPath('userData'), 'tun-runtime', 'sing-box.json')
+    const text = await readTextIfExists(runtimeConfigPath)
+    if (!text) return aliases
+    const config = JSON.parse(text)
+    const inbounds = Array.isArray(config?.inbounds) ? config.inbounds : []
+    for (const inbound of inbounds) {
+      if (inbound?.type !== 'tun') continue
+      if (typeof inbound.interface_name === 'string' && inbound.interface_name.trim()) {
+        aliases.add(inbound.interface_name.trim().toLowerCase())
+      }
+    }
+  } catch {
+    // Best-effort only; adapter artifacts below can still identify tunnel names.
+  }
+  return aliases
 }
 
 function parseSnapshotRows(text: string): any[] {
@@ -858,7 +879,7 @@ export async function generateTrafficForensicsSummary(manifest: TrafficForensics
   }
 
   const files = await listTrafficForensicsArtifacts(manifest.sessionDir)
-  const tunnelAliases = new Set<string>()
+  const tunnelAliases = await readRuntimeTunnelAliases()
   for (const file of files) {
     if (file.name.includes('adapters') && file.name.endsWith('.txt')) {
       try {

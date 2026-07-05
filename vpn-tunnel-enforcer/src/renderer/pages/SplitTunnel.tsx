@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Search, FolderOpen, Trash2, TerminalSquare, Plus } from 'lucide-react'
+import { AnimatePresence, motion } from 'framer-motion'
+import { Search, FolderOpen, Trash2, TerminalSquare, Plus, Loader2 } from 'lucide-react'
 import { MacCard, MacInput, MacButton, MacBadge } from '../design-system'
 import { PageTip } from '../components/PageTip'
 import { useAppStore } from '../store'
@@ -22,6 +23,7 @@ export function SplitTunnel() {
   const [addingApp, setAddingApp] = useState(false)
   const [cmdName, setCmdName] = useState('')
   const [addingCmd, setAddingCmd] = useState(false)
+  const [pendingRuleById, setPendingRuleById] = useState<Record<string, Rule>>({})
 
   // Fetch apps from main process on mount
   useEffect(() => {
@@ -47,6 +49,10 @@ export function SplitTunnel() {
 
   // Handle rule change for an app
   const handleRuleChange = useCallback(async (appId: string, rule: Rule) => {
+    const current = apps.find((app) => app.id === appId)
+    if (!current || current.rule === rule || pendingRuleById[appId]) return
+
+    setPendingRuleById((prev) => ({ ...prev, [appId]: rule }))
     try {
       await window.electronAPI.splitTunnelSetRule(appId, rule)
       setApps((prev) =>
@@ -55,8 +61,14 @@ export function SplitTunnel() {
     } catch (err: any) {
       console.error('Failed to set split tunnel rule:', err)
       useAppStore.getState().addGlobalToast('error', 'Ошибка', `Не удалось изменить правило: ${err?.message || err}`)
+    } finally {
+      setPendingRuleById((prev) => {
+        const next = { ...prev }
+        delete next[appId]
+        return next
+      })
     }
-  }, [])
+  }, [apps, pendingRuleById])
 
   // Handle adding an app via file dialog
   const handleAddApp = useCallback(async () => {
@@ -212,17 +224,27 @@ export function SplitTunnel() {
           {search.trim() ? t('common.noResults') : t('splitTunneling.noApps')}
         </div>
       ) : (
-        <div className="space-y-2">
-          {filteredApps.map((app) => (
-            <AppRow
-              key={app.id}
-              app={app}
-              onRuleChange={handleRuleChange}
-              onRemove={handleRemoveApp}
-              t={t}
-            />
-          ))}
-        </div>
+        <MacCard className="!p-0 overflow-hidden">
+          <div className="hidden sm:grid grid-cols-[minmax(0,1fr)_minmax(260px,320px)_40px] gap-3 px-4 py-2.5 border-b border-[var(--color-border)]/70 text-[11px] font-medium uppercase tracking-wide text-[var(--color-text-secondary)]">
+            <span>Приложение</span>
+            <span>Маршрут</span>
+            <span className="sr-only">Действия</span>
+          </div>
+          <div className="divide-y divide-[var(--color-border)]/60">
+            <AnimatePresence initial={false}>
+              {filteredApps.map((app) => (
+                <AppRow
+                  key={app.id}
+                  app={app}
+                  pendingRule={pendingRuleById[app.id]}
+                  onRuleChange={handleRuleChange}
+                  onRemove={handleRemoveApp}
+                  t={t}
+                />
+              ))}
+            </AnimatePresence>
+          </div>
+        </MacCard>
       )}
     </div>
   )
@@ -232,69 +254,105 @@ export function SplitTunnel() {
 
 interface AppRowProps {
   app: SplitTunnelApp
+  pendingRule?: Rule
   onRuleChange: (appId: string, rule: Rule) => void
   onRemove: (appId: string) => void
   t: (key: string) => string
 }
 
-const RULES: { value: Rule; labelKey: string; variant: 'info' | 'success' | 'neutral' }[] = [
-  { value: 'vpn', labelKey: 'splitTunneling.ruleVpn', variant: 'info' },
-  { value: 'direct', labelKey: 'splitTunneling.ruleDirect', variant: 'success' },
-  { value: 'none', labelKey: 'splitTunneling.ruleNone', variant: 'neutral' },
+const RULES: { value: Rule; labelKey: string; hint: string; activeClass: string }[] = [
+  {
+    value: 'vpn',
+    labelKey: 'splitTunneling.ruleVpn',
+    hint: 'Через VPN',
+    activeClass: 'bg-[var(--color-accent)] text-white shadow-sm'
+  },
+  {
+    value: 'direct',
+    labelKey: 'splitTunneling.ruleDirect',
+    hint: 'Мимо VPN',
+    activeClass: 'bg-[var(--color-success)] text-white shadow-sm'
+  },
+  {
+    value: 'none',
+    labelKey: 'splitTunneling.ruleNone',
+    hint: 'Без правила',
+    activeClass: 'bg-[var(--color-border-strong)] text-[var(--color-text)]'
+  },
 ]
 
-function AppRow({ app, onRuleChange, onRemove, t }: AppRowProps) {
+function AppRow({ app, pendingRule, onRuleChange, onRemove, t }: AppRowProps) {
   const isProcess = app.kind === 'process'
+  const displayedRule = pendingRule ?? app.rule
+  const isPending = !!pendingRule
   return (
-    <MacCard className="flex items-center gap-4 !p-3">
+    <motion.div
+      layout
+      initial={{ opacity: 0, y: 6 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: -6 }}
+      transition={{ duration: 0.16, ease: 'easeOut' }}
+      className={`grid grid-cols-[minmax(0,1fr)_auto] sm:grid-cols-[minmax(0,1fr)_minmax(260px,320px)_40px] items-center gap-3 px-4 py-3 transition-colors duration-150 ${
+        isPending ? 'bg-[var(--color-accent)]/5' : 'hover:bg-[var(--color-border)]/25'
+      }`}
+    >
       {/* App icon (terminal glyph for command/process entries) */}
-      <div className="w-9 h-9 rounded-[var(--radius-sm)] bg-[var(--color-border)] flex items-center justify-center shrink-0 overflow-hidden">
-        {isProcess ? (
-          <TerminalSquare className="w-5 h-5 text-[var(--color-accent)]" />
-        ) : app.icon ? (
-          <img
-            src={`data:image/png;base64,${app.icon}`}
-            alt={app.name}
-            className="w-7 h-7 object-contain"
-          />
-        ) : (
-          <span className="text-xs font-semibold text-[var(--color-text-secondary)]">
-            {app.name.charAt(0).toUpperCase()}
-          </span>
-        )}
-      </div>
-
-      {/* App info */}
-      <div className="flex-1 min-w-0">
-        <div className="text-sm font-medium text-[var(--color-text)] truncate flex items-center gap-2">
-          {app.name}
-          {isProcess && (
-            <MacBadge variant="info" className="!text-[10px] !px-1.5 !py-0">
-              {t('splitTunneling.commandTag')}
-            </MacBadge>
+      <div className="min-w-0 flex items-center gap-3">
+        <div className="w-9 h-9 rounded-[var(--radius-sm)] bg-[var(--color-border)] flex items-center justify-center shrink-0 overflow-hidden">
+          {isProcess ? (
+            <TerminalSquare className="w-5 h-5 text-[var(--color-accent)]" />
+          ) : app.icon ? (
+            <img
+              src={`data:image/png;base64,${app.icon}`}
+              alt={app.name}
+              className="w-7 h-7 object-contain"
+            />
+          ) : (
+            <span className="text-xs font-semibold text-[var(--color-text-secondary)]">
+              {app.name.charAt(0).toUpperCase()}
+            </span>
           )}
         </div>
-        <div className="text-xs text-[var(--color-text-secondary)] truncate">
-          {isProcess ? t('splitTunneling.commandSubtitle') : app.path}
+
+        {/* App info */}
+        <div className="min-w-0">
+          <div className="text-sm font-medium text-[var(--color-text)] truncate flex items-center gap-2">
+            <span className="truncate" title={app.name}>{app.name}</span>
+            {isProcess && (
+              <MacBadge variant="info" className="!text-[10px] !px-1.5 !py-0 shrink-0">
+                {t('splitTunneling.commandTag')}
+              </MacBadge>
+            )}
+          </div>
+          <div
+            className="text-xs text-[var(--color-text-secondary)] truncate"
+            title={isProcess ? t('splitTunneling.commandSubtitle') : app.path}
+          >
+            {isProcess ? t('splitTunneling.commandSubtitle') : app.path}
+          </div>
         </div>
       </div>
 
       {/* Rule selector */}
-      <div className="flex items-center gap-1.5 shrink-0">
-        {RULES.map(({ value, labelKey, variant }) => (
+      <div className="col-span-2 sm:col-span-1 justify-self-stretch sm:justify-self-auto flex items-center rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[var(--color-card)]/70 p-0.5">
+        {RULES.map(({ value, labelKey, hint, activeClass }) => (
           <button
             key={value}
+            type="button"
             onClick={() => onRuleChange(app.id, value)}
-            className="focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)] rounded-full"
+            disabled={isPending}
+            title={hint}
+            aria-pressed={displayedRule === value}
+            className={`relative flex-1 px-2.5 py-1.5 text-xs font-medium rounded-[calc(var(--radius-sm)-2px)] transition-all duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)] disabled:cursor-wait ${
+              displayedRule === value
+                ? activeClass
+                : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text)] hover:bg-[var(--color-border)]/45'
+            }`}
           >
-            <MacBadge
-              variant={app.rule === value ? variant : 'neutral'}
-              className={`cursor-pointer transition-opacity duration-150 ${
-                app.rule === value ? 'opacity-100' : 'opacity-50 hover:opacity-75'
-              }`}
-            >
+            <span className="inline-flex items-center justify-center gap-1.5">
+              {pendingRule === value && <Loader2 className="w-3 h-3 animate-spin" />}
               {t(labelKey)}
-            </MacBadge>
+            </span>
           </button>
         ))}
       </div>
@@ -302,11 +360,12 @@ function AppRow({ app, onRuleChange, onRemove, t }: AppRowProps) {
       {/* Remove button */}
       <button
         onClick={() => onRemove(app.id)}
-        className="p-1.5 rounded-[var(--radius-sm)] text-[var(--color-text-secondary)] hover:text-[var(--color-danger)] hover:bg-[var(--color-danger)]/10 transition-colors duration-150 shrink-0"
+        disabled={isPending}
+        className="justify-self-end p-1.5 rounded-[var(--radius-sm)] text-[var(--color-text-secondary)] hover:text-[var(--color-danger)] hover:bg-[var(--color-danger)]/10 transition-colors duration-150 shrink-0 disabled:opacity-45 disabled:cursor-wait"
         title={t('common.remove')}
       >
         <Trash2 className="w-4 h-4" />
       </button>
-    </MacCard>
+    </motion.div>
   )
 }

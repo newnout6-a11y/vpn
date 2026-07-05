@@ -244,6 +244,7 @@ export function Servers() {
   const [exportFlash, setExportFlash] = useState<Record<string, 'copied' | 'saved' | 'failed'>>({})
   const [exportingAll, setExportingAll] = useState(false)
   const [expandedIds, setExpandedIds] = useState<Set<string>>(() => readExpandedIds())
+  const [switchingId, setSwitchingId] = useState<string | null>(null)
 
   // Per-group-runtime UI state.
   const [refreshingGroups, setRefreshingGroups] = useState<Record<string, boolean>>({})
@@ -567,12 +568,16 @@ export function Servers() {
   // ─── Select / Remove / Export ───────────────────────────────────────────
 
   const handleSelect = async (id: string) => {
+    if (id === activeId || switchingId) return
+    setSwitchingId(id)
     try {
       await window.electronAPI.serversSelect(id)
       setActiveId(id)
       emitServerChanged()
     } catch (err) {
       console.error('Select failed:', err)
+    } finally {
+      setSwitchingId(null)
     }
   }
 
@@ -1053,6 +1058,7 @@ export function Servers() {
                 isCheckingHealth={!!healthCheckingGroups[group.id]}
                 healthByProfile={healthByProfile}
                 activeId={activeId}
+                switchingId={switchingId}
                 perRowPings={perRowPings}
                 verifyingCountryById={verifyingCountryById}
                 exportFlash={exportFlash}
@@ -1169,6 +1175,7 @@ interface GroupCardProps {
   isCheckingHealth: boolean
   healthByProfile: Record<string, HealthRow>
   activeId: string | null
+  switchingId: string | null
   perRowPings: Record<string, PerRowPing>
   verifyingCountryById: Record<string, boolean>
   exportFlash: Record<string, 'copied' | 'saved' | 'failed'>
@@ -1204,6 +1211,7 @@ function GroupCard(props: GroupCardProps) {
     isCheckingHealth,
     healthByProfile,
     activeId,
+    switchingId,
     perRowPings,
     verifyingCountryById,
     exportFlash,
@@ -1390,6 +1398,8 @@ function GroupCard(props: GroupCardProps) {
                             profile={profile}
                             group={isVirtual ? null : group}
                             isActive={profile.id === activeId}
+                            isSwitching={profile.id === switchingId}
+                            switchingLocked={!!switchingId}
                             perRowPing={perRowPings[profile.id]}
                             verifyingCountry={!!verifyingCountryById[profile.id]}
                             health={healthByProfile[profile.id]}
@@ -1530,6 +1540,8 @@ interface ServerProfileCardProps {
   profile: ServerProfile
   group: ServerGroup | null
   isActive: boolean
+  isSwitching?: boolean
+  switchingLocked?: boolean
   perRowPing?: PerRowPing
   health?: HealthRow
   exportFlash?: 'copied' | 'saved' | 'failed'
@@ -1547,6 +1559,8 @@ function ServerProfileCard({
   profile,
   group,
   isActive,
+  isSwitching,
+  switchingLocked,
   perRowPing,
   health,
   exportFlash,
@@ -1565,6 +1579,7 @@ function ServerProfileCard({
   const flag = countryFlagFromCountryOrName(country, profile.name)
   const ping = displayedServerPing(profile, perRowPing)
   const stealthBadge = profileStealthBadge(profile)
+  const isSelectDisabled = isActive || isSwitching || switchingLocked
 
   // Stale-from-subscription marker: lastSeenInSubscriptionAt is older than
   // group.lastFetchedAt by at least one minute. The fields are optional —
@@ -1580,16 +1595,41 @@ function ServerProfileCard({
     group.lastFetchedAt - lastSeen >= 60_000
 
   return (
-    <MacCard
-      hoverable
+    <motion.div
+      layout
+      initial={false}
+      animate={{
+        scale: isSwitching ? 0.992 : 1
+      }}
+      transition={{ duration: 0.18, ease: 'easeOut' }}
+    >
+      <MacCard
+      hoverable={!isSwitching}
       className={
-        '!p-3 cursor-pointer ' +
-        (isActive ? '!border-[var(--color-accent)] ring-1 ring-[var(--color-accent)]/30' : '')
+        '!p-3 cursor-pointer relative overflow-hidden ' +
+        (isActive || isSwitching ? '!border-[var(--color-accent)] ring-1 ring-[var(--color-accent)]/30 ' : '') +
+        (isSwitching ? 'shadow-[var(--shadow-card-hover)] ' : '')
       }
       onClick={() => onOpenDetail(profile)}
     >
+      <AnimatePresence>
+        {isSwitching && (
+          <motion.div
+            key="switching-wash"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.16 }}
+            className="pointer-events-none absolute inset-0 bg-[var(--color-accent)]/5"
+          />
+        )}
+      </AnimatePresence>
       <div className="flex items-center gap-3">
-        <MacBadge variant={statusVariant(profile.status)} dot pulse={profile.status === 'online'} />
+        <MacBadge
+          variant={isSwitching ? 'info' : statusVariant(profile.status)}
+          dot
+          pulse={isSwitching || profile.status === 'online'}
+        />
         <span
           className="text-lg leading-none flex-shrink-0 select-none"
           aria-hidden="true"
@@ -1607,9 +1647,31 @@ function ServerProfileCard({
                 {t('servers.groups.removedFromSub')}
               </MacBadge>
             )}
-            {isActive && (
-              <MacBadge variant="success">{t('servers.active')}</MacBadge>
-            )}
+            <AnimatePresence mode="wait" initial={false}>
+              {isSwitching ? (
+                <motion.span
+                  key="switching"
+                  initial={{ opacity: 0, y: -3 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: 3 }}
+                  transition={{ duration: 0.14 }}
+                >
+                  <MacBadge variant="info" pulse>
+                    {t('servers.switching', 'Переключение')}
+                  </MacBadge>
+                </motion.span>
+              ) : isActive ? (
+                <motion.span
+                  key="active"
+                  initial={{ opacity: 0, y: -3 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: 3 }}
+                  transition={{ duration: 0.14 }}
+                >
+                  <MacBadge variant="success">{t('servers.active')}</MacBadge>
+                </motion.span>
+              ) : null}
+            </AnimatePresence>
             <MacBadge variant="neutral" className="!text-[10px]">
               {clientDeviceLabel(profile.clientDevice)}
             </MacBadge>
@@ -1742,14 +1804,22 @@ function ServerProfileCard({
           <MacButton
             size="sm"
             variant={isActive ? 'secondary' : 'primary'}
-            disabled={isActive}
+            disabled={isSelectDisabled}
             onClick={(e) => {
               e.stopPropagation()
               if (!isActive) onSelect(profile.id)
             }}
           >
-            <Check className="w-3.5 h-3.5 mr-1" />
-            {isActive ? t('servers.selected') : t('servers.select')}
+            {isSwitching ? (
+              <Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" />
+            ) : (
+              <Check className="w-3.5 h-3.5 mr-1" />
+            )}
+            {isSwitching
+              ? t('servers.switchingShort', 'Идёт...')
+              : isActive
+                ? t('servers.selected')
+                : t('servers.select')}
           </MacButton>
           <MacButton
             size="sm"
@@ -1764,6 +1834,7 @@ function ServerProfileCard({
         </div>
       </div>
     </MacCard>
+    </motion.div>
   )
 }
 

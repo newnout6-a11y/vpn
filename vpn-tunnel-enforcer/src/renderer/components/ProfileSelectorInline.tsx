@@ -42,6 +42,7 @@ function groupBadgeVariant(status: ServerGroup['status']): BadgeVariant {
 export function ProfileSelectorInline() {
   const { t } = useTranslation()
   const addLog = useAppStore(s => s.addLog)
+  const setServerSwitchingName = useAppStore(s => s.setServerSwitchingName)
   // We branch the ping UX on this: when the tunnel is up the result reflects
   // round-trip through the active outbound, *not* per-server latency, so we
   // surface different copy ("Тоннель: 87 ms" vs "Сервер: 87 ms") to avoid
@@ -170,16 +171,20 @@ export function ProfileSelectorInline() {
     setOpen(false)
     if (id === current?.id) return
     const wasConnected = tunRunning
+    const profile = profiles.find(p => p.id === id)
+    const profileName = profile?.name ?? id
+    if (wasConnected && connectionMode === 'directVpn') {
+      setServerSwitchingName(profileName)
+    }
     setActiveId(id)
     setPingMs(null)
     try {
       await window.electronAPI.serversSelect(id)
-      const profile = profiles.find(p => p.id === id)
-      addLog('info', `Сервер выбран: ${profile?.name ?? id}`)
+      addLog('info', `Сервер выбран: ${profileName}`)
       emitServerChanged()
       if (wasConnected && connectionMode === 'directVpn') {
-        addLog('info', `Переподключаемся через новый сервер: ${profile?.name ?? id}…`)
-        useAppStore.getState().addGlobalToast('info', 'Переподключение', `Через ${profile?.name ?? id}`)
+        addLog('info', `Переподключаемся через новый сервер: ${profileName}…`)
+        useAppStore.getState().addGlobalToast('info', 'Переподключение', `Через ${profileName}`)
       }
       if (profile) {
         const gid = (profile as ServerProfile & { groupId?: string }).groupId
@@ -195,6 +200,10 @@ export function ProfileSelectorInline() {
       addLog('error', `Не удалось выбрать сервер: ${err.message}`)
       // Roll back optimistic state
       refresh()
+    } finally {
+      if (wasConnected && connectionMode === 'directVpn') {
+        setServerSwitchingName(null)
+      }
     }
   }
 

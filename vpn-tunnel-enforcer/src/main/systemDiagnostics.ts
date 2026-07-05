@@ -9,7 +9,6 @@ import { getRoutingPlan } from './connectionPlanner'
 import { runLeakCheck, type CheckStatus } from './leakDiagnostics'
 import { settingsStore } from './settings'
 import { describeVpnProfileCapabilities, redactSensitiveText, redactSettingsForDiagnostics } from './vpnProfiles'
-import { runStoreDiagnostics } from './storeDiagnostics'
 import { getSmartRouteRuleSetState } from './ruleSetManager'
 import { getTrafficForensicsStatus } from './trafficForensics'
 import { getTunRuntimeDir, parseProxyAddress, probeTcp, tunController } from './tunController'
@@ -736,18 +735,6 @@ export function buildActiveProfileDiagnosticItems(activeProfile: ServerProfile |
   ]
 }
 
-async function getStoreItems(): Promise<SystemDiagnosticItem[]> {
-  const store = await runStoreDiagnostics()
-  return store.items.map((row: any) => ({
-    id: `store-${row.id}`,
-    category: 'Store',
-    label: row.label,
-    status: row.status,
-    value: row.value,
-    details: row.details
-  }))
-}
-
 async function getTrafficForensicsItems(): Promise<SystemDiagnosticItem[]> {
   const status = await getTrafficForensicsStatus()
   if (!status.enabled) {
@@ -819,8 +806,7 @@ export async function runSystemDiagnostics(): Promise<SystemDiagnosticResult> {
     getTrafficForensicsItems(),
     getSmartRouteRuleSetItems(),
     buildActiveProfileDiagnosticItems(),
-    getRoutingItems(),
-    getStoreItems()
+    getRoutingItems()
   ])
 
   const items = itemGroups.flat()

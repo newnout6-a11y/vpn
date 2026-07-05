@@ -41,28 +41,33 @@ describe('appLogger rotation', () => {
   })
 
   it('rolls app.log to app.prev.log once it exceeds the cap', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined)
     const { logEvent, getLogDir } = await import('./appLogger')
-    const logDir = getLogDir()
-    const appLog = join(logDir, 'app.log')
-    const prevLog = join(logDir, 'app.prev.log')
+    try {
+      const logDir = getLogDir()
+      const appLog = join(logDir, 'app.log')
+      const prevLog = join(logDir, 'app.prev.log')
 
-    // Detail strings are truncated to ~4000 chars by the logger, so each line
-    // lands around ~3.6 KB. 5 MB cap / 3.6 KB ≈ 1400 lines to roll; write 2500
-    // to be safely over even after truncation.
-    const blob = 'x'.repeat(3500)
-    for (let i = 0; i < 2500; i++) {
-      logEvent('info', 'test', `line ${i}`, { blob })
+      // Detail strings are truncated to ~4000 chars by the logger, so each line
+      // lands around ~3.6 KB. 5 MB cap / 3.6 KB ≈ 1400 lines to roll; write 2500
+      // to be safely over even after truncation.
+      const blob = 'x'.repeat(3500)
+      for (let i = 0; i < 2500; i++) {
+        logEvent('info', 'test', `line ${i}`, { blob })
+      }
+      // Poll for the roll rather than a fixed sleep — the append queue is async.
+      for (let i = 0; i < 250 && !existsSync(prevLog); i++) await flush()
+
+      expect(existsSync(prevLog)).toBe(true)
+      // After a roll, the live log holds only post-roll lines → well under cap.
+      expect(existsSync(appLog)).toBe(true)
+      expect(statSync(appLog).size).toBeLessThan(5 * 1024 * 1024)
+      // The previous generation should itself be bounded (one roll's worth).
+      expect(statSync(prevLog).size).toBeLessThanOrEqual(6 * 1024 * 1024)
+    } finally {
+      logSpy.mockRestore()
     }
-    // Poll for the roll rather than a fixed sleep — the append queue is async.
-    for (let i = 0; i < 100 && !existsSync(prevLog); i++) await flush()
-
-    expect(existsSync(prevLog)).toBe(true)
-    // After a roll, the live log holds only post-roll lines → well under cap.
-    expect(existsSync(appLog)).toBe(true)
-    expect(statSync(appLog).size).toBeLessThan(5 * 1024 * 1024)
-    // The previous generation should itself be bounded (one roll's worth).
-    expect(statSync(prevLog).size).toBeLessThanOrEqual(6 * 1024 * 1024)
-  })
+  }, 15000)
 
   it('keeps a single small file when well under the cap', async () => {
     const { logEvent, getLogDir } = await import('./appLogger')

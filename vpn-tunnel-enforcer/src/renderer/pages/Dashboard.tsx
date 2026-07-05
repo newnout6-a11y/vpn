@@ -96,6 +96,7 @@ export function Dashboard() {
   const routingHealth = useAppStore(s => s.routingHealth)
   const leakChecks = useAppStore(s => s.leakChecks)
   const restartingProgress = useAppStore(s => s.restartingProgress)
+  const serverSwitchingName = useAppStore(s => s.serverSwitchingName)
 
   // Store actions
   const setMode = useAppStore(s => s.setMode)
@@ -115,6 +116,7 @@ export function Dashboard() {
   const setConnectionBusy = useAppStore(s => s.setConnectionBusy)
   const connecting = connectionBusy === 'connecting'
   const disconnecting = connectionBusy === 'disconnecting'
+  const isServerSwitching = Boolean(serverSwitchingName)
 
   // Local state
   const [toasts, setToasts] = useState<ToastData[]>([])
@@ -181,6 +183,7 @@ export function Dashboard() {
   // ─── Connection logic ───────────────────────────────────────────────────
 
   const isBusy = connecting || disconnecting
+  const circleBusy = isBusy || isServerSwitching
   const isConnected = tunRunning
 
   const proxyAddr = settings.connectionMode === 'directVpn'
@@ -341,7 +344,8 @@ export function Dashboard() {
 
   // ─── Kill-switch disengage ──────────────────────────────────────────────
 
-  const showKillSwitchBanner = firewallKillSwitchActive && !tunRunning
+  const visibleLeak = isLeak && !isServerSwitching
+  const showKillSwitchBanner = firewallKillSwitchActive && !tunRunning && !isServerSwitching && !connecting && !disconnecting && !restartingProgress
   const competingTun = useAppStore(s => s.competingTun)
 
   const handleDisengageKillSwitch = async () => {
@@ -377,7 +381,7 @@ export function Dashboard() {
     if (!confirmed) return
     setNuclearResetting(true)
     try {
-      const result = await window.electronAPI.firewallNuclearReset()
+      const result = await window.electronAPI.firewallNuclearReset('RESET_WINDOWS_FIREWALL_CONFIRMED')
       if (result.success) {
         setFirewallKillSwitchActive(false)
         showToast('info', 'Firewall сброшен', result.message)
@@ -439,6 +443,7 @@ export function Dashboard() {
   const statusLabel = (() => {
     if (connecting) return t('dashboard.connecting')
     if (disconnecting) return t('dashboard.disconnecting', 'Отключение...')
+    if (isServerSwitching) return `Переключение сервера${serverSwitchingName ? `: ${serverSwitchingName}` : '...'}`
     if (restartingProgress) return `Перезапуск ${restartingProgress}`
     if (isConnected && proxyDown) return 'Сервер не отвечает — трафик заблокирован'
     if (isConnected) return t('dashboard.connected')
@@ -446,7 +451,7 @@ export function Dashboard() {
   })()
 
   const statusColor = (() => {
-    if (connecting || disconnecting || restartingProgress) return 'text-[var(--color-warning)]'
+    if (connecting || disconnecting || restartingProgress || isServerSwitching) return 'text-[var(--color-warning)]'
     if (isConnected && proxyDown) return 'text-[var(--color-warning)]'
     if (isConnected) return 'text-[var(--color-success)]'
     return 'text-[var(--color-text-secondary)]'
@@ -562,7 +567,9 @@ export function Dashboard() {
         <div className="absolute inset-0 pointer-events-none opacity-50"
           style={{
             background: isConnected
-              ? 'radial-gradient(ellipse 60% 60% at 50% 50%, rgb(var(--rgb-success) / 0.08), transparent)'
+              ? isServerSwitching
+                ? 'radial-gradient(ellipse 60% 60% at 50% 50%, rgb(var(--rgb-warning) / 0.10), transparent)'
+                : 'radial-gradient(ellipse 60% 60% at 50% 50%, rgb(var(--rgb-success) / 0.08), transparent)'
               : 'radial-gradient(ellipse 60% 60% at 50% 50%, rgb(var(--rgb-accent) / 0.06), transparent)'
           }}
         />
@@ -582,21 +589,39 @@ export function Dashboard() {
             setConfirmDisconnect(false)
             handleToggleChange(!isConnected)
           }}
-          disabled={isBusy}
-          whileHover={!isBusy ? { scale: 1.03 } : {}}
-          whileTap={!isBusy ? { scale: 0.97 } : {}}
+          disabled={circleBusy}
+          whileHover={!circleBusy ? { scale: 1.03 } : {}}
+          whileTap={!circleBusy ? { scale: 0.97 } : {}}
           aria-label={statusLabel}
+          animate={isServerSwitching ? { scale: [1, 1.025, 1] } : { scale: 1 }}
+          transition={isServerSwitching ? { duration: 1.2, repeat: Infinity, ease: 'easeInOut' } : { duration: 0.2 }}
           className={`
             relative w-36 h-36 rounded-full flex items-center justify-center z-10
             transition-all duration-300 ease-out
-            ${isConnected
+            ${isServerSwitching
+              ? 'bg-[var(--color-warning)] shadow-[0_0_60px_rgb(var(--rgb-warning)/0.32),0_8px_32px_rgba(0,0,0,0.25)]'
+              : isConnected
               ? 'bg-[var(--color-success)] shadow-[0_0_60px_rgb(var(--rgb-success)/0.35),0_8px_32px_rgba(0,0,0,0.25)]'
               : 'bg-[var(--color-accent)] shadow-[0_0_40px_rgb(var(--rgb-accent)/0.2),0_8px_32px_rgba(0,0,0,0.25)]'
             }
-            ${isBusy ? 'opacity-70 cursor-wait' : 'cursor-pointer'}
+            ${circleBusy ? 'opacity-80 cursor-wait' : 'cursor-pointer'}
           `}
         >
-          {isConnected && (
+          {isServerSwitching && (
+            <>
+              <motion.div
+                className="absolute inset-[-10px] rounded-full border border-[var(--color-warning)]/35"
+                animate={{ scale: [0.95, 1.18, 0.95], opacity: [0.65, 0.08, 0.65] }}
+                transition={{ duration: 1.35, repeat: Infinity, ease: 'easeOut' }}
+              />
+              <motion.div
+                className="absolute inset-2 rounded-full bg-white/10"
+                animate={{ rotate: 360 }}
+                transition={{ duration: 1.4, repeat: Infinity, ease: 'linear' }}
+              />
+            </>
+          )}
+          {isConnected && !isServerSwitching && (
             <motion.div
               className="absolute inset-0 rounded-full bg-[var(--color-success)]"
               animate={{ scale: [1, 1.15, 1], opacity: [0.5, 0, 0.5] }}
@@ -604,7 +629,7 @@ export function Dashboard() {
             />
           )}
           <div className="relative z-10">
-            {isBusy ? (
+            {circleBusy ? (
               <Loader2 size={56} className="text-white animate-spin" />
             ) : (
               <Power size={56} className="text-white" strokeWidth={2.5} />
@@ -653,7 +678,7 @@ export function Dashboard() {
         {/* Connection info chips */}
         {isConnected && (
           <div className="flex flex-wrap items-center justify-center gap-2 text-xs">
-            {publicIp && !isLeak && vpnIp && publicIp === vpnIp ? (
+            {publicIp && !visibleLeak && vpnIp && publicIp === vpnIp ? (
               <span className="flex items-center gap-1.5 rounded-full bg-[var(--color-success)]/10 px-3 py-1.5 text-[var(--color-success)]">
                 <CheckCircle2 className="w-3.5 h-3.5" />
                 {ipGeo.country && (
@@ -666,7 +691,7 @@ export function Dashboard() {
                   </span>
                 )}
               </span>
-            ) : publicIp && isLeak ? (
+            ) : publicIp && visibleLeak ? (
               <span className="flex items-center gap-1.5 rounded-full bg-[var(--color-danger)]/10 px-3 py-1.5 text-[var(--color-danger)]">
                 <AlertTriangle className="w-3.5 h-3.5" />
                 <span className="font-mono">{publicIp}</span>
@@ -702,7 +727,7 @@ export function Dashboard() {
       </MacCard>
 
       {/* Leak warning banner */}
-      {isLeak && (
+      {visibleLeak && (
         <MacCard className="!border-[var(--color-danger)]/40 !bg-[var(--color-danger)]/10">
           <div className="flex items-center gap-3">
             <ShieldOff className="w-6 h-6 text-[var(--color-danger)] flex-shrink-0" />

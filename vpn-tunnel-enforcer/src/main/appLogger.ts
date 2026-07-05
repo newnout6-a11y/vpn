@@ -1,5 +1,5 @@
 import { app, shell } from 'electron'
-import { mkdir, open, readFile, stat, writeFile, appendFile } from 'fs/promises'
+import { mkdir, open, readFile, stat, writeFile, appendFile, unlink } from 'fs/promises'
 import { join } from 'path'
 import { redactSensitiveConfig, redactSensitiveText } from './vpnProfiles'
 
@@ -265,9 +265,18 @@ export async function getFullLogs(): Promise<LogFileSnapshot[]> {
 }
 
 export async function clearAppLog(): Promise<void> {
-  await mkdir(getLogDir(), { recursive: true })
-  await writeFile(getAppLogPath(), '', 'utf8')
-  currentLogBytes = 0
+  queue = queue.then(async () => {
+    await mkdir(getLogDir(), { recursive: true })
+    await mkdir(getTunLogDir(), { recursive: true }).catch(() => undefined)
+    await Promise.all([
+      writeFile(getAppLogPath(), '', 'utf8'),
+      unlink(getAppLogPrevPath()).catch(() => undefined),
+      writeFile(join(getTunLogDir(), 'sing-box.log'), '', 'utf8').catch(() => undefined),
+      unlink(join(getTunLogDir(), 'sing-box.prev.log')).catch(() => undefined)
+    ])
+    currentLogBytes = 0
+  })
+  await queue
 }
 
 export async function openLogFolder(): Promise<string> {

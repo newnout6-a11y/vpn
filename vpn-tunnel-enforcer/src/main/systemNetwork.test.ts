@@ -11,7 +11,10 @@ const paths = {
 vi.mock('electron', () => ({
   app: {
     getPath: (name: string) => {
-      if (name === 'programData') return paths.programData
+      if (name === 'programData') {
+        if (paths.programData === '__throw__') throw new Error("Failed to get 'programData' path")
+        return paths.programData
+      }
       if (name === 'userData') return paths.userData
       return paths.userData
     }
@@ -80,6 +83,19 @@ describe('systemNetwork baseline manifest', () => {
     )
   })
 
+  it('falls back to process.env.ProgramData when Electron has no programData path', async () => {
+    const fallbackRoot = join(paths.userData, '..', 'FallbackProgramData')
+    paths.programData = '__throw__'
+    process.env.ProgramData = fallbackRoot
+    vi.resetModules()
+
+    const { getTunNetworkBaselineManifestPath } = await import('./systemNetwork')
+
+    expect(getTunNetworkBaselineManifestPath()).toBe(
+      join(fallbackRoot, 'VPN-Tunnel-Enforcer', 'network-backups', 'latest-tun-network-baseline.json')
+    )
+  })
+
   it('does not leave a sticky applied marker when the required backup fails', async () => {
     const { applyTunNetworkBaseline, getTunNetworkBaselineManifestPath } = await import('./systemNetwork')
 
@@ -105,6 +121,16 @@ describe('systemNetwork baseline manifest', () => {
       expect.stringContaining('reg add')
     ]))
     expect(result.details).toContain('warnings:')
+  })
+
+  it('treats missing baseline manifest as an idempotent rollback no-op', async () => {
+    const { rollbackTunNetworkBaseline } = await import('./systemNetwork')
+
+    const result = await rollbackTunNetworkBaseline()
+
+    expect(result.success).toBe(true)
+    expect(result.skipped).toBe(true)
+    expect(result.message).toContain('baseline')
   })
 
   it('serializes concurrent baseline applications without sharing a temp manifest path', async () => {

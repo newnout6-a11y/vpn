@@ -721,6 +721,44 @@ describe('trafficForensics', () => {
     expect(readFileSync(join(started.sessionDir!, 'app-events.ndjson'), 'utf-8')).toContain('traffic-leak-signal')
   })
 
+  it('does not mark the runtime TUN interface as a physical DNS leak', async () => {
+    await resetForensicsState()
+    execElevatedMock.mockResolvedValue({ stdout: '', stderr: '' })
+
+    const userData = 'C:/Users/Redmi/CascadeProjects/vpn/.tmp/vpnte-traffic-forensics'
+    const runtimeDir = join(userData, 'tun-runtime')
+    mkdirSync(runtimeDir, { recursive: true })
+    writeFileSync(join(runtimeDir, 'sing-box.json'), JSON.stringify({
+      inbounds: [
+        {
+          type: 'tun',
+          tag: 'tun-in',
+          interface_name: 'Ethernet 5'
+        }
+      ]
+    }))
+
+    const started = await startTrafficForensicsSession({
+      mode: 'directVpn',
+      target: 'profile-1'
+    })
+    expect(started.sessionDir).toBeTruthy()
+
+    writeFileSync(join(started.sessionDir!, 'dns-client-servers-live.txt'), JSON.stringify([
+      {
+        InterfaceAlias: 'Ethernet 5',
+        InterfaceIndex: 51,
+        ServerAddresses: ['192.168.250.254']
+      }
+    ]))
+
+    await stopTrafficForensicsSession('user-stop')
+
+    const summary = JSON.parse(readFileSync(join(started.sessionDir!, 'summary.json'), 'utf-8'))
+    expect(summary.verdicts.dnsLeakDetected).toBe(false)
+    expect(JSON.stringify(summary.evidence ?? {})).not.toContain('DNS resolver is bound to a physical/non-tunnel interface')
+  })
+
   it('bridges app lifecycle events into summary verdict evidence', async () => {
     await resetForensicsState()
     execElevatedMock.mockResolvedValue({ stdout: '', stderr: '' })
