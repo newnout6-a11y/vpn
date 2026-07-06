@@ -681,6 +681,7 @@ export async function recoverStaleKillSwitch(isSingboxRunning: () => Promise<boo
 
 export interface FirewallRepairHealth {
   platform: 'win32' | 'other'
+  protectedTunnelActive?: boolean
   manifestPresent: boolean
   ourRuleCount: number
   stuckBlockDefault: boolean
@@ -691,10 +692,13 @@ export interface FirewallRepairHealth {
   recommendedActions: string[]
 }
 
-export async function getFirewallRepairHealth(): Promise<FirewallRepairHealth> {
+export async function getFirewallRepairHealth(
+  options: { protectedTunnelActive?: boolean } = {}
+): Promise<FirewallRepairHealth> {
   if (process.platform !== 'win32') {
     return {
       platform: 'other',
+      protectedTunnelActive: options.protectedTunnelActive === true,
       manifestPresent: false,
       ourRuleCount: 0,
       stuckBlockDefault: false,
@@ -706,6 +710,7 @@ export async function getFirewallRepairHealth(): Promise<FirewallRepairHealth> {
     }
   }
 
+  const protectedTunnelActive = options.protectedTunnelActive === true
   const manifestPresent = await killSwitchManifestExists()
   const stuckBlockDefault = await probeForStuckBlockDefault()
   let ourRuleCount = 0
@@ -753,11 +758,12 @@ $profiles = @(Get-NetFirewallProfile -Profile Domain,Private,Public -ErrorAction
   }
 
   const serviceDown = services.some((service) => service.status.toLowerCase() !== 'running')
+  const expectedActiveFirewall = protectedTunnelActive && !serviceDown && (ourRuleCount > 0 || manifestPresent || stuckBlockDefault)
   const recommendedActions: string[] = []
-  if (ourRuleCount > 0 || manifestPresent) {
+  if (!expectedActiveFirewall && (ourRuleCount > 0 || manifestPresent)) {
     recommendedActions.push('Remove VPNTE firewall rules and restore saved outbound policy')
   }
-  if (stuckBlockDefault) {
+  if (!expectedActiveFirewall && stuckBlockDefault) {
     recommendedActions.push('Restore firewall DefaultOutboundAction from VPNTE backup or Windows safe default')
   }
   if (serviceDown) {
@@ -766,12 +772,15 @@ $profiles = @(Get-NetFirewallProfile -Profile Domain,Private,Public -ErrorAction
 
   const summary: FirewallRepairHealth['summary'] = serviceDown
     ? 'fail'
-    : (ourRuleCount > 0 || manifestPresent || stuckBlockDefault)
+    : expectedActiveFirewall
+      ? 'ok'
+      : (ourRuleCount > 0 || manifestPresent || stuckBlockDefault)
       ? 'warn'
       : 'ok'
 
   return {
     platform: 'win32',
+    protectedTunnelActive,
     manifestPresent,
     ourRuleCount,
     stuckBlockDefault,
@@ -779,7 +788,9 @@ $profiles = @(Get-NetFirewallProfile -Profile Domain,Private,Public -ErrorAction
     profiles,
     summary,
     message: summary === 'ok'
-      ? 'VPNTE firewall state looks clean'
+      ? expectedActiveFirewall
+        ? 'VPNTE firewall is protecting the active tunnel'
+        : 'VPNTE firewall state looks clean'
       : summary === 'fail'
         ? 'Windows Firewall services need attention'
         : 'VPNTE firewall cleanup is recommended',

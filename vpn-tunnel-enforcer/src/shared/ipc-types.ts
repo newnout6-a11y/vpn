@@ -391,7 +391,11 @@ export interface ServerChannels {
   'servers:export-all-keys-file': () =>
     | { ok: true; path: string; total: number; exported: number; skipped: number }
     | { ok: false; cancelled: true }
-    | { ok: false; reason: string; error?: string }
+    | { ok: false; reason: string; error?: string; total?: number; skipped?: number }
+  'servers:export-all-proxies-file': () =>
+    | { ok: true; path: string; total: number; exported: number; skipped: number }
+    | { ok: false; cancelled: true }
+    | { ok: false; reason: string; error?: string; total?: number; skipped?: number }
   // ── Server group management ────────────────────────────────────────────
   'groups:list': () => ServerGroup[]
   'groups:get': (id: string) => ServerGroup | null

@@ -329,6 +329,7 @@ async function runLeakSelfTestOnce(mySession: number): Promise<LeakSelfTestResul
 
 let periodicLeakTimer: ReturnType<typeof setInterval> | null = null
 let onLeakDetectedCb: ((r: LeakSelfTestResult) => void) | null = null
+let transitionSuppressUntil = 0
 
 export function setLeakDetectedCallback(cb: (r: LeakSelfTestResult) => void): void {
   onLeakDetectedCb = cb
@@ -345,6 +346,21 @@ export function cancelLeakSelfTest(): void {
   activeSessionId += 1
 }
 
+export function suppressLeakSelfTestsFor(ms: number, reason: string): void {
+  const until = Date.now() + Math.max(0, ms)
+  if (until > transitionSuppressUntil) transitionSuppressUntil = until
+  cancelLeakSelfTest()
+  logEvent('debug', 'leak-test', 'suppressing event leak checks during network transition', {
+    reason,
+    ms,
+    until: transitionSuppressUntil
+  })
+}
+
+function isTransitionSuppressed(now = Date.now()): boolean {
+  return now < transitionSuppressUntil
+}
+
 /**
  * Run the leak self-test asynchronously, regardless of the periodic timer.
  * Used by network-change handlers and tunnel-status transitions to catch
@@ -357,6 +373,13 @@ export function cancelLeakSelfTest(): void {
 let lastTriggerAt = 0
 export function triggerLeakCheckNow(reason: string): void {
   const now = Date.now()
+  if (isTransitionSuppressed(now)) {
+    logEvent('debug', 'leak-test', 'event-triggered run suppressed during transition', {
+      reason,
+      remainingMs: transitionSuppressUntil - now
+    })
+    return
+  }
   if (now - lastTriggerAt < 5_000) return
   lastTriggerAt = now
   logEvent('debug', 'leak-test', 'event-triggered run', { reason })
@@ -439,6 +462,7 @@ export function startPeriodicLeakTest(
   stopPeriodicLeakTest()
   periodicLeakTimer = setInterval(() => {
     if (!shouldRun()) return
+    if (isTransitionSuppressed()) return
     const run = runLeakSelfTest()
     const runSession = inFlightSessionId
     run

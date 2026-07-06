@@ -79,4 +79,12 @@ describe('deriveRoutingVerdict', () => {
       responseType: 'text'
     }))
   })
+
+  it('ignores impossible IPv4-looking numbers on RU echo pages', async () => {
+    vi.mocked(axios.get)
+      .mockResolvedValueOnce({ data: '<script>var layout="384.518.844.978";</script>' })
+      .mockResolvedValueOnce({ data: 'IP address: 62.118.134.108' })
+
+    await expect(ruEgressIp()).resolves.toBe('62.118.134.108')
+  })
 })

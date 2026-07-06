@@ -451,8 +451,8 @@ export function Settings() {
 
           <ToggleRow
             icon={<Eye className="w-4 h-4 text-[var(--color-warning)]" />}
-            title="Отключить гео-определение IP"
-            description="Не отправлять VPN IP на сторонний сервис (ipapi.co) для определения страны. Включите для максимальной приватности — флаг страны и город показываться не будут."
+            title="Не делать онлайн-гео lookup в приложении"
+            description="Приложение не будет отправлять текущий VPN IP и IP выбранного сервера в ipapi.co, ip-api.com, ipwho.is, ipinfo или iplocation. Это не меняет сайты вроде 2ip.ru: они всё равно видят страну IP, с которого вы к ним заходите. Уже сохранённая страна профиля или страна из имени может остаться как локальная подсказка."
             checked={settings.disableGeoLookup}
             onChange={(next) => updateSettings({ disableGeoLookup: next })}
           />
@@ -470,14 +470,17 @@ export function Settings() {
                 </span>
                 <span className="block mt-1">
                   <span className="text-[var(--color-text-secondary)]">Станет:</span>{' '}
-                  российские сервисы открываются с вашим настоящим адресом, а
-                  всё остальное по-прежнему через VPN. Определяем РФ-назначения
-                  не по «.ru», а по стране IP (geoip-ru) и выверенным спискам
-                  доменов — поэтому ловятся и .com/.рф-сайты крупных сервисов.
+                  российские сервисы, которые реально размещены в РФ или входят
+                  в узкие списки гос/карт, открываются с вашим настоящим адресом,
+                  а всё остальное по-прежнему через VPN. Определяем РФ-направления
+                  не по «.ru», а по стране IP (geoip-ru) и точечным спискам доменов,
+                  чтобы не отправить YouTube/Google напрямую вместе с широкими
+                  «популярными в РФ» списками.
                 </span>
                 <span className="block mt-1 text-[var(--color-text-secondary)]">
-                  Списки скачиваются через защиту и кэшируются. Изменения
-                  вступят в силу после следующего включения защиты.
+                  Встроенные списки работают без сети; автообновление, если включено,
+                  использует маршрут служебных загрузок. Изменения вступят в силу
+                  после следующего включения защиты.
                 </span>
               </>
             }
@@ -517,7 +520,7 @@ export function Settings() {
 
               <ToggleRow
                 title="Автообновлять списки"
-                description="Раз в сутки пробовать скачать свежие правила через выбранный proxy. При ошибке останутся встроенные списки."
+                description="Раз в сутки пробовать скачать свежие правила через маршрут служебных загрузок. При ошибке останутся встроенные списки."
                 checked={settings.smartRuRuleSetMode === 'managed' && settings.smartRuRuleSetAutoUpdate}
                 onChange={(next) => updateSettings({
                   smartRuRuleSetMode: next ? 'managed' : 'bundled',
@@ -618,7 +621,7 @@ export function Settings() {
           <ToggleRow
             icon={<Settings2 className="w-4 h-4 text-amber-500" />}
             title={<>Расширенный режим <span className="text-amber-500">(для опытных)</span></>}
-            description="Открывает страницы Приложения и Починка, разрешает менять ручной адрес прокси и потенциально опасные параметры."
+            description="Открывает Починку и расширенные параметры: ручной адрес прокси, маршрут служебных загрузок и потенциально опасные сетевые опции."
             checked={settings.advancedMode}
             onChange={(next) => updateSettings({ advancedMode: next })}
           />

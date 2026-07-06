@@ -1134,7 +1134,7 @@ async function waitForOwnedRuntimeToExit(timeoutMs = 3000): Promise<boolean> {
   return !(await isOwnedTunRuntimeRunning())
 }
 
-async function isOwnedTunRuntimeRunning(): Promise<boolean> {
+export async function isOwnedTunRuntimeRunning(): Promise<boolean> {
   if (process.platform !== 'win32') return false
   try {
     const runtimeDir = getTunRuntimeDir()
@@ -1153,7 +1153,7 @@ if ($found.Count -gt 0) { 'true' } else { 'false' }
     return String(stdout || '').toLowerCase().includes('true')
   } catch (err) {
     logEvent('debug', 'tun', 'owned runtime status probe failed', err)
-    return await isSingboxRunning()
+    return false
   }
 }
 
@@ -2086,6 +2086,7 @@ export const tunController = {
       startOptions.enableAdapterLockdown === true
     const publicWifiCompatibility =
       startOptions.publicWifiCompatibility ?? settingsStore.get().publicWifiCompatibility
+    const adapterLockdownForceDns = !publicWifiCompatibility
     recordForensicTunEvent('tun-start-requested', {
       mode,
       proxyType,
@@ -2172,9 +2173,9 @@ export const tunController = {
           const lock = await timeAsync(
             'adapter-lockdown',
             () => applyPhysicalAdapterLockdown(TUN_IPV4_RESOLVER, {
-              forceDns: true
+              forceDns: adapterLockdownForceDns
             }),
-            { forceDns: true, parallel: true }
+            { forceDns: adapterLockdownForceDns, parallel: true }
           )
           logEvent('info', 'tun', 'adapter lockdown result', {
             applied: lock.applied,

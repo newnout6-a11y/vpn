@@ -172,6 +172,16 @@ describe('isBenignBlockLine / extractRealErrors', () => {
     expect(errors[0]).toMatch(/i\/o timeout/)
   })
 
+  it('excludes benign upload-close noise from the error summary', () => {
+    const log = [
+      '+0300 2026-07-05 18:29:24 ERROR [1097614137 171ms] connection: connection upload closed: raw-read tcp4 192.168.250.253:59761->192.168.250.254:10030: An existing connection was forcibly closed by the remote host.',
+      '+0300 x ERROR [3 0ms] outbound/vless[proxy-out]: connection to server failed: i/o timeout'
+    ].join('\n')
+    const errors = extractRealErrors(log)
+    expect(errors.length).toBe(1)
+    expect(errors[0]).toMatch(/i\/o timeout/)
+  })
+
   it('returns [] for a clean log', () => {
     const log = [
       '+0300 x INFO [1 0ms] outbound/direct[direct-out]: outbound connection to 77.88.21.24:443'

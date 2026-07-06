@@ -1243,3 +1243,384 @@ Windows-only gap:
 Notes:
 - short rationale
 ```
+
+2026-07-05 - RUNTIME-DIAG-MAINT-ZIP-4 DONE
+Files:
+- `vpn-tunnel-enforcer/src/main/routingSelfTest.ts`
+- `vpn-tunnel-enforcer/src/main/systemNetwork.ts`
+- `vpn-tunnel-enforcer/src/main/systemDiagnostics.ts`
+- `vpn-tunnel-enforcer/src/main/routingSelfTest.test.ts`
+- `vpn-tunnel-enforcer/src/main/systemNetwork.test.ts`
+- `vpn-tunnel-enforcer/src/main/systemDiagnostics.test.ts`
+Findings from fresh ZIP/screenshots:
+- `vpn-tunnel-enforcer-diagnostics-2026-07-05T14-27-47-360Z.zip` showed clean stop/rollback/kill-switch disable, but health summary stayed WARN because app-log treated benign `reg delete` misses for optional proxy/env values as real warnings.
+- Routing self-test reported an impossible RU host IP (`384.518.844.978`) because IPv4 extraction accepted any `ddd.ddd.ddd.ddd` token from RU echo HTML without validating octet ranges.
+Fixes:
+- Routing self-test now validates IPv4 octets before accepting an echo result, so impossible HTML/script numbers are ignored and the next endpoint can answer.
+- TUN network baseline cleanup now treats missing optional proxy/env registry values as clean debug/no-op instead of warning.
+- System diagnostics filters already-recorded benign optional proxy cleanup warnings so old app-log rows do not keep the health panel yellow after update/reinstall.
+Verification:
+- `npm test -- routingSelfTest.test.ts systemNetwork.test.ts systemDiagnostics.test.ts --reporter=dot` passed: 3 files / 23 tests.
+Windows-only gap:
+- Needs live packaged smoke: rerun routing self-test with Smart-RU enabled; RU host IP must be valid IPv4 or null/inconclusive, never an impossible octet value.
+- Needs live packaged smoke: start/stop Direct VPN and open Maintenance health; missing optional proxy/env registry values must not make `App log` WARN.
+
+2026-07-05 - RUNTIME-TRANSITION-LEAK-FIREWALL-1 DONE
+Files:
+- `vpn-tunnel-enforcer/src/main/leakSelfTest.ts`
+- `vpn-tunnel-enforcer/src/main/index.ts`
+- `vpn-tunnel-enforcer/src/main/trafficForensics.ts`
+- `vpn-tunnel-enforcer/src/main/leakSelfTest.test.ts`
+- `vpn-tunnel-enforcer/src/main/trafficForensics.test.ts`
+- `vpn-tunnel-enforcer/src/renderer/App.tsx`
+- `vpn-tunnel-enforcer/src/renderer/pages/Dashboard.tsx`
+- `vpn-tunnel-enforcer/src/renderer/AppSource.test.ts`
+Findings from fresh ZIP:
+- `vpn-tunnel-enforcer-diagnostics-2026-07-05T14-59-53-978Z.zip` is small because old heavy forensic artifacts are no longer staged; it still contains the current app log, system diagnostics, runtime config/logs, settings, README/manifest, and latest-run snapshots.
+- One leak warning appeared during Direct VPN startup (`2026-07-05T14:52:22Z`) after a network-change event fired while TUN/firewall/baseline were still settling; later leak checks were OK.
+- The short "internet blocked by firewall" banner was a renderer transition flicker: kill-switch state could arrive before the final running/stopped status settled.
+- `get-traffic-forensics-status` was still returning an old stopped June session while deep capture was disabled, bloating current IPC logs with stale artifact metadata.
+Fixes:
+- TUN start now suppresses event/periodic leak self-tests for a short transition window and cancels any in-flight stale leak probe before the tunnel settles.
+- Dashboard suppresses the firewall block banner briefly around TUN status handoffs, while still showing real stuck kill-switch states outside that window.
+- Disabled traffic forensics no longer surfaces old stopped session manifest/summary/artifact files in live status; old data stays on disk but stops polluting current IPC logs.
+Verification:
+- `npm test -- leakSelfTest.test.ts AppSource.test.ts trafficForensics.test.ts routingSelfTest.test.ts systemNetwork.test.ts systemDiagnostics.test.ts --reporter=dot` passed: 6 files / 51 tests.
+- `npm test -- --reporter=dot` passed: 61 files / 513 tests.
+- `npm run build` passed.
+- `npm run dist:win` passed and rebuilt `vpn-tunnel-enforcer/dist/VPN-Tunnel-Enforcer-Setup-1.1.0.exe`.
+- `git diff --check` passed.
+- Codebase index refreshed with `index_repository(mode=fast, persistence=true)`.
+Windows-only gap:
+- Needs live packaged smoke: switch Direct VPN servers and verify no transient leak banner and no transient firewall-block banner during the internal stop/start handoff.
+- Needs live packaged smoke: export ZIP after the new build and verify `app-log.json` no longer contains repeated huge disabled `get-traffic-forensics-status` payloads for old sessions.
+
+2026-07-05 - REINSTALL-FIREWALL-UI-ANIMATION-1 DONE
+Files:
+- `vpn-tunnel-enforcer/src/main/index.ts`
+- `vpn-tunnel-enforcer/src/main/tunController.ts`
+- `vpn-tunnel-enforcer/src/main/leakDiagnostics.ts`
+- `vpn-tunnel-enforcer/src/main/leakDiagnostics.test.ts`
+- `vpn-tunnel-enforcer/src/main/mainIpcRegression.test.ts`
+- `vpn-tunnel-enforcer/src/renderer/pages/Servers.tsx`
+- `vpn-tunnel-enforcer/src/renderer/pages/SplitTunnel.tsx`
+- `vpn-tunnel-enforcer/src/renderer/AppSource.test.ts`
+Findings from screenshot:
+- After reinstall, Maintenance/diagnostics can still show `Firewall VPNTE WARN` because Windows firewall rules, DefaultOutboundAction, and the VPNTE manifest live outside the installer payload and can survive uninstall/install.
+- Startup crash recovery was kicked off in the background after the renderer/tray were already created, so the UI could show stale firewall state before recovery finished.
+- Startup recovery also treated any process named `vpnte-sing-box.exe` as a live protected tunnel. That can preserve stale firewall state after reinstall if a stale/foreign process with the same name exists.
+- Routing diagnostics still treated benign sing-box `connection upload closed` / remote-host reset noise as a warning.
+- Servers/Apps used expensive framer-motion list layout/height animations (`layout`, `AnimatePresence`, height-to-auto), which is janky on large lists.
+Fixes:
+- Startup recovery now runs before creating the renderer window/tray.
+- Startup firewall/adapter recovery uses `isOwnedTunRuntimeRunning()`, which checks the process executable path under this app's `userData/tun-runtime` instead of trusting `tasklist` by image name.
+- The owned-runtime probe no longer falls back to plain image-name `tasklist` on probe failure.
+- Routing diagnostics filters benign sing-box upload-close / forcibly-closed lines while preserving real failures.
+- Servers group body rendering no longer animates `height: auto`, and server profile cards no longer use framer-motion `layout`.
+- Apps/Split Tunneling list rows no longer use framer-motion layout/enter/exit animation.
+Verification:
+- `npm test -- mainIpcRegression.test.ts leakDiagnostics.test.ts AppSource.test.ts splitTunneling.test.ts --reporter=dot` passed: 4 files / 38 tests.
+- `npm test -- --reporter=dot` passed: 61 files / 516 tests.
+- `npm run build` passed.
+- `npm run dist:win` passed and rebuilt `vpn-tunnel-enforcer/dist/VPN-Tunnel-Enforcer-Setup-1.1.0.exe`.
+- `git diff --check` passed.
+- Codebase index refreshed with `index_repository(mode=fast, persistence=true)`.
+Windows-only gap:
+- Needs live packaged smoke after reinstall: app startup should clear stale VPNTE firewall rules/manifest/DefaultOutboundAction before Maintenance shows results.
+- Needs live packaged UI smoke: Servers and Apps lists should no longer visibly fly in or lag during open/filter/select.
+
+2026-07-05 - FIREWALL-ACTIVE-SPLIT-NAMES-SERVER-LOAD-1 DONE
+Files:
+- `vpn-tunnel-enforcer/src/main/firewallKillSwitch.ts`
+- `vpn-tunnel-enforcer/src/main/index.ts`
+- `vpn-tunnel-enforcer/src/main/splitTunneling.ts`
+- `vpn-tunnel-enforcer/src/main/splitTunneling.test.ts`
+- `vpn-tunnel-enforcer/src/main/mainIpcRegression.test.ts`
+- `vpn-tunnel-enforcer/src/renderer/pages/Servers.tsx`
+- `vpn-tunnel-enforcer/src/renderer/AppSource.test.ts`
+Findings from screenshots:
+- Maintenance still showed `Firewall VPNTE WARN` while VPNTE rules/manifest/stuck outbound policy existed. During an active protected TUN this can be expected firewall state, not stale cleanup debris.
+- Split Tunneling app names showed mojibake (`U+FFFD`, CJK/Hangul fragments) from PowerShell/registry display-name encoding and from already persisted broken names.
+- Servers first paint waited for both profile data and group metadata, so a slow `groupsList` made the Servers page appear slower than other tabs.
+Fixes:
+- `firewall:repair-health` now passes active TUN state into `getFirewallRepairHealth`; active VPNTE firewall rules are reported as protecting the tunnel instead of cleanup WARN.
+- Targeted firewall repair remains blocked while TUN is active and returns health marked as protected-active.
+- Split Tunneling registry discovery now forces UTF-8 PowerShell output.
+- Split Tunneling sanitizes registry and stored app display names, removing replacement chars/CJK/Hangul garbage and falling back to stable folder/exe names for fully corrupt names.
+- Stored split-tunnel app names are normalized on read, so old corrupted names in `electron-store` are repaired without manual deletion.
+- Servers initial page load no longer waits for group metadata; profiles render first and groups load in parallel.
+Verification:
+- `npm test -- splitTunneling.test.ts mainIpcRegression.test.ts AppSource.test.ts leakDiagnostics.test.ts --reporter=dot` passed: 4 files / 43 tests.
+- First full `npm test -- --reporter=dot` hit a transient `appLoggerRotation.test.ts` timing failure; rerunning that file passed: 1 file / 2 tests.
+- Second full `npm test -- --reporter=dot` passed: 61 files / 521 tests.
+- `npm run build` passed.
+- `npm run dist:win` passed and rebuilt `vpn-tunnel-enforcer/dist/VPN-Tunnel-Enforcer-Setup-1.1.0.exe`.
+- Installer check: `VPN-Tunnel-Enforcer-Setup-1.1.0.exe` size 117,452,009 bytes, last write 2026-07-05 22:54:56.
+- `Get-AuthenticodeSignature` still reports `NotSigned` for the installer despite electron-builder printing signtool steps; real Publisher/UAC identity still requires a valid code-signing certificate.
+- `git diff --check` passed with only line-ending warnings.
+Windows-only gap:
+- Needs live packaged smoke: with Direct VPN active, Maintenance should show firewall state OK/protecting, not cleanup WARN.
+- Needs live packaged smoke: Split Tunneling should show cleaned names for Hiddify, WinRAR, YandexMusic, Office/WebView, and should repair existing stored names after opening the Apps tab.
+- Needs live packaged UI smoke: Servers should display profiles before slow group metadata finishes and no longer feel delayed on first open.
+
+2026-07-05 - PROXY-LIST-EXPORT-1 DONE
+Files:
+- `vpn-tunnel-enforcer/src/main/vpnProfiles.ts`
+- `vpn-tunnel-enforcer/src/main/serverPicker.ts`
+- `vpn-tunnel-enforcer/src/shared/ipc-types.ts`
+- `vpn-tunnel-enforcer/src/preload/index.ts`
+- `vpn-tunnel-enforcer/src/renderer/pages/Servers.tsx`
+- `vpn-tunnel-enforcer/src/main/vpnProfilesProtocolCoverage.test.ts`
+- `vpn-tunnel-enforcer/src/main/mainIpcRegression.test.ts`
+- `vpn-tunnel-enforcer/src/renderer/AppSource.test.ts`
+Finding:
+- Existing bulk export writes VPN client URI lines (`vless://`, `trojan://`, etc.). Some proxy pool tools instead require plain proxy-list lines like `host:port`, `host:port:user:pass`, or `protocol://user:pass@host:port`, one proxy per line.
+- The attached export file contains VLESS Reality profiles; those are not plain HTTP/SOCKS proxy credentials and must not be rewritten into fake `host:port:user:pass` lines.
+Fix:
+- Added `exportOutboundToProxyLine()` for real plain proxy outbounds only: HTTP, SOCKS/SOCKS4/SOCKS5, mixed, and Naive-as-HTTPS-proxy.
+- Added `servers:export-all-proxies-file` IPC and preload API.
+- Added a separate Servers page button `Proxy list` so the existing VPN-key export remains unchanged.
+- Proxy-list export writes strict one-proxy-per-line output with no header comments for maximum importer compatibility.
+- Unsupported VPN protocols are skipped and surfaced via exported/skipped counts; all-VLESS input returns `unsupported-all` rather than creating a misleading file.
+Verification:
+- `npm test -- vpnProfilesProtocolCoverage.test.ts mainIpcRegression.test.ts AppSource.test.ts --reporter=dot` passed: 3 files / 35 tests.
+- `npm test -- --reporter=dot` passed: 61 files / 525 tests.
+- `npm run build` passed.
+- `npm run dist:win` passed and rebuilt `vpn-tunnel-enforcer/dist/VPN-Tunnel-Enforcer-Setup-1.1.0.exe`.
+- Installer check: `VPN-Tunnel-Enforcer-Setup-1.1.0.exe` size 117,452,531 bytes, last write 2026-07-05 23:14:01.
+- `Get-AuthenticodeSignature` still reports `NotSigned`; real Publisher/UAC identity still requires a valid code-signing certificate.
+- `git diff --check` passed with only line-ending warnings.
+Windows-only gap:
+- Needs live packaged UI smoke: click Servers -> `Proxy list`; with only VLESS profiles it should show an unsupported/skipped message, while HTTP/SOCKS profiles should produce a plain one-proxy-per-line `.txt`.
+
+2026-07-05 - SERVERS-SELECT-LOADING-POLISH-1 DONE
+Files:
+- `vpn-tunnel-enforcer/src/renderer/design-system/MacSelect.tsx`
+- `vpn-tunnel-enforcer/src/renderer/pages/Servers.tsx`
+- `vpn-tunnel-enforcer/src/renderer/AppSource.test.ts`
+Findings from screenshots/diagnostics:
+- The add form `Группа` / `Устройство` dropdown was rendered inside the add card with local `absolute z-50`; following server/group cards could paint over it, making the dropdown look clipped or hidden under the list.
+- The Servers page had become too abrupt after removing expensive height/layout animations.
+- Long key/subscription imports only showed the button spinner; there was no page-level feedback that keys were being loaded/parsed/saved.
+- Fresh diagnostics still show Firewall health OK/protecting active tunnel, matching the previous firewall health fix.
+Fixes:
+- Open `MacSelect` now raises its own stacking context (`z-[200]`) and dropdown menu (`z-[220]`), so `Группа` and `Устройство` stay above the server list.
+- Server group body open animation now uses lightweight opacity/translate motion only, avoiding old `layout` and `height: auto` animation costs.
+- Add/import form disables input/selects during import and shows an inline indeterminate progress panel: `Загружаем и проверяем ключи...`.
+- Initial Servers page loading state now shows spinner + indeterminate progress instead of a static loading label.
+Verification:
+- `npm test -- AppSource.test.ts --reporter=dot` passed: 1 file / 8 tests.
+- `npm test -- --reporter=dot` passed: 61 files / 526 tests.
+- `npm run build` passed.
+- `npm run dist:win` passed and rebuilt `vpn-tunnel-enforcer/dist/VPN-Tunnel-Enforcer-Setup-1.1.0.exe`.
+- Installer check: `VPN-Tunnel-Enforcer-Setup-1.1.0.exe` size 117,453,134 bytes, last write 2026-07-05 23:26:46.
+- `Get-AuthenticodeSignature` still reports `NotSigned`; real Publisher/UAC identity still requires a valid code-signing certificate.
+- `git diff --check` passed with only line-ending warnings.
+Windows-only gap:
+- Needs live packaged UI smoke: open `Группа` and `Устройство` dropdowns in Servers add form; both should render above server cards/toolbars.
+- Needs live packaged UI smoke: paste a slow subscription/key batch and confirm visible inline progress until import finishes.
+
+2026-07-05 - SERVERS-SELECT-BULK-FEEDBACK-POLISH-2 DONE
+Files:
+- `vpn-tunnel-enforcer/src/renderer/design-system/MacSelect.tsx`
+- `vpn-tunnel-enforcer/src/renderer/pages/Servers.tsx`
+- `vpn-tunnel-enforcer/src/renderer/pages/SplitTunnel.tsx`
+- `vpn-tunnel-enforcer/src/renderer/AppSource.test.ts`
+Finding:
+- Live packaged test showed the portal-based `MacSelect` correction made the add-form dropdowns not open visibly at all.
+- Bulk key/proxy export still had no page-level feedback beyond a small button spinner and log entry.
+- Servers/Applications lists still felt too jumpy because large lists used transform/layout-style motion and broad `transition-all` effects.
+Fix:
+- Removed the portal dropdown from `MacSelect` and returned to an inline absolute menu, but now the open select raises its stacking context (`z-[120]`) and the menu uses `z-[130]`.
+- Raised the Servers add card itself above the server list (`relative z-30 overflow-visible`) and kept the server-list body at a lower layer.
+- Added a visible `bulkNotice` status panel for saving all keys and exporting `Proxy list`, with indeterminate progress during the operation and success/error summaries afterward.
+- Removed transform hover from server rows and removed layout/enter/exit motion from large server/app rows; app rule buttons now use `transition-colors` instead of `transition-all`.
+Verification:
+- `npm test -- AppSource.test.ts --reporter=dot` passed: 1 file / 8 tests.
+- `npm run build` passed and produced `out/renderer/assets/MacSelect-DdF9ZPF8.js` with inline dropdown classes, not the app-level portal implementation.
+- `rg` verified `absolute z-[130]`, `relative z-30 overflow-visible`, `servers.exportProxyListWorking`, and `transition-colors duration-100` in source/built renderer output.
+- `npm test -- --reporter=dot` passed: 61 files / 526 tests.
+- `git diff --check` passed with only line-ending warnings.
+- `npm run dist:win` passed and rebuilt `vpn-tunnel-enforcer/dist/VPN-Tunnel-Enforcer-Setup-1.1.0.exe`.
+- Installer check: `VPN-Tunnel-Enforcer-Setup-1.1.0.exe` size 117,453,752 bytes, last write 2026-07-05 23:53:28.
+- `Get-AuthenticodeSignature` still reports `NotSigned`; real Publisher/UAC identity still requires a valid code-signing certificate.
+Windows-only gap:
+- Needs live packaged UI smoke after installing the rebuilt EXE: open Servers -> Group/Device selects; menus should appear over the server cards instead of disappearing or hiding under the list.
+- Needs live packaged UI smoke: click `Сохранить ключи` and `Proxy list`; the page should show a visible progress/result panel.
+- Needs live packaged UI smoke: scroll/click Servers and Applications lists; row hover/switching should feel less jumpy.
+
+2026-07-06 - SPLIT-TUNNEL-PATH-MAINTENANCE-LABEL-1 DONE
+Files:
+- `vpn-tunnel-enforcer/src/renderer/pages/SplitTunnel.tsx`
+- `vpn-tunnel-enforcer/src/renderer/pages/Maintenance.tsx`
+- `vpn-tunnel-enforcer/src/renderer/AppSource.test.ts`
+Finding:
+- Split Tunneling app names were cleaned, but the displayed `path` still surfaced mojibake in corrupted executable/path segments, e.g. `YandexMusic\���� ��Ӝ.exe`.
+- Maintenance showed `stuck block: да` even when firewall health was `OK` and the active TUN was protected; technically true for DefaultOutboundAction=Block, but misleading to users.
+Fix:
+- Added renderer-only `displaySplitTunnelPath()` for Apps: corrupt path segments are cleaned for display and a corrupt executable leaf falls back to a safe app-name leaf such as `YandexMusic.exe`.
+- The stored/route `app.path` is not mutated by this UI display fix, avoiding accidental route-rule breakage without verifying the real file on disk.
+- Maintenance now uses `block default: активная защита` when `protectedTunnelActive && summary === ok && stuckBlockDefault`; stale states still show `залипший Block`.
+Verification:
+- `npm test -- AppSource.test.ts splitTunneling.test.ts --reporter=dot` passed: 2 files / 19 tests.
+- `npm run build` passed and produced updated renderer chunks `SplitTunnel-BENxXy7Z.js` and `Maintenance-DFe50JY5.js`.
+- `rg` verified `displaySplitTunnelPath`, `block default:`, and `активная защита` in source/built renderer output.
+- `npm test -- --reporter=dot` passed: 61 files / 528 tests.
+- `git diff --check` passed with only line-ending warnings.
+- `npm run dist:win` passed and rebuilt `vpn-tunnel-enforcer/dist/VPN-Tunnel-Enforcer-Setup-1.1.0.exe`.
+- Installer check: `VPN-Tunnel-Enforcer-Setup-1.1.0.exe` size 117,453,455 bytes, last write 2026-07-06 12:30:01.
+- `Get-AuthenticodeSignature` still reports `NotSigned`; real Publisher/UAC identity still requires a valid code-signing certificate.
+Windows-only gap:
+- Needs live packaged UI smoke: Apps row for YandexMusic should display a clean path leaf instead of mojibake.
+- Needs live packaged UI smoke: Maintenance with active protected tunnel should show `block default: активная защита`, not `stuck block: да`.
+
+2026-07-06 - SETTINGS-GEO-PRIVACY-TRUTH-1 DONE
+Files:
+- `vpn-tunnel-enforcer/src/renderer/pages/Settings.tsx`
+- `vpn-tunnel-enforcer/src/renderer/components/ServerDetailModal.tsx`
+- `vpn-tunnel-enforcer/src/main/serverProbe.ts`
+- `vpn-tunnel-enforcer/src/main/urlAvailability.ts`
+- `vpn-tunnel-enforcer/src/renderer/AppSource.test.ts`
+- `vpn-tunnel-enforcer/src/main/mainIpcRegression.test.ts`
+Finding:
+- The setting `Отключить гео-определение IP` claimed the app would not send VPN IP to `ipapi.co`, but the promise was only partially true: Dashboard already skipped current-IP lookup when `disableGeoLookup` was enabled, while Server Detail still fetched `https://ipapi.co/${host}/json/` directly from the renderer.
+- Main-process `server:probe` also fetched ASN/country from `ipapi.co` for the selected server even when `disableGeoLookup` was enabled.
+- URL Availability used `ipapi.co` for ASN/country enrichment of resolved target IPs. That is not the VPN exit IP, but it is still an app-controlled `ipapi.co` geo lookup, so the same privacy switch should gate it.
+- Minimal Tavily check confirmed the core assumption: `ipapi.co` JSON endpoints return geo/ASN data for the IP being queried, so a privacy toggle must prevent the request rather than only hide the UI result.
+Fix:
+- `ServerDetailModal` now reads `settings.disableGeoLookup` from the app store. When enabled, it does not start the renderer `fetch(ipapi.co)`, does not show the geo loading state, and hides the online location card/map fallback.
+- `serverProbe.probeServer()` now accepts `disableGeoLookup`; the IPC handler passes `settingsStore.get().disableGeoLookup`, and ASN enrichment is skipped when true.
+- `urlAvailability.checkUrl()` / `probeNative()` / `fetchAsn()` now carry `disableGeoLookup`; URL Availability IPC passes the saved setting, and `fetchAsn()` returns `null` before contacting `ipapi.co` when true.
+- Settings copy now matches behavior: it says the app will not send the current VPN IP or selected server IP to `ipapi.co`; online country/city/provider/map are disabled; locally saved/derived country hints may remain.
+- Regression tests cover the renderer setting wiring, server-probe gating, and URL-availability ASN gating.
+Verification:
+- `mcp__tavily.tavily_search` minimal search used for current `ipapi.co` endpoint behavior.
+- `npm test -- AppSource.test.ts mainIpcRegression.test.ts --reporter=dot` passed: 2 files / 22 tests.
+- `npm test -- --reporter=dot` passed: 61 files / 531 tests.
+- `npm run build` passed and produced updated main/renderer bundles, including `Settings-DWj0bdUS.js`, `Servers-BuxyoSIJ.js`, and `Availability-CiBZIQgZ.js`.
+- `git diff --check` passed with only existing line-ending warnings.
+Windows-only gap:
+- Needs live packaged UI smoke: with `Отключить гео-определение IP` enabled, open Dashboard/Server Detail/Availability and confirm no live country/city/provider/map enrichment appears from `ipapi.co`.
+- Installer was not rebuilt in this checkpoint; only `npm run build` was run.
+
+2026-07-06 - SETTINGS-FULL-COPY-BEHAVIOR-AUDIT-1 DONE
+Files:
+- `vpn-tunnel-enforcer/src/main/tunController.ts`
+- `vpn-tunnel-enforcer/src/main/settings.ts`
+- `vpn-tunnel-enforcer/src/main/tunControllerRecoverySource.test.ts`
+- `vpn-tunnel-enforcer/src/renderer/pages/Settings.tsx`
+- `vpn-tunnel-enforcer/src/renderer/store.ts`
+- `vpn-tunnel-enforcer/src/renderer/AppSource.test.ts`
+Question:
+- User asked whether every Settings point had really been checked. Honest answer before this checkpoint: not exhaustively; only geo privacy had been proven/fixed. This checkpoint completed a code-level pass over Settings page toggles/copy and their main/renderer behavior.
+Checked settings and behavior:
+- `strictAdapterLockdown`: start paths pass `enableAdapterLockdown`; physical lockdown disables IPv6 and optionally DNS-pins physical adapters.
+- `publicWifiCompatibility`: UI promised DHCP/DNS stays as-is. Found bug: `tunController.start()` always passed `forceDns: true`. Fixed to `forceDns: !publicWifiCompatibility`; IPv6 lockdown remains active.
+- `autoRestartOnCrash`: sing-box exit handler gates restart on setting, lastStartOptions, user stop state, and 3 backoff slots.
+- `desktopNotifications`: notification helper returns early when disabled.
+- `stealthMode`: start paths pass setting into `generateSingboxConfig`; config applies lower MTU / TLS fragmentation behavior as implemented.
+- `disableGeoLookup`: previous checkpoint fixed Dashboard/Server Detail/server probe/URL availability ipapi.co gating.
+- `smartRuSplit` / `smartRuMapsDirect`: start reads settings every run and passes to Smart Route config; maps direct only when master switch is on.
+- `smartRuRuleSetAutoUpdate` / mode: rule-set manager uses managed/bundled source, update interval, and bootstrap route policy.
+- `autoStart`: `settingsStore.save()` applies login item only when autoStart changes; boot recovery task is ensured once per process.
+- `minimizeToTray`: main window close flow respects setting and keeps active protection running in background when minimized.
+- `autoPilotEnabled`: renderer startup runs autoPilot only when enabled and not in Direct VPN mode.
+- `locationPrivacyEnabled`: UI applies/rolls back immediately; stop path rolls back if setting remained applied.
+- `advancedMode`: renderer hides Maintenance/advanced parameters, but Apps is intentionally normal visible workflow. Fixed stale copy that claimed Apps was opened by advanced mode.
+- `proxyOverride` / `proxyType`: Dashboard, tray start, leak checks, subscriptions/key checks, autoconfig, and bootstrap paths read saved values.
+- `bootstrapRouteMode`: used for subscription/key/Smart-RU service downloads only; copy kept scoped to service downloads.
+- `checkInterval`: `save-settings` and startup call `ipMonitor.setCheckInterval`.
+- `autoNetworkBaseline`: start paths apply baseline only when enabled and rollback on start failure/stop.
+- `deepTrafficInspectionEnabled` / size / retain: traffic-forensics start/status reads settings and clamps values. Fixed renderer default to match main default (`false`) so UI does not briefly overstate packet capture before settings load.
+Copy fixes:
+- Smart-RU text no longer overpromises broad RU domain matching; it now says RU-hosted IPs and narrow gov/maps lists are direct, while broad category-ru is avoided.
+- Smart-RU auto-update text now says it uses the service-download route, not always the selected proxy.
+- Advanced mode text now says it opens Maintenance and advanced network options, not Apps.
+Verification:
+- `npm test -- AppSource.test.ts tunControllerRecoverySource.test.ts mainIpcRegression.test.ts --reporter=dot` passed: 3 files / 29 tests.
+- `npm test -- --reporter=dot` passed: 61 files / 533 tests.
+- `npm run build` passed and produced updated renderer chunks including `Settings-DwQEzoip.js`.
+- `git diff --check` passed with only LF->CRLF warnings.
+Windows-only gap:
+- Needs live packaged UI smoke after installer rebuild/install: toggle public Wi-Fi compatibility ON, connect with strict adapter lockdown, and confirm physical adapter DNS is not forced to VPNTE TUN while IPv6 lockdown still applies.
+- Needs live packaged UI smoke: Settings copy should match behavior and deep traffic capture should default off before/after settings load.
+
+2026-07-06 - SETTINGS-FIX-INSTALLER-REBUILD-1 DONE
+Files/artifacts:
+- `vpn-tunnel-enforcer/dist/VPN-Tunnel-Enforcer-Setup-1.1.0.exe`
+- `vpn-tunnel-enforcer/dist/VPN-Tunnel-Enforcer-Setup-1.1.0.exe.blockmap`
+Context:
+- Previous Settings checkpoint had `npm run build` only. Rebuilt the Windows installer so the public Wi-Fi DNS behavior and Settings copy fixes are present in the installable EXE.
+Verification:
+- `npm run dist:win` passed: sidecar build, snapshot step (skipped because `mksnapshot` is not installed), production build, and `electron-builder --win nsis`.
+- Installer artifact: `VPN-Tunnel-Enforcer-Setup-1.1.0.exe`, size `117,453,757` bytes, last write `2026-07-06 13:21:21`.
+- Blockmap artifact: `VPN-Tunnel-Enforcer-Setup-1.1.0.exe.blockmap`, size `123,569` bytes, last write `2026-07-06 13:21:24`.
+- `Get-AuthenticodeSignature` on installer, unpacked app EXE, and ETW sidecar all returned `NotSigned`.
+Notes:
+- Electron-builder logs `signing with signtool.exe`, but Authenticode verification is authoritative here and shows no valid digital signature. Real UAC Publisher still requires a real code-signing certificate.
+Windows-only gap:
+- Install this rebuilt EXE and smoke Settings/public-Wi-Fi behavior in the packaged app.
+
+2026-07-06 - SETTINGS-GEO-PRIVACY-ALL-PROVIDERS-1 DONE
+Files/artifacts:
+- `vpn-tunnel-enforcer/src/main/serverPicker.ts`
+- `vpn-tunnel-enforcer/src/main/ipMonitor.ts`
+- `vpn-tunnel-enforcer/src/main/leakDiagnostics.ts`
+- `vpn-tunnel-enforcer/src/main/settings.ts`
+- `vpn-tunnel-enforcer/src/renderer/pages/Settings.tsx`
+- `vpn-tunnel-enforcer/src/renderer/components/BrowserIpCard.tsx`
+- `vpn-tunnel-enforcer/src/renderer/components/ServerDetailModal.tsx`
+- `vpn-tunnel-enforcer/src/main/mainIpcRegression.test.ts`
+- `vpn-tunnel-enforcer/src/renderer/AppSource.test.ts`
+- `vpn-tunnel-enforcer/dist/VPN-Tunnel-Enforcer-Setup-1.1.0.exe`
+User report:
+- Screenshot showed `Отключить гео-определение IP` ON while external `2ip.ru` still showed VPN IP `144.31.1.75`, location `Рашин, Польша`, provider `H2NEXUS LTD`.
+- Diagnostic zip `vpn-tunnel-enforcer-diagnostics-2026-07-06T10-38-32-085Z.zip` had `settings.disableGeoLookup: true`.
+Findings:
+- `2ip.ru` is an external website and can always geolocate the IP it sees; the app cannot prevent that without changing the VPN exit IP. The Settings copy made this boundary unclear.
+- Real code gap found: previous geo privacy fix gated Dashboard/Server Detail/server probe/URL availability `ipapi.co`, but `serverPicker.ts` could still call `ip-api.com`, `ipwho.is`, `ipinfo.is`, `ipinfo.io`, and `iplocation.net` for country verification/backfill paths.
+- Routine public-IP checks also used `ipinfo.io/json` as a fallback in `ipMonitor`, `leakDiagnostics`, and `BrowserIpCard`, which made the privacy setting look untrustworthy even though those checks only extracted the IP for leak detection.
+Fix:
+- Added `geoLookupDisabled()` in `serverPicker.ts` and gated all app-controlled server country lookup paths: secondary geo votes, batch lookup, exported `geolocateIp`, `verifyProfileCountry`, and IPC handlers `servers:verify-active-country` / `servers:verify-country`.
+- IPC now returns `reason: 'geo-lookup-disabled'` before starting geo lookup when the setting is ON.
+- Removed `https://ipinfo.io/json` from routine public-IP fallback lists in `ipMonitor`, `leakDiagnostics`, and `BrowserIpCard`.
+- Settings title/copy now says the app disables online geo lookup inside the app, lists covered providers, and explicitly says sites like `2ip.ru` can still show the country of the VPN IP they see.
+- Settings interface comment updated to describe all app-controlled third-party geo providers and the external-site limitation.
+Verification:
+- `npm test -- AppSource.test.ts mainIpcRegression.test.ts --reporter=dot` passed: 2 files / 25 tests.
+- `npm test -- --reporter=dot` passed: 61 files / 535 tests.
+- `git diff --check` passed with only existing LF->CRLF warnings.
+- `npm run build` passed.
+- `npm run dist:win` passed.
+- Installer artifact: `VPN-Tunnel-Enforcer-Setup-1.1.0.exe`, size `117,453,815` bytes, last write `2026-07-06 14:03:00`.
+- Blockmap artifact: `VPN-Tunnel-Enforcer-Setup-1.1.0.exe.blockmap`, size `123,551` bytes, last write `2026-07-06 14:03:04`.
+- `Get-AuthenticodeSignature` on installer, unpacked app EXE, and ETW sidecar still returned `NotSigned`.
+Windows-only gap:
+- Install this rebuilt EXE and smoke: with geo privacy ON, open Dashboard/Server Detail/Servers country verification and confirm no app-side country/city/provider enrichment happens; external websites such as `2ip.ru` will still show VPN IP geolocation by design.
+
+2026-07-06 - FINAL-ROLLUP-BEFORE-PUSH-1 DONE
+Scope:
+- Final rollup before commit/push of the accumulated stability, diagnostics, UI, Settings, VPN profile, and geo-privacy work.
+Primary completed areas:
+- Direct VPN/TUN stability: fixed DNS bootstrap circular detour, safer stop/rollback ordering, IP monitor resume paths, server-switch leak/banner suppression, stale sing-box cleanup behavior, and profile switching state handling.
+- Firewall/repair diagnostics: made active protected firewall block-default show as protection instead of stale stuck state; repair paths are targeted and blocked while TUN is active; benign sing-box upload-close/block noise is no longer surfaced as a critical problem.
+- VPN profiles/server picker: fixed Happ add/base64 parsing, subscription/profile race handling, safer profile resolution/in-flight behavior, proxy-list export path, server/group UI loading behavior, and smoother list behavior.
+- Settings truth audit: checked settings copy against implemented behavior; fixed public-Wi-Fi DNS behavior, Smart-RU copy, Advanced Mode copy, deep traffic default mismatch, and geo privacy behavior/copy.
+- Geo privacy: `disableGeoLookup` now gates app-controlled geo lookups across Dashboard/Server Detail/server probe/URL availability/server picker providers; routine IP checks no longer use `ipinfo.io/json`; copy explicitly explains that external sites like `2ip.ru` still geolocate the VPN IP they see.
+- UI polish: improved server/app list behavior, dropdown layering, key/proxy import feedback, split-tunnel corrupt path display, maintenance text, and server-switch transitional UI.
+Verification before push:
+- `npm test -- AppSource.test.ts mainIpcRegression.test.ts --reporter=dot` passed: 2 files / 25 tests.
+- `npm test -- --reporter=dot` passed: 61 files / 535 tests.
+- `git diff --check` passed with only LF->CRLF warnings.
+- `npm run build` passed.
+- `npm run dist:win` passed.
+- Codebase index updated via `mcp__codebase_memory_mcp.index_repository` fast mode with persistence.
+Installer:
+- Latest installer: `vpn-tunnel-enforcer/dist/VPN-Tunnel-Enforcer-Setup-1.1.0.exe`.
+- Size: `117,453,815` bytes.
+- Last write: `2026-07-06 14:03:00`.
+- Blockmap: `VPN-Tunnel-Enforcer-Setup-1.1.0.exe.blockmap`, `123,551` bytes, `2026-07-06 14:03:04`.
+Known remaining caveats:
+- Installer/app/sidecar Authenticode status remains `NotSigned`; UAC Publisher cannot become `VYT` without a real trusted code-signing certificate.
+- Final runtime confidence still needs live packaged Windows smoke after install: TUN start/stop, firewall rollback, server switch, geo privacy ON, public Wi-Fi compatibility, Smart-RU, repair page, tray/notifications.
+- `.kimchi/` and `vpn-tunnel-enforcer/.kimchi/` are untracked local directories and intentionally left out of git staging.

@@ -115,6 +115,20 @@ function isBenignSingBoxLogNoise(line: string): boolean {
   return /\bERROR\b.*connection upload closed\b/i.test(line)
 }
 
+function isBenignAppLogWarning(row: any): boolean {
+  const scope = String(row?.scope || '')
+  const message = String(row?.message || '')
+  const command = String(row?.details?.command || '')
+  return scope === 'system-network' &&
+    message === 'baseline command failed' &&
+    /^reg delete /i.test(command) &&
+    (
+      command.includes('"HKCU\\Environment"') ||
+      command.includes('"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyServer') ||
+      command.includes('"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v AutoConfigURL')
+    )
+}
+
 async function getLogSummary(
   path: string,
   options: { structuredApp?: boolean; includeErrors?: boolean; freshMs?: number } = {}
@@ -134,6 +148,7 @@ async function getLogSummary(
           const ts = Date.parse(String(row.ts || ''))
           if (!Number.isFinite(ts) || now - ts > freshMs) return []
           if (row.level !== 'warn' && row.level !== 'error') return []
+          if (isBenignAppLogWarning(row)) return []
           const details = row.details ? ` ${JSON.stringify(row.details).slice(0, 180)}` : ''
           return [redactSensitiveText(`${row.ts} ${row.level} ${row.scope || 'app'}: ${row.message || ''}${details}`)]
         } catch {

@@ -4,6 +4,7 @@ import { Socket } from 'net'
 import axios from 'axios'
 import { logEvent } from './appLogger'
 import { tunController } from './tunController'
+import { settingsStore } from './settings'
 
 export interface ServerProbeResult {
   host: string
@@ -47,6 +48,10 @@ export interface TlsCertInfo {
   sans: string[]
   protocol: string  // TLSv1.2, TLSv1.3
   cipher: string
+}
+
+export interface ProbeServerOptions {
+  disableGeoLookup?: boolean
 }
 
 const COMMON_PORTS = [22, 80, 443, 8080, 8443, 3128, 1080, 8388, 4433, 8081, 8888, 53, 21, 25, 110, 143, 587, 993, 995]
@@ -198,8 +203,9 @@ async function getHttpBanner(_host: string, _port = 80): Promise<string | null> 
 }
 
 // Main probe entry point
-export async function probeServer(host: string, knownPort?: number): Promise<ServerProbeResult> {
-  logEvent('info', 'server-probe', `probing ${host}`, { knownPort })
+export async function probeServer(host: string, knownPort?: number, options: ProbeServerOptions = {}): Promise<ServerProbeResult> {
+  const disableGeoLookup = options.disableGeoLookup === true
+  logEvent('info', 'server-probe', `probing ${host}`, { knownPort, disableGeoLookup })
 
   const resolvedIps = await resolveHost(host)
   const primaryIp = resolvedIps[0] || host
@@ -212,7 +218,7 @@ export async function probeServer(host: string, knownPort?: number): Promise<Ser
 
   const [reverseDns, asn, latency, openPorts, tlsCert, httpBanner] = await Promise.all([
     reverseDnsLookup(primaryIp),
-    getAsnInfo(primaryIp),
+    disableGeoLookup ? Promise.resolve(null) : getAsnInfo(primaryIp),
     tunRunning ? Promise.resolve({ samples: [], min: null, avg: null, max: null, jitter: null, loss: 1 }) : measureLatency(host, port),
     scanPorts(host, knownPort),
     getTlsCert(host, knownPort && [443, 8443, 4433].includes(knownPort) ? knownPort : 443),
@@ -233,6 +239,8 @@ export async function probeServer(host: string, knownPort?: number): Promise<Ser
 
 export function registerServerProbeIpcHandlers(): void {
   ipcMain.handle('server:probe', async (_event, host: string, knownPort?: number) => {
-    return probeServer(host, knownPort)
+    return probeServer(host, knownPort, {
+      disableGeoLookup: settingsStore.get().disableGeoLookup === true
+    })
   })
 }

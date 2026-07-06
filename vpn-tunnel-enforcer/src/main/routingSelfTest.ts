@@ -64,11 +64,17 @@ const RU_IP_ECHO_URLS = [
   'https://yandex.ru/internet/'
 ] as const
 
-const IPV4_RE = /\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b/
+const IPV4_RE = /\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b/g
 
 function extractIpv4(text: string): string | null {
-  const m = String(text || '').match(IPV4_RE)
-  return m ? m[1] : null
+  for (const match of String(text || '').matchAll(IPV4_RE)) {
+    const candidate = match[1]
+    const octets = candidate.split('.').map(part => Number(part))
+    if (octets.length === 4 && octets.every(part => Number.isInteger(part) && part >= 0 && part <= 255)) {
+      return candidate
+    }
+  }
+  return null
 }
 
 /** Egress IP through the VPN: a normal Node request, captured by the TUN and

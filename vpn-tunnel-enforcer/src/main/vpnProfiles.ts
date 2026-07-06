@@ -2591,3 +2591,45 @@ export function exportOutboundToUri(profile: { name: string; protocol: string; o
     default:            return null
   }
 }
+
+function proxyUserInfo(username: unknown, password: unknown): string {
+  const user = String(username ?? '')
+  const pass = String(password ?? '')
+  if (!user && !pass) return ''
+  return `${encodeURIComponent(user)}:${encodeURIComponent(pass)}@`
+}
+
+/**
+ * Renders plain proxy-list lines accepted by proxy pool tools:
+ *   host:port
+ *   host:port:user:pass
+ *   protocol://user:pass@host:port
+ *
+ * This intentionally does NOT coerce VPN protocols like VLESS/Trojan into a
+ * fake proxy credential line. Those links need their full VPN URI export.
+ */
+export function exportOutboundToProxyLine(profile: { protocol: string; outbound: Record<string, any> }): string | null {
+  const out = profile.outbound
+  if (!out || typeof out !== 'object') return null
+  const type = String(out.type || profile.protocol || '').toLowerCase()
+  const server = String(out.server || '')
+  const port = Number(out.server_port)
+  if (!server || !Number.isFinite(port) || port <= 0 || port > 65535) return null
+  const authority = buildHostPort(server, port)
+
+  if (type === 'http') {
+    return `http://${proxyUserInfo(out.username, out.password)}${authority}`
+  }
+  if (type === 'socks' || type === 'socks4' || type === 'socks5') {
+    const version = String(out.version || type).toLowerCase()
+    const scheme = version.includes('4') ? 'socks4' : 'socks5'
+    return `${scheme}://${proxyUserInfo(out.username, out.password)}${authority}`
+  }
+  if (type === 'mixed') {
+    return `socks5://${proxyUserInfo(out.username, out.password)}${authority}`
+  }
+  if (type === 'naive') {
+    return `https://${proxyUserInfo(out.username, out.password)}${authority}`
+  }
+  return null
+}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { describeVpnProfileCapabilities, exportOutboundToUri, parseVpnProfiles } from './vpnProfiles'
+import { describeVpnProfileCapabilities, exportOutboundToProxyLine, exportOutboundToUri, parseVpnProfiles } from './vpnProfiles'
 
 describe('phase 3 protocol URI coverage', () => {
   it('parses naive:// links into sing-box naive outbounds', () => {
@@ -160,6 +160,41 @@ describe('phase 3 protocol URI coverage', () => {
       config: ['abc', 'def'],
       query_server_name: 'cloudflare-ech.com'
     })
+  })
+
+  it('exports only real plain proxy outbounds to proxy-list lines', () => {
+    expect(exportOutboundToProxyLine({
+      protocol: 'http',
+      outbound: {
+        type: 'http',
+        server: 'proxy.example.com',
+        server_port: 8080,
+        username: 'user',
+        password: 'pa:ss'
+      }
+    })).toBe('http://user:pa%3Ass@proxy.example.com:8080')
+
+    expect(exportOutboundToProxyLine({
+      protocol: 'socks',
+      outbound: {
+        type: 'socks',
+        version: '5',
+        server: '2001:db8::1',
+        server_port: 1080
+      }
+    })).toBe('socks5://[2001:db8::1]:1080')
+
+    expect(exportOutboundToProxyLine(parseVpnProfiles(
+      'naive://user:pass@naive.example.com:443?sni=front.example.com#Naive'
+    )[0])).toBe('https://user:pass@naive.example.com:443')
+  })
+
+  it('does not coerce VPN links into fake proxy-list credentials', () => {
+    const [profile] = parseVpnProfiles(
+      'vless://00000000-0000-4000-8000-000000000000@vless.example.com:443?security=tls&sni=front.example.com#VLESS'
+    )
+
+    expect(exportOutboundToProxyLine(profile)).toBeNull()
   })
 
   it('summarizes stealth capabilities for Naive ECH profiles', () => {

@@ -7,7 +7,7 @@ import { rm } from 'fs/promises'
 import { promisify } from 'util'
 import { join } from 'path'
 import { happDetector } from './happDetector'
-import { tunController, detectForeignTun, killOwnedTunRuntimeProcesses } from './tunController'
+import { tunController, detectForeignTun, killOwnedTunRuntimeProcesses, isOwnedTunRuntimeRunning } from './tunController'
 import { classifyNavigation } from './navigationPolicy'
 import { ipMonitor } from './ipMonitor'
 import { autoconfig } from './autoconfig'
@@ -45,7 +45,7 @@ import { runAutoPilot } from './autoPilot'
 import { notify, setInAppFallbackCallback } from './notifications'
 import { exportDiagnosticsZip } from './diagnosticsExport'
 import { captureSnapshot, getSnapshotsDir, startPeriodicSnapshots, stopPeriodicSnapshots } from './systemSnapshot'
-import { runLeakSelfTest, startPeriodicLeakTest, stopPeriodicLeakTest, setLeakDetectedCallback, startNetworkChangeWatcher, stopNetworkChangeWatcher } from './leakSelfTest'
+import { runLeakSelfTest, startPeriodicLeakTest, stopPeriodicLeakTest, setLeakDetectedCallback, startNetworkChangeWatcher, stopNetworkChangeWatcher, suppressLeakSelfTestsFor } from './leakSelfTest'
 import { getTrafficForensicsStatus, restartTrafficForensicsSession, startTrafficForensicsSession, stopTrafficForensicsSession } from './trafficForensics'
 import { trafficMonitor, type TrafficStats } from './trafficMonitor'
 import { applyBrowserLeakProtection, rollbackBrowserLeakProtection } from './browserHardening'
@@ -479,6 +479,7 @@ async function resolveProxyForTrayStart(): Promise<{ proxyAddr: string; proxyTyp
 }
 
 async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http'): Promise<{ success: boolean; error?: string; warning?: string | null; vpnIp?: string | null }> {
+  suppressLeakSelfTestsFor(20_000, 'local-proxy-start')
   // Snapshot BEFORE we change anything. This is the baseline state that
   // support/diagnostics will compare against.
   captureSnapshot('tun-pre-start').catch(() => undefined)
@@ -640,6 +641,7 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
 }
 
 async function startDirectVpnProtection(): Promise<{ success: boolean; error?: string; warning?: string | null; vpnIp?: string | null }> {
+  suppressLeakSelfTestsFor(20_000, 'direct-vpn-start')
   captureSnapshot('tun-pre-start').catch(() => undefined)
 
   const staleKillSwitch = await clearStaleKillSwitchBeforeStart('Direct VPN start')
@@ -936,32 +938,10 @@ async function performCrashRecovery(): Promise<void> {
 
   await recoverStaleBaseline()
 
-  await recoverStaleKillSwitch(async () => {
-    try {
-      const { stdout } = await exec('tasklist /FI "IMAGENAME eq vpnte-sing-box.exe" /FO CSV /NH', {
-        windowsHide: true,
-        timeout: 5000,
-        encoding: 'utf8'
-      })
-      return String(stdout).toLowerCase().includes('vpnte-sing-box.exe')
-    } catch {
-      return false
-    }
-  })
+  await recoverStaleKillSwitch(isOwnedTunRuntimeRunning)
 
   if (await isPhysicalAdapterLockdownApplied()) {
-    let singboxRunning = false
-    try {
-      const { stdout } = await exec('tasklist /FI "IMAGENAME eq vpnte-sing-box.exe" /FO CSV /NH', {
-        windowsHide: true,
-        timeout: 5000,
-        encoding: 'utf8'
-      })
-      singboxRunning = String(stdout).toLowerCase().includes('vpnte-sing-box.exe')
-    } catch {
-      // If tasklist fails we assume sing-box is not running and roll back.
-    }
-    if (!singboxRunning) {
+    if (!(await isOwnedTunRuntimeRunning())) {
       logEvent('warn', 'phys-lockdown', 'recovering stale adapter lockdown — sing-box not running')
       try {
         await rollbackPhysicalAdapterLockdownIfApplied('startup recovery — sing-box not running')
@@ -1052,6 +1032,10 @@ app.whenReady().then(async () => {
     logEvent('warn', 'app', 'failed to start elevated PS helper', err)
   )
 
+  await performCrashRecovery().catch(err =>
+    logEvent('warn', 'app', 'crash recovery failed', err)
+  )
+
   createWindow()
   tray = createTray(mainWindow!, {
     onStart: startProtectionFromTray,
@@ -1061,10 +1045,6 @@ app.whenReady().then(async () => {
     onQuit: quitFromTray
   })
   refreshTrayState()
-
-  void performCrashRecovery().catch(err =>
-    logEvent('warn', 'app', 'crash recovery failed', err)
-  )
 
   setTimeout(() => {
     isKillSwitchActive()
@@ -1356,7 +1336,7 @@ app.whenReady().then(async () => {
   })
 
   handleLogged('firewall:repair-health', async () => {
-    return getFirewallRepairHealth()
+    return getFirewallRepairHealth({ protectedTunnelActive: tunController.getStatus().running })
   })
 
   handleLogged('firewall:repair-vpnte-rules', async () => {
@@ -1366,7 +1346,7 @@ app.whenReady().then(async () => {
         skipped: true,
         blocked: true,
         message: 'Отключите VPN перед починкой firewall-правил: во время активного TUN kill-switch нельзя снимать безопасно.',
-        health: await getFirewallRepairHealth()
+        health: await getFirewallRepairHealth({ protectedTunnelActive: true })
       }
     }
     return repairVpnteFirewallRules()

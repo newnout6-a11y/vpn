@@ -35,6 +35,7 @@ import { randomUUID } from 'crypto'
 import { logEvent } from './appLogger'
 import { tunController, getDirectProxyPort } from './tunController'
 import { getClashApiInfo } from './tunController'
+import { settingsStore } from './settings'
 import {
   scoreSinglePage,
   compareRenders,
@@ -90,6 +91,10 @@ export interface UrlAvailabilityResult {
     | 'unknown'
   /** Human-readable next step for the user. */
   recommendation: string
+}
+
+interface UrlAvailabilityOptions {
+  disableGeoLookup?: boolean
 }
 
 // ─── Store: history of recent checks ─────────────────────────────────────────
@@ -283,8 +288,9 @@ async function probeHttp(
   }
 }
 
-async function fetchAsn(ip: string): Promise<PathReport['asn']> {
+async function fetchAsn(ip: string, options: UrlAvailabilityOptions = {}): Promise<PathReport['asn']> {
   if (!ip || isPoisonedIp(ip)) return null
+  if (options.disableGeoLookup === true) return null
   try {
     const resp = await axios.get(`https://ipapi.co/${ip}/json/`, { timeout: 5000 })
     if (resp.data && !resp.data.error) {
@@ -302,7 +308,7 @@ async function fetchAsn(ip: string): Promise<PathReport['asn']> {
 // ─── Full native probe (used for the "tunnel" path always, and for the
 //      "direct" path when VPN is off) ────────────────────────────────────────
 
-async function probeNative(parsed: ParsedUrl): Promise<PathReport> {
+async function probeNative(parsed: ParsedUrl, options: UrlAvailabilityOptions = {}): Promise<PathReport> {
   const totalStart = Date.now()
   const dnsRes = await probeDns(parsed.host)
   if (!dnsRes || !dnsRes.resolved || dnsRes.poisoned) {
@@ -323,7 +329,7 @@ async function probeNative(parsed: ParsedUrl): Promise<PathReport> {
   }
 
   const firstIp = dnsRes.ips[0]
-  const asn = await fetchAsn(firstIp).catch(() => null)
+  const asn = await fetchAsn(firstIp, options).catch(() => null)
 
   const tcpRes = await probeTcp(parsed.host, parsed.port)
   if (!tcpRes.connected) {
@@ -675,7 +681,7 @@ function geoBlockMessage(v: GeoBlockVerdict): string {
 
 // ─── Public entry point ──────────────────────────────────────────────────────
 
-export async function checkUrl(input: string): Promise<UrlAvailabilityResult> {
+export async function checkUrl(input: string, options: UrlAvailabilityOptions = {}): Promise<UrlAvailabilityResult> {
   const parsed = parseUrlForProbe(input)
   if (!parsed) {
     throw new Error('Не удалось разобрать ссылку. Введите URL вида example.com или https://example.com/path.')
@@ -697,13 +703,13 @@ export async function checkUrl(input: string): Promise<UrlAvailabilityResult> {
   let direct: PathReport | null = null
   if (tunRunning) {
     const [t, d] = await Promise.all([
-      probeNative(parsed),
+      probeNative(parsed, options),
       probeViaClashApi(parsed)
     ])
     tunnel = t
     direct = d
   } else {
-    direct = await probeNative(parsed)
+    direct = await probeNative(parsed, options)
   }
 
   // ─── Geo-block determination via rendered-page signals ──────────────────
@@ -763,7 +769,9 @@ export function clearHistory(): void {
 
 export function registerUrlAvailabilityHandlers(): void {
   ipcMain.handle('url-availability:check', async (_event, url: string) => {
-    return checkUrl(url)
+    return checkUrl(url, {
+      disableGeoLookup: settingsStore.get().disableGeoLookup === true
+    })
   })
   ipcMain.handle('url-availability:history', async () => {
     return getHistory()

@@ -49,6 +49,10 @@ vi.mock('child_process', () => ({
         cb(new Error('reg add failed'), '', 'reg add failed')
         return
       }
+      if (state.failOptionalDeletes && cmd.startsWith('reg delete')) {
+        cb(new Error('optional value missing'), '', 'ERROR: The system was unable to find the specified registry key or value.')
+        return
+      }
       cb(null, '', '')
     })
   },
@@ -121,6 +125,20 @@ describe('systemNetwork baseline manifest', () => {
       expect.stringContaining('reg add')
     ]))
     expect(result.details).toContain('warnings:')
+  })
+
+  it('treats missing optional proxy registry values as a clean no-op', async () => {
+    ;(globalThis as any).__systemNetworkMock = {
+      failRegExport: false,
+      failOptionalDeletes: true
+    }
+    const { applyTunNetworkBaseline } = await import('./systemNetwork')
+
+    const result = await applyTunNetworkBaseline()
+
+    expect(result.success).toBe(true)
+    expect(result.warnings).toEqual([])
+    expect(result.details).not.toContain('warnings:')
   })
 
   it('treats missing baseline manifest as an idempotent rollback no-op', async () => {

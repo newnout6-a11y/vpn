@@ -3,7 +3,6 @@ import { logEvent } from './appLogger'
 
 const IP_CHECK_URLS = [
   'https://api.ipify.org?format=json',
-  'https://ipinfo.io/json',
   'https://api.myip.com'
 ]
 

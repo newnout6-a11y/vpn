@@ -19,6 +19,7 @@ import {
 } from 'lucide-react'
 import { MacModal, MacButton, MacCard, MacBadge, MacSelect } from '../design-system'
 import { countryFlagFromCountryOrName, detectCountry } from './countryGlyph'
+import { useAppStore } from '../store'
 import type { ClientDevice, ServerGroup, ServerProfile } from '../../shared/ipc-types'
 
 interface IpInfo {
@@ -104,7 +105,8 @@ function normalizeClientDevice(value: unknown): ClientDevice {
  * Modal that shows detailed metadata about a VPN server profile.
  *
  * Combines two data sources:
- *   1. ipapi.co (best-effort) for country / city / provider / map preview.
+ *   1. Best-effort online geo lookup for country / city / provider / map
+ *      preview, skipped entirely when the geo-privacy setting is enabled.
  *   2. window.electronAPI.serverProbe — main-process active probing of the
  *      host: DNS resolution, reverse DNS, ASN, TCP latency, common-port
  *      scan, TLS cert inspection, HTTP banner. Anything that can't be
@@ -112,6 +114,7 @@ function normalizeClientDevice(value: unknown): ClientDevice {
  */
 export function ServerDetailModal({ open, profile, onClose, onProfileUpdated }: ServerDetailModalProps) {
   const { t } = useTranslation()
+  const disableGeoLookup = useAppStore(s => s.settings.disableGeoLookup)
   const [ipInfo, setIpInfo] = useState<IpInfo | null>(null)
   const [loading, setLoading] = useState(false)
   const [probe, setProbe] = useState<ServerProbeResult | null>(null)
@@ -216,34 +219,39 @@ export function ServerDetailModal({ open, profile, onClose, onProfileUpdated }: 
       return
     }
 
-    setLoading(true)
+    setLoading(!disableGeoLookup)
     setProbing(true)
     let cancelled = false
 
-    // Geo info (existing behaviour).
-    fetch(`https://ipapi.co/${host}/json/`, { method: 'GET' })
-      .then(r => (r.ok ? r.json() : null))
-      .then(data => {
-        if (cancelled) return
-        if (data && !data.error) {
-          setIpInfo({
-            ip: data.ip || host,
-            country: data.country_name,
-            city: data.city,
-            region: data.region,
-            org: data.org,
-            loc:
-              data.latitude && data.longitude
-                ? `${data.latitude},${data.longitude}`
-                : undefined,
-            timezone: data.timezone
-          })
-        }
-      })
-      .catch(() => {})
-      .finally(() => {
-        if (!cancelled) setLoading(false)
-      })
+    if (!disableGeoLookup) {
+      // Geo info (best effort). Skipped when the privacy setting is ON so
+      // opening server details cannot send the VPN/server IP to ipapi.co.
+      fetch(`https://ipapi.co/${host}/json/`, { method: 'GET' })
+        .then(r => (r.ok ? r.json() : null))
+        .then(data => {
+          if (cancelled) return
+          if (data && !data.error) {
+            setIpInfo({
+              ip: data.ip || host,
+              country: data.country_name,
+              city: data.city,
+              region: data.region,
+              org: data.org,
+              loc:
+                data.latitude && data.longitude
+                  ? `${data.latitude},${data.longitude}`
+                  : undefined,
+              timezone: data.timezone
+            })
+          }
+        })
+        .catch(() => {})
+        .finally(() => {
+          if (!cancelled) setLoading(false)
+        })
+    } else {
+      setLoading(false)
+    }
 
     // Active probe via main process (DNS/latency/ports/TLS).
     window.electronAPI.serverProbe(host, port)
@@ -262,7 +270,7 @@ export function ServerDetailModal({ open, profile, onClose, onProfileUpdated }: 
     return () => {
       cancelled = true
     }
-  }, [open, profile])
+  }, [open, profile, disableGeoLookup])
 
   if (!profile) return null
 
@@ -423,7 +431,7 @@ export function ServerDetailModal({ open, profile, onClose, onProfileUpdated }: 
             {t('serverDetail.loading')}
           </p>
         )}
-        {(ipInfo || fallbackCountry) && (
+        {(ipInfo || (!disableGeoLookup && fallbackCountry)) && (
           <MacCard className="!p-3">
             <h4 className="text-xs font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider mb-2">
               {t('serverDetail.location')}

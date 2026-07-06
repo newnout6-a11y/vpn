@@ -31,6 +31,7 @@ import {
   normalizeClientDevice,
   resolveVpnProfiles,
   exportOutboundToUri,
+  exportOutboundToProxyLine,
   type VpnProfile
 } from './vpnProfiles'
 import { settingsStore } from './settings'
@@ -53,6 +54,14 @@ const execFile = promisify(execFileCb)
 const CURL_BIN = process.platform === 'win32' ? 'curl.exe' : 'curl'
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+function geoLookupDisabled(): boolean {
+  try {
+    return settingsStore.get().disableGeoLookup === true
+  } catch {
+    return false
+  }
+}
 
 // ─── Persistent Store ────────────────────────────────────────────────────────
 
@@ -801,6 +810,7 @@ function chooseGeoCountry(ip: string, votes: GeoVote[]): string | null {
 }
 
 async function fetchSecondaryGeoVote(ip: string, source: 'ipwho.is' | 'ipinfo.is' | 'ipinfo.io' | 'iplocation.net'): Promise<GeoVote | null> {
+  if (geoLookupDisabled()) return null
   try {
     if (source === 'ipwho.is') {
       const resp = await fetchGeoJson<any>(`https://ipwho.is/${encodeURIComponent(ip)}`, { timeoutSeconds: 5 })
@@ -862,6 +872,7 @@ async function fetchSecondaryGeoVote(ip: string, source: 'ipwho.is' | 'ipinfo.is
 async function batchGeolocateIps(ips: string[]): Promise<Map<string, string>> {
   const out = new Map<string, string>()
   const unique = [...new Set(ips.filter(Boolean))]
+  if (geoLookupDisabled() || unique.length === 0) return out
   const votesByIp = new Map<string, GeoVote[]>()
   for (const ip of unique) votesByIp.set(ip, [])
 
@@ -917,6 +928,7 @@ async function batchGeolocateIps(ips: string[]): Promise<Map<string, string>> {
 }
 
 export async function geolocateIp(ip: string): Promise<string | null> {
+  if (geoLookupDisabled()) return null
   const map = await batchGeolocateIps([ip])
   return map.get(ip) ?? null
 }
@@ -959,6 +971,7 @@ export function updateActiveProfileCountry(country: string, ip?: string | null):
 }
 
 export async function verifyProfileCountry(id: string): Promise<ServerProfile | null> {
+  if (geoLookupDisabled()) return null
   const profiles = getProfiles()
   const idx = profiles.findIndex(p => p.id === id)
   if (idx === -1) return null
@@ -2053,6 +2066,7 @@ export function registerServerPickerHandlers(): void {
   handleLogged('servers:verify-active-country', async (_event, ip: string) => {
     const cleanIp = requireString(ip, 'ip', { allowEmpty: true, maxLength: 128 })
     if (!cleanIp) return { ok: false as const, reason: 'missing-ip' }
+    if (geoLookupDisabled()) return { ok: false as const, reason: 'geo-lookup-disabled' }
     const country = await geolocateIp(cleanIp)
     if (!country) return { ok: false as const, reason: 'geo-lookup-failed' }
     const profile = updateActiveProfileCountry(country, cleanIp)
@@ -2063,6 +2077,7 @@ export function registerServerPickerHandlers(): void {
   handleLogged('servers:verify-country', async (_event, id: string) => {
     const cleanId = requireString(id, 'id', { allowEmpty: true, maxLength: 200 })
     if (!cleanId) return { ok: false as const, reason: 'missing-id' }
+    if (geoLookupDisabled()) return { ok: false as const, reason: 'geo-lookup-disabled' }
     const profile = await verifyProfileCountry(cleanId)
     if (!profile) return { ok: false as const, reason: 'geo-lookup-failed' }
     return { ok: true as const, country: profile.country ?? '', profile }
@@ -2258,6 +2273,66 @@ export function registerServerPickerHandlers(): void {
       }
     } catch (err: any) {
       logEvent('warn', 'server-picker', 'export-all-keys-file write failed', {
+        path: choice.filePath,
+        error: err?.message || String(err)
+      })
+      return { ok: false as const, reason: 'write-failed', error: err?.message || String(err) }
+    }
+  })
+
+  handleLogged('servers:export-all-proxies-file', async () => {
+    const profiles = getProfiles()
+    if (!profiles.length) return { ok: false as const, reason: 'no-profiles' }
+
+    const lines: string[] = []
+    let skipped = 0
+    for (const profile of profiles) {
+      if (!profile.outbound || typeof profile.outbound !== 'object') { skipped++; continue }
+      const line = exportOutboundToProxyLine({
+        protocol: profile.protocol,
+        outbound: profile.outbound
+      })
+      if (!line) { skipped++; continue }
+      lines.push(line)
+    }
+
+    if (!lines.length) {
+      return { ok: false as const, reason: 'unsupported-all', skipped, total: profiles.length }
+    }
+
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+    const defaultFileName = `proxy-list-${stamp}.txt`
+
+    const choice = await dialog.showSaveDialog({
+      title: 'Сохранить proxy-list',
+      defaultPath: join(app.getPath('desktop'), defaultFileName),
+      filters: [
+        { name: 'Text file', extensions: ['txt'] },
+        { name: 'All files', extensions: ['*'] }
+      ]
+    })
+
+    if (choice.canceled || !choice.filePath) {
+      return { ok: false as const, cancelled: true as const }
+    }
+
+    try {
+      await writeFile(choice.filePath, lines.join('\n') + '\n', 'utf8')
+      logEvent('info', 'server-picker', 'export-all-proxies-file', {
+        path: choice.filePath,
+        total: profiles.length,
+        exported: lines.length,
+        skipped
+      })
+      return {
+        ok: true as const,
+        path: choice.filePath,
+        total: profiles.length,
+        exported: lines.length,
+        skipped
+      }
+    } catch (err: any) {
+      logEvent('warn', 'server-picker', 'export-all-proxies-file write failed', {
         path: choice.filePath,
         error: err?.message || String(err)
       })

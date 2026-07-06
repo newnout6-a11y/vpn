@@ -119,6 +119,14 @@ function errorText(err: any): string {
   return String(err?.stderr || err?.stdout || err?.message || err || 'unknown error').replace(/\s+/g, ' ').trim()
 }
 
+function isOptionalProxyDeleteCommand(cmd: string): boolean {
+  return /^reg delete /i.test(cmd) && (
+    cmd.includes('"HKCU\\Environment"') ||
+    cmd.includes('"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyServer') ||
+    cmd.includes('"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v AutoConfigURL')
+  )
+}
+
 async function createBackup(): Promise<NetworkBackupManifest> {
   await mkdir(backupDir(), { recursive: true })
   const stamp = timestamp()
@@ -213,6 +221,10 @@ async function applyTunNetworkBaselineUnlocked(): Promise<SystemNetworkResult> {
         await exec(cmd, { windowsHide: true, timeout: 5000 })
       } catch (err: any) {
         const text = errorText(err)
+        if (isOptionalProxyDeleteCommand(cmd)) {
+          logEvent('debug', 'system-network', 'optional proxy registry value already absent', { command: cmd, error: text })
+          return
+        }
         const missingValue = /reg delete/i.test(cmd) && /unable to find|cannot find|system was unable to find|не удается найти/i.test(text)
         if (missingValue) return
         const warning = `${cmd.split(' /v ')[0]} failed: ${text}`

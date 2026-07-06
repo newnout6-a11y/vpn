@@ -44,9 +44,11 @@ vi.mock('./tunController', () => ({
 // Import after mocks
 import {
   addProcessName,
+  fallbackAppNameFromPath,
   generateSplitTunnelRouteRules,
   getDirectProcessNames,
   getVpnProcessNames,
+  sanitizeAppDisplayName,
   normalizeProcessName,
   splitTunneling
 } from './splitTunneling'
@@ -70,6 +72,42 @@ describe('splitTunneling', () => {
     it('returns empty array when no apps have vpn rule', () => {
       const names = getVpnProcessNames()
       expect(names).toEqual([])
+    })
+  })
+
+  describe('app display name sanitization', () => {
+    it('cleans mojibake suffixes without losing the useful product name', () => {
+      const name = sanitizeAppDisplayName(
+        'Hiddify, \uFFFD\uFFFD\uFFFD\uFFFD\uFFFD 2.5.7+20507',
+        'C:\\Program Files\\Hiddify\\Hiddify.exe'
+      )
+
+      expect(name).toBe('Hiddify 2.5.7+20507')
+      expect(name).not.toContain('\uFFFD')
+    })
+
+    it('falls back to the application folder when the whole display name is corrupt', () => {
+      expect(
+        sanitizeAppDisplayName(
+          '\uFFFD\uFFFD\uFFFD\uFFFD\uFFFD\uFFFD \uFFFD\uFFFD멋 5.108.3',
+          'C:\\Users\\Redmi\\AppData\\Local\\Programs\\YandexMusic\\broken.exe'
+        )
+      ).toBe('YandexMusic')
+    })
+
+    it('drops broken architecture suffixes from otherwise readable names', () => {
+      expect(
+        sanitizeAppDisplayName(
+          'WinRAR 7.01 (64-\uFFFD來\uFFFD\uFFFD)',
+          'C:\\Program Files\\WinRAR\\Rar.exe'
+        )
+      ).toBe('WinRAR 7.01')
+    })
+
+    it('prefers a stable folder name over numeric executable leaves', () => {
+      expect(fallbackAppNameFromPath('C:\\Program Files\\WinRAR\\Rar.exe')).toBe('WinRAR')
+      expect(fallbackAppNameFromPath('C:\\Program Files\\7-Zip\\7z.exe')).toBe('7-Zip')
+      expect(fallbackAppNameFromPath('C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe')).toBe('chrome')
     })
   })
 

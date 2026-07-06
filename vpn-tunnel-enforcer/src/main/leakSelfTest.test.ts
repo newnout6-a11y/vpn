@@ -96,4 +96,24 @@ describe('runLeakSelfTest coalescing', () => {
     expect(result.dnsLeakDetail).toContain('5.6.7.8')
     expect(result.summary).toContain('OK:')
   })
+
+  it('suppresses event-triggered leak checks during TUN start transitions', async () => {
+    vi.useFakeTimers()
+    try {
+      const { suppressLeakSelfTestsFor, triggerLeakCheckNow } = await import('./leakSelfTest')
+
+      suppressLeakSelfTestsFor(20_000, 'test-start')
+      triggerLeakCheckNow('network-change')
+
+      expect(execMock).not.toHaveBeenCalled()
+      expect(logEventMock).toHaveBeenCalledWith(
+        'debug',
+        'leak-test',
+        'event-triggered run suppressed during transition',
+        expect.objectContaining({ reason: 'network-change' })
+      )
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })

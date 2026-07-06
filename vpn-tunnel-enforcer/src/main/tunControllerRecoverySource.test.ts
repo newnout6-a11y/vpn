@@ -67,4 +67,18 @@ describe('tunController recovery cancellation guards', () => {
     expect(cleanup).toBeGreaterThan(helper)
     expect(source).not.toContain('function psQuote(value: string): string')
   })
+
+  it('keeps public Wi-Fi compatibility from forcing DNS on physical adapters', async () => {
+    const source = await readFile(join(here, 'tunController.ts'), 'utf8')
+    const compatibility = source.indexOf('const publicWifiCompatibility =')
+    const forceDns = source.indexOf('const adapterLockdownForceDns = !publicWifiCompatibility', compatibility)
+    const lockdownCall = source.indexOf('applyPhysicalAdapterLockdown(TUN_IPV4_RESOLVER', forceDns)
+    const option = source.indexOf('forceDns: adapterLockdownForceDns', lockdownCall)
+
+    expect(compatibility).toBeGreaterThan(0)
+    expect(forceDns).toBeGreaterThan(compatibility)
+    expect(lockdownCall).toBeGreaterThan(forceDns)
+    expect(option).toBeGreaterThan(lockdownCall)
+    expect(source).not.toContain('applyPhysicalAdapterLockdown(TUN_IPV4_RESOLVER, {\n              forceDns: true')
+  })
 })

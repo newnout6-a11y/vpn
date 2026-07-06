@@ -75,6 +75,15 @@ describe('buildActiveProfileDiagnosticItems', () => {
     expect(source).toContain('!isBenignSingBoxLogNoise(line)')
   })
 
+  it('filters optional proxy registry cleanup warnings from app-log health', () => {
+    const source = systemDiagnosticsSource()
+
+    expect(source).toContain('function isBenignAppLogWarning')
+    expect(source).toContain('baseline command failed')
+    expect(source).toContain('HKCU\\\\Environment')
+    expect(source).toContain('isBenignAppLogWarning(row)')
+  })
+
   it('reports missing active profile without warning', () => {
     const [item] = buildActiveProfileDiagnosticItems(null)
     expect(item.id).toBe('active-profile-capabilities')

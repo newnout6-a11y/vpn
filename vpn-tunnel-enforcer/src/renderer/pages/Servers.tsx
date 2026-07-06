@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef, type KeyboardEvent } from 'react'
 import { useTranslation } from 'react-i18next'
-import { motion, AnimatePresence } from 'framer-motion'
+import { motion } from 'framer-motion'
 import {
   Server,
   Wifi,
@@ -52,6 +52,12 @@ interface HealthRow {
   online: boolean
   latencyMs: number | null
   reason?: string
+}
+
+interface BulkNotice {
+  tone: 'info' | 'success' | 'error'
+  title: string
+  message: string
 }
 
 export function displayedServerPing(profile: Pick<ServerProfile, 'ping'>, perRowPing?: Pick<PerRowPing, 'ping'>): number | null {
@@ -243,6 +249,8 @@ export function Servers() {
   const [detailProfile, setDetailProfile] = useState<ServerProfile | null>(null)
   const [exportFlash, setExportFlash] = useState<Record<string, 'copied' | 'saved' | 'failed'>>({})
   const [exportingAll, setExportingAll] = useState(false)
+  const [exportingProxies, setExportingProxies] = useState(false)
+  const [bulkNotice, setBulkNotice] = useState<BulkNotice | null>(null)
   const [expandedIds, setExpandedIds] = useState<Set<string>>(() => readExpandedIds())
   const [switchingId, setSwitchingId] = useState<string | null>(null)
 
@@ -322,17 +330,14 @@ export function Servers() {
 
   useEffect(() => {
     let mounted = true
-    ;(async () => {
-      try {
-        await refreshAll()
-      } finally {
-        if (mounted) setLoading(false)
-      }
-    })()
+    void fetchProfiles().finally(() => {
+      if (mounted) setLoading(false)
+    })
+    void fetchGroups()
     return () => {
       mounted = false
     }
-  }, [refreshAll])
+  }, [fetchProfiles, fetchGroups])
 
   // Auto-expand when there is exactly one effective group, and remember the
   // user's choices via localStorage on every change.
@@ -675,9 +680,21 @@ export function Servers() {
 
   const handleExportAll = async () => {
     setExportingAll(true)
+    setBulkNotice({
+      tone: 'info',
+      title: t('servers.exportAllKeys'),
+      message: t('servers.exportKeysWorking', 'Готовим файл с ключами...')
+    })
     try {
       const result = await window.electronAPI.serversExportAllKeysToFile()
       if (result.ok) {
+        setBulkNotice({
+          tone: 'success',
+          title: t('servers.exportAllKeys'),
+          message:
+            `Сохранено ${result.exported} ключей` +
+            (result.skipped > 0 ? `, пропущено: ${result.skipped}` : '')
+        })
         addLog(
           'info',
           `Сохранено ${result.exported} ключей в ${result.path}` +
@@ -685,13 +702,96 @@ export function Servers() {
         )
         return
       }
-      if ((result as any).cancelled) return
+      if ((result as any).cancelled) {
+        setBulkNotice(null)
+        return
+      }
       const reason = (result as { reason?: string }).reason || 'неизвестная ошибка'
+      setBulkNotice({
+        tone: 'error',
+        title: t('servers.exportAllKeys'),
+        message: `Не удалось сохранить ключи: ${reason}`
+      })
       addLog('error', `Не удалось сохранить ключи: ${reason}`)
     } catch (err: any) {
+      setBulkNotice({
+        tone: 'error',
+        title: t('servers.exportAllKeys'),
+        message: `Не удалось сохранить ключи: ${err?.message ?? err}`
+      })
       addLog('error', `Не удалось сохранить ключи: ${err?.message ?? err}`)
     } finally {
       setExportingAll(false)
+    }
+  }
+
+  const handleExportProxyList = async () => {
+    setExportingProxies(true)
+    setBulkNotice({
+      tone: 'info',
+      title: t('servers.exportProxyList', 'Proxy list'),
+      message: t('servers.exportProxyListWorking', 'Собираем proxy-list в формате по одному proxy на строку...')
+    })
+    try {
+      const api = window.electronAPI as typeof window.electronAPI & {
+        serversExportAllProxiesToFile?: () => Promise<
+          | { ok: true; path: string; total: number; exported: number; skipped: number }
+          | { ok: false; cancelled: true }
+          | { ok: false; reason: string; error?: string; total?: number; skipped?: number }
+        >
+      }
+      if (typeof api.serversExportAllProxiesToFile !== 'function') {
+        setBulkNotice({
+          tone: 'error',
+          title: t('servers.exportProxyList', 'Proxy list'),
+          message: 'Proxy-list export is not available in this build'
+        })
+        addLog('error', 'Proxy-list export is not available in this build')
+        return
+      }
+      const result = await api.serversExportAllProxiesToFile()
+      if (result.ok) {
+        setBulkNotice({
+          tone: 'success',
+          title: t('servers.exportProxyList', 'Proxy list'),
+          message:
+            `Сохранено ${result.exported} proxy` +
+            (result.skipped > 0 ? `, пропущено: ${result.skipped}` : '')
+        })
+        addLog(
+          'info',
+          `Proxy-list: saved ${result.exported} proxies to ${result.path}` +
+            (result.skipped > 0 ? ` (skipped: ${result.skipped})` : '')
+        )
+        return
+      }
+      if ((result as any).cancelled) {
+        setBulkNotice(null)
+        return
+      }
+      const reason = (result as { reason?: string; skipped?: number; total?: number }).reason || 'unknown error'
+      const skipped = (result as { skipped?: number }).skipped
+      setBulkNotice({
+        tone: 'error',
+        title: t('servers.exportProxyList', 'Proxy list'),
+        message:
+          `Proxy-list export failed: ${reason}` +
+          (typeof skipped === 'number' ? ` (skipped: ${skipped})` : '')
+      })
+      addLog(
+        'error',
+        `Proxy-list export failed: ${reason}` +
+          (typeof skipped === 'number' ? ` (skipped: ${skipped})` : '')
+      )
+    } catch (err: any) {
+      setBulkNotice({
+        tone: 'error',
+        title: t('servers.exportProxyList', 'Proxy list'),
+        message: `Proxy-list export failed: ${err?.message ?? err}`
+      })
+      addLog('error', `Proxy-list export failed: ${err?.message ?? err}`)
+    } finally {
+      setExportingProxies(false)
     }
   }
 
@@ -955,10 +1055,20 @@ export function Servers() {
             variant="secondary"
             onClick={handleExportAll}
             loading={exportingAll}
-            disabled={totalProfiles === 0 || exportingAll}
+            disabled={totalProfiles === 0 || exportingAll || exportingProxies}
           >
             <Download className="w-4 h-4 mr-2" />
             {t('servers.exportAllKeys')}
+          </MacButton>
+          <MacButton
+            variant="secondary"
+            onClick={handleExportProxyList}
+            loading={exportingProxies}
+            disabled={totalProfiles === 0 || exportingAll || exportingProxies}
+            title="host:port, host:port:user:pass, protocol://user:pass@host:port"
+          >
+            <Download className="w-4 h-4 mr-2" />
+            {t('servers.exportProxyList', 'Proxy list')}
           </MacButton>
           <MacButton
             variant="secondary"
@@ -972,14 +1082,42 @@ export function Servers() {
         </div>
       </div>
 
+      {bulkNotice && (
+        <div
+          className={
+            'rounded-[var(--radius-sm)] border px-3 py-2 text-sm ' +
+            (bulkNotice.tone === 'success'
+              ? 'border-[var(--color-success)]/30 bg-[var(--color-success)]/8 text-[var(--color-success)]'
+              : bulkNotice.tone === 'error'
+                ? 'border-[var(--color-danger)]/30 bg-[var(--color-danger)]/8 text-[var(--color-danger)]'
+                : 'border-[var(--color-accent)]/25 bg-[var(--color-accent)]/8 text-[var(--color-text)]')
+          }
+          aria-live="polite"
+        >
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="font-medium">{bulkNotice.title}</div>
+              <div className="text-xs opacity-85">{bulkNotice.message}</div>
+            </div>
+            {(exportingAll || exportingProxies) && (
+              <Loader2 className="h-4 w-4 animate-spin shrink-0" />
+            )}
+          </div>
+          {(exportingAll || exportingProxies) && (
+            <MacProgress indeterminate size="sm" className="mt-2" />
+          )}
+        </div>
+      )}
+
       {/* Add card */}
-      <MacCard>
+      <MacCard className="relative z-30 overflow-visible">
         <div className="grid grid-cols-1 gap-3 xl:grid-cols-[minmax(360px,1fr)_minmax(220px,0.55fr)_9rem_auto] xl:items-end">
           <div className="min-w-0">
             <MacInput
               label={t('servers.add.keyLabel', 'Ключ / подписка')}
               placeholder={t('servers.addPlaceholder')}
               value={addInput}
+              disabled={adding}
               onChange={(e) => {
                 setAddInput(e.target.value)
                 if (addError) setAddError('')
@@ -996,7 +1134,7 @@ export function Servers() {
               options={groupOptions}
               value={addGroupId}
               onChange={(v) => setAddGroupId(v)}
-              disabled={!groupsAvailable && groupOptions.length === 1}
+              disabled={adding || (!groupsAvailable && groupOptions.length === 1)}
             />
           </div>
           <div className="min-w-0">
@@ -1005,18 +1143,31 @@ export function Servers() {
               options={CLIENT_DEVICE_OPTIONS}
               value={addClientDevice}
               onChange={(v) => setAddClientDevice((v === 'android' || v === 'ios' || v === 'mac') ? v : 'pc')}
+              disabled={adding}
             />
           </div>
           <MacButton
             className="w-full xl:w-auto xl:min-w-40 whitespace-nowrap"
             onClick={handleAdd}
             loading={adding}
-            disabled={!addInput.trim()}
+            disabled={adding || !addInput.trim()}
           >
             <Plus className="w-4 h-4 mr-1" />
             {t('servers.addServer')}
           </MacButton>
         </div>
+        {adding && (
+          <div
+            className="mt-4 rounded-[var(--radius-sm)] border border-[var(--color-accent)]/25 bg-[var(--color-accent)]/8 px-3 py-2"
+            aria-live="polite"
+          >
+            <div className="mb-2 flex items-center justify-between gap-3 text-xs text-[var(--color-text-secondary)]">
+              <span>{t('servers.add.loadingKeys', 'Загружаем и проверяем ключи...')}</span>
+              <span className="tabular-nums">{t('common.loading', 'Загрузка...')}</span>
+            </div>
+            <MacProgress indeterminate size="sm" />
+          </div>
+        )}
         {!groupsAvailable && groupsAvailable !== null && (
           <p className="text-[11px] text-[var(--color-text-secondary)] mt-2">
             {t('servers.groups.fallbackHint')}
@@ -1026,13 +1177,15 @@ export function Servers() {
 
       {/* Body */}
       {loading ? (
-        <div className="flex items-center justify-center py-16 text-[var(--color-text-secondary)]">
-          <p className="text-sm">{t('common.loading')}</p>
+        <div className="flex flex-col items-center justify-center gap-3 py-16 text-[var(--color-text-secondary)]">
+          <Loader2 className="h-5 w-5 animate-spin text-[var(--color-accent)]" />
+          <p className="text-sm">{t('servers.loadingProfiles', 'Загружаем серверы...')}</p>
+          <MacProgress indeterminate size="sm" className="w-full max-w-xs" />
         </div>
       ) : totalProfiles === 0 && (groupsAvailable === false || groups.length === 0) ? (
         <EmptyState />
       ) : (
-        <div className="space-y-4">
+        <div className="relative z-0 space-y-4">
           {effectiveGroups.map((group) => {
             const groupProfiles = profilesByGroup[group.id] ?? []
             const isExpanded = expandedIds.has(group.id)
@@ -1363,16 +1516,13 @@ function GroupCard(props: GroupCardProps) {
       </div>
 
       {/* Body */}
-      <AnimatePresence initial={false}>
-        {expanded && (
-          <motion.div
-            key={`body-${group.id}`}
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: 'auto', opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.22, ease: 'easeOut' }}
-            className="overflow-hidden"
-          >
+      {expanded && (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ duration: 0.12, ease: 'easeOut' }}
+          className="overflow-hidden"
+        >
             <div className="px-4 pb-4 pt-1 border-t border-[var(--color-border)]/60 space-y-3">
               {/* Metadata banner */}
               {!isVirtual && groupsAvailable && (
@@ -1419,9 +1569,8 @@ function GroupCard(props: GroupCardProps) {
                 </div>
               )}
             </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+        </motion.div>
+      )}
     </MacCard>
   )
 }
@@ -1595,35 +1744,17 @@ function ServerProfileCard({
     group.lastFetchedAt - lastSeen >= 60_000
 
   return (
-    <motion.div
-      layout
-      initial={false}
-      animate={{
-        scale: isSwitching ? 0.992 : 1
-      }}
-      transition={{ duration: 0.18, ease: 'easeOut' }}
-    >
-      <MacCard
-      hoverable={!isSwitching}
+    <MacCard
       className={
-        '!p-3 cursor-pointer relative overflow-hidden ' +
+        '!p-3 cursor-pointer relative overflow-hidden transition-colors duration-150 hover:!border-[color-mix(in_srgb,var(--color-accent)_24%,var(--color-border))] ' +
         (isActive || isSwitching ? '!border-[var(--color-accent)] ring-1 ring-[var(--color-accent)]/30 ' : '') +
         (isSwitching ? 'shadow-[var(--shadow-card-hover)] ' : '')
       }
       onClick={() => onOpenDetail(profile)}
     >
-      <AnimatePresence>
-        {isSwitching && (
-          <motion.div
-            key="switching-wash"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.16 }}
-            className="pointer-events-none absolute inset-0 bg-[var(--color-accent)]/5"
-          />
-        )}
-      </AnimatePresence>
+      {isSwitching && (
+        <div className="pointer-events-none absolute inset-0 bg-[var(--color-accent)]/5" />
+      )}
       <div className="flex items-center gap-3">
         <MacBadge
           variant={isSwitching ? 'info' : statusVariant(profile.status)}
@@ -1647,7 +1778,7 @@ function ServerProfileCard({
                 {t('servers.groups.removedFromSub')}
               </MacBadge>
             )}
-            <AnimatePresence mode="wait" initial={false}>
+            <>
               {isSwitching ? (
                 <motion.span
                   key="switching"
@@ -1671,7 +1802,7 @@ function ServerProfileCard({
                   <MacBadge variant="success">{t('servers.active')}</MacBadge>
                 </motion.span>
               ) : null}
-            </AnimatePresence>
+            </>
             <MacBadge variant="neutral" className="!text-[10px]">
               {clientDeviceLabel(profile.clientDevice)}
             </MacBadge>
@@ -1834,7 +1965,6 @@ function ServerProfileCard({
         </div>
       </div>
     </MacCard>
-    </motion.div>
   )
 }
 

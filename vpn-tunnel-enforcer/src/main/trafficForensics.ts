@@ -1161,6 +1161,30 @@ export async function getTrafficForensicsStatus(): Promise<TrafficForensicsStatu
   let manifest = await reconcileStaleRunningManifest(await readLatestManifest())
   const artifactFiles = await listTrafficForensicsArtifacts(manifest?.sessionDir ?? null)
   manifest = await reconcileStoppedCaptureManifest(manifest, artifactFiles)
+  if (!settings.enabled && !manifest?.running) {
+    return {
+      enabled: false,
+      running: false,
+      engine: null,
+      sessionId: null,
+      sessionDir: null,
+      mode: null,
+      target: null,
+      startedAt: null,
+      stoppedAt: null,
+      maxSizeMb: settings.maxSizeMb,
+      retainSessions: settings.retainSessions,
+      stopReason: null,
+      lastError: null,
+      schemaVersion: null,
+      summaryPath: null,
+      summaryGeneratedAt: null,
+      summary: null,
+      sidecar: null,
+      artifactFiles: [],
+      health: buildTrafficForensicsHealth([], null, null, emptySidecarEventProbe(), null, false)
+    }
+  }
   const summary = await readSummaryForStatus(manifest?.summaryPath)
   const sidecar = manifest?.sidecar ?? null
   // Only surface the live ETW digest (categories, top domains/endpoints, data

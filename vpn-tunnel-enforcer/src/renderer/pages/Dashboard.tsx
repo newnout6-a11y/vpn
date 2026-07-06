@@ -79,7 +79,11 @@ function countryFlag(country: string | null): string {
 
 // ─── Dashboard Component ────────────────────────────────────────────────────
 
-export function Dashboard() {
+interface DashboardProps {
+  suppressFirewallBannerUntil?: number
+}
+
+export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
   const { t } = useTranslation()
 
   // Store state
@@ -349,7 +353,14 @@ export function Dashboard() {
   // ─── Kill-switch disengage ──────────────────────────────────────────────
 
   const visibleLeak = isLeak && !isServerSwitching
-  const showKillSwitchBanner = firewallKillSwitchActive && !tunRunning && !isServerSwitching && !connecting && !disconnecting && !restartingProgress
+  const showKillSwitchBanner =
+    firewallKillSwitchActive &&
+    !tunRunning &&
+    !isServerSwitching &&
+    !connecting &&
+    !disconnecting &&
+    !restartingProgress &&
+    Date.now() >= suppressFirewallBannerUntil
   const competingTun = useAppStore(s => s.competingTun)
 
   const handleDisengageKillSwitch = async () => {

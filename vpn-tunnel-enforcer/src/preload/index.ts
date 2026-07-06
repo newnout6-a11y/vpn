@@ -101,7 +101,12 @@ export interface ElectronAPI {
   serversExportAllKeysToFile: () => Promise<
     | { ok: true; path: string; total: number; exported: number; skipped: number }
     | { ok: false; cancelled: true }
-    | { ok: false; reason: string; error?: string }
+    | { ok: false; reason: string; error?: string; total?: number; skipped?: number }
+  >
+  serversExportAllProxiesToFile: () => Promise<
+    | { ok: true; path: string; total: number; exported: number; skipped: number }
+    | { ok: false; cancelled: true }
+    | { ok: false; reason: string; error?: string; total?: number; skipped?: number }
   >
   // Server Groups — origin tracking and post-trial-aware refresh.
   groupsList: () => Promise<any[]>
@@ -404,6 +409,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   serversExportKey: (id: string) => ipcRenderer.invoke('servers:export-key', assertString(id, 'id')),
   serversExportKeyToFile: (id: string) => ipcRenderer.invoke('servers:export-key-file', assertString(id, 'id')),
   serversExportAllKeysToFile: () => ipcRenderer.invoke('servers:export-all-keys-file'),
+  serversExportAllProxiesToFile: () => ipcRenderer.invoke('servers:export-all-proxies-file'),
   // Server Groups — origin tracking and post-trial-aware refresh.
   groupsList: () => ipcRenderer.invoke('groups:list'),
   groupsGet: (id: string) => ipcRenderer.invoke('groups:get', assertString(id, 'id')),

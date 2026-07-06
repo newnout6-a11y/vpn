@@ -5,6 +5,7 @@ import { EventEmitter } from 'events'
 
 const execElevatedMock = vi.hoisted(() => vi.fn())
 const spawnMock = vi.hoisted(() => vi.fn())
+const trafficSettingsMock = vi.hoisted(() => ({ enabled: true }))
 process.env.VPNTE_TRAFFIC_FORENSICS_SIDECAR = '0'
 
 vi.mock('electron', () => ({
@@ -31,7 +32,7 @@ vi.mock('./appLogger', () => ({
 vi.mock('./settings', () => ({
   settingsStore: {
     get: () => ({
-      deepTrafficInspectionEnabled: true,
+      deepTrafficInspectionEnabled: trafficSettingsMock.enabled,
       deepTrafficInspectionMaxSizeMb: 512,
       deepTrafficInspectionRetainSessions: 3
     })
@@ -74,6 +75,7 @@ describe('trafficForensics', () => {
     await resetForensicsState()
     execElevatedMock.mockReset()
     spawnMock.mockReset()
+    trafficSettingsMock.enabled = true
     process.env.VPNTE_TRAFFIC_FORENSICS_SIDECAR = '0'
     if (existsSync('C:/Users/Redmi/CascadeProjects/vpn/.tmp/vpnte-traffic-forensics')) {
       rmSync('C:/Users/Redmi/CascadeProjects/vpn/.tmp/vpnte-traffic-forensics', { recursive: true, force: true })
@@ -192,6 +194,28 @@ describe('trafficForensics', () => {
     expect(manifest.running).toBe(false)
     expect(manifest.stopReason).toBe('zombie-recovery')
     expect(manifest.sidecar.running).toBe(false)
+  })
+
+  it('does not surface old stopped sessions when deep capture is disabled', async () => {
+    await resetForensicsState()
+    execElevatedMock.mockResolvedValue({ stdout: '', stderr: '' })
+
+    const started = await startTrafficForensicsSession({
+      mode: 'directVpn',
+      target: 'poland1'
+    })
+    await stopTrafficForensicsSession('manual-stop')
+    trafficSettingsMock.enabled = false
+
+    const status = await getTrafficForensicsStatus()
+
+    expect(existsSync(started.sessionDir!)).toBe(true)
+    expect(status.enabled).toBe(false)
+    expect(status.running).toBe(false)
+    expect(status.sessionId).toBeNull()
+    expect(status.summary).toBeNull()
+    expect(status.artifactFiles).toEqual([])
+    expect(status.health.artifactCount).toBe(0)
   })
 
   it('reports packet capture health and sidecar silence in status', async () => {

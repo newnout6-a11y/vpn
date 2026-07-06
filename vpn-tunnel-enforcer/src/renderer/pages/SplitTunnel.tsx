@@ -1,6 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
-import { AnimatePresence, motion } from 'framer-motion'
 import { Search, FolderOpen, Trash2, TerminalSquare, Plus, Loader2 } from 'lucide-react'
 import { MacCard, MacInput, MacButton, MacBadge } from '../design-system'
 import { PageTip } from '../components/PageTip'
@@ -8,6 +7,49 @@ import { useAppStore } from '../store'
 import type { SplitTunnelApp } from '../../shared/ipc-types'
 
 type Rule = SplitTunnelApp['rule']
+
+function hasCorruptPathText(value: string): boolean {
+  return /[\uFFFD\u3400-\u9fff\uac00-\ud7af]/.test(value)
+}
+
+function safePathFallbackName(name: string): string {
+  const cleaned = String(name || 'app')
+    .replace(/[\uFFFD\u3400-\u9fff\uac00-\ud7af]+/g, ' ')
+    .replace(/[<>:"/\\|?*]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return cleaned || 'app'
+}
+
+function cleanPathSegment(segment: string, fallbackName: string, isLeaf: boolean): string {
+  const extMatch = isLeaf ? segment.match(/(\.[A-Za-z0-9]{1,8})$/) : null
+  const ext = extMatch?.[1] ?? ''
+  const stem = ext ? segment.slice(0, -ext.length) : segment
+  const cleaned = stem
+    .replace(/[\uFFFD\u3400-\u9fff\uac00-\ud7af]+/g, ' ')
+    .replace(/[<>:"/\\|?*]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  const fallback = safePathFallbackName(fallbackName)
+  const nextStem = cleaned.length >= 2 && /[A-Za-zА-Яа-я0-9]/.test(cleaned) ? cleaned : fallback
+  return `${nextStem}${ext || (isLeaf ? '.exe' : '')}`
+}
+
+export function displaySplitTunnelPath(app: Pick<SplitTunnelApp, 'kind' | 'name' | 'path'>): string {
+  if (app.kind === 'process') return app.path
+  const rawPath = String(app.path || '')
+  if (!rawPath || !hasCorruptPathText(rawPath)) return rawPath
+
+  const separator = rawPath.includes('\\') ? '\\' : '/'
+  const parts = rawPath.split(/[\\/]+/)
+  return parts
+    .map((part, index) =>
+      hasCorruptPathText(part)
+        ? cleanPathSegment(part, app.name, index === parts.length - 1)
+        : part
+    )
+    .join(separator)
+}
 
 /**
  * Split Tunneling page — allows users to manage per-app VPN routing rules.
@@ -231,18 +273,16 @@ export function SplitTunnel() {
             <span className="sr-only">Действия</span>
           </div>
           <div className="divide-y divide-[var(--color-border)]/60">
-            <AnimatePresence initial={false}>
-              {filteredApps.map((app) => (
-                <AppRow
-                  key={app.id}
-                  app={app}
-                  pendingRule={pendingRuleById[app.id]}
-                  onRuleChange={handleRuleChange}
-                  onRemove={handleRemoveApp}
-                  t={t}
-                />
-              ))}
-            </AnimatePresence>
+            {filteredApps.map((app) => (
+              <AppRow
+                key={app.id}
+                app={app}
+                pendingRule={pendingRuleById[app.id]}
+                onRuleChange={handleRuleChange}
+                onRemove={handleRemoveApp}
+                t={t}
+              />
+            ))}
           </div>
         </MacCard>
       )}
@@ -285,13 +325,9 @@ function AppRow({ app, pendingRule, onRuleChange, onRemove, t }: AppRowProps) {
   const isProcess = app.kind === 'process'
   const displayedRule = pendingRule ?? app.rule
   const isPending = !!pendingRule
+  const displayPath = isProcess ? t('splitTunneling.commandSubtitle') : displaySplitTunnelPath(app)
   return (
-    <motion.div
-      layout
-      initial={{ opacity: 0, y: 6 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: -6 }}
-      transition={{ duration: 0.16, ease: 'easeOut' }}
+    <div
       className={`grid grid-cols-[minmax(0,1fr)_auto] sm:grid-cols-[minmax(0,1fr)_minmax(260px,320px)_40px] items-center gap-3 px-4 py-3 transition-colors duration-150 ${
         isPending ? 'bg-[var(--color-accent)]/5' : 'hover:bg-[var(--color-border)]/25'
       }`}
@@ -326,9 +362,9 @@ function AppRow({ app, pendingRule, onRuleChange, onRemove, t }: AppRowProps) {
           </div>
           <div
             className="text-xs text-[var(--color-text-secondary)] truncate"
-            title={isProcess ? t('splitTunneling.commandSubtitle') : app.path}
+            title={displayPath}
           >
-            {isProcess ? t('splitTunneling.commandSubtitle') : app.path}
+            {displayPath}
           </div>
         </div>
       </div>
@@ -343,7 +379,7 @@ function AppRow({ app, pendingRule, onRuleChange, onRemove, t }: AppRowProps) {
             disabled={isPending}
             title={hint}
             aria-pressed={displayedRule === value}
-            className={`relative flex-1 px-2.5 py-1.5 text-xs font-medium rounded-[calc(var(--radius-sm)-2px)] transition-all duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)] disabled:cursor-wait ${
+            className={`relative flex-1 px-2.5 py-1.5 text-xs font-medium rounded-[calc(var(--radius-sm)-2px)] transition-colors duration-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)] disabled:cursor-wait ${
               displayedRule === value
                 ? activeClass
                 : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text)] hover:bg-[var(--color-border)]/45'
@@ -366,6 +402,6 @@ function AppRow({ app, pendingRule, onRuleChange, onRemove, t }: AppRowProps) {
       >
         <Trash2 className="w-4 h-4" />
       </button>
-    </motion.div>
+    </div>
   )
 }

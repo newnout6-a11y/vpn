@@ -3,6 +3,11 @@ import { join } from 'path'
 import { describe, expect, it } from 'vitest'
 
 const mainIndexSource = () => readFileSync(join(process.cwd(), 'src', 'main', 'index.ts'), 'utf8')
+const serverProbeSource = () => readFileSync(join(process.cwd(), 'src', 'main', 'serverProbe.ts'), 'utf8')
+const urlAvailabilitySource = () => readFileSync(join(process.cwd(), 'src', 'main', 'urlAvailability.ts'), 'utf8')
+const serverPickerSource = () => readFileSync(join(process.cwd(), 'src', 'main', 'serverPicker.ts'), 'utf8')
+const ipMonitorSource = () => readFileSync(join(process.cwd(), 'src', 'main', 'ipMonitor.ts'), 'utf8')
+const leakDiagnosticsSource = () => readFileSync(join(process.cwd(), 'src', 'main', 'leakDiagnostics.ts'), 'utf8')
 
 describe('main IPC regressions', () => {
   it('bounds inspect-vpn-input before resolving or persisting input', () => {
@@ -43,7 +48,7 @@ describe('main IPC regressions', () => {
     expect(handlerStart).toBeGreaterThanOrEqual(0)
     expect(handler).toContain('if (tunController.getStatus().running)')
     expect(handler).toContain('blocked: true')
-    expect(handler).toContain('getFirewallRepairHealth()')
+    expect(handler).toContain('getFirewallRepairHealth({ protectedTunnelActive: true })')
     expect(handler).toContain('return repairVpnteFirewallRules()')
     expect(handler.indexOf('if (tunController.getStatus().running)')).toBeLessThan(
       handler.indexOf('return repairVpnteFirewallRules()')
@@ -60,7 +65,7 @@ describe('main IPC regressions', () => {
     expect(repairStart).toBeGreaterThanOrEqual(0)
     expect(resetStart).toBeGreaterThanOrEqual(0)
     expect(source.slice(repairStart, resetStart > repairStart ? resetStart : undefined)).toContain('repairVpnteFirewallRules()')
-    expect(source).toContain('getFirewallRepairHealth()')
+    expect(source).toContain('getFirewallRepairHealth({ protectedTunnelActive: tunController.getStatus().running })')
   })
 
   it('keeps destructive maintenance IPC behind narrow entry points', () => {
@@ -91,5 +96,81 @@ describe('main IPC regressions', () => {
     expect(handlerStart).toBeGreaterThanOrEqual(0)
     expect(validation).toBeGreaterThan(handlerStart)
     expect(validation).toBeLessThan(saveCall)
+  })
+
+  it('runs startup crash recovery before opening the renderer window', () => {
+    const source = mainIndexSource()
+    const readyStart = source.indexOf('app.whenReady().then')
+    const recoveryCall = source.indexOf('await performCrashRecovery()', readyStart)
+    const windowCall = source.indexOf('createWindow()', readyStart)
+
+    expect(readyStart).toBeGreaterThanOrEqual(0)
+    expect(recoveryCall).toBeGreaterThan(readyStart)
+    expect(recoveryCall).toBeLessThan(windowCall)
+    expect(source).toContain('recoverStaleKillSwitch(isOwnedTunRuntimeRunning)')
+  })
+
+  it('keeps proxy-list export as a separate server picker IPC path', () => {
+    const source = readFileSync(join(process.cwd(), 'src', 'main', 'serverPicker.ts'), 'utf8')
+
+    expect(source).toContain("handleLogged('servers:export-all-proxies-file'")
+    expect(source).toContain('exportOutboundToProxyLine')
+    expect(source).toContain('proxy-list-')
+    expect(source).toContain("reason: 'unsupported-all'")
+  })
+
+  it('respects disableGeoLookup in server probe enrichment', () => {
+    const source = serverProbeSource()
+    const handlerStart = source.indexOf("ipcMain.handle('server:probe'")
+    const handlerEnd = source.indexOf('\n  })\n}', handlerStart)
+    const handler = source.slice(handlerStart, handlerEnd)
+
+    expect(source).toContain("import { settingsStore } from './settings'")
+    expect(source).toContain('export interface ProbeServerOptions')
+    expect(source).toContain('const disableGeoLookup = options.disableGeoLookup === true')
+    expect(source).toContain('disableGeoLookup ? Promise.resolve(null) : getAsnInfo(primaryIp)')
+    expect(handler).toContain('disableGeoLookup: settingsStore.get().disableGeoLookup === true')
+  })
+
+  it('respects disableGeoLookup in URL availability ASN enrichment', () => {
+    const source = urlAvailabilitySource()
+    const handlerStart = source.indexOf("ipcMain.handle('url-availability:check'")
+    const handlerEnd = source.indexOf('\n  })', handlerStart)
+    const handler = source.slice(handlerStart, handlerEnd)
+
+    expect(source).toContain("import { settingsStore } from './settings'")
+    expect(source).toContain('interface UrlAvailabilityOptions')
+    expect(source).toContain('if (options.disableGeoLookup === true) return null')
+    expect(source).toContain('const asn = await fetchAsn(firstIp, options).catch(() => null)')
+    expect(source).toContain('probeNative(parsed, options)')
+    expect(handler).toContain('disableGeoLookup: settingsStore.get().disableGeoLookup === true')
+  })
+
+  it('respects disableGeoLookup in server picker country verification', () => {
+    const source = serverPickerSource()
+    const activeStart = source.indexOf("handleLogged('servers:verify-active-country'")
+    const activeEnd = source.indexOf("handleLogged('servers:verify-country'", activeStart)
+    const activeHandler = source.slice(activeStart, activeEnd)
+    const verifyStart = activeEnd
+    const verifyEnd = source.indexOf("handleLogged('servers:add'", verifyStart)
+    const verifyHandler = source.slice(verifyStart, verifyEnd)
+
+    expect(source).toContain('function geoLookupDisabled(): boolean')
+    expect(source).toContain('return settingsStore.get().disableGeoLookup === true')
+    expect(source).toContain('if (geoLookupDisabled() || unique.length === 0) return out')
+    expect(source).toContain('if (geoLookupDisabled()) return null')
+    expect(activeHandler).toContain("reason: 'geo-lookup-disabled'")
+    expect(activeHandler.indexOf("reason: 'geo-lookup-disabled'")).toBeLessThan(
+      activeHandler.indexOf('geolocateIp(cleanIp)')
+    )
+    expect(verifyHandler).toContain("reason: 'geo-lookup-disabled'")
+    expect(verifyHandler.indexOf("reason: 'geo-lookup-disabled'")).toBeLessThan(
+      verifyHandler.indexOf('verifyProfileCountry(cleanId)')
+    )
+  })
+
+  it('keeps routine public-IP checks off geo-profile providers', () => {
+    expect(ipMonitorSource()).not.toContain('https://ipinfo.io/json')
+    expect(leakDiagnosticsSource()).not.toContain('https://ipinfo.io/json')
   })
 })

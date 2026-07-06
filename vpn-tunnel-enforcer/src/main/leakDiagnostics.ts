@@ -67,7 +67,6 @@ export async function getPublicIpV4(): Promise<string | null> {
   const urls = [
     'https://api.ipify.org?format=json',
     'https://api.myip.com',
-    'https://ipinfo.io/json',
     'https://ifconfig.co/json'
   ]
 
@@ -314,6 +313,14 @@ export function isBenignBlockLine(line: string): boolean {
   )
 }
 
+export function isBenignSingboxErrorLine(line: string): boolean {
+  return (
+    isBenignBlockLine(line) ||
+    /\bconnection upload closed\b/i.test(line) ||
+    /\bforcibly closed by the remote host\b/i.test(line)
+  )
+}
+
 /** Pure: extract the up-to-5 most recent REAL error lines from a sing-box log. */
 export function extractRealErrors(logText: string): string[] {
   return logText
@@ -324,7 +331,7 @@ export function extractRealErrors(logText: string): string[] {
       const hasSingboxFailure = /\b(?:connection|dns|router|inbound|outbound)[:/].*\b(?:failed|timeout|refused|reset by peer|no such host|network is unreachable)\b/i.test(line)
       return hasErrorLevel || hasSingboxFailure
     })
-    .filter(line => !isBenignBlockLine(line))
+    .filter(line => !isBenignSingboxErrorLine(line))
     .slice(-5)
 }
 

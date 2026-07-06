@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, lazy, Suspense } from 'react'
+import { useEffect, useMemo, useRef, useState, lazy, Suspense } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import i18n from 'i18next'
 import { useAppStore } from './store'
@@ -267,6 +267,7 @@ const scheduleIdle = (fn: () => void) => {
 export default function App() {
   const [page, setPage] = useState<Page>('dashboard')
   const [visitedPages, setVisitedPages] = useState<Set<Page>>(() => new Set(['dashboard']))
+  const [firewallBannerSuppressUntil, setFirewallBannerSuppressUntil] = useState(0)
   // Set to true when the main process tells us it's running shutdown cleanup
   // (the user just confirmed "Отключить и закрыть"). Locks the UI behind a
   // full-screen overlay until the window itself goes away — without it the
@@ -286,6 +287,21 @@ export default function App() {
   const tunEventSeqRef = useRef(0)
   const detectHappFailureCountRef = useRef(0)
   const detectHappNextAllowedAtRef = useRef(0)
+  const firewallBannerSuppressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const suppressFirewallBannerBriefly = () => {
+    const until = Date.now() + 8_000
+    setFirewallBannerSuppressUntil(until)
+    if (firewallBannerSuppressTimerRef.current) clearTimeout(firewallBannerSuppressTimerRef.current)
+    firewallBannerSuppressTimerRef.current = setTimeout(() => {
+      setFirewallBannerSuppressUntil(current => current === until ? 0 : current)
+      firewallBannerSuppressTimerRef.current = null
+    }, 8_000)
+  }
+
+  useEffect(() => () => {
+    if (firewallBannerSuppressTimerRef.current) clearTimeout(firewallBannerSuppressTimerRef.current)
+  }, [])
 
   // Listen for IPC events
   useEffect(() => {
@@ -331,6 +347,7 @@ export default function App() {
       const isStopping = status === 'stopping'
       const busy = store.connectionBusy
       const isServerSwitching = Boolean(store.serverSwitchingName)
+      suppressFirewallBannerBriefly()
 
       // IPC status events can arrive slightly out of order around start/stop:
       // e.g. a delayed "running" from the previous health poll while the user
@@ -733,7 +750,7 @@ export default function App() {
 
   const renderPage = (pageId: Page) => {
     switch (pageId) {
-      case 'dashboard': return <Dashboard />
+      case 'dashboard': return <Dashboard suppressFirewallBannerUntil={firewallBannerSuppressUntil} />
       case 'apps': return <SplitTunnel />
       case 'servers': return <Servers />
       case 'speedtest': return <SpeedTest />
@@ -741,7 +758,7 @@ export default function App() {
       case 'trafficHistory': return <TrafficHistory />
       case 'schedule': return <Schedule />
       case 'maintenance':
-        return settings.advancedMode ? <Maintenance /> : <Dashboard />
+        return settings.advancedMode ? <Maintenance /> : <Dashboard suppressFirewallBannerUntil={firewallBannerSuppressUntil} />
       case 'settings': return <Settings />
       case 'logs': return <Logs />
     }

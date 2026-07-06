@@ -61,7 +61,7 @@ export const MacSelect: React.FC<MacSelectProps> = ({
   }, [open])
 
   return (
-    <div className={cn('flex flex-col gap-1.5', className)} ref={containerRef}>
+    <div className={cn('relative flex flex-col gap-1.5', open && 'z-[120]', className)} ref={containerRef}>
       {label && (
         <label className="text-sm font-medium text-[var(--color-text)]">{label}</label>
       )}
@@ -105,12 +105,12 @@ export const MacSelect: React.FC<MacSelectProps> = ({
         <AnimatePresence>
           {open && (
             <motion.ul
-              initial={{ opacity: 0, y: -4 }}
+              initial={{ opacity: 0, y: -3 }}
               animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -4 }}
-              transition={{ duration: 0.15 }}
+              exit={{ opacity: 0, y: -3 }}
+              transition={{ duration: 0.12, ease: 'easeOut' }}
               className={cn(
-                'absolute z-50 w-full mt-1 py-1',
+                'absolute z-[130] w-full mt-1 py-1',
                 'bg-[var(--color-card)] rounded-[var(--radius-sm)]',
                 'border border-[var(--color-border)]',
                 'shadow-[var(--shadow-modal)]',

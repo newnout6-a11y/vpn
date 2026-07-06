@@ -11,7 +11,7 @@
 
 import { execFile as execFileCb } from 'child_process'
 import { ipcMain, dialog, type IpcMainInvokeEvent } from 'electron'
-import { basename, extname } from 'path'
+import { basename, dirname, extname } from 'path'
 import { access } from 'fs/promises'
 import { promisify } from 'util'
 import { randomUUID } from 'crypto'
@@ -25,7 +25,11 @@ import type { SplitTunnelApp, SplitTunnelConfig } from '../shared/ipc-types'
 const execFile = promisify(execFileCb)
 
 function encodedPowerShell(script: string): string {
-  return Buffer.from(script, 'utf-16le').toString('base64')
+  const prelude =
+    '$ProgressPreference="SilentlyContinue";' +
+    '$OutputEncoding=[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new();' +
+    '[Console]::InputEncoding=[System.Text.UTF8Encoding]::new();'
+  return Buffer.from(prelude + script, 'utf-16le').toString('base64')
 }
 
 // ─── Persistent Store ────────────────────────────────────────────────────────
@@ -42,6 +46,61 @@ const store = new Store<SplitTunnelStore>({
     splitTunnelEnabled: true
   }
 })
+
+export function looksCorruptDisplayName(name: string): boolean {
+  const value = String(name ?? '')
+  const replacementCount = (value.match(/\uFFFD/g) ?? []).length
+  const cjkHangulCount = (value.match(/[\u3400-\u9fff\uac00-\ud7af]/g) ?? []).length
+  const hasKnownText = /[A-Za-zА-Яа-я0-9]/.test(value)
+  return replacementCount > 0 || (hasKnownText && cjkHangulCount >= 2)
+}
+
+function cleanDisplayName(name: string): string {
+  return String(name ?? '')
+    .replace(/\uFFFD+/g, ' ')
+    .replace(/[\u3400-\u9fff\uac00-\ud7af]+/g, ' ')
+    .replace(/\(\s*\d+\s*[-–]\s*\)/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/\s+([,.)\]])/g, '$1')
+    .replace(/([(])\s+/g, '$1')
+    .replace(/,\s*(?=\d)/g, ' ')
+    .replace(/,\s*$/g, '')
+    .trim()
+}
+
+function mostlyNumeric(value: string): boolean {
+  const compact = String(value ?? '').replace(/\s+/g, '')
+  return compact.length > 0 && /^[\d.+\-()]+$/.test(compact)
+}
+
+function isGenericContainerName(value: string): boolean {
+  return /^(application|app|bin|bin64|x64|x86|win64|win32|program files|program files \(x86\)|common files|current)$/i.test(
+    value.trim()
+  )
+}
+
+export function fallbackAppNameFromPath(path: string): string {
+  const base = basename(path, extname(path)).trim()
+  const parent = basename(dirname(path)).trim()
+  const candidates = [parent, base].filter(Boolean)
+  const picked = candidates.find(
+    (candidate) =>
+      !looksCorruptDisplayName(candidate) &&
+      !mostlyNumeric(candidate) &&
+      !isGenericContainerName(candidate)
+  )
+  return picked || base || path
+}
+
+export function sanitizeAppDisplayName(name: string, path: string): string {
+  const trimmed = String(name ?? '').trim()
+  const cleaned = cleanDisplayName(trimmed)
+  if (!looksCorruptDisplayName(trimmed) && cleaned && !mostlyNumeric(cleaned)) return cleaned
+  if (cleaned.length >= 3 && /[A-Za-zА-Яа-я]/.test(cleaned) && !mostlyNumeric(cleaned)) {
+    return cleaned
+  }
+  return fallbackAppNameFromPath(path)
+}
 
 let appsWriteQueue: Promise<void> = Promise.resolve()
 
@@ -157,7 +216,7 @@ $results | ConvertTo-Json -Compress -Depth 3
           row.Path.trim()
       )
       .map((row: any) => ({
-        name: row.Name.trim(),
+        name: sanitizeAppDisplayName(row.Name, row.Path.trim()),
         path: row.Path.trim(),
         icon: null // Icon extraction deferred — complex Win32 API needed
       }))
@@ -168,8 +227,23 @@ $results | ConvertTo-Json -Compress -Depth 3
 
 // ─── Rule Management ─────────────────────────────────────────────────────────
 
+function normalizeStoredApps(apps: SplitTunnelApp[]): { apps: SplitTunnelApp[]; changed: boolean } {
+  let changed = false
+  const normalized = apps.map((app) => {
+    if (app.kind === 'process') return app
+    const name = sanitizeAppDisplayName(app.name, app.path)
+    if (name === app.name) return app
+    changed = true
+    return { ...app, name }
+  })
+  return { apps: normalized, changed }
+}
+
 function getApps(): SplitTunnelApp[] {
-  return store.get('splitTunnelApps') ?? []
+  const apps = store.get('splitTunnelApps') ?? []
+  const normalized = normalizeStoredApps(apps)
+  if (normalized.changed) saveApps(normalized.apps)
+  return normalized.apps
 }
 
 function saveApps(apps: SplitTunnelApp[]): void {
@@ -206,7 +280,7 @@ async function addApp(exePath: string): Promise<SplitTunnelApp> {
   await access(exePath)
 
   return withAppsWriteLock(() => {
-    const name = basename(exePath, extname(exePath))
+    const name = fallbackAppNameFromPath(exePath)
     const app: SplitTunnelApp = {
       id: randomUUID(),
       name,
@@ -443,7 +517,7 @@ export function registerSplitTunnelHandlers(): void {
         const discovered = await discoverInstalledApps()
         const apps: SplitTunnelApp[] = discovered.map((d) => ({
           id: randomUUID(),
-          name: d.name,
+          name: sanitizeAppDisplayName(d.name, d.path),
           path: d.path,
           icon: d.icon,
           rule: 'none' as const

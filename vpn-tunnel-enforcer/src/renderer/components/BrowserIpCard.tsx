@@ -11,8 +11,7 @@ interface WebRtcCandidate {
 
 const IPV4_URLS = [
   'https://api.ipify.org?format=json',
-  'https://api.myip.com',
-  'https://ipinfo.io/json'
+  'https://api.myip.com'
 ]
 
 function isPrivateIp(ip: string): boolean {

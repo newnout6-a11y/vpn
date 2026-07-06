@@ -25,10 +25,8 @@ export interface AppSettings {
   locationPrivacyEnabled: boolean
   autoNetworkBaseline: boolean
   firewallKillSwitch: boolean
-  // When false, the renderer hides every advanced/destructive option:
-  // Maintenance page, Apps autoconfig page, autoNetworkBaseline toggle,
-  // proxyOverride field, mode picker. Default is false so a fresh user only
-  // sees the big "вкл./выкл. защиты" hero on Dashboard.
+  // When false, the renderer hides the advanced/destructive maintenance and
+  // network-tuning options. The Apps page remains a normal visible workflow.
   advancedMode: boolean
   // Flips to true after the first-run wizard completes (or the user dismisses
   // it). Until then the wizard overlay is shown.
@@ -53,9 +51,10 @@ export interface AppSettings {
   // invasive but reverted on stop, and without it real-world users still see
   // their original ISP IP in some apps.
   strictAdapterLockdown: boolean
-  // Disable IP geolocation lookup. When ON, the app does NOT send the VPN
-  // exit IP to ipapi.co for country/city display. Privacy-conscious users
-  // may prefer this since the third-party service can log the request.
+  // Disable app-controlled third-party IP geolocation lookups. When ON, the
+  // app does not send current VPN/server IPs to ipapi.co, ip-api.com,
+  // ipwho.is, ipinfo.*, or iplocation.net. External websites the user opens
+  // can still geolocate the IP they see.
   disableGeoLookup: boolean
   // Packet-level diagnostics capture. Keeps a rolling OS packet trace while
   // VPN protection is active so exported diagnostics can be inspected down to
@@ -76,14 +75,11 @@ export interface AppSettings {
   // Safe to leave ON outside of restrictive networks too — costs ~5% extra
   // bandwidth from MTU overhead and a handful of extra TLS roundtrips.
   stealthMode: boolean
-  // Smart RU split-routing. When ON, Russian destinations (banks, gov
-  // portals, shops, local services) egress with the user's REAL IP via
-  // direct-out, while everything else goes through the VPN — so foreign
-  // sites see the VPN location and RU sites that geo-fence/whitelist RU IPs
-  // keep working. The signal is NOT a naive ".ru domain" check: we use
-  // sing-box geoip-ru (route by destination IP country) + geosite-category-ru
-  // / category-gov-ru rule-sets (curated RU domain lists that cover .com/.рф
-  // properties too), maintained upstream and refreshed via cache_file.
+  // Smart RU split-routing. When ON, RU-hosted destinations and narrow
+  // government/map domain sets egress with the user's real IP via direct-out,
+  // while everything else goes through the VPN. The signal is not a naive
+  // ".ru" domain check: we use geoip-ru plus narrow geosite-category-gov-ru
+  // / maps suffix rules, and deliberately avoid broad category-ru.
   // Off by default — it's an opt-in routing policy, and when off the tunnel
   // behaves exactly as before (everything through proxy-out).
   smartRuSplit: boolean

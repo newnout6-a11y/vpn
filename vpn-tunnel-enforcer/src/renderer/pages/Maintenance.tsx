@@ -22,6 +22,7 @@ interface SystemDiagnosticResult {
 }
 
 interface FirewallRepairHealth {
+  protectedTunnelActive?: boolean
   manifestPresent: boolean
   ourRuleCount: number
   stuckBlockDefault: boolean
@@ -81,6 +82,13 @@ function statusIcon(status: HealthStatus | RepairStep['status']) {
   if (status === 'fail') return <TriangleAlert className="w-4 h-4 text-[var(--color-danger)] flex-shrink-0" />
   if (status === 'warn') return <TriangleAlert className="w-4 h-4 text-[var(--color-warning)] flex-shrink-0" />
   return <Activity className="w-4 h-4 text-[var(--color-text-secondary)] flex-shrink-0" />
+}
+
+function firewallBlockDefaultLabel(health: FirewallRepairHealth): string {
+  if (health.protectedTunnelActive && health.summary === 'ok' && health.stuckBlockDefault) {
+    return 'активная защита'
+  }
+  return health.stuckBlockDefault ? 'залипший Block' : 'нет'
 }
 
 function stepStatusFromResult(result: any): RepairStep['status'] {
@@ -347,7 +355,7 @@ export function Maintenance() {
               </div>
               <p className="text-xs text-[var(--color-text-secondary)] break-words">{firewallHealth.message}</p>
               <p className="text-xs text-[var(--color-text-secondary)] break-words">
-                VPNTE rules: {firewallHealth.ourRuleCount}; manifest: {firewallHealth.manifestPresent ? 'есть' : 'нет'}; stuck block: {firewallHealth.stuckBlockDefault ? 'да' : 'нет'}
+                VPNTE rules: {firewallHealth.ourRuleCount}; manifest: {firewallHealth.manifestPresent ? 'есть' : 'нет'}; block default: {firewallBlockDefaultLabel(firewallHealth)}
               </p>
               {firewallHealth.recommendedActions.length > 0 && (
                 <p className="text-xs text-[var(--color-warning)] break-words">
