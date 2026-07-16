@@ -96,6 +96,7 @@ const CLIENT_DEVICE_OPTIONS = [
   { value: 'ios', label: 'iOS' },
   { value: 'mac', label: 'Mac' }
 ]
+const PROBE_UI_TIMEOUT_MS = 10_000
 
 function normalizeClientDevice(value: unknown): ClientDevice {
   return value === 'android' || value === 'ios' || value === 'mac' ? value : 'pc'
@@ -253,22 +254,37 @@ export function ServerDetailModal({ open, profile, onClose, onProfileUpdated }: 
       setLoading(false)
     }
 
-    // Active probe via main process (DNS/latency/ports/TLS).
+    // Active probe via main process (DNS/latency/ports/TLS). The main side
+    // also has a deadline, but the UI must never keep a spinner forever if an
+    // IPC call is lost while the app is shutting down or being restarted.
+    let probeFinished = false
+    const probeTimeout = window.setTimeout(() => {
+      if (cancelled || probeFinished) return
+      probeFinished = true
+      setProbeError(true)
+      setProbing(false)
+    }, PROBE_UI_TIMEOUT_MS)
+
     window.electronAPI.serverProbe(host, port)
       .then((result: ServerProbeResult | null) => {
-        if (cancelled) return
+        if (cancelled || probeFinished) return
+        probeFinished = true
+        window.clearTimeout(probeTimeout)
         if (result) setProbe(result)
         else setProbeError(true)
+        setProbing(false)
       })
       .catch(() => {
-        if (!cancelled) setProbeError(true)
-      })
-      .finally(() => {
-        if (!cancelled) setProbing(false)
+        if (cancelled || probeFinished) return
+        probeFinished = true
+        window.clearTimeout(probeTimeout)
+        setProbeError(true)
+        setProbing(false)
       })
 
     return () => {
       cancelled = true
+      window.clearTimeout(probeTimeout)
     }
   }, [open, profile, disableGeoLookup])
 
@@ -335,7 +351,7 @@ export function ServerDetailModal({ open, profile, onClose, onProfileUpdated }: 
             group. Surfaces a subtle hint when the source subscription is
             expired so the user understands why connecting may be flaky. */}
         {profileId && (
-          <MacCard className="!p-3">
+          <MacCard className="!p-3 relative z-20">
             <div className="grid grid-cols-1 sm:grid-cols-[minmax(0,180px)_1fr] gap-3 items-end">
               <MacSelect
                 label="Device identity"

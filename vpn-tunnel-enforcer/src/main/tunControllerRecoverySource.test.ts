@@ -29,9 +29,9 @@ describe('tunController recovery cancellation guards', () => {
 
   it('publishes stopped after partial cleanup warnings instead of leaving UI connected', async () => {
     const source = await readFile(join(here, 'tunController.ts'), 'utf8')
-    const stopSignature = source.indexOf('async stop(): Promise<{ success: boolean; error?: string; warning?: string }>')
+    const stopSignature = source.indexOf('async stop(options: { preserveNetworkProtection?: boolean; preserveLastStartOptions?: boolean } = {})')
     const cleanupBranch = source.indexOf('if (cleanupErrors.length > 0)', stopSignature)
-    const successReturn = source.indexOf('return { success: true, warning }', cleanupBranch)
+    const successReturn = source.lastIndexOf('return { success: true, warning }')
     const stoppedNotify = source.indexOf("notifyStatus('stopped')", cleanupBranch)
     const failureReturn = source.indexOf('return { success: false, error: cleanupErrors.join', cleanupBranch)
 
@@ -68,6 +68,21 @@ describe('tunController recovery cancellation guards', () => {
     expect(source).not.toContain('function psQuote(value: string): string')
   })
 
+  it('keeps external proxy runtimes outside TUN process cleanup', async () => {
+    const source = await readFile(join(here, 'tunController.ts'), 'utf8')
+    const cleanup = source.slice(
+      source.indexOf('export async function killOwnedTunRuntimeProcesses'),
+      source.indexOf('async function killOwnedRuntimeProcesses')
+    )
+
+    expect(cleanup).toContain('const runtimeDir = getTunRuntimeDir()')
+    expect(cleanup).toContain("$names = @(${psSingleQuote(RUNTIME_EXE_NAME)}, 'vpnte-etw-sidecar.exe')")
+    expect(cleanup).toContain('$_.ExecutablePath')
+    expect(cleanup).toContain('StartsWith($runtimeDir')
+    expect(cleanup).not.toContain('vpnte-external-proxy.exe')
+    expect(cleanup).not.toContain('external-proxy-runtime')
+  })
+
   it('keeps public Wi-Fi compatibility from forcing DNS on physical adapters', async () => {
     const source = await readFile(join(here, 'tunController.ts'), 'utf8')
     const compatibility = source.indexOf('const publicWifiCompatibility =')
@@ -80,5 +95,55 @@ describe('tunController recovery cancellation guards', () => {
     expect(lockdownCall).toBeGreaterThan(forceDns)
     expect(option).toBeGreaterThan(lockdownCall)
     expect(source).not.toContain('applyPhysicalAdapterLockdown(TUN_IPV4_RESOLVER, {\n              forceDns: true')
+  })
+
+  it('preserves stealth mode across internal restarts and auto-recovery', async () => {
+    const source = await readFile(join(here, 'tunController.ts'), 'utf8')
+    const snapshot = source.indexOf('lastStartOptions = {')
+    const stealth = source.indexOf('stealthMode: startOptions.stealthMode === true', snapshot)
+    const freshSettings = source.indexOf('const nextSnapshot: StartOptions = {', stealth)
+    const restart = source.indexOf('return this.start(nextSnapshot)')
+    const recovery = source.indexOf('tunController.start(optsSnapshot)')
+
+    expect(snapshot).toBeGreaterThan(0)
+    expect(stealth).toBeGreaterThan(snapshot)
+    expect(freshSettings).toBeGreaterThan(stealth)
+    expect(restart).toBeGreaterThan(freshSettings)
+    expect(recovery).toBeGreaterThan(0)
+  })
+
+  it('uses a protected lifecycle transition for adaptive compatibility changes', async () => {
+    const source = await readFile(join(here, 'tunController.ts'), 'utf8')
+    const transition = source.indexOf('async restartForAdaptiveChange(')
+    const protectedStop = source.indexOf('preserveNetworkProtection: true', transition)
+    const preservedSnapshot = source.indexOf('preserveLastStartOptions: true', transition)
+    const cleanup = source.indexOf('await this.stop().catch', transition)
+
+    expect(transition).toBeGreaterThan(0)
+    expect(protectedStop).toBeGreaterThan(transition)
+    expect(preservedSnapshot).toBeGreaterThan(protectedStop)
+    expect(cleanup).toBeGreaterThan(preservedSnapshot)
+  })
+
+  it('allows the protected adaptive transition to replace only the Direct VPN profile', async () => {
+    const source = await readFile(join(here, 'tunController.ts'), 'utf8')
+    const transition = source.indexOf('async restartForAdaptiveChange(')
+    const overrides = source.indexOf("overrides: Pick<StartOptions, 'vpnProfile'> = {}", transition)
+    const restart = source.indexOf('this.start({ ...snapshot, ...overrides, adaptiveMode: nextMode })', transition)
+
+    expect(overrides).toBeGreaterThan(transition)
+    expect(restart).toBeGreaterThan(overrides)
+  })
+
+  it('cancels pending auto-restart if the setting is switched off during backoff', async () => {
+    const source = await readFile(join(here, 'tunController.ts'), 'utf8')
+    const timer = source.indexOf('restartTimer = setTimeout(() => {')
+    const cancel = source.indexOf('settingsStore.get().autoRestartOnCrash === false', timer)
+    const start = source.indexOf('tunController.start(optsSnapshot)', timer)
+
+    expect(timer).toBeGreaterThan(0)
+    expect(cancel).toBeGreaterThan(timer)
+    expect(cancel).toBeLessThan(start)
+    expect(source).toContain('auto-restart cancelled because setting is off')
   })
 })

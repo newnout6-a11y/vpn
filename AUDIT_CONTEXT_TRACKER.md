@@ -1624,3 +1624,145 @@ Known remaining caveats:
 - Installer/app/sidecar Authenticode status remains `NotSigned`; UAC Publisher cannot become `VYT` without a real trusted code-signing certificate.
 - Final runtime confidence still needs live packaged Windows smoke after install: TUN start/stop, firewall rollback, server switch, geo privacy ON, public Wi-Fi compatibility, Smart-RU, repair page, tray/notifications.
 - `.kimchi/` and `vpn-tunnel-enforcer/.kimchi/` are untracked local directories and intentionally left out of git staging.
+
+2026-07-07 - SETTINGS-PROTECTION-SEVEN-AGENT-AUDIT-1 DONE
+Source:
+- User request: audit the visible Settings/Protection toggles with 7 subagents, especially because `disableGeoLookup` looked useless/non-working from the UI.
+- Subagents reviewed: strict adapter lockdown, public Wi-Fi compatibility, auto-restart, Windows notifications, stealth mode, geo lookup privacy, Smart-RU.
+
+Files:
+- `vpn-tunnel-enforcer/src/renderer/pages/Dashboard.tsx`
+- `vpn-tunnel-enforcer/src/renderer/App.tsx`
+- `vpn-tunnel-enforcer/src/renderer/AppSource.test.ts`
+- `vpn-tunnel-enforcer/src/main/index.ts`
+- `vpn-tunnel-enforcer/src/main/mainIpcRegression.test.ts`
+- `vpn-tunnel-enforcer/src/main/tunController.ts`
+- `vpn-tunnel-enforcer/src/main/tunControllerRecoverySource.test.ts`
+- `vpn-tunnel-enforcer/src/main/routingSelfTest.ts`
+- `vpn-tunnel-enforcer/src/main/routingSelfTest.test.ts`
+- `vpn-tunnel-enforcer/src/main/ruleSetManager.ts`
+- `vpn-tunnel-enforcer/src/main/physicalAdapterLockdown.ts`
+- `vpn-tunnel-enforcer/src/main/physicalAdapterLockdownSource.test.ts`
+- `vpn-tunnel-enforcer/resources/vpnte-recover.ps1`
+- `vpn-tunnel-enforcer/src/main/bootRecoveryScriptSource.test.ts`
+
+Items:
+- SET-PROT-1 DONE: local-proxy start now saves the latest Settings before `startTun`, matching Direct VPN and avoiding stale debounced toggles.
+- SET-PROT-2 DONE: Dashboard geo lookup effect now depends on `settings.disableGeoLookup`, clears stale geo display immediately, and aborts in-flight `ipapi.co` fetches when the toggle changes.
+- SET-PROT-3 DONE: renderer no longer ignores terminal `stopped` from auto-restart recovery just because restart progress set `connectionBusy=connecting`.
+- SET-PROT-4 DONE: `lastStartOptions` now preserves `stealthMode`, so split/domain hot-reload and crash recovery do not silently lose MTU/fragmentation behavior.
+- SET-PROT-5 DONE: pending auto-restart rereads `autoRestartOnCrash`; if the user turns the setting off during backoff, the restart is cancelled and adapter lockdown is rolled back.
+- SET-PROT-6 DONE: `save-settings` restarts a running tunnel when `strictAdapterLockdown`, `publicWifiCompatibility`, or `stealthMode` changes; `restartWithLastOptions` now refreshes Settings-controlled toggles before replay.
+- SET-PROT-7 DONE: Smart-RU self-test respects `disableGeoLookup` by skipping RU external echo probes when privacy is ON.
+- SET-PROT-8 DONE: Smart-RU self-test no longer uses `2ip.ru`, because IP checkers are intentionally pinned to VPN by Smart-RU and using them as a direct-RU proof caused false partial verdicts.
+- SET-PROT-9 DONE: physical adapter lockdown manifest now snapshots DNS registry policy values and rollback restores pre-existing values instead of blindly deleting them.
+- SET-PROT-10 DONE: physical adapter lockdown no longer treats changed `forceDns`/resolver manifests as idempotent; it rolls back before reapplying.
+- SET-PROT-11 DONE: physical adapter lockdown surfaces `DNS_*_err` apply/rollback markers as warnings/incomplete rollback instead of silently reporting success.
+- SET-PROT-12 DONE: boot-time recovery script now uses the adapter lockdown manifest before restoring DNS/IPv6/transition/registry state; without a manifest it does only narrow orphan DNS cleanup and no longer enables IPv6 on every disabled physical adapter.
+- SET-PROT-13 DONE: Smart-RU managed rule-set auto-refresh now has a non-blocking startup/settings hook via `maybeRefreshSmartRouteRuleSets`, honoring `smartRuSplit`, managed mode, auto-update and interval logic.
+
+Verification:
+- `npm test -- AppSource.test.ts mainIpcRegression.test.ts routingSelfTest.test.ts tunControllerRecoverySource.test.ts networkCompatibility.test.ts tunControllerConfig.test.ts physicalAdapterLockdownSource.test.ts bootRecoveryScriptSource.test.ts ruleSetManager.test.ts -- --reporter=dot`
+- Result: 9 test files passed, 105 tests passed.
+- `npm run build`
+- Result: passed.
+- `npm test -- --reporter=dot`
+- Result: 63 test files passed, 547 tests passed.
+- `git diff --check`
+- Result: passed with only existing LF->CRLF working-copy warnings.
+
+Windows-only gap:
+- Needs live packaged smoke: toggle `disableGeoLookup` ON while Dashboard already shows country/city; UI should clear immediately and Smart-RU self-test must not contact `2ip.ru`/RU echo endpoints while privacy is ON.
+- Needs live packaged smoke: toggle `strictAdapterLockdown`, `publicWifiCompatibility`, and `stealthMode` while Direct VPN is running; tunnel should restart and regenerated `sing-box.json` should reflect the new DNS/MTU/fragmentation behavior.
+- Needs live packaged smoke: kill `vpnte-sing-box.exe` with auto-restart ON, then toggle auto-restart OFF during backoff; restart should cancel, adapter lockdown should roll back, and UI must not stay stuck on restart progress.
+- Needs real Windows registry smoke: pre-create `DisableSmartNameResolution` and `DisableParallelAandAAAA`, start/stop TUN, and verify rollback restores original values rather than deleting them.
+- Needs boot-time recovery smoke after a forced crash with manifest present: only manifest-backed adapters/registry/transition state should be restored; a manually disabled IPv6 adapter not touched by VPNTE must stay disabled.
+- Needs Smart-RU managed-cache smoke: managed auto-update should run non-blocking when managed mode is enabled, and corrupt managed `.srs` fallback still needs a separate runtime hardening pass.
+
+Notes:
+- The notification subagent found copy/semantics issues (`desktopNotifications` disables the whole main notification pipeline, not only Windows toasts; sound pref is not enforced). These were not changed in this batch because they are lower risk than routing/privacy/runtime correctness and should be handled as a separate notification semantics pass.
+- Smart-RU managed `.srs` integrity fallback remains a follow-up: current cache completeness still primarily checks file existence/size before sing-box runtime validation.
+
+2026-07-08 - EXTERNAL-PROXY-PSR-ROTATION-1 DONE
+Source:
+- User request: let another already-running local app (`C:\psr`) use VPNTE's external proxy, rotate it itself, and avoid global kill-switch/other settings killing or misrouting that external proxy path.
+
+Files:
+- `vpn-tunnel-enforcer/src/main/firewallKillSwitch.ts`
+- `vpn-tunnel-enforcer/src/main/externalProxy.ts`
+- `vpn-tunnel-enforcer/src/shared/ipc-types.ts`
+- `vpn-tunnel-enforcer/src/renderer/components/ExternalProxyCard.tsx`
+- `vpn-tunnel-enforcer/resources/vpnte-proxy.cmd`
+- `vpn-tunnel-enforcer/src/main/firewallKillSwitchValidation.test.ts`
+- `vpn-tunnel-enforcer/src/main/externalProxy.test.ts`
+- `C:\psr\src\utils\vpnte_proxy.py`
+- `C:\psr\src\platforms\kwork_ext.py`
+- `C:\psr\src\platforms\kwork.py`
+- `C:\psr\src\browser\browser_manager.py`
+- `C:\psr\src\api\routes\settings.py`
+- `C:\psr\desktop\src\pages\Settings.tsx`
+- `C:\psr\.env.example`
+- `C:\psr\README.md`
+- `C:\psr\tests\unit\test_vpnte_proxy.py`
+
+Items:
+- EXT-PROXY-1 DONE: external proxy sing-box runtime now has a stable program path and is included in kill-switch outbound allow-list creation.
+- EXT-PROXY-2 DONE: starting or rotating the external proxy ensures its firewall allow rule before stopping the previous process, so active global kill-switch should not strand the proxy during rotation.
+- EXT-PROXY-3 DONE: external proxy status now exposes the actual control URL/port; UI and `vpnte-proxy.cmd` no longer assume the fallback control port when the app had to bind another one.
+- EXT-PROXY-4 DONE: PSR gained an opt-in VPNTE proxy client that reads VPNTE's endpoint/token files from `%APPDATA%\VPN Tunnel Enforcer`, starts/rotates the proxy through the local control API, and returns a stable local proxy URL.
+- EXT-PROXY-5 DONE: PSR Kwork TLS/client path, browser startup path, and proxy rotator now use VPNTE proxy when `VPNTE_PROXY_ENABLED=1`.
+- EXT-PROXY-6 DONE: PSR defaults to strict mode when VPNTE proxy is enabled, so VPNTE/control failures do not silently fall back to direct traffic unless explicitly disabled.
+- EXT-PROXY-7 DONE: PSR settings UI/API/env example/README now expose `VPNTE_PROXY_*` and `VPNTE_CONTROL_*` knobs.
+- EXT-PROXY-8 DONE: `/start` is now idempotent for already-running external proxy instances and returns the current stable `proxyUrl` instead of restarting/rotating.
+- EXT-PROXY-9 DONE: external proxy JSON errors now include both `error` and `detail`, while text-mode helper output remains unchanged.
+- EXT-PROXY-10 DONE: external proxy sing-box route rules now keep `localhost`, loopback, and private IP destinations on `direct-out` so the proxy does not try to send local control/discovery calls through the VPN outbound.
+- EXT-PROXY-11 DONE: VPNTE now writes external proxy discovery/token files both to Electron `userData` (`%APPDATA%\vpn-tunnel-enforcer`) and the PSR contract path (`%APPDATA%\VPN Tunnel Enforcer`), fixing `RuntimeError: VPNTE control token not found`.
+
+Verification:
+- `npm test -- externalProxy.test.ts firewallKillSwitchValidation.test.ts preloadValidation.test.ts -- --reporter=dot`
+- Result: 3 test files passed, 26 tests passed.
+- `python -m pytest tests\unit\test_vpnte_proxy.py -q`
+- Result: 2 tests passed.
+- `python -m py_compile src\utils\vpnte_proxy.py src\platforms\kwork_ext.py src\browser\browser_manager.py src\platforms\kwork.py`
+- Result: passed.
+- `python -m pytest tests\unit\test_kwork_service.py -q`
+- Result: 23 tests passed.
+- `python -m ruff check src\utils\vpnte_proxy.py src\platforms\kwork_ext.py src\browser\browser_manager.py src\platforms\kwork.py tests\unit\test_vpnte_proxy.py`
+- Result: passed.
+- `npm test -- externalProxy.test.ts firewallKillSwitchValidation.test.ts preloadValidation.test.ts AppSource.test.ts mainIpcRegression.test.ts -- --reporter=dot`
+- Result: 5 test files passed, 55 tests passed.
+- `npm test -- --reporter=dot`
+- Result: 63 test files passed, 553 tests passed.
+- Follow-up VPNTE contract run: `npm test -- --reporter=dot`
+- Result: 63 test files passed, 554 tests passed.
+- Follow-up route syntax smoke: bundled `resources\sing-box.exe check` passed on an external-proxy config containing `localhost`, loopback, private-IP, DNS and final proxy rules.
+- Live local smoke: copied current running token/endpoint to `%APPDATA%\VPN Tunnel Enforcer`, then `POST http://127.0.0.1:17873/start` with `X-VPNTE-Control-Token` returned the running external proxy status.
+- Follow-up discovery-path run: `npm test -- --reporter=dot`
+- Result: 63 test files passed, 555 tests passed.
+- `python -m pytest tests\unit\test_vpnte_proxy.py tests\unit\test_kwork_service.py -q`
+- Result: 25 tests passed.
+- `npx vite build` in `C:\psr\desktop`
+- Result: passed with existing large chunk warning.
+- `npm run dist:win`
+- Result: passed; installer rebuilt at `vpn-tunnel-enforcer/dist/VPN-Tunnel-Enforcer-Setup-1.1.0.exe`.
+- Follow-up `npm run dist:win`
+- Result: passed after VPNTE-only contract patch.
+- Follow-up discovery-path `npm run dist:win`
+- Result: passed after writing discovery/token to both app-data paths.
+- `git diff --check` in VPNTE and PSR
+- Result: passed with only LF->CRLF working-copy warnings.
+- Codebase index full refresh completed for `C:\Users\Redmi\CascadeProjects\vpn` and `C:\psr`; cross-repo intelligence completed with no static cross edges.
+
+Installer:
+- Latest installer: `vpn-tunnel-enforcer/dist/VPN-Tunnel-Enforcer-Setup-1.1.0.exe`.
+- Size: `117,456,679` bytes.
+- SHA256: `1ED9D968446B0D9C3E7B3A92BF503213D75F5C1BB4328F8509947F1E15A74522`.
+- Follow-up size: `117,456,844` bytes.
+- Follow-up SHA256: `110BAA1C1CEFDFB9C7E34BBA51937A759515CE41127862DA53213ED694D55588`.
+- Discovery-path follow-up size: `117,456,975` bytes.
+- Discovery-path follow-up SHA256: `230C24DB4D297D8E25B707EC058613C51BAC06C2E0590FEDA7773D32C18C03AC`.
+- Authenticode: installer and unpacked app still report `NotSigned`.
+
+Windows-only gap:
+- Needs live packaged smoke with kill-switch already active: enable external proxy, rotate via PSR/control API, confirm `vpnte-external-proxy.exe` keeps outbound access while unrelated outbound traffic remains blocked.
+- Needs PSR end-to-end smoke against the target site: set `VPNTE_PROXY_ENABLED=1`, run one request/browser flow, rotate, and confirm the next request exits via the newly selected VPNTE external proxy profile.

@@ -86,6 +86,7 @@ declare global {
       serversSelect: (id: string) => Promise<void>
       serversGetActive: () => Promise<{ profile: import('../shared/ipc-types').ServerProfile | null; activeId: string | null }>
       serversPingAll: () => Promise<import('../shared/ipc-types').ServerProfile[]>
+      serversResolveIps: () => Promise<import('../shared/ipc-types').ServerProfile[]>
       serversPingOne: (host: string, port: number) => Promise<number | null>
       serversVerifyActiveCountry: (ip: string) => Promise<
         | { ok: true; country: string; profile: import('../shared/ipc-types').ServerProfile }
@@ -149,8 +150,21 @@ declare global {
       connectionHistoryExportJson: () => Promise<string>
       connectionHistoryClear: () => Promise<{ success: boolean }>
       // Traffic History
-      trafficHistoryList: (vpnIp?: string) => Promise<Array<{ domain: string; firstSeen: number; lastSeen: number; count: number; vpnIp: string | null }>>
+      trafficHistoryList: (vpnIp?: string, scheduleEnrichment?: boolean) => Promise<Array<{
+        domain: string
+        firstSeen: number
+        lastSeen: number
+        count: number
+        vpnIp: string | null
+        enrichment?: {
+          status: 'pending' | 'ready' | 'unavailable'
+          siteName: string | null
+          title: string | null
+          description: string | null
+        }
+      }>>
       trafficHistoryClear: () => Promise<{ success: boolean }>
+      onTrafficHistoryUpdated: (callback: () => void) => () => void
       // Domain Routing
       domainRoutingList: () => Promise<import('../shared/ipc-types').DomainRule[]>
       domainRoutingAdd: (rule: { pattern: string; action: 'vpn' | 'direct' | 'block'; priority: number }) => Promise<import('../shared/ipc-types').DomainRule>
@@ -199,11 +213,13 @@ declare global {
       i18nGetLocale: () => Promise<string>
       i18nSetLocale: (locale: string) => Promise<void>
       // External Proxy
-      externalProxyStatus: () => Promise<import('../shared/ipc-types').ExternalProxyStatus>
-      externalProxyStart: () => Promise<import('../shared/ipc-types').ExternalProxyStatus>
-      externalProxyStop: () => Promise<import('../shared/ipc-types').ExternalProxyStatus>
+      externalProxyStatus: (slot?: number) => Promise<import('../shared/ipc-types').ExternalProxyStatus>
+      externalProxyStart: (options?: import('../shared/ipc-types').ExternalProxyStartOptions) => Promise<import('../shared/ipc-types').ExternalProxyStatus>
+      externalProxyStartProfiles: (profileIds: string[]) => Promise<import('../shared/ipc-types').ExternalProxyBatchStartResult>
+      externalProxyStop: (slot?: number) => Promise<import('../shared/ipc-types').ExternalProxyStatus>
+      externalProxyStopAll: () => Promise<import('../shared/ipc-types').ExternalProxyStatus>
       externalProxyList: (country?: string) => Promise<import('../shared/ipc-types').ExternalProxyProfileRow[]>
-      externalProxyRotate: () => Promise<import('../shared/ipc-types').ExternalProxyStatus>
+      externalProxyRotate: (slot?: number) => Promise<import('../shared/ipc-types').ExternalProxyStatus>
       // VPN Repair
       repairOrphanedDns: () => Promise<any>
       rollbackAdapterLockdown: () => Promise<any>
@@ -231,8 +247,6 @@ export interface LeakSelfTestResult {
 }
 
 type Page = SidebarPage | 'maintenance'
-
-import { useState } from 'react'
 
 function proxyFromOverride(settings: AppSettings) {
   const raw = settings.proxyOverride.trim()
@@ -266,7 +280,9 @@ const scheduleIdle = (fn: () => void) => {
 
 export default function App() {
   const [page, setPage] = useState<Page>('dashboard')
-  const [visitedPages, setVisitedPages] = useState<Set<Page>>(() => new Set(['dashboard']))
+  // Keep traffic history mounted but hidden so its lightweight journal poller
+  // continues while the user is on another tab.
+  const [visitedPages, setVisitedPages] = useState<Set<Page>>(() => new Set(['dashboard', 'trafficHistory']))
   const [firewallBannerSuppressUntil, setFirewallBannerSuppressUntil] = useState(0)
   // Set to true when the main process tells us it's running shutdown cleanup
   // (the user just confirmed "Отключить и закрыть"). Locks the UI behind a
@@ -354,7 +370,7 @@ export default function App() {
       // has already clicked Stop. Keep transition states monotonic so the UI
       // does not flicker from "stopping" back to "connected".
       if ((busy === 'disconnecting' && (status === 'running' || status === 'proxy-down' || isCompetingTun)) ||
-          (busy === 'connecting' && status === 'stopped')) {
+          (busy === 'connecting' && status === 'stopped' && !store.restartingProgress)) {
         addLog('warn', `Ignored stale TUN status during ${busy}: ${status}`)
         return
       }

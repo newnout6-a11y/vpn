@@ -8,7 +8,7 @@ Windows Electron app that forces all traffic through a controlled VPN path. Runs
 - **Direct VPN**: imports `vless://`, `trojan://`, `ss://`, `vmess://`, `hysteria2://`, `naive://`, `anytls://`, `shadowtls://`, `tuic://`, sing-box outbound JSON, Clash YAML, Xray JSON, subscription URLs, and `happ://add/...` deep links
 - **Hard mode (TUN)**: Wintun adapter via sing-box with `mixed` TCP stack (native Windows kernel + gVisor UDP), `strict_route` DNS hijack, `route_exclude_address` for private ranges, firewall kill-switch, physical adapter lockdown (IPv6 off + DNS pinning), and `DisableSmartNameResolution` registry hardening
 - **Soft mode (Autoconfig)**: configures Android Studio, Gradle, Git, and `HTTP_PROXY` / `HTTPS_PROXY` environment variables via `setx` (uses `socks5h://` to force DNS through proxy), with rollback support
-- **External proxy mode**: separate sing-box process exposing a mixed HTTP/SOCKS proxy on `127.0.0.1:17990`, controlled via HTTP API on port 17873 by default
+- **External proxy mode**: independent sing-box processes exposing mixed HTTP/SOCKS proxies on loopback ports starting at `127.0.0.1:17990`, controlled via HTTP API on port 17873 by default
 
 ### Proxy Client Detection
 Automatically detects local proxies from:
@@ -150,15 +150,21 @@ Packaged builds include `vpnte-proxy.ps1` and `vpnte-proxy.cmd`. The app listens
 
 | Endpoint | Method | Auth | Purpose |
 |---|---|---|---|
-| `/status` | GET | No | Current proxy URL |
+| `/status` | GET | No | Current proxy URL (`?slot=1..47546`) |
+| `/instances` | GET | No | Proxy instances with cached data-plane health |
 | `/list` | GET | No | Profile list (optional `?country=`) |
-| `/start` | POST | Yes | Start with auto-picked profile |
-| `/rotate` | POST | Yes | Round-robin next profile |
-| `/connect` | POST | Yes | Specific profileId |
-| `/trigger` | POST | Yes | Fire-and-forget reconnect |
-| `/stop` | POST | Yes | Kill proxy process |
+| `/start` | POST | Yes | Start with auto-picked profile (`?slot=1..47546`) |
+| `/rotate` | POST | Yes | Round-robin next profile (`?slot=1..47546`) |
+| `/connect` | POST | Yes | Specific profileId (`?slot=1..47546`) |
+| `/trigger` | POST | Yes | Fire-and-forget reconnect (`?slot=1..47546`) |
+| `/healthcheck` | POST | Yes | Run an immediate data-plane check for one slot |
+| `/stop` | POST | Yes | Kill proxy process (`?slot=1..47546`) |
 
 Token: `X-VPNTE-Control-Token` header, generated per session, written to `%APPDATA%\VPN Tunnel Enforcer\external-proxy-control-token`. `vpnte-proxy.ps1` reads the endpoint file automatically and also accepts `VPNTE_CONTROL_URL` as an override.
+
+Slot 1 uses the legacy proxy port `17990`; each following slot uses the next TCP port. For example, slot 100 uses port `18089`. The PowerShell helper accepts `-Slot 1..47546` and derives the matching default port automatically.
+
+Each `/instances` row includes `health` (`healthy`, `checking`, or `unhealthy`), `egressIp`, `latencyMs`, `lastCheckedAt`, `lastSuccessAt`, and `lastError`. `running` is true only after both the external-IP and HTTPS probes succeed through that row's `proxyUrl`; `processRunning` reports only whether the managed child process is still alive. Repeated timeout/EOF health failures trigger bounded restart attempts, then disable the slot while retaining its diagnostic result.
 
 ## Boot-Time Recovery
 

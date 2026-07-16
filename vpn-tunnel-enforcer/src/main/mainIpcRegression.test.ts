@@ -98,6 +98,35 @@ describe('main IPC regressions', () => {
     expect(validation).toBeLessThan(saveCall)
   })
 
+  it('restarts a running tunnel when safety settings affect live runtime config', () => {
+    const source = mainIndexSource()
+    const handlerStart = source.indexOf("handleLogged('save-settings'")
+    const handlerEnd = source.indexOf("handleLogged('inspect-vpn-input'", handlerStart)
+    const handler = source.slice(handlerStart, handlerEnd)
+
+    expect(handler).toContain('previous.strictAdapterLockdown !== saved.strictAdapterLockdown')
+    expect(handler).toContain('previous.publicWifiCompatibility !== saved.publicWifiCompatibility')
+    expect(handler).toContain('previous.stealthMode !== saved.stealthMode')
+    expect(handler).toContain('tunController.getStatus().running')
+    expect(handler).toContain('tunController.restartWithLastOptions(`settings changed: ${changed}`)')
+  })
+
+  it('kicks Smart-RU managed rule-set auto-refresh on startup and relevant settings changes', () => {
+    const source = mainIndexSource()
+    const readyStart = source.indexOf('app.whenReady().then')
+    const appReadyRefresh = source.indexOf("maybeRefreshSmartRouteRuleSets('app-ready')", readyStart)
+    const handlerStart = source.indexOf("handleLogged('save-settings'")
+    const handlerEnd = source.indexOf("handleLogged('inspect-vpn-input'", handlerStart)
+    const handler = source.slice(handlerStart, handlerEnd)
+
+    expect(source).toContain('maybeRefreshSmartRouteRuleSets')
+    expect(appReadyRefresh).toBeGreaterThan(readyStart)
+    expect(handler).toContain('previous.smartRuSplit !== saved.smartRuSplit')
+    expect(handler).toContain('previous.smartRuRuleSetMode !== saved.smartRuRuleSetMode')
+    expect(handler).toContain('previous.smartRuRuleSetAutoUpdate !== saved.smartRuRuleSetAutoUpdate')
+    expect(handler).toContain("maybeRefreshSmartRouteRuleSets('settings-save')")
+  })
+
   it('runs startup crash recovery before opening the renderer window', () => {
     const source = mainIndexSource()
     const readyStart = source.indexOf('app.whenReady().then')
@@ -117,6 +146,26 @@ describe('main IPC regressions', () => {
     expect(source).toContain('exportOutboundToProxyLine')
     expect(source).toContain('proxy-list-')
     expect(source).toContain("reason: 'unsupported-all'")
+  })
+
+  it('stops all external proxies before the main VPN disconnect', () => {
+    const source = mainIndexSource()
+    const stopStart = source.indexOf('async function stopProtection()')
+    const tunStop = source.indexOf('const result = await tunController.stop()', stopStart)
+    const proxyStop = source.indexOf("await externalProxy.stopAll('vpn-stop')", stopStart)
+
+    expect(stopStart).toBeGreaterThanOrEqual(0)
+    expect(proxyStop).toBeGreaterThan(stopStart)
+    expect(proxyStop).toBeLessThan(tunStop)
+  })
+
+  it('stops all external proxies during application shutdown', () => {
+    const source = mainIndexSource()
+    const shutdownStart = source.indexOf('async function performShutdownCleanup')
+    const proxyStop = source.indexOf('await externalProxy.stopAll(`shutdown: ${reason}`)', shutdownStart)
+
+    expect(shutdownStart).toBeGreaterThanOrEqual(0)
+    expect(proxyStop).toBeGreaterThan(shutdownStart)
   })
 
   it('respects disableGeoLookup in server probe enrichment', () => {

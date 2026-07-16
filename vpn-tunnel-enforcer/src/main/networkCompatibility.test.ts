@@ -20,4 +20,10 @@ describe('selectTunMtu', () => {
   it('lets stealth mode win with the most conservative MTU', () => {
     expect(selectTunMtu({ publicWifiCompatibility: true, stealthMode: true })).toBe(STEALTH_TUN_MTU)
   })
+
+  it('uses the conservative MTU only for the dedicated MTU compatibility mode', () => {
+    expect(selectTunMtu({ adaptiveMode: 'baseline' })).toBe(DEFAULT_TUN_MTU)
+    expect(selectTunMtu({ adaptiveMode: 'tls-compatibility' })).toBe(DEFAULT_TUN_MTU)
+    expect(selectTunMtu({ adaptiveMode: 'mtu-compatibility' })).toBe(STEALTH_TUN_MTU)
+  })
 })

@@ -46,6 +46,7 @@ import {
 import { getPreferredSmartRouteRuleSetSourceDir } from './ruleSetManager'
 import { selectTunMtu } from './networkCompatibility'
 import type { PhysicalAdapterDnsSource } from './physicalAdapterLockdown'
+import type { AdaptiveBypassMode } from './adaptiveBypass'
 
 const exec = promisify(execCb)
 const execFile = promisify(execFileCb)
@@ -79,7 +80,7 @@ export interface TunStatus {
   restartAttempt?: number
 }
 
-interface StartOptions {
+export interface StartOptions {
   mode?: 'localProxy' | 'directVpn'
   proxyAddr?: string
   proxyType?: 'socks5' | 'http'
@@ -99,6 +100,7 @@ interface StartOptions {
   // record-fragment in non-Reality outbounds. Read from settings on every
   // start so toggling the UI immediately takes effect on the next restart.
   stealthMode?: boolean
+  adaptiveMode?: AdaptiveBypassMode
 }
 
 // Localhost clash-API state. Populated when sing-box starts; cleared on
@@ -292,6 +294,9 @@ const PROXY_CORE_PROCESS_NAMES = [
   'streisand.exe',
   // Surfboard
   'surfboard.exe',
+]
+const EXTERNAL_PROXY_PROCESS_NAMES = [
+  'vpnte-external-proxy.exe',
 ]
 
 export function getTunRuntimeDir(): string {
@@ -716,6 +721,7 @@ export function generateSingboxConfig(
   directProcessNames: string[] = [],
   options: {
     stealthMode?: boolean
+    adaptiveMode?: AdaptiveBypassMode
     publicWifiCompatibility?: boolean
     directProxyPortOverride?: number
     clashPortOverride?: number
@@ -740,8 +746,11 @@ export function generateSingboxConfig(
   //      offered by sing-box 1.12+; the docs explicitly recommend it as
   //      the first thing to try.
   const stealthMode = options.stealthMode === true
+  const adaptiveMode = options.adaptiveMode ?? 'baseline'
+  const tlsCompatibility = stealthMode || adaptiveMode === 'tls-compatibility'
   const tunMtu = selectTunMtu({
     stealthMode,
+    adaptiveMode,
     publicWifiCompatibility: options.publicWifiCompatibility === true
   })
   const isDirectVpn = typeof upstream !== 'string'
@@ -758,7 +767,9 @@ export function generateSingboxConfig(
     ruleSetDir: options.smartRuRuleSetDir
   }
   const parsedProxy = typeof upstream === 'string' ? parseProxyAddress(upstream) : null
-  const proxyCoreProcesses = isDirectVpn ? [] : uniqueProcessNames([...PROXY_CORE_PROCESS_NAMES, ...directProcessNames])
+  const proxyCoreProcesses = isDirectVpn
+    ? uniqueProcessNames(EXTERNAL_PROXY_PROCESS_NAMES)
+    : uniqueProcessNames([...PROXY_CORE_PROCESS_NAMES, ...EXTERNAL_PROXY_PROCESS_NAMES, ...directProcessNames])
 
   // sing-box 1.13 deprecates outbound domain_strategy; if the proxy/VPN
   // endpoint is a hostname, resolve only that bootstrap name directly, while
@@ -806,7 +817,7 @@ export function generateSingboxConfig(
     // server-side allowlists/sticky sessions) but different outbounds
     // within the same subscription look like different browsers, which
     // makes a big subscription harder to bulk-block by a single fp pattern.
-    if (stealthMode && !realityEnabled && !explicitClientDevice && tls.utls && typeof tls.utls === 'object') {
+    if (tlsCompatibility && !realityEnabled && !explicitClientDevice && tls.utls && typeof tls.utls === 'object') {
       // Windows-plausible fingerprints only. Safari does not exist on Windows,
       // so a "safari" uTLS fp on a Windows client is itself an anomaly DPI can
       // flag — drop it. chrome/firefox/edge are all native to Windows. Keep
@@ -821,7 +832,7 @@ export function generateSingboxConfig(
       tls.utls.fingerprint = fps[Math.abs(h) % fps.length]
     }
 
-    if (stealthMode && !realityEnabled) {
+    if (tlsCompatibility && !realityEnabled) {
       tls.record_fragment = true
     }
   }
@@ -1702,6 +1713,7 @@ async function prepareRuntime(
   directProcessNames: string[],
   options: {
     stealthMode?: boolean
+    adaptiveMode?: AdaptiveBypassMode
     publicWifiCompatibility?: boolean
     smartRuSplit?: boolean
     smartRuMapsDirect?: boolean
@@ -1980,7 +1992,8 @@ export async function attemptPostTrialFailover(): Promise<{ tried: number; succe
           enableFirewallKillSwitch: lastStartOptions?.enableFirewallKillSwitch ?? settings.firewallKillSwitch === true,
           enableAdapterLockdown: lastStartOptions?.enableAdapterLockdown ?? settings.strictAdapterLockdown === true,
           publicWifiCompatibility: lastStartOptions?.publicWifiCompatibility ?? settings.publicWifiCompatibility,
-          stealthMode: lastStartOptions?.stealthMode ?? settings.stealthMode === true
+          stealthMode: lastStartOptions?.stealthMode ?? settings.stealthMode === true,
+          adaptiveMode: lastStartOptions?.adaptiveMode
         })
         if (!startResult.success) {
           logEvent('warn', 'tun', 'post-trial failover: start failed', { error: startResult.error })
@@ -2307,6 +2320,7 @@ export const tunController = {
           proxyOwnerProcessNames,
           {
             stealthMode: startOptions.stealthMode === true,
+            adaptiveMode: startOptions.adaptiveMode,
             publicWifiCompatibility,
             ...smartRouteRuntimeOpts
           }
@@ -2370,6 +2384,7 @@ export const tunController = {
           proxyOwnerProcessNames,
           {
             stealthMode: startOptions.stealthMode === true,
+            adaptiveMode: startOptions.adaptiveMode,
             publicWifiCompatibility,
             ...smartRouteRuntimeOpts
           }
@@ -2513,6 +2528,20 @@ export const tunController = {
             // we kick off another full attempt.
             restartTimer = setTimeout(() => {
               restartTimer = null
+              if (settingsStore.get().autoRestartOnCrash === false) {
+                logEvent('info', 'tun', 'auto-restart cancelled because setting is off', { attempt })
+                if (adapterLockdownEngaged) {
+                  rollbackPhysicalAdapterLockdownIfApplied('auto-restart cancelled').catch(err =>
+                    logEvent('warn', 'tun', 'adapter lockdown rollback after auto-restart cancellation failed', err)
+                  )
+                  repairOrphanedPhysicalAdapterDns('auto-restart cancelled - safety repair').catch(err =>
+                    logEvent('warn', 'tun', 'orphaned DNS repair after auto-restart cancellation failed', err)
+                  )
+                }
+                if (killSwitchEngaged) notifyStatus('killswitch-active')
+                else notifyStatus('stopped')
+                return
+              }
               if (userInitiatedStop || stopInProgress) {
                 logEvent('info', 'tun', 'WSAEACCES retry cancelled by stop')
                 return
@@ -2952,7 +2981,9 @@ export const tunController = {
             vpnProfile,
             enableFirewallKillSwitch: wantKillSwitch,
             enableAdapterLockdown: wantAdapterLockdown,
-            publicWifiCompatibility
+            publicWifiCompatibility,
+            stealthMode: startOptions.stealthMode === true,
+            adaptiveMode: startOptions.adaptiveMode
           }
           if (!stopInProgress) {
             userInitiatedStop = false
@@ -3020,7 +3051,8 @@ export const tunController = {
     })
   },
 
-  async stop(): Promise<{ success: boolean; error?: string; warning?: string }> {
+  async stop(options: { preserveNetworkProtection?: boolean; preserveLastStartOptions?: boolean } = {}): Promise<{ success: boolean; error?: string; warning?: string }> {
+    const preserveNetworkProtection = options.preserveNetworkProtection === true
     // If start() is mid-flight, wait for it to finish before stopping.
     // Without this, stop() kills sing-box while start() is still polling
     // for it, leaving the app in an inconsistent state.
@@ -3050,8 +3082,10 @@ export const tunController = {
       mode: currentStatus.mode ?? null,
       restartAttempt
     })
-    lastStartOptions = null
-    restartAttempt = 0
+    if (!options.preserveLastStartOptions) {
+      lastStartOptions = null
+      restartAttempt = 0
+    }
     clearRestartTimers()
 
     // Status contract for the renderer:
@@ -3064,7 +3098,7 @@ export const tunController = {
     //                        leaks while we wait for retry / user action.
     //   'restarting:N/M'   — auto-restart attempt N of M is scheduled.
     //   'proxy-down'       — upstream proxy stopped responding; TUN still up.
-    notifyStatus('stopping')
+    notifyStatus(preserveNetworkProtection ? 'adapting' : 'stopping')
 
     // Defense-in-depth: silence the false-positive leak path before any
     // rollback runs. The renderer-side stoppingNowRef + ipMonitor IPC bridge
@@ -3120,6 +3154,7 @@ export const tunController = {
     // Every cleanup step is independent. A failed taskkill or baseline rollback
     // must not prevent us from removing firewall/DNS changes; that is exactly how
     // the app can leave Windows with "VPN off, internet broken".
+    if (!preserveNetworkProtection) {
     try {
       const baseline = await rollbackTunNetworkBaselineIfApplied('TUN stopped')
       if (!baseline.success) {
@@ -3151,6 +3186,9 @@ export const tunController = {
     } catch (err) {
       rememberCleanupError('orphaned DNS repair', err)
     }
+    } else {
+      logEvent('info', 'tun', 'preserved kill-switch, baseline, and adapter lockdown for adaptive transition')
+    }
 
     if (cleanupErrors.length > 0) {
       // Resume leak detection even on a partial-cleanup failure. Suspending
@@ -3161,6 +3199,10 @@ export const tunController = {
       // fresh baseline.
       resumeLeakMonitor()
       const warning = cleanupErrors.join(' | ')
+      if (preserveNetworkProtection) {
+        notifyStatus('adapting')
+        return { success: true, warning }
+      }
       notify('warn', 'Защита отключена с предупреждениями', warning, 'vpnDisconnect')
       notifyStatus('stopped')
       return { success: true, warning }
@@ -3169,6 +3211,10 @@ export const tunController = {
     // Cleanup finished — let the leak-detector run again. The next tunnel
     // start (or a manual recheck) will set a fresh vpnIp baseline.
     resumeLeakMonitor()
+    if (preserveNetworkProtection) {
+      notifyStatus('adapting')
+      return { success: true }
+    }
     notify('info', 'Защита выключена', 'Трафик идёт по обычному маршруту.', 'vpnDisconnect')
     notifyStatus('stopped')
 
@@ -3203,6 +3249,15 @@ export const tunController = {
       logEvent('warn', 'tun', 'restartWithLastOptions: no last options — leaving tunnel as-is', { reason })
       return { success: false, error: 'no last start options' }
     }
+    const settings = settingsStore.get()
+    const nextSnapshot: StartOptions = {
+      ...snapshot,
+      enableFirewallKillSwitch: settings.firewallKillSwitch === true,
+      enableAdapterLockdown: settings.strictAdapterLockdown === true,
+      publicWifiCompatibility: settings.publicWifiCompatibility,
+      stealthMode: settings.stealthMode === true,
+      adaptiveMode: snapshot.adaptiveMode
+    }
     logEvent('info', 'tun', `restarting tunnel to apply config change: ${reason}`)
     const stopped = await this.stop()
     if (!stopped.success) {
@@ -3211,7 +3266,43 @@ export const tunController = {
     // Brief pause so the runtime fully releases the TUN adapter before we
     // recreate it — mirrors the delay the old split-tunnel hot-reload used.
     await new Promise((resolve) => setTimeout(resolve, 500))
-    return this.start(snapshot)
+    return this.start(nextSnapshot)
+  },
+
+  async restartForAdaptiveChange(
+    nextMode: AdaptiveBypassMode,
+    reason: string,
+    overrides: Pick<StartOptions, 'vpnProfile'> = {}
+  ): Promise<{ success: boolean; error?: string; warning?: string | null }> {
+    if (!currentStatus.running) {
+      return { success: false, error: 'tunnel is not running' }
+    }
+    const snapshot = lastStartOptions
+    if (!snapshot) {
+      return { success: false, error: 'no last start options' }
+    }
+
+    logEvent('info', 'adaptive-bypass', 'starting protected compatibility transition', {
+      from: snapshot.adaptiveMode ?? 'baseline',
+      to: nextMode,
+      reason
+    })
+    const stopped = await this.stop({
+      preserveNetworkProtection: true,
+      preserveLastStartOptions: true
+    })
+    if (!stopped.success) return { success: false, error: stopped.error, warning: stopped.warning }
+
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    const restarted = await this.start({ ...snapshot, ...overrides, adaptiveMode: nextMode })
+    if (restarted.success) return restarted
+
+    // A failed protected transition must not strand the user behind a stale
+    // kill-switch or adapter DNS pin. The ordinary stop path fully rolls back.
+    await this.stop().catch(err =>
+      logEvent('warn', 'adaptive-bypass', 'terminal cleanup after adaptive transition failed', err)
+    )
+    return restarted
   },
 
   async disableFirewallKillSwitch(reason: string): Promise<{ success: boolean; message: string; skipped?: boolean }> {

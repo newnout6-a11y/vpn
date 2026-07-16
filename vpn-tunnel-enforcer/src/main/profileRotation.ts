@@ -20,6 +20,7 @@ import { requireBoolean, requireEnum, requireNumber, requirePlainObject, require
 import { notify } from './notifications'
 import { serverPicker, smartOfflinePing } from './serverPicker'
 import { settingsStore } from './settings'
+import { beginAdaptiveConnection } from './adaptiveBypass'
 import type { RotationConfig } from '../shared/ipc-types'
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -132,6 +133,23 @@ function saveConfig(config: RotationConfig): void {
   store.set('rotation', config)
 }
 
+function getUsableRotationProfileIds(): string[] {
+  return serverPicker
+    .getProfiles()
+    .filter((profile) =>
+      profile.enabled !== false &&
+      profile.outbound &&
+      typeof profile.outbound === 'object'
+    )
+    .map((profile) => profile.id)
+}
+
+function clampCurrentIndex(config: RotationConfig): RotationConfig {
+  if (config.profileIds.length === 0) return { ...config, currentIndex: 0 }
+  if (config.currentIndex >= 0 && config.currentIndex < config.profileIds.length) return config
+  return { ...config, currentIndex: 0 }
+}
+
 // ─── Availability Check ──────────────────────────────────────────────────────
 
 /**
@@ -156,7 +174,7 @@ async function buildAvailabilityMap(profileIds: string[]): Promise<Record<string
     }
 
     // Use cached status if recently checked (within last 2 minutes)
-    if (profile.lastChecked && Date.now() - profile.lastChecked < 120_000) {
+    if (!tunnelRunning && profile.lastChecked && Date.now() - profile.lastChecked < 120_000) {
       map[id] = profile.status === 'online'
       continue
     }
@@ -169,7 +187,7 @@ async function buildAvailabilityMap(profileIds: string[]): Promise<Record<string
         status: profile.status,
         lastChecked: profile.lastChecked ?? null
       })
-      map[id] = false
+      map[id] = profile.enabled !== false && profile.status !== 'offline'
       continue
     }
 
@@ -254,6 +272,19 @@ async function performRotationOnce(): Promise<{ success: boolean; newProfile: st
       const outbound = profile && (profile as any).outbound
       if (outbound && typeof outbound === 'object') {
         const settings = settingsStore.get()
+        const vpnProfile = {
+          name: profile!.name,
+          protocol: profile!.protocol as any,
+          outbound,
+          clientDevice: profile!.clientDevice,
+          clientFingerprint: profile!.clientFingerprint
+        }
+        const adaptive = beginAdaptiveConnection({
+          enabled: settings.adaptiveBypassEnabled,
+          legacyStealthMode: settings.stealthMode,
+          mode: 'directVpn',
+          profile: vpnProfile
+        })
         logEvent('info', 'profile-rotation', 'reconnecting live tunnel to rotated profile', {
           profileId: nextProfileId
         })
@@ -265,15 +296,12 @@ async function performRotationOnce(): Promise<{ success: boolean; newProfile: st
         )
         await tunController.start({
           mode: 'directVpn',
-          vpnProfile: {
-            name: profile!.name,
-            protocol: profile!.protocol as any,
-            outbound
-          },
+          vpnProfile,
           enableFirewallKillSwitch: settings.firewallKillSwitch === true,
           enableAdapterLockdown: settings.strictAdapterLockdown === true,
           publicWifiCompatibility: settings.publicWifiCompatibility,
-          stealthMode: settings.stealthMode === true
+          stealthMode: settings.stealthMode === true,
+          adaptiveMode: adaptive.mode
         }).catch((err) =>
           logEvent('warn', 'profile-rotation', 'start after rotate-reconnect failed', err)
         )
@@ -289,7 +317,6 @@ async function performRotationOnce(): Promise<{ success: boolean; newProfile: st
 
   // Schedule next rotation
   scheduleNextRotation(updatedConfig)
-  saveConfig(updatedConfig)
 
   return { success: true, newProfile: nextProfileId }
 }
@@ -403,7 +430,7 @@ export function registerRotationHandlers(): void {
   handleLogged('rotation:set-config', async (_event, partial: Partial<RotationConfig>) => {
     partial = sanitizeRotationConfigPatch(partial)
     const current = getConfig()
-    const updated: RotationConfig = {
+    let updated: RotationConfig = {
       ...current,
       ...partial,
       // Always clamp the interval
@@ -411,6 +438,11 @@ export function registerRotationHandlers(): void {
         partial.intervalMinutes ?? current.intervalMinutes
       )
     }
+
+    if (updated.enabled && updated.profileIds.length === 0 && partial.profileIds === undefined) {
+      updated = { ...updated, profileIds: getUsableRotationProfileIds(), currentIndex: 0 }
+    }
+    updated = clampCurrentIndex(updated)
 
     saveConfig(updated)
 

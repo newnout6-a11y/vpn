@@ -64,6 +64,10 @@ export function displayedServerPing(profile: Pick<ServerProfile, 'ping'>, perRow
   return perRowPing?.ping ?? profile.ping ?? null
 }
 
+export function hasSuccessfulRowPing(perRowPing?: Pick<PerRowPing, 'ping' | 'loading'>): boolean {
+  return perRowPing?.ping != null && !perRowPing.loading
+}
+
 const VIRTUAL_ALL_GROUP_ID = '__virtual_all__'
 const EXPANDED_STORAGE_KEY = 'vpnte:expanded-groups'
 const NEW_GROUP_OPTION = '__new__'
@@ -233,6 +237,7 @@ function writeExpandedIds(ids: Set<string>) {
 export function Servers() {
   const { t, i18n } = useTranslation()
   const addLog = useAppStore((s) => s.addLog)
+  const tunRunning = useAppStore((s) => s.tunRunning)
   const [profiles, setProfiles] = useState<ServerProfile[]>([])
   const [groups, setGroups] = useState<ServerGroup[]>([])
   const [groupsAvailable, setGroupsAvailable] = useState<boolean | null>(null)
@@ -257,6 +262,7 @@ export function Servers() {
   // Per-group-runtime UI state.
   const [refreshingGroups, setRefreshingGroups] = useState<Record<string, boolean>>({})
   const [healthCheckingGroups, setHealthCheckingGroups] = useState<Record<string, boolean>>({})
+  const [startingProxyGroups, setStartingProxyGroups] = useState<Record<string, boolean>>({})
   // Health-check results live only in-page (intentionally not persisted).
   // Keyed by profileId.
   const [healthByProfile, setHealthByProfile] = useState<Record<string, HealthRow>>({})
@@ -297,6 +303,14 @@ export function Servers() {
       ])
       setProfiles(list)
       setActiveId(active.activeId ?? active.profile?.id ?? null)
+      const api = window.electronAPI as unknown as {
+        serversResolveIps?: () => Promise<ServerProfile[]>
+      }
+      if (typeof api.serversResolveIps === 'function') {
+        void api.serversResolveIps()
+          .then((resolved) => setProfiles(resolved))
+          .catch(() => {})
+      }
     } catch (err) {
       console.error('Failed to fetch server profiles:', err)
     }
@@ -436,10 +450,11 @@ export function Servers() {
     return map
   }, [profiles, groups, groupsAvailable])
 
-  // ─── Per-row probe (kept verbatim from the previous version) ─────────────
+  // ─── Per-row ping ─────────────────────────────────────────────────────────
 
-  const probeRow = useCallback(
+  const pingRow = useCallback(
     async (rowKey: string, host: string, port: number | undefined) => {
+      if (!port) return
       setPerRowPings((prev) => ({
         ...prev,
         [rowKey]: {
@@ -449,16 +464,31 @@ export function Servers() {
         }
       }))
       try {
-        const probe = await window.electronAPI.serverProbe(host, port)
-        const ping = probe?.latency?.avg != null ? Math.round(probe.latency.avg) : null
-        const country = probe?.asn?.country || null
-        setPerRowPings((prev) => ({ ...prev, [rowKey]: { ping, country, loading: false } }))
-      } catch (err) {
-        console.error('Per-row probe failed:', err)
+        const ping = await window.electronAPI.serversPingOne(host, port)
+        if (ping != null) {
+          // A fresh direct probe is newer than a group's cached health result.
+          // It proves the endpoint is reachable, while health will be checked
+          // again by its own explicit action.
+          setHealthByProfile((prev) => {
+            if (!prev[rowKey]) return prev
+            const { [rowKey]: _staleHealth, ...next } = prev
+            return next
+          })
+        }
         setPerRowPings((prev) => ({
           ...prev,
           [rowKey]: {
-            ping: prev[rowKey]?.ping ?? null,
+            ping,
+            country: prev[rowKey]?.country ?? null,
+            loading: false
+          }
+        }))
+      } catch (err) {
+        console.error('Per-row ping failed:', err)
+        setPerRowPings((prev) => ({
+          ...prev,
+          [rowKey]: {
+            ping: null,
             country: prev[rowKey]?.country ?? null,
             loading: false
           }
@@ -470,7 +500,7 @@ export function Servers() {
 
   const handlePingOne = (profile: ServerProfile) => {
     if (!profile.server) return
-    probeRow(profile.id, profile.server, profile.port)
+    pingRow(profile.id, profile.server, profile.port)
   }
 
   const handleVerifyCountry = async (profile: ServerProfile) => {
@@ -515,6 +545,21 @@ export function Servers() {
     setPinging(true)
     try {
       if (profiles.length > 0) {
+        if (tunRunning) {
+          const queue = profiles.filter((profile) => profile.server && profile.port)
+          const concurrency = 5
+          let i = 0
+          const worker = async () => {
+            while (i < queue.length) {
+              const profile = queue[i++]
+              if (profile.server && profile.port) {
+                await pingRow(profile.id, profile.server, profile.port)
+              }
+            }
+          }
+          await Promise.all(Array.from({ length: Math.min(concurrency, queue.length) }, worker))
+          return
+        }
         const updated = await window.electronAPI.serversPingAll()
         setProfiles(updated)
         setPerRowPings((prev) => {
@@ -979,6 +1024,40 @@ export function Servers() {
     }
   }
 
+  const handleGroupStartExternalProxies = async (group: ServerGroup, groupProfiles: ServerProfile[]) => {
+    if (!groupProfiles.length) return
+
+    setStartingProxyGroups((prev) => ({ ...prev, [group.id]: true }))
+    try {
+      const result = await window.electronAPI.externalProxyStartProfiles(groupProfiles.map((profile) => profile.id))
+      window.dispatchEvent(new Event('vpnte:external-proxy-changed'))
+      const details = [
+        `Запущено: ${result.started.length}`,
+        result.alreadyRunningProfileIds.length > 0 ? `уже работали: ${result.alreadyRunningProfileIds.length}` : '',
+        result.skipped.length > 0 ? `пропущено: ${result.skipped.length}` : '',
+        result.failed.length > 0 ? `ошибок: ${result.failed.length}` : ''
+      ].filter(Boolean).join(', ')
+      const variant: ToastData['variant'] = result.failed.length > 0
+        ? 'warning'
+        : result.started.length > 0
+          ? 'success'
+          : 'info'
+
+      addLog('info', `${group.name}: внешние прокси. ${details}`)
+      showToast(variant, `Прокси: ${group.name}`, details)
+    } catch (err: any) {
+      const message = err?.message ?? String(err)
+      addLog('error', `${group.name}: не удалось запустить внешние прокси: ${message}`)
+      showToast('error', `Прокси: ${group.name}`, message)
+    } finally {
+      setStartingProxyGroups((prev) => {
+        const next = { ...prev }
+        delete next[group.id]
+        return next
+      })
+    }
+  }
+
   const confirmDeleteGroup = async (deleteServers: boolean) => {
     if (!deleteTarget) return
     const target = deleteTarget
@@ -1206,9 +1285,11 @@ export function Servers() {
                 onRenameKey={handleRenameKey}
                 onRefresh={() => handleGroupRefresh(group)}
                 onCheckHealth={() => handleGroupHealth(group)}
+                onStartExternalProxies={() => handleGroupStartExternalProxies(group, groupProfiles)}
                 onDelete={() => setDeleteTarget(group)}
                 isRefreshing={!!refreshingGroups[group.id]}
                 isCheckingHealth={!!healthCheckingGroups[group.id]}
+                isStartingExternalProxies={!!startingProxyGroups[group.id]}
                 healthByProfile={healthByProfile}
                 activeId={activeId}
                 switchingId={switchingId}
@@ -1323,9 +1404,11 @@ interface GroupCardProps {
   onRenameKey: (e: KeyboardEvent<HTMLInputElement>) => void
   onRefresh: () => void
   onCheckHealth: () => void
+  onStartExternalProxies: () => void
   onDelete: () => void
   isRefreshing: boolean
   isCheckingHealth: boolean
+  isStartingExternalProxies: boolean
   healthByProfile: Record<string, HealthRow>
   activeId: string | null
   switchingId: string | null
@@ -1359,9 +1442,11 @@ function GroupCard(props: GroupCardProps) {
     onRenameKey,
     onRefresh,
     onCheckHealth,
+    onStartExternalProxies,
     onDelete,
     isRefreshing,
     isCheckingHealth,
+    isStartingExternalProxies,
     healthByProfile,
     activeId,
     switchingId,
@@ -1468,8 +1553,23 @@ function GroupCard(props: GroupCardProps) {
           )}
         </div>
 
-        {!isVirtual && groupsAvailable && (
-          <div className="flex items-center gap-1.5 flex-shrink-0" data-no-toggle>
+        <div className="flex items-center gap-1.5 flex-shrink-0" data-no-toggle>
+            <MacButton
+              size="sm"
+              variant="ghost"
+              onClick={(e) => {
+                e.stopPropagation()
+                onStartExternalProxies()
+              }}
+              loading={isStartingExternalProxies}
+              disabled={isStartingExternalProxies || profiles.length === 0}
+              title="Запустить отдельный внешний прокси для каждого сервера группы"
+            >
+              <Globe2 className="w-3.5 h-3.5 mr-1" />
+              {isStartingExternalProxies ? 'Запускаем' : 'В прокси'}
+            </MacButton>
+          {!isVirtual && groupsAvailable && (
+            <>
             {isSubscription && (
               <MacButton
                 size="sm"
@@ -1511,8 +1611,9 @@ function GroupCard(props: GroupCardProps) {
             >
               <Trash2 className="w-3.5 h-3.5 text-[var(--color-danger)]" />
             </MacButton>
-          </div>
-        )}
+            </>
+          )}
+        </div>
       </div>
 
       {/* Body */}
@@ -1727,6 +1828,7 @@ function ServerProfileCard({
   const country = profile.country || perRowPing?.country || null
   const flag = countryFlagFromCountryOrName(country, profile.name)
   const ping = displayedServerPing(profile, perRowPing)
+  const hasFreshPingSuccess = hasSuccessfulRowPing(perRowPing)
   const stealthBadge = profileStealthBadge(profile)
   const isSelectDisabled = isActive || isSwitching || switchingLocked
 
@@ -1745,6 +1847,7 @@ function ServerProfileCard({
 
   return (
     <MacCard
+      flat
       className={
         '!p-3 cursor-pointer relative overflow-hidden transition-colors duration-150 hover:!border-[color-mix(in_srgb,var(--color-accent)_24%,var(--color-border))] ' +
         (isActive || isSwitching ? '!border-[var(--color-accent)] ring-1 ring-[var(--color-accent)]/30 ' : '') +
@@ -1826,6 +1929,12 @@ function ServerProfileCard({
             <span className="text-[11px] text-[var(--color-text-muted)] truncate font-mono">
               {profile.server}:{profile.port}
             </span>
+            <span
+              className="text-[11px] text-[var(--color-accent)] truncate font-mono"
+              title={profile.resolvedIp ? `DNS: ${profile.server}` : 'IP не разрешён'}
+            >
+              IP: {profile.resolvedIp ?? '—'}
+            </span>
           </div>
         </div>
 
@@ -1834,7 +1943,11 @@ function ServerProfileCard({
             the real per-server ping; health latency is a different metric and
             must not be displayed as geographical RTT. */}
         <div className="flex items-center gap-1 min-w-[64px] justify-end">
-          {health ? (
+          {hasFreshPingSuccess ? (
+            <span title="Последний точечный пинг: сервер доступен">
+              <Check className="w-3.5 h-3.5 text-[var(--color-success)]" />
+            </span>
+          ) : health ? (
             health.online ? (
               <span title="Health check: key is alive">
                 <Check className="w-3.5 h-3.5 text-[var(--color-success)]" />

@@ -148,9 +148,10 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
       return
     }
     let cancelled = false
+    const controller = new AbortController()
     ;(async () => {
       try {
-        const resp = await fetch(`https://ipapi.co/${publicIp}/json/`)
+        const resp = await fetch(`https://ipapi.co/${publicIp}/json/`, { signal: controller.signal })
         if (!resp.ok) return
         const data = await resp.json()
         if (!cancelled && data && !data.error) {
@@ -166,8 +167,11 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
         // silent — chip will just show IP without country
       }
     })()
-    return () => { cancelled = true }
-  }, [publicIp, isLeak, tunRunning, vpnIp])
+    return () => {
+      cancelled = true
+      controller.abort()
+    }
+  }, [publicIp, isLeak, tunRunning, vpnIp, settings?.disableGeoLookup])
 
   // ─── Toast management ───────────────────────────────────────────────────
 
@@ -261,6 +265,8 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
           addLog('error', 'Прокси не найден. Запустите Happ или введите адрес вручную.')
           return
         }
+        const saved = await window.electronAPI.saveSettings(settings)
+        setSettings(saved)
         const result = await window.electronAPI.startTun(proxyAddr, proxyType)
         if (transitionSeq !== transitionSeqRef.current) return
         if (result.success) {

@@ -6,6 +6,8 @@
  */
 
 import { describe, it, expect, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 
 vi.mock('electron', () => ({
   app: { getPath: () => '/tmp/vpnte-test' }
@@ -14,6 +16,8 @@ vi.mock('./admin', () => ({ execElevated: vi.fn() }))
 vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
 
 import { isValidIpOrCidr } from './firewallKillSwitch'
+
+const source = readFileSync(join(process.cwd(), 'src/main/firewallKillSwitch.ts'), 'utf8')
 
 describe('isValidIpOrCidr', () => {
   it('accepts plain IPv4', () => {
@@ -74,5 +78,21 @@ describe('isValidIpOrCidr', () => {
 
   it('trims surrounding whitespace before validating', () => {
     expect(isValidIpOrCidr('  10.0.0.1  ')).toBe(true)
+  })
+})
+
+describe('external proxy kill-switch allow-list', () => {
+  it('always includes the VPNTE external proxy runtime path in kill-switch program rules', () => {
+    expect(source).toContain("const EXTERNAL_PROXY_RUNTIME_EXE_NAME = 'vpnte-external-proxy.exe'")
+    expect(source).toContain('externalProxyProgramPath()')
+    expect(source).toContain("join(app.getPath('userData'), 'external-proxy-runtime', EXTERNAL_PROXY_RUNTIME_EXE_NAME)")
+    expect(source).toContain('...(opts.proxyOwnerProgramPaths ?? []), externalProxyProgramPath()')
+  })
+
+  it('exposes an idempotent helper for adding a program allow rule while kill-switch is already active', () => {
+    expect(source).toContain('export async function ensureKillSwitchProgramAllowed')
+    expect(source).toContain('if (!(await isKillSwitchActive()))')
+    expect(source).toContain('New-NetFirewallRule')
+    expect(source).toContain('-Program $program')
   })
 })

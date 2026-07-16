@@ -41,6 +41,22 @@ const domainRoutingStore = new Store<DomainRoutingStoreSchema>({
 /** In-memory hit counts for the current session, keyed by rule ID */
 const sessionHitCounts = new Map<string, number>()
 
+function normalizeDomainPattern(raw: string): string {
+  const trimmed = String(raw || '').trim().toLowerCase()
+  if (!trimmed) return ''
+  if (trimmed.startsWith('*.')) {
+    return trimmed.replace(/[/?#].*$/, '').replace(/\.+$/, '')
+  }
+  if (trimmed.includes('://')) {
+    try {
+      return new URL(trimmed).hostname.replace(/\.+$/, '')
+    } catch {
+      // Fall through to path stripping below.
+    }
+  }
+  return trimmed.split(/[/?#]/, 1)[0].replace(/\.+$/, '')
+}
+
 // ─── Pure Functions (exported for property testing) ──────────────────────────
 
 /**
@@ -66,7 +82,7 @@ export function matchDomain(rules: DomainRule[], domain: string): DomainRule | n
   for (const rule of sorted) {
     if (!rule.pattern || typeof rule.pattern !== 'string') continue
 
-    const pattern = rule.pattern.toLowerCase().trim()
+    const pattern = normalizeDomainPattern(rule.pattern)
     if (!pattern) continue
 
     if (pattern.startsWith('*.')) {
@@ -82,11 +98,12 @@ export function matchDomain(rules: DomainRule[], domain: string): DomainRule | n
       ) {
         return rule
       }
-    } else {
-      // Exact match
-      if (normalizedDomain === pattern) {
+    } else if (pattern.includes('.')) {
+      if (normalizedDomain === pattern || normalizedDomain.endsWith('.' + pattern)) {
         return rule
       }
+    } else {
+      if (normalizedDomain.includes(pattern)) return rule
     }
   }
 
@@ -112,9 +129,12 @@ export function parseDomainList(text: string): DomainRule[] {
     const trimmed = line.trim()
     if (!trimmed) continue
 
+    const pattern = normalizeDomainPattern(trimmed)
+    if (!pattern) continue
+
     rules.push({
       id: randomUUID(),
-      pattern: trimmed,
+      pattern,
       action: 'direct',
       priority: rules.length,
       hitCount: 0
@@ -139,6 +159,7 @@ function getRules(): DomainRule[] {
 function addRule(input: Omit<DomainRule, 'id' | 'hitCount'>): DomainRule {
   const newRule: DomainRule = {
     ...input,
+    pattern: normalizeDomainPattern(input.pattern),
     id: randomUUID(),
     hitCount: 0
   }
@@ -158,6 +179,7 @@ function updateRule(id: string, patch: Partial<DomainRule>): DomainRule {
   const updated: DomainRule = {
     ...rules[index],
     ...patch,
+    pattern: patch.pattern ? normalizeDomainPattern(patch.pattern) : rules[index].pattern,
     id, // id cannot be changed
     hitCount: sessionHitCounts.get(id) ?? rules[index].hitCount
   }
@@ -270,7 +292,7 @@ export function domainRulesToSingboxRules(input: DomainRule[]): Array<Record<str
 
   const result: Array<Record<string, any>> = []
   for (const rule of rules) {
-    const pattern = rule.pattern.trim().toLowerCase()
+    const pattern = normalizeDomainPattern(rule.pattern)
     const rb: Record<string, any> = rule.action === 'block'
       ? { action: 'reject', method: 'default', no_drop: true }
       : { outbound: outboundFor(rule.action) }
@@ -281,6 +303,7 @@ export function domainRulesToSingboxRules(input: DomainRule[]): Array<Record<str
       rb.domain_suffix = [`.${base}`]
     } else if (pattern.includes('.')) {
       rb.domain = [pattern]
+      rb.domain_suffix = [`.${pattern}`]
     } else {
       // No dot, no wildcard — treat as a keyword match (e.g. "telegram").
       rb.domain_keyword = [pattern]

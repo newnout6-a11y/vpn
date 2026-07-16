@@ -86,6 +86,7 @@ export interface AppSettings {
   autoPilotEnabled: boolean
   minimizeToTray: boolean
   locationPrivacyEnabled: boolean
+  domainEnrichmentEnabled: boolean
   autoNetworkBaseline: boolean
   firewallKillSwitch: boolean
   advancedMode: boolean
@@ -101,6 +102,8 @@ export interface AppSettings {
   // MTU and adds TLS ClientHello fragmentation to non-Reality outbounds
   // to make the encrypted flow harder to fingerprint.
   stealthMode: boolean
+  adaptiveBypassEnabled: boolean
+  adaptiveBypassServerFallback: boolean
   disableGeoLookup: boolean
   // Smart RU split-routing: RU destinations (geoip-ru + curated geosite)
   // egress direct with the real IP; everything else via VPN.
@@ -350,6 +353,7 @@ export const useAppStore = create<AppState>((set) => ({
     autoPilotEnabled: true,
     minimizeToTray: true,
     locationPrivacyEnabled: false,
+    domainEnrichmentEnabled: false,
     autoNetworkBaseline: false,
     firewallKillSwitch: false,
     advancedMode: false,
@@ -362,6 +366,8 @@ export const useAppStore = create<AppState>((set) => ({
     deepTrafficInspectionMaxSizeMb: 512,
     deepTrafficInspectionRetainSessions: 3,
     stealthMode: false,
+    adaptiveBypassEnabled: true,
+    adaptiveBypassServerFallback: true,
     disableGeoLookup: false,
     smartRuSplit: false,
     smartRuMapsDirect: false,

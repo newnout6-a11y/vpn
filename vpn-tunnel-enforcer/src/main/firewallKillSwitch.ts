@@ -15,6 +15,7 @@ const execFile = promisify(execFileCb)
 // find and remove our rules during rollback, even if our manifest is missing
 // (e.g. user wiped %APPDATA% manually after a crash).
 const RULE_PREFIX = 'VPNTE-killswitch'
+const EXTERNAL_PROXY_RUNTIME_EXE_NAME = 'vpnte-external-proxy.exe'
 
 // Exported for combinedPreStartProbe in connectionPlanner.ts so it can build
 // the firewall rule query without spawning a separate PowerShell process.
@@ -212,6 +213,14 @@ function psSingleQuote(value: string): string {
   return `'${value.replace(/'/g, "''")}'`
 }
 
+function externalProxyProgramPath(): string {
+  return join(app.getPath('userData'), 'external-proxy-runtime', EXTERNAL_PROXY_RUNTIME_EXE_NAME)
+}
+
+function stableRuleSuffix(value: string): string {
+  return String(value || 'program').replace(/[^a-z0-9_-]/gi, '-').slice(0, 48) || 'program'
+}
+
 /**
  * Validate a user-supplied IP/CIDR exception before it is interpolated into a
  * New-NetFirewallRule -RemoteAddress argument. We accept:
@@ -251,6 +260,55 @@ export function isValidIpOrCidr(value: string): boolean {
 
 export async function isKillSwitchActive(): Promise<boolean> {
   return (await readManifest()) !== null || await probeFirewallForOurRules()
+}
+
+export async function ensureKillSwitchProgramAllowed(
+  programPath: string,
+  ruleSuffix = 'program',
+  description = 'VPN Tunnel Enforcer kill-switch: allow managed helper outbound.'
+): Promise<FirewallKillSwitchResult> {
+  if (process.platform !== 'win32') {
+    return { success: true, skipped: true, message: 'Firewall kill-switch недоступен (не Windows)' }
+  }
+  const trimmed = String(programPath || '').trim()
+  if (!trimmed) {
+    return { success: false, message: 'Kill-switch allow rule: program path is empty' }
+  }
+  if (!(await isKillSwitchActive())) {
+    return { success: true, skipped: true, message: 'Kill-switch inactive' }
+  }
+
+  const ruleName = `${RULE_PREFIX}-allow-${stableRuleSuffix(ruleSuffix)}`
+  const script = `
+$ruleName = ${psSingleQuote(ruleName)}
+$program = ${psSingleQuote(trimmed)}
+Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue |
+  Remove-NetFirewallRule -ErrorAction SilentlyContinue
+New-NetFirewallRule \`
+  -DisplayName $ruleName \`
+  -Description ${psSingleQuote(description)} \`
+  -Direction Outbound -Action Allow \`
+  -Program $program \`
+  -Profile Any -Enabled True | Out-Null
+Write-Output "RULE:$ruleName"
+`
+
+  try {
+    await ps(script, true, 30000)
+    logEvent('info', 'firewall-killswitch', 'program allow rule ensured', { ruleName, programPath: trimmed })
+    return { success: true, message: `Kill-switch allow rule ensured: ${ruleName}` }
+  } catch (err: any) {
+    logEvent('warn', 'firewall-killswitch', 'failed to ensure program allow rule', {
+      ruleName,
+      programPath: trimmed,
+      error: err?.message || String(err)
+    })
+    return {
+      success: false,
+      message: `Не удалось разрешить ${trimmed} в kill-switch`,
+      details: err?.stderr || err?.message || String(err)
+    }
+  }
 }
 
 /**
@@ -297,7 +355,7 @@ export async function enableKillSwitch(opts: {
     .join(',')
 
   // Build proxy process allow rules dynamically
-  const proxyPaths = opts.proxyOwnerProgramPaths ?? []
+  const proxyPaths = [...new Set([...(opts.proxyOwnerProgramPaths ?? []), externalProxyProgramPath()])]
   const proxyAllowParts: string[] = []
   for (let i = 0; i < proxyPaths.length; i++) {
     const ruleName = `${RULE_PREFIX}-allow-proxy-${i}`

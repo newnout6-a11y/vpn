@@ -125,12 +125,17 @@ Packaged builds include:
 The app listens on `127.0.0.1:17873` and exposes:
 
 - `GET /api/external-proxy/status`
+- `GET /api/external-proxy/instances`
 - `GET /api/external-proxy/list`
 - `POST /api/external-proxy/start`
 - `POST /api/external-proxy/rotate`
 - `POST /api/external-proxy/connect`
 - `POST /api/external-proxy/trigger`
 - `POST /api/external-proxy/stop`
+
+The service supports ten independent proxy slots. Slot `1` preserves the legacy
+endpoint on `127.0.0.1:17990`; slots `2` through `10` default to ports `17991`
+through `17999`. Add `?slot=N` to status and mutation calls to select a slot.
 
 State-changing endpoints require `POST` plus `X-VPNTE-Control-Token`. The token
 is generated per app session and written to

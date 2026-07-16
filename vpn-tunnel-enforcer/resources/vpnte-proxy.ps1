@@ -2,10 +2,14 @@ param(
   [ValidateSet('start', 'rotate', 'connect', 'trigger', 'list', 'stop', 'status')]
   [string]$Action = 'start',
   [string]$Target = '',
-  [int]$Port = 17990,
+  [ValidateRange(0, 65535)]
+  [int]$Port = 0,
+  [ValidateRange(1, 47546)]
+  [int]$Slot = 1,
   [switch]$Json
 )
 
+$Port = if ($Port -gt 0) { $Port } else { 17989 + $Slot }
 $format = if ($Json) { "" } else { "&format=text" }
 $tokenFile = Join-Path $env:APPDATA "VPN Tunnel Enforcer\external-proxy-control-token"
 $endpointFile = Join-Path $env:APPDATA "VPN Tunnel Enforcer\external-proxy-control-endpoint.json"
@@ -99,22 +103,22 @@ switch ($Action) {
       Write-Error "Usage: .\vpnte-proxy.ps1 $Action <profileId>"
       exit 2
     }
-    $query = "?port=$Port$format&id=$([uri]::EscapeDataString($Target.Trim()))"
+    $query = "?slot=$Slot&port=$Port$format&id=$([uri]::EscapeDataString($Target.Trim()))"
     Invoke-VpnteProxy "$control/$Action$query" 'POST'
     break
   }
   'status' {
-    $suffix = if ($Json) { "" } else { "?format=text" }
+    $suffix = if ($Json) { "?slot=$Slot" } else { "?slot=$Slot&format=text" }
     Invoke-VpnteProxy "$control/status$suffix"
     break
   }
   'stop' {
-    $suffix = if ($Json) { "" } else { "?format=text" }
+    $suffix = if ($Json) { "?slot=$Slot" } else { "?slot=$Slot&format=text" }
     Invoke-VpnteProxy "$control/stop$suffix" 'POST'
     break
   }
   default {
-    $query = "?port=$Port$format"
+    $query = "?slot=$Slot&port=$Port$format"
     if ($Target.Trim()) {
       $query += "&country=$([uri]::EscapeDataString($Target.Trim()))"
     }

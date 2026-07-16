@@ -9,10 +9,13 @@
  * We tail the log file, grep for these patterns, and aggregate by domain.
  */
 
-import { ipcMain, app } from 'electron'
+import { ipcMain, app, BrowserWindow } from 'electron'
 import { readFile, stat } from 'fs/promises'
 import { join } from 'path'
 import { logEvent } from './appLogger'
+import { domainEnrichmentService, buildEnrichmentProxyRules, type DomainEnrichment } from './domainEnrichment'
+import { settingsStore } from './settings'
+import { tunController } from './tunController'
 
 export interface TrafficHistoryEntry {
   domain: string
@@ -21,6 +24,7 @@ export interface TrafficHistoryEntry {
   count: number
   // The user's public IP at the time of the session (best-effort)
   vpnIp: string | null
+  enrichment?: DomainEnrichment
 }
 
 export interface TrafficHistorySession {
@@ -29,6 +33,19 @@ export interface TrafficHistorySession {
   vpnIp: string | null
   domains: TrafficHistoryEntry[]
 }
+
+type ParsedTrafficHistoryEntry = Omit<TrafficHistoryEntry, 'vpnIp' | 'enrichment'>
+
+interface CachedLog {
+  mtimeMs: number
+  size: number
+  entries: ParsedTrafficHistoryEntry[]
+}
+
+const logCache = new Map<string, CachedLog>()
+let enrichmentUpdateRegistered = false
+let backgroundEnrichmentTimer: ReturnType<typeof setInterval> | null = null
+let backgroundEnrichmentInFlight = false
 
 function getSingboxLogPath(): string {
   return join(app.getPath('userData'), 'tun-runtime', 'sing-box.log')
@@ -111,10 +128,16 @@ export function parseSingboxLogLine(line: string): { domain: string; timestamp: 
  * Aggregates by domain — first/last seen, count.
  */
 async function parseLog(path: string, vpnIp: string | null): Promise<TrafficHistoryEntry[]> {
+  let fileInfo
   try {
-    await stat(path)
+    fileInfo = await stat(path)
   } catch {
     return []
+  }
+
+  const cached = logCache.get(path)
+  if (cached && cached.mtimeMs === fileInfo.mtimeMs && cached.size === fileInfo.size) {
+    return cached.entries.map(entry => ({ ...entry, vpnIp }))
   }
 
   let content: string
@@ -125,7 +148,7 @@ async function parseLog(path: string, vpnIp: string | null): Promise<TrafficHist
     return []
   }
 
-  const map = new Map<string, TrafficHistoryEntry>()
+  const map = new Map<string, ParsedTrafficHistoryEntry>()
   const lines = content.split(/\r?\n/)
 
   for (const line of lines) {
@@ -141,19 +164,23 @@ async function parseLog(path: string, vpnIp: string | null): Promise<TrafficHist
         domain: parsed.domain,
         firstSeen: parsed.timestamp,
         lastSeen: parsed.timestamp,
-        count: 1,
-        vpnIp
+        count: 1
       })
     }
   }
 
-  return Array.from(map.values()).sort((a, b) => b.lastSeen - a.lastSeen)
+  const entries = Array.from(map.values()).sort((a, b) => b.lastSeen - a.lastSeen)
+  logCache.set(path, { mtimeMs: fileInfo.mtimeMs, size: fileInfo.size, entries })
+  return entries.map(entry => ({ ...entry, vpnIp }))
 }
 
 /**
  * Get the current traffic history (combines current and previous sing-box logs).
  */
-export async function getTrafficHistory(vpnIp: string | null = null): Promise<TrafficHistoryEntry[]> {
+export async function getTrafficHistory(
+  vpnIp: string | null = null,
+  scheduleEnrichment = false
+): Promise<TrafficHistoryEntry[]> {
   const [current, prev] = await Promise.all([
     parseLog(getSingboxLogPath(), vpnIp),
     parseLog(getPrevSingboxLogPath(), vpnIp)
@@ -172,7 +199,56 @@ export async function getTrafficHistory(vpnIp: string | null = null): Promise<Tr
     }
   }
 
-  return Array.from(merged.values()).sort((a, b) => b.lastSeen - a.lastSeen)
+  const entries = Array.from(merged.values()).sort((a, b) => b.lastSeen - a.lastSeen)
+  const settings = settingsStore.get()
+  if (!settings.domainEnrichmentEnabled) return entries
+
+  const status = tunController.getStatus()
+  const proxyRules = settings.connectionMode === 'localProxy'
+    ? buildEnrichmentProxyRules(status.proxyAddr || settings.proxyOverride, status.proxyType || settings.proxyType)
+    : status.running
+      ? 'direct://'
+      : null
+  if (!proxyRules) return entries
+
+  if (scheduleEnrichment) {
+    domainEnrichmentService.queueDomains(entries.map(entry => entry.domain), proxyRules)
+  }
+  return entries.map(entry => ({
+    ...entry,
+    enrichment: domainEnrichmentService.get(entry.domain)
+  }))
+}
+
+/** Keep enrichment independent from the Traffic page lifecycle. */
+async function refreshBackgroundEnrichment(): Promise<void> {
+  const settings = settingsStore.get()
+  if (backgroundEnrichmentInFlight || !settings.domainEnrichmentEnabled) return
+  const tun = tunController.getStatus()
+  if (!tun.running && settings.connectionMode !== 'localProxy') return
+
+  backgroundEnrichmentInFlight = true
+  try {
+    await getTrafficHistory(null, true)
+  } catch (err) {
+    logEvent('debug', 'traffic-history', 'background enrichment refresh failed', err)
+  } finally {
+    backgroundEnrichmentInFlight = false
+  }
+}
+
+export function startBackgroundTrafficHistory(): void {
+  if (backgroundEnrichmentTimer) return
+  void refreshBackgroundEnrichment()
+  backgroundEnrichmentTimer = setInterval(() => {
+    void refreshBackgroundEnrichment()
+  }, 15_000)
+}
+
+export function stopBackgroundTrafficHistory(): void {
+  if (!backgroundEnrichmentTimer) return
+  clearInterval(backgroundEnrichmentTimer)
+  backgroundEnrichmentTimer = null
 }
 
 /**
@@ -188,17 +264,30 @@ export async function clearTrafficHistory(): Promise<void> {
         await unlink(path).catch(() => undefined)
       })
     } catch {}
+    logCache.delete(path)
   }
+  domainEnrichmentService.clear()
   logEvent('info', 'traffic-history', 'traffic history cleared')
 }
 
 export function registerTrafficHistoryIpcHandlers(): void {
-  ipcMain.handle('traffic-history:list', async (_event, vpnIp?: string) => {
-    return getTrafficHistory(vpnIp ?? null)
+  ipcMain.handle('traffic-history:list', async (_event, vpnIp?: string, scheduleEnrichment?: boolean) => {
+    return getTrafficHistory(vpnIp ?? null, scheduleEnrichment === true)
   })
 
   ipcMain.handle('traffic-history:clear', async () => {
     await clearTrafficHistory()
     return { success: true }
   })
+
+  if (!enrichmentUpdateRegistered) {
+    enrichmentUpdateRegistered = true
+    domainEnrichmentService.onUpdate(() => {
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (!win.isDestroyed()) win.webContents.send('traffic-history:enrichment-updated')
+      }
+    })
+  }
+
+  startBackgroundTrafficHistory()
 }

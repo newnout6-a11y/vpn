@@ -1,11 +1,10 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { motion } from 'framer-motion'
 import { Globe, Search, Trash2, RefreshCw, Loader2, ExternalLink } from 'lucide-react'
 import { MacCard, MacInput, MacButton, MacBadge } from '../design-system'
 import { PageTip } from '../components/PageTip'
 import { useAppStore } from '../store'
-import { categorizeTrafficDomain } from '../trafficCategory'
 
 interface TrafficEntry {
   domain: string
@@ -13,6 +12,12 @@ interface TrafficEntry {
   lastSeen: number
   count: number
   vpnIp: string | null
+  enrichment?: {
+    status: 'pending' | 'ready' | 'unavailable'
+    siteName: string | null
+    title: string | null
+    description: string | null
+  }
 }
 
 function formatDateTime(ts: number): string {
@@ -25,64 +30,72 @@ function formatDateTime(ts: number): string {
   })
 }
 
-type BadgeVariant = 'neutral' | 'success' | 'warning' | 'danger' | 'accent'
-
-function categorizeDomain(domain: string): { label: string, variant: BadgeVariant } | null {
-  const d = domain.toLowerCase()
-  if (/telemetry|metrics|analytics|events\.data|app-measurement|beacons|doubleclick\.net|track|crashlytics|flurry|appsflyer|appcenter/.test(d)) {
-    return { label: 'Телеметрия / Трекинг', variant: 'danger' }
-  }
-  if (/adsystem|adservice|ads\.|ad\.|googlesyndication|criteo|taboola|outbrain|appnexus|pubmatic/.test(d)) {
-    return { label: 'Реклама', variant: 'danger' }
-  }
-  if (/cloudflare|akamai|fastly|cloudfront|cdn|1e100\.net|gvt1|gvt2|googleapis|gstatic|edgecast|incapdns|akadns/.test(d)) {
-    return { label: 'CDN / Инфраструктура', variant: 'neutral' }
-  }
-  if (/whatsapp|telegram|t\.me|viber|discord|slack|skype|teams/.test(d)) {
-    return { label: 'Мессенджеры', variant: 'accent' }
-  }
-  if (/facebook|instagram|twitter|twimg|tiktok|vk\.com|linkedin|snapchat|pinterest/.test(d)) {
-    return { label: 'Соцсети', variant: 'accent' }
-  }
-  if (/youtube|googlevideo|netflix|hulu|disney|primevideo|twitch|vimeo|spotify|apple\.music/.test(d)) {
-    return { label: 'Медиа / Стриминг', variant: 'accent' }
-  }
-  if (/github|gitlab|bitbucket|npm|docker|huggingface|openai|anthropic|claude|api\./.test(d)) {
-    return { label: 'Разработка / AI', variant: 'success' }
-  }
-  if (/mail|smtp|imap|pop|outlook|yandex|gmail/.test(d)) {
-    return { label: 'Почта', variant: 'warning' }
-  }
-  if (/apple\.com|icloud|microsoft\.com|windowsupdate|mzstatic/.test(d)) {
-    return { label: 'Системные сервисы', variant: 'neutral' }
-  }
-  return null
-}
-
 export function TrafficHistory() {
   const { t } = useTranslation()
   const publicIp = useAppStore(s => s.publicIp)
+  const tunRunning = useAppStore(s => s.tunRunning)
   const [entries, setEntries] = useState<TrafficEntry[]>([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
   const [clearing, setClearing] = useState(false)
+  const domainEnrichmentEnabled = useAppStore(s => s.settings.domainEnrichmentEnabled)
+  const fetchInFlightRef = useRef(false)
+  const enrichmentRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  const fetchHistory = useCallback(async () => {
-    setLoading(true)
+  const fetchHistory = useCallback(async (background = false) => {
+    if (fetchInFlightRef.current) return
+    fetchInFlightRef.current = true
+    if (!background) setLoading(true)
     try {
-      const data = await window.electronAPI.trafficHistoryList(publicIp ?? undefined)
+      // Reading the journal is intentionally side-effect free. Enrichment is
+      // queued by its own workflow, never on every mount or polling tick.
+      const data = await window.electronAPI.trafficHistoryList(publicIp ?? undefined, false)
       setEntries(data || [])
     } catch (err) {
       console.error('Failed to fetch traffic history:', err)
-      setEntries([])
+      // Keep the last good list visible during a transient IPC/read failure.
+      if (!background) setEntries([])
     } finally {
-      setLoading(false)
+      fetchInFlightRef.current = false
+      if (!background) setLoading(false)
     }
   }, [publicIp])
 
   useEffect(() => {
-    fetchHistory()
+    void fetchHistory(false)
   }, [fetchHistory])
+
+  useEffect(() => {
+    if (!tunRunning) return
+
+    void fetchHistory(true)
+    const id = window.setInterval(() => {
+      void fetchHistory(true)
+    }, 8_000)
+    return () => window.clearInterval(id)
+  }, [fetchHistory, tunRunning])
+
+  useEffect(() => {
+    if (!domainEnrichmentEnabled) return
+
+    const unsubscribe = window.electronAPI.onTrafficHistoryUpdated(() => {
+      // Metadata jobs can complete in a burst. Coalesce their notifications
+      // into one background read instead of refreshing once per domain.
+      if (enrichmentRefreshTimerRef.current) return
+      enrichmentRefreshTimerRef.current = setTimeout(() => {
+        enrichmentRefreshTimerRef.current = null
+        void fetchHistory(true)
+      }, 250)
+    })
+
+    return () => {
+      unsubscribe()
+      if (enrichmentRefreshTimerRef.current) {
+        clearTimeout(enrichmentRefreshTimerRef.current)
+        enrichmentRefreshTimerRef.current = null
+      }
+    }
+  }, [domainEnrichmentEnabled, fetchHistory])
 
   const filtered = useMemo(() => {
     if (!search.trim()) return entries
@@ -129,7 +142,7 @@ export function TrafficHistory() {
           </p>
         </div>
         <div className="flex gap-2">
-          <MacButton variant="secondary" onClick={fetchHistory} loading={loading}>
+          <MacButton variant="secondary" onClick={() => { void fetchHistory(false) }} loading={loading}>
             <RefreshCw className="w-4 h-4 mr-1.5" />
             {t('common.refresh', 'Обновить')}
           </MacButton>
@@ -190,15 +203,25 @@ export function TrafficHistory() {
                       <div className="flex items-center gap-3">
                         <Globe className="w-4 h-4 text-[var(--color-accent)] flex-shrink-0" />
                         <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2">
+                          <div className="flex flex-wrap items-center gap-2">
                             <span className="text-sm font-medium text-[var(--color-text)] truncate">
                               {entry.domain}
                             </span>
                             <MacBadge variant="neutral">×{entry.count}</MacBadge>
-                            {(() => {
-                              const cat = categorizeTrafficDomain(entry.domain)
-                              return cat ? <MacBadge variant={cat.variant}>{cat.label}</MacBadge> : null
-                            })()}
+                            {entry.enrichment?.status === 'pending' && (
+                              <Loader2
+                                className="w-3.5 h-3.5 text-[var(--color-text-secondary)] animate-spin"
+                                aria-label="Получаем метаданные сайта"
+                              />
+                            )}
+                            {entry.enrichment?.status === 'ready' && entry.enrichment.siteName && (
+                              <MacBadge variant="success">{entry.enrichment.siteName}</MacBadge>
+                            )}
+                            {entry.enrichment?.status === 'unavailable' && (
+                              <MacBadge variant="neutral">
+                                Нет метаданных
+                              </MacBadge>
+                            )}
                             {entry.vpnIp && (
                               <span className="text-xs text-[var(--color-text-secondary)] font-mono ml-auto">
                                 IP: {entry.vpnIp}
@@ -206,9 +229,11 @@ export function TrafficHistory() {
                             )}
                           </div>
                           <p className="text-xs text-[var(--color-text-secondary)] mt-0.5">
-                            {formatDateTime(entry.firstSeen)}
+                            {entry.enrichment?.status === 'ready' && entry.enrichment.title
+                              ? entry.enrichment.title
+                              : formatDateTime(entry.firstSeen)}
                             {entry.firstSeen !== entry.lastSeen && (
-                              <> – {formatDateTime(entry.lastSeen)}</>
+                              <>{entry.enrichment?.status === 'ready' && entry.enrichment.title ? ' · ' : ' – '}{formatDateTime(entry.lastSeen)}</>
                             )}
                           </p>
                         </div>

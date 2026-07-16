@@ -2,6 +2,7 @@ import { app } from 'electron'
 import Store from 'electron-store'
 import { join } from 'path'
 import { execElevated } from './admin'
+import { domainEnrichmentService } from './domainEnrichment'
 
 export interface AppSettings {
   connectionMode: 'localProxy' | 'directVpn'
@@ -23,6 +24,7 @@ export interface AppSettings {
   autoPilotEnabled: boolean
   minimizeToTray: boolean
   locationPrivacyEnabled: boolean
+  domainEnrichmentEnabled: boolean
   autoNetworkBaseline: boolean
   firewallKillSwitch: boolean
   // When false, the renderer hides the advanced/destructive maintenance and
@@ -75,6 +77,8 @@ export interface AppSettings {
   // Safe to leave ON outside of restrictive networks too — costs ~5% extra
   // bandwidth from MTU overhead and a handful of extra TLS roundtrips.
   stealthMode: boolean
+  adaptiveBypassEnabled: boolean
+  adaptiveBypassServerFallback: boolean
   // Smart RU split-routing. When ON, RU-hosted destinations and narrow
   // government/map domain sets egress with the user's real IP via direct-out,
   // while everything else goes through the VPN. The signal is not a naive
@@ -116,6 +120,7 @@ const defaults: AppSettings = {
   autoPilotEnabled: true,
   minimizeToTray: true,
   locationPrivacyEnabled: false,
+  domainEnrichmentEnabled: false,
   // Off by default — wiping HKCU\Internet Settings + WinHTTP + env proxies is destructive
   // and not actually required for TUN to capture traffic at the routing layer. Users who
   // need to fix UWP/Store traffic capture can opt in via Settings → "Auto baseline".
@@ -133,6 +138,8 @@ const defaults: AppSettings = {
   deepTrafficInspectionMaxSizeMb: 512,
   deepTrafficInspectionRetainSessions: 3,
   stealthMode: false,
+  adaptiveBypassEnabled: true,
+  adaptiveBypassServerFallback: true,
   smartRuSplit: false,
   smartRuMapsDirect: false,
   smartRuRuleSetMode: 'bundled',
@@ -175,6 +182,7 @@ function normalizeSettings(input: Partial<AppSettings> | undefined): AppSettings
     autoPilotEnabled: merged.autoPilotEnabled !== false,
     minimizeToTray: Boolean(merged.minimizeToTray),
     locationPrivacyEnabled: Boolean(merged.locationPrivacyEnabled),
+    domainEnrichmentEnabled: Boolean(merged.domainEnrichmentEnabled),
     autoNetworkBaseline: Boolean(merged.autoNetworkBaseline),
     firewallKillSwitch: merged.firewallKillSwitch !== false,
     advancedMode: Boolean(merged.advancedMode),
@@ -198,6 +206,8 @@ function normalizeSettings(input: Partial<AppSettings> | undefined): AppSettings
     // this line the field was silently dropped on every save/load, so
     // the existing UI toggle had no effect.
     stealthMode: Boolean(merged.stealthMode),
+    adaptiveBypassEnabled: merged.adaptiveBypassEnabled !== false,
+    adaptiveBypassServerFallback: merged.adaptiveBypassServerFallback !== false,
     disableGeoLookup: Boolean(merged.disableGeoLookup),
     smartRuSplit: Boolean(merged.smartRuSplit),
     smartRuMapsDirect: Boolean(merged.smartRuMapsDirect),
@@ -255,6 +265,9 @@ export const settingsStore = {
     const previous = normalizeSettings(store.get('settings'))
     const settings = normalizeSettings({ ...previous, ...partial })
     store.set('settings', settings)
+    if (!settings.domainEnrichmentEnabled && previous.domainEnrichmentEnabled) {
+      domainEnrichmentService.setEnabled(false)
+    }
     if (settings.autoStart !== previous.autoStart) {
       applyLoginItem(settings.autoStart, { ensureBootRecovery: true })
     }

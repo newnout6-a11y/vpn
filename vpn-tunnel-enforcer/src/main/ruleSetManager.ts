@@ -317,3 +317,26 @@ export async function refreshSmartRouteRuleSets(force = false): Promise<SmartRou
   })
   return refreshInFlight
 }
+
+export function maybeRefreshSmartRouteRuleSets(reason: string): void {
+  const settings = settingsStore.get()
+  if (!settings.smartRuSplit) return
+  if (settings.smartRuRuleSetMode !== 'managed') return
+  if (!settings.smartRuRuleSetAutoUpdate) return
+
+  refreshSmartRouteRuleSets(false)
+    .then((state) => {
+      logEvent('info', 'smart-route', 'auto rule-set refresh checked', {
+        reason,
+        activeSource: state.activeSource,
+        managedComplete: state.managedComplete,
+        lastRefreshOk: state.lastRefreshOk
+      })
+    })
+    .catch((err) => {
+      logEvent('warn', 'smart-route', 'auto rule-set refresh failed', {
+        reason,
+        error: shortError(err)
+      })
+    })
+}

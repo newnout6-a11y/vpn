@@ -9,19 +9,30 @@ import { beforeEach, describe, it, expect, vi } from 'vitest'
 
 // routingSelfTest imports tunController/settings/socks/axios at module load.
 // Stub them so the pure verdict fn can be imported in isolation.
+const h = vi.hoisted(() => ({
+  tunRunning: false,
+  settings: {
+    smartRuSplit: false,
+    disableGeoLookup: false
+  }
+}))
+
 vi.mock('axios', () => ({ default: { get: vi.fn() } }))
 vi.mock('socks', () => ({ SocksClient: { createConnection: vi.fn() } }))
 vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
 vi.mock('./tunController', () => ({
-  tunController: { getStatus: () => ({ running: false }) },
+  tunController: { getStatus: () => ({ running: h.tunRunning }) },
   getDirectProxyPort: () => null
 }))
-vi.mock('./settings', () => ({ settingsStore: { get: () => ({ smartRuSplit: false }) } }))
+vi.mock('./settings', () => ({ settingsStore: { get: () => h.settings } }))
 
-import { deriveRoutingVerdict, ruEgressIp } from './routingSelfTest'
+import { deriveRoutingVerdict, ruEgressIp, runRoutingSelfTest } from './routingSelfTest'
 
 beforeEach(() => {
   vi.mocked(axios.get).mockReset()
+  h.tunRunning = false
+  h.settings.smartRuSplit = false
+  h.settings.disableGeoLookup = false
 })
 
 describe('deriveRoutingVerdict', () => {
@@ -71,13 +82,14 @@ describe('deriveRoutingVerdict', () => {
     expect(v.splitWorks).toBe(true)
   })
 
-  it('measures Smart-RU egress through an RU-domain echo page', async () => {
+  it('measures Smart-RU egress through a non-pinned RU-domain echo page', async () => {
     vi.mocked(axios.get).mockResolvedValueOnce({ data: 'Ваш IP: 5.5.5.5' })
 
     await expect(ruEgressIp()).resolves.toBe('5.5.5.5')
-    expect(axios.get).toHaveBeenCalledWith('https://2ip.ru/', expect.objectContaining({
+    expect(axios.get).toHaveBeenCalledWith('https://yandex.ru/internet/', expect.objectContaining({
       responseType: 'text'
     }))
+    expect(axios.get).not.toHaveBeenCalledWith('https://2ip.ru/', expect.anything())
   })
 
   it('ignores impossible IPv4-looking numbers on RU echo pages', async () => {
@@ -86,5 +98,19 @@ describe('deriveRoutingVerdict', () => {
       .mockResolvedValueOnce({ data: 'IP address: 62.118.134.108' })
 
     await expect(ruEgressIp()).resolves.toBe('62.118.134.108')
+  })
+
+  it('skips Smart-RU RU echo pages when geo lookup privacy is enabled', async () => {
+    h.tunRunning = true
+    h.settings.smartRuSplit = true
+    h.settings.disableGeoLookup = true
+    vi.mocked(axios.get).mockResolvedValueOnce({ data: '9.9.9.9' })
+
+    const result = await runRoutingSelfTest()
+
+    expect(result.smartRu.enabled).toBe(true)
+    expect(result.smartRu.ruHostIp).toBeNull()
+    expect(axios.get).toHaveBeenCalledTimes(1)
+    expect(axios.get).not.toHaveBeenCalledWith('https://2ip.ru/', expect.anything())
   })
 })

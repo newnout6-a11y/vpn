@@ -44,6 +44,9 @@ export interface ServerProfile {
   protocol: string
   server: string
   port: number
+  /** Latest IPv4 address resolved from `server`, for display only. */
+  resolvedIp?: string
+  resolvedIpAt?: number
   /**
    * Best-known exit country. This may come from background server IP
    * geolocation, or from the actual public IP observed after connecting.
@@ -196,9 +199,61 @@ export interface RotationConfig {
   nextRotationAt: number | null
 }
 
-/** External proxy status — sing-box mixed-inbound running on a local port */
-export interface ExternalProxyStatus {
+/** Route health for an external proxy instance. */
+export type ExternalProxyHealth =
+  | 'stopped'
+  | 'starting'
+  | 'healthy'
+  | 'degraded'
+  | 'rotating'
+  | 'quarantined'
+  | 'failed'
+
+export type ExternalProxyLifecycle =
+  | 'stopped'
+  | 'starting'
+  | 'ready'
+  | 'healthy'
+  | 'degraded'
+  | 'rotating'
+  | 'quarantined'
+  | 'failed'
+
+export interface ExternalProxyAggregate {
+  total: number
+  running: number
+  ready: number
+  healthy: number
+  uniqueEgress: number
+  duplicateEgress: number
+  starting: number
+  degraded: number
+  quarantined: number
+}
+
+export interface ExternalProxyInstanceStatus {
+  slot: number
+  /** True only when the proxy passed its latest external data-plane check. */
   running: boolean
+  /** Child-process state, independent from the active health result. */
+  processRunning: boolean
+  ready: boolean
+  health: ExternalProxyHealth
+  state: ExternalProxyLifecycle
+  generation: number
+  egressIp: string | null
+  latencyMs: number | null
+  lastCheckedAt: number | null
+  lastSuccessAt: number | null
+  egressCheckedAt: string | null
+  updatedAt: string | null
+  lastError: string | null
+  lastErrorAt: string | null
+  degradationReason: string | null
+  consecutiveFailures: number
+  nextCheckAt: string | null
+  lastRotateReason: string | null
+  autoDisabled: boolean
   host: string
   port: number | null
   proxyUrl: string | null
@@ -206,7 +261,25 @@ export interface ExternalProxyStatus {
   profileName: string | null
   country: string | null
   pid: number | null
-  startedAt: number | null
+  startedAt: string | null
+}
+
+/** External proxy status, with the legacy primary instance at the top level. */
+export interface ExternalProxyStatus extends ExternalProxyInstanceStatus {
+  controlHost: string
+  controlPort: number | null
+  controlUrl: string | null
+  /** null means that the UI does not impose a product-level instance cap. */
+  maxInstances: null
+  instances: ExternalProxyInstanceStatus[]
+  aggregate: ExternalProxyAggregate
+}
+
+export interface ExternalProxyStartOptions {
+  slot?: number
+  country?: string
+  profileId?: string
+  port?: number
 }
 
 /** External proxy profile row (picker entry) */
@@ -219,6 +292,16 @@ export interface ExternalProxyProfileRow {
   port: number
   groupId: string | null
   active: boolean
+  activeSlots: number[]
+}
+
+/** Result of assigning server profiles to independent external proxies. */
+export interface ExternalProxyBatchStartResult {
+  requested: number
+  started: ExternalProxyInstanceStatus[]
+  alreadyRunningProfileIds: string[]
+  skipped: Array<{ profileId: string; reason: 'active-vpn' | 'unavailable' }>
+  failed: Array<{ profileId: string; error: string }>
 }
 
 /** Schedule entry for automated connect/disconnect */
@@ -368,6 +451,7 @@ export interface ServerChannels {
   'servers:select': (id: string) => void
   'servers:get-active': () => { profile: ServerProfile | null; activeId: string | null }
   'servers:ping-all': () => ServerProfile[]
+  'servers:resolve-ips': () => ServerProfile[]
   'servers:add': (input: string, options?: { clientDevice?: ClientDevice }) => ServerProfile[]
   /**
    * Append a profile (single VPN URI) or a batch of profiles (subscription

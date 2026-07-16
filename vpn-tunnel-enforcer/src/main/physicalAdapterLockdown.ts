@@ -59,12 +59,24 @@ interface TransitionAdapterSnapshot {
   isatapState: string | null
 }
 
+interface RegistryValueSnapshot {
+  exists: boolean
+  type?: string
+  data?: string
+}
+
+interface DnsRegistryPolicySnapshot {
+  smartNameResolution: RegistryValueSnapshot
+  parallelAandAAAA: RegistryValueSnapshot
+}
+
 interface LockdownManifest {
   appliedAt: number
   tunDnsIpv4: string
   forceDns?: boolean
   adapters: AdapterSnapshot[]
   transitionAdapters?: TransitionAdapterSnapshot
+  dnsRegistryPolicy?: DnsRegistryPolicySnapshot
 }
 
 interface LockdownOptions {
@@ -311,6 +323,64 @@ function netshRestoreLine(tag: string, command: string, value: string | null): s
   return `try { ${command}${state} | Out-Null; Write-Output '${tag}:restore' } catch { Write-Output "${tag}_err: $_" }`
 }
 
+function registryRestoreLine(tag: string, key: string, name: string, snapshot?: RegistryValueSnapshot): string {
+  if (snapshot?.exists && snapshot.type && snapshot.data) {
+    return `try { reg add ${psSingleQuote(key)} /v ${psSingleQuote(name)} /t ${psSingleQuote(snapshot.type)} /d ${psSingleQuote(snapshot.data)} /f | Out-Null; Write-Output '${tag}:restore' } catch { Write-Output "${tag}_err: $_" }`
+  }
+  return `try { reg delete ${psSingleQuote(key)} /v ${psSingleQuote(name)} /f 2>$null | Out-Null; Write-Output '${tag}:delete' } catch { Write-Output "${tag}_err: $_" }`
+}
+
+async function snapshotDnsRegistryPolicy(): Promise<DnsRegistryPolicySnapshot> {
+  const script = `
+function Read-RegValue([string]$key, [string]$name, [string]$tag) {
+  $out = & reg query $key /v $name 2>$null
+  if ($LASTEXITCODE -ne 0 -or -not $out) {
+    [PSCustomObject]@{ tag=$tag; exists=$false; type=$null; data=$null }
+    return
+  }
+  $line = @($out) | Where-Object { $_ -match "\\s$name\\s+" } | Select-Object -First 1
+  if (-not $line) {
+    [PSCustomObject]@{ tag=$tag; exists=$false; type=$null; data=$null }
+    return
+  }
+  $parts = $line.Trim() -split '\\s+', 3
+  [PSCustomObject]@{
+    tag=$tag
+    exists=$true
+    type= if ($parts.Length -ge 2) { $parts[1] } else { $null }
+    data= if ($parts.Length -ge 3) { $parts[2] } else { $null }
+  }
+}
+@(
+  Read-RegValue 'HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\DNSClient' 'DisableSmartNameResolution' 'smartNameResolution'
+  Read-RegValue 'HKLM\\SYSTEM\\CurrentControlSet\\Services\\Dnscache\\Parameters' 'DisableParallelAandAAAA' 'parallelAandAAAA'
+) | ConvertTo-Json -Compress`
+  try {
+    const out = await runPS(script, 15000)
+    const rows = JSON.parse(out.trim() || '[]')
+    const list = Array.isArray(rows) ? rows : [rows]
+    const byTag = new Map<string, any>(list.map((row) => [String(row?.tag || ''), row]))
+    const read = (tag: string): RegistryValueSnapshot => {
+      const row = byTag.get(tag)
+      return {
+        exists: row?.exists === true,
+        type: typeof row?.type === 'string' && row.type ? row.type : undefined,
+        data: typeof row?.data === 'string' && row.data ? row.data : undefined
+      }
+    }
+    return {
+      smartNameResolution: read('smartNameResolution'),
+      parallelAandAAAA: read('parallelAandAAAA')
+    }
+  } catch (err) {
+    logEvent('warn', 'phys-lockdown', 'DNS registry policy snapshot failed; rollback will delete app policy keys only', err)
+    return {
+      smartNameResolution: { exists: false },
+      parallelAandAAAA: { exists: false }
+    }
+  }
+}
+
 /**
  * Apply the lockdown: disable IPv6 on each physical adapter and, unless public
  * Wi-Fi compatibility is enabled, force IPv4 DNS to the TUN's resolver. Each
@@ -321,7 +391,24 @@ export async function applyPhysicalAdapterLockdown(tunDnsIpv4: string, options: 
     return { applied: false, adapters: 0, warnings: ['platform is not Windows'] }
   }
   const forceDns = options.forceDns !== false
-  const existing = await readManifest()
+  let existing = await readManifest()
+  if (existing && (existing.tunDnsIpv4 !== tunDnsIpv4 || (existing.forceDns !== false) !== forceDns)) {
+    logEvent('warn', 'phys-lockdown', 'existing lockdown options differ; rolling back before reapply', {
+      existingTunDnsIpv4: existing.tunDnsIpv4,
+      requestedTunDnsIpv4: tunDnsIpv4,
+      existingForceDns: existing.forceDns !== false,
+      requestedForceDns: forceDns
+    })
+    const rollback = await rollbackPhysicalAdapterLockdownIfApplied('lockdown options changed before reapply')
+    if (!rollback.rolledBack) {
+      return {
+        applied: true,
+        adapters: existing.adapters.length,
+        warnings: ['existing lockdown options differ but rollback did not complete']
+      }
+    }
+    existing = null
+  }
   if (existing) {
     logEvent('info', 'phys-lockdown', 'lockdown already applied — skipping (idempotent)', {
       adapters: existing.adapters.length
@@ -329,9 +416,10 @@ export async function applyPhysicalAdapterLockdown(tunDnsIpv4: string, options: 
     return { applied: true, adapters: existing.adapters.length, warnings: [] }
   }
 
-  const [adapters, transitionAdapters] = await Promise.all([
+  const [adapters, transitionAdapters, dnsRegistryPolicy] = await Promise.all([
     snapshotPhysicalAdapters(),
-    snapshotTransitionAdapters()
+    snapshotTransitionAdapters(),
+    snapshotDnsRegistryPolicy()
   ])
   if (adapters.length === 0) {
     logEvent('warn', 'phys-lockdown', 'no physical adapters to lock down — nothing to do')
@@ -341,7 +429,8 @@ export async function applyPhysicalAdapterLockdown(tunDnsIpv4: string, options: 
       tunDnsIpv4,
       forceDns,
       adapters,
-      transitionAdapters
+      transitionAdapters,
+      dnsRegistryPolicy
     })
     return { applied: true, adapters: 0, warnings: ['no physical adapters found', ...transitionWarnings] }
   }
@@ -365,7 +454,8 @@ export async function applyPhysicalAdapterLockdown(tunDnsIpv4: string, options: 
     tunDnsIpv4,
     forceDns,
     adapters: pendingAdapters,
-    transitionAdapters
+    transitionAdapters,
+    dnsRegistryPolicy
   })
 
   const warnings: string[] = []
@@ -421,6 +511,9 @@ try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}
     for (const line of out.trim().split(/\r?\n/).filter(x => /TRANS_.*_err/.test(x))) {
       warnings.push(line)
     }
+    for (const line of out.trim().split(/\r?\n/).filter(x => /DNS_.*_err/.test(x))) {
+      warnings.push(line)
+    }
     logEvent('info', 'phys-lockdown', 'transition adapters disabled', { snapshot: transitionAdapters, out: out.trim() })
   } catch (err: any) {
     warnings.push(`Batch PS error: ${err?.message ?? String(err)}`)
@@ -442,7 +535,8 @@ try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}
     tunDnsIpv4,
     forceDns,
     adapters,
-    transitionAdapters
+    transitionAdapters,
+    dnsRegistryPolicy
   }
   await writeManifest(manifest)
   return { applied: true, adapters: adapters.length, warnings }
@@ -487,8 +581,8 @@ ${netshRestoreLine('TRANS_isatap', 'netsh interface isatap set state state=', m.
 `
   }
   combinedScript += `
-try { reg delete "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\DNSClient" /v DisableSmartNameResolution /f | Out-Null; Write-Output 'DNS_SMNR:restore' } catch { Write-Output "DNS_SMNR_err: $_" }
-try { reg delete "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Dnscache\\Parameters" /v DisableParallelAandAAAA /f | Out-Null; Write-Output 'DNS_PARALLEL:restore' } catch { Write-Output "DNS_PARALLEL_err: $_" }
+${registryRestoreLine('DNS_SMNR', 'HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\DNSClient', 'DisableSmartNameResolution', m.dnsRegistryPolicy?.smartNameResolution)}
+${registryRestoreLine('DNS_PARALLEL', 'HKLM\\SYSTEM\\CurrentControlSet\\Services\\Dnscache\\Parameters', 'DisableParallelAandAAAA', m.dnsRegistryPolicy?.parallelAandAAAA)}
 try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}`
 
   let rollbackSuccess = true
@@ -520,6 +614,12 @@ try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}`
       } else {
         logEvent('info', 'phys-lockdown', 'transition adapters restored', { reason })
       }
+    }
+    const dnsSmnrOk = /DNS_SMNR:restore|DNS_SMNR:delete/.test(out)
+    const dnsParallelOk = /DNS_PARALLEL:restore|DNS_PARALLEL:delete/.test(out)
+    if (!dnsSmnrOk || !dnsParallelOk) {
+      logEvent('warn', 'phys-lockdown', 'partial DNS registry policy rollback', { reason, dnsSmnrOk, dnsParallelOk })
+      rollbackSuccess = false
     }
   } catch (err) {
     logEvent('warn', 'phys-lockdown', `batch rollback failed`, err)

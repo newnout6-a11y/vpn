@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { ClientDevice, ExternalProxyStatus, ExternalProxyProfileRow } from '../shared/ipc-types'
+import type { ClientDevice, ExternalProxyBatchStartResult, ExternalProxyStartOptions, ExternalProxyStatus, ExternalProxyProfileRow } from '../shared/ipc-types'
 
 export interface ElectronAPI {
   detectHapp: () => Promise<any>
@@ -15,6 +15,9 @@ export interface ElectronAPI {
   getAutoconfigStatus: () => Promise<any[]>
   getSettings: () => Promise<any>
   saveSettings: (settings: any) => Promise<any>
+  adaptiveBypassGetStatus: () => Promise<any>
+  adaptiveBypassRetry: () => Promise<any>
+  adaptiveBypassResetLearning: () => Promise<any>
   smartRouteRuleSetsGetState: () => Promise<any>
   smartRouteRuleSetsRefresh: (force?: boolean) => Promise<any>
   inspectVpnInput: (input: string) => Promise<{ count: number; protocols: Record<string, number>; profiles: Array<{ index: number; name: string; protocol: string }>; fetched: boolean; source: string }>
@@ -76,6 +79,7 @@ export interface ElectronAPI {
   serversSelect: (id: string) => Promise<void>
   serversGetActive: () => Promise<{ profile: any | null; activeId: string | null }>
   serversPingAll: () => Promise<any[]>
+  serversResolveIps: () => Promise<any[]>
   serversPingOne: (host: string, port: number) => Promise<number | null>
   serversVerifyActiveCountry: (ip: string) => Promise<
     | { ok: true; country: string; profile: any }
@@ -165,8 +169,9 @@ export interface ElectronAPI {
   connectionHistoryExportJson: () => Promise<string>
   connectionHistoryClear: () => Promise<{ success: boolean }>
   // Traffic History
-  trafficHistoryList: (vpnIp?: string) => Promise<any[]>
+  trafficHistoryList: (vpnIp?: string, scheduleEnrichment?: boolean) => Promise<any[]>
   trafficHistoryClear: () => Promise<{ success: boolean }>
+  onTrafficHistoryUpdated: (callback: () => void) => () => void
   // Notification Preferences
   notificationsGetPrefs: () => Promise<any>
   notificationsSetPrefs: (prefs: any) => Promise<any>
@@ -193,11 +198,13 @@ export interface ElectronAPI {
   speedTestHistory: () => Promise<any[]>
   onSpeedTestProgress: (callback: (data: { percent: number; phase: string }) => void) => () => void
   // External Proxy
-  externalProxyStatus: () => Promise<ExternalProxyStatus>
-  externalProxyStart: () => Promise<ExternalProxyStatus>
-  externalProxyStop: () => Promise<ExternalProxyStatus>
+  externalProxyStatus: (slot?: number) => Promise<ExternalProxyStatus>
+  externalProxyStart: (options?: ExternalProxyStartOptions) => Promise<ExternalProxyStatus>
+  externalProxyStartProfiles: (profileIds: string[]) => Promise<ExternalProxyBatchStartResult>
+  externalProxyStop: (slot?: number) => Promise<ExternalProxyStatus>
+  externalProxyStopAll: () => Promise<ExternalProxyStatus>
   externalProxyList: (country?: string) => Promise<ExternalProxyProfileRow[]>
-  externalProxyRotate: () => Promise<ExternalProxyStatus>
+  externalProxyRotate: (slot?: number) => Promise<ExternalProxyStatus>
   // Event listeners
   onIpChanged: (callback: (data: { ip: string; isLeak: boolean }) => void) => () => void
   onTunStatusChanged: (callback: (status: string) => void) => () => void
@@ -249,6 +256,8 @@ const MAX_TEXT_ARG_CHARS = 4096
 const MAX_VPN_INPUT_CHARS = 256 * 1024
 const MAX_OBJECT_JSON_CHARS = 256 * 1024
 const MAX_STRING_ARRAY_ITEMS = 500
+const MAX_EXTERNAL_PROXY_SLOTS = 65535 - 17990 + 1
+const MAX_EXTERNAL_PROXY_BATCH_PROFILE_IDS = 65_535
 
 function assertString(value: unknown, name: string, maxChars = MAX_TEXT_ARG_CHARS): string {
   if (typeof value !== 'string') throw new TypeError(`${name} must be a string`)
@@ -294,6 +303,26 @@ function assertRequiredPort(value: unknown, name: string): number {
   const port = assertPort(value, name)
   if (port === undefined) throw new TypeError(`${name} must be a valid TCP port`)
   return port
+}
+
+function assertExternalProxySlot(value: unknown): number | undefined {
+  if (value === undefined || value === null) return undefined
+  const slot = Number(value)
+  if (!Number.isInteger(slot) || slot < 1 || slot > MAX_EXTERNAL_PROXY_SLOTS) {
+    throw new RangeError(`slot must be between 1 and ${MAX_EXTERNAL_PROXY_SLOTS}`)
+  }
+  return slot
+}
+
+function assertExternalProxyStartOptions(value: unknown): ExternalProxyStartOptions | undefined {
+  const options = assertOptionalPlainObject<Record<string, unknown>>(value, 'options')
+  if (!options) return undefined
+  return {
+    slot: assertExternalProxySlot(options.slot),
+    country: assertOptionalString(options.country, 'options.country'),
+    profileId: assertOptionalString(options.profileId, 'options.profileId'),
+    port: assertPort(options.port, 'options.port')
+  }
 }
 
 function assertStringArray(value: unknown, name: string, maxItems = MAX_STRING_ARRAY_ITEMS): string[] {
@@ -349,6 +378,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getAutoconfigStatus: () => ipcRenderer.invoke('get-autoconfig-status'),
   getSettings: () => ipcRenderer.invoke('get-settings'),
   saveSettings: (settings: any) => ipcRenderer.invoke('save-settings', assertPlainObject(settings, 'settings')),
+  adaptiveBypassGetStatus: () => ipcRenderer.invoke('adaptive-bypass:get-status'),
+  adaptiveBypassRetry: () => ipcRenderer.invoke('adaptive-bypass:retry'),
+  adaptiveBypassResetLearning: () => ipcRenderer.invoke('adaptive-bypass:reset-learning'),
   smartRouteRuleSetsGetState: () => ipcRenderer.invoke('smart-route:rule-sets-state'),
   smartRouteRuleSetsRefresh: (force?: boolean) => ipcRenderer.invoke('smart-route:rule-sets-refresh', assertOptionalBoolean(force, 'force') === true),
   inspectVpnInput: (input: string) => ipcRenderer.invoke('inspect-vpn-input', assertString(input, 'input', MAX_VPN_INPUT_CHARS)),
@@ -398,6 +430,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   serversSelect: (id: string) => ipcRenderer.invoke('servers:select', assertString(id, 'id')),
   serversGetActive: () => ipcRenderer.invoke('servers:get-active'),
   serversPingAll: () => ipcRenderer.invoke('servers:ping-all'),
+  serversResolveIps: () => ipcRenderer.invoke('servers:resolve-ips'),
   serversPingOne: (host: string, port: number) => ipcRenderer.invoke('servers:ping-one', assertString(host, 'host'), assertRequiredPort(port, 'port')),
   serversVerifyActiveCountry: (ip: string) => ipcRenderer.invoke('servers:verify-active-country', assertString(ip, 'ip')),
   serversVerifyCountry: (id: string) => ipcRenderer.invoke('servers:verify-country', assertString(id, 'id')),
@@ -463,8 +496,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
   connectionHistoryExportJson: () => ipcRenderer.invoke('connection-history:export-json'),
   connectionHistoryClear: () => ipcRenderer.invoke('connection-history:clear'),
   // Traffic History
-  trafficHistoryList: (vpnIp?: string) => ipcRenderer.invoke('traffic-history:list', assertOptionalString(vpnIp, 'vpnIp')),
+  trafficHistoryList: (vpnIp?: string, scheduleEnrichment?: boolean) => ipcRenderer.invoke(
+    'traffic-history:list',
+    assertOptionalString(vpnIp, 'vpnIp'),
+    assertOptionalBoolean(scheduleEnrichment, 'scheduleEnrichment') === true
+  ),
   trafficHistoryClear: () => ipcRenderer.invoke('traffic-history:clear'),
+  onTrafficHistoryUpdated: (callback: () => void) => {
+    const listener = () => callback()
+    ipcRenderer.on('traffic-history:enrichment-updated', listener)
+    return () => ipcRenderer.removeListener('traffic-history:enrichment-updated', listener)
+  },
   // Config Import/Export
   configExport: () => ipcRenderer.invoke('config:export'),
   configBrowseImport: () => ipcRenderer.invoke('config:browse-import'),
@@ -532,11 +574,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => ipcRenderer.removeListener('speed-test:progress', handler)
   },
   // External Proxy
-  externalProxyStatus: () => ipcRenderer.invoke('external-proxy:status'),
-  externalProxyStart: () => ipcRenderer.invoke('external-proxy:start'),
-  externalProxyStop: () => ipcRenderer.invoke('external-proxy:stop'),
+  externalProxyStatus: (slot?: number) => ipcRenderer.invoke('external-proxy:status', assertExternalProxySlot(slot)),
+  externalProxyStart: (options?: ExternalProxyStartOptions) => ipcRenderer.invoke('external-proxy:start', assertExternalProxyStartOptions(options)),
+  externalProxyStartProfiles: (profileIds: string[]) => ipcRenderer.invoke(
+    'external-proxy:start-profiles',
+    assertStringArray(profileIds, 'profileIds', MAX_EXTERNAL_PROXY_BATCH_PROFILE_IDS)
+  ),
+  externalProxyStop: (slot?: number) => ipcRenderer.invoke('external-proxy:stop', assertExternalProxySlot(slot)),
+  externalProxyStopAll: () => ipcRenderer.invoke('external-proxy:stop-all'),
   externalProxyList: (country?: string) => ipcRenderer.invoke('external-proxy:list', assertOptionalString(country, 'country')),
-  externalProxyRotate: () => ipcRenderer.invoke('external-proxy:rotate'),
+  externalProxyRotate: (slot?: number) => ipcRenderer.invoke('external-proxy:rotate', assertExternalProxySlot(slot)),
   // Event listeners
   onIpChanged: (callback: (data: { ip: string; isLeak: boolean }) => void) => {
     const handler = (_event: any, data: { ip: string; isLeak: boolean }) => callback(data)

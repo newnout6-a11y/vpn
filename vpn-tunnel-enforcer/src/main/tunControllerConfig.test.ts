@@ -382,10 +382,15 @@ describe('generateSingboxConfig process routing', () => {
     expect(directRule!.process_name).toContain('MyApp.exe')
   })
 
-  it('does NOT add a process_name direct rule in directVpn mode', () => {
+  it('only adds the managed external proxy runtime to direct-out in directVpn mode', () => {
     const cfg = gen({ outbound: { ...plainTlsOutbound } })
-    const directRule = cfg.route.rules.find((r) => Array.isArray(r.process_name))
-    expect(directRule).toBeUndefined()
+    const directRule = cfg.route.rules.find(
+      (r) => Array.isArray(r.process_name) && r.outbound === 'direct-out'
+    ) as any
+
+    expect(directRule).toBeTruthy()
+    expect(directRule.process_name).toContain('vpnte-external-proxy.exe')
+    expect(directRule.process_name).toHaveLength(1)
   })
 })
 

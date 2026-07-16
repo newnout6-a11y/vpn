@@ -40,7 +40,7 @@ import { relaunchElevatedIfNeeded } from './admin'
 import { clearAppLog, getFullLogs, logEvent, openLogFolder, type AppLogLevel } from './appLogger'
 import { runSystemDiagnostics } from './systemDiagnostics'
 import { combinedPreStartProbe, getRoutingPlan } from './connectionPlanner'
-import { getSmartRouteRuleSetState, refreshSmartRouteRuleSets } from './ruleSetManager'
+import { getSmartRouteRuleSetState, maybeRefreshSmartRouteRuleSets, refreshSmartRouteRuleSets } from './ruleSetManager'
 import { runAutoPilot } from './autoPilot'
 import { notify, setInAppFallbackCallback } from './notifications'
 import { exportDiagnosticsZip } from './diagnosticsExport'
@@ -62,7 +62,7 @@ import { registerKillSwitchIpc, granularKillSwitch } from './granularKillSwitch'
 import { registerRotationHandlers, initProfileRotation } from './profileRotation'
 import { registerSchedulerIpcHandlers, schedulerService } from './scheduler'
 import { registerConnectionHistoryIpcHandlers, connectionHistoryService } from './connectionHistory'
-import { registerTrafficHistoryIpcHandlers } from './trafficHistory'
+import { registerTrafficHistoryIpcHandlers, stopBackgroundTrafficHistory } from './trafficHistory'
 import { registerDnsHandlers, initDnsProfiles } from './dnsProfiles'
 import { registerDomainRoutingIpcHandlers } from './domainRouting'
 import { registerConfigManagerIpcHandlers } from './configManager'
@@ -70,7 +70,20 @@ import { registerNotificationPrefsIpcHandlers } from './notificationPrefs'
 import { registerI18nIpcHandlers } from './i18n'
 import { registerThemeIpcHandlers } from './themeManager'
 import { externalProxy } from './externalProxy'
-import { requirePlainObject } from './ipcValidation'
+import { requirePlainObject, requireStringArray } from './ipcValidation'
+import {
+  beginAdaptiveConnection,
+  getAdaptiveBypassStatus,
+  markAdaptiveFailure,
+  markAdaptiveServerFallback,
+  markAdaptiveSuccess,
+  markAdaptiveTransition,
+  markAdaptiveVerifying,
+  nextAdaptiveMode,
+  resolveAdaptiveCapabilities,
+  resetAdaptiveBypassLearning,
+  type AdaptiveCapabilities
+} from './adaptiveBypass'
 
 const exec = promisify(execCb)
 const execFile = promisify(execFileCb)
@@ -95,6 +108,138 @@ let latestRestartingProgress: string | null = null
 let currentConnectionStart: number | null = null
 let currentConnectionProfile: { id: string; name: string; mode: 'hard' | 'soft' | 'direct' } | null = null
 let stopInProgress = false
+let adaptiveVerificationGeneration = 0
+let activeAdaptiveContext: {
+  profile?: Record<string, any>
+  capabilities: AdaptiveCapabilities
+  enabled: boolean
+  serverFallbackEnabled: boolean
+  connectionMode: 'localProxy' | 'directVpn'
+  serverFallbackAttempted: boolean
+} | null = null
+
+function nextDirectVpnSibling(context: NonNullable<typeof activeAdaptiveContext>): VpnProfile | null {
+  if (
+    !settingsStore.get().adaptiveBypassServerFallback ||
+    !context.serverFallbackEnabled ||
+    context.connectionMode !== 'directVpn' ||
+    context.serverFallbackAttempted
+  ) return null
+  const active = serverPicker.getActiveProfile()
+  if (!active?.groupId) return null
+  const candidate = serverPicker.getProfiles().find(profile =>
+    profile.id !== active.id &&
+    profile.groupId === active.groupId &&
+    profile.status !== 'offline' &&
+    profile.outbound && typeof profile.outbound === 'object'
+  )
+  if (!candidate?.outbound) return null
+  context.serverFallbackAttempted = true
+  return {
+    name: candidate.name,
+    protocol: candidate.protocol as VpnProfile['protocol'],
+    outbound: candidate.outbound,
+    clientDevice: candidate.clientDevice,
+    clientFingerprint: candidate.clientFingerprint
+  }
+}
+
+function ensureAdaptiveMonitoringForRunningTunnel(): void {
+  if (activeAdaptiveContext || !settingsStore.get().adaptiveBypassEnabled) return
+  const tun = tunController.getStatus()
+  if (!tun.running || !tun.mode) return
+  const active = tun.mode === 'directVpn' ? serverPicker.getActiveProfile() : null
+  const profile = active?.outbound
+    ? {
+      name: active.name,
+      protocol: active.protocol,
+      outbound: active.outbound,
+      clientDevice: active.clientDevice,
+      clientFingerprint: active.clientFingerprint
+    }
+    : undefined
+  activeAdaptiveContext = {
+    profile,
+    capabilities: resolveAdaptiveCapabilities(tun.mode, profile),
+    enabled: true,
+    serverFallbackEnabled: settingsStore.get().adaptiveBypassServerFallback,
+    connectionMode: tun.mode,
+    serverFallbackAttempted: false
+  }
+  scheduleAdaptiveVerification()
+}
+
+function scheduleAdaptiveVerification(): void {
+  void verifyAdaptiveConnection().catch(err => {
+    logEvent('warn', 'adaptive-bypass', 'adaptive verification failed unexpectedly', err)
+    markAdaptiveFailure(err?.message || String(err))
+  })
+}
+
+async function verifyAdaptiveConnection(): Promise<void> {
+  const context = activeAdaptiveContext
+  const generation = ++adaptiveVerificationGeneration
+  if (!context || !tunController.getStatus().running) return
+  if (!context.enabled) {
+    markAdaptiveSuccess(context.profile)
+    return
+  }
+
+  const status = getAdaptiveBypassStatus()
+  if (status.mode === 'external-managed') {
+    markAdaptiveSuccess(context.profile)
+    return
+  }
+
+  markAdaptiveVerifying()
+  await new Promise(resolve => setTimeout(resolve, 1200))
+  if (generation !== adaptiveVerificationGeneration || !tunController.getStatus().running) return
+
+  const { tunnelHttpProbe } = await import('./serverPicker')
+  const latency = await tunnelHttpProbe(true)
+  if (generation !== adaptiveVerificationGeneration || !tunController.getStatus().running) return
+  if (latency !== null) {
+    markAdaptiveSuccess(context.profile)
+    logEvent('info', 'adaptive-bypass', 'tunnel verification succeeded', { latency })
+    return
+  }
+
+  const afterProbe = getAdaptiveBypassStatus()
+  // A single compatibility retry is deliberate. Repeatedly restarting a
+  // working-looking tunnel on one failed health probe is worse than surfacing
+  // a clear error, and creates a window where an unstable network flaps.
+  const next = afterProbe.attempts === 0
+    ? nextAdaptiveMode(afterProbe.mode, context.capabilities)
+    : null
+  if (!next) {
+    const sibling = nextDirectVpnSibling(context)
+    if (sibling) {
+      markAdaptiveServerFallback()
+      const restarted = await tunController.restartForAdaptiveChange(
+        afterProbe.mode,
+        'adaptive compatible profile failed tunnel health check',
+        { vpnProfile: sibling }
+      )
+      if (restarted.success) {
+        context.profile = sibling
+        scheduleAdaptiveVerification()
+        return
+      }
+      markAdaptiveFailure(restarted.error || 'Не удалось подключиться к соседнему серверу')
+      return
+    }
+    markAdaptiveFailure('Проверка выхода в интернет через туннель не прошла')
+    return
+  }
+
+  markAdaptiveTransition(next)
+  const restarted = await tunController.restartForAdaptiveChange(next, 'adaptive tunnel health check failed')
+  if (!restarted.success) {
+    markAdaptiveFailure(restarted.error || 'Не удалось применить совместимый режим')
+    return
+  }
+  scheduleAdaptiveVerification()
+}
 
 // Global guards against uncaught exceptions / rejections in the main process.
 // Without these, a stray ECONNRESET on a stale TCP socket (axios connection
@@ -542,15 +687,31 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
       })
   }
 
+  const connectionSettings = settingsStore.get()
+  const adaptive = beginAdaptiveConnection({
+    enabled: connectionSettings.adaptiveBypassEnabled,
+    legacyStealthMode: connectionSettings.stealthMode,
+    mode: 'localProxy'
+  })
+  activeAdaptiveContext = {
+    capabilities: adaptive.capabilities,
+    enabled: connectionSettings.adaptiveBypassEnabled,
+    serverFallbackEnabled: connectionSettings.adaptiveBypassServerFallback,
+    connectionMode: 'localProxy',
+    serverFallbackAttempted: false
+  }
   const result = await tunController.start({
     proxyAddr,
     proxyType: proxyType ?? 'socks5',
-    enableFirewallKillSwitch: settingsStore.get().firewallKillSwitch,
-    enableAdapterLockdown: settingsStore.get().strictAdapterLockdown,
-    publicWifiCompatibility: settingsStore.get().publicWifiCompatibility,
-    stealthMode: settingsStore.get().stealthMode
+    enableFirewallKillSwitch: connectionSettings.firewallKillSwitch,
+    enableAdapterLockdown: connectionSettings.strictAdapterLockdown,
+    publicWifiCompatibility: connectionSettings.publicWifiCompatibility,
+    stealthMode: connectionSettings.stealthMode,
+    adaptiveMode: adaptive.mode
   })
   if (!result.success) {
+    activeAdaptiveContext = null
+    markAdaptiveFailure(result.error || 'Не удалось запустить туннель')
     // Wait for the baseline to finish before rolling back so the manifest
     // exists for rollbackTunNetworkBaselineIfApplied to find.
     if (baselinePromise) await baselinePromise
@@ -564,6 +725,7 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
   // The baseline is very likely already done (start() took several seconds),
   // but await it to be sure before we report final status.
   if (baselinePromise) await baselinePromise
+  scheduleAdaptiveVerification()
 
   // Start traffic forensics session in background (non-blocking)
   startTrafficForensicsSession({ mode: 'localProxy', target: proxyAddr }).catch(err => {
@@ -736,6 +898,20 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
     name: profile.name
   })
 
+  const adaptive = beginAdaptiveConnection({
+    enabled: settings.adaptiveBypassEnabled,
+    legacyStealthMode: settings.stealthMode,
+    mode: 'directVpn',
+    profile
+  })
+  activeAdaptiveContext = {
+    profile,
+    capabilities: adaptive.capabilities,
+    enabled: settings.adaptiveBypassEnabled,
+    serverFallbackEnabled: settings.adaptiveBypassServerFallback,
+    connectionMode: 'directVpn',
+    serverFallbackAttempted: false
+  }
   const result = await tunController.start({
     mode: 'directVpn',
     vpnProfile: profile,
@@ -743,9 +919,12 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
     enableFirewallKillSwitch: settings.firewallKillSwitch,
     enableAdapterLockdown: settings.strictAdapterLockdown,
     publicWifiCompatibility: settings.publicWifiCompatibility,
-    stealthMode: settings.stealthMode
+    stealthMode: settings.stealthMode,
+    adaptiveMode: adaptive.mode
   })
   if (!result.success) {
+    activeAdaptiveContext = null
+    markAdaptiveFailure(result.error || 'Не удалось запустить туннель')
     if (baselinePromise) await baselinePromise
     await rollbackTunNetworkBaselineIfApplied('direct-vpn start failed').catch(err =>
       logEvent('warn', 'app', 'rollback after direct-vpn start failure failed', err)
@@ -754,6 +933,7 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
     return result
   }
   if (baselinePromise) await baselinePromise
+  scheduleAdaptiveVerification()
 
   // Start traffic forensics session in background (non-blocking)
   startTrafficForensicsSession({ mode: 'directVpn', target: profile.name }).catch(err => {
@@ -817,6 +997,8 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
 }
 
 async function stopProtection(): Promise<{ success: boolean; error?: string; warning?: string }> {
+  adaptiveVerificationGeneration += 1
+  activeAdaptiveContext = null
   // Record the connection BEFORE we stop, so traffic counters are still valid.
   // `stopInProgress` ensures the status-change handler doesn't double-record
   // when tunController emits 'stopped' as a result of the call below.
@@ -849,6 +1031,14 @@ async function stopProtection(): Promise<{ success: boolean; error?: string; war
   stopTrafficForensicsSession('vpn-stop').catch(err => {
     logEvent('warn', 'app', 'failed to stop traffic forensics session', err)
   })
+
+  // External proxies are tied to the VPN session. Stop them first, so they
+  // cannot remain available while the main TUN is still rolling back.
+  try {
+    await externalProxy.stopAll('vpn-stop')
+  } catch (err) {
+    logEvent('warn', 'external-proxy', 'failed to stop proxies before VPN stop', err)
+  }
 
   const result = await tunController.stop()
   ipMonitor.clearVpnIp()
@@ -1024,6 +1214,7 @@ app.whenReady().then(async () => {
   const initialSettings = settingsStore.get()
   settingsStore.syncLoginItem()
   ipMonitor.setCheckInterval(initialSettings.checkInterval)
+  maybeRefreshSmartRouteRuleSets('app-ready')
 
   // Start the persistent elevated PowerShell helper — one long-running
   // PS process that accepts JSON commands via stdin, eliminating the
@@ -1139,6 +1330,23 @@ app.whenReady().then(async () => {
     return settingsStore.get()
   })
 
+  handleLogged('adaptive-bypass:get-status', async () => {
+    return getAdaptiveBypassStatus()
+  })
+
+  handleLogged('adaptive-bypass:retry', async () => {
+    if (!tunController.getStatus().running || !activeAdaptiveContext) {
+      return { started: false, status: getAdaptiveBypassStatus() }
+    }
+    scheduleAdaptiveVerification()
+    return { started: true, status: getAdaptiveBypassStatus() }
+  })
+
+  handleLogged('adaptive-bypass:reset-learning', async () => {
+    resetAdaptiveBypassLearning()
+    return { success: true, status: getAdaptiveBypassStatus() }
+  })
+
   handleLogged('save-settings', async (_e, settings) => {
     settings = requirePlainObject(settings, 'settings') as Partial<AppSettings>
     const previous = settingsStore.get()
@@ -1172,6 +1380,43 @@ app.whenReady().then(async () => {
       } catch (err) {
         logEvent('warn', 'app', 'failed to engage kill-switch on settings save', err)
       }
+    }
+
+    const runningTunnelSettingsChanged =
+      previous.strictAdapterLockdown !== saved.strictAdapterLockdown ||
+      previous.publicWifiCompatibility !== saved.publicWifiCompatibility ||
+      previous.stealthMode !== saved.stealthMode ||
+      previous.adaptiveBypassEnabled !== saved.adaptiveBypassEnabled
+
+    if (runningTunnelSettingsChanged && tunController.getStatus().running) {
+      try {
+        const changed = [
+          previous.strictAdapterLockdown !== saved.strictAdapterLockdown ? 'strictAdapterLockdown' : null,
+          previous.publicWifiCompatibility !== saved.publicWifiCompatibility ? 'publicWifiCompatibility' : null,
+          previous.stealthMode !== saved.stealthMode ? 'stealthMode' : null,
+          previous.adaptiveBypassEnabled !== saved.adaptiveBypassEnabled ? 'adaptiveBypassEnabled' : null
+        ].filter(Boolean).join(', ')
+        const restarted = await tunController.restartWithLastOptions(`settings changed: ${changed}`)
+        if (!restarted.success) {
+          logEvent('warn', 'app', 'failed to restart tunnel after settings change', {
+            changed,
+            error: restarted.error
+          })
+        }
+      } catch (err) {
+        logEvent('warn', 'app', 'failed to apply running tunnel settings change', err)
+      }
+    }
+
+    if (
+      previous.smartRuSplit !== saved.smartRuSplit ||
+      previous.smartRuRuleSetMode !== saved.smartRuRuleSetMode ||
+      previous.smartRuRuleSetAutoUpdate !== saved.smartRuRuleSetAutoUpdate ||
+      previous.smartRuRuleSetUseProxy !== saved.smartRuRuleSetUseProxy ||
+      previous.smartRuRuleSetUpdateIntervalHours !== saved.smartRuRuleSetUpdateIntervalHours ||
+      previous.bootstrapRouteMode !== saved.bootstrapRouteMode
+    ) {
+      maybeRefreshSmartRouteRuleSets('settings-save')
     }
 
     return saved
@@ -1474,25 +1719,36 @@ app.whenReady().then(async () => {
     return restartTrafficForensicsSession('manual-ui-restart')
   })
 
-  // ─── External Proxy (sing-box mixed-inbound on 127.0.0.1:17990) ──────────────
-  handleLogged('external-proxy:status', async () => {
-    return externalProxy.status()
+  // ─── External Proxy instances (one isolated sing-box runtime per slot) ───
+  handleLogged('external-proxy:status', async (_e, slot?: number) => {
+    return externalProxy.status(slot)
   })
 
-  handleLogged('external-proxy:start', async () => {
-    return externalProxy.start({ action: 'start' })
+  handleLogged('external-proxy:start', async (_e, options?: { slot?: number; country?: string; profileId?: string; port?: number }) => {
+    return externalProxy.start({ action: 'start', ...options })
   })
 
-  handleLogged('external-proxy:stop', async () => {
-    return externalProxy.stop('ui')
+  handleLogged('external-proxy:start-profiles', async (_e, profileIds: unknown) => {
+    return externalProxy.startProfiles(requireStringArray(profileIds, 'profileIds', {
+      maxItems: 65_535,
+      itemMaxLength: 4096
+    }))
+  })
+
+  handleLogged('external-proxy:stop', async (_e, slot?: number) => {
+    return externalProxy.stop(slot, 'ui')
+  })
+
+  handleLogged('external-proxy:stop-all', async () => {
+    return externalProxy.stopAll('ui')
   })
 
   handleLogged('external-proxy:list', async (_e, country?: string) => {
     return externalProxy.list(country ?? null)
   })
 
-  handleLogged('external-proxy:rotate', async () => {
-    return externalProxy.start({ action: 'rotate' })
+  handleLogged('external-proxy:rotate', async (_e, slot?: number) => {
+    return externalProxy.rotate({ slot, action: 'rotate', rotateReason: 'ui' })
   })
 
   // ─── V2 Feature Module Registration ──────────────────────────────────────────
@@ -1612,6 +1868,11 @@ app.whenReady().then(async () => {
   tunController.onStatusChange((status: string) => {
     mainWindow?.webContents.send('tun-status-changed', status)
     const isRestarting = status.startsWith('restarting:')
+    if (status === 'stopped' || status === 'killswitch-active') {
+      adaptiveVerificationGeneration += 1
+      activeAdaptiveContext = null
+    }
+    if (status === 'running') ensureAdaptiveMonitoringForRunningTunnel()
     if (status === 'running' || status === 'proxy-down') {
       trafficMonitor.start()
     } else {
@@ -1686,6 +1947,14 @@ async function performShutdownCleanup(reason: string): Promise<void> {
   }
 
   try {
+    // Closing the app is also a VPN lifecycle boundary. Do not leave the
+    // independently spawned external sing-box processes behind.
+    await externalProxy.stopAll(`shutdown: ${reason}`)
+  } catch (err) {
+    logEvent('warn', 'external-proxy', 'failed to stop proxies during shutdown', err)
+  }
+
+  try {
     await rollbackTunNetworkBaselineIfApplied(`shutdown: ${reason}`)
   } catch (err) {
     logEvent('warn', 'app', 'baseline rollback during shutdown failed', err)
@@ -1729,6 +1998,8 @@ async function performShutdownCleanup(reason: string): Promise<void> {
   try {
     stopElevatedPsHelper()
   } catch {}
+
+  stopBackgroundTrafficHistory()
 }
 
 app.on('before-quit', async (event) => {

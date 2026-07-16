@@ -11,6 +11,8 @@ const settingsSource = () => readFileSync(join(process.cwd(), 'src', 'renderer',
 const storeSource = () => readFileSync(join(process.cwd(), 'src', 'renderer', 'store.ts'), 'utf8')
 const serverDetailSource = () => readFileSync(join(process.cwd(), 'src', 'renderer', 'components', 'ServerDetailModal.tsx'), 'utf8')
 const browserIpCardSource = () => readFileSync(join(process.cwd(), 'src', 'renderer', 'components', 'BrowserIpCard.tsx'), 'utf8')
+const trafficHistorySource = () => readFileSync(join(process.cwd(), 'src', 'renderer', 'pages', 'TrafficHistory.tsx'), 'utf8')
+const externalProxyCardSource = () => readFileSync(join(process.cwd(), 'src', 'renderer', 'components', 'ExternalProxyCard.tsx'), 'utf8')
 const preloadSource = () => readFileSync(join(process.cwd(), 'src', 'preload', 'index.ts'), 'utf8')
 const macSelectSource = () => readFileSync(join(process.cwd(), 'src', 'renderer', 'design-system', 'MacSelect.tsx'), 'utf8')
 
@@ -24,6 +26,15 @@ describe('App source regressions', () => {
     expect(handlerStart).toBeGreaterThanOrEqual(0)
     expect(setRestarting).toBeGreaterThan(handlerStart)
     expect(setRestarting).toBeLessThan(clearBusy)
+  })
+
+  it('does not ignore terminal stopped status from auto-restart recovery', () => {
+    const source = appSource()
+    const staleConnectingStop = source.indexOf("busy === 'connecting' && status === 'stopped'")
+    const restartGuard = source.indexOf('!store.restartingProgress', staleConnectingStop)
+
+    expect(staleConnectingStop).toBeGreaterThan(0)
+    expect(restartGuard).toBeGreaterThan(staleConnectingStop)
   })
 
   it('backs off periodic Happ detection failures', () => {
@@ -65,6 +76,29 @@ describe('App source regressions', () => {
     expect(splitTunnel).not.toContain('framer-motion')
     expect(splitTunnel).not.toContain('<motion.div\n      layout')
     expect(servers).toContain('initial={{ opacity: 0 }}')
+  })
+
+  it('keeps traffic history alive in the background without re-queuing enrichment', () => {
+    const app = appSource()
+    const traffic = trafficHistorySource()
+
+    expect(app).toContain("new Set(['dashboard', 'trafficHistory'])")
+    expect(traffic).toContain('fetchInFlightRef')
+    expect(traffic).toContain('window.setInterval')
+    expect(traffic).toContain('trafficHistoryList(publicIp ?? undefined, false)')
+    expect(traffic).not.toContain('fetchHistory(false, true)')
+    expect(traffic).not.toContain('fetchHistory(true, true)')
+  })
+
+  it('exposes a guarded control to stop every external proxy', () => {
+    const card = externalProxyCardSource()
+    const preload = preloadSource()
+
+    expect(card).toContain('handleStopAll')
+    expect(card).toContain('window.electronAPI.externalProxyStopAll()')
+    expect(card).toContain('Остановить все внешние прокси')
+    expect(card).toContain('processRunningCount === 0')
+    expect(preload).toContain("externalProxyStopAll: () => ipcRenderer.invoke('external-proxy:stop-all')")
   })
 
   it('does not block the Servers page first paint on group metadata', () => {
@@ -142,7 +176,21 @@ describe('App source regressions', () => {
     expect(detail).toContain('fetch(`https://ipapi.co/${host}/json/`')
     expect(detail).toContain('}, [open, profile, disableGeoLookup])')
     expect(detail).toContain('(ipInfo || (!disableGeoLookup && fallbackCountry))')
+    expect(dashboardSource()).toContain('}, [publicIp, isLeak, tunRunning, vpnIp, settings?.disableGeoLookup])')
     expect(browserIp).not.toContain('https://ipinfo.io/json')
+  })
+
+  it('saves the latest settings before starting either tunnel mode', () => {
+    const dashboard = dashboardSource()
+    const directSave = dashboard.indexOf('const saved = await window.electronAPI.saveSettings(settings)')
+    const directStart = dashboard.indexOf('const result = await window.electronAPI.startDirectVpn()', directSave)
+    const localSave = dashboard.indexOf('const saved = await window.electronAPI.saveSettings(settings)', directStart)
+    const localStart = dashboard.indexOf('const result = await window.electronAPI.startTun(proxyAddr, proxyType)', localSave)
+
+    expect(directSave).toBeGreaterThan(0)
+    expect(directStart).toBeGreaterThan(directSave)
+    expect(localSave).toBeGreaterThan(directStart)
+    expect(localStart).toBeGreaterThan(localSave)
   })
 
   it('keeps settings descriptions aligned with implemented settings behavior', () => {

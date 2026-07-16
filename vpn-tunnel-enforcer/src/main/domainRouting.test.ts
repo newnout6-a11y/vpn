@@ -28,9 +28,20 @@ describe('matchDomain', () => {
     expect(matchDomain(rules, '')).toBeNull()
   })
 
-  it('matches exact domain', () => {
+  it('matches apex domain', () => {
     const rules = [makeRule('example.com', 0)]
     expect(matchDomain(rules, 'example.com')).toEqual(rules[0])
+  })
+
+  it('matches subdomains for a normal domain pattern', () => {
+    const rules = [makeRule('example.com', 0)]
+    expect(matchDomain(rules, 'www.example.com')).toEqual(rules[0])
+    expect(matchDomain(rules, 'a.b.example.com')).toEqual(rules[0])
+  })
+
+  it('normalizes URL-like stored patterns before matching', () => {
+    const rules = [makeRule('https://2ip.ru/', 0)]
+    expect(matchDomain(rules, '2ip.ru')).toEqual(rules[0])
   })
 
   it('exact match is case-insensitive', () => {
@@ -116,6 +127,12 @@ describe('parseDomainList', () => {
     expect(result[1].pattern).toBe('google.com')
   })
 
+  it('normalizes full URLs to hostnames', () => {
+    const result = parseDomainList('https://2ip.ru/')
+    expect(result).toHaveLength(1)
+    expect(result[0].pattern).toBe('2ip.ru')
+  })
+
   it('handles Windows-style line endings (CRLF)', () => {
     const text = 'example.com\r\ngoogle.com\r\n'
     const result = parseDomainList(text)
@@ -161,9 +178,10 @@ describe('domainRulesToSingboxRules', () => {
     expect(out[0].domain).toBeUndefined()
   })
 
-  it('maps an exact domain to domain[]', () => {
+  it('maps a normal domain to apex and subdomain matchers', () => {
     const out = domainRulesToSingboxRules([makeRule('example.com', 0, 'vpn')])
     expect(out[0].domain).toEqual(['example.com'])
+    expect(out[0].domain_suffix).toEqual(['.example.com'])
   })
 
   it('maps a dotless token to domain_keyword[]', () => {

@@ -80,9 +80,12 @@ export function Logs() {
   const [entries, setEntries] = useState<ConnectionLogEntry[]>([])
   const [loading, setLoading] = useState(false)
   const [clearingLogs, setClearingLogs] = useState(false)
-  const [showRawLogs, setShowRawLogs] = useState(false)
   const [rawLogs, setRawLogs] = useState<ParsedLogEntry[]>([])
+  const [rawLogsLoading, setRawLogsLoading] = useState(false)
+  const [rawLogsError, setRawLogsError] = useState<string | null>(null)
   const rendererLogs = useAppStore(s => s.logs)
+  const mainLogs = useMemo(() => [...rawLogs].reverse(), [rawLogs])
+  const uiLogs = useMemo(() => [...rendererLogs].slice(-100).reverse(), [rendererLogs])
 
   // Filters
   const [selectedReasons, setSelectedReasons] = useState<DisconnectReason[]>([])
@@ -266,7 +269,9 @@ export function Logs() {
     }
   }
 
-  const loadRawLogs = async () => {
+  const loadRawLogs = useCallback(async () => {
+    setRawLogsLoading(true)
+    setRawLogsError(null)
     try {
       const snapshots = await window.electronAPI.getFullLogs()
       if (Array.isArray(snapshots)) {
@@ -293,12 +298,28 @@ export function Logs() {
             }
           }
           setRawLogs(parsed)
+        } else {
+          setRawLogs([])
         }
+      } else {
+        setRawLogs([])
       }
     } catch (err: any) {
-      useAppStore.getState().addGlobalToast('error', 'Ошибка', `Не удалось загрузить логи: ${err?.message || err}`)
+      const message = `Не удалось загрузить логи: ${err?.message || err}`
+      setRawLogsError(message)
+      setRawLogs([])
+    } finally {
+      setRawLogsLoading(false)
     }
-  }
+  }, [])
+
+  useEffect(() => {
+    void loadRawLogs()
+    const timer = window.setInterval(() => {
+      void loadRawLogs()
+    }, 5000)
+    return () => window.clearInterval(timer)
+  }, [loadRawLogs])
 
 
   const reasonColor = (reason: DisconnectReason): string => {
@@ -315,43 +336,40 @@ export function Logs() {
   // ─── Render ────────────────────────────────────────────────────────────────
 
   return (
-    <div className="space-y-5 max-w-6xl">
-      {/* Onboarding tip */}
-      <PageTip tipKey="logs">{t('tips.logs')}</PageTip>
+    <div className="xl:grid xl:grid-cols-[minmax(0,1fr)_420px] xl:gap-5 xl:items-start">
+      <div className="space-y-5 min-w-0">
+        {/* Onboarding tip */}
+        <PageTip tipKey="logs">{t('tips.logs')}</PageTip>
 
-      {/* Header */}
-      <div className="flex items-center justify-between gap-3">
-        <div>
-          <h2 className="text-2xl font-semibold text-[var(--color-text)]">
-            {t('logs.title')}
-          </h2>
-          <p className="text-sm text-[var(--color-text-secondary)] mt-1">
-            {t('logs.description')}
-          </p>
+        {/* Header */}
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h2 className="text-2xl font-semibold text-[var(--color-text)]">
+              {t('logs.title')}
+            </h2>
+            <p className="text-sm text-[var(--color-text-secondary)] mt-1">
+              {t('logs.description')}
+            </p>
+          </div>
+          <div className="flex flex-wrap justify-end gap-2">
+            <MacButton variant="secondary" size="sm" onClick={handleExportCsv}>
+              <Download size={14} className="mr-1.5" />
+              {t('logs.exportCsv')}
+            </MacButton>
+            <MacButton variant="secondary" size="sm" onClick={handleExportJson}>
+              <FileText size={14} className="mr-1.5" />
+              {t('logs.exportJson')}
+            </MacButton>
+            <MacButton variant="ghost" size="sm" onClick={handleClearLogs} loading={clearingLogs}>
+              <Trash2 size={14} className="mr-1.5" />
+              {t('logs.clear', 'Очистить')}
+            </MacButton>
+          </div>
         </div>
-        <div className="flex gap-2">
-          <MacButton variant="secondary" size="sm" onClick={handleExportCsv}>
-            <Download size={14} className="mr-1.5" />
-            {t('logs.exportCsv')}
-          </MacButton>
-          <MacButton variant="secondary" size="sm" onClick={handleExportJson}>
-            <FileText size={14} className="mr-1.5" />
-            {t('logs.exportJson')}
-          </MacButton>
-          <MacButton variant="ghost" size="sm" onClick={handleClearLogs} loading={clearingLogs}>
-            <Trash2 size={14} className="mr-1.5" />
-            {t('logs.clear', 'Очистить')}
-          </MacButton>
-          <MacButton variant="ghost" size="sm" onClick={() => setShowRawLogs(!showRawLogs)}>
-            <FileText size={14} className="mr-1.5" />
-            {showRawLogs ? 'Скрыть логи' : 'Показать логи'}
-          </MacButton>
-        </div>
-      </div>
 
-      {/* Filter Controls */}
-      <MacCard>
-        <div className="flex flex-wrap items-end gap-4">
+        {/* Filter Controls */}
+        <MacCard>
+          <div className="flex flex-wrap items-end gap-4">
           {/* Disconnect Reason Multi-Select */}
           <div className="flex flex-col gap-1.5">
             <label className="text-sm font-medium text-[var(--color-text)]">
@@ -405,200 +423,227 @@ export function Logs() {
               leftIcon={<Search size={14} />}
             />
           </div>
-        </div>
-      </MacCard>
-
-      {/* Summary Statistics */}
-      <MacCard>
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-sm font-semibold text-[var(--color-text)] flex items-center gap-2">
-            <Activity size={16} />
-            {t('logs.stats')}
-          </h3>
-          <MacSelect
-            options={[
-              { value: 'day', label: t('logs.periodDay') },
-              { value: 'week', label: t('logs.periodWeek') },
-              { value: 'month', label: t('logs.periodMonth') }
-            ]}
-            value={statsPeriod}
-            onChange={(v) => setStatsPeriod(v as 'day' | 'week' | 'month')}
-            className="w-32"
-          />
-        </div>
-        {stats && (
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <div className="flex flex-col gap-1">
-              <span className="text-xs text-[var(--color-text-secondary)]">
-                {t('logs.totalTime')}
-              </span>
-              <span className="text-lg font-semibold text-[var(--color-text)] flex items-center gap-1.5">
-                <Clock size={16} className="text-[var(--color-accent)]" />
-                {formatDuration(stats.totalTimeMs)}
-              </span>
-            </div>
-            <div className="flex flex-col gap-1">
-              <span className="text-xs text-[var(--color-text-secondary)]">
-                {t('logs.totalDown')}
-              </span>
-              <span className="text-lg font-semibold text-[var(--color-text)]">
-                ↓ {formatBytes(stats.totalBytesDown)}
-              </span>
-            </div>
-            <div className="flex flex-col gap-1">
-              <span className="text-xs text-[var(--color-text-secondary)]">
-                {t('logs.totalUp')}
-              </span>
-              <span className="text-lg font-semibold text-[var(--color-text)]">
-                ↑ {formatBytes(stats.totalBytesUp)}
-              </span>
-            </div>
-            <div className="flex flex-col gap-1">
-              <span className="text-xs text-[var(--color-text-secondary)]">
-                {t('logs.connections')}
-              </span>
-              <span className="text-lg font-semibold text-[var(--color-text)]">
-                {stats.entryCount}
-              </span>
-            </div>
-          </div>
-        )}
-      </MacCard>
-
-      {/* Connection History Table */}
-      <MacCard noPadding>
-        <div className="px-5 pt-5 pb-3 flex items-center justify-between">
-          <h3 className="text-sm font-semibold text-[var(--color-text)]">
-            {t('logs.connectionHistory')}
-          </h3>
-          <span className="text-xs text-[var(--color-text-secondary)]">
-            {sortedEntries.length} {t('logs.connections').toLowerCase()}
-          </span>
-        </div>
-
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-[var(--color-border)]">
-                <SortableHeader field="profileName" label={t('logs.profile')} onSort={handleSort} sortField={sortField} sortDirection={sortDirection} />
-                <SortableHeader field="mode" label={t('logs.mode')} onSort={handleSort} sortField={sortField} sortDirection={sortDirection} />
-                <SortableHeader field="startedAt" label={t('logs.startTime')} onSort={handleSort} sortField={sortField} sortDirection={sortDirection} />
-                <SortableHeader field="endedAt" label={t('logs.endTime')} onSort={handleSort} sortField={sortField} sortDirection={sortDirection} />
-                <SortableHeader field="duration" label={t('logs.duration')} onSort={handleSort} sortField={sortField} sortDirection={sortDirection} />
-                <SortableHeader field="traffic" label={t('logs.traffic')} onSort={handleSort} sortField={sortField} sortDirection={sortDirection} />
-                <SortableHeader field="disconnectReason" label={t('logs.reason')} onSort={handleSort} sortField={sortField} sortDirection={sortDirection} />
-              </tr>
-            </thead>
-            <tbody>
-              {loading ? (
-                <tr>
-                  <td colSpan={7} className="text-center py-8 text-[var(--color-text-secondary)]">
-                    {t('common.loading')}
-                  </td>
-                </tr>
-              ) : sortedEntries.length === 0 ? (
-                <tr>
-                  <td colSpan={7} className="text-center py-8 text-[var(--color-text-secondary)]">
-                    {t('logs.noLogs')}
-                  </td>
-                </tr>
-              ) : (
-                sortedEntries.map((entry) => (
-                  <tr
-                    key={entry.id}
-                    className="border-b border-[var(--color-border)] last:border-0 hover:bg-[var(--color-border)]/30 transition-colors duration-[var(--transition-fast)]"
-                  >
-                    <td className="px-4 py-2.5 font-medium text-[var(--color-text)]">
-                      {entry.profileName}
-                    </td>
-                    <td className="px-4 py-2.5 text-[var(--color-text-secondary)]">
-                      {entry.mode}
-                    </td>
-                    <td className="px-4 py-2.5 text-[var(--color-text-secondary)] whitespace-nowrap">
-                      {formatDateTime(entry.startedAt)}
-                    </td>
-                    <td className="px-4 py-2.5 text-[var(--color-text-secondary)] whitespace-nowrap">
-                      {entry.endedAt != null ? formatDateTime(entry.endedAt) : (
-                        <span className="text-green-400 text-xs font-medium">{t('logs.active')}</span>
-                      )}
-                    </td>
-                    <td className="px-4 py-2.5 text-[var(--color-text-secondary)] whitespace-nowrap">
-                      {entry.endedAt != null
-                        ? formatDuration(entry.endedAt - entry.startedAt)
-                        : '—'}
-                    </td>
-                    <td className="px-4 py-2.5 text-[var(--color-text-secondary)] whitespace-nowrap">
-                      <span className="text-xs">
-                        ↓{formatBytes(entry.bytesDown)} / ↑{formatBytes(entry.bytesUp)}
-                      </span>
-                    </td>
-                    <td className={`px-4 py-2.5 text-xs font-medium ${reasonColor(entry.disconnectReason)}`}>
-                      {reasonLabel(entry.disconnectReason)}
-                    </td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
-      </MacCard>
-
-      {/* Raw app logs viewer */}
-      {showRawLogs && (
-        <MacCard>
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex gap-2">
-              <button onClick={loadRawLogs} className="text-xs px-2 py-1 rounded-[var(--radius-sm)] bg-[var(--color-accent)]/10 text-[var(--color-accent)]">
-                Логи main
-              </button>
-              <span className="text-xs text-[var(--color-text-muted)] px-2 py-1">
-                Логи UI ({rendererLogs.length})
-              </span>
-            </div>
-            <MacButton variant="ghost" size="sm" onClick={loadRawLogs}>
-              <Activity size={12} className="mr-1" /> Обновить main
-            </MacButton>
-          </div>
-          {/* Main process logs */}
-          <div className="max-h-96 overflow-y-auto rounded-[var(--radius-sm)] bg-[var(--color-bg)] p-3 font-mono text-xs space-y-0.5">
-            {rawLogs.length === 0 ? (
-              <p className="text-[var(--color-text-muted)]">Нажмите «Обновить main» для загрузки</p>
-            ) : (
-              rawLogs.map((entry, i) => (
-                <div key={i} className="flex gap-2 py-0.5">
-                  {entry.ts && <span className="text-[var(--color-text-muted)] flex-shrink-0">{entry.ts}</span>}
-                  <span className={`flex-shrink-0 font-semibold ${
-                    entry.level === 'error' ? 'text-[var(--color-danger)]' :
-                    entry.level === 'warn' ? 'text-[var(--color-warning)]' :
-                    'text-[var(--color-text-secondary)]'
-                  }`}>{entry.level}</span>
-                  {entry.scope && <span className="text-[var(--color-accent)] flex-shrink-0">[{entry.scope}]</span>}
-                  <span className="text-[var(--color-text)] break-all">{entry.msg}</span>
-                </div>
-              ))
-            )}
-          </div>
-          {/* Renderer/UI logs (already in store, human-readable) */}
-          <div className="mt-3 pt-3 border-t border-[var(--color-card-elevated)]/40">
-            <p className="text-xs font-semibold text-[var(--color-text-secondary)] mb-2">UI логи</p>
-            <div className="max-h-48 overflow-y-auto rounded-[var(--radius-sm)] bg-[var(--color-bg)] p-3 font-mono text-xs space-y-0.5">
-              {rendererLogs.slice(-100).map((entry, i) => (
-                <div key={i} className="flex gap-2 py-0.5">
-                  <span className="text-[var(--color-text-muted)] flex-shrink-0">
-                    {new Date(entry.timestamp).toLocaleTimeString('ru-RU')}
-                  </span>
-                  <span className={`flex-shrink-0 font-semibold ${
-                    entry.level === 'error' ? 'text-[var(--color-danger)]' :
-                    entry.level === 'warn' ? 'text-[var(--color-warning)]' :
-                    'text-[var(--color-text-secondary)]'
-                  }`}>{entry.level}</span>
-                  <span className="text-[var(--color-text)] break-all">{entry.message}</span>
-                </div>
-              ))}
-            </div>
           </div>
         </MacCard>
-      )}
+
+        {/* Summary Statistics */}
+        <MacCard>
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-sm font-semibold text-[var(--color-text)] flex items-center gap-2">
+              <Activity size={16} />
+              {t('logs.stats')}
+            </h3>
+            <MacSelect
+              options={[
+                { value: 'day', label: t('logs.periodDay') },
+                { value: 'week', label: t('logs.periodWeek') },
+                { value: 'month', label: t('logs.periodMonth') }
+              ]}
+              value={statsPeriod}
+              onChange={(v) => setStatsPeriod(v as 'day' | 'week' | 'month')}
+              className="w-32"
+            />
+          </div>
+          {stats && (
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <div className="flex flex-col gap-1">
+                <span className="text-xs text-[var(--color-text-secondary)]">
+                  {t('logs.totalTime')}
+                </span>
+                <span className="text-lg font-semibold text-[var(--color-text)] flex items-center gap-1.5">
+                  <Clock size={16} className="text-[var(--color-accent)]" />
+                  {formatDuration(stats.totalTimeMs)}
+                </span>
+              </div>
+              <div className="flex flex-col gap-1">
+                <span className="text-xs text-[var(--color-text-secondary)]">
+                  {t('logs.totalDown')}
+                </span>
+                <span className="text-lg font-semibold text-[var(--color-text)]">
+                  ↓ {formatBytes(stats.totalBytesDown)}
+                </span>
+              </div>
+              <div className="flex flex-col gap-1">
+                <span className="text-xs text-[var(--color-text-secondary)]">
+                  {t('logs.totalUp')}
+                </span>
+                <span className="text-lg font-semibold text-[var(--color-text)]">
+                  ↑ {formatBytes(stats.totalBytesUp)}
+                </span>
+              </div>
+              <div className="flex flex-col gap-1">
+                <span className="text-xs text-[var(--color-text-secondary)]">
+                  {t('logs.connections')}
+                </span>
+                <span className="text-lg font-semibold text-[var(--color-text)]">
+                  {stats.entryCount}
+                </span>
+              </div>
+            </div>
+          )}
+        </MacCard>
+
+        {/* Connection History Table */}
+        <MacCard noPadding>
+          <div className="px-5 pt-5 pb-3 flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-[var(--color-text)]">
+              {t('logs.connectionHistory')}
+            </h3>
+            <span className="text-xs text-[var(--color-text-secondary)]">
+              {sortedEntries.length} {t('logs.connections').toLowerCase()}
+            </span>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-[var(--color-border)]">
+                  <SortableHeader field="profileName" label={t('logs.profile')} onSort={handleSort} sortField={sortField} sortDirection={sortDirection} />
+                  <SortableHeader field="mode" label={t('logs.mode')} onSort={handleSort} sortField={sortField} sortDirection={sortDirection} />
+                  <SortableHeader field="startedAt" label={t('logs.startTime')} onSort={handleSort} sortField={sortField} sortDirection={sortDirection} />
+                  <SortableHeader field="endedAt" label={t('logs.endTime')} onSort={handleSort} sortField={sortField} sortDirection={sortDirection} />
+                  <SortableHeader field="duration" label={t('logs.duration')} onSort={handleSort} sortField={sortField} sortDirection={sortDirection} />
+                  <SortableHeader field="traffic" label={t('logs.traffic')} onSort={handleSort} sortField={sortField} sortDirection={sortDirection} />
+                  <SortableHeader field="disconnectReason" label={t('logs.reason')} onSort={handleSort} sortField={sortField} sortDirection={sortDirection} />
+                </tr>
+              </thead>
+              <tbody>
+                {loading ? (
+                  <tr>
+                    <td colSpan={7} className="text-center py-8 text-[var(--color-text-secondary)]">
+                      {t('common.loading')}
+                    </td>
+                  </tr>
+                ) : sortedEntries.length === 0 ? (
+                  <tr>
+                    <td colSpan={7} className="text-center py-8 text-[var(--color-text-secondary)]">
+                      {t('logs.noLogs')}
+                    </td>
+                  </tr>
+                ) : (
+                  sortedEntries.map((entry) => (
+                    <tr
+                      key={entry.id}
+                      className="border-b border-[var(--color-border)] last:border-0 hover:bg-[var(--color-border)]/30 transition-colors duration-[var(--transition-fast)]"
+                    >
+                      <td className="px-4 py-2.5 font-medium text-[var(--color-text)]">
+                        {entry.profileName}
+                      </td>
+                      <td className="px-4 py-2.5 text-[var(--color-text-secondary)]">
+                        {entry.mode}
+                      </td>
+                      <td className="px-4 py-2.5 text-[var(--color-text-secondary)] whitespace-nowrap">
+                        {formatDateTime(entry.startedAt)}
+                      </td>
+                      <td className="px-4 py-2.5 text-[var(--color-text-secondary)] whitespace-nowrap">
+                        {entry.endedAt != null ? formatDateTime(entry.endedAt) : (
+                          <span className="text-green-400 text-xs font-medium">{t('logs.active')}</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-2.5 text-[var(--color-text-secondary)] whitespace-nowrap">
+                        {entry.endedAt != null
+                          ? formatDuration(entry.endedAt - entry.startedAt)
+                          : '—'}
+                      </td>
+                      <td className="px-4 py-2.5 text-[var(--color-text-secondary)] whitespace-nowrap">
+                        <span className="text-xs">
+                          ↓{formatBytes(entry.bytesDown)} / ↑{formatBytes(entry.bytesUp)}
+                        </span>
+                      </td>
+                      <td className={`px-4 py-2.5 text-xs font-medium ${reasonColor(entry.disconnectReason)}`}>
+                        {reasonLabel(entry.disconnectReason)}
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </MacCard>
+      </div>
+
+      <div className="mt-5 xl:mt-0 space-y-5 xl:sticky xl:top-5">
+        <MacCard>
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold text-[var(--color-text)] flex items-center gap-2">
+                <FileText size={16} />
+                {t('logs.title')}
+              </h3>
+              <p className="text-xs text-[var(--color-text-secondary)] mt-1">
+                Живой main и UI поток без отдельного открытия.
+              </p>
+            </div>
+            <MacButton variant="ghost" size="sm" onClick={loadRawLogs} loading={rawLogsLoading}>
+              <Activity size={12} className="mr-1" /> Обновить
+            </MacButton>
+          </div>
+          {rawLogsError ? (
+            <p className="mt-3 text-xs text-[var(--color-danger)]">{rawLogsError}</p>
+          ) : (
+            <div className="mt-3 space-y-4">
+              <div>
+                <div className="flex items-center justify-between gap-2 mb-2">
+                  <p className="text-xs font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider flex items-center gap-1.5">
+                    <FileText size={12} className="text-[var(--color-accent)]" />
+                    Main log
+                  </p>
+                  <span className="text-xs text-[var(--color-text-muted)]">{rawLogs.length} lines</span>
+                </div>
+                <div className="max-h-[28rem] overflow-y-auto rounded-[var(--radius-sm)] bg-[var(--color-bg)] p-3 font-mono text-xs space-y-0.5">
+                  {rawLogsLoading && rawLogs.length === 0 ? (
+                    <p className="text-[var(--color-text-muted)]">Загружаем main log…</p>
+                  ) : mainLogs.length === 0 ? (
+                    <p className="text-[var(--color-text-muted)]">Логов пока нет</p>
+                  ) : (
+                    mainLogs.map((entry, i) => (
+                      <div key={i} className="flex gap-2 py-0.5">
+                        {entry.ts && <span className="text-[var(--color-text-muted)] flex-shrink-0">{entry.ts}</span>}
+                        <span className={`flex-shrink-0 font-semibold ${
+                          entry.level === 'error' ? 'text-[var(--color-danger)]' :
+                          entry.level === 'warn' ? 'text-[var(--color-warning)]' :
+                          'text-[var(--color-text-secondary)]'
+                        }`}>{entry.level}</span>
+                        {entry.scope && <span className="text-[var(--color-accent)] flex-shrink-0">[{entry.scope}]</span>}
+                        <span className="text-[var(--color-text)] break-all">{entry.msg}</span>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+
+              <div className="pt-4 border-t border-[var(--color-card-elevated)]/40">
+                <div className="flex items-center justify-between gap-2 mb-2">
+                  <p className="text-xs font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider flex items-center gap-1.5">
+                    <Activity size={12} className="text-[var(--color-accent)]" />
+                    UI logs
+                  </p>
+                  <span className="text-xs text-[var(--color-text-muted)]">{rendererLogs.length} lines</span>
+                </div>
+                <div className="max-h-48 overflow-y-auto rounded-[var(--radius-sm)] bg-[var(--color-bg)] p-3 font-mono text-xs space-y-0.5">
+                  {uiLogs.length === 0 ? (
+                    <p className="text-[var(--color-text-muted)]">UI логов пока нет</p>
+                  ) : (
+                    uiLogs.map((entry, i) => (
+                      <div key={i} className="flex gap-2 py-0.5">
+                        <span className="text-[var(--color-text-muted)] flex-shrink-0">
+                          {new Date(entry.timestamp).toLocaleTimeString('ru-RU')}
+                        </span>
+                        <span className={`flex-shrink-0 font-semibold ${
+                          entry.level === 'error' ? 'text-[var(--color-danger)]' :
+                          entry.level === 'warn' ? 'text-[var(--color-warning)]' :
+                          'text-[var(--color-text-secondary)]'
+                        }`}>{entry.level}</span>
+                        <span className="text-[var(--color-text)] break-all">{entry.message}</span>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+        </MacCard>
+      </div>
     </div>
   )
 }

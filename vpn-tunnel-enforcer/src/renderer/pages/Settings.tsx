@@ -176,6 +176,7 @@ export function Settings() {
   const [osNotificationsBlocked, setOsNotificationsBlocked] = useState(false)
   const [ruleSetState, setRuleSetState] = useState<SmartRouteRuleSetState | null>(null)
   const [ruleSetRefreshing, setRuleSetRefreshing] = useState(false)
+  const [adaptiveStatus, setAdaptiveStatus] = useState<{ message: string; mode: string; phase: string } | null>(null)
 
   useEffect(() => {
     ;(async () => {
@@ -198,6 +199,24 @@ export function Settings() {
       }
     })()
   }, [addLog])
+
+  useEffect(() => {
+    let disposed = false
+    const refresh = async () => {
+      try {
+        const status = await window.electronAPI.adaptiveBypassGetStatus()
+        if (!disposed) setAdaptiveStatus(status)
+      } catch {
+        // The setting remains usable when an older main process is running.
+      }
+    }
+    void refresh()
+    const timer = setInterval(() => { void refresh() }, 3000)
+    return () => {
+      disposed = true
+      clearInterval(timer)
+    }
+  }, [])
 
   const handleRefreshRuleSets = async () => {
     setRuleSetRefreshing(true)
@@ -450,6 +469,43 @@ export function Settings() {
           />
 
           <ToggleRow
+            title="Автоподстройка сети"
+            description="Сначала подключается обычно. Если проверка через VPN не проходит, один раз включает совместимый режим и запоминает успешный вариант только на этом компьютере."
+            checked={settings.adaptiveBypassEnabled}
+            onChange={(next) => updateSettings({ adaptiveBypassEnabled: next })}
+          />
+
+          <div className="flex items-center justify-between gap-3 border border-[var(--color-border)] bg-[var(--color-surface-secondary)]/50 px-3 py-2 text-xs text-[var(--color-text-secondary)]">
+            <span>{adaptiveStatus?.message ?? 'Статус автоподстройки недоступен'}</span>
+            <span className="flex shrink-0 items-center gap-3">
+              {adaptiveStatus?.phase === 'failed' && (
+                <button
+                  type="button"
+                  className="text-[var(--color-accent)] hover:underline"
+                  onClick={() => {
+                    window.electronAPI.adaptiveBypassRetry()
+                      .then(() => addLog('info', 'Повторная проверка соединения запущена.'))
+                      .catch((err: any) => addLog('warn', `Не удалось повторить проверку: ${err?.message ?? err}`))
+                  }}
+                >
+                  Повторить
+                </button>
+              )}
+              <button
+                type="button"
+                className="text-[var(--color-accent)] hover:underline"
+                onClick={() => {
+                  window.electronAPI.adaptiveBypassResetLearning()
+                    .then(() => addLog('info', 'Сохранённые настройки совместимости очищены.'))
+                    .catch((err: any) => addLog('warn', `Не удалось очистить настройки совместимости: ${err?.message ?? err}`))
+                }}
+              >
+                Сбросить
+              </button>
+            </span>
+          </div>
+
+          <ToggleRow
             icon={<Eye className="w-4 h-4 text-[var(--color-warning)]" />}
             title="Не делать онлайн-гео lookup в приложении"
             description="Приложение не будет отправлять текущий VPN IP и IP выбранного сервера в ipapi.co, ip-api.com, ipwho.is, ipinfo или iplocation. Это не меняет сайты вроде 2ip.ru: они всё равно видят страну IP, с которого вы к ним заходите. Уже сохранённая страна профиля или страна из имени может остаться как локальная подсказка."
@@ -597,6 +653,14 @@ export function Settings() {
               }
             }}
           />
+
+          <ToggleRow
+            icon={<Wand2 className="w-4 h-4 text-[var(--color-accent)]" />}
+            title="Метаданные сайтов в истории"
+            description="Через активный VPN получает название и описание HTTPS-страницы домена. Результаты хранятся локально; без VPN новые запросы не выполняются."
+            checked={settings.domainEnrichmentEnabled}
+            onChange={(next) => updateSettings({ domainEnrichmentEnabled: next })}
+          />
         </div>
       </MacCard>
 
@@ -720,6 +784,13 @@ export function Settings() {
               }
               checked={settings.autoNetworkBaseline}
               onChange={(next) => updateSettings({ autoNetworkBaseline: next })}
+            />
+
+            <ToggleRow
+              title="Автоперебор соседнего сервера"
+              description="После неудачной проверки совместимого режима Direct VPN может один раз попробовать другой сервер из той же группы. Ручной выбранный сервер не изменяется."
+              checked={settings.adaptiveBypassServerFallback}
+              onChange={(next) => updateSettings({ adaptiveBypassServerFallback: next })}
             />
 
             <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-secondary)]/50 p-4 space-y-4">

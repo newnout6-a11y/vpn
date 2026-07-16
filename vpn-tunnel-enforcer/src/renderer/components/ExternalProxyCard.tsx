@@ -1,14 +1,31 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Globe2, Loader2, Power, RefreshCw, Square } from 'lucide-react'
+import { Globe2, Loader2, Plus, RefreshCw, Square } from 'lucide-react'
 import { MacCard } from '../design-system/MacCard'
 import { MacButton } from '../design-system/MacButton'
 import { useAppStore } from '../store'
-import type { ExternalProxyStatus } from '../../shared/ipc-types'
-
-const CONTROL_PORT = 17873
+import type { ExternalProxyInstanceStatus, ExternalProxyStatus } from '../../shared/ipc-types'
 
 const STOPPED: ExternalProxyStatus = {
+  slot: 1,
   running: false,
+  processRunning: false,
+  ready: false,
+  health: 'stopped',
+  state: 'stopped',
+  generation: 0,
+  egressIp: null,
+  latencyMs: null,
+  lastCheckedAt: null,
+  lastSuccessAt: null,
+  egressCheckedAt: null,
+  updatedAt: null,
+  lastError: null,
+  lastErrorAt: null,
+  degradationReason: null,
+  consecutiveFailures: 0,
+  nextCheckAt: null,
+  lastRotateReason: null,
+  autoDisabled: false,
   host: '127.0.0.1',
   port: null,
   proxyUrl: null,
@@ -16,7 +33,33 @@ const STOPPED: ExternalProxyStatus = {
   profileName: null,
   country: null,
   pid: null,
-  startedAt: null
+  startedAt: null,
+  controlHost: '127.0.0.1',
+  controlPort: null,
+  controlUrl: null,
+  maxInstances: null,
+  instances: [],
+  aggregate: {
+    total: 0,
+    running: 0,
+    ready: 0,
+    healthy: 0,
+    uniqueEgress: 0,
+    duplicateEgress: 0,
+    starting: 0,
+    degraded: 0,
+    quarantined: 0
+  }
+}
+
+type BusyAction = 'start' | 'stop' | 'rotate' | 'stopAll'
+const EXTERNAL_PROXY_CHANGED_EVENT = 'vpnte:external-proxy-changed'
+
+function firstAvailableSlot(instances: ExternalProxyInstanceStatus[]): number {
+  const occupied = new Set(instances.filter((instance) => instance.processRunning).map((instance) => instance.slot))
+  let slot = 1
+  while (occupied.has(slot)) slot += 1
+  return slot
 }
 
 export function ExternalProxyCard() {
@@ -24,166 +67,231 @@ export function ExternalProxyCard() {
   const addGlobalToast = useAppStore(s => s.addGlobalToast)
 
   const [status, setStatus] = useState<ExternalProxyStatus>(STOPPED)
-  const [busy, setBusy] = useState<'start' | 'stop' | 'rotate' | null>(null)
+  const [busy, setBusy] = useState<{ slot: number | 'all'; action: BusyAction } | null>(null)
   const [error, setError] = useState<string | null>(null)
+
+  const instances = status.instances.filter((instance) => instance.processRunning || instance.autoDisabled)
+  const processRunningCount = instances.filter((instance) => instance.processRunning).length
+  const activeCountries = [...new Set(
+    instances
+      .filter((instance) => instance.processRunning)
+      .map((instance) => instance.country)
+      .filter((country): country is string => Boolean(country))
+  )]
+  const countrySummary = activeCountries.length <= 6
+    ? activeCountries.join(', ')
+    : `${activeCountries.slice(0, 6).join(', ')} +${activeCountries.length - 6}`
 
   const refreshStatus = useCallback(async () => {
     try {
       const next = await window.electronAPI.externalProxyStatus()
       setStatus(next ?? STOPPED)
     } catch {
-      // Silent — status poll failures are non-fatal.
+      // Status polling is advisory. Controls surface actionable failures.
     }
   }, [])
 
-  // Initial status read.
   useEffect(() => {
-    refreshStatus()
+    const refreshNow = () => { void refreshStatus() }
+    refreshNow()
+    const id = window.setInterval(refreshNow, 5000)
+    window.addEventListener(EXTERNAL_PROXY_CHANGED_EVENT, refreshNow)
+    return () => {
+      window.clearInterval(id)
+      window.removeEventListener(EXTERNAL_PROXY_CHANGED_EVENT, refreshNow)
+    }
   }, [refreshStatus])
 
-  // Poll every 5s while running so we catch an externally-killed process
-  // (control API, OS, crash) without the user clicking anything.
-  useEffect(() => {
-    if (!status.running) return
-    const id = setInterval(refreshStatus, 5000)
-    return () => clearInterval(id)
-  }, [status.running, refreshStatus])
-
-  const handleStart = async () => {
-    setBusy('start')
+  const runAction = async (slot: number, action: BusyAction) => {
+    setBusy({ slot, action })
     setError(null)
-    addLog('info', 'Внешний прокси: запускаем sing-box…')
     try {
-      const next = await window.electronAPI.externalProxyStart()
-      setStatus(next)
-      if (next.running) {
-        addGlobalToast('success', 'Внешний прокси запущен', next.proxyUrl ?? undefined)
-        addLog('info', `Внешний прокси запущен: ${next.proxyUrl} (${next.profileName ?? '—'})`)
-      }
-    } catch (err: any) {
-      const msg = err?.message || String(err)
-      setError(msg)
-      addGlobalToast('error', 'Не удалось запустить внешний прокси', msg)
-      addLog('error', `Внешний прокси: ошибка запуска — ${msg}`)
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  const handleStop = async () => {
-    setBusy('stop')
-    setError(null)
-    addLog('info', 'Внешний прокси: останавливаем…')
-    try {
-      const next = await window.electronAPI.externalProxyStop()
+      const next = action === 'start'
+        ? await window.electronAPI.externalProxyStart({ slot })
+        : action === 'stop'
+          ? await window.electronAPI.externalProxyStop(slot)
+          : await window.electronAPI.externalProxyRotate(slot)
       setStatus(next ?? STOPPED)
-      addGlobalToast('info', 'Внешний прокси остановлен')
-      addLog('info', 'Внешний прокси остановлен')
+      return next
     } catch (err: any) {
-      const msg = err?.message || String(err)
-      setError(msg)
-      addGlobalToast('error', 'Не удалось остановить внешний прокси', msg)
-      addLog('error', `Внешний прокси: ошибка остановки — ${msg}`)
+      const message = err?.message || String(err)
+      setError(message)
+      addGlobalToast('error', 'Внешний прокси: операция не выполнена', message)
+      addLog('error', `Внешний прокси ${slot}: ${message}`)
+      return null
     } finally {
       setBusy(null)
     }
   }
 
-  const handleRotate = async () => {
-    setBusy('rotate')
+  const handleAdd = async () => {
+    const slot = firstAvailableSlot(instances)
+
+    addLog('info', `Внешний прокси ${slot}: запускаем sing-box`)
+    const next = await runAction(slot, 'start')
+    if (next?.processRunning) {
+      addGlobalToast('success', `Внешний прокси ${slot} запущен`, next.proxyUrl ?? undefined)
+      addLog('info', `Внешний прокси ${slot} запущен: ${next.proxyUrl} (${next.profileName ?? 'без имени'})`)
+    }
+  }
+
+  const handleStop = async (instance: ExternalProxyInstanceStatus) => {
+    addLog('info', `Внешний прокси ${instance.slot}: останавливаем`)
+    const next = await runAction(instance.slot, 'stop')
+    if (next) {
+      addGlobalToast('info', `Внешний прокси ${instance.slot} остановлен`)
+      addLog('info', `Внешний прокси ${instance.slot} остановлен`)
+    }
+  }
+
+  const handleRotate = async (instance: ExternalProxyInstanceStatus) => {
+    addLog('info', `Внешний прокси ${instance.slot}: меняем профиль`)
+    const next = await runAction(instance.slot, 'rotate')
+    if (next?.processRunning) {
+      addGlobalToast('success', `Профиль прокси ${instance.slot} сменён`, next.profileName ?? undefined)
+      addLog('info', `Внешний прокси ${instance.slot}: ${next.profileName ?? 'без имени'}`)
+    }
+  }
+
+  const handleStopAll = async () => {
+    setBusy({ slot: 'all', action: 'stopAll' })
     setError(null)
-    addLog('info', 'Внешний прокси: меняем профиль…')
+    addLog('info', 'Внешние прокси: останавливаем все')
     try {
-      const next = await window.electronAPI.externalProxyRotate()
-      setStatus(next)
-      if (next.running) {
-        addGlobalToast('success', 'Профель сменён', next.profileName ?? undefined)
-        addLog('info', `Внешний прокси: новый профиль — ${next.profileName ?? '—'}`)
-      }
+      const next = await window.electronAPI.externalProxyStopAll()
+      setStatus(next ?? STOPPED)
+      addGlobalToast('info', `Остановлено внешних прокси: ${processRunningCount}`)
+      addLog('info', `Внешние прокси: остановлено ${processRunningCount}`)
     } catch (err: any) {
-      const msg = err?.message || String(err)
-      setError(msg)
-      addGlobalToast('error', 'Не удалось сменить профиль', msg)
-      addLog('error', `Внешний прокси: ошибка ротации — ${msg}`)
+      const message = err?.message || String(err)
+      setError(message)
+      addGlobalToast('error', 'Не удалось остановить все внешние прокси', message)
+      addLog('error', `Внешние прокси: ошибка массовой остановки: ${message}`)
     } finally {
       setBusy(null)
     }
   }
 
-  const running = status.running
   const isBusy = busy !== null
-
   return (
     <MacCard>
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <h3 className="text-sm font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider flex items-center gap-2">
             <Globe2 className="w-4 h-4 text-[var(--color-accent)]" />
-            Внешний прокси
+            Внешние прокси
           </h3>
-          <p className="text-xs text-[var(--color-text-muted)] mt-1">
-            Запускает отдельный sing-box с HTTP/SOCKS прокси для других устройств в локальной сети.
-          </p>
-          <p className={`text-sm mt-1 ${running ? 'text-[var(--color-success)]' : 'text-[var(--color-text-secondary)]'}`}>
-            {running ? 'Запущен' : 'Остановлен'}
-            {running && status.profileName ? ` — ${status.profileName}` : ''}
+          {countrySummary && (
+            <p className="text-xs mt-1 text-[var(--color-text-muted)] truncate" title={activeCountries.join(', ')}>
+              Страны: {countrySummary}
+            </p>
+          )}
+          <p className="text-sm mt-1 text-[var(--color-text-secondary)]">
+            Запущено: {processRunningCount}
           </p>
         </div>
-        <span
-          className={`flex-shrink-0 inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium ${
-            running
-              ? 'bg-[var(--color-success)]/10 text-[var(--color-success)]'
-              : 'bg-[var(--color-bg)] text-[var(--color-text-secondary)]'
-          }`}
-        >
-          <span className={`w-1.5 h-1.5 rounded-full ${running ? 'bg-[var(--color-success)]' : 'bg-[var(--color-text-tertiary)]'}`} />
-          {running ? 'on' : 'off'}
-        </span>
+        <div className="flex items-center gap-2 flex-wrap justify-end">
+          <MacButton
+            variant="danger"
+            size="sm"
+            onClick={handleStopAll}
+            disabled={isBusy || processRunningCount === 0}
+            title="Остановить все внешние прокси"
+          >
+            {busy?.action === 'stopAll' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Square className="w-4 h-4" />}
+            Остановить все
+          </MacButton>
+          <MacButton
+            variant="primary"
+            size="sm"
+            onClick={handleAdd}
+            disabled={isBusy}
+            title="Добавить внешний прокси"
+          >
+            {busy?.action === 'start' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
+            Добавить прокси
+          </MacButton>
+        </div>
       </div>
 
-      {running && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-3">
-          <div className="bg-[var(--color-bg)] border border-[var(--color-border)] rounded-[var(--radius-sm)] px-3 py-2">
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-xs text-[var(--color-text-secondary)]">Proxy URL</span>
-              <span className="text-xs font-mono text-[var(--color-text)]">{status.proxyUrl ?? '—'}</span>
-            </div>
-          </div>
-          <div className="bg-[var(--color-bg)] border border-[var(--color-border)] rounded-[var(--radius-sm)] px-3 py-2">
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-xs text-[var(--color-text-secondary)]">Control API</span>
-              <span className="text-xs font-mono text-[var(--color-text)]">127.0.0.1:{CONTROL_PORT}</span>
-            </div>
-          </div>
+      {instances.length > 0 && (
+        <div className="mt-3 border-y border-[var(--color-border)] divide-y divide-[var(--color-border)]">
+          {instances.map((instance) => {
+            const rowBusy = busy?.slot === instance.slot
+            return (
+              <div key={instance.slot} className="grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-3 py-3">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium text-[var(--color-text)]">Прокси {instance.slot}</span>
+                    <span
+                      className={`inline-flex items-center gap-1.5 text-xs ${
+                        instance.health === 'healthy'
+                          ? 'text-[var(--color-success)]'
+                          : instance.health === 'starting' || instance.health === 'rotating'
+                            ? 'text-[var(--color-warning)]'
+                            : 'text-[var(--color-danger)]'
+                      }`}
+                      title={instance.lastError ?? instance.health}
+                    >
+                      <span
+                        className={`w-1.5 h-1.5 rounded-full ${
+                          instance.health === 'healthy'
+                            ? 'bg-[var(--color-success)]'
+                            : instance.health === 'starting' || instance.health === 'rotating'
+                              ? 'bg-[var(--color-warning)]'
+                              : 'bg-[var(--color-danger)]'
+                        }`}
+                      />
+                      {instance.autoDisabled ? 'disabled' : instance.health}
+                    </span>
+                  </div>
+                  <p className="text-xs text-[var(--color-text-secondary)] truncate mt-0.5">
+                    {instance.profileName ?? 'Без имени'}{instance.country ? `, ${instance.country}` : ''}
+                  </p>
+                  {instance.egressIp && (
+                    <p className="text-xs text-[var(--color-text-muted)] font-mono truncate mt-0.5">
+                      {instance.egressIp}{instance.latencyMs !== null ? `, ${instance.latencyMs} ms` : ''}
+                    </p>
+                  )}
+                </div>
+
+                <span className="text-xs font-mono text-[var(--color-text)] break-all md:text-right">
+                  {instance.proxyUrl ?? '—'}
+                </span>
+
+                <div className="flex items-center gap-1 justify-start md:justify-end">
+                  <MacButton
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => handleRotate(instance)}
+                    disabled={isBusy}
+                    aria-label={`Сменить профиль прокси ${instance.slot}`}
+                    title={`Сменить профиль прокси ${instance.slot}`}
+                  >
+                    {rowBusy && busy?.action === 'rotate' ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+                  </MacButton>
+                  <MacButton
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => handleStop(instance)}
+                    disabled={isBusy}
+                    aria-label={`Остановить прокси ${instance.slot}`}
+                    title={`Остановить прокси ${instance.slot}`}
+                  >
+                    {rowBusy && busy?.action === 'stop' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Square className="w-4 h-4 text-[var(--color-danger)]" />}
+                  </MacButton>
+                </div>
+              </div>
+            )
+          })}
         </div>
       )}
 
-      {error && (
-        <p className="text-xs text-[var(--color-danger)] mt-3 break-words">{error}</p>
-      )}
+      {error && <p className="text-xs text-[var(--color-danger)] mt-3 break-words">{error}</p>}
 
-      <div className="flex flex-wrap gap-2 mt-3">
-        {!running ? (
-          <MacButton variant="primary" size="sm" onClick={handleStart} disabled={isBusy}>
-            {busy === 'start' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Power className="w-4 h-4" />}
-            Запустить
-          </MacButton>
-        ) : (
-          <MacButton variant="danger" size="sm" onClick={handleStop} disabled={isBusy}>
-            {busy === 'stop' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Square className="w-4 h-4" />}
-            Остановить
-          </MacButton>
-        )}
-        <MacButton
-          variant="secondary"
-          size="sm"
-          onClick={handleRotate}
-          disabled={isBusy || !running}
-        >
-          {busy === 'rotate' ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-          Сменить профиль
-        </MacButton>
-      </div>
+      <p className="text-xs text-[var(--color-text-muted)] font-mono mt-3">
+        Control API: {status.controlUrl ?? '—'}
+      </p>
     </MacCard>
   )
 }

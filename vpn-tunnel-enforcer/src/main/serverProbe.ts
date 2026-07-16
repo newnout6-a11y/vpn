@@ -61,6 +61,23 @@ const SERVICE_HINTS: Record<number, string> = {
   53: 'DNS', 21: 'FTP', 25: 'SMTP', 110: 'POP3', 143: 'IMAP', 587: 'SMTP-Submission',
   993: 'IMAPS', 995: 'POP3S'
 }
+const DNS_LOOKUP_TIMEOUT_MS = 2500
+const PROBE_RESULT_TIMEOUT_MS = 9000
+
+function settleWithin<T>(operation: Promise<T>, fallback: T, timeoutMs: number): Promise<T> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(fallback), timeoutMs)
+    void operation
+      .then((result) => {
+        clearTimeout(timer)
+        resolve(result)
+      })
+      .catch(() => {
+        clearTimeout(timer)
+        resolve(fallback)
+      })
+  })
+}
 
 // Probe a single TCP port with short timeout
 function probePort(host: string, port: number, timeoutMs = 1500): Promise<boolean> {
@@ -114,27 +131,21 @@ async function measureLatency(host: string, port = 443, samples = 5): Promise<La
 
 // Resolve hostname to IPs (both v4 and v6)
 async function resolveHost(host: string): Promise<string[]> {
-  const ips: string[] = []
   // If host is already an IP, return it as is
   if (/^\d+\.\d+\.\d+\.\d+$/.test(host) || host.includes(':')) {
     return [host]
   }
-  try {
-    const v4 = await dns.resolve4(host).catch(() => [] as string[])
-    const v6 = await dns.resolve6(host).catch(() => [] as string[])
-    ips.push(...v4, ...v6)
-  } catch {}
-  return ips
+  const [v4, v6] = await Promise.all([
+    settleWithin(dns.resolve4(host), [] as string[], DNS_LOOKUP_TIMEOUT_MS),
+    settleWithin(dns.resolve6(host), [] as string[], DNS_LOOKUP_TIMEOUT_MS)
+  ])
+  return [...v4, ...v6]
 }
 
 // Reverse DNS lookup
 async function reverseDnsLookup(ip: string): Promise<string | null> {
-  try {
-    const names = await dns.reverse(ip)
-    return names.length > 0 ? names[0] : null
-  } catch {
-    return null
-  }
+  const names = await settleWithin(dns.reverse(ip), [] as string[], DNS_LOOKUP_TIMEOUT_MS)
+  return names.length > 0 ? names[0] : null
 }
 
 // Get ASN info from ipapi.co (free, no auth)
@@ -239,8 +250,12 @@ export async function probeServer(host: string, knownPort?: number, options: Pro
 
 export function registerServerProbeIpcHandlers(): void {
   ipcMain.handle('server:probe', async (_event, host: string, knownPort?: number) => {
-    return probeServer(host, knownPort, {
-      disableGeoLookup: settingsStore.get().disableGeoLookup === true
-    })
+    return settleWithin(
+      probeServer(host, knownPort, {
+        disableGeoLookup: settingsStore.get().disableGeoLookup === true
+      }),
+      null as ServerProbeResult | null,
+      PROBE_RESULT_TIMEOUT_MS
+    )
   })
 }

@@ -60,8 +60,8 @@ const IP_ECHO_HOSTS = [
 ]
 
 const RU_IP_ECHO_URLS = [
-  'https://2ip.ru/',
-  'https://yandex.ru/internet/'
+  'https://yandex.ru/internet/',
+  'https://internet.yandex.ru/'
 ] as const
 
 const IPV4_RE = /\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b/g
@@ -208,7 +208,9 @@ export function deriveRoutingVerdict(input: {
  */
 export async function runRoutingSelfTest(): Promise<RoutingSelfTestResult> {
   const tunnelActive = tunController.getStatus().running
-  const smartEnabled = settingsStore.get().smartRuSplit === true
+  const settings = settingsStore.get()
+  const smartEnabled = settings.smartRuSplit === true
+  const disableGeoLookup = settings.disableGeoLookup === true
   const base: RoutingSelfTestResult = {
     ranAt: Date.now(),
     tunnelActive,
@@ -239,7 +241,7 @@ export async function runRoutingSelfTest(): Promise<RoutingSelfTestResult> {
   // only proves direct-out works and used to create false "smart RU ok"
   // confidence, so we return null when no reliable runtime echo is available.
   let ruHostIp: string | null = null
-  if (smartEnabled) {
+  if (smartEnabled && !disableGeoLookup) {
     ruHostIp = await ruEgressIp()
   }
 
@@ -261,7 +263,8 @@ export async function runRoutingSelfTest(): Promise<RoutingSelfTestResult> {
     smartEnabled,
     // Log only the last octet for privacy.
     vpnIpTail: vpnIp ? vpnIp.split('.').slice(-1)[0] : null,
-    directIpTail: directIp ? directIp.split('.').slice(-1)[0] : null
+    directIpTail: directIp ? directIp.split('.').slice(-1)[0] : null,
+    smartRuEchoSkipped: smartEnabled && disableGeoLookup
   })
 
   return result

@@ -8,7 +8,7 @@ describe('Logs source regressions', () => {
   it('clears every persistent log/history/artifact store from the Logs clear action', () => {
     const source = logsSource()
     const handlerStart = source.indexOf('const handleClearLogs = async () =>')
-    const handlerEnd = source.indexOf('const loadRawLogs = async () =>', handlerStart)
+    const handlerEnd = source.indexOf('const loadRawLogs = useCallback(async () =>', handlerStart)
     const handler = source.slice(handlerStart, handlerEnd)
 
     expect(handlerStart).toBeGreaterThanOrEqual(0)
@@ -19,5 +19,19 @@ describe('Logs source regressions', () => {
     expect(handler).toContain('setEntries([])')
     expect(handler).toContain('setRawLogs([])')
     expect(handler).toContain('setStats(null)')
+  })
+
+  it('keeps the raw logs panel visible in a right-hand desktop column without a toggle', () => {
+    const source = logsSource()
+
+    expect(source).toContain("xl:grid-cols-[minmax(0,1fr)_420px]")
+    expect(source).toContain('xl:sticky xl:top-5')
+    expect(source).toContain('const mainLogs = useMemo(() => [...rawLogs].reverse(), [rawLogs])')
+    expect(source).toContain('const uiLogs = useMemo(() => [...rendererLogs].slice(-100).reverse(), [rendererLogs])')
+    expect(source).toContain('<FileText size={12} className="text-[var(--color-accent)]" />')
+    expect(source).toContain('<Activity size={12} className="text-[var(--color-accent)]" />')
+    expect(source).not.toContain('showRawLogs')
+    expect(source).not.toContain('Показать логи')
+    expect(source).not.toContain('Скрыть логи')
   })
 })

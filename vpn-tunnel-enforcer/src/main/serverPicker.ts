@@ -36,6 +36,7 @@ import {
 } from './vpnProfiles'
 import { settingsStore } from './settings'
 import { tunController } from './tunController'
+import { beginAdaptiveConnection } from './adaptiveBypass'
 import { ipMonitor } from './ipMonitor'
 import {
   serverGroups,
@@ -45,6 +46,10 @@ import {
   refreshGroup as refreshSubscriptionGroup
 } from './serverGroups'
 import type { ClientDevice, ServerProfile } from '../shared/ipc-types'
+
+const RESOLVED_IP_TTL_MS = 5 * 60_000
+const DNS_RESOLUTION_TIMEOUT_MS = 2500
+const resolvedIpCache = new Map<string, { ip: string | null; resolvedAt: number }>()
 
 // `execFile` is what we want for the stealth-curl probe — argv-style
 // invocation avoids any shell-quoting issues with hostnames or query
@@ -168,6 +173,14 @@ const TUNNEL_PROBE_URL_TIMEOUT_MS = 4000
 // sweet spot between "give a slow link a chance" and "don't make the UI
 // hang on dead servers".
 const ICMP_PROBE_TIMEOUT_MS = 1500
+const PHYSICAL_SOURCE_CACHE_MS = 60_000
+
+interface PhysicalIpv4Source {
+  alias: string
+  ipv4: string
+}
+
+let physicalSourceCache: { value: PhysicalIpv4Source[]; at: number } | null = null
 
 // ─── Ping Measurement ────────────────────────────────────────────────────────
 
@@ -317,6 +330,15 @@ export async function smartOfflinePing(host: string, port: number): Promise<numb
   // Rung order is chosen so the number the user sees reflects REAL endpoint
   // reachability under RU conditions, not a meaningless router echo.
   //
+  // 0. Try Windows ping forced through a physical IPv4 source address. This
+  //    bypasses cases where an always-on VPN or local proxy hijacks the
+  //    default route even while our own tunnel is off. If a real physical
+  //    adapter can reach the endpoint, this gives us the direct RTT the user
+  //    expects when they ask for "ping without VPN".
+  const directPhysical = await physicalSourcePing(host)
+  if (directPhysical != null) return directPhysical
+
+  //
   // 1. TCP-connect to the actual VPN port. This is the strongest cheap
   //    signal: it proves the VPN endpoint accepts a connection from THIS
   //    network. If TSPU has IP-blackholed the server (the common RU failure),
@@ -349,6 +371,88 @@ export async function smartOfflinePing(host: string, port: number): Promise<numb
   if (icmp != null) return icmp
 
   return null
+}
+
+async function physicalSourcePing(host: string): Promise<number | null> {
+  if (process.platform !== 'win32') return null
+  if (!isProbablyHostOrIp(host)) return null
+  if (host.includes(':')) return null
+
+  const sources = await getPhysicalIpv4Sources()
+  for (const source of sources) {
+    const ping = await pingFromSource(source.ipv4, host, ICMP_PROBE_TIMEOUT_MS)
+    if (ping != null) return ping
+  }
+  return null
+}
+
+async function getPhysicalIpv4Sources(): Promise<PhysicalIpv4Source[]> {
+  if (process.platform !== 'win32') return []
+  if (physicalSourceCache && Date.now() - physicalSourceCache.at < PHYSICAL_SOURCE_CACHE_MS) {
+    return physicalSourceCache.value
+  }
+
+  const script = `
+[Console]::OutputEncoding=[System.Text.Encoding]::UTF8
+$OutputEncoding=[System.Text.Encoding]::UTF8
+$ProgressPreference='SilentlyContinue'
+$ErrorActionPreference='SilentlyContinue'
+$rows = @()
+$adapters = Get-NetAdapter | Where-Object {
+  $_.Status -eq 'Up' -and
+  $_.InterfaceDescription -notmatch 'Wintun|TAP-Windows|Tailscale|WireGuard|Hyper-V|Loopback|vEthernet|VPN|VirtualBox|VMware|Bluetooth' -and
+  $_.MacAddress -and $_.MacAddress -ne '00-00-00-00-00-00'
+}
+foreach ($a in $adapters) {
+  $cfg = Get-NetIPConfiguration -InterfaceIndex $a.ifIndex -ErrorAction SilentlyContinue
+  if ($cfg -and $cfg.IPv4Address -and $cfg.IPv4Address.Count -gt 0) {
+    foreach ($ip in $cfg.IPv4Address) {
+      if ($ip.IPAddress -and $ip.IPAddress -notlike '169.254.*') {
+        $rows += [pscustomobject]@{ Alias = $a.Name; Ipv4 = $ip.IPAddress }
+      }
+    }
+  }
+}
+$rows | ConvertTo-Json -Compress
+`
+
+  try {
+    const { stdout } = await execFile(
+      'powershell.exe',
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')],
+      { windowsHide: true, timeout: 12000, encoding: 'buffer', maxBuffer: 64 * 1024 }
+    )
+    const text = decodeMaybeCp866(stdout as unknown as Buffer).trim()
+    if (!text || text === 'null') return []
+    const parsed = JSON.parse(text)
+    const arr = Array.isArray(parsed) ? parsed : [parsed]
+    const value = arr
+      .map((row: any) => ({
+        alias: String(row?.Alias ?? ''),
+        ipv4: String(row?.Ipv4 ?? '')
+      }))
+      .filter((row: PhysicalIpv4Source) => row.alias && /^\d+\.\d+\.\d+\.\d+$/.test(row.ipv4))
+    physicalSourceCache = { value, at: Date.now() }
+    return value
+  } catch {
+    physicalSourceCache = { value: [], at: Date.now() }
+    return []
+  }
+}
+
+export async function pingFromSource(sourceIp: string, host: string, timeoutMs: number): Promise<number | null> {
+  if (!isProbablyHostOrIp(host)) return null
+  try {
+    const { stdout } = await execFile(
+      'ping.exe',
+      ['-n', '1', '-w', String(Math.max(1, Math.floor(timeoutMs))), '-S', sourceIp, host],
+      { windowsHide: true, timeout: timeoutMs + 1500, encoding: 'buffer', maxBuffer: 64 * 1024 }
+    )
+    const text = decodeMaybeCp866(stdout as unknown as Buffer)
+    return parseIcmpReply(text, host)
+  } catch {
+    return null
+  }
 }
 
 /**
@@ -675,19 +779,38 @@ export async function pingAll(): Promise<ServerProfile[]> {
  * we don't want geolocation hiccups to throw out of the picker pipeline.
  */
 async function resolveHostIp(host: string): Promise<string | null> {
-  if (!host) return null
+  const cleanHost = host.trim()
+  if (!cleanHost) return null
   // Already an IPv4 — skip DNS.
-  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(host)) return host
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(cleanHost)) return cleanHost
+  const cached = resolvedIpCache.get(cleanHost)
+  if (cached && Date.now() - cached.resolvedAt < RESOLVED_IP_TTL_MS) return cached.ip
+  const remember = (ip: string | null) => {
+    resolvedIpCache.set(cleanHost, { ip, resolvedAt: Date.now() })
+    return ip
+  }
+  const withTimeout = <T>(promise: Promise<T>, fallback: T): Promise<T> =>
+    new Promise<T>((resolve) => {
+      const timer = setTimeout(() => resolve(fallback), DNS_RESOLUTION_TIMEOUT_MS)
+      void promise.then((value) => {
+        clearTimeout(timer)
+        resolve(value)
+      }).catch(() => {
+        clearTimeout(timer)
+        resolve(fallback)
+      })
+    })
   try {
-    const records = await dns.resolve4(host)
-    return records[0] || null
+    const records = await withTimeout(dns.resolve4(cleanHost), [] as string[])
+    if (records[0]) return remember(records[0])
   } catch {
-    try {
-      const lookup = await dns.lookup(host, { family: 4 })
-      return lookup.address || null
-    } catch {
-      return null
-    }
+    // Fall through to the system resolver.
+  }
+  try {
+    const lookup = await withTimeout(dns.lookup(cleanHost, { family: 4 }), null)
+    return remember(lookup?.address || null)
+  } catch {
+    return remember(null)
   }
 }
 
@@ -699,13 +822,51 @@ async function resolveHostIp(host: string): Promise<string | null> {
 async function resolveHostsToIps(hosts: string[]): Promise<Map<string, string>> {
   const out = new Map<string, string>()
   const unique = [...new Set(hosts.filter(Boolean))]
-  const CONCURRENCY = 8
-  for (let i = 0; i < unique.length; i += CONCURRENCY) {
-    const batch = unique.slice(i, i + CONCURRENCY)
-    const ips = await Promise.all(batch.map(h => resolveHostIp(h)))
-    batch.forEach((h, idx) => { if (ips[idx]) out.set(h, ips[idx] as string) })
+  const CONCURRENCY = 24
+  let next = 0
+  const worker = async () => {
+    while (next < unique.length) {
+      const host = unique[next++]
+      const ip = await resolveHostIp(host)
+      if (ip) out.set(host, ip)
+    }
   }
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, unique.length) }, worker))
   return out
+}
+
+async function profilesForDisplay(profiles: ServerProfile[]): Promise<ServerProfile[]> {
+  const hosts = [...new Set(profiles.map((profile) => profile.server.trim()).filter(Boolean))]
+  const ips = await resolveHostsToIps(hosts)
+  const now = Date.now()
+  return profiles.map((profile) => {
+    const resolvedIp = /^\d{1,3}(?:\.\d{1,3}){3}$/.test(profile.server)
+      ? profile.server
+      : ips.get(profile.server.trim()) ?? profile.resolvedIp
+    if (!resolvedIp) return profile
+    if (profile.resolvedIp === resolvedIp && profile.resolvedIpAt) return profile
+    return { ...profile, resolvedIp, resolvedIpAt: now }
+  })
+}
+
+let resolveIpsInFlight: Promise<ServerProfile[]> | null = null
+
+async function resolveAndPersistProfileIps(): Promise<ServerProfile[]> {
+  if (resolveIpsInFlight) return resolveIpsInFlight
+  resolveIpsInFlight = (async () => {
+  const profiles = getProfiles()
+  const enriched = await profilesForDisplay(profiles)
+  const changed = enriched.some((profile, index) =>
+    profile.resolvedIp !== profiles[index]?.resolvedIp
+  )
+  if (changed) saveProfiles(enriched)
+  return enriched
+  })()
+  try {
+    return await resolveIpsInFlight
+  } finally {
+    resolveIpsInFlight = null
+  }
 }
 
 interface GeoVote {
@@ -1568,6 +1729,12 @@ async function restartDirectVpnForSelectedProfile(profile: ServerProfile): Promi
 
   const settings = settingsStore.get()
   const vpnProfile = toVpnProfile(profile)
+  const adaptive = beginAdaptiveConnection({
+    enabled: settings.adaptiveBypassEnabled,
+    legacyStealthMode: settings.stealthMode,
+    mode: 'directVpn',
+    profile: vpnProfile
+  })
   const previousIp = await ipMonitor.getCurrentIp().then((info) => info.ip).catch(() => null)
   logEvent('info', 'server-picker', 'hot-reloading direct VPN after profile selection', {
     id: profile.id,
@@ -1587,7 +1754,8 @@ async function restartDirectVpnForSelectedProfile(profile: ServerProfile): Promi
     enableFirewallKillSwitch: settings.firewallKillSwitch,
     enableAdapterLockdown: settings.strictAdapterLockdown,
     publicWifiCompatibility: settings.publicWifiCompatibility,
-    stealthMode: settings.stealthMode
+    stealthMode: settings.stealthMode,
+    adaptiveMode: adaptive.mode
   })
   if (!started.success) {
     throw new Error(started.error || 'Failed to start tunnel with selected server')
@@ -2052,6 +2220,10 @@ export function registerServerPickerHandlers(): void {
 
   handleLogged('servers:ping-all', async () => {
     return await pingAll()
+  })
+
+  handleLogged('servers:resolve-ips', async () => {
+    return await resolveAndPersistProfileIps()
   })
 
   // Ping a single host:port. Used by the dashboard "ping selected" button to
