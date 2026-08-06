@@ -203,6 +203,14 @@ describe('generateSingboxConfig port selection', () => {
   })
 })
 
+describe('generateSingboxConfig runtime logging', () => {
+  it('keeps Traffic History events at info without enabling debug-volume logs', () => {
+    const cfg = gen({ outbound: { ...plainTlsOutbound } }) as any
+
+    expect(cfg.log).toMatchObject({ level: 'info', timestamp: true })
+  })
+})
+
 // ─── DNS bootstrap ────────────────────────────────────────────────────────────
 
 describe('generateSingboxConfig DNS bootstrap', () => {

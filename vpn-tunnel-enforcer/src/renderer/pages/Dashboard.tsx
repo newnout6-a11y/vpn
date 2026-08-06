@@ -38,6 +38,31 @@ function formatUptime(ms: number): string {
   return `${seconds} с`
 }
 
+function UptimeLabel({ startedAt }: { startedAt: number }) {
+  const [now, setNow] = useState(() => Date.now())
+
+  useEffect(() => {
+    const updateNow = () => setNow(Date.now())
+    const id = window.setInterval(() => {
+      if (!document.hidden) updateNow()
+    }, 1000)
+
+    updateNow()
+    document.addEventListener('visibilitychange', updateNow)
+    return () => {
+      window.clearInterval(id)
+      document.removeEventListener('visibilitychange', updateNow)
+    }
+  }, [startedAt])
+
+  return (
+    <span className="flex items-center gap-1.5 rounded-full bg-[var(--color-bg)] px-3 py-1.5 text-[var(--color-text-secondary)]">
+      <Clock className="w-3.5 h-3.5 text-[var(--color-accent)]" />
+      {formatUptime(now - startedAt)}
+    </span>
+  )
+}
+
 function formatSpeed(bytesPerSecond: number): string {
   const bits = Math.max(0, bytesPerSecond * 8)
   if (bits < 1_000_000) return `${Math.round(bits / 1_000)} Kbps`
@@ -130,14 +155,6 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
   const [ipGeo, setIpGeo] = useState<{ country: string | null; city: string | null }>({ country: null, city: null })
   const [confirmDisconnect, setConfirmDisconnect] = useState(false)
   const transitionSeqRef = useRef(0)
-
-  // Uptime ticker
-  const [now, setNow] = useState(() => Date.now())
-  useEffect(() => {
-    if (!tunRunning || !tunStartedAt) return
-    const id = setInterval(() => setNow(Date.now()), 1000)
-    return () => clearInterval(id)
-  }, [tunRunning, tunStartedAt])
 
   // Fetch country/city for the current public IP via ipapi.co
   // Only after VPN IP is confirmed — avoids geolocating the user's real IP.
@@ -645,8 +662,9 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
           {isConnected && !isServerSwitching && (
             <motion.div
               className="absolute inset-0 rounded-full bg-[var(--color-success)]"
-              animate={{ scale: [1, 1.15, 1], opacity: [0.5, 0, 0.5] }}
-              transition={{ duration: 2, repeat: Infinity, ease: 'easeOut' }}
+              initial={{ scale: 1, opacity: 0.35 }}
+              animate={{ scale: 1.12, opacity: 0 }}
+              transition={{ duration: 0.6, ease: 'easeOut' }}
             />
           )}
           <div className="relative z-10">
@@ -732,12 +750,7 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
               <Upload className="w-3.5 h-3.5 text-[var(--color-accent)]" />
               ↑ <span className="font-mono">{formatSpeed(traffic.uploadBps)}</span>
             </span>
-            {tunStartedAt && (
-              <span className="flex items-center gap-1.5 rounded-full bg-[var(--color-bg)] px-3 py-1.5 text-[var(--color-text-secondary)]">
-                <Clock className="w-3.5 h-3.5 text-[var(--color-accent)]" />
-                {formatUptime(now - tunStartedAt)}
-              </span>
-            )}
+            {tunStartedAt && <UptimeLabel startedAt={tunStartedAt} />}
             <span className="flex items-center gap-1.5 rounded-full bg-[var(--color-bg)] px-3 py-1.5 text-[var(--color-text-secondary)]">
               {t('dashboard.trafficDown')}: <span className="font-mono">{formatBytes(traffic.sessionDownloadBytes)}</span>
               {' / '}

@@ -2,13 +2,13 @@
  * Capture every piece of network state we'd want to see when debugging "the
  * app says VPN is up but my browser still shows real IP". This is the
  * single thing the user can hand to support — it captures EVERYTHING and is
- * cheap to run frequently.
+ * expensive enough to rate-limit periodic collection.
  *
  * Capture triggers:
  *   - app start (one-shot)
  *   - immediately before TUN start (so we can compare to "after")
  *   - immediately after TUN start
- *   - every 60s while TUN is running (rolling)
+ *   - every 5 minutes while TUN is running (rolling)
  *   - manually when the user clicks "Send logs"
  *
  * Output: %APPDATA%/<app>/snapshots/snapshot-<ISO ts>-<reason>.json
@@ -33,6 +33,7 @@ const exec = promisify(execCb)
 
 const SNAPSHOTS_DIRNAME = 'snapshots'
 const MAX_SNAPSHOTS_RETAINED = 60
+export const PERIODIC_SNAPSHOT_INTERVAL_MS = 5 * 60_000
 
 export type SnapshotReason =
   | 'app-start'
@@ -144,8 +145,8 @@ const PS_EMPTY_MARKER = '__VPNTE_EMPTY__'
  * to 'Continue' so non-terminating errors are also tolerated.
  *
  * This replaces the old pattern of ~14 separate tryPS() calls (each spawning
- * its own powershell.exe) — at 60s periodic intervals that was ~900 PS
- * spawns/hour. Now it's 1 spawn per snapshot.
+ * its own powershell.exe). One full capture is still expensive, so periodic
+ * captures are rate-limited to no more than once every five minutes.
  */
 function buildCombinedPSScript(): string {
   const proxyBlock = (port: number) => `
@@ -355,7 +356,7 @@ async function capturePlatformDumps(): Promise<Partial<SystemSnapshot>> {
  * Take one snapshot. Always succeeds (errors are recorded as fields).
  * Returns the absolute path of the file written, or null if writing failed.
  */
-export async function captureSnapshot(reason: SnapshotReason): Promise<string | null> {
+async function captureSnapshotNow(reason: SnapshotReason): Promise<string | null> {
   const ts = new Date().toISOString().replace(/[:.]/g, '-')
   const fileName = `snapshot-${ts}-${reason}.json`
 
@@ -407,7 +408,8 @@ export async function captureSnapshot(reason: SnapshotReason): Promise<string | 
 /**
  * Keep the snapshots directory bounded. We retain the latest
  * MAX_SNAPSHOTS_RETAINED files; older ones are deleted. This is critical
- * because the periodic snapshot runs every 60s and would otherwise eat disk.
+ * because periodic snapshots are retained for diagnostics and would otherwise
+ * eat disk over a long-running session.
  */
 async function pruneOldSnapshots(): Promise<void> {
   try {
@@ -438,12 +440,47 @@ async function pruneOldSnapshots(): Promise<void> {
 }
 
 let periodicTimer: ReturnType<typeof setInterval> | null = null
+let snapshotCaptureQueue: Promise<void> = Promise.resolve()
+let pendingSnapshotCaptures = 0
 
-export function startPeriodicSnapshots(intervalMs = 60_000): void {
+/**
+ * Serialize all snapshots so a manual or error capture cannot overlap the
+ * PowerShell collection already in progress. Periodic ticks are best-effort:
+ * they are skipped while any capture is queued instead of building a backlog.
+ */
+export function captureSnapshot(reason: SnapshotReason): Promise<string | null> {
+  if (reason === 'periodic' && pendingSnapshotCaptures > 0) {
+    logEvent('debug', 'snapshot', 'skipped periodic snapshot while capture is in progress')
+    return Promise.resolve(null)
+  }
+
+  pendingSnapshotCaptures += 1
+  const capture = snapshotCaptureQueue.then(() => captureSnapshotNow(reason))
+  snapshotCaptureQueue = capture.then(
+    () => undefined,
+    () => undefined
+  )
+  void capture.then(
+    () => { pendingSnapshotCaptures -= 1 },
+    () => { pendingSnapshotCaptures -= 1 }
+  )
+  return capture
+}
+
+export function startPeriodicSnapshots(intervalMs = PERIODIC_SNAPSHOT_INTERVAL_MS): void {
   stopPeriodicSnapshots()
+  const effectiveIntervalMs = Number.isFinite(intervalMs)
+    ? Math.max(PERIODIC_SNAPSHOT_INTERVAL_MS, Math.floor(intervalMs))
+    : PERIODIC_SNAPSHOT_INTERVAL_MS
+  if (effectiveIntervalMs !== intervalMs) {
+    logEvent('debug', 'snapshot', 'raised periodic snapshot interval to safe minimum', {
+      requestedIntervalMs: intervalMs,
+      effectiveIntervalMs
+    })
+  }
   periodicTimer = setInterval(() => {
     captureSnapshot('periodic').catch(() => undefined)
-  }, intervalMs)
+  }, effectiveIntervalMs)
 }
 
 export function stopPeriodicSnapshots(): void {

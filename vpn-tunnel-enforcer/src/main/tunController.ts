@@ -891,7 +891,10 @@ export function generateSingboxConfig(
       : []
 
   return {
-    log: { level: 'debug', timestamp: true, output: logPath },
+    // Keep connection and DNS events for Traffic History, but avoid the
+    // per-packet DEBUG flood that can make the renderer repeatedly parse
+    // multi-megabyte runtime logs.
+    log: { level: 'info', timestamp: true, output: logPath },
     dns: {
       // sing-box 1.13.x rejects `detour: direct-out` on DNS servers when the
       // direct outbound has no explicit override/bind options ("detour to an

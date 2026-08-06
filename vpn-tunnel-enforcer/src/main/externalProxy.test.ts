@@ -312,7 +312,37 @@ describe('external proxy slots', () => {
     await externalProxy.stop(1, 'test cleanup')
   })
 
-  it('restarts a slot after three confirmed transport failures with backoff', async () => {
+  it('does not let repeated runtime timeouts bypass a degraded route cooldown', async () => {
+    vi.useFakeTimers()
+    let started = false
+    try {
+      const profile = sampleProfile()
+      vi.mocked(serverPicker.getProfiles).mockReturnValue([profile])
+      spawnMock.mockClear()
+      probeExternalProxyMock.mockReset()
+      spawnMock.mockImplementation((_exe: string, args: string[]) => fakeChild(32550, args[0] === 'check'))
+      probeExternalProxyMock.mockRejectedValue(new Error('ConnectTimeout after 10000ms'))
+
+      await externalProxy.start({ slot: 1, port: 17990, action: 'start' })
+      started = true
+      await checkExternalProxyHealth(1)
+
+      const runCall = spawnMock.mock.calls.findIndex(([, args]) => args[0] === 'run')
+      const child = spawnMock.mock.results[runCall]?.value as ReturnType<typeof fakeChild>
+      for (let index = 0; index < 20; index += 1) {
+        child.stderr.emit('data', 'context deadline exceeded')
+      }
+
+      expect(probeExternalProxyMock).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(14_999)
+      expect(probeExternalProxyMock).toHaveBeenCalledTimes(1)
+    } finally {
+      if (started) await externalProxy.stop(1, 'test cleanup')
+      vi.useRealTimers()
+    }
+  })
+
+  it('uses an exponential cooldown without restarting a dead route', async () => {
     vi.useFakeTimers()
     let started = false
     try {
@@ -329,15 +359,17 @@ describe('external proxy slots', () => {
       await checkExternalProxyHealth(1)
       await checkExternalProxyHealth(1)
 
-      const runningBeforeRecovery = spawnMock.mock.calls.filter(([, args]) => args[0] === 'run').length
-      expect(runningBeforeRecovery).toBe(1)
+      const degraded = externalProxy.status(1)
+      expect(degraded).toMatchObject({
+        processRunning: true,
+        health: 'degraded',
+        consecutiveFailures: 3
+      })
+      expect(degraded.nextCheckAt).toEqual(expect.any(String))
 
-      await vi.advanceTimersByTimeAsync(2_000)
-      await Promise.resolve()
-      await Promise.resolve()
+      await vi.advanceTimersByTimeAsync(59_999)
 
-      const runningAfterRecovery = spawnMock.mock.calls.filter(([, args]) => args[0] === 'run').length
-      expect(runningAfterRecovery).toBe(2)
+      expect(spawnMock.mock.calls.filter(([, args]) => args[0] === 'run')).toHaveLength(1)
 
     } finally {
       if (started) await externalProxy.stop(1, 'test cleanup')
@@ -345,7 +377,7 @@ describe('external proxy slots', () => {
     }
   })
 
-  it('disables a slot after the bounded recovery budget is exhausted', async () => {
+  it('disables a slot after the bounded health-failure budget without restarting it', async () => {
     vi.useFakeTimers()
     let started = false
     try {
@@ -358,21 +390,11 @@ describe('external proxy slots', () => {
 
       await externalProxy.start({ slot: 1, port: 17990, action: 'start' })
       started = true
-      const failThreeChecks = async () => {
-        await checkExternalProxyHealth(1)
-        await checkExternalProxyHealth(1)
-        await checkExternalProxyHealth(1)
-      }
-
-      await failThreeChecks()
-      await vi.advanceTimersByTimeAsync(2_000)
-      await failThreeChecks()
-      await vi.advanceTimersByTimeAsync(5_000)
-      await failThreeChecks()
-      await vi.advanceTimersByTimeAsync(10_000)
-      await failThreeChecks()
-      await Promise.resolve()
-      await Promise.resolve()
+      await checkExternalProxyHealth(1)
+      await checkExternalProxyHealth(1)
+      await checkExternalProxyHealth(1)
+      await checkExternalProxyHealth(1)
+      await vi.advanceTimersByTimeAsync(0)
 
       const disabled = externalProxy.status(1)
       expect(disabled).toMatchObject({
@@ -383,6 +405,7 @@ describe('external proxy slots', () => {
         profileId: profile.id
       })
       expect(disabled.lastError).toContain('EOF')
+      expect(spawnMock.mock.calls.filter(([, args]) => args[0] === 'run')).toHaveLength(1)
     } finally {
       if (started) await externalProxy.stop(1, 'test cleanup')
       vi.useRealTimers()

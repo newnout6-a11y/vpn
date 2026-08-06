@@ -3,6 +3,9 @@ import { useAppStore, type LeakSelfTestResultClient } from '../store'
 import { AlertTriangle, CheckCircle2, FileArchive, FolderOpen, Loader2, Radar, RefreshCw, Send, ShieldAlert } from 'lucide-react'
 import { MacCard, MacButton } from '../design-system'
 
+const FORENSICS_RUNNING_POLL_INTERVAL_MS = 10_000
+const FORENSICS_IDLE_POLL_INTERVAL_MS = 30_000
+
 /**
  * The "everything you need to debug a not-working app" surface.
  *
@@ -35,20 +38,32 @@ export function DiagnosticsCard() {
   }
 
   useEffect(() => {
-    let mounted = true
+    let cancelled = false
+    let timeout: number | null = null
+
+    const scheduleNext = (running: boolean) => {
+      timeout = window.setTimeout(
+        checkStatus,
+        running ? FORENSICS_RUNNING_POLL_INTERVAL_MS : FORENSICS_IDLE_POLL_INTERVAL_MS
+      )
+    }
+
     const checkStatus = async () => {
       try {
         const status = await window.electronAPI.getTrafficForensicsStatus()
-        if (mounted) setForensicsStatus(status)
+        if (cancelled) return
+        setForensicsStatus(status)
+        scheduleNext(Boolean(status?.running))
       } catch (err) {
         // Status is best-effort UI telemetry; the export button remains usable.
+        if (!cancelled) scheduleNext(false)
       }
     }
-    checkStatus()
-    const interval = setInterval(checkStatus, 3000)
+
+    void checkStatus()
     return () => {
-      mounted = false
-      clearInterval(interval)
+      cancelled = true
+      if (timeout) window.clearTimeout(timeout)
     }
   }, [])
 

@@ -161,10 +161,6 @@ export interface StartExternalProxyOptions {
   rotateReason?: string | null
 }
 
-interface InternalStartExternalProxyOptions extends StartExternalProxyOptions {
-  automaticRecovery?: boolean
-}
-
 interface StopExternalProxyOptions {
   preserveHealth?: boolean
   preserveMetadata?: boolean
@@ -199,11 +195,12 @@ interface ExternalProxyHealthState {
   lastSuccessAt: number | null
   lastError: string | null
   consecutiveFailures: number
-  restartAttempts: number
   checkPromise: Promise<void> | null
   checkTimer: ReturnType<typeof setTimeout> | null
-  restartTimer: ReturnType<typeof setTimeout> | null
+  autoDisableTimer: ReturnType<typeof setTimeout> | null
   lastTransportSignalAt: number
+  lastRuntimeLogAt: number
+  suppressedRuntimeLogs: number
   nextCheckAt: number | null
 }
 
@@ -235,12 +232,15 @@ const EXTERNAL_PROXY_DNS_TAG = 'dns-bootstrap'
 const EXTERNAL_PROXY_DNS_STRATEGY = 'ipv4_only'
 const ENDPOINT_RESOLUTION_TTL_MS = 5 * 60_000
 const ENDPOINT_RESOLUTION_TIMEOUT_MS = 2_500
-const HEALTH_CHECK_CONCURRENCY = 5
+const HEALTH_CHECK_CONCURRENCY = 3
 const HEALTH_CHECK_INTERVAL_MS = 60_000
 const HEALTH_CHECK_INITIAL_DELAY_MS = 750
-const HEALTH_CHECK_RETRY_DELAY_MS = 5_000
-const HEALTH_FAILURE_RESTART_THRESHOLD = 3
-const HEALTH_RECOVERY_BACKOFF_MS = [2_000, 5_000, 10_000] as const
+const HEALTH_FAILURE_COOLDOWN_MS = [15_000, 30_000, 60_000] as const
+const HEALTH_FAILURE_AUTO_DISABLE_THRESHOLD = HEALTH_FAILURE_COOLDOWN_MS.length + 1
+const HEALTH_LEASED_RECHECK_MS = 5 * 60_000
+const TRANSPORT_SIGNAL_MIN_INTERVAL_MS = 30_000
+const TRANSPORT_SIGNAL_PROBE_DELAY_MS = 15_000
+const RUNTIME_WARNING_LOG_INTERVAL_MS = 30_000
 
 const healthCheckQueue: HealthCheckJob[] = []
 let activeHealthChecks = 0
@@ -293,11 +293,12 @@ function stateForSlot(slot: number): ExternalProxyState {
       lastSuccessAt: null,
       lastError: null,
       consecutiveFailures: 0,
-      restartAttempts: 0,
       checkPromise: null,
       checkTimer: null,
-      restartTimer: null,
-      lastTransportSignalAt: 0,
+      autoDisableTimer: null,
+      lastTransportSignalAt: Number.NEGATIVE_INFINITY,
+      lastRuntimeLogAt: Number.NEGATIVE_INFINITY,
+      suppressedRuntimeLogs: 0,
       nextCheckAt: null
     },
     lifecycle: 'stopped',
@@ -1060,6 +1061,22 @@ function markExternalProxyProcessFailure(state: ExternalProxyState, message: str
   touchExternalProxyState(state)
 }
 
+function logExternalProxyRuntimeWarning(state: ExternalProxyState, message: string): void {
+  const now = Date.now()
+  if (now - state.health.lastRuntimeLogAt < RUNTIME_WARNING_LOG_INTERVAL_MS) {
+    state.health.suppressedRuntimeLogs += 1
+    return
+  }
+
+  const suppressedRuntimeLogs = state.health.suppressedRuntimeLogs
+  state.health.lastRuntimeLogAt = now
+  state.health.suppressedRuntimeLogs = 0
+  logEvent('warn', 'external-proxy', message, {
+    slot: state.slot,
+    ...(suppressedRuntimeLogs > 0 ? { suppressedRuntimeLogs } : {})
+  })
+}
+
 async function startExternalProxyProcessUnlocked(
   state: ExternalProxyState,
   profile: ServerProfile,
@@ -1098,10 +1115,14 @@ async function startExternalProxyProcessUnlocked(
       })
     })
 
-    proc.stdout.on('data', (chunk) => logEvent('debug', 'external-proxy', String(chunk).trim()))
+    proc.stdout.on('data', (chunk) => {
+      const message = String(chunk).trim()
+      if (message) logEvent('debug', 'external-proxy', message, { slot: state.slot })
+    })
     proc.stderr.on('data', (chunk) => {
       const message = String(chunk).trim()
-      logEvent('warn', 'external-proxy', message, { slot: state.slot })
+      if (!message) return
+      logExternalProxyRuntimeWarning(state, message)
       recordExternalProxyTransportSignal(state.slot, message)
     })
     proc.once('error', (error) => {
@@ -1135,9 +1156,9 @@ function clearExternalProxyHealthTimers(state: ExternalProxyState): void {
     clearTimeout(state.health.checkTimer)
     state.health.checkTimer = null
   }
-  if (state.health.restartTimer) {
-    clearTimeout(state.health.restartTimer)
-    state.health.restartTimer = null
+  if (state.health.autoDisableTimer) {
+    clearTimeout(state.health.autoDisableTimer)
+    state.health.autoDisableTimer = null
   }
 }
 
@@ -1146,8 +1167,7 @@ function invalidateExternalProxyHealthWork(state: ExternalProxyState): void {
   state.health.checkPromise = null
 }
 
-function beginExternalProxyHealthRun(state: ExternalProxyState, preserveRecoveryAttempts: boolean): void {
-  const restartAttempts = preserveRecoveryAttempts ? state.health.restartAttempts : 0
+function beginExternalProxyHealthRun(state: ExternalProxyState): void {
   invalidateExternalProxyHealthWork(state)
   state.autoDisabled = false
   state.health = {
@@ -1158,11 +1178,12 @@ function beginExternalProxyHealthRun(state: ExternalProxyState, preserveRecovery
     lastSuccessAt: null,
     lastError: null,
     consecutiveFailures: 0,
-    restartAttempts,
     checkPromise: null,
     checkTimer: null,
-    restartTimer: null,
-    lastTransportSignalAt: 0,
+    autoDisableTimer: null,
+    lastTransportSignalAt: Number.NEGATIVE_INFINITY,
+    lastRuntimeLogAt: Number.NEGATIVE_INFINITY,
+    suppressedRuntimeLogs: 0,
     nextCheckAt: null
   }
   state.degradationReason = null
@@ -1192,85 +1213,58 @@ function completeHealthCheckJob(job: HealthCheckJob): void {
   job.complete()
 }
 
-function scheduleExternalProxyRecovery(slot: number): void {
+function externalProxyFailureCooldownMs(consecutiveFailures: number): number {
+  const index = Math.min(Math.max(0, consecutiveFailures - 1), HEALTH_FAILURE_COOLDOWN_MS.length - 1)
+  return HEALTH_FAILURE_COOLDOWN_MS[index]
+}
+
+/**
+ * A failed data-plane probe almost always means the remote route or the
+ * Internet path is unavailable. Restarting the same sing-box config only
+ * creates a new burst of failing handshakes, so exhausted slots are stopped
+ * instead. A manual start/rotate remains the explicit recovery mechanism.
+ */
+function scheduleExternalProxyAutoDisable(slot: number): void {
   const state = states.get(slot)
-  if (!state || !isExternalProxyStateRunning(state) || state.health.restartTimer) return
+  if (!state || !isExternalProxyStateRunning(state) || state.health.autoDisableTimer) return
 
-  if (activeExternalProxyLease(slot)) {
-    state.lifecycle = 'degraded'
-    state.health.status = 'degraded'
-    state.degradationReason = 'leased-route-recovery-blocked'
-    state.health.lastError = state.health.lastError || 'Automatic restart is blocked while a Buyer Search lease is active'
-    state.lastErrorAt = Date.now()
-    touchExternalProxyState(state)
-    return
-  }
-
-  if (state.health.restartAttempts >= HEALTH_RECOVERY_BACKOFF_MS.length) {
-    const generation = state.generation
+  const generation = state.generation
+  const timer = setTimeout(() => {
+    if (state.health.autoDisableTimer === timer) state.health.autoDisableTimer = null
     void withExternalProxyOperation(async () => {
       const current = states.get(slot)
       if (!current || current.generation !== generation || !isExternalProxyStateRunning(current)) return
+
+      if (activeExternalProxyLease(slot)) {
+        current.lifecycle = 'degraded'
+        current.health.status = 'degraded'
+        current.degradationReason = 'leased-route-recovery-blocked'
+        current.health.lastError = current.health.lastError || 'Automatic stop is blocked while a Buyer Search lease is active'
+        current.lastErrorAt = Date.now()
+        touchExternalProxyState(current)
+        scheduleExternalProxyHealthCheck(slot, HEALTH_LEASED_RECHECK_MS)
+        return
+      }
+
       current.autoDisabled = true
       current.lifecycle = 'failed'
       current.health.status = 'failed'
       current.health.lastError = current.health.lastError || 'External proxy disabled after repeated transport failures'
       current.lastErrorAt = Date.now()
-      current.degradationReason = 'recovery-exhausted'
+      current.degradationReason = 'health-failure-budget-exhausted'
+      current.health.nextCheckAt = null
       touchExternalProxyState(current)
       logEvent('error', 'external-proxy', 'disabled after repeated health-check transport failures', {
         slot,
         profileId: current.profileId,
         failures: current.health.consecutiveFailures,
-        restartAttempts: current.health.restartAttempts,
         error: current.health.lastError
       })
-      await stopExternalProxyUnlocked(slot, 'health recovery exhausted', { preserveHealth: true, preserveMetadata: true })
+      await stopExternalProxyUnlocked(slot, 'health failure budget exhausted', { preserveHealth: true, preserveMetadata: true })
     })
-    return
-  }
-
-  const delayMs = HEALTH_RECOVERY_BACKOFF_MS[state.health.restartAttempts]
-  state.health.restartAttempts += 1
-  const generation = state.generation
-  const timer = setTimeout(() => {
-    if (state.health.restartTimer === timer) state.health.restartTimer = null
-    if (state.generation !== generation || !isExternalProxyStateRunning(state) || state.health.status !== 'degraded') return
-    void withExternalProxyOperation(async () => {
-      const current = states.get(slot)
-      if (!current || current.generation !== generation || !isExternalProxyStateRunning(current)) return
-      const profileId = current.profileId
-      if (!profileId) return
-      try {
-        logEvent('warn', 'external-proxy', 'restarting after repeated health-check transport failures', {
-          slot,
-          profileId,
-          failures: current.health.consecutiveFailures,
-          restartAttempt: current.health.restartAttempts
-        })
-        await startExternalProxyUnlocked({
-          slot,
-          profileId,
-          country: current.lastCountryQuery,
-          action: 'connect',
-          automaticRecovery: true
-        })
-      } catch (error) {
-        const latest = states.get(slot)
-        if (!latest || latest.generation !== generation) return
-        latest.lifecycle = 'degraded'
-        latest.health.status = 'degraded'
-        latest.health.lastCheckedAt = Date.now()
-        latest.health.lastError = externalProxyHealthErrorMessage(error)
-        latest.lastErrorAt = latest.health.lastCheckedAt
-        latest.degradationReason = 'automatic-recovery-failed'
-        touchExternalProxyState(latest)
-        scheduleExternalProxyRecovery(slot)
-      }
-    })
-  }, delayMs)
+  }, 0)
   timer.unref?.()
-  state.health.restartTimer = timer
+  state.health.autoDisableTimer = timer
 }
 
 function markExternalProxyDegraded(
@@ -1283,9 +1277,9 @@ function markExternalProxyDegraded(
     clearTimeout(state.health.checkTimer)
     state.health.checkTimer = null
   }
-  if (state.health.restartTimer) {
-    clearTimeout(state.health.restartTimer)
-    state.health.restartTimer = null
+  if (state.health.autoDisableTimer) {
+    clearTimeout(state.health.autoDisableTimer)
+    state.health.autoDisableTimer = null
   }
   state.lifecycle = quarantined ? 'quarantined' : 'degraded'
   state.health.status = quarantined ? 'quarantined' : 'degraded'
@@ -1341,7 +1335,6 @@ async function runExternalProxyHealthCheck(job: HealthCheckJob): Promise<void> {
     state.health.lastSuccessAt = checkedAt
     state.health.lastError = null
     state.health.consecutiveFailures = 0
-    state.health.restartAttempts = 0
     state.degradationReason = null
     state.lastErrorAt = null
     state.rotationPreviousEgressIp = null
@@ -1387,10 +1380,10 @@ async function runExternalProxyHealthCheck(job: HealthCheckJob): Promise<void> {
     state.health.nextCheckAt = null
     if (isRecoverableExternalProxyTransportError(error)) {
       state.health.consecutiveFailures += 1
-      if (state.health.consecutiveFailures >= HEALTH_FAILURE_RESTART_THRESHOLD) {
-        scheduleExternalProxyRecovery(job.slot)
+      if (state.health.consecutiveFailures >= HEALTH_FAILURE_AUTO_DISABLE_THRESHOLD) {
+        scheduleExternalProxyAutoDisable(job.slot)
       } else {
-        scheduleExternalProxyHealthCheck(job.slot, HEALTH_CHECK_RETRY_DELAY_MS)
+        scheduleExternalProxyHealthCheck(job.slot, externalProxyFailureCooldownMs(state.health.consecutiveFailures))
       }
     } else {
       state.health.consecutiveFailures = 0
@@ -1453,10 +1446,15 @@ function recordExternalProxyTransportSignal(slot: number, message: string): void
   if (!state || !isExternalProxyStateRunning(state)) return
   if (!/(context deadline exceeded|timeout|timed out|eof|socket hang up|econnreset)/i.test(message)) return
   const now = Date.now()
-  if (now - state.health.lastTransportSignalAt < 2_000) return
+  if (
+    state.health.status !== 'healthy' ||
+    now - state.health.lastTransportSignalAt < TRANSPORT_SIGNAL_MIN_INTERVAL_MS
+  ) return
   state.health.lastTransportSignalAt = now
-  state.health.lastError = message
-  void queueExternalProxyHealthCheck(slot, true)
+  const requestedAt = now + TRANSPORT_SIGNAL_PROBE_DELAY_MS
+  if (state.health.nextCheckAt === null || requestedAt < state.health.nextCheckAt) {
+    scheduleExternalProxyHealthCheck(slot, TRANSPORT_SIGNAL_PROBE_DELAY_MS)
+  }
 }
 
 export async function checkExternalProxyHealth(slot: number | null | undefined = DEFAULT_PROXY_SLOT): Promise<ExternalProxyInstanceStatus> {
@@ -1489,7 +1487,6 @@ async function stopExternalProxyUnlocked(
     state.health.lastSuccessAt = null
     state.health.lastError = null
     state.health.consecutiveFailures = 0
-    state.health.restartAttempts = 0
     state.health.nextCheckAt = null
     state.degradationReason = null
     state.lastErrorAt = null
@@ -1525,7 +1522,7 @@ async function stopAllExternalProxies(reason = 'requested'): Promise<ExternalPro
   })
 }
 
-async function startExternalProxyUnlocked(options: InternalStartExternalProxyOptions = {}): Promise<ExternalProxyStatus> {
+async function startExternalProxyUnlocked(options: StartExternalProxyOptions = {}): Promise<ExternalProxyStatus> {
   const slot = parseExternalProxySlot(options.slot)
   const state = stateForSlot(slot)
   const action = options.action ?? 'start'
@@ -1575,7 +1572,7 @@ async function startExternalProxyUnlocked(options: InternalStartExternalProxyOpt
   state.generation += 1
   state.rotationPreviousEgressIp = action === 'rotate' ? previousEgressIp : null
   if (action === 'rotate') state.lastRotateReason = options.rotateReason?.trim() || 'manual'
-  beginExternalProxyHealthRun(state, Boolean(options.automaticRecovery))
+  beginExternalProxyHealthRun(state)
   await startExternalProxyProcessUnlocked(
     state,
     profile,
@@ -1592,7 +1589,7 @@ async function startExternalProxy(options: StartExternalProxyOptions = {}): Prom
 
 async function rotateExternalProxy(options: StartExternalProxyOptions = {}): Promise<ExternalProxyStatus> {
   const slot = parseExternalProxySlot(options.slot)
-  const idempotencyKey = String((options as InternalStartExternalProxyOptions).idempotencyKey ?? '').trim()
+  const idempotencyKey = String(options.idempotencyKey ?? '').trim()
   return withExternalProxyOperation(async () => {
     const prior = idempotencyKey ? rotationIdempotency.get(slot)?.get(idempotencyKey) : null
     if (prior) return getExternalProxyStatus(slot)
@@ -1600,7 +1597,7 @@ async function rotateExternalProxy(options: StartExternalProxyOptions = {}): Pro
       ...options,
       slot,
       action: 'rotate',
-      rotateReason: (options as InternalStartExternalProxyOptions).rotateReason
+      rotateReason: options.rotateReason
     })
     await queueExternalProxyHealthCheck(slot, true)
     const completed = getExternalProxyStatus(slot)

@@ -36,6 +36,8 @@ import { countryFlagFromCountryOrName } from './countryGlyph'
 import { SERVER_CHANGED_EVENT, emitServerChanged } from '../nav'
 import type { ServerGroup, ServerProfile } from '../../shared/ipc-types'
 
+const QUICK_SERVERS_REFRESH_INTERVAL_MS = 30_000
+
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
 function formatSpeedShort(bytesPerSecond: number): string {
@@ -119,11 +121,10 @@ function QuickServers() {
   }, [])
 
   useEffect(() => {
-    refresh()
-    // Poll on a slow cadence so the dashboard reflects external changes
-    // (a server added on the Servers page) without forcing the user to
-    // navigate away and back.
-    const id = setInterval(refresh, 5000)
+    void refresh()
+    // SERVER_CHANGED_EVENT keeps ordinary UI changes immediate. The interval
+    // is only a low-frequency fallback for changes made outside this window.
+    const id = window.setInterval(refresh, QUICK_SERVERS_REFRESH_INTERVAL_MS)
     const handler = () => refresh()
     window.addEventListener(SERVER_CHANGED_EVENT, handler)
     return () => {
@@ -545,8 +546,9 @@ interface RecentEntry {
 }
 
 /**
- * Top-5 domains seen by the tunnel, refreshed every 15 seconds while the
- * tunnel is up. Reuses the existing trafficHistoryList IPC.
+ * Top-5 domains seen by the tunnel. Reading this list reparses the runtime
+ * journal, so automatic refreshes are limited to mount and tunnel transitions;
+ * the user can request an immediate refresh with the button.
  */
 function RecentSites() {
   const { t } = useTranslation()
@@ -575,10 +577,7 @@ function RecentSites() {
   }, [])
 
   useEffect(() => {
-    refresh()
-    if (!tunRunning) return
-    const id = setInterval(refresh, 15_000)
-    return () => clearInterval(id)
+    void refresh()
   }, [refresh, tunRunning])
 
   return (

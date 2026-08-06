@@ -30,6 +30,10 @@
 !macroend
 
 !macro customInstall
+  ; Apply the Epic Online Services loopback compatibility fix while the
+  ; installer already has administrator rights. The script is idempotent.
+  nsExec::ExecToLog 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\resources\vpnte-eos-compat.ps1"'
+
   ; Keep user data intact on upgrade/reinstall. Server groups are user state:
   ; deleting them here can resurrect old subscriptions from legacy caches.
 

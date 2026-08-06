@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo, useCallback } from 'react'
+import { useEffect, useState, useMemo, useCallback, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useAppStore } from '../store'
 import {
@@ -70,6 +70,7 @@ function formatDateTime(ts: number | null): string {
 // ─── Disconnect Reason Options ───────────────────────────────────────────────
 
 const ALL_REASONS: DisconnectReason[] = ['user', 'error', 'rotation', 'schedule', 'crash']
+const RAW_LOG_POLL_INTERVAL_MS = 10_000
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
@@ -83,6 +84,7 @@ export function Logs() {
   const [rawLogs, setRawLogs] = useState<ParsedLogEntry[]>([])
   const [rawLogsLoading, setRawLogsLoading] = useState(false)
   const [rawLogsError, setRawLogsError] = useState<string | null>(null)
+  const rawLogsFetchInFlightRef = useRef(false)
   const rendererLogs = useAppStore(s => s.logs)
   const mainLogs = useMemo(() => [...rawLogs].reverse(), [rawLogs])
   const uiLogs = useMemo(() => [...rendererLogs].slice(-100).reverse(), [rendererLogs])
@@ -246,6 +248,7 @@ export function Logs() {
       schedule: t('logs.reasonSchedule'),
       crash: t('logs.reasonCrash')
     }
+    return map[reason]
   }
 
   const handleClearLogs = async () => {
@@ -269,8 +272,10 @@ export function Logs() {
     }
   }
 
-  const loadRawLogs = useCallback(async () => {
-    setRawLogsLoading(true)
+  const loadRawLogs = useCallback(async (background = false) => {
+    if (rawLogsFetchInFlightRef.current) return
+    rawLogsFetchInFlightRef.current = true
+    if (!background) setRawLogsLoading(true)
     setRawLogsError(null)
     try {
       const snapshots = await window.electronAPI.getFullLogs()
@@ -309,16 +314,39 @@ export function Logs() {
       setRawLogsError(message)
       setRawLogs([])
     } finally {
-      setRawLogsLoading(false)
+      rawLogsFetchInFlightRef.current = false
+      if (!background) setRawLogsLoading(false)
     }
   }, [])
 
   useEffect(() => {
-    void loadRawLogs()
-    const timer = window.setInterval(() => {
+    let timer: number | null = null
+
+    const stopPolling = () => {
+      if (timer === null) return
+      window.clearInterval(timer)
+      timer = null
+    }
+
+    const startPolling = () => {
+      if (timer !== null || document.visibilityState !== 'visible') return
       void loadRawLogs()
-    }, 5000)
-    return () => window.clearInterval(timer)
+      timer = window.setInterval(() => {
+        void loadRawLogs(true)
+      }, RAW_LOG_POLL_INTERVAL_MS)
+    }
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') startPolling()
+      else stopPolling()
+    }
+
+    startPolling()
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    return () => {
+      stopPolling()
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+    }
   }, [loadRawLogs])
 
 
@@ -574,7 +602,7 @@ export function Logs() {
                 Живой main и UI поток без отдельного открытия.
               </p>
             </div>
-            <MacButton variant="ghost" size="sm" onClick={loadRawLogs} loading={rawLogsLoading}>
+            <MacButton variant="ghost" size="sm" onClick={() => { void loadRawLogs() }} loading={rawLogsLoading}>
               <Activity size={12} className="mr-1" /> Обновить
             </MacButton>
           </div>

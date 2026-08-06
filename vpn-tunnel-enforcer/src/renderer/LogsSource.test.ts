@@ -21,6 +21,16 @@ describe('Logs source regressions', () => {
     expect(handler).toContain('setStats(null)')
   })
 
+  it('stops raw-log polling when the app window is hidden and prevents overlapping reads', () => {
+    const source = logsSource()
+
+    expect(source).toContain('RAW_LOG_POLL_INTERVAL_MS = 10_000')
+    expect(source).toContain('rawLogsFetchInFlightRef')
+    expect(source).toContain("document.visibilityState !== 'visible'")
+    expect(source).toContain("document.addEventListener('visibilitychange', onVisibilityChange)")
+    expect(source).toContain('void loadRawLogs(true)')
+  })
+
   it('keeps the raw logs panel visible in a right-hand desktop column without a toggle', () => {
     const source = logsSource()
 

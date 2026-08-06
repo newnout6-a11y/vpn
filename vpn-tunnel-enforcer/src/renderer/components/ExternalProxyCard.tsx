@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Globe2, Loader2, Plus, RefreshCw, Square } from 'lucide-react'
 import { MacCard } from '../design-system/MacCard'
 import { MacButton } from '../design-system/MacButton'
@@ -54,6 +54,41 @@ const STOPPED: ExternalProxyStatus = {
 
 type BusyAction = 'start' | 'stop' | 'rotate' | 'stopAll'
 const EXTERNAL_PROXY_CHANGED_EVENT = 'vpnte:external-proxy-changed'
+export const EXTERNAL_PROXY_UNSTABLE_REFRESH_INTERVAL_MS = 10_000
+export const EXTERNAL_PROXY_HEALTHY_REFRESH_INTERVAL_MS = 30_000
+export const EXTERNAL_PROXY_IDLE_REFRESH_INTERVAL_MS = 120_000
+
+export function externalProxyRefreshIntervalMs(status: ExternalProxyStatus): number {
+  const runningInstances = status.instances.filter((instance) => instance.processRunning)
+
+  if (runningInstances.length === 0) {
+    return status.instances.some((instance) => instance.autoDisabled)
+      ? EXTERNAL_PROXY_HEALTHY_REFRESH_INTERVAL_MS
+      : EXTERNAL_PROXY_IDLE_REFRESH_INTERVAL_MS
+  }
+
+  return runningInstances.some((instance) => !instance.ready || instance.health !== 'healthy')
+    ? EXTERNAL_PROXY_UNSTABLE_REFRESH_INTERVAL_MS
+    : EXTERNAL_PROXY_HEALTHY_REFRESH_INTERVAL_MS
+}
+
+function renderedStatusKey(status: ExternalProxyStatus): string {
+  const visibleInstances = status.instances.filter((instance) => instance.processRunning || instance.autoDisabled)
+  const instanceKey = visibleInstances.map((instance) => [
+    instance.slot,
+    instance.processRunning,
+    instance.autoDisabled,
+    instance.health,
+    instance.profileName,
+    instance.country,
+    instance.egressIp,
+    instance.latencyMs,
+    instance.proxyUrl,
+    instance.lastError
+  ].join('|')).join('||')
+
+  return `${status.controlUrl ?? ''}::${instanceKey}`
+}
 
 function firstAvailableSlot(instances: ExternalProxyInstanceStatus[]): number {
   const occupied = new Set(instances.filter((instance) => instance.processRunning).map((instance) => instance.slot))
@@ -69,6 +104,10 @@ export function ExternalProxyCard() {
   const [status, setStatus] = useState<ExternalProxyStatus>(STOPPED)
   const [busy, setBusy] = useState<{ slot: number | 'all'; action: BusyAction } | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const statusRef = useRef(status)
+  const refreshInFlightRef = useRef(false)
+  const refreshVersionRef = useRef(0)
+  const scheduleRefreshRef = useRef<() => void>(() => undefined)
 
   const instances = status.instances.filter((instance) => instance.processRunning || instance.autoDisabled)
   const processRunningCount = instances.filter((instance) => instance.processRunning).length
@@ -82,36 +121,87 @@ export function ExternalProxyCard() {
     ? activeCountries.join(', ')
     : `${activeCountries.slice(0, 6).join(', ')} +${activeCountries.length - 6}`
 
-  const refreshStatus = useCallback(async () => {
-    try {
-      const next = await window.electronAPI.externalProxyStatus()
-      setStatus(next ?? STOPPED)
-    } catch {
-      // Status polling is advisory. Controls surface actionable failures.
-    }
+  const applyStatus = useCallback((next: ExternalProxyStatus) => {
+    statusRef.current = next
+    setStatus((current) => renderedStatusKey(current) === renderedStatusKey(next) ? current : next)
   }, [])
 
+  const refreshStatus = useCallback(async () => {
+    if (refreshInFlightRef.current) return
+
+    refreshInFlightRef.current = true
+    const refreshVersion = refreshVersionRef.current
+    try {
+      const next = await window.electronAPI.externalProxyStatus()
+      if (refreshVersion === refreshVersionRef.current) {
+        applyStatus(next ?? STOPPED)
+      }
+    } catch {
+      // Status polling is advisory. Controls surface actionable failures.
+    } finally {
+      refreshInFlightRef.current = false
+    }
+  }, [applyStatus])
+
   useEffect(() => {
-    const refreshNow = () => { void refreshStatus() }
+    let pollTimer: number | null = null
+    let disposed = false
+
+    const clearScheduledRefresh = () => {
+      if (pollTimer !== null) {
+        window.clearTimeout(pollTimer)
+        pollTimer = null
+      }
+    }
+
+    const scheduleRefresh = () => {
+      clearScheduledRefresh()
+      if (disposed || document.hidden) return
+
+      pollTimer = window.setTimeout(() => {
+        pollTimer = null
+        void refreshStatus().finally(scheduleRefresh)
+      }, externalProxyRefreshIntervalMs(statusRef.current))
+    }
+
+    const refreshNow = () => {
+      if (disposed || document.hidden) return
+      void refreshStatus().finally(scheduleRefresh)
+    }
+
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        clearScheduledRefresh()
+      } else {
+        refreshNow()
+      }
+    }
+
+    scheduleRefreshRef.current = scheduleRefresh
     refreshNow()
-    const id = window.setInterval(refreshNow, 5000)
     window.addEventListener(EXTERNAL_PROXY_CHANGED_EVENT, refreshNow)
+    document.addEventListener('visibilitychange', handleVisibilityChange)
     return () => {
-      window.clearInterval(id)
+      disposed = true
+      clearScheduledRefresh()
+      scheduleRefreshRef.current = () => undefined
       window.removeEventListener(EXTERNAL_PROXY_CHANGED_EVENT, refreshNow)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
     }
   }, [refreshStatus])
 
   const runAction = async (slot: number, action: BusyAction) => {
     setBusy({ slot, action })
     setError(null)
+    refreshVersionRef.current += 1
     try {
       const next = action === 'start'
         ? await window.electronAPI.externalProxyStart({ slot })
         : action === 'stop'
           ? await window.electronAPI.externalProxyStop(slot)
           : await window.electronAPI.externalProxyRotate(slot)
-      setStatus(next ?? STOPPED)
+      applyStatus(next ?? STOPPED)
+      scheduleRefreshRef.current()
       return next
     } catch (err: any) {
       const message = err?.message || String(err)
@@ -156,10 +246,12 @@ export function ExternalProxyCard() {
   const handleStopAll = async () => {
     setBusy({ slot: 'all', action: 'stopAll' })
     setError(null)
+    refreshVersionRef.current += 1
     addLog('info', 'Внешние прокси: останавливаем все')
     try {
       const next = await window.electronAPI.externalProxyStopAll()
-      setStatus(next ?? STOPPED)
+      applyStatus(next ?? STOPPED)
+      scheduleRefreshRef.current()
       addGlobalToast('info', `Остановлено внешних прокси: ${processRunningCount}`)
       addLog('info', `Внешние прокси: остановлено ${processRunningCount}`)
     } catch (err: any) {

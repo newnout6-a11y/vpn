@@ -27,3 +27,7 @@ vpn-tunnel-enforcer/scripts/inspect-bundle.mjs
 
 # Russian-named developer drafts in the repo root.
 Диагностика маршрутизации*.txt
+
+.kimchi/
+coverage/
+

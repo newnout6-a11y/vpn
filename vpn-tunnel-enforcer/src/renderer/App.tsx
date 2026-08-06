@@ -248,6 +248,10 @@ export interface LeakSelfTestResult {
 
 type Page = SidebarPage | 'maintenance'
 
+// These pages read and render potentially large log files. Keep their work
+// scoped to the page the user is currently viewing.
+const ACTIVE_ONLY_PAGES: ReadonlySet<Page> = new Set(['trafficHistory', 'logs'])
+
 function proxyFromOverride(settings: AppSettings) {
   const raw = settings.proxyOverride.trim()
   const separator = raw.lastIndexOf(':')
@@ -280,9 +284,7 @@ const scheduleIdle = (fn: () => void) => {
 
 export default function App() {
   const [page, setPage] = useState<Page>('dashboard')
-  // Keep traffic history mounted but hidden so its lightweight journal poller
-  // continues while the user is on another tab.
-  const [visitedPages, setVisitedPages] = useState<Set<Page>>(() => new Set(['dashboard', 'trafficHistory']))
+  const [visitedPages, setVisitedPages] = useState<Set<Page>>(() => new Set(['dashboard']))
   const [firewallBannerSuppressUntil, setFirewallBannerSuppressUntil] = useState(0)
   // Set to true when the main process tells us it's running shutdown cleanup
   // (the user just confirmed "Отключить и закрыть"). Locks the UI behind a
@@ -762,7 +764,11 @@ export default function App() {
     })
   }, [page])
 
-  const mountedPages = useMemo(() => Array.from(visitedPages), [visitedPages])
+  const mountedPages = useMemo(() => {
+    const pages = new Set(visitedPages)
+    pages.add(page)
+    return Array.from(pages).filter(pageId => pageId === page || !ACTIVE_ONLY_PAGES.has(pageId))
+  }, [page, visitedPages])
 
   const renderPage = (pageId: Page) => {
     switch (pageId) {

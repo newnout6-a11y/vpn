@@ -10,7 +10,7 @@
  */
 
 import { ipcMain, app, BrowserWindow } from 'electron'
-import { readFile, stat } from 'fs/promises'
+import { open, stat } from 'fs/promises'
 import { join } from 'path'
 import { logEvent } from './appLogger'
 import { domainEnrichmentService, buildEnrichmentProxyRules, type DomainEnrichment } from './domainEnrichment'
@@ -38,9 +38,34 @@ type ParsedTrafficHistoryEntry = Omit<TrafficHistoryEntry, 'vpnIp' | 'enrichment
 
 interface CachedLog {
   mtimeMs: number
+  // Byte offset successfully consumed from the file. This lets polling read
+  // only appended log data instead of reparsing the whole file.
   size: number
-  entries: ParsedTrafficHistoryEntry[]
+  entries: Map<string, ParsedTrafficHistoryEntry>
+  trailingFragment: string
+  discardUntilNewline: boolean
 }
+
+const MAX_LOG_READ_BYTES = 1024 * 1024
+const MAX_TRAILING_FRAGMENT_BYTES = 64 * 1024
+
+const DOMAIN_PATTERN = '([a-zA-Z0-9_][a-zA-Z0-9_.-]*\\.[a-zA-Z]{2,})'
+const LOG_DOMAIN_PATTERNS: readonly RegExp[] = [
+  // sing-box 1.13 DNS exchange (request and response)
+  new RegExp(`\\bdns:\\s+exchanged?\\s+${DOMAIN_PATTERN}\\b`, 'i'),
+  // generic resolver phrases
+  new RegExp(`\\b(?:lookup|query)\\s+${DOMAIN_PATTERN}\\b`, 'i'),
+  // explicit destination after "to" or in "target=" — the only way to reach
+  // a real hostname for an HTTP/TLS connection rather than a resolved IP
+  new RegExp(`(?:to|target=)\\s+${DOMAIN_PATTERN}(?::\\d+)?`),
+  // SNI / Host: header sniffed by router/inbound
+  new RegExp(`\\b(?:sni|host|hostname)[=:]\\s*${DOMAIN_PATTERN}\\b`, 'i')
+]
+const IP_ONLY_DOMAIN_PATTERN = /^[\d.]+$/
+const LOCAL_DOMAIN_PATTERN = /^localhost$|\.local$|\.internal$|\.lan$/i
+const REVERSE_DNS_DOMAIN_PATTERN = /\.in-addr\.arpa$|\.ip6\.arpa$/i
+const SERVICE_DISCOVERY_DOMAIN_PATTERN = /(^|\.)_/
+const LOG_TIMESTAMP_PATTERN = /(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})/
 
 const logCache = new Map<string, CachedLog>()
 let enrichmentUpdateRegistered = false
@@ -72,24 +97,11 @@ function getPrevSingboxLogPath(): string {
 export function parseSingboxLogLine(line: string): { domain: string; timestamp: number } | null {
   if (!line || typeof line !== 'string') return null
 
-  const domainPattern = '([a-zA-Z0-9_][a-zA-Z0-9_.-]*\\.[a-zA-Z]{2,})'
 
-  // Source patterns ranked by reliability. The first hit wins.
-  const patterns: RegExp[] = [
-    // sing-box 1.13 DNS exchange (request and response)
-    new RegExp(`\\bdns:\\s+exchanged?\\s+${domainPattern}\\b`, 'i'),
-    // generic resolver phrases
-    new RegExp(`\\b(?:lookup|query)\\s+${domainPattern}\\b`, 'i'),
-    // explicit destination after "to" or in "target=" — the only way to reach
-    // a real hostname for an HTTP/TLS connection rather than a resolved IP
-    new RegExp(`(?:to|target=)\\s+${domainPattern}(?::\\d+)?`),
-    // SNI / Host: header sniffed by router/inbound
-    new RegExp(`\\b(?:sni|host|hostname)[=:]\\s*${domainPattern}\\b`, 'i')
-  ]
 
   let domain: string | null = null
-  for (const rx of patterns) {
-    const match = line.match(rx)
+  for (const rx of LOG_DOMAIN_PATTERNS) {
+    const match = rx.exec(line)
     if (match) {
       domain = match[1]
       break
@@ -103,17 +115,17 @@ export function parseSingboxLogLine(line: string): { domain: string; timestamp: 
 
   // Filter out IP-only "domains" (from earlier regex match on IPs).
   // Real domain has at least one letter in the TLD.
-  if (/^[\d.]+$/.test(domain)) return null
+  if (IP_ONLY_DOMAIN_PATTERN.test(domain)) return null
   // Filter out localhost and reserved
-  if (/^localhost$|\.local$|\.internal$|\.lan$/i.test(domain)) return null
+  if (LOCAL_DOMAIN_PATTERN.test(domain)) return null
   // Filter out reverse-DNS queries — they're noise, not browsing data.
-  if (/\.in-addr\.arpa$|\.ip6\.arpa$/i.test(domain)) return null
+  if (REVERSE_DNS_DOMAIN_PATTERN.test(domain)) return null
   // Filter out service-discovery / AD names (`_ldap._tcp.dc._msdcs.foo.bar`)
   // since they pollute the list and aren't user-visible navigation.
-  if (/(^|\.)_/.test(domain)) return null
+  if (SERVICE_DISCOVERY_DOMAIN_PATTERN.test(domain)) return null
 
   // Try to parse timestamp from line start
-  const tsMatch = line.match(/(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})/)
+  const tsMatch = LOG_TIMESTAMP_PATTERN.exec(line)
   let timestamp = Date.now()
   if (tsMatch) {
     const parsed = Date.parse(tsMatch[1].replace(' ', 'T') + 'Z')
@@ -127,6 +139,76 @@ export function parseSingboxLogLine(line: string): { domain: string; timestamp: 
  * Read and parse the sing-box log to extract domain access entries.
  * Aggregates by domain — first/last seen, count.
  */
+async function readLogSlice(path: string, offset: number, length: number): Promise<{ content: string; bytesRead: number }> {
+  const handle = await open(path, 'r')
+  try {
+    const buffer = Buffer.allocUnsafe(length)
+    const { bytesRead } = await handle.read(buffer, 0, length, offset)
+    return { content: buffer.subarray(0, bytesRead).toString('utf8'), bytesRead }
+  } finally {
+    await handle.close()
+  }
+}
+
+function updateEntries(cache: CachedLog, lines: string): void {
+  for (const line of lines.split('\n')) {
+    const parsed = parseSingboxLogLine(line)
+    if (!parsed) continue
+
+    const existing = cache.entries.get(parsed.domain)
+    if (existing) {
+      existing.count++
+      existing.lastSeen = parsed.timestamp
+      continue
+    }
+    cache.entries.set(parsed.domain, {
+      domain: parsed.domain,
+      firstSeen: parsed.timestamp,
+      lastSeen: parsed.timestamp,
+      count: 1
+    })
+  }
+}
+
+function appendLogChunk(cache: CachedLog, content: string, discardLeadingFragment: boolean): void {
+  let chunk = cache.trailingFragment + content
+  cache.trailingFragment = ''
+
+  if (discardLeadingFragment || cache.discardUntilNewline) {
+    const newline = chunk.indexOf('\n')
+    if (newline === -1) {
+      cache.discardUntilNewline = true
+      return
+    }
+    chunk = chunk.slice(newline + 1)
+    cache.discardUntilNewline = false
+  }
+
+  const lastNewline = chunk.lastIndexOf('\n')
+  if (lastNewline === -1) {
+    if (chunk.length <= MAX_TRAILING_FRAGMENT_BYTES) {
+      cache.trailingFragment = chunk
+    } else {
+      cache.discardUntilNewline = true
+    }
+    return
+  }
+
+  updateEntries(cache, chunk.slice(0, lastNewline))
+  const trailingFragment = chunk.slice(lastNewline + 1)
+  if (trailingFragment.length <= MAX_TRAILING_FRAGMENT_BYTES) {
+    cache.trailingFragment = trailingFragment
+  } else {
+    cache.discardUntilNewline = true
+  }
+}
+
+function cachedEntries(cache: CachedLog, vpnIp: string | null): TrafficHistoryEntry[] {
+  return Array.from(cache.entries.values())
+    .sort((a, b) => b.lastSeen - a.lastSeen)
+    .map(entry => ({ ...entry, vpnIp }))
+}
+
 async function parseLog(path: string, vpnIp: string | null): Promise<TrafficHistoryEntry[]> {
   let fileInfo
   try {
@@ -135,43 +217,40 @@ async function parseLog(path: string, vpnIp: string | null): Promise<TrafficHist
     return []
   }
 
-  const cached = logCache.get(path)
-  if (cached && cached.mtimeMs === fileInfo.mtimeMs && cached.size === fileInfo.size) {
-    return cached.entries.map(entry => ({ ...entry, vpnIp }))
+  let cache = logCache.get(path)
+  let reset = !cache ||
+    fileInfo.size < cache.size ||
+    (fileInfo.size === cache.size && fileInfo.mtimeMs !== cache.mtimeMs)
+  let offset = cache?.size ?? 0
+
+  if (reset || fileInfo.size - offset > MAX_LOG_READ_BYTES) {
+    reset = true
+    offset = Math.max(0, fileInfo.size - MAX_LOG_READ_BYTES)
+    cache = {
+      mtimeMs: fileInfo.mtimeMs,
+      size: offset,
+      entries: new Map(),
+      trailingFragment: '',
+      discardUntilNewline: false
+    }
   }
 
-  let content: string
+  if (cache && fileInfo.size === cache.size && fileInfo.mtimeMs === cache.mtimeMs) {
+    logCache.set(path, cache)
+    return cachedEntries(cache, vpnIp)
+  }
+
   try {
-    content = await readFile(path, 'utf-8')
+    const { content, bytesRead } = await readLogSlice(path, offset, fileInfo.size - offset)
+    appendLogChunk(cache!, content, reset && offset > 0)
+    cache!.size = offset + bytesRead
+    cache!.mtimeMs = fileInfo.mtimeMs
+    logCache.set(path, cache!)
+    return cachedEntries(cache!, vpnIp)
   } catch (err) {
     logEvent('warn', 'traffic-history', 'failed to read sing-box log', err)
     return []
   }
-
-  const map = new Map<string, ParsedTrafficHistoryEntry>()
-  const lines = content.split(/\r?\n/)
-
-  for (const line of lines) {
-    const parsed = parseSingboxLogLine(line)
-    if (!parsed) continue
-
-    const existing = map.get(parsed.domain)
-    if (existing) {
-      existing.count++
-      existing.lastSeen = parsed.timestamp
-    } else {
-      map.set(parsed.domain, {
-        domain: parsed.domain,
-        firstSeen: parsed.timestamp,
-        lastSeen: parsed.timestamp,
-        count: 1
-      })
-    }
-  }
-
-  const entries = Array.from(map.values()).sort((a, b) => b.lastSeen - a.lastSeen)
-  logCache.set(path, { mtimeMs: fileInfo.mtimeMs, size: fileInfo.size, entries })
-  return entries.map(entry => ({ ...entry, vpnIp }))
 }
 
 /**

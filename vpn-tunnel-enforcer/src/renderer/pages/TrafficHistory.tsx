@@ -1,6 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
-import { motion } from 'framer-motion'
 import { Globe, Search, Trash2, RefreshCw, Loader2, ExternalLink } from 'lucide-react'
 import { MacCard, MacInput, MacButton, MacBadge } from '../design-system'
 import { PageTip } from '../components/PageTip'
@@ -19,6 +18,9 @@ interface TrafficEntry {
     description: string | null
   }
 }
+
+const TRAFFIC_HISTORY_POLL_INTERVAL_MS = 15_000
+const MAX_RENDERED_ENTRIES = 300
 
 function formatDateTime(ts: number): string {
   return new Date(ts).toLocaleString(undefined, {
@@ -71,7 +73,7 @@ export function TrafficHistory() {
     void fetchHistory(true)
     const id = window.setInterval(() => {
       void fetchHistory(true)
-    }, 8_000)
+    }, TRAFFIC_HISTORY_POLL_INTERVAL_MS)
     return () => window.clearInterval(id)
   }, [fetchHistory, tunRunning])
 
@@ -103,6 +105,14 @@ export function TrafficHistory() {
     return entries.filter(e => e.domain.toLowerCase().includes(q))
   }, [entries, search])
 
+  // Keep the page responsive even when the sing-box journal contains a large
+  // number of unique domains. Search still runs against the complete result.
+  const visibleEntries = useMemo(
+    () => filtered.slice(0, MAX_RENDERED_ENTRIES),
+    [filtered]
+  )
+  const hasMoreEntries = visibleEntries.length < filtered.length
+
   const handleClear = async () => {
     setClearing(true)
     try {
@@ -118,13 +128,13 @@ export function TrafficHistory() {
   // Group by date for nicer display
   const grouped = useMemo(() => {
     const groups: Record<string, TrafficEntry[]> = {}
-    for (const entry of filtered) {
+    for (const entry of visibleEntries) {
       const day = new Date(entry.lastSeen).toLocaleDateString()
       if (!groups[day]) groups[day] = []
       groups[day].push(entry)
     }
     return groups
-  }, [filtered])
+  }, [visibleEntries])
 
   return (
     <div className="space-y-6 max-w-4xl">
@@ -183,22 +193,25 @@ export function TrafficHistory() {
         </MacCard>
       ) : (
         <div className="space-y-4">
-          <p className="text-xs text-[var(--color-text-secondary)]">
-            {t('trafficHistory.total', { count: filtered.length })}
-          </p>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[var(--color-text-secondary)]">
+            <p>{t('trafficHistory.total', { count: filtered.length })}</p>
+            {hasMoreEntries && (
+              <p>
+                {t('trafficHistory.showingLatest', {
+                  count: MAX_RENDERED_ENTRIES,
+                  defaultValue: 'Показаны последние {{count}} записей. Уточните поиск, чтобы увидеть более ранние.'
+                })}
+              </p>
+            )}
+          </div>
           {Object.entries(grouped).map(([day, items]) => (
             <div key={day}>
               <h2 className="text-xs font-medium text-[var(--color-text-secondary)] uppercase tracking-wide mb-2">
                 {day}
               </h2>
               <div className="space-y-1.5">
-                {items.map((entry, idx) => (
-                  <motion.div
-                    key={`${entry.domain}-${idx}`}
-                    initial={{ opacity: 0, y: 4 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ duration: 0.15, delay: idx * 0.01 }}
-                  >
+                {items.map((entry) => (
+                  <div key={entry.domain}>
                     <MacCard className="!p-3">
                       <div className="flex items-center gap-3">
                         <Globe className="w-4 h-4 text-[var(--color-accent)] flex-shrink-0" />
@@ -248,7 +261,7 @@ export function TrafficHistory() {
                         </a>
                       </div>
                     </MacCard>
-                  </motion.div>
+                  </div>
                 ))}
               </div>
             </div>

@@ -12,6 +12,8 @@ const storeSource = () => readFileSync(join(process.cwd(), 'src', 'renderer', 's
 const serverDetailSource = () => readFileSync(join(process.cwd(), 'src', 'renderer', 'components', 'ServerDetailModal.tsx'), 'utf8')
 const browserIpCardSource = () => readFileSync(join(process.cwd(), 'src', 'renderer', 'components', 'BrowserIpCard.tsx'), 'utf8')
 const trafficHistorySource = () => readFileSync(join(process.cwd(), 'src', 'renderer', 'pages', 'TrafficHistory.tsx'), 'utf8')
+const dashboardSideSource = () => readFileSync(join(process.cwd(), 'src', 'renderer', 'components', 'DashboardSide.tsx'), 'utf8')
+const diagnosticsCardSource = () => readFileSync(join(process.cwd(), 'src', 'renderer', 'components', 'DiagnosticsCard.tsx'), 'utf8')
 const externalProxyCardSource = () => readFileSync(join(process.cwd(), 'src', 'renderer', 'components', 'ExternalProxyCard.tsx'), 'utf8')
 const preloadSource = () => readFileSync(join(process.cwd(), 'src', 'preload', 'index.ts'), 'utf8')
 const macSelectSource = () => readFileSync(join(process.cwd(), 'src', 'renderer', 'design-system', 'MacSelect.tsx'), 'utf8')
@@ -78,16 +80,31 @@ describe('App source regressions', () => {
     expect(servers).toContain('initial={{ opacity: 0 }}')
   })
 
-  it('keeps traffic history alive in the background without re-queuing enrichment', () => {
+  it('mounts polling-heavy history and logs pages only while they are active', () => {
     const app = appSource()
     const traffic = trafficHistorySource()
 
-    expect(app).toContain("new Set(['dashboard', 'trafficHistory'])")
+    expect(app).toContain("new Set(['dashboard'])")
+    expect(app).toContain("const ACTIVE_ONLY_PAGES: ReadonlySet<Page> = new Set(['trafficHistory', 'logs'])")
+    expect(app).toContain('pageId === page || !ACTIVE_ONLY_PAGES.has(pageId)')
     expect(traffic).toContain('fetchInFlightRef')
     expect(traffic).toContain('window.setInterval')
     expect(traffic).toContain('trafficHistoryList(publicIp ?? undefined, false)')
-    expect(traffic).not.toContain('fetchHistory(false, true)')
-    expect(traffic).not.toContain('fetchHistory(true, true)')
+    expect(traffic).toContain('MAX_RENDERED_ENTRIES = 300')
+    expect(traffic).not.toContain("from 'framer-motion'")
+    expect(traffic).not.toContain('<motion.div')
+  })
+
+  it('keeps dashboard readers event-driven or low-frequency', () => {
+    const dashboardSide = dashboardSideSource()
+    const diagnostics = diagnosticsCardSource()
+
+    expect(dashboardSide).toContain('QUICK_SERVERS_REFRESH_INTERVAL_MS = 30_000')
+    expect(dashboardSide).toContain('window.setInterval(refresh, QUICK_SERVERS_REFRESH_INTERVAL_MS)')
+    expect(dashboardSide).not.toContain('setInterval(refresh, 15_000)')
+    expect(diagnostics).toContain('FORENSICS_RUNNING_POLL_INTERVAL_MS = 10_000')
+    expect(diagnostics).toContain('FORENSICS_IDLE_POLL_INTERVAL_MS = 30_000')
+    expect(diagnostics).toContain('running ? FORENSICS_RUNNING_POLL_INTERVAL_MS : FORENSICS_IDLE_POLL_INTERVAL_MS')
   })
 
   it('exposes a guarded control to stop every external proxy', () => {
