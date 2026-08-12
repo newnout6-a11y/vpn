@@ -7,6 +7,10 @@ export interface SelectOption {
   value: string
   label: string
   disabled?: boolean
+  /** Optional compact visual state shown before the label. */
+  indicator?: 'success' | 'danger' | 'muted' | 'accent'
+  /** Accessible description for the visual indicator. */
+  indicatorLabel?: string
 }
 
 export interface MacSelectProps {
@@ -18,6 +22,29 @@ export interface MacSelectProps {
   error?: string
   disabled?: boolean
   className?: string
+}
+
+function indicatorClass(indicator: NonNullable<SelectOption['indicator']>): string {
+  if (indicator === 'success') return 'bg-[var(--color-success)] shadow-[0_0_0_3px_color-mix(in_srgb,var(--color-success)_16%,transparent)]'
+  if (indicator === 'danger') return 'bg-[var(--color-danger)] shadow-[0_0_0_3px_color-mix(in_srgb,var(--color-danger)_14%,transparent)]'
+  if (indicator === 'accent') return 'bg-[var(--color-accent)] shadow-[0_0_0_3px_color-mix(in_srgb,var(--color-accent)_14%,transparent)]'
+  return 'bg-[var(--color-text-muted)]'
+}
+
+function OptionLabel({ option }: { option: SelectOption }) {
+  return (
+    <span className="flex min-w-0 items-center gap-2">
+      {option.indicator && (
+        <span
+          className={cn('h-2 w-2 flex-shrink-0 rounded-full', indicatorClass(option.indicator))}
+          role="img"
+          aria-label={option.indicatorLabel}
+          title={option.indicatorLabel}
+        />
+      )}
+      <span className="truncate">{option.label}</span>
+    </span>
+  )
 }
 
 /**
@@ -86,12 +113,13 @@ export const MacSelect: React.FC<MacSelectProps> = ({
         >
           <span
             className={cn(
+              'min-w-0',
               selectedOption
                 ? 'text-[var(--color-text)]'
                 : 'text-[var(--color-text-secondary)]'
             )}
           >
-            {selectedOption?.label || placeholder}
+            {selectedOption ? <OptionLabel option={selectedOption} /> : placeholder}
           </span>
           <ChevronDown
             size={16}
@@ -138,7 +166,7 @@ export const MacSelect: React.FC<MacSelectProps> = ({
                     }
                   }}
                 >
-                  {option.label}
+                  <OptionLabel option={option} />
                 </li>
               ))}
             </motion.ul>

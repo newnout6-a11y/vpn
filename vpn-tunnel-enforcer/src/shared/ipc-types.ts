@@ -62,6 +62,11 @@ export interface ServerProfile {
   ping?: number | null
   status: 'online' | 'offline' | 'unknown'
   lastChecked?: number
+  /** Persisted key-health result, independent from latency ping cleanup. */
+  healthStatus?: 'online' | 'offline' | 'unknown'
+  healthCheckedAt?: number
+  healthLatencyMs?: number | null
+  healthReason?: string
   /**
    * Full sing-box outbound configuration. Required for the VPN to actually
    * dial this server. Optional only for backward compatibility with
@@ -89,6 +94,14 @@ export interface ServerProfile {
    * "удалён провайдером" in the UI without actually deleting the key.
    */
   lastSeenInSubscriptionAt?: number
+  /**
+   * Set when a successful non-empty subscription refresh no longer contains
+   * this profile. Removed profiles stay visible for audit/history, but cannot
+   * be selected for the main VPN or assigned to an external proxy.
+   */
+  removedFromSubscriptionAt?: number
+  /** Previous enabled state restored if the provider publishes the key again. */
+  enabledBeforeSubscriptionRemoval?: boolean
   /**
    * Soft-disable. Tunnel start refuses to dial when false. Default: true.
    * We keep it optional for backward compat — undefined === enabled.
@@ -291,6 +304,13 @@ export interface ExternalProxyProfileRow {
   server: string
   port: number
   groupId: string | null
+  /** Last persisted reachability result for this server profile. */
+  status: ServerProfile['status']
+  pingMs: number | null
+  healthLatencyMs: number | null
+  healthReason: string | null
+  lastCheckedAt: number | null
+  selectedForVpn: boolean
   active: boolean
   activeSlots: number[]
 }
@@ -495,9 +515,9 @@ export interface ServerChannels {
   /**
    * Re-fetch the upstream subscription. On success the group is marked
    * `active`, profiles are dedupe-merged, and `lastSeenInSubscriptionAt` is
-   * stamped on every profile that came back. On failure the group is
-   * marked `expired` and profiles are LEFT IN PLACE — post-trial keys
-   * routinely keep working for hours after the panel goes 403.
+   * stamped on every profile that came back. A successful non-empty response
+   * archives and disables profiles no longer published upstream. On failure
+   * or an empty expired response, the last usable list is retained unchanged.
    *
    * The outer envelope distinguishes "the call itself failed" (network
    * issue, group not found) from "the refresh succeeded but the panel is

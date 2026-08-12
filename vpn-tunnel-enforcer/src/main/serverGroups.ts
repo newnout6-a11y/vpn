@@ -10,10 +10,9 @@
  *
  *   - Each subscription URL becomes one group with `source: 'subscription'`.
  *   - Loose VPN URIs the user pastes share a single "Ручные ключи" group.
- *   - When a subscription URL stops returning profiles (panel gone, trial
- *     expired, …) the group is marked `expired` instead of being deleted.
- *     The profiles themselves are LEFT in place because post-trial keys
- *     routinely keep working for hours/days after the panel disappears.
+ *   - A successful non-empty refresh mirrors the upstream list and archives
+ *     profiles the provider no longer publishes. Failed or empty/expired
+ *     responses retain the last usable list unchanged.
  *
  * The actual profile-side wiring (creating/reusing groups during
  * `addFromInput`, the migration that backfills `groupId`) lives in
@@ -36,6 +35,7 @@ import {
 import { settingsStore } from './settings'
 import { serverPickerStore, serverGroupsStore, type ServerPickerStoreShape } from './sharedStores'
 import type { ClientDevice, ServerGroup, ServerProfile } from '../shared/ipc-types'
+import { inferCountryMetadata } from '../shared/countries'
 
 // ─── Persistent Store ────────────────────────────────────────────────────────
 
@@ -50,6 +50,20 @@ const store = serverGroupsStore
 // Auto-created default group names. We keep them as constants so the
 // picker-side code that creates them on demand uses the exact same string.
 const MANUAL_KEYS_GROUP_NAME = 'Ручные ключи'
+export const DEFAULT_SERVER_GROUP_REFRESH_INTERVAL_MS = 30 * 60 * 1000
+export const MIN_SERVER_GROUP_REFRESH_INTERVAL_MS = 5 * 60 * 1000
+export const MAX_SERVER_GROUP_REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000
+const SERVER_GROUP_REFRESH_SWEEP_INTERVAL_MS = 60 * 1000
+const SERVER_GROUP_INITIAL_REFRESH_DELAY_MS = 10 * 1000
+
+type RefreshGroupResult =
+  | { ok: true; group: ServerGroup; addedCount: number; updatedCount: number; removedCount: number }
+  | { ok: false; error: string }
+
+const refreshGroupLocks = new Map<string, Promise<RefreshGroupResult>>()
+let autoRefreshTimer: ReturnType<typeof setInterval> | null = null
+let initialAutoRefreshTimer: ReturnType<typeof setTimeout> | null = null
+let autoRefreshSweepRunning = false
 
 // ─── CRUD ───────────────────────────────────────────────────────────────────
 
@@ -293,7 +307,7 @@ function vpnProfileToServerProfile(
     protocol: vpnProfile.protocol,
     server: outbound.server || '',
     port: outbound.server_port || 0,
-    country: undefined,
+    country: inferCountryMetadata(vpnProfile.name)?.label,
     ping: null,
     status: 'unknown',
     lastChecked: undefined,
@@ -334,13 +348,24 @@ function savePickerProfiles(profiles: ServerProfile[]): void {
  *
  * Returns the same shape as the IPC channel envelope.
  */
-export async function refreshGroup(
+export function refreshGroup(
   groupId: string,
   options: RefreshGroupOptions = {}
-): Promise<
-  | { ok: true; group: ServerGroup; addedCount: number; updatedCount: number; removedCount: number }
-  | { ok: false; error: string }
-> {
+): Promise<RefreshGroupResult> {
+  const existing = refreshGroupLocks.get(groupId)
+  if (existing) return existing
+
+  const refresh = refreshGroupUnlocked(groupId, options).finally(() => {
+    if (refreshGroupLocks.get(groupId) === refresh) refreshGroupLocks.delete(groupId)
+  })
+  refreshGroupLocks.set(groupId, refresh)
+  return refresh
+}
+
+async function refreshGroupUnlocked(
+  groupId: string,
+  options: RefreshGroupOptions = {}
+): Promise<RefreshGroupResult> {
   const group = getGroup(groupId)
   if (!group) return { ok: false, error: 'Группа не найдена' }
   if (group.source !== 'subscription' || !group.sourceUrl) {
@@ -501,9 +526,14 @@ export async function refreshGroup(
           prior.name && prior.name !== prior.protocol.toUpperCase()
             ? prior.name
             : deviceFresh.name || prior.name,
+        country: inferCountryMetadata(deviceFresh.name)?.label ?? prior.country,
         groupId,
         lastSeenInSubscriptionAt: now,
-        enabled: prior.enabled ?? true
+        removedFromSubscriptionAt: undefined,
+        enabledBeforeSubscriptionRemoval: undefined,
+        enabled: prior.removedFromSubscriptionAt
+          ? prior.enabledBeforeSubscriptionRemoval ?? true
+          : prior.enabled ?? true
       }
       merged.push(updated)
       updatedCount++
@@ -518,20 +548,35 @@ export async function refreshGroup(
     }
   }
 
-  // Profiles that were in the group but the upstream no longer lists.
-  // Per spec: leave them alone (don't disable, don't delete, don't update
-  // lastSeenInSubscriptionAt). We just count them for telemetry.
+  // A successful non-empty response is authoritative. Profiles absent from
+  // it remain visible as archived rows, but are disabled so neither the main
+  // VPN nor an external proxy can use them. Empty/failed responses returned
+  // earlier and therefore never reach here.
   let removedCount = 0
+  const removedProfileIds = new Set<string>()
+  const removedProfiles: ServerProfile[] = []
   for (const prior of inGroupExisting) {
     const key = profileTupleKey(prior)
     const profileDevice = normalizeClientDevice(options.clientDevice ?? prior.clientDevice ?? primaryDevice)
     const deviceKey = `${profileDevice}|${key}`
     if (seenDeviceKeys.has(deviceKey)) continue
-    merged.push(prior)
-    removedCount++
+    removedProfileIds.add(prior.id)
+    if (!prior.removedFromSubscriptionAt) removedCount++
+    removedProfiles.push({
+      ...prior,
+      removedFromSubscriptionAt: prior.removedFromSubscriptionAt ?? now,
+      enabledBeforeSubscriptionRemoval: prior.removedFromSubscriptionAt
+        ? prior.enabledBeforeSubscriptionRemoval
+        : prior.enabled !== false,
+      enabled: false
+    })
   }
 
-  savePickerProfiles([...outOfGroup, ...merged])
+  savePickerProfiles([...outOfGroup, ...merged, ...removedProfiles])
+  const activeProfileId = serverPickerStore.get('activeProfileId')
+  if (activeProfileId && removedProfileIds.has(activeProfileId)) {
+    serverPickerStore.set('activeProfileId', null)
+  }
 
   // The subscription answered with usable data. Default status is `active`,
   // but if the panel told us the trial already expired we honor that — the
@@ -561,12 +606,77 @@ export async function refreshGroup(
     id: groupId,
     added: addedCount,
     updated: updatedCount,
-    untouched: removedCount,
+    removed: removedCount,
     total: primaryResolved.profiles.length
   })
 
   const refreshed = getGroup(groupId)!
   return { ok: true, group: refreshed, addedCount, updatedCount, removedCount }
+}
+
+export function serverGroupRefreshIntervalMs(group: ServerGroup): number {
+  const providerIntervalMs = Number(group.refreshIntervalSeconds) * 1000
+  if (!Number.isFinite(providerIntervalMs) || providerIntervalMs <= 0) {
+    return DEFAULT_SERVER_GROUP_REFRESH_INTERVAL_MS
+  }
+  return Math.min(
+    MAX_SERVER_GROUP_REFRESH_INTERVAL_MS,
+    Math.max(MIN_SERVER_GROUP_REFRESH_INTERVAL_MS, providerIntervalMs)
+  )
+}
+
+export function isServerGroupRefreshDue(group: ServerGroup, now = Date.now()): boolean {
+  if (group.source !== 'subscription' || !group.sourceUrl) return false
+  const lastAttemptAt = group.lastFetchAttemptAt ?? group.lastFetchedAt ?? group.importedAt
+  return now - lastAttemptAt >= serverGroupRefreshIntervalMs(group)
+}
+
+export async function refreshDueServerGroups(now = Date.now()): Promise<{ refreshed: number; failed: number }> {
+  const dueGroups = getGroups().filter(group => isServerGroupRefreshDue(group, now))
+  let refreshed = 0
+  let failed = 0
+  for (const group of dueGroups) {
+    try {
+      const result = await refreshGroup(group.id)
+      if (result.ok) refreshed++
+      else failed++
+    } catch (error) {
+      failed++
+      logEvent('warn', 'server-groups', 'automatic refresh failed', { groupId: group.id, error })
+    }
+  }
+  return { refreshed, failed }
+}
+
+async function runAutomaticRefreshSweep(): Promise<void> {
+  if (autoRefreshSweepRunning) return
+  autoRefreshSweepRunning = true
+  try {
+    const result = await refreshDueServerGroups()
+    if (result.refreshed || result.failed) {
+      logEvent('info', 'server-groups', 'automatic refresh sweep finished', result)
+    }
+  } finally {
+    autoRefreshSweepRunning = false
+  }
+}
+
+export function startServerGroupAutoRefresh(): void {
+  stopServerGroupAutoRefresh()
+  initialAutoRefreshTimer = setTimeout(() => {
+    initialAutoRefreshTimer = null
+    void runAutomaticRefreshSweep()
+  }, SERVER_GROUP_INITIAL_REFRESH_DELAY_MS)
+  initialAutoRefreshTimer.unref?.()
+  autoRefreshTimer = setInterval(() => void runAutomaticRefreshSweep(), SERVER_GROUP_REFRESH_SWEEP_INTERVAL_MS)
+  autoRefreshTimer.unref?.()
+}
+
+export function stopServerGroupAutoRefresh(): void {
+  if (initialAutoRefreshTimer) clearTimeout(initialAutoRefreshTimer)
+  if (autoRefreshTimer) clearInterval(autoRefreshTimer)
+  initialAutoRefreshTimer = null
+  autoRefreshTimer = null
 }
 
 // ─── Delete handler ─────────────────────────────────────────────────────────
@@ -706,6 +816,9 @@ export const serverGroups = {
   findGroupBySourceUrl,
   ensureManualKeysGroup,
   refreshGroup,
+  refreshDueServerGroups,
+  startAutoRefresh: startServerGroupAutoRefresh,
+  stopAutoRefresh: stopServerGroupAutoRefresh,
   registerHandlers: registerServerGroupsHandlers
 }
 

@@ -1,6 +1,6 @@
 {
   "name": "vpn-tunnel-enforcer",
-  "version": "1.1.1",
+  "version": "1.1.8",
   "description": "Force all traffic through VPN Happ — Hard (TUN) or Soft (Autoconfig) mode with IP leak monitoring",
   "main": "./out/main/index.js",
   "scripts": {
@@ -20,6 +20,7 @@
   "dependencies": {
     "axios": "^1.7.2",
     "electron-store": "^8.1.0",
+    "flag-icons": "^7.5.0",
     "socks": "^2.8.3",
     "sudo-prompt": "^9.2.1",
     "tldts": "^7.4.8"

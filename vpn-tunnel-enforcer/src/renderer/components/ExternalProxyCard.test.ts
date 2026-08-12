@@ -69,6 +69,29 @@ describe('external proxy UI refresh policy', () => {
   })
 })
 
+describe('explicit external proxy assignment', () => {
+  const cardSource = readFileSync(join(process.cwd(), 'src', 'renderer', 'components', 'ExternalProxyCard.tsx'), 'utf8')
+  const serversSource = readFileSync(join(process.cwd(), 'src', 'renderer', 'pages', 'Servers.tsx'), 'utf8')
+
+  it('requires a selected profile when starting a new proxy slot', () => {
+    expect(cardSource).toContain('label="Сервер для нового прокси"')
+    expect(cardSource).toContain('externalProxyStart({ slot, profileId })')
+    expect(cardSource).not.toContain('externalProxyStart({ slot })')
+  })
+
+  it('starts exactly one selected server from its row action', () => {
+    expect(serversSource).toContain('externalProxyStartProfiles([profile.id])')
+    expect(serversSource).toContain('Запустить этот сервер как внешний прокси')
+  })
+
+  it('separates removed subscription servers and excludes them from group proxy starts', () => {
+    expect(serversSource).toContain("t('servers.groups.removedServers')")
+    expect(serversSource).toContain('profile.removedFromSubscriptionAt')
+    expect(serversSource).toContain('externalProxyStartProfiles(availableProfiles.map')
+    expect(serversSource).toContain('startingProxy || isActive || staleFromSub')
+  })
+})
+
 describe('dashboard rendering regressions', () => {
   const source = readFileSync(join(process.cwd(), 'src', 'renderer', 'pages', 'Dashboard.tsx'), 'utf8')
 

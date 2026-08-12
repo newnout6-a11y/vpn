@@ -11,6 +11,7 @@ import { ExternalProxyCard } from '../components/ExternalProxyCard'
 import { ProfileSelectorInline } from '../components/ProfileSelectorInline'
 import { ForeignVpnBanner } from '../components/ForeignVpnBanner'
 import { DashboardSide } from '../components/DashboardSide'
+import { CountryFlagIcon } from '../components/CountryFlagIcon'
 import {
   CheckCircle2,
   AlertTriangle,
@@ -80,26 +81,6 @@ function formatBytes(bytes: number): string {
 let toastIdCounter = 0
 function nextToastId(): string {
   return `toast-${++toastIdCounter}-${Date.now()}`
-}
-
-function countryFlag(country: string | null): string {
-  if (!country) return ''
-  const map: Record<string, string> = {
-    'Poland': '🇵🇱', 'Norway': '🇳🇴', 'Latvia': '🇱🇻', 'Sweden': '🇸🇪',
-    'Germany': '🇩🇪', 'Kazakhstan': '🇰🇿', 'Japan': '🇯🇵', 'United States': '🇺🇸',
-    'Russia': '🇷🇺', 'Netherlands': '🇳🇱', 'France': '🇫🇷', 'United Kingdom': '🇬🇧',
-    'Finland': '🇫🇮', 'Estonia': '🇪🇪', 'Lithuania': '🇱🇹', 'Czechia': '🇨🇿',
-    'Czech Republic': '🇨🇿', 'Switzerland': '🇨🇭', 'Austria': '🇦🇹', 'Italy': '🇮🇹',
-    'Spain': '🇪🇸', 'Canada': '🇨🇦', 'Singapore': '🇸🇬', 'Hong Kong': '🇭🇰',
-    'South Korea': '🇰🇷', 'Korea': '🇰🇷', 'Turkey': '🇹🇷', 'Ukraine': '🇺🇦',
-    'Belarus': '🇧🇾', 'Romania': '🇷🇴', 'Bulgaria': '🇧🇬', 'Hungary': '🇭🇺',
-    'Slovakia': '🇸🇰', 'Greece': '🇬🇷', 'Portugal': '🇵🇹', 'Belgium': '🇧🇪',
-    'Denmark': '🇩🇰', 'Ireland': '🇮🇪', 'Australia': '🇦🇺', 'New Zealand': '🇳🇿',
-    'India': '🇮🇳', 'Brazil': '🇧🇷', 'Argentina': '🇦🇷', 'Mexico': '🇲🇽',
-    'Chile': '🇨🇱', 'South Africa': '🇿🇦', 'Israel': '🇮🇱', 'UAE': '🇦🇪',
-    'United Arab Emirates': '🇦🇪'
-  }
-  return map[country] || '🌐'
 }
 
 // ─── Dashboard Component ────────────────────────────────────────────────────
@@ -721,7 +702,7 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
               <span className="flex items-center gap-1.5 rounded-full bg-[var(--color-success)]/10 px-3 py-1.5 text-[var(--color-success)]">
                 <CheckCircle2 className="w-3.5 h-3.5" />
                 {ipGeo.country && (
-                  <span className="text-base leading-none">{countryFlag(ipGeo.country)}</span>
+                  <CountryFlagIcon country={ipGeo.country} className="h-4 w-4" />
                 )}
                 <span className="font-mono">{publicIp}</span>
                 {ipGeo.country && (

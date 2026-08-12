@@ -11,6 +11,11 @@ import { describe, it, expect, vi } from 'vitest'
 vi.mock('electron-store', () => ({ default: class { get() { return [] } set() {} } }))
 vi.mock('socks', () => ({ SocksClient: { createConnection: vi.fn() } }))
 vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
+vi.mock('./physicalAdapterLockdown', () => ({
+  getPhysicalAdapterDnsSources: vi.fn(async () => [
+    { ifIndex: 17, alias: 'Wi-Fi', ipv4DnsServers: ['192.168.0.1'] }
+  ])
+}))
 vi.mock('./tunController', () => ({
   tunController: { getStatus: () => ({ running: false }) },
   getDirectProxyPort: () => null,
@@ -19,7 +24,12 @@ vi.mock('./tunController', () => ({
   sanitizeProxyOutbound: (outbound: Record<string, any>) => ({ outbound, needsBootstrapDns: false })
 }))
 
-import { classifyHysteria2ProbeFailure, describeProbeTarget } from './keyHealthChecker'
+import {
+  buildKeyProbeConfig,
+  classifyHysteria2ProbeFailure,
+  classifyOutboundProbeFailure,
+  describeProbeTarget
+} from './keyHealthChecker'
 import type { ServerProfile } from '../shared/ipc-types'
 
 function profile(outbound: Record<string, any>): ServerProfile {
@@ -83,5 +93,59 @@ describe('classifyHysteria2ProbeFailure', () => {
 
   it('classifies config/runtime incompatibility before generic handshake failure', () => {
     expect(classifyHysteria2ProbeFailure('decode config at /outbounds/0: unknown field gecko')).toBe('hy2-config-failed')
+  })
+})
+
+describe('buildKeyProbeConfig', () => {
+  const realityProfile = profile({
+    type: 'vless',
+    server: '185.81.129.169',
+    server_port: 443,
+    uuid: '11111111-1111-1111-1111-111111111111',
+    tls: {
+      enabled: true,
+      server_name: 'www.microsoft.com',
+      reality: { enabled: true, public_key: 'public-key', short_id: 'abcd' }
+    }
+  })
+
+  it('keeps the complete key outbound and detours only its underlying dial', () => {
+    const config = buildKeyProbeConfig(realityProfile, 50123, {
+      directProxy: { host: '127.0.0.1', port: 53648 }
+    })
+
+    expect(config.route.final).toBe('proxy-out')
+    expect(config.outbounds[0]).toMatchObject({
+      type: 'vless',
+      tag: 'proxy-out',
+      uuid: '11111111-1111-1111-1111-111111111111',
+      detour: 'probe-direct-out',
+      tls: { reality: { public_key: 'public-key', short_id: 'abcd' } }
+    })
+    expect(config.outbounds[1]).toMatchObject({
+      type: 'socks',
+      tag: 'probe-direct-out',
+      server: '127.0.0.1',
+      server_port: 53648
+    })
+  })
+
+  it('binds directly to the physical interface when our TUN is not running', () => {
+    const config = buildKeyProbeConfig(realityProfile, 50123, {
+      physicalInterface: 'Wi-Fi'
+    })
+
+    expect(config.outbounds[0].bind_interface).toBe('Wi-Fi')
+    expect(config.outbounds[0].detour).toBeUndefined()
+    expect(config.outbounds[1]).toEqual({ type: 'direct', tag: 'probe-direct-out' })
+  })
+})
+
+describe('classifyOutboundProbeFailure', () => {
+  it('separates auth, TLS, timeout, and config failures', () => {
+    expect(classifyOutboundProbeFailure('vless', 'authentication failed')).toBe('auth-failed')
+    expect(classifyOutboundProbeFailure('vless', 'reality verification failed')).toBe('tls-failed')
+    expect(classifyOutboundProbeFailure('vless', 'context deadline exceeded')).toBe('timeout')
+    expect(classifyOutboundProbeFailure('vless', 'decode config: unknown field')).toBe('config-failed')
   })
 })

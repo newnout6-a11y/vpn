@@ -24,7 +24,7 @@ Automatically detects local proxies from:
 ### Server Management
 - Groups keys by subscription, preserves removed-but-still-working post-trial keys
 - Subscription refresh with connection-tuple dedup, multi-device support, DoH bypass for blocked URLs
-- Key health checking (TCP + TLS for standard protocols, full sing-box subprocess for Hysteria2)
+- End-to-end key health checking through an isolated sing-box outbound for every supported protocol
 - Per-profile client device identity (PC/Android/iOS/macOS) with uTLS fingerprint emulation
 - Geolocation via 5-source voting (ip-api.com + ipwho.is + ipinfo.is + ipinfo.io + iplocation.net)
 - Export keys to URI (all protocols) or bulk file
@@ -152,12 +152,13 @@ Packaged builds include `vpnte-proxy.ps1` and `vpnte-proxy.cmd`. The app listens
 |---|---|---|---|
 | `/status` | GET | No | Current proxy URL (`?slot=1..47546`) |
 | `/instances` | GET | No | Proxy instances with cached data-plane health |
-| `/list` | GET | No | Profile list (optional `?country=`) |
+| `/list` | GET | No | Profile list with persisted health (optional `?country=`) |
 | `/start` | POST | Yes | Start with auto-picked profile (`?slot=1..47546`) |
 | `/rotate` | POST | Yes | Round-robin next profile (`?slot=1..47546`) |
 | `/connect` | POST | Yes | Specific profileId (`?slot=1..47546`) |
 | `/trigger` | POST | Yes | Fire-and-forget reconnect (`?slot=1..47546`) |
 | `/healthcheck` | POST | Yes | Run an immediate data-plane check for one slot |
+| `/profiles/healthcheck` | POST | Yes | Check every profile in `?groupId=...` and persist live/dead status |
 | `/stop` | POST | Yes | Kill proxy process (`?slot=1..47546`) |
 
 Token: `X-VPNTE-Control-Token` header, generated per session, written to `%APPDATA%\VPN Tunnel Enforcer\external-proxy-control-token`. `vpnte-proxy.ps1` reads the endpoint file automatically and also accepts `VPNTE_CONTROL_URL` as an override.
@@ -165,6 +166,8 @@ Token: `X-VPNTE-Control-Token` header, generated per session, written to `%APPDA
 Slot 1 uses the legacy proxy port `17990`; each following slot uses the next TCP port. For example, slot 100 uses port `18089`. The PowerShell helper accepts `-Slot 1..47546` and derives the matching default port automatically.
 
 Each `/instances` row includes `health` (`healthy`, `checking`, or `unhealthy`), `egressIp`, `latencyMs`, `lastCheckedAt`, `lastSuccessAt`, and `lastError`. `running` is true only after both the external-IP and HTTPS probes succeed through that row's `proxyUrl`; `processRunning` reports only whether the managed child process is still alive. Repeated timeout/EOF health failures trigger bounded restart attempts, then disable the slot while retaining its diagnostic result.
+
+Each `/list` row includes `status` (`online`, `offline`, or `unknown`), `lastCheckedAt`, `healthLatencyMs`, `healthReason`, `selectedForVpn`, and the external-proxy `activeSlots`. Run `vpnte-proxy.ps1 profiles-health <groupId> -Json` to refresh these values through the authenticated API.
 
 ## Boot-Time Recovery
 

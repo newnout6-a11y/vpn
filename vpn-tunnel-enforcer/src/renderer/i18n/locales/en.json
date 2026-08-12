@@ -184,6 +184,10 @@
       "serverCount": "{{count}} servers",
       "serverCount_one": "{{count}} server",
       "serverCount_other": "{{count}} servers",
+      "removedServerCount": "{{count}} removed",
+      "removedServers": "Removed servers",
+      "noActiveServers": "No active servers remain in this subscription",
+      "removedProxyUnavailable": "Removed servers cannot be assigned to a proxy",
       "expiredBanner": "Source subscription expired but we kept your keys. They often keep working for days/weeks after a trial ends because providers don't immediately revoke access. Click «Check keys» to see which are still alive, or just try connecting to a server you like — if it works, great.",
       "expiredBannerToast": "Source subscription stopped responding. Saved keys remain — they often keep working for a while after a trial ends. Try connecting while it still works.",
       "removedFromSub": "Removed from subscription",
@@ -226,7 +230,20 @@
       "aliveCount": "Alive keys: {{count}} of {{total}}",
       "alive": "Alive",
       "dead": "Dead",
-      "neverChecked": "Not checked"
+      "neverChecked": "Not checked",
+      "reasons": {
+        "auth-failed": "The server rejected the key or password",
+        "tls-failed": "The TLS/Reality handshake failed",
+        "timeout": "The server did not transfer data in time",
+        "config-failed": "The key configuration is not supported",
+        "handshake-failed": "The server is reachable, but the key could not connect",
+        "no-outbound": "The profile has no connection configuration",
+        "hy2-auth-failed": "The server rejected the Hysteria2 password",
+        "hy2-udp-blocked": "UDP/QUIC is unavailable for Hysteria2",
+        "hy2-tls-failed": "The Hysteria2 TLS handshake failed",
+        "hy2-config-failed": "The Hysteria2 configuration is not supported",
+        "hy2-handshake-failed": "Hysteria2 could not establish a connection"
+      }
     }
   },
   "serverDetail": {
@@ -283,7 +300,8 @@
     "groupStatusActive": "Active",
     "groupStatusExpired": "Expired",
     "groupStatusUnreachable": "Unreachable",
-    "groupStatusUnknown": "Unknown"
+    "groupStatusUnknown": "Unknown",
+    "pingSelectedLong": "Measure latency to the server directly, bypassing the VPN tunnel."
   },
   "dashboardSide": {
     "groupActive": "A",

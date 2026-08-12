@@ -6,7 +6,7 @@ import { X } from 'lucide-react'
 export interface MacModalProps {
   open: boolean
   onClose: () => void
-  title?: string
+  title?: React.ReactNode
   description?: string
   children: React.ReactNode
   className?: string

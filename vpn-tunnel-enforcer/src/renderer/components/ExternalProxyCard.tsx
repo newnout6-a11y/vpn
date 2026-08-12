@@ -2,8 +2,10 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Globe2, Loader2, Plus, RefreshCw, Square } from 'lucide-react'
 import { MacCard } from '../design-system/MacCard'
 import { MacButton } from '../design-system/MacButton'
+import { MacSelect, type SelectOption } from '../design-system/MacSelect'
 import { useAppStore } from '../store'
-import type { ExternalProxyInstanceStatus, ExternalProxyStatus } from '../../shared/ipc-types'
+import { SERVER_CHANGED_EVENT } from '../nav'
+import type { ExternalProxyInstanceStatus, ExternalProxyProfileRow, ExternalProxyStatus } from '../../shared/ipc-types'
 
 const STOPPED: ExternalProxyStatus = {
   slot: 1,
@@ -54,9 +56,9 @@ const STOPPED: ExternalProxyStatus = {
 
 type BusyAction = 'start' | 'stop' | 'rotate' | 'stopAll'
 const EXTERNAL_PROXY_CHANGED_EVENT = 'vpnte:external-proxy-changed'
-export const EXTERNAL_PROXY_UNSTABLE_REFRESH_INTERVAL_MS = 10_000
-export const EXTERNAL_PROXY_HEALTHY_REFRESH_INTERVAL_MS = 30_000
-export const EXTERNAL_PROXY_IDLE_REFRESH_INTERVAL_MS = 120_000
+export const EXTERNAL_PROXY_UNSTABLE_REFRESH_INTERVAL_MS = 3_000
+export const EXTERNAL_PROXY_HEALTHY_REFRESH_INTERVAL_MS = 10_000
+export const EXTERNAL_PROXY_IDLE_REFRESH_INTERVAL_MS = 10_000
 
 export function externalProxyRefreshIntervalMs(status: ExternalProxyStatus): number {
   const runningInstances = status.instances.filter((instance) => instance.processRunning)
@@ -102,6 +104,8 @@ export function ExternalProxyCard() {
   const addGlobalToast = useAppStore(s => s.addGlobalToast)
 
   const [status, setStatus] = useState<ExternalProxyStatus>(STOPPED)
+  const [availableProfiles, setAvailableProfiles] = useState<ExternalProxyProfileRow[]>([])
+  const [selectedProfileId, setSelectedProfileId] = useState('')
   const [busy, setBusy] = useState<{ slot: number | 'all'; action: BusyAction } | null>(null)
   const [error, setError] = useState<string | null>(null)
   const statusRef = useRef(status)
@@ -132,9 +136,18 @@ export function ExternalProxyCard() {
     refreshInFlightRef.current = true
     const refreshVersion = refreshVersionRef.current
     try {
-      const next = await window.electronAPI.externalProxyStatus()
+      const [next, profiles] = await Promise.all([
+        window.electronAPI.externalProxyStatus(),
+        window.electronAPI.externalProxyList()
+      ])
       if (refreshVersion === refreshVersionRef.current) {
         applyStatus(next ?? STOPPED)
+        setAvailableProfiles(profiles)
+        setSelectedProfileId((current) => {
+          const canUse = (row: ExternalProxyProfileRow) => !row.active && !row.selectedForVpn
+          if (profiles.some((row) => row.id === current && canUse(row))) return current
+          return profiles.find(canUse)?.id ?? ''
+        })
       }
     } catch {
       // Status polling is advisory. Controls surface actionable failures.
@@ -180,27 +193,32 @@ export function ExternalProxyCard() {
     scheduleRefreshRef.current = scheduleRefresh
     refreshNow()
     window.addEventListener(EXTERNAL_PROXY_CHANGED_EVENT, refreshNow)
+    window.addEventListener(SERVER_CHANGED_EVENT, refreshNow)
+    window.addEventListener('focus', refreshNow)
     document.addEventListener('visibilitychange', handleVisibilityChange)
     return () => {
       disposed = true
       clearScheduledRefresh()
       scheduleRefreshRef.current = () => undefined
       window.removeEventListener(EXTERNAL_PROXY_CHANGED_EVENT, refreshNow)
+      window.removeEventListener(SERVER_CHANGED_EVENT, refreshNow)
+      window.removeEventListener('focus', refreshNow)
       document.removeEventListener('visibilitychange', handleVisibilityChange)
     }
   }, [refreshStatus])
 
-  const runAction = async (slot: number, action: BusyAction) => {
+  const runAction = async (slot: number, action: BusyAction, profileId?: string) => {
     setBusy({ slot, action })
     setError(null)
     refreshVersionRef.current += 1
     try {
       const next = action === 'start'
-        ? await window.electronAPI.externalProxyStart({ slot })
+        ? await window.electronAPI.externalProxyStart({ slot, profileId })
         : action === 'stop'
           ? await window.electronAPI.externalProxyStop(slot)
           : await window.electronAPI.externalProxyRotate(slot)
       applyStatus(next ?? STOPPED)
+      void refreshStatus()
       scheduleRefreshRef.current()
       return next
     } catch (err: any) {
@@ -215,10 +233,15 @@ export function ExternalProxyCard() {
   }
 
   const handleAdd = async () => {
+    const selectedProfile = availableProfiles.find((profile) => profile.id === selectedProfileId)
+    if (!selectedProfile) {
+      setError('Выберите конкретный сервер для внешнего прокси')
+      return
+    }
     const slot = firstAvailableSlot(instances)
 
-    addLog('info', `Внешний прокси ${slot}: запускаем sing-box`)
-    const next = await runAction(slot, 'start')
+    addLog('info', `Внешний прокси ${slot}: запускаем ${selectedProfile.name}`)
+    const next = await runAction(slot, 'start', selectedProfile.id)
     if (next?.processRunning) {
       addGlobalToast('success', `Внешний прокси ${slot} запущен`, next.proxyUrl ?? undefined)
       addLog('info', `Внешний прокси ${slot} запущен: ${next.proxyUrl} (${next.profileName ?? 'без имени'})`)
@@ -265,6 +288,30 @@ export function ExternalProxyCard() {
   }
 
   const isBusy = busy !== null
+  const profileOptions: SelectOption[] = availableProfiles.map((profile) => {
+    const indicator = profile.status === 'online'
+      ? 'success' as const
+      : profile.status === 'offline'
+        ? 'danger' as const
+        : 'muted' as const
+    const indicatorLabel = profile.status === 'online'
+      ? 'Сервер доступен'
+      : profile.status === 'offline'
+        ? 'Сервер не отвечает'
+        : 'Сервер не проверен'
+    const assignmentLabel = profile.active
+      ? 'уже в прокси'
+      : profile.selectedForVpn
+        ? 'текущий VPN'
+        : null
+    return {
+      value: profile.id,
+      label: [profile.name, profile.country, profile.protocol.toUpperCase(), assignmentLabel].filter(Boolean).join(' · '),
+      indicator,
+      indicatorLabel,
+      disabled: profile.active || profile.selectedForVpn
+    }
+  })
   return (
     <MacCard>
       <div className="flex items-start justify-between gap-3">
@@ -293,17 +340,29 @@ export function ExternalProxyCard() {
             {busy?.action === 'stopAll' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Square className="w-4 h-4" />}
             Остановить все
           </MacButton>
-          <MacButton
-            variant="primary"
-            size="sm"
-            onClick={handleAdd}
-            disabled={isBusy}
-            title="Добавить внешний прокси"
-          >
-            {busy?.action === 'start' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
-            Добавить прокси
-          </MacButton>
         </div>
+      </div>
+
+      <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
+        <MacSelect
+          label="Сервер для нового прокси"
+          options={profileOptions}
+          value={selectedProfileId}
+          onChange={setSelectedProfileId}
+          placeholder={profileOptions.length ? 'Выберите сервер' : 'Нет доступных серверов'}
+          disabled={isBusy || profileOptions.length === 0}
+        />
+        <MacButton
+          variant="primary"
+          size="sm"
+          onClick={handleAdd}
+          disabled={isBusy || !selectedProfileId}
+          title="Запустить выбранный сервер как внешний прокси"
+          className="md:min-w-32"
+        >
+          {busy?.action === 'start' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
+          Запустить
+        </MacButton>
       </div>
 
       {instances.length > 0 && (

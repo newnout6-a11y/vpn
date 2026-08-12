@@ -39,7 +39,22 @@ vi.mock('./serverGroups', () => ({
   refreshGroup: vi.fn()
 }))
 
-import { isProbablyHostOrIp, parseIcmpReply } from './serverPicker'
+import { isProbablyHostOrIp, medianLatency, parseIcmpReply } from './serverPicker'
+
+describe('medianLatency', () => {
+  it('ignores failed attempts and keeps a successful retry', () => {
+    expect(medianLatency([null, 64])).toBe(64)
+  })
+
+  it('uses the median instead of a transient extreme', () => {
+    expect(medianLatency([115, 24, 25])).toBe(25)
+    expect(medianLatency([40, 44])).toBe(42)
+  })
+
+  it('returns null when every attempt failed', () => {
+    expect(medianLatency([null, null])).toBeNull()
+  })
+})
 
 describe('isProbablyHostOrIp', () => {
   it('accepts plain IPv4', () => {

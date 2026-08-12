@@ -54,7 +54,11 @@ import { resolveVpnProfile, resolveVpnProfiles, redactSensitiveConfig, type VpnP
 // ─── V2 Feature Modules ──────────────────────────────────────────────────────
 import { registerSplitTunnelHandlers } from './splitTunneling'
 import { registerServerPickerHandlers, serverPicker } from './serverPicker'
-import { registerServerGroupsHandlers } from './serverGroups'
+import {
+  registerServerGroupsHandlers,
+  startServerGroupAutoRefresh,
+  stopServerGroupAutoRefresh
+} from './serverGroups'
 import { registerServerProbeIpcHandlers } from './serverProbe'
 import { registerUrlAvailabilityHandlers } from './urlAvailability'
 import { registerSpeedTestHandlers } from './speedTest'
@@ -1782,6 +1786,10 @@ app.whenReady().then(async () => {
   // classifier re-bin previously-orphaned keys on the next migration pass.
   // Idempotent — safe to run on every startup.
   serverPicker.backfillProfileSourceUris()
+  // Provider labels commonly carry either a flag emoji or a concatenated
+  // country name (for example "latviavless4"). Persist that metadata for old
+  // installs as well as newly imported profiles.
+  serverPicker.backfillProfileCountriesFromNames()
 
   // One-time wipe of stale stored ping/status/lastChecked. Earlier builds
   // (pre-D6.5) stamped tunnel-RTT onto the active profile during connected
@@ -1789,6 +1797,7 @@ app.whenReady().then(async () => {
   // We clear them on startup so the user starts every session from a clean
   // baseline; the next offline pingAll repopulates with real numbers.
   serverPicker.clearStaleStoredPings()
+  startServerGroupAutoRefresh()
   // Country geolocation is intentionally manual now: subscriptions can carry
   // many servers, and automatically querying several public geo databases for
   // every missing entry makes refresh/startup slow and burns external limits.
@@ -1999,6 +2008,7 @@ async function performShutdownCleanup(reason: string): Promise<void> {
     stopElevatedPsHelper()
   } catch {}
 
+  stopServerGroupAutoRefresh()
   stopBackgroundTrafficHistory()
 }
 

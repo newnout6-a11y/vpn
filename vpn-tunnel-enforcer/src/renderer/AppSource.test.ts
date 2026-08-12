@@ -95,11 +95,11 @@ describe('App source regressions', () => {
     expect(traffic).not.toContain('<motion.div')
   })
 
-  it('keeps dashboard readers event-driven or low-frequency', () => {
+  it('keeps dashboard readers event-driven with bounded fallback polling', () => {
     const dashboardSide = dashboardSideSource()
     const diagnostics = diagnosticsCardSource()
 
-    expect(dashboardSide).toContain('QUICK_SERVERS_REFRESH_INTERVAL_MS = 30_000')
+    expect(dashboardSide).toContain('QUICK_SERVERS_REFRESH_INTERVAL_MS = 10_000')
     expect(dashboardSide).toContain('window.setInterval(refresh, QUICK_SERVERS_REFRESH_INTERVAL_MS)')
     expect(dashboardSide).not.toContain('setInterval(refresh, 15_000)')
     expect(diagnostics).toContain('FORENSICS_RUNNING_POLL_INTERVAL_MS = 10_000')
@@ -221,5 +221,32 @@ describe('App source regressions', () => {
     expect(settings).not.toContain('Открывает страницы Приложения и Починка')
     expect(settings).not.toContain('через выбранный proxy')
     expect(store).toContain('deepTrafficInspectionEnabled: false')
+  })
+
+  it('renders proxy health as a visual indicator and refreshes server-backed widgets promptly', () => {
+    const proxy = externalProxyCardSource()
+    const select = macSelectSource()
+    const side = dashboardSideSource()
+
+    expect(proxy).not.toContain("? 'живой'")
+    expect(proxy).toContain("? 'success' as const")
+    expect(proxy).toContain("window.addEventListener(SERVER_CHANGED_EVENT, refreshNow)")
+    expect(proxy).toContain('EXTERNAL_PROXY_IDLE_REFRESH_INTERVAL_MS = 10_000')
+    expect(select).toContain('indicator?:')
+    expect(select).toContain('<OptionLabel option={option} />')
+    expect(side).toContain('QUICK_SERVERS_REFRESH_INTERVAL_MS = 10_000')
+    expect(side).toContain("window.addEventListener('focus', handler)")
+  })
+
+  it('separates archived servers on the dashboard and uses distinct row action icons', () => {
+    const side = dashboardSideSource()
+    const servers = serversSource()
+
+    expect(side).toContain('const removedRows = cluster.rows.filter(row => row.removed)')
+    expect(side).toContain("t('servers.groups.removedServers', 'Удалённые серверы')")
+    expect(side).toContain('<ArchiveX className="h-3.5 w-3.5')
+    expect(servers).toContain('<Waypoints size={12} />')
+    expect(servers).toContain('<MapPin size={12} />')
+    expect(servers).not.toContain('<Globe2 size={12} />')
   })
 })

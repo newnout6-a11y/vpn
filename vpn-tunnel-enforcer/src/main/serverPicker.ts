@@ -35,7 +35,7 @@ import {
   type VpnProfile
 } from './vpnProfiles'
 import { settingsStore } from './settings'
-import { tunController } from './tunController'
+import { getDirectProxyPort, tunController } from './tunController'
 import { beginAdaptiveConnection } from './adaptiveBypass'
 import { ipMonitor } from './ipMonitor'
 import {
@@ -46,6 +46,8 @@ import {
   refreshGroup as refreshSubscriptionGroup
 } from './serverGroups'
 import type { ClientDevice, ServerProfile } from '../shared/ipc-types'
+import { inferCountryMetadata } from '../shared/countries'
+import { reliableSocksTcpPing } from './socksPing'
 
 const RESOLVED_IP_TTL_MS = 5 * 60_000
 const DNS_RESOLUTION_TIMEOUT_MS = 2500
@@ -93,7 +95,6 @@ const store = new Store<ServerPickerStore>({
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const PING_TIMEOUT_MS = 3500
 const PING_CONCURRENCY = 5
 
 // Neutral "is the tunnel responsive" probe targets, ordered RU-friendly first.
@@ -173,6 +174,8 @@ const TUNNEL_PROBE_URL_TIMEOUT_MS = 4000
 // sweet spot between "give a slow link a chance" and "don't make the UI
 // hang on dead servers".
 const ICMP_PROBE_TIMEOUT_MS = 1500
+const TCP_PROBE_TIMEOUT_MS = 1800
+const TCP_PROBE_ATTEMPTS = 3
 const PHYSICAL_SOURCE_CACHE_MS = 60_000
 
 interface PhysicalIpv4Source {
@@ -181,29 +184,23 @@ interface PhysicalIpv4Source {
 }
 
 let physicalSourceCache: { value: PhysicalIpv4Source[]; at: number } | null = null
+let physicalSourceLookup: Promise<PhysicalIpv4Source[]> | null = null
 
 // ─── Ping Measurement ────────────────────────────────────────────────────────
 
 /**
- * Measures latency to a server, with two paths:
- *
- *   1. VPN OFF → smart offline ladder. Plain TCP-connect to known VPN IPs
- *      gets blackholed at the firewall on Russian university nets and
- *      similar TSPU-policed networks: the operator instant-RSTs anything
- *      that looks like a VPN endpoint, so every server shows "—".
- *      `smartOfflinePing` tries ICMP first (rarely blocked, no SNI on the
- *      wire), then falls back to plain TCP — see its own JSDoc.
- *
- *   2. VPN ON → race a list of HTTPS probes through the tunnel. Whichever
- *      one returns first wins. RU-friendly endpoints (yandex.ru,
- *      gosuslugi.ru) are listed first; global fallbacks come after.
- *
- * Returns latency in ms or null if the server is fully unreachable.
+ * Measures the server endpoint through the physical internet connection.
+ * While TUN is active, mixed-direct-in routes the SOCKS CONNECT to direct-out;
+ * it never traverses proxy-out and therefore remains comparable with the
+ * disconnected measurement.
  */
-export function pingServer(host: string, port: number, opts?: { skipCache?: boolean }): Promise<number | null> {
-  return tunController.getStatus().running
-    ? tunnelHttpProbe(opts?.skipCache === true)
-    : smartOfflinePing(host, port)
+export async function pingServer(
+  host: string,
+  port: number,
+  _opts?: { skipCache?: boolean }
+): Promise<number | null> {
+  const tunnelRunning = tunController.getStatus().running
+  return smartEndpointPing(host, port, tunnelRunning, getDirectProxyPort())
 }
 
 /**
@@ -325,18 +322,42 @@ export async function tunnelHttpProbe(skipCache = false): Promise<number | null>
  * afford to block.)
  */
 export async function smartOfflinePing(host: string, port: number): Promise<number | null> {
+  return smartEndpointPing(host, port, false)
+}
+
+export async function smartEndpointPing(
+  host: string,
+  port: number,
+  tunnelRunning: boolean,
+  directProxyPort: number | null = null
+): Promise<number | null> {
   const isLoopback = /^127\./.test(host) || host === '::1' || host === 'localhost'
 
-  // Rung order is chosen so the number the user sees reflects REAL endpoint
-  // reachability under RU conditions, not a meaningless router echo.
-  //
-  // 0. Try Windows ping forced through a physical IPv4 source address. This
-  //    bypasses cases where an always-on VPN or local proxy hijacks the
-  //    default route even while our own tunnel is off. If a real physical
-  //    adapter can reach the endpoint, this gives us the direct RTT the user
-  //    expects when they ask for "ping without VPN".
-  const directPhysical = await physicalSourcePing(host)
-  if (directPhysical != null) return directPhysical
+  if (tunnelRunning && directProxyPort != null) {
+    const direct = await reliableSocksTcpPing(
+      directProxyPort,
+      host,
+      port,
+      TCP_PROBE_TIMEOUT_MS,
+      TCP_PROBE_ATTEMPTS
+    )
+    if (direct != null) return direct
+  }
+
+  // Bind both probes to the physical adapter. TCP proves the actual VPN port;
+  // ICMP keeps UDP-only endpoints measurable. Three concurrent TCP attempts
+  // let the median ignore one dropped SYN or one cold-route latency spike.
+  const directTcpPromise = physicalSourceTcpPing(host, port)
+  const directIcmpPromise = physicalSourcePing(host)
+  const directTcp = await directTcpPromise
+  if (isPlausibleRemoteLatency(directTcp, isLoopback)) return directTcp
+  const directIcmp = await directIcmpPromise
+  if (directIcmp != null) return directIcmp
+
+  // An unbound socket is captured by sing-box while TUN is active. Depending
+  // on route timing it returns a fake local 1-3 ms connect or times out. Never
+  // turn that local event into the selected server's RTT.
+  if (tunnelRunning && !isLoopback) return null
 
   //
   // 1. TCP-connect to the actual VPN port. This is the strongest cheap
@@ -344,7 +365,7 @@ export async function smartOfflinePing(host: string, port: number): Promise<numb
   //    network. If TSPU has IP-blackholed the server (the common RU failure),
   //    the SYN gets no SYN-ACK and this fails — correctly reporting the
   //    server as unreachable. No SNI/TLS on the wire, so it's DPI-safe.
-  let tcp = await plainTcpPing(host, port)
+  let tcp = await reliableTcpPing(host, port)
   
   // Anti-fake gate: some mobile and TSPU networks transparently intercept port
   // 443, spoofing the SYN-ACK locally in 1-3ms so they can inspect the SNI.
@@ -373,6 +394,10 @@ export async function smartOfflinePing(host: string, port: number): Promise<numb
   return null
 }
 
+function isPlausibleRemoteLatency(value: number | null, isLoopback: boolean): value is number {
+  return value != null && (isLoopback || value > 3)
+}
+
 async function physicalSourcePing(host: string): Promise<number | null> {
   if (process.platform !== 'win32') return null
   if (!isProbablyHostOrIp(host)) return null
@@ -386,12 +411,38 @@ async function physicalSourcePing(host: string): Promise<number | null> {
   return null
 }
 
+async function physicalSourceTcpPing(host: string, port: number): Promise<number | null> {
+  if (process.platform !== 'win32') return null
+  if (!isProbablyHostOrIp(host) || host.includes(':')) return null
+
+  const sources = await getPhysicalIpv4Sources()
+  const isLoopback = /^127\./.test(host) || host === 'localhost'
+  for (const source of sources) {
+    const latency = await reliableTcpPing(host, port, source.ipv4)
+    if (isPlausibleRemoteLatency(latency, isLoopback)) return latency
+  }
+  return null
+}
+
 async function getPhysicalIpv4Sources(): Promise<PhysicalIpv4Source[]> {
   if (process.platform !== 'win32') return []
   if (physicalSourceCache && Date.now() - physicalSourceCache.at < PHYSICAL_SOURCE_CACHE_MS) {
     return physicalSourceCache.value
   }
 
+  // A batch ping reaches this function concurrently. Share one adapter lookup
+  // instead of launching a PowerShell process for every visible server.
+  if (physicalSourceLookup) return physicalSourceLookup
+
+  physicalSourceLookup = loadPhysicalIpv4Sources()
+  try {
+    return await physicalSourceLookup
+  } finally {
+    physicalSourceLookup = null
+  }
+}
+
+async function loadPhysicalIpv4Sources(): Promise<PhysicalIpv4Source[]> {
   const script = `
 [Console]::OutputEncoding=[System.Text.Encoding]::UTF8
 $OutputEncoding=[System.Text.Encoding]::UTF8
@@ -604,7 +655,7 @@ function decodeMaybeCp866(buf: Buffer): string {
  * answers. Anything more (TLS handshake) would leak server_name and
  * trigger TSPU-style IP blackholing for ~10 minutes.
  */
-function plainTcpPing(host: string, port: number): Promise<number | null> {
+function tcpPing(host: string, port: number, localAddress?: string): Promise<number | null> {
   return new Promise((resolve) => {
     const socket = new Socket()
     const start = performance.now()
@@ -616,12 +667,29 @@ function plainTcpPing(host: string, port: number): Promise<number | null> {
       socket.destroy()
       resolve(value)
     }
-    socket.setTimeout(PING_TIMEOUT_MS)
+    socket.setTimeout(TCP_PROBE_TIMEOUT_MS)
     socket.once('connect', () => finish(Math.max(1, Math.round(performance.now() - start))))
     socket.once('timeout', () => finish(null))
     socket.once('error', () => finish(null))
-    socket.connect(port, host)
+    socket.connect({ port, host, ...(localAddress ? { localAddress } : {}) })
   })
+}
+
+export function medianLatency(samples: Array<number | null>): number | null {
+  const values = samples.filter((value): value is number => value != null).sort((a, b) => a - b)
+  if (values.length === 0) return null
+
+  const middle = Math.floor(values.length / 2)
+  return values.length % 2 === 1
+    ? values[middle]
+    : Math.round((values[middle - 1] + values[middle]) / 2)
+}
+
+async function reliableTcpPing(host: string, port: number, localAddress?: string): Promise<number | null> {
+  const samples = await Promise.all(
+    Array.from({ length: TCP_PROBE_ATTEMPTS }, () => tcpPing(host, port, localAddress))
+  )
+  return medianLatency(samples)
 }
 
 /**
@@ -659,7 +727,6 @@ function plainTcpPing(host: string, port: number): Promise<number | null> {
  */
 async function stealthTcpProbe(host: string, port: number): Promise<number | null> {
   if (process.platform !== 'win32') return null
-  void port
 
   // curl's --resolve requires an IP address, not a hostname. If the profile
   // has a domain (the common case), resolve it to an IP first.
@@ -683,8 +750,8 @@ async function stealthTcpProbe(host: string, port: number): Promise<number | nul
       '-w', '%{time_connect}',
       '--max-time', '2.5',
       '--connect-timeout', '2',
-      '--resolve', `yandex.ru:443:${resolveIp}`,
-      'https://yandex.ru:443'
+      '--resolve', `yandex.ru:${port}:${resolveIp}`,
+      `https://yandex.ru:${port}`
     ]
     const { stdout, stderr } = await execFile('curl.exe', args, {
       windowsHide: true,
@@ -730,10 +797,10 @@ export async function pingAll(): Promise<ServerProfile[]> {
   const profiles = getProfiles()
   const now = Date.now()
 
-  // When the tunnel is UP, a per-server ping is meaningless: every probe goes
-  // through the same tunnel and returns the SAME round-trip number — the
-  // tunnel itself is the bottleneck, not the remote endpoint. We MUST NOT
-  // stamp that number onto any profile's stored .ping, because:
+  // The UI measures rows individually while TUN is active using a source-bound
+  // physical-adapter probe. Keep this bulk method read-only in that state so
+  // an older renderer or an overlapping refresh cannot stamp transient live
+  // results onto persisted profile data:
   //   1. it would poison the dropdown / right-list UI which read profile.ping
   //      directly (e.g. ProfileSelectorInline shows " · X ms" for the active
   //      profile from the stored value);
@@ -741,10 +808,9 @@ export async function pingAll(): Promise<ServerProfile[]> {
   //      ~2 ms latency for the active profile while every other profile shows
   //      a realistic number — the exact "выбранный всё равно криво" symptom.
   //
-  // So while connected: do nothing to the persisted profile state. The pill
-  // button in ProfileSelectorInline and the LiveTraffic widget already give
-  // the user a live tunnel-RTT readout via separate IPC calls; pingAll only
-  // exists for offline per-server comparison.
+  // So while connected: do nothing to the persisted profile state. Current UI
+  // surfaces use servers:ping-one and display a live active-profile RTT without
+  // saving it.
   if (tunController.getStatus().running) {
     return profiles
   }
@@ -1694,13 +1760,29 @@ function getActiveProfileId(): string | null {
  */
 export function selectProfile(id: string): void {
   const profiles = getProfiles()
-  const exists = profiles.some((p) => p.id === id)
-  if (!exists) {
-    logEvent('warn', 'server-picker', 'selectProfile: profile not found', { id })
+  const selectable = profiles.some((p) => p.id === id && p.enabled !== false && !p.removedFromSubscriptionAt)
+  if (!selectable) {
+    logEvent('warn', 'server-picker', 'selectProfile: profile not found or unavailable', { id })
     return
   }
   store.set('activeProfileId', id)
   logEvent('info', 'server-picker', 'profile selected', { id })
+}
+
+export function backfillProfileCountriesFromNames(): number {
+  const profiles = getProfiles()
+  let changed = 0
+  const next = profiles.map(profile => {
+    const inferred = inferCountryMetadata(profile.name)
+    if (!inferred || profile.country === inferred.label) return profile
+    changed++
+    return { ...profile, country: inferred.label }
+  })
+  if (changed > 0) {
+    saveProfiles(next)
+    logEvent('info', 'server-picker', 'profile countries inferred from provider names', { changed })
+  }
+  return changed
 }
 
 function toVpnProfile(profile: ServerProfile): VpnProfile {
@@ -1800,7 +1882,7 @@ async function restartDirectVpnForSelectedProfile(profile: ServerProfile): Promi
  * the first one. Returns null only when there are no profiles at all.
  */
 export function getActiveProfile(): ServerProfile | null {
-  const profiles = getProfiles()
+  const profiles = getProfiles().filter((profile) => profile.enabled !== false && !profile.removedFromSubscriptionAt)
   if (!profiles.length) return null
   const activeId = getActiveProfileId()
   const found = activeId ? profiles.find((p) => p.id === activeId) : null
@@ -1861,7 +1943,7 @@ function vpnProfileToServerProfile(
     protocol: vpnProfile.protocol,
     server: outbound.server || '',
     port: outbound.server_port || 0,
-    country: undefined,
+    country: inferCountryMetadata(vpnProfile.name)?.label,
     ping: null,
     status: 'unknown',
     lastChecked: undefined,
@@ -2530,6 +2612,7 @@ export const serverPicker = {
   migrateProfilesIntoGroups,
   consolidateBogusSniGroups,
   backfillProfileSourceUris,
+  backfillProfileCountriesFromNames,
   clearStaleStoredPings,
   geolocateIp,
   updateActiveProfileCountry,

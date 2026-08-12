@@ -79,6 +79,7 @@ import {
   isValidExternalProxyControlToken,
   listExternalProxyProfiles,
   MAX_EXTERNAL_PROXY_SLOT,
+  pickExternalProxyProfile,
   releaseExternalProxyReservation,
   renewExternalProxyReservation,
   reserveExternalProxy
@@ -213,8 +214,25 @@ describe('listExternalProxyProfiles', () => {
     vi.mocked(serverPicker.getActiveProfileId).mockReturnValue('profile-1')
 
     expect(listExternalProxyProfiles()).toMatchObject([
-      { id: 'profile-1', active: false }
+      {
+        id: 'profile-1',
+        status: 'unknown',
+        pingMs: null,
+        lastCheckedAt: null,
+        selectedForVpn: true,
+        active: false
+      }
     ])
+  })
+
+  it('excludes profiles removed from their source subscription', () => {
+    const removed = sampleProfile()
+    removed.removedFromSubscriptionAt = Date.now()
+    removed.enabled = true
+    vi.mocked(serverPicker.getProfiles).mockReturnValue([removed])
+
+    expect(listExternalProxyProfiles()).toEqual([])
+    expect(pickExternalProxyProfile([removed], { profileId: removed.id })).toBeNull()
   })
 })
 
@@ -642,6 +660,7 @@ describe('external proxy control auth helpers', () => {
     expect(isExternalProxyMutationPath('/trigger')).toBe(true)
     expect(isExternalProxyMutationPath('/stop')).toBe(true)
     expect(isExternalProxyMutationPath('/healthcheck')).toBe(true)
+    expect(isExternalProxyMutationPath('/profiles/healthcheck')).toBe(true)
     expect(isExternalProxyMutationPath('/instances/prewarm')).toBe(true)
     expect(isExternalProxyMutationPath('/instances/status-batch')).toBe(true)
     expect(isExternalProxyMutationPath('/instances/reserve')).toBe(true)

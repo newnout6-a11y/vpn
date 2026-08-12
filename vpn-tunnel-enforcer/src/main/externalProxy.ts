@@ -147,6 +147,12 @@ export interface ExternalProxyProfileRow {
   server: string
   port: number
   groupId: string | null
+  status: ServerProfile['status']
+  pingMs: number | null
+  healthLatencyMs: number | null
+  healthReason: string | null
+  lastCheckedAt: number | null
+  selectedForVpn: boolean
   active: boolean
   activeSlots: number[]
 }
@@ -685,6 +691,7 @@ function profileMatchesCountry(profile: ServerProfile, countryQuery: string | nu
 function usableProfiles(countryQuery?: string | null): ServerProfile[] {
   return serverPicker
     .getProfiles()
+    .filter((profile) => !profile.removedFromSubscriptionAt)
     .filter((profile) => profile.enabled !== false && profile.outbound && typeof profile.outbound === 'object')
     .filter((profile) => profileMatchesCountry(profile, countryQuery))
 }
@@ -698,6 +705,7 @@ export function listExternalProxyProfiles(countryQuery?: string | null): Externa
     activeSlotsByProfileId.set(state.profileId, activeSlots)
   }
 
+  const selectedVpnProfileId = serverPicker.getActiveProfileId()
   return usableProfiles(countryQuery).map((profile) => {
     const activeSlots = activeSlotsByProfileId.get(profile.id) ?? []
     return {
@@ -708,6 +716,12 @@ export function listExternalProxyProfiles(countryQuery?: string | null): Externa
       server: profile.server,
       port: profile.port,
       groupId: profile.groupId ?? null,
+      status: profile.healthStatus ?? profile.status,
+      pingMs: profile.ping ?? null,
+      healthLatencyMs: profile.healthLatencyMs ?? null,
+      healthReason: profile.healthReason ?? null,
+      lastCheckedAt: profile.healthCheckedAt ?? profile.lastChecked ?? null,
+      selectedForVpn: profile.id === selectedVpnProfileId,
       active: activeSlots.length > 0,
       activeSlots
     }
@@ -719,6 +733,7 @@ export function pickExternalProxyProfile(
   opts: { profileId?: string | null; country?: string | null; currentProfileId?: string | null; action?: ExternalProxyAction } = {}
 ): ServerProfile | null {
   const usable = profiles
+    .filter((profile) => !profile.removedFromSubscriptionAt)
     .filter((profile) => profile.enabled !== false && profile.outbound && typeof profile.outbound === 'object')
     .filter((profile) => profileMatchesCountry(profile, opts.country))
   if (!usable.length) return null
@@ -1829,6 +1844,8 @@ function formatProfileListText(rows: ExternalProxyProfileRow[]): string {
       row.country ?? '',
       row.protocol,
       `${row.server}:${row.port}`,
+      row.status,
+      row.lastCheckedAt ?? '',
       row.active ? 'active' : '',
       row.name
     ].join('\t'))
@@ -1871,7 +1888,7 @@ function controlError(error: string, detail = error): { ok: false; error: string
 }
 
 export function isExternalProxyMutationPath(path: string): boolean {
-  return path === '/start' || path === '/rotate' || path === '/connect' || path === '/connect-profiles' || path === '/trigger' || path === '/stop' || path === '/healthcheck' || path === '/instances/prewarm' || path === '/instances/status-batch' || path === '/instances/reserve' || path === '/instances/renew' || path === '/instances/release'
+  return path === '/start' || path === '/rotate' || path === '/connect' || path === '/connect-profiles' || path === '/trigger' || path === '/stop' || path === '/healthcheck' || path === '/profiles/healthcheck' || path === '/instances/prewarm' || path === '/instances/status-batch' || path === '/instances/reserve' || path === '/instances/renew' || path === '/instances/release'
 }
 
 export function isValidExternalProxyControlToken(expected: string | null, provided: string | null | undefined): boolean {
@@ -1947,6 +1964,15 @@ async function handleControlRequest(req: IncomingMessage, res: ServerResponse): 
     if (path === '/list') {
       const rows = listExternalProxyProfiles(param('country'))
       return send(res, 200, wantsText ? formatProfileListText(rows) : { profiles: rows }, wantsText)
+    }
+    if (path === '/profiles/healthcheck') {
+      const groupId = param('groupId')?.trim()
+      if (!groupId) throw new RangeError('groupId is required')
+      const { checkGroupHealth } = await import('./keyHealthChecker')
+      const result = await checkGroupHealth(groupId)
+      if (!result.ok) throw new ExternalProxyApiError(result.error, 404)
+      const alive = result.results.filter((item) => item.online).length
+      return send(res, 200, wantsText ? `${alive}/${result.results.length}` : result, wantsText)
     }
     if (path === '/connect-profiles') {
       const profileIds = Array.isArray(body.profileIds)

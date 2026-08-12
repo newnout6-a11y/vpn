@@ -10,10 +10,8 @@
  * profile (which never got the poisoned write) showed realistic 16-817 ms.
  *
  * The fix: while the tunnel is UP, `pingAll` is a no-op on persisted state.
- * The pill button in ProfileSelectorInline still gets a live tunnel RTT
- * via its own IPC call, but nothing ever lands in the store from that
- * path. Per-server numbers are only written when the tunnel is DOWN —
- * that's when they actually mean per-server latency.
+ * ProfileSelectorInline gets a live active-profile RTT via its own IPC call,
+ * but nothing from that path lands in the persistent store.
  *
  * This test creates an in-memory store mock, simulates the tunnel-up
  * scenario, and asserts no profile got mutated.
@@ -186,6 +184,16 @@ describe('clearStaleStoredPings', () => {
     const { clearStaleStoredPings } = await import('./serverPicker')
     expect(() => clearStaleStoredPings()).not.toThrow()
   })
+
+  it('backfills provider countries from concatenated profile names', async () => {
+    mockStoreData.profiles[0].name = 'usavless1'
+    mockStoreData.profiles[1].name = 'netherlandsvless1'
+    const { backfillProfileCountriesFromNames } = await import('./serverPicker')
+
+    expect(backfillProfileCountriesFromNames()).toBe(2)
+    expect(mockStoreData.profiles.find(p => p.id === 'p-active')?.country).toBe('United States')
+    expect(mockStoreData.profiles.find(p => p.id === 'p-other')?.country).toBe('Netherlands')
+  })
 })
 
 describe('tunnelHttpProbe cache', () => {
@@ -214,4 +222,5 @@ describe('tunnelHttpProbe cache', () => {
     await tunnelHttpProbe()
     expect(axios.get.mock.calls.length).toBeGreaterThan(firstCallCount)
   })
+
 })

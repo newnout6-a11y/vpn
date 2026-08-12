@@ -67,7 +67,14 @@ vi.mock('./vpnProfiles', () => ({
   resolveVpnProfiles: (...args: any[]) => resolveVpnProfilesMock(...args)
 }))
 
-import { serverGroups, refreshGroup } from './serverGroups'
+import {
+  DEFAULT_SERVER_GROUP_REFRESH_INTERVAL_MS,
+  MIN_SERVER_GROUP_REFRESH_INTERVAL_MS,
+  isServerGroupRefreshDue,
+  refreshGroup,
+  serverGroupRefreshIntervalMs,
+  serverGroups
+} from './serverGroups'
 import type { VpnProfile } from './vpnProfiles'
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -165,7 +172,7 @@ describe('refreshGroup dedup-merge', () => {
     expect(ids).toEqual(['p1', 'p2'])
   })
 
-  it('adds genuinely new servers and keeps vanished ones', async () => {
+  it('adds genuinely new servers and removes vanished upstream entries', async () => {
     const group = serverGroups.createGroup({
       name: 'feodorn.com',
       source: 'subscription',
@@ -184,6 +191,17 @@ describe('refreshGroup dedup-merge', () => {
         groupId: group.id,
         sourceUri: 'vless://x@de.feodorn.com:443',
         outbound: { type: 'vless', server: 'de.feodorn.com', server_port: 443 },
+        enabled: true
+      },
+      {
+        id: 'p2',
+        name: 'NL',
+        protocol: 'vless',
+        server: 'nl.feodorn.com',
+        port: 443,
+        groupId: group.id,
+        sourceUri: 'vless://x@nl.feodorn.com:443',
+        outbound: { type: 'vless', server: 'nl.feodorn.com', server_port: 443 },
         enabled: true
       }
     ]
@@ -204,11 +222,39 @@ describe('refreshGroup dedup-merge', () => {
     if (!res.ok) return
 
     const inGroup = pickerProfiles().filter((p) => p.groupId === group.id)
-    // DE (kept, same id) + FR (new) = 2, no duplicate DE.
-    expect(inGroup).toHaveLength(2)
+    // DE (kept, same id) + FR (new) remain active. Vanished NL is archived.
+    expect(inGroup).toHaveLength(3)
     expect(res.addedCount).toBe(1)
     expect(res.updatedCount).toBe(1)
+    expect(res.removedCount).toBe(1)
     expect(inGroup.find((p) => p.server === 'de.feodorn.com')!.id).toBe('p1')
+    const removed = inGroup.find((p) => p.server === 'nl.feodorn.com')!
+    expect(removed).toMatchObject({
+      id: 'p2',
+      enabled: false,
+      enabledBeforeSubscriptionRemoval: true
+    })
+    expect(removed.removedFromSubscriptionAt).toEqual(expect.any(Number))
+
+    const repeated = await refreshGroup(group.id)
+    expect(repeated.ok && repeated.removedCount).toBe(0)
+
+    resolveVpnProfilesMock.mockResolvedValue({
+      profiles: [
+        makeVpnProfile('de.feodorn.com', 443, 'DE'),
+        makeVpnProfile('nl.feodorn.com', 443, 'NL'),
+        makeVpnProfile('fr.feodorn.com', 443, 'FR')
+      ],
+      source: 'subscription',
+      fetched: true,
+      userInfo: undefined
+    })
+    const restoredResult = await refreshGroup(group.id)
+    expect(restoredResult.ok).toBe(true)
+    const restored = pickerProfiles().find((p) => p.id === 'p2')!
+    expect(restored.enabled).toBe(true)
+    expect(restored.removedFromSubscriptionAt).toBeUndefined()
+    expect(restored.enabledBeforeSubscriptionRemoval).toBeUndefined()
   })
 
   it('running refresh twice does not grow the group', async () => {
@@ -417,6 +463,17 @@ describe('refreshGroup dedup-merge', () => {
       status: 'active'
     })
 
+    storeData.current['server-picker'].profiles = [{
+      id: 'saved',
+      name: 'Saved',
+      protocol: 'vless',
+      server: 'saved.example.com',
+      port: 443,
+      groupId: group.id,
+      outbound: { type: 'vless', server: 'saved.example.com', server_port: 443 },
+      enabled: true
+    }]
+
     resolveVpnProfilesMock.mockResolvedValue({
       profiles: [],
       source: 'subscription',
@@ -427,6 +484,7 @@ describe('refreshGroup dedup-merge', () => {
     await refreshGroup(group.id)
     const updated = serverGroups.getGroup(group.id)
     expect(updated?.status).toBe('expired')
+    expect(pickerProfiles().filter((p) => p.groupId === group.id)).toHaveLength(1)
   })
 
   it('marks elapsed subscriptions expired without hiding saved profiles', async () => {
@@ -455,5 +513,37 @@ describe('refreshGroup dedup-merge', () => {
     const updated = serverGroups.getGroup(group.id)
     expect(updated?.status).toBe('expired')
     expect(pickerProfiles().filter((p) => p.groupId === group.id)).toHaveLength(1)
+  })
+})
+
+describe('automatic subscription refresh schedule', () => {
+  it('uses a 30 minute default and clamps provider intervals', () => {
+    const base = {
+      id: 'g',
+      name: 'Group',
+      source: 'subscription' as const,
+      sourceUrl: 'https://sub.example.com/a',
+      importedAt: 1,
+      status: 'active' as const
+    }
+
+    expect(serverGroupRefreshIntervalMs(base)).toBe(DEFAULT_SERVER_GROUP_REFRESH_INTERVAL_MS)
+    expect(serverGroupRefreshIntervalMs({ ...base, refreshIntervalSeconds: 10 })).toBe(MIN_SERVER_GROUP_REFRESH_INTERVAL_MS)
+  })
+
+  it('marks only due subscription groups for refresh', () => {
+    const now = 2_000_000
+    const base = {
+      id: 'g',
+      name: 'Group',
+      source: 'subscription' as const,
+      sourceUrl: 'https://sub.example.com/a',
+      importedAt: now - DEFAULT_SERVER_GROUP_REFRESH_INTERVAL_MS,
+      status: 'active' as const
+    }
+
+    expect(isServerGroupRefreshDue(base, now)).toBe(true)
+    expect(isServerGroupRefreshDue({ ...base, lastFetchAttemptAt: now - 60_000 }, now)).toBe(false)
+    expect(isServerGroupRefreshDue({ ...base, source: 'manual', sourceUrl: undefined }, now)).toBe(false)
   })
 })

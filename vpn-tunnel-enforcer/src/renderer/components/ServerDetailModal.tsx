@@ -18,7 +18,8 @@ import {
   Download
 } from 'lucide-react'
 import { MacModal, MacButton, MacCard, MacBadge, MacSelect } from '../design-system'
-import { countryFlagFromCountryOrName, detectCountry } from './countryGlyph'
+import { detectCountry } from './countryGlyph'
+import { CountryFlagIcon } from './CountryFlagIcon'
 import { useAppStore } from '../store'
 import type { ClientDevice, ServerGroup, ServerProfile } from '../../shared/ipc-types'
 
@@ -304,7 +305,6 @@ export function ServerDetailModal({ open, profile, onClose, onProfileUpdated }: 
   // returns geo info — but the profile name almost always names the country.
   const recognised = detectCountry(profile.name)
   const fallbackCountry = profile.country || recognised?.label || null
-  const flag = countryFlagFromCountryOrName(profile.country, profile.name)
   const lat = ipInfo?.loc?.split(',')[0]
   const lon = ipInfo?.loc?.split(',')[1]
   const mapUrl =
@@ -321,7 +321,17 @@ export function ServerDetailModal({ open, profile, onClose, onProfileUpdated }: 
   })
 
   return (
-    <MacModal open={open} onClose={onClose} title={`${flag}  ${profile.name}`} size="lg">
+    <MacModal
+      open={open}
+      onClose={onClose}
+      title={(
+        <span className="inline-flex min-w-0 items-center gap-2">
+          <CountryFlagIcon country={profile.country} name={profile.name} />
+          <span className="truncate">{profile.name}</span>
+        </span>
+      )}
+      size="lg"
+    >
       <div className="space-y-4">
         {/* Protocol & Host */}
         <div className="grid grid-cols-2 gap-3">

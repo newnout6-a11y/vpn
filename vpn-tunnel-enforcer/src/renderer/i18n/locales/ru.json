@@ -186,6 +186,10 @@
       "serverCount_few": "{{count}} сервера",
       "serverCount_many": "{{count}} серверов",
       "serverCount_other": "{{count}} серверов",
+      "removedServerCount": "Удалено: {{count}}",
+      "removedServers": "Удалённые серверы",
+      "noActiveServers": "В этой подписке не осталось активных серверов",
+      "removedProxyUnavailable": "Удалённый сервер нельзя назначить прокси",
       "expiredBanner": "🪄 Подписка-источник истекла, но мы оставили ваши ключи. Они часто продолжают работать ещё дни-недели после истечения триала, потому что провайдеры не сразу отзывают доступ. Жмите «Проверить ключи» чтобы посмотреть, какие из них ещё живы, или просто подключитесь к понравившемуся серверу — если работает, отлично.",
       "expiredBannerToast": "Подписка-источник перестала отвечать. Сохранённые ключи остаются — они часто продолжают работать ещё какое-то время после истечения триала. Попробуйте подключиться, пока работает.",
       "removedFromSub": "Удалён из подписки",
@@ -228,7 +232,20 @@
       "aliveCount": "Живых ключей: {{count}} из {{total}}",
       "alive": "Живой",
       "dead": "Не отвечает",
-      "neverChecked": "Не проверен"
+      "neverChecked": "Не проверен",
+      "reasons": {
+        "auth-failed": "Ключ или пароль отклонён сервером",
+        "tls-failed": "TLS/Reality-рукопожатие не прошло",
+        "timeout": "Сервер не передал данные за отведённое время",
+        "config-failed": "Конфигурация ключа не поддерживается",
+        "handshake-failed": "Сервер доступен, но ключ не установил соединение",
+        "no-outbound": "У профиля отсутствует конфигурация подключения",
+        "hy2-auth-failed": "Пароль Hysteria2 отклонён сервером",
+        "hy2-udp-blocked": "UDP/QUIC для Hysteria2 недоступен",
+        "hy2-tls-failed": "TLS Hysteria2 не прошёл",
+        "hy2-config-failed": "Конфигурация Hysteria2 не поддерживается",
+        "hy2-handshake-failed": "Hysteria2 не установил соединение"
+      }
     }
   },
   "serverDetail": {
@@ -285,7 +302,8 @@
     "groupStatusActive": "Активна",
     "groupStatusExpired": "Истекла",
     "groupStatusUnreachable": "Не отвечает",
-    "groupStatusUnknown": "Не проверена"
+    "groupStatusUnknown": "Не проверена",
+    "pingSelectedLong": "Измерить задержку до сервера напрямую, в обход VPN-туннеля."
   },
   "dashboardSide": {
     "groupActive": "А",

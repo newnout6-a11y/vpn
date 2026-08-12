@@ -38,6 +38,15 @@ if not "%TARGET%"=="" (
 
 set "URL=!CONTROL_URL!/%ACTION%?format=text&slot=%SLOT%"
 
+if "%ACTION%"=="profiles-health" (
+  if "%TARGET%"=="" (
+    echo Usage: vpnte-proxy.cmd profiles-health GROUP_ID 1>&2
+    exit /b 2
+  )
+  set "URL=!CONTROL_URL!/profiles/healthcheck?format=text&groupId=!ENC_TARGET!"
+  goto :require_token
+)
+
 if "%ACTION%"=="connect" (
   if "%TARGET%"=="" (
     echo Usage: vpnte-proxy.cmd connect PROFILE_ID 1>&2
@@ -52,6 +61,7 @@ if "%ACTION%"=="connect" (
 if "%ACTION%"=="status" goto :get_request
 if "%ACTION%"=="list" goto :get_request
 
+:require_token
 if "%TOKEN%"=="" (
   echo External proxy control token was not found. Start VPN Tunnel Enforcer and try again. 1>&2
   exit /b 1

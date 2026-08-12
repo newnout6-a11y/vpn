@@ -7,17 +7,10 @@ import { MacCard } from '../design-system/MacCard'
 import { MacButton } from '../design-system/MacButton'
 import { MacBadge, type BadgeVariant } from '../design-system/MacBadge'
 import { cn } from '../design-system/utils'
-import { countryFlagFromCountryOrName } from './countryGlyph'
+import { CountryFlagIcon } from './CountryFlagIcon'
 import { useAppStore } from '../store'
 import { navigateTo, SERVER_CHANGED_EVENT, emitServerChanged } from '../nav'
 import type { ServerGroup, ServerProfile } from '../../shared/ipc-types'
-
-/**
- * Map a profile name to a country flag emoji.
- */
-function countryGlyph(country: string | null | undefined, name: string | null | undefined): string {
-  return countryFlagFromCountryOrName(country, name)
-}
 
 function groupBadgeVariant(status: ServerGroup['status']): BadgeVariant {
   switch (status) {
@@ -43,10 +36,6 @@ export function ProfileSelectorInline() {
   const { t } = useTranslation()
   const addLog = useAppStore(s => s.addLog)
   const setServerSwitchingName = useAppStore(s => s.setServerSwitchingName)
-  // We branch the ping UX on this: when the tunnel is up the result reflects
-  // round-trip through the active outbound, *not* per-server latency, so we
-  // surface different copy ("Тоннель: 87 ms" vs "Сервер: 87 ms") to avoid
-  // misleading the user.
   const tunRunning = useAppStore(s => s.tunRunning)
   const connectionMode = useAppStore(s => s.settings.connectionMode)
 
@@ -112,14 +101,8 @@ export function ProfileSelectorInline() {
     if (open) refresh()
   }, [open, refresh])
 
-  // Drop the cached pingMs whenever the tunnel state flips. Without this,
-  // a value measured WHILE the tunnel was up (which is a tunnel-RTT, not a
-  // per-server latency — see pingServer dispatch in serverPicker.ts) keeps
-  // showing as a plain "X ms" after disconnect — the ≈ prefix only fires
-  // while tunRunning is true, so the user can no longer tell the number is
-  // stale and meaningless. Same the other way: an offline measurement taken
-  // before the tunnel came up shouldn't masquerade as a tunnel-RTT either.
-  // Clearing on every transition forces the next click to actually measure.
+  // Drop the cached result whenever routing changes. The next click should
+  // measure the endpoint again through the current physical adapter state.
   useEffect(() => {
     setPingMs(null)
   }, [tunRunning])
@@ -216,9 +199,7 @@ export function ProfileSelectorInline() {
     setPingMs('pinging')
     try {
       const ms = await window.electronAPI.serversPingOne(current.server, current.port)
-      const label = tunRunning
-        ? `Тоннель (${current.server}:${current.port})`
-        : `${current.server}:${current.port}`
+      const label = `${current.server}:${current.port}`
       if (ms == null) {
         setPingMs(-1)
         addLog('warn', `Пинг ${label} не прошёл.`)
@@ -245,10 +226,7 @@ export function ProfileSelectorInline() {
   const pingLabel = (() => {
     if (pingMs === 'pinging') return '…'
     if (pingMs === -1) return t('profileSelector.pingFailed', '—')
-    if (typeof pingMs === 'number') {
-      const prefix = tunRunning ? '≈ ' : ''
-      return `${prefix}${pingMs} ${t('profileSelector.ms', 'ms')}`
-    }
+    if (typeof pingMs === 'number') return `${pingMs} ${t('profileSelector.ms', 'ms')}`
     return null
   })()
 
@@ -293,7 +271,7 @@ export function ProfileSelectorInline() {
         className="w-full flex items-center gap-3 px-3 py-2 rounded-[var(--radius-sm)] hover:bg-[var(--color-border)]/40 transition-colors duration-[var(--transition-fast)] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-bg)]"
       >
         <span className="grid h-9 w-9 place-items-center rounded-full bg-[var(--color-bg)] border border-[var(--color-border)] text-lg flex-shrink-0">
-          {current ? countryGlyph(current.country, current.name) : '🌐'}
+          <CountryFlagIcon country={current?.country} name={current?.name} className="h-6 w-6" />
         </span>
         <div className="flex-1 min-w-0 text-left">
           <p className="text-xs uppercase tracking-wider text-[var(--color-text-secondary)]">
@@ -312,12 +290,8 @@ export function ProfileSelectorInline() {
           type="button"
           onClick={handlePingSelected}
           disabled={pingMs === 'pinging' || !currentName}
-          aria-label={tunRunning
-            ? t('profileSelector.pingTunnelLong', 'Замерить отклик активного канала. Пока защита включена, цифра отражает общее «как сейчас», а не задержку до конкретного сервера — для сравнения серверов отключите защиту.')
-            : t('profileSelector.pingSelectedLong', 'Измерить, насколько быстро отвечает выбранный сервер.')}
-          title={tunRunning
-            ? t('profileSelector.pingTunnelLong', 'Замерить отклик активного канала. Пока защита включена, цифра отражает общее «как сейчас», а не задержку до конкретного сервера — для сравнения серверов отключите защиту.')
-            : t('profileSelector.pingSelectedLong', 'Измерить, насколько быстро отвечает выбранный сервер.')}
+          aria-label={t('profileSelector.pingSelectedLong', 'Измерить задержку до сервера напрямую, в обход VPN-туннеля.')}
+          title={t('profileSelector.pingSelectedLong', 'Измерить задержку до сервера напрямую, в обход VPN-туннеля.')}
           className={cn(
             'inline-flex items-center gap-1.5 px-2.5 py-1.5 mr-1 rounded-[var(--radius-sm)] text-xs font-medium tabular-nums',
             'border border-[var(--color-border)] bg-[var(--color-bg)]/60',
@@ -388,7 +362,7 @@ export function ProfileSelectorInline() {
                             : 'border border-transparent hover:bg-[var(--color-border)]/40'
                         }`}
                       >
-                        <span className="text-lg flex-shrink-0">{countryGlyph(profile.country, profile.name)}</span>
+                        <CountryFlagIcon country={profile.country} name={profile.name} />
                         <div className="flex-1 min-w-0">
                           <p className="text-sm font-medium text-[var(--color-text)] truncate">
                             {profile.name}

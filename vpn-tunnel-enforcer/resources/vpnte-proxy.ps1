@@ -1,5 +1,5 @@
 param(
-  [ValidateSet('start', 'rotate', 'connect', 'trigger', 'list', 'stop', 'status')]
+  [ValidateSet('start', 'rotate', 'connect', 'trigger', 'list', 'profiles-health', 'stop', 'status')]
   [string]$Action = 'start',
   [string]$Target = '',
   [ValidateRange(0, 65535)]
@@ -89,6 +89,15 @@ function Invoke-VpnteProxy($path, [string]$Method = 'GET') {
 }
 
 switch ($Action) {
+  'profiles-health' {
+    if (!$Target.Trim()) {
+      Write-Error "Usage: .\vpnte-proxy.ps1 profiles-health <groupId>"
+      exit 2
+    }
+    $suffix = if ($Json) { "?groupId=$([uri]::EscapeDataString($Target.Trim()))" } else { "?format=text&groupId=$([uri]::EscapeDataString($Target.Trim()))" }
+    Invoke-VpnteProxy "$control/profiles/healthcheck$suffix" 'POST'
+    break
+  }
   'list' {
     $suffix = if ($Json) { "" } else { "?format=text" }
     if ($Target.Trim()) {

@@ -17,7 +17,8 @@ import {
   HeartPulse,
   ExternalLink,
   AlertCircle,
-  Globe2
+  MapPin,
+  Waypoints
 } from 'lucide-react'
 import {
   MacCard,
@@ -34,7 +35,7 @@ import {
 } from '../design-system'
 import { PageTip } from '../components/PageTip'
 import { ServerDetailModal } from '../components/ServerDetailModal'
-import { countryFlagFromCountryOrName } from '../components/countryGlyph'
+import { CountryFlagIcon } from '../components/CountryFlagIcon'
 import { ForeignVpnBanner } from '../components/ForeignVpnBanner'
 import { emitServerChanged } from '../nav'
 import { useAppStore } from '../store'
@@ -263,8 +264,8 @@ export function Servers() {
   const [refreshingGroups, setRefreshingGroups] = useState<Record<string, boolean>>({})
   const [healthCheckingGroups, setHealthCheckingGroups] = useState<Record<string, boolean>>({})
   const [startingProxyGroups, setStartingProxyGroups] = useState<Record<string, boolean>>({})
-  // Health-check results live only in-page (intentionally not persisted).
-  // Keyed by profileId.
+  const [startingProxyProfiles, setStartingProxyProfiles] = useState<Record<string, boolean>>({})
+  // Keyed by profileId; backend also persists the online/offline verdict.
   const [healthByProfile, setHealthByProfile] = useState<Record<string, HealthRow>>({})
 
   // Inline rename: holds the id of the group being renamed and the draft.
@@ -295,7 +296,7 @@ export function Servers() {
 
   // ─── Data fetch ─────────────────────────────────────────────────────────
 
-  const fetchProfiles = useCallback(async () => {
+  const fetchProfiles = useCallback(async (resolveIps = true) => {
     try {
       const [list, active] = await Promise.all([
         window.electronAPI.serversList(),
@@ -306,7 +307,7 @@ export function Servers() {
       const api = window.electronAPI as unknown as {
         serversResolveIps?: () => Promise<ServerProfile[]>
       }
-      if (typeof api.serversResolveIps === 'function') {
+      if (resolveIps && typeof api.serversResolveIps === 'function') {
         void api.serversResolveIps()
           .then((resolved) => setProfiles(resolved))
           .catch(() => {})
@@ -350,6 +351,23 @@ export function Servers() {
     void fetchGroups()
     return () => {
       mounted = false
+    }
+  }, [fetchProfiles, fetchGroups])
+
+  // Background subscription refreshes update the stores outside this page.
+  // Poll the local stores while visible so the list follows them promptly.
+  useEffect(() => {
+    const refreshVisibleData = () => {
+      if (document.hidden) return
+      void Promise.all([fetchProfiles(false), fetchGroups()])
+    }
+    const timer = window.setInterval(refreshVisibleData, 10_000)
+    document.addEventListener('visibilitychange', refreshVisibleData)
+    window.addEventListener('focus', refreshVisibleData)
+    return () => {
+      window.clearInterval(timer)
+      document.removeEventListener('visibilitychange', refreshVisibleData)
+      window.removeEventListener('focus', refreshVisibleData)
     }
   }, [fetchProfiles, fetchGroups])
 
@@ -608,6 +626,7 @@ export function Servers() {
       // for serial pastes.
       setAddGroupId(NEW_GROUP_OPTION)
       await refreshAll()
+      emitServerChanged()
     } catch (err: any) {
       setAddError(err?.message || String(err))
     } finally {
@@ -636,6 +655,7 @@ export function Servers() {
       await window.electronAPI.serversRemove(id)
       setProfiles((prev) => prev.filter((p) => p.id !== id))
       if (activeId === id) setActiveId(null)
+      emitServerChanged()
     } catch (err) {
       console.error('Remove failed:', err)
     }
@@ -927,6 +947,7 @@ export function Servers() {
       if (result.ok) {
         setGroups((prev) => prev.map((g) => (g.id === result.group.id ? result.group : g)))
         await fetchProfiles()
+        emitServerChanged()
         addLog(
           'info',
           t('servers.groups.refreshOk', {
@@ -1005,6 +1026,8 @@ export function Servers() {
           return next
         })
         const alive = result.results.filter((r) => r.online).length
+        await fetchProfiles(false)
+        emitServerChanged()
         showToast(
           'info',
           group.name,
@@ -1025,11 +1048,12 @@ export function Servers() {
   }
 
   const handleGroupStartExternalProxies = async (group: ServerGroup, groupProfiles: ServerProfile[]) => {
-    if (!groupProfiles.length) return
+    const availableProfiles = groupProfiles.filter((profile) => !profile.removedFromSubscriptionAt)
+    if (!availableProfiles.length) return
 
     setStartingProxyGroups((prev) => ({ ...prev, [group.id]: true }))
     try {
-      const result = await window.electronAPI.externalProxyStartProfiles(groupProfiles.map((profile) => profile.id))
+      const result = await window.electronAPI.externalProxyStartProfiles(availableProfiles.map((profile) => profile.id))
       window.dispatchEvent(new Event('vpnte:external-proxy-changed'))
       const details = [
         `Запущено: ${result.started.length}`,
@@ -1053,6 +1077,38 @@ export function Servers() {
       setStartingProxyGroups((prev) => {
         const next = { ...prev }
         delete next[group.id]
+        return next
+      })
+    }
+  }
+
+  const handleProfileStartExternalProxy = async (profile: ServerProfile) => {
+    setStartingProxyProfiles((prev) => ({ ...prev, [profile.id]: true }))
+    try {
+      const result = await window.electronAPI.externalProxyStartProfiles([profile.id])
+      window.dispatchEvent(new Event('vpnte:external-proxy-changed'))
+      const started = result.started[0]
+      if (started) {
+        const detail = `Прокси ${started.slot}: ${started.proxyUrl ?? 'запускается'}`
+        addLog('info', `${profile.name}: ${detail}`)
+        showToast('success', `Прокси: ${profile.name}`, detail)
+      } else if (result.alreadyRunningProfileIds.includes(profile.id)) {
+        showToast('info', `Прокси: ${profile.name}`, 'Этот сервер уже назначен внешнему прокси')
+      } else if (result.skipped.some((item) => item.reason === 'active-vpn')) {
+        showToast('warning', `Прокси: ${profile.name}`, 'Сервер сейчас используется основным VPN')
+      } else if (result.failed[0]) {
+        throw new Error(result.failed[0].error)
+      } else {
+        showToast('warning', `Прокси: ${profile.name}`, 'Сервер недоступен для запуска')
+      }
+    } catch (err: any) {
+      const message = err?.message ?? String(err)
+      addLog('error', `${profile.name}: не удалось запустить внешний прокси: ${message}`)
+      showToast('error', `Прокси: ${profile.name}`, message)
+    } finally {
+      setStartingProxyProfiles((prev) => {
+        const next = { ...prev }
+        delete next[profile.id]
         return next
       })
     }
@@ -1290,6 +1346,7 @@ export function Servers() {
                 isRefreshing={!!refreshingGroups[group.id]}
                 isCheckingHealth={!!healthCheckingGroups[group.id]}
                 isStartingExternalProxies={!!startingProxyGroups[group.id]}
+                startingProxyProfiles={startingProxyProfiles}
                 healthByProfile={healthByProfile}
                 activeId={activeId}
                 switchingId={switchingId}
@@ -1300,6 +1357,7 @@ export function Servers() {
                 onRemoveProfile={handleRemove}
                 onPingProfile={handlePingOne}
                 onVerifyCountryProfile={handleVerifyCountry}
+                onStartProfileProxy={handleProfileStartExternalProxy}
                 onExportProfile={handleExport}
                 onExportProfileToFile={handleExportToFile}
                 onOpenDetail={setDetailProfile}
@@ -1409,6 +1467,7 @@ interface GroupCardProps {
   isRefreshing: boolean
   isCheckingHealth: boolean
   isStartingExternalProxies: boolean
+  startingProxyProfiles: Record<string, boolean>
   healthByProfile: Record<string, HealthRow>
   activeId: string | null
   switchingId: string | null
@@ -1419,6 +1478,7 @@ interface GroupCardProps {
   onRemoveProfile: (id: string) => void
   onPingProfile: (p: ServerProfile) => void
   onVerifyCountryProfile: (p: ServerProfile) => void
+  onStartProfileProxy: (p: ServerProfile) => void
   onExportProfile: (id: string) => void
   onExportProfileToFile: (id: string) => void
   onOpenDetail: (p: ServerProfile) => void
@@ -1447,6 +1507,7 @@ function GroupCard(props: GroupCardProps) {
     isRefreshing,
     isCheckingHealth,
     isStartingExternalProxies,
+    startingProxyProfiles,
     healthByProfile,
     activeId,
     switchingId,
@@ -1457,6 +1518,7 @@ function GroupCard(props: GroupCardProps) {
     onRemoveProfile,
     onPingProfile,
     onVerifyCountryProfile,
+    onStartProfileProxy,
     onExportProfile,
     onExportProfileToFile,
     onOpenDetail,
@@ -1479,8 +1541,44 @@ function GroupCard(props: GroupCardProps) {
           : t('servers.groups.statusUnknown')
 
   const isRenamingHere = renamingId === group.id
-  const grouped = groupByProtocol(profiles)
-  const protocolKeys = Object.keys(grouped).sort()
+  const currentProfiles = profiles.filter((profile) => !profile.removedFromSubscriptionAt)
+  const removedProfiles = profiles.filter((profile) => !!profile.removedFromSubscriptionAt)
+
+  const renderProtocolGroups = (profileList: ServerProfile[]) => {
+    const grouped = groupByProtocol(profileList)
+    return Object.keys(grouped).sort().map((protocol) => (
+      <div key={protocol}>
+        <h2 className="text-[11px] font-medium text-[var(--color-text-secondary)] uppercase tracking-wide mb-2">
+          {protocol}
+        </h2>
+        <div className="space-y-2">
+          {grouped[protocol].map((profile) => (
+            <ServerProfileCard
+              key={profile.id}
+              profile={profile}
+              group={isVirtual ? null : group}
+              isActive={profile.id === activeId}
+              isSwitching={profile.id === switchingId}
+              switchingLocked={!!switchingId}
+              perRowPing={perRowPings[profile.id]}
+              verifyingCountry={!!verifyingCountryById[profile.id]}
+              startingProxy={!!startingProxyProfiles[profile.id]}
+              health={healthByProfile[profile.id]}
+              exportFlash={exportFlash[profile.id]}
+              onSelect={onSelectProfile}
+              onRemove={onRemoveProfile}
+              onPing={onPingProfile}
+              onVerifyCountry={onVerifyCountryProfile}
+              onStartProxy={onStartProfileProxy}
+              onExport={onExportProfile}
+              onExportToFile={onExportProfileToFile}
+              onOpenDetail={onOpenDetail}
+            />
+          ))}
+        </div>
+      </div>
+    ))
+  }
 
   return (
     <MacCard className="!p-0 overflow-hidden">
@@ -1547,8 +1645,13 @@ function GroupCard(props: GroupCardProps) {
                 <MacBadge variant={groupStatusVariant(group.status)}>{statusLabel}</MacBadge>
               )}
               <span className="text-xs text-[var(--color-text-secondary)]">
-                {t('servers.groups.serverCount', { count: profiles.length })}
+                {t('servers.groups.serverCount', { count: currentProfiles.length })}
               </span>
+              {removedProfiles.length > 0 && (
+                <MacBadge variant="warning">
+                  {t('servers.groups.removedServerCount', { count: removedProfiles.length })}
+                </MacBadge>
+              )}
             </div>
           )}
         </div>
@@ -1562,10 +1665,10 @@ function GroupCard(props: GroupCardProps) {
                 onStartExternalProxies()
               }}
               loading={isStartingExternalProxies}
-              disabled={isStartingExternalProxies || profiles.length === 0}
+              disabled={isStartingExternalProxies || currentProfiles.length === 0}
               title="Запустить отдельный внешний прокси для каждого сервера группы"
             >
-              <Globe2 className="w-3.5 h-3.5 mr-1" />
+              <Waypoints className="w-3.5 h-3.5 mr-1" />
               {isStartingExternalProxies ? 'Запускаем' : 'В прокси'}
             </MacButton>
           {!isVirtual && groupsAvailable && (
@@ -1594,7 +1697,7 @@ function GroupCard(props: GroupCardProps) {
                 onCheckHealth()
               }}
               loading={isCheckingHealth}
-              disabled={isCheckingHealth || profiles.length === 0}
+              disabled={isCheckingHealth || currentProfiles.length === 0}
               title={t('servers.groups.checkHealth')}
             >
               <HeartPulse className="w-3.5 h-3.5 mr-1" />
@@ -1637,36 +1740,25 @@ function GroupCard(props: GroupCardProps) {
                 </p>
               ) : (
                 <div className="space-y-4">
-                  {protocolKeys.map((protocol) => (
-                    <div key={protocol}>
-                      <h2 className="text-[11px] font-medium text-[var(--color-text-secondary)] uppercase tracking-wide mb-2">
-                        {protocol}
-                      </h2>
-                      <div className="space-y-2">
-                        {grouped[protocol].map((profile) => (
-                          <ServerProfileCard
-                            key={profile.id}
-                            profile={profile}
-                            group={isVirtual ? null : group}
-                            isActive={profile.id === activeId}
-                            isSwitching={profile.id === switchingId}
-                            switchingLocked={!!switchingId}
-                            perRowPing={perRowPings[profile.id]}
-                            verifyingCountry={!!verifyingCountryById[profile.id]}
-                            health={healthByProfile[profile.id]}
-                            exportFlash={exportFlash[profile.id]}
-                            onSelect={onSelectProfile}
-                            onRemove={onRemoveProfile}
-                            onPing={onPingProfile}
-                            onVerifyCountry={onVerifyCountryProfile}
-                            onExport={onExportProfile}
-                            onExportToFile={onExportProfileToFile}
-                            onOpenDetail={onOpenDetail}
-                          />
-                        ))}
+                  {currentProfiles.length > 0 ? renderProtocolGroups(currentProfiles) : (
+                    <p className="text-xs text-[var(--color-text-secondary)] py-3">
+                      {t('servers.groups.noActiveServers')}
+                    </p>
+                  )}
+                  {removedProfiles.length > 0 && (
+                    <section className="border-t border-[var(--color-border)] pt-4" aria-label={t('servers.groups.removedServers')}>
+                      <div className="mb-3 flex items-center gap-2">
+                        <Trash2 className="h-3.5 w-3.5 text-[var(--color-text-secondary)]" />
+                        <h2 className="text-xs font-medium text-[var(--color-text)]">
+                          {t('servers.groups.removedServers')}
+                        </h2>
+                        <MacBadge variant="warning">{removedProfiles.length}</MacBadge>
                       </div>
-                    </div>
-                  ))}
+                      <div className="space-y-4 opacity-75">
+                        {renderProtocolGroups(removedProfiles)}
+                      </div>
+                    </section>
+                  )}
                 </div>
               )}
             </div>
@@ -1799,10 +1891,12 @@ interface ServerProfileCardProps {
   onRemove: (id: string) => void
   onPing: (profile: ServerProfile) => void
   onVerifyCountry: (profile: ServerProfile) => void
+  onStartProxy: (profile: ServerProfile) => void
   onExport: (id: string) => void
   onExportToFile: (id: string) => void
   onOpenDetail: (profile: ServerProfile) => void
   verifyingCountry?: boolean
+  startingProxy?: boolean
 }
 
 function ServerProfileCard({
@@ -1818,19 +1912,31 @@ function ServerProfileCard({
   onRemove,
   onPing,
   onVerifyCountry,
+  onStartProxy,
   onExport,
   onExportToFile,
   onOpenDetail,
-  verifyingCountry
+  verifyingCountry,
+  startingProxy
 }: ServerProfileCardProps) {
   const { t } = useTranslation()
 
   const country = profile.country || perRowPing?.country || null
-  const flag = countryFlagFromCountryOrName(country, profile.name)
   const ping = displayedServerPing(profile, perRowPing)
   const hasFreshPingSuccess = hasSuccessfulRowPing(perRowPing)
+  const effectiveHealth = health ?? (profile.healthStatus && profile.healthStatus !== 'unknown'
+    ? {
+        online: profile.healthStatus === 'online',
+        latencyMs: profile.healthLatencyMs ?? null,
+        reason: profile.healthReason
+      }
+    : undefined)
+  const healthTitle = effectiveHealth?.online
+    ? t('servers.health.alive')
+    : effectiveHealth?.reason
+      ? t(`servers.health.reasons.${effectiveHealth.reason}`, { defaultValue: effectiveHealth.reason })
+      : t('servers.health.dead')
   const stealthBadge = profileStealthBadge(profile)
-  const isSelectDisabled = isActive || isSwitching || switchingLocked
 
   // Stale-from-subscription marker: lastSeenInSubscriptionAt is older than
   // group.lastFetchedAt by at least one minute. The fields are optional —
@@ -1839,11 +1945,14 @@ function ServerProfileCard({
     (profile as ServerProfile & { lastSeenInSubscriptionAt?: number }).lastSeenInSubscriptionAt ??
     null
   const staleFromSub =
-    !!group &&
-    group.source === 'subscription' &&
-    !!group.lastFetchedAt &&
-    lastSeen != null &&
-    group.lastFetchedAt - lastSeen >= 60_000
+    !!profile.removedFromSubscriptionAt || (
+      !!group &&
+      group.source === 'subscription' &&
+      !!group.lastFetchedAt &&
+      lastSeen != null &&
+      group.lastFetchedAt - lastSeen >= 60_000
+    )
+  const isSelectDisabled = isActive || isSwitching || switchingLocked || staleFromSub
 
   return (
     <MacCard
@@ -1864,13 +1973,7 @@ function ServerProfileCard({
           dot
           pulse={isSwitching || profile.status === 'online'}
         />
-        <span
-          className="text-lg leading-none flex-shrink-0 select-none"
-          aria-hidden="true"
-          title={country ?? undefined}
-        >
-          {flag}
-        </span>
+        <CountryFlagIcon country={country} name={profile.name} className="h-5 w-5" />
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-sm font-medium text-[var(--color-text)] truncate">
@@ -1947,13 +2050,13 @@ function ServerProfileCard({
             <span title="Последний точечный пинг: сервер доступен">
               <Check className="w-3.5 h-3.5 text-[var(--color-success)]" />
             </span>
-          ) : health ? (
-            health.online ? (
-              <span title="Health check: key is alive">
+          ) : effectiveHealth ? (
+            effectiveHealth.online ? (
+              <span title={healthTitle}>
                 <Check className="w-3.5 h-3.5 text-[var(--color-success)]" />
               </span>
             ) : (
-              <span title={health.reason || t('servers.health.dead')}>
+              <span title={healthTitle}>
                 <AlertCircle className="w-3.5 h-3.5 text-[var(--color-danger)]" />
               </span>
             )
@@ -1968,6 +2071,23 @@ function ServerProfileCard({
         </div>
 
         <div className="flex items-center gap-1.5">
+          <MacButton
+            size="sm"
+            variant="ghost"
+            disabled={startingProxy || isActive || staleFromSub}
+            onClick={(e) => {
+              e.stopPropagation()
+              onStartProxy(profile)
+            }}
+            aria-label="Запустить этот сервер как внешний прокси"
+            title={staleFromSub
+              ? t('servers.groups.removedProxyUnavailable')
+              : isActive
+                ? 'Сервер используется основным VPN'
+                : 'Запустить этот сервер как внешний прокси'}
+          >
+            {startingProxy ? <Loader2 size={12} className="animate-spin" /> : <Waypoints size={12} />}
+          </MacButton>
           <MacButton
             size="sm"
             variant="ghost"
@@ -1998,7 +2118,7 @@ function ServerProfileCard({
             {verifyingCountry ? (
               <Loader2 size={12} className="animate-spin" />
             ) : (
-              <Globe2 size={12} />
+              <MapPin size={12} />
             )}
           </MacButton>
           <MacButton

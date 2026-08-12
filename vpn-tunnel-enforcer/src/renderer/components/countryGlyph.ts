@@ -104,6 +104,14 @@ const TABLE: ReadonlyArray<{ rx: RegExp; hit: CountryHit }> = [
  */
 export function detectCountry(name: string | null | undefined): CountryHit | null {
   if (!name) return null
+  const inferred = inferCountryMetadata(name)
+  if (inferred) {
+    return {
+      flag: countryFlagEmoji(inferred.iso2) ?? '🌐',
+      iso2: inferred.iso2,
+      label: inferred.label
+    }
+  }
   if (/\b(?:hong\s*kong|hk\b)/i.test(name)) {
     return { flag: '🇭🇰', iso2: 'HK', label: 'Hong Kong' }
   }
@@ -123,5 +131,6 @@ export function countryFlag(name: string | null | undefined): string {
 }
 
 export function countryFlagFromCountryOrName(country: string | null | undefined, name: string | null | undefined): string {
-  return detectCountry(country)?.flag ?? detectCountry(name)?.flag ?? '🌐'
+  return detectCountry(name)?.flag ?? detectCountry(country)?.flag ?? '🌐'
 }
+import { countryFlagEmoji, inferCountryMetadata } from '../../shared/countries'

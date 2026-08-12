@@ -21,6 +21,7 @@ import { useTranslation } from 'react-i18next'
 import { motion } from 'framer-motion'
 import {
   Activity,
+  ArchiveX,
   Check,
   Download,
   Globe,
@@ -32,11 +33,11 @@ import {
 import { MacCard } from '../design-system/MacCard'
 import { cn } from '../design-system/utils'
 import { useAppStore } from '../store'
-import { countryFlagFromCountryOrName } from './countryGlyph'
+import { CountryFlagIcon } from './CountryFlagIcon'
 import { SERVER_CHANGED_EVENT, emitServerChanged } from '../nav'
 import type { ServerGroup, ServerProfile } from '../../shared/ipc-types'
 
-const QUICK_SERVERS_REFRESH_INTERVAL_MS = 30_000
+const QUICK_SERVERS_REFRESH_INTERVAL_MS = 10_000
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
@@ -126,20 +127,23 @@ function QuickServers() {
     // is only a low-frequency fallback for changes made outside this window.
     const id = window.setInterval(refresh, QUICK_SERVERS_REFRESH_INTERVAL_MS)
     const handler = () => refresh()
+    const refreshWhenVisible = () => {
+      if (!document.hidden) void refresh()
+    }
     window.addEventListener(SERVER_CHANGED_EVENT, handler)
+    window.addEventListener('focus', handler)
+    document.addEventListener('visibilitychange', refreshWhenVisible)
     return () => {
       clearInterval(id)
       window.removeEventListener(SERVER_CHANGED_EVENT, handler)
+      window.removeEventListener('focus', handler)
+      document.removeEventListener('visibilitychange', refreshWhenVisible)
     }
   }, [refresh])
 
-  // Drop cached per-row ping numbers whenever the tunnel state flips. Pings
-  // measured while the tunnel was UP are tunnel-RTT (every row would show
-  // the same number), and pings measured while DOWN are per-server. Mixing
-  // them in the same map produces "выбранный криво, остальные норм" type
-  // confusion — see pingServer dispatch in serverPicker.ts. Forcing a
-  // clean slate on each transition guarantees the user is always looking at
-  // numbers that mean what the column header claims.
+  // Drop cached per-row numbers whenever routing changes. Each value is a
+  // physical-adapter endpoint RTT, but the route and adapter set may differ
+  // after connect/disconnect, so force a fresh measurement.
   useEffect(() => {
     setPings({})
   }, [tunRunning])
@@ -152,6 +156,7 @@ function QuickServers() {
     port: number | null
     country: string | null
     selected: boolean
+    removed: boolean
     onSelect: () => void
   }
 
@@ -166,8 +171,9 @@ function QuickServers() {
       port: profile.port || null,
       country: profile.country || null,
       selected: profile.id === activeId,
+      removed: !!profile.removedFromSubscriptionAt,
       onSelect: async () => {
-        if (profile.id === activeId) return
+        if (profile.id === activeId || profile.removedFromSubscriptionAt) return
         const shouldAnimateSwitch = tunRunning && connectionMode === 'directVpn'
         if (shouldAnimateSwitch) setServerSwitchingName(profile.name)
         setActiveId(profile.id)
@@ -209,10 +215,15 @@ function QuickServers() {
     return out
   }, [profiles, groups, groupsAvailable, activeId, addLog, refresh, tunRunning, connectionMode, setServerSwitchingName])
 
-  const totalRows = useMemo(
-    () => clusters.reduce((sum, c) => sum + c.rows.length, 0),
+  const activeRowsTotal = useMemo(
+    () => clusters.reduce((sum, c) => sum + c.rows.filter(row => !row.removed).length, 0),
     [clusters]
   )
+  const removedRowsTotal = useMemo(
+    () => clusters.reduce((sum, c) => sum + c.rows.filter(row => row.removed).length, 0),
+    [clusters]
+  )
+  const totalRows = activeRowsTotal + removedRowsTotal
 
   // Ping a single endpoint and write the result into our local map.
   const pingOne = useCallback(async (key: string, host: string, port: number) => {
@@ -228,7 +239,7 @@ function QuickServers() {
   const handlePingAll = async () => {
     setPingingAll(true)
     try {
-      const queue: Row[] = clusters.flatMap(c => c.rows.filter(r => r.host && r.port))
+      const queue: Row[] = clusters.flatMap(c => c.rows.filter(r => !r.removed && r.host && r.port))
       const concurrency = 5
       let i = 0
       const worker = async () => {
@@ -265,8 +276,17 @@ function QuickServers() {
           <Globe className="w-3.5 h-3.5" />
           {t('dashboardSide.servers', 'Серверы')}
           <span className="text-[var(--color-text-muted)] font-normal lowercase">
-            ·&nbsp;{totalRows}
+            ·&nbsp;{activeRowsTotal}
           </span>
+          {removedRowsTotal > 0 && (
+            <span
+              className="inline-flex items-center gap-1 text-[10px] font-medium normal-case text-[var(--color-warning)]"
+              title={t('servers.groups.removedServers', 'Удалённые серверы')}
+            >
+              <ArchiveX className="h-3 w-3" />
+              {removedRowsTotal}
+            </span>
+          )}
         </h3>
         <button
           type="button"
@@ -292,6 +312,8 @@ function QuickServers() {
 
       <div className="overflow-y-auto pr-1 -mr-1 max-h-[420px] space-y-3">
         {clusters.map((cluster, idx) => {
+          const currentRows = cluster.rows.filter(row => !row.removed)
+          const removedRows = cluster.rows.filter(row => row.removed)
           const statusKey = cluster.group?.status ?? 'unknown'
           const statusShort =
             statusKey === 'active'
@@ -332,7 +354,7 @@ function QuickServers() {
                 </div>
               )}
               <ul className="space-y-1">
-                {cluster.rows.map(row => {
+                {currentRows.map(row => {
                   const ping = pings[row.key]
                   const pingValue = ping === 'pinging' ? null : ping
                   return (
@@ -350,12 +372,7 @@ function QuickServers() {
                             : 'border border-transparent hover:bg-[var(--color-border)]/40'
                         )}
                       >
-                        <span
-                          className="text-base leading-none flex-shrink-0 select-none"
-                          aria-hidden="true"
-                        >
-                          {countryFlagFromCountryOrName(row.country, row.name)}
-                        </span>
+                        <CountryFlagIcon country={row.country} name={row.name} className="h-5 w-5" />
                         <span className="flex-1 min-w-0">
                           <span className="block text-xs font-medium text-[var(--color-text)] truncate">
                             {row.name}
@@ -377,9 +394,7 @@ function QuickServers() {
                             ? '…'
                             : pingValue == null
                               ? '—'
-                              : tunRunning
-                                ? `≈${pingValue}`
-                                : `${pingValue}`}
+                              : `${pingValue}`}
                         </span>
                         {row.selected && (
                           <Check className="w-3.5 h-3.5 text-[var(--color-accent)] flex-shrink-0" />
@@ -410,6 +425,34 @@ function QuickServers() {
                   )
                 })}
               </ul>
+              {removedRows.length > 0 && (
+                <div className="mt-2 border-t border-[var(--color-border)]/70 pt-2">
+                  <div className="mb-1 flex items-center gap-1.5 px-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--color-warning)]">
+                    <ArchiveX className="h-3 w-3" />
+                    <span>{t('servers.groups.removedServers', 'Удалённые серверы')}</span>
+                    <span className="font-normal tabular-nums">· {removedRows.length}</span>
+                  </div>
+                  <ul className="space-y-1 opacity-60">
+                    {removedRows.map(row => (
+                      <li
+                        key={row.key}
+                        className="flex items-center gap-2 rounded-[var(--radius-sm)] border border-transparent px-2 py-1.5"
+                      >
+                        <CountryFlagIcon country={row.country} name={row.name} className="h-5 w-5" />
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-xs font-medium text-[var(--color-text-secondary)] line-through decoration-[var(--color-warning)]/60">
+                            {row.name}
+                          </span>
+                          <span className="block truncate font-mono text-[10px] text-[var(--color-text-muted)]">
+                            {row.host ? `${row.host}${row.port ? `:${row.port}` : ''}` : row.protocol.toUpperCase()}
+                          </span>
+                        </span>
+                        <ArchiveX className="h-3.5 w-3.5 flex-shrink-0 text-[var(--color-warning)]" />
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
             </div>
           )
         })}
