@@ -1635,6 +1635,20 @@ async function validateProxyFullTunnel(
     }
   }
 
+  // No probe returned a public IP — the upstream VPN server is unreachable or
+  // blocking outbound traffic. Starting the TUN here would blackhole all traffic:
+  // sing-box would capture everything into the tunnel, but nothing would exit.
+  if (seen.length === 0) {
+    return {
+      ok: false,
+      directIp,
+      proxyIps,
+      message:
+        `Proxy ${host}:${port} принимает соединения, но не может выйти в интернет. ` +
+        'Проверьте upstream VPN-сервер в клиенте (Happ, V2RayN и т.д.) — возможно, он лежит или заблокирован.'
+    }
+  }
+
   return { ok: true, directIp, proxyIps }
 }
 
@@ -2519,10 +2533,26 @@ export const tunController = {
           // Same for the adapter lockdown: it must always come down on a failed
           // start, otherwise the user has IPv6 disabled + ISP DNS overridden
           // for no reason.
-          if (adapterLockdownEngaged && !canRetryPortBind) {
-            rollbackPhysicalAdapterLockdownIfApplied('sing-box never started').catch(err =>
-              logEvent('warn', 'tun', 'adapter lockdown rollback after start failure failed', err)
-            )
+          // IMPORTANT: adapterLockdownEngaged is set inside adapterLockdownPromise's
+          // .then() handler, which may not have resolved yet when onExit fires (e.g.
+          // UAC denied → sing-box exits in ~200ms, but lockdown PS takes 3-5s).
+          // We must always await the lockdown promise before deciding whether to
+          // roll back, otherwise we'd skip rollback while lockdown is still running
+          // and leave the user with broken IPv6 + pinned DNS.
+          if (!canRetryPortBind) {
+            if (adapterLockdownPromise) {
+              adapterLockdownPromise.catch(() => undefined).finally(() => {
+                if (adapterLockdownEngaged) {
+                  rollbackPhysicalAdapterLockdownIfApplied('sing-box never started').catch(err =>
+                    logEvent('warn', 'tun', 'adapter lockdown rollback after start failure failed', err)
+                  )
+                }
+              })
+            } else if (adapterLockdownEngaged) {
+              rollbackPhysicalAdapterLockdownIfApplied('sing-box never started').catch(err =>
+                logEvent('warn', 'tun', 'adapter lockdown rollback after start failure failed', err)
+              )
+            }
           }
           if (canRetryPortBind) {
             const retryOpts = startOptions
