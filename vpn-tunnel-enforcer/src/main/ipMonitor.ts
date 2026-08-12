@@ -29,6 +29,11 @@ let lastSuccessAt = 0
 // the rollback has finished or a new tunnel is established.
 let suppressed = false
 
+// Serialise concurrent recheck(rebaseline=true) calls. Without this, two
+// concurrent callers both fetch the IP, then both write vpnIp — the second
+// write wins with a potentially stale value and breaks all future leak checks.
+let recheckInFlight: Promise<{ ip: string | null; isLeak: boolean; vpnIp: string | null }> | null = null
+
 async function fetchPublicIpFrom(url: string): Promise<string> {
   try {
     const resp = await axios.get(url, { timeout: 6000 })
@@ -114,27 +119,40 @@ export const ipMonitor = {
    * fetched IP is treated as the new VPN baseline (clearing any stale leak
    * status). Use this after a VPN tunnel is established so the user doesn't
    * see "real IP visible" while routes are still propagating.
+   *
+   * Concurrent rebaseline calls are serialised — only one fetch runs at a
+   * time so two callers racing to set vpnIp don't overwrite each other.
    */
   async recheck(rebaseline = false): Promise<{ ip: string | null; isLeak: boolean; vpnIp: string | null }> {
     if (suppressed) {
       return { ip: currentIp, isLeak: false, vpnIp }
     }
-    const ip = await fetchPublicIp()
-    if (suppressed) {
-      return { ip: currentIp, isLeak: false, vpnIp }
-    }
-    if (ip) {
-      currentIp = ip
-      if (rebaseline) {
-        vpnIp = ip
-        isLeak = false
-        startMonitoring()
-      } else if (vpnIp) {
-        isLeak = ip !== vpnIp
+    if (rebaseline && recheckInFlight) return recheckInFlight
+
+    const doRecheck = async (): Promise<{ ip: string | null; isLeak: boolean; vpnIp: string | null }> => {
+      const ip = await fetchPublicIp()
+      if (suppressed) {
+        return { ip: currentIp, isLeak: false, vpnIp }
       }
-      notifyCallbacks(ip, isLeak)
+      if (ip) {
+        currentIp = ip
+        if (rebaseline) {
+          vpnIp = ip
+          isLeak = false
+          startMonitoring()
+        } else if (vpnIp) {
+          isLeak = ip !== vpnIp
+        }
+        notifyCallbacks(ip, isLeak)
+      }
+      return { ip: currentIp, isLeak, vpnIp }
     }
-    return { ip: currentIp, isLeak, vpnIp }
+
+    if (rebaseline) {
+      recheckInFlight = doRecheck().finally(() => { recheckInFlight = null })
+      return recheckInFlight
+    }
+    return doRecheck()
   },
 
   setVpnIp(ip: string) {

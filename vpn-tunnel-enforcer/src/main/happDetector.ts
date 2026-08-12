@@ -388,22 +388,28 @@ async function scanHappConfig(): Promise<ProxyCandidate[]> {
   return uniqueCandidates(candidates)
 }
 
-let detectCache: { promise: Promise<ProxyInfo | null>; ts: number } | null = null
+let detectCache: { promise: Promise<ProxyInfo | null>; ts: number; resolved: boolean; result: ProxyInfo | null } | null = null
 const DETECT_CACHE_TTL = 8000
 
 export const happDetector = {
   async detect(): Promise<ProxyInfo | null> {
     const now = Date.now()
-    if (detectCache && now - detectCache.ts < DETECT_CACHE_TTL) {
+    // Only reuse the cache if it resolved with a non-null result.
+    // A null result (Happ not found) must not be cached for the full TTL —
+    // the user may have just launched their VPN client and we need to re-scan.
+    if (detectCache && now - detectCache.ts < DETECT_CACHE_TTL && detectCache.resolved && detectCache.result !== null) {
       return detectCache.promise
     }
     const promise = this._detectUncached()
-    detectCache = { promise, ts: now }
-    promise.finally(() => {
+    detectCache = { promise, ts: now, resolved: false, result: null }
+    promise.then((result) => {
       if (detectCache && detectCache.promise === promise) {
-        setTimeout(() => {
-          if (detectCache && detectCache.promise === promise) detectCache = null
-        }, DETECT_CACHE_TTL)
+        detectCache.resolved = true
+        detectCache.result = result
+      }
+    }).catch(() => {
+      if (detectCache && detectCache.promise === promise) {
+        detectCache = null
       }
     })
     return promise

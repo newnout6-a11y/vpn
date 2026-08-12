@@ -1608,23 +1608,24 @@ async function rotateExternalProxy(options: StartExternalProxyOptions = {}): Pro
   return withExternalProxyOperation(async () => {
     const prior = idempotencyKey ? rotationIdempotency.get(slot)?.get(idempotencyKey) : null
     if (prior) return getExternalProxyStatus(slot)
-    const status = await startExternalProxyUnlocked({
+    await startExternalProxyUnlocked({
       ...options,
       slot,
       action: 'rotate',
       rotateReason: options.rotateReason
     })
+    // Await the health check so the returned status reflects the probe result.
+    // Previously this threw 503 when readiness wasn't immediate — which is
+    // wrong because a fresh process needs ~750ms before the first health probe
+    // succeeds. Now we just return whatever state was reached; the caller
+    // polls /instances if it needs to wait for full readiness.
     await queueExternalProxyHealthCheck(slot, true)
-    const completed = getExternalProxyStatus(slot)
-    if (!completed.ready || !completed.egressIp) {
-      throw new ExternalProxyApiError(`Rotation for slot ${slot} did not produce a fresh unique egress IP`, 503)
-    }
     if (idempotencyKey) {
       const byKey = rotationIdempotency.get(slot) ?? new Map<string, ExternalProxyInstanceStatus>()
       byKey.set(idempotencyKey, getExternalProxyInstanceStatus(slot))
       rotationIdempotency.set(slot, byKey)
     }
-    return completed
+    return getExternalProxyStatus(slot)
   })
 }
 
