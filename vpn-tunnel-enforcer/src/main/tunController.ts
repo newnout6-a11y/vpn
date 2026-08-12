@@ -2626,9 +2626,9 @@ export const tunController = {
         if (wasRunning) {
           try {
             if (userInitiatedStop) {
-            logEvent('info', 'tun', 'sing-box exited after user stop')
-            return
-          }
+              logEvent('info', 'tun', 'sing-box exited after user stop')
+              return
+            }
 
           rollbackTunNetworkBaselineIfApplied('sing-box exited').catch(err =>
             logEvent('warn', 'tun', 'baseline auto-rollback after sing-box exit failed', err)

@@ -171,7 +171,7 @@ Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
     $p=Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue;
     [pscustomobject]@{Host=$_.LocalAddress;Port=$_.LocalPort;Process=$p.ProcessName;Pid=$_.OwningProcess}
   } |
-  Where-Object { ($_.Process -match $rx) -or ($_.Port -in @(1080,1081,1087,10808,10809,7890,7891,7892,7893,7897,8080,2080,2081,6450,6451,9090,20170,20171,8388)) } |
+  Where-Object { ($_.Process -match $rx) -or ($_.Port -in @(1080,1081,1087,10808,10809,7890,7891,7892,7893,7897,8080,2080,2081,6450,6451,9090,20170,20171,8388,17990,17991,17992,17993,17994,17995,17996,17997,17998,17999)) } |
   Sort-Object Process,Port -Unique |
   ConvertTo-Json -Compress
 `)
@@ -261,7 +261,7 @@ $listeners = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue 
     $p=Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue;
     [pscustomobject]@{Host=$_.LocalAddress;Port=$_.LocalPort;Process=$p.ProcessName;Pid=$_.OwningProcess}
   } |
-  Where-Object { ($_.Process -match $listenerRx) -or ($_.Port -in @(1080,1081,1087,10808,10809,7890,7891,7892,7893,7897,8080,2080,2081,6450,6451,9090,20170,20171,8388)) } |
+  Where-Object { ($_.Process -match $listenerRx) -or ($_.Port -in @(1080,1081,1087,10808,10809,7890,7891,7892,7893,7897,8080,2080,2081,6450,6451,9090,20170,20171,8388,17990,17991,17992,17993,17994,17995,17996,17997,17998,17999)) } |
   Sort-Object Process,Port -Unique);
 
 ${firewallPart}

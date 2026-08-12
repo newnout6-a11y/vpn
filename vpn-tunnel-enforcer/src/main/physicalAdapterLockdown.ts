@@ -199,7 +199,7 @@ let snapshotPromiseTime = 0
 
 async function snapshotPhysicalAdapters(): Promise<AdapterSnapshot[]> {
   if (snapshotPromise && Date.now() - snapshotPromiseTime < 10000) {
-    return snapshotPromise
+    return await snapshotPromise
   }
 
   snapshotPromiseTime = Date.now()
