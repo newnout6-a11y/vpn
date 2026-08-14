@@ -176,6 +176,10 @@ export interface ServerGroup {
   refreshIntervalSeconds?: number
   /** Subscription-userinfo: panel URL the user can open in a browser. */
   webPageUrl?: string
+  /** Server-supplied subscription name from profile-title or content-disposition header. */
+  profileTitle?: string
+  /** Support/contact URL from support-url header. */
+  supportUrl?: string
   /** Number of profiles seen on the most recent successful refresh. */
   lastRefreshProfilesCount?: number
 }

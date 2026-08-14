@@ -273,7 +273,7 @@ export function buildKeyProbeConfig(
     throw new Error('profile has no outbound')
   }
 
-  const rawOutbound = { ...profile.outbound, tag: 'proxy-out' }
+  const rawOutbound: Record<string, any> = { ...profile.outbound, tag: 'proxy-out' }
   delete rawOutbound.detour
   if (options.directProxy) rawOutbound.detour = 'probe-direct-out'
   else if (options.physicalInterface) rawOutbound.bind_interface = options.physicalInterface

@@ -20,6 +20,29 @@ const TOPOLOGY_KEY_RE = /ip|ipv4|ipv6|address|addr|host|hostname|server|proxy|dn
 const IPV4_RE = /\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b/g
 const IPV6_RE = /\b(?:[0-9a-f]{1,4}:){2,}[0-9a-f]{1,4}(?:%\w+)?\b/gi
 const MAC_RE = /\b[0-9a-f]{2}(?::[0-9a-f]{2}){5}\b/gi
+const UTF8_DECODER = new TextDecoder('utf-8', { fatal: true })
+const WINDOWS_1251_DECODER = new TextDecoder('windows-1251')
+const WINDOWS_1251_BYTES = new Map<string, number>()
+for (let byte = 0; byte <= 255; byte += 1) {
+  WINDOWS_1251_BYTES.set(WINDOWS_1251_DECODER.decode(Uint8Array.of(byte)), byte)
+}
+
+/** Repair UTF-8 bytes that were accidentally decoded as Windows-1251. */
+export function repairMojibake(value: string): string {
+  if (!/[РС][\u0400-\u04ff]|вЂ|в„|В[«»·]/.test(value)) return value
+  const bytes: number[] = []
+  for (const char of value) {
+    const byte = WINDOWS_1251_BYTES.get(char)
+    if (byte === undefined) return value
+    bytes.push(byte)
+  }
+  try {
+    const repaired = UTF8_DECODER.decode(Uint8Array.from(bytes))
+    return repaired && !repaired.includes('\uFFFD') ? repaired : value
+  } catch {
+    return value
+  }
+}
 
 // Size-based rotation for app.log. Without this the file grows forever —
 // every IPC call logs at debug level, so over weeks of uptime the log can
@@ -116,7 +139,7 @@ function normalizeDetail(value: unknown): unknown {
   }
 
   if (typeof value === 'string') {
-    const redacted = redactTopologyText(redactSensitiveText(value))
+    const redacted = redactTopologyText(redactSensitiveText(repairMojibake(value)))
     return redacted.length > MAX_DETAIL_CHARS ? `${redacted.slice(0, MAX_DETAIL_CHARS)}...<truncated>` : redacted
   }
 
@@ -134,7 +157,7 @@ function normalizeDetail(value: unknown): unknown {
 }
 
 function formatLine(level: AppLogLevel, scope: string, message: string, details?: unknown): string {
-  const normalizedMessage = redactTopologyText(redactSensitiveText(message))
+  const normalizedMessage = redactTopologyText(redactSensitiveText(repairMojibake(message)))
   return JSON.stringify({
     ts: new Date().toISOString(),
     level,
@@ -146,7 +169,7 @@ function formatLine(level: AppLogLevel, scope: string, message: string, details?
 
 export function logEvent(level: AppLogLevel, scope: string, message: string, details?: unknown): void {
   const normalizedDetails = details === undefined ? undefined : normalizeDetail(details)
-  const normalizedMessage = redactTopologyText(redactSensitiveText(message))
+  const normalizedMessage = redactTopologyText(redactSensitiveText(repairMojibake(message)))
   const line = formatLine(level, scope, normalizedMessage, normalizedDetails)
   const lineBytes = Buffer.byteLength(line, 'utf8')
   queue = queue

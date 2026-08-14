@@ -28,7 +28,7 @@ vi.mock('./tunController', () => ({
 }))
 vi.mock('./serverPicker', () => ({ getActiveProfile: vi.fn(() => null) }))
 
-import { buildActiveProfileDiagnosticItems } from './systemDiagnostics'
+import { buildActiveProfileDiagnosticItems, isBenignSingBoxLogNoise } from './systemDiagnostics'
 
 const systemDiagnosticsSource = () => readFileSync(join(process.cwd(), 'src', 'main', 'systemDiagnostics.ts'), 'utf8')
 
@@ -67,12 +67,16 @@ describe('buildActiveProfileDiagnosticItems', () => {
     expect(directBlock).not.toContain("tun.running ? 'info' : 'warn'")
   })
 
-  it('filters benign sing-box upload-close noise from log warnings', () => {
-    const source = systemDiagnosticsSource()
-
-    expect(source).toContain('function isBenignSingBoxLogNoise')
-    expect(source).toContain('connection upload closed')
-    expect(source).toContain('!isBenignSingBoxLogNoise(line)')
+  it('does not promote routine remote stream closure to a sing-box core failure', () => {
+    expect(isBenignSingBoxLogNoise(
+      '+0300 x ERROR [1 171ms] connection: connection upload closed: raw-read tcp4: An existing connection was forcibly closed by the remote host.'
+    )).toBe(true)
+    expect(isBenignSingBoxLogNoise(
+      '+0300 x ERROR [2 171ms] connection: connection download closed: context canceled'
+    )).toBe(true)
+    expect(isBenignSingBoxLogNoise(
+      '+0300 x ERROR [3 0ms] outbound/vless[proxy-out]: connection to server failed: i/o timeout'
+    )).toBe(false)
   })
 
   it('filters optional proxy registry cleanup warnings from app-log health', () => {

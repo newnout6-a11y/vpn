@@ -198,8 +198,12 @@ let snapshotPromise: Promise<AdapterSnapshot[]> | null = null
 let snapshotPromiseTime = 0
 
 async function snapshotPhysicalAdapters(): Promise<AdapterSnapshot[]> {
+  // Return the in-flight promise directly so concurrent callers share one PS run.
+  // After it resolves (success or failure) snapshotPromise is cleared so the
+  // next call older than 10s always spawns a fresh script instead of re-awaiting
+  // an already-resolved promise that may be stale.
   if (snapshotPromise && Date.now() - snapshotPromiseTime < 10000) {
-    return await snapshotPromise
+    return snapshotPromise
   }
 
   snapshotPromiseTime = Date.now()
@@ -252,12 +256,15 @@ $rows | ConvertTo-Json -Compress -Depth 4
     forcedDnsTo: null,
     forcedIpv6Off: false
   }))
-  })()
+  })().finally(() => {
+    // Clear the cached promise once settled so the next call after 10s
+    // spawns a fresh PS script rather than re-returning a stale resolved value.
+    snapshotPromise = null
+  })
 
   try {
     return await snapshotPromise
   } catch (err) {
-    snapshotPromise = null
     throw err
   }
 }

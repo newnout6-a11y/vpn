@@ -30,13 +30,13 @@ export interface ElectronAPI {
   runAutoPilot: () => Promise<any>
   repairOrphanedDns: () => Promise<any>
   rollbackAdapterLockdown: () => Promise<any>
-  killStaleSingbox: () => Promise<{ success: boolean; message: string }>
+  killStaleSingbox: () => Promise<{ success: boolean; message: string; skipped?: boolean; blocked?: boolean; candidates?: number; killed?: number; names?: string[]; error?: string }>
   logRenderer: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => Promise<any>
   getFullLogs: () => Promise<any>
   clearAppLog: () => Promise<any>
   clearDiagnosticArtifacts: () => Promise<{ success: boolean; message: string; cleared: string[] }>
   rollbackTunNetworkBaseline: () => Promise<any>
-  disableFirewallKillSwitch: () => Promise<{ success: boolean; message: string }>
+  disableFirewallKillSwitch: () => Promise<{ success: boolean; message: string; skipped?: boolean }>
   getFirewallKillSwitchStatus: () => Promise<{ active: boolean }>
   firewallNuclearReset: (confirmationToken: string) => Promise<{ success: boolean; message: string }>
   firewallRepairHealth: () => Promise<any>
@@ -193,6 +193,9 @@ export interface ElectronAPI {
   themeCreate: (theme: any) => Promise<any>
   themeDelete: (id: string) => Promise<void>
   onThemeChanged: (callback: (theme: any) => void) => () => void
+  onServerActiveChanged: (callback: (data: { profileId: string; profileName: string; nextProfileId?: string }) => void) => () => void
+  onKillSwitchTrafficBlocked: (callback: (data: { reason: string; steps?: string[] }) => void) => () => void
+  onI18nLocaleChanged: (callback: (locale: string) => void) => () => void
   // Speed Test
   speedTestRun: () => Promise<any>
   speedTestHistory: () => Promise<any[]>
@@ -615,4 +618,4 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('app:shutting-down', handler)
     return () => ipcRenderer.removeListener('app:shutting-down', handler)
   }
-})
+} satisfies ElectronAPI)

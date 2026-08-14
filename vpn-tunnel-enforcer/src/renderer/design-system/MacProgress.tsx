@@ -4,7 +4,7 @@ import { cn } from './utils'
 
 export interface MacProgressProps {
   /** Progress value from 0 to 100 */
-  value: number
+  value?: number
   /** Show indeterminate animation (ignores value) */
   indeterminate?: boolean
   /** Height of the progress bar */
@@ -33,7 +33,7 @@ const variantColors = {
  * macOS-style progress bar with smooth animated fill.
  */
 export const MacProgress: React.FC<MacProgressProps> = ({
-  value,
+  value = 0,
   indeterminate,
   size = 'md',
   variant = 'accent',

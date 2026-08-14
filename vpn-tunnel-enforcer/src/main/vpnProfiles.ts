@@ -18,6 +18,7 @@ export type VpnProtocol =
   | 'anytls'
   | 'shadowtls'
   | 'tuic'
+  | 'wireguard'
   | 'sing-box'
 
 export interface VpnProfile {
@@ -85,6 +86,10 @@ export interface SubscriptionUserInfo {
   expiresAt?: number
   refreshIntervalSeconds?: number
   webPageUrl?: string
+  /** Server-supplied subscription name (profile-title or content-disposition filename). */
+  profileTitle?: string
+  /** Support/contact URL from support-url header. */
+  supportUrl?: string
 }
 
 interface FetchAttempt {
@@ -106,7 +111,8 @@ const SUPPORTED_OUTBOUND_TYPES = new Set([
   'naive',
   'anytls',
   'shadowtls',
-  'tuic'
+  'tuic',
+  'wireguard'
 ])
 const HAPP_VERSION = '3.22.1'
 const SUBSCRIPTION_USER_AGENTS = ['sing-box/1.13.8', 'v2RayTun/1.0', 'v2rayN/7.0']
@@ -128,7 +134,7 @@ const DEVICE_HEADER_PROFILES: Record<ClientDevice, {
   mac: { os: 'macOS', osVersion: '15.3', model: 'MacBookPro18,3' }
 }
 
-const VPN_URI_SCHEMES = 'vless|trojan|ss|vmess|hysteria2|hy2|naive|anytls|shadowtls|tuic'
+const VPN_URI_SCHEMES = 'vless|trojan|ss|vmess|hysteria2|hy2|naive|anytls|shadowtls|tuic|wireguard|wg'
 const VPN_URI_PREFIX_RE = new RegExp(`^(?:${VPN_URI_SCHEMES}):\\/\\/`, 'i')
 const VPN_URI_IN_TEXT_RE = new RegExp(`\\b(?:${VPN_URI_SCHEMES}):\\/\\/[^\\s"'<>\\\`\\\\]+`, 'i')
 
@@ -528,6 +534,21 @@ function buildTransport(params: URLSearchParams): Record<string, any> | undefine
     }
   }
 
+  if (type === 'splithttp' || type === 'xhttp' || type === 'split-http') {
+    const transport: Record<string, any> = {
+      type: 'splithttp',
+      host: param(params, 'host') || '',
+      path: ensureLeadingSlash(param(params, 'path') || '/')
+    }
+    const mode = param(params, 'mode')
+    if (mode) transport.method = mode
+    const headers: Record<string, string> = {}
+    const host = param(params, 'host')
+    if (host) headers.Host = host
+    if (Object.keys(headers).length) transport.headers = headers
+    return transport
+  }
+
   throw new Error(`Транспорт ${type} пока не поддерживается встроенным импортом`)
 }
 
@@ -537,6 +558,21 @@ function finishOutbound(outbound: Record<string, any>): Record<string, any> {
   delete result.detour
   delete result.domain_strategy
   delete result.domain_resolver
+  // Preserve multiplex/mux if present in the source outbound (e.g. from a
+  // pasted sing-box JSON or Clash config with multiplex: {enabled: true}).
+  // sing-box field is `multiplex`; Xray/Clash use `mux`. Normalise to sing-box.
+  if (!result.multiplex) {
+    const mux = result.mux
+    if (mux && typeof mux === 'object') {
+      result.multiplex = {
+        enabled: mux.enabled !== false,
+        ...(mux.concurrency !== undefined ? { max_connections: Number(mux.concurrency) } : {}),
+        ...(mux.protocol ? { protocol: mux.protocol } : {}),
+        ...(mux.brutal && typeof mux.brutal === 'object' ? { brutal: mux.brutal } : {})
+      }
+    }
+  }
+  delete result.mux
   // Anti-DPI default for the JSON-paste path: a user who pasted a full
   // sing-box outbound may not have included utls/alpn, so apply the same
   // browser-like defaults here. This is the last gate before the outbound
@@ -750,6 +786,13 @@ function parseAnyTls(line: string): VpnProfile {
   }
   const tls = buildTls(params, url.hostname, true)
   if (tls) outbound.tls = tls
+  // AnyTLS idle-session tuning fields (sing-box 1.11+)
+  const idleCheck = Number(param(params, 'idle_session_check_interval_ms', 'idleCheckInterval', 'idle-check-interval') || 0)
+  if (idleCheck > 0) outbound.idle_session_check_interval_ms = idleCheck
+  const idleTimeout = Number(param(params, 'idle_session_timeout_ms', 'idleTimeout', 'idle-timeout') || 0)
+  if (idleTimeout > 0) outbound.idle_session_timeout_ms = idleTimeout
+  const minIdle = Number(param(params, 'min_idle_session', 'minIdle', 'min-idle') || 0)
+  if (minIdle > 0) outbound.min_idle_session = minIdle
   return { name: safeDecode(url.hash.slice(1)) || 'AnyTLS', protocol: 'anytls', outbound: finishOutbound(outbound) }
 }
 
@@ -789,6 +832,35 @@ function parseTuic(line: string): VpnProfile {
   const tls = buildTls(params, url.hostname, true)
   if (tls) outbound.tls = tls
   return { name: safeDecode(url.hash.slice(1)) || 'TUIC', protocol: 'tuic', outbound: finishOutbound(outbound) }
+}
+
+// wireguard://[privateKey@]server:port?publicKey=...&presharedKey=...&ip=...&dns=...&mtu=...#name
+// Also handles the compact format: wireguard://privateKey:publicKey@server:port
+function parseWireGuard(line: string): VpnProfile {
+  const url = parseStandardUrl(line)
+  const params = url.searchParams
+  // privateKey may be in username or in ?private_key param
+  const privateKey = safeDecode(url.username || param(params, 'privateKey', 'private_key', 'pk') || '')
+  if (!privateKey) throw new Error('WireGuard link is missing private key')
+  const publicKey = param(params, 'publicKey', 'public_key', 'pubkey', 'peerPublicKey') || ''
+  if (!publicKey) throw new Error('WireGuard link is missing peer public key')
+  const outbound: Record<string, any> = {
+    type: 'wireguard',
+    tag: 'proxy-out',
+    server: url.hostname,
+    server_port: numberPort(url.port || '51820'),
+    private_key: privateKey,
+    peer_public_key: publicKey
+  }
+  const presharedKey = param(params, 'presharedKey', 'preshared_key', 'psk')
+  if (presharedKey) outbound.pre_shared_key = presharedKey
+  const localAddress = param(params, 'ip', 'address', 'localAddress', 'local_address')
+  if (localAddress) outbound.local_address = localAddress.split(',').map(s => s.trim()).filter(Boolean)
+  const dns = param(params, 'dns')
+  if (dns) outbound.dns_servers = dns.split(',').map(s => s.trim()).filter(Boolean)
+  const mtu = Number(param(params, 'mtu') || 0)
+  if (mtu > 0) outbound.mtu = mtu
+  return { name: safeDecode(url.hash.slice(1)) || 'WireGuard', protocol: 'wireguard', outbound }
 }
 
 function xrayProtocol(value: unknown): VpnProtocol | null {
@@ -1457,6 +1529,18 @@ function buildTransportFromClash(raw: Record<string, any>): Record<string, any> 
     }
   }
 
+  if (network === 'splithttp' || network === 'xhttp' || network === 'split-http') {
+    const opts = raw['splithttp-opts'] && typeof raw['splithttp-opts'] === 'object' ? raw['splithttp-opts'] : {}
+    const transport: Record<string, any> = {
+      type: 'splithttp',
+      host: stringValue(opts.host) || stringValue(raw.host) || '',
+      path: ensureLeadingSlash(stringValue(opts.path) || stringValue(raw.path) || '/')
+    }
+    const mode = stringValue(opts.mode) || stringValue(raw.mode)
+    if (mode) transport.method = mode
+    return transport
+  }
+
   return undefined
 }
 
@@ -1558,6 +1642,7 @@ function parseLine(line: string): VpnProfile | null {
   if (scheme === 'anytls') return parseAnyTls(trimmed)
   if (scheme === 'shadowtls') return parseShadowTls(trimmed)
   if (scheme === 'tuic') return parseTuic(trimmed)
+  if (scheme === 'wireguard' || scheme === 'wg') return parseWireGuard(trimmed)
   return null
 }
 
@@ -2020,6 +2105,44 @@ function parseSubscriptionUserInfo(headers: Record<string, string>): Subscriptio
     // to render an unsafe link.
     if (/^https?:\/\//i.test(trimmed)) {
       result.webPageUrl = trimmed
+      touched = true
+    }
+  }
+
+  // profile-title: server-supplied human-readable name for this subscription.
+  // Marzban/3X-UI panels send this so the client can name the group without
+  // the user having to type anything.
+  const profileTitle = headers['profile-title']
+  if (profileTitle) {
+    const trimmed = profileTitle.trim()
+    if (trimmed) {
+      result.profileTitle = trimmed
+      touched = true
+    }
+  }
+
+  // content-disposition: filename="My Subscription" — used by some panels as
+  // an alternative way to supply the group name.
+  if (!result.profileTitle) {
+    const cd = headers['content-disposition']
+    if (cd) {
+      const fnMatch = cd.match(/filename\*?=(?:utf-8'')?["']?([^"';\r\n]+)["']?/i)
+      if (fnMatch) {
+        const name = decodeURIComponent(fnMatch[1]).trim().replace(/\.(?:yaml|txt|json)$/i, '')
+        if (name) {
+          result.profileTitle = name
+          touched = true
+        }
+      }
+    }
+  }
+
+  // support-url: contact/support link from the panel.
+  const supportUrl = headers['support-url']
+  if (supportUrl) {
+    const trimmed = supportUrl.trim()
+    if (/^https?:\/\//i.test(trimmed)) {
+      result.supportUrl = trimmed
       touched = true
     }
   }

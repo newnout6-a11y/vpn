@@ -599,7 +599,9 @@ async function refreshGroupUnlocked(
     trafficTotalBytes: userInfo?.trafficTotalBytes ?? undefined,
     expiresAt: userInfo?.expiresAt ?? undefined,
     refreshIntervalSeconds: userInfo?.refreshIntervalSeconds ?? undefined,
-    webPageUrl: userInfo?.webPageUrl ?? undefined
+    webPageUrl: userInfo?.webPageUrl ?? undefined,
+    profileTitle: userInfo?.profileTitle ?? undefined,
+    supportUrl: userInfo?.supportUrl ?? undefined
   })
 
   logEvent('info', 'server-groups', 'group refreshed', {

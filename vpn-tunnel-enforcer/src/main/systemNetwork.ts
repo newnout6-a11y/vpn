@@ -67,7 +67,8 @@ function backupDir() {
 
 function getProgramDataPath(): string {
   try {
-    return app.getPath('programData')
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return (app as any).getPath('programData')
   } catch {
     return process.env.ProgramData || 'C:\\ProgramData'
   }

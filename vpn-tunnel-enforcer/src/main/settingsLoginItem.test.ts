@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const storeState = vi.hoisted(() => ({ data: {} as Record<string, any> }))
-const execElevatedMock = vi.hoisted(() => vi.fn(async () => ({ stdout: '', stderr: '' })))
+const execElevatedMock = vi.hoisted(() => vi.fn(async (_command: string) => ({ stdout: '', stderr: '' })))
 
 vi.mock('electron', () => ({
   app: {

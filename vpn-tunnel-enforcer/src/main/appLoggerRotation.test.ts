@@ -79,4 +79,12 @@ describe('appLogger rotation', () => {
 
     expect(existsSync(prevLog)).toBe(false)
   })
+
+  it('repairs reversible UTF-8/Windows-1251 mojibake without changing valid Russian', async () => {
+    const { repairMojibake } = await import('./appLogger')
+
+    expect(repairMojibake('Р—Р°С‰РёС‚Р° РІРєР»СЋС‡РµРЅР°')).toBe('Защита включена')
+    expect(repairMojibake('Защита включена')).toBe('Защита включена')
+    expect(repairMojibake('plain ASCII')).toBe('plain ASCII')
+  })
 })

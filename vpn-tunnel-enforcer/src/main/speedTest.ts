@@ -40,7 +40,9 @@ const store = new Store<SpeedTestStore>({
 const LATENCY_URLS = [
   'https://speed.cloudflare.com/__down?bytes=0',
   'https://www.google.com/generate_204',
-  'https://detectportal.firefox.com/success.txt'
+  'https://connectivitycheck.gstatic.com/generate_204',
+  'https://detectportal.firefox.com/success.txt',
+  'https://1.1.1.1'
 ]
 /** Download endpoints. Tried in order. Cloudflare supports dynamic payload size. */
 const DOWNLOAD_URLS = [
@@ -123,12 +125,12 @@ async function measureLatency(): Promise<number> {
   for (const url of LATENCY_URLS) {
     const pings: number[] = []
     // Warmup ping (discarded) — avoids cold DNS cache miss skewing the median.
-    try { await axios.get(url, { timeout: 5000, headers: { 'Cache-Control': 'no-cache' } }) } catch {}
+    try { await axios.get(url, { timeout: 10000, headers: { 'Cache-Control': 'no-cache' } }) } catch {}
     for (let i = 0; i < 5; i++) {
       const start = Date.now()
       try {
         await axios.get(url, {
-          timeout: 5000,
+          timeout: 10000,
           headers: { 'Cache-Control': 'no-cache' }
         })
         pings.push(Date.now() - start)

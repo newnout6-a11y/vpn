@@ -111,8 +111,11 @@ function joinRows(rows: string[], limit = 18): string {
   return visible.join(' | ') + suffix
 }
 
-function isBenignSingBoxLogNoise(line: string): boolean {
-  return /\bERROR\b.*connection upload closed\b/i.test(line)
+export function isBenignSingBoxLogNoise(line: string): boolean {
+  return (
+    /\bERROR\b.*connection (?:upload|download) closed\b/i.test(line) &&
+    /forcibly closed by the remote host|operation was canceled|context canceled/i.test(line)
+  )
 }
 
 function isBenignAppLogWarning(row: any): boolean {

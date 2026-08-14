@@ -19,7 +19,7 @@ export function requireStringArray(value: unknown, field: string, options: { max
   return value.map((item, index) => requireString(item, `${field}[${index}]`, { maxLength: options.itemMaxLength }))
 }
 
-export function requireEnum<T extends string>(value: unknown, field: string, allowed: readonly T[]): T {
+export function requireEnum<const T extends string>(value: unknown, field: string, allowed: readonly T[]): T {
   if (typeof value !== 'string' || !allowed.includes(value as T)) {
     throw new Error(`Invalid IPC payload: ${field} must be one of: ${allowed.join(', ')}`)
   }
@@ -39,7 +39,7 @@ export function optionalPlainObject(value: unknown, field: string): Record<strin
 }
 
 export function requirePort(value: unknown, field: string): number {
-  if (!Number.isInteger(value) || value < 1 || value > 65535) {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > 65535) {
     throw new Error(`Invalid IPC payload: ${field} must be an integer port from 1 to 65535`)
   }
   return value

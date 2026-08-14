@@ -209,6 +209,7 @@ let watchdogFailures = 0
 let startInProgress = false
 let stopInProgress = false
 const DIRECT_VPN_WATCHDOG_SUPPRESS_MS = 45000
+const DIRECT_VPN_WATCHDOG_INTERVAL_MS = 15000
 
 // Auto-restart bookkeeping. We remember the last successful start params so we
 // can replay them after an unexpected sing-box crash without asking the user.
@@ -962,6 +963,11 @@ export function generateSingboxConfig(
           '224.0.0.0/4',
           ...directVpnEndpointRouteExcludes
         ],
+        // Windows DNS Client reuses one UDP/53 flow for a long time. Keeping
+        // that flow indefinitely can leave sing-box parsing stale datagrams
+        // on the same session ("bad question name" / "bad rdata"). Rotate
+        // idle UDP sessions before they accumulate stale parser state.
+        udp_timeout: '30s',
         stack: 'mixed'
       },
       {
@@ -1183,7 +1189,7 @@ async function waitForTunInterface(timeoutMs = 5000): Promise<boolean> {
   while (Date.now() - start < timeoutMs) {
     const interfaces = networkInterfaces()
     for (const name of Object.keys(interfaces)) {
-      if (name === TUN_ADAPTER_ALIAS || ALL_KNOWN_ALIASES.includes(name)) {
+      if (name === TUN_ADAPTER_ALIAS || (ALL_KNOWN_ALIASES as readonly string[]).includes(name)) {
         const entries = interfaces[name]
         if (entries && entries.some(e => e.family === 'IPv4' && !e.internal)) {
           return true
@@ -1404,17 +1410,13 @@ function startProxyWatchdog(proxyAddr: string) {
 /**
  * Direct-VPN counterpart of startProxyWatchdog. In directVpn mode there is no
  * local proxy to probe — the upstream is the VLESS/Reality server itself. We
- * TCP-probe its host:port so a dead/unresponsive server (the "wsarecv: host
- * failed to respond" storm) is detected within ~15s and surfaced as
- * `proxy-down` with a clear "сервер X не отвечает" message, instead of leaving
- * the user staring at DNS timeouts and a misleading "leak" card.
- *
- * Note: a TCP connect succeeding doesn't fully prove the Reality handshake
- * works, but a TCP connect FAILING is a definitive "server is down" signal,
- * which is exactly the case we need to catch here. We use a slightly longer
- * 2s probe timeout because the server is remote (not localhost).
+ * Monitor the confirmed tunnel egress instead of opening a raw TCP socket from
+ * Electron. With the kill-switch enabled, only vpnte-sing-box.exe is allowed
+ * to dial the excluded VPN endpoint directly, so an Electron socket is
+ * expected to fail even while the tunnel is healthy. ipMonitor's successful
+ * public-IP checks exercise the real TUN -> proxy-out path.
  */
-function startServerWatchdog(host: string, port: number, label: string) {
+function startServerWatchdog(_host: string, _port: number, label: string) {
   stopProxyWatchdog()
   watchdogTimer = setInterval(async () => {
     if (!currentStatus.running) {
@@ -1422,33 +1424,19 @@ function startServerWatchdog(host: string, port: number, label: string) {
       return
     }
 
-    const alive = await probeTcp(host, port, 2500)
-    if (alive) {
+    if (hasRecentPublicIpConfirmation(DIRECT_VPN_WATCHDOG_SUPPRESS_MS)) {
       watchdogFailures = 0
       markProxyRecovered()
       return
     }
 
     watchdogFailures += 1
-    if (hasRecentPublicIpConfirmation(DIRECT_VPN_WATCHDOG_SUPPRESS_MS)) {
-      watchdogFailures = 0
-      logEvent('info', 'tun-watchdog', 'suppressing direct VPN server probe failure because tunnel egress was recently confirmed', {
-        host,
-        port,
-        label,
-        suppressWindowMs: DIRECT_VPN_WATCHDOG_SUPPRESS_MS
-      })
-      markProxyRecovered()
-      return
-    }
     if (watchdogFailures >= 3) {
       markProxyUnreachable(
-        `Сервер «${label}» не отвечает. Трафик блокируется в TUN (реальный IP не утекает). Выберите другой сервер.`
+        `VPN через сервер «${label}» не подтверждён. Трафик остаётся внутри TUN (реальный IP не утекает). Проверьте соединение или выберите другой сервер.`
       )
-    } else {
-      logEvent('warn', 'tun-watchdog', `VPN server probe failed (${watchdogFailures}/3)`, { host, port, label })
     }
-  }, 5000)
+  }, DIRECT_VPN_WATCHDOG_INTERVAL_MS)
 }
 
 // Quick TCP reachability probe (2s timeout). Used to verify the upstream proxy
@@ -2562,7 +2550,7 @@ export const tunController = {
             restartTimer = setTimeout(() => {
               restartTimer = null
               if (settingsStore.get().autoRestartOnCrash === false) {
-                logEvent('info', 'tun', 'auto-restart cancelled because setting is off', { attempt })
+                logEvent('info', 'tun', 'auto-restart cancelled because setting is off', { attempt: restartAttempt })
                 if (adapterLockdownEngaged) {
                   rollbackPhysicalAdapterLockdownIfApplied('auto-restart cancelled').catch(err =>
                     logEvent('warn', 'tun', 'adapter lockdown rollback after auto-restart cancellation failed', err)
@@ -2630,9 +2618,9 @@ export const tunController = {
               return
             }
 
-          rollbackTunNetworkBaselineIfApplied('sing-box exited').catch(err =>
-            logEvent('warn', 'tun', 'baseline auto-rollback after sing-box exit failed', err)
-          )
+            rollbackTunNetworkBaselineIfApplied('sing-box exited').catch(err =>
+              logEvent('warn', 'tun', 'baseline auto-rollback after sing-box exit failed', err)
+            )
 
           // Decide whether to auto-recover. We only restart if (a) the user
           // didn't ask for a stop, (b) the autoRestartOnCrash setting is on,
@@ -2962,13 +2950,9 @@ export const tunController = {
           if (mode === 'localProxy') {
             startProxyWatchdog(proxyAddr)
           } else if (mode === 'directVpn' && vpnProfile?.outbound) {
-            // Direct VPN mode had NO server-health watchdog — so when the VLESS
-            // server stopped responding mid-session (real case: wsarecv "host
-            // failed to respond" storm), nothing detected it. DNS-through-the-
-            // tunnel then timed out for 15s+, the IP-check fell back to showing
-            // the real IP, and the user saw confusing "leak"/error states with
-            // no clear "сервер не отвечает". Now we probe the VLESS server's
-            // host:port the same way and emit proxy-down so the UI can say so.
+            // Direct VPN health follows confirmed public-IP egress through the
+            // TUN. Electron must not dial the excluded VPN endpoint directly:
+            // firewall rules intentionally reserve that path for sing-box.
             const vhost = vpnProfile.outbound.server
             const vport = Number(vpnProfile.outbound.server_port)
             if (typeof vhost === 'string' && vhost && Number.isInteger(vport) && vport > 0 && vport <= 65535) {

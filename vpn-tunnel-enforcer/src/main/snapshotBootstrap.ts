@@ -52,7 +52,7 @@ function installSnapshotLoader(): void {
 
     const originalLoad = Module._load
     Module._load = function (request: string, parent: unknown, isMain: boolean) {
-      if (available.has(request)) {
+      if (available.has(request as (typeof SNAPSHOT_MODULES)[number])) {
         const cached = cache[request]
         if (cached !== undefined) return cached
       }

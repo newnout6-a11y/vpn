@@ -142,7 +142,7 @@ export function Maintenance() {
   const setFirewallHealth = useAppStore(s => s.setMaintenanceFirewallHealth)
   const storedRepairSteps = useAppStore(s => s.maintenanceRepairSteps) as RepairStep[] | null
   const setStoredRepairSteps = useAppStore(s => s.setMaintenanceRepairSteps)
-  const repairSteps = storedRepairSteps ?? AUTO_REPAIR_STEPS.map(step => ({ id: step.id, label: step.label, status: 'pending' as const }))
+  const repairSteps: RepairStep[] = storedRepairSteps ?? AUTO_REPAIR_STEPS.map(step => ({ id: step.id, label: step.label, status: 'pending' as const }))
 
   const important = useMemo(() => importantItems(systemDiagnostics), [systemDiagnostics])
   const systemSummary = useMemo(() => maintenanceSystemSummary(systemDiagnostics), [systemDiagnostics])

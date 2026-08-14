@@ -211,6 +211,15 @@ describe('generateSingboxConfig runtime logging', () => {
   })
 })
 
+describe('generateSingboxConfig TUN session lifetime', () => {
+  it('rotates idle UDP flows so Windows DNS does not reuse stale sessions indefinitely', () => {
+    const cfg = gen({ outbound: { ...plainTlsOutbound } })
+    const tun = cfg.inbounds.find((inbound) => inbound.tag === 'tun-in')
+
+    expect(tun?.udp_timeout).toBe('30s')
+  })
+})
+
 // ─── DNS bootstrap ────────────────────────────────────────────────────────────
 
 describe('generateSingboxConfig DNS bootstrap', () => {
@@ -493,7 +502,7 @@ describe('generateSingboxConfig domain routing', () => {
 
   it('moves private ranges to route_exclude_address on TUN inbound', () => {
     const cfg = gen({ outbound: { ...plainTlsOutbound, server: '1.2.3.4' } })
-    const tunInbound = cfg.inbounds.find((i: any) => i.type === 'tun')
+    const tunInbound: any = cfg.inbounds.find((i: any) => i.type === 'tun')
     expect(tunInbound).toBeTruthy()
     expect(tunInbound.route_exclude_address).toBeDefined()
     expect(tunInbound.route_exclude_address).toContain('127.0.0.0/8')
@@ -505,13 +514,13 @@ describe('generateSingboxConfig domain routing', () => {
 
   it('excludes the direct VPN server IP from TUN auto-route so the tunnel can dial its endpoint', () => {
     const cfg = gen({ outbound: { ...plainTlsOutbound, server: '91.224.75.185' } })
-    const tunInbound = cfg.inbounds.find((i: any) => i.type === 'tun')
+    const tunInbound: any = cfg.inbounds.find((i: any) => i.type === 'tun')
     expect(tunInbound.route_exclude_address).toContain('91.224.75.185/32')
   })
 
   it('does not add a hostname VPN endpoint to route_exclude_address', () => {
     const cfg = gen({ outbound: { ...plainTlsOutbound, server: 'example.com' } })
-    const tunInbound = cfg.inbounds.find((i: any) => i.type === 'tun')
+    const tunInbound: any = cfg.inbounds.find((i: any) => i.type === 'tun')
     expect(tunInbound.route_exclude_address).not.toContain('example.com/32')
   })
 

@@ -125,7 +125,7 @@ function extractIpv4(value: unknown): string | null {
   const match = raw.trim().match(/\b(\d{1,3}(?:\.\d{1,3}){3})\b/)
   if (!match) return null
   const octets = match[1].split('.').map(Number)
-  if (!octets.every(o => Number.isInteger(o) && o >= 0 && o <= 255)) return null
+  if (!octets.every((o: number) => Number.isInteger(o) && o >= 0 && o <= 255)) return null
   return match[1]
 }
 

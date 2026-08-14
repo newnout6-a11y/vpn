@@ -230,7 +230,7 @@ export async function probeServer(host: string, knownPort?: number, options: Pro
   const [reverseDns, asn, latency, openPorts, tlsCert, httpBanner] = await Promise.all([
     reverseDnsLookup(primaryIp),
     disableGeoLookup ? Promise.resolve(null) : getAsnInfo(primaryIp),
-    tunRunning ? Promise.resolve({ samples: [], min: null, avg: null, max: null, jitter: null, loss: 1 }) : measureLatency(host, port),
+    tunRunning ? Promise.resolve(null as LatencyStats | null) : measureLatency(host, port),
     scanPorts(host, knownPort),
     getTlsCert(host, knownPort && [443, 8443, 4433].includes(knownPort) ? knownPort : 443),
     getHttpBanner(host, 80)
@@ -241,7 +241,7 @@ export async function probeServer(host: string, knownPort?: number, options: Pro
     resolvedIps,
     reverseDns,
     asn,
-    latency: latency.samples.length > 0 ? latency : null,
+    latency: latency !== null && latency.samples.length > 0 ? latency : null,
     openPorts,
     tlsCert,
     httpBanner

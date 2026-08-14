@@ -81,7 +81,7 @@ beforeEach(() => {
   vi.mocked(axios.get).mockReset()
   vi.mocked(axios.get).mockResolvedValue({ data: { ip: '198.51.100.1' } })
   vi.mocked(childExec).mockReset()
-  vi.mocked(childExec).mockImplementation((_cmd: string, _opts: any, cb: Function) => {
+  vi.mocked(childExec).mockImplementation((_cmd: string, _opts: any, cb: any) => {
     if (cb) cb(null, '[]', '')
     return {} as any
   })
@@ -261,7 +261,7 @@ describe('getPublicIpV6', () => {
 describe('getPublicIpV4', () => {
   it('falls back to PowerShell Invoke-RestMethod when axios and curl fail', async () => {
     vi.mocked(axios.get).mockRejectedValue(new Error('blocked'))
-    vi.mocked(childExec).mockImplementation((cmd: string, _opts: any, cb: Function) => {
+    vi.mocked(childExec).mockImplementation((cmd: string, _opts: any, cb: any) => {
       if (String(cmd).toLowerCase().includes('powershell')) {
         cb(null, '198.51.100.77\n', '')
         return {} as any

@@ -1315,6 +1315,13 @@ app.whenReady().then(async () => {
   })
 
   handleLogged('get-traffic-stats', async () => {
+    // If the TUN is running but the traffic monitor is not (e.g. window
+    // was reloaded after TUN start and the onStatusChange 'running' event
+    // was missed), kick-start it so the renderer gets live data right away.
+    const tunStatus = tunController.getStatus()
+    if (tunStatus.running) {
+      trafficMonitor.start()
+    }
     return trafficMonitor.getCurrentStats()
   })
 
@@ -1648,17 +1655,17 @@ app.whenReady().then(async () => {
       const result = await killOwnedTunRuntimeProcesses()
       if (!result.success) {
         return {
+          ...result,
           success: false,
-          message: `Не удалось проверить процессы VPNTE runtime: ${result.error || 'unknown error'}`,
-          ...result
+          message: `Не удалось проверить процессы VPNTE runtime: ${result.error || 'unknown error'}`
         }
       }
       return {
+        ...result,
         success: true,
         message: result.killed > 0
           ? `Завершены процессы VPNTE runtime: ${result.killed}`
-          : 'Зависшие процессы VPNTE runtime не найдены',
-        ...result
+          : 'Зависшие процессы VPNTE runtime не найдены'
       }
     } catch (err: any) {
       return { success: false, message: `Не удалось завершить процессы: ${err?.message || err}` }

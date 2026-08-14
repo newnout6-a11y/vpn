@@ -43,19 +43,22 @@ describe('tunController recovery cancellation guards', () => {
     expect(failureReturn).toBe(-1)
   })
 
-  it('suppresses false direct-VPN proxy-down when public IP was just confirmed', async () => {
+  it('uses confirmed egress for Direct VPN watchdog and logs only state transitions', async () => {
     const source = await readFile(join(here, 'tunController.ts'), 'utf8')
-    const watchdogStart = source.indexOf('function startServerWatchdog(host: string, port: number, label: string)')
-    const watchdogEnd = source.indexOf('\n}', source.indexOf("}, 5000)", watchdogStart))
+    const watchdogStart = source.indexOf('function startServerWatchdog(_host: string, _port: number, label: string)')
+    const watchdogEnd = source.indexOf('\n}', source.indexOf('}, DIRECT_VPN_WATCHDOG_INTERVAL_MS)', watchdogStart))
     const watchdogSource = source.slice(watchdogStart, watchdogEnd)
 
     expect(watchdogStart).toBeGreaterThan(0)
     expect(watchdogSource).toContain('hasRecentPublicIpConfirmation(DIRECT_VPN_WATCHDOG_SUPPRESS_MS)')
-    expect(watchdogSource).toContain('suppressing direct VPN server probe failure')
     expect(watchdogSource).toContain('markProxyRecovered()')
+    expect(watchdogSource).not.toContain('probeTcp(')
+    expect(watchdogSource).not.toContain('logEvent(')
     expect(watchdogSource.indexOf('hasRecentPublicIpConfirmation(DIRECT_VPN_WATCHDOG_SUPPRESS_MS)')).toBeLessThan(
       watchdogSource.indexOf('markProxyUnreachable(')
     )
+    expect(source).toMatch(/if \(currentStatus\.proxyReachable === false\) return\r?\n\s+logEvent\('warn', 'tun-watchdog', reason\)/)
+    expect(source).toMatch(/if \(currentStatus\.proxyReachable !== false\) return\r?\n\s+logEvent\('info', 'tun-watchdog', 'upstream proxy recovered, traffic flowing again'\)/)
   })
 
   it('uses the local PowerShell quote helper for owned runtime process cleanup', async () => {
@@ -145,5 +148,58 @@ describe('tunController recovery cancellation guards', () => {
     expect(cancel).toBeGreaterThan(timer)
     expect(cancel).toBeLessThan(start)
     expect(source).toContain('auto-restart cancelled because setting is off')
+  })
+
+  // Regression: the WSAEACCES port-bind retry timer logged a bare `attempt`
+  // identifier that is only declared in the *sibling* auto-restart scope
+  // (`const attempt = restartAttempt + 1`). At runtime that threw a
+  // ReferenceError on the very first line of the cancel branch, which skipped
+  // the adapter-lockdown rollback, the orphaned-DNS repair, and the terminal
+  // notifyStatus() below it — leaving the user with IPv6 off, DNS pinned to a
+  // dead TUN resolver, and a stale "connected" UI. The port-bind retry timer
+  // has no `attempt` binding of its own, so it may only use `restartAttempt`.
+  it('never references an out-of-scope attempt counter in the port-bind retry timer', async () => {
+    const source = await readFile(join(here, 'tunController.ts'), 'utf8')
+
+    const retryStart = source.indexOf('const retryOpts = startOptions')
+    expect(retryStart, 'port-bind retry block must exist').toBeGreaterThan(0)
+    const retryEnd = source.indexOf("notifyStatus('restarting:1/1')", retryStart)
+    expect(retryEnd, 'port-bind retry block must end with its status notify').toBeGreaterThan(
+      retryStart
+    )
+
+    const retryBlock = source.slice(retryStart, retryEnd)
+    expect(retryBlock).toContain('auto-restart cancelled because setting is off')
+    // This block declares no `attempt` of its own. Strip comments, string
+    // literals and `attempt:` property keys, then nothing named `attempt` may
+    // remain as a value reference.
+    const executable = retryBlock
+      .replace(/\/\/[^\n]*/g, '')
+      .replace(/'(?:[^'\\]|\\.)*'/g, "''")
+      .replace(/`(?:[^`\\]|\\.)*`/g, '``')
+      .replace(/\battempt\s*:/g, 'key:')
+      .replace(/\brestartAttempt\b/g, '')
+    expect(
+      executable.match(/\battempt\b/g),
+      'port-bind retry timer must not reference a bare `attempt` binding'
+    ).toBeNull()
+  })
+
+  // The sibling backoff scope does declare `attempt`, so shorthand logging is
+  // fine there — but only if the declaration really precedes the usage within
+  // the same block.
+  it('declares the attempt counter before logging it in the backoff scope', async () => {
+    const source = await readFile(join(here, 'tunController.ts'), 'utf8')
+
+    const backoffBlockStart = source.indexOf('const canAutoRestart =')
+    expect(backoffBlockStart, 'backoff block must exist').toBeGreaterThan(0)
+
+    const declaration = source.indexOf('const attempt = restartAttempt + 1', backoffBlockStart)
+    expect(declaration, 'backoff scope must declare its attempt counter').toBeGreaterThan(backoffBlockStart)
+
+    // The "user initiated stop" cancel branch is also inside the backoff block;
+    // the declaration must precede it.
+    const usage = source.indexOf('auto-restart cancelled', declaration)
+    expect(usage, 'user-initiated stop cancel branch must appear after declaration').toBeGreaterThan(declaration)
   })
 })
