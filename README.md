@@ -70,6 +70,10 @@ npm run dev
 `npm run dev` starts Electron through `electron-vite`. Open the Electron window,
 not the plain Vite URL, because the renderer expects the preload IPC bridge.
 
+## Code navigation
+
+For code review and feature work, start with the [architecture map](vpn-tunnel-enforcer/docs/architecture/README.md). It documents runtime boundaries, IPC domains, ownership rules, and the recommended review path.
+
 ## Build
 
 ```bash
