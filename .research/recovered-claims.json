@@ -1,0 +1,707 @@
+[
+  {
+    "claim": "The Rendering panel's \"Paint flashing\" option is the direct instrument for detecting permanent repaints: Chromium flashes green on every repaint, so a continuously running shimmer/pulse-ring keyframe animation is visible as a persistently green region, and a whole-screen or unexpected green flash is the documented signal to investigate further. This gives a concrete, checkable way to confirm whether re-adding an animation reintroduces the repaint cost that motivated commit cfa47b5.",
+    "quote": "Chrome flashes the screen green whenever repainting happens. ... If, on another page, you see the whole screen flash green or areas of the screen that you didn't think should be painted, consider investigating further.",
+    "source": "https://developer.chrome.com/docs/devtools/rendering/performance"
+  },
+  {
+    "claim": "The \"Frame rendering stats\" checkbox pins an overlay in the viewport's top-right corner that reports four measurable quantities at once: a live FPS estimate, a frame timeline classifying frames as successfully rendered (blue), partially presented (yellow), or dropped (red), whether GPU rasterization is on or off, and GPU memory used versus maximum in MB. This is the built-in way to verify GPU-accelerated compositing state and dropped-frame counts on Windows, including with GPU acceleration disabled.",
+    "quote": "in the top-right corner of your viewport",
+    "source": "https://developer.chrome.com/docs/devtools/rendering/performance"
+  },
+  {
+    "claim": "\"Layer Borders\" overlays compositing structure — layer borders (orange/olive) and raster tiles (cyan) — on top of the page, which is the documented way to verify whether an element was actually promoted to its own compositor layer (e.g. by will-change or contain) rather than being painted into a shared layer; the full color legend lives in Chromium's debug_colors.cc rather than in the docs.",
+    "quote": "layer borders",
+    "source": "https://developer.chrome.com/docs/devtools/rendering/performance"
+  },
+  {
+    "claim": "The page carries no quantitative cost data: it contains no numbers comparing painting versus compositing cost, and no measurement of backdrop-filter or blur expense — the only cost guidance is qualitative (unnecessary repaints and layout shifts merit investigation). Any measurable claim about the price of a permanent backdrop-filter must come from Chromium performance traces or other sources, not from this reference.",
+    "quote": "consider investigating further",
+    "source": "https://developer.chrome.com/docs/devtools/rendering/performance"
+  },
+  {
+    "claim": "This official reference was last updated 2022-04-13 UTC, so it predates Electron 42's Chromium and omits newer Rendering-tab tooling (no ad-frame highlighting or Core Web Vitals overlay section); for Core Web Vitals values it defers to the Web Vitals Chrome extension, with thresholds LCP within 2.5 s, INP at or below 200 ms, and CLS at or below 0.1.",
+    "quote": "Last updated 2022-04-13 UTC",
+    "source": "https://developer.chrome.com/docs/devtools/rendering/performance"
+  },
+  {
+    "claim": "The skill prescribes exact loading-indicator thresholds that contradict skeleton-first web habits: show nothing under 200ms, a spinner for 200ms-2s, progress beyond 2s, and never skeletons under 500ms. This is directly checkable against VPN Tunnel Enforcer's loading states and argues that removing the shimmer skeleton in cfa47b5 was a quality improvement, not just a perf compromise.",
+    "quote": "For operations < 200 ms, show nothing. Just commit the change when it arrives. For 200ms–2s, show a spinner. Beyond 2s, show progress. Never use skeleton placeholders for anything under 500ms — they make fast operations feel slow.",
+    "source": "https://github.com/yetone/native-feel-skill"
+  },
+  {
+    "claim": "The audit treats an opaque window background as a defect and names the exact Windows API to replace it with a system-composited material: DwmSetWindowAttribute with DWMWA_SYSTEMBACKDROP_TYPE = DWMSBT_MAINWINDOW for Mica or DWMSBT_TRANSIENTWINDOW for Acrylic (the Electron equivalents of backgroundMaterial 'mica'/'acrylic'). This is the cheap substitute for CSS backdrop-filter, since the OS does the compositing.",
+    "quote": "**Window background uses platform material**, not a static color.\n  - Mac: `NSVisualEffectView` with appropriate material, or `NSGlassEffectView` (Liquid Glass) on macOS 26+.\n  - Win: `DwmSetWindowAttribute(DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_MAINWINDOW)` for mica, or `DWMSBT_TRANSIENTWINDOW` for acrylic.",
+    "source": "https://github.com/yetone/native-feel-skill"
+  },
+  {
+    "claim": "Native acrylic/mica behind a frameless (chromeless) window requires a specific 5-step recipe — DWM backdrop type, DwmExtendFrameIntoClientArea, transparent WebView default background, `body { background: transparent }`, and manual drag-region hit-testing — and the source explicitly warns it is fragile across Windows builds, which is the main risk for adopting Electron's backgroundMaterial on a frameless window.",
+    "quote": "This is finicky. Test on Windows 10, 11, 11 22H2, and 11 24H2 — each had subtle changes.",
+    "source": "https://github.com/yetone/native-feel-skill"
+  },
+  {
+    "claim": "Two motion rules directly restrict how framer-motion should be used in a desktop app: route/page transitions should be removed entirely (native views cut, they do not fade), and spring/bounce curves should be reserved for grab-and-drag rather than applied to ordinary state changes. This argues against using View Transitions API for SPA page switching and against spring defaults on toggles/badges.",
+    "quote": "**No spring/bounce animations on simple state changes.** Native uses tightly-controlled ease curves. Reserve spring for grab-and-drag.",
+    "source": "https://github.com/yetone/native-feel-skill"
+  },
+  {
+    "claim": "The source makes a precise, falsifiable distinction about hover: the web tell is `cursor: pointer` on rows and *uniform* hover treatment across all control types, not hover backgrounds per se — list rows and toolbar icon buttons should keep a subtle hover tint, while plain push buttons should have none, and every control needs a distinct `:active` pressed state.",
+    "quote": "The unifying principle: ask \"what does the equivalent native control do here?\" and do exactly that. The error is not \"too much hover\" or \"too little\" — it is *uniform* hover treatment, which is a web idiom. Native varies by control kind.",
+    "source": "https://github.com/yetone/native-feel-skill"
+  },
+  {
+    "claim": "Only transform and opacity changes avoid the paint step; every other animated CSS property (including background, color, shadows, and filters) forces repaint, and any geometry change forces both layout and paint. This is the technical basis for restricting the VPN app's animations to transform/opacity if repaint cost was the reason the previous redesign was reverted.",
+    "quote": "Anything other than transforms or opacity will always cause paint. … changing the geometry of any element means its pixels need fixing!",
+    "source": "https://web.dev/articles/simplify-paint-complexity-and-reduce-paint-areas"
+  },
+  {
+    "claim": "Blur-based paint effects (e.g. box-shadow) are measurably slower to paint than flat fills, even though CSS gives no syntactic hint of the cost difference — so a box-shadow-based 'frosted glass' imitation is not automatically a cheap substitute for backdrop-filter and must be profiled, not assumed.",
+    "quote": "background: red; and box-shadow: 0, 4px, 4px, rgba(0,0,0,0.5); don't necessarily look like they have vastly different performance characteristics, but they do",
+    "source": "https://web.dev/articles/simplify-paint-complexity-and-reduce-paint-areas"
+  },
+  {
+    "claim": "Layer promotion (via will-change: transform) does isolate a frequently repainted element from the rest of the page, but each promoted layer consumes memory and compositor management overhead, and the Chrome team's explicit guidance is not to promote without first profiling — i.e. promoting a glass panel is a measurable tradeoff, not a free fix.",
+    "quote": "each layer requires both memory and management … Don't promote elements without profiling.",
+    "source": "https://web.dev/articles/simplify-paint-complexity-and-reduce-paint-areas"
+  },
+  {
+    "claim": "Paint Flashing in the Chrome DevTools Rendering tab is the primary detection mechanism for unwanted repaints: Chrome flashes green over any region that repaints, and a whole-screen flash indicates the repaint area is far larger than the changed element. This is directly usable in Electron DevTools to verify whether a reintroduced blur or indicator animation causes a permanent full-window repaint.",
+    "quote": "will flash the screen green whenever painting happens",
+    "source": "https://web.dev/articles/simplify-paint-complexity-and-reduce-paint-areas"
+  },
+  {
+    "claim": "The browser merges separate dirty regions into a single repaint area, so a small animation in one corner combined with another elsewhere can escalate to a full-window repaint — meaning a tiny 'live' indicator animation can cost far more than its own pixel area. The stated per-frame budget is 10ms, normally insufficient to complete paint work.",
+    "quote": "10ms per frame … normally not long enough to get paint work done, especially on mobile devices",
+    "source": "https://web.dev/articles/simplify-paint-complexity-and-reduce-paint-areas"
+  },
+  {
+    "claim": "Scroll-driven animations are explicitly designed to avoid main-thread work, so they can drive visual motion without the per-frame main-thread cost of JS scroll listeners — relevant to replacing repaint-heavy effects with cheap compositor-side motion.",
+    "quote": "The API tries to use as few main thread resources as possible",
+    "source": "https://developer.chrome.com/blog/scroll-animation-performance-case-study"
+  },
+  {
+    "claim": "In a stress test where a deliberately expensive setInterval (1e9-iteration loop every 100 ms) ran alongside the animation, the JS scroll-listener version janked while the declarative CSS animation-timeline version kept animating smoothly — demonstrating the CSS version runs off the main thread.",
+    "quote": "the CSS version is completely unaffected by the heavy JavaScript work",
+    "source": "https://developer.chrome.com/blog/scroll-animation-performance-case-study"
+  },
+  {
+    "claim": "Main-thread-driven scroll animations jank because scroll is handled on a separate thread and scroll events are delivered asynchronously, making in-sync scroll animation impractical via JS listeners.",
+    "quote": "Scrolling is performed on a separate thread and therefore delivers scroll events asynchronously.",
+    "source": "https://developer.chrome.com/blog/scroll-animation-performance-case-study"
+  },
+  {
+    "claim": "The performance benefit of scroll-driven animations is version-gated: it requires Chrome 116 or later (support table lists Chrome/Edge 115 for the feature itself), so availability depends on the Chromium version bundled with Electron.",
+    "quote": "The following performance gains from the use of scroll-driven animations are available from Chrome 116.",
+    "source": "https://developer.chrome.com/blog/scroll-animation-performance-case-study"
+  },
+  {
+    "claim": "The JavaScript ScrollTimeline path passed to element.animate() gets the same off-main-thread behavior as the CSS animation-timeline path, so a WAAPI-based implementation is not a performance downgrade versus pure CSS.",
+    "quote": "The underlying technology is the same as the CSS version.",
+    "source": "https://developer.chrome.com/blog/scroll-animation-performance-case-study"
+  },
+  {
+    "claim": "The article provides no quantitative performance data — no frame rates, millisecond timings, or main-thread cost figures; its only evidence is a DevTools screenshot and a qualitative CPU-usage observation, so it cannot be cited for measurable cost claims.",
+    "quote": "The CPU usage is completely different in DevTools",
+    "source": "https://developer.chrome.com/blog/scroll-animation-performance-case-study"
+  },
+  {
+    "claim": "Scroll-driven animations are explicitly designed to minimize main-thread work, making them a cheap alternative to JS-driven per-frame motion.",
+    "quote": "The API tries to use as few main thread resources as possible",
+    "source": "https://developer.chrome.com/blog/scroll-animation-performance-case-study"
+  },
+  {
+    "claim": "Main-thread-driven scroll animations jank because scrolling runs on a separate thread and delivers scroll events asynchronously, making in-sync scroll animation impractical via JS listeners.",
+    "quote": "Scrolling is performed on a separate thread and therefore delivers scroll events asynchronously.",
+    "source": "https://developer.chrome.com/blog/scroll-animation-performance-case-study"
+  },
+  {
+    "claim": "The performance benefit is version-gated to Chrome 116+ (feature support table lists Chrome/Edge 115), so availability depends on the Chromium version bundled with Electron.",
+    "quote": "The following performance gains from the use of scroll-driven animations are available from Chrome 116.",
+    "source": "https://developer.chrome.com/blog/scroll-animation-performance-case-study"
+  },
+  {
+    "claim": "The article contains no quantitative performance data (no fps, no millisecond timings, no main-thread cost figures); its only evidence is a DevTools screenshot and a qualitative CPU-usage observation, so it cannot support measurable cost claims.",
+    "quote": "The CPU usage is completely different in DevTools",
+    "source": "https://developer.chrome.com/blog/scroll-animation-performance-case-study"
+  },
+  {
+    "claim": "Every render pass containing a backdrop-filter element forces a readback of the destination GPU texture before the element paints — i.e. the cost is a per-frame texture readback + filter application + rounded-rect clip, not a one-time cost. This is the structural reason a permanently visible .glass panel is expensive in a constantly-open Electron window.",
+    "quote": "A readback of the destination graphics texture is performed.",
+    "source": "https://github.com/mfreed7/backdrop-filter-feature/blob/master/README.md"
+  },
+  {
+    "claim": "The feature author explicitly concedes backdrop-filter is inherently performance-demanding, even while arguing the shipped design avoids a significant penalty — so 'it shipped in Chromium' is not evidence it is cheap.",
+    "quote": "Note that this feature can be very performance-demanding",
+    "source": "https://github.com/mfreed7/backdrop-filter-feature/blob/master/README.md"
+  },
+  {
+    "claim": "The cost bound comes from the Backdrop Root / nearest-ancestor-render-surface rule, not from author-side hints: because only the nearest ancestor render surface is read back, no extra rasterization is needed. This implies wrapping the blurred element in a small isolating surface (ancestor with filter/opacity/mask, i.e. its own render surface) shrinks the readback region — whereas will-change alone is not described as affecting readback cost.",
+    "quote": "only the nearest ancestor render surface is needed",
+    "source": "https://github.com/mfreed7/backdrop-filter-feature/blob/master/README.md"
+  },
+  {
+    "claim": "No additional rasterization is required for backdrop-filter in the shipped Chromium design — meaning the dominant cost is compositor-side readback/filter work per frame, so measurement should target GPU/compositor frame time rather than paint or layout counters.",
+    "quote": "No additional rasterization needs to take place, and this leads to a performant implementation.",
+    "source": "https://github.com/mfreed7/backdrop-filter-feature/blob/master/README.md"
+  },
+  {
+    "claim": "The filtered backdrop is clipped to the element's rounded border-box, so blur cost scales with the filtered element's own area — a small blurred surface (e.g. only a toolbar or badge) is materially cheaper than a full-window frosted panel.",
+    "quote": "The filtered image is clipped to the rounded-corner rect of the element's border.",
+    "source": "https://github.com/mfreed7/backdrop-filter-feature/blob/master/README.md"
+  },
+  {
+    "claim": "CSS/JS polyfills for frosted glass are not a viable substitute: they are limited in what they can filter and all are too slow for production, which rules out JS-based blur emulation as a cheap alternative.",
+    "quote": "all are too slow for production use",
+    "source": "https://github.com/mfreed7/backdrop-filter-feature/blob/master/README.md"
+  },
+  {
+    "claim": "The Chromium feature author explicitly concedes backdrop-filter is inherently performance-demanding, even while arguing the shipped design avoids a significant penalty — so 'it shipped in Chromium' is not evidence it is cheap.",
+    "quote": "Note that this feature can be very performance-demanding",
+    "source": "https://github.com/mfreed7/backdrop-filter-feature/blob/master/README.md"
+  },
+  {
+    "claim": "HSL's lightness channel is perceptually inaccurate because HSL deforms the color space (normalizing every hue to 0-100% saturation), so a fixed lightness delta or hue rotation lands differently per hue and can silently break text legibility — this is why derived hover/state colors from HSL (and Sass darken()) misbehave, while OKLCH keeps lightness predictable.",
+    "quote": "HSL \"hides this complexity by deforming the color space,\" which makes its `L` channel perceptually inaccurate — adding 10% lightness lands differently for blue than purple, and a hue rotation can silently change lightness enough to break text legibility.",
+    "source": "https://evilmartians.com/chronicles/oklch-in-css-why-quit-rgb-hsl"
+  },
+  {
+    "claim": "oklch() is supported in all current browsers as of the article, and CSS Color 5 relative colors are supported too, so no polyfill or preprocessor fallback is required (implying availability in a recent Chromium such as Electron 42's).",
+    "quote": "As of the article, `oklch()` is available in all current browsers per MDN, and relative colors from CSS Color 5 are supported too — \"You don't need [old polyfills].\"",
+    "source": "https://evilmartians.com/chronicles/oklch-in-css-why-quit-rgb-hsl"
+  },
+  {
+    "claim": "CSS relative colors in OKLCH let a single :hover rule serve every button/component variant by applying a fixed lightness delta to a per-variant custom property, replacing per-variant hover token duplication; deltas must be written as decimals (0.1) because % is unsupported inside calc() there.",
+    "quote": "Relative colors let one hover rule serve every button variant: the variant sets `--button-color`, and `:hover` applies a fixed lightness delta. Because `%` is unsupported in `calc()` here, deltas are written as `0.1` rather than `10%`.",
+    "source": "https://evilmartians.com/chronicles/oklch-in-css-why-quit-rgb-hsl"
+  },
+  {
+    "claim": "Chrome and Safari do not implement the CSS Color 4-required OKLCH gamut-mapping (reduce chroma/lightness, preserve hue) and instead use fast RGB clipping, which can visibly shift hue for out-of-gamut values — requiring manual sRGB declarations overridden inside @media (color-gamut: p3).",
+    "quote": "CSS Color 4 requires the OKLCH-based method (reduce chroma and lightness, preserve hue), but the authors report Chrome and Safari still use fast RGB clipping, which can visibly shift hue. Their workaround is manual: declare an sRGB value, then override inside `@media (color-gamut: p3)`",
+    "source": "https://evilmartians.com/chronicles/oklch-in-css-why-quit-rgb-hsl"
+  },
+  {
+    "claim": "Gradient interpolation declared in oklab (linear-gradient(in oklab, ...)) avoids both the desaturated gray midpoint of sRGB gradients and Lab's blue-to-purple drift — a zero-runtime-cost quality improvement for layered-gradient surfaces.",
+    "quote": "plus gradient interpolation via `linear-gradient(in oklab, blue, green)`, which they say avoids both the gray midpoint of sRGB gradients and Lab's blue-to-purple drift.",
+    "source": "https://evilmartians.com/chronicles/oklch-in-css-why-quit-rgb-hsl"
+  },
+  {
+    "claim": "On Windows 11 24H2 with Electron 35.2.1, a frameless BrowserWindow created with backgroundMaterial: \"acrylic\" loses the native Windows material and falls back to an opaque fill when the user maximizes/restores via non-programmatic paths (drag-to-top, title-bar double-click), while title-bar button maximize/restore preserves it — i.e. native Windows backdrop material is not reliably persistent in frameless windows.",
+    "quote": "Windows 11: Material (Acrylic/Mica) and Rounded Corners Inconsistencies in Frameless BrowserWindow Maximize/Restore Actions ... the issue has been partially fixed for cases involving `win.maximize()` and `win.restore()` ... [where material is lost] incorrect background color",
+    "source": "https://github.com/electron/electron/issues/46753"
+  },
+  {
+    "claim": "The defect is not limited to the backdrop: in the worst reproduction sequence (button maximize followed by drag-to-restore) the frameless window loses BOTH the acrylic material and the Windows 11 rounded corners, so adopting backgroundMaterial in a frameless app risks visible window-shape regressions, not just a flat background.",
+    "quote": "Expected behavior, per the report: the effect \"should persist in **all** maximize/restore scenarios,\" corners \"should remain consistent,\" and all materials (including mica) ought to be supported.",
+    "source": "https://github.com/electron/electron/issues/46753"
+  },
+  {
+    "claim": "This is a recurring regression class rather than a one-off: the report explicitly continues earlier issues #42393 and #41824 in which the material vanished after maximizing, and the earlier fix only covered the programmatic win.maximize()/win.restore() code path, leaving user-driven window interactions broken.",
+    "quote": "The reporter notes this is a continuation of earlier reports #42393 and #41824, where the material vanished after maximizing. That earlier fix only covered the programmatic path: \"the issue has been partially fixed for cases involving `win.maximize()` and `win.restore()`\".",
+    "source": "https://github.com/electron/electron/issues/46753"
+  },
+  {
+    "claim": "The bug was maintainer-confirmed and tracked against the 35.x and 36.x release lines, and was closed with linked pull request electron/electron#47386 — so the frameless acrylic/mica breakage documented here is a 35/36-era defect with a landed fix, and its status in later versions (e.g. Electron 42) must be verified against that PR rather than assumed from this issue.",
+    "quote": "Status: Closed, with linked pull request #47386 ... Labels: 35-x-y, 36-x-y, \"bug 🪲\", has-repro-gist, platform/windows, status/confirmed",
+    "source": "https://github.com/electron/electron/issues/46753"
+  },
+  {
+    "claim": "Mica support in this frameless configuration was treated as aspirational rather than working at the time of filing: the reproduction code sets backgroundMaterial to \"acrylic\" with an inline note that mica ought to work too, indicating the 'tabbed'/'mica' variants were not verified as functional in a frameless window.",
+    "quote": "backgroundMaterial: \"acrylic\", // Should also support \"mica\" for Win11",
+    "source": "https://github.com/electron/electron/issues/46753"
+  },
+  {
+    "claim": "CSS anchor positioning shipped in Chrome/Edge 125, so it is available in any Electron built on a Chromium newer than 125 (Electron 42's Chromium is far past that) — meaning tooltips/popovers/dropdowns in the app can be positioned declaratively with no JS measuring loop. Feature detection is @supports (anchor-name: --myanchor).",
+    "quote": "Chrome 125, Edge 125, Firefox 147, Safari 26. ... Feature detection is via `@supports (anchor-name: --myanchor)`",
+    "source": "https://developer.chrome.com/docs/css-ui/anchor-positioning-api"
+  },
+  {
+    "claim": "Anchor positioning is designed to work with top-layer elements (popover attribute, <dialog>), and unlike JS-positioned overlays it makes them scroll along with their non-top-layer anchor — but UA styles center such elements by default, so `inset: auto` must be reset.",
+    "quote": "works incredibly well with top-layer elements like `popover`. and `<dialog>` ... scroll along with elements not in the top layer ... a huge win for layered interfaces",
+    "source": "https://developer.chrome.com/docs/css-ui/anchor-positioning-api"
+  },
+  {
+    "claim": "The documented mechanism replaces third-party JS positioning libraries (Floating UI / Popper class of dependency) for menus, tooltips, selects and dialogs — but the page provides no performance measurements, timings, or benchmarks against those libraries, so any claimed cost saving is unquantified by this source.",
+    "quote": "with anchor positioning built into the browser, you can build layered user interfaces without relying on third-party libraries",
+    "source": "https://developer.chrome.com/docs/css-ui/anchor-positioning-api"
+  },
+  {
+    "claim": "Collision handling is declarative via @position-try + position-try-fallbacks (with built-in flip-block / flip-inline keywords), removing the need for JS resize/scroll listeners to reposition overlays when the anchor nears its containing block edge.",
+    "quote": "`@position-try` defines alternate positions, wired up through `position-try-fallbacks`, for when \"the anchor reaches the edges of its containing block.\" Built-in keywords `flip-block` and `flip-inline` cover simple flips",
+    "source": "https://developer.chrome.com/docs/css-ui/anchor-positioning-api"
+  },
+  {
+    "claim": "Animation support is incomplete: position-area cannot be transitioned (only the resulting positioned inset values can), so entry/exit motion for anchored popovers still needs transitions on transform/opacity rather than on the positioning property itself.",
+    "quote": "`position-area` \"is not transitionable yet, but the Chrome team is working on a solution,\" though positioned values can be transitioned",
+    "source": "https://developer.chrome.com/docs/css-ui/anchor-positioning-api"
+  },
+  {
+    "claim": "Anchor positioning creates no accessibility relationship between anchor and positioned element; aria-details is required to link them, and screen reader support for that is still maturing.",
+    "quote": "doesn't inherently create any meaningful semantic relationship between them",
+    "source": "https://developer.chrome.com/docs/css-ui/anchor-positioning-api"
+  },
+  {
+    "claim": "CSS anchor positioning shipped in Chrome/Edge 125, so it is available in any Electron whose Chromium is newer than 125 (Electron 42 is far past that) — tooltips/popovers/dropdowns can be positioned declaratively with no JS measuring loop. Feature detection is @supports (anchor-name: --myanchor).",
+    "quote": "Chrome 125, Edge 125, Firefox 147, Safari 26. ... Feature detection is via `@supports (anchor-name: --myanchor)`",
+    "source": "https://developer.chrome.com/docs/css-ui/anchor-positioning-api"
+  },
+  {
+    "claim": "Anchor positioning is designed for top-layer elements (popover attribute, <dialog>) and makes them scroll along with their non-top-layer anchor — something JS-positioned overlays need scroll listeners for; UA styles center such elements by default so `inset: auto` must be reset.",
+    "quote": "works incredibly well with top-layer elements like `popover`. and `<dialog>` ... scroll along with elements not in the top layer ... a huge win for layered interfaces",
+    "source": "https://developer.chrome.com/docs/css-ui/anchor-positioning-api"
+  },
+  {
+    "claim": "The article frames anchor positioning as replacing third-party JS positioning libraries (Floating UI / Popper class) for menus, tooltips, selects and dialogs, but contains no performance measurements, timings, or benchmarks against those libraries — so the cost saving is unquantified by this source.",
+    "quote": "with anchor positioning built into the browser, you can build layered user interfaces without relying on third-party libraries",
+    "source": "https://developer.chrome.com/docs/css-ui/anchor-positioning-api"
+  },
+  {
+    "claim": "Collision handling is declarative via @position-try plus position-try-fallbacks with built-in flip-block / flip-inline keywords, removing JS resize/scroll listeners for repositioning when the anchor nears its containing block edge.",
+    "quote": "`@position-try` defines alternate positions, wired up through `position-try-fallbacks`, for when \"the anchor reaches the edges of its containing block.\" Built-in keywords `flip-block` and `flip-inline` cover simple flips",
+    "source": "https://developer.chrome.com/docs/css-ui/anchor-positioning-api"
+  },
+  {
+    "claim": "Animation support is incomplete: position-area is not transitionable (only the resulting positioned inset values are), so entry/exit motion for anchored popovers must still ride on transform/opacity rather than the positioning property.",
+    "quote": "`position-area` \"is not transitionable yet, but the Chrome team is working on a solution,\" though positioned values can be transitioned",
+    "source": "https://developer.chrome.com/docs/css-ui/anchor-positioning-api"
+  },
+  {
+    "claim": "@starting-style and transition-behavior: allow-discrete reached Baseline \"Newly available\" on 2024-08-06, having shipped in Chrome/Edge 117 (Sept 2023) — i.e. they are unconditionally available in Electron 42's Chromium, which is many versions above 117. This makes pure-CSS enter/exit transitions a viable replacement for framer-motion AnimatePresence in MacModal/MacToast, with zero JS-per-frame cost.",
+    "quote": "Two of the four CSS entry/exit features ... reached Baseline Newly available on August 6, 2024, triggered by the Firefox 129 release. ... Support listed: Chrome 117, Edge 117, Firefox 129, Safari 17.5.",
+    "source": "https://web.dev/blog/baseline-entry-animations"
+  },
+  {
+    "claim": "transition-behavior: allow-discrete is the mechanism that makes discrete (non-interpolatable) properties such as display and visibility transitionable, by swapping the value at the 50% point of the transition instead of at 0% — this is what lets an element animate out before display:none applies, without a JS-driven presence wrapper.",
+    "quote": "enables transitioning discrete properties, those that \"can't interpolate between values,\" described as being \"like an on/off switch\" (examples given: display, visibility, mix-blend-mode). The new mode swaps values \"at the 50% point instead of at the 0% point of a transition.\"",
+    "source": "https://web.dev/blog/baseline-entry-animations"
+  },
+  {
+    "claim": "@starting-style supplies the pre-render state for elements coming out of display:none or entering the top layer, which previously had no animatable starting state — the canonical pattern is a dialog[open] rule with a nested @starting-style block animating an individual transform property (translate: 0 100vh -> 0 0).",
+    "quote": "dialog[open] { translate: 0 0; transition: translate 0.7s ease-out, display 0.7s ease-out allow-discrete; @starting-style { translate: 0 100vh; } }",
+    "source": "https://web.dev/blog/baseline-entry-animations"
+  },
+  {
+    "claim": "There is a concrete authoring gotcha: declaring the standalone transition-behavior property before the transition shorthand causes the browser to ignore it; the allow-discrete keyword must be placed inside the shorthand and only on the properties that need it.",
+    "quote": "The shorthand is recommended, since declaring transition-behavior before the shorthand means \"the browser will ignore the transition-behavior.\"",
+    "source": "https://web.dev/blog/baseline-entry-animations"
+  },
+  {
+    "claim": "As of this article, exit animations of ::backdrop required the overlay property, which was not yet Baseline — so modal-backdrop fade-out is the one part of the CSS-only dialog/popover animation story that still needed a fallback (relevant to whether MacModal can drop framer-motion entirely).",
+    "quote": "animating a ::backdrop pseudo-element \"requires the overlay property\" — \"Neither of these features are Baseline features yet.\" The post therefore covers entry animations only.",
+    "source": "https://web.dev/blog/baseline-entry-animations"
+  },
+  {
+    "claim": "Animating CSS custom properties (variables) is slow because they always trigger paint — making CSS-variable-driven animation slower than a JS library rebuilding a transform string once per frame. This is directly load-bearing for the project's decision about @property/CSS-variable-driven effects vs framer-motion.",
+    "quote": "animating CSS variables is \"**slow,**\" because they always trigger paint, making it \"way slower to animate with CSS variables than building `transform` strings once a frame via a JS library.\"",
+    "source": "https://motion.dev/magazine/do-you-still-need-framer-motion"
+  },
+  {
+    "claim": "Scroll-driven animations (animation-timeline: scroll() / view()) run completely off the main thread only when the animated property is compositor-friendly (transform or opacity); velocity-based or damped scroll effects require CSS-variable trickery that runs on the main thread and triggers paint, making them less performant than the JS equivalent (useVelocity + useSpring).",
+    "quote": "when the animated property is compositor-friendly like `transform` or `opacity`, \"these scroll animations will also run completely off the main thread\" ... velocity-based or damped scroll effects require \"CSS variable trickery,\" which runs on the main thread and triggers paint — \"so they're actually less performant than using JavaScript\"",
+    "source": "https://motion.dev/magazine/do-you-still-need-framer-motion"
+  },
+  {
+    "claim": "The individual CSS transform properties (translate, scale, rotate) can be hardware accelerated, unlike the JS approach of rebuilding a transform string each frame — so replacing framer-motion transforms with CSS individual transform properties is a genuine compositor win, but per-axis animation (e.g. scaleX alone) still forces @property/CSS-variable use and loses that benefit.",
+    "quote": "\"these animations can be hardware accelerated.\" ... individual axes still aren't separable, so per-axis work (e.g. `scaleX` apart from `scaleY`) needs `@property`-registered custom properties",
+    "source": "https://motion.dev/magazine/do-you-still-need-framer-motion"
+  },
+  {
+    "claim": "@starting-style is available in all modern browsers and degrades safely (older browsers skip the animation), enabling pure-CSS enter animations without the previous style-recalc/double-rAF hacks that risk layout thrashing — but the @starting-style block must come after the normal declarations because they share the same specificity, or it silently won't animate.",
+    "quote": "\"`@starting-style` is available in all modern browsers.\" ... the block must come *after* the normal declarations, since \"they inexplicably share the same specificity\"",
+    "source": "https://motion.dev/magazine/do-you-still-need-framer-motion"
+  },
+  {
+    "claim": "The View Transitions API is unsuitable for micro-interactions because it blocks pointer events and is not interruptible — a manual interruption jumps to the real DOM position; it is appropriate for page-level transitions while JS layout animations remain needed for component-level state changes.",
+    "quote": "view transitions block pointer events, and a manual interruption jumps to the real DOM position. Verdict: \"Interruptibility is a table stakes animation feature,\" making them \"completely unsuitable for these kinds of micro-interactions.\"",
+    "source": "https://motion.dev/magazine/do-you-still-need-framer-motion"
+  },
+  {
+    "claim": "CSS linear() easing can approximate spring/bounce curves as a lightweight zero-runtime option (Motion's own tooling precompiles springs to CSS linear()), but it is a predefined easing curve rather than a physics simulation, so it cannot respond to actual value velocity or interruption.",
+    "quote": "these are \"predefined easing curves, not a real physics simulation running on each style's actual value and velocity,\" so gesture velocity and interruption don't carry over. Still \"a good-enough, lightweight option in many cases.\"",
+    "source": "https://motion.dev/magazine/do-you-still-need-framer-motion"
+  },
+  {
+    "claim": "Same-document view transitions (document.startViewTransition) have shipped in Chromium since Chrome 111, so they are available in the Chromium bundled with Electron 42 without flags — usable for SPA page switches and, mechanically, for any DOM/style change including theme swaps.",
+    "quote": "supported in Chrome as of Chrome 111.",
+    "source": "https://developer.chrome.com/docs/web-platform/view-transitions/same-document"
+  },
+  {
+    "claim": "During a same-document view transition, the page is frozen while the DOM-update promise settles, so any async work (fetches, font/image loading) must complete before calling startViewTransition or the UI will visibly stall.",
+    "quote": "The transition won't be started until the promise fulfills. During this time, the page is frozen",
+    "source": "https://developer.chrome.com/docs/web-platform/view-transitions/same-document"
+  },
+  {
+    "claim": "The default view-transition group animation animates width and height, which runs layout every frame and is therefore NOT compositor-driven; Chrome's off-main-thread optimization for this was still unimplemented as of the doc's last update, meaning size-changing view transitions carry main-thread cost unless overridden to transform/opacity only.",
+    "quote": "is generally frowned upon in web performance circles as it runs layout per frame",
+    "source": "https://developer.chrome.com/docs/web-platform/view-transitions/same-document"
+  },
+  {
+    "claim": "A view transition is a one-shot, event-driven animation rather than a persistent effect: only one can run at a time, a new one forces the running one to finish, and multiple named elements are folded into a single transition — so per-navigation cost is bounded and there is no permanent compositing/repaint overhead.",
+    "quote": "Only one view transition is allowed to run at a time.",
+    "source": "https://developer.chrome.com/docs/web-platform/view-transitions/same-document"
+  },
+  {
+    "claim": "Correctness constraint for adoption: every participating element needs a unique view-transition-name, and duplicate names at the same time cause the transition to be silently skipped (view-transition-class, Chrome 125+, exists only to share styles, not identity).",
+    "quote": "If two rendered elements have the same `view-transition-name` at the same time, the transition will be skipped.",
+    "source": "https://developer.chrome.com/docs/web-platform/view-transitions/same-document"
+  },
+  {
+    "claim": "View transitions should be treated as progressive enhancement wrapped in feature detection and try/catch, since the DOM update must succeed independently of the animation — relevant for a production VPN client where a failed transition must not block a state change like connect/disconnect.",
+    "quote": "your app shouldn't enter an 'error' state if the DOM change succeeds, but the transition fails.",
+    "source": "https://developer.chrome.com/docs/web-platform/view-transitions/same-document"
+  },
+  {
+    "claim": "Adoption constraint: every participating element needs a unique view-transition-name, and duplicate names present at the same time cause the transition to be silently skipped (view-transition-class, Chrome 125+, only shares styles, not identity).",
+    "quote": "If two rendered elements have the same `view-transition-name` at the same time, the transition will be skipped.",
+    "source": "https://developer.chrome.com/docs/web-platform/view-transitions/same-document"
+  },
+  {
+    "claim": "The article explicitly names `backdrop-filter: blur(20px)` \"and higher\" as heavy blur to avoid — the exact value the project's cfa47b5 commit removed from its `.glass` class — giving an accessibility-side (not just perf-side) reason to keep it out rather than restore it.",
+    "quote": "Limit motion and blur: avoid heavy blur, specifically flagging `backdrop-filter: blur(20px)` \"and higher\"; shorten and simplify transitions; support `prefers-reduced-motion` with fallbacks.",
+    "source": "https://axesslab.com/glassmorphism-meets-accessibility-can-frosted-glass-be-inclusive/"
+  },
+  {
+    "claim": "Frosted-glass surfaces routinely fail WCAG 2.2 contrast minimums (4.5:1 body text, 3:1 large text / non-text UI) because semi-transparent fills over colorful or moving backdrops do not guarantee a stable contrast floor; the recommended fix is a semi-opaque fill or overlay behind text rather than relying on blur for separation — which is functionally what the project already shipped with `rgb(card / 0.96)`.",
+    "quote": "contrast ratios \"often fall short of WCAG 2.2 requirements\" when text sits on semi-transparent backgrounds over colorful imagery … add background overlays or semi-opaque fills behind text; do not rely on blur alone for separation.",
+    "source": "https://axesslab.com/glassmorphism-meets-accessibility-can-frosted-glass-be-inclusive/"
+  },
+  {
+    "claim": "`prefers-reduced-transparency` (alongside `prefers-reduced-motion`) is presented as a required user-preference gate for any translucency effect, meaning a re-introduced glass layer must be conditionally disabled — which also doubles as a cheap perf escape hatch on weak hardware.",
+    "quote": "Honor reduced-transparency settings via the `prefers-reduced-transparency` media query or platform accessibility APIs — \"Your UI needs to comply to those user preferences.\"",
+    "source": "https://axesslab.com/glassmorphism-meets-accessibility-can-frosted-glass-be-inclusive/"
+  },
+  {
+    "claim": "Visual hierarchy in glass-style UI should be carried by subtle borders, shadows, spacing and alignment rather than by the blur itself, because glass elements blend into backgrounds and interactive controls get missed — a zero-repaint substitute for the frosted effect.",
+    "quote": "Reinforce hierarchy with subtle borders or shadows, deliberate spacing and alignment, and by keeping critical information off textured or animated backgrounds. \"Do not let form override function.\"",
+    "source": "https://axesslab.com/glassmorphism-meets-accessibility-can-frosted-glass-be-inclusive/"
+  },
+  {
+    "claim": "The article asserts glass/blur effects \"demand significant system resources and GPU power\" and degrade experience on low-power devices, but supplies no measurement, benchmark, or frame-time figure — so it corroborates the project's perf-driven rollback only qualitatively and cannot be cited as a cost measurement.",
+    "quote": "the effects \"demand significant system resources and Graphics Processing Unit (GPU) power,\" degrading experience on low-power devices",
+    "source": "https://axesslab.com/glassmorphism-meets-accessibility-can-frosted-glass-be-inclusive/"
+  },
+  {
+    "claim": "Frameless windows with Windows Mica/Acrylic backgroundMaterial were broken until this PR, which shipped in Electron 27 (backported to 27-x-y via #39802) — so Electron 42 does support frameless + backgroundMaterial, and the project's frameless -webkit-app-region:drag window is not a blocker for native acrylic/mica.",
+    "quote": "Labeled `semver/patch` and `target/27-x-y`; the trop bot backported it automatically to the 27-x-y branch via #39802, so it landed in Electron 27 (and on `main` for 28). ... Author's note: \"Fixed Windows Mica/Acrylic background material effects on frameless windows.\"",
+    "source": "https://github.com/electron/electron/pull/39708"
+  },
+  {
+    "claim": "Frameless translucent windows only render the mica/acrylic effect if the window can become 'activated', which required an Electron-maintained Chromium patch (fix_activate_background_material_on_windows.patch) — i.e. the capability rests on a downstream fork patch, not stock Chromium behavior.",
+    "quote": "A patch allowing frameless, translucent (mica/acrylic) windows to become \"activated\", described as \"necessary for their effects\"",
+    "source": "https://github.com/electron/electron/pull/39708"
+  },
+  {
+    "claim": "The enabling patch is explicitly non-upstreamable in its merged form because Chromium does not model this use case, making native frameless mica/acrylic a fork-maintained feature with elevated regression risk across Electron upgrades.",
+    "quote": "Its own header text says the change \"likely can't be upstreamed as-is\" because \"Chromium doesn't have this use case in mind currently.\"",
+    "source": "https://github.com/electron/electron/pull/39708"
+  },
+  {
+    "claim": "Setting backgroundMaterial/vibrancy forces the window's background color to transparent and strips caption styling, so the app's own CSS/window background must be transparent for the native effect to show — a direct conflict with an opaque panel surface like the project's rgb(card / 0.96) background.",
+    "quote": "Windows created with vibrancy/translucency automatically get \"transparent background colors\" ... \"Removes some caption styling on translucent window effects on Windows when setting background material\"",
+    "source": "https://github.com/electron/electron/pull/39708"
+  },
+  {
+    "claim": "The PR contains no performance measurement, no documented Windows 11 build requirement, and no limitation list — validation was a single qualitative manual check — and a chain of follow-up fixes (#40395, #40749, #45456, #46657) shows frameless backgroundMaterial kept regressing after merge.",
+    "quote": "VerteDinde confirmed manual testing: \"Tested this on Windows - the transparency seems to be working as expected\" ... No discussion of explicit Windows 11 build requirements, DWM internals, performance cost, or documented limitations appears in the conversation. Follow-up work referenced later includes titlebar-on-frameless fixes (#40395, #40749), ... maximizing with Mica (#45456), and `backgroundMaterial` on initial activate (#46657).",
+    "source": "https://github.com/electron/electron/pull/39708"
+  },
+  {
+    "claim": "Only `transform` and `opacity` are compositor-only in every modern browser; `filter`, `clipPath` are additionally composited in Chrome/Firefox, and under heavy main-thread load animation should be restricted to exactly this set (transform, filter, clipPath, opacity). This bounds which properties a redesign may animate without paint/layout cost.",
+    "quote": "transform and opacity ... \"will operate directly on a layer\" and are described as \"the safest values to animate across all devices\" ... Chrome and Firefox run \"`filter` and SVGs entirely on the compositor\" ... Under heavy main-thread load, restrict yourself to \"`transform`, `filter`, `clipPath` and `opacity`.\"",
+    "source": "https://motion.dev/docs/performance"
+  },
+  {
+    "claim": "Motion/framer-motion's per-axis independent transform values (e.g. `{ x: 100, scale: 2 }`) are implemented via CSS variables and are NOT hardware-accelerated; passing a full `transform` shorthand string instead restores acceleration. This means the project's existing framer-motion usage across 17 files is likely running non-accelerated transforms.",
+    "quote": "currently these are not accelerated, even though they're being applied to `transform`",
+    "source": "https://motion.dev/docs/performance"
+  },
+  {
+    "claim": "JS-driven (requestAnimationFrame) animation always runs on the main JS thread and can be blocked into jank by competing work, whereas WAAPI/CSS animations that reach the compositor stay smooth regardless of main-thread load — and WAAPI-backed animations cause the browser to auto-promote the element to a new graphical layer.",
+    "quote": "JS-driven animation \"will **always** run on the main JS thread\" ... such an animation \"will remain smooth, no matter how busy your main JS thread becomes\" ... browsers \"automatically place elements animating these values on a new graphical layer.\"",
+    "source": "https://motion.dev/docs/performance"
+  },
+  {
+    "claim": "`box-shadow` and `border-radius` avoid layout but force a paint whose cost is proportional to layer size; `filter: drop-shadow(...)` and `clip-path: inset(0 round Npx)` are the recommended compositor-friendly substitutes. Relevant because box-shadow imitation is a candidate cheap replacement for frosted glass.",
+    "quote": "`box-shadow` and `border-radius` skip layout but \"do require a potentially expensive paint (step 2)\" ... \"the time a browser takes to repaint a layer is proportional to its size\"",
+    "source": "https://motion.dev/docs/performance"
+  },
+  {
+    "claim": "`will-change` layer promotion is not free — each layer consumes GPU memory and should be used sparingly, and establishing a 3D context promotes more elements than expected. This directly qualifies the hypothesis that will-change/layer promotion makes an expensive effect like backdrop-filter cheap.",
+    "quote": "Creating new layers doesn't come for free. Each takes space on the GPU. So do so sparingly.",
+    "source": "https://motion.dev/docs/performance"
+  },
+  {
+    "claim": "Windows system materials (Mica / Desktop Acrylic) are drawn by the OS compositor, not by the app's own renderer — which is exactly what Electron's BrowserWindow backgroundMaterial ('mica'/'acrylic'/'tabbed') maps onto, meaning the blur cost is borne by DWM rather than by Chromium's paint/composite pipeline.",
+    "quote": "Materials rely on compositor effects that require hardware support and user preferences.",
+    "source": "https://learn.microsoft.com/en-us/windows/apps/develop/ui/materials"
+  },
+  {
+    "claim": "Windows disables Acrylic entirely when Battery Saver is active, while Mica is unaffected — so an Electron app relying on backgroundMaterial:'acrylic' will silently lose its frosted-glass look on battery-saving laptops, whereas 'mica' survives.",
+    "quote": "**Battery Saver active** — Windows disables acrylic (`DesktopAcrylicBackdrop` and `AcrylicBrush`) when Battery Saver is on. Mica is not affected.",
+    "source": "https://learn.microsoft.com/en-us/windows/apps/develop/ui/materials"
+  },
+  {
+    "claim": "If the user turns off Transparency effects in Settings > Personalization > Colors, every system backdrop material falls back to a solid color — therefore any design built on native Mica/Acrylic must still read correctly as a fully opaque surface, and the fallback color is the design that must be gotten right.",
+    "quote": "**Transparency effects disabled** — if the user turns off *Transparency effects* in **Settings &gt; Personalization &gt; Colors**, all `SystemBackdrop` materials and `AcrylicBrush` fall back to their solid-color alternatives.",
+    "source": "https://learn.microsoft.com/en-us/windows/apps/develop/ui/materials"
+  },
+  {
+    "claim": "Mica and Desktop Acrylic require DirectX 11 plus adequate GPU memory, and fall back to a solid theme color on insufficient hardware or over Remote Desktop / in virtual machines — i.e. these effects are not available in software-rendering / GPU-disabled scenarios.",
+    "quote": "**Insufficient graphics hardware** — Mica and Desktop Acrylic require DirectX 11 and adequate GPU memory. Devices that don't meet the threshold fall back to a solid theme color.",
+    "source": "https://learn.microsoft.com/en-us/windows/apps/develop/ui/materials"
+  },
+  {
+    "claim": "Microsoft's own guidance separates the two materials by surface lifetime: Mica for the persistent main window background (title bar, nav pane), Desktop Acrylic for transient surfaces such as flyouts, popups and context menus — supporting the pattern of reserving live blur for short-lived overlays rather than permanently visible panels.",
+    "quote": "Mica incorporates the user's desktop wallpaper color into a muted, personalized background. It is designed for the main app window background, especially in the title bar and navigation pane areas.",
+    "source": "https://learn.microsoft.com/en-us/windows/apps/develop/ui/materials"
+  },
+  {
+    "claim": "Chromium's rendering pipeline has five sequential stages (JavaScript, Style, Layout, Paint, Composite), and a non-composited animation is defined as any animation that triggers one of the stages earlier than Composite — i.e. Style, Layout, or Paint — forcing the browser to do strictly more per-frame work.",
+    "quote": "A non-composited animation is any animation that triggers one of the earlier steps",
+    "source": "https://developer.chrome.com/docs/lighthouse/performance/non-composited-animations"
+  },
+  {
+    "claim": "Animations that can be handled entirely in the compositor stage do not require the main thread per frame; the ones that cannot are what the Lighthouse audit flags, and they 'require more work and can appear janky' specifically when the main thread is occupied by heavy tasks — the exact failure mode of a long-lived Electron app whose renderer main thread is also doing React work.",
+    "quote": "require more work and can appear janky (not smooth) on low-end phones",
+    "source": "https://developer.chrome.com/docs/lighthouse/performance/non-composited-animations"
+  },
+  {
+    "claim": "Whether a given animation is compositor-driven is directly observable, not a matter of inference: Chrome emits per-animation compositing failure reasons into the DevTools trace, and Lighthouse reads that trace to list the offending DOM nodes together with the reason each failed to composite.",
+    "quote": "Chrome reports the failure reasons to the DevTools trace, which is what Lighthouse reads.",
+    "source": "https://developer.chrome.com/docs/lighthouse/performance/non-composited-animations"
+  },
+  {
+    "claim": "Composited animations are excluded from Cumulative Layout Shift because they cannot cause other elements to shift, whereas non-composited animations produce real element movement that CLS measures and that can cascade into further shifts.",
+    "quote": "Composited animations won't result in other elements shifting and so are excluded from CLS.",
+    "source": "https://developer.chrome.com/docs/lighthouse/performance/non-composited-animations"
+  },
+  {
+    "claim": "This page does not itself enumerate the compositor-only properties (transform/opacity are never named on it) nor describe any DevTools Rendering-panel, Layers-panel, or frame-rendering-stats verification workflow; it delegates to two web.dev guides ('Stick to compositor-only properties and manage layer count', 'High-performance animations') and to the audit source at core/audits/non-composited-animations.js.",
+    "quote": "Stick to compositor-only properties and manage layer count",
+    "source": "https://developer.chrome.com/docs/lighthouse/performance/non-composited-animations"
+  },
+  {
+    "claim": "Mica is explicitly engineered for low cost: it samples the desktop wallpaper only once to build its visualization, rather than continuously re-sampling/compositing what is behind the window. This makes it the recommended material for a persistently visible app foundation layer — the opposite cost profile from a permanently-live CSS backdrop-filter, which re-blurs its backdrop every frame it is dirtied.",
+    "quote": "Mica is an opaque material that incorporates the user's theme and desktop wallpaper to create a highly personalized appearance. Mica is designed for performance as it only captures the background wallpaper once to create its visualization, so we recommend it for the foundation layer of your app, especially in the title bar area.",
+    "source": "https://learn.microsoft.com/en-us/windows/apps/develop/ui/system-backdrops"
+  },
+  {
+    "claim": "Microsoft restricts true frosted-glass Acrylic to transient, light-dismiss surfaces (flyouts, context menus) and does not recommend it as an always-on base layer — a vendor-level design rule that matches the project's own decision to remove permanent backdrop-filter: blur(20px) from .glass. The applicable pattern is Mica (or opaque) for the persistent window body, Acrylic only on short-lived modals/popovers.",
+    "quote": "Acrylic is a semi-transparent material that replicates the effect of frosted glass. It's used only for transient, light-dismiss surfaces such as flyouts and context menus.",
+    "source": "https://learn.microsoft.com/en-us/windows/apps/develop/ui/system-backdrops"
+  },
+  {
+    "claim": "System backdrop availability is not guaranteed and must be feature-detected at runtime rather than assumed; the docs require an explicit IsSupported() check plus a target implementing ICompositionSupportsSystemBackdrop before the material can be enabled, implying a required opaque/fallback path when the OS or window does not support it.",
+    "quote": "The system where the app runs must support the backdrop material. Call the MicaController.IsSupported or DesktopAcrylicController.IsSupported method to ensure the backdrop material is supported at runtime.",
+    "source": "https://learn.microsoft.com/en-us/windows/apps/develop/ui/system-backdrops"
+  },
+  {
+    "claim": "System backdrops follow OS light/dark theme automatically only while the app leaves tint parameters at defaults; once TintColor, TintOpacity, LuminosityOpacity, or FallbackColor are customized to match an app's own palette, the app becomes responsible for re-applying them on every theme change. This is a concrete correctness trap for an app with its own dark/light token system driven by [data-theme].",
+    "quote": "After customizing any of the controller's four properties, it no longer applies default Light or Dark values when the associated SystemBackdropConfiguration.Theme changes. You need to manually update those properties to match the new theme.",
+    "source": "https://learn.microsoft.com/en-us/windows/apps/develop/ui/system-backdrops"
+  },
+  {
+    "claim": "System backdrop rendering is policy-driven by window activation state: the app must feed activation changes into SystemBackdropConfiguration.IsInputActive so the material renders differently (falls back) when the window is deactivated. The material is therefore not a static fill and its appearance changes on focus loss.",
+    "quote": "configurationSource.IsInputActive = args.WindowActivationState != WindowActivationState.Deactivated;",
+    "source": "https://learn.microsoft.com/en-us/windows/apps/develop/ui/system-backdrops"
+  },
+  {
+    "claim": "As of Windows App SDK 2.0 the system material can be scoped to a bounded region (a card or panel) via SystemBackdropElement with its own CornerRadius, instead of only the whole window — the native analogue of 'blur only on a small layer', with the compositing still done by the system rather than by the renderer.",
+    "quote": "If you need to apply Mica or Acrylic to a specific region of your UI — such as a card, a panel, or any bounded area — use the SystemBackdropElement control instead.",
+    "source": "https://learn.microsoft.com/en-us/windows/apps/develop/ui/system-backdrops"
+  },
+  {
+    "claim": "System backdrop availability is not guaranteed and must be feature-detected at runtime; the docs require an explicit IsSupported() check plus a target implementing ICompositionSupportsSystemBackdrop before the material can be enabled, implying a mandatory opaque fallback path when the OS or window does not support it.",
+    "quote": "The system where the app runs must support the backdrop material. Call the MicaController.IsSupported or DesktopAcrylicController.IsSupported method to ensure the backdrop material is supported at runtime.",
+    "source": "https://learn.microsoft.com/en-us/windows/apps/develop/ui/system-backdrops"
+  },
+  {
+    "claim": "System backdrops follow OS light/dark theme automatically only while tint parameters remain at defaults; once TintColor, TintOpacity, LuminosityOpacity, or FallbackColor are customized to match an app palette, the app must re-apply them on every theme change. A concrete trap for an app driving its own dark/light tokens via [data-theme].",
+    "quote": "After customizing any of the controller's four properties, it no longer applies default Light or Dark values when the associated SystemBackdropConfiguration.Theme changes. You need to manually update those properties to match the new theme.",
+    "source": "https://learn.microsoft.com/en-us/windows/apps/develop/ui/system-backdrops"
+  },
+  {
+    "claim": "vibe's native Windows acrylic does NOT work with frameless windows — a hard blocker for VPN Tunnel Enforcer, whose window is frameless with -webkit-app-region: drag. The README states the titlebar-less Mica technique from pyke's millennium project cannot be used from Electron at all without patching Electron itself.",
+    "quote": "Frameless is unsupported. A titlebar-less framed Mica technique exists in the pyke `millennium` project, but the README states it \"does not work with Electron\" and would need changes inside Electron itself.",
+    "source": "https://github.com/SoFriendly/vibe"
+  },
+  {
+    "claim": "Native acrylic via this addon requires a rigid, non-negotiable BrowserWindow configuration: backgroundColor '#00000000', frame: true, titleBarStyle: 'default', and transparent must NOT be true (setting transparent: true kills the frame and breaks the effect); show: false is advised to avoid a flash of non-acrylic content.",
+    "quote": "`backgroundColor` | `'#00000000'` | Tricks Electron into a framed transparent window ... `frame` | `true` | Must stay on ... `transparent` | **not** `true` | Setting it kills the frame and breaks effects ... `show` | `false` (advised) | Avoids \"an ugly flash of non-acrylic-ized content\"",
+    "source": "https://github.com/SoFriendly/vibe"
+  },
+  {
+    "claim": "Acrylic performance is explicitly degraded on Windows 10 builds older than Windows 11 22000 — so the 'system compositor is free' assumption for native acrylic does not hold uniformly across the Windows install base; Mica is Windows 11 only and below build 22523 relies on an undocumented, lightly-tested API.",
+    "quote": "Acrylic: Windows 10 builds above 17763, though \"performance may suffer on builds earlier than Windows 11 22000.\" ... Mica: Windows 11 only. On builds below 22523 it relies on an undocumented API described as \"not heavily tested\" and possibly non-functional.",
+    "source": "https://github.com/SoFriendly/vibe"
+  },
+  {
+    "claim": "Native acrylic requires transparent backgrounds on BOTH the html and body elements — meaning it conflicts directly with an opaque CSS panel surface such as the rgb(card / 0.96) background the project adopted in commit cfa47b5; the README flags setting only one of the two as a common failure mode.",
+    "quote": "CSS-side, both the `html` and `body` elements need transparent backgrounds — the README calls doing only one of them \"a common mistake.\"",
+    "source": "https://github.com/SoFriendly/vibe"
+  },
+  {
+    "claim": "Theme switching with native acrylic is not automatic and has a legacy code path: vibe.forceTheme exists but current Electron should drive it through nativeTheme.themeSource; clearing effects leaves the window black and requires manually resetting setBackgroundColor and restyling the renderer.",
+    "quote": "`vibe.clearEffects(window)` — afterwards the window turns black, so reset `setBackgroundColor()` and/or notify the renderer to restyle. `vibe.forceTheme(window, 'dark' | 'light')` — legacy path; current Electron should use `nativeTheme.themeSource`.",
+    "source": "https://github.com/SoFriendly/vibe"
+  },
+  {
+    "claim": "This is a Rust native Node addon (N-API v6+, Electron 11+) requiring a Rust 1.56.1+ toolchain at build time — a real supply-chain and build-complexity cost versus Electron's built-in BrowserWindow backgroundMaterial option.",
+    "quote": "a native Node addon written in Rust that brings Windows acrylic/Mica window backgrounds to Electron ... Rust toolchain 1.56.1 or newer, installed via rustup",
+    "source": "https://github.com/SoFriendly/vibe"
+  },
+  {
+    "claim": "Native acrylic requires transparent backgrounds on BOTH html and body, which conflicts directly with an opaque CSS panel surface such as the rgb(card / 0.96) background the project adopted in cfa47b5; the README flags setting only one of the two as a common failure mode.",
+    "quote": "CSS-side, both the `html` and `body` elements need transparent backgrounds — the README calls doing only one of them \"a common mistake.\"",
+    "source": "https://github.com/SoFriendly/vibe"
+  },
+  {
+    "claim": "Theme switching and teardown are manual: vibe.forceTheme is a legacy path (current Electron should use nativeTheme.themeSource), and clearEffects leaves the window black, requiring a manual setBackgroundColor reset plus renderer restyle.",
+    "quote": "`vibe.clearEffects(window)` — afterwards the window turns black, so reset `setBackgroundColor()` and/or notify the renderer to restyle. `vibe.forceTheme(window, 'dark' | 'light')` — legacy path; current Electron should use `nativeTheme.themeSource`.",
+    "source": "https://github.com/SoFriendly/vibe"
+  },
+  {
+    "claim": "Chromium's own issue tracker carries a bug specifically about severe performance degradation from backdrop-filter: blur() applied to elements in the top-layer (i.e. <dialog>/popover — exactly the modal/overlay case a MacModal would use), confirming this is a reproduced engine-level regression rather than a general 'blur is heavy' folk belief. NOTE: the issue page itself is behind the tracker's Google sign-in wall; this text was recovered from search-engine snippets of that page, not a direct fetch.",
+    "quote": "Severe performance drop when using backdrop-filter: blur(...); in the top-layer [473056837]",
+    "source": "https://issues.chromium.org/issues/473056837"
+  },
+  {
+    "claim": "A Chromium engineer attributes the slowdown to the software compositor path: backdrop-filter as currently implemented copies the pixel buffer twice and then applies the filter operations. This means the cost is a per-frame CPU readback/copy penalty that is incurred specifically when GPU compositing is unavailable — directly relevant to Electron on Windows machines running with GPU acceleration disabled, blocklisted drivers, or in RDP/VM sessions, where a glass panel that is cheap on a GPU-accelerated dev box becomes pathological.",
+    "quote": "This particular issue is a known, longstanding issue in chromium's software compositor - backdrop filter as implemented currently makes two copies of the pixel buffer and applies the filter operations...",
+    "source": "https://issues.chromium.org/issues/473056837"
+  },
+  {
+    "claim": "The bug was closed as a duplicate of crbug.com/40916020 ('Rely on Skia's built-in backdrop filtering in software_renderer.cc'), i.e. the fix is an unlanded refactor of Chromium's software renderer that is still tracked as ongoing work. There is no engine-side fix to wait for in an Electron 42-era Chromium; the only available mitigation is to avoid or bound the effect in application CSS.",
+    "quote": "I'm marking this issue as a duplicate. Retrofitting software_renderer is one of my ongoing responsibilities. Please track that issue ( crbug.com/40916020) for updates.",
+    "source": "https://issues.chromium.org/issues/473056837"
+  },
+  {
+    "claim": "The engineer calls the software-compositor backdrop-filter cost 'longstanding', which dates the defect well before the current Chromium branch and rules out the hypothesis that a version bump of Electron/Chromium would have made the project's previously-reverted .glass backdrop-filter: blur(20px) affordable.",
+    "quote": "This particular issue is a known, longstanding issue in chromium's software compositor",
+    "source": "https://issues.chromium.org/issues/473056837"
+  },
+  {
+    "claim": "The issue is filed under the Blink>Compositing>Filters component, placing backdrop-filter cost in the compositing/filter pipeline rather than in layout or paint — consistent with the fact that promoting the element to its own layer or adding contain: paint does not eliminate the per-frame backdrop read-and-filter work, it only bounds the region being filtered.",
+    "quote": "Blink&gt;Compositing&gt;Filter...",
+    "source": "https://issues.chromium.org/issues/473056837"
+  },
+  {
+    "claim": "content-visibility: auto defers layout and paint for offscreen elements, cutting initial rendering time in a demo from 232ms to 30ms (~7x) — directly applicable to the long server list in Servers.tsx without any animation cost.",
+    "quote": "enables the user agent to skip an element's rendering work, including layout and painting, until it is needed ... rendering times going from 232ms to 30ms ... a 7x performance boost",
+    "source": "https://web.dev/articles/content-visibility"
+  },
+  {
+    "claim": "content-visibility: hidden preserves cached rendering state for offscreen/inactive views, unlike display: none which destroys it; Facebook engineers measured up to 250ms improvement in SPA navigation times using it for inactive views — relevant to tab/page switching between Dashboard/Servers/Settings.",
+    "quote": "an up to 250ms improvement in navigation times ... unlike with auto, it does not automatically start to render on-screen ... display: none hides the element and destroys its rendering state",
+    "source": "https://web.dev/articles/content-visibility"
+  },
+  {
+    "claim": "contain: paint restricts descendant painting to the element's bounds and contain: layout isolates descendants from external layout — these are the sub-primitives content-visibility applies, and they are what let the compositor skip offscreen work.",
+    "quote": "descendants of the containing box don't display outside its bounds ... descendants do not affect the external layout of other boxes on the page",
+    "source": "https://web.dev/articles/content-visibility"
+  },
+  {
+    "claim": "Using content-visibility: auto without contain-intrinsic-size causes scrollbar length to shift as items render, because size containment makes elements lay out as if empty; contain-intrinsic-size: auto 300px supplies an estimate and then remembers real measured sizes across scroll.",
+    "quote": "the size of the scrollbar will shift ... lay out as if it was empty ... a placeholder size in lieu of rendered content",
+    "source": "https://web.dev/articles/content-visibility"
+  },
+  {
+    "claim": "The skipping optimization is silently defeated by DOM APIs that force layout on a skipped subtree; Chromium emits console warnings (with verbose logging) when such an API touches a content-visibility: hidden subtree — a concrete verification method.",
+    "quote": "Chromium logs console messages when such an API hits a content-visibility: hidden subtree, visible with verbose logging enabled",
+    "source": "https://web.dev/articles/content-visibility"
+  },
+  {
+    "claim": "Feature is broadly available (Chrome/Edge 85+, Firefox 125, Safari 18; Baseline Newly available September 15, 2025), so it is safely usable in Electron 42's Chromium; accessibility caveat is that offscreen landmarks styled display:none still surface in the a11y tree and need aria-hidden.",
+    "quote": "Baseline Newly available as of September 15, 2025 ... landmark elements styled display: none or visibility: hidden will also surface in the accessibility tree while offscreen ... Remedy: add aria-hidden=\"true\"",
+    "source": "https://web.dev/articles/content-visibility"
+  },
+  {
+    "claim": "content-visibility: hidden preserves cached rendering state for inactive views, unlike display: none which destroys it; Facebook engineers measured up to 250ms improvement in SPA navigation times using it for inactive views — relevant to Dashboard/Servers/Settings page switching.",
+    "quote": "an up to 250ms improvement in navigation times ... unlike with auto, it does not automatically start to render on-screen ... display: none hides the element and destroys its rendering state",
+    "source": "https://web.dev/articles/content-visibility"
+  },
+  {
+    "claim": "content-visibility: auto without contain-intrinsic-size causes scrollbar length to shift as items render, because size-contained elements lay out as if empty; contain-intrinsic-size: auto 300px gives an estimate then remembers real measured sizes across scroll.",
+    "quote": "the size of the scrollbar will shift ... lay out as if it was empty ... a placeholder size in lieu of rendered content",
+    "source": "https://web.dev/articles/content-visibility"
+  },
+  {
+    "claim": "The optimization is silently defeated by DOM APIs that force layout on a skipped subtree; Chromium emits console messages (with verbose logging) when such an API hits a content-visibility: hidden subtree, giving a concrete verification method. Support is Chrome/Edge 85+, Baseline as of 2025-09-15, so it is safe in Electron 42's Chromium.",
+    "quote": "Chromium logs console messages when such an API hits a content-visibility: hidden subtree, visible with verbose logging enabled ... Baseline Newly available as of September 15, 2025",
+    "source": "https://web.dev/articles/content-visibility"
+  },
+  {
+    "claim": "Mullvad's desktop app design reduces the primary UI content to two facts — whether the connection is secure, and the apparent (exit) location — rather than presenting metrics or decorative visuals as the main surface.",
+    "quote": "The new Mullvad VPN app focuses on showing whether your connection is secure or not",
+    "source": "https://mullvad.net/uk/blog/announcing-new-mullvadvpn-app"
+  },
+  {
+    "claim": "Mullvad conveys persistent security state through a static, color-coded padlock in the menu bar/tray with a strictly binary green/red mapping — no animation or motion is used for the always-visible indicator.",
+    "quote": "A padlock in the menu bar is a helpful, constant reminder of your status ... green means you're connected, red signals that you're not",
+    "source": "https://mullvad.net/uk/blog/announcing-new-mullvadvpn-app"
+  },
+  {
+    "claim": "The main connection state is redundantly encoded as an explicit uppercase text label (\"SECURE CONNECTION\") next to the exit location, not by color alone — a zero-cost accessibility/legibility technique for security state.",
+    "quote": "The screenshot description also displays the label \"SECURE CONNECTION\" alongside a New York, USA endpoint.",
+    "source": "https://mullvad.net/uk/blog/announcing-new-mullvadvpn-app"
+  },
+  {
+    "claim": "Mullvad uses a world map as the spatial visualization of the active server location, i.e. the app's one 'hero' graphic is a location map rather than a real-time traffic/throughput chart.",
+    "quote": "A map clearly indicates where in the world you are connected to one of Mullvad's servers.",
+    "source": "https://mullvad.net/uk/blog/announcing-new-mullvadvpn-app"
+  },
+  {
+    "claim": "Mullvad frames the app's visual/interaction design as a deliberate product goal (intuitive UX as the core design principle), documenting it as an explicit design intent rather than an emergent side effect of engineering.",
+    "quote": "we have intentionally designed our new VPN app with an intuitive user experience at its core",
+    "source": "https://mullvad.net/uk/blog/announcing-new-mullvadvpn-app"
+  },
+  {
+    "claim": "Raycast 2.0 achieves the frosted/translucent look on Windows via native acrylic blur-behind at the OS/shell level (coordinated with the WebView2 runtime) rather than via CSS blur inside the web layer — i.e. the compositing is done by the system, matching the 'native backgroundMaterial instead of backdrop-filter' strategy under investigation. On macOS the equivalent is Apple's system material, not CSS.",
+    "quote": "macOS Tahoe support adopts \"Apple's new Liquid Glass material.\" Windows acrylic blur-behind alongside a custom title bar \"took careful coordination between the native shell and the WebView2 runtime\"",
+    "source": "https://www.raycast.com/blog/a-technical-deep-dive-into-the-new-raycast"
+  },
+  {
+    "claim": "Combining a custom (frameless-style) title bar with native Windows acrylic is non-trivial integration work, and controlling the web-view initialization parameters is what lets them avoid the startup white-flash typical of WebView2/embedded-browser apps — a concrete failure mode to plan for when enabling native window materials with a frameless Electron window.",
+    "quote": "owning initialization parameters lets them dodge \"the white-rectangle flash that's common in WebView2 apps on startup.\"",
+    "source": "https://www.raycast.com/blog/a-technical-deep-dive-into-the-new-raycast"
+  },
+  {
+    "claim": "Perceived native quality in a web-rendered desktop UI comes largely from removing 'web tells' — no cursor: pointer on controls, no hover highlights on most controls, no flicker on view transitions — a set of near-zero-cost design changes rather than added animation or blur.",
+    "quote": "Web tells are avoided: no `cursor: pointer` on controls, no hover highlights on most controls, no flicker on view transitions.",
+    "source": "https://www.raycast.com/blog/a-technical-deep-dive-into-the-new-raycast"
+  },
+  {
+    "claim": "Translucency of inner panels (not just the window background) was singled out as mattering disproportionately to the perceived quality of the redesign, indicating glass effects are best spent on small inner surfaces layered over an already system-blurred window background rather than applied broadly.",
+    "quote": "Translucency of inner panels was called out as mattering \"a great deal.\"",
+    "source": "https://www.raycast.com/blog/a-technical-deep-dive-into-the-new-raycast"
+  },
+  {
+    "claim": "Embedded-browser engines throttle rAF, CSS animations and timers in hidden/unfocused/occluded windows, and the team had to explicitly defeat this (occlusion detection off, invisible-but-fronted window, rAF-gated first paint) — meaning animation behavior in an always-open desktop app cannot be assumed to run as authored, and per-window environments plus unfocused-window throttling are real constraints on Windows.",
+    "quote": "Throttling of rAF, CSS animations, and timers is defeated by fronting the window while invisible (`alphaValue = 0`) and setting `windowOcclusionDetectionEnabled = false`; rendering is then kicked off inside a `requestAnimationFrame` immediately before display.",
+    "source": "https://www.raycast.com/blog/a-technical-deep-dive-into-the-new-raycast"
+  },
+  {
+    "claim": "Electron 42 ships Chromium 148.0.7778.96, V8 14.8 and Node v24.15.0, which sets the web-platform baseline available to the renderer (Chromium 148 is far past the ship points for View Transitions, @starting-style/transition-behavior: allow-discrete, CSS anchor positioning, popover, scroll-driven animations and individual transform properties — the post itself does not enumerate features, only links to the 'New in 148'/'New in 147' Chrome posts).",
+    "quote": "includes upgrades to Chromium 148.0.7778.96, V8 14.8, and Node v24.15.0.",
+    "source": "https://www.electronjs.org/blog/electron-42-0"
+  },
+  {
+    "claim": "Electron 42 adds a native background-blur API on views — view.setBackgroundBlur() — plus animatable view.setBounds(), giving a compositor-side/native alternative to permanently-applied CSS backdrop-filter for frosted-glass surfaces and to JS-driven bounds animation.",
+    "quote": "Added animation functionality to `view.setBounds()` and added `view.setBackgroundBlur()`",
+    "source": "https://www.electronjs.org/blog/electron-42-0"
+  },
+  {
+    "claim": "The Chromium bump in Electron 42 is a two-milestone jump from 146.0.7680.65 to 148.0.7778.96, so any Chromium rendering/compositing behavior documented for M147 or M148 applies to this Electron version.",
+    "quote": "from `146.0.7680.65` to `148.0.7778.96`",
+    "source": "https://www.electronjs.org/blog/electron-42-0"
+  },
+  {
+    "claim": "Electron 42's release notes contain no changes, deprecations, or removals affecting BrowserWindow backgroundMaterial, vibrancy, transparent, or frameless window options — the only deprecation is nativeImage.createFromNamedImage() hslShift array form, and the removals (Session.clearStorageData quotas, ELECTRON_SKIP_BINARY_DOWNLOAD) are unrelated to rendering.",
+    "quote": "The two removals — the `quotas` object from `Session.clearStorageData(options)` (dropped upstream in Chromium) and the `ELECTRON_SKIP_BINARY_DOWNLOAD` variable (superseded by lazy download) — are unrelated to rendering.",
+    "source": "https://www.electronjs.org/blog/electron-42-0"
+  },
+  {
+    "claim": "Electron 42 exposes nativeTheme.shouldDifferentiateWithoutColor (macOS accessibility signal), which is the platform hook for making security-state indicators (protected / reconnecting / firewall-blocked) readable without relying on hue alone.",
+    "quote": "the post adds `nativeTheme.shouldDifferentiateWithoutColor`, an accessibility signal rather than a window effect, though it can influence how you style UI.",
+    "source": "https://www.electronjs.org/blog/electron-42-0"
+  }
+]

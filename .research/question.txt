@@ -1,0 +1,27 @@
+Как улучшить визуал и анимации desktop-приложения VPN Tunnel Enforcer. Это НЕ абстрактный вопрос — исследование должно быть применимо к конкретному стеку и конкретной истории проекта.
+
+СТЕК (проверено по package.json и коду):
+- Electron 42, React 18.3, TypeScript 5.4, electron-vite 3
+- TailwindCSS 3.4 с theme-токенами через CSS custom properties (--rgb-* канальный формат для alpha-модификатора), darkMode через [data-theme="dark"]
+- framer-motion 11.1 УЖЕ установлен и используется в 17 файлах (Dashboard, MacModal, MacToast, MacSwitch, MacSegmentedControl, ServerDetailModal и др.)
+- lucide-react иконки, zustand 4 стор, i18next, @dnd-kit для drag-list
+- Собственный дизайн-система из macOS-стилизованных примитивов: MacButton, MacCard, MacModal, MacSwitch, MacToast, MacProgress, MacSegmentedControl, MacSelect, MacSidebar, MacBadge, MacDragList
+- Окно frameless (-webkit-app-region: drag), тёмная и светлая темы
+- 15 300 строк рендерера; Servers.tsx = 2203 строки, Settings.tsx = 881, Dashboard.tsx = 816
+
+КРИТИЧЕСКИЙ КОНТЕКСТ — ГЛАВНЫЙ ВОПРОС ИССЛЕДОВАНИЯ:
+Glassmorphism-редизайн в этом проекте УЖЕ БЫЛ СДЕЛАН и ПОТОМ ВЫРЕЗАН по причинам производительности. Коммит cfa47b5 удалил: backdrop-filter: blur(20px) с класса .glass (заменён на непрозрачный фон rgb(card / 0.96) с комментарием "Opaque panel surface avoids permanent backdrop compositing"), keyframes-шиммер для loading-состояний (заменён на статичный фон, "avoids a permanently repainting shimmer"), анимацию pulse-ring вокруг badge-точки (заменена на статичное кольцо, "Static halo preserves the live indicator without a permanent animation"), background-attachment: fixed с градиентного фона. Ранее коммит 9e61b87 отключил ETW-форензику по умолчанию, 7a3bcaa — серия perf-оптимизаций.
+
+Поэтому нужно исследовать НЕ "какие анимации модны", а: как получить визуальное качество 2026 года в Electron-приложении БЕЗ тех издержек, из-за которых предыдущую попытку откатили. Конкретно:
+
+1. Стоимость backdrop-filter/blur в Chromium: почему постоянный backdrop-filter дорог, как измерять (DevTools Rendering: Paint flashing, Layer borders, frame rendering stats), какие есть дешёвые альтернативы визуалу frosted glass (SVG-препроцессинг, статичный blurred-снимок фона, layered gradients + noise texture, box-shadow-имитация, blur только на malом слое). Работает ли backdrop-filter дешевле, если элемент промотирован в отдельный слой / ограничен contain: paint / имеет will-change. Есть ли разница на Windows с аппаратным ускорением и без него, и как ведёт себя Electron 42 (Chromium какой версии) при отключенном GPU.
+
+2. Нативные Windows-эффекты вместо CSS: Electron BrowserWindow backgroundMaterial ('acrylic', 'mica', 'tabbed'), vibrancy, Windows 11 Mica/Acrylic через DWM. Стоимость этих эффектов относительно CSS backdrop-filter (композитинг делает система, не Chromium). Ограничения: работает ли с frameless окном, transparent, требует ли Windows 11, конфликтует ли с CSS-фоном, известные баги в Electron, поведение при смене темы.
+
+3. Анимации без постоянного репейнта: какие свойства анимируются на GPU-композиторе (transform/opacity/filter) и не вызывают layout/paint, как проверить что анимация действительно compositor-driven; CSS-анимации vs framer-motion vs Web Animations API по стоимости; почему бесконечные repeat-анимации особенно вредны в постоянно открытом приложении и как делать "живой" индикатор без infinite loop (анимация по событию, а не постоянно); стоит ли использовать CSS @property и view-timeline; content-visibility и contain для длинных списков.
+
+4. Современные подходы 2026, применимые к React 18 + Tailwind 3 + framer-motion 11: View Transitions API (Document и cross-document, поддержка в Chromium, применимость к переключению страниц внутри SPA и к смене темы), CSS @starting-style и transition-behavior: allow-discrete для входа/выхода элементов без AnimatePresence, CSS anchor positioning для поповеров/тултипов, popover attribute, scroll-driven animations (animation-timeline: scroll/view), individual transform properties (translate/rotate/scale), color-mix() и oklch для более качественных палитр и hover-состояний, container queries. Что из этого доступно в Chromium версии Electron 42 и что даёт реальный выигрыш в качестве.
+
+5. Дизайн-качество, а не только техника: как выглядят в 2026 году референсные VPN/сетевые desktop-клиенты и dashboard-приложения (Tailscale, Mullvad, Proton VPN, WireGuard GUI, Cloudflare WARP, а также Linear, Raycast, Arc как эталоны desktop-эстетики) — конкретные приёмы, которые они используют: типографическая шкала и tabular-nums для метрик, плотность интерфейса, работа с цветом состояний (connected/connecting/blocked), микро-обратная связь на действие, skeleton vs spinner, empty states, визуализация трафика в реальном времени. Какие приёмы дают наибольший прирост воспринимаемого качества при наименьшей стоимости внедрения. Отдельно: как визуально выражать состояние безопасности (защищён / переподключается / трафик заблокирован файрволом) так, чтобы оно читалось мгновенно и не пугало ложно.
+
+Приоритет — конкретика с источниками, измеримые утверждения о стоимости, и явное разделение "даёт качество дешево" vs "выглядит модно но вернёт те же проблемы, из-за которых откатили прошлый редизайн".

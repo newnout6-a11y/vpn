@@ -1,0 +1,10 @@
+# live-snapshot.json is the machine-readable dump of the same content as
+# live-snapshot.md, plus per-verifier evidence text — 1.1 MB, which is a fifth of
+# this whole repository (5.9 MB, deliberately binary-free). The readable
+# rendering is committed; this is not.
+#
+# Regenerate with `node .research/snapshot.mjs`. Note the caveat: it reads the
+# workflow's subagent transcripts under ~/.claude/projects/..., which are local
+# and session-scoped. On a fresh clone there is nothing to regenerate FROM — so
+# treat live-snapshot.md as the archival copy, not this file.
+live-snapshot.json
