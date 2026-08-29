@@ -53,22 +53,44 @@ function hexToRgbChannels(hex: string): string {
  * `--rgb-*` custom properties. The CSS-ready `--color-*` aliases derive from
  * those automatically (see globals.css), so writing `--rgb-bg` is enough to
  * propagate the change everywhere.
+ *
+ * EVERY level is written, not a subset. This used to push seven properties and
+ * leave `--rgb-card-elevated`, `--rgb-border-strong`, `--rgb-text-muted` and the
+ * state colours at their globals.css values — which had been tuned for a canvas
+ * much darker than the built-in dark theme shipped. Half the palette came from
+ * the theme and half from a stylesheet that disagreed with it, so surfaces
+ * collapsed into one flat field and state colours could not be themed at all.
  */
 function applyThemeToDocument(theme: ThemeConfig): void {
   const root = document.documentElement
 
-  const tokenMap: Record<string, string> = {
+  const tokenMap: Record<string, string | undefined> = {
     '--rgb-bg': theme.colors.background,
+    '--rgb-sidebar': theme.colors.sidebar,
     '--rgb-card': theme.colors.cardBackground,
+    '--rgb-card-elevated': theme.colors.cardElevated,
     '--rgb-accent': theme.colors.accent,
     '--rgb-text': theme.colors.text,
     '--rgb-text-secondary': theme.colors.textSecondary,
-    '--rgb-sidebar': theme.colors.sidebar,
-    '--rgb-border': theme.colors.border
+    '--rgb-text-muted': theme.colors.textMuted,
+    '--rgb-border': theme.colors.border,
+    '--rgb-border-strong': theme.colors.borderStrong,
+    '--rgb-success': theme.colors.success,
+    '--rgb-warning': theme.colors.warning,
+    '--rgb-danger': theme.colors.danger
   }
 
   for (const [cssVar, hex] of Object.entries(tokenMap)) {
+    // A theme stored before this palette was widened can still be missing a
+    // level. Leave the stylesheet default in place rather than writing "0 0 0".
+    if (!hex) continue
     root.style.setProperty(cssVar, hexToRgbChannels(hex))
+  }
+
+  // `--rgb-accent-hover` is derived rather than themed: asking every theme
+  // author to supply a matching hover shade invites mismatches.
+  if (theme.colors.accent) {
+    root.style.setProperty('--rgb-accent-hover', shiftForHover(theme.colors.accent, theme.mode))
   }
 
   // Set data-theme attribute for CSS selectors
@@ -76,6 +98,25 @@ function applyThemeToDocument(theme: ThemeConfig): void {
     ? (isSystemDark() ? 'dark' : 'light')
     : theme.mode
   root.setAttribute('data-theme', effectiveMode)
+}
+
+/**
+ * Hover shade for the accent: lighter in dark mode, darker in light mode, so the
+ * hover always moves *away* from the surface it sits on.
+ */
+function shiftForHover(hex: string, mode: ThemeConfig['mode']): string {
+  const channels = hexToRgbChannels(hex).split(' ').map(Number)
+  const towardsLight = mode === 'light'
+    ? false
+    : mode === 'dark'
+      ? true
+      : isSystemDark()
+  const shifted = channels.map((c) =>
+    towardsLight
+      ? Math.min(255, Math.round(c + (255 - c) * 0.28))
+      : Math.max(0, Math.round(c * 0.78))
+  )
+  return shifted.join(' ')
 }
 
 function isSystemDark(): boolean {

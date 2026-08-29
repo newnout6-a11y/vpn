@@ -266,7 +266,7 @@ export function Maintenance() {
   }
 
   return (
-    <div className="space-y-6 max-w-4xl">
+    <div className="space-y-6 max-w-4xl mx-auto">
       <div>
         <h2 className="text-2xl font-bold text-[var(--color-text)]">Починка</h2>
         <p className="text-sm text-[var(--color-text-secondary)] mt-1">
@@ -286,8 +286,14 @@ export function Maintenance() {
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          {/*
+            One primary per card. "Проверить" and "Починить" were both primary,
+            so two equally loud blue buttons sat side by side with nothing saying
+            which to press. Diagnose first, then repair — so checking is the
+            secondary step and repairing carries the weight.
+          */}
           <MacButton
-            variant="primary"
+            variant="secondary"
             onClick={runHealthCheck}
             disabled={Boolean(runningAction)}
             className="flex items-center justify-center gap-2"
@@ -305,7 +311,7 @@ export function Maintenance() {
             Починить
           </MacButton>
           <MacButton
-            variant="secondary"
+            variant="ghost"
             onClick={exportZip}
             disabled={Boolean(runningAction)}
             className="flex items-center justify-center gap-2"
@@ -325,9 +331,16 @@ export function Maintenance() {
           <Wrench className="w-5 h-5 text-[var(--color-warning)]" />
           <h3 className="text-sm font-semibold text-[var(--color-text)] uppercase tracking-wider">Что делает авто-починка</h3>
         </div>
-        <div className="space-y-2">
+        {/*
+          Rows are a status readout, not controls. They used to be full-width
+          bordered boxes with rounded corners — visually identical to the buttons
+          above them — so the list read as six things you could press. Now it is a
+          plain list with a hairline between entries: same information, no
+          promise of interactivity.
+        */}
+        <div className="divide-y divide-[var(--color-border)]">
           {repairSteps.map(step => (
-            <div key={step.id} className="bg-[var(--color-bg)]/60 border border-[var(--color-card-elevated)]/40 rounded-lg px-3 py-2">
+            <div key={step.id} className="py-2 first:pt-0 last:pb-0">
               <div className="flex items-start gap-2">
                 {statusIcon(step.status)}
                 <div className="min-w-0">

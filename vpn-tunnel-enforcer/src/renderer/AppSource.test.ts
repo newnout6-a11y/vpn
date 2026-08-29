@@ -262,8 +262,33 @@ describe('App source regressions', () => {
     expect(side).toContain('const removedRows = cluster.rows.filter(row => row.removed)')
     expect(side).toContain("t('servers.groups.removedServers', 'Удалённые серверы')")
     expect(side).toContain('<ArchiveX className="h-3.5 w-3.5')
-    expect(servers).toContain('<Waypoints size={12} />')
-    expect(servers).toContain('<MapPin size={12} />')
+    // Row actions moved into a MacMenu, so the icons are menu-item icons now.
+    // The point of this assertion is unchanged: proxy and verify-country must
+    // stay visually distinct from each other, and Globe2 (used elsewhere) must
+    // not be reused for either.
+    expect(servers).toContain('<Waypoints size={14} />')
+    expect(servers).toContain('<MapPin size={14} />')
     expect(servers).not.toContain('<Globe2 size={12} />')
+    expect(servers).not.toContain('<Globe2 size={14} />')
+  })
+
+  it('keeps server rows down to one primary action plus an overflow menu', () => {
+    // Regression guard for the seven-control row: five unlabelled ghost icons,
+    // the Select button and a bare delete icon, all the same size. If secondary
+    // actions creep back onto the row as bare icons this fails.
+    const servers = serversSource()
+
+    expect(servers).toContain('<MacMenu')
+    expect(servers).toContain("label={t('servers.rowActions'")
+    // Delete lives in the menu, marked destructive so it sits below a separator.
+    expect(servers).toContain('destructive: true')
+    // Row actions are menu items, not buttons. Asserted on the row's own
+    // handlers rather than on "no Trash2 anywhere" — the GROUP header legitimately
+    // still has its own delete control, which this must not accidentally pin.
+    expect(servers).toContain('onSelect: () => onExportToFile(profile.id)')
+    expect(servers).toContain('onSelect: () => onRemove(profile.id)')
+    // The old row ghost buttons described themselves only via aria-label/title.
+    expect(servers).not.toContain("aria-label={t('servers.pingOne')}")
+    expect(servers).not.toContain('aria-label="Проверить страну"')
   })
 })

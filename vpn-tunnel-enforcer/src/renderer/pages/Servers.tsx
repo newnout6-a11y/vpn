@@ -26,6 +26,7 @@ import {
   MacButton,
   MacInput,
   MacSelect,
+  MacMenu,
   MacModal,
   MacProgress,
   MacToast,
@@ -2073,100 +2074,6 @@ function ServerProfileCard({
         <div className="flex items-center gap-1.5">
           <MacButton
             size="sm"
-            variant="ghost"
-            disabled={startingProxy || isActive || staleFromSub}
-            onClick={(e) => {
-              e.stopPropagation()
-              onStartProxy(profile)
-            }}
-            aria-label="Запустить этот сервер как внешний прокси"
-            title={staleFromSub
-              ? t('servers.groups.removedProxyUnavailable')
-              : isActive
-                ? 'Сервер используется основным VPN'
-                : 'Запустить этот сервер как внешний прокси'}
-          >
-            {startingProxy ? <Loader2 size={12} className="animate-spin" /> : <Waypoints size={12} />}
-          </MacButton>
-          <MacButton
-            size="sm"
-            variant="ghost"
-            disabled={!profile.server || perRowPing?.loading}
-            onClick={(e) => {
-              e.stopPropagation()
-              onPing(profile)
-            }}
-            aria-label={t('servers.pingOne')}
-          >
-            {perRowPing?.loading ? (
-              <Loader2 size={12} className="animate-spin" />
-            ) : (
-              <Activity size={12} />
-            )}
-          </MacButton>
-          <MacButton
-            size="sm"
-            variant="ghost"
-            disabled={!profile.server || verifyingCountry}
-            onClick={(e) => {
-              e.stopPropagation()
-              onVerifyCountry(profile)
-            }}
-            aria-label="Проверить страну"
-            title="Проверить страну"
-          >
-            {verifyingCountry ? (
-              <Loader2 size={12} className="animate-spin" />
-            ) : (
-              <MapPin size={12} />
-            )}
-          </MacButton>
-          <MacButton
-            size="sm"
-            variant="ghost"
-            onClick={(e) => {
-              e.stopPropagation()
-              onExport(profile.id)
-            }}
-            aria-label={t('servers.exportKey')}
-            title={
-              exportFlash === 'copied'
-                ? t('servers.keyCopied')
-                : exportFlash === 'failed'
-                  ? t('servers.exportFailed')
-                  : t('servers.exportKey')
-            }
-          >
-            {exportFlash === 'copied' ? (
-              <Check className="w-3.5 h-3.5 text-[var(--color-success)]" />
-            ) : (
-              <Copy className="w-3.5 h-3.5" />
-            )}
-          </MacButton>
-          <MacButton
-            size="sm"
-            variant="ghost"
-            onClick={(e) => {
-              e.stopPropagation()
-              onExportToFile(profile.id)
-            }}
-            aria-label={t('servers.saveKey')}
-            title={
-              exportFlash === 'saved'
-                ? t('servers.keySaved')
-                : exportFlash === 'failed'
-                  ? t('servers.exportFailed')
-                  : t('servers.saveKey')
-            }
-          >
-            {exportFlash === 'saved' ? (
-              <Check className="w-3.5 h-3.5 text-[var(--color-success)]" />
-            ) : (
-              <Download className="w-3.5 h-3.5" />
-            )}
-          </MacButton>
-          <MacButton
-            size="sm"
             variant={isActive ? 'secondary' : 'primary'}
             disabled={isSelectDisabled}
             onClick={(e) => {
@@ -2185,16 +2092,70 @@ function ServerProfileCard({
                 ? t('servers.selected')
                 : t('servers.select')}
           </MacButton>
-          <MacButton
-            size="sm"
-            variant="ghost"
-            onClick={(e) => {
-              e.stopPropagation()
-              onRemove(profile.id)
-            }}
-          >
-            <Trash2 className="w-3.5 h-3.5 text-[var(--color-danger)]" />
-          </MacButton>
+          {/*
+            Everything except "select" lives behind one trigger. There used to be
+            five unlabelled ghost icons plus a bare delete icon next to this
+            button — seven controls of identical size, so the row could not be
+            scanned and delete sat beside routine actions. In the menu each one
+            finally has a text label.
+          */}
+          <MacMenu
+            label={t('servers.rowActions', 'Действия для этого сервера')}
+            items={[
+              {
+                id: 'proxy',
+                label: t('servers.startAsProxy', 'Запустить как внешний прокси'),
+                icon: startingProxy ? <Loader2 size={14} className="animate-spin" /> : <Waypoints size={14} />,
+                busy: startingProxy,
+                disabled: startingProxy || isActive || staleFromSub,
+                title: staleFromSub
+                  ? t('servers.groups.removedProxyUnavailable')
+                  : isActive
+                    ? 'Сервер используется основным VPN'
+                    : undefined,
+                onSelect: () => onStartProxy(profile)
+              },
+              {
+                id: 'ping',
+                label: t('servers.pingOne'),
+                icon: perRowPing?.loading ? <Loader2 size={14} className="animate-spin" /> : <Activity size={14} />,
+                busy: perRowPing?.loading,
+                disabled: !profile.server || perRowPing?.loading,
+                onSelect: () => onPing(profile)
+              },
+              {
+                id: 'country',
+                label: 'Проверить страну',
+                icon: verifyingCountry ? <Loader2 size={14} className="animate-spin" /> : <MapPin size={14} />,
+                busy: verifyingCountry,
+                disabled: !profile.server || verifyingCountry,
+                onSelect: () => onVerifyCountry(profile)
+              },
+              {
+                id: 'copy',
+                label: exportFlash === 'copied' ? t('servers.keyCopied') : t('servers.exportKey'),
+                icon: exportFlash === 'copied'
+                  ? <Check size={14} className="text-[var(--color-success)]" />
+                  : <Copy size={14} />,
+                onSelect: () => onExport(profile.id)
+              },
+              {
+                id: 'save',
+                label: exportFlash === 'saved' ? t('servers.keySaved') : t('servers.saveKey'),
+                icon: exportFlash === 'saved'
+                  ? <Check size={14} className="text-[var(--color-success)]" />
+                  : <Download size={14} />,
+                onSelect: () => onExportToFile(profile.id)
+              },
+              {
+                id: 'remove',
+                label: t('servers.removeProfile', 'Удалить сервер'),
+                icon: <Trash2 size={14} />,
+                destructive: true,
+                onSelect: () => onRemove(profile.id)
+              }
+            ]}
+          />
         </div>
       </div>
     </MacCard>

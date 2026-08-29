@@ -4,6 +4,32 @@ module.exports = {
   darkMode: ['class', '[data-theme="dark"]'],
   theme: {
     extend: {
+      fontFamily: {
+        // globals.css asked for `font-feature-settings: "cv11","ss01","ss03"` —
+        // Inter-specific OpenType features — while no font file was ever bundled
+        // and `font-sans` fell through to Tailwind's default stack, i.e. Segoe UI
+        // on Windows, where those features do nothing at all. Naming the
+        // platform's own variable font is honest, costs zero bytes, and needs no
+        // CSP change (font-src is 'self' data:, so a web font CDN was never an
+        // option anyway).
+        // Windows 11 ships Segoe UI Variable; Windows 10 falls back to Segoe UI.
+        sans: [
+          'Segoe UI Variable Text',
+          'Segoe UI Variable',
+          'Segoe UI',
+          'system-ui',
+          '-apple-system',
+          'sans-serif'
+        ],
+        // The Display cut is optically tighter — headings only, not body copy.
+        display: [
+          'Segoe UI Variable Display',
+          'Segoe UI Variable',
+          'Segoe UI',
+          'system-ui',
+          'sans-serif'
+        ]
+      },
       colors: {
         // Theme-aware tokens. Each colour is wired to a CSS custom property in
         // RGB-channel form so Tailwind's `/<alpha>` modifier still works:

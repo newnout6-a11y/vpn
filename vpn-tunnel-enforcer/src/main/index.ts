@@ -350,9 +350,13 @@ function getIconPath() {
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 900,
-    height: 680,
-    minWidth: 800,
+    // 1100 wide, not 900: the dashboard's companion column (live traffic, quick
+    // server switch, recent sites) is gated behind Tailwind's `xl:` breakpoint at
+    // 1280px, and at 900px nothing else on the page used the space either. This
+    // still fits a 1366x768 laptop.
+    width: 1100,
+    height: 720,
+    minWidth: 860,
     minHeight: 600,
     show: false,
     frame: true,
@@ -363,7 +367,11 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false
     },
-    backgroundColor: '#1e1e2e'
+    // Must track --rgb-bg of the dark theme (themeManager DARK_THEME.background).
+    // This is the colour painted before the renderer's first frame; when it was
+    // '#1e1e2e' — a value belonging to neither theme — startup flashed a shade
+    // that appears nowhere else in the app.
+    backgroundColor: '#0d0e12'
   })
 
   mainWindow.on('ready-to-show', () => {

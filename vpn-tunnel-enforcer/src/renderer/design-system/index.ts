@@ -29,6 +29,7 @@ export {
 } from './MacToast'
 export { MacInput, type MacInputProps } from './MacInput'
 export { MacSelect, type MacSelectProps, type SelectOption } from './MacSelect'
+export { MacMenu, type MacMenuProps, type MacMenuItem } from './MacMenu'
 export { MacProgress, type MacProgressProps } from './MacProgress'
 export { MacDragList, type MacDragListProps, type DragItem } from './MacDragList'
 export { MacSwitch, type MacSwitchProps } from './MacSwitch'

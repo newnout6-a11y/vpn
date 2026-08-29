@@ -380,14 +380,41 @@ export interface ThemeConfig {
   name: string
   mode: 'light' | 'dark' | 'system'
   isCustom: boolean
+  /**
+   * Full surface + state palette.
+   *
+   * This used to carry only seven values, which split the palette across two
+   * disagreeing sources: ThemeProvider wrote those seven onto the document and
+   * everything else (cardElevated, borderStrong, textMuted, state colours, and
+   * every shadow/glow derived from them) stayed at the globals.css fallbacks —
+   * which had been tuned for a canvas 15 levels darker than the built-in dark
+   * theme actually shipped. The result was a UI with no depth: layers within a
+   * few RGB steps of each other and shadows calibrated for a different
+   * background.
+   *
+   * Every surface level is listed explicitly so one theme fully determines the
+   * palette. `cardElevated` and `borderStrong` are optional-in-practice for
+   * custom themes stored before this change; themeManager fills them in.
+   */
   colors: {
     background: string
+    /** Nav rail. Must differ from `background`, or the rail vanishes into it. */
+    sidebar: string
     cardBackground: string
+    /** Nested/raised surfaces inside a card (inputs, inner panels, hovers). */
+    cardElevated: string
     accent: string
     text: string
     textSecondary: string
-    sidebar: string
+    /** Lowest-emphasis text: hints, disabled, placeholder. */
+    textMuted: string
     border: string
+    /** Higher-contrast border for focus and separators that must read. */
+    borderStrong: string
+    /** State colours travel with the theme — in a VPN client they carry meaning. */
+    success: string
+    warning: string
+    danger: string
   }
 }
 

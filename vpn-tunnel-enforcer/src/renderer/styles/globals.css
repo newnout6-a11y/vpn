@@ -17,21 +17,25 @@
  * ────────────────────────────────────────────────────────────────────────── */
 
 :root {
-  /* Light theme — soft, muted, easy on the eyes (not pure white) */
-  --rgb-bg: 228 230 235;
-  --rgb-card: 238 240 245;
-  --rgb-card-elevated: 244 246 250;
-  --rgb-accent: 0 90 170;
-  --rgb-accent-hover: 0 75 140;
-  --rgb-text: 28 30 38;
-  --rgb-text-secondary: 95 99 112;
-  --rgb-text-muted: 148 152 165;
-  --rgb-sidebar: 222 225 231;
-  --rgb-border: 210 214 222;
-  --rgb-border-strong: 192 197 207;
+  /* Light theme. Cards read as cards by being LIGHTER than the canvas, so the
+     canvas is tinted down and cards go near-white. Must stay numerically equal
+     to LIGHT_THEME in src/main/themeManager.ts — these are the values painted on
+     the first frame, before the theme IPC round-trip lands, and any drift shows
+     up as a colour flash at startup. */
+  --rgb-bg: 230 233 240;
+  --rgb-sidebar: 221 225 235;
+  --rgb-card: 251 252 254;
+  --rgb-card-elevated: 255 255 255;
+  --rgb-accent: 0 96 192;
+  --rgb-accent-hover: 0 75 150;
+  --rgb-text: 20 22 28;
+  --rgb-text-secondary: 90 97 111;
+  --rgb-text-muted: 138 145 160;
+  --rgb-border: 206 212 224;
+  --rgb-border-strong: 176 184 200;
   --rgb-success: 30 155 60;
-  --rgb-warning: 210 130 0;
-  --rgb-danger: 200 45 35;
+  --rgb-warning: 184 114 0;
+  --rgb-danger: 198 45 35;
 
   /* CSS-ready aliases */
   --color-bg: rgb(var(--rgb-bg));
@@ -55,16 +59,19 @@
   --radius-lg: 16px;
 
   /* Shared shadow tokens — soft, layered */
-  --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.04), 0 4px 12px rgba(0, 0, 0, 0.05);
-  --shadow-card-hover: 0 2px 6px rgba(0, 0, 0, 0.06), 0 12px 28px rgba(0, 0, 0, 0.08);
-  --shadow-modal: 0 8px 32px rgba(0, 0, 0, 0.1);
-  --shadow-toast: 0 4px 16px rgba(0, 0, 0, 0.08);
-  --shadow-button: 0 1px 0 rgba(255, 255, 255, 0.5) inset, 0 1px 2px rgba(0, 0, 0, 0.06);
-  --shadow-button-hover: 0 1px 0 rgba(255, 255, 255, 0.6) inset, 0 4px 10px rgba(0, 0, 0, 0.1);
+  --shadow-card: 0 1px 2px rgba(15, 23, 42, 0.06), 0 4px 12px rgba(15, 23, 42, 0.07);
+  --shadow-card-hover: 0 2px 6px rgba(15, 23, 42, 0.08), 0 12px 28px rgba(15, 23, 42, 0.11);
+  --shadow-modal: 0 8px 32px rgba(15, 23, 42, 0.16);
+  --shadow-toast: 0 4px 16px rgba(15, 23, 42, 0.12);
+  --shadow-button: 0 1px 0 rgba(255, 255, 255, 0.5) inset, 0 1px 2px rgba(15, 23, 42, 0.08);
+  --shadow-button-hover: 0 1px 0 rgba(255, 255, 255, 0.6) inset, 0 4px 10px rgba(15, 23, 42, 0.12);
 
-  /* Opaque panel surface avoids permanent backdrop compositing. */
-  --glass-bg: rgb(var(--rgb-card) / 0.96);
-  --glass-border: rgb(255 255 255 / 0.6);
+  /* Opaque panel surface avoids permanent backdrop compositing.
+     The border is the theme border token, not a white hairline: on a near-white
+     card a white edge is invisible, which is what left cards looking like plain
+     text blocks in light mode. */
+  --glass-bg: rgb(var(--rgb-card));
+  --glass-border: rgb(var(--rgb-border));
 
   /* Accent glow — lighter in light mode */
   --glow-accent: 0 0 20px rgb(var(--rgb-accent) / 0.15);
@@ -82,17 +89,21 @@
 }
 
 [data-theme="dark"] {
-  --rgb-bg: 13 13 17;
-  --rgb-card: 28 28 34;
-  --rgb-card-elevated: 38 38 46;
+  /* Dark theme. Four distinct surface levels — canvas, nav rail, card, elevated.
+     The rail used to be byte-identical to the canvas in the shipped theme, which
+     is why it had no edge. Must stay numerically equal to DARK_THEME in
+     src/main/themeManager.ts (see the light block above for why). */
+  --rgb-bg: 13 14 18;
+  --rgb-sidebar: 20 21 27;
+  --rgb-card: 31 33 41;
+  --rgb-card-elevated: 42 45 55;
   --rgb-accent: 10 132 255;
-  --rgb-accent-hover: 64 156 255;
-  --rgb-text: 245 245 247;
-  --rgb-text-secondary: 152 152 157;
-  --rgb-text-muted: 99 99 102;
-  --rgb-sidebar: 18 18 22;
-  --rgb-border: 48 48 56;
-  --rgb-border-strong: 64 64 72;
+  --rgb-accent-hover: 78 168 255;
+  --rgb-text: 244 245 248;
+  --rgb-text-secondary: 160 166 180;
+  --rgb-text-muted: 110 116 129;
+  --rgb-border: 54 59 73;
+  --rgb-border-strong: 74 80 99;
   --rgb-success: 48 209 88;
   --rgb-warning: 255 214 10;
   --rgb-danger: 255 69 58;
@@ -104,9 +115,12 @@
   --shadow-button: 0 1px 0 rgba(255, 255, 255, 0.08) inset, 0 1px 2px rgba(0, 0, 0, 0.4);
   --shadow-button-hover: 0 1px 0 rgba(255, 255, 255, 0.12) inset, 0 4px 12px rgba(0, 0, 0, 0.5);
 
-  /* Opaque dark surface keeps panels distinct without a filter layer. */
-  --glass-bg: rgb(var(--rgb-card) / 0.94);
-  --glass-border: rgb(255 255 255 / 0.08);
+  /* Opaque dark surface keeps panels distinct without a filter layer.
+     Dark cards get their edge from the border token plus a 1px inset highlight
+     along the top — on a dark canvas a shadow alone reads as almost nothing,
+     because there is nothing lighter for it to darken. */
+  --glass-bg: rgb(var(--rgb-card));
+  --glass-border: rgb(var(--rgb-border));
 
   /* Accent glow for connected/active states */
   --glow-accent: 0 0 24px rgb(var(--rgb-accent) / 0.35);
@@ -136,8 +150,12 @@
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     text-rendering: optimizeLegibility;
-    /* Inter / SF Pro tabular and stylistic features for cleaner numbers and "i", "l" */
-    font-feature-settings: "cv11", "ss01", "ss03";
+    /* No font-feature-settings here any more. It requested "cv11", "ss01" and
+       "ss03" — stylistic sets that only exist in Inter — while no font file was
+       ever bundled, so `font-sans` resolved to Segoe UI and all three were
+       silently ignored. The stack now names Segoe UI Variable explicitly (see
+       tailwind.config.js); tabular figures come from `.tabular` /
+       `font-variant-numeric` below, which does work on it. */
     font-variant-ligatures: contextual;
   }
 
@@ -207,10 +225,20 @@
     -webkit-app-region: no-drag;
   }
 
-  /* Static panel surface: no backdrop filter on persistent dashboard cards. */
+  /* Static panel surface: no backdrop filter on persistent dashboard cards.
+     Carries the card shadow too — previously `.glass` set only background and
+     border, so every MacCard sat perfectly flat against the canvas and the only
+     thing separating a card from the page was a near-invisible hairline. */
   .glass {
     background: var(--glass-bg, var(--color-card));
-    border: 1px solid var(--glass-border, rgb(255 255 255 / 0.08));
+    border: 1px solid var(--glass-border, var(--color-border));
+    box-shadow: var(--shadow-card);
+  }
+
+  /* On a dark canvas a drop shadow has nothing lighter to darken, so the lift
+     comes from a 1px inset highlight along the top edge instead. */
+  [data-theme="dark"] .glass {
+    box-shadow: var(--shadow-card), inset 0 1px 0 rgb(255 255 255 / 0.04);
   }
 
   /* Accent glow for connected/active VPN states */

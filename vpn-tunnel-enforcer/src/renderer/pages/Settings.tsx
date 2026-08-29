@@ -278,8 +278,13 @@ export function Settings() {
     }
   }
 
+  // Centred rather than left-hugging. The cap stays — settings are text-heavy and
+  // long help paragraphs get unreadable past ~70ch — but left-aligning it in a
+  // maximised window put all the leftover space on the right, which read as a
+  // broken layout rather than a deliberate measure. Same reasoning on the other
+  // capped pages.
   return (
-    <div className="space-y-6 max-w-3xl">
+    <div className="space-y-6 max-w-3xl mx-auto">
       <div>
         <h2 className="text-2xl font-bold text-[var(--color-text)]">{t('settings.title')}</h2>
         <p className="text-sm text-[var(--color-text-secondary)] mt-1">Главные параметры защиты и поведения приложения</p>

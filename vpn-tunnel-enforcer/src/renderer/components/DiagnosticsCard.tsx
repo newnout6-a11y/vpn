@@ -290,6 +290,12 @@ export function DiagnosticsCard() {
         </p>
       </div>
 
+      {/*
+        All four are secondary on purpose. Exporting a support bundle used to be
+        the only `primary` here, which made it the loudest button on the whole
+        dashboard — the page's actual primary action is the connect toggle above,
+        and nothing in a diagnostics card should outrank it.
+      */}
       <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
         <MacButton
           variant="secondary"
@@ -318,7 +324,7 @@ export function DiagnosticsCard() {
           Папка со снимками
         </MacButton>
         <MacButton
-          variant="primary"
+          variant="secondary"
           onClick={handleExport}
           disabled={exporting}
           className="flex items-center justify-center gap-2 text-sm"

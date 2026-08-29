@@ -175,7 +175,10 @@ export function SplitTunnel() {
   }, [cmdName, addLog, t])
 
   return (
-    <div className="space-y-6 max-w-4xl">
+    // Wider than the other capped pages and centred: this one is a table of
+    // installed applications with a three-way control per row, so extra width
+    // goes into the name/path column instead of into empty margin.
+    <div className="space-y-6 max-w-6xl mx-auto">
       {/* Onboarding tip */}
       <PageTip tipKey="splitTunnel">{t('tips.splitTunnel')}</PageTip>
 

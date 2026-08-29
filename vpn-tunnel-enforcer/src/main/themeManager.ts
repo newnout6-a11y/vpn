@@ -14,6 +14,22 @@ import Store from 'electron-store'
 import type { ThemeConfig } from '../shared/ipc-types'
 
 // ─── Built-in Themes ─────────────────────────────────────────────────────────
+//
+// SURFACE LADDER. The previous palettes were flat: dark shipped background
+// #1c1c1e with sidebar #1c1c1e — byte-identical, so the nav rail had no edge at
+// all — and cardBackground #2c2c2e, 16 levels up, with no elevated level defined
+// anywhere. Light was similar: #f5f5f7 canvas under #ffffff cards.
+//
+// Both ladders below keep a deliberate, visible step between every level, and
+// the sidebar is its own level rather than a copy of the canvas:
+//
+//   dark:   background → sidebar → card → cardElevated   (each step ~+7..+12)
+//   light:  background → sidebar (darker) → card (near-white) → cardElevated
+//
+// Light inverts the direction on purpose: on a light canvas, cards read as cards
+// by being LIGHTER than their surroundings, so the canvas is tinted down and the
+// card goes to near-white. Commit 40d9063 already pushed the light canvas darker
+// for this reason; this continues it rather than reverting it.
 
 const LIGHT_THEME: ThemeConfig = {
   id: 'builtin-light',
@@ -21,13 +37,19 @@ const LIGHT_THEME: ThemeConfig = {
   mode: 'light',
   isCustom: false,
   colors: {
-    background: '#f5f5f7',
-    cardBackground: '#ffffff',
-    accent: '#007aff',
-    text: '#1d1d1f',
-    textSecondary: '#86868b',
-    sidebar: '#f0f0f2',
-    border: '#e5e5ea'
+    background: '#e6e9f0',
+    sidebar: '#dde1eb',
+    cardBackground: '#fbfcfe',
+    cardElevated: '#ffffff',
+    accent: '#0060c0',
+    text: '#14161c',
+    textSecondary: '#5a616f',
+    textMuted: '#8a91a0',
+    border: '#ced4e0',
+    borderStrong: '#b0b8c8',
+    success: '#1e9b3c',
+    warning: '#b87200',
+    danger: '#c62d23'
   }
 }
 
@@ -37,13 +59,19 @@ const DARK_THEME: ThemeConfig = {
   mode: 'dark',
   isCustom: false,
   colors: {
-    background: '#1c1c1e',
-    cardBackground: '#2c2c2e',
+    background: '#0d0e12',
+    sidebar: '#14151b',
+    cardBackground: '#1f2129',
+    cardElevated: '#2a2d37',
     accent: '#0a84ff',
-    text: '#f5f5f7',
-    textSecondary: '#98989d',
-    sidebar: '#1c1c1e',
-    border: '#38383a'
+    text: '#f4f5f8',
+    textSecondary: '#a0a6b4',
+    textMuted: '#6e7481',
+    border: '#363b49',
+    borderStrong: '#4a5063',
+    success: '#30d158',
+    warning: '#ffd60a',
+    danger: '#ff453a'
   }
 }
 
@@ -72,6 +100,39 @@ const themeStore = new Store<ThemeStoreSchema>({
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+/**
+ * Fill in palette levels a stored theme predates.
+ *
+ * Custom themes persisted before the palette was widened carry only the original
+ * seven colours. Returning those as-is would leave `--rgb-card-elevated`,
+ * `--rgb-border-strong`, `--rgb-text-muted` and the state colours unset, and the
+ * renderer would silently fall back to whatever the previous theme had written —
+ * so switching to an old custom theme would inherit half of another palette.
+ * Missing levels borrow from the built-in theme matching the stored mode.
+ */
+function withFullPalette(theme: ThemeConfig): ThemeConfig {
+  const base = theme.mode === 'light' ? LIGHT_THEME.colors : DARK_THEME.colors
+  const stored = (theme.colors ?? {}) as Partial<ThemeConfig['colors']>
+  return {
+    ...theme,
+    colors: {
+      background: stored.background ?? base.background,
+      sidebar: stored.sidebar ?? base.sidebar,
+      cardBackground: stored.cardBackground ?? base.cardBackground,
+      cardElevated: stored.cardElevated ?? base.cardElevated,
+      accent: stored.accent ?? base.accent,
+      text: stored.text ?? base.text,
+      textSecondary: stored.textSecondary ?? base.textSecondary,
+      textMuted: stored.textMuted ?? base.textMuted,
+      border: stored.border ?? base.border,
+      borderStrong: stored.borderStrong ?? base.borderStrong,
+      success: stored.success ?? base.success,
+      warning: stored.warning ?? base.warning,
+      danger: stored.danger ?? base.danger
+    }
+  }
+}
+
 function getBuiltinThemes(): ThemeConfig[] {
   return [LIGHT_THEME, DARK_THEME, getSystemTheme()]
 }
@@ -85,7 +146,7 @@ function getSystemTheme(): ThemeConfig {
 }
 
 function getAllThemes(): ThemeConfig[] {
-  const customThemes = themeStore.get('customThemes') || []
+  const customThemes = (themeStore.get('customThemes') || []).map(withFullPalette)
   return [...getBuiltinThemes(), ...customThemes]
 }
 

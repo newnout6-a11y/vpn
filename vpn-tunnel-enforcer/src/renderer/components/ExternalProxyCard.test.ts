@@ -81,7 +81,9 @@ describe('explicit external proxy assignment', () => {
 
   it('starts exactly one selected server from its row action', () => {
     expect(serversSource).toContain('externalProxyStartProfiles([profile.id])')
-    expect(serversSource).toContain('Запустить этот сервер как внешний прокси')
+    // The action is now a labelled entry in the row's overflow menu rather than
+    // an unlabelled ghost icon whose only description was a title attribute.
+    expect(serversSource).toContain("t('servers.startAsProxy', 'Запустить как внешний прокси')")
   })
 
   it('separates removed subscription servers and excludes them from group proxy starts', () => {
