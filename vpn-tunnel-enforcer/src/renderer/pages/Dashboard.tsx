@@ -702,7 +702,7 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
               <span className="flex items-center gap-1.5 rounded-full bg-[var(--color-success)]/10 px-3 py-1.5 text-[var(--color-success)]">
                 <CheckCircle2 className="w-3.5 h-3.5" />
                 {ipGeo.country && (
-                  <CountryFlagIcon country={ipGeo.country} className="h-4 w-4" />
+                  <CountryFlagIcon country={ipGeo.country} size={16} />
                 )}
                 <span className="font-mono">{publicIp}</span>
                 {ipGeo.country && (

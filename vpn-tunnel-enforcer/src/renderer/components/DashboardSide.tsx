@@ -372,7 +372,7 @@ function QuickServers() {
                             : 'border border-transparent hover:bg-[var(--color-border)]/40'
                         )}
                       >
-                        <CountryFlagIcon country={row.country} name={row.name} className="h-5 w-5" />
+                        <CountryFlagIcon country={row.country} name={row.name} size={20} />
                         <span className="flex-1 min-w-0">
                           <span className="block text-xs font-medium text-[var(--color-text)] truncate">
                             {row.name}
@@ -438,7 +438,7 @@ function QuickServers() {
                         key={row.key}
                         className="flex items-center gap-2 rounded-[var(--radius-sm)] border border-transparent px-2 py-1.5"
                       >
-                        <CountryFlagIcon country={row.country} name={row.name} className="h-5 w-5" />
+                        <CountryFlagIcon country={row.country} name={row.name} size={20} />
                         <span className="min-w-0 flex-1">
                           <span className="block truncate text-xs font-medium text-[var(--color-text-secondary)] line-through decoration-[var(--color-warning)]/60">
                             {row.name}

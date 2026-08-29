@@ -1974,7 +1974,7 @@ function ServerProfileCard({
           dot
           pulse={isSwitching || profile.status === 'online'}
         />
-        <CountryFlagIcon country={country} name={profile.name} className="h-5 w-5" />
+        <CountryFlagIcon country={country} name={profile.name} size={20} />
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-sm font-medium text-[var(--color-text)] truncate">
