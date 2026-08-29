@@ -191,7 +191,14 @@ function normalizeSettings(input: Partial<AppSettings> | undefined): AppSettings
     desktopNotifications: merged.desktopNotifications !== false,
     publicWifiCompatibility: merged.publicWifiCompatibility !== false,
     strictAdapterLockdown: merged.strictAdapterLockdown !== false,
-    deepTrafficInspectionEnabled: merged.deepTrafficInspectionEnabled !== false,
+    // `=== true`, not `!== false`, unlike the flags above. Those all default to
+    // true, so "anything but an explicit false means on" matches their default.
+    // This one defaults to false (see defaults above) and turning it on starts
+    // writing packet captures to disk, so an absent or malformed value must
+    // resolve to OFF. `!== false` only held because `merged` pre-fills from
+    // defaults; an explicit undefined arriving via saveSettings would have
+    // silently enabled forensics.
+    deepTrafficInspectionEnabled: merged.deepTrafficInspectionEnabled === true,
     deepTrafficInspectionMaxSizeMb: Math.min(
       2048,
       Math.max(128, Math.floor(Number(merged.deepTrafficInspectionMaxSizeMb) || defaults.deepTrafficInspectionMaxSizeMb))
