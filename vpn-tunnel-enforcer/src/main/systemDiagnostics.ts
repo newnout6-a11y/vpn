@@ -12,6 +12,7 @@ import { describeVpnProfileCapabilities, redactSensitiveText, redactSettingsForD
 import { getSmartRouteRuleSetState } from './ruleSetManager'
 import { getTrafficForensicsStatus } from './trafficForensics'
 import { getTunRuntimeDir, parseProxyAddress, probeTcp, tunController } from './tunController'
+import { verifyDirectoryHardened } from './runtimeDirSecurity'
 import { TUN_ADAPTER_ALIAS } from './tunAdapter'
 import { getActiveProfile } from './serverPicker'
 import type { ServerProfile } from '../shared/ipc-types'
@@ -257,9 +258,24 @@ async function getBinaryItems(): Promise<SystemDiagnosticItem[]> {
 
   const config = join(getTunRuntimeDir(), 'sing-box.json')
   const log = join(getTunRuntimeDir(), 'sing-box.log')
+  // We launch the staged sing-box elevated, so "who else can write here" is a
+  // security property worth surfacing rather than only logging. A weak DACL
+  // means an unprivileged process running as the same user can swap the binary
+  // or plant a DLL beside it and inherit our administrator rights.
+  const acl = await verifyDirectoryHardened(getTunRuntimeDir())
   return [
     item('binaries', 'TUN', 'Bundled binaries', missing ? 'fail' : 'ok', missing ? 'missing files' : 'present', joinRows(rows, 8)),
-    item('runtime-paths', 'TUN', 'Runtime files', 'info', getTunRuntimeDir(), `config=${config} | log=${log}`)
+    item('runtime-paths', 'TUN', 'Runtime files', 'info', getTunRuntimeDir(), `config=${config} | log=${log}`),
+    item(
+      'runtime-acl',
+      'TUN',
+      'Runtime directory permissions',
+      acl.hardened ? 'ok' : 'warn',
+      acl.hardened ? 'только администраторы' : 'доступен на запись пользователю',
+      [acl.message, acl.owner ? `owner=${acl.owner}` : null, ...(acl.offenders ?? [])]
+        .filter(Boolean)
+        .join(' | ')
+    )
   ]
 }
 

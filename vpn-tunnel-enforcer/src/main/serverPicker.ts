@@ -976,16 +976,45 @@ function currentBootstrapRoutes(): BootstrapRouteAttempt[] {
   }
 }
 
+/**
+ * Every geo lookup carries the IP addresses of the user's own VPN servers,
+ * so the request itself is sensitive metadata: on the wire it is a plaintext
+ * list of exactly the endpoints this user relies on. For an app built around
+ * evading DPI that is the one request we must never send unencrypted — the
+ * observer we are hiding from is on that path. Hard-fail anything that is not
+ * `https:` instead of trusting call sites to get the scheme right.
+ */
+export function isHttpsGeoUrl(url: string): boolean {
+  try {
+    return new URL(url).protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
 async function fetchGeoJson<T>(
   url: string,
   options: { method?: 'GET' | 'POST'; body?: unknown; headers?: string[]; timeoutSeconds?: number } = {}
 ): Promise<{ data: T; route: string } | null> {
+  if (!isHttpsGeoUrl(url)) {
+    logEvent('warn', 'server-picker', 'refused non-HTTPS geo lookup', {
+      url: url.replace(/\?.*/, '?...')
+    })
+    return null
+  }
   const errors: string[] = []
   const method = options.method ?? 'GET'
   for (const route of currentBootstrapRoutes()) {
     const args = [
       '-sS',
       '--fail',
+      // Belt-and-braces with isHttpsGeoUrl above: refuse the request at the
+      // curl level too if anything but https is ever reached, redirects
+      // included (we don't pass -L, but the flags cost nothing).
+      '--proto',
+      '=https',
+      '--proto-redir',
+      '=https',
       '--max-time',
       String(options.timeoutSeconds ?? 8),
       ...route.curlArgs,
@@ -1084,17 +1113,22 @@ async function fetchSecondaryGeoVote(ip: string, source: 'ipwho.is' | 'ipinfo.is
 }
 
 /**
- * Bulk-geolocate IPs via ip-api.com's batch endpoint: up to 100 IPs per
- * POST, free, no API key, 45 requests/min. This replaces the previous
- * per-IP ipapi.co loop, which fired 3 concurrent requests against a "~1
- * req/sec" free tier and got rate-limited (429) on any sizeable
- * subscription — leaving most country labels empty. Two batch POSTs now
- * cover 200 servers.
+ * Bulk-geolocate IPs via geojs.io's country endpoint: comma-separated `ip`
+ * query parameter, up to 100 IPs per request, free, no API key, and — the
+ * reason we use it — **HTTPS**.
  *
- * ip-api.com is HTTP-only on the free tier (HTTPS is paid). That is
- * acceptable here: the request carries only public server IPs (no user
- * data, no secrets) and the response is advisory UI metadata. Returns a
- * Map ip→country (missing = lookup failed / private IP).
+ * HISTORY / WHY NOT ip-api.com: this used to POST to
+ * `http://ip-api.com/batch`, because ip-api's free tier is HTTP-only (HTTPS
+ * is a paid plan). The old comment argued that was acceptable since the
+ * request "carries only public server IPs, no secrets". That reasoning was
+ * wrong for this application: the request body was a plaintext list of every
+ * VPN endpoint the user owns, sent across the exact network path we are
+ * trying to hide from. For a DPI-evasion tool, leaking the full server
+ * inventory in the clear inverts the whole threat model — the observer
+ * learns more from one geo lookup than from watching the tunnel itself.
+ * geojs gives the same data over TLS, so there is no tradeoff to make.
+ *
+ * Returns a Map ip→country (missing = lookup failed / private IP).
  */
 async function batchGeolocateIps(ips: string[]): Promise<Map<string, string>> {
   const out = new Map<string, string>()
@@ -1107,24 +1141,24 @@ async function batchGeolocateIps(ips: string[]): Promise<Map<string, string>> {
   for (let i = 0; i < unique.length; i += CHUNK) {
     const chunk = unique.slice(i, i + CHUNK)
     try {
-      // `fields` trims the response to just what we need. `query` echoes the
-      // IP back so we can map results to inputs regardless of order.
-      const resp = await fetchGeoJson<any[]>(
-        'http://ip-api.com/batch?fields=status,country,countryCode,query',
-        { method: 'POST', body: chunk, timeoutSeconds: 10, headers: ['Content-Type: application/json'] }
-      )
+      // `ip=a,b,c` returns an array of {ip, country, country_3, name}. The
+      // echoed `ip` maps results back to inputs regardless of order; an
+      // unknown address comes back with empty strings, which addGeoVote drops.
+      const url = new URL('https://get.geojs.io/v1/ip/country.json')
+      url.searchParams.set('ip', chunk.join(','))
+      const resp = await fetchGeoJson<any[]>(url.toString(), { timeoutSeconds: 10 })
       const rows = Array.isArray(resp?.data) ? resp.data : []
       for (const row of rows) {
-        if (row && row.status === 'success' && row.query) {
-          const votes = votesByIp.get(String(row.query))
-          if (votes) addGeoVote(votes, 'ip-api.com', row.country, row.countryCode)
+        if (row && row.ip) {
+          const votes = votesByIp.get(String(row.ip))
+          if (votes) addGeoVote(votes, 'geojs.io', row.name, row.country)
         }
       }
     } catch (err) {
       logEvent('debug', 'server-picker', 'batch geolocate chunk failed', { size: chunk.length, err: (err as Error)?.message })
       // Leave this chunk's countries empty — the next pass retries.
     }
-    // Stay well under 45 req/min even with many chunks.
+    // Be a polite client of a free service even with many chunks.
     if (i + CHUNK < unique.length) await new Promise(r => setTimeout(r, 1500))
   }
 
@@ -1260,7 +1294,7 @@ export function setProfileClientDevice(id: string, device: ClientDevice): Server
  * immediately.
  *
  * Pipeline: resolve all pending hostnames → IPs (parallel, local DNS) →
- * one ip-api.com/batch POST per 100 IPs → write countries back in a single
+ * one geojs.io batch GET per 100 IPs → write countries back in a single
  * store update. Far fewer network calls than the old per-IP loop and no
  * free-tier rate-limit dance.
  *
@@ -1824,12 +1858,13 @@ async function restartDirectVpnForSelectedProfile(profile: ServerProfile): Promi
     protocol: profile.protocol
   })
 
-  const stopped = await tunController.stop()
-  if (!stopped.success) {
-    throw new Error(stopped.error || 'Failed to stop tunnel before server switch')
-  }
-  await wait(500)
-  const started = await tunController.start({
+  // Protected swap: the firewall kill-switch, network baseline and adapter
+  // lockdown stay applied across the stop→start pair. A plain stop() would roll
+  // all three back and rebuild them, leaving seconds of unprotected egress on
+  // every single server switch. restartProtected() also guarantees a full
+  // rollback if the new server fails to come up, so we can't strand the user
+  // behind a kill-switch with no tunnel.
+  const restarted = await tunController.restartProtected('server switch', {
     mode: 'directVpn',
     vpnProfile,
     proxyType: 'socks5',
@@ -1839,8 +1874,8 @@ async function restartDirectVpnForSelectedProfile(profile: ServerProfile): Promi
     stealthMode: settings.stealthMode,
     adaptiveMode: adaptive.mode
   })
-  if (!started.success) {
-    throw new Error(started.error || 'Failed to start tunnel with selected server')
+  if (!restarted.success) {
+    throw new Error(restarted.error || 'Failed to start tunnel with selected server')
   }
 
   ipMonitor.resume()

@@ -83,7 +83,7 @@ export async function exportDiagnosticsZip(): Promise<ExportResult> {
   // Ask the user where to drop the zip.
   const defaultName = `vpn-tunnel-enforcer-diagnostics-${new Date().toISOString().replace(/[:.]/g, '-')}.zip`
   const choice = await dialog.showSaveDialog({
-    title: 'РЎРѕС…СЂР°РЅРёС‚СЊ РґРёР°РіРЅРѕСЃС‚РёРєСѓ',
+    title: 'Сохранить диагностику',
     defaultPath: join(app.getPath('desktop'), defaultName),
     filters: [{ name: 'ZIP archive', extensions: ['zip'] }]
   })
@@ -198,8 +198,9 @@ export async function exportDiagnosticsZip(): Promise<ExportResult> {
       }
     }
 
+    let forensicsStaged = false
     try {
-      await stageTrafficForensicsArtifacts(stage)
+      forensicsStaged = await stageTrafficForensicsArtifacts(stage)
     } catch (err) {
       logEvent('warn', 'diag-export', 'failed to stage traffic forensics artifacts', { err: (err as Error)?.message })
     }
@@ -212,39 +213,13 @@ export async function exportDiagnosticsZip(): Promise<ExportResult> {
     }
 
     // 7. README so the user/support knows what's inside.
-    const readme = `Р”РёР°РіРЅРѕСЃС‚РёРєР° VPN Tunnel Enforcer
-РЎРѕР·РґР°РЅРѕ: ${new Date().toISOString()}
-
-РЎРѕРґРµСЂР¶РёРјРѕРµ:
-  settings.json                     - С‚РµРєСѓС‰РёРµ РЅР°СЃС‚СЂРѕР№РєРё РїСЂРёР»РѕР¶РµРЅРёСЏ
-  app-log.json                      - РїРѕСЃР»РµРґРЅРёРµ Р·Р°РїРёСЃРё Р»РѕРіР° РїСЂРёР»РѕР¶РµРЅРёСЏ
-  system-info.json                  - РІРµСЂСЃРёСЏ Windows, РїР°РјСЏС‚СЊ, CPU
-  system-diagnostics.json           - СЃРЅРёРјРѕРє РјР°СЂС€СЂСѓС‚РѕРІ, ipconfig, netsh Рё РёС‚РѕРіРѕРІР°СЏ СЃРІРѕРґРєР° РїСЂРѕРІРµСЂРѕРє
-  runtime-*.json/log                - РєРѕРЅС„РёРі Рё Р»РѕРіРё sing-box
-  baseline-manifest.json            - РєР°РєРёРµ proxy-РЅР°СЃС‚СЂРѕР№РєРё Windows Р±С‹Р»Рё РёР·РјРµРЅРµРЅС‹
-  killswitch-manifest.json          - РєР°РєРёРµ РїСЂР°РІРёР»Р° Windows Firewall Р±С‹Р»Рё РїСЂРёРјРµРЅРµРЅС‹
-  adapter-lockdown-manifest.json    - РєР°РєРёРµ РёР·РјРµРЅРµРЅРёСЏ РІРЅРѕСЃРёР»РёСЃСЊ РІ С„РёР·РёС‡РµСЃРєРёРµ Р°РґР°РїС‚РµСЂС‹ (IPv6/DNS)
-  snapshots/                        - СЃРЅРёРјРєРё СЃРѕСЃС‚РѕСЏРЅРёСЏ СЃРµС‚Рё Рё СЃРёСЃС‚РµРјС‹ РЅР° РєР»СЋС‡РµРІС‹С… СЌС‚Р°РїР°С… СЂР°Р±РѕС‚С‹ РїСЂРёР»РѕР¶РµРЅРёСЏ
-  traffic-forensics/                - РіР»СѓР±РѕРєР°СЏ packet-level С‚СЂР°СЃСЃР°: ETL/PCAP/TXT, СЃС‡С‘С‚С‡РёРєРё pktmon,
-                                      РїСЂРёС‡РёРЅС‹ drop/reset, WFP netevents/state, manifest РїРѕ СЃРµСЃСЃРёСЏРј
-                                      Рё РЅРѕСЂРјР°Р»РёР·РѕРІР°РЅРЅР°СЏ СЃРІРѕРґРєР° summary.json/timeline.ndjson
-  traffic-forensics/*/summary.json  - evidence-linked РІС‹РІРѕРґС‹: TUN path, WFP/firewall block,
-                                      DNS/TCP/drop СЃРёРіРЅР°Р»С‹ Рё СѓСЂРѕРІРµРЅСЊ РґРѕСЃС‚Р°С‚РѕС‡РЅРѕСЃС‚Рё РґРѕРєР°Р·Р°С‚РµР»СЊСЃС‚РІ
-  traffic-forensics/*/*.ndjson      - timeline, dns, drops, tcp-health, packet-metrics, flows, app-events РґР»СЏ РєРѕСЂСЂРµР»СЏС†РёРё
-  traffic-forensics/*/events.ndjson - optional ETW sidecar input: TCPIP/DNS/WFP/Winsock/WebIO normalized events
-
-traffic-forensics РѕСЃРѕР±РµРЅРЅРѕ РїРѕР»РµР·РµРЅ РґР»СЏ СЂР°Р·Р±РѕСЂР°:
-  - ERR_CONNECTION_CLOSED / reset / timeout РІРЅРµ РїСЂРёР»РѕР¶РµРЅРёСЏ
-  - РґРѕР»РіРёС… Р·Р°РіСЂСѓР·РѕРє Рё Р·Р°РІРёСЃР°СЋС‰РёС… СЃР°Р№С‚РѕРІ
-  - РІРЅРµС€РЅРµР№ С„РёР»СЊС‚СЂР°С†РёРё, РѕР±СЂС‹РІРѕРІ РїРѕ РїСѓС‚Рё Рё СЃРїРѕСЂРЅС‹С… РїСЂРѕР±Р»РµРј Windows-СЃРµС‚Рё
-
-Р’Р°Р¶РЅРѕ: raw ETL/PCAP/TXT РјРѕРіСѓС‚ СЃРѕРґРµСЂР¶Р°С‚СЊ С‡СѓРІСЃС‚РІРёС‚РµР»СЊРЅС‹Р№ СЃРµС‚РµРІРѕР№ С‚СЂР°С„РёРє.
-
-РђСЂС…РёРІ РїРѕРґРіРѕС‚РѕРІР»РµРЅ РґР»СЏ РѕС‚РїСЂР°РІРєРё РІ РїРѕРґРґРµСЂР¶РєСѓ РёР»Рё РґР»СЏ РїРѕРІС‚РѕСЂРЅРѕРіРѕ СЂР°Р·Р±РѕСЂР° РїРѕР·Р¶Рµ.
-`
-    await writeFile(join(stage, 'README.txt'), readme, 'utf-8')
-
-    const cleanReadme = `Диагностика VPN Tunnel Enforcer
+    //
+    // There used to be two READMEs here: this one, and a second that overwrote
+    // it a few lines later. The first was written with Russian text that had
+    // been through a UTF-8/Windows-1251 round-trip and was committed in that
+    // mangled state, so the overwrite was the only reason users saw readable
+    // text at all. One README, correctly encoded.
+    const readme = `Диагностика VPN Tunnel Enforcer
 Создано: ${new Date().toISOString()}
 
 Содержимое:
@@ -259,28 +234,57 @@ traffic-forensics РѕСЃРѕР±РµРЅРЅРѕ РїРѕР»РµР·РµРЅ 
   adapter-lockdown-manifest.json    - изменения физических адаптеров (IPv6/DNS)
   snapshots/                        - снимки состояния сети и системы
   traffic-forensics/                - packet/WFP/DNS/TCP артефакты для глубокого разбора
+  traffic-forensics/REDACTION.txt   - как именно псевдонимизированы эти артефакты
 
-Важно: raw ETL/PCAP/TXT могут содержать чувствительный сетевой трафик.
+Про traffic-forensics:
+  Адреса и домены заменены на устойчивые токены (<ip-public-1>, <domain-2>.ru
+  и т.п.), одинаковые во всех файлах архива. Связки DNS → соединение → reset →
+  drop разбираются как раньше, сами адреса в архив не попадают. Подробности —
+  в traffic-forensics/REDACTION.txt.
+
+  Raw-захваты пакетов (*.etl, *.pcapng, pktmon-trace.txt) в архив НЕ включены:
+  они содержат payload целиком. Путь к ним локально есть в логе приложения —
+  если поддержка попросит именно их, их нужно приложить осознанно.
+
+Что в архиве всё равно остаётся:
+  Имя компьютера, версия ОС, состав адаптеров, названия интерфейсов и структура
+  маршрутов — этого требует разбор сетевых проблем.
+
 Архив подготовлен для поддержки или повторного локального разбора.
 `
+    await writeFile(join(stage, 'README.txt'), readme, 'utf-8')
+
     const topLevelFiles = await readdir(stage).catch(() => [])
     const diagnosticsManifest = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       createdAt: new Date().toISOString(),
       appVersion: app.getVersion(),
       electronVersion: process.versions.electron,
       nodeVersion: process.versions.node,
       platform: process.platform,
       arch: process.arch,
+      // Describe what is ACTUALLY done, per artifact class. The previous version
+      // listed three lines about settings/runtime/logs and said nothing about
+      // traffic-forensics, which at the time was copied verbatim — so a reader
+      // reasonably concluded the whole bundle was scrubbed when the most
+      // sensitive part of it was not.
       redaction: {
         settings: 'subscriptions, profile links and known secrets are redacted',
         runtimeJson: 'runtime JSON is parsed and sensitive values are redacted',
-        logs: 'text logs are redacted with the same sensitive-pattern scrubber'
+        logs: 'text logs are redacted with the same sensitive-pattern scrubber',
+        snapshots: 'snapshot JSON goes through the same sensitive-value redaction as runtime JSON',
+        trafficForensics: forensicsStaged
+          ? 'IPs, IPv6, MACs and hostnames are replaced with stable per-export pseudonyms; ' +
+            'address class (public/private) and public suffix are preserved so leak and ' +
+            'split-routing analysis still work. See traffic-forensics/REDACTION.txt'
+          : 'not included in this bundle',
+        rawPacketCaptures: 'excluded entirely (*.etl, *.pcapng, pktmon-trace.txt) — payloads cannot be redacted',
+        notRedacted: 'hostname, OS build, adapter names/aliases and route structure are kept — ' +
+          'network diagnosis is not possible without them'
       },
       topLevelFiles: topLevelFiles.sort()
     }
     await writeFile(join(stage, 'diagnostics-manifest.json'), JSON.stringify(diagnosticsManifest, null, 2), 'utf-8')
-    await writeFile(join(stage, 'README.txt'), cleanReadme, 'utf-8')
 
     const compressScript = `
 $ErrorActionPreference='Stop'

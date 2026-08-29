@@ -1,12 +1,19 @@
 import { app } from 'electron'
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process'
 import { existsSync } from 'fs'
-import { appendFile, cp, mkdir, readdir, readFile, rm, writeFile } from 'fs/promises'
+import { appendFile, mkdir, readdir, readFile, rm, writeFile } from 'fs/promises'
 import { release as osRelease, type as osType, version as osVersion } from 'os'
 import { basename, dirname, join } from 'path'
 import { execElevated } from './admin'
 import { logEvent } from './appLogger'
 import { settingsStore } from './settings'
+import { ensureElevatedRuntimeDirHardened } from './runtimeDirSecurity'
+import {
+  createForensicsRedactor,
+  redactJsonDocument,
+  redactNdjson,
+  type ForensicsRedactor
+} from './forensicsRedaction'
 import {
   MANIFEST_SCHEMA_VERSION,
   generateTrafficForensicsSummary,
@@ -264,6 +271,21 @@ function normalizeManifest(manifest: SessionManifest): SessionManifest {
 
 async function ensureLayout(): Promise<void> {
   await mkdir(getSessionsDir(), { recursive: true })
+  // We write .ps1 scripts into the session directories and immediately run them
+  // elevated (`-File`). Under the default %APPDATA% ACL the interactive user has
+  // Full Control, so an unprivileged process running as the same user could
+  // rewrite the script between our write and the elevated exec — a write→exec
+  // TOCTOU that yields code execution as administrator. Locking the forensics
+  // root to SYSTEM + Administrators closes it, and the session directories
+  // inherit that DACL.
+  const acl = await ensureElevatedRuntimeDirHardened(getRootDir(), 'traffic-forensics')
+  if (!acl.hardened && !acl.skipped) {
+    logEvent('warn', 'traffic-forensics', 'forensics directory is not admin-only — elevated script could be tampered with', {
+      dir: getRootDir(),
+      reason: acl.message,
+      offenders: acl.offenders ?? []
+    })
+  }
 }
 
 async function writeJson(path: string, value: unknown): Promise<void> {
@@ -1221,26 +1243,61 @@ export async function getTrafficForensicsStatus(): Promise<TrafficForensicsStatu
   }
 }
 
-async function copyDirBestEffort(src: string, dest: string): Promise<void> {
-  const SKIP_FOR_EXPORT = /\.(etl|pcapng)(\.tmp)?$|^pktmon-trace\.txt$/i
+/**
+ * Files that must never leave the machine, regardless of redaction.
+ *
+ * Raw packet captures contain full payloads — TLS records, unencrypted HTTP,
+ * anything the NIC saw. There is no meaningful way to scrub a binary ETL or a
+ * pcapng, and `pktmon-trace.txt` is just a textual rendering of the same bytes.
+ * They stay local: `%APPDATA%\...\traffic-forensics\sessions\<id>\` is in the
+ * log, so a user who genuinely needs to hand a capture to support can do it
+ * deliberately rather than by accident.
+ */
+const NEVER_EXPORT = /\.(etl|pcapng)(\.tmp)?$|^pktmon-trace\.txt$/i
+
+/**
+ * Text and JSON artifacts are pseudonymized rather than dropped. The extension
+ * decides how to parse them; anything unrecognized falls back to plain-text
+ * redaction, so a new artifact type added later is scrubbed by default instead
+ * of being exported raw.
+ */
+function redactArtifactBody(name: string, body: string, redactor: ForensicsRedactor): string {
+  if (/\.ndjson$/i.test(name)) return redactNdjson(body, redactor)
+  if (/\.json$/i.test(name)) return redactJsonDocument(body, redactor)
+  return redactor.redactText(body)
+}
+
+async function copyDirRedacted(src: string, dest: string, redactor: ForensicsRedactor): Promise<void> {
   await mkdir(dest, { recursive: true })
   const entries = await readdir(src, { withFileTypes: true })
   for (const entry of entries) {
     const srcPath = join(src, entry.name)
     const destPath = join(dest, entry.name)
     if (entry.isDirectory()) {
-      await copyDirBestEffort(srcPath, destPath).catch((err: any) => {
+      await copyDirRedacted(srcPath, destPath, redactor).catch((err: any) => {
         logEvent('warn', 'traffic-forensics', `failed to stage directory: ${entry.name}`, {
           error: err?.message || String(err)
         })
       })
-    } else {
-      if (SKIP_FOR_EXPORT.test(entry.name)) continue
-      await cp(srcPath, destPath, { force: true }).catch((err: any) => {
-        logEvent('warn', 'traffic-forensics', `failed to stage file: ${entry.name}`, {
-          error: err?.message || String(err)
-        })
+      continue
+    }
+    if (NEVER_EXPORT.test(entry.name)) continue
+    try {
+      const body = await readFile(srcPath, 'utf-8')
+      await writeFile(destPath, redactArtifactBody(entry.name, body, redactor), 'utf-8')
+    } catch (err: any) {
+      // A file we cannot read as text is a file we cannot redact. Never fall
+      // back to copying it — that is exactly the bug this replaces. Leave a
+      // marker so support knows something was present and why it is absent.
+      logEvent('warn', 'traffic-forensics', `failed to stage file, excluded from export: ${entry.name}`, {
+        error: err?.message || String(err)
       })
+      await writeFile(
+        `${destPath}.excluded.txt`,
+        `Артефакт ${entry.name} не включён в архив: не удалось прочитать и отредактировать как текст.\n` +
+        `Причина: ${err?.message || String(err)}\n`,
+        'utf-8'
+      ).catch(() => undefined)
     }
   }
 }
@@ -1267,22 +1324,69 @@ export async function stageTrafficForensicsArtifacts(stageDir: string): Promise<
   }
   const exportRoot = join(stageDir, 'traffic-forensics')
   await mkdir(exportRoot, { recursive: true })
+
+  // ONE redactor for the whole export: token assignment must be stable across
+  // files or the cross-artifact correlation that makes forensics useful (this
+  // DNS answer → that flow → that reset) is destroyed.
+  const redactor = createForensicsRedactor()
+
   const latestManifest = getLatestManifestPath()
   if (existsSync(latestManifest)) {
-    await cp(latestManifest, join(exportRoot, 'latest-session.json'), { force: true }).catch((err: any) => {
+    try {
+      const body = await readFile(latestManifest, 'utf-8')
+      await writeFile(
+        join(exportRoot, 'latest-session.json'),
+        redactJsonDocument(body, redactor),
+        'utf-8'
+      )
+    } catch (err: any) {
       logEvent('warn', 'traffic-forensics', 'failed to stage latest-session.json', {
         error: err?.message || String(err)
       })
-    })
+    }
   }
   if (manifest?.sessionDir && existsSync(manifest.sessionDir)) {
     const sessionName = manifest.sessionId || basename(manifest.sessionDir)
-    await copyDirBestEffort(manifest.sessionDir, join(exportRoot, 'sessions', sessionName)).catch((err: any) => {
+    await copyDirRedacted(manifest.sessionDir, join(exportRoot, 'sessions', sessionName), redactor).catch((err: any) => {
       logEvent('warn', 'traffic-forensics', 'failed to stage current traffic forensics session', {
         sessionId: manifest.sessionId,
         error: err?.message || String(err)
       })
     })
   }
+
+  // Tell the reader what was done, in the bundle itself. Without this the
+  // pseudonym tokens look like corruption rather than a deliberate policy.
+  const counts = redactor.stats()
+  await writeFile(
+    join(exportRoot, 'REDACTION.txt'),
+    `Артефакты traffic-forensics псевдонимизированы.\n\n` +
+    `Каждый уникальный адрес заменён на устойчивый токен, одинаковый во всех файлах архива:\n` +
+    `  <ip-public-N>    - публичный IPv4 (важно для анализа утечек: адрес вне туннеля)\n` +
+    `  <ip-private-N>   - приватный/link-local IPv4\n` +
+    `  <ipv6-public-N>  - публичный IPv6\n` +
+    `  <ipv6-private-N> - приватный IPv6\n` +
+    `  <mac-N>          - MAC-адрес\n` +
+    `  <domain-N>.tld   - домен; публичный суффикс сохранён, чтобы был виден\n` +
+    `                     разбор smart-RU (.ru против остальных)\n` +
+    `  <subN>.          - глубина поддомена\n\n` +
+    `Один и тот же токен = один и тот же адрес. Связки DNS → flow → reset → drop\n` +
+    `сохраняются, сами адреса в архив не попадают. Таблица соответствия нигде не\n` +
+    `сохраняется и существует только в памяти во время экспорта.\n\n` +
+    `Не сохранены как есть: loopback (127.0.0.0/8, ::1) и адреса собственного\n` +
+    `TUN-интерфейса — это константы из исходников приложения, без них не читается\n` +
+    `вывод про tunPathConfirmed.\n\n` +
+    `НЕ включены в архив вообще: raw-захваты пакетов (*.etl, *.pcapng,\n` +
+    `pktmon-trace.txt). Они содержат payload целиком и не поддаются редактированию.\n` +
+    `Локальный путь к ним есть в логе приложения.\n\n` +
+    `Заменено уникальных значений: IPv4=${counts.ipv4}, IPv6=${counts.ipv6}, ` +
+    `MAC=${counts.mac}, доменов=${counts.hosts}\n`,
+    'utf-8'
+  ).catch(() => undefined)
+
+  logEvent('info', 'traffic-forensics', 'staged pseudonymized forensics artifacts', {
+    sessionId: manifest?.sessionId ?? null,
+    replaced: counts
+  })
   return true
 }

@@ -12,6 +12,10 @@ const selectProfileMock = vi.hoisted(() => vi.fn())
 const smartOfflinePingMock = vi.hoisted(() => vi.fn())
 const tunStopMock = vi.hoisted(() => vi.fn(async () => undefined))
 const tunStartMock = vi.hoisted(() => vi.fn(async () => undefined))
+const tunRestartProtectedMock = vi.hoisted(() =>
+  vi.fn(async (_reason: string, _options: any) => ({ success: true }) as { success: boolean; error?: string })
+)
+const notifyMock = vi.hoisted(() => vi.fn(async () => undefined))
 const settingsGetMock = vi.hoisted(() => vi.fn(() => ({
   firewallKillSwitch: true,
   publicWifiCompatibility: false,
@@ -54,7 +58,7 @@ vi.mock('electron-store', () => ({
 
 vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
 vi.mock('./ipcLogging', () => ({ compactForIpcLog: (args: any[]) => args }))
-vi.mock('./notifications', () => ({ notify: vi.fn(async () => undefined) }))
+vi.mock('./notifications', () => ({ notify: notifyMock }))
 vi.mock('./settings', () => ({ settingsStore: { get: settingsGetMock } }))
 vi.mock('./serverPicker', () => ({
   smartOfflinePing: smartOfflinePingMock,
@@ -67,7 +71,8 @@ vi.mock('./tunController', () => ({
   tunController: {
     getStatus: () => ({ running: tunnelRunning }),
     stop: tunStopMock,
-    start: tunStartMock
+    start: tunStartMock,
+    restartProtected: tunRestartProtectedMock
   }
 }))
 
@@ -190,6 +195,9 @@ describe('profile rotation IPC', () => {
     smartOfflinePingMock.mockReset()
     tunStopMock.mockClear()
     tunStartMock.mockClear()
+    tunRestartProtectedMock.mockClear()
+    tunRestartProtectedMock.mockResolvedValue({ success: true })
+    notifyMock.mockClear()
     settingsGetMock.mockClear()
     serverProfiles.length = 0
     tunnelRunning = false
@@ -244,19 +252,26 @@ describe('profile rotation IPC', () => {
       profileId: 'profile-b',
       profileName: 'Profile B'
     })
-    expect(tunStopMock).toHaveBeenCalledTimes(1)
-    expect(tunStartMock).toHaveBeenCalledWith(expect.objectContaining({
-      mode: 'directVpn',
-      enableFirewallKillSwitch: true,
-      enableAdapterLockdown: true,
-      publicWifiCompatibility: false,
-      stealthMode: true,
-      vpnProfile: {
-        name: 'Profile B',
-        protocol: 'vless',
-        outbound: { type: 'vless', server: '198.51.100.2', server_port: 443 }
-      }
-    }))
+    expect(tunStopMock).not.toHaveBeenCalled()
+    expect(tunStartMock).not.toHaveBeenCalled()
+    // Rotation must not tear the kill-switch down between servers — it goes
+    // through the protected restart path instead of a bare stop()/start() pair.
+    expect(tunRestartProtectedMock).toHaveBeenCalledTimes(1)
+    expect(tunRestartProtectedMock).toHaveBeenCalledWith(
+      expect.stringContaining('profile rotation'),
+      expect.objectContaining({
+        mode: 'directVpn',
+        enableFirewallKillSwitch: true,
+        enableAdapterLockdown: true,
+        publicWifiCompatibility: false,
+        stealthMode: true,
+        vpnProfile: {
+          name: 'Profile B',
+          protocol: 'vless',
+          outbound: { type: 'vless', server: '198.51.100.2', server_port: 443 }
+        }
+      })
+    )
     expect(storeData.get('rotation')).toMatchObject({
       currentIndex: 1,
       nextRotationAt: expect.any(Number)
@@ -358,8 +373,62 @@ describe('profile rotation IPC', () => {
 
     expect(result).toEqual({ success: true, newProfile: 'profile-c' })
     expect(selectProfileMock).toHaveBeenCalledWith('profile-c')
-    expect(tunStartMock).toHaveBeenCalledWith(expect.objectContaining({
-      vpnProfile: expect.objectContaining({ name: 'Profile C' })
-    }))
+    expect(tunRestartProtectedMock).toHaveBeenCalledWith(
+      expect.stringContaining('profile rotation'),
+      expect.objectContaining({
+        vpnProfile: expect.objectContaining({ name: 'Profile C' })
+      })
+    )
+  })
+
+  it('reports a failed reconnect instead of silently leaving the tunnel down', async () => {
+    // Regression: stop() and start() were each wrapped in a .catch() that only
+    // wrote a warn log. A rotated key that failed to come up left the user with
+    // no tunnel, no kill-switch, and a "rotation succeeded" result.
+    vi.useFakeTimers()
+    tunnelRunning = true
+    tunRestartProtectedMock.mockResolvedValue({ success: false, error: 'handshake timeout' })
+    serverProfiles.push(
+      {
+        id: 'profile-a',
+        name: 'Profile A',
+        protocol: 'vless',
+        server: '198.51.100.1',
+        port: 443,
+        status: 'online',
+        outbound: { type: 'vless', server: '198.51.100.1', server_port: 443 }
+      },
+      {
+        id: 'profile-b',
+        name: 'Profile B',
+        protocol: 'vless',
+        server: '198.51.100.2',
+        port: 443,
+        status: 'online',
+        outbound: { type: 'vless', server: '198.51.100.2', server_port: 443 }
+      }
+    )
+    storeData.set('rotation', {
+      enabled: true,
+      intervalMinutes: 30,
+      order: 'sequential',
+      profileIds: ['profile-a', 'profile-b'],
+      currentIndex: 0,
+      nextRotationAt: null
+    } satisfies RotationConfig)
+
+    profileRotation.registerHandlers()
+    const result = await ipcHandlers.get('rotation:rotate-now')!({})
+
+    expect(result).toEqual({ success: false, newProfile: 'profile-b' })
+    // The user must be told: their traffic is no longer tunnelled.
+    expect(notifyMock).toHaveBeenCalledWith(
+      'error',
+      expect.stringContaining('Ротация'),
+      expect.stringContaining('handshake timeout'),
+      'connectionError'
+    )
+    // A failure must not disable the schedule — the next tick should retry.
+    expect(storeData.get('rotation')).toMatchObject({ nextRotationAt: expect.any(Number) })
   })
 })

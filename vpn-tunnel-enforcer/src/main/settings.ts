@@ -54,7 +54,7 @@ export interface AppSettings {
   // their original ISP IP in some apps.
   strictAdapterLockdown: boolean
   // Disable app-controlled third-party IP geolocation lookups. When ON, the
-  // app does not send current VPN/server IPs to ipapi.co, ip-api.com,
+  // app does not send current VPN/server IPs to ipapi.co, geojs.io,
   // ipwho.is, ipinfo.*, or iplocation.net. External websites the user opens
   // can still geolocate the IP they see.
   disableGeoLookup: boolean

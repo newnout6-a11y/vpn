@@ -1184,8 +1184,9 @@ app.whenReady().then(async () => {
   // the door on injected-script / data-exfil vectors if any renderer input is
   // ever mishandled. 'unsafe-inline' for style is required by our CSS-in-JS
   // (design tokens injected as inline <style>); script stays locked to 'self'.
-  // connect-src allows https/wss because the renderer talks to ip-api / ipify
-  // and the dev server uses ws for HMR.
+  // connect-src allows https/wss because the renderer talks to ipapi.co /
+  // ipify and the dev server uses ws for HMR. Note there is no `http:` in
+  // connect-src — plaintext lookups are refused at the policy level too.
   if (app.isPackaged) {
     const csp = [
       "default-src 'self'",

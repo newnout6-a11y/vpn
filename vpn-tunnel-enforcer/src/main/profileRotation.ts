@@ -265,6 +265,7 @@ async function performRotationOnce(): Promise<{ success: boolean; newProfile: st
   // does what the UI promises. When idle we just leave the selection for the
   // next manual connect. Lazy import avoids any load-order coupling with
   // tunController.
+  let reconnectError: string | null = null
   try {
     const { tunController } = await import('./tunController')
     if (tunController.getStatus().running) {
@@ -288,35 +289,62 @@ async function performRotationOnce(): Promise<{ success: boolean; newProfile: st
         logEvent('info', 'profile-rotation', 'reconnecting live tunnel to rotated profile', {
           profileId: nextProfileId
         })
-        // Restart in directVpn mode with the rotated profile. start() is
-        // guarded against concurrent starts and reuses the prior kill-switch /
-        // lockdown / stealth prefs via lastStartOptions where applicable.
-        await tunController.stop().catch((err) =>
-          logEvent('warn', 'profile-rotation', 'stop before rotate-reconnect failed', err)
+        // restartProtected keeps the kill-switch, network baseline and adapter
+        // lockdown applied across the swap, and rolls all three back if the
+        // rotated key does not come up. The old code awaited a bare stop() and
+        // start() with each error swallowed into a warn log: a failed rotation
+        // then left the user with no tunnel, no kill-switch and no indication
+        // anything had gone wrong — a silent leak that persisted until the next
+        // rotation tick.
+        const restarted = await tunController.restartProtected(
+          `profile rotation to ${profileName}`,
+          {
+            mode: 'directVpn',
+            vpnProfile,
+            proxyType: 'socks5',
+            enableFirewallKillSwitch: settings.firewallKillSwitch === true,
+            enableAdapterLockdown: settings.strictAdapterLockdown === true,
+            publicWifiCompatibility: settings.publicWifiCompatibility,
+            stealthMode: settings.stealthMode === true,
+            adaptiveMode: adaptive.mode
+          }
         )
-        await tunController.start({
-          mode: 'directVpn',
-          vpnProfile,
-          enableFirewallKillSwitch: settings.firewallKillSwitch === true,
-          enableAdapterLockdown: settings.strictAdapterLockdown === true,
-          publicWifiCompatibility: settings.publicWifiCompatibility,
-          stealthMode: settings.stealthMode === true,
-          adaptiveMode: adaptive.mode
-        }).catch((err) =>
-          logEvent('warn', 'profile-rotation', 'start after rotate-reconnect failed', err)
-        )
+        if (!restarted.success) {
+          reconnectError = restarted.error || 'Не удалось поднять туннель на новом профиле'
+        }
       } else {
+        reconnectError = 'У профиля нет конфигурации (outbound пуст)'
         logEvent('warn', 'profile-rotation', 'rotated profile has no outbound — cannot reconnect live tunnel', {
           profileId: nextProfileId
         })
       }
     }
   } catch (err) {
+    reconnectError = (err as Error)?.message || String(err)
     logEvent('warn', 'profile-rotation', 'rotate-reconnect path threw', err)
   }
 
-  // Schedule next rotation
+  // Schedule next rotation regardless — a failed rotation should still be
+  // retried on the next tick rather than silently disabling the feature.
   scheduleNextRotation(updatedConfig)
+
+  if (reconnectError) {
+    // Loud, because the user's traffic is no longer tunnelled. restartProtected
+    // has already rolled the protection back, so connectivity is restored — but
+    // it is *unprotected* connectivity, and only the user can decide what to do.
+    logEvent('error', 'profile-rotation', 'rotation left the tunnel down', {
+      profileId: nextProfileId,
+      profileName,
+      error: reconnectError
+    })
+    notify(
+      'error',
+      'Ротация не удалась',
+      `Не удалось подключиться к профилю ${profileName}: ${reconnectError}. Защита выключена — трафик идёт по обычному маршруту.`,
+      'connectionError'
+    ).catch(() => undefined)
+    return { success: false, newProfile: nextProfileId }
+  }
 
   return { success: true, newProfile: nextProfileId }
 }

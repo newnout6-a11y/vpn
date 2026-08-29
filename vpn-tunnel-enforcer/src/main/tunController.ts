@@ -45,6 +45,7 @@ import {
 } from './smartRoute'
 import { getPreferredSmartRouteRuleSetSourceDir } from './ruleSetManager'
 import { selectTunMtu } from './networkCompatibility'
+import { ensureElevatedRuntimeDirHardened } from './runtimeDirSecurity'
 import type { PhysicalAdapterDnsSource } from './physicalAdapterLockdown'
 import type { AdaptiveBypassMode } from './adaptiveBypass'
 
@@ -1728,6 +1729,29 @@ async function prepareRuntime(
   const runtimeDir = getTunRuntimeDir()
   await mkdir(runtimeDir, { recursive: true })
 
+  // Lock the runtime directory to SYSTEM + Administrators BEFORE staging any
+  // binary into it. The app always runs elevated (requireAdministrator in
+  // electron-builder.yml) and launches sing-box from this directory, which lives
+  // under %APPDATA% where the interactive user has Full Control by default —
+  // so without this, any unprivileged process running as the same user could
+  // swap vpnte-sing-box.exe or plant its own wintun.dll beside it and get code
+  // execution as administrator on the next connect. DLL planting is the easier
+  // half: copyResourceIfStale only compares size+mtime, so it would never
+  // notice a same-size replacement anyway.
+  //
+  // Order matters: hardening after the copy leaves a window where a planted
+  // file is already sitting in the directory when we lock it.
+  const acl = await ensureElevatedRuntimeDirHardened(runtimeDir, 'tun-runtime')
+  if (!acl.hardened && !acl.skipped) {
+    // Not fatal — a tunnel we refuse to start is worse for the user than one
+    // running out of a directory with weak permissions. But it must be visible.
+    logEvent('warn', 'tun', 'TUN runtime directory is not admin-only — local privilege escalation risk', {
+      runtimeDir,
+      reason: acl.message,
+      offenders: acl.offenders ?? []
+    })
+  }
+
   const singboxSrc = getBundledResource('sing-box.exe')
   const wintunSrc = getBundledResource('wintun.dll')
   const cronetSrc = getBundledResource(CRONET_DLL_NAME)
@@ -3247,6 +3271,81 @@ export const tunController = {
   },
 
   /**
+   * Restart the tunnel WITHOUT dismantling the network protection in between.
+   *
+   * A plain `stop()` → `start()` pair rolls back the firewall kill-switch, the
+   * network baseline and the physical-adapter lockdown, then builds them all
+   * again. Between the two there is a real leak window: the settle delay plus
+   * the whole start sequence with its elevated PowerShell probes — seconds, not
+   * milliseconds — during which traffic egresses through the physical adapter
+   * with no kill-switch behind it. Every in-place restart used to hit that
+   * window: applying a split-tunnel or domain-routing rule, switching server,
+   * rotating a profile. All of them belong on this path.
+   *
+   * `stop({ preserveNetworkProtection: true })` skips the rollback; `start()`
+   * then finds the kill-switch already active and reuses the existing rules,
+   * and `applyPhysicalAdapterLockdown()` is idempotent — so the protection
+   * simply stays up across the swap.
+   *
+   * Failure is the case that matters. A preserved stop leaves the firewall
+   * blocking with no tunnel behind it, which is fail-safe (no leak) but also
+   * means no internet, so we must never *return* in that state. If the tunnel
+   * does not come back we run a full ordinary `stop()`, restoring the baseline,
+   * DNS/IPv6 and outbound connectivity, and report the original error. Callers
+   * can then decide whether to retry with different options.
+   */
+  async restartProtected(
+    reason: string,
+    nextOptions: StartOptions,
+    options: { settleMs?: number } = {}
+  ): Promise<{ success: boolean; error?: string; warning?: string | null }> {
+    const settleMs = options.settleMs ?? 500
+    logEvent('info', 'tun', 'protected tunnel restart', {
+      reason,
+      mode: nextOptions.mode ?? 'localProxy',
+      settleMs
+    })
+    const stopped = await this.stop({
+      preserveNetworkProtection: true,
+      preserveLastStartOptions: true
+    })
+    if (!stopped.success) {
+      // The preserved stop failed with protection still applied. Hand over to
+      // the ordinary teardown rather than returning half-stopped.
+      await this.stop().catch(err =>
+        logEvent('warn', 'tun', 'teardown after failed protected stop failed', err)
+      )
+      return { success: false, error: stopped.error, warning: stopped.warning ?? null }
+    }
+
+    // Brief pause so the runtime fully releases the TUN adapter before we
+    // recreate it — mirrors the delay the old split-tunnel hot-reload used.
+    if (settleMs > 0) await new Promise((resolve) => setTimeout(resolve, settleMs))
+
+    let started: { success: boolean; error?: string; warning?: string | null }
+    try {
+      started = await this.start(nextOptions)
+    } catch (err) {
+      started = { success: false, error: (err as Error)?.message || String(err) }
+    }
+    if (started.success) {
+      return {
+        success: true,
+        warning: [stopped.warning, started.warning].filter(Boolean).join(' | ') || null
+      }
+    }
+
+    logEvent('warn', 'tun', 'protected restart could not bring the tunnel back — rolling protection back', {
+      reason,
+      error: started.error ?? null
+    })
+    await this.stop().catch(err =>
+      logEvent('warn', 'tun', 'terminal cleanup after failed protected restart failed', err)
+    )
+    return { success: false, error: started.error, warning: started.warning ?? null }
+  },
+
+  /**
    * Restart the tunnel reusing the last successful start options. Used by
    * split-tunnel / config hot-reload: the config (process route rules, DNS
    * profile, etc.) is regenerated on the next start(), so a stop→start cycle
@@ -3255,7 +3354,8 @@ export const tunController = {
    *
    * No-op (returns success) when the tunnel isn't running or when we have no
    * memory of how it was started. Snapshots lastStartOptions BEFORE stop()
-   * (which clears it) and replays it.
+   * (which clears it) and replays it. Goes through restartProtected() so the
+   * kill-switch is not torn down for the duration of the swap.
    */
   async restartWithLastOptions(reason: string): Promise<{ success: boolean; error?: string }> {
     if (!currentStatus.running) {
@@ -3276,14 +3376,10 @@ export const tunController = {
       adaptiveMode: snapshot.adaptiveMode
     }
     logEvent('info', 'tun', `restarting tunnel to apply config change: ${reason}`)
-    const stopped = await this.stop()
-    if (!stopped.success) {
-      return { success: false, error: stopped.error }
-    }
-    // Brief pause so the runtime fully releases the TUN adapter before we
-    // recreate it — mirrors the delay the old split-tunnel hot-reload used.
-    await new Promise((resolve) => setTimeout(resolve, 500))
-    return this.start(nextSnapshot)
+    const restarted = await this.restartProtected(`config change: ${reason}`, nextSnapshot)
+    return restarted.success
+      ? { success: true }
+      : { success: false, error: restarted.error }
   },
 
   async restartForAdaptiveChange(
@@ -3304,22 +3400,13 @@ export const tunController = {
       to: nextMode,
       reason
     })
-    const stopped = await this.stop({
-      preserveNetworkProtection: true,
-      preserveLastStartOptions: true
-    })
-    if (!stopped.success) return { success: false, error: stopped.error, warning: stopped.warning }
-
-    await new Promise((resolve) => setTimeout(resolve, 250))
-    const restarted = await this.start({ ...snapshot, ...overrides, adaptiveMode: nextMode })
-    if (restarted.success) return restarted
-
-    // A failed protected transition must not strand the user behind a stale
-    // kill-switch or adapter DNS pin. The ordinary stop path fully rolls back.
-    await this.stop().catch(err =>
-      logEvent('warn', 'adaptive-bypass', 'terminal cleanup after adaptive transition failed', err)
+    // 250ms rather than the default settle: an adaptive transition is a
+    // reaction to a live connectivity problem, so we want it to land fast.
+    return this.restartProtected(
+      `adaptive transition to ${nextMode}: ${reason}`,
+      { ...snapshot, ...overrides, adaptiveMode: nextMode },
+      { settleMs: 250 }
     )
-    return restarted
   },
 
   async disableFirewallKillSwitch(reason: string): Promise<{ success: boolean; message: string; skipped?: boolean }> {

@@ -195,6 +195,7 @@ export const IP_CHECKER_SUFFIXES = [
   '.icanhazip.com',
   '.ipapi.co',
   '.ip-api.com',
+  '.geojs.io',
   '.whatismyipaddress.com',
   '.whatismyip.com',
   '.iplocation.net',

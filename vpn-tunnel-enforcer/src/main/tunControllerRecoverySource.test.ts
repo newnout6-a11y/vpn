@@ -105,7 +105,7 @@ describe('tunController recovery cancellation guards', () => {
     const snapshot = source.indexOf('lastStartOptions = {')
     const stealth = source.indexOf('stealthMode: startOptions.stealthMode === true', snapshot)
     const freshSettings = source.indexOf('const nextSnapshot: StartOptions = {', stealth)
-    const restart = source.indexOf('return this.start(nextSnapshot)')
+    const restart = source.indexOf('this.restartProtected(`config change: ${reason}`, nextSnapshot)', freshSettings)
     const recovery = source.indexOf('tunController.start(optsSnapshot)')
 
     expect(snapshot).toBeGreaterThan(0)
@@ -115,24 +115,79 @@ describe('tunController recovery cancellation guards', () => {
     expect(recovery).toBeGreaterThan(0)
   })
 
+  /**
+   * Findings #2/#4: `stop()` rolls back the firewall kill-switch, the network
+   * baseline and the adapter lockdown, and `start()` rebuilds them. Every
+   * in-place restart therefore used to open a multi-second window of egress
+   * through the physical adapter with no kill-switch behind it. All of them now
+   * route through restartProtected(), which preserves the protection across the
+   * swap and does a full rollback only if the tunnel fails to come back.
+   */
+  it('preserves network protection across every in-place restart', async () => {
+    const source = await readFile(join(here, 'tunController.ts'), 'utf8')
+    const fnStart = source.indexOf('async restartProtected(')
+    expect(fnStart, 'restartProtected must exist').toBeGreaterThan(0)
+    const fnEnd = source.indexOf('async restartWithLastOptions(', fnStart)
+    const body = source.slice(fnStart, fnEnd)
+
+    // The preserved stop, then the restart, then the fail-safe teardown.
+    const preservedStop = body.indexOf('preserveNetworkProtection: true')
+    const preservedSnapshot = body.indexOf('preserveLastStartOptions: true', preservedStop)
+    const start = body.indexOf('await this.start(nextOptions)', preservedSnapshot)
+    const rollback = body.indexOf('await this.stop().catch', start)
+
+    expect(preservedStop).toBeGreaterThan(0)
+    expect(preservedSnapshot).toBeGreaterThan(preservedStop)
+    expect(start).toBeGreaterThan(preservedSnapshot)
+    expect(rollback).toBeGreaterThan(start)
+  })
+
+  it('never leaves a failed protected restart behind a stale kill-switch', async () => {
+    const source = await readFile(join(here, 'tunController.ts'), 'utf8')
+    const fnStart = source.indexOf('async restartProtected(')
+    const fnEnd = source.indexOf('async restartWithLastOptions(', fnStart)
+    const body = source.slice(fnStart, fnEnd)
+
+    // Both failure exits — the preserved stop failing, and start() failing —
+    // must run the ordinary full teardown before returning.
+    const failureReturns = body.match(/return \{ success: false/g) ?? []
+    const teardowns = body.match(/await this\.stop\(\)\.catch/g) ?? []
+    expect(failureReturns.length).toBe(2)
+    expect(teardowns.length).toBe(2)
+    // A thrown start() must be caught, not propagated — otherwise the teardown
+    // below it never runs.
+    expect(body).toContain('started = await this.start(nextOptions)')
+    expect(body).toContain('} catch (err) {')
+  })
+
+  it('routes config-change restarts through the protected path', async () => {
+    const source = await readFile(join(here, 'tunController.ts'), 'utf8')
+    const fnStart = source.indexOf('async restartWithLastOptions(')
+    const fnEnd = source.indexOf('async restartForAdaptiveChange(', fnStart)
+    const body = source.slice(fnStart, fnEnd)
+
+    expect(body).toContain('this.restartProtected(')
+    // A bare stop()/start() pair here is exactly the leak this fixes.
+    expect(body).not.toContain('await this.stop()')
+    expect(body).not.toContain('return this.start(')
+  })
+
   it('uses a protected lifecycle transition for adaptive compatibility changes', async () => {
     const source = await readFile(join(here, 'tunController.ts'), 'utf8')
-    const transition = source.indexOf('async restartForAdaptiveChange(')
-    const protectedStop = source.indexOf('preserveNetworkProtection: true', transition)
-    const preservedSnapshot = source.indexOf('preserveLastStartOptions: true', transition)
-    const cleanup = source.indexOf('await this.stop().catch', transition)
+    const fnStart = source.indexOf('async restartForAdaptiveChange(')
+    const fnEnd = source.indexOf('async disableFirewallKillSwitch(', fnStart)
+    const body = source.slice(fnStart, fnEnd)
 
-    expect(transition).toBeGreaterThan(0)
-    expect(protectedStop).toBeGreaterThan(transition)
-    expect(preservedSnapshot).toBeGreaterThan(protectedStop)
-    expect(cleanup).toBeGreaterThan(preservedSnapshot)
+    expect(fnStart).toBeGreaterThan(0)
+    expect(body).toContain('return this.restartProtected(')
+    expect(body).not.toContain('await this.stop()')
   })
 
   it('allows the protected adaptive transition to replace only the Direct VPN profile', async () => {
     const source = await readFile(join(here, 'tunController.ts'), 'utf8')
     const transition = source.indexOf('async restartForAdaptiveChange(')
     const overrides = source.indexOf("overrides: Pick<StartOptions, 'vpnProfile'> = {}", transition)
-    const restart = source.indexOf('this.start({ ...snapshot, ...overrides, adaptiveMode: nextMode })', transition)
+    const restart = source.indexOf('{ ...snapshot, ...overrides, adaptiveMode: nextMode }', transition)
 
     expect(overrides).toBeGreaterThan(transition)
     expect(restart).toBeGreaterThan(overrides)

@@ -8,15 +8,28 @@ describe('serverPicker source regressions', () => {
   it('refreshes the IP monitor baseline after a direct VPN profile switch', () => {
     const source = serverPickerSource()
     const restartStart = source.indexOf('async function restartDirectVpnForSelectedProfile')
-    const stopCall = source.indexOf('tunController.stop()', restartStart)
-    const startCall = source.indexOf('tunController.start', stopCall)
-    const resumeCall = source.indexOf('ipMonitor.resume()', startCall)
+    const restartCall = source.indexOf("tunController.restartProtected('server switch'", restartStart)
+    const resumeCall = source.indexOf('ipMonitor.resume()', restartCall)
     const rebaselineCall = source.indexOf('ipMonitor.recheck(true)', resumeCall)
 
     expect(restartStart).toBeGreaterThanOrEqual(0)
-    expect(stopCall).toBeGreaterThan(restartStart)
-    expect(startCall).toBeGreaterThan(stopCall)
-    expect(resumeCall).toBeGreaterThan(startCall)
+    expect(restartCall).toBeGreaterThan(restartStart)
+    expect(resumeCall).toBeGreaterThan(restartCall)
     expect(rebaselineCall).toBeGreaterThan(resumeCall)
+  })
+
+  it('keeps the kill-switch applied across a server switch', () => {
+    // Regression: this used to call tunController.stop() with no options, which
+    // rolls back the firewall, baseline and adapter lockdown, then rebuilt them
+    // in start() — seconds of unprotected egress on every server switch.
+    const source = serverPickerSource()
+    const restartStart = source.indexOf('async function restartDirectVpnForSelectedProfile')
+    const restartEnd = source.indexOf('direct VPN profile switch finished without', restartStart)
+    const body = source.slice(restartStart, restartEnd)
+
+    expect(restartEnd).toBeGreaterThan(restartStart)
+    expect(body).toContain("tunController.restartProtected('server switch'")
+    expect(body).not.toContain('tunController.stop()')
+    expect(body).not.toContain('tunController.start(')
   })
 })

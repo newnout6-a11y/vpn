@@ -182,7 +182,7 @@ describe('Diagnostics Preflight', () => {
       const sourceCode = readFileSync(exportTsPath, 'utf-8')
 
       const manifestWrite = sourceCode.indexOf("writeFile(join(stage, 'diagnostics-manifest.json')")
-      const readmeWrite = sourceCode.indexOf("writeFile(join(stage, 'README.txt'), cleanReadme")
+      const readmeWrite = sourceCode.indexOf("writeFile(join(stage, 'README.txt'), readme")
       const archiveInput = sourceCode.indexOf("Compress-Archive -Path (Join-Path $stage '*')")
 
       expect(manifestWrite).toBeGreaterThan(-1)
@@ -192,6 +192,39 @@ describe('Diagnostics Preflight', () => {
       expect(sourceCode).toContain('redaction')
       expect(sourceCode).toContain('known secrets are redacted')
       expect(sourceCode).toContain('topLevelFiles')
+    })
+
+    it('writes exactly one README, correctly encoded', () => {
+      // There used to be two: a mojibake'd one, then a clean one overwriting it.
+      // The overwrite hid the bug, so a reordering would have shipped garbled
+      // Russian to support.
+      const exportTsPath = join(process.cwd(), 'src', 'main', 'diagnosticsExport.ts')
+      const sourceCode = readFileSync(exportTsPath, 'utf-8')
+
+      const readmeWrites = sourceCode.match(/writeFile\(join\(stage, 'README\.txt'\)/g) ?? []
+      expect(readmeWrites.length).toBe(1)
+      expect(sourceCode).toContain('Диагностика VPN Tunnel Enforcer')
+      // UTF-8-as-1251 mojibake reads as long runs of 'Р'/'С' alternating with
+      // one other character. Real Russian never produces four such pairs in a
+      // row, which makes this a reliable signature without flagging valid text.
+      expect(sourceCode).not.toMatch(/(?:[РС][Ѐ-ӿ -‿°]){4}/)
+    })
+
+    it('states the forensics redaction policy truthfully in the manifest', () => {
+      // Regression for finding #5: the manifest claimed redaction while
+      // traffic-forensics was copied verbatim, so a user handing the bundle to
+      // support disclosed every domain resolved and every remote IP contacted.
+      const exportTsPath = join(process.cwd(), 'src', 'main', 'diagnosticsExport.ts')
+      const sourceCode = readFileSync(exportTsPath, 'utf-8')
+
+      expect(sourceCode).toContain('trafficForensics:')
+      expect(sourceCode).toContain('rawPacketCaptures:')
+      // The claim must be conditional on forensics actually being staged.
+      expect(sourceCode).toContain('forensicsStaged')
+      expect(sourceCode).toContain("? 'IPs, IPv6, MACs and hostnames are replaced with stable per-export pseudonyms; '")
+      expect(sourceCode).toContain("'not included in this bundle'")
+      // And it must be honest about what stays in the clear.
+      expect(sourceCode).toContain('notRedacted:')
     })
 
     it('should limit exported snapshots to a recent bounded set', () => {

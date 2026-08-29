@@ -508,7 +508,7 @@ export function Settings() {
           <ToggleRow
             icon={<Eye className="w-4 h-4 text-[var(--color-warning)]" />}
             title="Не делать онлайн-гео lookup в приложении"
-            description="Приложение не будет отправлять текущий VPN IP и IP выбранного сервера в ipapi.co, ip-api.com, ipwho.is, ipinfo или iplocation. Это не меняет сайты вроде 2ip.ru: они всё равно видят страну IP, с которого вы к ним заходите. Уже сохранённая страна профиля или страна из имени может остаться как локальная подсказка."
+            description="Приложение не будет отправлять текущий VPN IP и IP выбранного сервера в ipapi.co, geojs.io, ipwho.is, ipinfo или iplocation. Это не меняет сайты вроде 2ip.ru: они всё равно видят страну IP, с которого вы к ним заходите. Уже сохранённая страна профиля или страна из имени может остаться как локальная подсказка."
             checked={settings.disableGeoLookup}
             onChange={(next) => updateSettings({ disableGeoLookup: next })}
           />
@@ -848,6 +848,8 @@ export function Settings() {
                   />
                   <p className="text-xs text-[var(--color-text-secondary)] mt-1">
                     Эти сессии попадут и в ZIP-экспорт диагностики вместе с манифестом артефактов.
+                    Адреса и домены в них заменяются на устойчивые псевдонимы, а сырые захваты
+                    пакетов (.etl/.pcapng) в архив не включаются — только локально.
                   </p>
                 </div>
               </div>

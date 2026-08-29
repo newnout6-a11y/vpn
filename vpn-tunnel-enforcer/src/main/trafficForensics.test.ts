@@ -29,6 +29,19 @@ vi.mock('./appLogger', () => ({
   logEvent: vi.fn()
 }))
 
+// ACL hardening is covered by runtimeDirSecurity.test.ts. Stub it here so these
+// tests neither shell out to PowerShell nor need child_process.execFile, which
+// the child_process mock above deliberately does not provide.
+vi.mock('./runtimeDirSecurity', () => ({
+  ensureElevatedRuntimeDirHardened: vi.fn(async () => ({
+    hardened: true,
+    message: 'stubbed'
+  })),
+  verifyDirectoryHardened: vi.fn(async () => ({ hardened: true, message: 'stubbed' })),
+  resetRuntimeDirHardeningCache: vi.fn(),
+  directoryExists: vi.fn(async () => true)
+}))
+
 vi.mock('./settings', () => ({
   settingsStore: {
     get: () => ({
@@ -840,5 +853,138 @@ describe('trafficForensics', () => {
     expect(readFileSync(join(started.sessionDir!, 'app-events.ndjson'), 'utf-8')).toContain('leak-self-test-result')
     expect(readFileSync(join(started.sessionDir!, 'timeline.ndjson'), 'utf-8')).toContain('sing-box-start-failed')
     expect(readFileSync(join(started.sessionDir!, 'timeline.ndjson'), 'utf-8')).toContain('leak-self-test-result')
+  })
+
+  /**
+   * Finding #5: the export used to copy the session directory verbatim while the
+   * bundle manifest claimed redaction. These assert on the STAGED output — the
+   * unit tests in forensicsRedaction.test.ts cover the scrubber itself, but only
+   * this level catches "the redactor is fine, the export just doesn't call it".
+   */
+  it('pseudonymizes staged forensics artifacts instead of copying them verbatim', async () => {
+    await resetForensicsState()
+    execElevatedMock.mockResolvedValue({ stdout: '', stderr: '' })
+    const stageDir = 'C:/Users/Redmi/CascadeProjects/vpn/.tmp/vpnte-traffic-stage'
+
+    const started = await startTrafficForensicsSession({
+      mode: 'directVpn',
+      target: 'profile-1'
+    })
+    expect(started.sessionDir).toBeTruthy()
+
+    // Real artifact shapes: a resolved domain, the remote IP it resolved to, the
+    // established flow, a connection table and a resolver cache.
+    writeFileSync(join(started.sessionDir!, 'dnsclient-events-live.txt'), JSON.stringify([
+      { TimeCreated: '2026-06-19T00:00:00Z', Message: 'Query private-tracker.example.com resolved to 93.184.216.34 via DNS Client' }
+    ]))
+    writeFileSync(join(started.sessionDir!, 'nettcp-live.txt'), JSON.stringify([
+      {
+        LocalAddress: '10.8.0.2',
+        LocalPort: 50123,
+        RemoteAddress: '93.184.216.34',
+        RemotePort: 443,
+        State: 'Established',
+        OwningProcess: 4242
+      }
+    ]))
+    writeFileSync(
+      join(started.sessionDir!, 'dns-cache-live.txt'),
+      'Entry: private-tracker.example.com  Data: 93.184.216.34\nEntry: bank.ru  Data: 77.88.55.66\n'
+    )
+
+    await stopTrafficForensicsSession('user-stop')
+    const staged = await stageTrafficForensicsArtifacts(stageDir)
+    expect(staged).toBe(true)
+
+    const stagedSession = join(stageDir, 'traffic-forensics', 'sessions', started.sessionId!)
+    const stagedDns = readFileSync(join(stagedSession, 'dns.ndjson'), 'utf-8')
+    const stagedFlows = readFileSync(join(stagedSession, 'flows.ndjson'), 'utf-8')
+    const stagedCache = readFileSync(join(stagedSession, 'dns-cache-live.txt'), 'utf-8')
+
+    // Nothing real survives.
+    for (const body of [stagedDns, stagedFlows, stagedCache]) {
+      expect(body).not.toContain('93.184.216.34')
+      expect(body).not.toContain('private-tracker')
+      expect(body).not.toContain('77.88.55.66')
+    }
+    expect(stagedCache).not.toContain('bank.ru')
+
+    // The original session directory is untouched — redaction happens on the
+    // copy, so local diagnosis still has the real data.
+    expect(readFileSync(join(started.sessionDir!, 'flows.ndjson'), 'utf-8')).toContain('93.184.216.34')
+
+    // ...but the bundle is still diagnosable: one address, one token, everywhere.
+    const token = stagedDns.match(/<ip-public-\d+>/)?.[0]
+    expect(token).toBeTruthy()
+    expect(stagedFlows).toContain(token!)
+    expect(stagedCache).toContain(token!)
+    // Public suffixes survive so smart-RU analysis is still possible.
+    expect(stagedCache).toContain('.ru')
+    expect(stagedCache).toContain('.com')
+    // The reader is told what happened.
+    const notice = readFileSync(join(stageDir, 'traffic-forensics', 'REDACTION.txt'), 'utf-8')
+    expect(notice).toContain('<ip-public-N>')
+    expect(notice).toContain('*.etl')
+  })
+
+  it('never exports raw packet captures, redacted or otherwise', async () => {
+    await resetForensicsState()
+    execElevatedMock.mockResolvedValue({ stdout: '', stderr: '' })
+    const stageDir = 'C:/Users/Redmi/CascadeProjects/vpn/.tmp/vpnte-traffic-stage'
+
+    const started = await startTrafficForensicsSession({
+      mode: 'directVpn',
+      target: 'profile-1'
+    })
+
+    // Payload-bearing artifacts. There is no way to scrub these, so they must be
+    // excluded outright rather than redacted.
+    writeFileSync(join(started.sessionDir!, 'pktmon.etl'), 'BINARYPAYLOAD-SECRET')
+    writeFileSync(join(started.sessionDir!, 'pktmon-trace.pcapng'), 'BINARYPAYLOAD-SECRET')
+    writeFileSync(join(started.sessionDir!, 'pktmon-trace.txt'), 'GET /secret HTTP/1.1')
+
+    await stopTrafficForensicsSession('user-stop')
+    await stageTrafficForensicsArtifacts(stageDir)
+
+    const stagedSession = join(stageDir, 'traffic-forensics', 'sessions', started.sessionId!)
+    expect(existsSync(join(stagedSession, 'pktmon.etl'))).toBe(false)
+    expect(existsSync(join(stagedSession, 'pktmon-trace.pcapng'))).toBe(false)
+    expect(existsSync(join(stagedSession, 'pktmon-trace.txt'))).toBe(false)
+    // And they are still on disk locally for deliberate manual submission.
+    expect(existsSync(join(started.sessionDir!, 'pktmon.etl'))).toBe(true)
+  })
+
+  it('never copies bytes through verbatim, even for an unrecognized artifact type', async () => {
+    // The failure mode that matters: an artifact type nobody anticipated must
+    // default to being scrubbed, not to a raw byte copy. Everything goes through
+    // readFile('utf-8') + redact + writeFile, so raw bytes cannot survive — which
+    // is what the old `cp()` fallback allowed.
+    await resetForensicsState()
+    execElevatedMock.mockResolvedValue({ stdout: '', stderr: '' })
+    const stageDir = 'C:/Users/Redmi/CascadeProjects/vpn/.tmp/vpnte-traffic-stage'
+
+    const started = await startTrafficForensicsSession({
+      mode: 'directVpn',
+      target: 'profile-1'
+    })
+    // An extension the redactor has no special handling for, carrying both an
+    // address and bytes that are not valid UTF-8.
+    writeFileSync(
+      join(started.sessionDir!, 'future-artifact.bin'),
+      Buffer.concat([Buffer.from('peer 93.184.216.34 '), Buffer.from([0xff, 0xfe, 0x00, 0x81])])
+    )
+
+    await stopTrafficForensicsSession('user-stop')
+    await stageTrafficForensicsArtifacts(stageDir)
+
+    const stagedSession = join(stageDir, 'traffic-forensics', 'sessions', started.sessionId!)
+    const stagedPath = join(stagedSession, 'future-artifact.bin')
+    expect(existsSync(stagedPath)).toBe(true)
+
+    const stagedBytes = readFileSync(stagedPath)
+    expect(stagedBytes.toString('utf-8')).not.toContain('93.184.216.34')
+    expect(stagedBytes.toString('utf-8')).toContain('<ip-public-')
+    // Byte-for-byte identity would mean a raw copy slipped through.
+    expect(stagedBytes.equals(readFileSync(join(started.sessionDir!, 'future-artifact.bin')))).toBe(false)
   })
 })

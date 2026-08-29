@@ -139,10 +139,19 @@ export default function App() {
       // 'stopping' is fired at the top of tunController.stop() BEFORE rollback —
       // we use it to silence the false-positive leak / IP-changed events that
       // would otherwise fire during the 7-9s rollback window.
+      // 'adapting' is the same window for a PROTECTED restart (server switch,
+      // profile rotation, split-tunnel / routing change, adaptive transition):
+      // sing-box is being replaced while the kill-switch, network baseline and
+      // adapter lockdown all stay applied. Traffic is blocked, not leaking, and
+      // the tunnel is expected back within seconds — so this must not read as a
+      // disconnect in the UI, and leak verdicts produced inside it are false.
       const isRestarting = status.startsWith('restarting:')
       const isCompetingTun = status.startsWith('competing-tun:')
       const tunUp = status === 'running' || status === 'proxy-down' || isCompetingTun
       const isStopping = status === 'stopping'
+      const isAdapting = status === 'adapting'
+      // Both are "main is mid-transition, don't trust transient signals".
+      const isTransitioning = isStopping || isAdapting
       const busy = store.connectionBusy
       const isServerSwitching = Boolean(store.serverSwitchingName)
       suppressFirewallBannerBriefly()
@@ -159,7 +168,7 @@ export default function App() {
 
       // Flip the ref BEFORE we run any callbacks-that-flush so the leak/ip
       // callbacks above can read the latest value.
-      stoppingNowRef.current = isStopping
+      stoppingNowRef.current = isTransitioning
 
       // Best-effort: tell main's ipMonitor to suspend / resume too. The
       // preload bridge for these channels may not exist yet — the Window
@@ -167,7 +176,7 @@ export default function App() {
       // file. Fall back to silently ignoring; the renderer-side
       // stoppingNowRef guard is the authoritative defense.
       const api = window.electronAPI as unknown as Record<string, undefined | (() => Promise<unknown>)>
-      if (isStopping) {
+      if (isTransitioning) {
         api.ipMonitorSuspend?.()?.catch(() => undefined)
       } else if (status === 'running' || status === 'stopped') {
         api.ipMonitorResume?.()?.catch(() => undefined)
@@ -175,8 +184,9 @@ export default function App() {
 
       // Don't flip tunRunning to false purely on 'stopping' — the rollback is
       // still in progress and other UI (e.g. uptime pill) shouldn't snap to
-      // the stopped state until tunController emits 'stopped'.
-      if (!isStopping && !(isServerSwitching && status === 'stopped')) {
+      // the stopped state until tunController emits 'stopped'. Same for
+      // 'adapting', where the protection never comes down at all.
+      if (!isTransitioning && !(isServerSwitching && status === 'stopped')) {
         store.setTunRunning(tunUp)
         store.setProxyDown(status === 'proxy-down')
       }
@@ -197,13 +207,15 @@ export default function App() {
       if ((status === 'stopped' || status === 'killswitch-active') && !isServerSwitching) {
         store.resetConnectionState()
       }
-      if (!tunUp && !isRestarting && !isStopping && !isServerSwitching && store.mode === 'hard') store.setMode('off')
+      if (!tunUp && !isRestarting && !isTransitioning && !isServerSwitching && store.mode === 'hard') store.setMode('off')
       if (status === 'running') {
         addLog('info', 'Защита включена — весь трафик идёт через VPN.')
       } else if (status === 'stopped' && !isServerSwitching) {
         addLog('info', 'Защита выключена. Трафик идёт по обычному маршруту.')
       } else if (isStopping) {
         addLog('info', 'Останавливаем защиту — откатываем DNS, IPv6, файрвол…')
+      } else if (isAdapting) {
+        addLog('info', 'Переподключаем туннель — файрвол и защита остаются включёнными.')
       } else if (status === 'proxy-down') {
         addLog('warn', 'VPN-сервер не отвечает — трафик заблокирован для безопасности. Проверьте ваш VPN-клиент (Happ).')
       } else if (status === 'killswitch-active') {

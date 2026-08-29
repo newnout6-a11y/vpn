@@ -57,6 +57,23 @@ describe('App source regressions', () => {
     expect(source).toContain('stoppingNowRef.current || useAppStore.getState().serverSwitchingName')
   })
 
+  it("treats the protected-restart 'adapting' status as a transition, not a disconnect", () => {
+    // Protected restarts (server switch, rotation, routing change, adaptive
+    // transition) emit 'adapting' while the kill-switch stays applied. Treating
+    // it like any unknown status flipped tunRunning to false and let leak
+    // verdicts through, so the UI claimed a disconnect during a window where
+    // traffic was in fact still blocked by the firewall.
+    const source = appSource()
+
+    expect(source).toContain("const isAdapting = status === 'adapting'")
+    expect(source).toContain('const isTransitioning = isStopping || isAdapting')
+    expect(source).toContain('stoppingNowRef.current = isTransitioning')
+    expect(source).toContain('if (isTransitioning) {')
+    expect(source).toContain("if (!isTransitioning && !(isServerSwitching && status === 'stopped'))")
+    expect(source).toContain('!isRestarting && !isTransitioning && !isServerSwitching')
+    expect(source).toContain('файрвол и защита остаются включёнными')
+  })
+
   it('suppresses transient firewall banners during TUN status handoffs', () => {
     const app = appSource()
     const dashboard = dashboardSource()
@@ -185,7 +202,7 @@ describe('App source regressions', () => {
     const browserIp = browserIpCardSource()
 
     expect(settings).toContain('Не делать онлайн-гео lookup в приложении')
-    expect(settings).toContain('ipapi.co, ip-api.com, ipwho.is, ipinfo или iplocation')
+    expect(settings).toContain('ipapi.co, geojs.io, ipwho.is, ipinfo или iplocation')
     expect(settings).toContain('Это не меняет сайты вроде 2ip.ru')
     expect(detail).toContain('const disableGeoLookup = useAppStore(s => s.settings.disableGeoLookup)')
     expect(detail).toContain('setLoading(!disableGeoLookup)')

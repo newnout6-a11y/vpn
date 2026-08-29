@@ -2,8 +2,17 @@ import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-const mainSource = readFileSync(join(process.cwd(), 'src/main/serverPicker.ts'), 'utf8')
-const rendererSource = readFileSync(join(process.cwd(), 'src/renderer/pages/Servers.tsx'), 'utf8')
+/**
+ * Normalize line endings before matching. `core.autocrlf=true` (the Windows
+ * default) checks these files out with CRLF, so a multi-line needle written
+ * with bare `\n` never matches on a Windows worktree even though the code is
+ * exactly right.
+ */
+const readSource = (rel: string): string =>
+  readFileSync(join(process.cwd(), rel), 'utf8').replace(/\r\n/g, '\n')
+
+const mainSource = readSource('src/main/serverPicker.ts')
+const rendererSource = readSource('src/renderer/pages/Servers.tsx')
 
 describe('resolved IP display', () => {
   it('resolves in parallel and persists the result without blocking the initial list', () => {
