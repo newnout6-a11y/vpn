@@ -371,7 +371,7 @@ function createWindow() {
     // This is the colour painted before the renderer's first frame; when it was
     // '#1e1e2e' — a value belonging to neither theme — startup flashed a shade
     // that appears nowhere else in the app.
-    backgroundColor: '#0d0e12'
+    backgroundColor: '#1f1f1f'
   })
 
   mainWindow.on('ready-to-show', () => {

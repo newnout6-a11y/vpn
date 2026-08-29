@@ -58,17 +58,49 @@ const DARK_THEME: ThemeConfig = {
   name: 'Dark',
   mode: 'dark',
   isCustom: false,
+  // Surfaces, text and accent follow VS Code's "Dark Modern"
+  // (extensions/theme-defaults/themes/dark_modern.json):
+  //   #1f1f1f editor.background   #181818 sideBar/panel/statusBar.background
+  //   #313131 input/dropdown.bg   #3c3c3c input.border
+  //   #cccccc foreground          #9d9d9d descriptionForeground
+  //   #0078d4 button.background / focusBorder
+  //
+  // Two things this buys us. The greys are NEUTRAL — the previous dark palette
+  // carried a blue cast (13/14/18, 31/33/41), which is what made it read as a
+  // generic dark theme rather than a considered one. And the rail is genuinely
+  // darker than the canvas, the way editor chrome sits behind its document,
+  // instead of being a near-copy of it.
+  //
+  // #0078d4 is the Fluent/Windows blue rather than Apple's #0a84ff: same family,
+  // markedly less electric, and it belongs on the platform this app runs on.
+  //
+  // FOUR VALUES ARE DELIBERATELY NOT DARK MODERN, because that theme has no
+  // equivalent of our layout. VS Code paints panels edge-to-edge at
+  // editor.background and separates them with borders; we stack rounded cards on
+  // a canvas, so a card must differ from the canvas by luminance, not just by a
+  // hairline. Measured contrast ratios drove each choice:
+  //   cardBackground #2d2d2d  — Dark Modern's own #262626 gives only 1.09:1
+  //                             against the canvas, i.e. invisible as a surface;
+  //                             this gives 1.20:1.
+  //   cardElevated   #383838  — 1.17:1 over the card (its #313131 is 1.09:1).
+  //   border         #3c3c3c  — input.border, not panel.border #2b2b2b, which
+  //                             sat at 1.03:1 on the card and vanished.
+  //   textSecondary  #a3a3a3  — #9d9d9d clears AA on the canvas and card but
+  //                             lands at 4.32:1 on cardElevated, and secondary
+  //                             text does appear inside inputs and inner panels.
+  // Everything here clears WCAG AA on every surface it is used on; see
+  // themePalette.test.ts, which pins the ladder ordering.
   colors: {
-    background: '#0d0e12',
-    sidebar: '#14151b',
-    cardBackground: '#1f2129',
-    cardElevated: '#2a2d37',
-    accent: '#0a84ff',
-    text: '#f4f5f8',
-    textSecondary: '#a0a6b4',
-    textMuted: '#6e7481',
-    border: '#363b49',
-    borderStrong: '#4a5063',
+    background: '#1f1f1f',
+    sidebar: '#181818',
+    cardBackground: '#2d2d2d',
+    cardElevated: '#383838',
+    accent: '#0078d4',
+    text: '#cccccc',
+    textSecondary: '#a3a3a3',
+    textMuted: '#7a7a7a',
+    border: '#3c3c3c',
+    borderStrong: '#4d4d4d',
     success: '#30d158',
     warning: '#ffd60a',
     danger: '#ff453a'

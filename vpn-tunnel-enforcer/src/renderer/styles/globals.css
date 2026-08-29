@@ -89,21 +89,21 @@
 }
 
 [data-theme="dark"] {
-  /* Dark theme. Four distinct surface levels — canvas, nav rail, card, elevated.
-     The rail used to be byte-identical to the canvas in the shipped theme, which
-     is why it had no edge. Must stay numerically equal to DARK_THEME in
-     src/main/themeManager.ts (see the light block above for why). */
-  --rgb-bg: 13 14 18;
-  --rgb-sidebar: 20 21 27;
-  --rgb-card: 31 33 41;
-  --rgb-card-elevated: 42 45 55;
-  --rgb-accent: 10 132 255;
-  --rgb-accent-hover: 78 168 255;
-  --rgb-text: 244 245 248;
-  --rgb-text-secondary: 160 166 180;
-  --rgb-text-muted: 110 116 129;
-  --rgb-border: 54 59 73;
-  --rgb-border-strong: 74 80 99;
+  /* Dark Modern (VS Code) surfaces, text and accent — neutral greys, no blue
+     cast, and a rail that sits genuinely darker than the canvas. Must stay
+     numerically equal to DARK_THEME in src/main/themeManager.ts, which carries
+     the mapping back to the original theme keys. */
+  --rgb-bg: 31 31 31;
+  --rgb-sidebar: 24 24 24;
+  --rgb-card: 45 45 45;
+  --rgb-card-elevated: 56 56 56;
+  --rgb-accent: 0 120 212;
+  --rgb-accent-hover: 71 158 224;
+  --rgb-text: 204 204 204;
+  --rgb-text-secondary: 163 163 163;
+  --rgb-text-muted: 122 122 122;
+  --rgb-border: 60 60 60;
+  --rgb-border-strong: 77 77 77;
   --rgb-success: 48 209 88;
   --rgb-warning: 255 214 10;
   --rgb-danger: 255 69 58;
