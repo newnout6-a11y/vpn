@@ -114,6 +114,7 @@ export interface AppSettings {
   smartRuRuleSetAutoUpdate: boolean
   smartRuRuleSetUseProxy: boolean
   smartRuRuleSetUpdateIntervalHours: number
+  proxyEngine: 'auto' | 'sing-box' | 'xray'
 }
 
 export interface LeakCheckItem {
@@ -374,7 +375,8 @@ export const useAppStore = create<AppState>((set) => ({
     smartRuRuleSetMode: 'bundled',
     smartRuRuleSetAutoUpdate: true,
     smartRuRuleSetUseProxy: true,
-    smartRuRuleSetUpdateIntervalHours: 24
+    smartRuRuleSetUpdateIntervalHours: 24,
+    proxyEngine: 'auto'
   },
 
   setMode: (mode) => set({ mode }),

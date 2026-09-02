@@ -9,6 +9,7 @@ import { join } from 'path'
 import { happDetector } from './happDetector'
 import { tunController, detectForeignTun, killOwnedTunRuntimeProcesses, isOwnedTunRuntimeRunning, readRecentSingBoxOutboundFault } from './tunController'
 import type { SingBoxOutboundFault } from './tunController'
+import { readRecentXrayOutboundFault, getXrayStatus } from './xrayEngine'
 import { classifyNavigation } from './navigationPolicy'
 import { ipMonitor } from './ipMonitor'
 import { autoconfig } from './autoconfig'
@@ -226,7 +227,9 @@ async function verifyAdaptiveConnection(): Promise<void> {
   // REALITY key, dead upstream, cert mismatch). Those need a different
   // server or a fresh key — jump straight to server fallback / a clear
   // error instead of looping through compatibility transitions.
-  const outboundFault = await readRecentSingBoxOutboundFault()
+  const outboundFault = getXrayStatus().running
+    ? (await readRecentXrayOutboundFault()) || (await readRecentSingBoxOutboundFault())
+    : await readRecentSingBoxOutboundFault()
   if (generation !== adaptiveVerificationGeneration || !tunController.getStatus().running) return
   if (outboundFault) {
     logEvent('warn', 'adaptive-bypass', 'tunnel verification failed — sing-box outbound fault', { fault: outboundFault })
@@ -974,7 +977,8 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
     enableAdapterLockdown: settings.strictAdapterLockdown,
     publicWifiCompatibility: settings.publicWifiCompatibility,
     stealthMode: settings.stealthMode,
-    adaptiveMode: adaptive.mode
+    adaptiveMode: adaptive.mode,
+    proxyEngine: settings.proxyEngine
   })
   if (!result.success) {
     activeAdaptiveContext = null

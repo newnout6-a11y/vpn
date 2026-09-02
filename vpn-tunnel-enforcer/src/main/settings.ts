@@ -101,6 +101,11 @@ export interface AppSettings {
   smartRuRuleSetUseProxy: boolean
   // Managed rule-set refresh cadence.
   smartRuRuleSetUpdateIntervalHours: number
+  // Proxy engine for upstream tunnel:
+  // 'auto': xray for REALITY inbounds, sing-box for everything else
+  // 'sing-box': force sing-box
+  // 'xray': force xray for supported protocols
+  proxyEngine: 'auto' | 'sing-box' | 'xray'
 }
 
 const defaults: AppSettings = {
@@ -145,7 +150,8 @@ const defaults: AppSettings = {
   smartRuRuleSetMode: 'bundled',
   smartRuRuleSetAutoUpdate: true,
   smartRuRuleSetUseProxy: true,
-  smartRuRuleSetUpdateIntervalHours: 24
+  smartRuRuleSetUpdateIntervalHours: 24,
+  proxyEngine: 'auto'
 }
 
 const store = new Store<{ settings: AppSettings }>({
@@ -224,7 +230,10 @@ function normalizeSettings(input: Partial<AppSettings> | undefined): AppSettings
     smartRuRuleSetUpdateIntervalHours: Math.min(
       720,
       Math.max(1, Math.floor(Number(merged.smartRuRuleSetUpdateIntervalHours) || defaults.smartRuRuleSetUpdateIntervalHours))
-    )
+    ),
+    proxyEngine: merged.proxyEngine === 'sing-box' || merged.proxyEngine === 'xray'
+      ? merged.proxyEngine
+      : 'auto'
   }
 }
 

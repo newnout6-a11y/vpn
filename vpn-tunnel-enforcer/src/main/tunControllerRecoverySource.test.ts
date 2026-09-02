@@ -79,7 +79,7 @@ describe('tunController recovery cancellation guards', () => {
     )
 
     expect(cleanup).toContain('const runtimeDir = getTunRuntimeDir()')
-    expect(cleanup).toContain("$names = @(${psSingleQuote(RUNTIME_EXE_NAME)}, 'vpnte-etw-sidecar.exe')")
+    expect(cleanup).toContain("$names = @(${psSingleQuote(RUNTIME_EXE_NAME)}, 'vpnte-etw-sidecar.exe', 'vpnte-xray.exe')")
     expect(cleanup).toContain('$_.ExecutablePath')
     expect(cleanup).toContain('StartsWith($runtimeDir')
     expect(cleanup).not.toContain('vpnte-external-proxy.exe')

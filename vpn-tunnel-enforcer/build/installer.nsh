@@ -16,6 +16,7 @@
   ; Stop our own background sing-box runtime first (it holds the TUN adapter
   ; and would otherwise block file replacement / leave a half-running tunnel).
   nsExec::Exec 'taskkill /F /IM vpnte-sing-box.exe /T'
+  nsExec::Exec 'taskkill /F /IM vpnte-xray.exe /T'
   ; Then the app itself. /T also takes child processes. Ignore errors — the
   ; process may simply not be running.
   nsExec::Exec 'taskkill /F /IM "VPN Tunnel Enforcer.exe" /T'

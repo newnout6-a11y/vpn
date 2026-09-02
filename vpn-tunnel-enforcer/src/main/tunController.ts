@@ -48,6 +48,8 @@ import { selectTunMtu } from './networkCompatibility'
 import { ensureElevatedRuntimeDirHardened } from './runtimeDirSecurity'
 import type { PhysicalAdapterDnsSource } from './physicalAdapterLockdown'
 import type { AdaptiveBypassMode } from './adaptiveBypass'
+import { resolveProxyEngine, type ProxyEngineMode } from './proxyEngine'
+import { startXray, stopXray, getXrayRuntimeExePath } from './xrayEngine'
 
 const exec = promisify(execCb)
 const execFile = promisify(execFileCb)
@@ -102,6 +104,7 @@ export interface StartOptions {
   // start so toggling the UI immediately takes effect on the next restart.
   stealthMode?: boolean
   adaptiveMode?: AdaptiveBypassMode
+  proxyEngine?: ProxyEngineMode
 }
 
 // Localhost clash-API state. Populated when sing-box starts; cleared on
@@ -299,10 +302,12 @@ const PROXY_CORE_PROCESS_NAMES = [
 ]
 const EXTERNAL_PROXY_PROCESS_NAMES = [
   'vpnte-external-proxy.exe',
+  'vpnte-xray.exe'
 ]
 
 export function getTunRuntimeDir(): string {
-  return join(app.getPath('userData'), 'tun-runtime')
+  const base = app?.getPath ? app.getPath('userData') : join(process.env.APPDATA || process.cwd(), 'vpn-tunnel-enforcer')
+  return join(base, 'tun-runtime')
 }
 
 export type SingBoxOutboundFault = 'reality-key-mismatch' | 'tls-handshake-failed' | 'upstream-unreachable'
@@ -359,7 +364,7 @@ export function getBundledResource(name: string): string {
 // matches the heuristic Node uses for its own dependency-cache invalidation
 // and is good enough — when in doubt we still fall back to a plain copyFile,
 // so we can never end up with no destination file.
-async function copyResourceIfStale(src: string, dst: string): Promise<boolean> {
+export async function copyResourceIfStale(src: string, dst: string): Promise<boolean> {
   try {
     const [srcStat, dstStat] = await Promise.all([stat(src), stat(dst)])
     if (
@@ -771,6 +776,8 @@ export function generateSingboxConfig(
     smartRuMapsDirect?: boolean
     smartRuRuleSetDir?: string
     smartRuDirectDnsSources?: PhysicalAdapterDnsSource[]
+    xraySocksPort?: number
+    resolvedVpnEndpointIp?: string | null
   } = {}
 ): object {
   // Network-compatibility knobs adjust the TUN MTU:
@@ -817,7 +824,9 @@ export function generateSingboxConfig(
   // endpoint is a hostname, resolve only that bootstrap name directly, while
   // captured app DNS still goes through proxy-out and fails closed.
   const baseProxyOutbound = isDirectVpn
-    ? { ...upstream.outbound, tag: 'proxy-out' }
+    ? (options.xraySocksPort
+        ? { type: 'socks', tag: 'proxy-out', version: '5', server: '127.0.0.1', server_port: options.xraySocksPort }
+        : { ...upstream.outbound, tag: 'proxy-out' })
     : proxyType === 'http'
       ? { type: 'http', tag: 'proxy-out', server: parsedProxy!.host, server_port: parsedProxy!.port }
       : { type: 'socks', tag: 'proxy-out', version: '5', server: parsedProxy!.host, server_port: parsedProxy!.port }
@@ -927,9 +936,13 @@ export function generateSingboxConfig(
       ? [{ network: 'udp', action: 'reject', method: 'default', no_drop: true }]
       : []
   const needsSniff = true // Always sniff so that SNI and HTTP Host are available for routing and proxying
+  const rawDirectServer = isDirectVpn && typeof upstream.outbound?.server === 'string'
+    ? upstream.outbound.server
+    : null
+  const directServerCandidate = options.resolvedVpnEndpointIp || (rawDirectServer && isIP(rawDirectServer) === 4 ? rawDirectServer : null) || (proxyOutbound.server !== '127.0.0.1' ? proxyOutbound.server : null)
   const directVpnEndpointRouteExcludes =
-    isDirectVpn && typeof proxyOutbound.server === 'string' && isIP(proxyOutbound.server) === 4
-      ? [`${proxyOutbound.server}/32`]
+    isDirectVpn && typeof directServerCandidate === 'string' && isIP(directServerCandidate) === 4
+      ? [`${directServerCandidate}/32`]
       : []
 
   return {
@@ -1148,7 +1161,7 @@ export async function killOwnedTunRuntimeProcesses(): Promise<{ success: boolean
     const runtimeDir = getTunRuntimeDir()
     const stdout = await runPowerShell(`
 $runtimeDir = ${psSingleQuote(runtimeDir)}
-$names = @(${psSingleQuote(RUNTIME_EXE_NAME)}, 'vpnte-etw-sidecar.exe')
+$names = @(${psSingleQuote(RUNTIME_EXE_NAME)}, 'vpnte-etw-sidecar.exe', 'vpnte-xray.exe')
 $rows = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
   Where-Object {
     ($names -contains $_.Name) -and
@@ -1201,7 +1214,7 @@ export async function isOwnedTunRuntimeRunning(): Promise<boolean> {
     const runtimeDir = getTunRuntimeDir()
     const stdout = await runPowerShell(`
 $runtimeDir = ${psSingleQuote(runtimeDir)}
-$names = @(${psSingleQuote(RUNTIME_EXE_NAME)}, 'vpnte-etw-sidecar.exe')
+$names = @(${psSingleQuote(RUNTIME_EXE_NAME)}, 'vpnte-etw-sidecar.exe', 'vpnte-xray.exe')
 $found = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
   Where-Object {
     ($names -contains $_.Name) -and
@@ -1764,6 +1777,8 @@ async function prepareRuntime(
     smartRuSplit?: boolean
     smartRuMapsDirect?: boolean
     smartRuDirectDnsSources?: PhysicalAdapterDnsSource[]
+    xraySocksPort?: number
+    resolvedVpnEndpointIp?: string | null
   } = {}
 ): Promise<{ singbox: string; config: string }> {
   const runtimeDir = getTunRuntimeDir()
@@ -2383,6 +2398,29 @@ export const tunController = {
       // Direct VPN mode has no validation step — we can start prepareRuntime
       // immediately from the vpnProfile we already have in hand.
       if (vpnProfile) {
+        const engine = resolveProxyEngine(vpnProfile.outbound, startOptions.proxyEngine ?? 'auto')
+        let xraySocksPort: number | undefined
+        let resolvedVpnEndpointIp: string | null = null
+        if (engine === 'xray') {
+          try {
+            const xr = await startXray(vpnProfile.outbound, {
+              clientDevice: vpnProfile.clientDevice,
+              stealthMode: startOptions.stealthMode === true,
+              resolvedIp: vpnProfile.resolvedIp
+            })
+            xraySocksPort = xr.socksPort
+            resolvedVpnEndpointIp = xr.resolvedIp
+            proxyOwnerProgramPaths = [...new Set([...proxyOwnerProgramPaths, xr.exePath])]
+            proxyOwnerProcessNames = uniqueProcessNames([...proxyOwnerProcessNames, 'vpnte-xray.exe'])
+          } catch (xrErr) {
+            await rollbackEarlyAdapterLockdown('xray startup failed after adapter lockdown')
+            return finishStart({
+              success: false,
+              error: `Ошибка запуска движка xray-core: ${(xrErr as Error).message}`
+            })
+          }
+        }
+
         runtimePromise = timePromise('prepare-runtime', prepareRuntime(
           { outbound: vpnProfile.outbound, proxyType, clientDevice: vpnProfile.clientDevice },
           proxyType,
@@ -2391,6 +2429,8 @@ export const tunController = {
             stealthMode: startOptions.stealthMode === true,
             adaptiveMode: startOptions.adaptiveMode,
             publicWifiCompatibility,
+            xraySocksPort,
+            resolvedVpnEndpointIp,
             ...smartRouteRuntimeOpts
           }
         ), { mode })
@@ -2679,6 +2719,7 @@ export const tunController = {
           try {
             if (userInitiatedStop) {
               logEvent('info', 'tun', 'sing-box exited after user stop')
+              stopXray('sing-box exited after user stop').catch(() => undefined)
               return
             }
 
@@ -2831,6 +2872,7 @@ export const tunController = {
           disableKillSwitchIfActive('onExit emergency').catch(() => undefined)
           rollbackPhysicalAdapterLockdownIfApplied('onExit emergency').catch(() => undefined)
           repairOrphanedPhysicalAdapterDns('onExit emergency').catch(() => undefined)
+          stopXray('onExit emergency').catch(() => undefined)
           notifyStatus('stopped')
         }
         }
@@ -3199,6 +3241,7 @@ export const tunController = {
     }
 
     stopProxyWatchdog()
+    await stopXray('tun stopped').catch(err => rememberCleanupError('xray process stop', err))
     try {
       await killOwnedRuntimeProcesses()
       if (!(await waitForOwnedRuntimeToExit())) {

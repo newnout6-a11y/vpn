@@ -27,6 +27,7 @@ export interface VpnProfile {
   outbound: Record<string, any>
   clientDevice?: ClientDevice
   clientFingerprint?: string
+  resolvedIp?: string | null
 }
 
 export interface VpnProfileSummary {

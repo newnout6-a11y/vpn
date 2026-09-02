@@ -416,7 +416,8 @@ describe('generateSingboxConfig process routing', () => {
 
     expect(directRule).toBeTruthy()
     expect(directRule.process_name).toContain('vpnte-external-proxy.exe')
-    expect(directRule.process_name).toHaveLength(1)
+    expect(directRule.process_name).toContain('vpnte-xray.exe')
+    expect(directRule.process_name).toHaveLength(2)
   })
 })
 
@@ -692,5 +693,33 @@ describe('readRecentSingBoxOutboundFault', () => {
 
   it('returns null when the log file does not exist', async () => {
     expect(await readRecentSingBoxOutboundFault(join(dir, 'nope.log'))).toBeNull()
+  })
+})
+
+describe('generateSingboxConfig with xraySocksPort', () => {
+  it('configures proxy-out as SOCKS5 127.0.0.1:xraySocksPort and excludes real remote IP from TUN', () => {
+    const upstream = {
+      outbound: {
+        type: 'vless',
+        server: '185.100.100.1',
+        server_port: 443,
+        uuid: 'abc'
+      }
+    }
+    const cfg: any = generateSingboxConfig(upstream, 'socks5', [], {
+      xraySocksPort: 25555,
+      resolvedVpnEndpointIp: '185.100.100.1'
+    })
+
+    const proxyOut = cfg.outbounds.find((o: any) => o.tag === 'proxy-out')
+    expect(proxyOut).toBeDefined()
+    expect(proxyOut.type).toBe('socks')
+    expect(proxyOut.server).toBe('127.0.0.1')
+    expect(proxyOut.server_port).toBe(25555)
+    expect(proxyOut.version).toBe('5')
+
+    const tunIn = cfg.inbounds.find((i: any) => i.type === 'tun')
+    expect(tunIn.route_exclude_address).toContain('185.100.100.1/32')
+    expect(tunIn.route_exclude_address).not.toContain('127.0.0.1/32')
   })
 })

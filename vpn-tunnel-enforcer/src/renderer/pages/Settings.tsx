@@ -510,6 +510,31 @@ export function Settings() {
             </span>
           </div>
 
+          <div className="pt-2 border-t border-[var(--color-border)]">
+            <div className="flex items-center justify-between gap-4">
+              <div className="flex-1">
+                <p className="text-sm text-[var(--color-text)] flex items-center gap-2">
+                  <Network className="w-4 h-4 text-[var(--color-accent)]" />
+                  Движок подключения (Proxy Core)
+                </p>
+                <p className="text-xs text-[var(--color-text-secondary)] mt-0.5">
+                  Автоматически выбирает нативный xray-core для новейших REALITY-серверов или sing-box для остальных протоколов.
+                </p>
+              </div>
+              <div className="w-52 shrink-0">
+                <MacSelect
+                  options={[
+                    { value: 'auto', label: 'Авто (рекомендуется)' },
+                    { value: 'sing-box', label: 'Только sing-box' },
+                    { value: 'xray', label: 'Только xray-core' }
+                  ]}
+                  value={settings.proxyEngine ?? 'auto'}
+                  onChange={(val) => updateSettings({ proxyEngine: val as any })}
+                />
+              </div>
+            </div>
+          </div>
+
           <ToggleRow
             icon={<Eye className="w-4 h-4 text-[var(--color-warning)]" />}
             title="Не делать онлайн-гео lookup в приложении"

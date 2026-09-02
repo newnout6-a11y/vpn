@@ -25,6 +25,9 @@ import { logEvent } from './appLogger'
 import { cleanupManagedChildPidDirs, removeManagedChildPidFile, writeManagedChildPidFile } from './managedChildProcess'
 import { getPhysicalAdapterDnsSources } from './physicalAdapterLockdown'
 import { serverPickerStore, serverGroupsStore } from './sharedStores'
+import { settingsStore } from './settings'
+import { resolveProxyEngine } from './proxyEngine'
+import { buildXrayProbeConfig } from './xrayEngine'
 import { getBundledResource, getDirectProxyPort, pickFreeLocalPort, sanitizeProxyOutbound, tunController } from './tunController'
 import type { ServerProfile } from '../shared/ipc-types'
 
@@ -227,10 +230,10 @@ export function classifyOutboundProbeFailure(protocol: string, logText: string, 
   if (/auth|authentication|unauthori[sz]ed|bad key|wrong (?:uuid|password)|permission denied/.test(text)) {
     return 'auth-failed'
   }
-  if (/tls|certificate|x509|server name|sni|reality verification/.test(text)) {
+  if (/tls|certificate|x509|server name|sni|reality verification|reality.*invalid connection|bad reality/.test(text)) {
     return 'tls-failed'
   }
-  if (/timeout|deadline exceeded|i\/o timeout|network is unreachable|host unreachable|operation timed out/.test(text)) {
+  if (/timeout|deadline exceeded|i\/o timeout|network is unreachable|host unreachable|operation timed out|connection refused/.test(text)) {
     return 'timeout'
   }
   return 'handshake-failed'
@@ -326,7 +329,6 @@ async function checkOutboundHealth(profile: ServerProfile): Promise<KeyHealthRes
   })
   const workDir = await mkdtemp(join(tmpdir(), KEY_PROBE_DIR_PREFIX))
   const logPath = join(workDir, 'sing-box.log')
-  const configPath = join(workDir, 'sing-box.json')
   const pidPath = join(workDir, KEY_PROBE_PID_FILE)
   let child: ReturnType<typeof spawn> | null = null
   let childOutput = ''
@@ -337,14 +339,26 @@ async function checkOutboundHealth(profile: ServerProfile): Promise<KeyHealthRes
     const physicalAdapter = directProxy
       ? null
       : (await getPhysicalAdapterDnsSources().catch(() => []))[0] ?? null
-    const config = buildKeyProbeConfig(profile, inboundPort, {
-      directProxy,
-      physicalInterface: physicalAdapter?.alias,
-      logPath
-    })
 
-    await writeFile(configPath, JSON.stringify(config, null, 2), 'utf8')
-    child = spawn(getBundledResource('sing-box.exe'), ['run', '-c', configPath], {
+    const proxyEngineSetting = settingsStore.get().proxyEngine ?? 'auto'
+    const engine = resolveProxyEngine(profile.outbound, proxyEngineSetting)
+    const isXray = engine === 'xray'
+    const probeExe = isXray ? getBundledResource('xray.exe') : getBundledResource('sing-box.exe')
+    const probeConfigPath = join(workDir, isXray ? 'xray.json' : 'sing-box.json')
+    const config = isXray
+      ? buildXrayProbeConfig(profile.outbound, inboundPort, {
+          directProxy,
+          clientDevice: profile.clientDevice,
+          logPath
+        })
+      : buildKeyProbeConfig(profile, inboundPort, {
+          directProxy,
+          physicalInterface: physicalAdapter?.alias,
+          logPath
+        })
+
+    await writeFile(probeConfigPath, JSON.stringify(config, null, 2), 'utf8')
+    child = spawn(probeExe, ['run', '-c', probeConfigPath], {
       cwd: workDir,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe']
@@ -352,8 +366,8 @@ async function checkOutboundHealth(profile: ServerProfile): Promise<KeyHealthRes
     await writeManagedChildPidFile(pidPath, {
       owner: 'key-health-probe',
       pid: child.pid ?? 0,
-      exePath: getBundledResource('sing-box.exe'),
-      configPath,
+      exePath: probeExe,
+      configPath: probeConfigPath,
       createdAt: Date.now()
     }).catch((err) => {
       logEvent('warn', 'key-health', 'failed to write key probe pidfile', err)

@@ -42,6 +42,8 @@ portable:
 extraResources:
   - from: resources/sing-box.exe
     to: sing-box.exe
+  - from: resources/xray.exe
+    to: xray.exe
   - from: resources/libcronet.dll
     to: libcronet.dll
   - from: resources/wintun.dll
