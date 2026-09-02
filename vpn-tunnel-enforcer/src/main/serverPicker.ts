@@ -97,41 +97,43 @@ const store = new Store<ServerPickerStore>({
 
 const PING_CONCURRENCY = 5
 
-// Neutral "is the tunnel responsive" probe targets, ordered RU-friendly first.
+// "Did traffic actually egress through proxy-out?" probe targets.
 //
-// The original list (Cloudflare trace + gstatic 204) is well-behaved on most
-// networks but Russian university Wi-Fi and some federal-ISP TSPU configs
-// outright drop 1.1.1.1 and gstatic.com. Result: every ping during a working
-// tunnel returns "—" because neither URL ever responds.
+// This probe exists to answer one question: is the VPN tunnel carrying
+// traffic to the open internet? So every target here MUST be a destination
+// that sing-box routes through `proxy-out` — never one the smart-RU split
+// sends to `direct-out`.
 //
-// Mitigation: race a longer list with two RU-domestic anchors at the front.
-//   - yandex.ru/favicon.ico     — Yandex is the largest RU search engine; no
-//                                 operator blocks the homepage. The favicon
-//                                 keeps the response tiny (~1 KB) so the RTT
-//                                 we measure is dominated by tunnel cost,
-//                                 not download time.
-//   - gosuslugi.ru/favicon.ico  — Federal government services portal; every
-//                                 RU ISP and university actively whitelists
-//                                 it, so it survives even the strictest
-//                                 captive-portal regimes.
-//   - 1.1.1.1/cdn-cgi/trace     — Source-of-truth on non-RU networks; small
-//                                 plain-text response (~30 bytes), no rate
-//                                 limit, allow-listed almost everywhere
-//                                 globally.
-//   - gstatic.com/generate_204  — 204-No-Content backup via Google.
+// History / the bug this guards against: the list used to lead with
+// `yandex.ru/favicon.ico` and `gosuslugi.ru/favicon.ico` as "RU-friendly
+// anchors that never get blocked". But smart-RU split routing deliberately
+// sends those exact domains to `direct-out` (geoip-ru / gov-ru rule-sets).
+// So `Promise.any` resolved the instant gosuslugi answered over the
+// PHYSICAL link — and `verifyAdaptiveConnection` reported "tunnel
+// verification succeeded" even when proxy-out was 100% dead (rejected
+// REALITY key, dead upstream). The kill-switch then stayed up with no
+// working tunnel behind it: total outage the app labelled "protected".
 //
-// The probe races them in parallel (see `tunnelHttpProbe`), so adding more
-// URLs cannot make a "Ping all" slower; it can only make it faster on
-// networks where some endpoints are blocked.
-const TUNNEL_PROBE_URLS = [
-  // RU-friendly endpoints (almost never blocked, even on uni Wi-Fi):
-  'https://yandex.ru/favicon.ico',
-  'https://www.gosuslugi.ru/favicon.ico',
-  // Then the global fallbacks. Keep them — they're the source of truth
-  // when the user is on a non-RU network.
-  'https://1.1.1.1/cdn-cgi/trace',
-  'https://www.gstatic.com/generate_204'
-] as const
+// The RU-anchor rationale (uni Wi-Fi / TSPU drops 1.1.1.1 + gstatic) only
+// applies to a DIRECT probe. Through a working tunnel the local network
+// sees just the encrypted proxy-out connection, so foreign anchors are
+// both correct and safe here. If proxy-out is up, at least one of these
+// resolves and responds; if every one fails, the tunnel is not carrying
+// traffic — which is exactly the verdict we want.
+//
+// Each target carries a strict response check so a transparent proxy or
+// captive-portal interstitial returning "200 OK" can't be mistaken for a
+// real round-trip through the exit node.
+const TUNNEL_PROBE_TARGETS: ReadonlyArray<{
+  url: string
+  accept: (status: number, body: string) => boolean
+}> = [
+  { url: 'https://www.gstatic.com/generate_204', accept: (s) => s === 204 },
+  { url: 'https://www.google.com/generate_204', accept: (s) => s === 204 },
+  { url: 'https://cp.cloudflare.com/generate_204', accept: (s) => s === 204 },
+  // IP literal — no DNS dependency, proves the tunnel moves raw packets.
+  { url: 'https://1.1.1.1/cdn-cgi/trace', accept: (s, b) => s === 200 && /(^|\n)ip=/.test(b) }
+]
 
 // Cache the last tunnel-probe result for a short window so a `pingAll`
 // sweep across N profiles doesn't fan out into N identical requests
@@ -222,16 +224,18 @@ export async function pingServer(
  * ping during an active tunnel returned `ms: 5000` followed by
  * `Пинг … не прошёл`.
  *
- * Strategy: race all probe URLs concurrently and take the first one that
- * resolves. This shaves up to (N-1) * timeout off per "Ping all" call
- * when one of the URLs is firewall-blocked but others work — which is
- * exactly the scenario on RU university Wi-Fi where Cloudflare and
- * gstatic are dropped but Yandex / Gosuslugi sail through.
+ * Strategy: race the probe targets concurrently and take the first one
+ * that both responds AND returns the payload it's supposed to (so a
+ * transparent proxy / captive portal answering "200 OK" can't be mistaken
+ * for a real round-trip). Every target is a FOREIGN endpoint that sing-box
+ * routes through `proxy-out` — never a domain the smart-RU split sends to
+ * `direct-out`, which would let the probe "succeed" over the physical link
+ * while the tunnel is dead. If all targets fail, the tunnel is not
+ * carrying traffic — a null here is a real verdict, not just a slow link.
  *
- * Caches the winning result for a few seconds so back-to-back pingAll
- * sweeps don't fire identical requests against the same CDN (the tunnel
- * itself is the bottleneck — every profile would return the same number
- * anyway).
+ * Caches the winning result for a few seconds so back-to-back sweeps don't
+ * fire identical requests against the same CDN (the tunnel itself is the
+ * bottleneck — every profile would return the same number anyway).
  */
 export async function tunnelHttpProbe(skipCache = false): Promise<number | null> {
   const sessionKey = currentTunnelProbeSessionKey()
@@ -249,20 +253,28 @@ export async function tunnelHttpProbe(skipCache = false): Promise<number | null>
     if (Date.now() - cached.at < ttl) return cached.value
   }
 
-  // Fire every probe in parallel. `validateStatus < 500` accepts any
-  // success/redirect/client-error response — generate_204 returns 204,
-  // the trace endpoint returns 200, favicons return 200 — all count as
-  // "the tunnel made it through". `Connection: close` ensures we measure
-  // a fresh round-trip rather than the warmth of a pooled TLS session.
+  // Fire every probe in parallel. We accept the response only when its
+  // status/body matches what that endpoint is supposed to return — a bare
+  // "status < 500" would let a captive-portal or transparent-proxy "200 OK"
+  // masquerade as a real round-trip through the exit node. `Connection:
+  // close` ensures we measure a fresh round-trip rather than the warmth of
+  // a pooled TLS session.
   const start = performance.now()
-  const races = TUNNEL_PROBE_URLS.map(url =>
+  const races = TUNNEL_PROBE_TARGETS.map(target =>
     axios
-      .get(url, {
+      .get(target.url, {
         timeout: TUNNEL_PROBE_URL_TIMEOUT_MS,
-        validateStatus: status => status < 500,
+        validateStatus: () => true,
+        responseType: 'text',
+        transformResponse: (d) => d,
         headers: { 'Cache-Control': 'no-cache', Connection: 'close' }
       })
-      .then(() => Math.round(performance.now() - start))
+      .then(resp => {
+        if (!target.accept(resp.status, typeof resp.data === 'string' ? resp.data : String(resp.data ?? ''))) {
+          throw new Error(`probe rejected: ${target.url} -> ${resp.status}`)
+        }
+        return Math.round(performance.now() - start)
+      })
   )
 
   try {
@@ -273,11 +285,10 @@ export async function tunnelHttpProbe(skipCache = false): Promise<number | null>
     tunnelProbeCache = { value: ms, at: Date.now(), sessionKey }
     return ms
   } catch {
-    // All racers rejected — Promise.any throws AggregateError. The tunnel
-    // is genuinely unreachable, or every probe URL is blocked on this
-    // network (vanishingly unlikely with four geographically diverse
-    // anchors, but we cache the negative result either way so we don't
-    // hammer the network repeatedly).
+    // All racers rejected — Promise.any throws AggregateError. Every target
+    // routes through proxy-out, so this means the tunnel is not carrying
+    // traffic to the open internet. Cache the negative result briefly so we
+    // don't hammer the network on back-to-back checks.
     tunnelProbeCache = { value: null, at: Date.now(), sessionKey }
     return null
   }

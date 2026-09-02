@@ -1,5 +1,5 @@
 import { exec as execCb, execFile as execFileCb } from 'child_process'
-import { writeFile, mkdir, copyFile, access, rename, stat } from 'fs/promises'
+import { writeFile, mkdir, copyFile, access, rename, stat, readFile } from 'fs/promises'
 import { join, dirname } from 'path'
 import { promisify } from 'util'
 import { createConnection, createServer, isIP } from 'net'
@@ -303,6 +303,46 @@ const EXTERNAL_PROXY_PROCESS_NAMES = [
 
 export function getTunRuntimeDir(): string {
   return join(app.getPath('userData'), 'tun-runtime')
+}
+
+export type SingBoxOutboundFault = 'reality-key-mismatch' | 'tls-handshake-failed' | 'upstream-unreachable'
+
+/**
+ * Scan the tail of the live sing-box log for a persistent `proxy-out`
+ * failure that mode-switching (MTU / TLS fragmentation) cannot fix:
+ *
+ *   - `reality verification failed` — the server rejected our REALITY
+ *     public key / short-id (rotated server key, expired trial key, or the
+ *     imported key was never valid). Repeats on every single dial.
+ *   - TLS/cert handshake failures — the front SNI or cert no longer lines up.
+ *   - connection refused / timeout to the upstream — the node is down.
+ *
+ * Returns the dominant fault only when it shows up repeatedly (≥ 3 lines in
+ * the recent tail), so a single transient error during startup doesn't trip
+ * it. Best-effort: any read problem returns null.
+ */
+export async function readRecentSingBoxOutboundFault(
+  logPath: string = join(getTunRuntimeDir(), 'sing-box.log')
+): Promise<SingBoxOutboundFault | null> {
+  try {
+    const raw = await readFile(logPath, 'utf8')
+    const lines = raw.split(/\r?\n/).slice(-500)
+    let reality = 0
+    let tls = 0
+    let unreachable = 0
+    for (const line of lines) {
+      if (!/\bERROR\b/.test(line)) continue
+      if (/reality verification failed/i.test(line)) reality++
+      else if (/\b(tls|x509|certificate|bad certificate|handshake failure|remote error)\b/i.test(line)) tls++
+      else if (/\b(connection refused|i\/o timeout|no route to host|network is unreachable|context deadline exceeded|dial tcp)\b/i.test(line)) unreachable++
+    }
+    if (reality >= 3) return 'reality-key-mismatch'
+    if (tls >= 3) return 'tls-handshake-failed'
+    if (unreachable >= 3) return 'upstream-unreachable'
+    return null
+  } catch {
+    return null
+  }
 }
 
 export function getBundledResource(name: string): string {

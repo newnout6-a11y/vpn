@@ -14,7 +14,7 @@
  *   - parseProxyAddress handles IPv4 / IPv6 / bad input.
  */
 
-import { describe, it, expect, vi, afterEach } from 'vitest'
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 
 // ─── Mock the import chain so tunController loads under vitest/node ──────────
 vi.mock('electron', () => ({
@@ -85,7 +85,16 @@ vi.mock('./domainRouting', () => ({
   generateDomainRouteRules: () => domainState.rules
 }))
 
-import { generateSingboxConfig, parseProxyAddress } from './tunController'
+import { mkdtempSync, writeFileSync, rmSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
+import { generateSingboxConfig, parseProxyAddress, readRecentSingBoxOutboundFault } from './tunController'
+
+function repeatLine(line: string, n: number): string {
+  return Array.from({ length: n }, () => line).join('\n')
+}
+const REALITY_LINE =
+  '+0300 2026-09-02 10:54:31 ERROR [123 200ms] connection: open connection to 1.1.1.1:443 using outbound/vless[proxy-out]: reality verification failed'
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -638,5 +647,50 @@ describe('generateSingboxConfig smart RU split', () => {
     const idxSmart = cfg.route.rules.findIndex((r: any) => r.rule_set)
     expect(idxUser).toBeGreaterThanOrEqual(0)
     expect(idxSmart).toBeGreaterThan(idxUser)
+  })
+})
+
+// ─── sing-box outbound fault reader ─────────────────────────────────────────
+
+describe('readRecentSingBoxOutboundFault', () => {
+  let dir: string
+  const write = (content: string): string => {
+    const p = join(dir, 'sing-box.log')
+    writeFileSync(p, content, 'utf8')
+    return p
+  }
+
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'vpnte-fault-')) })
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }) })
+
+  it('flags a repeated REALITY verification failure', async () => {
+    expect(await readRecentSingBoxOutboundFault(write(repeatLine(REALITY_LINE, 5)))).toBe('reality-key-mismatch')
+  })
+
+  it('ignores a single transient REALITY error during startup', async () => {
+    const log = [
+      '+0300 2026-09-02 10:54:30 INFO sing-box started (0.40s)',
+      REALITY_LINE,
+      '+0300 2026-09-02 10:54:40 INFO [999 20ms] outbound/vless[proxy-out]: outbound connection to www.gstatic.com:443'
+    ].join('\n')
+    expect(await readRecentSingBoxOutboundFault(write(log))).toBeNull()
+  })
+
+  it('flags a repeated TLS handshake failure', async () => {
+    const line = '+0300 2026-09-02 10:54:31 ERROR [1 100ms] connection: open connection to proxy-out: remote error: tls: handshake failure'
+    expect(await readRecentSingBoxOutboundFault(write(repeatLine(line, 4)))).toBe('tls-handshake-failed')
+  })
+
+  it('flags a repeatedly unreachable upstream', async () => {
+    const line = '+0300 2026-09-02 10:54:31 ERROR [1 4s] connection: dial tcp 203.0.113.7:443: i/o timeout'
+    expect(await readRecentSingBoxOutboundFault(write(repeatLine(line, 3)))).toBe('upstream-unreachable')
+  })
+
+  it('returns null when the log is clean', async () => {
+    expect(await readRecentSingBoxOutboundFault(write('+0300 2026-09-02 10:54:31 INFO sing-box started (0.40s)'))).toBeNull()
+  })
+
+  it('returns null when the log file does not exist', async () => {
+    expect(await readRecentSingBoxOutboundFault(join(dir, 'nope.log'))).toBeNull()
   })
 })

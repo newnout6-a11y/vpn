@@ -270,9 +270,7 @@ export function ProfileSelectorInline() {
         aria-haspopup="listbox"
         className="w-full flex items-center gap-3 px-3 py-2 rounded-[var(--radius-sm)] hover:bg-[var(--color-border)]/40 transition-colors duration-[var(--transition-fast)] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-bg)]"
       >
-        <span className="grid h-9 w-9 place-items-center rounded-full bg-[var(--color-bg)] border border-[var(--color-border)] text-lg flex-shrink-0">
-          <CountryFlagIcon country={current?.country} name={current?.name} size={24} />
-        </span>
+        <CountryFlagIcon country={current?.country} name={current?.name} size={28} className="flex-shrink-0" />
         <div className="flex-1 min-w-0 text-left">
           <p className="text-xs uppercase tracking-wider text-[var(--color-text-secondary)]">
             {t('profileSelector.current', 'Текущий профиль')}

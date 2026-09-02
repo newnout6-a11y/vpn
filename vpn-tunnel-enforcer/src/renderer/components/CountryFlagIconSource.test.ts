@@ -61,10 +61,13 @@ describe('CountryFlagIcon sizing', () => {
   })
 
   it('requests the square 1x1 asset and does not force background-size', () => {
-    // Without `fis` the default asset is 4x3, which letterboxes inside a circle.
+    // The 1x1 asset is flag-icons' own square redrawing of each flag; it fills a
+    // circle with nothing cropped. The 4x3 asset would need a `cover` crop that
+    // shoves crosses and cantons off-centre.
     expect(componentCode).toContain('fi fis inline-block')
     // flag-icons' own `contain` cannot crop; `cover` on an off-square viewBox can.
     expect(componentCode).not.toContain('bg-cover')
+    expect(componentCode).not.toContain("backgroundSize")
   })
 
   it.each(callSites)('%s passes size, never a width class', (rel) => {

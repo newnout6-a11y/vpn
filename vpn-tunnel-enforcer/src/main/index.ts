@@ -7,7 +7,8 @@ import { rm } from 'fs/promises'
 import { promisify } from 'util'
 import { join } from 'path'
 import { happDetector } from './happDetector'
-import { tunController, detectForeignTun, killOwnedTunRuntimeProcesses, isOwnedTunRuntimeRunning } from './tunController'
+import { tunController, detectForeignTun, killOwnedTunRuntimeProcesses, isOwnedTunRuntimeRunning, readRecentSingBoxOutboundFault } from './tunController'
+import type { SingBoxOutboundFault } from './tunController'
 import { classifyNavigation } from './navigationPolicy'
 import { ipMonitor } from './ipMonitor'
 import { autoconfig } from './autoconfig'
@@ -148,6 +149,17 @@ function nextDirectVpnSibling(context: NonNullable<typeof activeAdaptiveContext>
   }
 }
 
+function adaptiveOutboundFaultMessage(fault: SingBoxOutboundFault): string {
+  switch (fault) {
+    case 'reality-key-mismatch':
+      return 'Сервер отклоняет ключ (REALITY verification failed). Скорее всего ключ устарел — обновите подписку или переимпортируйте ключ, либо выберите другой сервер.'
+    case 'tls-handshake-failed':
+      return 'Сервер не проходит TLS-проверку — возможно, он недоступен или его настройки изменились. Попробуйте другой сервер.'
+    case 'upstream-unreachable':
+      return 'Сервер не отвечает. Попробуйте другой сервер или проверьте подписку.'
+  }
+}
+
 function ensureAdaptiveMonitoringForRunningTunnel(): void {
   if (activeAdaptiveContext || !settingsStore.get().adaptiveBypassEnabled) return
   const tun = tunController.getStatus()
@@ -205,6 +217,36 @@ async function verifyAdaptiveConnection(): Promise<void> {
   if (latency !== null) {
     markAdaptiveSuccess(context.profile)
     logEvent('info', 'adaptive-bypass', 'tunnel verification succeeded', { latency })
+    return
+  }
+
+  // The probe failed: nothing reached the open internet through proxy-out.
+  // Before spending a compatibility-mode restart, check whether sing-box is
+  // reporting an outbound fault that MTU/TLS tweaks cannot fix (rejected
+  // REALITY key, dead upstream, cert mismatch). Those need a different
+  // server or a fresh key — jump straight to server fallback / a clear
+  // error instead of looping through compatibility transitions.
+  const outboundFault = await readRecentSingBoxOutboundFault()
+  if (generation !== adaptiveVerificationGeneration || !tunController.getStatus().running) return
+  if (outboundFault) {
+    logEvent('warn', 'adaptive-bypass', 'tunnel verification failed — sing-box outbound fault', { fault: outboundFault })
+    const sibling = nextDirectVpnSibling(context)
+    if (sibling) {
+      markAdaptiveServerFallback()
+      const restarted = await tunController.restartForAdaptiveChange(
+        getAdaptiveBypassStatus().mode,
+        `sing-box outbound fault: ${outboundFault}`,
+        { vpnProfile: sibling }
+      )
+      if (restarted.success) {
+        context.profile = sibling
+        scheduleAdaptiveVerification()
+        return
+      }
+      markAdaptiveFailure(restarted.error || adaptiveOutboundFaultMessage(outboundFault))
+      return
+    }
+    markAdaptiveFailure(adaptiveOutboundFaultMessage(outboundFault))
     return
   }
 
