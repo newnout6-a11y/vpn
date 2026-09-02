@@ -1,4 +1,4 @@
-﻿import { describe, it, expect } from 'vitest'
+import { describe, it, expect } from 'vitest'
 import { resolveProxyEngine } from './proxyEngine'
 import {
   toXrayOutbound,
@@ -195,7 +195,7 @@ describe('buildXrayConfig', () => {
     expect(config.inbounds[0].listen).toBe('127.0.0.1')
     expect(config.outbounds.some((o: any) => o.tag === 'proxy')).toBe(true)
     expect(config.outbounds.some((o: any) => o.tag === 'direct')).toBe(true)
-    expect(config.routing.rules.some((r: any) => r.ip?.includes('geoip:private'))).toBe(true)
+    expect(config.routing.rules.some((r: any) => r.ip?.includes('10.0.0.0/8'))).toBe(true)
   })
 })
 

@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Native Xray-core Engine — runs a managed vpnte-xray.exe process on loopback
  * SOCKS5 to handle protocols/inbounds (especially modern REALITY) that reject sing-box.
  *
@@ -315,7 +315,18 @@ export function buildXrayConfig(
     ],
     routing: {
       rules: [
-        { type: 'field', ip: ['geoip:private'], outboundTag: 'direct' },
+        {
+          type: 'field',
+          ip: [
+            '10.0.0.0/8',
+            '172.16.0.0/12',
+            '192.168.0.0/16',
+            '127.0.0.0/8',
+            '169.254.0.0/16',
+            '100.64.0.0/10'
+          ],
+          outboundTag: 'direct'
+        },
         { type: 'field', network: 'tcp,udp', outboundTag: 'proxy' }
       ]
     }
