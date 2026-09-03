@@ -306,8 +306,7 @@ const EXTERNAL_PROXY_PROCESS_NAMES = [
 ]
 
 export function getTunRuntimeDir(): string {
-  const base = app?.getPath ? app.getPath('userData') : join(process.env.APPDATA || process.cwd(), 'vpn-tunnel-enforcer')
-  return join(base, 'tun-runtime')
+  return join(app.getPath('userData'), 'tun-runtime')
 }
 
 export type SingBoxOutboundFault = 'reality-key-mismatch' | 'tls-handshake-failed' | 'upstream-unreachable'

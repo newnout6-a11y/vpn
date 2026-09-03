@@ -11,12 +11,14 @@ import { spawn, type ChildProcess } from 'child_process'
 import { isIP, Socket } from 'net'
 import { promises as dns } from 'dns'
 import { join } from 'path'
-import { readFile, writeFile } from 'fs/promises'
+import { readFile, writeFile, rename } from 'fs/promises'
 import { logEvent } from './appLogger'
 import {
   writeManagedChildPidFile,
-  removeManagedChildPidFile
+  removeManagedChildPidFile,
+  cleanupManagedChildPidFile
 } from './managedChildProcess'
+import { ensureKillSwitchProgramAllowed } from './firewallKillSwitch'
 import {
   getTunRuntimeDir,
   getBundledResource,
@@ -288,8 +290,14 @@ export function buildXrayConfig(
     : join(getTunRuntimeDir(), 'xray.log').replace(/\\/g, '/')
 
   return {
+    // `info`, not `warning`: xray logs dial/handshake failures
+    // ("failed to find an available destination", "dial tcp … i/o timeout")
+    // at Info level — at `warning` the log is silent on every failure and
+    // `readRecentXrayOutboundFault` can never see a fault to trigger
+    // server-fallback. Matches sing-box's `level: 'info'`. The log is rotated
+    // to xray.prev.log on each start so a long session can't grow it forever.
     log: {
-      loglevel: 'warning',
+      loglevel: 'info',
       access: '',
       error: logOutput
     },
@@ -452,6 +460,16 @@ export async function startXray(
   const logPath = join(runtimeDir, 'xray.log')
   const pidPath = join(runtimeDir, XRAY_PID_FILE)
 
+  // Reap an orphan vpnte-xray.exe from a previous hard-crashed session before
+  // we spawn a new one (identity-verified against the recorded exe+config path).
+  await cleanupManagedChildPidFile(pidPath, 'xray-engine', (message, details) => {
+    logEvent('warn', 'xray', message, details)
+  }).catch(() => undefined)
+
+  // Rotate the previous run's log so a fresh session starts clean and a long
+  // uptime at `info` verbosity can't grow it unbounded.
+  await rename(logPath, join(runtimeDir, 'xray.prev.log')).catch(() => undefined)
+
   const server = String(sbOutbound.server || '')
   let resolvedIp = options.resolvedIp || null
   if (!resolvedIp && isIP(server) === 0) {
@@ -506,6 +524,25 @@ export async function startXray(
     createdAt: Date.now()
   }).catch((err) => {
     logEvent('warn', 'xray', 'failed to write xray pidfile', err)
+  })
+
+  // Allow xray through the firewall kill-switch by exe path. tunController's
+  // enableKillSwitch({ proxyOwnerProgramPaths }) also covers this on a fresh
+  // connect, but its "kill-switch already active — reusing existing rules"
+  // fast-path skips adding new program rules — so a first xray connect while a
+  // stale non-xray kill-switch is up (or a preserveNetworkProtection restart
+  // during server fallback) would leave xray's dial blocked (WSAEACCES).
+  // This call is idempotent and no-ops when the kill-switch is inactive.
+  await ensureKillSwitchProgramAllowed(
+    exePath,
+    'xray-engine',
+    'VPN Tunnel Enforcer kill-switch: allow xray-core engine outbound.'
+  ).then((res) => {
+    if (!res.success && !res.skipped) {
+      logEvent('warn', 'xray', 'kill-switch allow rule for xray not confirmed', { message: res.message })
+    }
+  }).catch((err) => {
+    logEvent('warn', 'xray', 'failed to ensure xray kill-switch allow rule', err)
   })
 
   let childStderr = ''
@@ -602,19 +639,27 @@ export async function readRecentXrayOutboundFault(
     let unreachable = 0
 
     for (const line of lines) {
-      if (!/\[(Warning|Error)\]/i.test(line)) continue
-      if (/reality verification failed|reality.*invalid connection|bad reality/i.test(line)) {
+      // xray logs failures at [Info] (not [Warning]/[Error]); accept all three.
+      if (!/\[(Info|Warning|Error)\]/i.test(line)) continue
+      if (/reality verification failed|reality:.*invalid connection|bad reality/i.test(line)) {
         reality++
-      } else if (/\b(tls|x509|certificate|bad certificate|handshake failure|remote error)\b/i.test(line)) {
+      } else if (/\b(x509|bad certificate|tls: handshake failure|remote error: tls)\b/i.test(line)) {
         tls++
-      } else if (/\b(connection refused|i\/o timeout|no route to host|network is unreachable|context deadline exceeded|dial tcp|connection ends)\b/i.test(line)) {
+      } else if (
+        /failed to find an available destination|failed to process outbound traffic|all retry attempts failed/i.test(line) ||
+        /\b(connection refused|i\/o timeout|no route to host|network is unreachable|context deadline exceeded|dial tcp|connection ends)\b/i.test(line)
+      ) {
         unreachable++
       }
     }
 
+    // xray's client log cannot distinguish "server rejected my REALITY" from
+    // "server unreachable" — both surface as "failed to find an available
+    // destination". So an incompatible REALITY server reads as
+    // 'upstream-unreachable' here, which still drives the server-fallback path.
     if (reality >= 2) return 'reality-key-mismatch'
     if (tls >= 2) return 'tls-handshake-failed'
-    if (unreachable >= 2) return 'upstream-unreachable'
+    if (unreachable >= 3) return 'upstream-unreachable'
     return null
   } catch {
     return null

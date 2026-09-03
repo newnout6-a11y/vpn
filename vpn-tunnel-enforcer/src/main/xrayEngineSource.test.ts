@@ -18,8 +18,12 @@ describe('xrayEngine architectural invariants', () => {
     expect(xrayEngineSrc).not.toContain('dokodemo-door')
   })
 
-  it('configures Xray logging level as warning', () => {
-    expect(xrayEngineSrc).toContain("loglevel: 'warning'")
+  it('configures Xray logging at info level so failures are visible to the fault reader', () => {
+    expect(xrayEngineSrc).toContain("loglevel: 'info'")
+  })
+
+  it('routes xray outbound through the firewall kill-switch allow-list', () => {
+    expect(xrayEngineSrc).toContain('ensureKillSwitchProgramAllowed')
   })
 
   it('tunController includes vpnte-xray.exe in EXTERNAL_PROXY_PROCESS_NAMES', () => {

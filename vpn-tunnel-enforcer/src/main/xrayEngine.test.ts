@@ -1,4 +1,30 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
+import { writeFile, rm } from 'fs/promises'
+import { join } from 'path'
+import { tmpdir } from 'os'
+
+// xrayEngine.ts imports from ./tunController, which pulls in electron + its
+// whole sibling graph. Stub the few functions xrayEngine actually needs so
+// these pure-function tests don't require the full main-process import chain.
+vi.mock('./tunController', () => ({
+  getTunRuntimeDir: () => join(tmpdir(), 'vpnte-test-tun-runtime'),
+  getBundledResource: (name: string) => join(tmpdir(), 'vpnte-test', name),
+  pickFreeLocalPort: vi.fn(async () => 50123),
+  copyResourceIfStale: vi.fn(async () => true)
+}))
+vi.mock('./firewallKillSwitch', () => ({
+  ensureKillSwitchProgramAllowed: vi.fn(async () => ({ success: true, skipped: true, message: 'inactive' }))
+}))
+vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
+vi.mock('./vpnProfiles', () => ({
+  clientFingerprintForDevice: (d: string) => ({ pc: 'chrome', android: 'android', ios: 'ios', mac: 'safari' }[d] || 'chrome')
+}))
+vi.mock('./managedChildProcess', () => ({
+  writeManagedChildPidFile: vi.fn(async () => undefined),
+  removeManagedChildPidFile: vi.fn(async () => undefined),
+  cleanupManagedChildPidFile: vi.fn(async () => undefined)
+}))
+
 import { resolveProxyEngine } from './proxyEngine'
 import {
   toXrayOutbound,
@@ -6,9 +32,6 @@ import {
   buildXrayProbeConfig,
   readRecentXrayOutboundFault
 } from './xrayEngine'
-import { writeFile, rm } from 'fs/promises'
-import { join } from 'path'
-import { tmpdir } from 'os'
 
 describe('resolveProxyEngine', () => {
   it('defaults to xray for reality in auto mode', () => {
@@ -189,7 +212,7 @@ describe('buildXrayConfig', () => {
     const outbound = { protocol: 'freedom', tag: 'proxy' }
     const config = buildXrayConfig(outbound, 19999, { logPath: 'C:\\test\\xray.log' })
 
-    expect(config.log.loglevel).toBe('warning')
+    expect(config.log.loglevel).toBe('info')
     expect(config.inbounds[0].protocol).toBe('socks')
     expect(config.inbounds[0].port).toBe(19999)
     expect(config.inbounds[0].listen).toBe('127.0.0.1')
@@ -237,11 +260,12 @@ describe('readRecentXrayOutboundFault', () => {
     }
   })
 
-  it('detects upstream unreachable from timeout log', async () => {
+  it('detects upstream unreachable from repeated dial failures', async () => {
     const tmp = join(tmpdir(), 'test-xray-log-fault2.log')
     const logContent = [
-      '2026/09/02 12:00:00 [Warning] [12345] dial tcp 1.2.3.4:443: i/o timeout',
-      '2026/09/02 12:00:01 [Warning] [12345] dial tcp 1.2.3.4:443: connect: connection refused'
+      '2026/09/02 12:00:00 [Info] [1] app/proxyman/outbound: failed to process outbound traffic > proxy/vless/outbound: failed to find an available destination > common/retry: [dial tcp 1.2.3.4:443: i/o timeout] > common/retry: all retry attempts failed',
+      '2026/09/02 12:00:01 [Info] [2] app/proxyman/outbound: failed to process outbound traffic > proxy/vless/outbound: failed to find an available destination',
+      '2026/09/02 12:00:02 [Info] [3] proxy/vless/outbound: failed to find an available destination > common/retry: [dial tcp 1.2.3.4:443: connect: connection refused] > common/retry: all retry attempts failed'
     ].join('\n')
 
     await writeFile(tmp, logContent, 'utf8')
