@@ -284,11 +284,26 @@ export async function tunnelHttpProbe(skipCache = false): Promise<number | null>
     const ms = await Promise.any(races)
     tunnelProbeCache = { value: ms, at: Date.now(), sessionKey }
     return ms
-  } catch {
+  } catch (err) {
     // All racers rejected — Promise.any throws AggregateError. Every target
     // routes through proxy-out, so this means the tunnel is not carrying
     // traffic to the open internet. Cache the negative result briefly so we
     // don't hammer the network on back-to-back checks.
+    //
+    // Log *why* each one failed. Before this, "tunnel verification failed"
+    // was a black box — DNS timeout, TCP refused, and a captive-portal 200
+    // all looked identical from the outside, so a real network issue (e.g.
+    // a phone-hotspot path-MTU blackhole hanging the DoH/HTTPS handshake for
+    // several seconds before timing out) was indistinguishable from a dead
+    // proxy-out without re-running the connection under a debugger.
+    if (err instanceof AggregateError) {
+      logEvent('debug', 'server-picker', 'tunnel probe: every target failed', {
+        reasons: err.errors.map((e: unknown, i: number) => ({
+          url: TUNNEL_PROBE_TARGETS[i]?.url,
+          error: e instanceof Error ? e.message : String(e)
+        }))
+      })
+    }
     tunnelProbeCache = { value: null, at: Date.now(), sessionKey }
     return null
   }

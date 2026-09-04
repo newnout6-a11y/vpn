@@ -222,4 +222,23 @@ describe('main IPC regressions', () => {
     expect(ipMonitorSource()).not.toContain('https://ipinfo.io/json')
     expect(leakDiagnosticsSource()).not.toContain('https://ipinfo.io/json')
   })
+
+  it('sends to the renderer only through the isDestroyed-guarded helper', () => {
+    // Regression: `mainWindow?.webContents.send(...)` only guards against
+    // `mainWindow` being null. A closed-but-not-yet-nulled window is still
+    // non-null, and `.webContents` on a destroyed BrowserWindow throws
+    // `TypeError: Object has been destroyed` — uncaught, from whatever
+    // background path triggered the send. Hit live via
+    // tunController.onStatusChange during a failed adaptive restart
+    // (server-log: "terminal cleanup after failed protected restart failed").
+    // Every send must go through sendToMainWindow(), which checks
+    // `mainWindow && !mainWindow.isDestroyed()` first.
+    const source = mainIndexSource()
+    // Scan code, not prose: sendToMainWindow's own doc comment names the
+    // forbidden pattern to explain why it's forbidden.
+    const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^[ \t]*\/\/.*$/gm, '')
+    expect(source).toContain('function sendToMainWindow(')
+    expect(source).toContain('if (mainWindow && !mainWindow.isDestroyed())')
+    expect(code).not.toContain('mainWindow?.webContents.send(')
+  })
 })

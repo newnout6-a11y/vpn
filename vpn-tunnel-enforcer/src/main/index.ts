@@ -97,6 +97,19 @@ const MAX_INSPECT_VPN_INPUT_CHARS = 256 * 1024
 
 let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
+
+// `mainWindow?.webContents.send(...)` is not enough: `?.` only guards against
+// `null`, but a closed/destroyed BrowserWindow can still be a non-null
+// reference (the window is torn down asynchronously; a stale `mainWindow`
+// pointer is common when a background timer/callback fires mid-teardown).
+// `.webContents` on a destroyed window throws `TypeError: Object has been
+// destroyed`, uncaught, from inside whatever background path triggered the
+// send (e.g. tunController.onStatusChange during a failed adaptive restart).
+function sendToMainWindow(channel: string, ...args: unknown[]): void {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(channel, ...args)
+  }
+}
 let isQuitting = false
 let shutdownInProgress = false
 let latestPublicIp: string | null = null
@@ -475,7 +488,7 @@ function createWindow() {
       // also notified via 'app:shutting-down' so it can disable controls).
       isQuitting = true
       try {
-        mainWindow?.webContents.send('app:shutting-down')
+        sendToMainWindow('app:shutting-down')
       } catch {
         /* renderer may already be gone */
       }
@@ -809,7 +822,7 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
           // IP changed — this is the VPN exit IP. Rebaseline now.
           const rebased = await ipMonitor.recheck(true)
           try {
-            mainWindow?.webContents.send('ip-changed', { ip: rebased.ip, isLeak: rebased.isLeak })
+            sendToMainWindow('ip-changed', { ip: rebased.ip, isLeak: rebased.isLeak })
           } catch {}
           refreshTrayState({ status: 'protected', publicIp: rebased.ip, proxyAddr })
           return
@@ -822,7 +835,7 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
       const ipInfo = await ipMonitor.recheck(true)
       if (ipInfo.ip) {
         try {
-          mainWindow?.webContents.send('ip-changed', { ip: ipInfo.ip, isLeak: ipInfo.isLeak })
+          sendToMainWindow('ip-changed', { ip: ipInfo.ip, isLeak: ipInfo.isLeak })
         } catch {}
         refreshTrayState({ status: 'protected', publicIp: ipInfo.ip, proxyAddr })
       }
@@ -1020,7 +1033,7 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
         if (ipInfo.ip && ipInfo.ip !== preVpnIpDirect) {
           const rebased = await ipMonitor.recheck(true)
           try {
-            mainWindow?.webContents.send('ip-changed', { ip: rebased.ip, isLeak: rebased.isLeak })
+            sendToMainWindow('ip-changed', { ip: rebased.ip, isLeak: rebased.isLeak })
           } catch {}
           refreshTrayState({ status: 'protected', publicIp: rebased.ip, proxyAddr: profile.name })
           return
@@ -1032,7 +1045,7 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
       const ipInfo = await ipMonitor.recheck(true)
       if (ipInfo.ip) {
         try {
-          mainWindow?.webContents.send('ip-changed', { ip: ipInfo.ip, isLeak: ipInfo.isLeak })
+          sendToMainWindow('ip-changed', { ip: ipInfo.ip, isLeak: ipInfo.isLeak })
         } catch {}
         refreshTrayState({ status: 'protected', publicIp: ipInfo.ip, proxyAddr: profile.name })
       }
@@ -1312,7 +1325,7 @@ app.whenReady().then(async () => {
   // at which point real toasts come back.
   setInAppFallbackCallback((level, title, body) => {
     try {
-      mainWindow?.webContents.send('inapp-notification', { level, title, body, ts: Date.now() })
+      sendToMainWindow('inapp-notification', { level, title, body, ts: Date.now() })
     } catch {
       // Window may be torn down (close-on-quit race). Nothing to recover from.
     }
@@ -1327,7 +1340,7 @@ app.whenReady().then(async () => {
   // we prefer the physical-adapter toast — it's strictly more severe.
   setLeakDetectedCallback((r) => {
     try {
-      mainWindow?.webContents.send('leak-detected', r)
+      sendToMainWindow('leak-detected', r)
     } catch {}
     try {
       if (r.physicalAdapterReached) {
@@ -1922,14 +1935,14 @@ app.whenReady().then(async () => {
   trafficMonitor.onStatsChange((stats) => {
     latestTraffic = stats
     try {
-      mainWindow?.webContents.send('traffic-stats', stats)
+      sendToMainWindow('traffic-stats', stats)
     } catch {}
     refreshTrayState({ traffic: stats })
   })
 
   ipMonitor.onIpChange((ip: string, isLeak: boolean) => {
     latestPublicIp = ip
-    mainWindow?.webContents.send('ip-changed', { ip, isLeak })
+    sendToMainWindow('ip-changed', { ip, isLeak })
     refreshTrayState({ status: isLeak ? 'leak' : tunController.getStatus().running ? 'protected' : 'off', publicIp: ip })
     if (isLeak) {
       notify('error', 'Виден ваш реальный IP', `Текущий публичный IP: ${ip}. Включите защиту или проверьте VPN-клиент.`, 'leakDetected')
@@ -1937,7 +1950,7 @@ app.whenReady().then(async () => {
   })
 
   tunController.onStatusChange((status: string) => {
-    mainWindow?.webContents.send('tun-status-changed', status)
+    sendToMainWindow('tun-status-changed', status)
     const isRestarting = status.startsWith('restarting:')
     if (status === 'stopped' || status === 'killswitch-active') {
       adaptiveVerificationGeneration += 1
