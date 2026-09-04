@@ -118,9 +118,23 @@ async function runPowerShell(script: string, elevated: boolean, timeout: number)
 }
 
 /**
- * Build the exact DACL we want and stamp it onto the directory, then let every
- * existing child inherit it (`icacls /reset /T` replaces child ACLs with the
- * ones inherited from the now-protected parent).
+ * Build the exact DACL we want and stamp it onto the directory, then let
+ * every PRE-EXISTING CHILD inherit it.
+ *
+ * BUG THIS FIXES (live for weeks, silently no-op): the reset step used to be
+ * `icacls $dir /reset /T /C /Q` — `$dir` itself, plus `/T` to recurse. Per
+ * `icacls` semantics, `/reset` makes its target(s) inherit their DACL from
+ * *their own* parent. Applied to `$dir` itself, that undoes the `Set-Acl`
+ * two lines above in the same script — `$dir` immediately re-inherits from
+ * `%APPDATA%\...` (still fully writable by the interactive user), and the
+ * directory ends right back where it started. Every "ACL hardening
+ * succeeded" run was reverting itself before the verification read-back
+ * ever ran, which is why `verifyDirectoryHardened` kept reporting the
+ * interactive user's SID as an offender on every single connect. The fix:
+ * reset only `$dir`'s children (`$dir\*`), never `$dir` itself — new items
+ * created after `Set-Acl` already inherit the protected DACL by normal NTFS
+ * rules, so this step only matters for items that existed before hardening
+ * ever ran (e.g. binaries staged by an older build of this app).
  *
  * `-LiteralPath` throughout: runtime paths contain spaces and may contain
  * brackets, which PowerShell would otherwise treat as wildcards.
@@ -146,8 +160,13 @@ foreach ($sid in @($system, $admins)) {
 # would let them undo everything above, so this is load-bearing.
 $acl.SetOwner($admins)
 Set-Acl -LiteralPath $dir -AclObject $acl
-# Existing children keep their own explicit ACEs unless we reset them.
-& icacls $dir /reset /T /C /Q | Out-Null
+# Existing children keep their own explicit ACEs unless we reset them — but
+# NEVER pass $dir itself to /reset (see the function doc comment above: that
+# reintroduces inheritance from $dir's own parent and undoes the Set-Acl on
+# the line above). Only touch children, and only if any exist.
+if (Get-ChildItem -LiteralPath $dir -Force -ErrorAction SilentlyContinue | Select-Object -First 1) {
+  & icacls "$dir\\*" /reset /T /C /Q | Out-Null
+}
 Write-Output 'HARDENED'
 `
 }

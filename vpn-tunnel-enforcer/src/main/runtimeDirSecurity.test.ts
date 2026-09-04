@@ -254,11 +254,36 @@ describe('ensureElevatedRuntimeDirHardened', () => {
     // Well-known SIDs, not localized names.
     expect(script).toContain(SID_SYSTEM)
     expect(script).toContain(SID_ADMINS)
-    // Existing children must lose their own explicit ACEs.
+    // Existing children must lose their own explicit ACEs...
     expect(script).toContain('/reset /T')
+    // ...but the reset must target children only, NEVER `$dir` itself.
+    // `icacls /reset` makes its target inherit from *its own* parent — run on
+    // `$dir` itself that immediately undoes the `Set-Acl` two lines above,
+    // re-inheriting the still-writable-by-the-user parent DACL. This was a
+    // real, live bug: every "hardening succeeded" run was silently reverting
+    // itself before the read-back verification ever ran.
+    expect(script).toContain('icacls "$dir\\*"')
+    expect(script).not.toMatch(/icacls\s+\$dir\s+\/reset/)
     // Paths are passed literally so spaces and brackets survive.
     expect(script).toContain('-LiteralPath $dir')
     expect(script).toContain(RUNTIME_DIR)
+  })
+
+  it('does not revert its own Set-Acl by resetting $dir itself', async () => {
+    // Regression for the bug above, independent of the assertion in the test
+    // before this one: scan the whole script for ANY icacls invocation whose
+    // target is the bare directory variable (with or without quotes) rather
+    // than a child glob.
+    inspectResponses = [weakAcl(), hardenedAcl()]
+    await ensureElevatedRuntimeDirHardened(RUNTIME_DIR, 'tun-runtime')
+    const script = decodeEncodedCommand(String(execElevatedMock.mock.calls[0][0]))
+
+    const icaclsLines = script.split('\n').filter(line => /icacls/i.test(line))
+    expect(icaclsLines.length).toBeGreaterThan(0)
+    for (const line of icaclsLines) {
+      expect(line).not.toMatch(/icacls\s+\$dir\s/)
+      expect(line).not.toMatch(/icacls\s+"\$dir"\s/)
+    }
   })
 
   it('verifies the DACL after writing instead of trusting the exit code', async () => {
