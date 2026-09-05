@@ -1,7 +1,8 @@
 import { useAppStore, type AppSettings } from '../store'
 import { AnimatePresence, motion } from 'framer-motion'
-import { Bell, Eye, EyeOff, FileArchive, FolderOpen, Globe2, Languages, Loader2, MapPin, Network, Palette, RefreshCw, Save, Settings2, ShieldAlert, ShieldCheck, Wand2 } from 'lucide-react'
-import { ReactNode, useCallback, useEffect, useMemo, useState } from 'react'
+import { Bell, Eye, EyeOff, FileArchive, FolderOpen, Globe2, Languages, Loader2, MapPin, Network, Palette, RefreshCw, RotateCcw, Save, Settings2, ShieldAlert, ShieldCheck, Wand2 } from 'lucide-react'
+import { ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { cn } from '../design-system/utils'
 import { useTranslation } from 'react-i18next'
 import { KillSwitchSettings } from '../components/KillSwitchSettings'
 import { RotationSettings } from '../components/RotationSettings'
@@ -16,6 +17,66 @@ import { MacSegmentedControl } from '../design-system/MacSegmentedControl'
 import { MacSwitch } from '../design-system/MacSwitch'
 import { useTheme } from '../providers/ThemeProvider'
 import { navigateTo } from '../nav'
+
+/**
+ * Keys whose draft value diverges from the last-saved baseline. Kept as a
+ * standalone pure function so the dirty-tracking / reset behaviour is testable
+ * without mounting the page. `Object.is` comparison is deliberate — settings
+ * values are primitives or small stable objects replaced wholesale on edit.
+ */
+export function changedSettingKeys(
+  baseline: object | null | undefined,
+  draft: object | null | undefined
+): string[] {
+  const a = (baseline ?? {}) as Record<string, unknown>
+  const b = (draft ?? {}) as Record<string, unknown>
+  const changed: string[] = []
+  for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) {
+    if (!Object.is(a[k], b[k])) changed.push(k)
+  }
+  return changed
+}
+
+/**
+ * Tracks how the sticky save bar should present itself relative to page scroll:
+ * `docked` once the user has scrolled to the end of the content (bar anchors as
+ * a full-width footer), and `moving` briefly during an active scroll so it can
+ * ease out of the way instead of hanging rigidly over the text.
+ */
+function useSaveBarDock() {
+  const sentinelRef = useRef<HTMLDivElement>(null)
+  const [docked, setDocked] = useState(true)
+  const [moving, setMoving] = useState(false)
+
+  useEffect(() => {
+    const sentinel = sentinelRef.current
+    const scroller = sentinel?.closest('main') as HTMLElement | null
+    if (!sentinel || !scroller) return
+
+    let idle: ReturnType<typeof setTimeout>
+    const measure = () => {
+      const remaining = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight
+      setDocked(remaining <= 28)
+    }
+    const onScroll = () => {
+      measure()
+      setMoving(true)
+      clearTimeout(idle)
+      idle = setTimeout(() => setMoving(false), 170)
+    }
+    measure()
+    scroller.addEventListener('scroll', onScroll, { passive: true })
+    const ro = new ResizeObserver(measure)
+    ro.observe(scroller)
+    return () => {
+      scroller.removeEventListener('scroll', onScroll)
+      ro.disconnect()
+      clearTimeout(idle)
+    }
+  }, [])
+
+  return { sentinelRef, docked, moving }
+}
 
 interface ToggleRowProps {
   title: ReactNode
@@ -163,40 +224,40 @@ export function Settings() {
   const [exporting, setExporting] = useState(false)
   const [openingLogs, setOpeningLogs] = useState(false)
 
-  // Explicit save: edits stay in local component draft until explicitly
-  // saved. This prevents Dashboard's "Connect" or other background processes
-  // from silently persisting an uncommitted draft.
+  // Explicit save: edits live in a local `draft` and only reach disk when the
+  // user hits "Сохранить". `baseline` is the last-saved snapshot we diff
+  // against — deliberately its own state, not `storeSettings` by reference, so
+  // an unrelated store refresh can't make the bar flicker and "Сбросить"
+  // always lands the draft (and every control bound to it) on a known state.
+  const [baseline, setBaseline] = useState<AppSettings>(storeSettings)
   const [draft, setDraft] = useState<AppSettings>(storeSettings)
   const settings = draft
   const updateSettings = useCallback((partial: Partial<AppSettings>) => {
     setDraft(prev => ({ ...prev, ...partial }))
   }, [])
 
-  const isDirty = useMemo(() => {
-    if (draft === storeSettings) return false
-    if (!draft || !storeSettings) return true
-    const keysA = Object.keys(draft) as Array<keyof AppSettings>
-    const keysB = Object.keys(storeSettings) as Array<keyof AppSettings>
-    if (keysA.length !== keysB.length) return true
-    for (const k of keysA) {
-      if (draft[k] !== storeSettings[k]) return true
-    }
-    return false
-  }, [draft, storeSettings])
+  const changedKeys = useMemo(() => changedSettingKeys(baseline, draft), [baseline, draft])
+  const isDirty = changedKeys.length > 0
 
+  // Adopt external store updates only while the user hasn't started editing.
   useEffect(() => {
     if (!isDirty) {
+      setBaseline(storeSettings)
       setDraft(storeSettings)
     }
   }, [storeSettings, isDirty])
 
+  const resetDraft = useCallback(() => setDraft(baseline), [baseline])
+
   const [saving, setSaving] = useState(false)
+  const { sentinelRef, docked, moving } = useSaveBarDock()
 
   const handleSaveSettings = async () => {
     setSaving(true)
     try {
       const result = await window.electronAPI.saveSettings(draft)
       setSettings(result)
+      setBaseline(result)
       setDraft(result)
       useAppStore.getState().addGlobalToast('success', 'Настройки сохранены', 'Изменения применены.')
     } catch (err: any) {
@@ -256,6 +317,7 @@ export function Settings() {
     try {
       const savedSettings = await window.electronAPI.saveSettings(draft)
       setSettings(savedSettings)
+      setBaseline(savedSettings)
       setDraft(savedSettings)
       const state = await window.electronAPI.smartRouteRuleSetsRefresh(true)
       setRuleSetState(state)
@@ -710,10 +772,12 @@ export function Settings() {
                   applied = Boolean(status?.applied)
                   addLog('info', 'Доступ к местоположению Windows восстановлен.')
                 }
-                updateSettings({ locationPrivacyEnabled: applied })
                 const persisted = await window.electronAPI.saveSettings({ locationPrivacyEnabled: applied })
                 setSettings(persisted)
+                // Move draft and baseline together so this already-applied
+                // change doesn't register as an unsaved edit.
                 setDraft(prev => ({ ...prev, locationPrivacyEnabled: applied }))
+                setBaseline(prev => ({ ...prev, locationPrivacyEnabled: applied }))
               } catch (err: any) {
                 addLog('error', `Не удалось переключить настройку местоположения: ${err?.message ?? err}`)
               }
@@ -937,35 +1001,75 @@ export function Settings() {
         </button>
       </div>
 
-      {/* Sticky save bar — only rendered while the local draft differs from
-          what's on disk. Stays pinned to the bottom of the scroll area
-          (`sticky`, not `fixed`: the page content wrapper in App.tsx is the
-          scrolling ancestor) so it's visible no matter how far down the user
-          scrolled when they made the change. */}
+      {/* Anchors the scroll-position sensor for the save bar. Always mounted so
+          `useSaveBarDock` can find the scrolling <main> ancestor even before
+          the bar itself appears. */}
+      <div ref={sentinelRef} aria-hidden className="h-0 w-full" />
+
+      {/* Save bar — sticky to the bottom of the scroll area (the <main> wrapper
+          in App.tsx scrolls, not the window). It adapts to scroll:
+          • a compact pill while there's more content below / mid-scroll,
+            fading and easing down slightly so it doesn't sit like dead weight
+            over the text;
+          • a full-width docked card once you've scrolled to the end. */}
       <AnimatePresence>
         {isDirty && (
           <motion.div
-            initial={{ opacity: 0, y: 16 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: 16 }}
-            transition={{ duration: 0.16, ease: 'easeOut' }}
-            className="sticky bottom-4 z-20 flex items-center justify-between gap-4 rounded-[var(--radius-md)] border border-[var(--color-accent)]/40 bg-[var(--color-card-elevated)] px-4 py-3 shadow-[var(--shadow-modal)]"
+            key="settings-save-bar"
+            layout
+            initial={{ opacity: 0, y: 24 }}
+            animate={{
+              opacity: !docked && moving ? 0.5 : 1,
+              y: !docked && moving ? 8 : 0,
+              scale: !docked && moving ? 0.975 : 1,
+            }}
+            exit={{ opacity: 0, y: 24, transition: { duration: 0.14 } }}
+            transition={{
+              type: 'spring',
+              stiffness: 400,
+              damping: 32,
+              mass: 0.7,
+              opacity: { duration: 0.15 },
+            }}
+            style={{ bottom: docked ? 8 : 16 }}
+            className={cn(
+              'sticky z-30 mx-auto flex items-center justify-between gap-3 border shadow-[var(--shadow-modal)]',
+              docked
+                ? 'w-full max-w-3xl rounded-[var(--radius-lg)] border-[var(--color-border-strong)] bg-[var(--color-card-elevated)] px-5 py-3.5'
+                : 'w-fit max-w-full rounded-full border-[var(--color-accent)]/40 bg-[color-mix(in_srgb,var(--color-card-elevated)_92%,transparent)] px-3.5 py-2 backdrop-blur-xl'
+            )}
           >
-            <span className="text-sm text-[var(--color-text)]">
-              Есть несохранённые изменения — они пока не применены.
-            </span>
-            <div className="flex items-center gap-2">
+            <div className="flex min-w-0 items-center gap-2.5">
+              <span className="relative flex h-2 w-2 shrink-0">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--color-accent)] opacity-60" />
+                <span className="relative inline-flex h-2 w-2 rounded-full bg-[var(--color-accent)]" />
+              </span>
+              <div className="min-w-0 leading-tight">
+                <p className="truncate text-sm font-medium text-[var(--color-text)]">
+                  {docked
+                    ? 'Есть несохранённые изменения'
+                    : `Не сохранено${changedKeys.length > 1 ? ` · ${changedKeys.length}` : ''}`}
+                </p>
+                {docked && (
+                  <p className="truncate text-xs text-[var(--color-text-secondary)]">
+                    Изменено параметров: {changedKeys.length} — нажмите «Сохранить», чтобы применить.
+                  </p>
+                )}
+              </div>
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
               <MacButton
                 size="sm"
                 variant="ghost"
-                onClick={() => setDraft(storeSettings)}
+                onClick={resetDraft}
                 disabled={saving}
+                aria-label="Сбросить несохранённые изменения"
               >
-                Сбросить
+                {docked ? 'Сбросить' : <RotateCcw className="h-3.5 w-3.5" />}
               </MacButton>
               <MacButton size="sm" onClick={handleSaveSettings} loading={saving} disabled={saving}>
-                {!saving && <Save className="w-3.5 h-3.5 mr-1.5" />}
-                {saving ? 'Сохраняем…' : 'Сохранить и применить'}
+                {!saving && <Save className="mr-1.5 h-3.5 w-3.5" />}
+                {saving ? 'Сохраняем…' : docked ? 'Сохранить и применить' : 'Сохранить'}
               </MacButton>
             </div>
           </motion.div>
