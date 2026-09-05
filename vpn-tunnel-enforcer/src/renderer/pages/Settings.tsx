@@ -802,6 +802,7 @@ export function Settings() {
               // setting synchronously, so it applies and persists immediately
               // regardless of the Save button below (and keeps the dirty-bar
               // from popping up over a change that already took effect).
+              const toast = useAppStore.getState().addGlobalToast
               try {
                 let applied: boolean
                 if (next) {
@@ -818,8 +819,24 @@ export function Settings() {
                 // Move draft and baseline together so this already-applied
                 // change doesn't register as an unsaved edit.
                 commitDraftPartial({ locationPrivacyEnabled: applied })
+                if (applied === next) {
+                  toast(
+                    'success',
+                    next ? 'Местоположение Windows скрыто' : 'Местоположение Windows восстановлено',
+                    next
+                      ? 'Приложениям запрещён доступ к геолокации. Откатится автоматически при выключении VPN.'
+                      : 'Карты, Погода и другие приложения снова могут определять местоположение.'
+                  )
+                } else {
+                  toast(
+                    'warning',
+                    'Настройка местоположения не применилась',
+                    'Windows не дал изменить параметр. Проверьте права администратора или системную политику геолокации.'
+                  )
+                }
               } catch (err: any) {
                 addLog('error', `Не удалось переключить настройку местоположения: ${err?.message ?? err}`)
+                toast('error', 'Не удалось изменить настройку местоположения', err?.message ?? String(err))
               }
             }}
           />

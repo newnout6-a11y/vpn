@@ -70,6 +70,19 @@ describe('<Settings/> save bar', () => {
     expect(switchInRow(/Жёсткая блокировка адаптеров/)).toHaveAttribute('aria-checked', 'true')
   })
 
+  it('instant-apply location toggle shows a toast and never raises the save bar', async () => {
+    render(<Settings />)
+    await screen.findByText('settings.title')
+
+    fireEvent.click(switchInRow(/Скрывать местоположение Windows/))
+
+    await waitFor(() => expect(window.electronAPI.applyLocationPrivacy).toHaveBeenCalled())
+    await waitFor(() =>
+      expect(useAppStore.getState().globalToasts.some((t: any) => /Местоположение Windows/.test(t.title))).toBe(true),
+    )
+    expect(bar()).not.toBeInTheDocument()
+  })
+
   it('persists on Save and then hides', async () => {
     render(<Settings />)
     await screen.findByText('settings.title')
