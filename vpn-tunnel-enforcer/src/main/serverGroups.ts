@@ -269,21 +269,31 @@ function ensureManualKeysGroup(): string {
 // ─── Refresh helper ──────────────────────────────────────────────────────────
 
 /**
- * Connection-tuple-only key for a stored ServerProfile. Used by
- * refreshGroup() to match stored profiles against freshly-resolved
- * subscription profiles, which only have a tuple to offer. Keeping both
- * sides on the same key space prevents the "every refresh duplicates the
- * sourceUri-bearing keys" bug — we deliberately do NOT consult `sourceUri`
- * here because the fresh side never has a per-line URI at this point.
+ * Connection-tuple key for a stored ServerProfile.
+ * Used by refreshGroup() to match stored profiles against freshly-resolved
+ * subscription profiles.
+ *
+ * Distinct names or distinct sourceUris identify distinct endpoints
+ * even if they route through the same entry bridge (server:port:proto).
  */
-function profileTupleKey(p: { server: string; port: number; protocol: string }): string {
-  return `tuple:${p.server}|${p.port}|${p.protocol}`
+export function profileTupleKey(p: { server: string; port: number; protocol: string; name?: string; sourceUri?: string }): string {
+  const server = p.server || ''
+  const port = p.port || 0
+  const protocol = p.protocol || ''
+  const name = (p.name || '').trim()
+  const sourceUri = (p.sourceUri || '').trim()
+  return `tuple:${server}|${port}|${protocol}|${name}${sourceUri ? `|${sourceUri}` : ''}`
 }
 
-/** Connection-tuple-only key for a freshly-resolved VpnProfile. */
-function vpnProfileTupleKey(p: VpnProfile): string {
+/** Connection-tuple key for a freshly-resolved VpnProfile. */
+export function vpnProfileTupleKey(p: VpnProfile): string {
   const ob = p.outbound || {}
-  return `tuple:${ob.server || ''}|${Number(ob.server_port || 0)}|${p.protocol}`
+  const server = ob.server || ''
+  const port = Number(ob.server_port || 0)
+  const protocol = p.protocol || ''
+  const name = (p.name || '').trim()
+  const sourceUri = (p.sourceUri || '').trim()
+  return `tuple:${server}|${port}|${protocol}|${name}${sourceUri ? `|${sourceUri}` : ''}`
 }
 
 /**
@@ -317,8 +327,10 @@ function vpnProfileToServerProfile(
       ? clientFingerprintForDevice(clientDevice)
       : undefined,
     groupId,
-    sourceUri,
+    sourceUri: sourceUri ?? vpnProfile.sourceUri,
     lastSeenInSubscriptionAt: now,
+    removedFromSubscriptionAt: undefined,
+    enabledBeforeSubscriptionRemoval: undefined,
     enabled: true
   }
 }
@@ -467,20 +479,20 @@ async function refreshGroupUnlocked(
   // jump after a refresh), and append new profiles unchanged.
   const existingByDeviceAndKey = new Map<string, ServerProfile>()
   const existingByKey = new Map<string, ServerProfile[]>()
-  // IMPORTANT: index existing profiles by their CONNECTION TUPLE, not by
-  // profileKey(). profileKey() prefers `uri:<sourceUri>` when a profile has a
-  // sourceUri, but the fresh profiles coming back from a subscription refresh
-  // have no per-line URI here, so vpnProfileKey(fresh) always produces a
-  // `tuple:` key. Mixing the two key spaces means every profile that carries a
-  // sourceUri (now common, since backfillProfileSourceUris populates it) fails
-  // to match its fresh counterpart → the refresh re-adds it as a duplicate and
-  // keeps the stale copy. Keying both sides by the tuple keeps the match
-  // symmetric.
+  const existingByDeviceAndTupleWithoutUri = new Map<string, ServerProfile>()
+  const existingByTupleWithoutUri = new Map<string, ServerProfile[]>()
+
   for (const p of inGroupExisting) {
     const profileDevice = normalizeClientDevice(p.clientDevice)
-    existingByDeviceAndKey.set(`${profileDevice}|${profileTupleKey(p)}`, p)
     const tupleKey = profileTupleKey(p)
+    existingByDeviceAndKey.set(`${profileDevice}|${tupleKey}`, p)
     existingByKey.set(tupleKey, [...(existingByKey.get(tupleKey) ?? []), p])
+
+    const keyWithoutUri = `tuple:${p.server || ''}|${p.port || 0}|${p.protocol || ''}|${(p.name || '').trim()}`
+    if (!existingByDeviceAndTupleWithoutUri.has(`${profileDevice}|${keyWithoutUri}`)) {
+      existingByDeviceAndTupleWithoutUri.set(`${profileDevice}|${keyWithoutUri}`, p)
+    }
+    existingByTupleWithoutUri.set(keyWithoutUri, [...(existingByTupleWithoutUri.get(keyWithoutUri) ?? []), p])
   }
 
   let addedCount = 0
@@ -490,16 +502,26 @@ async function refreshGroupUnlocked(
   const addedNewKeys = new Set<string>()
 
   for (const { device, key, profile: fresh } of freshEntries) {
-    // The resolver doesn't give us per-profile sourceUris back, but for
-    // single-key inputs we could backfill from the input itself. The
-    // subscription-URL case has no per-line URI handy here, so we rely on
-    // the connection-tuple key — same behaviour as the legacy code.
     const deviceKey = `${device}|${key}`
     if (seenDeviceKeys.has(deviceKey)) continue
     seenDeviceKeys.add(deviceKey)
 
-    const prior = existingByDeviceAndKey.get(deviceKey)
+    const ob = fresh.outbound || {}
+    const keyWithoutUri = `tuple:${ob.server || ''}|${Number(ob.server_port || 0)}|${fresh.protocol || ''}|${(fresh.name || '').trim()}`
+    const deviceKeyWithoutUri = `${device}|${keyWithoutUri}`
+
+    let prior = existingByDeviceAndKey.get(deviceKey)
+    if (!prior && !fresh.sourceUri) {
+      const fallback = existingByDeviceAndTupleWithoutUri.get(deviceKeyWithoutUri)
+      if (fallback) {
+        prior = fallback
+      }
+    }
+
     if (prior) {
+      const priorTupleKey = profileTupleKey(prior)
+      seenDeviceKeys.add(`${device}|${priorTupleKey}`)
+      seenDeviceKeys.add(deviceKeyWithoutUri)
       const profileDevice = normalizeClientDevice(options.clientDevice ?? prior.clientDevice ?? device)
       const deviceFresh = freshByDeviceAndKey.get(`${profileDevice}|${key}`) ?? fresh
       const outbound = applyClientDeviceToOutbound(deviceFresh.outbound || {}, profileDevice)
@@ -518,6 +540,7 @@ async function refreshGroupUnlocked(
         protocol: deviceFresh.protocol,
         server: deviceFresh.outbound?.server || prior.server,
         port: deviceFresh.outbound?.server_port || prior.port,
+        sourceUri: deviceFresh.sourceUri ?? prior.sourceUri,
         // Update the human-readable name only if the upstream now has one
         // and the user hasn't overridden it (we have no way to know if
         // they did, so we conservatively only overwrite when our prior
@@ -537,9 +560,9 @@ async function refreshGroupUnlocked(
       }
       merged.push(updated)
       updatedCount++
-    } else if (!existingByKey.has(key) && !addedNewKeys.has(key)) {
+    } else if (!existingByKey.has(key) && (!fresh.sourceUri ? !existingByTupleWithoutUri.has(keyWithoutUri) : true) && !addedNewKeys.has(key)) {
       addedNewKeys.add(key)
-      merged.push(vpnProfileToServerProfile(fresh, groupId, undefined, now, { clientDevice: device }))
+      merged.push(vpnProfileToServerProfile(fresh, groupId, fresh.sourceUri, now, { clientDevice: device }))
       addedCount++
     } else {
       // The same connection tuple already exists in this group under another
@@ -559,7 +582,9 @@ async function refreshGroupUnlocked(
     const key = profileTupleKey(prior)
     const profileDevice = normalizeClientDevice(options.clientDevice ?? prior.clientDevice ?? primaryDevice)
     const deviceKey = `${profileDevice}|${key}`
-    if (seenDeviceKeys.has(deviceKey)) continue
+    const keyWithoutUri = `tuple:${prior.server || ''}|${prior.port || 0}|${prior.protocol || ''}|${(prior.name || '').trim()}`
+    const deviceKeyWithoutUri = `${profileDevice}|${keyWithoutUri}`
+    if (seenDeviceKeys.has(deviceKey) || seenDeviceKeys.has(deviceKeyWithoutUri)) continue
     removedProfileIds.add(prior.id)
     if (!prior.removedFromSubscriptionAt) removedCount++
     removedProfiles.push({

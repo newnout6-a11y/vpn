@@ -28,6 +28,7 @@ export interface VpnProfile {
   clientDevice?: ClientDevice
   clientFingerprint?: string
   resolvedIp?: string | null
+  sourceUri?: string
 }
 
 export interface VpnProfileSummary {
@@ -985,12 +986,14 @@ function buildTransportFromXrayStream(stream: Record<string, any>): Record<strin
   return undefined
 }
 
-function xrayOutboundToProfiles(raw: Record<string, any>): VpnProfile[] {
+function xrayOutboundToProfiles(raw: Record<string, any>, defaultName?: string): VpnProfile[] {
   const protocol = xrayProtocol(raw.protocol)
   if (!protocol) return []
   const settings = raw.settings && typeof raw.settings === 'object' ? raw.settings : {}
   const stream = raw.streamSettings && typeof raw.streamSettings === 'object' ? raw.streamSettings : {}
-  const tag = stringValue(raw.tag) || protocol.toUpperCase()
+  const remarks = stringValue(raw.remarks) || stringValue(raw.ps) || stringValue(raw.name) || defaultName
+  const tag = remarks || stringValue(raw.tag) || protocol.toUpperCase()
+  const sourceUri = stringValue(raw.sourceUri) || stringValue(raw.source_uri) || stringValue(raw.uri)
   const profiles: VpnProfile[] = []
 
   if (protocol === 'vless' || protocol === 'vmess') {
@@ -1019,11 +1022,13 @@ function xrayOutboundToProfiles(raw: Record<string, any>): VpnProfile[] {
         if (tls) outbound.tls = tls
         const transport = buildTransportFromXrayStream(stream)
         if (transport) outbound.transport = transport
-        profiles.push({
+        const profile: VpnProfile = {
           name: users.length > 1 ? `${tag} #${i + 1}` : tag,
           protocol,
           outbound: finishOutbound(outbound)
-        })
+        }
+        if (sourceUri) profile.sourceUri = sourceUri
+        profiles.push(profile)
       }
     }
     return profiles
@@ -1078,24 +1083,33 @@ function xrayOutboundToProfiles(raw: Record<string, any>): VpnProfile[] {
     if (tls) outbound.tls = tls
     const transport = buildTransportFromXrayStream(stream)
     if (transport) outbound.transport = transport
-    profiles.push({ name: tag, protocol, outbound: finishOutbound(outbound) })
+    const profile: VpnProfile = { name: tag, protocol, outbound: finishOutbound(outbound) }
+    if (sourceUri) profile.sourceUri = sourceUri
+    profiles.push(profile)
   }
   return profiles
 }
 
-function jsonOutboundCandidatesToProfiles(candidates: any[]): VpnProfile[] {
+function jsonOutboundCandidatesToProfiles(candidates: any[], defaultName?: string): VpnProfile[] {
   const singBoxProfiles = candidates
     .filter((outbound: any) => outbound && SUPPORTED_OUTBOUND_TYPES.has(String(outbound.type)))
-    .map((outbound: any) => ({
-      name: String(outbound.tag || outbound.type || 'sing-box'),
-      protocol: 'sing-box' as const,
-      outbound: finishOutbound(outbound)
-    }))
+    .map((outbound: any) => {
+      const remarks = stringValue(outbound.remarks) || stringValue(outbound.ps) || stringValue(outbound.name) || defaultName
+      const tag = remarks || stringValue(outbound.tag) || stringValue(outbound.type) || 'sing-box'
+      const profile: VpnProfile = {
+        name: tag,
+        protocol: 'sing-box' as const,
+        outbound: finishOutbound(outbound)
+      }
+      const sourceUri = stringValue(outbound.sourceUri) || stringValue(outbound.source_uri) || stringValue(outbound.uri)
+      if (sourceUri) profile.sourceUri = sourceUri
+      return profile
+    })
   if (singBoxProfiles.length) return singBoxProfiles
 
   return candidates.flatMap((outbound: any) => {
     try {
-      return outbound && typeof outbound === 'object' ? xrayOutboundToProfiles(outbound) : []
+      return outbound && typeof outbound === 'object' ? xrayOutboundToProfiles(outbound, defaultName) : []
     } catch {
       return []
     }
@@ -1223,7 +1237,7 @@ function parseUriProfilesFromText(text: string): VpnProfile[] {
   return profiles
 }
 
-function parseJsonValueProfiles(value: any, seenTexts: Set<string>, depth = 0): VpnProfile[] {
+function parseJsonValueProfiles(value: any, seenTexts: Set<string>, depth = 0, inheritedRemarks?: string): VpnProfile[] {
   if (depth > 6 || value === null || value === undefined) return []
 
   if (typeof value === 'string') {
@@ -1233,7 +1247,7 @@ function parseJsonValueProfiles(value: any, seenTexts: Set<string>, depth = 0): 
         if (seenTexts.has(document)) continue
         seenTexts.add(document)
         try {
-          const profiles = parseJsonValueProfiles(JSON.parse(document), seenTexts, depth + 1)
+          const profiles = parseJsonValueProfiles(JSON.parse(document), seenTexts, depth + 1, inheritedRemarks)
           if (profiles.length) return profiles
         } catch {
           // Try the next embedded JSON document, if any.
@@ -1251,12 +1265,12 @@ function parseJsonValueProfiles(value: any, seenTexts: Set<string>, depth = 0): 
   }
 
   if (Array.isArray(value)) {
-    const directProfiles = jsonOutboundCandidatesToProfiles(value)
+    const directProfiles = jsonOutboundCandidatesToProfiles(value, inheritedRemarks)
     if (directProfiles.length) return directProfiles
 
     const nestedProfiles: VpnProfile[] = []
     for (const item of value) {
-      const profiles = parseJsonValueProfiles(item, seenTexts, depth + 1)
+      const profiles = parseJsonValueProfiles(item, seenTexts, depth + 1, inheritedRemarks)
       if (profiles.length) nestedProfiles.push(...profiles)
     }
     return nestedProfiles
@@ -1264,12 +1278,14 @@ function parseJsonValueProfiles(value: any, seenTexts: Set<string>, depth = 0): 
 
   if (typeof value !== 'object') return []
 
+  const currentRemarks = stringValue(value.remarks) || stringValue(value.ps) || stringValue(value.name) || inheritedRemarks
+
   if (Array.isArray(value.outbounds)) {
-    const profiles = jsonOutboundCandidatesToProfiles(value.outbounds)
+    const profiles = jsonOutboundCandidatesToProfiles(value.outbounds, currentRemarks)
     if (profiles.length) return profiles
   }
 
-  const directProfile = jsonOutboundCandidatesToProfiles([value])
+  const directProfile = jsonOutboundCandidatesToProfiles([value], currentRemarks)
   if (directProfile.length) return directProfile
 
   // Some clients wrap the real Xray JSON into a subscription object/string.
@@ -1282,6 +1298,8 @@ function parseJsonValueProfiles(value: any, seenTexts: Set<string>, depth = 0): 
     'config',
     'configs',
     'configuration',
+    'outbound',
+    'outbounds',
     'profile',
     'profiles',
     'server',
@@ -1297,7 +1315,7 @@ function parseJsonValueProfiles(value: any, seenTexts: Set<string>, depth = 0): 
   for (const key of preferredKeys) {
     if (!Object.prototype.hasOwnProperty.call(value, key)) continue
     visitedKeys.add(key)
-    const profiles = parseJsonValueProfiles(value[key], seenTexts, depth + 1)
+    const profiles = parseJsonValueProfiles(value[key], seenTexts, depth + 1, currentRemarks)
     if (profiles.length) return profiles
   }
 
@@ -1305,7 +1323,7 @@ function parseJsonValueProfiles(value: any, seenTexts: Set<string>, depth = 0): 
     if (visitedKeys.has(key)) continue
     if (child === null || child === undefined) continue
     if (typeof child !== 'object' && typeof child !== 'string') continue
-    const profiles = parseJsonValueProfiles(child, seenTexts, depth + 1)
+    const profiles = parseJsonValueProfiles(child, seenTexts, depth + 1, currentRemarks)
     if (profiles.length) return profiles
   }
 
@@ -1651,17 +1669,21 @@ function parseLine(line: string): VpnProfile | null {
   if (!trimmed || trimmed.startsWith('#')) return null
   const scheme = trimmed.match(/^([a-z0-9+.-]+):\/\//i)?.[1]?.toLowerCase()
   if (!scheme) return null
-  if (scheme === 'vless') return parseVless(trimmed)
-  if (scheme === 'trojan') return parseTrojan(trimmed)
-  if (scheme === 'ss') return parseShadowsocks(trimmed)
-  if (scheme === 'vmess') return parseVmess(trimmed)
-  if (scheme === 'hysteria2' || scheme === 'hy2') return parseHysteria2(trimmed)
-  if (scheme === 'naive') return parseNaive(trimmed)
-  if (scheme === 'anytls') return parseAnyTls(trimmed)
-  if (scheme === 'shadowtls') return parseShadowTls(trimmed)
-  if (scheme === 'tuic') return parseTuic(trimmed)
-  if (scheme === 'wireguard' || scheme === 'wg') return parseWireGuard(trimmed)
-  return null
+  let profile: VpnProfile | null = null
+  if (scheme === 'vless') profile = parseVless(trimmed)
+  else if (scheme === 'trojan') profile = parseTrojan(trimmed)
+  else if (scheme === 'ss') profile = parseShadowsocks(trimmed)
+  else if (scheme === 'vmess') profile = parseVmess(trimmed)
+  else if (scheme === 'hysteria2' || scheme === 'hy2') profile = parseHysteria2(trimmed)
+  else if (scheme === 'naive') profile = parseNaive(trimmed)
+  else if (scheme === 'anytls') profile = parseAnyTls(trimmed)
+  else if (scheme === 'shadowtls') profile = parseShadowTls(trimmed)
+  else if (scheme === 'tuic') profile = parseTuic(trimmed)
+  else if (scheme === 'wireguard' || scheme === 'wg') profile = parseWireGuard(trimmed)
+  if (profile && !profile.sourceUri) {
+    profile.sourceUri = trimmed
+  }
+  return profile
 }
 
 export function parseVpnProfiles(text: string): VpnProfile[] {
@@ -2071,7 +2093,7 @@ async function fetchSubscriptionHttpResponse(url: string, attempt: FetchAttempt)
   throw new Error('too many redirects while fetching subscription')
 }
 
-function parseSubscriptionUserInfo(headers: Record<string, string>): SubscriptionUserInfo | undefined {
+export function parseSubscriptionUserInfo(headers: Record<string, string>): SubscriptionUserInfo | undefined {
   const result: SubscriptionUserInfo = {}
   let touched = false
 
@@ -2129,10 +2151,24 @@ function parseSubscriptionUserInfo(headers: Record<string, string>): Subscriptio
 
   // profile-title: server-supplied human-readable name for this subscription.
   // Marzban/3X-UI panels send this so the client can name the group without
-  // the user having to type anything.
+  // the user having to type anything. Supports base64: prefix (e.g. base64:QUxMIFZQTg==).
   const profileTitle = headers['profile-title']
   if (profileTitle) {
-    const trimmed = profileTitle.trim()
+    let trimmed = profileTitle.trim()
+    if (/^["'].*["']$/.test(trimmed)) {
+      trimmed = trimmed.slice(1, -1).trim()
+    }
+    if (/^base64:/i.test(trimmed)) {
+      const b64 = trimmed.slice(7).trim()
+      try {
+        const decoded = Buffer.from(b64, 'base64').toString('utf-8').trim()
+        if (decoded) {
+          trimmed = decoded
+        }
+      } catch {
+        // Keep original trimmed if decode fails
+      }
+    }
     if (trimmed) {
       result.profileTitle = trimmed
       touched = true
@@ -2177,6 +2213,11 @@ async function fetchAndParseSubscription(url: string, options?: SubscriptionFetc
         const userInfo = parseSubscriptionUserInfo(response.headers)
         const body = response.body
         const profiles = parseVpnProfiles(body)
+        for (const profile of profiles) {
+          if (!profile.sourceUri) {
+            profile.sourceUri = url
+          }
+        }
         if (profiles.length) return { profiles, source: attempt.label, userInfo }
         errors.push(`${attempt.label}: скачано (${describeSubscriptionBody(body)}), но VLESS/Trojan/SS/VMess/Hysteria2 не найдены`)
       } catch (err: any) {
@@ -2349,10 +2390,20 @@ async function resolveVpnProfilesUnlocked(trimmed: string, options?: Subscriptio
 
   if (/^https?:\/\//i.test(effective)) {
     const result = await fetchAndParseSubscription(effective, options)
+    for (const profile of result.profiles) {
+      if (!profile.sourceUri) {
+        profile.sourceUri = effective
+      }
+    }
     return { ...result, fetched: true }
   }
 
   const profiles = parseVpnProfiles(effective)
+  for (const profile of profiles) {
+    if (!profile.sourceUri && (VPN_URI_PREFIX_RE.test(effective) || /^https?:\/\//i.test(effective))) {
+      profile.sourceUri = effective
+    }
+  }
   return { profiles, source: unwrapped ? 'распакованная ссылка happ://' : 'вставленный текст', fetched: false, userInfo: undefined }
 }
 

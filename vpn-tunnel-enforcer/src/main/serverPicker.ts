@@ -2022,7 +2022,7 @@ function vpnProfileToServerProfile(
       ? clientFingerprintForDevice(clientDevice)
       : undefined,
     groupId,
-    sourceUri,
+    sourceUri: sourceUri ?? vpnProfile.sourceUri,
     lastSeenInSubscriptionAt: Date.now(),
     enabled: true
   }
@@ -2030,25 +2030,34 @@ function vpnProfileToServerProfile(
 
 /**
  * Stable identity for dedupe. Two profiles are "the same" when:
- *   1. They share an exact `sourceUri` (lossless, survives renames), OR
- *   2. They share `(server, port, protocol)`.
+ *   1. They share (server, port, protocol) AND
+ *   2. Their sourceUri does not conflict (different sourceUri means distinct keys) AND
+ *   3. Their name does not conflict (different names mean distinct locations/relays).
  *
- * The first wins because it's strictly more specific — two providers can
- * legitimately use the same `1.2.3.4:443/vless` triplet for different
- * UUIDs, but a re-pasted URI is unambiguously the same key.
+ * Providers frequently route multiple locations through the same entry bridge
+ * (same server:port:proto, different names or keys). Those must not be collapsed.
  */
-function isSameServerProfile(a: ServerProfile, b: ServerProfile): boolean {
-  if (a.sourceUri && b.sourceUri) return a.sourceUri === b.sourceUri
-  return a.server === b.server && a.port === b.port && a.protocol === b.protocol
+export function isSameServerProfile(a: ServerProfile, b: ServerProfile): boolean {
+  if (a.server !== b.server || a.port !== b.port || a.protocol !== b.protocol) {
+    return false
+  }
+  if (a.sourceUri && b.sourceUri && a.sourceUri !== b.sourceUri) {
+    return false
+  }
+  if (a.name && b.name && a.name.trim() !== b.name.trim()) {
+    return false
+  }
+  return true
 }
 
 /**
  * Derive a group name from a subscription URL. Prefers the panel's
- * advertised `webPageUrl` (the user's browser-facing dashboard) and falls
- * back to the subscription URL host. Capped at 60 chars so the UI doesn't
- * have to truncate aggressively.
+ * advertised `profileTitle` (or `webPageUrl`), falling back to the URL host.
+ * Capped at 60 chars so the UI doesn't have to truncate aggressively.
  */
-function deriveSubscriptionGroupName(input: string, webPageUrl?: string): string {
+export function deriveSubscriptionGroupName(input: string, webPageUrl?: string, profileTitle?: string): string {
+  const cleanTitle = profileTitle?.trim()
+  if (cleanTitle) return cleanTitle.slice(0, 60)
   const candidates: Array<string | undefined> = [webPageUrl, input]
   for (const candidate of candidates) {
     if (!candidate) continue
@@ -2203,7 +2212,7 @@ async function addFromInputUnlocked(trimmed: string, canonical: string, options:
     const group = serverGroups.createGroup({
       // `sourceUrl` is stored in canonical (https://) form so future
       // `findGroupBySourceUrl` lookups match cleanly with both forms.
-      name: deriveSubscriptionGroupName(canonical, userInfo?.webPageUrl),
+      name: deriveSubscriptionGroupName(canonical, userInfo?.webPageUrl, userInfo?.profileTitle),
       source: 'subscription',
       sourceUrl: canonical,
       importedAt: now,
@@ -2218,16 +2227,14 @@ async function addFromInputUnlocked(trimmed: string, canonical: string, options:
       trafficTotalBytes: userInfo?.trafficTotalBytes ?? undefined,
       expiresAt: userInfo?.expiresAt ?? undefined,
       refreshIntervalSeconds: userInfo?.refreshIntervalSeconds ?? undefined,
-      webPageUrl: userInfo?.webPageUrl ?? undefined
+      webPageUrl: userInfo?.webPageUrl ?? undefined,
+      profileTitle: userInfo?.profileTitle ?? undefined
     })
 
     const newProfiles = await appendProfilesToGroup(
       resolved.profiles,
       group.id,
-      // We don't have per-profile URIs from a subscription resolver
-      // (the upstream feed often omits them), so leave `sourceUri`
-      // unset and let the connection-tuple do the dedupe work.
-      () => undefined,
+      (vp) => vp.sourceUri ?? canonical,
       { clientDevice }
     )
 
