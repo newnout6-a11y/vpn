@@ -7,6 +7,7 @@ const isKillSwitchActiveMock = vi.hoisted(() => vi.fn(async () => false))
 const settingsGetMock = vi.hoisted(() => vi.fn(() => ({ firewallKillSwitch: false })))
 const settingsSaveMock = vi.hoisted(() => vi.fn())
 const logEventMock = vi.hoisted(() => vi.fn())
+const tunRunningMock = vi.hoisted(() => vi.fn(() => false))
 
 vi.mock('electron', () => ({
   ipcMain: { handle: vi.fn() },
@@ -38,6 +39,12 @@ vi.mock('./firewallKillSwitch', () => ({
   enableKillSwitch: enableKillSwitchMock,
   disableKillSwitchIfActive: disableKillSwitchIfActiveMock,
   isKillSwitchActive: isKillSwitchActiveMock
+}))
+
+vi.mock('./tunController', () => ({
+  tunController: {
+    getStatus: vi.fn(() => ({ running: tunRunningMock() }))
+  }
 }))
 
 vi.mock('./appLogger', () => ({ logEvent: logEventMock }))
@@ -85,5 +92,42 @@ describe('granularKillSwitch level application', () => {
       singboxExePath: 'C:\\Tools\\sing-box.exe'
     }))
     expect(settingsSaveMock).toHaveBeenLastCalledWith({ firewallKillSwitch: false })
+  })
+
+  it('does not engage kill-switch in standard mode when VPN is connected', async () => {
+    const { granularKillSwitch } = await import('./granularKillSwitch')
+    granularKillSwitch.init('C:\\Tools\\sing-box.exe')
+    granularKillSwitch.setVpnConnected(true)
+
+    await granularKillSwitch.setLevel('standard')
+
+    expect(granularKillSwitch.getLevel()).toBe('standard')
+    expect(granularKillSwitch.isVpnConnected()).toBe(true)
+    expect(enableKillSwitchMock).not.toHaveBeenCalled()
+  })
+
+  it('engages kill-switch in standard mode when VPN is not connected', async () => {
+    enableKillSwitchMock.mockResolvedValue({ success: true, message: 'enabled' })
+    const { granularKillSwitch } = await import('./granularKillSwitch')
+    granularKillSwitch.init('C:\\Tools\\sing-box.exe')
+    granularKillSwitch.setVpnConnected(false)
+
+    await granularKillSwitch.setLevel('standard')
+
+    expect(granularKillSwitch.getLevel()).toBe('standard')
+    expect(enableKillSwitchMock).toHaveBeenCalledWith(expect.objectContaining({
+      singboxExePath: 'C:\\Tools\\sing-box.exe'
+    }))
+  })
+
+  it('dynamically queries tunController running status when vpnConnected was not mutated directly', async () => {
+    const { granularKillSwitch } = await import('./granularKillSwitch')
+    granularKillSwitch.init('C:\\Tools\\sing-box.exe')
+
+    tunRunningMock.mockReturnValue(true)
+    expect(granularKillSwitch.isVpnConnected()).toBe(true)
+
+    tunRunningMock.mockReturnValue(false)
+    expect(granularKillSwitch.isVpnConnected()).toBe(false)
   })
 })

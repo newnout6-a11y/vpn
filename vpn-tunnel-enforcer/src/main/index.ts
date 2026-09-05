@@ -7,9 +7,9 @@ import { rm } from 'fs/promises'
 import { promisify } from 'util'
 import { join } from 'path'
 import { happDetector } from './happDetector'
-import { tunController, detectForeignTun, killOwnedTunRuntimeProcesses, isOwnedTunRuntimeRunning, readRecentSingBoxOutboundFault } from './tunController'
+import { tunController, detectForeignTun, killOwnedTunRuntimeProcesses, isOwnedTunRuntimeRunning, readRecentSingBoxOutboundFault, areTunRoutesActive } from './tunController'
 import type { SingBoxOutboundFault } from './tunController'
-import { readRecentXrayOutboundFault, getXrayStatus } from './xrayEngine'
+import { readRecentXrayOutboundFault, getXrayStatus, stopXray } from './xrayEngine'
 import { classifyNavigation } from './navigationPolicy'
 import { ipMonitor } from './ipMonitor'
 import { autoconfig } from './autoconfig'
@@ -88,6 +88,7 @@ import {
   nextAdaptiveMode,
   resolveAdaptiveCapabilities,
   resetAdaptiveBypassLearning,
+  resetAdaptiveBypassStatus,
   type AdaptiveCapabilities
 } from './adaptiveBypass'
 
@@ -267,12 +268,7 @@ async function verifyAdaptiveConnection(): Promise<void> {
   }
 
   const afterProbe = getAdaptiveBypassStatus()
-  // A single compatibility retry is deliberate. Repeatedly restarting a
-  // working-looking tunnel on one failed health probe is worse than surfacing
-  // a clear error, and creates a window where an unstable network flaps.
-  const next = afterProbe.attempts === 0
-    ? nextAdaptiveMode(afterProbe.mode, context.capabilities)
-    : null
+  const next = nextAdaptiveMode(afterProbe.mode, context.capabilities)
   if (!next) {
     const sibling = nextDirectVpnSibling(context)
     if (sibling) {
@@ -718,9 +714,24 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
       const ksResult = await disableKillSwitchIfActive('restart preflight: local proxy start')
       refreshTrayState({ killSwitchActive: await isKillSwitchActive().catch(() => false) })
       if (!ksResult.success) {
+        const errorMsg = `Не удалось снять старую блокировку перед перезапуском: ${ksResult.message}`
+        try {
+          const now = Date.now()
+          connectionHistoryService.addEntry({
+            startedAt: now,
+            endedAt: now,
+            profileName: `Proxy ${proxyAddr}`,
+            profileId: 'local-proxy',
+            mode: 'hard',
+            bytesDown: 0,
+            bytesUp: 0,
+            disconnectReason: 'error',
+            errorMessage: errorMsg
+          })
+        } catch {}
         return {
           success: false,
-          error: `Не удалось снять старую блокировку перед перезапуском: ${ksResult.message}`
+          error: errorMsg
         }
       }
     }
@@ -733,9 +744,24 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
     proxyListeners: probe.listeners
   })
   if (!plan.canStartHard) {
+    const errorMsg = `${plan.title}. ${plan.explanation} ${plan.after}`
+    try {
+      const now = Date.now()
+      connectionHistoryService.addEntry({
+        startedAt: now,
+        endedAt: now,
+        profileName: `Proxy ${proxyAddr}`,
+        profileId: 'local-proxy',
+        mode: 'hard',
+        bytesDown: 0,
+        bytesUp: 0,
+        disconnectReason: 'error',
+        errorMessage: errorMsg
+      })
+    } catch {}
     return {
       success: false,
-      error: `${plan.title}. ${plan.explanation} ${plan.after}`
+      error: errorMsg
     }
   }
 
@@ -781,7 +807,22 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
   })
   if (!result.success) {
     activeAdaptiveContext = null
-    markAdaptiveFailure(result.error || 'Не удалось запустить туннель')
+    const errorMsg = result.error || 'Не удалось запустить туннель'
+    markAdaptiveFailure(errorMsg)
+    try {
+      const now = Date.now()
+      connectionHistoryService.addEntry({
+        startedAt: now,
+        endedAt: now,
+        profileName: `Proxy ${proxyAddr}`,
+        profileId: 'local-proxy',
+        mode: 'hard',
+        bytesDown: 0,
+        bytesUp: 0,
+        disconnectReason: 'error',
+        errorMessage: errorMsg
+      })
+    } catch {}
     // Wait for the baseline to finish before rolling back so the manifest
     // exists for rollbackTunNetworkBaselineIfApplied to find.
     if (baselinePromise) await baselinePromise
@@ -829,15 +870,21 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
         }
       } catch { /* retry on next interval */ }
     }
-    // Fallback: IP never changed after 4s. Rebaseline anyway — TUN is up,
-    // so even if the IP is the same as pre-VPN, it's now routed through VPN.
+    // Fallback: IP never changed after 4s.
+    // Self-blinding prevention: do NOT call recheck(true) if tunnel routes are not active,
+    // otherwise the user's real ISP IP will overwrite vpnIp.
     try {
-      const ipInfo = await ipMonitor.recheck(true)
-      if (ipInfo.ip) {
-        try {
-          sendToMainWindow('ip-changed', { ip: ipInfo.ip, isLeak: ipInfo.isLeak })
-        } catch {}
-        refreshTrayState({ status: 'protected', publicIp: ipInfo.ip, proxyAddr })
+      const routesActive = await areTunRoutesActive().catch(() => false)
+      if (routesActive) {
+        const ipInfo = await ipMonitor.recheck(true)
+        if (ipInfo.ip) {
+          try {
+            sendToMainWindow('ip-changed', { ip: ipInfo.ip, isLeak: ipInfo.isLeak })
+          } catch {}
+          refreshTrayState({ status: 'protected', publicIp: ipInfo.ip, proxyAddr })
+        }
+      } else {
+        logEvent('warn', 'tun', 'TUN routes are not active after probe timeout; skipping ipMonitor.recheck(true) to avoid self-blinding leak detector')
       }
     } catch {}
   }
@@ -877,7 +924,24 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
   captureSnapshot('tun-pre-start').catch(() => undefined)
 
   const staleKillSwitch = await clearStaleKillSwitchBeforeStart('Direct VPN start')
-  if (!staleKillSwitch.success) return { success: false, error: staleKillSwitch.error }
+  if (!staleKillSwitch.success) {
+    const errorMsg = staleKillSwitch.error || 'Не удалось очистить старый kill-switch'
+    try {
+      const now = Date.now()
+      connectionHistoryService.addEntry({
+        startedAt: now,
+        endedAt: now,
+        profileName: 'Direct VPN',
+        profileId: 'direct-vpn',
+        mode: 'direct',
+        bytesDown: 0,
+        bytesUp: 0,
+        disconnectReason: 'error',
+        errorMessage: errorMsg
+      })
+    } catch {}
+    return { success: false, error: errorMsg }
+  }
 
   const settings = settingsStore.get()
 
@@ -921,10 +985,25 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
         clientFingerprint: activeServer.clientFingerprint ?? null
       })
     } else {
+      const errorMsg = 'У выбранного сервера нет конфигурации (outbound пуст). Удалите его в разделе «Серверы» и добавьте подписку заново.'
+      try {
+        const now = Date.now()
+        connectionHistoryService.addEntry({
+          startedAt: now,
+          endedAt: now,
+          profileName: activeServer?.name || 'Direct VPN',
+          profileId: activeServer?.id || 'direct-vpn',
+          mode: 'direct',
+          bytesDown: 0,
+          bytesUp: 0,
+          disconnectReason: 'error',
+          errorMessage: errorMsg
+        })
+      } catch {}
       captureSnapshot('tun-start-failed').catch(() => undefined)
       return {
         success: false,
-        error: 'У выбранного сервера нет конфигурации (outbound пуст). Удалите его в разделе «Серверы» и добавьте подписку заново.'
+        error: errorMsg
       }
     }
   } else if (settings.directVpnInput.trim()) {
@@ -938,14 +1017,44 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
         name: profile.name
       })
     } catch (err: any) {
+      const errorMsg = err?.message || String(err)
+      try {
+        const now = Date.now()
+        connectionHistoryService.addEntry({
+          startedAt: now,
+          endedAt: now,
+          profileName: 'Direct VPN',
+          profileId: 'direct-vpn',
+          mode: 'direct',
+          bytesDown: 0,
+          bytesUp: 0,
+          disconnectReason: 'error',
+          errorMessage: errorMsg
+        })
+      } catch {}
       captureSnapshot('tun-start-failed').catch(() => undefined)
-      return { success: false, error: err?.message || String(err) }
+      return { success: false, error: errorMsg }
     }
   } else {
+    const errorMsg = 'Нет выбранного сервера. Откройте раздел "Серверы" и добавьте подписку или ключ.'
+    try {
+      const now = Date.now()
+      connectionHistoryService.addEntry({
+        startedAt: now,
+        endedAt: now,
+        profileName: 'Direct VPN',
+        profileId: 'direct-vpn',
+        mode: 'direct',
+        bytesDown: 0,
+        bytesUp: 0,
+        disconnectReason: 'error',
+        errorMessage: errorMsg
+      })
+    } catch {}
     captureSnapshot('tun-start-failed').catch(() => undefined)
     return {
       success: false,
-      error: 'Нет выбранного сервера. Откройте раздел "Серверы" и добавьте подписку или ключ.'
+      error: errorMsg
     }
   }
 
@@ -995,7 +1104,22 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
   })
   if (!result.success) {
     activeAdaptiveContext = null
-    markAdaptiveFailure(result.error || 'Не удалось запустить туннель')
+    const errorMsg = result.error || 'Не удалось запустить туннель'
+    markAdaptiveFailure(errorMsg)
+    try {
+      const now = Date.now()
+      connectionHistoryService.addEntry({
+        startedAt: now,
+        endedAt: now,
+        profileName: profile.name || 'Direct VPN',
+        profileId: profile.name || 'direct-vpn',
+        mode: 'direct',
+        bytesDown: 0,
+        bytesUp: 0,
+        disconnectReason: 'error',
+        errorMessage: errorMsg
+      })
+    } catch {}
     if (baselinePromise) await baselinePromise
     await rollbackTunNetworkBaselineIfApplied('direct-vpn start failed').catch(err =>
       logEvent('warn', 'app', 'rollback after direct-vpn start failure failed', err)
@@ -1040,14 +1164,20 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
         }
       } catch { /* retry on next interval */ }
     }
-    // Fallback: rebaseline after 4s even if IP didn't change.
+    // Fallback: rebaseline after 4s only if tunnel routes are active.
+    // Prevents self-blinding leak detector with real ISP IP when routing failed.
     try {
-      const ipInfo = await ipMonitor.recheck(true)
-      if (ipInfo.ip) {
-        try {
-          sendToMainWindow('ip-changed', { ip: ipInfo.ip, isLeak: ipInfo.isLeak })
-        } catch {}
-        refreshTrayState({ status: 'protected', publicIp: ipInfo.ip, proxyAddr: profile.name })
+      const routesActive = await areTunRoutesActive().catch(() => false)
+      if (routesActive) {
+        const ipInfo = await ipMonitor.recheck(true)
+        if (ipInfo.ip) {
+          try {
+            sendToMainWindow('ip-changed', { ip: ipInfo.ip, isLeak: ipInfo.isLeak })
+          } catch {}
+          refreshTrayState({ status: 'protected', publicIp: ipInfo.ip, proxyAddr: profile.name })
+        }
+      } else {
+        logEvent('warn', 'tun', 'TUN routes are not active after direct probe timeout; skipping ipMonitor.recheck(true) to avoid self-blinding leak detector')
       }
     } catch {}
   }
@@ -1156,7 +1286,22 @@ async function startProtectionFromTray(): Promise<void> {
 
   const resolved = await resolveProxyForTrayStart()
   if (!resolved) {
-    notify('error', 'Прокси не найден', 'Запустите VPN-клиент в режиме Proxy или задайте адрес вручную в настройках.', 'connectionError')
+    const errorMsg = 'Прокси не найден. Запустите VPN-клиент в режиме Proxy или задайте адрес вручную в настройках.'
+    try {
+      const now = Date.now()
+      connectionHistoryService.addEntry({
+        startedAt: now,
+        endedAt: now,
+        profileName: 'Local Proxy',
+        profileId: 'local-proxy',
+        mode: 'hard',
+        bytesDown: 0,
+        bytesUp: 0,
+        disconnectReason: 'error',
+        errorMessage: errorMsg
+      })
+    } catch {}
+    notify('error', 'Прокси не найден', errorMsg, 'connectionError')
     mainWindow?.show()
     return
   }
@@ -1363,7 +1508,12 @@ app.whenReady().then(async () => {
   })
 
   handleLogged('recheck-public-ip', async (_e, rebaseline?: boolean) => {
-    return ipMonitor.recheck(rebaseline === true)
+    const wantsRebaseline = rebaseline === true
+    if (wantsRebaseline && !tunController.getStatus().running) {
+      logEvent('warn', 'tun', 'recheck-public-ip requested rebaseline while tunnel is not running — skipping rebaseline to avoid setting real IP as vpnIp')
+      return ipMonitor.recheck(false)
+    }
+    return ipMonitor.recheck(wantsRebaseline)
   })
 
   handleLogged('start-tun', async (_e, proxyAddr: string, proxyType?: 'socks5' | 'http') => {
@@ -1951,10 +2101,12 @@ app.whenReady().then(async () => {
 
   tunController.onStatusChange((status: string) => {
     sendToMainWindow('tun-status-changed', status)
+    granularKillSwitch.setVpnConnected(status === 'running')
     const isRestarting = status.startsWith('restarting:')
     if (status === 'stopped' || status === 'killswitch-active') {
       adaptiveVerificationGeneration += 1
       activeAdaptiveContext = null
+      resetAdaptiveBypassStatus()
     }
     if (status === 'running') ensureAdaptiveMonitoringForRunningTunnel()
     if (status === 'running' || status === 'proxy-down') {
@@ -1979,6 +2131,7 @@ app.whenReady().then(async () => {
     ) {
       const reason: 'crash' | 'error' = status === 'killswitch-active' ? 'crash' : 'error'
       const traffic = trafficMonitor.getCurrentStats()
+      const warning = tunController.getStatus().warning
       try {
         connectionHistoryService.addEntry({
           startedAt: currentConnectionStart,
@@ -1988,7 +2141,8 @@ app.whenReady().then(async () => {
           mode: currentConnectionProfile.mode,
           bytesDown: traffic.sessionDownloadBytes ?? 0,
           bytesUp: traffic.sessionUploadBytes ?? 0,
-          disconnectReason: reason
+          disconnectReason: reason,
+          errorMessage: warning || (reason === 'crash' ? 'Процесс VPN неожиданно завершил работу' : 'Сбой соединения')
         })
       } catch (err) {
         logEvent('warn', 'app', 'failed to record connection history (status-change)', err)
@@ -2023,11 +2177,21 @@ async function performShutdownCleanup(reason: string): Promise<void> {
   logEvent('info', 'app', `shutdown cleanup started: ${reason}`)
 
   try {
-    if (tunController.getStatus().running) {
-      await tunController.stop()
-    }
+    await tunController.stop()
   } catch (err) {
     logEvent('warn', 'app', 'tunController.stop during shutdown failed', err)
+  }
+
+  try {
+    await stopXray(`shutdown: ${reason}`)
+  } catch (err) {
+    logEvent('warn', 'app', 'stopXray during shutdown failed', err)
+  }
+
+  try {
+    await killOwnedTunRuntimeProcesses()
+  } catch (err) {
+    logEvent('warn', 'app', 'killOwnedTunRuntimeProcesses during shutdown failed', err)
   }
 
   try {

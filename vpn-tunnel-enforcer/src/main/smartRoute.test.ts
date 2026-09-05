@@ -165,6 +165,17 @@ describe('smartRouteDnsRules', () => {
     const rules = smartRouteDnsRules(ON_MAPS)
     expect(rules.some((r) => Array.isArray(r.domain_suffix) && r.domain_suffix.some((d: string) => d.includes('2gis')) && r.server === 'dns-direct')).toBe(true)
   })
+
+  it('binds RU TLDs and commercial services to the direct resolver tag', () => {
+    const rules = smartRouteDnsRules(ON)
+    const ruDirectRule = rules.find((r) => Array.isArray(r.domain_suffix) && r.domain_suffix.includes('.ru') && r.server === 'dns-direct')
+    expect(ruDirectRule).toBeDefined()
+    expect(ruDirectRule?.domain_suffix).toContain('.ru')
+    expect(ruDirectRule?.domain_suffix).toContain('.su')
+    expect(ruDirectRule?.domain_suffix).toContain('.xn--p1ai')
+    expect(ruDirectRule?.domain_suffix).toContain('.vk.com')
+    expect(ruDirectRule?.domain_suffix).toContain('.yandex.net')
+  })
 })
 
 describe('smartRouteNeedsDirectDns', () => {

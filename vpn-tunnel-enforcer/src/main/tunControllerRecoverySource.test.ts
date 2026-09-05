@@ -257,4 +257,45 @@ describe('tunController recovery cancellation guards', () => {
     const usage = source.indexOf('auto-restart cancelled', declaration)
     expect(usage, 'user-initiated stop cancel branch must appear after declaration').toBeGreaterThan(declaration)
   })
+
+  it('protects physical network adapters in removeStaleTunInterface via InterfaceDescription guard', async () => {
+    const source = await readFile(join(here, 'tunController.ts'), 'utf8')
+    const removeFnStart = source.indexOf('async function removeStaleTunInterface()')
+    expect(removeFnStart).toBeGreaterThan(0)
+    const removeFnBody = source.slice(removeFnStart, source.indexOf('function ', removeFnStart + 40))
+
+    expect(removeFnBody).toContain("InterfaceDescription -notmatch 'Wintun|VPNTE'")
+    expect(removeFnBody).toContain('__VPNTE_NOOP__')
+  })
+
+  it('stops xray-core on start failure to avoid orphaned zombie processes', async () => {
+    const source = await readFile(join(here, 'tunController.ts'), 'utf8')
+    const startCatchStart = source.indexOf("await rollbackEarlyAdapterLockdown('runtime prepare failed after adapter lockdown')")
+    expect(startCatchStart).toBeGreaterThan(0)
+    const startCatchBlock = source.slice(startCatchStart, startCatchStart + 200)
+
+    expect(startCatchBlock).toContain("await stopXray('runtime prepare failed')")
+  })
+
+  it('cleans up tunController, xray and owned processes unconditionally on shutdown', async () => {
+    const indexSource = await readFile(join(here, 'index.ts'), 'utf8')
+    const shutdownStart = indexSource.indexOf('async function performShutdownCleanup(')
+    expect(shutdownStart).toBeGreaterThan(0)
+    const shutdownBody = indexSource.slice(shutdownStart, shutdownStart + 1000)
+
+    expect(shutdownBody).toContain('await tunController.stop()')
+    expect(shutdownBody).not.toMatch(/if\s*\(\s*tunController\.getStatus\(\)\.running\s*\)\s*\{\s*await tunController\.stop\(\)/)
+    expect(shutdownBody).toContain("await stopXray(`shutdown: ${reason}`)")
+    expect(shutdownBody).toContain('await killOwnedTunRuntimeProcesses()')
+  })
+
+  it('does not artificially cut off adaptive bypass fallback chain on attempts count', async () => {
+    const indexSource = await readFile(join(here, 'index.ts'), 'utf8')
+    const verifyStart = indexSource.indexOf('async function verifyAdaptiveConnection()')
+    expect(verifyStart).toBeGreaterThan(0)
+    const verifyBody = indexSource.slice(verifyStart, indexSource.indexOf('// Global guards against uncaught exceptions', verifyStart))
+
+    expect(verifyBody).not.toContain('afterProbe.attempts === 0')
+    expect(verifyBody).toContain('const next = nextAdaptiveMode(afterProbe.mode, context.capabilities)')
+  })
 })

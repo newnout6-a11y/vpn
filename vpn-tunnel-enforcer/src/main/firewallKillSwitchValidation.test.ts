@@ -96,3 +96,11 @@ describe('external proxy kill-switch allow-list', () => {
     expect(source).toContain('-Program $program')
   })
 })
+
+describe('NTP clock-sync kill-switch allow rule', () => {
+  it('allows outbound UDP 123 for Windows Time sync and includes it in required rules', () => {
+    expect(source).toContain("const ntpAllow = `${RULE_PREFIX}-allow-ntp`")
+    expect(source).toContain('-Protocol UDP -RemotePort 123')
+    expect(source).toContain('${psSingleQuote(ntpAllow)}')
+  })
+})

@@ -48,3 +48,10 @@ describe('server page ping wiring', () => {
     expect(source).toContain('const hasFreshPingSuccess = hasSuccessfulRowPing(perRowPing)')
   })
 })
+
+describe('server selection error notification', () => {
+  it('notifies user via addGlobalToast when server selection fails', () => {
+    expect(source).toContain("addGlobalToast(")
+    expect(source).toContain("'Не удалось выбрать сервер'")
+  })
+})

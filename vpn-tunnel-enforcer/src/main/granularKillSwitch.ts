@@ -24,6 +24,7 @@ import { logEvent } from './appLogger'
 import { requireEnum, requirePlainObject, requireString } from './ipcValidation'
 import { notify } from './notifications'
 import { settingsStore } from './settings'
+import { tunController } from './tunController'
 import type { KillSwitchLevel, KillSwitchException } from '../shared/ipc-types'
 
 // ─── Persistent Store ────────────────────────────────────────────────────────
@@ -48,6 +49,18 @@ let exceptions: KillSwitchException[] = store.get('killSwitchExceptions', [])
 let vpnConnected = false
 let singboxExePath: string | null = null
 let initialized = false
+
+function isVpnConnected(): boolean {
+  if (vpnConnected) return true
+  if (tunController && typeof tunController.getStatus === 'function') {
+    try {
+      return Boolean(tunController.getStatus().running)
+    } catch {
+      // fallback
+    }
+  }
+  return false
+}
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -151,7 +164,7 @@ async function applyPolicy(): Promise<void> {
       break
 
     case 'standard':
-      if (vpnConnected) {
+      if (isVpnConnected()) {
         // VPN is connected — no need for kill-switch in standard mode
         // (it will be engaged by onVpnDisconnected when VPN drops)
         // But if it's currently active from a previous strict mode, disengage
@@ -165,7 +178,7 @@ async function applyPolicy(): Promise<void> {
       break
 
     case 'strict':
-      if (vpnConnected) {
+      if (isVpnConnected()) {
         // VPN is connected — in strict mode, traffic goes through VPN anyway
         // The kill-switch should still be active to prevent any bypass
         if (!(await isKillSwitchActive())) {
@@ -215,6 +228,14 @@ export const granularKillSwitch = {
       exceptions: exceptions.length,
       singboxExePath: exePath
     })
+  },
+
+  setVpnConnected(connected: boolean): void {
+    vpnConnected = connected
+  },
+
+  isVpnConnected(): boolean {
+    return isVpnConnected()
   },
 
   /**

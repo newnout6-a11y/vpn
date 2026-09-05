@@ -299,6 +299,17 @@ describe('generateSingboxConfig stealth mode', () => {
     expect(out.mux).toBeUndefined()
   })
 
+  it('preserves multiplex for VLESS/Reality to mitigate TSPU Signal 3 parallel ClientHello blocking', () => {
+    const cfg = gen({
+      outbound: {
+        ...realityOutbound,
+        multiplex: { enabled: true, protocol: 'h2mux', padding: true }
+      }
+    })
+    const out = cfg.outbounds.find((o) => o.tag === 'proxy-out')!
+    expect(out.multiplex).toEqual({ enabled: true, protocol: 'h2mux', padding: true })
+  })
+
   it('stealth fingerprint pool excludes Safari (implausible on Windows)', () => {
     // Probe many servers; none should ever get the safari fp.
     for (let i = 0; i < 50; i++) {
@@ -722,4 +733,20 @@ describe('generateSingboxConfig with xraySocksPort', () => {
     expect(tunIn.route_exclude_address).toContain('185.100.100.1/32')
     expect(tunIn.route_exclude_address).not.toContain('127.0.0.1/32')
   })
+
+  it('includes directProcessNames in direct-out route rules in directVpn mode', () => {
+    const upstream = {
+      outbound: {
+        type: 'vless',
+        server: '185.100.100.1',
+        server_port: 443,
+        uuid: 'abc'
+      }
+    }
+    const cfg: any = generateSingboxConfig(upstream, 'socks5', ['custom-app.exe'], {})
+    const directRule = cfg.route.rules.find((r: any) => r.outbound === 'direct-out' && Array.isArray(r.process_name))
+    expect(directRule).toBeDefined()
+    expect(directRule.process_name).toContain('custom-app.exe')
+  })
 })
+

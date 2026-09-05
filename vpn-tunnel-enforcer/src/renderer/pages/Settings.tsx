@@ -1,6 +1,7 @@
-import { useAppStore } from '../store'
-import { Bell, Eye, EyeOff, FileArchive, FolderOpen, Globe2, Languages, Loader2, MapPin, Network, Palette, RefreshCw, Settings2, ShieldAlert, ShieldCheck, Wand2 } from 'lucide-react'
-import { ReactNode, useEffect, useRef, useState } from 'react'
+import { useAppStore, type AppSettings } from '../store'
+import { AnimatePresence, motion } from 'framer-motion'
+import { Bell, Eye, EyeOff, FileArchive, FolderOpen, Globe2, Languages, Loader2, MapPin, Network, Palette, RefreshCw, Save, Settings2, ShieldAlert, ShieldCheck, Wand2 } from 'lucide-react'
+import { ReactNode, useCallback, useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { KillSwitchSettings } from '../components/KillSwitchSettings'
 import { RotationSettings } from '../components/RotationSettings'
@@ -8,6 +9,7 @@ import { DnsSettings } from '../components/DnsSettings'
 import { DomainRouting } from '../components/DomainRouting'
 import { ImportExportSettings } from '../components/ImportExportSettings'
 import { NotificationSettings } from '../components/NotificationSettings'
+import { MacButton } from '../design-system/MacButton'
 import { MacCard } from '../design-system/MacCard'
 import { MacSelect } from '../design-system/MacSelect'
 import { MacSegmentedControl } from '../design-system/MacSegmentedControl'
@@ -154,25 +156,56 @@ function ThemeSettings() {
 
 export function Settings() {
   const { t } = useTranslation()
-  const settings = useAppStore(s => s.settings)
-  const updateSettings = useAppStore(s => s.updateSettings)
+  const storeSettings = useAppStore(s => s.settings)
   const setSettings = useAppStore(s => s.setSettings)
   const setProxy = useAppStore(s => s.setProxy)
   const addLog = useAppStore(s => s.addLog)
   const [exporting, setExporting] = useState(false)
   const [openingLogs, setOpeningLogs] = useState(false)
 
-  // Auto-save: debounced persistence so toggle changes don't get lost if the
-  // user navigates away without clicking "Save and Apply". The explicit Save
-  // button still applies live changes (kill-switch reconnect, etc).
-  const autoSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Explicit save: edits stay in local component draft until explicitly
+  // saved. This prevents Dashboard's "Connect" or other background processes
+  // from silently persisting an uncommitted draft.
+  const [draft, setDraft] = useState<AppSettings>(storeSettings)
+  const settings = draft
+  const updateSettings = useCallback((partial: Partial<AppSettings>) => {
+    setDraft(prev => ({ ...prev, ...partial }))
+  }, [])
+
+  const isDirty = useMemo(() => {
+    if (draft === storeSettings) return false
+    if (!draft || !storeSettings) return true
+    const keysA = Object.keys(draft) as Array<keyof AppSettings>
+    const keysB = Object.keys(storeSettings) as Array<keyof AppSettings>
+    if (keysA.length !== keysB.length) return true
+    for (const k of keysA) {
+      if (draft[k] !== storeSettings[k]) return true
+    }
+    return false
+  }, [draft, storeSettings])
+
   useEffect(() => {
-    if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current)
-    autoSaveTimer.current = setTimeout(() => {
-      window.electronAPI.saveSettings(settings).catch(() => undefined)
-    }, 1500)
-    return () => { if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current) }
-  }, [settings])
+    if (!isDirty) {
+      setDraft(storeSettings)
+    }
+  }, [storeSettings, isDirty])
+
+  const [saving, setSaving] = useState(false)
+
+  const handleSaveSettings = async () => {
+    setSaving(true)
+    try {
+      const result = await window.electronAPI.saveSettings(draft)
+      setSettings(result)
+      setDraft(result)
+      useAppStore.getState().addGlobalToast('success', 'Настройки сохранены', 'Изменения применены.')
+    } catch (err: any) {
+      addLog('error', `Не удалось сохранить настройки: ${err?.message ?? err}`)
+      useAppStore.getState().addGlobalToast('error', 'Не удалось сохранить настройки', err?.message ?? String(err))
+    } finally {
+      setSaving(false)
+    }
+  }
   const [osNotificationsBlocked, setOsNotificationsBlocked] = useState(false)
   const [ruleSetState, setRuleSetState] = useState<SmartRouteRuleSetState | null>(null)
   const [ruleSetRefreshing, setRuleSetRefreshing] = useState(false)
@@ -221,8 +254,9 @@ export function Settings() {
   const handleRefreshRuleSets = async () => {
     setRuleSetRefreshing(true)
     try {
-      const savedSettings = await window.electronAPI.saveSettings(settings)
+      const savedSettings = await window.electronAPI.saveSettings(draft)
       setSettings(savedSettings)
+      setDraft(savedSettings)
       const state = await window.electronAPI.smartRouteRuleSetsRefresh(true)
       setRuleSetState(state)
       addLog(
@@ -268,15 +302,6 @@ export function Settings() {
     }
   }
 
-  const handleResetWizard = async () => {
-    try {
-      const result = await window.electronAPI.saveSettings({ firstRunComplete: false })
-      setSettings(result)
-      addLog('info', 'Мастер первого запуска будет показан при следующем открытии главной.')
-    } catch (err: any) {
-      addLog('error', `Не удалось сбросить мастер: ${err.message}`)
-    }
-  }
 
   // Centred rather than left-hugging. The cap stays — settings are text-heavy and
   // long help paragraphs get unreadable past ~70ch — but left-aligning it in a
@@ -464,8 +489,9 @@ export function Settings() {
                 </span>
                 <span className="block mt-1 text-[var(--color-text-secondary)]">
                   Цена: пара процентов скорости и чуть более долгий первый
-                  отклик. Изменения вступят в силу после следующего
-                  включения защиты.
+                  отклик. Если защита уже включена — применится сразу
+                  (туннель перезапустится автоматически), иначе — при
+                  следующем включении.
                 </span>
               </>
             }
@@ -519,6 +545,7 @@ export function Settings() {
                 </p>
                 <p className="text-xs text-[var(--color-text-secondary)] mt-0.5">
                   Автоматически выбирает нативный xray-core для новейших REALITY-серверов или sing-box для остальных протоколов.
+                  «Только xray-core» всё равно использует sing-box для протоколов, которые xray не поддерживает.
                 </p>
               </div>
               <div className="w-52 shrink-0">
@@ -668,16 +695,25 @@ export function Settings() {
             description="Запрещает Windows-приложениям использовать геолокацию: при выключении VPN автоматически возвращается в исходное состояние, чтобы Карты, Погода и т.д. снова работали."
             checked={settings.locationPrivacyEnabled}
             onChange={async (next) => {
+              // This row is an action, not a preference — it flips a real OS
+              // setting synchronously, so it applies and persists immediately
+              // regardless of the Save button below (and keeps the dirty-bar
+              // from popping up over a change that already took effect).
               try {
+                let applied: boolean
                 if (next) {
                   const status = await window.electronAPI.applyLocationPrivacy()
-                  updateSettings({ locationPrivacyEnabled: Boolean(status?.applied) })
+                  applied = Boolean(status?.applied)
                   addLog('info', 'Местоположение Windows ограничено. Откатим автоматически при выключении VPN.')
                 } else {
                   const status = await window.electronAPI.rollbackLocationPrivacy()
-                  updateSettings({ locationPrivacyEnabled: Boolean(status?.applied) })
+                  applied = Boolean(status?.applied)
                   addLog('info', 'Доступ к местоположению Windows восстановлен.')
                 }
+                updateSettings({ locationPrivacyEnabled: applied })
+                const persisted = await window.electronAPI.saveSettings({ locationPrivacyEnabled: applied })
+                setSettings(persisted)
+                setDraft(prev => ({ ...prev, locationPrivacyEnabled: applied }))
               } catch (err: any) {
                 addLog('error', `Не удалось переключить настройку местоположения: ${err?.message ?? err}`)
               }
@@ -727,13 +763,7 @@ export function Settings() {
               ? 'Мастер пройден. Включите чтобы запустить его снова при следующем открытии.'
               : 'Мастер будет показан при следующем запуске.'}
             checked={!settings.firstRunComplete}
-            onChange={(next) => {
-              if (next) {
-                void handleResetWizard()
-              } else {
-                updateSettings({ firstRunComplete: true })
-              }
-            }}
+            onChange={(next) => updateSettings({ firstRunComplete: !next })}
           />
         </div>
       </MacCard>
@@ -906,6 +936,41 @@ export function Settings() {
           Экспорт диагностики (ZIP)
         </button>
       </div>
+
+      {/* Sticky save bar — only rendered while the local draft differs from
+          what's on disk. Stays pinned to the bottom of the scroll area
+          (`sticky`, not `fixed`: the page content wrapper in App.tsx is the
+          scrolling ancestor) so it's visible no matter how far down the user
+          scrolled when they made the change. */}
+      <AnimatePresence>
+        {isDirty && (
+          <motion.div
+            initial={{ opacity: 0, y: 16 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 16 }}
+            transition={{ duration: 0.16, ease: 'easeOut' }}
+            className="sticky bottom-4 z-20 flex items-center justify-between gap-4 rounded-[var(--radius-md)] border border-[var(--color-accent)]/40 bg-[var(--color-card-elevated)] px-4 py-3 shadow-[var(--shadow-modal)]"
+          >
+            <span className="text-sm text-[var(--color-text)]">
+              Есть несохранённые изменения — они пока не применены.
+            </span>
+            <div className="flex items-center gap-2">
+              <MacButton
+                size="sm"
+                variant="ghost"
+                onClick={() => setDraft(storeSettings)}
+                disabled={saving}
+              >
+                Сбросить
+              </MacButton>
+              <MacButton size="sm" onClick={handleSaveSettings} loading={saving} disabled={saving}>
+                {!saving && <Save className="w-3.5 h-3.5 mr-1.5" />}
+                {saving ? 'Сохраняем…' : 'Сохранить и применить'}
+              </MacButton>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   )
 }

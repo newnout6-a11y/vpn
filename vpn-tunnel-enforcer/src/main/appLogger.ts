@@ -63,6 +63,14 @@ export function getLogDir(): string {
   return join(app.getPath('userData'), 'logs')
 }
 
+let logDirEnsured = false
+
+async function ensureLogDir(): Promise<void> {
+  if (logDirEnsured) return
+  await mkdir(getLogDir(), { recursive: true })
+  logDirEnsured = true
+}
+
 export function getAppLogPath(): string {
   return join(getLogDir(), 'app.log')
 }
@@ -116,7 +124,7 @@ function redactTopologyValue(value: unknown, key?: string): unknown {
     return keyLooksSensitive && redacted === value && value.trim() ? '<redacted-topology>' : redacted
   }
   if (typeof value === 'number') {
-    return keyLooksSensitive ? '<redacted-topology>' : value
+    return value
   }
   if (Array.isArray(value)) return value.map(item => redactTopologyValue(item, key))
   if (value && typeof value === 'object') {
@@ -174,9 +182,19 @@ export function logEvent(level: AppLogLevel, scope: string, message: string, det
   const lineBytes = Buffer.byteLength(line, 'utf8')
   queue = queue
     .then(async () => {
-      await mkdir(getLogDir(), { recursive: true })
+      await ensureLogDir()
       await rotateIfNeeded(lineBytes)
-      await appendFile(getAppLogPath(), line, 'utf8')
+      try {
+        await appendFile(getAppLogPath(), line, 'utf8')
+      } catch (err: any) {
+        if (err?.code === 'ENOENT') {
+          logDirEnsured = false
+          await ensureLogDir()
+          await appendFile(getAppLogPath(), line, 'utf8')
+        } else {
+          throw err
+        }
+      }
       // Track growth so we only stat() the file once per process.
       if (currentLogBytes >= 0) currentLogBytes += lineBytes
     })
@@ -289,7 +307,7 @@ export async function getFullLogs(): Promise<LogFileSnapshot[]> {
 
 export async function clearAppLog(): Promise<void> {
   queue = queue.then(async () => {
-    await mkdir(getLogDir(), { recursive: true })
+    await ensureLogDir()
     await mkdir(getTunLogDir(), { recursive: true }).catch(() => undefined)
     await Promise.all([
       writeFile(getAppLogPath(), '', 'utf8'),
@@ -303,7 +321,7 @@ export async function clearAppLog(): Promise<void> {
 }
 
 export async function openLogFolder(): Promise<string> {
-  await mkdir(getLogDir(), { recursive: true })
+  await ensureLogDir()
   await shell.openPath(getLogDir())
   return getLogDir()
 }

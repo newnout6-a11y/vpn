@@ -240,6 +240,9 @@ export function Servers() {
   const { t, i18n } = useTranslation()
   const addLog = useAppStore((s) => s.addLog)
   const tunRunning = useAppStore((s) => s.tunRunning)
+  const connectionMode = useAppStore((s) => s.settings.connectionMode)
+  const setServerSwitchingName = useAppStore((s) => s.setServerSwitchingName)
+  const addGlobalToast = useAppStore((s) => s.addGlobalToast)
   const [profiles, setProfiles] = useState<ServerProfile[]>([])
   const [groups, setGroups] = useState<ServerGroup[]>([])
   const [groupsAvailable, setGroupsAvailable] = useState<boolean | null>(null)
@@ -639,15 +642,30 @@ export function Servers() {
 
   const handleSelect = async (id: string) => {
     if (id === activeId || switchingId) return
+    const wasConnected = tunRunning
+    const profile = profiles.find((p) => p.id === id)
+    const profileName = profile?.name ?? id
+    const shouldAnimateSwitch = wasConnected && connectionMode === 'directVpn'
+    if (shouldAnimateSwitch) {
+      setServerSwitchingName(profileName)
+    }
     setSwitchingId(id)
     try {
       await window.electronAPI.serversSelect(id)
       setActiveId(id)
       emitServerChanged()
-    } catch (err) {
+    } catch (err: any) {
       console.error('Select failed:', err)
+      addGlobalToast(
+        'error',
+        'Не удалось выбрать сервер',
+        err?.message ? `Ошибка при переключении на «${profileName}»: ${err.message}` : `Ошибка при выборе сервера «${profileName}»`
+      )
     } finally {
       setSwitchingId(null)
+      if (shouldAnimateSwitch) {
+        setServerSwitchingName(null)
+      }
     }
   }
 

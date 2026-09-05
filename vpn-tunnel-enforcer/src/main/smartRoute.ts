@@ -134,6 +134,47 @@ function ruDomainRuleSets(): string[] {
 }
 
 /**
+ * Russian top-level domain zones that should resolve directly via dns-direct
+ * to keep domestic sites from going through foreign tunnels.
+ */
+export const RU_TLD_SUFFIXES = [
+  '.ru',
+  '.su',
+  '.xn--p1ai'
+]
+
+/**
+ * Basic Russian commercial and ecosystem services (VK, Yandex, Mail.ru, Ozon, etc.)
+ * that may use non-.ru TLDs (.com, .net, .me) but belong to the domestic ecosystem
+ * and need direct DNS resolution.
+ */
+export const RU_COMMERCIAL_SERVICE_SUFFIXES = [
+  // VK / Mail.ru ecosystem
+  '.vk.com',
+  '.vk.me',
+  '.vkuser.net',
+  '.userapi.com',
+  '.mail.ru',
+  '.dzen.ru',
+  // Yandex ecosystem
+  '.yandex.net',
+  '.yandex.com',
+  '.ya.ru',
+  // Major retail & financial services
+  '.ozon.ru',
+  '.wildberries.ru',
+  '.wb.ru',
+  '.avito.ru',
+  '.tinkoff.ru',
+  '.tbank.ru',
+  '.sberbank.ru',
+  '.sber.ru',
+  '.rutube.ru',
+  '.hh.ru',
+  '.kinopoisk.ru'
+]
+
+/**
  * Online-maps domains that benefit from real-location egress. Kept as a small
  * inline list rather than a rule-set: it's tiny, stable, and there's no
  * upstream "maps" geosite we can rely on. Suffix-matched.
@@ -359,6 +400,11 @@ export function smartRouteDnsRules(opts: SmartRouteOptions): Array<Record<string
   }
   // RU domains → direct resolver (real RU IPs, so geoip-ru matches).
   rules.push({ rule_set: ruDomainRuleSets(), server })
+  // Domestic Runet TLDs (.ru, .su, .рф) and commercial services → direct resolver
+  rules.push({
+    ...suffixListToMatcher([...RU_TLD_SUFFIXES, ...RU_COMMERCIAL_SERVICE_SUFFIXES]),
+    server
+  })
   if (opts.mapsDirect) {
     rules.push({ ...suffixListToMatcher(MAPS_DOMAIN_SUFFIXES), server })
   }

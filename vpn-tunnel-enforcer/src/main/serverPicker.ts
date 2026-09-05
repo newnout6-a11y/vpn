@@ -1898,7 +1898,8 @@ async function restartDirectVpnForSelectedProfile(profile: ServerProfile): Promi
     enableAdapterLockdown: settings.strictAdapterLockdown,
     publicWifiCompatibility: settings.publicWifiCompatibility,
     stealthMode: settings.stealthMode,
-    adaptiveMode: adaptive.mode
+    adaptiveMode: adaptive.mode,
+    proxyEngine: tunController.getLastStartOptions?.()?.proxyEngine ?? settings.proxyEngine
   })
   if (!restarted.success) {
     throw new Error(restarted.error || 'Failed to start tunnel with selected server')
@@ -1910,6 +1911,13 @@ async function restartDirectVpnForSelectedProfile(profile: ServerProfile): Promi
       const current = await ipMonitor.getCurrentIp()
       const shouldRebaseline = Boolean(current.ip && (current.ip !== previousIp || attempt === 6))
       if (shouldRebaseline) {
+        if (current.ip === previousIp && attempt === 6) {
+          const routesActive = await tunController.areTunRoutesActive().catch(() => false)
+          if (!routesActive) {
+            logEvent('warn', 'server-picker', 'TUN routes are not active after profile switch; skipping ipMonitor.recheck(true) to avoid self-blinding leak detector')
+            return
+          }
+        }
         const ipInfo = await ipMonitor.recheck(true)
         logEvent('info', 'server-picker', 'direct VPN IP baseline refreshed after profile switch', {
           id: profile.id,

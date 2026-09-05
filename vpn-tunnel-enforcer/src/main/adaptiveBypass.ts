@@ -258,6 +258,16 @@ export function getAdaptiveBypassStatus(): AdaptiveBypassStatus {
   return { ...currentStatus }
 }
 
+export function resetAdaptiveBypassStatus(): AdaptiveBypassStatus {
+  return setStatus({
+    phase: 'idle',
+    mode: 'baseline',
+    attempts: 0,
+    reason: null,
+    message: 'Готово к подключению'
+  })
+}
+
 export function resetAdaptiveBypassLearning(): void {
   store.set('learning', {})
   logEvent('info', 'adaptive-bypass', 'cleared learned compatibility decisions')

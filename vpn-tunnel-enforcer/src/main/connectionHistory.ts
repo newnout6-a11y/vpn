@@ -101,7 +101,7 @@ export function filterEntries(
     // Filter by text substring (case-insensitive)
     if (filters.text != null && filters.text.length > 0) {
       const searchLower = filters.text.toLowerCase()
-      const haystack = [entry.profileName, entry.mode, entry.disconnectReason]
+      const haystack = [entry.profileName, entry.mode, entry.disconnectReason, entry.errorMessage ?? '']
         .join(' ')
         .toLowerCase()
       if (!haystack.includes(searchLower)) {
@@ -176,7 +176,8 @@ export function exportCsv(entries: ConnectionLogEntry[]): string {
     'mode',
     'bytesDown',
     'bytesUp',
-    'disconnectReason'
+    'disconnectReason',
+    'errorMessage'
   ]
 
   const rows = entries.map((entry) => {
@@ -189,7 +190,8 @@ export function exportCsv(entries: ConnectionLogEntry[]): string {
       entry.mode,
       entry.bytesDown.toString(),
       entry.bytesUp.toString(),
-      entry.disconnectReason
+      entry.disconnectReason,
+      escapeCsvField(entry.errorMessage ?? '')
     ].join(',')
   })
 
@@ -223,6 +225,7 @@ function getEntries(): ConnectionLogEntry[] {
 function addEntry(entry: Omit<ConnectionLogEntry, 'id'>): ConnectionLogEntry {
   const newEntry: ConnectionLogEntry = {
     ...entry,
+    errorMessage: entry.errorMessage ?? null,
     id: randomUUID()
   }
 

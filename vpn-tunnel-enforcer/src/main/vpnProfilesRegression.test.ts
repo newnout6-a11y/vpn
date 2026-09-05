@@ -7,8 +7,9 @@ const execFileMock = vi.hoisted(() => {
 })
 
 vi.mock('child_process', () => ({
-  default: { execFile: execFileMock },
-  execFile: execFileMock
+  default: { execFile: execFileMock, exec: vi.fn() },
+  execFile: execFileMock,
+  exec: vi.fn()
 }))
 
 function curlStdout(headers: string, body = '') {
@@ -61,5 +62,18 @@ describe('vpnProfiles regressions', () => {
     expect(a.profiles).toHaveLength(1)
     expect(b.profiles).toHaveLength(1)
     expect(execFileMock[Symbol.for('nodejs.util.promisify.custom')]).toHaveBeenCalledTimes(1)
+  })
+
+  it('parses spx / spider_x for Reality and passes to xray config generator', async () => {
+    const { resolveVpnProfiles } = await import('./vpnProfiles')
+    const { toXrayOutbound } = await import('./xrayEngine')
+    const uri = 'vless://00000000-0000-4000-8000-000000000000@reality.example.com:443?security=reality&pbk=fake-public-key&sid=1234&spx=%2Ftest-path#Reality'
+    const resolved = await resolveVpnProfiles(uri)
+    expect(resolved.profiles).toHaveLength(1)
+    const profile = resolved.profiles[0]
+    expect(profile.outbound.tls?.reality?.spider_x).toBe('/test-path')
+
+    const outbound = toXrayOutbound(profile.outbound)
+    expect(outbound.streamSettings?.realitySettings?.spiderX).toBe('/test-path')
   })
 })

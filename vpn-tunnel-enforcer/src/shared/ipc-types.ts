@@ -438,6 +438,7 @@ export interface ConnectionLogEntry {
   bytesDown: number
   bytesUp: number
   disconnectReason: 'user' | 'error' | 'rotation' | 'schedule' | 'crash'
+  errorMessage?: string | null
 }
 
 /** Locale type */

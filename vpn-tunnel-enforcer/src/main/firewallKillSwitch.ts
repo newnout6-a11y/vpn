@@ -345,6 +345,7 @@ export async function enableKillSwitch(opts: {
   const lanAllow = `${RULE_PREFIX}-allow-lan`
   const tunAllow = `${RULE_PREFIX}-allow-tun`
   const dhcpAllow = `${RULE_PREFIX}-allow-dhcp`
+  const ntpAllow = `${RULE_PREFIX}-allow-ntp`
   const extraIpAllow = `${RULE_PREFIX}-allow-extra-ip`
 
   // Windows Firewall can be picky about mixed IPv4/IPv6 CIDR arrays here. IPv6 is
@@ -487,7 +488,18 @@ try {
   $rules += ${psSingleQuote(dhcpAllow)}
 } catch { Write-Output "WARN allow-dhcp: $_" }
 
-# 3g. Allow user-defined IP/CIDR exceptions (granular kill-switch UI).
+# 3g. Allow NTP (UDP 123) so Windows Time service keeps clocks synced for Reality/TLS.
+try {
+  New-NetFirewallRule \`
+    -DisplayName ${psSingleQuote(ntpAllow)} \`
+    -Description 'VPN Tunnel Enforcer kill-switch: allow NTP clock sync.' \`
+    -Direction Outbound -Action Allow \`
+    -Protocol UDP -RemotePort 123 \`
+    -Profile Any -Enabled True | Out-Null
+  $rules += ${psSingleQuote(ntpAllow)}
+} catch { Write-Output "WARN allow-ntp: $_" }
+
+# 3h. Allow user-defined IP/CIDR exceptions (granular kill-switch UI).
 ${extraIpAllowPart}
 
 # --- Step 4: Set DefaultOutboundAction=Block ---
@@ -499,7 +511,8 @@ $requiredRules = @(
   ${psSingleQuote(tunInterfaceAllow)},
   ${psSingleQuote(lanAllow)},
   ${psSingleQuote(tunAllow)},
-  ${psSingleQuote(dhcpAllow)}
+  ${psSingleQuote(dhcpAllow)},
+  ${psSingleQuote(ntpAllow)}
 )
 $missingRequired = @($requiredRules | Where-Object { $rules -notcontains $_ })
 if ($missingRequired.Count -gt 0) {

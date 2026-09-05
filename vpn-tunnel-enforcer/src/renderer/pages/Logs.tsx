@@ -579,7 +579,12 @@ export function Logs() {
                         </span>
                       </td>
                       <td className={`px-4 py-2.5 text-xs font-medium ${reasonColor(entry.disconnectReason)}`}>
-                        {reasonLabel(entry.disconnectReason)}
+                        <div>{reasonLabel(entry.disconnectReason)}</div>
+                        {entry.errorMessage && (
+                          <div className="text-[10px] text-[var(--color-text-secondary)] truncate max-w-[220px] font-normal" title={entry.errorMessage}>
+                            {entry.errorMessage}
+                          </div>
+                        )}
                       </td>
                     </tr>
                   ))

@@ -306,7 +306,8 @@ async function performRotationOnce(): Promise<{ success: boolean; newProfile: st
             enableAdapterLockdown: settings.strictAdapterLockdown === true,
             publicWifiCompatibility: settings.publicWifiCompatibility,
             stealthMode: settings.stealthMode === true,
-            adaptiveMode: adaptive.mode
+            adaptiveMode: adaptive.mode,
+            proxyEngine: tunController.getLastStartOptions?.()?.proxyEngine ?? settings.proxyEngine
           }
         )
         if (!restarted.success) {

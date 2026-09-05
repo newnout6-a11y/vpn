@@ -47,5 +47,25 @@ describe('appLogger topology redaction', () => {
     expect(raw).toContain('<redacted-ip>')
     expect(raw).toContain('<redacted-mac>')
     expect(raw).toContain('"keptCounter":3')
+    expect(raw).toContain('"routeCount":2')
+  })
+
+  it('preserves numeric fields like port, interfaceMetric, timeoutMs, ifindex', async () => {
+    const { logEvent, getAppLogPath } = await import('./appLogger')
+    logEvent('info', 'test-numeric', 'metrics report', {
+      port: 10808,
+      interfaceMetric: 5,
+      routeCount: 14,
+      timeoutMs: 5000,
+      ifindex: 42
+    })
+    await flush()
+
+    const raw = readFileSync(getAppLogPath(), 'utf8')
+    expect(raw).toContain('"port":10808')
+    expect(raw).toContain('"interfaceMetric":5')
+    expect(raw).toContain('"routeCount":14')
+    expect(raw).toContain('"timeoutMs":5000')
+    expect(raw).toContain('"ifindex":42')
   })
 })

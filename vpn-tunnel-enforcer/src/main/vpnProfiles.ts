@@ -464,10 +464,12 @@ function buildTls(params: URLSearchParams, host: string, defaultEnabled = false)
     const publicKey = param(params, 'pbk', 'publicKey', 'public_key')
     if (!publicKey) throw new Error('VLESS Reality ключ без pbk/publicKey')
     if (!tls.utls) tls.utls = { enabled: true, fingerprint: 'chrome' }
+    const spiderX = param(params, 'spx', 'spider_x', 'spiderX') || ''
     tls.reality = {
       enabled: true,
       public_key: publicKey,
-      short_id: param(params, 'sid', 'shortId', 'short_id') || ''
+      short_id: param(params, 'sid', 'shortId', 'short_id') || '',
+      ...(spiderX ? { spider_x: spiderX } : {})
     }
   }
 
@@ -569,6 +571,7 @@ function finishOutbound(outbound: Record<string, any>): Record<string, any> {
         enabled: mux.enabled !== false,
         ...(mux.concurrency !== undefined ? { max_connections: Number(mux.concurrency) } : {}),
         ...(mux.protocol ? { protocol: mux.protocol } : {}),
+        ...(mux.padding !== undefined ? { padding: mux.padding } : {}),
         ...(mux.brutal && typeof mux.brutal === 'object' ? { brutal: mux.brutal } : {})
       }
     }
@@ -625,6 +628,16 @@ function parseVless(line: string): VpnProfile {
   if (transport) outbound.transport = transport
   const packetEncoding = param(params, 'packetEncoding', 'packet_encoding')
   if (packetEncoding) outbound.packet_encoding = packetEncoding
+  const muxParam = param(params, 'mux', 'multiplex')
+  const paddingParam = param(params, 'padding')
+  if (muxParam !== null || paddingParam !== null) {
+    const enabled = muxParam === null || /^(1|true|on)$/i.test(muxParam)
+    const padding = paddingParam === null || /^(1|true|on)$/i.test(paddingParam)
+    outbound.multiplex = {
+      enabled,
+      padding
+    }
+  }
   return { name: safeDecode(url.hash.slice(1)) || 'VLESS', protocol: 'vless', outbound: finishOutbound(outbound) }
 }
 
@@ -898,10 +911,12 @@ function buildTlsFromXrayStream(stream: Record<string, any>, server: string): Re
     const publicKey = stringValue(realitySettings.publicKey) || stringValue(realitySettings.public_key)
     if (!publicKey) throw new Error('Xray Reality outbound без publicKey')
     if (!tls.utls) tls.utls = { enabled: true, fingerprint: 'chrome' }
+    const spiderX = stringValue(realitySettings.spiderX) || stringValue(realitySettings.spider_x) || stringValue(realitySettings.spx) || ''
     tls.reality = {
       enabled: true,
       public_key: publicKey,
-      short_id: stringValue(realitySettings.shortId) || stringValue(realitySettings.short_id) || ''
+      short_id: stringValue(realitySettings.shortId) || stringValue(realitySettings.short_id) || '',
+      ...(spiderX ? { spider_x: spiderX } : {})
     }
   }
 
@@ -1461,10 +1476,12 @@ function buildTlsFromClash(raw: Record<string, any>, server: string): Record<str
     const publicKey = stringValue(realityOpts['public-key']) || stringValue(realityOpts.public_key) || stringValue(raw['reality-public-key'])
     if (publicKey) {
       if (!tls.utls) tls.utls = { enabled: true, fingerprint: 'chrome' }
+      const spiderX = stringValue(realityOpts['spider-x']) || stringValue(realityOpts.spider_x) || stringValue(realityOpts.spx) || stringValue(raw['reality-spider-x']) || ''
       tls.reality = {
         enabled: true,
         public_key: publicKey,
-        short_id: stringValue(realityOpts['short-id']) || stringValue(realityOpts.short_id) || ''
+        short_id: stringValue(realityOpts['short-id']) || stringValue(realityOpts.short_id) || '',
+        ...(spiderX ? { spider_x: spiderX } : {})
       }
     }
   }
@@ -2466,6 +2483,7 @@ function appendTlsParams(params: URLSearchParams, tls: Record<string, any> | und
   if (isReality) {
     if (typeof tls.reality.public_key === 'string' && tls.reality.public_key) params.set('pbk', tls.reality.public_key)
     if (typeof tls.reality.short_id === 'string' && tls.reality.short_id) params.set('sid', tls.reality.short_id)
+    if (typeof tls.reality.spider_x === 'string' && tls.reality.spider_x) params.set('spx', tls.reality.spider_x)
   }
   const ech = tls.ech && typeof tls.ech === 'object' && tls.ech.enabled !== false ? tls.ech : null
   if (ech) {
