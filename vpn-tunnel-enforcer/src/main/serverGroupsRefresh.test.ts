@@ -514,6 +514,130 @@ describe('refreshGroup dedup-merge', () => {
     expect(updated?.status).toBe('expired')
     expect(pickerProfiles().filter((p) => p.groupId === group.id)).toHaveLength(1)
   })
+
+  it('updates stored profile without sourceUri when fresh profile carries sourceUri (symmetric upgrade path)', async () => {
+    const group = serverGroups.createGroup({
+      name: 'sub.example.com',
+      source: 'subscription',
+      sourceUrl: 'https://sub.example.com/feed',
+      importedAt: Date.now(),
+      status: 'active'
+    })
+
+    storeData.current['server-picker'].profiles = [
+      {
+        id: 'legacy-p1',
+        name: 'DE Node',
+        protocol: 'vless',
+        server: 'bridge1.example.com',
+        port: 443,
+        groupId: group.id,
+        sourceUri: undefined,
+        outbound: { type: 'vless', server: 'bridge1.example.com', server_port: 443 },
+        enabled: true
+      }
+    ]
+
+    resolveVpnProfilesMock.mockResolvedValue({
+      profiles: [
+        {
+          ...makeVpnProfile('bridge1.example.com', 443, 'DE Node'),
+          sourceUri: 'https://sub.example.com/feed'
+        }
+      ],
+      source: 'subscription',
+      fetched: true,
+      userInfo: undefined
+    })
+
+    const res = await refreshGroup(group.id)
+    expect(res.ok).toBe(true)
+    if (!res.ok) return
+    expect(res.addedCount).toBe(0)
+    expect(res.updatedCount).toBe(1)
+    expect(res.removedCount).toBe(0)
+
+    const inGroup = pickerProfiles().filter((p) => p.groupId === group.id)
+    expect(inGroup).toHaveLength(1)
+    expect(inGroup[0].id).toBe('legacy-p1')
+    expect(inGroup[0].sourceUri).toBe('https://sub.example.com/feed')
+  })
+
+  it('upgrades generic "proxy" profile name to upstream remarks upon refresh', async () => {
+    const group = serverGroups.createGroup({
+      name: 'sub.example.com',
+      source: 'subscription',
+      sourceUrl: 'https://sub.example.com/feed',
+      importedAt: Date.now(),
+      status: 'active'
+    })
+
+    storeData.current['server-picker'].profiles = [
+      {
+        id: 'p-proxy',
+        name: 'proxy',
+        protocol: 'vless',
+        server: 'bridge1.example.com',
+        port: 443,
+        groupId: group.id,
+        sourceUri: 'https://sub.example.com/feed',
+        outbound: { type: 'vless', server: 'bridge1.example.com', server_port: 443 },
+        enabled: true
+      }
+    ]
+
+    resolveVpnProfilesMock.mockResolvedValue({
+      profiles: [
+        {
+          ...makeVpnProfile('bridge1.example.com', 443, '🇩🇪 Дарвин ВПН'),
+          sourceUri: 'https://sub.example.com/feed'
+        }
+      ],
+      source: 'subscription',
+      fetched: true,
+      userInfo: undefined
+    })
+
+    const res = await refreshGroup(group.id)
+    expect(res.ok).toBe(true)
+    if (!res.ok) return
+
+    const inGroup = pickerProfiles().filter((p) => p.groupId === group.id)
+    expect(res.addedCount).toBe(1)
+    expect(res.removedCount).toBe(1)
+    const active = inGroup.filter((p) => !p.removedFromSubscriptionAt)
+    expect(active).toHaveLength(1)
+    expect(active[0].name).toBe('🇩🇪 Дарвин ВПН')
+    const removed = inGroup.find((p) => p.id === 'p-proxy')
+    expect(removed?.removedFromSubscriptionAt).toBeDefined()
+    expect(removed?.enabled).toBe(false)
+  })
+
+  it('upgrades group name from default host to profileTitle upon refresh', async () => {
+    const group = serverGroups.createGroup({
+      name: 'sub.example.com',
+      source: 'subscription',
+      sourceUrl: 'https://sub.example.com/feed',
+      importedAt: Date.now(),
+      status: 'active'
+    })
+
+    resolveVpnProfilesMock.mockResolvedValue({
+      profiles: [
+        makeVpnProfile('bridge1.example.com', 443, 'DE Node')
+      ],
+      source: 'subscription',
+      fetched: true,
+      userInfo: { profileTitle: 'ALL VPN' }
+    })
+
+    const res = await refreshGroup(group.id)
+    expect(res.ok).toBe(true)
+
+    const updatedGroup = serverGroups.getGroup(group.id)
+    expect(updatedGroup?.name).toBe('ALL VPN')
+    expect(updatedGroup?.profileTitle).toBe('ALL VPN')
+  })
 })
 
 describe('automatic subscription refresh schedule', () => {

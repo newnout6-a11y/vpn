@@ -986,13 +986,26 @@ function buildTransportFromXrayStream(stream: Record<string, any>): Record<strin
   return undefined
 }
 
+function isGenericTag(tag?: string | null, protocol?: string | null): boolean {
+  if (!tag) return true
+  const lower = tag.trim().toLowerCase()
+  if (['proxy', 'proxy-out', 'node', 'server', 'default', 'sing-box'].includes(lower)) return true
+  if (protocol && lower === protocol.toLowerCase()) return true
+  return false
+}
+
 function xrayOutboundToProfiles(raw: Record<string, any>, defaultName?: string): VpnProfile[] {
   const protocol = xrayProtocol(raw.protocol)
   if (!protocol) return []
   const settings = raw.settings && typeof raw.settings === 'object' ? raw.settings : {}
   const stream = raw.streamSettings && typeof raw.streamSettings === 'object' ? raw.streamSettings : {}
-  const remarks = stringValue(raw.remarks) || stringValue(raw.ps) || stringValue(raw.name) || defaultName
-  const tag = remarks || stringValue(raw.tag) || protocol.toUpperCase()
+  const rawTag = stringValue(raw.tag)
+  const remarks = stringValue(raw.remarks) || stringValue(raw.ps) || stringValue(raw.name)
+  const tag =
+    remarks ||
+    (isGenericTag(rawTag, protocol)
+      ? (defaultName || rawTag || protocol.toUpperCase())
+      : (rawTag || defaultName || protocol.toUpperCase()))
   const sourceUri = stringValue(raw.sourceUri) || stringValue(raw.source_uri) || stringValue(raw.uri)
   const profiles: VpnProfile[] = []
 
@@ -1094,8 +1107,14 @@ function jsonOutboundCandidatesToProfiles(candidates: any[], defaultName?: strin
   const singBoxProfiles = candidates
     .filter((outbound: any) => outbound && SUPPORTED_OUTBOUND_TYPES.has(String(outbound.type)))
     .map((outbound: any) => {
-      const remarks = stringValue(outbound.remarks) || stringValue(outbound.ps) || stringValue(outbound.name) || defaultName
-      const tag = remarks || stringValue(outbound.tag) || stringValue(outbound.type) || 'sing-box'
+      const outboundRemarks = stringValue(outbound.remarks) || stringValue(outbound.ps) || stringValue(outbound.name)
+      const outboundTag = stringValue(outbound.tag)
+      const tag =
+        outboundRemarks ||
+        (isGenericTag(outboundTag, outbound.type)
+          ? (defaultName || outboundTag || outbound.type)
+          : (outboundTag || defaultName || outbound.type)) ||
+        'sing-box'
       const profile: VpnProfile = {
         name: tag,
         protocol: 'sing-box' as const,
@@ -2097,7 +2116,16 @@ export function parseSubscriptionUserInfo(headers: Record<string, string>): Subs
   const result: SubscriptionUserInfo = {}
   let touched = false
 
-  const rawUserInfo = headers['subscription-userinfo']
+  const getHeader = (name: string): string | undefined => {
+    if (headers[name] !== undefined) return headers[name]
+    const lower = name.toLowerCase()
+    for (const [k, v] of Object.entries(headers)) {
+      if (k.toLowerCase() === lower) return v
+    }
+    return undefined
+  }
+
+  const rawUserInfo = getHeader('subscription-userinfo')
   if (rawUserInfo) {
     // Format: `upload=12345; download=67890; total=1000000000; expire=1735689600`
     // Whitespace around `;` and `=` is tolerated by every panel we've seen.
@@ -2128,7 +2156,7 @@ export function parseSubscriptionUserInfo(headers: Record<string, string>): Subs
     }
   }
 
-  const refreshRaw = headers['profile-update-interval']
+  const refreshRaw = getHeader('profile-update-interval')
   if (refreshRaw) {
     const refresh = Number(refreshRaw.trim())
     if (Number.isFinite(refresh) && refresh > 0 && Number.isInteger(refresh)) {
@@ -2137,7 +2165,7 @@ export function parseSubscriptionUserInfo(headers: Record<string, string>): Subs
     }
   }
 
-  const webPage = headers['profile-web-page-url']
+  const webPage = getHeader('profile-web-page-url')
   if (webPage) {
     const trimmed = webPage.trim()
     // Drop anything that isn't an http(s) URL. Some panels accidentally emit
@@ -2152,14 +2180,17 @@ export function parseSubscriptionUserInfo(headers: Record<string, string>): Subs
   // profile-title: server-supplied human-readable name for this subscription.
   // Marzban/3X-UI panels send this so the client can name the group without
   // the user having to type anything. Supports base64: prefix (e.g. base64:QUxMIFZQTg==).
-  const profileTitle = headers['profile-title']
+  const profileTitle = getHeader('profile-title')
   if (profileTitle) {
     let trimmed = profileTitle.trim()
     if (/^["'].*["']$/.test(trimmed)) {
       trimmed = trimmed.slice(1, -1).trim()
     }
     if (/^base64:/i.test(trimmed)) {
-      const b64 = trimmed.slice(7).trim()
+      let b64 = trimmed.slice(7).trim()
+      if (/^["'].*["']$/.test(b64)) {
+        b64 = b64.slice(1, -1).trim()
+      }
       try {
         const decoded = Buffer.from(b64, 'base64').toString('utf-8').trim()
         if (decoded) {
@@ -2168,6 +2199,23 @@ export function parseSubscriptionUserInfo(headers: Record<string, string>): Subs
       } catch {
         // Keep original trimmed if decode fails
       }
+    } else if (/^utf-8''/i.test(trimmed)) {
+      try {
+        const decoded = decodeURIComponent(trimmed.slice(7)).trim()
+        if (decoded) trimmed = decoded
+      } catch {
+        // Keep original trimmed if decode fails
+      }
+    } else if (/%[0-9a-fA-F]{2}/.test(trimmed)) {
+      try {
+        const decoded = decodeURIComponent(trimmed).trim()
+        if (decoded) trimmed = decoded
+      } catch {
+        // Keep original trimmed if decode fails
+      }
+    }
+    if (/^["'].*["']$/.test(trimmed)) {
+      trimmed = trimmed.slice(1, -1).trim()
     }
     if (trimmed) {
       result.profileTitle = trimmed
@@ -2178,7 +2226,7 @@ export function parseSubscriptionUserInfo(headers: Record<string, string>): Subs
   // content-disposition: filename="My Subscription" — used by some panels as
   // an alternative way to supply the group name.
   if (!result.profileTitle) {
-    const cd = headers['content-disposition']
+    const cd = getHeader('content-disposition')
     if (cd) {
       const fnMatch = cd.match(/filename\*?=(?:utf-8'')?["']?([^"';\r\n]+)["']?/i)
       if (fnMatch) {

@@ -41,6 +41,36 @@ describe('Subscription bridge relays, remarks parsing and deduplication', () => 
       const info = parseSubscriptionUserInfo(headers)
       expect(info?.profileTitle).toBe('ALL VPN')
     })
+
+    it('decodes base64 with internal quotes base64:"QUxMIFZQTg=="', () => {
+      const headers = {
+        'profile-title': 'base64:"QUxMIFZQTg=="'
+      }
+      const info = parseSubscriptionUserInfo(headers)
+      expect(info?.profileTitle).toBe('ALL VPN')
+    })
+
+    it('handles case-insensitive header key Profile-Title', () => {
+      const headers = {
+        'Profile-Title': 'base64:QUxMIFZQTg=='
+      }
+      const info = parseSubscriptionUserInfo(headers)
+      expect(info?.profileTitle).toBe('ALL VPN')
+    })
+
+    it('decodes RFC 5987 / URL-encoded UTF-8 profile-title', () => {
+      const headers = {
+        'profile-title': "UTF-8''%D0%94%D0%B0%D1%80%D0%B2%D0%B8%D0%BD%20%D0%92%D0%9F%D0%9D"
+      }
+      const info = parseSubscriptionUserInfo(headers)
+      expect(info?.profileTitle).toBe('Дарвин ВПН')
+
+      const headersPlainUrl = {
+        'profile-title': '%D0%94%D0%B0%D1%80%D0%B2%D0%B8%D0%BD%20%D0%92%D0%9F%D0%9D'
+      }
+      const infoPlain = parseSubscriptionUserInfo(headersPlainUrl)
+      expect(infoPlain?.profileTitle).toBe('Дарвин ВПН')
+    })
   })
 
   describe('parseVpnProfiles with shared gateway/bridge and remarks', () => {
@@ -171,6 +201,22 @@ describe('Subscription bridge relays, remarks parsing and deduplication', () => 
       expect(profiles[0].name).toBe('Direct Node 1')
       expect(profiles[1].name).toBe('Direct Node 2')
     })
+
+    it('preserves specific non-generic outbound tags when remarks is absent', () => {
+      const jsonNonGeneric = JSON.stringify([
+        {
+          tag: '🇭🇰 HK-Special-01',
+          protocol: 'vless',
+          settings: {
+            vnext: [{ address: 'hk.example.com', port: 443, users: [{ id: 'uuid-hk' }] }]
+          }
+        }
+      ])
+
+      const profiles = parseVpnProfiles(jsonNonGeneric)
+      expect(profiles).toHaveLength(1)
+      expect(profiles[0].name).toBe('🇭🇰 HK-Special-01')
+    })
   })
 
   describe('isSameServerProfile deduplication', () => {
@@ -268,6 +314,30 @@ describe('Subscription bridge relays, remarks parsing and deduplication', () => 
 
       expect(isSameServerProfile(a, b)).toBe(false)
       expect(isSameServerProfile(a, c)).toBe(false)
+    })
+
+    it('does NOT treat a named profile and an unnamed profile as duplicates', () => {
+      const a = makeServerProfile({ name: '🇩🇪 Дарвин ВПН' })
+      const b = makeServerProfile({ name: '' })
+      expect(isSameServerProfile(a, b)).toBe(false)
+    })
+
+    it('treats profile with sourceUri and profile without sourceUri as duplicate if tuple and name match', () => {
+      const a = makeServerProfile({
+        name: '🇩🇪 Darwin',
+        server: 'bridge1.alvsub.cc',
+        port: 443,
+        protocol: 'vless',
+        sourceUri: 'https://sub.alvsub.cc/feed'
+      })
+      const b = makeServerProfile({
+        name: '🇩🇪 Darwin',
+        server: 'bridge1.alvsub.cc',
+        port: 443,
+        protocol: 'vless',
+        sourceUri: undefined
+      })
+      expect(isSameServerProfile(a, b)).toBe(true)
     })
   })
 

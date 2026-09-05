@@ -2044,7 +2044,7 @@ export function isSameServerProfile(a: ServerProfile, b: ServerProfile): boolean
   if (a.sourceUri && b.sourceUri && a.sourceUri !== b.sourceUri) {
     return false
   }
-  if (a.name && b.name && a.name.trim() !== b.name.trim()) {
+  if ((a.name || '').trim() !== (b.name || '').trim()) {
     return false
   }
   return true

@@ -500,6 +500,7 @@ async function refreshGroupUnlocked(
   const merged: ServerProfile[] = []
   const seenDeviceKeys = new Set<string>()
   const addedNewKeys = new Set<string>()
+  const matchedExistingIds = new Set<string>()
 
   for (const { device, key, profile: fresh } of freshEntries) {
     const deviceKey = `${device}|${key}`
@@ -511,17 +512,21 @@ async function refreshGroupUnlocked(
     const deviceKeyWithoutUri = `${device}|${keyWithoutUri}`
 
     let prior = existingByDeviceAndKey.get(deviceKey)
-    if (!prior && !fresh.sourceUri) {
-      const fallback = existingByDeviceAndTupleWithoutUri.get(deviceKeyWithoutUri)
-      if (fallback) {
-        prior = fallback
+    if (!prior) {
+      const candidates = existingByTupleWithoutUri.get(keyWithoutUri)
+      if (candidates) {
+        prior = candidates.find(
+          p => !matchedExistingIds.has(p.id) && normalizeClientDevice(p.clientDevice) === device
+        )
       }
     }
 
     if (prior) {
+      matchedExistingIds.add(prior.id)
       const priorTupleKey = profileTupleKey(prior)
       seenDeviceKeys.add(`${device}|${priorTupleKey}`)
       seenDeviceKeys.add(deviceKeyWithoutUri)
+      seenDeviceKeys.add(deviceKey)
       const profileDevice = normalizeClientDevice(options.clientDevice ?? prior.clientDevice ?? device)
       const deviceFresh = freshByDeviceAndKey.get(`${profileDevice}|${key}`) ?? fresh
       const outbound = applyClientDeviceToOutbound(deviceFresh.outbound || {}, profileDevice)
@@ -544,9 +549,12 @@ async function refreshGroupUnlocked(
         // Update the human-readable name only if the upstream now has one
         // and the user hasn't overridden it (we have no way to know if
         // they did, so we conservatively only overwrite when our prior
-        // name was the default protocol-uppercase fallback).
+        // name was the default protocol-uppercase, "proxy", or "sing-box" fallback).
         name:
-          prior.name && prior.name !== prior.protocol.toUpperCase()
+          prior.name &&
+          prior.name !== prior.protocol.toUpperCase() &&
+          prior.name.toLowerCase() !== 'proxy' &&
+          prior.name.toLowerCase() !== 'sing-box'
             ? prior.name
             : deviceFresh.name || prior.name,
         country: inferCountryMetadata(deviceFresh.name)?.label ?? prior.country,
@@ -560,10 +568,15 @@ async function refreshGroupUnlocked(
       }
       merged.push(updated)
       updatedCount++
-    } else if (!existingByKey.has(key) && (!fresh.sourceUri ? !existingByTupleWithoutUri.has(keyWithoutUri) : true) && !addedNewKeys.has(key)) {
-      addedNewKeys.add(key)
-      merged.push(vpnProfileToServerProfile(fresh, groupId, fresh.sourceUri, now, { clientDevice: device }))
-      addedCount++
+    } else if (!existingByKey.has(key) && !addedNewKeys.has(key)) {
+      const existingUnderOtherDevice = existingByTupleWithoutUri
+        .get(keyWithoutUri)
+        ?.some(p => normalizeClientDevice(p.clientDevice) !== device)
+      if (!existingUnderOtherDevice) {
+        addedNewKeys.add(key)
+        merged.push(vpnProfileToServerProfile(fresh, groupId, fresh.sourceUri, now, { clientDevice: device }))
+        addedCount++
+      }
     } else {
       // The same connection tuple already exists in this group under another
       // device identity. Refresh the existing records in place, but avoid
@@ -579,6 +592,7 @@ async function refreshGroupUnlocked(
   const removedProfileIds = new Set<string>()
   const removedProfiles: ServerProfile[] = []
   for (const prior of inGroupExisting) {
+    if (matchedExistingIds.has(prior.id)) continue
     const key = profileTupleKey(prior)
     const profileDevice = normalizeClientDevice(options.clientDevice ?? prior.clientDevice ?? primaryDevice)
     const deviceKey = `${profileDevice}|${key}`
@@ -612,7 +626,30 @@ async function refreshGroupUnlocked(
   const expiresAt = userInfo?.expiresAt
   const trialAlreadyExpired =
     typeof expiresAt === 'number' && Number.isFinite(expiresAt) && expiresAt > 0 && expiresAt < now
+  const currentGroup = getGroup(groupId)
+  const isDefaultOrHostName = (name: string, sourceUrl?: string, webPageUrl?: string): boolean => {
+    if (!name || name === 'Подписка') return true
+    if (sourceUrl) {
+      try {
+        const host = new URL(sourceUrl).host
+        if (host && name === host) return true
+      } catch {}
+    }
+    if (webPageUrl) {
+      try {
+        const host = new URL(webPageUrl).host
+        if (host && name === host) return true
+      } catch {}
+    }
+    return false
+  }
+  const updatedGroupName =
+    userInfo?.profileTitle && currentGroup && isDefaultOrHostName(currentGroup.name, currentGroup.sourceUrl, currentGroup.webPageUrl)
+      ? userInfo.profileTitle.trim().slice(0, 60)
+      : undefined
+
   updateGroup(groupId, {
+    ...(updatedGroupName ? { name: updatedGroupName } : {}),
     status: trialAlreadyExpired ? 'expired' : 'active',
     lastFetchedAt: now,
     lastFetchAttemptAt: now,
