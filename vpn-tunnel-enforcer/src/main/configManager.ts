@@ -34,7 +34,6 @@ import type {
   DnsProfile,
   DomainRule,
   ThemeConfig,
-  WidgetLayout,
   RotationConfig,
   KillSwitchLevel,
   KillSwitchException,
@@ -53,7 +52,6 @@ export const ALL_SECTIONS = [
   'dns',
   'domainRouting',
   'themes',
-  'widgets',
   'rotation',
   'killSwitch',
   'notifications'
@@ -71,9 +69,10 @@ export interface ConfigExportData {
   schedules: ScheduleEntry[]
   splitTunnel: SplitTunnelApp[]
   dns: DnsProfile[]
+  /** Which DNS profile was active at export time (id into `dns`); null = system default. */
+  activeDnsProfileId: string | null
   domainRouting: DomainRule[]
   themes: ThemeConfig[]
-  widgets: WidgetLayout[]
   rotation: RotationConfig
   killSwitch: {
     level: KillSwitchLevel
@@ -202,8 +201,7 @@ export function validateImportData(data: unknown): {
     'splitTunnel',
     'dns',
     'domainRouting',
-    'themes',
-    'widgets'
+    'themes'
   ]
 
   for (const section of arraySections) {
@@ -300,9 +298,6 @@ export function detectConflicts(
   if (existing.themes.length > 0 && incoming.themes.length > 0) {
     conflicts.push('themes')
   }
-  if (existing.widgets.length > 0 && incoming.widgets.length > 0) {
-    conflicts.push('widgets')
-  }
 
   // Object sections: conflict if existing has non-default values
   if (existing.rotation.enabled || existing.rotation.profileIds.length > 0) {
@@ -392,6 +387,15 @@ export function applySelectiveImport(
         break
       case 'dns':
         result.dns = mergeArraySection(existing.dns, incoming.dns, conflictResolution)
+        // Carry the imported active-profile selection, but only if the
+        // incoming file names a profile that actually survived the merge —
+        // otherwise keep whatever was already selected.
+        if (
+          incoming.activeDnsProfileId &&
+          result.dns.some((d) => d.id === incoming.activeDnsProfileId)
+        ) {
+          result.activeDnsProfileId = incoming.activeDnsProfileId
+        }
         break
       case 'domainRouting':
         result.domainRouting = mergeArraySection(
@@ -404,13 +408,6 @@ export function applySelectiveImport(
         result.themes = mergeArraySection(
           existing.themes,
           incoming.themes,
-          conflictResolution
-        )
-        break
-      case 'widgets':
-        result.widgets = mergeArraySection(
-          existing.widgets,
-          incoming.widgets,
           conflictResolution
         )
         break
@@ -492,9 +489,9 @@ export function collectCurrentConfig(): ConfigExportData {
     schedules: schedulerStore.get('schedules') ?? [],
     splitTunnel: splitTunnelStore.get('splitTunnelApps') ?? [],
     dns: allDns,
+    activeDnsProfileId: dnsStore.get('activeProfileId') ?? null,
     domainRouting: domainRoutingStore.get('domainRules') ?? [],
     themes: themeStore.get('customThemes') ?? [],
-    widgets: [],
     rotation: rotationStore.get('rotation') ?? {
       enabled: false,
       intervalMinutes: 30,
@@ -533,6 +530,14 @@ function writeConfigToStores(config: ConfigExportData, sections: ConfigSection[]
         // Separate builtin from custom
         const custom = config.dns.filter((d) => !d.isBuiltin)
         dnsStore.set('customProfiles', custom)
+        // Restore the active-profile selection when the import names one that
+        // exists among the profiles we just wrote (custom or builtin).
+        if (
+          config.activeDnsProfileId &&
+          config.dns.some((d) => d.id === config.activeDnsProfileId)
+        ) {
+          dnsStore.set('activeProfileId', config.activeDnsProfileId)
+        }
         break
       }
       case 'domainRouting':
@@ -540,8 +545,6 @@ function writeConfigToStores(config: ConfigExportData, sections: ConfigSection[]
         break
       case 'themes':
         themeStore.set('customThemes', config.themes)
-        break
-      case 'widgets':
         break
       case 'rotation':
         rotationStore.set('rotation', config.rotation)

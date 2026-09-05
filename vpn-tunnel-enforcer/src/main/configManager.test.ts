@@ -23,9 +23,9 @@ function makeEmptyConfig(): ConfigExportData {
     schedules: [],
     splitTunnel: [],
     dns: [],
+    activeDnsProfileId: null,
     domainRouting: [],
     themes: [],
-    widgets: [],
     rotation: {
       enabled: false,
       intervalMinutes: 30,
@@ -73,6 +73,17 @@ function makeSchedule(id: string) {
     endTime: '17:00',
     profileId: 'p1',
     mode: 'hard' as const
+  }
+}
+
+function makeDns(id: string, isBuiltin = false) {
+  return {
+    id,
+    name: `DNS ${id}`,
+    primary: '9.9.9.9',
+    secondary: '149.112.112.112',
+    type: 'plain' as const,
+    isBuiltin
   }
 }
 
@@ -275,6 +286,31 @@ describe('applySelectiveImport', () => {
     // schedules unchanged
     expect(result.schedules).toHaveLength(1)
     expect(result.schedules[0].id).toBe('s1')
+  })
+
+  it('restores the imported active DNS profile when it survives the merge', () => {
+    const existing = { ...makeEmptyConfig(), dns: [makeDns('d1')], activeDnsProfileId: 'd1' }
+    const incoming = {
+      ...makeEmptyConfig(),
+      dns: [makeDns('d2')],
+      activeDnsProfileId: 'd2'
+    }
+
+    const result = applySelectiveImport(existing, incoming, ['dns'], 'replace')
+    expect(result.dns.map((d) => d.id)).toEqual(['d2'])
+    expect(result.activeDnsProfileId).toBe('d2')
+  })
+
+  it('keeps the current active DNS profile when the import names a missing one', () => {
+    const existing = { ...makeEmptyConfig(), dns: [makeDns('d1')], activeDnsProfileId: 'd1' }
+    const incoming = {
+      ...makeEmptyConfig(),
+      dns: [makeDns('d2')],
+      activeDnsProfileId: 'ghost'
+    }
+
+    const result = applySelectiveImport(existing, incoming, ['dns'], 'merge')
+    expect(result.activeDnsProfileId).toBe('d1')
   })
 
   it('replaces rotation in replace mode', () => {

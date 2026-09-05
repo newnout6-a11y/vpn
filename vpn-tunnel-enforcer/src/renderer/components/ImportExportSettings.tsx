@@ -31,7 +31,6 @@ const SECTION_KEYS: Record<string, string> = {
   dns: 'sectionDns',
   domainRouting: 'sectionDomainRouting',
   themes: 'sectionThemes',
-  widgets: 'sectionWidgets',
   rotation: 'sectionRotation',
   killSwitch: 'sectionKillSwitch',
   notifications: 'sectionNotifications'
