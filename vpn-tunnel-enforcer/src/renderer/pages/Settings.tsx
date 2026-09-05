@@ -1,6 +1,6 @@
 import { useAppStore, type AppSettings } from '../store'
 import { AnimatePresence, motion } from 'framer-motion'
-import { Bell, Eye, EyeOff, FileArchive, FolderOpen, Globe2, Languages, Loader2, MapPin, Network, Palette, RefreshCw, RotateCcw, Save, Settings2, ShieldAlert, ShieldCheck, Wand2 } from 'lucide-react'
+import { Bell, Eye, EyeOff, FileArchive, FolderOpen, Globe2, Languages, Loader2, MapPin, Network, Palette, RefreshCw, Save, Settings2, ShieldAlert, ShieldCheck, Wand2 } from 'lucide-react'
 import { ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { cn } from '../design-system/utils'
 import { useTranslation } from 'react-i18next'
@@ -35,6 +35,69 @@ export function changedSettingKeys(
     if (!Object.is(a[k], b[k])) changed.push(k)
   }
   return changed
+}
+
+export interface SettingsDraftController {
+  draft: AppSettings
+  baseline: AppSettings
+  changedKeys: string[]
+  isDirty: boolean
+  /** Merge a partial into the working draft (does not persist). */
+  update: (partial: Partial<AppSettings>) => void
+  /** Discard unsaved edits — restore every bound control to the saved state. */
+  reset: () => void
+  /** Adopt an authoritative full-settings result after a successful save. */
+  commit: (saved: AppSettings) => void
+  /** Move draft AND baseline together for a value that was applied out-of-band
+   *  (e.g. an instant-apply toggle that persists itself). */
+  commitPartial: (partial: Partial<AppSettings>) => void
+}
+
+/**
+ * Local draft / dirty tracking for the settings page. Edits live in `draft` and
+ * only reach disk on an explicit save. `baseline` is the last-saved snapshot we
+ * diff against — its own state, never `storeSettings` by reference, so an
+ * unrelated store refresh can't flip the dirty flag and `reset()` always lands
+ * the draft (and every bound control) on a known-good state.
+ */
+export function useSettingsDraft(storeSettings: AppSettings): SettingsDraftController {
+  const [baseline, setBaseline] = useState<AppSettings>(storeSettings)
+  const [draft, setDraft] = useState<AppSettings>(storeSettings)
+
+  const changedKeys = useMemo(() => changedSettingKeys(baseline, draft), [baseline, draft])
+  const isDirty = changedKeys.length > 0
+
+  // Adopt an external store update (e.g. a save triggered from the Dashboard)
+  // ONLY when `storeSettings` is a genuinely new reference AND the user isn't
+  // mid-edit. Keyed on the reference, never on `isDirty` — reacting to the
+  // dirty flag would force-sync the draft back to the store the instant an
+  // edit is reverted or committed, which is exactly how the save bar could
+  // vanish before it ever rendered.
+  const lastAdoptedStoreRef = useRef(storeSettings)
+  useEffect(() => {
+    if (storeSettings === lastAdoptedStoreRef.current) return
+    lastAdoptedStoreRef.current = storeSettings
+    if (!isDirty) {
+      setBaseline(storeSettings)
+      setDraft(storeSettings)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [storeSettings])
+
+  const update = useCallback((partial: Partial<AppSettings>) => {
+    setDraft(prev => ({ ...prev, ...partial }))
+  }, [])
+  const reset = useCallback(() => setDraft(baseline), [baseline])
+  const commit = useCallback((saved: AppSettings) => {
+    setBaseline(saved)
+    setDraft(saved)
+  }, [])
+  const commitPartial = useCallback((partial: Partial<AppSettings>) => {
+    setDraft(prev => ({ ...prev, ...partial }))
+    setBaseline(prev => ({ ...prev, ...partial }))
+  }, [])
+
+  return { draft, baseline, changedKeys, isDirty, update, reset, commit, commitPartial }
 }
 
 /**
@@ -224,30 +287,10 @@ export function Settings() {
   const [exporting, setExporting] = useState(false)
   const [openingLogs, setOpeningLogs] = useState(false)
 
-  // Explicit save: edits live in a local `draft` and only reach disk when the
-  // user hits "Сохранить". `baseline` is the last-saved snapshot we diff
-  // against — deliberately its own state, not `storeSettings` by reference, so
-  // an unrelated store refresh can't make the bar flicker and "Сбросить"
-  // always lands the draft (and every control bound to it) on a known state.
-  const [baseline, setBaseline] = useState<AppSettings>(storeSettings)
-  const [draft, setDraft] = useState<AppSettings>(storeSettings)
+  // Explicit save: edits stay in a local draft until the user hits "Сохранить".
+  const { draft, changedKeys, isDirty, update: updateSettings, reset: resetDraft, commit: commitDraft, commitPartial: commitDraftPartial } =
+    useSettingsDraft(storeSettings)
   const settings = draft
-  const updateSettings = useCallback((partial: Partial<AppSettings>) => {
-    setDraft(prev => ({ ...prev, ...partial }))
-  }, [])
-
-  const changedKeys = useMemo(() => changedSettingKeys(baseline, draft), [baseline, draft])
-  const isDirty = changedKeys.length > 0
-
-  // Adopt external store updates only while the user hasn't started editing.
-  useEffect(() => {
-    if (!isDirty) {
-      setBaseline(storeSettings)
-      setDraft(storeSettings)
-    }
-  }, [storeSettings, isDirty])
-
-  const resetDraft = useCallback(() => setDraft(baseline), [baseline])
 
   const [saving, setSaving] = useState(false)
   const { sentinelRef, docked, moving } = useSaveBarDock()
@@ -257,8 +300,7 @@ export function Settings() {
     try {
       const result = await window.electronAPI.saveSettings(draft)
       setSettings(result)
-      setBaseline(result)
-      setDraft(result)
+      commitDraft(result)
       useAppStore.getState().addGlobalToast('success', 'Настройки сохранены', 'Изменения применены.')
     } catch (err: any) {
       addLog('error', `Не удалось сохранить настройки: ${err?.message ?? err}`)
@@ -317,8 +359,7 @@ export function Settings() {
     try {
       const savedSettings = await window.electronAPI.saveSettings(draft)
       setSettings(savedSettings)
-      setBaseline(savedSettings)
-      setDraft(savedSettings)
+      commitDraft(savedSettings)
       const state = await window.electronAPI.smartRouteRuleSetsRefresh(true)
       setRuleSetState(state)
       addLog(
@@ -776,8 +817,7 @@ export function Settings() {
                 setSettings(persisted)
                 // Move draft and baseline together so this already-applied
                 // change doesn't register as an unsaved edit.
-                setDraft(prev => ({ ...prev, locationPrivacyEnabled: applied }))
-                setBaseline(prev => ({ ...prev, locationPrivacyEnabled: applied }))
+                commitDraftPartial({ locationPrivacyEnabled: applied })
               } catch (err: any) {
                 addLog('error', `Не удалось переключить настройку местоположения: ${err?.message ?? err}`)
               }
@@ -1016,27 +1056,26 @@ export function Settings() {
         {isDirty && (
           <motion.div
             key="settings-save-bar"
-            layout
             initial={{ opacity: 0, y: 24 }}
             animate={{
-              opacity: !docked && moving ? 0.5 : 1,
-              y: !docked && moving ? 8 : 0,
-              scale: !docked && moving ? 0.975 : 1,
+              opacity: !docked && moving ? 0.62 : 1,
+              y: !docked && moving ? 6 : 0,
             }}
-            exit={{ opacity: 0, y: 24, transition: { duration: 0.14 } }}
+            exit={{ opacity: 0, y: 24 }}
             transition={{
               type: 'spring',
-              stiffness: 400,
-              damping: 32,
+              stiffness: 420,
+              damping: 34,
               mass: 0.7,
-              opacity: { duration: 0.15 },
+              opacity: { duration: 0.16 },
             }}
-            style={{ bottom: docked ? 8 : 16 }}
+            style={{ bottom: docked ? 4 : 16 }}
             className={cn(
-              'sticky z-30 mx-auto flex items-center justify-between gap-3 border shadow-[var(--shadow-modal)]',
+              'sticky z-30 mx-auto flex w-full max-w-3xl items-center justify-between gap-3 border shadow-[var(--shadow-modal)]',
+              'transition-[background-color,border-color,border-radius,padding] duration-300 ease-out',
               docked
-                ? 'w-full max-w-3xl rounded-[var(--radius-lg)] border-[var(--color-border-strong)] bg-[var(--color-card-elevated)] px-5 py-3.5'
-                : 'w-fit max-w-full rounded-full border-[var(--color-accent)]/40 bg-[color-mix(in_srgb,var(--color-card-elevated)_92%,transparent)] px-3.5 py-2 backdrop-blur-xl'
+                ? 'rounded-[var(--radius-md)] border-[var(--color-border-strong)] bg-[var(--color-card-elevated)] px-5 py-3'
+                : 'rounded-[var(--radius-lg)] border-[var(--color-accent)]/35 bg-[color-mix(in_srgb,var(--color-card-elevated)_88%,transparent)] px-4 py-2.5 backdrop-blur-xl'
             )}
           >
             <div className="flex min-w-0 items-center gap-2.5">
@@ -1046,15 +1085,14 @@ export function Settings() {
               </span>
               <div className="min-w-0 leading-tight">
                 <p className="truncate text-sm font-medium text-[var(--color-text)]">
-                  {docked
-                    ? 'Есть несохранённые изменения'
-                    : `Не сохранено${changedKeys.length > 1 ? ` · ${changedKeys.length}` : ''}`}
+                  Есть несохранённые изменения
                 </p>
-                {docked && (
-                  <p className="truncate text-xs text-[var(--color-text-secondary)]">
-                    Изменено параметров: {changedKeys.length} — нажмите «Сохранить», чтобы применить.
-                  </p>
-                )}
+                <p className="truncate text-xs text-[var(--color-text-secondary)]">
+                  {changedKeys.length === 1
+                    ? 'изменён 1 параметр'
+                    : `изменено параметров: ${changedKeys.length}`}{' '}
+                  — нажмите «Сохранить»
+                </p>
               </div>
             </div>
             <div className="flex shrink-0 items-center gap-2">
@@ -1065,11 +1103,11 @@ export function Settings() {
                 disabled={saving}
                 aria-label="Сбросить несохранённые изменения"
               >
-                {docked ? 'Сбросить' : <RotateCcw className="h-3.5 w-3.5" />}
+                Сбросить
               </MacButton>
               <MacButton size="sm" onClick={handleSaveSettings} loading={saving} disabled={saving}>
                 {!saving && <Save className="mr-1.5 h-3.5 w-3.5" />}
-                {saving ? 'Сохраняем…' : docked ? 'Сохранить и применить' : 'Сохранить'}
+                {saving ? 'Сохраняем…' : 'Сохранить и применить'}
               </MacButton>
             </div>
           </motion.div>
