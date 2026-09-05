@@ -16,7 +16,7 @@
 
 import { spawn } from 'child_process'
 import { mkdtemp, readFile, rm, writeFile } from 'fs/promises'
-import { Socket } from 'net'
+import { Socket, isIP } from 'net'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { connect as tlsConnect } from 'tls'
@@ -33,8 +33,8 @@ import type { ServerProfile } from '../shared/ipc-types'
 
 const KEY_PROBE_TIMEOUT_MS = 8000
 const KEY_PROBE_DESTINATIONS = [
-  { host: 'yandex.ru', port: 443, serverName: 'yandex.ru', path: '/favicon.ico' },
   { host: '1.1.1.1', port: 443, serverName: 'cloudflare-dns.com', path: '/cdn-cgi/trace' },
+  { host: 'yandex.ru', port: 443, serverName: 'yandex.ru', path: '/favicon.ico' },
   { host: 'www.gstatic.com', port: 443, serverName: 'www.gstatic.com', path: '/generate_204' }
 ] as const
 const HEALTH_CHECK_CONCURRENCY = 5
@@ -47,6 +47,23 @@ export interface KeyHealthResult {
   latencyMs: number | null
   /** 'auth-failed' | 'timeout' | 'tls-failed' | 'config-failed' | etc. */
   reason?: string
+  /** Verified real public exit IP of the node (from trace). */
+  egressIp?: string
+  /** Verified two-letter country code of the exit node (from trace). */
+  country?: string
+}
+
+export function parseCloudflareTrace(text: string): { egressIp?: string; country?: string } {
+  if (!text) return {}
+  const ipMatch = text.match(/\bip=([0-9a-fA-F:.]+)/)
+  const locMatch = text.match(/\bloc=([A-Za-z]{2})\b/)
+  const rawIp = ipMatch ? ipMatch[1].trim() : undefined
+  const ipValid = Boolean(rawIp && isIP(rawIp) !== 0)
+  const country = locMatch ? locMatch[1].trim().toUpperCase() : undefined
+  return {
+    egressIp: ipValid ? rawIp : undefined,
+    country
+  }
 }
 
 interface ProbeTarget {
@@ -162,24 +179,26 @@ async function verifyHttpsThroughSocket(
   socket: Socket,
   destination: (typeof KEY_PROBE_DESTINATIONS)[number],
   timeoutMs: number
-): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
+): Promise<{ egressIp?: string; country?: string }> {
+  return new Promise<{ egressIp?: string; country?: string }>((resolve, reject) => {
     let settled = false
     let response = ''
+    let bodyTimer: NodeJS.Timeout | null = null
     const tls = tlsConnect({
       socket,
       servername: destination.serverName,
       rejectUnauthorized: false
     })
     const timer = setTimeout(() => finish(new Error('timeout')), timeoutMs)
-    const finish = (error: Error | null) => {
+    const finish = (error: Error | null, trace?: { egressIp?: string; country?: string }) => {
       if (settled) return
       settled = true
       clearTimeout(timer)
+      if (bodyTimer) clearTimeout(bodyTimer)
       try { tls.destroy() } catch { /* ignore */ }
       try { socket.destroy() } catch { /* ignore */ }
       if (error) reject(error)
-      else resolve()
+      else resolve(trace || {})
     }
 
     tls.once('secureConnect', () => {
@@ -190,12 +209,31 @@ async function verifyHttpsThroughSocket(
       )
     })
     tls.on('data', chunk => {
-      response += chunk.toString('latin1')
-      if (/^HTTP\/1\.[01] \d{3}\b/.test(response)) finish(null)
+      response += chunk.toString('utf8')
+      if (destination.path === '/cdn-cgi/trace') {
+        const trace = parseCloudflareTrace(response)
+        if (trace.egressIp) {
+          finish(null, trace)
+          return
+        }
+        if (/^HTTP\/1\.[01] \d{3}\b/.test(response) && !bodyTimer) {
+          bodyTimer = setTimeout(() => {
+            finish(null, parseCloudflareTrace(response))
+          }, 600)
+        }
+      } else if (/^HTTP\/1\.[01] \d{3}\b/.test(response)) {
+        finish(null, {})
+      }
     })
     tls.once('error', error => finish(error instanceof Error ? error : new Error(String(error))))
     tls.once('end', () => {
-      if (!settled) finish(new Error('probe destination closed without HTTP response'))
+      if (!settled) {
+        if (/^HTTP\/1\.[01] \d{3}\b/.test(response)) {
+          finish(null, parseCloudflareTrace(response))
+        } else {
+          finish(new Error('probe destination closed without HTTP response'))
+        }
+      }
     })
   })
 }
@@ -377,15 +415,15 @@ async function checkOutboundHealth(profile: ServerProfile): Promise<KeyHealthRes
     child.on('error', err => { childOutput += `\n${err.message}` })
 
     await waitForLocalSocks(inboundPort, 2500)
-    const destination = await Promise.any(KEY_PROBE_DESTINATIONS.map(async candidate => {
+    const probeOutcome = await Promise.any(KEY_PROBE_DESTINATIONS.map(async candidate => {
       const socket = await openTcpViaSocks(
         { host: '127.0.0.1', port: inboundPort },
         candidate.host,
         candidate.port,
         KEY_PROBE_TIMEOUT_MS
       )
-      await verifyHttpsThroughSocket(socket, candidate, KEY_PROBE_TIMEOUT_MS)
-      return candidate
+      const trace = await verifyHttpsThroughSocket(socket, candidate, KEY_PROBE_TIMEOUT_MS)
+      return { candidate, trace }
     }))
 
     const latencyMs = Date.now() - startedAt
@@ -393,10 +431,18 @@ async function checkOutboundHealth(profile: ServerProfile): Promise<KeyHealthRes
       profileId: profile.id,
       protocol: profile.protocol,
       latencyMs,
-      destination: `${destination.host}:${destination.port}`,
+      destination: `${probeOutcome.candidate.host}:${probeOutcome.candidate.port}`,
+      egressIp: probeOutcome.trace?.egressIp ?? null,
+      country: probeOutcome.trace?.country ?? null,
       bootstrap: directProxy ? 'tun-direct-out' : physicalAdapter?.alias || 'system-direct'
     })
-    return { profileId: profile.id, online: true, latencyMs }
+    return {
+      profileId: profile.id,
+      online: true,
+      latencyMs,
+      egressIp: probeOutcome.trace?.egressIp,
+      country: probeOutcome.trace?.country
+    }
   } catch (err: any) {
     const logText = await readProbeLog(logPath)
     const aggregateErrors = err instanceof AggregateError
@@ -480,17 +526,22 @@ export async function checkGroupHealth(groupId: string): Promise<{ ok: true; res
   if (Array.isArray(allProfiles)) {
     getPickerStore().set('profiles', allProfiles.map(profile => {
       const result = resultByProfileId.get(profile.id)
-      return result
-        ? {
-            ...profile,
-            status: result.online ? 'online' as const : 'offline' as const,
-            lastChecked: checkedAt,
-            healthStatus: result.online ? 'online' as const : 'offline' as const,
-            healthCheckedAt: checkedAt,
-            healthLatencyMs: result.latencyMs,
-            healthReason: result.reason
-          }
-        : profile
+      if (!result) return profile
+      const verifiedIp = result.egressIp || profile.countryVerifiedIp || profile.egressIp
+      const country = result.country || profile.country
+      return {
+        ...profile,
+        status: result.online ? 'online' as const : 'offline' as const,
+        lastChecked: checkedAt,
+        healthStatus: result.online ? 'online' as const : 'offline' as const,
+        healthCheckedAt: checkedAt,
+        healthLatencyMs: result.latencyMs,
+        healthReason: result.reason,
+        countryVerifiedIp: verifiedIp,
+        egressIp: verifiedIp,
+        countryVerifiedAt: result.egressIp ? checkedAt : profile.countryVerifiedAt,
+        country
+      }
     }))
   }
 

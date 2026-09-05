@@ -55,3 +55,11 @@ describe('server selection error notification', () => {
     expect(source).toContain("'Не удалось выбрать сервер'")
   })
 })
+
+describe('verified exit IP display', () => {
+  it('renders verified exit IP when countryVerifiedIp or egressIp is present', () => {
+    expect(source).toContain('profile.countryVerifiedIp || profile.egressIp')
+    expect(source).toContain('Выход: {profile.countryVerifiedIp || profile.egressIp}')
+  })
+})
+

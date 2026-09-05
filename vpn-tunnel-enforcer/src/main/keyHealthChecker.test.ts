@@ -28,7 +28,8 @@ import {
   buildKeyProbeConfig,
   classifyHysteria2ProbeFailure,
   classifyOutboundProbeFailure,
-  describeProbeTarget
+  describeProbeTarget,
+  parseCloudflareTrace
 } from './keyHealthChecker'
 import type { ServerProfile } from '../shared/ipc-types'
 
@@ -149,3 +150,42 @@ describe('classifyOutboundProbeFailure', () => {
     expect(classifyOutboundProbeFailure('vless', 'decode config: unknown field')).toBe('config-failed')
   })
 })
+
+describe('parseCloudflareTrace', () => {
+  it('extracts valid egress IP and country from cloudflare trace output', () => {
+    const trace = `
+fl=54f123
+h=cloudflare-dns.com
+ip=185.220.101.5
+ts=1725574123
+visit_scheme=https
+uag=Mozilla/5.0
+colo=FRA
+sliver=none
+http=http/1.1
+loc=FR
+tls=TLSv1.3
+sni=plaintext
+warp=off
+gateway=off
+rbi=off
+kex=X25519
+`
+    const parsed = parseCloudflareTrace(trace)
+    expect(parsed.egressIp).toBe('185.220.101.5')
+    expect(parsed.country).toBe('FR')
+  })
+
+  it('handles IPv6 addresses properly', () => {
+    const trace = 'ip=2a02:26f7:b000::1\nloc=DE\n'
+    const parsed = parseCloudflareTrace(trace)
+    expect(parsed.egressIp).toBe('2a02:26f7:b000::1')
+    expect(parsed.country).toBe('DE')
+  })
+
+  it('returns empty object when trace is invalid or missing ip/loc', () => {
+    expect(parseCloudflareTrace('')).toEqual({})
+    expect(parseCloudflareTrace('HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n')).toEqual({})
+  })
+})
+

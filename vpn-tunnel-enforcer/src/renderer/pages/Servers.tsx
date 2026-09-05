@@ -2051,9 +2051,25 @@ function ServerProfileCard({
             <span className="text-[11px] text-[var(--color-text-muted)] truncate font-mono">
               {profile.server}:{profile.port}
             </span>
+            {profile.countryVerifiedIp || profile.egressIp ? (
+              <span
+                className="text-[11px] text-[var(--color-success)] truncate font-mono font-medium"
+                title={`Выходной IP: ${profile.countryVerifiedIp || profile.egressIp} (проверен)\nВходной мост: ${profile.server} (${profile.resolvedIp ?? '—'})`}
+              >
+                Выход: {profile.countryVerifiedIp || profile.egressIp}
+              </span>
+            ) : null}
             <span
-              className="text-[11px] text-[var(--color-accent)] truncate font-mono"
-              title={profile.resolvedIp ? `DNS: ${profile.server}` : 'IP не разрешён'}
+              className={`text-[11px] truncate font-mono ${
+                profile.countryVerifiedIp || profile.egressIp
+                  ? 'text-[var(--color-text-muted)]'
+                  : 'text-[var(--color-accent)]'
+              }`}
+              title={
+                profile.resolvedIp
+                  ? `DNS: ${profile.server}${profile.countryVerifiedIp || profile.egressIp ? ' (входной мост)' : ''}`
+                  : 'IP не разрешён'
+              }
             >
               IP: {profile.resolvedIp ?? '—'}
             </span>

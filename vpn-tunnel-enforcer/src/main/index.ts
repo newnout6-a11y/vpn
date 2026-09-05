@@ -866,6 +866,16 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
             sendToMainWindow('ip-changed', { ip: rebased.ip, isLeak: rebased.isLeak })
           } catch {}
           refreshTrayState({ status: 'protected', publicIp: rebased.ip, proxyAddr })
+          const exitIp = rebased.ip
+          if (exitIp) {
+            void (async () => {
+              try {
+                const { geolocateIp, updateActiveProfileCountry } = await import('./serverPicker')
+                const country = await geolocateIp(exitIp)
+                if (country) updateActiveProfileCountry(country, exitIp)
+              } catch {}
+            })()
+          }
           return
         }
       } catch { /* retry on next interval */ }
@@ -877,11 +887,19 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
       const routesActive = await areTunRoutesActive().catch(() => false)
       if (routesActive) {
         const ipInfo = await ipMonitor.recheck(true)
-        if (ipInfo.ip) {
+        const exitIp = ipInfo.ip
+        if (exitIp) {
           try {
-            sendToMainWindow('ip-changed', { ip: ipInfo.ip, isLeak: ipInfo.isLeak })
+            sendToMainWindow('ip-changed', { ip: exitIp, isLeak: ipInfo.isLeak })
           } catch {}
-          refreshTrayState({ status: 'protected', publicIp: ipInfo.ip, proxyAddr })
+          refreshTrayState({ status: 'protected', publicIp: exitIp, proxyAddr })
+          void (async () => {
+            try {
+              const { geolocateIp, updateActiveProfileCountry } = await import('./serverPicker')
+              const country = await geolocateIp(exitIp)
+              if (country) updateActiveProfileCountry(country, exitIp)
+            } catch {}
+          })()
         }
       } else {
         logEvent('warn', 'tun', 'TUN routes are not active after probe timeout; skipping ipMonitor.recheck(true) to avoid self-blinding leak detector')
@@ -1160,6 +1178,16 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
             sendToMainWindow('ip-changed', { ip: rebased.ip, isLeak: rebased.isLeak })
           } catch {}
           refreshTrayState({ status: 'protected', publicIp: rebased.ip, proxyAddr: profile.name })
+          const exitIp = rebased.ip
+          if (exitIp) {
+            void (async () => {
+              try {
+                const { geolocateIp, updateActiveProfileCountry } = await import('./serverPicker')
+                const country = await geolocateIp(exitIp)
+                if (country) updateActiveProfileCountry(country, exitIp)
+              } catch {}
+            })()
+          }
           return
         }
       } catch { /* retry on next interval */ }
@@ -1170,11 +1198,19 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
       const routesActive = await areTunRoutesActive().catch(() => false)
       if (routesActive) {
         const ipInfo = await ipMonitor.recheck(true)
-        if (ipInfo.ip) {
+        const exitIp = ipInfo.ip
+        if (exitIp) {
           try {
-            sendToMainWindow('ip-changed', { ip: ipInfo.ip, isLeak: ipInfo.isLeak })
+            sendToMainWindow('ip-changed', { ip: exitIp, isLeak: ipInfo.isLeak })
           } catch {}
-          refreshTrayState({ status: 'protected', publicIp: ipInfo.ip, proxyAddr: profile.name })
+          refreshTrayState({ status: 'protected', publicIp: exitIp, proxyAddr: profile.name })
+          void (async () => {
+            try {
+              const { geolocateIp, updateActiveProfileCountry } = await import('./serverPicker')
+              const country = await geolocateIp(exitIp)
+              if (country) updateActiveProfileCountry(country, exitIp)
+            } catch {}
+          })()
         }
       } else {
         logEvent('warn', 'tun', 'TUN routes are not active after direct probe timeout; skipping ipMonitor.recheck(true) to avoid self-blinding leak detector')

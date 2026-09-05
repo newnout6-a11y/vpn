@@ -56,6 +56,8 @@ export interface ServerProfile {
   country?: string
   countryVerifiedAt?: number
   countryVerifiedIp?: string
+  /** Real exit/egress IP discovered via health probe or after connecting. */
+  egressIp?: string
   countryGeoVersion?: number
   clientDevice?: ClientDevice
   clientFingerprint?: string
