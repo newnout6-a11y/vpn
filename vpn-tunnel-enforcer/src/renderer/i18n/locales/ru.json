@@ -367,6 +367,7 @@
     "duration": "Длительность",
     "traffic": "Трафик",
     "reason": "Причина отключения",
+    "reasonColumn": "Итог",
     "reasonUser": "Пользователь",
     "reasonError": "Ошибка",
     "reasonRotation": "Ротация",

@@ -365,6 +365,7 @@
     "duration": "Duration",
     "traffic": "Traffic",
     "reason": "Disconnect reason",
+    "reasonColumn": "Outcome",
     "reasonUser": "User",
     "reasonError": "Error",
     "reasonRotation": "Rotation",

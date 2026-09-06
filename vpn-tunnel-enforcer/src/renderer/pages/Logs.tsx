@@ -523,7 +523,16 @@ export function Logs() {
           </div>
 
           <div className="overflow-x-auto">
-            <table className="w-full text-sm">
+            <table className="w-full min-w-[780px] text-sm table-fixed">
+              <colgroup>
+                <col className="w-[17%]" />
+                <col className="w-[8%]" />
+                <col className="w-[14%]" />
+                <col className="w-[14%]" />
+                <col className="w-[11%]" />
+                <col className="w-[13%]" />
+                <col className="w-[23%]" />
+              </colgroup>
               <thead>
                 <tr className="border-b border-[var(--color-border)]">
                   <SortableHeader field="profileName" label={t('logs.profile')} onSort={handleSort} sortField={sortField} sortDirection={sortDirection} />
@@ -532,7 +541,7 @@ export function Logs() {
                   <SortableHeader field="endedAt" label={t('logs.endTime')} onSort={handleSort} sortField={sortField} sortDirection={sortDirection} />
                   <SortableHeader field="duration" label={t('logs.duration')} onSort={handleSort} sortField={sortField} sortDirection={sortDirection} />
                   <SortableHeader field="traffic" label={t('logs.traffic')} onSort={handleSort} sortField={sortField} sortDirection={sortDirection} />
-                  <SortableHeader field="disconnectReason" label={t('logs.reason')} onSort={handleSort} sortField={sortField} sortDirection={sortDirection} />
+                  <SortableHeader field="disconnectReason" label={t('logs.reasonColumn')} onSort={handleSort} sortField={sortField} sortDirection={sortDirection} />
                 </tr>
               </thead>
               <tbody>
@@ -554,34 +563,38 @@ export function Logs() {
                       key={entry.id}
                       className="border-b border-[var(--color-border)] last:border-0 hover:bg-[var(--color-border)]/30 transition-colors duration-[var(--transition-fast)]"
                     >
-                      <td className="px-4 py-2.5 font-medium text-[var(--color-text)]">
+                      <td className="px-4 py-2.5 font-medium text-[var(--color-text)] truncate" title={entry.profileName}>
                         {entry.profileName}
                       </td>
-                      <td className="px-4 py-2.5 text-[var(--color-text-secondary)]">
+                      <td className="px-4 py-2.5 text-[var(--color-text-secondary)] truncate">
                         {entry.mode}
                       </td>
-                      <td className="px-4 py-2.5 text-[var(--color-text-secondary)] whitespace-nowrap">
+                      <td className="px-4 py-2.5 text-[var(--color-text-secondary)] truncate">
                         {formatDateTime(entry.startedAt)}
                       </td>
-                      <td className="px-4 py-2.5 text-[var(--color-text-secondary)] whitespace-nowrap">
+                      <td className="px-4 py-2.5 text-[var(--color-text-secondary)] truncate">
                         {entry.endedAt != null ? formatDateTime(entry.endedAt) : (
                           <span className="text-green-400 text-xs font-medium">{t('logs.active')}</span>
                         )}
                       </td>
-                      <td className="px-4 py-2.5 text-[var(--color-text-secondary)] whitespace-nowrap">
+                      <td className="px-4 py-2.5 text-[var(--color-text-secondary)] truncate">
                         {entry.endedAt != null
                           ? formatDuration(entry.endedAt - entry.startedAt)
                           : '—'}
                       </td>
-                      <td className="px-4 py-2.5 text-[var(--color-text-secondary)] whitespace-nowrap">
-                        <span className="text-xs">
-                          ↓{formatBytes(entry.bytesDown)} / ↑{formatBytes(entry.bytesUp)}
-                        </span>
+                      <td className="px-4 py-2.5 text-[var(--color-text-secondary)] text-xs leading-tight tabular-nums">
+                        <span className="block">↓ {formatBytes(entry.bytesDown)}</span>
+                        <span className="block">↑ {formatBytes(entry.bytesUp)}</span>
                       </td>
                       <td className={`px-4 py-2.5 text-xs font-medium ${reasonColor(entry.disconnectReason)}`}>
-                        <div>{reasonLabel(entry.disconnectReason)}</div>
+                        <div className="truncate" title={reasonLabel(entry.disconnectReason)}>
+                          {reasonLabel(entry.disconnectReason)}
+                        </div>
                         {entry.errorMessage && (
-                          <div className="text-[10px] text-[var(--color-text-secondary)] truncate max-w-[220px] font-normal" title={entry.errorMessage}>
+                          <div
+                            className="text-[10px] text-[var(--color-text-secondary)] truncate font-normal"
+                            title={entry.errorMessage}
+                          >
                             {entry.errorMessage}
                           </div>
                         )}
