@@ -11,6 +11,8 @@ interface TrafficEntry {
   lastSeen: number
   count: number
   vpnIp: string | null
+  bytesUp?: number
+  bytesDown?: number
   enrichment?: {
     status: 'pending' | 'ready' | 'unavailable'
     siteName: string | null
@@ -30,6 +32,14 @@ function formatDateTime(ts: number): string {
     minute: '2-digit',
     second: '2-digit'
   })
+}
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
+  if (bytes < 1024) return `${Math.round(bytes)} B`
+  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`
+  if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`
+  return `${(bytes / 1024 ** 3).toFixed(2)} GB`
 }
 
 export function TrafficHistory() {
@@ -113,6 +123,20 @@ export function TrafficHistory() {
   )
   const hasMoreEntries = visibleEntries.length < filtered.length
 
+  const totals = useMemo(() => {
+    let up = 0
+    let down = 0
+    let withBytes = 0
+    const ips = new Set<string>()
+    for (const e of filtered) {
+      up += e.bytesUp ?? 0
+      down += e.bytesDown ?? 0
+      if ((e.bytesUp ?? 0) + (e.bytesDown ?? 0) > 0) withBytes++
+      if (e.vpnIp) ips.add(e.vpnIp)
+    }
+    return { up, down, hasBytes: withBytes > 0, ips: [...ips] }
+  }, [filtered])
+
   const handleClear = async () => {
     setClearing(true)
     try {
@@ -179,10 +203,16 @@ export function TrafficHistory() {
         </div>
       ) : entries.length === 0 ? (
         <MacCard>
-          <div className="flex flex-col items-center justify-center py-12 text-[var(--color-text-secondary)]">
+          <div className="flex flex-col items-center justify-center py-12 text-center text-[var(--color-text-secondary)]">
             <Globe className="w-12 h-12 mb-3 opacity-40" />
             <p className="text-sm">{t('trafficHistory.empty')}</p>
-            <p className="text-xs mt-1">{t('trafficHistory.emptyHint')}</p>
+            <p className="text-xs mt-1 max-w-sm">
+              {tunRunning
+                ? t('trafficHistory.emptyHintConnected', {
+                    defaultValue: 'Откройте пару сайтов — домены появятся здесь в течение нескольких секунд.'
+                  })
+                : t('trafficHistory.emptyHint')}
+            </p>
           </div>
         </MacCard>
       ) : filtered.length === 0 ? (
@@ -195,6 +225,16 @@ export function TrafficHistory() {
         <div className="space-y-4">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[var(--color-text-secondary)]">
             <p>{t('trafficHistory.total', { count: filtered.length })}</p>
+            {totals.hasBytes && (
+              <p className="font-mono">
+                ↓ {formatBytes(totals.down)} · ↑ {formatBytes(totals.up)}
+              </p>
+            )}
+            {totals.ips.length > 0 && (
+              <p className="font-mono">
+                {t('trafficHistory.viaIp', { defaultValue: 'через IP' })}: {totals.ips.join(', ')}
+              </p>
+            )}
             {hasMoreEntries && (
               <p>
                 {t('trafficHistory.showingLatest', {
@@ -235,9 +275,9 @@ export function TrafficHistory() {
                                 Нет метаданных
                               </MacBadge>
                             )}
-                            {entry.vpnIp && (
-                              <span className="text-xs text-[var(--color-text-secondary)] font-mono ml-auto">
-                                IP: {entry.vpnIp}
+                            {(entry.bytesDown ?? 0) + (entry.bytesUp ?? 0) > 0 && (
+                              <span className="text-xs text-[var(--color-text-secondary)] font-mono ml-auto whitespace-nowrap">
+                                ↓ {formatBytes(entry.bytesDown ?? 0)} · ↑ {formatBytes(entry.bytesUp ?? 0)}
                               </span>
                             )}
                           </div>

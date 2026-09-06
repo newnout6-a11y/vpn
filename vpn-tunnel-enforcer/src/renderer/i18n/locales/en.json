@@ -536,10 +536,12 @@
   "trafficHistory": {
     "title": "Traffic History",
     "description": "Sites you visited through the VPN tunnel",
-    "tip": "All domains accessed while VPN is active. The IP shown is what the sites saw — your VPN IP, not your real one.",
+    "tip": "Domains are taken from the tunnel's live connections while the VPN is on, and kept after you disconnect. The IP shown is what the sites saw — your VPN IP, not your real one.",
     "searchPlaceholder": "Search by domain...",
     "empty": "No traffic recorded yet",
     "emptyHint": "Connect VPN and visit some sites to see history here",
+    "emptyHintConnected": "Open a couple of sites — domains show up here within a few seconds.",
+    "viaIp": "via IP",
     "total": "{{count}} unique domains"
   },
   "modes": {

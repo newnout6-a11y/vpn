@@ -28,6 +28,12 @@ vi.mock('./settings', () => ({
 vi.mock('./tunController', () => ({
   tunController: { getStatus: () => ({ running: false }) }
 }))
+vi.mock('./trafficConnections', () => ({
+  clearRecordedTrafficDomains: vi.fn(),
+  getRecordedTrafficDomains: () => [],
+  getInfraHosts: () => new Set<string>(),
+  shouldRecordHost: (host: string) => host
+}))
 
 import { getTrafficHistory, parseSingboxLogLine } from './trafficHistory'
 

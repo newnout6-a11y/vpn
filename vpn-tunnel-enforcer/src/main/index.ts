@@ -70,6 +70,7 @@ import { registerRotationHandlers, initProfileRotation } from './profileRotation
 import { registerSchedulerIpcHandlers, schedulerService } from './scheduler'
 import { registerConnectionHistoryIpcHandlers, connectionHistoryService } from './connectionHistory'
 import { registerTrafficHistoryIpcHandlers, stopBackgroundTrafficHistory } from './trafficHistory'
+import { startTrafficConnectionSampler, stopTrafficConnectionSampler } from './trafficConnections'
 import { registerDnsHandlers, initDnsProfiles } from './dnsProfiles'
 import { registerDomainRoutingIpcHandlers } from './domainRouting'
 import { registerConfigManagerIpcHandlers } from './configManager'
@@ -2085,6 +2086,10 @@ app.whenReady().then(async () => {
   registerSchedulerIpcHandlers()
   registerConnectionHistoryIpcHandlers()
   registerTrafficHistoryIpcHandlers()
+  // If the tunnel is already up by the time handlers register (autoStart, or a
+  // main-process restart while connected), begin sampling right away instead of
+  // waiting for the next status transition.
+  if (tunController.getStatus().running) startTrafficConnectionSampler()
   registerDnsHandlers()
   registerDomainRoutingIpcHandlers()
   registerConfigManagerIpcHandlers()
@@ -2162,8 +2167,10 @@ app.whenReady().then(async () => {
     if (status === 'running') ensureAdaptiveMonitoringForRunningTunnel()
     if (status === 'running' || status === 'proxy-down') {
       trafficMonitor.start()
+      startTrafficConnectionSampler()
     } else {
       trafficMonitor.stop()
+      stopTrafficConnectionSampler()
       // Stop traffic forensics session if it was running (status became stopped/killswitch-active/restarting)
       stopTrafficForensicsSession(`status:${status}`).catch(err => {
         logEvent('warn', 'app', 'failed to stop traffic forensics session on status change', err)
@@ -2300,6 +2307,7 @@ async function performShutdownCleanup(reason: string): Promise<void> {
 
   stopServerGroupAutoRefresh()
   stopBackgroundTrafficHistory()
+  stopTrafficConnectionSampler()
 }
 
 app.on('before-quit', async (event) => {

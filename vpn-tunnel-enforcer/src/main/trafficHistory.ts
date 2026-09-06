@@ -16,6 +16,12 @@ import { logEvent } from './appLogger'
 import { domainEnrichmentService, buildEnrichmentProxyRules, type DomainEnrichment } from './domainEnrichment'
 import { settingsStore } from './settings'
 import { tunController } from './tunController'
+import {
+  clearRecordedTrafficDomains,
+  getInfraHosts,
+  getRecordedTrafficDomains,
+  shouldRecordHost
+} from './trafficConnections'
 
 export interface TrafficHistoryEntry {
   domain: string
@@ -24,6 +30,10 @@ export interface TrafficHistoryEntry {
   count: number
   // The user's public IP at the time of the session (best-effort)
   vpnIp: string | null
+  // Bytes attributed to this domain by the Clash-API connection sampler.
+  // Absent for entries recovered only from the sing-box log.
+  bytesUp?: number
+  bytesDown?: number
   enrichment?: DomainEnrichment
 }
 
@@ -265,12 +275,31 @@ export async function getTrafficHistory(
     parseLog(getPrevSingboxLogPath(), vpnIp)
   ])
 
-  // Merge: if same domain in both, use the latest counts
+  const infraHosts = getInfraHosts()
   const merged = new Map<string, TrafficHistoryEntry>()
+
+  // 1. Clash-API connection sampler — the authoritative source. Real sniffed
+  //    destination domains + per-domain byte counts, persisted across restarts.
+  for (const rec of getRecordedTrafficDomains()) {
+    if (!shouldRecordHost(rec.domain, infraHosts)) continue
+    merged.set(rec.domain, {
+      domain: rec.domain,
+      firstSeen: rec.firstSeen,
+      lastSeen: rec.lastSeen,
+      count: rec.count,
+      bytesUp: rec.bytesUp,
+      bytesDown: rec.bytesDown,
+      vpnIp
+    })
+  }
+
+  // 2. sing-box log parse — fallback for domains the sampler never caught
+  //    (short-lived flows, a session before the sampler ran). Widens the time
+  //    window of a sampled domain but never inflates its connection count.
   for (const entry of [...prev, ...current]) {
+    if (!shouldRecordHost(entry.domain, infraHosts)) continue
     const existing = merged.get(entry.domain)
     if (existing) {
-      existing.count += entry.count
       existing.firstSeen = Math.min(existing.firstSeen, entry.firstSeen)
       existing.lastSeen = Math.max(existing.lastSeen, entry.lastSeen)
     } else {
@@ -345,6 +374,7 @@ export async function clearTrafficHistory(): Promise<void> {
     } catch {}
     logCache.delete(path)
   }
+  clearRecordedTrafficDomains()
   domainEnrichmentService.clear()
   logEvent('info', 'traffic-history', 'traffic history cleared')
 }
