@@ -45,6 +45,7 @@ import { combinedPreStartProbe, getRoutingPlan } from './connectionPlanner'
 import { getSmartRouteRuleSetState, maybeRefreshSmartRouteRuleSets, refreshSmartRouteRuleSets } from './ruleSetManager'
 import { runAutoPilot } from './autoPilot'
 import { notify, setInAppFallbackCallback } from './notifications'
+import { removeHijackingDevShortcut } from './taskbarIdentity'
 import { exportDiagnosticsZip } from './diagnosticsExport'
 import { captureSnapshot, getSnapshotsDir, startPeriodicSnapshots, stopPeriodicSnapshots } from './systemSnapshot'
 import { runLeakSelfTest, startPeriodicLeakTest, stopPeriodicLeakTest, setLeakDetectedCallback, startNetworkChangeWatcher, stopNetworkChangeWatcher, suppressLeakSelfTestsFor } from './leakSelfTest'
@@ -363,7 +364,16 @@ installCrashGuards()
 // places must agree or the registry-based block check / clear will miss.
 export const APP_USER_MODEL_ID = 'com.vpntunnelenforcer.app'
 if (process.platform === 'win32') {
-  app.setAppUserModelId(APP_USER_MODEL_ID)
+  // In dev (unpackaged) the first toast makes Electron auto-create
+  // `%APPDATA%\…\Start Menu\Programs\Electron.lnk` — target
+  // node_modules\electron\dist\electron.exe, icon = the Electron atom — and
+  // stamps it with whatever id we pass here. If that's the production id,
+  // Windows then binds the *installed* app's taskbar button to that stale dev
+  // shortcut (atom icon, "Electron" label); the window icon stays correct but
+  // the taskbar resolves via AUMID → Start Menu shortcut. A `.dev`-scoped id
+  // keeps dev runs from ever touching the shipped identity. The sweep in
+  // removeHijackingDevShortcut() heals installs already poisoned by an old build.
+  app.setAppUserModelId(app.isPackaged ? APP_USER_MODEL_ID : `${APP_USER_MODEL_ID}.dev`)
 }
 
 // ─── Single-instance lock ────────────────────────────────────────────────────
@@ -1426,6 +1436,11 @@ app.whenReady().then(async () => {
     packaged: app.isPackaged,
     userData: app.getPath('userData')
   })
+
+  // Clear a stale dev-mode "Electron.lnk" that an older build may have left in
+  // the Start Menu — Windows binds our taskbar button to it via the AUMID and
+  // shows the Electron atom instead of the app icon. Best-effort, non-blocking.
+  void removeHijackingDevShortcut()
 
   // Content-Security-Policy for the renderer. We ship a fully self-contained
   // bundle (no external CDNs), so a strict policy costs us nothing and shuts

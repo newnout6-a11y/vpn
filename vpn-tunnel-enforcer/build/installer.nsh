@@ -46,6 +46,14 @@
   ; Note: NSIS treats $$ as literal $, so PS variables need double-$.
   nsExec::ExecToLog 'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "try { [Environment]::SetEnvironmentVariable("DOTNET_NGEN_OPT","1","Machine"); $${asm}=[System.Reflection.Assembly]::LoadWithPartialName("System.Management.Automation"); if($${asm}){ $${ng}=Join-Path $${env:WINDIR} "Microsoft.NET\Framework64\v4.0.30319\ngen.exe"; if(Test-Path $${ng}){ & $${ng} install $${asm}.Location /nologo /silent; & $${ng} update /nologo /silent } } } catch {}"'
 
+  ; Remove the stale dev-mode "Electron.lnk" that running the app from source
+  ; drops in the Start Menu (target: node_modules\electron\dist\electron.exe,
+  ; icon: the Electron atom). It carries our AppUserModelID, so Windows binds
+  ; the installed app's taskbar button to it and shows the atom instead of our
+  ; icon. Best-effort — $APPDATA is the installing user's; the app also sweeps
+  ; this on startup (src/main/taskbarIdentity.ts) for other profiles.
+  Delete "$APPDATA\Microsoft\Windows\Start Menu\Programs\Electron.lnk"
+
   ; Refresh Windows icon cache so updated app / shortcut icons show up
   ; immediately after reinstall. Without this, Explorer can keep a stale
   ; cached icon for the existing shortcut or pinned taskbar entry.
