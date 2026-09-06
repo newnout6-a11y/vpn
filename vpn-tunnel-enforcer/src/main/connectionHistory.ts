@@ -101,7 +101,14 @@ export function filterEntries(
     // Filter by text substring (case-insensitive)
     if (filters.text != null && filters.text.length > 0) {
       const searchLower = filters.text.toLowerCase()
-      const haystack = [entry.profileName, entry.mode, entry.disconnectReason, entry.errorMessage ?? '']
+      const haystack = [
+        entry.profileName,
+        entry.mode,
+        entry.disconnectReason,
+        entry.errorMessage ?? '',
+        entry.outcome?.kind ?? '',
+        entry.outcome?.headline ?? ''
+      ]
         .join(' ')
         .toLowerCase()
       if (!haystack.includes(searchLower)) {
@@ -123,6 +130,9 @@ export function filterEntries(
  *
  * Total connection time = sum of (endedAt - startedAt) for entries where endedAt is not null.
  * Total traffic = sum of bytesDown and bytesUp respectively across all entries in the period.
+ *
+ * "Never came up" attempts (outcome.kind === 'start-failed') are excluded — they
+ * are not connections and would inflate the count with zero-duration noise.
  */
 export function aggregateStats(
   entries: ConnectionLogEntry[],
@@ -139,7 +149,9 @@ export function aggregateStats(
 
   const cutoff = currentTime - periodMs[period]
 
-  const filtered = entries.filter((entry) => entry.startedAt >= cutoff)
+  const filtered = entries.filter(
+    (entry) => entry.startedAt >= cutoff && entry.outcome?.kind !== 'start-failed'
+  )
 
   let totalTimeMs = 0
   let totalBytesDown = 0
@@ -177,7 +189,9 @@ export function exportCsv(entries: ConnectionLogEntry[]): string {
     'bytesDown',
     'bytesUp',
     'disconnectReason',
-    'errorMessage'
+    'errorMessage',
+    'outcomeKind',
+    'outcomeHeadline'
   ]
 
   const rows = entries.map((entry) => {
@@ -191,7 +205,9 @@ export function exportCsv(entries: ConnectionLogEntry[]): string {
       entry.bytesDown.toString(),
       entry.bytesUp.toString(),
       entry.disconnectReason,
-      escapeCsvField(entry.errorMessage ?? '')
+      escapeCsvField(entry.errorMessage ?? ''),
+      escapeCsvField(entry.outcome?.kind ?? ''),
+      escapeCsvField(entry.outcome?.headline ?? '')
     ].join(',')
   })
 
@@ -226,6 +242,7 @@ function addEntry(entry: Omit<ConnectionLogEntry, 'id'>): ConnectionLogEntry {
   const newEntry: ConnectionLogEntry = {
     ...entry,
     errorMessage: entry.errorMessage ?? null,
+    outcome: entry.outcome ?? null,
     id: randomUUID()
   }
 

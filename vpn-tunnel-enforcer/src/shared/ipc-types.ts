@@ -429,6 +429,56 @@ export interface WidgetLayout {
   visible: boolean
 }
 
+/**
+ * Why a VPN session ended (or never started). Finer-grained than
+ * `disconnectReason`, which stays as a coarse 5-bucket field for the filter
+ * UI and CSV compatibility (see `outcomeKindToDisconnectReason`).
+ */
+export type SessionOutcomeKind =
+  // intentional
+  | 'user-stop' // the user pressed "Отключить"
+  | 'app-quit' // the app was closed
+  | 'server-switch' // the user switched to another server (session continued on it)
+  | 'rotation' // auto-rotation moved to the next profile
+  | 'schedule' // a schedule window ended
+  // node / connectivity problem
+  | 'proxy-unreachable' // the upstream proxy/server stopped answering (watchdog)
+  | 'server-rejected-key' // REALITY/TLS handshake refused — key / SNI / cert mismatch
+  | 'server-down' // connection refused / timeout to the node
+  | 'singbox-crash' // the tunnel process exited unexpectedly
+  | 'killswitch' // kill-switch engaged and is holding traffic
+  | 'tun-setup-failed' // Wintun / routes / DNS bring-up failed
+  | 'network-lost' // the physical network dropped or changed under the tunnel
+  | 'system-sleep' // the machine suspended
+  // never came up
+  | 'start-failed'
+  | 'unknown'
+
+/** Machine-readable evidence backing a {@link SessionOutcome}. All optional. */
+export interface SessionOutcomeEvidence {
+  singboxExitCode?: number | null
+  singboxStderrTail?: string | null
+  outboundFault?: 'reality-key-mismatch' | 'tls-handshake-failed' | 'upstream-unreachable' | null
+  adaptiveMode?: 'baseline' | 'tls-compatibility' | 'mtu-compatibility' | 'external-managed' | null
+  adaptiveAttempts?: number | null
+  autoRestartAttempts?: number | null
+  killSwitchEngaged?: boolean | null
+  leakDetectedDuringSession?: boolean | null
+  networkTransition?: string | null
+  egressCountry?: string | null
+  egressIp?: string | null
+  proxyEngine?: 'sing-box' | 'xray' | null
+  /** "What to do" hint, shown for start failures. */
+  hint?: string | null
+}
+
+export interface SessionOutcome {
+  kind: SessionOutcomeKind
+  /** One-sentence human summary, composed at write time (Russian). */
+  headline: string
+  evidence?: SessionOutcomeEvidence
+}
+
 /** Connection history log entry */
 export interface ConnectionLogEntry {
   id: string
@@ -441,6 +491,8 @@ export interface ConnectionLogEntry {
   bytesUp: number
   disconnectReason: 'user' | 'error' | 'rotation' | 'schedule' | 'crash'
   errorMessage?: string | null
+  /** Structured cause + evidence. Absent on entries written before v1.1.18. */
+  outcome?: SessionOutcome | null
 }
 
 /** Locale type */

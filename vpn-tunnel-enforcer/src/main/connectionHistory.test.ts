@@ -236,7 +236,7 @@ describe('exportCsv', () => {
   it('produces correct CSV header', () => {
     const csv = exportCsv([])
     expect(csv).toBe(
-      'id,startedAt,endedAt,profileName,profileId,mode,bytesDown,bytesUp,disconnectReason,errorMessage'
+      'id,startedAt,endedAt,profileName,profileId,mode,bytesDown,bytesUp,disconnectReason,errorMessage,outcomeKind,outcomeHeadline'
     )
   })
 
@@ -245,8 +245,18 @@ describe('exportCsv', () => {
     const lines = csv.split('\n')
     expect(lines).toHaveLength(2)
     expect(lines[1]).toBe(
-      'entry-1,1700000000000,1700003600000,US Server,profile-1,hard,1024000,512000,user,'
+      'entry-1,1700000000000,1700003600000,US Server,profile-1,hard,1024000,512000,user,,,'
     )
+  })
+
+  it('exports the structured outcome kind + headline', () => {
+    const entry: ConnectionLogEntry = {
+      ...baseEntry,
+      disconnectReason: 'crash',
+      outcome: { kind: 'singbox-crash', headline: 'Ядро VPN завершилось, код 1' }
+    }
+    const csv = exportCsv([entry])
+    expect(csv.split('\n')[1]).toContain(',singbox-crash,"Ядро VPN завершилось, код 1"')
   })
 
   it('handles null endedAt', () => {

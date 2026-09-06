@@ -402,6 +402,14 @@ export function triggerLeakCheckNow(reason: string): void {
 // real network change always moves at least one IPv4 address.
 let lastNetSignature = ''
 let netWatchTimer: ReturnType<typeof setInterval> | null = null
+let onNetworkChangeCb: ((info: { oldRowCount: number; newRowCount: number }) => void) | null = null
+
+/** Notified whenever the physical network signature changes while the watcher runs. */
+export function setNetworkChangeCallback(
+  cb: ((info: { oldRowCount: number; newRowCount: number }) => void) | null
+): void {
+  onNetworkChangeCb = cb
+}
 
 function buildNetSignature(): string {
   const nics = networkInterfaces()
@@ -424,10 +432,10 @@ export function startNetworkChangeWatcher(): void {
     if (sig !== lastNetSignature) {
       const old = lastNetSignature
       lastNetSignature = sig
-      logEvent('info', 'leak-test', 'network change detected', {
-        oldRowCount: old.split(';').filter(Boolean).length,
-        newRowCount: sig.split(';').filter(Boolean).length
-      })
+      const oldRowCount = old.split(';').filter(Boolean).length
+      const newRowCount = sig.split(';').filter(Boolean).length
+      logEvent('info', 'leak-test', 'network change detected', { oldRowCount, newRowCount })
+      try { onNetworkChangeCb?.({ oldRowCount, newRowCount }) } catch { /* non-critical */ }
       // Tiny grace period so the new interface fully comes up before we
       // probe — otherwise the curl --interface call can fail with "no such
       // address" and falsely report "physical adapter unreachable".

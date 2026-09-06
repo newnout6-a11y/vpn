@@ -239,6 +239,30 @@ const STABLE_RESET_MS = 30000
 // when, for example, watchdog and onExit both notice the death.
 let postTrialFailoverInProgress = false
 
+// Last time the sing-box child exited — captured for the connection-history
+// "why did the session end" record. Read once right after a terminal status
+// change, so a short retention window is fine.
+export interface SingBoxExitInfo {
+  at: number
+  code: number | null
+  stderrTail: string | null
+  errorMessage: string | null
+  userInitiated: boolean
+}
+let lastSingBoxExit: SingBoxExitInfo | null = null
+
+export function getLastSingBoxExit(): SingBoxExitInfo | null {
+  return lastSingBoxExit
+}
+
+// Fired at the start of every protected restart (rotation / server switch /
+// adaptive transition / config hot-reload) with the caller's `reason` string,
+// so index.ts can roll the connection-history session when the node changes.
+let protectedRestartCallback: ((reason: string) => void) | null = null
+
+export function onProtectedRestart(cb: (reason: string) => void): void {
+  protectedRestartCallback = cb
+}
 
 function clearRestartTimers() {
   if (restartTimer) {
@@ -2623,6 +2647,15 @@ export const tunController = {
       const onExit = (error?: Error | null, stderr?: string) => {
         // This fires only when sing-box exits (or UAC is denied).
         const wasRunning = currentStatus.running
+        const rawCode = (error as unknown as { code?: unknown } | null | undefined)?.code
+        const exitCode = typeof rawCode === 'number' ? rawCode : null
+        lastSingBoxExit = {
+          at: Date.now(),
+          code: exitCode,
+          stderrTail: stderr ? String(stderr).split(/\r?\n/).filter(Boolean).slice(-6).join('\n').slice(0, 800) : null,
+          errorMessage: error?.message ?? null,
+          userInitiated: userInitiatedStop || stopInProgress
+        }
         stopProxyWatchdog()
         currentStatus = {
           running: false,
@@ -3581,6 +3614,9 @@ export const tunController = {
       mode: nextOptions.mode ?? 'localProxy',
       settleMs
     })
+    // Fired while the tunnel is still up (traffic counters valid) so index.ts
+    // can close the current connection-history session for a node switch.
+    try { protectedRestartCallback?.(reason) } catch { /* never let a listener break the restart */ }
     const stopped = await this.stop({
       preserveNetworkProtection: true,
       preserveLastStartOptions: true

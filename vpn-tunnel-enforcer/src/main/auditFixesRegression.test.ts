@@ -125,10 +125,13 @@ describe('Audit Fixes Regression: NTP UDP 123 kill-switch allow', () => {
 })
 
 describe('Audit Fixes Regression: Connection History error logging & display', () => {
-  it('records failed connection attempts with errorMessage across all failure paths', () => {
-    expect(indexSource).toContain('connectionHistoryService.addEntry({')
+  it('records failed connection attempts with a structured outcome across all failure paths', () => {
+    // Every "never came up" path funnels through recordStartFailure(), which
+    // writes disconnectReason:'error' + a start-failed outcome carrying the hint.
+    expect(indexSource).toContain('function recordStartFailure(')
     expect(indexSource).toContain("disconnectReason: 'error'")
-    expect(indexSource).toContain('errorMessage: errorMsg')
+    expect(indexSource).toContain("makeOutcome('start-failed'")
+    expect(indexSource).toContain('recordStartFailure({ id: ')
     expect(indexSource).toContain('Не удалось снять старую блокировку перед перезапуском')
     expect(indexSource).toContain('clearStaleKillSwitchBeforeStart')
   })
@@ -159,8 +162,11 @@ describe('Audit Fixes Regression: Connection History error logging & display', (
     expect(csv).toContain('Handshake timeout on Reality SNI')
   })
 
-  it('renders errorMessage in Logs.tsx table cell', () => {
-    expect(logsSource).toContain('entry.errorMessage &&')
-    expect(logsSource).toContain('title={entry.errorMessage}')
+  it('surfaces a legacy errorMessage in the Logs.tsx outcome view', () => {
+    // Legacy rows (no structured outcome) fall back to errorMessage as the
+    // headline, and OutcomeDetail also shows it verbatim as legacyMessage.
+    expect(logsSource).toContain('entry.errorMessage || t(`logs.outcome.${kind}`)')
+    expect(logsSource).toContain('legacyMessage')
+    expect(logsSource).toContain('entry.outcome?.headline || entry.errorMessage')
   })
 })

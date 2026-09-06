@@ -150,7 +150,7 @@ describe('main IPC regressions', () => {
 
   it('stops all external proxies before the main VPN disconnect', () => {
     const source = mainIndexSource()
-    const stopStart = source.indexOf('async function stopProtection()')
+    const stopStart = source.indexOf('async function stopProtection(')
     const tunStop = source.indexOf('const result = await tunController.stop()', stopStart)
     const proxyStop = source.indexOf("await externalProxy.stopAll('vpn-stop')", stopStart)
 

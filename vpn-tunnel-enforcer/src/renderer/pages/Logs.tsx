@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo, useCallback, useRef } from 'react'
+import { Fragment, useEffect, useState, useMemo, useCallback, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useAppStore } from '../store'
 import {
@@ -10,11 +10,27 @@ import {
   Clock,
   Activity,
   FileText,
-  Trash2
+  Trash2,
+  ChevronRight,
+  Copy,
+  Check,
+  Power,
+  LogOut,
+  Repeat,
+  CalendarClock,
+  ArrowLeftRight,
+  PlugZap,
+  KeyRound,
+  ServerCrash,
+  ShieldAlert,
+  Wifi,
+  Moon,
+  CircleSlash,
+  HelpCircle
 } from 'lucide-react'
 import { MacCard, MacInput, MacButton, MacSelect } from '../design-system'
 import { PageTip } from '../components/PageTip'
-import type { ConnectionLogEntry } from '../../shared/ipc-types'
+import type { ConnectionLogEntry, SessionOutcome, SessionOutcomeKind } from '../../shared/ipc-types'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -72,6 +88,72 @@ function formatDateTime(ts: number | null): string {
 const ALL_REASONS: DisconnectReason[] = ['user', 'error', 'rotation', 'schedule', 'crash']
 const RAW_LOG_POLL_INTERVAL_MS = 10_000
 
+// ─── Session outcome presentation ───────────────────────────────────────────
+
+type OutcomeTone = 'ok' | 'muted' | 'info' | 'warn' | 'bad'
+
+const TONE_CLASS: Record<OutcomeTone, string> = {
+  ok: 'text-emerald-400 bg-emerald-500/10 border-emerald-500/25',
+  muted: 'text-[var(--color-text-secondary)] bg-[var(--color-border)]/40 border-[var(--color-border)]',
+  info: 'text-sky-400 bg-sky-500/10 border-sky-500/25',
+  warn: 'text-amber-400 bg-amber-500/10 border-amber-500/25',
+  bad: 'text-red-400 bg-red-500/10 border-red-500/25'
+}
+
+const OUTCOME_META: Record<SessionOutcomeKind, { tone: OutcomeTone; Icon: typeof Power }> = {
+  'user-stop': { tone: 'ok', Icon: Power },
+  'app-quit': { tone: 'muted', Icon: LogOut },
+  'server-switch': { tone: 'info', Icon: ArrowLeftRight },
+  rotation: { tone: 'info', Icon: Repeat },
+  schedule: { tone: 'info', Icon: CalendarClock },
+  'proxy-unreachable': { tone: 'warn', Icon: PlugZap },
+  'server-rejected-key': { tone: 'bad', Icon: KeyRound },
+  'server-down': { tone: 'bad', Icon: ServerCrash },
+  'singbox-crash': { tone: 'bad', Icon: ServerCrash },
+  killswitch: { tone: 'bad', Icon: ShieldAlert },
+  'tun-setup-failed': { tone: 'bad', Icon: CircleSlash },
+  'network-lost': { tone: 'warn', Icon: Wifi },
+  'system-sleep': { tone: 'warn', Icon: Moon },
+  'start-failed': { tone: 'bad', Icon: CircleSlash },
+  unknown: { tone: 'muted', Icon: HelpCircle }
+}
+
+/** Legacy rows (no `outcome`) — synthesise a kind from the coarse reason. */
+function legacyKind(reason: DisconnectReason): SessionOutcomeKind {
+  switch (reason) {
+    case 'user': return 'user-stop'
+    case 'rotation': return 'rotation'
+    case 'schedule': return 'schedule'
+    case 'crash': return 'killswitch'
+    default: return 'unknown'
+  }
+}
+
+function isStartFailure(entry: ConnectionLogEntry): boolean {
+  return entry.outcome?.kind === 'start-failed' || (entry.endedAt != null && entry.endedAt - entry.startedAt < 1000 && entry.bytesDown === 0 && entry.bytesUp === 0 && (entry.disconnectReason === 'error'))
+}
+
+function buildDiagnosticsText(entry: ConnectionLogEntry): string {
+  const lines: string[] = []
+  lines.push(`Профиль: ${entry.profileName} (${entry.mode})`)
+  lines.push(`Начало: ${new Date(entry.startedAt).toISOString()}`)
+  if (entry.endedAt != null) lines.push(`Конец: ${new Date(entry.endedAt).toISOString()}`)
+  lines.push(`Трафик: ↓${entry.bytesDown} / ↑${entry.bytesUp} байт`)
+  if (entry.outcome) {
+    lines.push(`Итог: ${entry.outcome.kind} — ${entry.outcome.headline}`)
+    if (entry.outcome.evidence) {
+      lines.push('Детали:')
+      for (const [k, v] of Object.entries(entry.outcome.evidence)) {
+        if (v !== null && v !== undefined && v !== '') lines.push(`  ${k}: ${v}`)
+      }
+    }
+  } else {
+    lines.push(`Причина: ${entry.disconnectReason}`)
+    if (entry.errorMessage) lines.push(`Сообщение: ${entry.errorMessage}`)
+  }
+  return lines.join('\n')
+}
+
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export function Logs() {
@@ -98,6 +180,11 @@ export function Logs() {
   // Sorting
   const [sortField, setSortField] = useState<SortField>('startedAt')
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc')
+
+  // Row expansion + "copy diagnostics" feedback
+  const [expandedId, setExpandedId] = useState<string | null>(null)
+  const [copiedId, setCopiedId] = useState<string | null>(null)
+  const [showStartFailures, setShowStartFailures] = useState(false)
 
   // Stats
   const [statsPeriod, setStatsPeriod] = useState<'day' | 'week' | 'month'>('day')
@@ -188,6 +275,30 @@ export function Logs() {
     })
     return sorted
   }, [entries, sortField, sortDirection])
+
+  // Real sessions vs "never came up" attempts — shown in separate lists so the
+  // history table stays about actual connections.
+  const sessionEntries = useMemo(() => sortedEntries.filter((e) => !isStartFailure(e)), [sortedEntries])
+  const startFailures = useMemo(() => sortedEntries.filter(isStartFailure), [sortedEntries])
+
+  const outcomeFor = useCallback(
+    (entry: ConnectionLogEntry): { kind: SessionOutcomeKind; headline: string; outcome: SessionOutcome | null } => {
+      if (entry.outcome) return { kind: entry.outcome.kind, headline: entry.outcome.headline, outcome: entry.outcome }
+      const kind = legacyKind(entry.disconnectReason)
+      return { kind, headline: entry.errorMessage || t(`logs.outcome.${kind}`), outcome: null }
+    },
+    [t]
+  )
+
+  const copyDiagnostics = useCallback(async (entry: ConnectionLogEntry) => {
+    try {
+      await navigator.clipboard.writeText(buildDiagnosticsText(entry))
+      setCopiedId(entry.id)
+      setTimeout(() => setCopiedId((cur) => (cur === entry.id ? null : cur)), 1500)
+    } catch {
+      /* clipboard blocked — no-op */
+    }
+  }, [])
 
   // ─── Handlers ──────────────────────────────────────────────────────────────
 
@@ -350,17 +461,6 @@ export function Logs() {
   }, [loadRawLogs])
 
 
-  const reasonColor = (reason: DisconnectReason): string => {
-    switch (reason) {
-      case 'user': return 'text-[var(--color-text-secondary)]'
-      case 'error': return 'text-red-400'
-      case 'crash': return 'text-red-500'
-      case 'rotation': return 'text-blue-400'
-      case 'schedule': return 'text-green-400'
-      default: return 'text-[var(--color-text)]'
-    }
-  }
-
   // ─── Render ────────────────────────────────────────────────────────────────
 
   return (
@@ -518,20 +618,20 @@ export function Logs() {
               {t('logs.connectionHistory')}
             </h3>
             <span className="text-xs text-[var(--color-text-secondary)]">
-              {sortedEntries.length} {t('logs.connections').toLowerCase()}
+              {sessionEntries.length} {t('logs.connections').toLowerCase()}
             </span>
           </div>
 
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[780px] text-sm table-fixed">
+            <table className="w-full min-w-[760px] text-sm table-fixed">
               <colgroup>
-                <col className="w-[17%]" />
+                <col className="w-[20%]" />
                 <col className="w-[8%]" />
-                <col className="w-[14%]" />
-                <col className="w-[14%]" />
+                <col className="w-[15%]" />
+                <col className="w-[15%]" />
                 <col className="w-[11%]" />
                 <col className="w-[13%]" />
-                <col className="w-[23%]" />
+                <col className="w-[18%]" />
               </colgroup>
               <thead>
                 <tr className="border-b border-[var(--color-border)]">
@@ -551,61 +651,119 @@ export function Logs() {
                       {t('common.loading')}
                     </td>
                   </tr>
-                ) : sortedEntries.length === 0 ? (
+                ) : sessionEntries.length === 0 ? (
                   <tr>
                     <td colSpan={7} className="text-center py-8 text-[var(--color-text-secondary)]">
                       {t('logs.noLogs')}
                     </td>
                   </tr>
                 ) : (
-                  sortedEntries.map((entry) => (
-                    <tr
-                      key={entry.id}
-                      className="border-b border-[var(--color-border)] last:border-0 hover:bg-[var(--color-border)]/30 transition-colors duration-[var(--transition-fast)]"
-                    >
-                      <td className="px-4 py-2.5 font-medium text-[var(--color-text)] truncate" title={entry.profileName}>
-                        {entry.profileName}
-                      </td>
-                      <td className="px-4 py-2.5 text-[var(--color-text-secondary)] truncate">
-                        {entry.mode}
-                      </td>
-                      <td className="px-4 py-2.5 text-[var(--color-text-secondary)] truncate">
-                        {formatDateTime(entry.startedAt)}
-                      </td>
-                      <td className="px-4 py-2.5 text-[var(--color-text-secondary)] truncate">
-                        {entry.endedAt != null ? formatDateTime(entry.endedAt) : (
-                          <span className="text-green-400 text-xs font-medium">{t('logs.active')}</span>
+                  sessionEntries.map((entry) => {
+                    const { kind, headline, outcome } = outcomeFor(entry)
+                    const expanded = expandedId === entry.id
+                    return (
+                      <Fragment key={entry.id}>
+                        <tr
+                          onClick={() => setExpandedId(expanded ? null : entry.id)}
+                          className="border-b border-[var(--color-border)] last:border-0 hover:bg-[var(--color-border)]/30 transition-colors duration-[var(--transition-fast)] cursor-pointer"
+                        >
+                          <td className="px-4 py-2.5 font-medium text-[var(--color-text)] truncate" title={entry.profileName}>
+                            {entry.profileName}
+                          </td>
+                          <td className="px-4 py-2.5 text-[var(--color-text-secondary)] truncate">
+                            {entry.mode}
+                          </td>
+                          <td className="px-4 py-2.5 text-[var(--color-text-secondary)] truncate">
+                            {formatDateTime(entry.startedAt)}
+                          </td>
+                          <td className="px-4 py-2.5 text-[var(--color-text-secondary)] truncate">
+                            {entry.endedAt != null ? formatDateTime(entry.endedAt) : (
+                              <span className="text-green-400 text-xs font-medium">{t('logs.active')}</span>
+                            )}
+                          </td>
+                          <td className="px-4 py-2.5 text-[var(--color-text-secondary)] truncate">
+                            {entry.endedAt != null ? formatDuration(entry.endedAt - entry.startedAt) : '—'}
+                          </td>
+                          <td className="px-4 py-2.5 text-[var(--color-text-secondary)] text-xs leading-tight tabular-nums">
+                            <span className="block">↓ {formatBytes(entry.bytesDown)}</span>
+                            <span className="block">↑ {formatBytes(entry.bytesUp)}</span>
+                          </td>
+                          <td className="px-3 py-2.5">
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              <OutcomeChip kind={kind} label={t(`logs.outcome.${kind}`)} />
+                              <ChevronRight
+                                size={13}
+                                className={`flex-shrink-0 text-[var(--color-text-muted)] transition-transform ${expanded ? 'rotate-90' : ''}`}
+                              />
+                            </div>
+                          </td>
+                        </tr>
+                        {expanded && (
+                          <tr className="bg-[var(--color-bg)]/60">
+                            <td colSpan={7} className="px-5 py-3">
+                              <OutcomeDetail
+                                headline={headline}
+                                outcome={outcome}
+                                legacyMessage={outcome ? null : entry.errorMessage ?? null}
+                                onCopy={() => copyDiagnostics(entry)}
+                                copied={copiedId === entry.id}
+                                t={t}
+                              />
+                            </td>
+                          </tr>
                         )}
-                      </td>
-                      <td className="px-4 py-2.5 text-[var(--color-text-secondary)] truncate">
-                        {entry.endedAt != null
-                          ? formatDuration(entry.endedAt - entry.startedAt)
-                          : '—'}
-                      </td>
-                      <td className="px-4 py-2.5 text-[var(--color-text-secondary)] text-xs leading-tight tabular-nums">
-                        <span className="block">↓ {formatBytes(entry.bytesDown)}</span>
-                        <span className="block">↑ {formatBytes(entry.bytesUp)}</span>
-                      </td>
-                      <td className={`px-4 py-2.5 text-xs font-medium ${reasonColor(entry.disconnectReason)}`}>
-                        <div className="truncate" title={reasonLabel(entry.disconnectReason)}>
-                          {reasonLabel(entry.disconnectReason)}
-                        </div>
-                        {entry.errorMessage && (
-                          <div
-                            className="text-[10px] text-[var(--color-text-secondary)] truncate font-normal"
-                            title={entry.errorMessage}
-                          >
-                            {entry.errorMessage}
-                          </div>
-                        )}
-                      </td>
-                    </tr>
-                  ))
+                      </Fragment>
+                    )
+                  })
                 )}
               </tbody>
             </table>
           </div>
         </MacCard>
+
+        {/* Start failures — attempts that never reached a working tunnel */}
+        {startFailures.length > 0 && (
+          <MacCard noPadding>
+            <button
+              onClick={() => setShowStartFailures((v) => !v)}
+              className="w-full px-5 py-3.5 flex items-center justify-between text-left hover:bg-[var(--color-border)]/20 transition-colors"
+            >
+              <span className="text-sm font-semibold text-[var(--color-text)] flex items-center gap-2">
+                <CircleSlash size={15} className="text-red-400" />
+                {t('logs.startFailuresTitle')}
+                <span className="text-xs font-normal text-[var(--color-text-secondary)]">
+                  ({startFailures.length})
+                </span>
+              </span>
+              <ChevronRight size={15} className={`text-[var(--color-text-muted)] transition-transform ${showStartFailures ? 'rotate-90' : ''}`} />
+            </button>
+            {showStartFailures && (
+              <div className="px-5 pb-4">
+                <p className="text-xs text-[var(--color-text-secondary)] mb-3">{t('logs.startFailuresHint')}</p>
+                <div className="space-y-1.5">
+                  {startFailures.map((entry) => (
+                    <div key={entry.id} className="rounded-[var(--radius-sm)] bg-[var(--color-card)] border border-[var(--color-border)] px-3 py-2">
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-xs font-medium text-[var(--color-text)] truncate">{entry.profileName}</span>
+                        <span className="text-[10px] text-[var(--color-text-muted)] flex-shrink-0 tabular-nums">
+                          {formatDateTime(entry.startedAt)}
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-red-400/90 mt-1 leading-snug">
+                        {entry.outcome?.headline || entry.errorMessage}
+                      </p>
+                      {entry.outcome?.evidence?.outboundFault && (
+                        <p className="text-[10px] text-[var(--color-text-secondary)] mt-0.5">
+                          {t('logs.outcomeEvidence.outboundFault')}: {t(`logs.outboundFault.${entry.outcome.evidence.outboundFault}`)}
+                        </p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </MacCard>
+        )}
       </div>
 
       <div className="mt-5 xl:mt-0 space-y-5 xl:sticky xl:top-5">
@@ -727,5 +885,73 @@ function SortableHeader({
         )}
       </span>
     </th>
+  )
+}
+
+// ─── Session outcome chip + detail ──────────────────────────────────────────
+
+function OutcomeChip({ kind, label }: { kind: SessionOutcomeKind; label: string }) {
+  const { tone, Icon } = OUTCOME_META[kind]
+  return (
+    <span
+      className={`inline-flex min-w-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium ${TONE_CLASS[tone]}`}
+      title={label}
+    >
+      <Icon size={12} className="flex-shrink-0" />
+      <span className="truncate">{label}</span>
+    </span>
+  )
+}
+
+function OutcomeDetail({
+  headline,
+  outcome,
+  legacyMessage,
+  onCopy,
+  copied,
+  t
+}: {
+  headline: string
+  outcome: SessionOutcome | null
+  legacyMessage: string | null
+  onCopy: () => void
+  copied: boolean
+  t: (key: string, opts?: Record<string, unknown>) => string
+}) {
+  const ev = outcome?.evidence ?? {}
+  const rows: Array<[string, string]> = []
+  for (const [key, value] of Object.entries(ev)) {
+    if (value === null || value === undefined || value === '') continue
+    let display: string
+    if (key === 'outboundFault') display = t(`logs.outboundFault.${value}`)
+    else if (typeof value === 'boolean') display = value ? '✓' : '—'
+    else display = String(value)
+    rows.push([t(`logs.outcomeEvidence.${key}`), display])
+  }
+
+  return (
+    <div className="space-y-2.5">
+      <p className="text-sm text-[var(--color-text)] leading-snug">{headline}</p>
+      {legacyMessage && legacyMessage !== headline && (
+        <p className="text-xs text-[var(--color-text-secondary)]">{legacyMessage}</p>
+      )}
+      {rows.length > 0 && (
+        <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1 text-xs">
+          {rows.map(([label, value]) => (
+            <div key={label} className="flex justify-between gap-3 border-b border-[var(--color-border)]/40 py-0.5">
+              <dt className="text-[var(--color-text-secondary)] flex-shrink-0">{label}</dt>
+              <dd className="text-[var(--color-text)] text-right break-all font-mono">{value}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
+      <button
+        onClick={(e) => { e.stopPropagation(); onCopy() }}
+        className="inline-flex items-center gap-1.5 rounded-[var(--radius-sm)] border border-[var(--color-border)] px-2.5 py-1 text-[11px] text-[var(--color-text-secondary)] hover:text-[var(--color-text)] hover:border-[var(--color-accent)] transition-colors"
+      >
+        {copied ? <Check size={12} className="text-emerald-400" /> : <Copy size={12} />}
+        {copied ? t('logs.copied') : t('logs.copyDiagnostics')}
+      </button>
+    </div>
   )
 }

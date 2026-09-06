@@ -1,14 +1,16 @@
 import './snapshotBootstrap'
 import { startElevatedPsHelper, stopElevatedPsHelper } from './elevatedPsHelper'
-import { app, BrowserWindow, dialog, ipcMain, Tray, shell, session, Menu, type IpcMainInvokeEvent } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Tray, shell, session, Menu, powerMonitor, type IpcMainInvokeEvent } from 'electron'
 import { exec as execCb } from 'child_process'
 import { execFile as execFileCb } from 'child_process'
 import { rm } from 'fs/promises'
 import { promisify } from 'util'
 import { join } from 'path'
 import { happDetector } from './happDetector'
-import { tunController, detectForeignTun, killOwnedTunRuntimeProcesses, isOwnedTunRuntimeRunning, readRecentSingBoxOutboundFault, areTunRoutesActive } from './tunController'
+import { tunController, detectForeignTun, killOwnedTunRuntimeProcesses, isOwnedTunRuntimeRunning, readRecentSingBoxOutboundFault, areTunRoutesActive, getLastSingBoxExit, onProtectedRestart } from './tunController'
 import type { SingBoxOutboundFault } from './tunController'
+import { makeOutcome, outcomeKindToDisconnectReason, isNodeSwitchRestartReason } from './sessionOutcome'
+import type { SessionOutcome, SessionOutcomeEvidence, SessionOutcomeKind } from '../shared/ipc-types'
 import { readRecentXrayOutboundFault, getXrayStatus, stopXray } from './xrayEngine'
 import { classifyNavigation } from './navigationPolicy'
 import { ipMonitor } from './ipMonitor'
@@ -48,7 +50,7 @@ import { notify, setInAppFallbackCallback } from './notifications'
 import { removeHijackingDevShortcut } from './taskbarIdentity'
 import { exportDiagnosticsZip } from './diagnosticsExport'
 import { captureSnapshot, getSnapshotsDir, startPeriodicSnapshots, stopPeriodicSnapshots } from './systemSnapshot'
-import { runLeakSelfTest, startPeriodicLeakTest, stopPeriodicLeakTest, setLeakDetectedCallback, startNetworkChangeWatcher, stopNetworkChangeWatcher, suppressLeakSelfTestsFor } from './leakSelfTest'
+import { runLeakSelfTest, startPeriodicLeakTest, stopPeriodicLeakTest, setLeakDetectedCallback, setNetworkChangeCallback, startNetworkChangeWatcher, stopNetworkChangeWatcher, suppressLeakSelfTestsFor } from './leakSelfTest'
 import { getTrafficForensicsStatus, restartTrafficForensicsSession, startTrafficForensicsSession, stopTrafficForensicsSession } from './trafficForensics'
 import { trafficMonitor, type TrafficStats } from './trafficMonitor'
 import { applyBrowserLeakProtection, rollbackBrowserLeakProtection } from './browserHardening'
@@ -122,14 +124,170 @@ let latestTrayProxyAddr: string | null = null
 let latestKillSwitchActive = false
 let latestRestartingProgress: string | null = null
 
-// Connection history tracking. We open a "current connection" record when
-// startProtection / startDirectVpnProtection succeeds, and close it on stop or
-// on a status change to a terminal state. `stopInProgress` guards against
-// double-recording when the user-initiated stop also triggers a status-change
-// event.
-let currentConnectionStart: number | null = null
-let currentConnectionProfile: { id: string; name: string; mode: 'hard' | 'soft' | 'direct' } | null = null
+// Connection-history session tracking. openSession() when the tunnel comes up,
+// closeSession(outcome) when it ends. `stopInProgress` guards against
+// double-recording when a user-initiated stop also triggers a status-change.
+interface LiveSession {
+  startedAt: number
+  profile: { id: string; name: string; mode: 'hard' | 'soft' | 'direct' }
+  leakDetected: boolean
+  lastNetworkTransition: string | null
+}
+let currentSession: LiveSession | null = null
 let stopInProgress = false
+// Timestamps of the last physical-network change and the last OS suspend —
+// used by the crash path to tell "network dropped" / "went to sleep" apart
+// from a genuine tunnel fault.
+let lastNetworkChangeAt = 0
+let lastResumeAt = 0
+
+function openSession(profile: LiveSession['profile']): void {
+  currentSession = {
+    startedAt: Date.now(),
+    profile,
+    leakDetected: false,
+    lastNetworkTransition: null
+  }
+}
+
+/** Reconstruct a session from live tun state — used after a protected restart
+ *  (rotation / server switch) reopens the tunnel outside start*Protection(). */
+function ensureSessionForRunningTunnel(): void {
+  if (currentSession) return
+  const tun = tunController.getStatus()
+  let active: { id: string; name: string } | null = null
+  try {
+    const p = serverPicker.getActiveProfile()
+    if (p) active = { id: p.id, name: p.name }
+  } catch { /* ignore */ }
+  const mode: LiveSession['profile']['mode'] = tun.mode === 'directVpn' ? 'direct' : 'hard'
+  openSession({
+    id: active?.id ?? (mode === 'direct' ? 'direct-vpn' : 'local-proxy'),
+    name: tun.vpnProfileName || active?.name || (mode === 'direct' ? 'Direct VPN' : 'Local Proxy'),
+    mode
+  })
+}
+
+function sessionEgressEvidence(): Pick<SessionOutcomeEvidence, 'egressIp' | 'egressCountry' | 'proxyEngine'> {
+  let egressCountry: string | null = null
+  try {
+    egressCountry = serverPicker.getActiveProfile()?.country ?? null
+  } catch { /* ignore */ }
+  const engine = tunController.getLastStartOptions?.()?.proxyEngine
+  return {
+    egressIp: latestPublicIp,
+    egressCountry,
+    proxyEngine: engine === 'xray' ? 'xray' : engine === 'sing-box' ? 'sing-box' : null
+  }
+}
+
+function writeSessionEntry(s: LiveSession, stats: TrafficStats, outcome: SessionOutcome): void {
+  try {
+    connectionHistoryService.addEntry({
+      startedAt: s.startedAt,
+      endedAt: Date.now(),
+      profileName: s.profile.name,
+      profileId: s.profile.id,
+      mode: s.profile.mode,
+      bytesDown: stats.sessionDownloadBytes ?? 0,
+      bytesUp: stats.sessionUploadBytes ?? 0,
+      disconnectReason: outcomeKindToDisconnectReason(outcome.kind),
+      errorMessage: outcome.headline,
+      outcome
+    })
+  } catch (err) {
+    logEvent('warn', 'app', 'failed to record connection history', err)
+  }
+}
+
+/** Write the current session to history and clear it. No-op if none is open. */
+function closeSession(outcome: SessionOutcome): void {
+  const s = currentSession
+  currentSession = null
+  if (!s) return
+  writeSessionEntry(s, trafficMonitor.getCurrentStats(), outcome)
+}
+
+const OUTBOUND_FAULT_HINT = /прокси .*не отвеч|proxy .*(unreachable|not answ)|не отвечает/i
+
+/**
+ * Classify and record a session that ended on its own (crash, kill-switch,
+ * node rejection, network loss, sleep …). `stats` must be captured BEFORE
+ * trafficMonitor.stop() zeroes the counters.
+ */
+async function recordUnexpectedSessionEnd(
+  status: string,
+  session: LiveSession,
+  stats: TrafficStats
+): Promise<void> {
+  const tun = tunController.getStatus()
+  const exit = getLastSingBoxExit()
+  const adaptive = getAdaptiveBypassStatus()
+  const fault = await readRecentSingBoxOutboundFault().catch(() => null)
+  const now = Date.now()
+  const killswitch = status === 'killswitch-active'
+  const sleepRecent = lastResumeAt > 0 && now - lastResumeAt < 25_000
+  const netRecent = lastNetworkChangeAt > 0 && now - lastNetworkChangeAt < 15_000
+  const exitLooksLikeCrash = Boolean(exit && !exit.userInitiated && now - exit.at < 30_000)
+
+  let kind: SessionOutcomeKind
+  if (sleepRecent) kind = 'system-sleep'
+  else if (fault === 'reality-key-mismatch' || fault === 'tls-handshake-failed') kind = 'server-rejected-key'
+  else if (fault === 'upstream-unreachable') kind = 'server-down'
+  else if (netRecent) kind = 'network-lost'
+  else if (killswitch) kind = 'killswitch'
+  else if (tun.warning && OUTBOUND_FAULT_HINT.test(tun.warning)) kind = 'proxy-unreachable'
+  else if (exitLooksLikeCrash) kind = 'singbox-crash'
+  else kind = 'unknown'
+
+  const adaptiveMode = (['baseline', 'tls-compatibility', 'mtu-compatibility', 'external-managed'] as const).includes(
+    adaptive.mode as never
+  )
+    ? (adaptive.mode as SessionOutcomeEvidence['adaptiveMode'])
+    : null
+
+  const evidence: SessionOutcomeEvidence = {
+    ...sessionEgressEvidence(),
+    singboxExitCode: exit?.code ?? null,
+    singboxStderrTail: exit?.stderrTail ?? null,
+    outboundFault: fault,
+    adaptiveMode,
+    adaptiveAttempts: adaptive.attempts || null,
+    autoRestartAttempts: tun.restartAttempt || null,
+    killSwitchEngaged: killswitch,
+    leakDetectedDuringSession: session.leakDetected || null,
+    networkTransition: session.lastNetworkTransition
+  }
+  // If we couldn't classify but tunController left a human warning, use it verbatim.
+  const headlineOverride = kind === 'unknown' && tun.warning ? tun.warning : undefined
+  writeSessionEntry(session, stats, makeOutcome(kind, evidence, headlineOverride))
+}
+
+/** Zero-duration "the tunnel never came up" record. */
+function recordStartFailure(
+  profile: LiveSession['profile'],
+  hint: string,
+  extra: Partial<SessionOutcomeEvidence> = {}
+): void {
+  // A transient 'running' during the failed start may have opened a provisional
+  // session via ensureSessionForRunningTunnel — drop it, this attempt failed.
+  currentSession = null
+  const now = Date.now()
+  try {
+    connectionHistoryService.addEntry({
+      startedAt: now,
+      endedAt: now,
+      profileName: profile.name,
+      profileId: profile.id,
+      mode: profile.mode,
+      bytesDown: 0,
+      bytesUp: 0,
+      disconnectReason: 'error',
+      errorMessage: hint,
+      outcome: makeOutcome('start-failed', { hint, ...extra })
+    })
+  } catch { /* history write is best-effort */ }
+}
 let adaptiveVerificationGeneration = 0
 let activeAdaptiveContext: {
   profile?: Record<string, any>
@@ -500,7 +658,7 @@ function createWindow() {
         /* renderer may already be gone */
       }
       try {
-        await stopProtection()
+        await stopProtection('app-quit')
       } catch (err) {
         logEvent('warn', 'app', 'stopProtection during user-initiated close failed', err)
       }
@@ -726,20 +884,9 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
       refreshTrayState({ killSwitchActive: await isKillSwitchActive().catch(() => false) })
       if (!ksResult.success) {
         const errorMsg = `Не удалось снять старую блокировку перед перезапуском: ${ksResult.message}`
-        try {
-          const now = Date.now()
-          connectionHistoryService.addEntry({
-            startedAt: now,
-            endedAt: now,
-            profileName: `Proxy ${proxyAddr}`,
-            profileId: 'local-proxy',
-            mode: 'hard',
-            bytesDown: 0,
-            bytesUp: 0,
-            disconnectReason: 'error',
-            errorMessage: errorMsg
-          })
-        } catch {}
+        recordStartFailure({ id: 'local-proxy', name: `Proxy ${proxyAddr}`, mode: 'hard' }, errorMsg, {
+          killSwitchEngaged: true
+        })
         return {
           success: false,
           error: errorMsg
@@ -756,20 +903,7 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
   })
   if (!plan.canStartHard) {
     const errorMsg = `${plan.title}. ${plan.explanation} ${plan.after}`
-    try {
-      const now = Date.now()
-      connectionHistoryService.addEntry({
-        startedAt: now,
-        endedAt: now,
-        profileName: `Proxy ${proxyAddr}`,
-        profileId: 'local-proxy',
-        mode: 'hard',
-        bytesDown: 0,
-        bytesUp: 0,
-        disconnectReason: 'error',
-        errorMessage: errorMsg
-      })
-    } catch {}
+    recordStartFailure({ id: 'local-proxy', name: `Proxy ${proxyAddr}`, mode: 'hard' }, errorMsg)
     return {
       success: false,
       error: errorMsg
@@ -820,20 +954,9 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
     activeAdaptiveContext = null
     const errorMsg = result.error || 'Не удалось запустить туннель'
     markAdaptiveFailure(errorMsg)
-    try {
-      const now = Date.now()
-      connectionHistoryService.addEntry({
-        startedAt: now,
-        endedAt: now,
-        profileName: `Proxy ${proxyAddr}`,
-        profileId: 'local-proxy',
-        mode: 'hard',
-        bytesDown: 0,
-        bytesUp: 0,
-        disconnectReason: 'error',
-        errorMessage: errorMsg
-      })
-    } catch {}
+    recordStartFailure({ id: 'local-proxy', name: `Proxy ${proxyAddr}`, mode: 'hard' }, errorMsg, {
+      outboundFault: await readRecentSingBoxOutboundFault().catch(() => null)
+    })
     // Wait for the baseline to finish before rolling back so the manifest
     // exists for rollbackTunNetworkBaselineIfApplied to find.
     if (baselinePromise) await baselinePromise
@@ -921,14 +1044,9 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
 
   refreshTrayState({ status: 'protected', publicIp: latestPublicIp, proxyAddr })
 
-  // Open a connection-history record. Closed by stopProtection() or by the
+  // Open a connection-history session. Closed by stopProtection() or by the
   // tunController.onStatusChange handler if the tunnel dies on its own.
-  currentConnectionStart = Date.now()
-  currentConnectionProfile = {
-    id: 'local-proxy',
-    name: `Proxy ${proxyAddr}`,
-    mode: 'hard'
-  }
+  openSession({ id: 'local-proxy', name: `Proxy ${proxyAddr}`, mode: 'hard' })
 
   // Snapshot AFTER everything is applied (TUN up, kill-switch up,
   // adapter lockdown up). Then start the periodic snapshot timer +
@@ -955,20 +1073,9 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
   const staleKillSwitch = await clearStaleKillSwitchBeforeStart('Direct VPN start')
   if (!staleKillSwitch.success) {
     const errorMsg = staleKillSwitch.error || 'Не удалось очистить старый kill-switch'
-    try {
-      const now = Date.now()
-      connectionHistoryService.addEntry({
-        startedAt: now,
-        endedAt: now,
-        profileName: 'Direct VPN',
-        profileId: 'direct-vpn',
-        mode: 'direct',
-        bytesDown: 0,
-        bytesUp: 0,
-        disconnectReason: 'error',
-        errorMessage: errorMsg
-      })
-    } catch {}
+    recordStartFailure({ id: 'direct-vpn', name: 'Direct VPN', mode: 'direct' }, errorMsg, {
+      killSwitchEngaged: true
+    })
     return { success: false, error: errorMsg }
   }
 
@@ -1015,20 +1122,10 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
       })
     } else {
       const errorMsg = 'У выбранного сервера нет конфигурации (outbound пуст). Удалите его в разделе «Серверы» и добавьте подписку заново.'
-      try {
-        const now = Date.now()
-        connectionHistoryService.addEntry({
-          startedAt: now,
-          endedAt: now,
-          profileName: activeServer?.name || 'Direct VPN',
-          profileId: activeServer?.id || 'direct-vpn',
-          mode: 'direct',
-          bytesDown: 0,
-          bytesUp: 0,
-          disconnectReason: 'error',
-          errorMessage: errorMsg
-        })
-      } catch {}
+      recordStartFailure(
+        { id: activeServer?.id || 'direct-vpn', name: activeServer?.name || 'Direct VPN', mode: 'direct' },
+        errorMsg
+      )
       captureSnapshot('tun-start-failed').catch(() => undefined)
       return {
         success: false,
@@ -1047,39 +1144,13 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
       })
     } catch (err: any) {
       const errorMsg = err?.message || String(err)
-      try {
-        const now = Date.now()
-        connectionHistoryService.addEntry({
-          startedAt: now,
-          endedAt: now,
-          profileName: 'Direct VPN',
-          profileId: 'direct-vpn',
-          mode: 'direct',
-          bytesDown: 0,
-          bytesUp: 0,
-          disconnectReason: 'error',
-          errorMessage: errorMsg
-        })
-      } catch {}
+      recordStartFailure({ id: 'direct-vpn', name: 'Direct VPN', mode: 'direct' }, errorMsg)
       captureSnapshot('tun-start-failed').catch(() => undefined)
       return { success: false, error: errorMsg }
     }
   } else {
     const errorMsg = 'Нет выбранного сервера. Откройте раздел "Серверы" и добавьте подписку или ключ.'
-    try {
-      const now = Date.now()
-      connectionHistoryService.addEntry({
-        startedAt: now,
-        endedAt: now,
-        profileName: 'Direct VPN',
-        profileId: 'direct-vpn',
-        mode: 'direct',
-        bytesDown: 0,
-        bytesUp: 0,
-        disconnectReason: 'error',
-        errorMessage: errorMsg
-      })
-    } catch {}
+    recordStartFailure({ id: 'direct-vpn', name: 'Direct VPN', mode: 'direct' }, errorMsg)
     captureSnapshot('tun-start-failed').catch(() => undefined)
     return {
       success: false,
@@ -1135,20 +1206,11 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
     activeAdaptiveContext = null
     const errorMsg = result.error || 'Не удалось запустить туннель'
     markAdaptiveFailure(errorMsg)
-    try {
-      const now = Date.now()
-      connectionHistoryService.addEntry({
-        startedAt: now,
-        endedAt: now,
-        profileName: profile.name || 'Direct VPN',
-        profileId: profile.name || 'direct-vpn',
-        mode: 'direct',
-        bytesDown: 0,
-        bytesUp: 0,
-        disconnectReason: 'error',
-        errorMessage: errorMsg
-      })
-    } catch {}
+    recordStartFailure(
+      { id: profile.name || 'direct-vpn', name: profile.name || 'Direct VPN', mode: 'direct' },
+      errorMsg,
+      { outboundFault: await readRecentSingBoxOutboundFault().catch(() => null) }
+    )
     if (baselinePromise) await baselinePromise
     await rollbackTunNetworkBaselineIfApplied('direct-vpn start failed').catch(err =>
       logEvent('warn', 'app', 'rollback after direct-vpn start failure failed', err)
@@ -1166,13 +1228,8 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
 
   refreshTrayState({ status: 'protected', publicIp: latestPublicIp, proxyAddr: profile.name })
 
-  // Open a connection-history record (Direct VPN variant).
-  currentConnectionStart = Date.now()
-  currentConnectionProfile = {
-    id: profile.name || 'direct-vpn',
-    name: profile.name || 'Direct VPN',
-    mode: 'direct'
-  }
+  // Open a connection-history session (Direct VPN variant).
+  openSession({ id: profile.name || 'direct-vpn', name: profile.name || 'Direct VPN', mode: 'direct' })
 
   // Poll for the VPN IP instead of waiting a fixed 4s (see startProtection).
   // Same logic: use recheck(false) first, only rebaseline once IP changes.
@@ -1244,31 +1301,23 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
   }
 }
 
-async function stopProtection(): Promise<{ success: boolean; error?: string; warning?: string }> {
+async function stopProtection(
+  stopKind: Extract<SessionOutcomeKind, 'user-stop' | 'app-quit' | 'schedule'> = 'user-stop'
+): Promise<{ success: boolean; error?: string; warning?: string }> {
   adaptiveVerificationGeneration += 1
   activeAdaptiveContext = null
   // Record the connection BEFORE we stop, so traffic counters are still valid.
   // `stopInProgress` ensures the status-change handler doesn't double-record
   // when tunController emits 'stopped' as a result of the call below.
   stopInProgress = true
-  if (currentConnectionStart && currentConnectionProfile) {
-    const traffic = trafficMonitor.getCurrentStats()
-    try {
-      connectionHistoryService.addEntry({
-        startedAt: currentConnectionStart,
-        endedAt: Date.now(),
-        profileName: currentConnectionProfile.name,
-        profileId: currentConnectionProfile.id,
-        mode: currentConnectionProfile.mode,
-        bytesDown: traffic.sessionDownloadBytes ?? 0,
-        bytesUp: traffic.sessionUploadBytes ?? 0,
-        disconnectReason: 'user'
+  if (currentSession) {
+    const leak = currentSession.leakDetected
+    closeSession(
+      makeOutcome(stopKind, {
+        ...sessionEgressEvidence(),
+        leakDetectedDuringSession: leak
       })
-    } catch (err) {
-      logEvent('warn', 'app', 'failed to record connection history', err)
-    }
-    currentConnectionStart = null
-    currentConnectionProfile = null
+    )
   }
 
   stopPeriodicSnapshots()
@@ -1334,20 +1383,7 @@ async function startProtectionFromTray(): Promise<void> {
   const resolved = await resolveProxyForTrayStart()
   if (!resolved) {
     const errorMsg = 'Прокси не найден. Запустите VPN-клиент в режиме Proxy или задайте адрес вручную в настройках.'
-    try {
-      const now = Date.now()
-      connectionHistoryService.addEntry({
-        startedAt: now,
-        endedAt: now,
-        profileName: 'Local Proxy',
-        profileId: 'local-proxy',
-        mode: 'hard',
-        bytesDown: 0,
-        bytesUp: 0,
-        disconnectReason: 'error',
-        errorMessage: errorMsg
-      })
-    } catch {}
+    recordStartFailure({ id: 'local-proxy', name: 'Local Proxy', mode: 'hard' }, errorMsg)
     notify('error', 'Прокси не найден', errorMsg, 'connectionError')
     mainWindow?.show()
     return
@@ -1536,6 +1572,9 @@ app.whenReady().then(async () => {
   // somewhere unexpected). If physical-adapter fires AND dns-leak fires,
   // we prefer the physical-adapter toast — it's strictly more severe.
   setLeakDetectedCallback((r) => {
+    if (currentSession && (r.physicalAdapterReached || (r as any).dnsLeakDetected)) {
+      currentSession.leakDetected = true
+    }
     try {
       sendToMainWindow('leak-detected', r)
     } catch {}
@@ -1548,6 +1587,28 @@ app.whenReady().then(async () => {
     } catch (err: any) {
       logEvent('error', 'app', 'leak notification failed — user may not be alerted', { error: err?.message || String(err), summary: r.summary })
     }
+  })
+
+  // Correlate physical-network changes and OS sleep with tunnel deaths, so the
+  // connection-history record can say "network dropped" / "went to sleep"
+  // instead of a bare "sing-box crash".
+  setNetworkChangeCallback(({ oldRowCount, newRowCount }) => {
+    lastNetworkChangeAt = Date.now()
+    if (currentSession) {
+      currentSession.lastNetworkTransition =
+        newRowCount < oldRowCount
+          ? 'адаптер отключился'
+          : newRowCount > oldRowCount
+            ? 'подключился новый адаптер'
+            : 'сменился IP-адрес'
+    }
+  })
+  powerMonitor.on('resume', () => {
+    lastResumeAt = Date.now()
+    logEvent('info', 'app', 'system resumed from sleep')
+  })
+  powerMonitor.on('suspend', () => {
+    logEvent('info', 'app', 'system suspending')
   })
 
   // IPC handlers
@@ -2129,7 +2190,7 @@ app.whenReady().then(async () => {
     onDisconnect: (schedule) => {
       logEvent('info', 'scheduler', `schedule "${schedule.name}" triggered disconnect`)
       notify('info', 'Расписание', `VPN выключен по расписанию: ${schedule.name}`, 'scheduleTriggered').catch(() => undefined)
-      stopProtection().catch(err =>
+      stopProtection('schedule').catch(err =>
         logEvent('error', 'scheduler', 'scheduled stop failed', err)
       )
     }
@@ -2155,16 +2216,36 @@ app.whenReady().then(async () => {
     }
   })
 
+  // A protected restart (rotation / server switch) swaps the exit node without
+  // going through stop/startProtection — close the old session for the right
+  // reason and open a fresh one for the just-selected profile.
+  onProtectedRestart((reason) => {
+    const kind = isNodeSwitchRestartReason(reason)
+    if (!kind || !currentSession) return
+    closeSession(makeOutcome(kind, sessionEgressEvidence()))
+    ensureSessionForRunningTunnel()
+  })
+
   tunController.onStatusChange((status: string) => {
     sendToMainWindow('tun-status-changed', status)
     granularKillSwitch.setVpnConnected(status === 'running')
     const isRestarting = status.startsWith('restarting:')
-    if (status === 'stopped' || status === 'killswitch-active') {
+    const isTerminal = status === 'stopped' || status === 'killswitch-active'
+
+    // Snapshot the ending session NOW, before trafficMonitor.stop() zeroes the
+    // byte counters. Only when it ended on its own (not a user/scheduled stop).
+    const endingSession = isTerminal && currentSession && !stopInProgress ? currentSession : null
+    const endingStats = endingSession ? trafficMonitor.getCurrentStats() : null
+
+    if (isTerminal) {
       adaptiveVerificationGeneration += 1
       activeAdaptiveContext = null
       resetAdaptiveBypassStatus()
     }
-    if (status === 'running') ensureAdaptiveMonitoringForRunningTunnel()
+    if (status === 'running') {
+      ensureAdaptiveMonitoringForRunningTunnel()
+      ensureSessionForRunningTunnel()
+    }
     if (status === 'running' || status === 'proxy-down') {
       trafficMonitor.start()
       startTrafficConnectionSampler()
@@ -2177,36 +2258,9 @@ app.whenReady().then(async () => {
       })
     }
 
-    // Record connection-history entry on terminal/error transitions if we
-    // weren't already in the user-initiated stop path. `crash` for kill-switch
-    // (sing-box died and left firewall rules), otherwise `error` — the
-    // tunController emits 'stopped' on internal failures too.
-    if (
-      (status === 'killswitch-active' || status === 'stopped') &&
-      currentConnectionStart &&
-      currentConnectionProfile &&
-      !stopInProgress
-    ) {
-      const reason: 'crash' | 'error' = status === 'killswitch-active' ? 'crash' : 'error'
-      const traffic = trafficMonitor.getCurrentStats()
-      const warning = tunController.getStatus().warning
-      try {
-        connectionHistoryService.addEntry({
-          startedAt: currentConnectionStart,
-          endedAt: Date.now(),
-          profileName: currentConnectionProfile.name,
-          profileId: currentConnectionProfile.id,
-          mode: currentConnectionProfile.mode,
-          bytesDown: traffic.sessionDownloadBytes ?? 0,
-          bytesUp: traffic.sessionUploadBytes ?? 0,
-          disconnectReason: reason,
-          errorMessage: warning || (reason === 'crash' ? 'Процесс VPN неожиданно завершил работу' : 'Сбой соединения')
-        })
-      } catch (err) {
-        logEvent('warn', 'app', 'failed to record connection history (status-change)', err)
-      }
-      currentConnectionStart = null
-      currentConnectionProfile = null
+    if (endingSession) {
+      currentSession = null
+      void recordUnexpectedSessionEnd(status, endingSession, endingStats!)
     }
 
     refreshTrayState({
@@ -2233,6 +2287,13 @@ async function performShutdownCleanup(reason: string): Promise<void> {
   if (shutdownInProgress) return
   shutdownInProgress = true
   logEvent('info', 'app', `shutdown cleanup started: ${reason}`)
+
+  // Close any live session as an app-quit BEFORE tunController.stop() emits
+  // 'stopped' (which the status handler would otherwise log as a crash).
+  if (currentSession) {
+    stopInProgress = true
+    closeSession(makeOutcome('app-quit', sessionEgressEvidence()))
+  }
 
   try {
     await tunController.stop()
