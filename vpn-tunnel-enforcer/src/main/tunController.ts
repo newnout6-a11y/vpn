@@ -29,7 +29,7 @@ import {
   type VpnProfile
 } from './vpnProfiles'
 import type { ClientDevice } from '../shared/ipc-types'
-import { TUN_ADAPTER_ALIAS, TUN_IPV4_ADDRESS_CIDR, TUN_IPV4_RESOLVER, TUN_INTERFACE_METRIC, isOwnTunAddress, ALL_KNOWN_ALIASES } from './tunAdapter'
+import { TUN_ADAPTER_ALIAS, TUN_IPV4_ADDRESS_CIDR, TUN_IPV4_RESOLVER, TUN_INTERFACE_METRIC, isOwnTunAddress, ALL_KNOWN_ALIASES, updateTunAdapterAlias, getTunAdapterAlias } from './tunAdapter'
 import { ipMonitor } from './ipMonitor'
 import { cancelLeakSelfTest } from './leakSelfTest'
 import { startCompetingTunWatch, stopCompetingTunWatch } from './competingTunDetector'
@@ -568,10 +568,17 @@ function buildDohServer(
  * any load-order coupling, falling back to the hardcoded resolvers on any
  * error so a bad profile can never break tunnel startup.
  */
+const KNOWN_DOH_LITERALS: Record<string, { ip: string; serverName: string }> = {
+  'cloudflare-dns.com': { ip: '1.1.1.1', serverName: 'cloudflare-dns.com' },
+  'one.one.one.one': { ip: '1.1.1.1', serverName: 'cloudflare-dns.com' },
+  'dns.google': { ip: '8.8.8.8', serverName: 'dns.google' },
+  'dns.quad9.net': { ip: '9.9.9.9', serverName: 'dns.quad9.net' }
+}
+
 function buildRemoteDnsServers(): Array<Record<string, any>> {
   const fallback = [
-    buildDohServer(REMOTE_DNS_TAG, 'cloudflare-dns.com'),
-    buildDohServer(REMOTE_DNS_BACKUP_TAG, 'dns.google')
+    buildDohServer(REMOTE_DNS_TAG, '1.1.1.1', { serverName: 'cloudflare-dns.com' }),
+    buildDohServer(REMOTE_DNS_BACKUP_TAG, '8.8.8.8', { serverName: 'dns.google' })
   ]
   try {
     const profile = dnsProfiles.getActiveDnsProfile()
@@ -583,10 +590,13 @@ function buildRemoteDnsServers(): Array<Record<string, any>> {
       if (profile.type === 'doh') {
         const parsed = parseDnsUrl(addr, 'https')
         if (!parsed) return null
-        return buildDohServer(tag, parsed.host, {
+        const known = KNOWN_DOH_LITERALS[parsed.host.toLowerCase()]
+        const serverIp = known ? known.ip : parsed.host
+        const serverName = known ? known.serverName : (isIP(parsed.host) === 0 ? parsed.host : undefined)
+        return buildDohServer(tag, serverIp, {
           path: parsed.path,
           port: parsed.port,
-          serverName: isIP(parsed.host) === 0 ? parsed.host : undefined
+          serverName
         })
       }
       if (profile.type === 'dot') {
@@ -878,11 +888,11 @@ export function generateSingboxConfig(
   // captured app DNS still goes through proxy-out and fails closed.
   const baseProxyOutbound = isDirectVpn
     ? (options.xraySocksPort
-        ? { type: 'socks', tag: 'proxy-out', version: '5', server: '127.0.0.1', server_port: options.xraySocksPort }
+        ? { type: 'socks', tag: 'proxy-out', version: '5', server: '127.0.0.1', server_port: options.xraySocksPort, udp_fragment: true }
         : { ...upstream.outbound, tag: 'proxy-out' })
     : proxyType === 'http'
       ? { type: 'http', tag: 'proxy-out', server: parsedProxy!.host, server_port: parsedProxy!.port }
-      : { type: 'socks', tag: 'proxy-out', version: '5', server: parsedProxy!.host, server_port: parsedProxy!.port }
+      : { type: 'socks', tag: 'proxy-out', version: '5', server: parsedProxy!.host, server_port: parsedProxy!.port, udp_fragment: true }
   const { outbound: proxyOutbound, needsBootstrapDns } = sanitizeProxyOutbound(baseProxyOutbound)
 
   // Always-on anti-DPI defaults plus stealth-mode extras, applied to the
@@ -1046,7 +1056,7 @@ export function generateSingboxConfig(
       {
         type: 'tun',
         tag: 'tun-in',
-        interface_name: TUN_ADAPTER_ALIAS,
+        interface_name: getTunAdapterAlias(),
         // IPv4-only TUN. We deliberately do NOT give the TUN an IPv6 address
         // or capture IPv6 (no ::/1, 8000::/1 in route_address). Reason: the
         // whole stack is already IPv4-only — DNS strategy is ipv4_only and the
@@ -1068,9 +1078,6 @@ export function generateSingboxConfig(
         route_address: ['0.0.0.0/1', '128.0.0.0/1'],
         route_exclude_address: [
           '127.0.0.0/8',
-          '10.0.0.0/8',
-          '172.16.0.0/12',
-          '192.168.0.0/16',
           '169.254.0.0/16',
           '224.0.0.0/4',
           ...directVpnEndpointRouteExcludes
@@ -1117,6 +1124,11 @@ export function generateSingboxConfig(
         // of UDP, but if that rule runs first Windows DNS probes never reach
         // sing-box's resolver and the browser falls into DNS_PROBE failures.
         { protocol: 'dns', action: 'hijack-dns' },
+        // Private IP bypass is placed STRICTLY AFTER hijack-dns so that DNS
+        // queries sent to local/phone gateways (e.g. 192.168.43.1:53 or 172.20.10.1:53
+        // during mobile hotspot / USB tethering) are intercepted by TUN and hijacked,
+        // while non-DNS private traffic still routes directly to the local LAN.
+        { ip_is_private: true, outbound: 'direct-out' },
         // Direct VPN outbounds that are genuinely TCP-only cannot carry any
         // other UDP at all. Keep this AFTER hijack-dns so DNS still resolves
         // through sing-box, then fail-closed for the remaining UDP traffic.
@@ -1314,12 +1326,13 @@ if ($found.Count -gt 0) { 'true' } else { 'false' }
 async function waitForTunInterface(timeoutMs = 5000): Promise<boolean> {
   if (process.platform !== 'win32') return false
   const start = Date.now()
+  const activeAlias = getTunAdapterAlias()
   while (Date.now() - start < timeoutMs) {
     const interfaces = networkInterfaces()
     for (const name of Object.keys(interfaces)) {
-      if (name === TUN_ADAPTER_ALIAS || (ALL_KNOWN_ALIASES as readonly string[]).includes(name)) {
+      if (name === activeAlias || (ALL_KNOWN_ALIASES as readonly string[]).includes(name)) {
         const entries = interfaces[name]
-        if (entries && entries.some(e => e.family === 'IPv4' && !e.internal)) {
+        if (entries && entries.some(e => e.family === 'IPv4' && !e.internal && isOwnTunAddress(e.address))) {
           return true
         }
       }
@@ -1355,9 +1368,10 @@ async function applyLowTunInterfaceMetric(): Promise<void> {
     const { exec } = await import('child_process')
     const { promisify } = await import('util')
     const execAsync = promisify(exec)
+    const currentAlias = getTunAdapterAlias()
     // 20ms netsh execution instead of 850ms PowerShell
-    await execAsync(`netsh interface ipv4 set interface "${TUN_ADAPTER_ALIAS}" metric=${TUN_INTERFACE_METRIC}`, { windowsHide: true })
-    logEvent('info', 'tun', `set TUN InterfaceMetric=${TUN_INTERFACE_METRIC}`, { output: 'ipv4:set' })
+    await execAsync(`netsh interface ipv4 set interface "${currentAlias}" metric=${TUN_INTERFACE_METRIC}`, { windowsHide: true })
+    logEvent('info', 'tun', `set TUN (${currentAlias}) InterfaceMetric=${TUN_INTERFACE_METRIC}`, { output: 'ipv4:set' })
   } catch (err) {
     logEvent('warn', 'tun', 'failed to set TUN InterfaceMetric', err)
   }
@@ -1987,6 +2001,9 @@ async function prepareRuntime(
   // so we never land inside a Windows Hyper-V/WSL excluded port range
   // (which causes sing-box to fail bind with WSAEACCES).
   const { directPort: directProxyPortOverride, clashPort: clashPortOverride } = await portsPromise
+
+  const existingAliases = (options.smartRuDirectDnsSources ?? []).map((s: PhysicalAdapterDnsSource) => s.alias)
+  updateTunAdapterAlias(existingAliases.length > 0 ? existingAliases : undefined)
 
   const config = generateSingboxConfig(upstream, proxyType, directProcessNames, {
     ...options,
@@ -3086,7 +3103,8 @@ export const tunController = {
               const ks = await enableKillSwitch({
                 singboxExePath: runtime.singbox,
                 proxyOwnerProgramPaths,
-                extraAllowedRemoteCidrs: readGranularKillSwitchIpExceptions()
+                extraAllowedRemoteCidrs: readGranularKillSwitchIpExceptions(),
+                tunAdapterAlias: getTunAdapterAlias()
               })
               if (ks.success) {
                 logEvent('info', 'tun', 'kill-switch engaged (parallel with TUN wait)')

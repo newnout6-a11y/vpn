@@ -165,10 +165,9 @@ function currentTunnelProbeSessionKey(): string | null {
   ].join('|')
 }
 
-// Per-URL timeout for the tunnel probe race. 4 s covers any reasonable
-// global RTT plus TLS handshake jitter — anything longer means the URL is
-// effectively dead and another racer should already have won.
-const TUNNEL_PROBE_URL_TIMEOUT_MS = 4000
+// Per-URL timeout for the tunnel probe race. 8 s covers mobile hotspot / tethering
+// jitter, cellular gateway latency, and TLS handshakes.
+const TUNNEL_PROBE_URL_TIMEOUT_MS = 8000
 
 // ICMP / TCP timeouts for the offline (VPN-off) ladder. Kept short on
 // purpose: the user wants snappy "Ping all" feedback, and DPI-blocked hosts
@@ -237,7 +236,7 @@ export async function pingServer(
  * fire identical requests against the same CDN (the tunnel itself is the
  * bottleneck — every profile would return the same number anyway).
  */
-export async function tunnelHttpProbe(skipCache = false): Promise<number | null> {
+export async function tunnelHttpProbe(skipCache = false, maxRetries = 1): Promise<number | null> {
   const sessionKey = currentTunnelProbeSessionKey()
   if (!sessionKey) return null
 
@@ -253,60 +252,70 @@ export async function tunnelHttpProbe(skipCache = false): Promise<number | null>
     if (Date.now() - cached.at < ttl) return cached.value
   }
 
-  // Fire every probe in parallel. We accept the response only when its
-  // status/body matches what that endpoint is supposed to return — a bare
-  // "status < 500" would let a captive-portal or transparent-proxy "200 OK"
-  // masquerade as a real round-trip through the exit node. `Connection:
-  // close` ensures we measure a fresh round-trip rather than the warmth of
-  // a pooled TLS session.
-  const start = performance.now()
-  const races = TUNNEL_PROBE_TARGETS.map(target =>
-    axios
-      .get(target.url, {
-        timeout: TUNNEL_PROBE_URL_TIMEOUT_MS,
-        validateStatus: () => true,
-        responseType: 'text',
-        transformResponse: (d) => d,
-        headers: { 'Cache-Control': 'no-cache', Connection: 'close' }
-      })
-      .then(resp => {
-        if (!target.accept(resp.status, typeof resp.data === 'string' ? resp.data : String(resp.data ?? ''))) {
-          throw new Error(`probe rejected: ${target.url} -> ${resp.status}`)
-        }
-        return Math.round(performance.now() - start)
-      })
-  )
-
-  try {
-    // Promise.any is native in Node 18+; this project targets Electron with
-    // Node ≥ 18, so no polyfill needed. First successful response wins; the
-    // rest keep going harmlessly until their per-request timeout fires.
-    const ms = await Promise.any(races)
-    tunnelProbeCache = { value: ms, at: Date.now(), sessionKey }
-    return ms
-  } catch (err) {
-    // All racers rejected — Promise.any throws AggregateError. Every target
-    // routes through proxy-out, so this means the tunnel is not carrying
-    // traffic to the open internet. Cache the negative result briefly so we
-    // don't hammer the network on back-to-back checks.
-    //
-    // Log *why* each one failed. Before this, "tunnel verification failed"
-    // was a black box — DNS timeout, TCP refused, and a captive-portal 200
-    // all looked identical from the outside, so a real network issue (e.g.
-    // a phone-hotspot path-MTU blackhole hanging the DoH/HTTPS handshake for
-    // several seconds before timing out) was indistinguishable from a dead
-    // proxy-out without re-running the connection under a debugger.
-    if (err instanceof AggregateError) {
-      logEvent('debug', 'server-picker', 'tunnel probe: every target failed', {
-        reasons: err.errors.map((e: unknown, i: number) => ({
-          url: TUNNEL_PROBE_TARGETS[i]?.url,
-          error: e instanceof Error ? e.message : String(e)
-        }))
-      })
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (attempt > 0) {
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      if (currentTunnelProbeSessionKey() !== sessionKey) return null
     }
-    tunnelProbeCache = { value: null, at: Date.now(), sessionKey }
-    return null
+
+    // Fire every probe in parallel. We accept the response only when its
+    // status/body matches what that endpoint is supposed to return — a bare
+    // "status < 500" would let a captive-portal or transparent-proxy "200 OK"
+    // masquerade as a real round-trip through the exit node. `Connection:
+    // close` ensures we measure a fresh round-trip rather than the warmth of
+    // a pooled TLS session.
+    const start = performance.now()
+    const races = TUNNEL_PROBE_TARGETS.map(target =>
+      axios
+        .get(target.url, {
+          timeout: TUNNEL_PROBE_URL_TIMEOUT_MS,
+          validateStatus: () => true,
+          responseType: 'text',
+          transformResponse: (d) => d,
+          headers: { 'Cache-Control': 'no-cache', Connection: 'close' }
+        })
+        .then(resp => {
+          if (!target.accept(resp.status, typeof resp.data === 'string' ? resp.data : String(resp.data ?? ''))) {
+            throw new Error(`probe rejected: ${target.url} -> ${resp.status}`)
+          }
+          return Math.round(performance.now() - start)
+        })
+    )
+
+    try {
+      // Promise.any is native in Node 18+; this project targets Electron with
+      // Node ≥ 18, so no polyfill needed. First successful response wins; the
+      // rest keep going harmlessly until their per-request timeout fires.
+      const ms = await Promise.any(races)
+      tunnelProbeCache = { value: ms, at: Date.now(), sessionKey }
+      return ms
+    } catch (err) {
+      if (attempt < maxRetries) {
+        logEvent('debug', 'server-picker', 'tunnel probe attempt failed, retrying before mode change', {
+          attempt: attempt + 1,
+          maxRetries
+        })
+        continue
+      }
+      // All racers rejected — Promise.any throws AggregateError. Every target
+      // routes through proxy-out, so this means the tunnel is not carrying
+      // traffic to the open internet. Cache the negative result briefly so we
+      // don't hammer the network on back-to-back checks.
+      if (err instanceof AggregateError) {
+        logEvent('debug', 'server-picker', 'tunnel probe: every target failed after retries', {
+          reasons: err.errors.map((e: unknown, i: number) => ({
+            url: TUNNEL_PROBE_TARGETS[i]?.url,
+            error: e instanceof Error ? e.message : String(e)
+          }))
+        })
+      }
+      tunnelProbeCache = { value: null, at: Date.now(), sessionKey }
+      return null
+    }
   }
+
+  tunnelProbeCache = { value: null, at: Date.now(), sessionKey }
+  return null
 }
 
 /**

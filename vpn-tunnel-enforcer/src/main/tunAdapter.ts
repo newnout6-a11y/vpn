@@ -28,8 +28,91 @@
  * their next start.
  */
 
-/** Currently-active alias. Default is the disguised value. */
-export const TUN_ADAPTER_ALIAS = 'Ethernet 5'
+import { networkInterfaces } from 'os'
+
+export const DEFAULT_TUN_ADAPTER_ALIAS = 'Ethernet 5'
+
+export const CANDIDATE_TUN_ADAPTER_ALIASES = [
+  'Ethernet 5',
+  'Ethernet 6',
+  'Ethernet 7',
+  'Ethernet 8',
+  'Ethernet 9',
+  'Ethernet 10',
+  'Ethernet 11',
+  'Ethernet 12'
+] as const
+
+/**
+ * Parses interface names from `netsh interface show interface` output.
+ * Works across Windows language localisations and captures disconnected
+ * or disabled adapters that `os.networkInterfaces()` omits.
+ */
+export function parseNetshInterfaceNames(netshOutput: string): string[] {
+  if (!netshOutput || typeof netshOutput !== 'string') return []
+  const lines = netshOutput.split(/\r?\n/)
+  const dashIndex = lines.findIndex((l) => l.includes('---'))
+  if (dashIndex === -1) return []
+  const names: string[] = []
+  for (let i = dashIndex + 1; i < lines.length; i++) {
+    const line = lines[i].trim()
+    if (!line) continue
+    const parts = line.split(/\s{2,}/)
+    if (parts.length >= 4) {
+      names.push(parts[parts.length - 1].trim())
+    }
+  }
+  return names
+}
+
+/**
+ * Determine a non-colliding TUN adapter alias. Avoids rigid collision
+ * with existing physical / USB RNDIS (tethering) adapters.
+ */
+export function resolveTunAdapterAlias(existingAdapters?: string[]): string {
+  try {
+    const existing = new Set(
+      (existingAdapters || Object.keys(networkInterfaces())).map((n) => n.trim().toLowerCase())
+    )
+    for (const candidate of CANDIDATE_TUN_ADAPTER_ALIASES) {
+      if (!existing.has(candidate.toLowerCase())) {
+        return candidate
+      }
+    }
+    if (!existing.has('vpnte-tun')) {
+      return 'VPNTE-TUN'
+    }
+  } catch {
+    // fallback
+  }
+  return DEFAULT_TUN_ADAPTER_ALIAS
+}
+
+export function updateTunAdapterAlias(existingAdapters?: string[]): string {
+  let extraNames: string[] = []
+  if (process.platform === 'win32' && !existingAdapters) {
+    try {
+      // Fast ~20ms un-elevated netsh query to detect disabled/unconfigured adapters
+      const { execSync } = require('child_process')
+      const out = execSync('netsh interface show interface', { windowsHide: true, encoding: 'utf8', timeout: 2000 })
+      extraNames = parseNetshInterfaceNames(out)
+    } catch {
+      // fallback to networkInterfaces()
+    }
+  }
+  const combined = existingAdapters
+    ? existingAdapters
+    : [...Object.keys(networkInterfaces()), ...extraNames]
+  TUN_ADAPTER_ALIAS = resolveTunAdapterAlias(combined)
+  return TUN_ADAPTER_ALIAS
+}
+
+export function getTunAdapterAlias(): string {
+  return TUN_ADAPTER_ALIAS
+}
+
+/** Currently-active alias. Default is the disguised value, dynamically avoiding existing NICs. */
+export let TUN_ADAPTER_ALIAS = resolveTunAdapterAlias()
 
 /** Currently-active IPv4 address (with /30 prefix) handed to sing-box. */
 export const TUN_IPV4_ADDRESS_CIDR = '192.168.250.253/30'
@@ -113,12 +196,13 @@ export const TUN_INTERFACE_METRIC = 5
  * orphaned-adapter sweeper) iterate over this list so a user who crashed
  * on an old build still gets a clean machine after upgrading.
  */
-export const KNOWN_LEGACY_ALIASES = ['VPNTE-TUN'] as const
+export const KNOWN_LEGACY_ALIASES = [
+  'VPNTE-TUN',
+  ...CANDIDATE_TUN_ADAPTER_ALIASES
+] as const
 
 /**
- * The full set of aliases we ever look for, in priority order. The first
- * entry is the live alias we install today; the rest are historical names
- * we still need to clean up after.
+ * The full set of aliases we ever look for, in priority order.
  */
 export const ALL_KNOWN_ALIASES = [
   TUN_ADAPTER_ALIAS,

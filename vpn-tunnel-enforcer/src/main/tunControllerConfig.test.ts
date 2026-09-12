@@ -446,14 +446,14 @@ describe('generateSingboxConfig DNS profile', () => {
     const backup = cfg.dns.servers.find((s: any) => s.tag === 'dns-backup') as any
     expect(remote).toMatchObject({
       type: 'https',
-      server: 'cloudflare-dns.com',
+      server: '1.1.1.1',
       path: '/dns-query',
       detour: 'proxy-out',
       tls: { server_name: 'cloudflare-dns.com' }
     })
     expect(backup).toMatchObject({
       type: 'https',
-      server: 'dns.google',
+      server: '8.8.8.8',
       path: '/dns-query',
       detour: 'proxy-out',
       tls: { server_name: 'dns.google' }
@@ -470,16 +470,29 @@ describe('generateSingboxConfig DNS profile', () => {
     expect(backup).toMatchObject({ type: 'tcp', server: '149.112.112.112', detour: 'proxy-out' })
   })
 
-  it('applies a DoH profile as https server preserving host, path, port and SNI', () => {
+  it('applies a DoH profile as https server mapping known hostnames to IP literals with SNI', () => {
     dnsState.active = { id: 'x', name: 'DoH', primary: 'https://dns.google:443/dns-query', type: 'doh' }
     const cfg = gen({ outbound: { ...plainTlsOutbound, server: '1.2.3.4' } })
     const remote = cfg.dns.servers.find((s: any) => s.tag === 'dns-remote') as any
     expect(remote).toMatchObject({
       type: 'https',
-      server: 'dns.google',
+      server: '8.8.8.8',
       path: '/dns-query',
       detour: 'proxy-out',
       tls: { server_name: 'dns.google' }
+    })
+  })
+
+  it('applies a custom DoH profile preserving host, path, port and SNI', () => {
+    dnsState.active = { id: 'x', name: 'CustomDoH', primary: 'https://custom-dns.example.com:443/dns-query', type: 'doh' }
+    const cfg = gen({ outbound: { ...plainTlsOutbound, server: '1.2.3.4' } })
+    const remote = cfg.dns.servers.find((s: any) => s.tag === 'dns-remote') as any
+    expect(remote).toMatchObject({
+      type: 'https',
+      server: 'custom-dns.example.com',
+      path: '/dns-query',
+      detour: 'proxy-out',
+      tls: { server_name: 'custom-dns.example.com' }
     })
   })
 
@@ -521,16 +534,21 @@ describe('generateSingboxConfig domain routing', () => {
     expect(rules[domainIdx].outbound).toBe('block-out')
   })
 
-  it('moves private ranges to route_exclude_address on TUN inbound', () => {
+  it('prevents DNS bypass on tethering by omitting RFC1918 from route_exclude_address and placing ip_is_private after hijack-dns', () => {
     const cfg = gen({ outbound: { ...plainTlsOutbound, server: '1.2.3.4' } })
     const tunInbound: any = cfg.inbounds.find((i: any) => i.type === 'tun')
     expect(tunInbound).toBeTruthy()
     expect(tunInbound.route_exclude_address).toBeDefined()
     expect(tunInbound.route_exclude_address).toContain('127.0.0.0/8')
-    expect(tunInbound.route_exclude_address).toContain('192.168.0.0/16')
+    expect(tunInbound.route_exclude_address).not.toContain('192.168.0.0/16')
+    expect(tunInbound.route_exclude_address).not.toContain('172.16.0.0/12')
+    expect(tunInbound.route_exclude_address).not.toContain('10.0.0.0/8')
+
     const rules = cfg.route.rules
-    const hasPrivateRule = rules.some((r: any) => Array.isArray(r.ip_cidr) && r.ip_cidr.includes('127.0.0.0/8'))
-    expect(hasPrivateRule).toBe(false)
+    const hijackIdx = rules.findIndex((r: any) => r.protocol === 'dns' && r.action === 'hijack-dns')
+    const privateIdx = rules.findIndex((r: any) => r.ip_is_private === true && r.outbound === 'direct-out')
+    expect(hijackIdx).toBeGreaterThanOrEqual(0)
+    expect(privateIdx).toBeGreaterThan(hijackIdx)
   })
 
   it('excludes the direct VPN server IP from TUN auto-route so the tunnel can dial its endpoint', () => {
@@ -728,6 +746,7 @@ describe('generateSingboxConfig with xraySocksPort', () => {
     expect(proxyOut.server).toBe('127.0.0.1')
     expect(proxyOut.server_port).toBe(25555)
     expect(proxyOut.version).toBe('5')
+    expect(proxyOut.udp_fragment).toBe(true)
 
     const tunIn = cfg.inbounds.find((i: any) => i.type === 'tun')
     expect(tunIn.route_exclude_address).toContain('185.100.100.1/32')
@@ -747,6 +766,17 @@ describe('generateSingboxConfig with xraySocksPort', () => {
     const directRule = cfg.route.rules.find((r: any) => r.outbound === 'direct-out' && Array.isArray(r.process_name))
     expect(directRule).toBeDefined()
     expect(directRule.process_name).toContain('custom-app.exe')
+  })
+
+  it('sets udp_fragment: true on SOCKS outbound in localProxy (Happ) mode', () => {
+    const cfg: any = generateSingboxConfig('127.0.0.1:10808', 'socks5', [], {})
+    const proxyOut = cfg.outbounds.find((o: any) => o.tag === 'proxy-out')
+    expect(proxyOut).toMatchObject({
+      type: 'socks',
+      server: '127.0.0.1',
+      server_port: 10808,
+      udp_fragment: true
+    })
   })
 })
 

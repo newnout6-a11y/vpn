@@ -5,7 +5,7 @@ import { getActiveProfile } from './serverPicker'
 import { settingsStore } from './settings'
 import { parseProxyAddress, probeTcp, tunController } from './tunController'
 import { logEvent } from './appLogger'
-import { TUN_ADAPTER_ALIAS, TUN_IPV4_PREFIX } from './tunAdapter'
+import { TUN_ADAPTER_ALIAS, TUN_IPV4_PREFIX, getTunAdapterAlias } from './tunAdapter'
 
 const exec = promisify(execCb)
 const MAX_BUFFER = 1024 * 1024 * 4
@@ -112,7 +112,7 @@ async function getActiveTunnels(): Promise<TunnelInfo[]> {
   // JS source '\\.' -> runtime '\.' -> PS sees regex \. -> matches '.'.
   const prefixRegex = '^' + TUN_IPV4_PREFIX.replace(/\./g, '\\.')
   // Single-quote the alias for PS so spaces in 'Ethernet 5' parse correctly.
-  const aliasLiteral = `'${TUN_ADAPTER_ALIAS.replace(/'/g, "''")}'`
+  const aliasLiteral = `'${getTunAdapterAlias().replace(/'/g, "''")}'`
 
   const script = `
 $rx='(?i)wintun|\\btun\\b|wireguard|openvpn|tap-windows|happ|hiddify|singbox|sing-tun|v2ray|xray|vpn';
@@ -230,7 +230,7 @@ export async function combinedPreStartProbe(opts: {
   const { manifestExists, killSwitchRulePrefix } = opts
 
   const prefixRegex = '^' + TUN_IPV4_PREFIX.replace(/\./g, '\\.')
-  const aliasLiteral = `'${TUN_ADAPTER_ALIAS.replace(/'/g, "''")}'`
+  const aliasLiteral = `'${getTunAdapterAlias().replace(/'/g, "''")}'`
   const rulePattern = `'${killSwitchRulePrefix.replace(/'/g, "''")}*'`
 
   const firewallPart = manifestExists

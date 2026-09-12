@@ -36,7 +36,7 @@ import { join } from 'path'
 import { execElevated } from './admin'
 import { execElevatedPs, isElevatedPsHelperRunning } from './elevatedPsHelper'
 import { logEvent } from './appLogger'
-import { LEGACY_TUN_IPV4_PREFIX, TUN_ADAPTER_ALIAS, TUN_IPV4_GATEWAY, TUN_IPV4_PREFIX, TUN_IPV4_RESOLVER } from './tunAdapter'
+import { ALL_KNOWN_ALIASES, LEGACY_TUN_IPV4_PREFIX, TUN_ADAPTER_ALIAS, TUN_IPV4_GATEWAY, TUN_IPV4_PREFIX, TUN_IPV4_RESOLVER, getTunAdapterAlias } from './tunAdapter'
 
 const MANIFEST_BASENAME = 'latest-physical-adapter-lockdown.json'
 
@@ -44,13 +44,39 @@ interface AdapterSnapshot {
   // Stable adapter identifier on Windows.
   ifIndex: number
   alias: string
+  description?: string
   // What we found before we touched it. We restore exactly these.
   ipv6Enabled: boolean
   ipv4DnsServers: string[]
   ipv4DnsSource?: 'dhcp' | 'static' | 'unknown'
+  isCellularOrTethering?: boolean
   // What we set it to (or null if we left it alone for that field).
   forcedDnsTo: string[] | null
   forcedIpv6Off: boolean
+}
+
+export function isTetheringSubnetIp(ip: string): boolean {
+  if (!ip || typeof ip !== 'string') return false
+  const trimmed = ip.trim()
+  return /^192\.168\.(43|137|225|8)\./.test(trimmed) || /^172\.20\.10\./.test(trimmed)
+}
+
+/**
+ * Checks whether a network adapter is a cellular modem, USB RNDIS tethering,
+ * mobile hotspot, or mobile device adapter. Disabling IPv6 on these adapters breaks 464XLAT /
+ * CLAT (cellular carrier NAT64) and kills mobile hotspot connectivity.
+ */
+export function isCellularOrTetheringAdapter(
+  alias: string,
+  description = '',
+  dnsServers: string[] = [],
+  gateways: string[] = []
+): boolean {
+  const pattern = /\b(rndis|cellular|mobile|wwan|lte|[345]g|modem|tether|tethering)\b|remote ndis|apple mobile device/i
+  if (pattern.test(alias) || pattern.test(description)) return true
+  if (dnsServers.some((ip) => isTetheringSubnetIp(ip))) return true
+  if (gateways.some((ip) => isTetheringSubnetIp(ip))) return true
+  return false
 }
 
 interface TransitionAdapterSnapshot {
@@ -211,9 +237,11 @@ async function snapshotPhysicalAdapters(): Promise<AdapterSnapshot[]> {
     const script = `
 $ErrorActionPreference = 'SilentlyContinue'
 $rows = @()
+$knownAliases = @(${ALL_KNOWN_ALIASES.map(a => psSingleQuote(a)).join(',')})
 $adapters = Get-NetAdapter |
   Where-Object {
     $_.Status -eq 'Up' -and
+    $_.Name -notin $knownAliases -and
     $_.InterfaceDescription -notmatch 'Wintun|TAP-Windows|Tailscale|WireGuard|Hyper-V|Loopback|vEthernet|VPN|VirtualBox|VMware|Bluetooth' -and
     $_.MacAddress -and $_.MacAddress -ne '00-00-00-00-00-00'
   }
@@ -226,12 +254,35 @@ foreach ($a in $adapters) {
     $regPath = "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\$($a.InterfaceGuid)"
     $nameServer = [string]((Get-ItemProperty -Path $regPath -Name NameServer -ErrorAction SilentlyContinue).NameServer)
   } catch {}
+  $desc = [string]$a.InterfaceDescription
+  $name = [string]$a.Name
+  $mediaType = [string]$a.MediaType
+  $physMedia = [string]$a.PhysicalMediaType
+  $gw4 = @((Get-NetRoute -InterfaceIndex $a.ifIndex -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue).NextHop)
+  $isHotspotSubnet = [bool](
+    ($dns4 | Where-Object { $_ -match '^192\\.168\\.(43|137|225|8)\\.' -or $_ -match '^172\\.20\\.10\\.' }) -or
+    ($gw4 | Where-Object { $_ -match '^192\\.168\\.(43|137|225|8)\\.' -or $_ -match '^172\\.20\\.10\\.' })
+  )
+  $hasClatOrIpv6Only = [bool](
+    (Get-NetRoute -InterfaceIndex $a.ifIndex -DestinationPrefix '::/0' -ErrorAction SilentlyContinue) -and
+    (-not (Get-NetRoute -InterfaceIndex $a.ifIndex -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue))
+  )
+  $isCellularOrTether = [bool](
+    ($desc -match '\\b(rndis|cellular|mobile|wwan|lte|[345]g|modem|tether|tethering)\\b|remote ndis|apple mobile device') -or
+    ($name -match '\\b(cellular|mobile|wwan|lte|[345]g|modem|tether|tethering)\\b') -or
+    ($mediaType -match 'WWAN|WirelessWan') -or
+    ($physMedia -match 'WWAN|WirelessWan') -or
+    $isHotspotSubnet -or
+    $hasClatOrIpv6Only
+  )
   $rows += [pscustomobject]@{
     ifIndex      = [int]$a.ifIndex
     alias        = [string]$a.Name
+    description  = [string]$a.InterfaceDescription
     ipv6Enabled  = [bool]($bind6 -and $bind6.Enabled)
     ipv4Dns      = @($dns4)
     ipv4DnsSource = $(if ([string]::IsNullOrWhiteSpace($nameServer)) { 'dhcp' } else { 'static' })
+    isCellularOrTethering = $isCellularOrTether
   }
 }
 $rows | ConvertTo-Json -Compress -Depth 4
@@ -247,15 +298,23 @@ $rows | ConvertTo-Json -Compress -Depth 4
     return []
   }
   const arr = Array.isArray(parsed) ? parsed : [parsed]
-  return arr.map((row: any) => ({
-    ifIndex: Number(row.ifIndex),
-    alias: String(row.alias),
-    ipv6Enabled: Boolean(row.ipv6Enabled),
-    ipv4DnsServers: Array.isArray(row.ipv4Dns) ? row.ipv4Dns.map((x: any) => String(x)) : [],
-    ipv4DnsSource: row.ipv4DnsSource === 'static' || row.ipv4DnsSource === 'dhcp' ? row.ipv4DnsSource : 'unknown',
-    forcedDnsTo: null,
-    forcedIpv6Off: false
-  }))
+  return arr.map((row: any) => {
+    const alias = String(row.alias || '')
+    const description = String(row.description || '')
+    const dnsServers = Array.isArray(row.ipv4Dns) ? row.ipv4Dns.map((x: any) => String(x)) : []
+    const isCellularOrTethering = Boolean(row.isCellularOrTethering) || isCellularOrTetheringAdapter(alias, description, dnsServers)
+    return {
+      ifIndex: Number(row.ifIndex),
+      alias,
+      description,
+      ipv6Enabled: Boolean(row.ipv6Enabled),
+      ipv4DnsServers: dnsServers,
+      ipv4DnsSource: row.ipv4DnsSource === 'static' || row.ipv4DnsSource === 'dhcp' ? row.ipv4DnsSource : 'unknown',
+      isCellularOrTethering,
+      forcedDnsTo: null,
+      forcedIpv6Off: false
+    }
+  })
   })().finally(() => {
     // Clear the cached promise once settled so the next call after 10s
     // spawns a fresh PS script rather than re-returning a stale resolved value.
@@ -453,7 +512,7 @@ export async function applyPhysicalAdapterLockdown(tunDnsIpv4: string, options: 
   // forceDns) so rollback restores exactly what we intend to change.
   const pendingAdapters: AdapterSnapshot[] = adapters.map((a) => ({
     ...a,
-    forcedIpv6Off: a.ipv6Enabled,
+    forcedIpv6Off: a.isCellularOrTethering ? false : a.ipv6Enabled,
     forcedDnsTo: forceDns ? [tunDnsIpv4] : null
   }))
   await writeManifest({
@@ -473,8 +532,11 @@ export async function applyPhysicalAdapterLockdown(tunDnsIpv4: string, options: 
     const dnsLine = forceDns
       ? `try { Set-DnsClientServerAddress -InterfaceAlias ${psSingleQuote(a.alias)} -ServerAddresses ${psSingleQuote(tunDnsIpv4)} -ErrorAction Stop; Write-Output "A${i}_dns:set" } catch { Write-Output "A${i}_dns_err: $_" }`
       : `Write-Output "A${i}_dns:skip"`
+    const ipv6Line = a.isCellularOrTethering
+      ? `Write-Output "A${i}_ipv6:skip"`
+      : `try { Disable-NetAdapterBinding -InterfaceAlias ${psSingleQuote(a.alias)} -ComponentID ms_tcpip6 -ErrorAction Stop; Write-Output "A${i}_ipv6:off" } catch { Write-Output "A${i}_ipv6_err: $_" }`
     combinedScript += `
-try { Disable-NetAdapterBinding -InterfaceAlias ${psSingleQuote(a.alias)} -ComponentID ms_tcpip6 -ErrorAction Stop; Write-Output "A${i}_ipv6:off" } catch { Write-Output "A${i}_ipv6_err: $_" }
+${ipv6Line}
 ${dnsLine}
 `
   }
@@ -497,17 +559,18 @@ try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}
       const a = adapters[i]
       try {
         const ipv6Off = new RegExp(`A${i}_ipv6:off`).test(out)
+        const ipv6Skipped = new RegExp(`A${i}_ipv6:skip`).test(out)
         const dnsSet = new RegExp(`A${i}_dns:set`).test(out)
         const dnsSkipped = new RegExp(`A${i}_dns:skip`).test(out)
         
         a.forcedIpv6Off = ipv6Off
         a.forcedDnsTo = dnsSet ? [tunDnsIpv4] : null
         
-        if (!ipv6Off || (forceDns && !dnsSet)) {
+        if ((!a.isCellularOrTethering && !ipv6Off) || (forceDns && !dnsSet)) {
           const errs = out.trim().split(/\r?\n/).filter(l => new RegExp(`A${i}_.*err:`).test(l)).join('; ')
           warnings.push(`${a.alias}: ${errs || 'partial'}`)
         }
-        logEvent('info', 'phys-lockdown', `locked down ${a.alias}`, { ipv6Off, dnsSet, dnsSkipped })
+        logEvent('info', 'phys-lockdown', `locked down ${a.alias}`, { ipv6Off, ipv6Skipped, dnsSet, dnsSkipped, isCellularOrTethering: a.isCellularOrTethering })
       } catch (err: any) {
         warnings.push(`${a.alias}: ${err?.message ?? String(err)}`)
         logEvent('warn', 'phys-lockdown', `lockdown failed for ${a.alias}`, err)
@@ -650,7 +713,7 @@ $ErrorActionPreference = 'SilentlyContinue'
 $vpnteDns = @('${TUN_IPV4_GATEWAY}', '${TUN_IPV4_RESOLVER}')
 $vpnteDnsPrefixes = @('${TUN_IPV4_PREFIX}', '${LEGACY_TUN_IPV4_PREFIX}')
 $tunUp = Get-NetAdapter -ErrorAction SilentlyContinue |
-  Where-Object { $_.Status -eq 'Up' -and ($_.Name -eq '${TUN_ADAPTER_ALIAS}' -or $_.InterfaceDescription -match 'VPNTE') } |
+  Where-Object { $_.Status -eq 'Up' -and ($_.Name -eq '${getTunAdapterAlias()}' -or $_.InterfaceDescription -match 'VPNTE') } |
   Select-Object -First 1
 if ($tunUp) {
   [pscustomobject]@{ skipped = 'tun-up'; adapters = @() } | ConvertTo-Json -Compress

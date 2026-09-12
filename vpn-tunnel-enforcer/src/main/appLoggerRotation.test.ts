@@ -56,7 +56,7 @@ describe('appLogger rotation', () => {
         logEvent('info', 'test', `line ${i}`, { blob })
       }
       // Poll for the roll rather than a fixed sleep — the append queue is async.
-      for (let i = 0; i < 250 && !existsSync(prevLog); i++) await flush()
+      for (let i = 0; i < 250 && (!existsSync(prevLog) || !existsSync(appLog)); i++) await flush()
 
       expect(existsSync(prevLog)).toBe(true)
       // After a roll, the live log holds only post-roll lines → well under cap.

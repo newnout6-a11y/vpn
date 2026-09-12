@@ -75,5 +75,5 @@ describe('smart-route runtime smoke', () => {
     writeFileSync(f, JSON.stringify(cfg, null, 2))
     const out = execFileSync(exe, ['check', '-c', f], { encoding: 'utf8' })
     expect(typeof out).toBe('string')
-  })
+  }, 15000)
 })

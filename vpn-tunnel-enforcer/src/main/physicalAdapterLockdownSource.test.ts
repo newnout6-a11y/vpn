@@ -38,4 +38,29 @@ describe('physicalAdapterLockdown source regressions', () => {
     expect(s).toContain('warnings.push(line)')
     expect(s).toContain('partial DNS registry policy rollback')
   })
+
+  it('detects cellular/RNDIS/tethering adapters and avoids disabling ms_tcpip6', async () => {
+    const s = source()
+
+    expect(s).toContain('export function isCellularOrTetheringAdapter')
+    expect(s).toContain('isCellularOrTethering')
+    expect(s).toContain('forcedIpv6Off: a.isCellularOrTethering ? false : a.ipv6Enabled')
+    expect(s).toContain('a.isCellularOrTethering')
+    expect(s).toContain('Write-Output "A${i}_ipv6:skip"')
+
+    const { isCellularOrTetheringAdapter, isTetheringSubnetIp } = await import('./physicalAdapterLockdown')
+    expect(isCellularOrTetheringAdapter('Cellular')).toBe(true)
+    expect(isCellularOrTetheringAdapter('Ethernet 2', 'Remote NDIS based Internet Sharing Device')).toBe(true)
+    expect(isCellularOrTetheringAdapter('Ethernet 3', 'Apple Mobile Device Ethernet')).toBe(true)
+    expect(isCellularOrTetheringAdapter('Wi-Fi', 'Intel(R) Wi-Fi 6 AX200 160MHz')).toBe(false)
+    expect(isCellularOrTetheringAdapter('Ethernet', 'Realtek Gaming GbE Family Controller')).toBe(false)
+
+    // Mobile hotspot detection by DNS / Gateway IP
+    expect(isCellularOrTetheringAdapter('Wi-Fi', 'Intel(R) Wi-Fi 6 AX200 160MHz', ['192.168.43.1'])).toBe(true)
+    expect(isCellularOrTetheringAdapter('Wi-Fi', 'Intel(R) Wi-Fi 6 AX200 160MHz', ['172.20.10.1'])).toBe(true)
+    expect(isCellularOrTetheringAdapter('Wi-Fi', 'Intel(R) Wi-Fi 6 AX200 160MHz', [], ['192.168.137.1'])).toBe(true)
+    expect(isTetheringSubnetIp('192.168.43.1')).toBe(true)
+    expect(isTetheringSubnetIp('172.20.10.1')).toBe(true)
+    expect(isTetheringSubnetIp('192.168.1.1')).toBe(false)
+  })
 })

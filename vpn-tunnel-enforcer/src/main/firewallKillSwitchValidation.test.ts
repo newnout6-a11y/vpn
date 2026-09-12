@@ -104,3 +104,19 @@ describe('NTP clock-sync kill-switch allow rule', () => {
     expect(source).toContain('${psSingleQuote(ntpAllow)}')
   })
 })
+
+describe('Electron app binary kill-switch allow rule', () => {
+  it('allows outbound traffic for process.execPath so internal probes are not blocked with connect EACCES', () => {
+    expect(source).toContain("const appAllow = `${RULE_PREFIX}-allow-app`")
+    expect(source).toContain('-Program ${psSingleQuote(process.execPath)}')
+    expect(source).toContain('${psSingleQuote(appAllow)}')
+  })
+})
+
+describe('dynamic TUN adapter alias in kill-switch', () => {
+  it('uses dynamic tunAlias from options or getTunAdapterAlias() for adapter rule', () => {
+    expect(source).toContain('const tunAlias = opts.tunAdapterAlias || getTunAdapterAlias()')
+    expect(source).toContain("Get-NetAdapter -Name '${tunAlias}'")
+    expect(source).toContain("-InterfaceAlias '${tunAlias}'")
+  })
+})

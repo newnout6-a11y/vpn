@@ -109,4 +109,27 @@ describe('tunnelHttpProbe egress validation', () => {
     const { tunnelHttpProbe } = await import('./serverPicker')
     expect(await tunnelHttpProbe(true)).toBeTypeOf('number')
   })
+
+  it('uses 8000ms timeout for tunnel probe targets to tolerate mobile hotspot jitter', () => {
+    const src = readFileSync(join(__dirname, 'serverPicker.ts'), 'utf8')
+    expect(src).toContain('const TUNNEL_PROBE_URL_TIMEOUT_MS = 8000')
+  })
+
+  it('retries when initial probe fails before returning null', async () => {
+    let callCount = 0
+    axiosGet.mockImplementation((url: string) => {
+      callCount++
+      // Fail all targets on attempt 1, succeed on attempt 2
+      if (callCount <= 4) {
+        return Promise.reject(new Error('transient hotspot hiccup'))
+      }
+      return url.includes('generate_204')
+        ? Promise.resolve({ status: 204, data: '' })
+        : Promise.reject(new Error('blocked'))
+    })
+    const { tunnelHttpProbe } = await import('./serverPicker')
+    const latency = await tunnelHttpProbe(true)
+    expect(latency).toBeTypeOf('number')
+    expect(callCount).toBeGreaterThan(4)
+  })
 })

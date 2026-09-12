@@ -7,7 +7,7 @@ import { promisify } from 'util'
 import { execElevated } from './admin'
 import { execElevatedPs, isElevatedPsHelperRunning } from './elevatedPsHelper'
 import { logEvent } from './appLogger'
-import { TUN_ADAPTER_ALIAS, TUN_IPV4_NETWORK_CIDR } from './tunAdapter'
+import { TUN_ADAPTER_ALIAS, TUN_IPV4_NETWORK_CIDR, getTunAdapterAlias } from './tunAdapter'
 
 const execFile = promisify(execFileCb)
 
@@ -335,12 +335,15 @@ export async function enableKillSwitch(opts: {
   singboxExePath: string
   proxyOwnerProgramPaths?: string[]
   extraAllowedRemoteCidrs?: string[]
+  tunAdapterAlias?: string
 }): Promise<FirewallKillSwitchResult> {
   if (process.platform !== 'win32') {
     return { success: true, message: 'Firewall kill-switch недоступен (не Windows)' }
   }
 
+  const tunAlias = opts.tunAdapterAlias || getTunAdapterAlias()
   const singboxAllow = `${RULE_PREFIX}-allow-singbox`
+  const appAllow = `${RULE_PREFIX}-allow-app`
   const tunInterfaceAllow = `${RULE_PREFIX}-allow-tun-interface`
   const lanAllow = `${RULE_PREFIX}-allow-lan`
   const tunAllow = `${RULE_PREFIX}-allow-tun`
@@ -423,6 +426,17 @@ try {
   $rules += ${psSingleQuote(singboxAllow)}
 } catch { Write-Output "WARN allow-singbox: $_" }
 
+# 3a-bis. Allow the Electron application binary (process.execPath) outbound.
+try {
+  New-NetFirewallRule \`
+    -DisplayName ${psSingleQuote(appAllow)} \`
+    -Description 'VPN Tunnel Enforcer kill-switch: allow Electron app outbound.' \`
+    -Direction Outbound -Action Allow \`
+    -Program ${psSingleQuote(process.execPath)} \`
+    -Profile Any -Enabled True | Out-Null
+  $rules += ${psSingleQuote(appAllow)}
+} catch { Write-Output "WARN allow-app: $_" }
+
 # 3b. Allow proxy owner processes (Happ xray.exe, etc.)
 ${proxyAllowParts.join('\n')}
 
@@ -437,7 +451,7 @@ ${proxyAllowParts.join('\n')}
 # blocking the whole script.
 $tunAliasFound = $false
 for ($i = 0; $i -lt 150; $i++) {
-  $a = Get-NetAdapter -Name '${TUN_ADAPTER_ALIAS}' -ErrorAction SilentlyContinue
+  $a = Get-NetAdapter -Name '${tunAlias}' -ErrorAction SilentlyContinue
   if ($a -and $a.Status -eq 'Up') { $tunAliasFound = $true; break }
   Start-Sleep -Milliseconds 100
 }
@@ -445,9 +459,9 @@ if ($tunAliasFound) {
   try {
     New-NetFirewallRule \`
       -DisplayName ${psSingleQuote(tunInterfaceAllow)} \`
-      -Description 'VPN Tunnel Enforcer kill-switch: allow captured app traffic through ${TUN_ADAPTER_ALIAS}.' \`
+      -Description 'VPN Tunnel Enforcer kill-switch: allow captured app traffic through ${tunAlias}.' \`
       -Direction Outbound -Action Allow \`
-      -InterfaceAlias '${TUN_ADAPTER_ALIAS}' \`
+      -InterfaceAlias '${tunAlias}' \`
       -Profile Any -Enabled True | Out-Null
     $rules += ${psSingleQuote(tunInterfaceAllow)}
   } catch { Write-Output "WARN allow-tun-interface: $_" }
@@ -508,6 +522,7 @@ ${extraIpAllowPart}
 # or TUN-interface allows can wedge all app traffic until recovery runs.
 $requiredRules = @(
   ${psSingleQuote(singboxAllow)},
+  ${psSingleQuote(appAllow)},
   ${psSingleQuote(tunInterfaceAllow)},
   ${psSingleQuote(lanAllow)},
   ${psSingleQuote(tunAllow)},
