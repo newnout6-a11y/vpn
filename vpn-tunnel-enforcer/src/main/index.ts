@@ -392,6 +392,9 @@ async function verifyAdaptiveConnection(): Promise<void> {
   if (latency !== null) {
     markAdaptiveSuccess(context.profile)
     logEvent('info', 'adaptive-bypass', 'tunnel verification succeeded', { latency })
+    try {
+      tunController.recoverProxyIfAlive('adaptive-probe')
+    } catch {}
     return
   }
 
@@ -971,16 +974,17 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
   // but await it to be sure before we report final status.
   if (baselinePromise) await baselinePromise
   scheduleAdaptiveVerification()
+  ipMonitor.startMonitoring()
 
   // Start traffic forensics session in background (non-blocking)
   startTrafficForensicsSession({ mode: 'localProxy', target: proxyAddr }).catch(err => {
     logEvent('warn', 'app', 'failed to start traffic forensics session', err)
   })
 
-  // Poll for the VPN IP instead of waiting a fixed 4s. The TUN routes
+  // Poll for the VPN IP instead of waiting a fixed delay. The TUN routes
   // propagate within a few hundred ms on most systems, so polling every 500ms
-  // shows the VPN IP much sooner than a fixed 4s delay. We verify TUN is
-  // running on each attempt and stop after 8 tries (4s max) as a safety net.
+  // shows the VPN IP much sooner. We verify TUN is
+  // running on each attempt and stop after 16 tries (8s max) as a safety net.
   // CRITICAL: we must NOT rebaseline (recheck(true)) until the IP has actually
   // changed from the pre-VPN value. If we rebaseline too early (before TUN
   // routes propagate), we'd set vpnIp = realIP, permanently breaking leak
@@ -988,7 +992,7 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
   // IP differs from the pre-VPN baseline.
   const preVpnIp = (await ipMonitor.getCurrentIp()).ip
   const pollVpnIp = async () => {
-    for (let attempt = 0; attempt < 8; attempt++) {
+    for (let attempt = 0; attempt < 16; attempt++) {
       await new Promise(r => setTimeout(r, 500))
       if (!tunController.getStatus().running) return
       try {
@@ -1014,7 +1018,7 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
         }
       } catch { /* retry on next interval */ }
     }
-    // Fallback: IP never changed after 4s.
+    // Fallback: IP never changed after 8s.
     // Self-blinding prevention: do NOT call recheck(true) if tunnel routes are not active,
     // otherwise the user's real ISP IP will overwrite vpnIp.
     try {
@@ -1220,6 +1224,7 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
   }
   if (baselinePromise) await baselinePromise
   scheduleAdaptiveVerification()
+  ipMonitor.startMonitoring()
 
   // Start traffic forensics session in background (non-blocking)
   startTrafficForensicsSession({ mode: 'directVpn', target: profile.name }).catch(err => {
@@ -1231,11 +1236,11 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
   // Open a connection-history session (Direct VPN variant).
   openSession({ id: profile.name || 'direct-vpn', name: profile.name || 'Direct VPN', mode: 'direct' })
 
-  // Poll for the VPN IP instead of waiting a fixed 4s (see startProtection).
+  // Poll for the VPN IP instead of waiting a fixed delay (see startProtection).
   // Same logic: use recheck(false) first, only rebaseline once IP changes.
   const preVpnIpDirect = (await ipMonitor.getCurrentIp()).ip
   const pollVpnIpDirect = async () => {
-    for (let attempt = 0; attempt < 8; attempt++) {
+    for (let attempt = 0; attempt < 16; attempt++) {
       await new Promise(r => setTimeout(r, 500))
       if (!tunController.getStatus().running) return
       try {
@@ -1260,7 +1265,7 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
         }
       } catch { /* retry on next interval */ }
     }
-    // Fallback: rebaseline after 4s only if tunnel routes are active.
+    // Fallback: rebaseline after 8s only if tunnel routes are active.
     // Prevents self-blinding leak detector with real ISP IP when routing failed.
     try {
       const routesActive = await areTunRoutesActive().catch(() => false)
@@ -2201,14 +2206,30 @@ app.whenReady().then(async () => {
   // Push events from main → renderer
   trafficMonitor.onStatsChange((stats) => {
     latestTraffic = stats
+    if (stats.running && (stats.downloadBps > 1024 || stats.uploadBps > 1024)) {
+      try {
+        tunController.recoverProxyIfAlive('traffic')
+      } catch {}
+    }
     try {
       sendToMainWindow('traffic-stats', stats)
     } catch {}
     refreshTrayState({ traffic: stats })
   })
 
+  ipMonitor.setRecoveryCallback((source) => {
+    try {
+      tunController.recoverProxyIfAlive(source)
+    } catch {}
+  })
+
   ipMonitor.onIpChange((ip: string, isLeak: boolean) => {
     latestPublicIp = ip
+    if (ip && !isLeak) {
+      try {
+        tunController.recoverProxyIfAlive('ipMonitor')
+      } catch {}
+    }
     sendToMainWindow('ip-changed', { ip, isLeak })
     refreshTrayState({ status: isLeak ? 'leak' : tunController.getStatus().running ? 'protected' : 'off', publicIp: ip })
     if (isLeak) {

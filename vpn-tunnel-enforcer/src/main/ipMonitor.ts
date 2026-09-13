@@ -1,8 +1,11 @@
+import { isIP } from 'net'
 import axios from 'axios'
 import { logEvent } from './appLogger'
 
-const IP_CHECK_URLS = [
+export const IP_CHECK_URLS = [
+  'https://cloudflare.com/cdn-cgi/trace',
   'https://api.ipify.org?format=json',
+  'https://icanhazip.com',
   'https://api.myip.com'
 ]
 
@@ -34,23 +37,58 @@ let suppressed = false
 // write wins with a potentially stale value and breaks all future leak checks.
 let recheckInFlight: Promise<{ ip: string | null; isLeak: boolean; vpnIp: string | null }> | null = null
 
-async function fetchPublicIpFrom(url: string): Promise<string> {
+let ipMonitorRecoveryCallback: ((source: string) => void) | null = null
+
+export function setIpMonitorRecoveryCallback(cb: ((source: string) => void) | null): void {
+  ipMonitorRecoveryCallback = cb
+}
+
+export async function fetchPublicIpFrom(url: string): Promise<string> {
   try {
-    const resp = await axios.get(url, { timeout: 6000 })
-    const ip = resp.data?.ip || resp.data?.query || null
-    if (ip) {
+    const resp = await axios.get(url, {
+      timeout: 6000,
+      responseType: 'text',
+      transformResponse: (d) => d
+    })
+    const raw = typeof resp.data === 'string' ? resp.data.trim() : JSON.stringify(resp.data)
+    let ip: string | null = null
+    if (typeof resp.data === 'object' && resp.data !== null && !Array.isArray(resp.data)) {
+      ip = (resp.data as any).ip || (resp.data as any).query || null
+    }
+    if (!ip && raw.startsWith('{')) {
+      try {
+        const parsed = JSON.parse(raw)
+        ip = parsed?.ip || parsed?.query || null
+      } catch {}
+    }
+    if (!ip) {
+      // Check cloudflare cdn-cgi/trace format: ip=1.2.3.4
+      const matchTrace = raw.match(/^ip=([0-9a-fA-F:.]+)/m)
+      if (matchTrace) {
+        ip = matchTrace[1]
+      } else if (/^[0-9a-fA-F:.]+$/.test(raw)) {
+        // Plain text IP (icanhazip)
+        ip = raw
+      }
+    }
+    if (ip && (isIP(ip) === 4 || isIP(ip) === 6)) {
       lastSuccessAt = Date.now()
       logEvent('debug', 'ip-monitor', 'public IP endpoint succeeded', { url, ip })
+      if (ipMonitorRecoveryCallback) {
+        try {
+          ipMonitorRecoveryCallback('ipMonitor')
+        } catch {}
+      }
       return ip
     }
-    throw new Error('response did not contain an IP')
+    throw new Error('response did not contain a valid IP')
   } catch (err: any) {
     logEvent('debug', 'ip-monitor', 'public IP endpoint failed', { url, error: err.message || String(err) })
     throw err
   }
 }
 
-async function fetchPublicIp(): Promise<string | null> {
+export async function fetchPublicIp(): Promise<string | null> {
   try {
     return await Promise.any(IP_CHECK_URLS.map(fetchPublicIpFrom))
   } catch {
@@ -96,6 +134,9 @@ function stopMonitoring() {
 }
 
 export const ipMonitor = {
+  startMonitoring,
+  stopMonitoring,
+  setRecoveryCallback: setIpMonitorRecoveryCallback,
   async getCurrentIp(): Promise<{ ip: string | null; isLeak: boolean; vpnIp: string | null }> {
     if (suppressed) {
       // Return last-known state without touching it. Never report leak while

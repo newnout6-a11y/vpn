@@ -30,4 +30,4 @@ vpn-tunnel-enforcer/scripts/inspect-bundle.mjs
 
 .kimchi/
 coverage/
-
+.agents/

@@ -152,6 +152,19 @@ const TUNNEL_PROBE_TARGETS: ReadonlyArray<{
 const TUNNEL_PROBE_SUCCESS_CACHE_MS = 3500
 const TUNNEL_PROBE_FAILURE_CACHE_MS = 1500
 let tunnelProbeCache: { value: number | null; at: number; sessionKey: string } | null = null
+let lastSuccessfulTunnelProbeAt = 0
+
+export function getLastSuccessfulTunnelProbeAt(): number {
+  return lastSuccessfulTunnelProbeAt
+}
+
+export function hasRecentTunnelProbeConfirmation(maxAgeMs = 45000): boolean {
+  return lastSuccessfulTunnelProbeAt > 0 && (Date.now() - lastSuccessfulTunnelProbeAt) <= maxAgeMs
+}
+
+if (typeof tunController?.setWatchdogProbeConfirmationChecker === 'function') {
+  tunController.setWatchdogProbeConfirmationChecker(hasRecentTunnelProbeConfirmation)
+}
 
 function currentTunnelProbeSessionKey(): string | null {
   const status = tunController.getStatus()
@@ -287,7 +300,11 @@ export async function tunnelHttpProbe(skipCache = false, maxRetries = 1): Promis
       // Node ≥ 18, so no polyfill needed. First successful response wins; the
       // rest keep going harmlessly until their per-request timeout fires.
       const ms = await Promise.any(races)
+      lastSuccessfulTunnelProbeAt = Date.now()
       tunnelProbeCache = { value: ms, at: Date.now(), sessionKey }
+      try {
+        tunController.recoverProxyIfAlive('tunnelHttpProbe')
+      } catch {}
       return ms
     } catch (err) {
       if (attempt < maxRetries) {
@@ -2703,5 +2720,7 @@ export const serverPicker = {
   updateActiveProfileCountry,
   verifyProfileCountry,
   setProfileClientDevice,
+  getLastSuccessfulTunnelProbeAt,
+  hasRecentTunnelProbeConfirmation,
   registerHandlers: registerServerPickerHandlers
 }

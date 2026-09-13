@@ -459,19 +459,21 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
 
   // ─── Status label ──────────────────────────────────────────────────────
 
+  const isProxyActuallyDown = proxyDown && (!traffic?.running || (traffic.downloadBps <= 1024 && traffic.uploadBps <= 1024))
+
   const statusLabel = (() => {
     if (connecting) return t('dashboard.connecting')
     if (disconnecting) return t('dashboard.disconnecting', 'Отключение...')
     if (isServerSwitching) return `Переключение сервера${serverSwitchingName ? `: ${serverSwitchingName}` : '...'}`
     if (restartingProgress) return `Перезапуск ${restartingProgress}`
-    if (isConnected && proxyDown) return 'Сервер не отвечает — трафик заблокирован'
+    if (isConnected && isProxyActuallyDown) return 'Сервер не отвечает — трафик заблокирован'
     if (isConnected) return t('dashboard.connected')
     return t('dashboard.disconnected')
   })()
 
   const statusColor = (() => {
     if (connecting || disconnecting || restartingProgress || isServerSwitching) return 'text-[var(--color-warning)]'
-    if (isConnected && proxyDown) return 'text-[var(--color-warning)]'
+    if (isConnected && isProxyActuallyDown) return 'text-[var(--color-warning)]'
     if (isConnected) return 'text-[var(--color-success)]'
     return 'text-[var(--color-text-secondary)]'
   })()

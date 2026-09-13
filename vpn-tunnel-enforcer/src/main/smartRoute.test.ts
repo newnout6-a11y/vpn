@@ -12,6 +12,8 @@ import {
   suffixListToMatcher,
   RU_GEOIP_RULESET,
   RU_GOV_GEOSITE_RULESET,
+  GOOGLE_AND_GEMINI_PINNED_SUFFIXES,
+  KIMI_MOONSHOT_DOMAIN_SUFFIXES,
   type SmartRouteOptions
 } from './smartRoute'
 
@@ -133,6 +135,34 @@ describe('smartRouteRules', () => {
     const idxGeoip = rules.findIndex((r) => r.rule_set === RU_GEOIP_RULESET)
     expect(idxDomain).toBeLessThan(idxGeoip)
   })
+
+  it('pins Google and Gemini domains to proxy-out BEFORE ruDomainRuleSets and geoip', () => {
+    const rules = smartRouteRules(ON)
+    const idxGemini = rules.findIndex(
+      (r) => Array.isArray(r.domain_suffix) && r.domain_suffix.includes('.gemini.google.com') && r.outbound === 'proxy-out'
+    )
+    const idxRuDomain = rules.findIndex((r) => Array.isArray(r.rule_set))
+    const idxGeoip = rules.findIndex((r) => r.rule_set === RU_GEOIP_RULESET)
+    expect(idxGemini).toBeGreaterThanOrEqual(0)
+    expect(idxGemini).toBeLessThan(idxRuDomain)
+    expect(idxGemini).toBeLessThan(idxGeoip)
+
+    const geminiRule = rules[idxGemini]
+    for (const suffix of GOOGLE_AND_GEMINI_PINNED_SUFFIXES) {
+      expect(geminiRule.domain_suffix).toContain(suffix)
+    }
+  })
+
+  it('routes Kimi Desktop and Moonshot coding gateways to direct-out', () => {
+    const rules = smartRouteRules(ON)
+    const kimiRule = rules.find(
+      (r) => Array.isArray(r.domain_suffix) && r.domain_suffix.includes('.kimi.com') && r.outbound === 'direct-out'
+    )
+    expect(kimiRule).toBeDefined()
+    for (const suffix of KIMI_MOONSHOT_DOMAIN_SUFFIXES) {
+      expect(kimiRule?.domain_suffix).toContain(suffix)
+    }
+  })
 })
 
 describe('smartRouteDnsRules', () => {
@@ -146,6 +176,24 @@ describe('smartRouteDnsRules', () => {
     expect(Array.isArray(first.domain_suffix)).toBe(true)
     expect(first.server).toBe('dns-remote')
     expect(first.domain_suffix).toContain('.2ip.ru')
+  })
+
+  it('resolves Google and Gemini pinned domains via dns-remote', () => {
+    const rules = smartRouteDnsRules(ON)
+    const geminiDnsRule = rules.find(
+      (r) => Array.isArray(r.domain_suffix) && r.domain_suffix.includes('.gemini.google.com')
+    )
+    expect(geminiDnsRule).toBeDefined()
+    expect(geminiDnsRule?.server).toBe('dns-remote')
+  })
+
+  it('resolves Kimi / Moonshot domains via direct DNS resolver', () => {
+    const rules = smartRouteDnsRules(ON)
+    const kimiDnsRule = rules.find(
+      (r) => Array.isArray(r.domain_suffix) && r.domain_suffix.includes('.kimi.com')
+    )
+    expect(kimiDnsRule).toBeDefined()
+    expect(kimiDnsRule?.server).toBe('dns-direct')
   })
 
   it('binds RU domain rule-sets to the direct resolver tag', () => {

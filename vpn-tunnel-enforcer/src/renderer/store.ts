@@ -380,7 +380,11 @@ export const useAppStore = create<AppState>((set) => ({
   },
 
   setMode: (mode) => set({ mode }),
-  setPublicIp: (ip, isLeak) => set({ publicIp: ip, isLeak }),
+  setPublicIp: (ip, isLeak) => set((state) => ({
+    publicIp: ip,
+    isLeak,
+    proxyDown: ip && !isLeak ? false : state.proxyDown
+  })),
   setVpnIp: (ip) => set({ vpnIp: ip }),
   setProxy: (proxy) => set({ proxy }),
   setDetecting: (d) => set({ detecting: d }),
@@ -417,7 +421,10 @@ export const useAppStore = create<AppState>((set) => ({
         }
       : { lastCheck: null, summary: 'unknown', message: 'Диагностика ещё не запускалась' }
   }),
-  setTrafficStats: (traffic) => set({ traffic }),
+  setTrafficStats: (traffic) => set((state) => ({
+    traffic,
+    proxyDown: (traffic.running && (traffic.downloadBps > 1024 || traffic.uploadBps > 1024)) ? false : state.proxyDown
+  })),
   setBrowserIpCheck: (browserIpCheck) => set({ browserIpCheck }),
   // Reset all connection-related state — called on crash/killswitch/disconnect
   // to prevent stale data from misleading the user.

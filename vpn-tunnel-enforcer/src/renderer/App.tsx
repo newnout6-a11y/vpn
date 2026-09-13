@@ -119,6 +119,9 @@ export default function App() {
       if (!isLeak && store.tunRunning) {
         store.setVpnIp(ip)
       }
+      if (ip && !isLeak && store.proxyDown) {
+        store.setProxyDown(false)
+      }
       if (isLeak) {
         addLog('error', `ОБНАРУЖЕНА УТЕЧКА IP! Текущий: ${ip}`)
       } else {
@@ -248,7 +251,11 @@ export default function App() {
     })
 
     const unsubTraffic = window.electronAPI.onTrafficStats((stats) => {
-      useAppStore.getState().setTrafficStats(stats)
+      const store = useAppStore.getState()
+      store.setTrafficStats(stats)
+      if (stats.running && (stats.downloadBps > 1024 || stats.uploadBps > 1024) && store.proxyDown) {
+        store.setProxyDown(false)
+      }
     })
 
     const unsubLeak = window.electronAPI.onLeakDetected((result) => {

@@ -120,3 +120,22 @@ describe('dynamic TUN adapter alias in kill-switch', () => {
     expect(source).toContain("-InterfaceAlias '${tunAlias}'")
   })
 })
+
+describe('loopback kill-switch allow rules (IPv4 and IPv6)', () => {
+  it('defines dedicated Outbound and Inbound loopback rules for local IPC', () => {
+    expect(source).toContain("const loopbackOutAllow = `${RULE_PREFIX}-allow-loopback-out`")
+    expect(source).toContain("const loopbackInAllow = `${RULE_PREFIX}-allow-loopback-in`")
+    expect(source).toContain("-DisplayName ${psSingleQuote(loopbackOutAllow)}")
+    expect(source).toContain("-Direction Outbound -Action Allow")
+    expect(source).toContain("-RemoteAddress '127.0.0.0/8', '::1/128'")
+    expect(source).toContain("-DisplayName ${psSingleQuote(loopbackInAllow)}")
+    expect(source).toContain("-Direction Inbound -Action Allow")
+    expect(source).toContain("-LocalAddress '127.0.0.0/8', '::1/128'")
+  })
+
+  it('includes loopbackOutAllow and loopbackInAllow in requiredRules', () => {
+    expect(source).toContain('${psSingleQuote(loopbackOutAllow)}')
+    expect(source).toContain('${psSingleQuote(loopbackInAllow)}')
+  })
+})
+

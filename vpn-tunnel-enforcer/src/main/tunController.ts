@@ -31,6 +31,7 @@ import {
 import type { ClientDevice } from '../shared/ipc-types'
 import { TUN_ADAPTER_ALIAS, TUN_IPV4_ADDRESS_CIDR, TUN_IPV4_RESOLVER, TUN_INTERFACE_METRIC, isOwnTunAddress, ALL_KNOWN_ALIASES, updateTunAdapterAlias, getTunAdapterAlias } from './tunAdapter'
 import { ipMonitor } from './ipMonitor'
+import { trafficMonitor } from './trafficMonitor'
 import { cancelLeakSelfTest } from './leakSelfTest'
 import { startCompetingTunWatch, stopCompetingTunWatch } from './competingTunDetector'
 import { dnsProfiles } from './dnsProfiles'
@@ -997,11 +998,11 @@ export function generateSingboxConfig(
   const bootstrapPrimaryServer = bootstrapUpstreams[0] || '1.1.1.1'
   const quicUdp443BlockRules =
     shouldBlockQuicUdp443(proxyOutbound, proxyType, isDirectVpn)
-      ? [{ network: 'udp', port: 443, action: 'reject', method: 'default', no_drop: true }]
+      ? [{ network: 'udp', port: 443, action: 'reject', method: 'drop' }]
       : []
   const allUdpBlockRules =
     isTcpOnlyNetworkOutbound(proxyOutbound) && isDirectVpn
-      ? [{ network: 'udp', action: 'reject', method: 'default', no_drop: true }]
+      ? [{ network: 'udp', action: 'reject', method: 'drop' }]
       : []
   const needsSniff = true // Always sniff so that SNI and HTTP Host are available for routing and proxying
   const rawDirectServer = isDirectVpn && typeof upstream.outbound?.server === 'string'
@@ -1133,6 +1134,9 @@ export function generateSingboxConfig(
         // other UDP at all. Keep this AFTER hijack-dns so DNS still resolves
         // through sing-box, then fail-closed for the remaining UDP traffic.
         ...allUdpBlockRules,
+        // WebRTC STUN leak protection: force WebRTC STUN UDP ports (19302, 3478) to proxy-out
+        // so STUN queries (e.g. stun.l.google.com) never leak via direct-out or physical interfaces
+        { network: 'udp', port: [19302, 3478], outbound: 'proxy-out' },
         // User-defined per-domain rules (Settings → Domain Routing). Injected
         // AFTER sniff (so the SNI/Host is available to match on) and the DNS
         // hijack, but BEFORE the private-range and catch-all rules so an
@@ -1480,7 +1484,7 @@ function markProxyUnreachable(reason: string): void {
   notifyStatus('proxy-down')
 }
 
-function markProxyRecovered(): void {
+export function markProxyRecovered(): void {
   if (!currentStatus.running) return
   if (currentStatus.proxyReachable !== false) return
   logEvent('info', 'tun-watchdog', 'upstream proxy recovered, traffic flowing again')
@@ -1488,9 +1492,38 @@ function markProxyRecovered(): void {
   notifyStatus('running')
 }
 
+export function recoverProxyIfAlive(source = 'external'): void {
+  if (!currentStatus.running) return
+  watchdogFailures = 0
+  if (currentStatus.proxyReachable === false) {
+    logEvent('info', 'tun-watchdog', `tunnel egress confirmed via ${source} — recovering proxy status`)
+    markProxyRecovered()
+  }
+}
+
 function hasRecentPublicIpConfirmation(maxAgeMs: number): boolean {
   const lastSuccessAt = ipMonitor.getLastSuccessAt()
   return lastSuccessAt > 0 && Date.now() - lastSuccessAt <= maxAgeMs
+}
+
+let watchdogProbeConfirmationChecker: ((maxAgeMs: number) => boolean) | null = null
+
+export function setWatchdogProbeConfirmationChecker(checker: ((maxAgeMs: number) => boolean) | null): void {
+  watchdogProbeConfirmationChecker = checker
+}
+
+export function hasRecentWatchdogConfirmation(maxAgeMs: number): boolean {
+  if (hasRecentPublicIpConfirmation(maxAgeMs)) {
+    return true
+  }
+  const stats = trafficMonitor.getCurrentStats()
+  if (stats.running && (stats.downloadBps > 1024 || stats.uploadBps > 1024)) {
+    return true
+  }
+  if (watchdogProbeConfirmationChecker && watchdogProbeConfirmationChecker(maxAgeMs)) {
+    return true
+  }
+  return false
 }
 
 function stopProxyWatchdog() {
@@ -1526,9 +1559,9 @@ function startProxyWatchdog(proxyAddr: string) {
     }
 
     watchdogFailures += 1
-    if (hasRecentPublicIpConfirmation(DIRECT_VPN_WATCHDOG_SUPPRESS_MS)) {
+    if (hasRecentWatchdogConfirmation(DIRECT_VPN_WATCHDOG_SUPPRESS_MS)) {
       watchdogFailures = 0
-      logEvent('info', 'tun-watchdog', 'suppressing direct VPN probe failure because tunnel egress was recently confirmed', {
+      logEvent('info', 'tun-watchdog', 'suppressing direct VPN probe failure because tunnel egress/traffic was recently confirmed', {
         host: parsed.host,
         port: parsed.port,
         proxyAddr,
@@ -1566,7 +1599,7 @@ function startServerWatchdog(_host: string, _port: number, label: string) {
       return
     }
 
-    if (hasRecentPublicIpConfirmation(DIRECT_VPN_WATCHDOG_SUPPRESS_MS)) {
+    if (hasRecentPublicIpConfirmation(DIRECT_VPN_WATCHDOG_SUPPRESS_MS) || hasRecentWatchdogConfirmation(DIRECT_VPN_WATCHDOG_SUPPRESS_MS)) {
       watchdogFailures = 0
       markProxyRecovered()
       return
@@ -1790,12 +1823,32 @@ async function getProxyOwnerProcesses(host: string, port: number): Promise<Array
     `$hostName='${safeHost}';`,
     `$port=${port};`,
     "$addresses=@($hostName,'127.0.0.1','::1','0.0.0.0','::');",
-    'Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue |',
+    '$listeners = Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue |',
     'Where-Object { $addresses -contains $_.LocalAddress } |',
     'ForEach-Object {',
-    '  $p=Get-CimInstance Win32_Process -Filter "ProcessId=$($_.OwningProcess)" -ErrorAction SilentlyContinue;',
+    '  $p = Get-CimInstance Win32_Process -Filter "ProcessId=$($_.OwningProcess)" -ErrorAction SilentlyContinue;',
     '  if ($p) { [pscustomobject]@{ ProcessName=$p.Name; Path=$p.ExecutablePath; Id=$p.ProcessId } }',
-    '} | ConvertTo-Json -Compress'
+    '};',
+    '$results = @($listeners);',
+    'foreach ($l in $listeners) {',
+    '  if ($l.Path) {',
+    '    $dir = Split-Path -Parent $l.Path;',
+    '    $leaf = Split-Path -Leaf $dir;',
+    '    if ($leaf -match "^(core|bin|runtime|tun|tun2)$") { $dir = Split-Path -Parent $dir };',
+    '    if ($dir -and (Test-Path $dir) -and $dir.Length -gt 3) {',
+    '      Get-ChildItem -Path $dir -Depth 3 -Filter *.exe -ErrorAction SilentlyContinue | ForEach-Object {',
+    '        $results += [pscustomobject]@{ ProcessName=$_.Name; Path=$_.FullName; Id=$null }',
+    '      };',
+    '      $dirWithSlash = if ($dir.EndsWith("\\")) { $dir } else { $dir + "\\" };',
+    '      Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |',
+    '        Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($dirWithSlash, [System.StringComparison]::OrdinalIgnoreCase) } |',
+    '        ForEach-Object {',
+    '          $results += [pscustomobject]@{ ProcessName=$_.Name; Path=$_.ExecutablePath; Id=$_.ProcessId }',
+    '        };',
+    '    }',
+    '  }',
+    '};',
+    '$results | Where-Object { $_.ProcessName } | Select-Object -Property ProcessName, Path -Unique | ConvertTo-Json -Compress'
   ].join(' ')
 
   try {
@@ -3760,6 +3813,22 @@ export const tunController = {
 
   areTunRoutesActive(): Promise<boolean> {
     return areTunRoutesActive()
+  },
+
+  markProxyRecovered() {
+    markProxyRecovered()
+  },
+
+  recoverProxyIfAlive(source = 'external') {
+    recoverProxyIfAlive(source)
+  },
+
+  setWatchdogProbeConfirmationChecker(checker: ((maxAgeMs: number) => boolean) | null) {
+    setWatchdogProbeConfirmationChecker(checker)
+  },
+
+  hasRecentWatchdogConfirmation(maxAgeMs: number): boolean {
+    return hasRecentWatchdogConfirmation(maxAgeMs)
   },
 
   onStatusChange(callback: (status: string) => void) {

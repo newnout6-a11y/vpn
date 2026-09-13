@@ -183,9 +183,48 @@ const MAPS_DOMAIN_SUFFIXES = [
   '.maps.yandex.net',
   '.maps.yandex.ru',
   '.2gis.com',
-  '.2gis.ru',
-  '.maps.googleapis.com',
-  '.maps.gstatic.com'
+  '.2gis.ru'
+]
+
+/**
+ * Google and Gemini pinned domains.
+ *
+ * Pinned to proxy-out and dns-remote BEFORE any RU domain or geoip-ru rules to prevent
+ * Google Global Cache (GGC) nodes inside Russia or maps from splitting the Google session
+ * under the same user account (which triggers Google anti-bot / "unusual traffic" blocks).
+ */
+export const GOOGLE_AND_GEMINI_PINNED_SUFFIXES = [
+  '.gemini.google.com',
+  '.generativelanguage.googleapis.com',
+  '.proactivebackend-pa.googleapis.com',
+  '.alkalimakersuite-pa.googleapis.com',
+  '.aistudio.google.com',
+  '.cloudaicompanion-pa.googleapis.com',
+  '.deepmind.google',
+  '.deepmind.com',
+  '.google.com',
+  '.googleapis.com',
+  '.gstatic.com',
+  '.googleusercontent.com',
+  '.googlevideo.com',
+  '.gvt1.com',
+  '.1e100.net'
+]
+
+/**
+ * Kimi Desktop and Moonshot AI coding gateway / CDN domain suffixes.
+ *
+ * Routed directly via direct-out and direct DNS to prevent Moonshot coding APIs
+ * (e.g. agent-gw.kimi.com/coding/v1, notilo.kimi.com) from being blocked by
+ * domestic Chinese geo-fencing when accessed from foreign datacenter IPs.
+ */
+export const KIMI_MOONSHOT_DOMAIN_SUFFIXES = [
+  '.kimi.com',
+  '.kimi.ai',
+  '.moonshot.cn',
+  '.volces.com',
+  '.aliyun.com',
+  '.trustdecision.com'
 ]
 
 /**
@@ -354,6 +393,11 @@ export function smartRouteRules(opts: SmartRouteOptions): Array<Record<string, a
   //    case: users open `2ip.ru`, not `www.2ip.ru`).
   rules.push({ ...suffixListToMatcher(IP_CHECKER_SUFFIXES), outbound: 'proxy-out' })
 
+  // 0.2. Google and Gemini pinned domains ALWAYS go through the VPN (proxy-out)
+  //      BEFORE ruDomainRuleSets and BEFORE RU_GEOIP_RULESET to prevent Google Global Cache (GGC)
+  //      nodes inside Russia or maps from splitting the Google session under the same user account.
+  rules.push({ ...suffixListToMatcher(GOOGLE_AND_GEMINI_PINNED_SUFFIXES), outbound: 'proxy-out' })
+
   // 0.5. Media/CDN domains that often resolve to RU caches MUST still use the
   // VPN. Otherwise the later geoip-ru direct rule steals them and breaks video.
   rules.push({ ...suffixListToMatcher(VPN_PINNED_MEDIA_SUFFIXES), outbound: 'proxy-out' })
@@ -375,6 +419,9 @@ export function smartRouteRules(opts: SmartRouteOptions): Array<Record<string, a
   // 3. RU-hosted IPs → direct (catches services regardless of domain/TLD).
   rules.push({ rule_set: RU_GEOIP_RULESET, outbound: 'direct-out' })
 
+  // 4. Kimi Desktop and Moonshot coding gateways → direct-out to avoid Chinese geo-blocking of datacenter IPs
+  rules.push({ ...suffixListToMatcher(KIMI_MOONSHOT_DOMAIN_SUFFIXES), outbound: 'direct-out' })
+
   return rules
 }
 
@@ -391,6 +438,8 @@ export function smartRouteDnsRules(opts: SmartRouteOptions): Array<Record<string
   // direct one — matched first so an RU-hosted checker doesn't fall into the
   // RU-direct DNS rule below and resolve to its RU node. Apex + subdomains.
   rules.push({ ...suffixListToMatcher(IP_CHECKER_SUFFIXES), server: 'dns-remote' })
+  // Google and Gemini pinned domains: resolve strictly through dns-remote
+  rules.push({ ...suffixListToMatcher(GOOGLE_AND_GEMINI_PINNED_SUFFIXES), server: 'dns-remote' })
   // Media/CDN domains: same story as route rules above — keep them on the
   // tunnelled resolver so we don't prefer RU CDN nodes for throttled media.
   rules.push({ ...suffixListToMatcher(VPN_PINNED_MEDIA_SUFFIXES), server: 'dns-remote' })
@@ -408,6 +457,8 @@ export function smartRouteDnsRules(opts: SmartRouteOptions): Array<Record<string
   if (opts.mapsDirect) {
     rules.push({ ...suffixListToMatcher(MAPS_DOMAIN_SUFFIXES), server })
   }
+  // Kimi / Moonshot coding APIs and CDNs: resolve via direct DNS (local resolver)
+  rules.push({ ...suffixListToMatcher(KIMI_MOONSHOT_DOMAIN_SUFFIXES), server })
   return rules
 }
 

@@ -38,6 +38,9 @@ const LAN_BYPASS_CIDRS = [
   'ff00::/8'
 ]
 
+// Loopback bypass CIDRs: covers BOTH IPv4 and IPv6 loopback addresses.
+export const LOOPBACK_BYPASS_CIDRS = ['127.0.0.0/8', '::1/128']
+
 export interface FirewallKillSwitchResult {
   success: boolean
   message: string
@@ -345,6 +348,8 @@ export async function enableKillSwitch(opts: {
   const singboxAllow = `${RULE_PREFIX}-allow-singbox`
   const appAllow = `${RULE_PREFIX}-allow-app`
   const tunInterfaceAllow = `${RULE_PREFIX}-allow-tun-interface`
+  const loopbackOutAllow = `${RULE_PREFIX}-allow-loopback-out`
+  const loopbackInAllow = `${RULE_PREFIX}-allow-loopback-in`
   const lanAllow = `${RULE_PREFIX}-allow-lan`
   const tunAllow = `${RULE_PREFIX}-allow-tun`
   const dhcpAllow = `${RULE_PREFIX}-allow-dhcp`
@@ -469,6 +474,31 @@ if ($tunAliasFound) {
   Write-Output "WARN allow-tun-interface: adapter not found after 15s"
 }
 
+# 3c-bis. Dedicated Outbound Allow rule for loopback (IPv4 127.0.0.0/8 and IPv6 ::1/128).
+# Allows local connections to 127.0.0.1 and [::1] (Electron Happy Eyeballs localhost resolution).
+try {
+  New-NetFirewallRule \`
+    -DisplayName ${psSingleQuote(loopbackOutAllow)} \`
+    -Description 'VPN Tunnel Enforcer kill-switch: allow loopback outbound (IPv4 and IPv6).' \`
+    -Direction Outbound -Action Allow \`
+    -RemoteAddress '127.0.0.0/8', '::1/128' \`
+    -Profile Any -Enabled True | Out-Null
+  $rules += ${psSingleQuote(loopbackOutAllow)}
+} catch { Write-Output "WARN allow-loopback-out: $_" }
+
+# 3c-ter. Dedicated Inbound Allow rule for loopback (IPv4 127.0.0.0/8 and IPv6 ::1/128).
+# Allows background listening workers (kimi-webbridge.exe on 127.0.0.1:10086 and Daimon standalone
+# runtime on dynamic WebSocket ports) to receive local IPC connections on any port.
+try {
+  New-NetFirewallRule \`
+    -DisplayName ${psSingleQuote(loopbackInAllow)} \`
+    -Description 'VPN Tunnel Enforcer kill-switch: allow loopback inbound for local IPC workers.' \`
+    -Direction Inbound -Action Allow \`
+    -LocalAddress '127.0.0.0/8', '::1/128' \`
+    -Profile Any -Enabled True | Out-Null
+  $rules += ${psSingleQuote(loopbackInAllow)}
+} catch { Write-Output "WARN allow-loopback-in: $_" }
+
 # 3d. Allow IPv4 LAN ranges outbound (printers, NAS, router, mDNS).
 try {
   New-NetFirewallRule \`
@@ -524,6 +554,8 @@ $requiredRules = @(
   ${psSingleQuote(singboxAllow)},
   ${psSingleQuote(appAllow)},
   ${psSingleQuote(tunInterfaceAllow)},
+  ${psSingleQuote(loopbackOutAllow)},
+  ${psSingleQuote(loopbackInAllow)},
   ${psSingleQuote(lanAllow)},
   ${psSingleQuote(tunAllow)},
   ${psSingleQuote(dhcpAllow)},
