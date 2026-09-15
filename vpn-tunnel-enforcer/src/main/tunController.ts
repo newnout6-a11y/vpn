@@ -2704,6 +2704,7 @@ export const tunController = {
     // 2. Poll tasklist for sing-box.exe to determine if it actually started.
     return new Promise((resolve) => {
       let resolved = false
+      let startAbortedReason: string | null = null
       const finish = (result: { success: boolean; error?: string; warning?: string | null }) => {
         if (resolved) return
         resolved = true
@@ -2741,7 +2742,7 @@ export const tunController = {
           restartAttempt
         }
         if (!resolved) {
-          const msg = error?.message || (stderr ? String(stderr) : 'sing-box не запустился')
+          const msg = startAbortedReason || error?.message || (stderr ? String(stderr) : 'sing-box не запустился')
           const combined = `${error?.message ?? ''} ${stderr ?? ''}`
           // sing-box can fail to bind the mixed-direct-in inbound when the
           // randomly-picked port falls inside a Windows Hyper-V/WSL excluded
@@ -3282,6 +3283,7 @@ export const tunController = {
             if (ksResult.engaged) {
               killSwitchEngaged = true
             } else {
+              startAbortedReason = ksResult.warning || 'Не удалось применить обязательные правила брандмауэра Kill-Switch. Запуск отменен.'
               logEvent('error', 'tun', 'firewall kill-switch failed to engage — aborting start and rolling back', { warning: ksResult.warning })
               await killOwnedRuntimeProcesses()
               await stopXray('kill-switch failed to engage').catch(() => undefined)

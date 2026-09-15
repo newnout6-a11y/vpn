@@ -127,10 +127,12 @@ describe('loopback kill-switch allow rules (IPv4 and IPv6)', () => {
     expect(source).toContain("const loopbackInAllow = `${RULE_PREFIX}-allow-loopback-in`")
     expect(source).toContain("-DisplayName ${psSingleQuote(loopbackOutAllow)}")
     expect(source).toContain("-Direction Outbound -Action Allow")
-    expect(source).toContain("-RemoteAddress '127.0.0.0/8', '::1/128'")
+    expect(source).toContain("-RemoteAddress '127.0.0.0/8'")
+    expect(source).toContain("-RemoteAddress '::1/128'")
     expect(source).toContain("-DisplayName ${psSingleQuote(loopbackInAllow)}")
     expect(source).toContain("-Direction Inbound -Action Allow")
-    expect(source).toContain("-LocalAddress '127.0.0.0/8', '::1/128'")
+    expect(source).toContain("-LocalAddress '127.0.0.0/8'")
+    expect(source).toContain("-LocalAddress '::1/128'")
   })
 
   it('includes loopbackOutAllow and loopbackInAllow in requiredRules', () => {

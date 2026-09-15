@@ -32,4 +32,11 @@ describe('serverPicker source regressions', () => {
     expect(body).not.toContain('tunController.stop()')
     expect(body).not.toContain('tunController.start(')
   })
+
+  it('uses getFastPhysicalIpv4Sources via networkInterfaces to avoid PowerShell contention', () => {
+    const source = serverPickerSource()
+    expect(source).toContain('export function getFastPhysicalIpv4Sources()')
+    expect(source).toContain('const fast = getFastPhysicalIpv4Sources()')
+    expect(source).toContain('const PHYSICAL_SOURCE_FAILURE_CACHE_MS = 3_000')
+  })
 })

@@ -388,17 +388,36 @@ try {
   const extraCidrs = (opts.extraAllowedRemoteCidrs ?? []).filter(isValidIpOrCidr)
   let extraIpAllowPart = ''
   if (extraCidrs.length > 0) {
-    const addressList = extraCidrs.map((c) => `'${c}'`).join(',')
-    extraIpAllowPart = `
+    const v4Cidrs = extraCidrs.filter((c) => !c.includes(':'))
+    const v6Cidrs = extraCidrs.filter((c) => c.includes(':'))
+    const parts: string[] = []
+    if (v4Cidrs.length > 0) {
+      const addressList = v4Cidrs.map((c) => `'${c}'`).join(',')
+      parts.push(`
 try {
   New-NetFirewallRule \`
     -DisplayName ${psSingleQuote(extraIpAllow)} \`
-    -Description 'VPN Tunnel Enforcer kill-switch: allow user-defined IP/CIDR exceptions.' \`
+    -Description 'VPN Tunnel Enforcer kill-switch: allow user-defined IPv4 exceptions.' \`
     -Direction Outbound -Action Allow \`
     -RemoteAddress ${addressList} \`
     -Profile Any -Enabled True | Out-Null
   $rules += ${psSingleQuote(extraIpAllow)}
-} catch { Write-Output "WARN allow-extra-ip: $_" }`
+} catch { Write-Output "WARN allow-extra-ip-v4: $_" }`)
+    }
+    if (v6Cidrs.length > 0) {
+      const addressList = v6Cidrs.map((c) => `'${c}'`).join(',')
+      parts.push(`
+try {
+  New-NetFirewallRule \`
+    -DisplayName ${psSingleQuote(extraIpAllow)} \`
+    -Description 'VPN Tunnel Enforcer kill-switch: allow user-defined IPv6 exceptions.' \`
+    -Direction Outbound -Action Allow \`
+    -RemoteAddress ${addressList} \`
+    -Profile Any -Enabled True | Out-Null
+  $rules += ${psSingleQuote(extraIpAllow)}
+} catch { Write-Output "WARN allow-extra-ip-v6: $_" }`)
+    }
+    extraIpAllowPart = parts.join('\n')
   }
 
   // One atomic elevated PowerShell script: save defaults → add allows → set block.
@@ -474,28 +493,44 @@ if ($tunAliasFound) {
   Write-Output "WARN allow-tun-interface: adapter not found after 15s"
 }
 
-# 3c-bis. Dedicated Outbound Allow rule for loopback (IPv4 127.0.0.0/8 and IPv6 ::1/128).
-# Allows local connections to 127.0.0.1 and [::1] (Electron Happy Eyeballs localhost resolution).
+# 3c-bis. Dedicated Outbound Allow rules for loopback (IPv4 127.0.0.0/8 and IPv6 ::1/128).
+# Windows Firewall rejects mixing IPv4 and IPv6 CIDRs in a single rule, so we create separate rules.
 try {
   New-NetFirewallRule \`
     -DisplayName ${psSingleQuote(loopbackOutAllow)} \`
-    -Description 'VPN Tunnel Enforcer kill-switch: allow loopback outbound (IPv4 and IPv6).' \`
+    -Description 'VPN Tunnel Enforcer kill-switch: allow loopback outbound (IPv4).' \`
     -Direction Outbound -Action Allow \`
-    -RemoteAddress '127.0.0.0/8', '::1/128' \`
+    -RemoteAddress '127.0.0.0/8' \`
     -Profile Any -Enabled True | Out-Null
+  try {
+    New-NetFirewallRule \`
+      -DisplayName ${psSingleQuote(loopbackOutAllow)} \`
+      -Description 'VPN Tunnel Enforcer kill-switch: allow loopback outbound (IPv6).' \`
+      -Direction Outbound -Action Allow \`
+      -RemoteAddress '::1/128' \`
+      -Profile Any -Enabled True | Out-Null
+  } catch { Write-Output "WARN allow-loopback-out-v6: $_" }
   $rules += ${psSingleQuote(loopbackOutAllow)}
 } catch { Write-Output "WARN allow-loopback-out: $_" }
 
-# 3c-ter. Dedicated Inbound Allow rule for loopback (IPv4 127.0.0.0/8 and IPv6 ::1/128).
+# 3c-ter. Dedicated Inbound Allow rules for loopback (IPv4 127.0.0.0/8 and IPv6 ::1/128).
 # Allows background listening workers (kimi-webbridge.exe on 127.0.0.1:10086 and Daimon standalone
 # runtime on dynamic WebSocket ports) to receive local IPC connections on any port.
 try {
   New-NetFirewallRule \`
     -DisplayName ${psSingleQuote(loopbackInAllow)} \`
-    -Description 'VPN Tunnel Enforcer kill-switch: allow loopback inbound for local IPC workers.' \`
+    -Description 'VPN Tunnel Enforcer kill-switch: allow loopback inbound for local IPC workers (IPv4).' \`
     -Direction Inbound -Action Allow \`
-    -LocalAddress '127.0.0.0/8', '::1/128' \`
+    -LocalAddress '127.0.0.0/8' \`
     -Profile Any -Enabled True | Out-Null
+  try {
+    New-NetFirewallRule \`
+      -DisplayName ${psSingleQuote(loopbackInAllow)} \`
+      -Description 'VPN Tunnel Enforcer kill-switch: allow loopback inbound for local IPC workers (IPv6).' \`
+      -Direction Inbound -Action Allow \`
+      -LocalAddress '::1/128' \`
+      -Profile Any -Enabled True | Out-Null
+  } catch { Write-Output "WARN allow-loopback-in-v6: $_" }
   $rules += ${psSingleQuote(loopbackInAllow)}
 } catch { Write-Output "WARN allow-loopback-in: $_" }
 

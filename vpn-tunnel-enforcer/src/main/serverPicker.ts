@@ -11,6 +11,7 @@
  */
 
 import { app, dialog, ipcMain, type IpcMainInvokeEvent } from 'electron'
+import { networkInterfaces } from 'os'
 import { Socket } from 'net'
 import { promises as dns } from 'dns'
 import { writeFile } from 'fs/promises'
@@ -494,7 +495,36 @@ async function getPhysicalIpv4Sources(): Promise<PhysicalIpv4Source[]> {
   }
 }
 
+const PHYSICAL_SOURCE_FAILURE_CACHE_MS = 3_000
+
+export function getFastPhysicalIpv4Sources(): PhysicalIpv4Source[] {
+  if (process.platform !== 'win32') return []
+  const nics = networkInterfaces()
+  const virtualRx = /wintun|\btun\b|wireguard|\bwg\d*\b|openvpn|tap-windows|happ|hiddify|singbox|v2ray|xray|hyper-v|vethernet|virtualbox|vmware|bluetooth|loopback/i
+  const virtualMacPrefixes = ['0a:00:27', '08:00:27', '00:15:5d', '00:05:69', '00:0c:29', '00:50:56']
+  const results: PhysicalIpv4Source[] = []
+  for (const [name, addrs] of Object.entries(nics)) {
+    if (!addrs || virtualRx.test(name)) continue
+    for (const a of addrs) {
+      if (a.family === 'IPv4' && !a.internal && a.mac && a.mac !== '00:00:00:00:00:00' && !a.address.startsWith('169.254.')) {
+        const lowerMac = a.mac.toLowerCase()
+        if (virtualMacPrefixes.some((p) => lowerMac.startsWith(p))) continue
+        results.push({ alias: name, ipv4: a.address })
+      }
+    }
+  }
+  return results
+}
+
 async function loadPhysicalIpv4Sources(): Promise<PhysicalIpv4Source[]> {
+  // Fast path: use os.networkInterfaces() directly (0 ms, zero process spawns).
+  // Avoids spawning PowerShell which takes seconds and fails when system is busy.
+  const fast = getFastPhysicalIpv4Sources()
+  if (fast.length > 0) {
+    physicalSourceCache = { value: fast, at: Date.now() }
+    return fast
+  }
+
   const script = `
 [Console]::OutputEncoding=[System.Text.Encoding]::UTF8
 $OutputEncoding=[System.Text.Encoding]::UTF8
@@ -538,7 +568,8 @@ $rows | ConvertTo-Json -Compress
     physicalSourceCache = { value, at: Date.now() }
     return value
   } catch {
-    physicalSourceCache = { value: [], at: Date.now() }
+    // Short failure cache: do NOT lock out pings for 60s on transient PowerShell failure
+    physicalSourceCache = { value: [], at: Date.now() - PHYSICAL_SOURCE_CACHE_MS + PHYSICAL_SOURCE_FAILURE_CACHE_MS }
     return []
   }
 }
