@@ -1516,6 +1516,10 @@ export function hasRecentWatchdogConfirmation(maxAgeMs: number): boolean {
   if (hasRecentPublicIpConfirmation(maxAgeMs)) {
     return true
   }
+  const lastTrafficAt = trafficMonitor.getLastTrafficAt?.() ?? 0
+  if (lastTrafficAt > 0 && Date.now() - lastTrafficAt <= maxAgeMs) {
+    return true
+  }
   const stats = trafficMonitor.getCurrentStats()
   if (stats.running && (stats.downloadBps > 1024 || stats.uploadBps > 1024)) {
     return true

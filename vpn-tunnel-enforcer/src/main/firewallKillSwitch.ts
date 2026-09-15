@@ -461,6 +461,20 @@ try {
   $rules += ${psSingleQuote(appAllow)}
 } catch { Write-Output "WARN allow-app: $_" }
 
+# 3a-ter. Allow system curl.exe outbound (used by server latency probes).
+$curlPath = Join-Path $env:SystemRoot 'System32\\curl.exe'
+if (Test-Path $curlPath) {
+  try {
+    New-NetFirewallRule \`
+      -DisplayName '${RULE_PREFIX}-allow-curl' \`
+      -Description 'VPN Tunnel Enforcer kill-switch: allow system curl for server latency probes.' \`
+      -Direction Outbound -Action Allow \`
+      -Program $curlPath \`
+      -Profile Any -Enabled True | Out-Null
+    $rules += '${RULE_PREFIX}-allow-curl'
+  } catch { Write-Output "WARN allow-curl: $_" }
+}
+
 # 3b. Allow proxy owner processes (Happ xray.exe, etc.)
 ${proxyAllowParts.join('\n')}
 

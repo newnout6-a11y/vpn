@@ -73,6 +73,7 @@ let previousCounters: AdapterCounters | null = null
 let peakDownloadBps = 0
 let peakUploadBps = 0
 let startedAt: number | null = null
+let lastTrafficAt = 0
 
 function encodedPowerShell(script: string): string {
   const prelude =
@@ -136,6 +137,9 @@ function processCounters(counters: AdapterCounters) {
   const seconds = Math.max((counters.ts - previousCounters.ts) / 1000, 0.001)
   const downloadBps = Math.max(0, (counters.receivedBytes - previousCounters.receivedBytes) / seconds)
   const uploadBps = Math.max(0, (counters.sentBytes - previousCounters.sentBytes) / seconds)
+  if (counters.receivedBytes > previousCounters.receivedBytes || counters.sentBytes > previousCounters.sentBytes) {
+    lastTrafficAt = counters.ts || Date.now()
+  }
   peakDownloadBps = Math.max(peakDownloadBps, downloadBps)
   peakUploadBps = Math.max(peakUploadBps, uploadBps)
   previousCounters = counters
@@ -309,6 +313,10 @@ export const trafficMonitor = {
 
   getCurrentStats(): TrafficStats {
     return { ...currentStats }
+  },
+
+  getLastTrafficAt(): number {
+    return lastTrafficAt
   },
 
   onStatsChange(callback: (stats: TrafficStats) => void) {

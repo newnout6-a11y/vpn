@@ -46,7 +46,7 @@ export function setIpMonitorRecoveryCallback(cb: ((source: string) => void) | nu
 export async function fetchPublicIpFrom(url: string): Promise<string> {
   try {
     const resp = await axios.get(url, {
-      timeout: 6000,
+      timeout: 10000,
       responseType: 'text',
       transformResponse: (d) => d
     })

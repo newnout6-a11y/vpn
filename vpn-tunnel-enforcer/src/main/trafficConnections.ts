@@ -209,6 +209,12 @@ export function pruneDomains(
   return domains
 }
 
+let infraServerHostsProvider: (() => string[]) | null = null
+
+export function setInfraServerHostsProvider(provider: (() => string[]) | null): void {
+  infraServerHostsProvider = provider
+}
+
 // ─── infra host set ─────────────────────────────────────────────────────────
 
 let infraHostsCache: { at: number; set: ReadonlySet<string> } | null = null
@@ -225,17 +231,29 @@ export function getInfraHosts(): ReadonlySet<string> {
     return infraHostsCache.set
   }
   const hosts = new Set(DOH_INFRA_HOSTS)
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const { serverPicker } = require('./serverPicker') as typeof import('./serverPicker')
-    for (const profile of serverPicker.getProfiles()) {
-      const host = normalizeHost(profile?.server)
-      if (host) hosts.add(host)
+  if (infraServerHostsProvider) {
+    try {
+      for (const server of infraServerHostsProvider()) {
+        const host = normalizeHost(server)
+        if (host) hosts.add(host)
+      }
+    } catch {
+      /* ignore */
     }
-  } catch (err) {
-    logEvent('debug', 'traffic-history', 'getInfraHosts: serverPicker unavailable', {
-      error: (err as Error)?.message
-    })
+  } else {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const sp = require('./serverPicker')
+      const picker = sp?.serverPicker || sp
+      if (typeof picker?.getProfiles === 'function') {
+        for (const profile of picker.getProfiles()) {
+          const host = normalizeHost(profile?.server)
+          if (host) hosts.add(host)
+        }
+      }
+    } catch {
+      /* serverPicker module not available via require in bundled asar */
+    }
   }
   infraHostsCache = { at: now, set: hosts }
   return hosts

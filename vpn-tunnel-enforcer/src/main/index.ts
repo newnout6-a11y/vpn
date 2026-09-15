@@ -72,7 +72,7 @@ import { registerRotationHandlers, initProfileRotation } from './profileRotation
 import { registerSchedulerIpcHandlers, schedulerService } from './scheduler'
 import { registerConnectionHistoryIpcHandlers, connectionHistoryService } from './connectionHistory'
 import { registerTrafficHistoryIpcHandlers, stopBackgroundTrafficHistory } from './trafficHistory'
-import { startTrafficConnectionSampler, stopTrafficConnectionSampler } from './trafficConnections'
+import { startTrafficConnectionSampler, stopTrafficConnectionSampler, setInfraServerHostsProvider } from './trafficConnections'
 import { registerDnsHandlers, initDnsProfiles } from './dnsProfiles'
 import { registerDomainRoutingIpcHandlers } from './domainRouting'
 import { registerConfigManagerIpcHandlers } from './configManager'
@@ -2152,6 +2152,7 @@ app.whenReady().then(async () => {
   registerSchedulerIpcHandlers()
   registerConnectionHistoryIpcHandlers()
   registerTrafficHistoryIpcHandlers()
+  setInfraServerHostsProvider(() => serverPicker.getProfiles().map((p) => p?.server).filter((s): s is string => Boolean(s)))
   // If the tunnel is already up by the time handlers register (autoStart, or a
   // main-process restart while connected), begin sampling right away instead of
   // waiting for the next status transition.
