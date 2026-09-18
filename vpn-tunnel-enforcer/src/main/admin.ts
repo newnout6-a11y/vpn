@@ -19,39 +19,52 @@ function psQuote(value: string): string {
 }
 
 let elevatedCache: boolean | null = null
+let elevatedPromise: Promise<boolean> | null = null
+
+export function clearElevatedCache(): void {
+  elevatedCache = null
+  elevatedPromise = null
+}
 
 export async function isProcessElevated(): Promise<boolean> {
   if (process.platform !== 'win32') return false
   if (elevatedCache !== null) return elevatedCache
+  if (elevatedPromise) return elevatedPromise
 
-  try {
-    const { stdout } = await execFile('cmd.exe', ['/d', '/s', '/c', ADMIN_CHECK_FAST], {
-      windowsHide: true,
-      timeout: 3000,
-      encoding: 'utf8'
-    })
-    elevatedCache = stdout.trim().toLowerCase().includes('true')
-    if (elevatedCache) return elevatedCache
-  } catch {
-    // Fast check failed — fall through to PowerShell for a definitive answer.
-  }
+  elevatedPromise = (async () => {
+    try {
+      const { stdout } = await execFile('cmd.exe', ['/d', '/s', '/c', ADMIN_CHECK_FAST], {
+        windowsHide: true,
+        timeout: 3000,
+        encoding: 'utf8'
+      })
+      elevatedCache = stdout.trim().toLowerCase().includes('true')
+      if (elevatedCache) return elevatedCache
+    } catch {
+      // Fast check failed — fall through to PowerShell for a definitive answer.
+    }
 
-  try {
-    const { stdout } = await execFile(
-      'powershell.exe',
-      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encodedPowerShell(ADMIN_CHECK_PS)],
-      {
-      windowsHide: true,
-      timeout: 5000,
-      encoding: 'utf8'
-      }
-    )
-    elevatedCache = stdout.trim().toLowerCase() === 'true'
-    return elevatedCache
-  } catch {
-    elevatedCache = false
-    return false
-  }
+    try {
+      const { stdout } = await execFile(
+        'powershell.exe',
+        ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encodedPowerShell(ADMIN_CHECK_PS)],
+        {
+          windowsHide: true,
+          timeout: 5000,
+          encoding: 'utf8'
+        }
+      )
+      elevatedCache = stdout.trim().toLowerCase() === 'true'
+      return elevatedCache
+    } catch {
+      elevatedCache = false
+      return false
+    } finally {
+      elevatedPromise = null
+    }
+  })()
+
+  return elevatedPromise
 }
 
 export async function execElevated(

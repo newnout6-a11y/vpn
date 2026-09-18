@@ -8,23 +8,17 @@ vi.mock('./appLogger', () => ({
   logEvent: vi.fn()
 }))
 
-vi.mock('child_process', () => ({
-  default: {
-    spawn: vi.fn(() => ({
-      killed: false,
-      exitCode: null,
-      stdin: {
-        write: vi.fn(),
-        end: vi.fn()
-      },
-      stdout: { on: vi.fn() },
-      stderr: { on: vi.fn() },
-      on: vi.fn()
-    }))
-  },
-  spawn: vi.fn(() => ({
+const mockKill = vi.fn()
+const mockExecFile = vi.fn((_cmd: string, _args: string[], _opts: any, cb?: any) => {
+  if (typeof cb === 'function') cb(null, '', '')
+})
+
+vi.mock('child_process', () => {
+  const makeChild = () => ({
+    pid: 9999,
     killed: false,
     exitCode: null,
+    kill: mockKill,
     stdin: {
       write: vi.fn(),
       end: vi.fn()
@@ -32,8 +26,17 @@ vi.mock('child_process', () => ({
     stdout: { on: vi.fn() },
     stderr: { on: vi.fn() },
     on: vi.fn()
-  }))
-}))
+  })
+
+  return {
+    default: {
+      spawn: vi.fn(() => makeChild()),
+      execFile: mockExecFile
+    },
+    spawn: vi.fn(() => makeChild()),
+    execFile: mockExecFile
+  }
+})
 
 describe('elevated PS helper errors', () => {
   beforeEach(() => {
@@ -131,5 +134,51 @@ describe('elevated PS helper errors', () => {
       name: 'ElevatedPsHelperError',
       code: 'elevated-helper-unavailable'
     })
+  })
+
+  it('terminates the hung process on timeout and rejects with elevated-helper-timeout', async () => {
+    vi.useFakeTimers()
+    ;(globalThis as any).__elevatedPsHelperMock = { elevated: true }
+    mockKill.mockClear()
+    mockExecFile.mockClear()
+    const { execElevatedPs, startElevatedPsHelper, isElevatedPsHelperRunning } = await import('./elevatedPsHelper')
+
+    await startElevatedPsHelper()
+    expect(isElevatedPsHelperRunning()).toBe(true)
+
+    const promise = execElevatedPs('Get-NetFirewallRule', 2000, 'firewall-killswitch')
+
+    vi.advanceTimersByTime(2001)
+
+    await expect(promise).rejects.toMatchObject({
+      name: 'ElevatedPsHelperError',
+      code: 'elevated-helper-timeout'
+    })
+
+    expect(mockKill).toHaveBeenCalledWith('SIGKILL')
+    expect(isElevatedPsHelperRunning()).toBe(false)
+    vi.useRealTimers()
+  })
+
+  it('rejects queued pending commands when a hung helper process is killed', async () => {
+    vi.useFakeTimers()
+    ;(globalThis as any).__elevatedPsHelperMock = { elevated: true }
+    const { execElevatedPs, startElevatedPsHelper } = await import('./elevatedPsHelper')
+
+    await startElevatedPsHelper()
+
+    const p1 = execElevatedPs('Get-NetFirewallRule', 1000, 'firewall-killswitch')
+    const p2 = execElevatedPs('Get-NetFirewallProfile', 5000, 'firewall-killswitch')
+
+    vi.advanceTimersByTime(1001)
+
+    await expect(p1).rejects.toMatchObject({
+      code: 'elevated-helper-timeout'
+    })
+    await expect(p2).rejects.toMatchObject({
+      code: 'elevated-helper-exited'
+    })
+
+    vi.useRealTimers()
   })
 })

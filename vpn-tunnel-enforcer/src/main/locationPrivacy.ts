@@ -1,6 +1,6 @@
 import { app } from 'electron'
 import { execFile as execFileCb } from 'child_process'
-import { mkdir, readFile, writeFile } from 'fs/promises'
+import { mkdir, readFile, writeFile, unlink } from 'fs/promises'
 import { join } from 'path'
 import { promisify } from 'util'
 import { execElevated } from './admin'
@@ -146,13 +146,13 @@ export async function rollbackLocationPrivacy(): Promise<LocationPrivacyStatus> 
   }
 
   if (manifest?.hklmBackup) {
-    await runElevated(`reg import "${manifest.hklmBackup}"`)
+    await runElevated(`reg import "${manifest.hklmBackup}"`).catch(() => undefined)
   } else {
-    await runElevated(
-      `reg delete "${HKLM_LOCATION}" /v DisableLocation /f & ` +
-      `reg delete "${HKLM_LOCATION}" /v DisableWindowsLocationProvider /f`
-    ).catch(() => undefined)
+    await runElevated(`reg delete "${HKLM_LOCATION}" /v DisableLocation /f`).catch(() => undefined)
+    await runElevated(`reg delete "${HKLM_LOCATION}" /v DisableWindowsLocationProvider /f`).catch(() => undefined)
   }
+
+  await unlink(manifestPath()).catch(() => undefined)
 
   return getLocationPrivacyStatus()
 }

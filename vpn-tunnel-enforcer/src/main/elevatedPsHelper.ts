@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from 'child_process'
+import { spawn, execFile as execFileCb, type ChildProcess } from 'child_process'
 import { isProcessElevated } from './admin'
 import { logEvent } from './appLogger'
 
@@ -110,7 +110,8 @@ while ($line = [Console]::In.ReadLine()) {
     $stderr = [string]::Empty
     $exitCode = 0
     try {
-      $output = Invoke-Expression $cmd.script *>&1 | Where-Object { $_ -isnot [System.Management.Automation.VerboseRecord] -and $_ -isnot [System.Management.Automation.DebugRecord] }
+      $sb = [ScriptBlock]::Create($cmd.script)
+      $output = & $sb *>&1 | Where-Object { $_ -isnot [System.Management.Automation.VerboseRecord] -and $_ -isnot [System.Management.Automation.DebugRecord] }
       $stdout = ($output | Out-String)
     } catch {
       $stderr = $_.Exception.Message
@@ -223,21 +224,50 @@ export async function startElevatedPsHelper(): Promise<void> {
 
 export function stopElevatedPsHelper(): void {
   if (helperProcess) {
+    const proc = helperProcess
+    helperProcess = null
     try {
-      helperProcess.stdin?.write('__EXIT__\n')
-      helperProcess.stdin?.end()
+      proc.stdin?.write('__EXIT__\n')
+      proc.stdin?.end()
     } catch {}
     setTimeout(() => {
-      if (helperProcess) {
-        try { helperProcess.kill() } catch {}
-      }
+      try {
+        if (!proc.killed && proc.exitCode === null) {
+          proc.kill('SIGTERM')
+        }
+      } catch {}
     }, 1000)
-    helperProcess = null
   }
   for (const [id, pending] of pendingCommands) {
     clearTimeout(pending.timer)
     pendingCommands.delete(id)
     pending.reject(new ElevatedPsHelperError('elevated-helper-stopped', 'PS helper stopped'))
+  }
+}
+
+function terminateHungHelper(cause: Error): void {
+  const proc = helperProcess
+  helperProcess = null
+  if (proc) {
+    try {
+      logEvent('warn', 'ps-helper', 'terminating hung elevated PS helper process', {
+        pid: proc.pid,
+        error: cause.message
+      })
+      proc.kill('SIGKILL')
+      if (proc.pid && process.platform === 'win32') {
+        execFileCb('taskkill.exe', ['/F', '/T', '/PID', String(proc.pid)], { windowsHide: true }, () => {})
+      }
+    } catch (e: any) {
+      logEvent('warn', 'ps-helper', 'error terminating hung helper', { error: e?.message || String(e) })
+    }
+  }
+  for (const [pendingId, pending] of pendingCommands) {
+    clearTimeout(pending.timer)
+    pendingCommands.delete(pendingId)
+    pending.reject(
+      new ElevatedPsHelperError('elevated-helper-exited', `PS helper terminated due to hung command: ${cause.message}`)
+    )
   }
 }
 
@@ -272,7 +302,12 @@ export async function execElevatedPs(
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       pendingCommands.delete(id)
-      reject(new ElevatedPsHelperError('elevated-helper-timeout', `PS command timed out after ${timeoutMs}ms: ${script.slice(0, 100)}`))
+      const timeoutError = new ElevatedPsHelperError(
+        'elevated-helper-timeout',
+        `PS command timed out after ${timeoutMs}ms: ${script.slice(0, 100)}`
+      )
+      terminateHungHelper(timeoutError)
+      reject(timeoutError)
     }, timeoutMs)
 
     pendingCommands.set(id, { resolve, reject, timer, script })
