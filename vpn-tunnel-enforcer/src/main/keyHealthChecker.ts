@@ -157,22 +157,40 @@ async function openTcpDirect(host: string, port: number, timeoutMs: number): Pro
   })
 }
 
-async function openTcpViaSocks(socks: { host: string; port: number }, host: string, port: number, timeoutMs: number): Promise<Socket> {
+export async function openTcpViaSocks(socks: { host: string; port: number }, host: string, port: number, timeoutMs: number): Promise<Socket> {
   // SocksClient's `timeout` covers the proxy command but not the dial to
   // the proxy itself. Wrap the whole thing so we never hang forever when
-  // sing-box's inbound stalls.
-  const connectPromise = SocksClient.createConnection({
-    proxy: { host: socks.host, port: socks.port, type: 5 },
-    command: 'connect',
-    destination: { host, port },
-    timeout: timeoutMs
-  }).then(({ socket }) => socket as Socket)
+  // sing-box's inbound stalls, and ensure that if the timeout fires first,
+  // any late-connecting socket is immediately destroyed.
+  return new Promise<Socket>((resolve, reject) => {
+    let settled = false
+    const timer = setTimeout(() => {
+      settled = true
+      reject(new Error('timeout'))
+    }, timeoutMs)
 
-  const timeoutPromise = new Promise<Socket>((_, reject) => {
-    setTimeout(() => reject(new Error('timeout')), timeoutMs)
+    SocksClient.createConnection({
+      proxy: { host: socks.host, port: socks.port, type: 5 },
+      command: 'connect',
+      destination: { host, port },
+      timeout: timeoutMs
+    })
+      .then(({ socket }) => {
+        if (settled) {
+          try { socket.destroy() } catch { /* ignore */ }
+          return
+        }
+        settled = true
+        clearTimeout(timer)
+        resolve(socket as Socket)
+      })
+      .catch((err) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        reject(err)
+      })
   })
-
-  return Promise.race([connectPromise, timeoutPromise])
 }
 
 async function verifyHttpsThroughSocket(

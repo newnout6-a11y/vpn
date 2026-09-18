@@ -25,7 +25,7 @@
 
 import { beforeEach, describe, it, expect, vi } from 'vitest'
 import axios from 'axios'
-import { exec as childExec } from 'child_process'
+import { exec as childExec, execFile as childExecFile } from 'child_process'
 
 vi.mock('electron', () => ({
   app: { getPath: () => '/tmp/vpnte-test', getAppPath: () => '/tmp/vpnte-test/app', isPackaged: false }
@@ -57,7 +57,25 @@ vi.mock('child_process', () => {
         resolve({ stdout, stderr })
       })
     })
-  return { default: { exec }, exec }
+
+  const execFile = vi.fn((_file: string, _args: any, _opts: any, cb: Function) => {
+    const callback = typeof _opts === 'function' ? _opts : cb
+    if (callback) callback(null, '[]', '')
+    return {} as any
+  })
+  ;(execFile as any)[Symbol.for('nodejs.util.promisify.custom')] = (file: string, args: any, opts: any) =>
+    new Promise((resolve, reject) => {
+      execFile(file, args, opts, (err: any, stdout: string, stderr: string) => {
+        if (err) {
+          err.stderr = stderr
+          reject(err)
+          return
+        }
+        resolve({ stdout, stderr })
+      })
+    })
+
+  return { default: { exec, execFile }, exec, execFile }
 })
 vi.mock('fs/promises', () => ({
   default: { readFile: vi.fn(async () => '') },
@@ -83,6 +101,12 @@ beforeEach(() => {
   vi.mocked(childExec).mockReset()
   vi.mocked(childExec).mockImplementation((_cmd: string, _opts: any, cb: any) => {
     if (cb) cb(null, '[]', '')
+    return {} as any
+  })
+  vi.mocked(childExecFile).mockReset()
+  vi.mocked(childExecFile).mockImplementation((_file: string, _args: any, _opts: any, cb: any) => {
+    const callback = typeof _opts === 'function' ? _opts : cb
+    if (callback) callback(null, '[]', '')
     return {} as any
   })
 })
@@ -261,17 +285,25 @@ describe('getPublicIpV6', () => {
 describe('getPublicIpV4', () => {
   it('falls back to PowerShell Invoke-RestMethod when axios and curl fail', async () => {
     vi.mocked(axios.get).mockRejectedValue(new Error('blocked'))
+    vi.mocked(childExecFile).mockImplementation((_file: string, _args: any, _opts: any, cb: any) => {
+      const callback = typeof _opts === 'function' ? _opts : cb
+      callback(new Error('curl missing'), '', 'curl missing')
+      return {} as any
+    })
     vi.mocked(childExec).mockImplementation((cmd: string, _opts: any, cb: any) => {
       if (String(cmd).toLowerCase().includes('powershell')) {
         cb(null, '198.51.100.77\n', '')
         return {} as any
       }
-      cb(new Error('curl missing'), '', 'curl missing')
+      cb(new Error('error'), '', '')
       return {} as any
     })
 
     const ip = await getPublicIpV4()
-    const commands = vi.mocked(childExec).mock.calls.map(([cmd]) => String(cmd))
+    const commands = [
+      ...vi.mocked(childExecFile).mock.calls.map(([file, args]) => `${file} ${(args || []).join(' ')}`),
+      ...vi.mocked(childExec).mock.calls.map(([cmd]) => String(cmd))
+    ]
     expect(commands).toEqual(
       expect.arrayContaining([
         expect.stringContaining('curl.exe'),

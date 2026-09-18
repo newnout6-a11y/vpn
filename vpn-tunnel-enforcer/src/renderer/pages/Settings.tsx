@@ -153,11 +153,11 @@ function ToggleRow({ title, description, checked, onChange, icon }: ToggleRowPro
   return (
     <div className="flex items-start justify-between gap-4">
       <div className="flex-1">
-        <p className="text-sm text-[var(--color-text)] flex items-center gap-2">
+        <span className="text-sm text-[var(--color-text)] flex items-center gap-2">
           {icon}
           {title}
-        </p>
-        <p className="text-xs text-[var(--color-text-secondary)] mt-1 leading-relaxed">{description}</p>
+        </span>
+        <div className="text-xs text-[var(--color-text-secondary)] mt-1 leading-relaxed">{description}</div>
       </div>
       <MacSwitch checked={checked} onChange={onChange} />
     </div>
@@ -659,7 +659,7 @@ export function Settings() {
                     { value: 'xray', label: 'Только xray-core' }
                   ]}
                   value={settings.proxyEngine ?? 'auto'}
-                  onChange={(val) => updateSettings({ proxyEngine: val as any })}
+                  onChange={(val) => updateSettings({ proxyEngine: val as 'auto' | 'sing-box' | 'xray' })}
                 />
               </div>
             </div>

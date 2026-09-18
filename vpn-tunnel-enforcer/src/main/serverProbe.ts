@@ -1,6 +1,6 @@
 import { ipcMain } from 'electron'
 import { promises as dns } from 'dns'
-import { Socket } from 'net'
+import { Socket, isIP } from 'net'
 import axios from 'axios'
 import { logEvent } from './appLogger'
 import { tunController } from './tunController'
@@ -130,9 +130,16 @@ async function measureLatency(host: string, port = 443, samples = 5): Promise<La
 }
 
 // Resolve hostname to IPs (both v4 and v6)
-async function resolveHost(host: string): Promise<string[]> {
+export async function resolveHost(rawHost: string): Promise<string[]> {
+  let host = rawHost.trim()
+  if (host.startsWith('[') && host.includes(']')) {
+    host = host.slice(1, host.indexOf(']'))
+  } else if (!host.includes('::') && host.includes(':')) {
+    host = host.split(':')[0]
+  }
+
   // If host is already an IP, return it as is
-  if (/^\d+\.\d+\.\d+\.\d+$/.test(host) || host.includes(':')) {
+  if (isIP(host) !== 0) {
     return [host]
   }
   const [v4, v6] = await Promise.all([

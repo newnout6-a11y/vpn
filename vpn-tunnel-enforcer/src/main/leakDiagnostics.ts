@@ -1,5 +1,5 @@
 import axios from 'axios'
-import { exec as execCb } from 'child_process'
+import { exec as execCb, execFile as execFileCb } from 'child_process'
 import { readFile } from 'fs/promises'
 import { join } from 'path'
 import { networkInterfaces } from 'os'
@@ -8,6 +8,7 @@ import { detectForeignTun, getTunRuntimeDir, parseProxyAddress, probeTcp } from 
 import { TUN_ADAPTER_ALIAS } from './tunAdapter'
 
 const exec = promisify(execCb)
+const execFile = promisify(execFileCb)
 
 function recordForensicLeakCheckEvent(event: string, details: Record<string, unknown>): void {
   import('./trafficForensics')
@@ -77,7 +78,7 @@ export async function getPublicIpV4(): Promise<string | null> {
   }
 
   try {
-    const { stdout } = await exec('curl.exe -4 -sS --max-time 8 https://api.ipify.org', {
+    const { stdout } = await execFile('curl.exe', ['-4', '-sS', '--max-time', '8', 'https://api.ipify.org'], {
       windowsHide: true,
       timeout: 10000
     })
@@ -159,7 +160,7 @@ export async function getPublicIpV6(): Promise<string | null> {
   }
 
   try {
-    const { stdout } = await exec('curl.exe -6 -sS --max-time 8 https://api6.ipify.org', {
+    const { stdout } = await execFile('curl.exe', ['-6', '-sS', '--max-time', '8', 'https://api6.ipify.org'], {
       windowsHide: true,
       timeout: 10000
     })

@@ -3,6 +3,7 @@ import { networkInterfaces } from 'os'
 import { safeStorage } from 'electron'
 import Store from 'electron-store'
 import { logEvent } from './appLogger'
+import { ALL_KNOWN_ALIASES, getTunAdapterAlias, isOwnTunAddress } from './tunAdapter'
 
 export type AdaptiveBypassMode =
   | 'baseline'
@@ -100,11 +101,22 @@ function hmac(value: string): string {
   return createHmac('sha256', getInstallSecret()).update(value).digest('base64url')
 }
 
-function networkFingerprint(): string {
-  const interfaces = Object.entries(networkInterfaces())
-    .flatMap(([name, values]) => (values ?? [])
-      .filter(value => !value.internal && value.mac && value.mac !== '00:00:00:00:00:00')
-      .map(value => `${name}:${value.mac}`))
+export function isTunOrVpnAdapter(name: string): boolean {
+  if (!name) return false
+  const lower = name.toLowerCase()
+  if (lower === getTunAdapterAlias().toLowerCase()) return true
+  if (ALL_KNOWN_ALIASES.some((a) => a.toLowerCase() === lower)) return true
+  return /wintun|sing-box|singbox|sing-tun|\btun\b|wireguard|openvpn|tap-windows|vpnte/i.test(name)
+}
+
+export function networkFingerprint(customInterfaces?: NodeJS.Dict<import('os').NetworkInterfaceInfo[]>): string {
+  const interfaces = Object.entries(customInterfaces ?? networkInterfaces())
+    .flatMap(([name, values]) => {
+      if (isTunOrVpnAdapter(name)) return []
+      return (values ?? [])
+        .filter(value => !value.internal && value.mac && value.mac !== '00:00:00:00:00:00' && !isOwnTunAddress(value.address))
+        .map(value => `${name}:${value.mac}`)
+    })
     .sort()
 
   return hmac(interfaces.join('|') || 'unknown-network')

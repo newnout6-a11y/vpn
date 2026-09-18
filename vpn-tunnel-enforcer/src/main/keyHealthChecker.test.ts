@@ -29,6 +29,7 @@ import {
   classifyHysteria2ProbeFailure,
   classifyOutboundProbeFailure,
   describeProbeTarget,
+  openTcpViaSocks,
   parseCloudflareTrace
 } from './keyHealthChecker'
 import type { ServerProfile } from '../shared/ipc-types'
@@ -186,6 +187,39 @@ kex=X25519
   it('returns empty object when trace is invalid or missing ip/loc', () => {
     expect(parseCloudflareTrace('')).toEqual({})
     expect(parseCloudflareTrace('HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n')).toEqual({})
+  })
+})
+
+describe('openTcpViaSocks socket safety', () => {
+  it('resolves socket on successful connection', async () => {
+    const mockSocket = { destroy: vi.fn() }
+    const { SocksClient } = await import('socks')
+    vi.mocked(SocksClient.createConnection).mockResolvedValueOnce({ socket: mockSocket } as any)
+
+    const socket = await openTcpViaSocks({ host: '127.0.0.1', port: 10808 }, 'api.ipify.org', 443, 2000)
+    expect(socket).toBe(mockSocket)
+  })
+
+  it('rejects on timeout and destroys any late connecting socket', async () => {
+    let resolveLate!: (val: any) => void
+    const mockSocket = { destroy: vi.fn() }
+    const { SocksClient } = await import('socks')
+    vi.mocked(SocksClient.createConnection).mockImplementationOnce(() => {
+      return new Promise((resolve) => {
+        resolveLate = resolve
+      })
+    })
+
+    const probePromise = openTcpViaSocks({ host: '127.0.0.1', port: 10808 }, 'api.ipify.org', 443, 50)
+    let rejectedError: any
+    probePromise.catch((err) => { rejectedError = err })
+
+    await new Promise((r) => setTimeout(r, 80))
+    expect(rejectedError?.message).toBe('timeout')
+
+    resolveLate({ socket: mockSocket })
+    await new Promise((r) => setTimeout(r, 10))
+    expect(mockSocket.destroy).toHaveBeenCalled()
   })
 })
 

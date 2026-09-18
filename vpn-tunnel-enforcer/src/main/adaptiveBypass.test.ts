@@ -19,7 +19,8 @@ vi.mock('electron-store', () => ({
 
 vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
 
-import { nextAdaptiveMode, resolveAdaptiveCapabilities } from './adaptiveBypass'
+import { nextAdaptiveMode, resolveAdaptiveCapabilities, isTunOrVpnAdapter, networkFingerprint } from './adaptiveBypass'
+import * as os from 'os'
 
 describe('adaptive bypass capability matrix', () => {
   it('keeps local external proxies externally managed', () => {
@@ -46,5 +47,53 @@ describe('adaptive bypass capability matrix', () => {
 
     expect(nextAdaptiveMode('tls-compatibility', capabilities)).toBe('mtu-compatibility')
     expect(nextAdaptiveMode('mtu-compatibility', capabilities)).toBeNull()
+  })
+})
+
+describe('adaptive bypass network fingerprinting', () => {
+  it('identifies TUN, Wintun, and VPN adapter names', () => {
+    expect(isTunOrVpnAdapter('Ethernet 5')).toBe(true)
+    expect(isTunOrVpnAdapter('VPNTE-TUN')).toBe(true)
+    expect(isTunOrVpnAdapter('wintun-adapter')).toBe(true)
+    expect(isTunOrVpnAdapter('sing-box tun')).toBe(true)
+    expect(isTunOrVpnAdapter('WireGuard Tunnel')).toBe(true)
+    expect(isTunOrVpnAdapter('OpenVPN TAP')).toBe(true)
+    expect(isTunOrVpnAdapter('Wi-Fi')).toBe(false)
+    expect(isTunOrVpnAdapter('Ethernet')).toBe(false)
+  })
+
+  it('calculates stable networkFingerprint ignoring newly spawned TUN adapter', () => {
+    const physicalInterfaces = {
+      'Wi-Fi': [
+        {
+          address: '192.168.1.100',
+          netmask: '255.255.255.0',
+          family: 'IPv4',
+          mac: '00:11:22:33:44:55',
+          internal: false,
+          cidr: '192.168.1.100/24'
+        } as any
+      ]
+    }
+
+    const physicalWithTun = {
+      ...physicalInterfaces,
+      'Ethernet 5': [
+        {
+          address: '192.168.250.253',
+          netmask: '255.255.255.252',
+          family: 'IPv4',
+          mac: '00:00:00:00:00:01',
+          internal: false,
+          cidr: '192.168.250.253/30'
+        } as any
+      ]
+    }
+
+    const fpBefore = networkFingerprint(physicalInterfaces)
+    const fpAfter = networkFingerprint(physicalWithTun)
+
+    expect(fpBefore).toBe(fpAfter)
+    expect(fpBefore).not.toBe('')
   })
 })

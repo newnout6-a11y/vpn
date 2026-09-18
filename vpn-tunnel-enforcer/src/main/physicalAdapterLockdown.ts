@@ -220,19 +220,26 @@ async function runPS(script: string, timeoutMs = 30000): Promise<string> {
  * Note: PS arrays of single objects deserialize as the object itself, so we
  * normalize that on the JS side.
  */
+let cachedAdaptersSnapshot: AdapterSnapshot[] | null = null
+let cachedAdaptersSnapshotTime = 0
 let snapshotPromise: Promise<AdapterSnapshot[]> | null = null
-let snapshotPromiseTime = 0
+
+export function clearPhysicalAdaptersSnapshotCache(): void {
+  cachedAdaptersSnapshot = null
+  cachedAdaptersSnapshotTime = 0
+  snapshotPromise = null
+}
 
 async function snapshotPhysicalAdapters(): Promise<AdapterSnapshot[]> {
+  // Return the fresh snapshot if taken within 10s to avoid expensive PS reruns.
+  if (cachedAdaptersSnapshot && Date.now() - cachedAdaptersSnapshotTime < 10000) {
+    return cachedAdaptersSnapshot
+  }
   // Return the in-flight promise directly so concurrent callers share one PS run.
-  // After it resolves (success or failure) snapshotPromise is cleared so the
-  // next call older than 10s always spawns a fresh script instead of re-awaiting
-  // an already-resolved promise that may be stale.
-  if (snapshotPromise && Date.now() - snapshotPromiseTime < 10000) {
+  if (snapshotPromise) {
     return snapshotPromise
   }
 
-  snapshotPromiseTime = Date.now()
   snapshotPromise = (async () => {
     const script = `
 $ErrorActionPreference = 'SilentlyContinue'
@@ -298,26 +305,27 @@ $rows | ConvertTo-Json -Compress -Depth 4
     return []
   }
   const arr = Array.isArray(parsed) ? parsed : [parsed]
-  return arr.map((row: any) => {
-    const alias = String(row.alias || '')
-    const description = String(row.description || '')
-    const dnsServers = Array.isArray(row.ipv4Dns) ? row.ipv4Dns.map((x: any) => String(x)) : []
-    const isCellularOrTethering = Boolean(row.isCellularOrTethering) || isCellularOrTetheringAdapter(alias, description, dnsServers)
-    return {
-      ifIndex: Number(row.ifIndex),
-      alias,
-      description,
-      ipv6Enabled: Boolean(row.ipv6Enabled),
-      ipv4DnsServers: dnsServers,
-      ipv4DnsSource: row.ipv4DnsSource === 'static' || row.ipv4DnsSource === 'dhcp' ? row.ipv4DnsSource : 'unknown',
-      isCellularOrTethering,
-      forcedDnsTo: null,
-      forcedIpv6Off: false
-    }
-  })
+    const result = arr.map((row: any) => {
+      const alias = String(row.alias || '')
+      const description = String(row.description || '')
+      const dnsServers = Array.isArray(row.ipv4Dns) ? row.ipv4Dns.map((x: any) => String(x)) : []
+      const isCellularOrTethering = Boolean(row.isCellularOrTethering) || isCellularOrTetheringAdapter(alias, description, dnsServers)
+      return {
+        ifIndex: Number(row.ifIndex),
+        alias,
+        description,
+        ipv6Enabled: Boolean(row.ipv6Enabled),
+        ipv4DnsServers: dnsServers,
+        ipv4DnsSource: row.ipv4DnsSource === 'static' || row.ipv4DnsSource === 'dhcp' ? row.ipv4DnsSource : 'unknown',
+        isCellularOrTethering,
+        forcedDnsTo: null,
+        forcedIpv6Off: false
+      }
+    })
+    cachedAdaptersSnapshot = result
+    cachedAdaptersSnapshotTime = Date.now()
+    return result
   })().finally(() => {
-    // Clear the cached promise once settled so the next call after 10s
-    // spawns a fresh PS script rather than re-returning a stale resolved value.
     snapshotPromise = null
   })
 
@@ -609,6 +617,7 @@ try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}
     dnsRegistryPolicy
   }
   await writeManifest(manifest)
+  clearPhysicalAdaptersSnapshotCache()
   return { applied: true, adapters: adapters.length, warnings }
 }
 
@@ -701,6 +710,7 @@ try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}`
   } else {
     logEvent('warn', 'phys-lockdown', 'manifest kept for retry on next startup — rollback was incomplete', { reason })
   }
+  clearPhysicalAdaptersSnapshotCache()
   return { rolledBack: rollbackSuccess }
 }
 

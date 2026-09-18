@@ -1,4 +1,4 @@
-import { readFile, writeFile, mkdir, stat } from 'fs/promises'
+import { readFile, writeFile, mkdir, stat, readdir } from 'fs/promises'
 import { join } from 'path'
 import { homedir } from 'os'
 import { exec } from 'child_process'
@@ -17,10 +17,10 @@ function getConfigDir(): string {
 async function findAndroidStudioDirs(): Promise<string[]> {
   const configDir = getConfigDir()
   try {
-    const { stdout } = await execAsync(`dir /b "${configDir}"`, { encoding: 'utf-8' })
-    return stdout.trim().split('\n')
+    const entries = await readdir(configDir)
+    return entries
       .filter((e: string) => e.startsWith('AndroidStudio'))
-      .map((e: string) => join(configDir, e.trim()))
+      .map((e: string) => join(configDir, e))
   } catch {
     return []
   }
@@ -30,8 +30,9 @@ export const androidStudio = {
   name: 'Android Studio',
 
   async apply(proxyAddr: string, proxyType: 'socks5' | 'http' = 'socks5'): Promise<boolean> {
-    const [host, portStr] = proxyAddr.split(':')
-    const port = portStr
+    const lastColon = proxyAddr.lastIndexOf(':')
+    const host = lastColon >= 0 ? proxyAddr.slice(0, lastColon) : proxyAddr
+    const port = lastColon >= 0 ? proxyAddr.slice(lastColon + 1) : ''
     const isSocks = proxyType === 'socks5'
     const dirs = await findAndroidStudioDirs()
 

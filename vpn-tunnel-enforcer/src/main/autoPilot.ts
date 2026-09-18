@@ -31,31 +31,50 @@ interface VerifiedProxy {
   type: 'socks5' | 'http'
 }
 
-function listenerHost(listener: ProxyListenerInfo): string {
+export function listenerHost(listener: ProxyListenerInfo): string {
   if (listener.host === '::' || listener.host === '::1' || listener.host === '0.0.0.0') return '127.0.0.1'
   return listener.host || '127.0.0.1'
 }
 
-async function probeSocks5(host: string, port: number): Promise<boolean> {
-  try {
-    const { socket } = await SocksClient.createConnection({
+export async function probeSocks5(host: string, port: number, timeoutMs = 3000): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      resolve(false)
+    }, timeoutMs)
+
+    SocksClient.createConnection({
       proxy: { host, port, type: 5 },
       command: 'connect',
       destination: { host: 'api.ipify.org', port: 443 },
-      timeout: 5000
+      timeout: timeoutMs
     })
-    socket.destroy()
-    return true
-  } catch {
-    return false
-  }
+      .then(({ socket }) => {
+        if (settled) {
+          try { socket.destroy() } catch { /* ignore */ }
+          return
+        }
+        settled = true
+        clearTimeout(timer)
+        try { socket.destroy() } catch { /* ignore */ }
+        resolve(true)
+      })
+      .catch(() => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        resolve(false)
+      })
+  })
 }
 
-async function probeHttp(host: string, port: number): Promise<boolean> {
+export async function probeHttp(host: string, port: number, timeoutMs = 3000): Promise<boolean> {
   try {
     await axios.get('https://api.ipify.org?format=json', {
       proxy: { host, port, protocol: 'http' },
-      timeout: 5000
+      timeout: timeoutMs
     })
     return true
   } catch {
@@ -63,7 +82,7 @@ async function probeHttp(host: string, port: number): Promise<boolean> {
   }
 }
 
-async function verifyListener(listener: ProxyListenerInfo): Promise<VerifiedProxy | null> {
+export async function verifyListener(listener: ProxyListenerInfo): Promise<VerifiedProxy | null> {
   const host = listenerHost(listener)
   const port = listener.port
   if (!await probeTcp(host, port, 1200)) return null
@@ -79,7 +98,7 @@ async function verifyListener(listener: ProxyListenerInfo): Promise<VerifiedProx
   return null
 }
 
-async function pickWorkingProxy(plan: RoutingPlan): Promise<VerifiedProxy | null> {
+export async function pickWorkingProxy(plan: RoutingPlan): Promise<VerifiedProxy | null> {
   if (plan.proxy?.verified) {
     return { host: plan.proxy.host, port: plan.proxy.port, type: plan.proxy.type }
   }
@@ -94,7 +113,13 @@ async function pickWorkingProxy(plan: RoutingPlan): Promise<VerifiedProxy | null
     return score(a) - score(b)
   })
 
+  const seenEndpoints = new Set<string>()
   for (const listener of preferred) {
+    const host = listenerHost(listener)
+    const key = `${host}:${listener.port}`
+    if (seenEndpoints.has(key)) continue
+    seenEndpoints.add(key)
+
     const verified = await verifyListener(listener)
     if (verified) return verified
   }
@@ -109,7 +134,41 @@ function hasForeignTunnel(plan: RoutingPlan): boolean {
   return plan.activeTunnels.some(tunnel => !tunnel.isVpnte)
 }
 
+let autoPilotRunning = false
+
+export function isAutoPilotRunning(): boolean {
+  return autoPilotRunning
+}
+
 export async function runAutoPilot(): Promise<AutoPilotResult> {
+  if (autoPilotRunning) {
+    const plan = await getRoutingPlan()
+    return {
+      ranAt: Date.now(),
+      summary: 'warn',
+      mode: tunController.getStatus().running ? 'hard' : 'off',
+      title: 'Автопилот уже выполняется',
+      message: 'Предыдущий запуск автопилота еще не завершился. Повторный запуск пропущен.',
+      changed: false,
+      steps: [{
+        label: 'Проверка параллельного запуска',
+        before: 'Автопилот уже активен.',
+        after: 'Параллельный запуск заблокирован во избежание гонок.',
+        status: 'warn'
+      }],
+      plan
+    }
+  }
+
+  autoPilotRunning = true
+  try {
+    return await doRunAutoPilot()
+  } finally {
+    autoPilotRunning = false
+  }
+}
+
+async function doRunAutoPilot(): Promise<AutoPilotResult> {
   const steps: AutoPilotStep[] = []
   let changed = false
   let plan = await getRoutingPlan()

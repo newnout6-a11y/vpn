@@ -4,7 +4,9 @@ import { promisify } from 'util'
 const execFileAsync = promisify(execFile)
 
 function proxyUrl(proxyAddr: string, proxyType: 'socks5' | 'http'): string {
-  const [host, port] = proxyAddr.split(':')
+  const lastColon = proxyAddr.lastIndexOf(':')
+  const host = lastColon >= 0 ? proxyAddr.slice(0, lastColon) : proxyAddr
+  const port = lastColon >= 0 ? proxyAddr.slice(lastColon + 1) : ''
   // For SOCKS5 we use socks5h:// (h = resolve DNS through the proxy too).
   // curl, pip, npm, git, requests/httpx all accept this scheme. Plain socks5://
   // would resolve DNS locally, which would defeat the kill-switch (DNS could
