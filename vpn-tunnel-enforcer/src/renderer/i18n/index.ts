@@ -24,7 +24,7 @@ i18n.use(initReactI18next).init({
 // After init, try to get persisted locale from main process
 setTimeout(async () => {
   try {
-    const api = (window as any).electronAPI
+    const api = window.electronAPI
     if (api?.i18nGetLocale) {
       const savedLocale = await api.i18nGetLocale()
       if (savedLocale && savedLocale !== i18n.language) {

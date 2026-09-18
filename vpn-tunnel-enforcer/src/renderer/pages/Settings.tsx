@@ -186,7 +186,7 @@ function LanguageSettings() {
     setCurrentLocale(locale)
     i18n.changeLanguage(locale)
     try {
-      await (window as any).electronAPI?.i18nSetLocale?.(locale)
+      await window.electronAPI?.i18nSetLocale?.(locale)
     } catch (err) {
       console.warn('[LanguageSettings] Failed to persist locale:', err)
     }

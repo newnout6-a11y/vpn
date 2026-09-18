@@ -192,52 +192,58 @@ export function Logs() {
 
   // ─── Data Loading ──────────────────────────────────────────────────────────
 
-  const loadEntries = useCallback(async () => {
-    setLoading(true)
-    try {
-      const filters: Record<string, unknown> = {}
-      if (selectedReasons.length > 0) {
-        filters.levels = selectedReasons
-      }
-      if (dateFrom) {
-        filters.dateFrom = new Date(dateFrom).getTime()
-      }
-      if (dateTo) {
-        // Set to end of day
-        filters.dateTo = new Date(dateTo).getTime() + 24 * 60 * 60 * 1000 - 1
-      }
-      if (searchText.trim()) {
-        filters.text = searchText.trim()
-      }
+  useEffect(() => {
+    let active = true
+    const run = async () => {
+      setLoading(true)
+      try {
+        const filters: Record<string, unknown> = {}
+        if (selectedReasons.length > 0) {
+          filters.levels = selectedReasons
+        }
+        if (dateFrom) {
+          filters.dateFrom = new Date(dateFrom).getTime()
+        }
+        if (dateTo) {
+          // Set to end of day
+          filters.dateTo = new Date(dateTo).getTime() + 24 * 60 * 60 * 1000 - 1
+        }
+        if (searchText.trim()) {
+          filters.text = searchText.trim()
+        }
 
-      const hasFilters = Object.keys(filters).length > 0
-      const result = hasFilters
-        ? await window.electronAPI.connectionHistoryFilter(filters)
-        : await window.electronAPI.connectionHistoryList()
-      setEntries(result || [])
-    } catch {
-      setEntries([])
-    } finally {
-      setLoading(false)
+        const hasFilters = Object.keys(filters).length > 0
+        const result = hasFilters
+          ? await window.electronAPI.connectionHistoryFilter(filters)
+          : await window.electronAPI.connectionHistoryList()
+        if (active) setEntries(result || [])
+      } catch {
+        if (active) setEntries([])
+      } finally {
+        if (active) setLoading(false)
+      }
+    }
+    void run()
+    return () => {
+      active = false
     }
   }, [selectedReasons, dateFrom, dateTo, searchText])
 
-  const loadStats = useCallback(async () => {
-    try {
-      const result = await window.electronAPI.connectionHistoryStats(statsPeriod)
-      setStats(result)
-    } catch {
-      setStats(null)
+  useEffect(() => {
+    let active = true
+    const run = async () => {
+      try {
+        const result = await window.electronAPI.connectionHistoryStats(statsPeriod)
+        if (active) setStats(result)
+      } catch {
+        if (active) setStats(null)
+      }
+    }
+    void run()
+    return () => {
+      active = false
     }
   }, [statsPeriod])
-
-  useEffect(() => {
-    loadEntries()
-  }, [loadEntries])
-
-  useEffect(() => {
-    loadStats()
-  }, [loadStats])
 
   // ─── Sorting Logic ─────────────────────────────────────────────────────────
 

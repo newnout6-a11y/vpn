@@ -85,7 +85,7 @@ export function Schedule() {
 
   const fetchSchedules = useCallback(async () => {
     try {
-      const api = (window as any).electronAPI
+      const api = window.electronAPI
       if (api?.schedulerList) {
         const list = await api.schedulerList()
         setSchedules(list)
@@ -99,7 +99,7 @@ export function Schedule() {
 
   const fetchNextEvent = useCallback(async () => {
     try {
-      const api = (window as any).electronAPI
+      const api = window.electronAPI
       if (api?.schedulerNextEvent) {
         const event = await api.schedulerNextEvent()
         setNextEvent(event)
@@ -128,7 +128,7 @@ export function Schedule() {
 
   const handleCreate = async () => {
     try {
-      const api = (window as any).electronAPI
+      const api = window.electronAPI
       if (api?.schedulerCreate) {
         await api.schedulerCreate({
           name: form.name,
@@ -153,7 +153,7 @@ export function Schedule() {
   const handleUpdate = async () => {
     if (!editingId) return
     try {
-      const api = (window as any).electronAPI
+      const api = window.electronAPI
       if (api?.schedulerUpdate) {
         await api.schedulerUpdate(editingId, {
           name: form.name,
@@ -178,7 +178,7 @@ export function Schedule() {
 
   const handleDelete = async (id: string) => {
     try {
-      const api = (window as any).electronAPI
+      const api = window.electronAPI
       if (api?.schedulerDelete) {
         await api.schedulerDelete(id)
         setSchedules((prev) => prev.filter((s) => s.id !== id))
@@ -192,7 +192,7 @@ export function Schedule() {
 
   const handleToggleEnabled = async (id: string, enabled: boolean) => {
     try {
-      const api = (window as any).electronAPI
+      const api = window.electronAPI
       if (api?.schedulerUpdate) {
         await api.schedulerUpdate(id, { enabled })
         setSchedules((prev) =>

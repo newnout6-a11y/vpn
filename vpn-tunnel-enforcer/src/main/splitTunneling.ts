@@ -118,42 +118,52 @@ async function withAppsWriteLock<T>(operation: () => Promise<T> | T): Promise<T>
   }
 }
 
+
 // ─── App Discovery ───────────────────────────────────────────────────────────
 
 /**
  * Discovers installed Windows applications by scanning the registry Uninstall keys.
  * Returns apps with name, exe path, and icon (null for now — icon extraction is complex).
  */
+let discoverAppsPromise: Promise<Array<{ name: string; path: string; icon: string | null }>> | null = null
+
 export async function discoverInstalledApps(): Promise<
   Array<{ name: string; path: string; icon: string | null }>
 > {
   if (process.platform !== 'win32') return []
+  if (discoverAppsPromise) return discoverAppsPromise
 
-  const registryPaths = [
-    'HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
-    'HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
-    'HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall'
-  ]
+  discoverAppsPromise = (async () => {
+    const registryPaths = [
+      'HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+      'HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+      'HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall'
+    ]
 
-  const apps: Array<{ name: string; path: string; icon: string | null }> = []
-  const seenPaths = new Set<string>()
+    const apps: Array<{ name: string; path: string; icon: string | null }> = []
+    const seenPaths = new Set<string>()
 
-  for (const regPath of registryPaths) {
-    try {
-      const result = await queryRegistryApps(regPath)
-      for (const app of result) {
-        const normalizedPath = app.path.toLowerCase()
-        if (!seenPaths.has(normalizedPath)) {
-          seenPaths.add(normalizedPath)
-          apps.push(app)
+    for (const regPath of registryPaths) {
+      try {
+        const result = await queryRegistryApps(regPath)
+        for (const app of result) {
+          const normalizedPath = app.path.toLowerCase()
+          if (!seenPaths.has(normalizedPath)) {
+            seenPaths.add(normalizedPath)
+            apps.push(app)
+          }
         }
+      } catch (err) {
+        logEvent('debug', 'split-tunnel', `registry scan failed for ${regPath}`, err)
       }
-    } catch (err) {
-      logEvent('debug', 'split-tunnel', `registry scan failed for ${regPath}`, err)
     }
-  }
 
-  return apps
+    return apps
+  })().finally(() => {
+    discoverAppsPromise = null
+  })
+
+  return discoverAppsPromise
 }
 
 /**
@@ -194,16 +204,16 @@ Get-ChildItem $basePath -ErrorAction SilentlyContinue | ForEach-Object {
 $results | ConvertTo-Json -Compress -Depth 3
 `
 
-  const { stdout } = await execFile(
-    'powershell.exe',
-    ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encodedPowerShell(psScript)],
-    { windowsHide: true, timeout: 15000, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 }
-  )
-
-  const trimmed = stdout.trim()
-  if (!trimmed || trimmed === 'null') return []
-
   try {
+    const { stdout } = await execFile(
+      'powershell.exe',
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encodedPowerShell(psScript)],
+      { windowsHide: true, timeout: 15000, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 }
+    )
+
+    const trimmed = stdout.trim()
+    if (!trimmed || trimmed === 'null') return []
+
     const parsed = JSON.parse(trimmed)
     const rows = Array.isArray(parsed) ? parsed : [parsed]
     return rows
@@ -220,7 +230,8 @@ $results | ConvertTo-Json -Compress -Depth 3
         path: row.Path.trim(),
         icon: null // Icon extraction deferred — complex Win32 API needed
       }))
-  } catch {
+  } catch (err: any) {
+    logEvent('debug', 'split-tunnel', `queryRegistryApps failed for ${registryPath}`, { error: err?.message })
     return []
   }
 }

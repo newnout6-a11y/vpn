@@ -20,12 +20,6 @@ import type { AppSettings } from './store'
 import type { ElectronAPI } from '../preload/index'
 import { emitServerChanged, NAV_EVENT, type AppPage } from './nav'
 
-declare global {
-  interface Window {
-    electronAPI: ElectronAPI
-  }
-}
-
 type Page = SidebarPage | 'maintenance'
 
 // These pages read and render potentially large log files. Keep their work

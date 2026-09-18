@@ -63,7 +63,7 @@ export const NotificationSettings: React.FC = () => {
   const [prefs, setPrefs] = useState<NotificationPreferences | null>(null)
   const [osBlocked, setOsBlocked] = useState(false)
 
-  const api = (window as any).electronAPI
+  const api = window.electronAPI
 
   // ─── Fetch OS notification state ──────────────────────────────────────────
 

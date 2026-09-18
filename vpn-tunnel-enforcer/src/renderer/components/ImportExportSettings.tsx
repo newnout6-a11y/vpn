@@ -21,7 +21,7 @@ interface ConfigApi {
 }
 
 function getApi(): ConfigApi {
-  return (window as any).electronAPI as ConfigApi
+  return window.electronAPI as unknown as ConfigApi
 }
 
 const SECTION_KEYS: Record<string, string> = {

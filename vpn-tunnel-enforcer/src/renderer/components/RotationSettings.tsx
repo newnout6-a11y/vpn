@@ -57,7 +57,7 @@ export const RotationSettings: React.FC = () => {
   const [, setTick] = useState(0)
   const tickRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
-  const api = (window as any).electronAPI
+  const api = window.electronAPI
 
   // ─── Fetch initial data ──────────────────────────────────────────────────
 

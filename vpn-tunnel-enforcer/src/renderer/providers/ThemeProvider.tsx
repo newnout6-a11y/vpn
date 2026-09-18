@@ -140,7 +140,7 @@ export function ThemeProvider({ children }: ThemeProviderProps): React.ReactElem
 
     async function init(): Promise<void> {
       try {
-        const api = (window as any).electronAPI
+        const api = window.electronAPI
         if (!api) {
           // Fallback: no electron API available (e.g., in tests or web mode)
           setLoading(false)
@@ -174,7 +174,7 @@ export function ThemeProvider({ children }: ThemeProviderProps): React.ReactElem
 
   // Listen for theme changes from main process (e.g., system theme change)
   useEffect(() => {
-    const api = (window as any).electronAPI
+    const api = window.electronAPI
     if (!api?.onThemeChanged) return
 
     const unsubscribe = api.onThemeChanged((newTheme: ThemeConfig) => {
@@ -190,7 +190,7 @@ export function ThemeProvider({ children }: ThemeProviderProps): React.ReactElem
   // Set theme by ID
   const setTheme = useCallback(async (id: string) => {
     try {
-      const api = (window as any).electronAPI
+      const api = window.electronAPI
       if (!api?.themeSetActive) return
 
       await api.themeSetActive(id)
