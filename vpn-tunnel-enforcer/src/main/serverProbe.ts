@@ -5,6 +5,7 @@ import axios from 'axios'
 import { logEvent } from './appLogger'
 import { tunController } from './tunController'
 import { settingsStore } from './settings'
+import { normalizeServerPort } from '../shared/portValidation'
 
 export interface ServerProbeResult {
   host: string
@@ -81,6 +82,8 @@ function settleWithin<T>(operation: Promise<T>, fallback: T, timeoutMs: number):
 
 // Probe a single TCP port with short timeout
 function probePort(host: string, port: number, timeoutMs = 1500): Promise<boolean> {
+  const safePort = normalizeServerPort(port)
+  if (!safePort) return Promise.resolve(false)
   return new Promise((resolve) => {
     const socket = new Socket()
     let resolved = false
@@ -94,12 +97,13 @@ function probePort(host: string, port: number, timeoutMs = 1500): Promise<boolea
     socket.once('connect', () => finish(true))
     socket.once('timeout', () => finish(false))
     socket.once('error', () => finish(false))
-    socket.connect(port, host)
+    socket.connect(safePort, host)
   })
 }
 
 // Measure latency via TCP connect timing (port 443 default — usually open)
 async function measureLatency(host: string, port = 443, samples = 5): Promise<LatencyStats> {
+  const safePort = normalizeServerPort(port, 443)!
   const results: number[] = []
   let lost = 0
   const deadline = Date.now() + 7000
@@ -110,7 +114,7 @@ async function measureLatency(host: string, port = 443, samples = 5): Promise<La
       break
     }
     const start = Date.now()
-    const ok = await probePort(host, port, Math.min(3000, Math.max(500, remaining)))
+    const ok = await probePort(host, safePort, Math.min(3000, Math.max(500, remaining)))
     if (ok) results.push(Date.now() - start)
     else lost++
     // small delay between probes
@@ -149,6 +153,7 @@ export async function resolveHost(rawHost: string): Promise<string[]> {
   return [...v4, ...v6]
 }
 
+
 // Reverse DNS lookup
 async function reverseDnsLookup(ip: string): Promise<string | null> {
   const names = await settleWithin(dns.reverse(ip), [] as string[], DNS_LOOKUP_TIMEOUT_MS)
@@ -180,7 +185,7 @@ async function getAsnInfo(ip: string): Promise<AsnInfo | null> {
 // port is reachable; everything else is unused diagnostic noise that hurt
 // users far more than it helped them.
 async function scanPorts(host: string, knownPort?: number): Promise<PortScanResult[]> {
-  const port = knownPort && knownPort > 0 ? knownPort : 443
+  const port = normalizeServerPort(knownPort, 443)!
   const open = await probePort(host, port, 1000)
   if (!open) return []
   return [{ port, open, service: SERVICE_HINTS[port] }]
@@ -223,7 +228,8 @@ async function getHttpBanner(_host: string, _port = 80): Promise<string | null> 
 // Main probe entry point
 export async function probeServer(host: string, knownPort?: number, options: ProbeServerOptions = {}): Promise<ServerProbeResult> {
   const disableGeoLookup = options.disableGeoLookup === true
-  logEvent('info', 'server-probe', `probing ${host}`, { knownPort, disableGeoLookup })
+  const safePort = normalizeServerPort(knownPort, 443)!
+  logEvent('info', 'server-probe', `probing ${host}`, { knownPort: safePort, disableGeoLookup })
 
   const resolvedIps = await resolveHost(host)
   const primaryIp = resolvedIps[0] || host
@@ -232,14 +238,12 @@ export async function probeServer(host: string, knownPort?: number, options: Pro
   // When TUN is active, TCP probes go through the tunnel — latency would be
   // tunnel RTT, not direct RTT. Skip latency measurement to avoid misleading
   // values (the active server self-loops, others show tunnel RTT as "direct").
-  const port = knownPort && knownPort > 0 ? knownPort : 443
-
   const [reverseDns, asn, latency, openPorts, tlsCert, httpBanner] = await Promise.all([
     reverseDnsLookup(primaryIp),
     disableGeoLookup ? Promise.resolve(null) : getAsnInfo(primaryIp),
-    tunRunning ? Promise.resolve(null as LatencyStats | null) : measureLatency(host, port),
-    scanPorts(host, knownPort),
-    getTlsCert(host, knownPort && [443, 8443, 4433].includes(knownPort) ? knownPort : 443),
+    tunRunning ? Promise.resolve(null as LatencyStats | null) : measureLatency(host, safePort),
+    scanPorts(host, safePort),
+    getTlsCert(host, [443, 8443, 4433].includes(safePort) ? safePort : 443),
     getHttpBanner(host, 80)
   ])
 
@@ -257,8 +261,12 @@ export async function probeServer(host: string, knownPort?: number, options: Pro
 
 export function registerServerProbeIpcHandlers(): void {
   ipcMain.handle('server:probe', async (_event, host: string, knownPort?: number) => {
+    if (typeof host !== 'string' || !host.trim()) {
+      return null
+    }
+    const safePort = normalizeServerPort(knownPort) ?? undefined
     return settleWithin(
-      probeServer(host, knownPort, {
+      probeServer(host.trim(), safePort, {
         disableGeoLookup: settingsStore.get().disableGeoLookup === true
       }),
       null as ServerProbeResult | null,

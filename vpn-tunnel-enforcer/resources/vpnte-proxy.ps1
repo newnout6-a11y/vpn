@@ -15,18 +15,44 @@ $tokenFile = Join-Path $env:APPDATA "VPN Tunnel Enforcer\external-proxy-control-
 $endpointFile = Join-Path $env:APPDATA "VPN Tunnel Enforcer\external-proxy-control-endpoint.json"
 $control = "http://127.0.0.1:17873"
 
+function Test-IsSafeLocalControlUrl([string]$candidate) {
+  if ([string]::IsNullOrWhiteSpace($candidate)) { return $false }
+  try {
+    $u = [System.Uri]$candidate
+    if ($u.Scheme -ne 'http') { return $false }
+    $hostLower = $u.Host.ToLowerInvariant()
+    $isLoopbackHost = ($hostLower -eq '127.0.0.1' -or $hostLower -eq 'localhost' -or $hostLower -eq '::1' -or $hostLower -eq '[::1]')
+    if (-not $isLoopbackHost) { return $false }
+    if ($u.Port -le 0 -or $u.Port -gt 65535) { return $false }
+    return $true
+  } catch {
+    return $false
+  }
+}
+
 function Get-VpnteControlUrl {
   if ($env:VPNTE_CONTROL_URL) {
-    return $env:VPNTE_CONTROL_URL.TrimEnd("/")
+    $raw = $env:VPNTE_CONTROL_URL.Trim().TrimEnd("/")
+    if (Test-IsSafeLocalControlUrl $raw) {
+      return $raw
+    } else {
+      Write-Warning "VPNTE_CONTROL_URL is not a valid local loopback address: '$raw'. Using default."
+    }
   }
   if (Test-Path $endpointFile) {
     try {
       $endpoint = Get-Content -LiteralPath $endpointFile -Raw | ConvertFrom-Json
       if ($endpoint.url) {
-        return ([string]$endpoint.url).TrimEnd("/")
+        $raw = ([string]$endpoint.url).Trim().TrimEnd("/")
+        if (Test-IsSafeLocalControlUrl $raw) {
+          return $raw
+        }
       }
       if ($endpoint.host -and $endpoint.port) {
-        return "http://$($endpoint.host):$($endpoint.port)"
+        $raw = "http://$($endpoint.host):$($endpoint.port)"
+        if (Test-IsSafeLocalControlUrl $raw) {
+          return $raw
+        }
       }
     } catch {
       # Fall back to the default control port below.
@@ -69,6 +95,10 @@ function Get-VpnteControlToken {
 }
 
 function Invoke-VpnteProxy($path, [string]$Method = 'GET') {
+  if (-not (Test-IsSafeLocalControlUrl $path)) {
+    Write-Error "Invalid control API request target: '$path'. Must be a local loopback HTTP endpoint."
+    exit 1
+  }
   Start-VpnteIfNeeded
   $headers = @{}
   if ($Method -ne 'GET') {

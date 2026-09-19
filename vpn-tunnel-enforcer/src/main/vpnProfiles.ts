@@ -4,6 +4,7 @@ import { hostname, userInfo } from 'os'
 import { promisify } from 'util'
 import { brotliDecompressSync, gunzipSync, inflateRawSync, inflateSync } from 'zlib'
 import type { ClientDevice } from '../shared/ipc-types'
+import { normalizeServerPort } from '../shared/portValidation'
 import { buildBootstrapRouteAttempts, type BootstrapRouteMode } from './bootstrapRoute'
 
 const execFile = promisify(execFileCb)
@@ -293,8 +294,8 @@ function decodeSubscriptionBody(value: Buffer): string {
 }
 
 function numberPort(raw: string | null | undefined): number {
-  const port = Number(raw)
-  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+  const port = normalizeServerPort(raw)
+  if (port === null) {
     throw new Error(`Некорректный порт VPN-сервера: ${raw || 'пусто'}`)
   }
   return port
@@ -1251,7 +1252,7 @@ function parseUriProfilesFromText(text: string): VpnProfile[] {
     if (VPN_URI_PREFIX_RE.test(trimmed)) addCandidate(trimmed)
   }
 
-  const uriPattern = /\b(?:vless|trojan|ss|vmess|hysteria2|hy2|naive|anytls|shadowtls|tuic):\/\/[^\s"'<>`\\]+/gi
+  const uriPattern = new RegExp(`\\b(?:${VPN_URI_SCHEMES}):\\/\\/[^\\s"'<>\`\\\\]+`, 'gi')
   for (const match of text.matchAll(uriPattern)) addCandidate(match[0])
   return profiles
 }

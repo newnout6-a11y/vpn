@@ -26,6 +26,7 @@ import { logEvent } from './appLogger'
 import { compactForIpcLog } from './ipcLogging'
 import { optionalPlainObject, optionalString, requireEnum, requirePort, requireString } from './ipcValidation'
 import { buildBootstrapRouteAttempts, type BootstrapRouteAttempt } from './bootstrapRoute'
+import { normalizeServerPort } from '../shared/portValidation'
 import {
   applyClientDeviceToOutbound,
   clientFingerprintForDevice,
@@ -1421,7 +1422,7 @@ export function migrateLegacyDirectVpnProfiles(): void {
       name: profile.name || (profile.protocol ? String(profile.protocol).toUpperCase() : 'Profile'),
       protocol: profile.protocol || 'vless',
       server: profile.outbound.server || '',
-      port: typeof profile.outbound.server_port === 'number' ? profile.outbound.server_port : 0,
+      port: normalizeServerPort(profile.outbound.server_port, 443)!,
       country: undefined,
       ping: null,
       status: 'unknown' as const,
@@ -1860,7 +1861,16 @@ export function clearStaleStoredPings(): void {
 }
 
 function getProfiles(): ServerProfile[] {
-  return store.get('profiles') ?? []
+  const profiles = store.get('profiles') ?? []
+  return profiles.map((p) => {
+    if (!p) return p
+    const normalizedPort = normalizeServerPort(p.port ?? p.outbound?.server_port, 443)!
+    if (p.port !== normalizedPort || (p.outbound && p.outbound.server_port !== normalizedPort)) {
+      const outbound = p.outbound ? { ...p.outbound, server_port: normalizedPort } : p.outbound
+      return { ...p, port: normalizedPort, outbound }
+    }
+    return p
+  })
 }
 
 function saveProfiles(profiles: ServerProfile[]): void {
@@ -2063,12 +2073,16 @@ function vpnProfileToServerProfile(
 ): ServerProfile {
   const clientDevice = normalizeClientDevice(options.clientDevice)
   const outbound = applyClientDeviceToOutbound(vpnProfile.outbound || {}, clientDevice)
+  const normalizedPort = normalizeServerPort(outbound.server_port, 443)!
+  if (outbound.server_port !== undefined) {
+    outbound.server_port = normalizedPort
+  }
   return {
     id: randomUUID(),
     name: vpnProfile.name || vpnProfile.protocol.toUpperCase(),
     protocol: vpnProfile.protocol,
     server: outbound.server || '',
-    port: outbound.server_port || 0,
+    port: normalizedPort,
     country: inferCountryMetadata(vpnProfile.name)?.label,
     ping: null,
     status: 'unknown',

@@ -276,4 +276,16 @@ describe('phase 3 protocol URI coverage', () => {
       'Hysteria2 uses QUIC/UDP; tcp-only routing can block it'
     )
   })
+
+  it('extracts wireguard and wg links embedded inside mixed subscription text', () => {
+    const text = 'Check out: wireguard://cGFzc3dvcmQxMjM=@wg.example.com:51820?publicKey=cHVibGljS2V5MTIz&ip=10.0.0.2#MyWG and wg://cGFzc3dvcmQxMjM=@wg2.example.com:51820?publicKey=cHVibGljS2V5MTIz&ip=10.0.0.3#WG2'
+    const profiles = parseVpnProfiles(text)
+    expect(profiles).toHaveLength(2)
+    expect(profiles[0].protocol).toBe('wireguard')
+    expect(profiles[0].name).toBe('MyWG')
+    expect(profiles[0].outbound.server_port).toBe(51820)
+    expect(profiles[1].protocol).toBe('wireguard')
+    expect(profiles[1].name).toBe('WG2')
+    expect(profiles[1].outbound.server_port).toBe(51820)
+  })
 })

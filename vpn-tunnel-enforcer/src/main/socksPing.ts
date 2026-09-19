@@ -1,5 +1,6 @@
 import { isIP, Socket } from 'net'
 import { performance } from 'perf_hooks'
+import { isValidPort, isValidTimeout } from '../shared/portValidation'
 
 function socksAddress(host: string): Buffer | null {
   if (isIP(host) === 4) {
@@ -24,6 +25,9 @@ export function socksTcpConnectPing(
   port: number,
   timeoutMs: number
 ): Promise<number | null> {
+  if (!isValidPort(proxyPort) || !isValidPort(port) || !isValidTimeout(timeoutMs) || typeof host !== 'string' || !host.trim()) {
+    return Promise.resolve(null)
+  }
   return new Promise(resolve => {
     const address = socksAddress(host)
     if (!address) {
@@ -87,6 +91,9 @@ export async function reliableSocksTcpPing(
   timeoutMs: number,
   attempts = 3
 ): Promise<number | null> {
+  if (!isValidPort(proxyPort) || !isValidPort(port) || !isValidTimeout(timeoutMs) || typeof host !== 'string' || !host.trim()) {
+    return null
+  }
   const samples = await Promise.all(
     Array.from({ length: attempts }, () => socksTcpConnectPing(proxyPort, host, port, timeoutMs))
   )

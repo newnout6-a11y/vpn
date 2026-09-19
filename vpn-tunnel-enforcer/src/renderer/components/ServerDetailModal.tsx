@@ -22,6 +22,7 @@ import { detectCountry } from './countryGlyph'
 import { CountryFlagIcon } from './CountryFlagIcon'
 import { useAppStore } from '../store'
 import type { ClientDevice, ServerGroup, ServerProfile } from '../../shared/ipc-types'
+import { normalizeServerPort } from '../../shared/portValidation'
 
 interface IpInfo {
   ip: string
@@ -214,7 +215,7 @@ export function ServerDetailModal({ open, profile, onClose, onProfileUpdated }: 
     }
 
     const host = (profile as any).server
-    const port = (profile as any).port as number | undefined
+    const port = normalizeServerPort((profile as any)?.port ?? (profile as any)?.outbound?.server_port) ?? undefined
     if (!host) {
       setLoading(false)
       setProbing(false)
@@ -292,7 +293,7 @@ export function ServerDetailModal({ open, profile, onClose, onProfileUpdated }: 
   if (!profile) return null
 
   const host = (profile as any).server as string | undefined
-  const port = (profile as any).port as number | undefined
+  const port = normalizeServerPort((profile as any)?.port ?? (profile as any)?.outbound?.server_port) ?? undefined
   const ping = (profile as any).ping as number | null | undefined
   const profileId = (profile as ServerProfile | null)?.id
   const clientDevice = normalizeClientDevice((profile as ServerProfile | null)?.clientDevice)

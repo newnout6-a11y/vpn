@@ -32,4 +32,27 @@ describe('SOCKS direct ping', () => {
     const proxyPort = await fakeSocksServer(5)
     expect(await socksTcpConnectPing(proxyPort, '203.0.113.1', 443, 1000)).toBeNull()
   })
+
+  it('rejects invalid or out-of-range ports and timeouts immediately without socket activity', async () => {
+    // Invalid target port
+    expect(await socksTcpConnectPing(10808, 'example.com', 0, 1000)).toBeNull()
+    expect(await socksTcpConnectPing(10808, 'example.com', -1, 1000)).toBeNull()
+    expect(await socksTcpConnectPing(10808, 'example.com', 65536, 1000)).toBeNull()
+    expect(await socksTcpConnectPing(10808, 'example.com', 443.5, 1000)).toBeNull()
+    expect(await socksTcpConnectPing(10808, 'example.com', NaN, 1000)).toBeNull()
+
+    // Invalid proxy port
+    expect(await socksTcpConnectPing(0, 'example.com', 443, 1000)).toBeNull()
+    expect(await socksTcpConnectPing(-5, 'example.com', 443, 1000)).toBeNull()
+    expect(await socksTcpConnectPing(70000, 'example.com', 443, 1000)).toBeNull()
+
+    // Invalid timeout
+    expect(await socksTcpConnectPing(10808, 'example.com', 443, 0)).toBeNull()
+    expect(await socksTcpConnectPing(10808, 'example.com', 443, -100)).toBeNull()
+    expect(await socksTcpConnectPing(10808, 'example.com', 443, NaN)).toBeNull()
+    expect(await socksTcpConnectPing(10808, 'example.com', 443, Infinity)).toBeNull()
+
+    // Invalid host
+    expect(await socksTcpConnectPing(10808, '', 443, 1000)).toBeNull()
+  })
 })
