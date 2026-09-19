@@ -5,24 +5,59 @@
 
 $ErrorActionPreference = 'SilentlyContinue'
 
-$logFile = Join-Path $env:APPDATA 'VPN Tunnel Enforcer\recovery.log'
+$programData = if ($env:ProgramData) { $env:ProgramData } else { 'C:\ProgramData' }
+$logDir = Join-Path $programData 'VPN-Tunnel-Enforcer'
+if (-not (Test-Path $logDir)) {
+    try { New-Item -Path $logDir -ItemType Directory -Force | Out-Null } catch {}
+}
+$logFile = Join-Path $logDir 'recovery.log'
+if (-not (Test-Path (Split-Path $logFile -Parent))) {
+    $logFile = Join-Path $env:TEMP 'vpnte-recovery.log'
+}
+
 function Log([string]$msg) {
     $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-    "$ts $msg" | Out-File $logFile -Append -Encoding UTF8
+    try {
+        "$ts $msg" | Out-File $logFile -Append -Encoding UTF8
+    } catch {}
 }
 
 Log "=== Boot-time recovery started ==="
 
-$userData = Join-Path $env:APPDATA 'vpn-tunnel-enforcer'
-$adapterManifestPath = Join-Path $userData 'latest-physical-adapter-lockdown.json'
+# Search candidate locations for adapter lockdown manifest:
+# 1. ProgramData (canonical cross-session / SYSTEM-accessible location)
+# 2. ProgramData with space in name
+# 3. Current user / SYSTEM APPDATA
+# 4. User profile directories under C:\Users\*\AppData\Roaming\vpn-tunnel-enforcer
+$candidatePaths = @(
+    (Join-Path $programData 'VPN-Tunnel-Enforcer\latest-physical-adapter-lockdown.json'),
+    (Join-Path $programData 'VPN Tunnel Enforcer\latest-physical-adapter-lockdown.json')
+)
+if ($env:APPDATA) {
+    $candidatePaths += (Join-Path $env:APPDATA 'vpn-tunnel-enforcer\latest-physical-adapter-lockdown.json')
+}
+$userProfiles = Get-ChildItem 'C:\Users\*\AppData\Roaming\vpn-tunnel-enforcer\latest-physical-adapter-lockdown.json' -ErrorAction SilentlyContinue
+if ($userProfiles) {
+    foreach ($p in $userProfiles) {
+        $candidatePaths += $p.FullName
+    }
+}
+
+$adapterManifestPath = $null
 $adapterManifest = $null
-if (Test-Path $adapterManifestPath) {
-    try {
-        $adapterManifest = Get-Content $adapterManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
-        Log "Adapter lockdown manifest: loaded"
-    } catch {
-        Log "Adapter lockdown manifest: failed to read ($_)"
-        $adapterManifest = $null
+foreach ($cp in $candidatePaths) {
+    if (Test-Path $cp) {
+        try {
+            $parsed = Get-Content $cp -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($parsed) {
+                $adapterManifestPath = $cp
+                $adapterManifest = $parsed
+                Log "Adapter lockdown manifest: loaded from $cp"
+                break
+            }
+        } catch {
+            Log "Adapter lockdown manifest: failed to read $cp ($_)"
+        }
     }
 }
 
@@ -108,10 +143,12 @@ if ($adapterManifest -and $adapterManifest.transitionAdapters) {
 if ($adapterManifest -and $adapterManifest.dnsRegistryPolicy) {
     Restore-RegValue "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient" "DisableSmartNameResolution" $adapterManifest.dnsRegistryPolicy.smartNameResolution "DisableSmartNameResolution"
     Restore-RegValue "HKLM\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters" "DisableParallelAandAAAA" $adapterManifest.dnsRegistryPolicy.parallelAandAAAA "DisableParallelAandAAAA"
-} else {
+} elseif ($vpnteRules -gt 0) {
     reg delete "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient" /v DisableSmartNameResolution /f 2>$null
     reg delete "HKLM\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters" /v DisableParallelAandAAAA /f 2>$null
-    Log "Registry: VPNTE DNS policy keys removed without manifest"
+    Log "Registry: VPNTE DNS policy keys removed without manifest (orphaned VPNTE rules detected)"
+} else {
+    Log "Registry: preserved DNS policy keys (no manifest and no orphaned VPNTE rules detected)"
 }
 
 # 6. DNS cache flush
@@ -119,22 +156,55 @@ Clear-DnsClientCache
 Log "DNS cache: flushed"
 
 if ($adapterManifest) {
-    try {
-        Remove-Item $adapterManifestPath -Force
-        Log "Adapter lockdown manifest: removed"
-    } catch {
-        Log "Adapter lockdown manifest: remove failed ($_)"
+    foreach ($cp in $candidatePaths) {
+        if (Test-Path $cp) {
+            try {
+                Remove-Item $cp -Force
+                Log "Adapter lockdown manifest: removed $cp"
+            } catch {
+                Log "Adapter lockdown manifest: remove failed for $cp ($_)"
+            }
+        }
     }
 }
 
-# 7. Env proxy vars: remove orphaned setx HTTP_PROXY
-$envKeys = @('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
-             'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy')
-foreach ($key in $envKeys) {
-    $val = (Get-ItemProperty -Path 'HKCU:\Environment' -Name $key -ErrorAction SilentlyContinue).$key
-    if ($val) {
-        Log "Env: removing orphaned $key=$val"
-        reg delete "HKCU\Environment" /v $key /f 2>$null
+# 7. Env proxy vars: remove only orphaned local/VPNTE proxy settings, preserving custom/corporate proxies
+function Clean-VpnteProxyEnv($envPath) {
+    $regTarget = $envPath -replace '^Registry::', ''
+    if ($regTarget -match '^[A-Za-z0-9_]+:') {
+        $regTarget = $regTarget -replace ':', ''
+    }
+    $proxyKeys = @('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy')
+    foreach ($key in $proxyKeys) {
+        $val = (Get-ItemProperty -Path $envPath -Name $key -ErrorAction SilentlyContinue).$key
+        if ($val -and ($val -match '^(https?|socks5h?)://(127\.0\.0\.1|localhost)(:\d+)?/?$')) {
+            Log "Env: removing orphaned VPNTE $key=$val from $envPath"
+            reg delete $regTarget /v $key /f 2>$null
+        } elseif ($val) {
+            Log "Env: preserving non-VPNTE $key=$val in $envPath"
+        }
+    }
+    $noProxyKeys = @('NO_PROXY', 'no_proxy')
+    foreach ($key in $noProxyKeys) {
+        $val = (Get-ItemProperty -Path $envPath -Name $key -ErrorAction SilentlyContinue).$key
+        if ($val -and ($val -eq 'localhost,127.0.0.1,::1')) {
+            Log "Env: removing VPNTE default $key=$val from $envPath"
+            reg delete $regTarget /v $key /f 2>$null
+        } elseif ($val) {
+            Log "Env: preserving non-VPNTE $key=$val in $envPath"
+        }
+    }
+}
+
+Clean-VpnteProxyEnv 'HKCU:\Environment'
+
+# When running as SYSTEM, also inspect loaded user profiles under HKEY_USERS
+$loadedUsers = Get-ChildItem 'Registry::HKEY_USERS' -ErrorAction SilentlyContinue |
+    Where-Object { $_.PSChildName -notmatch '_Classes$' -and $_.PSChildName -notmatch '^(S-1-5-18|S-1-5-19|S-1-5-20|\.DEFAULT)$' }
+foreach ($u in $loadedUsers) {
+    $userEnvPath = "Registry::HKEY_USERS\$($u.PSChildName)\Environment"
+    if (Test-Path $userEnvPath) {
+        Clean-VpnteProxyEnv $userEnvPath
     }
 }
 

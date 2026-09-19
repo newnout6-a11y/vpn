@@ -63,4 +63,13 @@ describe('physicalAdapterLockdown source regressions', () => {
     expect(isTetheringSubnetIp('172.20.10.1')).toBe(true)
     expect(isTetheringSubnetIp('192.168.1.1')).toBe(false)
   })
+
+  it('persists lockdown manifest to both ProgramData and userData for boot recovery access', () => {
+    const s = source()
+
+    expect(s).toContain('export function getLockdownManifestPaths')
+    expect(s).toContain('programData: join(programDataDir, MANIFEST_BASENAME)')
+    expect(s).toContain('userData: join(app.getPath(\'userData\'), MANIFEST_BASENAME)')
+    expect(s).toContain('pdTarget = programDataManifestPath()')
+  })
 })

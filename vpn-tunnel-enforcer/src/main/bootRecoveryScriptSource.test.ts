@@ -23,4 +23,29 @@ describe('boot recovery script source regressions', () => {
     expect(script).toContain('$adapterManifest.dnsRegistryPolicy.smartNameResolution')
     expect(script).toContain('$adapterManifest.dnsRegistryPolicy.parallelAandAAAA')
   })
+
+  it('searches ProgramData and all user profiles for lockdown manifest', () => {
+    const script = scriptSource()
+
+    expect(script).toContain("Join-Path $programData 'VPN-Tunnel-Enforcer\\latest-physical-adapter-lockdown.json'")
+    expect(script).toContain('Get-ChildItem \'C:\\Users\\*\\AppData\\Roaming\\vpn-tunnel-enforcer\\latest-physical-adapter-lockdown.json\'')
+    expect(script).toContain('foreach ($cp in $candidatePaths)')
+  })
+
+  it('preserves third-party DNS policies when no manifest and no VPNTE rules exist', () => {
+    const script = scriptSource()
+
+    expect(script).toContain('preserved DNS policy keys (no manifest and no orphaned VPNTE rules detected)')
+    expect(script).toContain('elseif ($vpnteRules -gt 0)')
+  })
+
+  it('only removes orphaned local VPNTE proxy env vars and preserves corporate proxies', () => {
+    const script = scriptSource()
+
+    expect(script).toContain('Clean-VpnteProxyEnv')
+    expect(script).toContain('^(https?|socks5h?)://(127\\.0\\.0\\.1|localhost)(:\\d+)?/?$')
+    expect(script).toContain('localhost,127.0.0.1,::1')
+    expect(script).toContain('preserving non-VPNTE $key=$val')
+    expect(script).toContain('Registry::HKEY_USERS')
+  })
 })

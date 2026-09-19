@@ -31,7 +31,7 @@
  */
 import { app } from 'electron'
 import { existsSync } from 'fs'
-import { readFile, writeFile, unlink, rename } from 'fs/promises'
+import { readFile, writeFile, unlink, rename, mkdir } from 'fs/promises'
 import { join } from 'path'
 import { execElevated } from './admin'
 import { execElevatedPs, isElevatedPsHelperRunning } from './elevatedPsHelper'
@@ -119,18 +119,44 @@ export interface PhysicalAdapterDnsSource {
   ipv4DnsServers: string[]
 }
 
+function getProgramDataPath(): string {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return (app as any).getPath('programData')
+  } catch {
+    return process.env.ProgramData || 'C:\\ProgramData'
+  }
+}
+
+export function getLockdownManifestPaths(): { programData: string; userData: string } {
+  const programDataDir = join(getProgramDataPath(), 'VPN-Tunnel-Enforcer')
+  return {
+    programData: join(programDataDir, MANIFEST_BASENAME),
+    userData: join(app.getPath('userData'), MANIFEST_BASENAME)
+  }
+}
+
 function manifestPath(): string {
-  return join(app.getPath('userData'), MANIFEST_BASENAME)
+  return getLockdownManifestPaths().userData
+}
+
+function programDataManifestPath(): string {
+  return getLockdownManifestPaths().programData
 }
 
 async function readManifest(): Promise<LockdownManifest | null> {
-  try {
-    if (!existsSync(manifestPath())) return null
-    const raw = await readFile(manifestPath(), 'utf-8')
-    return JSON.parse(raw) as LockdownManifest
-  } catch {
-    return null
+  const paths = [programDataManifestPath(), manifestPath()]
+  for (const path of paths) {
+    try {
+      if (existsSync(path)) {
+        const raw = await readFile(path, 'utf-8')
+        return JSON.parse(raw) as LockdownManifest
+      }
+    } catch {
+      // continue to next path
+    }
   }
+  return null
 }
 
 function sanitizeDnsServers(values: unknown): string[] {
@@ -157,16 +183,38 @@ function summarizeDnsSources(adapters: AdapterSnapshot[]): PhysicalAdapterDnsSou
 }
 
 async function writeManifest(m: LockdownManifest): Promise<void> {
-  const tmp = manifestPath() + '.tmp'
-  await writeFile(tmp, JSON.stringify(m, null, 2), 'utf-8')
-  await rename(tmp, manifestPath())
+  const payload = JSON.stringify(m, null, 2)
+
+  // 1. Write to userData
+  try {
+    const userTarget = manifestPath()
+    const userTmp = userTarget + '.tmp'
+    await writeFile(userTmp, payload, 'utf-8')
+    await rename(userTmp, userTarget)
+  } catch (err) {
+    logEvent('warn', 'phys-lockdown', 'writing userData manifest failed', err)
+  }
+
+  // 2. Write to ProgramData for cross-session & SYSTEM boot recovery
+  try {
+    const pdTarget = programDataManifestPath()
+    await mkdir(join(getProgramDataPath(), 'VPN-Tunnel-Enforcer'), { recursive: true })
+    const pdTmp = pdTarget + '.tmp'
+    await writeFile(pdTmp, payload, 'utf-8')
+    await rename(pdTmp, pdTarget)
+  } catch (err) {
+    logEvent('warn', 'phys-lockdown', 'writing ProgramData manifest failed', err)
+  }
 }
 
 async function deleteManifest(): Promise<void> {
-  try {
-    if (existsSync(manifestPath())) await unlink(manifestPath())
-  } catch (err) {
-    logEvent('warn', 'phys-lockdown', 'manifest delete failed', err)
+  const paths = [manifestPath(), programDataManifestPath()]
+  for (const path of paths) {
+    try {
+      if (existsSync(path)) await unlink(path)
+    } catch (err) {
+      logEvent('warn', 'phys-lockdown', `manifest delete failed for ${path}`, err)
+    }
   }
 }
 
