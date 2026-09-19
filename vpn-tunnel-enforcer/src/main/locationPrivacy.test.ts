@@ -143,4 +143,23 @@ describe('locationPrivacy module', () => {
       expect.stringContaining('latest-location-backup.json')
     )
   })
+
+  it('aborts and throws without modifying HKLM if HKLM backup fails', async () => {
+    mockExecFile.mockImplementation((file: string, args: string[], _opts: any, cb: any) => {
+      // simulate key exists on query, but export fails on HKLM
+      if (args[0] === 'query') {
+        cb(null, { stdout: 'key exists', stderr: '' })
+      } else if (args[0] === 'export' && args[1].includes('LocationAndSensors')) {
+        cb(new Error('export failed: access denied'), null)
+      } else {
+        cb(null, { stdout: '', stderr: '' })
+      }
+    })
+
+    const { applyLocationPrivacy } = await import('./locationPrivacy')
+    await expect(applyLocationPrivacy()).rejects.toThrow('Не удалось создать backup HKLM')
+
+    // execElevated must NOT have been called
+    expect(mockExecElevated).not.toHaveBeenCalled()
+  })
 })

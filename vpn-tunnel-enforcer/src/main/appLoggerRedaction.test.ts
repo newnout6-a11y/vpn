@@ -17,7 +17,18 @@ vi.mock('./vpnProfiles', () => ({
   redactSensitiveText: (value: string) => value
 }))
 
-const flush = () => new Promise((resolve) => setTimeout(resolve, 50))
+const waitForLogContent = async (logPath: string): Promise<string> => {
+  for (let i = 0; i < 50; i++) {
+    try {
+      const content = readFileSync(logPath, 'utf8')
+      if (content.length > 0) return content
+    } catch {
+      // File not created yet
+    }
+    await new Promise((resolve) => setTimeout(resolve, 30))
+  }
+  return readFileSync(logPath, 'utf8')
+}
 
 describe('appLogger topology redaction', () => {
   beforeEach(() => {
@@ -37,9 +48,8 @@ describe('appLogger topology redaction', () => {
       routeCount: 2,
       keptCounter: 3
     })
-    await flush()
 
-    const raw = readFileSync(getAppLogPath(), 'utf8')
+    const raw = await waitForLogContent(getAppLogPath())
     expect(raw).not.toContain('192.0.2.44')
     expect(raw).not.toContain('203.0.113.10')
     expect(raw).not.toContain('aa:bb:cc:dd:ee:ff')
@@ -59,9 +69,8 @@ describe('appLogger topology redaction', () => {
       timeoutMs: 5000,
       ifindex: 42
     })
-    await flush()
 
-    const raw = readFileSync(getAppLogPath(), 'utf8')
+    const raw = await waitForLogContent(getAppLogPath())
     expect(raw).toContain('"port":10808')
     expect(raw).toContain('"interfaceMetric":5')
     expect(raw).toContain('"routeCount":14')

@@ -3,7 +3,7 @@
 # Recovers from a BSOD/crash that left the firewall blocking, DNS pinned,
 # IPv6 disabled, or proxy settings wiped.
 
-$ErrorActionPreference = 'SilentlyContinue'
+$hasWarnings = $false
 
 $programData = if ($env:ProgramData) { $env:ProgramData } else { 'C:\ProgramData' }
 $logDir = Join-Path $programData 'VPN-Tunnel-Enforcer'
@@ -73,36 +73,62 @@ function Restore-RegValue($key, $name, $snapshot, $tag) {
     try {
         if ($snapshot -and $snapshot.exists -eq $true -and $snapshot.type -and $snapshot.data) {
             reg add $key /v $name /t $snapshot.type /d $snapshot.data /f 2>$null | Out-Null
-            Log "Registry: restored $tag"
+            if ($LASTEXITCODE -eq 0) {
+                Log "Registry: restored $tag"
+            } else {
+                Log "Registry: failed to restore $tag (exit code $LASTEXITCODE)"
+                $script:hasWarnings = $true
+            }
         } else {
             reg delete $key /v $name /f 2>$null | Out-Null
-            Log "Registry: removed VPNTE-created $tag"
+            if ($LASTEXITCODE -eq 0) {
+                Log "Registry: removed VPNTE-created $tag"
+            } else {
+                Log "Registry: failed to remove VPNTE-created $tag (exit code $LASTEXITCODE)"
+            }
         }
     } catch {
         Log "Registry: failed to restore $tag ($_)"
+        $script:hasWarnings = $true
     }
 }
 
 # 1. Firewall: restore DefaultOutboundAction to Allow if no VPNTE rules exist
-$blockProfiles = Get-NetFirewallProfile -Profile Domain,Private,Public |
-    Where-Object { $_.DefaultOutboundAction -eq 'Block' }
-$vpnteRules = Get-NetFirewallRule -DisplayName 'VPNTE-killswitch*' |
-    Measure-Object | Select-Object -ExpandProperty Count
-if ($blockProfiles -and $vpnteRules -eq 0) {
-    Log "Firewall: DefaultOutboundAction=Block with no VPNTE rules — restoring Allow"
-    Set-NetFirewallProfile -Profile Domain,Private,Public -DefaultOutboundAction Allow
-    Log "Firewall: restored"
-}
-if ($vpnteRules -gt 0) {
-    Log "Firewall: removing $vpnteRules orphaned VPNTE-killswitch rules"
-    Get-NetFirewallRule -DisplayName 'VPNTE-killswitch*' | Remove-NetFirewallRule
-    Set-NetFirewallProfile -Profile Domain,Private,Public -DefaultOutboundAction Allow
-    Log "Firewall: rules removed, Allow restored"
+try {
+    $blockProfiles = Get-NetFirewallProfile -Profile Domain,Private,Public -ErrorAction SilentlyContinue |
+        Where-Object { $_.DefaultOutboundAction -eq 'Block' }
+    $vpnteRules = Get-NetFirewallRule -DisplayName 'VPNTE-killswitch*' -ErrorAction SilentlyContinue |
+        Measure-Object | Select-Object -ExpandProperty Count
+
+    if ($blockProfiles -and $vpnteRules -eq 0) {
+        Log "Firewall: DefaultOutboundAction=Block with no VPNTE rules — restoring Allow"
+        try {
+            Set-NetFirewallProfile -Profile Domain,Private,Public -DefaultOutboundAction Allow -ErrorAction Stop
+            Log "Firewall: restored"
+        } catch {
+            Log "Firewall: failed to restore Allow ($_)"
+            $hasWarnings = $true
+        }
+    }
+    if ($vpnteRules -gt 0) {
+        Log "Firewall: removing $vpnteRules orphaned VPNTE-killswitch rules"
+        try {
+            Get-NetFirewallRule -DisplayName 'VPNTE-killswitch*' -ErrorAction Stop | Remove-NetFirewallRule -ErrorAction Stop
+            Set-NetFirewallProfile -Profile Domain,Private,Public -DefaultOutboundAction Allow -ErrorAction Stop
+            Log "Firewall: rules removed, Allow restored"
+        } catch {
+            Log "Firewall: failed to remove rules or restore Allow ($_)"
+            $hasWarnings = $true
+        }
+    }
+} catch {
+    Log "Firewall check encountered error ($_)"
+    $hasWarnings = $true
 }
 
 # 2. DNS: reset any adapter still pinned to VPNTE resolver (192.168.250.254/253)
 $vpnteDns = @('192.168.250.253', '192.168.250.254')
-$adapters = Get-NetAdapter |
+$adapters = Get-NetAdapter -ErrorAction SilentlyContinue |
     Where-Object {
         $_.Status -eq 'Up' -and
         $_.InterfaceDescription -notmatch 'Wintun|TAP-Windows|Tailscale|WireGuard|Hyper-V|Loopback|vEthernet|VPN|VirtualBox|VMware|Bluetooth' -and
@@ -110,23 +136,43 @@ $adapters = Get-NetAdapter |
     }
 foreach ($a in $adapters) {
     $manifestAdapter = Get-ManifestAdapter $a
-    $dns = @(Get-DnsClientServerAddress -InterfaceAlias $a.Name -AddressFamily IPv4).ServerAddresses
+    $dns = @(Get-DnsClientServerAddress -InterfaceAlias $a.Name -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses
     if ($manifestAdapter -and $manifestAdapter.forcedDnsTo -and @($manifestAdapter.forcedDnsTo).Count -gt 0) {
         if ($manifestAdapter.ipv4DnsSource -eq 'static' -and $manifestAdapter.ipv4DnsServers -and @($manifestAdapter.ipv4DnsServers).Count -gt 0) {
             Log "DNS: restoring static DNS on $($a.Name)"
-            Set-DnsClientServerAddress -InterfaceAlias $a.Name -ServerAddresses @($manifestAdapter.ipv4DnsServers)
+            try {
+                Set-DnsClientServerAddress -InterfaceAlias $a.Name -ServerAddresses @($manifestAdapter.ipv4DnsServers) -ErrorAction Stop
+            } catch {
+                Log "DNS: failed to restore static DNS on $($a.Name) ($_)"
+                $hasWarnings = $true
+            }
         } else {
             Log "DNS: resetting DNS to DHCP on $($a.Name)"
-            Set-DnsClientServerAddress -InterfaceAlias $a.Name -ResetServerAddresses
+            try {
+                Set-DnsClientServerAddress -InterfaceAlias $a.Name -ResetServerAddresses -ErrorAction Stop
+            } catch {
+                Log "DNS: failed to reset DNS to DHCP on $($a.Name) ($_)"
+                $hasWarnings = $true
+            }
         }
     } elseif (-not $adapterManifest -and ($dns | Where-Object { $vpnteDns -contains $_ })) {
         Log "DNS: resetting orphaned DNS on $($a.Name) without manifest (was: $($dns -join ','))"
-        Set-DnsClientServerAddress -InterfaceAlias $a.Name -ResetServerAddresses
+        try {
+            Set-DnsClientServerAddress -InterfaceAlias $a.Name -ResetServerAddresses -ErrorAction Stop
+        } catch {
+            Log "DNS: failed to reset orphaned DNS on $($a.Name) ($_)"
+            $hasWarnings = $true
+        }
     }
     # 3. IPv6: re-enable only when the manifest says VPNTE disabled it.
     if ($manifestAdapter -and $manifestAdapter.forcedIpv6Off -eq $true -and $manifestAdapter.ipv6Enabled -eq $true) {
         Log "IPv6: re-enabling on $($a.Name)"
-        Enable-NetAdapterBinding -InterfaceAlias $a.Name -ComponentID ms_tcpip6
+        try {
+            Enable-NetAdapterBinding -InterfaceAlias $a.Name -ComponentID ms_tcpip6 -ErrorAction Stop
+        } catch {
+            Log "IPv6: failed to re-enable ms_tcpip6 on $($a.Name) ($_)"
+            $hasWarnings = $true
+        }
     }
 }
 
@@ -152,8 +198,12 @@ if ($adapterManifest -and $adapterManifest.dnsRegistryPolicy) {
 }
 
 # 6. DNS cache flush
-Clear-DnsClientCache
-Log "DNS cache: flushed"
+try {
+    Clear-DnsClientCache -ErrorAction Stop
+    Log "DNS cache: flushed"
+} catch {
+    Log "DNS cache: flush warning ($_)"
+}
 
 if ($adapterManifest) {
     foreach ($cp in $candidatePaths) {
@@ -214,10 +264,23 @@ foreach ($alias in $tunAliases) {
     $tun = Get-NetAdapter -Name $alias -ErrorAction SilentlyContinue
     if ($tun) {
         Log "TUN: removing stale adapter '$alias'"
-        try { Remove-NetAdapter -Name $alias -Confirm:$false } catch {
-            try { Disable-NetAdapter -Name $alias -Confirm:$false } catch {}
+        try {
+            Remove-NetAdapter -Name $alias -Confirm:$false -ErrorAction Stop
+            Log "TUN: successfully removed adapter '$alias'"
+        } catch {
+            try {
+                Disable-NetAdapter -Name $alias -Confirm:$false -ErrorAction Stop
+                Log "TUN: disabled adapter '$alias' (removal failed)"
+            } catch {
+                Log "TUN: failed to remove or disable adapter '$alias' ($_)"
+                $hasWarnings = $true
+            }
         }
     }
 }
 
-Log "=== Boot-time recovery complete ==="
+if ($hasWarnings) {
+    Log "=== Boot-time recovery complete (with warnings) ==="
+} else {
+    Log "=== Boot-time recovery complete ==="
+}

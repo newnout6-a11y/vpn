@@ -120,6 +120,7 @@ export const env = {
       await broadcastEnvironmentChanged()
       return true
     } catch {
+      await this.rollback().catch(() => undefined)
       return false
     }
   },

@@ -13,6 +13,7 @@ import {
   Zap,
   Lock,
   Sparkles,
+  TriangleAlert,
 } from 'lucide-react'
 import { MacButton } from '../design-system/MacButton'
 import { MacCard } from '../design-system/MacCard'
@@ -76,6 +77,8 @@ export function FirstRunWizard({ onComplete, onSkip }: Props) {
   const [selectedTheme, setSelectedTheme] = useState<'light' | 'dark' | 'system'>('system')
   const [selectedMode, setSelectedMode] = useState<'hard' | 'soft' | 'direct'>('hard')
   const [killSwitchLevel, setKillSwitchLevel] = useState<'off' | 'standard' | 'strict'>('standard')
+  const [finishing, setFinishing] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
 
   const currentIndex = STEPS.indexOf(step)
 
@@ -102,7 +105,7 @@ export function FirstRunWizard({ onComplete, onSkip }: Props) {
         addLog('warn', t('onboarding.vpnNotFound'))
       }
     } catch (err: any) {
-      addLog('error', t('onboarding.vpnError', { error: err.message }))
+      addLog('warn', `Автопоиск прокси: ${err?.message || err}`)
     } finally {
       setDetecting(false)
       setDetectionDone(true)
@@ -110,18 +113,16 @@ export function FirstRunWizard({ onComplete, onSkip }: Props) {
   }
 
   function goNext() {
-    const idx = STEPS.indexOf(step)
-    if (idx < TOTAL_STEPS - 1) {
+    if (currentIndex < STEPS.length - 1) {
       setDirection(1)
-      setStep(STEPS[idx + 1])
+      setStep(STEPS[currentIndex + 1])
     }
   }
 
   function goBack() {
-    const idx = STEPS.indexOf(step)
-    if (idx > 0) {
+    if (currentIndex > 0) {
       setDirection(-1)
-      setStep(STEPS[idx - 1])
+      setStep(STEPS[currentIndex - 1])
     }
   }
 
@@ -131,39 +132,52 @@ export function FirstRunWizard({ onComplete, onSkip }: Props) {
   }
 
   async function handleFinish() {
-    // Save all wizard settings
+    setFinishing(true)
+    setSaveError(null)
+
     try {
       await window.electronAPI.saveSettings({
         firstRunComplete: true,
         firewallKillSwitch: killSwitchLevel !== 'off',
       })
-    } catch {
       updateSettings({ firstRunComplete: true })
+
+      // Save theme via IPC if available
+      try {
+        const themeId = selectedTheme === 'light' ? 'light' : selectedTheme === 'dark' ? 'dark' : 'system'
+        if ((window.electronAPI as any).themeSetActive) {
+          await (window.electronAPI as any).themeSetActive(themeId)
+        }
+      } catch (err: any) {
+        addLog('warn', `Не удалось применить тему: ${err?.message || err}`)
+      }
+
+      // Save locale via IPC if available
+      try {
+        if ((window.electronAPI as any).i18nSetLocale) {
+          await (window.electronAPI as any).i18nSetLocale(selectedLang)
+        }
+      } catch (err: any) {
+        addLog('warn', `Не удалось применить язык: ${err?.message || err}`)
+      }
+
+      // Save kill-switch level via IPC if available
+      try {
+        if ((window.electronAPI as any).killSwitchSetLevel) {
+          await (window.electronAPI as any).killSwitchSetLevel(killSwitchLevel)
+        }
+      } catch (err: any) {
+        addLog('warn', `Не удалось установить уровень kill switch: ${err?.message || err}`)
+      }
+
+      onComplete()
+    } catch (err: any) {
+      const msg = err?.message || 'Не удалось сохранить настройки. Пожалуйста, попробуйте снова.'
+      setSaveError(msg)
+      addLog('error', `Ошибка завершения первого запуска: ${msg}`)
+    } finally {
+      setFinishing(false)
     }
-
-    // Save theme via IPC if available
-    try {
-      const themeId = selectedTheme === 'light' ? 'light' : selectedTheme === 'dark' ? 'dark' : 'system'
-      if ((window.electronAPI as any).themeSetActive) {
-        await (window.electronAPI as any).themeSetActive(themeId)
-      }
-    } catch { /* theme save is best-effort */ }
-
-    // Save locale via IPC if available
-    try {
-      if ((window.electronAPI as any).i18nSetLocale) {
-        await (window.electronAPI as any).i18nSetLocale(selectedLang)
-      }
-    } catch { /* locale save is best-effort */ }
-
-    // Save kill-switch level via IPC if available
-    try {
-      if ((window.electronAPI as any).killSwitchSetLevel) {
-        await (window.electronAPI as any).killSwitchSetLevel(killSwitchLevel)
-      }
-    } catch { /* kill-switch save is best-effort */ }
-
-    onComplete()
   }
 
   function handleSkip() {
@@ -286,6 +300,27 @@ export function FirstRunWizard({ onComplete, onSkip }: Props) {
           </AnimatePresence>
         </MacCard>
 
+        {/* Save error banner */}
+        {saveError && (
+          <div
+            role="alert"
+            className="flex items-center justify-between p-3 mt-4 rounded-[var(--radius-sm)] bg-red-500/10 border border-red-500/30 text-red-400 text-xs"
+          >
+            <div className="flex items-center gap-2">
+              <TriangleAlert size={16} className="shrink-0 text-red-400" />
+              <span>{saveError}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setSaveError(null)}
+              className="text-red-400 hover:text-red-300 font-bold ml-2 text-sm leading-none"
+              aria-label="Dismiss error"
+            >
+              ×
+            </button>
+          </div>
+        )}
+
         {/* Navigation footer */}
         <div className="flex items-center justify-between mt-6">
           <div>
@@ -309,7 +344,7 @@ export function FirstRunWizard({ onComplete, onSkip }: Props) {
                 <ArrowRight size={16} className="ml-1.5" />
               </MacButton>
             ) : (
-              <MacButton variant="primary" size="lg" onClick={handleFinish}>
+              <MacButton variant="primary" size="lg" onClick={handleFinish} loading={finishing} disabled={finishing}>
                 {t('onboarding.finish')}
                 <CheckCircle2 size={16} className="ml-1.5" />
               </MacButton>

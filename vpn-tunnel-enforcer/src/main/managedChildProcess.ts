@@ -100,10 +100,25 @@ export async function cleanupManagedChildPidFile(
   owner: string,
   log?: (message: string, details?: unknown) => void
 ): Promise<boolean> {
-  const entry = await readFile(pidFile, 'utf8').then(parsePidFile).catch(() => null)
-  if (!entry || entry.owner !== owner) {
+  const raw = await readFile(pidFile, 'utf8').catch(() => null)
+  if (raw === null) {
+    return true
+  }
+
+  const entry = parsePidFile(raw)
+  if (!entry) {
     await rm(pidFile, { force: true }).catch(() => undefined)
     return true
+  }
+
+  if (entry.owner !== owner) {
+    log?.('managed child pidfile belongs to different owner, skipping cleanup', {
+      pidFile,
+      expectedOwner: owner,
+      actualOwner: entry.owner,
+      pid: entry.pid
+    })
+    return false
   }
 
   const cleaned = process.platform === 'win32'

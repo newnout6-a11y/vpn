@@ -10,9 +10,11 @@ const execFile = promisify(execFileCb)
 const HKCU_LOCATION = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\location'
 const HKLM_LOCATION = 'HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\LocationAndSensors'
 
-interface BackupManifest {
+export interface BackupManifest {
   hkcuBackup: string | null
+  hkcuKeyExisted: boolean
   hklmBackup: string | null
+  hklmKeyExisted: boolean
   createdAt: number
 }
 
@@ -61,6 +63,15 @@ function runElevated(command: string): Promise<void> {
   return execElevated(command, { timeout: 30000 }).then(() => undefined)
 }
 
+async function keyExists(key: string): Promise<boolean> {
+  try {
+    await reg(['query', key])
+    return true
+  } catch {
+    return false
+  }
+}
+
 async function exportKey(key: string, file: string): Promise<string | null> {
   try {
     await reg(['export', key, file, '/y'])
@@ -73,9 +84,23 @@ async function exportKey(key: string, file: string): Promise<string | null> {
 async function createBackup(): Promise<BackupManifest> {
   await mkdir(backupDir(), { recursive: true })
   const stamp = timestamp()
-  const hkcuBackup = await exportKey(HKCU_LOCATION, join(backupDir(), `hkcu-location-${stamp}.reg`))
-  const hklmBackup = await exportKey(HKLM_LOCATION, join(backupDir(), `hklm-location-${stamp}.reg`))
-  const manifest = { hkcuBackup, hklmBackup, createdAt: Date.now() }
+  const hkcuKeyExisted = await keyExists(HKCU_LOCATION)
+  const hklmKeyExisted = await keyExists(HKLM_LOCATION)
+
+  const hkcuBackup = hkcuKeyExisted
+    ? await exportKey(HKCU_LOCATION, join(backupDir(), `hkcu-location-${stamp}.reg`))
+    : null
+  const hklmBackup = hklmKeyExisted
+    ? await exportKey(HKLM_LOCATION, join(backupDir(), `hklm-location-${stamp}.reg`))
+    : null
+
+  const manifest: BackupManifest = {
+    hkcuBackup,
+    hkcuKeyExisted,
+    hklmBackup,
+    hklmKeyExisted,
+    createdAt: Date.now()
+  }
   await writeFile(manifestPath(), JSON.stringify(manifest, null, 2), 'utf-8')
   return manifest
 }
@@ -123,11 +148,15 @@ export async function getLocationPrivacyStatus(): Promise<LocationPrivacyStatus>
 
 export async function applyLocationPrivacy(): Promise<LocationPrivacyStatus> {
   const manifest = await createBackup()
-  // Validate backup succeeded before modifying — if backup failed, abort.
-  // Without a backup, rollback is impossible and Location stays disabled forever.
-  if (!manifest.hkcuBackup) {
-    throw new Error('Не удалось создать backup. Настройки местоположения не были изменены.')
+  // Validate backup succeeded before modifying.
+  // If either key existed prior to applying, its backup MUST have succeeded.
+  if (manifest.hkcuKeyExisted && !manifest.hkcuBackup) {
+    throw new Error('Не удалось создать backup HKCU. Настройки местоположения не были изменены.')
   }
+  if (manifest.hklmKeyExisted && !manifest.hklmBackup) {
+    throw new Error('Не удалось создать backup HKLM. Настройки местоположения не были изменены.')
+  }
+
   await reg(['add', HKCU_LOCATION, '/v', 'Value', '/t', 'REG_SZ', '/d', 'Deny', '/f'])
   await runElevated(
     `reg add "${HKLM_LOCATION}" /v DisableLocation /t REG_DWORD /d 1 /f && ` +
@@ -139,17 +168,19 @@ export async function applyLocationPrivacy(): Promise<LocationPrivacyStatus> {
 export async function rollbackLocationPrivacy(): Promise<LocationPrivacyStatus> {
   const manifest = await readManifest()
 
-  if (manifest?.hkcuBackup) {
-    await reg(['import', manifest.hkcuBackup]).catch(() => undefined)
-  } else {
-    await reg(['delete', HKCU_LOCATION, '/v', 'Value', '/f']).catch(() => undefined)
-  }
+  if (manifest) {
+    if (manifest.hkcuBackup) {
+      await reg(['import', manifest.hkcuBackup]).catch(() => undefined)
+    } else if (manifest.hkcuKeyExisted === false) {
+      await reg(['delete', HKCU_LOCATION, '/v', 'Value', '/f']).catch(() => undefined)
+    }
 
-  if (manifest?.hklmBackup) {
-    await runElevated(`reg import "${manifest.hklmBackup}"`).catch(() => undefined)
-  } else {
-    await runElevated(`reg delete "${HKLM_LOCATION}" /v DisableLocation /f`).catch(() => undefined)
-    await runElevated(`reg delete "${HKLM_LOCATION}" /v DisableWindowsLocationProvider /f`).catch(() => undefined)
+    if (manifest.hklmBackup) {
+      await runElevated(`reg import "${manifest.hklmBackup}"`).catch(() => undefined)
+    } else if (manifest.hklmKeyExisted === false) {
+      await runElevated(`reg delete "${HKLM_LOCATION}" /v DisableLocation /f`).catch(() => undefined)
+      await runElevated(`reg delete "${HKLM_LOCATION}" /v DisableWindowsLocationProvider /f`).catch(() => undefined)
+    }
   }
 
   await unlink(manifestPath()).catch(() => undefined)

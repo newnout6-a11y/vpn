@@ -200,4 +200,30 @@ describe('env autoconfig backup and rollback', () => {
     expect(process.env.HTTP_PROXY).toBeUndefined()
     expect(mockFs[backupFile]).toBeUndefined()
   })
+
+  it('triggers compensating rollback if setting an environment variable fails midway', async () => {
+    // Simulate pre-existing corporate proxy
+    mockFs[backupFile] = JSON.stringify({
+      createdAt: 1000,
+      httpProxy: 'http://corporate:8080',
+      httpsProxy: null,
+      allProxy: null,
+      noProxy: null
+    })
+
+    const rollbackSpy = vi.spyOn(env, 'rollback')
+
+    // First command succeeds, third command (ALL_PROXY) throws
+    mockExecFile.mockImplementation((cmd: string, args: string[]) => {
+      if (cmd === 'setx' && args[0] === 'ALL_PROXY') {
+        return new Error('setx failed: access denied or buffer overflow')
+      }
+      return { stdout: '', stderr: '' }
+    })
+
+    const ok = await env.apply('127.0.0.1:10808', 'socks5')
+    expect(ok).toBe(false)
+    expect(rollbackSpy).toHaveBeenCalled()
+    rollbackSpy.mockRestore()
+  })
 })

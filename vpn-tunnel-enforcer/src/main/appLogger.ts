@@ -97,10 +97,19 @@ async function rotateIfNeeded(incomingBytes: number): Promise<void> {
     }
     if (currentLogBytes + incomingBytes <= MAX_LOG_BYTES) return
     // Roll: app.log → app.prev.log (overwrite the older generation).
-    const { rename, unlink } = await import('fs/promises')
+    const { rename, unlink, stat: fsStat } = await import('fs/promises')
     await unlink(getAppLogPrevPath()).catch(() => undefined)
-    await rename(getAppLogPath(), getAppLogPrevPath()).catch(() => undefined)
-    currentLogBytes = 0
+    try {
+      await rename(getAppLogPath(), getAppLogPrevPath())
+      currentLogBytes = 0
+    } catch {
+      // If rename failed (e.g. file locked), do NOT reset counter to 0. Re-stat from disk.
+      try {
+        currentLogBytes = (await fsStat(getAppLogPath())).size
+      } catch {
+        // Leave currentLogBytes as-is
+      }
+    }
   } catch {
     // Leave currentLogBytes as-is; we'll retry on the next write.
   }

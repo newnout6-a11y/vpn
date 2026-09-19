@@ -30,6 +30,7 @@ import {
 import { MacCard } from '../design-system/MacCard'
 import { MacSwitch } from '../design-system/MacSwitch'
 import { MacSegmentedControl } from '../design-system/MacSegmentedControl'
+import { MacButton } from '../design-system/MacButton'
 import type { NotificationPreferences } from '../../shared/ipc-types'
 
 // ─── Event type definitions ──────────────────────────────────────────────────
@@ -62,6 +63,7 @@ export const NotificationSettings: React.FC = () => {
   const { t } = useTranslation()
   const [prefs, setPrefs] = useState<NotificationPreferences | null>(null)
   const [osBlocked, setOsBlocked] = useState(false)
+  const [ipcError, setIpcError] = useState<string | null>(null)
 
   const api = window.electronAPI
 
@@ -82,8 +84,8 @@ export const NotificationSettings: React.FC = () => {
     try {
       const result: NotificationPreferences = await api.notificationsGetPrefs()
       setPrefs(result)
-    } catch {
-      // IPC not yet available
+    } catch (err: any) {
+      setIpcError(err?.message || 'Не удалось загрузить настройки уведомлений')
     }
   }, [api])
 
@@ -105,10 +107,11 @@ export const NotificationSettings: React.FC = () => {
   const updatePrefs = useCallback(
     async (partial: Partial<NotificationPreferences>) => {
       try {
+        setIpcError(null)
         const updated: NotificationPreferences = await api.notificationsSetPrefs(partial)
         setPrefs(updated)
-      } catch {
-        // IPC error — keep local state unchanged
+      } catch (err: any) {
+        setIpcError(err?.message || 'Не удалось сохранить настройки уведомлений')
       }
     },
     [api]
@@ -143,16 +146,60 @@ export const NotificationSettings: React.FC = () => {
   if (!prefs) {
     return (
       <MacCard>
-        <div className="flex items-center gap-2 text-[var(--color-text-secondary)]">
-          <Bell size={18} className="animate-pulse" />
-          <span className="text-sm">{t('common.loading')}</span>
-        </div>
+        {ipcError ? (
+          <div
+            role="alert"
+            className="flex items-center justify-between p-3 rounded-[var(--radius-sm)] bg-red-500/10 border border-red-500/30 text-red-400 text-xs"
+          >
+            <div className="flex items-center gap-2">
+              <AlertTriangle size={16} className="shrink-0 text-red-400" />
+              <span>{ipcError}</span>
+            </div>
+            <MacButton
+              variant="secondary"
+              size="sm"
+              onClick={() => {
+                setIpcError(null)
+                fetchPrefs()
+                fetchOsState()
+              }}
+            >
+              Повторить
+            </MacButton>
+          </div>
+        ) : (
+          <div className="flex items-center gap-2 text-[var(--color-text-secondary)]">
+            <Bell size={18} className="animate-pulse" />
+            <span className="text-sm">{t('common.loading')}</span>
+          </div>
+        )}
       </MacCard>
     )
   }
 
   return (
     <MacCard className="space-y-5">
+      {/* Error banner */}
+      {ipcError && (
+        <div
+          role="alert"
+          className="flex items-center justify-between p-3 rounded-[var(--radius-sm)] bg-red-500/10 border border-red-500/30 text-red-400 text-xs"
+        >
+          <div className="flex items-center gap-2">
+            <AlertTriangle size={16} className="shrink-0 text-red-400" />
+            <span>{ipcError}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setIpcError(null)}
+            className="text-red-400 hover:text-red-300 font-bold ml-2 px-1 text-sm leading-none"
+            aria-label="Dismiss error"
+          >
+            ×
+          </button>
+        </div>
+      )}
+
       {/* Header */}
       <div className="flex items-center gap-2">
         <Bell size={20} className="text-[var(--color-accent)]" />
