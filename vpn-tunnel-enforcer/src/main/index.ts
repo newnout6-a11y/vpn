@@ -112,7 +112,42 @@ let tray: Tray | null = null
 // send (e.g. tunController.onStatusChange during a failed adaptive restart).
 function sendToMainWindow(channel: string, ...args: unknown[]): void {
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send(channel, ...args)
+    if (!mainWindow.webContents.isCrashed()) {
+      mainWindow.webContents.send(channel, ...args)
+    }
+  }
+}
+
+function loadRenderer(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  if (process.env.ELECTRON_RENDERER_URL) {
+    mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL).catch(() => {
+      setTimeout(loadRenderer, 1000)
+    })
+  } else {
+    mainWindow.loadFile(join(__dirname, '../renderer/index.html')).catch((err) => {
+      logEvent('error', 'app', 'failed to load renderer index.html', { error: String(err) })
+    })
+  }
+}
+
+function restoreAndFocusMainWindow(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  if (mainWindow.webContents.isCrashed()) {
+    logEvent('warn', 'app', 'webContents was crashed upon window restore; reloading')
+    loadRenderer()
+  }
+  if (mainWindow.isMinimized()) {
+    mainWindow.restore()
+  }
+  if (!mainWindow.isVisible()) {
+    mainWindow.show()
+  }
+  mainWindow.focus()
+  try {
+    mainWindow.webContents.invalidate()
+  } catch {
+    /* ignore */
   }
 }
 let isQuitting = false
@@ -559,10 +594,26 @@ if (app.isPackaged && !app.requestSingleInstanceLock()) {
   app.exit(0)
 } else {
   app.on('second-instance', () => {
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore()
-      if (!mainWindow.isVisible()) mainWindow.show()
-      mainWindow.focus()
+    restoreAndFocusMainWindow()
+  })
+
+  // Watch for GPU process crashes or device removals (e.g. DXGI device removal on sleep/wake)
+  app.on('child-process-gone', (_event, details) => {
+    logEvent('warn', 'app', 'child process gone', {
+      type: details.type,
+      reason: details.reason,
+      exitCode: details.exitCode,
+      serviceName: details.serviceName
+    })
+    if (details.type === 'GPU' && mainWindow && !mainWindow.isDestroyed()) {
+      logEvent('info', 'app', 'GPU process reset detected; invalidating window surface')
+      try {
+        if (mainWindow.isVisible()) {
+          mainWindow.webContents.invalidate()
+        }
+      } catch {
+        /* ignore */
+      }
     }
   })
 }
@@ -591,13 +642,37 @@ function createWindow() {
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      backgroundThrottling: false
     },
     // Must track --rgb-bg of the dark theme (themeManager DARK_THEME.background).
     // This is the colour painted before the renderer's first frame; when it was
     // '#1e1e2e' — a value belonging to neither theme — startup flashed a shade
     // that appears nowhere else in the app.
     backgroundColor: '#1f1f1f'
+  })
+
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    logEvent('error', 'app', 'renderer process gone', {
+      reason: details.reason,
+      exitCode: details.exitCode
+    })
+    if (isQuitting || shutdownInProgress) return
+
+    logEvent('info', 'app', 'automatically reloading renderer after render-process-gone')
+    setTimeout(() => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        loadRenderer()
+      }
+    }, 300)
+  })
+
+  mainWindow.webContents.on('unresponsive', () => {
+    logEvent('warn', 'app', 'renderer became unresponsive')
+  })
+
+  mainWindow.webContents.on('responsive', () => {
+    logEvent('info', 'app', 'renderer became responsive again')
   })
 
   mainWindow.on('ready-to-show', () => {
@@ -672,15 +747,6 @@ function createWindow() {
     })
   })
 
-  const loadRenderer = () => {
-    if (process.env.ELECTRON_RENDERER_URL) {
-      mainWindow!.loadURL(process.env.ELECTRON_RENDERER_URL).catch(() => {
-        setTimeout(loadRenderer, 1000)
-      })
-    } else {
-      mainWindow!.loadFile(join(__dirname, '../renderer/index.html'))
-    }
-  }
   loadRenderer()
 
   hardenWebContents(mainWindow.webContents)
@@ -1390,7 +1456,7 @@ async function startProtectionFromTray(): Promise<void> {
     const errorMsg = 'Прокси не найден. Запустите VPN-клиент в режиме Proxy или задайте адрес вручную в настройках.'
     recordStartFailure({ id: 'local-proxy', name: 'Local Proxy', mode: 'hard' }, errorMsg)
     notify('error', 'Прокси не найден', errorMsg, 'connectionError')
-    mainWindow?.show()
+    restoreAndFocusMainWindow()
     return
   }
   refreshTrayState({ proxyAddr: resolved.proxyAddr })
@@ -1418,7 +1484,7 @@ async function runTrayDiagnostics(): Promise<void> {
         ? 'Найдена критичная проблема маршрутизации.'
         : 'Есть предупреждения, откройте приложение для деталей.'
   notify(result.summary === 'fail' ? 'error' : result.summary === 'warn' ? 'warn' : 'info', 'Проверка маршрута', message)
-  mainWindow?.show()
+  restoreAndFocusMainWindow()
 }
 
 async function quitFromTray(): Promise<void> {
@@ -1608,10 +1674,32 @@ app.whenReady().then(async () => {
             : 'сменился IP-адрес'
     }
   })
-  powerMonitor.on('resume', () => {
+  const handleSystemWake = (source: 'resume' | 'unlock-screen') => {
     lastResumeAt = Date.now()
-    logEvent('info', 'app', 'system resumed from sleep')
-  })
+    logEvent('info', 'app', `system woke up (${source})`)
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow.webContents.isCrashed()) {
+        logEvent('warn', 'app', 'detected crashed webContents on system wake; reloading')
+        loadRenderer()
+      } else {
+        try {
+          if (mainWindow.isVisible()) {
+            mainWindow.webContents.invalidate()
+          }
+          sendToMainWindow('app:resumed-from-sleep')
+        } catch (err: any) {
+          logEvent('warn', 'app', 'failed waking renderer after sleep', { err: err?.message })
+        }
+      }
+    }
+  }
+
+  powerMonitor.on('resume', () => handleSystemWake('resume'))
+  try {
+    powerMonitor.on('unlock-screen', () => handleSystemWake('unlock-screen'))
+  } catch {
+    /* platform may not support unlock-screen */
+  }
   powerMonitor.on('suspend', () => {
     logEvent('info', 'app', 'system suspending')
   })
@@ -2297,7 +2385,7 @@ app.whenReady().then(async () => {
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
-    else mainWindow?.show()
+    else restoreAndFocusMainWindow()
   })
 })
 

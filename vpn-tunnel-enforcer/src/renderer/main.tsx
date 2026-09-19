@@ -3,7 +3,29 @@ import ReactDOM from 'react-dom/client'
 import { MotionConfig } from 'framer-motion'
 import './i18n' // Initialize i18n before rendering
 import App from './App'
+import { RootErrorBoundary } from './components/RootErrorBoundary'
 import './styles/globals.css'
+
+// Report uncaught window-level errors to main-process logger
+if (typeof window !== 'undefined') {
+  window.addEventListener('error', (event) => {
+    try {
+      const msg = event.error?.stack || `${event.message} at ${event.filename}:${event.lineno}:${event.colno}`
+      window.electronAPI?.logRenderer?.('error', `[window.onerror] ${msg}`)
+    } catch {
+      /* ignore */
+    }
+  })
+
+  window.addEventListener('unhandledrejection', (event) => {
+    try {
+      const reason = event.reason instanceof Error ? event.reason.stack || event.reason.message : String(event.reason)
+      window.electronAPI?.logRenderer?.('error', `[window.unhandledrejection] ${reason}`)
+    } catch {
+      /* ignore */
+    }
+  })
+}
 
 /**
  * `reducedMotion="user"` is an accessibility fix, not a nicety.
@@ -19,8 +41,10 @@ import './styles/globals.css'
  */
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <MotionConfig reducedMotion="user">
-      <App />
-    </MotionConfig>
+    <RootErrorBoundary>
+      <MotionConfig reducedMotion="user">
+        <App />
+      </MotionConfig>
+    </RootErrorBoundary>
   </React.StrictMode>
 )

@@ -311,6 +311,22 @@ export default function App() {
       i18n.changeLanguage(locale).catch(() => undefined)
     })
 
+    // System resume from sleep / suspend: re-sync connection status
+    const unsubResume = window.electronAPI.onAppResumedFromSleep?.(() => {
+      addLog('info', 'Возобновление работы после спящего режима...')
+      window.electronAPI.getTunStatus()
+        .then((s) => {
+          const store = useAppStore.getState()
+          store.setTunRunning(s.running)
+          store.setTunStartedAt(s.startedAt ?? null)
+        })
+        .catch(() => undefined)
+      window.electronAPI.getFirewallKillSwitchStatus()
+        .then(({ active }) => useAppStore.getState().setFirewallKillSwitchActive(active))
+        .catch(() => undefined)
+      window.electronAPI.recheckPublicIp(false).catch(() => undefined)
+    })
+
     return () => {
       unsubIp()
       unsubTun()
@@ -322,6 +338,7 @@ export default function App() {
       unsubServerActive?.()
       unsubKsBlocked?.()
       unsubI18n?.()
+      unsubResume?.()
     }
   }, [addLog])
 

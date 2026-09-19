@@ -95,8 +95,25 @@ function formatSpeed(bytesPerSecond: number): string {
 
 function showWindow() {
   if (!trayWindow || trayWindow.isDestroyed()) return
+  if (trayWindow.isMinimized()) {
+    trayWindow.restore()
+  }
+  if (trayWindow.webContents.isCrashed()) {
+    try {
+      const { logEvent } = require('./appLogger')
+      logEvent('warn', 'tray', 'webContents was crashed upon showWindow; reloading')
+    } catch {
+      /* ignore */
+    }
+    trayWindow.webContents.reload()
+  }
   trayWindow.show()
   trayWindow.focus()
+  try {
+    trayWindow.webContents.invalidate()
+  } catch {
+    /* ignore */
+  }
 }
 
 function runAction(action?: () => unknown | Promise<unknown>) {
