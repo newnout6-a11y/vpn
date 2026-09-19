@@ -141,3 +141,10 @@ describe('loopback kill-switch allow rules (IPv4 and IPv6)', () => {
   })
 })
 
+describe('curl.exe kill-switch exclusion (regression test for leak self-test false-positive)', () => {
+  it('does not create an allow rule for curl.exe so physical adapter probes and leak tests are strictly enforced', () => {
+    expect(source).not.toContain('allow-curl')
+    expect(source).not.toContain('System32\\curl.exe')
+  })
+})
+
