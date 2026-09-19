@@ -216,14 +216,20 @@ async function activeChromiumTargets(): Promise<ChromiumTarget[]> {
   return result
 }
 
-async function applyChromiumPolicy(target: ChromiumTarget, details: string[]): Promise<boolean> {
+async function applyChromiumPolicy(
+  target: ChromiumTarget,
+  details: string[]
+): Promise<{ changed: boolean; confirmedCount: number; unconfirmedCount: number }> {
   let changed = false
+  let confirmedCount = 0
+  let unconfirmedCount = 0
   const verifiedKeys: string[] = []
   for (const key of target.policyKeys) {
     try {
       const current = await queryValue(key, WEBRTC_POLICY.name)
       if (current === WEBRTC_POLICY.data) {
         verifiedKeys.push(key)
+        confirmedCount++
         details.push(`${target.name}: policy ${key}\\${WEBRTC_POLICY.name} уже применена`)
         continue
       }
@@ -231,11 +237,13 @@ async function applyChromiumPolicy(target: ChromiumTarget, details: string[]): P
       const verified = await queryValue(key, WEBRTC_POLICY.name)
       if (verified === WEBRTC_POLICY.data) {
         verifiedKeys.push(key)
+        confirmedCount++
         details.push(`${target.name}: policy ${key}\\${WEBRTC_POLICY.name}=${WEBRTC_POLICY.data}`)
+        changed = true
       } else {
+        unconfirmedCount++
         details.push(`${target.name}: policy ${key}\\${WEBRTC_POLICY.name} write was not confirmed by read-back`)
       }
-      changed = true
     } catch (err: any) {
       details.push(`${target.name}: не удалось записать policy ${key}: ${err?.message || String(err)}`)
     }
@@ -246,7 +254,7 @@ async function applyChromiumPolicy(target: ChromiumTarget, details: string[]): P
   ) {
     details.push(`${target.name}: only HKCU WebRTC policy was confirmed; HKLM policy was not confirmed`)
   }
-  return changed
+  return { changed, confirmedCount, unconfirmedCount }
 }
 
 function stringifyJsonLikeOriginal(data: unknown, original: string): string {
@@ -358,23 +366,39 @@ export async function applyBrowserLeakProtection(): Promise<BrowserHardeningResu
 
   const manifest = await ensureManifest(targets.flatMap(target => target.policyKeys))
   let changed = false
+  let allTargetsProtected = true
+  let anyUnconfirmed = false
+
   for (const target of targets) {
-    const policyChanged = await applyChromiumPolicy(target, details)
+    const policyResult = await applyChromiumPolicy(target, details)
     const prefsChanged = await applyChromiumPreferences(target, manifest, details)
-    changed = changed || policyChanged || prefsChanged
+    changed = changed || policyResult.changed || prefsChanged
+    if (policyResult.unconfirmedCount > 0) {
+      anyUnconfirmed = true
+    }
+    const isTargetProtected = policyResult.confirmedCount > 0 || prefsChanged
+    if (!isTargetProtected) {
+      allTargetsProtected = false
+    }
   }
-  changed = await applyFirefoxPreferences(manifest, details) || changed
+  changed = (await applyFirefoxPreferences(manifest, details)) || changed
+
+  const success = allTargetsProtected
 
   const result = {
-    success: true,
+    success,
     changed,
-    restartRequired: true,
-    message: changed
-      ? 'Защита браузеров от WebRTC/IP leak применена. Полностью закройте браузеры, включая фоновые процессы, и откройте заново.'
-      : 'Настройки защиты уже применены. Если браузер был открыт — полностью перезапустите его.',
+    restartRequired: changed || success,
+    message: !success
+      ? (anyUnconfirmed
+          ? 'Запись WebRTC policy не была подтверждена при обратном чтении. Проверьте права администратора.'
+          : 'Не удалось применить политику защиты браузера.')
+      : changed
+        ? 'Защита браузеров от WebRTC/IP leak применена. Полностью закройте браузеры, включая фоновые процессы, и откройте заново.'
+        : 'Настройки защиты уже применены. Если браузер был открыт — полностью перезапустите его.',
     details
   }
-  logEvent('info', 'browser-hardening', 'browser leak protection applied', result)
+  logEvent(success ? 'info' : 'warn', 'browser-hardening', 'browser leak protection applied', result)
   return result
 }
 

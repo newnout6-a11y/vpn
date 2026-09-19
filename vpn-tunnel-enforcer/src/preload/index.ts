@@ -148,6 +148,7 @@ export interface ElectronAPI {
   killSwitchBrowseApp: () => Promise<{ path: string; name: string } | null>
   // DNS Profiles
   dnsList: () => Promise<any[]>
+  dnsGetActive: () => Promise<string | null>
   dnsCreate: (profile: { name: string; primary: string; secondary: string; type: 'plain' | 'doh' | 'dot' }) => Promise<any>
   dnsUpdate: (id: string, patch: any) => Promise<any>
   dnsDelete: (id: string) => Promise<void>
@@ -475,6 +476,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   rotationRotateNow: () => ipcRenderer.invoke('rotation:rotate-now'),
   // DNS Profiles
   dnsList: () => ipcRenderer.invoke('dns:list'),
+  dnsGetActive: () => ipcRenderer.invoke('dns:get-active'),
   dnsCreate: (profile: { name: string; primary: string; secondary: string; type: 'plain' | 'doh' | 'dot' }) => ipcRenderer.invoke('dns:create', assertPlainObject(profile, 'profile')),
   dnsUpdate: (id: string, patch: any) => ipcRenderer.invoke('dns:update', assertString(id, 'id'), assertPlainObject(patch, 'patch')),
   dnsDelete: (id: string) => ipcRenderer.invoke('dns:delete', assertString(id, 'id')),

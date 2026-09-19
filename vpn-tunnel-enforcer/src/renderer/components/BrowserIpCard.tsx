@@ -1,9 +1,9 @@
-import { useState } from 'react'
+import { useState, useRef } from 'react'
 import { CheckCircle2, Eye, Globe2, Loader2, RadioTower, RefreshCw, ShieldAlert, TriangleAlert } from 'lucide-react'
 import { useAppStore, type BrowserIpCheck } from '../store'
 import { MacCard, MacButton } from '../design-system'
 
-interface WebRtcCandidate {
+export interface WebRtcCandidate {
   type: string
   address: string
   protocol: string
@@ -14,7 +14,29 @@ const IPV4_URLS = [
   'https://api.myip.com'
 ]
 
-function isPrivateIp(ip: string): boolean {
+export function unwrapIpv4Mapped(ip: string): string {
+  const trimmed = ip.trim().toLowerCase()
+  // Match dot-decimal IPv4-mapped IPv6: ::ffff:192.168.1.1 or 0:0:0:0:0:ffff:192.168.1.1
+  const dotMatch = trimmed.match(/^(?:::ffff:|(?:0+:){5}ffff:)(\d{1,3}(?:\.\d{1,3}){3})$/i)
+  if (dotMatch) {
+    return dotMatch[1]
+  }
+  // Match hex IPv4-mapped IPv6: ::ffff:c0a8:0101 or 0:0:0:0:0:ffff:c0a8:0101
+  const hexMatch = trimmed.match(/^(?:::ffff:|(?:0+:){5}ffff:)([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i)
+  if (hexMatch) {
+    const high = parseInt(hexMatch[1], 16)
+    const low = parseInt(hexMatch[2], 16)
+    const b1 = (high >> 8) & 0xff
+    const b2 = high & 0xff
+    const b3 = (low >> 8) & 0xff
+    const b4 = low & 0xff
+    return `${b1}.${b2}.${b3}.${b4}`
+  }
+  return trimmed
+}
+
+export function isPrivateIp(rawIp: string): boolean {
+  const ip = unwrapIpv4Mapped(rawIp)
   return (
     ip.startsWith('10.') ||
     ip.startsWith('127.') ||
@@ -22,6 +44,7 @@ function isPrivateIp(ip: string): boolean {
     ip.startsWith('192.168.') ||
     /^172\.(1[6-9]|2\d|3[01])\./.test(ip) ||
     ip === '::1' ||
+    ip === '::' ||
     /^fe80:/i.test(ip) ||
     /^fc|^fd/i.test(ip)
   )
@@ -133,7 +156,7 @@ function collectWebRtcCandidates(timeoutMs = 4500): Promise<{ candidates: WebRtc
   })
 }
 
-function summarize(args: {
+export function summarize(args: {
   browserIpv4: string | null
   browserIpv6: string | null
   nodeIp: string | null
@@ -225,8 +248,10 @@ export function BrowserIpCard() {
   const [hardening, setHardening] = useState(false)
   const [rollingBack, setRollingBack] = useState(false)
   const [hardeningMessage, setHardeningMessage] = useState<string | null>(null)
+  const checkIdRef = useRef(0)
 
   const runCheck = async (silent = false) => {
+    const currentCheckId = ++checkIdRef.current
     setRunning(true)
     if (!silent) addLog('info', 'Проверяем, какой IP видят сайты в браузере…')
     try {
@@ -236,6 +261,9 @@ export function BrowserIpCard() {
         fetchBrowserIpv6(),
         collectWebRtcCandidates()
       ])
+      if (checkIdRef.current !== currentCheckId) {
+        return
+      }
       const result = summarize({
         browserIpv4,
         browserIpv6,
@@ -255,6 +283,9 @@ export function BrowserIpCard() {
         addLog(result.summary === 'fail' ? 'error' : result.summary === 'warn' ? 'warn' : 'info', `Проверка браузера: ${message}`)
       }
     } catch (err: any) {
+      if (checkIdRef.current !== currentCheckId) {
+        return
+      }
       const failed: BrowserIpCheck = {
         ranAt: Date.now(),
         summary: 'fail',
@@ -271,7 +302,9 @@ export function BrowserIpCard() {
       setCheck(failed)
       if (!silent) addLog('error', failed.details[0])
     } finally {
-      setRunning(false)
+      if (checkIdRef.current === currentCheckId) {
+        setRunning(false)
+      }
     }
   }
 

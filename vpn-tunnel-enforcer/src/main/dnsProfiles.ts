@@ -204,8 +204,12 @@ const store = new Store<DnsStore>({
 // ─── Profile Management ──────────────────────────────────────────────────────
 
 function getAllProfiles(): DnsProfile[] {
+  const activeId = getActiveProfileId()
   const custom = store.get('customProfiles') ?? []
-  return [...BUILTIN_PROFILES, ...custom]
+  return [...BUILTIN_PROFILES, ...custom].map((p) => ({
+    ...p,
+    isSelected: p.id === activeId
+  }))
 }
 
 function getCustomProfiles(): DnsProfile[] {
@@ -267,6 +271,11 @@ export function registerDnsHandlers(): void {
   // dns:list — returns all profiles (builtin + custom)
   handleLogged('dns:list', async () => {
     return getAllProfiles()
+  })
+
+  // dns:get-active — returns the active DNS profile ID
+  handleLogged('dns:get-active', async () => {
+    return getActiveProfileId()
   })
 
   // dns:create — creates a new custom DNS profile

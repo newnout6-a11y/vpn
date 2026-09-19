@@ -350,6 +350,7 @@ export interface DnsProfile {
   secondary: string
   type: 'plain' | 'doh' | 'dot'
   isBuiltin: boolean
+  isSelected?: boolean
 }
 
 /** Domain routing action */

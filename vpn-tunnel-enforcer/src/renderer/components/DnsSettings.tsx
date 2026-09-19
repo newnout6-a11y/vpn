@@ -68,10 +68,17 @@ export const DnsSettings: React.FC = () => {
   // Load profiles from main process
   const loadProfiles = useCallback(async () => {
     try {
-      const list = await window.electronAPI.dnsList()
+      const [list, currentActiveId] = await Promise.all([
+        window.electronAPI.dnsList(),
+        typeof window.electronAPI.dnsGetActive === 'function'
+          ? window.electronAPI.dnsGetActive()
+          : Promise.resolve(null)
+      ])
       setProfiles(list)
-      // Determine active profile from the list (the one that was selected)
-      // We'll track it locally after selection
+      const active = currentActiveId ?? list.find((p: any) => p.isSelected)?.id ?? null
+      if (active) {
+        setActiveId(active)
+      }
     } catch (err) {
       console.error('Failed to load DNS profiles:', err)
     } finally {

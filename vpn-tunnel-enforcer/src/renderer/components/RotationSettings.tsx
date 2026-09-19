@@ -9,13 +9,14 @@
  * - Calls 'rotation:set-config' IPC when settings change
  * - Shows current rotation status: current profile name, time until next rotation
  * - "Rotate Now" button that calls 'rotation:rotate-now' IPC
+ * - Handles IPC errors with user feedback and state synchronization
  *
  * Validates: Requirements 9.1, 9.3, 9.5
  */
 
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { RefreshCw, Clock, Shuffle } from 'lucide-react'
+import { RefreshCw, Clock, Shuffle, TriangleAlert } from 'lucide-react'
 import { MacCard } from '../design-system/MacCard'
 import { MacSwitch } from '../design-system/MacSwitch'
 import { MacInput } from '../design-system/MacInput'
@@ -53,6 +54,7 @@ export const RotationSettings: React.FC = () => {
   const [profiles, setProfiles] = useState<ServerProfile[]>([])
   const [intervalInput, setIntervalInput] = useState('')
   const [intervalError, setIntervalError] = useState<string | undefined>(undefined)
+  const [ipcError, setIpcError] = useState<string | null>(null)
   const [rotating, setRotating] = useState(false)
   const [, setTick] = useState(0)
   const tickRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -66,8 +68,8 @@ export const RotationSettings: React.FC = () => {
       const cfg: RotationConfig = await api.rotationGetConfig()
       setConfig(cfg)
       setIntervalInput(String(cfg.intervalMinutes))
-    } catch {
-      // IPC not yet available
+    } catch (err: any) {
+      setIpcError(err?.message || 'Не удалось загрузить настройки ротации')
     }
   }, [api])
 
@@ -75,8 +77,8 @@ export const RotationSettings: React.FC = () => {
     try {
       const list: ServerProfile[] = await api.serversList()
       setProfiles(list)
-    } catch {
-      // IPC not yet available
+    } catch (err: any) {
+      setIpcError(err?.message || 'Не удалось загрузить список серверов')
     }
   }, [api])
 
@@ -104,17 +106,21 @@ export const RotationSettings: React.FC = () => {
   const updateConfig = useCallback(
     async (partial: Partial<RotationConfig>) => {
       try {
+        setIpcError(null)
         const updated: RotationConfig = await api.rotationSetConfig(partial)
         setConfig(updated)
         setIntervalInput(String(updated.intervalMinutes))
-      } catch {
-        // IPC error
+      } catch (err: any) {
+        setIpcError(err?.message || 'Не удалось сохранить настройки ротации')
+        if (config) {
+          setIntervalInput(String(config.intervalMinutes))
+        }
       }
     },
-    [api]
+    [api, config]
   )
 
-  // ─── Handlers ────────────────────────────────────────────────────────────
+  // ─── Handlers ────────────────────────────────────────────────────
 
   const handleToggleEnabled = (checked: boolean) => {
     updateConfig({ enabled: checked })
@@ -169,11 +175,12 @@ export const RotationSettings: React.FC = () => {
 
   const handleRotateNow = async () => {
     setRotating(true)
+    setIpcError(null)
     try {
       await api.rotationRotateNow()
       await fetchConfig()
-    } catch {
-      // IPC error
+    } catch (err: any) {
+      setIpcError(err?.message || 'Не удалось выполнить ротацию')
     } finally {
       setRotating(false)
     }
@@ -198,16 +205,60 @@ export const RotationSettings: React.FC = () => {
   if (!config) {
     return (
       <MacCard>
-        <div className="flex items-center gap-2 text-[var(--color-text-secondary)]">
-          <RefreshCw size={18} className="animate-spin" />
-          <span className="text-sm">{t('common.loading')}</span>
-        </div>
+        {ipcError ? (
+          <div
+            role="alert"
+            className="flex items-center justify-between p-3 rounded-[var(--radius-sm)] bg-red-500/10 border border-red-500/30 text-red-400 text-xs"
+          >
+            <div className="flex items-center gap-2">
+              <TriangleAlert size={16} className="shrink-0 text-red-400" />
+              <span>{ipcError}</span>
+            </div>
+            <MacButton
+              variant="secondary"
+              size="sm"
+              onClick={() => {
+                setIpcError(null)
+                fetchConfig()
+                fetchProfiles()
+              }}
+            >
+              Повторить
+            </MacButton>
+          </div>
+        ) : (
+          <div className="flex items-center gap-2 text-[var(--color-text-secondary)]">
+            <RefreshCw size={18} className="animate-spin" />
+            <span className="text-sm">{t('common.loading')}</span>
+          </div>
+        )}
       </MacCard>
     )
   }
 
   return (
     <MacCard className="space-y-5">
+      {/* Error banner */}
+      {ipcError && (
+        <div
+          role="alert"
+          className="flex items-center justify-between p-3 rounded-[var(--radius-sm)] bg-red-500/10 border border-red-500/30 text-red-400 text-xs"
+        >
+          <div className="flex items-center gap-2">
+            <TriangleAlert size={16} className="shrink-0 text-red-400" />
+            <span>{ipcError}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setIpcError(null)}
+            className="text-red-400 hover:text-red-300 font-bold ml-2 px-1 text-sm leading-none"
+            aria-label="Dismiss error"
+          >
+            ×
+          </button>
+        </div>
+      )}
+
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">

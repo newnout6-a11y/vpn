@@ -126,6 +126,27 @@ describe('browserHardening module', () => {
     )
   })
 
+  it('returns success: false when policy write is not confirmed by read-back', async () => {
+    mockExistsSync.mockImplementation((p: string) => {
+      return typeof p === 'string' && p.includes('Google\\Chrome\\User Data')
+    })
+    mockExecFile.mockImplementation((file: string, args: string[], _opts: any, cb: any) => {
+      if (args[0] === 'query') {
+        // Always return not found, simulating read-back failure
+        cb(new Error('not found'), null)
+      } else {
+        cb(null, { stdout: '', stderr: '' })
+      }
+    })
+
+    const { applyBrowserLeakProtection } = await import('./browserHardening')
+    const res = await applyBrowserLeakProtection()
+
+    expect(res.success).toBe(false)
+    expect(res.changed).toBe(false)
+    expect(res.message).toContain('не была подтверждена при обратном чтении')
+  })
+
   it('rolls back browser hardening from manifest', async () => {
     mockReadFile.mockResolvedValue(JSON.stringify({
       createdAt: 123456789,
