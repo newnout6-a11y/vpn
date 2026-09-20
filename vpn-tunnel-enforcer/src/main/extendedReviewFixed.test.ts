@@ -87,11 +87,28 @@ it('verifies packet loss/timeout without ICMP PacketTooBig yields lower_bound PM
 })
 
 it('verifies IPv6 uses 48B header overhead (40B IPv6 + 8B ICMPv6)', async () => {
-  state.ps = { Status: 'ok', BestPayload: 1372, TooBigCount: 2, TimeoutCount: 0 }
+  state.ps = { Status: 'ok', LargestAccepted: 1372, SmallestTooBig: 1380, TooBigCount: 2, TimeoutCount: 0 }
   const result = await probePmtu('2001:4860:4860::8888')
   expect(result.family).toBe(6)
   expect(result.pmtu).toBe(1420)
   expect(result.status).toBe('ok')
+})
+
+it('verifies wide gap between accepted and rejected yields lower_bound with interval', async () => {
+  state.ps = {
+    Status: 'ok',
+    LargestAccepted: 1372,
+    SmallestTooBig: 1472,
+    AcceptedCount: 1,
+    TooBigCount: 1,
+    TimeoutCount: 0
+  }
+  const result = await probePmtu('8.8.8.8')
+  expect(result.status).toBe('lower_bound')
+  expect(result.pmtu).toBe(1400)
+  expect(result.minTested).toBe(1400)
+  expect(result.maxTested).toBe(1500)
+  expect(result.detail).toContain('[1400 .. 1500]')
 })
 
 it('verifies healthy profile on underlay is not flagged as leak without baseline evidence', () => {

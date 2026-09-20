@@ -129,9 +129,9 @@ describe('Extended Live Server Probe Unit & Contract Tests', () => {
 
   describe('parseCloudflareTrace Reflector Parsing', () => {
     it('parses valid cloudflare trace payload', () => {
-      const trace = `fl=123f45\nh=1.1.1.1\nip=203.0.113.195\nts=1700000000\nvisit_scheme=https\nuag=Mozilla/5.0\ncolo=FRA\nsliver=none\nhttp=http/2\nloc=DE\ntls=TLSv1.3\nsni=plaintext\nwarp=off\ngateway=off\nrbi=off\nkex=X25519\n`
+      const trace = `fl=123f45\nh=1.1.1.1\nip=198.41.214.162\nts=1700000000\nvisit_scheme=https\nuag=Mozilla/5.0\ncolo=FRA\nsliver=none\nhttp=http/2\nloc=DE\ntls=TLSv1.3\nsni=plaintext\nwarp=off\ngateway=off\nrbi=off\nkex=X25519\n`
       const parsed = parseCloudflareTrace(trace)
-      expect(parsed.egressIp).toBe('203.0.113.195')
+      expect(parsed.egressIp).toBe('198.41.214.162')
       expect(parsed.country).toBe('DE')
     })
 

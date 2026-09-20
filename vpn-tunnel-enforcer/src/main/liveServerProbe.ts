@@ -226,8 +226,8 @@ export async function queryDoH(
       fetchWithTimeout('AAAA')
     ])
 
-    let lastErr = ''
-    let dnsError: string | undefined
+    let aError: string | undefined
+    let aaaaError: string | undefined
 
     if (resA.status === 'fulfilled') {
       const data = resA.value
@@ -236,7 +236,7 @@ export async function queryDoH(
       truncated = data.TC
       if (rcode !== undefined && rcode !== 0) {
         const rcodeStr = rcode === 3 ? 'NXDOMAIN' : rcode === 2 ? 'SERVFAIL' : rcode === 5 ? 'REFUSED' : `RCODE_${rcode}`
-        dnsError = `DNS ${rcodeStr}`
+        aError = `DNS A: ${rcodeStr}`
       } else if (Array.isArray(data.Answer)) {
         for (const ans of data.Answer) {
           if (!ans?.data) continue
@@ -265,7 +265,7 @@ export async function queryDoH(
         }
       }
     } else {
-      lastErr = resA.reason?.message || 'A lookup failed'
+      aError = resA.reason?.message || 'A lookup failed'
     }
 
     if (resAAAA.status === 'fulfilled') {
@@ -273,9 +273,9 @@ export async function queryDoH(
       if (rcode === undefined || rcode === 0) rcode = data.Status
       if (adFlag === undefined) adFlag = data.AD
       if (truncated === undefined) truncated = data.TC
-      if (data.Status !== undefined && data.Status !== 0 && !dnsError) {
+      if (data.Status !== undefined && data.Status !== 0) {
         const rcodeStr = data.Status === 3 ? 'NXDOMAIN' : data.Status === 2 ? 'SERVFAIL' : data.Status === 5 ? 'REFUSED' : `RCODE_${data.Status}`
-        dnsError = `DNS ${rcodeStr}`
+        aaaaError = `DNS AAAA: ${rcodeStr}`
       }
       if (data.Status === 0 && Array.isArray(data.Answer)) {
         for (const ans of data.Answer) {
@@ -296,20 +296,38 @@ export async function queryDoH(
           }
         }
       }
+    } else {
+      aaaaError = resAAAA.reason?.message || 'AAAA lookup failed'
     }
 
-    const isOk = !dnsError && (resA.status === 'fulfilled' || resAAAA.status === 'fulfilled') && recs.length > 0
+    const aSuccess = !aError && resA.status === 'fulfilled'
+    const aaaaSuccess = !aaaaError && resAAAA.status === 'fulfilled'
+    const hasRecords = recs.length > 0
+
+    let status: 'ok' | 'partial' | 'error' = 'error'
+    let combinedError: string | undefined
+
+    if (aSuccess && aaaaSuccess && hasRecords) {
+      status = 'ok'
+    } else if ((aSuccess || aaaaSuccess) && hasRecords) {
+      status = 'partial'
+      combinedError = aError || aaaaError
+    } else {
+      status = 'error'
+      combinedError = [aError, aaaaError].filter(Boolean).join('; ') || 'No records returned'
+    }
+
     return {
       resolverId,
       resolverName,
       endpoint: urlBase,
-      status: isOk ? 'ok' : 'error',
+      status,
       durationMs: Date.now() - started,
       authenticatedData: adFlag,
       records: recs,
       truncated,
       rcode,
-      error: isOk ? undefined : (dnsError || lastErr || 'No records returned')
+      error: combinedError
     }
   } catch (err: any) {
     return {
@@ -1445,7 +1463,23 @@ export function evaluateLiveCheckFindings(
   }
 
   // 9. Egress vs Endpoint Findings
-  if (check.egress && check.egress.status === 'ok') {
+  if (check.egress && check.egress.status === 'error') {
+    findings.push({
+      code: 'EGRESS_VERIFICATION_FAILED',
+      severity: 'error',
+      title: 'Сбой проверки выхода в интернет (Egress)',
+      detail: check.egress.error || 'Рефлекторы не подтвердили выход через туннель',
+      evidence: { status: check.egress.status }
+    })
+  } else if (check.egress && check.egress.status === 'partial') {
+    findings.push({
+      code: 'EGRESS_PARTIAL',
+      severity: 'warning',
+      title: 'Частичное подтверждение выхода в интернет',
+      detail: check.egress.error || 'Один из рефлекторов выхода не ответил или обнаружено расхождение',
+      evidence: { status: check.egress.status }
+    })
+  } else if (check.egress && check.egress.status === 'ok') {
     if (check.egress.exitIpv4 && check.egress.matchesEndpoint === false) {
       findings.push({
         code: 'EGRESS_DIFFERS_FROM_ENDPOINT',
@@ -1554,14 +1588,72 @@ export function execPs(
 
 let activeHandshakeWorkerLock: Promise<void> = Promise.resolve()
 
-export async function withHandshakeWorkerLock<T>(fn: () => Promise<T>): Promise<T> {
+export async function withHandshakeWorkerLock<T>(
+  fn: () => Promise<T>,
+  options?: { signal?: AbortSignal; queueTimeoutMs?: number }
+): Promise<T> {
+  const queueTimeoutMs = options?.queueTimeoutMs ?? 15000
+  const signal = options?.signal
+
+  if (signal?.aborted) {
+    throw new Error('Cancelled')
+  }
+
   const previousLock = activeHandshakeWorkerLock
   let release: () => void = () => {}
-  activeHandshakeWorkerLock = new Promise<void>(resolve => {
+  const currentLock = new Promise<void>(resolve => {
     release = resolve
   })
+  activeHandshakeWorkerLock = currentLock
+
   try {
-    await previousLock
+    await new Promise<void>((resolve, reject) => {
+      let timer: NodeJS.Timeout | null = null
+      let settled = false
+
+      const cleanup = () => {
+        if (timer) clearTimeout(timer)
+        signal?.removeEventListener('abort', onAbort)
+      }
+
+      const onAbort = () => {
+        if (settled) return
+        settled = true
+        cleanup()
+        reject(new Error('Cancelled'))
+      }
+
+      const onTimeout = () => {
+        if (settled) return
+        settled = true
+        cleanup()
+        reject(new Error(`Handshake worker queue lease timeout (${queueTimeoutMs}ms)`))
+      }
+
+      if (signal?.aborted) {
+        onAbort()
+        return
+      }
+
+      signal?.addEventListener('abort', onAbort, { once: true })
+      timer = setTimeout(onTimeout, queueTimeoutMs)
+
+      previousLock.then(
+        () => {
+          if (settled) return
+          settled = true
+          cleanup()
+          resolve()
+        },
+        () => {
+          if (settled) return
+          settled = true
+          cleanup()
+          resolve()
+        }
+      )
+    })
+
     return await fn()
   } finally {
     release()
@@ -1571,7 +1663,7 @@ export async function withHandshakeWorkerLock<T>(fn: () => Promise<T>): Promise<
 /**
  * Stage 8: Tunnel Handshake & Fresh Egress Probe
  * Spawns an isolated ephemeral proxy instance, verifies end-to-end handshake,
- * and requests exit IPs from dual independent reflectors.
+ * and requests exit IPs from dual independent reflectors (including IPv6 reflector).
  */
 export async function probeTunnelHandshakeAndEgress(
   profile?: ServerProfile | null,
@@ -1613,297 +1705,380 @@ export async function probeTunnelHandshakeAndEgress(
     }
   }
 
-  return withHandshakeWorkerLock(async () => {
-    if (signal?.aborted) {
-      return {
-        handshake: { status: 'skipped', durationMs: 0, protocol: profile?.protocol, error: 'Cancelled' },
-        egress: { status: 'skipped', durationMs: 0, reflectors: [], error: 'Cancelled' }
-      }
-    }
-
-    if (!profile || !profile.outbound || typeof profile.outbound !== 'object') {
-      return {
-        handshake: {
-          status: 'skipped',
-          durationMs: 0,
-          protocol: profile?.protocol,
-          error: 'Профиль не выбран или не имеет конфигурации outbound'
-        },
-        egress: {
-          status: 'skipped',
-          durationMs: 0,
-          reflectors: [],
-          error: 'Проверка egress пропущена: профиль не настроен'
+  try {
+    return await withHandshakeWorkerLock(async () => {
+      if (signal?.aborted) {
+        return {
+          handshake: { status: 'skipped', durationMs: 0, protocol: profile?.protocol, error: 'Cancelled' },
+          egress: { status: 'skipped', durationMs: 0, reflectors: [], error: 'Cancelled' }
         }
       }
-    }
 
-    const outbound = profile.outbound
-    const workDirPrefix = 'vpnte-live-handshake-'
-    const pidFileName = 'engine.pid'
-    let workDir: string | null = null
-    let child: any = null
-    let logText = ''
-    let cfSocket: net.Socket | null = null
-    let ipifySocket: net.Socket | null = null
-
-    const abortHandler = () => {
-      if (child) {
-        try { child.kill('SIGKILL') } catch {}
-      }
-      if (cfSocket) {
-        try { cfSocket.destroy() } catch {}
-      }
-      if (ipifySocket) {
-        try { ipifySocket.destroy() } catch {}
-      }
-    }
-
-    if (signal) {
-      signal.addEventListener('abort', abortHandler, { once: true })
-    }
-
-    try {
-      workDir = await mkdtemp(join(tmpdir(), workDirPrefix))
-      const logPath = join(workDir, 'engine.log')
-      const pidPath = join(workDir, pidFileName)
-      const inboundPort = await pickFreeLocalPort()
-
-      const tunStatus = tunController.getStatus()
-      let directProxy: { host: string; port: number } | null = null
-      if (tunStatus.running && tunStatus.proxyAddr) {
-        const directPort = getDirectProxyPort()
-        if (directPort) directProxy = { host: '127.0.0.1', port: directPort }
-      }
-      const physicalAdapter = directProxy
-        ? null
-        : (await getPhysicalAdapterDnsSources().catch(() => []))[0] ?? null
-
-      const proxyEngineSetting = settingsStore.get().proxyEngine ?? 'auto'
-      const engine = resolveProxyEngine(outbound, proxyEngineSetting)
-      const isXray = engine === 'xray'
-      const probeExe = isXray ? getBundledResource('xray.exe') : getBundledResource('sing-box.exe')
-
-      if (!probeExe) {
+      if (!profile || !profile.outbound || typeof profile.outbound !== 'object') {
         return {
           handshake: {
             status: 'skipped',
-            durationMs: Date.now() - started,
-            protocol: profile.protocol,
-            error: 'Бинарный файл движка (sing-box/xray) не найден'
+            durationMs: 0,
+            protocol: profile?.protocol,
+            error: 'Профиль не выбран или не имеет конфигурации outbound'
           },
           egress: {
             status: 'skipped',
             durationMs: 0,
             reflectors: [],
-            error: 'Движок туннеля не найден'
+            error: 'Проверка egress пропущена: профиль не настроен'
           }
         }
       }
 
-      if (signal?.aborted) throw new Error('Cancelled')
+      const outbound = profile.outbound
+      const workDirPrefix = 'vpnte-live-handshake-'
+      const pidFileName = 'engine.pid'
+      let workDir: string | null = null
+      let child: any = null
+      let logText = ''
+      let cfSocket: net.Socket | null = null
+      let ipifySocket: net.Socket | null = null
+      let ip6Socket: net.Socket | null = null
 
-      const probeConfigPath = join(workDir, isXray ? 'xray.json' : 'sing-box.json')
-      const config = isXray
-        ? buildXrayProbeConfig(outbound, inboundPort, {
-            directProxy,
-            clientDevice: profile.clientDevice,
-            logPath
-          })
-        : buildKeyProbeConfig(profile, inboundPort, {
-            directProxy,
-            physicalInterface: physicalAdapter?.alias,
-            logPath
-          })
-
-      await writeFile(probeConfigPath, JSON.stringify(config, null, 2), 'utf8')
-
-      if (signal?.aborted) throw new Error('Cancelled')
-
-      child = spawn(probeExe, ['run', '-c', probeConfigPath], {
-        cwd: workDir,
-        windowsHide: true,
-        stdio: ['ignore', 'pipe', 'pipe']
-      })
-
-      child.on('error', (err: any) => {
-        logText += `\n[child error] ${err?.message || err}`
-      })
-
-      await writeManagedChildPidFile(pidPath, {
-        owner: 'live-handshake-probe',
-        pid: child.pid ?? 0,
-        exePath: probeExe,
-        configPath: probeConfigPath,
-        createdAt: Date.now()
-      }).catch(() => {})
-
-      child.stdout?.on('data', (d: Buffer) => { logText += d.toString() })
-      child.stderr?.on('data', (d: Buffer) => { logText += d.toString() })
-
-      // Wait for inbound port with signal
-      await waitForLocalSocks(inboundPort, 2500, signal)
-
-      if (signal?.aborted) throw new Error('Cancelled')
-
-      // Handshake check: connect via local socks inbound to Cloudflare
-      cfSocket = await openTcpViaSocks({ host: '127.0.0.1', port: inboundPort }, '1.1.1.1', 443, 4000)
-      const cfTrace = await verifyHttpsThroughSocket(cfSocket, {
-        host: '1.1.1.1',
-        port: 443,
-        serverName: 'cloudflare-dns.com',
-        path: '/cdn-cgi/trace'
-      }, 4000)
-
-      const handshakeMs = Date.now() - started
-      const handshake: TunnelHandshakeResult = {
-        status: 'ok',
-        durationMs: handshakeMs,
-        protocol: profile.protocol,
-        evidence: {
-          transport: outbound.type || profile.protocol,
-          alpn: outbound.tls?.alpn?.[0],
-          inboundPort
+      const abortHandler = () => {
+        if (child) {
+          try { child.kill('SIGKILL') } catch {}
+        }
+        if (cfSocket) {
+          try { cfSocket.destroy() } catch {}
+        }
+        if (ipifySocket) {
+          try { ipifySocket.destroy() } catch {}
+        }
+        if (ip6Socket) {
+          try { ip6Socket.destroy() } catch {}
         }
       }
 
-      // Egress check using dual reflectors
-      const egressStarted = Date.now()
-      const reflectorResults: EgressReflectorResult[] = []
-
-      if (cfTrace.egressIp) {
-        reflectorResults.push({
-          source: 'cloudflare-trace',
-          ip: cfTrace.egressIp,
-          family: net.isIP(cfTrace.egressIp) === 6 ? 6 : 4,
-          country: cfTrace.country,
-          durationMs: handshakeMs,
-          status: 'ok'
-        })
-      } else {
-        reflectorResults.push({
-          source: 'cloudflare-trace',
-          status: 'error',
-          error: 'Cloudflare trace did not return an IP',
-          durationMs: handshakeMs
-        })
+      if (signal) {
+        signal.addEventListener('abort', abortHandler, { once: true })
       }
 
-      // Reflector 2: ipify over socks
       try {
-        const ipifyStart = Date.now()
-        ipifySocket = await openTcpViaSocks({ host: '127.0.0.1', port: inboundPort }, 'api.ipify.org', 443, 3500)
-        const ipifyTrace = await verifyHttpsThroughSocket(ipifySocket, {
-          host: 'api.ipify.org',
+        workDir = await mkdtemp(join(tmpdir(), workDirPrefix))
+        const logPath = join(workDir, 'engine.log')
+        const pidPath = join(workDir, pidFileName)
+        const inboundPort = await pickFreeLocalPort()
+
+        const tunStatus = tunController.getStatus()
+        let directProxy: { host: string; port: number } | null = null
+        if (tunStatus.running && tunStatus.proxyAddr) {
+          const directPort = getDirectProxyPort()
+          if (directPort) directProxy = { host: '127.0.0.1', port: directPort }
+        }
+        const physicalAdapter = directProxy
+          ? null
+          : (await getPhysicalAdapterDnsSources().catch(() => []))[0] ?? null
+
+        const proxyEngineSetting = settingsStore.get().proxyEngine ?? 'auto'
+        const engine = resolveProxyEngine(outbound, proxyEngineSetting)
+        const isXray = engine === 'xray'
+        const probeExe = isXray ? getBundledResource('xray.exe') : getBundledResource('sing-box.exe')
+
+        if (!probeExe) {
+          return {
+            handshake: {
+              status: 'skipped',
+              durationMs: Date.now() - started,
+              protocol: profile.protocol,
+              error: 'Бинарный файл движка (sing-box/xray) не найден'
+            },
+            egress: {
+              status: 'skipped',
+              durationMs: 0,
+              reflectors: [],
+              error: 'Движок туннеля не найден'
+            }
+          }
+        }
+
+        if (signal?.aborted) throw new Error('Cancelled')
+
+        const probeConfigPath = join(workDir, isXray ? 'xray.json' : 'sing-box.json')
+        const config = isXray
+          ? buildXrayProbeConfig(outbound, inboundPort, {
+              directProxy,
+              clientDevice: profile.clientDevice,
+              logPath
+            })
+          : buildKeyProbeConfig(profile, inboundPort, {
+              directProxy,
+              physicalInterface: physicalAdapter?.alias,
+              logPath
+            })
+
+        await writeFile(probeConfigPath, JSON.stringify(config, null, 2), 'utf8')
+
+        if (signal?.aborted) throw new Error('Cancelled')
+
+        child = spawn(probeExe, ['run', '-c', probeConfigPath], {
+          cwd: workDir,
+          windowsHide: true,
+          stdio: ['ignore', 'pipe', 'pipe']
+        })
+
+        child.on('error', (err: any) => {
+          logText += `\n[child error] ${err?.message || err}`
+        })
+
+        await writeManagedChildPidFile(pidPath, {
+          owner: 'live-handshake-probe',
+          pid: child.pid ?? 0,
+          exePath: probeExe,
+          configPath: probeConfigPath,
+          createdAt: Date.now()
+        }).catch(() => {})
+
+        child.stdout?.on('data', (d: Buffer) => { logText += d.toString() })
+        child.stderr?.on('data', (d: Buffer) => { logText += d.toString() })
+
+        // Wait for inbound port with signal
+        await waitForLocalSocks(inboundPort, 2500, signal)
+
+        if (signal?.aborted) throw new Error('Cancelled')
+
+        // Handshake check: connect via local socks inbound to Cloudflare
+        cfSocket = await openTcpViaSocks({ host: '127.0.0.1', port: inboundPort }, '1.1.1.1', 443, 4000, signal)
+        const cfTrace = await verifyHttpsThroughSocket(cfSocket, {
+          host: '1.1.1.1',
           port: 443,
-          serverName: 'api.ipify.org',
-          path: '/?format=text'
-        }, 3500)
-        if (ipifyTrace.egressIp) {
+          serverName: 'cloudflare-dns.com',
+          path: '/cdn-cgi/trace'
+        }, 4000)
+
+        const handshakeMs = Date.now() - started
+        const handshake: TunnelHandshakeResult = {
+          status: 'ok',
+          durationMs: handshakeMs,
+          protocol: profile.protocol,
+          evidence: {
+            transport: outbound.type || profile.protocol,
+            alpn: outbound.tls?.alpn?.[0],
+            inboundPort
+          }
+        }
+
+        // Egress check using multi reflectors
+        const egressStarted = Date.now()
+        const reflectorResults: EgressReflectorResult[] = []
+
+        if (cfTrace.egressIp) {
           reflectorResults.push({
-            source: 'ipify',
-            ip: ipifyTrace.egressIp,
-            family: 4,
-            durationMs: Date.now() - ipifyStart,
+            source: 'cloudflare-trace',
+            ip: cfTrace.egressIp,
+            family: net.isIP(cfTrace.egressIp) === 6 ? 6 : 4,
+            country: cfTrace.country,
+            durationMs: handshakeMs,
             status: 'ok'
           })
         } else {
           reflectorResults.push({
-            source: 'ipify',
+            source: 'cloudflare-trace',
             status: 'error',
-            error: 'No IP returned by ipify',
-            family: 4,
-            durationMs: Date.now() - ipifyStart
+            error: 'Cloudflare trace did not return an IP',
+            durationMs: handshakeMs
           })
         }
-      } catch (err: any) {
-        reflectorResults.push({
-          source: 'ipify',
-          status: 'error',
-          error: err?.message || 'ipify probe failed',
-          family: 4,
-          durationMs: Date.now() - started
-        })
-      }
 
-      const successfulReflectors = reflectorResults.filter(r => r.status === 'ok' && r.ip)
-      const ipv4Results = successfulReflectors.filter(r => r.family === 4)
-      const exitIpv4 = ipv4Results[0]?.ip
-      const exitIpv6 = successfulReflectors.find(r => r.family === 6)?.ip
-      const country = cfTrace.country
-
-      let reflectorDiscrepancy: string | undefined
-      if (ipv4Results.length >= 2) {
-        const firstIp = ipv4Results[0].ip
-        const mismatch = ipv4Results.find(r => r.ip !== firstIp)
-        if (mismatch) {
-          reflectorDiscrepancy = `Расхождение IP: ${ipv4Results[0].source}=${firstIp} vs ${mismatch.source}=${mismatch.ip}`
-        }
-      }
-
-      const egressStatus: 'ok' | 'partial' | 'error' =
-        successfulReflectors.length >= 2 && !reflectorDiscrepancy
-          ? 'ok'
-          : successfulReflectors.length > 0
-            ? 'partial'
-            : 'error'
-
-      const egress: LiveEgressResult = {
-        status: egressStatus,
-        durationMs: Date.now() - egressStarted,
-        exitIpv4,
-        exitIpv6,
-        country,
-        reflectors: reflectorResults,
-        endpointIp,
-        matchesEndpoint: exitIpv4 && endpointIp ? exitIpv4 === endpointIp : undefined,
-        underlayPath: 'route-selected'
-      }
-
-      return { handshake, egress }
-    } catch (err: any) {
-      let diskLogs = ''
-      if (workDir) {
+        // Reflector 2: ipify over socks (IPv4)
         try {
-          diskLogs = await readFile(join(workDir, 'engine.log'), 'utf8')
-        } catch {}
-      }
-      const combinedLogs = `${logText}\n${diskLogs}`
-      const classified = classifyOutboundProbeFailure(profile.protocol, combinedLogs, err?.message || '')
-      let handshakeStatus: TunnelHandshakeResult['status'] = 'transport_failed'
-      if (classified.includes('auth')) handshakeStatus = 'auth_failed'
-      else if (classified === 'timeout') handshakeStatus = 'timeout'
-
-      return {
-        handshake: {
-          status: handshakeStatus,
-          durationMs: Date.now() - started,
-          protocol: profile.protocol,
-          error: err?.message || classified,
-          evidence: {
-            transport: profile?.outbound?.type || profile?.protocol,
-            detail: classified
+          const ipifyStart = Date.now()
+          ipifySocket = await openTcpViaSocks({ host: '127.0.0.1', port: inboundPort }, 'api.ipify.org', 443, 3500, signal)
+          const ipifyTrace = await verifyHttpsThroughSocket(ipifySocket, {
+            host: 'api.ipify.org',
+            port: 443,
+            serverName: 'api.ipify.org',
+            path: '/?format=text'
+          }, 3500)
+          if (ipifyTrace.egressIp) {
+            reflectorResults.push({
+              source: 'ipify',
+              ip: ipifyTrace.egressIp,
+              family: 4,
+              durationMs: Date.now() - ipifyStart,
+              status: 'ok'
+            })
+          } else {
+            reflectorResults.push({
+              source: 'ipify',
+              status: 'error',
+              error: 'No IP returned by ipify',
+              family: 4,
+              durationMs: Date.now() - ipifyStart
+            })
           }
-        },
-        egress: {
-          status: 'skipped',
-          durationMs: 0,
-          reflectors: [],
-          error: `Рукопожатие завершилось ошибкой (${classified})`
+        } catch (err: any) {
+          if (signal?.aborted) throw err
+          reflectorResults.push({
+            source: 'ipify',
+            status: 'error',
+            error: err?.message || 'ipify probe failed',
+            family: 4,
+            durationMs: Date.now() - started
+          })
+        }
+
+        // Reflector 3: IPv6 egress check (api6.ipify.org)
+        let exitIpv6: string | undefined
+        let ipv6Status: 'ok' | 'unsupported' | 'error' = 'unsupported'
+
+        if (cfTrace.egressIp && net.isIP(cfTrace.egressIp) === 6) {
+          exitIpv6 = cfTrace.egressIp
+          ipv6Status = 'ok'
+        }
+
+        try {
+          const ip6Start = Date.now()
+          ip6Socket = await openTcpViaSocks({ host: '127.0.0.1', port: inboundPort }, 'api6.ipify.org', 443, 3500, signal)
+          const ip6Trace = await verifyHttpsThroughSocket(ip6Socket, {
+            host: 'api6.ipify.org',
+            port: 443,
+            serverName: 'api6.ipify.org',
+            path: '/?format=text'
+          }, 3500)
+          if (ip6Trace.egressIp && net.isIP(ip6Trace.egressIp) === 6) {
+            exitIpv6 = ip6Trace.egressIp
+            ipv6Status = 'ok'
+            reflectorResults.push({
+              source: 'ipify-v6',
+              ip: ip6Trace.egressIp,
+              family: 6,
+              durationMs: Date.now() - ip6Start,
+              status: 'ok'
+            })
+          } else {
+            reflectorResults.push({
+              source: 'ipify-v6',
+              family: 6,
+              durationMs: Date.now() - ip6Start,
+              status: 'unsupported',
+              error: 'IPv6 не поддерживается туннелем или провайдером'
+            })
+          }
+        } catch (err: any) {
+          if (signal?.aborted) throw err
+          reflectorResults.push({
+            source: 'ipify-v6',
+            family: 6,
+            status: 'unsupported',
+            error: 'IPv6 не поддерживается туннелем или провайдером',
+            durationMs: Date.now() - started
+          })
+        }
+
+        const successfulReflectors = reflectorResults.filter(r => r.status === 'ok' && r.ip)
+        const ipv4Results = successfulReflectors.filter(r => r.family === 4)
+        const exitIpv4 = ipv4Results[0]?.ip
+        if (!exitIpv6) {
+          exitIpv6 = successfulReflectors.find(r => r.family === 6)?.ip
+        }
+        const country = cfTrace.country
+
+        let reflectorDiscrepancy: string | undefined
+        if (ipv4Results.length >= 2) {
+          const firstIp = ipv4Results[0].ip
+          const mismatch = ipv4Results.find(r => r.ip !== firstIp)
+          if (mismatch) {
+            reflectorDiscrepancy = `Расхождение IP: ${ipv4Results[0].source}=${firstIp} vs ${mismatch.source}=${mismatch.ip}`
+          }
+        }
+
+        const egressStatus: 'ok' | 'partial' | 'error' =
+          successfulReflectors.length >= 2 && !reflectorDiscrepancy
+            ? 'ok'
+            : successfulReflectors.length > 0
+              ? 'partial'
+              : 'error'
+
+        const egress: LiveEgressResult = {
+          status: egressStatus,
+          durationMs: Date.now() - egressStarted,
+          exitIpv4,
+          exitIpv6,
+          ipv6Status,
+          country,
+          reflectors: reflectorResults,
+          endpointIp,
+          matchesEndpoint: exitIpv4 && endpointIp ? exitIpv4 === endpointIp : undefined,
+          underlayPath: 'route-selected'
+        }
+
+        return { handshake, egress }
+      } catch (err: any) {
+        let diskLogs = ''
+        if (workDir) {
+          try {
+            diskLogs = await readFile(join(workDir, 'engine.log'), 'utf8')
+          } catch {}
+        }
+        const combinedLogs = `${logText}\n${diskLogs}`
+        const classified = classifyOutboundProbeFailure(profile.protocol, combinedLogs, err?.message || '')
+        let handshakeStatus: TunnelHandshakeResult['status'] = 'transport_failed'
+        if (classified.includes('auth')) handshakeStatus = 'auth_failed'
+        else if (classified === 'timeout') handshakeStatus = 'timeout'
+
+        return {
+          handshake: {
+            status: handshakeStatus,
+            durationMs: Date.now() - started,
+            protocol: profile.protocol,
+            error: err?.message || classified,
+            evidence: {
+              transport: profile?.outbound?.type || profile?.protocol,
+              detail: classified
+            }
+          },
+          egress: {
+            status: 'skipped',
+            durationMs: 0,
+            reflectors: [],
+            error: `Рукопожатие завершилось ошибкой (${classified})`
+          }
+        }
+      } finally {
+        if (signal) {
+          signal.removeEventListener('abort', abortHandler)
+        }
+        if (child) {
+          try { child.kill('SIGKILL') } catch {}
+        }
+        if (cfSocket) {
+          try { cfSocket.destroy() } catch {}
+        }
+        if (ipifySocket) {
+          try { ipifySocket.destroy() } catch {}
+        }
+        if (ip6Socket) {
+          try { ip6Socket.destroy() } catch {}
+        }
+        if (workDir) {
+          await rm(workDir, { recursive: true, force: true }).catch(() => {})
         }
       }
-    } finally {
-      if (signal) {
-        signal.removeEventListener('abort', abortHandler)
-      }
-      if (child) {
-        try { child.kill('SIGKILL') } catch {}
-      }
-      if (workDir) {
-        await rm(workDir, { recursive: true, force: true }).catch(() => {})
+    }, { signal, queueTimeoutMs: 15000 })
+  } catch (queueErr: any) {
+    const isCancelled = signal?.aborted || queueErr?.message === 'Cancelled'
+    return {
+      handshake: {
+        status: isCancelled ? 'skipped' : 'timeout',
+        durationMs: Date.now() - started,
+        protocol: profile.protocol,
+        error: queueErr?.message || 'Очередь worker завершилась ошибкой'
+      },
+      egress: {
+        status: isCancelled ? 'skipped' : 'timeout',
+        durationMs: 0,
+        reflectors: [],
+        error: queueErr?.message || 'Очередь worker завершилась ошибкой'
       }
     }
-  })
+  }
 }
 
 /**
@@ -2020,26 +2195,36 @@ if ($ctrl.Status -ne [System.Net.NetworkInformation.IPStatus]::Success) {
   exit 0
 }
 if ($family -eq 6) {
-  $ladder = @(1452, 1444, 1352, 1232)
+  $ladder = @(1452, 1444, 1420, 1380, 1340, 1260, 1232)
 } else {
-  $ladder = @(1472, 1464, 1372, 1252)
+  $ladder = @(1472, 1464, 1440, 1400, 1360, 1280, 1252)
 }
-$best = 0
+$largestAccepted = 0
+$smallestTooBig = 0
 $tooBigCount = 0
 $timeoutCount = 0
+$acceptedCount = 0
 foreach ($sz in $ladder) {
   $buf = New-Object byte[] $sz
-  $reply = $p.Send($ip, 700, $buf, $opt)
+  $reply = $p.Send($ip, 600, $buf, $opt)
   if ($reply.Status -eq [System.Net.NetworkInformation.IPStatus]::Success) {
-    $best = $sz
-    break
+    $acceptedCount++
+    if ($sz -gt $largestAccepted) { $largestAccepted = $sz }
   } elseif ($reply.Status -eq [System.Net.NetworkInformation.IPStatus]::PacketTooBig) {
     $tooBigCount++
+    if ($smallestTooBig -eq 0 -or $sz -lt $smallestTooBig) { $smallestTooBig = $sz }
   } else {
     $timeoutCount++
   }
 }
-[PSCustomObject]@{ Status = 'ok'; BestPayload = $best; TooBigCount = $tooBigCount; TimeoutCount = $timeoutCount } | ConvertTo-Json
+[PSCustomObject]@{
+  Status = 'ok';
+  LargestAccepted = $largestAccepted;
+  SmallestTooBig = $smallestTooBig;
+  AcceptedCount = $acceptedCount;
+  TooBigCount = $tooBigCount;
+  TimeoutCount = $timeoutCount
+} | ConvertTo-Json
 `
     const { stdout } = await execPs(script, 4500, signal)
     if (stdout.trim()) {
@@ -2059,7 +2244,16 @@ foreach ($sz in $ladder) {
 
       if (parsed.Status === 'ok') {
         const topOfLadder = family === 6 ? 1452 : 1472
-        if (parsed.BestPayload === topOfLadder) {
+        const largestAccepted = typeof parsed.LargestAccepted === 'number' && parsed.LargestAccepted > 0
+          ? parsed.LargestAccepted
+          : (typeof parsed.BestPayload === 'number' ? parsed.BestPayload : 0)
+        const smallestTooBig = typeof parsed.SmallestTooBig === 'number' && parsed.SmallestTooBig > 0
+          ? parsed.SmallestTooBig
+          : 0
+        const tooBigCount = typeof parsed.TooBigCount === 'number' ? parsed.TooBigCount : 0
+        const timeoutCount = typeof parsed.TimeoutCount === 'number' ? parsed.TimeoutCount : 0
+
+        if (largestAccepted === topOfLadder) {
           return {
             status: 'lower_bound',
             durationMs: Date.now() - started,
@@ -2068,14 +2262,15 @@ foreach ($sz in $ladder) {
             interfaceAlias,
             method: 'icmp-df',
             pmtu: 1500,
-            minTested: 1280,
+            minTested: 1500,
             maxTested: 1500,
             detail: 'PMTU не менее 1500 байт (пакет 1500B с DF принят)'
           }
         }
-        if (parsed.BestPayload > 0) {
-          const totalMtu = parsed.BestPayload + headerOverhead
-          const isExact = parsed.TooBigCount > 0
+        if (largestAccepted > 0) {
+          const totalMtu = largestAccepted + headerOverhead
+          const rejectedMtu = smallestTooBig > 0 ? smallestTooBig + headerOverhead : undefined
+          const isExact = smallestTooBig > 0 && (smallestTooBig - largestAccepted <= 8) && timeoutCount === 0
           return {
             status: isExact ? 'ok' : 'lower_bound',
             durationMs: Date.now() - started,
@@ -2084,14 +2279,14 @@ foreach ($sz in $ladder) {
             interfaceAlias,
             method: 'icmp-df',
             pmtu: totalMtu,
-            minTested: 1280,
-            maxTested: 1500,
+            minTested: totalMtu,
+            maxTested: rejectedMtu || 1500,
             detail: isExact
-              ? `Подтверждённый PMTU ${totalMtu} байт (payload ${parsed.BestPayload}B + ${headerOverhead}B IP/ICMP)`
-              : `PMTU не менее ${totalMtu} байт (пакет ${totalMtu}B принят, большие размеры не ответили)`
+              ? `Подтверждённый PMTU ${totalMtu} байт (точная граница [${totalMtu} .. ${rejectedMtu}]B)`
+              : `PMTU в интервале [${totalMtu} .. ${rejectedMtu || 1500}] байт (не менее ${totalMtu} байт, большие размеры не ответили)`
           }
         }
-        if (parsed.TimeoutCount > 0 && parsed.TooBigCount === 0) {
+        if (timeoutCount > 0 && tooBigCount === 0) {
           return {
             status: 'blackhole_suspected',
             durationMs: Date.now() - started,
@@ -2108,27 +2303,27 @@ foreach ($sz in $ladder) {
   } catch (err: any) {
     if (ifMtu) {
       return {
-        status: 'ok',
+        status: 'lower_bound',
         durationMs: Date.now() - started,
         destination: destinationIp,
         family,
         interfaceAlias,
         method: 'interface-nlmtu',
         pmtu: ifMtu,
-        detail: `MTU локального интерфейса ${ifMtu} байт`
+        detail: `MTU локального интерфейса ${ifMtu} байт (не является подтверждённым path PMTU)`
       }
     }
   }
 
   return {
-    status: ifMtu ? 'ok' : 'skipped',
+    status: ifMtu ? 'lower_bound' : 'skipped',
     durationMs: Date.now() - started,
     destination: destinationIp,
     family,
     interfaceAlias,
     method: ifMtu ? 'interface-nlmtu' : 'fallback',
     pmtu: ifMtu,
-    detail: ifMtu ? `MTU локального интерфейса ${ifMtu} байт` : 'PMTU не удалось определить'
+    detail: ifMtu ? `MTU локального интерфейса ${ifMtu} байт (не является подтверждённым path PMTU)` : 'PMTU не удалось определить'
   }
 }
 

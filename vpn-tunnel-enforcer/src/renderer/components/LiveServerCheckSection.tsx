@@ -382,6 +382,14 @@ export function LiveServerCheckSection({
                         {h.latency.avg} ms
                       </span>
                     )}
+                    {h.infrastructure?.changesFromPrevious &&
+                      Object.values(h.infrastructure.changesFromPrevious).some(Boolean) && (
+                        <span title="Сетевые диффы обнаружены">
+                          <MacBadge variant="warning" className="text-[8px] py-0 px-1">
+                            Diff
+                          </MacBadge>
+                        </span>
+                      )}
                     {h.findings?.length > 0 && (
                       <MacBadge
                         variant={
@@ -518,11 +526,25 @@ export function LiveServerCheckSection({
                                 {res.resolverName || res.resolverId}
                               </span>
                               {res.authenticatedData && (
-                                <MacBadge variant="success" className="text-[8px] py-0 px-1">DNSSEC</MacBadge>
+                                <span title="Флаг Authenticated Data ответа резолвера (DNSSEC)">
+                                  <MacBadge
+                                    variant="success"
+                                    className="text-[8px] py-0 px-1"
+                                  >
+                                    AD (DNSSEC)
+                                  </MacBadge>
+                                </span>
+                              )}
+                              {res.status === 'partial' && (
+                                <span title={res.error || 'Частичный ответ'}>
+                                  <MacBadge variant="warning" className="text-[8px] py-0 px-1">
+                                    Частично
+                                  </MacBadge>
+                                </span>
                               )}
                             </div>
                             <div className="flex items-center gap-1.5 font-mono text-[9px]">
-                              {res.error ? (
+                              {res.status === 'error' && res.error ? (
                                 <span className="text-[var(--color-danger)]">{res.error}</span>
                               ) : (
                                 <>
@@ -870,6 +892,15 @@ export function LiveServerCheckSection({
                     {result.infrastructure.changesFromPrevious.portsChanged && (
                       <MacBadge variant="neutral" className="text-[9px]">Порты изменились</MacBadge>
                     )}
+                    {result.infrastructure.changesFromPrevious.handshakeChanged && (
+                      <MacBadge variant="warning" className="text-[9px]">Handshake изменился</MacBadge>
+                    )}
+                    {result.infrastructure.changesFromPrevious.egressChanged && (
+                      <MacBadge variant="warning" className="text-[9px]">Egress IP изменился</MacBadge>
+                    )}
+                    {result.infrastructure.changesFromPrevious.pmtuChanged && (
+                      <MacBadge variant="info" className="text-[9px]">PMTU изменился</MacBadge>
+                    )}
                   </div>
                 )}
               </div>
@@ -948,9 +979,15 @@ export function LiveServerCheckSection({
               >
                 <div className="space-y-1.5 text-[11px]">
                   <div className="flex justify-between items-center">
-                    <span className="text-[var(--color-text-secondary)]">Egress IPv4 / IPv6:</span>
+                    <span className="text-[var(--color-text-secondary)]">Egress IPv4:</span>
                     <span className="font-mono font-bold text-[var(--color-accent)]">
-                      {result.egress.exitIpv4 || result.egress.exitIpv6 || 'Не определён'}
+                      {result.egress.exitIpv4 || 'Не определён'}
+                    </span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-[var(--color-text-secondary)]">Egress IPv6:</span>
+                    <span className="font-mono text-[var(--color-text)]">
+                      {result.egress.exitIpv6 || (result.egress.ipv6Status === 'unsupported' ? 'Не поддерживается туннелем' : 'Не определён')}
                     </span>
                   </div>
                   {result.egress.country && (
@@ -1062,6 +1099,12 @@ export function LiveServerCheckSection({
                       {result.pmtu.pmtu ? `${result.pmtu.pmtu} B` : 'Не определён'}
                     </span>
                   </div>
+                  {result.pmtu.minTested !== undefined && result.pmtu.maxTested !== undefined && (
+                    <div className="flex justify-between items-center">
+                      <span className="text-[var(--color-text-secondary)]">Интервал:</span>
+                      <span className="font-mono text-[10px]">[{result.pmtu.minTested} .. {result.pmtu.maxTested}] B</span>
+                    </div>
+                  )}
                   <div className="flex justify-between items-center">
                     <span className="text-[var(--color-text-secondary)]">Метод:</span>
                     <MacBadge variant="neutral" className="text-[10px]">

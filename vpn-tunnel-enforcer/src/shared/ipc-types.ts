@@ -235,7 +235,7 @@ export interface DnsResolverComparison {
   resolverId: string
   resolverName: string
   endpoint: string
-  status: 'ok' | 'error' | 'timeout' | 'skipped'
+  status: 'ok' | 'partial' | 'error' | 'timeout' | 'skipped'
   durationMs: number
   error?: string
   authenticatedData?: boolean
@@ -283,7 +283,7 @@ export interface EgressReflectorResult {
   family?: 4 | 6
   country?: string
   durationMs: number
-  status: 'ok' | 'error' | 'timeout'
+  status: 'ok' | 'error' | 'timeout' | 'unsupported'
   error?: string
 }
 
@@ -292,6 +292,7 @@ export interface LiveEgressResult {
   durationMs: number
   exitIpv4?: string
   exitIpv6?: string
+  ipv6Status?: 'ok' | 'unsupported' | 'error'
   country?: string
   reflectors: EgressReflectorResult[]
   endpointIp?: string
