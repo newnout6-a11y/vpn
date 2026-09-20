@@ -242,6 +242,8 @@ export interface DnsResolverComparison {
   records: DnsRecordEntry[]
   truncated?: boolean
   rcode?: number
+  aStatus?: 'ok' | 'nxdomain' | 'servfail' | 'refused' | 'error' | 'timeout'
+  aaaaStatus?: 'ok' | 'nxdomain' | 'servfail' | 'refused' | 'error' | 'timeout'
 }
 
 export interface DnsDiagnostics {

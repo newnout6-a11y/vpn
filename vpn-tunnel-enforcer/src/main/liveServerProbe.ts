@@ -187,6 +187,8 @@ export async function queryDoH(
   let adFlag: boolean | undefined
   let rcode: number | undefined
   let truncated: boolean | undefined
+  let aStatus: DnsResolverComparison['aStatus']
+  let aaaaStatus: DnsResolverComparison['aaaaStatus']
 
   try {
     const fetchWithTimeout = async (type: 'A' | 'AAAA') => {
@@ -237,7 +239,9 @@ export async function queryDoH(
       if (rcode !== undefined && rcode !== 0) {
         const rcodeStr = rcode === 3 ? 'NXDOMAIN' : rcode === 2 ? 'SERVFAIL' : rcode === 5 ? 'REFUSED' : `RCODE_${rcode}`
         aError = `DNS A: ${rcodeStr}`
+        aStatus = rcode === 3 ? 'nxdomain' : rcode === 2 ? 'servfail' : rcode === 5 ? 'refused' : 'error'
       } else if (Array.isArray(data.Answer)) {
+        aStatus = 'ok'
         for (const ans of data.Answer) {
           if (!ans?.data) continue
           const cleanName = (ans.name || host).replace(/\.$/, '')
@@ -266,6 +270,7 @@ export async function queryDoH(
       }
     } else {
       aError = resA.reason?.message || 'A lookup failed'
+      aStatus = resA.reason?.name === 'AbortError' || /timeout/i.test(aError || '') ? 'timeout' : 'error'
     }
 
     if (resAAAA.status === 'fulfilled') {
@@ -276,7 +281,9 @@ export async function queryDoH(
       if (data.Status !== undefined && data.Status !== 0) {
         const rcodeStr = data.Status === 3 ? 'NXDOMAIN' : data.Status === 2 ? 'SERVFAIL' : data.Status === 5 ? 'REFUSED' : `RCODE_${data.Status}`
         aaaaError = `DNS AAAA: ${rcodeStr}`
+        aaaaStatus = data.Status === 3 ? 'nxdomain' : data.Status === 2 ? 'servfail' : data.Status === 5 ? 'refused' : 'error'
       }
+      if (data.Status === 0) aaaaStatus = 'ok'
       if (data.Status === 0 && Array.isArray(data.Answer)) {
         for (const ans of data.Answer) {
           if (!ans?.data) continue
@@ -298,6 +305,7 @@ export async function queryDoH(
       }
     } else {
       aaaaError = resAAAA.reason?.message || 'AAAA lookup failed'
+      aaaaStatus = resAAAA.reason?.name === 'AbortError' || /timeout/i.test(aaaaError || '') ? 'timeout' : 'error'
     }
 
     const aSuccess = !aError && resA.status === 'fulfilled'
@@ -327,7 +335,9 @@ export async function queryDoH(
       records: recs,
       truncated,
       rcode,
-      error: combinedError
+      error: combinedError,
+      aStatus,
+      aaaaStatus
     }
   } catch (err: any) {
     return {
@@ -1823,8 +1833,12 @@ export async function probeTunnelHandshakeAndEgress(
           stdio: ['ignore', 'pipe', 'pipe']
         })
 
+        let childErrorReject: ((reason?: any) => void) | null = null
+        const childError = new Promise<never>((_, reject) => { childErrorReject = reject })
         child.on('error', (err: any) => {
-          logText += `\n[child error] ${err?.message || err}`
+          const error = err instanceof Error ? err : new Error(err?.message || String(err))
+          logText += `\n[child error] ${error.message}`
+          childErrorReject?.(error)
         })
 
         await writeManagedChildPidFile(pidPath, {
@@ -1839,7 +1853,10 @@ export async function probeTunnelHandshakeAndEgress(
         child.stderr?.on('data', (d: Buffer) => { logText += d.toString() })
 
         // Wait for inbound port with signal
-        await waitForLocalSocks(inboundPort, 2500, signal)
+        await Promise.race([
+          waitForLocalSocks(inboundPort, 2500, signal),
+          childError
+        ])
 
         if (signal?.aborted) throw new Error('Cancelled')
 
@@ -1953,21 +1970,25 @@ export async function probeTunnelHandshakeAndEgress(
               status: 'ok'
             })
           } else {
+            ipv6Status = 'error'
             reflectorResults.push({
               source: 'ipify-v6',
               family: 6,
               durationMs: Date.now() - ip6Start,
-              status: 'unsupported',
-              error: 'IPv6 не поддерживается туннелем или провайдером'
+              status: 'error',
+              error: 'IPv6 reflector returned no valid IPv6 address'
             })
           }
         } catch (err: any) {
           if (signal?.aborted) throw err
+          const message = err?.message || 'IPv6 reflector probe failed'
+          const isUnsupported = /ENETUNREACH|EHOSTUNREACH|ENETDOWN|EAFNOSUPPORT|not supported|no route/i.test(message)
+          ipv6Status = isUnsupported ? 'unsupported' : /timeout/i.test(message) ? 'error' : 'error'
           reflectorResults.push({
             source: 'ipify-v6',
             family: 6,
-            status: 'unsupported',
-            error: 'IPv6 не поддерживается туннелем или провайдером',
+            status: isUnsupported ? 'unsupported' : /timeout/i.test(message) ? 'timeout' : 'error',
+            error: message,
             durationMs: Date.now() - started
           })
         }
@@ -2263,8 +2284,8 @@ foreach ($sz in $ladder) {
             method: 'icmp-df',
             pmtu: 1500,
             minTested: 1500,
-            maxTested: 1500,
-            detail: 'PMTU не менее 1500 байт (пакет 1500B с DF принят)'
+            maxTested: undefined,
+            detail: `PMTU не менее 1500 байт (верхний проверенный payload ${topOfLadder}B принят; точная граница не измерена)`
           }
         }
         if (largestAccepted > 0) {

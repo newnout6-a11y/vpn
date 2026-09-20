@@ -86,6 +86,32 @@ it('verifies packet loss/timeout without ICMP PacketTooBig yields lower_bound PM
   expect(result.detail).toContain('не менее 1400')
 })
 
+it('does not present the top PMTU ladder result as an exact 1500..1500 interval', async () => {
+  state.ps = { Status: 'ok', LargestAccepted: 1472, SmallestTooBig: 0, TooBigCount: 0, TimeoutCount: 0 }
+  const result = await probePmtu('8.8.8.8')
+  expect(result.status).toBe('lower_bound')
+  expect(result.pmtu).toBe(1500)
+  expect(result.minTested).toBe(1500)
+  expect(result.maxTested).toBeUndefined()
+  expect(result.detail).toContain('точная граница не измерена')
+})
+
+it('exposes independent A and AAAA DoH statuses for mixed results', async () => {
+  vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => {
+    if (url.endsWith('type=AAAA')) {
+      return Promise.resolve({ ok: true, json: async () => ({ Status: 3, AD: false }) })
+    }
+    return Promise.resolve({
+      ok: true,
+      json: async () => ({ Status: 0, AD: true, Answer: [{ name: 'example.com', type: 1, TTL: 60, data: '93.184.216.34' }] })
+    })
+  }))
+  const result = await queryDoH('google-doh', 'Google', 'https://dns.google/resolve', 'example.com')
+  expect(result.status).toBe('partial')
+  expect(result.aStatus).toBe('ok')
+  expect(result.aaaaStatus).toBe('nxdomain')
+})
+
 it('verifies IPv6 uses 48B header overhead (40B IPv6 + 8B ICMPv6)', async () => {
   state.ps = { Status: 'ok', LargestAccepted: 1372, SmallestTooBig: 1380, TooBigCount: 2, TimeoutCount: 0 }
   const result = await probePmtu('2001:4860:4860::8888')
