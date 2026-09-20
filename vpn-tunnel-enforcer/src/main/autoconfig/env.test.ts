@@ -253,4 +253,18 @@ describe('env autoconfig backup and rollback', () => {
     expect(ok).toBe(false)
     expect(mockFs[backupFile]).toBeDefined()
   })
+  it('blocks apply and rollback on malformed backup without changing registry', async () => {
+    mockFs[backupFile] = '{}'
+    expect(await env.apply('127.0.0.1:1080')).toBe(false)
+    expect(await env.rollback()).toBe(false)
+    expect(mockExecFile).not.toHaveBeenCalled()
+    expect(mockFs[backupFile]).toBe('{}')
+  })
+  it('blocks apply when reading original environment is denied', async () => {
+    mockExecFile.mockReturnValue(new Error('Access denied'))
+    expect(await env.apply('127.0.0.1:1080')).toBe(false)
+    expect(mockExecFile.mock.calls.every(call => call[0] === 'reg' && call[1][0] === 'query')).toBe(true)
+    expect(mockFs[backupFile]).toBeUndefined()
+  })
+
 })

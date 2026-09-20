@@ -137,6 +137,8 @@ async function createBackup(): Promise<BackupManifest> {
     ? await exportKey(HKLM_LOCATION, join(backupDir(), `hklm-location-${stamp}.reg`))
     : null
 
+  if (hkcuKeyExisted && !hkcuBackup) throw new Error('Не удалось создать backup HKCU')
+  if (hklmKeyExisted && !hklmBackup) throw new Error('Не удалось создать backup HKLM')
   const manifest: BackupManifest = {
     hkcuBackup,
     hkcuKeyExisted,
@@ -151,8 +153,9 @@ async function createBackup(): Promise<BackupManifest> {
 async function readManifest(): Promise<BackupManifest | null> {
   try {
     return JSON.parse(await readFile(manifestPath(), 'utf-8')) as BackupManifest
-  } catch {
-    return null
+  } catch (err: any) {
+    if (err?.code === 'ENOENT') return null
+    throw err
   }
 }
 
@@ -208,46 +211,51 @@ export async function applyLocationPrivacy(): Promise<LocationPrivacyStatus> {
   return getLocationPrivacyStatus()
 }
 
+function isMissingRegistryError(err: any): boolean {
+  return /unable to find|не удается найти|не удалось найти/i.test(String(err?.stderr || err?.message || ''))
+}
+
+async function deleteValue(key: string, name: string): Promise<void> {
+  try { await reg(['delete', key, '/v', name, '/f']) }
+  catch (err) {
+    if (isMissingRegistryError(err)) return
+    if (!key.startsWith('HKLM')) throw err
+    try { await runElevated(`reg delete "${key}" /v "${name}" /f`) }
+    catch (elevatedError) { if (!isMissingRegistryError(elevatedError)) throw elevatedError }
+  }
+}
+
 export async function rollbackLocationPrivacy(): Promise<LocationPrivacyStatus> {
   const manifest = await readManifest()
-
-  if (manifest) {
-    let rollbackFailed = false
-
-    if (manifest.hkcuBackup) {
-      try {
-        await reg(['import', manifest.hkcuBackup])
-      } catch {
-        rollbackFailed = true
-      }
-    } else if (manifest.hkcuKeyExisted === false) {
-      try {
-        await reg(['delete', HKCU_LOCATION, '/v', 'Value', '/f'])
-      } catch {
-        // ignore if not found
-      }
-    }
-
-    if (manifest.hklmBackup) {
-      try {
-        await runElevated(`reg import "${manifest.hklmBackup}"`)
-      } catch {
-        rollbackFailed = true
-      }
-    } else if (manifest.hklmKeyExisted === false) {
-      try {
-        await runElevated(`reg delete "${HKLM_LOCATION}" /v DisableLocation /f && reg delete "${HKLM_LOCATION}" /v DisableWindowsLocationProvider /f`)
-      } catch {
-        rollbackFailed = true
-      }
-    }
-
-    if (rollbackFailed) {
-      throw new Error('Не удалось полностью восстановить настройки реестра. Резервная копия сохранена.')
-    }
-
-    await unlink(manifestPath()).catch(() => undefined)
+  if (!manifest) return getLocationPrivacyStatus()
+  let failed = false
+  for (const item of [
+    { key: HKCU_LOCATION, backup: manifest.hkcuBackup, existed: manifest.hkcuKeyExisted, values: ['Value'] },
+    { key: HKLM_LOCATION, backup: manifest.hklmBackup, existed: manifest.hklmKeyExisted, values: ['DisableLocation', 'DisableWindowsLocationProvider'] }
+  ]) {
+    try {
+      if (item.backup) {
+        // reg import merges: explicitly remove only our values absent in the original key.
+        const raw = await readFile(item.backup, 'utf16le')
+        if (!raw.includes('Windows Registry Editor Version 5.00')) throw new Error('Invalid registry backup')
+        const fullKey = item.key.replace(/^HKCU/, 'HKEY_CURRENT_USER').replace(/^HKLM/, 'HKEY_LOCAL_MACHINE').toLowerCase()
+        let inKey = false
+        const present = new Set<string>()
+        for (const line of raw.split(/\r?\n/)) {
+          const section = line.trim().match(/^\[(.+)\]$/)
+          if (section) inKey = section[1].toLowerCase() === fullKey
+          const value = inKey && line.match(/^"([^"]+)"=/)
+          if (value) present.add(value[1].toLowerCase())
+        }
+        if (item.key.startsWith('HKLM')) await runElevated(`reg import "${item.backup}"`)
+        else await reg(['import', item.backup])
+        for (const value of item.values) if (!present.has(value.toLowerCase())) await deleteValue(item.key, value)
+      } else if (item.existed === false) {
+        for (const value of item.values) await deleteValue(item.key, value)
+      } else { throw new Error('Missing registry backup') }
+    } catch { failed = true }
   }
-
+  if (failed) throw new Error('Не удалось полностью восстановить настройки реестра. Резервная копия сохранена.')
+  await unlink(manifestPath())
   return getLocationPrivacyStatus()
 }

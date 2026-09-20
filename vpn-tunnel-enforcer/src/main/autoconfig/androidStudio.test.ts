@@ -107,9 +107,31 @@ describe('androidStudio autoconfig', () => {
 
       expect(await androidStudio.apply('127.0.0.1:1080')).toBe(true)
       expect(await androidStudio.isApplied()).toBe(true)
+      expect(await androidStudio.apply('127.0.0.1:8080', 'http')).toBe(true)
+      expect(Object.keys(files).filter(p => p.endsWith('.vpn-backup'))).toEqual([])
 
       expect(await androidStudio.rollback()).toBe(true)
       expect(await androidStudio.isApplied()).toBe(false)
     })
   })
+})
+
+it('preserves Android restore backup and reports failure when write fails', async () => {
+  vi.clearAllMocks()
+  mockReaddir.mockResolvedValue(['AndroidStudio2024.1'])
+  mockReadFile.mockImplementation(async (path: string) => {
+    if (path.endsWith('.vpn-backup')) return 'original settings'
+    throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+  })
+  mockWriteFile.mockRejectedValue(new Error('EACCES'))
+  expect(await androidStudio.rollback()).toBe(false)
+  expect(mockUnlink).not.toHaveBeenCalled()
+})
+it('does not touch unowned Android proxy configuration', async () => {
+  vi.clearAllMocks()
+  mockReaddir.mockResolvedValue(['AndroidStudio2024.1'])
+  mockReadFile.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }))
+  expect(await androidStudio.rollback()).toBe(true)
+  expect(mockWriteFile).not.toHaveBeenCalled()
+  expect(mockUnlink).not.toHaveBeenCalled()
 })

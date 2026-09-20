@@ -24,6 +24,7 @@ interface ChromiumTarget {
 }
 
 interface RegistryBackup {
+  safeToModify?: boolean
   key: string
   backupPath: string | null
 }
@@ -151,8 +152,9 @@ async function queryValue(key: string, value: string): Promise<string | null> {
 async function readManifest(): Promise<BackupManifest | null> {
   try {
     return JSON.parse(await readFile(manifestPath(), 'utf8')) as BackupManifest
-  } catch {
-    return null
+  } catch (err: any) {
+    if (err?.code === 'ENOENT') return null
+    throw err
   }
 }
 
@@ -172,10 +174,15 @@ async function ensureManifest(policyKeys: string[]): Promise<BackupManifest> {
   const knownKeys = new Set(manifest.registryBackups.map(x => x.key))
   for (const key of policyKeys) {
     if (knownKeys.has(key)) continue
-    manifest.registryBackups.push({
-      key,
-      backupPath: await exportKey(key, join(dir, `${safeName(key)}.reg`))
-    })
+    const backupPath = await exportKey(key, join(dir, `${safeName(key)}.reg`))
+    let safeToModify = Boolean(backupPath)
+    if (!backupPath) {
+      try { await reg(['query', key, '/v', WEBRTC_POLICY.name]) }
+      catch (err: any) {
+        safeToModify = /unable to find|не удается найти|не удалось найти/i.test(String(err?.stderr || err?.message || ''))
+      }
+    }
+    manifest.registryBackups.push({ key, backupPath, safeToModify })
   }
   await writeManifest(manifest)
   return manifest
@@ -198,7 +205,7 @@ async function profilePreferencePaths(target: ChromiumTarget): Promise<string[]>
     const prefs = join(target.userDataDir, 'Preferences')
     return existsSync(prefs) ? [prefs] : []
   }
-  const entries = await readdir(target.userDataDir, { withFileTypes: true }).catch(() => [])
+  const entries = await readdir(target.userDataDir, { withFileTypes: true })
   const dirs = entries
     .filter(entry => entry.isDirectory())
     .map(entry => entry.name)
@@ -218,7 +225,8 @@ async function activeChromiumTargets(): Promise<ChromiumTarget[]> {
 
 async function applyChromiumPolicy(
   target: ChromiumTarget,
-  details: string[]
+  details: string[],
+  manifest: BackupManifest
 ): Promise<{ changed: boolean; confirmedCount: number; unconfirmedCount: number }> {
   let changed = false
   let confirmedCount = 0
@@ -233,6 +241,8 @@ async function applyChromiumPolicy(
         details.push(`${target.name}: policy ${key}\\${WEBRTC_POLICY.name} уже применена`)
         continue
       }
+      const backup = manifest.registryBackups.find(item => item.key === key)
+      if (!backup?.backupPath && !backup?.safeToModify) throw new Error('Registry backup unavailable; policy unchanged')
       await reg(['add', key, '/v', WEBRTC_POLICY.name, '/t', WEBRTC_POLICY.type, '/d', WEBRTC_POLICY.data, '/f'])
       const verified = await queryValue(key, WEBRTC_POLICY.name)
       if (verified === WEBRTC_POLICY.data) {
@@ -266,9 +276,10 @@ function stringifyJsonLikeOriginal(data: unknown, original: string): string {
   return JSON.stringify(data, null, indent) + (trailingNewline ? '\n' : '')
 }
 
-async function applyChromiumPreferences(target: ChromiumTarget, manifest: BackupManifest, details: string[]): Promise<boolean> {
+async function applyChromiumPreferences(target: ChromiumTarget, manifest: BackupManifest, details: string[]): Promise<{ changed: boolean; verified: boolean }> {
   const paths = await profilePreferencePaths(target)
   let changed = false
+  let failed = false
   for (const prefsPath of paths) {
     try {
       const raw = await readFile(prefsPath, 'utf8')
@@ -287,13 +298,16 @@ async function applyChromiumPreferences(target: ChromiumTarget, manifest: Backup
       }
       await addFileBackup(manifest, prefsPath)
       await writeFile(prefsPath, stringifyJsonLikeOriginal(data, raw), 'utf8')
-      details.push(`${target.name}: обновлён ${prefsPath}`)
       changed = true
+      const verified = JSON.parse(await readFile(prefsPath, 'utf8')).webrtc
+      if (verified?.ip_handling_policy !== WEBRTC_POLICY.data || verified.multiple_routes_enabled !== false || verified.nonproxied_udp_enabled !== false) throw new Error('Preferences read-back failed')
+      details.push(`${target.name}: обновлён ${prefsPath}`)
     } catch (err: any) {
+      failed = true
       details.push(`${target.name}: не удалось обновить ${prefsPath}: ${err?.message || String(err)}`)
     }
   }
-  return changed
+  return { changed, verified: paths.length > 0 && !failed }
 }
 
 function setFirefoxPref(raw: string, key: string, value: string): string {
@@ -306,15 +320,16 @@ function setFirefoxPref(raw: string, key: string, value: string): string {
 async function firefoxUserJsPaths(): Promise<string[]> {
   const profilesDir = join(roamingAppData(), 'Mozilla', 'Firefox', 'Profiles')
   if (!existsSync(profilesDir)) return []
-  const entries = await readdir(profilesDir, { withFileTypes: true }).catch(() => [])
+  const entries = await readdir(profilesDir, { withFileTypes: true })
   return entries
     .filter(entry => entry.isDirectory())
     .map(entry => join(profilesDir, entry.name, 'user.js'))
 }
 
-async function applyFirefoxPreferences(manifest: BackupManifest, details: string[]): Promise<boolean> {
+async function applyFirefoxPreferences(manifest: BackupManifest, details: string[]): Promise<{ changed: boolean; verified: boolean }> {
   const paths = await firefoxUserJsPaths()
   let changed = false
+  let failed = false
   for (const userJsPath of paths) {
     try {
       const raw = existsSync(userJsPath) ? await readFile(userJsPath, 'utf8') : ''
@@ -328,13 +343,15 @@ async function applyFirefoxPreferences(manifest: BackupManifest, details: string
       }
       await addFileBackup(manifest, userJsPath)
       await writeFile(userJsPath, next, 'utf8')
-      details.push(`Firefox: обновлён ${userJsPath}`)
       changed = true
+      if (await readFile(userJsPath, 'utf8') !== next) throw new Error('Preferences read-back failed')
+      details.push(`Firefox: обновлён ${userJsPath}`)
     } catch (err: any) {
+      failed = true
       details.push(`Firefox: не удалось обновить ${userJsPath}: ${err?.message || String(err)}`)
     }
   }
-  return changed
+  return { changed, verified: paths.length > 0 && !failed }
 }
 
 export async function applyBrowserLeakProtection(): Promise<BrowserHardeningResult> {
@@ -370,18 +387,20 @@ export async function applyBrowserLeakProtection(): Promise<BrowserHardeningResu
   let anyUnconfirmed = false
 
   for (const target of targets) {
-    const policyResult = await applyChromiumPolicy(target, details)
-    const prefsChanged = await applyChromiumPreferences(target, manifest, details)
-    changed = changed || policyResult.changed || prefsChanged
+    const policyResult = await applyChromiumPolicy(target, details, manifest)
+    const prefsResult = await applyChromiumPreferences(target, manifest, details)
+    changed = changed || policyResult.changed || prefsResult.changed
     if (policyResult.unconfirmedCount > 0) {
       anyUnconfirmed = true
     }
-    const isTargetProtected = policyResult.confirmedCount > 0 || prefsChanged
+    const isTargetProtected = policyResult.confirmedCount > 0 || prefsResult.verified
     if (!isTargetProtected) {
       allTargetsProtected = false
     }
   }
-  changed = (await applyFirefoxPreferences(manifest, details)) || changed
+  const firefoxResult = await applyFirefoxPreferences(manifest, details)
+  changed = firefoxResult.changed || changed
+  if (firefoxPaths.length > 0 && !firefoxResult.verified) allTargetsProtected = false
 
   const success = allTargetsProtected
 
@@ -425,9 +444,15 @@ export async function rollbackBrowserLeakProtection(): Promise<BrowserHardeningR
   }
 
   const details: string[] = []
+  let failed = false
   for (const item of manifest.registryBackups) {
     try {
-      await reg(['delete', item.key, '/v', WEBRTC_POLICY.name, '/f']).catch(() => ({ stdout: '', stderr: '' }))
+      if (!item.backupPath && !item.safeToModify) throw new Error('Registry backup is unverified')
+      if (item.backupPath && !existsSync(item.backupPath)) throw new Error('Registry backup is missing')
+      try { await reg(['delete', item.key, '/v', WEBRTC_POLICY.name, '/f']) }
+      catch (err: any) {
+        if (!/unable to find|не удается найти|не удалось найти/i.test(String(err?.stderr || err?.message || ''))) throw err
+      }
       if (item.backupPath && existsSync(item.backupPath)) {
         await reg(['import', item.backupPath])
         details.push(`Registry восстановлен: ${item.key}`)
@@ -435,12 +460,14 @@ export async function rollbackBrowserLeakProtection(): Promise<BrowserHardeningR
         details.push(`Registry policy удалена: ${item.key}\\${WEBRTC_POLICY.name}`)
       }
     } catch (err: any) {
+      failed = true
       details.push(`Не удалось восстановить registry ${item.key}: ${err?.message || String(err)}`)
     }
   }
   for (const item of manifest.fileBackups) {
     try {
       if (item.existed && (!item.backupPath || !existsSync(item.backupPath))) {
+        failed = true
         details.push(`Skipped restore for existing file without backup: ${item.path}`)
         continue
       }
@@ -448,20 +475,23 @@ export async function rollbackBrowserLeakProtection(): Promise<BrowserHardeningR
         await copyFile(item.backupPath, item.path)
         details.push(`Файл восстановлен: ${item.path}`)
       } else {
-        await unlink(item.path).catch(() => undefined)
+        try { await unlink(item.path) } catch (err: any) { if (err?.code !== 'ENOENT') throw err }
         details.push(`Файл удалён: ${item.path}`)
       }
     } catch (err: any) {
+      failed = true
       details.push(`Не удалось восстановить ${item.path}: ${err?.message || String(err)}`)
     }
   }
-  await unlink(manifestPath()).catch(() => undefined)
+  if (!failed) {
+    try { await unlink(manifestPath()) } catch { failed = true }
+  }
 
   const result = {
-    success: true,
+    success: !failed,
     changed: true,
     restartRequired: true,
-    message: 'Защита браузеров откатана из backup. Полностью перезапустите браузеры.',
+    message: failed ? 'Откат завершён не полностью. Backup сохранён; повторите попытку.' : 'Защита браузеров откатана из backup. Полностью перезапустите браузеры.',
     details
   }
   logEvent('info', 'browser-hardening', 'browser leak protection rolled back', result)

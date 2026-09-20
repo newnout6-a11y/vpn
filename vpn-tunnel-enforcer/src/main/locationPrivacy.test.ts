@@ -55,7 +55,7 @@ describe('locationPrivacy module', () => {
     mockMkdir.mockResolvedValue(undefined)
     mockWriteFile.mockResolvedValue(undefined)
     mockUnlink.mockResolvedValue(undefined)
-    mockReadFile.mockRejectedValue(new Error('ENOENT'))
+    mockReadFile.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }))
   })
 
   it('detects when location is allowed/default', async () => {
@@ -124,6 +124,8 @@ describe('locationPrivacy module', () => {
     })
     mockExecElevated.mockResolvedValue({ stdout: '', stderr: '' })
 
+    const manifest = await mockReadFile()
+    mockReadFile.mockImplementation(async (path: string) => path.endsWith('.reg') ? 'Windows Registry Editor Version 5.00\r\n' : manifest)
     const { rollbackLocationPrivacy } = await import('./locationPrivacy')
     await rollbackLocationPrivacy()
 
@@ -198,4 +200,26 @@ describe('locationPrivacy module', () => {
     await expect(rollbackLocationPrivacy()).rejects.toThrow('Не удалось полностью восстановить настройки реестра')
     expect(mockUnlink).not.toHaveBeenCalledWith(expect.stringContaining('latest-location-backup.json'))
   })
+  it('deletes values absent in original key without deleting unrelated values', async () => {
+    const snapshot = { hkcuBackup: 'cu.reg', hkcuKeyExisted: true, hklmBackup: 'lm.reg', hklmKeyExisted: true }
+    mockReadFile.mockImplementation(async (path: string) => path.endsWith('.reg')
+      ? 'Windows Registry Editor Version 5.00\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Microsoft\\Windows\\LocationAndSensors]\r\n"Unrelated"=dword:00000001\r\n'
+      : JSON.stringify(snapshot))
+    mockExecFile.mockImplementation((_f: string, _a: string[], _o: any, cb: any) => cb(null, { stdout: '', stderr: '' }))
+    mockExecElevated.mockResolvedValue({ stdout: '', stderr: '' })
+    const { rollbackLocationPrivacy } = await import('./locationPrivacy')
+    await rollbackLocationPrivacy()
+    const deletes = mockExecFile.mock.calls.filter(call => call[1][0] === 'delete').map(call => call[1][3])
+    expect(deletes).toEqual(['Value', 'DisableLocation', 'DisableWindowsLocationProvider'])
+    expect(mockUnlink).toHaveBeenCalled()
+  })
+  it('preserves absent-key manifest when value deletion fails', async () => {
+    mockReadFile.mockResolvedValue(JSON.stringify({ hkcuBackup: null, hkcuKeyExisted: false, hklmBackup: null, hklmKeyExisted: false }))
+    mockExecFile.mockImplementation((_f: string, _a: string[], _o: any, cb: any) => cb(new Error('Access denied')))
+    mockExecElevated.mockRejectedValue(new Error('Access denied'))
+    const { rollbackLocationPrivacy } = await import('./locationPrivacy')
+    await expect(rollbackLocationPrivacy()).rejects.toThrow('Резервная копия сохранена')
+    expect(mockUnlink).not.toHaveBeenCalled()
+  })
+
 })

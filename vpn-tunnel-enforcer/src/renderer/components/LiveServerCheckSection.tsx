@@ -40,6 +40,7 @@ export function LiveServerCheckSection({
   const [result, setResult] = useState<LiveServerCheck | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [history, setHistory] = useState<LiveServerCheck[]>([])
+  const [historyRetry, setHistoryRetry] = useState(0)
   const [showHistory, setShowHistory] = useState(false)
 
   const currentRequestIdRef = useRef<string | null>(null)
@@ -55,6 +56,8 @@ export function LiveServerCheckSection({
 
     const currentGen = ++generationRef.current
     setRunning(false)
+    setHistory([])
+    setShowHistory(false)
     setResult(null)
     setError(null)
 
@@ -65,21 +68,25 @@ export function LiveServerCheckSection({
       .then((items) => {
         if (generationRef.current !== currentGen) return
         if (Array.isArray(items)) {
+          items = items.filter(item => port === undefined || item.port === port)
           setHistory(items)
           if (items.length > 0) {
             setResult(items[0])
           }
         }
       })
-      .catch(() => {})
+      .catch(() => {
+        if (generationRef.current === currentGen) setError('Не удалось загрузить историю проверок')
+      })
 
     return () => {
+      ++generationRef.current
       if (currentRequestIdRef.current) {
         window.electronAPI?.serverLiveCheckCancel?.(currentRequestIdRef.current).catch(() => {})
         currentRequestIdRef.current = null
       }
     }
-  }, [profileId, host])
+  }, [profileId, host, port, historyRetry])
 
   const handleStartCheck = async () => {
     if (running || (!host && !profileId)) return
@@ -137,6 +144,42 @@ export function LiveServerCheckSection({
 
   return (
     <MacCard className="!p-3 border border-[var(--color-border)]">
+      {result?.portsError && (
+        <div
+          role="alert"
+          className="flex items-center gap-2 p-2.5 mb-3 rounded-[var(--radius-sm)] bg-amber-500/10 border border-amber-500/30 text-amber-400 text-xs"
+        >
+          <AlertTriangle size={14} className="shrink-0" />
+          <span>{result.portsError}</span>
+        </div>
+      )}
+      {result?.infrastructure?.error && (
+        <div
+          role="alert"
+          className="flex items-center gap-2 p-2.5 mb-3 rounded-[var(--radius-sm)] bg-amber-500/10 border border-amber-500/30 text-amber-400 text-xs"
+        >
+          <AlertTriangle size={14} className="shrink-0" />
+          <span>{result.infrastructure.error}</span>
+        </div>
+      )}
+      {error === 'Не удалось загрузить историю проверок' && (
+        <div
+          role="alert"
+          className="flex items-center justify-between p-2.5 mb-3 rounded-[var(--radius-sm)] bg-red-500/10 border border-red-500/30 text-red-400 text-xs"
+        >
+          <div className="flex items-center gap-2">
+            <AlertCircle size={14} className="shrink-0" />
+            <span>{error}</span>
+          </div>
+          <MacButton
+            variant="secondary"
+            size="sm"
+            onClick={() => setHistoryRetry(n => n + 1)}
+          >
+            Повторить загрузку истории
+          </MacButton>
+        </div>
+      )}
       <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
         <div className="flex items-center gap-2">
           <Activity size={14} className={running ? 'animate-pulse text-[var(--color-accent)]' : 'text-[var(--color-accent)]'} />
@@ -431,7 +474,7 @@ export function LiveServerCheckSection({
                   <div className="flex justify-between text-[11px]">
                     <span className="text-[var(--color-text-secondary)]">Путь:</span>
                     <MacBadge variant="neutral" className="text-[10px]">
-                      {result.latency.pathType === 'tun' ? 'Через активный TUN' : 'Прямой (direct)'}
+                      Маршрут выбран ОС (не измерен); TUN: {result.latency.tunRunning === undefined ? 'нет данных' : result.latency.tunRunning ? 'включён' : 'выключен'}
                     </MacBadge>
                   </div>
                 </div>
@@ -680,7 +723,7 @@ export function LiveServerCheckSection({
                 {result.infrastructure?.activeTunnelMatchesProfile && result.infrastructure?.egressCountry && (
                   <div className="flex justify-between">
                     <span className="text-[var(--color-text-secondary)]">Страна egress (активный VPN):</span>
-                    <span>{result.infrastructure.egressCountry}</span>
+                    <span>{result.infrastructure.egressCountry} (из профиля; время измерения неизвестно)</span>
                   </div>
                 )}
                 {result.infrastructure?.sharedCidrWithProfiles && (

@@ -22,6 +22,7 @@
     "axios": "^1.7.2",
     "electron-store": "^8.1.0",
     "flag-icons": "^7.5.0",
+    "ip-address": "10.5.0",
     "socks": "^2.8.3",
     "sudo-prompt": "^9.2.1",
     "tldts": "^7.4.8"

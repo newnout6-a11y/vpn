@@ -71,7 +71,16 @@ function Get-ManifestAdapter($adapter) {
 
 function Restore-RegValue($key, $name, $snapshot, $tag) {
     try {
-        if ($snapshot -and $snapshot.exists -eq $true -and $snapshot.type -and $snapshot.data) {
+        if (-not $snapshot -or ($snapshot.exists -ne $true -and $snapshot.exists -ne $false)) {
+            $script:hasWarnings = $true
+            Log "Registry: missing snapshot for $tag; preserved current value"
+            return
+        }
+        if ($snapshot.exists -eq $true) {
+            if (-not $snapshot.type -or $null -eq $snapshot.data) {
+                $script:hasWarnings = $true
+                return
+            }
             reg add $key /v $name /t $snapshot.type /d $snapshot.data /f 2>$null | Out-Null
             if ($LASTEXITCODE -eq 0) {
                 Log "Registry: restored $tag"
@@ -234,22 +243,6 @@ try {
     Log "DNS cache: flush warning ($_)"
 }
 
-if ($adapterManifest -and -not $hasWarnings -and -not $script:hasWarnings) {
-    foreach ($cp in $candidatePaths) {
-        if (Test-Path $cp) {
-            try {
-                Remove-Item $cp -Force -ErrorAction Stop
-                Log "Adapter lockdown manifest: removed $cp"
-            } catch {
-                Log "Adapter lockdown manifest: remove failed for $cp ($_)"
-                $hasWarnings = $true
-            }
-        }
-    }
-} elseif ($adapterManifest) {
-    Log "Adapter lockdown manifest: preserved because recovery finished with warnings"
-}
-
 # 7. Env proxy vars: remove only orphaned local/VPNTE proxy settings, preserving custom/corporate proxies
 function Clean-VpnteProxyEnv($envPath) {
     $regTarget = $envPath -replace '^Registry::', ''
@@ -317,6 +310,26 @@ foreach ($alias in $tunAliases) {
             }
         }
     }
+}
+
+if ($adapterManifest -and -not $hasWarnings -and -not $script:hasWarnings) {
+    foreach ($cp in $candidatePaths) {
+        if (Test-Path $cp) {
+            try {
+                $candidate = Get-Content -LiteralPath $cp -Raw | ConvertFrom-Json
+                if (($candidate | ConvertTo-Json -Depth 30 -Compress) -ne ($adapterManifest | ConvertTo-Json -Depth 30 -Compress)) { continue }
+            } catch { $hasWarnings = $true; continue }
+            try {
+                Remove-Item $cp -Force -ErrorAction Stop
+                Log "Adapter lockdown manifest: removed $cp"
+            } catch {
+                Log "Adapter lockdown manifest: remove failed for $cp ($_)"
+                $hasWarnings = $true
+            }
+        }
+    }
+} elseif ($adapterManifest) {
+    Log "Adapter lockdown manifest: preserved because recovery finished with warnings"
 }
 
 if ($hasWarnings) {

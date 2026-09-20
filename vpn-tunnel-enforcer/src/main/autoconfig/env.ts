@@ -14,6 +14,14 @@ export interface EnvProxyBackup {
   noProxy: string | null
 }
 
+function parseBackup(raw: string): EnvProxyBackup {
+  const value = JSON.parse(raw)
+  if (!value || !['httpProxy', 'httpsProxy', 'allProxy', 'noProxy'].every(key => value[key] === null || typeof value[key] === 'string')) {
+    throw new Error('Invalid environment backup')
+  }
+  return value
+}
+
 function backupPath(): string {
   return join(homedir(), '.vpnte', 'env-proxy-backup.json')
 }
@@ -60,8 +68,9 @@ async function getUserEnvValue(name: string): Promise<string | null> {
       }
     }
     return null
-  } catch {
-    return null
+  } catch (err: any) {
+    if (/unable to find|не удается найти|не удалось найти/i.test(String(err?.stderr || err?.message || ''))) return null
+    throw err
   }
 }
 
@@ -89,7 +98,7 @@ async function deleteUserEnvValue(name: string): Promise<void> {
 
 async function saveBackupIfMissing(): Promise<void> {
   try {
-    await readFile(backupPath(), 'utf8')
+    parseBackup(await readFile(backupPath(), 'utf8'))
     return
   } catch (err: any) {
     if (err?.code !== 'ENOENT') {
@@ -154,7 +163,7 @@ export const env = {
     try {
       let backup: EnvProxyBackup | null = null
       try {
-        backup = JSON.parse(await readFile(backupPath(), 'utf8')) as EnvProxyBackup
+        backup = parseBackup(await readFile(backupPath(), 'utf8'))
       } catch {
         // No backup file found — cannot restore unknown prior environment
         return false
@@ -164,7 +173,7 @@ export const env = {
 
       const restoreOrDelete = async (name: string, value: string | null | undefined) => {
         try {
-          if (value) {
+          if (value !== null && value !== undefined) {
             await setUserEnvValue(name, value)
             process.env[name] = value
           } else {

@@ -1,6 +1,7 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { CheckCircle2, Eye, Globe2, Loader2, RadioTower, RefreshCw, ShieldAlert, TriangleAlert } from 'lucide-react'
 import { useAppStore, type BrowserIpCheck } from '../store'
+import { Address4, Address6 } from 'ip-address'
 import { MacCard, MacButton } from '../design-system'
 
 export interface WebRtcCandidate {
@@ -16,27 +17,23 @@ const IPV4_URLS = [
 
 export function unwrapIpv4Mapped(ip: string): string {
   const trimmed = ip.trim().toLowerCase()
-  // Match dot-decimal IPv4-mapped IPv6: ::ffff:192.168.1.1 or 0:0:0:0:0:ffff:192.168.1.1
-  const dotMatch = trimmed.match(/^(?:::ffff:|(?:0+:){5}ffff:)(\d{1,3}(?:\.\d{1,3}){3})$/i)
-  if (dotMatch) {
-    return dotMatch[1]
-  }
-  // Match hex IPv4-mapped IPv6: ::ffff:c0a8:0101 or 0:0:0:0:0:ffff:c0a8:0101
-  const hexMatch = trimmed.match(/^(?:::ffff:|(?:0+:){5}ffff:)([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i)
-  if (hexMatch) {
-    const high = parseInt(hexMatch[1], 16)
-    const low = parseInt(hexMatch[2], 16)
-    const b1 = (high >> 8) & 0xff
-    const b2 = high & 0xff
-    const b3 = (low >> 8) & 0xff
-    const b4 = low & 0xff
-    return `${b1}.${b2}.${b3}.${b4}`
-  }
+  try {
+    if (Address4.isValid(trimmed)) return new Address4(trimmed).correctForm()
+    if (Address6.isValid(trimmed)) {
+      const address = new Address6(trimmed)
+      const groups = address.canonicalForm().split(':')
+      if (groups.slice(0, 5).every(g => g === '0000') && groups[5] === 'ffff') {
+        return address.to4().correctForm()
+      }
+      return address.correctForm()
+    }
+  } catch {}
   return trimmed
 }
 
 export function isPrivateIp(rawIp: string): boolean {
   const ip = unwrapIpv4Mapped(rawIp)
+  if (!Address4.isValid(ip) && !Address6.isValid(ip)) return false
   return (
     ip.startsWith('10.') ||
     ip.startsWith('127.') ||
@@ -45,13 +42,13 @@ export function isPrivateIp(rawIp: string): boolean {
     /^172\.(1[6-9]|2\d|3[01])\./.test(ip) ||
     ip === '::1' ||
     ip === '::' ||
-    /^fe80:/i.test(ip) ||
+    /^fe[89ab][0-9a-f]:/i.test(ip) ||
     /^fc|^fd/i.test(ip)
   )
 }
 
 function unique(values: string[]): string[] {
-  return [...new Set(values.filter(Boolean))]
+  return [...new Set(values.filter(Boolean).map(unwrapIpv4Mapped))]
 }
 
 function worse(a: BrowserIpCheck['summary'], b: BrowserIpCheck['summary']): BrowserIpCheck['summary'] {
@@ -59,8 +56,11 @@ function worse(a: BrowserIpCheck['summary'], b: BrowserIpCheck['summary']): Brow
   return weight[b] > weight[a] ? b : a
 }
 
-async function fetchWithTimeout(url: string, timeoutMs = 8000): Promise<any | null> {
+async function fetchWithTimeout(url: string, timeoutMs = 8000, signal?: AbortSignal): Promise<any | null> {
   const controller = new AbortController()
+  const abort = () => controller.abort()
+  signal?.addEventListener('abort', abort, { once: true })
+  if (signal?.aborted) controller.abort()
   const timeout = setTimeout(() => controller.abort(), timeoutMs)
   try {
     const response = await fetch(url, {
@@ -70,14 +70,16 @@ async function fetchWithTimeout(url: string, timeoutMs = 8000): Promise<any | nu
     if (!response.ok) return null
     return await response.json()
   } finally {
+    signal?.removeEventListener('abort', abort)
     clearTimeout(timeout)
   }
 }
 
-async function fetchBrowserIpv4(): Promise<string | null> {
+async function fetchBrowserIpv4(signal?: AbortSignal): Promise<string | null> {
   for (const url of IPV4_URLS) {
+    if (signal?.aborted) break
     try {
-      const data = await fetchWithTimeout(url)
+      const data = await fetchWithTimeout(url, 8000, signal)
       const ip = data?.ip || data?.query
       if (typeof ip === 'string' && /^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) return ip
     } catch {
@@ -86,9 +88,9 @@ async function fetchBrowserIpv4(): Promise<string | null> {
   return null
 }
 
-async function fetchBrowserIpv6(): Promise<string | null> {
+async function fetchBrowserIpv6(signal?: AbortSignal): Promise<string | null> {
   try {
-    const data = await fetchWithTimeout('https://api6.ipify.org?format=json', 6000)
+    const data = await fetchWithTimeout('https://api6.ipify.org?format=json', 6000, signal)
     const ip = data?.ip
     return typeof ip === 'string' && ip.includes(':') ? ip : null
   } catch {
@@ -108,8 +110,9 @@ function parseCandidate(raw: string): WebRtcCandidate | null {
   }
 }
 
-function collectWebRtcCandidates(timeoutMs = 4500): Promise<{ candidates: WebRtcCandidate[]; error: string | null }> {
+function collectWebRtcCandidates(timeoutMs = 4500, signal?: AbortSignal): Promise<{ candidates: WebRtcCandidate[]; error: string | null }> {
   return new Promise((resolve) => {
+    if (signal?.aborted) { resolve({ candidates: [], error: 'Cancelled' }); return }
     if (typeof RTCPeerConnection === 'undefined') {
       resolve({ candidates: [], error: 'WebRTC недоступен в этом окружении' })
       return
@@ -123,6 +126,8 @@ function collectWebRtcCandidates(timeoutMs = 4500): Promise<{ candidates: WebRtc
     const finish = (error: string | null = null) => {
       if (done) return
       done = true
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', abort)
       try {
         pc.close()
       } catch {
@@ -130,7 +135,9 @@ function collectWebRtcCandidates(timeoutMs = 4500): Promise<{ candidates: WebRtc
       resolve({ candidates, error })
     }
 
+    const abort = () => finish('Cancelled')
     const timer = setTimeout(() => finish(null), timeoutMs)
+    signal?.addEventListener('abort', abort, { once: true })
     pc.onicecandidate = (event) => {
       if (!event.candidate) {
         clearTimeout(timer)
@@ -166,7 +173,7 @@ export function summarize(args: {
 }): BrowserIpCheck {
   const details: string[] = []
   let summary: BrowserIpCheck['summary'] = 'ok'
-  const browserMatchesNode = args.browserIpv4 && args.nodeIp ? args.browserIpv4 === args.nodeIp : null
+  const browserMatchesNode = args.browserIpv4 && args.nodeIp ? unwrapIpv4Mapped(args.browserIpv4) === unwrapIpv4Mapped(args.nodeIp) : null
 
   if (!args.browserIpv4) {
     summary = worse(summary, 'fail')
@@ -188,7 +195,7 @@ export function summarize(args: {
   const webRtcAddresses = args.webRtcCandidates.map(c => c.address)
   const webRtcMdnsCount = webRtcAddresses.filter(x => /\.local$/i.test(x)).length
   const webRtcLocalIps = unique(webRtcAddresses.filter(x => !/\.local$/i.test(x) && isPrivateIp(x)))
-  const webRtcPublicIps = unique(webRtcAddresses.filter(x => !/\.local$/i.test(x) && !isPrivateIp(x) && /[.:]/.test(x)))
+  const webRtcPublicIps = unique(webRtcAddresses.filter(x => !/\.local$/i.test(x) && !isPrivateIp(x) && (Address4.isValid(x) || Address6.isValid(x))))
   const expectedPublicIps = unique([args.browserIpv4, args.browserIpv6, args.nodeIp].filter((ip): ip is string => Boolean(ip)))
   const unexpectedWebRtcPublicIps = webRtcPublicIps.filter(ip => !expectedPublicIps.includes(ip))
 
@@ -243,23 +250,35 @@ export function BrowserIpCard() {
   const setCheck = useAppStore(s => s.setBrowserIpCheck)
   const tunRunning = useAppStore(s => s.tunRunning)
   const publicIp = useAppStore(s => s.publicIp)
+  const networkContext = useAppStore(s => `${s.mode}:${s.tunStartedAt}:${s.connectionBusy}:${s.serverSwitchingName}:${s.vpnIp}`)
   const addLog = useAppStore(s => s.addLog)
   const [running, setRunning] = useState(false)
   const [hardening, setHardening] = useState(false)
   const [rollingBack, setRollingBack] = useState(false)
   const [hardeningMessage, setHardeningMessage] = useState<string | null>(null)
   const checkIdRef = useRef(0)
+  const abortRef = useRef<AbortController | null>(null)
+  useEffect(() => {
+    setRunning(false)
+    return () => {
+      ++checkIdRef.current
+      abortRef.current?.abort()
+    }
+  }, [tunRunning, publicIp, networkContext])
 
   const runCheck = async (silent = false) => {
+    abortRef.current?.abort()
+    const controller = new AbortController()
+    abortRef.current = controller
     const currentCheckId = ++checkIdRef.current
     setRunning(true)
     if (!silent) addLog('info', 'Проверяем, какой IP видят сайты в браузере…')
     try {
       const [nodeIpInfo, browserIpv4, browserIpv6, webRtc] = await Promise.all([
         window.electronAPI.getPublicIp().catch(() => ({ ip: publicIp, isLeak: false, vpnIp: null })),
-        fetchBrowserIpv4(),
-        fetchBrowserIpv6(),
-        collectWebRtcCandidates()
+        fetchBrowserIpv4(controller.signal),
+        fetchBrowserIpv6(controller.signal),
+        collectWebRtcCandidates(4500, controller.signal)
       ])
       if (checkIdRef.current !== currentCheckId) {
         return
@@ -345,7 +364,7 @@ export function BrowserIpCard() {
   const status = check?.summary ?? 'unknown'
   const browserProtectionAttention = status === 'warn' || status === 'fail'
   const webRtcUnexpectedPublicIps = check?.webRtcPublicIps.filter(ip =>
-    ip !== check.browserIpv4 && ip !== check.browserIpv6 && ip !== check.nodeIp
+    ![check.browserIpv4, check.browserIpv6, check.nodeIp].filter(Boolean).map(x => unwrapIpv4Mapped(x!)).includes(unwrapIpv4Mapped(ip))
   ) ?? []
   const webRtcHasLocalLeak = Boolean(check?.webRtcLocalIps.length)
   const title =

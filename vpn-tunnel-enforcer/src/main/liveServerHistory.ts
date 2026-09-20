@@ -148,9 +148,10 @@ class LiveServerHistoryManager {
     return this.history.get(key) || []
   }
 
-  public getPreviousSuccessfulCheck(profileId?: string, host?: string): LiveServerCheck | null {
+  public getPreviousSuccessfulCheck(profileId?: string, host?: string, port?: number): LiveServerCheck | null {
     const history = this.getHistory({ profileId, host })
     for (const check of history) {
+      if (check.cancelled || (port !== undefined && check.port !== port)) continue
       if (check.reachability?.status === 'ok' || check.dns?.status === 'ok') {
         return check
       }
@@ -222,7 +223,7 @@ export function computeHistoryDiff(
   for (const [port, prevP] of previousTestedPorts.entries()) {
     const currP = currentTestedPorts.get(port)
     if (currP !== undefined) {
-      if (prevP.open && !currP.open) {
+      if (prevP.open && currP.state === 'closed') {
         closedPorts.push(port)
       } else if (!prevP.open && currP.open) {
         newOpenPorts.push(port)

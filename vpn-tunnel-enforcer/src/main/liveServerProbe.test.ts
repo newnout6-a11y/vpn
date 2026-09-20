@@ -25,6 +25,13 @@ vi.mock('dns', async (importOriginal) => {
     resolveCname: mockResolveCname,
     reverse: mockReverse
   }
+  Object.assign(promises, { Resolver: class {
+    resolve4 = promises.resolve4
+    resolve6 = promises.resolve6
+    resolveCname = promises.resolveCname
+    reverse = promises.reverse
+    cancel() {}
+  } })
   return {
     ...actual,
     default: { ...actual, promises },

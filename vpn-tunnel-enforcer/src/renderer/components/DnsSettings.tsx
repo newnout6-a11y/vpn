@@ -18,7 +18,7 @@
 
 import React, { useState, useEffect, useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Globe, Trash2, Plus, CheckCircle2 } from 'lucide-react'
+import { Globe, Trash2, Plus, CheckCircle2, AlertTriangle } from 'lucide-react'
 import { MacCard } from '../design-system/MacCard'
 import { MacInput } from '../design-system/MacInput'
 import { MacButton } from '../design-system/MacButton'
@@ -55,6 +55,8 @@ export const DnsSettings: React.FC = () => {
   // State
   const [profiles, setProfiles] = useState<DnsProfile[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
+  const [ipcError, setIpcError] = useState<string | null>(null)
+  const [selecting, setSelecting] = useState(false)
   const [loading, setLoading] = useState(true)
 
   // Create form state
@@ -71,15 +73,14 @@ export const DnsSettings: React.FC = () => {
       const [list, currentActiveId] = await Promise.all([
         window.electronAPI.dnsList(),
         typeof window.electronAPI.dnsGetActive === 'function'
-          ? window.electronAPI.dnsGetActive()
-          : Promise.resolve(null)
+          ? window.electronAPI.dnsGetActive().catch(() => undefined)
+          : Promise.resolve(undefined)
       ])
       setProfiles(list)
-      const active = currentActiveId ?? list.find((p: any) => p.isSelected)?.id ?? null
-      if (active) {
-        setActiveId(active)
-      }
+      const active = currentActiveId !== undefined ? currentActiveId : list.find((p: any) => p.isSelected)?.id ?? null
+      setActiveId(active)
     } catch (err) {
+      setIpcError('Не удалось загрузить DNS-профили')
       console.error('Failed to load DNS profiles:', err)
     } finally {
       setLoading(false)
@@ -92,13 +93,17 @@ export const DnsSettings: React.FC = () => {
 
   // Handle profile selection
   const handleSelect = async (id: string) => {
-    setActiveId(id)
+    if (selecting) return
+    setSelecting(true)
+    setIpcError(null)
     try {
       await window.electronAPI.dnsSelect(id)
+      await loadProfiles()
     } catch (err) {
+      setIpcError('Не удалось переключить DNS-профиль')
       console.error('Failed to select DNS profile:', err)
-      setActiveId(null)
-    }
+      await loadProfiles()
+    } finally { setSelecting(false) }
   }
 
   // Validate DNS address on blur
@@ -190,7 +195,7 @@ export const DnsSettings: React.FC = () => {
       await window.electronAPI.dnsDelete(id)
       setProfiles((prev) => prev.filter((p) => p.id !== id))
       if (activeId === id) {
-        setActiveId(null)
+        await loadProfiles()
       }
     } catch (err) {
       console.error('Failed to delete DNS profile:', err)
@@ -210,6 +215,27 @@ export const DnsSettings: React.FC = () => {
 
   return (
     <div className="space-y-4">
+      {ipcError && (
+        <div
+          role="alert"
+          className="flex items-center justify-between p-3 rounded-[var(--radius-sm)] bg-red-500/10 border border-red-500/30 text-red-400 text-xs"
+        >
+          <div className="flex items-center gap-2">
+            <AlertTriangle size={16} className="shrink-0 text-red-400" />
+            <span>{ipcError}</span>
+          </div>
+          <MacButton
+            variant="secondary"
+            size="sm"
+            onClick={() => {
+              setIpcError(null)
+              void loadProfiles()
+            }}
+          >
+            Повторить
+          </MacButton>
+        </div>
+      )}
       {/* Profile List & Selector */}
       <MacCard>
         <div className="space-y-3">
@@ -235,6 +261,8 @@ export const DnsSettings: React.FC = () => {
                     : 'border-[var(--color-border)] bg-[var(--color-bg)] hover:border-[var(--color-accent)]/40'
                 }`}
                 role="radio"
+                aria-label={profile.name}
+                aria-disabled={selecting}
                 aria-checked={activeId === profile.id}
                 tabIndex={0}
                 onKeyDown={(e) => {

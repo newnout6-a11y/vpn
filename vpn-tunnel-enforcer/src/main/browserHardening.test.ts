@@ -67,6 +67,7 @@ describe('browserHardening module', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
+    mockReadFile.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }))
     mockMkdir.mockResolvedValue(undefined)
     mockWriteFile.mockResolvedValue(undefined)
     mockUnlink.mockResolvedValue(undefined)
@@ -179,4 +180,57 @@ describe('browserHardening module', () => {
     // unlinks manifest
     expect(mockUnlink).toHaveBeenCalledWith(expect.stringContaining('latest-browser-hardening.json'))
   })
+})
+
+describe('Audit remaining hardening result defects', () => {
+  it('keeps verified preference fallback successful on repeated apply', async () => {
+    vi.clearAllMocks()
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
+    let prefs = '{}'
+    mockExistsSync.mockImplementation((p: string) => p.includes('Google\\Chrome\\User Data'))
+    mockReaddir.mockResolvedValue([{ name: 'Default', isDirectory: () => true }])
+    mockMkdir.mockResolvedValue(undefined)
+    mockCopyFile.mockResolvedValue(undefined)
+    mockReadFile.mockImplementation(async (p: string) => {
+      if (p.endsWith('Preferences')) return prefs
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+    })
+    mockWriteFile.mockImplementation(async (p: string, value: string) => { if(p.endsWith('Preferences')) prefs = value })
+    mockExecFile.mockImplementation((_file: string, args: string[], _opts: any, cb: any) => {
+      if(args[0] === 'query') cb(new Error('Read-back unavailable'), null)
+      else cb(null, { stdout: '', stderr: '' })
+    })
+    const { applyBrowserLeakProtection } = await import('./browserHardening')
+    const first = await applyBrowserLeakProtection()
+    const second = await applyBrowserLeakProtection()
+    expect(first.success).toBe(true)
+    expect(first.details.some(d => d.includes('not confirmed'))).toBe(true)
+    expect(second.success).toBe(true)
+    expect(second.details.some(d => d.includes('уже защищён'))).toBe(true)
+  })
+  it('reports failure when Firefox-only write fails', async () => {
+    vi.clearAllMocks()
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
+    mockExistsSync.mockImplementation((p: string) => p.endsWith('Mozilla\\Firefox\\Profiles'))
+    mockReaddir.mockResolvedValue([{ name: 'test.default', isDirectory: () => true }])
+    mockMkdir.mockResolvedValue(undefined)
+    mockReadFile.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }))
+    mockWriteFile.mockImplementation(async (p: string) => { if(p.endsWith('user.js')) throw new Error('EACCES') })
+    const { applyBrowserLeakProtection } = await import('./browserHardening')
+    const result = await applyBrowserLeakProtection()
+    expect(result.success).toBe(false)
+    expect(result.changed).toBe(false)
+    expect(result.details.some(d => d.includes('не удалось обновить'))).toBe(true)
+  })
+})
+
+it('keeps browser hardening manifest after failed restoration', async () => {
+  vi.clearAllMocks()
+  Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
+  mockReadFile.mockResolvedValue(JSON.stringify({ createdAt: 1, registryBackups: [], fileBackups: [{ path: 'prefs', backupPath: 'prefs.bak', existed: true }] }))
+  mockExistsSync.mockReturnValue(true)
+  mockCopyFile.mockRejectedValue(new Error('EACCES'))
+  const { rollbackBrowserLeakProtection } = await import('./browserHardening')
+  expect((await rollbackBrowserLeakProtection()).success).toBe(false)
+  expect(mockUnlink).not.toHaveBeenCalled()
 })

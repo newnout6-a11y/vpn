@@ -49,6 +49,7 @@ export function parseProxyAddr(proxyAddr: string): { host: string; port: string 
     portStr = trimmed.slice(lastColon + 1)
   }
 
+  if (trimmed.startsWith('[') && net.isIP(host) !== 6) return null
   // Host must be non-empty
   if (!host || host.length === 0) return null
 
@@ -73,11 +74,13 @@ export function parseProxyAddr(proxyAddr: string): { host: string; port: string 
 }
 
 async function writeBackupIfMissing(filePath: string, content: string): Promise<void> {
+  try { await stat(filePath + '.vpn-created'); return } catch (err: any) { if (err?.code !== 'ENOENT') throw err }
   const backupPath = filePath + '.vpn-backup'
   try {
     await stat(backupPath)
     // Backup already exists from earlier run; preserve it
-  } catch {
+  } catch (err: any) {
+    if (err?.code !== 'ENOENT') throw err
     await writeFile(backupPath, content, 'utf-8')
   }
 }
@@ -117,7 +120,8 @@ export const androidStudio = {
         let hadFile = true
         try {
           content = await readFile(otherXmlPath, 'utf-8')
-        } catch {
+        } catch (err: any) {
+          if (err?.code !== 'ENOENT') throw err
           content = '<application>\n</application>'
           hadFile = false
         }
@@ -154,7 +158,8 @@ export const androidStudio = {
         let hadFile = true
         try {
           content = await readFile(vmoptsPath, 'utf-8')
-        } catch {
+        } catch (err: any) {
+          if (err?.code !== 'ENOENT') throw err
           content = ''
           hadFile = false
         }
@@ -190,71 +195,41 @@ export const androidStudio = {
 
   async rollback(): Promise<boolean> {
     const dirs = await findAndroidStudioDirs()
+    let success = true
     for (const dir of dirs) {
-      const otherXmlPath = join(dir, 'options', 'other.xml')
-      const vmoptsPath = join(dir, 'studio64.exe.vmoptions')
-
-      try {
-        const backup = await readFile(otherXmlPath + '.vpn-backup', 'utf-8')
-        await writeFile(otherXmlPath, backup, 'utf-8')
-        await unlink(otherXmlPath + '.vpn-backup').catch(() => undefined)
-      } catch {
-        // No backup file. Check if file was created fresh by us
-        let wasCreated = false
+      for (const file of [join(dir, 'options', 'other.xml'), join(dir, 'studio64.exe.vmoptions')]) {
+        const readOptional = async (path: string) => {
+          try { return await readFile(path, 'utf-8') }
+          catch (err: any) { if (err?.code === 'ENOENT') return null; throw err }
+        }
+        const remove = async (path: string) => {
+          try { await unlink(path) }
+          catch (err: any) { if (err?.code !== 'ENOENT') throw err }
+        }
         try {
-          await readFile(otherXmlPath + '.vpn-created', 'utf-8')
-          wasCreated = true
-          await unlink(otherXmlPath + '.vpn-created').catch(() => undefined)
-        } catch {
-          wasCreated = false
-        }
-
-        if (wasCreated) {
-          await unlink(otherXmlPath).catch(() => undefined)
-        } else {
-          try {
-            const cur = await readFile(otherXmlPath, 'utf-8')
-            const cleaned = cur.replace(/<component\s+name="HttpConfigurable"[\s\S]*?<\/component>\n?/, '')
-            if (cleaned.replace(/<application>\s*<\/application>/, '').trim() === '') {
-              await unlink(otherXmlPath).catch(() => undefined)
-            } else {
-              await writeFile(otherXmlPath, cleaned, 'utf-8')
+          const created = await readOptional(file + '.vpn-created')
+          const backup = await readOptional(file + '.vpn-backup')
+          if (created !== null) {
+            // Remove only our component/block, preserving edits made since apply.
+            const current = await readOptional(file)
+            if (current !== null) {
+              const cleaned = file.endsWith('.xml')
+                ? current.replace(/<component\s+name="HttpConfigurable"[\s\S]*?<\/component>\n?/, '')
+                : current.replace(/# VPN-Tunnel-Enforcer[\s\S]*?# \/VPN-Tunnel-Enforcer\n?/, '')
+              if (!cleaned.replace(/<application>\s*<\/application>/, '').trim()) await remove(file)
+              else await writeFile(file, cleaned, 'utf-8')
             }
-          } catch { /* */ }
-        }
-      }
-
-      // Remove our VM options block (or restore backup if present)
-      try {
-        const backup = await readFile(vmoptsPath + '.vpn-backup', 'utf-8')
-        await writeFile(vmoptsPath, backup, 'utf-8')
-        await unlink(vmoptsPath + '.vpn-backup').catch(() => undefined)
-      } catch {
-        let wasCreated = false
-        try {
-          await readFile(vmoptsPath + '.vpn-created', 'utf-8')
-          wasCreated = true
-          await unlink(vmoptsPath + '.vpn-created').catch(() => undefined)
-        } catch {
-          wasCreated = false
-        }
-
-        if (wasCreated) {
-          await unlink(vmoptsPath).catch(() => undefined)
-        } else {
-          try {
-            const cur = await readFile(vmoptsPath, 'utf-8')
-            const cleaned = cur.replace(/# VPN-Tunnel-Enforcer[\s\S]*?# \/VPN-Tunnel-Enforcer\n?/, '')
-            if (!cleaned.trim()) {
-              await unlink(vmoptsPath).catch(() => undefined)
-            } else {
-              await writeFile(vmoptsPath, cleaned, 'utf-8')
-            }
-          } catch { /* */ }
-        }
+            await remove(file + '.vpn-created')
+            if (backup !== null) await remove(file + '.vpn-backup')
+          } else if (backup !== null) {
+            await writeFile(file, backup, 'utf-8')
+            await remove(file + '.vpn-backup')
+          }
+          // No provenance: do not delete somebody else's proxy settings.
+        } catch { success = false }
       }
     }
-    return true
+    return success
   },
 
   async isApplied(): Promise<boolean> {

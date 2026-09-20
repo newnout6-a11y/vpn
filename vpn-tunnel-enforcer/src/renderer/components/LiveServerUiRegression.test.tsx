@@ -159,6 +159,21 @@ describe('LiveServerCheckSection UI Regressions', () => {
     // Must display connection failure rate, not misleading generic packet loss
     expect(screen.getByText('Отказы TCP соединений:')).toBeInTheDocument()
     expect(screen.getByText('20% (1/5)')).toBeInTheDocument()
-    expect(screen.getByText(/Прямой \(direct\)/i)).toBeInTheDocument()
+    expect(screen.getByText(/Маршрут выбран ОС/i)).toBeInTheDocument()
   })
+})
+
+it('Second review: failed history load for B clears A and offers retry', async () => {
+  const oldCheck = makeMockCheck('old-profile-a', '192.0.2.1')
+  ;(window as any).electronAPI = {
+    serverLiveCheckHistory: vi.fn().mockResolvedValueOnce([oldCheck]).mockRejectedValueOnce(new Error('B history failed')),
+    serverLiveCheckCancel: vi.fn().mockResolvedValue({ cancelled: true }), serverLiveCheck: vi.fn()
+  }
+  const view = render(<LiveServerCheckSection profileId="p1" host="a.example" port={443} />)
+  await screen.findByText('192.0.2.1')
+  view.rerender(<LiveServerCheckSection profileId="p2" host="b.example" port={443} />)
+  await act(async () => {})
+  expect(screen.queryByText('192.0.2.1')).not.toBeInTheDocument()
+  expect(screen.queryByTitle('История проверок')).not.toBeInTheDocument()
+  expect(screen.getByText('Повторить загрузку истории')).toBeInTheDocument()
 })

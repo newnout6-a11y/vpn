@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
     reachability: { status: 'ok' },
     openPorts: [{ port: 443, open: true }]
   },
+  cancelDns: vi.fn(),
   identity: vi.fn(() => new Error('SAN mismatch'))
 }))
 
@@ -37,6 +38,13 @@ vi.mock('dns', () => {
     resolveCname: async () => [],
     reverse: async () => []
   }
+  Object.assign(promises, { Resolver: class {
+    resolve4 = promises.resolve4
+    resolve6 = promises.resolve6
+    resolveCname = promises.resolveCname
+    reverse = promises.reverse
+    cancel() { mocks.cancelDns() }
+  } })
   return { promises, default: { promises } }
 })
 vi.mock('tls', async () => {
@@ -152,4 +160,97 @@ describe('Live Server Audit Regressions: Defect Verifications', () => {
     save.mockRestore()
     prev.mockRestore()
   })
+})
+
+vi.mock('child_process', async () => {
+  const { EventEmitter } = await import('node:events')
+  const spawn = () => {
+    const child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), kill: vi.fn() })
+    queueMicrotask(() => {
+      child.stdout.emit('data', Buffer.from('Tracing route to 192.0.2.1\r\n  1  * * * Request timed out.\r\nTrace complete.\r\n'))
+      child.emit('close', 0)
+    })
+    return child
+  }
+  return { spawn, default: { spawn } }
+})
+import { probeHttp, probeRoute } from './liveServerProbe'
+import * as localHttp from 'node:http'
+
+describe('Second review: residual defects, observed behavior', () => {
+  it('does not treat timeout as closed', () => {
+    const before = { openPorts: [{ port: 443, open: true, state: 'open' }] }
+    const after = { openPorts: [{ port: 443, open: false, state: 'timeout' }] }
+    expect(computeHistoryDiff(after as any, before as any)?.closedPorts).toEqual([])
+  })
+  it('does not infer target reached from Trace complete', async () => {
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
+    try {
+      const result = await probeRoute('192.0.2.1')
+      expect(result.reachedTarget).toBe(false)
+      expect(result.hopDetails?.[0]).toContain('Request timed out')
+    } finally { Object.defineProperty(process, 'platform', platform) }
+  })
+  it('HTTP overall deadline stops an active slow body', async () => {
+    let interval: ReturnType<typeof setInterval> | undefined
+    const server = localHttp.createServer((req, res) => {
+      if (req.method === 'HEAD') { res.writeHead(405); res.end(); return }
+      res.writeHead(200)
+      res.flushHeaders()
+      let chunks = 0
+      interval = setInterval(() => { res.write('x'); if (++chunks === 40) { clearInterval(interval); res.end() } }, 100)
+    })
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    try {
+      const port = (server.address() as any).port
+      const result = await probeHttp('127.0.0.1', port, false, 'audit.example')
+      expect(result.status).toBe('error')
+      expect(result.error).toContain('deadline')
+      expect(result.durationMs).toBeLessThan(4100)
+    } finally {
+      clearInterval(interval)
+      server.closeAllConnections()
+      await new Promise<void>(resolve => server.close(() => resolve()))
+    }
+  }, 8000)
+})
+
+it('isolates cancellation by sender and rejects duplicate IDs', async () => {
+  registerLiveServerProbeIpcHandlers()
+  mocks.resolve4.mockImplementation(() => new Promise(() => {}))
+  const owner = Object.assign(new EventEmitter(), { id: 71 })
+  const other = Object.assign(new EventEmitter(), { id: 72 })
+  const run = mocks.handlers.get('server:live-check')!
+  const cancel = mocks.handlers.get('server:live-check-cancel')!
+  const options = { requestId: 'same-id', host: 'audit.invalid', port: 443 }
+  const pending = run({ sender: owner }, options)
+  await expect(run({ sender: owner }, options)).rejects.toThrow('Duplicate')
+  expect((await cancel({ sender: other }, 'same-id')).cancelled).toBe(false)
+  expect((await cancel({ sender: owner }, 'same-id')).cancelled).toBe(true)
+  expect((await pending).cancelled).toBe(true)
+  expect(mocks.cancelDns).toHaveBeenCalled()
+  expect(owner.listenerCount('destroyed')).toBe(0)
+  mocks.resolve4.mockResolvedValue([])
+})
+it.each(['timeout', 'filtered'])('does not classify %s as a closed port', state => {
+  const previous = { openPorts: [{ port: 443, open: true, state: 'open' }] }
+  expect(computeHistoryDiff({ openPorts: [{ port: 443, open: false, state }] } as any, previous as any)?.closedPorts).toEqual([])
+  expect(computeHistoryDiff({ openPorts: [{ port: 443, open: false, state: 'closed' }] } as any, previous as any)?.closedPorts).toEqual([443])
+})
+it('follows same-authority redirect preserving query on the original port', async () => {
+  const requests: string[] = []
+  const server = localHttp.createServer((req, res) => {
+    requests.push(`${req.headers.host}${req.url}`)
+    if (req.url === '/') { res.writeHead(302, { location: '/next?probe=1' }); res.end() }
+    else { res.writeHead(204); res.end() }
+  })
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+  try {
+    const port = (server.address() as any).port
+    const result = await probeHttp('127.0.0.1', port, false, 'audit.example')
+    expect(result.statusCode).toBe(204)
+    expect(result.targetPort).toBe(port)
+    expect(requests).toEqual([`audit.example:${port}/`, `audit.example:${port}/next?probe=1`])
+  } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())) }
 })

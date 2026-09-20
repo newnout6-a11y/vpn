@@ -232,7 +232,8 @@ export interface LiveLatencyStats {
   samples: number[]
   samplesAttempted: number
   samplesSucceeded?: number
-  pathType?: 'direct' | 'tun'
+  pathType?: 'direct' | 'tun' | 'os-selected'
+  tunRunning?: boolean
   method: 'tcp'
 }
 
@@ -285,6 +286,8 @@ export interface RouteDiagnostics {
   error?: string
   hops?: number
   reachedTarget?: boolean
+  commandFinished?: boolean
+  partial?: boolean
   hopDetails?: string[]
   mtu?: number
   mtuStatus?: 'measured' | 'unavailable' | 'skipped'
@@ -293,6 +296,9 @@ export interface RouteDiagnostics {
 
 export interface InfrastructureHints {
   status: LiveCheckStatus
+  error?: string
+  egressSource?: 'profile-cache'
+  egressObservedAt?: string | null
   asn?: AsnInfo
   egressIp?: string
   egressCountry?: string
@@ -345,6 +351,7 @@ export interface LiveServerCheck {
   tls?: LiveTlsCertInfo
   http?: HttpProbeResult
   openPorts?: LivePortScanItem[]
+  portsError?: string
   route?: RouteDiagnostics
   infrastructure?: InfrastructureHints
   findings: LiveCheckFinding[]

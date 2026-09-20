@@ -148,7 +148,7 @@ export function FirstRunWizard({ onComplete, onSkip }: Props) {
           await (window.electronAPI as any).themeSetActive(themeId)
         }
       } catch (err: any) {
-        addLog('warn', `Не удалось применить тему: ${err?.message || err}`)
+        throw new Error(`Не удалось применить тему: ${err?.message || err}`)
       }
 
       try {
@@ -156,7 +156,7 @@ export function FirstRunWizard({ onComplete, onSkip }: Props) {
           await (window.electronAPI as any).i18nSetLocale(selectedLang)
         }
       } catch (err: any) {
-        addLog('warn', `Не удалось применить язык: ${err?.message || err}`)
+        throw new Error(`Не удалось применить язык: ${err?.message || err}`)
       }
 
       // 3. Persist onboarding completion only after mandatory operations succeed

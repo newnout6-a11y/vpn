@@ -125,3 +125,18 @@ describe('<RotationSettings />', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 })
+
+it('Audit: displays structured rotation failure returned by backend', async () => {
+  const cfg = { enabled: true, intervalMinutes: 15, order: 'sequential', profileIds: ['p1','p2'], currentIndex: 0, nextRotationAt: null }
+  ;(window as any).electronAPI = {
+    rotationGetConfig: vi.fn().mockResolvedValue(cfg),
+    rotationSetConfig: vi.fn().mockResolvedValue(cfg),
+    rotationRotateNow: vi.fn().mockResolvedValue({ success: false, newProfile: 'p2' }),
+    serversList: vi.fn().mockResolvedValue([{ id: 'p1', name: 'Server A', protocol: 'vless' }, { id: 'p2', name: 'Server B', protocol: 'vless' }])
+  }
+  render(<RotationSettings />)
+  fireEvent.click(await screen.findByText('settings.rotationRotateNow'))
+  expect(await screen.findByRole('alert')).toHaveTextContent('Не удалось переключить сервер')
+  expect(window.electronAPI.rotationGetConfig).toHaveBeenCalledTimes(1)
+  cleanup()
+})

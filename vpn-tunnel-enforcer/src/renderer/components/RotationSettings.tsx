@@ -177,7 +177,8 @@ export const RotationSettings: React.FC = () => {
     setRotating(true)
     setIpcError(null)
     try {
-      await api.rotationRotateNow()
+      const result = await api.rotationRotateNow()
+      if (!result?.success) throw new Error('Не удалось переключить сервер. Проверьте доступность профилей и повторите попытку.')
       await fetchConfig()
     } catch (err: any) {
       setIpcError(err?.message || 'Не удалось выполнить ротацию')

@@ -68,8 +68,8 @@ describe('BrowserIpCard IP helpers', () => {
         tunRunning: true
       })
 
-      expect(summary.webRtcLocalIps).toContain('::ffff:192.168.1.10')
-      expect(summary.webRtcPublicIps).not.toContain('::ffff:192.168.1.10')
+      expect(summary.webRtcLocalIps).toContain('192.168.1.10')
+      expect(summary.webRtcPublicIps).not.toContain('192.168.1.10')
       expect(summary.webRtcPublicIps).toEqual(['198.51.100.1'])
       // Should not claim that an unexpected public IP leaked
       expect(summary.details.some(d => d.includes('WebRTC показал другие публичные адреса'))).toBe(false)

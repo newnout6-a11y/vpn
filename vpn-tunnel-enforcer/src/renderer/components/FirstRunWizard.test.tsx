@@ -117,4 +117,16 @@ describe('<FirstRunWizard /> save error handling', () => {
     expect(onComplete).not.toHaveBeenCalled()
     expect(useAppStore.getState().settings.firstRunComplete).toBe(false)
   })
+  it.each(['themeSetActive', 'i18nSetLocale'])('keeps onboarding incomplete if %s fails', async method => {
+    const api = window.electronAPI as any
+    api[method].mockRejectedValueOnce(new Error('Preference failed'))
+    const onComplete = vi.fn()
+    render(<FirstRunWizard onComplete={onComplete} onSkip={vi.fn()} />)
+    for (let i = 0; i < 5; i++) fireEvent.click(screen.getByText('onboarding.next'))
+    fireEvent.click(await screen.findByText('onboarding.finish'))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Preference failed')
+    expect(api.saveSettings).not.toHaveBeenCalled()
+    expect(onComplete).not.toHaveBeenCalled()
+  })
+
 })
