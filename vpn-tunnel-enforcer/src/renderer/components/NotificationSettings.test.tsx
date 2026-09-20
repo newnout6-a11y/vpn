@@ -56,11 +56,11 @@ describe('<NotificationSettings />', () => {
       expect(screen.getByRole('alert')).toBeInTheDocument()
     })
     expect(screen.getByText('Preferences service unavailable')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Повторить' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Повторить|common\.retry/ })).toBeInTheDocument()
 
     // When clicking retry
     api.notificationsGetPrefs.mockResolvedValueOnce(mockPrefs)
-    fireEvent.click(screen.getByRole('button', { name: 'Повторить' }))
+    fireEvent.click(screen.getByRole('button', { name: /Повторить|common\.retry/ }))
 
     await waitFor(() => {
       expect(screen.getByText('notifications.title')).toBeInTheDocument()
@@ -92,5 +92,42 @@ describe('<NotificationSettings />', () => {
     fireEvent.click(dismissBtn)
 
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('shows error banner and allows retry when checkOsNotificationState fails', async () => {
+    const api = (globalThis as any).window.electronAPI
+    api.checkOsNotificationState.mockRejectedValueOnce(new Error('OS notifications check failed'))
+
+    render(<NotificationSettings />)
+
+    await waitFor(() => {
+      expect(screen.getByText('OS notifications check failed')).toBeInTheDocument()
+    })
+    expect(screen.getByRole('alert')).toBeInTheDocument()
+
+    // When clicking retry and check succeeds
+    api.checkOsNotificationState.mockResolvedValueOnce({ osNotificationsEnabled: true })
+    const retryBtn = screen.getByRole('button', { name: /Повторить|common\.retry/ })
+    fireEvent.click(retryBtn)
+
+    await waitFor(() => {
+      expect(screen.queryByText('OS notifications check failed')).not.toBeInTheDocument()
+    })
+  })
+
+  it('allows dismissing OS check error banner', async () => {
+    const api = (globalThis as any).window.electronAPI
+    api.checkOsNotificationState.mockRejectedValueOnce(new Error('OS status lookup error'))
+
+    render(<NotificationSettings />)
+
+    await waitFor(() => {
+      expect(screen.getByText('OS status lookup error')).toBeInTheDocument()
+    })
+
+    const dismissBtn = screen.getByRole('button', { name: 'Dismiss OS error' })
+    fireEvent.click(dismissBtn)
+
+    expect(screen.queryByText('OS status lookup error')).not.toBeInTheDocument()
   })
 })

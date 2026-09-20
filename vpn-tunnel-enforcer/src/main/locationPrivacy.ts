@@ -63,12 +63,30 @@ function runElevated(command: string): Promise<void> {
   return execElevated(command, { timeout: 30000 }).then(() => undefined)
 }
 
-async function keyExists(key: string): Promise<boolean> {
+type KeyStatus = 'exists' | 'absent' | 'unknown'
+
+async function checkKeyStatus(key: string): Promise<KeyStatus> {
   try {
     await reg(['query', key])
-    return true
-  } catch {
-    return false
+    return 'exists'
+  } catch (err: any) {
+    const text = String(err?.stderr || err?.stdout || err?.message || '')
+    if (/unable to find|не удается найти|не удалось найти/i.test(text)) {
+      return 'absent'
+    }
+    // If access was denied or unprivileged on HKLM, attempt elevated query
+    if (key.startsWith('HKLM')) {
+      try {
+        await execElevated(`reg query "${key}"`, { timeout: 15000 })
+        return 'exists'
+      } catch (elevErr: any) {
+        const elevText = String(elevErr?.stderr || elevErr?.stdout || elevErr?.message || '')
+        if (/unable to find|не удается найти|не удалось найти/i.test(elevText)) {
+          return 'absent'
+        }
+      }
+    }
+    return 'unknown'
   }
 }
 
@@ -77,15 +95,40 @@ async function exportKey(key: string, file: string): Promise<string | null> {
     await reg(['export', key, file, '/y'])
     return file
   } catch {
+    if (key.startsWith('HKLM')) {
+      try {
+        await execElevated(`reg export "${key}" "${file}" /y`, { timeout: 30000 })
+        return file
+      } catch {
+        return null
+      }
+    }
     return null
   }
 }
 
 async function createBackup(): Promise<BackupManifest> {
   await mkdir(backupDir(), { recursive: true })
+
+  // Preserve pre-existing manifest if an earlier apply is pending rollback
+  const existing = await readManifest()
+  if (existing) {
+    return existing
+  }
+
   const stamp = timestamp()
-  const hkcuKeyExisted = await keyExists(HKCU_LOCATION)
-  const hklmKeyExisted = await keyExists(HKLM_LOCATION)
+  const hkcuStatus = await checkKeyStatus(HKCU_LOCATION)
+  const hklmStatus = await checkKeyStatus(HKLM_LOCATION)
+
+  if (hkcuStatus === 'unknown') {
+    throw new Error('Не удалось проверить состояние реестра HKCU перед созданием backup. Настройки местоположения не были изменены.')
+  }
+  if (hklmStatus === 'unknown') {
+    throw new Error('Не удалось проверить состояние реестра HKLM перед созданием backup. Настройки местоположения не были изменены.')
+  }
+
+  const hkcuKeyExisted = hkcuStatus === 'exists'
+  const hklmKeyExisted = hklmStatus === 'exists'
 
   const hkcuBackup = hkcuKeyExisted
     ? await exportKey(HKCU_LOCATION, join(backupDir(), `hkcu-location-${stamp}.reg`))
@@ -169,21 +212,42 @@ export async function rollbackLocationPrivacy(): Promise<LocationPrivacyStatus> 
   const manifest = await readManifest()
 
   if (manifest) {
+    let rollbackFailed = false
+
     if (manifest.hkcuBackup) {
-      await reg(['import', manifest.hkcuBackup]).catch(() => undefined)
+      try {
+        await reg(['import', manifest.hkcuBackup])
+      } catch {
+        rollbackFailed = true
+      }
     } else if (manifest.hkcuKeyExisted === false) {
-      await reg(['delete', HKCU_LOCATION, '/v', 'Value', '/f']).catch(() => undefined)
+      try {
+        await reg(['delete', HKCU_LOCATION, '/v', 'Value', '/f'])
+      } catch {
+        // ignore if not found
+      }
     }
 
     if (manifest.hklmBackup) {
-      await runElevated(`reg import "${manifest.hklmBackup}"`).catch(() => undefined)
+      try {
+        await runElevated(`reg import "${manifest.hklmBackup}"`)
+      } catch {
+        rollbackFailed = true
+      }
     } else if (manifest.hklmKeyExisted === false) {
-      await runElevated(`reg delete "${HKLM_LOCATION}" /v DisableLocation /f`).catch(() => undefined)
-      await runElevated(`reg delete "${HKLM_LOCATION}" /v DisableWindowsLocationProvider /f`).catch(() => undefined)
+      try {
+        await runElevated(`reg delete "${HKLM_LOCATION}" /v DisableLocation /f && reg delete "${HKLM_LOCATION}" /v DisableWindowsLocationProvider /f`)
+      } catch {
+        rollbackFailed = true
+      }
     }
-  }
 
-  await unlink(manifestPath()).catch(() => undefined)
+    if (rollbackFailed) {
+      throw new Error('Не удалось полностью восстановить настройки реестра. Резервная копия сохранена.')
+    }
+
+    await unlink(manifestPath()).catch(() => undefined)
+  }
 
   return getLocationPrivacyStatus()
 }

@@ -3,6 +3,7 @@ import { join } from 'path'
 import { homedir } from 'os'
 import { exec } from 'child_process'
 import { promisify } from 'util'
+import net from 'net'
 
 const execAsync = promisify(exec)
 
@@ -35,7 +36,7 @@ export function parseProxyAddr(proxyAddr: string): { host: string; port: string 
   if (trimmed.startsWith('[')) {
     const closeBracket = trimmed.indexOf(']')
     if (closeBracket === -1) return null
-    host = trimmed.slice(1, closeBracket)
+    host = trimmed.slice(1, closeBracket).trim()
     const after = trimmed.slice(closeBracket + 1)
     if (!after.startsWith(':')) return null
     portStr = after.slice(1)
@@ -44,13 +45,28 @@ export function parseProxyAddr(proxyAddr: string): { host: string; port: string 
     if (lastColon <= 0) return null
     // If there are multiple colons and no brackets, it's an unbracketed IPv6 without a distinct port
     if (trimmed.indexOf(':') !== lastColon) return null
-    host = trimmed.slice(0, lastColon)
+    host = trimmed.slice(0, lastColon).trim()
     portStr = trimmed.slice(lastColon + 1)
+  }
+
+  // Host must be non-empty
+  if (!host || host.length === 0) return null
+
+  // Port must be strictly integer digits (no trailing junk or decimal numbers)
+  if (!/^\d+$/.test(portStr)) {
+    return null
   }
 
   const portNum = parseInt(portStr, 10)
   if (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535) {
     return null
+  }
+
+  // Validate host: either valid IP (v4/v6) or valid hostname
+  if (net.isIP(host) === 0) {
+    if (!/^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$/.test(host)) {
+      return null
+    }
   }
 
   return { host, port: String(portNum) }
@@ -86,7 +102,7 @@ export const androidStudio = {
       }
     }
 
-    let anySuccess = false
+    let allSuccess = targetDirs.length > 0
 
     for (const dir of targetDirs) {
       let dirSuccess = true
@@ -108,6 +124,8 @@ export const androidStudio = {
 
         if (hadFile) {
           await writeBackupIfMissing(otherXmlPath, content)
+        } else {
+          await writeFile(otherXmlPath + '.vpn-created', 'created', 'utf-8')
         }
 
         const proxyEntry = `<component name="HttpConfigurable">
@@ -143,6 +161,8 @@ export const androidStudio = {
 
         if (hadFile) {
           await writeBackupIfMissing(vmoptsPath, content)
+        } else {
+          await writeFile(vmoptsPath + '.vpn-created', 'created', 'utf-8')
         }
 
         const marker = '# VPN-Tunnel-Enforcer'
@@ -160,12 +180,12 @@ export const androidStudio = {
         dirSuccess = false
       }
 
-      if (dirSuccess) {
-        anySuccess = true
+      if (!dirSuccess) {
+        allSuccess = false
       }
     }
 
-    return anySuccess
+    return allSuccess
   },
 
   async rollback(): Promise<boolean> {
@@ -178,7 +198,31 @@ export const androidStudio = {
         const backup = await readFile(otherXmlPath + '.vpn-backup', 'utf-8')
         await writeFile(otherXmlPath, backup, 'utf-8')
         await unlink(otherXmlPath + '.vpn-backup').catch(() => undefined)
-      } catch { /* no backup */ }
+      } catch {
+        // No backup file. Check if file was created fresh by us
+        let wasCreated = false
+        try {
+          await readFile(otherXmlPath + '.vpn-created', 'utf-8')
+          wasCreated = true
+          await unlink(otherXmlPath + '.vpn-created').catch(() => undefined)
+        } catch {
+          wasCreated = false
+        }
+
+        if (wasCreated) {
+          await unlink(otherXmlPath).catch(() => undefined)
+        } else {
+          try {
+            const cur = await readFile(otherXmlPath, 'utf-8')
+            const cleaned = cur.replace(/<component\s+name="HttpConfigurable"[\s\S]*?<\/component>\n?/, '')
+            if (cleaned.replace(/<application>\s*<\/application>/, '').trim() === '') {
+              await unlink(otherXmlPath).catch(() => undefined)
+            } else {
+              await writeFile(otherXmlPath, cleaned, 'utf-8')
+            }
+          } catch { /* */ }
+        }
+      }
 
       // Remove our VM options block (or restore backup if present)
       try {
@@ -186,11 +230,28 @@ export const androidStudio = {
         await writeFile(vmoptsPath, backup, 'utf-8')
         await unlink(vmoptsPath + '.vpn-backup').catch(() => undefined)
       } catch {
+        let wasCreated = false
         try {
-          const cur = await readFile(vmoptsPath, 'utf-8')
-          const cleaned = cur.replace(/# VPN-Tunnel-Enforcer[\s\S]*?# \/VPN-Tunnel-Enforcer\n?/, '')
-          await writeFile(vmoptsPath, cleaned, 'utf-8')
-        } catch { /* */ }
+          await readFile(vmoptsPath + '.vpn-created', 'utf-8')
+          wasCreated = true
+          await unlink(vmoptsPath + '.vpn-created').catch(() => undefined)
+        } catch {
+          wasCreated = false
+        }
+
+        if (wasCreated) {
+          await unlink(vmoptsPath).catch(() => undefined)
+        } else {
+          try {
+            const cur = await readFile(vmoptsPath, 'utf-8')
+            const cleaned = cur.replace(/# VPN-Tunnel-Enforcer[\s\S]*?# \/VPN-Tunnel-Enforcer\n?/, '')
+            if (!cleaned.trim()) {
+              await unlink(vmoptsPath).catch(() => undefined)
+            } else {
+              await writeFile(vmoptsPath, cleaned, 'utf-8')
+            }
+          } catch { /* */ }
+        }
       }
     }
     return true

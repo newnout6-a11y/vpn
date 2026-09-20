@@ -11,7 +11,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, rmSync, existsSync, statSync } from 'fs'
+import { mkdtempSync, rmSync, existsSync, statSync, mkdirSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 
@@ -87,4 +87,50 @@ describe('appLogger rotation', () => {
     expect(repairMojibake('Защита включена')).toBe('Защита включена')
     expect(repairMojibake('plain ASCII')).toBe('plain ASCII')
   })
+
+  it('retains rotation byte stats when rename fails so subsequent writes retry rotation', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+    const { logEvent, getLogDir } = await import('./appLogger')
+    try {
+      const logDir = getLogDir()
+      const appLog = join(logDir, 'app.log')
+      const prevLog = join(logDir, 'app.prev.log')
+
+      // Block rotation by creating a non-empty directory at app.prev.log,
+      // causing unlink and rename to fail with EPERM.
+      mkdirSync(prevLog, { recursive: true })
+      writeFileSync(join(prevLog, 'lock.tmp'), 'blocking file')
+
+      const blob = 'x'.repeat(3500)
+      for (let i = 0; i < 2500; i++) {
+        logEvent('info', 'test', `line ${i}`, { blob })
+      }
+      for (let i = 0; i < 250 && (!existsSync(appLog) || statSync(appLog).size < 5 * 1024 * 1024); i++) {
+        await flush()
+      }
+
+      // Rename failed, app.log exceeded 5 MB and prevLog is still a directory
+      expect(existsSync(appLog)).toBe(true)
+      expect(statSync(appLog).size).toBeGreaterThanOrEqual(5 * 1024 * 1024)
+      expect(statSync(prevLog).isDirectory()).toBe(true)
+
+      // Unblock: remove the directory so subsequent rename can succeed
+      rmSync(prevLog, { recursive: true, force: true })
+
+      // Write one single line. Because currentLogBytes retained the >= 5 MB stat,
+      // this subsequent write must immediately re-attempt rotation and succeed.
+      logEvent('info', 'test', 'retry line', { blob: 'small' })
+
+      for (let i = 0; i < 250 && (!existsSync(prevLog) || statSync(appLog).size >= 5 * 1024 * 1024); i++) {
+        await flush()
+      }
+
+      // Rotation has now succeeded: prevLog is a file (not dir) and appLog rolled
+      expect(existsSync(prevLog)).toBe(true)
+      expect(statSync(prevLog).isFile()).toBe(true)
+      expect(statSync(appLog).size).toBeLessThan(5 * 1024 * 1024)
+    } finally {
+      logSpy.mockRestore()
+    }
+  }, 15000)
 })

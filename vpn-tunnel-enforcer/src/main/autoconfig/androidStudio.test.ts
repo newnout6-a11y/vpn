@@ -1,17 +1,25 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { parseProxyAddr, androidStudio } from './androidStudio'
-import * as fsPromises from 'fs/promises'
 
-vi.mock('fs/promises', async () => {
-  const actual = await vi.importActual<typeof fsPromises>('fs/promises')
+const mockReadFile = vi.fn()
+const mockWriteFile = vi.fn()
+const mockMkdir = vi.fn()
+const mockStat = vi.fn()
+const mockReaddir = vi.fn()
+const mockUnlink = vi.fn()
+
+vi.mock('fs/promises', () => {
+  const fns = {
+    readFile: (...args: any[]) => mockReadFile(...args),
+    writeFile: (...args: any[]) => mockWriteFile(...args),
+    mkdir: (...args: any[]) => mockMkdir(...args),
+    stat: (...args: any[]) => mockStat(...args),
+    readdir: (...args: any[]) => mockReaddir(...args),
+    unlink: (...args: any[]) => mockUnlink(...args)
+  }
   return {
-    ...actual,
-    readFile: vi.fn(),
-    writeFile: vi.fn(),
-    mkdir: vi.fn(),
-    stat: vi.fn(),
-    readdir: vi.fn(),
-    unlink: vi.fn()
+    ...fns,
+    default: fns
   }
 })
 
@@ -34,6 +42,9 @@ describe('androidStudio autoconfig', () => {
       expect(parseProxyAddr('127.0.0.1:0')).toBeNull()
       expect(parseProxyAddr('127.0.0.1:70000')).toBeNull()
       expect(parseProxyAddr('127.0.0.1:abc')).toBeNull()
+      expect(parseProxyAddr('localhost:1080junk')).toBeNull()
+      expect(parseProxyAddr('localhost:1.5')).toBeNull()
+      expect(parseProxyAddr('[]:1080')).toBeNull()
       expect(parseProxyAddr('')).toBeNull()
     })
   })
@@ -41,6 +52,8 @@ describe('androidStudio autoconfig', () => {
   describe('apply & backup preservation', () => {
     beforeEach(() => {
       vi.clearAllMocks()
+      mockMkdir.mockResolvedValue(undefined)
+      mockReaddir.mockResolvedValue([])
     })
 
     it('returns false immediately on invalid proxy address', async () => {
@@ -49,11 +62,6 @@ describe('androidStudio autoconfig', () => {
     })
 
     it('does not overwrite existing backup on repeated apply', async () => {
-      const mockReaddir = vi.mocked(fsPromises.readdir)
-      const mockStat = vi.mocked(fsPromises.stat)
-      const mockReadFile = vi.mocked(fsPromises.readFile)
-      const mockWriteFile = vi.mocked(fsPromises.writeFile)
-
       mockReaddir.mockResolvedValue(['AndroidStudio2024.1'] as any)
       // File exists
       mockReadFile.mockResolvedValue('<application></application>')
@@ -65,8 +73,43 @@ describe('androidStudio autoconfig', () => {
       expect(res).toBe(true)
 
       // Verify that writeFile was NOT called for .vpn-backup
-      const backupCalls = mockWriteFile.mock.calls.filter(call => String(call[0]).endsWith('.vpn-backup'))
+      const backupCalls = mockWriteFile.mock.calls.filter((call) => String(call[0]).endsWith('.vpn-backup'))
       expect(backupCalls.length).toBe(0)
+    })
+
+    it('leaves proxy disabled after apply then rollback when other.xml was initially absent', async () => {
+      const files: Record<string, string> = {}
+      mockReaddir.mockResolvedValue(['AndroidStudio2024.1'] as any)
+      mockMkdir.mockResolvedValue(undefined)
+      mockReadFile.mockImplementation(async (path: any) => {
+        const val = files[String(path)]
+        if (val === undefined) {
+          const err = new Error('ENOENT')
+          ;(err as any).code = 'ENOENT'
+          throw err
+        }
+        return val as any
+      })
+      mockWriteFile.mockImplementation(async (path: any, data: any) => {
+        files[String(path)] = String(data)
+      })
+      mockStat.mockImplementation(async (path: any) => {
+        if (files[String(path)] === undefined) {
+          const err = new Error('ENOENT')
+          ;(err as any).code = 'ENOENT'
+          throw err
+        }
+        return {} as any
+      })
+      mockUnlink.mockImplementation(async (path: any) => {
+        delete files[String(path)]
+      })
+
+      expect(await androidStudio.apply('127.0.0.1:1080')).toBe(true)
+      expect(await androidStudio.isApplied()).toBe(true)
+
+      expect(await androidStudio.rollback()).toBe(true)
+      expect(await androidStudio.isApplied()).toBe(false)
     })
   })
 })

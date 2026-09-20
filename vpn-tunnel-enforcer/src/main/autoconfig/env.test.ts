@@ -226,4 +226,31 @@ describe('env autoconfig backup and rollback', () => {
     expect(rollbackSpy).toHaveBeenCalled()
     rollbackSpy.mockRestore()
   })
+
+  it('does NOT delete proxy variables when backup creation fails before any setx', async () => {
+    const fs = await import('fs/promises')
+    vi.mocked(fs.mkdir).mockRejectedValueOnce(new Error('EACCES backup directory'))
+    mockExecFile.mockReturnValue({ stdout: '', stderr: '' })
+
+    const ok = await env.apply('127.0.0.1:10808')
+    expect(ok).toBe(false)
+    expect(mockExecFile.mock.calls.filter(([cmd]) => cmd === 'setx')).toHaveLength(0)
+    const deleted = mockExecFile.mock.calls.filter(([cmd, args]) => cmd === 'reg' && args[0] === 'delete')
+    expect(deleted).toHaveLength(0)
+  })
+
+  it('reports failed rollback and preserves backup file when restore fails', async () => {
+    mockFs[backupFile] = JSON.stringify({
+      createdAt: 1000,
+      httpProxy: 'http://corp:8080',
+      httpsProxy: 'http://corp:8080',
+      allProxy: 'http://corp:8080',
+      noProxy: 'internal'
+    })
+    mockExecFile.mockImplementation((cmd: string) => (cmd === 'setx' ? new Error('Access denied') : { stdout: '', stderr: '' }))
+
+    const ok = await env.rollback()
+    expect(ok).toBe(false)
+    expect(mockFs[backupFile]).toBeDefined()
+  })
 })

@@ -61,8 +61,11 @@ const EVENT_TOGGLES: EventToggleConfig[] = [
 
 export const NotificationSettings: React.FC = () => {
   const { t } = useTranslation()
+  const tRef = useRef(t)
+  tRef.current = t
   const [prefs, setPrefs] = useState<NotificationPreferences | null>(null)
   const [osBlocked, setOsBlocked] = useState(false)
+  const [osCheckError, setOsCheckError] = useState<string | null>(null)
   const [ipcError, setIpcError] = useState<string | null>(null)
 
   const api = window.electronAPI
@@ -71,10 +74,11 @@ export const NotificationSettings: React.FC = () => {
 
   const fetchOsState = useCallback(async () => {
     try {
+      setOsCheckError(null)
       const state = await api.checkOsNotificationState()
       setOsBlocked(!state.osNotificationsEnabled)
-    } catch {
-      // IPC not yet available — assume allowed
+    } catch (err: any) {
+      setOsCheckError(err?.message || tRef.current('notifications.osCheckError'))
     }
   }, [api])
 
@@ -164,7 +168,7 @@ export const NotificationSettings: React.FC = () => {
                 fetchOsState()
               }}
             >
-              Повторить
+              {t('common.retry')}
             </MacButton>
           </div>
         ) : (
@@ -197,6 +201,36 @@ export const NotificationSettings: React.FC = () => {
           >
             ×
           </button>
+        </div>
+      )}
+
+      {/* OS notification check error banner */}
+      {osCheckError && (
+        <div
+          role="alert"
+          className="flex items-center justify-between p-3 rounded-[var(--radius-sm)] bg-[var(--color-warning)]/10 border border-[var(--color-warning)]/30 text-[var(--color-warning)] text-xs"
+        >
+          <div className="flex items-center gap-2">
+            <AlertTriangle size={16} className="shrink-0 text-[var(--color-warning)]" />
+            <span>{osCheckError}</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <MacButton
+              variant="secondary"
+              size="sm"
+              onClick={() => fetchOsState()}
+            >
+              {t('common.retry')}
+            </MacButton>
+            <button
+              type="button"
+              onClick={() => setOsCheckError(null)}
+              className="text-[var(--color-warning)] hover:opacity-80 font-bold px-1 text-sm leading-none"
+              aria-label="Dismiss OS error"
+            >
+              ×
+            </button>
+          </div>
         </div>
       )}
 

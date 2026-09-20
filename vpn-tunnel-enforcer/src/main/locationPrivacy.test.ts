@@ -55,6 +55,7 @@ describe('locationPrivacy module', () => {
     mockMkdir.mockResolvedValue(undefined)
     mockWriteFile.mockResolvedValue(undefined)
     mockUnlink.mockResolvedValue(undefined)
+    mockReadFile.mockRejectedValue(new Error('ENOENT'))
   })
 
   it('detects when location is allowed/default', async () => {
@@ -155,11 +156,46 @@ describe('locationPrivacy module', () => {
         cb(null, { stdout: '', stderr: '' })
       }
     })
+    mockExecElevated.mockRejectedValue(new Error('export failed: access denied (elevated)'))
 
     const { applyLocationPrivacy } = await import('./locationPrivacy')
     await expect(applyLocationPrivacy()).rejects.toThrow('Не удалось создать backup HKLM')
 
-    // execElevated must NOT have been called
-    expect(mockExecElevated).not.toHaveBeenCalled()
+    // execElevated must NOT have been called to add/modify registry
+    expect(mockExecElevated).not.toHaveBeenCalledWith(expect.stringContaining('reg add'), expect.any(Object))
+  })
+
+  it('aborts and does not modify registry when HKLM query fails with Access Denied', async () => {
+    mockExecFile.mockImplementation((file: string, args: string[], _opts: any, cb: any) => {
+      if (args[0] === 'query' && args[1].includes('LocationAndSensors')) {
+        cb(new Error('Access is denied'), null)
+      } else {
+        cb(null, { stdout: '', stderr: '' })
+      }
+    })
+    mockExecElevated.mockRejectedValue(new Error('Access is denied (elevated)'))
+
+    const { applyLocationPrivacy } = await import('./locationPrivacy')
+    await expect(applyLocationPrivacy()).rejects.toThrow('Не удалось проверить состояние реестра HKLM')
+    expect(mockExecElevated).not.toHaveBeenCalledWith(expect.stringContaining('reg add'), expect.any(Object))
+  })
+
+  it('preserves rollback manifest when registry import fails', async () => {
+    mockReadFile.mockResolvedValue(
+      JSON.stringify({
+        hkcuBackup: 'C:\\MockProgramData\\old-cu.reg',
+        hklmBackup: 'C:\\MockProgramData\\old-lm.reg',
+        hkcuKeyExisted: true,
+        hklmKeyExisted: true
+      })
+    )
+    mockExecFile.mockImplementation((file: string, _args: string[], _opts: any, cb: any) => {
+      cb(new Error('Import failed'), null)
+    })
+    mockExecElevated.mockRejectedValue(new Error('Elevation denied'))
+
+    const { rollbackLocationPrivacy } = await import('./locationPrivacy')
+    await expect(rollbackLocationPrivacy()).rejects.toThrow('Не удалось полностью восстановить настройки реестра')
+    expect(mockUnlink).not.toHaveBeenCalledWith(expect.stringContaining('latest-location-backup.json'))
   })
 })

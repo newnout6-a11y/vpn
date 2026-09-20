@@ -73,18 +73,28 @@ async function setUserEnvValue(name: string, value: string): Promise<void> {
 }
 
 async function deleteUserEnvValue(name: string): Promise<void> {
-  await execFileAsync('reg', ['delete', 'HKCU\\Environment', '/v', name, '/f'], {
-    windowsHide: true,
-    timeout: 10000
-  }).catch(() => undefined)
+  try {
+    await execFileAsync('reg', ['delete', 'HKCU\\Environment', '/v', name, '/f'], {
+      windowsHide: true,
+      timeout: 10000
+    })
+  } catch (err: any) {
+    const text = String(err?.stderr || err?.stdout || err?.message || '')
+    if (/unable to find|не удается найти|не удалось найти/i.test(text)) {
+      return
+    }
+    throw err
+  }
 }
 
 async function saveBackupIfMissing(): Promise<void> {
   try {
     await readFile(backupPath(), 'utf8')
     return
-  } catch {
-    // no backup yet
+  } catch (err: any) {
+    if (err?.code !== 'ENOENT') {
+      throw err
+    }
   }
   await mkdir(join(homedir(), '.vpnte'), { recursive: true })
   const backup: EnvProxyBackup = {
@@ -108,11 +118,24 @@ export const env = {
     const url = proxyUrl(proxyAddr, proxyType)
     try {
       await saveBackupIfMissing()
-      // Set user-level environment variables (survives reboot)
-      await setUserEnvValue('HTTP_PROXY', url)
-      await setUserEnvValue('HTTPS_PROXY', url)
-      await setUserEnvValue('ALL_PROXY', url)
-      await setUserEnvValue('NO_PROXY', 'localhost,127.0.0.1,::1')
+    } catch {
+      // Failed to prepare backup before modifying system environment.
+      // Abort immediately without rollback to avoid deleting user variables.
+      return false
+    }
+
+    const appliedKeys: string[] = []
+    try {
+      const keysToSet: Array<[string, string]> = [
+        ['HTTP_PROXY', url],
+        ['HTTPS_PROXY', url],
+        ['ALL_PROXY', url],
+        ['NO_PROXY', 'localhost,127.0.0.1,::1']
+      ]
+      for (const [key, val] of keysToSet) {
+        await setUserEnvValue(key, val)
+        appliedKeys.push(key)
+      }
       process.env.HTTP_PROXY = url
       process.env.HTTPS_PROXY = url
       process.env.ALL_PROXY = url
@@ -120,7 +143,9 @@ export const env = {
       await broadcastEnvironmentChanged()
       return true
     } catch {
-      await this.rollback().catch(() => undefined)
+      if (appliedKeys.length > 0) {
+        await this.rollback().catch(() => undefined)
+      }
       return false
     }
   },
@@ -131,16 +156,23 @@ export const env = {
       try {
         backup = JSON.parse(await readFile(backupPath(), 'utf8')) as EnvProxyBackup
       } catch {
-        backup = null
+        // No backup file found — cannot restore unknown prior environment
+        return false
       }
 
+      let hasErrors = false
+
       const restoreOrDelete = async (name: string, value: string | null | undefined) => {
-        if (value) {
-          await setUserEnvValue(name, value).catch(() => undefined)
-          process.env[name] = value
-        } else {
-          await deleteUserEnvValue(name)
-          delete process.env[name]
+        try {
+          if (value) {
+            await setUserEnvValue(name, value)
+            process.env[name] = value
+          } else {
+            await deleteUserEnvValue(name)
+            delete process.env[name]
+          }
+        } catch {
+          hasErrors = true
         }
       }
 
@@ -148,6 +180,11 @@ export const env = {
       await restoreOrDelete('HTTPS_PROXY', backup?.httpsProxy ?? null)
       await restoreOrDelete('ALL_PROXY', backup?.allProxy ?? null)
       await restoreOrDelete('NO_PROXY', backup?.noProxy ?? null)
+
+      if (hasErrors) {
+        // Preserve backup file if restore operations failed, so rollback can be retried
+        return false
+      }
 
       await unlink(backupPath()).catch(() => undefined)
       await broadcastEnvironmentChanged()

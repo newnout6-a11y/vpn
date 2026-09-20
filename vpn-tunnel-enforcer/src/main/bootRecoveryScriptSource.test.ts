@@ -48,4 +48,20 @@ describe('boot recovery script source regressions', () => {
     expect(script).toContain('preserving non-VPNTE $key=$val')
     expect(script).toContain('Registry::HKEY_USERS')
   })
+
+  it('preserves adapter manifest if recovery finishes with warnings or errors', () => {
+    const script = scriptSource()
+
+    expect(script).toContain('if ($adapterManifest -and -not $hasWarnings -and -not $script:hasWarnings)')
+    expect(script).toContain('Adapter lockdown manifest: preserved because recovery finished with warnings')
+    expect(script).toContain('Remove-Item $cp -Force -ErrorAction Stop')
+  })
+
+  it('propagates failure exit codes from netsh and reg delete to warnings', () => {
+    const script = scriptSource()
+
+    expect(script).toContain('Transition adapters: failed to restore teredo state (exit code $LASTEXITCODE)')
+    expect(script).toContain('$hasWarnings = $true')
+    expect(script).toContain('$script:hasWarnings = $true')
+  })
 })

@@ -80,11 +80,14 @@ function Restore-RegValue($key, $name, $snapshot, $tag) {
                 $script:hasWarnings = $true
             }
         } else {
-            reg delete $key /v $name /f 2>$null | Out-Null
+            $delOutput = reg delete $key /v $name /f 2>&1
             if ($LASTEXITCODE -eq 0) {
                 Log "Registry: removed VPNTE-created $tag"
+            } elseif ($delOutput -match 'unable to find|не удается найти') {
+                Log "Registry: VPNTE-created $tag was already absent"
             } else {
-                Log "Registry: failed to remove VPNTE-created $tag (exit code $LASTEXITCODE)"
+                Log "Registry: failed to remove VPNTE-created $tag (exit code $LASTEXITCODE, $delOutput)"
+                $script:hasWarnings = $true
             }
         }
     } catch {
@@ -179,9 +182,27 @@ foreach ($a in $adapters) {
 # 4. Transition adapters: restore only known prior state.
 if ($adapterManifest -and $adapterManifest.transitionAdapters) {
     $t = $adapterManifest.transitionAdapters
-    if ($t.teredoType -match '^[a-z]+$') { netsh interface teredo set state type=$($t.teredoType) | Out-Null }
-    if ($t.sixToFourState -match '^[a-z]+$') { netsh interface 6to4 set state state=$($t.sixToFourState) | Out-Null }
-    if ($t.isatapState -match '^[a-z]+$') { netsh interface isatap set state state=$($t.isatapState) | Out-Null }
+    if ($t.teredoType -match '^[a-z]+$') {
+        netsh interface teredo set state type=$($t.teredoType) | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Log "Transition adapters: failed to restore teredo state (exit code $LASTEXITCODE)"
+            $hasWarnings = $true
+        }
+    }
+    if ($t.sixToFourState -match '^[a-z]+$') {
+        netsh interface 6to4 set state state=$($t.sixToFourState) | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Log "Transition adapters: failed to restore 6to4 state (exit code $LASTEXITCODE)"
+            $hasWarnings = $true
+        }
+    }
+    if ($t.isatapState -match '^[a-z]+$') {
+        netsh interface isatap set state state=$($t.isatapState) | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Log "Transition adapters: failed to restore isatap state (exit code $LASTEXITCODE)"
+            $hasWarnings = $true
+        }
+    }
     Log "Transition adapters: restored from manifest where known"
 }
 
@@ -190,8 +211,16 @@ if ($adapterManifest -and $adapterManifest.dnsRegistryPolicy) {
     Restore-RegValue "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient" "DisableSmartNameResolution" $adapterManifest.dnsRegistryPolicy.smartNameResolution "DisableSmartNameResolution"
     Restore-RegValue "HKLM\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters" "DisableParallelAandAAAA" $adapterManifest.dnsRegistryPolicy.parallelAandAAAA "DisableParallelAandAAAA"
 } elseif ($vpnteRules -gt 0) {
-    reg delete "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient" /v DisableSmartNameResolution /f 2>$null
-    reg delete "HKLM\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters" /v DisableParallelAandAAAA /f 2>$null
+    $del1 = reg delete "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient" /v DisableSmartNameResolution /f 2>&1
+    if ($LASTEXITCODE -ne 0 -and $del1 -notmatch 'unable to find|не удается найти') {
+        Log "Registry: failed to remove DisableSmartNameResolution ($del1)"
+        $hasWarnings = $true
+    }
+    $del2 = reg delete "HKLM\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters" /v DisableParallelAandAAAA /f 2>&1
+    if ($LASTEXITCODE -ne 0 -and $del2 -notmatch 'unable to find|не удается найти') {
+        Log "Registry: failed to remove DisableParallelAandAAAA ($del2)"
+        $hasWarnings = $true
+    }
     Log "Registry: VPNTE DNS policy keys removed without manifest (orphaned VPNTE rules detected)"
 } else {
     Log "Registry: preserved DNS policy keys (no manifest and no orphaned VPNTE rules detected)"
@@ -205,17 +234,20 @@ try {
     Log "DNS cache: flush warning ($_)"
 }
 
-if ($adapterManifest) {
+if ($adapterManifest -and -not $hasWarnings -and -not $script:hasWarnings) {
     foreach ($cp in $candidatePaths) {
         if (Test-Path $cp) {
             try {
-                Remove-Item $cp -Force
+                Remove-Item $cp -Force -ErrorAction Stop
                 Log "Adapter lockdown manifest: removed $cp"
             } catch {
                 Log "Adapter lockdown manifest: remove failed for $cp ($_)"
+                $hasWarnings = $true
             }
         }
     }
+} elseif ($adapterManifest) {
+    Log "Adapter lockdown manifest: preserved because recovery finished with warnings"
 }
 
 # 7. Env proxy vars: remove only orphaned local/VPNTE proxy settings, preserving custom/corporate proxies
@@ -229,7 +261,11 @@ function Clean-VpnteProxyEnv($envPath) {
         $val = (Get-ItemProperty -Path $envPath -Name $key -ErrorAction SilentlyContinue).$key
         if ($val -and ($val -match '^(https?|socks5h?)://(127\.0\.0\.1|localhost)(:\d+)?/?$')) {
             Log "Env: removing orphaned VPNTE $key=$val from $envPath"
-            reg delete $regTarget /v $key /f 2>$null
+            $delRes = reg delete $regTarget /v $key /f 2>&1
+            if ($LASTEXITCODE -ne 0 -and $delRes -notmatch 'unable to find|не удается найти') {
+                Log "Env: failed to remove $key from $regTarget ($delRes)"
+                $script:hasWarnings = $true
+            }
         } elseif ($val) {
             Log "Env: preserving non-VPNTE $key=$val in $envPath"
         }
@@ -239,7 +275,11 @@ function Clean-VpnteProxyEnv($envPath) {
         $val = (Get-ItemProperty -Path $envPath -Name $key -ErrorAction SilentlyContinue).$key
         if ($val -and ($val -eq 'localhost,127.0.0.1,::1')) {
             Log "Env: removing VPNTE default $key=$val from $envPath"
-            reg delete $regTarget /v $key /f 2>$null
+            $delRes = reg delete $regTarget /v $key /f 2>&1
+            if ($LASTEXITCODE -ne 0 -and $delRes -notmatch 'unable to find|не удается найти') {
+                Log "Env: failed to remove $key from $regTarget ($delRes)"
+                $script:hasWarnings = $true
+            }
         } elseif ($val) {
             Log "Env: preserving non-VPNTE $key=$val in $envPath"
         }

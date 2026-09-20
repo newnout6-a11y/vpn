@@ -136,13 +136,12 @@ export function FirstRunWizard({ onComplete, onSkip }: Props) {
     setSaveError(null)
 
     try {
-      await window.electronAPI.saveSettings({
-        firstRunComplete: true,
-        firewallKillSwitch: killSwitchLevel !== 'off',
-      })
-      updateSettings({ firstRunComplete: true })
+      // 1. Mandatory security setting: apply chosen kill switch level first
+      if ((window.electronAPI as any).killSwitchSetLevel) {
+        await (window.electronAPI as any).killSwitchSetLevel(killSwitchLevel)
+      }
 
-      // Save theme via IPC if available
+      // 2. Optional UI preferences: theme and language
       try {
         const themeId = selectedTheme === 'light' ? 'light' : selectedTheme === 'dark' ? 'dark' : 'system'
         if ((window.electronAPI as any).themeSetActive) {
@@ -152,7 +151,6 @@ export function FirstRunWizard({ onComplete, onSkip }: Props) {
         addLog('warn', `Не удалось применить тему: ${err?.message || err}`)
       }
 
-      // Save locale via IPC if available
       try {
         if ((window.electronAPI as any).i18nSetLocale) {
           await (window.electronAPI as any).i18nSetLocale(selectedLang)
@@ -161,14 +159,12 @@ export function FirstRunWizard({ onComplete, onSkip }: Props) {
         addLog('warn', `Не удалось применить язык: ${err?.message || err}`)
       }
 
-      // Save kill-switch level via IPC if available
-      try {
-        if ((window.electronAPI as any).killSwitchSetLevel) {
-          await (window.electronAPI as any).killSwitchSetLevel(killSwitchLevel)
-        }
-      } catch (err: any) {
-        addLog('warn', `Не удалось установить уровень kill switch: ${err?.message || err}`)
-      }
+      // 3. Persist onboarding completion only after mandatory operations succeed
+      await window.electronAPI.saveSettings({
+        firstRunComplete: true,
+        firewallKillSwitch: killSwitchLevel !== 'off',
+      })
+      updateSettings({ firstRunComplete: true })
 
       onComplete()
     } catch (err: any) {

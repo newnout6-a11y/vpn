@@ -93,4 +93,28 @@ describe('<FirstRunWizard /> save error handling', () => {
     })
     expect(useAppStore.getState().settings.firstRunComplete).toBe(true)
   })
+
+  it('blocks onComplete and shows alert when killSwitchSetLevel fails', async () => {
+    const onComplete = vi.fn()
+    const onSkip = vi.fn()
+    const api = (globalThis as any).window.electronAPI
+    api.killSwitchSetLevel.mockRejectedValueOnce(new Error('Kill switch save failed'))
+
+    render(<FirstRunWizard onComplete={onComplete} onSkip={onSkip} />)
+
+    for (let i = 0; i < 5; i++) {
+      const nextBtn = screen.getByText('onboarding.next')
+      fireEvent.click(nextBtn)
+    }
+
+    const finishBtn = await screen.findByText('onboarding.finish')
+    fireEvent.click(finishBtn)
+
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toBeInTheDocument()
+    })
+    expect(screen.getByText('Kill switch save failed')).toBeInTheDocument()
+    expect(onComplete).not.toHaveBeenCalled()
+    expect(useAppStore.getState().settings.firstRunComplete).toBe(false)
+  })
 })
