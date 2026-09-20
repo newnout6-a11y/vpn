@@ -326,12 +326,12 @@ describe('Extended Live Server Probe Unit & Contract Tests', () => {
       expect(finding?.detail).toContain('VLESS')
     })
 
-    it('emits DIRECT_UNDERLAY_LEAK with error severity when egress leaks underlay IP', () => {
+    it('does not emit DIRECT_UNDERLAY_LEAK without baseline leak evidence', () => {
       const egress: LiveEgressResult = {
         status: 'ok',
         durationMs: 400,
         exitIpv4: '95.165.12.34',
-        underlayPath: 'direct',
+        underlayPath: 'route-selected',
         reflectors: []
       }
 
@@ -342,8 +342,7 @@ describe('Extended Live Server Probe Unit & Contract Tests', () => {
       })
 
       const leakFinding = findings.find((f) => f.code === 'DIRECT_UNDERLAY_LEAK')
-      expect(leakFinding).toBeDefined()
-      expect(leakFinding?.severity).toBe('error')
+      expect(leakFinding).toBeUndefined()
     })
 
     it('emits PMTU_BLACKHOLE_SUSPECTED when blackhole is detected', () => {

@@ -296,7 +296,7 @@ export interface LiveEgressResult {
   reflectors: EgressReflectorResult[]
   endpointIp?: string
   matchesEndpoint?: boolean
-  underlayPath?: 'direct' | 'nested' | 'unknown'
+  underlayPath?: 'direct' | 'nested' | 'unknown' | 'route-selected'
   error?: string
 }
 
@@ -310,15 +310,15 @@ export interface PathDiagnostics {
   nextHop?: string
   isTunInterface: boolean
   underlayInterfaceAlias?: string
-  evidenceKind: 'net-route' | 'os-unverified' | 'simulation'
+  evidenceKind: 'etw-corroborated' | 'route-policy' | 'net-route' | 'os-unverified'
   error?: string
 }
 
 export interface PmtuDiagnostics {
-  status: 'ok' | 'lower_bound' | 'icmp_blocked' | 'blackhole_suspected' | 'unsupported' | 'skipped' | 'error'
+  status: 'ok' | 'lower_bound' | 'blackhole_suspected' | 'icmp_blocked' | 'skipped'
   durationMs: number
   destination: string
-  family: 4 | 6
+  family?: 4 | 6
   interfaceAlias?: string
   method: 'icmp-df' | 'interface-nlmtu' | 'fallback'
   pmtu?: number
@@ -428,6 +428,9 @@ export interface InfrastructureHints {
     countryChanged?: boolean
     portsChanged?: boolean
     latencySpike?: boolean
+    handshakeChanged?: boolean
+    egressChanged?: boolean
+    pmtuChanged?: boolean
   }
 }
 

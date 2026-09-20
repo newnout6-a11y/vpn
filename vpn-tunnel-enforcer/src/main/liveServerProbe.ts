@@ -162,20 +162,15 @@ async function dnsQuery<T>(run: (resolver: InstanceType<typeof dnsPromises.Resol
 }
 
 export function isPublicFqdn(host: string): boolean {
-  if (!host || net.isIP(host) !== 0) return false
-  const trimmed = host.trim().toLowerCase()
+  if (!host || typeof host !== 'string') return false
+  const trimmed = host.trim().replace(/\.+$/, '').toLowerCase()
+  if (!trimmed || net.isIP(trimmed) !== 0) return false
   if (!trimmed.includes('.')) return false
-  if (
-    trimmed === 'localhost' ||
-    trimmed.endsWith('.local') ||
-    trimmed.endsWith('.lan') ||
-    trimmed.endsWith('.internal') ||
-    trimmed.endsWith('.home.arpa') ||
-    trimmed.endsWith('.corp') ||
-    trimmed.endsWith('.home')
-  ) {
-    return false
-  }
+  const labels = trimmed.split('.')
+  const tld = labels[labels.length - 1]
+  const privateTlds = ['local', 'lan', 'internal', 'home', 'arpa', 'invalid', 'test', 'example', 'localhost', 'onion', 'corp']
+  if (privateTlds.includes(tld)) return false
+  if (trimmed.endsWith('.home.arpa')) return false
   return true
 }
 
@@ -231,50 +226,35 @@ export async function queryDoH(
       fetchWithTimeout('AAAA')
     ])
 
-    let anySuccess = false
     let lastErr = ''
+    let dnsError: string | undefined
 
     if (resA.status === 'fulfilled') {
-      anySuccess = true
       const data = resA.value
       rcode = data.Status
       adFlag = data.AD
       truncated = data.TC
-      if (Array.isArray(data.Answer)) {
+      if (rcode !== undefined && rcode !== 0) {
+        const rcodeStr = rcode === 3 ? 'NXDOMAIN' : rcode === 2 ? 'SERVFAIL' : rcode === 5 ? 'REFUSED' : `RCODE_${rcode}`
+        dnsError = `DNS ${rcodeStr}`
+      } else if (Array.isArray(data.Answer)) {
         for (const ans of data.Answer) {
           if (!ans?.data) continue
           const cleanName = (ans.name || host).replace(/\.$/, '')
-          const recType = ans.type === 28 ? 'AAAA' : ans.type === 5 ? 'CNAME' : 'A'
-          recs.push({
-            name: cleanName,
-            type: recType,
-            value: ans.data.replace(/\.$/, ''),
-            ttl: typeof ans.TTL === 'number' ? ans.TTL : undefined,
-            observedAt: new Date().toISOString(),
-            resolverId,
-            transport: 'doh'
-          })
-        }
-      }
-    } else {
-      lastErr = resA.reason?.message || 'A lookup failed'
-    }
-
-    if (resAAAA.status === 'fulfilled') {
-      anySuccess = true
-      const data = resAAAA.value
-      if (rcode === undefined) rcode = data.Status
-      if (adFlag === undefined) adFlag = data.AD
-      if (truncated === undefined) truncated = data.TC
-      if (Array.isArray(data.Answer)) {
-        for (const ans of data.Answer) {
-          if (!ans?.data) continue
-          const cleanName = (ans.name || host).replace(/\.$/, '')
-          const recType = ans.type === 28 ? 'AAAA' : ans.type === 5 ? 'CNAME' : 'A'
-          if (!recs.some(r => r.type === recType && r.value === ans.data.replace(/\.$/, ''))) {
+          if (ans.type === 1 && net.isIP(ans.data) === 4) {
             recs.push({
               name: cleanName,
-              type: recType,
+              type: 'A',
+              value: ans.data.replace(/\.$/, ''),
+              ttl: typeof ans.TTL === 'number' ? ans.TTL : undefined,
+              observedAt: new Date().toISOString(),
+              resolverId,
+              transport: 'doh'
+            })
+          } else if (ans.type === 5) {
+            recs.push({
+              name: cleanName,
+              type: 'CNAME',
               value: ans.data.replace(/\.$/, ''),
               ttl: typeof ans.TTL === 'number' ? ans.TTL : undefined,
               observedAt: new Date().toISOString(),
@@ -284,19 +264,52 @@ export async function queryDoH(
           }
         }
       }
+    } else {
+      lastErr = resA.reason?.message || 'A lookup failed'
     }
 
+    if (resAAAA.status === 'fulfilled') {
+      const data = resAAAA.value
+      if (rcode === undefined || rcode === 0) rcode = data.Status
+      if (adFlag === undefined) adFlag = data.AD
+      if (truncated === undefined) truncated = data.TC
+      if (data.Status !== undefined && data.Status !== 0 && !dnsError) {
+        const rcodeStr = data.Status === 3 ? 'NXDOMAIN' : data.Status === 2 ? 'SERVFAIL' : data.Status === 5 ? 'REFUSED' : `RCODE_${data.Status}`
+        dnsError = `DNS ${rcodeStr}`
+      }
+      if (data.Status === 0 && Array.isArray(data.Answer)) {
+        for (const ans of data.Answer) {
+          if (!ans?.data) continue
+          const cleanName = (ans.name || host).replace(/\.$/, '')
+          if (ans.type === 28 && net.isIP(ans.data) === 6) {
+            if (!recs.some(r => r.type === 'AAAA' && r.value === ans.data.replace(/\.$/, ''))) {
+              recs.push({
+                name: cleanName,
+                type: 'AAAA',
+                value: ans.data.replace(/\.$/, ''),
+                ttl: typeof ans.TTL === 'number' ? ans.TTL : undefined,
+                observedAt: new Date().toISOString(),
+                resolverId,
+                transport: 'doh'
+              })
+            }
+          }
+        }
+      }
+    }
+
+    const isOk = !dnsError && (resA.status === 'fulfilled' || resAAAA.status === 'fulfilled') && recs.length > 0
     return {
       resolverId,
       resolverName,
       endpoint: urlBase,
-      status: anySuccess ? 'ok' : 'error',
+      status: isOk ? 'ok' : 'error',
       durationMs: Date.now() - started,
       authenticatedData: adFlag,
       records: recs,
       truncated,
       rcode,
-      error: anySuccess ? undefined : lastErr
+      error: isOk ? undefined : (dnsError || lastErr || 'No records returned')
     }
   } catch (err: any) {
     return {
@@ -1420,26 +1433,19 @@ export function evaluateLiveCheckFindings(
 
   // 8. Handshake & Tunnel Service Findings
   if (check.handshake && check.handshake.status !== 'ok' && check.handshake.status !== 'skipped') {
+    const rawErr = check.handshake.error || check.handshake.status
+    const cleanErr = typeof rawErr === 'string' ? rawErr.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '[REDACTED_UUID]') : rawErr
     findings.push({
       code: 'TUNNEL_HANDSHAKE_FAILED',
       severity: 'error',
       title: 'Сбой рукопожатия туннеля',
-      detail: `Протокол ${check.handshake.protocol || 'VPN'} не прошёл проверку: ${check.handshake.error || check.handshake.status}`,
+      detail: `Протокол ${check.handshake.protocol || 'VPN'} не прошёл проверку: ${cleanErr}`,
       evidence: { protocol: check.handshake.protocol || '', status: check.handshake.status }
     })
   }
 
   // 9. Egress vs Endpoint Findings
   if (check.egress && check.egress.status === 'ok') {
-    if (check.egress.underlayPath === 'direct') {
-      findings.push({
-        code: 'DIRECT_UNDERLAY_LEAK',
-        severity: 'error',
-        title: 'Утечка прямого провайдера (Direct Underlay)',
-        detail: 'Выходной IP совпадает с прямым подключением без защитного туннелирования!',
-        evidence: { exit: check.egress.exitIpv4 || check.egress.exitIpv6 || '' }
-      })
-    }
     if (check.egress.exitIpv4 && check.egress.matchesEndpoint === false) {
       findings.push({
         code: 'EGRESS_DIFFERS_FROM_ENDPOINT',
@@ -1469,6 +1475,19 @@ export function evaluateLiveCheckFindings(
       detail: `Обнаружен MTU ${check.pmtu.pmtu} байт. Это может приводить к повышенной фрагментации пакетов.`,
       evidence: { pmtu: check.pmtu.pmtu }
     })
+  }
+
+  const UUID_REGEX = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi
+  for (const f of findings) {
+    if (typeof f.detail === 'string') f.detail = f.detail.replace(UUID_REGEX, '[REDACTED_UUID]')
+    if (typeof f.title === 'string') f.title = f.title.replace(UUID_REGEX, '[REDACTED_UUID]')
+    if (f.evidence && typeof f.evidence === 'object') {
+      for (const [k, v] of Object.entries(f.evidence)) {
+        if (typeof v === 'string') {
+          f.evidence[k] = v.replace(UUID_REGEX, '[REDACTED_UUID]')
+        }
+      }
+    }
   }
 
   return findings
@@ -1533,6 +1552,22 @@ export function execPs(
   })
 }
 
+let activeHandshakeWorkerLock: Promise<void> = Promise.resolve()
+
+export async function withHandshakeWorkerLock<T>(fn: () => Promise<T>): Promise<T> {
+  const previousLock = activeHandshakeWorkerLock
+  let release: () => void = () => {}
+  activeHandshakeWorkerLock = new Promise<void>(resolve => {
+    release = resolve
+  })
+  try {
+    await previousLock
+    return await fn()
+  } finally {
+    release()
+  }
+}
+
 /**
  * Stage 8: Tunnel Handshake & Fresh Egress Probe
  * Spawns an isolated ephemeral proxy instance, verifies end-to-end handshake,
@@ -1578,199 +1613,297 @@ export async function probeTunnelHandshakeAndEgress(
     }
   }
 
-  const workDirPrefix = 'vpnte-live-handshake-'
-  const pidFileName = 'engine.pid'
-  let workDir: string | null = null
-  let child: any = null
-  let logText = ''
-
-  try {
-    await cleanupManagedChildPidDirs(tmpdir(), workDirPrefix, pidFileName, 'live-handshake-probe', () => {})
-    workDir = await mkdtemp(join(tmpdir(), workDirPrefix))
-    const logPath = join(workDir, 'engine.log')
-    const pidPath = join(workDir, pidFileName)
-    const inboundPort = await pickFreeLocalPort()
-
-    const tunStatus = tunController.getStatus()
-    let directProxy: { host: string; port: number } | null = null
-    if (tunStatus.running && tunStatus.proxyAddr) {
-      const directPort = getDirectProxyPort()
-      if (directPort) directProxy = { host: '127.0.0.1', port: directPort }
+  return withHandshakeWorkerLock(async () => {
+    if (signal?.aborted) {
+      return {
+        handshake: { status: 'skipped', durationMs: 0, protocol: profile?.protocol, error: 'Cancelled' },
+        egress: { status: 'skipped', durationMs: 0, reflectors: [], error: 'Cancelled' }
+      }
     }
-    const physicalAdapter = directProxy
-      ? null
-      : (await getPhysicalAdapterDnsSources().catch(() => []))[0] ?? null
 
-    const proxyEngineSetting = settingsStore.get().proxyEngine ?? 'auto'
-    const engine = resolveProxyEngine(profile.outbound, proxyEngineSetting)
-    const isXray = engine === 'xray'
-    const probeExe = isXray ? getBundledResource('xray.exe') : getBundledResource('sing-box.exe')
-
-    if (!probeExe) {
+    if (!profile || !profile.outbound || typeof profile.outbound !== 'object') {
       return {
         handshake: {
           status: 'skipped',
-          durationMs: Date.now() - started,
-          protocol: profile.protocol,
-          error: 'Бинарный файл движка (sing-box/xray) не найден'
+          durationMs: 0,
+          protocol: profile?.protocol,
+          error: 'Профиль не выбран или не имеет конфигурации outbound'
         },
         egress: {
           status: 'skipped',
           durationMs: 0,
           reflectors: [],
-          error: 'Движок туннеля не найден'
+          error: 'Проверка egress пропущена: профиль не настроен'
         }
       }
     }
 
-    const probeConfigPath = join(workDir, isXray ? 'xray.json' : 'sing-box.json')
-    const config = isXray
-      ? buildXrayProbeConfig(profile.outbound, inboundPort, {
-          directProxy,
-          clientDevice: profile.clientDevice,
-          logPath
-        })
-      : buildKeyProbeConfig(profile, inboundPort, {
-          directProxy,
-          physicalInterface: physicalAdapter?.alias,
-          logPath
-        })
+    const outbound = profile.outbound
+    const workDirPrefix = 'vpnte-live-handshake-'
+    const pidFileName = 'engine.pid'
+    let workDir: string | null = null
+    let child: any = null
+    let logText = ''
+    let cfSocket: net.Socket | null = null
+    let ipifySocket: net.Socket | null = null
 
-    await writeFile(probeConfigPath, JSON.stringify(config, null, 2), 'utf8')
-
-    child = spawn(probeExe, ['run', '-c', probeConfigPath], {
-      cwd: workDir,
-      windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe']
-    })
-
-    await writeManagedChildPidFile(pidPath, {
-      owner: 'live-handshake-probe',
-      pid: child.pid ?? 0,
-      exePath: probeExe,
-      configPath: probeConfigPath,
-      createdAt: Date.now()
-    }).catch(() => {})
-
-    child.stdout?.on('data', (d: Buffer) => { logText += d.toString() })
-    child.stderr?.on('data', (d: Buffer) => { logText += d.toString() })
-
-    // Wait for inbound port
-    await waitForLocalSocks(inboundPort, 2500)
-
-    // Handshake check: connect via local socks inbound to Cloudflare
-    const socket = await openTcpViaSocks({ host: '127.0.0.1', port: inboundPort }, '1.1.1.1', 443, 4000)
-    const cfTrace = await verifyHttpsThroughSocket(socket, {
-      host: '1.1.1.1',
-      port: 443,
-      serverName: 'cloudflare-dns.com',
-      path: '/cdn-cgi/trace'
-    }, 4000)
-
-    const handshakeMs = Date.now() - started
-    const handshake: TunnelHandshakeResult = {
-      status: 'ok',
-      durationMs: handshakeMs,
-      protocol: profile.protocol,
-      evidence: {
-        transport: profile.outbound.type || profile.protocol,
-        alpn: profile.outbound.tls?.alpn?.[0],
-        inboundPort
+    const abortHandler = () => {
+      if (child) {
+        try { child.kill('SIGKILL') } catch {}
+      }
+      if (cfSocket) {
+        try { cfSocket.destroy() } catch {}
+      }
+      if (ipifySocket) {
+        try { ipifySocket.destroy() } catch {}
       }
     }
 
-    // Now Egress check using dual reflectors
-    const egressStarted = Date.now()
-    const reflectorResults: EgressReflectorResult[] = []
-
-    if (cfTrace.egressIp) {
-      reflectorResults.push({
-        source: 'cloudflare-trace',
-        ip: cfTrace.egressIp,
-        family: net.isIP(cfTrace.egressIp) === 6 ? 6 : 4,
-        country: cfTrace.country,
-        durationMs: handshakeMs,
-        status: 'ok'
-      })
+    if (signal) {
+      signal.addEventListener('abort', abortHandler, { once: true })
     }
 
-    // Reflector 2: ipify over socks
     try {
-      const ipifyStart = Date.now()
-      const ipifySocket = await openTcpViaSocks({ host: '127.0.0.1', port: inboundPort }, 'api.ipify.org', 443, 3500)
-      const ipifyTrace = await verifyHttpsThroughSocket(ipifySocket, {
-        host: 'api.ipify.org',
+      workDir = await mkdtemp(join(tmpdir(), workDirPrefix))
+      const logPath = join(workDir, 'engine.log')
+      const pidPath = join(workDir, pidFileName)
+      const inboundPort = await pickFreeLocalPort()
+
+      const tunStatus = tunController.getStatus()
+      let directProxy: { host: string; port: number } | null = null
+      if (tunStatus.running && tunStatus.proxyAddr) {
+        const directPort = getDirectProxyPort()
+        if (directPort) directProxy = { host: '127.0.0.1', port: directPort }
+      }
+      const physicalAdapter = directProxy
+        ? null
+        : (await getPhysicalAdapterDnsSources().catch(() => []))[0] ?? null
+
+      const proxyEngineSetting = settingsStore.get().proxyEngine ?? 'auto'
+      const engine = resolveProxyEngine(outbound, proxyEngineSetting)
+      const isXray = engine === 'xray'
+      const probeExe = isXray ? getBundledResource('xray.exe') : getBundledResource('sing-box.exe')
+
+      if (!probeExe) {
+        return {
+          handshake: {
+            status: 'skipped',
+            durationMs: Date.now() - started,
+            protocol: profile.protocol,
+            error: 'Бинарный файл движка (sing-box/xray) не найден'
+          },
+          egress: {
+            status: 'skipped',
+            durationMs: 0,
+            reflectors: [],
+            error: 'Движок туннеля не найден'
+          }
+        }
+      }
+
+      if (signal?.aborted) throw new Error('Cancelled')
+
+      const probeConfigPath = join(workDir, isXray ? 'xray.json' : 'sing-box.json')
+      const config = isXray
+        ? buildXrayProbeConfig(outbound, inboundPort, {
+            directProxy,
+            clientDevice: profile.clientDevice,
+            logPath
+          })
+        : buildKeyProbeConfig(profile, inboundPort, {
+            directProxy,
+            physicalInterface: physicalAdapter?.alias,
+            logPath
+          })
+
+      await writeFile(probeConfigPath, JSON.stringify(config, null, 2), 'utf8')
+
+      if (signal?.aborted) throw new Error('Cancelled')
+
+      child = spawn(probeExe, ['run', '-c', probeConfigPath], {
+        cwd: workDir,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe']
+      })
+
+      child.on('error', (err: any) => {
+        logText += `\n[child error] ${err?.message || err}`
+      })
+
+      await writeManagedChildPidFile(pidPath, {
+        owner: 'live-handshake-probe',
+        pid: child.pid ?? 0,
+        exePath: probeExe,
+        configPath: probeConfigPath,
+        createdAt: Date.now()
+      }).catch(() => {})
+
+      child.stdout?.on('data', (d: Buffer) => { logText += d.toString() })
+      child.stderr?.on('data', (d: Buffer) => { logText += d.toString() })
+
+      // Wait for inbound port with signal
+      await waitForLocalSocks(inboundPort, 2500, signal)
+
+      if (signal?.aborted) throw new Error('Cancelled')
+
+      // Handshake check: connect via local socks inbound to Cloudflare
+      cfSocket = await openTcpViaSocks({ host: '127.0.0.1', port: inboundPort }, '1.1.1.1', 443, 4000)
+      const cfTrace = await verifyHttpsThroughSocket(cfSocket, {
+        host: '1.1.1.1',
         port: 443,
-        serverName: 'api.ipify.org',
-        path: '/?format=text'
-      }, 3500)
-      if (ipifyTrace.egressIp) {
+        serverName: 'cloudflare-dns.com',
+        path: '/cdn-cgi/trace'
+      }, 4000)
+
+      const handshakeMs = Date.now() - started
+      const handshake: TunnelHandshakeResult = {
+        status: 'ok',
+        durationMs: handshakeMs,
+        protocol: profile.protocol,
+        evidence: {
+          transport: outbound.type || profile.protocol,
+          alpn: outbound.tls?.alpn?.[0],
+          inboundPort
+        }
+      }
+
+      // Egress check using dual reflectors
+      const egressStarted = Date.now()
+      const reflectorResults: EgressReflectorResult[] = []
+
+      if (cfTrace.egressIp) {
         reflectorResults.push({
-          source: 'ipify',
-          ip: ipifyTrace.egressIp,
-          family: 4,
-          durationMs: Date.now() - ipifyStart,
+          source: 'cloudflare-trace',
+          ip: cfTrace.egressIp,
+          family: net.isIP(cfTrace.egressIp) === 6 ? 6 : 4,
+          country: cfTrace.country,
+          durationMs: handshakeMs,
           status: 'ok'
         })
+      } else {
+        reflectorResults.push({
+          source: 'cloudflare-trace',
+          status: 'error',
+          error: 'Cloudflare trace did not return an IP',
+          durationMs: handshakeMs
+        })
       }
-    } catch {}
 
-    const exitIpv4 = reflectorResults.find(r => r.family === 4)?.ip || (cfTrace.egressIp && net.isIP(cfTrace.egressIp) === 4 ? cfTrace.egressIp : undefined)
-    const exitIpv6 = reflectorResults.find(r => r.family === 6)?.ip || (cfTrace.egressIp && net.isIP(cfTrace.egressIp) === 6 ? cfTrace.egressIp : undefined)
-    const country = cfTrace.country
-
-    const egress: LiveEgressResult = {
-      status: reflectorResults.length > 0 ? 'ok' : 'partial',
-      durationMs: Date.now() - egressStarted,
-      exitIpv4,
-      exitIpv6,
-      country,
-      reflectors: reflectorResults,
-      endpointIp,
-      matchesEndpoint: exitIpv4 && endpointIp ? exitIpv4 === endpointIp : undefined,
-      underlayPath: tunStatus.running ? 'nested' : 'direct'
-    }
-
-    return { handshake, egress }
-  } catch (err: any) {
-    let diskLogs = ''
-    if (workDir) {
+      // Reflector 2: ipify over socks
       try {
-        diskLogs = await readFile(join(workDir, 'engine.log'), 'utf8')
-      } catch {}
-    }
-    const combinedLogs = `${logText}\n${diskLogs}`
-    const classified = classifyOutboundProbeFailure(profile.protocol, combinedLogs, err?.message || '')
-    let handshakeStatus: TunnelHandshakeResult['status'] = 'transport_failed'
-    if (classified.includes('auth')) handshakeStatus = 'auth_failed'
-    else if (classified === 'timeout') handshakeStatus = 'timeout'
-
-    return {
-      handshake: {
-        status: handshakeStatus,
-        durationMs: Date.now() - started,
-        protocol: profile.protocol,
-        error: err?.message || classified,
-        evidence: {
-          transport: profile.outbound.type || profile.protocol,
-          detail: classified
+        const ipifyStart = Date.now()
+        ipifySocket = await openTcpViaSocks({ host: '127.0.0.1', port: inboundPort }, 'api.ipify.org', 443, 3500)
+        const ipifyTrace = await verifyHttpsThroughSocket(ipifySocket, {
+          host: 'api.ipify.org',
+          port: 443,
+          serverName: 'api.ipify.org',
+          path: '/?format=text'
+        }, 3500)
+        if (ipifyTrace.egressIp) {
+          reflectorResults.push({
+            source: 'ipify',
+            ip: ipifyTrace.egressIp,
+            family: 4,
+            durationMs: Date.now() - ipifyStart,
+            status: 'ok'
+          })
+        } else {
+          reflectorResults.push({
+            source: 'ipify',
+            status: 'error',
+            error: 'No IP returned by ipify',
+            family: 4,
+            durationMs: Date.now() - ipifyStart
+          })
         }
-      },
-      egress: {
-        status: 'skipped',
-        durationMs: 0,
-        reflectors: [],
-        error: `Рукопожатие завершилось ошибкой (${classified})`
+      } catch (err: any) {
+        reflectorResults.push({
+          source: 'ipify',
+          status: 'error',
+          error: err?.message || 'ipify probe failed',
+          family: 4,
+          durationMs: Date.now() - started
+        })
+      }
+
+      const successfulReflectors = reflectorResults.filter(r => r.status === 'ok' && r.ip)
+      const ipv4Results = successfulReflectors.filter(r => r.family === 4)
+      const exitIpv4 = ipv4Results[0]?.ip
+      const exitIpv6 = successfulReflectors.find(r => r.family === 6)?.ip
+      const country = cfTrace.country
+
+      let reflectorDiscrepancy: string | undefined
+      if (ipv4Results.length >= 2) {
+        const firstIp = ipv4Results[0].ip
+        const mismatch = ipv4Results.find(r => r.ip !== firstIp)
+        if (mismatch) {
+          reflectorDiscrepancy = `Расхождение IP: ${ipv4Results[0].source}=${firstIp} vs ${mismatch.source}=${mismatch.ip}`
+        }
+      }
+
+      const egressStatus: 'ok' | 'partial' | 'error' =
+        successfulReflectors.length >= 2 && !reflectorDiscrepancy
+          ? 'ok'
+          : successfulReflectors.length > 0
+            ? 'partial'
+            : 'error'
+
+      const egress: LiveEgressResult = {
+        status: egressStatus,
+        durationMs: Date.now() - egressStarted,
+        exitIpv4,
+        exitIpv6,
+        country,
+        reflectors: reflectorResults,
+        endpointIp,
+        matchesEndpoint: exitIpv4 && endpointIp ? exitIpv4 === endpointIp : undefined,
+        underlayPath: 'route-selected'
+      }
+
+      return { handshake, egress }
+    } catch (err: any) {
+      let diskLogs = ''
+      if (workDir) {
+        try {
+          diskLogs = await readFile(join(workDir, 'engine.log'), 'utf8')
+        } catch {}
+      }
+      const combinedLogs = `${logText}\n${diskLogs}`
+      const classified = classifyOutboundProbeFailure(profile.protocol, combinedLogs, err?.message || '')
+      let handshakeStatus: TunnelHandshakeResult['status'] = 'transport_failed'
+      if (classified.includes('auth')) handshakeStatus = 'auth_failed'
+      else if (classified === 'timeout') handshakeStatus = 'timeout'
+
+      return {
+        handshake: {
+          status: handshakeStatus,
+          durationMs: Date.now() - started,
+          protocol: profile.protocol,
+          error: err?.message || classified,
+          evidence: {
+            transport: profile?.outbound?.type || profile?.protocol,
+            detail: classified
+          }
+        },
+        egress: {
+          status: 'skipped',
+          durationMs: 0,
+          reflectors: [],
+          error: `Рукопожатие завершилось ошибкой (${classified})`
+        }
+      }
+    } finally {
+      if (signal) {
+        signal.removeEventListener('abort', abortHandler)
+      }
+      if (child) {
+        try { child.kill('SIGKILL') } catch {}
+      }
+      if (workDir) {
+        await rm(workDir, { recursive: true, force: true }).catch(() => {})
       }
     }
-  } finally {
-    if (child) {
-      try { child.kill('SIGKILL') } catch {}
-    }
-    if (workDir) {
-      await rm(workDir, { recursive: true, force: true }).catch(() => {})
-    }
-  }
+  })
 }
 
 /**
@@ -1845,6 +1978,7 @@ export async function probePmtu(
   const started = Date.now()
   const ipVer = net.isIP(destinationIp)
   const family: 4 | 6 = ipVer === 6 ? 6 : 4
+  const headerOverhead = family === 6 ? 48 : 28
 
   if (process.platform !== 'win32' || !destinationIp || ipVer === 0) {
     return {
@@ -1876,6 +2010,7 @@ export async function probePmtu(
   try {
     const script = `
 $ip = [System.Net.IPAddress]::Parse('${destinationIp}')
+$family = ${family}
 $p = New-Object System.Net.NetworkInformation.Ping
 $opt = New-Object System.Net.NetworkInformation.PingOptions(64, $true)
 $ctrlBuf = New-Object byte[] 32
@@ -1884,7 +2019,11 @@ if ($ctrl.Status -ne [System.Net.NetworkInformation.IPStatus]::Success) {
   [PSCustomObject]@{ Status = 'icmp_blocked'; Detail = $ctrl.Status.ToString() } | ConvertTo-Json
   exit 0
 }
-$ladder = @(1472, 1464, 1372, 1252)
+if ($family -eq 6) {
+  $ladder = @(1452, 1444, 1352, 1232)
+} else {
+  $ladder = @(1472, 1464, 1372, 1252)
+}
 $best = 0
 $tooBigCount = 0
 $timeoutCount = 0
@@ -1919,7 +2058,8 @@ foreach ($sz in $ladder) {
       }
 
       if (parsed.Status === 'ok') {
-        if (parsed.BestPayload === 1472) {
+        const topOfLadder = family === 6 ? 1452 : 1472
+        if (parsed.BestPayload === topOfLadder) {
           return {
             status: 'lower_bound',
             durationMs: Date.now() - started,
@@ -1934,9 +2074,10 @@ foreach ($sz in $ladder) {
           }
         }
         if (parsed.BestPayload > 0) {
-          const totalMtu = parsed.BestPayload + 28
+          const totalMtu = parsed.BestPayload + headerOverhead
+          const isExact = parsed.TooBigCount > 0
           return {
-            status: 'ok',
+            status: isExact ? 'ok' : 'lower_bound',
             durationMs: Date.now() - started,
             destination: destinationIp,
             family,
@@ -1945,7 +2086,9 @@ foreach ($sz in $ladder) {
             pmtu: totalMtu,
             minTested: 1280,
             maxTested: 1500,
-            detail: `Подтверждённый PMTU ${totalMtu} байт (payload ${parsed.BestPayload}B + 28B IP/ICMP)`
+            detail: isExact
+              ? `Подтверждённый PMTU ${totalMtu} байт (payload ${parsed.BestPayload}B + ${headerOverhead}B IP/ICMP)`
+              : `PMTU не менее ${totalMtu} байт (пакет ${totalMtu}B принят, большие размеры не ответили)`
           }
         }
         if (parsed.TimeoutCount > 0 && parsed.TooBigCount === 0) {
@@ -2109,41 +2252,105 @@ export async function runLiveServerCheck(
     else reportStage('route', 'skipped')
     reportStage('infrastructure', 'running')
 
+    const reachabilityPromise = probeReachabilityAndLatency(primaryIp, port, mode, checkSignal).then(
+      res => {
+        reportStage('reachability', res.reachability.status === 'ok' ? 'completed' : 'failed')
+        return res
+      },
+      err => {
+        reportStage('reachability', 'failed')
+        throw err
+      }
+    )
+
+    const tlsPromise = (isTlsApplicable
+      ? probeTls(primaryIp, port, sniHostname || (net.isIP(host) === 0 ? host : undefined), checkSignal)
+      : Promise.resolve<LiveTlsCertInfo | undefined>(undefined)
+    ).then(
+      res => {
+        reportStage('tls', res ? (res.status === 'ok' ? 'completed' : 'failed') : 'skipped')
+        return res
+      },
+      err => {
+        reportStage('tls', 'failed')
+        throw err
+      }
+    )
+
+    const httpPromise = probeHttp(primaryIp, port, isTlsApplicable, host, checkSignal, sniHostname).then(
+      res => {
+        reportStage('http', res.status === 'ok' ? 'completed' : 'failed')
+        return res
+      },
+      err => {
+        reportStage('http', 'failed')
+        throw err
+      }
+    )
+
+    const portsPromise = probePorts(primaryIp, port, mode, checkSignal).then(
+      res => {
+        reportStage('ports', 'completed')
+        return res
+      },
+      err => {
+        reportStage('ports', 'failed')
+        throw err
+      }
+    )
+
+    const routePromise = (mode === 'extended'
+      ? probeRoute(primaryIp, checkSignal)
+      : Promise.resolve<RouteDiagnostics | undefined>(undefined)
+    ).then(
+      res => {
+        if (mode === 'extended') {
+          reportStage('route', res?.status === 'ok' ? 'completed' : 'failed')
+        }
+        return res
+      },
+      err => {
+        if (mode === 'extended') reportStage('route', 'failed')
+        throw err
+      }
+    )
+
+    const infraPromise = probeInfrastructure(host, primaryIp, options.profileId, endpointCountry, disableGeoLookup, checkSignal).then(
+      res => {
+        reportStage('infrastructure', res.status === 'ok' ? 'completed' : 'failed')
+        return res
+      },
+      err => {
+        reportStage('infrastructure', 'failed')
+        throw err
+      }
+    )
+
     const [reachabilitySettled, tlsSettled, httpSettled, portsSettled, routeSettled, infraSettled] =
       await Promise.allSettled([
-        probeReachabilityAndLatency(primaryIp, port, mode, checkSignal),
-        isTlsApplicable
-          ? probeTls(primaryIp, port, sniHostname || (net.isIP(host) === 0 ? host : undefined), checkSignal)
-          : Promise.resolve<LiveTlsCertInfo | undefined>(undefined),
-        probeHttp(primaryIp, port, isTlsApplicable, host, checkSignal, sniHostname),
-        probePorts(primaryIp, port, mode, checkSignal),
-        mode === 'extended' ? probeRoute(primaryIp, checkSignal) : Promise.resolve<RouteDiagnostics | undefined>(undefined),
-        probeInfrastructure(host, primaryIp, options.profileId, endpointCountry, disableGeoLookup, checkSignal)
+        reachabilityPromise,
+        tlsPromise,
+        httpPromise,
+        portsPromise,
+        routePromise,
+        infraPromise
       ])
 
     const reachabilityRes = reachabilitySettled.status === 'fulfilled'
       ? reachabilitySettled.value
       : { reachability: { status: 'error' as const, durationMs: 0, error: 'Probe crashed', tcpReachable: false, port }, latency: undefined }
-    reportStage('reachability', reachabilityRes.reachability.status === 'ok' ? 'completed' : 'failed')
 
     const tlsRes: LiveTlsCertInfo | undefined = tlsSettled.status === 'fulfilled' ? tlsSettled.value : { status: 'error', durationMs: 0, error: 'TLS probe failed' }
-    reportStage('tls', tlsRes ? (tlsRes.status === 'ok' ? 'completed' : 'failed') : 'skipped')
 
     const httpRes: HttpProbeResult = httpSettled.status === 'fulfilled' ? httpSettled.value : { status: 'error', durationMs: 0, error: 'HTTP probe failed', confidence: 'low' }
-    reportStage('http', httpRes.status === 'ok' ? 'completed' : 'failed')
 
     const openPortsRes = portsSettled.status === 'fulfilled' ? portsSettled.value : undefined
-    reportStage('ports', portsSettled.status === 'fulfilled' ? 'completed' : 'failed')
 
     const routeRes: RouteDiagnostics | undefined = routeSettled.status === 'fulfilled' ? routeSettled.value : { status: 'error', durationMs: 0, error: 'Route probe failed' }
-    if (mode === 'extended') {
-      reportStage('route', routeRes?.status === 'ok' ? 'completed' : 'failed')
-    }
 
     const infraRes: InfrastructureHints = infraSettled.status === 'fulfilled'
       ? infraSettled.value
       : { status: 'error', endpointCountry, error: 'Infrastructure probe failed' }
-    reportStage('infrastructure', infraRes.status === 'ok' ? 'completed' : 'failed')
 
     // 3. Tunnel Handshake & Fresh Egress Probes
     reportStage('handshake', 'running')
@@ -2212,7 +2419,10 @@ export async function runLiveServerCheck(
           tlsCertChanged: diff.tlsCertChanged,
           countryChanged: diff.countryChanged,
           portsChanged: diff.portsChanged,
-          latencySpike: diff.latencySpike
+          latencySpike: diff.latencySpike,
+          handshakeChanged: diff.handshakeChanged,
+          egressChanged: diff.egressChanged,
+          pmtuChanged: diff.pmtuChanged
         }
       }
     }

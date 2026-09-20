@@ -53,12 +53,44 @@ export interface KeyHealthResult {
   country?: string
 }
 
+export function isPublicIp(ip: string): boolean {
+  if (!ip) return false
+  const family = isIP(ip)
+  if (family === 4) {
+    const parts = ip.split('.').map(Number)
+    if (parts.length !== 4 || parts.some(n => isNaN(n) || n < 0 || n > 255)) return false
+    // 0.0.0.0/8
+    if (parts[0] === 0) return false
+    // 10.0.0.0/8
+    if (parts[0] === 10) return false
+    // 127.0.0.0/8
+    if (parts[0] === 127) return false
+    // 169.254.0.0/16 (link-local)
+    if (parts[0] === 169 && parts[1] === 254) return false
+    // 172.16.0.0/12
+    if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return false
+    // 192.168.0.0/16
+    if (parts[0] === 192 && parts[1] === 168) return false
+    // 224.0.0.0/4 (multicast) and 240.0.0.0/4 (reserved)
+    if (parts[0] >= 224) return false
+    return true
+  } else if (family === 6) {
+    const lower = ip.toLowerCase()
+    if (lower === '::' || lower === '::1') return false
+    if (lower.startsWith('fe80:') || lower.startsWith('fe9') || lower.startsWith('fea') || lower.startsWith('feb')) return false
+    if (lower.startsWith('fc') || lower.startsWith('fd')) return false
+    if (lower.startsWith('ff')) return false
+    return true
+  }
+  return false
+}
+
 export function parseCloudflareTrace(text: string): { egressIp?: string; country?: string } {
   if (!text) return {}
   const ipMatch = text.match(/\bip=([0-9a-fA-F:.]+)/)
   const locMatch = text.match(/\bloc=([A-Za-z]{2})\b/)
   const rawIp = ipMatch ? ipMatch[1].trim() : undefined
-  const ipValid = Boolean(rawIp && isIP(rawIp) !== 0)
+  const ipValid = Boolean(rawIp && isPublicIp(rawIp))
   const country = locMatch ? locMatch[1].trim().toUpperCase() : undefined
   return {
     egressIp: ipValid ? rawIp : undefined,
@@ -195,7 +227,7 @@ export async function openTcpViaSocks(socks: { host: string; port: number }, hos
 
 export async function verifyHttpsThroughSocket(
   socket: Socket,
-  destination: (typeof KEY_PROBE_DESTINATIONS)[number] | { host: string; port: number; serverName: string; path: string },
+  destination: (typeof KEY_PROBE_DESTINATIONS)[number] | { host: string; port: number; serverName: string; path: string; rejectUnauthorized?: boolean },
   timeoutMs: number
 ): Promise<{ egressIp?: string; country?: string }> {
   return new Promise<{ egressIp?: string; country?: string }>((resolve, reject) => {
@@ -205,7 +237,7 @@ export async function verifyHttpsThroughSocket(
     const tls = tlsConnect({
       socket,
       servername: destination.serverName,
-      rejectUnauthorized: false
+      rejectUnauthorized: (destination as any).rejectUnauthorized !== undefined ? (destination as any).rejectUnauthorized : true
     })
     const timer = setTimeout(() => finish(new Error('timeout')), timeoutMs)
     const finish = (error: Error | null, trace?: { egressIp?: string; country?: string }) => {
@@ -228,28 +260,100 @@ export async function verifyHttpsThroughSocket(
     })
     tls.on('data', chunk => {
       response += chunk.toString('utf8')
-      if (destination.path === '/cdn-cgi/trace') {
+      const statusMatch = response.match(/^HTTP\/1\.[01] (\d{3})\b/)
+      if (statusMatch) {
+        const statusCode = parseInt(statusMatch[1], 10)
+        if (statusCode < 200 || statusCode >= 300) {
+          finish(new Error(`reflector returned HTTP ${statusCode}`))
+          return
+        }
+      }
+
+      if (destination.path.includes('/cdn-cgi/trace')) {
         const trace = parseCloudflareTrace(response)
         if (trace.egressIp) {
           finish(null, trace)
           return
         }
-        if (/^HTTP\/1\.[01] \d{3}\b/.test(response) && !bodyTimer) {
+        if (statusMatch && !bodyTimer) {
           bodyTimer = setTimeout(() => {
-            finish(null, parseCloudflareTrace(response))
+            const trace = parseCloudflareTrace(response)
+            if (trace.egressIp) finish(null, trace)
+            else finish(new Error('Cloudflare trace did not contain valid public IP'))
           }, 600)
         }
-      } else if (/^HTTP\/1\.[01] \d{3}\b/.test(response)) {
+      } else if (destination.path.includes('format=text') || destination.serverName.includes('ipify')) {
+        const headerEnd = response.indexOf('\r\n\r\n')
+        if (headerEnd !== -1) {
+          const body = response.slice(headerEnd + 4).trim()
+          let ip = body
+          if (body.startsWith('{')) {
+            try {
+              const parsed = JSON.parse(body)
+              if (parsed.ip) ip = String(parsed.ip).trim()
+            } catch {}
+          }
+          if (ip && isPublicIp(ip)) {
+            finish(null, { egressIp: ip })
+            return
+          }
+        }
+        if (statusMatch && !bodyTimer) {
+          bodyTimer = setTimeout(() => {
+            const headerEnd = response.indexOf('\r\n\r\n')
+            const body = headerEnd !== -1 ? response.slice(headerEnd + 4).trim() : ''
+            let ip = body
+            if (body.startsWith('{')) {
+              try {
+                const parsed = JSON.parse(body)
+                if (parsed.ip) ip = String(parsed.ip).trim()
+              } catch {}
+            }
+            if (ip && isPublicIp(ip)) {
+              finish(null, { egressIp: ip })
+            } else {
+              finish(new Error('ipify did not return a valid public IP'))
+            }
+          }, 600)
+        }
+      } else if (statusMatch) {
         finish(null, {})
       }
     })
     tls.once('error', error => finish(error instanceof Error ? error : new Error(String(error))))
     tls.once('end', () => {
       if (!settled) {
-        if (/^HTTP\/1\.[01] \d{3}\b/.test(response)) {
-          finish(null, parseCloudflareTrace(response))
-        } else {
+        const statusMatch = response.match(/^HTTP\/1\.[01] (\d{3})\b/)
+        if (!statusMatch) {
           finish(new Error('probe destination closed without HTTP response'))
+          return
+        }
+        const statusCode = parseInt(statusMatch[1], 10)
+        if (statusCode < 200 || statusCode >= 300) {
+          finish(new Error(`reflector returned HTTP ${statusCode}`))
+          return
+        }
+        if (destination.path.includes('/cdn-cgi/trace')) {
+          const trace = parseCloudflareTrace(response)
+          if (trace.egressIp) finish(null, trace)
+          else finish(new Error('Cloudflare trace did not contain valid public IP'))
+        } else if (destination.path.includes('format=text') || destination.serverName.includes('ipify')) {
+          const headerEnd = response.indexOf('\r\n\r\n')
+          const body = headerEnd !== -1 ? response.slice(headerEnd + 4).trim() : ''
+          let ip = body
+          if (body.startsWith('{')) {
+            try {
+              const parsed = JSON.parse(body)
+              if (parsed.ip) ip = String(parsed.ip).trim()
+            } catch {}
+          }
+          if (ip && isPublicIp(ip)) {
+            finish(null, { egressIp: ip })
+          } else {
+            finish(new Error('reflector response did not contain a valid public IP'))
+          }
+        } else {
+          finish(null, {})
         }
       }
     })
@@ -295,10 +399,16 @@ export function classifyOutboundProbeFailure(protocol: string, logText: string, 
   return 'handshake-failed'
 }
 
-export async function waitForLocalSocks(port: number, timeoutMs: number): Promise<void> {
+export async function waitForLocalSocks(port: number, timeoutMs: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) {
+    throw new Error('Cancelled')
+  }
   const deadline = Date.now() + timeoutMs
   let lastError: unknown = null
   while (Date.now() < deadline) {
+    if (signal?.aborted) {
+      throw new Error('Cancelled')
+    }
     try {
       const socket = await openTcpDirect('127.0.0.1', port, 300)
       try { socket.destroy() } catch { /* ignore */ }

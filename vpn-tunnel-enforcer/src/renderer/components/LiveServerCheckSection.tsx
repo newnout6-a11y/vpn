@@ -67,11 +67,15 @@ export function LiveServerCheckSection({
 
   const currentRequestIdRef = useRef<string | null>(null)
   const generationRef = useRef<number>(0)
+  const lastSequenceRef = useRef<number>(0)
 
   useEffect(() => {
     const unsub = window.electronAPI?.onLiveCheckProgress?.((p) => {
       if (currentRequestIdRef.current && p.requestId === currentRequestIdRef.current) {
-        setProgress(p)
+        if (p.sequence > lastSequenceRef.current) {
+          lastSequenceRef.current = p.sequence
+          setProgress(p)
+        }
       }
     })
     return () => {
@@ -128,8 +132,10 @@ export function LiveServerCheckSection({
     const requestId = `req-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
     currentRequestIdRef.current = requestId
     const checkGen = ++generationRef.current
+    lastSequenceRef.current = 0
 
     setRunning(true)
+    setProgress(null)
     setError(null)
 
     try {
@@ -278,32 +284,38 @@ export function LiveServerCheckSection({
         </div>
       </div>
 
-      {running && progress && (
-        <div className="mb-3 p-2.5 rounded-[var(--radius-sm)] bg-[var(--color-bg-secondary)] border border-[var(--color-accent)]/40 text-xs shadow-sm">
-          <div className="flex items-center justify-between mb-1.5">
-            <div className="flex items-center gap-2">
-              <span className="relative flex h-2 w-2">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[var(--color-accent)] opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-[var(--color-accent)]"></span>
-              </span>
-              <span className="font-medium text-[var(--color-text)]">
-                {STAGE_LABELS[progress.stage] || progress.stage}
-              </span>
+      {running && progress && (() => {
+        const currentStep = Math.min(
+          progress.completedStages + (progress.status === 'running' ? 1 : 0),
+          progress.totalStages
+        )
+        return (
+          <div className="mb-3 p-2.5 rounded-[var(--radius-sm)] bg-[var(--color-bg-secondary)] border border-[var(--color-accent)]/40 text-xs shadow-sm">
+            <div className="flex items-center justify-between mb-1.5">
+              <div className="flex items-center gap-2">
+                <span className="relative flex h-2 w-2">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[var(--color-accent)] opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-[var(--color-accent)]"></span>
+                </span>
+                <span className="font-medium text-[var(--color-text)]">
+                  {STAGE_LABELS[progress.stage] || progress.stage}
+                </span>
+              </div>
+              <div className="text-[11px] text-[var(--color-text-secondary)] font-mono">
+                Этап {currentStep} из {progress.totalStages} • {(progress.elapsedMs / 1000).toFixed(1)}с
+              </div>
             </div>
-            <div className="text-[11px] text-[var(--color-text-secondary)] font-mono">
-              Этап {progress.completedStages + 1} из {progress.totalStages} • {(progress.elapsedMs / 1000).toFixed(1)}с
+            <div className="w-full h-1.5 bg-[var(--color-bg-tertiary)] rounded-full overflow-hidden">
+              <div
+                className="h-full bg-[var(--color-accent)] transition-all duration-300 rounded-full"
+                style={{
+                  width: `${Math.min(100, Math.max(5, (currentStep / progress.totalStages) * 100))}%`
+                }}
+              />
             </div>
           </div>
-          <div className="w-full h-1.5 bg-[var(--color-bg-tertiary)] rounded-full overflow-hidden">
-            <div
-              className="h-full bg-[var(--color-accent)] transition-all duration-300 rounded-full"
-              style={{
-                width: `${Math.min(100, Math.max(5, ((progress.completedStages + 1) / progress.totalStages) * 100))}%`
-              }}
-            />
-          </div>
-        </div>
-      )}
+        )
+      })()}
 
       {mode === 'extended' && (
         <p className="text-[11px] text-[var(--color-warning)] mb-3 flex items-center gap-1.5">
@@ -956,10 +968,12 @@ export function LiveServerCheckSection({
                       {result.egress.matchesEndpoint ? 'Совпадает с Endpoint' : 'Отличается (Dual-hop/NAT)'}
                     </MacBadge>
                   </div>
-                  {result.egress.underlayPath === 'direct' && (
-                    <div className="p-1.5 rounded bg-amber-500/10 border border-amber-500/30 text-amber-400 text-[10px] flex items-center gap-1.5">
-                      <AlertTriangle size={12} className="shrink-0" />
-                      <span>Direct Underlay: выходной IP совпадает с прямым подключением!</span>
+                  {result.egress.underlayPath && result.egress.underlayPath !== 'unknown' && (
+                    <div className="flex justify-between items-center pt-0.5">
+                      <span className="text-[var(--color-text-secondary)]">Путь транспорта:</span>
+                      <MacBadge variant="neutral" className="text-[10px]">
+                        {result.egress.underlayPath === 'route-selected' ? 'По таблице ОС' : result.egress.underlayPath}
+                      </MacBadge>
                     </div>
                   )}
                   {result.egress.reflectors && result.egress.reflectors.length > 0 && (
@@ -1002,10 +1016,14 @@ export function LiveServerCheckSection({
                   <div className="flex justify-between items-center">
                     <span className="text-[var(--color-text-secondary)]">Тип маршрута:</span>
                     <MacBadge
-                      variant={result.pathDiagnostics.isTunInterface ? 'info' : 'neutral'}
+                      variant={result.pathDiagnostics.status === 'ok' ? (result.pathDiagnostics.isTunInterface ? 'info' : 'neutral') : 'warning'}
                       className="text-[10px]"
                     >
-                      {result.pathDiagnostics.isTunInterface ? 'TUN интерфейс' : 'Прямой маршрут (Direct)'}
+                      {result.pathDiagnostics.status !== 'ok'
+                        ? 'Маршрут не определён'
+                        : result.pathDiagnostics.isTunInterface
+                          ? 'TUN интерфейс (по таблице ОС)'
+                          : 'Физический адаптер (по таблице ОС)'}
                     </MacBadge>
                   </div>
                   {result.pathDiagnostics.nextHop && (
@@ -1039,7 +1057,7 @@ export function LiveServerCheckSection({
               >
                 <div className="space-y-1.5 text-[11px]">
                   <div className="flex justify-between items-center">
-                    <span className="text-[var(--color-text-secondary)]">Оптимальный MTU:</span>
+                    <span className="text-[var(--color-text-secondary)]">Определённый MTU:</span>
                     <span className="font-mono font-bold text-[var(--color-accent)] text-xs">
                       {result.pmtu.pmtu ? `${result.pmtu.pmtu} B` : 'Не определён'}
                     </span>
@@ -1061,7 +1079,7 @@ export function LiveServerCheckSection({
                         result.pmtu.status === 'ok'
                           ? 'success'
                           : result.pmtu.status === 'lower_bound'
-                            ? 'warning'
+                            ? (result.pmtu.pmtu && result.pmtu.pmtu >= 1420 ? 'success' : 'warning')
                             : 'danger'
                       }
                       className="text-[10px]"
@@ -1069,7 +1087,7 @@ export function LiveServerCheckSection({
                       {result.pmtu.status === 'ok'
                         ? 'Стабильно'
                         : result.pmtu.status === 'lower_bound'
-                          ? 'Пониженный MTU'
+                          ? (result.pmtu.pmtu && result.pmtu.pmtu >= 1420 ? `Не менее ${result.pmtu.pmtu} B` : `Пониженный MTU (≥${result.pmtu.pmtu} B)`)
                           : result.pmtu.status === 'blackhole_suspected'
                             ? 'Подозрение на Blackhole'
                             : result.pmtu.status === 'icmp_blocked'

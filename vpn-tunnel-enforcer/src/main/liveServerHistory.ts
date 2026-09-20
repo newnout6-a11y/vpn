@@ -64,6 +64,27 @@ export function sanitizeLiveCheckForStorage(check: LiveServerCheck): LiveServerC
   if (sanitized.handshake?.evidence?.detail) {
     sanitized.handshake.evidence.detail = sanitized.handshake.evidence.detail.replace(UUID_REGEX, '[REDACTED_UUID]')
   }
+  if (sanitized.error) {
+    sanitized.error = sanitized.error.replace(UUID_REGEX, '[REDACTED_UUID]')
+  }
+
+  if (Array.isArray(sanitized.findings)) {
+    for (const finding of sanitized.findings) {
+      if (typeof finding.detail === 'string') {
+        finding.detail = finding.detail.replace(UUID_REGEX, '[REDACTED_UUID]')
+      }
+      if (typeof finding.title === 'string') {
+        finding.title = finding.title.replace(UUID_REGEX, '[REDACTED_UUID]')
+      }
+      if (finding.evidence && typeof finding.evidence === 'object') {
+        for (const [k, v] of Object.entries(finding.evidence)) {
+          if (typeof v === 'string') {
+            finding.evidence[k] = v.replace(UUID_REGEX, '[REDACTED_UUID]')
+          }
+        }
+      }
+    }
+  }
 
   return sanitized
 }
@@ -265,11 +286,27 @@ export function computeHistoryDiff(
 
   const prevExit = previous.egress?.exitIpv4
   const currExit = current.egress?.exitIpv4
-  const egressChanged = Boolean(prevExit && currExit && prevExit !== currExit)
+  const prevExit6 = previous.egress?.exitIpv6
+  const currExit6 = current.egress?.exitIpv6
+  const egressChanged = Boolean(
+    (prevExit && currExit && prevExit !== currExit) ||
+    (prevExit6 && currExit6 && prevExit6 !== currExit6)
+  )
 
-  const prevPmtu = previous.pmtu?.pmtu
-  const currPmtu = current.pmtu?.pmtu
-  const pmtuChanged = Boolean(prevPmtu && currPmtu && prevPmtu !== currPmtu)
+  const prevPmtuObj = previous.pmtu
+  const currPmtuObj = current.pmtu
+  const isPmtuComparable = Boolean(
+    prevPmtuObj &&
+    currPmtuObj &&
+    typeof prevPmtuObj.pmtu === 'number' &&
+    typeof currPmtuObj.pmtu === 'number' &&
+    prevPmtuObj.family === currPmtuObj.family &&
+    prevPmtuObj.method === currPmtuObj.method &&
+    (!prevPmtuObj.destination || !currPmtuObj.destination || prevPmtuObj.destination === currPmtuObj.destination)
+  )
+  const prevPmtu = isPmtuComparable ? prevPmtuObj!.pmtu : undefined
+  const currPmtu = isPmtuComparable ? currPmtuObj!.pmtu : undefined
+  const pmtuChanged = Boolean(isPmtuComparable && prevPmtu !== currPmtu)
 
   return {
     previousStartedAt: previous.startedAt,
