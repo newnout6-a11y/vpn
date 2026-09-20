@@ -186,6 +186,176 @@ export interface ServerGroup {
   lastRefreshProfilesCount?: number
 }
 
+// ─── Live Server Extraction & Technical Profile ──────────────────────────────
+
+export type LiveCheckStatus = 'ok' | 'unavailable' | 'error' | 'skipped'
+
+export interface AsnInfo {
+  asn: string
+  org: string
+  network: string
+  country: string
+}
+
+export interface DnsDiagnostics {
+  status: LiveCheckStatus
+  durationMs: number
+  error?: string
+  a: string[]
+  aaaa: string[]
+  cnameChain: string[]
+  ttl?: number
+  resolverUsed?: string
+  timings?: {
+    aMs?: number
+    aaaaMs?: number
+    cnameMs?: number
+  }
+}
+
+export interface ReachabilityDiagnostics {
+  status: LiveCheckStatus
+  durationMs: number
+  error?: string
+  tcpReachable: boolean
+  port: number
+}
+
+export interface LiveLatencyStats {
+  min: number
+  avg: number
+  median: number
+  max: number
+  jitter: number   // stddev
+  loss: number     // 0..1 (fraction lost)
+  samples: number[]
+  samplesAttempted: number
+  method: 'tcp'
+}
+
+export interface LiveTlsCertInfo {
+  status: LiveCheckStatus
+  durationMs: number
+  error?: string
+  hostnameVerified?: boolean
+  subject?: string
+  issuer?: string
+  validFrom?: string
+  validTo?: string
+  daysRemaining?: number
+  fingerprint?: string // sha-256
+  sans?: string[]
+  protocol?: string    // TLSv1.2, TLSv1.3
+  cipher?: string
+  alpn?: string
+}
+
+export interface HttpProbeResult {
+  status: LiveCheckStatus
+  durationMs: number
+  error?: string
+  statusCode?: number
+  protocol?: string
+  serverHeader?: string
+  viaHeader?: string
+  locationHeader?: string
+  contentType?: string
+  bodySize?: number
+  confidence: 'low'
+}
+
+export interface LivePortScanItem {
+  port: number
+  open: boolean
+  state: 'open' | 'closed' | 'filtered' | 'timeout'
+  service?: string
+}
+
+export interface RouteDiagnostics {
+  status: LiveCheckStatus
+  durationMs: number
+  error?: string
+  hops?: number
+  mtu?: number
+  routeMethod?: string
+}
+
+export interface InfrastructureHints {
+  status: LiveCheckStatus
+  asn?: AsnInfo
+  egressIp?: string
+  egressCountry?: string
+  endpointCountry?: string
+  sharedCidrWithProfiles?: string[]
+  changesFromPrevious?: {
+    ipChanged?: boolean
+    asnChanged?: boolean
+    tlsCertChanged?: boolean
+    countryChanged?: boolean
+    portsChanged?: boolean
+  }
+}
+
+export interface LiveCheckFinding {
+  code: string
+  severity: 'info' | 'warning' | 'error'
+  title: string
+  detail: string
+  evidence?: Record<string, string | number | boolean>
+}
+
+export interface LiveServerCheckOptions {
+  profileId?: string
+  host?: string
+  port?: number
+  mode?: 'basic' | 'extended'
+}
+
+export interface LiveServerCheck {
+  id: string
+  profileId?: string
+  host: string
+  port: number
+  mode: 'basic' | 'extended'
+  startedAt: string
+  finishedAt: string
+  durationMs: number
+  cancelled?: boolean
+  dns: DnsDiagnostics
+  reverseDns?: string[]
+  asn?: AsnInfo
+  reachability: ReachabilityDiagnostics
+  latency?: LiveLatencyStats
+  tls?: LiveTlsCertInfo
+  http?: HttpProbeResult
+  openPorts?: LivePortScanItem[]
+  route?: RouteDiagnostics
+  infrastructure?: InfrastructureHints
+  findings: LiveCheckFinding[]
+}
+
+export interface LiveServerCheckHistoryDiff {
+  previousStartedAt?: string
+  ipChanged?: boolean
+  previousIps?: string[]
+  currentIps?: string[]
+  tlsCertChanged?: boolean
+  previousTlsFingerprint?: string
+  currentTlsFingerprint?: string
+  asnChanged?: boolean
+  previousAsn?: string
+  currentAsn?: string
+  countryChanged?: boolean
+  previousCountry?: string
+  currentCountry?: string
+  latencySpike?: boolean
+  previousAvgLatency?: number
+  currentAvgLatency?: number
+  portsChanged?: boolean
+  closedPorts?: number[]
+  newOpenPorts?: number[]
+}
+
 /** Speed test result entry */
 export interface SpeedTestResult {
   id: string
@@ -621,6 +791,10 @@ export interface ServerChannels {
   'groups:check-health': (id: string) =>
     | { ok: true; results: Array<{ profileId: string; online: boolean; latencyMs: number | null; reason?: string }> }
     | { ok: false; error: string }
+  // ── Live Server Extraction & Technical Profile ──────────────────────────────
+  'server:live-check': (options: LiveServerCheckOptions) => Promise<LiveServerCheck>
+  'server:live-check-cancel': (checkId?: string) => Promise<{ cancelled: boolean }>
+  'server:live-check-history': (filter?: { profileId?: string; host?: string }) => Promise<LiveServerCheck[]>
 }
 
 /** Speed Test IPC channels */

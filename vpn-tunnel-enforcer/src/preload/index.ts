@@ -1,5 +1,13 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { ClientDevice, ExternalProxyBatchStartResult, ExternalProxyStartOptions, ExternalProxyStatus, ExternalProxyProfileRow } from '../shared/ipc-types'
+import type {
+  ClientDevice,
+  ExternalProxyBatchStartResult,
+  ExternalProxyStartOptions,
+  ExternalProxyStatus,
+  ExternalProxyProfileRow,
+  LiveServerCheck,
+  LiveServerCheckOptions
+} from '../shared/ipc-types'
 
 export interface ElectronAPI {
   detectHapp: () => Promise<any>
@@ -126,6 +134,9 @@ export interface ElectronAPI {
     | { ok: false; error: string }
   >
   serverProbe: (host: string, knownPort?: number) => Promise<any>
+  serverLiveCheck: (options: LiveServerCheckOptions) => Promise<LiveServerCheck>
+  serverLiveCheckCancel: (checkId?: string) => Promise<{ cancelled: boolean }>
+  serverLiveCheckHistory: (filter?: { profileId?: string; host?: string }) => Promise<LiveServerCheck[]>
   urlAvailabilityCheck: (url: string) => Promise<any>
   urlAvailabilityHistory: () => Promise<any[]>
   urlAvailabilityClearHistory: () => Promise<void>
@@ -363,6 +374,17 @@ function assertLeakOptions(value: unknown): { proxyAddr?: string; proxyType?: 's
   }
 }
 
+function assertLiveCheckOptions(value: unknown): LiveServerCheckOptions {
+  const options = assertPlainObject<Record<string, unknown>>(value, 'options')
+  const mode = options.mode !== undefined ? assertEnum(options.mode, ['basic', 'extended'] as const, 'options.mode') : undefined
+  return {
+    profileId: assertOptionalString(options.profileId, 'options.profileId'),
+    host: assertOptionalString(options.host, 'options.host'),
+    port: assertPort(options.port, 'options.port'),
+    mode
+  }
+}
+
 contextBridge.exposeInMainWorld('electronAPI', {
   detectHapp: () => ipcRenderer.invoke('detect-happ'),
   getPublicIp: () => ipcRenderer.invoke('get-public-ip'),
@@ -452,6 +474,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   groupsRefresh: (id: string) => ipcRenderer.invoke('groups:refresh', assertString(id, 'id')),
   groupsCheckHealth: (id: string) => ipcRenderer.invoke('groups:check-health', assertString(id, 'id')),
   serverProbe: (host: string, knownPort?: number) => ipcRenderer.invoke('server:probe', assertString(host, 'host'), assertPort(knownPort, 'knownPort')),
+  serverLiveCheck: (options: LiveServerCheckOptions) =>
+    ipcRenderer.invoke('server:live-check', assertLiveCheckOptions(options)),
+  serverLiveCheckCancel: (checkId?: string) =>
+    ipcRenderer.invoke('server:live-check-cancel', assertOptionalString(checkId, 'checkId')),
+  serverLiveCheckHistory: (filter?: { profileId?: string; host?: string }) =>
+    ipcRenderer.invoke('server:live-check-history', assertOptionalPlainObject(filter, 'filter')),
   // URL Availability — paste a link, get verdict + diagnostics for both
   // the tunnel path and the direct path (clash-direct-out when VPN is on).
   urlAvailabilityCheck: (url: string) => ipcRenderer.invoke('url-availability:check', assertString(url, 'url', MAX_VPN_INPUT_CHARS)),

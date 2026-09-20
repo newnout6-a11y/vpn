@@ -65,6 +65,7 @@ import {
   stopServerGroupAutoRefresh
 } from './serverGroups'
 import { registerServerProbeIpcHandlers } from './serverProbe'
+import { registerLiveServerProbeIpcHandlers } from './liveServerProbe'
 import { registerUrlAvailabilityHandlers } from './urlAvailability'
 import { registerSpeedTestHandlers } from './speedTest'
 import { registerKillSwitchIpc, granularKillSwitch } from './granularKillSwitch'
@@ -2233,6 +2234,7 @@ app.whenReady().then(async () => {
   // many servers, and automatically querying several public geo databases for
   // every missing entry makes refresh/startup slow and burns external limits.
   registerServerProbeIpcHandlers()
+  registerLiveServerProbeIpcHandlers()
   registerUrlAvailabilityHandlers()
   registerSpeedTestHandlers()
   registerKillSwitchIpc()

@@ -23,6 +23,7 @@ import { CountryFlagIcon } from './CountryFlagIcon'
 import { useAppStore } from '../store'
 import type { ClientDevice, ServerGroup, ServerProfile } from '../../shared/ipc-types'
 import { normalizeServerPort } from '../../shared/portValidation'
+import { LiveServerCheckSection } from './LiveServerCheckSection'
 
 interface IpInfo {
   ip: string
@@ -738,6 +739,9 @@ export function ServerDetailModal({ open, profile, onClose, onProfileUpdated }: 
             )}
           </>
         )}
+
+        {/* Live Server Extraction & Technical Profile */}
+        <LiveServerCheckSection profileId={profileId} host={host} port={port} />
 
         <div className="flex justify-between items-center gap-2 pt-2">
           {/*
