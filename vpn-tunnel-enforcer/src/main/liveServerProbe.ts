@@ -1777,8 +1777,18 @@ export async function probeTunnelHandshakeAndEgress(
         const inboundPort = await pickFreeLocalPort()
 
         const tunStatus = tunController.getStatus()
+        const activeProfile = serverPicker.getActiveProfile()
+        // Do not route a probe for the currently running direct-VPN profile
+        // through that same tunnel: this creates a self/nested handshake and
+        // commonly times out before the new engine can authenticate.
+        const isSelfProbe = Boolean(
+          tunStatus.running &&
+          tunStatus.mode === 'directVpn' &&
+          tunStatus.vpnProfileName === profile.name &&
+          activeProfile?.id === profile.id
+        )
         let directProxy: { host: string; port: number } | null = null
-        if (tunStatus.running && tunStatus.proxyAddr) {
+        if (tunStatus.running && tunStatus.proxyAddr && !isSelfProbe) {
           const directPort = getDirectProxyPort()
           if (directPort) directProxy = { host: '127.0.0.1', port: directPort }
         }
