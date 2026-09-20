@@ -6,11 +6,32 @@ import * as http from 'http'
 import * as https from 'https'
 import * as crypto from 'crypto'
 import { spawn } from 'child_process'
+import { tmpdir } from 'os'
+import { join } from 'path'
+import { mkdtemp, readFile, rm, writeFile } from 'fs/promises'
+import { SocksClient } from 'socks'
 import axios from 'axios'
 import { logEvent } from './appLogger'
 import { settingsStore } from './settings'
 import { serverPicker } from './serverPicker'
-import { tunController } from './tunController'
+import { tunController, getBundledResource, getDirectProxyPort, pickFreeLocalPort } from './tunController'
+import { ALL_KNOWN_ALIASES } from './tunAdapter'
+import { getPhysicalAdapterDnsSources } from './physicalAdapterLockdown'
+import { resolveProxyEngine } from './proxyEngine'
+import { buildXrayProbeConfig } from './xrayEngine'
+import {
+  buildKeyProbeConfig,
+  classifyOutboundProbeFailure,
+  parseCloudflareTrace,
+  waitForLocalSocks,
+  openTcpViaSocks,
+  verifyHttpsThroughSocket
+} from './keyHealthChecker'
+import {
+  cleanupManagedChildPidDirs,
+  writeManagedChildPidFile,
+  removeManagedChildPidFile
+} from './managedChildProcess'
 import { Address6 } from 'ip-address'
 import { normalizeServerPort } from '../shared/portValidation'
 import {
@@ -21,16 +42,26 @@ import {
 import type {
   AsnInfo,
   DnsDiagnostics,
+  DnsRecordEntry,
+  DnsResolverComparison,
+  EgressReflectorResult,
   HttpProbeResult,
   InfrastructureHints,
   LiveCheckFinding,
+  LiveCheckProgress,
+  LiveCheckStage,
+  LiveEgressResult,
   LiveLatencyStats,
   LivePortScanItem,
   LiveServerCheck,
   LiveServerCheckOptions,
   LiveTlsCertInfo,
+  PathDiagnostics,
+  PmtuDiagnostics,
   ReachabilityDiagnostics,
-  RouteDiagnostics
+  RouteDiagnostics,
+  ServerProfile,
+  TunnelHandshakeResult
 } from '../shared/ipc-types'
 
 export const LIVE_PROBE_THRESHOLDS = {
@@ -130,8 +161,158 @@ async function dnsQuery<T>(run: (resolver: InstanceType<typeof dnsPromises.Resol
   })
 }
 
+export function isPublicFqdn(host: string): boolean {
+  if (!host || net.isIP(host) !== 0) return false
+  const trimmed = host.trim().toLowerCase()
+  if (!trimmed.includes('.')) return false
+  if (
+    trimmed === 'localhost' ||
+    trimmed.endsWith('.local') ||
+    trimmed.endsWith('.lan') ||
+    trimmed.endsWith('.internal') ||
+    trimmed.endsWith('.home.arpa') ||
+    trimmed.endsWith('.corp') ||
+    trimmed.endsWith('.home')
+  ) {
+    return false
+  }
+  return true
+}
+
+export async function queryDoH(
+  resolverId: 'google-doh' | 'cloudflare-doh',
+  resolverName: string,
+  urlBase: string,
+  host: string,
+  signal?: AbortSignal,
+  headers?: Record<string, string>
+): Promise<DnsResolverComparison> {
+  const started = Date.now()
+  const recs: DnsRecordEntry[] = []
+  let adFlag: boolean | undefined
+  let rcode: number | undefined
+  let truncated: boolean | undefined
+
+  try {
+    const fetchWithTimeout = async (type: 'A' | 'AAAA') => {
+      const url = `${urlBase}?name=${encodeURIComponent(host)}&type=${type}`
+      const ctrl = new AbortController()
+      const timer = setTimeout(() => ctrl.abort(new Error('timeout')), 3000)
+      const onOuterAbort = () => ctrl.abort(signal?.reason || new Error('cancelled'))
+      if (signal) {
+        if (signal.aborted) ctrl.abort(signal.reason)
+        else signal.addEventListener('abort', onOuterAbort, { once: true })
+      }
+      try {
+        const resp = await fetch(url, {
+          headers: {
+            Accept: 'application/dns-json',
+            ...headers
+          },
+          signal: ctrl.signal
+        })
+        if (!resp.ok) {
+          throw new Error(`HTTP ${resp.status} ${resp.statusText}`)
+        }
+        return (await resp.json()) as {
+          Status?: number
+          AD?: boolean
+          TC?: boolean
+          Answer?: Array<{ name: string; type: number; TTL: number; data: string }>
+        }
+      } finally {
+        clearTimeout(timer)
+        signal?.removeEventListener('abort', onOuterAbort)
+      }
+    }
+
+    const [resA, resAAAA] = await Promise.allSettled([
+      fetchWithTimeout('A'),
+      fetchWithTimeout('AAAA')
+    ])
+
+    let anySuccess = false
+    let lastErr = ''
+
+    if (resA.status === 'fulfilled') {
+      anySuccess = true
+      const data = resA.value
+      rcode = data.Status
+      adFlag = data.AD
+      truncated = data.TC
+      if (Array.isArray(data.Answer)) {
+        for (const ans of data.Answer) {
+          if (!ans?.data) continue
+          const cleanName = (ans.name || host).replace(/\.$/, '')
+          const recType = ans.type === 28 ? 'AAAA' : ans.type === 5 ? 'CNAME' : 'A'
+          recs.push({
+            name: cleanName,
+            type: recType,
+            value: ans.data.replace(/\.$/, ''),
+            ttl: typeof ans.TTL === 'number' ? ans.TTL : undefined,
+            observedAt: new Date().toISOString(),
+            resolverId,
+            transport: 'doh'
+          })
+        }
+      }
+    } else {
+      lastErr = resA.reason?.message || 'A lookup failed'
+    }
+
+    if (resAAAA.status === 'fulfilled') {
+      anySuccess = true
+      const data = resAAAA.value
+      if (rcode === undefined) rcode = data.Status
+      if (adFlag === undefined) adFlag = data.AD
+      if (truncated === undefined) truncated = data.TC
+      if (Array.isArray(data.Answer)) {
+        for (const ans of data.Answer) {
+          if (!ans?.data) continue
+          const cleanName = (ans.name || host).replace(/\.$/, '')
+          const recType = ans.type === 28 ? 'AAAA' : ans.type === 5 ? 'CNAME' : 'A'
+          if (!recs.some(r => r.type === recType && r.value === ans.data.replace(/\.$/, ''))) {
+            recs.push({
+              name: cleanName,
+              type: recType,
+              value: ans.data.replace(/\.$/, ''),
+              ttl: typeof ans.TTL === 'number' ? ans.TTL : undefined,
+              observedAt: new Date().toISOString(),
+              resolverId,
+              transport: 'doh'
+            })
+          }
+        }
+      }
+    }
+
+    return {
+      resolverId,
+      resolverName,
+      endpoint: urlBase,
+      status: anySuccess ? 'ok' : 'error',
+      durationMs: Date.now() - started,
+      authenticatedData: adFlag,
+      records: recs,
+      truncated,
+      rcode,
+      error: anySuccess ? undefined : lastErr
+    }
+  } catch (err: any) {
+    return {
+      resolverId,
+      resolverName,
+      endpoint: urlBase,
+      status: err?.name === 'AbortError' || err?.message === 'timeout' ? 'timeout' : 'error',
+      durationMs: Date.now() - started,
+      records: [],
+      error: err?.message || 'DoH lookup failed'
+    }
+  }
+}
+
 /**
- * Stage 2: DNS Diagnostics (parallel A/AAAA, CNAME chain, reverse DNS)
+ * Stage 2: DNS Diagnostics (parallel A/AAAA, CNAME chain, TTL tracking, DoH multi-resolver comparison)
  */
 export async function probeDns(
   host: string,
@@ -151,13 +332,33 @@ export async function probeDns(
       }
     } catch {}
 
+    const directRecord: DnsRecordEntry = {
+      name: host,
+      type: ipFamily === 4 ? 'A' : 'AAAA',
+      value: host,
+      observedAt: new Date().toISOString(),
+      resolverId: 'system',
+      transport: 'system'
+    }
+
     return {
       dns: {
         status: 'ok',
         durationMs: Date.now() - started,
         a: ipFamily === 4 ? [host] : [],
         aaaa: ipFamily === 6 ? [host] : [],
-        cnameChain: []
+        cnameChain: [],
+        records: [directRecord],
+        resolvers: [
+          {
+            resolverId: 'system',
+            resolverName: 'Системный резолвер (Direct IP)',
+            endpoint: 'OS/Direct',
+            status: 'ok',
+            durationMs: 0,
+            records: [directRecord]
+          }
+        ]
       },
       reverseDns: reverseDnsList
     }
@@ -171,7 +372,9 @@ export async function probeDns(
         error: 'Cancelled',
         a: [],
         aaaa: [],
-        cnameChain: []
+        cnameChain: [],
+        records: [],
+        resolvers: []
       },
       reverseDns: []
     }
@@ -180,11 +383,12 @@ export async function probeDns(
   const aRecords: string[] = []
   const aaaaRecords: string[] = []
   const cnameChain: string[] = []
+  const dnsRecords: DnsRecordEntry[] = []
   const timings: { aMs?: number; aaaaMs?: number; cnameMs?: number } = {}
   let minTtl: number | undefined
   let primaryError: string | undefined
 
-  // 1. Parallel A and AAAA resolution
+  // 1. Parallel A and AAAA resolution (System Resolver)
   const queryA = async () => {
     const aStart = Date.now()
     try {
@@ -195,8 +399,17 @@ export async function probeDns(
 
       timings.aMs = Date.now() - aStart
       for (const r of resA) {
-        if (r?.address && !aRecords.includes(r.address)) {
-          aRecords.push(r.address)
+        if (r?.address) {
+          if (!aRecords.includes(r.address)) aRecords.push(r.address)
+          dnsRecords.push({
+            name: host,
+            type: 'A',
+            value: r.address,
+            ttl: typeof r.ttl === 'number' ? r.ttl : undefined,
+            observedAt: new Date().toISOString(),
+            resolverId: 'system',
+            transport: 'system'
+          })
           if (typeof r.ttl === 'number') {
             minTtl = minTtl === undefined ? r.ttl : Math.min(minTtl, r.ttl)
           }
@@ -216,8 +429,17 @@ export async function probeDns(
 
       timings.aaaaMs = Date.now() - aaaaStart
       for (const r of resAAAA) {
-        if (r?.address && !aaaaRecords.includes(r.address)) {
-          aaaaRecords.push(r.address)
+        if (r?.address) {
+          if (!aaaaRecords.includes(r.address)) aaaaRecords.push(r.address)
+          dnsRecords.push({
+            name: host,
+            type: 'AAAA',
+            value: r.address,
+            ttl: typeof r.ttl === 'number' ? r.ttl : undefined,
+            observedAt: new Date().toISOString(),
+            resolverId: 'system',
+            transport: 'system'
+          })
           if (typeof r.ttl === 'number') {
             minTtl = minTtl === undefined ? r.ttl : Math.min(minTtl, r.ttl)
           }
@@ -243,6 +465,14 @@ export async function probeDns(
         if (cnames.length === 0) break
         const nextTarget = cnames[0]
         cnameChain.push(nextTarget)
+        dnsRecords.push({
+          name: currentTarget,
+          type: 'CNAME',
+          value: nextTarget,
+          observedAt: new Date().toISOString(),
+          resolverId: 'system',
+          transport: 'system'
+        })
         const lower = nextTarget.toLowerCase()
         if (visited.has(lower)) break
         visited.add(lower)
@@ -254,7 +484,63 @@ export async function probeDns(
     timings.cnameMs = Date.now() - cnameStart
   }
 
-  // 3. Reverse DNS for all resolved unique IPs
+  // 3. Multi-resolver Comparison (Google DoH & Cloudflare DoH in extended mode)
+  const resolverComparisons: DnsResolverComparison[] = []
+  const hasRecords = aRecords.length > 0 || aaaaRecords.length > 0
+
+  resolverComparisons.push({
+    resolverId: 'system',
+    resolverName: 'Системный резолвер (OS/Hosts)',
+    endpoint: 'OS/System',
+    status: hasRecords ? 'ok' : 'error',
+    durationMs: timings.aMs || 0,
+    records: dnsRecords.filter(r => r.resolverId === 'system'),
+    error: hasRecords ? undefined : primaryError
+  })
+
+  const discrepancies: string[] = []
+
+  if (mode === 'extended' && isPublicFqdn(host) && !signal?.aborted) {
+    const [googleRes, cfRes] = await Promise.allSettled([
+      queryDoH('google-doh', 'Google Public DNS (DoH)', 'https://dns.google/resolve', host, signal),
+      queryDoH('cloudflare-doh', 'Cloudflare DNS (DoH)', 'https://cloudflare-dns.com/dns-query', host, signal, { Accept: 'application/dns-json' })
+    ])
+
+    if (googleRes.status === 'fulfilled') {
+      resolverComparisons.push(googleRes.value)
+      dnsRecords.push(...googleRes.value.records)
+    }
+    if (cfRes.status === 'fulfilled') {
+      resolverComparisons.push(cfRes.value)
+      dnsRecords.push(...cfRes.value.records)
+    }
+
+    // Check for discrepancies between resolvers
+    const systemIps = new Set(dnsRecords.filter(r => r.resolverId === 'system' && (r.type === 'A' || r.type === 'AAAA')).map(r => r.value))
+    const dohIps = new Set(dnsRecords.filter(r => r.transport === 'doh' && (r.type === 'A' || r.type === 'AAAA')).map(r => r.value))
+
+    if (systemIps.size > 0 && dohIps.size > 0) {
+      const hasOverlap = [...systemIps].some(ip => dohIps.has(ip))
+      if (!hasOverlap) {
+        discrepancies.push(
+          `Системный DNS ([${[...systemIps].join(', ')}]) не совпадает с публичными DoH ([${[...dohIps].join(', ')}]) (возможно split-horizon DNS или CDN)`
+        )
+      }
+    }
+
+    const googleIps = dnsRecords.filter(r => r.resolverId === 'google-doh' && (r.type === 'A' || r.type === 'AAAA')).map(r => r.value)
+    const cfIps = dnsRecords.filter(r => r.resolverId === 'cloudflare-doh' && (r.type === 'A' || r.type === 'AAAA')).map(r => r.value)
+    if (googleIps.length > 0 && cfIps.length > 0) {
+      const overlap = googleIps.some(ip => cfIps.includes(ip))
+      if (!overlap) {
+        discrepancies.push(
+          `Google DoH ([${googleIps.join(', ')}]) и Cloudflare DoH ([${cfIps.join(', ')}]) вернули разные адреса (GeoDNS/Anycast)`
+        )
+      }
+    }
+  }
+
+  // 4. Reverse DNS for all resolved unique IPs
   const allIps = [...new Set([...aRecords, ...aaaaRecords])]
   const reverseDnsList: string[] = []
   if (!signal?.aborted && allIps.length > 0) {
@@ -278,7 +564,6 @@ export async function probeDns(
   }
 
   const durationMs = Date.now() - started
-  const hasRecords = aRecords.length > 0 || aaaaRecords.length > 0
 
   return {
     dns: {
@@ -289,6 +574,9 @@ export async function probeDns(
       aaaa: aaaaRecords,
       cnameChain,
       ttl: minTtl,
+      records: dnsRecords,
+      resolvers: resolverComparisons,
+      discrepancies: discrepancies.length > 0 ? discrepancies : undefined,
       timings
     },
     reverseDns: reverseDnsList
@@ -1117,16 +1405,598 @@ export function evaluateLiveCheckFindings(
     }
   }
 
+  // 7. DNS Discrepancy Findings
+  if (check.dns?.discrepancies && check.dns.discrepancies.length > 0) {
+    for (const disc of check.dns.discrepancies) {
+      findings.push({
+        code: 'DNS_RESOLVER_DISCREPANCY',
+        severity: 'info',
+        title: 'Расхождение ответов DNS резолверов',
+        detail: disc,
+        evidence: { host: check.host || '' }
+      })
+    }
+  }
+
+  // 8. Handshake & Tunnel Service Findings
+  if (check.handshake && check.handshake.status !== 'ok' && check.handshake.status !== 'skipped') {
+    findings.push({
+      code: 'TUNNEL_HANDSHAKE_FAILED',
+      severity: 'error',
+      title: 'Сбой рукопожатия туннеля',
+      detail: `Протокол ${check.handshake.protocol || 'VPN'} не прошёл проверку: ${check.handshake.error || check.handshake.status}`,
+      evidence: { protocol: check.handshake.protocol || '', status: check.handshake.status }
+    })
+  }
+
+  // 9. Egress vs Endpoint Findings
+  if (check.egress && check.egress.status === 'ok') {
+    if (check.egress.underlayPath === 'direct') {
+      findings.push({
+        code: 'DIRECT_UNDERLAY_LEAK',
+        severity: 'error',
+        title: 'Утечка прямого провайдера (Direct Underlay)',
+        detail: 'Выходной IP совпадает с прямым подключением без защитного туннелирования!',
+        evidence: { exit: check.egress.exitIpv4 || check.egress.exitIpv6 || '' }
+      })
+    }
+    if (check.egress.exitIpv4 && check.egress.matchesEndpoint === false) {
+      findings.push({
+        code: 'EGRESS_DIFFERS_FROM_ENDPOINT',
+        severity: 'info',
+        title: 'Выходной IP отличается от IP подключения',
+        detail: `Endpoint: ${check.egress.endpointIp || check.host}, фактический Egress: ${check.egress.exitIpv4} (${check.egress.country || '—'})`,
+        evidence: { endpoint: check.egress.endpointIp || '', exit: check.egress.exitIpv4 }
+      })
+    }
+  }
+
+  // 10. PMTU Findings
+  if (check.pmtu?.status === 'blackhole_suspected') {
+    findings.push({
+      code: 'PMTU_BLACKHOLE_SUSPECTED',
+      severity: 'warning',
+      title: 'Подозрение на PMTU Blackhole',
+      detail: check.pmtu.detail || 'Большие пакеты отбрасываются без ICMP ответа',
+      evidence: { destination: check.pmtu.destination, status: check.pmtu.status }
+    })
+  }
+  if (check.pmtu?.pmtu && check.pmtu.pmtu < 1300) {
+    findings.push({
+      code: 'LOW_PMTU',
+      severity: 'warning',
+      title: 'Низкий MTU канала',
+      detail: `Обнаружен MTU ${check.pmtu.pmtu} байт. Это может приводить к повышенной фрагментации пакетов.`,
+      evidence: { pmtu: check.pmtu.pmtu }
+    })
+  }
+
   return findings
 }
 
 /**
+ * Execute a PowerShell script safely with timeout and AbortSignal support via base64 EncodedCommand
+ */
+export function execPs(
+  script: string,
+  timeoutMs: number,
+  signal?: AbortSignal
+): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    let finished = false
+    let child: any = null
+    const timer = setTimeout(() => {
+      finish(new Error('PowerShell command timeout'))
+    }, timeoutMs)
+
+    const abortHandler = () => {
+      finish(new Error('Cancelled'))
+    }
+
+    const finish = (err?: Error, res?: { stdout: string; stderr: string }) => {
+      if (finished) return
+      finished = true
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', abortHandler)
+      if (child) {
+        try { child.kill() } catch {}
+      }
+      if (err) reject(err)
+      else resolve(res || { stdout: '', stderr: '' })
+    }
+
+    if (signal) {
+      if (signal.aborted) {
+        finish(new Error('Cancelled'))
+        return
+      }
+      signal.addEventListener('abort', abortHandler, { once: true })
+    }
+
+    try {
+      const encoded = Buffer.from(script, 'utf16le').toString('base64')
+      child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded], {
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe']
+      })
+      let stdout = ''
+      let stderr = ''
+      child.stdout?.on('data', (d: Buffer) => { stdout += d.toString('utf8') })
+      child.stderr?.on('data', (d: Buffer) => { stderr += d.toString('utf8') })
+      child.on('error', (err: any) => finish(err))
+      child.on('close', () => {
+        finish(undefined, { stdout, stderr })
+      })
+    } catch (err: any) {
+      finish(err)
+    }
+  })
+}
+
+/**
+ * Stage 8: Tunnel Handshake & Fresh Egress Probe
+ * Spawns an isolated ephemeral proxy instance, verifies end-to-end handshake,
+ * and requests exit IPs from dual independent reflectors.
+ */
+export async function probeTunnelHandshakeAndEgress(
+  profile?: ServerProfile | null,
+  endpointIp?: string,
+  signal?: AbortSignal
+): Promise<{ handshake: TunnelHandshakeResult; egress: LiveEgressResult }> {
+  const started = Date.now()
+  if (!profile || !profile.outbound || typeof profile.outbound !== 'object') {
+    return {
+      handshake: {
+        status: 'skipped',
+        durationMs: 0,
+        protocol: profile?.protocol,
+        error: 'Профиль не выбран или не имеет конфигурации outbound'
+      },
+      egress: {
+        status: 'skipped',
+        durationMs: 0,
+        reflectors: [],
+        error: 'Проверка egress пропущена: профиль не настроен'
+      }
+    }
+  }
+
+  if (signal?.aborted) {
+    return {
+      handshake: {
+        status: 'skipped',
+        durationMs: 0,
+        protocol: profile.protocol,
+        error: 'Cancelled'
+      },
+      egress: {
+        status: 'skipped',
+        durationMs: 0,
+        reflectors: [],
+        error: 'Cancelled'
+      }
+    }
+  }
+
+  const workDirPrefix = 'vpnte-live-handshake-'
+  const pidFileName = 'engine.pid'
+  let workDir: string | null = null
+  let child: any = null
+  let logText = ''
+
+  try {
+    await cleanupManagedChildPidDirs(tmpdir(), workDirPrefix, pidFileName, 'live-handshake-probe', () => {})
+    workDir = await mkdtemp(join(tmpdir(), workDirPrefix))
+    const logPath = join(workDir, 'engine.log')
+    const pidPath = join(workDir, pidFileName)
+    const inboundPort = await pickFreeLocalPort()
+
+    const tunStatus = tunController.getStatus()
+    let directProxy: { host: string; port: number } | null = null
+    if (tunStatus.running && tunStatus.proxyAddr) {
+      const directPort = getDirectProxyPort()
+      if (directPort) directProxy = { host: '127.0.0.1', port: directPort }
+    }
+    const physicalAdapter = directProxy
+      ? null
+      : (await getPhysicalAdapterDnsSources().catch(() => []))[0] ?? null
+
+    const proxyEngineSetting = settingsStore.get().proxyEngine ?? 'auto'
+    const engine = resolveProxyEngine(profile.outbound, proxyEngineSetting)
+    const isXray = engine === 'xray'
+    const probeExe = isXray ? getBundledResource('xray.exe') : getBundledResource('sing-box.exe')
+
+    if (!probeExe) {
+      return {
+        handshake: {
+          status: 'skipped',
+          durationMs: Date.now() - started,
+          protocol: profile.protocol,
+          error: 'Бинарный файл движка (sing-box/xray) не найден'
+        },
+        egress: {
+          status: 'skipped',
+          durationMs: 0,
+          reflectors: [],
+          error: 'Движок туннеля не найден'
+        }
+      }
+    }
+
+    const probeConfigPath = join(workDir, isXray ? 'xray.json' : 'sing-box.json')
+    const config = isXray
+      ? buildXrayProbeConfig(profile.outbound, inboundPort, {
+          directProxy,
+          clientDevice: profile.clientDevice,
+          logPath
+        })
+      : buildKeyProbeConfig(profile, inboundPort, {
+          directProxy,
+          physicalInterface: physicalAdapter?.alias,
+          logPath
+        })
+
+    await writeFile(probeConfigPath, JSON.stringify(config, null, 2), 'utf8')
+
+    child = spawn(probeExe, ['run', '-c', probeConfigPath], {
+      cwd: workDir,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe']
+    })
+
+    await writeManagedChildPidFile(pidPath, {
+      owner: 'live-handshake-probe',
+      pid: child.pid ?? 0,
+      exePath: probeExe,
+      configPath: probeConfigPath,
+      createdAt: Date.now()
+    }).catch(() => {})
+
+    child.stdout?.on('data', (d: Buffer) => { logText += d.toString() })
+    child.stderr?.on('data', (d: Buffer) => { logText += d.toString() })
+
+    // Wait for inbound port
+    await waitForLocalSocks(inboundPort, 2500)
+
+    // Handshake check: connect via local socks inbound to Cloudflare
+    const socket = await openTcpViaSocks({ host: '127.0.0.1', port: inboundPort }, '1.1.1.1', 443, 4000)
+    const cfTrace = await verifyHttpsThroughSocket(socket, {
+      host: '1.1.1.1',
+      port: 443,
+      serverName: 'cloudflare-dns.com',
+      path: '/cdn-cgi/trace'
+    }, 4000)
+
+    const handshakeMs = Date.now() - started
+    const handshake: TunnelHandshakeResult = {
+      status: 'ok',
+      durationMs: handshakeMs,
+      protocol: profile.protocol,
+      evidence: {
+        transport: profile.outbound.type || profile.protocol,
+        alpn: profile.outbound.tls?.alpn?.[0],
+        inboundPort
+      }
+    }
+
+    // Now Egress check using dual reflectors
+    const egressStarted = Date.now()
+    const reflectorResults: EgressReflectorResult[] = []
+
+    if (cfTrace.egressIp) {
+      reflectorResults.push({
+        source: 'cloudflare-trace',
+        ip: cfTrace.egressIp,
+        family: net.isIP(cfTrace.egressIp) === 6 ? 6 : 4,
+        country: cfTrace.country,
+        durationMs: handshakeMs,
+        status: 'ok'
+      })
+    }
+
+    // Reflector 2: ipify over socks
+    try {
+      const ipifyStart = Date.now()
+      const ipifySocket = await openTcpViaSocks({ host: '127.0.0.1', port: inboundPort }, 'api.ipify.org', 443, 3500)
+      const ipifyTrace = await verifyHttpsThroughSocket(ipifySocket, {
+        host: 'api.ipify.org',
+        port: 443,
+        serverName: 'api.ipify.org',
+        path: '/?format=text'
+      }, 3500)
+      if (ipifyTrace.egressIp) {
+        reflectorResults.push({
+          source: 'ipify',
+          ip: ipifyTrace.egressIp,
+          family: 4,
+          durationMs: Date.now() - ipifyStart,
+          status: 'ok'
+        })
+      }
+    } catch {}
+
+    const exitIpv4 = reflectorResults.find(r => r.family === 4)?.ip || (cfTrace.egressIp && net.isIP(cfTrace.egressIp) === 4 ? cfTrace.egressIp : undefined)
+    const exitIpv6 = reflectorResults.find(r => r.family === 6)?.ip || (cfTrace.egressIp && net.isIP(cfTrace.egressIp) === 6 ? cfTrace.egressIp : undefined)
+    const country = cfTrace.country
+
+    const egress: LiveEgressResult = {
+      status: reflectorResults.length > 0 ? 'ok' : 'partial',
+      durationMs: Date.now() - egressStarted,
+      exitIpv4,
+      exitIpv6,
+      country,
+      reflectors: reflectorResults,
+      endpointIp,
+      matchesEndpoint: exitIpv4 && endpointIp ? exitIpv4 === endpointIp : undefined,
+      underlayPath: tunStatus.running ? 'nested' : 'direct'
+    }
+
+    return { handshake, egress }
+  } catch (err: any) {
+    let diskLogs = ''
+    if (workDir) {
+      try {
+        diskLogs = await readFile(join(workDir, 'engine.log'), 'utf8')
+      } catch {}
+    }
+    const combinedLogs = `${logText}\n${diskLogs}`
+    const classified = classifyOutboundProbeFailure(profile.protocol, combinedLogs, err?.message || '')
+    let handshakeStatus: TunnelHandshakeResult['status'] = 'transport_failed'
+    if (classified.includes('auth')) handshakeStatus = 'auth_failed'
+    else if (classified === 'timeout') handshakeStatus = 'timeout'
+
+    return {
+      handshake: {
+        status: handshakeStatus,
+        durationMs: Date.now() - started,
+        protocol: profile.protocol,
+        error: err?.message || classified,
+        evidence: {
+          transport: profile.outbound.type || profile.protocol,
+          detail: classified
+        }
+      },
+      egress: {
+        status: 'skipped',
+        durationMs: 0,
+        reflectors: [],
+        error: `Рукопожатие завершилось ошибкой (${classified})`
+      }
+    }
+  } finally {
+    if (child) {
+      try { child.kill('SIGKILL') } catch {}
+    }
+    if (workDir) {
+      await rm(workDir, { recursive: true, force: true }).catch(() => {})
+    }
+  }
+}
+
+/**
+ * Stage 9: Windows Path Confirmation (inspects Windows routing table for TUN vs direct adapter)
+ */
+export async function probePathConfirmation(
+  destinationIp: string,
+  signal?: AbortSignal
+): Promise<PathDiagnostics> {
+  const started = Date.now()
+  if (process.platform !== 'win32' || !destinationIp || net.isIP(destinationIp) === 0) {
+    return {
+      status: 'skipped',
+      durationMs: 0,
+      destination: destinationIp || '',
+      isTunInterface: false,
+      evidenceKind: 'os-unverified'
+    }
+  }
+
+  try {
+    const script = `Find-NetRoute -RemoteIPAddress "${destinationIp}" -ErrorAction SilentlyContinue | Select-Object -First 1 InterfaceIndex, InterfaceAlias, IPAddress, NextHop | ConvertTo-Json`
+    const { stdout } = await execPs(script, 3000, signal)
+    if (!stdout.trim()) {
+      return {
+        status: 'error',
+        durationMs: Date.now() - started,
+        destination: destinationIp,
+        isTunInterface: false,
+        evidenceKind: 'net-route',
+        error: 'Таблица маршрутизации не вернула активный маршрут'
+      }
+    }
+
+    const parsed = JSON.parse(stdout)
+    const alias = parsed.InterfaceAlias || ''
+    const isTun = ALL_KNOWN_ALIASES.some(a => alias.toLowerCase().includes(a.toLowerCase()))
+
+    return {
+      status: 'ok',
+      durationMs: Date.now() - started,
+      destination: destinationIp,
+      activeInterfaceIndex: typeof parsed.InterfaceIndex === 'number' ? parsed.InterfaceIndex : undefined,
+      activeInterfaceAlias: alias,
+      activeLocalIp: parsed.IPAddress || undefined,
+      nextHop: parsed.NextHop || undefined,
+      isTunInterface: isTun,
+      evidenceKind: 'net-route'
+    }
+  } catch (err: any) {
+    return {
+      status: 'error',
+      durationMs: Date.now() - started,
+      destination: destinationIp,
+      isTunInterface: false,
+      evidenceKind: 'net-route',
+      error: err?.message || 'Сбой проверки маршрута Windows'
+    }
+  }
+}
+
+/**
+ * Stage 10: Path MTU (PMTU) Discovery
+ * Queries interface MTU and executes ICMP ping ladder with DontFragment (DF) flag.
+ */
+export async function probePmtu(
+  destinationIp: string,
+  interfaceIndex?: number,
+  interfaceAlias?: string,
+  signal?: AbortSignal
+): Promise<PmtuDiagnostics> {
+  const started = Date.now()
+  const ipVer = net.isIP(destinationIp)
+  const family: 4 | 6 = ipVer === 6 ? 6 : 4
+
+  if (process.platform !== 'win32' || !destinationIp || ipVer === 0) {
+    return {
+      status: 'skipped',
+      durationMs: 0,
+      destination: destinationIp || '',
+      family,
+      method: 'fallback',
+      detail: 'Определение PMTU доступно только для прямых IP-адресов на Windows'
+    }
+  }
+
+  // 1. Interface MTU via Get-NetIPInterface
+  let ifMtu: number | undefined
+  if (interfaceIndex) {
+    try {
+      const script = `Get-NetIPInterface -InterfaceIndex ${interfaceIndex} -AddressFamily IPv${family} -ErrorAction SilentlyContinue | Select-Object -First 1 NlMtu | ConvertTo-Json`
+      const { stdout } = await execPs(script, 2000, signal)
+      if (stdout.trim()) {
+        const parsed = JSON.parse(stdout)
+        if (typeof parsed.NlMtu === 'number' && parsed.NlMtu > 0) {
+          ifMtu = parsed.NlMtu
+        }
+      }
+    } catch {}
+  }
+
+  // 2. Ladder ICMP probe with DF flag
+  try {
+    const script = `
+$ip = [System.Net.IPAddress]::Parse('${destinationIp}')
+$p = New-Object System.Net.NetworkInformation.Ping
+$opt = New-Object System.Net.NetworkInformation.PingOptions(64, $true)
+$ctrlBuf = New-Object byte[] 32
+$ctrl = $p.Send($ip, 700, $ctrlBuf, $opt)
+if ($ctrl.Status -ne [System.Net.NetworkInformation.IPStatus]::Success) {
+  [PSCustomObject]@{ Status = 'icmp_blocked'; Detail = $ctrl.Status.ToString() } | ConvertTo-Json
+  exit 0
+}
+$ladder = @(1472, 1464, 1372, 1252)
+$best = 0
+$tooBigCount = 0
+$timeoutCount = 0
+foreach ($sz in $ladder) {
+  $buf = New-Object byte[] $sz
+  $reply = $p.Send($ip, 700, $buf, $opt)
+  if ($reply.Status -eq [System.Net.NetworkInformation.IPStatus]::Success) {
+    $best = $sz
+    break
+  } elseif ($reply.Status -eq [System.Net.NetworkInformation.IPStatus]::PacketTooBig) {
+    $tooBigCount++
+  } else {
+    $timeoutCount++
+  }
+}
+[PSCustomObject]@{ Status = 'ok'; BestPayload = $best; TooBigCount = $tooBigCount; TimeoutCount = $timeoutCount } | ConvertTo-Json
+`
+    const { stdout } = await execPs(script, 4500, signal)
+    if (stdout.trim()) {
+      const parsed = JSON.parse(stdout)
+      if (parsed.Status === 'icmp_blocked') {
+        return {
+          status: 'icmp_blocked',
+          durationMs: Date.now() - started,
+          destination: destinationIp,
+          family,
+          interfaceAlias,
+          method: ifMtu ? 'interface-nlmtu' : 'fallback',
+          pmtu: ifMtu,
+          detail: 'ICMP echo заблокирован узлом или сетью; показан MTU сетевого адаптера'
+        }
+      }
+
+      if (parsed.Status === 'ok') {
+        if (parsed.BestPayload === 1472) {
+          return {
+            status: 'lower_bound',
+            durationMs: Date.now() - started,
+            destination: destinationIp,
+            family,
+            interfaceAlias,
+            method: 'icmp-df',
+            pmtu: 1500,
+            minTested: 1280,
+            maxTested: 1500,
+            detail: 'PMTU не менее 1500 байт (пакет 1500B с DF принят)'
+          }
+        }
+        if (parsed.BestPayload > 0) {
+          const totalMtu = parsed.BestPayload + 28
+          return {
+            status: 'ok',
+            durationMs: Date.now() - started,
+            destination: destinationIp,
+            family,
+            interfaceAlias,
+            method: 'icmp-df',
+            pmtu: totalMtu,
+            minTested: 1280,
+            maxTested: 1500,
+            detail: `Подтверждённый PMTU ${totalMtu} байт (payload ${parsed.BestPayload}B + 28B IP/ICMP)`
+          }
+        }
+        if (parsed.TimeoutCount > 0 && parsed.TooBigCount === 0) {
+          return {
+            status: 'blackhole_suspected',
+            durationMs: Date.now() - started,
+            destination: destinationIp,
+            family,
+            interfaceAlias,
+            method: ifMtu ? 'interface-nlmtu' : 'fallback',
+            pmtu: ifMtu,
+            detail: 'Подозрение на PMTU Blackhole: большие пакеты отбрасываются без ICMP PacketTooBig'
+          }
+        }
+      }
+    }
+  } catch (err: any) {
+    if (ifMtu) {
+      return {
+        status: 'ok',
+        durationMs: Date.now() - started,
+        destination: destinationIp,
+        family,
+        interfaceAlias,
+        method: 'interface-nlmtu',
+        pmtu: ifMtu,
+        detail: `MTU локального интерфейса ${ifMtu} байт`
+      }
+    }
+  }
+
+  return {
+    status: ifMtu ? 'ok' : 'skipped',
+    durationMs: Date.now() - started,
+    destination: destinationIp,
+    family,
+    interfaceAlias,
+    method: ifMtu ? 'interface-nlmtu' : 'fallback',
+    pmtu: ifMtu,
+    detail: ifMtu ? `MTU локального интерфейса ${ifMtu} байт` : 'PMTU не удалось определить'
+  }
+}
+
+/**
  * Main Live Server Check runner
- * Wraps overall timeout, isolates sub-probe failures, attaches diff before saving.
+ * Wraps overall timeout, coordinates 11 diagnostic stages, emits progress updates.
  */
 export async function runLiveServerCheck(
   options: LiveServerCheckOptions,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  onProgress?: (progress: LiveCheckProgress) => void
 ): Promise<LiveServerCheck> {
   const startedAt = new Date().toISOString()
   const startTs = Date.now()
@@ -1139,12 +2009,14 @@ export async function runLiveServerCheck(
   let endpointCountry: string | undefined
   let profileTlsEnabled: boolean | undefined
   let sniHostname: string | undefined
+  let matchedProfile: ServerProfile | null = null
 
   if (options.profileId) {
     try {
       const allProfiles = serverPicker.getProfiles()
       const found = allProfiles.find(p => p.id === options.profileId)
       if (found) {
+        matchedProfile = found
         if (!host) host = found.server
         if (!port) port = found.port
         endpointCountry = found.country
@@ -1171,7 +2043,7 @@ export async function runLiveServerCheck(
   })
 
   // Create deadline controller to enforce an overall timeout on the entire check
-  const totalTimeoutMs = mode === 'extended' ? 22000 : 14000
+  const totalTimeoutMs = mode === 'extended' ? 45000 : 25000
   const deadlineController = new AbortController()
 
   const overallTimer = setTimeout(() => {
@@ -1192,14 +2064,50 @@ export async function runLiveServerCheck(
 
   const checkSignal = deadlineController.signal
 
+  const totalStages = 11
+  let completedStages = 0
+  let sequence = 0
+
+  const reportStage = (
+    stage: LiveCheckStage,
+    status: 'running' | 'completed' | 'failed' | 'skipped',
+    detail?: string
+  ) => {
+    if (status === 'completed' || status === 'failed' || status === 'skipped') {
+      completedStages++
+    }
+    try {
+      onProgress?.({
+        requestId,
+        sequence: ++sequence,
+        stage,
+        status,
+        completedStages,
+        totalStages,
+        elapsedMs: Date.now() - startTs,
+        detail
+      })
+    } catch {}
+  }
+
   try {
     // 1. DNS Probe
+    reportStage('dns', 'running')
     const dnsRes = await probeDns(host, mode, checkSignal)
+    reportStage('dns', dnsRes.dns.status === 'ok' ? 'completed' : dnsRes.dns.status === 'skipped' ? 'skipped' : 'failed')
     const primaryIp = dnsRes.dns.a[0] || dnsRes.dns.aaaa[0] || host
 
-    // 2. Parallel Probes isolated with Promise.allSettled
+    // 2. Reachability, TLS, HTTP, Ports, Route, Infrastructure Probes
     const isTlsPort = [443, 8443, 2053, 2083, 2087, 2096, 4433].includes(port)
     const isTlsApplicable = profileTlsEnabled ?? (isTlsPort || sniHostname !== undefined)
+
+    reportStage('reachability', 'running')
+    reportStage('tls', 'running')
+    reportStage('http', 'running')
+    reportStage('ports', 'running')
+    if (mode === 'extended') reportStage('route', 'running')
+    else reportStage('route', 'skipped')
+    reportStage('infrastructure', 'running')
 
     const [reachabilitySettled, tlsSettled, httpSettled, portsSettled, routeSettled, infraSettled] =
       await Promise.allSettled([
@@ -1216,14 +2124,51 @@ export async function runLiveServerCheck(
     const reachabilityRes = reachabilitySettled.status === 'fulfilled'
       ? reachabilitySettled.value
       : { reachability: { status: 'error' as const, durationMs: 0, error: 'Probe crashed', tcpReachable: false, port }, latency: undefined }
+    reportStage('reachability', reachabilityRes.reachability.status === 'ok' ? 'completed' : 'failed')
 
     const tlsRes: LiveTlsCertInfo | undefined = tlsSettled.status === 'fulfilled' ? tlsSettled.value : { status: 'error', durationMs: 0, error: 'TLS probe failed' }
+    reportStage('tls', tlsRes ? (tlsRes.status === 'ok' ? 'completed' : 'failed') : 'skipped')
+
     const httpRes: HttpProbeResult = httpSettled.status === 'fulfilled' ? httpSettled.value : { status: 'error', durationMs: 0, error: 'HTTP probe failed', confidence: 'low' }
+    reportStage('http', httpRes.status === 'ok' ? 'completed' : 'failed')
+
     const openPortsRes = portsSettled.status === 'fulfilled' ? portsSettled.value : undefined
+    reportStage('ports', portsSettled.status === 'fulfilled' ? 'completed' : 'failed')
+
     const routeRes: RouteDiagnostics | undefined = routeSettled.status === 'fulfilled' ? routeSettled.value : { status: 'error', durationMs: 0, error: 'Route probe failed' }
+    if (mode === 'extended') {
+      reportStage('route', routeRes?.status === 'ok' ? 'completed' : 'failed')
+    }
+
     const infraRes: InfrastructureHints = infraSettled.status === 'fulfilled'
       ? infraSettled.value
       : { status: 'error', endpointCountry, error: 'Infrastructure probe failed' }
+    reportStage('infrastructure', infraRes.status === 'ok' ? 'completed' : 'failed')
+
+    // 3. Tunnel Handshake & Fresh Egress Probes
+    reportStage('handshake', 'running')
+    reportStage('egress', 'running')
+    const { handshake: handshakeRes, egress: egressRes } = await probeTunnelHandshakeAndEgress(
+      matchedProfile,
+      primaryIp,
+      checkSignal
+    )
+    reportStage('handshake', handshakeRes.status === 'ok' ? 'completed' : handshakeRes.status === 'skipped' ? 'skipped' : 'failed')
+    reportStage('egress', egressRes.status === 'ok' ? 'completed' : egressRes.status === 'skipped' ? 'skipped' : 'failed')
+
+    // 4. Windows Path Confirmation & PMTU Probes
+    reportStage('path', 'running')
+    const pathRes = await probePathConfirmation(primaryIp, checkSignal)
+    reportStage('path', pathRes.status === 'ok' ? 'completed' : pathRes.status === 'skipped' ? 'skipped' : 'failed')
+
+    reportStage('pmtu', 'running')
+    const pmtuRes = await probePmtu(
+      primaryIp,
+      pathRes.activeInterfaceIndex,
+      pathRes.activeInterfaceAlias,
+      checkSignal
+    )
+    reportStage('pmtu', pmtuRes.status === 'ok' || pmtuRes.status === 'lower_bound' ? 'completed' : pmtuRes.status === 'skipped' ? 'skipped' : 'failed')
 
     // Get previous successful check for diff & findings
     const previousCheck = liveServerHistory.getPreviousSuccessfulCheck(options.profileId, host, port)
@@ -1250,7 +2195,11 @@ export async function runLiveServerCheck(
       openPorts: openPortsRes,
       portsError: portsSettled.status === 'rejected' ? 'Port probe failed' : undefined,
       route: routeRes,
-      infrastructure: infraRes
+      infrastructure: infraRes,
+      handshake: handshakeRes,
+      egress: egressRes,
+      pathDiagnostics: pathRes,
+      pmtu: pmtuRes
     }
 
     // Attach diff to infrastructure hints BEFORE saving to disk!
@@ -1306,7 +2255,15 @@ export function registerLiveServerProbeIpcHandlers(): void {
     activeControllers.set(key, controller)
 
     try {
-      const result = await runLiveServerCheck({ ...options, requestId }, controller.signal)
+      const result = await runLiveServerCheck(
+        { ...options, requestId },
+        controller.signal,
+        (progress) => {
+          if (_event.sender && !_event.sender.isDestroyed()) {
+            _event.sender.send('server:live-check-progress', progress)
+          }
+        }
+      )
       return result
     } finally {
       _event.sender?.removeListener('destroyed', onDestroyed)

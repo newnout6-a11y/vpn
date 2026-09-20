@@ -197,6 +197,53 @@ export interface AsnInfo {
   country: string
 }
 
+export type LiveCheckStage =
+  | 'dns'
+  | 'reachability'
+  | 'tls'
+  | 'http'
+  | 'ports'
+  | 'route'
+  | 'infrastructure'
+  | 'handshake'
+  | 'egress'
+  | 'path'
+  | 'pmtu'
+
+export interface LiveCheckProgress {
+  requestId: string
+  sequence: number
+  stage: LiveCheckStage
+  status: 'running' | 'completed' | 'failed' | 'skipped'
+  completedStages: number
+  totalStages: number
+  elapsedMs: number
+  detail?: string
+}
+
+export interface DnsRecordEntry {
+  name: string
+  type: 'A' | 'AAAA' | 'CNAME' | 'PTR'
+  value: string
+  ttl?: number
+  observedAt: string
+  resolverId: string
+  transport: 'system' | 'doh'
+}
+
+export interface DnsResolverComparison {
+  resolverId: string
+  resolverName: string
+  endpoint: string
+  status: 'ok' | 'error' | 'timeout' | 'skipped'
+  durationMs: number
+  error?: string
+  authenticatedData?: boolean
+  records: DnsRecordEntry[]
+  truncated?: boolean
+  rcode?: number
+}
+
 export interface DnsDiagnostics {
   status: LiveCheckStatus
   durationMs: number
@@ -206,11 +253,80 @@ export interface DnsDiagnostics {
   cnameChain: string[]
   ttl?: number
   resolverUsed?: string
+  records?: DnsRecordEntry[]
+  resolvers?: DnsResolverComparison[]
+  discrepancies?: string[]
   timings?: {
     aMs?: number
     aaaaMs?: number
     cnameMs?: number
   }
+}
+
+export interface TunnelHandshakeResult {
+  status: 'ok' | 'auth_failed' | 'transport_failed' | 'timeout' | 'skipped' | 'unsupported'
+  durationMs: number
+  protocol?: string
+  error?: string
+  evidence?: {
+    transport?: string
+    alpn?: string
+    tlsVersion?: string
+    detail?: string
+    inboundPort?: number
+  }
+}
+
+export interface EgressReflectorResult {
+  source: string
+  ip?: string
+  family?: 4 | 6
+  country?: string
+  durationMs: number
+  status: 'ok' | 'error' | 'timeout'
+  error?: string
+}
+
+export interface LiveEgressResult {
+  status: 'ok' | 'partial' | 'error' | 'skipped' | 'timeout'
+  durationMs: number
+  exitIpv4?: string
+  exitIpv6?: string
+  country?: string
+  reflectors: EgressReflectorResult[]
+  endpointIp?: string
+  matchesEndpoint?: boolean
+  underlayPath?: 'direct' | 'nested' | 'unknown'
+  error?: string
+}
+
+export interface PathDiagnostics {
+  status: 'ok' | 'error' | 'skipped'
+  durationMs: number
+  destination: string
+  activeInterfaceIndex?: number
+  activeInterfaceAlias?: string
+  activeLocalIp?: string
+  nextHop?: string
+  isTunInterface: boolean
+  underlayInterfaceAlias?: string
+  evidenceKind: 'net-route' | 'os-unverified' | 'simulation'
+  error?: string
+}
+
+export interface PmtuDiagnostics {
+  status: 'ok' | 'lower_bound' | 'icmp_blocked' | 'blackhole_suspected' | 'unsupported' | 'skipped' | 'error'
+  durationMs: number
+  destination: string
+  family: 4 | 6
+  interfaceAlias?: string
+  method: 'icmp-df' | 'interface-nlmtu' | 'fallback'
+  pmtu?: number
+  minTested?: number
+  maxTested?: number
+  lossRate?: number
+  detail?: string
+  error?: string
 }
 
 export interface ReachabilityDiagnostics {
@@ -354,6 +470,10 @@ export interface LiveServerCheck {
   portsError?: string
   route?: RouteDiagnostics
   infrastructure?: InfrastructureHints
+  handshake?: TunnelHandshakeResult
+  egress?: LiveEgressResult
+  pathDiagnostics?: PathDiagnostics
+  pmtu?: PmtuDiagnostics
   findings: LiveCheckFinding[]
 }
 
@@ -377,6 +497,15 @@ export interface LiveServerCheckHistoryDiff {
   portsChanged?: boolean
   closedPorts?: number[]
   newOpenPorts?: number[]
+  handshakeChanged?: boolean
+  previousHandshakeStatus?: string
+  currentHandshakeStatus?: string
+  egressChanged?: boolean
+  previousExitIp?: string
+  currentExitIp?: string
+  pmtuChanged?: boolean
+  previousPmtu?: number
+  currentPmtu?: number
 }
 
 /** Speed test result entry */
@@ -818,6 +947,7 @@ export interface ServerChannels {
   'server:live-check': (options: LiveServerCheckOptions) => Promise<LiveServerCheck>
   'server:live-check-cancel': (requestId?: string) => Promise<{ cancelled: boolean; reason?: string }>
   'server:live-check-history': (filter?: { profileId?: string; host?: string }) => Promise<LiveServerCheck[]>
+  'server:live-check-progress': (callback: (progress: LiveCheckProgress) => void) => void
 }
 
 /** Speed Test IPC channels */

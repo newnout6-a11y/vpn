@@ -14,11 +14,18 @@ import {
   AlertCircle,
   Info,
   History,
-  Route as RouteIcon
+  Route as RouteIcon,
+  Zap,
+  Layers,
+  Compass,
+  Gauge,
+  ArrowRightLeft
 } from 'lucide-react'
 import { MacButton, MacCard, MacBadge } from '../design-system'
 import type {
   LiveCheckFinding,
+  LiveCheckProgress,
+  LiveCheckStage,
   LiveCheckStatus,
   LiveServerCheck
 } from '../../shared/ipc-types'
@@ -29,6 +36,20 @@ interface LiveServerCheckSectionProps {
   port?: number
 }
 
+const STAGE_LABELS: Record<LiveCheckStage, string> = {
+  dns: 'DNS резолвинг и DoH',
+  reachability: 'TCP доступность и задержка',
+  tls: 'TLS сертификат и шифрование',
+  http: 'HTTP/HTTPS зондирование',
+  ports: 'Сканирование портов',
+  route: 'Трассировка маршрута',
+  infrastructure: 'ASN и сетевые диффы',
+  handshake: 'Рукопожатие туннеля',
+  egress: 'Свежий exit IP (рефлекторы)',
+  path: 'Маршрутизация Windows',
+  pmtu: 'PMTU и DF зондирование'
+}
+
 export function LiveServerCheckSection({
   profileId,
   host,
@@ -37,6 +58,7 @@ export function LiveServerCheckSection({
   const { t } = useTranslation()
   const [mode, setMode] = useState<'basic' | 'extended'>('basic')
   const [running, setRunning] = useState(false)
+  const [progress, setProgress] = useState<LiveCheckProgress | null>(null)
   const [result, setResult] = useState<LiveServerCheck | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [history, setHistory] = useState<LiveServerCheck[]>([])
@@ -45,6 +67,17 @@ export function LiveServerCheckSection({
 
   const currentRequestIdRef = useRef<string | null>(null)
   const generationRef = useRef<number>(0)
+
+  useEffect(() => {
+    const unsub = window.electronAPI?.onLiveCheckProgress?.((p) => {
+      if (currentRequestIdRef.current && p.requestId === currentRequestIdRef.current) {
+        setProgress(p)
+      }
+    })
+    return () => {
+      unsub?.()
+    }
+  }, [])
 
   // Target change or unmount cleanup
   useEffect(() => {
@@ -56,6 +89,7 @@ export function LiveServerCheckSection({
 
     const currentGen = ++generationRef.current
     setRunning(false)
+    setProgress(null)
     setHistory([])
     setShowHistory(false)
     setResult(null)
@@ -244,6 +278,33 @@ export function LiveServerCheckSection({
         </div>
       </div>
 
+      {running && progress && (
+        <div className="mb-3 p-2.5 rounded-[var(--radius-sm)] bg-[var(--color-bg-secondary)] border border-[var(--color-accent)]/40 text-xs shadow-sm">
+          <div className="flex items-center justify-between mb-1.5">
+            <div className="flex items-center gap-2">
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[var(--color-accent)] opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-[var(--color-accent)]"></span>
+              </span>
+              <span className="font-medium text-[var(--color-text)]">
+                {STAGE_LABELS[progress.stage] || progress.stage}
+              </span>
+            </div>
+            <div className="text-[11px] text-[var(--color-text-secondary)] font-mono">
+              Этап {progress.completedStages + 1} из {progress.totalStages} • {(progress.elapsedMs / 1000).toFixed(1)}с
+            </div>
+          </div>
+          <div className="w-full h-1.5 bg-[var(--color-bg-tertiary)] rounded-full overflow-hidden">
+            <div
+              className="h-full bg-[var(--color-accent)] transition-all duration-300 rounded-full"
+              style={{
+                width: `${Math.min(100, Math.max(5, ((progress.completedStages + 1) / progress.totalStages) * 100))}%`
+              }}
+            />
+          </div>
+        </div>
+      )}
+
       {mode === 'extended' && (
         <p className="text-[11px] text-[var(--color-warning)] mb-3 flex items-center gap-1.5">
           <AlertTriangle size={12} />
@@ -429,6 +490,52 @@ export function LiveServerCheckSection({
                     <div className="font-mono text-[10px] text-[var(--color-text)] truncate">
                       {result.reverseDns.join(', ')}
                     </div>
+                  </div>
+                )}
+                {/* Multi-resolver Comparison Table */}
+                {result.dns?.resolvers && result.dns.resolvers.length > 0 && (
+                  <div className="pt-1 border-t border-[var(--color-border)]">
+                    <div className="text-[10px] text-[var(--color-text-secondary)] mb-1">Сравнение резолверов:</div>
+                    <div className="space-y-1 bg-[var(--color-bg-tertiary)] p-1.5 rounded">
+                      {result.dns.resolvers.map((res, i) => {
+                        const addresses = res.records.map((r) => r.value)
+                        return (
+                          <div key={i} className="flex items-center justify-between text-[10px]">
+                            <div className="flex items-center gap-1">
+                              <span className="font-mono font-medium text-[var(--color-text)]">
+                                {res.resolverName || res.resolverId}
+                              </span>
+                              {res.authenticatedData && (
+                                <MacBadge variant="success" className="text-[8px] py-0 px-1">DNSSEC</MacBadge>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-1.5 font-mono text-[9px]">
+                              {res.error ? (
+                                <span className="text-[var(--color-danger)]">{res.error}</span>
+                              ) : (
+                                <>
+                                  <span className="text-[var(--color-text-secondary)]">{res.durationMs}ms</span>
+                                  <span className="truncate max-w-[110px]" title={addresses.join(', ')}>
+                                    {addresses.slice(0, 2).join(', ')}{addresses.length > 2 ? ` +${addresses.length - 2}` : ''}
+                                  </span>
+                                </>
+                              )}
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )}
+                {/* Discrepancies */}
+                {result.dns?.discrepancies && result.dns.discrepancies.length > 0 && (
+                  <div className="space-y-0.5 pt-0.5">
+                    {result.dns.discrepancies.map((d, i) => (
+                      <div key={i} className="text-[10px] text-amber-400 flex items-center gap-1">
+                        <AlertTriangle size={10} className="shrink-0" />
+                        <span>{d}</span>
+                      </div>
+                    ))}
                   </div>
                 )}
               </div>
@@ -755,6 +862,234 @@ export function LiveServerCheckSection({
                 )}
               </div>
             </DiagnosticBox>
+
+            {/* Tunnel Handshake Block */}
+            {result.handshake && (
+              <DiagnosticBox
+                icon={<Zap size={12} />}
+                title="Рукопожатие туннеля (Handshake)"
+                status={result.handshake.status}
+                durationMs={result.handshake.durationMs}
+              >
+                <div className="space-y-1.5 text-[11px]">
+                  <div className="flex justify-between items-center">
+                    <span className="text-[var(--color-text-secondary)]">Протокол:</span>
+                    <MacBadge variant="info" className="font-mono text-[10px] uppercase">
+                      {result.handshake.protocol || '—'}
+                    </MacBadge>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-[var(--color-text-secondary)]">Статус проверки:</span>
+                    <MacBadge
+                      variant={
+                        result.handshake.status === 'ok'
+                          ? 'success'
+                          : result.handshake.status === 'auth_failed'
+                            ? 'danger'
+                            : 'warning'
+                      }
+                      className="text-[10px]"
+                    >
+                      {result.handshake.status === 'ok'
+                        ? 'Успешно (handshake ok)'
+                        : result.handshake.status === 'auth_failed'
+                          ? 'Ошибка аутентификации'
+                          : result.handshake.status === 'transport_failed'
+                            ? 'Сбой транспорта'
+                            : result.handshake.status === 'timeout'
+                              ? 'Таймаут соединения'
+                              : result.handshake.status}
+                    </MacBadge>
+                  </div>
+                  {result.handshake.durationMs !== undefined && (
+                    <div className="flex justify-between">
+                      <span className="text-[var(--color-text-secondary)]">Время установления:</span>
+                      <span className="font-mono">{result.handshake.durationMs} ms</span>
+                    </div>
+                  )}
+                  {result.handshake.evidence && (
+                    <div className="pt-0.5">
+                      <div className="text-[10px] text-[var(--color-text-secondary)]">Свидетельство:</div>
+                      <div className="font-mono text-[9px] text-[var(--color-text-secondary)] bg-[var(--color-bg-tertiary)] p-1 rounded max-h-16 overflow-y-auto break-all">
+                        {result.handshake.evidence.detail ||
+                          result.handshake.evidence.transport ||
+                          JSON.stringify(result.handshake.evidence)}
+                      </div>
+                    </div>
+                  )}
+                  {result.handshake.error && (
+                    <div className="text-[10px] text-[var(--color-danger)] pt-0.5">
+                      {result.handshake.error}
+                    </div>
+                  )}
+                </div>
+              </DiagnosticBox>
+            )}
+
+            {/* Fresh Egress Verification Block */}
+            {result.egress && (
+              <DiagnosticBox
+                icon={<ArrowRightLeft size={12} />}
+                title="Свежий Egress (Выходной IP)"
+                status={result.egress.status}
+                durationMs={result.egress.durationMs}
+              >
+                <div className="space-y-1.5 text-[11px]">
+                  <div className="flex justify-between items-center">
+                    <span className="text-[var(--color-text-secondary)]">Egress IPv4 / IPv6:</span>
+                    <span className="font-mono font-bold text-[var(--color-accent)]">
+                      {result.egress.exitIpv4 || result.egress.exitIpv6 || 'Не определён'}
+                    </span>
+                  </div>
+                  {result.egress.country && (
+                    <div className="flex justify-between">
+                      <span className="text-[var(--color-text-secondary)]">Страна выхода:</span>
+                      <span>{result.egress.country}</span>
+                    </div>
+                  )}
+                  <div className="flex justify-between items-center pt-0.5">
+                    <span className="text-[var(--color-text-secondary)]">Сравнение с Endpoint:</span>
+                    <MacBadge
+                      variant={result.egress.matchesEndpoint ? 'success' : 'neutral'}
+                      className="text-[10px]"
+                    >
+                      {result.egress.matchesEndpoint ? 'Совпадает с Endpoint' : 'Отличается (Dual-hop/NAT)'}
+                    </MacBadge>
+                  </div>
+                  {result.egress.underlayPath === 'direct' && (
+                    <div className="p-1.5 rounded bg-amber-500/10 border border-amber-500/30 text-amber-400 text-[10px] flex items-center gap-1.5">
+                      <AlertTriangle size={12} className="shrink-0" />
+                      <span>Direct Underlay: выходной IP совпадает с прямым подключением!</span>
+                    </div>
+                  )}
+                  {result.egress.reflectors && result.egress.reflectors.length > 0 && (
+                    <div className="pt-1">
+                      <div className="text-[10px] text-[var(--color-text-secondary)] mb-0.5">Независимые рефлекторы:</div>
+                      <div className="space-y-0.5 bg-[var(--color-bg-tertiary)] p-1 rounded font-mono text-[9px]">
+                        {result.egress.reflectors.map((r, i) => (
+                          <div key={i} className="flex justify-between">
+                            <span className="text-[var(--color-text-secondary)]">{r.source}:</span>
+                            <span>{r.ip || r.error || 'нет данных'} {r.country ? `(${r.country})` : ''}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {result.egress.error && (
+                    <div className="text-[10px] text-[var(--color-danger)] pt-0.5">
+                      {result.egress.error}
+                    </div>
+                  )}
+                </div>
+              </DiagnosticBox>
+            )}
+
+            {/* Windows Path Routing Block */}
+            {result.pathDiagnostics && (
+              <DiagnosticBox
+                icon={<Compass size={12} />}
+                title="Маршрутизация Windows"
+                status={result.pathDiagnostics.status}
+                durationMs={result.pathDiagnostics.durationMs}
+              >
+                <div className="space-y-1.5 text-[11px]">
+                  <div className="flex justify-between items-center">
+                    <span className="text-[var(--color-text-secondary)]">Интерфейс:</span>
+                    <span className="font-mono font-medium truncate max-w-[160px]" title={result.pathDiagnostics.activeInterfaceAlias}>
+                      {result.pathDiagnostics.activeInterfaceAlias || `Index ${result.pathDiagnostics.activeInterfaceIndex ?? '—'}`}
+                    </span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-[var(--color-text-secondary)]">Тип маршрута:</span>
+                    <MacBadge
+                      variant={result.pathDiagnostics.isTunInterface ? 'info' : 'neutral'}
+                      className="text-[10px]"
+                    >
+                      {result.pathDiagnostics.isTunInterface ? 'TUN интерфейс' : 'Прямой маршрут (Direct)'}
+                    </MacBadge>
+                  </div>
+                  {result.pathDiagnostics.nextHop && (
+                    <div className="flex justify-between">
+                      <span className="text-[var(--color-text-secondary)]">Шлюз (NextHop):</span>
+                      <span className="font-mono text-[10px]">{result.pathDiagnostics.nextHop}</span>
+                    </div>
+                  )}
+                  {result.pathDiagnostics.activeLocalIp && (
+                    <div className="flex justify-between">
+                      <span className="text-[var(--color-text-secondary)]">Локальный IP:</span>
+                      <span className="font-mono text-[10px]">{result.pathDiagnostics.activeLocalIp}</span>
+                    </div>
+                  )}
+                  {result.pathDiagnostics.error && (
+                    <div className="text-[10px] text-[var(--color-warning)] pt-0.5">
+                      {result.pathDiagnostics.error}
+                    </div>
+                  )}
+                </div>
+              </DiagnosticBox>
+            )}
+
+            {/* PMTU Discovery Block */}
+            {result.pmtu && (
+              <DiagnosticBox
+                icon={<Gauge size={12} />}
+                title="PMTU и фрагментация"
+                status={result.pmtu.status}
+                durationMs={result.pmtu.durationMs}
+              >
+                <div className="space-y-1.5 text-[11px]">
+                  <div className="flex justify-between items-center">
+                    <span className="text-[var(--color-text-secondary)]">Оптимальный MTU:</span>
+                    <span className="font-mono font-bold text-[var(--color-accent)] text-xs">
+                      {result.pmtu.pmtu ? `${result.pmtu.pmtu} B` : 'Не определён'}
+                    </span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-[var(--color-text-secondary)]">Метод:</span>
+                    <MacBadge variant="neutral" className="text-[10px]">
+                      {result.pmtu.method === 'icmp-df'
+                        ? 'ICMP DF ladder (пинг)'
+                        : result.pmtu.method === 'interface-nlmtu'
+                          ? 'MTU интерфейса'
+                          : result.pmtu.method}
+                    </MacBadge>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-[var(--color-text-secondary)]">Статус PMTU:</span>
+                    <MacBadge
+                      variant={
+                        result.pmtu.status === 'ok'
+                          ? 'success'
+                          : result.pmtu.status === 'lower_bound'
+                            ? 'warning'
+                            : 'danger'
+                      }
+                      className="text-[10px]"
+                    >
+                      {result.pmtu.status === 'ok'
+                        ? 'Стабильно'
+                        : result.pmtu.status === 'lower_bound'
+                          ? 'Пониженный MTU'
+                          : result.pmtu.status === 'blackhole_suspected'
+                            ? 'Подозрение на Blackhole'
+                            : result.pmtu.status === 'icmp_blocked'
+                              ? 'ICMP заблокирован'
+                              : 'Ошибка зондирования'}
+                    </MacBadge>
+                  </div>
+                  {result.pmtu.detail && (
+                    <div className="text-[10px] text-[var(--color-text-secondary)] pt-0.5">
+                      {result.pmtu.detail}
+                    </div>
+                  )}
+                  {result.pmtu.error && (
+                    <div className="text-[10px] text-[var(--color-danger)] pt-0.5">
+                      {result.pmtu.error}
+                    </div>
+                  )}
+                </div>
+              </DiagnosticBox>
+            )}
           </div>
         </div>
       )}
@@ -771,7 +1106,7 @@ function DiagnosticBox({
 }: {
   icon: React.ReactNode
   title: string
-  status?: LiveCheckStatus
+  status?: string
   durationMs?: number
   children: React.ReactNode
 }) {
@@ -827,13 +1162,13 @@ function FindingCard({ finding }: { finding: LiveCheckFinding }) {
   )
 }
 
-function StatusDot({ status }: { status: LiveCheckStatus }) {
+function StatusDot({ status }: { status: string }) {
   const colorClass =
     status === 'ok'
       ? 'bg-[var(--color-success)]'
-      : status === 'error'
+      : status === 'error' || status === 'auth_failed' || status === 'blackhole_suspected'
         ? 'bg-[var(--color-danger)]'
-        : status === 'skipped'
+        : status === 'skipped' || status === 'unsupported'
           ? 'bg-[var(--color-text-secondary)]'
           : 'bg-[var(--color-warning)]'
 

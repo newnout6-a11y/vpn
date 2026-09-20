@@ -39,6 +39,32 @@ export function sanitizeLiveCheckForStorage(check: LiveServerCheck): LiveServerC
     }
   }
 
+  // Clean evidence in handshake
+  if (sanitized.handshake?.evidence) {
+    for (const key of Object.keys(sanitized.handshake.evidence)) {
+      const lower = key.toLowerCase()
+      if (
+        lower.includes('uuid') ||
+        lower.includes('secret') ||
+        lower.includes('password') ||
+        lower.includes('key') ||
+        lower.includes('shortid') ||
+        lower.includes('token') ||
+        lower.includes('uri')
+      ) {
+        delete (sanitized.handshake.evidence as any)[key]
+      }
+    }
+  }
+
+  const UUID_REGEX = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi
+  if (sanitized.handshake?.error) {
+    sanitized.handshake.error = sanitized.handshake.error.replace(UUID_REGEX, '[REDACTED_UUID]')
+  }
+  if (sanitized.handshake?.evidence?.detail) {
+    sanitized.handshake.evidence.detail = sanitized.handshake.evidence.detail.replace(UUID_REGEX, '[REDACTED_UUID]')
+  }
+
   return sanitized
 }
 
@@ -233,6 +259,18 @@ export function computeHistoryDiff(
 
   const portsChanged = closedPorts.length > 0 || newOpenPorts.length > 0
 
+  const prevHandshake = previous.handshake?.status
+  const currHandshake = current.handshake?.status
+  const handshakeChanged = Boolean(prevHandshake && currHandshake && prevHandshake !== currHandshake)
+
+  const prevExit = previous.egress?.exitIpv4
+  const currExit = current.egress?.exitIpv4
+  const egressChanged = Boolean(prevExit && currExit && prevExit !== currExit)
+
+  const prevPmtu = previous.pmtu?.pmtu
+  const currPmtu = current.pmtu?.pmtu
+  const pmtuChanged = Boolean(prevPmtu && currPmtu && prevPmtu !== currPmtu)
+
   return {
     previousStartedAt: previous.startedAt,
     ipChanged,
@@ -252,6 +290,15 @@ export function computeHistoryDiff(
     currentAvgLatency: currAvg,
     portsChanged,
     closedPorts,
-    newOpenPorts
+    newOpenPorts,
+    handshakeChanged,
+    previousHandshakeStatus: prevHandshake,
+    currentHandshakeStatus: currHandshake,
+    egressChanged,
+    previousExitIp: prevExit,
+    currentExitIp: currExit,
+    pmtuChanged,
+    previousPmtu: prevPmtu,
+    currentPmtu: currPmtu
   }
 }

@@ -47,25 +47,33 @@ vi.mock('dns', () => {
   } })
   return { promises, default: { promises } }
 })
-vi.mock('tls', async () => {
+vi.mock('tls', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('tls')>()
   const { EventEmitter } = await import('node:events')
+  const connect = (_opts: unknown, callback: Function) => {
+    const socket = Object.assign(new EventEmitter(), {
+      destroy: vi.fn(),
+      getPeerCertificate: () => ({
+        subject: { CN: 'unrelated.example' },
+        subjectaltname: 'DNS:unrelated.example'
+      }),
+      getProtocol: () => 'TLSv1.3',
+      getCipher: () => ({ name: 'test' }),
+      authorized: false,
+      authorizationError: 'DEPTH_ZERO_SELF_SIGNED_CERT',
+      alpnProtocol: 'h2'
+    })
+    queueMicrotask(() => callback())
+    return socket
+  }
   return {
+    ...actual,
     checkServerIdentity: mocks.identity,
-    connect: (_opts: unknown, callback: Function) => {
-      const socket = Object.assign(new EventEmitter(), {
-        destroy: vi.fn(),
-        getPeerCertificate: () => ({
-          subject: { CN: 'unrelated.example' },
-          subjectaltname: 'DNS:unrelated.example'
-        }),
-        getProtocol: () => 'TLSv1.3',
-        getCipher: () => ({ name: 'test' }),
-        authorized: false,
-        authorizationError: 'DEPTH_ZERO_SELF_SIGNED_CERT',
-        alpnProtocol: 'h2'
-      })
-      queueMicrotask(() => callback())
-      return socket
+    connect,
+    default: {
+      ...actual,
+      checkServerIdentity: mocks.identity,
+      connect
     }
   }
 })
@@ -162,7 +170,8 @@ describe('Live Server Audit Regressions: Defect Verifications', () => {
   })
 })
 
-vi.mock('child_process', async () => {
+vi.mock('child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('child_process')>()
   const { EventEmitter } = await import('node:events')
   const spawn = () => {
     const child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), kill: vi.fn() })
@@ -172,7 +181,7 @@ vi.mock('child_process', async () => {
     })
     return child
   }
-  return { spawn, default: { spawn } }
+  return { ...actual, spawn, default: { ...actual, spawn } }
 })
 import { probeHttp, probeRoute } from './liveServerProbe'
 import * as localHttp from 'node:http'

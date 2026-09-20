@@ -5,6 +5,7 @@ import type {
   ExternalProxyStartOptions,
   ExternalProxyStatus,
   ExternalProxyProfileRow,
+  LiveCheckProgress,
   LiveServerCheck,
   LiveServerCheckOptions
 } from '../shared/ipc-types'
@@ -137,6 +138,7 @@ export interface ElectronAPI {
   serverLiveCheck: (options: LiveServerCheckOptions) => Promise<LiveServerCheck>
   serverLiveCheckCancel: (requestId?: string) => Promise<{ cancelled: boolean; reason?: string }>
   serverLiveCheckHistory: (filter?: { profileId?: string; host?: string }) => Promise<LiveServerCheck[]>
+  onLiveCheckProgress: (callback: (progress: LiveCheckProgress) => void) => () => void
   urlAvailabilityCheck: (url: string) => Promise<any>
   urlAvailabilityHistory: () => Promise<any[]>
   urlAvailabilityClearHistory: () => Promise<void>
@@ -481,6 +483,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('server:live-check-cancel', assertOptionalString(requestId, 'requestId')),
   serverLiveCheckHistory: (filter?: { profileId?: string; host?: string }) =>
     ipcRenderer.invoke('server:live-check-history', assertOptionalPlainObject(filter, 'filter')),
+  onLiveCheckProgress: (callback: (progress: LiveCheckProgress) => void) => {
+    const handler = (_event: any, data: LiveCheckProgress) => callback(data)
+    ipcRenderer.on('server:live-check-progress', handler)
+    return () => ipcRenderer.removeListener('server:live-check-progress', handler)
+  },
   // URL Availability — paste a link, get verdict + diagnostics for both
   // the tunnel path and the direct path (clash-direct-out when VPN is on).
   urlAvailabilityCheck: (url: string) => ipcRenderer.invoke('url-availability:check', assertString(url, 'url', MAX_VPN_INPUT_CHARS)),

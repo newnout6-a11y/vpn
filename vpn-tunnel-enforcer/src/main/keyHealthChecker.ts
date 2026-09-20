@@ -135,7 +135,7 @@ function shouldProbeViaTunnel(): { host: string; port: number } | null {
   }
 }
 
-async function openTcpDirect(host: string, port: number, timeoutMs: number): Promise<Socket> {
+export async function openTcpDirect(host: string, port: number, timeoutMs: number): Promise<Socket> {
   return new Promise<Socket>((resolve, reject) => {
     const socket = new Socket()
     let settled = false
@@ -193,9 +193,9 @@ export async function openTcpViaSocks(socks: { host: string; port: number }, hos
   })
 }
 
-async function verifyHttpsThroughSocket(
+export async function verifyHttpsThroughSocket(
   socket: Socket,
-  destination: (typeof KEY_PROBE_DESTINATIONS)[number],
+  destination: (typeof KEY_PROBE_DESTINATIONS)[number] | { host: string; port: number; serverName: string; path: string },
   timeoutMs: number
 ): Promise<{ egressIp?: string; country?: string }> {
   return new Promise<{ egressIp?: string; country?: string }>((resolve, reject) => {
@@ -283,11 +283,11 @@ export function classifyOutboundProbeFailure(protocol: string, logText: string, 
   if (/unknown field|decode config|parse config|invalid config|unsupported|missing required|check outbound/.test(text)) {
     return 'config-failed'
   }
-  if (/auth|authentication|unauthori[sz]ed|bad key|wrong (?:uuid|password)|permission denied/.test(text)) {
-    return 'auth-failed'
-  }
   if (/tls|certificate|x509|server name|sni|reality verification|reality.*invalid connection|bad reality/.test(text)) {
     return 'tls-failed'
+  }
+  if (/\bauth\b|authentication|\bunauthori[sz]ed\b|bad key|wrong (?:uuid|password)|permission denied/.test(text)) {
+    return 'auth-failed'
   }
   if (/timeout|deadline exceeded|i\/o timeout|network is unreachable|host unreachable|operation timed out|connection refused/.test(text)) {
     return 'timeout'
@@ -295,7 +295,7 @@ export function classifyOutboundProbeFailure(protocol: string, logText: string, 
   return 'handshake-failed'
 }
 
-async function waitForLocalSocks(port: number, timeoutMs: number): Promise<void> {
+export async function waitForLocalSocks(port: number, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs
   let lastError: unknown = null
   while (Date.now() < deadline) {
