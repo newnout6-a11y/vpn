@@ -231,7 +231,29 @@ export function ServerDetailModal({ open, profile, onClose, onProfileUpdated }: 
       // Geo info (best effort). Skipped when the privacy setting is ON so
       // opening server details cannot send the VPN/server IP to ipapi.co.
       fetch(`https://ipapi.co/${host}/json/`, { method: 'GET' })
-        .then(r => (r.ok ? r.json() : null))
+        .then(async r => {
+          if (r.ok) {
+            const data = await r.json().catch(() => null)
+            if (data && !data.error) return data
+          }
+          // Fallback to ipwho.is if ipapi.co rate limits (429) or errors
+          const alt = await fetch(`https://ipwho.is/${encodeURIComponent(host)}`)
+            .then(res => (res.ok ? res.json() : null))
+            .catch(() => null)
+          if (alt && alt.success !== false) {
+            return {
+              ip: alt.ip || host,
+              country_name: alt.country,
+              city: alt.city,
+              region: alt.region,
+              org: alt.connection?.isp || alt.connection?.org,
+              latitude: alt.latitude,
+              longitude: alt.longitude,
+              timezone: alt.timezone?.id
+            }
+          }
+          return null
+        })
         .then(data => {
           if (cancelled) return
           if (data && !data.error) {

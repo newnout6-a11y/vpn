@@ -148,21 +148,37 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
     let cancelled = false
     const controller = new AbortController()
     ;(async () => {
+      let country: string | null = null
+      let city: string | null = null
       try {
         const resp = await fetch(`https://ipapi.co/${publicIp}/json/`, { signal: controller.signal })
-        if (!resp.ok) return
-        const data = await resp.json()
-        if (!cancelled && data && !data.error) {
-          setIpGeo({
-            country: data.country_name || null,
-            city: data.city || null
-          })
-          if (data.country_name) {
-            window.electronAPI.serversVerifyActiveCountry(publicIp).catch(() => undefined)
+        if (resp.ok) {
+          const data = await resp.json().catch(() => null)
+          if (data && !data.error) {
+            country = data.country_name || null
+            city = data.city || null
           }
         }
-      } catch {
-        // silent — chip will just show IP without country
+      } catch {}
+
+      if (!country && !controller.signal.aborted) {
+        try {
+          const alt = await fetch(`https://ipwho.is/${encodeURIComponent(publicIp)}`, { signal: controller.signal })
+          if (alt.ok) {
+            const data = await alt.json().catch(() => null)
+            if (data && data.success !== false) {
+              country = data.country || null
+              city = data.city || null
+            }
+          }
+        } catch {}
+      }
+
+      if (!cancelled && (country || city)) {
+        setIpGeo({ country, city })
+        if (country) {
+          window.electronAPI.serversVerifyActiveCountry(publicIp).catch(() => undefined)
+        }
       }
     })()
     return () => {

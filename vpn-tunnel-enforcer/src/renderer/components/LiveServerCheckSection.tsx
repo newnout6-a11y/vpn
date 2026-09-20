@@ -29,6 +29,7 @@ import type {
   LiveCheckStatus,
   LiveServerCheck
 } from '../../shared/ipc-types'
+import { sanitizeHopLine, formatInfrastructureError } from '../../shared/hopFormatting'
 
 interface LiveServerCheckSectionProps {
   profileId?: string
@@ -157,7 +158,8 @@ export function LiveServerCheckSection({
       }
     } catch (err: any) {
       if (generationRef.current === checkGen) {
-        setError(err?.message || t('liveCheck.error', 'Ошибка при выполнении проверки'))
+        const rawErr = err?.message || t('liveCheck.error', 'Ошибка при выполнении проверки')
+        setError(formatInfrastructureError(rawErr))
       }
     } finally {
       if (generationRef.current === checkGen) {
@@ -199,7 +201,16 @@ export function LiveServerCheckSection({
           className="flex items-center gap-2 p-2.5 mb-3 rounded-[var(--radius-sm)] bg-amber-500/10 border border-amber-500/30 text-amber-400 text-xs"
         >
           <AlertTriangle size={14} className="shrink-0" />
-          <span>{result.infrastructure.error}</span>
+          <span>{formatInfrastructureError(result.infrastructure.error)}</span>
+        </div>
+      )}
+      {error && error !== 'Не удалось загрузить историю проверок' && (
+        <div
+          role="alert"
+          className="flex items-center gap-2 p-2.5 mb-3 rounded-[var(--radius-sm)] bg-amber-500/10 border border-amber-500/30 text-amber-400 text-xs"
+        >
+          <AlertCircle size={14} className="shrink-0" />
+          <span>{error}</span>
         </div>
       )}
       {error === 'Не удалось загрузить историю проверок' && (
@@ -825,7 +836,7 @@ export function LiveServerCheckSection({
                       <div className="bg-[var(--color-bg-tertiary)] p-1 rounded font-mono text-[9px] max-h-20 overflow-y-auto space-y-0.5">
                         {result.route.hopDetails.map((h, i) => (
                           <div key={i} className="truncate">
-                            {typeof h === 'string' ? h : String(h)}
+                            {sanitizeHopLine(typeof h === 'string' ? h : String(h))}
                           </div>
                         ))}
                       </div>

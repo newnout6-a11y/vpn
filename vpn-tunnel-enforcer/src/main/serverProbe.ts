@@ -160,7 +160,7 @@ async function reverseDnsLookup(ip: string): Promise<string | null> {
   return names.length > 0 ? names[0] : null
 }
 
-// Get ASN info from ipapi.co (free, no auth)
+// Get ASN info from ipapi.co with ipwho.is fallback
 async function getAsnInfo(ip: string): Promise<AsnInfo | null> {
   try {
     const resp = await axios.get(`https://ipapi.co/${ip}/json/`, { timeout: 6000 })
@@ -170,6 +170,21 @@ async function getAsnInfo(ip: string): Promise<AsnInfo | null> {
         org: resp.data.org || 'unknown',
         network: resp.data.network || '',
         country: resp.data.country_name || resp.data.country || ''
+      }
+    }
+  } catch {}
+  try {
+    const fb = await axios.get(`https://ipwho.is/${encodeURIComponent(ip)}`, { timeout: 6000 })
+    if (fb.data && fb.data.success !== false) {
+      const d = fb.data
+      const rawAsn = d.connection?.asn
+        ? (String(d.connection.asn).startsWith('AS') ? String(d.connection.asn) : `AS${d.connection.asn}`)
+        : 'unknown'
+      return {
+        asn: rawAsn,
+        org: d.connection?.isp || d.connection?.org || 'unknown',
+        network: '',
+        country: d.country || ''
       }
     }
   } catch {}

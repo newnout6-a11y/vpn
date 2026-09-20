@@ -177,3 +177,57 @@ it('Second review: failed history load for B clears A and offers retry', async (
   expect(screen.queryByTitle('История проверок')).not.toBeInTheDocument()
   expect(screen.getByText('Повторить загрузку истории')).toBeInTheDocument()
 })
+
+it('sanitizes traceroute hops with OEM replacement characters to standard ms in UI', async () => {
+  const checkWithCorruptedHops = makeMockCheck('uuid-corrupt-hops', '13.143.252.2', {
+    route: {
+      status: 'ok',
+      durationMs: 36,
+      hops: 1,
+      reachedTarget: true,
+      hopDetails: [
+        '1  <1 \uFFFD\uFFFD  <1 \uFFFD\uFFFD  <1 \uFFFD\uFFFD  13.143.252.2'
+      ]
+    }
+  })
+
+  ;(window as any).electronAPI = {
+    serverLiveCheckHistory: vi.fn().mockResolvedValue([checkWithCorruptedHops]),
+    serverLiveCheck: vi.fn().mockResolvedValue(checkWithCorruptedHops),
+    serverLiveCheckCancel: vi.fn()
+  }
+
+  render(<LiveServerCheckSection profileId="p-corrupt" host="corrupt.test" port={443} />)
+  await screen.findByText('13.143.252.2')
+
+  // The hop must be sanitized without replacement character diamonds
+  expect(screen.getByText('1 <1 ms <1 ms <1 ms 13.143.252.2')).toBeInTheDocument()
+  expect(screen.queryByText(/\uFFFD/)).not.toBeInTheDocument()
+})
+
+it('formats raw 429 status error into user-friendly localized message in UI banner', async () => {
+  const checkWith429 = makeMockCheck('uuid-429', '13.143.252.2', {
+    infrastructure: {
+      status: 'error',
+      error: 'Request failed with status code 429',
+      endpointCountry: 'Japan'
+    }
+  })
+
+  ;(window as any).electronAPI = {
+    serverLiveCheckHistory: vi.fn().mockResolvedValue([checkWith429]),
+    serverLiveCheck: vi.fn().mockResolvedValue(checkWith429),
+    serverLiveCheckCancel: vi.fn()
+  }
+
+  render(<LiveServerCheckSection profileId="p-429" host="rate-limited.test" port={443} />)
+  await screen.findByText('13.143.252.2')
+
+  // The raw 429 message must NOT appear
+  expect(screen.queryByText('Request failed with status code 429')).not.toBeInTheDocument()
+  // The clean localized banner MUST appear
+  expect(
+    screen.getByText('Превышен лимит запросов к сервису геолокации (429). Повторите попытку позже.')
+  ).toBeInTheDocument()
+})
+

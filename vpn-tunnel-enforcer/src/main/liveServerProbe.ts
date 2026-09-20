@@ -34,6 +34,7 @@ import {
 } from './managedChildProcess'
 import { Address6 } from 'ip-address'
 import { normalizeServerPort } from '../shared/portValidation'
+import { sanitizeHopLine, formatInfrastructureError } from '../shared/hopFormatting'
 import {
   liveServerHistory,
   computeHistoryDiff,
@@ -1105,7 +1106,8 @@ export async function probeRoute(targetIp: string, signal?: AbortSignal): Promis
   }
 
   return new Promise<RouteDiagnostics>(resolve => {
-    let output = ''
+    const chunks: Buffer[] = []
+    let totalBytes = 0
     let finished = false
     let child: ReturnType<typeof spawn> | undefined
     let timer: ReturnType<typeof setTimeout> | undefined
@@ -1115,7 +1117,33 @@ export async function probeRoute(targetIp: string, signal?: AbortSignal): Promis
       finished = true
       clearTimeout(timer)
       signal?.removeEventListener('abort', abort)
-      const lines = output.split(/\r?\n/).filter(line => /^\s*\d+\s+/.test(line)).map(line => line.trim()).slice(0, 8)
+
+      const rawBuffer = Buffer.concat(chunks)
+      let output = ''
+      try {
+        const utf8 = rawBuffer.toString('utf8')
+        if (!utf8.includes('\uFFFD')) {
+          output = utf8
+        } else {
+          // On Russian Windows, tracert console output uses OEM 866 (ibm866)
+          const ibm866 = new TextDecoder('ibm866').decode(rawBuffer)
+          if (!ibm866.includes('\uFFFD')) {
+            output = ibm866
+          } else {
+            output = new TextDecoder('windows-1251').decode(rawBuffer)
+          }
+        }
+      } catch {
+        output = rawBuffer.toString('utf8')
+      }
+
+      const lines = output
+        .split(/\r?\n/)
+        .filter(line => /^\s*\d+\s+/.test(line))
+        .map(line => sanitizeHopLine(line))
+        .filter(Boolean)
+        .slice(0, 8)
+
       const reachedTarget = lines.some(line => line.split(/\s+/).some(token => {
         const ip = token.replace(/^\[|\]$/g, '')
         return net.isIP(ip) !== 0 && canonical(ip) === canonical(targetIp)
@@ -1128,7 +1156,13 @@ export async function probeRoute(targetIp: string, signal?: AbortSignal): Promis
     const abort = () => finish('skipped', 'Cancelled')
     try {
       child = spawn('tracert', ['-d', '-h', '8', '-w', '400', targetIp], { windowsHide: true })
-      child.stdout?.on('data', data => { output = (output + data.toString()).slice(0, 65536) })
+      child.stdout?.on('data', data => {
+        const buf = Buffer.isBuffer(data) ? data : Buffer.from(data)
+        if (totalBytes < 65536) {
+          chunks.push(buf)
+          totalBytes += buf.length
+        }
+      })
       child.on('close', code => finish(code === 0 ? 'ok' : 'error', code === 0 ? undefined : 'Traceroute execution error', true))
       child.on('error', err => finish('error', err.message))
       timer = setTimeout(() => finish('unavailable', 'Traceroute timed out'), LIVE_PROBE_THRESHOLDS.TRACEROUTE_TIMEOUT_MS)
@@ -1171,8 +1205,39 @@ export async function probeInfrastructure(
             country: resp.data.country_name || resp.data.country || ''
           }
           asnCache.set(primaryIp, { data: asnInfo, expiresAt: Date.now() + 10 * 60 * 1000 })
+        } else if (resp.data?.error) {
+          throw new Error(resp.data?.reason || resp.data?.message || 'Geo lookup error')
         }
-      } catch (err: any) { infrastructureError = err?.message || 'ASN lookup failed' }
+      } catch (err: any) {
+        // Fallback to secondary HTTPS provider (ipwho.is) on rate limiting or lookup failure
+        if (!signal?.aborted) {
+          try {
+            const fbResp = await axios.get(`https://ipwho.is/${encodeURIComponent(primaryIp)}`, {
+              timeout: 4000,
+              signal
+            })
+            if (fbResp.data && fbResp.data.success !== false) {
+              const d = fbResp.data
+              const rawAsn = d.connection?.asn
+                ? (String(d.connection.asn).startsWith('AS') ? String(d.connection.asn) : `AS${d.connection.asn}`)
+                : 'unknown'
+              asnInfo = {
+                asn: rawAsn,
+                org: d.connection?.isp || d.connection?.org || 'unknown',
+                network: '',
+                country: d.country || ''
+              }
+              asnCache.set(primaryIp, { data: asnInfo, expiresAt: Date.now() + 10 * 60 * 1000 })
+            } else {
+              infrastructureError = formatInfrastructureError(fbResp.data?.message || err?.message || 'ASN lookup failed')
+            }
+          } catch (fbErr: any) {
+            infrastructureError = formatInfrastructureError(fbErr?.message || err?.message || 'ASN lookup failed')
+          }
+        } else {
+          infrastructureError = 'Cancelled'
+        }
+      }
     }
   }
 
