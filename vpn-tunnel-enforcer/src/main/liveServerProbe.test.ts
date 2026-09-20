@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach, afterAll } from 'vitest'
+import { describe, expect, it, vi, beforeEach, afterEach, afterAll } from 'vitest'
 import * as http from 'http'
 import * as net from 'net'
 import * as dns from 'dns'
@@ -298,11 +298,11 @@ describe('liveServerProbe', () => {
   describe('evaluateLiveCheckFindings', () => {
     it('evaluates DNS findings: MULTI_IP and DNS_CHANGED', () => {
       const prev = {
-        dns: { status: 'ok', durationMs: 10, a: ['1.1.1.1'], aaaa: [], cnameChain: [] }
-      } as LiveServerCheck
+        dns: { status: 'ok' as const, durationMs: 10, a: ['1.1.1.1'], aaaa: [], cnameChain: [] }
+      } as unknown as LiveServerCheck
 
       const current = {
-        dns: { status: 'ok', durationMs: 10, a: ['2.2.2.2', '3.3.3.3'], aaaa: [], cnameChain: [] },
+        dns: { status: 'ok' as const, durationMs: 10, a: ['2.2.2.2', '3.3.3.3'], aaaa: [], cnameChain: [] },
         host: 'example.com'
       }
 
@@ -385,6 +385,7 @@ describe('liveServerProbe', () => {
           status: 'ok',
           endpointCountry: 'Germany',
           egressCountry: 'Netherlands',
+          activeTunnelMatchesProfile: true,
           sharedCidrWithProfiles: ['Profile 1', 'Profile 2']
         }
       } as Partial<LiveServerCheck>
@@ -395,6 +396,21 @@ describe('liveServerProbe', () => {
       expect(codes).toContain('ASN_CHANGED')
       expect(codes).toContain('EGRESS_COUNTRY_MISMATCH')
       expect(codes).toContain('CIDR_SHARED_WITH_PROFILE')
+    })
+
+    it('does not evaluate EGRESS_COUNTRY_MISMATCH if active tunnel does not match profile', () => {
+      const current = {
+        infrastructure: {
+          status: 'ok',
+          endpointCountry: 'Germany',
+          egressCountry: 'Netherlands',
+          activeTunnelMatchesProfile: false
+        }
+      } as Partial<LiveServerCheck>
+
+      const findings = evaluateLiveCheckFindings(current)
+      const codes = findings.map((f) => f.code)
+      expect(codes).not.toContain('EGRESS_COUNTRY_MISMATCH')
     })
   })
 })

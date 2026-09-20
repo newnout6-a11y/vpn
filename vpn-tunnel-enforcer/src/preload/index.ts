@@ -135,7 +135,7 @@ export interface ElectronAPI {
   >
   serverProbe: (host: string, knownPort?: number) => Promise<any>
   serverLiveCheck: (options: LiveServerCheckOptions) => Promise<LiveServerCheck>
-  serverLiveCheckCancel: (checkId?: string) => Promise<{ cancelled: boolean }>
+  serverLiveCheckCancel: (requestId?: string) => Promise<{ cancelled: boolean; reason?: string }>
   serverLiveCheckHistory: (filter?: { profileId?: string; host?: string }) => Promise<LiveServerCheck[]>
   urlAvailabilityCheck: (url: string) => Promise<any>
   urlAvailabilityHistory: () => Promise<any[]>
@@ -378,6 +378,7 @@ function assertLiveCheckOptions(value: unknown): LiveServerCheckOptions {
   const options = assertPlainObject<Record<string, unknown>>(value, 'options')
   const mode = options.mode !== undefined ? assertEnum(options.mode, ['basic', 'extended'] as const, 'options.mode') : undefined
   return {
+    requestId: assertOptionalString(options.requestId, 'options.requestId'),
     profileId: assertOptionalString(options.profileId, 'options.profileId'),
     host: assertOptionalString(options.host, 'options.host'),
     port: assertPort(options.port, 'options.port'),
@@ -476,8 +477,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   serverProbe: (host: string, knownPort?: number) => ipcRenderer.invoke('server:probe', assertString(host, 'host'), assertPort(knownPort, 'knownPort')),
   serverLiveCheck: (options: LiveServerCheckOptions) =>
     ipcRenderer.invoke('server:live-check', assertLiveCheckOptions(options)),
-  serverLiveCheckCancel: (checkId?: string) =>
-    ipcRenderer.invoke('server:live-check-cancel', assertOptionalString(checkId, 'checkId')),
+  serverLiveCheckCancel: (requestId?: string) =>
+    ipcRenderer.invoke('server:live-check-cancel', assertOptionalString(requestId, 'requestId')),
   serverLiveCheckHistory: (filter?: { profileId?: string; host?: string }) =>
     ipcRenderer.invoke('server:live-check-history', assertOptionalPlainObject(filter, 'filter')),
   // URL Availability — paste a link, get verdict + diagnostics for both

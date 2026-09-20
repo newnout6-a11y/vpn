@@ -1,11 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Activity,
   Play,
   Square,
-  Clock,
   Shield,
   Lock,
   Globe,
@@ -14,10 +13,8 @@ import {
   AlertTriangle,
   AlertCircle,
   Info,
-  CheckCircle2,
-  ChevronDown,
-  ChevronRight,
-  History
+  History,
+  Route as RouteIcon
 } from 'lucide-react'
 import { MacButton, MacCard, MacBadge } from '../design-system'
 import type {
@@ -45,48 +42,95 @@ export function LiveServerCheckSection({
   const [history, setHistory] = useState<LiveServerCheck[]>([])
   const [showHistory, setShowHistory] = useState(false)
 
-  // Load history on mount or target change
+  const currentRequestIdRef = useRef<string | null>(null)
+  const generationRef = useRef<number>(0)
+
+  // Target change or unmount cleanup
   useEffect(() => {
+    // Cancel in-flight check if target changed
+    if (currentRequestIdRef.current) {
+      window.electronAPI?.serverLiveCheckCancel?.(currentRequestIdRef.current).catch(() => {})
+      currentRequestIdRef.current = null
+    }
+
+    const currentGen = ++generationRef.current
+    setRunning(false)
+    setResult(null)
+    setError(null)
+
     if (!profileId && !host) return
+
     window.electronAPI
       ?.serverLiveCheckHistory?.({ profileId, host })
       .then((items) => {
+        if (generationRef.current !== currentGen) return
         if (Array.isArray(items)) {
           setHistory(items)
-          if (items.length > 0 && !result) {
+          if (items.length > 0) {
             setResult(items[0])
           }
         }
       })
       .catch(() => {})
+
+    return () => {
+      if (currentRequestIdRef.current) {
+        window.electronAPI?.serverLiveCheckCancel?.(currentRequestIdRef.current).catch(() => {})
+        currentRequestIdRef.current = null
+      }
+    }
   }, [profileId, host])
 
   const handleStartCheck = async () => {
     if (running || (!host && !profileId)) return
+
+    const requestId = `req-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
+    currentRequestIdRef.current = requestId
+    const checkGen = ++generationRef.current
+
     setRunning(true)
     setError(null)
 
     try {
       const checkResult = await window.electronAPI.serverLiveCheck({
+        requestId,
         profileId,
         host,
         port,
         mode
       })
-      setResult(checkResult)
-      setHistory((prev) => [checkResult, ...prev.filter((c) => c.id !== checkResult.id)])
+
+      // Generation and requestId guard: ignore if stale or cancelled
+      if (generationRef.current === checkGen && currentRequestIdRef.current === requestId) {
+        setResult(checkResult)
+        setHistory((prev) => [
+          checkResult,
+          ...prev.filter((c) => c.id !== checkResult.id)
+        ].slice(0, 20))
+      }
     } catch (err: any) {
-      setError(err?.message || t('liveCheck.error', 'Ошибка при выполнении проверки'))
+      if (generationRef.current === checkGen) {
+        setError(err?.message || t('liveCheck.error', 'Ошибка при выполнении проверки'))
+      }
     } finally {
-      setRunning(false)
+      if (generationRef.current === checkGen) {
+        setRunning(false)
+        currentRequestIdRef.current = null
+      }
     }
-  };
+  }
 
   const handleCancel = async () => {
-    try {
-      await window.electronAPI.serverLiveCheckCancel(result?.id)
-    } catch {}
+    const reqToCancel = currentRequestIdRef.current
+    generationRef.current++
+    currentRequestIdRef.current = null
     setRunning(false)
+
+    if (reqToCancel) {
+      try {
+        await window.electronAPI.serverLiveCheckCancel(reqToCancel)
+      } catch {}
+    }
   }
 
   if (!host && !profileId) return null
@@ -194,7 +238,7 @@ export function LiveServerCheckSection({
             <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1">
               {history.map((h, i) => (
                 <div
-                  key={h.id || i}
+                  key={h.id || `${h.startedAt}-${i}`}
                   onClick={() => setResult(h)}
                   className={`p-1.5 rounded cursor-pointer transition-colors flex items-center justify-between text-[11px] ${
                     result?.id === h.id
@@ -375,14 +419,20 @@ export function LiveServerCheckSection({
                     </div>
                   </div>
                   <div className="flex justify-between text-[11px] pt-1">
-                    <span className="text-[var(--color-text-secondary)]">Jitter (флуктуация):</span>
+                    <span className="text-[var(--color-text-secondary)]">Jitter:</span>
                     <span className="font-mono">{result.latency.jitter} ms</span>
                   </div>
                   <div className="flex justify-between text-[11px]">
-                    <span className="text-[var(--color-text-secondary)]">Потери пакетов:</span>
+                    <span className="text-[var(--color-text-secondary)]">Отказы TCP соединений:</span>
                     <span className={`font-mono ${result.latency.loss > 0 ? 'text-[var(--color-danger)]' : 'text-[var(--color-success)]'}`}>
-                      {Math.round(result.latency.loss * 100)}% ({result.latency.samples.length}/{result.latency.samplesAttempted})
+                      {Math.round(result.latency.loss * 100)}% ({result.latency.samplesAttempted !== undefined ? `${result.latency.samplesAttempted - (result.latency.samplesSucceeded ?? result.latency.samples?.length ?? 0)}/${result.latency.samplesAttempted}` : ''})
                     </span>
+                  </div>
+                  <div className="flex justify-between text-[11px]">
+                    <span className="text-[var(--color-text-secondary)]">Путь:</span>
+                    <MacBadge variant="neutral" className="text-[10px]">
+                      {result.latency.pathType === 'tun' ? 'Через активный TUN' : 'Прямой (direct)'}
+                    </MacBadge>
                   </div>
                 </div>
               ) : (
@@ -456,6 +506,14 @@ export function LiveServerCheckSection({
                       </span>
                     </div>
                   )}
+                  {result.tls.authorized !== undefined && !result.tls.authorized && (
+                    <div className="flex justify-between items-center pt-0.5">
+                      <span className="text-[var(--color-text-secondary)]">Цепочка:</span>
+                      <MacBadge variant="warning" className="text-[9px]">
+                        {result.tls.authorizationError || 'Самоподписанный / не доверен'}
+                      </MacBadge>
+                    </div>
+                  )}
                   {result.tls.fingerprint && (
                     <div className="pt-0.5">
                       <div className="text-[10px] text-[var(--color-text-secondary)]">SHA-256 Fingerprint:</div>
@@ -464,6 +522,9 @@ export function LiveServerCheckSection({
                       </div>
                     </div>
                   )}
+                  <div className="text-[9px] text-[var(--color-text-secondary)] pt-1">
+                    * Для Reality TLS-зонд видит маскировочный домен, а не внутренний VPN-бэкенд.
+                  </div>
                 </div>
               </DiagnosticBox>
             )}
@@ -492,6 +553,12 @@ export function LiveServerCheckSection({
                       {result.http.statusCode ? `HTTP ${result.http.statusCode}` : 'Нет ответа'}
                     </MacBadge>
                   </div>
+                  {result.http.targetPort && (
+                    <div className="flex justify-between">
+                      <span className="text-[var(--color-text-secondary)]">Проверенный порт:</span>
+                      <span className="font-mono">{result.http.targetPort} ({result.http.isTls ? 'HTTPS' : 'HTTP'})</span>
+                    </div>
+                  )}
                   {result.http.serverHeader && (
                     <div className="flex justify-between">
                       <span className="text-[var(--color-text-secondary)]">Server:</span>
@@ -545,6 +612,50 @@ export function LiveServerCheckSection({
               </DiagnosticBox>
             )}
 
+            {/* Route Diagnostics Block */}
+            {result.route && (
+              <DiagnosticBox
+                icon={<RouteIcon size={12} />}
+                title="Маршрут до endpoint"
+                status={result.route.status}
+                durationMs={result.route.durationMs}
+              >
+                <div className="space-y-1 text-[11px]">
+                  <div className="flex justify-between items-center">
+                    <span className="text-[var(--color-text-secondary)]">Число хопов:</span>
+                    <span className="font-mono font-bold">
+                      {result.route.hops !== undefined ? result.route.hops : '—'}
+                    </span>
+                  </div>
+                  {result.route.reachedTarget !== undefined && (
+                    <div className="flex justify-between items-center">
+                      <span className="text-[var(--color-text-secondary)]">Достижение цели:</span>
+                      <MacBadge variant={result.route.reachedTarget ? 'success' : 'warning'} className="text-[10px]">
+                        {result.route.reachedTarget ? 'Достигнут' : 'Не завершено'}
+                      </MacBadge>
+                    </div>
+                  )}
+                  {result.route.hopDetails && result.route.hopDetails.length > 0 && (
+                    <div className="pt-1">
+                      <div className="text-[10px] text-[var(--color-text-secondary)] mb-0.5">Хопы трассировки:</div>
+                      <div className="bg-[var(--color-bg-tertiary)] p-1 rounded font-mono text-[9px] max-h-20 overflow-y-auto space-y-0.5">
+                        {result.route.hopDetails.map((h, i) => (
+                          <div key={i} className="truncate">
+                            {typeof h === 'string' ? h : String(h)}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {result.route.error && (
+                    <div className="text-[10px] text-[var(--color-warning)] pt-0.5">
+                      {result.route.error}
+                    </div>
+                  )}
+                </div>
+              </DiagnosticBox>
+            )}
+
             {/* Infrastructure & Diffs Block */}
             <DiagnosticBox
               icon={<Shield size={12} />}
@@ -566,9 +677,9 @@ export function LiveServerCheckSection({
                     <span>{result.infrastructure.endpointCountry}</span>
                   </div>
                 )}
-                {result.infrastructure?.egressCountry && (
+                {result.infrastructure?.activeTunnelMatchesProfile && result.infrastructure?.egressCountry && (
                   <div className="flex justify-between">
-                    <span className="text-[var(--color-text-secondary)]">Страна egress VPN:</span>
+                    <span className="text-[var(--color-text-secondary)]">Страна egress (активный VPN):</span>
                     <span>{result.infrastructure.egressCountry}</span>
                   </div>
                 )}
@@ -587,6 +698,12 @@ export function LiveServerCheckSection({
                     )}
                     {result.infrastructure.changesFromPrevious.asnChanged && (
                       <MacBadge variant="warning" className="text-[9px]">ASN изменился</MacBadge>
+                    )}
+                    {result.infrastructure.changesFromPrevious.countryChanged && (
+                      <MacBadge variant="warning" className="text-[9px]">Страна изменилась</MacBadge>
+                    )}
+                    {result.infrastructure.changesFromPrevious.latencySpike && (
+                      <MacBadge variant="danger" className="text-[9px]">Всплеск задержки</MacBadge>
                     )}
                     {result.infrastructure.changesFromPrevious.portsChanged && (
                       <MacBadge variant="neutral" className="text-[9px]">Порты изменились</MacBadge>

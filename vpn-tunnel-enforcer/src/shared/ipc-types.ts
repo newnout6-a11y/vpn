@@ -227,9 +227,12 @@ export interface LiveLatencyStats {
   median: number
   max: number
   jitter: number   // stddev
-  loss: number     // 0..1 (fraction lost)
+  loss: number     // 0..1 (fraction of attempted samples that failed to connect)
+  connectionFailureRate?: number
   samples: number[]
   samplesAttempted: number
+  samplesSucceeded?: number
+  pathType?: 'direct' | 'tun'
   method: 'tcp'
 }
 
@@ -238,6 +241,8 @@ export interface LiveTlsCertInfo {
   durationMs: number
   error?: string
   hostnameVerified?: boolean
+  authorized?: boolean
+  authorizationError?: string
   subject?: string
   issuer?: string
   validFrom?: string
@@ -248,6 +253,7 @@ export interface LiveTlsCertInfo {
   protocol?: string    // TLSv1.2, TLSv1.3
   cipher?: string
   alpn?: string
+  alpnProtocol?: string
 }
 
 export interface HttpProbeResult {
@@ -261,6 +267,8 @@ export interface HttpProbeResult {
   locationHeader?: string
   contentType?: string
   bodySize?: number
+  targetPort?: number
+  isTls?: boolean
   confidence: 'low'
 }
 
@@ -276,7 +284,10 @@ export interface RouteDiagnostics {
   durationMs: number
   error?: string
   hops?: number
+  reachedTarget?: boolean
+  hopDetails?: string[]
   mtu?: number
+  mtuStatus?: 'measured' | 'unavailable' | 'skipped'
   routeMethod?: string
 }
 
@@ -286,6 +297,7 @@ export interface InfrastructureHints {
   egressIp?: string
   egressCountry?: string
   endpointCountry?: string
+  activeTunnelMatchesProfile?: boolean
   sharedCidrWithProfiles?: string[]
   changesFromPrevious?: {
     ipChanged?: boolean
@@ -293,6 +305,7 @@ export interface InfrastructureHints {
     tlsCertChanged?: boolean
     countryChanged?: boolean
     portsChanged?: boolean
+    latencySpike?: boolean
   }
 }
 
@@ -305,6 +318,7 @@ export interface LiveCheckFinding {
 }
 
 export interface LiveServerCheckOptions {
+  requestId?: string
   profileId?: string
   host?: string
   port?: number
@@ -313,6 +327,7 @@ export interface LiveServerCheckOptions {
 
 export interface LiveServerCheck {
   id: string
+  requestId?: string
   profileId?: string
   host: string
   port: number
@@ -321,6 +336,7 @@ export interface LiveServerCheck {
   finishedAt: string
   durationMs: number
   cancelled?: boolean
+  error?: string
   dns: DnsDiagnostics
   reverseDns?: string[]
   asn?: AsnInfo
@@ -793,7 +809,7 @@ export interface ServerChannels {
     | { ok: false; error: string }
   // ── Live Server Extraction & Technical Profile ──────────────────────────────
   'server:live-check': (options: LiveServerCheckOptions) => Promise<LiveServerCheck>
-  'server:live-check-cancel': (checkId?: string) => Promise<{ cancelled: boolean }>
+  'server:live-check-cancel': (requestId?: string) => Promise<{ cancelled: boolean; reason?: string }>
   'server:live-check-history': (filter?: { profileId?: string; host?: string }) => Promise<LiveServerCheck[]>
 }
 

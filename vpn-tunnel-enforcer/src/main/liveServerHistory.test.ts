@@ -197,11 +197,13 @@ describe('liveServerHistory', () => {
       const prev = makeMockCheck({
         openPorts: [
           { port: 80, open: true, state: 'open' },
-          { port: 443, open: true, state: 'open' }
+          { port: 443, open: true, state: 'open' },
+          { port: 8443, open: false, state: 'closed' }
         ]
       })
       const curr = makeMockCheck({
         openPorts: [
+          { port: 80, open: false, state: 'closed' },
           { port: 443, open: true, state: 'open' },
           { port: 8443, open: true, state: 'open' }
         ]
@@ -211,6 +213,24 @@ describe('liveServerHistory', () => {
       expect(diff?.portsChanged).toBe(true)
       expect(diff?.closedPorts).toEqual([80])
       expect(diff?.newOpenPorts).toEqual([8443])
+    })
+
+    it('does not mark untested ports as closed when moving from extended to basic mode', () => {
+      const prevExtended = makeMockCheck({
+        openPorts: [
+          { port: 443, open: true, state: 'open' },
+          { port: 8443, open: true, state: 'open' }
+        ]
+      })
+      const currBasic = makeMockCheck({
+        openPorts: [
+          { port: 443, open: true, state: 'open' }
+        ]
+      })
+
+      const diff = computeHistoryDiff(currBasic, prevExtended)
+      expect(diff?.portsChanged).toBe(false)
+      expect(diff?.closedPorts).toEqual([])
     })
   })
 })

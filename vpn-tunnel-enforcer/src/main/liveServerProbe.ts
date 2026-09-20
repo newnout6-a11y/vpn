@@ -66,7 +66,7 @@ const SERVICE_HINTS: Record<number, string> = {
 // In-memory ASN cache with 10-minute TTL to reduce external geo queries
 const asnCache = new Map<string, { data: AsnInfo; expiresAt: number }>()
 
-// Active checks registry for cancellation
+// Active checks registry mapped by unique requestId
 const activeControllers = new Map<string, AbortController>()
 
 /**
@@ -109,7 +109,7 @@ export function normalizeHostAndPort(
 }
 
 /**
- * Stage 2: DNS Diagnostics
+ * Stage 2: DNS Diagnostics (parallel A/AAAA, CNAME chain, reverse DNS)
  */
 export async function probeDns(
   host: string,
@@ -119,7 +119,7 @@ export async function probeDns(
   const started = Date.now()
   const ipFamily = net.isIP(host)
 
-  // Direct IP entered: skip DNS queries
+  // Direct IP entered: skip forward DNS
   if (ipFamily !== 0) {
     const reverseDnsList: string[] = []
     try {
@@ -167,35 +167,37 @@ export async function probeDns(
   let minTtl: number | undefined
   let primaryError: string | undefined
 
-  // 1. Resolve A records with TTL
-  const aStart = Date.now()
-  try {
-    const resA = await Promise.race([
-      dnsPromises.resolve4(host, { ttl: true }),
-      new Promise<Array<{ address: string; ttl: number }>>((_, reject) =>
-        setTimeout(() => reject(new Error('A query timeout')), LIVE_PROBE_THRESHOLDS.DNS_LOOKUP_TIMEOUT_MS)
-      )
-    ]).catch(err => {
-      primaryError = err?.message || 'A query failed'
-      return [] as Array<{ address: string; ttl: number }>
-    })
+  // 1. Parallel A and AAAA resolution
+  const queryA = async () => {
+    const aStart = Date.now()
+    try {
+      const resA = await Promise.race([
+        dnsPromises.resolve4(host, { ttl: true }),
+        new Promise<Array<{ address: string; ttl: number }>>((_, reject) =>
+          setTimeout(() => reject(new Error('A query timeout')), LIVE_PROBE_THRESHOLDS.DNS_LOOKUP_TIMEOUT_MS)
+        )
+      ]).catch((err) => {
+        primaryError = err?.message || 'A query failed'
+        return [] as Array<{ address: string; ttl: number }>
+      })
 
-    timings.aMs = Date.now() - aStart
-    for (const r of resA) {
-      if (r?.address && !aRecords.includes(r.address)) {
-        aRecords.push(r.address)
-        if (typeof r.ttl === 'number') {
-          minTtl = minTtl === undefined ? r.ttl : Math.min(minTtl, r.ttl)
+      timings.aMs = Date.now() - aStart
+      for (const r of resA) {
+        if (r?.address && !aRecords.includes(r.address)) {
+          aRecords.push(r.address)
+          if (typeof r.ttl === 'number') {
+            minTtl = minTtl === undefined ? r.ttl : Math.min(minTtl, r.ttl)
+          }
         }
       }
+    } catch (err: any) {
+      timings.aMs = Date.now() - aStart
+      if (!primaryError) primaryError = err?.message
     }
-  } catch (err: any) {
-    timings.aMs = Date.now() - aStart
-    primaryError = err?.message
   }
 
-  // 2. Resolve AAAA records with TTL
-  if (!signal?.aborted) {
+  const queryAAAA = async () => {
+    if (signal?.aborted) return
     const aaaaStart = Date.now()
     try {
       const resAAAA = await Promise.race([
@@ -219,12 +221,15 @@ export async function probeDns(
     }
   }
 
-  // 3. Resolve CNAME chain (max depth 5 to avoid infinite loop)
+  await Promise.all([queryA(), queryAAAA()])
+
+  // 2. Resolve CNAME chain (max depth 5, checking signal in loop)
   if (!signal?.aborted) {
     const cnameStart = Date.now()
     let currentTarget = host
     const visited = new Set<string>([host.toLowerCase()])
     for (let depth = 0; depth < 5; depth++) {
+      if (signal?.aborted) break
       try {
         const cnames = await Promise.race([
           dnsPromises.resolveCname(currentTarget),
@@ -247,11 +252,12 @@ export async function probeDns(
     timings.cnameMs = Date.now() - cnameStart
   }
 
-  // 4. Reverse DNS for all resolved unique IPs
+  // 3. Reverse DNS for all resolved unique IPs
   const allIps = [...new Set([...aRecords, ...aaaaRecords])]
   const reverseDnsList: string[] = []
   if (!signal?.aborted && allIps.length > 0) {
-    const reversePromises = allIps.map(async ip => {
+    const reversePromises = allIps.map(async (ip) => {
+      if (signal?.aborted) return []
       try {
         const rev = await Promise.race([
           dnsPromises.reverse(ip),
@@ -294,6 +300,7 @@ export async function probeDns(
 
 /**
  * Stage 3: Real TLS Probe
+ * Verifies certificate identity against host or SNI, preserves authorization state, passes ALPN.
  */
 export async function probeTls(
   host: string,
@@ -310,7 +317,8 @@ export async function probeTls(
     }
   }
 
-  const targetSni = sniHostname || (net.isIP(host) === 0 ? host : undefined)
+  const identityTarget = sniHostname || host
+  const isTargetIp = net.isIP(identityTarget) !== 0
 
   return new Promise<LiveTlsCertInfo>((resolve) => {
     let finished = false
@@ -321,14 +329,16 @@ export async function probeTls(
       resolve(result)
     }
 
-    if (signal) {
-      signal.addEventListener('abort', () => {
-        finish({
-          status: 'skipped',
-          durationMs: Date.now() - started,
-          error: 'Cancelled'
-        })
+    const abortHandler = () => {
+      finish({
+        status: 'skipped',
+        durationMs: Date.now() - started,
+        error: 'Cancelled'
       })
+    }
+
+    if (signal) {
+      signal.addEventListener('abort', abortHandler, { once: true })
     }
 
     const timer = setTimeout(() => {
@@ -342,12 +352,18 @@ export async function probeTls(
     let socket: tls.TLSSocket | null = null
 
     try {
+      // RFC 6066: servername must only be sent for DNS hostnames, not IP addresses
+      const servername = sniHostname
+        ? (net.isIP(sniHostname) === 0 ? sniHostname : undefined)
+        : (isTargetIp ? undefined : identityTarget)
+
       socket = tls.connect(
         {
           host,
           port,
-          servername: targetSni,
-          rejectUnauthorized: false, // passive diagnostic: inspect cert even if untrusted/expired
+          servername,
+          rejectUnauthorized: false,
+          ALPNProtocols: ['h2', 'http/1.1'],
           timeout: LIVE_PROBE_THRESHOLDS.TLS_HANDSHAKE_TIMEOUT_MS
         },
         () => {
@@ -366,15 +382,23 @@ export async function probeTls(
             const protocol = socket?.getProtocol() || undefined
             const cipher = socket?.getCipher()?.name || undefined
             const alpn = (socket as any)?.alpnProtocol || undefined
+            const authorized = socket?.authorized === true
+            const authorizationError = socket?.authorizationError ? String(socket.authorizationError) : undefined
 
-            let hostnameVerified = true
+            // Verify identity against identityTarget (works for both domain and IP against SANs)
+            let hostnameVerified = false
             let verifyError: string | undefined
-            if (targetSni) {
-              const checkErr = tls.checkServerIdentity(targetSni, cert)
+            try {
+              const checkErr = tls.checkServerIdentity(identityTarget, cert)
               if (checkErr) {
                 hostnameVerified = false
                 verifyError = checkErr.message
+              } else {
+                hostnameVerified = true
               }
+            } catch (err: any) {
+              hostnameVerified = false
+              verifyError = err?.message || 'Hostname check failed'
             }
 
             // Parse SANs
@@ -415,6 +439,8 @@ export async function probeTls(
               status: 'ok',
               durationMs: Date.now() - started,
               hostnameVerified,
+              authorized,
+              authorizationError,
               error: verifyError,
               subject,
               issuer,
@@ -425,7 +451,8 @@ export async function probeTls(
               sans,
               protocol,
               cipher,
-              alpn
+              alpn,
+              alpnProtocol: alpn
             })
           } catch (err: any) {
             finish({
@@ -467,12 +494,13 @@ export async function probeTls(
 
 /**
  * Stage 4: HTTP/HTTPS Diagnostic Probe
- * Follows HEAD, falls back to 405 GET, max 8KB, sanitized Location without query/credentials.
+ * Passes Host authority and TLS SNI, enforces overall deadline, bounded 8KB body.
  */
 export async function probeHttp(
-  host: string,
+  connectIp: string,
   port: number,
   isTls: boolean,
+  authorityHost?: string,
   signal?: AbortSignal
 ): Promise<HttpProbeResult> {
   const started = Date.now()
@@ -481,11 +509,14 @@ export async function probeHttp(
       status: 'skipped',
       durationMs: 0,
       error: 'Cancelled',
+      targetPort: port,
+      isTls,
       confidence: 'low'
     }
   }
 
   const requester = isTls ? https : http
+  const overallDeadline = Date.now() + LIVE_PROBE_THRESHOLDS.HTTP_PROBE_TIMEOUT_MS
 
   const executeRequest = (
     method: 'HEAD' | 'GET',
@@ -500,25 +531,37 @@ export async function probeHttp(
         resolve(res)
       }
 
-      if (signal?.aborted) {
+      if (signal?.aborted || Date.now() >= overallDeadline) {
         done({
           status: 'skipped',
           durationMs: Date.now() - started,
-          error: 'Cancelled',
+          error: signal?.aborted ? 'Cancelled' : 'HTTP overall deadline exceeded',
+          targetPort: port,
+          isTls,
           confidence: 'low'
         })
         return
       }
 
+      const hostHeaderValue = authorityHost
+        ? (port === (isTls ? 443 : 80) ? authorityHost : `${authorityHost}:${port}`)
+        : (port === (isTls ? 443 : 80) ? connectIp : `${connectIp}:${port}`)
+
+      const servername = (authorityHost && net.isIP(authorityHost) === 0) ? authorityHost : undefined
+
+      const remainingTime = Math.max(500, overallDeadline - Date.now())
+
       const req = requester.request(
         {
-          host,
+          host: connectIp,
           port,
           path: reqPath,
           method,
-          timeout: LIVE_PROBE_THRESHOLDS.HTTP_PROBE_TIMEOUT_MS,
+          servername,
+          timeout: remainingTime,
           rejectUnauthorized: false,
           headers: {
+            Host: hostHeaderValue,
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) VPNTE-Diagnostics/1.0',
             Accept: '*/*'
           }
@@ -526,15 +569,21 @@ export async function probeHttp(
         (res) => {
           let bytesReceived = 0
           const statusCode = res.statusCode || 0
-          const serverHeader = typeof res.headers['server'] === 'string' ? res.headers['server'] : undefined
-          const viaHeader = typeof res.headers['via'] === 'string' ? res.headers['via'] : undefined
-          const contentType = typeof res.headers['content-type'] === 'string' ? res.headers['content-type'] : undefined
+          const serverHeader = Array.isArray(res.headers['server'])
+            ? res.headers['server'].join(', ')
+            : (res.headers['server'] || undefined)
+          const viaHeader = Array.isArray(res.headers['via'])
+            ? res.headers['via'].join(', ')
+            : (res.headers['via'] || undefined)
+          const contentType = Array.isArray(res.headers['content-type'])
+            ? res.headers['content-type'].join(', ')
+            : (res.headers['content-type'] || undefined)
 
           // Sanitize Location: strip query and credentials
           let locationHeader: string | undefined
           if (res.headers['location'] && typeof res.headers['location'] === 'string') {
             try {
-              const parsed = new URL(res.headers['location'], `${isTls ? 'https' : 'http'}://${host}:${port}`)
+              const parsed = new URL(res.headers['location'], `${isTls ? 'https' : 'http'}://${connectIp}:${port}`)
               locationHeader = `${parsed.protocol}//${parsed.host}${parsed.pathname}`
             } catch {
               locationHeader = res.headers['location'].split('?')[0].split('#')[0]
@@ -546,7 +595,7 @@ export async function probeHttp(
             res.destroy()
             try {
               const nextUrl = new URL(locationHeader)
-              if (nextUrl.hostname === host && Number(nextUrl.port || (isTls ? 443 : 80)) === port) {
+              if (nextUrl.hostname === connectIp && Number(nextUrl.port || (isTls ? 443 : 80)) === port) {
                 executeRequest('HEAD', nextUrl.pathname, redirectCount + 1).then(done)
                 return
               }
@@ -579,6 +628,8 @@ export async function probeHttp(
               locationHeader,
               contentType,
               bodySize: bytesReceived,
+              targetPort: port,
+              isTls,
               confidence: 'low'
             })
           })
@@ -594,6 +645,8 @@ export async function probeHttp(
               locationHeader,
               contentType,
               bodySize: bytesReceived,
+              targetPort: port,
+              isTls,
               confidence: 'low'
             })
           })
@@ -606,6 +659,8 @@ export async function probeHttp(
           status: 'error',
           durationMs: Date.now() - started,
           error: 'HTTP request timeout',
+          targetPort: port,
+          isTls,
           confidence: 'low'
         })
       })
@@ -615,6 +670,8 @@ export async function probeHttp(
           status: 'error',
           durationMs: Date.now() - started,
           error: err?.message || 'HTTP request error',
+          targetPort: port,
+          isTls,
           confidence: 'low'
         })
       })
@@ -626,9 +683,11 @@ export async function probeHttp(
             status: 'skipped',
             durationMs: Date.now() - started,
             error: 'Cancelled',
+            targetPort: port,
+            isTls,
             confidence: 'low'
           })
-        })
+        }, { once: true })
       }
 
       req.end()
@@ -665,7 +724,7 @@ function probeTcpSingle(
     }
 
     if (signal) {
-      signal.addEventListener('abort', () => finish(false, 'Cancelled'))
+      signal.addEventListener('abort', () => finish(false, 'Cancelled'), { once: true })
     }
 
     socket.setTimeout(timeoutMs)
@@ -678,6 +737,7 @@ function probeTcpSingle(
 
 /**
  * Stage 5: Reachability, Latency & Stability Probe
+ * Measures TCP connect failure rate, records pathType, counts only actual attempted samples.
  */
 export async function probeReachabilityAndLatency(
   host: string,
@@ -686,22 +746,21 @@ export async function probeReachabilityAndLatency(
   signal?: AbortSignal
 ): Promise<{ reachability: ReachabilityDiagnostics; latency: LiveLatencyStats | undefined }> {
   const started = Date.now()
-  const samplesNeeded = mode === 'extended' ? 10 : 5
+  const samplesTarget = mode === 'extended' ? 10 : 5
   const timeoutPerSample = LIVE_PROBE_THRESHOLDS.TCP_CONNECT_TIMEOUT_MS
   const deadline = Date.now() + (mode === 'extended' ? 9000 : 6000)
 
   const durations: number[] = []
   let lostCount = 0
+  let attemptedCount = 0
   let primaryError: string | undefined
 
-  for (let i = 0; i < samplesNeeded; i++) {
+  for (let i = 0; i < samplesTarget; i++) {
     if (signal?.aborted) break
     const remainingTime = deadline - Date.now()
-    if (remainingTime <= 0) {
-      lostCount += samplesNeeded - i
-      break
-    }
+    if (remainingTime <= 0) break
 
+    attemptedCount++
     const probe = await probeTcpSingle(host, port, Math.min(timeoutPerSample, remainingTime), signal)
     if (probe.ok) {
       durations.push(probe.durationMs)
@@ -711,12 +770,14 @@ export async function probeReachabilityAndLatency(
     }
 
     // Inter-sample spacing (60ms) if not at end
-    if (i < samplesNeeded - 1 && Date.now() + 60 < deadline && !signal?.aborted) {
+    if (i < samplesTarget - 1 && Date.now() + 60 < deadline && !signal?.aborted) {
       await new Promise((r) => setTimeout(r, 60))
     }
   }
 
   const tcpReachable = durations.length > 0
+  const pathType = tunController.getStatus().running ? 'tun' : 'direct'
+
   const reachability: ReachabilityDiagnostics = {
     status: tcpReachable ? 'ok' : 'error',
     durationMs: Date.now() - started,
@@ -725,7 +786,7 @@ export async function probeReachabilityAndLatency(
     error: tcpReachable ? undefined : (primaryError || 'Connection refused or timed out')
   }
 
-  if (durations.length === 0) {
+  if (attemptedCount === 0 || durations.length === 0) {
     return { reachability, latency: undefined }
   }
 
@@ -740,7 +801,7 @@ export async function probeReachabilityAndLatency(
 
   const variance = durations.reduce((sum, d) => sum + (d - avg) ** 2, 0) / durations.length
   const jitter = Math.round(Math.sqrt(variance))
-  const loss = Number((lostCount / samplesNeeded).toFixed(2))
+  const loss = Number((lostCount / attemptedCount).toFixed(2))
 
   const latency: LiveLatencyStats = {
     min,
@@ -749,8 +810,10 @@ export async function probeReachabilityAndLatency(
     max,
     jitter,
     loss,
+    connectionFailureRate: loss,
     samples: durations,
-    samplesAttempted: samplesNeeded,
+    samplesAttempted: attemptedCount,
+    pathType,
     method: 'tcp'
   }
 
@@ -779,7 +842,6 @@ export async function probePorts(
   const results: LivePortScanItem[] = []
   const concurrency = LIVE_PROBE_THRESHOLDS.PORT_SCAN_CONCURRENCY
 
-  // Semaphore queue runner
   let index = 0
   const workers = Array.from({ length: concurrency }).map(async () => {
     while (index < portsToScan.length) {
@@ -812,7 +874,7 @@ export async function probePorts(
 }
 
 /**
- * Stage 7: Route Diagnostics (Hop estimation via traceroute)
+ * Stage 7: Route Diagnostics (Hop estimation via tracert, no fake MTU)
  */
 export async function probeRoute(targetIp: string, signal?: AbortSignal): Promise<RouteDiagnostics> {
   const started = Date.now()
@@ -820,7 +882,8 @@ export async function probeRoute(targetIp: string, signal?: AbortSignal): Promis
     return {
       status: 'unavailable',
       durationMs: 0,
-      error: 'Platform does not support native win32 traceroute'
+      error: 'Platform does not support native win32 traceroute',
+      mtuStatus: 'unavailable'
     }
   }
 
@@ -828,7 +891,8 @@ export async function probeRoute(targetIp: string, signal?: AbortSignal): Promis
     return {
       status: 'skipped',
       durationMs: 0,
-      error: 'Cancelled'
+      error: 'Cancelled',
+      mtuStatus: 'skipped'
     }
   }
 
@@ -855,7 +919,8 @@ export async function probeRoute(targetIp: string, signal?: AbortSignal): Promis
         finish({
           status: 'unavailable',
           durationMs: Date.now() - started,
-          error: 'Traceroute timed out'
+          error: 'Traceroute timed out',
+          mtuStatus: 'unavailable'
         })
       }, LIVE_PROBE_THRESHOLDS.TRACEROUTE_TIMEOUT_MS)
 
@@ -866,9 +931,10 @@ export async function probeRoute(targetIp: string, signal?: AbortSignal): Promis
           finish({
             status: 'skipped',
             durationMs: Date.now() - started,
-            error: 'Cancelled'
+            error: 'Cancelled',
+            mtuStatus: 'skipped'
           })
-        })
+        }, { once: true })
       }
 
       child.on('close', (code) => {
@@ -878,21 +944,29 @@ export async function probeRoute(targetIp: string, signal?: AbortSignal): Promis
           finish({
             status: 'unavailable',
             durationMs,
-            error: 'Traceroute execution error'
+            error: 'Traceroute execution error',
+            mtuStatus: 'unavailable'
           })
           return
         }
 
-        // Count lines matching hop number e.g. "  1   <1 ms ..."
-        const hopMatches = output.match(/^\s*\d+\s+/gm)
-        const hops = hopMatches ? hopMatches.length : undefined
+        // Parse hop lines
+        const hopLines = output
+          .split(/\r?\n/)
+          .filter(line => /^\s*\d+\s+/.test(line))
+          .map(line => line.trim())
+
+        const reachedTarget = output.toLowerCase().includes('complete') ||
+          hopLines.some(line => line.includes(targetIp))
 
         finish({
-          status: hops ? 'ok' : 'unavailable',
+          status: hopLines.length > 0 ? 'ok' : 'unavailable',
           durationMs,
-          hops,
+          hops: hopLines.length > 0 ? hopLines.length : undefined,
+          reachedTarget,
+          hopDetails: hopLines.slice(0, 8),
           routeMethod: 'tracert',
-          mtu: 1500
+          mtuStatus: 'unavailable'
         })
       })
 
@@ -901,14 +975,16 @@ export async function probeRoute(targetIp: string, signal?: AbortSignal): Promis
         finish({
           status: 'unavailable',
           durationMs: Date.now() - started,
-          error: err.message
+          error: err.message,
+          mtuStatus: 'unavailable'
         })
       })
     } catch (err: any) {
       finish({
         status: 'unavailable',
         durationMs: Date.now() - started,
-        error: err?.message || 'Failed to spawn traceroute'
+        error: err?.message || 'Failed to spawn traceroute',
+        mtuStatus: 'unavailable'
       })
     }
   })
@@ -916,10 +992,12 @@ export async function probeRoute(targetIp: string, signal?: AbortSignal): Promis
 
 /**
  * Stage 8: Infrastructure Hints & ASN
+ * Passes signal to axios, and strictly scopes egress country comparison to active profile.
  */
 export async function probeInfrastructure(
   host: string,
   primaryIp: string,
+  profileId?: string,
   endpointCountry?: string,
   disableGeoLookup?: boolean,
   signal?: AbortSignal
@@ -933,7 +1011,8 @@ export async function probeInfrastructure(
     } else if (!signal?.aborted) {
       try {
         const resp = await axios.get(`https://ipapi.co/${primaryIp}/json/`, {
-          timeout: 4000
+          timeout: 4000,
+          signal
         })
         if (resp.data && !resp.data.error) {
           asnInfo = {
@@ -948,16 +1027,20 @@ export async function probeInfrastructure(
     }
   }
 
-  // Active tunnel status
+  // Active tunnel status: ONLY associate egress with this profile if it is the currently connected profile
   const tunRunning = tunController.getStatus().running
   let egressCountry: string | undefined
   let egressIp: string | undefined
+  let activeTunnelMatchesProfile = false
 
   if (tunRunning) {
     try {
       const active = serverPicker.getActiveProfile()
-      egressCountry = active?.country
-      egressIp = active?.egressIp
+      if (active && profileId && active.id === profileId) {
+        activeTunnelMatchesProfile = true
+        egressCountry = active.country
+        egressIp = active.egressIp
+      }
     } catch {}
   }
 
@@ -983,6 +1066,7 @@ export async function probeInfrastructure(
     egressIp,
     egressCountry,
     endpointCountry: asnInfo?.country || endpointCountry,
+    activeTunnelMatchesProfile,
     sharedCidrWithProfiles: sharedCidrWithProfiles.length > 0 ? sharedCidrWithProfiles : undefined
   }
 }
@@ -992,7 +1076,7 @@ export async function probeInfrastructure(
  */
 export function evaluateLiveCheckFindings(
   check: Partial<LiveServerCheck>,
-  previousCheck: LiveServerCheck | null
+  previousCheck: LiveServerCheck | null = null
 ): LiveCheckFinding[] {
   const findings: LiveCheckFinding[] = []
 
@@ -1065,7 +1149,7 @@ export function evaluateLiveCheckFindings(
         code: 'TLS_SAN_MISMATCH',
         severity: 'warning',
         title: 'Имя хоста отсутствует в SAN сертификата',
-        detail: `Сертификат выдан для [${check.tls.sans?.slice(0, 5).join(', ') || check.tls.subject}], имя хоста ${check.host}`,
+        detail: `Сертификат выдан для [${check.tls.sans?.slice(0, 5).join(', ') || check.tls.subject}], проверялся ${check.host}`,
         evidence: { host: check.host || '' }
       })
     }
@@ -1126,16 +1210,16 @@ export function evaluateLiveCheckFindings(
       findings.push({
         code: 'PACKET_LOSS',
         severity: 'error',
-        title: 'Высокие потери пакетов при подключении',
-        detail: `Потеряно ${Math.round(check.latency.loss * 100)}% проб`,
+        title: 'Высокая доля отказов TCP подключений',
+        detail: `Не удалось установить соединение в ${Math.round(check.latency.loss * 100)}% попыток`,
         evidence: { lossPct: Math.round(check.latency.loss * 100) }
       })
     } else if (check.latency.loss >= LIVE_PROBE_THRESHOLDS.PACKET_LOSS_WARNING) {
       findings.push({
         code: 'PACKET_LOSS',
         severity: 'warning',
-        title: 'Потери пакетов при проверке задержки',
-        detail: `Потеряно ${Math.round(check.latency.loss * 100)}% проб`,
+        title: 'Отказы TCP подключений при проверке задержки',
+        detail: `Не удалось установить соединение в ${Math.round(check.latency.loss * 100)}% попыток`,
         evidence: { lossPct: Math.round(check.latency.loss * 100) }
       })
     }
@@ -1190,7 +1274,12 @@ export function evaluateLiveCheckFindings(
     })
   }
 
-  if (check.infrastructure?.egressCountry && check.infrastructure?.endpointCountry) {
+  // Only compare egress country if active tunnel matches this profile!
+  if (
+    check.infrastructure?.activeTunnelMatchesProfile === true &&
+    check.infrastructure?.egressCountry &&
+    check.infrastructure?.endpointCountry
+  ) {
     const egCountry = check.infrastructure.egressCountry.toLowerCase().trim()
     const epCountry = check.infrastructure.endpointCountry.toLowerCase().trim()
     if (egCountry && epCountry && egCountry !== epCountry) {
@@ -1209,6 +1298,7 @@ export function evaluateLiveCheckFindings(
 
 /**
  * Main Live Server Check runner
+ * Wraps overall timeout, isolates sub-probe failures, attaches diff before saving.
  */
 export async function runLiveServerCheck(
   options: LiveServerCheckOptions,
@@ -1216,7 +1306,8 @@ export async function runLiveServerCheck(
 ): Promise<LiveServerCheck> {
   const startedAt = new Date().toISOString()
   const startTs = Date.now()
-  const checkId = options.profileId ? `live-${options.profileId}` : `live-${crypto.randomUUID()}`
+  const checkId = crypto.randomUUID()
+  const requestId = options.requestId || checkId
 
   // Look up profile if profileId was supplied
   let host = options.host || ''
@@ -1232,7 +1323,6 @@ export async function runLiveServerCheck(
         if (!host) host = found.server
         if (!port) port = found.port
         endpointCountry = found.country
-        // If outbound TLS server_name exists, use as SNI
         if (found.outbound?.tls?.server_name) {
           sniHostname = found.outbound.tls.server_name
         }
@@ -1248,78 +1338,125 @@ export async function runLiveServerCheck(
 
   logEvent('info', 'live-server-probe', `Starting live check for ${host}:${port}`, {
     mode,
+    checkId,
+    requestId,
     profileId: options.profileId,
     disableGeoLookup
   })
 
-  // 1. DNS Probe
-  const dnsRes = await probeDns(host, mode, signal)
-  const primaryIp = dnsRes.dns.a[0] || dnsRes.dns.aaaa[0] || host
+  // Create deadline controller to enforce an overall timeout on the entire check
+  const totalTimeoutMs = mode === 'extended' ? 22000 : 14000
+  const deadlineController = new AbortController()
 
-  // 2. Parallel Reachability, TLS, HTTP, Ports, Route, Infra
-  const isTlsPort = [443, 8443, 2053, 2083, 2087, 2096, 4433].includes(port)
-  const isTlsApplicable = isTlsPort || sniHostname !== undefined
+  const overallTimer = setTimeout(() => {
+    deadlineController.abort(new Error('Live check overall deadline exceeded'))
+  }, totalTimeoutMs)
 
-  const [reachabilityRes, tlsRes, httpRes, openPortsRes, routeRes, infraRes] = await Promise.all([
-    probeReachabilityAndLatency(primaryIp, port, mode, signal),
-    isTlsApplicable
-      ? probeTls(primaryIp, port, sniHostname || (net.isIP(host) === 0 ? host : undefined), signal)
-      : Promise.resolve<LiveTlsCertInfo | undefined>(undefined),
-    probeHttp(primaryIp, isTlsPort ? port : 80, isTlsPort, signal),
-    probePorts(primaryIp, port, mode, signal),
-    mode === 'extended' ? probeRoute(primaryIp, signal) : Promise.resolve<RouteDiagnostics | undefined>(undefined),
-    probeInfrastructure(host, primaryIp, endpointCountry, disableGeoLookup, signal)
-  ])
-
-  // Get previous successful check for diff & findings
-  const previousCheck = liveServerHistory.getPreviousSuccessfulCheck(options.profileId, host)
-
-  const partialCheck: Partial<LiveServerCheck> = {
-    id: checkId,
-    profileId: options.profileId,
-    host,
-    port,
-    mode,
-    startedAt,
-    finishedAt: new Date().toISOString(),
-    durationMs: Date.now() - startTs,
-    cancelled: signal?.aborted || false,
-    dns: dnsRes.dns,
-    reverseDns: dnsRes.reverseDns.length > 0 ? dnsRes.reverseDns : undefined,
-    asn: infraRes.asn,
-    reachability: reachabilityRes.reachability,
-    latency: reachabilityRes.latency,
-    tls: tlsRes,
-    http: httpRes,
-    openPorts: openPortsRes,
-    route: routeRes,
-    infrastructure: infraRes
+  const abortForwarder = () => {
+    deadlineController.abort()
   }
 
-  // Evaluate Findings
-  const findings = evaluateLiveCheckFindings(partialCheck, previousCheck)
-  partialCheck.findings = findings
-
-  const finalCheck = partialCheck as LiveServerCheck
-
-  // Save to history (secrets scrubbed)
-  liveServerHistory.addCheck(finalCheck)
-
-  // Attach diff to infrastructure hints if previous check existed
-  if (previousCheck && finalCheck.infrastructure) {
-    const diff = computeHistoryDiff(finalCheck, previousCheck)
-    if (diff) {
-      finalCheck.infrastructure.changesFromPrevious = {
-        ipChanged: diff.ipChanged,
-        asnChanged: diff.asnChanged,
-        tlsCertChanged: diff.tlsCertChanged,
-        countryChanged: diff.countryChanged,
-        portsChanged: diff.portsChanged
-      }
+  if (signal) {
+    if (signal.aborted) {
+      deadlineController.abort()
+    } else {
+      signal.addEventListener('abort', abortForwarder, { once: true })
     }
   }
 
-  return sanitizeLiveCheckForStorage(finalCheck)
+  const checkSignal = deadlineController.signal
+
+  try {
+    // 1. DNS Probe
+    const dnsRes = await probeDns(host, mode, checkSignal)
+    const primaryIp = dnsRes.dns.a[0] || dnsRes.dns.aaaa[0] || host
+
+    // 2. Parallel Probes isolated with Promise.allSettled
+    const isTlsPort = [443, 8443, 2053, 2083, 2087, 2096, 4433].includes(port)
+    const isTlsApplicable = isTlsPort || sniHostname !== undefined
+
+    const [reachabilitySettled, tlsSettled, httpSettled, portsSettled, routeSettled, infraSettled] =
+      await Promise.allSettled([
+        probeReachabilityAndLatency(primaryIp, port, mode, checkSignal),
+        isTlsApplicable
+          ? probeTls(primaryIp, port, sniHostname || (net.isIP(host) === 0 ? host : undefined), checkSignal)
+          : Promise.resolve<LiveTlsCertInfo | undefined>(undefined),
+        probeHttp(primaryIp, isTlsPort ? port : 80, isTlsPort, host, checkSignal),
+        probePorts(primaryIp, port, mode, checkSignal),
+        mode === 'extended' ? probeRoute(primaryIp, checkSignal) : Promise.resolve<RouteDiagnostics | undefined>(undefined),
+        probeInfrastructure(host, primaryIp, options.profileId, endpointCountry, disableGeoLookup, checkSignal)
+      ])
+
+    const reachabilityRes = reachabilitySettled.status === 'fulfilled'
+      ? reachabilitySettled.value
+      : { reachability: { status: 'error' as const, durationMs: 0, error: 'Probe crashed', tcpReachable: false, port }, latency: undefined }
+
+    const tlsRes = tlsSettled.status === 'fulfilled' ? tlsSettled.value : undefined
+    const httpRes = httpSettled.status === 'fulfilled' ? httpSettled.value : undefined
+    const openPortsRes = portsSettled.status === 'fulfilled' ? portsSettled.value : undefined
+    const routeRes = routeSettled.status === 'fulfilled' ? routeSettled.value : undefined
+    const infraRes = infraSettled.status === 'fulfilled'
+      ? infraSettled.value
+      : { status: 'ok' as const, endpointCountry }
+
+    // Get previous successful check for diff & findings
+    const previousCheck = liveServerHistory.getPreviousSuccessfulCheck(options.profileId, host)
+
+    const partialCheck: Partial<LiveServerCheck> = {
+      id: checkId,
+      requestId,
+      profileId: options.profileId,
+      host,
+      port,
+      mode,
+      startedAt,
+      finishedAt: new Date().toISOString(),
+      durationMs: Date.now() - startTs,
+      cancelled: checkSignal.aborted || false,
+      error: checkSignal.aborted ? 'Live check was cancelled' : undefined,
+      dns: dnsRes.dns,
+      reverseDns: dnsRes.reverseDns.length > 0 ? dnsRes.reverseDns : undefined,
+      asn: infraRes.asn,
+      reachability: reachabilityRes.reachability,
+      latency: reachabilityRes.latency,
+      tls: tlsRes,
+      http: httpRes,
+      openPorts: openPortsRes,
+      route: routeRes,
+      infrastructure: infraRes
+    }
+
+    // Attach diff to infrastructure hints BEFORE saving to disk!
+    if (previousCheck && partialCheck.infrastructure) {
+      const diff = computeHistoryDiff(partialCheck as LiveServerCheck, previousCheck)
+      if (diff) {
+        partialCheck.infrastructure.changesFromPrevious = {
+          ipChanged: diff.ipChanged,
+          asnChanged: diff.asnChanged,
+          tlsCertChanged: diff.tlsCertChanged,
+          countryChanged: diff.countryChanged,
+          portsChanged: diff.portsChanged,
+          latencySpike: diff.latencySpike
+        }
+      }
+    }
+
+    // Evaluate Findings
+    const findings = evaluateLiveCheckFindings(partialCheck, previousCheck)
+    partialCheck.findings = findings
+
+    const finalCheck = partialCheck as LiveServerCheck
+
+    // Save to history (diff is already attached)
+    liveServerHistory.addCheck(finalCheck)
+
+    return sanitizeLiveCheckForStorage(finalCheck)
+  } finally {
+    clearTimeout(overallTimer)
+    if (signal) {
+      signal.removeEventListener('abort', abortForwarder)
+    }
+  }
 }
 
 /**
@@ -1331,44 +1468,31 @@ export function registerLiveServerProbeIpcHandlers(): void {
       throw new TypeError('options must be an object')
     }
 
-    const checkKey = options.profileId ? `profile-${options.profileId}` : `host-${options.host || 'adhoc'}`
-
-    // Cancel any ongoing check for this target before starting a new one
-    const existing = activeControllers.get(checkKey)
-    if (existing) {
-      existing.abort()
-      activeControllers.delete(checkKey)
-    }
-
+    const requestId = options.requestId || crypto.randomUUID()
     const controller = new AbortController()
-    activeControllers.set(checkKey, controller)
+    activeControllers.set(requestId, controller)
 
     try {
-      const result = await runLiveServerCheck(options, controller.signal)
+      const result = await runLiveServerCheck({ ...options, requestId }, controller.signal)
       return result
     } finally {
-      if (activeControllers.get(checkKey) === controller) {
-        activeControllers.delete(checkKey)
+      if (activeControllers.get(requestId) === controller) {
+        activeControllers.delete(requestId)
       }
     }
   })
 
-  ipcMain.handle('server:live-check-cancel', async (_event, checkId?: string) => {
-    if (checkId) {
-      for (const [key, ctrl] of activeControllers.entries()) {
-        if (key.includes(checkId)) {
-          ctrl.abort()
-          activeControllers.delete(key)
-        }
-      }
-    } else {
-      // Cancel all active live checks
-      for (const ctrl of activeControllers.values()) {
+  ipcMain.handle('server:live-check-cancel', async (_event, requestId?: string) => {
+    if (requestId) {
+      const ctrl = activeControllers.get(requestId)
+      if (ctrl) {
         ctrl.abort()
+        activeControllers.delete(requestId)
+        return { cancelled: true }
       }
-      activeControllers.clear()
+      return { cancelled: false, reason: 'not_found' }
     }
-    return { cancelled: true }
+    return { cancelled: false, reason: 'missing_request_id' }
   })
 
   ipcMain.handle(

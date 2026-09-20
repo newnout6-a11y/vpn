@@ -134,7 +134,8 @@ describe('<LiveServerCheckSection />', () => {
         profileId: 'prof-123',
         host: 'vpn.mock.net',
         port: 443,
-        mode: 'basic'
+        mode: 'basic',
+        requestId: expect.any(String)
       })
     })
 

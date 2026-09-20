@@ -213,11 +213,23 @@ export function computeHistoryDiff(
     currAvg - prevAvg > 50
   )
 
-  const prevPorts = (previous.openPorts || []).filter(p => p.open).map(p => p.port)
-  const currPorts = (current.openPorts || []).filter(p => p.open).map(p => p.port)
+  const currentTestedPorts = new Map((current.openPorts || []).map(p => [p.port, p]))
+  const previousTestedPorts = new Map((previous.openPorts || []).map(p => [p.port, p]))
 
-  const closedPorts = prevPorts.filter(p => !currPorts.includes(p))
-  const newOpenPorts = currPorts.filter(p => !prevPorts.includes(p))
+  const closedPorts: number[] = []
+  const newOpenPorts: number[] = []
+
+  for (const [port, prevP] of previousTestedPorts.entries()) {
+    const currP = currentTestedPorts.get(port)
+    if (currP !== undefined) {
+      if (prevP.open && !currP.open) {
+        closedPorts.push(port)
+      } else if (!prevP.open && currP.open) {
+        newOpenPorts.push(port)
+      }
+    }
+  }
+
   const portsChanged = closedPorts.length > 0 || newOpenPorts.length > 0
 
   return {
