@@ -207,8 +207,26 @@ export type LiveCheckStage =
   | 'infrastructure'
   | 'handshake'
   | 'egress'
+  | 'mediaStream'
   | 'path'
   | 'pmtu'
+
+export interface LiveMediaStreamDiagnostics {
+  status: 'ok' | 'warning' | 'error' | 'skipped'
+  durationMs: number
+  twitchHlsReachable?: boolean
+  quicFallbackGuarded?: boolean
+  error2000Risk?: boolean
+  testedEndpoints?: Array<{
+    endpoint: string
+    reachable: boolean
+    latencyMs?: number
+    protocol?: string
+    error?: string
+  }>
+  detail?: string
+  error?: string
+}
 
 export interface LiveCheckProgress {
   requestId: string
@@ -480,6 +498,7 @@ export interface LiveServerCheck {
   egress?: LiveEgressResult
   pathDiagnostics?: PathDiagnostics
   pmtu?: PmtuDiagnostics
+  mediaStream?: LiveMediaStreamDiagnostics
   findings: LiveCheckFinding[]
 }
 

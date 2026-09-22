@@ -88,7 +88,7 @@ vi.mock('./domainRouting', () => ({
 import { mkdtempSync, writeFileSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { generateSingboxConfig, parseProxyAddress, readRecentSingBoxOutboundFault } from './tunController'
+import { generateSingboxConfig, parseProxyAddress, readRecentSingBoxOutboundFault, isVpnOutboundUdpCapable, shouldBlockQuicUdp443 } from './tunController'
 
 function repeatLine(line: string, n: number): string {
   return Array.from({ length: n }, () => line).join('\n')
@@ -343,12 +343,21 @@ describe('generateSingboxConfig stealth mode', () => {
 // ─── UDP blocking ─────────────────────────────────────────────────────────────
 
 describe('generateSingboxConfig UDP rules', () => {
-  it('does not blanket-block UDP for imported VLESS Reality profiles carrying stale network=tcp', () => {
-    const cfg = gen({ outbound: { ...realityOutbound, network: 'tcp' } })
-    const udpBlockAll = cfg.route.rules.some(
-      (r) => r.network === 'udp' && r.action === 'reject' && r.port === undefined
-    )
-    expect(udpBlockAll).toBe(false)
+  it('blocks UDP/443 (QUIC) and public UDP for TCP-only VLESS profiles to prevent Twitch Error #2000', () => {
+    // VLESS Reality without packet_encoding cannot carry UDP. Leaving UDP/443 unblocked causes
+    // Twitch HLS streaming to blackhole and throw Error #2000 in Chromium/Yandex.
+    for (const outbound of [realityOutbound, plainTlsOutbound]) {
+      const cfg = gen({ outbound: { ...outbound } })
+      const quicBlock = cfg.route.rules.some(
+        (r) => r.network === 'udp' && r.port === 443 && r.action === 'reject'
+      )
+      const udpBlockAll = cfg.route.rules.some(
+        (r) => r.network === 'udp' && r.action === 'reject' && r.port === undefined
+      )
+      expect(quicBlock).toBe(true)
+      expect(udpBlockAll).toBe(true)
+      expect(cfg.route.final).toBe('proxy-out')
+    }
   })
 
   it('blocks UDP/443 (QUIC) for HTTP proxy mode', () => {
@@ -359,17 +368,51 @@ describe('generateSingboxConfig UDP rules', () => {
     expect(quicBlock).toBe(true)
   })
 
-  it('does not block UDP/443 (QUIC) for directVpn so HTTP/3 rides the tunnel', () => {
-    // Rejecting QUIC on a native tunnel does not fast-fail the browser to TCP;
-    // it stalls ~5–10s (the YouTube/Speedtest symptom). Let it ride the tunnel.
-    for (const outbound of [realityOutbound, plainTlsOutbound]) {
+  it('does not block UDP/443 (QUIC) or UDP for genuine UDP-capable directVpn outbounds (Hysteria2, VLESS with xudp)', () => {
+    const hy2Outbound = {
+      type: 'hysteria2',
+      server: 'example.com',
+      server_port: 443,
+      password: 'pass'
+    }
+    const vlessXudpOutbound = {
+      ...plainTlsOutbound,
+      packet_encoding: 'xudp'
+    }
+
+    for (const outbound of [hy2Outbound, vlessXudpOutbound]) {
       const cfg = gen({ outbound: { ...outbound } })
       const quicBlock = cfg.route.rules.some(
         (r) => r.network === 'udp' && r.port === 443 && r.action === 'reject'
       )
+      const udpBlockAll = cfg.route.rules.some(
+        (r) => r.network === 'udp' && r.action === 'reject' && r.port === undefined
+      )
       expect(quicBlock).toBe(false)
+      expect(udpBlockAll).toBe(false)
       expect(cfg.route.final).toBe('proxy-out')
     }
+  })
+
+  it('correctly determines isVpnOutboundUdpCapable and shouldBlockQuicUdp443 across protocols', () => {
+    expect(isVpnOutboundUdpCapable({ type: 'hysteria2' })).toBe(true)
+    expect(isVpnOutboundUdpCapable({ type: 'tuic' })).toBe(true)
+    expect(isVpnOutboundUdpCapable({ type: 'wireguard' })).toBe(true)
+    expect(isVpnOutboundUdpCapable({ type: 'shadowsocks' })).toBe(true)
+    expect(isVpnOutboundUdpCapable({ type: 'vless', packet_encoding: 'xudp' })).toBe(true)
+    expect(isVpnOutboundUdpCapable({ type: 'vless', packet_encoding: 'packetaddr' })).toBe(true)
+    expect(isVpnOutboundUdpCapable({ type: 'vless' })).toBe(false)
+    expect(isVpnOutboundUdpCapable({ type: 'vless', tls: { reality: { enabled: true } } })).toBe(false)
+    expect(isVpnOutboundUdpCapable({ type: 'vmess' })).toBe(false)
+    expect(isVpnOutboundUdpCapable({ type: 'vmess', packet_encoding: 'xudp' })).toBe(true)
+    expect(isVpnOutboundUdpCapable({ type: 'trojan' })).toBe(false)
+    expect(isVpnOutboundUdpCapable({ type: 'http' })).toBe(false)
+    expect(isVpnOutboundUdpCapable({ type: 'hysteria2', network: 'tcp' })).toBe(false)
+
+    expect(shouldBlockQuicUdp443({ type: 'vless' }, 'socks5', true)).toBe(true)
+    expect(shouldBlockQuicUdp443({ type: 'hysteria2' }, 'socks5', true)).toBe(false)
+    expect(shouldBlockQuicUdp443({ type: 'vless', packet_encoding: 'xudp' }, 'socks5', true)).toBe(false)
+    expect(shouldBlockQuicUdp443({ type: 'hysteria2' }, 'http', true)).toBe(true)
   })
 
   it('routes final traffic through proxy-out', () => {

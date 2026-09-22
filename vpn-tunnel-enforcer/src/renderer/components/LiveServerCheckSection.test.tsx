@@ -67,6 +67,17 @@ const mockCheckResult: LiveServerCheck = {
   openPorts: [
     { port: 443, open: true, state: 'open', service: 'HTTPS' }
   ],
+  mediaStream: {
+    status: 'ok',
+    durationMs: 85,
+    twitchHlsReachable: true,
+    quicFallbackGuarded: true,
+    error2000Risk: false,
+    testedEndpoints: [
+      { endpoint: 'usher.ttvnw.net (HLS Origin)', reachable: true, latencyMs: 45, protocol: 'TLS 1.3 / TCP' }
+    ],
+    detail: 'HLS медиапотоки защищены. Защита от QUIC blackhole активна.'
+  },
   findings: [
     {
       code: 'DNS_MULTI_IP',
@@ -146,6 +157,9 @@ describe('<LiveServerCheckSection />', () => {
       expect(screen.getByText('104.21.5.1')).toBeInTheDocument()
       expect(screen.getByText('35 ms')).toBeInTheDocument()
       expect(screen.getByText('TLS Сертификат')).toBeInTheDocument()
+      expect(screen.getByText('Twitch HLS и медиапотоки')).toBeInTheDocument()
+      expect(screen.getByText('Доступен (TCP/TLS)')).toBeInTheDocument()
+      expect(screen.getByText('Активна (UDP/443 guard)')).toBeInTheDocument()
     })
   })
 

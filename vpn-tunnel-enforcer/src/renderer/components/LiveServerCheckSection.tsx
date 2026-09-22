@@ -47,6 +47,7 @@ const STAGE_LABELS: Record<LiveCheckStage, string> = {
   infrastructure: 'ASN и сетевые диффы',
   handshake: 'Рукопожатие туннеля',
   egress: 'Свежий exit IP (рефлекторы)',
+  mediaStream: 'Twitch HLS и медиапотоки',
   path: 'Маршрутизация Windows',
   pmtu: 'PMTU и DF зондирование'
 }
@@ -1157,6 +1158,68 @@ export function LiveServerCheckSection({
                   {result.pmtu.error && (
                     <div className="text-[10px] text-[var(--color-danger)] pt-0.5">
                       {result.pmtu.error}
+                    </div>
+                  )}
+                </div>
+              </DiagnosticBox>
+            )}
+
+            {/* Twitch & HLS Media Stream Diagnostics Block */}
+            {result.mediaStream && (
+              <DiagnosticBox
+                icon={<Activity size={12} />}
+                title="Twitch HLS и медиапотоки"
+                status={result.mediaStream.status}
+                durationMs={result.mediaStream.durationMs}
+              >
+                <div className="space-y-1.5 text-[11px]">
+                  <div className="flex justify-between items-center">
+                    <span className="text-[var(--color-text-secondary)]">Twitch HLS CDN:</span>
+                    <MacBadge
+                      variant={result.mediaStream.twitchHlsReachable ? 'success' : 'danger'}
+                      className="text-[10px]"
+                    >
+                      {result.mediaStream.twitchHlsReachable ? 'Доступен (TCP/TLS)' : 'Недоступен'}
+                    </MacBadge>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-[var(--color-text-secondary)]">Защита от QUIC Blackhole:</span>
+                    <MacBadge
+                      variant={result.mediaStream.quicFallbackGuarded ? 'success' : 'warning'}
+                      className="text-[10px]"
+                    >
+                      {result.mediaStream.quicFallbackGuarded ? 'Активна (UDP/443 guard)' : 'Не активна'}
+                    </MacBadge>
+                  </div>
+                  {result.mediaStream.error2000Risk && (
+                    <div className="flex justify-between items-center pt-0.5">
+                      <span className="text-[var(--color-text-secondary)]">Риск ошибки #2000:</span>
+                      <MacBadge variant="danger" className="text-[10px]">
+                        Высокий (QUIC stall)
+                      </MacBadge>
+                    </div>
+                  )}
+                  {result.mediaStream.testedEndpoints && result.mediaStream.testedEndpoints.length > 0 && (
+                    <div className="pt-1">
+                      <div className="text-[10px] text-[var(--color-text-secondary)] mb-0.5">Проверенные CDN:</div>
+                      <div className="space-y-0.5 bg-[var(--color-bg-tertiary)] p-1 rounded font-mono text-[9px]">
+                        {result.mediaStream.testedEndpoints.map((ep, i) => (
+                          <div key={i} className="flex justify-between">
+                            <span className="text-[var(--color-text-secondary)]">{ep.endpoint}:</span>
+                            <span>{ep.reachable ? `${ep.latencyMs ?? '—'} ms (OK)` : (ep.error || 'Сбой')}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {result.mediaStream.detail && (
+                    <div className="text-[10px] text-[var(--color-text-secondary)] pt-0.5">
+                      {result.mediaStream.detail}
+                    </div>
+                  )}
+                  {result.mediaStream.error && (
+                    <div className="text-[10px] text-[var(--color-danger)] pt-0.5">
+                      {result.mediaStream.error}
                     </div>
                   )}
                 </div>

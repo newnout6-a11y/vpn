@@ -718,14 +718,6 @@ export function sanitizeProxyOutbound(outbound: Record<string, any>): { outbound
 
   const outboundType = String(result.type || '').toLowerCase()
 
-  if ((outboundType === 'vless' || outboundType === 'vmess') && result.network === 'tcp') {
-    // Imported VLESS/VMess profiles can carry a stale tcp-only marker from
-    // older builds even when the source profile never requested it. Keeping
-    // that marker makes directVpn install QUIC/UDP guards and reproduces the
-    // long browser fallback stalls seen in diagnostics.
-    delete result.network
-  }
-
   if (outboundType === 'hysteria2') {
     // Hysteria2 is QUIC-based. Older imports saved `network: "tcp"` because
     // other TLS protocols were tcp-only; keeping it here makes our UDP guard
@@ -786,42 +778,75 @@ function normalizeHysteria2ServerPortsForSingbox(value: unknown): string | null 
   return `${start}:${end}`
 }
 
-function isTcpOnlyNetworkOutbound(outbound: Record<string, any>): boolean {
+export function isVpnOutboundUdpCapable(outbound: Record<string, any>): boolean {
+  if (!outbound || typeof outbound !== 'object') return false
   const type = String(outbound.type || '').toLowerCase()
-  if (type === 'hysteria2' || type === 'tuic') return false
-  return typeof outbound.network === 'string' && outbound.network === 'tcp'
+
+  // An explicit network: "tcp" configuration means UDP cannot be relayed over this outbound
+  if (typeof outbound.network === 'string' && outbound.network.toLowerCase() === 'tcp') {
+    return false
+  }
+
+  // HTTP proxies and non-UDP transport wrappers
+  if (type === 'http' || type === 'naive' || type === 'anytls' || type === 'shadowtls') {
+    return false
+  }
+
+  // Native UDP-based VPN protocols always support UDP/QUIC
+  if (type === 'hysteria2' || type === 'tuic' || type === 'wireguard') {
+    return true
+  }
+
+  // VLESS:
+  // In sing-box and Xray, VLESS over TCP (including Reality) requires packet_encoding ('xudp' or 'packetaddr')
+  // to relay UDP datagrams. Without packet encoding, UDP packets blackhole into the proxy, breaking Twitch/QUIC.
+  if (type === 'vless') {
+    const pe = String(outbound.packet_encoding || '').toLowerCase()
+    return pe === 'xudp' || pe === 'packetaddr'
+  }
+
+  // VMess & Trojan:
+  // If packet_encoding is configured ('xudp' or 'packetaddr'), UDP is supported.
+  // Reality on Trojan/VMess without packet_encoding cannot carry UDP.
+  if (type === 'vmess' || type === 'trojan') {
+    const pe = String(outbound.packet_encoding || '').toLowerCase()
+    if (pe === 'xudp' || pe === 'packetaddr') return true
+    if (outbound.tls && typeof outbound.tls === 'object' && outbound.tls.reality) return false
+    return false
+  }
+
+  // Shadowsocks natively supports UDP unless restricted to tcp
+  if (type === 'shadowsocks') {
+    return true
+  }
+
+  // SOCKS5 outbound supports UDP unless restricted to tcp
+  if (type === 'socks') {
+    return true
+  }
+
+  return false
 }
 
-function shouldBlockQuicUdp443(
+export function isTcpOnlyNetworkOutbound(outbound: Record<string, any>): boolean {
+  return !isVpnOutboundUdpCapable(outbound)
+}
+
+export function shouldBlockQuicUdp443(
   proxyOutbound: Record<string, any>,
   proxyType: 'socks5' | 'http',
   isDirectVpn: boolean
 ): boolean {
   if (proxyType === 'http') return true
   if (isDirectVpn) {
-    // For a native TUN tunnel (directVpn) we carry QUIC through the proxy
-    // instead of rejecting UDP/443. Rejecting it does NOT make Chromium fail
-    // over to TCP quickly: because of cached Alt-Svc (h3) advertisements and
-    // QUIC connection timeouts, the browser stalls ~5–10s before falling back
-    // — exactly the "YouTube hangs then springs to life" symptom, and it also
-    // breaks HTTP/3-heavy flows like speedtest.net's server discovery.
-    //
-    // Letting UDP/443 ride the tunnel is never worse than rejecting it: if the
-    // upstream relays UDP (standard for Xray/sing-box VLESS/VMess/Trojan/SS)
-    // HTTP/3 works natively with no stall; if it does not, the browser falls
-    // back to TCP just as it does today. Hysteria2/TUIC are native-UDP and
-    // already carry QUIC, so they were never blocked here either.
-    return false
+    // For direct VPN tunnels:
+    // If the outbound is genuinely UDP-capable (Hysteria2, TUIC, WireGuard, or VLESS with xudp),
+    // QUIC (UDP/443) rides the tunnel natively without stall.
+    // If the outbound cannot carry UDP (such as TCP-only VLESS Reality without packet_encoding,
+    // or explicit network: 'tcp'), we MUST block UDP/443 so Chromium/Yandex fails fast on QUIC
+    // and falls back to HTTPS/TCP immediately, preventing Twitch Error #2000.
+    return !isVpnOutboundUdpCapable(proxyOutbound)
   }
-  // Local proxy mode always forwards the captured traffic into a loopback
-  // SOCKS/HTTP hop that ultimately rides whatever upstream transport the app
-  // selected. In practice Chromium will happily keep retrying HTTP/3 over
-  // UDP/443 when that chain cannot carry QUIC reliably, which surfaces as
-  // ERR_CONNECTION_CLOSED / stalled first loads on arbitrary sites.
-  //
-  // Block only UDP/443 here (not all UDP) so browsers fail fast on QUIC and
-  // immediately fall back to TCP TLS, while non-browser UDP traffic on other
-  // ports keeps its previous behaviour.
   return true
 }
 

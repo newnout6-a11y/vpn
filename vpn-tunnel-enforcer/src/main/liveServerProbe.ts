@@ -14,7 +14,7 @@ import axios from 'axios'
 import { logEvent } from './appLogger'
 import { settingsStore } from './settings'
 import { serverPicker } from './serverPicker'
-import { tunController, getBundledResource, getDirectProxyPort, pickFreeLocalPort } from './tunController'
+import { tunController, getBundledResource, getDirectProxyPort, pickFreeLocalPort, isVpnOutboundUdpCapable, shouldBlockQuicUdp443 } from './tunController'
 import { ALL_KNOWN_ALIASES } from './tunAdapter'
 import { getPhysicalAdapterDnsSources } from './physicalAdapterLockdown'
 import { resolveProxyEngine } from './proxyEngine'
@@ -53,6 +53,7 @@ import type {
   LiveCheckStage,
   LiveEgressResult,
   LiveLatencyStats,
+  LiveMediaStreamDiagnostics,
   LivePortScanItem,
   LiveServerCheck,
   LiveServerCheckOptions,
@@ -1586,6 +1587,44 @@ export function evaluateLiveCheckFindings(
     })
   }
 
+  // 11. Media Stream (Twitch HLS & QUIC Fallback) Findings
+  if (check.mediaStream) {
+    if (check.mediaStream.error2000Risk) {
+      findings.push({
+        code: 'TWITCH_MEDIA_ERROR_2000_RISK',
+        severity: 'warning',
+        title: 'Риск ошибки Twitch #2000 (QUIC Blackhole)',
+        detail: 'VPN-профиль использует TCP-транспорт без поддержки UDP, но UDP/443 (QUIC) не заблокирован. Браузер будет пытаться загружать медиапотоки по HTTP/3, что вызовет тайм-аут видео и ошибку Twitch #2000.',
+        evidence: {
+          error2000Risk: true,
+          quicFallbackGuarded: Boolean(check.mediaStream.quicFallbackGuarded),
+          twitchHlsReachable: Boolean(check.mediaStream.twitchHlsReachable)
+        }
+      })
+    } else if (check.mediaStream.twitchHlsReachable && check.mediaStream.quicFallbackGuarded) {
+      findings.push({
+        code: 'TWITCH_HLS_OK',
+        severity: 'info',
+        title: 'Медиапотоки Twitch HLS защищены',
+        detail: 'Доставка HLS видеопотоков подтверждена. Защита от QUIC blackhole активна, браузер корректно использует HTTPS/TCP.',
+        evidence: {
+          quicFallbackGuarded: true,
+          twitchHlsReachable: true
+        }
+      })
+    } else if (check.mediaStream.twitchHlsReachable === false && check.mediaStream.status === 'error') {
+      findings.push({
+        code: 'TWITCH_MEDIA_UNREACHABLE',
+        severity: 'warning',
+        title: 'Серверы Twitch HLS недоступны',
+        detail: check.mediaStream.error || 'Не удалось установить соединение с серверами доставки видео Twitch через туннель.',
+        evidence: {
+          twitchHlsReachable: false
+        }
+      })
+    }
+  }
+
   const UUID_REGEX = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi
   for (const f of findings) {
     if (typeof f.detail === 'string') f.detail = f.detail.replace(UUID_REGEX, '[REDACTED_UUID]')
@@ -1736,6 +1775,255 @@ export async function withHandshakeWorkerLock<T>(
 }
 
 /**
+ * Helper: Probe media endpoint over SOCKS proxy
+ */
+async function verifyMediaEndpointViaSocks(
+  socks: { host: string; port: number },
+  endpoint: { host: string; port: number },
+  timeoutMs: number,
+  signal?: AbortSignal
+): Promise<{ reachable: boolean; statusCode?: number; latencyMs: number; error?: string }> {
+  const started = Date.now()
+  let sock: net.Socket | null = null
+  let tlsSock: tls.TLSSocket | null = null
+  try {
+    sock = await openTcpViaSocks(socks, endpoint.host, endpoint.port, timeoutMs, signal)
+    return await new Promise((resolve) => {
+      let settled = false
+      const timer = setTimeout(() => {
+        finish(false, undefined, 'TLS handshake timeout')
+      }, timeoutMs)
+
+      const finish = (reachable: boolean, statusCode?: number, error?: string) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        try { tlsSock?.destroy() } catch {}
+        try { sock?.destroy() } catch {}
+        resolve({
+          reachable,
+          statusCode,
+          latencyMs: Date.now() - started,
+          error
+        })
+      }
+
+      if (signal?.aborted) {
+        finish(false, undefined, 'Cancelled')
+        return
+      }
+
+      tlsSock = tls.connect({
+        socket: sock ?? undefined,
+        servername: endpoint.host,
+        rejectUnauthorized: false
+      })
+
+      tlsSock.once('secureConnect', () => {
+        tlsSock?.write(
+          `HEAD / HTTP/1.1\r\nHost: ${endpoint.host}\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\nConnection: close\r\n\r\n`
+        )
+      })
+
+      let buffer = ''
+      tlsSock.on('data', (chunk) => {
+        buffer += chunk.toString('utf8')
+        const match = buffer.match(/^HTTP\/1\.[01] (\d{3})\b/)
+        if (match) {
+          const code = parseInt(match[1], 10)
+          finish(true, code)
+        }
+      })
+
+      tlsSock.once('error', (err) => {
+        finish(false, undefined, err.message)
+      })
+
+      tlsSock.once('end', () => {
+        if (!settled) {
+          const match = buffer.match(/^HTTP\/1\.[01] (\d{3})\b/)
+          if (match) {
+            finish(true, parseInt(match[1], 10))
+          } else {
+            finish(buffer.length > 0, undefined, buffer.length === 0 ? 'Empty response' : undefined)
+          }
+        }
+      })
+    })
+  } catch (err: any) {
+    if (sock) {
+      try { (sock as net.Socket).destroy() } catch {}
+    }
+    return {
+      reachable: false,
+      latencyMs: Date.now() - started,
+      error: err?.message || 'Connection failed'
+    }
+  }
+}
+
+/**
+ * Helper: Probe media endpoint directly via TLS
+ */
+async function verifyMediaEndpointDirect(
+  endpoint: { host: string; port: number },
+  timeoutMs: number,
+  signal?: AbortSignal
+): Promise<{ reachable: boolean; statusCode?: number; latencyMs: number; error?: string }> {
+  const started = Date.now()
+  let tlsSock: tls.TLSSocket | null = null
+  return new Promise((resolve) => {
+    let settled = false
+    const timer = setTimeout(() => {
+      finish(false, undefined, 'Direct TLS timeout')
+    }, timeoutMs)
+
+    const finish = (reachable: boolean, statusCode?: number, error?: string) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      try { tlsSock?.destroy() } catch {}
+      resolve({
+        reachable,
+        statusCode,
+        latencyMs: Date.now() - started,
+        error
+      })
+    }
+
+    if (signal?.aborted) {
+      finish(false, undefined, 'Cancelled')
+      return
+    }
+
+    try {
+      tlsSock = tls.connect({
+        host: endpoint.host,
+        port: endpoint.port,
+        servername: endpoint.host,
+        rejectUnauthorized: false
+      })
+
+      tlsSock.once('secureConnect', () => {
+        tlsSock?.write(
+          `HEAD / HTTP/1.1\r\nHost: ${endpoint.host}\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\nConnection: close\r\n\r\n`
+        )
+      })
+
+      let buffer = ''
+      tlsSock.on('data', (chunk) => {
+        buffer += chunk.toString('utf8')
+        const match = buffer.match(/^HTTP\/1\.[01] (\d{3})\b/)
+        if (match) {
+          finish(true, parseInt(match[1], 10))
+        }
+      })
+
+      tlsSock.once('error', (err) => {
+        finish(false, undefined, err.message)
+      })
+
+      tlsSock.once('end', () => {
+        if (!settled) {
+          const match = buffer.match(/^HTTP\/1\.[01] (\d{3})\b/)
+          if (match) {
+            finish(true, parseInt(match[1], 10))
+          } else {
+            finish(buffer.length > 0, undefined, buffer.length === 0 ? 'Empty response' : undefined)
+          }
+        }
+      })
+    } catch (err: any) {
+      finish(false, undefined, err.message)
+    }
+  })
+}
+
+/**
+ * Stage: Media Stream Diagnostics (Twitch HLS & QUIC Fallback)
+ * Tests reachability of Twitch CDN / HLS endpoints through the proxy and checks
+ * whether QUIC blackhole risk (Twitch Error #2000) is mitigated.
+ */
+export async function probeMediaStream(
+  profile?: ServerProfile | null,
+  socksPort?: number,
+  signal?: AbortSignal
+): Promise<LiveMediaStreamDiagnostics> {
+  const started = Date.now()
+  if (signal?.aborted) {
+    return { status: 'skipped', durationMs: 0, error: 'Cancelled' }
+  }
+
+  const outbound = profile?.outbound || (tunController.getStatus().running ? (serverPicker.getActiveProfile()?.outbound ?? null) : null)
+  const isUdpCapable = outbound ? isVpnOutboundUdpCapable(outbound) : false
+  const quicBlocked = outbound ? shouldBlockQuicUdp443(outbound, 'socks5', true) : false
+
+  const quicFallbackGuarded = isUdpCapable || quicBlocked
+  const error2000Risk = Boolean(outbound && !isUdpCapable && !quicBlocked)
+
+  const tunRunning = tunController.getStatus().running
+  const effectiveSocksPort = socksPort || (tunRunning ? getDirectProxyPort() : null)
+
+  const endpoints = [
+    { name: 'usher.ttvnw.net (HLS Origin)', host: 'usher.ttvnw.net', port: 443 },
+    { name: 'static.twitchcdn.net (Twitch CDN)', host: 'static.twitchcdn.net', port: 443 }
+  ]
+
+  const testedEndpoints: Array<{
+    endpoint: string
+    reachable: boolean
+    latencyMs?: number
+    protocol?: string
+    error?: string
+  }> = []
+
+  let anyReachable = false
+
+  for (const ep of endpoints) {
+    if (signal?.aborted) break
+    const result = effectiveSocksPort
+      ? await verifyMediaEndpointViaSocks({ host: '127.0.0.1', port: effectiveSocksPort }, ep, 3500, signal)
+      : await verifyMediaEndpointDirect(ep, 3500, signal)
+
+    testedEndpoints.push({
+      endpoint: ep.name,
+      reachable: result.reachable,
+      latencyMs: result.latencyMs,
+      protocol: result.reachable ? 'TLS 1.3 / TCP' : undefined,
+      error: result.error
+    })
+    if (result.reachable) anyReachable = true
+  }
+
+  const durationMs = Date.now() - started
+  let status: 'ok' | 'warning' | 'error' | 'skipped' = 'ok'
+  let detail = ''
+
+  if (!anyReachable && testedEndpoints.length > 0) {
+    status = 'error'
+    detail = 'Серверы Twitch HLS / CDN недоступны через данный туннель.'
+  } else if (error2000Risk) {
+    status = 'warning'
+    detail = 'Обнаружен риск ошибки Twitch #2000: TCP-only профиль не блокирует QUIC (UDP/443).'
+  } else {
+    status = 'ok'
+    detail = isUdpCapable
+      ? 'HLS медиапотоки доступны. Профиль поддерживает UDP/QUIC.'
+      : 'HLS медиапотоки защищены. Защита от QUIC blackhole активна (UDP/443 guard блокирует QUIC, fallback на HTTPS/TCP).'
+  }
+
+  return {
+    status,
+    durationMs,
+    twitchHlsReachable: anyReachable,
+    quicFallbackGuarded,
+    error2000Risk,
+    testedEndpoints,
+    detail
+  }
+}
+
+/**
  * Stage 8: Tunnel Handshake & Fresh Egress Probe
  * Spawns an isolated ephemeral proxy instance, verifies end-to-end handshake,
  * and requests exit IPs from dual independent reflectors (including IPv6 reflector).
@@ -1744,7 +2032,7 @@ export async function probeTunnelHandshakeAndEgress(
   profile?: ServerProfile | null,
   endpointIp?: string,
   signal?: AbortSignal
-): Promise<{ handshake: TunnelHandshakeResult; egress: LiveEgressResult }> {
+): Promise<{ handshake: TunnelHandshakeResult; egress: LiveEgressResult; mediaStream: LiveMediaStreamDiagnostics }> {
   const started = Date.now()
   if (!profile || !profile.outbound || typeof profile.outbound !== 'object') {
     return {
@@ -1759,6 +2047,11 @@ export async function probeTunnelHandshakeAndEgress(
         durationMs: 0,
         reflectors: [],
         error: 'Проверка egress пропущена: профиль не настроен'
+      },
+      mediaStream: {
+        status: 'skipped',
+        durationMs: 0,
+        detail: 'Профиль не выбран'
       }
     }
   }
@@ -1776,6 +2069,11 @@ export async function probeTunnelHandshakeAndEgress(
         durationMs: 0,
         reflectors: [],
         error: 'Cancelled'
+      },
+      mediaStream: {
+        status: 'skipped',
+        durationMs: 0,
+        error: 'Cancelled'
       }
     }
   }
@@ -1785,7 +2083,8 @@ export async function probeTunnelHandshakeAndEgress(
       if (signal?.aborted) {
         return {
           handshake: { status: 'skipped', durationMs: 0, protocol: profile?.protocol, error: 'Cancelled' },
-          egress: { status: 'skipped', durationMs: 0, reflectors: [], error: 'Cancelled' }
+          egress: { status: 'skipped', durationMs: 0, reflectors: [], error: 'Cancelled' },
+          mediaStream: { status: 'skipped', durationMs: 0, error: 'Cancelled' }
         }
       }
 
@@ -1802,6 +2101,11 @@ export async function probeTunnelHandshakeAndEgress(
             durationMs: 0,
             reflectors: [],
             error: 'Проверка egress пропущена: профиль не настроен'
+          },
+          mediaStream: {
+            status: 'skipped',
+            durationMs: 0,
+            detail: 'Профиль не выбран'
           }
         }
       }
@@ -1878,6 +2182,11 @@ export async function probeTunnelHandshakeAndEgress(
               status: 'skipped',
               durationMs: 0,
               reflectors: [],
+              error: 'Движок туннеля не найден'
+            },
+            mediaStream: {
+              status: 'skipped',
+              durationMs: 0,
               error: 'Движок туннеля не найден'
             }
           }
@@ -2105,7 +2414,21 @@ export async function probeTunnelHandshakeAndEgress(
           underlayPath: 'route-selected'
         }
 
-        return { handshake, egress }
+        let mediaStream: LiveMediaStreamDiagnostics = {
+          status: 'skipped',
+          durationMs: 0
+        }
+        try {
+          mediaStream = await probeMediaStream(profile, inboundPort, signal)
+        } catch (mErr: any) {
+          mediaStream = {
+            status: 'error',
+            durationMs: 0,
+            error: mErr?.message || 'Сбой проверки медиапотоков'
+          }
+        }
+
+        return { handshake, egress, mediaStream }
       } catch (err: any) {
         let diskLogs = ''
         if (workDir) {
@@ -2134,6 +2457,11 @@ export async function probeTunnelHandshakeAndEgress(
             status: 'skipped',
             durationMs: 0,
             reflectors: [],
+            error: `Рукопожатие завершилось ошибкой (${classified})`
+          },
+          mediaStream: {
+            status: 'skipped',
+            durationMs: 0,
             error: `Рукопожатие завершилось ошибкой (${classified})`
           }
         }
@@ -2171,6 +2499,11 @@ export async function probeTunnelHandshakeAndEgress(
         status: isCancelled ? 'skipped' : 'timeout',
         durationMs: 0,
         reflectors: [],
+        error: queueErr?.message || 'Очередь worker завершилась ошибкой'
+      },
+      mediaStream: {
+        status: isCancelled ? 'skipped' : 'error',
+        durationMs: 0,
         error: queueErr?.message || 'Очередь worker завершилась ошибкой'
       }
     }
@@ -2498,7 +2831,7 @@ export async function runLiveServerCheck(
 
   const checkSignal = deadlineController.signal
 
-  const totalStages = 11
+  const totalStages = 12
   let completedStages = 0
   let sequence = 0
 
@@ -2643,16 +2976,18 @@ export async function runLiveServerCheck(
       ? infraSettled.value
       : { status: 'error', endpointCountry, error: 'Infrastructure probe failed' }
 
-    // 3. Tunnel Handshake & Fresh Egress Probes
+    // 3. Tunnel Handshake, Fresh Egress & Media Stream Probes
     reportStage('handshake', 'running')
     reportStage('egress', 'running')
-    const { handshake: handshakeRes, egress: egressRes } = await probeTunnelHandshakeAndEgress(
+    reportStage('mediaStream', 'running')
+    const { handshake: handshakeRes, egress: egressRes, mediaStream: mediaStreamRes } = await probeTunnelHandshakeAndEgress(
       matchedProfile,
       primaryIp,
       checkSignal
     )
     reportStage('handshake', handshakeRes.status === 'ok' ? 'completed' : handshakeRes.status === 'skipped' ? 'skipped' : 'failed')
     reportStage('egress', egressRes.status === 'ok' ? 'completed' : egressRes.status === 'skipped' ? 'skipped' : 'failed')
+    reportStage('mediaStream', mediaStreamRes.status === 'ok' ? 'completed' : mediaStreamRes.status === 'skipped' ? 'skipped' : 'failed')
 
     // 4. Windows Path Confirmation & PMTU Probes
     reportStage('path', 'running')
@@ -2696,6 +3031,7 @@ export async function runLiveServerCheck(
       infrastructure: infraRes,
       handshake: handshakeRes,
       egress: egressRes,
+      mediaStream: mediaStreamRes,
       pathDiagnostics: pathRes,
       pmtu: pmtuRes
     }
