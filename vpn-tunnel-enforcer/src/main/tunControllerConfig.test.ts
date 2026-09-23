@@ -343,21 +343,29 @@ describe('generateSingboxConfig stealth mode', () => {
 // ─── UDP blocking ─────────────────────────────────────────────────────────────
 
 describe('generateSingboxConfig UDP rules', () => {
-  it('blocks UDP/443 (QUIC) and public UDP for TCP-only VLESS profiles to prevent Twitch Error #2000', () => {
-    // VLESS Reality without packet_encoding cannot carry UDP. Leaving UDP/443 unblocked causes
-    // Twitch HLS streaming to blackhole and throw Error #2000 in Chromium/Yandex.
-    for (const outbound of [realityOutbound, plainTlsOutbound]) {
-      const cfg = gen({ outbound: { ...outbound } })
-      const quicBlock = cfg.route.rules.some(
-        (r) => r.network === 'udp' && r.port === 443 && r.action === 'reject'
-      )
-      const udpBlockAll = cfg.route.rules.some(
-        (r) => r.network === 'udp' && r.action === 'reject' && r.port === undefined
-      )
-      expect(quicBlock).toBe(true)
-      expect(udpBlockAll).toBe(true)
-      expect(cfg.route.final).toBe('proxy-out')
-    }
+  it('blocks all UDP only when a VLESS profile is explicitly TCP-only', () => {
+    const cfg = gen({ outbound: { ...realityOutbound } })
+    const quicBlock = cfg.route.rules.some(
+      (r) => r.network === 'udp' && r.port === 443 && r.action === 'reject'
+    )
+    const udpBlockAll = cfg.route.rules.some(
+      (r) => r.network === 'udp' && r.action === 'reject' && r.port === undefined
+    )
+    expect(quicBlock).toBe(true)
+    expect(udpBlockAll).toBe(true)
+    expect(cfg.route.final).toBe('proxy-out')
+  })
+
+  it('keeps general UDP available on default VLESS while falling QUIC back to TCP', () => {
+    const cfg = gen({ outbound: { ...plainTlsOutbound } })
+    const quicBlock = cfg.route.rules.some(
+      (r) => r.network === 'udp' && r.port === 443 && r.action === 'reject'
+    )
+    const udpBlockAll = cfg.route.rules.some(
+      (r) => r.network === 'udp' && r.action === 'reject' && r.port === undefined
+    )
+    expect(quicBlock).toBe(true)
+    expect(udpBlockAll).toBe(false)
   })
 
   it('blocks UDP/443 (QUIC) for HTTP proxy mode', () => {
@@ -401,11 +409,15 @@ describe('generateSingboxConfig UDP rules', () => {
     expect(isVpnOutboundUdpCapable({ type: 'shadowsocks' })).toBe(true)
     expect(isVpnOutboundUdpCapable({ type: 'vless', packet_encoding: 'xudp' })).toBe(true)
     expect(isVpnOutboundUdpCapable({ type: 'vless', packet_encoding: 'packetaddr' })).toBe(true)
-    expect(isVpnOutboundUdpCapable({ type: 'vless' })).toBe(false)
-    expect(isVpnOutboundUdpCapable({ type: 'vless', tls: { reality: { enabled: true } } })).toBe(false)
-    expect(isVpnOutboundUdpCapable({ type: 'vmess' })).toBe(false)
+    expect(isVpnOutboundUdpCapable({ type: 'vless' })).toBe(true)
+    expect(isVpnOutboundUdpCapable({ type: 'vless', packet_encoding: '' })).toBe(true)
+    expect(isVpnOutboundUdpCapable({ type: 'vless', tls: { reality: { enabled: true } } })).toBe(true)
+    expect(isVpnOutboundUdpCapable({ type: 'vless', network: 'tcp' })).toBe(false)
+    expect(isVpnOutboundUdpCapable({ type: 'vless', network: ['tcp'] })).toBe(false)
+    expect(isVpnOutboundUdpCapable({ type: 'vless', network: ['tcp', 'udp'] })).toBe(true)
+    expect(isVpnOutboundUdpCapable({ type: 'vmess' })).toBe(true)
     expect(isVpnOutboundUdpCapable({ type: 'vmess', packet_encoding: 'xudp' })).toBe(true)
-    expect(isVpnOutboundUdpCapable({ type: 'trojan' })).toBe(false)
+    expect(isVpnOutboundUdpCapable({ type: 'trojan' })).toBe(true)
     expect(isVpnOutboundUdpCapable({ type: 'http' })).toBe(false)
     expect(isVpnOutboundUdpCapable({ type: 'hysteria2', network: 'tcp' })).toBe(false)
 

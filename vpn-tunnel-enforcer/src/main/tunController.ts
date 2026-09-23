@@ -782,8 +782,13 @@ export function isVpnOutboundUdpCapable(outbound: Record<string, any>): boolean 
   if (!outbound || typeof outbound !== 'object') return false
   const type = String(outbound.type || '').toLowerCase()
 
-  // An explicit network: "tcp" configuration means UDP cannot be relayed over this outbound
-  if (typeof outbound.network === 'string' && outbound.network.toLowerCase() === 'tcp') {
+  // Sing-box accepts a network list; UDP is unavailable only when the configured list excludes it.
+  const configuredNetworks = Array.isArray(outbound.network)
+    ? outbound.network.map((network: unknown) => String(network).trim().toLowerCase())
+    : typeof outbound.network === 'string'
+      ? outbound.network.toLowerCase().split(',').map((network: string) => network.trim())
+      : null
+  if (configuredNetworks && !configuredNetworks.includes('udp')) {
     return false
   }
 
@@ -797,22 +802,16 @@ export function isVpnOutboundUdpCapable(outbound: Record<string, any>): boolean 
     return true
   }
 
-  // VLESS:
-  // In sing-box and Xray, VLESS over TCP (including Reality) requires packet_encoding ('xudp' or 'packetaddr')
-  // to relay UDP datagrams. Without packet encoding, UDP packets blackhole into the proxy, breaking Twitch/QUIC.
+  // sing-box defaults VLESS packet_encoding to xudp. An explicitly empty value uses
+  // the standard packet connection path, which still accepts UDP packets.
   if (type === 'vless') {
-    const pe = String(outbound.packet_encoding || '').toLowerCase()
-    return pe === 'xudp' || pe === 'packetaddr'
+    const pe = outbound.packet_encoding
+    return pe == null || pe === '' || String(pe).toLowerCase() === 'xudp' || String(pe).toLowerCase() === 'packetaddr'
   }
 
-  // VMess & Trojan:
-  // If packet_encoding is configured ('xudp' or 'packetaddr'), UDP is supported.
-  // Reality on Trojan/VMess without packet_encoding cannot carry UDP.
+  // VMess and Trojan expose UDP packet-connection paths without packet_encoding too.
   if (type === 'vmess' || type === 'trojan') {
-    const pe = String(outbound.packet_encoding || '').toLowerCase()
-    if (pe === 'xudp' || pe === 'packetaddr') return true
-    if (outbound.tls && typeof outbound.tls === 'object' && outbound.tls.reality) return false
-    return false
+    return true
   }
 
   // Shadowsocks natively supports UDP unless restricted to tcp
@@ -839,13 +838,16 @@ export function shouldBlockQuicUdp443(
 ): boolean {
   if (proxyType === 'http') return true
   if (isDirectVpn) {
-    // For direct VPN tunnels:
-    // If the outbound is genuinely UDP-capable (Hysteria2, TUIC, WireGuard, or VLESS with xudp),
-    // QUIC (UDP/443) rides the tunnel natively without stall.
-    // If the outbound cannot carry UDP (such as TCP-only VLESS Reality without packet_encoding,
-    // or explicit network: 'tcp'), we MUST block UDP/443 so Chromium/Yandex fails fast on QUIC
-    // and falls back to HTTPS/TCP immediately, preventing Twitch Error #2000.
-    return !isVpnOutboundUdpCapable(proxyOutbound)
+    if (!isVpnOutboundUdpCapable(proxyOutbound)) return true
+
+    // Some VLESS servers accept the TCP tunnel but do not relay XUDP reliably. Keep QUIC
+    // on TCP fallback unless the profile explicitly opts into a known UDP packet encoding.
+    if (String(proxyOutbound?.type || '').toLowerCase() === 'vless') {
+      const packetEncoding = String(proxyOutbound.packet_encoding || '').toLowerCase()
+      return packetEncoding !== 'xudp' && packetEncoding !== 'packetaddr'
+    }
+
+    return false
   }
   return true
 }
@@ -1138,11 +1140,10 @@ export function generateSingboxConfig(
             }]
             : []
         ),
-        // QUIC handling (see shouldBlockQuicUdp443): for local HTTP-proxy
-        // chains we still drop UDP/443 before sniffing. For a native tunnel
-        // (directVpn) this list is empty so QUIC rides the tunnel instead —
-        // rejecting it there does not fast-fail the browser to TCP and instead
-        // causes the multi-second "YouTube hangs then springs to life" stalls.
+        // QUIC handling (see shouldBlockQuicUdp443): drop UDP/443 for HTTP-proxy
+        // chains and VLESS profiles without explicit packet encoding so browsers
+        // fall back to HTTPS/TCP when the remote server may not relay XUDP reliably.
+        // Native UDP tunnel protocols and explicitly encoded VLESS keep QUIC enabled.
         ...quicUdp443BlockRules,
         ...(needsSniff ? [{ action: 'sniff' }] : []),
         // DNS from captured apps must be hijacked BEFORE any blanket UDP

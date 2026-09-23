@@ -36,12 +36,12 @@ describe('Twitch HLS & QUIC Error #2000 mitigation', () => {
       expect(isVpnOutboundUdpCapable({ type: 'vless', packet_encoding: 'packetaddr' })).toBe(true)
     })
 
-    it('identifies standard VLESS Reality without packet encoding as NOT UDP-capable', () => {
+    it('identifies VLESS Reality without packet encoding as UDP-capable by sing-box default', () => {
       expect(isVpnOutboundUdpCapable({
         type: 'vless',
         tls: { enabled: true, reality: { enabled: true, public_key: 'abc' } }
-      })).toBe(false)
-      expect(isVpnOutboundUdpCapable({ type: 'vless' })).toBe(false)
+      })).toBe(true)
+      expect(isVpnOutboundUdpCapable({ type: 'vless' })).toBe(true)
     })
 
     it('respects explicit network: "tcp" as NOT UDP-capable even for UDP protocols', () => {
@@ -65,7 +65,7 @@ describe('Twitch HLS & QUIC Error #2000 mitigation', () => {
   })
 
   describe('shouldBlockQuicUdp443', () => {
-    it('blocks QUIC (UDP/443) for directVpn when outbound is TCP-only (prevents Twitch #2000)', () => {
+    it('blocks QUIC for default VLESS to avoid unreliable server-side XUDP while preserving other UDP', () => {
       const vlessReality = {
         type: 'vless',
         server: '1.2.3.4',
@@ -88,7 +88,7 @@ describe('Twitch HLS & QUIC Error #2000 mitigation', () => {
   })
 
   describe('probeMediaStream diagnostics evaluation', () => {
-    it('evaluates error2000Risk as false and quicFallbackGuarded as true for TCP-only VLESS when guarded', async () => {
+    it('reports QUIC fallback guard for default VLESS even though the protocol can carry UDP', async () => {
       const profile: ServerProfile = {
         id: 'prof-vless-reality',
         name: 'VLESS Reality Node',
@@ -108,6 +108,7 @@ describe('Twitch HLS & QUIC Error #2000 mitigation', () => {
       expect(result.quicFallbackGuarded).toBe(true)
       expect(result.error2000Risk).toBe(false)
       expect(result.detail).toContain('Защита от QUIC blackhole активна')
+      expect(isVpnOutboundUdpCapable(profile.outbound!)).toBe(true)
     })
 
     it('evaluates UDP capable profile as quicFallbackGuarded without risk', async () => {

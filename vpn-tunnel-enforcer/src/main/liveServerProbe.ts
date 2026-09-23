@@ -2007,9 +2007,11 @@ export async function probeMediaStream(
     detail = 'Обнаружен риск ошибки Twitch #2000: TCP-only профиль не блокирует QUIC (UDP/443).'
   } else {
     status = 'ok'
-    detail = isUdpCapable
-      ? 'HLS медиапотоки доступны. Профиль поддерживает UDP/QUIC.'
-      : 'HLS медиапотоки защищены. Защита от QUIC blackhole активна (UDP/443 guard блокирует QUIC, fallback на HTTPS/TCP).'
+    detail = quicBlocked
+      ? 'HLS медиапотоки защищены. Защита от QUIC blackhole активна (UDP/443 guard блокирует QUIC, fallback на HTTPS/TCP).'
+      : isUdpCapable
+        ? 'HLS медиапотоки доступны. Профиль поддерживает UDP/QUIC.'
+        : 'HLS медиапотоки доступны, но возможность UDP/QUIC не удалось определить.'
   }
 
   return {
