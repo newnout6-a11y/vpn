@@ -88,6 +88,16 @@ describe('buildActiveProfileDiagnosticItems', () => {
     expect(source).toContain('isBenignAppLogWarning(row)')
   })
 
+  it('keeps A and AAAA DNS probes independent', () => {
+    const source = systemDiagnosticsSource()
+    const dnsStart = source.indexOf("Resolve-DnsName example.com -Type A")
+    const dnsBlock = source.slice(dnsStart, source.indexOf("ConvertTo-Json -Compress", dnsStart))
+
+    expect(dnsBlock).toContain('-QuickTimeout')
+    expect(dnsBlock).toContain("try { $records += Resolve-DnsName example.com -Type AAAA")
+    expect(dnsBlock).toContain('catch {}')
+  })
+
   it('reports missing active profile without warning', () => {
     const [item] = buildActiveProfileDiagnosticItems(null)
     expect(item.id).toBe('active-profile-capabilities')

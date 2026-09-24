@@ -442,8 +442,8 @@ Get-NetRoute -ErrorAction SilentlyContinue |
   try {
     const raw = await ps(`
 $records=@();
-$records += Resolve-DnsName example.com -Type A -ErrorAction Stop;
-$records += Resolve-DnsName example.com -Type AAAA -ErrorAction SilentlyContinue;
+try { $records += Resolve-DnsName example.com -Type A -QuickTimeout -ErrorAction Stop } catch {}
+try { $records += Resolve-DnsName example.com -Type AAAA -QuickTimeout -ErrorAction Stop } catch {}
 $records | Where-Object { $_.IPAddress } | Select-Object Type,IPAddress | ConvertTo-Json -Compress
 `, 10000)
     const rows = asArray<any>(parseJson(raw))
