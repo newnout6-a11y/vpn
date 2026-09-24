@@ -629,7 +629,7 @@ function parseVless(line: string): VpnProfile {
   const transport = buildTransport(params)
   if (transport) outbound.transport = transport
   const packetEncoding = param(params, 'packetEncoding', 'packet_encoding')
-  if (packetEncoding) outbound.packet_encoding = packetEncoding
+  if (packetEncoding !== null) outbound.packet_encoding = packetEncoding
   const muxParam = param(params, 'mux', 'multiplex')
   const paddingParam = param(params, 'padding')
   if (muxParam !== null || paddingParam !== null) {
@@ -1617,6 +1617,12 @@ function clashProxyToProfile(raw: Record<string, any>): VpnProfile | null {
 
   if (type === 'vless' || type === 'vmess') {
     outbound.uuid = stringValue(raw.uuid) || stringValue(raw.id) || ''
+    if (type === 'vless') {
+      outbound.encryption = stringValue(raw.encryption) || 'none'
+      if (Object.prototype.hasOwnProperty.call(raw, 'packet-encoding') || Object.prototype.hasOwnProperty.call(raw, 'packet_encoding')) {
+        outbound.packet_encoding = stringValue(raw['packet-encoding']) || stringValue(raw.packet_encoding)
+      }
+    }
     if (type === 'vmess') {
       outbound.security = stringValue(raw.cipher) || stringValue(raw.security) || 'auto'
       outbound.alter_id = Number(raw.alterId || raw.alter_id || 0)
@@ -1662,6 +1668,7 @@ function clashProxyToProfile(raw: Record<string, any>): VpnProfile | null {
   if (tls) outbound.tls = tls
   const transport = buildTransportFromClash(raw)
   if (transport) outbound.transport = transport
+  if (raw.udp !== undefined) outbound.udp = boolValue(raw.udp)
 
   return {
     name: stringValue(raw.name) || type.toUpperCase(),
@@ -2671,7 +2678,7 @@ function vlessToUri(name: string, outbound: Record<string, any>): string {
   appendTlsParams(params, outbound.tls, String(outbound.server || ''))
   appendTransportParams(params, outbound.transport)
   if (typeof outbound.flow === 'string' && outbound.flow) params.set('flow', outbound.flow)
-  if (typeof outbound.packet_encoding === 'string' && outbound.packet_encoding) {
+  if (Object.prototype.hasOwnProperty.call(outbound, 'packet_encoding') && typeof outbound.packet_encoding === 'string') {
     params.set('packetEncoding', outbound.packet_encoding)
   }
   const uuid = encodeURIComponent(String(outbound.uuid || ''))
@@ -2809,6 +2816,21 @@ function tuicToUri(name: string, outbound: Record<string, any>): string {
   return `tuic://${uuid}:${password}@${authority}?${params.toString()}${nameToFragment(name)}`
 }
 
+function wireguardToUri(name: string, outbound: Record<string, any>): string {
+  const params = new URLSearchParams()
+  if (typeof outbound.peer_public_key === 'string' && outbound.peer_public_key) params.set('publicKey', outbound.peer_public_key)
+  if (typeof outbound.pre_shared_key === 'string' && outbound.pre_shared_key) params.set('psk', outbound.pre_shared_key)
+  const addresses = Array.isArray(outbound.local_address) ? outbound.local_address.filter((value: unknown) => typeof value === 'string' && value) : []
+  if (addresses.length > 0) params.set('address', addresses.join(','))
+  const dns = Array.isArray(outbound.dns_servers) ? outbound.dns_servers.filter((value: unknown) => typeof value === 'string' && value) : []
+  if (dns.length > 0) params.set('dns', dns.join(','))
+  if (Number.isFinite(Number(outbound.mtu)) && Number(outbound.mtu) > 0) params.set('mtu', String(Number(outbound.mtu)))
+  const privateKey = encodeURIComponent(String(outbound.private_key || ''))
+  const authority = buildHostPort(String(outbound.server || ''), outbound.server_port)
+  const query = params.toString()
+  return `wireguard://${privateKey}@${authority}${query ? `?${query}` : ''}${nameToFragment(name)}`
+}
+
 /**
  * Renders a single sing-box outbound back to its scheme URI.
  *
@@ -2830,6 +2852,7 @@ export function exportOutboundToUri(profile: { name: string; protocol: string; o
     case 'anytls':      return anyTlsToUri(profile.name, out)
     case 'shadowtls':   return shadowTlsToUri(profile.name, out)
     case 'tuic':        return tuicToUri(profile.name, out)
+    case 'wireguard':   return wireguardToUri(profile.name, out)
     default:            return null
   }
 }

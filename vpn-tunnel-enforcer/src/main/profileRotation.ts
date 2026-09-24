@@ -173,8 +173,9 @@ async function buildAvailabilityMap(profileIds: string[]): Promise<Record<string
       continue
     }
 
-    // Use cached status if recently checked (within last 2 minutes)
-    if (!tunnelRunning && profile.lastChecked && Date.now() - profile.lastChecked < 120_000) {
+    // Use only a recent, explicit online/offline result. `unknown` and stale
+    // values must not make an unavailable profile eligible for rotation.
+    if (!tunnelRunning && profile.lastChecked && Date.now() - profile.lastChecked < 120_000 && profile.status === 'online') {
       map[id] = profile.status === 'online'
       continue
     }
@@ -187,6 +188,9 @@ async function buildAvailabilityMap(profileIds: string[]): Promise<Record<string
         status: profile.status,
         lastChecked: profile.lastChecked ?? null
       })
+      // While the tunnel is active a direct probe would be routed through the
+      // tunnel and cannot distinguish profiles. An explicit offline verdict is
+      // still authoritative; unknown is eligible for protected restart.
       map[id] = profile.enabled !== false && profile.status !== 'offline'
       continue
     }
@@ -374,8 +378,10 @@ function scheduleNextRotation(config: RotationConfig): void {
   const updatedConfig = { ...config, nextRotationAt }
   saveConfig(updatedConfig)
 
-  rotationTimer = setTimeout(async () => {
-    await performRotation()
+  rotationTimer = setTimeout(() => {
+    void performRotation().catch((err) => {
+      logEvent('error', 'profile-rotation', 'scheduled rotation failed', err)
+    })
   }, intervalMs)
 
   logEvent('debug', 'profile-rotation', 'next rotation scheduled', {

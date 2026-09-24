@@ -157,9 +157,12 @@ function getRules(): DomainRule[] {
 }
 
 function addRule(input: Omit<DomainRule, 'id' | 'hitCount'>): DomainRule {
+  if (!input || !['vpn', 'direct', 'block'].includes(input.action) || !Number.isFinite(Number(input.priority))) throw new Error('Invalid domain rule')
+  const normalizedPattern = normalizeDomainPattern(input.pattern)
+  if (!normalizedPattern || normalizedPattern.length > 253) throw new Error('Invalid domain pattern')
   const newRule: DomainRule = {
     ...input,
-    pattern: normalizeDomainPattern(input.pattern),
+    pattern: normalizedPattern,
     id: randomUUID(),
     hitCount: 0
   }
@@ -176,10 +179,13 @@ function updateRule(id: string, patch: Partial<DomainRule>): DomainRule {
     throw new Error(`Domain rule not found: ${id}`)
   }
 
+  if ('action' in patch && !['vpn', 'direct', 'block'].includes(String(patch.action))) throw new Error('Invalid domain action')
+  const normalizedPatchPattern = patch.pattern === undefined ? undefined : normalizeDomainPattern(patch.pattern)
+  if (normalizedPatchPattern !== undefined && (!normalizedPatchPattern || normalizedPatchPattern.length > 253)) throw new Error('Invalid domain pattern')
   const updated: DomainRule = {
     ...rules[index],
     ...patch,
-    pattern: patch.pattern ? normalizeDomainPattern(patch.pattern) : rules[index].pattern,
+    pattern: normalizedPatchPattern ?? rules[index].pattern,
     id, // id cannot be changed
     hitCount: sessionHitCounts.get(id) ?? rules[index].hitCount
   }
@@ -385,6 +391,7 @@ export function registerDomainRoutingIpcHandlers(): void {
   })
 
   ipcMain.handle('domain-routing:import', async (_event, filePath: string) => {
+    if (typeof filePath !== 'string' || !filePath.trim()) throw new Error('Invalid import path')
     const result = domainRoutingService.importFromFile(filePath)
     await hotReloadIfActive()
     return result

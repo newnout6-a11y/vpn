@@ -178,7 +178,7 @@ async function queryRegistryApps(
 $ErrorActionPreference='SilentlyContinue'
 $results=@()
 $root='${registryPath.replace(/'/g, "''")}'
-$hive=$root.Split('\\\\')[0]
+$hive=$root.Split('\\')[0]
 $subPath=$root.Substring($hive.Length+1)
 if($hive -eq 'HKLM'){$regHive='HKLM:'}else{$regHive='HKCU:'}
 $basePath="$regHive\\$subPath"

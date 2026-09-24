@@ -696,6 +696,8 @@ export interface DnsProfile {
   primary: string
   secondary: string
   type: 'plain' | 'doh' | 'dot'
+  primaryType?: 'plain' | 'doh' | 'dot'
+  secondaryType?: 'plain' | 'doh' | 'dot'
   isBuiltin: boolean
   isSelected?: boolean
 }

@@ -419,11 +419,18 @@ async function verifyAdaptiveConnection(): Promise<void> {
   }
 
   markAdaptiveVerifying()
-  await new Promise(resolve => setTimeout(resolve, 1200))
+  // Require a stable verification window before persisting adaptive learning.
+  // One transient successful request must not change the remembered mode.
+  await new Promise(resolve => setTimeout(resolve, 20_000))
   if (generation !== adaptiveVerificationGeneration || !tunController.getStatus().running) return
 
   const { tunnelHttpProbe } = await import('./serverPicker')
-  const latency = await tunnelHttpProbe(true)
+  let latency: number | null = null
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const sample = await tunnelHttpProbe(true)
+    if (sample !== null) latency = sample
+    if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 2500))
+  }
   if (generation !== adaptiveVerificationGeneration || !tunController.getStatus().running) return
   if (latency !== null) {
     markAdaptiveSuccess(context.profile)
@@ -1977,6 +1984,14 @@ app.whenReady().then(async () => {
   })
 
   handleLogged('rollback-tun-network-baseline', async () => {
+    if (tunController.getStatus().running) {
+      return {
+        success: true,
+        skipped: true,
+        blocked: true,
+        message: 'Отключите VPN перед откатом network baseline: активный TUN использует текущие DNS/proxy настройки.'
+      }
+    }
     return rollbackTunNetworkBaseline()
   })
 
@@ -2061,6 +2076,14 @@ app.whenReady().then(async () => {
   })
 
   handleLogged('network:rollback-adapter-lockdown', async () => {
+    if (tunController.getStatus().running) {
+      return {
+        rolledBack: false,
+        skipped: true,
+        blocked: true,
+        message: 'Отключите VPN перед откатом adapter lockdown: активный TUN использует текущие DNS/IPv6 настройки.'
+      }
+    }
     return rollbackPhysicalAdapterLockdownIfApplied('manual maintenance trigger')
   })
 
@@ -2280,7 +2303,9 @@ app.whenReady().then(async () => {
           startProtection(resolved.proxyAddr, resolved.proxyType).catch(err =>
             logEvent('error', 'scheduler', 'scheduled start failed', err)
           )
-        })
+        }).catch(err =>
+          logEvent('error', 'scheduler', 'scheduled proxy resolve failed', err)
+        )
       }
     },
     onDisconnect: (schedule) => {

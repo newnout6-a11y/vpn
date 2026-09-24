@@ -151,7 +151,9 @@ async function queryValue(key: string, value: string): Promise<string | null> {
 
 async function readManifest(): Promise<BackupManifest | null> {
   try {
-    return JSON.parse(await readFile(manifestPath(), 'utf8')) as BackupManifest
+    const value = JSON.parse(await readFile(manifestPath(), 'utf8')) as Partial<BackupManifest>
+    if (!value || !Number.isFinite(value.createdAt) || !Array.isArray(value.registryBackups) || !Array.isArray(value.fileBackups)) throw new Error('Malformed browser hardening manifest')
+    return value as BackupManifest
   } catch (err: any) {
     if (err?.code === 'ENOENT') return null
     throw err

@@ -215,6 +215,11 @@ export const themeManager = {
   },
 
   createTheme(theme: Omit<ThemeConfig, 'id' | 'isCustom'>): ThemeConfig {
+    if (!theme || typeof theme.name !== 'string' || !theme.name.trim() || !['light', 'dark', 'system'].includes(theme.mode) || !theme.colors || typeof theme.colors !== 'object') {
+      throw new Error('Invalid theme')
+    }
+    const colorValues = Object.values(theme.colors)
+    if (colorValues.some((value) => typeof value !== 'string' || !/^#[0-9a-f]{6}$/i.test(value))) throw new Error('Invalid theme colors')
     const newTheme: ThemeConfig = {
       ...theme,
       id: generateId(),

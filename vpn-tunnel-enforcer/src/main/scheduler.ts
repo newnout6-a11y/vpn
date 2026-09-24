@@ -226,6 +226,7 @@ function getSchedules(): ScheduleEntry[] {
 }
 
 function createSchedule(entry: Omit<ScheduleEntry, 'id'>): ScheduleEntry {
+  validateSchedule(entry)
   const newEntry: ScheduleEntry = {
     ...entry,
     id: randomUUID()
@@ -245,10 +246,19 @@ function updateSchedule(id: string, patch: Partial<ScheduleEntry>): ScheduleEntr
   }
 
   const updated: ScheduleEntry = { ...schedules[index], ...patch, id } // id cannot be changed
+  validateSchedule(updated)
   schedules[index] = updated
   schedulerStore.set('schedules', schedules)
   scheduleNextTimer()
   return updated
+}
+
+function validateSchedule(entry: Omit<ScheduleEntry, 'id'> | ScheduleEntry): void {
+  if (!entry || typeof entry.name !== 'string' || !entry.name.trim() || !Array.isArray(entry.days) || entry.days.some((d) => !Number.isInteger(d) || d < 0 || d > 6)) {
+    throw new Error('Invalid schedule')
+  }
+  if (parseTimeToMinutes(entry.startTime) !== parseTimeToMinutes(entry.startTime) || parseTimeToMinutes(entry.endTime) !== parseTimeToMinutes(entry.endTime)) throw new Error('Invalid schedule time')
+  if (!['hard', 'soft', 'direct'].includes(entry.mode)) throw new Error('Invalid schedule mode')
 }
 
 function deleteSchedule(id: string): void {

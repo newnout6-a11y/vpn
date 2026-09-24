@@ -6,6 +6,7 @@ import { join } from 'path'
 import { randomBytes, timingSafeEqual } from 'crypto'
 import { lookup } from 'dns/promises'
 import { isIP } from 'net'
+import Store from 'electron-store'
 import { serverPicker } from './serverPicker'
 import { logEvent } from './appLogger'
 import { cleanupManagedChildPidFile, removeManagedChildPidFile, writeManagedChildPidFile } from './managedChildProcess'
@@ -233,6 +234,17 @@ const rotationIdempotency = new Map<number, Map<string, ExternalProxyInstanceSta
 const firewallAllowCache = new Map<string, { checkedAt: number; result: Awaited<ReturnType<typeof ensureKillSwitchProgramAllowed>> }>()
 const firewallAllowInFlight = new Map<string, Promise<Awaited<ReturnType<typeof ensureKillSwitchProgramAllowed>>>>()
 const endpointResolutionCache = new Map<string, { address: string; expiresAt: number }>()
+const leaseStore = new Store<{ leases: ExternalProxyLease[] }>({ name: 'external-proxy-leases', defaults: { leases: [] } })
+
+for (const lease of leaseStore.get('leases')) {
+  if (lease && Number.isFinite(lease.expiresAt) && lease.expiresAt > Date.now() && typeof lease.leaseToken === 'string' && typeof lease.owner === 'string') {
+    leasesBySlot.set(lease.slot, lease)
+  }
+}
+
+function persistExternalProxyLeases(): void {
+  leaseStore.set('leases', [...leasesBySlot.values()])
+}
 
 const EXTERNAL_PROXY_DNS_TAG = 'dns-bootstrap'
 const EXTERNAL_PROXY_DNS_STRATEGY = 'ipv4_only'
@@ -377,6 +389,7 @@ function forgetExternalProxyLease(slot: number, leaseToken?: string): ExternalPr
   const lease = leasesBySlot.get(slot)
   if (!lease || (leaseToken && lease.leaseToken !== leaseToken)) return null
   leasesBySlot.delete(slot)
+  persistExternalProxyLeases()
   clearExternalProxyLeaseTimer(slot)
   return lease
 }
@@ -526,6 +539,7 @@ export async function reserveExternalProxy(options: ReserveExternalProxyOptions)
       expiresAt: Date.now() + ttlSeconds * 1_000
     }
     leasesBySlot.set(lease.slot, lease)
+    persistExternalProxyLeases()
     scheduleExternalProxyLeaseExpiry(lease)
     rememberExternalProxyRoute(owner, selected)
     logEvent('info', 'external-proxy', 'Buyer Search route reserved', {
@@ -545,6 +559,7 @@ export async function renewExternalProxyReservation(leaseToken: string, ttlSecon
     const lease = [...leasesBySlot.values()].find((candidate) => candidate.leaseToken === token)
     if (!lease) throw new ExternalProxyApiError('Unknown or expired lease token', 403)
     lease.expiresAt = Date.now() + normalizeLeaseTtlSeconds(ttlSeconds) * 1_000
+    persistExternalProxyLeases()
     scheduleExternalProxyLeaseExpiry(lease)
     return externalProxyReservation(lease)
   })
@@ -1917,14 +1932,17 @@ async function handleControlRequest(req: IncomingMessage, res: ServerResponse): 
   const path = url.pathname.replace(/^\/api\/external-proxy/, '')
   const wantsText = url.searchParams.get('format') === 'text' || url.searchParams.get('text') === '1'
 
+  const requiresToken = isExternalProxyMutationPath(path) || path === '/status' || path === '/' || path === '/instances' || path === '/list' || path === '/healthcheck'
   if (isExternalProxyMutationPath(path)) {
     if (req.method !== 'POST') {
       return send(res, 405, wantsText ? 'method-not-allowed' : controlError('method-not-allowed'), wantsText)
     }
-    if (!isValidExternalProxyControlToken(controlToken, requestControlToken(req))) {
-      return send(res, 401, wantsText ? 'unauthorized' : controlError('unauthorized'), wantsText)
-    }
-  } else if (req.method !== 'GET') {
+  } else if (requiresToken) {
+    if (req.method !== 'GET') return send(res, 405, wantsText ? 'method-not-allowed' : controlError('method-not-allowed'), wantsText)
+  }
+  if (requiresToken && !isValidExternalProxyControlToken(controlToken, requestControlToken(req))) {
+    return send(res, 401, wantsText ? 'unauthorized' : controlError('unauthorized'), wantsText)
+  } else if (!requiresToken && req.method !== 'GET') {
     return send(res, 405, wantsText ? 'method-not-allowed' : controlError('method-not-allowed'), wantsText)
   }
 

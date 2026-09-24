@@ -40,10 +40,20 @@ export const autoconfig = {
       const target = targets[id]
       if (target) {
         try {
-          results[id] = await target.apply(proxyAddr, proxyType)
-        } catch {
-          results[id] = false
-        }
+            results[id] = await target.apply(proxyAddr, proxyType)
+            if (!results[id]) {
+              for (const appliedId of Object.keys(results).filter((key) => results[key])) {
+                results[appliedId] = await (targets[appliedId]?.rollback() ?? Promise.resolve(false))
+              }
+              break
+            }
+          } catch {
+            results[id] = false
+            for (const appliedId of Object.keys(results).filter((key) => results[key])) {
+              results[appliedId] = await (targets[appliedId]?.rollback() ?? Promise.resolve(false))
+            }
+            break
+          }
       }
     }
     return results

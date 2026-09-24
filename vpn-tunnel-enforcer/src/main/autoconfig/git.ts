@@ -93,6 +93,7 @@ export const git = {
       } catch {
         backup = null
       }
+      if (!backup) return false
       await restoreGlobalProxy('http.proxy', backup?.httpProxy ?? null)
       await restoreGlobalProxy('https.proxy', backup?.httpsProxy ?? null)
       await unlink(backupPath()).catch(() => undefined)

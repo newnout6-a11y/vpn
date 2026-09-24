@@ -172,7 +172,9 @@ export const DnsSettings: React.FC = () => {
         name: formName.trim(),
         primary: formPrimary.trim(),
         secondary: formSecondary.trim(),
-        type: primaryResult.type
+        type: primaryResult.type,
+        primaryType: primaryResult.type,
+        secondaryType: formSecondary.trim() ? secondaryType : undefined
       })
 
       setProfiles((prev) => [...prev, newProfile])

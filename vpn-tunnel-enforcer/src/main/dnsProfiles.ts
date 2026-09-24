@@ -281,11 +281,21 @@ export function registerDnsHandlers(): void {
   // dns:create — creates a new custom DNS profile
   handleLogged('dns:create', async (_event, profile: Omit<DnsProfile, 'id' | 'isBuiltin'>) => {
     const raw = requirePlainObject(profile, 'profile')
+    const primary = requireString(raw.primary, 'profile.primary', { maxLength: 2048 })
+    const secondary = optionalString(raw.secondary, 'profile.secondary', { allowEmpty: true, maxLength: 2048 }) ?? ''
+    const primaryValidation = validateDnsAddress(primary)
+    if (!primaryValidation.valid) throw new Error(primaryValidation.error)
+    const secondaryValidation = secondary ? validateDnsAddress(secondary) : null
+    if (secondaryValidation && !secondaryValidation.valid) throw new Error(secondaryValidation.error)
+    const declaredType = requireEnum(raw.type, 'profile.type', ['plain', 'doh', 'dot'])
+    if (declaredType !== primaryValidation.type) throw new Error('profile.type must match profile.primary')
     const newProfile: DnsProfile = {
       name: requireString(raw.name, 'profile.name', { maxLength: 120 }),
-      primary: requireString(raw.primary, 'profile.primary', { maxLength: 2048 }),
-      secondary: optionalString(raw.secondary, 'profile.secondary', { allowEmpty: true, maxLength: 2048 }) ?? '',
-      type: requireEnum(raw.type, 'profile.type', ['plain', 'doh', 'dot']),
+      primary,
+      secondary,
+      type: declaredType,
+      primaryType: primaryValidation.type,
+      secondaryType: secondaryValidation?.type,
       id: generateId(),
       isBuiltin: false
     }
@@ -312,6 +322,17 @@ export function registerDnsHandlers(): void {
     if ('primary' in rawPatch) patch.primary = requireString(rawPatch.primary, 'patch.primary', { maxLength: 2048 })
     if ('secondary' in rawPatch) patch.secondary = optionalString(rawPatch.secondary, 'patch.secondary', { allowEmpty: true, maxLength: 2048 }) ?? ''
     if ('type' in rawPatch) patch.type = requireEnum(rawPatch.type, 'patch.type', ['plain', 'doh', 'dot'])
+    if ('primary' in rawPatch) {
+      const result = validateDnsAddress(patch.primary as string)
+      if (!result.valid) throw new Error(result.error)
+      patch.primaryType = result.type
+    }
+    if ('secondary' in rawPatch) {
+      const value = patch.secondary as string
+      const result = value ? validateDnsAddress(value) : null
+      if (result && !result.valid) throw new Error(result.error)
+      patch.secondaryType = result?.type
+    }
     const custom = getCustomProfiles()
     const index = custom.findIndex((p) => p.id === id)
 
@@ -323,6 +344,12 @@ export function registerDnsHandlers(): void {
     if (custom[index].isBuiltin) {
       throw new Error('Cannot modify built-in DNS profiles')
     }
+
+    const resultingPrimary = ('primary' in patch ? patch.primary : custom[index].primary) as string
+    const resultingType = ('type' in patch ? patch.type : custom[index].type) as DnsProfile['type']
+    const resultingPrimaryValidation = validateDnsAddress(resultingPrimary)
+    if (!resultingPrimaryValidation.valid) throw new Error(resultingPrimaryValidation.error)
+    if (resultingPrimaryValidation.type !== resultingType) throw new Error('profile.type must match profile.primary')
 
     const updated: DnsProfile = {
       ...custom[index],

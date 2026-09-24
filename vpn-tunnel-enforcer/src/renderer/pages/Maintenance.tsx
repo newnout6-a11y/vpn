@@ -3,7 +3,7 @@ import { Activity, CheckCircle2, Download, Loader2, ShieldCheck, TriangleAlert, 
 import { useAppStore } from '../store'
 import { MacCard, MacButton } from '../design-system'
 
-type MaintenanceAction = 'health-check' | 'auto-repair' | 'export-zip' | 'nuclear-reset'
+type MaintenanceAction = 'health-check' | 'auto-repair' | 'protection-test' | 'export-zip' | 'nuclear-reset'
 type HealthStatus = 'ok' | 'warn' | 'fail' | 'info'
 
 interface DiagnosticItem {
@@ -184,6 +184,14 @@ export function Maintenance() {
 
   const runAutoRepair = async () => {
     if (!window.confirm('Выполнить безопасную авто-починку? Будут затронуты только VPNTE firewall rules, VPNTE network baseline, VPNTE adapter lockdown, осиротевший VPNTE DNS и процессы VPNTE runtime.')) return
+    const tun = await window.electronAPI.getTunStatus()
+    if (tun.running) {
+      const message = 'Сначала отключите VPN: авто-починка не изменяет DNS, IPv6, baseline и firewall при активной защите.'
+      setLastResult(message)
+      addLog('warn', message)
+      useAppStore.getState().addGlobalToast('warning', 'Починка', message)
+      return
+    }
     setRunningAction('auto-repair')
     setStoredRepairSteps(AUTO_REPAIR_STEPS.map(step => ({ id: step.id, label: step.label, status: 'pending' })))
     addLog('warn', 'Починка: запуск безопасной авто-починки')
@@ -221,6 +229,41 @@ export function Maintenance() {
       const message = failed ? 'Авто-починка завершена с ошибками' : 'Авто-починка завершена'
       setLastResult(message)
       useAppStore.getState().addGlobalToast(failed ? 'warning' : 'success', 'Починка', message)
+    } finally {
+      setRunningAction(null)
+    }
+  }
+
+  const runProtectionTest = async () => {
+    setRunningAction('protection-test')
+    addLog('info', 'Починка: проверка leak-switch и маршрутизации')
+    try {
+      const tun = await window.electronAPI.getTunStatus()
+      if (!tun.running) {
+        const message = 'Проверка защиты доступна только при активном VPN'
+        setLastResult(message)
+        addLog('warn', message)
+        return
+      }
+      const [leak, routing] = await Promise.all([
+        window.electronAPI.runLeakSelfTest(),
+        window.electronAPI.runRoutingSelfTest()
+      ])
+      const failed = leak.physicalAdapterReached || leak.publicIpMismatch || leak.dnsLeakDetected === true || routing.verdict === 'leak'
+      const inconclusive = !failed && (routing.verdict !== 'ok' || leak.summary.includes('отменён'))
+      const message = failed
+        ? `Проверка защиты: обнаружена проблема. ${leak.summary} ${routing.message}`
+        : inconclusive
+          ? `Проверка защиты не завершена однозначно. ${leak.summary} ${routing.message}`
+          : `Проверка защиты пройдена. ${leak.summary} ${routing.message}`
+      setLastResult(message)
+      addLog(failed ? 'error' : inconclusive ? 'warn' : 'info', message)
+      useAppStore.getState().addGlobalToast(failed ? 'error' : inconclusive ? 'warning' : 'success', 'Проверка защиты', message)
+    } catch (err: any) {
+      const message = err?.message || String(err)
+      setLastResult(message)
+      addLog('error', message)
+      useAppStore.getState().addGlobalToast('error', 'Проверка защиты', message)
     } finally {
       setRunningAction(null)
     }
@@ -309,6 +352,15 @@ export function Maintenance() {
           >
             {runningAction === 'auto-repair' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wrench className="w-4 h-4" />}
             Починить
+          </MacButton>
+          <MacButton
+            variant="secondary"
+            onClick={runProtectionTest}
+            disabled={Boolean(runningAction)}
+            className="flex items-center justify-center gap-2"
+          >
+            {runningAction === 'protection-test' ? <Loader2 className="w-4 h-4 animate-spin" /> : <ShieldCheck className="w-4 h-4" />}
+            Проверить защиту
           </MacButton>
           <MacButton
             variant="ghost"

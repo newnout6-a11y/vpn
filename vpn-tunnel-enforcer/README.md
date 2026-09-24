@@ -129,7 +129,7 @@ cd native/vpnte-etw-sidecar && cargo build --release
 npm test
 ```
 
-414 tests across 43 files. Windows-only networking operations are guarded and unit-tested where possible.
+The test suite is run with `npm test -- --reporter=dot`; current totals are reported by Vitest. Windows-only networking operations are guarded and unit-tested where possible.
 
 ## How Hard Mode Works
 
@@ -150,9 +150,9 @@ Packaged builds include `vpnte-proxy.ps1` and `vpnte-proxy.cmd`. The app listens
 
 | Endpoint | Method | Auth | Purpose |
 |---|---|---|---|
-| `/status` | GET | No | Current proxy URL (`?slot=1..47546`) |
-| `/instances` | GET | No | Proxy instances with cached data-plane health |
-| `/list` | GET | No | Profile list with persisted health (optional `?country=`) |
+| `/status` | GET | Yes | Current proxy URL (`?slot=1..47546`) |
+| `/instances` | GET | Yes | Proxy instances with cached data-plane health |
+| `/list` | GET | Yes | Profile list with persisted health (optional `?country=`) |
 | `/start` | POST | Yes | Start with auto-picked profile (`?slot=1..47546`) |
 | `/rotate` | POST | Yes | Round-robin next profile (`?slot=1..47546`) |
 | `/connect` | POST | Yes | Specific profileId (`?slot=1..47546`) |
@@ -191,7 +191,7 @@ Each `/list` row includes `status` (`online`, `offline`, or `unknown`), `lastChe
 - sing-box 1.13 + Wintun (TUN adapter)
 - electron-store 8 for local app state (shared singletons)
 - Native Rust ETW sidecar (ferrisetw)
-- Vitest 4 (414 tests)
+- Vitest 4 (see current totals from the test command)
 
 ## License
 

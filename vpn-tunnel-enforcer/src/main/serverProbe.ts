@@ -247,6 +247,7 @@ export async function probeServer(host: string, knownPort?: number, options: Pro
   logEvent('info', 'server-probe', `probing ${host}`, { knownPort: safePort, disableGeoLookup })
 
   const resolvedIps = await resolveHost(host)
+  if (resolvedIps.some((ip) => isPrivateProbeAddress(ip))) throw new Error('Refusing to probe private or loopback address')
   const primaryIp = resolvedIps[0] || host
   const tunRunning = tunController.getStatus().running
 
@@ -274,14 +275,25 @@ export async function probeServer(host: string, knownPort?: number, options: Pro
   }
 }
 
+function isPrivateProbeAddress(ip: string): boolean {
+  const value = ip.toLowerCase()
+  if (value === '::' || value === '::1' || value.startsWith('127.') || value.startsWith('10.') || value.startsWith('192.168.') || value.startsWith('169.254.') || value.startsWith('fc') || value.startsWith('fd') || value.startsWith('fe80:')) return true
+  const parts = value.split('.').map(Number)
+  return parts.length === 4 && parts.every((part) => Number.isInteger(part) && part >= 0 && part <= 255) && (parts[0] === 0 || parts[0] === 127 || parts[0] === 10 || (parts[0] === 192 && parts[1] === 168) || (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) || (parts[0] === 169 && parts[1] === 254))
+}
+
 export function registerServerProbeIpcHandlers(): void {
   ipcMain.handle('server:probe', async (_event, host: string, knownPort?: number) => {
     if (typeof host !== 'string' || !host.trim()) {
       return null
     }
+    const normalizedHost = host.trim().replace(/^\[|\]$/g, '').toLowerCase()
+    if (normalizedHost === 'localhost' || normalizedHost.endsWith('.localhost') || normalizedHost === '0.0.0.0' || normalizedHost === '::' || normalizedHost.startsWith('127.') || normalizedHost.startsWith('10.') || normalizedHost.startsWith('192.168.') || normalizedHost.startsWith('169.254.')) {
+      throw new Error('Refusing to probe private or loopback host')
+    }
     const safePort = normalizeServerPort(knownPort) ?? undefined
     return settleWithin(
-      probeServer(host.trim(), safePort, {
+      probeServer(normalizedHost, safePort, {
         disableGeoLookup: settingsStore.get().disableGeoLookup === true
       }),
       null as ServerProbeResult | null,

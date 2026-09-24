@@ -94,6 +94,16 @@ export function isPrivateOrReservedIp(rawIp: string): boolean {
     }
   }
 
+  // IPv4-mapped IPv6 can also be written in hexadecimal, and NAT64 well-known
+  // addresses embed an IPv4 destination in 64:ff9b::/96.
+  if (ip.startsWith('64:ff9b:') || ip.startsWith('64:ff9b::')) return true
+  const mappedHex = ip.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i)
+  if (mappedHex) {
+    const a = Number.parseInt(mappedHex[1], 16)
+    const b = Number.parseInt(mappedHex[2], 16)
+    return isPrivateOrReservedIp(`${a >>> 8}.${a & 255}.${b >>> 8}.${b & 255}`)
+  }
+
   const kind = isIP(ip)
   if (kind === 4) {
     const parts = ip.split('.').map(Number)

@@ -674,8 +674,16 @@ function importApply(
     const existing = collectCurrentConfig()
     const merged = applySelectiveImport(existing, parsed, validSections, conflictResolution)
 
-    // Write merged data back to stores
-    writeConfigToStores(merged, validSections)
+    // Write as a transaction from the caller's perspective: restore the
+    // exact pre-import snapshot if any store rejects a write.
+    try {
+      writeConfigToStores(merged, validSections)
+    } catch (writeError) {
+      try { writeConfigToStores(existing, validSections) } catch (rollbackError) {
+        logEvent('error', 'config-manager', 'config import rollback failed', { rollbackError })
+      }
+      throw writeError
+    }
 
     // C16: refresh in-memory service state for sections whose live services
     // cache data loaded at init. Without this, imported schedules/rotation/

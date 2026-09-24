@@ -24,6 +24,28 @@ describe('Maintenance source regressions', () => {
     expect(source.indexOf('firewallRepairVpnteRules')).toBeLessThan(source.indexOf('firewallNuclearReset'))
   })
 
+  it('offers a live protection test for leak and routing state', () => {
+    const source = maintenanceSource()
+
+    expect(source).toContain("type MaintenanceAction = 'health-check' | 'auto-repair' | 'protection-test'")
+    expect(source).toContain('runLeakSelfTest()')
+    expect(source).toContain('runRoutingSelfTest()')
+    expect(source).toContain('physicalAdapterReached')
+    expect(source).toContain("routing.verdict === 'leak'")
+    expect(source).toContain("routing.verdict !== 'ok'")
+  })
+
+  it('does not start auto-repair while the tunnel is active', () => {
+    const source = maintenanceSource()
+    const start = source.indexOf('const runAutoRepair = async () =>')
+    const stateChange = source.indexOf("setRunningAction('auto-repair')", start)
+    const guard = source.indexOf('if (tun.running)', start)
+
+    expect(guard).toBeGreaterThan(start)
+    expect(guard).toBeLessThan(stateChange)
+    expect(source.slice(start, stateChange)).toContain('Сначала отключите VPN')
+  })
+
   it('does not let hidden Store diagnostics drive the visible VPN repair summary', () => {
     const source = maintenanceSource()
 

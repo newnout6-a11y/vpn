@@ -55,6 +55,27 @@ describe('main IPC regressions', () => {
     )
   })
 
+  it('does not roll back network baseline or adapter lockdown while TUN is active', () => {
+    const source = mainIndexSource()
+    const baselineStart = source.indexOf("handleLogged('rollback-tun-network-baseline'")
+    const baselineEnd = source.indexOf("handleLogged('disable-firewall-kill-switch'", baselineStart)
+    const adapterStart = source.indexOf("handleLogged('network:rollback-adapter-lockdown'")
+    const adapterEnd = source.indexOf("handleLogged('tun:kill-stale-singbox'", adapterStart)
+    const baseline = source.slice(baselineStart, baselineEnd)
+    const adapter = source.slice(adapterStart, adapterEnd)
+
+    expect(baseline).toContain('if (tunController.getStatus().running)')
+    expect(baseline).toContain('blocked: true')
+    expect(baseline.indexOf('if (tunController.getStatus().running)')).toBeLessThan(
+      baseline.indexOf('return rollbackTunNetworkBaseline()')
+    )
+    expect(adapter).toContain('if (tunController.getStatus().running)')
+    expect(adapter).toContain('blocked: true')
+    expect(adapter.indexOf('if (tunController.getStatus().running)')).toBeLessThan(
+      adapter.indexOf('return rollbackPhysicalAdapterLockdownIfApplied')
+    )
+  })
+
   it('exposes targeted firewall repair separately from full firewall reset', () => {
     const source = mainIndexSource()
     const healthStart = source.indexOf("handleLogged('firewall:repair-health'")

@@ -163,6 +163,7 @@ export function FirstRunWizard({ onComplete, onSkip }: Props) {
       await window.electronAPI.saveSettings({
         firstRunComplete: true,
         firewallKillSwitch: killSwitchLevel !== 'off',
+        connectionMode: selectedMode === 'direct' ? 'directVpn' : 'localProxy',
       })
       updateSettings({ firstRunComplete: true })
 

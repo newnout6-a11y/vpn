@@ -162,6 +162,25 @@ describe('phase 3 protocol URI coverage', () => {
     })
   })
 
+  it('round-trips WireGuard exports with peer and interface settings', () => {
+    const profile = parseVpnProfiles(
+      'wireguard://privateKey@wg.example.com:51820?publicKey=peerKey&psk=sharedKey&address=10.0.0.2%2F32&dns=1.1.1.1&mtu=1420#WG'
+    )[0]
+    const exported = exportOutboundToUri(profile)
+    const reparsed = parseVpnProfiles(exported || '')[0]
+
+    expect(exported).toMatch(/^wireguard:\/\//)
+    expect(reparsed.outbound).toMatchObject({
+      type: 'wireguard',
+      private_key: 'privateKey',
+      peer_public_key: 'peerKey',
+      pre_shared_key: 'sharedKey',
+      local_address: ['10.0.0.2/32'],
+      dns_servers: ['1.1.1.1'],
+      mtu: 1420
+    })
+  })
+
   it('exports only real plain proxy outbounds to proxy-list lines', () => {
     expect(exportOutboundToProxyLine({
       protocol: 'http',

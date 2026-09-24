@@ -28,7 +28,7 @@ import {
   normalizeClientDevice,
   type VpnProfile
 } from './vpnProfiles'
-import type { ClientDevice } from '../shared/ipc-types'
+import type { ClientDevice, DnsProfile } from '../shared/ipc-types'
 import { TUN_ADAPTER_ALIAS, TUN_IPV4_ADDRESS_CIDR, TUN_IPV4_RESOLVER, TUN_INTERFACE_METRIC, isOwnTunAddress, ALL_KNOWN_ALIASES, updateTunAdapterAlias, getTunAdapterAlias } from './tunAdapter'
 import { ipMonitor } from './ipMonitor'
 import { trafficMonitor } from './trafficMonitor'
@@ -585,10 +585,10 @@ function buildRemoteDnsServers(): Array<Record<string, any>> {
     const profile = dnsProfiles.getActiveDnsProfile()
     if (!profile || !profile.primary) return fallback
 
-    const toServer = (address: string, tag: string): Record<string, any> | null => {
+    const toServer = (address: string, tag: string, type: DnsProfile['type']): Record<string, any> | null => {
       const addr = String(address || '').trim()
       if (!addr) return null
-      if (profile.type === 'doh') {
+      if (type === 'doh') {
         const parsed = parseDnsUrl(addr, 'https')
         if (!parsed) return null
         const known = KNOWN_DOH_LITERALS[parsed.host.toLowerCase()]
@@ -600,7 +600,7 @@ function buildRemoteDnsServers(): Array<Record<string, any>> {
           serverName
         })
       }
-      if (profile.type === 'dot') {
+      if (type === 'dot') {
         const parsed = parseDnsUrl(addr, 'tls')
         if (!parsed) return null
         const tls = tlsServerNameFor(parsed.host)
@@ -617,11 +617,11 @@ function buildRemoteDnsServers(): Array<Record<string, any>> {
     }
 
     const servers: Array<Record<string, any>> = []
-    const primary = toServer(profile.primary, REMOTE_DNS_TAG)
+    const primary = toServer(profile.primary, REMOTE_DNS_TAG, profile.primaryType ?? profile.type)
     if (!primary) return fallback
     servers.push(primary)
     if (profile.secondary) {
-      const secondary = toServer(profile.secondary, REMOTE_DNS_BACKUP_TAG)
+      const secondary = toServer(profile.secondary, REMOTE_DNS_BACKUP_TAG, profile.secondaryType ?? profile.type)
       if (secondary) servers.push(secondary)
     }
     return servers
@@ -803,10 +803,10 @@ export function isVpnOutboundUdpCapable(outbound: Record<string, any>): boolean 
   }
 
   // sing-box defaults VLESS packet_encoding to xudp. An explicitly empty value uses
-  // the standard packet connection path, which still accepts UDP packets.
+  // the standard packet connection path, which does not provide xudp UDP tunneling.
   if (type === 'vless') {
     const pe = outbound.packet_encoding
-    return pe == null || pe === '' || String(pe).toLowerCase() === 'xudp' || String(pe).toLowerCase() === 'packetaddr'
+    return pe == null || String(pe).toLowerCase() === 'xudp' || String(pe).toLowerCase() === 'packetaddr'
   }
 
   // VMess and Trojan expose UDP packet-connection paths without packet_encoding too.

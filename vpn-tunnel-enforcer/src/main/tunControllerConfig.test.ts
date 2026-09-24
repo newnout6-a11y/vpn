@@ -410,7 +410,7 @@ describe('generateSingboxConfig UDP rules', () => {
     expect(isVpnOutboundUdpCapable({ type: 'vless', packet_encoding: 'xudp' })).toBe(true)
     expect(isVpnOutboundUdpCapable({ type: 'vless', packet_encoding: 'packetaddr' })).toBe(true)
     expect(isVpnOutboundUdpCapable({ type: 'vless' })).toBe(true)
-    expect(isVpnOutboundUdpCapable({ type: 'vless', packet_encoding: '' })).toBe(true)
+    expect(isVpnOutboundUdpCapable({ type: 'vless', packet_encoding: '' })).toBe(false)
     expect(isVpnOutboundUdpCapable({ type: 'vless', tls: { reality: { enabled: true } } })).toBe(true)
     expect(isVpnOutboundUdpCapable({ type: 'vless', network: 'tcp' })).toBe(false)
     expect(isVpnOutboundUdpCapable({ type: 'vless', network: ['tcp'] })).toBe(false)

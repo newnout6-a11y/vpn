@@ -521,10 +521,7 @@ export function deriveVerdict(
         recommendation: 'Провайдер не блокирует сайт (сеть работает). Если сайт всё равно недоступен или пишет «Not supported in your country», значит он сам запрещает доступ по IP — включите VPN.'
       }
     }
-    return {
-      verdict: 'works-only-with-vpn',
-      recommendation: 'Сайт недоступен без VPN. Включите защиту и проверьте ещё раз.'
-    }
+    return { verdict: 'unknown', recommendation: 'Прямой доступ недоступен, но VPN-путь ещё не измерен. Включите VPN и повторите проверку.' }
   }
   // Both reports present.
   if (tunnel && direct) {

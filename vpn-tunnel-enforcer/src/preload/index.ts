@@ -162,7 +162,7 @@ export interface ElectronAPI {
   // DNS Profiles
   dnsList: () => Promise<any[]>
   dnsGetActive: () => Promise<string | null>
-  dnsCreate: (profile: { name: string; primary: string; secondary: string; type: 'plain' | 'doh' | 'dot' }) => Promise<any>
+  dnsCreate: (profile: { name: string; primary: string; secondary: string; type: 'plain' | 'doh' | 'dot'; primaryType?: 'plain' | 'doh' | 'dot'; secondaryType?: 'plain' | 'doh' | 'dot' }) => Promise<any>
   dnsUpdate: (id: string, patch: any) => Promise<any>
   dnsDelete: (id: string) => Promise<void>
   dnsSelect: (id: string) => Promise<void>
@@ -513,7 +513,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // DNS Profiles
   dnsList: () => ipcRenderer.invoke('dns:list'),
   dnsGetActive: () => ipcRenderer.invoke('dns:get-active'),
-  dnsCreate: (profile: { name: string; primary: string; secondary: string; type: 'plain' | 'doh' | 'dot' }) => ipcRenderer.invoke('dns:create', assertPlainObject(profile, 'profile')),
+  dnsCreate: (profile: { name: string; primary: string; secondary: string; type: 'plain' | 'doh' | 'dot'; primaryType?: 'plain' | 'doh' | 'dot'; secondaryType?: 'plain' | 'doh' | 'dot' }) => ipcRenderer.invoke('dns:create', assertPlainObject(profile, 'profile')),
   dnsUpdate: (id: string, patch: any) => ipcRenderer.invoke('dns:update', assertString(id, 'id'), assertPlainObject(patch, 'patch')),
   dnsDelete: (id: string) => ipcRenderer.invoke('dns:delete', assertString(id, 'id')),
   dnsSelect: (id: string) => ipcRenderer.invoke('dns:select', assertString(id, 'id')),
