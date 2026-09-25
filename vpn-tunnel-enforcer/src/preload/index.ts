@@ -78,6 +78,7 @@ export interface ElectronAPI {
   configImportApply: (filePath: string, sections: string[], conflictResolution: 'replace' | 'merge') => Promise<{ success: boolean; error?: string }>
   // Split Tunneling
   splitTunnelGetApps: () => Promise<any[]>
+  splitTunnelRefreshApps: () => Promise<{ apps: any[]; added: number }>
   splitTunnelGetConfig: () => Promise<any>
   splitTunnelSetRule: (appId: string, rule: 'vpn' | 'direct' | 'none') => Promise<void>
   splitTunnelAddApp: (exePath: string) => Promise<any>
@@ -445,6 +446,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   restartTrafficForensics: () => ipcRenderer.invoke('restart-traffic-forensics'),
   // Split Tunneling
   splitTunnelGetApps: () => ipcRenderer.invoke('split-tunnel:get-apps'),
+  splitTunnelRefreshApps: () => ipcRenderer.invoke('split-tunnel:refresh-apps'),
   splitTunnelGetConfig: () => ipcRenderer.invoke('split-tunnel:get-config'),
   splitTunnelSetRule: (appId: string, rule: 'vpn' | 'direct' | 'none') =>
     ipcRenderer.invoke('split-tunnel:set-rule', assertString(appId, 'appId'), assertEnum(rule, ['vpn', 'direct', 'none'] as const, 'rule')),

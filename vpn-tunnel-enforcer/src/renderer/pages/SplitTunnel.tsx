@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Search, FolderOpen, Trash2, TerminalSquare, Plus, Loader2 } from 'lucide-react'
+import { Search, FolderOpen, Trash2, TerminalSquare, Plus, Loader2, RefreshCw } from 'lucide-react'
 import { MacCard, MacInput, MacButton, MacBadge } from '../design-system'
 import { PageTip } from '../components/PageTip'
 import { useAppStore } from '../store'
@@ -63,6 +63,7 @@ export function SplitTunnel() {
   const [search, setSearch] = useState('')
   const [loading, setLoading] = useState(true)
   const [addingApp, setAddingApp] = useState(false)
+  const [refreshing, setRefreshing] = useState(false)
   const [cmdName, setCmdName] = useState('')
   const [addingCmd, setAddingCmd] = useState(false)
   const [pendingRuleById, setPendingRuleById] = useState<Record<string, Rule>>({})
@@ -82,11 +83,21 @@ export function SplitTunnel() {
     fetchApps()
   }, [])
 
-  // Filter apps by search query (case-insensitive)
+  // Filter apps by search query (case-insensitive). Matches the display name,
+  // the full path AND the executable's leaf name, so typing "codex" finds both
+  // "Codex Switcher" (name match) and the OpenAI Codex CLI whose install dir is
+  // `...\OpenAI\Codex\bin\codex.exe` (path/leaf match) even when its display
+  // name doesn't contain the query.
   const filteredApps = useMemo(() => {
     if (!search.trim()) return apps
     const query = search.toLowerCase()
-    return apps.filter((app) => app.name.toLowerCase().includes(query))
+    return apps.filter((app) => {
+      if (app.name.toLowerCase().includes(query)) return true
+      const path = String(app.path || '').toLowerCase()
+      if (path.includes(query)) return true
+      const leaf = path.split(/[\\/]/).pop() ?? ''
+      return leaf.includes(query)
+    })
   }, [apps, search])
 
   // Handle rule change for an app
@@ -131,6 +142,29 @@ export function SplitTunnel() {
       setAddingApp(false)
     }
   }, [])
+
+  // Re-scan installed apps and merge in any new ones (keeps existing rules).
+  const handleRefreshApps = useCallback(async () => {
+    setRefreshing(true)
+    try {
+      const result = await window.electronAPI.splitTunnelRefreshApps()
+      if (result && Array.isArray(result.apps)) {
+        setApps(result.apps)
+        useAppStore.getState().addGlobalToast(
+          'success',
+          t('splitTunneling.refreshed', 'Список обновлён'),
+          result.added > 0
+            ? t('splitTunneling.refreshAdded', `Найдено новых приложений: ${result.added}`)
+            : t('splitTunneling.refreshNone', 'Новых приложений не найдено')
+        )
+      }
+    } catch (err: any) {
+      console.error('Failed to refresh apps:', err)
+      useAppStore.getState().addGlobalToast('error', 'Ошибка', `Не удалось обновить список: ${err?.message || err}`)
+    } finally {
+      setRefreshing(false)
+    }
+  }, [t])
 
   // Handle removing an app
   const handleRemoveApp = useCallback(async (appId: string) => {
@@ -202,6 +236,16 @@ export function SplitTunnel() {
             leftIcon={<Search className="w-4 h-4" />}
           />
         </div>
+        <MacButton
+          variant="secondary"
+          onClick={handleRefreshApps}
+          loading={refreshing}
+          className="shrink-0"
+          title={t('splitTunneling.refreshTitle', 'Пересканировать установленные приложения')}
+        >
+          <RefreshCw className="w-4 h-4 mr-2" />
+          {t('splitTunneling.refresh', 'Обновить')}
+        </MacButton>
         <MacButton
           variant="secondary"
           onClick={handleAddApp}

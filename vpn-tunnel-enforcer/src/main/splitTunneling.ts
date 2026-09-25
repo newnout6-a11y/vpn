@@ -10,9 +10,9 @@
  */
 
 import { execFile as execFileCb } from 'child_process'
-import { ipcMain, dialog, type IpcMainInvokeEvent } from 'electron'
-import { basename, dirname, extname } from 'path'
-import { access } from 'fs/promises'
+import { ipcMain, dialog, app, type IpcMainInvokeEvent } from 'electron'
+import { basename, dirname, extname, join } from 'path'
+import { access, readdir } from 'fs/promises'
 import { promisify } from 'util'
 import { randomUUID } from 'crypto'
 import Store from 'electron-store'
@@ -50,15 +50,20 @@ const store = new Store<SplitTunnelStore>({
 export function looksCorruptDisplayName(name: string): boolean {
   const value = String(name ?? '')
   const replacementCount = (value.match(/\uFFFD/g) ?? []).length
-  const cjkHangulCount = (value.match(/[\u3400-\u9fff\uac00-\ud7af]/g) ?? []).length
+  if (replacementCount > 0) return true
+  // Mojibake: Cyrillic/other text whose UTF-16LE bytes were read as UTF-8 (or
+  // vice-versa) yields CJK Compatibility Ideographs (U+F900-FAFF), CJK Ext-A
+  // (U+3400-9FFF), Hangul (U+AC00-D7AF) and scattered high-range letters
+  // (U+0800-08FF). A legit app name never mixes Latin/Cyrillic with those.
+  const mojibakeCount = (value.match(/[\u3400-\u9fff\uf900-\ufaff\uac00-\ud7af\u0800-\u08ff]/g) ?? []).length
   const hasKnownText = /[A-Za-zА-Яа-я0-9]/.test(value)
-  return replacementCount > 0 || (hasKnownText && cjkHangulCount >= 2)
+  return hasKnownText && mojibakeCount >= 1
 }
 
 function cleanDisplayName(name: string): string {
   return String(name ?? '')
     .replace(/\uFFFD+/g, ' ')
-    .replace(/[\u3400-\u9fff\uac00-\ud7af]+/g, ' ')
+    .replace(/[\u3400-\u9fff\uf900-\ufaff\uac00-\ud7af\u0800-\u08ff]+/g, ' ')
     .replace(/\(\s*\d+\s*[-–]\s*\)/g, ' ')
     .replace(/\s+/g, ' ')
     .replace(/\s+([,.)\]])/g, '$1')
@@ -158,6 +163,22 @@ export async function discoverInstalledApps(): Promise<
       }
     }
 
+    // Many per-user apps (OpenAI Codex CLI, VS Code Insiders, portable tools)
+    // install under %LOCALAPPDATA%\Programs WITHOUT writing an Uninstall key,
+    // so the registry scan above never sees them. Scan that directory too.
+    try {
+      const localApps = await discoverLocalProgramsApps()
+      for (const app of localApps) {
+        const normalizedPath = app.path.toLowerCase()
+        if (!seenPaths.has(normalizedPath)) {
+          seenPaths.add(normalizedPath)
+          apps.push(app)
+        }
+      }
+    } catch (err) {
+      logEvent('debug', 'split-tunnel', 'local Programs scan failed', err)
+    }
+
     return apps
   })().finally(() => {
     discoverAppsPromise = null
@@ -234,6 +255,144 @@ $results | ConvertTo-Json -Compress -Depth 3
     logEvent('debug', 'split-tunnel', `queryRegistryApps failed for ${registryPath}`, { error: err?.message })
     return []
   }
+}
+
+/**
+ * Discovers per-user apps installed under %LOCALAPPDATA%\Programs that never
+ * write a registry Uninstall key (OpenAI Codex CLI, portable Electron apps,
+ * etc.). Walks each product directory a few levels deep looking for the
+ * "main" executable and synthesises a friendly name from the folder path.
+ *
+ * Kept deliberately shallow + capped so a huge Programs tree can't stall the
+ * scan: 2 levels of product dirs, then up to 2 levels inside each product.
+ */
+async function discoverLocalProgramsApps(): Promise<
+  Array<{ name: string; path: string; icon: string | null }>
+> {
+  if (process.platform !== 'win32') return []
+  const programsRoot = join(app.getPath('appData'), '..', 'Local', 'Programs')
+  const results: Array<{ name: string; path: string; icon: string | null }> = []
+
+  async function listDirs(dir: string): Promise<string[]> {
+    try {
+      const entries = await readdir(dir, { withFileTypes: true })
+      // Include symlinks/junctions too: some installers (OpenAI Codex) lay out
+      // `Codex\bin` as a junction, and Dirent.isDirectory() is false for those.
+      return entries
+        .filter(e => e.isDirectory() || e.isSymbolicLink())
+        .map(e => join(dir, e.name))
+    } catch {
+      return []
+    }
+  }
+
+  async function listExes(dir: string): Promise<string[]> {
+    try {
+      const entries = await readdir(dir, { withFileTypes: true })
+      return entries
+        .filter(e => e.isFile() && /\.exe$/i.test(e.name))
+        .map(e => join(dir, e.name))
+    } catch {
+      return []
+    }
+  }
+
+  // Pick the most "primary" exe for a product. Filter out installer/helper
+  // executables (uninstallers, updaters, crash reporters, elevation helpers),
+  // then prefer an exe whose leaf matches the product name, then the shortest
+  // remaining leaf (heuristic for the launcher over `*-helper.exe` siblings).
+  const HELPER_EXE_RX = /^(unins|uninstall|setup|update|inno|crash|crashpad|report|notifier|elevate|elevator|squirrel|service|helper|daemon|broker)/i
+  function pickMainExe(exes: string[], productName: string): string | null {
+    const candidates = exes.filter(p => !HELPER_EXE_RX.test(basename(p)))
+    if (candidates.length === 0) return null
+    // Compare against every meaningful word in the product name so "OpenAI
+    // Codex" matches `codex.exe`, "Microsoft VS Code" matches `code.exe`, etc.
+    const words = productName
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter(w => w.length >= 3 && !/^(the|app|for|and|ide)$/.test(w))
+    const matches = candidates.filter(p => {
+      const leaf = basename(p, extname(p)).replace(/[\s_-]+/g, '').toLowerCase()
+      return words.some(w => leaf === w || leaf === `${w}exe` || leaf.startsWith(w))
+    })
+    if (matches.length > 0) {
+      // Among matches prefer the SHORTEST leaf — `codex.exe` over
+      // `codex-code-mode-host.exe` (both start with the product word).
+      matches.sort((a, b) => basename(a).length - basename(b).length)
+      return matches[0]
+    }
+    candidates.sort((a, b) => basename(a).length - basename(b).length)
+    return candidates[0]
+  }
+
+  // Build a display name from the product folder chain (e.g. "OpenAI\Codex").
+  function nameFromPath(productDir: string): string {
+    const rel = productDir.slice(programsRoot.length).replace(/^[\\/]+/, '')
+    const parts = rel.split(/[\\/]+/).filter(Boolean)
+    const meaningful = parts.filter(p => !isGenericContainerName(p) && !mostlyNumeric(p))
+    return meaningful.join(' ') || basename(productDir)
+  }
+
+  // For nested products (OpenAI\Codex\bin\codex.exe) the vendor dir name
+  // ("OpenAI") is too generic — derive the name from the exe's own folder
+  // chain instead so we get "Codex" / "OpenAI Codex".
+  function nameForExe(vendorDir: string, exePath: string): string {
+    const vendorName = nameFromPath(vendorDir)
+    const exeDirName = nameFromPath(dirname(exePath))
+    // If the exe lives deeper than the vendor dir and its folder chain yields
+    // a more specific name, prefer it; otherwise keep the vendor name.
+    if (exeDirName && exeDirName.toLowerCase() !== vendorName.toLowerCase()) {
+      // Combine vendor + product when both are meaningful ("OpenAI" + "Codex").
+      if (vendorName && !exeDirName.toLowerCase().includes(vendorName.toLowerCase())) {
+        return `${vendorName} ${exeDirName}`
+      }
+      return exeDirName
+    }
+    return vendorName
+  }
+
+  // Recursively collect candidate exes under `dir`, descending at most
+  // `depth` levels into subdirectories. Stops descending a branch as soon as
+  // it finds exes at that level (the launcher lives next to its helpers).
+  // This handles both `Product\app.exe` and nested `Vendor\Product\bin\app.exe`
+  // (OpenAI Codex) without scanning an entire deep tree.
+  async function collectExes(dir: string, depth: number): Promise<string[]> {
+    const here = await listExes(dir)
+    if (here.length > 0 || depth <= 0) return here
+    const subs = await listDirs(dir)
+    const out: string[] = []
+    for (const sub of subs.slice(0, 8)) {
+      out.push(...await collectExes(sub, depth - 1))
+      if (out.length > 0) break
+    }
+    return out
+  }
+
+  const vendorDirs = await listDirs(programsRoot)
+  // Cap the number of product dirs we inspect to keep the scan fast.
+  const MAX_PRODUCTS = 250
+  let inspected = 0
+
+  for (const vendorDir of vendorDirs) {
+    if (inspected >= MAX_PRODUCTS) break
+    inspected++
+    // Search the vendor/product dir and up to 2 levels inside it for exes.
+    const found = await collectExes(vendorDir, 2)
+    const exes = found.filter(p => !HELPER_EXE_RX.test(basename(p)))
+    if (exes.length === 0) continue
+    const productName = nameFromPath(vendorDir)
+    const mainExe = pickMainExe(exes, productName)
+    if (mainExe) {
+      const displayName = nameForExe(vendorDir, mainExe)
+      results.push({
+        name: sanitizeAppDisplayName(displayName, mainExe),
+        path: mainExe,
+        icon: null
+      })
+    }
+  }
+
+  return results
 }
 
 // ─── Rule Management ─────────────────────────────────────────────────────────
@@ -542,6 +701,38 @@ export function registerSplitTunnelHandlers(): void {
     }
 
     return storedApps
+  })
+
+  // Re-scan installed apps and merge newly discovered ones into the stored
+  // list. Existing entries keep their id AND their routing rule (matched by
+  // path); only genuinely new apps are appended with rule 'none'. Returns the
+  // full updated list plus how many were added, so the UI can report it.
+  handleLogged('split-tunnel:refresh-apps', async () => {
+    const discovered = await discoverInstalledApps()
+    const added = await withAppsWriteLock(() => {
+      const apps = getApps()
+      const byPath = new Map(apps.map(a => [a.path.toLowerCase(), a]))
+      let addedCount = 0
+      for (const d of discovered) {
+        const key = d.path.toLowerCase()
+        if (byPath.has(key)) continue
+        const entry: SplitTunnelApp = {
+          id: randomUUID(),
+          name: sanitizeAppDisplayName(d.name, d.path),
+          path: d.path,
+          icon: d.icon,
+          rule: 'none',
+          kind: 'app'
+        }
+        apps.push(entry)
+        byPath.set(key, entry)
+        addedCount++
+      }
+      if (addedCount > 0) saveApps(apps)
+      return addedCount
+    })
+    logEvent('info', 'split-tunnel', 'app list refreshed', { added, total: getApps().length })
+    return { apps: getApps(), added }
   })
 
   handleLogged('split-tunnel:set-rule', async (_event, appId: string, rule: 'vpn' | 'direct' | 'none') => {

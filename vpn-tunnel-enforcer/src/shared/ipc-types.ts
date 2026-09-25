@@ -895,6 +895,7 @@ export interface ExtendedSettings {
 /** Split Tunneling IPC channels */
 export interface SplitTunnelChannels {
   'split-tunnel:get-apps': () => SplitTunnelApp[]
+  'split-tunnel:refresh-apps': () => { apps: SplitTunnelApp[]; added: number }
   'split-tunnel:set-rule': (appId: string, rule: 'vpn' | 'direct' | 'none') => void
   'split-tunnel:add-app': (exePath: string) => SplitTunnelApp
   'split-tunnel:remove-app': (appId: string) => void
