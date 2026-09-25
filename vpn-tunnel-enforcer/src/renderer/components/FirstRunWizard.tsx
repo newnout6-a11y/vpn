@@ -159,11 +159,14 @@ export function FirstRunWizard({ onComplete, onSkip }: Props) {
         throw new Error(`Не удалось применить язык: ${err?.message || err}`)
       }
 
-      // 3. Persist onboarding completion only after mandatory operations succeed
+      // 3. Persist onboarding completion only after mandatory operations succeed.
+      //    routingMode keeps the hard/soft choice alive — connectionMode alone
+      //    cannot, because both hard and soft use the 'localProxy' upstream.
       await window.electronAPI.saveSettings({
         firstRunComplete: true,
         firewallKillSwitch: killSwitchLevel !== 'off',
         connectionMode: selectedMode === 'direct' ? 'directVpn' : 'localProxy',
+        routingMode: selectedMode === 'soft' ? 'soft' : 'hard',
       })
       updateSettings({ firstRunComplete: true })
 

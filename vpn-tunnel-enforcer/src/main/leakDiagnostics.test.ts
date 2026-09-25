@@ -218,6 +218,20 @@ describe('classifyDirectPublic', () => {
     expect(r.smartRuExamples).toContain('213.180.193.56')
   })
 
+  it('attributes a RU-hostname IPv6 (AAAA) direct-out to smart-RU when split is ON', () => {
+    // AAAA exchanges must feed the hostname→IP map just like A records —
+    // otherwise IPv6 direct-out egress of a RU host reads as a leak.
+    const log = [
+      '+0300 x INFO [303 5ms] dns: exchanged AAAA yandex.ru. 7 IN AAAA 2a02:6b8::2:242',
+      '+0300 x INFO [404 0ms] inbound/tun[tun-in]: inbound connection to 2a02:6b8::2:242:443',
+      '+0300 x INFO [404 0ms] router: found process path: C:\\Users\\Redmi\\AppData\\Local\\Yandex\\YandexBrowser\\Application\\browser.exe',
+      '+0300 x INFO [404 0ms] outbound/direct[direct-out]: outbound connection to 2a02:6b8::2:242:443'
+    ].join('\n')
+    const r = classifyDirectPublic(log, { smartRuSplit: true })
+    expect(r.leakedCount).toBe(0)
+    expect(r.smartRuCount).toBe(1)
+  })
+
   it('flags the same RU-IP direct-out as a leak when smart-RU split is OFF', () => {
     const log = [
       '+0300 x INFO [303 5ms] dns: exchanged A yandex.ru. 7 IN A 213.180.193.56',

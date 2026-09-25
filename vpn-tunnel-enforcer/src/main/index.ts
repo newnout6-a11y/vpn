@@ -425,16 +425,22 @@ async function verifyAdaptiveConnection(): Promise<void> {
   if (generation !== adaptiveVerificationGeneration || !tunController.getStatus().running) return
 
   const { tunnelHttpProbe } = await import('./serverPicker')
-  let latency: number | null = null
+  // Require a STABLE success before persisting adaptive learning. A single
+  // transient probe that happens to succeed (success → fail → fail) must NOT
+  // flip the remembered mode — the comment above promises a stable window.
+  // Count successes and keep the LAST successful sample for the latency log;
+  // succeed only when a majority (≥2 of 3) of probes got through.
+  const samples: number[] = []
   for (let attempt = 0; attempt < 3; attempt++) {
     const sample = await tunnelHttpProbe(true)
-    if (sample !== null) latency = sample
+    if (sample !== null) samples.push(sample)
     if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 2500))
   }
   if (generation !== adaptiveVerificationGeneration || !tunController.getStatus().running) return
-  if (latency !== null) {
+  if (samples.length >= 2) {
+    const latency = samples[samples.length - 1]
     markAdaptiveSuccess(context.profile)
-    logEvent('info', 'adaptive-bypass', 'tunnel verification succeeded', { latency })
+    logEvent('info', 'adaptive-bypass', 'tunnel verification succeeded', { latency, successes: samples.length })
     try {
       tunController.recoverProxyIfAlive('adaptive-probe')
     } catch {}
@@ -894,8 +900,8 @@ function refreshTrayState(patch: {
     status: latestTrayStatus,
     publicIp: latestPublicIp,
     proxyAddr: latestTrayProxyAddr,
-    downloadBps: latestTraffic.downloadBps,
-    uploadBps: latestTraffic.uploadBps,
+    downloadBps: latestTraffic.smoothedDownloadBps || latestTraffic.downloadBps,
+    uploadBps: latestTraffic.smoothedUploadBps || latestTraffic.uploadBps,
     tunRunning: tunStatus.running,
     firewallKillSwitchActive: latestKillSwitchActive,
     restartingProgress: latestRestartingProgress
@@ -935,7 +941,45 @@ async function resolveProxyForTrayStart(): Promise<{ proxyAddr: string; proxyTyp
   return { proxyAddr: `${detected.host}:${detected.port}`, proxyType: detected.type }
 }
 
+/**
+ * Start the user-selected Soft route without creating a TUN. Soft mode owns
+ * only the env autoconfig target; if a Hard tunnel is currently running, stop
+ * it first so the two routing modes cannot overlap.
+ */
+async function startSoftProtection(proxyAddr: string, proxyType?: 'socks5' | 'http'): Promise<{ success: boolean; error?: string; warning?: string | null; vpnIp?: string | null }> {
+  if (tunController.getStatus().running) {
+    const stopped = await stopProtection()
+    if (!stopped.success) return stopped
+  }
+
+  const normalizedProxyType = proxyType ?? settingsStore.get().proxyType
+  const results = await autoconfig.apply(['env'], proxyAddr, normalizedProxyType)
+  if (!results.env) {
+    const error = 'Не удалось применить env autoconfig'
+    recordStartFailure({ id: 'local-proxy-soft', name: `Soft proxy ${proxyAddr}`, mode: 'soft' }, error)
+    return { success: false, error }
+  }
+
+  refreshTrayState({ status: 'protected', proxyAddr })
+  sendToMainWindow('soft-status-changed', true)
+  return { success: true, vpnIp: null }
+}
+
+async function rollbackSoftAutoconfigIfApplied(reason: string): Promise<void> {
+  try {
+    const status = await autoconfig.getStatus()
+    if (status.some(target => target.id === 'env' && target.applied)) {
+      logEvent('info', 'app', `rolling back env autoconfig before ${reason}`)
+      await autoconfig.rollback(['env'])
+      sendToMainWindow('soft-status-changed', false)
+    }
+  } catch (err) {
+    logEvent('warn', 'app', `env autoconfig rollback before ${reason} failed`, err)
+  }
+}
+
 async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http'): Promise<{ success: boolean; error?: string; warning?: string | null; vpnIp?: string | null }> {
+  await rollbackSoftAutoconfigIfApplied('hard protection start')
   suppressLeakSelfTestsFor(20_000, 'local-proxy-start')
   // Snapshot BEFORE we change anything. This is the baseline state that
   // support/diagnostics will compare against.
@@ -1145,6 +1189,7 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
 }
 
 async function startDirectVpnProtection(): Promise<{ success: boolean; error?: string; warning?: string | null; vpnIp?: string | null }> {
+  await rollbackSoftAutoconfigIfApplied('direct VPN start')
   suppressLeakSelfTestsFor(20_000, 'direct-vpn-start')
   captureSnapshot('tun-pre-start').catch(() => undefined)
 
@@ -1383,6 +1428,7 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
 async function stopProtection(
   stopKind: Extract<SessionOutcomeKind, 'user-stop' | 'app-quit' | 'schedule'> = 'user-stop'
 ): Promise<{ success: boolean; error?: string; warning?: string }> {
+  await rollbackSoftAutoconfigIfApplied('protection stop')
   adaptiveVerificationGeneration += 1
   activeAdaptiveContext = null
   // Record the connection BEFORE we stop, so traffic counters are still valid.
@@ -1459,6 +1505,21 @@ async function startProtectionFromTray(): Promise<void> {
     return
   }
 
+  if (settingsStore.get().routingMode === 'soft') {
+    const resolved = await resolveProxyForTrayStart()
+    if (!resolved) {
+      const errorMsg = 'Прокси не найден. Запустите VPN-клиент в режиме Proxy или задайте адрес вручную в настройках.'
+      notify('error', 'Прокси не найден', errorMsg, 'connectionError')
+      restoreAndFocusMainWindow()
+      return
+    }
+    const result = await startSoftProtection(resolved.proxyAddr, resolved.proxyType)
+    if (!result.success) {
+      notify('error', 'Не удалось включить Soft-режим', result.error || 'Неизвестная ошибка', 'connectionError')
+    }
+    return
+  }
+
   const resolved = await resolveProxyForTrayStart()
   if (!resolved) {
     const errorMsg = 'Прокси не найден. Запустите VPN-клиент в режиме Proxy или задайте адрес вручную в настройках.'
@@ -1526,8 +1587,12 @@ async function performCrashRecovery(): Promise<void> {
     const status = await autoconfig.getStatus()
     const envApplied = status.find(t => t.id === 'env')?.applied
     if (envApplied) {
-      logEvent('info', 'app', 'rolling back env autoconfig (setx HTTP_PROXY) on crash recovery')
-      await autoconfig.rollback(['env'])
+      if (settingsStore.get().routingMode === 'soft' && settingsStore.get().connectionMode !== 'directVpn') {
+        logEvent('info', 'app', 'preserving env autoconfig during Soft-mode crash recovery')
+      } else {
+        logEvent('info', 'app', 'rolling back env autoconfig (setx HTTP_PROXY) on crash recovery')
+        await autoconfig.rollback(['env'])
+      }
     }
   } catch (err) {
     logEvent('warn', 'app', 'env autoconfig rollback during crash recovery failed', err)
@@ -2300,7 +2365,8 @@ app.whenReady().then(async () => {
             logEvent('warn', 'scheduler', 'scheduled connect failed: no proxy found')
             return
           }
-          startProtection(resolved.proxyAddr, resolved.proxyType).catch(err =>
+          const start = schedule.mode === 'soft' ? startSoftProtection : startProtection
+          start(resolved.proxyAddr, resolved.proxyType).catch(err =>
             logEvent('error', 'scheduler', 'scheduled start failed', err)
           )
         }).catch(err =>
@@ -2322,7 +2388,7 @@ app.whenReady().then(async () => {
   // Push events from main → renderer
   trafficMonitor.onStatsChange((stats) => {
     latestTraffic = stats
-    if (stats.running && (stats.downloadBps > 1024 || stats.uploadBps > 1024)) {
+    if (stats.running && ((stats.smoothedDownloadBps || stats.downloadBps) > 1024 || (stats.smoothedUploadBps || stats.uploadBps) > 1024)) {
       try {
         tunController.recoverProxyIfAlive('traffic')
       } catch {}

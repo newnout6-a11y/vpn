@@ -503,10 +503,13 @@ export function classifyDirectPublic(logText: string, options: { smartRuSplit?: 
 
   // Pass 1: build hostname → set-of-IPs map from sing-box's own DNS exchange
   // lines so we can attribute a direct-out IP back to the hostname that
-  // produced it (needed for smart-RU attribution at INFO log level).
+  // produced it (needed for smart-RU attribution at INFO log level). Match
+  // BOTH A and AAAA exchanges — an IPv6-only RU host resolved via AAAA must
+  // attribute just like an A record, otherwise its direct-out egress reads
+  // as a leak. The record type is captured but unused (both map host→IP).
   const ipToHostnames = new Map<string, Set<string>>()
   for (const line of logText.split(/\r?\n/)) {
-    const m = line.match(/dns: (?:exchanged|cached) A\s+([^\s]+)\.\s+\d+\s+IN\s+A\s+([0-9a-fA-F:.]+)/i)
+    const m = line.match(/dns: (?:exchanged|cached) (?:A|AAAA)\s+([^\s]+)\.\s+\d+\s+IN\s+(?:A|AAAA)\s+([0-9a-fA-F:.]+)/i)
     if (!m) continue
     const host = m[1].toLowerCase()
     const ip = m[2]

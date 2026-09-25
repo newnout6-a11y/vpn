@@ -32,7 +32,7 @@ class FakeProc extends EventEmitter {
   }
 }
 
-import { trafficMonitor } from './trafficMonitor'
+import { calculateBurstiness, smoothTrafficRate, trafficMonitor } from './trafficMonitor'
 
 const realPlatform = process.platform
 function setPlatform(p: string) {
@@ -70,9 +70,21 @@ describe('trafficMonitor persistent reader', () => {
   })
 
   it('computes download/upload bps from successive samples', () => {
-    const seen: Array<{ downloadBps: number; uploadBps: number; adapterFound: boolean }> = []
+    const seen: Array<{
+      downloadBps: number
+      uploadBps: number
+      smoothedDownloadBps: number
+      downloadBurstinessPct: number
+      adapterFound: boolean
+    }> = []
     const off = trafficMonitor.onStatsChange((s) =>
-      seen.push({ downloadBps: s.downloadBps, uploadBps: s.uploadBps, adapterFound: s.adapterFound })
+      seen.push({
+        downloadBps: s.downloadBps,
+        uploadBps: s.uploadBps,
+        smoothedDownloadBps: s.smoothedDownloadBps,
+        downloadBurstinessPct: s.downloadBurstinessPct,
+        adapterFound: s.adapterFound
+      })
     )
     trafficMonitor.start('VPNTE-TUN')
     // First found sample establishes the baseline (bps still 0).
@@ -85,6 +97,19 @@ describe('trafficMonitor persistent reader', () => {
     expect(last.adapterFound).toBe(true)
     expect(last.downloadBps).toBeGreaterThan(0)
     expect(last.uploadBps).toBeGreaterThan(0)
+    expect(last.smoothedDownloadBps).toBe(last.downloadBps)
+    expect(last.downloadBurstinessPct).toBe(0)
+  })
+
+  it('smooths an isolated burst without changing the raw rate', () => {
+    expect(smoothTrafficRate(10, 100, 0.35)).toBeCloseTo(41.5)
+    expect(smoothTrafficRate(0, 100, 0.35)).toBe(100)
+  })
+
+  it('reports relative variation of recent counter deltas', () => {
+    expect(calculateBurstiness([100, 100, 100])).toBe(0)
+    expect(calculateBurstiness([50, 100, 150])).toBe(41)
+    expect(calculateBurstiness([0, 0])).toBe(0)
   })
 
   it('kills the reader process on stop()', () => {

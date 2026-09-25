@@ -477,6 +477,8 @@ function LiveTraffic() {
   const tunRunning = useAppStore(s => s.tunRunning)
   const samplesRef = useRef<{ down: number[]; up: number[] }>({ down: [], up: [] })
   const [, forceTick] = useState(0)
+  const displayedDownloadBps = traffic.smoothedDownloadBps || traffic.downloadBps
+  const displayedUploadBps = traffic.smoothedUploadBps || traffic.uploadBps
 
   useEffect(() => {
     if (!tunRunning) {
@@ -488,14 +490,14 @@ function LiveTraffic() {
     }
     samplesRef.current.down = [
       ...samplesRef.current.down.slice(-(SAMPLES_KEPT - 1)),
-      traffic.downloadBps
+      displayedDownloadBps
     ]
     samplesRef.current.up = [
       ...samplesRef.current.up.slice(-(SAMPLES_KEPT - 1)),
-      traffic.uploadBps
+      displayedUploadBps
     ]
     forceTick(t => t + 1)
-  }, [traffic.ts, traffic.downloadBps, traffic.uploadBps, tunRunning])
+  }, [traffic.ts, displayedDownloadBps, displayedUploadBps, tunRunning])
 
   const downSamples = samplesRef.current.down
   const upSamples = samplesRef.current.up
@@ -527,7 +529,7 @@ function LiveTraffic() {
             {t('dashboardSide.down', 'Загрузка')}
           </div>
           <div className="text-sm font-semibold text-[var(--color-text)] tabular-nums">
-            {formatSpeedShort(traffic.downloadBps)}
+            {formatSpeedShort(displayedDownloadBps)}
             <span className="text-[10px] font-normal text-[var(--color-text-secondary)] ml-1">bps</span>
           </div>
         </div>
@@ -537,7 +539,7 @@ function LiveTraffic() {
             {t('dashboardSide.up', 'Отдача')}
           </div>
           <div className="text-sm font-semibold text-[var(--color-text)] tabular-nums">
-            {formatSpeedShort(traffic.uploadBps)}
+            {formatSpeedShort(displayedUploadBps)}
             <span className="text-[10px] font-normal text-[var(--color-text-secondary)] ml-1">bps</span>
           </div>
         </div>
@@ -570,6 +572,12 @@ function LiveTraffic() {
           />
         )}
       </svg>
+
+      {(traffic.downloadBurstinessPct > 0 || traffic.uploadBurstinessPct > 0) && (
+        <p className="text-[10px] text-[var(--color-text-secondary)] mt-1 text-center">
+          Колебания за последние 5 с: загрузка {traffic.downloadBurstinessPct}%, отдача {traffic.uploadBurstinessPct}%
+        </p>
+      )}
 
       {!tunRunning && (
         <p className="text-[10px] text-[var(--color-text-secondary)] mt-1 text-center">

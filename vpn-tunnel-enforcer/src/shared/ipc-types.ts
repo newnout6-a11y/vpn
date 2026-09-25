@@ -208,6 +208,7 @@ export type LiveCheckStage =
   | 'handshake'
   | 'egress'
   | 'mediaStream'
+  | 'throughput'
   | 'path'
   | 'pmtu'
 
@@ -224,6 +225,52 @@ export interface LiveMediaStreamDiagnostics {
     protocol?: string
     error?: string
   }>
+  detail?: string
+  error?: string
+}
+
+/**
+ * A bounded HTTPS transfer measured through the selected profile's isolated
+ * proxy. It describes that server's data path, not the maximum capacity of
+ * the physical Wi-Fi link.
+ */
+export interface LiveThroughputSample {
+  index: number
+  bytes: number
+  durationMs: number
+  throughputMbps: number
+  ttfbMs?: number
+  stallCount: number
+  maxInterChunkGapMs: number
+}
+
+export interface LiveThroughputDiagnostics {
+  status: 'ok' | 'warning' | 'error' | 'skipped'
+  durationMs: number
+  endpoint?: string
+  /** How the isolated probe reached the public network. */
+  route?: 'physical-direct' | 'active-tunnel-direct-detour' | 'active-profile-self'
+  samples: LiveThroughputSample[]
+  medianMbps?: number
+  minMbps?: number
+  maxMbps?: number
+  variabilityPct?: number
+  stallCount?: number
+  maxInterChunkGapMs?: number
+  detail?: string
+  error?: string
+}
+
+/** Snapshot of process-based split-tunnel routing at probe time. */
+export interface LiveSplitTunnelDiagnostics {
+  status: 'ok' | 'warning' | 'error' | 'skipped'
+  enabled: boolean
+  directProcessNames: string[]
+  vpnProcessNames: string[]
+  duplicateProcessNames: string[]
+  directRuleCount: number
+  vpnRuleCount: number
+  defaultOutbound: 'proxy-out' | 'unknown'
   detail?: string
   error?: string
 }
@@ -452,6 +499,7 @@ export interface InfrastructureHints {
     handshakeChanged?: boolean
     egressChanged?: boolean
     pmtuChanged?: boolean
+    throughputChanged?: boolean
   }
 }
 
@@ -469,6 +517,35 @@ export interface LiveServerCheckOptions {
   host?: string
   port?: number
   mode?: 'basic' | 'extended'
+}
+
+/** A bounded sequential comparison of several saved profiles. */
+export interface LiveServerBatchCheckOptions {
+  requestId?: string
+  profileIds: string[]
+  mode?: 'basic' | 'extended'
+}
+
+export interface LiveServerBatchCheckProgress {
+  requestId: string
+  sequence: number
+  profileId: string
+  index: number
+  total: number
+  status: 'running' | 'completed' | 'failed' | 'cancelled'
+  stage?: LiveCheckStage
+  detail?: string
+  medianMbps?: number
+}
+
+export interface LiveServerBatchCheckResult {
+  requestId: string
+  mode: 'basic' | 'extended'
+  startedAt: string
+  finishedAt: string
+  cancelled: boolean
+  results: LiveServerCheck[]
+  errors: Array<{ profileId: string; error: string }>
 }
 
 export interface LiveServerCheck {
@@ -499,6 +576,8 @@ export interface LiveServerCheck {
   pathDiagnostics?: PathDiagnostics
   pmtu?: PmtuDiagnostics
   mediaStream?: LiveMediaStreamDiagnostics
+  throughput?: LiveThroughputDiagnostics
+  splitTunnel?: LiveSplitTunnelDiagnostics
   findings: LiveCheckFinding[]
 }
 
@@ -531,6 +610,9 @@ export interface LiveServerCheckHistoryDiff {
   pmtuChanged?: boolean
   previousPmtu?: number
   currentPmtu?: number
+  throughputChanged?: boolean
+  previousMedianThroughput?: number
+  currentMedianThroughput?: number
 }
 
 /** Speed test result entry */
@@ -973,9 +1055,11 @@ export interface ServerChannels {
     | { ok: false; error: string }
   // ── Live Server Extraction & Technical Profile ──────────────────────────────
   'server:live-check': (options: LiveServerCheckOptions) => Promise<LiveServerCheck>
+  'server:live-check-batch': (options: LiveServerBatchCheckOptions) => Promise<LiveServerBatchCheckResult>
   'server:live-check-cancel': (requestId?: string) => Promise<{ cancelled: boolean; reason?: string }>
   'server:live-check-history': (filter?: { profileId?: string; host?: string }) => Promise<LiveServerCheck[]>
   'server:live-check-progress': (callback: (progress: LiveCheckProgress) => void) => void
+  'server:live-check-batch-progress': (callback: (progress: LiveServerBatchCheckProgress) => void) => void
 }
 
 /** Speed Test IPC channels */

@@ -10,6 +10,7 @@ const readNormalized = (relPath: string) =>
 
 const tunControllerSource = readNormalized('src/main/tunController.ts')
 const indexSource = readNormalized('src/main/index.ts')
+const appSource = readNormalized('src/renderer/App.tsx')
 const serversSource = readNormalized('src/renderer/pages/Servers.tsx')
 const firewallSource = readNormalized('src/main/firewallKillSwitch.ts')
 const appLoggerSource = readNormalized('src/main/appLogger.ts')
@@ -98,6 +99,25 @@ describe('Audit Fixes Regression: leak detector self-blinding prevention', () =>
 
   it('checks areTunRoutesActive in serverPicker fallback before calling recheck(true)', () => {
     expect(serverPickerSource).toContain('TUN routes are not active after profile switch; skipping ipMonitor.recheck(true)')
+  })
+})
+
+describe('Audit Fixes Regression: Soft routing lifecycle', () => {
+  it('keeps Soft mode out of Hard AutoPilot and restores env autoconfig on startup', () => {
+    expect(appSource).toContain("settings.autoPilotEnabled && settings.routingMode !== 'soft'")
+    expect(appSource).toContain("settings.routingMode === 'soft' && settings.connectionMode !== 'directVpn'")
+    expect(appSource).toContain("window.electronAPI.applyAutoconfig(['env']")
+  })
+
+  it('uses a dedicated Soft start path for tray and schedules', () => {
+    expect(indexSource).toContain('async function startSoftProtection(')
+    expect(indexSource).toContain("schedule.mode === 'soft' ? startSoftProtection : startProtection")
+    expect(indexSource).toContain("sendToMainWindow('soft-status-changed', true)")
+  })
+
+  it('does not discard persisted Soft env autoconfig during crash recovery', () => {
+    expect(indexSource).toContain('preserving env autoconfig during Soft-mode crash recovery')
+    expect(indexSource).toContain("rollbackSoftAutoconfigIfApplied('protection stop')")
   })
 })
 

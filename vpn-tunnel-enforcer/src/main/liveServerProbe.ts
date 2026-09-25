@@ -56,8 +56,14 @@ import type {
   LiveMediaStreamDiagnostics,
   LivePortScanItem,
   LiveServerCheck,
+  LiveServerBatchCheckOptions,
+  LiveServerBatchCheckProgress,
+  LiveServerBatchCheckResult,
   LiveServerCheckOptions,
+  LiveSplitTunnelDiagnostics,
   LiveTlsCertInfo,
+  LiveThroughputDiagnostics,
+  LiveThroughputSample,
   PathDiagnostics,
   PmtuDiagnostics,
   ReachabilityDiagnostics,
@@ -81,7 +87,10 @@ export const LIVE_PROBE_THRESHOLDS = {
   TCP_CONNECT_TIMEOUT_MS: 1500,
   TLS_HANDSHAKE_TIMEOUT_MS: 3500,
   HTTP_PROBE_TIMEOUT_MS: 3500,
-  TRACEROUTE_TIMEOUT_MS: 3500
+  TRACEROUTE_TIMEOUT_MS: 3500,
+  THROUGHPUT_TIMEOUT_MS: 8000,
+  THROUGHPUT_MAX_BYTES: 12 * 1024 * 1024,
+  THROUGHPUT_STALL_GAP_MS: 750
 } as const
 
 export const RESTRICTED_PORTS = [80, 443, 8080, 8443, 2053, 2083, 2087, 2096] as const
@@ -1587,6 +1596,49 @@ export function evaluateLiveCheckFindings(
     })
   }
 
+  // 10b. Profile-specific throughput & stall findings
+  if (check.throughput) {
+    if (check.throughput.status === 'error') {
+      findings.push({
+        code: 'THROUGHPUT_PROBE_FAILED',
+        severity: 'warning',
+        title: 'Не удалось измерить поток через профиль',
+        detail: check.throughput.error || 'HTTPS-зонд скорости не завершился.',
+        evidence: { endpoint: check.throughput.endpoint || '' }
+      })
+    } else if (check.throughput.status === 'warning') {
+      findings.push({
+        code: 'THROUGHPUT_UNSTABLE',
+        severity: 'warning',
+        title: 'Скорость через сервер нестабильна',
+        detail: `Разброс коротких проб ${check.throughput.variabilityPct ?? 0}%, stalls: ${check.throughput.stallCount ?? 0}, максимальная пауза: ${check.throughput.maxInterChunkGapMs ?? 0} ms.`,
+        evidence: {
+          medianMbps: check.throughput.medianMbps ?? 0,
+          minMbps: check.throughput.minMbps ?? 0,
+          maxMbps: check.throughput.maxMbps ?? 0,
+          variabilityPct: check.throughput.variabilityPct ?? 0,
+          stallCount: check.throughput.stallCount ?? 0,
+          maxInterChunkGapMs: check.throughput.maxInterChunkGapMs ?? 0
+        }
+      })
+    }
+  }
+  const throughputDiff = previousCheck && check.throughput && previousCheck.throughput
+    ? computeHistoryDiff(check as LiveServerCheck, previousCheck)
+    : undefined
+  if (throughputDiff?.throughputChanged) {
+    findings.push({
+      code: 'THROUGHPUT_DEGRADED_FROM_PREVIOUS',
+      severity: 'warning',
+      title: 'Профиль стал заметно медленнее предыдущей проверки',
+      detail: `Медианная скорость снизилась с ${throughputDiff.previousMedianThroughput} до ${throughputDiff.currentMedianThroughput} Mbps.`,
+      evidence: {
+        previousMedianMbps: throughputDiff.previousMedianThroughput ?? 0,
+        currentMedianMbps: throughputDiff.currentMedianThroughput ?? 0
+      }
+    })
+  }
+
   // 11. Media Stream (Twitch HLS & QUIC Fallback) Findings
   if (check.mediaStream) {
     if (check.mediaStream.error2000Risk) {
@@ -1636,6 +1688,28 @@ export function evaluateLiveCheckFindings(
         }
       }
     }
+  }
+
+  if (check.splitTunnel?.status === 'warning') {
+    findings.push({
+      code: 'SPLIT_TUNNEL_RULE_CONFLICT',
+      severity: 'warning',
+      title: 'Пересечение правил split tunneling',
+      detail: check.splitTunnel.detail || 'Один process_name попал в несколько маршрутизирующих правил.',
+      evidence: {
+        duplicateProcessNames: check.splitTunnel.duplicateProcessNames.join(','),
+        directRuleCount: check.splitTunnel.directRuleCount,
+        vpnRuleCount: check.splitTunnel.vpnRuleCount
+      }
+    })
+  } else if (check.splitTunnel?.status === 'error') {
+    findings.push({
+      code: 'SPLIT_TUNNEL_DIAGNOSTICS_FAILED',
+      severity: 'warning',
+      title: 'Не удалось прочитать split tunneling',
+      detail: check.splitTunnel.error || 'Состояние process-based routing неизвестно.',
+      evidence: {}
+    })
   }
 
   return findings
@@ -2033,8 +2107,9 @@ export async function probeMediaStream(
 export async function probeTunnelHandshakeAndEgress(
   profile?: ServerProfile | null,
   endpointIp?: string,
-  signal?: AbortSignal
-): Promise<{ handshake: TunnelHandshakeResult; egress: LiveEgressResult; mediaStream: LiveMediaStreamDiagnostics }> {
+  signal?: AbortSignal,
+  includeThroughput = false
+): Promise<{ handshake: TunnelHandshakeResult; egress: LiveEgressResult; mediaStream: LiveMediaStreamDiagnostics; throughput?: LiveThroughputDiagnostics }> {
   const started = Date.now()
   if (!profile || !profile.outbound || typeof profile.outbound !== 'object') {
     return {
@@ -2166,6 +2241,11 @@ export async function probeTunnelHandshakeAndEgress(
         const physicalAdapter = directProxy
           ? null
           : (await getPhysicalAdapterDnsSources().catch(() => []))[0] ?? null
+        const probeRoute: LiveThroughputDiagnostics['route'] = isSelfProbe
+          ? 'active-profile-self'
+          : directProxy
+            ? 'active-tunnel-direct-detour'
+            : 'physical-direct'
 
         const proxyEngineSetting = settingsStore.get().proxyEngine ?? 'auto'
         const engine = resolveProxyEngine(outbound, proxyEngineSetting)
@@ -2430,7 +2510,11 @@ export async function probeTunnelHandshakeAndEgress(
           }
         }
 
-        return { handshake, egress, mediaStream }
+        const throughput = includeThroughput
+          ? await probeThroughput(inboundPort, signal, probeRoute)
+          : undefined
+
+        return { handshake, egress, mediaStream, throughput }
       } catch (err: any) {
         let diskLogs = ''
         if (workDir) {
@@ -2568,6 +2652,260 @@ export async function probePathConfirmation(
       evidenceKind: 'net-route',
       error: err?.message || 'Сбой проверки маршрута Windows'
     }
+  }
+}
+
+/**
+ * Reduce bounded transfer samples to a comparable server-path result. The
+ * median is deliberately the headline number; min/max and stalls expose the
+ * bursty behaviour that an average speed test hides.
+ */
+export function summarizeThroughputSamples(
+  samples: LiveThroughputSample[],
+  endpoint: string,
+  durationMs: number,
+  error?: string
+): LiveThroughputDiagnostics {
+  if (samples.length === 0) {
+    return {
+      status: error ? 'error' : 'skipped',
+      durationMs,
+      endpoint,
+      samples: [],
+      error
+    }
+  }
+
+  const speeds = samples.map(sample => sample.throughputMbps).filter(Number.isFinite).sort((a, b) => a - b)
+  if (speeds.length === 0) {
+    return {
+      status: 'error',
+      durationMs,
+      endpoint,
+      samples,
+      error: error || 'Измерения потока не содержат числовой скорости'
+    }
+  }
+  const medianMbps = speeds.length % 2 === 0
+    ? (speeds[speeds.length / 2 - 1] + speeds[speeds.length / 2]) / 2
+    : speeds[Math.floor(speeds.length / 2)]
+  const minMbps = speeds[0]
+  const maxMbps = speeds[speeds.length - 1]
+  const variabilityPct = medianMbps > 0
+    ? Math.round(((maxMbps - minMbps) / medianMbps) * 100)
+    : 0
+  const stallCount = samples.reduce((sum, sample) => sum + sample.stallCount, 0)
+  const maxInterChunkGapMs = Math.max(...samples.map(sample => sample.maxInterChunkGapMs), 0)
+  const partial = Boolean(error)
+  const unstable = partial || variabilityPct >= 40 || stallCount > 0 || maxInterChunkGapMs >= LIVE_PROBE_THRESHOLDS.THROUGHPUT_STALL_GAP_MS
+
+  return {
+    status: unstable ? 'warning' : 'ok',
+    durationMs,
+    endpoint,
+    samples,
+    medianMbps: Math.round(medianMbps * 100) / 100,
+    minMbps: Math.round(minMbps * 100) / 100,
+    maxMbps: Math.round(maxMbps * 100) / 100,
+    variabilityPct,
+    stallCount,
+    maxInterChunkGapMs,
+    error,
+    detail: unstable
+      ? partial
+        ? `Получены не все короткие пробы: ${error}. Сравните доступные min/max и stalls с другими профилями.`
+        : 'Поток идёт неравномерно: сравните min/max, stalls и максимальную паузу с другими профилями.'
+      : 'Поток стабилен в пределах короткого диагностического зонда.'
+  }
+}
+
+export function summarizeSplitTunnelDiagnostics(
+  enabled: boolean,
+  directProcessNames: string[],
+  vpnProcessNames: string[]
+): LiveSplitTunnelDiagnostics {
+  const allNames = [...directProcessNames, ...vpnProcessNames]
+  const counts = new Map<string, number>()
+  for (const name of allNames) counts.set(name, (counts.get(name) || 0) + 1)
+  const duplicateProcessNames = [...counts.entries()]
+    .filter(([, count]) => count > 1)
+    .map(([name]) => name)
+  const status = !enabled
+    ? 'skipped'
+    : duplicateProcessNames.length > 0
+      ? 'warning'
+      : 'ok'
+  return {
+    status,
+    enabled,
+    directProcessNames,
+    vpnProcessNames,
+    duplicateProcessNames,
+    directRuleCount: directProcessNames.length > 0 ? 1 : 0,
+    vpnRuleCount: 0,
+    defaultOutbound: 'proxy-out',
+    detail: !enabled
+      ? 'Split tunneling выключен: весь трафик следует обычному default route.'
+      : duplicateProcessNames.length > 0
+        ? `Одинаковые process_name встречаются в правилах: ${duplicateProcessNames.join(', ')}.`
+        : directProcessNames.length > 0
+          ? `Прямой маршрут назначен ${directProcessNames.length} process_name; остальные приложения идут через proxy-out.`
+          : 'Явных direct-правил нет: приложения идут через proxy-out.'
+  }
+}
+
+/** Read the effective process routing rules without changing the live tunnel. */
+export async function collectSplitTunnelDiagnostics(): Promise<LiveSplitTunnelDiagnostics> {
+  try {
+    const { splitTunneling } = await import('./splitTunneling')
+    const config = splitTunneling.getConfig()
+    return summarizeSplitTunnelDiagnostics(
+      config.enabled === true,
+      splitTunneling.getDirectProcessNames(),
+      splitTunneling.getVpnProcessNames()
+    )
+  } catch (error: any) {
+    return {
+      status: 'error',
+      enabled: false,
+      directProcessNames: [],
+      vpnProcessNames: [],
+      duplicateProcessNames: [],
+      directRuleCount: 0,
+      vpnRuleCount: 0,
+      defaultOutbound: 'unknown',
+      error: error?.message || String(error)
+    }
+  }
+}
+
+/** Download a bounded Cloudflare payload through the selected profile SOCKS. */
+async function probeHttpsDownloadThroughSocks(
+  socks: { host: string; port: number },
+  bytes: number,
+  sampleIndex: number,
+  signal?: AbortSignal
+): Promise<LiveThroughputSample> {
+  const started = Date.now()
+  const socket = await openTcpViaSocks(socks, 'speed.cloudflare.com', 443, LIVE_PROBE_THRESHOLDS.THROUGHPUT_TIMEOUT_MS, signal)
+  return await new Promise((resolve, reject) => {
+    let settled = false
+    let header = Buffer.alloc(0)
+    let headerParsed = false
+    let tlsSocket: tls.TLSSocket | undefined
+    let received = 0
+    let firstByteAt: number | undefined
+    let lastChunkAt: number | undefined
+    let maxInterChunkGapMs = 0
+    let stallCount = 0
+    const timer = setTimeout(() => finish(new Error('throughput probe timeout')), LIVE_PROBE_THRESHOLDS.THROUGHPUT_TIMEOUT_MS)
+
+    const cleanup = () => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', onAbort)
+      socket.removeAllListeners()
+      try { tlsSocket?.destroy() } catch {}
+      try { socket.destroy() } catch {}
+    }
+    const finish = (error?: Error) => {
+      if (settled) return
+      settled = true
+      const durationMs = Math.max(1, Date.now() - started)
+      cleanup()
+      if (error) {
+        reject(error)
+        return
+      }
+      resolve({
+        index: sampleIndex,
+        bytes: received,
+        durationMs,
+        throughputMbps: Math.round(((received * 8) / durationMs / 1000) * 100) / 100,
+        ttfbMs: firstByteAt === undefined ? undefined : firstByteAt - started,
+        stallCount,
+        maxInterChunkGapMs
+      })
+    }
+    const onAbort = () => finish(new Error('Cancelled'))
+    signal?.addEventListener('abort', onAbort, { once: true })
+    if (signal?.aborted) { onAbort(); return }
+
+    tlsSocket = tls.connect({ socket, servername: 'speed.cloudflare.com', rejectUnauthorized: true })
+    const onData = (chunk: Buffer) => {
+      if (settled) return
+      let body = chunk
+      if (!headerParsed) {
+        header = Buffer.concat([header, chunk])
+        const delimiter = header.indexOf('\r\n\r\n')
+        if (delimiter < 0) return
+        const statusLine = header.subarray(0, delimiter).toString('ascii').split('\r\n', 1)[0] || ''
+        const statusCode = Number.parseInt(statusLine.split(' ')[1] || '', 10)
+        if (!Number.isFinite(statusCode) || statusCode < 200 || statusCode >= 300) {
+          finish(new Error(`throughput probe HTTP status ${statusLine || 'unknown'}`))
+          return
+        }
+        body = header.subarray(delimiter + 4)
+        headerParsed = true
+      }
+      if (body.length === 0) return
+      const now = Date.now()
+      if (firstByteAt === undefined) firstByteAt = now
+      if (lastChunkAt !== undefined) {
+        const gap = now - lastChunkAt
+        maxInterChunkGapMs = Math.max(maxInterChunkGapMs, gap)
+        if (gap >= LIVE_PROBE_THRESHOLDS.THROUGHPUT_STALL_GAP_MS) stallCount++
+      }
+      lastChunkAt = now
+      received = Math.min(LIVE_PROBE_THRESHOLDS.THROUGHPUT_MAX_BYTES, received + body.length)
+      if (received >= bytes) finish()
+    }
+    tlsSocket.once('secureConnect', () => {
+      tlsSocket.write(
+        `GET /__down?bytes=${bytes}&vpnte_probe=${sampleIndex}-${Date.now()} HTTP/1.1\r\n` +
+        'Host: speed.cloudflare.com\r\n' +
+        'Accept: application/octet-stream\r\n' +
+        'Accept-Encoding: identity\r\n' +
+        'Cache-Control: no-cache\r\n' +
+        'Connection: close\r\n\r\n'
+      )
+    })
+    tlsSocket.on('data', onData)
+    tlsSocket.once('end', () => {
+      if (!headerParsed) {
+        finish(new Error('throughput probe ended before HTTP headers'))
+      } else if (received < bytes) {
+        finish(new Error(`throughput probe ended after ${received} of ${bytes} bytes`))
+      } else {
+        finish()
+      }
+    })
+    tlsSocket.once('timeout', () => finish(new Error('throughput probe timeout')))
+    tlsSocket.once('error', (err) => finish(err instanceof Error ? err : new Error(String(err))))
+  })
+}
+
+async function probeThroughput(
+  inboundPort: number,
+  signal?: AbortSignal,
+  route: LiveThroughputDiagnostics['route'] = 'physical-direct'
+): Promise<LiveThroughputDiagnostics> {
+  const started = Date.now()
+  const endpoint = 'speed.cloudflare.com/__down'
+  const bytesPerSample = 4 * 1024 * 1024
+  const samples: LiveThroughputSample[] = []
+  let lastError: string | undefined
+  for (let index = 0; index < 3; index++) {
+    if (signal?.aborted) break
+    try {
+      samples.push(await probeHttpsDownloadThroughSocks({ host: '127.0.0.1', port: inboundPort }, bytesPerSample, index, signal))
+    } catch (err: any) {
+      lastError = err?.message || String(err)
+      if (signal?.aborted) break
+    }
+  }
+  return {
+    ...summarizeThroughputSamples(samples, endpoint, Date.now() - started, lastError),
+    route
   }
 }
 
@@ -2812,7 +3150,7 @@ export async function runLiveServerCheck(
   })
 
   // Create deadline controller to enforce an overall timeout on the entire check
-  const totalTimeoutMs = mode === 'extended' ? 45000 : 25000
+  const totalTimeoutMs = mode === 'extended' ? 60000 : 25000
   const deadlineController = new AbortController()
 
   const overallTimer = setTimeout(() => {
@@ -2833,7 +3171,7 @@ export async function runLiveServerCheck(
 
   const checkSignal = deadlineController.signal
 
-  const totalStages = 12
+  const totalStages = 13
   let completedStages = 0
   let sequence = 0
 
@@ -2982,14 +3320,20 @@ export async function runLiveServerCheck(
     reportStage('handshake', 'running')
     reportStage('egress', 'running')
     reportStage('mediaStream', 'running')
-    const { handshake: handshakeRes, egress: egressRes, mediaStream: mediaStreamRes } = await probeTunnelHandshakeAndEgress(
+    if (mode === 'extended') reportStage('throughput', 'running')
+    else reportStage('throughput', 'skipped')
+    const { handshake: handshakeRes, egress: egressRes, mediaStream: mediaStreamRes, throughput: throughputRes } = await probeTunnelHandshakeAndEgress(
       matchedProfile,
       primaryIp,
-      checkSignal
+      checkSignal,
+      mode === 'extended'
     )
     reportStage('handshake', handshakeRes.status === 'ok' ? 'completed' : handshakeRes.status === 'skipped' ? 'skipped' : 'failed')
     reportStage('egress', egressRes.status === 'ok' ? 'completed' : egressRes.status === 'skipped' ? 'skipped' : 'failed')
     reportStage('mediaStream', mediaStreamRes.status === 'ok' ? 'completed' : mediaStreamRes.status === 'skipped' ? 'skipped' : 'failed')
+    if (mode === 'extended') {
+      reportStage('throughput', throughputRes?.status === 'ok' ? 'completed' : throughputRes?.status === 'skipped' ? 'skipped' : 'failed')
+    }
 
     // 4. Windows Path Confirmation & PMTU Probes
     reportStage('path', 'running')
@@ -3004,6 +3348,10 @@ export async function runLiveServerCheck(
       checkSignal
     )
     reportStage('pmtu', pmtuRes.status === 'ok' || pmtuRes.status === 'lower_bound' ? 'completed' : pmtuRes.status === 'skipped' ? 'skipped' : 'failed')
+
+    const splitTunnelRes = mode === 'extended'
+      ? await collectSplitTunnelDiagnostics()
+      : undefined
 
     // Get previous successful check for diff & findings
     const previousCheck = liveServerHistory.getPreviousSuccessfulCheck(options.profileId, host, port)
@@ -3035,7 +3383,9 @@ export async function runLiveServerCheck(
       egress: egressRes,
       mediaStream: mediaStreamRes,
       pathDiagnostics: pathRes,
-      pmtu: pmtuRes
+      pmtu: pmtuRes,
+      throughput: throughputRes,
+      splitTunnel: splitTunnelRes
     }
 
     // Attach diff to infrastructure hints BEFORE saving to disk!
@@ -3051,7 +3401,8 @@ export async function runLiveServerCheck(
           latencySpike: diff.latencySpike,
           handshakeChanged: diff.handshakeChanged,
           egressChanged: diff.egressChanged,
-          pmtuChanged: diff.pmtuChanged
+          pmtuChanged: diff.pmtuChanged,
+          throughputChanged: diff.throughputChanged
         }
       }
     }
@@ -3071,6 +3422,90 @@ export async function runLiveServerCheck(
     if (signal) {
       signal.removeEventListener('abort', abortForwarder)
     }
+  }
+}
+
+/**
+ * Compare a bounded set of saved profiles under identical conditions. The
+ * checks are deliberately sequential because each extended probe starts an
+ * isolated sing-box/xray process and concurrent probes would compete for the
+ * same public Wi-Fi and make the ranking meaningless.
+ */
+export async function runLiveServerBatchCheck(
+  options: LiveServerBatchCheckOptions,
+  signal?: AbortSignal,
+  onProgress?: (progress: LiveServerBatchCheckProgress) => void
+): Promise<LiveServerBatchCheckResult> {
+  const startedAt = new Date().toISOString()
+  const requestId = options.requestId || crypto.randomUUID()
+  const mode = options.mode === 'basic' ? 'basic' : 'extended'
+  const uniqueProfileIds = [...new Set(options.profileIds)]
+  const profiles = serverPicker.getProfiles().filter(profile =>
+    uniqueProfileIds.includes(profile.id) && profile.enabled !== false && !profile.removedFromSubscriptionAt
+  )
+  const orderedProfiles = uniqueProfileIds
+    .map(id => profiles.find(profile => profile.id === id))
+    .filter((profile): profile is ServerProfile => Boolean(profile))
+  const errors: Array<{ profileId: string; error: string }> = []
+  const results: LiveServerCheck[] = []
+  let sequence = 0
+
+  for (let index = 0; index < orderedProfiles.length; index++) {
+    const profile = orderedProfiles[index]
+    if (signal?.aborted) break
+    const emit = (patch: Omit<LiveServerBatchCheckProgress, 'requestId' | 'sequence' | 'profileId' | 'index' | 'total'>) => {
+      onProgress?.({
+        requestId,
+        sequence: ++sequence,
+        profileId: profile.id,
+        index,
+        total: orderedProfiles.length,
+        ...patch
+      })
+    }
+    emit({ status: 'running', stage: 'dns' })
+    try {
+      const result = await runLiveServerCheck(
+        { requestId: `${requestId}:${profile.id}`, profileId: profile.id, mode },
+        signal,
+        progress => {
+          emit({
+            status: 'running',
+            stage: progress.stage,
+            detail: progress.detail,
+            medianMbps: undefined
+          })
+        }
+      )
+      results.push(result)
+      emit({
+        status: 'completed',
+        stage: 'throughput',
+        medianMbps: result.throughput?.medianMbps,
+        detail: result.throughput?.detail
+      })
+    } catch (error: any) {
+      const message = error?.message || String(error)
+      errors.push({ profileId: profile.id, error: message })
+      emit({ status: signal?.aborted ? 'cancelled' : 'failed', detail: message })
+      if (signal?.aborted) break
+    }
+  }
+
+  for (const profileId of uniqueProfileIds) {
+    if (!orderedProfiles.some(profile => profile.id === profileId) && !errors.some(error => error.profileId === profileId)) {
+      errors.push({ profileId, error: 'Профиль не найден, выключен или удалён из подписки' })
+    }
+  }
+
+  return {
+    requestId,
+    mode,
+    startedAt,
+    finishedAt: new Date().toISOString(),
+    cancelled: Boolean(signal?.aborted),
+    results,
+    errors
   }
 }
 
@@ -3109,6 +3544,38 @@ export function registerLiveServerProbeIpcHandlers(): void {
       if (activeControllers.get(key) === controller) {
         activeControllers.delete(key)
       }
+    }
+  })
+
+  ipcMain.handle('server:live-check-batch', async (_event, options: LiveServerBatchCheckOptions) => {
+    if (!options || typeof options !== 'object' || !Array.isArray(options.profileIds)) {
+      throw new TypeError('options.profileIds must be an array')
+    }
+    if (options.profileIds.length < 1 || options.profileIds.length > 12) {
+      throw new RangeError('A batch live check accepts between 1 and 12 profiles')
+    }
+    const requestId = options.requestId || crypto.randomUUID()
+    const owner = _event.sender?.id ?? 0
+    const key = `${owner}:${requestId}`
+    if (activeControllers.has(key)) throw new Error('Duplicate live check requestId')
+    if ([...activeControllers.keys()].filter(k => k.startsWith(`${owner}:`)).length >= 2) throw new Error('Too many active live checks')
+    const controller = new AbortController()
+    const onDestroyed = () => controller.abort()
+    _event.sender?.once('destroyed', onDestroyed)
+    activeControllers.set(key, controller)
+    try {
+      return await runLiveServerBatchCheck(
+        { ...options, requestId },
+        controller.signal,
+        progress => {
+          if (_event.sender && !_event.sender.isDestroyed()) {
+            _event.sender.send('server:live-check-batch-progress', progress)
+          }
+        }
+      )
+    } finally {
+      _event.sender?.removeListener('destroyed', onDestroyed)
+      if (activeControllers.get(key) === controller) activeControllers.delete(key)
     }
   })
 

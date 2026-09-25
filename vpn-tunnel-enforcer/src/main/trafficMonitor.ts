@@ -4,6 +4,8 @@ import { TUN_ADAPTER_ALIAS } from './tunAdapter'
 
 // How often the persistent PowerShell reader samples the adapter counters.
 const SAMPLE_INTERVAL_MS = 1000
+const SMOOTHING_ALPHA = 0.35
+const BURSTINESS_WINDOW_SIZE = 5
 // Backoff before respawning the reader after an unexpected exit. Kept well
 // above SAMPLE_INTERVAL_MS so a broken PowerShell can't turn into a tight
 // spawn loop (the very thing this module was rewritten to avoid).
@@ -16,6 +18,10 @@ export interface TrafficStats {
   adapterFound: boolean
   downloadBps: number
   uploadBps: number
+  smoothedDownloadBps: number
+  smoothedUploadBps: number
+  downloadBurstinessPct: number
+  uploadBurstinessPct: number
   totalDownloadBytes: number
   totalUploadBytes: number
   sessionDownloadBytes: number
@@ -41,6 +47,10 @@ function emptyStats(adapterName = TUN_ADAPTER_ALIAS): TrafficStats {
     adapterFound: false,
     downloadBps: 0,
     uploadBps: 0,
+    smoothedDownloadBps: 0,
+    smoothedUploadBps: 0,
+    downloadBurstinessPct: 0,
+    uploadBurstinessPct: 0,
     totalDownloadBytes: 0,
     totalUploadBytes: 0,
     sessionDownloadBytes: 0,
@@ -72,6 +82,10 @@ let baseCounters: AdapterCounters | null = null
 let previousCounters: AdapterCounters | null = null
 let peakDownloadBps = 0
 let peakUploadBps = 0
+let smoothedDownloadBps = 0
+let smoothedUploadBps = 0
+let downloadSamples: number[] = []
+let uploadSamples: number[] = []
 let startedAt: number | null = null
 let lastTrafficAt = 0
 
@@ -93,6 +107,10 @@ function publish(stats: TrafficStats) {
 }
 
 function publishAdapterNotFound(runningOverride = running) {
+  smoothedDownloadBps = 0
+  smoothedUploadBps = 0
+  downloadSamples = []
+  uploadSamples = []
   publish({
     ...currentStats,
     ts: Date.now(),
@@ -101,8 +119,38 @@ function publishAdapterNotFound(runningOverride = running) {
     adapterFound: false,
     downloadBps: 0,
     uploadBps: 0,
+    smoothedDownloadBps: 0,
+    smoothedUploadBps: 0,
+    downloadBurstinessPct: 0,
+    uploadBurstinessPct: 0,
     startedAt
   })
+}
+
+/**
+ * Keep the raw counter delta for diagnostics, but make the number shown in
+ * the UI resistant to a single buffered burst. The first sample establishes
+ * the level and subsequent samples use a short EMA.
+ */
+export function smoothTrafficRate(previous: number, current: number, alpha = SMOOTHING_ALPHA): number {
+  if (!Number.isFinite(previous) || previous <= 0) return Math.max(0, current)
+  const safeAlpha = Math.min(1, Math.max(0.01, alpha))
+  return Math.max(0, previous + safeAlpha * (current - previous))
+}
+
+/** Relative standard deviation of the recent raw samples, in percent. */
+export function calculateBurstiness(samples: number[]): number {
+  if (samples.length < 2) return 0
+  const finite = samples.filter(value => Number.isFinite(value) && value >= 0)
+  if (finite.length < 2) return 0
+  const mean = finite.reduce((sum, value) => sum + value, 0) / finite.length
+  if (mean <= 0) return 0
+  const variance = finite.reduce((sum, value) => sum + (value - mean) ** 2, 0) / finite.length
+  return Math.round(Math.min(999, (Math.sqrt(variance) / mean) * 100))
+}
+
+function rememberSample(samples: number[], value: number): number[] {
+  return [...samples, value].slice(-BURSTINESS_WINDOW_SIZE)
 }
 
 // Turn one counter sample into a published TrafficStats update. Mirrors the
@@ -122,6 +170,10 @@ function processCounters(counters: AdapterCounters) {
   ) {
     baseCounters = counters
     previousCounters = counters
+    smoothedDownloadBps = 0
+    smoothedUploadBps = 0
+    downloadSamples = []
+    uploadSamples = []
     publish({
       ...emptyStats(counters.name),
       ts: counters.ts,
@@ -142,6 +194,10 @@ function processCounters(counters: AdapterCounters) {
   }
   peakDownloadBps = Math.max(peakDownloadBps, downloadBps)
   peakUploadBps = Math.max(peakUploadBps, uploadBps)
+  smoothedDownloadBps = smoothTrafficRate(smoothedDownloadBps, downloadBps)
+  smoothedUploadBps = smoothTrafficRate(smoothedUploadBps, uploadBps)
+  downloadSamples = rememberSample(downloadSamples, downloadBps)
+  uploadSamples = rememberSample(uploadSamples, uploadBps)
   previousCounters = counters
 
   publish({
@@ -151,6 +207,10 @@ function processCounters(counters: AdapterCounters) {
     adapterFound: true,
     downloadBps,
     uploadBps,
+    smoothedDownloadBps,
+    smoothedUploadBps,
+    downloadBurstinessPct: calculateBurstiness(downloadSamples),
+    uploadBurstinessPct: calculateBurstiness(uploadSamples),
     totalDownloadBytes: counters.receivedBytes,
     totalUploadBytes: counters.sentBytes,
     sessionDownloadBytes: Math.max(0, counters.receivedBytes - baseCounters.receivedBytes),
@@ -296,6 +356,10 @@ export const trafficMonitor = {
     previousCounters = null
     peakDownloadBps = 0
     peakUploadBps = 0
+    smoothedDownloadBps = 0
+    smoothedUploadBps = 0
+    downloadSamples = []
+    uploadSamples = []
     publish({ ...emptyStats(adapterName), running: true, startedAt })
     spawnReader()
   },
@@ -307,6 +371,10 @@ export const trafficMonitor = {
     previousCounters = null
     peakDownloadBps = 0
     peakUploadBps = 0
+    smoothedDownloadBps = 0
+    smoothedUploadBps = 0
+    downloadSamples = []
+    uploadSamples = []
     startedAt = null
     publish(emptyStats(adapterName))
   },

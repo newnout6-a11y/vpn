@@ -308,6 +308,14 @@ export function computeHistoryDiff(
   const currPmtu = isPmtuComparable ? currPmtuObj!.pmtu : undefined
   const pmtuChanged = Boolean(isPmtuComparable && prevPmtu !== currPmtu)
 
+  const prevThroughput = previous.throughput?.medianMbps
+  const currThroughput = current.throughput?.medianMbps
+  const throughputChanged = Boolean(
+    prevThroughput !== undefined &&
+    currThroughput !== undefined &&
+    currThroughput < prevThroughput * 0.65
+  )
+
   return {
     previousStartedAt: previous.startedAt,
     ipChanged,
@@ -336,6 +344,9 @@ export function computeHistoryDiff(
     currentExitIp: currExit,
     pmtuChanged,
     previousPmtu: prevPmtu,
-    currentPmtu: currPmtu
+    currentPmtu: currPmtu,
+    throughputChanged,
+    previousMedianThroughput: prevThroughput,
+    currentMedianThroughput: currThroughput
   }
 }

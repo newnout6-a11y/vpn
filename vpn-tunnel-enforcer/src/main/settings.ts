@@ -6,6 +6,12 @@ import { domainEnrichmentService } from './domainEnrichment'
 
 export interface AppSettings {
   connectionMode: 'localProxy' | 'directVpn'
+  // Routing preference chosen in the first-run wizard / Settings:
+  // 'hard' = full TUN tunnel (start-tun), 'soft' = no TUN, apps are pointed
+  // at the local proxy via env autoconfig (setx HTTP_PROXY …). Distinct from
+  // connectionMode, which only picks the upstream (Happ proxy vs direct VPN
+  // server) — hard and soft used to collapse into the same start-tun path.
+  routingMode: 'hard' | 'soft'
   proxyOverride: string
   proxyType: 'socks5' | 'http'
   bootstrapRouteMode: 'auto' | 'direct' | 'localProxy'
@@ -110,6 +116,7 @@ export interface AppSettings {
 
 const defaults: AppSettings = {
   connectionMode: 'localProxy',
+  routingMode: 'hard',
   proxyOverride: '',
   proxyType: 'socks5',
   bootstrapRouteMode: 'auto',
@@ -172,6 +179,7 @@ function normalizeSettings(input: Partial<AppSettings> | undefined): AppSettings
     : []
   return {
     connectionMode: merged.connectionMode === 'directVpn' ? 'directVpn' : 'localProxy',
+    routingMode: merged.routingMode === 'soft' ? 'soft' : 'hard',
     proxyOverride: typeof merged.proxyOverride === 'string' ? merged.proxyOverride.trim() : '',
     proxyType: merged.proxyType === 'http' ? 'http' : 'socks5',
     bootstrapRouteMode: merged.bootstrapRouteMode === 'direct' || merged.bootstrapRouteMode === 'localProxy'

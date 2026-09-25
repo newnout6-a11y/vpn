@@ -47,6 +47,14 @@ vi.mock('electron', () => ({
   }
 }))
 
+const leaseStoreSetMock = vi.hoisted(() => vi.fn())
+vi.mock('electron-store', () => ({
+  default: class MockStore {
+    get() { return [] }
+    set(...args: any[]) { leaseStoreSetMock(...args) }
+  }
+}))
+
 vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
 
 vi.mock('./firewallKillSwitch', () => ({
@@ -87,6 +95,21 @@ import {
 import { serverPicker } from './serverPicker'
 
 const source = readFileSync(join(process.cwd(), 'src/main/externalProxy.ts'), 'utf8')
+
+describe('external-proxy lease persistence across restarts', () => {
+  it('does not restore persisted leases into the live map on module load', () => {
+    // A lease only guards a route owned by a child of the current process.
+    // Restoring it after a restart would block the slot for up to the TTL
+    // while protecting nothing (the proxy child is long gone).
+    const bootBlock = source.slice(
+      source.indexOf("const leaseStore = new Store"),
+      source.indexOf('function persistExternalProxyLeases')
+    )
+    expect(bootBlock).not.toMatch(/leasesBySlot\.set\(/)
+    expect(bootBlock).not.toMatch(/scheduleExternalProxyLeaseExpiry\(/)
+    expect(bootBlock).toMatch(/leaseStore\.set\('leases', \[\]\)/)
+  })
+})
 
 function sampleProfile(): ServerProfile {
   return {

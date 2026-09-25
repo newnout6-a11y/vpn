@@ -48,6 +48,7 @@ const STAGE_LABELS: Record<LiveCheckStage, string> = {
   handshake: 'Рукопожатие туннеля',
   egress: 'Свежий exit IP (рефлекторы)',
   mediaStream: 'Twitch HLS и медиапотоки',
+  throughput: 'Стабильность потока через профиль',
   path: 'Маршрутизация Windows',
   pmtu: 'PMTU и DF зондирование'
 }
@@ -334,7 +335,7 @@ export function LiveServerCheckSection({
           <AlertTriangle size={12} />
           {t(
             'liveCheck.extendedWarning',
-            'Расширенная проверка выполняет зондирование портов (80..2096), CNAME-цепочки и трассировку маршрута.'
+            'Расширенная проверка выполняет зондирование портов (80..2096), CNAME-цепочки и трассировку маршрута, а также измеряет PMTU и короткую скорость/стабильность потока через выбранный сервер.'
           )}
         </p>
       )}
@@ -913,6 +914,9 @@ export function LiveServerCheckSection({
                     {result.infrastructure.changesFromPrevious.pmtuChanged && (
                       <MacBadge variant="info" className="text-[9px]">PMTU изменился</MacBadge>
                     )}
+                    {result.infrastructure.changesFromPrevious.throughputChanged && (
+                      <MacBadge variant="danger" className="text-[9px]">Скорость ниже прошлой</MacBadge>
+                    )}
                   </div>
                 )}
               </div>
@@ -1221,6 +1225,105 @@ export function LiveServerCheckSection({
                     <div className="text-[10px] text-[var(--color-danger)] pt-0.5">
                       {result.mediaStream.error}
                     </div>
+                  )}
+                </div>
+              </DiagnosticBox>
+            )}
+
+            {/* Profile-specific bounded throughput probe */}
+            {result.throughput && (
+              <DiagnosticBox
+                icon={<Zap size={12} />}
+                title="Скорость и стабильность профиля"
+                status={result.throughput.status}
+                durationMs={result.throughput.durationMs}
+              >
+                <div className="space-y-1.5 text-[11px]">
+                  <div className="flex justify-between items-center">
+                    <span className="text-[var(--color-text-secondary)]">Медиана:</span>
+                    <span className="font-mono font-bold text-[var(--color-accent)]">
+                      {result.throughput.medianMbps !== undefined ? `${result.throughput.medianMbps} Mbps` : 'Нет данных'}
+                    </span>
+                  </div>
+                  {result.throughput.minMbps !== undefined && result.throughput.maxMbps !== undefined && (
+                    <div className="flex justify-between">
+                      <span className="text-[var(--color-text-secondary)]">Диапазон проб:</span>
+                      <span className="font-mono">{result.throughput.minMbps}–{result.throughput.maxMbps} Mbps</span>
+                    </div>
+                  )}
+                  <div className="flex justify-between">
+                    <span className="text-[var(--color-text-secondary)]">Разброс:</span>
+                    <span className="font-mono">{result.throughput.variabilityPct ?? '—'}%</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-[var(--color-text-secondary)]">Stalls / макс. пауза:</span>
+                    <span className="font-mono">{result.throughput.stallCount ?? 0} / {result.throughput.maxInterChunkGapMs ?? 0} ms</span>
+                  </div>
+                  {result.throughput.route && (
+                    <div className="flex justify-between">
+                      <span className="text-[var(--color-text-secondary)]">Путь пробы:</span>
+                      <span className="font-mono">
+                        {result.throughput.route === 'physical-direct'
+                          ? 'напрямую через Wi-Fi'
+                          : result.throughput.route === 'active-profile-self'
+                            ? 'активный профиль'
+                            : 'через direct-detour активного туннеля'}
+                      </span>
+                    </div>
+                  )}
+                  {result.throughput.samples.length > 0 && (
+                    <div className="flex justify-between">
+                      <span className="text-[var(--color-text-secondary)]">TTFB по пробам:</span>
+                      <span className="font-mono">{result.throughput.samples.map(sample => sample.ttfbMs ?? '—').join(' / ')} ms</span>
+                    </div>
+                  )}
+                  {result.throughput.detail && (
+                    <div className="text-[10px] text-[var(--color-text-secondary)] pt-0.5">
+                      {result.throughput.detail}
+                    </div>
+                  )}
+                  {result.throughput.error && (
+                    <div className="text-[10px] text-[var(--color-danger)] pt-0.5">
+                      {result.throughput.error}
+                    </div>
+                  )}
+                </div>
+              </DiagnosticBox>
+            )}
+
+            {result.splitTunnel && (
+              <DiagnosticBox
+                icon={<ArrowRightLeft size={12} />}
+                title="Маршрутизация split tunneling"
+                status={result.splitTunnel.status}
+              >
+                <div className="space-y-1.5 text-[11px]">
+                  <div className="flex justify-between">
+                    <span className="text-[var(--color-text-secondary)]">Состояние:</span>
+                    <span className="font-mono">{result.splitTunnel.enabled ? 'включён' : 'выключен'}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-[var(--color-text-secondary)]">Direct process_name:</span>
+                    <span className="font-mono">{result.splitTunnel.directProcessNames.length}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-[var(--color-text-secondary)]">VPN process_name:</span>
+                    <span className="font-mono">{result.splitTunnel.vpnProcessNames.length}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-[var(--color-text-secondary)]">Default outbound:</span>
+                    <span className="font-mono">{result.splitTunnel.defaultOutbound}</span>
+                  </div>
+                  {result.splitTunnel.duplicateProcessNames.length > 0 && (
+                    <div className="text-[10px] text-[var(--color-warning)]">
+                      Повторяются: {result.splitTunnel.duplicateProcessNames.join(', ')}
+                    </div>
+                  )}
+                  {result.splitTunnel.detail && (
+                    <div className="text-[10px] text-[var(--color-text-secondary)]">{result.splitTunnel.detail}</div>
+                  )}
+                  {result.splitTunnel.error && (
+                    <div className="text-[10px] text-[var(--color-danger)]">{result.splitTunnel.error}</div>
                   )}
                 </div>
               </DiagnosticBox>

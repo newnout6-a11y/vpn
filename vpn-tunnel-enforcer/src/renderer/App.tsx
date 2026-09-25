@@ -244,10 +244,17 @@ export default function App() {
         .catch(() => undefined)
     })
 
+    const unsubSoft = window.electronAPI.onSoftStatusChanged?.((connected) => {
+      const store = useAppStore.getState()
+      store.setMode(connected ? 'soft' : 'off')
+      store.setTunRunning(false)
+      if (!connected) store.setVpnIp(null)
+    })
+
     const unsubTraffic = window.electronAPI.onTrafficStats((stats) => {
       const store = useAppStore.getState()
       store.setTrafficStats(stats)
-      if (stats.running && (stats.downloadBps > 1024 || stats.uploadBps > 1024) && store.proxyDown) {
+      if (stats.running && ((stats.smoothedDownloadBps || stats.downloadBps) > 1024 || (stats.smoothedUploadBps || stats.uploadBps) > 1024) && store.proxyDown) {
         store.setProxyDown(false)
       }
     })
@@ -330,6 +337,7 @@ export default function App() {
     return () => {
       unsubIp()
       unsubTun()
+      unsubSoft?.()
       unsubTraffic()
       unsubLeak()
       unsubMainErr()
@@ -358,14 +366,40 @@ export default function App() {
       }
 
       const manualProxy = settings.connectionMode === 'directVpn' ? null : proxyFromOverride(settings)
+      let softStartupPromise: Promise<void> | null = null
       if (settings.connectionMode === 'directVpn') {
         store.setProxy(null)
         addLog('info', 'Режим Direct VPN: Happ не используется.')
       } else if (manualProxy) {
         store.setProxy(manualProxy)
         addLog('info', `Используется ручной прокси: ${manualProxy.host}:${manualProxy.port} (${manualProxy.type})`)
+        if (settings.routingMode === 'soft') {
+          softStartupPromise = window.electronAPI.applyAutoconfig(['env'], `${manualProxy.host}:${manualProxy.port}`, manualProxy.type)
+            .then(results => {
+              const liveStore = useAppStore.getState()
+              liveStore.setMode(results?.env ? 'soft' : 'off')
+              liveStore.setTunRunning(false)
+            })
+            .catch((err: any) => addLog('warn', `Не удалось восстановить Soft-режим: ${err.message}`))
+        }
       } else {
-        scheduleIdle(() => {
+        if (settings.routingMode === 'soft') {
+          softStartupPromise = window.electronAPI.detectHapp()
+            .then(proxy => {
+              if (!proxy) {
+                addLog('warn', 'Прокси Happ не найдено автоматически')
+                return
+              }
+              useAppStore.getState().setProxy(proxy)
+              return window.electronAPI.applyAutoconfig(['env'], `${proxy.host}:${proxy.port}`, proxy.type).then(results => {
+                const liveStore = useAppStore.getState()
+                liveStore.setMode(results?.env ? 'soft' : 'off')
+                liveStore.setTunRunning(false)
+              })
+            })
+            .catch((err: any) => addLog('error', `Ошибка восстановления Soft-режима: ${err.message}`))
+        }
+        if (settings.routingMode !== 'soft') scheduleIdle(() => {
           addLog('info', 'Поиск прокси Happ...')
           void window.electronAPI.detectHapp()
             .then(proxy => {
@@ -380,7 +414,7 @@ export default function App() {
         })
       }
 
-      if (settings.autoPilotEnabled && settings.connectionMode !== 'directVpn') {
+      if (settings.autoPilotEnabled && settings.routingMode !== 'soft' && settings.connectionMode !== 'directVpn') {
         addLog('info', 'Автопилот маршрута включен: приложение само выберет безопасный режим.')
         useAppStore.getState().addGlobalToast('info', 'Автопилот', 'Подбираем безопасный режим подключения...')
         setTimeout(() => {
@@ -412,10 +446,13 @@ export default function App() {
             })
         }, 500)
       } else {
+        if (settings.routingMode === 'soft' && softStartupPromise) {
+          void softStartupPromise
+        }
         scheduleIdle(() => {
           void window.electronAPI.getRoutingPlan()
             .then(plan => {
-              if (plan.recommendedMode === 'external') useAppStore.getState().setMode('external')
+              if (settings.routingMode !== 'soft' && plan.recommendedMode === 'external') useAppStore.getState().setMode('external')
               addLog(plan.status === 'broken' || plan.status === 'blocked' ? 'warn' : 'info', `План маршрута: ${plan.title}`)
             })
             .catch((err: any) => addLog('warn', `Не удалось построить план маршрута: ${err.message}`))
@@ -491,6 +528,11 @@ export default function App() {
               backupPath: found?.backupPath ?? t.backupPath
             }
           }))
+        }
+        if (settings.routingMode === 'soft' && settings.connectionMode !== 'directVpn') {
+          const envApplied = targets.some((target: any) => target.id === 'env' && target.applied)
+          store.setMode(envApplied ? 'soft' : 'off')
+          store.setTunRunning(false)
         }
       }
 

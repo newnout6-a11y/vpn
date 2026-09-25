@@ -236,10 +236,13 @@ const firewallAllowInFlight = new Map<string, Promise<Awaited<ReturnType<typeof 
 const endpointResolutionCache = new Map<string, { address: string; expiresAt: number }>()
 const leaseStore = new Store<{ leases: ExternalProxyLease[] }>({ name: 'external-proxy-leases', defaults: { leases: [] } })
 
-for (const lease of leaseStore.get('leases')) {
-  if (lease && Number.isFinite(lease.expiresAt) && lease.expiresAt > Date.now() && typeof lease.leaseToken === 'string' && typeof lease.owner === 'string') {
-    leasesBySlot.set(lease.slot, lease)
-  }
+// Persisted leases do NOT survive a process restart. A lease only guards a
+// live route owned by a running child of THIS process; after a restart the
+// proxy state maps are empty, so a restored lease would block the slot for
+// up to the TTL (1h) while protecting nothing. Drop them on boot instead of
+// restoring them into leasesBySlot.
+if (leaseStore.get('leases').length > 0) {
+  leaseStore.set('leases', [])
 }
 
 function persistExternalProxyLeases(): void {

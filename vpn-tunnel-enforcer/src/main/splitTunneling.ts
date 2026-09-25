@@ -37,13 +37,18 @@ function encodedPowerShell(script: string): string {
 interface SplitTunnelStore {
   splitTunnelApps: SplitTunnelApp[]
   splitTunnelEnabled: boolean
+  // Exe paths the user explicitly deleted from the list. Refresh must not
+  // re-add them — without this tombstone every refresh resurrects removed
+  // apps with rule 'none'.
+  splitTunnelRemovedPaths: string[]
 }
 
 const store = new Store<SplitTunnelStore>({
   name: 'split-tunnel',
   defaults: {
     splitTunnelApps: [],
-    splitTunnelEnabled: true
+    splitTunnelEnabled: true,
+    splitTunnelRemovedPaths: []
   }
 })
 
@@ -57,14 +62,27 @@ export function looksCorruptDisplayName(name: string): boolean {
   // (U+0800-08FF). A legit app name never mixes Latin/Cyrillic with those.
   const mojibakeCount = (value.match(/[\u3400-\u9fff\uf900-\ufaff\uac00-\ud7af\u0800-\u08ff]/g) ?? []).length
   const hasKnownText = /[A-Za-zА-Яа-я0-9]/.test(value)
-  return hasKnownText && mojibakeCount >= 1
+  const letterCount = (value.match(/[^\s\d\W_]/gu) ?? []).length
+  // Legit Asian app names consist largely of CJK/Hangul glyphs — never
+  // flag those. Only a name that ALSO carries Latin/Cyrillic text can be
+  // mojibake, and real mojibake produces long runs, so require 3+
+  // suspicious chars AND >= half of all letters.
+  const latinCyrillicCount = (value.match(/[A-Za-z\u0410-\u044f]/g) ?? []).length
+  const otherLetterCount = letterCount - mojibakeCount
+  return (
+    hasKnownText &&
+    latinCyrillicCount > 0 &&
+    mojibakeCount >= 3 &&
+    mojibakeCount > otherLetterCount / 2
+  )
 }
 
 function cleanDisplayName(name: string): string {
-  return String(name ?? '')
+  const value = String(name ?? '')
+  return value
     .replace(/\uFFFD+/g, ' ')
-    .replace(/[\u3400-\u9fff\uf900-\ufaff\uac00-\ud7af\u0800-\u08ff]+/g, ' ')
-    .replace(/\(\s*\d+\s*[-–]\s*\)/g, ' ')
+    .replace(looksCorruptDisplayName(value) ? /[\u3400-\u9fff\uf900-\ufaff\uac00-\ud7af\u0800-\u08ff]+/g : /(?!)/g, ' ')
+    .replace(/\(\s*\d+\s*[-–][^)]*\)/g, ' ')
     .replace(/\s+/g, ' ')
     .replace(/\s+([,.)\]])/g, '$1')
     .replace(/([(])\s+/g, '$1')
@@ -352,18 +370,20 @@ async function discoverLocalProgramsApps(): Promise<
   }
 
   // Recursively collect candidate exes under `dir`, descending at most
-  // `depth` levels into subdirectories. Stops descending a branch as soon as
-  // it finds exes at that level (the launcher lives next to its helpers).
-  // This handles both `Product\app.exe` and nested `Vendor\Product\bin\app.exe`
-  // (OpenAI Codex) without scanning an entire deep tree.
-  async function collectExes(dir: string, depth: number): Promise<string[]> {
+  // `depth` levels into subdirectories. Stops descending a BRANCH as soon as
+  // that branch yields exes (the launcher lives next to its helpers), but
+  // keeps scanning SIBLING branches — `Vendor\ProductA` and `Vendor\ProductB`
+  // must both be found. Returns entries of { dir, exes } so the caller can
+  // name each product from the folder where its launcher actually lives.
+  async function collectProducts(dir: string, depth: number): Promise<Array<{ dir: string; exes: string[] }>> {
     const here = await listExes(dir)
-    if (here.length > 0 || depth <= 0) return here
+    if (here.length > 0 || depth <= 0) {
+      return here.length > 0 ? [{ dir, exes: here }] : []
+    }
     const subs = await listDirs(dir)
-    const out: string[] = []
+    const out: Array<{ dir: string; exes: string[] }> = []
     for (const sub of subs.slice(0, 8)) {
-      out.push(...await collectExes(sub, depth - 1))
-      if (out.length > 0) break
+      out.push(...await collectProducts(sub, depth - 1))
     }
     return out
   }
@@ -377,18 +397,21 @@ async function discoverLocalProgramsApps(): Promise<
     if (inspected >= MAX_PRODUCTS) break
     inspected++
     // Search the vendor/product dir and up to 2 levels inside it for exes.
-    const found = await collectExes(vendorDir, 2)
-    const exes = found.filter(p => !HELPER_EXE_RX.test(basename(p)))
-    if (exes.length === 0) continue
-    const productName = nameFromPath(vendorDir)
-    const mainExe = pickMainExe(exes, productName)
-    if (mainExe) {
-      const displayName = nameForExe(vendorDir, mainExe)
-      results.push({
-        name: sanitizeAppDisplayName(displayName, mainExe),
-        path: mainExe,
-        icon: null
-      })
+    // Sibling subdirectories are independent products — collect them all.
+    const products = await collectProducts(vendorDir, 2)
+    for (const product of products) {
+      const exes = product.exes.filter(p => !HELPER_EXE_RX.test(basename(p)))
+      if (exes.length === 0) continue
+      const productName = nameFromPath(product.dir)
+      const mainExe = pickMainExe(exes, productName)
+      if (mainExe) {
+        const displayName = nameForExe(vendorDir, mainExe)
+        results.push({
+          name: sanitizeAppDisplayName(displayName, mainExe),
+          path: mainExe,
+          icon: null
+        })
+      }
     }
   }
 
@@ -418,6 +441,24 @@ function getApps(): SplitTunnelApp[] {
 
 function saveApps(apps: SplitTunnelApp[]): void {
   store.set('splitTunnelApps', apps)
+}
+
+function getRemovedPaths(): Set<string> {
+  const raw = store.get('splitTunnelRemovedPaths') ?? []
+  return new Set(raw.filter((p): p is string => typeof p === 'string').map(p => p.toLowerCase()))
+}
+
+function rememberRemovedPath(path: string): void {
+  const removed = getRemovedPaths()
+  removed.add(path.toLowerCase())
+  store.set('splitTunnelRemovedPaths', [...removed])
+}
+
+function forgetRemovedPath(path: string): void {
+  const removed = getRemovedPaths()
+  if (removed.delete(path.toLowerCase())) {
+    store.set('splitTunnelRemovedPaths', [...removed])
+  }
 }
 
 function isEnabled(): boolean {
@@ -469,6 +510,9 @@ async function addApp(exePath: string): Promise<SplitTunnelApp> {
 
     apps.push(app)
     saveApps(apps)
+    // A manual add is an explicit user choice — clear any removal tombstone
+    // so a later refresh keeps the app instead of dropping it again.
+    forgetRemovedPath(exePath)
     logEvent('info', 'split-tunnel', `app added`, { id: app.id, name: app.name, path: app.path })
     return app
   })
@@ -549,12 +593,17 @@ export async function addProcessName(rawName: string): Promise<SplitTunnelApp> {
 async function removeApp(appId: string): Promise<void> {
   await withAppsWriteLock(() => {
     const apps = getApps()
+    const target = apps.find((a) => a.id === appId)
     const filtered = apps.filter((a) => a.id !== appId)
     if (filtered.length === apps.length) {
       logEvent('warn', 'split-tunnel', `removeApp: app not found`, { appId })
       return
     }
     saveApps(filtered)
+    // Tombstone the path so the next refresh does not resurrect the app the
+    // user just deleted. Process-name entries are user-created, never
+    // discovered, so they need no tombstone.
+    if (target && target.kind !== 'process') rememberRemovedPath(target.path)
     logEvent('info', 'split-tunnel', `app removed`, { appId })
   })
 }
@@ -685,13 +734,17 @@ export function registerSplitTunnelHandlers(): void {
     if (storedApps.length === 0) {
       try {
         const discovered = await discoverInstalledApps()
-        const apps: SplitTunnelApp[] = discovered.map((d) => ({
-          id: randomUUID(),
-          name: sanitizeAppDisplayName(d.name, d.path),
-          path: d.path,
-          icon: d.icon,
-          rule: 'none' as const
-        }))
+        const removedPaths = getRemovedPaths()
+        const apps: SplitTunnelApp[] = discovered
+          .filter((d) => !removedPaths.has(d.path.toLowerCase()))
+          .map((d) => ({
+            id: randomUUID(),
+            name: sanitizeAppDisplayName(d.name, d.path),
+            path: d.path,
+            icon: d.icon,
+            rule: 'none' as const,
+            kind: 'app' as const
+          }))
         saveApps(apps)
         return apps
       } catch (err) {
@@ -712,10 +765,13 @@ export function registerSplitTunnelHandlers(): void {
     const added = await withAppsWriteLock(() => {
       const apps = getApps()
       const byPath = new Map(apps.map(a => [a.path.toLowerCase(), a]))
+      const removedPaths = getRemovedPaths()
       let addedCount = 0
       for (const d of discovered) {
         const key = d.path.toLowerCase()
         if (byPath.has(key)) continue
+        // The user previously deleted this path — respect that choice.
+        if (removedPaths.has(key)) continue
         const entry: SplitTunnelApp = {
           id: randomUUID(),
           name: sanitizeAppDisplayName(d.name, d.path),

@@ -6,6 +6,9 @@ import type {
   ExternalProxyStatus,
   ExternalProxyProfileRow,
   LiveCheckProgress,
+  LiveServerBatchCheckOptions,
+  LiveServerBatchCheckProgress,
+  LiveServerBatchCheckResult,
   LiveServerCheck,
   LiveServerCheckOptions
 } from '../shared/ipc-types'
@@ -137,9 +140,11 @@ export interface ElectronAPI {
   >
   serverProbe: (host: string, knownPort?: number) => Promise<any>
   serverLiveCheck: (options: LiveServerCheckOptions) => Promise<LiveServerCheck>
+  serverLiveCheckBatch: (options: LiveServerBatchCheckOptions) => Promise<LiveServerBatchCheckResult>
   serverLiveCheckCancel: (requestId?: string) => Promise<{ cancelled: boolean; reason?: string }>
   serverLiveCheckHistory: (filter?: { profileId?: string; host?: string }) => Promise<LiveServerCheck[]>
   onLiveCheckProgress: (callback: (progress: LiveCheckProgress) => void) => () => void
+  onLiveBatchCheckProgress: (callback: (progress: LiveServerBatchCheckProgress) => void) => () => void
   urlAvailabilityCheck: (url: string) => Promise<any>
   urlAvailabilityHistory: () => Promise<any[]>
   urlAvailabilityClearHistory: () => Promise<void>
@@ -226,6 +231,7 @@ export interface ElectronAPI {
   // Event listeners
   onIpChanged: (callback: (data: { ip: string; isLeak: boolean }) => void) => () => void
   onTunStatusChanged: (callback: (status: string) => void) => () => void
+  onSoftStatusChanged?: (callback: (connected: boolean) => void) => () => void
   onTrafficStats: (callback: (stats: TrafficStats) => void) => () => void
   onLeakDetected: (callback: (result: LeakSelfTestResult) => void) => () => void
   onMainError: (callback: (data: { code: string; message: string }) => void) => () => void
@@ -240,6 +246,10 @@ export interface TrafficStats {
   adapterFound: boolean
   downloadBps: number
   uploadBps: number
+  smoothedDownloadBps: number
+  smoothedUploadBps: number
+  downloadBurstinessPct: number
+  uploadBurstinessPct: number
   totalDownloadBytes: number
   totalUploadBytes: number
   sessionDownloadBytes: number
@@ -481,6 +491,21 @@ contextBridge.exposeInMainWorld('electronAPI', {
   serverProbe: (host: string, knownPort?: number) => ipcRenderer.invoke('server:probe', assertString(host, 'host'), assertPort(knownPort, 'knownPort')),
   serverLiveCheck: (options: LiveServerCheckOptions) =>
     ipcRenderer.invoke('server:live-check', assertLiveCheckOptions(options)),
+  serverLiveCheckBatch: (options: LiveServerBatchCheckOptions) => {
+    const checked = assertPlainObject<Record<string, unknown>>(options, 'options')
+    if (!Array.isArray(checked.profileIds)) throw new TypeError('options.profileIds must be an array')
+    const profileIds = assertStringArray(checked.profileIds, 'options.profileIds')
+    if (profileIds.length < 1 || profileIds.length > 12) {
+      throw new RangeError('options.profileIds must contain between 1 and 12 profiles')
+    }
+    return ipcRenderer.invoke('server:live-check-batch', {
+      requestId: assertOptionalString(checked.requestId, 'options.requestId'),
+      profileIds,
+      mode: checked.mode === undefined
+        ? undefined
+        : assertEnum(checked.mode, ['basic', 'extended'] as const, 'options.mode')
+    }) as Promise<LiveServerBatchCheckResult>
+  },
   serverLiveCheckCancel: (requestId?: string) =>
     ipcRenderer.invoke('server:live-check-cancel', assertOptionalString(requestId, 'requestId')),
   serverLiveCheckHistory: (filter?: { profileId?: string; host?: string }) =>
@@ -489,6 +514,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const handler = (_event: any, data: LiveCheckProgress) => callback(data)
     ipcRenderer.on('server:live-check-progress', handler)
     return () => ipcRenderer.removeListener('server:live-check-progress', handler)
+  },
+  onLiveBatchCheckProgress: (callback: (progress: LiveServerBatchCheckProgress) => void) => {
+    const handler = (_event: any, data: LiveServerBatchCheckProgress) => callback(data)
+    ipcRenderer.on('server:live-check-batch-progress', handler)
+    return () => ipcRenderer.removeListener('server:live-check-batch-progress', handler)
   },
   // URL Availability — paste a link, get verdict + diagnostics for both
   // the tunnel path and the direct path (clash-direct-out when VPN is on).
@@ -634,6 +664,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const handler = (_event: any, status: string) => callback(status)
     ipcRenderer.on('tun-status-changed', handler)
     return () => ipcRenderer.removeListener('tun-status-changed', handler)
+  },
+  onSoftStatusChanged: (callback: (connected: boolean) => void) => {
+    const handler = (_event: any, connected: boolean) => callback(Boolean(connected))
+    ipcRenderer.on('soft-status-changed', handler)
+    return () => ipcRenderer.removeListener('soft-status-changed', handler)
   },
   onTrafficStats: (callback: (stats: TrafficStats) => void) => {
     const handler = (_event: any, stats: TrafficStats) => callback(stats)

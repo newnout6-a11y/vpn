@@ -3,6 +3,8 @@ import {
   isPublicFqdn,
   queryDoH,
   evaluateLiveCheckFindings,
+  summarizeThroughputSamples,
+  summarizeSplitTunnelDiagnostics,
   LIVE_PROBE_THRESHOLDS
 } from './liveServerProbe'
 import {
@@ -19,7 +21,8 @@ import type {
   LiveEgressResult,
   PathDiagnostics,
   PmtuDiagnostics,
-  DnsDiagnostics
+  DnsDiagnostics,
+  LiveThroughputSample
 } from '../shared/ipc-types'
 
 describe('Extended Live Server Probe Unit & Contract Tests', () => {
@@ -386,6 +389,94 @@ describe('Extended Live Server Probe Unit & Contract Tests', () => {
       expect(degradedFinding).toBeDefined()
       expect(degradedFinding?.severity).toBe('warning')
       expect(degradedFinding?.detail).toContain('1280')
+    })
+  })
+
+  describe('profile-specific throughput summary', () => {
+    const sample = (index: number, mbps: number, gap = 0): LiveThroughputSample => ({
+      index,
+      bytes: 4 * 1024 * 1024,
+      durationMs: Math.round((4 * 1024 * 1024 * 8) / (mbps * 1_000_000) * 1000),
+      throughputMbps: mbps,
+      ttfbMs: 80 + index,
+      stallCount: gap >= LIVE_PROBE_THRESHOLDS.THROUGHPUT_STALL_GAP_MS ? 1 : 0,
+      maxInterChunkGapMs: gap
+    })
+
+    it('uses median and marks bursty samples as unstable', () => {
+      const result = summarizeThroughputSamples([
+        sample(0, 10),
+        sample(1, 24),
+        sample(2, 12, 900)
+      ], 'speed.cloudflare.com/__down', 1234)
+
+      expect(result.status).toBe('warning')
+      expect(result.medianMbps).toBe(12)
+      expect(result.minMbps).toBe(10)
+      expect(result.maxMbps).toBe(24)
+      expect(result.variabilityPct).toBe(117)
+      expect(result.stallCount).toBe(1)
+      expect(result.maxInterChunkGapMs).toBe(900)
+    })
+
+    it('keeps a stable short probe separate from absolute link capacity', () => {
+      const result = summarizeThroughputSamples([
+        sample(0, 2),
+        sample(1, 2.1),
+        sample(2, 1.9)
+      ], 'speed.cloudflare.com/__down', 1234)
+
+      expect(result.status).toBe('ok')
+      expect(result.medianMbps).toBe(2)
+      expect(result.variabilityPct).toBe(10)
+      expect(result.detail).toContain('стабилен')
+    })
+
+    it('marks a partial sample set as a warning instead of hiding the probe error', () => {
+      const result = summarizeThroughputSamples([
+        sample(0, 10),
+        sample(1, 10.5)
+      ], 'speed.cloudflare.com/__down', 1234, 'sample 3 timed out')
+
+      expect(result.status).toBe('warning')
+      expect(result.error).toBe('sample 3 timed out')
+      expect(result.detail).toContain('не все короткие пробы')
+    })
+
+    it('reports throughput degradation against the previous profile check', () => {
+      const previous = {
+        throughput: summarizeThroughputSamples([sample(0, 20), sample(1, 21), sample(2, 19)], 'probe', 100)
+      } as unknown as LiveServerCheck
+      const current = {
+        host: 'vpn.example.com',
+        throughput: summarizeThroughputSamples([sample(0, 8), sample(1, 7), sample(2, 8)], 'probe', 100)
+      } as Partial<LiveServerCheck>
+
+      const findings = evaluateLiveCheckFindings(current, previous)
+      expect(findings.find(f => f.code === 'THROUGHPUT_DEGRADED_FROM_PREVIOUS')).toBeDefined()
+    })
+  })
+
+  describe('split tunnel routing snapshot', () => {
+    it('reports the default proxy route when no direct rules exist', () => {
+      const result = summarizeSplitTunnelDiagnostics(true, [], [])
+      expect(result.status).toBe('ok')
+      expect(result.defaultOutbound).toBe('proxy-out')
+      expect(result.directRuleCount).toBe(0)
+      expect(result.detail).toContain('proxy-out')
+    })
+
+    it('flags the same process name in direct and VPN rule sets', () => {
+      const result = summarizeSplitTunnelDiagnostics(true, ['browser.exe'], ['browser.exe'])
+      expect(result.status).toBe('warning')
+      expect(result.duplicateProcessNames).toEqual(['browser.exe'])
+      expect(result.detail).toContain('browser.exe')
+    })
+
+    it('does not call disabled split tunneling a conflict', () => {
+      const result = summarizeSplitTunnelDiagnostics(false, ['browser.exe'], ['browser.exe'])
+      expect(result.status).toBe('skipped')
+      expect(result.enabled).toBe(false)
     })
   })
 })

@@ -18,7 +18,8 @@ import {
   ExternalLink,
   AlertCircle,
   MapPin,
-  Waypoints
+  Waypoints,
+  Gauge
 } from 'lucide-react'
 import {
   MacCard,
@@ -36,6 +37,7 @@ import {
 } from '../design-system'
 import { PageTip } from '../components/PageTip'
 import { ServerDetailModal } from '../components/ServerDetailModal'
+import { LiveServerBatchComparison } from '../components/LiveServerBatchComparison'
 import { CountryFlagIcon } from '../components/CountryFlagIcon'
 import { ForeignVpnBanner } from '../components/ForeignVpnBanner'
 import { emitServerChanged } from '../nav'
@@ -263,6 +265,7 @@ export function Servers() {
   const [bulkNotice, setBulkNotice] = useState<BulkNotice | null>(null)
   const [expandedIds, setExpandedIds] = useState<Set<string>>(() => readExpandedIds())
   const [switchingId, setSwitchingId] = useState<string | null>(null)
+  const [batchComparisonOpen, setBatchComparisonOpen] = useState(false)
 
   // Per-group-runtime UI state.
   const [refreshingGroups, setRefreshingGroups] = useState<Record<string, boolean>>({})
@@ -1184,6 +1187,7 @@ export function Servers() {
   // ─── JSX ────────────────────────────────────────────────────────────────
 
   const totalProfiles = profiles.length
+  const enabledProfiles = profiles.filter(profile => profile.enabled !== false && !profile.removedFromSubscriptionAt)
 
   return (
     <div className="space-y-6">
@@ -1197,9 +1201,15 @@ export function Servers() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-semibold text-[var(--color-text)]">
-            {t('servers.title')}
-          </h1>
+          <div className="flex items-center gap-2 flex-wrap">
+            <h1 className="text-2xl font-semibold text-[var(--color-text)]">
+              {t('servers.title')}
+            </h1>
+            <MacBadge variant="success">Доступно {enabledProfiles.length}</MacBadge>
+            {totalProfiles !== enabledProfiles.length && (
+              <MacBadge variant="neutral">Всего {totalProfiles}</MacBadge>
+            )}
+          </div>
           <p className="text-sm text-[var(--color-text-secondary)] mt-1">
             {t('servers.description')}
           </p>
@@ -1232,6 +1242,15 @@ export function Servers() {
           >
             <RefreshCw className="w-4 h-4 mr-2" />
             {pinging ? t('servers.checking') : t('servers.pingAll')}
+          </MacButton>
+          <MacButton
+            variant="secondary"
+            onClick={() => setBatchComparisonOpen(true)}
+            disabled={enabledProfiles.length === 0}
+            title="Сравнить до 12 включённых серверов по расширенной проверке"
+          >
+            <Gauge className="w-4 h-4 mr-2" />
+            Сравнить серверы
           </MacButton>
         </div>
       </div>
@@ -1398,6 +1417,12 @@ export function Servers() {
           setDetailProfile(updated)
           emitServerChanged()
         }}
+      />
+
+      <LiveServerBatchComparison
+        open={batchComparisonOpen}
+        profiles={enabledProfiles}
+        onClose={() => setBatchComparisonOpen(false)}
       />
 
       {/* Delete group confirmation */}

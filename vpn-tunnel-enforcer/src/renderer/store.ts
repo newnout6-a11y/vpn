@@ -68,6 +68,8 @@ function persistRendererLog(level: LogEntry['level'], message: string) {
 
 export interface AppSettings {
   connectionMode: 'localProxy' | 'directVpn'
+  // 'hard' = TUN tunnel, 'soft' = env-proxy autoconfig without TUN.
+  routingMode: 'hard' | 'soft'
   proxyOverride: string
   proxyType: 'socks5' | 'http'
   bootstrapRouteMode: 'auto' | 'direct' | 'localProxy'
@@ -144,6 +146,10 @@ export interface TrafficStats {
   adapterFound: boolean
   downloadBps: number
   uploadBps: number
+  smoothedDownloadBps: number
+  smoothedUploadBps: number
+  downloadBurstinessPct: number
+  uploadBurstinessPct: number
   totalDownloadBytes: number
   totalUploadBytes: number
   sessionDownloadBytes: number
@@ -174,6 +180,10 @@ const emptyTrafficStats: TrafficStats = {
   adapterFound: false,
   downloadBps: 0,
   uploadBps: 0,
+  smoothedDownloadBps: 0,
+  smoothedUploadBps: 0,
+  downloadBurstinessPct: 0,
+  uploadBurstinessPct: 0,
   totalDownloadBytes: 0,
   totalUploadBytes: 0,
   sessionDownloadBytes: 0,
@@ -340,6 +350,7 @@ export const useAppStore = create<AppState>((set) => ({
   logs: [],
   settings: {
     connectionMode: 'localProxy',
+    routingMode: 'hard',
     proxyOverride: '',
     proxyType: 'socks5',
     bootstrapRouteMode: 'auto',
@@ -423,7 +434,7 @@ export const useAppStore = create<AppState>((set) => ({
   }),
   setTrafficStats: (traffic) => set((state) => ({
     traffic,
-    proxyDown: (traffic.running && (traffic.downloadBps > 1024 || traffic.uploadBps > 1024)) ? false : state.proxyDown
+    proxyDown: (traffic.running && ((traffic.smoothedDownloadBps || traffic.downloadBps) > 1024 || (traffic.smoothedUploadBps || traffic.uploadBps) > 1024)) ? false : state.proxyDown
   })),
   setBrowserIpCheck: (browserIpCheck) => set({ browserIpCheck }),
   // Reset all connection-related state — called on crash/killswitch/disconnect

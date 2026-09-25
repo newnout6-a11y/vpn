@@ -206,7 +206,12 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
 
   const isBusy = connecting || disconnecting
   const circleBusy = isBusy || isServerSwitching
-  const isConnected = tunRunning
+  // Soft mode is "connected" without a TUN: the UI mode flag ('soft') is set
+  // when the env autoconfig is applied and cleared on disconnect.
+  const uiMode = useAppStore(s => s.mode)
+  const isSoftConnected =
+    uiMode === 'soft' && settings.connectionMode !== 'directVpn'
+  const isConnected = tunRunning || isSoftConnected
 
   const proxyAddr = settings.connectionMode === 'directVpn'
     ? ''
@@ -273,6 +278,30 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
           showToast('error', t('dashboard.connectionError'), errorMsg)
           addLog('error', `Не удалось включить Direct VPN: ${errorMsg}`)
         }
+      } else if (settings.routingMode === 'soft') {
+        // Soft mode (chosen in the first-run wizard): no TUN at all. Point
+        // apps at the local proxy through the env autoconfig (setx
+        // HTTP_PROXY/HTTPS_PROXY/ALL_PROXY) — this is the whole difference
+        // from Hard, which tunnels everything at the routing layer.
+        if (!proxyAddr) {
+          showToast('error', t('dashboard.connectionError'), 'No proxy available')
+          addLog('error', 'Прокси не найден. Запустите Happ или введите адрес вручную.')
+          return
+        }
+        const saved = await window.electronAPI.saveSettings(settings)
+        setSettings(saved)
+        const results = await window.electronAPI.applyAutoconfig(['env'], proxyAddr, proxyType)
+        if (transitionSeq !== transitionSeqRef.current) return
+        if (results?.env) {
+          setMode('soft')
+          setTunRunning(false)
+          setVpnIp(null)
+          addLog('info', 'Soft-режим включён: приложения настроены на VPN-прокси (env autoconfig).')
+        } else {
+          const errorMsg = 'Не удалось применить env autoconfig'
+          showToast('error', t('dashboard.connectionError'), errorMsg)
+          addLog('error', `Не удалось включить Soft-режим: ${errorMsg}`)
+        }
       } else {
         if (!proxyAddr) {
           showToast('error', t('dashboard.connectionError'), 'No proxy available')
@@ -333,6 +362,11 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
     }, 30000)
 
     try {
+      // Soft mode never started a TUN — stopTun would be a no-op success, but
+      // the env-proxy autoconfig it applied must be rolled back explicitly.
+      if (settings.routingMode === 'soft' && settings.connectionMode !== 'directVpn') {
+        await window.electronAPI.rollbackAutoconfig(['env']).catch(() => undefined)
+      }
       const result = await window.electronAPI.stopTun()
       if (transitionSeq !== transitionSeqRef.current) return
       if (result.success) {
@@ -475,7 +509,7 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
 
   // ─── Status label ──────────────────────────────────────────────────────
 
-  const isProxyActuallyDown = proxyDown && (!traffic?.running || (traffic.downloadBps <= 1024 && traffic.uploadBps <= 1024))
+  const isProxyActuallyDown = proxyDown && (!traffic?.running || ((traffic.smoothedDownloadBps || traffic.downloadBps) <= 1024 && (traffic.smoothedUploadBps || traffic.uploadBps) <= 1024))
 
   const statusLabel = (() => {
     if (connecting) return t('dashboard.connecting')
@@ -743,11 +777,11 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
             ) : null}
             <span className="flex items-center gap-1.5 rounded-full bg-[var(--color-bg)] px-3 py-1.5 text-[var(--color-text-secondary)]">
               <Download className="w-3.5 h-3.5 text-[var(--color-success)]" />
-              ↓ <span className="font-mono">{formatSpeed(traffic.downloadBps)}</span>
+              ↓ <span className="font-mono">{formatSpeed(traffic.smoothedDownloadBps || traffic.downloadBps)}</span>
             </span>
             <span className="flex items-center gap-1.5 rounded-full bg-[var(--color-bg)] px-3 py-1.5 text-[var(--color-text-secondary)]">
               <Upload className="w-3.5 h-3.5 text-[var(--color-accent)]" />
-              ↑ <span className="font-mono">{formatSpeed(traffic.uploadBps)}</span>
+              ↑ <span className="font-mono">{formatSpeed(traffic.smoothedUploadBps || traffic.uploadBps)}</span>
             </span>
             {tunStartedAt && <UptimeLabel startedAt={tunStartedAt} />}
             <span className="flex items-center gap-1.5 rounded-full bg-[var(--color-bg)] px-3 py-1.5 text-[var(--color-text-secondary)]">
