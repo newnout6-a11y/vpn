@@ -364,7 +364,7 @@ export function LiveServerCheckSection({
                 {history.length} записей
               </span>
             </div>
-            <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1">
+            <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1">
               {history.map((h, i) => (
                 <div
                   key={h.id || `${h.startedAt}-${i}`}
@@ -375,10 +375,10 @@ export function LiveServerCheckSection({
                       : 'hover:bg-[var(--color-bg-tertiary)]'
                   }`}
                 >
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
                     <StatusDot status={h.reachability?.status || 'ok'} />
                     <span className="font-mono text-[10px]">
-                      {new Date(h.startedAt).toLocaleTimeString()}
+                      {new Date(h.startedAt).toLocaleString()}
                     </span>
                     <MacBadge variant="neutral" className="text-[10px]">
                       {h.mode}
@@ -389,7 +389,25 @@ export function LiveServerCheckSection({
                       </span>
                     )}
                   </div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 shrink-0">
+                    {h.throughput?.medianMbps !== undefined && (
+                      <span className="font-mono font-semibold text-[var(--color-accent)]">
+                        {h.throughput.medianMbps.toFixed(2)} Mbps
+                      </span>
+                    )}
+                    {h.throughput?.variabilityPct !== undefined && (
+                      <span className="font-mono text-[10px]" title="Разброс min/max относительно медианы">
+                        ±{h.throughput.variabilityPct}%
+                      </span>
+                    )}
+                    {h.throughput && (
+                      <MacBadge
+                        variant={h.throughput.status === 'ok' ? 'success' : h.throughput.status === 'warning' ? 'warning' : 'danger'}
+                        className="text-[9px]"
+                      >
+                        {h.throughput.status === 'ok' ? 'OK' : h.throughput.status === 'warning' ? 'WARN' : 'ERR'}
+                      </MacBadge>
+                    )}
                     {h.latency && (
                       <span className="text-[var(--color-text)] font-semibold">
                         {h.latency.avg} ms
@@ -1272,9 +1290,51 @@ export function LiveServerCheckSection({
                     </div>
                   )}
                   {result.throughput.samples.length > 0 && (
-                    <div className="flex justify-between">
-                      <span className="text-[var(--color-text-secondary)]">TTFB по пробам:</span>
-                      <span className="font-mono">{result.throughput.samples.map(sample => sample.ttfbMs ?? '—').join(' / ')} ms</span>
+                    <>
+                      <div className="flex justify-between">
+                        <span className="text-[var(--color-text-secondary)]">TTFB по пробам:</span>
+                        <span className="font-mono">{result.throughput.samples.map(sample => sample.ttfbMs ?? '—').join(' / ')} ms</span>
+                      </div>
+                      <div className="mt-2 overflow-x-auto rounded border border-[var(--color-border)]">
+                        <table className="w-full text-[10px]">
+                          <thead className="text-[var(--color-text-secondary)]">
+                            <tr className="border-b border-[var(--color-border)]">
+                              <th className="px-1.5 py-1 text-left">Проба</th>
+                              <th className="px-1.5 py-1 text-right">Mbps</th>
+                              <th className="px-1.5 py-1 text-right">Байт</th>
+                              <th className="px-1.5 py-1 text-right">Время</th>
+                              <th className="px-1.5 py-1 text-right">TTFB</th>
+                              <th className="px-1.5 py-1 text-right">Stall</th>
+                              <th className="px-1.5 py-1 text-right">Пауза</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {result.throughput.samples.map(sample => (
+                              <tr key={sample.index} className="border-b last:border-b-0 border-[var(--color-border)]">
+                                <td className="px-1.5 py-1 text-left font-mono">#{sample.index + 1}</td>
+                                <td className="px-1.5 py-1 text-right font-mono font-semibold">{sample.throughputMbps.toFixed(2)}</td>
+                                <td className="px-1.5 py-1 text-right font-mono">{(sample.bytes / 1024 / 1024).toFixed(2)} MiB</td>
+                                <td className="px-1.5 py-1 text-right font-mono">{sample.durationMs} ms</td>
+                                <td className="px-1.5 py-1 text-right font-mono">{sample.ttfbMs ?? '—'} ms</td>
+                                <td className="px-1.5 py-1 text-right font-mono">{sample.stallCount}</td>
+                                <td className="px-1.5 py-1 text-right font-mono">{sample.maxInterChunkGapMs} ms</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </>
+                  )}
+                  {result.throughput.status !== 'skipped' && (
+                    <div className="grid grid-cols-2 gap-x-3 gap-y-1 mt-2 pt-2 border-t border-[var(--color-border)] text-[10px]">
+                      <span className="text-[var(--color-text-secondary)]">Порог разброса</span>
+                      <span className="font-mono text-right">&lt; 40%: {result.throughput.variabilityPct !== undefined ? (result.throughput.variabilityPct < 40 ? 'да' : 'нет') : '—'}</span>
+                      <span className="text-[var(--color-text-secondary)]">Stalls = 0</span>
+                      <span className="font-mono text-right">{result.throughput.stallCount === 0 ? 'да' : 'нет'}</span>
+                      <span className="text-[var(--color-text-secondary)]">Пауза &lt; 750 ms</span>
+                      <span className="font-mono text-right">{result.throughput.maxInterChunkGapMs !== undefined ? (result.throughput.maxInterChunkGapMs < 750 ? 'да' : 'нет') : '—'}</span>
+                      <span className="text-[var(--color-text-secondary)]">Полнота проб</span>
+                      <span className="font-mono text-right">{result.throughput.error ? 'нет' : 'да'}</span>
                     </div>
                   )}
                   {result.throughput.detail && (
