@@ -4,7 +4,7 @@
  *
  * Sing-box logs entries like:
  *   2026/05/16 12:34:56 INFO [N] inbound/tun-in: connection from 10.x.x.x to api.example.com:443
- *   2026/05/16 12:34:57 INFO [N] dns: lookup example.com -> 1.2.3.4
+ *   2026/05/16 12:34:57 INFO [N] dns: exchanged A example.com. 7 IN A 1.2.3.4
  *
  * We tail the log file, grep for these patterns, and aggregate by domain.
  */
@@ -61,8 +61,15 @@ const MAX_TRAILING_FRAGMENT_BYTES = 64 * 1024
 
 const DOMAIN_PATTERN = '([a-zA-Z0-9_][a-zA-Z0-9_.-]*\\.[a-zA-Z]{2,})'
 const LOG_DOMAIN_PATTERNS: readonly RegExp[] = [
-  // sing-box 1.13 DNS exchange (request and response)
-  new RegExp(`\\bdns:\\s+exchanged?\\s+${DOMAIN_PATTERN}\\b`, 'i'),
+  // sing-box 1.13 DNS exchange (request and response). Real log lines carry a
+  // record-type token between the verb and the hostname:
+  //   "dns: exchanged A sub.alvsub.cc. 13 IN A 5.129.240.114"
+  //   "dns: exchange A sub.alvsub.cc. IN A"          (request side)
+  //   "dns: cached A youboost.app. 59 IN A 109.71.15.131"
+  // The old pattern (`exchanged?\s+<host>`) missed every one of these because
+  // of the "A"/"AAAA"/"HTTPS" token, which is why the history only ever showed
+  // the one host that also appeared in a "to <domain>" line (api.ipify.org).
+  new RegExp(`\\bdns:\\s+(?:exchanged?|cached)\\s+(?:[A-Z]{1,6}\\s+)?${DOMAIN_PATTERN}\\b`, 'i'),
   // generic resolver phrases
   new RegExp(`\\b(?:lookup|query)\\s+${DOMAIN_PATTERN}\\b`, 'i'),
   // explicit destination after "to" or in "target=" — the only way to reach

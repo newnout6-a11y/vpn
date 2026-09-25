@@ -314,9 +314,25 @@ export function isBenignBlockLine(line: string): boolean {
   )
 }
 
+/**
+ * A sing-box log line is BENIGN process-search noise when the router could
+ * not map a connection back to its owning process. On Windows this happens
+ * for every connection owned by SYSTEM / another user / an elevated service:
+ * sing-box (running as the user) is not allowed to open those processes, so
+ * it logs `router: failed to search process: Access is denied.` at INFO
+ * level and routes the connection by the remaining (non-process) matchers.
+ * Nothing about routing breaks — the process_name rules simply don't match
+ * that connection — so reporting these as "errors" made every healthy
+ * session look broken. Exported for tests.
+ */
+export function isBenignProcessSearchLine(line: string): boolean {
+  return /router: failed to search process: Access is denied/i.test(line)
+}
+
 export function isBenignSingboxErrorLine(line: string): boolean {
   return (
     isBenignBlockLine(line) ||
+    isBenignProcessSearchLine(line) ||
     /\bconnection upload closed\b/i.test(line) ||
     /\bforcibly closed by the remote host\b/i.test(line)
   )
@@ -382,21 +398,124 @@ async function getTunLogItem(tunRunning: boolean): Promise<LeakCheckItem> {
 }
 
 /**
- * Pure classifier for direct-out connections found in a sing-box log. Splits
- * public IPs that egressed direct into three buckets:
- *   - smartRu:  matched geoip-ru / geosite-category-gov-ru → RU split (expected)
- *   - allowed:  the connection's process was a VPN-core (Happ/xray) exclusion
- *   - leaked:   neither — a genuine unexplained direct-out of a public IP
+ * Process names that are allowed to egress direct because they ARE the VPN
+ * core / the app's own probes. Mirrors PROXY_CORE_PROCESS_NAMES +
+ * EXTERNAL_PROXY_PROCESS_NAMES in tunController.ts (kept as a local list so
+ * this module stays import-light and unit-testable). Compared
+ * case-insensitively against the leaf of the `router: found process path`
+ * line sing-box emits at INFO level.
+ */
+const VPN_CORE_PROCESS_LEAVES = new Set([
+  // Happ
+  'happ.exe', 'happd.exe', 'happ-tcping.exe',
+  // Xray / V2Ray
+  'xray.exe', 'v2ray.exe', 'v2rayn.exe',
+  // sing-box
+  'sing-box.exe', 'singbox.exe', 'sing-tun.exe',
+  // Clash family
+  'mihomo.exe', 'clash.exe', 'clash-meta.exe', 'clash-verge.exe',
+  'clash-verge-service.exe', 'flclash.exe', 'mihomo-party.exe', 'verge-mihomo.exe',
+  // Hiddify
+  'hiddify.exe', 'hiddifyn.exe',
+  // NekoRay / NekoBox
+  'nekoray.exe', 'nekobox.exe',
+  // Shadowsocks
+  'shadowsocks.exe', 'ss-local.exe', 'shadowsocks-rust.exe',
+  // Trojan
+  'trojan.exe',
+  // Outline
+  'outline.exe',
+  // WireGuard / OpenVPN
+  'wireguard.exe', 'openvpn.exe',
+  // Karing / Streisand / Surfboard
+  'karing.exe', 'streisand.exe', 'surfboard.exe',
+  // VPNTE's own runtime cores + the Electron app itself (self-probes egress
+  // via the mixed-direct-in loopback inbound by design)
+  'vpnte-external-proxy.exe', 'vpnte-xray.exe', 'vpn tunnel enforcer.exe'
+])
+
+/** Pure: is this process path one of the VPN-core / self-probe processes? */
+export function isVpnCoreProcessPath(processPath: string): boolean {
+  const leaf = String(processPath || '').split(/[\\/]/).pop()?.trim().toLowerCase() ?? ''
+  return leaf.length > 0 && VPN_CORE_PROCESS_LEAVES.has(leaf)
+}
+
+/** Pure: extract the process path from a `router: found process path: X` line. */
+function extractFoundProcessPath(line: string): string | null {
+  const m = line.match(/router: found process path: (.+?)\s*$/i)
+  return m ? m[1] : null
+}
+
+/** Pure: extract the destination host:port from an inbound/direct-out line. */
+function extractConnectionTarget(line: string): string | null {
+  const m = line.match(/(?:inbound|outbound) connection to ([^\s]+)/i)
+  return m ? m[1] : null
+}
+
+/** Pure: strip the :port from a host:port target, keeping IPv6 brackets off. */
+function targetHost(target: string): string {
+  const t = target.trim()
+  // IPv6 literal [::1]:443 or bare v6 — not expected here (targets are
+  // IPv4/hostnames in practice), but don't choke on them.
+  if (t.startsWith('[')) return t.slice(1, t.indexOf(']'))
+  const i = t.lastIndexOf(':')
+  return i > 0 ? t.slice(0, i) : t
+}
+
+/** Pure: does this string look like a DNS-resolvable hostname (not an IP)? */
+function isHostname(value: string): boolean {
+  return /[a-z]/i.test(value) && !/^[0-9a-fA-F:.]+$/.test(value)
+}
+
+/**
+ * Pure classifier for direct-out connections found in a sing-box log.
+ *
+ * The tunnel runs sing-box at log level INFO, so the DEBUG `router: match[i]
+ * rule_set=...` / `process_name=[...]` lines the previous version relied on
+ * are NOT present. What INFO does give us, per connection id, is:
+ *   - `router: found process path: <exe>`        → the owning process
+ *   - `inbound/mixed[mixed-direct-in]: ...`      → app self-probe (direct by design)
+ *   - `dns: exchanged A <host>. ... IN A <ip>`   → hostname → resolved-IP map
+ *
+ * Buckets (a public IP is a LEAK only when it lands in none of them):
+ *   - allowed:  the owning process is a VPN-core / the app itself, OR the
+ *               connection arrived via the mixed-direct-in self-probe inbound.
+ *   - smartRu:  smart-RU split is ON and the destination is a known RU
+ *               hostname (.ru/.su/.рф or a RU commercial service domain) —
+ *               resolved from the log's own DNS exchange lines.
+ *   - leaked:   everything else — a genuinely unexplained public direct-out.
+ *
  * Exported for unit testing (the IO wrapper getDirectPublicSummary just reads
  * the file and delegates here).
  */
-export function classifyDirectPublic(logText: string): {
+export function classifyDirectPublic(logText: string, options: { smartRuSplit?: boolean } = {}): {
   leakedCount: number; allowedCoreCount: number; smartRuCount: number; unparsedDirectCount: number
   leakedExamples: string[]; allowedExamples: string[]; smartRuExamples: string[]
 } {
-  const byId = new Map<string, { allowedCore: boolean; smartRu: boolean; directIps: string[] }>()
+  const byId = new Map<string, {
+    allowedCore: boolean
+    smartRu: boolean
+    selfProbe: boolean
+    processPath: string | null
+    directIps: string[]
+  }>()
   let unparsedDirectCount = 0
 
+  // Pass 1: build hostname → set-of-IPs map from sing-box's own DNS exchange
+  // lines so we can attribute a direct-out IP back to the hostname that
+  // produced it (needed for smart-RU attribution at INFO log level).
+  const ipToHostnames = new Map<string, Set<string>>()
+  for (const line of logText.split(/\r?\n/)) {
+    const m = line.match(/dns: (?:exchanged|cached) A\s+([^\s]+)\.\s+\d+\s+IN\s+A\s+([0-9a-fA-F:.]+)/i)
+    if (!m) continue
+    const host = m[1].toLowerCase()
+    const ip = m[2]
+    const set = ipToHostnames.get(ip) ?? new Set<string>()
+    set.add(host)
+    ipToHostnames.set(ip, set)
+  }
+
+  // Pass 2: per-connection classification.
   for (const line of logText.split(/\r?\n/)) {
     const id = line.match(/\[(\d+)\s/)?.[1]
     const hasDirectOutbound = /outbound\/direct\[direct-out]/i.test(line) || /\bdirect-out\b/i.test(line)
@@ -405,15 +524,37 @@ export function classifyDirectPublic(logText: string): {
       continue
     }
 
-    const entry = byId.get(id) ?? { allowedCore: false, smartRu: false, directIps: [] }
-    if (/router: match\[\d+].*process_name=\[/i.test(line)) {
+    const entry = byId.get(id) ?? {
+      allowedCore: false,
+      smartRu: false,
+      selfProbe: false,
+      processPath: null,
+      directIps: []
+    }
+
+    // The process that owns this connection (INFO level, always logged).
+    const procPath = extractFoundProcessPath(line)
+    if (procPath) {
+      entry.processPath = procPath
+      if (isVpnCoreProcessPath(procPath)) entry.allowedCore = true
+    }
+
+    // The app's own probes arrive via the loopback mixed-direct-in inbound
+    // and are routed direct by design — never a leak.
+    if (/inbound\/mixed\[mixed-direct-in]/i.test(line)) {
+      entry.selfProbe = true
       entry.allowedCore = true
     }
+
     // Smart-RU split: a connection routed direct because it matched the RU
-    // geoip / gov-geosite rule-set. This is EXPECTED (banks/gov/VK/Yandex
-    // egress with the real IP by design), NOT a leak.
+    // geoip / gov-geosite rule-set. Only visible at DEBUG level, but keep the
+    // matcher so debug logs classify correctly too.
     if (/router: match\[\d+].*rule_set=(geoip-ru|geosite-category-gov-ru).*=>\s*route\(direct-out\)/i.test(line)) {
       entry.smartRu = true
+    }
+    // A process_name match (DEBUG) is a VPN-core / split-tunnel exclusion.
+    if (/router: match\[\d+].*process_name=\[/i.test(line)) {
+      entry.allowedCore = true
     }
 
     const direct = line.match(/outbound\/direct\[direct-out\].*?(?:to|connection to) ([0-9a-fA-F:.]+):\d+/i)
@@ -433,9 +574,26 @@ export function classifyDirectPublic(logText: string): {
   const smartRu: string[] = []
   for (const entry of byId.values()) {
     for (const ip of entry.directIps) {
-      if (entry.smartRu) smartRu.push(ip)
-      else if (entry.allowedCore) allowed.push(ip)
-      else leaked.push(ip)
+      if (entry.allowedCore) {
+        allowed.push(ip)
+        continue
+      }
+      // Smart-RU attribution: the destination IP came from a known RU
+      // hostname (per the log's own DNS exchanges) and smart-RU split is ON.
+      if (options.smartRuSplit === true) {
+        const hosts = ipToHostnames.get(ip)
+        const ruHost = hosts && [...hosts].some(isRuHostname)
+        if (entry.smartRu || ruHost) {
+          smartRu.push(ip)
+          continue
+        }
+      } else if (entry.smartRu) {
+        // DEBUG log told us it was a rule_set match even though the toggle
+        // read as off — still not a leak (the rule fired).
+        smartRu.push(ip)
+        continue
+      }
+      leaked.push(ip)
     }
   }
 
@@ -450,10 +608,27 @@ export function classifyDirectPublic(logText: string): {
   }
 }
 
-async function getDirectPublicSummary(): Promise<{ leakedCount: number; allowedCoreCount: number; smartRuCount: number; unparsedDirectCount: number; leakedExamples: string[]; allowedExamples: string[]; smartRuExamples: string[] }> {
+/** Pure: is this hostname in a Russian TLD or a known RU commercial service? */
+export function isRuHostname(hostname: string): boolean {
+  const h = String(hostname || '').trim().toLowerCase().replace(/\.$/, '')
+  if (!h) return false
+  // Domestic Runet TLDs.
+  if (h.endsWith('.ru') || h.endsWith('.su') || h.endsWith('.xn--p1ai') || h === 'ru' || h === 'su') return true
+  // RU commercial/ecosystem services on non-.ru TLDs (Yandex/VK/Mail.ru/etc).
+  const RU_SERVICE_SUFFIXES = [
+    '.yandex.net', '.yandex.com', '.ya.ru', '.yandex',
+    '.vk.com', '.vk.me', '.vkuser.net', '.userapi.com',
+    '.mail.ru', '.dzen.ru', '.ozon.ru', '.wildberries.ru', '.wb.ru',
+    '.avito.ru', '.tinkoff.ru', '.tbank.ru', '.sberbank.ru', '.sber.ru',
+    '.rutube.ru', '.hh.ru', '.kinopoisk.ru'
+  ]
+  return RU_SERVICE_SUFFIXES.some(s => h.endsWith(s) || h === s.slice(1))
+}
+
+async function getDirectPublicSummary(smartRuSplit: boolean): Promise<{ leakedCount: number; allowedCoreCount: number; smartRuCount: number; unparsedDirectCount: number; leakedExamples: string[]; allowedExamples: string[]; smartRuExamples: string[] }> {
   try {
     const log = await readFile(join(getTunRuntimeDir(), 'sing-box.log'), 'utf-8')
-    return classifyDirectPublic(log)
+    return classifyDirectPublic(log, { smartRuSplit })
   } catch {
     return { leakedCount: 0, allowedCoreCount: 0, smartRuCount: 0, unparsedDirectCount: 0, leakedExamples: [], allowedExamples: [], smartRuExamples: [] }
   }
@@ -566,37 +741,33 @@ export async function runLeakCheck(options: RunLeakCheckOptions = {}): Promise<L
 
   items.push(await getTunLogItem(Boolean(options.tunRunning)))
 
-  const directPublic = await getDirectPublicSummary()
-  const suspiciousCoreDirect = directPublic.allowedCoreCount > 10 || directPublic.allowedExamples.length > 1
+  const directPublic = await getDirectPublicSummary(options.smartRuSplit === true)
   const parserDrift = directPublic.unparsedDirectCount > 0 && directPublic.leakedCount === 0 && directPublic.allowedCoreCount === 0 && directPublic.smartRuCount === 0
   // When smart-RU split is ON, RU-hosted public IPs routed direct are the
   // feature working as intended (banks/gov/VK/Yandex see the real IP) — show
   // them as informational, never a leak.
   const smartRuDirectInfo = options.smartRuSplit === true && directPublic.smartRuCount > 0
+  const onlyBenignDirect = directPublic.leakedCount === 0 && !parserDrift
   items.push({
     id: 'direct-public',
     label: 'Direct-out приложений',
-    status: directPublic.leakedCount > 0 ? 'fail' : parserDrift || suspiciousCoreDirect ? 'warn' : 'ok',
+    status: directPublic.leakedCount > 0 ? 'fail' : parserDrift ? 'warn' : 'ok',
     value: directPublic.leakedCount > 0
       ? `${directPublic.leakedCount} записей`
       : parserDrift
         ? `${directPublic.unparsedDirectCount} direct-out without IP`
       : smartRuDirectInfo
         ? `${directPublic.smartRuCount} RU-направлений (smart-RU)`
-        : parserDrift
-          ? 'sing-box log contains direct-out lines, but diagnostics could not extract an IP. The log format may have changed.'
-        : suspiciousCoreDirect
-          ? `${directPublic.allowedCoreCount} VPN-core direct-out`
-          : 'Утечек не найдено',
+        : 'Утечек не найдено',
     details:
       directPublic.leakedCount > 0
         ? `Публичные IP ушли в direct-out без VPN-core исключения: ${directPublic.leakedExamples.join(', ')}`
         : smartRuDirectInfo
           ? `Это умная маршрутизация РФ: российские сервисы (${directPublic.smartRuExamples.join(', ')}) идут напрямую с реальным IP по правилам geoip-ru/gov-ru. Так и задумано — иностранный трафик при этом через VPN.`
-        : suspiciousCoreDirect
-          ? `VPN-core процесс делает direct-out к нескольким публичным IP: ${directPublic.allowedExamples.join(', ')}. Это похоже на split/direct правила upstream proxy.`
-        : directPublic.allowedCoreCount > 0
-          ? `Найден только разрешённый direct-out VPN-core процессов Happ/xray: ${directPublic.allowedExamples.join(', ')}`
+        : parserDrift
+          ? 'sing-box log contains direct-out lines, but diagnostics could not extract an IP. The log format may have changed.'
+        : onlyBenignDirect && directPublic.allowedCoreCount > 0
+          ? `Разрешённый direct-out: VPN-core/собственные пробы приложения (${directPublic.allowedExamples.join(', ')}). Утечек нет.`
           : 'Публичный direct-out по текущему логу не найден'
   })
 

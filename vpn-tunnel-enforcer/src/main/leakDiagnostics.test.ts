@@ -93,7 +93,7 @@ vi.mock('./tunController', () => ({
   probeTcp: vi.fn(async () => false)
 }))
 
-import { classifyDirectPublic, isBenignBlockLine, extractRealErrors, summarizeSingboxLog, dnsTypeName, getPublicIpV4, getPublicIpV6, runLeakCheck } from './leakDiagnostics'
+import { classifyDirectPublic, isBenignBlockLine, isBenignProcessSearchLine, isVpnCoreProcessPath, isRuHostname, extractRealErrors, summarizeSingboxLog, dnsTypeName, getPublicIpV4, getPublicIpV6, runLeakCheck } from './leakDiagnostics'
 
 beforeEach(() => {
   vi.mocked(axios.get).mockReset()
@@ -124,8 +124,8 @@ const SMART_RU_LOG = [
 ].join('\n')
 
 describe('classifyDirectPublic', () => {
-  it('classifies RU geoip/gov-ru direct-out as smart-RU, NOT a leak', () => {
-    const r = classifyDirectPublic(SMART_RU_LOG)
+  it('classifies RU geoip/gov-ru direct-out as smart-RU, NOT a leak (DEBUG log)', () => {
+    const r = classifyDirectPublic(SMART_RU_LOG, { smartRuSplit: true })
     expect(r.leakedCount).toBe(0)
     expect(r.smartRuCount).toBe(3)
     expect(r.smartRuExamples).toContain('77.88.21.24')
@@ -143,7 +143,7 @@ describe('classifyDirectPublic', () => {
     expect(r.leakedExamples).toContain('8.8.8.8')
   })
 
-  it('counts a VPN-core process_name exclusion as allowed, not leaked', () => {
+  it('counts a VPN-core process_name exclusion as allowed, not leaked (DEBUG log)', () => {
     const log = [
       '+0300 x DEBUG [777 0ms] router: match[1] process_name=[Happ.exe] => route(direct-out)',
       '+0300 x INFO [777 0ms] outbound/direct[direct-out]: outbound connection to 1.2.3.4:443'
@@ -171,6 +171,116 @@ describe('classifyDirectPublic', () => {
     const r = classifyDirectPublic(log)
     expect(r.leakedCount).toBe(0)
     expect(r.unparsedDirectCount).toBe(1)
+  })
+
+  // ── INFO-level classification (the real production log shape) ──────────
+  // The tunnel runs sing-box at INFO, so there are NO `router: match[i]
+  // rule_set=...` / `process_name=[...]` DEBUG lines. Classification must
+  // work off `found process path`, the mixed-direct-in inbound and the DNS
+  // exchange lines. These are real-shaped lines from the user's 2026-09-25
+  // session.
+
+  it('treats a VPN-core process found via process path as allowed (INFO log)', () => {
+    const log = [
+      '+0300 x INFO [101 0ms] inbound/tun[tun-in]: inbound connection to 1.2.3.4:443',
+      '+0300 x INFO [101 0ms] router: found process path: C:\\Program Files\\Happ\\Happ.exe',
+      '+0300 x INFO [101 0ms] outbound/direct[direct-out]: outbound connection to 1.2.3.4:443'
+    ].join('\n')
+    const r = classifyDirectPublic(log)
+    expect(r.leakedCount).toBe(0)
+    expect(r.allowedCoreCount).toBe(1)
+  })
+
+  it('treats the app self-probe via mixed-direct-in as allowed (INFO log)', () => {
+    const log = [
+      '+0300 x INFO [202 0ms] inbound/mixed[mixed-direct-in]: inbound connection from 127.0.0.1:50189',
+      '+0300 x INFO [202 1ms] inbound/mixed[mixed-direct-in]: inbound connection to se.savethis.cloud:443',
+      '+0300 x INFO [202 2ms] router: found process path: C:\\Program Files\\VPN Tunnel Enforcer\\VPN Tunnel Enforcer.exe',
+      '+0300 x INFO [202 2ms] outbound/direct[direct-out]: outbound connection to 1.2.3.4:443'
+    ].join('\n')
+    const r = classifyDirectPublic(log)
+    expect(r.leakedCount).toBe(0)
+    expect(r.allowedCoreCount).toBe(1)
+  })
+
+  it('attributes a RU-hostname IP to smart-RU when split is ON (INFO log)', () => {
+    // Yandex Browser → yandex.ru resolved to a RU IP, then direct-out. This
+    // is the exact false-positive from the user's diagnostic.
+    const log = [
+      '+0300 x INFO [303 5ms] dns: exchanged A yandex.ru. 7 IN A 213.180.193.56',
+      '+0300 x INFO [404 0ms] inbound/tun[tun-in]: inbound connection to 213.180.193.56:443',
+      '+0300 x INFO [404 0ms] router: found process path: C:\\Users\\Redmi\\AppData\\Local\\Yandex\\YandexBrowser\\Application\\browser.exe',
+      '+0300 x INFO [404 0ms] outbound/direct[direct-out]: outbound connection to 213.180.193.56:443'
+    ].join('\n')
+    const r = classifyDirectPublic(log, { smartRuSplit: true })
+    expect(r.leakedCount).toBe(0)
+    expect(r.smartRuCount).toBe(1)
+    expect(r.smartRuExamples).toContain('213.180.193.56')
+  })
+
+  it('flags the same RU-IP direct-out as a leak when smart-RU split is OFF', () => {
+    const log = [
+      '+0300 x INFO [303 5ms] dns: exchanged A yandex.ru. 7 IN A 213.180.193.56',
+      '+0300 x INFO [404 0ms] inbound/tun[tun-in]: inbound connection to 213.180.193.56:443',
+      '+0300 x INFO [404 0ms] router: found process path: C:\\Users\\Redmi\\AppData\\Local\\Yandex\\YandexBrowser\\Application\\browser.exe',
+      '+0300 x INFO [404 0ms] outbound/direct[direct-out]: outbound connection to 213.180.193.56:443'
+    ].join('\n')
+    const r = classifyDirectPublic(log, { smartRuSplit: false })
+    expect(r.leakedCount).toBe(1)
+    expect(r.leakedExamples).toContain('213.180.193.56')
+  })
+
+  it('flags a foreign-hostname IP direct-out as a leak even when smart-RU is ON', () => {
+    // A non-RU host resolving to a foreign IP must NOT be excused by smart-RU.
+    const log = [
+      '+0300 x INFO [505 5ms] dns: exchanged A example.com. 7 IN A 93.184.216.34',
+      '+0300 x INFO [606 0ms] inbound/tun[tun-in]: inbound connection to 93.184.216.34:443',
+      '+0300 x INFO [606 0ms] router: found process path: C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+      '+0300 x INFO [606 0ms] outbound/direct[direct-out]: outbound connection to 93.184.216.34:443'
+    ].join('\n')
+    const r = classifyDirectPublic(log, { smartRuSplit: true })
+    expect(r.leakedCount).toBe(1)
+    expect(r.leakedExamples).toContain('93.184.216.34')
+  })
+})
+
+describe('isVpnCoreProcessPath', () => {
+  it('recognises VPN-core executables by leaf name, case-insensitively', () => {
+    expect(isVpnCoreProcessPath('C:\\Program Files\\Happ\\Happ.exe')).toBe(true)
+    expect(isVpnCoreProcessPath('C:\\Program Files\\Hiddify\\Hiddify.exe')).toBe(true)
+    expect(isVpnCoreProcessPath('C:\\Windows\\System32\\xray.exe')).toBe(true)
+    expect(isVpnCoreProcessPath('C:\\Program Files\\VPN Tunnel Enforcer\\VPN Tunnel Enforcer.exe')).toBe(true)
+    expect(isVpnCoreProcessPath('C:\\Users\\x\\vpnte-xray.exe')).toBe(true)
+  })
+
+  it('rejects ordinary apps', () => {
+    expect(isVpnCoreProcessPath('C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe')).toBe(false)
+    expect(isVpnCoreProcessPath('C:\\Users\\Redmi\\AppData\\Local\\Yandex\\YandexBrowser\\Application\\browser.exe')).toBe(false)
+    expect(isVpnCoreProcessPath('C:\\Windows\\System32\\curl.exe')).toBe(false)
+    expect(isVpnCoreProcessPath('')).toBe(false)
+  })
+})
+
+describe('isRuHostname', () => {
+  it('matches RU TLDs', () => {
+    expect(isRuHostname('yandex.ru')).toBe(true)
+    expect(isRuHostname('api.browser.yandex.ru')).toBe(true)
+    expect(isRuHostname('example.su')).toBe(true)
+    expect(isRuHostname('пример.xn--p1ai')).toBe(true)
+  })
+
+  it('matches RU commercial services on non-.ru TLDs', () => {
+    expect(isRuHostname('api.browser.yandex.net')).toBe(true)
+    expect(isRuHostname('s3.yandex.net')).toBe(true)
+    expect(isRuHostname('vk.com')).toBe(true)
+    expect(isRuHostname('cdn.vk.com')).toBe(true)
+  })
+
+  it('rejects foreign hostnames', () => {
+    expect(isRuHostname('example.com')).toBe(false)
+    expect(isRuHostname('google.com')).toBe(false)
+    expect(isRuHostname('youboost.app')).toBe(false)
+    expect(isRuHostname('')).toBe(false)
   })
 })
 
@@ -219,6 +329,50 @@ describe('isBenignBlockLine / extractRealErrors', () => {
       '+0300 x INFO [2 0ms] route: failed probes from previous session ignored'
     ].join('\n')
     expect(extractRealErrors(log)).toEqual([])
+  })
+})
+
+describe('isBenignProcessSearchLine', () => {
+  it('treats "router: failed to search process: Access is denied" as benign', () => {
+    // Real-shaped lines from a healthy session (2026-09-25 diagnostic): the
+    // router cannot open SYSTEM/other-user processes, logs this at INFO and
+    // routes by the remaining matchers. Not an error.
+    expect(isBenignProcessSearchLine(
+      '+0300 2026-09-25 17:32:53 INFO [2574407273 0ms] router: failed to search process: Access is denied.'
+    )).toBe(true)
+    expect(isBenignProcessSearchLine(
+      '+0300 2026-09-25 17:34:50 INFO router: failed to search process: Access is denied.'
+    )).toBe(true)
+  })
+
+  it('does not match other router failures', () => {
+    expect(isBenignProcessSearchLine(
+      '+0300 x ERROR [1 0ms] router: failed to initialize rule-set geoip-ru: file missing'
+    )).toBe(false)
+    expect(isBenignProcessSearchLine(
+      '+0300 x ERROR outbound/vless[proxy-out]: connection to server failed: i/o timeout'
+    )).toBe(false)
+  })
+
+  it('keeps process-search noise out of the error summary but keeps real errors', () => {
+    const log = [
+      '+0300 2026-09-25 17:32:53 INFO [2574407273 0ms] router: failed to search process: Access is denied.',
+      '+0300 2026-09-25 17:34:50 INFO router: failed to search process: Access is denied.',
+      '+0300 x ERROR [3 0ms] outbound/vless[proxy-out]: connection to server failed: i/o timeout'
+    ].join('\n')
+    const errors = extractRealErrors(log)
+    expect(errors.length).toBe(1)
+    expect(errors[0]).toMatch(/i\/o timeout/)
+  })
+
+  it('produces a clean summary for a healthy session full of process-search noise', () => {
+    const log = [
+      '+0300 2026-09-25 17:32:53 INFO [2574407273 0ms] router: failed to search process: Access is denied.',
+      '+0300 2026-09-25 17:32:53 INFO [2574407273 0ms] outbound/vless[proxy-out]: outbound connection to ex.com:443',
+      '+0300 2026-09-25 17:34:50 INFO router: failed to search process: Access is denied.'
+    ].join('\n')
+    expect(extractRealErrors(log)).toEqual([])
+    expect(summarizeSingboxLog(log)).not.toContain('errors:')
   })
 })
 

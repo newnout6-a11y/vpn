@@ -114,8 +114,15 @@ function joinRows(rows: string[], limit = 18): string {
 
 export function isBenignSingBoxLogNoise(line: string): boolean {
   return (
-    /\bERROR\b.*connection (?:upload|download) closed\b/i.test(line) &&
-    /forcibly closed by the remote host|operation was canceled|context canceled/i.test(line)
+    (
+      /\bERROR\b.*connection (?:upload|download) closed\b/i.test(line) &&
+      /forcibly closed by the remote host|operation was canceled|context canceled/i.test(line)
+    ) ||
+    // sing-box cannot map connections owned by SYSTEM / other users / elevated
+    // services back to a process name (it runs as the user). It logs this at
+    // INFO and routes by the remaining matchers — routing is unaffected, so
+    // the line is noise, not a health problem.
+    /router: failed to search process: Access is denied/i.test(line)
   )
 }
 

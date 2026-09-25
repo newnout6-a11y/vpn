@@ -79,6 +79,22 @@ describe('buildActiveProfileDiagnosticItems', () => {
     )).toBe(false)
   })
 
+  it('does not promote process-search access-denied noise to a sing-box core failure', () => {
+    // Real-shaped lines from a healthy 2026-09-25 session: sing-box cannot
+    // open SYSTEM/other-user processes to learn their names, logs this at
+    // INFO and routes by the remaining matchers. Not a health problem.
+    expect(isBenignSingBoxLogNoise(
+      '+0300 2026-09-25 17:32:53 INFO [2574407273 0ms] router: failed to search process: Access is denied.'
+    )).toBe(true)
+    expect(isBenignSingBoxLogNoise(
+      '+0300 2026-09-25 17:34:50 INFO router: failed to search process: Access is denied.'
+    )).toBe(true)
+    // Other router failures must still surface.
+    expect(isBenignSingBoxLogNoise(
+      '+0300 x ERROR [1 0ms] router: failed to initialize rule-set geoip-ru: file missing'
+    )).toBe(false)
+  })
+
   it('filters optional proxy registry cleanup warnings from app-log health', () => {
     const source = systemDiagnosticsSource()
 

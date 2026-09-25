@@ -60,6 +60,39 @@ describe('traffic history log parsing', () => {
     })
   })
 
+  it('parses the real sing-box 1.13 DNS exchange format (record-type token)', () => {
+    // Real lines from a production 2026-09-25 log. The old pattern missed all
+    // of these because of the "A"/"AAAA"/"HTTPS" token after the verb — which
+    // is why the history only ever showed api.ipify.org (matched via "to <d>").
+    expect(parseSingboxLogLine(
+      '+0300 2026-09-25 17:17:06 INFO [1657141230 946ms] dns: exchanged A sub.alvsub.cc. 13 IN A 5.129.240.114'
+    )).toMatchObject({ domain: 'sub.alvsub.cc' })
+    expect(parseSingboxLogLine(
+      '+0300 2026-09-25 17:17:55 INFO [3321415587 5.41s] dns: exchanged A yandex.ru. 7 IN A 213.180.193.56'
+    )).toMatchObject({ domain: 'yandex.ru' })
+    expect(parseSingboxLogLine(
+      '+0300 2026-09-25 17:24:01 INFO [3339232011 328ms] dns: cached A youboost.app. 59 IN A 109.71.15.131'
+    )).toMatchObject({ domain: 'youboost.app' })
+    expect(parseSingboxLogLine(
+      '+0300 2026-09-25 17:17:06 INFO [1 5ms] dns: exchanged AAAA www.youtube.com. 7 IN AAAA 2a00::1'
+    )).toMatchObject({ domain: 'www.youtube.com' })
+    expect(parseSingboxLogLine(
+      '+0300 2026-09-25 17:17:06 DEBUG [1657141230 0ms] dns: exchange A chatgpt.com. IN A'
+    )).toMatchObject({ domain: 'chatgpt.com' })
+  })
+
+  it('still matches a hostname in a "to <domain>:port" connection line', () => {
+    expect(parseSingboxLogLine(
+      '+0300 2026-09-25 17:47:40 INFO [2440758562 1ms] inbound/mixed[mixed-direct-in]: inbound connection to api.ipify.org:80'
+    )).toMatchObject({ domain: 'api.ipify.org' })
+  })
+
+  it('does not treat a bare IP destination as a domain', () => {
+    expect(parseSingboxLogLine(
+      '+0300 2026-09-25 17:24:01 INFO [698962057 0ms] inbound/tun[tun-in]: inbound connection to 109.71.15.131:443'
+    )).toBeNull()
+  })
+
   it('uses a bounded initial tail and incorporates only appended log data afterwards', async () => {
     const logPath = join(runtimeDir, 'sing-box.log')
     const filler = 'DEBUG connection retry without a hostname\n'.repeat(30_000)
