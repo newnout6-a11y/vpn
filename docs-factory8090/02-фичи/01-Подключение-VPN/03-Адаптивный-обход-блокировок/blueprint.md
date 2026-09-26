@@ -2,43 +2,6 @@
 
 > Источник: https://factory.8090.ai/project/992274e4-1c6b-4d44-8c22-e4c038e690c2/blueprints/f8735bdf-c10c-4727-82b6-b215b74e750f
 
-## Feature Summary
-
-Summarize what this feature does from the user's perspective and which requirements it fulfills.
-
-## Component Blueprint Composition
-
-List the shared capabilities this feature composes and how each is configured or scoped. For example:
-
-* **@Component Blueprint 1** — What this capability provides; how this feature configures or scopes it.
-* **@Component Blueprint 2** — What this capability provides; using `#ComponentA` and `#ComponentB` to enable this feature.
-
-## Feature-Specific Components
-
-Components that exist only for this feature, defined as `component` blocks.
-
-## System Contracts
-
-### Key Contracts
-
-Invariants, correctness rules, and reliability semantics (idempotency, ordering, consistency, retry behavior).
-
-### Integration Contracts
-
-Events published/consumed, API interfaces, webhooks, and composition expectations for consumers of this capability.
-
-## Architecture Decision Records
-
-### ADR-001: Decision Title
-
-**Context:** Why this decision was needed.
-
-**Decision:** What was chosen and how.
-
-**Consequences:** Trade-offs, benefits, and implications.
-
-# Адаптивный обход блокировок
-
 ## Обзор функции
 
 Функция соединяет `adaptiveBypassEnabled`, `adaptiveBypassServerFallback`, состояние `AdaptiveBypassStatus` и жизненный цикл TUN для повышения надёжности подключения при сетевых ограничениях. Она не заявляет невидимость VPN и не гарантирует доступ в каждой сети. Связанные требования описаны в @Адаптивный обход блокировок.
