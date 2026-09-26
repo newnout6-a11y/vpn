@@ -14,7 +14,7 @@ import axios from 'axios'
 import { logEvent } from './appLogger'
 import { settingsStore } from './settings'
 import { serverPicker } from './serverPicker'
-import { tunController, getBundledResource, getDirectProxyPort, pickFreeLocalPort, isVpnOutboundUdpCapable, shouldBlockQuicUdp443 } from './tunController'
+import { tunController, getBundledResource, getDirectProxyPort, getTunnelProbePort, pickFreeLocalPort, isVpnOutboundUdpCapable, shouldBlockQuicUdp443 } from './tunController'
 import { ALL_KNOWN_ALIASES } from './tunAdapter'
 import { getPhysicalAdapterDnsSources } from './physicalAdapterLockdown'
 import { resolveProxyEngine } from './proxyEngine'
@@ -2227,17 +2227,16 @@ export async function probeTunnelHandshakeAndEgress(
         const tunStatus = tunController.getStatus()
         const activeProfile = serverPicker.getActiveProfile()
         // Do not route a probe for the currently running direct-VPN profile
-        // through a second proxy process. Reuse its already-running SOCKS
-        // inbound instead; a nested handshake to the same server can time out,
-        // and binding a duplicate probe to the physical adapter is blocked by
-        // the kill-switch (or tests a different path than the active tunnel).
+        // through a second proxy process. Use sing-box's dedicated localhost
+        // inbound, which routes to proxy-out. getDirectProxyPort() is a bypass
+        // inbound routed to direct-out and must not be used to test the tunnel.
         const isSelfProbe = Boolean(
           tunStatus.running &&
           tunStatus.mode === 'directVpn' &&
           tunStatus.vpnProfileName === profile.name &&
           activeProfile?.id === profile.id
         )
-        const activeTunnelPort = isSelfProbe ? getDirectProxyPort() : null
+        const activeTunnelPort = isSelfProbe ? getTunnelProbePort() : null
         let directProxy: { host: string; port: number } | null = null
         if (tunStatus.running && tunStatus.proxyAddr && !isSelfProbe) {
           const directPort = getDirectProxyPort()

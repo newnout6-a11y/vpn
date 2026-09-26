@@ -4,6 +4,7 @@ const mocks = vi.hoisted(() => ({
   openTcpViaSocks: vi.fn(),
   verifyHttpsThroughSocket: vi.fn(),
   getDirectProxyPort: vi.fn<() => number | null>(() => 10808),
+  getTunnelProbePort: vi.fn<() => number | null>(() => 10809),
   getPhysicalAdapterDnsSources: vi.fn(async () => []),
   spawn: vi.fn(),
   tunStatus: {
@@ -30,6 +31,7 @@ vi.mock('./tunController', () => ({
   tunController: { getStatus: () => mocks.tunStatus },
   getBundledResource: vi.fn(() => '/tmp/sing-box.exe'),
   getDirectProxyPort: mocks.getDirectProxyPort,
+  getTunnelProbePort: mocks.getTunnelProbePort,
   pickFreeLocalPort: vi.fn(async () => 50123),
   isVpnOutboundUdpCapable: () => false,
   shouldBlockQuicUdp443: () => true
@@ -93,7 +95,7 @@ describe('probeTunnelHandshakeAndEgress handshake classification', () => {
     const result = await probeTunnelHandshakeAndEgress(activeProfile, '203.0.113.42', undefined, true)
 
     expect(result.handshake.status).toBe('ok')
-    expect(result.handshake.evidence?.inboundPort).toBe(10808)
+    expect(result.handshake.evidence?.inboundPort).toBe(10809)
     expect(result.egress.reflectors).toEqual(expect.arrayContaining([
       expect.objectContaining({
         source: 'cloudflare-trace',
@@ -109,10 +111,11 @@ describe('probeTunnelHandshakeAndEgress handshake classification', () => {
     expect(result.throughput?.route).toBe('active-tunnel')
     expect(evaluateLiveCheckFindings({ handshake: result.handshake }).some(f => f.code === 'TUNNEL_HANDSHAKE_FAILED')).toBe(false)
 
-    expect(mocks.getDirectProxyPort).toHaveBeenCalledOnce()
+    expect(mocks.getTunnelProbePort).toHaveBeenCalledOnce()
+    expect(mocks.getDirectProxyPort).not.toHaveBeenCalled()
     expect(mocks.getPhysicalAdapterDnsSources).not.toHaveBeenCalled()
     expect(mocks.spawn).not.toHaveBeenCalled()
-    expect(mocks.openTcpViaSocks.mock.calls.every(([socks]) => socks.port === 10808)).toBe(true)
+    expect(mocks.openTcpViaSocks.mock.calls.every(([socks]) => socks.port === 10809)).toBe(true)
     expect(mocks.openTcpViaSocks.mock.calls.map(([, host]) => host)).toEqual(expect.arrayContaining([
       '1.1.1.1',
       'api.ipify.org',
@@ -141,7 +144,7 @@ describe('probeTunnelHandshakeAndEgress handshake classification', () => {
       expect.objectContaining({ source: 'ipify', status: 'ok', ip: '203.0.113.42' })
     ]))
     expect(mocks.openTcpViaSocks).toHaveBeenCalledWith(
-      expect.objectContaining({ port: 10808 }),
+      expect.objectContaining({ port: 10809 }),
       'api.ipify.org',
       443,
       3500,
@@ -151,7 +154,7 @@ describe('probeTunnelHandshakeAndEgress handshake classification', () => {
   })
 
   it('skips an active-tunnel probe when its SOCKS inbound is unavailable', async () => {
-    mocks.getDirectProxyPort.mockReturnValueOnce(null)
+    mocks.getTunnelProbePort.mockReturnValueOnce(null)
 
     const result = await probeTunnelHandshakeAndEgress(activeProfile, '203.0.113.42', undefined, true)
 
@@ -166,6 +169,7 @@ describe('probeTunnelHandshakeAndEgress handshake classification', () => {
     })
     expect(mocks.openTcpViaSocks).not.toHaveBeenCalled()
     expect(mocks.spawn).not.toHaveBeenCalled()
+    expect(mocks.getDirectProxyPort).not.toHaveBeenCalled()
     expect(evaluateLiveCheckFindings({ handshake: result.handshake }).some(f => f.code === 'TUNNEL_HANDSHAKE_FAILED')).toBe(false)
   })
 })

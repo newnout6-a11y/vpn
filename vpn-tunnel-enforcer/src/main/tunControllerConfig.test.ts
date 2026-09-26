@@ -88,7 +88,7 @@ vi.mock('./domainRouting', () => ({
 import { mkdtempSync, writeFileSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { generateSingboxConfig, parseProxyAddress, readRecentSingBoxOutboundFault, isVpnOutboundUdpCapable, shouldBlockQuicUdp443 } from './tunController'
+import { generateSingboxConfig, getTunnelProbePort, parseProxyAddress, readRecentSingBoxOutboundFault, isVpnOutboundUdpCapable, shouldBlockQuicUdp443 } from './tunController'
 
 function repeatLine(line: string, n: number): string {
   return Array.from({ length: n }, () => line).join('\n')
@@ -110,7 +110,12 @@ function gen(
   upstream: Parameters<typeof generateSingboxConfig>[0],
   proxyType: 'socks5' | 'http' = 'socks5',
   directProcessNames: string[] = [],
-  options: { stealthMode?: boolean; directProxyPortOverride?: number; clashPortOverride?: number } = {}
+  options: {
+    stealthMode?: boolean
+    directProxyPortOverride?: number
+    tunnelProbePortOverride?: number
+    clashPortOverride?: number
+  } = {}
 ): SingboxConfig {
   return generateSingboxConfig(upstream, proxyType, directProcessNames, options) as unknown as SingboxConfig
 }
@@ -123,6 +128,11 @@ function clashPortOf(cfg: SingboxConfig): number {
 function directPortOf(cfg: SingboxConfig): number {
   const mixed = cfg.inbounds.find((i) => i.tag === 'mixed-direct-in')
   return Number(mixed?.listen_port)
+}
+
+function liveCheckPortOf(cfg: SingboxConfig): number | undefined {
+  const inbound = cfg.inbounds.find((i) => i.tag === 'live-check-in')
+  return inbound ? Number(inbound.listen_port) : undefined
 }
 
 const realityOutbound = {
@@ -354,6 +364,40 @@ describe('generateSingboxConfig UDP rules', () => {
     expect(quicBlock).toBe(true)
     expect(udpBlockAll).toBe(true)
     expect(cfg.route.final).toBe('proxy-out')
+  })
+
+  it('routes the direct-VPN live-check inbound to proxy-out, not direct-out', () => {
+    const cfg = gen({ outbound: realityOutbound }, 'socks5', [], {
+      directProxyPortOverride: 34567,
+      tunnelProbePortOverride: 34569,
+      clashPortOverride: 34568
+    })
+
+    const inbound = cfg.inbounds.find((i) => i.tag === 'live-check-in')
+    expect(inbound).toMatchObject({ type: 'mixed', listen: '127.0.0.1', listen_port: 34569 })
+    expect(getTunnelProbePort()).toBe(34569)
+    expect(cfg.route.rules).toContainEqual({ inbound: 'live-check-in', outbound: 'proxy-out' })
+    expect(cfg.route.rules).toContainEqual({ inbound: 'mixed-direct-in', outbound: 'direct-out' })
+    expect(liveCheckPortOf(cfg)).toBeDefined()
+    expect(new Set([directPortOf(cfg), liveCheckPortOf(cfg), clashPortOf(cfg)]).size).toBe(3)
+  })
+
+  it('does not expose a live-check inbound in external-proxy mode', () => {
+    const cfg = gen('127.0.0.1:10808')
+    expect(liveCheckPortOf(cfg)).toBeUndefined()
+    expect(getTunnelProbePort()).toBeNull()
+  })
+
+  it('reselects a live-check port when the override collides with another inbound', () => {
+    const cfg = gen({ outbound: realityOutbound }, 'socks5', [], {
+      directProxyPortOverride: 34567,
+      tunnelProbePortOverride: 34567,
+      clashPortOverride: 34568
+    })
+
+    expect(liveCheckPortOf(cfg)).toBeDefined()
+    expect(new Set([directPortOf(cfg), liveCheckPortOf(cfg), clashPortOf(cfg)]).size).toBe(3)
+    expect(getTunnelProbePort()).toBe(liveCheckPortOf(cfg))
   })
 
   it('keeps general UDP available on default VLESS while falling QUIC back to TCP', () => {
@@ -792,7 +836,8 @@ describe('generateSingboxConfig with xraySocksPort', () => {
     }
     const cfg: any = generateSingboxConfig(upstream, 'socks5', [], {
       xraySocksPort: 25555,
-      resolvedVpnEndpointIp: '185.100.100.1'
+      resolvedVpnEndpointIp: '185.100.100.1',
+      tunnelProbePortOverride: 25556
     })
 
     const proxyOut = cfg.outbounds.find((o: any) => o.tag === 'proxy-out')
@@ -806,6 +851,10 @@ describe('generateSingboxConfig with xraySocksPort', () => {
     const tunIn = cfg.inbounds.find((i: any) => i.type === 'tun')
     expect(tunIn.route_exclude_address).toContain('185.100.100.1/32')
     expect(tunIn.route_exclude_address).not.toContain('127.0.0.1/32')
+
+    expect(cfg.inbounds.find((i: any) => i.tag === 'live-check-in')?.listen_port).toBe(25556)
+    expect(cfg.route.rules).toContainEqual({ inbound: 'live-check-in', outbound: 'proxy-out' })
+    expect(getTunnelProbePort()).toBe(25556)
   })
 
   it('includes directProcessNames in direct-out route rules in directVpn mode', () => {

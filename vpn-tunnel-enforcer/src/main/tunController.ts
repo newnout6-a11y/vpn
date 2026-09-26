@@ -115,9 +115,15 @@ export interface StartOptions {
 let clashApiInfo: { port: number; secret: string } | null = null
 
 let directProxyPort: number | null = null;
+let tunnelProbePort: number | null = null
 
 export function getDirectProxyPort(): number | null {
   return directProxyPort;
+}
+
+/** Local mixed inbound routed to proxy-out for diagnostics of the active VPN. */
+export function getTunnelProbePort(): number | null {
+  return tunnelProbePort
 }
 
 export function getClashApiInfo(): { port: number; secret: string } | null {
@@ -862,6 +868,7 @@ export function generateSingboxConfig(
     adaptiveMode?: AdaptiveBypassMode
     publicWifiCompatibility?: boolean
     directProxyPortOverride?: number
+    tunnelProbePortOverride?: number
     clashPortOverride?: number
     smartRuSplit?: boolean
     smartRuMapsDirect?: boolean
@@ -1013,6 +1020,26 @@ export function generateSingboxConfig(
     }
   }
   directProxyPort = dPort
+
+  let probePort = options.tunnelProbePortOverride
+  if (isDirectVpn) {
+    if (
+      typeof probePort !== 'number' ||
+      !Number.isInteger(probePort) ||
+      probePort <= 0 ||
+      probePort > 65535 ||
+      probePort === clashPort ||
+      probePort === dPort
+    ) {
+      probePort = randomLocalPort()
+      while (probePort === clashPort || probePort === dPort) {
+        probePort = randomLocalPort()
+      }
+    }
+    tunnelProbePort = probePort
+  } else {
+    tunnelProbePort = null
+  }
   const domainRouteRules = buildDomainRouteRules()
   const smartRouteRouteRules = smartRouteRules(smartRoute)
   const smartRouteRuleSetDefs = smartRouteRuleSets(smartRoute)
@@ -1123,7 +1150,17 @@ export function generateSingboxConfig(
         tag: 'mixed-direct-in',
         listen: '127.0.0.1',
         listen_port: dPort
-      }
+      },
+      // Unlike mixed-direct-in (direct-out bypass), this loopback-only inbound
+      // is reserved for health checks and always exits through proxy-out.
+      ...(isDirectVpn
+        ? [{
+            type: 'mixed',
+            tag: 'live-check-in',
+            listen: '127.0.0.1',
+            listen_port: probePort
+          }]
+        : [])
     ],
     outbounds: [
       proxyOutbound,
@@ -1133,6 +1170,7 @@ export function generateSingboxConfig(
     route: {
       rules: [
         { inbound: 'mixed-direct-in', outbound: 'direct-out' },
+        ...(isDirectVpn ? [{ inbound: 'live-check-in', outbound: 'proxy-out' }] : []),
         ...(
           proxyCoreProcesses.length > 0
             ? [{
@@ -1995,14 +2033,15 @@ async function prepareRuntime(
   // generateSingboxConfig falls back to randomLocalPort if no override is
   // supplied, so direct callers (e.g. tests) still work.
   //
-  // We resolve BOTH the mixed-direct-in port AND the clash_api controller
-  // port through the OS, because either one landing inside a Windows
+  // We resolve the mixed-direct-in port, live-check inbound, and clash_api
+  // controller port through the OS, because any one landing inside a Windows
   // Hyper-V/WSL excluded port range makes sing-box fail to bind (WSAEACCES)
-  // and exit at startup. The clash port is resolved second with the direct
-  // port excluded so the two never collide.
+  // and exit at startup. Each later port pick excludes the earlier ones so
+  // they never collide.
   const portsPromise = (async () => {
     let directPort: number | undefined
     let clashPort: number | undefined
+    let probePort: number | undefined
     try {
       directPort = await pickFreeLocalPort()
     } catch (err) {
@@ -2013,7 +2052,16 @@ async function prepareRuntime(
     } catch (err) {
       logEvent('warn', 'tun', 'pickFreeLocalPort (clash) failed — falling back to random port', err)
     }
-    return { directPort, clashPort }
+    if (typeof upstream !== 'string') {
+      try {
+        probePort = await pickFreeLocalPort(
+          [directPort, clashPort].filter((port): port is number => typeof port === 'number')
+        )
+      } catch (err) {
+        logEvent('warn', 'tun', 'pickFreeLocalPort (live-check) failed — falling back to random port', err)
+      }
+    }
+    return { directPort, clashPort, probePort }
   })()
 
   // Rotate previous log so each run has a clean slate; previous one kept as .prev.log.
@@ -2081,10 +2129,14 @@ async function prepareRuntime(
     }
   }
 
-  // Pre-resolve the mixed-direct-in port AND the clash_api port via the OS
-  // so we never land inside a Windows Hyper-V/WSL excluded port range
+  // Pre-resolve all localhost listener ports via the OS so we never land
+  // inside a Windows Hyper-V/WSL excluded port range
   // (which causes sing-box to fail bind with WSAEACCES).
-  const { directPort: directProxyPortOverride, clashPort: clashPortOverride } = await portsPromise
+  const {
+    directPort: directProxyPortOverride,
+    clashPort: clashPortOverride,
+    probePort: tunnelProbePortOverride
+  } = await portsPromise
 
   const existingAliases = (options.smartRuDirectDnsSources ?? []).map((s: PhysicalAdapterDnsSource) => s.alias)
   updateTunAdapterAlias(existingAliases.length > 0 ? existingAliases : undefined)
@@ -2098,6 +2150,7 @@ async function prepareRuntime(
     smartRuSplit: options.smartRuSplit === true && smartRuRuleSetDir !== undefined,
     smartRuRuleSetDir,
     directProxyPortOverride,
+    tunnelProbePortOverride,
     clashPortOverride
   })
   await writeFile(configPath, JSON.stringify(config, null, 2), 'utf-8')
@@ -3619,6 +3672,7 @@ export const tunController = {
     // tell callers "VPN is off" instead of returning ECONNREFUSED.
     clashApiInfo = null
     directProxyPort = null
+    tunnelProbePort = null
     logEvent('info', 'tun', 'TUN stopped')
     recordForensicTunEvent('tun-stopped', {
       cleanupErrors
