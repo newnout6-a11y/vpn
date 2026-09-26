@@ -1017,6 +1017,23 @@ export function Servers() {
     }
   }
 
+  const handleGroupRefreshPolicy = async (group: ServerGroup, value: string) => {
+    const api = window.electronAPI as typeof window.electronAPI & {
+      groupsSetRefreshPolicy?: (id: string, intervalMinutes: number | null) => Promise<ServerGroup | null>
+    }
+    if (typeof api.groupsSetRefreshPolicy !== 'function') return
+    const intervalMinutes = value === 'auto' ? null : Number(value)
+    try {
+      const updated = await api.groupsSetRefreshPolicy(group.id, intervalMinutes)
+      if (updated) {
+        setGroups((prev) => prev.map((item) => item.id === updated.id ? updated : item))
+        addLog('info', `${group.name}: частота автообновления изменена на ${value === 'auto' ? 'авто' : `${intervalMinutes} мин.`}`)
+      }
+    } catch (err: any) {
+      showToast('error', 'Не удалось изменить частоту обновления', err?.message ?? String(err))
+    }
+  }
+
   const handleGroupHealth = async (group: ServerGroup) => {
     if (group.id === VIRTUAL_ALL_GROUP_ID) return
     const api = window.electronAPI as unknown as {
@@ -1378,6 +1395,7 @@ export function Servers() {
                 onRenameCancel={cancelRename}
                 onRenameKey={handleRenameKey}
                 onRefresh={() => handleGroupRefresh(group)}
+                onRefreshPolicyChange={(value) => handleGroupRefreshPolicy(group, value)}
                 onCheckHealth={() => handleGroupHealth(group)}
                 onStartExternalProxies={() => handleGroupStartExternalProxies(group, groupProfiles)}
                 onDelete={() => setDeleteTarget(group)}
@@ -1505,6 +1523,7 @@ interface GroupCardProps {
   onRenameCancel: () => void
   onRenameKey: (e: KeyboardEvent<HTMLInputElement>) => void
   onRefresh: () => void
+  onRefreshPolicyChange: (value: string) => void
   onCheckHealth: () => void
   onStartExternalProxies: () => void
   onDelete: () => void
@@ -1545,6 +1564,7 @@ function GroupCard(props: GroupCardProps) {
     onRenameCancel,
     onRenameKey,
     onRefresh,
+    onRefreshPolicyChange,
     onCheckHealth,
     onStartExternalProxies,
     onDelete,
@@ -1718,20 +1738,40 @@ function GroupCard(props: GroupCardProps) {
           {!isVirtual && groupsAvailable && (
             <>
             {isSubscription && (
-              <MacButton
-                size="sm"
-                variant="ghost"
-                onClick={(e) => {
-                  e.stopPropagation()
-                  onRefresh()
-                }}
-                loading={isRefreshing}
-                disabled={isRefreshing}
-                title={t('servers.groups.refresh')}
-              >
-                <RefreshCw className="w-3.5 h-3.5 mr-1" />
-                {isRefreshing ? t('servers.groups.refreshing') : t('servers.groups.refresh')}
-              </MacButton>
+              <>
+                <MacButton
+                  size="sm"
+                  variant="ghost"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onRefresh()
+                  }}
+                  loading={isRefreshing}
+                  disabled={isRefreshing}
+                  title={t('servers.groups.refresh')}
+                >
+                  <RefreshCw className="w-3.5 h-3.5 mr-1" />
+                  {isRefreshing ? t('servers.groups.refreshing') : t('servers.groups.refresh')}
+                </MacButton>
+                <label className="inline-flex items-center gap-1.5 text-xs text-[var(--color-text-secondary)]" onClick={(e) => e.stopPropagation()}>
+                  <span className="sr-only">Частота автообновления</span>
+                  <select
+                    value={group.refreshIntervalOverrideMinutes ? String(group.refreshIntervalOverrideMinutes) : 'auto'}
+                    onChange={(e) => onRefreshPolicyChange(e.target.value)}
+                    className="h-8 rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[var(--color-surface)] px-2 text-xs text-[var(--color-text)] outline-none focus:border-[var(--color-accent)]"
+                    title="Частота автоматического обновления подписки"
+                  >
+                    <option value="auto">Авто</option>
+                    <option value="1">1 мин</option>
+                    <option value="5">5 мин</option>
+                    <option value="15">15 мин</option>
+                    <option value="30">30 мин</option>
+                    <option value="60">1 ч</option>
+                    <option value="360">6 ч</option>
+                    <option value="1440">1 день</option>
+                  </select>
+                </label>
+              </>
             )}
             <MacButton
               size="sm"

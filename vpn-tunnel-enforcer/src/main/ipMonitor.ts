@@ -31,6 +31,11 @@ let lastSuccessAt = 0
 // `ipMonitor.suspend()` when the stop begins and `ipMonitor.resume()` once
 // the rollback has finished or a new tunnel is established.
 let suppressed = false
+// A protected profile swap must keep monitoring suspended until the new
+// tunnel's public IP has been explicitly adopted as the baseline. `stop()`
+// calls `resume()` in its finally block, so a plain boolean was not enough:
+// the monitor could wake up in the middle of the stop->start transition.
+let resumeDeferred = false
 
 // Serialise concurrent recheck(rebaseline=true) calls. Without this, two
 // concurrent callers both fetch the IP, then both write vpnIp — the second
@@ -155,6 +160,12 @@ export const ipMonitor = {
     return { ip: currentIp, isLeak, vpnIp }
   },
 
+  /** Probe the network during a protected transition without changing the
+   * cached verdict or notifying the renderer. */
+  async probeCurrentIp(): Promise<string | null> {
+    return fetchPublicIp()
+  },
+
   /**
    * Force an immediate IP re-check. When `rebaseline` is true, the freshly
    * fetched IP is treated as the new VPN baseline (clearing any stale leak
@@ -165,14 +176,14 @@ export const ipMonitor = {
    * time so two callers racing to set vpnIp don't overwrite each other.
    */
   async recheck(rebaseline = false): Promise<{ ip: string | null; isLeak: boolean; vpnIp: string | null }> {
-    if (suppressed) {
+    if (suppressed && !rebaseline) {
       return { ip: currentIp, isLeak: false, vpnIp }
     }
     if (rebaseline && recheckInFlight) return recheckInFlight
 
     const doRecheck = async (): Promise<{ ip: string | null; isLeak: boolean; vpnIp: string | null }> => {
       const ip = await fetchPublicIp()
-      if (suppressed) {
+      if (suppressed && !rebaseline) {
         return { ip: currentIp, isLeak: false, vpnIp }
       }
       if (ip) {
@@ -184,7 +195,10 @@ export const ipMonitor = {
         } else if (vpnIp) {
           isLeak = ip !== vpnIp
         }
-        notifyCallbacks(ip, isLeak)
+        // An explicit rebaseline is the end of a protected transition. It is
+        // safe to publish the clean result even while the deferred resume is
+        // still held; the caller releases the monitor immediately afterwards.
+        if (!suppressed || rebaseline) notifyCallbacks(ip, isLeak)
       }
       return { ip: currentIp, isLeak, vpnIp }
     }
@@ -236,6 +250,21 @@ export const ipMonitor = {
     logEvent('info', 'ip-monitor', 'leak detection suspended (stop-tun rollback)')
   },
 
+  /** Hold a later resume until the caller has installed a fresh VPN baseline. */
+  deferResume() {
+    resumeDeferred = true
+    suppressed = true
+    logEvent('info', 'ip-monitor', 'leak detection resume deferred (protected profile switch)')
+  },
+
+  releaseDeferredResume() {
+    resumeDeferred = false
+    if (suppressed) {
+      suppressed = false
+      logEvent('info', 'ip-monitor', 'deferred leak detection resume released')
+    }
+  },
+
   /**
    * Resume leak detection. Does NOT trigger an immediate re-check — the
    * caller is responsible for that (typically `ipMonitor.recheck(true)` once
@@ -243,6 +272,10 @@ export const ipMonitor = {
    * Idempotent.
    */
   resume() {
+    if (resumeDeferred) {
+      logEvent('debug', 'ip-monitor', 'leak detection resume ignored while protected profile switch is active')
+      return
+    }
     if (!suppressed) return
     suppressed = false
     logEvent('info', 'ip-monitor', 'leak detection resumed')

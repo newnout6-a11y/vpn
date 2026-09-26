@@ -214,6 +214,7 @@ let watchdogFailures = 0
 let startInProgress = false
 let stopInProgress = false
 let stopRequested = false
+let transitionCancelRequested = false
 const DIRECT_VPN_WATCHDOG_SUPPRESS_MS = 45000
 const DIRECT_VPN_WATCHDOG_INTERVAL_MS = 15000
 
@@ -2277,6 +2278,18 @@ export async function attemptPostTrialFailover(): Promise<{ tried: number; succe
 }
 
 export const tunController = {
+  /** Request cancellation of a start or protected restart without racing a
+   * second stop() call against the cleanup already in progress. */
+  cancelTransition(): void {
+    transitionCancelRequested = true
+    stopRequested = true
+    logEvent('info', 'tun', 'active tunnel transition cancellation requested', {
+      startInProgress,
+      stopInProgress,
+      running: currentStatus.running
+    })
+  },
+
   async start(proxyAddrOrOpts: string | StartOptions): Promise<{ success: boolean; error?: string; warning?: string | null }> {
     if (currentStatus.running) {
       return { success: false, error: 'TUN уже запущен' }
@@ -2287,10 +2300,17 @@ export const tunController = {
     if (stopInProgress) {
       return { success: false, error: 'Остановка защиты ещё выполняется — подождите' }
     }
+    if (transitionCancelRequested) {
+      transitionCancelRequested = false
+      return { success: false, error: 'Запуск отменён' }
+    }
     startInProgress = true
     stopRequested = false
     const finishStart = <T extends { success: boolean; error?: string; warning?: string | null }>(result: T): T => {
       startInProgress = false
+      // Consume a cancellation that arrived while this start was unwinding;
+      // otherwise the next deliberate connect would be cancelled too.
+      if (transitionCancelRequested) transitionCancelRequested = false
       return result
     }
 
@@ -3675,6 +3695,7 @@ export const tunController = {
     } finally {
       resumeLeakMonitor()
       stopInProgress = false
+      if (!startInProgress && !currentStatus.running && !preserveNetworkProtection) transitionCancelRequested = false
     }
   },
 
@@ -3731,6 +3752,17 @@ export const tunController = {
         logEvent('warn', 'tun', 'teardown after failed protected stop failed', err)
       )
       return { success: false, error: stopped.error, warning: stopped.warning ?? null }
+    }
+
+    if (transitionCancelRequested) {
+      transitionCancelRequested = false
+      try {
+        await this.stop()
+      } catch (err) {
+        logEvent('warn', 'tun', 'teardown after cancelled protected restart failed', err)
+      }
+      const cancelledResult = { success: false, error: 'Перезапуск отменён' }
+      return cancelledResult
     }
 
     // Brief pause so the runtime fully releases the TUN adapter before we

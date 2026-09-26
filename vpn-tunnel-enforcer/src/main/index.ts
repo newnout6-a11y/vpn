@@ -1807,6 +1807,16 @@ app.whenReady().then(async () => {
     return stopProtection()
   })
 
+  handleLogged('cancel-tun', async () => {
+    tunController.cancelTransition()
+    return stopProtection()
+  })
+
+  handleLogged('cancel-transition', async () => {
+    tunController.cancelTransition()
+    return { requested: true }
+  })
+
   handleLogged('get-tun-status', async () => {
     return tunController.getStatus()
   })

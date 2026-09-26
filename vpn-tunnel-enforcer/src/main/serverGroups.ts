@@ -51,8 +51,13 @@ const store = serverGroupsStore
 // picker-side code that creates them on demand uses the exact same string.
 const MANUAL_KEYS_GROUP_NAME = 'Ручные ключи'
 export const DEFAULT_SERVER_GROUP_REFRESH_INTERVAL_MS = 30 * 60 * 1000
-export const MIN_SERVER_GROUP_REFRESH_INTERVAL_MS = 5 * 60 * 1000
+// Some panels publish `profile-update-interval: 1`, which is a client-side
+// hint rather than permission to hammer the subscription endpoint every
+// second. A 15-minute floor also gives a transient/partial provider response
+// time to recover before we touch the saved server set again.
+export const MIN_SERVER_GROUP_REFRESH_INTERVAL_MS = 15 * 60 * 1000
 export const MAX_SERVER_GROUP_REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000
+export const MIN_MANUAL_SERVER_GROUP_REFRESH_INTERVAL_MS = 60 * 1000
 const SERVER_GROUP_REFRESH_SWEEP_INTERVAL_MS = 60 * 1000
 const SERVER_GROUP_INITIAL_REFRESH_DELAY_MS = 10 * 1000
 
@@ -679,6 +684,13 @@ async function refreshGroupUnlocked(
 }
 
 export function serverGroupRefreshIntervalMs(group: ServerGroup): number {
+  const overrideMinutes = Number(group.refreshIntervalOverrideMinutes)
+  if (Number.isFinite(overrideMinutes) && overrideMinutes > 0) {
+    return Math.min(
+      MAX_SERVER_GROUP_REFRESH_INTERVAL_MS,
+      Math.max(MIN_MANUAL_SERVER_GROUP_REFRESH_INTERVAL_MS, overrideMinutes * 60 * 1000)
+    )
+  }
   const providerIntervalMs = Number(group.refreshIntervalSeconds) * 1000
   if (!Number.isFinite(providerIntervalMs) || providerIntervalMs <= 0) {
     return DEFAULT_SERVER_GROUP_REFRESH_INTERVAL_MS
@@ -842,6 +854,22 @@ export function registerServerGroupsHandlers(): void {
 
   handleLogged('groups:refresh', async (_event, id: string) => {
     return await refreshGroup(id)
+  })
+
+  handleLogged('groups:set-refresh-policy', async (_event, id: string, intervalMinutes: number | null) => {
+    if (intervalMinutes !== null && (!Number.isInteger(intervalMinutes) || intervalMinutes < 1 || intervalMinutes > 1440)) {
+      throw new Error('Интервал обновления должен быть от 1 до 1440 минут')
+    }
+    const updated = updateGroup(id, {
+      refreshIntervalOverrideMinutes: intervalMinutes === null ? undefined : intervalMinutes
+    })
+    if (!updated) throw new Error('Группа не найдена')
+    logEvent('info', 'server-groups', 'refresh policy changed', {
+      id,
+      intervalMinutes: intervalMinutes ?? 'auto',
+      effectiveMs: serverGroupRefreshIntervalMs(updated)
+    })
+    return updated
   })
 
   // Health-check delegates to keyHealthChecker. Static `await import()`

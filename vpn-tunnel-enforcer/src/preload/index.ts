@@ -20,6 +20,8 @@ export interface ElectronAPI {
   startTun: (proxyAddr: string, proxyType?: 'socks5' | 'http') => Promise<{ success: boolean; error?: string; warning?: string | null; vpnIp?: string | null }>
   startDirectVpn: () => Promise<{ success: boolean; error?: string; warning?: string | null; vpnIp?: string | null }>
   stopTun: () => Promise<{ success: boolean; error?: string; warning?: string }>
+  cancelTun: () => Promise<{ success: boolean; error?: string; warning?: string }>
+  cancelTransition: () => Promise<{ requested: boolean }>
   getTunStatus: () => Promise<{ running: boolean; proxyAddr: string | null; proxyType: 'socks5' | 'http' | null; pid: number | null; warning?: string | null; startedAt?: number | null; restartAttempt?: number }>
   getTrafficStats: () => Promise<TrafficStats>
   applyAutoconfig: (targets: string[], proxyAddr: string, proxyType?: 'socks5' | 'http') => Promise<Record<string, boolean>>
@@ -90,6 +92,7 @@ export interface ElectronAPI {
   // Server Picker
   serversList: () => Promise<any[]>
   serversSelect: (id: string) => Promise<void>
+  serversCancelSwitch: () => Promise<{ cancelled: boolean }>
   serversGetActive: () => Promise<{ profile: any | null; activeId: string | null }>
   serversPingAll: () => Promise<any[]>
   serversResolveIps: () => Promise<any[]>
@@ -134,6 +137,7 @@ export interface ElectronAPI {
     | { ok: true; group: any; addedCount: number; updatedCount: number; removedCount: number }
     | { ok: false; error: string }
   >
+  groupsSetRefreshPolicy: (id: string, intervalMinutes: number | null) => Promise<any | null>
   groupsCheckHealth: (id: string) => Promise<
     | { ok: true; results: Array<{ profileId: string; online: boolean; latencyMs: number | null; reason?: string }> }
     | { ok: false; error: string }
@@ -330,6 +334,11 @@ function assertRequiredPort(value: unknown, name: string): number {
   return port
 }
 
+function assertInteger(value: unknown, name: string): number {
+  if (!Number.isInteger(value)) throw new TypeError(`${name} must be an integer`)
+  return value as number
+}
+
 function assertExternalProxySlot(value: unknown): number | undefined {
   if (value === undefined || value === null) return undefined
   const slot = Number(value)
@@ -407,6 +416,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('start-tun', assertString(proxyAddr, 'proxyAddr'), proxyType === undefined ? undefined : assertEnum(proxyType, ['socks5', 'http'] as const, 'proxyType')),
   startDirectVpn: () => ipcRenderer.invoke('start-direct-vpn'),
   stopTun: () => ipcRenderer.invoke('stop-tun'),
+  cancelTun: () => ipcRenderer.invoke('cancel-tun'),
+  cancelTransition: () => ipcRenderer.invoke('cancel-transition'),
   getTunStatus: () => ipcRenderer.invoke('get-tun-status'),
   getTrafficStats: () => ipcRenderer.invoke('get-traffic-stats'),
   applyAutoconfig: (targets: string[], proxyAddr: string, proxyType?: 'socks5' | 'http') =>
@@ -466,6 +477,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Server Picker
   serversList: () => ipcRenderer.invoke('servers:list'),
   serversSelect: (id: string) => ipcRenderer.invoke('servers:select', assertString(id, 'id')),
+  serversCancelSwitch: () => ipcRenderer.invoke('servers:cancel-switch'),
   serversGetActive: () => ipcRenderer.invoke('servers:get-active'),
   serversPingAll: () => ipcRenderer.invoke('servers:ping-all'),
   serversResolveIps: () => ipcRenderer.invoke('servers:resolve-ips'),
@@ -487,6 +499,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   groupsRename: (id: string, name: string) => ipcRenderer.invoke('groups:rename', assertString(id, 'id'), assertString(name, 'name')),
   groupsDelete: (id: string, deleteServers: boolean) => ipcRenderer.invoke('groups:delete', assertString(id, 'id'), assertBoolean(deleteServers, 'deleteServers')),
   groupsRefresh: (id: string) => ipcRenderer.invoke('groups:refresh', assertString(id, 'id')),
+  groupsSetRefreshPolicy: (id: string, intervalMinutes: number | null) =>
+    ipcRenderer.invoke('groups:set-refresh-policy', assertString(id, 'id'), intervalMinutes === null ? null : assertInteger(intervalMinutes, 'intervalMinutes')),
   groupsCheckHealth: (id: string) => ipcRenderer.invoke('groups:check-health', assertString(id, 'id')),
   serverProbe: (host: string, knownPort?: number) => ipcRenderer.invoke('server:probe', assertString(host, 'host'), assertPort(knownPort, 'knownPort')),
   serverLiveCheck: (options: LiveServerCheckOptions) =>

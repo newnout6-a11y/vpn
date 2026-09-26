@@ -184,6 +184,8 @@ export interface ServerGroup {
   supportUrl?: string
   /** Number of profiles seen on the most recent successful refresh. */
   lastRefreshProfilesCount?: number
+  /** User override for automatic refresh cadence, in minutes. Omit for auto. */
+  refreshIntervalOverrideMinutes?: number
 }
 
 // ─── Live Server Extraction & Technical Profile ──────────────────────────────
@@ -1045,6 +1047,7 @@ export interface ServerChannels {
   'groups:refresh': (id: string) =>
     | { ok: true; group: ServerGroup; addedCount: number; updatedCount: number; removedCount: number }
     | { ok: false; error: string }
+  'groups:set-refresh-policy': (id: string, intervalMinutes: number | null) => ServerGroup | null
   /**
    * Run a TCP/TLS health probe across every profile in the group.
    * Delegates to keyHealthChecker (Agent C). Wrapped in a try/catch so the

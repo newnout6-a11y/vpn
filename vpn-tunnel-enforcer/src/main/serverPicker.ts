@@ -1945,6 +1945,13 @@ async function restartDirectVpnForSelectedProfile(profile: ServerProfile): Promi
     profile: vpnProfile
   })
   const previousIp = await ipMonitor.getCurrentIp().then((info) => info.ip).catch(() => null)
+  ipMonitor.deferResume()
+  let deferredResumeReleased = false
+  const releaseDeferredResume = () => {
+    if (deferredResumeReleased) return
+    deferredResumeReleased = true
+    ipMonitor.releaseDeferredResume()
+  }
   logEvent('info', 'server-picker', 'hot-reloading direct VPN after profile selection', {
     id: profile.id,
     name: profile.name,
@@ -1957,59 +1964,89 @@ async function restartDirectVpnForSelectedProfile(profile: ServerProfile): Promi
   // every single server switch. restartProtected() also guarantees a full
   // rollback if the new server fails to come up, so we can't strand the user
   // behind a kill-switch with no tunnel.
-  const restarted = await tunController.restartProtected('server switch', {
-    mode: 'directVpn',
-    vpnProfile,
-    proxyType: 'socks5',
-    enableFirewallKillSwitch: settings.firewallKillSwitch,
-    enableAdapterLockdown: settings.strictAdapterLockdown,
-    publicWifiCompatibility: settings.publicWifiCompatibility,
-    stealthMode: settings.stealthMode,
-    adaptiveMode: adaptive.mode,
-    proxyEngine: tunController.getLastStartOptions?.()?.proxyEngine ?? settings.proxyEngine
-  })
+  let restarted: { success: boolean; error?: string }
+  try {
+    restarted = await tunController.restartProtected('server switch', {
+      mode: 'directVpn',
+      vpnProfile,
+      proxyType: 'socks5',
+      enableFirewallKillSwitch: settings.firewallKillSwitch,
+      enableAdapterLockdown: settings.strictAdapterLockdown,
+      publicWifiCompatibility: settings.publicWifiCompatibility,
+      stealthMode: settings.stealthMode,
+      adaptiveMode: adaptive.mode,
+      proxyEngine: tunController.getLastStartOptions?.()?.proxyEngine ?? settings.proxyEngine
+    })
+  } catch (err) {
+    ipMonitor.clearVpnIp()
+    releaseDeferredResume()
+    throw err
+  }
   if (!restarted.success) {
+    ipMonitor.clearVpnIp()
+    releaseDeferredResume()
     throw new Error(restarted.error || 'Failed to start tunnel with selected server')
   }
 
+  // Keep the explicit resume call for the normal lifecycle contract. During
+  // this protected swap it is intentionally a no-op until the fresh baseline
+  // below releases the deferred resume.
   ipMonitor.resume()
-  for (let attempt = 1; attempt <= 6; attempt++) {
-    try {
-      const current = await ipMonitor.getCurrentIp()
-      const shouldRebaseline = Boolean(current.ip && (current.ip !== previousIp || attempt === 6))
-      if (shouldRebaseline) {
-        if (current.ip === previousIp && attempt === 6) {
-          const routesActive = await tunController.areTunRoutesActive().catch(() => false)
-          if (!routesActive) {
-            logEvent('warn', 'server-picker', 'TUN routes are not active after profile switch; skipping ipMonitor.recheck(true) to avoid self-blinding leak detector')
-            return
+  try {
+    for (let attempt = 1; attempt <= 6; attempt++) {
+      try {
+        // getCurrentIp() intentionally serves cached state while suspended;
+        // probeCurrentIp() lets us observe route convergence without allowing
+        // the transient real IP to become a leak verdict.
+        const currentIp = await ipMonitor.probeCurrentIp()
+        const shouldRebaseline = Boolean(currentIp && (currentIp !== previousIp || attempt === 6))
+        if (shouldRebaseline) {
+          if (currentIp === previousIp && attempt === 6) {
+            const routesActive = await tunController.areTunRoutesActive().catch(() => false)
+            if (!routesActive) {
+              logEvent('warn', 'server-picker', 'TUN routes are not active after profile switch; skipping ipMonitor.recheck(true) and leaving IP baseline unchanged')
+              releaseDeferredResume()
+              return
+            }
           }
+          const ipInfo = await ipMonitor.recheck(true)
+          releaseDeferredResume()
+          logEvent('info', 'server-picker', 'direct VPN IP baseline refreshed after profile switch', {
+            id: profile.id,
+            name: profile.name,
+            ip: ipInfo.ip,
+            previousIp,
+            attempt
+          })
+          return
         }
-        const ipInfo = await ipMonitor.recheck(true)
-        logEvent('info', 'server-picker', 'direct VPN IP baseline refreshed after profile switch', {
+      } catch (err) {
+        logEvent('warn', 'server-picker', 'direct VPN IP rebaseline after profile switch failed', {
           id: profile.id,
           name: profile.name,
-          ip: ipInfo.ip,
-          previousIp,
-          attempt
+          attempt,
+          error: (err as Error)?.message || String(err)
         })
-        return
       }
-    } catch (err) {
-      logEvent('warn', 'server-picker', 'direct VPN IP rebaseline after profile switch failed', {
-        id: profile.id,
-        name: profile.name,
-        attempt,
-        error: (err as Error)?.message || String(err)
-      })
+      await wait(500)
     }
-    await wait(500)
-  }
 
-  logEvent('warn', 'server-picker', 'direct VPN profile switch finished without a fresh public IP baseline', {
-    id: profile.id,
-    name: profile.name
-  })
+    releaseDeferredResume()
+    logEvent('warn', 'server-picker', 'direct VPN profile switch finished without a fresh public IP baseline', {
+      id: profile.id,
+      name: profile.name
+    })
+  } catch (err) {
+    releaseDeferredResume()
+    throw err
+  }
+}
+
+let profileSwitchGeneration = 0
+
+export function cancelProfileSwitch(): void {
+  profileSwitchGeneration++
+  logEvent('info', 'server-picker', 'profile switch cancellation requested')
 }
 
 /**
@@ -2439,7 +2476,18 @@ export function registerServerPickerHandlers(): void {
     const profile = getProfiles().find((p) => p.id === id)
     if (!profile) throw new Error('Profile not found')
     selectProfile(id)
+    const generation = ++profileSwitchGeneration
     await restartDirectVpnForSelectedProfile(profile)
+    if (generation !== profileSwitchGeneration) {
+      await tunController.stop().catch((err) => logEvent('warn', 'server-picker', 'failed to stop cancelled profile switch', err))
+      ipMonitor.clearVpnIp()
+      throw new Error('Переключение сервера отменено')
+    }
+  })
+
+  handleLogged('servers:cancel-switch', async () => {
+    cancelProfileSwitch()
+    return { cancelled: true }
   })
 
   handleLogged('servers:get-active', async () => {

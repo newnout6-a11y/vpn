@@ -23,6 +23,7 @@ import {
   Power,
   Radar,
   ShieldOff,
+  Square,
   TriangleAlert,
   Upload
 } from 'lucide-react'
@@ -396,6 +397,31 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
     }
   }
 
+  const handleCancelTransition = async () => {
+    if (!circleBusy) return
+    transitionSeqRef.current++
+    setConfirmDisconnect(false)
+    addLog('warn', 'Отменяем текущий запуск или переключение сервера…')
+    try {
+      if (isServerSwitching) {
+        await window.electronAPI.serversCancelSwitch().catch(() => undefined)
+        await window.electronAPI.cancelTransition()
+        addLog('info', 'Отмена смены сервера запрошена; текущий защищённый переход завершит очистку сам.')
+      } else {
+        const result = await window.electronAPI.cancelTun()
+        if (!result.success && result.error) addLog('warn', `Отмена завершилась с предупреждением: ${result.error}`)
+        setMode('off')
+        setTunRunning(false)
+        setVpnIp(null)
+        useAppStore.getState().resetConnectionState()
+      }
+    } catch (err: any) {
+      addLog('error', `Не удалось отменить переход: ${err?.message || String(err)}`)
+    } finally {
+      setConnectionBusy(null)
+    }
+  }
+
   const handleToggleChange = (checked: boolean) => {
     if (checked) {
       handleConnect()
@@ -740,6 +766,17 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
         <p className={`text-sm font-medium ${statusColor}`}>
           {statusLabel}
         </p>
+
+        {(connecting || isServerSwitching) && (
+          <button
+            type="button"
+            onClick={handleCancelTransition}
+            className="inline-flex items-center gap-2 px-4 py-1.5 text-sm font-medium rounded-[var(--radius-sm)] border border-[var(--color-warning)]/60 text-[var(--color-warning)] hover:bg-[var(--color-warning)]/10 transition-colors z-10"
+          >
+            <Square size={13} />
+            Отменить переход
+          </button>
+        )}
 
         {/* Profile selector card */}
         <div className="w-full max-w-md space-y-2">
