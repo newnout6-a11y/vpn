@@ -69,7 +69,41 @@ responsibilities:
 	- Отделяет геоданные внешнего провайдера от результата проверки ключа и прямой задержки.
 ```
 
+```component
+name: LiveServerHistoryManager
+container: Electron Main
+responsibilities:
+	- Хранит результаты live-проверок по ключам `profile:<id>`, `host:<host>` и `global`.
+	- Загружает и сохраняет историю в локальный JSON-файл через `app.getPath('userData')`.
+	- Возвращает историю отдельной цели или 20 последних результатов по всем ключам.
+	- Выбирает предыдущую неотменённую успешную проверку с учетом цели и порта.
+	- Санитизирует данные перед сохранением и игнорирует поврежденный файл.
+```
+
+```component
+name: computeHistoryDiff
+container: Electron Main
+responsibilities:
+	- Сравнивает текущий результат с предыдущей успешной live-проверкой.
+	- Вычисляет изменения IP A/AAAA, TLS fingerprint, ASN, страны, задержки, портов, handshake, egress IPv4/IPv6, PMTU и медианной скорости.
+	- Возвращает признаки изменений и значения до и после сравнения для результата live-проверки.
+```
+
 `ServersPage` передаёт действия пользователя в main process через IPC, а `ServerDetailModal` параллельно обрабатывает best-effort геолокацию и основной `serverProbe`. Ошибка внешнего геосервиса не блокирует отображение профиля и результата main-process проверки.
+
+`LiveServerHistoryManager` получает завершенный `LiveServerCheck` из `liveServerProbe`, а `computeHistoryDiff` сравнивает его с предыдущей успешной записью до сохранения. Renderer получает список истории через `serverLiveCheckHistory` и показывает подтвержденные признаки изменения IP и TLS-отпечатка внутри блока инфраструктуры и диффов.
+
+```model
+name: LiveServerCheckHistory
+store: Local JSON file
+description: Локальная история результатов live-проверок, сгруппированная по целевой проверке.
+fields:
+	- target_key: string (`profile:<id>`, `host:<host>` или `global`)
+	- checks: LiveServerCheck[] (не более 20, новые записи первыми)
+constraints:
+	- Перед сохранением результат проходит через `sanitizeLiveCheckForStorage`.
+	- Повреждённое содержимое файла не блокирует live-проверку.
+```
 
 ## System Contracts
 
@@ -81,6 +115,13 @@ responsibilities:
 * Проверки не выполняются для разрешённых private или loopback адресов.
 * Успешная проверка ключа сохраняет состояние доступности, время, длительность, а при наличии результат выхода и страну.
 * Геолокация является best-effort. Ошибка или ограничение провайдера не делает всю карточку деталей недоступной.
+* `LiveServerHistoryManager` ограничивает историю каждой цели 20 результатами и помещает новый результат в начало списка.
+* Ключ цели имеет вид `profile:<id>`, `host:<host>` или `global`; hostname нормализуется в нижний регистр и очищается от пробелов.
+* `sanitizeLiveCheckForStorage` удаляет из evidence поля, содержащие `uuid`, `secret`, `password`, `key`, `shortid`, `token` или `uri`, и заменяет UUID в строковых данных на `[REDACTED_UUID]`.
+* Ошибка чтения поврежденного файла истории игнорируется, а ошибка записи не блокирует текущую live-проверку.
+* `getPreviousSuccessfulCheck` выбирает последнюю неотменённую запись с `reachability.status === 'ok'` или `dns.status === 'ok'`, учитывая порт.
+* `computeHistoryDiff` считает скачком задержки рост `avg` более чем в 1,5 раза и более чем на 50 мс, а падением скорости снижение `medianMbps` менее чем до 65 процентов предыдущего значения.
+* Изменение PMTU сравнивается только при одинаковых `family`, `method` и совместимых `destination`.
 
 ### Integration Contracts
 
@@ -88,6 +129,10 @@ responsibilities:
 * `ServerProbe` возвращает `ServerProbeResult`, включающий `resolvedIps`, `reverseDns`, `asn`, `latency`, `openPorts`, `tlsCert` и `httpBanner`. Для VPN endpoint TLS и HTTP banner могут быть отключены и возвращать `null`.
 * `KeyHealthChecker` возвращает список результатов с `profileId`, `online`, `latencyMs`, `reason`, `egressIp` и `country` и обновляет профильные поля проверки здоровья.
 * `ServerDetailModal` обращается к `https://ipapi.co/{ip}/json/` и при ошибке к `https://ipwho.is/{ip}` непосредственно из renderer. Политика допустимости таких запросов остаётся открытым вопросом из F-158.
+* `liveServerProbe` вызывает `liveServerHistory.getPreviousSuccessfulCheck`, `computeHistoryDiff` и `liveServerHistory.addCheck` для завершенного результата.
+* IPC-канал `server:live-check-history` принимает необязательный фильтр `profileId` или `host` и возвращает `LiveServerCheck[]`.
+* Preload предоставляет renderer метод `serverLiveCheckHistory`, который вызывает `server:live-check-history`.
+* `LiveServerCheck.infrastructure.changesFromPrevious` передает в renderer признаки диффа, включая `ipChanged`, `tlsCertChanged`, `asnChanged`, `countryChanged`, `portsChanged`, `latencySpike`, `handshakeChanged`, `egressChanged`, `pmtuChanged` и `throughputChanged`.
 
 ## Architecture Decision Records
 
