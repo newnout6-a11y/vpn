@@ -2,43 +2,6 @@
 
 > Источник: https://factory.8090.ai/project/992274e4-1c6b-4d44-8c22-e4c038e690c2/blueprints/e782bec2-6724-4ccd-a8f1-c61dfe511e30
 
-## Feature Summary
-
-Summarize what this feature does from the user's perspective and which requirements it fulfills.
-
-## Component Blueprint Composition
-
-List the shared capabilities this feature composes and how each is configured or scoped. For example:
-
-* **@Component Blueprint 1** — What this capability provides; how this feature configures or scopes it.
-* **@Component Blueprint 2** — What this capability provides; using `#ComponentA` and `#ComponentB` to enable this feature.
-
-## Feature-Specific Components
-
-Components that exist only for this feature, defined as `component` blocks.
-
-## System Contracts
-
-### Key Contracts
-
-Invariants, correctness rules, and reliability semantics (idempotency, ordering, consistency, retry behavior).
-
-### Integration Contracts
-
-Events published/consumed, API interfaces, webhooks, and composition expectations for consumers of this capability.
-
-## Architecture Decision Records
-
-### ADR-001: Decision Title
-
-**Context:** Why this decision was needed.
-
-**Decision:** What was chosen and how.
-
-**Consequences:** Trade-offs, benefits, and implications.
-
-# Soft-режим: автонастройка прокси в приложениях
-
 ## Обзор фичи
 
 Фича соответствует требованиям @Soft-режим: автонастройка прокси в приложениях. В Electron 42-приложении Soft-маршрут запускает `autoconfig` без создания TUN и применяет выбранный `Прокси` к целям `env`, `git`, `gradle` и `android-studio`. Для каждой цели сохраняется исходное состояние перед первым применением, а откат выполняется последовательно с отдельным результатом по каждой цели.

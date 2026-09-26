@@ -4,43 +4,6 @@
 
 ## Feature Summary
 
-Summarize what this feature does from the user's perspective and which requirements it fulfills.
-
-## Component Blueprint Composition
-
-List the shared capabilities this feature composes and how each is configured or scoped. For example:
-
-* **@Component Blueprint 1** — What this capability provides; how this feature configures or scopes it.
-* **@Component Blueprint 2** — What this capability provides; using `#ComponentA` and `#ComponentB` to enable this feature.
-
-## Feature-Specific Components
-
-Components that exist only for this feature, defined as `component` blocks.
-
-## System Contracts
-
-### Key Contracts
-
-Invariants, correctness rules, and reliability semantics (idempotency, ordering, consistency, retry behavior).
-
-### Integration Contracts
-
-Events published/consumed, API interfaces, webhooks, and composition expectations for consumers of this capability.
-
-## Architecture Decision Records
-
-### ADR-001: Decision Title
-
-**Context:** Why this decision was needed.
-
-**Decision:** What was chosen and how.
-
-**Consequences:** Trade-offs, benefits, and implications.
-
-# Восстановление сети после сбоя
-
-## Feature Summary
-
 Функция восстанавливает сетевые изменения VPN Tunnel Enforcer после аварийного завершения, сбоя туннеля или загрузки Windows. Она использует startup recovery в Electron, задачу Windows Boot Recovery и ручные операции обслуживания, чтобы обработать baseline, kill-switch, блокировку физических адаптеров, DNS, переменные прокси окружения и stale TUN-адаптеры. Требования функции описаны в @Восстановление сети после сбоя.
 
 ## Component Blueprint Composition
