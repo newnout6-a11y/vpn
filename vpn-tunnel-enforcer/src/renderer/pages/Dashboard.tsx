@@ -401,7 +401,8 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
     if (!circleBusy) return
     transitionSeqRef.current++
     setConfirmDisconnect(false)
-    addLog('warn', 'Отменяем текущий запуск или переключение сервера…')
+    const cancellationTarget = isServerSwitching ? 'смену сервера' : 'подключение'
+    addLog('warn', `Отменяем ${cancellationTarget}…`)
     try {
       if (isServerSwitching) {
         await window.electronAPI.serversCancelSwitch().catch(() => undefined)
@@ -416,7 +417,7 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
         useAppStore.getState().resetConnectionState()
       }
     } catch (err: any) {
-      addLog('error', `Не удалось отменить переход: ${err?.message || String(err)}`)
+      addLog('error', `Не удалось отменить ${cancellationTarget}: ${err?.message || String(err)}`)
     } finally {
       setConnectionBusy(null)
     }
@@ -774,7 +775,7 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
             className="inline-flex items-center gap-2 px-4 py-1.5 text-sm font-medium rounded-[var(--radius-sm)] border border-[var(--color-warning)]/60 text-[var(--color-warning)] hover:bg-[var(--color-warning)]/10 transition-colors z-10"
           >
             <Square size={13} />
-            Отменить переход
+            {isServerSwitching ? t('dashboard.cancelServerSwitch') : t('dashboard.cancelConnection')}
           </button>
         )}
 

@@ -1755,18 +1755,22 @@ export function execPs(
     }
 
     try {
-      const encoded = Buffer.from(script, 'utf16le').toString('base64')
+      const utf8OutputBootstrap = '$utf8 = [System.Text.UTF8Encoding]::new($false); [Console]::OutputEncoding = $utf8; $OutputEncoding = $utf8;'
+      const encoded = Buffer.from(`${utf8OutputBootstrap}\n${script}`, 'utf16le').toString('base64')
       child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded], {
         windowsHide: true,
         stdio: ['ignore', 'pipe', 'pipe']
       })
-      let stdout = ''
-      let stderr = ''
-      child.stdout?.on('data', (d: Buffer) => { stdout += d.toString('utf8') })
-      child.stderr?.on('data', (d: Buffer) => { stderr += d.toString('utf8') })
+      const stdoutChunks: Buffer[] = []
+      const stderrChunks: Buffer[] = []
+      child.stdout?.on('data', (d: Buffer) => { stdoutChunks.push(Buffer.from(d)) })
+      child.stderr?.on('data', (d: Buffer) => { stderrChunks.push(Buffer.from(d)) })
       child.on('error', (err: any) => finish(err))
       child.on('close', () => {
-        finish(undefined, { stdout, stderr })
+        finish(undefined, {
+          stdout: Buffer.concat(stdoutChunks).toString('utf8'),
+          stderr: Buffer.concat(stderrChunks).toString('utf8')
+        })
       })
     } catch (err: any) {
       finish(err)

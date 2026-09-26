@@ -66,13 +66,19 @@ import {
   probePorts,
   probeHttp,
   evaluateLiveCheckFindings,
-  RESTRICTED_PORTS
+  RESTRICTED_PORTS,
+  execPs
 } from './liveServerProbe'
 import type { LiveServerCheck } from '../shared/ipc-types'
 
 describe('liveServerProbe', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+  })
+
+  it.skipIf(process.platform !== 'win32')('preserves Cyrillic PowerShell output as UTF-8', async () => {
+    const result = await execPs("Write-Output 'Проверка: сетевой интерфейс'", 5000)
+    expect(result.stdout.trim()).toBe('Проверка: сетевой интерфейс')
   })
 
   describe('normalizeHostAndPort', () => {

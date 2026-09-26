@@ -291,4 +291,17 @@ describe('App source regressions', () => {
     expect(servers).not.toContain("aria-label={t('servers.pingOne')}")
     expect(servers).not.toContain('aria-label="Проверить страну"')
   })
+
+  it('labels cancellation by the operation and provides Russian and English strings', () => {
+    const dashboard = dashboardSource()
+    const ru = JSON.parse(readFileSync(join(process.cwd(), 'src', 'renderer', 'i18n', 'locales', 'ru.json'), 'utf8'))
+    const en = JSON.parse(readFileSync(join(process.cwd(), 'src', 'renderer', 'i18n', 'locales', 'en.json'), 'utf8'))
+
+    expect(dashboard).toContain("isServerSwitching ? t('dashboard.cancelServerSwitch') : t('dashboard.cancelConnection')")
+    expect(dashboard).not.toContain('Отменить переход')
+    expect(ru.dashboard.cancelConnection).toBe('Отменить подключение')
+    expect(ru.dashboard.cancelServerSwitch).toBe('Отменить смену сервера')
+    expect(en.dashboard.cancelConnection).toBe('Cancel connection')
+    expect(en.dashboard.cancelServerSwitch).toBe('Cancel server switch')
+  })
 })

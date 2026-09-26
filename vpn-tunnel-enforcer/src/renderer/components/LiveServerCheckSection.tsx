@@ -22,6 +22,13 @@ import {
   ArrowRightLeft
 } from 'lucide-react'
 import { MacButton, MacCard, MacBadge } from '../design-system'
+import {
+  formatInterfaceAlias,
+  formatThroughputRouteLabel,
+  handshakeChangeLabel,
+  interfaceAliasTitle,
+  routeDiagnosticStatus
+} from '../utils/liveServerPresentation'
 import type {
   LiveCheckFinding,
   LiveCheckProgress,
@@ -832,7 +839,7 @@ export function LiveServerCheckSection({
               <DiagnosticBox
                 icon={<RouteIcon size={12} />}
                 title="Маршрут до endpoint"
-                status={result.route.status}
+                status={routeDiagnosticStatus(result.route)}
                 durationMs={result.route.durationMs}
               >
                 <div className="space-y-1 text-[11px]">
@@ -924,7 +931,7 @@ export function LiveServerCheckSection({
                       <MacBadge variant="neutral" className="text-[9px]">Порты изменились</MacBadge>
                     )}
                     {result.infrastructure.changesFromPrevious.handshakeChanged && (
-                      <MacBadge variant="warning" className="text-[9px]">Handshake изменился</MacBadge>
+                      <MacBadge variant="warning" className="text-[9px]">{handshakeChangeLabel(result.handshake?.status)}</MacBadge>
                     )}
                     {result.infrastructure.changesFromPrevious.egressChanged && (
                       <MacBadge variant="warning" className="text-[9px]">Egress IP изменился</MacBadge>
@@ -946,7 +953,6 @@ export function LiveServerCheckSection({
                 icon={<Zap size={12} />}
                 title="Рукопожатие туннеля (Handshake)"
                 status={result.handshake.status}
-                durationMs={result.handshake.durationMs}
               >
                 <div className="space-y-1.5 text-[11px]">
                   <div className="flex justify-between items-center">
@@ -979,10 +985,23 @@ export function LiveServerCheckSection({
                     </MacBadge>
                   </div>
                   {result.handshake.durationMs !== undefined && (
-                    <div className="flex justify-between">
-                      <span className="text-[var(--color-text-secondary)]">Время установления:</span>
+                    <div
+                      className="flex justify-between"
+                      title={t(
+                        'liveCheck.handshakeProbeDurationTitle',
+                        'От запуска handshake-зонда до первого успешного TCP CONNECT. Проба идёт через выбранный профиль; если он уже активен, используется работающий туннель — его запуск не измеряется.'
+                      )}
+                    >
+                      <span className="text-[var(--color-text-secondary)]">
+                        {t('liveCheck.handshakeProbeDurationLabel', 'Время до первого TCP CONNECT:')}
+                      </span>
                       <span className="font-mono">{result.handshake.durationMs} ms</span>
                     </div>
+                  )}
+                  {result.handshake.durationMs !== undefined && (
+                    <p className="text-[10px] text-[var(--color-text-secondary)]">
+                      {t('liveCheck.handshakeProbeDurationNote', 'Замер live-зонда, не время запуска VPN.')}
+                    </p>
                   )}
                   {result.handshake.evidence && (
                     <div className="pt-0.5">
@@ -1080,8 +1099,11 @@ export function LiveServerCheckSection({
                 <div className="space-y-1.5 text-[11px]">
                   <div className="flex justify-between items-center">
                     <span className="text-[var(--color-text-secondary)]">Интерфейс:</span>
-                    <span className="font-mono font-medium truncate max-w-[160px]" title={result.pathDiagnostics.activeInterfaceAlias}>
-                      {result.pathDiagnostics.activeInterfaceAlias || `Index ${result.pathDiagnostics.activeInterfaceIndex ?? '—'}`}
+                    <span
+                      className="font-mono font-medium truncate max-w-[160px]"
+                      title={interfaceAliasTitle(result.pathDiagnostics.activeInterfaceAlias)}
+                    >
+                      {formatInterfaceAlias(result.pathDiagnostics.activeInterfaceAlias, result.pathDiagnostics.activeInterfaceIndex)}
                     </span>
                   </div>
                   <div className="flex justify-between items-center">
@@ -1097,6 +1119,9 @@ export function LiveServerCheckSection({
                           : 'Физический адаптер (по таблице ОС)'}
                     </MacBadge>
                   </div>
+                  <p className="text-[10px] text-[var(--color-text-secondary)]">
+                    Это внешний маршрут до VPN-сервера; маршрут приложений внутри туннеля здесь не проверяется.
+                  </p>
                   {result.pathDiagnostics.nextHop && (
                     <div className="flex justify-between">
                       <span className="text-[var(--color-text-secondary)]">Шлюз (NextHop):</span>
@@ -1281,13 +1306,7 @@ export function LiveServerCheckSection({
                     <div className="flex justify-between">
                       <span className="text-[var(--color-text-secondary)]">Путь пробы:</span>
                       <span className="font-mono">
-                        {result.throughput.route === 'physical-direct'
-                          ? 'напрямую через Wi-Fi'
-                          : result.throughput.route === 'active-tunnel'
-                            ? 'по уже работающему активному туннелю'
-                          : result.throughput.route === 'active-profile-self'
-                            ? 'независимая проверка активного профиля'
-                            : 'через direct-detour активного туннеля'}
+                        {formatThroughputRouteLabel(result.throughput.route)}
                       </span>
                     </div>
                   )}

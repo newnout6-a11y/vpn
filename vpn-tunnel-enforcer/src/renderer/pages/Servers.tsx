@@ -1593,7 +1593,19 @@ function GroupCard(props: GroupCardProps) {
 
   const isVirtual = group.id === VIRTUAL_ALL_GROUP_ID
   const isSubscription = group.source === 'subscription'
+  const [refreshSelectOpen, setRefreshSelectOpen] = useState(false)
   const headerIcon = isSubscription ? '📡' : '🔑'
+
+  const refreshIntervalOptions: SelectOption[] = [
+    { value: 'auto', label: t('servers.groups.refreshAuto') },
+    { value: '1', label: t('servers.groups.refresh1Minute') },
+    { value: '5', label: t('servers.groups.refresh5Minutes') },
+    { value: '15', label: t('servers.groups.refresh15Minutes') },
+    { value: '30', label: t('servers.groups.refresh30Minutes') },
+    { value: '60', label: t('servers.groups.refresh1Hour') },
+    { value: '360', label: t('servers.groups.refresh6Hours') },
+    { value: '1440', label: t('servers.groups.refresh1Day') }
+  ]
 
   const statusLabel =
     group.status === 'active'
@@ -1645,7 +1657,7 @@ function GroupCard(props: GroupCardProps) {
   }
 
   return (
-    <MacCard className="!p-0 overflow-hidden">
+    <MacCard className={`!p-0 ${refreshSelectOpen ? 'overflow-visible' : 'overflow-hidden'}`}>
       {/* Header (clickable) */}
       <div
         role="button"
@@ -1753,24 +1765,17 @@ function GroupCard(props: GroupCardProps) {
                   <RefreshCw className="w-3.5 h-3.5 mr-1" />
                   {isRefreshing ? t('servers.groups.refreshing') : t('servers.groups.refresh')}
                 </MacButton>
-                <label className="inline-flex items-center gap-1.5 text-xs text-[var(--color-text-secondary)]" onClick={(e) => e.stopPropagation()}>
-                  <span className="sr-only">Частота автообновления</span>
-                  <select
+                <div data-no-toggle onKeyDown={(e) => e.stopPropagation()}>
+                  <MacSelect
+                    options={refreshIntervalOptions}
                     value={group.refreshIntervalOverrideMinutes ? String(group.refreshIntervalOverrideMinutes) : 'auto'}
-                    onChange={(e) => onRefreshPolicyChange(e.target.value)}
-                    className="h-8 rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[var(--color-surface)] px-2 text-xs text-[var(--color-text)] outline-none focus:border-[var(--color-accent)]"
-                    title="Частота автоматического обновления подписки"
-                  >
-                    <option value="auto">Авто</option>
-                    <option value="1">1 мин</option>
-                    <option value="5">5 мин</option>
-                    <option value="15">15 мин</option>
-                    <option value="30">30 мин</option>
-                    <option value="60">1 ч</option>
-                    <option value="360">6 ч</option>
-                    <option value="1440">1 день</option>
-                  </select>
-                </label>
+                    onChange={onRefreshPolicyChange}
+                    ariaLabel={t('servers.groups.refreshIntervalLabel')}
+                    size="sm"
+                    className="w-[96px] shrink-0"
+                    onOpenChange={setRefreshSelectOpen}
+                  />
+                </div>
               </>
             )}
             <MacButton

@@ -1,6 +1,6 @@
 import '@testing-library/jest-dom/vitest'
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { render, fireEvent, screen, waitFor, cleanup, act } from '@testing-library/react'
+import { render, fireEvent, screen, waitFor, cleanup, act, within } from '@testing-library/react'
 import { LiveServerCheckSection } from './LiveServerCheckSection'
 import type { LiveServerCheck } from '../../shared/ipc-types'
 
@@ -229,5 +229,65 @@ it('formats raw 429 status error into user-friendly localized message in UI bann
   expect(
     screen.getByText('Превышен лимит запросов к сервису геолокации (429). Повторите попытку позже.')
   ).toBeInTheDocument()
+})
+
+it('does not mark an unfinished traceroute green and explains the saved route data', async () => {
+  const checkWithIncompleteRoute = makeMockCheck('uuid-incomplete-route', '192.0.2.11', {
+    route: {
+      status: 'ok',
+      durationMs: 35,
+      hops: 1,
+      reachedTarget: false,
+      hopDetails: ['1  *  *  *  Request timed out']
+    },
+    throughput: {
+      status: 'ok',
+      durationMs: 1200,
+      endpoint: 'speed.cloudflare.com/__down',
+      route: 'physical-direct',
+      samples: [],
+      medianMbps: 28.5
+    },
+    handshake: { status: 'ok', durationMs: 1426, protocol: 'VLESS' },
+    infrastructure: {
+      status: 'ok',
+      changesFromPrevious: { handshakeChanged: true, tlsCertChanged: false }
+    },
+    pathDiagnostics: {
+      status: 'ok',
+      durationMs: 925,
+      destination: '192.0.2.11',
+      activeInterfaceAlias: 'Ethernet\uFFFD',
+      isTunInterface: false,
+      evidenceKind: 'net-route'
+    }
+  })
+
+  ;(window as any).electronAPI = {
+    serverLiveCheckHistory: vi.fn().mockResolvedValue([]),
+    serverLiveCheck: vi.fn().mockResolvedValue(checkWithIncompleteRoute),
+    serverLiveCheckCancel: vi.fn()
+  }
+
+  render(<LiveServerCheckSection profileId="p-route" host="audit.invalid" port={443} />)
+  fireEvent.click(screen.getByText('Проверить'))
+  await screen.findByText('192.0.2.11')
+
+  const routeCard = screen.getByText('Маршрут до endpoint').closest('div.p-2')
+  expect(routeCard).not.toBeNull()
+  expect(within(routeCard as HTMLElement).getByTitle('warning')).toBeInTheDocument()
+  expect(within(routeCard as HTMLElement).getByText('Не завершено')).toBeInTheDocument()
+  expect(screen.getByText('через профиль; к его endpoint — по физической сети (вне TUN)')).toBeInTheDocument()
+  expect(screen.getByText('Handshake восстановлен')).toBeInTheDocument()
+  expect(screen.queryByText('Handshake изменился')).not.toBeInTheDocument()
+  expect(screen.getByText('Время до первого TCP CONNECT:')).toBeInTheDocument()
+  expect(screen.getByText('1426 ms')).toBeInTheDocument()
+  expect(screen.getByText('Замер live-зонда, не время запуска VPN.')).toBeInTheDocument()
+  expect(screen.getByTitle(
+    'От запуска handshake-зонда до первого успешного TCP CONNECT. Проба идёт через выбранный профиль; если он уже активен, используется работающий туннель — его запуск не измеряется.'
+  )).toBeInTheDocument()
+  expect(screen.queryByText('Время установления:')).not.toBeInTheDocument()
+  expect(screen.getByText('Имя повреждено в старой проверке')).toBeInTheDocument()
+  expect(screen.getByText(/Это внешний маршрут до VPN-сервера/)).toBeInTheDocument()
 })
 

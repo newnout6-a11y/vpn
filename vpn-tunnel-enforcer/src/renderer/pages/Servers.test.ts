@@ -49,6 +49,20 @@ describe('server page ping wiring', () => {
   })
 })
 
+describe('subscription refresh frequency control', () => {
+  it('uses the compact in-app select instead of the native white-popup select', () => {
+    expect(source).toContain('<MacSelect')
+    expect(source).toContain('size="sm"')
+    expect(source).toContain('className="w-[96px] shrink-0"')
+    expect(source).toContain('onOpenChange={setRefreshSelectOpen}')
+    expect(source).toContain("refreshSelectOpen ? 'overflow-visible' : 'overflow-hidden'")
+    expect(source).not.toContain('<select')
+    for (const value of ['auto', '1', '5', '15', '30', '60', '360', '1440']) {
+      expect(source).toContain(`value: '${value}'`)
+    }
+  })
+})
+
 describe('server selection error notification', () => {
   it('notifies user via addGlobalToast when server selection fails', () => {
     expect(source).toContain("addGlobalToast(")

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { AlertTriangle, Check, Gauge, Play, Square } from 'lucide-react'
 import { MacBadge, MacButton, MacInput, MacModal } from '../design-system'
+import { formatThroughputRouteLabel } from '../utils/liveServerPresentation'
 import type {
   LiveServerBatchCheckProgress,
   LiveServerBatchCheckResult,
@@ -32,10 +33,7 @@ function resultLabel(result: LiveServerCheck): string {
 }
 
 function routeLabel(route: LiveThroughputDiagnostics['route']): string {
-  if (route === 'physical-direct') return 'Wi-Fi'
-  if (route === 'active-profile-self') return 'активный профиль'
-  if (route === 'active-tunnel-direct-detour') return 'через активный туннель'
-  return '—'
+  return formatThroughputRouteLabel(route, true)
 }
 
 export function LiveServerBatchComparison({ open, profiles, onClose }: LiveServerBatchComparisonProps) {

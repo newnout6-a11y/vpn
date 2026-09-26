@@ -6,6 +6,8 @@
     "connected": "Connected",
     "disconnected": "Disconnected",
     "connectionError": "Connection failed",
+    "cancelConnection": "Cancel connection",
+    "cancelServerSwitch": "Cancel server switch",
     "publicIp": "Public IP",
     "uptime": "Uptime",
     "currentProfile": "Current Profile",
@@ -16,6 +18,11 @@
     "nextSchedule": "Next scheduled event",
     "killSwitchStatus": "Kill-Switch",
     "speedTestLast": "Last speed test"
+  },
+  "liveCheck": {
+    "handshakeProbeDurationLabel": "Time to first TCP connection:",
+    "handshakeProbeDurationNote": "Probe timing, not VPN startup time.",
+    "handshakeProbeDurationTitle": "Measured from handshake-probe start until the first successful TCP CONNECT. The probe uses the selected profile; if it is already active, the running tunnel is reused, so VPN startup is not measured."
   },
   "dashboardWidgets": {
     "scheduleConnect": "Connect",
@@ -164,6 +171,15 @@
       "create": "Create new group",
       "refresh": "Refresh",
       "refreshing": "Refreshing...",
+      "refreshIntervalLabel": "Auto-refresh interval",
+      "refreshAuto": "Auto",
+      "refresh1Minute": "1 min",
+      "refresh5Minutes": "5 min",
+      "refresh15Minutes": "15 min",
+      "refresh30Minutes": "30 min",
+      "refresh1Hour": "1 hr",
+      "refresh6Hours": "6 hr",
+      "refresh1Day": "1 day",
       "checkHealth": "Check keys",
       "checking": "Checking...",
       "delete": "Delete group",

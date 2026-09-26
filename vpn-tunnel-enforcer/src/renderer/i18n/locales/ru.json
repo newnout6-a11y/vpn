@@ -6,6 +6,8 @@
     "connected": "Подключено",
     "disconnected": "Отключено",
     "connectionError": "Ошибка подключения",
+    "cancelConnection": "Отменить подключение",
+    "cancelServerSwitch": "Отменить смену сервера",
     "publicIp": "Публичный IP",
     "uptime": "Время работы",
     "currentProfile": "Текущий профиль",
@@ -16,6 +18,11 @@
     "nextSchedule": "Следующее событие",
     "killSwitchStatus": "Kill-Switch",
     "speedTestLast": "Последний тест скорости"
+  },
+  "liveCheck": {
+    "handshakeProbeDurationLabel": "Время до первого TCP CONNECT:",
+    "handshakeProbeDurationNote": "Замер live-зонда, не время запуска VPN.",
+    "handshakeProbeDurationTitle": "От запуска handshake-зонда до первого успешного TCP CONNECT. Проба идёт через выбранный профиль; если он уже активен, используется работающий туннель — его запуск не измеряется."
   },
   "dashboardWidgets": {
     "scheduleConnect": "Подключить",
@@ -164,6 +171,15 @@
       "create": "Создать новую группу",
       "refresh": "Обновить",
       "refreshing": "Обновление...",
+      "refreshIntervalLabel": "Частота автообновления",
+      "refreshAuto": "Авто",
+      "refresh1Minute": "1 мин",
+      "refresh5Minutes": "5 мин",
+      "refresh15Minutes": "15 мин",
+      "refresh30Minutes": "30 мин",
+      "refresh1Hour": "1 ч",
+      "refresh6Hours": "6 ч",
+      "refresh1Day": "1 день",
       "checkHealth": "Проверить ключи",
       "checking": "Проверка...",
       "delete": "Удалить группу",

@@ -250,7 +250,7 @@ export interface LiveThroughputDiagnostics {
   status: 'ok' | 'warning' | 'error' | 'skipped'
   durationMs: number
   endpoint?: string
-  /** How the probe reached the public network. */
+  /** Route context used by the probe; the public download still goes through the selected profile SOCKS. */
   route?: 'physical-direct' | 'active-tunnel-direct-detour' | 'active-profile-self' | 'active-tunnel'
   samples: LiveThroughputSample[]
   medianMbps?: number
