@@ -2196,6 +2196,13 @@ export async function probeTunnelHandshakeAndEgress(
       let cfSocket: net.Socket | null = null
       let ipifySocket: net.Socket | null = null
       let ip6Socket: net.Socket | null = null
+      let establishedHandshake: TunnelHandshakeResult | null = null
+      let probeRoute: LiveThroughputDiagnostics['route'] = 'physical-direct'
+      let egressStarted = 0
+      let reflectorResults: EgressReflectorResult[] = []
+      let completedEgress: LiveEgressResult | null = null
+      let completedMediaStream: LiveMediaStreamDiagnostics | null = null
+      let completedThroughput: LiveThroughputDiagnostics | undefined
 
       const abortHandler = () => {
         if (child) {
@@ -2217,155 +2224,202 @@ export async function probeTunnelHandshakeAndEgress(
       }
 
       try {
-        workDir = await mkdtemp(join(tmpdir(), workDirPrefix))
-        const logPath = join(workDir, 'engine.log')
-        const pidPath = join(workDir, pidFileName)
-        const inboundPort = await pickFreeLocalPort()
-
         const tunStatus = tunController.getStatus()
         const activeProfile = serverPicker.getActiveProfile()
         // Do not route a probe for the currently running direct-VPN profile
-        // through that same tunnel: this creates a self/nested handshake and
-        // commonly times out before the new engine can authenticate.
+        // through a second proxy process. Reuse its already-running SOCKS
+        // inbound instead; a nested handshake to the same server can time out,
+        // and binding a duplicate probe to the physical adapter is blocked by
+        // the kill-switch (or tests a different path than the active tunnel).
         const isSelfProbe = Boolean(
           tunStatus.running &&
           tunStatus.mode === 'directVpn' &&
           tunStatus.vpnProfileName === profile.name &&
           activeProfile?.id === profile.id
         )
+        const activeTunnelPort = isSelfProbe ? getDirectProxyPort() : null
         let directProxy: { host: string; port: number } | null = null
         if (tunStatus.running && tunStatus.proxyAddr && !isSelfProbe) {
           const directPort = getDirectProxyPort()
           if (directPort) directProxy = { host: '127.0.0.1', port: directPort }
         }
-        const physicalAdapter = directProxy
+        const physicalAdapter = isSelfProbe || directProxy
           ? null
           : (await getPhysicalAdapterDnsSources().catch(() => []))[0] ?? null
-        const probeRoute: LiveThroughputDiagnostics['route'] = isSelfProbe
-          ? 'active-profile-self'
+        probeRoute = isSelfProbe
+          ? 'active-tunnel'
           : directProxy
             ? 'active-tunnel-direct-detour'
             : 'physical-direct'
 
-        const proxyEngineSetting = settingsStore.get().proxyEngine ?? 'auto'
-        const engine = resolveProxyEngine(outbound, proxyEngineSetting)
-        const isXray = engine === 'xray'
-        const probeExe = isXray ? getBundledResource('xray.exe') : getBundledResource('sing-box.exe')
-
-        if (!probeExe) {
+        if (isSelfProbe && !activeTunnelPort) {
           return {
             handshake: {
               status: 'skipped',
               durationMs: Date.now() - started,
               protocol: profile.protocol,
-              error: 'Бинарный файл движка (sing-box/xray) не найден'
+              evidence: { detail: 'Проверка отдельного рукопожатия пропущена: у активного туннеля нет доступного локального SOCKS-порта.' }
             },
             egress: {
               status: 'skipped',
               durationMs: 0,
               reflectors: [],
-              error: 'Движок туннеля не найден'
+              error: 'Нельзя проверить egress активного туннеля: локальный SOCKS-порт недоступен'
             },
             mediaStream: {
               status: 'skipped',
               durationMs: 0,
-              error: 'Движок туннеля не найден'
+              error: 'Нельзя проверить медиапотоки через активный туннель без локального SOCKS-порта'
+            },
+            ...(includeThroughput
+              ? { throughput: { status: 'skipped' as const, durationMs: 0, samples: [], route: probeRoute } }
+              : {})
+          }
+        }
+
+        let inboundPort: number
+        if (isSelfProbe) {
+          inboundPort = activeTunnelPort!
+        } else {
+          workDir = await mkdtemp(join(tmpdir(), workDirPrefix))
+          const logPath = join(workDir, 'engine.log')
+          const pidPath = join(workDir, pidFileName)
+          inboundPort = await pickFreeLocalPort()
+
+          const proxyEngineSetting = settingsStore.get().proxyEngine ?? 'auto'
+          const engine = resolveProxyEngine(outbound, proxyEngineSetting)
+          const isXray = engine === 'xray'
+          const probeExe = isXray ? getBundledResource('xray.exe') : getBundledResource('sing-box.exe')
+
+          if (!probeExe) {
+            return {
+              handshake: {
+                status: 'skipped',
+                durationMs: Date.now() - started,
+                protocol: profile.protocol,
+                error: 'Бинарный файл движка (sing-box/xray) не найден'
+              },
+              egress: {
+                status: 'skipped',
+                durationMs: 0,
+                reflectors: [],
+                error: 'Движок туннеля не найден'
+              },
+              mediaStream: {
+                status: 'skipped',
+                durationMs: 0,
+                error: 'Движок туннеля не найден'
+              },
+              ...(includeThroughput
+                ? { throughput: { status: 'skipped' as const, durationMs: 0, samples: [], route: probeRoute } }
+                : {})
+            }
+          }
+
+          if (signal?.aborted) throw new Error('Cancelled')
+
+          const probeConfigPath = join(workDir, isXray ? 'xray.json' : 'sing-box.json')
+          const config = isXray
+            ? buildXrayProbeConfig(outbound, inboundPort, {
+                directProxy,
+                clientDevice: profile.clientDevice,
+                logPath
+              })
+            : buildKeyProbeConfig(profile, inboundPort, {
+                directProxy,
+                physicalInterface: physicalAdapter?.alias,
+                logPath
+              })
+
+          await writeFile(probeConfigPath, JSON.stringify(config, null, 2), 'utf8')
+
+          if (signal?.aborted) throw new Error('Cancelled')
+
+          child = spawn(probeExe, ['run', '-c', probeConfigPath], {
+            cwd: workDir,
+            windowsHide: true,
+            stdio: ['ignore', 'pipe', 'pipe']
+          })
+
+          let childErrorReject: ((reason?: any) => void) | null = null
+          const childError = new Promise<never>((_, reject) => { childErrorReject = reject })
+          child.on('error', (err: any) => {
+            const error = err instanceof Error ? err : new Error(err?.message || String(err))
+            logText += `\n[child error] ${error.message}`
+            childErrorReject?.(error)
+          })
+
+          await writeManagedChildPidFile(pidPath, {
+            owner: 'live-handshake-probe',
+            pid: child.pid ?? 0,
+            exePath: probeExe,
+            configPath: probeConfigPath,
+            createdAt: Date.now()
+          }).catch(() => {})
+
+          child.stdout?.on('data', (d: Buffer) => { logText += d.toString() })
+          child.stderr?.on('data', (d: Buffer) => { logText += d.toString() })
+
+          await Promise.race([
+            waitForLocalSocks(inboundPort, 2500, signal),
+            childError
+          ])
+        }
+
+        if (signal?.aborted) throw new Error('Cancelled')
+
+        const markHandshakeEstablished = () => {
+          if (establishedHandshake) return
+          establishedHandshake = {
+            status: 'ok',
+            durationMs: Date.now() - started,
+            protocol: profile.protocol,
+            evidence: {
+              transport: outbound.type || profile.protocol,
+              alpn: outbound.tls?.alpn?.[0],
+              inboundPort
             }
           }
         }
 
-        if (signal?.aborted) throw new Error('Cancelled')
-
-        const probeConfigPath = join(workDir, isXray ? 'xray.json' : 'sing-box.json')
-        const config = isXray
-          ? buildXrayProbeConfig(outbound, inboundPort, {
-              directProxy,
-              clientDevice: profile.clientDevice,
-              logPath
+        // A successful SOCKS CONNECT confirms that the selected outbound can
+        // establish a TCP tunnel. Treat Cloudflare connect/TLS/HTTP as one
+        // reflector so a destination-specific failure cannot suppress others.
+        egressStarted = Date.now()
+        let cfTrace: { egressIp?: string; country?: string } = {}
+        try {
+          cfSocket = await openTcpViaSocks({ host: '127.0.0.1', port: inboundPort }, '1.1.1.1', 443, 4000, signal)
+          markHandshakeEstablished()
+          cfTrace = await verifyHttpsThroughSocket(cfSocket, {
+            host: '1.1.1.1',
+            port: 443,
+            serverName: 'cloudflare-dns.com',
+            path: '/cdn-cgi/trace'
+          }, 4000)
+          if (cfTrace.egressIp) {
+            reflectorResults.push({
+              source: 'cloudflare-trace',
+              ip: cfTrace.egressIp,
+              family: net.isIP(cfTrace.egressIp) === 6 ? 6 : 4,
+              country: cfTrace.country,
+              durationMs: Date.now() - egressStarted,
+              status: 'ok'
             })
-          : buildKeyProbeConfig(profile, inboundPort, {
-              directProxy,
-              physicalInterface: physicalAdapter?.alias,
-              logPath
+          } else {
+            reflectorResults.push({
+              source: 'cloudflare-trace',
+              status: 'error',
+              error: 'Cloudflare trace did not return an IP',
+              durationMs: Date.now() - egressStarted
             })
-
-        await writeFile(probeConfigPath, JSON.stringify(config, null, 2), 'utf8')
-
-        if (signal?.aborted) throw new Error('Cancelled')
-
-        child = spawn(probeExe, ['run', '-c', probeConfigPath], {
-          cwd: workDir,
-          windowsHide: true,
-          stdio: ['ignore', 'pipe', 'pipe']
-        })
-
-        let childErrorReject: ((reason?: any) => void) | null = null
-        const childError = new Promise<never>((_, reject) => { childErrorReject = reject })
-        child.on('error', (err: any) => {
-          const error = err instanceof Error ? err : new Error(err?.message || String(err))
-          logText += `\n[child error] ${error.message}`
-          childErrorReject?.(error)
-        })
-
-        await writeManagedChildPidFile(pidPath, {
-          owner: 'live-handshake-probe',
-          pid: child.pid ?? 0,
-          exePath: probeExe,
-          configPath: probeConfigPath,
-          createdAt: Date.now()
-        }).catch(() => {})
-
-        child.stdout?.on('data', (d: Buffer) => { logText += d.toString() })
-        child.stderr?.on('data', (d: Buffer) => { logText += d.toString() })
-
-        // Wait for inbound port with signal
-        await Promise.race([
-          waitForLocalSocks(inboundPort, 2500, signal),
-          childError
-        ])
-
-        if (signal?.aborted) throw new Error('Cancelled')
-
-        // Handshake check: connect via local socks inbound to Cloudflare
-        cfSocket = await openTcpViaSocks({ host: '127.0.0.1', port: inboundPort }, '1.1.1.1', 443, 4000, signal)
-        const cfTrace = await verifyHttpsThroughSocket(cfSocket, {
-          host: '1.1.1.1',
-          port: 443,
-          serverName: 'cloudflare-dns.com',
-          path: '/cdn-cgi/trace'
-        }, 4000)
-
-        const handshakeMs = Date.now() - started
-        const handshake: TunnelHandshakeResult = {
-          status: 'ok',
-          durationMs: handshakeMs,
-          protocol: profile.protocol,
-          evidence: {
-            transport: outbound.type || profile.protocol,
-            alpn: outbound.tls?.alpn?.[0],
-            inboundPort
           }
-        }
-
-        // Egress check using multi reflectors
-        const egressStarted = Date.now()
-        const reflectorResults: EgressReflectorResult[] = []
-
-        if (cfTrace.egressIp) {
-          reflectorResults.push({
-            source: 'cloudflare-trace',
-            ip: cfTrace.egressIp,
-            family: net.isIP(cfTrace.egressIp) === 6 ? 6 : 4,
-            country: cfTrace.country,
-            durationMs: handshakeMs,
-            status: 'ok'
-          })
-        } else {
+        } catch (err: any) {
+          if (signal?.aborted) throw err
           reflectorResults.push({
             source: 'cloudflare-trace',
             status: 'error',
-            error: 'Cloudflare trace did not return an IP',
-            durationMs: handshakeMs
+            error: err?.message || 'Cloudflare trace probe failed',
+            durationMs: Date.now() - egressStarted
           })
         }
 
@@ -2373,6 +2427,7 @@ export async function probeTunnelHandshakeAndEgress(
         try {
           const ipifyStart = Date.now()
           ipifySocket = await openTcpViaSocks({ host: '127.0.0.1', port: inboundPort }, 'api.ipify.org', 443, 3500, signal)
+          markHandshakeEstablished()
           const ipifyTrace = await verifyHttpsThroughSocket(ipifySocket, {
             host: 'api.ipify.org',
             port: 443,
@@ -2419,6 +2474,7 @@ export async function probeTunnelHandshakeAndEgress(
         try {
           const ip6Start = Date.now()
           ip6Socket = await openTcpViaSocks({ host: '127.0.0.1', port: inboundPort }, 'api6.ipify.org', 443, 3500, signal)
+          markHandshakeEstablished()
           const ip6Trace = await verifyHttpsThroughSocket(ip6Socket, {
             host: 'api6.ipify.org',
             port: 443,
@@ -2495,6 +2551,7 @@ export async function probeTunnelHandshakeAndEgress(
           matchesEndpoint: exitIpv4 && endpointIp ? exitIpv4 === endpointIp : undefined,
           underlayPath: 'route-selected'
         }
+        completedEgress = egress
 
         let mediaStream: LiveMediaStreamDiagnostics = {
           status: 'skipped',
@@ -2509,13 +2566,64 @@ export async function probeTunnelHandshakeAndEgress(
             error: mErr?.message || 'Сбой проверки медиапотоков'
           }
         }
+        if (mediaStream.twitchHlsReachable) markHandshakeEstablished()
+        completedMediaStream = mediaStream
 
         const throughput = includeThroughput
           ? await probeThroughput(inboundPort, signal, probeRoute)
           : undefined
+        if (throughput?.samples.some(sample => sample.bytes > 0)) markHandshakeEstablished()
+        completedThroughput = throughput
 
-        return { handshake, egress, mediaStream, throughput }
+        if (!establishedHandshake) {
+          const handshakeError = reflectorResults.find(reflector => reflector.error)?.error || 'No successful TCP connection through the tunnel'
+          const classified = classifyOutboundProbeFailure(profile.protocol, logText, handshakeError)
+          let status: TunnelHandshakeResult['status'] = 'transport_failed'
+          if (classified.includes('auth')) status = 'auth_failed'
+          else if (classified === 'timeout') status = 'timeout'
+          establishedHandshake = {
+            status,
+            durationMs: Date.now() - started,
+            protocol: profile.protocol,
+            error: handshakeError,
+            evidence: {
+              transport: outbound.type || profile.protocol,
+              detail: classified
+            }
+          }
+        }
+
+        return { handshake: establishedHandshake, egress, mediaStream, throughput }
       } catch (err: any) {
+        if (establishedHandshake) {
+          const errorMessage = signal?.aborted ? 'Cancelled' : err?.message || 'Probe failed after tunnel connection'
+          const successfulReflectors = reflectorResults.filter(r => r.status === 'ok' && r.ip)
+          return {
+            handshake: establishedHandshake,
+            egress: completedEgress ?? {
+              status: successfulReflectors.length > 0 ? 'partial' : 'error',
+              durationMs: egressStarted ? Date.now() - egressStarted : 0,
+              reflectors: reflectorResults,
+              error: `Проверка egress прервана после успешного рукопожатия: ${errorMessage}`
+            },
+            mediaStream: completedMediaStream ?? {
+              status: 'skipped',
+              durationMs: 0,
+              error: errorMessage
+            },
+            ...(includeThroughput
+              ? {
+                  throughput: completedThroughput ?? {
+                    status: 'skipped' as const,
+                    durationMs: 0,
+                    samples: [],
+                    route: probeRoute
+                  }
+                }
+              : {})
+          }
+        }
+
         let diskLogs = ''
         if (workDir) {
           try {
@@ -3427,9 +3535,9 @@ export async function runLiveServerCheck(
 
 /**
  * Compare a bounded set of saved profiles under identical conditions. The
- * checks are deliberately sequential because each extended probe starts an
- * isolated sing-box/xray process and concurrent probes would compete for the
- * same public Wi-Fi and make the ranking meaningless.
+ * checks are deliberately sequential because isolated sing-box/xray probes
+ * and checks through the active tunnel still share the same uplink; concurrent
+ * requests would compete for bandwidth and make the ranking noisy.
  */
 export async function runLiveServerBatchCheck(
   options: LiveServerBatchCheckOptions,

@@ -250,8 +250,8 @@ export interface LiveThroughputDiagnostics {
   status: 'ok' | 'warning' | 'error' | 'skipped'
   durationMs: number
   endpoint?: string
-  /** How the isolated probe reached the public network. */
-  route?: 'physical-direct' | 'active-tunnel-direct-detour' | 'active-profile-self'
+  /** How the probe reached the public network. */
+  route?: 'physical-direct' | 'active-tunnel-direct-detour' | 'active-profile-self' | 'active-tunnel'
   samples: LiveThroughputSample[]
   medianMbps?: number
   minMbps?: number

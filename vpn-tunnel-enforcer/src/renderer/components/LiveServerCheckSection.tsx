@@ -1283,8 +1283,10 @@ export function LiveServerCheckSection({
                       <span className="font-mono">
                         {result.throughput.route === 'physical-direct'
                           ? 'напрямую через Wi-Fi'
+                          : result.throughput.route === 'active-tunnel'
+                            ? 'по уже работающему активному туннелю'
                           : result.throughput.route === 'active-profile-self'
-                            ? 'активный профиль'
+                            ? 'независимая проверка активного профиля'
                             : 'через direct-detour активного туннеля'}
                       </span>
                     </div>
