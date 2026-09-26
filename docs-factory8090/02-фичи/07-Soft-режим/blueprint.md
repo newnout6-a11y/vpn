@@ -1,0 +1,174 @@
+# Soft-режим: автонастройка прокси в приложениях
+
+> Источник: https://factory.8090.ai/project/992274e4-1c6b-4d44-8c22-e4c038e690c2/blueprints/e782bec2-6724-4ccd-a8f1-c61dfe511e30
+
+## Feature Summary
+
+Summarize what this feature does from the user's perspective and which requirements it fulfills.
+
+## Component Blueprint Composition
+
+List the shared capabilities this feature composes and how each is configured or scoped. For example:
+
+* **@Component Blueprint 1** — What this capability provides; how this feature configures or scopes it.
+* **@Component Blueprint 2** — What this capability provides; using `#ComponentA` and `#ComponentB` to enable this feature.
+
+## Feature-Specific Components
+
+Components that exist only for this feature, defined as `component` blocks.
+
+## System Contracts
+
+### Key Contracts
+
+Invariants, correctness rules, and reliability semantics (idempotency, ordering, consistency, retry behavior).
+
+### Integration Contracts
+
+Events published/consumed, API interfaces, webhooks, and composition expectations for consumers of this capability.
+
+## Architecture Decision Records
+
+### ADR-001: Decision Title
+
+**Context:** Why this decision was needed.
+
+**Decision:** What was chosen and how.
+
+**Consequences:** Trade-offs, benefits, and implications.
+
+# Soft-режим: автонастройка прокси в приложениях
+
+## Обзор фичи
+
+Фича соответствует требованиям @Soft-режим: автонастройка прокси в приложениях. В Electron 42-приложении Soft-маршрут запускает `autoconfig` без создания TUN и применяет выбранный `Прокси` к целям `env`, `git`, `gradle` и `android-studio`. Для каждой цели сохраняется исходное состояние перед первым применением, а откат выполняется последовательно с отдельным результатом по каждой цели.
+
+## Композиция blueprint-компонентов
+
+Фича работает внутри main-процесса Electron и взаимодействует с renderer через IPC, опубликованный preload-слоем. Dashboard выбирает Soft-ветку запуска, а `index.ts` координирует жизненный цикл Soft-маршрута, включая остановку активного Hard-туннеля, восстановление при старте и очистку при завершении приложения.
+
+## Компоненты, специфичные для фичи
+
+### Координатор Soft-жизненного цикла
+
+```component
+name: SoftProtectionCoordinator
+container: Electron main process
+responsibilities:
+	- Запускает Soft-маршрут через `autoconfig.apply` только для цели `env`.
+	- Останавливает активный TUN перед включением Soft-маршрута.
+	- Обновляет состояние tray и отправляет событие `soft-status-changed`.
+	- Выполняет откат env при остановке защиты, переключении режима, восстановлении после сбоя и завершении приложения.
+```
+
+### Реестр автонастройки
+
+```component
+name: AutoconfigRegistry
+container: Electron main process
+responsibilities:
+	- Регистрирует цели `android-studio`, `gradle`, `env` и `git`.
+	- Последовательно вызывает применение или откат цели и возвращает результат по идентификаторам.
+	- Возвращает статус, область действия, предупреждение, управляемый путь и путь резервной копии.
+```
+
+### Автонастройка переменных окружения
+
+```component
+name: EnvironmentAutoconfig
+container: Electron main process
+responsibilities:
+	- Читает исходные пользовательские HTTP_PROXY, HTTPS_PROXY, ALL_PROXY и NO_PROXY из HKCU\\Environment.
+	- Сохраняет резервную копию в `.vpnte/env-proxy-backup.json` до первого изменения.
+	- Записывает пользовательские переменные через `setx`, обновляет process.env и рассылает уведомление об изменении окружения.
+	- При откате восстанавливает значения или удаляет отсутствовавшие значения.
+```
+
+### Автонастройка Git
+
+```component
+name: GitAutoconfig
+container: Electron main process
+responsibilities:
+	- Читает глобальные `http.proxy` и `https.proxy` через `git config`.
+	- Сохраняет резервную копию в `.vpnte/git-proxy-backup.json`.
+	- Устанавливает или восстанавливает глобальные прокси-настройки Git.
+```
+
+### Автонастройка Gradle
+
+```component
+name: GradleAutoconfig
+container: Electron main process
+responsibilities:
+	- Читает пользовательский `~/.gradle/gradle.properties`.
+	- Сохраняет исходный файл в `gradle.properties.vpn-backup`.
+	- Удаляет прежний блок `VPN Tunnel Enforcer` и добавляет настройки JVM-прокси для SOCKS5 или HTTP.
+	- Записывает файл атомарно через временный файл и rename.
+```
+
+### Автонастройка Android Studio
+
+```component
+name: AndroidStudioAutoconfig
+container: Electron main process
+responsibilities:
+	- Находит каталоги `AndroidStudio*` в пользовательском каталоге Google.
+	- Строго разбирает IPv4, hostname и bracketed IPv6 с портом 1-65535.
+	- Изменяет `options/other.xml` и `studio64.exe.vmoptions`, сохраняя резервные копии или маркеры созданных файлов.
+	- При откате восстанавливает резервные копии или удаляет только принадлежащий приложению компонент и vmoptions-блок.
+```
+
+`SoftProtectionCoordinator` передаёт адрес и тип прокси в `AutoconfigRegistry`. При частичном сбое реестр откатывает ранее успешно применённые цели. Renderer вызывает те же операции через preload-контракты `apply-autoconfig`, `rollback-autoconfig` и `get-autoconfig-status`.
+
+## Системные контракты
+
+### Основные контракты
+
+* Soft-маршрут не запускает TUN. После успешного запуска tray получает состояние защищённого маршрута, а VPN IP остаётся `null`.
+* env является обязательной целью запуска Soft-маршрута. Ошибка её применения означает неуспешное включение.
+* Повторное применение не заменяет существующую резервную копию.
+* Ошибка восстановления не удаляет резервную копию, чтобы разрешить повторную попытку.
+* При восстановлении после сбоя ранее сохранённый Soft env сохраняется, если Soft-режим всё ещё выбран и подключение не является Direct VPN.
+
+### Интеграционные контракты
+
+* Renderer вызывает `apply-autoconfig` с массивом идентификаторов целей, адресом прокси и типом `socks5` или `http`.
+* Renderer вызывает `rollback-autoconfig` с массивом идентификаторов целей.
+* Renderer вызывает `get-autoconfig-status` и получает список `AutoconfigTarget` с `id`, `name`, `applied`, `scope`, `warning`, `managedPath` и `backupPath`.
+* Координатор отправляет renderer событие `soft-status-changed` со значением активности Soft-маршрута.
+* `EnvironmentAutoconfig` использует `socks5h://` для SOCKS5 и `http://` для HTTP. Git и Gradle в текущем коде разбирают адрес разделением по `:`, поэтому bracketed IPv6 для них не поддержан корректно.
+
+## Архитектурные решения
+
+### ADR-001: Soft-маршрут без TUN
+
+**Контекст:** Soft-режим должен направлять выбранные приложения через прокси и не должен включать системный TUN.
+
+**Решение:** Отдельный путь `startSoftProtection` применяет только env-цель и не вызывает запуск TUN. Dashboard также переводит состояние в Soft и очищает VPN IP.
+
+**Последствия:** Soft-режим не обеспечивает маршрутизацию приложений, которые не используют применённые цели. Переключение на Hard требует остановить Soft-настройку, чтобы режимы не пересекались.
+
+### ADR-002: Резервная копия до первого применения
+
+**Контекст:** Откат должен вернуть настройки, существовавшие до первого применения Soft-маршрута.
+
+**Решение:** Каждая цель создаёт резервную копию только при её отсутствии. Env и Git используют JSON-файлы в `.vpnte`, Gradle и Android Studio используют соседние backup-файлы или маркеры созданных файлов.
+
+**Последствия:** Текущая стратегия может восстановить состояние целого файла или ключа и затереть пользовательские изменения после применения. Это открытый вопрос F-121.
+
+### ADR-003: Текущий формат Android Studio
+
+**Контекст:** Код должен изменять конфигурацию Android Studio и JVM-параметры.
+
+**Решение:** Текущая реализация пишет `HttpConfigurable` в `options/other.xml` и добавляет маркерный блок в `studio64.exe.vmoptions`.
+
+**Последствия:** Журнал указывает на новый формат `options/proxy.settings.xml`, который текущий код не обрабатывает. Поддержка нового формата остаётся открытым вопросом F-120. Host в XML также не экранируется.
+
+### ADR-004: Ограничения текущей реализации
+
+**Контекст:** Reverse engineering должен сохранить проверенные расхождения между кодом и журналом аудита.
+
+**Решение:** В blueprint зафиксированы F-014, F-117, F-118, F-119, F-120 и F-121 как ограничения или вопросы, а не как исправленное поведение.
+
+**Последствия:** Blueprint описывает текущее состояние и не утверждает, что заявленные в документации исправления Git rollback и autoconfig compensation подтверждены полностью. `setx` может обрезать значения длиннее 1024 символов, а откат Android Studio требует осторожного обращения с компонентом `HttpConfigurable`.
