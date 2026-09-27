@@ -1,0 +1,15 @@
+{
+  "name": "vpn",
+  "version": "1.1.22",
+  "private": true,
+  "description": "VPN Tunnel Enforcer monorepo / workspace",
+  "scripts": {
+    "dev": "npm --prefix vpn-tunnel-enforcer run dev",
+    "typecheck": "npm --prefix vpn-tunnel-enforcer run typecheck",
+    "build": "npm --prefix vpn-tunnel-enforcer run build",
+    "test": "npm --prefix vpn-tunnel-enforcer test",
+    "dist": "npm --prefix vpn-tunnel-enforcer run dist:win",
+    "dist:win": "npm --prefix vpn-tunnel-enforcer run dist:win",
+    "dist:portable": "npm --prefix vpn-tunnel-enforcer run dist:portable"
+  }
+}
