@@ -2043,6 +2043,7 @@ async function restartDirectVpnForSelectedProfile(profile: ServerProfile): Promi
 }
 
 let profileSwitchGeneration = 0
+let profileSwitchInProgress = false
 
 export function cancelProfileSwitch(): void {
   profileSwitchGeneration++
@@ -2475,13 +2476,20 @@ export function registerServerPickerHandlers(): void {
     id = requireString(id, 'id', { maxLength: 200 })
     const profile = getProfiles().find((p) => p.id === id)
     if (!profile) throw new Error('Profile not found')
-    selectProfile(id)
-    const generation = ++profileSwitchGeneration
-    await restartDirectVpnForSelectedProfile(profile)
-    if (generation !== profileSwitchGeneration) {
-      await tunController.stop().catch((err) => logEvent('warn', 'server-picker', 'failed to stop cancelled profile switch', err))
-      ipMonitor.clearVpnIp()
-      throw new Error('Переключение сервера отменено')
+    if (profileSwitchInProgress) throw new Error('Переключение сервера уже выполняется')
+
+    profileSwitchInProgress = true
+    try {
+      selectProfile(id)
+      const generation = ++profileSwitchGeneration
+      await restartDirectVpnForSelectedProfile(profile)
+      if (generation !== profileSwitchGeneration) {
+        await tunController.stop().catch((err) => logEvent('warn', 'server-picker', 'failed to stop cancelled profile switch', err))
+        ipMonitor.clearVpnIp()
+        throw new Error('Переключение сервера отменено')
+      }
+    } finally {
+      profileSwitchInProgress = false
     }
   })
 
