@@ -4,181 +4,155 @@
 [![React](https://img.shields.io/badge/React-18.3-61DAFB?logo=react&logoColor=black)](https://react.dev/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.4-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![TailwindCSS](https://img.shields.io/badge/TailwindCSS-3.4-38B2AC?logo=tailwindcss&logoColor=white)](https://tailwindcss.com/)
-[![Vitest](https://img.shields.io/badge/Vitest-1260+_tests-729B1B?logo=vitest&logoColor=white)](https://vitest.dev/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Комплексное клиентское приложение для Windows (10/11 x64), предназначенное для гарантированной изоляции сетевого трафика, туннелирования через современные протоколы обхода блокировок и предотвращения любых видов утечек данных (IP, IPv6, DNS, WebRTC).
+Windows-клиент (10/11 x64, версия 1.1.22) для изоляции сетевого трафика и обхода блокировок: системный TUN через Wintun + sing-box, fail-closed WFP kill-switch, перехват DNS, Smart RU маршрутизация, форензика трафика на Rust ETW-сайдкаре, планировщик и ротация серверов.
+
+> **Честная оговорка:** в `docs/` и `docs-factory8090/` лежит ТЗ — это план развития, а не описание текущего состояния. Раздел [«Что пока не реализовано»](#что-пока-не-реализовано-план) ниже перечисляет фичи из ТЗ/старого README, которых в коде нет.
 
 ---
 
-## 🚀 Ключевые возможности
+## Режимы работы
 
-- **Многоядерный сетевой стек (Hard Mode / TUN):**
-  - Создание виртуального адаптера Wintun (`VPNTE-TUN`, `awg-tun`) и перехват всего системного IPv4/IPv6 трафика.
-  - Поддержка ядер `sing-box` (схемы 1.13.x и 1.14.x с автоматической адаптацией конфигурации), сателлита `xray-core` (VLESS-REALITY) и альтернативного ядра `mihomo` (`CoreAdapter`).
-  - Поддержка обфусцированного протокола **AmneziaWG** (AWG 1.0/2.0 с параметрами `Jc, Jmin, Jmax, S1..S4, H1..H4`) через выделенный процесс `amneziawg-go.exe`.
-- **Поддерживаемые протоколы:**
-  - `VLESS` (XTLS-Reality, Vision, gRPC, WebSocket), `WireGuard` (через схему `endpoints[]`), `Hysteria 2` (RFC-параметры), `Shadowsocks 2022 AEAD` (SIP002 IPv6), `VMess` (AEAD, `alter_id: 0`), `Trojan`, `NaiveProxy`, `ECH`.
-- **Защита от утечек и WFP Kill-Switch (Zero-Leak Security):**
-  - Блокировка утечек через Windows Filtering Platform (WFP) и Windows Firewall.
-  - Полная изоляция IPv6 (`outbound block ::/0`), защита от утечек DNS (FakeIP, DoH/DoT/DoQ, отключение Windows Smart Multi-Homed Name Resolution).
-  - Транзакционный откат конфигурации сети: хранение манифестов в `%ProgramData%\VPNTE\manifests\` с жестким DACL (SYSTEM/Admins), атомарная запись и фоновая задача аварийного восстановления при загрузке ОС (Boot Recovery).
-- **Изоляция профилей (Chromium Browser Boxes):**
-  - Запуск независимых инстансов Chromium с выделенными SOCKS5-инбаундами (`127.0.0.1:10801..10850`) для безопасной работы с мультиаккаунтами без пересечения цифровых отпечатков (fingerprints), cookies и WebRTC.
-- **Интеллектуальная маршрутизация:**
-  - Режим **Smart RU**: комплектные бинарные наборы правил (`geoip-ru.srs`, `geosite-category-gov-ru.srs`) для локального fallback и бесперебойного доступа к сервисам РФ в обход туннеля.
-  - Split Tunneling по абсолютным путям процессов (`.exe`) и диапазонам IP/CIDR.
-- **Режим разработчика (Soft Mode / Autoconfig):**
-  - Безадминистраторское прямое локальное SOCKS5/HTTP проксирование.
-  - Автоматическая настройка окружения разработчика: Android Studio (`proxy.settings.xml`), Git, Gradle, переменные среды (`HTTP_PROXY`, `HTTPS_PROXY` через прямую запись в `HKCU\Environment`).
-- **Форензика трафика и ETW-сайдкар:**
-  - Высокопроизводительный сайдкар на Rust для непрерывного отслеживания сетевых сокетов через Event Tracing for Windows (`Microsoft-Windows-TCPIP` + WinsockAFD) с нагрузкой < 0.5% CPU.
-  - Атрибуция соединений по процессам, ротация базы 50 МБ / 24 ч, захват сетевых дампов через `pktmon`.
-- **Автоматизация и жизненный цикл:**
-  - Планировщик подключений (таймзоны, DST, объединение окон активности).
-  - Ротация серверов по принципу **Health-Before-Commit** (переключение только на предварительно проверенный здоровый узел).
-  - Управление внешним локальным прокси (Happ Proxy Utility) с защитой токена NTFS DACL и предотвращением DNS Rebinding.
+**Hard Mode (directVpn)** — требует прав администратора:
+- Wintun-адаптер (алиас маскируется под `Ethernet 5..12`, подсеть `192.168.250.252/30`, адрес `.253`, резолвер `.254`, метрика 5, IPv4-only).
+- Ядро `sing-box` (основное), сателлит `xray-core` для VLESS-REALITY (SOCKS на `127.0.0.1`, случайный порт).
+- Поднятие туннеля — ~10 шагов: pre-flight (чужой TUN → отказ с объяснением), lockdown физических адаптеров (IPv6 off, DNS → `.254`, `DisableSmartNameResolution`), копирование бинарей в рантайм (только если устарели — по size+mtime), генерация конфига + `sing-box check -c`, запуск, ожидание `Status=Up` у TUN, и **только потом** kill-switch (иначе правило по `-InterfaceAlias` молча не создастся).
+- Watchdog: directVpn — проверка egress-IP каждые 15 с; localProxy — TCP-проба прокси каждые 5 с, 3 промаха → `proxy-down` без роняния TUN. Авторестарт с бэкоффом 2/5/10 с, затем post-trial failover по соседним ключам группы.
+
+**Soft Mode (localProxy)** — без админ-прав: прямое локальное SOCKS5/HTTP-проксирование. TCP-проба upstream + `validateProxyFullTunnel` (curl-гонка через прокси vs прямой IP — проверка, что прокси не отдаёт мой же IP). Автоконфиг окружения разработчика: Android Studio, Git, Gradle, переменные `HTTP_PROXY`/`HTTPS_PROXY` в `HKCU\Environment` (для SOCKS5 пишется `socks5h://`, чтобы DNS тоже шёл через прокси).
+
+**Connection Planner** — pre-start зонд одним комбинированным PowerShell-скриптом (TUN + loopback + правила VPNTE), вердикт `ready/protected/blocked/broken` с рекомендацией режима.
+
+## Протоколы
+
+Реально поддерживаются парсером `vpnProfiles.ts` (подписки, ключи, экспорт URI): **VLESS** (XTLS-Reality через xray; Vision/gRPC/WebSocket через sing-box), **WireGuard**, **Hysteria2**, **TUIC**, **Shadowsocks** (в т.ч. 2022 AEAD, SIP002), **VMess** (AEAD, `alterId: 0`), **Trojan**, **Naive**, **AnyTLS**, **ShadowTLS**. uTLS-отпечаток `chrome`, `record_fragment` в stealth для non-Reality.
+
+## DNS
+
+- Перехват: правило `{ protocol: 'dns', action: 'hijack-dns' }` — весь DNS из TUN идёт в резолвер sing-box. Стратегия `ipv4_only`; TUN IPv4-only, IPv6-утечки закрываются kill-switch + lockdown.
+- DoH через туннель (`1.1.1.1` cloudflare-dns.com, `8.8.8.8` dns.google), plain-DNS — TCP/53 через туннель, DoT — через туннель.
+- Bootstrap: UDP напрямую к DNS физических адаптеров или `1.1.1.1`/`8.8.8.8` для резолва имени VPN-сервера до поднятия туннеля — **имя сервера при этом видно провайдеру** (известное ограничение).
+- Smart RU: `dns-direct` к pre-lockdown DNS для `.ru/.su/.рф` и gov-ru (чтобы geoip-ru видел реальные RU IP).
+
+## Kill-switch (WFP)
+
+- `DefaultOutboundAction=Block` на трёх профилях (Domain/Private/Public) — вместо Block-правил по интерфейсу (старый подход блокировал сам sing-box, т.к. Block всегда побеждает Allow).
+- Allow-правила `VPNTE-killswitch-*`: exe sing-box, exe приложения, владельцы upstream-прокси (Happ `xray.exe` и т.п.), TUN по `-InterfaceAlias`, loopback v4/v6, LAN, DHCP (UDP 67/68), NTP (UDP 123 — часы для REALITY/TLS), пользовательские IP/CIDR.
+- Манифест отката в `%ProgramData%\VPNTE\manifests\` (DACL SYSTEM/Admins, атомарная запись temp+rename), crash-recovery при старте приложения.
+- Granular: `off` / `standard` (блок при обрыве VPN) / `strict` (блок всегда вне VPN). Ядерный `nuclearFirewallReset` (бэкап `.wfw` + `netsh advfirewall reset`).
+- Fail-closed: при падении туннеля kill-switch **намеренно остаётся** до авторестарта/failover.
+
+## Маршрутизация
+
+Порядок правил sing-box (упрощённо): `mixed-direct-in` (127.0.0.1) → direct (диагностика) → `live-check-in` → proxy-out (health-пробы) → процессы прокси-ядер (Happ.exe, xray.exe…) → direct (анти-петля) → UDP/443 → reject (TCP-only outbound) → `hijack-dns` → `ip_is_private` → direct (**строго после** hijack, чтобы DNS на шлюз перехватывался) → весь UDP → reject (directVpn + TCP-only) → STUN 19302/3478 → proxy-out (анти-WebRTC) → пользовательские доменные правила → Smart RU (IP-чекеры/Google/медиа → proxy-out; gov-ru/geosite/geoip-ru → direct-out по локальным `geoip-ru.srs`, `geosite-category-gov-ru.srs`) → final → proxy-out.
+
+Split tunneling — по **имени процесса** (direct/vpn/none), hot-reload через рестарт без снятия защиты. Честная оговорка: ТЗ требует абсолютный путь процесса (имя подвержено подмене) — пока расхождение.
+
+## Форензика трафика
+
+- Сессии: elevated `pktmon` (провайдеры TCPIP/WFP/Winsock-AFD/WebIO, circular capture 128–2048 MiB, default 512), fallback — `netsh trace`. Хранилище `<userData>/traffic-forensics/sessions/<timestamp>`, retention 1–10 сессий (default 3).
+- **Rust ETW-сайдкар** (`native/vpnte-etw-sidecar/`, `ferrisetw`): 5 провайдеров (TCPIP, DNS-Client, WFP, Winsock-AFD, WebIO), heartbeat каждые 30 с, лимит 250 000 data-событий с backpressure, только метаданные (5-tuple, DNS-имена — не пейлоады), стабильная kernel-сессия `VPNTE-ETW` с reclaim осиротевшей. Честная оговорка: PowerShell-фолбэк (`vpnte-etw-sidecar.ps1`) — это поллинг Event Log, а не настоящий ETW, и на части систем теряет события.
+- Summary: `summary.json`, `timeline.ndjson`, `flows.ndjson`, `dns.ndjson`, `drops.ndjson`, `tcp-health.ndjson`, вердикты (`leak`, `TUN path`, `kill-switch block`, `reset`, `timeout/loss`, `MTU`, `sing-box failure`, `insufficient evidence`).
+- Zombie recovery протухших `running: true`, 30-секундный warmup без варнингов, stop-артефакты переопределяют stale-статусы.
+- Экспорт — с redaction: IPv4/IPv6/MAC/домены → стабильные токены, raw ETL/PCAPNG не экспортируются, маппинг токенов не сохраняется.
+
+## Диагностика и UI
+
+10 страниц: Dashboard, Servers, SpeedTest, Availability, TrafficHistory, Schedule, Settings, Logs, Maintenance, SplitTunnel. React 18 + Zustand (IPC-first стор, без кешей), i18n ru/en (~615 ключей).
+
+- **DiagnosticsCard**: активный leak self-test (`curl.exe --interface <IPv4 физ. адаптера>` к api.ipify.org — leak, если физ. адаптер вышел в интернет или его IP ≠ TUN IP), routing self-test (VPN-путь vs direct-путь через `mixed-direct-in`), статус ETW-сайдкара (движок, категории, топ-домены, heartbeat), экспорт диагностики в ZIP, рестарт форензики.
+- `runSystemDiagnostics()`: runtime, TUN, DNS, адаптеры, маршруты, процессы/листенеры, endpoints, службы Windows, логи, forensics status.
+- Browser hardening (реестр WebRTC-policy Chromium + `user_pref` Firefox) — это **не** Browser Boxes, их нет (см. ниже).
+
+## Автоматизация
+
+- **Scheduler**: окна `[start, end)`, overnight-привязка к предыдущему дню, горизонт 7 дней.
+- **AutoPilot**: трогает только собственный VPNTE TUN, требует рабочий прокси перед стартом TUN, при failure восстанавливает baseline.
+- **Rotation**: интервал 5–1440 мин, sequential/random, reconnect через `restartProtected`. Честная оговорка: commit профиля происходит **до** успешного reconnect — атомарного health-before-commit пока нет.
+- **keyHealthChecker**: изолированный sing-box/xray во временной директории, HTTPS через профиль к Cloudflare/Yandex/Gstatic, timeout 8 с, concurrency 5.
+- **ipMonitor**: racing по Cloudflare trace / ipify / icanhazip / myip.com, poll 30 с, колбэк только при смене IP.
+- **liveServerProbe**: глубокие DNS/TCP/TLS/HTTP-пробы, traceroute, throughput — ручная диагностика из UI, **не** гейт выбора сервера.
+
+## External Proxy Control API
+
+Локальный REST на `127.0.0.1:17873`:
+- `GET /api/external-proxy/status`, `/instances`, `/list`
+- `POST /api/external-proxy/start`, `/rotate`, `/stop`
+- 10 независимых слотов: слот 1 → порт `17990`, слоты 2–10 → `17991`..`17999`. Мутирующие запросы — заголовок `X-VPNTE-Control-Token` (файл `%APPDATA%\VPN Tunnel Enforcer\external-proxy-control-token`).
+
+## Безопасность: что есть и чего нет
+
+**Есть:** валидация IPC (~170 методов в preload: лимиты 4 КБ текст / 256 КБ VPN-ввод / 500 элементов; `requireString/requirePort/...` в main); долгоживущий elevated PowerShell-хелпер с allowlist командлетов (блок `Invoke-Expression`, сетевых запросов, `route add`); pid-супервизор дочерних процессов (убиваются только «свои» по exePath+commandLine); ACL-hardening рантайм-директории до копирования бинарей; транзакционные манифесты отката; Boot Recovery — scheduled task `VPNTE Boot Recovery` (ONSTART, SYSTEM) → `vpnte-recover.ps1` (чистка orphaned `VPNTE-killswitch*`, восстановление DNS, удаление stale TUN).
+
+**Открыто (известные дефекты):** секреты (UUID/ключи/URL подписок) хранятся в plaintext — DPAPI запланирован (F-001); нет senderFrame-валидации критических IPC-каналов (F-139); ошибка регистрации Boot Recovery task'а проглатывается молча; нет подписи кода; Electron 42 — EOL 20.10.2026, план миграции нужен.
+
+## Что пока не реализовано (план)
+
+Из старого README и ТЗ в коде **отсутствуют** (проверено поиском по `src/`, `scripts/`, `resources/`, `native/`): **AmneziaWG**, **FakeIP**, **DoQ**, **Chromium Browser Boxes** (изолированные инстансы с SOCKS `10801..10850`), ядро **mihomo** (в коде упоминается только как детект конкурирующих клиентов). Это план пакета WP-12 — см. `docs-factory8090/06-ТЗ-исправление-и-развитие.md`. Полное ТЗ — в `docs/` (3 тома).
 
 ---
 
-## 📁 Структура репозитория
+## Структура репозитория
 
 ```
 vpn/
-├── docs/                                 # 🌟 Официальное консолидированное ТЗ (3 тома)
-│   ├── README.md                         # Оглавление и навигация по ТЗ
-│   ├── 01-ТЗ-СЕТЕВОЕ-ЯДРО...md           # Сетевое ядро, протоколы, Wintun, маршрутизация, DNS
-│   ├── 02-ТЗ-СИСТЕМНАЯ-БЕЗОПАСНОСТЬ...md # WFP Kill-Switch, защита от утечек, DPAPI, ОС
-│   └── 03-ТЗ-ЖИЗНЕННЫЙ-ЦИКЛ...md         # Lifecycle, автоматизация, UI/UX, диагностика, CI/CD
-│
-├── docs-factory8090/                     # База знаний и артефакты Software Factory 8090
-│   ├── 00-журнал-аудита.md               # Полный реестр 201 аудиторской находки (F-001..F-201)
-│   ├── 01-обзор/                         # Обзорные документы продукта и требования
-│   ├── 02-фичи/                          # 44 фичи по 10 направлениям (requirements + blueprint)
-│   ├── 03-контейнеры/                    # Архитектурные схемы контейнеров
-│   ├── 04-компоненты/                    # Спецификации компонентов
-│   ├── 05-открытые-вопросы.md            # Реестр 128 вопросов с утверждёнными решениями PO
-│   └── 06-ТЗ-исправление-и-развитие.md   # Комплексное ТЗ устранения дефектов и развития (WP-0..12)
-│
-├── vpn-tunnel-enforcer/                  # 💻 Исходный код приложения (Electron + React)
+├── docs/                                 # ТЗ (3 тома: сетевое ядро / безопасность / жизненный цикл) — план, не факт
+├── docs-factory8090/                     # База знаний: аудит (201 находка: F-001..F-201), 44 фичи, компоненты, открытые вопросы, план WP-0..WP-12
+├── vpn-tunnel-enforcer/                  # Исходный код приложения (Electron + React)
 │   ├── src/
-│   │   ├── main/                         # Главный процесс Electron (сеть, IPC, безопасность)
-│   │   ├── preload/                      # Безопасный контекстный мост (contextBridge)
-│   │   ├── renderer/                     # UI интерфейс (React 18, Tailwind, Fluent UI)
-│   │   └── shared/                       # Общие типы, схемы валидации и утилиты
-│   ├── resources/                        # Встраиваемые бинарники, скрипты и правила SRS
-│   ├── scripts/                          # Скрипты сборки сайдкаров и снапшотов V8
-│   └── package.json                      # Зависимости приложения (версия 1.1.22)
-│
+│   │   ├── main/                         # Главный процесс: сеть, IPC, безопасность, форензика (~270 файлов)
+│   │   ├── preload/                      # contextBridge-мост, валидация аргументов
+│   │   ├── renderer/                     # UI: 10 страниц, компоненты, i18n ru/en
+│   │   └── shared/                       # Общие типы (75 типов IPC), схемы
+│   ├── native/vpnte-etw-sidecar/          # Rust ETW-сайдкар (ferrisetw)
+│   ├── resources/                        # .srs-правила, .ps1/.cmd скрипты, иконки
+│   ├── scripts/                          # build-sidecar.mjs и др.
+│   └── package.json                      # Версия приложения 1.1.22
 ├── sing-box-1.13.8-windows-amd64/        # Вендорный дистрибутив sing-box
 ├── wintun/                               # Драйвер Wintun (заголовки, библиотеки)
-├── package.json                          # Корневой манифест рабочих сценариев монорепозитория
+├── progress.md                           # Журнал выполненных задач
 └── README.md                             # Этот документ
 ```
 
----
+## Требования
 
-## 🛠️ Требования к окружению
+- **ОС:** Windows 10 (сборка 19041+) или Windows 11 x64.
+- **Среда:** Node.js 18+ (рекомендуется 20/22 LTS), npm 9+.
+- **Права:** Hard Mode (Wintun, WFP, адаптеры) требует администратора — UAC-элевация реализована внутри приложения.
 
-- **ОС:** Windows 10 (сборка 19041+) или Windows 11 x64 (рекомендуется).
-- **Среда выполнения:** Node.js 18+ (рекомендуется Node.js 20 LTS / 22 LTS).
-- **Менеджер пакетов:** npm 9+
-- **Права доступа:** Для операций с Wintun, сетевыми адаптерами и WFP требуются права Администратора Windows (UAC-элевация реализована внутри приложения).
-
----
-
-## 🚀 Быстрый старт
-
-### Установка зависимостей
-
-Вы можете запускать команды как из корня репозитория, так и из папки `vpn-tunnel-enforcer`:
+## Быстрый старт
 
 ```bash
-# Установка зависимостей приложения
 cd vpn-tunnel-enforcer
 npm install
+npm run dev        # из корня репозитория тоже работает
 ```
 
-### Запуск в режиме разработки
+> `npm run dev` запускает приложение через `electron-vite`. Открывайте окно Electron, а не браузерный URL Vite — интерфейс использует типизированный IPC-мост `contextBridge`.
+
+## Тесты
+
+138 тест-файлов на Vitest. Текущий прогон: 138 сьютов, 1264 passed, 3 skipped.
 
 ```bash
-# Из корня репозитория:
-npm run dev
-
-# Либо напрямую из каталога приложения:
-cd vpn-tunnel-enforcer
-npm run dev
+npm test                                            # полный набор
+npm --prefix vpn-tunnel-enforcer run test:watch     # watch-режим
+npm --prefix vpn-tunnel-enforcer run test:coverage  # покрытие
+npm run typecheck                                   # tsc --noEmit
 ```
 
-> **Важно:** `npm run dev` запускает приложение через `electron-vite`. Открывайте окно Electron, а не браузерный URL Vite, так как интерфейс использует типизированный IPC-мост `contextBridge`.
-
----
-
-## 🧪 Тестирование
-
-Проект содержит всеобъемлющий набор unit- и integration-тестов на базе **Vitest** (1260+ тестов), покрывающих жизненный цикл, маршрутизацию, парсинг профилей, защиту от утечек и UI-компоненты:
+## Сборка
 
 ```bash
-# Запуск полного набора тестов из корня:
-npm test
-
-# Запуск тестов в режиме отслеживания изменений (watch):
-npm --prefix vpn-tunnel-enforcer run test:watch
-
-# Запуск с отчетом о покрытии кода (coverage):
-npm --prefix vpn-tunnel-enforcer run test:coverage
+npm run dist:win       # NSIS-инсталлятор
+npm run dist:portable  # портативная версия
 ```
 
-Проверка типов TypeScript:
-```bash
-npm run typecheck
-```
+Артефакты — в `vpn-tunnel-enforcer/dist/`, например `VPN-Tunnel-Enforcer-Setup-1.1.22.exe`.
 
----
+> **Важно для сборки:** в `resources/` репозитория **нет** `sing-box.exe`, `xray.exe`, `wintun.dll`, `libcronet.dll`, `vpnte-etw-sidecar.exe` — их нужно положить вручную до `dist`. `npm run build:sidecar` требует Rust/cargo на Windows; без него сборка молча пропускается и в установщик попадёт только PowerShell-фолбэк сайдкара.
 
-## 📦 Сборка и упаковка (Production Build)
+## Лицензия
 
-Сборка оптимизированного Windows-инсталлятора (NSIS) и портативной версии:
-
-```bash
-# Полная сборка Windows-инсталлятора (.exe):
-npm run dist:win
-
-# Сборка портативной версии (Portable):
-npm run dist:portable
-```
-
-Артефакты сборки сохраняются в каталог `vpn-tunnel-enforcer/dist/`:
-- `VPN-Tunnel-Enforcer-Setup-1.1.22.exe` (инсталлятор NSIS с автоматической регистрацией Boot Recovery)
-- `VPN-Tunnel-Enforcer-1.1.22-portable.exe` (портативная сборка)
-
----
-
-## 🔌 Внешний API управления прокси (External Proxy Control API)
-
-Приложение поднимает локальный управляющий REST API на порту `127.0.0.1:17873`:
-
-- `GET /api/external-proxy/status` — текущий статус службы.
-- `GET /api/external-proxy/instances` — список активных инстансов.
-- `GET /api/external-proxy/list` — перечень доступных слотов прокси.
-- `POST /api/external-proxy/start` — запуск выделенного локального прокси.
-- `POST /api/external-proxy/rotate` — ротация серверов в слоте.
-- `POST /api/external-proxy/stop` — остановка инстанса.
-
-API поддерживает 10 независимых слотов: слот 1 по умолчанию слушает порт `17990`, слоты 2–10 используют порты `17991`..`17999`. Мутирующие запросы защищены сессионным токеном `X-VPNTE-Control-Token` (`%APPDATA%\VPN Tunnel Enforcer\external-proxy-control-token`).
-
----
-
-## 📚 Архитектурная документация и ТЗ
-
-Подробная документация сведена в три мастер-тома в папке [`docs/`](docs/):
-
-1. [**Том 1: Сетевое ядро, протоколы, Wintun, маршрутизация и DNS**](docs/01-ТЗ-СЕТЕВОЕ-ЯДРО-ПРОТОКОЛЫ-И-МАРШРУТИЗАЦИЯ.md)
-2. [**Том 2: Системная безопасность, защита от утечек, транзакционный откат и ОС**](docs/02-ТЗ-СИСТЕМНАЯ-БЕЗОПАСНОСТЬ-ЗАЩИТА-ОТ-УТЕЧЕК-И-ОС.md)
-3. [**Том 3: Жизненный цикл, автоматизация, мониторинг, UI/UX и диагностика**](docs/03-ТЗ-ЖИЗНЕННЫЙ-ЦИКЛ-АВТОМАТИЗАЦИЯ-UI-И-ДИАГНОСТИКА.md)
-
----
-
-## 📄 Лицензия
-
-Проект распространяется под лицензией [MIT](LICENSE).
+MIT.
