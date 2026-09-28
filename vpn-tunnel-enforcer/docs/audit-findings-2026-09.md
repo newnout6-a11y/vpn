@@ -1,5 +1,7 @@
 # VPN Tunnel Enforcer: Audit Findings
 
+> **Примечание (2026-09-28):** это исторический отчёт одного прохода аудита. Канонический реестр находок — `docs-factory8090/00-журнал-аудита.md` (F-001…F-210, с разделом «Ревизия 2026-09-28»). При расхождении статусов верить журналу.
+
 Дата отчёта: 2026-09-24  
 Объём: исходники `src/main`, preload/renderer, native sidecar, packaging, тесты, git history, актуальные sing-box/Electron/Node docs через Tavily и проверка гипотез Jev.
 

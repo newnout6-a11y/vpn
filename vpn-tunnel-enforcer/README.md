@@ -24,9 +24,9 @@ Automatically detects local proxies from:
 ### Server Management
 - Groups keys by subscription, preserves removed-but-still-working post-trial keys
 - Subscription refresh with connection-tuple dedup, multi-device support, DoH bypass for blocked URLs
-- End-to-end key health checking through an isolated sing-box outbound for every supported protocol
+- End-to-end key health checking through an isolated probe core — sing-box or xray, chosen per profile engine (`resolveProxyEngine`)
 - Per-profile client device identity (PC/Android/iOS/macOS) with uTLS fingerprint emulation
-- Geolocation via 5-source voting (ip-api.com + ipwho.is + ipinfo.is + ipinfo.io + iplocation.net)
+- Geolocation via 5-source voting (geojs.io batch + ipwho.is + ipinfo.is + ipinfo.io + iplocation.net); ip-api.com intentionally excluded (plaintext HTTP)
 - Export keys to URI (all protocols) or bulk file
 
 ### Smart RU Split Routing
@@ -68,7 +68,7 @@ Automatically detects local proxies from:
 - **Code-split pages**: `React.lazy` + `Suspense` — initial bundle 880 KB (was 1327 KB)
 - **Global toast notifications**: visible on all pages via Zustand store
 - **Micro-interactions**: button hover scale, tap shrink, card hover lift
-- **Auto-save settings**: debounced 1.5s persistence — toggles never lost
+- **Settings persistence**: the main Settings page saves via the «Сохранить» button; notification and kill-switch toggles apply immediately
 - **Hot-reload with notification**: domain routing and split tunneling changes show "Применяем изменения" before tunnel restart
 
 ## Prerequisites
@@ -109,7 +109,7 @@ Open the Electron window, not the plain Vite URL — the renderer expects the pr
 npm run dist:win
 ```
 
-Installer: `dist/VPN-Tunnel-Enforcer-Setup-1.1.0.exe` (~112 MB)
+Installer: `dist/VPN-Tunnel-Enforcer-Setup-<version>.exe` (current `1.1.22`, ~112 MB)
 
 Portable: `npm run dist:portable`
 
@@ -160,6 +160,10 @@ Packaged builds include `vpnte-proxy.ps1` and `vpnte-proxy.cmd`. The app listens
 | `/healthcheck` | POST | Yes | Run an immediate data-plane check for one slot |
 | `/profiles/healthcheck` | POST | Yes | Check every profile in `?groupId=...` and persist live/dead status |
 | `/stop` | POST | Yes | Kill proxy process (`?slot=1..47546`) |
+| `/connect-profiles` | POST | Yes | Batch start by profile ids |
+| `/instances/prewarm` | POST | Yes | Pre-stage runtime for a slot |
+| `/instances/status-batch` | POST | Yes | Batch status refresh |
+| `/instances/reserve` / `/renew` / `/release` | POST | Yes | Slot leases (TTL ~1h, dropped on restart) |
 
 Token: `X-VPNTE-Control-Token` header, generated per session, written to `%APPDATA%\VPN Tunnel Enforcer\external-proxy-control-token`. `vpnte-proxy.ps1` reads the endpoint file automatically and also accepts `VPNTE_CONTROL_URL` as an override.
 
@@ -171,7 +175,7 @@ Each `/list` row includes `status` (`online`, `offline`, or `unknown`), `lastChe
 
 ## Boot-Time Recovery
 
-`vpnte-recover.ps1` runs at system startup (before user logon) as a scheduled task with SYSTEM privileges. It restores:
+`vpnte-recover.ps1` runs at system startup (before user logon) as a scheduled task with SYSTEM privileges. **Known defect (F-202/F-203):** in packaged builds the task registration currently points at a non-existent path and its `schtasks /TR` quoting is broken, so recovery may not be registered — fix is planned in WP-3. When registered, it restores:
 
 - Firewall `DefaultOutboundAction` to Allow + removes VPNTE rules
 - DNS server addresses to DHCP (resets VPNTE resolver pinning)
@@ -185,7 +189,7 @@ Each `/list` row includes `status` (`online`, `offline`, or `unknown`), `lastChe
 ## Tech Stack
 
 - **Electron 42** + React 18 + electron-vite 3
-- TypeScript 5.9
+- TypeScript 5.4 (`^5.4.0` in package.json)
 - Zustand for shared renderer state
 - TailwindCSS 3 + class-variance-authority + framer-motion
 - sing-box 1.13 + Wintun (TUN adapter)

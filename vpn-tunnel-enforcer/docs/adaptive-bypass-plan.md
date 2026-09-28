@@ -1,6 +1,6 @@
 # Adaptive Bypass Autopilot
 
-Status: draft. No implementation has started.
+Status: implemented (2026-07-10, см. `adaptive-bypass-implementation-log.md`). Этот документ остаётся проектным контрактом фичи. Известные расхождения плана и кода зафиксированы в журнале аудита (F-126, F-127: нет единого координатора с отменой, одна эталонная точка, другой формат IPC-статуса) и закрываются в WP-10.
 
 ## Goal
 

@@ -1,5 +1,7 @@
 # Session Context — VPN Tunnel Enforcer Optimization Session (2026-06-28)
 
+> **Архив:** рабочие заметки одной сессии от 2026-06-28. Не отражает текущее состояние кода; актуальное состояние — в корневом `README.md` и `docs/`. Оставлено как исторический контекст.
+
 ## Overview
 
 Full-day optimization session on the VPN Tunnel Enforcer Electron app. Started with startup performance analysis, progressed through network path investigation, dead code cleanup, security hardening, bug fixing, UI redesign, and multi-client proxy detection.

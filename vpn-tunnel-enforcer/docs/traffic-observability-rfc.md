@@ -646,5 +646,4 @@ evidence-linked conclusions from the data the app already collects.
    fixtures.
 5. Add diagnostics README entries explaining the new normalized files.
 6. Add UI/status surface only after summaries are stable.
-7. Prototype the ETW sidecar after artifact correlation proves its exact input
-   contract.
+7. ~~Prototype the ETW sidecar~~ — **выполнено**: Rust-сайдкар `native/vpnte-etw-sidecar/` реализован и встроен (Phase 4). Открытый остаток: heartbeat не читает счётчик потерянных ETW-событий (F-106).

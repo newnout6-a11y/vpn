@@ -66,5 +66,5 @@
 
 ## Связанные папки и репозитории документации
 
-- [docs-factory8090/](../docs-factory8090/): Полный архивный каталог Software Factory 8090, включающий 44 фичи по подсистемам, журнал аудита находок F-001..F-201 (201 находка), реестр вопросов и архитектурные контейнеры.
+- [docs-factory8090/](../docs-factory8090/): Полный архивный каталог Software Factory 8090, включающий 44 фичи по подсистемам, журнал аудита находок F-001..F-210 (210 находок), реестр вопросов и архитектурные контейнеры.
 - [vpn-tunnel-enforcer/docs/](../vpn-tunnel-enforcer/docs/): Технические RFC и дорожные карты приложения (Censorship Resilience Phases 1-8, Traffic Observability RFC, Adaptive Bypass, Multi-Account Isolation).

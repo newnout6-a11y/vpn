@@ -15,7 +15,7 @@
 
 ```powershell
 # 1. PowerShell от администратора
-cd C:\Users\Redmi\CascadeProjects\windsurf-project-2\vpn-tunnel-enforcer
+cd <корень репозитория>\vpn-tunnel-enforcer
 .\diag\install.ps1
 ```
 

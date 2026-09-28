@@ -39,7 +39,7 @@ Windows-клиент (10/11 x64, версия 1.1.22) для изоляции с
 
 - `DefaultOutboundAction=Block` на трёх профилях (Domain/Private/Public) — вместо Block-правил по интерфейсу (старый подход блокировал сам sing-box, т.к. Block всегда побеждает Allow).
 - Allow-правила `VPNTE-killswitch-*`: exe sing-box, exe приложения, владельцы upstream-прокси (Happ `xray.exe` и т.п.), TUN по `-InterfaceAlias`, loopback v4/v6, LAN, DHCP (UDP 67/68), NTP (UDP 123 — часы для REALITY/TLS), пользовательские IP/CIDR.
-- Манифест отката в `%ProgramData%\VPNTE\manifests\` (DACL SYSTEM/Admins, атомарная запись temp+rename), crash-recovery при старте приложения.
+- Манифест отката — атомарная запись temp+rename, crash-recovery при старте приложения. **Честная оговорка:** сегодня манифест лежит в `%APPDATA%` (`firewall-killswitch/manifest.json`), а не в `%ProgramData%\VPNTE\manifests\` с DACL — переезд туда с жёстким DACL это план ТЗ (F-186).
 - Granular: `off` / `standard` (блок при обрыве VPN) / `strict` (блок всегда вне VPN). Ядерный `nuclearFirewallReset` (бэкап `.wfw` + `netsh advfirewall reset`).
 - Fail-closed: при падении туннеля kill-switch **намеренно остаётся** до авторестарта/failover.
 
@@ -77,15 +77,15 @@ Split tunneling — по **имени процесса** (direct/vpn/none), hot-
 ## External Proxy Control API
 
 Локальный REST на `127.0.0.1:17873`:
-- `GET /api/external-proxy/status`, `/instances`, `/list`
-- `POST /api/external-proxy/start`, `/rotate`, `/stop`
-- 10 независимых слотов: слот 1 → порт `17990`, слоты 2–10 → `17991`..`17999`. Мутирующие запросы — заголовок `X-VPNTE-Control-Token` (файл `%APPDATA%\VPN Tunnel Enforcer\external-proxy-control-token`).
+- `GET /status`, `/instances`, `/list`
+- `POST /start`, `/rotate`, `/connect`, `/connect-profiles`, `/trigger`, `/healthcheck`, `/profiles/healthcheck`, `/stop`, `/instances/prewarm|status-batch|reserve|renew|release`
+- Слоты 1..47546: порт слота = `17990 + slot - 1` (слот 100 → `18089`). Мутирующие запросы — заголовок `X-VPNTE-Control-Token` (файл `%APPDATA%\VPN Tunnel Enforcer\external-proxy-control-token`).
 
 ## Безопасность: что есть и чего нет
 
-**Есть:** валидация IPC (~170 методов в preload: лимиты 4 КБ текст / 256 КБ VPN-ввод / 500 элементов; `requireString/requirePort/...` в main); долгоживущий elevated PowerShell-хелпер с allowlist командлетов (блок `Invoke-Expression`, сетевых запросов, `route add`); pid-супервизор дочерних процессов (убиваются только «свои» по exePath+commandLine); ACL-hardening рантайм-директории до копирования бинарей; транзакционные манифесты отката; Boot Recovery — scheduled task `VPNTE Boot Recovery` (ONSTART, SYSTEM) → `vpnte-recover.ps1` (чистка orphaned `VPNTE-killswitch*`, восстановление DNS, удаление stale TUN).
+**Есть:** валидация IPC (~170 методов в preload: лимиты 4 КБ текст / 256 КБ VPN-ввод / 500 элементов; `requireString/requirePort/...` в main); долгоживущий elevated PowerShell-хелпер с allowlist командлетов (блок `Invoke-Expression`, сетевых запросов, `route add`); pid-супервизор дочерних процессов (убиваются только «свои» по exePath+commandLine); ACL-hardening рантайм-директории до копирования бинарей; транзакционные манифесты отката; Boot Recovery — scheduled task `VPNTE Boot Recovery` (ONSTART, SYSTEM) → `vpnte-recover.ps1` (чистка orphaned `VPNTE-killswitch*`, восстановление DNS, удаление stale TUN) — **в packaged-сборках регистрация задачи сейчас сломана (F-202/F-203), работает только в dev**.
 
-**Открыто (известные дефекты):** секреты (UUID/ключи/URL подписок) хранятся в plaintext — DPAPI запланирован (F-001); нет senderFrame-валидации критических IPC-каналов (F-139); ошибка регистрации Boot Recovery task'а проглатывается молча; нет подписи кода; Electron 42 — EOL 20.10.2026, план миграции нужен.
+**Открыто (известные дефекты):** секреты (UUID/ключи/URL подписок) хранятся в plaintext — DPAPI запланирован (F-001/F-189); нет senderFrame-валидации критических IPC-каналов (F-139); CSP ставится через `onHeadersReceived` и потому не действует на renderer, загруженный через `loadFile` (F-206); Boot Recovery в packaged-сборках сломан — задача указывает на несуществующий путь `resources\resources\vpnte-recover.ps1` и её команда `schtasks /TR` содержит неэкранированные кавычки, ошибка проглатывается (F-202/F-203); нет подписи кода; Electron 42 — EOL 20.10.2026, план миграции нужен.
 
 ## Что пока не реализовано (план)
 
@@ -98,7 +98,7 @@ Split tunneling — по **имени процесса** (direct/vpn/none), hot-
 ```
 vpn/
 ├── docs/                                 # ТЗ (3 тома: сетевое ядро / безопасность / жизненный цикл) — план, не факт
-├── docs-factory8090/                     # База знаний: аудит (185 находок), 44 фичи, компоненты, открытые вопросы, план WP-0..WP-12
+├── docs-factory8090/                     # База знаний: аудит (210 находок F-001…F-210), 44 фичи (88 документов), компоненты, открытые вопросы, план WP-0..WP-12
 ├── vpn-tunnel-enforcer/                  # Исходный код приложения (Electron + React)
 │   ├── src/
 │   │   ├── main/                         # Главный процесс: сеть, IPC, безопасность, форензика (~270 файлов)
@@ -109,8 +109,6 @@ vpn/
 │   ├── resources/                        # .srs-правила, .ps1/.cmd скрипты, иконки
 │   ├── scripts/                          # build-sidecar.mjs и др.
 │   └── package.json                      # Версия приложения 1.1.22
-├── sing-box-1.13.8-windows-amd64/        # Вендорный дистрибутив sing-box
-├── wintun/                               # Драйвер Wintun (заголовки, библиотеки)
 ├── progress.md                           # Журнал выполненных задач
 └── README.md                             # Этот документ
 ```
@@ -133,7 +131,7 @@ npm run dev        # из корня репозитория тоже работ�
 
 ## Тесты
 
-123 тест-файла на Vitest. Последний зафиксированный прогон (`progress.md`, 13.09.2026): 98 сьютов, 950 passed, 3 skipped.
+134 тест-файла на Vitest (1164 теста). Последний прогон в Linux-песочнице (28.09.2026): 1109 passed, 43 failed (преимущественно Windows-специфика: пути/PowerShell), 12 skipped; на Windows набор зелёный. Актуальные итоги — вывод `npm test`.
 
 ```bash
 npm test                                            # полный набор

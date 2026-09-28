@@ -1,5 +1,7 @@
 # Roadmap: censorship resilience and next protocol/features pass
 
+> **Статус (актуализировано 2026-09-28):** исследовательский документ. Фаза 1 выполнена (sing-box обновлён до 1.13.13 — см. `censorship-resilience-phases/phase-01-sing-box-upgrade.md`); остальные фазы — планы. Текущие статусы фаз — только в `censorship-resilience-phases/*.md`, при расхождении с этим файлом верить фазам. Находки по рассинхрону: F-174, F-175.
+
 ## Goal
 
 Make VPN Tunnel Enforcer materially stronger against modern blocking while keeping
@@ -35,7 +37,7 @@ Strong points already present:
 Current architectural limits:
 
 - transport import is still narrow: `ws`, `grpc`, `httpupgrade`, `http/h2`
-- no parser/import path for `wireguard` or `amneziawg`
+- `wireguard://` URI импортируется/экспортируется, но runtime sing-box 1.13 его не принимает (legacy outbound, F-047); `amneziawg` — нет ни импорта, ни runtime
 - no full remote rule-provider channel management beyond the current managed Smart-RU cache
 - no proxy chaining / bootstrap chaining model similar to `dialer-proxy`
 - no ECH-first UX or validation surface
@@ -63,7 +65,7 @@ Why:
 
 What changed upstream that is relevant:
 
-- latest stable is newer than your bundled `sing-box-1.13.8-windows-amd64`
+- latest stable is newer than the bundled sing-box 1.13.x (`resources/sing-box.exe`; устаревший каталог-заглушка `sing-box-1.13.8-windows-amd64/` удалён из репозитория 2026-09-28)
 - `1.13.12` updated NaiveProxy
 - `1.14.0-alpha.26` adds Hysteria2 `gecko` obfuscation
 - sing-box docs expose remote rule-set refresh, Naive outbound, ECH in TLS, and
