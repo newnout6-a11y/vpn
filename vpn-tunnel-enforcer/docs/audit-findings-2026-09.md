@@ -129,7 +129,7 @@ Wizard хранит `selectedMode` (`hard`, `soft`, `direct`), но `handleFinis
 
 ### 15. URL availability делает слишком сильный вывод
 
-**Статус: исправлено.** Без VPN-измерения verdict теперь `unknown`.
+**Статус: исправлено частично (уточнено ревизией 2026-09-28).** Общий случай без VPN-измерения даёт verdict `unknown`, но исключение осталось: при `tunnel === null` и direct-ответе 401/403 `deriveVerdict` по-прежнему возвращает `works-only-with-vpn` (`urlAvailability.ts`, ветка `!tunnel && direct`), хотя VPN-путь не измерялся. Снятие исключения 401/403 — в WP-7 (F-085).
 
 При `tunnel === null` и недоступном direct report verdict может стать `works-only-with-vpn`, хотя VPN вообще не был измерен.
 
