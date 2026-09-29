@@ -666,12 +666,41 @@ Write-Output "SAVED:$savedJson"
     }
   }
 
-  await writeManifest({
-    createdAt: Date.now(),
-    ruleNames: installedRules,
-    singboxExePath: opts.singboxExePath,
-    savedProfiles
-  })
+  try {
+    await writeManifest({
+      createdAt: Date.now(),
+      ruleNames: installedRules,
+      singboxExePath: opts.singboxExePath,
+      savedProfiles
+    })
+  } catch (error: any) {
+    // The firewall transaction is not committed until its recovery manifest
+    // is durable. Compensate immediately instead of leaving Block active with
+    // no authoritative baseline.
+    const restoreLines = savedProfiles.map(
+      profile =>
+        `Set-NetFirewallProfile -Profile '${profile.name}' -DefaultOutboundAction ${profile.defaultOutbound} -ErrorAction Continue`
+    )
+    try {
+      await ps(
+        `${restoreLines.join('\n')}\n` +
+        `Get-NetFirewallRule -DisplayName '${RULE_PREFIX}*' -ErrorAction SilentlyContinue | ` +
+        'Remove-NetFirewallRule -ErrorAction SilentlyContinue',
+        true,
+        30000
+      )
+    } catch (rollbackError) {
+      logEvent('error', 'firewall-killswitch', 'manifest commit and compensating rollback both failed', {
+        manifestError: error?.message || String(error),
+        rollbackError: rollbackError instanceof Error ? rollbackError.message : String(rollbackError)
+      })
+    }
+    return {
+      success: false,
+      message: 'Kill-switch отменён: не удалось надёжно записать recovery manifest',
+      details: error?.message || String(error)
+    }
+  }
 
   logEvent('info', 'firewall-killswitch', 'kill-switch engaged (DefaultOutboundAction=Block)', {
     ruleNames: installedRules,

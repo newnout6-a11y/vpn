@@ -273,29 +273,45 @@ async function rollbackTunNetworkBaselineUnlocked(): Promise<SystemNetworkResult
     }
   }
 
-  try {
-    if (manifest.internetSettingsBackup) {
-      await exec(`reg import "${manifest.internetSettingsBackup}"`, { windowsHide: true, timeout: 15000 })
+  const failures: string[] = []
+  const runStep = async (name: string, operation: () => Promise<unknown>) => {
+    try {
+      await operation()
+      logEvent('info', 'system-network', 'baseline rollback step succeeded', { name })
+    } catch (error: any) {
+      const message = error?.message || String(error)
+      failures.push(`${name}: ${message}`)
+      logEvent('error', 'system-network', 'baseline rollback step failed; continuing', { name, message })
     }
-    if (manifest.environmentBackup) {
-      await exec(`reg import "${manifest.environmentBackup}"`, { windowsHide: true, timeout: 15000 })
-    }
-    if (manifest.hklmConnectionsBackup) {
-      await execElevated(`reg import "${manifest.hklmConnectionsBackup}"`, { timeout: 15000 })
-    }
-    await notifyWinInetSettingsChanged()
+  }
+
+  if (manifest.internetSettingsBackup) {
+    await runStep('HKCU Internet Settings', () =>
+      exec(`reg import "${manifest.internetSettingsBackup}"`, { windowsHide: true, timeout: 15000 }))
+  }
+  if (manifest.environmentBackup) {
+    await runStep('HKCU Environment', () =>
+      exec(`reg import "${manifest.environmentBackup}"`, { windowsHide: true, timeout: 15000 }))
+  }
+  if (manifest.hklmConnectionsBackup) {
+    await runStep('HKLM Connections', () =>
+      execElevated(`reg import "${manifest.hklmConnectionsBackup}"`, { timeout: 15000 }))
+  }
+  await runStep('WinINet settings notification', () => notifyWinInetSettingsChanged())
+
+  if (failures.length === 0) {
     await clearManifest()
     return {
       success: true,
       message: 'Сетевые настройки восстановлены из backup',
       details: `Backup created at: ${new Date(manifest.createdAt).toLocaleString()}`
     }
-  } catch (err: any) {
-    return {
-      success: false,
-      message: err.message || String(err),
-      details: err.stderr || err.stdout
-    }
+  }
+  return {
+    success: false,
+    message: 'Сетевые настройки восстановлены частично; manifest сохранён для повторного отката',
+    details: failures.join(' | '),
+    warnings: failures
   }
 }
 

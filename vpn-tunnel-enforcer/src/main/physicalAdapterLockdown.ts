@@ -36,6 +36,7 @@ import { join } from 'path'
 import { execElevated } from './admin'
 import { execElevatedPs, isElevatedPsHelperRunning } from './elevatedPsHelper'
 import { logEvent } from './appLogger'
+import { ensureElevatedRuntimeDirHardened } from './runtimeDirSecurity'
 import { ALL_KNOWN_ALIASES, LEGACY_TUN_IPV4_PREFIX, TUN_ADAPTER_ALIAS, TUN_IPV4_GATEWAY, TUN_IPV4_PREFIX, TUN_IPV4_RESOLVER, getTunAdapterAlias } from './tunAdapter'
 
 const MANIFEST_BASENAME = 'latest-physical-adapter-lockdown.json'
@@ -145,7 +146,9 @@ function programDataManifestPath(): string {
 }
 
 async function readManifest(): Promise<LockdownManifest | null> {
-  const paths = [programDataManifestPath(), manifestPath()]
+  // ProgramData is authoritative. The userData copy is diagnostic only and
+  // must never drive elevated rollback.
+  const paths = [programDataManifestPath()]
   for (const path of paths) {
     try {
       if (existsSync(path)) {
@@ -198,12 +201,18 @@ async function writeManifest(m: LockdownManifest): Promise<void> {
   // 2. Write to ProgramData for cross-session & SYSTEM boot recovery
   try {
     const pdTarget = programDataManifestPath()
-    await mkdir(join(getProgramDataPath(), 'VPN-Tunnel-Enforcer'), { recursive: true })
+    const pdDir = join(getProgramDataPath(), 'VPN-Tunnel-Enforcer')
+    await mkdir(pdDir, { recursive: true })
+    const acl = await ensureElevatedRuntimeDirHardened(pdDir, 'recovery-manifest')
+    if (!acl.hardened && !acl.skipped) {
+      throw new Error(`ProgramData recovery manifest directory is not trusted: ${acl.message}`)
+    }
     const pdTmp = pdTarget + '.tmp'
     await writeFile(pdTmp, payload, 'utf-8')
     await rename(pdTmp, pdTarget)
   } catch (err) {
-    logEvent('warn', 'phys-lockdown', 'writing ProgramData manifest failed', err)
+    logEvent('error', 'phys-lockdown', 'writing trusted ProgramData manifest failed', err)
+    throw err
   }
 }
 
@@ -544,17 +553,8 @@ export async function applyPhysicalAdapterLockdown(tunDnsIpv4: string, options: 
     snapshotDnsRegistryPolicy()
   ])
   if (adapters.length === 0) {
-    logEvent('warn', 'phys-lockdown', 'no physical adapters to lock down — nothing to do')
-    const transitionWarnings = await applyTransitionAdapterLockdown(transitionAdapters)
-    await writeManifest({
-      appliedAt: Date.now(),
-      tunDnsIpv4,
-      forceDns,
-      adapters,
-      transitionAdapters,
-      dnsRegistryPolicy
-    })
-    return { applied: true, adapters: 0, warnings: ['no physical adapters found', ...transitionWarnings] }
+    logEvent('error', 'phys-lockdown', 'lockdown not checked: no physical adapters were discovered')
+    return { applied: false, adapters: 0, warnings: ['no physical adapters found; lockdown was not applied'] }
   }
 
   // Write a PENDING manifest BEFORE we touch any adapter. If the app crashes

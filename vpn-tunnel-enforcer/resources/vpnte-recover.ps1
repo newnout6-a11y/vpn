@@ -24,23 +24,35 @@ function Log([string]$msg) {
 
 Log "=== Boot-time recovery started ==="
 
-# Search candidate locations for adapter lockdown manifest:
-# 1. ProgramData (canonical cross-session / SYSTEM-accessible location)
-# 2. ProgramData with space in name
-# 3. Current user / SYSTEM APPDATA
-# 4. User profile directories under C:\Users\*\AppData\Roaming\vpn-tunnel-enforcer
-$candidatePaths = @(
-    (Join-Path $programData 'VPN-Tunnel-Enforcer\latest-physical-adapter-lockdown.json'),
-    (Join-Path $programData 'VPN Tunnel Enforcer\latest-physical-adapter-lockdown.json')
-)
-if ($env:APPDATA) {
-    $candidatePaths += (Join-Path $env:APPDATA 'vpn-tunnel-enforcer\latest-physical-adapter-lockdown.json')
-}
-$userProfiles = Get-ChildItem 'C:\Users\*\AppData\Roaming\vpn-tunnel-enforcer\latest-physical-adapter-lockdown.json' -ErrorAction SilentlyContinue
-if ($userProfiles) {
-    foreach ($p in $userProfiles) {
-        $candidatePaths += $p.FullName
+# ProgramData is the sole authoritative recovery source. Never execute
+# manifest-derived SYSTEM actions from user-writable AppData.
+$trustedManifestDir = Join-Path $programData 'VPN-Tunnel-Enforcer'
+$candidatePaths = @()
+try {
+    $acl = Get-Acl -LiteralPath $trustedManifestDir -ErrorAction Stop
+    $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+    $allowed = @('S-1-5-18', 'S-1-5-32-544')
+    $writeMask = [System.Security.AccessControl.FileSystemRights]::Write -bor
+                 [System.Security.AccessControl.FileSystemRights]::Modify -bor
+                 [System.Security.AccessControl.FileSystemRights]::FullControl -bor
+                 [System.Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+                 [System.Security.AccessControl.FileSystemRights]::TakeOwnership
+    $unsafeRule = $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) |
+        Where-Object {
+            $_.AccessControlType -eq 'Allow' -and
+            $allowed -notcontains $_.IdentityReference.Value -and
+            (($_.FileSystemRights -band $writeMask) -ne 0)
+        } |
+        Select-Object -First 1
+    if (-not $acl.AreAccessRulesProtected -or $allowed -notcontains $owner -or $unsafeRule) {
+        Log "SECURITY: ignored recovery manifest directory with untrusted ACL: $trustedManifestDir"
+        $hasWarnings = $true
+    } else {
+        $candidatePaths += (Join-Path $trustedManifestDir 'latest-physical-adapter-lockdown.json')
     }
+} catch {
+    Log "SECURITY: recovery manifest ACL validation failed: $_"
+    $hasWarnings = $true
 }
 
 $adapterManifestPath = $null
@@ -291,12 +303,14 @@ foreach ($u in $loadedUsers) {
     }
 }
 
-# 8. Remove stale TUN adapter if present
-$tunAliases = @('Ethernet 5', 'VPNTE-TUN')
-foreach ($alias in $tunAliases) {
-    $tun = Get-NetAdapter -Name $alias -ErrorAction SilentlyContinue
+# 8. Remove stale Wintun adapters by driver identity, never by a hard-coded
+# alias that a physical NIC may legitimately have.
+$staleTuns = Get-NetAdapter -ErrorAction SilentlyContinue |
+    Where-Object { $_.InterfaceDescription -match 'Wintun' }
+foreach ($tun in $staleTuns) {
+    $alias = $tun.Name
     if ($tun) {
-        Log "TUN: removing stale adapter '$alias'"
+        Log "TUN: removing stale Wintun adapter '$alias'"
         try {
             Remove-NetAdapter -Name $alias -Confirm:$false -ErrorAction Stop
             Log "TUN: successfully removed adapter '$alias'"

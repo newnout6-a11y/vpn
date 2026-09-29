@@ -286,7 +286,9 @@ function normalizeSettings(input: Partial<AppSettings> | undefined): AppSettings
     locationPrivacyEnabled: Boolean(merged.locationPrivacyEnabled),
     domainEnrichmentEnabled: Boolean(merged.domainEnrichmentEnabled),
     autoNetworkBaseline: Boolean(merged.autoNetworkBaseline),
-    firewallKillSwitch: merged.firewallKillSwitch !== false,
+    // Security-sensitive and invasive: absent/malformed input never opts the
+    // user into a system-wide firewall block.
+    firewallKillSwitch: merged.firewallKillSwitch === true,
     advancedMode: Boolean(merged.advancedMode),
     firstRunComplete: Boolean(merged.firstRunComplete),
     autoRestartOnCrash: merged.autoRestartOnCrash !== false,
@@ -335,6 +337,19 @@ function normalizeSettings(input: Partial<AppSettings> | undefined): AppSettings
 
 let bootRecoveryTaskEnsured = false
 
+export function getBootRecoveryScriptPath(packaged = app.isPackaged): string {
+  return packaged
+    ? join(process.resourcesPath, 'vpnte-recover.ps1')
+    : join(process.cwd(), 'resources', 'vpnte-recover.ps1')
+}
+
+export function buildBootRecoveryTaskCommand(recoverScript: string): string {
+  const script = `& '${recoverScript.replace(/'/g, "''")}'`
+  const encoded = Buffer.from(script, 'utf16le').toString('base64')
+  const taskAction = `powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded}`
+  return `schtasks /Create /TN "VPNTE Boot Recovery" /SC ONSTART /RU SYSTEM /RP "" /TR "${taskAction}" /F`
+}
+
 function applyLoginItem(autoStart: boolean, options: { ensureBootRecovery?: boolean } = {}) {
   if (process.platform === 'win32' && app.isPackaged) {
     const taskName = 'VPN Tunnel Enforcer'
@@ -348,14 +363,22 @@ function applyLoginItem(autoStart: boolean, options: { ensureBootRecovery?: bool
     execElevated(command, { timeout: 15000 }).catch(() => undefined)
 
     if (options.ensureBootRecovery && !bootRecoveryTaskEnsured) {
+      // Reserve immediately so multiple settings operations in the same tick
+      // cannot race and register the task twice. A failure clears the flag and
+      // permits a later retry.
       bootRecoveryTaskEnsured = true
       // Register boot-time recovery task once per app process. It is
       // independent of autoStart and restores network settings if a crash or
       // BSOD left firewall/DNS state pinned.
-      const recoverScript = join(app.isPackaged ? process.resourcesPath : process.cwd(), 'resources', 'vpnte-recover.ps1')
-      const recoverCmd = `powershell -NoProfile -ExecutionPolicy Bypass -File "${recoverScript}"`
-      const recoverTask = `schtasks /Create /TN "VPNTE Boot Recovery" /SC ONSTART /RU SYSTEM /RP "" /TR "${recoverCmd}" /F`
-      execElevated(recoverTask, { timeout: 15000 }).catch(() => undefined)
+      const recoverTask = buildBootRecoveryTaskCommand(getBootRecoveryScriptPath(true))
+      void execElevated(recoverTask, { timeout: 15000 })
+        .then(() => {
+          bootRecoveryTaskEnsured = true
+        })
+        .catch((error) => {
+          bootRecoveryTaskEnsured = false
+          console.error('[settings] VPNTE Boot Recovery task registration failed', error)
+        })
     }
 
     return

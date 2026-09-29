@@ -24,11 +24,13 @@ describe('boot recovery script source regressions', () => {
     expect(script).toContain('$adapterManifest.dnsRegistryPolicy.parallelAandAAAA')
   })
 
-  it('searches ProgramData and all user profiles for lockdown manifest', () => {
+  it('trusts only ACL-verified ProgramData and never user profile manifests', () => {
     const script = scriptSource()
 
-    expect(script).toContain("Join-Path $programData 'VPN-Tunnel-Enforcer\\latest-physical-adapter-lockdown.json'")
-    expect(script).toContain('Get-ChildItem \'C:\\Users\\*\\AppData\\Roaming\\vpn-tunnel-enforcer\\latest-physical-adapter-lockdown.json\'')
+    expect(script).toContain("$trustedManifestDir = Join-Path $programData 'VPN-Tunnel-Enforcer'")
+    expect(script).toContain('Get-Acl -LiteralPath $trustedManifestDir')
+    expect(script).toContain('AreAccessRulesProtected')
+    expect(script).not.toContain("Get-ChildItem 'C:\\Users\\*\\AppData\\Roaming\\vpn-tunnel-enforcer")
     expect(script).toContain('foreach ($cp in $candidatePaths)')
   })
 

@@ -88,7 +88,7 @@ describe('deepTrafficInspectionEnabled default', () => {
     expect(settingsStore.get().deepTrafficInspectionEnabled).toBe(true)
   })
 
-  it('does NOT weaken the default-on safety flags, which use the opposite idiom', async () => {
+  it('keeps default-on flags enabled while kill-switch remains explicit opt-in', async () => {
     // firewallKillSwitch defaults to true: an absent value must stay ON, or a
     // partial patch would quietly disable the kill switch. Same reasoning in
     // reverse — hence two different idioms in one function.
@@ -96,7 +96,7 @@ describe('deepTrafficInspectionEnabled default', () => {
 
     const saved = settingsStore.save({ firewallKillSwitch: undefined })
 
-    expect(saved.firewallKillSwitch).toBe(true)
+    expect(saved.firewallKillSwitch).toBe(false)
     expect(saved.autoRestartOnCrash).toBe(true)
     expect(saved.strictAdapterLockdown).toBe(true)
     // ...while forensics went the other way on the very same call.

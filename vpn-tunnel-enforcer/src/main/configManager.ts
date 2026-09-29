@@ -537,6 +537,8 @@ function writeConfigToStores(config: ConfigExportData, sections: ConfigSection[]
           config.dns.some((d) => d.id === config.activeDnsProfileId)
         ) {
           dnsStore.set('activeProfileId', config.activeDnsProfileId)
+        } else {
+          dnsStore.set('activeProfileId', config.dns[0]?.id ?? null)
         }
         break
       }

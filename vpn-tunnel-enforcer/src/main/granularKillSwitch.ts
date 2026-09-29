@@ -15,6 +15,9 @@
 import { ipcMain, BrowserWindow, dialog, type IpcMainInvokeEvent } from 'electron'
 import Store from 'electron-store'
 import { randomUUID } from 'crypto'
+import { access, realpath } from 'fs/promises'
+import { constants as fsConstants } from 'fs'
+import { isIP } from 'net'
 import {
   enableKillSwitch,
   disableKillSwitchIfActive,
@@ -49,6 +52,7 @@ let exceptions: KillSwitchException[] = store.get('killSwitchExceptions', [])
 let vpnConnected = false
 let singboxExePath: string | null = null
 let initialized = false
+let exceptionMutationQueue: Promise<unknown> = Promise.resolve()
 
 function isVpnConnected(): boolean {
   if (vpnConnected) return true
@@ -95,6 +99,43 @@ function getExceptionIpCidrs(): string[] {
   return exceptions
     .filter((e) => e.type === 'ip')
     .map((e) => e.value)
+}
+
+export async function validateKillSwitchException(
+  exception: Omit<KillSwitchException, 'id'>
+): Promise<Omit<KillSwitchException, 'id'>> {
+  const label = String(exception.label ?? '').trim()
+  if (!label || label.length > 200) throw new Error('exception.label must contain 1-200 characters')
+  const raw = String(exception.value ?? '').trim()
+  if (!raw || raw.length > 2048) throw new Error('exception.value must contain 1-2048 characters')
+
+  if (exception.type === 'ip') {
+    const [address, prefix, extra] = raw.split('/')
+    if (extra !== undefined || !isIP(address)) throw new Error('exception.value must be a valid IP or CIDR')
+    if (prefix !== undefined) {
+      if (!/^\d+$/.test(prefix)) throw new Error('exception.value contains an invalid CIDR prefix')
+      const bits = Number(prefix)
+      const maximum = isIP(address) === 4 ? 32 : 128
+      if (bits < 0 || bits > maximum) throw new Error(`exception.value CIDR prefix must be 0-${maximum}`)
+    }
+    return { type: 'ip', value: prefix === undefined ? address : `${address}/${Number(prefix)}`, label }
+  }
+
+  if (exception.type !== 'app') throw new Error('exception.type must be app or ip')
+  if (!/\.exe$/i.test(raw)) throw new Error('exception.value must point to an .exe file')
+  if (process.platform === 'win32' && !/^(?:[a-z]:\\|\\\\)/i.test(raw)) {
+    throw new Error('exception.value must be an absolute Windows path')
+  }
+  await access(raw, fsConstants.R_OK)
+  const canonical = await realpath(raw)
+  if (!/\.exe$/i.test(canonical)) throw new Error('canonical exception path must point to an .exe file')
+  return { type: 'app', value: canonical, label }
+}
+
+function serializeExceptionMutation<T>(operation: () => Promise<T>): Promise<T> {
+  const next = exceptionMutationQueue.then(operation, operation)
+  exceptionMutationQueue = next.then(() => undefined, () => undefined)
+  return next
 }
 
 // ─── Core Logic ──────────────────────────────────────────────────────────────
@@ -304,41 +345,53 @@ export const granularKillSwitch = {
   /**
    * Add an exception to the list.
    */
-  addException(exception: Omit<KillSwitchException, 'id'>): KillSwitchException {
-    const entry: KillSwitchException = {
-      id: randomUUID(),
-      ...exception
-    }
-    exceptions.push(entry)
-    store.set('killSwitchExceptions', exceptions)
-
-    logEvent('info', 'granular-kill-switch', 'exception added', {
-      id: entry.id,
-      type: entry.type,
-      value: entry.value,
-      label: entry.label
+  async addException(exception: Omit<KillSwitchException, 'id'>): Promise<KillSwitchException> {
+    return serializeExceptionMutation(async () => {
+      const validated = await validateKillSwitchException(exception)
+      const duplicate = exceptions.find(item =>
+        item.type === validated.type &&
+        item.value.toLowerCase() === validated.value.toLowerCase()
+      )
+      if (duplicate) throw new Error('An equivalent kill-switch exception already exists')
+      const previous = [...exceptions]
+      const entry: KillSwitchException = { id: randomUUID(), ...validated }
+      exceptions = [...exceptions, entry]
+      store.set('killSwitchExceptions', exceptions)
+      try {
+        if (await isKillSwitchActive()) await engageKillSwitch('active exception list updated')
+      } catch (error) {
+        exceptions = previous
+        store.set('killSwitchExceptions', exceptions)
+        throw error
+      }
+      logEvent('info', 'granular-kill-switch', 'exception added and synchronized', {
+        id: entry.id, type: entry.type, value: entry.value, label: entry.label
+      })
+      return entry
     })
-
-    return entry
   },
 
   /**
    * Remove an exception from the list by ID.
    */
-  removeException(id: string): void {
-    const index = exceptions.findIndex((e) => e.id === id)
-    if (index === -1) {
-      logEvent('warn', 'granular-kill-switch', `exception not found: ${id}`)
-      return
-    }
-
-    const removed = exceptions.splice(index, 1)[0]
-    store.set('killSwitchExceptions', exceptions)
-
-    logEvent('info', 'granular-kill-switch', 'exception removed', {
-      id: removed.id,
-      type: removed.type,
-      value: removed.value
+  async removeException(id: string): Promise<void> {
+    return serializeExceptionMutation(async () => {
+      const index = exceptions.findIndex((e) => e.id === id)
+      if (index === -1) throw new Error(`Kill-switch exception not found: ${id}`)
+      const previous = [...exceptions]
+      const removed = exceptions[index]
+      exceptions = exceptions.filter(item => item.id !== id)
+      store.set('killSwitchExceptions', exceptions)
+      try {
+        if (await isKillSwitchActive()) await engageKillSwitch('active exception list updated')
+      } catch (error) {
+        exceptions = previous
+        store.set('killSwitchExceptions', exceptions)
+        throw error
+      }
+      logEvent('info', 'granular-kill-switch', 'exception removed and synchronized', {
+        id: removed.id, type: removed.type, value: removed.value
+      })
     })
   }
 }
@@ -397,7 +450,7 @@ export function registerKillSwitchIpc(): void {
 
   handleLogged('kill-switch:add-exception', async (_e, exception: Omit<KillSwitchException, 'id'>) => {
     const raw = requirePlainObject(exception, 'exception')
-    return granularKillSwitch.addException({
+    return await granularKillSwitch.addException({
       type: requireEnum(raw.type, 'exception.type', ['app', 'ip']),
       value: requireString(raw.value, 'exception.value', { maxLength: 2048 }),
       label: requireString(raw.label, 'exception.label', { maxLength: 200 })
@@ -406,7 +459,7 @@ export function registerKillSwitchIpc(): void {
 
   handleLogged('kill-switch:remove-exception', async (_e, id: string) => {
     id = requireString(id, 'id', { maxLength: 200 })
-    granularKillSwitch.removeException(id)
+    await granularKillSwitch.removeException(id)
     return { success: true }
   })
 
