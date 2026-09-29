@@ -299,13 +299,6 @@ export function registerConnectionHistoryIpcHandlers(): void {
   })
 
   ipcMain.handle(
-    'connection-history:add',
-    (_event, entry: Omit<ConnectionLogEntry, 'id'>) => {
-      return connectionHistoryService.addEntry(entry)
-    }
-  )
-
-  ipcMain.handle(
     'connection-history:filter',
     (_event, filters: ConnectionHistoryFilters) => {
       return connectionHistoryService.filter(filters)

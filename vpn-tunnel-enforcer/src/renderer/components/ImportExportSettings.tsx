@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Download, Upload, CheckCircle2, AlertTriangle } from 'lucide-react'
 import { MacCard, MacButton, MacModal } from '../design-system'
+import { confirmSecretExport } from '../utils/secretClipboard'
 
 type ConflictResolution = 'replace' | 'merge'
 
@@ -64,6 +65,7 @@ export function ImportExportSettings() {
   }
 
   const handleExport = async () => {
+    if (!confirmSecretExport('file')) return
     setExporting(true)
     setExportSuccess(false)
     try {

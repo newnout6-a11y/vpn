@@ -39,6 +39,15 @@ vi.mock('electron-store', () => ({
     set(key: string, value: any) {
       storeData.current[this.name][key] = value
     }
+    get path() {
+      return `/tmp/${this.name}.json`
+    }
+    get store() {
+      return storeData.current[this.name]
+    }
+    set store(value: Record<string, any>) {
+      storeData.current[this.name] = value
+    }
   }
 }))
 
@@ -75,6 +84,7 @@ import {
   serverGroupRefreshIntervalMs,
   serverGroups
 } from './serverGroups'
+import { serverPickerStore } from './sharedStores'
 import type { VpnProfile } from './vpnProfiles'
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -99,7 +109,7 @@ function makeVpnProfile(server: string, port: number, name = 'Key'): VpnProfile 
 }
 
 function pickerProfiles() {
-  return storeData.current['server-picker'].profiles as any[]
+  return serverPickerStore.get('profiles', []) as any[]
 }
 
 beforeEach(() => {

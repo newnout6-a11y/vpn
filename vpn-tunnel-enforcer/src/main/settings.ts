@@ -1,8 +1,18 @@
 import { app } from 'electron'
 import Store from 'electron-store'
+import { copyFileSync, existsSync } from 'fs'
 import { join } from 'path'
 import { execElevated } from './admin'
 import { domainEnrichmentService } from './domainEnrichment'
+import {
+  decryptJsonSecret,
+  decryptSecret,
+  encryptJsonSecret,
+  encryptSecret,
+  isSecretEncryptionAvailable,
+  isSecretRef,
+  type SecretRef
+} from './secretStorage'
 
 export interface AppSettings {
   connectionMode: 'localProxy' | 'directVpn'
@@ -161,10 +171,88 @@ const defaults: AppSettings = {
   proxyEngine: 'auto'
 }
 
-const store = new Store<{ settings: AppSettings }>({
+type PersistedAppSettings = Omit<
+  AppSettings,
+  'directVpnInput' | 'directVpnCachedInput' | 'directVpnCachedSource' | 'directVpnCachedProfiles'
+> & {
+  directVpnInput: string | SecretRef
+  directVpnCachedInput: string | SecretRef
+  directVpnCachedSource: string | SecretRef
+  directVpnCachedProfiles: AppSettings['directVpnCachedProfiles'] | SecretRef
+}
+
+const store = new Store<{ settings: PersistedAppSettings | AppSettings; schemaVersion: number; migration?: unknown }>({
   name: 'settings',
-  defaults: { settings: defaults }
+  defaults: { settings: defaults, schemaVersion: 1 }
 })
+
+function hasPlaintextSettingsSecrets(value: PersistedAppSettings | AppSettings): boolean {
+  return Boolean(
+    (typeof value.directVpnInput === 'string' && value.directVpnInput) ||
+    (typeof value.directVpnCachedInput === 'string' && value.directVpnCachedInput) ||
+    (typeof value.directVpnCachedSource === 'string' && value.directVpnCachedSource) ||
+    (Array.isArray(value.directVpnCachedProfiles) && value.directVpnCachedProfiles.length > 0)
+  )
+}
+
+function decodePersistedSettings(value: PersistedAppSettings | AppSettings): AppSettings {
+  return {
+    ...value,
+    directVpnInput: isSecretRef(value.directVpnInput) ? decryptSecret(value.directVpnInput) : value.directVpnInput,
+    directVpnCachedInput: isSecretRef(value.directVpnCachedInput) ? decryptSecret(value.directVpnCachedInput) : value.directVpnCachedInput,
+    directVpnCachedSource: isSecretRef(value.directVpnCachedSource) ? decryptSecret(value.directVpnCachedSource) : value.directVpnCachedSource,
+    directVpnCachedProfiles: isSecretRef(value.directVpnCachedProfiles)
+      ? decryptJsonSecret<AppSettings['directVpnCachedProfiles']>(value.directVpnCachedProfiles)
+      : value.directVpnCachedProfiles
+  }
+}
+
+function encodeSettings(value: AppSettings): PersistedAppSettings {
+  return {
+    ...value,
+    directVpnInput: value.directVpnInput ? encryptSecret(value.directVpnInput) : '',
+    directVpnCachedInput: value.directVpnCachedInput ? encryptSecret(value.directVpnCachedInput) : '',
+    directVpnCachedSource: value.directVpnCachedSource ? encryptSecret(value.directVpnCachedSource) : '',
+    directVpnCachedProfiles: value.directVpnCachedProfiles.length > 0
+      ? encryptJsonSecret(value.directVpnCachedProfiles)
+      : []
+  }
+}
+
+function readSettingsWithMigration(): AppSettings {
+  const persisted = store.get('settings')
+  const decoded = decodePersistedSettings(persisted)
+  if (!hasPlaintextSettingsSecrets(persisted)) return decoded
+  if (!isSecretEncryptionAvailable()) {
+    throw new Error('Settings migration requires Windows secure storage; plaintext data was left unchanged')
+  }
+
+  const backupPath = `${store.path}.pre-safe-storage-v1.bak`
+  if (existsSync(store.path) && !existsSync(backupPath)) copyFileSync(store.path, backupPath)
+  store.store = {
+    settings: encodeSettings(decoded),
+    schemaVersion: 1,
+    migration: {
+      id: 'safe-storage-v1',
+      completedAt: Date.now()
+    }
+  }
+  return decoded
+}
+
+function persistSettings(value: AppSettings): void {
+  const containsSecrets = Boolean(
+    value.directVpnInput ||
+    value.directVpnCachedInput ||
+    value.directVpnCachedSource ||
+    value.directVpnCachedProfiles.length
+  )
+  if (containsSecrets && !isSecretEncryptionAvailable()) {
+    throw new Error('Secure storage is unavailable; settings containing VPN secrets were not written')
+  }
+  store.set('settings', encodeSettings(value))
+  store.set('schemaVersion', 1)
+}
 
 function normalizeSettings(input: Partial<AppSettings> | undefined): AppSettings {
   const merged = { ...defaults, ...(input ?? {}) }
@@ -282,13 +370,13 @@ function applyLoginItem(autoStart: boolean, options: { ensureBootRecovery?: bool
 
 export const settingsStore = {
   get(): AppSettings {
-    return normalizeSettings(store.get('settings'))
+    return normalizeSettings(readSettingsWithMigration())
   },
 
   save(partial: Partial<AppSettings>): AppSettings {
-    const previous = normalizeSettings(store.get('settings'))
+    const previous = normalizeSettings(readSettingsWithMigration())
     const settings = normalizeSettings({ ...previous, ...partial })
-    store.set('settings', settings)
+    persistSettings(settings)
     if (!settings.domainEnrichmentEnabled && previous.domainEnrichmentEnabled) {
       domainEnrichmentService.setEnabled(false)
     }
@@ -299,8 +387,8 @@ export const settingsStore = {
   },
 
   setLoginItem(openAtLogin: boolean): AppSettings {
-    const settings = normalizeSettings({ ...normalizeSettings(store.get('settings')), autoStart: openAtLogin })
-    store.set('settings', settings)
+    const settings = normalizeSettings({ ...normalizeSettings(readSettingsWithMigration()), autoStart: openAtLogin })
+    persistSettings(settings)
     applyLoginItem(settings.autoStart, { ensureBootRecovery: true })
     return settings
   },

@@ -1,11 +1,12 @@
 import { app } from 'electron'
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'http'
-import { access, copyFile, mkdir, stat, writeFile } from 'fs/promises'
+import { access, copyFile, mkdir, rm, stat, writeFile } from 'fs/promises'
 import { join } from 'path'
 import { randomBytes, timingSafeEqual } from 'crypto'
 import { lookup } from 'dns/promises'
 import { isIP } from 'net'
+import { userInfo } from 'os'
 import Store from 'electron-store'
 import { serverPicker } from './serverPicker'
 import { logEvent } from './appLogger'
@@ -607,15 +608,53 @@ function controlEndpointPath(dir = app.getPath('userData')): string {
   return join(dir, CONTROL_ENDPOINT_FILE)
 }
 
+async function hardenWindowsControlToken(path: string): Promise<void> {
+  if (process.platform !== 'win32') return
+  const username = userInfo().username
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(
+      'icacls.exe',
+      [
+        path,
+        '/inheritance:r',
+        '/grant:r',
+        '*S-1-5-18:F',
+        '*S-1-5-32-544:F',
+        `${username}:F`
+      ],
+      { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }
+    )
+    let stderr = ''
+    child.stderr.on('data', chunk => {
+      stderr = `${stderr}${String(chunk)}`.slice(-4096)
+    })
+    child.once('error', reject)
+    child.once('exit', code => {
+      if (code === 0) resolve()
+      else reject(new Error(`icacls rejected control-token ACL (${code}): ${stderr.trim()}`))
+    })
+  })
+}
+
+async function writePrivateControlToken(path: string, token: string): Promise<void> {
+  await writeFile(path, token + '\n', { encoding: 'utf8', mode: 0o600 })
+  try {
+    await hardenWindowsControlToken(path)
+  } catch (error) {
+    await rm(path, { force: true }).catch(() => undefined)
+    throw error
+  }
+}
+
 async function writeControlTokenFiles(token: string): Promise<void> {
   const [primary, ...compat] = controlDiscoveryDirs()
   await mkdir(primary, { recursive: true })
-  await writeFile(controlTokenPath(primary), token + '\n', { encoding: 'utf8', mode: 0o600 })
+  await writePrivateControlToken(controlTokenPath(primary), token)
 
   await Promise.all(compat.map(async (dir) => {
     try {
       await mkdir(dir, { recursive: true })
-      await writeFile(controlTokenPath(dir), token + '\n', { encoding: 'utf8', mode: 0o600 })
+      await writePrivateControlToken(controlTokenPath(dir), token)
     } catch (err) {
       logEvent('warn', 'external-proxy', 'failed to write compatibility control token file', {
         path: controlTokenPath(dir),
@@ -1929,7 +1968,17 @@ function requestControlToken(req: IncomingMessage): string | null {
   return null
 }
 
+export function isTrustedExternalProxyHostHeader(host: string | undefined, localPort: number): boolean {
+  if (!host || !Number.isInteger(localPort) || localPort < 1 || localPort > 65535) return false
+  const normalized = host.trim().toLowerCase()
+  return normalized === `${CONTROL_HOST}:${localPort}` || normalized === `localhost:${localPort}`
+}
+
 async function handleControlRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const localPort = Number(req.socket.localPort)
+  if (!isTrustedExternalProxyHostHeader(req.headers.host, localPort)) {
+    return send(res, 421, controlError('untrusted-host', 'Host header must target the loopback control endpoint'))
+  }
   if (req.method === 'OPTIONS') return send(res, 204, '', true)
   const url = new URL(req.url ?? '/', `http://${CONTROL_HOST}:${EXTERNAL_PROXY_CONTROL_PORT}`)
   const path = url.pathname.replace(/^\/api\/external-proxy/, '')

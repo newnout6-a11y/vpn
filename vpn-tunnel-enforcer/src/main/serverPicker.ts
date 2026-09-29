@@ -21,7 +21,6 @@ import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import axios from 'axios'
 import { randomUUID } from 'crypto'
-import Store from 'electron-store'
 import { logEvent } from './appLogger'
 import { compactForIpcLog } from './ipcLogging'
 import { optionalPlainObject, optionalString, requireEnum, requirePort, requireString } from './ipcValidation'
@@ -50,6 +49,7 @@ import {
 import type { ClientDevice, ServerProfile } from '../shared/ipc-types'
 import { inferCountryMetadata } from '../shared/countries'
 import { reliableSocksTcpPing } from './socksPing'
+import { serverPickerStore as store } from './sharedStores'
 
 const RESOLVED_IP_TTL_MS = 5 * 60_000
 const DNS_RESOLUTION_TIMEOUT_MS = 2500
@@ -74,11 +74,6 @@ function geoLookupDisabled(): boolean {
 
 // ─── Persistent Store ────────────────────────────────────────────────────────
 
-interface ServerPickerStore {
-  profiles: ServerProfile[]
-  activeProfileId: string | null
-}
-
 interface AddProfilesOptions {
   clientDevice?: ClientDevice
 }
@@ -86,14 +81,6 @@ interface AddProfilesOptions {
 const CLIENT_DEVICES = ['pc', 'android', 'ios', 'mac'] as const
 
 const COUNTRY_GEO_VERSION = 3
-
-const store = new Store<ServerPickerStore>({
-  name: 'server-picker',
-  defaults: {
-    profiles: [],
-    activeProfileId: null
-  }
-})
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 

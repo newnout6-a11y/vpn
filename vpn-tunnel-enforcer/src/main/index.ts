@@ -82,6 +82,7 @@ import { registerI18nIpcHandlers } from './i18n'
 import { registerThemeIpcHandlers } from './themeManager'
 import { externalProxy } from './externalProxy'
 import { requirePlainObject, requireStringArray } from './ipcValidation'
+import { installTrustedIpcBoundary } from './ipcSecurity'
 import {
   beginAdaptiveConnection,
   getAdaptiveBypassStatus,
@@ -657,6 +658,7 @@ function createWindow() {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
       backgroundThrottling: false
     },
     // Must track --rgb-bg of the dark theme (themeManager DARK_THEME.background).
@@ -1612,6 +1614,11 @@ async function performCrashRecovery(): Promise<void> {
 Menu.setApplicationMenu(null)
 
 app.whenReady().then(async () => {
+  // Must run before the first feature calls ipcMain.handle. Wrapping the
+  // primitive once prevents future channels from silently omitting the
+  // senderFrame/origin checks required by the trusted boundary.
+  installTrustedIpcBoundary()
+
   logEvent('info', 'app', 'application ready', {
     version: app.getVersion(),
     packaged: app.isPackaged,

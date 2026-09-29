@@ -72,6 +72,32 @@ async function copyIfExists(src: string, dst: string): Promise<boolean> {
   }
 }
 
+const REDACTABLE_DIAGNOSTIC_FILE_RE = /\.(?:json|jsonl|ndjson|log|txt|csv|md|manifest)$/i
+
+export async function redactStagedDiagnostics(root: string): Promise<void> {
+  const entries = await readdir(root, { withFileTypes: true })
+  for (const entry of entries) {
+    const path = join(root, entry.name)
+    if (entry.isDirectory()) {
+      await redactStagedDiagnostics(path)
+      continue
+    }
+    if (!entry.isFile() || !REDACTABLE_DIAGNOSTIC_FILE_RE.test(entry.name)) continue
+
+    const raw = await readFile(path, 'utf8')
+    if (/\.json$/i.test(entry.name)) {
+      try {
+        const parsed = JSON.parse(raw)
+        await writeFile(path, JSON.stringify(redactSensitiveConfig(parsed), null, 2), 'utf8')
+        continue
+      } catch {
+        // Malformed JSON is still text and must pass through the final scrub.
+      }
+    }
+    await writeFile(path, redactSensitiveText(raw), 'utf8')
+  }
+}
+
 function snapshotTimeFromName(name: string): number | null {
   const match = name.match(/^snapshot-(\d{4}-\d{2}-\d{2}T\d{2})-(\d{2})-(\d{2})-(\d{3}Z)-/)
   if (!match) return null
@@ -285,6 +311,12 @@ export async function exportDiagnosticsZip(): Promise<ExportResult> {
       topLevelFiles: topLevelFiles.sort()
     }
     await writeFile(join(stage, 'diagnostics-manifest.json'), JSON.stringify(diagnosticsManifest, null, 2), 'utf-8')
+
+    // Last line of defence: copied manifests, third-party diagnostics and
+    // future staged text files all pass through one final scrub immediately
+    // before compression. This prevents a newly added artifact from silently
+    // bypassing the per-source redaction above.
+    await redactStagedDiagnostics(stage)
 
     const compressScript = `
 $ErrorActionPreference='Stop'

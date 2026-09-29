@@ -1,4 +1,4 @@
-import { execFile as execFileCb } from 'child_process'
+import { execFile as execFileCb, spawn } from 'child_process'
 import { createHash } from 'crypto'
 import { hostname, userInfo } from 'os'
 import { promisify } from 'util'
@@ -8,6 +8,62 @@ import { normalizeServerPort } from '../shared/portValidation'
 import { buildBootstrapRouteAttempts, type BootstrapRouteMode } from './bootstrapRoute'
 
 const execFile = promisify(execFileCb)
+
+/**
+ * Sends request headers through curl's stdin-backed header file (`-H @-`).
+ * Device identifiers, subscription HWIDs and Happ user-agent fingerprints
+ * therefore never appear in the process command line/WMI argv.
+ */
+function execSubscriptionCurl(args: string[], headerLines: string[]): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const child = spawn('curl.exe', args, {
+      windowsHide: true,
+      stdio: ['pipe', 'pipe', 'pipe']
+    })
+    const stdout: Buffer[] = []
+    const stderr: Buffer[] = []
+    let stdoutBytes = 0
+    let settled = false
+    const timeout = setTimeout(() => {
+      child.kill()
+      finish(new Error('curl subscription request timed out'))
+    }, 30_000)
+
+    const finish = (error?: Error) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timeout)
+      if (error) {
+        Object.assign(error, {
+          stdout: Buffer.concat(stdout),
+          stderr: Buffer.concat(stderr)
+        })
+        reject(error)
+      } else {
+        resolve(Buffer.concat(stdout))
+      }
+    }
+
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdoutBytes += chunk.length
+      if (stdoutBytes > 16 * 1024 * 1024) {
+        child.kill()
+        finish(new Error('curl subscription response exceeded 16 MiB'))
+        return
+      }
+      stdout.push(Buffer.from(chunk))
+    })
+    child.stderr.on('data', (chunk: Buffer) => {
+      if (Buffer.concat(stderr).length < 64 * 1024) stderr.push(Buffer.from(chunk))
+    })
+    child.once('error', finish)
+    child.once('exit', code => {
+      if (code === 0) finish()
+      else finish(new Error(`curl subscription request failed with exit code ${code}`))
+    })
+    child.stdin.end(`${headerLines.join('\r\n')}\r\n`, 'utf8')
+  })
+}
 
 export type VpnProtocol =
   | 'vless'
@@ -98,6 +154,7 @@ export interface SubscriptionUserInfo {
 interface FetchAttempt {
   label: string
   args: string[]
+  headerLines: string[]
 }
 
 interface SubscriptionHttpResponse {
@@ -1761,7 +1818,7 @@ export function buildSubscriptionHwid(device: ClientDevice = 'pc'): string {
   return `vpnte-${createHash('sha256').update(seed).digest('hex').slice(0, 32)}`
 }
 
-function subscriptionCommonCurlArgs(device: ClientDevice = 'pc'): string[] {
+function subscriptionCommonHeaders(device: ClientDevice = 'pc'): string[] {
   // X-HWID is what every modern Marzban/Marzneshin-style panel uses to bind a
   // subscription to a specific device. Sosa Connect (sub.sosa.ink) and similar
   // panels return an EMPTY 200 OK when the header is missing — that's the
@@ -1776,27 +1833,27 @@ function subscriptionCommonCurlArgs(device: ClientDevice = 'pc'): string[] {
   // will additionally fall back to no-header attempts.
   const clientDevice = normalizeClientDevice(device)
   const hwid = buildSubscriptionHwid(clientDevice)
-  const args = ['-H', `x-hwid: ${hwid}`]
+  const headers = [`x-hwid: ${hwid}`]
   const profile = DEVICE_HEADER_PROFILES[clientDevice]
-  args.push(
-    '-H', `x-device-os: ${profile.os}`,
-    '-H', `x-ver-os: ${profile.osVersion}`,
-    '-H', `x-device-model: ${profile.model}`
+  headers.push(
+    `x-device-os: ${profile.os}`,
+    `x-ver-os: ${profile.osVersion}`,
+    `x-device-model: ${profile.model}`
   )
-  return args
+  return headers
 }
 
 // Same fetch args but without X-HWID, used as a secondary attempt for panels
 // that would reject unknown device identifiers. Most won't need this branch.
-function subscriptionFallbackCurlArgs(): string[] {
+function subscriptionFallbackHeaders(): string[] {
   return []
 }
 
 function buildFetchAttempts(options: SubscriptionFetchOptions = {}): FetchAttempt[] {
   const clientDevice = normalizeClientDevice(options.clientDevice)
-  const headerSets: Array<{ args: string[]; suffix: string }> = [
-    { args: subscriptionCommonCurlArgs(clientDevice), suffix: '' },
-    { args: subscriptionFallbackCurlArgs(), suffix: ' [no-hwid]' }
+  const headerSets: Array<{ headers: string[]; suffix: string }> = [
+    { headers: subscriptionCommonHeaders(clientDevice), suffix: '' },
+    { headers: subscriptionFallbackHeaders(), suffix: ' [no-hwid]' }
   ]
   const bootstrapAttempts = buildBootstrapRouteAttempts({
     mode: options.bootstrapRouteMode,
@@ -1812,7 +1869,8 @@ function buildFetchAttempts(options: SubscriptionFetchOptions = {}): FetchAttemp
       for (const route of bootstrapAttempts) {
         attempts.push({
           label: `${route.label} (${ua})${headerSet.suffix}`,
-          args: [...route.curlArgs, '--compressed', '-A', ua, ...headerSet.args]
+          args: [...route.curlArgs, '--compressed'],
+          headerLines: [`User-Agent: ${ua}`, ...headerSet.headers]
         })
       }
     }
@@ -1891,9 +1949,9 @@ async function buildDnsBypassAttempts(url: string, options: SubscriptionFetchOpt
   if (!ips.length) return []
   const port = parsed.port || (parsed.protocol === 'https:' ? '443' : '80')
   const clientDevice = normalizeClientDevice(options.clientDevice)
-  const headerSets: Array<{ args: string[]; suffix: string }> = [
-    { args: subscriptionCommonCurlArgs(clientDevice), suffix: '' },
-    { args: subscriptionFallbackCurlArgs(), suffix: ' [no-hwid]' }
+  const headerSets: Array<{ headers: string[]; suffix: string }> = [
+    { headers: subscriptionCommonHeaders(clientDevice), suffix: '' },
+    { headers: subscriptionFallbackHeaders(), suffix: ' [no-hwid]' }
   ]
   const attempts: FetchAttempt[] = []
   for (const headerSet of headerSets) {
@@ -1901,7 +1959,8 @@ async function buildDnsBypassAttempts(url: string, options: SubscriptionFetchOpt
       for (const ip of ips) {
         attempts.push({
           label: `напрямую через DoH ${ip} (${ua})${headerSet.suffix}`,
-          args: ['--noproxy', '*', '--compressed', '-A', ua, ...headerSet.args, '--resolve', `${host}:${port}:${ip}`]
+          args: ['--noproxy', '*', '--compressed', '--resolve', `${host}:${port}:${ip}`],
+          headerLines: [`User-Agent: ${ua}`, ...headerSet.headers]
         })
       }
     }
@@ -2065,7 +2124,7 @@ async function fetchSubscriptionHttpResponse(url: string, attempt: FetchAttempt)
     if (visited.has(currentUrl)) throw new Error('redirect loop while fetching subscription')
     visited.add(currentUrl)
 
-    const { stdout } = await execFile('curl.exe', [
+    const stdout = await execSubscriptionCurl([
       '-sS',
       '--fail',
       // We follow redirects ourselves because some panels redirect to
@@ -2075,16 +2134,13 @@ async function fetchSubscriptionHttpResponse(url: string, attempt: FetchAttempt)
       '-',
       '--max-time',
       '25',
+      '-H',
+      '@-',
       ...attempt.args,
       currentUrl
-    ], {
-      windowsHide: true,
-      timeout: 30000,
-      encoding: 'buffer',
-      maxBuffer: 1024 * 1024 * 16
-    })
+    ], attempt.headerLines)
 
-    const raw = stdout as Buffer
+    const raw = stdout
     const splitIdx = lastIndexOfHeaderTerminator(raw)
     const headerBytes = splitIdx >= 0 ? raw.subarray(0, splitIdx) : Buffer.alloc(0)
     const bodyBytes = splitIdx >= 0 ? raw.subarray(splitIdx + 4) : raw

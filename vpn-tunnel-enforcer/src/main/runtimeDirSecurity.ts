@@ -31,10 +31,10 @@
  * carries that group as deny-only and does not. That asymmetry is the whole
  * point — it is how `%ProgramFiles%` protects itself.
  *
- * Everything here is best-effort by design: a directory we cannot lock down is
- * a serious warning, but refusing to bring up the tunnel over it would leave
- * the user with no VPN at all, which is worse. Callers log the warning and
- * continue; `verifyDirectoryHardened` lets diagnostics report the real state.
+ * This helper returns a verified result rather than deciding policy. Callers
+ * that stage or execute privileged code MUST fail closed when `hardened` is
+ * false: availability never justifies executing a user-replaceable binary as
+ * administrator.
  */
 
 import { stat } from 'fs/promises'

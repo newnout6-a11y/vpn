@@ -2008,13 +2008,15 @@ async function prepareRuntime(
   // file is already sitting in the directory when we lock it.
   const acl = await ensureElevatedRuntimeDirHardened(runtimeDir, 'tun-runtime')
   if (!acl.hardened && !acl.skipped) {
-    // Not fatal — a tunnel we refuse to start is worse for the user than one
-    // running out of a directory with weak permissions. But it must be visible.
-    logEvent('warn', 'tun', 'TUN runtime directory is not admin-only — local privilege escalation risk', {
+    logEvent('error', 'tun', 'refusing to stage privileged binaries in an untrusted runtime directory', {
       runtimeDir,
       reason: acl.message,
       offenders: acl.offenders ?? []
     })
+    throw new Error(
+      `Безопасный запуск VPN невозможен: каталог runtime не защищён (${acl.message}). ` +
+      'Бинарные файлы не были скопированы и туннель не запускался.'
+    )
   }
 
   const singboxSrc = getBundledResource('sing-box.exe')

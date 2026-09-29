@@ -17,6 +17,7 @@ import { ipcMain, shell } from 'electron'
 import Store from 'electron-store'
 import { getWindowsNotificationState, resetWindowsNotificationBlock, setNotificationPrefsProvider } from './notifications'
 import type { NotificationPreferences } from '../shared/ipc-types'
+import { requirePlainObject } from './ipcValidation'
 
 // ─── Event type mapping ──────────────────────────────────────────────────────
 
@@ -80,6 +81,36 @@ function setPrefs(partial: Partial<NotificationPreferences>): NotificationPrefer
   return updated
 }
 
+function validatePrefsPatch(value: unknown): Partial<NotificationPreferences> {
+  const raw = requirePlainObject(value, 'notification preferences')
+  const allowed = new Set([...Object.keys(DEFAULT_PREFS)])
+  for (const key of Object.keys(raw)) {
+    if (!allowed.has(key)) throw new Error(`Invalid notification preference: ${key}`)
+  }
+  const result: Partial<NotificationPreferences> = {}
+  const booleanKeys: Array<Exclude<keyof NotificationPreferences, 'method'>> = [
+    'vpnConnect',
+    'vpnDisconnect',
+    'leakDetected',
+    'profileRotation',
+    'scheduleTriggered',
+    'connectionError',
+    'sound'
+  ]
+  for (const key of booleanKeys) {
+    if (raw[key] === undefined) continue
+    if (typeof raw[key] !== 'boolean') throw new Error(`Invalid notification preference: ${key} must be boolean`)
+    result[key] = raw[key] as boolean
+  }
+  if (raw.method !== undefined) {
+    if (raw.method !== 'system' && raw.method !== 'inapp' && raw.method !== 'both') {
+      throw new Error('Invalid notification preference: method')
+    }
+    result.method = raw.method
+  }
+  return result
+}
+
 // ─── IPC Registration ────────────────────────────────────────────────────────
 
 export function registerNotificationPrefsIpcHandlers(): void {
@@ -93,8 +124,8 @@ export function registerNotificationPrefsIpcHandlers(): void {
     return getPrefs()
   })
 
-  ipcMain.handle('notifications:set-prefs', (_event, partial: Partial<NotificationPreferences>) => {
-    return setPrefs(partial)
+  ipcMain.handle('notifications:set-prefs', (_event, partial: unknown) => {
+    return setPrefs(validatePrefsPatch(partial))
   })
 
   ipcMain.handle('notifications:check-os-state', async () => {

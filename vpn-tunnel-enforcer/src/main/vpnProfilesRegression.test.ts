@@ -1,15 +1,20 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { EventEmitter } from 'events'
+import { PassThrough } from 'stream'
 
 const execFileMock = vi.hoisted(() => {
   const fn = vi.fn() as any
   fn[Symbol.for('nodejs.util.promisify.custom')] = vi.fn()
   return fn
 })
+const spawnMock = vi.hoisted(() => vi.fn())
+const spawnResult = vi.hoisted(() => ({ stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), exitCode: 0 }))
 
 vi.mock('child_process', () => ({
-  default: { execFile: execFileMock, exec: vi.fn() },
+  default: { execFile: execFileMock, exec: vi.fn(), spawn: spawnMock },
   execFile: execFileMock,
-  exec: vi.fn()
+  exec: vi.fn(),
+  spawn: spawnMock
 }))
 
 function curlStdout(headers: string, body = '') {
@@ -21,6 +26,23 @@ describe('vpnProfiles regressions', () => {
     vi.resetModules()
     execFileMock.mockReset()
     execFileMock[Symbol.for('nodejs.util.promisify.custom')].mockReset()
+    spawnMock.mockReset()
+    spawnResult.stdout = Buffer.alloc(0)
+    spawnResult.stderr = Buffer.alloc(0)
+    spawnResult.exitCode = 0
+    spawnMock.mockImplementation(() => {
+      const child = new EventEmitter() as any
+      child.stdin = new PassThrough()
+      child.stdout = new PassThrough()
+      child.stderr = new PassThrough()
+      child.kill = vi.fn()
+      queueMicrotask(() => {
+        child.stdout.end(spawnResult.stdout)
+        child.stderr.end(spawnResult.stderr)
+        child.emit('exit', spawnResult.exitCode)
+      })
+      return child
+    })
   })
 
   it('unwraps only the first VPN URI from Happ add base64 lists', async () => {
@@ -36,10 +58,7 @@ describe('vpnProfiles regressions', () => {
   })
 
   it('reports HTTP redirects without Location instead of parsing an empty body', async () => {
-    execFileMock[Symbol.for('nodejs.util.promisify.custom')].mockResolvedValue({
-      stdout: curlStdout('HTTP/1.1 302 Found'),
-      stderr: Buffer.alloc(0)
-    })
+    spawnResult.stdout = curlStdout('HTTP/1.1 302 Found')
 
     const { resolveVpnProfiles } = await import('./vpnProfiles')
 
@@ -48,10 +67,7 @@ describe('vpnProfiles regressions', () => {
 
   it('dedupes identical in-flight subscription resolution calls', async () => {
     const body = 'vless://00000000-0000-4000-8000-000000000000@one.example.com:443?security=tls#One'
-    execFileMock[Symbol.for('nodejs.util.promisify.custom')].mockResolvedValue({
-      stdout: curlStdout('HTTP/1.1 200 OK', body),
-      stderr: Buffer.alloc(0)
-    })
+    spawnResult.stdout = curlStdout('HTTP/1.1 200 OK', body)
 
     const { resolveVpnProfiles } = await import('./vpnProfiles')
     const [a, b] = await Promise.all([
@@ -61,7 +77,9 @@ describe('vpnProfiles regressions', () => {
 
     expect(a.profiles).toHaveLength(1)
     expect(b.profiles).toHaveLength(1)
-    expect(execFileMock[Symbol.for('nodejs.util.promisify.custom')]).toHaveBeenCalledTimes(1)
+    expect(spawnMock).toHaveBeenCalledTimes(1)
+    const argv = JSON.stringify(spawnMock.mock.calls[0]?.[1] ?? [])
+    expect(argv).not.toMatch(/x-hwid|Happ\/3\.22\.1/)
   })
 
   it('parses spx / spider_x for Reality and passes to xray config generator', async () => {
