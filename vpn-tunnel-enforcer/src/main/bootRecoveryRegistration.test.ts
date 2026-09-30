@@ -1,3 +1,4 @@
+import { join } from 'path'
 import { describe, expect, it, vi } from 'vitest'
 
 vi.mock('electron', () => ({
@@ -21,7 +22,7 @@ describe('boot recovery registration (AT-03-002)', () => {
   it('uses the actual packaged extraResources path', () => {
     const previous = process.resourcesPath
     Object.defineProperty(process, 'resourcesPath', { configurable: true, value: 'C:\\Program Files\\VPNTE\\resources' })
-    expect(getBootRecoveryScriptPath(true)).toBe('C:\\Program Files\\VPNTE\\resources/vpnte-recover.ps1')
+    expect(getBootRecoveryScriptPath(true)).toBe(join('C:\\Program Files\\VPNTE\\resources', 'vpnte-recover.ps1'))
     Object.defineProperty(process, 'resourcesPath', { configurable: true, value: previous })
   })
 
