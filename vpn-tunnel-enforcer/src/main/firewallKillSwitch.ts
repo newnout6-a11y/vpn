@@ -7,6 +7,8 @@ import { promisify } from 'util'
 import { execElevated } from './admin'
 import { execElevatedPs, isElevatedPsHelperRunning } from './elevatedPsHelper'
 import { logEvent } from './appLogger'
+import { randomUUID } from 'crypto'
+import { getRecoveryManifestDir, recoveryManifestPath, readRecoveryManifest, writeRecoveryManifest, writeRecoveryArtifact, removeRecoveryManifest } from './recoveryManifest'
 import { TUN_ADAPTER_ALIAS, TUN_IPV4_NETWORK_CIDR, getTunAdapterAlias } from './tunAdapter'
 
 const execFile = promisify(execFileCb)
@@ -52,66 +54,71 @@ export interface FirewallKillSwitchResult {
   skipped?: boolean
 }
 
-interface SavedProfile {
-  name: string
-  defaultOutbound: string
+export interface SavedProfile {
+  name: 'Domain' | 'Private' | 'Public'
+  defaultOutbound: 'Allow' | 'Block' | 'NotConfigured'
 }
-
-interface FirewallManifest {
+export interface FirewallManifest {
+  schemaVersion: 1
+  owner: 'VPNTE'
+  operationId: string
+  phase: 'prepared' | 'active'
+  strictMode: boolean
   createdAt: number
   ruleNames: string[]
   singboxExePath: string | null
   savedProfiles: SavedProfile[]
 }
-
-function backupDir() {
-  return join(app.getPath('userData'), 'firewall-killswitch')
-}
-
-function manifestPath() {
-  return join(backupDir(), 'manifest.json')
-}
-
-async function readManifest(): Promise<FirewallManifest | null> {
-  try {
-    const raw = await readFile(manifestPath(), 'utf-8')
-    return JSON.parse(raw) as FirewallManifest
-  } catch (err: any) {
-    if (err?.code === 'ENOENT') {
-      // File doesn't exist — normal state, no manifest = no active kill-switch
-      return null
+export function validateSavedProfiles(value: unknown): SavedProfile[] {
+  if (!Array.isArray(value) || value.length !== 3) throw new Error('Invalid firewall snapshot: all profiles required')
+  const names = new Set<string>()
+  return value.map(item => {
+    if (!item || typeof item !== 'object' || !['Domain','Private','Public'].includes(item.name) ||
+        !['Allow','Block','NotConfigured'].includes(item.defaultOutbound) || names.has(item.name)) {
+      throw new Error('Invalid firewall profile or policy')
     }
-    // File exists but is corrupt (partial write during crash). Log it —
-    // this is important because a corrupt manifest means the kill-switch
-    // may actually be active but we can't read its state. The caller
-    // falls through to probeFirewallForOurRules() as a safety net.
-    logEvent('warn', 'firewall-killswitch', 'manifest file is corrupt — treating as no manifest', {
-      error: err?.message || String(err)
-    })
+    names.add(item.name)
+    return { name: item.name, defaultOutbound: item.defaultOutbound }
+  })
+}
+export function validateFirewallManifest(value: unknown): FirewallManifest {
+  const v = value as Partial<FirewallManifest> | null
+  if (!v || typeof v !== 'object' || v.schemaVersion !== 1 || v.owner !== 'VPNTE' ||
+      typeof v.operationId !== 'string' || !/^[a-f0-9-]{36}$/i.test(v.operationId) ||
+      !['prepared','active'].includes(v.phase || '') || typeof v.strictMode !== 'boolean' ||
+      !Number.isSafeInteger(v.createdAt) || (v.createdAt ?? 0) <= 0 ||
+      !Array.isArray(v.ruleNames) || v.ruleNames.length > 500 ||
+      v.ruleNames.some(name => typeof name !== 'string' || !/^VPNTE-killswitch-[a-zA-Z0-9_-]{1,100}$/.test(name)) ||
+      !(v.singboxExePath === null || (typeof v.singboxExePath === 'string' && /^[a-z]:\\/i.test(v.singboxExePath) && !/[\x00-\x1f]/.test(v.singboxExePath)))) {
+    throw new Error('Invalid or unsupported firewall manifest')
+  }
+  return { schemaVersion: 1, owner: 'VPNTE', operationId: v.operationId, phase: v.phase!,
+    strictMode: v.strictMode, createdAt: v.createdAt!, ruleNames: [...new Set(v.ruleNames)],
+    singboxExePath: v.singboxExePath!, savedProfiles: validateSavedProfiles(v.savedProfiles) }
+}
+export function getKillSwitchManifestPath(): string { return recoveryManifestPath('firewall.json') }
+function backupDir(): string { return getRecoveryManifestDir() }
+let manifestReadFailure: string | null = null
+async function readManifest(): Promise<FirewallManifest | null> {
+  manifestReadFailure = null
+  try { return await readRecoveryManifest('firewall.json', validateFirewallManifest) }
+  catch (error) {
+    manifestReadFailure = error instanceof Error ? error.message : String(error)
+    logEvent('error', 'firewall-killswitch', 'CRITICAL_SECURITY_EVENT: recovery manifest rejected', { error: manifestReadFailure })
     return null
   }
 }
-
 // Exported for combinedPreStartProbe: a file-read-only check that determines
 // whether the firewall rule probe should be included in the combined PS script.
 export async function killSwitchManifestExists(): Promise<boolean> {
   return (await readManifest()) !== null
 }
 
-async function writeManifest(m: FirewallManifest): Promise<void> {
-  await mkdir(backupDir(), { recursive: true })
-  const tmp = manifestPath() + '.tmp'
-  await writeFile(tmp, JSON.stringify(m, null, 2), 'utf-8')
-  await rename(tmp, manifestPath())
+async function writeManifest(m: Omit<FirewallManifest, 'schemaVersion' | 'owner' | 'operationId' | 'phase' | 'strictMode'> & Partial<FirewallManifest>): Promise<void> {
+  await writeRecoveryManifest('firewall.json', { schemaVersion: 1, owner: 'VPNTE', operationId: randomUUID(),
+    phase: 'active', strictMode: false, ...m }, validateFirewallManifest)
 }
-
-async function clearManifest(): Promise<void> {
-  try {
-    await unlink(manifestPath())
-  } catch {
-    // already gone
-  }
-}
+async function clearManifest(): Promise<void> { await removeRecoveryManifest('firewall.json') }
 
 function withPowerShellPrelude(script: string) {
   const prelude =
@@ -130,13 +137,12 @@ async function ps(script: string, elevated = false, timeout = 30000) {
   // Keep elevated scripts under userData instead of %TEMP% and do not remove them
   // immediately: sudo-prompt can return before the elevated PowerShell has opened
   // the -File path, which made PowerShell report "argument for -File does not exist".
-  const scriptDir = join(backupDir(), 'ps')
-  await mkdir(scriptDir, { recursive: true })
+  const scriptDir = backupDir()
   const scriptPath = join(
     scriptDir,
     `script-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.ps1`
   )
-  await writeFile(scriptPath, '\ufeff' + withPowerShellPrelude(script), 'utf8')
+  await writeRecoveryArtifact(scriptPath.slice(scriptDir.length + 1), '\ufeff' + withPowerShellPrelude(script))
 
   try {
     if (elevated) {
