@@ -1,4 +1,4 @@
-import { app } from 'electron'
+import { app, BrowserWindow, dialog } from 'electron'
 import { mkdir, readFile, writeFile, unlink, stat, rename } from 'fs/promises'
 import { join } from 'path'
 import { execFile as execFileCb } from 'child_process'
@@ -52,6 +52,7 @@ export interface FirewallKillSwitchResult {
   // "Kill-switch снят вручную" warn log that fired every stop because main
   // had already auto-disabled before the user-driven IPC arrived.
   skipped?: boolean
+  state?: 'unknown'
 }
 
 export interface SavedProfile {
@@ -340,14 +341,55 @@ Write-Output "RULE:$ruleName"
  * Safety: Allow rules are created BEFORE setting the default to Block, so if
  * the script fails partway, only harmless extra Allow rules remain.
  */
-export async function enableKillSwitch(opts: {
+let firewallQueue: Promise<unknown> = Promise.resolve()
+function serializeFirewall<T>(operation: () => Promise<T>): Promise<T> {
+  const result = firewallQueue.then(operation, operation)
+  firewallQueue = result.then(() => undefined, () => undefined)
+  return result
+}
+export interface KillSwitchOptions {
   singboxExePath: string
   proxyOwnerProgramPaths?: string[]
   extraAllowedRemoteCidrs?: string[]
   tunAdapterAlias?: string
-}): Promise<FirewallKillSwitchResult> {
+  strictMode?: boolean
+}
+export async function enableKillSwitch(opts: KillSwitchOptions): Promise<FirewallKillSwitchResult> {
+  return serializeFirewall(() => enableKillSwitchUnlocked(opts))
+}
+async function snapshotFirewallProfiles(): Promise<SavedProfile[]> {
+  const { stdout } = await ps(`$snapshot = @(Get-NetFirewallProfile -Profile Domain,Private,Public -ErrorAction Stop | ForEach-Object {
+  [pscustomobject]@{name=[string]$_.Name;defaultOutbound=[string]$_.DefaultOutboundAction}
+})
+Write-Output ('SNAPSHOT:' + ($snapshot | ConvertTo-Json -Compress))`, true)
+  const line = String(stdout).split(/\r?\n/).find(line => line.startsWith('SNAPSHOT:'))
+  if (!line) throw new Error('Firewall policy snapshot was not confirmed')
+  return validateSavedProfiles(JSON.parse(line.slice('SNAPSHOT:'.length)))
+}
+function reportRecoveryWarning(message: string): void {
+  logEvent('error', 'firewall-killswitch', 'CRITICAL_SECURITY_EVENT: protection is unknown', { message })
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) win.webContents.send('network-recovery-warning', { state: 'unknown', message })
+  }
+  void dialog.showMessageBox({ type: 'warning', title: 'VPNTE: защита не подтверждена', message }).catch(() => undefined)
+}
+async function enableKillSwitchUnlocked(opts: KillSwitchOptions): Promise<FirewallKillSwitchResult> {
   if (process.platform !== 'win32') {
     return { success: true, message: 'Firewall kill-switch недоступен (не Windows)' }
+  }
+
+  const previous = await readManifest()
+  if (manifestReadFailure) return { success: false, state: 'unknown', message: 'Recovery manifest is untrusted or invalid; refusing to replace its baseline' }
+  const savedProfiles = previous?.savedProfiles ?? await snapshotFirewallProfiles()
+  const prepared: FirewallManifest = {
+    schemaVersion: 1, owner: 'VPNTE', operationId: previous?.operationId ?? randomUUID(),
+    phase: 'prepared', strictMode: opts.strictMode ?? previous?.strictMode ?? false,
+    createdAt: previous?.createdAt ?? Date.now(), savedProfiles,
+    ruleNames: previous?.ruleNames ?? [], singboxExePath: opts.singboxExePath
+  }
+  // This durable snapshot MUST precede any New/Remove/Set-NetFirewall operation.
+  try { await writeManifest(prepared) } catch (error) {
+    return { success: false, message: 'Firewall unchanged: recovery snapshot could not be committed', details: String(error) }
   }
 
   const tunAlias = opts.tunAdapterAlias || getTunAdapterAlias()
@@ -428,14 +470,8 @@ try {
 
   // One atomic elevated PowerShell script: save defaults → add allows → set block.
   const script = `
-# --- Step 1: Save current DefaultOutboundAction ---
-$profileNames = @('Domain','Private','Public')
-$saved = @()
-foreach ($pn in $profileNames) {
-  $prof = Get-NetFirewallProfile -Profile $pn
-  $saved += @{ name = $pn; defaultOutbound = $prof.DefaultOutboundAction.ToString() }
-}
-$savedJson = ($saved | ConvertTo-Json -Compress)
+# Snapshot is already durable in the protected manifest before this transaction.
+$savedJson = ${psSingleQuote(JSON.stringify(savedProfiles))}
 
 # --- Step 2: Clean stale rules ---
 Get-NetFirewallRule -DisplayName '${RULE_PREFIX}*' -ErrorAction SilentlyContinue |
@@ -626,7 +662,6 @@ Write-Output "SAVED:$savedJson"
 `
 
   let installedRules: string[] = []
-  let savedProfiles: SavedProfile[] = []
   try {
     const { stdout } = await ps(script, true, 60000)
     const output = String(stdout || '')
@@ -641,19 +676,9 @@ Write-Output "SAVED:$savedJson"
         .filter((n) => n.startsWith(RULE_PREFIX))
     }
 
-    const savedLine = lines.find((l) => l.startsWith('SAVED:'))
-    if (savedLine) {
-      try {
-        savedProfiles = validateSavedProfiles(JSON.parse(savedLine.slice('SAVED:'.length)))
-      } catch {
-        savedProfiles = [
-          { name: 'Domain', defaultOutbound: 'Allow' },
-          { name: 'Private', defaultOutbound: 'Allow' },
-          { name: 'Public', defaultOutbound: 'Allow' }
-        ]
-      }
-    }
   } catch (err: any) {
+    try { await restoreAndCleanup(prepared); await clearManifest() }
+    catch (rollbackError) { logEvent('error', 'firewall-killswitch', 'failed transaction recovery retained', { rollbackError: String(rollbackError) }) }
     logEvent('error', 'firewall-killswitch', 'failed to install kill-switch', err)
     return {
       success: false,
@@ -670,33 +695,14 @@ Write-Output "SAVED:$savedJson"
   }
 
   try {
-    await writeManifest({
-      createdAt: Date.now(),
-      ruleNames: installedRules,
-      singboxExePath: opts.singboxExePath,
-      savedProfiles
-    })
+    await writeManifest({ ...prepared, phase: 'active', ruleNames: installedRules })
   } catch (error: any) {
     // The firewall transaction is not committed until its recovery manifest
     // is durable. Compensate immediately instead of leaving Block active with
     // no authoritative baseline.
-    const restoreLines = savedProfiles.map(
-      profile =>
-        `Set-NetFirewallProfile -Profile '${profile.name}' -DefaultOutboundAction ${profile.defaultOutbound} -ErrorAction Continue`
-    )
-    try {
-      await ps(
-        `${restoreLines.join('\n')}\n` +
-        `Get-NetFirewallRule -DisplayName '${RULE_PREFIX}*' -ErrorAction SilentlyContinue | ` +
-        'Remove-NetFirewallRule -ErrorAction SilentlyContinue',
-        true,
-        30000
-      )
-    } catch (rollbackError) {
-      logEvent('error', 'firewall-killswitch', 'manifest commit and compensating rollback both failed', {
-        manifestError: error?.message || String(error),
-        rollbackError: rollbackError instanceof Error ? rollbackError.message : String(rollbackError)
-      })
+    try { await restoreAndCleanup(prepared); await clearManifest() }
+    catch (rollbackError) {
+      logEvent('error', 'firewall-killswitch', 'manifest commit and verified rollback failed; snapshot retained', { rollbackError: String(rollbackError) })
     }
     return {
       success: false,
@@ -719,37 +725,43 @@ Write-Output "SAVED:$savedJson"
  * Restore DefaultOutboundAction to saved values and remove all our rules.
  * Order: restore defaults FIRST (so traffic flows), then remove allow rules.
  */
-async function restoreAndCleanup(): Promise<void> {
-  const manifest = await readManifest()
-
-  // Build restore script. Even if manifest is missing, try to set defaults
-  // back to Allow and remove any stale rules.
-  const profiles = manifest?.savedProfiles ?? [
-    { name: 'Domain', defaultOutbound: 'Allow' },
-    { name: 'Private', defaultOutbound: 'Allow' },
-    { name: 'Public', defaultOutbound: 'Allow' }
-  ]
-
-  const restoreLines = profiles.map(
-    (p) => `Set-NetFirewallProfile -Profile '${p.name}' -DefaultOutboundAction ${p.defaultOutbound} -ErrorAction SilentlyContinue`
-  )
-
-  await ps(
-    restoreLines.join('\n') + '\n' +
-    `Get-NetFirewallRule -DisplayName '${RULE_PREFIX}*' -ErrorAction SilentlyContinue | ` +
-      `Remove-NetFirewallRule -ErrorAction SilentlyContinue`,
-    true,
-    30000
-  )
+async function restoreAndCleanup(snapshot?: FirewallManifest): Promise<void> {
+  const manifest = snapshot ?? await readManifest()
+  if (!manifest && !(await probeFirewallForOurRules())) {
+    if (manifestReadFailure) throw new Error('Invalid recovery manifest; no proven VPNTE rules, no system changes allowed')
+    return // Never change a foreign Block policy without proof of ownership.
+  }
+  const profiles = validateSavedProfiles(manifest?.savedProfiles ?? [
+    { name: 'Domain', defaultOutbound: 'Allow' }, { name: 'Private', defaultOutbound: 'Allow' }, { name: 'Public', defaultOutbound: 'Allow' }
+  ])
+  if (!manifest) reportRecoveryWarning('Манифест сетевой защиты утерян или повреждён. Выполняется сброс Allow. Защита не подтверждена; трафик может идти напрямую.')
+  const restores = profiles.map(p => `
+try {
+  Set-NetFirewallProfile -Profile ${psSingleQuote(p.name)} -DefaultOutboundAction ${p.defaultOutbound} -ErrorAction Stop
+  if ([string](Get-NetFirewallProfile -Profile ${psSingleQuote(p.name)} -ErrorAction Stop).DefaultOutboundAction -ne ${psSingleQuote(p.defaultOutbound)}) { throw 'Policy read-back mismatch' }
+} catch { $errors += ${psSingleQuote(p.name)} + ': ' + [string]$_ }
+`).join('\n')
+  const { stdout } = await ps(`$errors = @()
+${restores}
+try {
+  Get-NetFirewallRule -DisplayName '${RULE_PREFIX}*' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction Stop
+  if ((Get-NetFirewallRule -DisplayName '${RULE_PREFIX}*' -ErrorAction SilentlyContinue | Measure-Object).Count -ne 0) { throw 'VPNTE rules remain' }
+} catch { $errors += 'rules: ' + [string]$_ }
+if ($errors.Count -gt 0) { throw ($errors -join ' | ') }
+Write-Output 'RESTORED'`, true, 30000)
+  if (!String(stdout).split(/\r?\n/).includes('RESTORED')) throw new Error('Firewall rollback read-back was not confirmed')
 }
-
 export async function disableKillSwitch(reason: string): Promise<FirewallKillSwitchResult> {
+  return serializeFirewall(() => disableKillSwitchUnlocked(reason))
+}
+async function disableKillSwitchUnlocked(reason: string): Promise<FirewallKillSwitchResult> {
   if (process.platform !== 'win32') {
     return { success: true, message: 'Firewall kill-switch недоступен (не Windows)' }
   }
 
   try {
     await restoreAndCleanup()
+    await clearManifest()
   } catch (err: any) {
     logEvent('warn', 'firewall-killswitch', 'failed to fully restore kill-switch', err)
     return {
@@ -759,7 +771,6 @@ export async function disableKillSwitch(reason: string): Promise<FirewallKillSwi
     }
   }
 
-  await clearManifest()
   logEvent('info', 'firewall-killswitch', `kill-switch disengaged: ${reason}`)
   return { success: true, message: 'Firewall kill-switch снят' }
 }

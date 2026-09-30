@@ -146,8 +146,9 @@ async function createBackup(): Promise<NetworkBackupManifest> {
 async function readManifest(): Promise<NetworkBackupManifest | null> {
   try {
     return JSON.parse(await readFile(manifestPath(), 'utf-8')) as NetworkBackupManifest
-  } catch {
-    return null
+  } catch (error: any) {
+    if (error?.code === 'ENOENT') return null
+    throw new Error('Network baseline manifest is unreadable or corrupt; recovery is not verified')
   }
 }
 
@@ -171,7 +172,7 @@ $sig='[DllImport("wininet.dll", SetLastError=true)] public static extern bool In
 $type=Add-Type -MemberDefinition $sig -Name WinInet -Namespace Native -PassThru
 $null=$type::InternetSetOption([IntPtr]::Zero, 39, [IntPtr]::Zero, 0)
 $null=$type::InternetSetOption([IntPtr]::Zero, 37, [IntPtr]::Zero, 0)
-`, false, 10000).catch(() => undefined)
+`, false, 10000)
 }
 
 export async function applyTunNetworkBaseline(): Promise<SystemNetworkResult> {
@@ -263,7 +264,11 @@ async function rollbackTunNetworkBaselineUnlocked(): Promise<SystemNetworkResult
     return { success: false, message: 'Rollback доступен только на Windows' }
   }
 
-  const manifest = await readManifest()
+  let manifest: NetworkBackupManifest | null
+  try { manifest = await readManifest() } catch (error) {
+    logEvent('error', 'system-network', 'CRITICAL_SECURITY_EVENT: baseline recovery unknown', { error: String(error) })
+    return { success: false, message: 'Baseline повреждён: восстановление сети не подтверждено', warnings: [String(error)] }
+  }
   if (!manifest) {
     return {
       success: true,
@@ -324,8 +329,10 @@ export async function rollbackTunNetworkBaselineIfApplied(
     return { success: true, skipped: true, message: 'Rollback недоступен (не Windows)' }
   }
   return withBaselineOpLock(async () => {
-    if (!(await isBaselineApplied())) {
-      return { success: true, skipped: true, message: 'Baseline не был применён - откатывать нечего' }
+    try {
+      if (!(await isBaselineApplied())) return { success: true, skipped: true, message: 'Baseline не был применён - откатывать нечего' }
+    } catch (error) {
+      return { success: false, message: 'Baseline unreadable: network recovery is unknown', warnings: [String(error)] }
     }
     logEvent('info', 'system-network', `auto-rollback baseline: ${reason}`)
     const result = await rollbackTunNetworkBaselineUnlocked()
