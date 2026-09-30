@@ -82,7 +82,7 @@ Get-Content -LiteralPath ${quote(target)} -Raw -Encoding UTF8`)
   return validate(JSON.parse(raw))
 }
 /** Unique temp + fsync + admin-owned protected file ACL + rename commit point. */
-export async function writeRecoveryArtifact(name: string, content: string): Promise<void> {
+export async function writeRecoveryArtifact(name: string, content: string | Buffer): Promise<void> {
   const target = recoveryManifestPath(name)
   if (Buffer.byteLength(content, 'utf8') > MAX_MANIFEST_BYTES) throw new Error('Recovery artifact exceeds limit')
   await ensureRecoveryManifestDir()
@@ -107,8 +107,28 @@ Assert-TrustedArtifact ${quote(temporary)} $false`
 export async function writeRecoveryManifest<T>(name: string, value: T, validate: (value: unknown) => T): Promise<void> {
   await writeRecoveryArtifact(name, JSON.stringify(validate(value), null, 2))
 }
+export async function readRecoveryArtifact(name: string): Promise<Buffer> {
+  const target = recoveryManifestPath(name)
+  await ensureRecoveryManifestDir()
+  const raw = await runRead(`${TRUST_CHECK}
+Assert-TrustedArtifact ${quote(join(process.env.ProgramData || 'C:\\ProgramData', 'VPNTE'))} $true
+Assert-TrustedArtifact ${quote(getRecoveryManifestDir())} $true
+Assert-TrustedArtifact ${quote(target)} $false
+if ((Get-Item -LiteralPath ${quote(target)}).Length -gt ${MAX_MANIFEST_BYTES}) { throw 'Recovery artifact exceeds limit' }
+[Convert]::ToBase64String([IO.File]::ReadAllBytes(${quote(target)}))`)
+  return Buffer.from(raw, 'base64')
+}
 export async function removeRecoveryManifest(name: string): Promise<void> {
-  try { await unlink(recoveryManifestPath(name)) } catch (error: any) { if (error?.code !== 'ENOENT') throw error }
+  // Do not follow a replaced parent or delete an artifact from an untrusted tree.
+  const target = recoveryManifestPath(name)
+  await ensureRecoveryManifestDir()
+  await runRead(`${TRUST_CHECK}
+Assert-TrustedArtifact ${quote(join(process.env.ProgramData || 'C:\\ProgramData', 'VPNTE'))} $true
+Assert-TrustedArtifact ${quote(getRecoveryManifestDir())} $true
+if (Test-Path -LiteralPath ${quote(target)}) {
+  Assert-TrustedArtifact ${quote(target)} $false
+  Remove-Item -LiteralPath ${quote(target)} -Force -ErrorAction Stop
+}`)
 }
 
 export function validateRecoveryPolicy(value: unknown): { schemaVersion: 1; owner: 'VPNTE'; strictMode: boolean } {
