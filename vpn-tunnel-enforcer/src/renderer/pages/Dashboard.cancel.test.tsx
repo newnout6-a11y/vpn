@@ -1,4 +1,4 @@
-// AT-00-003 / AT-00-008 / F-021: cancellation feedback and late IPC callbacks.
+// AT-00-003 / AT-00-008 / AT-09-009 / F-021: cancellation feedback and late IPC callbacks.
 import '@testing-library/jest-dom/vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -54,10 +54,13 @@ describe('Dashboard cancellation', () => {
     expect(cancelButton).toBeDisabled()
     expect(cancelButton).toHaveAttribute('aria-busy', 'true')
     expect(cancelButton.querySelector('.animate-spin')).not.toBeNull()
+    expect(cancelButton).toHaveTextContent('Отменяем…')
+    expect(cancelButton).toBeVisible()
     const powerButton = screen.getAllByRole('button', { name: 'Отменяем…' }).find(button => button !== cancelButton)!
     expect(powerButton).toHaveClass('bg-[var(--color-cancellation)]')
     expect(powerButton).not.toHaveClass('bg-[var(--color-accent)]')
     expect(screen.getByRole('status')).toHaveTextContent('Отменяем…')
+    expect(screen.getByRole('status')).toHaveClass('sr-only')
     fireEvent.click(cancelButton)
     expect(window.electronAPI.cancelTun).toHaveBeenCalledTimes(1)
     act(() => {
@@ -68,10 +71,13 @@ describe('Dashboard cancellation', () => {
     view.unmount()
     render(<Dashboard />)
     expect(screen.getByRole('button', { name: 'Отменяем…', busy: true })).toBeDisabled()
+    expect(screen.getByRole('status')).toHaveClass('sr-only')
     await act(async () => cancellation.resolve({ success: true }))
     expect(useAppStore.getState().connectionCancelling).toBe(false)
     expect(useAppStore.getState().connectionBusy).toBeNull()
     expect(screen.queryByRole('button', { name: 'Отменяем…', busy: true })).not.toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('Отключено')
+    expect(screen.getByRole('status')).not.toHaveClass('sr-only')
   })
 
   it('shows recovery warnings as the cancellation outcome', async () => {

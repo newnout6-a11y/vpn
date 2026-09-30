@@ -724,7 +724,7 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
             relative w-36 h-36 rounded-full flex items-center justify-center z-10
             transition-all duration-300 ease-out
             ${cancelling
-              ? 'bg-[var(--color-cancellation)] shadow-[0_0_60px_rgb(var(--rgb-cancellation)/0.4),0_8px_32px_rgba(0,0,0,0.25)]'
+              ? 'cancellation-orbit bg-[var(--color-cancellation)] shadow-[0_0_60px_rgb(var(--rgb-cancellation)/0.4),0_8px_32px_rgba(0,0,0,0.25)]'
               : isServerSwitching
               ? 'bg-[var(--color-warning)] shadow-[0_0_60px_rgb(var(--rgb-warning)/0.32),0_8px_32px_rgba(0,0,0,0.25)]'
               : isConnected
@@ -792,8 +792,8 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
           </motion.div>
         )}
 
-        {/* Status text */}
-        <p className={`text-sm font-medium ${statusColor}`} role="status" aria-live="polite">
+        {/* During cancellation the button shows the label; keep live status for screen readers. */}
+        <p className={cancelling ? 'sr-only' : `text-sm font-medium ${statusColor}`} role="status" aria-live="polite">
           {statusLabel}
         </p>
 

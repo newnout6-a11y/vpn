@@ -321,4 +321,30 @@
   .pulse-ring.animate-pulse {
     animation: none;
   }
+
+  /* Static rings give cancellation a distinct frame around the existing spinner. */
+  .cancellation-orbit {
+    margin-block: 8px;
+    background-image: radial-gradient(circle at 35% 22%, rgb(255 255 255 / 0.12), transparent 65%);
+  }
+
+  .cancellation-orbit::before,
+  .cancellation-orbit::after {
+    content: "";
+    position: absolute;
+    border-radius: 50%;
+    pointer-events: none;
+  }
+
+  .cancellation-orbit::before {
+    inset: -14px;
+    border: 1px solid rgb(var(--rgb-cancellation) / 0.38);
+    box-shadow: 0 0 28px rgb(var(--rgb-cancellation) / 0.18);
+  }
+
+  .cancellation-orbit::after {
+    inset: -28px;
+    border: 1px solid rgb(var(--rgb-cancellation) / 0.18);
+    background: radial-gradient(circle, transparent 60%, rgb(var(--rgb-cancellation) / 0.08) 72%, transparent 74%);
+  }
 }
