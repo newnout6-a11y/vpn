@@ -77,6 +77,7 @@ import { startTrafficConnectionSampler, stopTrafficConnectionSampler, setInfraSe
 import { registerDnsHandlers, initDnsProfiles } from './dnsProfiles'
 import { registerDomainRoutingIpcHandlers } from './domainRouting'
 import { registerConfigManagerIpcHandlers } from './configManager'
+import { clearOwnedSecretClipboard } from './secretClipboard'
 import { registerNotificationPrefsIpcHandlers } from './notificationPrefs'
 import { registerI18nIpcHandlers } from './i18n'
 import { registerThemeIpcHandlers } from './themeManager'
@@ -2519,6 +2520,7 @@ app.whenReady().then(async () => {
 async function performShutdownCleanup(reason: string): Promise<void> {
   if (shutdownInProgress) return
   shutdownInProgress = true
+  clearOwnedSecretClipboard()
   logEvent('info', 'app', `shutdown cleanup started: ${reason}`)
 
   // Close any live session as an app-quit BEFORE tunController.stop() emits

@@ -43,7 +43,7 @@ import { ForeignVpnBanner } from '../components/ForeignVpnBanner'
 import { emitServerChanged } from '../nav'
 import { useAppStore } from '../store'
 import type { ClientDevice, ServerGroup, ServerProfile } from '../../shared/ipc-types'
-import { confirmSecretExport, scheduleSecretClipboardCleanup } from '../utils/secretClipboard'
+import { confirmSecretExport } from '../utils/secretClipboard'
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -687,7 +687,7 @@ export function Servers() {
   const handleExport = async (id: string) => {
     if (!confirmSecretExport('clipboard')) return
     try {
-      const result = await window.electronAPI.serversExportKey(id)
+      const result = await window.electronAPI.serversCopyKey(id)
       if (!result.ok) {
         setExportFlash((prev) => ({ ...prev, [id]: 'failed' }))
         window.setTimeout(
@@ -701,8 +701,6 @@ export function Servers() {
         )
         return
       }
-      await navigator.clipboard.writeText(result.uri)
-      scheduleSecretClipboardCleanup(result.uri)
       setExportFlash((prev) => ({ ...prev, [id]: 'copied' }))
       window.setTimeout(
         () =>

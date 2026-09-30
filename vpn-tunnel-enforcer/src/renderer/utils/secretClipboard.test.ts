@@ -1,37 +1,17 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { scheduleSecretClipboardCleanup } from './secretClipboard'
+import { confirmSecretExport } from './secretClipboard'
 
-describe('secret clipboard cleanup (AT-01-008)', () => {
-  afterEach(() => {
-    vi.useRealTimers()
-    vi.unstubAllGlobals()
+describe('secret export warning (AT-01-008)', () => {
+  afterEach(() => vi.restoreAllMocks())
+  it('warns about timeout and clipboard history, propagating cancellation', () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    expect(confirmSecretExport('clipboard')).toBe(false)
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('60 секунд'))
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('облачные копии не удаляются'))
   })
-
-  it('clears only the unchanged exported secret', async () => {
-    vi.useFakeTimers()
-    const writeText = vi.fn().mockResolvedValue(undefined)
-    vi.stubGlobal('navigator', {
-      clipboard: {
-        readText: vi.fn().mockResolvedValue('FAKE-SECRET'),
-        writeText
-      }
-    })
-    scheduleSecretClipboardCleanup('FAKE-SECRET', 100)
-    await vi.advanceTimersByTimeAsync(100)
-    expect(writeText).toHaveBeenCalledWith('')
-  })
-
-  it('does not destroy newer clipboard content', async () => {
-    vi.useFakeTimers()
-    const writeText = vi.fn().mockResolvedValue(undefined)
-    vi.stubGlobal('navigator', {
-      clipboard: {
-        readText: vi.fn().mockResolvedValue('new user content'),
-        writeText
-      }
-    })
-    scheduleSecretClipboardCleanup('FAKE-SECRET', 100)
-    await vi.advanceTimersByTimeAsync(100)
-    expect(writeText).not.toHaveBeenCalled()
+  it('warns that file export is plaintext and propagates approval', () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    expect(confirmSecretExport('file')).toBe(true)
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('обычный текстовый файл'))
   })
 })

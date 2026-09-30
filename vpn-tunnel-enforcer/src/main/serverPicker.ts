@@ -23,6 +23,7 @@ import axios from 'axios'
 import { randomUUID } from 'crypto'
 import { logEvent } from './appLogger'
 import { compactForIpcLog } from './ipcLogging'
+import { copySecretToClipboard } from './secretClipboard'
 import { optionalPlainObject, optionalString, requireEnum, requirePort, requireString } from './ipcValidation'
 import { buildBootstrapRouteAttempts, type BootstrapRouteAttempt } from './bootstrapRoute'
 import { normalizeServerPort } from '../shared/portValidation'
@@ -2571,7 +2572,7 @@ export function registerServerPickerHandlers(): void {
   // {ok: true, uri, profile} on success, or {ok: false, reason} when the
   // outbound shape isn't representable as a single-line URI (custom
   // sing-box JSON profiles fall in that bucket).
-  handleLogged('servers:export-key', async (_event, id: string) => {
+  const exportProfileKey = (id: string) => {
     id = requireString(id, 'id', { maxLength: 200 })
     const profile = getProfiles().find(p => p.id === id)
     if (!profile) return { ok: false as const, reason: 'profile-not-found' }
@@ -2585,6 +2586,13 @@ export function registerServerPickerHandlers(): void {
     })
     if (!uri) return { ok: false as const, reason: 'unsupported-protocol', protocol: profile.protocol }
     return { ok: true as const, uri, name: profile.name, protocol: profile.protocol }
+  }
+  handleLogged('servers:export-key', async (_event, id: string) => exportProfileKey(id))
+  handleLogged('servers:copy-key', async (_event, id: string) => {
+    const result = exportProfileKey(id)
+    if (!result.ok) return result
+    // The renderer receives only acknowledgement, not the clipboard secret.
+    return { ok: true as const, ...copySecretToClipboard(result.uri) }
   })
 
   // Save the exported URI to a .txt file via the OS save dialog. Used when

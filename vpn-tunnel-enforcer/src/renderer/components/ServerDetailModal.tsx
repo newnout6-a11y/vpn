@@ -24,7 +24,7 @@ import { useAppStore } from '../store'
 import type { ClientDevice, ServerGroup, ServerProfile } from '../../shared/ipc-types'
 import { normalizeServerPort } from '../../shared/portValidation'
 import { LiveServerCheckSection } from './LiveServerCheckSection'
-import { confirmSecretExport, scheduleSecretClipboardCleanup } from '../utils/secretClipboard'
+import { confirmSecretExport } from '../utils/secretClipboard'
 
 interface IpInfo {
   ip: string
@@ -158,14 +158,12 @@ export function ServerDetailModal({ open, profile, onClose, onProfileUpdated }: 
     if (!id) return
     if (!confirmSecretExport('clipboard')) return
     try {
-      const result = await window.electronAPI.serversExportKey(id)
+      const result = await window.electronAPI.serversCopyKey(id)
       if (!result.ok) {
         setExportState('failed')
         setTimeout(() => setExportState('idle'), 2200)
         return
       }
-      await navigator.clipboard.writeText(result.uri)
-      scheduleSecretClipboardCleanup(result.uri)
       setExportState('copied')
       setTimeout(() => setExportState('idle'), 2200)
     } catch {
