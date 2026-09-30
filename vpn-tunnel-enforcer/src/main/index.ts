@@ -1671,7 +1671,16 @@ app.whenReady().then(async () => {
     return
   }
 
-  const initialSettings = settingsStore.get()
+  let initialSettings: ReturnType<typeof settingsStore.get>
+  try { initialSettings = settingsStore.get() }
+  catch {
+    logEvent('error', 'security', 'Secure settings migration unavailable; startup refused without changing network protection')
+    await dialog.showMessageBox({ type: 'error', title: 'VPNTE: защищённое хранилище',
+      message: 'Не удалось открыть или мигрировать защищённые настройки.',
+      detail: 'Запуск отменён без сброса сетевой защиты. Восстановите доступ к Windows DPAPI / safeStorage. Приложение не сообщает об успешной VPN-защите.', buttons: ['Закрыть'] })
+    app.exit(1)
+    return
+  }
   settingsStore.syncLoginItem()
   ipMonitor.setCheckInterval(initialSettings.checkInterval)
   maybeRefreshSmartRouteRuleSets('app-ready')

@@ -15,10 +15,10 @@
  * - parseDomainList(text)
  */
 
-import { ipcMain, dialog } from 'electron'
+import { ipcMain, dialog, type WebContents } from 'electron'
 import Store from 'electron-store'
 import { randomUUID } from 'crypto'
-import { readFileSync } from 'fs'
+import { readFileSync, openSync, closeSync, fstatSync, constants as fsConstants } from 'fs'
 import { logEvent } from './appLogger'
 import { tunController } from './tunController'
 import type { DomainRule, DomainAction } from '../shared/ipc-types'
@@ -230,7 +230,7 @@ function reorderRules(ids: string[]): DomainRule[] {
   }))
 }
 
-function importFromFile(filePath: string): DomainRule[] {
+function importFromFile(filePath: string | number): DomainRule[] {
   const text = readFileSync(filePath, 'utf-8')
   const parsed = parseDomainList(text)
 
@@ -336,6 +336,9 @@ export const domainRoutingService = {
   // in DomainRule for interface compatibility but will always be 0.
 }
 
+interface ApprovedDomainImport { path: string; fd: number; release: () => void }
+const approvedDomainImports = new WeakMap<WebContents, ApprovedDomainImport>()
+
 // ─── IPC Registration ────────────────────────────────────────────────────────
 
 async function hotReloadIfActive(): Promise<void> {
@@ -390,14 +393,20 @@ export function registerDomainRoutingIpcHandlers(): void {
     return result
   })
 
-  ipcMain.handle('domain-routing:import', async (_event, filePath: string) => {
-    if (typeof filePath !== 'string' || !filePath.trim()) throw new Error('Invalid import path')
-    const result = domainRoutingService.importFromFile(filePath)
+  ipcMain.handle('domain-routing:import', async (event, filePath: string) => {
+    const approved = approvedDomainImports.get(event.sender)
+    if (!approved || filePath !== approved.path) throw new Error('Import requires this renderer’s native-dialog selection')
+    let result: DomainRule[]
+    try {
+      if (fstatSync(approved.fd).size > 4 * 1024 * 1024) throw new Error('Domain import exceeds 4 MiB')
+      result = domainRoutingService.importFromFile(approved.fd)
+    } finally { approved.release() }
     await hotReloadIfActive()
     return result
   })
 
-  ipcMain.handle('domain-routing:browse-file', async () => {
+  ipcMain.handle('domain-routing:browse-file', async (event) => {
+    approvedDomainImports.get(event.sender)?.release()
     const result = await dialog.showOpenDialog({
       properties: ['openFile'],
       filters: [
@@ -408,6 +417,28 @@ export function registerDomainRoutingIpcHandlers(): void {
     if (result.canceled || result.filePaths.length === 0) {
       return null
     }
-    return result.filePaths[0]
+    if (event.sender.isDestroyed?.()) throw new Error('Import renderer closed during native selection')
+    approvedDomainImports.get(event.sender)?.release()
+    const path = result.filePaths[0]
+    // Hold the selected file open: an attacker cannot substitute another path
+    // or swap the selected pathname after the user gesture and before import.
+    const fd = openSync(path, fsConstants.O_RDONLY)
+    try {
+      const info = fstatSync(fd)
+      if (!info.isFile() || info.size > 4 * 1024 * 1024) throw new Error('Domain import must be a regular file up to 4 MiB')
+    } catch (error) { closeSync(fd); throw error }
+    let released = false
+    let timer: ReturnType<typeof setTimeout>
+    const approved: ApprovedDomainImport = { path, fd, release: () => {
+      if (released) return
+      released = true; clearTimeout(timer)
+      event.sender.removeListener?.('destroyed', approved.release)
+      if (approvedDomainImports.get(event.sender) === approved) approvedDomainImports.delete(event.sender)
+      closeSync(fd)
+    } }
+    timer = setTimeout(approved.release, 60_000); timer.unref?.()
+    approvedDomainImports.set(event.sender, approved)
+    event.sender.once?.('destroyed', approved.release)
+    return path
   })
 }
