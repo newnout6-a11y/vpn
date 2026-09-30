@@ -20,7 +20,7 @@
  */
 
 import { ipcMain, dialog, type IpcMainInvokeEvent, type WebContents } from 'electron'
-import { readFileSync, writeFileSync, openSync, closeSync, fstatSync } from 'fs'
+import { readFileSync, readSync, writeFileSync, openSync, closeSync, fstatSync } from 'fs'
 import Store from 'electron-store'
 import { logEvent } from './appLogger'
 import { compactForIpcLog } from './ipcLogging'
@@ -762,12 +762,40 @@ function handleLogged<T>(
  * Registers all config manager IPC handlers.
  * Should be called once during app initialization.
  */
-interface ApprovedConfigImport { path: string; raw: string; release: () => void }
+interface ApprovedConfigImport { path: string; raw: string; expiresAt: number; release: () => void }
 const approvedConfigImports = new WeakMap<WebContents, ApprovedConfigImport>()
+const configImportDialogs = new WeakMap<WebContents, object>()
+const MAX_CONFIG_IMPORT_BYTES = 16 * 1024 * 1024
 function requireApprovedConfigImport(sender: WebContents, path: string): ApprovedConfigImport {
   const approved = approvedConfigImports.get(sender)
-  if (!approved || approved.path !== path) throw new Error('Configuration import requires this renderer’s native-dialog selection')
+  if (approved && (sender.isDestroyed?.() || Date.now() >= approved.expiresAt)) approved.release()
+  if (!approved || approvedConfigImports.get(sender) !== approved || approved.path !== path) {
+    throw new Error('Configuration import requires this renderer’s native-dialog selection')
+  }
   return approved
+}
+
+function readSelectedConfig(path: string): string {
+  const fd = openSync(path, 'r')
+  try {
+    const before = fstatSync(fd)
+    if (!before.isFile() || before.size > MAX_CONFIG_IMPORT_BYTES) {
+      throw new Error('Configuration import must be a regular file up to 16 MiB')
+    }
+    // Do not use an unbounded readFileSync: the file can grow after fstat.
+    const buffer = Buffer.alloc(before.size + 1)
+    let length = 0
+    while (length < buffer.length) {
+      const count = readSync(fd, buffer, length, buffer.length - length, null)
+      if (count === 0) break
+      length += count
+    }
+    const after = fstatSync(fd)
+    if (length !== before.size || after.size !== before.size || after.mtimeMs !== before.mtimeMs) {
+      throw new Error('Configuration import file changed while reading')
+    }
+    return buffer.subarray(0, length).toString('utf8')
+  } finally { closeSync(fd) }
 }
 
 export function registerConfigManagerIpcHandlers(): void {
@@ -798,6 +826,8 @@ export function registerConfigManagerIpcHandlers(): void {
   // config:browse-import — opens file dialog to select a JSON config file
   ipcMain.handle('config:browse-import', async (event) => {
     approvedConfigImports.get(event.sender)?.release()
+    const request = {}
+    configImportDialogs.set(event.sender, request)
     const result = await dialog.showOpenDialog({
       properties: ['openFile'],
       filters: [
@@ -805,21 +835,16 @@ export function registerConfigManagerIpcHandlers(): void {
         { name: 'All Files', extensions: ['*'] }
       ]
     })
-    if (result.canceled || result.filePaths.length === 0) {
-      return null
-    }
+    // Only the newest dialog may grant a capability, even if an older one
+    // completes later. Cancellation also invalidates the older selection.
+    if (configImportDialogs.get(event.sender) !== request) return null
+    configImportDialogs.delete(event.sender)
+    if (result.canceled || result.filePaths.length === 0) return null
     if (event.sender.isDestroyed?.()) throw new Error('Configuration import renderer closed')
-    approvedConfigImports.get(event.sender)?.release()
     const path = result.filePaths[0]
-    const fd = openSync(path, 'r')
-    let raw: string
-    try {
-      const info = fstatSync(fd)
-      if (!info.isFile() || info.size > 16 * 1024 * 1024) throw new Error('Configuration import must be a regular file up to 16 MiB')
-      raw = readFileSync(fd, 'utf8')
-    } finally { closeSync(fd) }
+    const raw = readSelectedConfig(path)
     let timer: ReturnType<typeof setTimeout>
-    const approved: ApprovedConfigImport = { path, raw, release: () => {
+    const approved: ApprovedConfigImport = { path, raw, expiresAt: Date.now() + 60_000, release: () => {
       clearTimeout(timer)
       event.sender.removeListener?.('destroyed', approved.release)
       if (approvedConfigImports.get(event.sender) === approved) approvedConfigImports.delete(event.sender)
