@@ -77,12 +77,14 @@ import { startTrafficConnectionSampler, stopTrafficConnectionSampler, setInfraSe
 import { registerDnsHandlers, initDnsProfiles } from './dnsProfiles'
 import { registerDomainRoutingIpcHandlers } from './domainRouting'
 import { registerConfigManagerIpcHandlers } from './configManager'
+import { clearOwnedSecretClipboard } from './secretClipboard'
 import { registerNotificationPrefsIpcHandlers } from './notificationPrefs'
 import { registerI18nIpcHandlers } from './i18n'
 import { registerThemeIpcHandlers } from './themeManager'
 import { externalProxy } from './externalProxy'
 import { requirePlainObject, requireStringArray } from './ipcValidation'
-import { installTrustedIpcBoundary } from './ipcSecurity'
+import { installTrustedIpcBoundary, registerTrustedRenderer } from './ipcSecurity'
+import { pathToFileURL } from 'url'
 import {
   beginAdaptiveConnection,
   getAdaptiveBypassStatus,
@@ -122,11 +124,13 @@ function sendToMainWindow(channel: string, ...args: unknown[]): void {
 
 function loadRenderer(): void {
   if (!mainWindow || mainWindow.isDestroyed()) return
-  if (process.env.ELECTRON_RENDERER_URL) {
+  if (!app.isPackaged && process.env.ELECTRON_RENDERER_URL) {
+    registerTrustedRenderer(mainWindow.webContents, process.env.ELECTRON_RENDERER_URL, true)
     mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL).catch(() => {
       setTimeout(loadRenderer, 1000)
     })
   } else {
+    registerTrustedRenderer(mainWindow.webContents, pathToFileURL(join(__dirname, '../renderer/index.html')).href)
     mainWindow.loadFile(join(__dirname, '../renderer/index.html')).catch((err) => {
       logEvent('error', 'app', 'failed to load renderer index.html', { error: String(err) })
     })
@@ -786,12 +790,13 @@ function createWindow() {
  * The actual decision lives in the pure, tested `classifyNavigation`.
  */
 function hardenWebContents(contents: Electron.WebContents): void {
-  const devUrl = process.env.ELECTRON_RENDERER_URL
+  const devUrl = !app.isPackaged ? process.env.ELECTRON_RENDERER_URL : undefined
+  const entryUrl = pathToFileURL(join(__dirname, '../renderer/index.html')).href
 
   // Hand http(s) links to the OS browser; reject everything else. Never let a
   // renderer-triggered open create a new in-app window.
   contents.setWindowOpenHandler(({ url }) => {
-    if (classifyNavigation(url, devUrl) === 'open-external') {
+    if (classifyNavigation(url, devUrl, entryUrl) === 'open-external') {
       shell.openExternal(url).catch(err =>
         logEvent('warn', 'security', 'openExternal failed', { url, err: String(err) })
       )
@@ -803,7 +808,7 @@ function hardenWebContents(contents: Electron.WebContents): void {
 
   // Cancel any attempt to navigate the main window away from our own origin.
   contents.on('will-navigate', (event, url) => {
-    const verdict = classifyNavigation(url, devUrl)
+    const verdict = classifyNavigation(url, devUrl, entryUrl)
     if (verdict === 'allow-internal') return
     event.preventDefault()
     logEvent('warn', 'security', 'blocked in-app navigation', { url, verdict })
@@ -1667,7 +1672,16 @@ app.whenReady().then(async () => {
     return
   }
 
-  const initialSettings = settingsStore.get()
+  let initialSettings: ReturnType<typeof settingsStore.get>
+  try { initialSettings = settingsStore.get() }
+  catch {
+    logEvent('error', 'security', 'Secure settings migration unavailable; startup refused without changing network protection')
+    await dialog.showMessageBox({ type: 'error', title: 'VPNTE: защищённое хранилище',
+      message: 'Не удалось открыть или мигрировать защищённые настройки.',
+      detail: 'Запуск отменён без сброса сетевой защиты. Восстановите доступ к Windows DPAPI / safeStorage. Приложение не сообщает об успешной VPN-защите.', buttons: ['Закрыть'] })
+    app.exit(1)
+    return
+  }
   settingsStore.syncLoginItem()
   ipMonitor.setCheckInterval(initialSettings.checkInterval)
   maybeRefreshSmartRouteRuleSets('app-ready')
@@ -2506,6 +2520,7 @@ app.whenReady().then(async () => {
 async function performShutdownCleanup(reason: string): Promise<void> {
   if (shutdownInProgress) return
   shutdownInProgress = true
+  clearOwnedSecretClipboard()
   logEvent('info', 'app', `shutdown cleanup started: ${reason}`)
 
   // Close any live session as an app-quit BEFORE tunController.stop() emits

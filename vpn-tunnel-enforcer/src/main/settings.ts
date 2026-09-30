@@ -1,10 +1,11 @@
-import { app } from 'electron'
+import { app, dialog } from 'electron'
 import Store from 'electron-store'
-import { copyFileSync, existsSync } from 'fs'
 import { join } from 'path'
 import { execElevated } from './admin'
 import { domainEnrichmentService } from './domainEnrichment'
+import { readBootRecoveryReport } from './recoveryManifest'
 import {
+  protectLegacySecretBackup,
   decryptJsonSecret,
   decryptSecret,
   encryptJsonSecret,
@@ -220,6 +221,7 @@ function encodeSettings(value: AppSettings): PersistedAppSettings {
 }
 
 function readSettingsWithMigration(): AppSettings {
+  protectLegacySecretBackup(`${store.path}.pre-safe-storage-v1.bak`)
   const persisted = store.get('settings')
   const decoded = decodePersistedSettings(persisted)
   if (!hasPlaintextSettingsSecrets(persisted)) return decoded
@@ -227,8 +229,7 @@ function readSettingsWithMigration(): AppSettings {
     throw new Error('Settings migration requires Windows secure storage; plaintext data was left unchanged')
   }
 
-  const backupPath = `${store.path}.pre-safe-storage-v1.bak`
-  if (existsSync(store.path) && !existsSync(backupPath)) copyFileSync(store.path, backupPath)
+  protectLegacySecretBackup(`${store.path}.pre-safe-storage-v1.bak`, store.path)
   store.store = {
     settings: encodeSettings(decoded),
     schemaVersion: 1,
@@ -336,6 +337,10 @@ function normalizeSettings(input: Partial<AppSettings> | undefined): AppSettings
 }
 
 let bootRecoveryTaskEnsured = false
+let bootRecoveryStatus: { status: 'not-checked' | 'verified' | 'failed'; message: string } = {
+  status: 'not-checked', message: 'Boot Recovery task has not been verified'
+}
+export function getBootRecoveryRegistrationStatus() { return { ...bootRecoveryStatus } }
 
 export function getBootRecoveryScriptPath(packaged = app.isPackaged): string {
   return packaged
@@ -344,10 +349,8 @@ export function getBootRecoveryScriptPath(packaged = app.isPackaged): string {
 }
 
 export function buildBootRecoveryTaskCommand(recoverScript: string): string {
-  const script = `& '${recoverScript.replace(/'/g, "''")}'`
-  const encoded = Buffer.from(script, 'utf16le').toString('base64')
-  const taskAction = `powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded}`
-  return `schtasks /Create /TN "VPNTE Boot Recovery" /SC ONSTART /RU SYSTEM /RP "" /TR "${taskAction}" /F`
+  const script = `& '${recoverScript.replace(/'/g, "''")}' -RegisterTask`
+  return `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${Buffer.from(script, 'utf16le').toString('base64')}`
 }
 
 function applyLoginItem(autoStart: boolean, options: { ensureBootRecovery?: boolean } = {}) {
@@ -371,13 +374,24 @@ function applyLoginItem(autoStart: boolean, options: { ensureBootRecovery?: bool
       // independent of autoStart and restores network settings if a crash or
       // BSOD left firewall/DNS state pinned.
       const recoverTask = buildBootRecoveryTaskCommand(getBootRecoveryScriptPath(true))
-      void execElevated(recoverTask, { timeout: 15000 })
-        .then(() => {
-          bootRecoveryTaskEnsured = true
+      void execElevated(recoverTask, { timeout: 30000 })
+        .then(async ({ stdout }) => {
+          if (!String(stdout).split(/\r?\n/).includes('RECOVERY_TASK_VERIFIED')) throw new Error('Boot Recovery read-back marker missing')
+          bootRecoveryStatus = { status: 'verified', message: 'SYSTEM startup trigger, action and principal verified' }
+          const report = await readBootRecoveryReport()
+          if (report && report.status !== 'restored') {
+            await dialog.showMessageBox({ type: 'warning', title: 'VPNTE: Boot Recovery',
+              message: report.status === 'strict-retained' ? 'Строгая блокировка сохранена после перезагрузки.' : 'Восстановление сети после перезагрузки не завершено.',
+              detail: 'Защита не подтверждена. Проверьте результат Boot Recovery в системной диагностике.', buttons: ['OK'] })
+          }
         })
-        .catch((error) => {
+        .catch(() => {
           bootRecoveryTaskEnsured = false
-          console.error('[settings] VPNTE Boot Recovery task registration failed', error)
+          bootRecoveryStatus = { status: 'failed', message: 'Boot Recovery registration or trusted report verification failed' }
+          console.error('[settings] Boot Recovery verification failed; recovery is not confirmed')
+          void dialog.showMessageBox({ type: 'error', title: 'VPNTE: Boot Recovery',
+            message: 'Задача восстановления сети не подтверждена. Автовосстановление после перезагрузки не гарантировано.',
+            detail: 'Проверьте системную диагностику и установку приложения с правами администратора.', buttons: ['OK'] }).catch(() => undefined)
         })
     }
 

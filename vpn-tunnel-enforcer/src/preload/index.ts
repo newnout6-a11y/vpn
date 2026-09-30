@@ -109,12 +109,18 @@ export interface ElectronAPI {
   serversAddToGroup: (input: string, groupId: string | null, options?: { clientDevice?: ClientDevice }) => Promise<any[]>
   serversSetClientDevice: (id: string, clientDevice: ClientDevice) => Promise<any>
   serversRemove: (id: string) => Promise<void>
+  serversCopyKey: (id: string) => Promise<
+    | { ok: true; clearAfterMs: number }
+    | { ok: false; cancelled: true }
+    | { ok: false; reason: string; protocol?: string }
+  >
   serversExportKey: (id: string) => Promise<
     | { ok: true; uri: string; name: string; protocol: string }
+    | { ok: false; cancelled: true }
     | { ok: false; reason: string; protocol?: string }
   >
   serversExportKeyToFile: (id: string) => Promise<
-    | { ok: true; path: string; uri: string; name: string; protocol: string }
+    | { ok: true; path: string; name: string; protocol: string }
     | { ok: false; cancelled: true }
     | { ok: false; reason: string; protocol?: string; error?: string }
   >
@@ -489,6 +495,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('servers:add-to-group', assertString(input, 'input', MAX_VPN_INPUT_CHARS), assertNullableString(groupId, 'groupId'), assertClientDeviceOptions(options)),
   serversSetClientDevice: (id: string, clientDevice: ClientDevice) => ipcRenderer.invoke('servers:set-client-device', assertString(id, 'id'), assertClientDevice(clientDevice)),
   serversRemove: (id: string) => ipcRenderer.invoke('servers:remove', assertString(id, 'id')),
+  serversCopyKey: (id: string) => ipcRenderer.invoke('servers:copy-key', assertString(id, 'id')),
   serversExportKey: (id: string) => ipcRenderer.invoke('servers:export-key', assertString(id, 'id')),
   serversExportKeyToFile: (id: string) => ipcRenderer.invoke('servers:export-key-file', assertString(id, 'id')),
   serversExportAllKeysToFile: () => ipcRenderer.invoke('servers:export-all-keys-file'),

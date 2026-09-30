@@ -23,6 +23,8 @@ import axios from 'axios'
 import { randomUUID } from 'crypto'
 import { logEvent } from './appLogger'
 import { compactForIpcLog } from './ipcLogging'
+import { copySecretToClipboard } from './secretClipboard'
+import { withSecretExportConsent } from './secretExportConsent'
 import { optionalPlainObject, optionalString, requireEnum, requirePort, requireString } from './ipcValidation'
 import { buildBootstrapRouteAttempts, type BootstrapRouteAttempt } from './bootstrapRoute'
 import { normalizeServerPort } from '../shared/portValidation'
@@ -2571,7 +2573,7 @@ export function registerServerPickerHandlers(): void {
   // {ok: true, uri, profile} on success, or {ok: false, reason} when the
   // outbound shape isn't representable as a single-line URI (custom
   // sing-box JSON profiles fall in that bucket).
-  handleLogged('servers:export-key', async (_event, id: string) => {
+  const exportProfileKey = (id: string) => {
     id = requireString(id, 'id', { maxLength: 200 })
     const profile = getProfiles().find(p => p.id === id)
     if (!profile) return { ok: false as const, reason: 'profile-not-found' }
@@ -2585,6 +2587,19 @@ export function registerServerPickerHandlers(): void {
     })
     if (!uri) return { ok: false as const, reason: 'unsupported-protocol', protocol: profile.protocol }
     return { ok: true as const, uri, name: profile.name, protocol: profile.protocol }
+  }
+  handleLogged('servers:export-key', async (event, id: string) => {
+    id = requireString(id, 'id', { maxLength: 200 })
+    return withSecretExportConsent(event.sender, 'renderer', () => exportProfileKey(id))
+  })
+  handleLogged('servers:copy-key', async (event, id: string) => {
+    id = requireString(id, 'id', { maxLength: 200 })
+    return withSecretExportConsent(event.sender, 'clipboard', () => {
+      const result = exportProfileKey(id)
+      if (!result.ok) return result
+      // The renderer receives only acknowledgement, not the clipboard secret.
+      return { ok: true as const, ...copySecretToClipboard(result.uri) }
+    })
   })
 
   // Save the exported URI to a .txt file via the OS save dialog. Used when
@@ -2594,17 +2609,18 @@ export function registerServerPickerHandlers(): void {
   //   {ok: true, path}            — file written
   //   {ok: false, cancelled: true} — user dismissed the dialog
   //   {ok: false, reason}          — anything else (no profile, write failed, …)
-  handleLogged('servers:export-key-file', async (_event, id: string) => {
+  handleLogged('servers:export-key-file', async (event, id: string) => {
     id = requireString(id, 'id', { maxLength: 200 })
-    const profile = getProfiles().find(p => p.id === id)
-    if (!profile) return { ok: false as const, reason: 'profile-not-found' }
-    if (!profile.outbound || typeof profile.outbound !== 'object') {
-      return { ok: false as const, reason: 'no-outbound' }
-    }
-    const uri = exportOutboundToUri({
-      name: profile.name,
-      protocol: profile.protocol,
-      outbound: profile.outbound
+    return withSecretExportConsent(event.sender, 'file', async () => {
+      const profile = getProfiles().find(p => p.id === id)
+      if (!profile) return { ok: false as const, reason: 'profile-not-found' }
+      if (!profile.outbound || typeof profile.outbound !== 'object') {
+        return { ok: false as const, reason: 'no-outbound' }
+      }
+      const uri = exportOutboundToUri({
+        name: profile.name,
+        protocol: profile.protocol,
+        outbound: profile.outbound
     })
     if (!uri) return { ok: false as const, reason: 'unsupported-protocol', protocol: profile.protocol }
 
@@ -2618,7 +2634,7 @@ export function registerServerPickerHandlers(): void {
     const defaultFileName = `${profile.protocol}-${safeName}.txt`
 
     const choice = await dialog.showSaveDialog({
-      title: 'Сохранить ключ VPN',
+      title: 'Сохранить ключ VPN — файл содержит секрет доступа',
       defaultPath: join(app.getPath('desktop'), defaultFileName),
       filters: [
         { name: 'Текстовый файл', extensions: ['txt'] },
@@ -2635,7 +2651,7 @@ export function registerServerPickerHandlers(): void {
       // Most clients accept extra leading/trailing whitespace, but minimum
       // surprise is "the file is exactly the URI".
       await writeFile(choice.filePath, uri + '\n', 'utf8')
-      return { ok: true as const, path: choice.filePath, uri, name: profile.name, protocol: profile.protocol }
+      return { ok: true as const, path: choice.filePath, name: profile.name, protocol: profile.protocol }
     } catch (err: any) {
       logEvent('warn', 'server-picker', 'export-key-file write failed', {
         path: choice.filePath,
@@ -2643,6 +2659,7 @@ export function registerServerPickerHandlers(): void {
       })
       return { ok: false as const, reason: 'write-failed', error: err?.message || String(err) }
     }
+    })
   })
 
   // Bulk export: dump every saved profile (one URI per line) into a single
@@ -2654,37 +2671,38 @@ export function registerServerPickerHandlers(): void {
   //   {ok: true, path, total, exported, skipped}
   //   {ok: false, cancelled: true}
   //   {ok: false, reason: 'no-profiles' | 'unsupported-all' | 'write-failed'}
-  handleLogged('servers:export-all-keys-file', async () => {
-    const profiles = getProfiles()
-    if (!profiles.length) return { ok: false as const, reason: 'no-profiles' }
+  handleLogged('servers:export-all-keys-file', async (event) => {
+    return withSecretExportConsent(event.sender, 'file', async () => {
+      const profiles = getProfiles()
+      if (!profiles.length) return { ok: false as const, reason: 'no-profiles' }
 
-    const lines: string[] = []
-    let skipped = 0
-    for (const profile of profiles) {
-      if (!profile.outbound || typeof profile.outbound !== 'object') { skipped++; continue }
-      const uri = exportOutboundToUri({
-        name: profile.name,
-        protocol: profile.protocol,
-        outbound: profile.outbound
-      })
-      if (!uri) { skipped++; continue }
-      lines.push(uri)
-    }
+      const lines: string[] = []
+      let skipped = 0
+      for (const profile of profiles) {
+        if (!profile.outbound || typeof profile.outbound !== 'object') { skipped++; continue }
+        const uri = exportOutboundToUri({
+          name: profile.name,
+          protocol: profile.protocol,
+          outbound: profile.outbound
+        })
+        if (!uri) { skipped++; continue }
+        lines.push(uri)
+      }
 
-    if (!lines.length) {
-      return { ok: false as const, reason: 'unsupported-all' }
-    }
+      if (!lines.length) {
+        return { ok: false as const, reason: 'unsupported-all' }
+      }
 
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
-    const defaultFileName = `vpn-keys-${stamp}.txt`
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+      const defaultFileName = `vpn-keys-${stamp}.txt`
 
-    const choice = await dialog.showSaveDialog({
-      title: 'Сохранить все ключи VPN',
-      defaultPath: join(app.getPath('desktop'), defaultFileName),
-      filters: [
-        { name: 'Текстовый файл', extensions: ['txt'] },
-        { name: 'Все файлы', extensions: ['*'] }
-      ]
+      const choice = await dialog.showSaveDialog({
+        title: 'Сохранить все ключи VPN — файл содержит пароли/ключи',
+        defaultPath: join(app.getPath('desktop'), defaultFileName),
+        filters: [
+          { name: 'Текстовый файл', extensions: ['txt'] },
+          { name: 'Все файлы', extensions: ['*'] }
+        ]
     })
 
     if (choice.canceled || !choice.filePath) {
@@ -2722,38 +2740,40 @@ export function registerServerPickerHandlers(): void {
       })
       return { ok: false as const, reason: 'write-failed', error: err?.message || String(err) }
     }
+    })
   })
 
-  handleLogged('servers:export-all-proxies-file', async () => {
-    const profiles = getProfiles()
-    if (!profiles.length) return { ok: false as const, reason: 'no-profiles' }
+  handleLogged('servers:export-all-proxies-file', async (event) => {
+    return withSecretExportConsent(event.sender, 'file', async () => {
+      const profiles = getProfiles()
+      if (!profiles.length) return { ok: false as const, reason: 'no-profiles' }
 
-    const lines: string[] = []
-    let skipped = 0
-    for (const profile of profiles) {
-      if (!profile.outbound || typeof profile.outbound !== 'object') { skipped++; continue }
-      const line = exportOutboundToProxyLine({
-        protocol: profile.protocol,
-        outbound: profile.outbound
-      })
-      if (!line) { skipped++; continue }
-      lines.push(line)
-    }
+      const lines: string[] = []
+      let skipped = 0
+      for (const profile of profiles) {
+        if (!profile.outbound || typeof profile.outbound !== 'object') { skipped++; continue }
+        const line = exportOutboundToProxyLine({
+          protocol: profile.protocol,
+          outbound: profile.outbound
+        })
+        if (!line) { skipped++; continue }
+        lines.push(line)
+      }
 
-    if (!lines.length) {
-      return { ok: false as const, reason: 'unsupported-all', skipped, total: profiles.length }
-    }
+      if (!lines.length) {
+        return { ok: false as const, reason: 'unsupported-all', skipped, total: profiles.length }
+      }
 
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
-    const defaultFileName = `proxy-list-${stamp}.txt`
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+      const defaultFileName = `proxy-list-${stamp}.txt`
 
-    const choice = await dialog.showSaveDialog({
-      title: 'Сохранить proxy-list',
-      defaultPath: join(app.getPath('desktop'), defaultFileName),
-      filters: [
-        { name: 'Text file', extensions: ['txt'] },
-        { name: 'All files', extensions: ['*'] }
-      ]
+      const choice = await dialog.showSaveDialog({
+        title: 'Сохранить proxy-list — файл может содержать пароли',
+        defaultPath: join(app.getPath('desktop'), defaultFileName),
+        filters: [
+          { name: 'Text file', extensions: ['txt'] },
+          { name: 'All files', extensions: ['*'] }
+        ]
     })
 
     if (choice.canceled || !choice.filePath) {
@@ -2782,6 +2802,7 @@ export function registerServerPickerHandlers(): void {
       })
       return { ok: false as const, reason: 'write-failed', error: err?.message || String(err) }
     }
+    })
   })
 }
 

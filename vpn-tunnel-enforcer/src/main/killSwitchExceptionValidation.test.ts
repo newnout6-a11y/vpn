@@ -23,14 +23,13 @@ describe('strict kill-switch exception validation (AT-03-009)', () => {
   it.each([
     '192.0.2.1',
     '10.0.0.0/8',
-    '0.0.0.0/0',
     '2001:db8::/32',
-    '::/0'
+    '2001:db8::1'
   ])('accepts valid IP/CIDR %s', async value => {
     await expect(validateKillSwitchException({ type: 'ip', value, label: 'test' })).resolves.toMatchObject({ value })
   })
 
-  it.each(['999.1.1.1', '10.0.0.1/33', '2001:db8::/129', 'host.example', '10.0.0.0/x'])(
+  it.each(['0.0.0.0/0', '::/0', '999.1.1.1', '10.0.0.1/33', '2001:db8::/129', 'host.example', '10.0.0.0/x'])(
     'rejects invalid IP/CIDR %s',
     async value => {
       await expect(validateKillSwitchException({ type: 'ip', value, label: 'test' })).rejects.toThrow(/IP|CIDR/)

@@ -31,9 +31,14 @@
 !macroend
 
 !macro customInstall
-  ; Apply the Epic Online Services loopback compatibility fix while the
-  ; installer already has administrator rights. The script is idempotent.
-  nsExec::ExecToLog 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\resources\vpnte-eos-compat.ps1"'
+  ; Mandatory SYSTEM recovery task on every install/upgrade. Fail visibly if registration cannot be verified.
+  nsExec::ExecToStack 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\resources\vpnte-recover.ps1" -RegisterTask'
+  Pop $0
+  Pop $1
+  ${If} $0 != 0
+    MessageBox MB_ICONSTOP "VPNTE Boot Recovery registration failed: $1"
+    Abort
+  ${EndIf}
 
   ; Keep user data intact on upgrade/reinstall. Server groups are user state:
   ; deleting them here can resurrect old subscriptions from legacy caches.

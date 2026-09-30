@@ -1,5 +1,14 @@
 import { exec as execCb, execFile as execFileCb } from 'child_process'
-import { promisify } from 'util'
+import util, { promisify } from 'util'
+
+// Node 22/24 removed util.isObject and util.isFunction which sudo-prompt uses internally.
+if (typeof (util as any).isObject !== 'function') {
+  ;(util as any).isObject = (arg: any): arg is object => typeof arg === 'object' && arg !== null
+}
+if (typeof (util as any).isFunction !== 'function') {
+  ;(util as any).isFunction = (arg: any): arg is Function => typeof arg === 'function'
+}
+
 import sudo from 'sudo-prompt'
 
 const exec = promisify(execCb)

@@ -7,7 +7,8 @@ import { isProcessElevated } from './admin'
 import { getAppLogPath, getLogDir, logEvent } from './appLogger'
 import { getRoutingPlan } from './connectionPlanner'
 import { runLeakCheck, type CheckStatus } from './leakDiagnostics'
-import { settingsStore } from './settings'
+import { settingsStore, getBootRecoveryRegistrationStatus } from './settings'
+import { readBootRecoveryReport } from './recoveryManifest'
 import { describeVpnProfileCapabilities, redactSensitiveText, redactSettingsForDiagnostics } from './vpnProfiles'
 import { getSmartRouteRuleSetState } from './ruleSetManager'
 import { getTrafficForensicsStatus } from './trafficForensics'
@@ -856,6 +857,19 @@ export async function runSystemDiagnostics(): Promise<SystemDiagnosticResult> {
   ])
 
   const items = itemGroups.flat()
+  const task = getBootRecoveryRegistrationStatus()
+  items.push(item('boot-recovery-task', 'System', 'Boot Recovery task',
+    task.status === 'verified' ? 'ok' : task.status === 'failed' ? 'fail' : 'warn', task.status, task.message))
+  if (process.platform === 'win32') {
+    try {
+      const recovery = await readBootRecoveryReport()
+      items.push(item('boot-recovery-result', 'System', 'Last Boot Recovery',
+        recovery?.status === 'restored' ? 'ok' : 'warn', recovery?.status ?? 'not-checked',
+        recovery ? recovery.messages.map(m => m.message).join('\n') : 'No trusted recovery report is available'))
+    } catch {
+      items.push(item('boot-recovery-result', 'System', 'Last Boot Recovery', 'fail', 'unknown', 'Trusted recovery report could not be verified'))
+    }
+  }
   const result = {
     ranAt: Date.now(),
     summary: combineStatus(items),

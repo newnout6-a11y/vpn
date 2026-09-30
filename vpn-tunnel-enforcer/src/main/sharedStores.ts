@@ -1,7 +1,7 @@
 import Store from 'electron-store'
-import { copyFileSync, existsSync } from 'fs'
 import type { ServerProfile, ServerGroup, KillSwitchLevel, KillSwitchException } from '../shared/ipc-types'
 import {
+  protectLegacySecretBackup,
   decryptJsonSecret,
   decryptSecret,
   encryptJsonSecret,
@@ -76,6 +76,7 @@ function decryptProfile(profile: PersistedServerProfile): ServerProfile {
 }
 
 function migrateProfilesIfNeeded(): void {
+  protectLegacySecretBackup(`${persistedServerPickerStore.path}.pre-safe-storage-v1.bak`)
   const profiles = persistedServerPickerStore.get('profiles', [])
   const plaintextProfiles = profiles.filter(profileContainsPlaintextSecret)
   if (plaintextProfiles.length === 0) return
@@ -83,10 +84,7 @@ function migrateProfilesIfNeeded(): void {
     throw new Error('VPN profile migration requires Windows secure storage; plaintext data was left unchanged')
   }
 
-  const backupPath = `${persistedServerPickerStore.path}.pre-safe-storage-v1.bak`
-  if (existsSync(persistedServerPickerStore.path) && !existsSync(backupPath)) {
-    copyFileSync(persistedServerPickerStore.path, backupPath)
-  }
+  protectLegacySecretBackup(`${persistedServerPickerStore.path}.pre-safe-storage-v1.bak`, persistedServerPickerStore.path)
 
   const activeProfileId = persistedServerPickerStore.get('activeProfileId', null)
   const encrypted = profiles.map(profile => encryptProfile(decryptProfile(profile)))
@@ -138,10 +136,29 @@ export const serverPickerStore = {
   }
 }
 
-export const serverGroupsStore = new Store<ServerGroupsStoreShape>({
-  name: 'server-groups',
-  defaults: { groups: [] }
+const persistedServerGroupsStore = new Store<{ groups: Array<ServerGroup | SecretRef> }>({
+  name: 'server-groups', defaults: { groups: [] }
 })
+export const serverGroupsStore = {
+  get(_key: 'groups', fallback: ServerGroup[] = []): ServerGroup[] {
+    protectLegacySecretBackup(`${persistedServerGroupsStore.path}.pre-safe-storage-v1.bak`)
+    const persisted = persistedServerGroupsStore.get('groups', fallback)
+    if (!Array.isArray(persisted)) throw new Error('Invalid server group store')
+    const groups = persisted.map(group => isSecretRef(group) ? decryptJsonSecret<ServerGroup>(group) : group)
+    if (persisted.some(group => !isSecretRef(group))) {
+      // Prepare the entire encrypted replacement before committing any field.
+      const encrypted = groups.map(encryptJsonSecret)
+      protectLegacySecretBackup(`${persistedServerGroupsStore.path}.pre-safe-storage-v1.bak`, persistedServerGroupsStore.path)
+      persistedServerGroupsStore.set('groups', encrypted)
+    }
+    return groups
+  },
+  set(_key: 'groups', groups: ServerGroup[]): void {
+    if (!Array.isArray(groups)) throw new Error('Invalid server group array')
+    persistedServerGroupsStore.set('groups', groups.map(encryptJsonSecret))
+  },
+  get path(): string { return persistedServerGroupsStore.path }
+}
 
 export const granularKillSwitchStore = new Store<GranularKillSwitchStoreShape>({
   name: 'granular-kill-switch',

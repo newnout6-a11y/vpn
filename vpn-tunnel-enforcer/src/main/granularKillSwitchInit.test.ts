@@ -38,6 +38,9 @@ vi.mock('./settings', () => ({
     save: settingsSaveMock
   }
 }))
+vi.mock('./recoveryManifest', () => ({
+  persistRecoveryPolicy: vi.fn(async () => {})
+}))
 
 describe('granularKillSwitch initialization guard', () => {
   beforeEach(() => {

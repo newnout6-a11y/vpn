@@ -1,3 +1,5 @@
+import { recoveryManifestPath, readRecoveryManifest, writeRecoveryManifest, removeRecoveryManifest } from './recoveryManifest'
+import { isIP } from 'net'
 /**
  * Hard lockdown of the physical adapter while TUN is up.
  *
@@ -44,6 +46,7 @@ const MANIFEST_BASENAME = 'latest-physical-adapter-lockdown.json'
 interface AdapterSnapshot {
   // Stable adapter identifier on Windows.
   ifIndex: number
+  interfaceGuid?: string
   alias: string
   description?: string
   // What we found before we touched it. We restore exactly these.
@@ -98,6 +101,8 @@ interface DnsRegistryPolicySnapshot {
 }
 
 interface LockdownManifest {
+  schemaVersion?: 1
+  owner?: 'VPNTE'
   appliedAt: number
   tunDnsIpv4: string
   forceDns?: boolean
@@ -130,9 +135,9 @@ function getProgramDataPath(): string {
 }
 
 export function getLockdownManifestPaths(): { programData: string; userData: string } {
-  const programDataDir = join(getProgramDataPath(), 'VPN-Tunnel-Enforcer')
+  const programDataDir = recoveryManifestPath(MANIFEST_BASENAME)
   return {
-    programData: join(programDataDir, MANIFEST_BASENAME),
+    programData: programDataDir,
     userData: join(app.getPath('userData'), MANIFEST_BASENAME)
   }
 }
@@ -145,21 +150,36 @@ function programDataManifestPath(): string {
   return getLockdownManifestPaths().programData
 }
 
-async function readManifest(): Promise<LockdownManifest | null> {
-  // ProgramData is authoritative. The userData copy is diagnostic only and
-  // must never drive elevated rollback.
-  const paths = [programDataManifestPath()]
-  for (const path of paths) {
-    try {
-      if (existsSync(path)) {
-        const raw = await readFile(path, 'utf-8')
-        return JSON.parse(raw) as LockdownManifest
-      }
-    } catch {
-      // continue to next path
+export function validateLockdownManifest(value: unknown): LockdownManifest {
+  const v = value as any
+  if (!v || v.schemaVersion !== 1 || v.owner !== 'VPNTE' || !Number.isSafeInteger(v.appliedAt) ||
+      !isIP(v.tunDnsIpv4) || !Array.isArray(v.adapters) || v.adapters.length > 256) throw new Error('Invalid lockdown manifest')
+  for (const a of v.adapters) {
+    if (!a || !Number.isInteger(a.ifIndex) || a.ifIndex <= 0 || typeof a.alias !== 'string' || a.alias.length > 256 ||
+        /[\x00-\x1f]/.test(a.alias) || typeof a.ipv6Enabled !== 'boolean' || typeof a.forcedIpv6Off !== 'boolean' ||
+        typeof a.interfaceGuid !== 'string' || !/^\{?[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\}?$/i.test(a.interfaceGuid) ||
+        !['dhcp','static','unknown'].includes(a.ipv4DnsSource) ||
+        !Array.isArray(a.ipv4DnsServers) || a.ipv4DnsServers.some((ip: unknown) => typeof ip !== 'string' || !isIP(ip)) ||
+        !(a.forcedDnsTo === null || (Array.isArray(a.forcedDnsTo) && a.forcedDnsTo.every((ip: string) => isIP(ip))))) throw new Error('Invalid adapter snapshot')
+  }
+  if (v.transitionAdapters) {
+    for (const [key, values] of Object.entries({
+      teredoType: ['disabled','default','client','enterpriseclient','natclient','server'],
+      sixToFourState: ['disabled','default','enabled'], isatapState: ['disabled','default','enabled']
+    })) {
+      const state = v.transitionAdapters[key]
+      if (state !== null && !values.includes(state)) throw new Error('Invalid transition snapshot')
     }
   }
-  return null
+  if (!v.dnsRegistryPolicy) throw new Error('Missing DNS policy snapshot')
+  for (const key of ['smartNameResolution','parallelAandAAAA']) {
+    const r = v.dnsRegistryPolicy[key]
+    if (!r || typeof r.exists !== 'boolean' || (r.exists && (r.type !== 'REG_DWORD' || typeof r.data !== 'string' || !/^(?:0x[a-f0-9]{1,8}|[0-9]{1,10})$/i.test(r.data) || Number(r.data) > 0xffffffff))) throw new Error('Invalid DNS registry snapshot')
+  }
+  return v
+}
+async function readManifest(): Promise<LockdownManifest | null> {
+  return readRecoveryManifest(MANIFEST_BASENAME, validateLockdownManifest)
 }
 
 function sanitizeDnsServers(values: unknown): string[] {
@@ -186,45 +206,14 @@ function summarizeDnsSources(adapters: AdapterSnapshot[]): PhysicalAdapterDnsSou
 }
 
 async function writeManifest(m: LockdownManifest): Promise<void> {
-  const payload = JSON.stringify(m, null, 2)
-
-  // 1. Write to userData
-  try {
-    const userTarget = manifestPath()
-    const userTmp = userTarget + '.tmp'
-    await writeFile(userTmp, payload, 'utf-8')
-    await rename(userTmp, userTarget)
-  } catch (err) {
-    logEvent('warn', 'phys-lockdown', 'writing userData manifest failed', err)
-  }
-
-  // 2. Write to ProgramData for cross-session & SYSTEM boot recovery
-  try {
-    const pdTarget = programDataManifestPath()
-    const pdDir = join(getProgramDataPath(), 'VPN-Tunnel-Enforcer')
-    await mkdir(pdDir, { recursive: true })
-    const acl = await ensureElevatedRuntimeDirHardened(pdDir, 'recovery-manifest')
-    if (!acl.hardened && !acl.skipped) {
-      throw new Error(`ProgramData recovery manifest directory is not trusted: ${acl.message}`)
-    }
-    const pdTmp = pdTarget + '.tmp'
-    await writeFile(pdTmp, payload, 'utf-8')
-    await rename(pdTmp, pdTarget)
-  } catch (err) {
-    logEvent('error', 'phys-lockdown', 'writing trusted ProgramData manifest failed', err)
-    throw err
-  }
+  await writeRecoveryManifest(MANIFEST_BASENAME, { ...m, schemaVersion: 1, owner: 'VPNTE' }, validateLockdownManifest)
+  // Diagnostic-only copy; it is NEVER consumed by elevated rollback.
+  const target = manifestPath()
+  await writeFile(target, JSON.stringify(m, null, 2), 'utf8').catch(error => logEvent('warn', 'phys-lockdown', 'diagnostic copy failed', error))
 }
-
 async function deleteManifest(): Promise<void> {
-  const paths = [manifestPath(), programDataManifestPath()]
-  for (const path of paths) {
-    try {
-      if (existsSync(path)) await unlink(path)
-    } catch (err) {
-      logEvent('warn', 'phys-lockdown', `manifest delete failed for ${path}`, err)
-    }
-  }
+  await removeRecoveryManifest(MANIFEST_BASENAME)
+  await unlink(manifestPath()).catch((error: any) => { if (error?.code !== 'ENOENT') throw error })
 }
 
 function psSingleQuote(s: string): string {
@@ -341,6 +330,7 @@ foreach ($a in $adapters) {
   )
   $rows += [pscustomobject]@{
     ifIndex      = [int]$a.ifIndex
+    interfaceGuid = [string]$a.InterfaceGuid
     alias        = [string]$a.Name
     description  = [string]$a.InterfaceDescription
     ipv6Enabled  = [bool]($bind6 -and $bind6.Enabled)
@@ -369,6 +359,7 @@ $rows | ConvertTo-Json -Compress -Depth 4
       const isCellularOrTethering = Boolean(row.isCellularOrTethering) || isCellularOrTetheringAdapter(alias, description, dnsServers)
       return {
         ifIndex: Number(row.ifIndex),
+        interfaceGuid: String(row.interfaceGuid || ''),
         alias,
         description,
         ipv6Enabled: Boolean(row.ipv6Enabled),
@@ -451,36 +442,41 @@ function netshState(value: string | null): string | null {
 function netshRestoreLine(tag: string, command: string, value: string | null): string {
   const state = netshState(value)
   if (!state) return `Write-Output '${tag}:unknown'`
-  return `try { ${command}${state} | Out-Null; Write-Output '${tag}:restore' } catch { Write-Output "${tag}_err: $_" }`
+  return `try { ${command}${state} | Out-Null; if ($LASTEXITCODE -ne 0) { throw 'native command failed' }; Write-Output '${tag}:restore' } catch { Write-Output "${tag}_err: $_" }`
 }
 
 function registryRestoreLine(tag: string, key: string, name: string, snapshot?: RegistryValueSnapshot): string {
-  if (snapshot?.exists && snapshot.type && snapshot.data) {
-    return `try { reg add ${psSingleQuote(key)} /v ${psSingleQuote(name)} /t ${psSingleQuote(snapshot.type)} /d ${psSingleQuote(snapshot.data)} /f | Out-Null; Write-Output '${tag}:restore' } catch { Write-Output "${tag}_err: $_" }`
-  }
-  return `try { reg delete ${psSingleQuote(key)} /v ${psSingleQuote(name)} /f 2>$null | Out-Null; Write-Output '${tag}:delete' } catch { Write-Output "${tag}_err: $_" }`
+  if (!snapshot) return `Write-Output '${tag}_err: missing ownership snapshot'`
+  const keyPath = psSingleQuote(key.replace(/^HKLM\\/, ''))
+  const valueName = psSingleQuote(name)
+  const expected = Number(snapshot.data || 0) | 0
+  return `
+$key = $null
+try {
+  $key = [Microsoft.Win32.Registry]::LocalMachine.CreateSubKey(${keyPath})
+  ${snapshot.exists ? `$key.SetValue(${valueName},[int]${expected},[Microsoft.Win32.RegistryValueKind]::DWord)` : `$key.DeleteValue(${valueName},$false)`}
+  $present = @($key.GetValueNames()) -contains ${valueName}
+  if ($present -ne $${snapshot.exists ? 'true' : 'false'}) { throw 'Registry presence read-back mismatch' }
+  ${snapshot.exists ? `if ($key.GetValueKind(${valueName}) -ne [Microsoft.Win32.RegistryValueKind]::DWord -or [int]$key.GetValue(${valueName}) -ne ${expected}) { throw 'Registry value read-back mismatch' }` : ''}
+  Write-Output '${tag}:${snapshot.exists ? 'restore' : 'delete'}'
+} catch { Write-Output "${tag}_err: $_" }
+finally { if ($key) { $key.Close() } }
+`
 }
 
 async function snapshotDnsRegistryPolicy(): Promise<DnsRegistryPolicySnapshot> {
   const script = `
+$ErrorActionPreference='Stop'
 function Read-RegValue([string]$key, [string]$name, [string]$tag) {
-  $out = & reg query $key /v $name 2>$null
-  if ($LASTEXITCODE -ne 0 -or -not $out) {
-    [PSCustomObject]@{ tag=$tag; exists=$false; type=$null; data=$null }
-    return
-  }
-  $line = @($out) | Where-Object { $_ -match "\\s$name\\s+" } | Select-Object -First 1
-  if (-not $line) {
-    [PSCustomObject]@{ tag=$tag; exists=$false; type=$null; data=$null }
-    return
-  }
-  $parts = $line.Trim() -split '\\s+', 3
-  [PSCustomObject]@{
-    tag=$tag
-    exists=$true
-    type= if ($parts.Length -ge 2) { $parts[1] } else { $null }
-    data= if ($parts.Length -ge 3) { $parts[2] } else { $null }
-  }
+  $registryKey=[Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($key.Substring(5))
+  try {
+    $exists=$registryKey -and @($registryKey.GetValueNames()) -contains $name
+    if (-not $exists) { return [pscustomobject]@{tag=$tag;exists=$false;type=$null;data=$null} }
+    if ($registryKey.GetValueKind($name) -ne [Microsoft.Win32.RegistryValueKind]::DWord) { throw 'DNS policy has unsupported registry type' }
+    $data=[int]$registryKey.GetValue($name)
+    $unsigned=[BitConverter]::ToUInt32([BitConverter]::GetBytes($data),0)
+    return [pscustomobject]@{tag=$tag;exists=$true;type='REG_DWORD';data=('0x'+$unsigned.ToString('x'))}
+  } finally { if($registryKey){$registryKey.Close()} }
 }
 @(
   Read-RegValue 'HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\DNSClient' 'DisableSmartNameResolution' 'smartNameResolution'
@@ -493,6 +489,7 @@ function Read-RegValue([string]$key, [string]$name, [string]$tag) {
     const byTag = new Map<string, any>(list.map((row) => [String(row?.tag || ''), row]))
     const read = (tag: string): RegistryValueSnapshot => {
       const row = byTag.get(tag)
+      if (!row || typeof row.exists !== 'boolean') throw new Error('Incomplete DNS registry snapshot')
       return {
         exists: row?.exists === true,
         type: typeof row?.type === 'string' && row.type ? row.type : undefined,
@@ -504,11 +501,8 @@ function Read-RegValue([string]$key, [string]$name, [string]$tag) {
       parallelAandAAAA: read('parallelAandAAAA')
     }
   } catch (err) {
-    logEvent('warn', 'phys-lockdown', 'DNS registry policy snapshot failed; rollback will delete app policy keys only', err)
-    return {
-      smartNameResolution: { exists: false },
-      parallelAandAAAA: { exists: false }
-    }
+    logEvent('error', 'phys-lockdown', 'DNS registry snapshot failed; refusing mutation without baseline', err)
+    throw new Error('DNS registry baseline could not be verified')
   }
 }
 
@@ -586,22 +580,26 @@ export async function applyPhysicalAdapterLockdown(tunDnsIpv4: string, options: 
   for (let i = 0; i < adapters.length; i++) {
     const a = adapters[i]
     const dnsLine = forceDns
-      ? `try { Set-DnsClientServerAddress -InterfaceAlias ${psSingleQuote(a.alias)} -ServerAddresses ${psSingleQuote(tunDnsIpv4)} -ErrorAction Stop; Write-Output "A${i}_dns:set" } catch { Write-Output "A${i}_dns_err: $_" }`
+      ? `try { Set-DnsClientServerAddress -InterfaceAlias $ownedAdapter.Name -ServerAddresses ${psSingleQuote(tunDnsIpv4)} -ErrorAction Stop; if (@((Get-DnsClientServerAddress -InterfaceAlias $ownedAdapter.Name -AddressFamily IPv4 -ErrorAction Stop).ServerAddresses) -join ',' -ne ${psSingleQuote(tunDnsIpv4)}) { throw 'DNS read-back mismatch' }; Write-Output "A${i}_dns:set" } catch { Write-Output "A${i}_dns_err: $_" }`
       : `Write-Output "A${i}_dns:skip"`
     const ipv6Line = a.isCellularOrTethering
       ? `Write-Output "A${i}_ipv6:skip"`
-      : `try { Disable-NetAdapterBinding -InterfaceAlias ${psSingleQuote(a.alias)} -ComponentID ms_tcpip6 -ErrorAction Stop; Write-Output "A${i}_ipv6:off" } catch { Write-Output "A${i}_ipv6_err: $_" }`
+      : `try { Disable-NetAdapterBinding -InterfaceAlias $ownedAdapter.Name -ComponentID ms_tcpip6 -ErrorAction Stop; if ((Get-NetAdapterBinding -InterfaceAlias $ownedAdapter.Name -ComponentID ms_tcpip6 -ErrorAction Stop).Enabled) { throw 'IPv6 read-back mismatch' }; Write-Output "A${i}_ipv6:off" } catch { Write-Output "A${i}_ipv6_err: $_" }`
     combinedScript += `
+$ownedAdapter = @(Get-NetAdapter -ErrorAction Stop | Where-Object { [string]$_.InterfaceGuid -eq ${psSingleQuote(a.interfaceGuid || '')} })
+if ($ownedAdapter.Count -eq 1) {
+  $ownedAdapter = $ownedAdapter[0]
 ${ipv6Line}
 ${dnsLine}
+} else { Write-Output 'A${i}_ipv6_err: ownership mismatch'; Write-Output 'A${i}_dns_err: ownership mismatch' }
 `
   }
 
   // Also include the transition adapters in the same script
   combinedScript += `
-try { netsh interface teredo set state type=disabled | Out-Null; Write-Output 'TRANS_teredo:disabled' } catch { Write-Output "TRANS_teredo_err: $_" }
-try { netsh interface 6to4 set state state=disabled | Out-Null; Write-Output 'TRANS_6to4:disabled' } catch { Write-Output "TRANS_6to4_err: $_" }
-try { netsh interface isatap set state state=disabled | Out-Null; Write-Output 'TRANS_isatap:disabled' } catch { Write-Output "TRANS_isatap_err: $_" }
+${transitionAdapters.teredoType ? `try { netsh interface teredo set state type=disabled | Out-Null; if ($LASTEXITCODE -ne 0) { throw 'native command failed' }; Write-Output 'TRANS_teredo:disabled' } catch { Write-Output "TRANS_teredo_err: $_" }` : "Write-Output 'TRANS_teredo:absent'"}
+${transitionAdapters.sixToFourState ? `try { netsh interface 6to4 set state state=disabled | Out-Null; if ($LASTEXITCODE -ne 0) { throw 'native command failed' }; Write-Output 'TRANS_6to4:disabled' } catch { Write-Output "TRANS_6to4_err: $_" }` : "Write-Output 'TRANS_6to4:absent'"}
+${transitionAdapters.isatapState ? `try { netsh interface isatap set state state=disabled | Out-Null; if ($LASTEXITCODE -ne 0) { throw 'native command failed' }; Write-Output 'TRANS_isatap:disabled' } catch { Write-Output "TRANS_isatap_err: $_" }` : "Write-Output 'TRANS_isatap:absent'"}
 try { reg add "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\DNSClient" /v DisableSmartNameResolution /t REG_DWORD /d 1 /f | Out-Null; Write-Output 'DNS_SMNR:off' } catch { Write-Output "DNS_SMNR_err: $_" }
 try { reg add "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Dnscache\\Parameters" /v DisableParallelAandAAAA /t REG_DWORD /d 1 /f | Out-Null; Write-Output 'DNS_PARALLEL:off' } catch { Write-Output "DNS_PARALLEL_err: $_" }
 try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}
@@ -689,14 +687,18 @@ export async function rollbackPhysicalAdapterLockdownIfApplied(reason: string, o
     const dnsRestoreLine = !shouldTouchDns
       ? `Write-Output 'A${i}_dns:noop'`
       : (options.resetDnsToDhcp || a.ipv4DnsSource !== 'static')
-        ? `try { Set-DnsClientServerAddress -InterfaceAlias ${psSingleQuote(a.alias)} -ResetServerAddresses -ErrorAction Stop; Write-Output 'A${i}_dns:reset' } catch { Write-Output "A${i}_dns_err: $_" }`
-        : `try { Set-DnsClientServerAddress -InterfaceAlias ${psSingleQuote(a.alias)} -ServerAddresses ${a.ipv4DnsServers.map(psSingleQuote).join(',')} -ErrorAction Stop; Write-Output 'A${i}_dns:restore' } catch { Write-Output "A${i}_dns_err: $_" }`
+        ? `try { Set-DnsClientServerAddress -InterfaceAlias $ownedAdapter.Name -ResetServerAddresses -ErrorAction Stop; Write-Output 'A${i}_dns:reset' } catch { Write-Output "A${i}_dns_err: $_" }`
+        : `try { Set-DnsClientServerAddress -InterfaceAlias $ownedAdapter.Name -ServerAddresses ${a.ipv4DnsServers.map(psSingleQuote).join(',')} -ErrorAction Stop; if ((@((Get-DnsClientServerAddress -InterfaceAlias $ownedAdapter.Name -AddressFamily IPv4 -ErrorAction Stop).ServerAddresses) -join ',') -ne ${psSingleQuote(a.ipv4DnsServers.join(','))}) { throw 'DNS read-back mismatch' }; Write-Output 'A${i}_dns:restore' } catch { Write-Output "A${i}_dns_err: $_" }`
     const ipv6RestoreLine = a.forcedIpv6Off && a.ipv6Enabled
-      ? `try { Enable-NetAdapterBinding -InterfaceAlias ${psSingleQuote(a.alias)} -ComponentID ms_tcpip6 -ErrorAction Stop; Write-Output 'A${i}_ipv6:on' } catch { Write-Output "A${i}_ipv6_err: $_" }`
+      ? `try { Enable-NetAdapterBinding -InterfaceAlias $ownedAdapter.Name -ComponentID ms_tcpip6 -ErrorAction Stop; if (-not (Get-NetAdapterBinding -InterfaceAlias $ownedAdapter.Name -ComponentID ms_tcpip6 -ErrorAction Stop).Enabled) { throw 'IPv6 read-back mismatch' }; Write-Output 'A${i}_ipv6:on' } catch { Write-Output "A${i}_ipv6_err: $_" }`
       : `Write-Output 'A${i}_ipv6:noop'`
     combinedScript += `
+$ownedAdapter = @(Get-NetAdapter -ErrorAction Stop | Where-Object { [string]$_.InterfaceGuid -eq ${psSingleQuote(a.interfaceGuid || '')} })
+if ($ownedAdapter.Count -eq 1) {
+  $ownedAdapter = $ownedAdapter[0]
 ${ipv6RestoreLine}
 ${dnsRestoreLine}
+} else { Write-Output 'A${i}_ipv6_err: ownership mismatch'; Write-Output 'A${i}_dns_err: ownership mismatch' }
 `
   }
 
@@ -764,63 +766,14 @@ try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}`
 
 export async function repairOrphanedPhysicalAdapterDns(reason: string): Promise<{ repaired: boolean; adapters: string[] }> {
   if (process.platform !== 'win32') return { repaired: false, adapters: [] }
-  if (await readManifest()) return { repaired: false, adapters: [] }
-
-  const script = `
-$ErrorActionPreference = 'SilentlyContinue'
-$vpnteDns = @('${TUN_IPV4_GATEWAY}', '${TUN_IPV4_RESOLVER}')
-$vpnteDnsPrefixes = @('${TUN_IPV4_PREFIX}', '${LEGACY_TUN_IPV4_PREFIX}')
-$tunUp = Get-NetAdapter -ErrorAction SilentlyContinue |
-  Where-Object { $_.Status -eq 'Up' -and ($_.Name -eq '${getTunAdapterAlias()}' -or $_.InterfaceDescription -match 'VPNTE') } |
-  Select-Object -First 1
-if ($tunUp) {
-  [pscustomobject]@{ skipped = 'tun-up'; adapters = @() } | ConvertTo-Json -Compress
-  return
-}
-$fixed = @()
-$adapters = Get-NetAdapter |
-  Where-Object {
-    $_.Status -eq 'Up' -and
-    $_.InterfaceDescription -notmatch 'Wintun|TAP-Windows|Tailscale|WireGuard|Hyper-V|Loopback|vEthernet|VPN|VirtualBox|VMware|Bluetooth' -and
-    $_.MacAddress -and $_.MacAddress -ne '00-00-00-00-00-00'
+  // A private resolver address is not proof that VPNTE changed an adapter.
+  // Automatic restoration needs the exact trusted ownership/baseline snapshot.
+  const manifest = await readManifest()
+  if (manifest) {
+    const result = await rollbackPhysicalAdapterLockdownIfApplied(reason)
+    return { repaired: result.rolledBack, adapters: result.rolledBack ? manifest.adapters.map(a => a.alias) : [] }
   }
-foreach ($a in $adapters) {
-  $dns4 = @((Get-DnsClientServerAddress -InterfaceAlias $a.Name -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses)
-  $nameServer = ''
-  try {
-    $regPath = "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\$($a.InterfaceGuid)"
-    $nameServer = [string]((Get-ItemProperty -Path $regPath -Name NameServer -ErrorAction SilentlyContinue).NameServer)
-  } catch {}
-  $staleVpnteDns = @($dns4 | Where-Object {
-    $addr = [string]$_
-    ($vpnteDns -contains $addr) -or (($vpnteDnsPrefixes | Where-Object { $addr.StartsWith($_) }).Count -gt 0)
-  })
-  $manualVpnteDns = @($nameServer -split '[, ]+' | Where-Object {
-    $addr = [string]$_
-    ($vpnteDns -contains $addr) -or (($vpnteDnsPrefixes | Where-Object { $addr.StartsWith($_) }).Count -gt 0)
-  })
-  if ($staleVpnteDns.Count -gt 0 -and $manualVpnteDns.Count -gt 0) {
-    try {
-      Set-DnsClientServerAddress -InterfaceAlias $a.Name -ResetServerAddresses -ErrorAction Stop
-      $fixed += [pscustomobject]@{ alias = [string]$a.Name; oldDns = @($dns4) }
-    } catch {}
-  }
-}
-try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}
-[pscustomobject]@{ skipped = $null; adapters = @($fixed) } | ConvertTo-Json -Compress -Depth 4
-`
-  try {
-    const raw = (await runPS(script, 20000)).trim()
-    const parsed = raw ? JSON.parse(raw) : { adapters: [] }
-    const adaptersRaw = Array.isArray(parsed.adapters) ? parsed.adapters : parsed.adapters ? [parsed.adapters] : []
-    const adapters = adaptersRaw.map((row: any) => String(row.alias || '')).filter(Boolean)
-    if (adapters.length) {
-      logEvent('warn', 'phys-lockdown', 'repaired orphaned VPNTE DNS on physical adapters', { reason, adapters })
-      return { repaired: true, adapters }
-    }
-  } catch (err) {
-    logEvent('warn', 'phys-lockdown', 'orphaned DNS repair failed', { reason, err: (err as Error).message })
-  }
+  logEvent('warn', 'phys-lockdown', 'DNS recovery not verified: no owned adapter baseline; foreign settings preserved', { reason })
   return { repaired: false, adapters: [] }
 }
 

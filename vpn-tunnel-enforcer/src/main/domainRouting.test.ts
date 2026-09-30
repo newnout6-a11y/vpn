@@ -2,7 +2,11 @@
  * Unit tests for domainRouting.ts pure functions.
  */
 
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
+vi.mock('electron', () => ({ ipcMain: { handle: vi.fn() }, dialog: {} }))
+vi.mock('electron-store', () => ({ default: class { get() { return [] } set() {} } }))
+vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
+vi.mock('./tunController', () => ({ tunController: { getStatus: () => ({ running: false }) } }))
 import { matchDomain, parseDomainList, domainRulesToSingboxRules } from './domainRouting'
 import type { DomainRule } from '../shared/ipc-types'
 

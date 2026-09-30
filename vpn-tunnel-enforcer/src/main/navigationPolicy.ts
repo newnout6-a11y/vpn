@@ -23,7 +23,8 @@ export type NavigationVerdict = 'allow-internal' | 'open-external' | 'block'
  */
 export function classifyNavigation(
   target: string,
-  devUrl: string | undefined
+  devUrl: string | undefined,
+  entryUrl?: string
 ): NavigationVerdict {
   let u: URL
   try {
@@ -40,10 +41,12 @@ export function classifyNavigation(
       /* malformed dev URL — fall through to external handling */
     }
   } else if (u.protocol === 'file:') {
-    // Production: our renderer is loaded from a host-less local file:// URL.
-    // A file:// URL WITH a host (file://remote-host/share/…) is a UNC/remote
-    // path and must never be treated as internal — block it.
-    return u.host === '' ? 'allow-internal' : 'block'
+    if (!entryUrl || u.host || u.search) return 'block'
+    try {
+      const expected = new URL(entryUrl)
+      u.hash = ''; expected.hash = ''
+      return u.href === expected.href ? 'allow-internal' : 'block'
+    } catch { return 'block' }
   }
 
   // External: only http(s) may leave to the OS browser. Everything else

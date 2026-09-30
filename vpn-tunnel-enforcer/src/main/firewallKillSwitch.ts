@@ -1,12 +1,15 @@
-import { app } from 'electron'
-import { mkdir, readFile, writeFile, unlink, stat, rename } from 'fs/promises'
-import { join } from 'path'
+import { app, BrowserWindow, dialog } from 'electron'
+import { mkdir, readFile, writeFile, unlink, stat, rename, access, realpath } from 'fs/promises'
+import { join, isAbsolute, win32 } from 'path'
+import { constants as fsConstants } from 'fs'
 import { execFile as execFileCb } from 'child_process'
 import { isIP } from 'net'
 import { promisify } from 'util'
 import { execElevated } from './admin'
 import { execElevatedPs, isElevatedPsHelperRunning } from './elevatedPsHelper'
 import { logEvent } from './appLogger'
+import { randomUUID, createHash } from 'crypto'
+import { getRecoveryManifestDir, recoveryManifestPath, readRecoveryManifest, writeRecoveryManifest, writeRecoveryArtifact, removeRecoveryManifest, strictRecoveryRequired } from './recoveryManifest'
 import { TUN_ADAPTER_ALIAS, TUN_IPV4_NETWORK_CIDR, getTunAdapterAlias } from './tunAdapter'
 
 const execFile = promisify(execFileCb)
@@ -50,68 +53,78 @@ export interface FirewallKillSwitchResult {
   // "Kill-switch снят вручную" warn log that fired every stop because main
   // had already auto-disabled before the user-driven IPC arrived.
   skipped?: boolean
+  state?: 'unknown'
 }
 
-interface SavedProfile {
-  name: string
-  defaultOutbound: string
+export interface SavedProfile {
+  name: 'Domain' | 'Private' | 'Public'
+  defaultOutbound: 'Allow' | 'Block' | 'NotConfigured'
 }
-
-interface FirewallManifest {
+export interface FirewallManifest {
+  schemaVersion: 1
+  owner: 'VPNTE'
+  operationId: string
+  phase: 'prepared' | 'active'
+  strictMode: boolean
   createdAt: number
   ruleNames: string[]
   singboxExePath: string | null
   savedProfiles: SavedProfile[]
+  exceptionPolicy?: FirewallExceptionPolicy
+  pendingExceptionPolicy?: FirewallExceptionPolicy
 }
-
-function backupDir() {
-  return join(app.getPath('userData'), 'firewall-killswitch')
-}
-
-function manifestPath() {
-  return join(backupDir(), 'manifest.json')
-}
-
-async function readManifest(): Promise<FirewallManifest | null> {
-  try {
-    const raw = await readFile(manifestPath(), 'utf-8')
-    return JSON.parse(raw) as FirewallManifest
-  } catch (err: any) {
-    if (err?.code === 'ENOENT') {
-      // File doesn't exist — normal state, no manifest = no active kill-switch
-      return null
+export function validateSavedProfiles(value: unknown): SavedProfile[] {
+  if (!Array.isArray(value) || value.length !== 3) throw new Error('Invalid firewall snapshot: all profiles required')
+  const names = new Set<string>()
+  return value.map(item => {
+    if (!item || typeof item !== 'object' || !['Domain','Private','Public'].includes(item.name) ||
+        !['Allow','Block','NotConfigured'].includes(item.defaultOutbound) || names.has(item.name)) {
+      throw new Error('Invalid firewall profile or policy')
     }
-    // File exists but is corrupt (partial write during crash). Log it —
-    // this is important because a corrupt manifest means the kill-switch
-    // may actually be active but we can't read its state. The caller
-    // falls through to probeFirewallForOurRules() as a safety net.
-    logEvent('warn', 'firewall-killswitch', 'manifest file is corrupt — treating as no manifest', {
-      error: err?.message || String(err)
-    })
+    names.add(item.name)
+    return { name: item.name, defaultOutbound: item.defaultOutbound }
+  })
+}
+export function validateFirewallManifest(value: unknown): FirewallManifest {
+  const v = value as Partial<FirewallManifest> | null
+  if (!v || typeof v !== 'object' || v.schemaVersion !== 1 || v.owner !== 'VPNTE' ||
+      typeof v.operationId !== 'string' || !/^[a-f0-9-]{36}$/i.test(v.operationId) ||
+      !['prepared','active'].includes(v.phase || '') || typeof v.strictMode !== 'boolean' ||
+      !Number.isSafeInteger(v.createdAt) || (v.createdAt ?? 0) <= 0 ||
+      !Array.isArray(v.ruleNames) || v.ruleNames.length > 500 ||
+      v.ruleNames.some(name => typeof name !== 'string' || !/^VPNTE-killswitch-[a-zA-Z0-9_-]{1,100}$/.test(name)) ||
+      !(v.singboxExePath === null || (typeof v.singboxExePath === 'string' && /^[a-z]:\\/i.test(v.singboxExePath) && !/[\x00-\x1f]/.test(v.singboxExePath)))) {
+    throw new Error('Invalid or unsupported firewall manifest')
+  }
+  return { schemaVersion: 1, owner: 'VPNTE', operationId: v.operationId, phase: v.phase!,
+    strictMode: v.strictMode, createdAt: v.createdAt!, ruleNames: [...new Set(v.ruleNames)],
+    singboxExePath: v.singboxExePath!, savedProfiles: validateSavedProfiles(v.savedProfiles),
+    ...(v.exceptionPolicy ? { exceptionPolicy: validateFirewallExceptionPolicy(v.exceptionPolicy) } : {}),
+    ...(v.pendingExceptionPolicy ? { pendingExceptionPolicy: validateFirewallExceptionPolicy(v.pendingExceptionPolicy) } : {}) }
+}
+export function getKillSwitchManifestPath(): string { return recoveryManifestPath('firewall.json') }
+function backupDir(): string { return getRecoveryManifestDir() }
+let manifestReadFailure: string | null = null
+async function readManifest(): Promise<FirewallManifest | null> {
+  manifestReadFailure = null
+  try { return await readRecoveryManifest('firewall.json', validateFirewallManifest) }
+  catch (error) {
+    manifestReadFailure = error instanceof Error ? error.message : String(error)
+    logEvent('error', 'firewall-killswitch', 'CRITICAL_SECURITY_EVENT: recovery manifest rejected', { error: manifestReadFailure })
     return null
   }
 }
-
 // Exported for combinedPreStartProbe: a file-read-only check that determines
 // whether the firewall rule probe should be included in the combined PS script.
 export async function killSwitchManifestExists(): Promise<boolean> {
   return (await readManifest()) !== null
 }
 
-async function writeManifest(m: FirewallManifest): Promise<void> {
-  await mkdir(backupDir(), { recursive: true })
-  const tmp = manifestPath() + '.tmp'
-  await writeFile(tmp, JSON.stringify(m, null, 2), 'utf-8')
-  await rename(tmp, manifestPath())
+async function writeManifest(m: Omit<FirewallManifest, 'schemaVersion' | 'owner' | 'operationId' | 'phase' | 'strictMode'> & Partial<FirewallManifest>): Promise<void> {
+  await writeRecoveryManifest('firewall.json', { schemaVersion: 1, owner: 'VPNTE', operationId: randomUUID(),
+    phase: 'active', strictMode: false, ...m }, validateFirewallManifest)
 }
-
-async function clearManifest(): Promise<void> {
-  try {
-    await unlink(manifestPath())
-  } catch {
-    // already gone
-  }
-}
+async function clearManifest(): Promise<void> { await removeRecoveryManifest('firewall.json') }
 
 function withPowerShellPrelude(script: string) {
   const prelude =
@@ -130,13 +143,12 @@ async function ps(script: string, elevated = false, timeout = 30000) {
   // Keep elevated scripts under userData instead of %TEMP% and do not remove them
   // immediately: sudo-prompt can return before the elevated PowerShell has opened
   // the -File path, which made PowerShell report "argument for -File does not exist".
-  const scriptDir = join(backupDir(), 'ps')
-  await mkdir(scriptDir, { recursive: true })
+  const scriptDir = backupDir()
   const scriptPath = join(
     scriptDir,
     `script-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.ps1`
   )
-  await writeFile(scriptPath, '\ufeff' + withPowerShellPrelude(script), 'utf8')
+  await writeRecoveryArtifact(scriptPath.slice(scriptDir.length + 1), '\ufeff' + withPowerShellPrelude(script))
 
   try {
     if (elevated) {
@@ -334,14 +346,150 @@ Write-Output "RULE:$ruleName"
  * Safety: Allow rules are created BEFORE setting the default to Block, so if
  * the script fails partway, only harmless extra Allow rules remain.
  */
-export async function enableKillSwitch(opts: {
+let firewallQueue: Promise<unknown> = Promise.resolve()
+function serializeFirewall<T>(operation: () => Promise<T>): Promise<T> {
+  const result = firewallQueue.then(operation, operation)
+  firewallQueue = result.then(() => undefined, () => undefined)
+  return result
+}
+export interface KillSwitchOptions {
   singboxExePath: string
   proxyOwnerProgramPaths?: string[]
+  appExceptionPaths?: string[]
   extraAllowedRemoteCidrs?: string[]
   tunAdapterAlias?: string
-}): Promise<FirewallKillSwitchResult> {
+  strictMode?: boolean
+}
+export async function enableKillSwitch(opts: KillSwitchOptions): Promise<FirewallKillSwitchResult> {
+  return serializeFirewall(() => enableKillSwitchUnlocked(opts))
+}
+export interface FirewallExceptionPolicy { apps: string[]; cidrs: string[] }
+function validateFirewallExceptionPolicy(value: unknown): FirewallExceptionPolicy {
+  const v = value as FirewallExceptionPolicy
+  if (!v || !Array.isArray(v.apps) || !Array.isArray(v.cidrs) || v.apps.length + v.cidrs.length > 256 ||
+      v.apps.some(p => typeof p !== 'string' || !/^[a-z]:\\/i.test(p) || !/\.exe$/i.test(p) || /[\x00-\x1f]/.test(p)) ||
+      v.cidrs.some(c => typeof c !== 'string' || !isValidIpOrCidr(c))) throw new Error('Invalid firewall exception policy')
+  return { apps: [...new Set(v.apps)], cidrs: [...new Set(v.cidrs)] }
+}
+export async function canonicalizeExceptionAppPath(raw: string): Promise<string> {
+  if (!raw || raw.length > 2048 || /[\x00-\x1f]/.test(raw) || !/\.exe$/i.test(raw)) throw new Error('exception.value must be an executable path')
+  if (process.platform === 'win32') {
+    if (!/^[a-z]:\\/i.test(raw) || !win32.isAbsolute(raw) || raw.slice(2).includes(':') || raw.split(/[\\/]/).includes('..')) throw new Error('exception.value must be a local absolute Windows path')
+  } else if (!isAbsolute(raw)) throw new Error('exception.value must be an absolute path')
+  await access(raw, fsConstants.R_OK)
+  const canonical = await realpath(raw)
+  if (!(await stat(canonical)).isFile() || !/\.exe$/i.test(canonical) || (process.platform === 'win32' && !/^[a-z]:\\/i.test(canonical))) throw new Error('exception.value must be a local readable .exe file')
+  return canonical
+}
+function exceptionRuleNames(policy: FirewallExceptionPolicy): string[] {
+  return [...policy.apps.map(p => 'app:' + p.toLowerCase()), ...policy.cidrs.map(c => 'ip:' + c)].map(value =>
+    `${RULE_PREFIX}-user-${createHash('sha256').update(value).digest('hex').slice(0,24)}`)
+}
+function exceptionPolicyScript(policy: FirewallExceptionPolicy): string {
+  const names = exceptionRuleNames(policy)
+  const rules = [...policy.apps.map((value, i) => ({ name: names[i], program: value, remote: null })),
+    ...policy.cidrs.map((value, i) => ({ name: names[policy.apps.length + i], program: null, remote: value }))]
+  const encoded = Buffer.from(JSON.stringify(rules)).toString('base64')
+  return `
+$ErrorActionPreference='Stop'
+$profiles=@(Get-NetFirewallProfile -Profile Domain,Private,Public -ErrorAction Stop)
+if ($profiles.Count -ne 3 -or @($profiles | Where-Object { [string]$_.DefaultOutboundAction -ne 'Block' }).Count) { throw 'Live update requires verified Block policies' }
+# Only user exceptions are replaced. Core, TUN, Xray and Happ rules stay intact.
+# Removal-first may temporarily narrow an exception, but never opens new traffic
+# before the requested policy has been validated. Never set DefaultOutboundAction.
+Get-NetFirewallRule -DisplayName '${RULE_PREFIX}-user-*' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction Stop
+Get-NetFirewallRule -DisplayName '${RULE_PREFIX}-allow-extra-ip' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction Stop
+$requested=@([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}')) | ConvertFrom-Json)
+foreach ($r in $requested) {
+  $ruleParams=@{DisplayName=$r.name;Direction='Outbound';Action='Allow';Profile='Any';Enabled='True'}
+  if($r.program){$ruleParams.Program=$r.program}else{$ruleParams.RemoteAddress=$r.remote}
+  New-NetFirewallRule @ruleParams -ErrorAction Stop | Out-Null
+  $actual=@(Get-NetFirewallRule -DisplayName $r.name -ErrorAction Stop)
+  if($actual.Count -ne 1 -or [string]$actual[0].Enabled -ne 'True' -or [string]$actual[0].Action -ne 'Allow' -or [string]$actual[0].Direction -ne 'Outbound'){throw 'Exception rule read-back mismatch'}
+  if($r.program){
+    $filter=$actual[0] | Get-NetFirewallApplicationFilter -ErrorAction Stop
+    if([string]$filter.Program -ine [string]$r.program){throw 'Program filter read-back mismatch'}
+  }else{
+    $filter=$actual[0] | Get-NetFirewallAddressFilter -ErrorAction Stop
+    if(@($filter.RemoteAddress).Count -ne 1 -or [string]@($filter.RemoteAddress)[0] -ne [string]$r.remote){throw 'Remote filter read-back mismatch'}
+  }
+}
+$actualNames=@(Get-NetFirewallRule -DisplayName '${RULE_PREFIX}-user-*' -ErrorAction SilentlyContinue | ForEach-Object { [string]$_.DisplayName })
+if($actualNames.Count -ne $requested.Count -or @($actualNames | Where-Object { $_ -notin @($requested.name) }).Count){throw 'Exception set read-back mismatch'}
+Write-Output 'EXCEPTIONS_VERIFIED'
+`
+}
+export function updateKillSwitchExceptions(apps: string[], cidrs: string[], strictMode?: boolean): Promise<FirewallKillSwitchResult> {
+  return serializeFirewall(() => updateExceptionsUnlocked(apps, cidrs, strictMode))
+}
+async function updateExceptionsUnlocked(apps: string[], cidrs: string[], strictMode?: boolean): Promise<FirewallKillSwitchResult> {
+  const previous = await readManifest()
+  if (!previous || manifestReadFailure || previous.phase !== 'active') return { success: false, state: 'unknown', message: 'Live exceptions require a trusted active firewall transaction' }
+  const policy = validateFirewallExceptionPolicy({ apps: await Promise.all(apps.map(canonicalizeExceptionAppPath)), cidrs })
+  const old = previous.exceptionPolicy ?? { apps: [], cidrs: [] }
+  // Original baseline and core rule names are never replaced by a live update.
+  await writeManifest({ ...previous, pendingExceptionPolicy: policy })
+  try {
+    const { stdout } = await ps(exceptionPolicyScript(policy), true, 30000)
+    if (!String(stdout).split(/\r?\n/).includes('EXCEPTIONS_VERIFIED')) throw new Error('Exception verification marker missing')
+    const { pendingExceptionPolicy: _pending, ...committed } = previous
+    await writeManifest({ ...committed, strictMode: strictMode ?? previous.strictMode, exceptionPolicy: policy,
+      ruleNames: [...previous.ruleNames.filter(n => !n.startsWith(`${RULE_PREFIX}-user-`) && n !== `${RULE_PREFIX}-allow-extra-ip`), ...exceptionRuleNames(policy)] })
+    return { success: true, message: 'User exceptions verified; core/upstream protection preserved' }
+  } catch (error) {
+    try {
+      const { stdout } = await ps(exceptionPolicyScript(old), true, 30000)
+      if (!String(stdout).split(/\r?\n/).includes('EXCEPTIONS_VERIFIED')) throw new Error('Exception compensation not verified')
+      await writeManifest(previous)
+    } catch {
+      reportRecoveryWarning('Live-обновление исключений не подтверждено. Core-защита сохранена, но набор исключений требует повторной проверки.')
+      return { success: false, state: 'unknown', message: 'Live exception update and compensation failed; recovery journal retained' }
+    }
+    return { success: false, message: 'Exception update failed; previous exception policy restored', details: String(error) }
+  }
+}
+
+async function snapshotFirewallProfiles(): Promise<SavedProfile[]> {
+  const { stdout } = await ps(`$snapshot = @(Get-NetFirewallProfile -Profile Domain,Private,Public -ErrorAction Stop | ForEach-Object {
+  [pscustomobject]@{name=[string]$_.Name;defaultOutbound=[string]$_.DefaultOutboundAction}
+})
+Write-Output ('SNAPSHOT:' + ($snapshot | ConvertTo-Json -Compress))`, true)
+  const line = String(stdout).split(/\r?\n/).find(line => line.startsWith('SNAPSHOT:'))
+  if (!line) throw new Error('Firewall policy snapshot was not confirmed')
+  return validateSavedProfiles(JSON.parse(line.slice('SNAPSHOT:'.length)))
+}
+function reportRecoveryWarning(message: string): void {
+  logEvent('error', 'firewall-killswitch', 'CRITICAL_SECURITY_EVENT: protection is unknown', { message })
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) win.webContents.send('network-recovery-warning', { state: 'unknown', message })
+  }
+  void dialog.showMessageBox({ type: 'warning', title: 'VPNTE: защита не подтверждена', message }).catch(() => undefined)
+}
+async function enableKillSwitchUnlocked(opts: KillSwitchOptions): Promise<FirewallKillSwitchResult> {
   if (process.platform !== 'win32') {
     return { success: true, message: 'Firewall kill-switch недоступен (не Windows)' }
+  }
+
+  if ((opts.extraAllowedRemoteCidrs ?? []).some(c => !isValidIpOrCidr(c))) return { success: false, message: 'Invalid exception IP/CIDR' }
+  if (opts.appExceptionPaths) opts = { ...opts, appExceptionPaths: await Promise.all(opts.appExceptionPaths.map(canonicalizeExceptionAppPath)) }
+  const previous = await readManifest()
+  if (manifestReadFailure) return { success: false, state: 'unknown', message: 'Recovery manifest is untrusted or invalid; refusing to replace its baseline' }
+  if (previous?.phase === 'active') {
+    if (opts.appExceptionPaths !== undefined || opts.extraAllowedRemoteCidrs !== undefined || opts.strictMode !== undefined) {
+      return updateExceptionsUnlocked(opts.appExceptionPaths ?? previous.exceptionPolicy?.apps ?? [], opts.extraAllowedRemoteCidrs ?? previous.exceptionPolicy?.cidrs ?? [], opts.strictMode)
+    }
+    return { success: true, skipped: true, message: 'Active firewall preserved; use differential exceptions update' }
+  }
+  const savedProfiles = previous?.savedProfiles ?? await snapshotFirewallProfiles()
+  const prepared: FirewallManifest = {
+    schemaVersion: 1, owner: 'VPNTE', operationId: previous?.operationId ?? randomUUID(),
+    phase: 'prepared', strictMode: opts.strictMode ?? previous?.strictMode ?? false,
+    createdAt: previous?.createdAt ?? Date.now(), savedProfiles,
+    ruleNames: previous?.ruleNames ?? [], singboxExePath: opts.singboxExePath
+  }
+  // This durable snapshot MUST precede any New/Remove/Set-NetFirewall operation.
+  try { await writeManifest(prepared) } catch (error) {
+    return { success: false, message: 'Firewall unchanged: recovery snapshot could not be committed', details: String(error) }
   }
 
   const tunAlias = opts.tunAdapterAlias || getTunAdapterAlias()
@@ -422,14 +570,8 @@ try {
 
   // One atomic elevated PowerShell script: save defaults → add allows → set block.
   const script = `
-# --- Step 1: Save current DefaultOutboundAction ---
-$profileNames = @('Domain','Private','Public')
-$saved = @()
-foreach ($pn in $profileNames) {
-  $prof = Get-NetFirewallProfile -Profile $pn
-  $saved += @{ name = $pn; defaultOutbound = $prof.DefaultOutboundAction.ToString() }
-}
-$savedJson = ($saved | ConvertTo-Json -Compress)
+# Snapshot is already durable in the protected manifest before this transaction.
+$savedJson = ${psSingleQuote(JSON.stringify(savedProfiles))}
 
 # --- Step 2: Clean stale rules ---
 Get-NetFirewallRule -DisplayName '${RULE_PREFIX}*' -ErrorAction SilentlyContinue |
@@ -620,7 +762,6 @@ Write-Output "SAVED:$savedJson"
 `
 
   let installedRules: string[] = []
-  let savedProfiles: SavedProfile[] = []
   try {
     const { stdout } = await ps(script, true, 60000)
     const output = String(stdout || '')
@@ -635,22 +776,9 @@ Write-Output "SAVED:$savedJson"
         .filter((n) => n.startsWith(RULE_PREFIX))
     }
 
-    const savedLine = lines.find((l) => l.startsWith('SAVED:'))
-    if (savedLine) {
-      try {
-        const parsed = JSON.parse(savedLine.slice(5))
-        savedProfiles = Array.isArray(parsed)
-          ? parsed.map((p: any) => ({ name: String(p.name), defaultOutbound: String(p.defaultOutbound) }))
-          : []
-      } catch {
-        savedProfiles = [
-          { name: 'Domain', defaultOutbound: 'Allow' },
-          { name: 'Private', defaultOutbound: 'Allow' },
-          { name: 'Public', defaultOutbound: 'Allow' }
-        ]
-      }
-    }
   } catch (err: any) {
+    try { await restoreAndCleanup(prepared); await clearManifest() }
+    catch (rollbackError) { logEvent('error', 'firewall-killswitch', 'failed transaction recovery retained', { rollbackError: String(rollbackError) }) }
     logEvent('error', 'firewall-killswitch', 'failed to install kill-switch', err)
     return {
       success: false,
@@ -667,39 +795,25 @@ Write-Output "SAVED:$savedJson"
   }
 
   try {
-    await writeManifest({
-      createdAt: Date.now(),
-      ruleNames: installedRules,
-      singboxExePath: opts.singboxExePath,
-      savedProfiles
-    })
+    await writeManifest({ ...prepared, phase: 'active', ruleNames: installedRules })
   } catch (error: any) {
     // The firewall transaction is not committed until its recovery manifest
     // is durable. Compensate immediately instead of leaving Block active with
     // no authoritative baseline.
-    const restoreLines = savedProfiles.map(
-      profile =>
-        `Set-NetFirewallProfile -Profile '${profile.name}' -DefaultOutboundAction ${profile.defaultOutbound} -ErrorAction Continue`
-    )
-    try {
-      await ps(
-        `${restoreLines.join('\n')}\n` +
-        `Get-NetFirewallRule -DisplayName '${RULE_PREFIX}*' -ErrorAction SilentlyContinue | ` +
-        'Remove-NetFirewallRule -ErrorAction SilentlyContinue',
-        true,
-        30000
-      )
-    } catch (rollbackError) {
-      logEvent('error', 'firewall-killswitch', 'manifest commit and compensating rollback both failed', {
-        manifestError: error?.message || String(error),
-        rollbackError: rollbackError instanceof Error ? rollbackError.message : String(rollbackError)
-      })
+    try { await restoreAndCleanup(prepared); await clearManifest() }
+    catch (rollbackError) {
+      logEvent('error', 'firewall-killswitch', 'manifest commit and verified rollback failed; snapshot retained', { rollbackError: String(rollbackError) })
     }
     return {
       success: false,
       message: 'Kill-switch отменён: не удалось надёжно записать recovery manifest',
       details: error?.message || String(error)
     }
+  }
+
+  if (opts.appExceptionPaths !== undefined || opts.extraAllowedRemoteCidrs !== undefined) {
+    const updated = await updateExceptionsUnlocked(opts.appExceptionPaths ?? [], opts.extraAllowedRemoteCidrs ?? [], opts.strictMode)
+    if (!updated.success) return updated
   }
 
   logEvent('info', 'firewall-killswitch', 'kill-switch engaged (DefaultOutboundAction=Block)', {
@@ -716,37 +830,43 @@ Write-Output "SAVED:$savedJson"
  * Restore DefaultOutboundAction to saved values and remove all our rules.
  * Order: restore defaults FIRST (so traffic flows), then remove allow rules.
  */
-async function restoreAndCleanup(): Promise<void> {
-  const manifest = await readManifest()
-
-  // Build restore script. Even if manifest is missing, try to set defaults
-  // back to Allow and remove any stale rules.
-  const profiles = manifest?.savedProfiles ?? [
-    { name: 'Domain', defaultOutbound: 'Allow' },
-    { name: 'Private', defaultOutbound: 'Allow' },
-    { name: 'Public', defaultOutbound: 'Allow' }
-  ]
-
-  const restoreLines = profiles.map(
-    (p) => `Set-NetFirewallProfile -Profile '${p.name}' -DefaultOutboundAction ${p.defaultOutbound} -ErrorAction SilentlyContinue`
-  )
-
-  await ps(
-    restoreLines.join('\n') + '\n' +
-    `Get-NetFirewallRule -DisplayName '${RULE_PREFIX}*' -ErrorAction SilentlyContinue | ` +
-      `Remove-NetFirewallRule -ErrorAction SilentlyContinue`,
-    true,
-    30000
-  )
+async function restoreAndCleanup(snapshot?: FirewallManifest): Promise<void> {
+  const manifest = snapshot ?? await readManifest()
+  if (!manifest && !(await probeFirewallForOurRules())) {
+    if (manifestReadFailure) throw new Error('Invalid recovery manifest; no proven VPNTE rules, no system changes allowed')
+    return // Never change a foreign Block policy without proof of ownership.
+  }
+  const profiles = validateSavedProfiles(manifest?.savedProfiles ?? [
+    { name: 'Domain', defaultOutbound: 'Allow' }, { name: 'Private', defaultOutbound: 'Allow' }, { name: 'Public', defaultOutbound: 'Allow' }
+  ])
+  if (!manifest) reportRecoveryWarning('Манифест сетевой защиты утерян или повреждён. Выполняется сброс Allow. Защита не подтверждена; трафик может идти напрямую.')
+  const restores = profiles.map(p => `
+try {
+  Set-NetFirewallProfile -Profile ${psSingleQuote(p.name)} -DefaultOutboundAction ${p.defaultOutbound} -ErrorAction Stop
+  if ([string](Get-NetFirewallProfile -Profile ${psSingleQuote(p.name)} -ErrorAction Stop).DefaultOutboundAction -ne ${psSingleQuote(p.defaultOutbound)}) { throw 'Policy read-back mismatch' }
+} catch { $errors += ${psSingleQuote(p.name)} + ': ' + [string]$_ }
+`).join('\n')
+  const { stdout } = await ps(`$errors = @()
+${restores}
+try {
+  Get-NetFirewallRule -DisplayName '${RULE_PREFIX}*' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction Stop
+  if ((Get-NetFirewallRule -DisplayName '${RULE_PREFIX}*' -ErrorAction SilentlyContinue | Measure-Object).Count -ne 0) { throw 'VPNTE rules remain' }
+} catch { $errors += 'rules: ' + [string]$_ }
+if ($errors.Count -gt 0) { throw ($errors -join ' | ') }
+Write-Output 'RESTORED'`, true, 30000)
+  if (!String(stdout).split(/\r?\n/).includes('RESTORED')) throw new Error('Firewall rollback read-back was not confirmed')
 }
-
 export async function disableKillSwitch(reason: string): Promise<FirewallKillSwitchResult> {
+  return serializeFirewall(() => disableKillSwitchUnlocked(reason))
+}
+async function disableKillSwitchUnlocked(reason: string): Promise<FirewallKillSwitchResult> {
   if (process.platform !== 'win32') {
     return { success: true, message: 'Firewall kill-switch недоступен (не Windows)' }
   }
 
   try {
     await restoreAndCleanup()
+    await clearManifest()
   } catch (err: any) {
     logEvent('warn', 'firewall-killswitch', 'failed to fully restore kill-switch', err)
     return {
@@ -756,7 +876,6 @@ export async function disableKillSwitch(reason: string): Promise<FirewallKillSwi
     }
   }
 
-  await clearManifest()
   logEvent('info', 'firewall-killswitch', `kill-switch disengaged: ${reason}`)
   return { success: true, message: 'Firewall kill-switch снят' }
 }
@@ -825,9 +944,13 @@ async function probeFirewallForOurRules(): Promise<boolean> {
 export async function recoverStaleKillSwitch(isSingboxRunning: () => Promise<boolean>): Promise<void> {
   if (process.platform !== 'win32') return
   const manifest = await readManifest()
+  if (manifest?.strictMode || await strictRecoveryRequired()) {
+    logEvent('info', 'firewall-killswitch', 'strict recovery keeps firewall blocked until explicit user action')
+    return
+  }
   const manifestSaysActive = manifest !== null
   const firewallSaysActive = manifestSaysActive || await probeFirewallForOurRules()
-  const stuckBlockDefault = !manifestSaysActive && !firewallSaysActive && await probeForStuckBlockDefault()
+  const stuckBlockDefault = false // A foreign Block policy is not evidence of VPNTE ownership.
   if (!manifestSaysActive && !firewallSaysActive && !stuckBlockDefault) return
   if (await isSingboxRunning()) {
     logEvent(

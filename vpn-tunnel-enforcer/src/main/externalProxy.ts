@@ -235,7 +235,7 @@ const rotationIdempotency = new Map<number, Map<string, ExternalProxyInstanceSta
 const firewallAllowCache = new Map<string, { checkedAt: number; result: Awaited<ReturnType<typeof ensureKillSwitchProgramAllowed>> }>()
 const firewallAllowInFlight = new Map<string, Promise<Awaited<ReturnType<typeof ensureKillSwitchProgramAllowed>>>>()
 const endpointResolutionCache = new Map<string, { address: string; expiresAt: number }>()
-const leaseStore = new Store<{ leases: ExternalProxyLease[] }>({ name: 'external-proxy-leases', defaults: { leases: [] } })
+const leaseStore = new Store<{ leases: Array<Omit<ExternalProxyLease, 'leaseToken'>> }>({ name: 'external-proxy-leases', defaults: { leases: [] } })
 
 // Persisted leases do NOT survive a process restart. A lease only guards a
 // live route owned by a running child of THIS process; after a restart the
@@ -247,7 +247,9 @@ if (leaseStore.get('leases').length > 0) {
 }
 
 function persistExternalProxyLeases(): void {
-  leaseStore.set('leases', [...leasesBySlot.values()])
+  // Tokens only authorize a live process-owned lease; persisting them serves
+  // no recovery purpose. Store diagnostic metadata, never the bearer secret.
+  leaseStore.set('leases', [...leasesBySlot.values()].map(({ leaseToken: _token, ...metadata }) => metadata))
 }
 
 const EXTERNAL_PROXY_DNS_TAG = 'dns-bootstrap'

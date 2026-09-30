@@ -15,10 +15,10 @@
  * - parseDomainList(text)
  */
 
-import { ipcMain, dialog } from 'electron'
+import { ipcMain, dialog, type WebContents } from 'electron'
 import Store from 'electron-store'
 import { randomUUID } from 'crypto'
-import { readFileSync } from 'fs'
+import { readFileSync, readSync, openSync, closeSync, fstatSync } from 'fs'
 import { logEvent } from './appLogger'
 import { tunController } from './tunController'
 import type { DomainRule, DomainAction } from '../shared/ipc-types'
@@ -230,8 +230,11 @@ function reorderRules(ids: string[]): DomainRule[] {
   }))
 }
 
-function importFromFile(filePath: string): DomainRule[] {
-  const text = readFileSync(filePath, 'utf-8')
+function importFromFile(filePath: string | number): DomainRule[] {
+  return importFromText(readFileSync(filePath, 'utf-8'))
+}
+
+function importFromText(text: string): DomainRule[] {
   const parsed = parseDomainList(text)
 
   // Get existing rules to determine starting priority
@@ -336,6 +339,35 @@ export const domainRoutingService = {
   // in DomainRule for interface compatibility but will always be 0.
 }
 
+interface ApprovedDomainImport { path: string; text: string; expiresAt: number; release: () => void }
+const approvedDomainImports = new WeakMap<WebContents, ApprovedDomainImport>()
+const domainImportDialogs = new WeakMap<WebContents, object>()
+const MAX_DOMAIN_IMPORT_BYTES = 4 * 1024 * 1024
+
+/** Capture bounded bytes while the native selection is being granted. Holding
+ * a file descriptor alone does not prevent edits to the same file. */
+function readSelectedDomainRules(path: string): string {
+  const fd = openSync(path, 'r')
+  try {
+    const before = fstatSync(fd)
+    if (!before.isFile() || before.size > MAX_DOMAIN_IMPORT_BYTES) {
+      throw new Error('Domain import must be a regular file up to 4 MiB')
+    }
+    const buffer = Buffer.alloc(before.size + 1)
+    let length = 0
+    while (length < buffer.length) {
+      const count = readSync(fd, buffer, length, buffer.length - length, null)
+      if (count === 0) break
+      length += count
+    }
+    const after = fstatSync(fd)
+    if (length !== before.size || after.size !== before.size || after.mtimeMs !== before.mtimeMs) {
+      throw new Error('Domain import file changed while reading')
+    }
+    return buffer.subarray(0, length).toString('utf8')
+  } finally { closeSync(fd) }
+}
+
 // ─── IPC Registration ────────────────────────────────────────────────────────
 
 async function hotReloadIfActive(): Promise<void> {
@@ -390,14 +422,24 @@ export function registerDomainRoutingIpcHandlers(): void {
     return result
   })
 
-  ipcMain.handle('domain-routing:import', async (_event, filePath: string) => {
-    if (typeof filePath !== 'string' || !filePath.trim()) throw new Error('Invalid import path')
-    const result = domainRoutingService.importFromFile(filePath)
+  ipcMain.handle('domain-routing:import', async (event, filePath: string) => {
+    const approved = approvedDomainImports.get(event.sender)
+    if (approved && (event.sender.isDestroyed?.() || Date.now() >= approved.expiresAt)) approved.release()
+    if (!approved || approvedDomainImports.get(event.sender) !== approved || filePath !== approved.path) {
+      throw new Error('Import requires this renderer’s native-dialog selection')
+    }
+    let result: DomainRule[]
+    try {
+      result = importFromText(approved.text)
+    } finally { approved.release() }
     await hotReloadIfActive()
     return result
   })
 
-  ipcMain.handle('domain-routing:browse-file', async () => {
+  ipcMain.handle('domain-routing:browse-file', async (event) => {
+    approvedDomainImports.get(event.sender)?.release()
+    const request = {}
+    domainImportDialogs.set(event.sender, request)
     const result = await dialog.showOpenDialog({
       properties: ['openFile'],
       filters: [
@@ -405,9 +447,26 @@ export function registerDomainRoutingIpcHandlers(): void {
         { name: 'All Files', extensions: ['*'] }
       ]
     })
+    if (domainImportDialogs.get(event.sender) !== request) return null
+    domainImportDialogs.delete(event.sender)
     if (result.canceled || result.filePaths.length === 0) {
       return null
     }
-    return result.filePaths[0]
+    if (event.sender.isDestroyed?.()) throw new Error('Import renderer closed during native selection')
+    const path = result.filePaths[0]
+    const text = readSelectedDomainRules(path)
+    let released = false
+    let timer: ReturnType<typeof setTimeout>
+    const approved: ApprovedDomainImport = { path, text, expiresAt: Date.now() + 60_000, release: () => {
+      if (released) return
+      released = true; clearTimeout(timer)
+      event.sender.removeListener?.('destroyed', approved.release)
+      if (approvedDomainImports.get(event.sender) === approved) approvedDomainImports.delete(event.sender)
+      approved.text = ''
+    } }
+    timer = setTimeout(approved.release, 60_000); timer.unref?.()
+    approvedDomainImports.set(event.sender, approved)
+    event.sender.once?.('destroyed', approved.release)
+    return path
   })
 }

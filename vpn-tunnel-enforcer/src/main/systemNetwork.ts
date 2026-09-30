@@ -1,13 +1,11 @@
-import { app } from 'electron'
-import { mkdir, readFile, writeFile, unlink, rename } from 'fs/promises'
-import { join } from 'path'
 import { exec as execCb } from 'child_process'
 import { promisify } from 'util'
 import { execElevated } from './admin'
 import { logEvent } from './appLogger'
+import { readRecoveryManifest, writeRecoveryManifest, removeRecoveryManifest, recoveryManifestPath } from './recoveryManifest'
 
 const exec = promisify(execCb)
-
+const BASELINE_NAME = 'latest-tun-network-baseline.json'
 export interface SystemNetworkResult {
   success: boolean
   message: string
@@ -15,323 +13,201 @@ export interface SystemNetworkResult {
   warnings?: string[]
   skipped?: boolean
 }
-
-// Presence of the manifest file is the source of truth that baseline is currently applied.
-// Rollback removes the manifest. Used by tunController/main to drive idempotent auto-rollback.
-export async function isBaselineApplied(): Promise<boolean> {
-  return (await readManifest()) !== null
+const PROXY_ENV_KEYS = ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy']
+const TARGETS = {
+  internet: { key: 'Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings', names: ['ProxyEnable', 'ProxyServer', 'AutoConfigURL', 'AutoDetect'] },
+  environment: { key: 'Environment', names: ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY'] },
+  winhttp: { key: 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\\Connections', names: ['WinHttpSettings'] }
+} as const
+interface RegistrySnapshot {
+  target: keyof typeof TARGETS
+  name: string
+  exists: boolean
+  kind: 'String' | 'ExpandString' | 'DWord' | 'QWord' | 'Binary' | 'MultiString' | null
+  data: string | number | string[] | number[] | null
 }
-
-interface NetworkBackupManifest {
+export interface NetworkBackupManifest {
+  schemaVersion: 1
+  owner: 'VPNTE'
   createdAt: number
-  internetSettingsBackup: string | null
-  environmentBackup: string | null
-  hklmConnectionsBackup: string | null
+  userSid: string
+  values: RegistrySnapshot[]
 }
 
-const INTERNET_SETTINGS = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings'
-const USER_ENVIRONMENT = 'HKCU\\Environment'
-const HKLM_CONNECTIONS = 'HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\\Connections'
-
-const PROXY_ENV_KEYS = [
-  'HTTP_PROXY',
-  'HTTPS_PROXY',
-  'ALL_PROXY',
-  'NO_PROXY',
-  'http_proxy',
-  'https_proxy',
-  'all_proxy',
-  'no_proxy'
-]
-
-let baselineOpQueue: Promise<void> = Promise.resolve()
-
-async function withBaselineOpLock<T>(operation: () => Promise<T>): Promise<T> {
-  const previous = baselineOpQueue
-  let release!: () => void
-  baselineOpQueue = new Promise<void>((resolve) => {
-    release = resolve
+// No paths, registry keys, executable commands or import files come from disk.
+// The whitelist defines every value VPNTE may modify or restore.
+export function validateNetworkBackupManifest(value: unknown): NetworkBackupManifest {
+  const v = value as NetworkBackupManifest
+  if (!v || v.schemaVersion !== 1 || v.owner !== 'VPNTE' || !Number.isSafeInteger(v.createdAt) || v.createdAt <= 0 ||
+      typeof v.userSid !== 'string' || !/^S-1-5-21-\d+-\d+-\d+-\d+$/.test(v.userSid) || !Array.isArray(v.values) || v.values.length !== 9) {
+    throw new Error('Invalid network baseline schema or identity')
+  }
+  const seen = new Set<string>()
+  const values = v.values.map(s => {
+    if (!s || !Object.hasOwn(TARGETS, s.target) || typeof s.name !== 'string' ||
+        !(TARGETS[s.target].names as readonly string[]).includes(s.name) || typeof s.exists !== 'boolean') throw new Error('Invalid baseline registry target')
+    const id = `${s.target}/${s.name}`
+    if (seen.has(id)) throw new Error('Duplicate baseline registry target')
+    seen.add(id)
+    let valid = !s.exists && s.kind === null && s.data === null
+    if (s.exists) {
+      switch (s.kind) {
+        case 'String': case 'ExpandString': valid = typeof s.data === 'string' && s.data.length <= 65536; break
+        case 'DWord': valid = Number.isInteger(s.data) && Number(s.data) >= -2147483648 && Number(s.data) <= 2147483647; break
+        // QWords are serialized as decimal text to avoid loss of precision in JS.
+        case 'QWord': valid = typeof s.data === 'string' && /^-?\d{1,19}$/.test(s.data) && BigInt(s.data) >= -(1n << 63n) && BigInt(s.data) < (1n << 63n); break
+        case 'Binary': valid = Array.isArray(s.data) && s.data.length <= 65536 && s.data.every(x => Number.isInteger(x) && Number(x) >= 0 && Number(x) <= 255); break
+        case 'MultiString': valid = Array.isArray(s.data) && s.data.length <= 1024 && s.data.every(x => typeof x === 'string' && x.length <= 65536); break
+      }
+    }
+    if (!valid) throw new Error('Invalid baseline registry value or type')
+    return { target: s.target, name: s.name, exists: s.exists, kind: s.kind, data: s.data }
   })
-  await previous.catch(() => undefined)
-  try {
-    return await operation()
-  } finally {
-    release()
-  }
+  return { schemaVersion: 1, owner: 'VPNTE', createdAt: v.createdAt, userSid: v.userSid, values }
 }
 
-function backupDir() {
-  // Store backups in ProgramData (survives app uninstall) instead of userData.
-  return join(getProgramDataPath(), 'VPN-Tunnel-Enforcer', 'network-backups')
+let baselineOpQueue: Promise<unknown> = Promise.resolve()
+function withBaselineOpLock<T>(operation: () => Promise<T>): Promise<T> {
+  const result = baselineOpQueue.then(operation, operation)
+  baselineOpQueue = result.then(() => undefined, () => undefined)
+  return result
 }
-
-function getProgramDataPath(): string {
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return (app as any).getPath('programData')
-  } catch {
-    return process.env.ProgramData || 'C:\\ProgramData'
-  }
-}
-
-export function getTunNetworkBaselineManifestPath() {
-  return join(backupDir(), 'latest-tun-network-baseline.json')
-}
-
-function manifestPath() {
-  return getTunNetworkBaselineManifestPath()
-}
-
-function timestamp() {
-  const d = new Date()
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`
-}
-
-function encodedPowerShell(script: string) {
-  const prelude =
-    '$OutputEncoding=[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new();' +
-    '[Console]::InputEncoding=[System.Text.UTF8Encoding]::new();'
-  return Buffer.from(prelude + script, 'utf16le').toString('base64')
-}
-
+export function getTunNetworkBaselineManifestPath(): string { return recoveryManifestPath(BASELINE_NAME) }
+function readManifest() { return readRecoveryManifest(BASELINE_NAME, validateNetworkBackupManifest) }
+export async function isBaselineApplied(): Promise<boolean> { return (await readManifest()) !== null }
+function psJson(value: unknown): string { return `[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(JSON.stringify(value)).toString('base64')}')) | ConvertFrom-Json` }
 async function ps(script: string, elevated = false, timeout = 30000) {
-  const command = `powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encodedPowerShell(script)}`
-  if (elevated) return execElevated(command, { timeout, maxBuffer: 1024 * 1024 * 4 })
-  return exec(command, {
-    windowsHide: true,
-    timeout,
-    maxBuffer: 1024 * 1024 * 4,
-    encoding: 'utf8'
-  })
+  const prelude = '$OutputEncoding=[Console]::OutputEncoding=[Text.UTF8Encoding]::new();$ErrorActionPreference="Stop";'
+  const command = `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${Buffer.from(prelude + script, 'utf16le').toString('base64')}`
+  if (elevated) return execElevated(command, { timeout, maxBuffer: 4 * 1024 * 1024 })
+  return exec(command, { windowsHide: true, timeout, maxBuffer: 4 * 1024 * 1024, encoding: 'utf8' })
 }
-
-async function exportKey(key: string, file: string, elevated = false): Promise<string | null> {
+// Shared snapshot/restore code uses .NET APIs: no locale-dependent reg parsing.
+const REGISTRY_HELPERS = `
+$targets = ${psJson(TARGETS)}
+function Get-BaseKey($target) {
+  if ($target -eq 'winhttp') { return [Microsoft.Win32.Registry]::LocalMachine }
+  return [Microsoft.Win32.Registry]::CurrentUser
+}
+function Get-Snapshot($target, $name) {
+  $key = (Get-BaseKey $target).OpenSubKey($targets.$target.key)
   try {
-    if (elevated) await execElevated(`reg export "${key}" "${file}" /y`, { timeout: 15000 })
-    else await exec(`reg export "${key}" "${file}" /y`, { windowsHide: true, timeout: 15000 })
-    return file
-  } catch {
-    return null
-  }
+    $exists = $key -and @($key.GetValueNames()) -contains $name
+    $kind = $null; $data = $null
+    if ($exists) {
+      $kind = [string]$key.GetValueKind($name)
+      $data = $key.GetValue($name,$null,[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+      if ($kind -eq 'QWord') { $data = [string]$data }
+      if ($kind -eq 'Binary' -or $kind -eq 'MultiString') { $data = @($data) }
+    }
+    return [pscustomobject]@{target=$target;name=$name;exists=[bool]$exists;kind=$kind;data=$data}
+  } finally { if ($key) { $key.Close() } }
 }
-
-function errorText(err: any): string {
-  return String(err?.stderr || err?.stdout || err?.message || err || 'unknown error').replace(/\s+/g, ' ').trim()
+function Restore-Snapshot($s) {
+  $key = (Get-BaseKey $s.target).CreateSubKey($targets.($s.target).key)
+  try {
+    if ($s.exists) {
+      $data = $s.data
+      switch ($s.kind) {
+        'DWord' { $data = [int]$s.data }
+        'QWord' { $data = [long]$s.data }
+        'Binary' { $data = [byte[]]@($s.data) }
+        'MultiString' { $data = [string[]]@($s.data) }
+      }
+      $key.SetValue($s.name,$data,[Enum]::Parse([Microsoft.Win32.RegistryValueKind],[string]$s.kind))
+    } else { $key.DeleteValue($s.name,$false) }
+  } finally { $key.Close() }
+  $actual = Get-Snapshot $s.target $s.name
+  if ($actual.exists -ne $s.exists -or $actual.kind -cne $s.kind -or
+      ($actual.data | ConvertTo-Json -Compress -Depth 5) -cne ($s.data | ConvertTo-Json -Compress -Depth 5)) { throw 'Registry read-back mismatch' }
 }
-
-function isOptionalProxyDeleteCommand(cmd: string): boolean {
-  return /^reg delete /i.test(cmd) && (
-    cmd.includes('"HKCU\\Environment"') ||
-    cmd.includes('"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyServer') ||
-    cmd.includes('"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v AutoConfigURL')
-  )
-}
-
+`
 async function createBackup(): Promise<NetworkBackupManifest> {
-  await mkdir(backupDir(), { recursive: true })
-  const stamp = timestamp()
-  const manifest: NetworkBackupManifest = {
-    createdAt: Date.now(),
-    internetSettingsBackup: await exportKey(INTERNET_SETTINGS, join(backupDir(), `hkcu-internet-settings-${stamp}.reg`)),
-    environmentBackup: await exportKey(USER_ENVIRONMENT, join(backupDir(), `hkcu-environment-${stamp}.reg`)),
-    hklmConnectionsBackup: await exportKey(HKLM_CONNECTIONS, join(backupDir(), `hklm-connections-${stamp}.reg`), true)
-  }
-  const tmpPath = `${manifestPath()}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`
-  await writeFile(tmpPath, JSON.stringify(manifest, null, 2), 'utf-8')
-  await rename(tmpPath, manifestPath())
+  const { stdout } = await ps(`${REGISTRY_HELPERS}
+$values = @()
+foreach ($target in @('internet','environment','winhttp')) {
+  foreach ($name in $targets.$target.names) { $values += Get-Snapshot $target $name }
+}
+[pscustomobject]@{schemaVersion=1;owner='VPNTE';createdAt=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds();userSid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value;values=$values} | ConvertTo-Json -Depth 8 -Compress`)
+  const manifest = validateNetworkBackupManifest(JSON.parse(String(stdout).replace(/^\uFEFF/, '').trim()))
+  await writeRecoveryManifest(BASELINE_NAME, manifest, validateNetworkBackupManifest)
   return manifest
 }
-
-async function readManifest(): Promise<NetworkBackupManifest | null> {
-  try {
-    return JSON.parse(await readFile(manifestPath(), 'utf-8')) as NetworkBackupManifest
-  } catch {
-    return null
-  }
-}
-
-async function clearManifest(): Promise<void> {
-  try {
-    await unlink(manifestPath())
-  } catch {
-    // Already gone — fine.
-  }
-}
-
-function clearCurrentProcessProxyEnv() {
-  for (const key of PROXY_ENV_KEYS) {
-    delete process.env[key]
-  }
-}
-
 async function notifyWinInetSettingsChanged() {
   await ps(`
 $sig='[DllImport("wininet.dll", SetLastError=true)] public static extern bool InternetSetOption(IntPtr hInternet, int dwOption, IntPtr lpBuffer, int dwBufferLength);'
 $type=Add-Type -MemberDefinition $sig -Name WinInet -Namespace Native -PassThru
-$null=$type::InternetSetOption([IntPtr]::Zero, 39, [IntPtr]::Zero, 0)
-$null=$type::InternetSetOption([IntPtr]::Zero, 37, [IntPtr]::Zero, 0)
-`, false, 10000).catch(() => undefined)
+if (-not $type::InternetSetOption([IntPtr]::Zero,39,[IntPtr]::Zero,0)) { throw 'WinINet settings notification failed' }
+if (-not $type::InternetSetOption([IntPtr]::Zero,37,[IntPtr]::Zero,0)) { throw 'WinINet refresh failed' }
+`, false, 10000)
 }
 
-export async function applyTunNetworkBaseline(): Promise<SystemNetworkResult> {
-  return withBaselineOpLock(applyTunNetworkBaselineUnlocked)
-}
-
-async function applyTunNetworkBaselineUnlocked(): Promise<SystemNetworkResult> {
-  if (process.platform !== 'win32') {
-    return { success: false, message: 'Сетевой baseline доступен только на Windows' }
-  }
-
+export function applyTunNetworkBaseline(): Promise<SystemNetworkResult> { return withBaselineOpLock(applyUnlocked) }
+async function applyUnlocked(): Promise<SystemNetworkResult> {
+  if (process.platform !== 'win32') return { success: false, message: 'Сетевой baseline доступен только на Windows' }
+  let prepared = false
   try {
-    const manifest = await createBackup()
-    const warnings: string[] = []
-
-    // Validate that at least the primary backup (HKCU Internet Settings)
-    // succeeded before wiping. If the backup failed, abort — wiping
-    // without a backup would permanently destroy the user's proxy settings.
-    if (!manifest.internetSettingsBackup) {
-      await clearManifest()
-      return {
-        success: false,
-        message: 'Не удалось создать backup настроек. Отмена — настройки не были изменены.',
-        details: 'reg export для HKCU\\Internet Settings завершился ошибкой. Проверьте права доступа.'
-      }
-    }
-
-    // 1. Reset WinHTTP proxy (requires elevation)
-    await execElevated('netsh winhttp reset proxy', { timeout: 10000 }).catch((err) => {
-      const warning = `netsh winhttp reset proxy failed: ${errorText(err)}`
-      warnings.push(warning)
-      logEvent('warn', 'system-network', warning)
-    })
-
-    // 2. Clear WinINet proxy & environment vars in HKCU (fast native reg commands, no broadcasting deadlock)
-    const commands = [
-      'reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyEnable /t REG_DWORD /d 0 /f',
-      'reg delete "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyServer /f',
-      'reg delete "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v AutoConfigURL /f',
-      'reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v AutoDetect /t REG_DWORD /d 0 /f'
-    ]
-    for (const key of PROXY_ENV_KEYS) {
-      commands.push(`reg delete "HKCU\\Environment" /v ${key} /f`)
-    }
-
-    await Promise.all(commands.map(async (cmd) => {
-      try {
-        await exec(cmd, { windowsHide: true, timeout: 5000 })
-      } catch (err: any) {
-        const text = errorText(err)
-        if (isOptionalProxyDeleteCommand(cmd)) {
-          logEvent('debug', 'system-network', 'optional proxy registry value already absent', { command: cmd, error: text })
-          return
-        }
-        const missingValue = /reg delete/i.test(cmd) && /unable to find|cannot find|system was unable to find|не удается найти/i.test(text)
-        if (missingValue) return
-        const warning = `${cmd.split(' /v ')[0]} failed: ${text}`
-        warnings.push(warning)
-        logEvent('warn', 'system-network', 'baseline command failed', { command: cmd, error: text })
-      }
-    }))
-
-    clearCurrentProcessProxyEnv()
+    if (await readManifest()) return { success: true, skipped: true, message: 'Baseline уже применён; исходный снимок сохранён' }
+    await createBackup() // Mandatory durable commit before any registry or WinHTTP changes.
+    prepared = true
+    await execElevated('netsh winhttp reset proxy', { timeout: 10000 })
+    const { stdout } = await ps(`${REGISTRY_HELPERS}
+foreach ($name in $targets.internet.names) {
+  $s = [pscustomobject]@{target='internet';name=$name;exists=$false;kind=$null;data=$null}
+  if ($name -in @('ProxyEnable','AutoDetect')) { $s.exists=$true; $s.kind='DWord'; $s.data=0 }
+  Restore-Snapshot $s
+}
+foreach ($name in $targets.environment.names) { Restore-Snapshot ([pscustomobject]@{target='environment';name=$name;exists=$false;kind=$null;data=$null}) }
+Write-Output 'BASELINE_APPLIED'`)
+    if (!String(stdout).includes('BASELINE_APPLIED')) throw new Error('Baseline application verification missing')
     await notifyWinInetSettingsChanged()
-    return {
-      success: true,
-      message: 'Сеть нормализована для TUN',
-      details:
-        'WinHTTP proxy сброшен, WinINet/User proxy и PAC отключены, env proxy удалены. ' +
-        `Backup: ${manifestPath()}` +
-        (warnings.length > 0 ? `; warnings: ${warnings.join(' | ')}` : ''),
-      warnings
+    for (const key of PROXY_ENV_KEYS) delete process.env[key]
+    return { success: true, message: 'Сеть нормализована для TUN', details: `Backup: ${getTunNetworkBaselineManifestPath()}`, warnings: [] }
+  } catch (error) {
+    const warnings = [String(error)]
+    if (prepared) {
+      const rollback = await rollbackUnlocked()
+      if (!rollback.success) warnings.push(...(rollback.warnings || [rollback.message]))
     }
-  } catch (err: any) {
-    return {
-      success: false,
-      message: err.message || String(err),
-      details: err.stderr || err.stdout
-    }
+    logEvent('error', 'system-network', 'baseline application failed', { warnings })
+    return { success: false, message: 'Baseline не применён; проверьте отчёт восстановления', warnings, details: warnings.join(' | ') }
   }
 }
-
-export async function rollbackTunNetworkBaseline(): Promise<SystemNetworkResult> {
-  return withBaselineOpLock(rollbackTunNetworkBaselineUnlocked)
+export function rollbackTunNetworkBaseline(): Promise<SystemNetworkResult> { return withBaselineOpLock(rollbackUnlocked) }
+async function rollbackUnlocked(): Promise<SystemNetworkResult> {
+  if (process.platform !== 'win32') return { success: false, message: 'Rollback доступен только на Windows' }
+  try {
+    const manifest = await readManifest()
+    if (!manifest) return { success: true, skipped: true, message: 'Активный VPNTE network baseline не найден' }
+    const { stdout } = await ps(`${REGISTRY_HELPERS}
+if ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne '${manifest.userSid}') { throw 'Baseline user identity mismatch' }
+$values = @(${psJson(manifest.values)})
+$results = @()
+foreach ($s in $values) {
+  try { Restore-Snapshot $s; $results += [pscustomobject]@{name=($s.target+'/'+$s.name);success=$true;error=$null} }
+  catch { $results += [pscustomobject]@{name=($s.target+'/'+$s.name);success=$false;error=[string]$_} }
 }
-
-async function rollbackTunNetworkBaselineUnlocked(): Promise<SystemNetworkResult> {
-  if (process.platform !== 'win32') {
-    return { success: false, message: 'Rollback доступен только на Windows' }
-  }
-
-  const manifest = await readManifest()
-  if (!manifest) {
-    return {
-      success: true,
-      skipped: true,
-      message: 'Активный VPNTE network baseline не найден',
-      details: 'Откат не требуется: VPNTE не нашёл backup/manifest изменений.'
+ConvertTo-Json -InputObject @($results) -Depth 5 -Compress`, true)
+    const steps = JSON.parse(String(stdout).trim()) as Array<{ name: string; success: boolean; error: string | null }>
+    if (!Array.isArray(steps) || steps.length !== 9 || steps.some((s, i) => s.name !== `${manifest.values[i].target}/${manifest.values[i].name}` || typeof s.success !== 'boolean')) throw new Error('Invalid baseline recovery report')
+    const warnings: string[] = []
+    for (const step of steps) {
+      logEvent(step.success ? 'info' : 'error', 'system-network', 'baseline rollback step', step)
+      if (!step.success) warnings.push(`${step.name}: ${step.error}`)
     }
-  }
-
-  const failures: string[] = []
-  const runStep = async (name: string, operation: () => Promise<unknown>) => {
-    try {
-      await operation()
-      logEvent('info', 'system-network', 'baseline rollback step succeeded', { name })
-    } catch (error: any) {
-      const message = error?.message || String(error)
-      failures.push(`${name}: ${message}`)
-      logEvent('error', 'system-network', 'baseline rollback step failed; continuing', { name, message })
-    }
-  }
-
-  if (manifest.internetSettingsBackup) {
-    await runStep('HKCU Internet Settings', () =>
-      exec(`reg import "${manifest.internetSettingsBackup}"`, { windowsHide: true, timeout: 15000 }))
-  }
-  if (manifest.environmentBackup) {
-    await runStep('HKCU Environment', () =>
-      exec(`reg import "${manifest.environmentBackup}"`, { windowsHide: true, timeout: 15000 }))
-  }
-  if (manifest.hklmConnectionsBackup) {
-    await runStep('HKLM Connections', () =>
-      execElevated(`reg import "${manifest.hklmConnectionsBackup}"`, { timeout: 15000 }))
-  }
-  await runStep('WinINet settings notification', () => notifyWinInetSettingsChanged())
-
-  if (failures.length === 0) {
-    await clearManifest()
-    return {
-      success: true,
-      message: 'Сетевые настройки восстановлены из backup',
-      details: `Backup created at: ${new Date(manifest.createdAt).toLocaleString()}`
-    }
-  }
-  return {
-    success: false,
-    message: 'Сетевые настройки восстановлены частично; manifest сохранён для повторного отката',
-    details: failures.join(' | '),
-    warnings: failures
+    try { await notifyWinInetSettingsChanged() } catch (error) { warnings.push(`WinINet notification: ${String(error)}`) }
+    if (warnings.length) return { success: false, message: 'Baseline восстановлен частично; снимок сохранён', warnings, details: warnings.join(' | ') }
+    await removeRecoveryManifest(BASELINE_NAME)
+    return { success: true, message: 'Сетевые настройки восстановлены и проверены', details: `Backup created at: ${new Date(manifest.createdAt).toISOString()}` }
+  } catch (error) {
+    logEvent('error', 'system-network', 'CRITICAL_SECURITY_EVENT: baseline recovery unknown', { error: String(error) })
+    return { success: false, message: 'Baseline recovery не подтверждён; снимок сохранён', warnings: [String(error)] }
   }
 }
-
-// Best-effort auto-rollback used on TUN stop, app exit, and crash recovery.
-// Safe to call when baseline is not applied (returns success with skipped=true).
-export async function rollbackTunNetworkBaselineIfApplied(
-  reason: string
-): Promise<SystemNetworkResult & { skipped?: boolean }> {
-  if (process.platform !== 'win32') {
-    return { success: true, skipped: true, message: 'Rollback недоступен (не Windows)' }
-  }
+export function rollbackTunNetworkBaselineIfApplied(reason: string): Promise<SystemNetworkResult> {
+  if (process.platform !== 'win32') return Promise.resolve({ success: true, skipped: true, message: 'Rollback недоступен (не Windows)' })
   return withBaselineOpLock(async () => {
-    if (!(await isBaselineApplied())) {
-      return { success: true, skipped: true, message: 'Baseline не был применён - откатывать нечего' }
-    }
     logEvent('info', 'system-network', `auto-rollback baseline: ${reason}`)
-    const result = await rollbackTunNetworkBaselineUnlocked()
-    if (!result.success) {
-      logEvent('warn', 'system-network', 'auto-rollback failed', result)
-    }
-    return result
+    return rollbackUnlocked()
   })
 }

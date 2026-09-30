@@ -68,8 +68,25 @@ describe('physicalAdapterLockdown source regressions', () => {
     const s = source()
 
     expect(s).toContain('export function getLockdownManifestPaths')
-    expect(s).toContain('programData: join(programDataDir, MANIFEST_BASENAME)')
+    expect(s).toContain('const programDataDir = recoveryManifestPath(MANIFEST_BASENAME)')
     expect(s).toContain('userData: join(app.getPath(\'userData\'), MANIFEST_BASENAME)')
-    expect(s).toContain('pdTarget = programDataManifestPath()')
+    expect(s).toContain('writeRecoveryManifest(MANIFEST_BASENAME')
+    expect(s).toContain('readRecoveryManifest(MANIFEST_BASENAME')
+    expect(s).toContain('[string]$_.InterfaceGuid -eq')
   })
+  it('rejects injected/ambiguous adapter, transition and registry snapshots (AT-03-012)', async () => {
+    const { validateLockdownManifest } = await import('./physicalAdapterLockdown')
+    const fixture = {
+      schemaVersion: 1, owner: 'VPNTE', appliedAt: Date.now(), tunDnsIpv4: '192.168.250.254',
+      adapters: [{ ifIndex: 1, interfaceGuid: '22222222-2222-2222-2222-222222222222', alias: 'Ethernet', ipv6Enabled: true, ipv4DnsServers: ['1.1.1.1'], ipv4DnsSource: 'static', forcedDnsTo: ['192.168.250.254'], forcedIpv6Off: true }],
+      transitionAdapters: { teredoType: 'client', sixToFourState: null, isatapState: null },
+      dnsRegistryPolicy: { smartNameResolution: { exists: false }, parallelAandAAAA: { exists: true, type: 'REG_DWORD', data: '0x0' } }
+    }
+    expect(validateLockdownManifest(fixture).adapters).toHaveLength(1)
+    expect(() => validateLockdownManifest({ ...fixture, adapters: [{ ...fixture.adapters[0], interfaceGuid: undefined }] })).toThrow()
+    expect(() => validateLockdownManifest({ ...fixture, transitionAdapters: { ...fixture.transitionAdapters, teredoType: "client; Invoke-Expression evil" } })).toThrow()
+    expect(() => validateLockdownManifest({ ...fixture, dnsRegistryPolicy: { ...fixture.dnsRegistryPolicy, smartNameResolution: { exists: true, type: 'REG_DWORD', data: "0 & evil" } } })).toThrow()
+    expect(() => validateLockdownManifest({ ...fixture, dnsRegistryPolicy: undefined })).toThrow()
+  })
+
 })

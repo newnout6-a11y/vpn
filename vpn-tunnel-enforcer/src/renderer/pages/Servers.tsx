@@ -43,7 +43,6 @@ import { ForeignVpnBanner } from '../components/ForeignVpnBanner'
 import { emitServerChanged } from '../nav'
 import { useAppStore } from '../store'
 import type { ClientDevice, ServerGroup, ServerProfile } from '../../shared/ipc-types'
-import { confirmSecretExport, scheduleSecretClipboardCleanup } from '../utils/secretClipboard'
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -685,10 +684,10 @@ export function Servers() {
   }
 
   const handleExport = async (id: string) => {
-    if (!confirmSecretExport('clipboard')) return
     try {
-      const result = await window.electronAPI.serversExportKey(id)
+      const result = await window.electronAPI.serversCopyKey(id)
       if (!result.ok) {
+        if ('cancelled' in result) return
         setExportFlash((prev) => ({ ...prev, [id]: 'failed' }))
         window.setTimeout(
           () =>
@@ -701,8 +700,6 @@ export function Servers() {
         )
         return
       }
-      await navigator.clipboard.writeText(result.uri)
-      scheduleSecretClipboardCleanup(result.uri)
       setExportFlash((prev) => ({ ...prev, [id]: 'copied' }))
       window.setTimeout(
         () =>
@@ -728,7 +725,6 @@ export function Servers() {
   }
 
   const handleExportToFile = async (id: string) => {
-    if (!confirmSecretExport('file')) return
     try {
       const result = await window.electronAPI.serversExportKeyToFile(id)
       if (result.ok) {
@@ -770,7 +766,6 @@ export function Servers() {
   }
 
   const handleExportAll = async () => {
-    if (!confirmSecretExport('file')) return
     setExportingAll(true)
     setBulkNotice({
       tone: 'info',
@@ -818,7 +813,6 @@ export function Servers() {
   }
 
   const handleExportProxyList = async () => {
-    if (!confirmSecretExport('file')) return
     setExportingProxies(true)
     setBulkNotice({
       tone: 'info',
