@@ -1,11 +1,11 @@
 import { app, dialog } from 'electron'
 import Store from 'electron-store'
-import { copyFileSync, existsSync } from 'fs'
 import { join } from 'path'
 import { execElevated } from './admin'
 import { domainEnrichmentService } from './domainEnrichment'
 import { readBootRecoveryReport } from './recoveryManifest'
 import {
+  protectLegacySecretBackup,
   decryptJsonSecret,
   decryptSecret,
   encryptJsonSecret,
@@ -221,6 +221,7 @@ function encodeSettings(value: AppSettings): PersistedAppSettings {
 }
 
 function readSettingsWithMigration(): AppSettings {
+  protectLegacySecretBackup(`${store.path}.pre-safe-storage-v1.bak`)
   const persisted = store.get('settings')
   const decoded = decodePersistedSettings(persisted)
   if (!hasPlaintextSettingsSecrets(persisted)) return decoded
@@ -228,8 +229,7 @@ function readSettingsWithMigration(): AppSettings {
     throw new Error('Settings migration requires Windows secure storage; plaintext data was left unchanged')
   }
 
-  const backupPath = `${store.path}.pre-safe-storage-v1.bak`
-  if (existsSync(store.path) && !existsSync(backupPath)) copyFileSync(store.path, backupPath)
+  protectLegacySecretBackup(`${store.path}.pre-safe-storage-v1.bak`, store.path)
   store.store = {
     settings: encodeSettings(decoded),
     schemaVersion: 1,
