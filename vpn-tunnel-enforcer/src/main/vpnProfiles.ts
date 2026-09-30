@@ -10,19 +10,27 @@ import { buildBootstrapRouteAttempts, type BootstrapRouteMode } from './bootstra
 const execFile = promisify(execFileCb)
 
 /**
- * Sends request headers through curl's stdin-backed header file (`-H @-`).
- * Device identifiers, subscription HWIDs and Happ user-agent fingerprints
- * therefore never appear in the process command line/WMI argv.
+ * Sends URL and sensitive headers through curl --config stdin. -q disables
+ * user curlrc files. No subscription token, credential or device ID is in argv.
  */
-function execSubscriptionCurl(args: string[], headerLines: string[]): Promise<Buffer> {
+function execSubscriptionCurl(args: string[], url: string, headerLines: string[]): Promise<Buffer> {
+  const quoteConfig = (value: string): string => {
+    if (/[\x00-\x1f\x7f]/.test(value)) throw new Error('Invalid control character in subscription request')
+    return '"' + value.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"'
+  }
+  const parsed = new URL(url)
+  if (!['http:','https:'].includes(parsed.protocol)) throw new Error('Invalid subscription transport')
+  const config = [`url = ${quoteConfig(url)}`, ...headerLines.map(line => `header = ${quoteConfig(line)}`)].join('\n') + '\n'
+
   return new Promise((resolve, reject) => {
-    const child = spawn('curl.exe', args, {
+    const child = spawn('curl.exe', ['-q', '--config', '-', ...args], {
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe']
     })
     const stdout: Buffer[] = []
     const stderr: Buffer[] = []
     let stdoutBytes = 0
+    let stderrBytes = 0
     let settled = false
     const timeout = setTimeout(() => {
       child.kill()
@@ -35,8 +43,9 @@ function execSubscriptionCurl(args: string[], headerLines: string[]): Promise<Bu
       clearTimeout(timeout)
       if (error) {
         Object.assign(error, {
-          stdout: Buffer.concat(stdout),
-          stderr: Buffer.concat(stderr)
+          // Failed response bodies may themselves contain credential bundles.
+          stderr: Buffer.from(redactSensitiveText(Buffer.concat(stderr).toString('utf8')))
+
         })
         reject(error)
       } else {
@@ -54,14 +63,16 @@ function execSubscriptionCurl(args: string[], headerLines: string[]): Promise<Bu
       stdout.push(Buffer.from(chunk))
     })
     child.stderr.on('data', (chunk: Buffer) => {
-      if (Buffer.concat(stderr).length < 64 * 1024) stderr.push(Buffer.from(chunk))
+      const remaining = 64 * 1024 - stderrBytes
+      if (remaining > 0) { const part = Buffer.from(chunk).subarray(0, remaining); stderr.push(part); stderrBytes += part.length }
     })
     child.once('error', finish)
-    child.once('exit', code => {
+    child.once('close', code => {
       if (code === 0) finish()
       else finish(new Error(`curl subscription request failed with exit code ${code}`))
     })
-    child.stdin.end(`${headerLines.join('\r\n')}\r\n`, 'utf8')
+    child.stdin.once('error', () => { child.kill(); finish(new Error('Subscription request input failed')) })
+    child.stdin.end(config, 'utf8')
   })
 }
 
@@ -280,9 +291,12 @@ const SECRET_KEYS = new Set([
 
 export function redactSensitiveText(value: string): string {
   return value
-    .replace(/\b(?:vless|trojan|ss|vmess|hysteria2|hy2|naive|anytls|shadowtls|tuic):\/\/\S+/gi, '<redacted-vpn-uri>')
+    .replace(/\b(?:vless|trojan|ss|vmess|hysteria2|hy2|naive|anytls|shadowtls|tuic|wg|wireguard|happ|mantaray):\/\/\S+/gi, '<redacted-vpn-uri>')
     .replace(/\bhttps?:\/\/[^\s"'<>]{8,}/gi, '<redacted-url>')
     .replace(/\b(Could not resolve host|No such host is known|resolve host):\s*[^\s"'<>]+/gi, '$1: <redacted-host>')
+    .replace(/\bBearer\s+[a-z0-9._~+\/=-]+/gi, 'Bearer <redacted-token>')
+    .replace(/\b[a-z]:[\\/](?:Users|Documents and Settings)[\\/][^\r\n"'<>]+/gi, '<redacted-user-path>')
+    .replace(/\/(?:home|Users)\/[^\s\/"'<>]+(?:\/[^\r\n"'<>]*)?/g, '<redacted-user-path>')
     .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi, '<redacted-uuid>')
 }
 
@@ -2134,11 +2148,8 @@ async function fetchSubscriptionHttpResponse(url: string, attempt: FetchAttempt)
       '-',
       '--max-time',
       '25',
-      '-H',
-      '@-',
-      ...attempt.args,
-      currentUrl
-    ], attempt.headerLines)
+      ...attempt.args
+    ], currentUrl, attempt.headerLines)
 
     const raw = stdout
     const splitIdx = lastIndexOfHeaderTerminator(raw)

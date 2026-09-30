@@ -8,7 +8,7 @@ const execFileMock = vi.hoisted(() => {
   return fn
 })
 const spawnMock = vi.hoisted(() => vi.fn())
-const spawnResult = vi.hoisted(() => ({ stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), exitCode: 0 }))
+const spawnResult = vi.hoisted(() => ({ stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), exitCode: 0, stdin: '' }))
 
 vi.mock('child_process', () => ({
   default: { execFile: execFileMock, exec: vi.fn(), spawn: spawnMock },
@@ -30,9 +30,11 @@ describe('vpnProfiles regressions', () => {
     spawnResult.stdout = Buffer.alloc(0)
     spawnResult.stderr = Buffer.alloc(0)
     spawnResult.exitCode = 0
+    spawnResult.stdin = ''
     spawnMock.mockImplementation(() => {
       const child = new EventEmitter() as any
       child.stdin = new PassThrough()
+      child.stdin.on('data', (data: Buffer) => { spawnResult.stdin += data.toString('utf8') })
       child.stdout = new PassThrough()
       child.stderr = new PassThrough()
       child.kill = vi.fn()
@@ -40,9 +42,21 @@ describe('vpnProfiles regressions', () => {
         child.stdout.end(spawnResult.stdout)
         child.stderr.end(spawnResult.stderr)
         child.emit('exit', spawnResult.exitCode)
+        child.emit('close', spawnResult.exitCode)
       })
       return child
     })
+  })
+
+  it('keeps the subscription URL and credentials out of argv (AT-01-009)', async () => {
+    spawnResult.stdout = curlStdout('HTTP/1.1 200 OK', 'vless://00000000-0000-4000-8000-000000000000@one.example.com:443?security=tls#One')
+    const { resolveVpnProfiles } = await import('./vpnProfiles')
+    await resolveVpnProfiles('https://sub.example.test/SECRET-SUBSCRIPTION-TOKEN?auth=PRIVATE-TOKEN')
+    const argv = JSON.stringify(spawnMock.mock.calls[0][1])
+    expect(argv).not.toContain('SECRET-SUBSCRIPTION-TOKEN')
+    expect(argv).not.toContain('PRIVATE-TOKEN')
+    expect(spawnResult.stdin).toContain('url = "https://sub.example.test/SECRET-SUBSCRIPTION-TOKEN?auth=PRIVATE-TOKEN"')
+    expect(spawnMock.mock.calls[0][1].slice(0,3)).toEqual(['-q','--config','-'])
   })
 
   it('unwraps only the first VPN URI from Happ add base64 lists', async () => {
