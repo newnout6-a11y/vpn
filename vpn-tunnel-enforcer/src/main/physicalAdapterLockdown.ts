@@ -764,63 +764,14 @@ try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}`
 
 export async function repairOrphanedPhysicalAdapterDns(reason: string): Promise<{ repaired: boolean; adapters: string[] }> {
   if (process.platform !== 'win32') return { repaired: false, adapters: [] }
-  if (await readManifest()) return { repaired: false, adapters: [] }
-
-  const script = `
-$ErrorActionPreference = 'SilentlyContinue'
-$vpnteDns = @('${TUN_IPV4_GATEWAY}', '${TUN_IPV4_RESOLVER}')
-$vpnteDnsPrefixes = @('${TUN_IPV4_PREFIX}', '${LEGACY_TUN_IPV4_PREFIX}')
-$tunUp = Get-NetAdapter -ErrorAction SilentlyContinue |
-  Where-Object { $_.Status -eq 'Up' -and ($_.Name -eq '${getTunAdapterAlias()}' -or $_.InterfaceDescription -match 'VPNTE') } |
-  Select-Object -First 1
-if ($tunUp) {
-  [pscustomobject]@{ skipped = 'tun-up'; adapters = @() } | ConvertTo-Json -Compress
-  return
-}
-$fixed = @()
-$adapters = Get-NetAdapter |
-  Where-Object {
-    $_.Status -eq 'Up' -and
-    $_.InterfaceDescription -notmatch 'Wintun|TAP-Windows|Tailscale|WireGuard|Hyper-V|Loopback|vEthernet|VPN|VirtualBox|VMware|Bluetooth' -and
-    $_.MacAddress -and $_.MacAddress -ne '00-00-00-00-00-00'
+  // A private resolver address is not proof that VPNTE changed an adapter.
+  // Automatic restoration needs the exact trusted ownership/baseline snapshot.
+  const manifest = await readManifest()
+  if (manifest) {
+    const result = await rollbackPhysicalAdapterLockdownIfApplied(reason)
+    return { repaired: result.rolledBack, adapters: result.rolledBack ? manifest.adapters.map(a => a.alias) : [] }
   }
-foreach ($a in $adapters) {
-  $dns4 = @((Get-DnsClientServerAddress -InterfaceAlias $a.Name -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses)
-  $nameServer = ''
-  try {
-    $regPath = "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\$($a.InterfaceGuid)"
-    $nameServer = [string]((Get-ItemProperty -Path $regPath -Name NameServer -ErrorAction SilentlyContinue).NameServer)
-  } catch {}
-  $staleVpnteDns = @($dns4 | Where-Object {
-    $addr = [string]$_
-    ($vpnteDns -contains $addr) -or (($vpnteDnsPrefixes | Where-Object { $addr.StartsWith($_) }).Count -gt 0)
-  })
-  $manualVpnteDns = @($nameServer -split '[, ]+' | Where-Object {
-    $addr = [string]$_
-    ($vpnteDns -contains $addr) -or (($vpnteDnsPrefixes | Where-Object { $addr.StartsWith($_) }).Count -gt 0)
-  })
-  if ($staleVpnteDns.Count -gt 0 -and $manualVpnteDns.Count -gt 0) {
-    try {
-      Set-DnsClientServerAddress -InterfaceAlias $a.Name -ResetServerAddresses -ErrorAction Stop
-      $fixed += [pscustomobject]@{ alias = [string]$a.Name; oldDns = @($dns4) }
-    } catch {}
-  }
-}
-try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}
-[pscustomobject]@{ skipped = $null; adapters = @($fixed) } | ConvertTo-Json -Compress -Depth 4
-`
-  try {
-    const raw = (await runPS(script, 20000)).trim()
-    const parsed = raw ? JSON.parse(raw) : { adapters: [] }
-    const adaptersRaw = Array.isArray(parsed.adapters) ? parsed.adapters : parsed.adapters ? [parsed.adapters] : []
-    const adapters = adaptersRaw.map((row: any) => String(row.alias || '')).filter(Boolean)
-    if (adapters.length) {
-      logEvent('warn', 'phys-lockdown', 'repaired orphaned VPNTE DNS on physical adapters', { reason, adapters })
-      return { repaired: true, adapters }
-    }
-  } catch (err) {
-    logEvent('warn', 'phys-lockdown', 'orphaned DNS repair failed', { reason, err: (err as Error).message })
-  }
+  logEvent('warn', 'phys-lockdown', 'DNS recovery not verified: no owned adapter baseline; foreign settings preserved', { reason })
   return { repaired: false, adapters: [] }
 }
 
