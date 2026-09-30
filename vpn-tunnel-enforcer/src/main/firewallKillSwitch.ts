@@ -1,13 +1,14 @@
 import { app, BrowserWindow, dialog } from 'electron'
-import { mkdir, readFile, writeFile, unlink, stat, rename } from 'fs/promises'
-import { join } from 'path'
+import { mkdir, readFile, writeFile, unlink, stat, rename, access, realpath } from 'fs/promises'
+import { join, isAbsolute, win32 } from 'path'
+import { constants as fsConstants } from 'fs'
 import { execFile as execFileCb } from 'child_process'
 import { isIP } from 'net'
 import { promisify } from 'util'
 import { execElevated } from './admin'
 import { execElevatedPs, isElevatedPsHelperRunning } from './elevatedPsHelper'
 import { logEvent } from './appLogger'
-import { randomUUID } from 'crypto'
+import { randomUUID, createHash } from 'crypto'
 import { getRecoveryManifestDir, recoveryManifestPath, readRecoveryManifest, writeRecoveryManifest, writeRecoveryArtifact, removeRecoveryManifest, strictRecoveryRequired } from './recoveryManifest'
 import { TUN_ADAPTER_ALIAS, TUN_IPV4_NETWORK_CIDR, getTunAdapterAlias } from './tunAdapter'
 
@@ -69,6 +70,8 @@ export interface FirewallManifest {
   ruleNames: string[]
   singboxExePath: string | null
   savedProfiles: SavedProfile[]
+  exceptionPolicy?: FirewallExceptionPolicy
+  pendingExceptionPolicy?: FirewallExceptionPolicy
 }
 export function validateSavedProfiles(value: unknown): SavedProfile[] {
   if (!Array.isArray(value) || value.length !== 3) throw new Error('Invalid firewall snapshot: all profiles required')
@@ -95,7 +98,9 @@ export function validateFirewallManifest(value: unknown): FirewallManifest {
   }
   return { schemaVersion: 1, owner: 'VPNTE', operationId: v.operationId, phase: v.phase!,
     strictMode: v.strictMode, createdAt: v.createdAt!, ruleNames: [...new Set(v.ruleNames)],
-    singboxExePath: v.singboxExePath!, savedProfiles: validateSavedProfiles(v.savedProfiles) }
+    singboxExePath: v.singboxExePath!, savedProfiles: validateSavedProfiles(v.savedProfiles),
+    ...(v.exceptionPolicy ? { exceptionPolicy: validateFirewallExceptionPolicy(v.exceptionPolicy) } : {}),
+    ...(v.pendingExceptionPolicy ? { pendingExceptionPolicy: validateFirewallExceptionPolicy(v.pendingExceptionPolicy) } : {}) }
 }
 export function getKillSwitchManifestPath(): string { return recoveryManifestPath('firewall.json') }
 function backupDir(): string { return getRecoveryManifestDir() }
@@ -350,6 +355,7 @@ function serializeFirewall<T>(operation: () => Promise<T>): Promise<T> {
 export interface KillSwitchOptions {
   singboxExePath: string
   proxyOwnerProgramPaths?: string[]
+  appExceptionPaths?: string[]
   extraAllowedRemoteCidrs?: string[]
   tunAdapterAlias?: string
   strictMode?: boolean
@@ -357,6 +363,92 @@ export interface KillSwitchOptions {
 export async function enableKillSwitch(opts: KillSwitchOptions): Promise<FirewallKillSwitchResult> {
   return serializeFirewall(() => enableKillSwitchUnlocked(opts))
 }
+export interface FirewallExceptionPolicy { apps: string[]; cidrs: string[] }
+function validateFirewallExceptionPolicy(value: unknown): FirewallExceptionPolicy {
+  const v = value as FirewallExceptionPolicy
+  if (!v || !Array.isArray(v.apps) || !Array.isArray(v.cidrs) || v.apps.length + v.cidrs.length > 256 ||
+      v.apps.some(p => typeof p !== 'string' || !/^[a-z]:\\/i.test(p) || !/\.exe$/i.test(p) || /[\x00-\x1f]/.test(p)) ||
+      v.cidrs.some(c => typeof c !== 'string' || !isValidIpOrCidr(c))) throw new Error('Invalid firewall exception policy')
+  return { apps: [...new Set(v.apps)], cidrs: [...new Set(v.cidrs)] }
+}
+export async function canonicalizeExceptionAppPath(raw: string): Promise<string> {
+  if (!raw || raw.length > 2048 || /[\x00-\x1f]/.test(raw) || !/\.exe$/i.test(raw)) throw new Error('exception.value must be an executable path')
+  if (process.platform === 'win32') {
+    if (!/^[a-z]:\\/i.test(raw) || !win32.isAbsolute(raw) || raw.slice(2).includes(':') || raw.split(/[\\/]/).includes('..')) throw new Error('exception.value must be a local absolute Windows path')
+  } else if (!isAbsolute(raw)) throw new Error('exception.value must be an absolute path')
+  await access(raw, fsConstants.R_OK)
+  const canonical = await realpath(raw)
+  if (!(await stat(canonical)).isFile() || !/\.exe$/i.test(canonical) || (process.platform === 'win32' && !/^[a-z]:\\/i.test(canonical))) throw new Error('exception.value must be a local readable .exe file')
+  return canonical
+}
+function exceptionRuleNames(policy: FirewallExceptionPolicy): string[] {
+  return [...policy.apps.map(p => 'app:' + p.toLowerCase()), ...policy.cidrs.map(c => 'ip:' + c)].map(value =>
+    `${RULE_PREFIX}-user-${createHash('sha256').update(value).digest('hex').slice(0,24)}`)
+}
+function exceptionPolicyScript(policy: FirewallExceptionPolicy): string {
+  const names = exceptionRuleNames(policy)
+  const rules = [...policy.apps.map((value, i) => ({ name: names[i], program: value, remote: null })),
+    ...policy.cidrs.map((value, i) => ({ name: names[policy.apps.length + i], program: null, remote: value }))]
+  const encoded = Buffer.from(JSON.stringify(rules)).toString('base64')
+  return `
+$ErrorActionPreference='Stop'
+$profiles=@(Get-NetFirewallProfile -Profile Domain,Private,Public -ErrorAction Stop)
+if ($profiles.Count -ne 3 -or @($profiles | Where-Object { [string]$_.DefaultOutboundAction -ne 'Block' }).Count) { throw 'Live update requires verified Block policies' }
+# Only user exceptions are replaced. Core, TUN, Xray and Happ rules stay intact.
+# Removal-first may temporarily narrow an exception, but never opens new traffic
+# before the requested policy has been validated. Never set DefaultOutboundAction.
+Get-NetFirewallRule -DisplayName '${RULE_PREFIX}-user-*' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction Stop
+Get-NetFirewallRule -DisplayName '${RULE_PREFIX}-allow-extra-ip' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction Stop
+$requested=@([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}')) | ConvertFrom-Json)
+foreach ($r in $requested) {
+  $ruleParams=@{DisplayName=$r.name;Direction='Outbound';Action='Allow';Profile='Any';Enabled='True'}
+  if($r.program){$ruleParams.Program=$r.program}else{$ruleParams.RemoteAddress=$r.remote}
+  New-NetFirewallRule @ruleParams -ErrorAction Stop | Out-Null
+  $actual=@(Get-NetFirewallRule -DisplayName $r.name -ErrorAction Stop)
+  if($actual.Count -ne 1 -or [string]$actual[0].Enabled -ne 'True' -or [string]$actual[0].Action -ne 'Allow' -or [string]$actual[0].Direction -ne 'Outbound'){throw 'Exception rule read-back mismatch'}
+  if($r.program){
+    $filter=$actual[0] | Get-NetFirewallApplicationFilter -ErrorAction Stop
+    if([string]$filter.Program -ine [string]$r.program){throw 'Program filter read-back mismatch'}
+  }else{
+    $filter=$actual[0] | Get-NetFirewallAddressFilter -ErrorAction Stop
+    if(@($filter.RemoteAddress).Count -ne 1 -or [string]@($filter.RemoteAddress)[0] -ne [string]$r.remote){throw 'Remote filter read-back mismatch'}
+  }
+}
+$actualNames=@(Get-NetFirewallRule -DisplayName '${RULE_PREFIX}-user-*' -ErrorAction SilentlyContinue | ForEach-Object { [string]$_.DisplayName })
+if($actualNames.Count -ne $requested.Count -or @($actualNames | Where-Object { $_ -notin @($requested.name) }).Count){throw 'Exception set read-back mismatch'}
+Write-Output 'EXCEPTIONS_VERIFIED'
+`
+}
+export function updateKillSwitchExceptions(apps: string[], cidrs: string[], strictMode?: boolean): Promise<FirewallKillSwitchResult> {
+  return serializeFirewall(() => updateExceptionsUnlocked(apps, cidrs, strictMode))
+}
+async function updateExceptionsUnlocked(apps: string[], cidrs: string[], strictMode?: boolean): Promise<FirewallKillSwitchResult> {
+  const previous = await readManifest()
+  if (!previous || manifestReadFailure || previous.phase !== 'active') return { success: false, state: 'unknown', message: 'Live exceptions require a trusted active firewall transaction' }
+  const policy = validateFirewallExceptionPolicy({ apps: await Promise.all(apps.map(canonicalizeExceptionAppPath)), cidrs })
+  const old = previous.exceptionPolicy ?? { apps: [], cidrs: [] }
+  // Original baseline and core rule names are never replaced by a live update.
+  await writeManifest({ ...previous, pendingExceptionPolicy: policy })
+  try {
+    const { stdout } = await ps(exceptionPolicyScript(policy), true, 30000)
+    if (!String(stdout).split(/\r?\n/).includes('EXCEPTIONS_VERIFIED')) throw new Error('Exception verification marker missing')
+    const { pendingExceptionPolicy: _pending, ...committed } = previous
+    await writeManifest({ ...committed, strictMode: strictMode ?? previous.strictMode, exceptionPolicy: policy,
+      ruleNames: [...previous.ruleNames.filter(n => !n.startsWith(`${RULE_PREFIX}-user-`) && n !== `${RULE_PREFIX}-allow-extra-ip`), ...exceptionRuleNames(policy)] })
+    return { success: true, message: 'User exceptions verified; core/upstream protection preserved' }
+  } catch (error) {
+    try {
+      const { stdout } = await ps(exceptionPolicyScript(old), true, 30000)
+      if (!String(stdout).split(/\r?\n/).includes('EXCEPTIONS_VERIFIED')) throw new Error('Exception compensation not verified')
+      await writeManifest(previous)
+    } catch {
+      reportRecoveryWarning('Live-обновление исключений не подтверждено. Core-защита сохранена, но набор исключений требует повторной проверки.')
+      return { success: false, state: 'unknown', message: 'Live exception update and compensation failed; recovery journal retained' }
+    }
+    return { success: false, message: 'Exception update failed; previous exception policy restored', details: String(error) }
+  }
+}
+
 async function snapshotFirewallProfiles(): Promise<SavedProfile[]> {
   const { stdout } = await ps(`$snapshot = @(Get-NetFirewallProfile -Profile Domain,Private,Public -ErrorAction Stop | ForEach-Object {
   [pscustomobject]@{name=[string]$_.Name;defaultOutbound=[string]$_.DefaultOutboundAction}
@@ -378,8 +470,16 @@ async function enableKillSwitchUnlocked(opts: KillSwitchOptions): Promise<Firewa
     return { success: true, message: 'Firewall kill-switch недоступен (не Windows)' }
   }
 
+  if ((opts.extraAllowedRemoteCidrs ?? []).some(c => !isValidIpOrCidr(c))) return { success: false, message: 'Invalid exception IP/CIDR' }
+  if (opts.appExceptionPaths) opts = { ...opts, appExceptionPaths: await Promise.all(opts.appExceptionPaths.map(canonicalizeExceptionAppPath)) }
   const previous = await readManifest()
   if (manifestReadFailure) return { success: false, state: 'unknown', message: 'Recovery manifest is untrusted or invalid; refusing to replace its baseline' }
+  if (previous?.phase === 'active') {
+    if (opts.appExceptionPaths !== undefined || opts.extraAllowedRemoteCidrs !== undefined || opts.strictMode !== undefined) {
+      return updateExceptionsUnlocked(opts.appExceptionPaths ?? previous.exceptionPolicy?.apps ?? [], opts.extraAllowedRemoteCidrs ?? previous.exceptionPolicy?.cidrs ?? [], opts.strictMode)
+    }
+    return { success: true, skipped: true, message: 'Active firewall preserved; use differential exceptions update' }
+  }
   const savedProfiles = previous?.savedProfiles ?? await snapshotFirewallProfiles()
   const prepared: FirewallManifest = {
     schemaVersion: 1, owner: 'VPNTE', operationId: previous?.operationId ?? randomUUID(),
@@ -709,6 +809,11 @@ Write-Output "SAVED:$savedJson"
       message: 'Kill-switch отменён: не удалось надёжно записать recovery manifest',
       details: error?.message || String(error)
     }
+  }
+
+  if (opts.appExceptionPaths !== undefined || opts.extraAllowedRemoteCidrs !== undefined) {
+    const updated = await updateExceptionsUnlocked(opts.appExceptionPaths ?? [], opts.extraAllowedRemoteCidrs ?? [], opts.strictMode)
+    if (!updated.success) return updated
   }
 
   logEvent('info', 'firewall-killswitch', 'kill-switch engaged (DefaultOutboundAction=Block)', {
