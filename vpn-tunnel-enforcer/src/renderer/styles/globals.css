@@ -36,6 +36,8 @@
   --rgb-success: 30 155 60;
   --rgb-warning: 184 114 0;
   --rgb-danger: 198 45 35;
+  /* Distinct operation colour, independent of blue/green/warning states. */
+  --rgb-cancellation: 109 40 217;
 
   /* CSS-ready aliases */
   --color-bg: rgb(var(--rgb-bg));
@@ -52,6 +54,7 @@
   --color-success: rgb(var(--rgb-success));
   --color-warning: rgb(var(--rgb-warning));
   --color-danger: rgb(var(--rgb-danger));
+  --color-cancellation: rgb(var(--rgb-cancellation));
 
   /* Shared radius tokens */
   --radius-sm: 8px;

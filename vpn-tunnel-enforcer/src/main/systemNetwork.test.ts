@@ -70,6 +70,54 @@ beforeEach(() => {
 })
 afterEach(() => Object.defineProperty(process, 'platform', platform))
 describe('trusted typed network baseline', () => {
+  it.skipIf(process.platform !== 'win32')('native restore/read-back handles all registry types in an isolated test subtree', async () => {
+    const manifest = fixture()
+    manifest.values = [
+      { target: 'internet', name: 'ProxyEnable', exists: true, kind: 'DWord', data: 1 },
+      { target: 'internet', name: 'ProxyServer', exists: true, kind: 'String', data: 'fixture' },
+      { target: 'internet', name: 'AutoConfigURL', exists: true, kind: 'QWord', data: '9223372036854775807' },
+      { target: 'internet', name: 'AutoDetect', exists: false, kind: null, data: null },
+      { target: 'environment', name: 'HTTP_PROXY', exists: true, kind: 'ExpandString', data: '%FIXTURE_PROXY%' },
+      { target: 'environment', name: 'HTTPS_PROXY', exists: true, kind: 'MultiString', data: ['first', 'second'] },
+      { target: 'environment', name: 'ALL_PROXY', exists: true, kind: 'String', data: '' },
+      { target: 'environment', name: 'NO_PROXY', exists: false, kind: null, data: null },
+      { target: 'winhttp', name: 'WinHttpSettings', exists: true, kind: 'Binary', data: [0, 1, 255] }
+    ] as any
+    state.manifest = manifest
+    await rollbackTunNetworkBaseline()
+    const captured = state.scripts[0]
+    const helpers = captured.slice(0, captured.indexOf('\nif ([Security.Principal.WindowsIdentity]'))
+    const report = captured.slice(captured.indexOf('$values ='))
+    // All registry targets resolve below this process-owned GUID subtree.
+    // The actual network keys, ProgramData manifests and HKLM are untouched.
+    const script = `$ProgressPreference='SilentlyContinue';${helpers}
+$testRoot='Software\\VPNTE-Recovery-Test-'+[Guid]::NewGuid().ToString('N')
+function Get-BaseKey($target) { return [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($testRoot) }
+try { ${report} }
+finally { [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree($testRoot,$false) }`
+    const stdout = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand',
+      Buffer.from(script, 'utf16le').toString('base64')], { encoding: 'utf8', windowsHide: true, timeout: 10000 })
+    const steps = JSON.parse(stdout.trim())
+    expect(steps).toHaveLength(9)
+    expect(steps.every((step: any) => step.success && step.error === null)).toBe(true)
+  })
+  // AT-03-007 / F-033: execute actual JSON decoding and report construction,
+  // substituting only registry effects. Never run the real Restore-Snapshot.
+  it.skipIf(process.platform !== 'win32').each([null, ...Array.from({ length: 9 }, (_, i) => i)])(
+    'native PowerShell reports nine independent rollback steps (failed step %s)', async failedStep => {
+      state.manifest = fixture()
+      await rollbackTunNetworkBaseline()
+      const productionReport = state.scripts[0].slice(state.scripts[0].indexOf('$values ='))
+      const failedName = failedStep === null ? '' : fixture().values[failedStep].name
+      const script = `$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';function Restore-Snapshot($s) { if ($s.name -eq '${failedName}') { throw 'injected native failure' } }\n${productionReport}`
+      const stdout = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand',
+        Buffer.from(script, 'utf16le').toString('base64')], { encoding: 'utf8', windowsHide: true, timeout: 10000 })
+      const steps = JSON.parse(stdout.trim())
+      expect(steps).toHaveLength(9)
+      expect(steps.map((step: any) => step.name)).toEqual(fixture().values.map(s => `${s.target}/${s.name}`))
+      expect(steps.map((step: any) => step.success)).toEqual(fixture().values.map((_s, i) => i !== failedStep))
+    }
+  )
   it('retains the snapshot and reports native stderr without a huge encoded command', async () => {
     state.manifest = fixture(); state.nativeFailure = true
     const result = await rollbackTunNetworkBaseline()

@@ -573,6 +573,7 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
   })()
 
   const statusColor = (() => {
+    if (cancelling) return 'text-[var(--color-text)]'
     if (connecting || disconnecting || restartingProgress || isServerSwitching) return 'text-[var(--color-warning)]'
     if (isConnected && isProxyActuallyDown) return 'text-[var(--color-warning)]'
     if (isConnected) return 'text-[var(--color-success)]'
@@ -688,7 +689,9 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
         {/* Subtle gradient backdrop inside the card */}
         <div className="absolute inset-0 pointer-events-none opacity-50"
           style={{
-            background: isConnected
+            background: cancelling
+              ? 'radial-gradient(ellipse 60% 60% at 50% 50%, rgb(var(--rgb-cancellation) / 0.16), transparent)'
+              : isConnected
               ? isServerSwitching
                 ? 'radial-gradient(ellipse 60% 60% at 50% 50%, rgb(var(--rgb-warning) / 0.10), transparent)'
                 : 'radial-gradient(ellipse 60% 60% at 50% 50%, rgb(var(--rgb-success) / 0.08), transparent)'
@@ -715,12 +718,14 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
           whileHover={!circleBusy ? { scale: 1.03 } : {}}
           whileTap={!circleBusy ? { scale: 0.97 } : {}}
           aria-label={statusLabel}
-          animate={isServerSwitching ? { scale: [1, 1.025, 1] } : { scale: 1 }}
-          transition={isServerSwitching ? { duration: 1.2, repeat: Infinity, ease: 'easeInOut' } : { duration: 0.2 }}
+          animate={isServerSwitching && !cancelling ? { scale: [1, 1.025, 1] } : { scale: 1 }}
+          transition={isServerSwitching && !cancelling ? { duration: 1.2, repeat: Infinity, ease: 'easeInOut' } : { duration: 0.2 }}
           className={`
             relative w-36 h-36 rounded-full flex items-center justify-center z-10
             transition-all duration-300 ease-out
-            ${isServerSwitching
+            ${cancelling
+              ? 'bg-[var(--color-cancellation)] shadow-[0_0_60px_rgb(var(--rgb-cancellation)/0.4),0_8px_32px_rgba(0,0,0,0.25)]'
+              : isServerSwitching
               ? 'bg-[var(--color-warning)] shadow-[0_0_60px_rgb(var(--rgb-warning)/0.32),0_8px_32px_rgba(0,0,0,0.25)]'
               : isConnected
               ? 'bg-[var(--color-success)] shadow-[0_0_60px_rgb(var(--rgb-success)/0.35),0_8px_32px_rgba(0,0,0,0.25)]'
@@ -729,7 +734,7 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
             ${circleBusy ? 'opacity-80 cursor-wait' : 'cursor-pointer'}
           `}
         >
-          {isServerSwitching && (
+          {isServerSwitching && !cancelling && (
             <>
               <motion.div
                 className="absolute inset-[-10px] rounded-full border border-[var(--color-warning)]/35"
@@ -743,7 +748,7 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
               />
             </>
           )}
-          {isConnected && !isServerSwitching && (
+          {isConnected && !isServerSwitching && !cancelling && (
             <motion.div
               className="absolute inset-0 rounded-full bg-[var(--color-success)]"
               initial={{ scale: 1, opacity: 0.35 }}

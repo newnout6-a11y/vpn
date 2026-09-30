@@ -192,7 +192,9 @@ async function rollbackUnlocked(): Promise<SystemNetworkResult> {
     if (!manifest) return { success: true, skipped: true, message: 'Активный VPNTE network baseline не найден' }
     const { stdout } = await ps(`${REGISTRY_HELPERS}
 if ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne '${manifest.userSid}') { throw 'Baseline user identity mismatch' }
-$values = @(${psJson(manifest.values)})
+# ConvertFrom-Json emits the decoded array as one pipeline object in Windows
+# PowerShell 5.1. An extra @() would nest it and collapse nine steps into one.
+$values = ${psJson(manifest.values)}
 $results = @()
 foreach ($s in $values) {
   try { Restore-Snapshot $s; $results += [pscustomobject]@{name=($s.target+'/'+$s.name);success=$true;error=$null} }

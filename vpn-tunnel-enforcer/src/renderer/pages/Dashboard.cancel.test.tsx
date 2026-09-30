@@ -54,6 +54,9 @@ describe('Dashboard cancellation', () => {
     expect(cancelButton).toBeDisabled()
     expect(cancelButton).toHaveAttribute('aria-busy', 'true')
     expect(cancelButton.querySelector('.animate-spin')).not.toBeNull()
+    const powerButton = screen.getAllByRole('button', { name: 'Отменяем…' }).find(button => button !== cancelButton)!
+    expect(powerButton).toHaveClass('bg-[var(--color-cancellation)]')
+    expect(powerButton).not.toHaveClass('bg-[var(--color-accent)]')
     expect(screen.getByRole('status')).toHaveTextContent('Отменяем…')
     fireEvent.click(cancelButton)
     expect(window.electronAPI.cancelTun).toHaveBeenCalledTimes(1)
@@ -78,6 +81,19 @@ describe('Dashboard cancellation', () => {
     expect(await screen.findByText('Подключение отменено с предупреждениями')).toBeInTheDocument()
     expect(screen.getByText('Recovery not verified')).toBeInTheDocument()
     expect(useAppStore.getState().logs.some(log => log.message.includes('Recovery not verified'))).toBe(true)
+  })
+
+  it('cancellation colour overrides a connected tunnel and disappears after cleanup', async () => {
+    const cancellation = deferred<{ success: boolean }>()
+    vi.mocked(window.electronAPI.cancelTun).mockReturnValue(cancellation.promise)
+    useAppStore.setState({ tunRunning: true, mode: 'hard' })
+    render(<Dashboard />)
+    fireEvent.click(screen.getByRole('button', { name: 'Отменить подключение' }))
+    const powerButton = screen.getAllByRole('button', { name: 'Отменяем…' }).find(button => !button.hasAttribute('aria-busy'))!
+    expect(powerButton).toHaveClass('bg-[var(--color-cancellation)]')
+    expect(powerButton).not.toHaveClass('bg-[var(--color-success)]')
+    await act(async () => cancellation.resolve({ success: true }))
+    expect(screen.getByRole('button', { name: 'Отключено' })).toHaveClass('bg-[var(--color-accent)]')
   })
 
   it.each(['failed result', 'rejected IPC'])('shows %s without claiming the tunnel stopped', async kind => {
