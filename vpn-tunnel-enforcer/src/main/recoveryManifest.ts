@@ -36,6 +36,35 @@ async function runRead(script: string): Promise<string> {
   })
   return String(stdout).replace(/^\uFEFF/, '').trim()
 }
+function programDataTrustCheck(): string {
+  const programData = process.env.ProgramData || 'C:\\ProgramData'
+  return `
+$knownProgramData = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
+if (-not [string]::Equals([IO.Path]::GetFullPath(${quote(programData)}).TrimEnd([char]92),[IO.Path]::GetFullPath($knownProgramData).TrimEnd([char]92),[StringComparison]::OrdinalIgnoreCase)) { throw 'ProgramData environment does not match the Windows known folder' }
+$parent = Get-Item -LiteralPath $knownProgramData -Force -ErrorAction Stop
+if (-not $parent.PSIsContainer -or ($parent.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Untrusted ProgramData path' }
+`
+}
+/** Every read rechecks the known folder, directory ACLs and the artifact.
+ * Bootstrap is needed only when a checked directory is actually absent.
+ * Never retry a rejected ACL/reparse/permission check as "missing" storage.
+ */
+async function runTrustedRead(script: string): Promise<string> {
+  if (process.platform !== 'win32') throw new Error('Trusted recovery storage requires Windows')
+  const root = join(process.env.ProgramData || 'C:\\ProgramData', 'VPNTE')
+  const checked = `${TRUST_CHECK}${programDataTrustCheck()}
+foreach ($dir in @(${quote(root)},${quote(getRecoveryManifestDir())})) {
+  if (-not (Test-Path -LiteralPath $dir -ErrorAction Stop)) { Write-Output 'RECOVERY_STORAGE_MISSING'; return }
+  Assert-TrustedArtifact $dir $true
+}
+${script}`
+  const raw = await runRead(checked)
+  if (raw !== 'RECOVERY_STORAGE_MISSING') return raw
+  await ensureRecoveryManifestDir()
+  const initialized = await runRead(checked)
+  if (initialized === 'RECOVERY_STORAGE_MISSING') throw new Error('Recovery storage disappeared after bootstrap')
+  return initialized
+}
 export async function ensureRecoveryManifestDir(): Promise<void> {
   if (process.platform !== 'win32') throw new Error('Trusted recovery storage requires Windows')
   const programData = process.env.ProgramData || 'C:\\ProgramData'
@@ -43,11 +72,7 @@ export async function ensureRecoveryManifestDir(): Promise<void> {
   // Never recursively reset ACLs or bless pre-existing user-controlled contents.
   // DirectoryInfo.Create(DirectorySecurity) creates new directories with their
   // restrictive DACL in the same operation (Windows PowerShell / .NET Framework).
-  const script = `$ErrorActionPreference='Stop';${TRUST_CHECK}
-$knownProgramData = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
-if (-not [string]::Equals([IO.Path]::GetFullPath(${quote(programData)}).TrimEnd([char]92),[IO.Path]::GetFullPath($knownProgramData).TrimEnd([char]92),[StringComparison]::OrdinalIgnoreCase)) { throw 'ProgramData environment does not match the Windows known folder' }
-$parent = Get-Item -LiteralPath $knownProgramData -Force -ErrorAction Stop
-if (-not $parent.PSIsContainer -or ($parent.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Untrusted ProgramData path' }
+  const script = `$ErrorActionPreference='Stop';${TRUST_CHECK}${programDataTrustCheck()}
 foreach ($dir in @(${quote(root)},${quote(getRecoveryManifestDir())})) {
   if (-not (Test-Path -LiteralPath $dir)) {
     $acl = New-Object Security.AccessControl.DirectorySecurity
@@ -69,13 +94,9 @@ Write-Output 'RECOVERY_STORAGE_VERIFIED'`
 /** Reads and checks directory AND file ACLs before any manifest content is used. */
 export async function readRecoveryManifest<T>(name: string, validate: (value: unknown) => T): Promise<T | null> {
   const target = recoveryManifestPath(name)
-  await ensureRecoveryManifestDir()
   // Even absence is trusted only after checking the containing directories.
   // An attacker-controlled directory must not trigger an Allow fallback.
-  const root = join(process.env.ProgramData || 'C:\\ProgramData', 'VPNTE')
-  const raw = await runRead(`${TRUST_CHECK}
-Assert-TrustedArtifact ${quote(root)} $true
-Assert-TrustedArtifact ${quote(getRecoveryManifestDir())} $true
+  const raw = await runTrustedRead(`
 if (-not (Test-Path -LiteralPath ${quote(target)})) { Write-Output 'RECOVERY_ARTIFACT_ABSENT'; return }
 Assert-TrustedArtifact ${quote(target)} $false
 if ((Get-Item -LiteralPath ${quote(target)}).Length -gt ${MAX_MANIFEST_BYTES}) { throw 'Recovery manifest exceeds limit' }
@@ -111,10 +132,7 @@ export async function writeRecoveryManifest<T>(name: string, value: T, validate:
 }
 export async function readRecoveryArtifact(name: string): Promise<Buffer> {
   const target = recoveryManifestPath(name)
-  await ensureRecoveryManifestDir()
-  const raw = await runRead(`${TRUST_CHECK}
-Assert-TrustedArtifact ${quote(join(process.env.ProgramData || 'C:\\ProgramData', 'VPNTE'))} $true
-Assert-TrustedArtifact ${quote(getRecoveryManifestDir())} $true
+  const raw = await runTrustedRead(`
 Assert-TrustedArtifact ${quote(target)} $false
 if ((Get-Item -LiteralPath ${quote(target)}).Length -gt ${MAX_MANIFEST_BYTES}) { throw 'Recovery artifact exceeds limit' }
 [Convert]::ToBase64String([IO.File]::ReadAllBytes(${quote(target)}))`)
@@ -123,10 +141,7 @@ if ((Get-Item -LiteralPath ${quote(target)}).Length -gt ${MAX_MANIFEST_BYTES}) {
 export async function removeRecoveryManifest(name: string): Promise<void> {
   // Do not follow a replaced parent or delete an artifact from an untrusted tree.
   const target = recoveryManifestPath(name)
-  await ensureRecoveryManifestDir()
-  await runRead(`${TRUST_CHECK}
-Assert-TrustedArtifact ${quote(join(process.env.ProgramData || 'C:\\ProgramData', 'VPNTE'))} $true
-Assert-TrustedArtifact ${quote(getRecoveryManifestDir())} $true
+  await runTrustedRead(`
 if (Test-Path -LiteralPath ${quote(target)}) {
   Assert-TrustedArtifact ${quote(target)} $false
   Remove-Item -LiteralPath ${quote(target)} -Force -ErrorAction Stop

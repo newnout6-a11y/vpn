@@ -122,3 +122,19 @@
 Дополнительный контроль: первый итоговый full run (50.45 s) дал 1495 passed, 10 skipped, 1 timeout в существующем `twitchHlsProbe.test.ts` (5 s). Отдельный повтор этого файла — 14/14 passed (2.94 s). Тест реально вызывает media probe без HTTP fixture; поэтому этот результат не объявлен успешным полным DoD. Выполняется повтор всего набора без параллельного native benchmark. Production-код media probe и timeout теста не менялись.
 
 Итоговый DoD этапа 1: повтор `npm.cmd test -- --reporter=dot --maxWorkers=4` — exit 0, 154 passed / 2 skipped files, 1496 passed / 10 skipped tests, 0 failures (48.80 s). `npm.cmd run typecheck`, coverage (AC 927/927, F 210/210), `node --check scripts/benchmark-windows-probes.mjs`, `git diff --check` — exit 0. Все изменения этого этапа готовы к атомарному коммиту; наблюдённый media-probe timeout оставлен в журнале как ограничение существующего теста.
+
+### 2026-10-01 — этап 2: объединённая trusted storage boundary
+
+Этап 1 сохранён в `f029600`, исходная фиксация в `a8c5575`.
+
+`recoveryManifest.ts`: authoritative manifest read, binary artifact read и removal на существующем storage выполняются одним native процессом. Внутри одного запроса каждый раз проверяются Windows known folder, тип/reparse родительского ProgramData, оба защищённых каталога, owner/protected DACL/allow ACE, тип/reparse/owner/DACL самого файла и лимит размера до чтения. Доверие не кэшируется. Bootstrap/elevation запускается только по явному маркеру действительно отсутствующего проверенного каталога; после bootstrap весь запрос повторяется с новыми проверками. Ошибки ACL/permissions/path не превращаются в отсутствие и не запускают «исправление» чужих ACL. Повторное исчезновение после bootstrap даёт ошибку, а не бесконечный retry.
+
+Durable write path (unique wx + fsync + ACL + rename) не изменён. Known-folder prelude выделен в общую функцию для bootstrap и read, чтобы их правила не расходились.
+
+Целевые проверки: `$env:VPNTE_PWSH='powershell.exe'; npm.cmd test -- src/main/recoveryManifestStorage.test.ts --reporter=dot --maxWorkers=4` — 36/36 passed (7.55 s). В том числе native fixture matrix: trusted/file absent, неправильный root/file owner, посторонний directory ACE, parent/file reparse, неверный file type, unprotected DACL, oversize. Файловые cmdlets фиктивные; настоящие ProgramData/ACL не менялись. Bootstrap, повторное исчезновение, смена trust после первого read, binary/remove boundary, fsync/write failures также проверены.
+
+Ожидаемый эффект определяется числом границ: каждый обычный read/remove исключает один cold PowerShell launch и повторные directory ACL checks. Миллисекунды настоящего start/stop после этой правки ещё не измерены.
+
+Дополнительно native matrix расширена: посторонний file ACE, leaf unprotected DACL, directory reparse, несовпадающий ProgramData env. Последний целевой прогон — 40/40 passed (9.79 s). Совместный native прогон recovery storage/boot behavior/boot execution/firewall/systemNetwork до этих четырёх новых сценариев — 5 файлов, 122/122 passed (9.59 s).
+
+Итоговый DoD этапа 2: `npm.cmd test -- --reporter=dot --maxWorkers=4` — exit 0, 154 passed / 2 skipped files, 1515 passed / 10 skipped tests, 0 failures (50.57 s). `npm.cmd run typecheck`, coverage AC 927/927 и F 210/210, `git diff --check` — exit 0. Цель по-прежнему активна; дальнейший приоритет — убрать дублирующий native TUN wait из firewall без расширения helper policy, затем stop/shutdown и Xray/preflight.
