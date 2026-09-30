@@ -466,24 +466,17 @@ finally { if ($key) { $key.Close() } }
 
 async function snapshotDnsRegistryPolicy(): Promise<DnsRegistryPolicySnapshot> {
   const script = `
+$ErrorActionPreference='Stop'
 function Read-RegValue([string]$key, [string]$name, [string]$tag) {
-  $out = & reg query $key /v $name 2>$null
-  if ($LASTEXITCODE -ne 0 -or -not $out) {
-    [PSCustomObject]@{ tag=$tag; exists=$false; type=$null; data=$null }
-    return
-  }
-  $line = @($out) | Where-Object { $_ -match "\\s$name\\s+" } | Select-Object -First 1
-  if (-not $line) {
-    [PSCustomObject]@{ tag=$tag; exists=$false; type=$null; data=$null }
-    return
-  }
-  $parts = $line.Trim() -split '\\s+', 3
-  [PSCustomObject]@{
-    tag=$tag
-    exists=$true
-    type= if ($parts.Length -ge 2) { $parts[1] } else { $null }
-    data= if ($parts.Length -ge 3) { $parts[2] } else { $null }
-  }
+  $registryKey=[Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($key.Substring(5))
+  try {
+    $exists=$registryKey -and @($registryKey.GetValueNames()) -contains $name
+    if (-not $exists) { return [pscustomobject]@{tag=$tag;exists=$false;type=$null;data=$null} }
+    if ($registryKey.GetValueKind($name) -ne [Microsoft.Win32.RegistryValueKind]::DWord) { throw 'DNS policy has unsupported registry type' }
+    $data=[int]$registryKey.GetValue($name)
+    $unsigned=[BitConverter]::ToUInt32([BitConverter]::GetBytes($data),0)
+    return [pscustomobject]@{tag=$tag;exists=$true;type='REG_DWORD';data=('0x'+$unsigned.ToString('x'))}
+  } finally { if($registryKey){$registryKey.Close()} }
 }
 @(
   Read-RegValue 'HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\DNSClient' 'DisableSmartNameResolution' 'smartNameResolution'
@@ -496,6 +489,7 @@ function Read-RegValue([string]$key, [string]$name, [string]$tag) {
     const byTag = new Map<string, any>(list.map((row) => [String(row?.tag || ''), row]))
     const read = (tag: string): RegistryValueSnapshot => {
       const row = byTag.get(tag)
+      if (!row || typeof row.exists !== 'boolean') throw new Error('Incomplete DNS registry snapshot')
       return {
         exists: row?.exists === true,
         type: typeof row?.type === 'string' && row.type ? row.type : undefined,
@@ -507,11 +501,8 @@ function Read-RegValue([string]$key, [string]$name, [string]$tag) {
       parallelAandAAAA: read('parallelAandAAAA')
     }
   } catch (err) {
-    logEvent('warn', 'phys-lockdown', 'DNS registry policy snapshot failed; rollback will delete app policy keys only', err)
-    return {
-      smartNameResolution: { exists: false },
-      parallelAandAAAA: { exists: false }
-    }
+    logEvent('error', 'phys-lockdown', 'DNS registry snapshot failed; refusing mutation without baseline', err)
+    throw new Error('DNS registry baseline could not be verified')
   }
 }
 
