@@ -46,6 +46,7 @@ const MANIFEST_BASENAME = 'latest-physical-adapter-lockdown.json'
 interface AdapterSnapshot {
   // Stable adapter identifier on Windows.
   ifIndex: number
+  interfaceGuid?: string
   alias: string
   description?: string
   // What we found before we touched it. We restore exactly these.
@@ -155,9 +156,25 @@ export function validateLockdownManifest(value: unknown): LockdownManifest {
       !isIP(v.tunDnsIpv4) || !Array.isArray(v.adapters) || v.adapters.length > 256) throw new Error('Invalid lockdown manifest')
   for (const a of v.adapters) {
     if (!a || !Number.isInteger(a.ifIndex) || a.ifIndex <= 0 || typeof a.alias !== 'string' || a.alias.length > 256 ||
-        /[\x00-\x1f]/.test(a.alias) || typeof a.ipv6Enabled !== 'boolean' ||
+        /[\x00-\x1f]/.test(a.alias) || typeof a.ipv6Enabled !== 'boolean' || typeof a.forcedIpv6Off !== 'boolean' ||
+        typeof a.interfaceGuid !== 'string' || !/^\{?[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\}?$/i.test(a.interfaceGuid) ||
+        !['dhcp','static','unknown'].includes(a.ipv4DnsSource) ||
         !Array.isArray(a.ipv4DnsServers) || a.ipv4DnsServers.some((ip: unknown) => typeof ip !== 'string' || !isIP(ip)) ||
         !(a.forcedDnsTo === null || (Array.isArray(a.forcedDnsTo) && a.forcedDnsTo.every((ip: string) => isIP(ip))))) throw new Error('Invalid adapter snapshot')
+  }
+  if (v.transitionAdapters) {
+    for (const [key, values] of Object.entries({
+      teredoType: ['disabled','default','client','enterpriseclient','natclient','server'],
+      sixToFourState: ['disabled','default','enabled'], isatapState: ['disabled','default','enabled']
+    })) {
+      const state = v.transitionAdapters[key]
+      if (state !== null && !values.includes(state)) throw new Error('Invalid transition snapshot')
+    }
+  }
+  if (!v.dnsRegistryPolicy) throw new Error('Missing DNS policy snapshot')
+  for (const key of ['smartNameResolution','parallelAandAAAA']) {
+    const r = v.dnsRegistryPolicy[key]
+    if (!r || typeof r.exists !== 'boolean' || (r.exists && (r.type !== 'REG_DWORD' || typeof r.data !== 'string' || !/^(?:0x[a-f0-9]{1,8}|[0-9]{1,10})$/i.test(r.data) || Number(r.data) > 0xffffffff))) throw new Error('Invalid DNS registry snapshot')
   }
   return v
 }
@@ -313,6 +330,7 @@ foreach ($a in $adapters) {
   )
   $rows += [pscustomobject]@{
     ifIndex      = [int]$a.ifIndex
+    interfaceGuid = [string]$a.InterfaceGuid
     alias        = [string]$a.Name
     description  = [string]$a.InterfaceDescription
     ipv6Enabled  = [bool]($bind6 -and $bind6.Enabled)
@@ -341,6 +359,7 @@ $rows | ConvertTo-Json -Compress -Depth 4
       const isCellularOrTethering = Boolean(row.isCellularOrTethering) || isCellularOrTetheringAdapter(alias, description, dnsServers)
       return {
         ifIndex: Number(row.ifIndex),
+        interfaceGuid: String(row.interfaceGuid || ''),
         alias,
         description,
         ipv6Enabled: Boolean(row.ipv6Enabled),
@@ -423,14 +442,15 @@ function netshState(value: string | null): string | null {
 function netshRestoreLine(tag: string, command: string, value: string | null): string {
   const state = netshState(value)
   if (!state) return `Write-Output '${tag}:unknown'`
-  return `try { ${command}${state} | Out-Null; Write-Output '${tag}:restore' } catch { Write-Output "${tag}_err: $_" }`
+  return `try { ${command}${state} | Out-Null; if ($LASTEXITCODE -ne 0) { throw 'native command failed' }; Write-Output '${tag}:restore' } catch { Write-Output "${tag}_err: $_" }`
 }
 
 function registryRestoreLine(tag: string, key: string, name: string, snapshot?: RegistryValueSnapshot): string {
+  if (!snapshot) return `Write-Output '${tag}_err: missing ownership snapshot'`
   if (snapshot?.exists && snapshot.type && snapshot.data) {
-    return `try { reg add ${psSingleQuote(key)} /v ${psSingleQuote(name)} /t ${psSingleQuote(snapshot.type)} /d ${psSingleQuote(snapshot.data)} /f | Out-Null; Write-Output '${tag}:restore' } catch { Write-Output "${tag}_err: $_" }`
+    return `try { reg add ${psSingleQuote(key)} /v ${psSingleQuote(name)} /t ${psSingleQuote(snapshot.type)} /d ${psSingleQuote(snapshot.data)} /f | Out-Null; if ($LASTEXITCODE -ne 0) { throw 'registry restore failed' }; Write-Output '${tag}:restore' } catch { Write-Output "${tag}_err: $_" }`
   }
-  return `try { reg delete ${psSingleQuote(key)} /v ${psSingleQuote(name)} /f 2>$null | Out-Null; Write-Output '${tag}:delete' } catch { Write-Output "${tag}_err: $_" }`
+  return `try { reg delete ${psSingleQuote(key)} /v ${psSingleQuote(name)} /f 2>$null | Out-Null; if ($LASTEXITCODE -ne 0) { throw 'registry delete unverified' }; Write-Output '${tag}:delete' } catch { Write-Output "${tag}_err: $_" }`
 }
 
 async function snapshotDnsRegistryPolicy(): Promise<DnsRegistryPolicySnapshot> {
@@ -558,14 +578,18 @@ export async function applyPhysicalAdapterLockdown(tunDnsIpv4: string, options: 
   for (let i = 0; i < adapters.length; i++) {
     const a = adapters[i]
     const dnsLine = forceDns
-      ? `try { Set-DnsClientServerAddress -InterfaceAlias ${psSingleQuote(a.alias)} -ServerAddresses ${psSingleQuote(tunDnsIpv4)} -ErrorAction Stop; Write-Output "A${i}_dns:set" } catch { Write-Output "A${i}_dns_err: $_" }`
+      ? `try { Set-DnsClientServerAddress -InterfaceAlias $ownedAdapter.Name -ServerAddresses ${psSingleQuote(tunDnsIpv4)} -ErrorAction Stop; Write-Output "A${i}_dns:set" } catch { Write-Output "A${i}_dns_err: $_" }`
       : `Write-Output "A${i}_dns:skip"`
     const ipv6Line = a.isCellularOrTethering
       ? `Write-Output "A${i}_ipv6:skip"`
-      : `try { Disable-NetAdapterBinding -InterfaceAlias ${psSingleQuote(a.alias)} -ComponentID ms_tcpip6 -ErrorAction Stop; Write-Output "A${i}_ipv6:off" } catch { Write-Output "A${i}_ipv6_err: $_" }`
+      : `try { Disable-NetAdapterBinding -InterfaceAlias $ownedAdapter.Name -ComponentID ms_tcpip6 -ErrorAction Stop; Write-Output "A${i}_ipv6:off" } catch { Write-Output "A${i}_ipv6_err: $_" }`
     combinedScript += `
+$ownedAdapter = @(Get-NetAdapter -ErrorAction Stop | Where-Object { [string]$_.InterfaceGuid -eq ${psSingleQuote(a.interfaceGuid || '')} })
+if ($ownedAdapter.Count -eq 1) {
+  $ownedAdapter = $ownedAdapter[0]
 ${ipv6Line}
 ${dnsLine}
+} else { Write-Output 'A${i}_ipv6_err: ownership mismatch'; Write-Output 'A${i}_dns_err: ownership mismatch' }
 `
   }
 
@@ -661,14 +685,18 @@ export async function rollbackPhysicalAdapterLockdownIfApplied(reason: string, o
     const dnsRestoreLine = !shouldTouchDns
       ? `Write-Output 'A${i}_dns:noop'`
       : (options.resetDnsToDhcp || a.ipv4DnsSource !== 'static')
-        ? `try { Set-DnsClientServerAddress -InterfaceAlias ${psSingleQuote(a.alias)} -ResetServerAddresses -ErrorAction Stop; Write-Output 'A${i}_dns:reset' } catch { Write-Output "A${i}_dns_err: $_" }`
-        : `try { Set-DnsClientServerAddress -InterfaceAlias ${psSingleQuote(a.alias)} -ServerAddresses ${a.ipv4DnsServers.map(psSingleQuote).join(',')} -ErrorAction Stop; Write-Output 'A${i}_dns:restore' } catch { Write-Output "A${i}_dns_err: $_" }`
+        ? `try { Set-DnsClientServerAddress -InterfaceAlias $ownedAdapter.Name -ResetServerAddresses -ErrorAction Stop; Write-Output 'A${i}_dns:reset' } catch { Write-Output "A${i}_dns_err: $_" }`
+        : `try { Set-DnsClientServerAddress -InterfaceAlias $ownedAdapter.Name -ServerAddresses ${a.ipv4DnsServers.map(psSingleQuote).join(',')} -ErrorAction Stop; Write-Output 'A${i}_dns:restore' } catch { Write-Output "A${i}_dns_err: $_" }`
     const ipv6RestoreLine = a.forcedIpv6Off && a.ipv6Enabled
-      ? `try { Enable-NetAdapterBinding -InterfaceAlias ${psSingleQuote(a.alias)} -ComponentID ms_tcpip6 -ErrorAction Stop; Write-Output 'A${i}_ipv6:on' } catch { Write-Output "A${i}_ipv6_err: $_" }`
+      ? `try { Enable-NetAdapterBinding -InterfaceAlias $ownedAdapter.Name -ComponentID ms_tcpip6 -ErrorAction Stop; Write-Output 'A${i}_ipv6:on' } catch { Write-Output "A${i}_ipv6_err: $_" }`
       : `Write-Output 'A${i}_ipv6:noop'`
     combinedScript += `
+$ownedAdapter = @(Get-NetAdapter -ErrorAction Stop | Where-Object { [string]$_.InterfaceGuid -eq ${psSingleQuote(a.interfaceGuid || '')} })
+if ($ownedAdapter.Count -eq 1) {
+  $ownedAdapter = $ownedAdapter[0]
 ${ipv6RestoreLine}
 ${dnsRestoreLine}
+} else { Write-Output 'A${i}_ipv6_err: ownership mismatch'; Write-Output 'A${i}_dns_err: ownership mismatch' }
 `
   }
 

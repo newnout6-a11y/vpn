@@ -139,7 +139,7 @@ try {
     if ($adapterManifest) {
         if (-not $adapterManifest.adapters -or @($adapterManifest.adapters).Count -gt 256) { throw 'Invalid adapter manifest' }
         foreach ($a in $adapterManifest.adapters) {
-            if ($a.ifIndex -le 0 -or $a.alias -isnot [string] -or $a.ipv6Enabled -isnot [bool]) { throw 'Invalid adapter snapshot' }
+            if ($a.ifIndex -le 0 -or $a.alias -isnot [string] -or $a.ipv6Enabled -isnot [bool] -or $a.forcedIpv6Off -isnot [bool] -or $a.interfaceGuid -notmatch '^\{?[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}\}?$') { throw 'Invalid adapter snapshot' }
             foreach ($ip in @($a.ipv4DnsServers) + @($a.forcedDnsTo)) {
                 if ($ip) { $parsedIP = $null; if (-not [Net.IPAddress]::TryParse([string]$ip, [ref]$parsedIP)) { throw 'Invalid DNS snapshot' } }
             }
@@ -151,7 +151,7 @@ try {
 function Get-ManifestAdapter($adapter) {
     if (-not $adapterManifest -or -not $adapterManifest.adapters) { return $null }
     foreach ($entry in @($adapterManifest.adapters)) {
-        if ($entry.ifIndex -eq $adapter.ifIndex -and $entry.alias -eq $adapter.Name) { return $entry }
+        if ([string]$entry.interfaceGuid -eq [string]$adapter.InterfaceGuid) { return $entry }
     }
     return $null
 }
@@ -164,7 +164,7 @@ function Restore-RegValue($key, $name, $snapshot, $tag) {
             return
         }
         if ($snapshot.exists -eq $true) {
-            if (-not $snapshot.type -or $null -eq $snapshot.data) {
+            if ($snapshot.type -ne 'REG_DWORD' -or [string]$snapshot.data -notmatch '^(0x[a-fA-F0-9]{1,8}|[0-9]{1,10})$' -or [double]$snapshot.data -gt 4294967295) {
                 $script:hasWarnings = $true
                 return
             }
@@ -259,21 +259,21 @@ foreach ($a in $adapters) {
 # 4. Transition adapters: restore only known prior state.
 if ($adapterManifest -and $adapterManifest.transitionAdapters) {
     $t = $adapterManifest.transitionAdapters
-    if ($t.teredoType -match '^[a-z]+$') {
+    if ($t.teredoType -in @('disabled','default','client','enterpriseclient','natclient','server')) {
         netsh interface teredo set state type=$($t.teredoType) | Out-Null
         if ($LASTEXITCODE -ne 0) {
             Log "Transition adapters: failed to restore teredo state (exit code $LASTEXITCODE)"
             $hasWarnings = $true
         }
     }
-    if ($t.sixToFourState -match '^[a-z]+$') {
+    if ($t.sixToFourState -in @('disabled','default','enabled')) {
         netsh interface 6to4 set state state=$($t.sixToFourState) | Out-Null
         if ($LASTEXITCODE -ne 0) {
             Log "Transition adapters: failed to restore 6to4 state (exit code $LASTEXITCODE)"
             $hasWarnings = $true
         }
     }
-    if ($t.isatapState -match '^[a-z]+$') {
+    if ($t.isatapState -in @('disabled','default','enabled')) {
         netsh interface isatap set state state=$($t.isatapState) | Out-Null
         if ($LASTEXITCODE -ne 0) {
             Log "Transition adapters: failed to restore isatap state (exit code $LASTEXITCODE)"
