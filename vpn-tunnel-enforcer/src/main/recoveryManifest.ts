@@ -131,6 +131,24 @@ if (Test-Path -LiteralPath ${quote(target)}) {
 }`)
 }
 
+export interface BootRecoveryReport {
+  schemaVersion: 1
+  owner: 'VPNTE'
+  completedAt: number
+  status: 'restored' | 'strict-retained' | 'warnings'
+  messages: Array<{ time: number; message: string }>
+}
+export function validateBootRecoveryReport(value: unknown): BootRecoveryReport {
+  const v = value as BootRecoveryReport
+  if (!v || v.schemaVersion !== 1 || v.owner !== 'VPNTE' || !Number.isSafeInteger(v.completedAt) || v.completedAt <= 0 ||
+      !['restored','strict-retained','warnings'].includes(v.status) || !Array.isArray(v.messages) || v.messages.length > 500 ||
+      v.messages.some(m => !m || !Number.isSafeInteger(m.time) || typeof m.message !== 'string' || m.message.length > 4096)) throw new Error('Invalid Boot Recovery report')
+  return v
+}
+export function readBootRecoveryReport(): Promise<BootRecoveryReport | null> {
+  return readRecoveryManifest('recovery-result.json', validateBootRecoveryReport)
+}
+
 export function validateRecoveryPolicy(value: unknown): { schemaVersion: 1; owner: 'VPNTE'; strictMode: boolean } {
   const v = value as any
   if (!v || v.schemaVersion !== 1 || v.owner !== 'VPNTE' || typeof v.strictMode !== 'boolean') throw new Error('Invalid recovery policy')
