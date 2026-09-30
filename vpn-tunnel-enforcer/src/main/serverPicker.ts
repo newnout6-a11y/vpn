@@ -2594,11 +2594,11 @@ export function registerServerPickerHandlers(): void {
   })
   handleLogged('servers:copy-key', async (event, id: string) => {
     id = requireString(id, 'id', { maxLength: 200 })
-    return withSecretExportConsent(event.sender, 'clipboard', () => {
+    return withSecretExportConsent(event.sender, 'clipboard', async () => {
       const result = exportProfileKey(id)
       if (!result.ok) return result
       // The renderer receives only acknowledgement, not the clipboard secret.
-      return { ok: true as const, ...copySecretToClipboard(result.uri) }
+      return { ok: true as const, ...await copySecretToClipboard(result.uri) }
     })
   })
 

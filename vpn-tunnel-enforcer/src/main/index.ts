@@ -2520,7 +2520,7 @@ app.whenReady().then(async () => {
 async function performShutdownCleanup(reason: string): Promise<void> {
   if (shutdownInProgress) return
   shutdownInProgress = true
-  clearOwnedSecretClipboard()
+  await clearOwnedSecretClipboard()
   logEvent('info', 'app', `shutdown cleanup started: ${reason}`)
 
   // Close any live session as an app-quit BEFORE tunController.stop() emits
