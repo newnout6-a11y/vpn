@@ -1,23 +1,4 @@
 param([switch]$RegisterTask)
-# Registration is used by both the installer and application repair path.
-if ($RegisterTask) {
-    $ErrorActionPreference = 'Stop'
-    $service = New-Object -ComObject 'Schedule.Service'
-    $service.Connect()
-    try { $null = $service.GetFolder('\VPNTE') } catch { $null = $service.GetFolder('\').CreateFolder('VPNTE') }
-    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes("& '" + $PSCommandPath.Replace("'", "''") + "'"))
-    $arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ' + $encoded
-    $action = New-ScheduledTaskAction -Execute "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -Argument $arguments
-    $trigger = New-ScheduledTaskTrigger -AtStartup
-    $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-    Register-ScheduledTask -TaskName 'BootRecoveryTask' -TaskPath '\VPNTE\' -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
-    $task = Get-ScheduledTask -TaskName 'BootRecoveryTask' -TaskPath '\VPNTE\' -ErrorAction Stop
-    if ($task.Principal.UserId -notin @('SYSTEM','S-1-5-18') -or $task.Actions.Arguments -ne $arguments) { throw 'Recovery task read-back mismatch' }
-    Unregister-ScheduledTask -TaskName 'VPNTE Boot Recovery' -Confirm:$false -ErrorAction SilentlyContinue
-    Write-Output 'RECOVERY_TASK_VERIFIED'
-    exit 0
-}
-
 # VPN Tunnel Enforcer — Boot-time Network Recovery
 # Runs via scheduled task at system startup (before user logon).
 # Recovers from a BSOD/crash that left the firewall blocking, DNS pinned,
@@ -26,23 +7,10 @@ if ($RegisterTask) {
 $hasWarnings = $false
 
 $programData = if ($env:ProgramData) { $env:ProgramData } else { 'C:\ProgramData' }
-$logDir = Join-Path $programData 'VPNTE\manifests'
-if (-not (Test-Path $logDir)) {
-    try { New-Item -Path $logDir -ItemType Directory -Force | Out-Null } catch {}
-}
-$logFile = Join-Path $logDir 'recovery.log'
-if (-not (Test-Path (Split-Path $logFile -Parent))) {
-    $logFile = Join-Path $env:TEMP 'vpnte-recovery.log'
-}
-
+$script:recoveryMessages = @()
 function Log([string]$msg) {
-    $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-    try {
-        "$ts $msg" | Out-File $logFile -Append -Encoding UTF8
-    } catch {}
+    $script:recoveryMessages += [pscustomobject]@{ time=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds(); message=$msg }
 }
-
-Log "=== Boot-time recovery started ==="
 
 # ACL checks apply to the parent, directory AND each file, with reparse points rejected.
 $trustedManifestDir = Join-Path $programData 'VPNTE\manifests'
@@ -56,6 +24,49 @@ function Assert-TrustedArtifact($path, $directory) {
         if ($rule.AccessControlType -eq 'Allow' -and $allowed -notcontains $rule.IdentityReference.Value) { throw 'Untrusted recovery ACE' }
     }
 }
+function Initialize-RecoveryStorage {
+    $parent = Get-Item -LiteralPath $programData -Force -ErrorAction Stop
+    if (-not $parent.PSIsContainer -or ($parent.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Untrusted ProgramData path' }
+    foreach ($dir in @((Join-Path $programData 'VPNTE'), $trustedManifestDir)) {
+        if (-not (Test-Path -LiteralPath $dir)) {
+            $acl = New-Object Security.AccessControl.DirectorySecurity
+            $acl.SetAccessRuleProtection($true,$false)
+            foreach ($sid in @('S-1-5-18','S-1-5-32-544')) {
+                $id = New-Object Security.Principal.SecurityIdentifier($sid)
+                $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($id,'FullControl','ContainerInherit,ObjectInherit','None','Allow')))
+            }
+            $acl.SetOwner((New-Object Security.Principal.SecurityIdentifier('S-1-5-32-544')))
+            $info = New-Object IO.DirectoryInfo($dir)
+            $info.Create($acl)
+        }
+        Assert-TrustedArtifact $dir $true
+    }
+}
+function Write-RecoveryReport([string]$status) {
+    Assert-TrustedArtifact (Join-Path $programData 'VPNTE') $true
+    Assert-TrustedArtifact $trustedManifestDir $true
+    $target = Join-Path $trustedManifestDir 'recovery-result.json'
+    if (Test-Path -LiteralPath $target) { Assert-TrustedArtifact $target $false }
+    $temporary = Join-Path $trustedManifestDir ('tmp-' + [Guid]::NewGuid().ToString())
+    $report = [pscustomobject]@{schemaVersion=1;owner='VPNTE';completedAt=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds();status=$status;messages=@($script:recoveryMessages | Select-Object -Last 500)}
+    $bytes = [Text.Encoding]::UTF8.GetBytes(($report | ConvertTo-Json -Depth 6 -Compress))
+    try {
+        $file = New-Object IO.FileStream($temporary,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+        try { $file.Write($bytes,0,$bytes.Length); $file.Flush($true) } finally { $file.Dispose() }
+        $acl = New-Object Security.AccessControl.FileSecurity
+        $acl.SetAccessRuleProtection($true,$false)
+        foreach ($sid in @('S-1-5-18','S-1-5-32-544')) {
+            $id = New-Object Security.Principal.SecurityIdentifier($sid)
+            $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($id,'FullControl','Allow')))
+        }
+        $acl.SetOwner((New-Object Security.Principal.SecurityIdentifier('S-1-5-32-544')))
+        Set-Acl -LiteralPath $temporary -AclObject $acl -ErrorAction Stop
+        Assert-TrustedArtifact $temporary $false
+        if (Test-Path -LiteralPath $target) { [IO.File]::Replace($temporary,$target,$null) }
+        else { [IO.File]::Move($temporary,$target) }
+    } finally { if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force -ErrorAction Stop } }
+}
+
 function Read-TrustedManifest($name) {
     $path = Join-Path $trustedManifestDir $name
     if (-not (Test-Path -LiteralPath $path)) { return $null }
@@ -65,6 +76,26 @@ function Read-TrustedManifest($name) {
     if ($value.schemaVersion -ne 1 -or $value.owner -ne 'VPNTE') { throw 'Unsupported recovery manifest schema' }
     return $value
 }
+# Registration is used by both the installer and application repair path.
+if ($RegisterTask) {
+    $ErrorActionPreference = 'Stop'
+    Initialize-RecoveryStorage
+    $service = New-Object -ComObject 'Schedule.Service'
+    $service.Connect()
+    try { $null = $service.GetFolder('\VPNTE') } catch { $null = $service.GetFolder('\').CreateFolder('VPNTE') }
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes("& '" + $PSCommandPath.Replace("'", "''") + "'"))
+    $arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ' + $encoded
+    $action = New-ScheduledTaskAction -Execute "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -Argument $arguments
+    $trigger = New-ScheduledTaskTrigger -AtStartup
+    $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+    Register-ScheduledTask -TaskName 'BootRecoveryTask' -TaskPath '\VPNTE\' -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
+    $task = Get-ScheduledTask -TaskName 'BootRecoveryTask' -TaskPath '\VPNTE\' -ErrorAction Stop
+    if ($task.Principal.UserId -notin @('SYSTEM','S-1-5-18') -or $task.Principal.RunLevel -ne 'Highest' -or @($task.Actions).Count -ne 1 -or $task.Actions.Execute -ne $action.Execute -or $task.Actions.Arguments -ne $arguments -or @($task.Triggers).Count -ne 1 -or $task.Triggers[0].CimClass.CimClassName -ne 'MSFT_TaskBootTrigger') { throw 'Recovery task read-back mismatch' }
+    Unregister-ScheduledTask -TaskName 'VPNTE Boot Recovery' -Confirm:$false -ErrorAction SilentlyContinue
+    Write-Output 'RECOVERY_TASK_VERIFIED'
+    exit 0
+}
+
 try {
     Assert-TrustedArtifact (Join-Path $programData 'VPNTE') $true
     Assert-TrustedArtifact $trustedManifestDir $true
@@ -97,6 +128,7 @@ if ($strictRequired) {
     # No Allow rules or adapter/DNS cleanup may turn strict protection into fail-open.
     Set-NetFirewallProfile -Profile Domain,Private,Public -DefaultOutboundAction Block -ErrorAction Stop
     Log 'Strict protection retained until explicit user action'
+    Write-RecoveryReport 'strict-retained'
     exit 0
 }
 $candidatePaths = @((Join-Path $trustedManifestDir 'latest-physical-adapter-lockdown.json'))
@@ -119,7 +151,7 @@ try {
 function Get-ManifestAdapter($adapter) {
     if (-not $adapterManifest -or -not $adapterManifest.adapters) { return $null }
     foreach ($entry in @($adapterManifest.adapters)) {
-        if ($entry.ifIndex -eq $adapter.ifIndex -or $entry.alias -eq $adapter.Name) { return $entry }
+        if ($entry.ifIndex -eq $adapter.ifIndex -and $entry.alias -eq $adapter.Name) { return $entry }
     }
     return $null
 }
@@ -211,14 +243,6 @@ foreach ($a in $adapters) {
                 $hasWarnings = $true
             }
         }
-    } elseif (-not $adapterManifest -and ($dns | Where-Object { $vpnteDns -contains $_ })) {
-        Log "DNS: resetting orphaned DNS on $($a.Name) without manifest (was: $($dns -join ','))"
-        try {
-            Set-DnsClientServerAddress -InterfaceAlias $a.Name -ResetServerAddresses -ErrorAction Stop
-        } catch {
-            Log "DNS: failed to reset orphaned DNS on $($a.Name) ($_)"
-            $hasWarnings = $true
-        }
     }
     # 3. IPv6: re-enable only when the manifest says VPNTE disabled it.
     if ($manifestAdapter -and $manifestAdapter.forcedIpv6Off -eq $true -and $manifestAdapter.ipv6Enabled -eq $true) {
@@ -263,18 +287,6 @@ if ($adapterManifest -and $adapterManifest.transitionAdapters) {
 if ($adapterManifest -and $adapterManifest.dnsRegistryPolicy) {
     Restore-RegValue "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient" "DisableSmartNameResolution" $adapterManifest.dnsRegistryPolicy.smartNameResolution "DisableSmartNameResolution"
     Restore-RegValue "HKLM\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters" "DisableParallelAandAAAA" $adapterManifest.dnsRegistryPolicy.parallelAandAAAA "DisableParallelAandAAAA"
-} elseif ($vpnteRules -gt 0) {
-    $del1 = reg delete "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient" /v DisableSmartNameResolution /f 2>&1
-    if ($LASTEXITCODE -ne 0 -and $del1 -notmatch 'unable to find|не удается найти') {
-        Log "Registry: failed to remove DisableSmartNameResolution ($del1)"
-        $hasWarnings = $true
-    }
-    $del2 = reg delete "HKLM\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters" /v DisableParallelAandAAAA /f 2>&1
-    if ($LASTEXITCODE -ne 0 -and $del2 -notmatch 'unable to find|не удается найти') {
-        Log "Registry: failed to remove DisableParallelAandAAAA ($del2)"
-        $hasWarnings = $true
-    }
-    Log "Registry: VPNTE DNS policy keys removed without manifest (orphaned VPNTE rules detected)"
 } else {
     Log "Registry: preserved DNS policy keys (no manifest and no orphaned VPNTE rules detected)"
 }
@@ -287,49 +299,21 @@ try {
     Log "DNS cache: flush warning ($_)"
 }
 
-# 7. Env proxy vars: remove only orphaned local/VPNTE proxy settings, preserving custom/corporate proxies
-function Clean-VpnteProxyEnv($envPath) {
-    $regTarget = $envPath -replace '^Registry::', ''
-    if ($regTarget -match '^[A-Za-z0-9_]+:') {
-        $regTarget = $regTarget -replace ':', ''
+# User registry recovery is deferred to the owning user context; SYSTEM never
+# guesses a user SID or wipes environment values by matching their contents.
+try {
+    $baseline = Read-TrustedManifest 'latest-tun-network-baseline.json'
+    if ($baseline) {
+        $hasWarnings = $true
+        Log 'Network baseline retained for verified recovery in its owning user context'
     }
-    $proxyKeys = @('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy')
-    foreach ($key in $proxyKeys) {
-        $val = (Get-ItemProperty -Path $envPath -Name $key -ErrorAction SilentlyContinue).$key
-        if ($val -and ($val -match '^(https?|socks5h?)://(127\.0\.0\.1|localhost)(:\d+)?/?$')) {
-            Log "Env: removing orphaned VPNTE $key=$val from $envPath"
-            $delRes = reg delete $regTarget /v $key /f 2>&1
-            if ($LASTEXITCODE -ne 0 -and $delRes -notmatch 'unable to find|не удается найти') {
-                Log "Env: failed to remove $key from $regTarget ($delRes)"
-                $script:hasWarnings = $true
-            }
-        } elseif ($val) {
-            Log "Env: preserving non-VPNTE $key=$val in $envPath"
-        }
-    }
-    $noProxyKeys = @('NO_PROXY', 'no_proxy')
-    foreach ($key in $noProxyKeys) {
-        $val = (Get-ItemProperty -Path $envPath -Name $key -ErrorAction SilentlyContinue).$key
-        if ($val -and ($val -eq 'localhost,127.0.0.1,::1')) {
-            Log "Env: removing VPNTE default $key=$val from $envPath"
-            $delRes = reg delete $regTarget /v $key /f 2>&1
-            if ($LASTEXITCODE -ne 0 -and $delRes -notmatch 'unable to find|не удается найти') {
-                Log "Env: failed to remove $key from $regTarget ($delRes)"
-                $script:hasWarnings = $true
-            }
-        } elseif ($val) {
-            Log "Env: preserving non-VPNTE $key=$val in $envPath"
-        }
-    }
-}
-
-# User environment recovery requires an exact ownership snapshot; broad HKEY_USERS cleanup is intentionally disabled.
+} catch { $hasWarnings = $true; Log 'SECURITY: rejected network baseline' }
 
 # 8. Remove only the exact recorded VPNTE adapter (stable GUID + driver + subnet).
 try {
     $tunOwner = Read-TrustedManifest 'tun-owner.json'
     if ($tunOwner) {
-        if ($tunOwner.interfaceGuid -notmatch '^\{?[a-fA-F0-9-]{36}\}?$') { throw 'Invalid TUN ownership GUID' }
+        if ($tunOwner.interfaceGuid -notmatch '^\{?[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}\}?$') { throw 'Invalid TUN ownership GUID' }
         $staleTuns = @(Get-NetAdapter -ErrorAction Stop | Where-Object {
             [string]$_.InterfaceGuid -eq $tunOwner.interfaceGuid -and $_.InterfaceDescription -match 'Wintun'
         })
@@ -368,3 +352,6 @@ if ($hasWarnings) {
 } else {
     Log "=== Boot-time recovery complete ==="
 }
+
+Write-RecoveryReport $(if ($hasWarnings -or $script:hasWarnings) { 'warnings' } else { 'restored' })
+if ($hasWarnings -or $script:hasWarnings) { exit 1 }
