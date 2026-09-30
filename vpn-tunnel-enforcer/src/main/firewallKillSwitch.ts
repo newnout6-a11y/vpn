@@ -8,7 +8,7 @@ import { execElevated } from './admin'
 import { execElevatedPs, isElevatedPsHelperRunning } from './elevatedPsHelper'
 import { logEvent } from './appLogger'
 import { randomUUID } from 'crypto'
-import { getRecoveryManifestDir, recoveryManifestPath, readRecoveryManifest, writeRecoveryManifest, writeRecoveryArtifact, removeRecoveryManifest } from './recoveryManifest'
+import { getRecoveryManifestDir, recoveryManifestPath, readRecoveryManifest, writeRecoveryManifest, writeRecoveryArtifact, removeRecoveryManifest, strictRecoveryRequired } from './recoveryManifest'
 import { TUN_ADAPTER_ALIAS, TUN_IPV4_NETWORK_CIDR, getTunAdapterAlias } from './tunAdapter'
 
 const execFile = promisify(execFileCb)
@@ -839,9 +839,13 @@ async function probeFirewallForOurRules(): Promise<boolean> {
 export async function recoverStaleKillSwitch(isSingboxRunning: () => Promise<boolean>): Promise<void> {
   if (process.platform !== 'win32') return
   const manifest = await readManifest()
+  if (manifest?.strictMode || await strictRecoveryRequired()) {
+    logEvent('info', 'firewall-killswitch', 'strict recovery keeps firewall blocked until explicit user action')
+    return
+  }
   const manifestSaysActive = manifest !== null
   const firewallSaysActive = manifestSaysActive || await probeFirewallForOurRules()
-  const stuckBlockDefault = !manifestSaysActive && !firewallSaysActive && await probeForStuckBlockDefault()
+  const stuckBlockDefault = false // A foreign Block policy is not evidence of VPNTE ownership.
   if (!manifestSaysActive && !firewallSaysActive && !stuckBlockDefault) return
   if (await isSingboxRunning()) {
     logEvent(

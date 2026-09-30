@@ -94,3 +94,31 @@ export async function writeRecoveryManifest<T>(name: string, value: T, validate:
 export async function removeRecoveryManifest(name: string): Promise<void> {
   try { await unlink(recoveryManifestPath(name)) } catch (error: any) { if (error?.code !== 'ENOENT') throw error }
 }
+
+export function validateRecoveryPolicy(value: unknown): { schemaVersion: 1; owner: 'VPNTE'; strictMode: boolean } {
+  const v = value as any
+  if (!v || v.schemaVersion !== 1 || v.owner !== 'VPNTE' || typeof v.strictMode !== 'boolean') throw new Error('Invalid recovery policy')
+  return { schemaVersion: 1, owner: 'VPNTE', strictMode: v.strictMode }
+}
+export async function persistRecoveryPolicy(strictMode: boolean): Promise<void> {
+  await writeRecoveryManifest('recovery-policy.json', { schemaVersion: 1, owner: 'VPNTE', strictMode }, validateRecoveryPolicy)
+}
+export async function strictRecoveryRequired(): Promise<boolean> {
+  try { return (await readRecoveryManifest('recovery-policy.json', validateRecoveryPolicy))?.strictMode === true }
+  catch { return true } // An unreadable strict policy must never permit fail-open recovery.
+}
+export async function recordOwnedTunAdapter(alias: string): Promise<void> {
+  if (process.platform !== 'win32') return
+  const raw = await runRead(`$adapter = Get-NetAdapter -Name ${quote(alias)} -ErrorAction Stop
+if ($adapter.InterfaceDescription -notmatch 'Wintun') { throw 'VPNTE TUN driver identity mismatch' }
+$ip = Get-NetIPAddress -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4 -ErrorAction Stop | Where-Object { $_.IPAddress -eq '192.168.250.253' -and $_.PrefixLength -eq 30 }
+if (-not $ip) { throw 'VPNTE TUN address identity mismatch' }
+[pscustomobject]@{schemaVersion=1;owner='VPNTE';alias=[string]$adapter.Name;interfaceGuid=[string]$adapter.InterfaceGuid} | ConvertTo-Json -Compress`)
+  const value = JSON.parse(raw)
+  const validate = (v: any) => {
+    if (!v || v.schemaVersion !== 1 || v.owner !== 'VPNTE' || v.alias !== alias ||
+      !/^\{?[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\}?$/i.test(v.interfaceGuid)) throw new Error('Invalid TUN ownership snapshot')
+    return v
+  }
+  await writeRecoveryManifest('tun-owner.json', value, validate)
+}

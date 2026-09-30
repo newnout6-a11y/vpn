@@ -1,3 +1,4 @@
+import { persistRecoveryPolicy } from './recoveryManifest'
 /**
  * Granular Kill-Switch Service
  *
@@ -155,6 +156,7 @@ async function engageKillSwitch(reason: string): Promise<boolean> {
 
   const result = await enableKillSwitch({
     singboxExePath,
+    strictMode: currentLevel === 'strict',
     proxyOwnerProgramPaths: appExceptions.length > 0 ? appExceptions : undefined,
     extraAllowedRemoteCidrs: ipExceptions.length > 0 ? ipExceptions : undefined
   })
@@ -253,7 +255,7 @@ export const granularKillSwitch = {
     try {
       const legacyEnabled = settingsStore.get().firewallKillSwitch
       const granularEnabled = currentLevel !== 'off'
-      if (legacyEnabled !== granularEnabled) {
+      if (currentLevel !== 'strict' && legacyEnabled !== granularEnabled) {
         currentLevel = legacyEnabled ? 'standard' : 'off'
         store.set('killSwitchLevel', currentLevel)
         logEvent('info', 'granular-kill-switch', 'synced level from legacy setting', {
@@ -308,6 +310,7 @@ export const granularKillSwitch = {
       throw new Error('Cannot enable kill-switch before sing-box path is initialized')
     }
     const previousLevel = currentLevel
+    if (process.platform === 'win32') await persistRecoveryPolicy(level === 'strict')
     currentLevel = level
     store.set('killSwitchLevel', level)
 
@@ -323,6 +326,7 @@ export const granularKillSwitch = {
     try {
       await applyPolicy()
     } catch (err) {
+      if (process.platform === 'win32') await persistRecoveryPolicy(previousLevel === 'strict')
       currentLevel = previousLevel
       store.set('killSwitchLevel', previousLevel)
       try {

@@ -1,3 +1,5 @@
+import { recoveryManifestPath, readRecoveryManifest, writeRecoveryManifest, removeRecoveryManifest } from './recoveryManifest'
+import { isIP } from 'net'
 /**
  * Hard lockdown of the physical adapter while TUN is up.
  *
@@ -130,9 +132,9 @@ function getProgramDataPath(): string {
 }
 
 export function getLockdownManifestPaths(): { programData: string; userData: string } {
-  const programDataDir = join(getProgramDataPath(), 'VPN-Tunnel-Enforcer')
+  const programDataDir = recoveryManifestPath(MANIFEST_BASENAME)
   return {
-    programData: join(programDataDir, MANIFEST_BASENAME),
+    programData: programDataDir,
     userData: join(app.getPath('userData'), MANIFEST_BASENAME)
   }
 }
@@ -145,21 +147,20 @@ function programDataManifestPath(): string {
   return getLockdownManifestPaths().programData
 }
 
-async function readManifest(): Promise<LockdownManifest | null> {
-  // ProgramData is authoritative. The userData copy is diagnostic only and
-  // must never drive elevated rollback.
-  const paths = [programDataManifestPath()]
-  for (const path of paths) {
-    try {
-      if (existsSync(path)) {
-        const raw = await readFile(path, 'utf-8')
-        return JSON.parse(raw) as LockdownManifest
-      }
-    } catch {
-      // continue to next path
-    }
+export function validateLockdownManifest(value: unknown): LockdownManifest {
+  const v = value as any
+  if (!v || v.schemaVersion !== 1 || v.owner !== 'VPNTE' || !Number.isSafeInteger(v.appliedAt) ||
+      !isIP(v.tunDnsIpv4) || !Array.isArray(v.adapters) || v.adapters.length > 256) throw new Error('Invalid lockdown manifest')
+  for (const a of v.adapters) {
+    if (!a || !Number.isInteger(a.ifIndex) || a.ifIndex <= 0 || typeof a.alias !== 'string' || a.alias.length > 256 ||
+        /[\x00-\x1f]/.test(a.alias) || typeof a.ipv6Enabled !== 'boolean' ||
+        !Array.isArray(a.ipv4DnsServers) || a.ipv4DnsServers.some((ip: unknown) => typeof ip !== 'string' || !isIP(ip)) ||
+        !(a.forcedDnsTo === null || (Array.isArray(a.forcedDnsTo) && a.forcedDnsTo.every((ip: string) => isIP(ip))))) throw new Error('Invalid adapter snapshot')
   }
-  return null
+  return v
+}
+async function readManifest(): Promise<LockdownManifest | null> {
+  return readRecoveryManifest(MANIFEST_BASENAME, validateLockdownManifest)
 }
 
 function sanitizeDnsServers(values: unknown): string[] {
@@ -186,45 +187,14 @@ function summarizeDnsSources(adapters: AdapterSnapshot[]): PhysicalAdapterDnsSou
 }
 
 async function writeManifest(m: LockdownManifest): Promise<void> {
-  const payload = JSON.stringify(m, null, 2)
-
-  // 1. Write to userData
-  try {
-    const userTarget = manifestPath()
-    const userTmp = userTarget + '.tmp'
-    await writeFile(userTmp, payload, 'utf-8')
-    await rename(userTmp, userTarget)
-  } catch (err) {
-    logEvent('warn', 'phys-lockdown', 'writing userData manifest failed', err)
-  }
-
-  // 2. Write to ProgramData for cross-session & SYSTEM boot recovery
-  try {
-    const pdTarget = programDataManifestPath()
-    const pdDir = join(getProgramDataPath(), 'VPN-Tunnel-Enforcer')
-    await mkdir(pdDir, { recursive: true })
-    const acl = await ensureElevatedRuntimeDirHardened(pdDir, 'recovery-manifest')
-    if (!acl.hardened && !acl.skipped) {
-      throw new Error(`ProgramData recovery manifest directory is not trusted: ${acl.message}`)
-    }
-    const pdTmp = pdTarget + '.tmp'
-    await writeFile(pdTmp, payload, 'utf-8')
-    await rename(pdTmp, pdTarget)
-  } catch (err) {
-    logEvent('error', 'phys-lockdown', 'writing trusted ProgramData manifest failed', err)
-    throw err
-  }
+  await writeRecoveryManifest(MANIFEST_BASENAME, { ...m, schemaVersion: 1, owner: 'VPNTE' }, validateLockdownManifest)
+  // Diagnostic-only copy; it is NEVER consumed by elevated rollback.
+  const target = manifestPath()
+  await writeFile(target, JSON.stringify(m, null, 2), 'utf8').catch(error => logEvent('warn', 'phys-lockdown', 'diagnostic copy failed', error))
 }
-
 async function deleteManifest(): Promise<void> {
-  const paths = [manifestPath(), programDataManifestPath()]
-  for (const path of paths) {
-    try {
-      if (existsSync(path)) await unlink(path)
-    } catch (err) {
-      logEvent('warn', 'phys-lockdown', `manifest delete failed for ${path}`, err)
-    }
-  }
+  await removeRecoveryManifest(MANIFEST_BASENAME)
+  await unlink(manifestPath()).catch((error: any) => { if (error?.code !== 'ENOENT') throw error })
 }
 
 function psSingleQuote(s: string): string {
@@ -599,9 +569,9 @@ ${dnsLine}
 
   // Also include the transition adapters in the same script
   combinedScript += `
-try { netsh interface teredo set state type=disabled | Out-Null; Write-Output 'TRANS_teredo:disabled' } catch { Write-Output "TRANS_teredo_err: $_" }
-try { netsh interface 6to4 set state state=disabled | Out-Null; Write-Output 'TRANS_6to4:disabled' } catch { Write-Output "TRANS_6to4_err: $_" }
-try { netsh interface isatap set state state=disabled | Out-Null; Write-Output 'TRANS_isatap:disabled' } catch { Write-Output "TRANS_isatap_err: $_" }
+${transitionAdapters.teredoType ? `try { netsh interface teredo set state type=disabled | Out-Null; if ($LASTEXITCODE -ne 0) { throw 'native command failed' }; Write-Output 'TRANS_teredo:disabled' } catch { Write-Output "TRANS_teredo_err: $_" }` : "Write-Output 'TRANS_teredo:absent'"}
+${transitionAdapters.sixToFourState ? `try { netsh interface 6to4 set state state=disabled | Out-Null; if ($LASTEXITCODE -ne 0) { throw 'native command failed' }; Write-Output 'TRANS_6to4:disabled' } catch { Write-Output "TRANS_6to4_err: $_" }` : "Write-Output 'TRANS_6to4:absent'"}
+${transitionAdapters.isatapState ? `try { netsh interface isatap set state state=disabled | Out-Null; if ($LASTEXITCODE -ne 0) { throw 'native command failed' }; Write-Output 'TRANS_isatap:disabled' } catch { Write-Output "TRANS_isatap_err: $_" }` : "Write-Output 'TRANS_isatap:absent'"}
 try { reg add "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\DNSClient" /v DisableSmartNameResolution /t REG_DWORD /d 1 /f | Out-Null; Write-Output 'DNS_SMNR:off' } catch { Write-Output "DNS_SMNR_err: $_" }
 try { reg add "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Dnscache\\Parameters" /v DisableParallelAandAAAA /t REG_DWORD /d 1 /f | Out-Null; Write-Output 'DNS_PARALLEL:off' } catch { Write-Output "DNS_PARALLEL_err: $_" }
 try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}

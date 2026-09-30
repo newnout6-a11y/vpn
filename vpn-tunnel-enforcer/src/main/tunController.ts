@@ -1,3 +1,4 @@
+import { recordOwnedTunAdapter, strictRecoveryRequired } from './recoveryManifest'
 import { exec as execCb, execFile as execFileCb } from 'child_process'
 import { writeFile, mkdir, copyFile, access, rename, stat, readFile } from 'fs/promises'
 import { join, dirname } from 'path'
@@ -3261,6 +3262,7 @@ export const tunController = {
               }
               const ks = await enableKillSwitch({
                 singboxExePath: runtime.singbox,
+                strictMode: await strictRecoveryRequired(),
                 proxyOwnerProgramPaths,
                 extraAllowedRemoteCidrs: readGranularKillSwitchIpExceptions(),
                 tunAdapterAlias: getTunAdapterAlias()
@@ -3356,6 +3358,8 @@ export const tunController = {
             })
             return
           }
+
+          await recordOwnedTunAdapter(getTunAdapterAlias())
 
           // Lock in our TUN's InterfaceMetric as soon as the adapter is up.
           await timeAsync('tun-interface-metric-set', () => applyLowTunInterfaceMetric())
