@@ -88,3 +88,24 @@ describe('server profile safeStorage migration (AT-01-001)', () => {
     expect(JSON.stringify(state.stores['server-picker'])).toBe(before)
   })
 })
+
+describe('subscription group encryption (AT-01-001)', () => {
+  beforeEach(() => {
+    vi.resetModules(); state.encryptCalls = 0; state.failOnEncryptCall = 0
+    state.stores = { 'server-groups': { groups: [{ id: 'group', name: 'group', source: 'subscription', sourceUrl: 'https://sub.test/PRIVATE-TOKEN', importedAt: 1, status: 'ok' }] } }
+  })
+  it('migrates group URL secrets atomically and still returns the original model', async () => {
+    const { serverGroupsStore } = await import('./sharedStores')
+    expect(serverGroupsStore.get('groups')[0].sourceUrl).toBe('https://sub.test/PRIVATE-TOKEN')
+    expect(JSON.stringify(state.stores['server-groups'])).not.toContain('PRIVATE-TOKEN')
+    expect(JSON.stringify(state.stores['server-groups'])).toContain('vpnte-safe-storage-v1')
+    serverGroupsStore.set('groups', serverGroupsStore.get('groups'))
+    expect(serverGroupsStore.get('groups')[0].sourceUrl).toBe('https://sub.test/PRIVATE-TOKEN')
+  })
+  it('does not partially replace groups after failed encryption', async () => {
+    const before = JSON.stringify(state.stores['server-groups']); state.failOnEncryptCall = 1
+    const { serverGroupsStore } = await import('./sharedStores')
+    expect(() => serverGroupsStore.get('groups')).toThrow('injected')
+    expect(JSON.stringify(state.stores['server-groups'])).toBe(before)
+  })
+})
