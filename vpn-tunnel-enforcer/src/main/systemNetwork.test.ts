@@ -1,5 +1,6 @@
 // AT-03-003 / AT-03-007 / AT-03-012: baseline fault injection, not Windows L3.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { execFileSync } from 'child_process'
 const state = vi.hoisted(() => ({
   manifest: null as any, failRead: false, failWrite: false, failApply: false,
   failNetsh: false, failNotify: false, failedSteps: [] as number[], scripts: [] as string[],
@@ -34,12 +35,13 @@ function response(command: string) {
   return { stdout: '', stderr: '' }
 }
 vi.mock('./admin', () => ({ execElevated: vi.fn(async (command: string) => response(command)) }))
-vi.mock('child_process', () => {
+vi.mock('child_process', async importOriginal => {
+  const actual = await importOriginal<typeof import('child_process')>()
   const exec = (command: string, _options: unknown, callback: Function) => {
     try { const result = response(command); callback(null, { stdout: result.stdout, stderr: result.stderr }) }
     catch (error) { callback(error) }
   }
-  return { exec, default: { exec } }
+  return { ...actual, exec, default: { ...actual, exec } }
 })
 vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
 vi.mock('./recoveryManifest', () => ({
@@ -123,6 +125,15 @@ describe('trusted typed network baseline', () => {
     expect((await rollbackTunNetworkBaseline()).skipped).toBe(true)
     state.failRead = true
     expect((await rollbackTunNetworkBaseline()).success).toBe(false)
+  })
+  it.skipIf(!process.env.VPNTE_PWSH)('parses all generated baseline scripts with real PowerShell', async () => {
+    await applyTunNetworkBaseline()
+    await rollbackTunNetworkBaseline()
+    for (const script of state.scripts) {
+      const encoded = Buffer.from(script).toString('base64')
+      const command = `$source=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}'));$tokens=$null;$errors=$null;[System.Management.Automation.Language.Parser]::ParseInput($source,[ref]$tokens,[ref]$errors)|Out-Null;if($errors.Count){$errors|Out-String|Write-Output;exit 1}`
+      expect(() => execFileSync(process.env.VPNTE_PWSH!, ['-NoProfile', '-NonInteractive', '-Command', command], { encoding: 'utf8' })).not.toThrow()
+    }
   })
   it('serializes concurrent applications without replacing the first baseline', async () => {
     const results = await Promise.all(Array.from({ length: 50 }, () => applyTunNetworkBaseline()))
