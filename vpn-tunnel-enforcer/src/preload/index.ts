@@ -111,14 +111,16 @@ export interface ElectronAPI {
   serversRemove: (id: string) => Promise<void>
   serversCopyKey: (id: string) => Promise<
     | { ok: true; clearAfterMs: number }
+    | { ok: false; cancelled: true }
     | { ok: false; reason: string; protocol?: string }
   >
   serversExportKey: (id: string) => Promise<
     | { ok: true; uri: string; name: string; protocol: string }
+    | { ok: false; cancelled: true }
     | { ok: false; reason: string; protocol?: string }
   >
   serversExportKeyToFile: (id: string) => Promise<
-    | { ok: true; path: string; uri: string; name: string; protocol: string }
+    | { ok: true; path: string; name: string; protocol: string }
     | { ok: false; cancelled: true }
     | { ok: false; reason: string; protocol?: string; error?: string }
   >

@@ -74,6 +74,9 @@ export function assertSafeIpcPayload(value: unknown): void {
     nodes += 1
     if (nodes > MAX_IPC_NODES) throw new Error('Invalid IPC payload: too many values')
     if (depth > MAX_IPC_DEPTH) throw new Error('Invalid IPC payload: nesting is too deep')
+    if (typeof candidate === 'number' && !Number.isFinite(candidate)) {
+      throw new Error('Invalid IPC payload: number must be finite')
+    }
     if (
       candidate === null ||
       candidate === undefined ||

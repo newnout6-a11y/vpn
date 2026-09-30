@@ -53,6 +53,9 @@ describe('trusted IPC boundary (AT-01-003)', () => {
 })
 
 describe('generic IPC payload envelope (AT-01-004)', () => {
+  it.each([NaN, Infinity, -Infinity])('rejects non-finite numbers before dispatch: %s', value => {
+    expect(() => assertSafeIpcPayload({ nested: [value] })).toThrow(/finite/)
+  })
   it('accepts bounded structured-clone data', () => {
     expect(() => assertSafeIpcPayload([{ id: 'profile-1', options: { enabled: true } }])).not.toThrow()
   })
