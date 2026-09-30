@@ -447,10 +447,21 @@ function netshRestoreLine(tag: string, command: string, value: string | null): s
 
 function registryRestoreLine(tag: string, key: string, name: string, snapshot?: RegistryValueSnapshot): string {
   if (!snapshot) return `Write-Output '${tag}_err: missing ownership snapshot'`
-  if (snapshot?.exists && snapshot.type && snapshot.data) {
-    return `try { reg add ${psSingleQuote(key)} /v ${psSingleQuote(name)} /t ${psSingleQuote(snapshot.type)} /d ${psSingleQuote(snapshot.data)} /f | Out-Null; if ($LASTEXITCODE -ne 0) { throw 'registry restore failed' }; Write-Output '${tag}:restore' } catch { Write-Output "${tag}_err: $_" }`
-  }
-  return `try { reg delete ${psSingleQuote(key)} /v ${psSingleQuote(name)} /f 2>$null | Out-Null; if ($LASTEXITCODE -ne 0) { throw 'registry delete unverified' }; Write-Output '${tag}:delete' } catch { Write-Output "${tag}_err: $_" }`
+  const keyPath = psSingleQuote(key.replace(/^HKLM\\/, ''))
+  const valueName = psSingleQuote(name)
+  const expected = Number(snapshot.data || 0) | 0
+  return `
+$key = $null
+try {
+  $key = [Microsoft.Win32.Registry]::LocalMachine.CreateSubKey(${keyPath})
+  ${snapshot.exists ? `$key.SetValue(${valueName},[int]${expected},[Microsoft.Win32.RegistryValueKind]::DWord)` : `$key.DeleteValue(${valueName},$false)`}
+  $present = @($key.GetValueNames()) -contains ${valueName}
+  if ($present -ne $${snapshot.exists ? 'true' : 'false'}) { throw 'Registry presence read-back mismatch' }
+  ${snapshot.exists ? `if ($key.GetValueKind(${valueName}) -ne [Microsoft.Win32.RegistryValueKind]::DWord -or [int]$key.GetValue(${valueName}) -ne ${expected}) { throw 'Registry value read-back mismatch' }` : ''}
+  Write-Output '${tag}:${snapshot.exists ? 'restore' : 'delete'}'
+} catch { Write-Output "${tag}_err: $_" }
+finally { if ($key) { $key.Close() } }
+`
 }
 
 async function snapshotDnsRegistryPolicy(): Promise<DnsRegistryPolicySnapshot> {
@@ -578,11 +589,11 @@ export async function applyPhysicalAdapterLockdown(tunDnsIpv4: string, options: 
   for (let i = 0; i < adapters.length; i++) {
     const a = adapters[i]
     const dnsLine = forceDns
-      ? `try { Set-DnsClientServerAddress -InterfaceAlias $ownedAdapter.Name -ServerAddresses ${psSingleQuote(tunDnsIpv4)} -ErrorAction Stop; Write-Output "A${i}_dns:set" } catch { Write-Output "A${i}_dns_err: $_" }`
+      ? `try { Set-DnsClientServerAddress -InterfaceAlias $ownedAdapter.Name -ServerAddresses ${psSingleQuote(tunDnsIpv4)} -ErrorAction Stop; if (@((Get-DnsClientServerAddress -InterfaceAlias $ownedAdapter.Name -AddressFamily IPv4 -ErrorAction Stop).ServerAddresses) -join ',' -ne ${psSingleQuote(tunDnsIpv4)}) { throw 'DNS read-back mismatch' }; Write-Output "A${i}_dns:set" } catch { Write-Output "A${i}_dns_err: $_" }`
       : `Write-Output "A${i}_dns:skip"`
     const ipv6Line = a.isCellularOrTethering
       ? `Write-Output "A${i}_ipv6:skip"`
-      : `try { Disable-NetAdapterBinding -InterfaceAlias $ownedAdapter.Name -ComponentID ms_tcpip6 -ErrorAction Stop; Write-Output "A${i}_ipv6:off" } catch { Write-Output "A${i}_ipv6_err: $_" }`
+      : `try { Disable-NetAdapterBinding -InterfaceAlias $ownedAdapter.Name -ComponentID ms_tcpip6 -ErrorAction Stop; if ((Get-NetAdapterBinding -InterfaceAlias $ownedAdapter.Name -ComponentID ms_tcpip6 -ErrorAction Stop).Enabled) { throw 'IPv6 read-back mismatch' }; Write-Output "A${i}_ipv6:off" } catch { Write-Output "A${i}_ipv6_err: $_" }`
     combinedScript += `
 $ownedAdapter = @(Get-NetAdapter -ErrorAction Stop | Where-Object { [string]$_.InterfaceGuid -eq ${psSingleQuote(a.interfaceGuid || '')} })
 if ($ownedAdapter.Count -eq 1) {
@@ -686,9 +697,9 @@ export async function rollbackPhysicalAdapterLockdownIfApplied(reason: string, o
       ? `Write-Output 'A${i}_dns:noop'`
       : (options.resetDnsToDhcp || a.ipv4DnsSource !== 'static')
         ? `try { Set-DnsClientServerAddress -InterfaceAlias $ownedAdapter.Name -ResetServerAddresses -ErrorAction Stop; Write-Output 'A${i}_dns:reset' } catch { Write-Output "A${i}_dns_err: $_" }`
-        : `try { Set-DnsClientServerAddress -InterfaceAlias $ownedAdapter.Name -ServerAddresses ${a.ipv4DnsServers.map(psSingleQuote).join(',')} -ErrorAction Stop; Write-Output 'A${i}_dns:restore' } catch { Write-Output "A${i}_dns_err: $_" }`
+        : `try { Set-DnsClientServerAddress -InterfaceAlias $ownedAdapter.Name -ServerAddresses ${a.ipv4DnsServers.map(psSingleQuote).join(',')} -ErrorAction Stop; if ((@((Get-DnsClientServerAddress -InterfaceAlias $ownedAdapter.Name -AddressFamily IPv4 -ErrorAction Stop).ServerAddresses) -join ',') -ne ${psSingleQuote(a.ipv4DnsServers.join(','))}) { throw 'DNS read-back mismatch' }; Write-Output 'A${i}_dns:restore' } catch { Write-Output "A${i}_dns_err: $_" }`
     const ipv6RestoreLine = a.forcedIpv6Off && a.ipv6Enabled
-      ? `try { Enable-NetAdapterBinding -InterfaceAlias $ownedAdapter.Name -ComponentID ms_tcpip6 -ErrorAction Stop; Write-Output 'A${i}_ipv6:on' } catch { Write-Output "A${i}_ipv6_err: $_" }`
+      ? `try { Enable-NetAdapterBinding -InterfaceAlias $ownedAdapter.Name -ComponentID ms_tcpip6 -ErrorAction Stop; if (-not (Get-NetAdapterBinding -InterfaceAlias $ownedAdapter.Name -ComponentID ms_tcpip6 -ErrorAction Stop).Enabled) { throw 'IPv6 read-back mismatch' }; Write-Output 'A${i}_ipv6:on' } catch { Write-Output "A${i}_ipv6_err: $_" }`
       : `Write-Output 'A${i}_ipv6:noop'`
     combinedScript += `
 $ownedAdapter = @(Get-NetAdapter -ErrorAction Stop | Where-Object { [string]$_.InterfaceGuid -eq ${psSingleQuote(a.interfaceGuid || '')} })

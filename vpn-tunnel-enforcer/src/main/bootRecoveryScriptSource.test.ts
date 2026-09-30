@@ -59,11 +59,13 @@ describe('boot recovery script source regressions', () => {
     expect(script).toContain('Remove-Item $cp -Force -ErrorAction Stop')
   })
 
-  it('propagates failure exit codes from netsh and reg delete to warnings', () => {
+  it('propagates native transition errors and registry read-back failures to warnings', () => {
     const script = scriptSource()
 
     expect(script).toContain('Transition adapters: failed to restore teredo state (exit code $LASTEXITCODE)')
     expect(script).toContain('$hasWarnings = $true')
-    expect(script).toContain('$script:hasWarnings = $true')
+    expect(script).toContain('$script:hasWarnings=$true')
+    expect(script).toContain('Registry presence read-back mismatch')
+    expect(script).toContain('Registry value read-back mismatch')
   })
 })

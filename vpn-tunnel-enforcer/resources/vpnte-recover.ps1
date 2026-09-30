@@ -163,40 +163,30 @@ function Get-ManifestAdapter($adapter) {
     return $null
 }
 
+function Get-RecoveryRegistryKey($keyPath) {
+    return [Microsoft.Win32.Registry]::LocalMachine.CreateSubKey($keyPath)
+}
 function Restore-RegValue($key, $name, $snapshot, $tag) {
+    $registryKey=$null
     try {
-        if (-not $snapshot -or ($snapshot.exists -ne $true -and $snapshot.exists -ne $false)) {
-            $script:hasWarnings = $true
-            Log "Registry: missing snapshot for $tag; preserved current value"
-            return
+        if (-not $snapshot -or $snapshot.exists -isnot [bool]) { throw 'Missing registry ownership snapshot' }
+        $expected=0
+        if ($snapshot.exists) {
+            if ($snapshot.type -ne 'REG_DWORD' -or [string]$snapshot.data -notmatch '^(0x[a-fA-F0-9]{1,8}|[0-9]{1,10})$') { throw 'Invalid DWORD snapshot' }
+            $unsigned = if ([string]$snapshot.data -match '^0x') { [Convert]::ToUInt32(([string]$snapshot.data).Substring(2),16) } else { [uint32]$snapshot.data }
+            $expected=[BitConverter]::ToInt32([BitConverter]::GetBytes($unsigned),0)
         }
-        if ($snapshot.exists -eq $true) {
-            if ($snapshot.type -ne 'REG_DWORD' -or [string]$snapshot.data -notmatch '^(0x[a-fA-F0-9]{1,8}|[0-9]{1,10})$' -or [double]$snapshot.data -gt 4294967295) {
-                $script:hasWarnings = $true
-                return
-            }
-            reg add $key /v $name /t $snapshot.type /d $snapshot.data /f 2>$null | Out-Null
-            if ($LASTEXITCODE -eq 0) {
-                Log "Registry: restored $tag"
-            } else {
-                Log "Registry: failed to restore $tag (exit code $LASTEXITCODE)"
-                $script:hasWarnings = $true
-            }
-        } else {
-            $delOutput = reg delete $key /v $name /f 2>&1
-            if ($LASTEXITCODE -eq 0) {
-                Log "Registry: removed VPNTE-created $tag"
-            } elseif ($delOutput -match 'unable to find|не удается найти') {
-                Log "Registry: VPNTE-created $tag was already absent"
-            } else {
-                Log "Registry: failed to remove VPNTE-created $tag (exit code $LASTEXITCODE, $delOutput)"
-                $script:hasWarnings = $true
-            }
-        }
-    } catch {
-        Log "Registry: failed to restore $tag ($_)"
-        $script:hasWarnings = $true
-    }
+        if ($key -notin @('HKLM\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient','HKLM\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters') -or
+            $name -notin @('DisableSmartNameResolution','DisableParallelAandAAAA')) { throw 'Unapproved DNS registry target' }
+        $registryKey=Get-RecoveryRegistryKey ($key.Substring(5))
+        if ($snapshot.exists) { $registryKey.SetValue($name,$expected,[Microsoft.Win32.RegistryValueKind]::DWord) }
+        else { $registryKey.DeleteValue($name,$false) }
+        $present=@($registryKey.GetValueNames()) -contains $name
+        if ($present -ne $snapshot.exists) { throw 'Registry presence read-back mismatch' }
+        if ($present -and ($registryKey.GetValueKind($name) -ne [Microsoft.Win32.RegistryValueKind]::DWord -or [int]$registryKey.GetValue($name) -ne $expected)) { throw 'Registry value read-back mismatch' }
+        Log "Registry: restored and verified $tag"
+    } catch { $script:hasWarnings=$true; Log "Registry: failed to restore $tag" }
+    finally { if ($registryKey) { $registryKey.Close() } }
 }
 
 # 1. Firewall: restore ONLY proven VPNTE changes, never a foreign Block policy.
