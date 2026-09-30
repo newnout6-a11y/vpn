@@ -1,4 +1,4 @@
-import { open, rename, unlink, lstat } from 'fs/promises'
+import { open, rename, unlink } from 'fs/promises'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
 import { execFile as execFileCb } from 'child_process'
@@ -67,15 +67,18 @@ Write-Output 'RECOVERY_STORAGE_VERIFIED'`
 /** Reads and checks directory AND file ACLs before any manifest content is used. */
 export async function readRecoveryManifest<T>(name: string, validate: (value: unknown) => T): Promise<T | null> {
   const target = recoveryManifestPath(name)
-  // ENOENT is distinct from corrupt/unsupported/untrusted data. Never read AppData.
-  try { await lstat(target) } catch (error: any) { if (error?.code === 'ENOENT') return null; throw error }
+  await ensureRecoveryManifestDir()
+  // Even absence is trusted only after checking the containing directories.
+  // An attacker-controlled directory must not trigger an Allow fallback.
   const root = join(process.env.ProgramData || 'C:\\ProgramData', 'VPNTE')
   const raw = await runRead(`${TRUST_CHECK}
 Assert-TrustedArtifact ${quote(root)} $true
 Assert-TrustedArtifact ${quote(getRecoveryManifestDir())} $true
+if (-not (Test-Path -LiteralPath ${quote(target)})) { Write-Output 'RECOVERY_ARTIFACT_ABSENT'; return }
 Assert-TrustedArtifact ${quote(target)} $false
 if ((Get-Item -LiteralPath ${quote(target)}).Length -gt ${MAX_MANIFEST_BYTES}) { throw 'Recovery manifest exceeds limit' }
 Get-Content -LiteralPath ${quote(target)} -Raw -Encoding UTF8`)
+  if (raw === 'RECOVERY_ARTIFACT_ABSENT') return null
   return validate(JSON.parse(raw))
 }
 /** Unique temp + fsync + admin-owned protected file ACL + rename commit point. */
