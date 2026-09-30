@@ -22,7 +22,10 @@ import { runSystemDiagnostics } from './systemDiagnostics'
 import { stageTrafficForensicsArtifacts } from './trafficForensics'
 import { getTunRuntimeDir } from './tunController'
 import { redactSensitiveConfig, redactSensitiveText, redactSettingsForDiagnostics } from './vpnProfiles'
-import { getTunNetworkBaselineManifestPath } from './systemNetwork'
+import { validateNetworkBackupManifest } from './systemNetwork'
+import { validateFirewallManifest } from './firewallKillSwitch'
+import { validateLockdownManifest } from './physicalAdapterLockdown'
+import { readRecoveryManifest, validateBootRecoveryReport } from './recoveryManifest'
 
 const execFile = promisify(execFileCb)
 const DIAGNOSTICS_SNAPSHOT_RECENT_MS = 2 * 60 * 60 * 1000
@@ -96,6 +99,34 @@ export async function redactStagedDiagnostics(root: string): Promise<void> {
     }
     await writeFile(path, redactSensitiveText(raw), 'utf8')
   }
+}
+
+/** Diagnostics use the same trusted, schema-checked artifacts as recovery.
+ * AppData copies are not authoritative and must never masquerade as baseline.
+ * Redact before writing to the staging directory, not only before compression.
+ */
+export async function stageRecoveryManifests(root: string): Promise<void> {
+  const artifacts = [
+    ['latest-tun-network-baseline.json', 'baseline-manifest.json', validateNetworkBackupManifest],
+    ['firewall.json', 'killswitch-manifest.json', validateFirewallManifest],
+    ['latest-physical-adapter-lockdown.json', 'adapter-lockdown-manifest.json', validateLockdownManifest],
+    ['recovery-result.json', 'boot-recovery-result.json', validateBootRecoveryReport]
+  ] as const
+  const statuses: Array<{ artifact: string; status: string }> = []
+  for (const [name, output, validate] of artifacts) {
+    let value: unknown
+    try {
+      value = await readRecoveryManifest<unknown>(name, validate)
+    } catch {
+      statuses.push({ artifact: name, status: 'unavailable-or-untrusted' })
+      logEvent('warn', 'diag-export', 'trusted recovery artifact unavailable', { artifact: name })
+      continue
+    }
+    if (value === null) { statuses.push({ artifact: name, status: 'absent' }); continue }
+    await writeFile(join(root, output), JSON.stringify(redactSensitiveConfig(value), null, 2), 'utf8')
+    statuses.push({ artifact: name, status: 'trusted-and-redacted' })
+  }
+  await writeFile(join(root, 'recovery-artifacts-status.json'), JSON.stringify(statuses, null, 2), 'utf8')
 }
 
 function snapshotTimeFromName(name: string): number | null {
@@ -175,9 +206,7 @@ export async function exportDiagnosticsZip(): Promise<ExportResult> {
 
     // 6. Baseline manifest (so support can see what we changed in the registry).
     const userData = app.getPath('userData')
-    await copyIfExists(getTunNetworkBaselineManifestPath(), join(stage, 'baseline-manifest.json'))
-    await copyIfExists(join(userData, 'firewall-killswitch', 'manifest.json'), join(stage, 'killswitch-manifest.json'))
-    await copyIfExists(join(userData, 'latest-physical-adapter-lockdown.json'), join(stage, 'adapter-lockdown-manifest.json'))
+    await stageRecoveryManifests(stage)
 
     // 6b. Snapshots dir - every captured network/system snapshot from app
     // start, every TUN start/stop, periodic 60s captures, and any
