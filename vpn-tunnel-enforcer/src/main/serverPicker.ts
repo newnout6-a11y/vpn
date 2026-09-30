@@ -2618,7 +2618,7 @@ export function registerServerPickerHandlers(): void {
     const defaultFileName = `${profile.protocol}-${safeName}.txt`
 
     const choice = await dialog.showSaveDialog({
-      title: 'Сохранить ключ VPN',
+      title: 'Сохранить ключ VPN — файл содержит секрет доступа',
       defaultPath: join(app.getPath('desktop'), defaultFileName),
       filters: [
         { name: 'Текстовый файл', extensions: ['txt'] },
@@ -2679,7 +2679,7 @@ export function registerServerPickerHandlers(): void {
     const defaultFileName = `vpn-keys-${stamp}.txt`
 
     const choice = await dialog.showSaveDialog({
-      title: 'Сохранить все ключи VPN',
+      title: 'Сохранить все ключи VPN — файл содержит пароли/ключи',
       defaultPath: join(app.getPath('desktop'), defaultFileName),
       filters: [
         { name: 'Текстовый файл', extensions: ['txt'] },
@@ -2748,7 +2748,7 @@ export function registerServerPickerHandlers(): void {
     const defaultFileName = `proxy-list-${stamp}.txt`
 
     const choice = await dialog.showSaveDialog({
-      title: 'Сохранить proxy-list',
+      title: 'Сохранить proxy-list — файл может содержать пароли',
       defaultPath: join(app.getPath('desktop'), defaultFileName),
       filters: [
         { name: 'Text file', extensions: ['txt'] },

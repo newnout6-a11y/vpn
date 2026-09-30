@@ -19,8 +19,8 @@
  * - applySelectiveImport(existing, incoming, sections, conflictResolution)
  */
 
-import { ipcMain, dialog, type IpcMainInvokeEvent } from 'electron'
-import { readFileSync, writeFileSync } from 'fs'
+import { ipcMain, dialog, type IpcMainInvokeEvent, type WebContents } from 'electron'
+import { readFileSync, writeFileSync, openSync, closeSync, fstatSync } from 'fs'
 import Store from 'electron-store'
 import { logEvent } from './appLogger'
 import { compactForIpcLog } from './ipcLogging'
@@ -570,7 +570,8 @@ function writeConfigToStores(config: ConfigExportData, sections: ConfigSection[]
 async function exportConfig(): Promise<{ success: boolean; path?: string; error?: string }> {
   try {
     const result = await dialog.showSaveDialog({
-      title: 'Export Configuration',
+      title: 'Экспорт конфигурации — содержит пароли и приватные ключи VPN',
+      buttonLabel: 'Сохранить файл с секретами',
       defaultPath: `vpn-tunnel-enforcer-config-${Date.now()}.json`,
       filters: [{ name: 'JSON Files', extensions: ['json'] }]
     })
@@ -597,14 +598,14 @@ async function exportConfig(): Promise<{ success: boolean; path?: string; error?
 /**
  * Validates an import file and returns available sections and conflicts.
  */
-function importValidate(filePath: string): {
+function importValidate(filePath: string, approvedRaw?: string): {
   success: boolean
   sections: string[]
   conflicts: string[]
   error?: string
 } {
   try {
-    const raw = readFileSync(filePath, 'utf-8')
+    const raw = approvedRaw ?? readFileSync(filePath, 'utf-8')
     let parsed: unknown
 
     try {
@@ -652,10 +653,11 @@ function importValidate(filePath: string): {
 function importApply(
   filePath: string,
   sections: string[],
-  conflictResolution: 'replace' | 'merge'
+  conflictResolution: 'replace' | 'merge',
+  approvedRaw?: string
 ): { success: boolean; error?: string } {
   try {
-    const raw = readFileSync(filePath, 'utf-8')
+    const raw = approvedRaw ?? readFileSync(filePath, 'utf-8')
     const parsed = JSON.parse(raw) as ConfigExportData
 
     // Re-validate
@@ -760,6 +762,14 @@ function handleLogged<T>(
  * Registers all config manager IPC handlers.
  * Should be called once during app initialization.
  */
+interface ApprovedConfigImport { path: string; raw: string; release: () => void }
+const approvedConfigImports = new WeakMap<WebContents, ApprovedConfigImport>()
+function requireApprovedConfigImport(sender: WebContents, path: string): ApprovedConfigImport {
+  const approved = approvedConfigImports.get(sender)
+  if (!approved || approved.path !== path) throw new Error('Configuration import requires this renderer’s native-dialog selection')
+  return approved
+}
+
 export function registerConfigManagerIpcHandlers(): void {
   // config:export — exports all settings and saves to file via dialog
   handleLogged('config:export', async () => {
@@ -767,24 +777,27 @@ export function registerConfigManagerIpcHandlers(): void {
   })
 
   // config:import — validates a file and returns sections/conflicts
-  handleLogged('config:import', async (_event, filePath: string) => {
+  handleLogged('config:import', async (event, filePath: string) => {
     filePath = requireString(filePath, 'filePath', { maxLength: 4096 })
-    return configManager.importValidate(filePath)
+    return configManager.importValidate(filePath, requireApprovedConfigImport(event.sender, filePath).raw)
   })
 
   // config:import-apply — applies selected sections from import file
   handleLogged(
     'config:import-apply',
-    async (_event, filePath: string, sections: string[], conflictResolution: 'replace' | 'merge') => {
+    async (event, filePath: string, sections: string[], conflictResolution: 'replace' | 'merge') => {
       filePath = requireString(filePath, 'filePath', { maxLength: 4096 })
       sections = requireStringArray(sections, 'sections', { maxItems: 32, itemMaxLength: 80 })
       conflictResolution = requireEnum(conflictResolution, 'conflictResolution', ['replace', 'merge'])
-      return configManager.importApply(filePath, sections, conflictResolution)
+      const approved = requireApprovedConfigImport(event.sender, filePath)
+      try { return configManager.importApply(filePath, sections, conflictResolution, approved.raw) }
+      finally { approved.release() }
     }
   )
 
   // config:browse-import — opens file dialog to select a JSON config file
-  ipcMain.handle('config:browse-import', async () => {
+  ipcMain.handle('config:browse-import', async (event) => {
+    approvedConfigImports.get(event.sender)?.release()
     const result = await dialog.showOpenDialog({
       properties: ['openFile'],
       filters: [
@@ -795,6 +808,26 @@ export function registerConfigManagerIpcHandlers(): void {
     if (result.canceled || result.filePaths.length === 0) {
       return null
     }
-    return result.filePaths[0]
+    if (event.sender.isDestroyed?.()) throw new Error('Configuration import renderer closed')
+    approvedConfigImports.get(event.sender)?.release()
+    const path = result.filePaths[0]
+    const fd = openSync(path, 'r')
+    let raw: string
+    try {
+      const info = fstatSync(fd)
+      if (!info.isFile() || info.size > 16 * 1024 * 1024) throw new Error('Configuration import must be a regular file up to 16 MiB')
+      raw = readFileSync(fd, 'utf8')
+    } finally { closeSync(fd) }
+    let timer: ReturnType<typeof setTimeout>
+    const approved: ApprovedConfigImport = { path, raw, release: () => {
+      clearTimeout(timer)
+      event.sender.removeListener?.('destroyed', approved.release)
+      if (approvedConfigImports.get(event.sender) === approved) approvedConfigImports.delete(event.sender)
+      approved.raw = ''
+    } }
+    timer = setTimeout(approved.release, 60_000); timer.unref?.()
+    approvedConfigImports.set(event.sender, approved)
+    event.sender.once?.('destroyed', approved.release)
+    return path
   })
 }
