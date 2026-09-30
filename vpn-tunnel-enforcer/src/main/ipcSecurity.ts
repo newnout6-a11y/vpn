@@ -1,4 +1,5 @@
-import { ipcMain, type IpcMainInvokeEvent } from 'electron'
+import { ipcMain, type IpcMainInvokeEvent, type WebContents } from 'electron'
+import * as electron from 'electron'
 
 const PATCH_MARK = Symbol.for('vpnte.ipc.trusted-boundary.installed')
 const MAX_IPC_DEPTH = 12
@@ -18,15 +19,17 @@ function normalizedOrigin(url: string): string | null {
   }
 }
 
-function isPackagedRendererUrl(url: string): boolean {
-  if (!url.startsWith('file://')) return false
-  try {
-    const parsed = new URL(url)
-    const pathname = decodeURIComponent(parsed.pathname).replace(/\\/g, '/')
-    return pathname.endsWith('/renderer/index.html')
-  } catch {
-    return false
-  }
+const trustedRenderers = new WeakMap<WebContents, { entryUrl: string; devOrigin: string | null }>()
+export function registerTrustedRenderer(sender: WebContents, entryUrl: string, development = false): void {
+  const packaged = 'app' in electron && electron.app?.isPackaged === true
+  const parsed = new URL(entryUrl)
+  if (development && packaged) throw new Error('Packaged IPC cannot trust a development origin')
+  if (development) {
+    if (!['http:','https:'].includes(parsed.protocol) || !['localhost','127.0.0.1','[::1]'].includes(parsed.hostname)) throw new Error('Development renderer must be a loopback HTTP origin')
+  } else if (parsed.protocol !== 'file:' || parsed.host || parsed.search) throw new Error('Packaged renderer must be an exact local entry file')
+  parsed.hash = ''
+  trustedRenderers.set(sender, { entryUrl: parsed.href, devOrigin: development ? parsed.origin : null })
+  sender.once?.('destroyed', () => trustedRenderers.delete(sender))
 }
 
 /**
@@ -41,25 +44,25 @@ function isPackagedRendererUrl(url: string): boolean {
 export function assertTrustedIpcSender(event: IpcMainInvokeEvent): void {
   const frame = event.senderFrame
   if (!frame) {
-    if (process.env.NODE_ENV === 'test') return
+    // Unit harnesses invoking handlers without real WebContents. This escape
+    // cannot be enabled in a packaged app by setting NODE_ENV externally.
+    const packaged = 'app' in electron && electron.app?.isPackaged === true
+    if (process.env.NODE_ENV === 'test' && !packaged) return
     throw new Error('Rejected IPC request: sender frame is unavailable')
   }
-
-  if (frame !== event.sender.mainFrame) {
-    throw new Error('Rejected IPC request: subframes are not trusted')
-  }
-
+  if (frame !== event.sender.mainFrame) throw new Error('Rejected IPC request: subframes are not trusted')
+  const trusted = trustedRenderers.get(event.sender)
+  if (!trusted || event.sender.isDestroyed?.()) throw new Error('Rejected IPC request: unregistered renderer WebContents')
   const frameUrl = frame.url || ''
-  const devUrl = process.env.ELECTRON_RENDERER_URL
-  if (devUrl) {
-    const expectedOrigin = normalizedOrigin(devUrl)
-    const actualOrigin = normalizedOrigin(frameUrl)
-    if (expectedOrigin && actualOrigin === expectedOrigin) return
+  if (trusted.devOrigin) {
+    if (normalizedOrigin(frameUrl) === trusted.devOrigin) return
     throw new Error('Rejected IPC request: untrusted development origin')
   }
-
-  if (isPackagedRendererUrl(frameUrl)) return
-  if (process.env.NODE_ENV === 'test' && (frameUrl === '' || frameUrl === 'about:blank')) return
+  try {
+    const candidate = new URL(frameUrl)
+    candidate.hash = ''
+    if (candidate.protocol === 'file:' && !candidate.host && !candidate.search && candidate.href === trusted.entryUrl) return
+  } catch { /* Malformed URLs fail closed. */ }
   throw new Error('Rejected IPC request: untrusted renderer origin')
 }
 

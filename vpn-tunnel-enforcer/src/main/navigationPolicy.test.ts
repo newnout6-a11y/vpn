@@ -9,10 +9,13 @@ import { classifyNavigation } from './navigationPolicy'
 
 describe('classifyNavigation — production (file:// renderer)', () => {
   const dev = undefined
+  const entry = 'file:///C:/app/renderer/index.html'
 
   it('allows our own file:// origin (in-app routing/assets)', () => {
-    expect(classifyNavigation('file:///C:/app/renderer/index.html', dev)).toBe('allow-internal')
-    expect(classifyNavigation('file:///C:/app/renderer/assets/x.js', dev)).toBe('allow-internal')
+    expect(classifyNavigation('file:///C:/app/renderer/index.html', dev, entry)).toBe('allow-internal')
+    expect(classifyNavigation('file:///C:/app/renderer/assets/x.js', dev, entry)).toBe('block')
+    expect(classifyNavigation('file:///C:/Users/Public/renderer/index.html', dev, entry)).toBe('block')
+    expect(classifyNavigation(entry + '#/settings', dev, entry)).toBe('allow-internal')
   })
 
   it('sends external https to the OS browser', () => {

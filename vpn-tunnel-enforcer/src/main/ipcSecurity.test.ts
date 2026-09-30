@@ -6,14 +6,14 @@ vi.mock('electron', () => ({
   }
 }))
 
-import { assertSafeIpcPayload, assertTrustedIpcSender } from './ipcSecurity'
+import { assertSafeIpcPayload, assertTrustedIpcSender, registerTrustedRenderer } from './ipcSecurity'
 
-function event(url: string, sameFrame = true): any {
+const entry = 'file:///C:/Program%20Files/VPNTunnel/resources/app.asar/out/renderer/index.html'
+function event(url: string, sameFrame = true, registered = true): any {
   const mainFrame = { url }
-  return {
-    senderFrame: sameFrame ? mainFrame : { url },
-    sender: { mainFrame }
-  }
+  const sender = { mainFrame }
+  if (registered) registerTrustedRenderer(sender as any, process.env.NODE_ENV === 'development' ? process.env.ELECTRON_RENDERER_URL! : entry, process.env.NODE_ENV === 'development')
+  return { senderFrame: sameFrame ? mainFrame : { url }, sender }
 }
 
 describe('trusted IPC boundary (AT-01-003)', () => {
@@ -38,6 +38,10 @@ describe('trusted IPC boundary (AT-01-003)', () => {
     process.env.NODE_ENV = 'production'
     expect(() => assertTrustedIpcSender(event('file:///C:/Users/Public/hostile.html'))).toThrow(/untrusted renderer origin/)
     expect(() => assertTrustedIpcSender(event('file:///C:/app/renderer/index.html', false))).toThrow(/subframes/)
+    expect(() => assertTrustedIpcSender(event('file:///C:/Users/Public/renderer/index.html'))).toThrow(/untrusted renderer origin/)
+    expect(() => assertTrustedIpcSender(event(entry, true, false))).toThrow(/unregistered/)
+    expect(() => assertTrustedIpcSender(event(entry + '?untrusted=1'))).toThrow(/untrusted renderer origin/)
+    expect(() => assertTrustedIpcSender(event(entry + '#/settings'))).not.toThrow()
   })
 
   it('pins development IPC to the configured origin', () => {
