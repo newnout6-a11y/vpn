@@ -10,6 +10,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { ipcMain } from 'electron'
 
 // ─── Stateful electron-store mock, keyed by store name ──────────────────────
 // vi.hoisted so the data object exists before the hoisted vi.mock factory runs.
@@ -80,7 +81,9 @@ import {
   DEFAULT_SERVER_GROUP_REFRESH_INTERVAL_MS,
   MIN_SERVER_GROUP_REFRESH_INTERVAL_MS,
   isServerGroupRefreshDue,
+  refreshDueServerGroups,
   refreshGroup,
+  registerServerGroupsHandlers,
   serverGroupRefreshIntervalMs,
   serverGroups
 } from './serverGroups'
@@ -647,6 +650,125 @@ describe('refreshGroup dedup-merge', () => {
     const updatedGroup = serverGroups.getGroup(group.id)
     expect(updatedGroup?.name).toBe('ALL VPN')
     expect(updatedGroup?.profileTitle).toBe('ALL VPN')
+  })
+})
+
+describe('AT-04-007 / F-064: failed subscription refresh', () => {
+  function seedSubscription() {
+    const group = serverGroups.createGroup({
+      name: 'Saved subscription',
+      source: 'subscription',
+      sourceUrl: 'https://sub.example.com/saved',
+      importedAt: Date.now() - DEFAULT_SERVER_GROUP_REFRESH_INTERVAL_MS,
+      lastFetchedAt: 1,
+      lastRefreshProfilesCount: 1,
+      status: 'active'
+    })
+    serverPickerStore.set('profiles', [{
+      id: 'saved',
+      name: 'Saved',
+      protocol: 'vless',
+      server: 'saved.example.com',
+      port: 443,
+      groupId: group.id,
+      outbound: makeVpnProfile('saved.example.com', 443).outbound,
+      status: 'unknown',
+      enabled: true
+    }])
+    serverPickerStore.set('activeProfileId', 'saved')
+    return group
+  }
+
+  it.each([
+    'getaddrinfo ENOTFOUND sub.example.com',
+    'connect ECONNREFUSED',
+    'TLS certificate verification failed',
+    'HTTP 500',
+    'Request timed out',
+    'Invalid subscription payload'
+  ])('returns an error and preserves saved profiles on %s', async (message) => {
+    const group = seedSubscription()
+    const savedStore = JSON.stringify(storeData.current['server-picker'])
+    resolveVpnProfilesMock.mockRejectedValue(new Error(message))
+
+    expect(await refreshGroup(group.id)).toEqual({ ok: false, error: message })
+    expect(JSON.stringify(storeData.current['server-picker'])).toBe(savedStore)
+    expect(serverGroups.getGroup(group.id)).toMatchObject({
+      lastFetchedAt: 1,
+      lastRefreshProfilesCount: 1,
+      lastFetchAttemptAt: expect.any(Number),
+      lastFetchError: message
+    })
+  })
+
+  it('rejects an empty subscription without removing saved profiles', async () => {
+    const group = seedSubscription()
+    const savedStore = JSON.stringify(storeData.current['server-picker'])
+    resolveVpnProfilesMock.mockResolvedValue({ profiles: [], source: 'subscription', fetched: true })
+
+    expect(await refreshGroup(group.id)).toEqual({
+      ok: false,
+      error: 'Подписка вернула пустой список профилей'
+    })
+    expect(JSON.stringify(storeData.current['server-picker'])).toBe(savedStore)
+    expect(serverGroups.getGroup(group.id)).toMatchObject({
+      status: 'expired',
+      lastFetchedAt: 1,
+      lastFetchError: 'Подписка вернула пустой список профилей'
+    })
+  })
+
+  it('does not commit partial results when a secondary device fetch fails', async () => {
+    const group = seedSubscription()
+    const saved = pickerProfiles()[0]
+    serverPickerStore.set('profiles', [saved, { ...saved, id: 'saved-android', clientDevice: 'android' }])
+    const savedStore = JSON.stringify(storeData.current['server-picker'])
+    resolveVpnProfilesMock
+      .mockResolvedValueOnce({ profiles: [makeVpnProfile('new.example.com', 443)], source: 'subscription', fetched: true })
+      .mockRejectedValueOnce(new Error('Android subscription timed out'))
+
+    expect(await refreshGroup(group.id)).toEqual({ ok: false, error: 'Android subscription timed out' })
+    expect(resolveVpnProfilesMock).toHaveBeenCalledTimes(2)
+    expect(JSON.stringify(storeData.current['server-picker'])).toBe(savedStore)
+  })
+
+  it('forwards the failure through groups:refresh IPC', async () => {
+    const group = seedSubscription()
+    resolveVpnProfilesMock.mockRejectedValue(new Error('HTTP 500'))
+    vi.mocked(ipcMain.handle).mockClear()
+    registerServerGroupsHandlers()
+    const handler = vi.mocked(ipcMain.handle).mock.calls.find(([channel]) => channel === 'groups:refresh')?.[1]
+    expect(handler).toBeDefined()
+
+    expect(await handler!({} as any, group.id)).toEqual({ ok: false, error: 'HTTP 500' })
+  })
+
+  it('counts network errors and empty responses as failed automatic refreshes', async () => {
+    const { id: failedId, ...subscription } = seedSubscription()
+    const empty = serverGroups.createGroup(subscription)
+    const successful = serverGroups.createGroup(subscription)
+    resolveVpnProfilesMock
+      .mockRejectedValueOnce(new Error('HTTP 500'))
+      .mockResolvedValueOnce({ profiles: [], source: 'subscription', fetched: true })
+      .mockResolvedValueOnce({ profiles: [makeVpnProfile('new.example.com', 443)], source: 'subscription', fetched: true })
+
+    expect(await refreshDueServerGroups()).toEqual({ refreshed: 1, failed: 2 })
+    expect(serverGroups.getGroup(failedId)?.lastFetchError).toBe('HTTP 500')
+    expect(serverGroups.getGroup(empty.id)?.lastFetchError).toBe('Подписка вернула пустой список профилей')
+    expect(serverGroups.getGroup(successful.id)?.lastFetchError).toBeNull()
+  })
+
+  it('releases the failed refresh lock so a successful retry clears the error', async () => {
+    const group = seedSubscription()
+    resolveVpnProfilesMock
+      .mockRejectedValueOnce(new Error('HTTP 500'))
+      .mockResolvedValueOnce({ profiles: [makeVpnProfile('saved.example.com', 443, 'Saved')], source: 'subscription', fetched: true })
+
+    expect(await refreshGroup(group.id)).toEqual({ ok: false, error: 'HTTP 500' })
+    expect(await refreshGroup(group.id)).toMatchObject({ ok: true, updatedCount: 1 })
+    expect(resolveVpnProfilesMock).toHaveBeenCalledTimes(2)
+    expect(serverGroups.getGroup(group.id)?.lastFetchError).toBeNull()
+    expect(serverPickerStore.get('activeProfileId')).toBe('saved')
   })
 })
 
