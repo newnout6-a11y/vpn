@@ -160,4 +160,33 @@ describe('differential live firewall fault injection (AT-03-008/009)', () => {
     const command = `$tokens=$null;$errors=$null;$source=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}'));[System.Management.Automation.Language.Parser]::ParseInput($source,[ref]$tokens,[ref]$errors)|Out-Null;if($errors.Count){$errors|Out-String|Write-Output;exit 1}`
     expect(() => execFileSync(process.env.VPNTE_PWSH!, ['-NoProfile','-NonInteractive','-Command',command], { encoding: 'utf8' })).not.toThrow()
   })
+
+  it.skipIf(process.platform !== 'win32' && !process.env.VPNTE_PWSH).each([
+    { cidrs: [] }, { cidrs: ['192.0.2.1'] }, { cidrs: ['192.0.2.1', '198.51.100.2'] }
+  ])('executes the production live script for native JSON policy $cidrs (AT-03-008)', async ({ cidrs }) => {
+    await active()
+    await updateKillSwitchExceptions([], cidrs)
+    // In-memory cmdlets only: no Windows firewall or recovery files are touched.
+    const script = `
+$script:rules=@{}
+function Get-NetFirewallProfile { 'Domain','Private','Public' | ForEach-Object { [pscustomobject]@{DefaultOutboundAction='Block'} } }
+function Get-NetFirewallRule { param($DisplayName) $script:rules.Values | Where-Object { $_.DisplayName -like $DisplayName } }
+function Remove-NetFirewallRule { param([Parameter(ValueFromPipeline=$true)]$Rule) process { if($Rule){$script:rules.Remove($Rule.DisplayName)} } }
+function New-NetFirewallRule { param($DisplayName,$Direction,$Action,$Profile,$Enabled,$Program,$RemoteAddress)
+  if($DisplayName -isnot [string] -or -not $DisplayName){throw 'Invalid scalar rule name'}
+  $script:rules[$DisplayName]=[pscustomobject]@{DisplayName=$DisplayName;Direction=$Direction;Action=$Action;Enabled=$Enabled;Program=$Program;RemoteAddress=$RemoteAddress}
+}
+function Get-NetFirewallAddressFilter { param([Parameter(ValueFromPipeline=$true)]$Rule) process { [pscustomobject]@{RemoteAddress=$Rule.RemoteAddress} } }
+function Get-NetFirewallApplicationFilter { param([Parameter(ValueFromPipeline=$true)]$Rule) process { [pscustomobject]@{Program=$Rule.Program} } }
+${state.scripts[0]}
+Write-Output ('RESULT:' + (@($script:rules.Values | ForEach-Object { $_.RemoteAddress }) | ConvertTo-Json -Compress))
+`
+    const output = execFileSync(process.env.VPNTE_PWSH || 'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')],
+      { encoding: 'utf8', timeout: 15000, stdio: ['ignore','pipe','pipe'] })
+    expect(output).toContain('EXCEPTIONS_VERIFIED')
+    const raw = output.split(/\r?\n/).find(line => line.startsWith('RESULT:'))!.slice(7)
+    const values = raw ? JSON.parse(raw) : []
+    expect((Array.isArray(values) ? values : [values]).sort()).toEqual([...cidrs].sort())
+  }, 20000)
 })

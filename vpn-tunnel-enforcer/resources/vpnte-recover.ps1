@@ -416,9 +416,10 @@ try {
     if ($tunOwner) {
         if ($tunOwner.interfaceGuid -notmatch '^\{?[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}\}?$') { throw 'Invalid TUN ownership GUID' }
         $staleTuns = @(Get-NetAdapter -ErrorAction Stop | Where-Object {
-            [string]$_.InterfaceGuid -eq $tunOwner.interfaceGuid -and $_.InterfaceDescription -match 'Wintun'
+            [string]$_.InterfaceGuid -eq $tunOwner.interfaceGuid
         })
         foreach ($tun in $staleTuns) {
+            if ($tun.DriverDescription -notmatch '^Wintun\b' -or $tun.PnPDeviceID -notlike 'SWD\Wintun\*') { throw 'TUN ownership driver mismatch' }
             $ownedIP = @(Get-NetIPAddress -InterfaceIndex $tun.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -eq '192.168.250.253' -and $_.PrefixLength -eq 30 })
             if ($ownedIP.Count -eq 0) { throw 'TUN ownership address mismatch' }
             try { Remove-NetAdapter -Name $tun.Name -Confirm:$false -ErrorAction Stop }

@@ -166,7 +166,7 @@ export async function strictRecoveryRequired(): Promise<boolean> {
 export async function recordOwnedTunAdapter(alias: string): Promise<void> {
   if (process.platform !== 'win32') return
   const raw = await runRead(`$adapter = Get-NetAdapter -Name ${quote(alias)} -ErrorAction Stop
-if ($adapter.InterfaceDescription -notmatch 'Wintun') { throw 'VPNTE TUN driver identity mismatch' }
+if ($adapter.DriverDescription -notmatch '^Wintun\\b' -or $adapter.PnPDeviceID -notlike 'SWD\\Wintun\\*') { throw 'VPNTE TUN driver identity mismatch' }
 $ip = Get-NetIPAddress -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4 -ErrorAction Stop | Where-Object { $_.IPAddress -eq '192.168.250.253' -and $_.PrefixLength -eq 30 }
 if (-not $ip) { throw 'VPNTE TUN address identity mismatch' }
 [pscustomobject]@{schemaVersion=1;owner='VPNTE';alias=[string]$adapter.Name;interfaceGuid=[string]$adapter.InterfaceGuid} | ConvertTo-Json -Compress`)

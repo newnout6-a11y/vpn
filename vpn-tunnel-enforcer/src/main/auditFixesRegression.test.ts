@@ -26,14 +26,14 @@ describe('Audit Fixes Regression: tunController', () => {
     expect(tunControllerSource).toContain('await killOwnedRuntimeProcesses()')
     expect(tunControllerSource).toContain("await rollbackEarlyAdapterLockdown('tun interface failed to reach Status=Up')")
     expect(tunControllerSource).toContain("await disableKillSwitchIfActive('tun interface failed to reach Status=Up')")
-    expect(tunControllerSource).toContain('finish({\n              success: false,')
+    expect(tunControllerSource).toMatch(/finish\(\{\s+success: false,/)
   })
 
   it('guarantees rollback and reports failure if firewall kill-switch fails to engage', () => {
     expect(tunControllerSource).toContain("logEvent('error', 'tun', 'firewall kill-switch failed to engage — aborting start and rolling back'")
     expect(tunControllerSource).toContain("await rollbackEarlyAdapterLockdown('kill-switch failed to engage')")
     expect(tunControllerSource).toContain("await disableKillSwitchIfActive('kill-switch failed to engage')")
-    expect(tunControllerSource).toContain('finish({\n                success: false,')
+    expect(tunControllerSource).toMatch(/finish\(\{\s+success: false,/)
   })
 
   it('prevents stop/start race via stopRequested flag at multiple critical checkpoints', () => {

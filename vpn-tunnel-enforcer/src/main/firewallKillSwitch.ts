@@ -399,7 +399,7 @@ if ($profiles.Count -ne 3 -or @($profiles | Where-Object { [string]$_.DefaultOut
 # before the requested policy has been validated. Never set DefaultOutboundAction.
 Get-NetFirewallRule -DisplayName '${RULE_PREFIX}-user-*' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction Stop
 Get-NetFirewallRule -DisplayName '${RULE_PREFIX}-allow-extra-ip' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction Stop
-$requested=@([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}')) | ConvertFrom-Json)
+$requested=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}')) | ConvertFrom-Json
 foreach ($r in $requested) {
   $ruleParams=@{DisplayName=$r.name;Direction='Outbound';Action='Allow';Profile='Any';Enabled='True'}
   if($r.program){$ruleParams.Program=$r.program}else{$ruleParams.RemoteAddress=$r.remote}
@@ -441,7 +441,11 @@ async function updateExceptionsUnlocked(apps: string[], cidrs: string[], strictM
       const { stdout } = await ps(exceptionPolicyScript(old), true, 30000)
       if (!String(stdout).split(/\r?\n/).includes('EXCEPTIONS_VERIFIED')) throw new Error('Exception compensation not verified')
       await writeManifest(previous)
-    } catch {
+    } catch (compensationError) {
+      logEvent('error', 'firewall-killswitch', 'exception update and compensation failed', {
+        update: String((error as any)?.stderr || error).replace(/-EncodedCommand\s+\S+/gi, '-EncodedCommand <omitted>').slice(-2000),
+        compensation: String((compensationError as any)?.stderr || compensationError).replace(/-EncodedCommand\s+\S+/gi, '-EncodedCommand <omitted>').slice(-2000)
+      })
       reportRecoveryWarning('Live-обновление исключений не подтверждено. Core-защита сохранена, но набор исключений требует повторной проверки.')
       return { success: false, state: 'unknown', message: 'Live exception update and compensation failed; recovery journal retained' }
     }

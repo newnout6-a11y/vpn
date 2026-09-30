@@ -1,7 +1,7 @@
 // AT-03-002/003/004/012: execute the real script with fake Windows boundaries.
 // ACL, WFP and reboot evidence still require Windows L3; mocks are not acceptance.
 import { execFileSync } from 'child_process'
-import { readFileSync } from 'fs'
+import { readFileSync, mkdirSync, mkdtempSync, writeFileSync, unlinkSync, rmdirSync } from 'fs'
 import { join } from 'path'
 import { describe, expect, it } from 'vitest'
 const pwsh = process.env.VPNTE_PWSH
@@ -9,14 +9,14 @@ const source = readFileSync(join(process.cwd(), 'resources/vpnte-recover.ps1'), 
 const fixtures = () => ({
   policy: { schemaVersion: 1, owner: 'VPNTE', strictMode: false },
   firewall: null as any, tun: null as any, untrusted: false, failProfile: '',
-  adapters: [{ Name: 'Other VPN', InterfaceGuid: '11111111-1111-1111-1111-111111111111', InterfaceDescription: 'Wintun', ifIndex: 10, Status: 'Up' }],
+  adapters: [{ Name: 'Other VPN', InterfaceGuid: '11111111-1111-1111-1111-111111111111', InterfaceDescription: 'sing-tun Tunnel', DriverDescription: 'Wintun Userspace Tunnel', PnPDeviceID: 'SWD\\Wintun\\fixture', ifIndex: 10, Status: 'Up' }],
   rules: false
 })
 function run(patch: Partial<ReturnType<typeof fixtures>> = {}) {
   const fixture = { ...fixtures(), ...patch }
   const encoded = Buffer.from(JSON.stringify(fixture)).toString('base64')
   const mocks = `
-$env:ProgramData='/trusted'
+$env:ProgramData=if([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT){[Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)}else{'/trusted'}
 $global:f = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}')) | ConvertFrom-Json
 $global:profiles = @{Domain='Block';Private='Block';Public='Block'}
 $global:removed=$false
@@ -75,8 +75,16 @@ $fn=$ast.Find({param($node) $node -is [System.Management.Automation.Language.Fun
 $source=$source.Remove($fn.Extent.StartOffset,$fn.Extent.EndOffset-$fn.Extent.StartOffset).Insert($fn.Extent.StartOffset,'function Write-RecoveryReport([string]$status) { Write-Output ("REPORT:"+$status) }')
 & ([scriptblock]::Create($source))
 `
-  try { return { status: 0, output: execFileSync(pwsh!, ['-NoProfile', '-NonInteractive', '-Command', bootstrap], { encoding: 'utf8', timeout: 15000 }) } }
-  catch (error: any) { return { status: error.status, output: String(error.stdout) + String(error.stderr) } }
+  // Windows cannot pass this full-script harness within its command-line limit.
+  const tempRoot = join(process.cwd(), '.tmp')
+  mkdirSync(tempRoot, { recursive: true })
+  const tempDir = mkdtempSync(join(tempRoot, 'boot-recovery-native-'))
+  const harnessPath = join(tempDir, 'harness.ps1')
+  try {
+    writeFileSync(harnessPath, bootstrap, 'utf8')
+    return { status: 0, output: execFileSync(pwsh!, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', harnessPath], { encoding: 'utf8', timeout: 15000, windowsHide: true, stdio: ['ignore','pipe','pipe'] }) }
+  } catch (error: any) { return { status: error.status, output: String(error.stdout) + String(error.stderr) } }
+  finally { unlinkSync(harnessPath); rmdirSync(tempDir) }
 }
 describe.skipIf(!pwsh)('actual boot recovery control flow on mocked system APIs', () => {
   it('does not alter a foreign Block profile without VPNTE ownership', () => {
@@ -107,7 +115,7 @@ describe.skipIf(!pwsh)('actual boot recovery control flow on mocked system APIs'
     expect(result.status).toBe(1)
     expect(result.output).toContain('PROFILE:Private/Allow')
     expect(result.output).toContain('PROFILE:Public/Allow')
-    expect(result.output).not.toContain('DELETE:/trusted/VPNTE/manifests/firewall.json')
+    expect(result.output).not.toMatch(/DELETE:.*firewall\.json/)
     expect(result.output).toContain('REPORT:warnings')
   })
   it('only removes the exact GUID/driver/subnet-owned Wintun adapter', () => {

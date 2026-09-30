@@ -1,5 +1,6 @@
 // AT-03-003 / AT-03-012: fail-closed storage boundaries (Windows calls mocked).
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { execFileSync } from 'node:child_process'
 
 const mocks = vi.hoisted(() => ({
   elevated: vi.fn(), read: vi.fn(), open: vi.fn(), rename: vi.fn(), unlink: vi.fn(),
@@ -18,7 +19,7 @@ vi.mock('child_process', () => {
   }
   return { execFile, default: { execFile } }
 })
-import { readRecoveryManifest, recoveryManifestPath, strictRecoveryRequired, writeRecoveryArtifact } from './recoveryManifest'
+import { readRecoveryManifest, recordOwnedTunAdapter, recoveryManifestPath, strictRecoveryRequired, writeRecoveryArtifact } from './recoveryManifest'
 
 const platform = Object.getOwnPropertyDescriptor(process, 'platform')!
 function decode(command: string) { return Buffer.from(command.split(' ').at(-1)!, 'base64').toString('utf16le') }
@@ -33,6 +34,33 @@ beforeEach(() => {
 afterEach(() => Object.defineProperty(process, 'platform', platform))
 
 describe('trusted recovery storage', () => {
+  it.skipIf(process.platform !== 'win32' && !process.env.VPNTE_PWSH).each([
+    { driver: 'Wintun Userspace Tunnel', pnp: 'SWD\\Wintun\\fixture', ip: '192.168.250.253', prefix: 30, accepted: true },
+    { driver: 'Wintun Userspace Tunnel', pnp: 'ROOT\\NET\\fixture', ip: '192.168.250.253', prefix: 30, accepted: false },
+    { driver: 'Physical NIC', pnp: 'SWD\\Wintun\\fixture', ip: '192.168.250.253', prefix: 30, accepted: false },
+    { driver: 'Wintun Userspace Tunnel', pnp: 'SWD\\Wintun\\fixture', ip: '192.168.250.254', prefix: 30, accepted: false },
+    { driver: 'Wintun Userspace Tunnel', pnp: 'SWD\\Wintun\\fixture', ip: '192.168.250.253', prefix: 24, accepted: false }
+  ])('checks native TUN driver/device/subnet before ownership commit: $driver / $pnp / $ip / $prefix (AT-03-002)', async fixture => {
+    // Execute the actual read script against fake cmdlets; storage remains mocked.
+    mocks.read.mockImplementation((_exe, args) => {
+      const json = Buffer.from(JSON.stringify(fixture)).toString('base64')
+      const script = `$fixture=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${json}'))|ConvertFrom-Json
+function Get-NetAdapter { [pscustomobject]@{Name='Ethernet 5';InterfaceDescription='sing-tun Tunnel';DriverDescription=$fixture.driver;PnPDeviceID=$fixture.pnp;ifIndex=5;InterfaceGuid='00000000-0000-0000-0000-000000000005'} }
+function Get-NetIPAddress { [pscustomobject]@{IPAddress=$fixture.ip;PrefixLength=$fixture.prefix} }
+${Buffer.from(args.at(-1), 'base64').toString('utf16le')}`
+      try {
+        return execFileSync(process.env.VPNTE_PWSH || 'powershell.exe', ['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script, 'utf16le').toString('base64')], { encoding: 'utf8', timeout: 15000, stdio: ['ignore','pipe','pipe'] })
+      } catch { throw new Error('Native TUN identity rejected') }
+    })
+    if (fixture.accepted) {
+      await expect(recordOwnedTunAdapter('Ethernet 5')).resolves.toBeUndefined()
+      expect(mocks.rename).toHaveBeenCalledWith(expect.any(String), recoveryManifestPath('tun-owner.json'))
+    } else {
+      await expect(recordOwnedTunAdapter('Ethernet 5')).rejects.toThrow('identity rejected')
+      expect(mocks.open).not.toHaveBeenCalled()
+    }
+  }, 20000)
+
   it.each(['../firewall.json', 'x/y', 'x\\y', '', 'a'.repeat(162)])('rejects artifact name %s before system calls', async name => {
     await expect(writeRecoveryArtifact(name, '{}')).rejects.toThrow('name')
     expect(mocks.elevated).not.toHaveBeenCalled()
