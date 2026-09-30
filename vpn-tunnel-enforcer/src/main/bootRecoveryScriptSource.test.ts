@@ -46,7 +46,8 @@ describe('boot recovery script source regressions', () => {
     expect(script).not.toContain('Clean-VpnteProxyEnv')
     expect(script).not.toContain('Registry::HKEY_USERS')
     expect(script).not.toContain('resetting orphaned DNS')
-    expect(script).toContain('Network baseline retained for verified recovery in its owning user context')
+    expect(script).toContain('[Microsoft.Win32.Registry]::Users.OpenSubKey($sid,$true)')
+    expect(script).toContain('Registry value read-back mismatch')
     expect(script).toContain('[string]$entry.interfaceGuid -eq [string]$adapter.InterfaceGuid')
   })
 

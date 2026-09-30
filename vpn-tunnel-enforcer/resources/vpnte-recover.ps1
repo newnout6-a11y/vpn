@@ -218,7 +218,6 @@ if ($firewallManifest -or $vpnteRules -gt 0) {
 $vpnteDns = @('192.168.250.253', '192.168.250.254')
 $adapters = Get-NetAdapter -ErrorAction SilentlyContinue |
     Where-Object {
-        $_.Status -eq 'Up' -and
         $_.InterfaceDescription -notmatch 'Wintun|TAP-Windows|Tailscale|WireGuard|Hyper-V|Loopback|vEthernet|VPN|VirtualBox|VMware|Bluetooth' -and
         $_.MacAddress -and $_.MacAddress -ne '00-00-00-00-00-00'
     }
@@ -230,6 +229,8 @@ foreach ($a in $adapters) {
             Log "DNS: restoring static DNS on $($a.Name)"
             try {
                 Set-DnsClientServerAddress -InterfaceAlias $a.Name -ServerAddresses @($manifestAdapter.ipv4DnsServers) -ErrorAction Stop
+                $actualDns=@((Get-DnsClientServerAddress -InterfaceAlias $a.Name -AddressFamily IPv4 -ErrorAction Stop).ServerAddresses)
+                if (($actualDns -join ',') -ne (@($manifestAdapter.ipv4DnsServers) -join ',')) { throw 'DNS read-back mismatch' }
             } catch {
                 Log "DNS: failed to restore static DNS on $($a.Name) ($_)"
                 $hasWarnings = $true
@@ -238,6 +239,9 @@ foreach ($a in $adapters) {
             Log "DNS: resetting DNS to DHCP on $($a.Name)"
             try {
                 Set-DnsClientServerAddress -InterfaceAlias $a.Name -ResetServerAddresses -ErrorAction Stop
+                $dnsKey='HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\'+$a.InterfaceGuid
+                $staticDns=[string](Get-ItemProperty -LiteralPath $dnsKey -Name NameServer -ErrorAction SilentlyContinue).NameServer
+                if (-not [string]::IsNullOrWhiteSpace($staticDns)) { throw 'DHCP DNS read-back mismatch' }
             } catch {
                 Log "DNS: failed to reset DNS to DHCP on $($a.Name) ($_)"
                 $hasWarnings = $true
@@ -249,9 +253,18 @@ foreach ($a in $adapters) {
         Log "IPv6: re-enabling on $($a.Name)"
         try {
             Enable-NetAdapterBinding -InterfaceAlias $a.Name -ComponentID ms_tcpip6 -ErrorAction Stop
+            if (-not (Get-NetAdapterBinding -InterfaceAlias $a.Name -ComponentID ms_tcpip6 -ErrorAction Stop).Enabled) { throw 'IPv6 binding read-back mismatch' }
         } catch {
             Log "IPv6: failed to re-enable ms_tcpip6 on $($a.Name) ($_)"
             $hasWarnings = $true
+        }
+    }
+}
+
+if ($adapterManifest) {
+    foreach ($entry in @($adapterManifest.adapters)) {
+        if (-not @($adapters | Where-Object { [string]$_.InterfaceGuid -eq [string]$entry.interfaceGuid }).Count) {
+            $hasWarnings=$true; Log 'Owned physical adapter not found; snapshot retained'
         }
     }
 }
@@ -299,15 +312,97 @@ try {
     Log "DNS cache: flush warning ($_)"
 }
 
-# User registry recovery is deferred to the owning user context; SYSTEM never
-# guesses a user SID or wipes environment values by matching their contents.
+# 7. Restore only the exact typed baseline, in its recorded user's hive.
+# A SYSTEM HKCU is not the interactive user's HKCU. Use the exact SID if loaded;
+# otherwise mount that SID's registered NTUSER.DAT temporarily, never sweep HKU.
+$baseline = $null
+$mountedHive = $null
+$userHive = $null
 try {
     $baseline = Read-TrustedManifest 'latest-tun-network-baseline.json'
     if ($baseline) {
-        $hasWarnings = $true
-        Log 'Network baseline retained for verified recovery in its owning user context'
+        if ($baseline.userSid -notmatch '^S-1-5-21-\d+-\d+-\d+-\d+$' -or @($baseline.values).Count -ne 9) { throw 'Invalid baseline identity or values' }
+        $targets = @{
+            internet=@{key='Software\Microsoft\Windows\CurrentVersion\Internet Settings';names=@('ProxyEnable','ProxyServer','AutoConfigURL','AutoDetect')}
+            environment=@{key='Environment';names=@('HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY')}
+            winhttp=@{key='SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings\Connections';names=@('WinHttpSettings')}
+        }
+        $seen = @{}
+        foreach ($v in @($baseline.values)) {
+            $id = [string]$v.target + '/' + [string]$v.name
+            if (-not $targets.ContainsKey([string]$v.target) -or $v.name -cnotin $targets[[string]$v.target].names -or $seen.ContainsKey($id) -or $v.exists -isnot [bool]) { throw 'Invalid baseline target' }
+            $seen[$id]=$true
+            if (-not $v.exists) {
+                if ($null -ne $v.kind -or $null -ne $v.data) { throw 'Invalid absent registry snapshot' }
+                continue
+            }
+            switch ($v.kind) {
+                {$_ -in @('String','ExpandString')} { if ($v.data -isnot [string] -or $v.data.Length -gt 65536) { throw 'Invalid string' } }
+                'DWord' { if ($v.data -isnot [long] -and $v.data -isnot [int]) { throw 'Invalid DWORD' }; $null=[int]$v.data }
+                'QWord' { if ($v.data -isnot [string] -or $v.data -notmatch '^-?\d{1,19}$') { throw 'Invalid QWORD' }; $null=[long]$v.data }
+                'Binary' { if ($v.data -isnot [array] -or $v.data.Count -gt 65536) { throw 'Invalid binary' }; foreach($b in $v.data){ if(($b -isnot [int] -and $b -isnot [long]) -or $b -lt 0 -or $b -gt 255){throw 'Invalid byte'} } }
+                'MultiString' { if ($v.data -isnot [array] -or $v.data.Count -gt 1024) { throw 'Invalid multistring' }; foreach($x in $v.data){if($x -isnot [string] -or $x.Length -gt 65536){throw 'Invalid multistring item'}} }
+                default { throw 'Unsupported registry type' }
+            }
+        }
+        $sid = [string]$baseline.userSid
+        $userHive = [Microsoft.Win32.Registry]::Users.OpenSubKey($sid,$true)
+        if (-not $userHive) {
+            $profileKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\' + $sid
+            $profilePath = [Environment]::ExpandEnvironmentVariables([string](Get-ItemProperty -LiteralPath $profileKey -Name ProfileImagePath -ErrorAction Stop).ProfileImagePath)
+            if ($profilePath -notmatch '^[a-zA-Z]:\\' -or $profilePath -match '\\\.\.\\') { throw 'Invalid profile path' }
+            $hivePath = Join-Path $profilePath 'NTUSER.DAT'
+            foreach ($path in @($profilePath,$hivePath)) {
+                $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+                if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Reparse user hive rejected' }
+            }
+            $mountName = 'VPNTE-Recovery-' + [Guid]::NewGuid().ToString('N')
+            & reg.exe load ('HKU\'+$mountName) $hivePath | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Unable to mount owning user hive' }
+            $mountedHive=$mountName
+            $userHive=[Microsoft.Win32.Registry]::Users.OpenSubKey($mountName,$true)
+            if (-not $userHive) { throw 'Mounted user hive not readable' }
+        }
+        $baselineRecovered=$true
+        foreach ($v in @($baseline.values)) {
+            $key=$null
+            try {
+                $base=if($v.target -eq 'winhttp'){[Microsoft.Win32.Registry]::LocalMachine}else{$userHive}
+                $key=$base.CreateSubKey($targets[[string]$v.target].key)
+                if($v.exists){
+                    $data=$v.data
+                    switch($v.kind){
+                        'DWord' {$data=[int]$v.data}
+                        'QWord' {$data=[long]$v.data}
+                        'Binary' {$data=[byte[]]@($v.data)}
+                        'MultiString' {$data=[string[]]@($v.data)}
+                    }
+                    $key.SetValue($v.name,$data,[Enum]::Parse([Microsoft.Win32.RegistryValueKind],[string]$v.kind))
+                }else{$key.DeleteValue($v.name,$false)}
+                $exists=@($key.GetValueNames()) -contains $v.name
+                if($exists -ne $v.exists){throw 'Registry presence read-back mismatch'}
+                if($exists){
+                    $kind=[string]$key.GetValueKind($v.name)
+                    $actual=$key.GetValue($v.name,$null,[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                    if($kind -eq 'QWord'){$actual=[string]$actual}
+                    if($kind -in @('Binary','MultiString')){$actual=@($actual)}
+                    if($kind -cne $v.kind -or ($actual|ConvertTo-Json -Compress -Depth 5) -cne ($v.data|ConvertTo-Json -Compress -Depth 5)){throw 'Registry value read-back mismatch'}
+                }
+                Log ('Baseline restored: '+$v.target+'/'+$v.name)
+            }catch{$baselineRecovered=$false;$hasWarnings=$true;Log ('Baseline step failed: '+$v.target+'/'+$v.name)}
+            finally{if($key){$key.Close()}}
+        }
     }
-} catch { $hasWarnings = $true; Log 'SECURITY: rejected network baseline' }
+} catch { $hasWarnings=$true; $baselineRecovered=$false; Log 'Baseline recovery failed; trusted snapshot retained' }
+finally {
+    if($userHive){$userHive.Close()}
+    if($mountedHive){
+        [GC]::Collect();[GC]::WaitForPendingFinalizers()
+        & reg.exe unload ('HKU\'+$mountedHive) | Out-Null
+        if($LASTEXITCODE -ne 0){$hasWarnings=$true;$baselineRecovered=$false;Log 'Owning user hive unload failed'}
+    }
+}
+if($baseline -and $baselineRecovered){Remove-Item -LiteralPath (Join-Path $trustedManifestDir 'latest-tun-network-baseline.json') -Force -ErrorAction Stop}
 
 # 8. Remove only the exact recorded VPNTE adapter (stable GUID + driver + subnet).
 try {
