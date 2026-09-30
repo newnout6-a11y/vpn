@@ -1943,12 +1943,12 @@ async function getProxyOwnerProcesses(host: string, port: number): Promise<Array
 // granularKillSwitch, which would create a circular import. Returns only the
 // `ip`-typed exception values; the firewall layer validates each one before
 // use, so a malformed entry here is harmless.
-function readGranularKillSwitchIpExceptions(): string[] {
+function readGranularKillSwitchExceptions(type: 'app' | 'ip'): string[] {
   try {
     const exceptions = granularKillSwitchStore.get('killSwitchExceptions', []) as Array<{ type?: string; value?: string }>
     if (!Array.isArray(exceptions)) return []
     return exceptions
-      .filter((e) => e && e.type === 'ip' && typeof e.value === 'string' && e.value.trim())
+      .filter((e) => e && e.type === type && typeof e.value === 'string' && e.value.trim())
       .map((e) => String(e.value).trim())
   } catch {
     return []
@@ -3264,7 +3264,8 @@ export const tunController = {
                 singboxExePath: runtime.singbox,
                 strictMode: await strictRecoveryRequired(),
                 proxyOwnerProgramPaths,
-                extraAllowedRemoteCidrs: readGranularKillSwitchIpExceptions(),
+                appExceptionPaths: readGranularKillSwitchExceptions('app'),
+                extraAllowedRemoteCidrs: readGranularKillSwitchExceptions('ip'),
                 tunAdapterAlias: getTunAdapterAlias()
               })
               if (ks.success) {

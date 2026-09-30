@@ -16,13 +16,13 @@ import { persistRecoveryPolicy } from './recoveryManifest'
 import { ipcMain, BrowserWindow, dialog, type IpcMainInvokeEvent } from 'electron'
 import Store from 'electron-store'
 import { randomUUID } from 'crypto'
-import { access, realpath } from 'fs/promises'
-import { constants as fsConstants } from 'fs'
-import { isIP } from 'net'
 import {
   enableKillSwitch,
   disableKillSwitchIfActive,
-  isKillSwitchActive
+  isKillSwitchActive,
+  updateKillSwitchExceptions,
+  canonicalizeExceptionAppPath,
+  isValidIpOrCidr
 } from './firewallKillSwitch'
 import { logEvent } from './appLogger'
 import { requireEnum, requirePlainObject, requireString } from './ipcValidation'
@@ -49,6 +49,7 @@ const store = new Store<GranularKillSwitchStore>({
 // ─── State ───────────────────────────────────────────────────────────────────
 
 let currentLevel: KillSwitchLevel = store.get('killSwitchLevel', 'off')
+let committedLevel = currentLevel
 let exceptions: KillSwitchException[] = store.get('killSwitchExceptions', [])
 let vpnConnected = false
 let singboxExePath: string | null = null
@@ -111,26 +112,12 @@ export async function validateKillSwitchException(
   if (!raw || raw.length > 2048) throw new Error('exception.value must contain 1-2048 characters')
 
   if (exception.type === 'ip') {
-    const [address, prefix, extra] = raw.split('/')
-    if (extra !== undefined || !isIP(address)) throw new Error('exception.value must be a valid IP or CIDR')
-    if (prefix !== undefined) {
-      if (!/^\d+$/.test(prefix)) throw new Error('exception.value contains an invalid CIDR prefix')
-      const bits = Number(prefix)
-      const maximum = isIP(address) === 4 ? 32 : 128
-      if (bits < 0 || bits > maximum) throw new Error(`exception.value CIDR prefix must be 0-${maximum}`)
-    }
+    if (!isValidIpOrCidr(raw)) throw new Error('exception.value must be a valid IP/CIDR; wildcard /0 and unspecified addresses are forbidden')
+    const [address, prefix] = raw.split('/')
     return { type: 'ip', value: prefix === undefined ? address : `${address}/${Number(prefix)}`, label }
   }
-
   if (exception.type !== 'app') throw new Error('exception.type must be app or ip')
-  if (!/\.exe$/i.test(raw)) throw new Error('exception.value must point to an .exe file')
-  if (process.platform === 'win32' && !/^(?:[a-z]:\\|\\\\)/i.test(raw)) {
-    throw new Error('exception.value must be an absolute Windows path')
-  }
-  await access(raw, fsConstants.R_OK)
-  const canonical = await realpath(raw)
-  if (!/\.exe$/i.test(canonical)) throw new Error('canonical exception path must point to an .exe file')
-  return { type: 'app', value: canonical, label }
+  return { type: 'app', value: await canonicalizeExceptionAppPath(raw), label }
 }
 
 function serializeExceptionMutation<T>(operation: () => Promise<T>): Promise<T> {
@@ -154,10 +141,12 @@ async function engageKillSwitch(reason: string): Promise<boolean> {
   const appExceptions = getExceptionAppPaths()
   const ipExceptions = getExceptionIpCidrs()
 
-  const result = await enableKillSwitch({
+  const result = await isKillSwitchActive()
+    ? await updateKillSwitchExceptions(appExceptions, ipExceptions, currentLevel === 'strict')
+    : await enableKillSwitch({
     singboxExePath,
     strictMode: currentLevel === 'strict',
-    proxyOwnerProgramPaths: appExceptions.length > 0 ? appExceptions : undefined,
+    appExceptionPaths: appExceptions,
     extraAllowedRemoteCidrs: ipExceptions.length > 0 ? ipExceptions : undefined
   })
 
@@ -192,7 +181,7 @@ async function disengageKillSwitch(reason: string): Promise<boolean> {
     return true
   }
   logEvent('error', 'granular-kill-switch', `failed to disengage kill-switch: ${result.message}`)
-  return false
+  throw new Error(`Failed to disengage kill-switch: ${result.message}`)
 }
 
 /**
@@ -200,39 +189,32 @@ async function disengageKillSwitch(reason: string): Promise<boolean> {
  * Called when level changes or VPN state changes.
  */
 async function applyPolicy(): Promise<void> {
-  switch (currentLevel) {
-    case 'off':
-      // Disable kill-switch if it's currently active
-      await disengageKillSwitch('level set to off')
-      break
-
-    case 'standard':
-      if (isVpnConnected()) {
-        // VPN is connected — no need for kill-switch in standard mode
-        // (it will be engaged by onVpnDisconnected when VPN drops)
-        // But if it's currently active from a previous strict mode, disengage
-        if (await isKillSwitchActive()) {
-          await disengageKillSwitch('standard mode: VPN is connected')
-        }
-      } else {
-        // VPN is not connected — engage kill-switch
-        await engageKillSwitch('VPN-соединение отсутствует (стандартный режим)')
-      }
-      break
-
-    case 'strict':
-      if (isVpnConnected()) {
-        // VPN is connected — in strict mode, traffic goes through VPN anyway
-        // The kill-switch should still be active to prevent any bypass
-        if (!(await isKillSwitchActive())) {
-          await engageKillSwitch('Строгий режим: блокировка трафика вне VPN')
-        }
-      } else {
-        // VPN is not connected — block everything
-        await engageKillSwitch('Строгий режим: VPN не подключён, весь трафик заблокирован')
-      }
-      break
+  if (currentLevel === 'off') {
+    await disengageKillSwitch('level set to off')
+  } else {
+    // Keep protection active while connected too: the next unexpected drop must
+    // not race firewall activation, and strict->standard must not remove it.
+    await engageKillSwitch(currentLevel === 'strict' ? 'Строгая защита вне VPN' : 'Стандартная защита при разрыве VPN')
   }
+}
+async function applyExceptionSet(next: KillSwitchException[]): Promise<boolean> {
+  if (!(await isKillSwitchActive())) return false
+  const result = await updateKillSwitchExceptions(next.filter(e => e.type === 'app').map(e => e.value), next.filter(e => e.type === 'ip').map(e => e.value), currentLevel === 'strict')
+  if (!result.success) throw new Error(result.message)
+  return true
+}
+async function commitExceptionSet(next: KillSwitchException[]): Promise<void> {
+  const previous = exceptions
+  const applied = await applyExceptionSet(next)
+  try { store.set('killSwitchExceptions', next) }
+  catch (error) {
+    if (applied) {
+      try { await applyExceptionSet(previous) }
+      catch { sendNotification('Обновление и компенсация исключений не подтверждены', 'Core-защита сохранена. Проверьте firewall и повторите операцию.'); throw new Error('Exception persistence and system compensation failed') }
+    }
+    throw error
+  }
+  exceptions = next
 }
 
 // ─── Public API ──────────────────────────────────────────────────────────────
@@ -246,6 +228,7 @@ export const granularKillSwitch = {
     singboxExePath = exePath
     initialized = true
     currentLevel = store.get('killSwitchLevel', 'off')
+    committedLevel = currentLevel
     exceptions = store.get('killSwitchExceptions', [])
 
     // Sync with legacy setting on startup. If they disagree, the legacy
@@ -266,6 +249,7 @@ export const granularKillSwitch = {
       logEvent('warn', 'granular-kill-switch', 'startup sync failed', err)
     }
 
+    committedLevel = currentLevel
     logEvent('info', 'granular-kill-switch', 'initialized', {
       level: currentLevel,
       exceptions: exceptions.length,
@@ -285,7 +269,7 @@ export const granularKillSwitch = {
    * Get the current kill-switch level.
    */
   getLevel(): KillSwitchLevel {
-    return currentLevel
+    return committedLevel
   },
 
   /**
@@ -295,6 +279,7 @@ export const granularKillSwitch = {
    */
   reloadFromStore(): void {
     currentLevel = store.get('killSwitchLevel', 'off')
+    committedLevel = currentLevel
     exceptions = store.get('killSwitchExceptions', [])
     logEvent('info', 'granular-kill-switch', 'reloaded from store after import', {
       level: currentLevel,
@@ -306,44 +291,43 @@ export const granularKillSwitch = {
    * Set the kill-switch level and apply the policy.
    */
   async setLevel(level: KillSwitchLevel): Promise<void> {
-    if (!initialized && level !== 'off') {
-      throw new Error('Cannot enable kill-switch before sing-box path is initialized')
-    }
-    const previousLevel = currentLevel
-    if (process.platform === 'win32') await persistRecoveryPolicy(level === 'strict')
-    currentLevel = level
-    store.set('killSwitchLevel', level)
-
-    // Sync the legacy boolean in app settings so tunController.start() picks
-    // up the change. 'off' → false, anything else → true.
-    try {
-      settingsStore.save({ firewallKillSwitch: level !== 'off' })
-    } catch (err) {
-      logEvent('warn', 'granular-kill-switch', 'failed to sync legacy firewallKillSwitch setting', err)
-    }
-
-    logEvent('info', 'granular-kill-switch', `level changed: ${previousLevel} → ${level}`)
-    try {
-      await applyPolicy()
-    } catch (err) {
-      if (process.platform === 'win32') await persistRecoveryPolicy(previousLevel === 'strict')
-      currentLevel = previousLevel
-      store.set('killSwitchLevel', previousLevel)
+    return serializeExceptionMutation(async () => {
+      if (!['off','standard','strict'].includes(level)) throw new Error('Invalid kill-switch level')
+      if (!initialized && level !== 'off') throw new Error('Cannot enable kill-switch before sing-box path is initialized')
+      const previousLevel = currentLevel
+      // Enter strict before privileged effects; leave it only after success.
+      if (process.platform === 'win32' && level === 'strict') await persistRecoveryPolicy(true)
+      currentLevel = level
       try {
-        settingsStore.save({ firewallKillSwitch: previousLevel !== 'off' })
-      } catch (rollbackErr) {
-        logEvent('warn', 'granular-kill-switch', 'failed to roll back legacy firewallKillSwitch setting', rollbackErr)
+        await applyPolicy()
+        settingsStore.save({ firewallKillSwitch: level !== 'off' })
+        store.set('killSwitchLevel', level)
+        if (process.platform === 'win32') await persistRecoveryPolicy(level === 'strict')
+        committedLevel = level
+        logEvent('info', 'granular-kill-switch', 'level committed after verified firewall operation', { previousLevel, level })
+      } catch (error) {
+        currentLevel = previousLevel
+        const failures: string[] = []
+        // Independent compensation: a failing system step cannot suppress store
+        // restoration or hide the fact that strict protection is uncertain.
+        try { await applyPolicy() } catch { failures.push('firewall compensation') }
+        try { store.set('killSwitchLevel', previousLevel) } catch { failures.push('level persistence') }
+        try { settingsStore.save({ firewallKillSwitch: previousLevel !== 'off' }) } catch { failures.push('legacy setting persistence') }
+        if (process.platform === 'win32') {
+          try { await persistRecoveryPolicy(previousLevel === 'strict' || failures.length > 0) } catch { failures.push('trusted recovery policy') }
+        }
+        if (failures.length) sendNotification('Изменение уровня защиты не подтверждено', failures.join(', '))
+        logEvent('error', 'granular-kill-switch', 'level transition failed', { failures })
+        throw error
       }
-      logEvent('error', 'granular-kill-switch', `level change rolled back: failed to apply ${level}`, err)
-      throw err
-    }
+    })
   },
 
   /**
    * Get the current exception list.
    */
   getExceptions(): KillSwitchException[] {
-    return [...exceptions]
+    return exceptions.map(e => ({ ...e }))
   },
 
   /**
@@ -357,17 +341,8 @@ export const granularKillSwitch = {
         item.value.toLowerCase() === validated.value.toLowerCase()
       )
       if (duplicate) throw new Error('An equivalent kill-switch exception already exists')
-      const previous = [...exceptions]
       const entry: KillSwitchException = { id: randomUUID(), ...validated }
-      exceptions = [...exceptions, entry]
-      store.set('killSwitchExceptions', exceptions)
-      try {
-        if (await isKillSwitchActive()) await engageKillSwitch('active exception list updated')
-      } catch (error) {
-        exceptions = previous
-        store.set('killSwitchExceptions', exceptions)
-        throw error
-      }
+      await commitExceptionSet([...exceptions, entry])
       logEvent('info', 'granular-kill-switch', 'exception added and synchronized', {
         id: entry.id, type: entry.type, value: entry.value, label: entry.label
       })
@@ -382,17 +357,8 @@ export const granularKillSwitch = {
     return serializeExceptionMutation(async () => {
       const index = exceptions.findIndex((e) => e.id === id)
       if (index === -1) throw new Error(`Kill-switch exception not found: ${id}`)
-      const previous = [...exceptions]
       const removed = exceptions[index]
-      exceptions = exceptions.filter(item => item.id !== id)
-      store.set('killSwitchExceptions', exceptions)
-      try {
-        if (await isKillSwitchActive()) await engageKillSwitch('active exception list updated')
-      } catch (error) {
-        exceptions = previous
-        store.set('killSwitchExceptions', exceptions)
-        throw error
-      }
+      await commitExceptionSet(exceptions.filter(item => item.id !== id))
       logEvent('info', 'granular-kill-switch', 'exception removed and synchronized', {
         id: removed.id, type: removed.type, value: removed.value
       })
