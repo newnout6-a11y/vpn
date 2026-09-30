@@ -39,8 +39,8 @@ Windows-клиент (10/11 x64, версия 1.1.22) для изоляции с
 
 - `DefaultOutboundAction=Block` на трёх профилях (Domain/Private/Public) — вместо Block-правил по интерфейсу (старый подход блокировал сам sing-box, т.к. Block всегда побеждает Allow).
 - Allow-правила `VPNTE-killswitch-*`: exe sing-box, exe приложения, владельцы upstream-прокси (Happ `xray.exe` и т.п.), TUN по `-InterfaceAlias`, loopback v4/v6, LAN, DHCP (UDP 67/68), NTP (UDP 123 — часы для REALITY/TLS), пользовательские IP/CIDR.
-- Манифест отката — атомарная запись temp+rename, crash-recovery при старте приложения. **Честная оговорка:** сегодня манифест лежит в `%APPDATA%` (`firewall-killswitch/manifest.json`), а не в `%ProgramData%\VPNTE\manifests\` с DACL — переезд туда с жёстким DACL это план ТЗ (F-186).
-- Granular: `off` / `standard` (блок при обрыве VPN) / `strict` (блок всегда вне VPN). Ядерный `nuclearFirewallReset` (бэкап `.wfw` + `netsh advfirewall reset`).
+- Манифест отката — атомарная запись temp+rename, crash-recovery при старте приложения. Манифест и промежуточные скрипты хранятся в `%ProgramData%\VPNTE\manifests\` с защищённым DACL (только SYSTEM и Администраторы) и проверкой от symlink/junction abuse (WP-3).
+- Granular: `off` / `standard` (блок при обрыве VPN) / `strict` (блок всегда вне VPN). При strictMode аварийное восстановление сохраняет блокировку (fail-closed) до явного действия пользователя. Ядерный `nuclearFirewallReset` (бэкап `.wfw` + `netsh advfirewall reset`).
 - Fail-closed: при падении туннеля kill-switch **намеренно остаётся** до авторестарта/failover.
 
 ## Маршрутизация
@@ -82,10 +82,17 @@ Split tunneling — по **имени процесса** (direct/vpn/none), hot-
 - Слоты 1..47546: порт слота = `17990 + slot - 1` (слот 100 → `18089`). Мутирующие запросы — заголовок `X-VPNTE-Control-Token` (файл `%APPDATA%\VPN Tunnel Enforcer\external-proxy-control-token`).
 
 ## Безопасность: что есть и чего нет
+ 
+**Есть (реализовано в WP-1 и WP-3):**
+- **Шифрование секретов:** ключи VPN, токены, UUID и ссылки подписок шифруются через Electron `safeStorage` (Windows DPAPI); хранилища групп серверов и бэкапы миграции защищены.
+- **Доверенная IPC-граница:** строгая проверка `senderFrame` (только mainFrame), точного origin/file entry point, валидация structured-clone (лимиты глубины, размера строк/бинарников, запрет `__proto__`, NaN/Infinity); действенный `<meta>` CSP для `file://`.
+- **Безопасный экспорт и импорт:** экспорт ключей требует нативного системного диалога подтверждения в main-процессе; очистка буфера обмена через 60 с по SHA-256 таймеру; импорт конфигов и правил доменов привязан к одноразовым capability-токенам нативного диалога.
+- **Транзакционный Firewall и Boot Recovery:** манифесты хранятся в `%ProgramData%\VPNTE\manifests\` с защитой ACL (SYSTEM/Admins only) и защитой от symlinks; регистрация задачи `BootRecoveryTask` в packaged-сборках проверена (UTF-16LE EncodedCommand); независимый покомпонентный откат (DNS, IPv6, Firewall, WinINet); fail-closed блокировка при strictMode; защита от удаления физических сетевых адаптеров.
+- Скрытие приватных данных устройства (HWID, заголовки) из командной строки `curl` (передаются через stdin).
 
-**Есть:** валидация IPC (~170 методов в preload: лимиты 4 КБ текст / 256 КБ VPN-ввод / 500 элементов; `requireString/requirePort/...` в main); долгоживущий elevated PowerShell-хелпер с allowlist командлетов (блок `Invoke-Expression`, сетевых запросов, `route add`); pid-супервизор дочерних процессов (убиваются только «свои» по exePath+commandLine); ACL-hardening рантайм-директории до копирования бинарей; транзакционные манифесты отката; Boot Recovery — scheduled task `VPNTE Boot Recovery` (ONSTART, SYSTEM) → `vpnte-recover.ps1` (чистка orphaned `VPNTE-killswitch*`, восстановление DNS, удаление stale TUN) — **в packaged-сборках регистрация задачи сейчас сломана (F-202/F-203), работает только в dev**.
-
-**Открыто (известные дефекты):** секреты (UUID/ключи/URL подписок) хранятся в plaintext — DPAPI запланирован (F-001/F-189); нет senderFrame-валидации критических IPC-каналов (F-139); CSP ставится через `onHeadersReceived` и потому не действует на renderer, загруженный через `loadFile` (F-206); Boot Recovery в packaged-сборках сломан — задача указывает на несуществующий путь `resources\resources\vpnte-recover.ps1` и её команда `schtasks /TR` содержит неэкранированные кавычки, ошибка проглатывается (F-202/F-203); нет подписи кода; Electron 42 — EOL 20.10.2026, план миграции нужен.
+**Открыто (плановые задачи):**
+- Подпись кода (ожидает решения владельца по сертификату, раздел 10.8 ТЗ-06);
+- Миграция Electron 42 → 44 (дедлайн 20.10.2026, WP-11).
 
 ## Что пока не реализовано (план)
 
