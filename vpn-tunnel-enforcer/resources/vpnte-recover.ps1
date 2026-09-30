@@ -7,6 +7,13 @@ param([switch]$RegisterTask)
 $hasWarnings = $false
 
 $programData = if ($env:ProgramData) { $env:ProgramData } else { 'C:\ProgramData' }
+if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+    $knownProgramData = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
+    if (-not [string]::Equals([IO.Path]::GetFullPath($programData).TrimEnd([char]92),[IO.Path]::GetFullPath($knownProgramData).TrimEnd([char]92),[StringComparison]::OrdinalIgnoreCase)) {
+        Write-Warning 'ProgramData environment does not match the Windows known folder'
+        exit 1
+    }
+}
 $script:recoveryMessages = @()
 function Log([string]$msg) {
     $script:recoveryMessages += [pscustomobject]@{ time=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds(); message=$msg }

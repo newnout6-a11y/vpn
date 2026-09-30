@@ -44,7 +44,9 @@ export async function ensureRecoveryManifestDir(): Promise<void> {
   // DirectoryInfo.Create(DirectorySecurity) creates new directories with their
   // restrictive DACL in the same operation (Windows PowerShell / .NET Framework).
   const script = `$ErrorActionPreference='Stop';${TRUST_CHECK}
-$parent = Get-Item -LiteralPath ${quote(programData)} -Force -ErrorAction Stop
+$knownProgramData = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
+if (-not [string]::Equals([IO.Path]::GetFullPath(${quote(programData)}).TrimEnd([char]92),[IO.Path]::GetFullPath($knownProgramData).TrimEnd([char]92),[StringComparison]::OrdinalIgnoreCase)) { throw 'ProgramData environment does not match the Windows known folder' }
+$parent = Get-Item -LiteralPath $knownProgramData -Force -ErrorAction Stop
 if (-not $parent.PSIsContainer -or ($parent.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Untrusted ProgramData path' }
 foreach ($dir in @(${quote(root)},${quote(getRecoveryManifestDir())})) {
   if (-not (Test-Path -LiteralPath $dir)) {
