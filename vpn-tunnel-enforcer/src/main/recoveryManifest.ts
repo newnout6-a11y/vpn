@@ -1,10 +1,9 @@
-import { mkdir, open, rename, unlink, lstat } from 'fs/promises'
+import { open, rename, unlink, lstat } from 'fs/promises'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import { execElevated } from './admin'
-import { ensureElevatedRuntimeDirHardened, verifyDirectoryHardened } from './runtimeDirSecurity'
 
 const execFile = promisify(execFileCb)
 const MAX_MANIFEST_BYTES = 1024 * 1024
@@ -37,20 +36,33 @@ async function runRead(script: string): Promise<string> {
   })
   return String(stdout).replace(/^\uFEFF/, '').trim()
 }
-async function rejectReparse(path: string): Promise<void> {
-  const item = await lstat(path)
-  if (item.isSymbolicLink() || !item.isDirectory()) throw new Error('Recovery directory is not a real directory')
-}
 export async function ensureRecoveryManifestDir(): Promise<void> {
   if (process.platform !== 'win32') throw new Error('Trusted recovery storage requires Windows')
-  const root = join(process.env.ProgramData || 'C:\\ProgramData', 'VPNTE')
-  for (const dir of [root, getRecoveryManifestDir()]) {
-    await mkdir(dir, { recursive: true })
-    await rejectReparse(dir)
-    const result = await ensureElevatedRuntimeDirHardened(dir, 'recovery-manifest')
-    const verified = await verifyDirectoryHardened(dir)
-    if (!result.hardened || !verified.hardened || result.skipped || verified.skipped) throw new Error('Recovery storage ACL is not trusted')
+  const programData = process.env.ProgramData || 'C:\\ProgramData'
+  const root = join(programData, 'VPNTE')
+  // Never recursively reset ACLs or bless pre-existing user-controlled contents.
+  // DirectoryInfo.Create(DirectorySecurity) creates new directories with their
+  // restrictive DACL in the same operation (Windows PowerShell / .NET Framework).
+  const script = `$ErrorActionPreference='Stop';${TRUST_CHECK}
+$parent = Get-Item -LiteralPath ${quote(programData)} -Force -ErrorAction Stop
+if (-not $parent.PSIsContainer -or ($parent.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Untrusted ProgramData path' }
+foreach ($dir in @(${quote(root)},${quote(getRecoveryManifestDir())})) {
+  if (-not (Test-Path -LiteralPath $dir)) {
+    $acl = New-Object Security.AccessControl.DirectorySecurity
+    $acl.SetAccessRuleProtection($true,$false)
+    foreach ($sid in @('S-1-5-18','S-1-5-32-544')) {
+      $id = New-Object Security.Principal.SecurityIdentifier($sid)
+      $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($id,'FullControl','ContainerInherit,ObjectInherit','None','Allow')))
+    }
+    $acl.SetOwner((New-Object Security.Principal.SecurityIdentifier('S-1-5-32-544')))
+    $info = New-Object IO.DirectoryInfo($dir)
+    $info.Create($acl)
   }
+  Assert-TrustedArtifact $dir $true
+}
+Write-Output 'RECOVERY_STORAGE_VERIFIED'`
+  const { stdout } = await execElevated(`powershell.exe -NoProfile -NonInteractive -EncodedCommand ${Buffer.from(script, 'utf16le').toString('base64')}`, { timeout: 15000 })
+  if (!String(stdout).split(/\r?\n/).includes('RECOVERY_STORAGE_VERIFIED')) throw new Error('Recovery storage verification failed')
 }
 /** Reads and checks directory AND file ACLs before any manifest content is used. */
 export async function readRecoveryManifest<T>(name: string, validate: (value: unknown) => T): Promise<T | null> {
@@ -68,8 +80,9 @@ Get-Content -LiteralPath ${quote(target)} -Raw -Encoding UTF8`)
 }
 /** Unique temp + fsync + admin-owned protected file ACL + rename commit point. */
 export async function writeRecoveryArtifact(name: string, content: string): Promise<void> {
-  await ensureRecoveryManifestDir()
   const target = recoveryManifestPath(name)
+  if (Buffer.byteLength(content, 'utf8') > MAX_MANIFEST_BYTES) throw new Error('Recovery artifact exceeds limit')
+  await ensureRecoveryManifestDir()
   const temporary = recoveryManifestPath(`tmp-${randomUUID()}`)
   try {
     const handle = await open(temporary, 'wx', 0o600)
