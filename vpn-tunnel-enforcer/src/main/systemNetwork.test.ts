@@ -4,7 +4,7 @@ import { execFileSync } from 'child_process'
 const state = vi.hoisted(() => ({
   manifest: null as any, failRead: false, failWrite: false, failApply: false,
   failNetsh: false, failNotify: false, failedSteps: [] as number[], scripts: [] as string[],
-  writes: [] as any[], operations: [] as string[]
+  writes: [] as any[], operations: [] as string[], nativeFailure: false
 }))
 const fixture = () => ({
   schemaVersion: 1, owner: 'VPNTE', createdAt: 1780000000000, userSid: 'S-1-5-21-1-2-3-1001',
@@ -21,6 +21,9 @@ function response(command: string) {
     return { stdout: '', stderr: '' }
   }
   const script = Buffer.from(command.split(' ').at(-1)!, 'base64').toString('utf16le')
+  if (state.nativeFailure) throw Object.assign(new Error(`Command failed: ${command}`), {
+    code: 1, stderr: 'Baseline user identity mismatch'
+  })
   state.scripts.push(script)
   if (script.includes('ToUnixTimeMilliseconds')) return { stdout: JSON.stringify(fixture()), stderr: '' }
   if (script.includes("Write-Output 'BASELINE_APPLIED'")) {
@@ -37,11 +40,12 @@ function response(command: string) {
 vi.mock('./admin', () => ({ execElevated: vi.fn(async (command: string) => response(command)) }))
 vi.mock('child_process', async importOriginal => {
   const actual = await importOriginal<typeof import('child_process')>()
-  const exec = (command: string, _options: unknown, callback: Function) => {
+  const execFile = (file: string, args: string[], _options: unknown, callback: Function) => {
+    const command = `${file} ${args.join(' ')}`
     try { const result = response(command); callback(null, { stdout: result.stdout, stderr: result.stderr }) }
     catch (error) { callback(error) }
   }
-  return { ...actual, exec, default: { ...actual, exec } }
+  return { ...actual, execFile, default: { ...actual, execFile } }
 })
 vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
 vi.mock('./recoveryManifest', () => ({
@@ -61,10 +65,20 @@ const platform = Object.getOwnPropertyDescriptor(process, 'platform')!
 beforeEach(() => {
   state.manifest = null; state.failRead = false; state.failWrite = false; state.failApply = false
   state.failNetsh = false; state.failNotify = false; state.failedSteps = []; state.scripts = []; state.writes = []; state.operations = []
+  state.nativeFailure = false
   Object.defineProperty(process, 'platform', { configurable: true, value: 'win32' })
 })
 afterEach(() => Object.defineProperty(process, 'platform', platform))
 describe('trusted typed network baseline', () => {
+  it('retains the snapshot and reports native stderr without a huge encoded command', async () => {
+    state.manifest = fixture(); state.nativeFailure = true
+    const result = await rollbackTunNetworkBaseline()
+    expect(result.success).toBe(false)
+    expect(result.warnings?.[0]).toContain('Baseline user identity mismatch')
+    expect(result.warnings?.[0]).not.toContain('-EncodedCommand')
+    expect(result.warnings?.[0].length).toBeLessThan(200)
+    expect(state.manifest).not.toBeNull()
+  })
   it('uses canonical trusted storage rather than AppData or arbitrary reg files', () => {
     expect(getTunNetworkBaselineManifestPath()).toBe('C:\\ProgramData\\VPNTE\\manifests\\latest-tun-network-baseline.json')
     expect(validateNetworkBackupManifest(fixture()).values).toHaveLength(9)

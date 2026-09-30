@@ -1,10 +1,10 @@
-import { exec as execCb } from 'child_process'
+import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import { execElevated } from './admin'
 import { logEvent } from './appLogger'
 import { readRecoveryManifest, writeRecoveryManifest, removeRecoveryManifest, recoveryManifestPath } from './recoveryManifest'
 
-const exec = promisify(execCb)
+const execFile = promisify(execFileCb)
 const BASELINE_NAME = 'latest-tun-network-baseline.json'
 export interface SystemNetworkResult {
   success: boolean
@@ -79,8 +79,19 @@ function psJson(value: unknown): string { return `[Text.Encoding]::UTF8.GetStrin
 async function ps(script: string, elevated = false, timeout = 30000) {
   const prelude = '$OutputEncoding=[Console]::OutputEncoding=[Text.UTF8Encoding]::new();$ErrorActionPreference="Stop";'
   const command = `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${Buffer.from(prelude + script, 'utf16le').toString('base64')}`
-  if (elevated) return execElevated(command, { timeout, maxBuffer: 4 * 1024 * 1024 })
-  return exec(command, { windowsHide: true, timeout, maxBuffer: 4 * 1024 * 1024, encoding: 'utf8' })
+  try {
+    if (elevated) return await execElevated(command, { timeout, maxBuffer: 4 * 1024 * 1024 })
+    return await execFile('powershell.exe', [
+      '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand',
+      Buffer.from(prelude + script, 'utf16le').toString('base64')
+    ], { windowsHide: true, timeout, maxBuffer: 4 * 1024 * 1024, encoding: 'utf8' })
+  } catch (error) {
+    // Log the actual failure before the length limit, without the snapshot.
+    const failure = error as { stderr?: string; code?: string | number; message?: string }
+    const diagnostic = String(failure.stderr || failure.message || error)
+      .replace(/-EncodedCommand\s+[A-Za-z0-9+/=]+/g, '-EncodedCommand [omitted]').trim()
+    throw new Error(`PowerShell failed${failure.code === undefined ? '' : ` (${failure.code})`}: ${diagnostic.slice(0, 2000)}`)
+  }
 }
 // Shared snapshot/restore code uses .NET APIs: no locale-dependent reg parsing.
 const REGISTRY_HELPERS = `

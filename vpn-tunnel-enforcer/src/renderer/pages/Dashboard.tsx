@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { motion } from 'framer-motion'
 import { PageTip } from '../components/PageTip'
@@ -80,6 +80,9 @@ function formatBytes(bytes: number): string {
 }
 
 let toastIdCounter = 0
+// Like the global busy flag, this generation must survive a Dashboard remount.
+// Cancellation on another tab invalidates callbacks from the old component.
+const connectionTransitionSeq = { current: 0 }
 function nextToastId(): string {
   return `toast-${++toastIdCounter}-${Date.now()}`
 }
@@ -124,6 +127,7 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
   // useState here used to be lost on unmount → button re-enabled → double
   // start → broken routing.)
   const connectionBusy = useAppStore(s => s.connectionBusy)
+  const cancelling = useAppStore(s => s.connectionCancelling)
   const setConnectionBusy = useAppStore(s => s.setConnectionBusy)
   const connecting = connectionBusy === 'connecting'
   const disconnecting = connectionBusy === 'disconnecting'
@@ -136,7 +140,6 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
   const [nuclearResetting, setNuclearResetting] = useState(false)
   const [ipGeo, setIpGeo] = useState<{ country: string | null; city: string | null }>({ country: null, city: null })
   const [confirmDisconnect, setConfirmDisconnect] = useState(false)
-  const transitionSeqRef = useRef(0)
 
   // Fetch country/city for the current public IP via ipapi.co
   // Only after VPN IP is confirmed — avoids geolocating the user's real IP.
@@ -225,15 +228,15 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
     // second click here is rejected while the first transition is still in
     // flight. Without this the user could double-start the tunnel (main does
     // guard it, but the UI used to still allow the click and then "broke").
-    if (connectionBusy) return
-    const transitionSeq = ++transitionSeqRef.current
+    if (useAppStore.getState().connectionBusy) return
+    const transitionSeq = ++connectionTransitionSeq.current
     setConnectionBusy('connecting')
     addLog('info', t('dashboard.connecting'))
 
     // Safety timeout: if the IPC never resolves (main process hung), clear
     // the busy state after 30s so the power button is not stuck spinning.
     const busyTimeout = setTimeout(() => {
-      if (transitionSeq === transitionSeqRef.current) {
+      if (transitionSeq === connectionTransitionSeq.current) {
         setConnectionBusy(null)
         addLog('warn', 'Превышено время ожидания запуска. Попробуйте снова.')
       }
@@ -248,15 +251,17 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
     try {
       if (settings.connectionMode === 'directVpn') {
         const active = await window.electronAPI.serversGetActive()
+        if (transitionSeq !== connectionTransitionSeq.current) return
         if (!active.profile && !settings.directVpnInput.trim()) {
           showToast('error', t('dashboard.connectionError'), 'No server selected')
           addLog('error', 'Сначала выберите сервер в разделе «Серверы».')
           return
         }
         const saved = await window.electronAPI.saveSettings(settings)
+        if (transitionSeq !== connectionTransitionSeq.current) return
         setSettings(saved)
         const result = await window.electronAPI.startDirectVpn()
-        if (transitionSeq !== transitionSeqRef.current) return
+        if (transitionSeq !== connectionTransitionSeq.current) return
         if (result.success) {
           setMode('hard')
           setTunRunning(true)
@@ -290,9 +295,10 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
           return
         }
         const saved = await window.electronAPI.saveSettings(settings)
+        if (transitionSeq !== connectionTransitionSeq.current) return
         setSettings(saved)
         const results = await window.electronAPI.applyAutoconfig(['env'], proxyAddr, proxyType)
-        if (transitionSeq !== transitionSeqRef.current) return
+        if (transitionSeq !== connectionTransitionSeq.current) return
         if (results?.env) {
           setMode('soft')
           setTunRunning(false)
@@ -310,9 +316,10 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
           return
         }
         const saved = await window.electronAPI.saveSettings(settings)
+        if (transitionSeq !== connectionTransitionSeq.current) return
         setSettings(saved)
         const result = await window.electronAPI.startTun(proxyAddr, proxyType)
-        if (transitionSeq !== transitionSeqRef.current) return
+        if (transitionSeq !== connectionTransitionSeq.current) return
         if (result.success) {
           setMode('hard')
           setTunRunning(true)
@@ -337,13 +344,14 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
         }
       }
     } catch (err: any) {
+      if (transitionSeq !== connectionTransitionSeq.current) return
       const errorMsg = err.message || 'Unknown error'
       showToast('error', t('dashboard.connectionError'), errorMsg)
       addLog('error', `Ошибка запуска: ${errorMsg}`)
     } finally {
       clearTimeout(busyTimeout)
       refreshKillSwitchState()
-      if (transitionSeq === transitionSeqRef.current) {
+      if (transitionSeq === connectionTransitionSeq.current) {
         setConnectionBusy(null)
       }
     }
@@ -351,12 +359,12 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
 
   const handleDisconnect = async () => {
     if (connectionBusy) return
-    const transitionSeq = ++transitionSeqRef.current
+    const transitionSeq = ++connectionTransitionSeq.current
     setConnectionBusy('disconnecting')
     addLog('info', 'Выключаем защиту…')
 
     const busyTimeout = setTimeout(() => {
-      if (transitionSeq === transitionSeqRef.current) {
+      if (transitionSeq === connectionTransitionSeq.current) {
         setConnectionBusy(null)
         addLog('warn', 'Превышено время ожидания остановки. Попробуйте снова.')
       }
@@ -369,7 +377,7 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
         await window.electronAPI.rollbackAutoconfig(['env']).catch(() => undefined)
       }
       const result = await window.electronAPI.stopTun()
-      if (transitionSeq !== transitionSeqRef.current) return
+      if (transitionSeq !== connectionTransitionSeq.current) return
       if (result.success) {
         setMode('off')
         setTunRunning(false)
@@ -391,15 +399,16 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
       addLog('error', `Ошибка остановки: ${errorMsg}`)
     } finally {
       clearTimeout(busyTimeout)
-      if (transitionSeq === transitionSeqRef.current) {
+      if (transitionSeq === connectionTransitionSeq.current) {
         setConnectionBusy(null)
       }
     }
   }
 
   const handleCancelTransition = async () => {
-    if (!circleBusy) return
-    transitionSeqRef.current++
+    if (!circleBusy || useAppStore.getState().connectionCancelling) return
+    connectionTransitionSeq.current++
+    useAppStore.getState().setConnectionCancelling(true)
     setConfirmDisconnect(false)
     const cancellationTarget = isServerSwitching ? 'смену сервера' : 'подключение'
     addLog('warn', `Отменяем ${cancellationTarget}…`)
@@ -410,15 +419,29 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
         addLog('info', 'Отмена смены сервера запрошена; текущий защищённый переход завершит очистку сам.')
       } else {
         const result = await window.electronAPI.cancelTun()
-        if (!result.success && result.error) addLog('warn', `Отмена завершилась с предупреждением: ${result.error}`)
-        setMode('off')
-        setTunRunning(false)
-        setVpnIp(null)
-        useAppStore.getState().resetConnectionState()
+        if (result.success) {
+          setMode('off')
+          setTunRunning(false)
+          setVpnIp(null)
+          useAppStore.getState().resetConnectionState()
+          if (result.warning) {
+            showToast('warning', t('dashboard.cancelledWithWarnings'), result.warning)
+            addLog('warn', `Отмена завершилась с предупреждением: ${result.warning}`)
+          } else {
+            showToast('info', t('dashboard.connectionCancelled'))
+            addLog('info', t('dashboard.connectionCancelled'))
+          }
+        } else {
+          const errorMsg = result.error || t('dashboard.cancelFailed')
+          showToast('error', t('dashboard.cancelFailed'), errorMsg)
+          addLog('error', `Не удалось отменить подключение: ${errorMsg}`)
+        }
       }
     } catch (err: any) {
+      showToast('error', t('dashboard.cancelFailed'), err?.message || String(err))
       addLog('error', `Не удалось отменить ${cancellationTarget}: ${err?.message || String(err)}`)
     } finally {
+      useAppStore.getState().setConnectionCancelling(false)
       setConnectionBusy(null)
     }
   }
@@ -539,6 +562,7 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
   const isProxyActuallyDown = proxyDown && (!traffic?.running || ((traffic.smoothedDownloadBps || traffic.downloadBps) <= 1024 && (traffic.smoothedUploadBps || traffic.uploadBps) <= 1024))
 
   const statusLabel = (() => {
+    if (cancelling) return t('dashboard.cancelling')
     if (connecting) return t('dashboard.connecting')
     if (disconnecting) return t('dashboard.disconnecting', 'Отключение...')
     if (isServerSwitching) return `Переключение сервера${serverSwitchingName ? `: ${serverSwitchingName}` : '...'}`
@@ -764,18 +788,20 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
         )}
 
         {/* Status text */}
-        <p className={`text-sm font-medium ${statusColor}`}>
+        <p className={`text-sm font-medium ${statusColor}`} role="status" aria-live="polite">
           {statusLabel}
         </p>
 
-        {(connecting || isServerSwitching) && (
+        {(connecting || isServerSwitching || cancelling) && (
           <button
             type="button"
             onClick={handleCancelTransition}
+            disabled={cancelling}
+            aria-busy={cancelling}
             className="inline-flex items-center gap-2 px-4 py-1.5 text-sm font-medium rounded-[var(--radius-sm)] border border-[var(--color-warning)]/60 text-[var(--color-warning)] hover:bg-[var(--color-warning)]/10 transition-colors z-10"
           >
-            <Square size={13} />
-            {isServerSwitching ? t('dashboard.cancelServerSwitch') : t('dashboard.cancelConnection')}
+            {cancelling ? <Loader2 size={13} className="animate-spin" /> : <Square size={13} />}
+            {cancelling ? t('dashboard.cancelling') : isServerSwitching ? t('dashboard.cancelServerSwitch') : t('dashboard.cancelConnection')}
           </button>
         )}
 

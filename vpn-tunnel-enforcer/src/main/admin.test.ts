@@ -49,6 +49,38 @@ describe('admin module', () => {
     Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
   })
 
+  // AT-03-007 / F-033: generated recovery commands bypass the shell boundary.
+  it('runs long generated PowerShell directly when already elevated', async () => {
+    const { execElevated, clearElevatedCache } = await import('./admin')
+    clearElevatedCache()
+    mockExecFile.mockImplementationOnce((_file: string, _args: string[], _opts: any, cb: any) => {
+      cb(null, { stdout: 'true', stderr: '' })
+    })
+    mockExecFile.mockImplementationOnce((_file: string, _args: string[], _opts: any, cb: any) => {
+      cb(null, { stdout: 'RECOVERY_OK', stderr: '' })
+    })
+    const payload = Buffer.from("Write-Output 'RECOVERY_OK'\n#" + 'x'.repeat(5000), 'utf16le').toString('base64')
+    const command = `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${payload}`
+    expect(command.length).toBeGreaterThan(8191)
+    expect((await execElevated(command, { timeout: 12345, maxBuffer: 45678 })).stdout).toBe('RECOVERY_OK')
+    expect(mockExecFile).toHaveBeenLastCalledWith('powershell.exe', [
+      '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', payload
+    ], expect.objectContaining({ timeout: 12345, maxBuffer: 45678, windowsHide: true }), expect.any(Function))
+    expect(mockExec).not.toHaveBeenCalled()
+    expect(mockSudoExec).not.toHaveBeenCalled()
+  })
+
+  it('does not reinterpret a shell suffix as PowerShell arguments', async () => {
+    const { execElevated, clearElevatedCache } = await import('./admin')
+    clearElevatedCache()
+    mockExecFile.mockImplementationOnce((_file: string, _args: string[], _opts: any, cb: any) => cb(null, { stdout: 'true', stderr: '' }))
+    mockExec.mockImplementationOnce((_command: string, _opts: any, cb: any) => cb(null, { stdout: '', stderr: '' }))
+    const command = 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand QQ== & echo tail'
+    await execElevated(command)
+    expect(mockExec).toHaveBeenCalledWith(command, expect.any(Object), expect.any(Function))
+    expect(mockExecFile).toHaveBeenCalledTimes(1)
+  })
+
   it('returns false immediately on non-win32 platforms', async () => {
     Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true })
     const { isProcessElevated, clearElevatedCache } = await import('./admin')
