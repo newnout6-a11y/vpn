@@ -1,3 +1,23 @@
+param([switch]$RegisterTask)
+# Registration is used by both the installer and application repair path.
+if ($RegisterTask) {
+    $ErrorActionPreference = 'Stop'
+    $service = New-Object -ComObject 'Schedule.Service'
+    $service.Connect()
+    try { $null = $service.GetFolder('\VPNTE') } catch { $null = $service.GetFolder('\').CreateFolder('VPNTE') }
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes("& '" + $PSCommandPath.Replace("'", "''") + "'"))
+    $arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ' + $encoded
+    $action = New-ScheduledTaskAction -Execute "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -Argument $arguments
+    $trigger = New-ScheduledTaskTrigger -AtStartup
+    $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+    Register-ScheduledTask -TaskName 'BootRecoveryTask' -TaskPath '\VPNTE\' -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
+    $task = Get-ScheduledTask -TaskName 'BootRecoveryTask' -TaskPath '\VPNTE\' -ErrorAction Stop
+    if ($task.Principal.UserId -notin @('SYSTEM','S-1-5-18') -or $task.Actions.Arguments -ne $arguments) { throw 'Recovery task read-back mismatch' }
+    Unregister-ScheduledTask -TaskName 'VPNTE Boot Recovery' -Confirm:$false -ErrorAction SilentlyContinue
+    Write-Output 'RECOVERY_TASK_VERIFIED'
+    exit 0
+}
+
 # VPN Tunnel Enforcer — Boot-time Network Recovery
 # Runs via scheduled task at system startup (before user logon).
 # Recovers from a BSOD/crash that left the firewall blocking, DNS pinned,
@@ -6,7 +26,7 @@
 $hasWarnings = $false
 
 $programData = if ($env:ProgramData) { $env:ProgramData } else { 'C:\ProgramData' }
-$logDir = Join-Path $programData 'VPN-Tunnel-Enforcer'
+$logDir = Join-Path $programData 'VPNTE\manifests'
 if (-not (Test-Path $logDir)) {
     try { New-Item -Path $logDir -ItemType Directory -Force | Out-Null } catch {}
 }
@@ -24,54 +44,77 @@ function Log([string]$msg) {
 
 Log "=== Boot-time recovery started ==="
 
-# ProgramData is the sole authoritative recovery source. Never execute
-# manifest-derived SYSTEM actions from user-writable AppData.
-$trustedManifestDir = Join-Path $programData 'VPN-Tunnel-Enforcer'
-$candidatePaths = @()
+# ACL checks apply to the parent, directory AND each file, with reparse points rejected.
+$trustedManifestDir = Join-Path $programData 'VPNTE\manifests'
+function Assert-TrustedArtifact($path, $directory) {
+    $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or [bool]$item.PSIsContainer -ne [bool]$directory) { throw 'Untrusted recovery path type' }
+    $acl = Get-Acl -LiteralPath $path -ErrorAction Stop
+    $allowed = @('S-1-5-18','S-1-5-32-544')
+    if (-not $acl.AreAccessRulesProtected -or $allowed -notcontains $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value) { throw 'Untrusted recovery owner or inheritance' }
+    foreach ($rule in $acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])) {
+        if ($rule.AccessControlType -eq 'Allow' -and $allowed -notcontains $rule.IdentityReference.Value) { throw 'Untrusted recovery ACE' }
+    }
+}
+function Read-TrustedManifest($name) {
+    $path = Join-Path $trustedManifestDir $name
+    if (-not (Test-Path -LiteralPath $path)) { return $null }
+    Assert-TrustedArtifact $path $false
+    if ((Get-Item -LiteralPath $path).Length -gt 1048576) { throw 'Recovery manifest size limit' }
+    $value = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($value.schemaVersion -ne 1 -or $value.owner -ne 'VPNTE') { throw 'Unsupported recovery manifest schema' }
+    return $value
+}
 try {
-    $acl = Get-Acl -LiteralPath $trustedManifestDir -ErrorAction Stop
-    $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
-    $allowed = @('S-1-5-18', 'S-1-5-32-544')
-    $writeMask = [System.Security.AccessControl.FileSystemRights]::Write -bor
-                 [System.Security.AccessControl.FileSystemRights]::Modify -bor
-                 [System.Security.AccessControl.FileSystemRights]::FullControl -bor
-                 [System.Security.AccessControl.FileSystemRights]::ChangePermissions -bor
-                 [System.Security.AccessControl.FileSystemRights]::TakeOwnership
-    $unsafeRule = $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) |
-        Where-Object {
-            $_.AccessControlType -eq 'Allow' -and
-            $allowed -notcontains $_.IdentityReference.Value -and
-            (($_.FileSystemRights -band $writeMask) -ne 0)
-        } |
-        Select-Object -First 1
-    if (-not $acl.AreAccessRulesProtected -or $allowed -notcontains $owner -or $unsafeRule) {
-        Log "SECURITY: ignored recovery manifest directory with untrusted ACL: $trustedManifestDir"
-        $hasWarnings = $true
-    } else {
-        $candidatePaths += (Join-Path $trustedManifestDir 'latest-physical-adapter-lockdown.json')
+    Assert-TrustedArtifact (Join-Path $programData 'VPNTE') $true
+    Assert-TrustedArtifact $trustedManifestDir $true
+} catch {
+    Write-Warning 'Recovery storage is untrusted; no system changes are permitted'
+    exit 1
+}
+$strictRequired = $false
+$firewallManifest = $null
+try {
+    $policy = Read-TrustedManifest 'recovery-policy.json'
+    if ($policy -and $policy.strictMode -isnot [bool]) { throw 'Invalid strict policy' }
+    $strictRequired = $policy -and $policy.strictMode
+    $firewallManifest = Read-TrustedManifest 'firewall.json'
+    if ($firewallManifest) {
+        if ($firewallManifest.strictMode -isnot [bool] -or $firewallManifest.phase -notin @('prepared','active') -or @($firewallManifest.savedProfiles).Count -ne 3) { throw 'Invalid firewall snapshot' }
+        $names = @()
+        foreach ($p in $firewallManifest.savedProfiles) {
+            if ($p.name -notin @('Domain','Private','Public') -or $p.name -in $names -or $p.defaultOutbound -notin @('Allow','Block','NotConfigured')) { throw 'Invalid firewall profile or policy' }
+            $names += $p.name
+        }
+        $strictRequired = $strictRequired -or $firewallManifest.strictMode
     }
 } catch {
-    Log "SECURITY: recovery manifest ACL validation failed: $_"
+    $strictRequired = $true
     $hasWarnings = $true
+    Log "SECURITY: invalid firewall recovery data, retaining Block"
 }
-
+if ($strictRequired) {
+    # No Allow rules or adapter/DNS cleanup may turn strict protection into fail-open.
+    Set-NetFirewallProfile -Profile Domain,Private,Public -DefaultOutboundAction Block -ErrorAction Stop
+    Log 'Strict protection retained until explicit user action'
+    exit 0
+}
+$candidatePaths = @((Join-Path $trustedManifestDir 'latest-physical-adapter-lockdown.json'))
 $adapterManifestPath = $null
 $adapterManifest = $null
-foreach ($cp in $candidatePaths) {
-    if (Test-Path $cp) {
-        try {
-            $parsed = Get-Content $cp -Raw -Encoding UTF8 | ConvertFrom-Json
-            if ($parsed) {
-                $adapterManifestPath = $cp
-                $adapterManifest = $parsed
-                Log "Adapter lockdown manifest: loaded from $cp"
-                break
+try {
+    $adapterManifest = Read-TrustedManifest 'latest-physical-adapter-lockdown.json'
+    if ($adapterManifest) {
+        if (-not $adapterManifest.adapters -or @($adapterManifest.adapters).Count -gt 256) { throw 'Invalid adapter manifest' }
+        foreach ($a in $adapterManifest.adapters) {
+            if ($a.ifIndex -le 0 -or $a.alias -isnot [string] -or $a.ipv6Enabled -isnot [bool]) { throw 'Invalid adapter snapshot' }
+            foreach ($ip in @($a.ipv4DnsServers) + @($a.forcedDnsTo)) {
+                if ($ip) { $parsedIP = $null; if (-not [Net.IPAddress]::TryParse([string]$ip, [ref]$parsedIP)) { throw 'Invalid DNS snapshot' } }
             }
-        } catch {
-            Log "Adapter lockdown manifest: failed to read $cp ($_)"
         }
+        $adapterManifestPath = $candidatePaths[0]
     }
-}
+} catch { $adapterManifest = $null; $hasWarnings = $true; Log 'SECURITY: rejected adapter manifest' }
 
 function Get-ManifestAdapter($adapter) {
     if (-not $adapterManifest -or -not $adapterManifest.adapters) { return $null }
@@ -117,37 +160,26 @@ function Restore-RegValue($key, $name, $snapshot, $tag) {
     }
 }
 
-# 1. Firewall: restore DefaultOutboundAction to Allow if no VPNTE rules exist
-try {
-    $blockProfiles = Get-NetFirewallProfile -Profile Domain,Private,Public -ErrorAction SilentlyContinue |
-        Where-Object { $_.DefaultOutboundAction -eq 'Block' }
-    $vpnteRules = Get-NetFirewallRule -DisplayName 'VPNTE-killswitch*' -ErrorAction SilentlyContinue |
-        Measure-Object | Select-Object -ExpandProperty Count
-
-    if ($blockProfiles -and $vpnteRules -eq 0) {
-        Log "Firewall: DefaultOutboundAction=Block with no VPNTE rules — restoring Allow"
-        try {
-            Set-NetFirewallProfile -Profile Domain,Private,Public -DefaultOutboundAction Allow -ErrorAction Stop
-            Log "Firewall: restored"
-        } catch {
-            Log "Firewall: failed to restore Allow ($_)"
-            $hasWarnings = $true
-        }
+# 1. Firewall: restore ONLY proven VPNTE changes, never a foreign Block policy.
+$vpnteRules = @(Get-NetFirewallRule -DisplayName 'VPNTE-killswitch*' -ErrorAction SilentlyContinue).Count
+if ($firewallManifest -or $vpnteRules -gt 0) {
+    $profiles = if ($firewallManifest) { $firewallManifest.savedProfiles } else {
+        $hasWarnings = $true
+        Log 'CRITICAL_SECURITY_EVENT: missing manifest; Allow fallback, protection unknown'
+        @('Domain','Private','Public') | ForEach-Object { [pscustomobject]@{name=$_;defaultOutbound='Allow'} }
     }
-    if ($vpnteRules -gt 0) {
-        Log "Firewall: removing $vpnteRules orphaned VPNTE-killswitch rules"
+    $firewallRecovered = $true
+    foreach ($p in $profiles) {
         try {
-            Get-NetFirewallRule -DisplayName 'VPNTE-killswitch*' -ErrorAction Stop | Remove-NetFirewallRule -ErrorAction Stop
-            Set-NetFirewallProfile -Profile Domain,Private,Public -DefaultOutboundAction Allow -ErrorAction Stop
-            Log "Firewall: rules removed, Allow restored"
-        } catch {
-            Log "Firewall: failed to remove rules or restore Allow ($_)"
-            $hasWarnings = $true
-        }
+            Set-NetFirewallProfile -Profile $p.name -DefaultOutboundAction $p.defaultOutbound -ErrorAction Stop
+            if ([string](Get-NetFirewallProfile -Profile $p.name -ErrorAction Stop).DefaultOutboundAction -ne $p.defaultOutbound) { throw 'Firewall read-back mismatch' }
+        } catch { $firewallRecovered = $false; $hasWarnings = $true; Log "Firewall profile restore failed: $($p.name)" }
     }
-} catch {
-    Log "Firewall check encountered error ($_)"
-    $hasWarnings = $true
+    try {
+        Get-NetFirewallRule -DisplayName 'VPNTE-killswitch*' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction Stop
+        if (@(Get-NetFirewallRule -DisplayName 'VPNTE-killswitch*' -ErrorAction SilentlyContinue).Count -gt 0) { throw 'VPNTE rules remain' }
+    } catch { $firewallRecovered = $false; $hasWarnings = $true; Log 'Firewall rule cleanup failed' }
+    if ($firewallRecovered -and $firewallManifest) { Remove-Item -LiteralPath (Join-Path $trustedManifestDir 'firewall.json') -Force -ErrorAction Stop }
 }
 
 # 2. DNS: reset any adapter still pinned to VPNTE resolver (192.168.250.254/253)
@@ -291,40 +323,25 @@ function Clean-VpnteProxyEnv($envPath) {
     }
 }
 
-Clean-VpnteProxyEnv 'HKCU:\Environment'
+# User environment recovery requires an exact ownership snapshot; broad HKEY_USERS cleanup is intentionally disabled.
 
-# When running as SYSTEM, also inspect loaded user profiles under HKEY_USERS
-$loadedUsers = Get-ChildItem 'Registry::HKEY_USERS' -ErrorAction SilentlyContinue |
-    Where-Object { $_.PSChildName -notmatch '_Classes$' -and $_.PSChildName -notmatch '^(S-1-5-18|S-1-5-19|S-1-5-20|\.DEFAULT)$' }
-foreach ($u in $loadedUsers) {
-    $userEnvPath = "Registry::HKEY_USERS\$($u.PSChildName)\Environment"
-    if (Test-Path $userEnvPath) {
-        Clean-VpnteProxyEnv $userEnvPath
-    }
-}
-
-# 8. Remove stale Wintun adapters by driver identity, never by a hard-coded
-# alias that a physical NIC may legitimately have.
-$staleTuns = Get-NetAdapter -ErrorAction SilentlyContinue |
-    Where-Object { $_.InterfaceDescription -match 'Wintun' }
-foreach ($tun in $staleTuns) {
-    $alias = $tun.Name
-    if ($tun) {
-        Log "TUN: removing stale Wintun adapter '$alias'"
-        try {
-            Remove-NetAdapter -Name $alias -Confirm:$false -ErrorAction Stop
-            Log "TUN: successfully removed adapter '$alias'"
-        } catch {
-            try {
-                Disable-NetAdapter -Name $alias -Confirm:$false -ErrorAction Stop
-                Log "TUN: disabled adapter '$alias' (removal failed)"
-            } catch {
-                Log "TUN: failed to remove or disable adapter '$alias' ($_)"
-                $hasWarnings = $true
-            }
+# 8. Remove only the exact recorded VPNTE adapter (stable GUID + driver + subnet).
+try {
+    $tunOwner = Read-TrustedManifest 'tun-owner.json'
+    if ($tunOwner) {
+        if ($tunOwner.interfaceGuid -notmatch '^\{?[a-fA-F0-9-]{36}\}?$') { throw 'Invalid TUN ownership GUID' }
+        $staleTuns = @(Get-NetAdapter -ErrorAction Stop | Where-Object {
+            [string]$_.InterfaceGuid -eq $tunOwner.interfaceGuid -and $_.InterfaceDescription -match 'Wintun'
+        })
+        foreach ($tun in $staleTuns) {
+            $ownedIP = @(Get-NetIPAddress -InterfaceIndex $tun.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -eq '192.168.250.253' -and $_.PrefixLength -eq 30 })
+            if ($ownedIP.Count -eq 0) { throw 'TUN ownership address mismatch' }
+            try { Remove-NetAdapter -Name $tun.Name -Confirm:$false -ErrorAction Stop }
+            catch { Disable-NetAdapter -Name $tun.Name -Confirm:$false -ErrorAction Stop }
         }
+        Remove-Item -LiteralPath (Join-Path $trustedManifestDir 'tun-owner.json') -Force -ErrorAction Stop
     }
-}
+} catch { $hasWarnings = $true; Log 'TUN recovery failed; ownership record preserved' }
 
 if ($adapterManifest -and -not $hasWarnings -and -not $script:hasWarnings) {
     foreach ($cp in $candidatePaths) {

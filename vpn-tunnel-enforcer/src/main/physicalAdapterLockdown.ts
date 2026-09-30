@@ -100,6 +100,8 @@ interface DnsRegistryPolicySnapshot {
 }
 
 interface LockdownManifest {
+  schemaVersion?: 1
+  owner?: 'VPNTE'
   appliedAt: number
   tunDnsIpv4: string
   forceDns?: boolean
