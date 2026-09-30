@@ -27,8 +27,8 @@ describe('boot recovery script source regressions', () => {
   it('trusts only ACL-verified ProgramData and never user profile manifests', () => {
     const script = scriptSource()
 
-    expect(script).toContain("$trustedManifestDir = Join-Path $programData 'VPN-Tunnel-Enforcer'")
-    expect(script).toContain('Get-Acl -LiteralPath $trustedManifestDir')
+    expect(script).toContain("$trustedManifestDir = Join-Path $programData 'VPNTE\\manifests'")
+    expect(script).toContain('Get-Acl -LiteralPath $path')
     expect(script).toContain('AreAccessRulesProtected')
     expect(script).not.toContain("Get-ChildItem 'C:\\Users\\*\\AppData\\Roaming\\vpn-tunnel-enforcer")
     expect(script).toContain('foreach ($cp in $candidatePaths)')
@@ -38,17 +38,16 @@ describe('boot recovery script source regressions', () => {
     const script = scriptSource()
 
     expect(script).toContain('preserved DNS policy keys (no manifest and no orphaned VPNTE rules detected)')
-    expect(script).toContain('elseif ($vpnteRules -gt 0)')
+    expect(script).not.toContain('elseif ($vpnteRules -gt 0)')
   })
 
-  it('only removes orphaned local VPNTE proxy env vars and preserves corporate proxies', () => {
+  it('never sweeps foreign user environment or DNS values by matching contents', () => {
     const script = scriptSource()
-
-    expect(script).toContain('Clean-VpnteProxyEnv')
-    expect(script).toContain('^(https?|socks5h?)://(127\\.0\\.0\\.1|localhost)(:\\d+)?/?$')
-    expect(script).toContain('localhost,127.0.0.1,::1')
-    expect(script).toContain('preserving non-VPNTE $key=$val')
-    expect(script).toContain('Registry::HKEY_USERS')
+    expect(script).not.toContain('Clean-VpnteProxyEnv')
+    expect(script).not.toContain('Registry::HKEY_USERS')
+    expect(script).not.toContain('resetting orphaned DNS')
+    expect(script).toContain('Network baseline retained for verified recovery in its owning user context')
+    expect(script).toContain('$entry.ifIndex -eq $adapter.ifIndex -and $entry.alias -eq $adapter.Name')
   })
 
   it('preserves adapter manifest if recovery finishes with warnings or errors', () => {

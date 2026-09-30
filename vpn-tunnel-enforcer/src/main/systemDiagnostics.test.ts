@@ -18,7 +18,7 @@ vi.mock('./appLogger', () => ({
 }))
 vi.mock('./connectionPlanner', () => ({ getRoutingPlan: vi.fn(() => ({ verdict: 'unknown' })) }))
 vi.mock('./leakDiagnostics', () => ({ runLeakCheck: vi.fn(async () => ({ items: [] })) }))
-vi.mock('./settings', () => ({ settingsStore: { get: () => ({ proxyOverride: '', proxyType: 'socks5' }) } }))
+vi.mock('./settings', () => ({ getBootRecoveryRegistrationStatus: () => ({ status: 'not-checked', message: 'Not checked on Linux' }), settingsStore: { get: () => ({ proxyOverride: '', proxyType: 'socks5' }) } }))
 vi.mock('./ruleSetManager', () => ({ getSmartRouteRuleSetState: vi.fn() }))
 vi.mock('./tunController', () => ({
   getTunRuntimeDir: () => '/tmp/vpnte-test/tun',
