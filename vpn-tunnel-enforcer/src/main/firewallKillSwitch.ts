@@ -391,10 +391,15 @@ export interface KillSwitchOptions {
   appExceptionPaths?: string[]
   extraAllowedRemoteCidrs?: string[]
   tunAdapterAlias?: string
+  // Internal startup barrier: true only after the controller verifies and
+  // journals this adapter's GUID, Wintun identity and owned address.
+  tunAdapterReady?: Promise<boolean>
   strictMode?: boolean
 }
 export async function enableKillSwitch(opts: KillSwitchOptions): Promise<FirewallKillSwitchResult> {
-  return serializeFirewall(() => enableKillSwitchUnlocked(opts))
+  // Attach the rejection handler before entering the serialized queue.
+  const ready = opts.tunAdapterReady?.then(value => value === true, () => false)
+  return serializeFirewall(() => enableKillSwitchUnlocked({ ...opts, tunAdapterReady: ready }))
 }
 export interface FirewallExceptionPolicy { apps: string[]; cidrs: string[] }
 function validateFirewallExceptionPolicy(value: unknown): FirewallExceptionPolicy {
@@ -543,7 +548,6 @@ async function enableKillSwitchUnlocked(opts: KillSwitchOptions): Promise<Firewa
   const tunAllow = `${RULE_PREFIX}-allow-tun`
   const dhcpAllow = `${RULE_PREFIX}-allow-dhcp`
   const ntpAllow = `${RULE_PREFIX}-allow-ntp`
-  const extraIpAllow = `${RULE_PREFIX}-allow-extra-ip`
 
   // Windows Firewall can be picky about mixed IPv4/IPv6 CIDR arrays here. IPv6 is
   // disabled by adapter lockdown anyway, so keep the firewall LAN bypass IPv4-only.
@@ -569,45 +573,15 @@ try {
 } catch { Write-Output "WARN allow-proxy-${i}: $_" }`)
   }
 
-  // User-defined IP/CIDR exceptions (from the granular kill-switch UI). These
-  // were previously collected but never applied — the address stayed blocked.
-  // We validate each entry as an IPv4/IPv6 address or CIDR before letting it
-  // anywhere near New-NetFirewallRule (defence against injection through the
-  // exception list). Anything that doesn't look like an address is dropped.
-  const extraCidrs = (opts.extraAllowedRemoteCidrs ?? []).filter(isValidIpOrCidr)
-  let extraIpAllowPart = ''
-  if (extraCidrs.length > 0) {
-    const v4Cidrs = extraCidrs.filter((c) => !c.includes(':'))
-    const v6Cidrs = extraCidrs.filter((c) => c.includes(':'))
-    const parts: string[] = []
-    if (v4Cidrs.length > 0) {
-      const addressList = v4Cidrs.map((c) => `'${c}'`).join(',')
-      parts.push(`
-try {
-  New-NetFirewallRule \`
-    -DisplayName ${psSingleQuote(extraIpAllow)} \`
-    -Description 'VPN Tunnel Enforcer kill-switch: allow user-defined IPv4 exceptions.' \`
-    -Direction Outbound -Action Allow \`
-    -RemoteAddress ${addressList} \`
-    -Profile Any -Enabled True | Out-Null
-  $rules += ${psSingleQuote(extraIpAllow)}
-} catch { Write-Output "WARN allow-extra-ip-v4: $_" }`)
-    }
-    if (v6Cidrs.length > 0) {
-      const addressList = v6Cidrs.map((c) => `'${c}'`).join(',')
-      parts.push(`
-try {
-  New-NetFirewallRule \`
-    -DisplayName ${psSingleQuote(extraIpAllow)} \`
-    -Description 'VPN Tunnel Enforcer kill-switch: allow user-defined IPv6 exceptions.' \`
-    -Direction Outbound -Action Allow \`
-    -RemoteAddress ${addressList} \`
-    -Profile Any -Enabled True | Out-Null
-  $rules += ${psSingleQuote(extraIpAllow)}
-} catch { Write-Output "WARN allow-extra-ip-v6: $_" }`)
-    }
-    extraIpAllowPart = parts.join('\n')
-  }
+  // Startup callers share their verified adapter barrier. Other callers keep
+  // the bounded native wait; helper policies remain separate and unchanged.
+  const adapterWaitScript = opts.tunAdapterReady ? '$tunAliasFound = $true' : `
+$tunAliasFound = $false
+for ($i = 0; $i -lt 150; $i++) {
+  $a = Get-NetAdapter -Name ${psSingleQuote(tunAlias)} -ErrorAction SilentlyContinue
+  if ($a -and $a.Status -eq 'Up') { $tunAliasFound = $true; break }
+  Start-Sleep -Milliseconds 100
+}`
 
   // One atomic elevated PowerShell script: save defaults → add allows → set block.
   const script = `
@@ -651,24 +625,16 @@ ${proxyAllowParts.join('\n')}
 # DefaultOutboundAction=Block blocks the browser before Windows can route the
 # packet into the TUN, which looks like "internet is blocked" even though
 # sing-box itself is allowed.
-# The -InterfaceAlias rule requires the TUN adapter to exist. We poll for it
-# here (up to ~15s) so the entire kill-switch script can be kicked off in
-# parallel with the JS-side waitForTunInterface, saving ~2-3s of sequential
-# waiting. If the adapter never appears, we skip this rule rather than
-# blocking the whole script.
-$tunAliasFound = $false
-for ($i = 0; $i -lt 150; $i++) {
-  $a = Get-NetAdapter -Name '${tunAlias}' -ErrorAction SilentlyContinue
-  if ($a -and $a.Status -eq 'Up') { $tunAliasFound = $true; break }
-  Start-Sleep -Milliseconds 100
-}
+# The controller's barrier verifies ownership before native effects. Legacy
+# callers without that barrier still wait for adapter Up here.
+${adapterWaitScript}
 if ($tunAliasFound) {
   try {
     New-NetFirewallRule \`
       -DisplayName ${psSingleQuote(tunInterfaceAllow)} \`
       -Description 'VPN Tunnel Enforcer kill-switch: allow captured app traffic through ${tunAlias}.' \`
       -Direction Outbound -Action Allow \`
-      -InterfaceAlias '${tunAlias}' \`
+      -InterfaceAlias ${psSingleQuote(tunAlias)} \`
       -Profile Any -Enabled True | Out-Null
     $rules += ${psSingleQuote(tunInterfaceAllow)}
   } catch { Write-Output "WARN allow-tun-interface: $_" }
@@ -761,8 +727,7 @@ try {
   $rules += ${psSingleQuote(ntpAllow)}
 } catch { Write-Output "WARN allow-ntp: $_" }
 
-# 3h. Allow user-defined IP/CIDR exceptions (granular kill-switch UI).
-${extraIpAllowPart}
+# User exceptions are installed once, with full read-back below.
 
 # --- Step 4: Set DefaultOutboundAction=Block ---
 # Only set Block if the required allow-list core exists. A single optional
@@ -807,6 +772,9 @@ Write-Output "SAVED:$savedJson"
 
   let installedRules: string[] = []
   try {
+    if (opts.tunAdapterReady && !await timedFirewallPhase('verified-adapter-wait', () => opts.tunAdapterReady!)) {
+      throw new Error('Owned TUN adapter was not confirmed; initial firewall apply cancelled')
+    }
     const { stdout } = await timedFirewallPhase('initial-apply-policy', () => ps(script, true, 60000))
     const output = String(stdout || '')
     const lines = output.split('\n').map((l) => l.trim())

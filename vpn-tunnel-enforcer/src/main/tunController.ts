@@ -3177,6 +3177,7 @@ export const tunController = {
       let successHandled = false
       let pollInFlight = false
       let pendingKillSwitch: Promise<{ engaged: boolean; warning: string | null }> | null = null
+      let settleFirewallAdapter: ((ready: boolean) => void) | null = null
       const processWaitStarted = phaseStart()
       const poller = setInterval(async () => {
         if (pollInFlight) return
@@ -3235,29 +3236,12 @@ export const tunController = {
               }
             }
 
-            // Engage the firewall kill-switch NOW, after sing-box is up. The
-            // kill-switch installs an Allow rule scoped to -InterfaceAlias
-            // TUN_ADAPTER_ALIAS, and Windows Firewall validates that alias when the
-            // rule is created. If we engage too early the rule fails silently,
-            // DefaultOutboundAction=Block kicks in, and traffic to the TUN dies.
-            //
-            // We also need the adapter present for the route-metric tweak below,
-            // so wait for it unconditionally — this is a couple of hundred ms in
-            // the steady-state and prevents a leak window where Wi-Fi outranks
-            // our TUN on the default-route tiebreak.
-            // Run waitForTunInterface and the kill-switch IN PARALLEL. The
-            // kill-switch PS script now internally polls for the TUN adapter
-            // before creating the -InterfaceAlias rule, so it no longer needs
-            // the JS-side wait to complete first. This overlaps the ~2-3s
-            // kill-switch PS script with the ~300-3000ms TUN wait, saving
-            // ~2-3s on the critical path.
-            //
-            // The TUN metric set (netsh, ~20ms) runs after waitForTunInterface
-            // completes — it's negligible and needs the adapter present.
+            // Prepare the durable firewall transaction while JS waits for TUN.
+            // Native effects wait for exact ownership validation, eliminating a
+            // second native adapter poll without weakening the helper policy.
             const parallelStarted = phaseStart()
+            const firewallAdapterReady = new Promise<boolean>(resolve => { settleFirewallAdapter = resolve })
 
-            // Kick off the kill-switch immediately (if enabled and not already
-            // active). The script handles TUN adapter polling internally.
             let killSwitchPromise: Promise<{ engaged: boolean; warning: string | null }> | null = null
             if (wantKillSwitch) {
               killSwitchPromise = (async () => {
@@ -3271,7 +3255,8 @@ export const tunController = {
                   proxyOwnerProgramPaths,
                   appExceptionPaths: readGranularKillSwitchExceptions('app'),
                   extraAllowedRemoteCidrs: readGranularKillSwitchExceptions('ip'),
-                  tunAdapterAlias: getTunAdapterAlias()
+                  tunAdapterAlias: getTunAdapterAlias(),
+                  tunAdapterReady: firewallAdapterReady
                 })
                 if (ks.success) {
                   logEvent('info', 'tun', 'kill-switch engaged (parallel with TUN wait)')
@@ -3292,6 +3277,8 @@ export const tunController = {
 
             if (stopRequested) {
               logEvent('info', 'tun', 'start aborted by stop request before TUN wait')
+              settleFirewallAdapter?.(false)
+              if (pendingKillSwitch) await pendingKillSwitch
               await killOwnedRuntimeProcesses()
               await stopXray('start aborted by stop request').catch(() => undefined)
               await rollbackEarlyAdapterLockdown('start aborted by stop request')
@@ -3318,6 +3305,8 @@ export const tunController = {
 
             if (stopRequested) {
               logEvent('info', 'tun', 'start aborted by stop request after TUN wait')
+              settleFirewallAdapter?.(false)
+              if (pendingKillSwitch) await pendingKillSwitch
               await killOwnedRuntimeProcesses()
               await stopXray('start aborted by stop request').catch(() => undefined)
               await rollbackEarlyAdapterLockdown('start aborted by stop request')
@@ -3342,6 +3331,8 @@ export const tunController = {
             // Guaranteed rollback if Wintun failed to come up — no silent leak.
             if (!tunReady) {
               logEvent('error', 'tun', `${TUN_ADAPTER_ALIAS} failed to reach Status=Up within timeout — aborting start and rolling back`)
+              settleFirewallAdapter?.(false)
+              if (pendingKillSwitch) await pendingKillSwitch
               await killOwnedRuntimeProcesses()
               await stopXray('tun interface failed to reach Status=Up').catch(() => undefined)
               await rollbackEarlyAdapterLockdown('tun interface failed to reach Status=Up')
@@ -3367,6 +3358,7 @@ export const tunController = {
             }
 
             await timeAsync('tun-ownership-record', () => recordOwnedTunAdapter(getTunAdapterAlias()))
+            settleFirewallAdapter?.(!stopRequested && !resolved)
 
             // Lock in our TUN's InterfaceMetric as soon as the adapter is up.
             await timeAsync('tun-interface-metric-set', () => applyLowTunInterfaceMetric())
@@ -3595,6 +3587,7 @@ export const tunController = {
           // Let the parallel firewall transaction settle before rolling it back.
           // Each cleanup is independent, and every failure still settles start().
           const cleanupErrors: string[] = []
+          settleFirewallAdapter?.(false)
           if (pendingKillSwitch) await pendingKillSwitch.catch(() => undefined)
           for (const cleanup of [
             () => killOwnedRuntimeProcesses(),

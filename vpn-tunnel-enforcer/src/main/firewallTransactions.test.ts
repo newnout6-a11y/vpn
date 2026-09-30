@@ -27,7 +27,7 @@ vi.mock('./recoveryManifest', () => ({
   writeRecoveryArtifact: vi.fn(async (name: string) => { state.artifacts.push(name) }),
   removeRecoveryManifest: async () => { state.manifest = null }
 }))
-vi.mock('./admin', () => ({ execElevated: (...args: any[]) => state.fallback(...args) }))
+vi.mock('./admin', () => ({ execElevated: (...args: any[]) => state.fallback(...args), isProcessElevated: async () => false }))
 vi.mock('child_process', async importOriginal => {
   const actual = await importOriginal<typeof import('child_process')>()
   const execFile = (...args: any[]) => {
@@ -78,6 +78,38 @@ beforeEach(() => {
 })
 afterEach(() => { Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true }) })
 describe('firewall transaction fault injection (AT-03-003/004/007; F-030, F-186)', () => {
+  it('prepares in parallel but waits for verified TUN before applying policy (AT-03-004)', async () => {
+    let confirm!: (ready: boolean) => void
+    const tunAdapterReady = new Promise<boolean>(resolve => { confirm = resolve })
+    const pending = enableKillSwitch({ ...options, tunAdapterReady, extraAllowedRemoteCidrs: ['192.0.2.1'] })
+    await vi.waitFor(() => expect(state.manifest?.phase).toBe('prepared'))
+    expect(state.scripts.some(s => s.includes('# --- Step 2:'))).toBe(false)
+    confirm(true)
+    expect((await pending).success).toBe(true)
+    const script = state.scripts.find(s => s.includes('# --- Step 2:'))!
+    expect(script).not.toContain('Get-NetAdapter')
+    expect(script).not.toContain('Start-Sleep')
+    expect(script).not.toMatch(/New-NetFirewallRule\s+`\s+-DisplayName 'VPNTE-killswitch-allow-extra-ip'/)
+    // Use the actual helper policy validator, with elevation unavailable, so
+    // accepted means it reached startup; no process or OS mutation is possible.
+    const helper = await vi.importActual<typeof import('./elevatedPsHelper')>('./elevatedPsHelper')
+    await expect(helper.execElevatedPs(script, 1000, 'firewall-killswitch')).rejects.toMatchObject({ code: 'elevated-helper-unavailable' })
+  })
+  it.each(['cancelled', 'rejected'])('does not apply policy after adapter readiness is %s (AT-03-007)', async reason => {
+    const tunAdapterReady = reason === 'cancelled' ? Promise.resolve(false) : Promise.reject(new Error('ownership failed'))
+    expect((await enableKillSwitch({ ...options, tunAdapterReady })).success).toBe(false)
+    expect(state.scripts.some(s => s.includes('# --- Step 2:'))).toBe(false)
+    expect(state.scripts.some(s => s.includes("Write-Output 'RESTORED'"))).toBe(true)
+    expect(state.manifest).toBeNull()
+  })
+  it('retains the bounded native wait for callers without an ownership barrier (AT-03-004)', async () => {
+    await enableKillSwitch(options)
+    const script = state.scripts.find(s => s.includes('# --- Step 2:'))!
+    expect(script).toContain('Get-NetAdapter')
+    expect(script).toContain('$i -lt 150')
+    const helper = await vi.importActual<typeof import('./elevatedPsHelper')>('./elevatedPsHelper')
+    await expect(helper.execElevatedPs(script, 1000, 'firewall-killswitch')).rejects.toMatchObject({ code: 'elevated-helper-script-rejected' })
+  })
   it('executes successful helper commands without persisting fallback scripts (AT-03-004)', async () => {
     expect((await enableKillSwitch(options)).success).toBe(true)
     expect(state.artifacts).toEqual([])
@@ -140,9 +172,10 @@ describe('firewall transaction fault injection (AT-03-003/004/007; F-030, F-186)
     expect(state.manifest.pendingExceptionPolicy.cidrs).toEqual(['192.0.2.1'])
   })
   it.skipIf(process.platform !== 'win32' && !process.env.VPNTE_PWSH).each([
-    { cidrs: [] }, { cidrs: ['192.0.2.1'] }, { cidrs: ['192.0.2.1', '198.51.100.2'] }
-  ])('executes the merged production transaction in native PowerShell: $cidrs (AT-03-008)', async ({ cidrs }) => {
-    await enableKillSwitch({ ...options, appExceptionPaths: [], extraAllowedRemoteCidrs: cidrs })
+    { cidrs: [], ready: false }, { cidrs: ['192.0.2.1'], ready: false }, { cidrs: ['192.0.2.1', '198.51.100.2'], ready: false },
+    { cidrs: [], ready: true }, { cidrs: ['192.0.2.1'], ready: true }, { cidrs: ['192.0.2.1', '198.51.100.2'], ready: true }
+  ])('executes the merged production transaction in native PowerShell: $cidrs / barrier $ready (AT-03-008)', async ({ cidrs, ready }) => {
+    await enableKillSwitch({ ...options, appExceptionPaths: [], extraAllowedRemoteCidrs: cidrs, ...(ready ? { tunAdapterReady: Promise.resolve(true) } : {}) })
     const transaction = state.scripts.find(s => s.includes('# --- Step 2:'))!
     // Cmdlets are fixtures; this never writes Windows policy or recovery files.
     const script = `

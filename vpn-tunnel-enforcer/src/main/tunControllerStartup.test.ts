@@ -18,7 +18,7 @@ function harness() {
     applyLowTunInterfaceMetric: vi.fn(async () => {}),
     runPowerShell: vi.fn(async () => '5'),
     isKillSwitchActive: vi.fn(async () => false),
-    enableKillSwitch: vi.fn(async () => ({ success: true })),
+    enableKillSwitch: vi.fn(async (opts: { tunAdapterReady?: Promise<boolean> }) => ({ success: await opts.tunAdapterReady })),
     strictRecoveryRequired: vi.fn(async () => false),
     readGranularKillSwitchExceptions: vi.fn(() => []),
     getTunAdapterAlias: () => 'Ethernet 5',
@@ -36,7 +36,7 @@ function harness() {
   // Only this extracted callback runs; never import/start the actual engine.
   const compiled = ts.transpileModule(`
 let resolved=false, successHandled=false, pollInFlight=false, stopRequested=false;
-let attempts=0, startAbortedReason=null, pendingKillSwitch=null;
+let attempts=0, startAbortedReason=null, pendingKillSwitch=null, settleFirewallAdapter=null;
 const maxAttempts=30, poller=1, wantKillSwitch=true, adapterLockdownPromise=null;
 const runtime={singbox:'fixture.exe'}, proxyOwnerProgramPaths=[], processWaitStarted=0;
 const phases={},phaseDurations={},tStart=Date.now();
@@ -47,12 +47,46 @@ const wantAdapterLockdown=false,startOptions={},STABLE_RESET_MS=60000;
 let killSwitchEngaged=false,killSwitchWarning=null,restartAttempt=0,lastStartOptions=null;
 let stopInProgress=false,userInitiatedStop=false,stableTimer=null;
 function finish(result){if(!resolved){resolved=true;onFinish(result)}}
-return ${callback};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
-  const poll = new Function(...Object.keys(os), compiled)(...Object.values(os)) as () => Promise<void>
-  return { poll, ...os }
+return {poll: ${callback}, requestStop: () => {stopRequested=true}};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
+  const control = new Function(...Object.keys(os), compiled)(...Object.values(os)) as { poll: () => Promise<void>; requestStop: () => void }
+  return { ...control, ...os }
 }
 
 describe('startup callback fault boundaries', () => {
+  it('shares adapter readiness only after exact ownership validation (AT-02-004)', async () => {
+    const h = harness()
+    let verify!: () => void
+    h.recordOwnedTunAdapter.mockReturnValue(new Promise(resolve => { verify = resolve }))
+    const pending = h.poll()
+    await vi.waitFor(() => expect(h.recordOwnedTunAdapter).toHaveBeenCalledOnce())
+    const gate = h.enableKillSwitch.mock.calls[0][0].tunAdapterReady!
+    const observed = vi.fn()
+    void gate.then(observed)
+    await Promise.resolve()
+    expect(observed).not.toHaveBeenCalled()
+    verify()
+    await pending
+    expect(observed).toHaveBeenCalledWith(true)
+    expect(h.onFinish).toHaveBeenCalledWith({ success: true, warning: null })
+  })
+
+  it.each(['interface wait', 'ownership'])('settles cancellation during %s before rollback (AT-02-005)', async phase => {
+    const h = harness()
+    h.recordOwnedTunAdapter.mockResolvedValue(undefined)
+    let release!: () => void
+    if (phase === 'interface wait') h.waitForTunInterface.mockReturnValue(new Promise(resolve => { release = () => resolve(true) }))
+    else h.recordOwnedTunAdapter.mockReturnValue(new Promise(resolve => { release = resolve }))
+    const pending = h.poll()
+    await vi.waitFor(() => expect(phase === 'interface wait' ? h.waitForTunInterface : h.recordOwnedTunAdapter).toHaveBeenCalledOnce())
+    h.requestStop()
+    release()
+    await pending
+    expect(await h.enableKillSwitch.mock.calls[0][0].tunAdapterReady).toBe(false)
+    expect(h.disableKillSwitchIfActive).toHaveBeenCalledOnce()
+    expect(h.onFinish).toHaveBeenCalledOnce()
+    expect(h.onFinish).toHaveBeenCalledWith(expect.objectContaining({ success: false }))
+    expect(h.notifyStatus).not.toHaveBeenCalledWith('running')
+  })
   it('completes a verified startup once without performing rollback', async () => {
     const h = harness()
     h.recordOwnedTunAdapter.mockResolvedValue(undefined)
