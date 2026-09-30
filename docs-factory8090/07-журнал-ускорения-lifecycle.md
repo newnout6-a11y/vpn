@@ -86,3 +86,39 @@
 - Read-only native benchmark холодных/повторных probes; сравнение до/после по одинаковому сценарию.
 - Дополнительный разбор Xray, DNS/bootstrap, concurrent диагностики, UI, cancel, restart, shutdown.
 - Отдельный разбор предупреждения `TUN routes are not active after direct probe timeout`: start returned success, VPN IP/routes не подтверждены. Недостаточно доказательств, чтобы обвинить конкретный сервер или Happ.
+
+### 2026-10-01 — этап 1: firewall fast path и native benchmark
+
+Изменения:
+
+- `firewallKillSwitch.ps`: сначала постоянный помощник (включая read-only запросы), fallback-файл создаётся только если он нужен. ACL-проверка fallback-файла сохранена.
+- После timeout/exit/неизвестного отказа helper нет слепого повторного исполнения. Fallback допустим лишь для typed unavailable/script-rejected, то есть до начала эффектов. Ответ с ненулевым exitCode считается отказом, а не успешной командой.
+- Initial core policy и initial exceptions теперь одна native transaction под одним prepared journal. `pendingExceptionPolicy` записывается ДО эффектов; Block/rules/filter/set read-back выполняется в том же скрипте, включая пустой набор. Active commit содержит проверенную policy и удаляет pending. При script/marker/commit failure выполняется компенсация всей initial transaction; неудачная компенсация сохраняет prepared journal.
+- Live updates уже работающей защиты остаются отдельными сериализованными транзакциями с прежним baseline.
+- Новые phase timing: read manifest, snapshot profiles, prepared journal, native apply, active commit, live phases, restore policy, clear journal. Command timing различает helper/file/elevated-file, стоимость записи fallback и выполнения. Логи не содержат текст команд/секреты.
+- Добавлен повторяемый read-only `scripts/benchmark-windows-probes.mjs`. Он не подключает VPN и не меняет network/firewall/registry/ACL. Сырые времена в `.tmp/windows-probe-benchmark.json`; таблица ниже сохранена в Git.
+
+| Read-only probe (5 cold + 5 warm) | Cold median | Warm first | Warm median |
+| --- | ---: | ---: | ---: |
+| No-op | 138 ms | 72 ms | 1 ms |
+| Firewall profiles | 684 ms | 534 ms | 15 ms |
+| Owned firewall rule count | 937 ms | 261 ms | 248 ms |
+| Adapter count | 752 ms | 607 ms | 23 ms |
+| Default/split-route count | 532 ms | 560 ms | 13 ms |
+
+Все 50 probes успешны. Вывод: повторное использование процесса особенно полезно для NetSecurity/NetAdapter/NetTCPIP после первого импорта; wildcard firewall query остаётся заметной операцией и в тёплом процессе. Это не измерение end-to-end подключения после изменений.
+
+Проверки до финального DoD этого этапа:
+
+- `npm.cmd run typecheck` — exit 0.
+- `$env:VPNTE_PWSH='powershell.exe'; npm.cmd test -- src/main/firewallTransactions.test.ts src/main/elevatedPsHelper.test.ts src/main/tunControllerStartup.test.ts --reporter=dot --maxWorkers=4` — 3 файла, 54 теста passed, 0 skipped/failures (3.15 s).
+- Native initial policy: empty/one/multiple CIDRs; native live policy: empty/one/multiple CIDRs; compensation, absent helper, helper rejection/unavailable/timeout/exit, exitCode failure; preservation of original Block; no fallback artifacts on fast path.
+- Промежуточная full suite до последнего read-only fast path: 154 passed / 2 skipped files, 1494 passed / 10 skipped tests, 0 failures (48.92 s). Итоговый прогон будет записан отдельно.
+- `python -X utf8 ../docs/04-приёмочные-тесты/traceability/check-coverage.py` — exit 0, AC 927/927, F 210/210.
+- Native harness сначала обнаружил ограничения Windows command-line длины и две ошибки фикстуры (имя hash-map конфликтовало с production `$rules`, затем streaming enumeration менялась при Remove). Harness перенесён в собственный `.tmp/firewall-initial-*/harness.ps1`, фикстура выдаёт снимок коллекции; собственные файлы/каталог удаляются в finally. Эти неуспешные прогоны не считаются доказательством успешной проверки.
+
+Не считать цель завершённой: остаются storage cold launches, main firewall adapter wait/fallback, повторный stop/shutdown cleanup, Xray/DNS/preflight/diagnostics и маршрутный warning. Тайминги реального пользовательского start/stop после изменений ещё не получены.
+
+Дополнительный контроль: первый итоговый full run (50.45 s) дал 1495 passed, 10 skipped, 1 timeout в существующем `twitchHlsProbe.test.ts` (5 s). Отдельный повтор этого файла — 14/14 passed (2.94 s). Тест реально вызывает media probe без HTTP fixture; поэтому этот результат не объявлен успешным полным DoD. Выполняется повтор всего набора без параллельного native benchmark. Production-код media probe и timeout теста не менялись.
+
+Итоговый DoD этапа 1: повтор `npm.cmd test -- --reporter=dot --maxWorkers=4` — exit 0, 154 passed / 2 skipped files, 1496 passed / 10 skipped tests, 0 failures (48.80 s). `npm.cmd run typecheck`, coverage (AC 927/927, F 210/210), `node --check scripts/benchmark-windows-probes.mjs`, `git diff --check` — exit 0. Все изменения этого этапа готовы к атомарному коммиту; наблюдённый media-probe timeout оставлен в журнале как ограничение существующего теста.

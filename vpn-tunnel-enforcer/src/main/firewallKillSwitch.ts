@@ -140,6 +140,29 @@ function cmdDoubleQuote(value: string): string {
 }
 
 async function ps(script: string, elevated = false, timeout = 30000) {
+  // The persistent helper executes source from its pipe. A protected .ps1 is
+  // needed only by the fallback; writing it first adds two cold PS launches.
+  if (isElevatedPsHelperRunning()) {
+    const started = performance.now()
+    let result: Awaited<ReturnType<typeof execElevatedPs>> | undefined
+    try {
+      result = await execElevatedPs(script, timeout, 'firewall-killswitch')
+    } catch (err: any) {
+      // Only a known rejection before execution permits a fallback. A timeout
+      // or lost reply may follow effects; replaying would duplicate mutation.
+      if (!['elevated-helper-script-rejected', 'elevated-helper-unavailable'].includes(err?.code)) throw err
+      logEvent('debug', 'firewall-killswitch', 'helper fallback', {
+        code: err?.code ?? 'unclassified', durationMs: Math.round(performance.now() - started)
+      })
+    }
+    if (result) {
+      logEvent('debug', 'firewall-killswitch', 'command timing', {
+        transport: 'helper', durationMs: Math.round(performance.now() - started)
+      })
+      if (result.exitCode) throw new Error(result.stderr || `Firewall command failed (exit ${result.exitCode})`)
+      return { stdout: result.stdout, stderr: result.stderr }
+    }
+  }
   // Keep elevated scripts under userData instead of %TEMP% and do not remove them
   // immediately: sudo-prompt can return before the elevated PowerShell has opened
   // the -File path, which made PowerShell report "argument for -File does not exist".
@@ -148,20 +171,13 @@ async function ps(script: string, elevated = false, timeout = 30000) {
     scriptDir,
     `script-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.ps1`
   )
+  const persistStarted = performance.now()
   await writeRecoveryArtifact(scriptPath.slice(scriptDir.length + 1), '\ufeff' + withPowerShellPrelude(script))
+  const persistMs = Math.round(performance.now() - persistStarted)
+  const executionStarted = performance.now()
 
   try {
     if (elevated) {
-      // Use persistent PS helper if available — avoids 300-800ms
-      // powershell.exe startup overhead per call.
-      if (isElevatedPsHelperRunning()) {
-        try {
-          const result = await execElevatedPs(script, timeout, 'firewall-killswitch')
-          return { stdout: result.stdout, stderr: result.stderr }
-        } catch (err: any) {
-          // PS helper failed — fall back to execElevated
-        }
-      }
       const command = `powershell -NoProfile -ExecutionPolicy Bypass -File ${cmdDoubleQuote(scriptPath)}`
       return execElevated(command, { timeout, maxBuffer: 1024 * 1024 * 4 })
     }
@@ -180,6 +196,10 @@ async function ps(script: string, elevated = false, timeout = 30000) {
       stderr: String(result.stderr ?? '')
     }
   } finally {
+    logEvent('debug', 'firewall-killswitch', 'command timing', {
+      transport: elevated ? 'elevated-file' : 'file', persistMs,
+      durationMs: Math.round(performance.now() - executionStarted)
+    })
     if (!elevated) {
       await unlink(scriptPath).catch(() => undefined)
     } else {
@@ -347,6 +367,19 @@ Write-Output "RULE:$ruleName"
  * the script fails partway, only harmless extra Allow rules remain.
  */
 let firewallQueue: Promise<unknown> = Promise.resolve()
+async function timedFirewallPhase<T>(phase: string, operation: () => Promise<T>): Promise<T> {
+  const started = performance.now()
+  let outcome = 'rejected'
+  try {
+    const result = await operation()
+    outcome = 'fulfilled'
+    return result
+  } finally {
+    logEvent('debug', 'firewall-killswitch', 'phase timing', {
+      phase, outcome, durationMs: Math.round(performance.now() - started)
+    })
+  }
+}
 function serializeFirewall<T>(operation: () => Promise<T>): Promise<T> {
   const result = firewallQueue.then(operation, operation)
   firewallQueue = result.then(() => undefined, () => undefined)
@@ -423,18 +456,18 @@ export function updateKillSwitchExceptions(apps: string[], cidrs: string[], stri
   return serializeFirewall(() => updateExceptionsUnlocked(apps, cidrs, strictMode))
 }
 async function updateExceptionsUnlocked(apps: string[], cidrs: string[], strictMode?: boolean): Promise<FirewallKillSwitchResult> {
-  const previous = await readManifest()
+  const previous = await timedFirewallPhase('live-read-manifest', readManifest)
   if (!previous || manifestReadFailure || previous.phase !== 'active') return { success: false, state: 'unknown', message: 'Live exceptions require a trusted active firewall transaction' }
   const policy = validateFirewallExceptionPolicy({ apps: await Promise.all(apps.map(canonicalizeExceptionAppPath)), cidrs })
   const old = previous.exceptionPolicy ?? { apps: [], cidrs: [] }
   // Original baseline and core rule names are never replaced by a live update.
-  await writeManifest({ ...previous, pendingExceptionPolicy: policy })
+  await timedFirewallPhase('live-prepare-journal', () => writeManifest({ ...previous, pendingExceptionPolicy: policy }))
   try {
-    const { stdout } = await ps(exceptionPolicyScript(policy), true, 30000)
+    const { stdout } = await timedFirewallPhase('live-apply-policy', () => ps(exceptionPolicyScript(policy), true, 30000))
     if (!String(stdout).split(/\r?\n/).includes('EXCEPTIONS_VERIFIED')) throw new Error('Exception verification marker missing')
     const { pendingExceptionPolicy: _pending, ...committed } = previous
-    await writeManifest({ ...committed, strictMode: strictMode ?? previous.strictMode, exceptionPolicy: policy,
-      ruleNames: [...previous.ruleNames.filter(n => !n.startsWith(`${RULE_PREFIX}-user-`) && n !== `${RULE_PREFIX}-allow-extra-ip`), ...exceptionRuleNames(policy)] })
+    await timedFirewallPhase('live-commit-journal', () => writeManifest({ ...committed, strictMode: strictMode ?? previous.strictMode, exceptionPolicy: policy,
+      ruleNames: [...previous.ruleNames.filter(n => !n.startsWith(`${RULE_PREFIX}-user-`) && n !== `${RULE_PREFIX}-allow-extra-ip`), ...exceptionRuleNames(policy)] }))
     return { success: true, message: 'User exceptions verified; core/upstream protection preserved' }
   } catch (error) {
     try {
@@ -476,7 +509,10 @@ async function enableKillSwitchUnlocked(opts: KillSwitchOptions): Promise<Firewa
 
   if ((opts.extraAllowedRemoteCidrs ?? []).some(c => !isValidIpOrCidr(c))) return { success: false, message: 'Invalid exception IP/CIDR' }
   if (opts.appExceptionPaths) opts = { ...opts, appExceptionPaths: await Promise.all(opts.appExceptionPaths.map(canonicalizeExceptionAppPath)) }
-  const previous = await readManifest()
+  const initialExceptions = opts.appExceptionPaths !== undefined || opts.extraAllowedRemoteCidrs !== undefined
+    ? validateFirewallExceptionPolicy({ apps: opts.appExceptionPaths ?? [], cidrs: opts.extraAllowedRemoteCidrs ?? [] })
+    : null
+  const previous = await timedFirewallPhase('initial-read-manifest', readManifest)
   if (manifestReadFailure) return { success: false, state: 'unknown', message: 'Recovery manifest is untrusted or invalid; refusing to replace its baseline' }
   if (previous?.phase === 'active') {
     if (opts.appExceptionPaths !== undefined || opts.extraAllowedRemoteCidrs !== undefined || opts.strictMode !== undefined) {
@@ -484,15 +520,16 @@ async function enableKillSwitchUnlocked(opts: KillSwitchOptions): Promise<Firewa
     }
     return { success: true, skipped: true, message: 'Active firewall preserved; use differential exceptions update' }
   }
-  const savedProfiles = previous?.savedProfiles ?? await snapshotFirewallProfiles()
+  const savedProfiles = previous?.savedProfiles ?? await timedFirewallPhase('snapshot-profiles', snapshotFirewallProfiles)
   const prepared: FirewallManifest = {
     schemaVersion: 1, owner: 'VPNTE', operationId: previous?.operationId ?? randomUUID(),
     phase: 'prepared', strictMode: opts.strictMode ?? previous?.strictMode ?? false,
     createdAt: previous?.createdAt ?? Date.now(), savedProfiles,
-    ruleNames: previous?.ruleNames ?? [], singboxExePath: opts.singboxExePath
+    ruleNames: previous?.ruleNames ?? [], singboxExePath: opts.singboxExePath,
+    ...(initialExceptions ? { pendingExceptionPolicy: initialExceptions } : {})
   }
   // This durable snapshot MUST precede any New/Remove/Set-NetFirewall operation.
-  try { await writeManifest(prepared) } catch (error) {
+  try { await timedFirewallPhase('initial-prepare-journal', () => writeManifest(prepared)) } catch (error) {
     return { success: false, message: 'Firewall unchanged: recovery snapshot could not be committed', details: String(error) }
   }
 
@@ -760,6 +797,9 @@ try {
 }
 
 # Output: JSON with rules + saved profiles
+# Initial exceptions share the prepared recovery journal and the native
+# transaction. Their full read-back still runs, including the empty policy.
+${initialExceptions ? exceptionPolicyScript(initialExceptions) : ''}
 $rulesCsv = ($rules -join ',')
 Write-Output "RULES:$rulesCsv"
 Write-Output "SAVED:$savedJson"
@@ -767,9 +807,13 @@ Write-Output "SAVED:$savedJson"
 
   let installedRules: string[] = []
   try {
-    const { stdout } = await ps(script, true, 60000)
+    const { stdout } = await timedFirewallPhase('initial-apply-policy', () => ps(script, true, 60000))
     const output = String(stdout || '')
     const lines = output.split('\n').map((l) => l.trim())
+
+    if (initialExceptions && !lines.includes('EXCEPTIONS_VERIFIED')) {
+      throw new Error('Initial exception verification marker missing')
+    }
 
     const rulesLine = lines.find((l) => l.startsWith('RULES:'))
     if (rulesLine) {
@@ -799,7 +843,12 @@ Write-Output "SAVED:$savedJson"
   }
 
   try {
-    await writeManifest({ ...prepared, phase: 'active', ruleNames: installedRules })
+    const { pendingExceptionPolicy: _pending, ...committed } = prepared
+    if (initialExceptions) installedRules = [
+      ...installedRules.filter(n => n !== `${RULE_PREFIX}-allow-extra-ip`), ...exceptionRuleNames(initialExceptions)
+    ]
+    await timedFirewallPhase('initial-commit-journal', () => writeManifest({ ...committed, phase: 'active', ruleNames: installedRules,
+      ...(initialExceptions ? { exceptionPolicy: initialExceptions } : {}) }))
   } catch (error: any) {
     // The firewall transaction is not committed until its recovery manifest
     // is durable. Compensate immediately instead of leaving Block active with
@@ -813,11 +862,6 @@ Write-Output "SAVED:$savedJson"
       message: 'Kill-switch отменён: не удалось надёжно записать recovery manifest',
       details: error?.message || String(error)
     }
-  }
-
-  if (opts.appExceptionPaths !== undefined || opts.extraAllowedRemoteCidrs !== undefined) {
-    const updated = await updateExceptionsUnlocked(opts.appExceptionPaths ?? [], opts.extraAllowedRemoteCidrs ?? [], opts.strictMode)
-    if (!updated.success) return updated
   }
 
   logEvent('info', 'firewall-killswitch', 'kill-switch engaged (DefaultOutboundAction=Block)', {
@@ -869,8 +913,8 @@ async function disableKillSwitchUnlocked(reason: string): Promise<FirewallKillSw
   }
 
   try {
-    await restoreAndCleanup()
-    await clearManifest()
+    await timedFirewallPhase('restore-policy', () => restoreAndCleanup())
+    await timedFirewallPhase('clear-journal', clearManifest)
   } catch (err: any) {
     logEvent('warn', 'firewall-killswitch', 'failed to fully restore kill-switch', err)
     return {
