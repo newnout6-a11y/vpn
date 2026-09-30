@@ -644,10 +644,7 @@ Write-Output "SAVED:$savedJson"
     const savedLine = lines.find((l) => l.startsWith('SAVED:'))
     if (savedLine) {
       try {
-        const parsed = JSON.parse(savedLine.slice(5))
-        savedProfiles = Array.isArray(parsed)
-          ? parsed.map((p: any) => ({ name: String(p.name), defaultOutbound: String(p.defaultOutbound) }))
-          : []
+        savedProfiles = validateSavedProfiles(JSON.parse(savedLine.slice('SAVED:'.length)))
       } catch {
         savedProfiles = [
           { name: 'Domain', defaultOutbound: 'Allow' },
