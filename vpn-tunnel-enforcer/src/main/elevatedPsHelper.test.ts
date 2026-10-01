@@ -9,12 +9,14 @@ vi.mock('./appLogger', () => ({
 }))
 
 const mockKill = vi.fn()
+const mockChildren: any[] = []
 const mockExecFile = vi.fn((_cmd: string, _args: string[], _opts: any, cb?: any) => {
   if (typeof cb === 'function') cb(null, '', '')
 })
 
 vi.mock('child_process', () => {
-  const makeChild = () => ({
+  const makeChild = () => {
+    const child = {
     pid: 9999,
     killed: false,
     exitCode: null,
@@ -26,7 +28,10 @@ vi.mock('child_process', () => {
     stdout: { on: vi.fn() },
     stderr: { on: vi.fn() },
     on: vi.fn()
-  })
+    }
+    mockChildren.push(child)
+    return child
+  }
 
   return {
     default: {
@@ -188,5 +193,35 @@ describe('elevated PS helper errors', () => {
     })
 
     vi.useRealTimers()
+  })
+
+  it.each([20, undefined, -1, '20', 10000])('records safe helper timing with executionMs=%s (AT-00-005)', async executionMs => {
+    ;(globalThis as any).__elevatedPsHelperMock = { elevated: true }
+    const { execElevatedPs, startElevatedPsHelper, stopElevatedPsHelper } = await import('./elevatedPsHelper')
+    const { logEvent } = await import('./appLogger')
+    const logger = vi.mocked(logEvent)
+    logger.mockClear()
+    await startElevatedPsHelper()
+    const child = mockChildren.at(-1)!
+    const receive = child.stdout.on.mock.calls.find((call: any[]) => call[0] === 'data')[1]
+    const clock = vi.spyOn(performance, 'now').mockReturnValue(100)
+    try {
+      const pending = execElevatedPs('Get-NetFirewallProfile # private-source', 5000, 'firewall-killswitch')
+      const { id } = JSON.parse(child.stdin.write.mock.calls.at(-1)[0])
+      clock.mockReturnValue(150)
+      receive(Buffer.from(JSON.stringify({ id, stdout: 'private-output', stderr: 'private-error', exitCode: 0, executionMs }) + '\n'))
+      expect(await pending).toEqual({ stdout: 'private-output', stderr: 'private-error', exitCode: 0 })
+      const timing = logger.mock.calls.find(call => call[1] === 'ps-helper' && call[2] === 'command timing')![3]
+      expect(timing).toMatchObject({ policy: 'firewall-killswitch', roundtripMs: 50 })
+      if (executionMs === 20) expect(timing).toMatchObject({ executionMs: 20, transportOverheadMs: 30 })
+      else {
+        expect(timing).not.toHaveProperty('executionMs')
+        expect(timing).not.toHaveProperty('transportOverheadMs')
+      }
+      expect(JSON.stringify(timing)).not.toContain('private')
+    } finally {
+      clock.mockRestore()
+      stopElevatedPsHelper()
+    }
   })
 })
