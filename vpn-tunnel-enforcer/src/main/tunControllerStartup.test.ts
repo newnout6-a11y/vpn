@@ -201,16 +201,41 @@ describe('startup callback fault boundaries', () => {
     expect(h.notifyStatus).toHaveBeenCalledWith('stopped')
   })
 
-  it('reports every cleanup failure and still settles the connection attempt', async () => {
+  it.each(['alive', 'probe failed', 'kill failed'])('retains protection after validation failure when runtime is %s (AT-02-004 / AT-03-007)', async outcome => {
     const h = harness()
-    h.killOwnedRuntimeProcesses.mockRejectedValue(new Error('process cleanup failed'))
+    if (outcome === 'alive') h.waitForOwnedRuntimeToExit.mockResolvedValue(false)
+    if (outcome === 'probe failed') h.waitForOwnedRuntimeToExit.mockRejectedValue(new Error('exit probe failed'))
+    if (outcome === 'kill failed') h.killOwnedRuntimeProcesses.mockRejectedValue(new Error('process cleanup failed'))
+    await h.poll()
+    expect(h.stopXray).toHaveBeenCalledOnce()
+    expect(h.rollbackEarlyAdapterLockdown).not.toHaveBeenCalled()
+    expect(h.disableKillSwitchIfActive).not.toHaveBeenCalled()
+    expect(h.notifyStatus).not.toHaveBeenCalledWith('stopped')
+    expect(h.onFinish).toHaveBeenCalledWith(expect.objectContaining({ success: false, warning: expect.any(String) }))
+  })
+
+  it('waits for delayed runtime exit before releasing protection (AT-02-004)', async () => {
+    const h = harness()
+    let release!: (exited: boolean) => void
+    h.waitForOwnedRuntimeToExit.mockReturnValue(new Promise(resolve => { release = resolve }))
+    const pending = h.poll()
+    await vi.waitFor(() => expect(h.waitForOwnedRuntimeToExit).toHaveBeenCalledOnce())
+    expect(h.disableKillSwitchIfActive).not.toHaveBeenCalled()
+    expect(h.onFinish).not.toHaveBeenCalled()
+    release(true)
+    await pending
+    expect(h.disableKillSwitchIfActive).toHaveBeenCalledOnce()
+  })
+
+  it('reports every independent rollback failure after confirmed exit', async () => {
+    const h = harness()
     h.stopXray.mockRejectedValue(new Error('xray cleanup failed'))
     h.rollbackEarlyAdapterLockdown.mockRejectedValue(new Error('adapter cleanup failed'))
     h.disableKillSwitchIfActive.mockRejectedValue(new Error('firewall cleanup failed'))
     await expect(h.poll()).resolves.toBeUndefined()
     const result = h.onFinish.mock.calls[0][0]
     expect(result.success).toBe(false)
-    for (const name of ['process','xray','adapter','firewall']) expect(result.warning).toContain(`${name} cleanup failed`)
+    for (const name of ['xray','adapter','firewall']) expect(result.warning).toContain(`${name} cleanup failed`)
     expect(h.onFinish).toHaveBeenCalledOnce()
   })
 

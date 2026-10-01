@@ -1354,16 +1354,19 @@ foreach ($p in $rows) {
 }
 
 async function killOwnedRuntimeProcesses(): Promise<void> {
-  await killOwnedTunRuntimeProcesses()
+  const result = await killOwnedTunRuntimeProcesses()
+  if (!result.success || result.killed < result.candidates) {
+    throw new Error(result.error || 'Owned runtime termination was not confirmed')
+  }
 }
 
 async function waitForOwnedRuntimeToExit(timeoutMs = 3000): Promise<boolean> {
   const started = Date.now()
   while (Date.now() - started < timeoutMs) {
-    if (!(await isOwnedTunRuntimeRunning())) return true
+    if (!(await isOwnedTunRuntimeRunning(true))) return true
     await new Promise((resolve) => setTimeout(resolve, 250))
   }
-  return !(await isOwnedTunRuntimeRunning())
+  return !(await isOwnedTunRuntimeRunning(true))
 }
 
 export async function areTunRoutesActive(): Promise<boolean> {
@@ -1382,14 +1385,14 @@ if ($routes.Count -gt 0) { 'true' } else { 'false' }
   }
 }
 
-export async function isOwnedTunRuntimeRunning(): Promise<boolean> {
+export async function isOwnedTunRuntimeRunning(requireProof = false): Promise<boolean> {
   if (process.platform !== 'win32') return false
   try {
     const runtimeDir = getTunRuntimeDir()
     const stdout = await runPowerShell(`
 $runtimeDir = ${psSingleQuote(runtimeDir)}
 $names = @(${psSingleQuote(RUNTIME_EXE_NAME)}, 'vpnte-etw-sidecar.exe', 'vpnte-xray.exe')
-$found = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+$found = @(Get-CimInstance Win32_Process -ErrorAction Stop |
   Where-Object {
     ($names -contains $_.Name) -and
     $_.ExecutablePath -and
@@ -1398,9 +1401,12 @@ $found = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
   Select-Object -First 1)
 if ($found.Count -gt 0) { 'true' } else { 'false' }
 `, 5000)
-    return String(stdout || '').toLowerCase().includes('true')
+    const result = String(stdout || '').trim().toLowerCase()
+    if (result !== 'true' && result !== 'false') throw new Error('Owned runtime status response is invalid')
+    return result === 'true'
   } catch (err) {
     logEvent('debug', 'tun', 'owned runtime status probe failed', err)
+    if (requireProof) throw err
     return false
   }
 }
@@ -3659,21 +3665,30 @@ export const tunController = {
           startupCompensationStarted = true
           settleFirewallAdapter?.(false)
           if (pendingKillSwitch) await pendingKillSwitch.catch(() => undefined)
-          for (const cleanup of [
-            () => killOwnedRuntimeProcesses(),
-            () => stopXray('startup validation failed'),
+          let runtimeExited = false
+          try {
+            await killOwnedRuntimeProcesses()
+            runtimeExited = await waitForOwnedRuntimeToExit()
+          } catch (cleanupError) {
+            cleanupErrors.push(String(cleanupError))
+            logEvent('error', 'tun', 'startup runtime termination failed', cleanupError)
+          }
+          if (!runtimeExited) cleanupErrors.push('runtime exit not confirmed; network protection retained')
+          const cleanups: Array<() => Promise<unknown>> = [() => stopXray('startup validation failed')]
+          if (runtimeExited) cleanups.push(
             () => rollbackEarlyAdapterLockdown('startup validation failed'),
             () => disableKillSwitchIfActive('startup validation failed')
-          ]) {
+          )
+          for (const cleanup of cleanups) {
             try { await cleanup() }
             catch (cleanupError) {
               cleanupErrors.push(String(cleanupError))
               logEvent('error', 'tun', 'startup rollback step failed', cleanupError)
             }
           }
-          currentStatus = { ...currentStatus, running: false, pid: null, startedAt: null,
+          currentStatus = { ...currentStatus, running: false, ...(runtimeExited ? { pid: null, startedAt: null } : {}),
             warning: cleanupErrors.length ? cleanupErrors.join('; ') : null }
-          try { notifyStatus('stopped') }
+          try { notifyStatus(runtimeExited ? 'stopped' : 'error') }
           catch (statusError) { logEvent('error', 'tun', 'startup failure status listener threw', statusError) }
           finally {
             finish({ success: false, error: startAbortedReason,
