@@ -401,32 +401,51 @@ export async function stageXrayRuntime(): Promise<string> {
   return dst
 }
 
-async function waitForLocalSocks(port: number, timeoutMs: number): Promise<void> {
+async function waitForLocalSocks(port: number, timeoutMs: number, signal?: AbortSignal): Promise<void> {
   const deadline = Date.now() + timeoutMs
+  const cancelled = () => new Error('Xray startup cancelled')
   let lastError: unknown = null
   while (Date.now() < deadline) {
+    if (signal?.aborted) throw cancelled()
     try {
       await new Promise<void>((resolve, reject) => {
         const socket = new Socket()
-        socket.setTimeout(250)
-        socket.once('connect', () => {
+        let settled = false
+        const finish = (error?: Error) => {
+          if (settled) return
+          settled = true
+          signal?.removeEventListener('abort', abort)
           socket.destroy()
-          resolve()
-        })
-        socket.once('error', (err) => {
-          socket.destroy()
-          reject(err)
-        })
-        socket.once('timeout', () => {
-          socket.destroy()
-          reject(new Error('timeout'))
-        })
-        socket.connect(port, '127.0.0.1')
+          if (error) reject(error)
+          else resolve()
+        }
+        const abort = () => finish(cancelled())
+        socket.setTimeout(Math.min(250, Math.max(1, deadline - Date.now())))
+        socket.once('connect', () => finish())
+        socket.once('error', error => finish(error))
+        socket.once('timeout', () => finish(new Error('timeout')))
+        signal?.addEventListener('abort', abort, { once: true })
+        if (signal?.aborted) { abort(); return }
+        try { socket.connect(port, '127.0.0.1') } catch (error) { finish(error as Error) }
       })
+      if (signal?.aborted) throw cancelled()
       return
     } catch (err) {
+      if (signal?.aborted) throw cancelled()
       lastError = err
-      await new Promise((r) => setTimeout(r, 100))
+      await new Promise<void>((resolve, reject) => {
+        const abort = () => {
+          clearTimeout(timer)
+          signal?.removeEventListener('abort', abort)
+          reject(cancelled())
+        }
+        const timer = setTimeout(() => {
+          signal?.removeEventListener('abort', abort)
+          resolve()
+        }, Math.min(100, Math.max(0, deadline - Date.now())))
+        signal?.addEventListener('abort', abort, { once: true })
+        if (signal?.aborted) abort()
+      })
     }
   }
   throw lastError instanceof Error ? lastError : new Error(`Xray SOCKS5 port ${port} did not respond within ${timeoutMs}ms`)
@@ -550,10 +569,11 @@ export async function startXray(
     })
 
     try {
-      await timed('wait-local-socks', () => waitForLocalSocks(socksPort, SOCKS_PROBE_TIMEOUT_MS))
+      await timed('wait-local-socks', () => waitForLocalSocks(socksPort, SOCKS_PROBE_TIMEOUT_MS, options.signal))
     } catch (probeErr) {
       try { child.kill() } catch {}
       await removeManagedChildPidFile(pidPath, pid)
+      if (options.signal?.aborted) throw new Error('Xray startup cancelled')
       throw new Error(`xray-движок запустился, но локальный SOCKS-порт ${socksPort} не отвечает: ${(probeErr as Error).message}`)
     }
 
