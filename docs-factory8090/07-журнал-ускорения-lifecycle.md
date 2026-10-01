@@ -224,3 +224,39 @@ Durable write path (unique wx + fsync + ACL + rename) не изменён. Known
 - Исправлен вводящий в заблуждение source comment «8 s max»: 8 s — сумма интервалов, HTTP может продлевать background проверку. Существующий preVpnIp, взятый после TUN start, и route/status oracle не изменены; нормативное расхождение уже записано в этапе 5.
 - [Axios cancellation](https://axios.rest/pages/advanced/cancellation): AbortController/signal поддерживается, CancelToken deprecated. Возможный следующий шаг — operation-owned AbortSignal; отменять весь global HTTP/resolver нельзя, чтобы не затронуть чужую операцию.
 - Последний доступный app.log по-прежнему modified 2026-10-01T00:26:57.8703357+03:00, 328207 bytes. Новых живых start/stop после оптимизации нет. Контрольный installer этапа 5 устарел относительно stage 6 и требует пересборки.
+
+### 2026-10-01 — этап 7: воспроизводимый анализ логов и проект coordinator
+
+- Добавлен read-only `scripts/analyze-lifecycle-log.mjs`: file/stdin JSONL → JSON с IPC duration, отдельными TUN/Xray timing events и sample counts/min/median/p95/max. Экспорт не содержит args/result/errors/endpoint/config/IP/path. Учитываются только allowlisted channels/phases; parallel/background не складываются в якобы total.
+- Pairing без operation id допускается только для единственного same-channel окна. Overlap, отсутствие start/terminal, reversed timestamps, malformed/truncated records помечаются явно. Summary включает разные исходы (в том числе отменённые/ошибочные), поэтому нельзя объявлять его «временем успешного подключения». IPC finished само по себе не доказывает защищённость.
+- `npm.cmd test -- src/main/lifecycleTimingAnalysis.test.ts --reporter=dot --maxWorkers=4`: 6/6 passed (1.50 s). Первый прогон выявил ошибку чтения stdin через promises.readFile(0); stdin заменён на чтение async iterable, повтор зелёный. Реальный file input также исполнен: `node scripts/analyze-lifecycle-log.mjs "$env:APPDATA\vpn-tunnel-enforcer\logs\app.log" > .tmp/lifecycle-before.json`, exit 0, invalidLines=0, outOfOrderRecords=0, unfinished=0, native timing events=1.
+- Подтверждённые исходные IPC samples: start-direct-vpn 8209 ms (отмена) и 22755 ms (native successful start); stop-tun 11155/10993 ms; cancel-tun 6873 ms. Для successful start только один sample, статистическую оценку улучшения строить рано.
+
+#### Конкретное предложение отдельного WP-0/WP-2/WP-3 coordinator
+
+Это записанные существующие расхождения, а не доказанная причина каждого измеренного торможения. По AGENTS их исправление требует согласования владельца; этапы 1–7 не меняли rollback order/status oracle.
+
+| Граница production | Установленный факт | Изменение, предлагаемое для согласования |
+| --- | --- | --- |
+| Main baseline + native start | baselinePromise живёт вне tunController; main ждёт его даже после native result. После этого выполняет schedule/history/tray без нового owner check | Единый operation owner охватывает main baseline и controller; после каждого await проверяет generation; late success не открывает историю и не возвращает успех проигравшей команды |
+| stop во время preflight | startInProgress ожидание — 20 × 100 ms, затем cleanup идёт при ещё выполняющемся start. stopInProgress ставится только после ожидания | Serialized lifecycle lane и active operation promise; cancel ack немедленно, cleanup владеет активными effects до их settle/compensation. Повторные stop соединяются с тем же cleanup, не начинают независимый rollback |
+| Xray resolveServerAddress | resolve4 → lookup IPv4; сигнала/deadline нет | Dedicated operation Resolver с cancellation; lookup имеет отдельное fencing/deadline, так как Resolver.cancel не отменяет getaddrinfo. Не отменять global resolver чужих callers |
+| Xray config test | `spawn(run -test)` без explicit timeout, unlimited stdout/stderr; child не зарегистрирован в activeXrayState | Operation-owned preflight child; AbortSignal/deadline, bounded tails, listeners сразу после spawn, доказанный exit перед release ownership |
+| Xray runtime start/stop | activeXrayState выставляется после firewall/SOCKS; stopXray kill()+remove pid/reset не ждёт exit, ошибки kill только warn | Track spawning/ready/stopping process identity по PID/path/start time; typed stop proof, grace/escalation из согласованного контракта, retained manifest при failure |
+| Sing-box onExit | callback замыкает start и может писать global state/history/restart | Generation/owned child identity проверяются перед глобальными effects; собственные cleanup/logging старого child допускаются, смена новой session запрещена |
+| Network cleanup | Обычный порядок отличается от нормативного §2.1; duplicate stage proof уже оптимизирован | После отдельного согласования привести порядок к ТЗ, independent failure collection сохранить; не запускать потенциально конфликтующие firewall/DNS/adapter mutations параллельно |
+| Protected status / route fallback | Presence/alias route не является exact effective route + egress proof; preVpnIp получен после TUN | Отдельное согласование статуса verification/connected и exact owned GUID + 0/1/128/1 + egress; не объявлять provider IP evidence безопасностью всех пакетов |
+
+Минимальные проверки coordinator до merge: AT-00-002/003/007/008, AT-02-002/004/005/006/009/011, AT-03-001/003/004/007. Held boundaries на DNS, preflight, PID write, firewall native transaction, adapter ownership, baseline completion; cancel/quit на 10/50/90%, late callback после нового start; no resurrection/no stale history/no orphan child; повтор shutdown не снимает чужую защиту. L3 — Windows 10/11, cold/warm, packet capture двумя оракулами, baseline byte/read-back equality.
+
+[Node DNS](https://nodejs.org/docs/latest-v24.x/api/dns.html): Resolver.cancel отменяет queries своего экземпляра; lookup использует getaddrinfo/libuv threadpool, resolve использует асинхронный DNS. Их нельзя считать одинаковой отменяемой границей. [Node child_process](https://nodejs.org/api/child_process.html): spawn поддерживает signal/timeout; kill/killed не являются подтверждением exit. Эти возможности — основа предложения, не выполненный coordinator.
+
+#### Реальный before/after smoke после установки контрольного артефакта
+
+1. Зафиксировать installer/source hash, OS, cold/warm, профиль и режим/настройки. Не публиковать ключи. Сохранить current baseline snapshot через существующую диагностику; чужой VPN не включать/выключать посреди парного сравнения.
+2. По 5 cold и 5 warm connect/disconnect, cancel во время старта, quit после stop; записать click-to-terminal IPC и native phase durations. Сопоставлять успешные подключения отдельно от cancel/fail; медленный/недоступный IP provider также проверять отдельно. На одинаковом сервере проверить доступность/egress и утечки.
+3. После каждого stop сверить owned processes, Wintun/routes, firewall profile/rules/filters, DNS/IPv6/registry baseline. Warning или неполный proof считается отдельным исходом, не «быстрым успешным отключением».
+4. Сохранить новые JSONL и выполнить analyser для before/after. Сравнить distributions и critical path, не сумму overlapping stages. При новых timings проверить Xray resolve/preflight/firewall и stop rollback по этапам.
+5. Настоящий native smoke пока не исполнен: текущий shell unelevated, protected runtime недоступен, пользователь ушёл спать. UAC/ACL не обходились. Это внешнее ограничение проверки, не причина объявить цель достигнутой.
+
+Итоговый DoD этапа 7: `VPNTE_PWSH=powershell.exe; npm.cmd test -- --reporter=dot --maxWorkers=4` — exit 0, 158 passed / 1 skipped files, 1583 passed / 3 skipped tests (56.61 s). `npm.cmd run typecheck`, coverage AC 927/927 F 210/210 и `git diff --check` — exit 0. Предложение coordinator отправлено владельцу на согласование через async question; до ответа его реализация и изменение нормативного rollback/status контракта не начинаются. Независимая работа над контрольным артефактом продолжается.
