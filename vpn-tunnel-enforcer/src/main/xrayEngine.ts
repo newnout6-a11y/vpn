@@ -9,11 +9,11 @@
 
 import { spawn, type ChildProcess } from 'child_process'
 import { isIP, Socket } from 'net'
-import { promises as dns } from 'dns'
 import { join } from 'path'
 import { readFile, writeFile, rename } from 'fs/promises'
 import { logEvent } from './appLogger'
 import { runXrayConfigPreflight, stopXrayPreflights } from './xrayPreflight'
+import { resolveXrayEndpoint } from './xrayDns'
 import {
   writeManagedChildPidFile,
   removeManagedChildPidFile,
@@ -387,23 +387,8 @@ export function buildXrayProbeConfig(
  * Pre-resolves hostname to IPv4 address to prevent circular DNS deadlock when
  * adapter lockdown is active.
  */
-export async function resolveServerAddress(server: string): Promise<string | null> {
-  const trimmed = String(server || '').trim()
-  if (!trimmed) return null
-  if (isIP(trimmed) === 4) return trimmed
-  if (isIP(trimmed) === 6) return null // IPv4-only TUN routing
-
-  try {
-    const ips = await dns.resolve4(trimmed)
-    if (ips.length > 0 && ips[0]) return ips[0]
-  } catch {}
-
-  try {
-    const lookup = await dns.lookup(trimmed, { family: 4 })
-    if (lookup?.address && isIP(lookup.address) === 4) return lookup.address
-  } catch {}
-
-  return null
+export async function resolveServerAddress(server: string, signal?: AbortSignal): Promise<string | null> {
+  return resolveXrayEndpoint(server, signal)
 }
 
 /**
@@ -489,7 +474,7 @@ export async function startXray(
     const server = String(sbOutbound.server || '')
     let resolvedIp = options.resolvedIp || null
     if (!resolvedIp && isIP(server) === 0) {
-      resolvedIp = await timed('resolve-server', () => resolveServerAddress(server))
+      resolvedIp = await timed('resolve-server', () => resolveServerAddress(server, options.signal))
     }
 
     const socksPort = options.portOverride ?? (await timed('pick-port', pickFreeLocalPort))
