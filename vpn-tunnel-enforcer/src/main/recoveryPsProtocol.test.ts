@@ -1,7 +1,7 @@
 // AT-03-003/006/007/012: actual dispatcher with fake cmdlets, no system writes.
 import { describe, expect, it } from 'vitest'
 import { execFileSync } from 'node:child_process'
-import { recoveryWorkerFunctions, recoveryWorkerScript } from './recoveryPsProtocol'
+import { DNS_POLICY_SNAPSHOT_SCRIPT, recoveryWorkerFunctions, recoveryWorkerScript } from './recoveryPsProtocol'
 
 const native = process.platform === 'win32' || Boolean(process.env.VPNTE_PWSH)
 function run(request: unknown, variant = 'trusted'): {value: string; set: number; removed: number} {
@@ -44,6 +44,34 @@ $value=Invoke-RecoveryOperation $request
   return JSON.parse(stdout.replace(/^\uFEFF/,'').trim())
 }
 describe('fixed recovery dispatcher native proof', () => {
+  it.skipIf(!native)('reads both real DNS policies identically to the fixed standalone reader without system writes', () => {
+    const script = "$ErrorActionPreference='Stop';[Console]::OutputEncoding=[Text.Encoding]::UTF8;" + DNS_POLICY_SNAPSHOT_SCRIPT
+    const standalone = execFileSync(process.env.VPNTE_PWSH || 'powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], {
+      timeout: 15000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']
+    })
+    const result = run({ op: 'inspect-dns-policy' })
+    const rows = JSON.parse(result.value)
+    expect(rows).toEqual(JSON.parse(standalone.replace(/^\uFEFF/, '').trim()))
+    expect(rows.map((row: { tag: string }) => row.tag)).toEqual(['smartNameResolution', 'parallelAandAAAA'])
+    for (const row of rows) {
+      expect(typeof row.exists).toBe('boolean')
+      expect(Object.keys(row).sort()).toEqual(['data', 'exists', 'tag', 'type'])
+      if (row.exists) {
+        expect(row.type).toBe('REG_DWORD')
+        expect(row.data).toMatch(/^0x[0-9a-f]{1,8}$/i)
+      } else expect(row).toMatchObject({ type: null, data: null })
+    }
+    expect(result).toMatchObject({ set: 0, removed: 0 })
+  }, 30000)
+  it.skipIf(!native).each([
+    { op: 'inspect-dns-policy', key: 'HKLM\\arbitrary' },
+    { op: 'inspect-dns-policy', path: 'C:\\arbitrary' },
+    { op: 'inspect-dns-policy', script: 'Get-Process' },
+    { op: 'inspect-dns-policy', name: 'firewall.json' },
+    { op: 'INSPECT-DNS-POLICY' }
+  ])('rejects an expanded DNS request at the native boundary: %j', request => {
+    expect(() => run(request)).toThrow()
+  }, 20000)
   it.skipIf(!native)('reads trusted JSON with unicode and reports checked absence',()=>{
     expect(JSON.parse(run({op:'read',name:'firewall.json'}).value)).toEqual({owner:'VPNTE',text:'сеть'})
     expect(run({op:'read',name:'firewall.json'},'absent').value).toBe('RECOVERY_ARTIFACT_ABSENT')

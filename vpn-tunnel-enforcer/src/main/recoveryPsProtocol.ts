@@ -1,14 +1,14 @@
 /** AT-03-012: closed data protocol; requests never contain scripts or paths. */
 export const RECOVERY_MAX_BYTES = 1024 * 1024
 export type RecoveryRequest =
-  | { op: 'ensure' | 'warmup' }
+  | { op: 'ensure' | 'warmup' | 'inspect-dns-policy' }
   | { op: 'read' | 'binary' | 'remove'; name: string }
   | { op: 'protect'; name: string }
   | { op: 'inspect-tun'; alias: string }
 
 export function validateRecoveryRequest(value: RecoveryRequest): void {
   const fields = Object.keys(value).sort().join(',')
-  if (value.op === 'ensure' || value.op === 'warmup') {
+  if (value.op === 'ensure' || value.op === 'warmup' || value.op === 'inspect-dns-policy') {
     if (fields === 'op') return
   } else if (value.op === 'inspect-tun') {
     if (fields === 'alias,op' && typeof value.alias === 'string' && /^(Ethernet (?:[5-9]|1[0-2])|VPNTE-TUN|awg-tun)$/.test(value.alias)) return
@@ -19,11 +19,33 @@ export function validateRecoveryRequest(value: RecoveryRequest): void {
   throw new Error('Invalid recovery worker request')
 }
 
+/** Fixed, read-only baseline reader shared by the typed worker and pre-dispatch fallback. */
+export const DNS_POLICY_SNAPSHOT_SCRIPT = String.raw`
+$ErrorActionPreference='Stop'
+function Read-RegValue([string]$key, [string]$name, [string]$tag) {
+  $registryKey=[Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($key.Substring(5))
+  try {
+    $exists=$registryKey -and @($registryKey.GetValueNames()) -contains $name
+    if (-not $exists) { return [pscustomobject]@{tag=$tag;exists=$false;type=$null;data=$null} }
+    if ($registryKey.GetValueKind($name) -ne [Microsoft.Win32.RegistryValueKind]::DWord) { throw 'DNS policy has unsupported registry type' }
+    $data=[int]$registryKey.GetValue($name)
+    $unsigned=[BitConverter]::ToUInt32([BitConverter]::GetBytes($data),0)
+    return [pscustomobject]@{tag=$tag;exists=$true;type='REG_DWORD';data=('0x'+$unsigned.ToString('x'))}
+  } finally { if($registryKey){$registryKey.Close()} }
+}
+@(
+  Read-RegValue 'HKLM\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient' 'DisableSmartNameResolution' 'smartNameResolution'
+  Read-RegValue 'HKLM\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters' 'DisableParallelAandAAAA' 'parallelAandAAAA'
+) | ConvertTo-Json -Compress`
+
 /** Kept separate so the real dispatcher can run against fake cmdlets in L2 tests. */
 export function recoveryWorkerFunctions(programData: string): string {
   const literal = `'${programData.replace(/'/g, "''")}'`
   return String.raw`
 $expectedProgramData=${literal}
+function Read-DnsPolicySnapshot {
+${DNS_POLICY_SNAPSHOT_SCRIPT}
+}
 function Assert-TrustedArtifact($path, $directory) {
   $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
   if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Reparse recovery artifact rejected' }
@@ -62,9 +84,13 @@ function Assert-RecoveryDirectories($root, [bool]$create) {
   return $true
 }
 function Invoke-RecoveryOperation($request) {
-  if ($request.op -isnot [string] -or @('warmup','inspect-tun','ensure','read','binary','remove','protect') -cnotcontains $request.op) { throw 'Unknown recovery worker operation' }
+  if ($request.op -isnot [string] -or @('warmup','inspect-tun','inspect-dns-policy','ensure','read','binary','remove','protect') -cnotcontains $request.op) { throw 'Unknown recovery worker operation' }
   $fields = @($request.PSObject.Properties.Name | Sort-Object) -join ','
   switch -Exact ($request.op) {
+    'inspect-dns-policy' {
+      if ($fields -ne 'op') { throw 'Invalid recovery worker fields' }
+      return (Read-DnsPolicySnapshot)
+    }
     'warmup' {
       if ($fields -ne 'op') { throw 'Invalid recovery worker fields' }
       Import-Module NetAdapter,NetTCPIP -ErrorAction Stop

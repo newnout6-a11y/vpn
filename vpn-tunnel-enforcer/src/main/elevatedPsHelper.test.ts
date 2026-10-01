@@ -94,6 +94,13 @@ describe('elevated PS helper errors', () => {
     })
   })
 
+  it('keeps the fixed registry reader outside arbitrary physical-adapter scripts (AT-03-012)', async () => {
+    const { execElevatedPs } = await import('./elevatedPsHelper')
+    const { DNS_POLICY_SNAPSHOT_SCRIPT } = await import('./recoveryPsProtocol')
+    await expect(execElevatedPs(DNS_POLICY_SNAPSHOT_SCRIPT, 15000, 'physical-adapter-lockdown'))
+      .rejects.toMatchObject({ code: 'elevated-helper-script-rejected' })
+  })
+
   it('does not let physical-adapter commands authorize firewall reset payloads', async () => {
     ;(globalThis as any).__elevatedPsHelperMock = { elevated: true }
     const { execElevatedPs } = await import('./elevatedPsHelper')
