@@ -142,6 +142,9 @@ while ($line = [Console]::In.ReadLine()) {
     $id = $cmd.id
     $value = Invoke-RecoveryOperation $cmd.request
     if ($value -isnot [string] -or [Text.Encoding]::UTF8.GetByteCount($value) -gt ${RECOVERY_MAX_BYTES * 2}) { throw 'Invalid recovery operation output' }
+    # PS 5.1 Get-Content attaches provider properties to its string. Without
+    # this cast ConvertTo-Json emits an object instead of the wire string.
+    $value = [string]$value
     $result = @{id=$id;ok=$true;value=$value}
   } catch { $result = @{id=$id;ok=$false;error='Recovery operation rejected: ' + $_.Exception.Message} }
   [Console]::Out.WriteLine(($result | ConvertTo-Json -Compress -Depth 3))

@@ -3,6 +3,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import type { ChildProcess, spawn } from 'node:child_process'
+import { spawn as nativeSpawn } from 'node:child_process'
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
 vi.mock('./admin', () => ({ isProcessElevated: vi.fn(async () => false) }))
 vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
 import { RecoveryPsWorker } from './recoveryPsWorker'
@@ -132,6 +135,42 @@ describe('typed recovery worker ownership', () => {
       expect(await worker.execute({op:'warmup'})).toBe('RECOVERY_MODULES_READY')
       expect(await worker.execute({op:'warmup'})).toBe('RECOVERY_MODULES_READY')
     } finally { await worker.stop() }
+    expect(worker.hasExited).toBe(true)
+  },25000)
+
+  it.skipIf(process.platform !== 'win32')('reads native Get-Content strings through production framing without serializing provider metadata (AT-03-002/003)', async () => {
+    const root = mkdtempSync(join(process.cwd(), '.tmp', 'recovery-native-read-'))
+    const report = '  {"schemaVersion":1,"owner":"VPNTE","completedAt":1,"status":"warnings","messages":[{"time":1,"message":"Сеть \\u2603 — проверка"}]}\r\n'
+    writeFileSync(join(root, 'recovery-result.json'), '\ufeff' + report, 'utf8')
+    writeFileSync(join(root, 'second.json'), '{"second":"строка\\nс кавычками \\" и слешем \\\\"}\n', 'utf8')
+    writeFileSync(join(root, 'empty.json'), '')
+    // Only the trusted storage boundary is stubbed; dispatcher, Get-Item,
+    // Get-Content, PS 5.1 serialization, pipes and JS receiver are production.
+    const isolatedSpawn: typeof nativeSpawn = ((command: string, args: string[], options: any) => {
+      const script = Buffer.from(args.at(-1)!, 'base64').toString('utf16le')
+      const isolated = script.replace("[Console]::Out.WriteLine('{\"id\":0", `
+function Get-RecoveryRoot { return '${root.replace(/'/g, "''")}' }
+function Assert-RecoveryDirectories($root, [bool]$create) { return $true }
+function Assert-TrustedArtifact($path, $directory) { }
+[Console]::Out.WriteLine('{"id":0`)
+      return nativeSpawn(command, [...args.slice(0, -1), Buffer.from(isolated, 'utf16le').toString('base64')], options)
+    }) as typeof nativeSpawn
+    const worker = new RecoveryPsWorker(process.env.ProgramData || 'C:\\ProgramData', isolatedSpawn)
+    try {
+      const reads = await Promise.all([
+        worker.execute({ op: 'read', name: 'recovery-result.json' }),
+        worker.execute({ op: 'read', name: 'second.json' }),
+        worker.execute({ op: 'read', name: 'recovery-result.json' })
+      ])
+      expect(reads[0]).toBe(report)
+      expect(reads[2]).toBe(report)
+      expect(JSON.parse(reads[0]).messages[0].message).toBe('Сеть ☃ — проверка')
+      expect(reads[1]).not.toContain('PSPath')
+      expect(JSON.parse(reads[1]).second).toContain('строка')
+      expect(await worker.execute({ op: 'read', name: 'absent.json' })).toBe('RECOVERY_ARTIFACT_ABSENT')
+      await expect(worker.execute({ op: 'read', name: 'empty.json' })).rejects.toMatchObject({ code: 'rejected' })
+      expect(await worker.execute({ op: 'read', name: 'recovery-result.json' })).toBe(report)
+    } finally { await worker.stop(); rmSync(root, { recursive: true, force: true }) }
     expect(worker.hasExited).toBe(true)
   },25000)
 })
