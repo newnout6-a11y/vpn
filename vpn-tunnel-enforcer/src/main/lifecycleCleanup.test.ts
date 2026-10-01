@@ -54,7 +54,7 @@ function mainHarness(name: 'performShutdownCleanup' | 'stopProtection') {
     tunController: { stop: vi.fn(async (): Promise<any> => ({ success: true, networkCleanup: { baseline: true, firewall: true, adapters: true } })) },
     clearOwnedSecretClipboard: done(), stopXray: done(), killOwnedTunRuntimeProcesses: done(), externalProxy: { stopAll: done() },
     rollbackTunNetworkBaselineIfApplied: done(), disableKillSwitchIfActive: done(), rollbackPhysicalAdapterLockdownIfApplied: done(),
-    repairOrphanedPhysicalAdapterDns: done(), logEvent: noop(), stopElevatedPsHelper: noop(),
+    repairOrphanedPhysicalAdapterDns: done(), logEvent: noop(), stopElevatedPsHelper: noop(), stopRecoveryPsWorker: done(),
     autoconfig: { getStatus: vi.fn(async () => []), rollback: done() },
     stopServerGroupAutoRefresh: noop(), stopBackgroundTrafficHistory: noop(), stopTrafficConnectionSampler: noop(),
     rollbackSoftAutoconfigIfApplied: done(), stopPeriodicSnapshots: noop(), stopPeriodicLeakTest: noop(), stopNetworkChangeWatcher: noop(),
@@ -100,6 +100,16 @@ return {start:()=>controller.start('127.0.0.1:1080'),state:()=>({starting:startI
 }
 
 describe('lifecycle cleanup evidence and retries (AT-02-005 / AT-03-007)', () => {
+  it('retains the recovery worker until all shutdown network backstops complete', async () => {
+    const h = mainHarness('performShutdownCleanup')
+    h.tunController.stop.mockResolvedValue({success:false,networkCleanup:{baseline:false,firewall:false,adapters:false}})
+    await h.run('test')
+    expect(h.stopRecoveryPsWorker).toHaveBeenCalledOnce()
+    for(const step of [h.rollbackTunNetworkBaselineIfApplied,h.disableKillSwitchIfActive,h.rollbackPhysicalAdapterLockdownIfApplied,h.repairOrphanedPhysicalAdapterDns]) {
+      expect(step.mock.invocationCallOrder[0]).toBeLessThan(h.stopRecoveryPsWorker.mock.invocationCallOrder[0])
+    }
+    expect(h.stopRecoveryPsWorker.mock.invocationCallOrder[0]).toBeLessThan(h.stopElevatedPsHelper.mock.invocationCallOrder[0])
+  })
   it('keeps start admission closed through the final stop completion microtask', async () => {
     const h = startupAdmissionHarness(new Promise(() => {}))
     expect(await h.start()).toMatchObject({success:false,error:expect.stringContaining('Остановка')})

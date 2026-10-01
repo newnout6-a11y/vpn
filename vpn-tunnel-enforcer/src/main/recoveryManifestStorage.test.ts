@@ -4,8 +4,13 @@ import { execFileSync } from 'node:child_process'
 
 const mocks = vi.hoisted(() => ({
   elevated: vi.fn(), read: vi.fn(), open: vi.fn(), rename: vi.fn(), unlink: vi.fn(),
-  write: vi.fn(), sync: vi.fn(), close: vi.fn()
+  write: vi.fn(), sync: vi.fn(), close: vi.fn(), worker: vi.fn()
 }))
+vi.mock('./recoveryPsWorker', () => {
+  class RecoveryWorkerError extends Error { constructor(public code: string, message: string) { super(message) } }
+  return { executeRecoveryOperation: mocks.worker, RecoveryWorkerError }
+})
+import { RecoveryWorkerError } from './recoveryPsWorker'
 vi.mock('./admin', () => ({ execElevated: mocks.elevated }))
 vi.mock('fs/promises', () => {
   const api = { open: mocks.open, rename: mocks.rename, unlink: mocks.unlink }
@@ -26,6 +31,7 @@ const originalProgramData = process.env.ProgramData
 function decode(command: string) { return Buffer.from(command.split(' ').at(-1)!, 'base64').toString('utf16le') }
 beforeEach(() => {
   vi.resetAllMocks()
+  mocks.worker.mockRejectedValue(new RecoveryWorkerError('unavailable', 'fixture unavailable before dispatch'))
   Object.defineProperty(process, 'platform', { configurable: true, value: 'win32' })
   mocks.elevated.mockResolvedValue({ stdout: 'RECOVERY_STORAGE_VERIFIED' })
   mocks.read.mockReturnValue('RECOVERY_ARTIFACT_ABSENT')
@@ -39,6 +45,39 @@ afterEach(() => {
 })
 
 describe('trusted recovery storage', () => {
+  it('uses typed worker for fresh reads instead of spawning legacy PowerShell (AT-03-012)', async () => {
+    mocks.worker.mockResolvedValueOnce('{"schemaVersion":1}').mockRejectedValueOnce(new RecoveryWorkerError('rejected', 'ACL changed'))
+    expect(await readRecoveryManifest('firewall.json', value => value)).toEqual({ schemaVersion: 1 })
+    await expect(readRecoveryManifest('firewall.json', value => value)).rejects.toThrow('ACL changed')
+    expect(mocks.read).not.toHaveBeenCalled()
+    expect(mocks.elevated).not.toHaveBeenCalled()
+  })
+  it('commits worker-backed writes only after fsync and explicit temporary proof (AT-03-007)', async () => {
+    mocks.worker.mockImplementation(async request => request.op === 'ensure' ? 'RECOVERY_STORAGE_VERIFIED' : 'RECOVERY_TEMP_VERIFIED')
+    await writeRecoveryArtifact('firewall.json', '{}')
+    expect(mocks.worker.mock.calls.map(call => call[0].op)).toEqual(['ensure', 'protect'])
+    expect(mocks.sync.mock.invocationCallOrder[0]).toBeLessThan(mocks.worker.mock.invocationCallOrder[1])
+    expect(mocks.worker.mock.invocationCallOrder[1]).toBeLessThan(mocks.rename.mock.invocationCallOrder[0])
+    expect(mocks.elevated).not.toHaveBeenCalled()
+  })
+  it.each(['timeout', 'exited', 'protocol', 'rejected', 'closed', 'busy'] as const)('does not replay dispatched %s failures in the legacy path (AT-03-007)', async code => {
+    mocks.worker.mockResolvedValueOnce('RECOVERY_STORAGE_VERIFIED').mockRejectedValueOnce(new RecoveryWorkerError(code, 'uncertain or rejected'))
+    await expect(writeRecoveryArtifact('firewall.json', '{}')).rejects.toThrow('uncertain or rejected')
+    expect(mocks.rename).not.toHaveBeenCalled()
+    expect(mocks.elevated).not.toHaveBeenCalled()
+    expect(mocks.unlink).toHaveBeenCalled()
+  })
+  it('does not commit after storage disappearance or an absent temporary proof (AT-03-012)', async () => {
+    mocks.worker.mockResolvedValueOnce('RECOVERY_STORAGE_VERIFIED').mockResolvedValueOnce('RECOVERY_STORAGE_MISSING')
+    await expect(writeRecoveryArtifact('firewall.json', '{}')).rejects.toThrow('temporary verification')
+    expect(mocks.rename).not.toHaveBeenCalled()
+  })
+  it('rechecks worker storage after explicit absence/bootstrap (AT-03-012)', async () => {
+    mocks.worker.mockResolvedValueOnce('RECOVERY_STORAGE_MISSING').mockResolvedValueOnce('RECOVERY_STORAGE_VERIFIED').mockResolvedValueOnce('RECOVERY_ARTIFACT_ABSENT')
+    expect(await readRecoveryManifest('firewall.json', value => value)).toBeNull()
+    expect(mocks.worker.mock.calls.map(call => call[0].op)).toEqual(['read', 'ensure', 'read'])
+    expect(mocks.read).not.toHaveBeenCalled()
+  })
   it.skipIf(process.platform !== 'win32' && !process.env.VPNTE_PWSH).each([
     { variant: 'trusted', accepted: true }, { variant: 'fileAbsent', accepted: true },
     { variant: 'rootOwner', accepted: false }, { variant: 'directoryAce', accepted: false },

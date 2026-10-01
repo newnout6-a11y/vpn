@@ -1,5 +1,6 @@
 import './snapshotBootstrap'
 import { startElevatedPsHelper, stopElevatedPsHelper } from './elevatedPsHelper'
+import { warmRecoveryPsWorker, stopRecoveryPsWorker } from './recoveryPsWorker'
 import { app, BrowserWindow, dialog, ipcMain, Tray, shell, session, Menu, powerMonitor, type IpcMainInvokeEvent } from 'electron'
 import { exec as execCb } from 'child_process'
 import { execFile as execFileCb } from 'child_process'
@@ -1741,6 +1742,9 @@ app.whenReady().then(async () => {
     logEvent('warn', 'app', 'crash recovery failed', err)
   )
 
+  // Only module loading; every connect still reads fresh ownership/ACL evidence.
+  void warmRecoveryPsWorker()
+
   createWindow()
   tray = createTray(mainWindow!, {
     onStart: startProtectionFromTray,
@@ -2657,6 +2661,7 @@ async function performShutdownCleanup(reason: string): Promise<void> {
   }
 
   // Stop the persistent elevated PS helper process.
+  await stopRecoveryPsWorker().catch(err => logEvent('warn', 'app', 'recovery worker shutdown failed', err))
   try {
     stopElevatedPsHelper()
   } catch {}
