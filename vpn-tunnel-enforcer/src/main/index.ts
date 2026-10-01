@@ -1109,22 +1109,30 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
   // Poll for the VPN IP instead of waiting a fixed delay. The TUN routes
   // propagate within a few hundred ms on most systems, so polling every 500ms
   // shows the VPN IP much sooner. We verify TUN is
-  // running on each attempt and stop after 16 tries (8s max) as a safety net.
+  // running on each attempt and stop after 16 tries. The intervals total 8s;
+  // provider requests can extend the background check beyond that.
   // CRITICAL: we must NOT rebaseline (recheck(true)) until the IP has actually
   // changed from the pre-VPN value. If we rebaseline too early (before TUN
   // routes propagate), we'd set vpnIp = realIP, permanently breaking leak
   // detection. So we use recheck(false) first, and only rebaseline once the
   // IP differs from the pre-VPN baseline.
-  const preVpnIp = (await ipMonitor.getCurrentIp()).ip
+  const vpnIpPollGeneration = adaptiveVerificationGeneration
+  const isCurrentVpnIpPoll = () => vpnIpPollGeneration === adaptiveVerificationGeneration && tunController.getStatus().running
   const pollVpnIp = async () => {
+    // External providers describe the connection; they do not gate native
+    // startup. Keep this request with the existing background IP polling.
+    const preVpnIp = (await ipMonitor.getCurrentIp(isCurrentVpnIpPoll)).ip
+    if (!isCurrentVpnIpPoll()) return
     for (let attempt = 0; attempt < 16; attempt++) {
       await new Promise(r => setTimeout(r, 500))
-      if (!tunController.getStatus().running) return
+      if (!isCurrentVpnIpPoll()) return
       try {
-        const ipInfo = await ipMonitor.recheck(false)
+        const ipInfo = await ipMonitor.recheck(false, isCurrentVpnIpPoll)
+        if (!isCurrentVpnIpPoll()) return
         if (ipInfo.ip && ipInfo.ip !== preVpnIp) {
           // IP changed — this is the VPN exit IP. Rebaseline now.
-          const rebased = await ipMonitor.recheck(true)
+          const rebased = await ipMonitor.recheck(true, isCurrentVpnIpPoll)
+          if (!isCurrentVpnIpPoll()) return
           try {
             sendToMainWindow('ip-changed', { ip: rebased.ip, isLeak: rebased.isLeak })
           } catch {}
@@ -1147,9 +1155,12 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
     // Self-blinding prevention: do NOT call recheck(true) if tunnel routes are not active,
     // otherwise the user's real ISP IP will overwrite vpnIp.
     try {
+      if (!isCurrentVpnIpPoll()) return
       const routesActive = await areTunRoutesActive().catch(() => false)
+      if (!isCurrentVpnIpPoll()) return
       if (routesActive) {
-        const ipInfo = await ipMonitor.recheck(true)
+        const ipInfo = await ipMonitor.recheck(true, isCurrentVpnIpPoll)
+        if (!isCurrentVpnIpPoll()) return
         const exitIp = ipInfo.ip
         if (exitIp) {
           try {
@@ -1169,7 +1180,7 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
       }
     } catch {}
   }
-  void pollVpnIp()
+  void pollVpnIp().catch(err => logEvent('warn', 'tun', 'background VPN IP polling failed', { error: String(err?.message || err).slice(-500) }))
 
   refreshTrayState({ status: 'protected', publicIp: latestPublicIp, proxyAddr })
 
@@ -1364,15 +1375,22 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
 
   // Poll for the VPN IP instead of waiting a fixed delay (see startProtection).
   // Same logic: use recheck(false) first, only rebaseline once IP changes.
-  const preVpnIpDirect = (await ipMonitor.getCurrentIp()).ip
+  const vpnIpPollGeneration = adaptiveVerificationGeneration
+  const isCurrentVpnIpPoll = () => vpnIpPollGeneration === adaptiveVerificationGeneration && tunController.getStatus().running
   const pollVpnIpDirect = async () => {
+    // External providers describe the connection; they do not gate native
+    // startup. Keep this request with the existing background IP polling.
+    const preVpnIpDirect = (await ipMonitor.getCurrentIp(isCurrentVpnIpPoll)).ip
+    if (!isCurrentVpnIpPoll()) return
     for (let attempt = 0; attempt < 16; attempt++) {
       await new Promise(r => setTimeout(r, 500))
-      if (!tunController.getStatus().running) return
+      if (!isCurrentVpnIpPoll()) return
       try {
-        const ipInfo = await ipMonitor.recheck(false)
+        const ipInfo = await ipMonitor.recheck(false, isCurrentVpnIpPoll)
+        if (!isCurrentVpnIpPoll()) return
         if (ipInfo.ip && ipInfo.ip !== preVpnIpDirect) {
-          const rebased = await ipMonitor.recheck(true)
+          const rebased = await ipMonitor.recheck(true, isCurrentVpnIpPoll)
+          if (!isCurrentVpnIpPoll()) return
           try {
             sendToMainWindow('ip-changed', { ip: rebased.ip, isLeak: rebased.isLeak })
           } catch {}
@@ -1391,12 +1409,15 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
         }
       } catch { /* retry on next interval */ }
     }
-    // Fallback: rebaseline after 8s only if tunnel routes are active.
+    // Fallback: rebaseline after the polling attempts only if routes are active.
     // Prevents self-blinding leak detector with real ISP IP when routing failed.
     try {
+      if (!isCurrentVpnIpPoll()) return
       const routesActive = await areTunRoutesActive().catch(() => false)
+      if (!isCurrentVpnIpPoll()) return
       if (routesActive) {
-        const ipInfo = await ipMonitor.recheck(true)
+        const ipInfo = await ipMonitor.recheck(true, isCurrentVpnIpPoll)
+        if (!isCurrentVpnIpPoll()) return
         const exitIp = ipInfo.ip
         if (exitIp) {
           try {
@@ -1416,7 +1437,7 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
       }
     } catch {}
   }
-  void pollVpnIpDirect()
+  void pollVpnIpDirect().catch(err => logEvent('warn', 'tun', 'background VPN IP polling failed', { error: String(err?.message || err).slice(-500) }))
 
   captureSnapshot('tun-post-start').catch(() => undefined)
   startPeriodicSnapshots(60_000)
@@ -1435,8 +1456,8 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
 async function stopProtection(
   stopKind: Extract<SessionOutcomeKind, 'user-stop' | 'app-quit' | 'schedule'> = 'user-stop'
 ): Promise<{ success: boolean; error?: string; warning?: string }> {
-  await rollbackSoftAutoconfigIfApplied('protection stop')
   adaptiveVerificationGeneration += 1
+  await rollbackSoftAutoconfigIfApplied('protection stop')
   activeAdaptiveContext = null
   // Record the connection BEFORE we stop, so traffic counters are still valid.
   // `stopInProgress` ensures the status-change handler doesn't double-record
@@ -1833,11 +1854,13 @@ app.whenReady().then(async () => {
   })
 
   handleLogged('cancel-tun', async () => {
+    adaptiveVerificationGeneration += 1
     tunController.cancelTransition()
     return stopProtection()
   })
 
   handleLogged('cancel-transition', async () => {
+    adaptiveVerificationGeneration += 1
     tunController.cancelTransition()
     return { requested: true }
   })
@@ -2524,6 +2547,7 @@ app.whenReady().then(async () => {
 async function performShutdownCleanup(reason: string): Promise<void> {
   if (shutdownInProgress) return
   shutdownInProgress = true
+  adaptiveVerificationGeneration += 1
   await clearOwnedSecretClipboard()
   logEvent('info', 'app', `shutdown cleanup started: ${reason}`)
 

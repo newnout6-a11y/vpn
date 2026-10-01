@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { isIP } from 'node:net'
 import { EventEmitter } from 'node:events'
 import ts from 'typescript'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 function body(file: string, name: string): string {
   const source = ts.createSourceFile(file, readFileSync(join(process.cwd(), 'src/main', file), 'utf8'), ts.ScriptTarget.Latest, true)
@@ -218,5 +218,104 @@ describe('Xray startup phase measurements (AT-02-002 / AT-02-004)', () => {
       success: false, totalMs: 5, phaseDurations: { 'stop-previous': 5, 'prepare-runtime': 0 }
     })
     expect(JSON.stringify(h.logEvent.mock.calls)).not.toContain(error.message)
+  })
+})
+
+function ipStartupHarness(mode: 'direct' | 'proxy') {
+  let running = false
+  const settings = { autoNetworkBaseline: false, directVpnInput: '' }
+  const os = {
+    rollbackSoftAutoconfigIfApplied: done(), suppressLeakSelfTestsFor: noop(), captureSnapshot: done(),
+    clearStaleKillSwitchBeforeStart: vi.fn(async () => ({ success: true })), recordStartFailure: noop(),
+    settingsStore: { get: () => settings },
+    serverPicker: { getActiveProfile: () => ({ id: 'fixture', name: 'fixture', protocol: 'vless', outbound: { server: 'fixture.invalid', server_port: 443 } }) },
+    killSwitchManifestExists: vi.fn(async () => false), combinedPreStartProbe: vi.fn(async () => ({ tunnels: [], listeners: [] })),
+    getRoutingPlan: vi.fn(async () => ({ canStartHard: true })),
+    beginAdaptiveConnection: () => ({ capabilities: {}, mode: 'standard' }),
+    tunController: { start: vi.fn(async (): Promise<any> => { running = true; return { success: true } }), getStatus: () => ({ running }) },
+    applyTunNetworkBaseline: vi.fn(async (): Promise<any> => ({ success: true })), rollbackTunNetworkBaselineIfApplied: done(),
+    markAdaptiveFailure: noop(), readRecentSingBoxOutboundFault: vi.fn(async () => null), scheduleAdaptiveVerification: noop(),
+    ipMonitor: { startMonitoring: noop(), getCurrentIp: vi.fn(async (_guard?: () => boolean) => ({ ip: '203.0.113.1' })),
+      recheck: vi.fn(async (_rebaseline: boolean, _guard?: () => boolean) => ({ ip: '203.0.113.1', isLeak: false })) },
+    startTrafficForensicsSession: done(), refreshTrayState: noop(), openSession: noop(), startPeriodicSnapshots: noop(),
+    startPeriodicLeakTest: noop(), startNetworkChangeWatcher: noop(), sendToMainWindow: noop(), logEvent: noop(),
+    areTunRoutesActive: vi.fn(async () => false)
+  }
+  const name = mode === 'direct' ? 'startDirectVpnProtection' : 'startProtection'
+  const control = compile<{ start: () => Promise<any>; cancel: () => void }>(`
+let adaptiveVerificationGeneration=0,activeAdaptiveContext=null,latestPublicIp=null;
+const KILL_SWITCH_RULE_PREFIX='VPNTE-killswitch';
+${body('index.ts', name)}
+return {start: () => ${name}(${mode === 'proxy' ? "'127.0.0.1:1080','socks5'" : ''}), cancel: () => {adaptiveVerificationGeneration++}};
+`, os)
+  return { ...control, ...os, settings, setRunning: (value: boolean) => { running = value } }
+}
+describe.each(['direct', 'proxy'] as const)('background IP startup: %s (AT-00-003 / AT-02-002)', mode => {
+  afterEach(() => { vi.clearAllTimers(); vi.useRealTimers() })
+  it('returns the native outcome while the external IP request remains pending', async () => {
+    const h = ipStartupHarness(mode)
+    let resolve!: (value: { ip: string }) => void
+    h.ipMonitor.getCurrentIp.mockReturnValue(new Promise(done => { resolve = done }))
+    expect(await h.start()).toEqual({ success: true, warning: null, vpnIp: null })
+    expect(h.ipMonitor.getCurrentIp).toHaveBeenCalledOnce()
+    expect(h.startNetworkChangeWatcher).toHaveBeenCalledOnce()
+    h.cancel()
+    resolve({ ip: '198.51.100.1' })
+    await Promise.resolve()
+    expect(h.ipMonitor.recheck).not.toHaveBeenCalled()
+  })
+  it('still waits for the required native baseline and preserves its warning', async () => {
+    const h = ipStartupHarness(mode)
+    h.settings.autoNetworkBaseline = true
+    let release!: (value: any) => void
+    h.applyTunNetworkBaseline.mockReturnValue(new Promise(done => { release = done }))
+    h.ipMonitor.getCurrentIp.mockReturnValue(new Promise(() => {}))
+    const finished = vi.fn()
+    const pending = h.start().then(result => { finished(result); return result })
+    await vi.waitFor(() => expect(h.tunController.start).toHaveBeenCalledOnce())
+    expect(finished).not.toHaveBeenCalled()
+    release({ success: false, message: 'fixture baseline failure' })
+    expect((await pending).warning).toContain('fixture baseline failure')
+    h.cancel()
+  })
+  it('keeps a native startup failure without launching post-start IP checks', async () => {
+    const h = ipStartupHarness(mode)
+    h.tunController.start.mockResolvedValue({ success: false, error: 'native check failed' })
+    expect(await h.start()).toEqual({ success: false, error: 'native check failed' })
+    expect(h.ipMonitor.getCurrentIp).not.toHaveBeenCalled()
+  })
+  it('records a rejected background provider without rejecting completed native startup', async () => {
+    const h = ipStartupHarness(mode)
+    h.ipMonitor.getCurrentIp.mockRejectedValue(new Error('fixture provider failed'))
+    expect((await h.start()).success).toBe(true)
+    await Promise.resolve()
+    expect(h.logEvent).toHaveBeenCalledWith('warn', 'tun', 'background VPN IP polling failed', { error: 'fixture provider failed' })
+  })
+  it('ignores cancellation during an in-flight polling response before rebaseline', async () => {
+    vi.useFakeTimers()
+    const h = ipStartupHarness(mode)
+    let release!: (value: any) => void
+    h.ipMonitor.recheck.mockReturnValue(new Promise(done => { release = done }))
+    await h.start()
+    await vi.advanceTimersByTimeAsync(500)
+    expect(h.ipMonitor.recheck).toHaveBeenCalledOnce()
+    h.cancel()
+    release({ ip: '198.51.100.1', isLeak: false })
+    await Promise.resolve()
+    expect(h.ipMonitor.recheck).not.toHaveBeenCalledWith(true, expect.any(Function))
+    expect(h.areTunRoutesActive).not.toHaveBeenCalled()
+  })
+  it('ignores cancellation during the final route probe', async () => {
+    vi.useFakeTimers()
+    const h = ipStartupHarness(mode)
+    let release!: (value: boolean) => void
+    h.areTunRoutesActive.mockReturnValue(new Promise(done => { release = done }))
+    await h.start()
+    await vi.advanceTimersByTimeAsync(8000)
+    expect(h.areTunRoutesActive).toHaveBeenCalledOnce()
+    h.cancel()
+    release(true)
+    await Promise.resolve()
+    expect(h.ipMonitor.recheck).not.toHaveBeenCalledWith(true, expect.any(Function))
   })
 })

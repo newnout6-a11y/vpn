@@ -2,6 +2,7 @@ import { readFile } from 'fs/promises'
 import { dirname, join } from 'path'
 import { fileURLToPath } from 'url'
 import { describe, expect, it } from 'vitest'
+import ts from 'typescript'
 
 const here = dirname(fileURLToPath(import.meta.url))
 
@@ -279,9 +280,10 @@ describe('tunController recovery cancellation guards', () => {
 
   it('cleans up tunController, xray and owned processes unconditionally on shutdown', async () => {
     const indexSource = await readFile(join(here, 'index.ts'), 'utf8')
-    const shutdownStart = indexSource.indexOf('async function performShutdownCleanup(')
-    expect(shutdownStart).toBeGreaterThan(0)
-    const shutdownBody = indexSource.slice(shutdownStart, shutdownStart + 1000)
+    const parsed = ts.createSourceFile('index.ts', indexSource, ts.ScriptTarget.Latest, true)
+    const shutdown = parsed.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'performShutdownCleanup')
+    expect(shutdown).toBeDefined()
+    const shutdownBody = shutdown!.getText(parsed)
 
     expect(shutdownBody).toContain('await tunController.stop()')
     expect(shutdownBody).not.toMatch(/if\s*\(\s*tunController\.getStatus\(\)\.running\s*\)\s*\{\s*await tunController\.stop\(\)/)

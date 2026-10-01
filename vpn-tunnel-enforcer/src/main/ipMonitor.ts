@@ -41,6 +41,7 @@ let resumeDeferred = false
 // concurrent callers both fetch the IP, then both write vpnIp — the second
 // write wins with a potentially stale value and breaks all future leak checks.
 let recheckInFlight: Promise<{ ip: string | null; isLeak: boolean; vpnIp: string | null }> | null = null
+let recheckOwner: (() => boolean) | undefined
 
 let ipMonitorRecoveryCallback: ((source: string) => void) | null = null
 
@@ -48,7 +49,7 @@ export function setIpMonitorRecoveryCallback(cb: ((source: string) => void) | nu
   ipMonitorRecoveryCallback = cb
 }
 
-export async function fetchPublicIpFrom(url: string): Promise<string> {
+export async function fetchPublicIpFrom(url: string, canPublish?: () => boolean): Promise<string> {
   try {
     const resp = await axios.get(url, {
       timeout: 10000,
@@ -77,9 +78,10 @@ export async function fetchPublicIpFrom(url: string): Promise<string> {
       }
     }
     if (ip && (isIP(ip) === 4 || isIP(ip) === 6)) {
-      lastSuccessAt = Date.now()
-      logEvent('debug', 'ip-monitor', 'public IP endpoint succeeded', { url, ip })
-      if (ipMonitorRecoveryCallback) {
+      const current = !canPublish || canPublish()
+      if (current) lastSuccessAt = Date.now()
+      if (current) logEvent('debug', 'ip-monitor', 'public IP endpoint succeeded', { url, ip })
+      if (current && ipMonitorRecoveryCallback) {
         try {
           ipMonitorRecoveryCallback('ipMonitor')
         } catch {}
@@ -93,9 +95,10 @@ export async function fetchPublicIpFrom(url: string): Promise<string> {
   }
 }
 
-export async function fetchPublicIp(): Promise<string | null> {
+export async function fetchPublicIp(canPublish?: () => boolean): Promise<string | null> {
+  if (canPublish && !canPublish()) return null
   try {
-    return await Promise.any(IP_CHECK_URLS.map(fetchPublicIpFrom))
+    return await Promise.any(IP_CHECK_URLS.map(url => fetchPublicIpFrom(url, canPublish)))
   } catch {
     logEvent('warn', 'ip-monitor', 'all public IP endpoints failed')
     return null
@@ -142,13 +145,15 @@ export const ipMonitor = {
   startMonitoring,
   stopMonitoring,
   setRecoveryCallback: setIpMonitorRecoveryCallback,
-  async getCurrentIp(): Promise<{ ip: string | null; isLeak: boolean; vpnIp: string | null }> {
+  async getCurrentIp(canPublish?: () => boolean): Promise<{ ip: string | null; isLeak: boolean; vpnIp: string | null }> {
+    if (canPublish && !canPublish()) return { ip: currentIp, isLeak, vpnIp }
     if (suppressed) {
       // Return last-known state without touching it. Never report leak while
       // suspended — see the suspended-state comment block above.
       return { ip: currentIp, isLeak: false, vpnIp }
     }
-    const ip = await fetchPublicIp()
+    const ip = await fetchPublicIp(canPublish)
+    if (canPublish && !canPublish()) return { ip: currentIp, isLeak, vpnIp }
     if (suppressed) {
       // We may have been suspended while the HTTP request was in flight.
       return { ip: currentIp, isLeak: false, vpnIp }
@@ -175,14 +180,22 @@ export const ipMonitor = {
    * Concurrent rebaseline calls are serialised — only one fetch runs at a
    * time so two callers racing to set vpnIp don't overwrite each other.
    */
-  async recheck(rebaseline = false): Promise<{ ip: string | null; isLeak: boolean; vpnIp: string | null }> {
+  async recheck(rebaseline = false, canPublish?: () => boolean): Promise<{ ip: string | null; isLeak: boolean; vpnIp: string | null }> {
+    if (canPublish && !canPublish()) return { ip: currentIp, isLeak, vpnIp }
     if (suppressed && !rebaseline) {
       return { ip: currentIp, isLeak: false, vpnIp }
     }
-    if (rebaseline && recheckInFlight) return recheckInFlight
+    if (rebaseline && recheckInFlight) {
+      if (recheckOwner === canPublish) return recheckInFlight
+      // Different sessions never share a network sample. Wait for the older
+      // owner, then take a fresh sample if this caller is still current.
+      await recheckInFlight.catch(() => undefined)
+      return ipMonitor.recheck(rebaseline, canPublish)
+    }
 
     const doRecheck = async (): Promise<{ ip: string | null; isLeak: boolean; vpnIp: string | null }> => {
-      const ip = await fetchPublicIp()
+      const ip = await fetchPublicIp(canPublish)
+      if (canPublish && !canPublish()) return { ip: currentIp, isLeak, vpnIp }
       if (suppressed && !rebaseline) {
         return { ip: currentIp, isLeak: false, vpnIp }
       }
@@ -204,7 +217,8 @@ export const ipMonitor = {
     }
 
     if (rebaseline) {
-      recheckInFlight = doRecheck().finally(() => { recheckInFlight = null })
+      recheckOwner = canPublish
+      recheckInFlight = doRecheck().finally(() => { recheckInFlight = null; recheckOwner = undefined })
       return recheckInFlight
     }
     return doRecheck()
