@@ -5,6 +5,7 @@ import { isIP } from 'node:net'
 import { EventEmitter } from 'node:events'
 import ts from 'typescript'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { ConnectionLifecycle } from './connectionLifecycle'
 
 function body(file: string, name: string): string {
   const source = ts.createSourceFile(file, readFileSync(join(process.cwd(), 'src/main', file), 'utf8'), ts.ScriptTarget.Latest, true)
@@ -49,6 +50,7 @@ return ({${body('tunController.ts', 'stop')}}).stop;
 }
 function mainHarness(name: 'performShutdownCleanup' | 'stopProtection') {
   const os = {
+    connectionLifecycle: new ConnectionLifecycle(() => {}),
     tunController: { stop: vi.fn(async (): Promise<any> => ({ success: true, networkCleanup: { baseline: true, firewall: true, adapters: true } })) },
     clearOwnedSecretClipboard: done(), stopXray: done(), killOwnedTunRuntimeProcesses: done(), externalProxy: { stopAll: done() },
     rollbackTunNetworkBaselineIfApplied: done(), disableKillSwitchIfActive: done(), rollbackPhysicalAdapterLockdownIfApplied: done(),
@@ -416,6 +418,7 @@ function ipStartupHarness(mode: 'direct' | 'proxy') {
   let running = false
   const settings = { autoNetworkBaseline: false, directVpnInput: '' }
   const os = {
+    ...mainHarness('stopProtection'),
     rollbackSoftAutoconfigIfApplied: done(), suppressLeakSelfTestsFor: noop(), captureSnapshot: done(),
     clearStaleKillSwitchBeforeStart: vi.fn(async () => ({ success: true })), recordStartFailure: noop(),
     settingsStore: { get: () => settings },
@@ -423,26 +426,85 @@ function ipStartupHarness(mode: 'direct' | 'proxy') {
     killSwitchManifestExists: vi.fn(async () => false), combinedPreStartProbe: vi.fn(async () => ({ tunnels: [], listeners: [] })),
     getRoutingPlan: vi.fn(async () => ({ canStartHard: true })),
     beginAdaptiveConnection: () => ({ capabilities: {}, mode: 'standard' }),
-    tunController: { start: vi.fn(async (): Promise<any> => { running = true; return { success: true } }), getStatus: () => ({ running }) },
+    tunController: { start: vi.fn(async (): Promise<any> => { running = true; return { success: true } }), getStatus: () => ({ running }),
+      stop: vi.fn(async () => ({ success:true,networkCleanup:{baseline:true,firewall:true,adapters:true} })) },
     applyTunNetworkBaseline: vi.fn(async (): Promise<any> => ({ success: true })), rollbackTunNetworkBaselineIfApplied: done(),
     markAdaptiveFailure: noop(), readRecentSingBoxOutboundFault: vi.fn(async () => null), scheduleAdaptiveVerification: noop(),
-    ipMonitor: { startMonitoring: noop(), getCurrentIp: vi.fn(async (_guard?: () => boolean) => ({ ip: '203.0.113.1' })),
+    ipMonitor: { clearVpnIp:noop(),startMonitoring: noop(), getCurrentIp: vi.fn(async (_guard?: () => boolean) => ({ ip: '203.0.113.1' })),
       recheck: vi.fn(async (_rebaseline: boolean, _guard?: () => boolean) => ({ ip: '203.0.113.1', isLeak: false })) },
     startTrafficForensicsSession: done(), refreshTrayState: noop(), openSession: noop(), startPeriodicSnapshots: noop(),
     startPeriodicLeakTest: noop(), startNetworkChangeWatcher: noop(), sendToMainWindow: noop(), logEvent: noop(),
     areTunRoutesActive: vi.fn(async () => false)
   }
+  os.connectionLifecycle = new ConnectionLifecycle(() => { running=false })
   const name = mode === 'direct' ? 'startDirectVpnProtection' : 'startProtection'
-  const control = compile<{ start: () => Promise<any>; cancel: () => void }>(`
-let adaptiveVerificationGeneration=0,activeAdaptiveContext=null,latestPublicIp=null;
+  const control = compile<{ start: () => Promise<any>; cancel: () => void; stop: () => Promise<any>; shutdown: () => Promise<void> }>(`
+let adaptiveVerificationGeneration=0,activeAdaptiveContext=null,latestPublicIp=null,currentSession=null,stopInProgress=false,shutdownInProgress=false;
 const KILL_SWITCH_RULE_PREFIX='VPNTE-killswitch';
 ${body('index.ts', name)}
-return {start: () => ${name}(${mode === 'proxy' ? "'127.0.0.1:1080','socks5'" : ''}), cancel: () => {adaptiveVerificationGeneration++}};
+${body('index.ts','stopProtection')}
+${body('index.ts','performShutdownCleanup')}
+return {start: () => ${name}(${mode === 'proxy' ? "'127.0.0.1:1080','socks5'" : ''}),stop:stopProtection,shutdown:()=>performShutdownCleanup('test'), cancel: () => {adaptiveVerificationGeneration++}};
 `, os)
   return { ...control, ...os, settings, setRunning: (value: boolean) => { running = value } }
 }
 describe.each(['direct', 'proxy'] as const)('background IP startup: %s (AT-00-003 / AT-02-002)', mode => {
   afterEach(() => { vi.clearAllTimers(); vi.useRealTimers() })
+  it.each(['preflight','native','fault'] as const)('fences cancellation while a main %s boundary is pending', async phase => {
+    const h=ipStartupHarness(mode)
+    let release!: (result:any)=>void
+    const boundary=phase==='preflight' ? (mode==='direct' ? h.clearStaleKillSwitchBeforeStart : h.combinedPreStartProbe)
+      : phase==='native' ? h.tunController.start : h.readRecentSingBoxOutboundFault
+    if (phase==='fault') h.tunController.start.mockResolvedValue({success:false,error:'native failure'})
+    boundary.mockReturnValue(new Promise<any>(done=>{release=done}))
+    const started=h.start()
+    await vi.waitFor(()=>expect(boundary).toHaveBeenCalledOnce())
+    const stopped=h.stop()
+    await Promise.resolve()
+    expect(h.tunController.stop).not.toHaveBeenCalled()
+    release(phase==='preflight' ? {success:true,tunnels:[],listeners:[]} : phase==='native' ? {success:true} : null)
+    expect(await started).toEqual({success:false,error:'Запуск отменён'})
+    await stopped
+    if (phase==='preflight') expect(h.tunController.start).not.toHaveBeenCalled()
+    expect(h.recordStartFailure).not.toHaveBeenCalled()
+    expect(h.openSession).not.toHaveBeenCalled()
+    expect(h.refreshTrayState).not.toHaveBeenCalledWith(expect.objectContaining({status:'protected'}))
+  })
+  it('waits for main baseline on shutdown and never opens a cancelled session', async () => {
+    const h=ipStartupHarness(mode)
+    h.settings.autoNetworkBaseline=true
+    let release!: (result:any)=>void
+    h.applyTunNetworkBaseline.mockReturnValue(new Promise(done=>{release=done}))
+    const started=h.start()
+    await vi.waitFor(()=>expect(h.tunController.start).toHaveBeenCalledOnce())
+    const shutdown=h.shutdown()
+    await Promise.resolve()
+    expect(h.tunController.stop).not.toHaveBeenCalled()
+    release({success:true})
+    expect(await started).toMatchObject({success:false})
+    await shutdown
+    expect(h.tunController.stop).toHaveBeenCalledOnce()
+    expect(h.openSession).not.toHaveBeenCalled()
+    expect(await h.start()).toMatchObject({success:false})
+  })
+  it('waits for held main baseline before stop and suppresses stale history/status', async () => {
+    const h=ipStartupHarness(mode)
+    h.settings.autoNetworkBaseline=true
+    let release!: (value:any)=>void
+    h.applyTunNetworkBaseline.mockReturnValue(new Promise(done=>{release=done}))
+    const started=h.start()
+    await vi.waitFor(()=>expect(h.tunController.start).toHaveBeenCalledOnce())
+    const stopped=h.stop()
+    await Promise.resolve()
+    expect(h.tunController.stop).not.toHaveBeenCalled()
+    expect(h.openSession).not.toHaveBeenCalled()
+    release({success:true})
+    expect(await started).toEqual({success:false,error:'Запуск отменён'})
+    expect((await stopped).success).toBe(true)
+    expect(h.scheduleAdaptiveVerification).not.toHaveBeenCalled()
+    expect(h.openSession).not.toHaveBeenCalled()
+    expect(h.refreshTrayState).not.toHaveBeenCalledWith(expect.objectContaining({status:'protected'}))
+  })
   it('returns the native outcome while the external IP request remains pending', async () => {
     const h = ipStartupHarness(mode)
     let resolve!: (value: { ip: string }) => void

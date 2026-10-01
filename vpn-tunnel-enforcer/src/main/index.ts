@@ -9,6 +9,7 @@ import { join } from 'path'
 import { happDetector } from './happDetector'
 import { tunController, detectForeignTun, killOwnedTunRuntimeProcesses, isOwnedTunRuntimeRunning, readRecentSingBoxOutboundFault, areTunRoutesActive, getLastSingBoxExit, onProtectedRestart } from './tunController'
 import type { NetworkCleanupReceipt, SingBoxOutboundFault } from './tunController'
+import { ConnectionLifecycle } from './connectionLifecycle'
 import { makeOutcome, outcomeKindToDisconnectReason, isNodeSwitchRestartReason } from './sessionOutcome'
 import type { SessionOutcome, SessionOutcomeEvidence, SessionOutcomeKind } from '../shared/ipc-types'
 import { readRecentXrayOutboundFault, getXrayStatus, stopXray } from './xrayEngine'
@@ -985,8 +986,14 @@ async function rollbackSoftAutoconfigIfApplied(reason: string): Promise<void> {
   }
 }
 
+const connectionLifecycle = new ConnectionLifecycle(() => {
+  adaptiveVerificationGeneration += 1
+  tunController.cancelTransition()
+})
+
 async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http'): Promise<{ success: boolean; error?: string; warning?: string | null; vpnIp?: string | null }> {
-  await rollbackSoftAutoconfigIfApplied('hard protection start')
+  return connectionLifecycle.start(async owner => {
+  await owner.wait(rollbackSoftAutoconfigIfApplied('hard protection start'))
   suppressLeakSelfTestsFor(20_000, 'local-proxy-start')
   // Snapshot BEFORE we change anything. This is the baseline state that
   // support/diagnostics will compare against.
@@ -996,11 +1003,11 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
   // separate ones (firewall rule check + active tunnels + proxy listeners).
   // The manifest read (file I/O) determines whether the firewall probe is
   // included in the PS script at all — if no manifest, we skip it entirely.
-  const manifestExists = await killSwitchManifestExists()
-  const probe = await combinedPreStartProbe({
+  const manifestExists = await owner.wait(killSwitchManifestExists())
+  const probe = await owner.wait(combinedPreStartProbe({
     manifestExists,
     killSwitchRulePrefix: KILL_SWITCH_RULE_PREFIX
-  })
+  }))
 
   // Clear stale kill-switch if active. Uses the probe result instead of
   // calling isKillSwitchActive() again (which would spawn another PS process).
@@ -1008,8 +1015,8 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
     const killSwitchActive = probe.manifestExists || probe.firewallRulesExist
     if (killSwitchActive) {
       logEvent('info', 'firewall-killswitch', 'restart preflight: clearing stale kill-switch before local proxy start')
-      const ksResult = await disableKillSwitchIfActive('restart preflight: local proxy start')
-      refreshTrayState({ killSwitchActive: await isKillSwitchActive().catch(() => false) })
+      const ksResult = await owner.wait(disableKillSwitchIfActive('restart preflight: local proxy start'))
+      refreshTrayState({ killSwitchActive: await owner.wait(isKillSwitchActive().catch(() => false)) })
       if (!ksResult.success) {
         const errorMsg = `Не удалось снять старую блокировку перед перезапуском: ${ksResult.message}`
         recordStartFailure({ id: 'local-proxy', name: `Proxy ${proxyAddr}`, mode: 'hard' }, errorMsg, {
@@ -1025,10 +1032,10 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
 
   // Build routing plan from pre-computed probe data (skips 2 PS calls,
   // only runs proxy detection which is TCP-based, not PowerShell).
-  const plan = await getRoutingPlan({
+  const plan = await owner.wait(getRoutingPlan({
     activeTunnels: probe.tunnels,
     proxyListeners: probe.listeners
-  })
+  }))
   if (!plan.canStartHard) {
     const errorMsg = `${plan.title}. ${plan.explanation} ${plan.after}`
     recordStartFailure({ id: 'local-proxy', name: `Proxy ${proxyAddr}`, mode: 'hard' }, errorMsg)
@@ -1056,6 +1063,7 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
       })
   }
 
+  if (baselinePromise) owner.retain(baselinePromise)
   const connectionSettings = settingsStore.get()
   const adaptive = beginAdaptiveConnection({
     enabled: connectionSettings.adaptiveBypassEnabled,
@@ -1069,7 +1077,7 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
     connectionMode: 'localProxy',
     serverFallbackAttempted: false
   }
-  const result = await tunController.start({
+  const result = await owner.wait(tunController.start({
     proxyAddr,
     proxyType: proxyType ?? 'socks5',
     enableFirewallKillSwitch: connectionSettings.firewallKillSwitch,
@@ -1077,27 +1085,29 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
     publicWifiCompatibility: connectionSettings.publicWifiCompatibility,
     stealthMode: connectionSettings.stealthMode,
     adaptiveMode: adaptive.mode
-  })
+  }))
   if (!result.success) {
     activeAdaptiveContext = null
     const errorMsg = result.error || 'Не удалось запустить туннель'
     markAdaptiveFailure(errorMsg)
     recordStartFailure({ id: 'local-proxy', name: `Proxy ${proxyAddr}`, mode: 'hard' }, errorMsg, {
-      outboundFault: await readRecentSingBoxOutboundFault().catch(() => null)
+      outboundFault: await owner.wait(readRecentSingBoxOutboundFault().catch(() => null))
     })
     // Wait for the baseline to finish before rolling back so the manifest
     // exists for rollbackTunNetworkBaselineIfApplied to find.
-    if (baselinePromise) await baselinePromise
+    if (baselinePromise) await owner.wait(baselinePromise)
     await rollbackTunNetworkBaselineIfApplied('start-tun failed').catch(err =>
       logEvent('warn', 'app', 'rollback after start-tun failure failed', err)
     )
+    owner.assertActive()
     captureSnapshot('tun-start-failed').catch(() => undefined)
     return result
   }
 
   // The baseline is very likely already done (start() took several seconds),
   // but await it to be sure before we report final status.
-  if (baselinePromise) await baselinePromise
+  if (baselinePromise) await owner.wait(baselinePromise)
+  owner.assertActive()
   scheduleAdaptiveVerification()
   ipMonitor.startMonitoring()
 
@@ -1204,14 +1214,16 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
     warning: [baselineWarning, result.warning].filter(Boolean).join(' | ') || null,
     vpnIp: null
   }
+  })
 }
 
 async function startDirectVpnProtection(): Promise<{ success: boolean; error?: string; warning?: string | null; vpnIp?: string | null }> {
-  await rollbackSoftAutoconfigIfApplied('direct VPN start')
+  return connectionLifecycle.start(async owner => {
+  await owner.wait(rollbackSoftAutoconfigIfApplied('direct VPN start'))
   suppressLeakSelfTestsFor(20_000, 'direct-vpn-start')
   captureSnapshot('tun-pre-start').catch(() => undefined)
 
-  const staleKillSwitch = await clearStaleKillSwitchBeforeStart('Direct VPN start')
+  const staleKillSwitch = await owner.wait(clearStaleKillSwitchBeforeStart('Direct VPN start'))
   if (!staleKillSwitch.success) {
     const errorMsg = staleKillSwitch.error || 'Не удалось очистить старый kill-switch'
     recordStartFailure({ id: 'direct-vpn', name: 'Direct VPN', mode: 'direct' }, errorMsg, {
@@ -1275,15 +1287,16 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
     }
   } else if (settings.directVpnInput.trim()) {
     try {
-      profile = await resolveVpnProfile(settings.directVpnInput, settings.directVpnSelectedIndex, {
+      profile = await owner.wait(resolveVpnProfile(settings.directVpnInput, settings.directVpnSelectedIndex, {
         proxyAddr: settings.proxyOverride,
         proxyType: settings.proxyType
-      })
+      }))
       logEvent('info', 'tun', 'using legacy directVpnInput fallback (no server-picker profile)', {
         protocol: profile.protocol,
         name: profile.name
       })
     } catch (err: any) {
+      owner.assertActive()
       const errorMsg = err?.message || String(err)
       recordStartFailure({ id: 'direct-vpn', name: 'Direct VPN', mode: 'direct' }, errorMsg)
       captureSnapshot('tun-start-failed').catch(() => undefined)
@@ -1313,6 +1326,7 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
       })
   }
 
+  if (baselinePromise) owner.retain(baselinePromise)
   logEvent('info', 'tun', 'direct VPN profile selected', {
     protocol: profile.protocol,
     name: profile.name
@@ -1332,7 +1346,7 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
     connectionMode: 'directVpn',
     serverFallbackAttempted: false
   }
-  const result = await tunController.start({
+  const result = await owner.wait(tunController.start({
     mode: 'directVpn',
     vpnProfile: profile,
     proxyType: 'socks5',
@@ -1342,7 +1356,7 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
     stealthMode: settings.stealthMode,
     adaptiveMode: adaptive.mode,
     proxyEngine: settings.proxyEngine
-  })
+  }))
   if (!result.success) {
     activeAdaptiveContext = null
     const errorMsg = result.error || 'Не удалось запустить туннель'
@@ -1350,16 +1364,18 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
     recordStartFailure(
       { id: profile.name || 'direct-vpn', name: profile.name || 'Direct VPN', mode: 'direct' },
       errorMsg,
-      { outboundFault: await readRecentSingBoxOutboundFault().catch(() => null) }
+      { outboundFault: await owner.wait(readRecentSingBoxOutboundFault().catch(() => null)) }
     )
-    if (baselinePromise) await baselinePromise
+    if (baselinePromise) await owner.wait(baselinePromise)
     await rollbackTunNetworkBaselineIfApplied('direct-vpn start failed').catch(err =>
       logEvent('warn', 'app', 'rollback after direct-vpn start failure failed', err)
     )
+    owner.assertActive()
     captureSnapshot('tun-start-failed').catch(() => undefined)
     return result
   }
-  if (baselinePromise) await baselinePromise
+  if (baselinePromise) await owner.wait(baselinePromise)
+  owner.assertActive()
   scheduleAdaptiveVerification()
   ipMonitor.startMonitoring()
 
@@ -1451,11 +1467,13 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
     warning: [baselineWarning, result.warning].filter(Boolean).join(' | ') || null,
     vpnIp: null
   }
+  })
 }
 
 async function stopProtection(
   stopKind: Extract<SessionOutcomeKind, 'user-stop' | 'app-quit' | 'schedule'> = 'user-stop'
 ): Promise<{ success: boolean; error?: string; warning?: string }> {
+  return connectionLifecycle.stop(async () => {
   adaptiveVerificationGeneration += 1
   await rollbackSoftAutoconfigIfApplied('protection stop')
   activeAdaptiveContext = null
@@ -1524,6 +1542,7 @@ async function stopProtection(
   // Keep internal cleanup evidence inside main; IPC exposes the user outcome.
   const { networkCleanup: _cleanup, ...outcome } = result
   return outcome
+  })
 }
 
 async function startProtectionFromTray(): Promise<void> {
@@ -1861,7 +1880,11 @@ app.whenReady().then(async () => {
 
   handleLogged('cancel-transition', async () => {
     adaptiveVerificationGeneration += 1
-    tunController.cancelTransition()
+    if (connectionLifecycle.starting) {
+      void stopProtection().catch(err => logEvent('warn', 'tun', 'cancelled main startup cleanup failed', err))
+    } else {
+      tunController.cancelTransition()
+    }
     return { requested: true }
   })
 
@@ -2548,6 +2571,7 @@ async function performShutdownCleanup(reason: string): Promise<void> {
   if (shutdownInProgress) return
   shutdownInProgress = true
   adaptiveVerificationGeneration += 1
+  await connectionLifecycle.close().catch(err => logEvent('warn', 'app', 'pending main lifecycle during shutdown failed', err))
   await clearOwnedSecretClipboard()
   logEvent('info', 'app', `shutdown cleanup started: ${reason}`)
 
