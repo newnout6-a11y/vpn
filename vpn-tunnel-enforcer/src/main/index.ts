@@ -1,5 +1,5 @@
 import './snapshotBootstrap'
-import { startElevatedPsHelper, stopElevatedPsHelper } from './elevatedPsHelper'
+import { startElevatedPsHelper, stopElevatedPsHelper, warmElevatedPsHelper } from './elevatedPsHelper'
 import { warmRecoveryPsWorker, stopRecoveryPsWorker } from './recoveryPsWorker'
 import { app, BrowserWindow, dialog, ipcMain, Tray, shell, session, Menu, powerMonitor, type IpcMainInvokeEvent } from 'electron'
 import { exec as execCb } from 'child_process'
@@ -1734,7 +1734,7 @@ app.whenReady().then(async () => {
   // Start the persistent elevated PowerShell helper — one long-running
   // PS process that accepts JSON commands via stdin, eliminating the
   // 300-800ms process-creation overhead per elevated PS call.
-  void startElevatedPsHelper().catch(err =>
+  const helperStartup = startElevatedPsHelper().catch(err =>
     logEvent('warn', 'app', 'failed to start elevated PS helper', err)
   )
 
@@ -1742,6 +1742,8 @@ app.whenReady().then(async () => {
     logEvent('warn', 'app', 'crash recovery failed', err)
   )
 
+  // Recovery gets priority. Warm the actual helper without caching network state.
+  void helperStartup.then(() => warmElevatedPsHelper())
   // Only module loading; every connect still reads fresh ownership/ACL evidence.
   void warmRecoveryPsWorker()
 

@@ -135,6 +135,33 @@ export function isElevatedPsHelperRunning(): boolean {
   return helperProcess !== null && !helperProcess.killed && helperProcess.exitCode === null
 }
 
+const HELPER_WARMUP_COMMANDS: ReadonlyArray<{ policy: ElevatedPsPolicy; script: string }> = [
+  { policy: 'firewall-killswitch', script: 'Import-Module NetSecurity -ErrorAction Stop; Get-NetFirewallProfile -Profile Domain,Private,Public -ErrorAction Stop | Out-Null' },
+  { policy: 'physical-adapter-lockdown', script: 'Import-Module NetAdapter,DnsClient,NetTCPIP -ErrorAction Stop; Get-NetAdapter -ErrorAction Stop | Out-Null' }
+]
+
+/** Prepare this helper only; query results are discarded, never reused as evidence. */
+export async function warmElevatedPsHelper(): Promise<void> {
+  const owner = helperProcess
+  if (!owner || !isElevatedPsHelperRunning()) return
+  for (const command of HELPER_WARMUP_COMMANDS) {
+    // Do not restart a stopped helper or warm a replacement during shutdown.
+    if (helperProcess !== owner || !isElevatedPsHelperRunning()) break
+    const started = performance.now()
+    let outcome = 'failed'
+    try {
+      const result = await execElevatedPs(command.script, 15000, command.policy)
+      if (result.exitCode !== 0) throw new Error('Helper warm-up failed')
+      outcome = 'complete'
+    } catch {
+      logEvent('warn', 'ps-helper', 'fixed read-only warm-up unavailable', { policy: command.policy })
+    } finally {
+      logEvent('debug', 'ps-helper', 'warm-up timing', { policy: command.policy, outcome,
+        durationMs: Math.round(performance.now() - started) })
+    }
+  }
+}
+
 export async function startElevatedPsHelper(): Promise<void> {
   if (isElevatedPsHelperRunning()) return
   if (helperStarting) return helperStarting
