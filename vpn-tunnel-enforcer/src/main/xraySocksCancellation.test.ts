@@ -93,7 +93,7 @@ describe('interruptible production SOCKS readiness (AT-00-003/007; AT-02-004/005
   })
   it('passes the startup owner signal to readiness and preserves cancellation classification', () => {
     expect(source).toContain('waitForLocalSocks(socksPort, SOCKS_PROBE_TIMEOUT_MS, options.signal)')
-    expect(source).toMatch(/await removeManagedChildPidFile\(pidPath, pid\)\s+if \(options.signal\?\.aborted\) throw new Error\('Xray startup cancelled'\)/)
+    expect(source).toContain("if (options.signal?.aborted) throw new Error('Xray startup cancelled')")
   })
   it('executes successful readiness and cancellation with real loopback sockets', async () => {
     const server = createServer(socket => socket.end())

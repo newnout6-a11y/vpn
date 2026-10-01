@@ -347,6 +347,8 @@ function xrayStartHarness() {
   const text = body('xrayEngine.ts', 'startXray').replace(/^export /, '')
   const start = compile<(outbound: Record<string, unknown>, options?: Record<string, unknown>) => Promise<any>>(`
 const XRAY_PID_FILE='fixture.pid',SOCKS_PROBE_TIMEOUT_MS=3500;
+const exitedChildren=new WeakSet();
+${body('xrayEngine.ts', 'runtimeHasExited')}
 let activeXrayState={proc:null};
 ${text}
 return startXray;
