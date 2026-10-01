@@ -7,7 +7,7 @@ const state = vi.hoisted(() => ({ manifest: null as any, writes: [] as any[], sc
   failWrite: false, failApply: false, failRestore: false, invalidRead: false,
   liveFailures: 0, liveMissingMarker: false, failCommit: false,
   artifacts: [] as string[], helperAvailable: true, helperFailure: null as any, helperExitCode: 0, longApps: false,
-  fileProbe: vi.fn((..._args: any[]) => '0'),
+  nativeTimings: '', fileProbe: vi.fn((..._args: any[]) => '0'),
   fallback: vi.fn(async (..._args: any[]) => ({ stdout: 'SNAPSHOT:[]', stderr: '' })) }))
 vi.mock('electron', () => ({ app: { getPath: () => 'C:\\VPNTE' },
   BrowserWindow: { getAllWindows: () => [] }, dialog: { showMessageBox: vi.fn(async () => ({})) } }))
@@ -62,7 +62,7 @@ vi.mock('./elevatedPsHelper', () => ({ isElevatedPsHelperRunning: () => state.he
       if (withExceptions && !state.manifest.pendingExceptionPolicy) throw new Error('Initial effects without journal')
       if (withExceptions && state.liveFailures > 0) { state.liveFailures--; throw new Error('initial exceptions failed') }
       const marker = withExceptions && !state.liveMissingMarker ? 'EXCEPTIONS_VERIFIED\n' : ''
-      return { stdout: marker + 'RULES:VPNTE-killswitch-allow-app', stderr: '', exitCode: 0 }
+      return { stdout: state.nativeTimings + marker + 'RULES:VPNTE-killswitch-allow-app', stderr: '', exitCode: 0 }
     }
     if (script.includes("Write-Output 'EXCEPTIONS_VERIFIED'")) {
       if (!state.manifest?.pendingExceptionPolicy) throw new Error('Live effects without durable journal')
@@ -79,8 +79,21 @@ vi.mock('./elevatedPsHelper', () => ({ isElevatedPsHelperRunning: () => state.he
   }
 }))
 import { enableKillSwitch, disableKillSwitch, isKillSwitchActive, updateKillSwitchExceptions } from './firewallKillSwitch'
+import { logEvent } from './appLogger'
 const originalPlatform = process.platform
 const options = { singboxExePath: 'C:\\VPNTE\\sing-box.exe' }
+function executeNativeFixture(script: string): string {
+  const temporaryRoot = join(process.cwd(), '.tmp')
+  mkdirSync(temporaryRoot, { recursive: true })
+  const temporary = mkdtempSync(join(temporaryRoot, 'firewall-transaction-'))
+  const scriptPath = join(temporary, 'harness.ps1')
+  try {
+    writeFileSync(scriptPath, '\ufeff' + script)
+    return execFileSync(process.env.VPNTE_PWSH || 'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', scriptPath],
+      { encoding: 'utf8', timeout: 15000, stdio: ['ignore', 'pipe', 'pipe'] })
+  } finally { unlinkSync(scriptPath); rmdirSync(temporary) }
+}
 beforeEach(() => {
   Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
   state.manifest = null; state.writes = []; state.scripts = []
@@ -88,11 +101,38 @@ beforeEach(() => {
   state.liveFailures = 0; state.liveMissingMarker = false; state.failCommit = false
   state.artifacts = []; state.helperAvailable = true; state.helperFailure = null; state.helperExitCode = 0
   state.longApps = false
+  state.nativeTimings = ''; vi.mocked(logEvent).mockClear()
   state.fallback.mockReset().mockRejectedValue(new Error('Fallback boundary refused'))
   state.fileProbe.mockReset().mockReturnValue('0')
 })
 afterEach(() => { Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true }) })
 describe('firewall transaction fault injection (AT-03-003/004/007; F-030, F-186)', () => {
+  it('logs only bounded unique native phases without treating them as security proof (AT-00-005/AT-03-007)', async () => {
+    state.nativeTimings = [
+      'VPNTE_FW_TIMING:initial-stale-cleanup:240',
+      'VPNTE_FW_TIMING:initial-create-allows:00025',
+      'VPNTE_FW_TIMING:initial-set-block:0',
+      'VPNTE_FW_TIMING:initial-exceptions:30', 'VPNTE_FW_TIMING:initial-exceptions:31',
+      'VPNTE_FW_TIMING:restore-profiles:60001',
+      'VPNTE_FW_TIMING:restore-remove-rules:-1',
+      'VPNTE_FW_TIMING:private-server.example:42',
+      'VPNTE_FW_TIMING:initial-stale-cleanup:999999',
+      'VPNTE_FW_TIMING:restore-profiles:NaN'
+    ].join('\n') + '\n'
+    expect((await enableKillSwitch({ ...options, appExceptionPaths: [], tunAdapterReady: Promise.resolve(true) })).success).toBe(true)
+    expect(vi.mocked(logEvent).mock.calls.filter(call => call[2] === 'native phase timing')).toEqual([
+      ['debug', 'firewall-killswitch', 'native phase timing', { phase: 'initial-stale-cleanup', durationMs: 240 }],
+      ['debug', 'firewall-killswitch', 'native phase timing', { phase: 'initial-create-allows', durationMs: 25 }],
+      ['debug', 'firewall-killswitch', 'native phase timing', { phase: 'initial-set-block', durationMs: 0 }]
+    ])
+    expect(vi.mocked(logEvent).mock.calls.flatMap(call => call.slice(2)).join(' ')).not.toContain('private-server.example')
+  })
+  it('refuses an unverified exception result even with well-formed native timings (AT-03-007)', async () => {
+    state.nativeTimings = 'VPNTE_FW_TIMING:initial-exceptions:1\n'; state.liveMissingMarker = true
+    expect((await enableKillSwitch({ ...options, appExceptionPaths: [], tunAdapterReady: Promise.resolve(true) })).success).toBe(false)
+    expect(state.manifest).toBeNull()
+    expect(state.scripts.some(script => script.includes("Write-Output 'RESTORED'"))).toBe(true)
+  })
   it('uses the protected-file fallback for oversized initial and live exception policies (AT-03-007/008/009)', async () => {
     state.longApps = true
     const paths = Array.from({ length: 36 }, (_, i) => `C:\\${('a'.repeat(200) + '\\').repeat(8)}app-${i}.exe`)
@@ -223,23 +263,47 @@ function Get-NetFirewallApplicationFilter { param([Parameter(ValueFromPipeline=$
 ${transaction}
 Write-Output ('RESULT:' + (@($script:fixtureRules.Values | Where-Object {$_.DisplayName -like 'VPNTE-killswitch-user-*'} | ForEach-Object { $_.RemoteAddress }) | ConvertTo-Json -Compress))
 `
-    const temporaryRoot = join(process.cwd(), '.tmp')
-    mkdirSync(temporaryRoot, { recursive: true })
-    const temporary = mkdtempSync(join(temporaryRoot, 'firewall-initial-'))
-    const scriptPath = join(temporary, 'harness.ps1')
-    let output: string
-    try {
-      writeFileSync(scriptPath, '\ufeff' + script)
-      output = execFileSync(process.env.VPNTE_PWSH || 'powershell.exe',
-        ['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File', scriptPath],
-        { encoding: 'utf8', timeout: 15000, stdio: ['ignore','pipe','pipe'] })
-    } finally { unlinkSync(scriptPath); rmdirSync(temporary) }
+    const output = executeNativeFixture(script)
     expect(output).toContain('EXCEPTIONS_VERIFIED')
     expect(output).toContain('RULES:VPNTE-killswitch-allow-singbox')
+    const timings = [...output.matchAll(/^VPNTE_FW_TIMING:([a-z-]+):(\d+)\r?$/gm)]
+    expect(timings.map(match => match[1])).toEqual(['initial-stale-cleanup', 'initial-create-allows', 'initial-set-block', 'initial-exceptions'])
+    expect(timings.every(match => Number.isSafeInteger(Number(match[2])) && Number(match[2]) >= 0)).toBe(true)
     const raw = output.split(/\r?\n/).find(line => line.startsWith('RESULT:'))!.slice(7)
     const values = raw ? JSON.parse(raw) : []
     expect((Array.isArray(values) ? values : [values]).sort()).toEqual([...cidrs].sort())
   }, 20000)
+  it.skipIf(process.platform !== 'win32' && !process.env.VPNTE_PWSH).each(['valid', 'set-error', 'readback-error'])(
+    'preserves independent native restore/readbacks with timings: %s (AT-03-004/007)', async mode => {
+      await enableKillSwitch(options)
+      await disableKillSwitch('native fixture')
+      const restore = state.scripts.find(script => script.includes("Write-Output 'RESTORED'"))!
+      const output = executeNativeFixture(`
+$script:profiles=@{Domain='Allow';Private='Allow';Public='Allow'};$script:attempts=New-Object 'Collections.Generic.List[string]'
+$script:rules=@{own=[pscustomobject]@{DisplayName='VPNTE-killswitch-allow-app'};foreign=[pscustomobject]@{DisplayName='foreign-app'}}
+function Set-NetFirewallProfile { param($Profile,$DefaultOutboundAction)
+  $script:attempts.Add($Profile)
+  if($Profile -eq 'Private' -and '${mode}' -eq 'set-error'){throw 'Fixture set failed'}
+  $script:profiles[$Profile]=$DefaultOutboundAction
+}
+function Get-NetFirewallProfile { param($Profile)
+  $value=$script:profiles[$Profile]
+  if($Profile -eq 'Private' -and '${mode}' -eq 'readback-error'){$value='Allow'}
+  [pscustomobject]@{DefaultOutboundAction=$value}
+}
+function Get-NetFirewallRule { param($DisplayName) @($script:rules.Values)|Where-Object{$_.DisplayName -like $DisplayName} }
+function Remove-NetFirewallRule { param([Parameter(ValueFromPipeline=$true)]$Rule) process { if($Rule){$script:rules.Remove('own')} } }
+$success=$false
+try {${restore}
+$success=$true
+}catch{}
+Write-Output ('RESULT:'+(@{success=$success;attempts=$script:attempts.ToArray();ownRemains=$script:rules.ContainsKey('own');foreignRemains=$script:rules.ContainsKey('foreign')}|ConvertTo-Json -Compress))
+`)
+      const result = JSON.parse(output.split(/\r?\n/).find(line => line.startsWith('RESULT:'))!.slice(7))
+      expect(result).toEqual({ success: mode === 'valid', attempts: ['Domain', 'Private', 'Public'], ownRemains: false, foreignRemains: true })
+      expect([...output.matchAll(/^VPNTE_FW_TIMING:([a-z-]+):(\d+)\r?$/gm)].map(match => match[1])).toEqual(['restore-profiles', 'restore-remove-rules'])
+      expect(output.includes('RESTORED')).toBe(mode === 'valid')
+    }, 20000)
   it('commits the real original Block policies BEFORE mutation', async () => {
     expect((await enableKillSwitch(options)).success).toBe(true)
     expect(state.writes.map(value => value.phase)).toEqual(['prepared','active'])

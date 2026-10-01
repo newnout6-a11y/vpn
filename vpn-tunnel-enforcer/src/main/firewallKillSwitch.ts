@@ -139,6 +139,28 @@ function cmdDoubleQuote(value: string): string {
   return `"${value.replace(/"/g, '\\"')}"`
 }
 
+const NATIVE_FIREWALL_PHASES = new Set([
+  'initial-stale-cleanup', 'initial-create-allows', 'initial-set-block', 'initial-exceptions',
+  'restore-profiles', 'restore-remove-rules'
+])
+function logNativeFirewallTimings(stdout: string): void {
+  // Diagnostic markers carry no security proof and never affect the result.
+  // Accept only fixed names and bounded integer milliseconds, once per phase.
+  const timings = new Map<string, number>()
+  const duplicates = new Set<string>()
+  for (const line of stdout.split(/\r?\n/)) {
+    const match = /^VPNTE_FW_TIMING:([a-z-]+):([0-9]{1,5})$/.exec(line.trim())
+    if (!match || !NATIVE_FIREWALL_PHASES.has(match[1])) continue
+    const durationMs = Number(match[2])
+    if (durationMs > 60000) continue
+    if (timings.has(match[1])) duplicates.add(match[1])
+    timings.set(match[1], durationMs)
+  }
+  for (const [phase, durationMs] of timings) {
+    if (!duplicates.has(phase)) logEvent('debug', 'firewall-killswitch', 'native phase timing', { phase, durationMs })
+  }
+}
+
 async function ps(script: string, elevated = false, timeout = 30000) {
   // The persistent helper executes source from its pipe. A protected .ps1 is
   // needed only by the fallback; writing it first adds two cold PS launches.
@@ -160,6 +182,7 @@ async function ps(script: string, elevated = false, timeout = 30000) {
         transport: 'helper', durationMs: Math.round(performance.now() - started)
       })
       if (result.exitCode) throw new Error(result.stderr || `Firewall command failed (exit ${result.exitCode})`)
+      logNativeFirewallTimings(result.stdout)
       return { stdout: result.stdout, stderr: result.stderr }
     }
   }
@@ -179,7 +202,9 @@ async function ps(script: string, elevated = false, timeout = 30000) {
   try {
     if (elevated) {
       const command = `powershell -NoProfile -ExecutionPolicy Bypass -File ${cmdDoubleQuote(scriptPath)}`
-      return execElevated(command, { timeout, maxBuffer: 1024 * 1024 * 4 })
+      const result = await execElevated(command, { timeout, maxBuffer: 1024 * 1024 * 4 })
+      logNativeFirewallTimings(String(result.stdout ?? ''))
+      return result
     }
     const result = await execFile(
       'powershell',
@@ -191,6 +216,7 @@ async function ps(script: string, elevated = false, timeout = 30000) {
         encoding: 'utf8'
       }
     ) as { stdout: string; stderr: string }
+    logNativeFirewallTimings(String(result.stdout ?? ''))
     return {
       stdout: String(result.stdout ?? ''),
       stderr: String(result.stderr ?? '')
@@ -440,8 +466,9 @@ if ($profiles.Count -ne 3 -or @($profiles | Where-Object { [string]$_.DefaultOut
 # Only user exceptions are replaced. Core, TUN, Xray and Happ rules stay intact.
 # Removal-first may temporarily narrow an exception, but never opens new traffic
 # before the requested policy has been validated. Never set DefaultOutboundAction.
-Get-NetFirewallRule -DisplayName '${RULE_PREFIX}-user-*' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction Stop
-Get-NetFirewallRule -DisplayName '${RULE_PREFIX}-allow-extra-ip' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction Stop
+# One native lookup for the same two disjoint stale groups. The final set
+# read-back below is a new query after removal/creation, never this result.
+Get-NetFirewallRule -DisplayName @('${RULE_PREFIX}-user-*','${RULE_PREFIX}-allow-extra-ip') -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction Stop
 $requested=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}')) | ConvertFrom-Json
 # Association queries cost one CIM round trip per application. For larger sets,
 # read the same default PersistentStore once; never reuse this operation's index.
@@ -607,8 +634,11 @@ for ($i = 0; $i -lt 150; $i++) {
 $savedJson = ${psSingleQuote(JSON.stringify(savedProfiles))}
 
 # --- Step 2: Clean stale rules ---
+$nativePhaseWatch = [Diagnostics.Stopwatch]::StartNew()
 Get-NetFirewallRule -DisplayName '${RULE_PREFIX}*' -ErrorAction SilentlyContinue |
   Remove-NetFirewallRule -ErrorAction SilentlyContinue
+Write-Output ('VPNTE_FW_TIMING:initial-stale-cleanup:' + $nativePhaseWatch.ElapsedMilliseconds)
+$nativePhaseWatch.Restart()
 
 $rules = @()
 
@@ -769,6 +799,8 @@ if ($missingRequired.Count -gt 0) {
     Remove-NetFirewallRule -ErrorAction SilentlyContinue
   throw ("Missing required allow rules before DefaultOutboundAction=Block: " + ($missingRequired -join ','))
 }
+Write-Output ('VPNTE_FW_TIMING:initial-create-allows:' + $nativePhaseWatch.ElapsedMilliseconds)
+$nativePhaseWatch.Restart()
 try {
   Set-NetFirewallProfile -Profile Domain,Private,Public -DefaultOutboundAction Block
 } catch {
@@ -778,11 +810,14 @@ try {
     Remove-NetFirewallRule -ErrorAction SilentlyContinue
   throw
 }
+Write-Output ('VPNTE_FW_TIMING:initial-set-block:' + $nativePhaseWatch.ElapsedMilliseconds)
+$nativePhaseWatch.Restart()
 
 # Output: JSON with rules + saved profiles
 # Initial exceptions share the prepared recovery journal and the native
 # transaction. Their full read-back still runs, including the empty policy.
 ${initialExceptions ? exceptionPolicyScript(initialExceptions) : ''}
+Write-Output ('VPNTE_FW_TIMING:initial-exceptions:' + $nativePhaseWatch.ElapsedMilliseconds)
 $rulesCsv = ($rules -join ',')
 Write-Output "RULES:$rulesCsv"
 Write-Output "SAVED:$savedJson"
@@ -881,11 +916,15 @@ try {
 } catch { $errors += ${psSingleQuote(p.name)} + ': ' + [string]$_ }
 `).join('\n')
   const { stdout } = await ps(`$errors = @()
+$nativePhaseWatch = [Diagnostics.Stopwatch]::StartNew()
 ${restores}
+Write-Output ('VPNTE_FW_TIMING:restore-profiles:' + $nativePhaseWatch.ElapsedMilliseconds)
+$nativePhaseWatch.Restart()
 try {
   Get-NetFirewallRule -DisplayName '${RULE_PREFIX}*' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction Stop
   if ((Get-NetFirewallRule -DisplayName '${RULE_PREFIX}*' -ErrorAction SilentlyContinue | Measure-Object).Count -ne 0) { throw 'VPNTE rules remain' }
 } catch { $errors += 'rules: ' + [string]$_ }
+Write-Output ('VPNTE_FW_TIMING:restore-remove-rules:' + $nativePhaseWatch.ElapsedMilliseconds)
 if ($errors.Count -gt 0) { throw ($errors -join ' | ') }
 Write-Output 'RESTORED'`, true, 30000)
   if (!String(stdout).split(/\r?\n/).includes('RESTORED')) throw new Error('Firewall rollback read-back was not confirmed')

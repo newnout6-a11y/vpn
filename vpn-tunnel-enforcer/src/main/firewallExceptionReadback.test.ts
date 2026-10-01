@@ -21,13 +21,20 @@ const compiled = ts.transpileModule(functions.map(node => node.getText(ast)).joi
 const generate = new Function('createHash', 'RULE_PREFIX', `${compiled}; return exceptionPolicyScript`)(createHash, 'VPNTE-killswitch') as
   (policy: { apps: string[]; cidrs: string[] }) => string
 
-function run(count: number, mode = 'valid'): { success: boolean; error: string; bulk: number; association: number; address: number } {
-  const policy = { apps: Array.from({ length: count }, (_, i) => `C:\\Apps\\app-${i}.exe`), cidrs: ['192.0.2.1'] }
+function run(count: number, mode = 'valid', empty = false): { success: boolean; error: string; bulk: number; association: number; address: number; queries: string[][]; remaining: string[] } {
+  const policy = { apps: Array.from({ length: count }, (_, i) => `C:\\Apps\\app-${i}.exe`), cidrs: empty ? [] : ['192.0.2.1'] }
   const script = `
 $script:rules=@{};$script:bulk=0;$script:association=0;$script:address=0;$script:mode='${mode}';$script:expectImmediate=${count < 8 ? '$true' : '$false'}
+$script:queries=New-Object 'Collections.Generic.List[object]'
+if($script:mode -like 'cleanup-*'){
+  foreach($name in @('VPNTE-killswitch-user-old','VPNTE-killswitch-allow-extra-ip','VPNTE-killswitch-allow-app','VPNTE-killswitch-userish-foreign','other-user-foreign')){
+    $script:rules[$name]=[pscustomobject]@{Name=('id-'+$name);DisplayName=$name;Program=$null}
+  }
+}
 function Get-NetFirewallProfile { 'Domain','Private','Public' | ForEach-Object { [pscustomobject]@{DefaultOutboundAction='Block'} } }
-function Get-NetFirewallRule { param($DisplayName)
-  $result=@($script:rules.Values | Where-Object { $_.DisplayName -like $DisplayName })
+function Get-NetFirewallRule { param([string[]]$DisplayName)
+  $script:queries.Add(@($DisplayName))
+  $result=@($script:rules.Values | Where-Object { $name=$_.DisplayName; @($DisplayName | Where-Object { $name -like $_ }).Count -gt 0 })
   if($script:bulk -and $DisplayName -notlike '*user-*'){throw 'Unexpected query'}
   if($script:bulk -and $DisplayName -notmatch '\\*$' -and $result.Count -and $result[0].Program){
     if($script:mode -eq 'disabled'){$result[0].Enabled='False'}
@@ -36,7 +43,12 @@ function Get-NetFirewallRule { param($DisplayName)
   }
   $result
 }
-function Remove-NetFirewallRule { param([Parameter(ValueFromPipeline=$true)]$Rule) process { if($Rule){$script:rules.Remove($Rule.DisplayName)} } }
+function Remove-NetFirewallRule { param([Parameter(ValueFromPipeline=$true)]$Rule) process {
+  if($Rule){
+    if($script:mode -eq 'cleanup-remove-error'){throw 'Fixture removal failed'}
+    if($script:mode -ne 'cleanup-user-leftover' -or $Rule.DisplayName -notlike 'VPNTE-killswitch-user-*'){$script:rules.Remove($Rule.DisplayName)}
+  }
+} }
 function New-NetFirewallRule { param($DisplayName,$Direction,$Action,$Profile,$Enabled,$Program,$RemoteAddress)
   if($script:expectImmediate -and $Program -and @($script:rules.Values | Where-Object {$_.Program}).Count -ne $script:association){throw 'Small policy lost immediate verification'}
   $script:rules[$DisplayName]=[pscustomobject]@{Name=('id-'+$DisplayName);DisplayName=$DisplayName;Direction=$Direction;Action=$Action;Enabled=$Enabled;Program=$Program;RemoteAddress=$RemoteAddress}
@@ -69,7 +81,7 @@ try {
 ${generate(policy)}
   $success=$true
 }catch{$failure=$_.Exception.Message}
-Write-Output ('RESULT:'+(@{success=$success;error=$failure;bulk=$script:bulk;association=$script:association;address=$script:address}|ConvertTo-Json -Compress))
+Write-Output ('RESULT:'+(@{success=$success;error=$failure;bulk=$script:bulk;association=$script:association;address=$script:address;queries=$script:queries.ToArray();remaining=@($script:rules.Keys|Sort-Object)}|ConvertTo-Json -Compress -Depth 4))
 `
   const root = join(process.cwd(), '.tmp')
   mkdirSync(root, { recursive: true })
@@ -87,6 +99,21 @@ Write-Output ('RESULT:'+(@{success=$success;error=$failure;bulk=$script:bulk;ass
 }
 
 describe.skipIf(process.platform !== 'win32' && !process.env.VPNTE_PWSH)('native application read-back (AT-03-004/007/008)', () => {
+  it('removes only both stale exception groups in one query, then freshly verifies the empty set (AT-03-004/008)', () => {
+    const result = run(0, 'cleanup-valid', true)
+    expect(result).toMatchObject({ success: true, bulk: 0, association: 0, address: 0 })
+    expect(result.queries).toEqual([
+      ['VPNTE-killswitch-user-*', 'VPNTE-killswitch-allow-extra-ip'], ['VPNTE-killswitch-user-*']
+    ])
+    expect(new Set(result.remaining)).toEqual(new Set(['VPNTE-killswitch-allow-app', 'VPNTE-killswitch-userish-foreign', 'other-user-foreign']))
+  }, 20000)
+  it.each(['cleanup-remove-error', 'cleanup-user-leftover'])('does not report verified exceptions after %s (AT-03-007/008)', mode => {
+    const result = run(0, mode, true)
+    expect(result.success).toBe(false)
+    expect(result.error).toBeTruthy()
+    expect(result.remaining).toContain('VPNTE-killswitch-user-old')
+    expect(result.remaining).toContain('other-user-foreign')
+  }, 20000)
   it('admits the bulk production script to the firewall helper policy before elevation (AT-03-004)', async () => {
     const platform = process.platform
     Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
