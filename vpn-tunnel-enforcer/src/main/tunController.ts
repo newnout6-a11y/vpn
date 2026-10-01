@@ -2486,10 +2486,10 @@ export const tunController = {
     // Kick off DNS sources lookup IN PARALLEL with foreign-tun detection
     // below — they're independent. Result is consumed by prepareRuntime for both
     // bootstrap DNS (safe RU direct resolve) and Smart-RU direct DNS.
-    const dnsSourcesPromise = getPhysicalAdapterDnsSources().catch((err) => {
+    const dnsSourcesPromise = timePromise('physical-dns-sources', getPhysicalAdapterDnsSources().catch((err) => {
       logEvent('warn', 'tun', 'failed to read physical adapter DNS sources', err)
       return [] as PhysicalAdapterDnsSource[]
-    })
+    }), { parallel: true })
 
     if (mode === 'localProxy' && !proxyAddr) {
       return finishStart({ success: false, error: 'Не указан upstream proxy' })
@@ -2602,11 +2602,14 @@ export const tunController = {
     // full-tunnel validation passes, so a bad upstream cannot write a broken
     // runtime config before we reject the start.
     let runtimePromise: Promise<{ singbox: string; config: string }> | null = null
-    // Await DNS sources before branching into mode-specific logic — both
-    // localProxy and directVpn paths need smartRouteRuntimeOpts.
-    const smartRuDirectDnsSources = await dnsSourcesPromise
-    const smartRouteRuntimeOpts = { smartRuSplit, smartRuMapsDirect, smartRuDirectDnsSources }
+    // DNS sources configure sing-box; Xray does not consume this snapshot.
+    // Keep the read shared with lockdown, but overlap it with Xray startup.
+    const smartRouteRuntimeOptsPromise = dnsSourcesPromise.then(smartRuDirectDnsSources => ({
+      smartRuSplit, smartRuMapsDirect, smartRuDirectDnsSources
+    }))
     if (mode === 'localProxy') {
+      // Preserve the existing local-proxy preflight ordering.
+      await timeAsync('physical-dns-sources-await', () => smartRouteRuntimeOptsPromise)
       // ---------- Pre-flight 2: proxy must actually be listening ----------
       // If Happ is closed or in TUN mode, port 10808 isn't listening — without this check
       // sing-box would start TUN, hijack all routes, and then 100% of traffic would blackhole.
@@ -2696,9 +2699,15 @@ export const tunController = {
             proxyOwnerProgramPaths = [...new Set([...proxyOwnerProgramPaths, xr.exePath])]
             proxyOwnerProcessNames = uniqueProcessNames([...proxyOwnerProcessNames, 'vpnte-xray.exe'])
           } catch (xrErr) {
-            await stopXray('xray startup failed').catch(err =>
-              logEvent('warn', 'tun', 'xray cleanup after startup failure not confirmed', err)
-            )
+            try { await stopXray('xray startup failed') }
+            catch (error) {
+              logEvent('warn', 'tun', 'xray cleanup after startup failure not confirmed', error)
+              // The concurrent native lockdown still belongs to this start.
+              await adapterLockdownPromise?.catch(() => undefined)
+              return finishStart({ success: false,
+                error: `Ошибка запуска движка xray-core: ${(xrErr as Error).message}`,
+                warning: `Xray exit not confirmed; adapter protection retained: ${String(error)}` })
+            }
             await rollbackEarlyAdapterLockdown('xray startup failed after adapter lockdown')
             return finishStart({
               success: false,
@@ -2707,6 +2716,19 @@ export const tunController = {
           }
         }
 
+        const smartRouteRuntimeOpts = await timeAsync('physical-dns-sources-await', () => smartRouteRuntimeOptsPromise)
+        if (stopRequested || startAbortController.signal.aborted) {
+          // Xray may now be ready while the shared snapshot is still pending.
+          // Confirm its exit before releasing the adapter restrictions.
+          try { await stopXray('start cancelled while reading DNS sources') }
+          catch (error) {
+            await adapterLockdownPromise?.catch(() => undefined)
+            return finishStart({ success: false, error: 'Запуск отменён',
+              warning: `Xray exit not confirmed; adapter protection retained: ${String(error)}` })
+          }
+          await rollbackEarlyAdapterLockdown('start cancelled while reading DNS sources')
+          return finishStart({ success: false, error: 'Запуск отменён' })
+        }
         runtimePromise = timePromise('prepare-runtime', prepareRuntime(
           { outbound: vpnProfile.outbound, proxyType, clientDevice: vpnProfile.clientDevice },
           proxyType,
@@ -2781,7 +2803,7 @@ export const tunController = {
             stealthMode: startOptions.stealthMode === true,
             adaptiveMode: startOptions.adaptiveMode,
             publicWifiCompatibility,
-            ...smartRouteRuntimeOpts
+            ...(await smartRouteRuntimeOptsPromise)
           }
         ), { mode, fallback: true })
       }

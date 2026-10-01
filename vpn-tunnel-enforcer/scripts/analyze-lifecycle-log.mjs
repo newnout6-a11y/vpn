@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises'
 
 const channels = new Set(['start-tun', 'start-direct-vpn', 'stop-tun', 'cancel-tun', 'cancel-transition'])
 const phaseNames = new Set([
+  'physical-dns-sources', 'physical-dns-sources-await',
   'foreign-tun-preflight', 'split-tunnel-rules', 'proxy-listen-and-owner-lookup', 'proxy-full-tunnel-check',
   'prepare-runtime', 'owned-runtime-cleanup', 'singbox-config-check', 'stale-tun-cleanup',
   'singbox-launch-submit', 'wait-singbox-process', 'adapter-lockdown', 'adapter-lockdown-await',

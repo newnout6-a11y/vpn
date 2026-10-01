@@ -17,6 +17,8 @@ describe('read-only lifecycle timing analysis (AT-00-005)', () => {
       event(0, 'ipc', 'start-direct-vpn started'),
       event(200, 'tun', 'start timing', { totalMs: 180, phaseDurations: {
         'adapter-lockdown': { durationMs: 80, startMs: 0, endMs: 80, parallel: true },
+        'physical-dns-sources': { durationMs: 70, parallel: true },
+        'physical-dns-sources-await': { durationMs: 15 },
         'tun-interface-metric-readback': { durationMs: 90, background: true },
         'firewall-kill-switch-await': { durationMs: 100, startMs: 80, endMs: 180 }
       } }),
@@ -25,6 +27,8 @@ describe('read-only lifecycle timing analysis (AT-00-005)', () => {
     expect(r.ipc[0]).toMatchObject({ elapsedMs: 210, loggedMs: 209, pairing: 'unique-window' })
     expect(r.timings[0]).toMatchObject({ totalMs: 180, phases: { 'adapter-lockdown': { durationMs: 80, parallel: true }, 'tun-interface-metric-readback': { durationMs: 90, background: true } } })
     expect(r.summary[0]).toMatchObject({ samples: 1, medianMs: 209 })
+    expect(r.timings[0].phases['physical-dns-sources']).toEqual({ durationMs: 70, parallel: true })
+    expect(r.timings[0].phases['physical-dns-sources-await']).toEqual({ durationMs: 15 })
   })
   it('does not assign overlapping same-channel completions to specific starts', () => {
     const r = run([event(0, 'ipc', 'start-tun started'), event(10, 'ipc', 'start-tun started'), event(20, 'ipc', 'start-tun finished', { ms: 10 }), event(100, 'ipc', 'start-tun failed', { ms: 100 })])
