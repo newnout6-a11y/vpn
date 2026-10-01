@@ -8,7 +8,7 @@ import { promisify } from 'util'
 import { join } from 'path'
 import { happDetector } from './happDetector'
 import { tunController, detectForeignTun, killOwnedTunRuntimeProcesses, isOwnedTunRuntimeRunning, readRecentSingBoxOutboundFault, areTunRoutesActive, getLastSingBoxExit, onProtectedRestart } from './tunController'
-import type { SingBoxOutboundFault } from './tunController'
+import type { NetworkCleanupReceipt, SingBoxOutboundFault } from './tunController'
 import { makeOutcome, outcomeKindToDisconnectReason, isNodeSwitchRestartReason } from './sessionOutcome'
 import type { SessionOutcome, SessionOutcomeEvidence, SessionOutcomeKind } from '../shared/ipc-types'
 import { readRecentXrayOutboundFault, getXrayStatus, stopXray } from './xrayEngine'
@@ -1472,9 +1472,11 @@ async function stopProtection(
   const result = await tunController.stop()
   ipMonitor.clearVpnIp()
   trafficMonitor.stop()
-  await repairOrphanedPhysicalAdapterDns('post-stop safety repair').catch(err =>
-    logEvent('warn', 'phys-lockdown', 'post-stop orphaned DNS repair failed', err)
-  )
+  if (!result.networkCleanup?.adapters) {
+    await repairOrphanedPhysicalAdapterDns('post-stop safety repair').catch(err =>
+      logEvent('warn', 'phys-lockdown', 'post-stop orphaned DNS repair failed', err)
+    )
+  }
 
   // Auto-rollback Windows location-privacy if we (or the user) had it
   // applied for the duration of the VPN session. Without this, geolocation
@@ -1498,7 +1500,9 @@ async function stopProtection(
   refreshTrayState({ status: 'off', restartingProgress: null })
   captureSnapshot('tun-post-stop').catch(() => undefined)
   stopInProgress = false
-  return result
+  // Keep internal cleanup evidence inside main; IPC exposes the user outcome.
+  const { networkCleanup: _cleanup, ...outcome } = result
+  return outcome
 }
 
 async function startProtectionFromTray(): Promise<void> {
@@ -2530,8 +2534,10 @@ async function performShutdownCleanup(reason: string): Promise<void> {
     closeSession(makeOutcome('app-quit', sessionEgressEvidence()))
   }
 
+  let networkCleanup: NetworkCleanupReceipt | undefined
   try {
-    await tunController.stop()
+    const stopped = await tunController.stop()
+    networkCleanup = stopped.networkCleanup
   } catch (err) {
     logEvent('warn', 'app', 'tunController.stop during shutdown failed', err)
   }
@@ -2556,33 +2562,39 @@ async function performShutdownCleanup(reason: string): Promise<void> {
     logEvent('warn', 'external-proxy', 'failed to stop proxies during shutdown', err)
   }
 
-  try {
-    await rollbackTunNetworkBaselineIfApplied(`shutdown: ${reason}`)
-  } catch (err) {
-    logEvent('warn', 'app', 'baseline rollback during shutdown failed', err)
+  if (!networkCleanup?.baseline) {
+    try {
+      await rollbackTunNetworkBaselineIfApplied(`shutdown: ${reason}`)
+    } catch (err) {
+      logEvent('warn', 'app', 'baseline rollback during shutdown failed', err)
+    }
   }
 
-  try {
-    // Always disengage the firewall kill-switch on app exit. Leaving it in
-    // place would lock the user out of the internet between sessions.
-    await disableKillSwitchIfActive(`shutdown: ${reason}`)
-  } catch (err) {
-    logEvent('warn', 'app', 'kill-switch disable during shutdown failed', err)
+  if (!networkCleanup?.firewall) {
+    try {
+      // Always disengage the firewall kill-switch on app exit. Leaving it in
+      // place would lock the user out of the internet between sessions.
+      await disableKillSwitchIfActive(`shutdown: ${reason}`)
+    } catch (err) {
+      logEvent('warn', 'app', 'kill-switch disable during shutdown failed', err)
+    }
   }
 
-  try {
-    // Same for the adapter lockdown: never leave IPv6 disabled / DNS overridden
-    // across sessions. tunController.stop() already does this, but a forced
-    // shutdown path (no Stop button click) needs it as a backstop.
-    await rollbackPhysicalAdapterLockdownIfApplied(`shutdown: ${reason}`)
-  } catch (err) {
-    logEvent('warn', 'app', 'adapter lockdown rollback during shutdown failed', err)
-  }
+  if (!networkCleanup?.adapters) {
+    try {
+      // Same for the adapter lockdown: never leave IPv6 disabled / DNS overridden
+      // across sessions. tunController.stop() already does this, but a forced
+      // shutdown path (no Stop button click) needs it as a backstop.
+      await rollbackPhysicalAdapterLockdownIfApplied(`shutdown: ${reason}`)
+    } catch (err) {
+      logEvent('warn', 'app', 'adapter lockdown rollback during shutdown failed', err)
+    }
 
-  try {
-    await repairOrphanedPhysicalAdapterDns(`shutdown: ${reason}`)
-  } catch (err) {
-    logEvent('warn', 'app', 'orphaned DNS repair during shutdown failed', err)
+    try {
+      await repairOrphanedPhysicalAdapterDns(`shutdown: ${reason}`)
+    } catch (err) {
+      logEvent('warn', 'app', 'orphaned DNS repair during shutdown failed', err)
+    }
   }
 
   try {

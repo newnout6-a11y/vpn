@@ -66,6 +66,20 @@ function recordForensicTunEvent(event: string, details: Record<string, unknown> 
     .catch(() => undefined)
 }
 
+// A receipt belongs only to this completed stop call. It is never cached across
+// sessions and never replaces trusted reads on a later lifecycle operation.
+export interface NetworkCleanupReceipt {
+  baseline: boolean
+  firewall: boolean
+  adapters: boolean
+}
+export interface TunStopResult {
+  success: boolean
+  error?: string
+  warning?: string
+  networkCleanup?: NetworkCleanupReceipt
+}
+
 export interface TunStatus {
   running: boolean
   mode?: 'localProxy' | 'directVpn'
@@ -3616,7 +3630,15 @@ export const tunController = {
     })
   },
 
-  async stop(options: { preserveNetworkProtection?: boolean; preserveLastStartOptions?: boolean } = {}): Promise<{ success: boolean; error?: string; warning?: string }> {
+  async stop(options: { preserveNetworkProtection?: boolean; preserveLastStartOptions?: boolean } = {}): Promise<TunStopResult> {
+    const stopStarted = performance.now()
+    const stopPhases: Record<string, number> = {}
+    const timedStop = async <T>(name: string, effect: () => Promise<T>): Promise<T> => {
+      const started = performance.now()
+      try { return await effect() }
+      finally { stopPhases[name] = Math.round(performance.now() - started) }
+    }
+    const networkCleanup: NetworkCleanupReceipt = { baseline: false, firewall: false, adapters: false }
     stopRequested = true
     const preserveNetworkProtection = options.preserveNetworkProtection === true
     // If start() is mid-flight, wait for it to finish before stopping.
@@ -3684,10 +3706,10 @@ export const tunController = {
     }
 
     stopProxyWatchdog()
-    await stopXray('tun stopped').catch(err => rememberCleanupError('xray process stop', err))
+    await timedStop('stop-xray', () => stopXray('tun stopped')).catch(err => rememberCleanupError('xray process stop', err))
     try {
-      await killOwnedRuntimeProcesses()
-      if (!(await waitForOwnedRuntimeToExit())) {
+      await timedStop('stop-runtime', () => killOwnedRuntimeProcesses())
+      if (!(await timedStop('wait-runtime-exit', () => waitForOwnedRuntimeToExit()))) {
         cleanupErrors.push('runtime process stop: vpnte-sing-box.exe is still running')
         logEvent('warn', 'tun', 'runtime process still running after stop')
       }
@@ -3724,7 +3746,8 @@ export const tunController = {
     // the app can leave Windows with "VPN off, internet broken".
     if (!preserveNetworkProtection) {
     try {
-      const baseline = await rollbackTunNetworkBaselineIfApplied('TUN stopped')
+      const baseline = await timedStop('rollback-baseline', () => rollbackTunNetworkBaselineIfApplied('TUN stopped'))
+      networkCleanup.baseline = baseline.success
       if (!baseline.success) {
         cleanupErrors.push(`baseline auto-rollback: ${baseline.message}`)
         logEvent('warn', 'tun', 'baseline auto-rollback after stop failed', baseline)
@@ -3734,7 +3757,8 @@ export const tunController = {
     }
 
     try {
-      const killSwitch = await disableKillSwitchIfActive('TUN stopped')
+      const killSwitch = await timedStop('disable-firewall', () => disableKillSwitchIfActive('TUN stopped'))
+      networkCleanup.firewall = killSwitch.success
       if (!killSwitch.success) {
         cleanupErrors.push(`kill-switch disable: ${killSwitch.message}`)
         logEvent('warn', 'tun', 'kill-switch disable after stop failed', killSwitch)
@@ -3744,15 +3768,20 @@ export const tunController = {
     }
 
     try {
-      await rollbackPhysicalAdapterLockdownIfApplied('TUN stopped')
+      const adapters = await timedStop('rollback-adapters', () => rollbackPhysicalAdapterLockdownIfApplied('TUN stopped'))
+      networkCleanup.adapters = adapters.rolledBack || adapters.skipped === true
     } catch (err) {
       rememberCleanupError('adapter lockdown rollback', err)
     }
 
-    try {
-      await repairOrphanedPhysicalAdapterDns('TUN stopped safety repair')
-    } catch (err) {
-      rememberCleanupError('orphaned DNS repair', err)
+    if (!networkCleanup.adapters) {
+      try {
+        const repair = await timedStop('repair-dns', () => repairOrphanedPhysicalAdapterDns('TUN stopped safety repair'))
+        networkCleanup.adapters = repair.repaired
+        if (!repair.repaired) cleanupErrors.push('adapter lockdown rollback: восстановление не подтверждено; требуется повторная проверка')
+      } catch (err) {
+        rememberCleanupError('orphaned DNS repair', err)
+      }
     }
     } else {
       logEvent('info', 'tun', 'preserved kill-switch, baseline, and adapter lockdown for adaptive transition')
@@ -3769,11 +3798,11 @@ export const tunController = {
       const warning = cleanupErrors.join(' | ')
       if (preserveNetworkProtection) {
         notifyStatus('adapting')
-        return { success: true, warning }
+        return { success: true, warning, networkCleanup }
       }
       notify('warn', 'Защита отключена с предупреждениями', warning, 'vpnDisconnect')
       notifyStatus('stopped')
-      return { success: true, warning }
+      return { success: true, warning, networkCleanup }
     }
 
     // Cleanup finished — let the leak-detector run again. The next tunnel
@@ -3781,13 +3810,15 @@ export const tunController = {
     resumeLeakMonitor()
     if (preserveNetworkProtection) {
       notifyStatus('adapting')
-      return { success: true }
+      return { success: true, networkCleanup }
     }
     notify('info', 'Защита выключена', 'Трафик идёт по обычному маршруту.', 'vpnDisconnect')
     notifyStatus('stopped')
 
-    return { success: true }
+    return { success: true, networkCleanup }
     } finally {
+      logEvent('info', 'tun', 'stop timing', { phaseDurations: stopPhases,
+        totalMs: Math.round(performance.now() - stopStarted), preserveNetworkProtection, networkCleanup })
       resumeLeakMonitor()
       stopInProgress = false
       if (!startInProgress && !currentStatus.running && !preserveNetworkProtection) transitionCancelRequested = false

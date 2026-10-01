@@ -674,10 +674,12 @@ try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}
  * empty list means "back to DHCP", which is what `Set-DnsClientServerAddress
  * -ResetServerAddresses` does.
  */
-export async function rollbackPhysicalAdapterLockdownIfApplied(reason: string, options: RollbackOptions = {}): Promise<{ rolledBack: boolean }> {
-  if (process.platform !== 'win32') return { rolledBack: false }
+export async function rollbackPhysicalAdapterLockdownIfApplied(reason: string, options: RollbackOptions = {}): Promise<{ rolledBack: boolean; skipped?: boolean }> {
+  if (process.platform !== 'win32') return { rolledBack: false, skipped: true }
   const m = await readManifest()
-  if (!m) return { rolledBack: false }
+  // Only a successful trusted read proving absence is a no-op. Trust errors
+  // propagate; incomplete rollback still returns rolledBack:false without skip.
+  if (!m) return { rolledBack: false, skipped: true }
 
   let combinedScript = `$ErrorActionPreference = 'Continue'\n`
   

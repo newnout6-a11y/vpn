@@ -150,3 +150,23 @@ Durable write path (unique wx + fsync + ACL + rename) не изменён. Known
 - `npm.cmd run typecheck`, coverage AC 927/927 и F 210/210, `git diff --check`: exit 0. Пользовательские end-to-end времена после этих изменений ещё не получены.
 
 Итоговый DoD этапа 3: `VPNTE_PWSH=powershell.exe; npm.cmd test -- --reporter=dot --maxWorkers=4` — exit 0, 155 passed / 1 skipped files, 1532 passed / 3 skipped tests (51.03 s). Дополнительные семь native cases теперь включены переменной окружения и в полном прогоне. Typecheck и coverage ранее этого этапа — exit 0; `git diff --check` повторяется перед коммитом.
+
+### 2026-10-01 — этап 4: исключение повторных подтверждённых rollback
+
+- `tunController.stop` выдаёт внутренний receipt текущей операции отдельно по baseline, firewall и adapters. Receipt не кэшируется между stop/session и не выходит в обычный stopProtection IPC outcome. Неподтверждённые этапы остаются false; independent retries остаются для каждого из них.
+- `rollbackPhysicalAdapterLockdownIfApplied` различает отсутствие trusted manifest (`skipped:true`) и incomplete rollback (`rolledBack:false` без skipped). Trust read errors по-прежнему выбрасываются; отсутствие ownership не превращает чужой DNS в наш и не запускает его сброс.
+- DNS safety repair в контроллере и index пропускаются только после подтверждённого rollback/verified no-op в этой остановке. После incomplete/error резервный repair сохраняется; повторный неподтверждённый результат теперь входит в warning вместо ложного чистого выключения.
+- Shutdown не повторяет подтверждённые network stages своего только что завершённого `stop()`. Если stop выбросил исключение, metadata отсутствует либо отдельный stage false, соответствующие backstops выполняются. Process backstops (Xray/owned sing-box/external proxies) сохранены: `stopXray` пока не даёт доказательства завершения процесса, поэтому его повтор не удалён ради скорости.
+- Новые `stop timing`: stop-xray, stop-runtime, wait-runtime-exit, rollback-baseline, disable-firewall, rollback-adapters, repair-dns, total. Deadline/grace и порядок этапов не сокращены/не переставлены.
+- Целевой прогон `npm.cmd test -- src/main/lifecycleCleanup.test.ts src/main/tunControllerRecoverySource.test.ts src/main/mainIpcRegression.test.ts src/main/physicalAdapterLockdownSource.test.ts --reporter=dot --maxWorkers=4`: 4 files, 64/64 passed (2.27 s). Новые тесты исполняют production AST bodies с fake OS boundaries: positive/no-op, partial/recovered retry, runtime/baseline/firewall/adapter/DNS failure matrix, later ACL change, adaptive preservation, shutdown per-stage retries, IPC stripping. Первый прогон нашёл старый source oracle для return shape; обновлён под receipt, поведенческий stopped/warning contract проверяется также новым исполнением.
+- `npm.cmd run typecheck`, coverage AC 927/927 F 210/210 — exit 0. Полный native suite выполняется; trailing whitespace замечен diff-check и удалён, повтор проверки обязателен.
+
+#### Зафиксированные расхождения, не исправленные молча
+
+`docs/02-…md`, §2.1 требует firewall policy → rules → DNS → protocols → registry → Wintun. Текущий обычный stop завершает runtime/TUN, затем registry baseline, firewall и adapter rollback; внутри physical rollback IPv6 идёт перед DNS. Это существующее расхождение, ускорение его не меняет. Предложение: отдельный согласованный WP-2/WP-3 lifecycle coordinator с independent staged rollback и native chaos proof; требуется решение владельца согласно AGENTS перед перестановкой.
+
+`stopXray` делает `child.kill()` и сброс active state/PID-файла без ожидания exit; при ошибке kill пишет warn, но не возвращает typed failure. Xray preflight `run -test` не имеет явного deadline и собирает stdout/stderr без bounded buffer; runtime stderr listener прикрепляется после firewall probe. Эти факты не доказывают причину измеренных 23 s, но требуют отдельной проверки lifecycle contract и предельных случаев. Process backstops сохранены до получения stronger proof.
+
+[Microsoft Set-DnsClientServerAddress](https://learn.microsoft.com/en-us/powershell/module/dnsclient/set-dnsclientserveraddress?view=windowsserver2025-ps): static addresses заменяют DHCP-derived DNS, ResetServerAddresses возвращает DHCP. Поэтому оптимизация не заменяет read-back безусловным reset и не трогает DNS без owned baseline.
+
+Итоговый DoD этапа 4: `VPNTE_PWSH=powershell.exe; npm.cmd test -- --reporter=dot --maxWorkers=4` — exit 0, 156 passed / 1 skipped files, 1551 passed / 3 skipped tests (56.74 s). Typecheck, traceability AC 927/927 F 210/210 и финальный `git diff --check` — exit 0. Реальные пользовательские stop/quit после изменений пока не измерены.

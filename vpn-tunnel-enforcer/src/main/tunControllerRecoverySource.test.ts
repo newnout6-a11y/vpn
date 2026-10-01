@@ -31,7 +31,7 @@ describe('tunController recovery cancellation guards', () => {
     const source = await readFile(join(here, 'tunController.ts'), 'utf8')
     const stopSignature = source.indexOf('async stop(options: { preserveNetworkProtection?: boolean; preserveLastStartOptions?: boolean } = {})')
     const cleanupBranch = source.indexOf('if (cleanupErrors.length > 0)', stopSignature)
-    const successReturn = source.lastIndexOf('return { success: true, warning }')
+    const successReturn = source.lastIndexOf('return { success: true, warning, networkCleanup }')
     const stoppedNotify = source.indexOf("notifyStatus('stopped')", cleanupBranch)
     const failureReturn = source.indexOf('return { success: false, error: cleanupErrors.join', cleanupBranch)
 
