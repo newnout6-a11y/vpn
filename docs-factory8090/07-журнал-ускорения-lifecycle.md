@@ -200,3 +200,14 @@ Durable write path (unique wx + fsync + ACL + rename) не изменён. Known
 [Node child_process](https://nodejs.org/api/child_process.html#subprocesskilled): killed означает отправку сигнала, а не exit. Process backstops сохраняются до подтверждения завершения.
 
 Следующий приоритет: post-start HTTP вне critical path с generation fence, полный cancel/restart coordinator, сборка/проверка installer и реальные before/after повторения. Цель активна; L2/native fixtures не заменяют L3 сеть/chaos и фактические пользовательские времена.
+
+### 2026-10-01 — контрольная сборка после этапа 5
+
+- Source commit: `8d8a557`; этап 4: `7197938`, этап 3: `3fcad89`. Working tree перед сборкой чистый.
+- `npm.cmd run dist:win` — exit 0. Electron 44.4.3 x64, NSIS 1.1.22. Build включает typecheck. Snapshot generation пропущена из-за отсутствующего mksnapshot; это записано как ограничение сборки, не как созданный snapshot. DeprecationWarning DEP0190 относится к shell args build path; production lifecycle не менялся этой сборкой.
+- Installer: `vpn-tunnel-enforcer/dist/VPN-Tunnel-Enforcer-Setup-1.1.22.exe`, 139146729 bytes, modified 2026-10-01T09:17:28.8267569+03:00.
+- SHA256: `AEC816E3E5E2214728A71C02F1946F41F2E93D5E091CF32C4EBA25D3D90B5C2F`.
+- Authenticode status: `NotSigned`; решение о signing не принято и не изменялось.
+- Actual ASAR main содержит все пять markers: verified-adapter-wait, stop timing, tunAdapterReady, native adapter Up rejection, Xray allow-firewall timing. SHA256 пяти unpacked runtime resources (sing-box, Xray, Wintun, Cronet, vpnte-recover.ps1) совпали с workspace sources. Verifier exit 0.
+- Сборка — контрольный артефакт текущих изменений, не подтверждение end-to-end ускорения. Installer ещё не запущен, настоящий VPN/network/firewall smoke этой версией не проведён. Из shell protected runtime/ProgramData недоступны; ACL не обходились.
+- Дальнейшая работа не закончена: background IP/generation fence, cancel/start coordinator и реальные cold/warm before/after измерения остаются в scope исходной цели. Если следующие этапы меняют исходники, installer необходимо снова пересобрать и записать новый hash.
