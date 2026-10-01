@@ -23,6 +23,7 @@ function harness() {
     readGranularKillSwitchExceptions: vi.fn(() => []),
     getTunAdapterAlias: () => 'Ethernet 5',
     killOwnedRuntimeProcesses: vi.fn(async () => {}),
+    waitForOwnedRuntimeToExit: vi.fn(async () => true),
     stopXray: vi.fn(async () => {}),
     rollbackEarlyAdapterLockdown: vi.fn(async () => {}),
     disableKillSwitchIfActive: vi.fn(async () => {}),
@@ -37,6 +38,8 @@ function harness() {
   const compiled = ts.transpileModule(`
 let resolved=false, successHandled=false, pollInFlight=false, stopRequested=false;
 let attempts=0, startAbortedReason=null, pendingKillSwitch=null, settleFirewallAdapter=null;
+let startupPollCompletion=null;
+let startupCompensationStarted=false;
 const maxAttempts=30, poller=1, wantKillSwitch=true, adapterLockdownPromise=null;
 const runtime={singbox:'fixture.exe'}, proxyOwnerProgramPaths=[], processWaitStarted=0;
 const phases={},phaseDurations={},tStart=Date.now();
@@ -47,12 +50,61 @@ const wantAdapterLockdown=false,startOptions={},STABLE_RESET_MS=60000;
 let killSwitchEngaged=false,killSwitchWarning=null,restartAttempt=0,lastStartOptions=null;
 let stopInProgress=false,userInitiatedStop=false,stableTimer=null;
 function finish(result){if(!resolved){resolved=true;onFinish(result)}}
-return {poll: ${callback}, requestStop: () => {stopRequested=true}};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
-  const control = new Function(...Object.keys(os), compiled)(...Object.values(os)) as { poll: () => Promise<void>; requestStop: () => void }
+return {poll: ${callback}, requestStop: () => {stopRequested=true}, exit: () => {resolved=true;settleFirewallAdapter?.(false)}, completion: () => startupPollCompletion};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
+  const control = new Function(...Object.keys(os), compiled)(...Object.values(os)) as { poll: () => Promise<void>; requestStop: () => void; exit: () => void; completion: () => Promise<void> | null }
   return { ...control, ...os }
 }
 
 describe('startup callback fault boundaries', () => {
+  it.each(['process', 'ownership', 'metric', 'firewall'])('ignores late %s success after process exit (AT-00-003 / AT-02-005)', async phase => {
+    const h = harness()
+    h.recordOwnedTunAdapter.mockResolvedValue(undefined)
+    let release!: () => void
+    const held = new Promise<void>(done => { release = done })
+    const boundary = phase === 'process' ? h.isSingboxRunning : phase === 'ownership' ? h.recordOwnedTunAdapter : phase === 'metric' ? h.applyLowTunInterfaceMetric : h.enableKillSwitch
+    boundary.mockImplementation((async () => { await held; return phase === 'firewall' ? { success: true } : phase === 'process' ? true : undefined }) as any)
+    const pending = h.poll()
+    await vi.waitFor(() => expect(boundary).toHaveBeenCalledOnce())
+    h.exit()
+    const released = vi.fn()
+    void h.completion()!.then(released)
+    await Promise.resolve()
+    expect(released).not.toHaveBeenCalled()
+    release()
+    await pending
+    await h.completion()
+    expect(h.onFinish).not.toHaveBeenCalled()
+    expect(h.notifyStatus).not.toHaveBeenCalledWith('running')
+    expect(h.startCompetingTunWatch).not.toHaveBeenCalled()
+    expect(released).toHaveBeenCalledOnce()
+  })
+  it('awaits timeout compensation and stops an owned zombie before network rollback (AT-02-004)', async () => {
+    const h = harness()
+    h.isSingboxRunning.mockResolvedValue(false)
+    for (let i=0;i<29;i++) await h.poll()
+    let release!: () => void
+    h.killOwnedRuntimeProcesses.mockReturnValue(new Promise<void>(done => { release = done }))
+    const pending = h.poll()
+    await vi.waitFor(() => expect(h.killOwnedRuntimeProcesses).toHaveBeenCalledOnce())
+    expect(h.disableKillSwitchIfActive).not.toHaveBeenCalled()
+    expect(h.onFinish).not.toHaveBeenCalled()
+    release()
+    await pending
+    expect(h.waitForOwnedRuntimeToExit).toHaveBeenCalledOnce()
+    expect(h.disableKillSwitchIfActive).toHaveBeenCalledOnce()
+    expect(h.rollbackEarlyAdapterLockdown).toHaveBeenCalledOnce()
+    expect(h.onFinish).toHaveBeenCalledWith(expect.objectContaining({success:false,warning:null}))
+  })
+  it('retains protection and reports unconfirmed zombie exit on timeout (AT-02-004)', async () => {
+    const h = harness()
+    h.isSingboxRunning.mockResolvedValue(false)
+    h.waitForOwnedRuntimeToExit.mockResolvedValue(false)
+    for (let i=0;i<30;i++) await h.poll()
+    expect(h.disableKillSwitchIfActive).not.toHaveBeenCalled()
+    expect(h.rollbackEarlyAdapterLockdown).not.toHaveBeenCalled()
+    expect(h.stopXray).toHaveBeenCalledOnce()
+    expect(h.onFinish).toHaveBeenCalledWith(expect.objectContaining({success:false,warning:expect.stringContaining('exit not confirmed')}))
+  })
   it('shares adapter readiness only after exact ownership validation (AT-02-004)', async () => {
     const h = harness()
     let verify!: () => void

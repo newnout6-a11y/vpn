@@ -8,14 +8,15 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 function body(file: string, name: string): string {
   const source = ts.createSourceFile(file, readFileSync(join(process.cwd(), 'src/main', file), 'utf8'), ts.ScriptTarget.Latest, true)
-  let found: ts.FunctionDeclaration | ts.MethodDeclaration | undefined
+  let found: ts.FunctionDeclaration | ts.MethodDeclaration | ts.VariableDeclaration | undefined
   function visit(node: ts.Node) {
     if ((ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node)) && node.name?.getText(source) === name) found = node
+    if (ts.isVariableDeclaration(node) && node.name.getText(source) === name && node.initializer && ts.isArrowFunction(node.initializer)) found = node
     ts.forEachChild(node, visit)
   }
   visit(source)
   if (!found) throw new Error(`Missing production function ${name}`)
-  return found.getText(source)
+  return `${ts.isVariableDeclaration(found) ? 'const ' : ''}${found.getText(source)}`
 }
 function compile<T>(text: string, dependencies: Record<string, unknown>): T {
   const js = ts.transpileModule(text, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText
@@ -24,9 +25,10 @@ function compile<T>(text: string, dependencies: Record<string, unknown>): T {
 const noop = () => vi.fn((..._args: any[]) => {})
 const done = () => vi.fn(async () => {})
 
-function stopHarness(startupController: AbortController | null = null) {
+function stopHarness(startupController: AbortController | null = null, startupCompletion: Promise<void> | null = null) {
   const os = {
     startupController,
+    startupCompletion,
     stopXray: done(), killOwnedRuntimeProcesses: done(), waitForOwnedRuntimeToExit: vi.fn(async () => true),
     rollbackTunNetworkBaselineIfApplied: vi.fn(async () => ({ success: true, message: 'restored' })),
     disableKillSwitchIfActive: vi.fn(async () => ({ success: true, message: 'restored' })),
@@ -38,6 +40,7 @@ function stopHarness(startupController: AbortController | null = null) {
   }
   const stop = compile<(options?: { preserveNetworkProtection?: boolean }) => Promise<any>>(`
 let startInProgress=false,stopRequested=false,stopInProgress=false,userInitiatedStop=false,activeStartAbortController=startupController;
+let activeStartCompletion=startupCompletion,activeStopCompletion=null,activeStopPreservesProtection=false;
 let recoveryCancelGeneration=0,lastStartOptions=null,restartAttempt=0,transitionCancelRequested=false;
 let currentStatus={running:true,mode:'directVpn'},clashApiInfo=null,directProxyPort=null,tunnelProbePort=null;
 return ({${body('tunController.ts', 'stop')}}).stop;
@@ -65,7 +68,149 @@ return ${name};
   return { run, ...os }
 }
 
+function startupExitHarness(pollCompletion: Promise<void> | null = null) {
+  const os = {
+    pollCompletion, logEvent: noop(), recordForensicTunEvent: noop(), stopProxyWatchdog: noop(),
+    stopXray: done(), disableKillSwitchIfActive: done(), rollbackEarlyAdapterLockdown: done(), notifyStatus: noop(),
+    finishResult: noop()
+  }
+  const run = compile<{ exit: (error: Error) => void; settled: () => Promise<unknown[]>; pollCompensating: () => void }>(`
+let currentStatus={running:false},mode='directVpn',restartAttempt=0,lastSingBoxExit=null;
+let userInitiatedStop=false,stopInProgress=false,resolved=false,startAbortedReason=null;
+let startupCompensationStarted=false;
+let settleFirewallAdapter=null,pendingKillSwitch=null,adapterLockdownPromise=null;
+let startupPollCompletion=pollCompletion;const startupCleanupTasks=[];
+function finish(result){resolved=true;finishResult(result)}
+${body('tunController.ts', 'onExit')}
+return {exit:onExit,settled:()=>Promise.all(startupCleanupTasks),pollCompensating:()=>{startupCompensationStarted=true}};
+`, os)
+  return {...run,...os}
+}
+
+function startupAdmissionHarness(stopCompletion: Promise<unknown> | null = null) {
+  const os = {stopCompletion,clearRestartTimers:vi.fn(() => {throw new Error('preparation failed')})}
+  return compile<{start: () => Promise<any>; state: () => {starting:boolean;completion:Promise<void>|null}}>(`
+let currentStatus={running:false},startInProgress=false,stopInProgress=false,transitionCancelRequested=false;
+let activeStartCompletion=null,activeStopCompletion=stopCompletion,activeStartAbortController=null,stopRequested=false,userInitiatedStop=false;
+const controller={${body('tunController.ts','start')}};
+return {start:()=>controller.start('127.0.0.1:1080'),state:()=>({starting:startInProgress,completion:activeStartCompletion})};
+`,os)
+}
+
 describe('lifecycle cleanup evidence and retries (AT-02-005 / AT-03-007)', () => {
+  it('keeps start admission closed through the final stop completion microtask', async () => {
+    const h = startupAdmissionHarness(new Promise(() => {}))
+    expect(await h.start()).toMatchObject({success:false,error:expect.stringContaining('Остановка')})
+    expect(h.state().completion).toBeNull()
+  })
+  it('releases the actual start owner even if preparation unexpectedly throws', async () => {
+    const h = startupAdmissionHarness()
+    await expect(h.start()).rejects.toThrow('preparation failed')
+    expect(h.state()).toEqual({starting:false,completion:null})
+    await expect(h.start()).rejects.toThrow('preparation failed')
+  })
+  it('retains startup exit compensation until a pending poll and adapter rollback finish', async () => {
+    let releasePoll!: () => void, releaseRollback!: () => void
+    const poll = new Promise<void>(done => { releasePoll = done })
+    const h = startupExitHarness(poll)
+    h.rollbackEarlyAdapterLockdown.mockReturnValue(new Promise<void>(done => { releaseRollback = done }))
+    h.exit(new Error('child failed'))
+    expect(h.finishResult).toHaveBeenCalledWith({success:false,error:'child failed'})
+    expect(h.stopXray).not.toHaveBeenCalled()
+    const settled = vi.fn()
+    void h.settled().then(settled)
+    releasePoll()
+    await vi.waitFor(() => expect(h.rollbackEarlyAdapterLockdown).toHaveBeenCalledOnce())
+    expect(settled).not.toHaveBeenCalled()
+    releaseRollback()
+    await h.settled()
+    expect(settled).toHaveBeenCalledOnce()
+    expect(h.disableKillSwitchIfActive).toHaveBeenCalledOnce()
+  })
+  it('does not skip adapter compensation when another startup exit rollback step rejects', async () => {
+    const h = startupExitHarness()
+    h.stopXray.mockRejectedValue(new Error('xray unconfirmed'))
+    h.disableKillSwitchIfActive.mockRejectedValue(new Error('firewall failed'))
+    h.exit(new Error('child failed'))
+    await h.settled()
+    expect(h.rollbackEarlyAdapterLockdown).toHaveBeenCalledOnce()
+    expect(h.logEvent).toHaveBeenCalledWith('warn','tun','startup exit rollback failed',expect.any(Error))
+  })
+  it('does not settle or duplicate the rollback when owned taskkill itself triggers onExit', async () => {
+    const h = startupExitHarness()
+    h.pollCompensating()
+    h.exit(new Error('killed during compensation'))
+    await h.settled()
+    expect(h.finishResult).not.toHaveBeenCalled()
+    expect(h.stopXray).not.toHaveBeenCalled()
+    expect(h.disableKillSwitchIfActive).not.toHaveBeenCalled()
+    expect(h.rollbackEarlyAdapterLockdown).not.toHaveBeenCalled()
+  })
+  it('waits for native startup effects beyond two seconds before rolling anything back', async () => {
+    vi.useFakeTimers()
+    let release!: () => void
+    const started = new Promise<void>(done => { release = done })
+    const h = stopHarness(new AbortController(), started)
+    const result = h.stop()
+    await vi.advanceTimersByTimeAsync(3000)
+    expect(h.stopXray).not.toHaveBeenCalled()
+    expect(h.disableKillSwitchIfActive).not.toHaveBeenCalled()
+    expect(h.rollbackTunNetworkBaselineIfApplied).not.toHaveBeenCalled()
+    release()
+    expect((await result).success).toBe(true)
+    vi.useRealTimers()
+  })
+  it('joins concurrent ordinary stops without duplicate native rollback', async () => {
+    let release!: () => void
+    const h = stopHarness()
+    h.stopXray.mockReturnValue(new Promise<void>(done => { release = done }))
+    const first = h.stop(), second = h.stop()
+    await vi.waitFor(() => expect(h.stopXray).toHaveBeenCalledOnce())
+    release()
+    expect(await second).toEqual(await first)
+    expect(h.killOwnedRuntimeProcesses).toHaveBeenCalledOnce()
+    expect(h.rollbackTunNetworkBaselineIfApplied).toHaveBeenCalledOnce()
+    expect(h.disableKillSwitchIfActive).toHaveBeenCalledOnce()
+    expect(h.rollbackPhysicalAdapterLockdownIfApplied).toHaveBeenCalledOnce()
+  })
+  it('coalesces 200 queued stop commands behind one held startup owner (AT-00-007 subset)', async () => {
+    let release!: () => void
+    const started = new Promise<void>(done => {release=done})
+    const h = stopHarness(new AbortController(),started)
+    const requests=Array.from({length:200},()=>h.stop())
+    await Promise.resolve()
+    expect(h.stopXray).not.toHaveBeenCalled()
+    release()
+    const results=await Promise.all(requests)
+    expect(results.every(result=>result.success)).toBe(true)
+    expect(h.stopXray).toHaveBeenCalledOnce()
+    expect(h.rollbackTunNetworkBaselineIfApplied).toHaveBeenCalledOnce()
+    expect(h.disableKillSwitchIfActive).toHaveBeenCalledOnce()
+  })
+  it('does not tell a preserved-stop caller that full teardown preserved protection', async () => {
+    const h = stopHarness()
+    const first = h.stop(), protectedStop = h.stop({ preserveNetworkProtection: true })
+    await first
+    expect(await protectedStop).toMatchObject({ success: false })
+    expect(h.disableKillSwitchIfActive).toHaveBeenCalledOnce()
+  })
+  it('escalates a preserved stop into one full teardown for concurrent ordinary callers (AT-00-007)', async () => {
+    const h = stopHarness()
+    const preserved = h.stop({ preserveNetworkProtection: true })
+    const first = h.stop(), second = h.stop()
+    expect((await preserved).networkCleanup).toEqual({baseline:false,firewall:false,adapters:false})
+    expect(await second).toEqual(await first)
+    expect(h.stopXray).toHaveBeenCalledTimes(2)
+    expect(h.disableKillSwitchIfActive).toHaveBeenCalledOnce()
+    expect(h.rollbackTunNetworkBaselineIfApplied).toHaveBeenCalledOnce()
+  })
+  it('releases the stop gate after a thrown listener so later cleanup can retry', async () => {
+    const h = stopHarness()
+    h.notify.mockImplementationOnce(() => { throw new Error('listener failed') })
+    await expect(h.stop()).rejects.toThrow('listener failed')
+    expect((await h.stop()).success).toBe(true)
+    expect(h.stopXray).toHaveBeenCalledTimes(2)
+  })
   it('signals startup cancellation synchronously before cleanup awaits', async () => {
     const startup = new AbortController()
     const h = stopHarness(startup)

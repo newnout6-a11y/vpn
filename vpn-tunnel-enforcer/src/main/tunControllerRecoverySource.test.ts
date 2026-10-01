@@ -14,7 +14,7 @@ describe('tunController recovery cancellation guards', () => {
     expect(source).toContain('const generation = recoveryCancelGeneration')
     expect(source).toContain('generation !== recoveryCancelGeneration')
     expect(source).toContain('recoveryCancelGeneration += 1')
-    expect(source).toContain('restartTimer = setTimeout(() => {')
+    expect(source.includes('restartTimer = setTimeout(async () => {')).toBe(true)
     expect(source).toContain("WSAEACCES retry cancelled by stop")
   })
 
@@ -196,7 +196,7 @@ describe('tunController recovery cancellation guards', () => {
 
   it('cancels pending auto-restart if the setting is switched off during backoff', async () => {
     const source = await readFile(join(here, 'tunController.ts'), 'utf8')
-    const timer = source.indexOf('restartTimer = setTimeout(() => {')
+    const timer = source.indexOf('restartTimer = setTimeout(async () => {', source.indexOf('const optsSnapshot = lastStartOptions'))
     const cancel = source.indexOf('settingsStore.get().autoRestartOnCrash === false', timer)
     const start = source.indexOf('tunController.start(optsSnapshot)', timer)
 

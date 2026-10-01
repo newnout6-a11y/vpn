@@ -234,6 +234,9 @@ let watchdogTimer: ReturnType<typeof setInterval> | null = null
 let watchdogFailures = 0
 let startInProgress = false
 let activeStartAbortController: AbortController | null = null
+let activeStartCompletion: Promise<void> | null = null
+let activeStopCompletion: Promise<TunStopResult> | null = null
+let activeStopPreservesProtection = false
 let stopInProgress = false
 let stopRequested = false
 let transitionCancelRequested = false
@@ -2363,10 +2366,10 @@ export const tunController = {
     if (currentStatus.running) {
       return { success: false, error: 'TUN уже запущен' }
     }
-    if (startInProgress) {
+    if (startInProgress || activeStartCompletion) {
       return { success: false, error: 'Запуск защиты уже выполняется' }
     }
-    if (stopInProgress) {
+    if (stopInProgress || activeStopCompletion) {
       return { success: false, error: 'Остановка защиты ещё выполняется — подождите' }
     }
     if (transitionCancelRequested) {
@@ -2377,6 +2380,12 @@ export const tunController = {
     stopRequested = false
     const startAbortController = new AbortController()
     activeStartAbortController = startAbortController
+    let releaseStart!: () => void
+    const startCompletion = new Promise<void>(done => { releaseStart = done })
+    activeStartCompletion = startCompletion
+    let startupPollCompletion: Promise<void> | null = null
+    const startupCleanupTasks: Promise<void>[] = []
+    try {
     const finishStart = <T extends { success: boolean; error?: string; warning?: string | null }>(result: T): T => {
       startInProgress = false
       if (activeStartAbortController === startAbortController) activeStartAbortController = null
@@ -2828,9 +2837,12 @@ export const tunController = {
     // sudo-prompt's callback fires on child exit. For a long-running daemon we:
     // 1. Fire-and-forget the sudo.exec call, using its callback to mark "stopped" on exit.
     // 2. Poll tasklist for sing-box.exe to determine if it actually started.
-    return new Promise((resolve) => {
+    return await new Promise((resolve) => {
       let resolved = false
+      let startupCompensationStarted = false
       let startAbortedReason: string | null = null
+      let pendingKillSwitch: Promise<{ engaged: boolean; warning: string | null }> | null = null
+      let settleFirewallAdapter: ((ready: boolean) => void) | null = null
       const finish = (result: { success: boolean; error?: string; warning?: string | null }) => {
         if (resolved) return
         resolved = true
@@ -2867,6 +2879,12 @@ export const tunController = {
           proxyReachable: true,
           startedAt: null,
           restartAttempt
+        }
+        if (!resolved && startupCompensationStarted) {
+          // The poll already owns failure cleanup. Its kill triggers this
+          // callback too; do not start a second rollback or settle it early.
+          logEvent('info', 'tun', 'owned runtime exited during startup compensation')
+          return
         }
         if (!resolved) {
           const msg = startAbortedReason || error?.message || (stderr ? String(stderr) : 'sing-box не запустился')
@@ -2909,43 +2927,40 @@ export const tunController = {
           // killSwitchEngaged is set in the success path.
           // Skip the teardown when we are about to retry: the next attempt
           // benefits from the rules already being in place.
+          settleFirewallAdapter?.(false)
           if (!canRetryPortBind) {
-            disableKillSwitchIfActive('sing-box never started').catch(err =>
-              logEvent('warn', 'tun', 'kill-switch disable after start failure failed', err)
-            )
-            stopXray('sing-box never started').catch(() => undefined)
-          }
-          // Same for the adapter lockdown: it must always come down on a failed
-          // start, otherwise the user has IPv6 disabled + ISP DNS overridden
-          // for no reason.
-          // IMPORTANT: adapterLockdownEngaged is set inside adapterLockdownPromise's
-          // .then() handler, which may not have resolved yet when onExit fires (e.g.
-          // UAC denied → sing-box exits in ~200ms, but lockdown PS takes 3-5s).
-          // We must always await the lockdown promise before deciding whether to
-          // roll back, otherwise we'd skip rollback while lockdown is still running
-          // and leave the user with broken IPv6 + pinned DNS.
-          if (!canRetryPortBind) {
-            if (adapterLockdownPromise) {
-              adapterLockdownPromise.catch(() => undefined).finally(() => {
-                if (adapterLockdownEngaged) {
-                  rollbackPhysicalAdapterLockdownIfApplied('sing-box never started').catch(err =>
-                    logEvent('warn', 'tun', 'adapter lockdown rollback after start failure failed', err)
-                  )
-                }
-              })
-            } else if (adapterLockdownEngaged) {
-              rollbackPhysicalAdapterLockdownIfApplied('sing-box never started').catch(err =>
-                logEvent('warn', 'tun', 'adapter lockdown rollback after start failure failed', err)
-              )
-            }
+            // Retain startup ownership through native compensation. The poll
+            // might be inside ownership/firewall validation when exit arrives.
+            const cleanup = (async () => {
+              if (startupPollCompletion) await startupPollCompletion
+              if (pendingKillSwitch) await pendingKillSwitch.catch(() => undefined)
+              for (const effect of [
+                () => stopXray('sing-box never started'),
+                () => disableKillSwitchIfActive('sing-box never started'),
+                () => rollbackEarlyAdapterLockdown('sing-box never started')
+              ]) {
+                try { await effect() }
+                catch (cleanupError) { logEvent('warn', 'tun', 'startup exit rollback failed', cleanupError) }
+              }
+            })()
+            startupCleanupTasks.push(cleanup)
+          } else {
+            // The retry may reuse protection only after the previous native
+            // apply has settled. A pending adapter gate must not survive exit.
+            startupCleanupTasks.push((async () => {
+              if (startupPollCompletion) await startupPollCompletion
+              if (pendingKillSwitch) await pendingKillSwitch.catch(() => undefined)
+              if (adapterLockdownPromise) await adapterLockdownPromise.catch(() => undefined)
+            })())
           }
           if (canRetryPortBind) {
             const retryOpts = startOptions
             // Schedule the retry on next tick so the current start() call
             // unwinds cleanly (startInProgress cleared, callbacks fired) before
             // we kick off another full attempt.
-            restartTimer = setTimeout(() => {
+            restartTimer = setTimeout(async () => {
               restartTimer = null
+              await startCompletion
               if (settingsStore.get().autoRestartOnCrash === false) {
                 logEvent('info', 'tun', 'auto-restart cancelled because setting is off', { attempt: restartAttempt })
                 if (adapterLockdownEngaged) {
@@ -3056,8 +3071,13 @@ export const tunController = {
 
             clearRestartTimers()
             const optsSnapshot = lastStartOptions
-            restartTimer = setTimeout(() => {
+            restartTimer = setTimeout(async () => {
               restartTimer = null
+              await startCompletion
+              if (settingsStore.get().autoRestartOnCrash === false) {
+                logEvent('info', 'tun', 'auto-restart cancelled because setting is off', { attempt })
+                return
+              }
               if (userInitiatedStop || stopInProgress) {
                 logEvent('info', 'tun', 'auto-restart cancelled — user initiated stop', { attempt })
                 return
@@ -3197,12 +3217,12 @@ export const tunController = {
       const maxAttempts = 30 // 30 * 250ms = 7.5s (same ceiling, finer granularity)
       let successHandled = false
       let pollInFlight = false
-      let pendingKillSwitch: Promise<{ engaged: boolean; warning: string | null }> | null = null
-      let settleFirewallAdapter: ((ready: boolean) => void) | null = null
       const processWaitStarted = phaseStart()
       const poller = setInterval(async () => {
         if (pollInFlight) return
         pollInFlight = true
+        let releasePoll!: () => void
+        startupPollCompletion = new Promise<void>(done => { releasePoll = done })
         try {
           if (resolved || successHandled) {
             clearInterval(poller)
@@ -3211,6 +3231,7 @@ export const tunController = {
           if (stopRequested) {
             clearInterval(poller)
             logEvent('info', 'tun', 'start polling aborted by stop request')
+            startupCompensationStarted = true
             await killOwnedRuntimeProcesses()
             await stopXray('start aborted by stop request').catch(() => undefined)
             await rollbackEarlyAdapterLockdown('start aborted by stop request')
@@ -3233,6 +3254,7 @@ export const tunController = {
           }
           attempts++
           const running = await isSingboxRunning()
+          if (resolved) return
           if (running) {
             if (successHandled) return
             successHandled = true
@@ -3247,9 +3269,11 @@ export const tunController = {
             if (adapterLockdownPromise) {
               try {
                 await timeAsync('adapter-lockdown-await', () => adapterLockdownPromise!)
+                if (resolved) return
                 mark('lockdown-done')
               } catch {
                 // Lockdown failed after sing-box started — kill it and abort.
+                startupCompensationStarted = true
                 await killOwnedRuntimeProcesses()
                 await rollbackEarlyAdapterLockdown('lockdown failed after sing-box started')
                 finish({ success: false, error: adapterLockdownWarning || 'Adapter lockdown failed' })
@@ -3298,6 +3322,7 @@ export const tunController = {
 
             if (stopRequested) {
               logEvent('info', 'tun', 'start aborted by stop request before TUN wait')
+              startupCompensationStarted = true
               settleFirewallAdapter?.(false)
               if (pendingKillSwitch) await pendingKillSwitch
               await killOwnedRuntimeProcesses()
@@ -3323,9 +3348,11 @@ export const tunController = {
 
             // Wait for the TUN adapter (JS-side) in parallel with the kill-switch.
             const tunReady = await timeAsync('wait-tun-interface', () => waitForTunInterface(5000))
+            if (resolved) return
 
             if (stopRequested) {
               logEvent('info', 'tun', 'start aborted by stop request after TUN wait')
+              startupCompensationStarted = true
               settleFirewallAdapter?.(false)
               if (pendingKillSwitch) await pendingKillSwitch
               await killOwnedRuntimeProcesses()
@@ -3352,6 +3379,7 @@ export const tunController = {
             // Guaranteed rollback if Wintun failed to come up — no silent leak.
             if (!tunReady) {
               logEvent('error', 'tun', `${TUN_ADAPTER_ALIAS} failed to reach Status=Up within timeout — aborting start and rolling back`)
+              startupCompensationStarted = true
               settleFirewallAdapter?.(false)
               if (pendingKillSwitch) await pendingKillSwitch
               await killOwnedRuntimeProcesses()
@@ -3379,10 +3407,12 @@ export const tunController = {
             }
 
             await timeAsync('tun-ownership-record', () => recordOwnedTunAdapter(getTunAdapterAlias()))
+            if (resolved) return
             settleFirewallAdapter?.(!stopRequested && !resolved)
 
             // Lock in our TUN's InterfaceMetric as soon as the adapter is up.
             await timeAsync('tun-interface-metric-set', () => applyLowTunInterfaceMetric())
+            if (resolved) return
 
             // Diagnostic readback only — background, non-blocking.
             const readbackStarted = phaseStart()
@@ -3405,6 +3435,7 @@ export const tunController = {
             // Collect the kill-switch result (it was started in parallel above).
             if (killSwitchPromise) {
               const ksResult = await timeAsync('firewall-kill-switch-await', () => killSwitchPromise!)
+              if (resolved) return
               endPhase('firewall-kill-switch', parallelStarted, {
                 engaged: ksResult.engaged,
                 parallel: true
@@ -3414,6 +3445,7 @@ export const tunController = {
               } else {
                 startAbortedReason = ksResult.warning || 'Не удалось применить обязательные правила брандмауэра Kill-Switch. Запуск отменен.'
                 logEvent('error', 'tun', 'firewall kill-switch failed to engage — aborting start and rolling back', { warning: ksResult.warning })
+                startupCompensationStarted = true
                 await killOwnedRuntimeProcesses()
                 await stopXray('kill-switch failed to engage').catch(() => undefined)
                 await rollbackEarlyAdapterLockdown('kill-switch failed to engage')
@@ -3443,6 +3475,7 @@ export const tunController = {
 
             if (stopRequested) {
               logEvent('info', 'tun', 'start aborted by stop request before marking running')
+              startupCompensationStarted = true
               await killOwnedRuntimeProcesses()
               await stopXray('start aborted by stop request').catch(() => undefined)
               await rollbackEarlyAdapterLockdown('start aborted by stop request')
@@ -3579,21 +3612,36 @@ export const tunController = {
               })
               logEvent('error', 'tun', 'sing-box did not start within timeout', { proxyAddr, proxyType })
               recordForensicTunEvent('sing-box-start-timeout', { proxyAddr, proxyType, attempts })
-              // sing-box never reported running. Drop the kill-switch we installed
-              // pre-flight so the user isn't stuck offline because of UAC denial.
-              if (killSwitchEngaged) {
-                disableKillSwitch('sing-box did not start within timeout').catch(err =>
-                  logEvent('warn', 'tun', 'kill-switch disable after timeout failed', err)
-                )
+              const cleanupErrors: string[] = []
+              const reason = 'sing-box did not start within timeout'
+              startupCompensationStarted = true
+              settleFirewallAdapter?.(false)
+              if (pendingKillSwitch) await pendingKillSwitch.catch(() => undefined)
+              // A failed presence probe is not evidence that the child exited.
+              // Kill owned zombies before dismantling their network protection.
+              let runtimeExited = false
+              try {
+                await killOwnedRuntimeProcesses()
+                runtimeExited = await waitForOwnedRuntimeToExit()
+                if (!runtimeExited) cleanupErrors.push('runtime exit not confirmed; network protection retained')
+              } catch (cleanupError) {
+                cleanupErrors.push(String(cleanupError))
               }
-              if (adapterLockdownEngaged) {
-                rollbackPhysicalAdapterLockdownIfApplied('sing-box did not start within timeout').catch(err =>
-                  logEvent('warn', 'tun', 'adapter lockdown rollback after timeout failed', err)
-                )
+              try { await stopXray(reason) }
+              catch (cleanupError) { cleanupErrors.push(String(cleanupError)) }
+              if (runtimeExited) {
+                for (const effect of [
+                  () => disableKillSwitchIfActive(reason),
+                  () => rollbackEarlyAdapterLockdown(reason)
+                ]) {
+                  try { await effect() }
+                  catch (cleanupError) { cleanupErrors.push(String(cleanupError)) }
+                }
               }
               finish({
                 success: false,
-                error: 'sing-box не стартовал за 7 секунд. Проверьте UAC-подтверждение и журнал.'
+                error: 'sing-box не стартовал за 7 секунд. Проверьте UAC-подтверждение и журнал.',
+                warning: cleanupErrors.length ? cleanupErrors.join('; ') : null
               })
             }
           }
@@ -3608,6 +3656,7 @@ export const tunController = {
           // Let the parallel firewall transaction settle before rolling it back.
           // Each cleanup is independent, and every failure still settles start().
           const cleanupErrors: string[] = []
+          startupCompensationStarted = true
           settleFirewallAdapter?.(false)
           if (pendingKillSwitch) await pendingKillSwitch.catch(() => undefined)
           for (const cleanup of [
@@ -3632,12 +3681,38 @@ export const tunController = {
           }
         } finally {
           pollInFlight = false
+          releasePoll()
         }
       }, 250)
     })
+    } finally {
+      // Stop must wait for the whole startup owner, including failure cleanup.
+      // A timeout that merely stops waiting cannot cancel a native mutation.
+      if (startupPollCompletion) await startupPollCompletion
+      await Promise.allSettled(startupCleanupTasks)
+      if (activeStartCompletion === startCompletion) activeStartCompletion = null
+      if (activeStartAbortController === startAbortController) activeStartAbortController = null
+      startInProgress = false
+      releaseStart()
+    }
   },
 
   async stop(options: { preserveNetworkProtection?: boolean; preserveLastStartOptions?: boolean } = {}): Promise<TunStopResult> {
+    stopRequested = true
+    activeStartAbortController?.abort()
+    if (activeStopCompletion) {
+      const preserved = activeStopPreservesProtection
+      const stopped = await activeStopCompletion
+      if (preserved && options.preserveNetworkProtection !== true) return this.stop(options)
+      if (!preserved && options.preserveNetworkProtection === true) {
+        return { success: false, error: 'Полная остановка уже выполнялась; защиту нельзя считать сохранённой' }
+      }
+      return stopped
+    }
+    // Reserve admission synchronously so a new start cannot slip into the wait.
+    stopInProgress = true
+    activeStopPreservesProtection = options.preserveNetworkProtection === true
+    const cleanup = async (): Promise<TunStopResult> => {
     const stopStarted = performance.now()
     const stopPhases: Record<string, number> = {}
     const timedStop = async <T>(name: string, effect: () => Promise<T>): Promise<T> => {
@@ -3649,15 +3724,11 @@ export const tunController = {
     stopRequested = true
     activeStartAbortController?.abort()
     const preserveNetworkProtection = options.preserveNetworkProtection === true
-    // If start() is mid-flight, wait for it to finish before stopping.
-    // Without this, stop() kills sing-box while start() is still polling
-    // for it, leaving the app in an inconsistent state.
-    if (startInProgress) {
+    // Retain native effect ownership until startup/failure compensation settles.
+    // Two seconds of waiting was not evidence that DNS/firewall had finished.
+    if (activeStartCompletion) {
       logEvent('info', 'tun', 'stop() called while start() in progress — waiting for start to finish')
-      // Give start() up to 2s to complete, then proceed anyway
-      for (let i = 0; i < 20 && startInProgress; i++) {
-        await new Promise(r => setTimeout(r, 100))
-      }
+      await activeStartCompletion
     }
     stopInProgress = true
     let leakMonitorSuspended = false
@@ -3830,6 +3901,14 @@ export const tunController = {
       resumeLeakMonitor()
       stopInProgress = false
       if (!startInProgress && !currentStatus.running && !preserveNetworkProtection) transitionCancelRequested = false
+    }
+    }
+    const stopped = Promise.resolve().then(cleanup)
+    activeStopCompletion = stopped
+    try { return await stopped }
+    finally {
+      if (activeStopCompletion === stopped) activeStopCompletion = null
+      stopInProgress = false
     }
   },
 
