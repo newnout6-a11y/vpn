@@ -260,3 +260,11 @@ Durable write path (unique wx + fsync + ACL + rename) не изменён. Known
 5. Настоящий native smoke пока не исполнен: текущий shell unelevated, protected runtime недоступен, пользователь ушёл спать. UAC/ACL не обходились. Это внешнее ограничение проверки, не причина объявить цель достигнутой.
 
 Итоговый DoD этапа 7: `VPNTE_PWSH=powershell.exe; npm.cmd test -- --reporter=dot --maxWorkers=4` — exit 0, 158 passed / 1 skipped files, 1583 passed / 3 skipped tests (56.61 s). `npm.cmd run typecheck`, coverage AC 927/927 F 210/210 и `git diff --check` — exit 0. Предложение coordinator отправлено владельцу на согласование через async question; до ответа его реализация и изменение нормативного rollback/status контракта не начинаются. Независимая работа над контрольным артефактом продолжается.
+
+### 2026-10-01 — согласование coordinator и контрольная сборка этапа 7
+
+- Владелец ответил: «Да, реализовать отдельным этапом с приёмочными тестами». Согласование касается конкретного предложения выше: единый owner connect/cancel/stop, DNS/Xray cancellation/deadline, exit proof, порядок отката и статус защиты. Нормативные документы не редактируются. Исходная цель остаётся активной.
+- `npm.cmd run dist:win` — exit 0, source `5790f98` (production IP changes `4581e8a`). Electron 44.4.3 x64, NSIS 1.1.22. Build включает typecheck; mksnapshot отсутствует, snapshot generation пропущена; DEP0190 build warning остаётся.
+- Installer 139147056 bytes, modified 2026-10-01T09:44:01.7557702+03:00. SHA256 `07F2F0EF1C1C932355DC7D1C0473B753522C8B7CB9ED4402CD9904D36F8383C8`, Authenticode NotSigned. Не установлен, live smoke не проведён.
+- ASAR verifier использует actual bundled main: verified-adapter-wait, stop timing, tunAdapterReady, background VPN IP polling failed, recheckOwner. Runtime resources сверяются source/unpacked SHA256 для sing-box.exe, xray.exe, wintun.dll, libcronet.dll, vpnte-recover.ps1. Первый verifier вызов указал неверное имя cronet.dll; исправлено на фактическое libcronet.dll. Это ошибка команды проверки, не отсутствующий bundled resource.
+- Перед следующим изменением source контрольная сборка завершена; следующая source revision потребует новой сборки/hash. Следующий этап — operation owner/lane и реальные отменяемые границы, с тестами удержанных DNS/preflight/native effects и быстрых повторов.
