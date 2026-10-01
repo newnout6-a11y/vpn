@@ -428,6 +428,11 @@ function exceptionPolicyScript(policy: FirewallExceptionPolicy): string {
   const rules = [...policy.apps.map((value, i) => ({ name: names[i], program: value, remote: null })),
     ...policy.cidrs.map((value, i) => ({ name: names[policy.apps.length + i], program: null, remote: value }))]
   const encoded = Buffer.from(JSON.stringify(rules)).toString('base64')
+  const bulkApplicationReadback = policy.apps.length >= 8
+  const createRule = `
+  $ruleParams=@{DisplayName=$r.name;Direction='Outbound';Action='Allow';Profile='Any';Enabled='True'}
+  if($r.program){$ruleParams.Program=$r.program}else{$ruleParams.RemoteAddress=$r.remote}
+  New-NetFirewallRule @ruleParams -ErrorAction Stop | Out-Null`
   return `
 $ErrorActionPreference='Stop'
 $profiles=@(Get-NetFirewallProfile -Profile Domain,Private,Public -ErrorAction Stop)
@@ -438,15 +443,28 @@ if ($profiles.Count -ne 3 -or @($profiles | Where-Object { [string]$_.DefaultOut
 Get-NetFirewallRule -DisplayName '${RULE_PREFIX}-user-*' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction Stop
 Get-NetFirewallRule -DisplayName '${RULE_PREFIX}-allow-extra-ip' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction Stop
 $requested=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}')) | ConvertFrom-Json
+# Association queries cost one CIM round trip per application. For larger sets,
+# read the same default PersistentStore once; never reuse this operation's index.
+$applicationIndex=$null
+${bulkApplicationReadback ? `foreach ($r in $requested) {${createRule}
+}
+  $applicationIndex=@{}
+  foreach($filter in @(Get-NetFirewallApplicationFilter -All -ErrorAction Stop)){
+    $key=[string]$filter.InstanceID
+    if($applicationIndex.ContainsKey($key)){$applicationIndex[$key]=@($applicationIndex[$key])+@($filter)}
+    else{$applicationIndex[$key]=@($filter)}
+  }` : ''}
 foreach ($r in $requested) {
-  $ruleParams=@{DisplayName=$r.name;Direction='Outbound';Action='Allow';Profile='Any';Enabled='True'}
-  if($r.program){$ruleParams.Program=$r.program}else{$ruleParams.RemoteAddress=$r.remote}
-  New-NetFirewallRule @ruleParams -ErrorAction Stop | Out-Null
+${bulkApplicationReadback ? '' : createRule}
   $actual=@(Get-NetFirewallRule -DisplayName $r.name -ErrorAction Stop)
   if($actual.Count -ne 1 -or [string]$actual[0].Enabled -ne 'True' -or [string]$actual[0].Action -ne 'Allow' -or [string]$actual[0].Direction -ne 'Outbound'){throw 'Exception rule read-back mismatch'}
   if($r.program){
-    $filter=$actual[0] | Get-NetFirewallApplicationFilter -ErrorAction Stop
-    if([string]$filter.Program -ine [string]$r.program){throw 'Program filter read-back mismatch'}
+    if($null -ne $applicationIndex){
+      $key=[string]$actual[0].Name
+      if(-not $key -or -not $applicationIndex.ContainsKey($key)){throw 'Program filter read-back mismatch'}
+      $filters=@($applicationIndex[$key])
+    }else{$filters=@($actual[0] | Get-NetFirewallApplicationFilter -ErrorAction Stop)}
+    if($filters.Count -ne 1 -or [string]$filters[0].Program -ine [string]$r.program){throw 'Program filter read-back mismatch'}
   }else{
     $filter=$actual[0] | Get-NetFirewallAddressFilter -ErrorAction Stop
     if(@($filter.RemoteAddress).Count -ne 1 -or [string]@($filter.RemoteAddress)[0] -ne [string]$r.remote){throw 'Remote filter read-back mismatch'}
