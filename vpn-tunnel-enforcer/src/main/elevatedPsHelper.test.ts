@@ -45,6 +45,14 @@ describe('elevated PS helper errors', () => {
     vi.resetModules()
   })
 
+  it('classifies oversized scripts before dispatch (AT-03-007/009)', async () => {
+    const { execElevatedPs } = await import('./elevatedPsHelper')
+    const prefix = 'Get-NetFirewallProfile;#'
+    const boundary = prefix + 'x'.repeat(64 * 1024 - prefix.length)
+    await expect(execElevatedPs(boundary, 1000, 'firewall-killswitch')).rejects.toMatchObject({ code: 'elevated-helper-unavailable' })
+    await expect(execElevatedPs(boundary + 'x', 1000, 'firewall-killswitch')).rejects.toMatchObject({ code: 'elevated-helper-script-too-large' })
+  })
+
   it('fails immediately with a typed unavailable error when helper cannot start', async () => {
     const { execElevatedPs, ElevatedPsHelperError } = await import('./elevatedPsHelper')
 

@@ -150,7 +150,7 @@ async function ps(script: string, elevated = false, timeout = 30000) {
     } catch (err: any) {
       // Only a known rejection before execution permits a fallback. A timeout
       // or lost reply may follow effects; replaying would duplicate mutation.
-      if (!['elevated-helper-script-rejected', 'elevated-helper-unavailable'].includes(err?.code)) throw err
+      if (!['elevated-helper-script-rejected', 'elevated-helper-script-too-large', 'elevated-helper-unavailable'].includes(err?.code)) throw err
       logEvent('debug', 'firewall-killswitch', 'helper fallback', {
         code: err?.code ?? 'unclassified', durationMs: Math.round(performance.now() - started)
       })

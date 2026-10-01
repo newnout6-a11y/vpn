@@ -11,7 +11,7 @@ interface PendingCommand {
 
 export class ElevatedPsHelperError extends Error {
   constructor(
-    public readonly code: 'elevated-helper-unavailable' | 'elevated-helper-stopped' | 'elevated-helper-exited' | 'elevated-helper-timeout' | 'elevated-helper-script-rejected',
+    public readonly code: 'elevated-helper-unavailable' | 'elevated-helper-stopped' | 'elevated-helper-exited' | 'elevated-helper-timeout' | 'elevated-helper-script-rejected' | 'elevated-helper-script-too-large',
     message: string
   ) {
     super(message)
@@ -280,7 +280,7 @@ export async function execElevatedPs(
     throw new Error('execElevatedPs is only available on Windows')
   }
   if (script.length > MAX_SCRIPT_CHARS) {
-    throw new Error(`PS helper script is too large (${script.length} chars)`)
+    throw new ElevatedPsHelperError('elevated-helper-script-too-large', `PS helper script is too large (${script.length} chars)`)
   }
   if (pendingCommands.size >= MAX_PENDING_COMMANDS) {
     throw new Error(`PS helper queue is full (${pendingCommands.size} pending)`)

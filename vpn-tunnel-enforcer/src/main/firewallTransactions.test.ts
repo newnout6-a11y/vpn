@@ -6,12 +6,21 @@ const state = vi.hoisted(() => ({ manifest: null as any, writes: [] as any[], sc
   snapshot: ['Domain','Private','Public'].map(name => ({ name, defaultOutbound: 'Block' })),
   failWrite: false, failApply: false, failRestore: false, invalidRead: false,
   liveFailures: 0, liveMissingMarker: false, failCommit: false,
-  artifacts: [] as string[], helperAvailable: true, helperFailure: null as any, helperExitCode: 0,
+  artifacts: [] as string[], helperAvailable: true, helperFailure: null as any, helperExitCode: 0, longApps: false,
   fileProbe: vi.fn((..._args: any[]) => '0'),
   fallback: vi.fn(async (..._args: any[]) => ({ stdout: 'SNAPSHOT:[]', stderr: '' })) }))
 vi.mock('electron', () => ({ app: { getPath: () => 'C:\\VPNTE' },
   BrowserWindow: { getAllWindows: () => [] }, dialog: { showMessageBox: vi.fn(async () => ({})) } }))
 vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
+vi.mock('fs/promises', async importOriginal => {
+  const actual = await importOriginal<typeof import('fs/promises')>()
+  const api = { ...actual,
+    access: (...args: Parameters<typeof actual.access>) => state.longApps ? Promise.resolve() : actual.access(...args),
+    realpath: (...args: Parameters<typeof actual.realpath>) => state.longApps ? Promise.resolve(args[0]) : actual.realpath(...args),
+    stat: (...args: Parameters<typeof actual.stat>) => state.longApps ? Promise.resolve({ isFile: () => true }) : actual.stat(...args)
+  }
+  return { ...api, default: api }
+})
 vi.mock('./recoveryManifest', () => ({
   getRecoveryManifestDir: () => 'C:\\ProgramData\\VPNTE\\manifests',
   recoveryManifestPath: (name: string) => `C:\\ProgramData\\VPNTE\\manifests\\${name}`,
@@ -40,6 +49,11 @@ vi.mock('./elevatedPsHelper', () => ({ isElevatedPsHelperRunning: () => state.he
   execElevatedPs: async (script: string) => {
     state.scripts.push(script)
     if (state.helperFailure) throw state.helperFailure
+    if (script.length > 64 * 1024) {
+      // Exercise the real helper's pre-dispatch size guard; no native process.
+      const helper = await vi.importActual<typeof import('./elevatedPsHelper')>('./elevatedPsHelper')
+      return helper.execElevatedPs(script, 1000, 'firewall-killswitch')
+    }
     if (state.helperExitCode) return { stdout: '', stderr: 'native command failed', exitCode: state.helperExitCode }
     if (script.includes('# --- Step 2:')) {
       if (!state.manifest || state.manifest.phase !== 'prepared') throw new Error('mutated without a durable snapshot')
@@ -73,11 +87,26 @@ beforeEach(() => {
   state.failWrite = false; state.failApply = false; state.failRestore = false; state.invalidRead = false
   state.liveFailures = 0; state.liveMissingMarker = false; state.failCommit = false
   state.artifacts = []; state.helperAvailable = true; state.helperFailure = null; state.helperExitCode = 0
+  state.longApps = false
   state.fallback.mockReset().mockRejectedValue(new Error('Fallback boundary refused'))
   state.fileProbe.mockReset().mockReturnValue('0')
 })
 afterEach(() => { Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true }) })
 describe('firewall transaction fault injection (AT-03-003/004/007; F-030, F-186)', () => {
+  it('uses the protected-file fallback for oversized initial and live exception policies (AT-03-007/008/009)', async () => {
+    state.longApps = true
+    const paths = Array.from({ length: 36 }, (_, i) => `C:\\${('a'.repeat(200) + '\\').repeat(8)}app-${i}.exe`)
+    expect(paths.every(path => path.length <= 2048)).toBe(true)
+    state.fallback.mockResolvedValue({ stdout: 'EXCEPTIONS_VERIFIED\nRULES:VPNTE-killswitch-allow-app', stderr: '' })
+    expect((await enableKillSwitch({ ...options, appExceptionPaths: paths, tunAdapterReady: Promise.resolve(true) })).success).toBe(true)
+    expect(state.artifacts).toHaveLength(1)
+    expect(state.manifest.exceptionPolicy.apps).toEqual(paths)
+    expect((await updateKillSwitchExceptions(paths, [])).success).toBe(true)
+    expect(state.artifacts).toHaveLength(2)
+    expect(state.fallback).toHaveBeenCalledTimes(2)
+    expect(state.scripts.filter(script => script.length > 64 * 1024)).toHaveLength(2)
+    expect(state.manifest.pendingExceptionPolicy).toBeUndefined()
+  })
   it('prepares in parallel but waits for verified TUN before applying policy (AT-03-004)', async () => {
     let confirm!: (ready: boolean) => void
     const tunAdapterReady = new Promise<boolean>(resolve => { confirm = resolve })
@@ -130,6 +159,7 @@ describe('firewall transaction fault injection (AT-03-003/004/007; F-030, F-186)
   })
   it.each([
     { code: 'elevated-helper-script-rejected', fallback: true },
+    { code: 'elevated-helper-script-too-large', fallback: true },
     { code: 'elevated-helper-unavailable', fallback: true },
     { code: 'elevated-helper-timeout', fallback: false },
     { code: 'elevated-helper-exited', fallback: false },
