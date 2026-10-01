@@ -13,6 +13,7 @@ import { promises as dns } from 'dns'
 import { join } from 'path'
 import { readFile, writeFile, rename } from 'fs/promises'
 import { logEvent } from './appLogger'
+import { runXrayConfigPreflight, stopXrayPreflights } from './xrayPreflight'
 import {
   writeManagedChildPidFile,
   removeManagedChildPidFile,
@@ -42,6 +43,7 @@ export interface XrayOutboundOptions {
 
 export interface StartXrayOptions extends XrayOutboundOptions {
   portOverride?: number
+  signal?: AbortSignal
 }
 
 export interface XrayEngineStatus {
@@ -456,8 +458,13 @@ export async function startXray(
   const phaseDurations: Record<string, number> = {}
   let completed = false
   const timed = async <T>(phase: string, effect: () => Promise<T>): Promise<T> => {
+    if (options.signal?.aborted) throw new Error('Xray startup cancelled')
     const began = performance.now()
-    try { return await effect() }
+    try {
+      const result = await effect()
+      if (options.signal?.aborted) throw new Error('Xray startup cancelled')
+      return result
+    }
     finally { phaseDurations[phase] = Math.round(performance.now() - began) }
   }
   try {
@@ -497,26 +504,8 @@ export async function startXray(
     await timed('write-config', () => writeFile(configPath, JSON.stringify(config, null, 2), 'utf8'))
 
     // Run preflight test: xray run -test -c <config>
-    await timed('config-preflight', () => new Promise<void>((resolve, reject) => {
-      const testProc = spawn(exePath, ['run', '-test', '-c', configPath], {
-        cwd: runtimeDir,
-        windowsHide: true,
-        stdio: ['ignore', 'pipe', 'pipe']
-      })
-      let stderr = ''
-      let stdout = ''
-      testProc.stdout?.on('data', (c) => { stdout += c.toString() })
-      testProc.stderr?.on('data', (c) => { stderr += c.toString() })
-      testProc.on('error', reject)
-      testProc.on('exit', (code) => {
-        if (code === 0) {
-          resolve()
-        } else {
-          const errDetails = (stderr || stdout || `exit code ${code}`).trim()
-          reject(new Error(`xray run -test preflight failed: ${errDetails}`))
-        }
-      })
-    }))
+    await timed('config-preflight', () => runXrayConfigPreflight(exePath, runtimeDir, configPath, options.signal))
+    if (options.signal?.aborted) throw new Error('Xray startup cancelled')
 
     const child = spawn(exePath, ['run', '-c', configPath], {
       cwd: runtimeDir,
@@ -612,6 +601,7 @@ export async function startXray(
  * Stops the managed Xray process.
  */
 export async function stopXray(reason = 'stopped'): Promise<void> {
+  const preflightError = await stopXrayPreflights().then(() => null, error => error)
   const { proc } = activeXrayState
   const pidPath = join(getTunRuntimeDir(), XRAY_PID_FILE)
 
@@ -637,6 +627,7 @@ export async function stopXray(reason = 'stopped'): Promise<void> {
   }
 
   logEvent('info', 'xray', 'xray engine stopped', { reason })
+  if (preflightError) throw preflightError
 }
 
 /**

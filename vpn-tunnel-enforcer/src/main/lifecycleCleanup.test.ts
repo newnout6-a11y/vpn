@@ -24,8 +24,9 @@ function compile<T>(text: string, dependencies: Record<string, unknown>): T {
 const noop = () => vi.fn((..._args: any[]) => {})
 const done = () => vi.fn(async () => {})
 
-function stopHarness() {
+function stopHarness(startupController: AbortController | null = null) {
   const os = {
+    startupController,
     stopXray: done(), killOwnedRuntimeProcesses: done(), waitForOwnedRuntimeToExit: vi.fn(async () => true),
     rollbackTunNetworkBaselineIfApplied: vi.fn(async () => ({ success: true, message: 'restored' })),
     disableKillSwitchIfActive: vi.fn(async () => ({ success: true, message: 'restored' })),
@@ -36,7 +37,7 @@ function stopHarness() {
     clearRestartTimers: noop(), cancelLeakSelfTest: noop(), stopCompetingTunWatch: noop(), stopProxyWatchdog: noop()
   }
   const stop = compile<(options?: { preserveNetworkProtection?: boolean }) => Promise<any>>(`
-let startInProgress=false,stopRequested=false,stopInProgress=false,userInitiatedStop=false;
+let startInProgress=false,stopRequested=false,stopInProgress=false,userInitiatedStop=false,activeStartAbortController=startupController;
 let recoveryCancelGeneration=0,lastStartOptions=null,restartAttempt=0,transitionCancelRequested=false;
 let currentStatus={running:true,mode:'directVpn'},clashApiInfo=null,directProxyPort=null,tunnelProbePort=null;
 return ({${body('tunController.ts', 'stop')}}).stop;
@@ -65,6 +66,13 @@ return ${name};
 }
 
 describe('lifecycle cleanup evidence and retries (AT-02-005 / AT-03-007)', () => {
+  it('signals startup cancellation synchronously before cleanup awaits', async () => {
+    const startup = new AbortController()
+    const h = stopHarness(startup)
+    const result = h.stop()
+    expect(startup.signal.aborted).toBe(true)
+    await result
+  })
   it.each([{ rolledBack: true }, { rolledBack: false, skipped: true }])('skips redundant DNS recovery after confirmed adapter result %j', async result => {
     const h = stopHarness()
     h.rollbackPhysicalAdapterLockdownIfApplied.mockResolvedValue(result)
@@ -168,6 +176,7 @@ function xrayStartHarness() {
     cleanupManagedChildPidFile: effect(3, undefined), rename: effect(2, undefined),
     resolveServerAddress: effect(17, '192.0.2.1'), pickFreeLocalPort: effect(4, 10800),
     writeFile: effect(3, undefined), writeManagedChildPidFile: effect(5, undefined),
+    runXrayConfigPreflight: effect(11, undefined),
     ensureKillSwitchProgramAllowed: effect(41, { success: true }), waitForLocalSocks: effect(2, undefined),
     removeManagedChildPidFile: effect(1, undefined), logEvent: noop(), getTunRuntimeDir: () => 'fixture-dir',
     toXrayOutbound: () => ({}), buildXrayConfig: () => ({}), join, isIP,
@@ -188,6 +197,43 @@ return startXray;
   return { start, ...os }
 }
 describe('Xray startup phase measurements (AT-02-002 / AT-02-004)', () => {
+  it('does not launch the runtime before held native validation completes', async () => {
+    const h = xrayStartHarness()
+    let release!: () => void
+    h.runXrayConfigPreflight.mockReturnValue(new Promise(done => { release = () => done(undefined) }))
+    const result = h.start({ server: 'fixture.invalid' })
+    await vi.waitFor(() => expect(h.runXrayConfigPreflight).toHaveBeenCalledOnce())
+    expect(h.spawn).not.toHaveBeenCalled()
+    release()
+    expect((await result).socksPort).toBe(10800)
+    expect(h.spawn).toHaveBeenCalledOnce()
+  })
+  it('does not start work for an already cancelled owner', async () => {
+    const h = xrayStartHarness()
+    const startup = new AbortController()
+    startup.abort()
+    await expect(h.start({}, { signal: startup.signal })).rejects.toThrow('cancelled')
+    expect(h.stopXray).not.toHaveBeenCalled()
+    expect(h.spawn).not.toHaveBeenCalled()
+  })
+  it('passes the owner signal into validation and fences cancellation after held DNS', async () => {
+    const h = xrayStartHarness()
+    const startup = new AbortController()
+    let release!: (ip: string) => void
+    h.resolveServerAddress.mockReturnValue(new Promise(done => { release = done }))
+    const result = h.start({ server: 'fixture.invalid' }, { signal: startup.signal })
+    const rejected = expect(result).rejects.toThrow('cancelled')
+    await vi.waitFor(() => expect(h.resolveServerAddress).toHaveBeenCalledOnce())
+    startup.abort()
+    release('192.0.2.1')
+    await rejected
+    expect(h.pickFreeLocalPort).not.toHaveBeenCalled()
+    expect(h.runXrayConfigPreflight).not.toHaveBeenCalled()
+    expect(h.spawn).not.toHaveBeenCalled()
+    const valid = xrayStartHarness()
+    await valid.start({ server: 'fixture.invalid' }, { signal: new AbortController().signal })
+    expect(valid.runXrayConfigPreflight).toHaveBeenCalledWith('fixture.exe', 'fixture-dir', expect.any(String), expect.any(AbortSignal))
+  })
   it('measures each awaited boundary and preserves the successful result', async () => {
     const h = xrayStartHarness()
     expect(await h.start({ server: 'fixture.invalid' })).toEqual({ socksPort: 10800, exePath: 'fixture.exe', resolvedIp: '192.0.2.1' })

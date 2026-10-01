@@ -233,6 +233,7 @@ let statusCallbacks: ((status: string) => void)[] = []
 let watchdogTimer: ReturnType<typeof setInterval> | null = null
 let watchdogFailures = 0
 let startInProgress = false
+let activeStartAbortController: AbortController | null = null
 let stopInProgress = false
 let stopRequested = false
 let transitionCancelRequested = false
@@ -2350,6 +2351,7 @@ export const tunController = {
   cancelTransition(): void {
     transitionCancelRequested = true
     stopRequested = true
+    activeStartAbortController?.abort()
     logEvent('info', 'tun', 'active tunnel transition cancellation requested', {
       startInProgress,
       stopInProgress,
@@ -2373,8 +2375,11 @@ export const tunController = {
     }
     startInProgress = true
     stopRequested = false
+    const startAbortController = new AbortController()
+    activeStartAbortController = startAbortController
     const finishStart = <T extends { success: boolean; error?: string; warning?: string | null }>(result: T): T => {
       startInProgress = false
+      if (activeStartAbortController === startAbortController) activeStartAbortController = null
       // Consume a cancellation that arrived while this start was unwinding;
       // otherwise the next deliberate connect would be cancelled too.
       if (transitionCancelRequested) transitionCancelRequested = false
@@ -2668,13 +2673,17 @@ export const tunController = {
             const xr = await startXray(vpnProfile.outbound, {
               clientDevice: vpnProfile.clientDevice,
               stealthMode: startOptions.stealthMode === true,
-              resolvedIp: vpnProfile.resolvedIp
+              resolvedIp: vpnProfile.resolvedIp,
+              signal: startAbortController.signal
             })
             xraySocksPort = xr.socksPort
             resolvedVpnEndpointIp = xr.resolvedIp
             proxyOwnerProgramPaths = [...new Set([...proxyOwnerProgramPaths, xr.exePath])]
             proxyOwnerProcessNames = uniqueProcessNames([...proxyOwnerProcessNames, 'vpnte-xray.exe'])
           } catch (xrErr) {
+            await stopXray('xray startup failed').catch(err =>
+              logEvent('warn', 'tun', 'xray cleanup after startup failure not confirmed', err)
+            )
             await rollbackEarlyAdapterLockdown('xray startup failed after adapter lockdown')
             return finishStart({
               success: false,
@@ -2826,6 +2835,7 @@ export const tunController = {
         if (resolved) return
         resolved = true
         startInProgress = false
+        if (activeStartAbortController === startAbortController) activeStartAbortController = null
         resolve(result)
       }
 
@@ -3637,6 +3647,7 @@ export const tunController = {
     }
     const networkCleanup: NetworkCleanupReceipt = { baseline: false, firewall: false, adapters: false }
     stopRequested = true
+    activeStartAbortController?.abort()
     const preserveNetworkProtection = options.preserveNetworkProtection === true
     // If start() is mid-flight, wait for it to finish before stopping.
     // Without this, stop() kills sing-box while start() is still polling
