@@ -93,6 +93,7 @@ ${generated}`
   }, 20000)
   it.skipIf(process.platform !== 'win32' && !process.env.VPNTE_PWSH).each([
     { driver: 'Wintun Userspace Tunnel', pnp: 'SWD\\Wintun\\fixture', ip: '192.168.250.253', prefix: 30, accepted: true },
+    { driver: 'Wintun Userspace Tunnel', pnp: 'SWD\\Wintun\\fixture', ip: '192.168.250.253', prefix: 30, status: 'Disconnected', accepted: false },
     { driver: 'Wintun Userspace Tunnel', pnp: 'ROOT\\NET\\fixture', ip: '192.168.250.253', prefix: 30, accepted: false },
     { driver: 'Physical NIC', pnp: 'SWD\\Wintun\\fixture', ip: '192.168.250.253', prefix: 30, accepted: false },
     { driver: 'Wintun Userspace Tunnel', pnp: 'SWD\\Wintun\\fixture', ip: '192.168.250.254', prefix: 30, accepted: false },
@@ -102,7 +103,7 @@ ${generated}`
     mocks.read.mockImplementation((_exe, args) => {
       const json = Buffer.from(JSON.stringify(fixture)).toString('base64')
       const script = `$fixture=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${json}'))|ConvertFrom-Json
-function Get-NetAdapter { [pscustomobject]@{Name='Ethernet 5';InterfaceDescription='sing-tun Tunnel';DriverDescription=$fixture.driver;PnPDeviceID=$fixture.pnp;ifIndex=5;InterfaceGuid='00000000-0000-0000-0000-000000000005'} }
+function Get-NetAdapter { [pscustomobject]@{Name='Ethernet 5';Status=$(if($fixture.status){$fixture.status}else{'Up'});InterfaceDescription='sing-tun Tunnel';DriverDescription=$fixture.driver;PnPDeviceID=$fixture.pnp;ifIndex=5;InterfaceGuid='00000000-0000-0000-0000-000000000005'} }
 function Get-NetIPAddress { [pscustomobject]@{IPAddress=$fixture.ip;PrefixLength=$fixture.prefix} }
 ${Buffer.from(args.at(-1), 'base64').toString('utf16le')}`
       try {

@@ -170,3 +170,33 @@ Durable write path (unique wx + fsync + ACL + rename) не изменён. Known
 [Microsoft Set-DnsClientServerAddress](https://learn.microsoft.com/en-us/powershell/module/dnsclient/set-dnsclientserveraddress?view=windowsserver2025-ps): static addresses заменяют DHCP-derived DNS, ResetServerAddresses возвращает DHCP. Поэтому оптимизация не заменяет read-back безусловным reset и не трогает DNS без owned baseline.
 
 Итоговый DoD этапа 4: `VPNTE_PWSH=powershell.exe; npm.cmd test -- --reporter=dot --maxWorkers=4` — exit 0, 156 passed / 1 skipped files, 1551 passed / 3 skipped tests (56.74 s). Typecheck, traceability AC 927/927 F 210/210 и финальный `git diff --check` — exit 0. Реальные пользовательские stop/quit после изменений пока не измерены.
+
+### 2026-10-01 — этап 5: Xray timing и повторная проверка readiness
+
+- После устранения duplicate native adapter wait перепроверено равенство гарантий: в `recordOwnedTunAdapter` добавлена явная native `Status=Up` проверка до GUID/driver/PnP/IP ownership commit. Native negative fixture с правильными driver/PnP/IP и Disconnected запрещает commit. JS helper comment исправлен: он ищет candidate address, а не выполняет Get-NetAdapter.
+- Xray start получил длительности stop-previous, prepare-runtime, cleanup-pid, rotate-log, resolve-server, pick-port, write-config, config-preflight, write-pid, allow-firewall, wait-local-socks и total/success. Ошибки сохраняют partial timings и исходное исключение. Timing event не содержит endpoint/config/credentials. Сам алгоритм и deadlines не сокращены.
+- `npm.cmd test -- src/main/lifecycleCleanup.test.ts --reporter=dot --maxWorkers=4`: 22/22 passed (1.88 s). Production Xray body исполняется с fake child events/clock/OS: phase deltas, skipped endpoint/port overrides, propagated failure и отсутствие текста исключения в timing. Native storage/startup целевой прогон: 52/52 passed (10.12 s).
+- Первый typecheck нашёл tuple typing у zero-argument log mock; mock сделан variadic, повтор typecheck — exit 0. Full native suite: 156 passed / 1 skipped files, 1555 passed / 3 skipped tests (62.25 s), exit 0. Coverage AC 927/927 F 210/210 и diff-check — exit 0.
+- Bundled `resources/sing-box.exe version`: 1.13.13, Go1.25.10 windows/amd64, revision 78b2e12fbdd85e6ec956647d6f79cf0bba85c6ba. Это read-only запуск version, TUN/network не запускались.
+
+#### Дополнительные кандидаты и ограничения
+
+| Участок | Что установлено | Следующее доказательство / решение |
+| --- | --- | --- |
+| Main после успешного TUN start | Обе ветки ждут `ipMonitor.getCurrentIp()` до возврата IPC. Он делает HTTP, одновременно startMonitoring уже запускает другой IP probe | Измерить post-start IP отдельно. Перенести в существующий background poll с generation fence, сохранив проверки/обработку ошибок |
+| IP provider race | Четыре endpoints через Promise.any, axios timeout=10 s; параллельная гонка, не последовательные 40 s | Global single-flight/cache без generation небезопасен: результат старой сети может попасть в новую baseline |
+| Pre-VPN IP naming | preVpnIp/preVpnIpDirect получают ПОСЛЕ запуска TUN. Если уже получен exit IP, poll не увидит смены и пойдёт в route fallback | Разделить prior-session evidence и post-start sample, согласовать status/egress контракт |
+| Route fallback | Current probe ищет /0 либо 0/1 по ALL_KNOWN_ALIASES, не проверяет оба /1, GUID или effective selected route; exception и absence оба false | Typed диагностика + exact owned identity + оба маршрута и end-to-end egress; не расширять success oracle до «любой route» |
+| Source config | auto_route=true, strict_route=true, IPv4 route_address=[0/1,128/1], IPv6 не захватывается | Сопоставить real route dump/child log после воспроизведения; protected runtime logs недоступны этому shell |
+| DNS bootstrap | Xray resolve4 → lookup IPv4 до adapter lockdown; нет явного cancellation/deadline на resolver sequence | Сохранить bootstrap до lockdown. Abort/deadline + operation fencing требуют отдельных tests |
+| Runtime preparation | OS port picks, параллельные stale-only binary copies, ACL до staging; rule-sets local, failure безопасно отключает split | Отказ от ACL/hash/port preflight ради скорости отклонён. First/warm staging уже различаются |
+| Cancel/stop start wait | Stop выставляет stopRequested, ждёт startInProgress не более 2 s, затем cleanup; poll/native calls могут ещё идти | Проверить весь lifecycle mutex/fencing, а не только poll callback; WP-0 deadline/cancel coordinator |
+| UI feedback | Cancel сразу ставит connectionCancelling и invalidates transition seq; purple circle/busy button/warning outcome | UI tests зелёные. Animation не создаёт измеренную 23 s задержку |
+| Adaptive stability | Stable20s + probes фоновые, scheduleAdaptiveVerification не awaited | Не убирать stability ради сокращения IPC: она уже вне critical path |
+| Restart/foreign VPN | Generation/restart timers и independent owned cleanup обязательны; Happ warning появился после stop | Нет доказательств обвинять Happ/сервер в измеренном firewall времени |
+
+[sing-box TUN](https://sing-box.sagernet.org/configuration/inbound/tun/): strict_route на Windows защищает multihomed DNS, route_address заменяет default routes. Проверка должна учитывать config и actual runtime version; присутствие адаптера не доказывает egress.
+
+[Node child_process](https://nodejs.org/api/child_process.html#subprocesskilled): killed означает отправку сигнала, а не exit. Process backstops сохраняются до подтверждения завершения.
+
+Следующий приоритет: post-start HTTP вне critical path с generation fence, полный cancel/restart coordinator, сборка/проверка installer и реальные before/after повторения. Цель активна; L2/native fixtures не заменяют L3 сеть/chaos и фактические пользовательские времена.

@@ -452,146 +452,160 @@ export async function startXray(
   sbOutbound: Record<string, any>,
   options: StartXrayOptions = {}
 ): Promise<{ socksPort: number; exePath: string; resolvedIp: string | null }> {
-  await stopXray('preparing fresh start')
-
-  const runtimeDir = getTunRuntimeDir()
-  const exePath = await stageXrayRuntime()
-  const configPath = join(runtimeDir, 'xray.json')
-  const logPath = join(runtimeDir, 'xray.log')
-  const pidPath = join(runtimeDir, XRAY_PID_FILE)
-
-  // Reap an orphan vpnte-xray.exe from a previous hard-crashed session before
-  // we spawn a new one (identity-verified against the recorded exe+config path).
-  await cleanupManagedChildPidFile(pidPath, 'xray-engine', (message, details) => {
-    logEvent('warn', 'xray', message, details)
-  }).catch(() => undefined)
-
-  // Rotate the previous run's log so a fresh session starts clean and a long
-  // uptime at `info` verbosity can't grow it unbounded.
-  await rename(logPath, join(runtimeDir, 'xray.prev.log')).catch(() => undefined)
-
-  const server = String(sbOutbound.server || '')
-  let resolvedIp = options.resolvedIp || null
-  if (!resolvedIp && isIP(server) === 0) {
-    resolvedIp = await resolveServerAddress(server)
+  const startTime = performance.now()
+  const phaseDurations: Record<string, number> = {}
+  let completed = false
+  const timed = async <T>(phase: string, effect: () => Promise<T>): Promise<T> => {
+    const began = performance.now()
+    try { return await effect() }
+    finally { phaseDurations[phase] = Math.round(performance.now() - began) }
   }
+  try {
+    await timed('stop-previous', () => stopXray('preparing fresh start'))
 
-  const socksPort = options.portOverride ?? (await pickFreeLocalPort())
+    const runtimeDir = getTunRuntimeDir()
+    const exePath = await timed('prepare-runtime', stageXrayRuntime)
+    const configPath = join(runtimeDir, 'xray.json')
+    const logPath = join(runtimeDir, 'xray.log')
+    const pidPath = join(runtimeDir, XRAY_PID_FILE)
 
-  const xrayOutbound = toXrayOutbound(sbOutbound, {
-    clientDevice: options.clientDevice,
-    stealthMode: options.stealthMode,
-    resolvedIp
-  })
+    // Reap an orphan vpnte-xray.exe from a previous hard-crashed session before
+    // we spawn a new one (identity-verified against the recorded exe+config path).
+    await timed('cleanup-pid', () => cleanupManagedChildPidFile(pidPath, 'xray-engine', (message, details) => {
+      logEvent('warn', 'xray', message, details)
+    })).catch(() => undefined)
 
-  const config = buildXrayConfig(xrayOutbound, socksPort, { logPath })
-  await writeFile(configPath, JSON.stringify(config, null, 2), 'utf8')
+    // Rotate the previous run's log so a fresh session starts clean and a long
+    // uptime at `info` verbosity can't grow it unbounded.
+    await timed('rotate-log', () => rename(logPath, join(runtimeDir, 'xray.prev.log'))).catch(() => undefined)
 
-  // Run preflight test: xray run -test -c <config>
-  await new Promise<void>((resolve, reject) => {
-    const testProc = spawn(exePath, ['run', '-test', '-c', configPath], {
+    const server = String(sbOutbound.server || '')
+    let resolvedIp = options.resolvedIp || null
+    if (!resolvedIp && isIP(server) === 0) {
+      resolvedIp = await timed('resolve-server', () => resolveServerAddress(server))
+    }
+
+    const socksPort = options.portOverride ?? (await timed('pick-port', pickFreeLocalPort))
+
+    const xrayOutbound = toXrayOutbound(sbOutbound, {
+      clientDevice: options.clientDevice,
+      stealthMode: options.stealthMode,
+      resolvedIp
+    })
+
+    const config = buildXrayConfig(xrayOutbound, socksPort, { logPath })
+    await timed('write-config', () => writeFile(configPath, JSON.stringify(config, null, 2), 'utf8'))
+
+    // Run preflight test: xray run -test -c <config>
+    await timed('config-preflight', () => new Promise<void>((resolve, reject) => {
+      const testProc = spawn(exePath, ['run', '-test', '-c', configPath], {
+        cwd: runtimeDir,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe']
+      })
+      let stderr = ''
+      let stdout = ''
+      testProc.stdout?.on('data', (c) => { stdout += c.toString() })
+      testProc.stderr?.on('data', (c) => { stderr += c.toString() })
+      testProc.on('error', reject)
+      testProc.on('exit', (code) => {
+        if (code === 0) {
+          resolve()
+        } else {
+          const errDetails = (stderr || stdout || `exit code ${code}`).trim()
+          reject(new Error(`xray run -test preflight failed: ${errDetails}`))
+        }
+      })
+    }))
+
+    const child = spawn(exePath, ['run', '-c', configPath], {
       cwd: runtimeDir,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe']
     })
-    let stderr = ''
-    let stdout = ''
-    testProc.stdout?.on('data', (c) => { stdout += c.toString() })
-    testProc.stderr?.on('data', (c) => { stderr += c.toString() })
-    testProc.on('error', reject)
-    testProc.on('exit', (code) => {
-      if (code === 0) {
-        resolve()
-      } else {
-        const errDetails = (stderr || stdout || `exit code ${code}`).trim()
-        reject(new Error(`xray run -test preflight failed: ${errDetails}`))
+
+    const pid = child.pid ?? 0
+    await timed('write-pid', () => writeManagedChildPidFile(pidPath, {
+      owner: 'xray-engine',
+      pid,
+      exePath,
+      configPath,
+      createdAt: Date.now()
+    })).catch((err) => {
+      logEvent('warn', 'xray', 'failed to write xray pidfile', err)
+    })
+
+    // Allow xray through the firewall kill-switch by exe path. tunController's
+    // enableKillSwitch({ proxyOwnerProgramPaths }) also covers this on a fresh
+    // connect, but its "kill-switch already active — reusing existing rules"
+    // fast-path skips adding new program rules — so a first xray connect while a
+    // stale non-xray kill-switch is up (or a preserveNetworkProtection restart
+    // during server fallback) would leave xray's dial blocked (WSAEACCES).
+    // This call is idempotent and no-ops when the kill-switch is inactive.
+    await timed('allow-firewall', () => ensureKillSwitchProgramAllowed(
+      exePath,
+      'xray-engine',
+      'VPN Tunnel Enforcer kill-switch: allow xray-core engine outbound.'
+    )).then((res) => {
+      if (!res.success && !res.skipped) {
+        logEvent('warn', 'xray', 'kill-switch allow rule for xray not confirmed', { message: res.message })
+      }
+    }).catch((err) => {
+      logEvent('warn', 'xray', 'failed to ensure xray kill-switch allow rule', err)
+    })
+
+    let childStderr = ''
+    child.stderr?.on('data', (chunk) => {
+      childStderr += chunk.toString()
+    })
+
+    child.once('exit', (code, signal) => {
+      logEvent(code === 0 ? 'info' : 'warn', 'xray', 'xray process exited', { code, signal, stderr: childStderr.slice(-500) })
+      if (activeXrayState.proc === child) {
+        activeXrayState = {
+          running: false,
+          proc: null,
+          socksPort: null,
+          exePath: null,
+          configPath: null,
+          logPath: null,
+          startedAt: null,
+          resolvedIp: null
+        }
       }
     })
-  })
 
-  const child = spawn(exePath, ['run', '-c', configPath], {
-    cwd: runtimeDir,
-    windowsHide: true,
-    stdio: ['ignore', 'pipe', 'pipe']
-  })
-
-  const pid = child.pid ?? 0
-  await writeManagedChildPidFile(pidPath, {
-    owner: 'xray-engine',
-    pid,
-    exePath,
-    configPath,
-    createdAt: Date.now()
-  }).catch((err) => {
-    logEvent('warn', 'xray', 'failed to write xray pidfile', err)
-  })
-
-  // Allow xray through the firewall kill-switch by exe path. tunController's
-  // enableKillSwitch({ proxyOwnerProgramPaths }) also covers this on a fresh
-  // connect, but its "kill-switch already active — reusing existing rules"
-  // fast-path skips adding new program rules — so a first xray connect while a
-  // stale non-xray kill-switch is up (or a preserveNetworkProtection restart
-  // during server fallback) would leave xray's dial blocked (WSAEACCES).
-  // This call is idempotent and no-ops when the kill-switch is inactive.
-  await ensureKillSwitchProgramAllowed(
-    exePath,
-    'xray-engine',
-    'VPN Tunnel Enforcer kill-switch: allow xray-core engine outbound.'
-  ).then((res) => {
-    if (!res.success && !res.skipped) {
-      logEvent('warn', 'xray', 'kill-switch allow rule for xray not confirmed', { message: res.message })
+    try {
+      await timed('wait-local-socks', () => waitForLocalSocks(socksPort, SOCKS_PROBE_TIMEOUT_MS))
+    } catch (probeErr) {
+      try { child.kill() } catch {}
+      await removeManagedChildPidFile(pidPath, pid)
+      throw new Error(`xray-движок запустился, но локальный SOCKS-порт ${socksPort} не отвечает: ${(probeErr as Error).message}`)
     }
-  }).catch((err) => {
-    logEvent('warn', 'xray', 'failed to ensure xray kill-switch allow rule', err)
-  })
 
-  let childStderr = ''
-  child.stderr?.on('data', (chunk) => {
-    childStderr += chunk.toString()
-  })
-
-  child.once('exit', (code, signal) => {
-    logEvent(code === 0 ? 'info' : 'warn', 'xray', 'xray process exited', { code, signal, stderr: childStderr.slice(-500) })
-    if (activeXrayState.proc === child) {
-      activeXrayState = {
-        running: false,
-        proc: null,
-        socksPort: null,
-        exePath: null,
-        configPath: null,
-        logPath: null,
-        startedAt: null,
-        resolvedIp: null
-      }
+    activeXrayState = {
+      running: true,
+      proc: child,
+      socksPort,
+      exePath,
+      configPath,
+      logPath,
+      startedAt: Date.now(),
+      resolvedIp
     }
-  })
 
-  try {
-    await waitForLocalSocks(socksPort, SOCKS_PROBE_TIMEOUT_MS)
-  } catch (probeErr) {
-    try { child.kill() } catch {}
-    await removeManagedChildPidFile(pidPath, pid)
-    throw new Error(`xray-движок запустился, но локальный SOCKS-порт ${socksPort} не отвечает: ${(probeErr as Error).message}`)
+    logEvent('info', 'xray', 'xray engine started successfully', {
+      socksPort,
+      pid,
+      resolvedIp
+    })
+
+    completed = true
+    return { socksPort, exePath, resolvedIp }
+  } finally {
+    logEvent('info', 'xray', 'start timing', { phaseDurations,
+      totalMs: Math.round(performance.now() - startTime), success: completed })
   }
-
-  activeXrayState = {
-    running: true,
-    proc: child,
-    socksPort,
-    exePath,
-    configPath,
-    logPath,
-    startedAt: Date.now(),
-    resolvedIp
-  }
-
-  logEvent('info', 'xray', 'xray engine started successfully', {
-    socksPort,
-    pid,
-    resolvedIp
-  })
-
-  return { socksPort, exePath, resolvedIp }
 }
 
 /**

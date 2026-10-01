@@ -1,6 +1,8 @@
 // AT-02-005 / AT-03-007: run production lifecycle bodies with fake OS boundaries.
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { isIP } from 'node:net'
+import { EventEmitter } from 'node:events'
 import ts from 'typescript'
 import { describe, expect, it, vi } from 'vitest'
 
@@ -19,7 +21,7 @@ function compile<T>(text: string, dependencies: Record<string, unknown>): T {
   const js = ts.transpileModule(text, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText
   return new Function(...Object.keys(dependencies), js)(...Object.values(dependencies))
 }
-const noop = () => vi.fn(() => {})
+const noop = () => vi.fn((..._args: any[]) => {})
 const done = () => vi.fn(async () => {})
 
 function stopHarness() {
@@ -154,5 +156,67 @@ describe('lifecycle cleanup evidence and retries (AT-02-005 / AT-03-007)', () =>
     expect(await rollback('test')).toEqual({ rolledBack: false, skipped: true })
     readManifest.mockRejectedValue(new Error('untrusted ACL'))
     await expect(rollback('test')).rejects.toThrow('untrusted ACL')
+  })
+})
+
+function xrayStartHarness() {
+  let clock = 0
+  const effect = <T>(cost: number, value: T) => vi.fn(async (..._args: any[]) => { clock += cost; return value })
+  const os = {
+    performance: { now: () => clock },
+    stopXray: effect(5, undefined), stageXrayRuntime: effect(24, 'fixture.exe'),
+    cleanupManagedChildPidFile: effect(3, undefined), rename: effect(2, undefined),
+    resolveServerAddress: effect(17, '192.0.2.1'), pickFreeLocalPort: effect(4, 10800),
+    writeFile: effect(3, undefined), writeManagedChildPidFile: effect(5, undefined),
+    ensureKillSwitchProgramAllowed: effect(41, { success: true }), waitForLocalSocks: effect(2, undefined),
+    removeManagedChildPidFile: effect(1, undefined), logEvent: noop(), getTunRuntimeDir: () => 'fixture-dir',
+    toXrayOutbound: () => ({}), buildXrayConfig: () => ({}), join, isIP,
+    spawn: vi.fn((_file: string, args: string[]) => {
+      const child = Object.assign(new EventEmitter(), { pid: 42, stdout: new EventEmitter(), stderr: new EventEmitter(), kill: vi.fn() })
+      clock += args.includes('-test') ? 11 : 1
+      if (args.includes('-test')) queueMicrotask(() => child.emit('exit', 0))
+      return child
+    })
+  }
+  const text = body('xrayEngine.ts', 'startXray').replace(/^export /, '')
+  const start = compile<(outbound: Record<string, unknown>, options?: Record<string, unknown>) => Promise<any>>(`
+const XRAY_PID_FILE='fixture.pid',SOCKS_PROBE_TIMEOUT_MS=3500;
+let activeXrayState={proc:null};
+${text}
+return startXray;
+`, os)
+  return { start, ...os }
+}
+describe('Xray startup phase measurements (AT-02-002 / AT-02-004)', () => {
+  it('measures each awaited boundary and preserves the successful result', async () => {
+    const h = xrayStartHarness()
+    expect(await h.start({ server: 'fixture.invalid' })).toEqual({ socksPort: 10800, exePath: 'fixture.exe', resolvedIp: '192.0.2.1' })
+    expect(h.logEvent).toHaveBeenCalledWith('info', 'xray', 'start timing', {
+      success: true, totalMs: 118,
+      phaseDurations: { 'stop-previous': 5, 'prepare-runtime': 24, 'cleanup-pid': 3, 'rotate-log': 2,
+        'resolve-server': 17, 'pick-port': 4, 'write-config': 3, 'config-preflight': 11,
+        'write-pid': 5, 'allow-firewall': 41, 'wait-local-socks': 2 }
+    })
+  })
+  it('keeps endpoint/port overrides and does not invent times for skipped work', async () => {
+    const h = xrayStartHarness()
+    await h.start({ server: 'fixture.invalid' }, { resolvedIp: '192.0.2.2', portOverride: 10801 })
+    expect(h.resolveServerAddress).not.toHaveBeenCalled()
+    expect(h.pickFreeLocalPort).not.toHaveBeenCalled()
+    const report = h.logEvent.mock.calls.find(call => call[2] === 'start timing')![3] as any
+    expect(report.phaseDurations['resolve-server']).toBeUndefined()
+    expect(report.phaseDurations['pick-port']).toBeUndefined()
+    expect(report.success).toBe(true)
+  })
+  it('records partial failed timings while propagating the original failure', async () => {
+    const h = xrayStartHarness()
+    const error = new Error('sensitive fixture failure')
+    h.stageXrayRuntime.mockRejectedValue(error)
+    await expect(h.start({ server: 'fixture.invalid' })).rejects.toBe(error)
+    expect(h.spawn).not.toHaveBeenCalled()
+    expect(h.logEvent).toHaveBeenCalledWith('info', 'xray', 'start timing', {
+      success: false, totalMs: 5, phaseDurations: { 'stop-previous': 5, 'prepare-runtime': 0 }
+    })
+    expect(JSON.stringify(h.logEvent.mock.calls)).not.toContain(error.message)
   })
 })

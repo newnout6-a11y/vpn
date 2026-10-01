@@ -1401,12 +1401,9 @@ if ($found.Count -gt 0) { 'true' } else { 'false' }
   }
 }
 
-// Polls Get-NetAdapter until VPNTE-TUN reports Status=Up. Wintun creates the
-// adapter shortly after sing-box opens its TUN inbound, but there's a small
-// gap where Get-NetAdapter either doesn't see it or reports it as Disconnected.
-// Firewall rules with -InterfaceAlias <TUN_ADAPTER_ALIAS> fail silently when the alias
-// doesn't exist yet, so any caller that's about to install such a rule must
-// wait for this helper to succeed first.
+// Fast JS wait for a candidate TUN address. Exact driver/GUID/address and Up
+// validation is performed by recordOwnedTunAdapter before the firewall barrier
+// opens; this wait alone never authorizes native firewall effects.
 async function waitForTunInterface(timeoutMs = 5000): Promise<boolean> {
   if (process.platform !== 'win32') return false
   const start = Date.now()
