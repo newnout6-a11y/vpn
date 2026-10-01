@@ -326,3 +326,19 @@ Durable write path (unique wx + fsync + ACL + rename) не изменён. Known
 - **DoD этапа 11:** `npm.cmd run typecheck` exit 0; `VPNTE_PWSH=powershell.exe; npm.cmd test -- --reporter=dot --maxWorkers=4` exit 0, 163 passed / 1 skipped files, 1648 passed / 3 skipped tests (62.09 s); `.tmp/stage11-full-tests.exit` содержит 0. Coverage AC 927/927 F 210/210 exit 0. app.log по-прежнему 328207 bytes, modified 00:26:57 MSK; новых real VPN samples нет.
 - Владелец уточнил: «ты ускоряешь, а не замедляешь». Обычный startup не ждёт новых операций: baseline уже был awaited, его параллельность сохранена. При cancel/quit ожидание actual native settlement заменяет конкурентный teardown; его нельзя выдавать за ускорение. Следующие изменения должны опираться на critical-path timings firewall/rollback и убрать лишние round trips, сохраняя exit/read-back proof.
 - Открытый согласованный scope: runtime Xray ownership/exit/tails, fencing crash/failover/adaptive callbacks, priority/deadline registry, нормативный порядок rollback и exact route/status evidence, новая итоговая сборка и реальный cold/warm before-after. Эти пункты не закрыты данным этапом; цель остаётся активной.
+
+### 2026-10-01 — read-only native benchmark firewall filters
+
+- Следующий кандидат ускорения проверен на настоящем NetSecurity без изменения правил/профилей/адаптеров: `.tmp/firewall-readback-bench.ps1`. ActiveStore содержит 617 правил; sample — первые 20 по Name. Значения путей/адресов не выводились и не сохранялись; экспортированы только timings/counts/equality booleans.
+- [Microsoft Get-NetFirewallApplicationFilter](https://learn.microsoft.com/powershell/module/netsecurity/get-netfirewallapplicationfilter) принимает один AssociatedNetFirewallRule CimInstance, а не массив. Pipeline по 20 правилам продолжает делать отдельные association queries. GetAll даёт кандидат для operation-local dictionary; proof нельзя заменить сравнением только DisplayName или общим count.
+- Первый benchmark завершился exit 1: Get-NetFirewallAddressFilter -All -PolicyStore ActiveStore получил Windows Error 5 (PermissionDenied). Per-rule чтение address/application и bulk application доступны текущему unelevated shell. UAC/ACL не обходились. Повтор экспортирует этот denied outcome явно вместо мнимой полной эквивалентности.
+
+| Round | Per-rule application read (20), ms | Bulk application read (617), ms | Local index construction, ms | Per-rule address read (20), ms |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 407.3 | 83.9 | 16.9 | 381.0 |
+| 2 | 368.1 | 80.4 | 33.6 | 369.3 |
+| 3 | 338.8 | 70.3 | 18.1 | 337.4 |
+
+- All 3 rounds: application InstanceID→rule Name mapping 20/20, exactly one filter и Program equality true. Полная address/application equivalence false: bulk address не прочитан. Последний script exit 0 означает корректный отчёт результатов, **не** успешный full readback oracle.
+- Имеется реальный резерв для компонента application read (bulk + index 88.4–114.0 ms против 338.8–407.3 ms). Это лишь read subtotal: не measured production startup/rollback, не оценка полного firewall transaction и не proof всех filters/policies. Порог целесообразности зависит от количества app exceptions и общего ActiveStore; у пустой policy такого выигрыша нет.
+- Production оптимизация ещё не внесена: сначала нужны scoped mapping/duplicate/missing/change tests и разрешённый elevated readback oracle, либо оставить per-rule address verification и оптимизировать только application часть. Нельзя считать сравнение 20 текущих правил достаточным доказательством всей будущей политики. Новых native mutations нет; исходный app.log не изменился.
