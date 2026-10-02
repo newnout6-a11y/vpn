@@ -569,3 +569,17 @@
 ### Откат
 
 - Revert scoped firewall API change; settings/profile/recovery manifest форматы совместимы. Возвращает прежние NetSecurity операции с правилами.
+
+## 2026-10-03 — WP-3 / WP-0: adapter apply и ранняя отмена
+
+- Владелец разрешил продолжать ускорение по прежней схеме. Начальный checkout 2a5c410, чистый. Установленная COM-сборка: starts 4501/3578/3273 ms, stops 3276/2966 ms, cancel 3296 ms; firewall await уже 502/643/403 ms. Adapter lockdown тёплый 1833/1813 ms, native mutation 1130/1132 ms. При cancel новый adapter batch запускался уже после сигнала отмены и Xray exit, затем компенсировался. Baseline rollback остаётся ~1 s.
+- Adapter apply получил startup AbortSignal и проверки перед новыми effects. Общие snapshot reads разрешено завершить; после отмены до journal/native dispatch новые изменения не отправляются. Durable journal и уже отправленные native пакеты остаются под владельцем компенсации после runtime exit proof. Отмена и поздний native отказ не запускают преждевременный rollback из parallel apply wrapper.
+- Свежая GUID/binding проверка пропускает повторный Disable IPv6 только при доказанном boolean=false; missing/ambiguous/nonboolean/read-back failure не проходят. Mobile/464XLAT исключение сохранено. Два reg.exe add заменены .NET Registry с проверкой DWORD=1, пропуском повторной записи и read-back после изменений. Baseline восстановления прежних значений/отсутствия сохранён. Missing policy proof и частичные ошибки сохраняют conservative recovery journal.
+- Неизвестный результат helper, timeout/exit/stop и nonzero reply больше не переигрываются fallback transport; fallback разрешён только известному отказу до dispatch. Диагностика включает cancelled, phase/pendingRecovery, ipv6AlreadyOff. Нормативные docs и manifest/settings/profile форматы не менялись.
+- Safe replay старого/нового production apply после abort: mutation batches 1→0, journal writes 2→0. Native read-only proof текущего GUID/IPv6/DNS-policy: первый 433 ms, тёплые 343/313/336/330/306 ms, 6/6 доказательства успешны, binding unchanged. Это отдельный компонент, не полный installed apply. Реальные уникальные HKCU registry fixtures: warm reg 11–12 ms/value, .NET 0–1 ms/value; первый cold .NET 62 ms vs reg27. 12/12 independent reg query proofs, cleanupOk=true. Реальные HKLM/сетевые настройки и установленный клиент не менялись.
+- Финальные `npm.cmd run typecheck`: exit 0; focused seven-suite command из lifecycle journal этапа29: 174 passed, exit 0. `npm.cmd test -- --maxWorkers=4`: 183 files passed / 2 skipped, 2073 tests passed / 10 skipped / 0 failed, exit 0, 113.14 s. `python -X utf8 ../docs/04-приёмочные-тесты/traceability/check-coverage.py`: AC927/927 F210/210, exit 0. `git diff --check`: exit 0. Первые test typing / CLIXML / benchmark-interface setup замечания и границы записаны в журнале.
+- `npm.cmd run dist:win`: exit 0, 7 packaged-ASAR markers, main SHA256 ab4a2493df59584735f6e33949d3c5821067722828fc959242747b8d119f81a2, совпадает с compiled output. Installer dist/VPN-Tunnel-Enforcer-Setup-1.1.22.exe: 139168386 bytes, 03.10.2026 00:32:56 MSK, SHA256 1C830BDB249EB61B2BE2DBD7CA92E7A3ABC9E4014F5334BD20E0FABE376ABC53, NotSigned. Agent did not install it; новые full start/stop/cancel и L3 acceptance пока не измерены. 11 собственных временных файлов этого этапа удалены, прежние сохранены.
+
+### Откат
+
+- Revert scoped adapter/cancellation change; сетевые baseline/settings/profiles совместимы. Возвращает прежние повторные native операции и apply после отмены.

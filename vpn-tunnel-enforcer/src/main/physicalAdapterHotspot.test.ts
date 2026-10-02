@@ -25,7 +25,7 @@ beforeEach(() => {
       gateways: ['10.253.112.13'], networkProfiles: [fixture.profile], isCellularOrTethering: false
     }) }
     if (script.includes('netsh interface teredo show state')) return { stdout: '{}' }
-    return { stdout: fixture.profile.startsWith('Galaxy') ? 'A0_ipv6:skip\nA0_dns:skip' : 'A0_ipv6:off\nA0_dns:skip' }
+    return { stdout: (fixture.profile.startsWith('Galaxy') ? 'A0_ipv6:skip\nA0_dns:skip' : 'A0_ipv6:off\nA0_dns:skip') + '\nDNS_SMNR:off\nDNS_PARALLEL:off' }
   })
 })
 describe('hotspot snapshot integration', () => {

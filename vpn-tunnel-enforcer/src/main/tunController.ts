@@ -2576,15 +2576,21 @@ export const tunController = {
           const lock = await timeAsync(
             'adapter-lockdown',
             () => applyPhysicalAdapterLockdown(TUN_IPV4_RESOLVER, {
-              forceDns: adapterLockdownForceDns
+              forceDns: adapterLockdownForceDns,
+              signal: startAbortController.signal
             }),
             { forceDns: adapterLockdownForceDns, parallel: true }
           )
           logEvent('info', 'tun', 'adapter lockdown result', {
             applied: lock.applied,
+            cancelled: lock.cancelled === true,
             adapters: lock.adapters,
             warnings: lock.warnings
           })
+          if (lock.cancelled || startAbortController.signal.aborted) {
+            adapterLockdownEngaged = lock.applied
+            return
+          }
           if (lock.applied) {
             adapterLockdownEngaged = true
             if (lock.warnings.length > 0) {
