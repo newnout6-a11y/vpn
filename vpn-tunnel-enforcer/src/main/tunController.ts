@@ -1,4 +1,5 @@
 import { recordOwnedTunAdapter, strictRecoveryRequired } from './recoveryManifest'
+import { executeRecoveryOperation, RecoveryWorkerError } from './recoveryPsWorker'
 import { exec as execCb, execFile as execFileCb } from 'child_process'
 import { writeFile, mkdir, copyFile, access, rename, stat, readFile } from 'fs/promises'
 import { join, dirname } from 'path'
@@ -1389,7 +1390,13 @@ export async function isOwnedTunRuntimeRunning(requireProof = false): Promise<bo
   if (process.platform !== 'win32') return false
   try {
     const runtimeDir = getTunRuntimeDir()
-    const stdout = await runPowerShell(`
+    let stdout: string
+    try { stdout = await executeRecoveryOperation({ op: 'inspect-runtime', runtimeDir }, 5000) }
+    catch (error) {
+      if (!(error instanceof RecoveryWorkerError) || error.code !== 'unavailable') throw error
+      // Only known pre-dispatch unavailability permits the existing reader.
+      // Query failure/deadline/closed admission cannot prove that the runtime exited.
+      stdout = await runPowerShell(`
 $runtimeDir = ${psSingleQuote(runtimeDir)}
 $names = @(${psSingleQuote(RUNTIME_EXE_NAME)}, 'vpnte-etw-sidecar.exe', 'vpnte-xray.exe')
 $found = @(Get-CimInstance Win32_Process -ErrorAction Stop |
@@ -1401,6 +1408,7 @@ $found = @(Get-CimInstance Win32_Process -ErrorAction Stop |
   Select-Object -First 1)
 if ($found.Count -gt 0) { 'true' } else { 'false' }
 `, 5000)
+    }
     const result = String(stdout || '').trim().toLowerCase()
     if (result !== 'true' && result !== 'false') throw new Error('Owned runtime status response is invalid')
     return result === 'true'

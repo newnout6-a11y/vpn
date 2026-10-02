@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import ts from 'typescript'
 import { describe, expect, it, vi } from 'vitest'
+import { RecoveryWorkerError } from './recoveryPsWorker'
 
 const source = ts.createSourceFile('tunController.ts', readFileSync(join(process.cwd(), 'src/main/tunController.ts'), 'utf8'), ts.ScriptTarget.Latest, true)
 function load<T>(name: string, dependencies: Record<string, unknown>): T {
@@ -30,15 +31,17 @@ describe('runtime exit proof', () => {
   it.each(['', 'garbage', 'false\nwarning', 'native error'])('never treats an invalid/failed probe as proof of absence: %j', async output => {
     const probe = load<(strict: boolean) => Promise<boolean>>('isOwnedTunRuntimeRunning', {
       process: { platform: 'win32' }, getTunRuntimeDir: () => 'fixture', RUNTIME_EXE_NAME: 'owned.exe',
+      RecoveryWorkerError, executeRecoveryOperation: async () => { throw new RecoveryWorkerError('unavailable', 'fixture fallback') },
       psSingleQuote: (value: string) => `'${value}'`, logEvent: vi.fn(),
       runPowerShell: async () => { if (output === 'native error') throw new Error(output); return output }
     })
-    await expect(probe(true)).rejects.toThrow()
+    await expect(probe(true)).rejects.toThrow(output === 'native error' ? output : 'Owned runtime status response is invalid')
   })
   it.each([['true', true], ['false\r\n', false]])('accepts only an exact native boolean: %j', async (output, expected) => {
     const native = vi.fn(async (..._args: any[]) => output)
     const probe = load<(strict: boolean) => Promise<boolean>>('isOwnedTunRuntimeRunning', {
       process: { platform: 'win32' }, getTunRuntimeDir: () => 'fixture', RUNTIME_EXE_NAME: 'owned.exe',
+      RecoveryWorkerError, executeRecoveryOperation: async () => { throw new RecoveryWorkerError('unavailable', 'fixture fallback') },
       psSingleQuote: (value: string) => `'${value}'`, logEvent: vi.fn(), runPowerShell: native
     })
     expect(await probe(true)).toBe(expected)

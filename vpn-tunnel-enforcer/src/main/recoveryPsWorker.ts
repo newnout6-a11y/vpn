@@ -191,10 +191,11 @@ async function getWorker(): Promise<RecoveryPsWorker> {
   })()
   try { return await starting } finally { starting = null }
 }
-export async function executeRecoveryOperation(request: RecoveryRequest): Promise<string> {
+export async function executeRecoveryOperation(request: RecoveryRequest, timeoutMs = 15000): Promise<string> {
   validateRecoveryRequest(request)
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 1 || timeoutMs > 30000) throw new Error('Invalid recovery worker deadline')
   const started = performance.now()
-  try { return await (await getWorker()).execute(request) }
+  try { return await (await getWorker()).execute(request, timeoutMs) }
   finally { logEvent('debug', 'recovery-worker', 'operation timing', { operation: request.op, durationMs: Math.round(performance.now() - started) }) }
 }
 export async function warmRecoveryPsWorker(): Promise<void> {

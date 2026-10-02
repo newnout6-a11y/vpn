@@ -4,11 +4,20 @@ import { execFileSync } from 'node:child_process'
 import { DNS_POLICY_SNAPSHOT_SCRIPT, recoveryWorkerFunctions, recoveryWorkerScript } from './recoveryPsProtocol'
 
 const native = process.platform === 'win32' || Boolean(process.env.VPNTE_PWSH)
-function run(request: unknown, variant = 'trusted'): {value: string; set: number; removed: number} {
+function run(request: unknown, variant = 'trusted'): {value: string; set: number; removed: number; queries: number} {
   const serialized = Buffer.from(JSON.stringify(request)).toString('base64')
   const fixture = String.raw`
 $global:variant='${variant}'
-$global:sets=0;$global:removed=0
+$global:sets=0;$global:removed=0;$global:queries=0
+function Get-CimInstance { [CmdletBinding()]param($ClassName)
+  $global:queries++
+  if ($ClassName -ne 'Win32_Process') { throw 'Unexpected CIM class' }
+  if ($global:variant -eq 'queryError') { throw 'Fixture CIM error' }
+  if ($global:variant -eq 'runtimeAbsent') { return }
+  $name=switch($global:variant){ 'ownedSidecar' {'vpnte-etw-sidecar.exe'} 'ownedXray' {'vpnte-xray.exe'} 'wrongName' {'sing-box.exe'} default {'vpnte-sing-box.exe'} }
+  $path=switch($global:variant){ 'foreignRuntime' {'C:\foreign\vpnte-sing-box.exe'} 'missingPath' {$null} 'caseRuntime' {'c:\VPNTE-FIXTURE-RUNTIME\vpnte-sing-box.exe'} 'prefixRuntime' {'C:\VPNTE-fixture-runtime-extra\vpnte-sing-box.exe'} default {'C:\VPNTE-fixture-runtime\vpnte-sing-box.exe'} }
+  [pscustomobject]@{Name=$name;ExecutablePath=$path;ProcessId=1}
+}
 function Test-Path { [CmdletBinding()]param($LiteralPath) return -not ($global:variant -eq 'storageMissing' -or ($global:variant -eq 'absent' -and $LiteralPath -like '*firewall.json')) }
 function Get-Item { [CmdletBinding()]param($LiteralPath,[switch]$Force)
   $isFile=$LiteralPath -like '*.json' -or $LiteralPath -like '*tmp-*'
@@ -36,14 +45,34 @@ function Get-NetIPAddress { [CmdletBinding()]param($InterfaceIndex,$AddressFamil
 ${recoveryWorkerFunctions(variant === 'environmentMismatch' ? 'C:\\different-programdata' : process.env.ProgramData || 'C:\\ProgramData')}
 $request=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${serialized}'))|ConvertFrom-Json
 $value=Invoke-RecoveryOperation $request
-[pscustomobject]@{value=$value;set=$global:sets;removed=$global:removed}|ConvertTo-Json -Compress
+[pscustomobject]@{value=$value;set=$global:sets;removed=$global:removed;queries=$global:queries}|ConvertTo-Json -Compress
 `
   const env = {...process.env}
   for(const key of Object.keys(env))if(key.toLowerCase()==='psmodulepath')delete env[key]
-  const stdout=execFileSync(process.env.VPNTE_PWSH || 'powershell.exe', ['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from("$ErrorActionPreference='Stop';[Console]::OutputEncoding=[Text.Encoding]::UTF8;"+fixture,'utf16le').toString('base64')], {env,timeout:15000,encoding:'utf8',stdio:['ignore','pipe','pipe']})
+  // Direct argv (no cmd.exe); keep the growing fake-cmdlet fixture below the
+  // CreateProcess limit instead of inflating it with UTF-16/base64 encoding.
+  const stdout=execFileSync(process.env.VPNTE_PWSH || 'powershell.exe', ['-NoProfile','-NonInteractive','-Command',"$ErrorActionPreference='Stop';[Console]::OutputEncoding=[Text.Encoding]::UTF8;"+fixture], {env,timeout:15000,encoding:'utf8',stdio:['ignore','pipe','pipe']})
   return JSON.parse(stdout.replace(/^\uFEFF/,'').trim())
 }
 describe('fixed recovery dispatcher native proof', () => {
+  it.skipIf(!native).each([
+    ['runtimeAbsent', 'false'], ['ownedSingBox', 'true'], ['ownedSidecar', 'true'], ['ownedXray', 'true'],
+    ['wrongName', 'false'], ['foreignRuntime', 'false'], ['missingPath', 'false'], ['caseRuntime', 'true'],
+    ['prefixRuntime', 'true'] // Preserve the conservative legacy prefix: hold, never a false exit.
+  ])('fresh runtime observation preserves the legacy predicate: %s', (variant, value) => {
+    expect(run({ op: 'inspect-runtime', runtimeDir: 'C:\\VPNTE-fixture-runtime' }, variant)).toEqual({ value, set: 0, removed: 0, queries: 1 })
+  }, 20000)
+  it.skipIf(!native)('refuses to confirm runtime exit on a CIM query failure', () => {
+    expect(() => run({ op: 'inspect-runtime', runtimeDir: 'C:\\VPNTE-fixture-runtime' }, 'queryError')).toThrow()
+  }, 20000)
+  it.skipIf(!native).each([
+    { op: 'inspect-runtime', runtimeDir: 'C:\\runtime', script: 'Get-Process' },
+    { op: 'inspect-runtime', runtimeDir: 'C:\\runtime', names: ['arbitrary.exe'] },
+    { op: 'INSPECT-RUNTIME', runtimeDir: 'C:\\runtime' },
+    ...['relative', '\\\\server\\share', 'C:/runtime', 'C:\\..\\runtime', 'C:\\.\\runtime', 'C:\\runtime:stream', 'C:\\runtime\n', 'C:\\"runtime', 'C:\\' + 'x'.repeat(2048)].map(runtimeDir => ({ op: 'inspect-runtime', runtimeDir }))
+  ])('validates readonly runtime request again in PowerShell: %j', request => {
+    expect(() => run(request)).toThrow()
+  }, 20000)
   it.skipIf(!native)('reads both real DNS policies identically to the fixed standalone reader without system writes', () => {
     const script = "$ErrorActionPreference='Stop';[Console]::OutputEncoding=[Text.Encoding]::UTF8;" + DNS_POLICY_SNAPSHOT_SCRIPT
     const standalone = execFileSync(process.env.VPNTE_PWSH || 'powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], {

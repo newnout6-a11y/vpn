@@ -29,6 +29,23 @@ function fixture() {
 }
 afterEach(() => vi.useRealTimers())
 describe('typed recovery worker ownership', () => {
+  it('holds a 5-second runtime query until confirmed child close on timeout', async () => {
+    vi.useFakeTimers()
+    const f = fixture()
+    let settled = false
+    const pending = f.worker.execute({ op: 'inspect-runtime', runtimeDir: 'C:\\VPNTE-fixture-runtime' }, 5000)
+      .catch(error => { settled = true; return error })
+    await Promise.resolve()
+    expect(f.writes[0].request).toEqual({ op: 'inspect-runtime', runtimeDir: 'C:\\VPNTE-fixture-runtime' })
+    await vi.advanceTimersByTimeAsync(4999)
+    expect(f.process.kill).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(f.process.kill).toHaveBeenCalledOnce()
+    f.reply(f.writes[0].id, 'false')
+    expect(settled).toBe(false)
+    f.process.emit('close', 1)
+    expect(await pending).toMatchObject({ code: 'timeout' })
+  })
   it.each([
     {op:'ensure',script:'Get-Item'}, {op:'protect',name:'firewall.json'}, {op:'read',name:'../x'},
     {op:'read',name:'a\\b'}, {op:'read',name:'x',path:'C:\\x'}, {op:'inspect-tun',alias:'Ethernet 5;evil'}, {op:'unknown'}
