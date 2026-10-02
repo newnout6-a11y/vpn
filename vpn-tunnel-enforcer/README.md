@@ -74,7 +74,7 @@ Automatically detects local proxies from:
 ## Prerequisites
 
 - Windows 10/11 x64
-- Node.js 22+ (for development)
+- Node.js 22.13.0 or newer (for development; enforced during `npm install`)
 - `resources/sing-box.exe` (sing-box 1.13+)
 - `resources/wintun.dll`
 - Optional: local proxy client (Happ, V2RayN, Clash Verge, Hiddify, NekoRay, etc.)

@@ -213,6 +213,7 @@ interface AppState {
   // return, the power button re-enabled, and a second click double-started the
   // tunnel and broke routing. null = idle.
   connectionBusy: 'connecting' | 'disconnecting' | null
+  connectionCancelling: boolean
   serverSwitchingName: string | null
   // True iff the firewall kill-switch rules are currently installed. Used to
   // drive the Dashboard banner that appears when sing-box died but the rules
@@ -241,6 +242,7 @@ interface AppState {
   setTunStartedAt: (ts: number | null) => void
   setRestarting: (progress: string | null) => void
   setConnectionBusy: (busy: 'connecting' | 'disconnecting' | null) => void
+  setConnectionCancelling: (cancelling: boolean) => void
   setServerSwitchingName: (name: string | null) => void
   setFirewallKillSwitchActive: (active: boolean) => void
   setCompetingTun: (name: string | null) => void
@@ -326,6 +328,7 @@ export const useAppStore = create<AppState>((set) => ({
   tunStartedAt: null,
   restartingProgress: null,
   connectionBusy: null,
+  connectionCancelling: false,
   serverSwitchingName: null,
   firewallKillSwitchActive: false,
   competingTun: null,
@@ -410,7 +413,12 @@ export const useAppStore = create<AppState>((set) => ({
     connectionBusy: progress ? (state.connectionBusy ?? 'connecting') : state.connectionBusy
   })),
   setConnectionBusy: (busy) => set((state) => ({
-    connectionBusy: busy === null && state.restartingProgress ? (state.connectionBusy ?? 'connecting') : busy
+    connectionBusy: state.connectionCancelling ? 'disconnecting'
+      : busy === null && state.restartingProgress ? (state.connectionBusy ?? 'connecting') : busy
+  })),
+  setConnectionCancelling: (cancelling) => set((state) => ({
+    connectionCancelling: cancelling,
+    connectionBusy: cancelling ? 'disconnecting' : state.connectionBusy
   })),
   setServerSwitchingName: (name) => set({ serverSwitchingName: name }),
   setFirewallKillSwitchActive: (active) => set({ firewallKillSwitchActive: active }),

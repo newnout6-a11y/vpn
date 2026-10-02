@@ -11,7 +11,12 @@ describe('xrayEngine architectural invariants', () => {
   const settingsSrc = readFileSync(join(root, 'src/main/settings.ts'), 'utf8')
 
   it('runs preflight test before launching Xray runtime', () => {
-    expect(xrayEngineSrc).toContain("['run', '-test', '-c'")
+    const preflightSrc = readFileSync(join(root, 'src/main/xrayPreflight.ts'), 'utf8')
+    expect(preflightSrc).toContain("['run', '-test', '-c'")
+    const validation = xrayEngineSrc.indexOf("await timed('config-preflight'")
+    const runtime = xrayEngineSrc.indexOf("const child = spawn(exePath, ['run', '-c'")
+    expect(validation).toBeGreaterThan(0)
+    expect(runtime).toBeGreaterThan(validation)
   })
 
   it('does not use insecure dokodemo-door inbound', () => {

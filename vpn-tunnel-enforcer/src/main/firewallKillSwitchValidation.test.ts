@@ -116,8 +116,8 @@ describe('Electron app binary kill-switch allow rule', () => {
 describe('dynamic TUN adapter alias in kill-switch', () => {
   it('uses dynamic tunAlias from options or getTunAdapterAlias() for adapter rule', () => {
     expect(source).toContain('const tunAlias = opts.tunAdapterAlias || getTunAdapterAlias()')
-    expect(source).toContain("Get-NetAdapter -Name '${tunAlias}'")
-    expect(source).toContain("-InterfaceAlias '${tunAlias}'")
+    expect(source).toContain('Get-NetAdapter -Name ${psSingleQuote(tunAlias)}')
+    expect(source).toContain('-InterfaceAlias ${psSingleQuote(tunAlias)}')
   })
 })
 

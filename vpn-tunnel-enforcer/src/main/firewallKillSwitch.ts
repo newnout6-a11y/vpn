@@ -139,7 +139,53 @@ function cmdDoubleQuote(value: string): string {
   return `"${value.replace(/"/g, '\\"')}"`
 }
 
+const NATIVE_FIREWALL_PHASES = new Set([
+  'initial-stale-cleanup', 'initial-create-allows', 'initial-set-block', 'initial-exceptions',
+  'restore-profiles', 'restore-remove-rules'
+])
+function logNativeFirewallTimings(stdout: string): void {
+  // Diagnostic markers carry no security proof and never affect the result.
+  // Accept only fixed names and bounded integer milliseconds, once per phase.
+  const timings = new Map<string, number>()
+  const duplicates = new Set<string>()
+  for (const line of stdout.split(/\r?\n/)) {
+    const match = /^VPNTE_FW_TIMING:([a-z-]+):([0-9]{1,5})$/.exec(line.trim())
+    if (!match || !NATIVE_FIREWALL_PHASES.has(match[1])) continue
+    const durationMs = Number(match[2])
+    if (durationMs > 60000) continue
+    if (timings.has(match[1])) duplicates.add(match[1])
+    timings.set(match[1], durationMs)
+  }
+  for (const [phase, durationMs] of timings) {
+    if (!duplicates.has(phase)) logEvent('debug', 'firewall-killswitch', 'native phase timing', { phase, durationMs })
+  }
+}
+
 async function ps(script: string, elevated = false, timeout = 30000) {
+  // The persistent helper executes source from its pipe. A protected .ps1 is
+  // needed only by the fallback; writing it first adds two cold PS launches.
+  if (isElevatedPsHelperRunning()) {
+    const started = performance.now()
+    let result: Awaited<ReturnType<typeof execElevatedPs>> | undefined
+    try {
+      result = await execElevatedPs(script, timeout, 'firewall-killswitch')
+    } catch (err: any) {
+      // Only a known rejection before execution permits a fallback. A timeout
+      // or lost reply may follow effects; replaying would duplicate mutation.
+      if (!['elevated-helper-script-rejected', 'elevated-helper-script-too-large', 'elevated-helper-unavailable'].includes(err?.code)) throw err
+      logEvent('debug', 'firewall-killswitch', 'helper fallback', {
+        code: err?.code ?? 'unclassified', durationMs: Math.round(performance.now() - started)
+      })
+    }
+    if (result) {
+      logEvent('debug', 'firewall-killswitch', 'command timing', {
+        transport: 'helper', durationMs: Math.round(performance.now() - started)
+      })
+      if (result.exitCode) throw new Error(result.stderr || `Firewall command failed (exit ${result.exitCode})`)
+      logNativeFirewallTimings(result.stdout)
+      return { stdout: result.stdout, stderr: result.stderr }
+    }
+  }
   // Keep elevated scripts under userData instead of %TEMP% and do not remove them
   // immediately: sudo-prompt can return before the elevated PowerShell has opened
   // the -File path, which made PowerShell report "argument for -File does not exist".
@@ -148,22 +194,17 @@ async function ps(script: string, elevated = false, timeout = 30000) {
     scriptDir,
     `script-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.ps1`
   )
+  const persistStarted = performance.now()
   await writeRecoveryArtifact(scriptPath.slice(scriptDir.length + 1), '\ufeff' + withPowerShellPrelude(script))
+  const persistMs = Math.round(performance.now() - persistStarted)
+  const executionStarted = performance.now()
 
   try {
     if (elevated) {
-      // Use persistent PS helper if available — avoids 300-800ms
-      // powershell.exe startup overhead per call.
-      if (isElevatedPsHelperRunning()) {
-        try {
-          const result = await execElevatedPs(script, timeout, 'firewall-killswitch')
-          return { stdout: result.stdout, stderr: result.stderr }
-        } catch (err: any) {
-          // PS helper failed — fall back to execElevated
-        }
-      }
       const command = `powershell -NoProfile -ExecutionPolicy Bypass -File ${cmdDoubleQuote(scriptPath)}`
-      return execElevated(command, { timeout, maxBuffer: 1024 * 1024 * 4 })
+      const result = await execElevated(command, { timeout, maxBuffer: 1024 * 1024 * 4 })
+      logNativeFirewallTimings(String(result.stdout ?? ''))
+      return result
     }
     const result = await execFile(
       'powershell',
@@ -175,11 +216,16 @@ async function ps(script: string, elevated = false, timeout = 30000) {
         encoding: 'utf8'
       }
     ) as { stdout: string; stderr: string }
+    logNativeFirewallTimings(String(result.stdout ?? ''))
     return {
       stdout: String(result.stdout ?? ''),
       stderr: String(result.stderr ?? '')
     }
   } finally {
+    logEvent('debug', 'firewall-killswitch', 'command timing', {
+      transport: elevated ? 'elevated-file' : 'file', persistMs,
+      durationMs: Math.round(performance.now() - executionStarted)
+    })
     if (!elevated) {
       await unlink(scriptPath).catch(() => undefined)
     } else {
@@ -347,6 +393,19 @@ Write-Output "RULE:$ruleName"
  * the script fails partway, only harmless extra Allow rules remain.
  */
 let firewallQueue: Promise<unknown> = Promise.resolve()
+async function timedFirewallPhase<T>(phase: string, operation: () => Promise<T>): Promise<T> {
+  const started = performance.now()
+  let outcome = 'rejected'
+  try {
+    const result = await operation()
+    outcome = 'fulfilled'
+    return result
+  } finally {
+    logEvent('debug', 'firewall-killswitch', 'phase timing', {
+      phase, outcome, durationMs: Math.round(performance.now() - started)
+    })
+  }
+}
 function serializeFirewall<T>(operation: () => Promise<T>): Promise<T> {
   const result = firewallQueue.then(operation, operation)
   firewallQueue = result.then(() => undefined, () => undefined)
@@ -358,10 +417,15 @@ export interface KillSwitchOptions {
   appExceptionPaths?: string[]
   extraAllowedRemoteCidrs?: string[]
   tunAdapterAlias?: string
+  // Internal startup barrier: true only after the controller verifies and
+  // journals this adapter's GUID, Wintun identity and owned address.
+  tunAdapterReady?: Promise<boolean>
   strictMode?: boolean
 }
 export async function enableKillSwitch(opts: KillSwitchOptions): Promise<FirewallKillSwitchResult> {
-  return serializeFirewall(() => enableKillSwitchUnlocked(opts))
+  // Attach the rejection handler before entering the serialized queue.
+  const ready = opts.tunAdapterReady?.then(value => value === true, () => false)
+  return serializeFirewall(() => enableKillSwitchUnlocked({ ...opts, tunAdapterReady: ready }))
 }
 export interface FirewallExceptionPolicy { apps: string[]; cidrs: string[] }
 function validateFirewallExceptionPolicy(value: unknown): FirewallExceptionPolicy {
@@ -390,6 +454,11 @@ function exceptionPolicyScript(policy: FirewallExceptionPolicy): string {
   const rules = [...policy.apps.map((value, i) => ({ name: names[i], program: value, remote: null })),
     ...policy.cidrs.map((value, i) => ({ name: names[policy.apps.length + i], program: null, remote: value }))]
   const encoded = Buffer.from(JSON.stringify(rules)).toString('base64')
+  const bulkApplicationReadback = policy.apps.length >= 8
+  const createRule = `
+  $ruleParams=@{DisplayName=$r.name;Direction='Outbound';Action='Allow';Profile='Any';Enabled='True'}
+  if($r.program){$ruleParams.Program=$r.program}else{$ruleParams.RemoteAddress=$r.remote}
+  New-NetFirewallRule @ruleParams -ErrorAction Stop | Out-Null`
   return `
 $ErrorActionPreference='Stop'
 $profiles=@(Get-NetFirewallProfile -Profile Domain,Private,Public -ErrorAction Stop)
@@ -397,18 +466,32 @@ if ($profiles.Count -ne 3 -or @($profiles | Where-Object { [string]$_.DefaultOut
 # Only user exceptions are replaced. Core, TUN, Xray and Happ rules stay intact.
 # Removal-first may temporarily narrow an exception, but never opens new traffic
 # before the requested policy has been validated. Never set DefaultOutboundAction.
-Get-NetFirewallRule -DisplayName '${RULE_PREFIX}-user-*' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction Stop
-Get-NetFirewallRule -DisplayName '${RULE_PREFIX}-allow-extra-ip' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction Stop
-$requested=@([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}')) | ConvertFrom-Json)
+# One native lookup for the same two disjoint stale groups. The final set
+# read-back below is a new query after removal/creation, never this result.
+Get-NetFirewallRule -DisplayName @('${RULE_PREFIX}-user-*','${RULE_PREFIX}-allow-extra-ip') -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction Stop
+$requested=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}')) | ConvertFrom-Json
+# Association queries cost one CIM round trip per application. For larger sets,
+# read the same default PersistentStore once; never reuse this operation's index.
+$applicationIndex=$null
+${bulkApplicationReadback ? `foreach ($r in $requested) {${createRule}
+}
+  $applicationIndex=@{}
+  foreach($filter in @(Get-NetFirewallApplicationFilter -All -ErrorAction Stop)){
+    $key=[string]$filter.InstanceID
+    if($applicationIndex.ContainsKey($key)){$applicationIndex[$key]=@($applicationIndex[$key])+@($filter)}
+    else{$applicationIndex[$key]=@($filter)}
+  }` : ''}
 foreach ($r in $requested) {
-  $ruleParams=@{DisplayName=$r.name;Direction='Outbound';Action='Allow';Profile='Any';Enabled='True'}
-  if($r.program){$ruleParams.Program=$r.program}else{$ruleParams.RemoteAddress=$r.remote}
-  New-NetFirewallRule @ruleParams -ErrorAction Stop | Out-Null
+${bulkApplicationReadback ? '' : createRule}
   $actual=@(Get-NetFirewallRule -DisplayName $r.name -ErrorAction Stop)
   if($actual.Count -ne 1 -or [string]$actual[0].Enabled -ne 'True' -or [string]$actual[0].Action -ne 'Allow' -or [string]$actual[0].Direction -ne 'Outbound'){throw 'Exception rule read-back mismatch'}
   if($r.program){
-    $filter=$actual[0] | Get-NetFirewallApplicationFilter -ErrorAction Stop
-    if([string]$filter.Program -ine [string]$r.program){throw 'Program filter read-back mismatch'}
+    if($null -ne $applicationIndex){
+      $key=[string]$actual[0].Name
+      if(-not $key -or -not $applicationIndex.ContainsKey($key)){throw 'Program filter read-back mismatch'}
+      $filters=@($applicationIndex[$key])
+    }else{$filters=@($actual[0] | Get-NetFirewallApplicationFilter -ErrorAction Stop)}
+    if($filters.Count -ne 1 -or [string]$filters[0].Program -ine [string]$r.program){throw 'Program filter read-back mismatch'}
   }else{
     $filter=$actual[0] | Get-NetFirewallAddressFilter -ErrorAction Stop
     if(@($filter.RemoteAddress).Count -ne 1 -or [string]@($filter.RemoteAddress)[0] -ne [string]$r.remote){throw 'Remote filter read-back mismatch'}
@@ -423,25 +506,29 @@ export function updateKillSwitchExceptions(apps: string[], cidrs: string[], stri
   return serializeFirewall(() => updateExceptionsUnlocked(apps, cidrs, strictMode))
 }
 async function updateExceptionsUnlocked(apps: string[], cidrs: string[], strictMode?: boolean): Promise<FirewallKillSwitchResult> {
-  const previous = await readManifest()
+  const previous = await timedFirewallPhase('live-read-manifest', readManifest)
   if (!previous || manifestReadFailure || previous.phase !== 'active') return { success: false, state: 'unknown', message: 'Live exceptions require a trusted active firewall transaction' }
   const policy = validateFirewallExceptionPolicy({ apps: await Promise.all(apps.map(canonicalizeExceptionAppPath)), cidrs })
   const old = previous.exceptionPolicy ?? { apps: [], cidrs: [] }
   // Original baseline and core rule names are never replaced by a live update.
-  await writeManifest({ ...previous, pendingExceptionPolicy: policy })
+  await timedFirewallPhase('live-prepare-journal', () => writeManifest({ ...previous, pendingExceptionPolicy: policy }))
   try {
-    const { stdout } = await ps(exceptionPolicyScript(policy), true, 30000)
+    const { stdout } = await timedFirewallPhase('live-apply-policy', () => ps(exceptionPolicyScript(policy), true, 30000))
     if (!String(stdout).split(/\r?\n/).includes('EXCEPTIONS_VERIFIED')) throw new Error('Exception verification marker missing')
     const { pendingExceptionPolicy: _pending, ...committed } = previous
-    await writeManifest({ ...committed, strictMode: strictMode ?? previous.strictMode, exceptionPolicy: policy,
-      ruleNames: [...previous.ruleNames.filter(n => !n.startsWith(`${RULE_PREFIX}-user-`) && n !== `${RULE_PREFIX}-allow-extra-ip`), ...exceptionRuleNames(policy)] })
+    await timedFirewallPhase('live-commit-journal', () => writeManifest({ ...committed, strictMode: strictMode ?? previous.strictMode, exceptionPolicy: policy,
+      ruleNames: [...previous.ruleNames.filter(n => !n.startsWith(`${RULE_PREFIX}-user-`) && n !== `${RULE_PREFIX}-allow-extra-ip`), ...exceptionRuleNames(policy)] }))
     return { success: true, message: 'User exceptions verified; core/upstream protection preserved' }
   } catch (error) {
     try {
       const { stdout } = await ps(exceptionPolicyScript(old), true, 30000)
       if (!String(stdout).split(/\r?\n/).includes('EXCEPTIONS_VERIFIED')) throw new Error('Exception compensation not verified')
       await writeManifest(previous)
-    } catch {
+    } catch (compensationError) {
+      logEvent('error', 'firewall-killswitch', 'exception update and compensation failed', {
+        update: String((error as any)?.stderr || error).replace(/-EncodedCommand\s+\S+/gi, '-EncodedCommand <omitted>').slice(-2000),
+        compensation: String((compensationError as any)?.stderr || compensationError).replace(/-EncodedCommand\s+\S+/gi, '-EncodedCommand <omitted>').slice(-2000)
+      })
       reportRecoveryWarning('Live-обновление исключений не подтверждено. Core-защита сохранена, но набор исключений требует повторной проверки.')
       return { success: false, state: 'unknown', message: 'Live exception update and compensation failed; recovery journal retained' }
     }
@@ -472,7 +559,10 @@ async function enableKillSwitchUnlocked(opts: KillSwitchOptions): Promise<Firewa
 
   if ((opts.extraAllowedRemoteCidrs ?? []).some(c => !isValidIpOrCidr(c))) return { success: false, message: 'Invalid exception IP/CIDR' }
   if (opts.appExceptionPaths) opts = { ...opts, appExceptionPaths: await Promise.all(opts.appExceptionPaths.map(canonicalizeExceptionAppPath)) }
-  const previous = await readManifest()
+  const initialExceptions = opts.appExceptionPaths !== undefined || opts.extraAllowedRemoteCidrs !== undefined
+    ? validateFirewallExceptionPolicy({ apps: opts.appExceptionPaths ?? [], cidrs: opts.extraAllowedRemoteCidrs ?? [] })
+    : null
+  const previous = await timedFirewallPhase('initial-read-manifest', readManifest)
   if (manifestReadFailure) return { success: false, state: 'unknown', message: 'Recovery manifest is untrusted or invalid; refusing to replace its baseline' }
   if (previous?.phase === 'active') {
     if (opts.appExceptionPaths !== undefined || opts.extraAllowedRemoteCidrs !== undefined || opts.strictMode !== undefined) {
@@ -480,15 +570,16 @@ async function enableKillSwitchUnlocked(opts: KillSwitchOptions): Promise<Firewa
     }
     return { success: true, skipped: true, message: 'Active firewall preserved; use differential exceptions update' }
   }
-  const savedProfiles = previous?.savedProfiles ?? await snapshotFirewallProfiles()
+  const savedProfiles = previous?.savedProfiles ?? await timedFirewallPhase('snapshot-profiles', snapshotFirewallProfiles)
   const prepared: FirewallManifest = {
     schemaVersion: 1, owner: 'VPNTE', operationId: previous?.operationId ?? randomUUID(),
     phase: 'prepared', strictMode: opts.strictMode ?? previous?.strictMode ?? false,
     createdAt: previous?.createdAt ?? Date.now(), savedProfiles,
-    ruleNames: previous?.ruleNames ?? [], singboxExePath: opts.singboxExePath
+    ruleNames: previous?.ruleNames ?? [], singboxExePath: opts.singboxExePath,
+    ...(initialExceptions ? { pendingExceptionPolicy: initialExceptions } : {})
   }
   // This durable snapshot MUST precede any New/Remove/Set-NetFirewall operation.
-  try { await writeManifest(prepared) } catch (error) {
+  try { await timedFirewallPhase('initial-prepare-journal', () => writeManifest(prepared)) } catch (error) {
     return { success: false, message: 'Firewall unchanged: recovery snapshot could not be committed', details: String(error) }
   }
 
@@ -502,7 +593,6 @@ async function enableKillSwitchUnlocked(opts: KillSwitchOptions): Promise<Firewa
   const tunAllow = `${RULE_PREFIX}-allow-tun`
   const dhcpAllow = `${RULE_PREFIX}-allow-dhcp`
   const ntpAllow = `${RULE_PREFIX}-allow-ntp`
-  const extraIpAllow = `${RULE_PREFIX}-allow-extra-ip`
 
   // Windows Firewall can be picky about mixed IPv4/IPv6 CIDR arrays here. IPv6 is
   // disabled by adapter lockdown anyway, so keep the firewall LAN bypass IPv4-only.
@@ -528,45 +618,15 @@ try {
 } catch { Write-Output "WARN allow-proxy-${i}: $_" }`)
   }
 
-  // User-defined IP/CIDR exceptions (from the granular kill-switch UI). These
-  // were previously collected but never applied — the address stayed blocked.
-  // We validate each entry as an IPv4/IPv6 address or CIDR before letting it
-  // anywhere near New-NetFirewallRule (defence against injection through the
-  // exception list). Anything that doesn't look like an address is dropped.
-  const extraCidrs = (opts.extraAllowedRemoteCidrs ?? []).filter(isValidIpOrCidr)
-  let extraIpAllowPart = ''
-  if (extraCidrs.length > 0) {
-    const v4Cidrs = extraCidrs.filter((c) => !c.includes(':'))
-    const v6Cidrs = extraCidrs.filter((c) => c.includes(':'))
-    const parts: string[] = []
-    if (v4Cidrs.length > 0) {
-      const addressList = v4Cidrs.map((c) => `'${c}'`).join(',')
-      parts.push(`
-try {
-  New-NetFirewallRule \`
-    -DisplayName ${psSingleQuote(extraIpAllow)} \`
-    -Description 'VPN Tunnel Enforcer kill-switch: allow user-defined IPv4 exceptions.' \`
-    -Direction Outbound -Action Allow \`
-    -RemoteAddress ${addressList} \`
-    -Profile Any -Enabled True | Out-Null
-  $rules += ${psSingleQuote(extraIpAllow)}
-} catch { Write-Output "WARN allow-extra-ip-v4: $_" }`)
-    }
-    if (v6Cidrs.length > 0) {
-      const addressList = v6Cidrs.map((c) => `'${c}'`).join(',')
-      parts.push(`
-try {
-  New-NetFirewallRule \`
-    -DisplayName ${psSingleQuote(extraIpAllow)} \`
-    -Description 'VPN Tunnel Enforcer kill-switch: allow user-defined IPv6 exceptions.' \`
-    -Direction Outbound -Action Allow \`
-    -RemoteAddress ${addressList} \`
-    -Profile Any -Enabled True | Out-Null
-  $rules += ${psSingleQuote(extraIpAllow)}
-} catch { Write-Output "WARN allow-extra-ip-v6: $_" }`)
-    }
-    extraIpAllowPart = parts.join('\n')
-  }
+  // Startup callers share their verified adapter barrier. Other callers keep
+  // the bounded native wait; helper policies remain separate and unchanged.
+  const adapterWaitScript = opts.tunAdapterReady ? '$tunAliasFound = $true' : `
+$tunAliasFound = $false
+for ($i = 0; $i -lt 150; $i++) {
+  $a = Get-NetAdapter -Name ${psSingleQuote(tunAlias)} -ErrorAction SilentlyContinue
+  if ($a -and $a.Status -eq 'Up') { $tunAliasFound = $true; break }
+  Start-Sleep -Milliseconds 100
+}`
 
   // One atomic elevated PowerShell script: save defaults → add allows → set block.
   const script = `
@@ -574,8 +634,11 @@ try {
 $savedJson = ${psSingleQuote(JSON.stringify(savedProfiles))}
 
 # --- Step 2: Clean stale rules ---
+$nativePhaseWatch = [Diagnostics.Stopwatch]::StartNew()
 Get-NetFirewallRule -DisplayName '${RULE_PREFIX}*' -ErrorAction SilentlyContinue |
   Remove-NetFirewallRule -ErrorAction SilentlyContinue
+Write-Output ('VPNTE_FW_TIMING:initial-stale-cleanup:' + $nativePhaseWatch.ElapsedMilliseconds)
+$nativePhaseWatch.Restart()
 
 $rules = @()
 
@@ -610,24 +673,16 @@ ${proxyAllowParts.join('\n')}
 # DefaultOutboundAction=Block blocks the browser before Windows can route the
 # packet into the TUN, which looks like "internet is blocked" even though
 # sing-box itself is allowed.
-# The -InterfaceAlias rule requires the TUN adapter to exist. We poll for it
-# here (up to ~15s) so the entire kill-switch script can be kicked off in
-# parallel with the JS-side waitForTunInterface, saving ~2-3s of sequential
-# waiting. If the adapter never appears, we skip this rule rather than
-# blocking the whole script.
-$tunAliasFound = $false
-for ($i = 0; $i -lt 150; $i++) {
-  $a = Get-NetAdapter -Name '${tunAlias}' -ErrorAction SilentlyContinue
-  if ($a -and $a.Status -eq 'Up') { $tunAliasFound = $true; break }
-  Start-Sleep -Milliseconds 100
-}
+# The controller's barrier verifies ownership before native effects. Legacy
+# callers without that barrier still wait for adapter Up here.
+${adapterWaitScript}
 if ($tunAliasFound) {
   try {
     New-NetFirewallRule \`
       -DisplayName ${psSingleQuote(tunInterfaceAllow)} \`
       -Description 'VPN Tunnel Enforcer kill-switch: allow captured app traffic through ${tunAlias}.' \`
       -Direction Outbound -Action Allow \`
-      -InterfaceAlias '${tunAlias}' \`
+      -InterfaceAlias ${psSingleQuote(tunAlias)} \`
       -Profile Any -Enabled True | Out-Null
     $rules += ${psSingleQuote(tunInterfaceAllow)}
   } catch { Write-Output "WARN allow-tun-interface: $_" }
@@ -720,8 +775,7 @@ try {
   $rules += ${psSingleQuote(ntpAllow)}
 } catch { Write-Output "WARN allow-ntp: $_" }
 
-# 3h. Allow user-defined IP/CIDR exceptions (granular kill-switch UI).
-${extraIpAllowPart}
+# User exceptions are installed once, with full read-back below.
 
 # --- Step 4: Set DefaultOutboundAction=Block ---
 # Only set Block if the required allow-list core exists. A single optional
@@ -745,6 +799,8 @@ if ($missingRequired.Count -gt 0) {
     Remove-NetFirewallRule -ErrorAction SilentlyContinue
   throw ("Missing required allow rules before DefaultOutboundAction=Block: " + ($missingRequired -join ','))
 }
+Write-Output ('VPNTE_FW_TIMING:initial-create-allows:' + $nativePhaseWatch.ElapsedMilliseconds)
+$nativePhaseWatch.Restart()
 try {
   Set-NetFirewallProfile -Profile Domain,Private,Public -DefaultOutboundAction Block
 } catch {
@@ -754,8 +810,14 @@ try {
     Remove-NetFirewallRule -ErrorAction SilentlyContinue
   throw
 }
+Write-Output ('VPNTE_FW_TIMING:initial-set-block:' + $nativePhaseWatch.ElapsedMilliseconds)
+$nativePhaseWatch.Restart()
 
 # Output: JSON with rules + saved profiles
+# Initial exceptions share the prepared recovery journal and the native
+# transaction. Their full read-back still runs, including the empty policy.
+${initialExceptions ? exceptionPolicyScript(initialExceptions) : ''}
+Write-Output ('VPNTE_FW_TIMING:initial-exceptions:' + $nativePhaseWatch.ElapsedMilliseconds)
 $rulesCsv = ($rules -join ',')
 Write-Output "RULES:$rulesCsv"
 Write-Output "SAVED:$savedJson"
@@ -763,9 +825,16 @@ Write-Output "SAVED:$savedJson"
 
   let installedRules: string[] = []
   try {
-    const { stdout } = await ps(script, true, 60000)
+    if (opts.tunAdapterReady && !await timedFirewallPhase('verified-adapter-wait', () => opts.tunAdapterReady!)) {
+      throw new Error('Owned TUN adapter was not confirmed; initial firewall apply cancelled')
+    }
+    const { stdout } = await timedFirewallPhase('initial-apply-policy', () => ps(script, true, 60000))
     const output = String(stdout || '')
     const lines = output.split('\n').map((l) => l.trim())
+
+    if (initialExceptions && !lines.includes('EXCEPTIONS_VERIFIED')) {
+      throw new Error('Initial exception verification marker missing')
+    }
 
     const rulesLine = lines.find((l) => l.startsWith('RULES:'))
     if (rulesLine) {
@@ -795,7 +864,12 @@ Write-Output "SAVED:$savedJson"
   }
 
   try {
-    await writeManifest({ ...prepared, phase: 'active', ruleNames: installedRules })
+    const { pendingExceptionPolicy: _pending, ...committed } = prepared
+    if (initialExceptions) installedRules = [
+      ...installedRules.filter(n => n !== `${RULE_PREFIX}-allow-extra-ip`), ...exceptionRuleNames(initialExceptions)
+    ]
+    await timedFirewallPhase('initial-commit-journal', () => writeManifest({ ...committed, phase: 'active', ruleNames: installedRules,
+      ...(initialExceptions ? { exceptionPolicy: initialExceptions } : {}) }))
   } catch (error: any) {
     // The firewall transaction is not committed until its recovery manifest
     // is durable. Compensate immediately instead of leaving Block active with
@@ -809,11 +883,6 @@ Write-Output "SAVED:$savedJson"
       message: 'Kill-switch отменён: не удалось надёжно записать recovery manifest',
       details: error?.message || String(error)
     }
-  }
-
-  if (opts.appExceptionPaths !== undefined || opts.extraAllowedRemoteCidrs !== undefined) {
-    const updated = await updateExceptionsUnlocked(opts.appExceptionPaths ?? [], opts.extraAllowedRemoteCidrs ?? [], opts.strictMode)
-    if (!updated.success) return updated
   }
 
   logEvent('info', 'firewall-killswitch', 'kill-switch engaged (DefaultOutboundAction=Block)', {
@@ -847,11 +916,15 @@ try {
 } catch { $errors += ${psSingleQuote(p.name)} + ': ' + [string]$_ }
 `).join('\n')
   const { stdout } = await ps(`$errors = @()
+$nativePhaseWatch = [Diagnostics.Stopwatch]::StartNew()
 ${restores}
+Write-Output ('VPNTE_FW_TIMING:restore-profiles:' + $nativePhaseWatch.ElapsedMilliseconds)
+$nativePhaseWatch.Restart()
 try {
   Get-NetFirewallRule -DisplayName '${RULE_PREFIX}*' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction Stop
   if ((Get-NetFirewallRule -DisplayName '${RULE_PREFIX}*' -ErrorAction SilentlyContinue | Measure-Object).Count -ne 0) { throw 'VPNTE rules remain' }
 } catch { $errors += 'rules: ' + [string]$_ }
+Write-Output ('VPNTE_FW_TIMING:restore-remove-rules:' + $nativePhaseWatch.ElapsedMilliseconds)
 if ($errors.Count -gt 0) { throw ($errors -join ' | ') }
 Write-Output 'RESTORED'`, true, 30000)
   if (!String(stdout).split(/\r?\n/).includes('RESTORED')) throw new Error('Firewall rollback read-back was not confirmed')
@@ -865,8 +938,8 @@ async function disableKillSwitchUnlocked(reason: string): Promise<FirewallKillSw
   }
 
   try {
-    await restoreAndCleanup()
-    await clearManifest()
+    await timedFirewallPhase('restore-policy', () => restoreAndCleanup())
+    await timedFirewallPhase('clear-journal', clearManifest)
   } catch (err: any) {
     logEvent('warn', 'firewall-killswitch', 'failed to fully restore kill-switch', err)
     return {

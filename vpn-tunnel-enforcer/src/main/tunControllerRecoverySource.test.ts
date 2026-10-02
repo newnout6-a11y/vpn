@@ -2,6 +2,7 @@ import { readFile } from 'fs/promises'
 import { dirname, join } from 'path'
 import { fileURLToPath } from 'url'
 import { describe, expect, it } from 'vitest'
+import ts from 'typescript'
 
 const here = dirname(fileURLToPath(import.meta.url))
 
@@ -13,7 +14,7 @@ describe('tunController recovery cancellation guards', () => {
     expect(source).toContain('const generation = recoveryCancelGeneration')
     expect(source).toContain('generation !== recoveryCancelGeneration')
     expect(source).toContain('recoveryCancelGeneration += 1')
-    expect(source).toContain('restartTimer = setTimeout(() => {')
+    expect(source.includes('restartTimer = setTimeout(async () => {')).toBe(true)
     expect(source).toContain("WSAEACCES retry cancelled by stop")
   })
 
@@ -31,7 +32,7 @@ describe('tunController recovery cancellation guards', () => {
     const source = await readFile(join(here, 'tunController.ts'), 'utf8')
     const stopSignature = source.indexOf('async stop(options: { preserveNetworkProtection?: boolean; preserveLastStartOptions?: boolean } = {})')
     const cleanupBranch = source.indexOf('if (cleanupErrors.length > 0)', stopSignature)
-    const successReturn = source.lastIndexOf('return { success: true, warning }')
+    const successReturn = source.lastIndexOf('return { success: true, warning, networkCleanup }')
     const stoppedNotify = source.indexOf("notifyStatus('stopped')", cleanupBranch)
     const failureReturn = source.indexOf('return { success: false, error: cleanupErrors.join', cleanupBranch)
 
@@ -195,7 +196,7 @@ describe('tunController recovery cancellation guards', () => {
 
   it('cancels pending auto-restart if the setting is switched off during backoff', async () => {
     const source = await readFile(join(here, 'tunController.ts'), 'utf8')
-    const timer = source.indexOf('restartTimer = setTimeout(() => {')
+    const timer = source.indexOf('restartTimer = setTimeout(async () => {', source.indexOf('const optsSnapshot = lastStartOptions'))
     const cancel = source.indexOf('settingsStore.get().autoRestartOnCrash === false', timer)
     const start = source.indexOf('tunController.start(optsSnapshot)', timer)
 
@@ -279,9 +280,10 @@ describe('tunController recovery cancellation guards', () => {
 
   it('cleans up tunController, xray and owned processes unconditionally on shutdown', async () => {
     const indexSource = await readFile(join(here, 'index.ts'), 'utf8')
-    const shutdownStart = indexSource.indexOf('async function performShutdownCleanup(')
-    expect(shutdownStart).toBeGreaterThan(0)
-    const shutdownBody = indexSource.slice(shutdownStart, shutdownStart + 1000)
+    const parsed = ts.createSourceFile('index.ts', indexSource, ts.ScriptTarget.Latest, true)
+    const shutdown = parsed.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'performShutdownCleanup')
+    expect(shutdown).toBeDefined()
+    const shutdownBody = shutdown!.getText(parsed)
 
     expect(shutdownBody).toContain('await tunController.stop()')
     expect(shutdownBody).not.toMatch(/if\s*\(\s*tunController\.getStatus\(\)\.running\s*\)\s*\{\s*await tunController\.stop\(\)/)

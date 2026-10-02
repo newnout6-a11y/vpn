@@ -441,7 +441,7 @@ async function refreshGroupUnlocked(
     logEvent('warn', 'server-groups', 'refresh failed', { id: groupId, error: message })
     const refreshed = getGroup(groupId)
     if (!refreshed) return { ok: false, error: 'Группа исчезла во время обновления' }
-    return { ok: true, group: refreshed, addedCount: 0, updatedCount: 0, removedCount: 0 }
+    return { ok: false, error: message }
   }
 
   const primaryResolved = resolvedByDevice.get(primaryDevice) ?? Array.from(resolvedByDevice.values())[0]
@@ -453,13 +453,13 @@ async function refreshGroupUnlocked(
   if (!resolvedProfilesCount) {
     // Soft-expired: the panel returned 200 but the body has zero keys. This
     // is the classic "trial period over" signal from Marzban/3X-UI.
+    const message = 'Подписка вернула пустой список профилей'
     updateGroup(groupId, {
       status: 'expired',
       lastFetchAttemptAt: now,
-      lastFetchError: 'Подписка вернула пустой список профилей'
+      lastFetchError: message
     })
-    const refreshed = getGroup(groupId)!
-    return { ok: true, group: refreshed, addedCount: 0, updatedCount: 0, removedCount: 0 }
+    return { ok: false, error: message }
   }
 
   // Read userInfo defensively. Agent C may add more fields to

@@ -7,11 +7,13 @@ interface PendingCommand {
   reject: (err: Error) => void
   timer: ReturnType<typeof setTimeout>
   script: string
+  policy: ElevatedPsPolicy
+  submittedAt: number
 }
 
 export class ElevatedPsHelperError extends Error {
   constructor(
-    public readonly code: 'elevated-helper-unavailable' | 'elevated-helper-stopped' | 'elevated-helper-exited' | 'elevated-helper-timeout' | 'elevated-helper-script-rejected',
+    public readonly code: 'elevated-helper-unavailable' | 'elevated-helper-stopped' | 'elevated-helper-exited' | 'elevated-helper-timeout' | 'elevated-helper-script-rejected' | 'elevated-helper-script-too-large',
     message: string
   ) {
     super(message)
@@ -109,6 +111,7 @@ while ($line = [Console]::In.ReadLine()) {
     $stdout = [string]::Empty
     $stderr = [string]::Empty
     $exitCode = 0
+    $executionWatch = [System.Diagnostics.Stopwatch]::StartNew()
     try {
       $sb = [ScriptBlock]::Create($cmd.script)
       $output = & $sb *>&1 | Where-Object { $_ -isnot [System.Management.Automation.VerboseRecord] -and $_ -isnot [System.Management.Automation.DebugRecord] }
@@ -117,7 +120,8 @@ while ($line = [Console]::In.ReadLine()) {
       $stderr = $_.Exception.Message
       $exitCode = 1
     }
-    $result = @{ id = [int]$cmd.id; success = $exitCode -eq 0; stdout = $stdout; stderr = $stderr; exitCode = $exitCode }
+    $executionWatch.Stop()
+    $result = @{ id = [int]$cmd.id; success = $exitCode -eq 0; stdout = $stdout; stderr = $stderr; exitCode = $exitCode; executionMs = $executionWatch.ElapsedMilliseconds }
     $result | ConvertTo-Json -Compress -Depth 3
   } catch {
     $result = @{ id = 0; success = $false; stdout = ''; stderr = "JSON parse error: $_"; exitCode = 1 }
@@ -129,6 +133,33 @@ while ($line = [Console]::In.ReadLine()) {
 
 export function isElevatedPsHelperRunning(): boolean {
   return helperProcess !== null && !helperProcess.killed && helperProcess.exitCode === null
+}
+
+const HELPER_WARMUP_COMMANDS: ReadonlyArray<{ policy: ElevatedPsPolicy; script: string }> = [
+  { policy: 'firewall-killswitch', script: 'Import-Module NetSecurity -ErrorAction Stop; Get-NetFirewallProfile -Profile Domain,Private,Public -ErrorAction Stop | Out-Null' },
+  { policy: 'physical-adapter-lockdown', script: 'Import-Module NetAdapter,DnsClient,NetTCPIP -ErrorAction Stop; Get-NetAdapter -ErrorAction Stop | Out-Null' }
+]
+
+/** Prepare this helper only; query results are discarded, never reused as evidence. */
+export async function warmElevatedPsHelper(): Promise<void> {
+  const owner = helperProcess
+  if (!owner || !isElevatedPsHelperRunning()) return
+  for (const command of HELPER_WARMUP_COMMANDS) {
+    // Do not restart a stopped helper or warm a replacement during shutdown.
+    if (helperProcess !== owner || !isElevatedPsHelperRunning()) break
+    const started = performance.now()
+    let outcome = 'failed'
+    try {
+      const result = await execElevatedPs(command.script, 15000, command.policy)
+      if (result.exitCode !== 0) throw new Error('Helper warm-up failed')
+      outcome = 'complete'
+    } catch {
+      logEvent('warn', 'ps-helper', 'fixed read-only warm-up unavailable', { policy: command.policy })
+    } finally {
+      logEvent('debug', 'ps-helper', 'warm-up timing', { policy: command.policy, outcome,
+        durationMs: Math.round(performance.now() - started) })
+    }
+  }
 }
 
 export async function startElevatedPsHelper(): Promise<void> {
@@ -173,6 +204,16 @@ export async function startElevatedPsHelper(): Promise<void> {
             if (pending) {
               clearTimeout(pending.timer)
               pendingCommands.delete(id)
+              const roundtripMs = Math.max(0, performance.now() - pending.submittedAt)
+              const executionMs = typeof result.executionMs === 'number' && Number.isFinite(result.executionMs)
+                && result.executionMs >= 0 && result.executionMs <= roundtripMs + 5 ? result.executionMs : undefined
+              // This residual includes queue wait AND pipe/serialization overhead.
+              // Never log source, stdout, stderr, or network identifiers here.
+              logEvent('debug', 'ps-helper', 'command timing', {
+                policy: pending.policy, roundtripMs: Math.round(roundtripMs),
+                ...(executionMs !== undefined ? { executionMs,
+                  transportOverheadMs: Math.round(Math.max(0, roundtripMs - executionMs)) } : {})
+              })
               pending.resolve({
                 stdout: result.stdout || '',
                 stderr: result.stderr || '',
@@ -280,7 +321,7 @@ export async function execElevatedPs(
     throw new Error('execElevatedPs is only available on Windows')
   }
   if (script.length > MAX_SCRIPT_CHARS) {
-    throw new Error(`PS helper script is too large (${script.length} chars)`)
+    throw new ElevatedPsHelperError('elevated-helper-script-too-large', `PS helper script is too large (${script.length} chars)`)
   }
   if (pendingCommands.size >= MAX_PENDING_COMMANDS) {
     throw new Error(`PS helper queue is full (${pendingCommands.size} pending)`)
@@ -310,7 +351,7 @@ export async function execElevatedPs(
       reject(timeoutError)
     }, timeoutMs)
 
-    pendingCommands.set(id, { resolve, reject, timer, script })
+    pendingCommands.set(id, { resolve, reject, timer, script, policy, submittedAt: performance.now() })
 
     const cmd = JSON.stringify({ id, script, timeout: timeoutMs }) + '\n'
     try {

@@ -83,6 +83,13 @@ function Read-TrustedManifest($name) {
     if ($value.schemaVersion -ne 1 -or $value.owner -ne 'VPNTE') { throw 'Unsupported recovery manifest schema' }
     return $value
 }
+function Resolve-RecoveryPrincipalSid([string]$userId) {
+    try {
+        if ($userId -match '^S-\d-') { return (New-Object Security.Principal.SecurityIdentifier($userId)).Value }
+        $account = New-Object Security.Principal.NTAccount($userId)
+        return $account.Translate([Security.Principal.SecurityIdentifier]).Value
+    } catch { throw 'Recovery task read-back mismatch: principal account cannot be resolved' }
+}
 # Registration is used by both the installer and application repair path.
 if ($RegisterTask) {
     $ErrorActionPreference = 'Stop'
@@ -97,7 +104,9 @@ if ($RegisterTask) {
     $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
     Register-ScheduledTask -TaskName 'BootRecoveryTask' -TaskPath '\VPNTE\' -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
     $task = Get-ScheduledTask -TaskName 'BootRecoveryTask' -TaskPath '\VPNTE\' -ErrorAction Stop
-    if ($task.Principal.UserId -notin @('SYSTEM','S-1-5-18') -or $task.Principal.RunLevel -ne 'Highest' -or @($task.Actions).Count -ne 1 -or $task.Actions.Execute -ne $action.Execute -or $task.Actions.Arguments -ne $arguments -or @($task.Triggers).Count -ne 1 -or $task.Triggers[0].CimClass.CimClassName -ne 'MSFT_TaskBootTrigger') { throw 'Recovery task read-back mismatch' }
+    # Task Scheduler normalizes SYSTEM to a localized name (e.g. on Russian Windows).
+    # Compare the resolved identity, never a language-dependent account spelling.
+    if ((Resolve-RecoveryPrincipalSid $task.Principal.UserId) -ne 'S-1-5-18' -or $task.Principal.RunLevel -ne 'Highest' -or @($task.Actions).Count -ne 1 -or $task.Actions.Execute -ne $action.Execute -or $task.Actions.Arguments -ne $arguments -or @($task.Triggers).Count -ne 1 -or $task.Triggers[0].CimClass.CimClassName -ne 'MSFT_TaskBootTrigger') { throw 'Recovery task read-back mismatch' }
     Unregister-ScheduledTask -TaskName 'VPNTE Boot Recovery' -Confirm:$false -ErrorAction SilentlyContinue
     Write-Output 'RECOVERY_TASK_VERIFIED'
     exit 0
@@ -407,9 +416,10 @@ try {
     if ($tunOwner) {
         if ($tunOwner.interfaceGuid -notmatch '^\{?[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}\}?$') { throw 'Invalid TUN ownership GUID' }
         $staleTuns = @(Get-NetAdapter -ErrorAction Stop | Where-Object {
-            [string]$_.InterfaceGuid -eq $tunOwner.interfaceGuid -and $_.InterfaceDescription -match 'Wintun'
+            [string]$_.InterfaceGuid -eq $tunOwner.interfaceGuid
         })
         foreach ($tun in $staleTuns) {
+            if ($tun.DriverDescription -notmatch '^Wintun\b' -or $tun.PnPDeviceID -notlike 'SWD\Wintun\*') { throw 'TUN ownership driver mismatch' }
             $ownedIP = @(Get-NetIPAddress -InterfaceIndex $tun.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -eq '192.168.250.253' -and $_.PrefixLength -eq 30 })
             if ($ownedIP.Count -eq 0) { throw 'TUN ownership address mismatch' }
             try { Remove-NetAdapter -Name $tun.Name -Confirm:$false -ErrorAction Stop }

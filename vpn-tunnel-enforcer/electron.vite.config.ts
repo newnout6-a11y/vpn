@@ -1,6 +1,6 @@
 import { readFileSync } from 'fs'
 import { resolve } from 'path'
-import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
+import { defineConfig } from 'electron-vite'
 import react from '@vitejs/plugin-react'
 import { transform } from 'esbuild'
 
@@ -38,8 +38,9 @@ const snapshotBootstrapPlugin = {
 
 export default defineConfig({
   main: {
-    plugins: [externalizeDepsPlugin(), snapshotBootstrapPlugin],
+    plugins: [snapshotBootstrapPlugin],
     build: {
+      externalizeDeps: true,
       outDir: 'out/main',
       rollupOptions: {
         input: {
@@ -49,8 +50,8 @@ export default defineConfig({
     }
   },
   preload: {
-    plugins: [externalizeDepsPlugin()],
     build: {
+      externalizeDeps: true,
       outDir: 'out/preload',
       rollupOptions: {
         input: {

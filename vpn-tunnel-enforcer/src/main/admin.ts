@@ -81,12 +81,21 @@ export async function execElevated(
   options: { timeout?: number; maxBuffer?: number } = {}
 ): Promise<{ stdout: string; stderr: string }> {
   if (process.platform !== 'win32' || await isProcessElevated()) {
-    return exec(command, {
+    const execOptions = {
       windowsHide: true,
       timeout: options.timeout ?? 30000,
       maxBuffer: options.maxBuffer ?? 1024 * 1024,
-      encoding: 'utf8'
-    })
+      encoding: 'utf8' as const
+    }
+    // Avoid cmd.exe's 8191-character limit for this fixed generated command.
+    // Arbitrary shell commands retain their existing execution semantics.
+    const encodedPowerShell = /^powershell\.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ([A-Za-z0-9+/]+={0,2})$/.exec(command)
+    if (encodedPowerShell) {
+      return execFile('powershell.exe', [
+        '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encodedPowerShell[1]
+      ], execOptions)
+    }
+    return exec(command, execOptions)
   }
 
   return new Promise((resolve, reject) => {

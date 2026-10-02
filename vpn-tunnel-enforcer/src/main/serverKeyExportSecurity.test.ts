@@ -27,8 +27,9 @@ vi.mock('electron', () => ({
   app: { getPath: () => '/tmp/vpnte-test', getAppPath: () => '/tmp/vpnte-test' },
   BrowserWindow: { fromWebContents: () => null },
   clipboard: {
-    writeText: (text: string) => { state.clipboardWrite(text); state.clipboardText = text },
-    readText: () => state.clipboardText, availableFormats: () => ['text/plain'], clear: () => { state.clipboardText = '' }
+    writeText: async (text: string) => { await state.clipboardWrite(text); state.clipboardText = text },
+    readText: async () => state.clipboardText,
+    read: async () => [{ types: ['text/plain'] }], clear: () => { state.clipboardText = '' }
   },
   dialog: { showMessageBox: state.nativePrompt, showSaveDialog: state.saveDialog },
   ipcMain: {
@@ -113,7 +114,7 @@ beforeEach(async () => {
 })
 afterEach(async () => {
   const { clearOwnedSecretClipboard } = await import('./secretClipboard')
-  clearOwnedSecretClipboard()
+  await clearOwnedSecretClipboard()
   rmSync(exportDirectory, { recursive: true, force: true })
 })
 
@@ -152,5 +153,10 @@ describe('main-owned export approval (AT-01-008)', () => {
     await expect(invoke('servers:export-key-file')).rejects.toThrow('native consent unavailable')
     expect(state.uri).not.toHaveBeenCalled()
     expect(existsSync(exportPath)).toBe(false)
+  })
+  it('a rejected native clipboard write never returns a success acknowledgement', async () => {
+    state.nativePrompt.mockResolvedValue({ response: 1 })
+    state.clipboardWrite.mockRejectedValueOnce(new Error('clipboard busy'))
+    await expect(invoke('servers:copy-key')).rejects.toThrow('clipboard busy')
   })
 })

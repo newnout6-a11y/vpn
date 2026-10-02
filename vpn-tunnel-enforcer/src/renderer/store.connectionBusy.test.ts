@@ -19,12 +19,23 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { useAppStore } from './store'
 
 function reset() {
-  useAppStore.setState({ globalToasts: [], restartingProgress: null })
+  useAppStore.setState({ globalToasts: [], restartingProgress: null, connectionCancelling: false })
   useAppStore.getState().setConnectionBusy(null)
   useAppStore.getState().setTunRunning(false)
 }
 
 describe('store.connectionBusy', () => {
+  // AT-00-003 / AT-00-008: cleanup owns the busy state until its IPC completes.
+  it('keeps cancellation busy across terminal status updates until explicitly finished', () => {
+    useAppStore.getState().setConnectionCancelling(true)
+    useAppStore.getState().setTunRunning(false)
+    useAppStore.getState().setConnectionBusy(null)
+    expect(useAppStore.getState().connectionBusy).toBe('disconnecting')
+    expect(useAppStore.getState().connectionCancelling).toBe(true)
+    useAppStore.getState().setConnectionCancelling(false)
+    useAppStore.getState().setConnectionBusy(null)
+    expect(useAppStore.getState().connectionBusy).toBeNull()
+  })
   beforeEach(reset)
 
   it('defaults to null (idle)', () => {

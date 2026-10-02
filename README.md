@@ -1,6 +1,6 @@
 # VPN Tunnel Enforcer
 
-[![Electron](https://img.shields.io/badge/Electron-42_LTS-47848F?logo=electron&logoColor=white)](https://www.electronjs.org/)
+[![Electron](https://img.shields.io/badge/Electron-44.4.3-47848F?logo=electron&logoColor=white)](https://www.electronjs.org/)
 [![React](https://img.shields.io/badge/React-18.3-61DAFB?logo=react&logoColor=black)](https://react.dev/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.4-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![TailwindCSS](https://img.shields.io/badge/TailwindCSS-3.4-38B2AC?logo=tailwindcss&logoColor=white)](https://tailwindcss.com/)
@@ -92,7 +92,8 @@ Split tunneling — по **имени процесса** (direct/vpn/none), hot-
 
 **Открыто (плановые задачи):**
 - Подпись кода (ожидает решения владельца по сертификату, раздел 10.8 ТЗ-06);
-- Миграция Electron 42 → 44 (дедлайн 20.10.2026, WP-11).
+
+**Миграция WP-11:** зависимости переведены на Electron 44.4.3, electron-vite 5.0.0 и electron-builder 26.15.3. `npm run test:electron` проверяет настоящий runtime с production-preload, изоляцией sandbox/contextBridge, доверенной границей IPC и native safeStorage в отдельном userData. Полная VM-матрица установки/обновления с активным туннелем проверяется отдельно.
 
 ## Что пока не реализовано (план)
 
@@ -123,7 +124,7 @@ vpn/
 ## Требования
 
 - **ОС:** Windows 10 (сборка 19041+) или Windows 11 x64.
-- **Среда:** Node.js 18+ (рекомендуется 20/22 LTS), npm 9+.
+- **Среда:** Node.js 22.13.0+ (22 LTS или новее), npm 10+; Electron 44 требует как минимум Node.js 22.12.0, а полный toolchain проекта — 22.13.0. Более старые версии отклоняются при `npm install`.
 - **Права:** Hard Mode (Wintun, WFP, адаптеры) требует администратора — UAC-элевация реализована внутри приложения.
 
 ## Быстрый старт

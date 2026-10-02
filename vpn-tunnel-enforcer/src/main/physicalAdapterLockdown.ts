@@ -1,4 +1,6 @@
 import { recoveryManifestPath, readRecoveryManifest, writeRecoveryManifest, removeRecoveryManifest } from './recoveryManifest'
+import { executeRecoveryOperation, RecoveryWorkerError } from './recoveryPsWorker'
+import { DNS_POLICY_SNAPSHOT_SCRIPT } from './recoveryPsProtocol'
 import { isIP } from 'net'
 /**
  * Hard lockdown of the physical adapter while TUN is up.
@@ -465,28 +467,24 @@ finally { if ($key) { $key.Close() } }
 }
 
 async function snapshotDnsRegistryPolicy(): Promise<DnsRegistryPolicySnapshot> {
-  const script = `
-$ErrorActionPreference='Stop'
-function Read-RegValue([string]$key, [string]$name, [string]$tag) {
-  $registryKey=[Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($key.Substring(5))
   try {
-    $exists=$registryKey -and @($registryKey.GetValueNames()) -contains $name
-    if (-not $exists) { return [pscustomobject]@{tag=$tag;exists=$false;type=$null;data=$null} }
-    if ($registryKey.GetValueKind($name) -ne [Microsoft.Win32.RegistryValueKind]::DWord) { throw 'DNS policy has unsupported registry type' }
-    $data=[int]$registryKey.GetValue($name)
-    $unsigned=[BitConverter]::ToUInt32([BitConverter]::GetBytes($data),0)
-    return [pscustomobject]@{tag=$tag;exists=$true;type='REG_DWORD';data=('0x'+$unsigned.ToString('x'))}
-  } finally { if($registryKey){$registryKey.Close()} }
-}
-@(
-  Read-RegValue 'HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\DNSClient' 'DisableSmartNameResolution' 'smartNameResolution'
-  Read-RegValue 'HKLM\\SYSTEM\\CurrentControlSet\\Services\\Dnscache\\Parameters' 'DisableParallelAandAAAA' 'parallelAandAAAA'
-) | ConvertTo-Json -Compress`
-  try {
-    const out = await runPS(script, 15000)
-    const rows = JSON.parse(out.trim() || '[]')
-    const list = Array.isArray(rows) ? rows : [rows]
-    const byTag = new Map<string, any>(list.map((row) => [String(row?.tag || ''), row]))
+    let out: string
+    try { out = await executeRecoveryOperation({ op: 'inspect-dns-policy' }) }
+    catch (error) {
+      // Only unavailability before admission allows the existing fixed fallback.
+      if (!(error instanceof RecoveryWorkerError) || error.code !== 'unavailable') throw error
+      out = await runPS(DNS_POLICY_SNAPSHOT_SCRIPT, 15000)
+    }
+    const list = JSON.parse(out.trim())
+    if (!Array.isArray(list) || list.length !== 2) throw new Error('Incomplete DNS registry snapshot')
+    const tags = new Set(['smartNameResolution', 'parallelAandAAAA'])
+    for (const row of list) {
+      if (!row || typeof row !== 'object' || Object.keys(row).sort().join(',') !== 'data,exists,tag,type'
+        || !tags.delete(row.tag) || typeof row.exists !== 'boolean') throw new Error('Invalid DNS registry snapshot')
+      if (row.exists ? row.type !== 'REG_DWORD' || typeof row.data !== 'string' || !/^0x[0-9a-f]{1,8}$/i.test(row.data)
+        : row.type !== null || row.data !== null) throw new Error('Unsupported DNS registry snapshot value')
+    }
+    const byTag = new Map<string, any>(list.map(row => [row.tag, row]))
     const read = (tag: string): RegistryValueSnapshot => {
       const row = byTag.get(tag)
       if (!row || typeof row.exists !== 'boolean') throw new Error('Incomplete DNS registry snapshot')
@@ -674,10 +672,12 @@ try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}
  * empty list means "back to DHCP", which is what `Set-DnsClientServerAddress
  * -ResetServerAddresses` does.
  */
-export async function rollbackPhysicalAdapterLockdownIfApplied(reason: string, options: RollbackOptions = {}): Promise<{ rolledBack: boolean }> {
-  if (process.platform !== 'win32') return { rolledBack: false }
+export async function rollbackPhysicalAdapterLockdownIfApplied(reason: string, options: RollbackOptions = {}): Promise<{ rolledBack: boolean; skipped?: boolean }> {
+  if (process.platform !== 'win32') return { rolledBack: false, skipped: true }
   const m = await readManifest()
-  if (!m) return { rolledBack: false }
+  // Only a successful trusted read proving absence is a no-op. Trust errors
+  // propagate; incomplete rollback still returns rolledBack:false without skip.
+  if (!m) return { rolledBack: false, skipped: true }
 
   let combinedScript = `$ErrorActionPreference = 'Continue'\n`
   

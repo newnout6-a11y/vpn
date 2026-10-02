@@ -4,7 +4,7 @@ import { execFileSync } from 'child_process'
 const state = vi.hoisted(() => ({
   manifest: null as any, failRead: false, failWrite: false, failApply: false,
   failNetsh: false, failNotify: false, failedSteps: [] as number[], scripts: [] as string[],
-  writes: [] as any[], operations: [] as string[]
+  writes: [] as any[], operations: [] as string[], nativeFailure: false
 }))
 const fixture = () => ({
   schemaVersion: 1, owner: 'VPNTE', createdAt: 1780000000000, userSid: 'S-1-5-21-1-2-3-1001',
@@ -21,6 +21,9 @@ function response(command: string) {
     return { stdout: '', stderr: '' }
   }
   const script = Buffer.from(command.split(' ').at(-1)!, 'base64').toString('utf16le')
+  if (state.nativeFailure) throw Object.assign(new Error(`Command failed: ${command}`), {
+    code: 1, stderr: 'Baseline user identity mismatch'
+  })
   state.scripts.push(script)
   if (script.includes('ToUnixTimeMilliseconds')) return { stdout: JSON.stringify(fixture()), stderr: '' }
   if (script.includes("Write-Output 'BASELINE_APPLIED'")) {
@@ -37,11 +40,12 @@ function response(command: string) {
 vi.mock('./admin', () => ({ execElevated: vi.fn(async (command: string) => response(command)) }))
 vi.mock('child_process', async importOriginal => {
   const actual = await importOriginal<typeof import('child_process')>()
-  const exec = (command: string, _options: unknown, callback: Function) => {
+  const execFile = (file: string, args: string[], _options: unknown, callback: Function) => {
+    const command = `${file} ${args.join(' ')}`
     try { const result = response(command); callback(null, { stdout: result.stdout, stderr: result.stderr }) }
     catch (error) { callback(error) }
   }
-  return { ...actual, exec, default: { ...actual, exec } }
+  return { ...actual, execFile, default: { ...actual, execFile } }
 })
 vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
 vi.mock('./recoveryManifest', () => ({
@@ -61,10 +65,68 @@ const platform = Object.getOwnPropertyDescriptor(process, 'platform')!
 beforeEach(() => {
   state.manifest = null; state.failRead = false; state.failWrite = false; state.failApply = false
   state.failNetsh = false; state.failNotify = false; state.failedSteps = []; state.scripts = []; state.writes = []; state.operations = []
+  state.nativeFailure = false
   Object.defineProperty(process, 'platform', { configurable: true, value: 'win32' })
 })
 afterEach(() => Object.defineProperty(process, 'platform', platform))
 describe('trusted typed network baseline', () => {
+  it.skipIf(process.platform !== 'win32')('native restore/read-back handles all registry types in an isolated test subtree', async () => {
+    const manifest = fixture()
+    manifest.values = [
+      { target: 'internet', name: 'ProxyEnable', exists: true, kind: 'DWord', data: 1 },
+      { target: 'internet', name: 'ProxyServer', exists: true, kind: 'String', data: 'fixture' },
+      { target: 'internet', name: 'AutoConfigURL', exists: true, kind: 'QWord', data: '9223372036854775807' },
+      { target: 'internet', name: 'AutoDetect', exists: false, kind: null, data: null },
+      { target: 'environment', name: 'HTTP_PROXY', exists: true, kind: 'ExpandString', data: '%FIXTURE_PROXY%' },
+      { target: 'environment', name: 'HTTPS_PROXY', exists: true, kind: 'MultiString', data: ['first', 'second'] },
+      { target: 'environment', name: 'ALL_PROXY', exists: true, kind: 'String', data: '' },
+      { target: 'environment', name: 'NO_PROXY', exists: false, kind: null, data: null },
+      { target: 'winhttp', name: 'WinHttpSettings', exists: true, kind: 'Binary', data: [0, 1, 255] }
+    ] as any
+    state.manifest = manifest
+    await rollbackTunNetworkBaseline()
+    const captured = state.scripts[0]
+    const helpers = captured.slice(0, captured.indexOf('\nif ([Security.Principal.WindowsIdentity]'))
+    const report = captured.slice(captured.indexOf('$values ='))
+    // All registry targets resolve below this process-owned GUID subtree.
+    // The actual network keys, ProgramData manifests and HKLM are untouched.
+    const script = `$ProgressPreference='SilentlyContinue';${helpers}
+$testRoot='Software\\VPNTE-Recovery-Test-'+[Guid]::NewGuid().ToString('N')
+function Get-BaseKey($target) { return [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($testRoot) }
+try { ${report} }
+finally { [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree($testRoot,$false) }`
+    const stdout = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand',
+      Buffer.from(script, 'utf16le').toString('base64')], { encoding: 'utf8', windowsHide: true, timeout: 10000 })
+    const steps = JSON.parse(stdout.trim())
+    expect(steps).toHaveLength(9)
+    expect(steps.every((step: any) => step.success && step.error === null)).toBe(true)
+  })
+  // AT-03-007 / F-033: execute actual JSON decoding and report construction,
+  // substituting only registry effects. Never run the real Restore-Snapshot.
+  it.skipIf(process.platform !== 'win32').each([null, ...Array.from({ length: 9 }, (_, i) => i)])(
+    'native PowerShell reports nine independent rollback steps (failed step %s)', async failedStep => {
+      state.manifest = fixture()
+      await rollbackTunNetworkBaseline()
+      const productionReport = state.scripts[0].slice(state.scripts[0].indexOf('$values ='))
+      const failedName = failedStep === null ? '' : fixture().values[failedStep].name
+      const script = `$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';function Restore-Snapshot($s) { if ($s.name -eq '${failedName}') { throw 'injected native failure' } }\n${productionReport}`
+      const stdout = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand',
+        Buffer.from(script, 'utf16le').toString('base64')], { encoding: 'utf8', windowsHide: true, timeout: 10000 })
+      const steps = JSON.parse(stdout.trim())
+      expect(steps).toHaveLength(9)
+      expect(steps.map((step: any) => step.name)).toEqual(fixture().values.map(s => `${s.target}/${s.name}`))
+      expect(steps.map((step: any) => step.success)).toEqual(fixture().values.map((_s, i) => i !== failedStep))
+    }
+  )
+  it('retains the snapshot and reports native stderr without a huge encoded command', async () => {
+    state.manifest = fixture(); state.nativeFailure = true
+    const result = await rollbackTunNetworkBaseline()
+    expect(result.success).toBe(false)
+    expect(result.warnings?.[0]).toContain('Baseline user identity mismatch')
+    expect(result.warnings?.[0]).not.toContain('-EncodedCommand')
+    expect(result.warnings?.[0].length).toBeLessThan(200)
+    expect(state.manifest).not.toBeNull()
+  })
   it('uses canonical trusted storage rather than AppData or arbitrary reg files', () => {
     expect(getTunNetworkBaselineManifestPath()).toBe('C:\\ProgramData\\VPNTE\\manifests\\latest-tun-network-baseline.json')
     expect(validateNetworkBackupManifest(fixture()).values).toHaveLength(9)

@@ -4,6 +4,7 @@ import { join } from 'path'
 import { execElevated } from './admin'
 import { domainEnrichmentService } from './domainEnrichment'
 import { readBootRecoveryReport } from './recoveryManifest'
+import { logEvent } from './appLogger'
 import {
   protectLegacySecretBackup,
   decryptJsonSecret,
@@ -374,24 +375,42 @@ function applyLoginItem(autoStart: boolean, options: { ensureBootRecovery?: bool
       // independent of autoStart and restores network settings if a crash or
       // BSOD left firewall/DNS state pinned.
       const recoverTask = buildBootRecoveryTaskCommand(getBootRecoveryScriptPath(true))
+      let stage: 'register' | 'read-back' | 'report' = 'register'
       void execElevated(recoverTask, { timeout: 30000 })
-        .then(async ({ stdout }) => {
-          if (!String(stdout).split(/\r?\n/).includes('RECOVERY_TASK_VERIFIED')) throw new Error('Boot Recovery read-back marker missing')
-          bootRecoveryStatus = { status: 'verified', message: 'SYSTEM startup trigger, action and principal verified' }
+        .then(async ({ stdout, stderr }) => {
+          stage = 'read-back'
+          if (!String(stdout).split(/\r?\n/).includes('RECOVERY_TASK_VERIFIED')) {
+            throw Object.assign(new Error('Boot Recovery read-back marker missing'), { stderr })
+          }
+          stage = 'report'
           const report = await readBootRecoveryReport()
+          bootRecoveryStatus = { status: 'verified', message: 'SYSTEM startup trigger, action and principal verified' }
+          logEvent('info', 'boot-recovery', 'task and trusted report verification completed', { reportStatus: report?.status ?? 'absent' })
           if (report && report.status !== 'restored') {
             await dialog.showMessageBox({ type: 'warning', title: 'VPNTE: Boot Recovery',
               message: report.status === 'strict-retained' ? 'Строгая блокировка сохранена после перезагрузки.' : 'Восстановление сети после перезагрузки не завершено.',
               detail: 'Защита не подтверждена. Проверьте результат Boot Recovery в системной диагностике.', buttons: ['OK'] })
+              .catch(error => logEvent('error', 'boot-recovery', 'recovery warning could not be displayed', { error }))
           }
         })
-        .catch(() => {
+        .catch(error => {
           bootRecoveryTaskEnsured = false
-          bootRecoveryStatus = { status: 'failed', message: 'Boot Recovery registration or trusted report verification failed' }
-          console.error('[settings] Boot Recovery verification failed; recovery is not confirmed')
+          bootRecoveryStatus = { status: 'failed', message: `Boot Recovery verification failed at ${stage}` }
+          // Command errors may carry a large stderr/encoded command. Bound the
+          // diagnostic before the logger applies its existing secret redaction.
+          logEvent('error', 'boot-recovery', 'verification failed; recovery is not confirmed', {
+            stage,
+            error: String(error instanceof Error ? error.message : error).slice(0, 1024),
+            stderr: typeof error?.stderr === 'string' ? error.stderr.slice(0, 2048) : undefined,
+            code: typeof error?.code === 'number' ? error.code : typeof error?.code === 'string' ? error.code.slice(0, 64) : undefined
+          })
+          const stageLabel = { register: 'Регистрация задачи', 'read-back': 'Проверка ответа регистрации', report: 'Проверка сохранённого отчёта' }[stage]
           void dialog.showMessageBox({ type: 'error', title: 'VPNTE: Boot Recovery',
-            message: 'Задача восстановления сети не подтверждена. Автовосстановление после перезагрузки не гарантировано.',
-            detail: 'Проверьте системную диагностику и установку приложения с правами администратора.', buttons: ['OK'] }).catch(() => undefined)
+            message: stage === 'report'
+              ? 'Задача восстановления зарегистрирована, но сохранённый отчёт не прошёл проверку. Результат восстановления не подтверждён.'
+              : 'Задача восстановления сети не подтверждена. Автовосстановление после перезагрузки не гарантировано.',
+            detail: `Этап: ${stageLabel}. Подробности записаны в журнал (boot-recovery). Проверьте системную диагностику.`, buttons: ['OK'] })
+            .catch(error => logEvent('error', 'boot-recovery', 'verification error could not be displayed', { error }))
         })
     }
 
