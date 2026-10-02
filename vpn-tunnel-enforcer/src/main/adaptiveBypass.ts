@@ -145,8 +145,13 @@ export function networkFingerprint(customInterfaces?: NodeJS.Dict<import('os').N
 }
 
 export async function readAdaptiveNetworkFingerprint(): Promise<string | null> {
+  const started = performance.now()
   const identity = await readAdaptiveNetworkIdentity()
-  return identity?.length ? networkFingerprint(undefined, identity) : null
+  const fingerprint = identity?.length ? networkFingerprint(undefined, identity) : null
+  logEvent('info', 'adaptive-bypass', 'Network identity read completed', {
+    reader: 'cim', durationMs: Math.round(performance.now() - started), known: fingerprint !== null
+  })
+  return fingerprint
 }
 
 export function profileFingerprint(profile: Record<string, any> | undefined): string {

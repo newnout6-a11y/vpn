@@ -25,6 +25,7 @@ vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
 import { nextAdaptiveMode, resolveAdaptiveCapabilities, isTunOrVpnAdapter, networkFingerprint,
   profileFingerprint, readAdaptiveNetworkFingerprint, beginAdaptiveConnection, markAdaptiveSuccess,
   markAdaptiveTransition, resetAdaptiveBypassStatus, invalidateAdaptiveLearningContext, getAdaptiveBypassStatus } from './adaptiveBypass'
+import { logEvent } from './appLogger'
 
 const interfaces: any = { 'Wi-Fi': [{ address: '192.168.1.100', netmask: '255.255.255.0', family: 'IPv4', mac: '00:11:22:33:44:55', internal: false }] }
 const identity = [{ alias: 'Wi-Fi', guid: 'fixture-guid', profiles: ['Home network'], gateways: ['192.168.1.1'] }]
@@ -36,6 +37,7 @@ beforeEach(() => {
   state.identity.mockReset().mockResolvedValue(identity)
   state.interfaces.mockReset().mockReturnValue(interfaces)
   resetAdaptiveBypassStatus()
+  vi.mocked(logEvent).mockClear()
 })
 
 async function begin(p: any = profile, legacyStealthMode = false) {
@@ -49,6 +51,17 @@ async function learn(p: any = profile) {
 }
 
 describe('adaptive bypass capability matrix', () => {
+  it.each([true, false])('logs only bounded identity timing and known=%s (AT-00-005 / AT-10-007)', async known => {
+    state.identity.mockResolvedValue(known ? identity : null)
+    const fingerprint = await readAdaptiveNetworkFingerprint()
+    expect(fingerprint !== null).toBe(known)
+    expect(logEvent).toHaveBeenCalledExactlyOnceWith('info', 'adaptive-bypass', 'Network identity read completed', {
+      reader: 'cim', durationMs: expect.any(Number), known
+    })
+    const details = vi.mocked(logEvent).mock.calls[0][3] as { durationMs: number }
+    expect(details.durationMs).toBeGreaterThanOrEqual(0)
+    expect(Object.keys(details).sort()).toEqual(['durationMs', 'known', 'reader'])
+  })
   it('keeps local external proxies externally managed', () => {
     const capabilities = resolveAdaptiveCapabilities('localProxy')
 

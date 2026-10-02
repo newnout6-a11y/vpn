@@ -530,3 +530,15 @@
 
 ### Rollback
 - Return to the preceding native-graph repair build. Native profiles stay compatible; the preceding build does not reuse new v2 learning keys. No network ownership manifest format changed.
+
+## 2026-10-02 — WP-10 / WP-0: remove cold network-identity imports
+
+- Owner approved starting with the measured identity-reader regression. Replaced cold Get-NetAdapter / Get-NetConnectionProfile / Get-NetRoute module imports with three fresh read-only CIM queries, preserving visible/up/MAC-bearing physical adapter selection, NLA Name/InstanceID, GUID, active default gateways, v2 HMAC privacy and IPv4 preference. A failed query still produces unknown identity; bounded hidden process remains 4000 ms / 256 KiB. No cached network snapshot or helper queue dependency was added.
+- Added a monotonic `Network identity read completed` event with reader/durationMs/known only. Regression tests exposed and fixed empty `.NextHop` expansion into `[null]`; profile-only and completely empty identities now have proper array semantics.
+- Actual Windows read-only comparison with the previous HEAD reader: 2329→448 / 2270→429 / 2403→469 ms, 3/3 identical normalized identities on the current network, no raw topology printed/persisted. This is reader latency, not installed full-connect acceptance. Previous installed cycles were 9939 / 8504 ms; firewall awaits remain 3161 / 2867 ms. Full investigation and actual Happ control-path observations recorded in docs-factory8090/07-журнал-ускорения-lifecycle.md, stage 26.
+- `npm.cmd run typecheck`: exit 0. Focused `npx.cmd vitest run src/main/adaptiveNetworkIdentity.test.ts src/main/adaptiveBypass.test.ts src/main/serverPickerSwitch.test.ts src/main/profileRotation.test.ts src/main/lifecycleCleanup.test.ts --maxWorkers=4`: 5 files / 122 tests passed, exit 0. Initial focused run had 2 gateway-empty failures, both repaired.
+- Full `npm.cmd test -- --maxWorkers=4`: exit 0, 179 files passed / 2 skipped, 1981 tests passed / 10 skipped / 0 failed, 83.97 s. `python -X utf8 ../docs/04-приёмочные-тесты/traceability/check-coverage.py`: exit 0, AC927/927 F210/210. `git diff --check`: exit 0. Normative docs unchanged.
+- `npm.cmd run dist:win`: exit 0, typecheck repeated successfully; seven packaged-ASAR markers confirmed. Installer `vpn-tunnel-enforcer/dist/VPN-Tunnel-Enforcer-Setup-1.1.22.exe`, 139165757 bytes, SHA256 `AAB87DB5754FEEB3429856F93F31A110AA1C11CBD79797B6F0C629022CAB00D1`, Authenticode NotSigned. Current network and installed client unchanged; live full-connect timing of this artifact remains unmeasured. Own temporary benchmark/test/build artifacts removed after recording results.
+
+### Rollback
+- Revert this scoped reader/timing change; the adaptive key format and stored profiles remain compatible. This restores the slower module-based identity read. No firewall or network ownership manifest format changed.
