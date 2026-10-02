@@ -24,12 +24,13 @@ import { mkdir, readdir, stat, unlink, writeFile } from 'fs/promises'
 import { existsSync } from 'fs'
 import { networkInterfaces, hostname, release, type as osType, totalmem, freemem } from 'os'
 import { join } from 'path'
-import { exec as execCb } from 'child_process'
+import { exec as execCb, execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import { logEvent } from './appLogger'
 import { getTunNetworkBaselineManifestPath } from './systemNetwork'
 
 const exec = promisify(execCb)
+const execFile = promisify(execFileCb)
 
 const SNAPSHOTS_DIRNAME = 'snapshots'
 const MAX_SNAPSHOTS_RETAINED = 60
@@ -109,8 +110,11 @@ async function tryPS(script: string, timeoutMs = 15000): Promise<string | { erro
     const utf8Prefix =
       "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;$OutputEncoding=[System.Text.Encoding]::UTF8;$ProgressPreference='SilentlyContinue';"
     const encoded = Buffer.from(utf8Prefix + script, 'utf-16le').toString('base64')
-    const cmd = `powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded}`
-    const { stdout } = await exec(cmd, { windowsHide: true, timeout: timeoutMs, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 })
+    // The combined diagnostic command exceeds cmd.exe's 8191-character limit.
+    // Pass the encoded script as a single argument directly to PowerShell.
+    const { stdout } = await execFile('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded], {
+      windowsHide: true, timeout: timeoutMs, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024
+    })
     return String(stdout).trim()
   } catch (err: any) {
     return { error: err?.message ?? String(err) }
