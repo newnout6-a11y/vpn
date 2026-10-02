@@ -4,7 +4,7 @@
 
 ## Что это
 
-VPN Tunnel Enforcer — Windows-клиент (Electron 42 + React + TypeScript, sing-box + Wintun) для изоляции трафика и обхода блокировок. Код — в `vpn-tunnel-enforcer/`.
+VPN Tunnel Enforcer — Windows-клиент (Electron 44 + React + TypeScript, sing-box + Wintun) для изоляции трафика и обхода блокировок. Код — в `vpn-tunnel-enforcer/`; среда разработки требует Node.js >=22.13.0.
 
 ## Иерархия источников истины (сверху вниз)
 

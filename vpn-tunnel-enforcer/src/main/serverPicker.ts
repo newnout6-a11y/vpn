@@ -287,8 +287,8 @@ export async function tunnelHttpProbe(skipCache = false, maxRetries = 1): Promis
     )
 
     try {
-      // Promise.any is native in Node 18+; this project targets Electron with
-      // Node ≥ 18, so no polyfill needed. First successful response wins; the
+      // Promise.any is native in the project's Node >=22.13 runtime, so no
+      // polyfill is needed. First successful response wins; the
       // rest keep going harmlessly until their per-request timeout fires.
       const ms = await Promise.any(races)
       lastSuccessfulTunnelProbeAt = Date.now()
