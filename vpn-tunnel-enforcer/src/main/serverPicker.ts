@@ -1398,7 +1398,7 @@ export function setProfileClientDevice(id: string, device: ClientDevice): Server
     outbound,
     clientDevice,
     clientFingerprint: outbound && typeof outbound === 'object' && outbound.tls && typeof outbound.tls === 'object'
-      ? clientFingerprintForDevice(clientDevice)
+      ? outbound.tls.utls?.fingerprint || clientFingerprintForDevice(clientDevice)
       : undefined
   }
   profiles[idx] = updated
@@ -2167,7 +2167,7 @@ function vpnProfileToServerProfile(
     outbound,
     clientDevice,
     clientFingerprint: outbound.tls && typeof outbound.tls === 'object'
-      ? clientFingerprintForDevice(clientDevice)
+      ? outbound.tls.utls?.fingerprint || clientFingerprintForDevice(clientDevice)
       : undefined,
     groupId,
     sourceUri: sourceUri ?? vpnProfile.sourceUri,

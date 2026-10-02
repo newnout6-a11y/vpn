@@ -6,6 +6,7 @@ import { brotliDecompressSync, gunzipSync, inflateRawSync, inflateSync } from 'z
 import type { ClientDevice } from '../shared/ipc-types'
 import { normalizeServerPort } from '../shared/portValidation'
 import { buildBootstrapRouteAttempts, type BootstrapRouteMode } from './bootstrapRoute'
+import { NATIVE_XRAY_FIELD, getNativeXrayProfile, nativeXrayDocumentEntry, preserveNativeXrayProfile } from './nativeXrayProfile'
 
 const execFile = promisify(execFileCb)
 
@@ -244,6 +245,8 @@ export function applyClientDeviceToOutbound(outbound: Record<string, any>, devic
   const result = JSON.parse(JSON.stringify(outbound || {}))
   const tls = result.tls && typeof result.tls === 'object' ? result.tls as Record<string, any> : null
   if (!tls || tls.enabled === false) return result
+  // A device preference supplies a default, not a replacement for the provider's camouflage.
+  if (getNativeXrayProfile(result) || (tls.utls?.enabled !== false && tls.utls?.fingerprint)) return result
   tls.utls = {
     ...(tls.utls && typeof tls.utls === 'object' ? tls.utls : {}),
     enabled: true,
@@ -1066,7 +1069,7 @@ function isGenericTag(tag?: string | null, protocol?: string | null): boolean {
   return false
 }
 
-function xrayOutboundToProfiles(raw: Record<string, any>, defaultName?: string): VpnProfile[] {
+function xrayOutboundToProfiles(raw: Record<string, any>, defaultName?: string, context?: Record<string, any>, documentEntry?: { outboundTag?: string; balancerTag?: string }): VpnProfile[] {
   const protocol = xrayProtocol(raw.protocol)
   if (!protocol) return []
   const settings = raw.settings && typeof raw.settings === 'object' ? raw.settings : {}
@@ -1107,6 +1110,10 @@ function xrayOutboundToProfiles(raw: Record<string, any>, defaultName?: string):
         if (tls) outbound.tls = tls
         const transport = buildTransportFromXrayStream(stream)
         if (transport) outbound.transport = transport
+        if (['vless', 'vmess'].includes(protocol)) {
+          const selected = documentEntry ? raw : { ...raw, settings: { ...settings, vnext: [{ ...node, users: [user] }] } }
+          outbound[NATIVE_XRAY_FIELD] = preserveNativeXrayProfile(selected, context, documentEntry)
+        }
         const profile: VpnProfile = {
           name: users.length > 1 ? `${tag} #${i + 1}` : tag,
           protocol,
@@ -1114,6 +1121,7 @@ function xrayOutboundToProfiles(raw: Record<string, any>, defaultName?: string):
         }
         if (sourceUri) profile.sourceUri = sourceUri
         profiles.push(profile)
+        if (documentEntry) return profiles
       }
     }
     return profiles
@@ -1168,6 +1176,9 @@ function xrayOutboundToProfiles(raw: Record<string, any>, defaultName?: string):
     if (tls) outbound.tls = tls
     const transport = buildTransportFromXrayStream(stream)
     if (transport) outbound.transport = transport
+    if (['trojan', 'shadowsocks'].includes(protocol)) {
+      outbound[NATIVE_XRAY_FIELD] = preserveNativeXrayProfile(documentEntry ? raw : { ...raw, settings: { ...settings, servers: [node] } }, context, documentEntry)
+    }
     const profile: VpnProfile = { name: tag, protocol, outbound: finishOutbound(outbound) }
     if (sourceUri) profile.sourceUri = sourceUri
     profiles.push(profile)
@@ -1175,7 +1186,20 @@ function xrayOutboundToProfiles(raw: Record<string, any>, defaultName?: string):
   return profiles
 }
 
-function jsonOutboundCandidatesToProfiles(candidates: any[], defaultName?: string): VpnProfile[] {
+function jsonOutboundCandidatesToProfiles(candidates: any[], defaultName?: string, context?: Record<string, any>): VpnProfile[] {
+  const entry = context && nativeXrayDocumentEntry(context)
+  if (entry) {
+    const selector = context!.routing?.balancers?.find((b: any) => b.tag === entry.balancerTag)?.selector || []
+    const selected = candidates.find(raw => ['vless', 'vmess', 'trojan', 'shadowsocks'].includes(raw?.protocol)
+      && (entry.outboundTag === raw.tag || selector.some((prefix: string) => String(raw.tag || '').startsWith(prefix))))
+    if (selected) {
+      const profiles = xrayOutboundToProfiles(selected, defaultName, context, entry)
+      if (profiles.length) {
+        profiles[0].name = defaultName || profiles[0].name
+        return [profiles[0]]
+      }
+    }
+  }
   const singBoxProfiles = candidates
     .filter((outbound: any) => outbound && SUPPORTED_OUTBOUND_TYPES.has(String(outbound.type)))
     .map((outbound: any) => {
@@ -1198,13 +1222,14 @@ function jsonOutboundCandidatesToProfiles(candidates: any[], defaultName?: strin
     })
   if (singBoxProfiles.length) return singBoxProfiles
 
-  return candidates.flatMap((outbound: any) => {
+  const profiles = candidates.flatMap((outbound: any) => {
     try {
-      return outbound && typeof outbound === 'object' ? xrayOutboundToProfiles(outbound, defaultName) : []
+      return outbound && typeof outbound === 'object' ? xrayOutboundToProfiles(outbound, defaultName, context) : []
     } catch {
       return []
     }
   })
+  return profiles
 }
 
 function findJsonDocumentEnd(text: string, start: number): number | null {
@@ -1372,7 +1397,7 @@ function parseJsonValueProfiles(value: any, seenTexts: Set<string>, depth = 0, i
   const currentRemarks = stringValue(value.remarks) || stringValue(value.ps) || stringValue(value.name) || inheritedRemarks
 
   if (Array.isArray(value.outbounds)) {
-    const profiles = jsonOutboundCandidatesToProfiles(value.outbounds, currentRemarks)
+    const profiles = jsonOutboundCandidatesToProfiles(value.outbounds, currentRemarks, value)
     if (profiles.length) return profiles
   }
 
@@ -2566,7 +2591,7 @@ export function redactSensitiveConfig(value: unknown): unknown {
     const result: Record<string, unknown> = {}
     for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
       const lower = key.toLowerCase()
-      if (SECRET_KEYS.has(lower) || /uuid|password|token|secret|private[_-]?key|public[_-]?key|short[_-]?id|^id$/i.test(key)) {
+      if (key === NATIVE_XRAY_FIELD || SECRET_KEYS.has(lower) || /uuid|password|token|secret|private[_-]?key|public[_-]?key|short[_-]?id|^id$/i.test(key)) {
         result[key] = '<redacted>'
       } else {
         result[key] = redactSensitiveConfig(raw)
@@ -2908,6 +2933,8 @@ function wireguardToUri(name: string, outbound: Record<string, any>): string {
 export function exportOutboundToUri(profile: { name: string; protocol: string; outbound: Record<string, any> }): string | null {
   const out = profile.outbound
   if (!out || typeof out !== 'object') return null
+  // A URI cannot represent native mux, balancers or a bridge graph. Do not export a degraded key.
+  if (getNativeXrayProfile(out)) return null
   const type = String(out.type || profile.protocol || '').toLowerCase()
   switch (type) {
     case 'vless':       return vlessToUri(profile.name, out)

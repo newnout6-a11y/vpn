@@ -336,7 +336,8 @@ function xrayStartHarness() {
     runXrayConfigPreflight: effect(11, undefined),
     ensureKillSwitchProgramAllowed: effect(41, { success: true }), waitForLocalSocks: effect(2, undefined),
     removeManagedChildPidFile: effect(1, undefined), logEvent: noop(), getTunRuntimeDir: () => 'fixture-dir',
-    toXrayOutbound: () => ({}), buildXrayConfig: () => ({}), join, isIP,
+    toXrayOutbound: () => ({}), buildXrayConfig: () => ({ outbounds: [], routing: { rules: [] } }), join, isIP,
+    getNativeXrayProfile: vi.fn(() => null as any), resolveXrayConfigEndpoints: effect(21, undefined),
     spawn: vi.fn((_file: string, args: string[]) => {
       const child = Object.assign(new EventEmitter(), { pid: 42, stdout: new EventEmitter(), stderr: new EventEmitter(), kill: vi.fn() })
       clock += args.includes('-test') ? 11 : 1
@@ -356,6 +357,22 @@ return startXray;
   return { start, ...os }
 }
 describe('Xray startup phase measurements (AT-02-002 / AT-02-004)', () => {
+  it('fences cancellation during preserved connection-graph bootstrap before config publication (AT-02-004)', async () => {
+    const h = xrayStartHarness()
+    h.getNativeXrayProfile.mockReturnValue({ entry: { balancerTag: 'fixture' } })
+    let release!: () => void
+    h.resolveXrayConfigEndpoints.mockReturnValue(new Promise(done => { release = () => done(undefined) }))
+    const owner = new AbortController()
+    const result = h.start({ server: 'fixture.invalid' }, { signal: owner.signal })
+    const rejected = expect(result).rejects.toThrow('cancelled')
+    await vi.waitFor(() => expect(h.resolveXrayConfigEndpoints).toHaveBeenCalledOnce())
+    owner.abort()
+    release()
+    await rejected
+    expect(h.writeFile).not.toHaveBeenCalled()
+    expect(h.runXrayConfigPreflight).not.toHaveBeenCalled()
+    expect(h.spawn).not.toHaveBeenCalled()
+  })
   it('does not launch the runtime before held native validation completes', async () => {
     const h = xrayStartHarness()
     let release!: () => void

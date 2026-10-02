@@ -968,12 +968,13 @@ export function generateSingboxConfig(
     const realityEnabled = tls.reality && typeof tls.reality === 'object'
       && tls.reality.enabled !== false
 
+    const sourceFingerprint = tls.utls?.enabled !== false && tls.utls?.fingerprint
     if (!tls.utls || typeof tls.utls !== 'object' || tls.utls.enabled === false) {
       tls.utls = { enabled: true, fingerprint: 'chrome' }
     } else if (!tls.utls.fingerprint) {
       tls.utls.fingerprint = 'chrome'
     }
-    if (explicitClientDevice) {
+    if (explicitClientDevice && !sourceFingerprint) {
       tls.utls.fingerprint = clientFingerprintForDevice(explicitClientDevice)
     }
     if (!Array.isArray(tls.alpn) || tls.alpn.length === 0) {
@@ -987,7 +988,7 @@ export function generateSingboxConfig(
     // server-side allowlists/sticky sessions) but different outbounds
     // within the same subscription look like different browsers, which
     // makes a big subscription harder to bulk-block by a single fp pattern.
-    if (tlsCompatibility && !realityEnabled && !explicitClientDevice && tls.utls && typeof tls.utls === 'object') {
+    if (tlsCompatibility && !realityEnabled && !explicitClientDevice && !sourceFingerprint && tls.utls && typeof tls.utls === 'object') {
       // Windows-plausible fingerprints only. Safari does not exist on Windows,
       // so a "safari" uTLS fp on a Windows client is itself an anomaly DPI can
       // flag — drop it. chrome/firefox/edge are all native to Windows. Keep

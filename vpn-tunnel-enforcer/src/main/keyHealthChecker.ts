@@ -28,7 +28,9 @@ import { getPhysicalAdapterDnsSources } from './physicalAdapterLockdown'
 import { serverPickerStore, serverGroupsStore } from './sharedStores'
 import { settingsStore } from './settings'
 import { resolveProxyEngine } from './proxyEngine'
-import { buildXrayProbeConfig } from './xrayEngine'
+import { buildXrayProbeConfig, resolveXrayConfigEndpoints } from './xrayEngine'
+import { getNativeXrayProfile } from './nativeXrayProfile'
+import { resolveXrayEndpoint } from './xrayDns'
 import { getBundledResource, getDirectProxyPort, pickFreeLocalPort, sanitizeProxyOutbound, tunController } from './tunController'
 import type { ServerProfile } from '../shared/ipc-types'
 
@@ -614,6 +616,9 @@ async function checkOutboundHealth(profile: ServerProfile): Promise<KeyHealthRes
           logPath
         })
 
+    if (isXray && getNativeXrayProfile(profile.outbound)) {
+      await resolveXrayConfigEndpoints(config, host => resolveXrayEndpoint(host, AbortSignal.timeout(4000)))
+    }
     await writeFile(probeConfigPath, JSON.stringify(config, null, 2), 'utf8')
     child = spawn(probeExe, ['run', '-c', probeConfigPath], {
       cwd: workDir,

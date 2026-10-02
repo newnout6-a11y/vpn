@@ -274,6 +274,12 @@ describe('generateSingboxConfig DNS bootstrap', () => {
 // ─── Stealth mode ─────────────────────────────────────────────────────────────
 
 describe('generateSingboxConfig stealth mode', () => {
+  it('keeps a provider fingerprint and ALPN despite stealth mode and device defaults (AT-04-006)', () => {
+    const cfg = gen({ outbound: { ...plainTlsOutbound, tls: { enabled: true, utls: { enabled: true, fingerprint: 'firefox' }, alpn: ['http/1.1'] } }, clientDevice: 'pc' }, 'socks5', [], { stealthMode: true })
+    const out = cfg.outbounds.find((o) => o.tag === 'proxy-out')!
+    expect(out.tls.utls.fingerprint).toBe('firefox')
+    expect(out.tls.alpn).toEqual(['http/1.1'])
+  })
   it('uses MTU 1500 by default and 1280 in stealth mode', () => {
     const normal = gen({ outbound: { ...plainTlsOutbound } })
     const stealth = gen({ outbound: { ...plainTlsOutbound } }, 'socks5', [], { stealthMode: true })
