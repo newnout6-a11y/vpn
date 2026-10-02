@@ -455,6 +455,7 @@ function ipStartupHarness(mode: 'direct' | 'proxy') {
     killSwitchManifestExists: vi.fn(async () => false), combinedPreStartProbe: vi.fn(async () => ({ tunnels: [], listeners: [] })),
     getRoutingPlan: vi.fn(async () => ({ canStartHard: true })),
     beginAdaptiveConnection: () => ({ capabilities: {}, mode: 'standard' }),
+    readAdaptiveNetworkFingerprint: vi.fn(async () => null),
     tunController: { start: vi.fn(async (): Promise<any> => { running = true; return { success: true } }), getStatus: () => ({ running }),
       stop: vi.fn(async () => ({ success:true,networkCleanup:{baseline:true,firewall:true,adapters:true} })) },
     applyTunNetworkBaseline: vi.fn(async (): Promise<any> => ({ success: true })), rollbackTunNetworkBaselineIfApplied: done(),

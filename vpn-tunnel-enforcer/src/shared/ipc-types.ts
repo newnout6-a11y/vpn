@@ -1007,7 +1007,7 @@ export interface ServerChannels {
     | { ok: false; reason: string; country?: string }
   'servers:remove': (id: string) => void
   'servers:export-key': (id: string) =>
-    | { ok: true; uri: string; name: string; protocol: string }
+    | { ok: true; uri: string; format?: 'uri' | 'json'; name: string; protocol: string }
     | { ok: false; reason: string; protocol?: string }
   'servers:export-key-file': (id: string) =>
     | { ok: true; path: string; uri: string; name: string; protocol: string }

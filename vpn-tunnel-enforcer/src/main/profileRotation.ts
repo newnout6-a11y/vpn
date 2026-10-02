@@ -20,7 +20,7 @@ import { requireBoolean, requireEnum, requireNumber, requirePlainObject, require
 import { notify } from './notifications'
 import { serverPicker, smartOfflinePing } from './serverPicker'
 import { settingsStore } from './settings'
-import { beginAdaptiveConnection } from './adaptiveBypass'
+import { beginAdaptiveConnection, readAdaptiveNetworkFingerprint } from './adaptiveBypass'
 import type { RotationConfig } from '../shared/ipc-types'
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -284,11 +284,14 @@ async function performRotationOnce(): Promise<{ success: boolean; newProfile: st
           clientDevice: profile!.clientDevice,
           clientFingerprint: profile!.clientFingerprint
         }
+        const networkIdentity = settings.adaptiveBypassEnabled ? await readAdaptiveNetworkFingerprint() : null
+        if (!tunController.getStatus().running) throw new Error('Ротация не перезапускает остановленный туннель')
         const adaptive = beginAdaptiveConnection({
           enabled: settings.adaptiveBypassEnabled,
           legacyStealthMode: settings.stealthMode,
           mode: 'directVpn',
-          profile: vpnProfile
+          profile: vpnProfile,
+          networkIdentity
         })
         logEvent('info', 'profile-rotation', 'reconnecting live tunnel to rotated profile', {
           profileId: nextProfileId

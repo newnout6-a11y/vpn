@@ -11,7 +11,7 @@ vi.mock('./tunController', () => ({
 vi.mock('./firewallKillSwitch', () => ({ ensureKillSwitchProgramAllowed: vi.fn() }))
 vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
 
-import { applyClientDeviceToOutbound, exportOutboundToUri, parseVpnProfiles, redactSensitiveConfig } from './vpnProfiles'
+import { applyClientDeviceToOutbound, exportOutboundToUri, exportOutboundForSharing, parseVpnProfiles, redactSensitiveConfig } from './vpnProfiles'
 import { buildXrayConfig, buildXrayProbeConfig, resolveXrayConfigEndpoints, toXrayOutbound } from './xrayEngine'
 import { compileNativeXrayProfile, getNativeXrayProfile, NATIVE_XRAY_FIELD, preserveNativeXrayProfile } from './nativeXrayProfile'
 import { resolveProxyEngine } from './proxyEngine'
@@ -64,6 +64,40 @@ function compile(doc = document()) {
 }
 
 describe('AT-04-002 / AT-04-006 / AT-02-002: preserved Xray connection pipeline', () => {
+  it('exports complete JSON and re-imports the bridge graph without provider listeners or application bypass', () => {
+    const { profile, config } = compile()
+    const shared = exportOutboundForSharing(profile)!
+    expect(shared.format).toBe('json')
+    const doc = JSON.parse(shared.content)
+    expect(doc.inbounds).toBeUndefined()
+    expect(doc.api).toBeUndefined()
+    expect(doc.dns).toBeUndefined()
+    expect(doc.log).toBeUndefined()
+    expect(shared.content).not.toContain('vpnte_xray')
+    expect(shared.content).not.toContain('untrusted')
+    const [restored] = parseVpnProfiles(shared.content)
+    expect(restored.name).toBe(profile.name)
+    const rebuilt = buildXrayConfig(toXrayOutbound(restored.outbound), 50124, { nativeProfile: getNativeXrayProfile(restored.outbound) })
+    expect(rebuilt.routing.balancers).toHaveLength(config.routing.balancers.length)
+    expect(rebuilt.outbounds.filter((o: any) => o.protocol === 'vless').map((o: any) => o.mux)).toEqual(config.outbounds.filter((o: any) => o.protocol === 'vless').map((o: any) => o.mux))
+    expect(rebuilt.outbounds.some((o: any) => o.streamSettings?.sockopt?.dialerProxy)).toBe(true)
+    const simple = { ...profile, name: 'Simple', outbound: { ...profile.outbound } }
+    delete simple.outbound[NATIVE_XRAY_FIELD]
+    expect(parseVpnProfiles(JSON.stringify([doc, exportOutboundToUri(simple)])).map(p => p.name)).toEqual(['Norway', 'Simple'])
+  })
+  it('exports independent native JSON and ordinary sing-box multiplex without degradation', () => {
+    const [profile] = parseVpnProfiles(JSON.stringify(vless('single')))
+    const restored = parseVpnProfiles(exportOutboundForSharing(profile)!.content)
+    expect(restored).toHaveLength(1)
+    expect(toXrayOutbound(restored[0].outbound).mux).toEqual(toXrayOutbound(profile.outbound).mux)
+    const [singbox] = parseVpnProfiles(JSON.stringify({ type: 'trojan', server: '192.0.2.1', server_port: 443, password: 'SYNTHETIC', multiplex: { enabled: false, padding: true } }))
+    const shared = exportOutboundForSharing(singbox)!
+    expect(shared.format).toBe('json')
+    expect(parseVpnProfiles(shared.content)[0].outbound.multiplex).toEqual(singbox.outbound.multiplex)
+    const simple = { ...singbox, outbound: { ...singbox.outbound } }
+    delete simple.outbound.multiplex
+    expect(exportOutboundForSharing(simple)!.format).toBe('uri')
+  })
   it('keeps one provider JSON document as one connection, with its automatic failover', () => {
     const profiles = parseVpnProfiles(JSON.stringify([document(), { ...document(), remarks: 'Sweden' }]))
     expect(profiles.map(p => p.name)).toEqual(['Norway', 'Sweden'])
@@ -204,10 +238,14 @@ describe('AT-04-002 / AT-04-006 / AT-02-002: preserved Xray connection pipeline'
     const { config } = compile()
     const dir = mkdtempSync(join(tmpdir(), 'vpnte-native-xray-test-'))
     try {
-      const file = join(dir, 'config.json')
-      config.log.error = ''
-      writeFileSync(file, JSON.stringify(config))
-      expect(() => execFileSync(resolve('resources/xray.exe'), ['run', '-test', '-c', file], { cwd: dir, windowsHide: true, timeout: 10000, stdio: 'pipe' })).not.toThrow()
+      const [restored] = parseVpnProfiles(exportOutboundForSharing(compile().profile)!.content)
+      const rebuilt = buildXrayConfig(toXrayOutbound(restored.outbound), 50124, { nativeProfile: getNativeXrayProfile(restored.outbound) })
+      for (const target of [config, rebuilt]) {
+        const file = join(dir, 'config.json')
+        target.log.error = ''
+        writeFileSync(file, JSON.stringify(target))
+        expect(() => execFileSync(resolve('resources/xray.exe'), ['run', '-test', '-c', file], { cwd: dir, windowsHide: true, timeout: 10000, stdio: 'pipe' })).not.toThrow()
+      }
     } finally {
       if (dirname(resolve(dir)) !== resolve(tmpdir())) throw new Error('Unsafe temporary cleanup target')
       rmSync(dir, { recursive: true, force: true })

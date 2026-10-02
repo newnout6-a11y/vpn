@@ -6,6 +6,7 @@ const state = vi.hoisted(() => ({
   profiles: [] as any[],
   tunnelStatus: { running: true, mode: 'directVpn' },
   restartProtected: vi.fn(),
+  networkIdentity: vi.fn(), settings: {} as Record<string, any>,
   stop: vi.fn(async () => undefined),
   ipMonitor: {
     getCurrentIp: vi.fn(async () => ({ ip: '198.51.100.1' })),
@@ -49,13 +50,14 @@ vi.mock('electron-store', () => ({
 vi.mock('axios', () => ({ default: { get: vi.fn() } }))
 vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
 vi.mock('./ipcLogging', () => ({ compactForIpcLog: (args: any[]) => args }))
-vi.mock('./settings', () => ({ settingsStore: { get: () => ({}) } }))
+vi.mock('./settings', () => ({ settingsStore: { get: () => state.settings } }))
 vi.mock('./vpnProfiles', () => ({
   applyClientDeviceToOutbound: vi.fn(),
   clientFingerprintForDevice: vi.fn(),
   normalizeClientDevice: vi.fn(),
   resolveVpnProfiles: vi.fn(),
   exportOutboundToUri: vi.fn(),
+  exportOutboundForSharing: vi.fn(),
   exportOutboundToProxyLine: vi.fn()
 }))
 vi.mock('./tunController', () => ({
@@ -69,7 +71,7 @@ vi.mock('./tunController', () => ({
     setWatchdogProbeConfirmationChecker: vi.fn()
   }
 }))
-vi.mock('./adaptiveBypass', () => ({ beginAdaptiveConnection: () => ({ mode: 'disabled' }) }))
+vi.mock('./adaptiveBypass', () => ({ beginAdaptiveConnection: () => ({ mode: 'disabled' }), readAdaptiveNetworkFingerprint: state.networkIdentity }))
 vi.mock('./ipMonitor', () => ({ ipMonitor: state.ipMonitor }))
 vi.mock('./serverGroups', () => ({
   serverGroups: { getGroups: () => [], createGroup: vi.fn(), deleteGroup: vi.fn() },
@@ -111,6 +113,8 @@ beforeEach(async () => {
   state.profiles = [profile('a'), profile('b')]
   state.storeData.set('profiles', state.profiles)
   state.tunnelStatus = { running: true, mode: 'directVpn' }
+  state.settings = {}
+  state.networkIdentity.mockReset().mockResolvedValue('fixture-network-hmac')
   state.restartProtected.mockReset().mockResolvedValue({ success: true })
   state.stop.mockClear()
   for (const mock of Object.values(state.ipMonitor)) mock.mockClear()
@@ -122,6 +126,29 @@ beforeEach(async () => {
 })
 
 describe('server profile switching', () => {
+  it('does not restart after cancellation during the new network-identity read (AT-02-004)', async () => {
+    state.settings = { adaptiveBypassEnabled: true }
+    const identity = deferred<string>()
+    state.networkIdentity.mockReturnValue(identity.promise)
+    const pending = selectProfileHandler({}, 'a')
+    const rejected = expect(pending).rejects.toThrow('Переключение сервера отменено')
+    await vi.waitFor(() => expect(state.networkIdentity).toHaveBeenCalledOnce())
+    await cancelSwitchHandler({})
+    identity.resolve('fixture-network-hmac')
+    await rejected
+    expect(state.restartProtected).not.toHaveBeenCalled()
+  })
+  it('does not restart a tunnel stopped while the network identity was pending', async () => {
+    state.settings = { adaptiveBypassEnabled: true }
+    const identity = deferred<string>()
+    state.networkIdentity.mockReturnValue(identity.promise)
+    const pending = selectProfileHandler({}, 'a')
+    await vi.waitFor(() => expect(state.networkIdentity).toHaveBeenCalledOnce())
+    state.tunnelStatus.running = false
+    identity.resolve('fixture-network-hmac')
+    await pending
+    expect(state.restartProtected).not.toHaveBeenCalled()
+  })
   it('rejects a second selection before changing the selected profile', async () => {
     const pendingRestart = deferred<{ success: boolean }>()
     state.restartProtected.mockReturnValueOnce(pendingRestart.promise)

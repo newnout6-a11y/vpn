@@ -89,6 +89,8 @@ import { installTrustedIpcBoundary, registerTrustedRenderer } from './ipcSecurit
 import { pathToFileURL } from 'url'
 import {
   beginAdaptiveConnection,
+  readAdaptiveNetworkFingerprint,
+  invalidateAdaptiveLearningContext,
   getAdaptiveBypassStatus,
   markAdaptiveFailure,
   markAdaptiveServerFallback,
@@ -415,13 +417,13 @@ async function verifyAdaptiveConnection(): Promise<void> {
   const generation = ++adaptiveVerificationGeneration
   if (!context || !tunController.getStatus().running) return
   if (!context.enabled) {
-    markAdaptiveSuccess(context.profile)
+    await markAdaptiveSuccess(context.profile)
     return
   }
 
   const status = getAdaptiveBypassStatus()
   if (status.mode === 'external-managed') {
-    markAdaptiveSuccess(context.profile)
+    await markAdaptiveSuccess(context.profile)
     return
   }
 
@@ -446,7 +448,8 @@ async function verifyAdaptiveConnection(): Promise<void> {
   if (generation !== adaptiveVerificationGeneration || !tunController.getStatus().running) return
   if (samples.length >= 2) {
     const latency = samples[samples.length - 1]
-    markAdaptiveSuccess(context.profile)
+    await markAdaptiveSuccess(context.profile)
+    if (generation !== adaptiveVerificationGeneration || !tunController.getStatus().running) return
     logEvent('info', 'adaptive-bypass', 'tunnel verification succeeded', { latency, successes: samples.length })
     try {
       tunController.recoverProxyIfAlive('adaptive-probe')
@@ -1337,7 +1340,8 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
     enabled: settings.adaptiveBypassEnabled,
     legacyStealthMode: settings.stealthMode,
     mode: 'directVpn',
-    profile
+    profile,
+    networkIdentity: settings.adaptiveBypassEnabled ? await owner.wait(readAdaptiveNetworkFingerprint()) : null
   })
   activeAdaptiveContext = {
     profile,
@@ -1808,6 +1812,7 @@ app.whenReady().then(async () => {
   // connection-history record can say "network dropped" / "went to sleep"
   // instead of a bare "sing-box crash".
   setNetworkChangeCallback(({ oldRowCount, newRowCount }) => {
+    invalidateAdaptiveLearningContext()
     lastNetworkChangeAt = Date.now()
     if (currentSession) {
       currentSession.lastNetworkTransition =

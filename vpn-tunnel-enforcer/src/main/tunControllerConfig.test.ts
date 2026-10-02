@@ -15,6 +15,11 @@
  */
 
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
+import { sanitizeProxyOutbound } from './tunController'
+import { execFileSync } from 'child_process'
+import { mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { tmpdir } from 'os'
+import { dirname, resolve } from 'path'
 
 // ─── Mock the import chain so tunController loads under vitest/node ──────────
 vi.mock('electron', () => ({
@@ -85,8 +90,6 @@ vi.mock('./domainRouting', () => ({
   generateDomainRouteRules: () => domainState.rules
 }))
 
-import { mkdtempSync, writeFileSync, rmSync } from 'fs'
-import { tmpdir } from 'os'
 import { join } from 'path'
 import { generateSingboxConfig, getTunnelProbePort, parseProxyAddress, readRecentSingBoxOutboundFault, isVpnOutboundUdpCapable, shouldBlockQuicUdp443 } from './tunController'
 
@@ -308,10 +311,10 @@ describe('generateSingboxConfig stealth mode', () => {
     expect(Array.isArray(out.tls.alpn)).toBe(true)
   })
 
-  it('strips multiplex/mux from imported outbounds (DPI-harmful)', () => {
+  it('preserves explicit multiplex on ordinary TLS and removes only its legacy alias (AT-04-006)', () => {
     const cfg = gen({ outbound: { ...plainTlsOutbound, multiplex: { enabled: true, protocol: 'h2mux' }, mux: { enabled: true } } })
     const out = cfg.outbounds.find((o) => o.tag === 'proxy-out')!
-    expect(out.multiplex).toBeUndefined()
+    expect(out.multiplex).toEqual({ enabled: true, protocol: 'h2mux' })
     expect(out.mux).toBeUndefined()
   })
 
@@ -370,6 +373,31 @@ describe('generateSingboxConfig UDP rules', () => {
     expect(quicBlock).toBe(true)
     expect(udpBlockAll).toBe(true)
     expect(cfg.route.final).toBe('proxy-out')
+  })
+  it.each(['vless', 'vmess', 'trojan', 'shadowsocks'])('preserves explicit %s multiplex without REALITY (AT-04-006)', type => {
+    const multiplex = { enabled: false, protocol: 'smux', padding: true, max_connections: 3 }
+    expect(sanitizeProxyOutbound({ type, server: '192.0.2.1', multiplex }).outbound.multiplex).toEqual(multiplex)
+    expect(sanitizeProxyOutbound({ type, server: '192.0.2.1', mux: { enabled: true, concurrency: 6, padding: true } }).outbound.multiplex).toEqual({ enabled: true, max_connections: 6, padding: true })
+  })
+  it('rejects multiplex for an unsupported protocol instead of silently removing it', () => {
+    expect(() => sanitizeProxyOutbound({ type: 'hysteria2', multiplex: { enabled: true } })).toThrow(/Multiplex/)
+  })
+  it.runIf(process.platform === 'win32')('passes bundled sing-box validation for the four supported multiplex protocols', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vpnte-multiplex-check-'))
+    try {
+      for (const type of ['vless', 'vmess', 'trojan', 'shadowsocks']) {
+        const out = sanitizeProxyOutbound({ type, tag: 'proxy-out', server: '192.0.2.1', server_port: 443,
+          ...(type === 'vless' || type === 'vmess' ? { uuid: '11111111-2222-4333-8444-555555555555' } : { password: 'SYNTHETIC' }),
+          ...(type === 'shadowsocks' ? { method: 'chacha20-ietf-poly1305' } : {}),
+          multiplex: { enabled: true, protocol: 'smux', padding: true }, ...(type === 'vmess' ? { security: 'auto' } : {}) }).outbound
+        const file = join(dir, 'config.json')
+        writeFileSync(file, JSON.stringify({ outbounds: [out] }))
+        expect(() => execFileSync(resolve('resources/sing-box.exe'), ['check', '-c', file], { windowsHide: true, stdio: 'pipe', timeout: 10000 })).not.toThrow()
+      }
+    } finally {
+      if (dirname(resolve(dir)) !== resolve(tmpdir())) throw new Error('Unsafe cleanup target')
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   it('routes the direct-VPN live-check inbound to proxy-out, not direct-out', () => {

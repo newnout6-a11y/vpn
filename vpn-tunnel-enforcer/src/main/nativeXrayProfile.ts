@@ -55,13 +55,25 @@ export function nativeXraySelectedOutbound(profile: NativeXrayProfile): Json {
 
 /** Only an unconditional terminal route can describe the complete provider connection. */
 export function nativeXrayDocumentEntry(document: Json): NativeXrayProfile['entry'] | null {
-  if (!Array.isArray(document.routing?.balancers) || !document.routing.balancers.length) return null
   const rule = document.routing?.rules?.at(-1)
   if (!rule || Object.keys(rule).some(k => !['type', 'network', 'outboundTag', 'balancerTag'].includes(k))) return null
   if (rule.network && rule.network !== 'tcp,udp' && rule.network !== 'udp,tcp') return null
   if (rule.outboundTag) return { outboundTag: rule.outboundTag }
   if (rule.balancerTag) return { balancerTag: rule.balancerTag }
   return null
+}
+
+/** Export only the validated connection graph, without local app/runtime settings. */
+export function exportNativeXrayDocument(profile: NativeXrayProfile, name: string): Json {
+  const graph = compileNativeXrayProfile(profile, nativeXraySelectedOutbound(profile))
+  const document: Json = {
+    remarks: name,
+    outbounds: [...graph.outbounds, { tag: 'block', protocol: 'blackhole' }],
+    routing: { rules: [...graph.rules, { type: 'field', network: 'tcp,udp', ...graph.entry }] }
+  }
+  if (graph.balancers.length) document.routing.balancers = graph.balancers
+  for (const key of ['observatory', 'burstObservatory', 'policy'] as const) if (graph[key]) document[key] = graph[key]
+  return document
 }
 
 /**

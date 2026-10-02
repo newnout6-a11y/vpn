@@ -6,7 +6,7 @@ import { brotliDecompressSync, gunzipSync, inflateRawSync, inflateSync } from 'z
 import type { ClientDevice } from '../shared/ipc-types'
 import { normalizeServerPort } from '../shared/portValidation'
 import { buildBootstrapRouteAttempts, type BootstrapRouteMode } from './bootstrapRoute'
-import { NATIVE_XRAY_FIELD, getNativeXrayProfile, nativeXrayDocumentEntry, preserveNativeXrayProfile } from './nativeXrayProfile'
+import { NATIVE_XRAY_FIELD, getNativeXrayProfile, nativeXrayDocumentEntry, preserveNativeXrayProfile, exportNativeXrayDocument } from './nativeXrayProfile'
 
 const execFile = promisify(execFileCb)
 
@@ -378,7 +378,9 @@ function numberPort(raw: string | null | undefined): number {
 function param(params: URLSearchParams, ...names: string[]): string | null {
   for (const name of names) {
     const value = params.get(name)
-    if (value !== null && value !== '') return safeDecode(value)
+    // URLSearchParams has already decoded one layer. A second decode corrupts
+    // literal percent escapes inside paths, credentials and XHTTP extra JSON.
+    if (value !== null && value !== '') return value
   }
   return null
 }
@@ -589,10 +591,17 @@ function buildTransport(params: URLSearchParams): Record<string, any> | undefine
   }
 
   if (type === 'grpc') {
-    return {
+    const transport: Record<string, any> = {
       type: 'grpc',
       service_name: param(params, 'serviceName', 'service_name') || ''
     }
+    const mode = param(params, 'mode')
+    const multi = param(params, 'multiMode', 'multi_mode')
+    if (mode && !['gun', 'multi'].includes(mode)) throw new Error('Неизвестный режим gRPC')
+    if (multi && !['true', 'false', '1', '0'].includes(multi)) throw new Error('Некорректный multiMode gRPC')
+    if (mode && multi && (mode === 'multi') !== ['true', '1'].includes(multi)) throw new Error('Противоречивый режим gRPC')
+    if (mode || multi) transport.multi_mode = mode ? mode === 'multi' : ['true', '1'].includes(multi!)
+    return transport
   }
 
   if (type === 'httpupgrade' || type === 'http-upgrade') {
@@ -620,7 +629,14 @@ function buildTransport(params: URLSearchParams): Record<string, any> | undefine
       path: ensureLeadingSlash(param(params, 'path') || '/')
     }
     const mode = param(params, 'mode')
-    if (mode) transport.method = mode
+    if (mode && !['auto', 'packet-up', 'stream-up', 'stream-one'].includes(mode)) throw new Error('Неизвестный режим XHTTP')
+    if (mode) transport.mode = mode
+    const extra = param(params, 'extra')
+    if (extra) {
+      const parsed = JSON.parse(extra)
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('XHTTP extra должен быть JSON-объектом')
+      transport.extra = parsed
+    }
     const headers: Record<string, string> = {}
     const host = param(params, 'host')
     if (host) headers.Host = host
@@ -800,6 +816,10 @@ function parseVmess(line: string): VpnProfile {
   if (raw.net) params.set('type', raw.net)
   if (raw.host) params.set('host', raw.host)
   if (raw.path) params.set('path', raw.path)
+  if (raw.net === 'grpc') params.set('serviceName', raw.serviceName || raw.path || '')
+  if (raw.mode) params.set('mode', String(raw.mode))
+  if (raw.multiMode !== undefined) params.set('multiMode', String(raw.multiMode))
+  if (raw.extra !== undefined) params.set('extra', typeof raw.extra === 'string' ? raw.extra : JSON.stringify(raw.extra))
 
   const outbound: Record<string, any> = {
     type: 'vmess',
@@ -2654,6 +2674,13 @@ function appendTransportParams(params: URLSearchParams, transport: Record<string
   } else if (type === 'grpc') {
     params.set('type', 'grpc')
     if (typeof transport.service_name === 'string' && transport.service_name) params.set('serviceName', transport.service_name)
+    if (typeof transport.multi_mode === 'boolean') params.set('mode', transport.multi_mode ? 'multi' : 'gun')
+  } else if (type === 'xhttp' || type === 'splithttp') {
+    params.set('type', 'xhttp')
+    if (typeof transport.host === 'string' && transport.host) params.set('host', transport.host)
+    if (typeof transport.path === 'string' && transport.path) params.set('path', transport.path)
+    if (transport.mode || transport.method) params.set('mode', transport.mode || transport.method)
+    if (transport.extra && typeof transport.extra === 'object') params.set('extra', JSON.stringify(transport.extra))
   } else if (type === 'httpupgrade') {
     params.set('type', 'httpupgrade')
     if (typeof transport.host === 'string' && transport.host) params.set('host', transport.host)
@@ -2811,6 +2838,8 @@ function vmessToUri(name: string, outbound: Record<string, any>): string {
     net: transportType === 'ws' ? 'ws'
        : transportType === 'grpc' ? 'grpc'
        : transportType === 'http' ? 'http'
+       : transportType === 'xhttp' || transportType === 'splithttp' ? 'xhttp'
+       : transportType === 'httpupgrade' ? 'httpupgrade'
        : 'tcp',
     type: 'none',
     tls: tls ? 'tls' : ''
@@ -2829,6 +2858,12 @@ function vmessToUri(name: string, outbound: Record<string, any>): string {
       if (headerHost) payload.host = String(headerHost)
     } else if (transportType === 'grpc') {
       if (typeof transport.service_name === 'string') payload.path = transport.service_name
+      if (typeof transport.multi_mode === 'boolean') payload.mode = transport.multi_mode ? 'multi' : 'gun'
+    } else if (['xhttp', 'splithttp', 'httpupgrade'].includes(transportType)) {
+      payload.path = transport.path || '/'
+      payload.host = transport.host || ''
+      if (transport.mode || transport.method) payload.mode = transport.mode || transport.method
+      if (transport.extra) payload.extra = transport.extra
     } else if (transportType === 'http') {
       if (Array.isArray(transport.host) && transport.host.length) payload.host = String(transport.host[0])
       if (typeof transport.path === 'string') payload.path = transport.path
@@ -2949,6 +2984,18 @@ export function exportOutboundToUri(profile: { name: string; protocol: string; o
     case 'wireguard':   return wireguardToUri(profile.name, out)
     default:            return null
   }
+}
+
+/** URI when lossless; otherwise a complete JSON connection usable on re-import. */
+export function exportOutboundForSharing(profile: { name: string; protocol: string; outbound: Record<string, any> }): { content: string; format: 'uri' | 'json' } | null {
+  const out = profile.outbound
+  if (!out || typeof out !== 'object') return null
+  const native = getNativeXrayProfile(out)
+  if (native) return { content: JSON.stringify(exportNativeXrayDocument(native, profile.name)), format: 'json' }
+  const uri = exportOutboundToUri(profile)
+  if (uri && out.multiplex === undefined && out.mux === undefined) return { content: uri, format: 'uri' }
+  if (!SUPPORTED_OUTBOUND_TYPES.has(String(out.type || profile.protocol))) return null
+  return { content: JSON.stringify({ remarks: profile.name, outbounds: [out] }), format: 'json' }
 }
 
 function proxyUserInfo(username: unknown, password: unknown): string {

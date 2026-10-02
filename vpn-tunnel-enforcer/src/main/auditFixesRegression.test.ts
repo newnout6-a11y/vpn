@@ -55,11 +55,9 @@ describe('Audit Fixes Regression: tunController', () => {
     expect(profileRotationSource).toContain('proxyEngine: tunController.getLastStartOptions?.()?.proxyEngine ?? settings.proxyEngine')
   })
 
-  it('preserves multiplex for VLESS/Reality to mitigate TSPU Signal 3', () => {
-    expect(tunControllerSource).toContain('isVlessRealityOutbound')
-    expect(tunControllerSource).toContain('if (!isVlessRealityOutbound) {')
-    expect(tunControllerSource).toContain('if (result.multiplex !== undefined) delete result.multiplex')
-    expect(tunControllerSource).toContain('TSPU Signal 3')
+  it('preserves explicit provider multiplex across supported protocols', () => {
+    expect(tunControllerSource).toContain("['vless', 'vmess', 'trojan', 'shadowsocks']")
+    expect(tunControllerSource).not.toContain('delete result.multiplex')
   })
 })
 

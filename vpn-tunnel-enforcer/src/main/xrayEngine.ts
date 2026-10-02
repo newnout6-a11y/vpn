@@ -191,7 +191,7 @@ export function toXrayOutbound(
     network = 'grpc'
     streamSettings.grpcSettings = {
       serviceName: transport.service_name || '',
-      multiMode: Boolean(transport.idle_timeout)
+      multiMode: transport.multi_mode === true
     }
   } else if (transportType === 'httpupgrade') {
     network = 'httpupgrade'
@@ -213,6 +213,8 @@ export function toXrayOutbound(
       path: transport.path || '/',
       host: transport.host || tls?.server_name || server
     }
+    if (transport.mode || transport.method) streamSettings.xhttpSettings.mode = transport.mode || transport.method
+    if (transport.extra && typeof transport.extra === 'object') streamSettings.xhttpSettings.extra = JSON.parse(JSON.stringify(transport.extra))
   }
 
   streamSettings.network = network

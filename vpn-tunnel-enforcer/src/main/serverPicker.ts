@@ -34,12 +34,13 @@ import {
   normalizeClientDevice,
   resolveVpnProfiles,
   exportOutboundToUri,
+  exportOutboundForSharing,
   exportOutboundToProxyLine,
   type VpnProfile
 } from './vpnProfiles'
 import { settingsStore } from './settings'
 import { getDirectProxyPort, tunController } from './tunController'
-import { beginAdaptiveConnection } from './adaptiveBypass'
+import { beginAdaptiveConnection, readAdaptiveNetworkFingerprint } from './adaptiveBypass'
 import { ipMonitor } from './ipMonitor'
 import {
   serverGroups,
@@ -1977,11 +1978,16 @@ async function restartDirectVpnForSelectedProfile(profile: ServerProfile): Promi
 
   const settings = settingsStore.get()
   const vpnProfile = toVpnProfile(profile)
+  const switchGeneration = profileSwitchGeneration
+  const networkIdentity = settings.adaptiveBypassEnabled ? await readAdaptiveNetworkFingerprint() : null
+  if (switchGeneration !== profileSwitchGeneration) throw new Error('Переключение сервера отменено')
+  if (!tunController.getStatus().running) return
   const adaptive = beginAdaptiveConnection({
     enabled: settings.adaptiveBypassEnabled,
     legacyStealthMode: settings.stealthMode,
     mode: 'directVpn',
-    profile: vpnProfile
+    profile: vpnProfile,
+    networkIdentity
   })
   const previousIp = await ipMonitor.getCurrentIp().then((info) => info.ip).catch(() => null)
   ipMonitor.deferResume()
@@ -2618,11 +2624,8 @@ export function registerServerPickerHandlers(): void {
     removeProfile(id)
   })
 
-  // Export an entry back to its scheme URI (vless://, trojan://, …) so the
-  // user can move the key to another device or another client. Returns
-  // {ok: true, uri, profile} on success, or {ok: false, reason} when the
-  // outbound shape isn't representable as a single-line URI (custom
-  // sing-box JSON profiles fall in that bucket).
+  // Export a URI or complete JSON when a single URI would lose settings.
+  // Consent and clipboard ownership remain in main for either format.
   const exportProfileKey = (id: string) => {
     id = requireString(id, 'id', { maxLength: 200 })
     const profile = getProfiles().find(p => p.id === id)
@@ -2630,13 +2633,14 @@ export function registerServerPickerHandlers(): void {
     if (!profile.outbound || typeof profile.outbound !== 'object') {
       return { ok: false as const, reason: 'no-outbound' }
     }
-    const uri = exportOutboundToUri({
+    const exported = exportOutboundForSharing({
       name: profile.name,
       protocol: profile.protocol,
       outbound: profile.outbound
     })
-    if (!uri) return { ok: false as const, reason: 'unsupported-protocol', protocol: profile.protocol }
-    return { ok: true as const, uri, name: profile.name, protocol: profile.protocol }
+    if (!exported) return { ok: false as const, reason: 'unsupported-protocol', protocol: profile.protocol }
+    // Keep the legacy IPC field name; content can be a URI or complete JSON.
+    return { ok: true as const, uri: exported.content, format: exported.format, name: profile.name, protocol: profile.protocol }
   }
   handleLogged('servers:export-key', async (event, id: string) => {
     id = requireString(id, 'id', { maxLength: 200 })
@@ -2652,7 +2656,7 @@ export function registerServerPickerHandlers(): void {
     })
   })
 
-  // Save the exported URI to a .txt file via the OS save dialog. Used when
+  // Save a URI as .txt or a complete connection as .json via the OS dialog. Used when
   // the user wants to keep a backup, store keys in a password manager, or
   // share the key out-of-band — clipboard is fine for one-shot paste, but
   // a file is what people actually archive. Returns:
@@ -2667,26 +2671,27 @@ export function registerServerPickerHandlers(): void {
       if (!profile.outbound || typeof profile.outbound !== 'object') {
         return { ok: false as const, reason: 'no-outbound' }
       }
-      const uri = exportOutboundToUri({
+      const exported = exportOutboundForSharing({
         name: profile.name,
         protocol: profile.protocol,
         outbound: profile.outbound
     })
-    if (!uri) return { ok: false as const, reason: 'unsupported-protocol', protocol: profile.protocol }
+    if (!exported) return { ok: false as const, reason: 'unsupported-protocol', protocol: profile.protocol }
 
-    // Pick a sane default filename: "<protocol>-<sanitised-name>.txt".
+    // Pick "<protocol>-<sanitised-name>" with the matching format extension.
     // Stripping non-filename characters makes the dialog suggestion usable on
     // Windows without the user having to retype.
     const safeName = (profile.name || profile.protocol)
       .replace(/[<>:"/\\|?*\u0000-\u001F]/g, '')
       .replace(/\s+/g, '-')
       .slice(0, 60) || profile.protocol
-    const defaultFileName = `${profile.protocol}-${safeName}.txt`
+    const defaultFileName = `${profile.protocol}-${safeName}.${exported.format === 'json' ? 'json' : 'txt'}`
 
     const choice = await dialog.showSaveDialog({
       title: 'Сохранить ключ VPN — файл содержит секрет доступа',
       defaultPath: join(app.getPath('desktop'), defaultFileName),
       filters: [
+        ...(exported.format === 'json' ? [{ name: 'Конфигурация JSON', extensions: ['json'] }] : []),
         { name: 'Текстовый файл', extensions: ['txt'] },
         { name: 'Все файлы', extensions: ['*'] }
       ]
@@ -2697,10 +2702,8 @@ export function registerServerPickerHandlers(): void {
     }
 
     try {
-      // We persist just the URI on a single line plus a trailing newline.
-      // Most clients accept extra leading/trailing whitespace, but minimum
-      // surprise is "the file is exactly the URI".
-      await writeFile(choice.filePath, uri + '\n', 'utf8')
+      // Persist the complete URI or JSON, with only a trailing newline.
+      await writeFile(choice.filePath, exported.content + '\n', 'utf8')
       return { ok: true as const, path: choice.filePath, name: profile.name, protocol: profile.protocol }
     } catch (err: any) {
       logEvent('warn', 'server-picker', 'export-key-file write failed', {
@@ -2712,10 +2715,8 @@ export function registerServerPickerHandlers(): void {
     })
   })
 
-  // Bulk export: dump every saved profile (one URI per line) into a single
-  // .txt file via the OS save dialog. Profiles that don't have a single-line
-  // representation (custom sing-box JSON, missing outbound) are skipped and
-  // their count is returned so the UI can mention them.
+  // Bulk export uses URI lines or a JSON array when any profile needs JSON.
+  // Missing/unsupported outbounds are counted so the UI can report omissions.
   //
   // Returns the same shape as the single-key handler, plus counts:
   //   {ok: true, path, total, exported, skipped}
@@ -2730,13 +2731,13 @@ export function registerServerPickerHandlers(): void {
       let skipped = 0
       for (const profile of profiles) {
         if (!profile.outbound || typeof profile.outbound !== 'object') { skipped++; continue }
-        const uri = exportOutboundToUri({
+        const exported = exportOutboundForSharing({
           name: profile.name,
           protocol: profile.protocol,
           outbound: profile.outbound
         })
-        if (!uri) { skipped++; continue }
-        lines.push(uri)
+        if (!exported) { skipped++; continue }
+        lines.push(exported.content)
       }
 
       if (!lines.length) {
@@ -2744,12 +2745,14 @@ export function registerServerPickerHandlers(): void {
       }
 
       const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
-      const defaultFileName = `vpn-keys-${stamp}.txt`
+      const hasJson = lines.some(line => line.startsWith('{'))
+      const defaultFileName = `vpn-keys-${stamp}.${hasJson ? 'json' : 'txt'}`
 
       const choice = await dialog.showSaveDialog({
         title: 'Сохранить все ключи VPN — файл содержит пароли/ключи',
         defaultPath: join(app.getPath('desktop'), defaultFileName),
         filters: [
+          ...(hasJson ? [{ name: 'Конфигурации JSON', extensions: ['json'] }] : []),
           { name: 'Текстовый файл', extensions: ['txt'] },
           { name: 'Все файлы', extensions: ['*'] }
         ]
@@ -2769,7 +2772,9 @@ export function registerServerPickerHandlers(): void {
     ].join('\n')
 
     try {
-      await writeFile(choice.filePath, header + lines.join('\n') + '\n', 'utf8')
+      const content = hasJson ? JSON.stringify(lines.map(line => line.startsWith('{') ? JSON.parse(line) : line))
+        : header + lines.join('\n')
+      await writeFile(choice.filePath, content + '\n', 'utf8')
       logEvent('info', 'server-picker', 'export-all-keys-file', {
         path: choice.filePath,
         total: profiles.length,

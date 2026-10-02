@@ -714,23 +714,12 @@ export function sanitizeProxyOutbound(outbound: Record<string, any>): { outbound
   delete result.domain_strategy
   delete result.domain_resolver
 
-  // Multiplexing: under modern DPI, arbitrary multiplexing is generally stripped.
-  // However, for VLESS/Reality, multiplexing with padding is a critical defence
-  // against TSPU Signal 3 (freezing / blocking parallel ClientHello handshakes to same SNI).
-  // Preserve multiplex for VLESS/Reality if present, and normalise legacy mux.
-  const isRealityOutbound = Boolean(
-    result.tls &&
-    typeof result.tls === 'object' &&
-    result.tls.reality &&
-    typeof result.tls.reality === 'object' &&
-    result.tls.reality.enabled !== false
-  )
-  const isVlessRealityOutbound = (String(result.type || '').toLowerCase() === 'vless') && isRealityOutbound
-
-  if (!isVlessRealityOutbound) {
-    if (result.multiplex !== undefined) delete result.multiplex
-    if (result.mux !== undefined) delete result.mux
-  } else {
+  // Preserve explicit provider multiplex settings on supported sing-box protocols.
+  // Unknown combinations must be rejected rather than silently downgraded.
+  if (result.multiplex !== undefined || result.mux !== undefined) {
+    if (!['vless', 'vmess', 'trojan', 'shadowsocks'].includes(String(result.type || '').toLowerCase())) {
+      throw new Error('Multiplex не поддерживается этим протоколом sing-box')
+    }
     if (!result.multiplex && result.mux && typeof result.mux === 'object') {
       result.multiplex = {
         enabled: (result.mux as any).enabled !== false,
