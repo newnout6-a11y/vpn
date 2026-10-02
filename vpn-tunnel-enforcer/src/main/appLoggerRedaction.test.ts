@@ -77,4 +77,18 @@ describe('appLogger topology redaction', () => {
     expect(raw).toContain('"timeoutMs":5000')
     expect(raw).toContain('"ifindex":42')
   })
+  it('preserves safe failure stage/code metadata in the actual log (AT-08-001)', async () => {
+    const { logEvent, getAppLogPath } = await import('./appLogger')
+    logEvent('warn', 'server-picker', 'tunnel failure path diagnostics', {
+      schemaVersion: 1, assessment: 'UPSTREAM_TCP_OK_ENGINE_EGRESS_UNCONFIRMED',
+      engineHttps: { ok: false, stage: 'tls', code: 'ETIMEDOUT', elapsedMs: 3000 },
+      outcomes: [{ target: 'cloudflare-ip-trace', code: 'ECONNRESET' }],
+      xray: { dialing: 27, protocolRequests: 1, denied: 0 }
+    })
+    const raw = await waitForLogContent(getAppLogPath())
+    expect(raw).toContain('"stage":"tls"')
+    expect(raw).toContain('"code":"ETIMEDOUT"')
+    expect(raw).toContain('"target":"cloudflare-ip-trace"')
+    expect(raw).toContain('UPSTREAM_TCP_OK_ENGINE_EGRESS_UNCONFIRMED')
+  })
 })

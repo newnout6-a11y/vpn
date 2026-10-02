@@ -62,7 +62,7 @@ interface AdapterSnapshot {
 }
 
 export function isTetheringSubnetIp(ip: string): boolean {
-  if (!ip || typeof ip !== 'string') return false
+  if (!ip || typeof ip !== 'string' || isIP(ip.trim()) !== 4) return false
   const trimmed = ip.trim()
   return /^192\.168\.(43|137|225|8)\./.test(trimmed) || /^172\.20\.10\./.test(trimmed)
 }
@@ -76,12 +76,16 @@ export function isCellularOrTetheringAdapter(
   alias: string,
   description = '',
   dnsServers: string[] = [],
-  gateways: string[] = []
+  gateways: string[] = [],
+  networkProfiles: string[] = []
 ): boolean {
   const pattern = /\b(rndis|cellular|mobile|wwan|lte|[345]g|modem|tether|tethering)\b|remote ndis|apple mobile device/i
   if (pattern.test(alias) || pattern.test(description)) return true
   if (dnsServers.some((ip) => isTetheringSubnetIp(ip))) return true
   if (gateways.some((ip) => isTetheringSubnetIp(ip))) return true
+  // Current Android hotspots may use arbitrary 10/8 DHCP subnets. A private
+  // address alone cannot identify tethering; use the connected profile name.
+  if (networkProfiles.some(name => /\b(galaxy|iphone|pixel|android|redmi|poco|oneplus)\b|\bmobile hotspot\b|\bточка доступа\b/i.test(name))) return true
   return false
 }
 
@@ -314,6 +318,7 @@ foreach ($a in $adapters) {
   $mediaType = [string]$a.MediaType
   $physMedia = [string]$a.PhysicalMediaType
   $gw4 = @((Get-NetRoute -InterfaceIndex $a.ifIndex -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue).NextHop)
+  $profiles = @((Get-NetConnectionProfile -InterfaceIndex $a.ifIndex -ErrorAction SilentlyContinue).Name)
   $isHotspotSubnet = [bool](
     ($dns4 | Where-Object { $_ -match '^192\\.168\\.(43|137|225|8)\\.' -or $_ -match '^172\\.20\\.10\\.' }) -or
     ($gw4 | Where-Object { $_ -match '^192\\.168\\.(43|137|225|8)\\.' -or $_ -match '^172\\.20\\.10\\.' })
@@ -337,6 +342,8 @@ foreach ($a in $adapters) {
     description  = [string]$a.InterfaceDescription
     ipv6Enabled  = [bool]($bind6 -and $bind6.Enabled)
     ipv4Dns      = @($dns4)
+    gateways     = @($gw4)
+    networkProfiles = @($profiles)
     ipv4DnsSource = $(if ([string]::IsNullOrWhiteSpace($nameServer)) { 'dhcp' } else { 'static' })
     isCellularOrTethering = $isCellularOrTether
   }
@@ -358,7 +365,21 @@ $rows | ConvertTo-Json -Compress -Depth 4
       const alias = String(row.alias || '')
       const description = String(row.description || '')
       const dnsServers = Array.isArray(row.ipv4Dns) ? row.ipv4Dns.map((x: any) => String(x)) : []
-      const isCellularOrTethering = Boolean(row.isCellularOrTethering) || isCellularOrTetheringAdapter(alias, description, dnsServers)
+      const gateways = Array.isArray(row.gateways) ? row.gateways.map(String) : []
+      const profiles = Array.isArray(row.networkProfiles) ? row.networkProfiles.map(String) : []
+      const nativeMobile = Boolean(row.isCellularOrTethering)
+      const knownMobile = isCellularOrTetheringAdapter(alias, description, dnsServers, gateways)
+      const profileMobile = isCellularOrTetheringAdapter('', '', [], [], profiles)
+      const isCellularOrTethering = nativeMobile || knownMobile || profileMobile
+      logEvent('info', 'phys-lockdown', 'physical uplink classification', {
+        ifIndex: Number(row.ifIndex),
+        mobile: isCellularOrTethering,
+        method: knownMobile ? 'device-or-subnet' : nativeMobile ? 'native-media-or-v6-only' : profileMobile ? 'mobile-network-profile' : 'ordinary-network',
+        v6EnabledBefore: Boolean(row.ipv6Enabled),
+        v4DefaultCount: gateways.length,
+        configuredResolverCount: dnsServers.length,
+        resolverSource: row.ipv4DnsSource
+      })
       return {
         ifIndex: Number(row.ifIndex),
         interfaceGuid: String(row.interfaceGuid || ''),

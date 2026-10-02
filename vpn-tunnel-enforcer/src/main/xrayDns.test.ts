@@ -24,6 +24,17 @@ beforeEach(() => {
   mocks.resolvers.length = 0
 })
 describe('Xray operation-owned bootstrap DNS', () => {
+  it('records both resolver failures and successful fallback without topology/secrets (AT-08-001)', async () => {
+    mocks.resolve4.mockRejectedValue(Object.assign(new Error('secret.example 192.0.2.53'), { code: 'ESERVFAIL' }))
+    const report = vi.fn()
+    expect(await resolveXrayEndpoint('secret.example', undefined, report)).toBe('192.0.2.2')
+    expect(report.mock.calls[0][0]).toMatchObject({ method: 'resolve4', ok: false, code: 'ESERVFAIL' })
+    expect(report.mock.calls[1][0]).toMatchObject({ method: 'system-lookup', ok: true, family: 4 })
+    expect(JSON.stringify(report.mock.calls)).not.toMatch(/secret|192\.0\.2/)
+  })
+  it('does not let failed diagnostic reporting alter resolution', async () => {
+    expect(await resolveXrayEndpoint('fixture.example', undefined, () => { throw new Error('logger down') })).toBe('192.0.2.1')
+  })
   it.each(['', '  ', '192.0.2.10', '2001:db8::1'])('keeps literal/empty handling without DNS: %s', async server => {
     expect(await resolveXrayEndpoint(server)).toBe(server === '192.0.2.10' ? server : null)
     expect(mocks.resolve4).not.toHaveBeenCalled()

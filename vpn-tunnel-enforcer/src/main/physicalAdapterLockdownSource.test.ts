@@ -74,6 +74,18 @@ describe('physicalAdapterLockdown source regressions', () => {
     expect(s).toContain('readRecoveryManifest(MANIFEST_BASENAME')
     expect(s).toContain('[string]$_.InterfaceGuid -eq')
   })
+  it('recognizes modern phone Wi-Fi profiles without treating all private networks as tethering (AT-03-006)', async () => {
+    const { isCellularOrTetheringAdapter, isTetheringSubnetIp } = await import('./physicalAdapterLockdown')
+    for (const name of ['Galaxy S24 Ultra F4E5 2', 'iPhone (Владимир)', 'Pixel 9', 'Redmi Note 13', 'Mobile Hotspot']) {
+      expect(isCellularOrTetheringAdapter('Беспроводная сеть', 'MediaTek Wi-Fi', ['77.88.8.7'], ['10.253.112.13'], [name])).toBe(true)
+    }
+    expect(isCellularOrTetheringAdapter('Wi-Fi', 'MediaTek', [], ['10.253.112.13'], ['Office'])).toBe(false)
+    expect(isCellularOrTetheringAdapter('Wi-Fi', 'MediaTek', [], ['192.168.1.1'], ['Home'])).toBe(false)
+    expect(isTetheringSubnetIp('192.168.43.999')).toBe(false)
+    expect(isTetheringSubnetIp('192.168.43.evil')).toBe(false)
+    expect(source()).toContain('Get-NetConnectionProfile -InterfaceIndex $a.ifIndex')
+    expect(source()).toContain('isCellularOrTetheringAdapter(alias, description, dnsServers, gateways)')
+  })
   it('rejects injected/ambiguous adapter, transition and registry snapshots (AT-03-012)', async () => {
     const { validateLockdownManifest } = await import('./physicalAdapterLockdown')
     const fixture = {

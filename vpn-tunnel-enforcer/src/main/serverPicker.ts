@@ -51,6 +51,7 @@ import {
 import type { ClientDevice, ServerProfile } from '../shared/ipc-types'
 import { inferCountryMetadata } from '../shared/countries'
 import { reliableSocksTcpPing } from './socksPing'
+import { networkFailureCode } from './networkFailureDiagnostics'
 import { serverPickerStore as store } from './sharedStores'
 
 const RESOLVED_IP_TTL_MS = 5 * 60_000
@@ -116,14 +117,15 @@ const PING_CONCURRENCY = 5
 // captive-portal interstitial returning "200 OK" can't be mistaken for a
 // real round-trip through the exit node.
 const TUNNEL_PROBE_TARGETS: ReadonlyArray<{
+  id: string
   url: string
   accept: (status: number, body: string) => boolean
 }> = [
-  { url: 'https://www.gstatic.com/generate_204', accept: (s) => s === 204 },
-  { url: 'https://www.google.com/generate_204', accept: (s) => s === 204 },
-  { url: 'https://cp.cloudflare.com/generate_204', accept: (s) => s === 204 },
+  { id: 'gstatic-204', url: 'https://www.gstatic.com/generate_204', accept: (s) => s === 204 },
+  { id: 'google-204', url: 'https://www.google.com/generate_204', accept: (s) => s === 204 },
+  { id: 'cloudflare-204', url: 'https://cp.cloudflare.com/generate_204', accept: (s) => s === 204 },
   // IP literal — no DNS dependency, proves the tunnel moves raw packets.
-  { url: 'https://1.1.1.1/cdn-cgi/trace', accept: (s, b) => s === 200 && /(^|\n)ip=/.test(b) }
+  { id: 'cloudflare-ip-trace', url: 'https://1.1.1.1/cdn-cgi/trace', accept: (s, b) => s === 200 && /(^|\n)ip=/.test(b) }
 ]
 
 // Cache the last tunnel-probe result for a short window so a `pingAll`
@@ -144,6 +146,36 @@ const TUNNEL_PROBE_SUCCESS_CACHE_MS = 3500
 const TUNNEL_PROBE_FAILURE_CACHE_MS = 1500
 let tunnelProbeCache: { value: number | null; at: number; sessionKey: string } | null = null
 let lastSuccessfulTunnelProbeAt = 0
+let failureDiagnostics: { sessionKey: string; at: number; promise: Promise<void> } | null = null
+
+async function logTunnelFailureDiagnostics(sessionKey: string): Promise<void> {
+  if (failureDiagnostics?.sessionKey === sessionKey && Date.now() - failureDiagnostics.at < 30000) {
+    await failureDiagnostics.promise
+    return
+  }
+  const promise = (async () => {
+    try {
+      const [{ collectTunnelFailureDiagnostics }, xray, runtime] = await Promise.all([
+        import('./networkFailureDiagnostics'), import('./xrayEngine'), import('./tunController')
+      ])
+      if (currentTunnelProbeSessionKey() !== sessionKey) return
+      const status = tunController.getStatus()
+      const engine = xray.getXrayStatus()
+      const details = await collectTunnelFailureDiagnostics({
+        runtimeDir: runtime.getTunRuntimeDir(), startedAt: status.startedAt ?? Date.now(),
+        xrayStartedAt: engine.startedAt, xrayPort: engine.running ? engine.socksPort : null,
+        directPort: getDirectProxyPort(), dialTarget: xray.getXrayDialTarget()
+      })
+      if (currentTunnelProbeSessionKey() === sessionKey) {
+        logEvent('warn', 'server-picker', 'tunnel failure path diagnostics', details)
+      }
+    } catch (error) {
+      if (currentTunnelProbeSessionKey() === sessionKey) logEvent('warn', 'server-picker', 'tunnel failure diagnostics unavailable', { code: networkFailureCode(error) })
+    }
+  })()
+  failureDiagnostics = { sessionKey, at: Date.now(), promise }
+  await promise
+}
 
 export function getLastSuccessfulTunnelProbeAt(): number {
   return lastSuccessfulTunnelProbeAt
@@ -269,10 +301,13 @@ export async function tunnelHttpProbe(skipCache = false, maxRetries = 1): Promis
     // close` ensures we measure a fresh round-trip rather than the warmth of
     // a pooled TLS session.
     const start = performance.now()
-    const races = TUNNEL_PROBE_TARGETS.map(target =>
+    const cancellation = new AbortController()
+    const outcomes: Array<Record<string, unknown>> = []
+    const races = TUNNEL_PROBE_TARGETS.map((target, index) =>
       axios
         .get(target.url, {
           timeout: TUNNEL_PROBE_URL_TIMEOUT_MS,
+          signal: cancellation.signal,
           validateStatus: () => true,
           responseType: 'text',
           transformResponse: (d) => d,
@@ -280,17 +315,24 @@ export async function tunnelHttpProbe(skipCache = false, maxRetries = 1): Promis
         })
         .then(resp => {
           if (!target.accept(resp.status, typeof resp.data === 'string' ? resp.data : String(resp.data ?? ''))) {
-            throw new Error(`probe rejected: ${target.url} -> ${resp.status}`)
+            throw Object.assign(new Error('probe response rejected'), { code: 'PROBE_RESPONSE_REJECTED', status: resp.status })
           }
+          outcomes[index] = { target: target.id, ok: true, elapsedMs: Math.round(performance.now() - start), status: resp.status }
           return Math.round(performance.now() - start)
+        })
+        .catch(error => {
+          outcomes[index] = { target: target.id, ok: false, elapsedMs: Math.round(performance.now() - start), code: networkFailureCode(error), status: typeof error?.status === 'number' ? error.status : undefined }
+          throw error
         })
     )
 
     try {
       // Promise.any is native in the project's Node >=22.13 runtime, so no
-      // polyfill is needed. First successful response wins; the
-      // rest keep going harmlessly until their per-request timeout fires.
+      // polyfill is needed. First successful response wins; cancel the other
+      // requests so they cannot keep loading a slow hotspot after success.
       const ms = await Promise.any(races)
+      cancellation.abort()
+      if (currentTunnelProbeSessionKey() !== sessionKey) return null
       lastSuccessfulTunnelProbeAt = Date.now()
       tunnelProbeCache = { value: ms, at: Date.now(), sessionKey }
       try {
@@ -298,6 +340,12 @@ export async function tunnelHttpProbe(skipCache = false, maxRetries = 1): Promis
       } catch {}
       return ms
     } catch (err) {
+      cancellation.abort()
+      if (currentTunnelProbeSessionKey() !== sessionKey) return null
+      logEvent('info', 'server-picker', 'tunnel HTTPS probe results', {
+        sessionStartedAt: tunController.getStatus().startedAt, attempt: attempt + 1, outcomes,
+        stage: 'os-tun-https', elapsedMs: Math.round(performance.now() - start)
+      })
       if (attempt < maxRetries) {
         logEvent('debug', 'server-picker', 'tunnel probe attempt failed, retrying before mode change', {
           attempt: attempt + 1,
@@ -312,11 +360,13 @@ export async function tunnelHttpProbe(skipCache = false, maxRetries = 1): Promis
       if (err instanceof AggregateError) {
         logEvent('debug', 'server-picker', 'tunnel probe: every target failed after retries', {
           reasons: err.errors.map((e: unknown, i: number) => ({
-            url: TUNNEL_PROBE_TARGETS[i]?.url,
-            error: e instanceof Error ? e.message : String(e)
+            target: TUNNEL_PROBE_TARGETS[i]?.id,
+            code: networkFailureCode(e)
           }))
         })
       }
+      await logTunnelFailureDiagnostics(sessionKey)
+      if (currentTunnelProbeSessionKey() !== sessionKey) return null
       tunnelProbeCache = { value: null, at: Date.now(), sessionKey }
       return null
     }

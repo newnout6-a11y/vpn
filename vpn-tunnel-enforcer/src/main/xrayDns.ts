@@ -1,5 +1,6 @@
 import { promises as dns } from 'node:dns'
 import { isIP } from 'node:net'
+import { networkFailureCode } from './networkFailureDiagnostics'
 
 function cancelled(): Error {
   return Object.assign(new Error('Xray DNS resolution cancelled'), { name: 'AbortError' })
@@ -33,12 +34,14 @@ function readWithAbort<T>(read: () => Promise<T>, signal?: AbortSignal, cancelRe
 }
 
 /** Same resolve4→IPv4 lookup bootstrap, with operation-owned cancellation. */
-export async function resolveXrayEndpoint(server: string, signal?: AbortSignal): Promise<string | null> {
+export async function resolveXrayEndpoint(server: string, signal?: AbortSignal, report?: (details: Record<string, unknown>) => void): Promise<string | null> {
   if (signal?.aborted) throw cancelled()
   const trimmed = String(server || '').trim()
   if (!trimmed) return null
   if (isIP(trimmed) === 4) return trimmed
   if (isIP(trimmed) === 6) return null
+  const reportStage = (details: Record<string, unknown>) => { try { report?.(details) } catch {} }
+  let began = Date.now()
   try {
     let ips: string[]
     if (signal) {
@@ -48,18 +51,24 @@ export async function resolveXrayEndpoint(server: string, signal?: AbortSignal):
       ips = await readWithAbort(() => resolver.resolve4(trimmed), signal, () => resolver.cancel())
     } else ips = await dns.resolve4(trimmed)
     if (signal?.aborted) throw cancelled()
+    reportStage({ method: 'resolve4', ok: ips.length > 0, answerCount: ips.length, family: 4, elapsedMs: Date.now() - began })
     if (ips.length > 0 && ips[0]) return ips[0]
-  } catch {
+  } catch (error) {
     if (signal?.aborted) throw cancelled()
+    reportStage({ method: 'resolve4', ok: false, code: networkFailureCode(error), elapsedMs: Date.now() - began })
   }
+  began = Date.now()
   try {
     // getaddrinfo is not cancelled by Resolver.cancel. Discard its late value
     // and let the caller react immediately while the OS read finishes alone.
     const lookup = await readWithAbort(() => dns.lookup(trimmed, { family: 4 }), signal)
     if (signal?.aborted) throw cancelled()
-    if (lookup?.address && isIP(lookup.address) === 4) return lookup.address
-  } catch {
+    const ok = Boolean(lookup?.address && isIP(lookup.address) === 4)
+    reportStage({ method: 'system-lookup', ok, family: 4, elapsedMs: Date.now() - began })
+    if (ok) return lookup.address
+  } catch (error) {
     if (signal?.aborted) throw cancelled()
+    reportStage({ method: 'system-lookup', ok: false, code: networkFailureCode(error), elapsedMs: Date.now() - began })
   }
   return null
 }

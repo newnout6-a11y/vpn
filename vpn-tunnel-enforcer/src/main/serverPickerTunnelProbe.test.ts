@@ -19,6 +19,12 @@ let tunnelRunning = true
 let tunnelStartedAt = 1000
 
 const axiosGet = vi.fn()
+const diagnostics = vi.fn(async (..._args: any[]) => ({ schemaVersion: 1, engineHttps: { ok: false, stage: 'tls', code: 'ETIMEDOUT' } }))
+vi.mock('./networkFailureDiagnostics', async () => ({
+  ...await vi.importActual<typeof import('./networkFailureDiagnostics')>('./networkFailureDiagnostics'),
+  collectTunnelFailureDiagnostics: (...args: any[]) => diagnostics(...args)
+}))
+vi.mock('./xrayEngine', () => ({ getXrayStatus: () => ({ running: true, startedAt: 1000, socksPort: 50123 }), getXrayDialTarget: () => ({ host: '192.0.2.1', port: 443 }) }))
 
 vi.mock('electron', () => ({
   app: { getPath: () => '/tmp/vpnte-test', getAppPath: () => '/tmp/vpnte-test' },
@@ -47,7 +53,8 @@ vi.mock('./tunController', () => ({
       vpnProfileName: 'Test'
     })
   },
-  getDirectProxyPort: () => null
+  getDirectProxyPort: () => null,
+  getTunRuntimeDir: () => '/tmp/vpnte-test'
 }))
 vi.mock('./serverGroups', () => ({
   serverGroups: { getGroups: () => [], createGroup: vi.fn(), deleteGroup: vi.fn() },
@@ -60,6 +67,7 @@ vi.mock('./serverGroups', () => ({
 beforeEach(() => {
   vi.clearAllMocks()
   vi.resetModules()
+  tunnelRunning = true
   tunnelStartedAt += 1000 // bust the per-session probe cache between cases
 })
 
@@ -78,6 +86,32 @@ describe('tunnelHttpProbe target list', () => {
 })
 
 describe('tunnelHttpProbe egress validation', () => {
+  it('logs per-target error codes and core diagnostics before returning failure (AT-07-002 / AT-08-001)', async () => {
+    axiosGet.mockRejectedValue(Object.assign(new Error('private.example 192.0.2.1'), { code: 'ETIMEDOUT' }))
+    const { tunnelHttpProbe } = await import('./serverPicker')
+    expect(await tunnelHttpProbe(true, 0)).toBeNull()
+    expect(diagnostics).toHaveBeenCalledOnce()
+    const { logEvent } = await import('./appLogger')
+    const entry = vi.mocked(logEvent).mock.calls.find(call => call[2] === 'tunnel HTTPS probe results')!
+    expect(entry[3]).toMatchObject({ outcomes: [
+      { target: 'gstatic-204', code: 'ETIMEDOUT' }, { target: 'google-204', code: 'ETIMEDOUT' },
+      { target: 'cloudflare-204', code: 'ETIMEDOUT' }, { target: 'cloudflare-ip-trace', code: 'ETIMEDOUT' }
+    ] })
+    expect(JSON.stringify(vi.mocked(logEvent).mock.calls)).not.toMatch(/private\.example|192\.0\.2\.1/)
+    await tunnelHttpProbe(true, 0)
+    expect(diagnostics).toHaveBeenCalledOnce()
+  })
+  it('discards a successful result from the previous session (AT-07-002)', async () => {
+    let complete!: (value: any) => void
+    axiosGet.mockReturnValue(new Promise(resolve => { complete = resolve }))
+    const { tunnelHttpProbe, getLastSuccessfulTunnelProbeAt } = await import('./serverPicker')
+    const old = tunnelHttpProbe(true, 0)
+    tunnelStartedAt += 1000
+    complete({ status: 200, data: 'ip=203.0.113.7\n' })
+    expect(await old).toBeNull()
+    expect(getLastSuccessfulTunnelProbeAt()).toBe(0)
+    expect(diagnostics).not.toHaveBeenCalled()
+  })
   it('returns a latency when a generate_204 endpoint answers 204', async () => {
     axiosGet.mockImplementation((url: string) =>
       url.includes('generate_204')

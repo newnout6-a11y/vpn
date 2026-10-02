@@ -85,6 +85,7 @@ export interface XrayEngineStatus {
 }
 
 interface XrayState {
+  dialTarget?: { host: string; port: number }
   running: boolean
   proc: ChildProcess | null
   socksPort: number | null
@@ -418,7 +419,12 @@ export function buildXrayProbeConfig(
  * adapter lockdown is active.
  */
 export async function resolveServerAddress(server: string, signal?: AbortSignal): Promise<string | null> {
-  return resolveXrayEndpoint(server, signal)
+  return resolveXrayEndpoint(server, signal, details => logEvent('info', 'xray', 'bootstrap resolution stage', details))
+}
+
+// Internal diagnostic input; never publish the address in diagnostic details.
+export function getXrayDialTarget(): { host: string; port: number } | null {
+  return activeXrayState.running ? activeXrayState.dialTarget ?? null : null
 }
 
 /**
@@ -525,6 +531,13 @@ export async function startXray(
     if (!resolvedIp && isIP(server) === 0) {
       resolvedIp = await timed('resolve-server', () => resolveServerAddress(server, options.signal))
     }
+    logEvent('info', 'xray', 'bootstrap destination selected', {
+      method: options.resolvedIp ? 'supplied-resolution' : isIP(server) ? 'literal' : resolvedIp ? 'resolved' : 'engine-resolution-required',
+      family: isIP(resolvedIp || server),
+      port: Number(sbOutbound.server_port),
+      stage: 'before-process-start'
+    })
+    const dialTarget = { host: resolvedIp || server, port: Number(sbOutbound.server_port) }
 
     const socksPort = options.portOverride ?? (await timed('pick-port', pickFreeLocalPort))
 
@@ -550,9 +563,9 @@ export async function startXray(
     const pid = child.pid ?? 0
     // Own the spawned child before any asynchronous persistence or readiness.
     activeXrayState = { running: false, proc: child, socksPort, exePath, configPath,
-      logPath, startedAt: Date.now(), resolvedIp }
+      logPath, startedAt: Date.now(), resolvedIp, dialTarget }
     let childStderr = ''
-    child.stderr?.on('data', (chunk) => { childStderr += chunk.toString() })
+    child.stderr?.on('data', (chunk) => { childStderr = (childStderr + chunk.toString()).slice(-64 * 1024) })
     child.on('error', (error) => {
       if (!child.pid) exitedChildren.add(child) // Spawn failure; no process exists.
       logEvent('warn', 'xray', 'xray process error', error)
@@ -609,13 +622,16 @@ export async function startXray(
         configPath,
         logPath,
         startedAt: Date.now(),
-        resolvedIp
+        resolvedIp,
+        dialTarget
       }
 
       logEvent('info', 'xray', 'xray engine started successfully', {
         socksPort,
         pid,
-        resolvedIp
+        resolvedIp,
+        stage: 'local-socks-ready',
+        remoteVerified: false
       })
 
       completed = true
