@@ -555,3 +555,17 @@
 
 ### Rollback
 - Revert the scoped route/IP/cancel change. Settings, profile and ownership manifest formats remain compatible. Own temporary test/build logs removed after recording results.
+
+
+## 2026-10-02/03 — WP-3 / WP-0: ускорение правил Windows Firewall
+
+- Владелец разрешил исправить и измерить firewall участок. Начальный checkout 74c5019 был чистым. New/Get/Remove собственных правил теперь используют COM HNetCfg.FwPolicy2/FwRule; snapshot/set/restore профилей, NotConfigured, durable journal, TUN barrier, Allow-before-Block и независимый CIM read-back исключений сохранены. Lazy handle не кеширует коллекции или proof; после удаления выполняется свежая проверка. Physical-adapter policy запрещает новый firewall API. Backend указан в command timing.
+- Native disabled-rule benchmark, три пары production типов: create CIM604/562/590 vs COM212/72/73 ms; read CIM326/333/346 vs COM77/25/35; verified remove CIM954/1022/1149 vs COM172/157/167. 3/3 CIM signatures совпали. Расширенные IPv6/duplicate-name fixtures тоже 3/3 совпали, 14 rules/API. Исправлена найденная native проверкой ошибка COM interface setter: явная VARIANT array allocation вместо string[] cast. Исходный IPv6 loopback отклоняется обоими API, прежняя обработка сохранена.
+- Все тестовые правила были выключены, уникальный benchmark namespace, profilesUnchanged/activeOwnRulesUnchanged/cleanupOk=true. Финальное CIM/COM чтение текущих правил: 11/11, имена равны. Остаток VPNTE-benchmark rules — 0. Действующий VPN и установленный клиент не менялись. Измерено ускорение компонентов; новые full start/stop/cancel времена и L3 egress/leaks/boot acceptance ещё не подтверждены. Полные данные, первые failed runs и границы записаны в lifecycle journal, этап 28.
+- `npm.cmd run typecheck`: exit 0. Focused шестью suites (точная команда в этапе 28): 139 passed / 1 skipped, exit 0. Финальный `npm.cmd test -- --maxWorkers=4`: exit 0, 182 files passed / 2 skipped, 2040 tests passed / 10 skipped / 0 failed, 109.29 s. `python -X utf8 ../docs/04-приёмочные-тесты/traceability/check-coverage.py`: exit 0, AC927/927 F210/210. `git diff --check`: exit 0. Нормативные docs не менялись.
+- `npm.cmd run dist:win`: exit 0, Electron 44.4.3 NSIS. 10 packaged-ASAR markers проверены, main совпадает с compiled output, SHA256 62b4552ec859d52b45cfd0f82df2f23e2cbfb11d09925a6fb31b4031e05d3949. Optional snapshot пропущен как раньше.
+- Installer `vpn-tunnel-enforcer/dist/VPN-Tunnel-Enforcer-Setup-1.1.22.exe`, 139167722 bytes, 03.10.2026 00:02:15 MSK, SHA256 DDEDA7E356AD54EDD40BDEE8AFC59972845F1FBE5CFF634B77755E89623C16BC, NotSigned. Artifact заменяет предыдущий с тем же номером; агентом не установлен. Удаление собственных временных файлов отклонено automatic approval review (`blocked by policy` без пояснения), они оставлены в `.tmp`; прежние артефакты сохранены.
+
+### Откат
+
+- Revert scoped firewall API change; settings/profile/recovery manifest форматы совместимы. Возвращает прежние NetSecurity операции с правилами.

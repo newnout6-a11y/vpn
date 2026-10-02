@@ -746,3 +746,66 @@ Durable write path (unique wx + fsync + ACL + rename) не изменён. Known
 - Новый установщик `vpn-tunnel-enforcer/dist/VPN-Tunnel-Enforcer-Setup-1.1.22.exe`: **139166458 bytes**, **02.10.2026 23:18:45 МСК**, SHA256 **BEE4F9D7ACAE234DFFFBF8072ED5F55A59E4810DA12FECDF86139FA92B0B0EAF**, Authenticode **NotSigned**. Заменяет предыдущий artifact с тем же номером 1.1.22. Клиент агентом не установлен; новые фактические времена подключения/отмены пока не подтверждены. Собственные временные test/build логи удаляются после записи результатов.
 
 **Откат:** revert этого scoped исправления; profiles/settings/manifests совместимы с предыдущей сборкой. Вернёт прежнюю эвристику маршрутов и лишние IP/cleanup волны.
+
+
+### 2026-10-02 — этап 28: прямой API правил Windows Firewall (WP-3 / WP-0)
+
+**Граница:** владелец разрешил исправление и замеры следующего firewall участка. Начальный checkout `74c5019`, чистый. AT-03-003/004/007/008/009 и AT-00-005; сохранены условия AC-LEAK-KS/RCV, F-030/F-035/F-036/F-186. Нормативные документы не меняются. L3 leak/boot/OS-матрица этим этапом не объявляется выполненной.
+
+#### Установленный клиент перед изменением
+
+- Повторно прочитан текущий `app.log` через `node scripts/analyze-lifecycle-log.mjs <app.log>`: exit 0, 0 invalid lines, 0 out-of-order records, 0 незавершённых IPC. Последние штатные start-direct-vpn (23:21–23:22 МСК): **6306 / 5085 / 5198 ms**, stop-tun **3555 / 3349 ms**, cancel-tun **2871 ms**. Это сборка этапа 27, не COM-изменение.
+- Firewall await старта **2383 / 2105 / 2247 ms**, native apply **2140 / 1831 / 1952 ms**. Два тёплых apply: stale cleanup **346 / 381**, create allows **659 / 662**, set Block **98 / 131**, exceptions **714 / 766 ms**. Два обычных restore: profiles **188 / 194**, remove rules **1136 / 1137 ms**. Поэтому меняется именно доступ к правилам.
+
+#### Реальные Windows-замеры
+
+Замеры выполнялись в отдельном скрытом elevated процессе на **выключенных** временных правилах с уникальным `VPNTE-benchmark-<guid>-` префиксом. Настройки профилей не менялись. Существующие VPNTE-killswitch правила не создавались, не удалялись и не переключались. Пары выполнялись с чередованием порядка CIM→COM / COM→CIM. Новые правила независимо проверялись через NetSecurity/CIM.
+
+1. Read-only текущие собственные правила: первый CIM/COM **501/136 ms**, тёплые **364/31**, **361/63 ms**, counts **11/11**, имена совпали во всех парах.
+2. Базовый набор 11 отключённых Allow-правил, 3 пары:
+
+| Пара | Создание CIM / COM | Чтение CIM / COM | Удаление CIM / COM |
+| --- | ---: | ---: | ---: |
+| 0 | 609 / 83 ms | 399 / 26 ms | 450 / 175 ms |
+| 1 | 621 / 42 ms | 408 / 35 ms | 442 / 132 ms |
+| 2 | 616 / 42 ms | 449 / 40 ms | 495 / 143 ms |
+
+3. Набор production типов: program, interface, IPv4 loopback in/out, LAN CIDR set, TUN CIDR, DHCP UDP 67/68, NTP UDP 123, user app/IP. Попыток 12, реально 10 правил: IPv6 loopback `::1/128` **отклоняется обоими API** на этой Windows; прежние optional catch/WARN сохранены. Использован фактический production prelude, заменён только namespace тестовых правил и Enabled=False. Независимые CIM signatures сравнивали Direction/Action/Enabled/Profile/EdgeTraversalPolicy, Program, Remote/LocalAddress, Protocol/Remote/LocalPort, InterfaceAlias, PolicyStoreSourceType. **3/3 полных набора совпали**.
+
+| Пара | Создание CIM / COM | Чтение CIM / COM | Удаление с новым доказательством CIM / COM |
+| --- | ---: | ---: | ---: |
+| 0 | 604 / 212 ms | 326 / 77 ms | 954 / 172 ms |
+| 1 | 562 / 72 ms | 333 / 25 ms | 1022 / 157 ms |
+| 2 | 590 / 73 ms | 346 / 35 ms | 1149 / 167 ms |
+
+4. Расширенный набор: ещё обычные IPv6 remote/local `2001:db8::1/128` и **две разные IPv4 записи с одним DisplayName**, 14 реально созданных правил. Прогон совпал по времени с первым полным suite, поэтому нагрузка выше; не смешивается с тёплыми числами предыдущей таблицы. **3/3 signatures совпали**, обе одноимённые записи удалены; counts перед удалением 14 в каждом API.
+
+| Пара | Создание CIM / COM | Чтение CIM / COM | Удаление с доказательством CIM / COM |
+| --- | ---: | ---: | ---: |
+| 0 | 1350 / 315 ms | 508 / 124 ms | 2217 / 340 ms |
+| 1 | 1175 / 108 ms | 589 / 40 ms | 1909 / 320 ms |
+| 2 | 1237 / 119 ms | 617 / 37 ms | 1798 / 283 ms |
+
+Все законченные прогоны: cleanupOk=true, profilesUnchanged=true; production shaped и expanded также activeOwnRulesUnchanged=true. Первый строгий benchmark остановился на старом IPv6 loopback HRESULT 0x80070057 и удалил свои артефакты; затем failures регистрировались отдельно для каждой shape и сравнивались наборы реально созданных правил. Первое сравнение выявило ошибку нового интерфейсного setter: string[] не подходит COM Automation. Простое приведение к object[] в legacy host сохраняло string[] через covariance; исправлено явным `[Array]::CreateInstance([object], count)` и заполнением строками. Тест с реальным **не зарегистрированным** FwRule проверяет setter production функции, а Add подменён объектом в памяти, без системных эффектов.
+
+#### Реализация и границы безопасности
+
+- `firewallRulesApi.ts`: New/Get/Remove через `HNetCfg.FwPolicy2` / `HNetCfg.FwRule`, ленивый handle на команду; коллекции и доказательства не кешируются. Profile Any — NET_FW_PROFILE2_ALL, protocol ставится до ports, EdgeTraversal=false. Input создания ограничен нашими именами/Allow/Any/in-or-out/boolean/TCP-or-UDP. Query принимает только собственный namespace, сохраняя видимость старых prefix имён. После удаления — свежая проверка нулевого остатка, включая duplicates; factory/query/remove/add/null failures не превращаются в успех.
+- Профили по-прежнему snapshot/set/restore через NetSecurity, сохраняется NotConfigured и независимый read-back каждого профиля. Ленивый COM factory позволяет выполнить все три независимых profile restore даже при недоступном rule API; такая компенсация остаётся ошибкой, manifest не удаляется как успешно завершённый.
+- Durable prepared journal, trusted TUN barrier, обязательные allows до Block, exception validation и независимый CIM filter read-back сохранены. Автоматического повторения после COM ошибок/неизвестного helper outcome нет. Известный отказ helper до dispatch сохраняет прежний защищённый file fallback. Physical-adapter policy отдельно запрещает firewall COM и новые primitives; общие опасные токены не разрешались.
+- `command timing` дополнен фиксированным `ruleBackend: com | netsecurity`; native phase markers сохранены. Это наблюдаемость, не доказательство защищённости.
+- Справка Microsoft: [INetFwRule Interfaces](https://learn.microsoft.com/en-us/windows/win32/api/netfw/nf-netfw-inetfwrule-put_interfaces), [ALL profiles](https://learn.microsoft.com/en-us/windows/win32/api/icftypes/ne-icftypes-net_fw_profile_type2), [Add](https://learn.microsoft.com/en-us/windows/win32/api/netfw/nf-netfw-inetfwrules-add), [Remove](https://learn.microsoft.com/en-us/windows/win32/api/netfw/nf-netfw-inetfwrules-remove). Поведение проверено на текущем хосте; равенство выключенных фильтров не заменяет L3 egress/IPv6/утечки/Group Policy/boot recovery acceptance.
+
+#### Проверки
+
+- Focused: `npx.cmd vitest run src/main/firewallRulesApi.test.ts src/main/firewallTransactions.test.ts src/main/firewallExceptionReadback.test.ts src/main/firewallManifestSecurity.test.ts src/main/firewallKillSwitchValidation.test.ts src/main/elevatedPsHelper.test.ts --maxWorkers=4` — **6 files passed, 139 tests passed / 1 skipped**, exit 0, 13.62 s. Последующая проверка фиксированного backend logging включена в окончательный full suite.
+- До адаптации старых NetSecurity fixtures первый focused run: 29 failed / 94 passed / 1 skipped. Затем исправлены fixture boundary, sort/path oracle и интерфейсный setter; проверка helper также поймала запрещённый токен в комментарии. Удалён только этот комментарный токен, blacklist не ослаблен. Промежуточные failed runs не приняты за успех.
+- Первый full `npm.cmd test -- --maxWorkers=4`: **182 files passed / 2 skipped, 2039 tests passed / 10 skipped / 0 failed**, exit 0, 109.76 s. После него добавлены legacy-prefix regression и backend log oracle, запущен повторный полный suite на окончательном коде.
+- `python -X utf8 ../docs/04-приёмочные-тесты/traceability/check-coverage.py`: exit 0, **AC927/927 F210/210**.
+
+**Откат:** revert scoped firewall API change; профили, settings и recovery manifest форматы совместимы. Вернёт более медленные NetSecurity операции с правилами. Компонентные замеры подтверждают ускорение, полный установленный start/stop/cancel новой сборки пока не измерен.
+
+- Окончательный `npm.cmd run typecheck` — exit 0; повторён сборкой. Финальный `npm.cmd test -- --maxWorkers=4` — **182 files passed / 2 skipped, 2040 tests passed / 10 skipped / 0 failed**, exit 0, **109.29 s**. Ожидаемый stderr RootErrorBoundary сохранён. После этого runtime/test source не менялся. `git diff --check` exit 0.
+- `npm.cmd run dist:win` — exit 0, Electron 44.4.3 / NSIS. Необязательный V8 snapshot пропущен (`@electron/mksnapshot` отсутствует). Первый artifact verifier использовал POSIX путь внутри Windows ASAR и не нашёл файл; исправлен только временный verifier на native path separators. Повторная проверка прошла: **10 маркеров** нового backend/старых safety checks, packaged main побайтово равен `out/main/index.js`; SHA256 **62b4552ec859d52b45cfd0f82df2f23e2cbfb11d09925a6fb31b4031e05d3949**.
+- Финальное read-only сравнение на окончательном source: **CIM11 / COM11, имена совпали**. Отдельный свежий NetSecurity query: **0 VPNTE-benchmark правил осталось**. Удаление собственных временных benchmark/test/build/verifier файлов дважды отклонено автоматической проверкой инструментов: `blocked by policy`, иной причины не предоставлено. Файлы оставлены в `.tmp`; прежние чужие файлы сохранены.
+- Установщик `vpn-tunnel-enforcer/dist/VPN-Tunnel-Enforcer-Setup-1.1.22.exe`: **139167722 bytes**, **03.10.2026 00:02:15 МСК**, SHA256 **DDEDA7E356AD54EDD40BDEE8AFC59972845F1FBE5CFF634B77755E89623C16BC**, Authenticode **NotSigned**. Заменяет предыдущий artifact с тем же номером 1.1.22. Агент его не устанавливал, действующий VPN сохранён; full installed start/stop/cancel и L3 на этой сборке пока не измерены.

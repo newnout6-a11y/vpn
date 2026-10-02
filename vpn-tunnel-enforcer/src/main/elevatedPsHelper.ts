@@ -60,6 +60,9 @@ const BLOCKED_SCRIPT_TOKENS = [
 
 const POLICY_REQUIRED_TOKENS: Record<ElevatedPsPolicy, RegExp[]> = {
   'firewall-killswitch': [
+    /\bGet-VpnteFirewallRuleNames\b/i,
+    /\bNew-VpnteFirewallRule\b/i,
+    /\bRemove-VpnteFirewallRules\b/i,
     /\bGet-NetFirewallProfile\b/i,
     /\bSet-NetFirewallProfile\b/i,
     /\bNew-NetFirewallRule\b/i,
@@ -90,6 +93,8 @@ const POLICY_FORBIDDEN_TOKENS: Record<ElevatedPsPolicy, RegExp[]> = {
     /\broute\s+(?:add|change|delete)\b/i
   ],
   'physical-adapter-lockdown': [
+    /\bHNetCfg\.Fw(?:Policy2|Rule)\b/i,
+    /\b(?:Get-VpnteFirewallRuleNames|New-VpnteFirewallRule|Remove-VpnteFirewallRules)\b/i,
     /\bGet-NetFirewallProfile\b/i,
     /\bSet-NetFirewallProfile\b/i,
     /\bNew-NetFirewallRule\b/i,

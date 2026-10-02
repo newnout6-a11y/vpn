@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmdirSync, unlinkSync, writeFileS
 import { join } from 'node:path'
 import ts from 'typescript'
 import { describe, expect, it, vi } from 'vitest'
+import { FIREWALL_RULES_BOUNDARY_FIXTURE_PS } from './testFixtures/firewallRulesBoundary'
 
 vi.mock('./admin', () => ({ isProcessElevated: async () => false }))
 vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
@@ -78,6 +79,7 @@ function Get-NetFirewallAddressFilter { param([Parameter(ValueFromPipeline=$true
 } }
 $success=$false;$failure=''
 try {
+${FIREWALL_RULES_BOUNDARY_FIXTURE_PS}
 ${generate(policy)}
   $success=$true
 }catch{$failure=$_.Exception.Message}
@@ -99,10 +101,11 @@ Write-Output ('RESULT:'+(@{success=$success;error=$failure;bulk=$script:bulk;ass
 }
 
 describe.skipIf(process.platform !== 'win32' && !process.env.VPNTE_PWSH)('native application read-back (AT-03-004/007/008)', () => {
-  it('removes only both stale exception groups in one query, then freshly verifies the empty set (AT-03-004/008)', () => {
+  it('removes only both stale exception groups and freshly verifies removal and the empty set (AT-03-004/008)', () => {
     const result = run(0, 'cleanup-valid', true)
     expect(result).toMatchObject({ success: true, bulk: 0, association: 0, address: 0 })
     expect(result.queries).toEqual([
+      ['VPNTE-killswitch-user-*', 'VPNTE-killswitch-allow-extra-ip'],
       ['VPNTE-killswitch-user-*', 'VPNTE-killswitch-allow-extra-ip'], ['VPNTE-killswitch-user-*']
     ])
     expect(new Set(result.remaining)).toEqual(new Set(['VPNTE-killswitch-allow-app', 'VPNTE-killswitch-userish-foreign', 'other-user-foreign']))
