@@ -12,6 +12,11 @@ function run(events: unknown[], prefix = '') {
 }
 
 describe('read-only lifecycle timing analysis (AT-00-005)', () => {
+  it('retains the fresh runtime-exit preflight separately from process termination', () => {
+    const r = run([event(5, 'tun', 'stop timing', { totalMs: 5, phaseDurations: { 'runtime-stop-preflight': 2, 'rollback-baseline': 3 } })])
+    expect(r.timings[0].phases).toEqual({ 'runtime-stop-preflight': { durationMs: 2 }, 'rollback-baseline': { durationMs: 3 } })
+    expect(r.timings[0].phases['stop-runtime']).toBeUndefined()
+  })
   it('reports IPC and parallel/background stages separately without counting double', () => {
     const r = run([
       event(0, 'ipc', 'start-direct-vpn started'),

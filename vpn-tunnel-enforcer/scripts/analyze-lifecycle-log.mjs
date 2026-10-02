@@ -10,7 +10,7 @@ const phaseNames = new Set([
   'singbox-launch-submit', 'wait-singbox-process', 'adapter-lockdown', 'adapter-lockdown-await',
   'wait-tun-interface', 'tun-ownership-record', 'tun-interface-metric-set', 'tun-interface-metric-readback',
   'firewall-kill-switch-await', 'firewall-kill-switch', 'stop-xray', 'stop-runtime', 'wait-runtime-exit',
-  'rollback-baseline', 'disable-firewall', 'rollback-adapters', 'repair-dns',
+  'rollback-baseline', 'disable-firewall', 'rollback-adapters', 'repair-dns', 'runtime-stop-preflight',
   'stop-previous', 'cleanup-pid', 'rotate-log', 'resolve-server', 'pick-port', 'write-config',
   'config-preflight', 'write-pid', 'allow-firewall', 'wait-local-socks'
 ])

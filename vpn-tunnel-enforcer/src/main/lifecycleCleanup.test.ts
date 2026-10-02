@@ -30,6 +30,7 @@ function stopHarness(startupController: AbortController | null = null, startupCo
   const os = {
     startupController,
     startupCompletion,
+    isOwnedTunRuntimeRunning: vi.fn(async () => false),
     stopXray: done(), killOwnedRuntimeProcesses: done(), waitForOwnedRuntimeToExit: vi.fn(async () => true),
     rollbackTunNetworkBaselineIfApplied: vi.fn(async () => ({ success: true, message: 'restored' })),
     disableKillSwitchIfActive: vi.fn(async () => ({ success: true, message: 'restored' })),
@@ -39,12 +40,13 @@ function stopHarness(startupController: AbortController | null = null, startupCo
     logEvent: noop(), notify: noop(), notifyStatus: noop(), recordForensicTunEvent: noop(),
     clearRestartTimers: noop(), cancelLeakSelfTest: noop(), stopCompetingTunWatch: noop(), stopProxyWatchdog: noop()
   }
-  const stop = compile<(options?: { preserveNetworkProtection?: boolean }) => Promise<any>>(`
+  const stop = compile<((options?: { preserveNetworkProtection?: boolean }) => Promise<any>) & { setRunning(running: boolean): void }>(`
 let startInProgress=false,stopRequested=false,stopInProgress=false,userInitiatedStop=false,activeStartAbortController=startupController;
 let activeStartCompletion=startupCompletion,activeStopCompletion=null,activeStopPreservesProtection=false;
 let recoveryCancelGeneration=0,lastStartOptions=null,restartAttempt=0,transitionCancelRequested=false;
 let currentStatus={running:true,mode:'directVpn'},clashApiInfo=null,directProxyPort=null,tunnelProbePort=null;
-return ({${body('tunController.ts', 'stop')}}).stop;
+const controller = {${body('tunController.ts', 'stop')}};
+return Object.assign(controller.stop.bind(controller), { setRunning: (running) => { currentStatus.running = running } });
 `, os)
   return { stop, ...os }
 }
@@ -230,6 +232,25 @@ describe('lifecycle cleanup evidence and retries (AT-02-005 / AT-03-007)', () =>
     expect(startup.signal.aborted).toBe(true)
     await result
   })
+  it('skips a redundant runtime kill only after fresh exit proof on an idle/cancelled start (AT-02-001)', async () => {
+    const h = stopHarness()
+    h.stop.setRunning(false)
+    const result = await h.stop()
+    expect(h.isOwnedTunRuntimeRunning).toHaveBeenCalledExactlyOnceWith(true)
+    expect(h.killOwnedRuntimeProcesses).not.toHaveBeenCalled()
+    expect(h.waitForOwnedRuntimeToExit).not.toHaveBeenCalled()
+    expect(result.networkCleanup).toEqual({ baseline: true, firewall: true, adapters: true })
+  })
+  it.each(['present', 'unknown'])('keeps process termination and network cleanup when idle runtime is %s', async state => {
+    const h = stopHarness()
+    h.stop.setRunning(false)
+    if (state === 'present') h.isOwnedTunRuntimeRunning.mockResolvedValue(true)
+    else h.isOwnedTunRuntimeRunning.mockRejectedValue(new Error('read unavailable'))
+    await h.stop()
+    expect(h.killOwnedRuntimeProcesses).toHaveBeenCalledOnce()
+    expect(h.waitForOwnedRuntimeToExit).toHaveBeenCalledOnce()
+    expect(h.disableKillSwitchIfActive).toHaveBeenCalledOnce()
+  })
   it.each([{ rolledBack: true }, { rolledBack: false, skipped: true }])('skips redundant DNS recovery after confirmed adapter result %j', async result => {
     const h = stopHarness()
     h.rollbackPhysicalAdapterLockdownIfApplied.mockResolvedValue(result)
@@ -357,6 +378,21 @@ return startXray;
   return { start, ...os }
 }
 describe('Xray startup phase measurements (AT-02-002 / AT-02-004)', () => {
+  it.each([true, false])('classifies a firewall rejection with cancelled=%s without hiding real errors', async cancelled => {
+    const h = xrayStartHarness(), owner = new AbortController(), error = new Error('firewall fixture')
+    h.ensureKillSwitchProgramAllowed.mockImplementation(async () => {
+      if (cancelled) owner.abort()
+      throw error
+    })
+    if (cancelled) h.waitForLocalSocks.mockRejectedValue(new Error('cancelled'))
+    const result = h.start({ server: 'fixture.invalid' }, { signal: owner.signal })
+    if (cancelled) await expect(result).rejects.toThrow('cancelled')
+    else await result
+    if (cancelled) {
+      expect(h.logEvent).toHaveBeenCalledWith('info', 'xray', 'xray startup cancelled while awaiting firewall')
+      expect(h.logEvent.mock.calls.some(call => call[0] === 'warn' && call[2] === 'failed to ensure xray kill-switch allow rule')).toBe(false)
+    } else expect(h.logEvent).toHaveBeenCalledWith('warn', 'xray', 'failed to ensure xray kill-switch allow rule', error)
+  })
   it('fences cancellation during preserved connection-graph bootstrap before config publication (AT-02-004)', async () => {
     const h = xrayStartHarness()
     h.getNativeXrayProfile.mockReturnValue({ entry: { balancerTag: 'fixture' } })
@@ -480,6 +516,26 @@ return {start: () => ${name}(${mode === 'proxy' ? "'127.0.0.1:1080','socks5'" : 
 }
 describe.each(['direct', 'proxy'] as const)('background IP startup: %s (AT-00-003 / AT-02-002)', mode => {
   afterEach(() => { vi.clearAllTimers(); vi.useRealTimers() })
+  it('adopts an unchanged post-start IP once routes are confirmed, without a 16-wave HTTP loop (AT-07-007)', async () => {
+    vi.useFakeTimers()
+    const h = ipStartupHarness(mode)
+    h.areTunRoutesActive.mockResolvedValue(true)
+    await h.start()
+    await vi.advanceTimersByTimeAsync(8000)
+    expect(h.ipMonitor.getCurrentIp).toHaveBeenCalledOnce()
+    expect(h.ipMonitor.recheck).toHaveBeenCalledExactlyOnceWith(true, expect.any(Function))
+    expect(h.areTunRoutesActive).toHaveBeenCalledOnce()
+    expect(h.sendToMainWindow).toHaveBeenCalledOnce()
+  })
+  it('keeps the baseline unchanged and makes no repeated HTTP waves while routes are unconfirmed (AT-07-012)', async () => {
+    vi.useFakeTimers()
+    const h = ipStartupHarness(mode)
+    await h.start()
+    await vi.advanceTimersByTimeAsync(8000)
+    expect(h.ipMonitor.getCurrentIp).toHaveBeenCalledOnce()
+    expect(h.ipMonitor.recheck).not.toHaveBeenCalled()
+    expect(h.areTunRoutesActive).toHaveBeenCalledTimes(5)
+  })
   it.each(['preflight','native','fault'] as const)('fences cancellation while a main %s boundary is pending', async phase => {
     const h=ipStartupHarness(mode)
     let release!: (result:any)=>void
@@ -580,13 +636,14 @@ describe.each(['direct', 'proxy'] as const)('background IP startup: %s (AT-00-00
     let release!: (value: any) => void
     h.ipMonitor.recheck.mockReturnValue(new Promise(done => { release = done }))
     await h.start()
-    await vi.advanceTimersByTimeAsync(500)
+    h.areTunRoutesActive.mockResolvedValue(true)
+    await vi.advanceTimersByTimeAsync(2000)
     expect(h.ipMonitor.recheck).toHaveBeenCalledOnce()
     h.cancel()
     release({ ip: '198.51.100.1', isLeak: false })
     await Promise.resolve()
-    expect(h.ipMonitor.recheck).not.toHaveBeenCalledWith(true, expect.any(Function))
-    expect(h.areTunRoutesActive).not.toHaveBeenCalled()
+    expect(h.ipMonitor.recheck).toHaveBeenCalledExactlyOnceWith(true, expect.any(Function))
+    expect(h.sendToMainWindow).not.toHaveBeenCalled()
   })
   it('ignores cancellation during the final route probe', async () => {
     vi.useFakeTimers()

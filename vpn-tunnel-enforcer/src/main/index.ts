@@ -1120,32 +1120,27 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
     logEvent('warn', 'app', 'failed to start traffic forensics session', err)
   })
 
-  // Poll for the VPN IP instead of waiting a fixed delay. The TUN routes
-  // propagate within a few hundred ms on most systems, so polling every 500ms
-  // shows the VPN IP much sooner. We verify TUN is
-  // running on each attempt and stop after 16 tries. The intervals total 8s;
-  // provider requests can extend the background check beyond that.
-  // CRITICAL: we must NOT rebaseline (recheck(true)) until the IP has actually
-  // changed from the pre-VPN value. If we rebaseline too early (before TUN
-  // routes propagate), we'd set vpnIp = realIP, permanently breaking leak
-  // detection. So we use recheck(false) first, and only rebaseline once the
-  // IP differs from the pre-VPN baseline.
+  // The first post-start IP may already be the VPN IP. Verify selected TUN
+  // routes before adopting a fresh baseline; comparing two post-start IPs
+  // cannot detect propagation. Four 2s waits bound background retry frequency.
   const vpnIpPollGeneration = adaptiveVerificationGeneration
   const isCurrentVpnIpPoll = () => vpnIpPollGeneration === adaptiveVerificationGeneration && tunController.getStatus().running
   const pollVpnIp = async () => {
     // External providers describe the connection; they do not gate native
     // startup. Keep this request with the existing background IP polling.
-    const preVpnIp = (await ipMonitor.getCurrentIp(isCurrentVpnIpPoll)).ip
+    await ipMonitor.getCurrentIp(isCurrentVpnIpPoll)
     if (!isCurrentVpnIpPoll()) return
-    for (let attempt = 0; attempt < 16; attempt++) {
-      await new Promise(r => setTimeout(r, 500))
+    for (let attempt = 0; attempt < 4; attempt++) {
+      await new Promise(r => setTimeout(r, 2000))
       if (!isCurrentVpnIpPoll()) return
       try {
-        const ipInfo = await ipMonitor.recheck(false, isCurrentVpnIpPoll)
+        const routesActive = await areTunRoutesActive().catch(() => false)
         if (!isCurrentVpnIpPoll()) return
-        if (ipInfo.ip && ipInfo.ip !== preVpnIp) {
-          // IP changed — this is the VPN exit IP. Rebaseline now.
-          const rebased = await ipMonitor.recheck(true, isCurrentVpnIpPoll)
+        if (!routesActive) continue
+        const ipInfo = await ipMonitor.recheck(true, isCurrentVpnIpPoll)
+        if (!isCurrentVpnIpPoll()) return
+        if (ipInfo.ip) {
+          const rebased = ipInfo
           if (!isCurrentVpnIpPoll()) return
           try {
             sendToMainWindow('ip-changed', { ip: rebased.ip, isLeak: rebased.isLeak })
@@ -1165,7 +1160,7 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
         }
       } catch { /* retry on next interval */ }
     }
-    // Fallback: IP never changed after 8s.
+    // Final route check after the bounded background waits.
     // Self-blinding prevention: do NOT call recheck(true) if tunnel routes are not active,
     // otherwise the user's real ISP IP will overwrite vpnIp.
     try {
@@ -1395,22 +1390,25 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
   openSession({ id: profile.name || 'direct-vpn', name: profile.name || 'Direct VPN', mode: 'direct' })
 
   // Poll for the VPN IP instead of waiting a fixed delay (see startProtection).
-  // Same logic: use recheck(false) first, only rebaseline once IP changes.
+  // Adopt a fresh baseline only after selected TUN routes are confirmed.
   const vpnIpPollGeneration = adaptiveVerificationGeneration
   const isCurrentVpnIpPoll = () => vpnIpPollGeneration === adaptiveVerificationGeneration && tunController.getStatus().running
   const pollVpnIpDirect = async () => {
     // External providers describe the connection; they do not gate native
     // startup. Keep this request with the existing background IP polling.
-    const preVpnIpDirect = (await ipMonitor.getCurrentIp(isCurrentVpnIpPoll)).ip
+    await ipMonitor.getCurrentIp(isCurrentVpnIpPoll)
     if (!isCurrentVpnIpPoll()) return
-    for (let attempt = 0; attempt < 16; attempt++) {
-      await new Promise(r => setTimeout(r, 500))
+    for (let attempt = 0; attempt < 4; attempt++) {
+      await new Promise(r => setTimeout(r, 2000))
       if (!isCurrentVpnIpPoll()) return
       try {
-        const ipInfo = await ipMonitor.recheck(false, isCurrentVpnIpPoll)
+        const routesActive = await areTunRoutesActive().catch(() => false)
         if (!isCurrentVpnIpPoll()) return
-        if (ipInfo.ip && ipInfo.ip !== preVpnIpDirect) {
-          const rebased = await ipMonitor.recheck(true, isCurrentVpnIpPoll)
+        if (!routesActive) continue
+        const ipInfo = await ipMonitor.recheck(true, isCurrentVpnIpPoll)
+        if (!isCurrentVpnIpPoll()) return
+        if (ipInfo.ip) {
+          const rebased = ipInfo
           if (!isCurrentVpnIpPoll()) return
           try {
             sendToMainWindow('ip-changed', { ip: rebased.ip, isLeak: rebased.isLeak })

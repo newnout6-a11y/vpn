@@ -1,4 +1,4 @@
-import { recordOwnedTunAdapter, strictRecoveryRequired } from './recoveryManifest'
+import { recordOwnedTunAdapter, strictRecoveryRequired, readRecoveryManifest } from './recoveryManifest'
 import { executeRecoveryOperation, RecoveryWorkerError } from './recoveryPsWorker'
 import { exec as execCb, execFile as execFileCb } from 'child_process'
 import { writeFile, mkdir, copyFile, access, rename, stat, readFile } from 'fs/promises'
@@ -1363,13 +1363,39 @@ async function waitForOwnedRuntimeToExit(timeoutMs = 3000): Promise<boolean> {
 export async function areTunRoutesActive(): Promise<boolean> {
   if (process.platform !== 'win32') return true
   try {
+    if (!currentStatus.running) return false
+    const runtimePid = currentStatus.pid, runtimeStartedAt = currentStatus.startedAt
+    const alias = getTunAdapterAlias()
+    const owner = await readRecoveryManifest<{ interfaceGuid: string }>('tun-owner.json', (value: any) => {
+      if (!value || value.schemaVersion !== 1 || value.owner !== 'VPNTE' || value.alias !== alias
+        || !/^\{?[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\}?$/i.test(value.interfaceGuid)) {
+        throw new Error('Invalid TUN ownership snapshot')
+      }
+      return value
+    })
+    if (!owner) return false
     const stdout = await runPowerShell(`
-$aliases = @(${ALL_KNOWN_ALIASES.map(a => psSingleQuote(a)).join(', ')})
-$routes = @(Get-NetRoute -DestinationPrefix '0.0.0.0/0', '0.0.0.0/1' -ErrorAction SilentlyContinue |
-  Where-Object { $aliases -contains $_.InterfaceAlias })
-if ($routes.Count -gt 0) { 'true' } else { 'false' }
+$ErrorActionPreference = 'Stop'
+$namespace = 'root/StandardCimv2'
+$adapter = @(Get-CimInstance -Namespace $namespace -ClassName MSFT_NetAdapter | Where-Object { $_.Name -eq ${psSingleQuote(alias)} })
+if ($adapter.Count -ne 1 -or $adapter[0].InterfaceOperationalStatus -ne 1 -or
+    [string]$adapter[0].InterfaceGuid -ne ${psSingleQuote(owner.interfaceGuid)} -or
+    $adapter[0].DriverDescription -notmatch '^Wintun\\b' -or $adapter[0].PnPDeviceID -notlike 'SWD\\Wintun\\*') { 'false'; return }
+$index = $adapter[0].InterfaceIndex
+$addresses = @(Get-CimInstance -Namespace $namespace -ClassName MSFT_NetIPAddress -Filter "InterfaceIndex = $index" |
+  Where-Object { $_.IPAddress -eq '192.168.250.253' -and $_.PrefixLength -eq 30 })
+if ($addresses.Count -ne 1) { 'false'; return }
+# Ask Windows for the selected route, including fragmented prefixes and more
+# specific competing routes. These lookups send no packets to the canaries.
+foreach ($destination in @('1.1.1.1', '8.8.8.8', '208.67.222.222')) {
+  $found = Invoke-CimMethod -Namespace $namespace -ClassName MSFT_NetRoute -MethodName Find -Arguments @{RemoteIPAddress=$destination}
+  $routes = @($found.CmdletOutput | Where-Object { $_.DestinationPrefix })
+  if ($found.ReturnValue -ne 0 -or $routes.Count -ne 1 -or $routes[0].InterfaceIndex -ne $index) { 'false'; return }
+}
+'true'
 `, 3000)
-    return String(stdout || '').toLowerCase().includes('true')
+    return currentStatus.running && currentStatus.pid === runtimePid && currentStatus.startedAt === runtimeStartedAt
+      && getTunAdapterAlias() === alias && String(stdout || '').trim().toLowerCase() === 'true'
   } catch (err) {
     logEvent('debug', 'tun', 'areTunRoutesActive probe failed', err)
     return false
@@ -3822,10 +3848,18 @@ export const tunController = {
     stopProxyWatchdog()
     await timedStop('stop-xray', () => stopXray('tun stopped')).catch(err => rememberCleanupError('xray process stop', err))
     try {
-      await timedStop('stop-runtime', () => killOwnedRuntimeProcesses())
-      if (!(await timedStop('wait-runtime-exit', () => waitForOwnedRuntimeToExit()))) {
-        cleanupErrors.push('runtime process stop: vpnte-sing-box.exe is still running')
-        logEvent('warn', 'tun', 'runtime process still running after stop')
+      // A cancelled early start may never have launched sing-box. Prove that
+      // no owned runtime remains after its owner settles before skipping kill.
+      const runtimePresent = currentStatus.running || await timedStop('runtime-stop-preflight',
+        () => isOwnedTunRuntimeRunning(true)).catch(() => true)
+      if (runtimePresent) {
+        await timedStop('stop-runtime', () => killOwnedRuntimeProcesses())
+        if (!(await timedStop('wait-runtime-exit', () => waitForOwnedRuntimeToExit()))) {
+          cleanupErrors.push('runtime process stop: vpnte-sing-box.exe is still running')
+          logEvent('warn', 'tun', 'runtime process still running after stop')
+        }
+      } else {
+        logEvent('info', 'tun', 'runtime stop skipped after fresh exit proof')
       }
     } catch (err) {
       rememberCleanupError('runtime process stop', err)

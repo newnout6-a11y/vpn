@@ -673,7 +673,8 @@ export async function startXray(
           logEvent('warn', 'xray', 'kill-switch allow rule for xray not confirmed', { message: res.message })
         }
       }).catch((err) => {
-        logEvent('warn', 'xray', 'failed to ensure xray kill-switch allow rule', err)
+        if (options.signal?.aborted) logEvent('info', 'xray', 'xray startup cancelled while awaiting firewall')
+        else logEvent('warn', 'xray', 'failed to ensure xray kill-switch allow rule', err)
       })
 
       try {

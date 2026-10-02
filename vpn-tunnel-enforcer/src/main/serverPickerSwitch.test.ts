@@ -126,6 +126,13 @@ beforeEach(async () => {
 })
 
 describe('server profile switching', () => {
+  it('retries a failed fresh baseline instead of releasing deferred monitoring with cached data (AT-07-012)', async () => {
+    state.ipMonitor.recheck.mockResolvedValueOnce({ ip: null as any })
+    await expect(selectProfileHandler({}, 'a')).resolves.toBeUndefined()
+    expect(state.ipMonitor.recheck).toHaveBeenCalledTimes(2)
+    expect(state.ipMonitor.releaseDeferredResume).toHaveBeenCalledOnce()
+    expect(state.ipMonitor.releaseDeferredResume.mock.invocationCallOrder[0]).toBeGreaterThan(state.ipMonitor.recheck.mock.invocationCallOrder[1])
+  })
   it('does not restart after cancellation during the new network-identity read (AT-02-004)', async () => {
     state.settings = { adaptiveBypassEnabled: true }
     const identity = deferred<string>()

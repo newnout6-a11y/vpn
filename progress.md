@@ -542,3 +542,16 @@
 
 ### Rollback
 - Revert this scoped reader/timing change; the adaptive key format and stored profiles remain compatible. This restores the slower module-based identity read. No firewall or network ownership manifest format changed.
+
+## 2026-10-02 — WP-0 / WP-2 / WP-6 / WP-7: repair route evidence, IP waves and early cancel
+
+- Owner approved repairing the three installed-log findings. Latest installed cycles before this patch: connect 6872/5420/5449 ms, ordinary stop 3762/3694 ms, cancel 3402 ms. CIM identity is already 498/474/469 ms. The old /0-/1 route heuristic misreported a live TUN with 60 fragmented routes; 57 public-IP successes occurred in 10 s. Full measured phases recorded in lifecycle journal stage 27.
+- Route evidence now uses trusted TUN ownership plus fresh CIM adapter/address checks and Windows-selected routes for three IPv4 canaries, without forcing the route's interface or sending packets. Unknown/invalid/late evidence fails closed. This is supporting route evidence, not full egress/IPv6 leak acceptance.
+- One in-flight HTTP provider wave per owner; abort losers and old generations, with no result cache between completed waves; back off 429 providers. Post-start checks use four 2 s waits and route proof before one baseline adoption; rebaseline does not duplicate the immediate timer wave. A failed fresh baseline returns null and profile switching retries rather than publishing cached data as freshly verified.
+- Early cancellation still awaits the startup owner/native compensation. Skip redundant runtime kill/wait only after fresh exit proof; errors retain kill/wait and all network rollback steps. Add runtime-stop-preflight timing; expected Xray firewall cancellation is info while real failure remains warn.
+- Final `npm.cmd run typecheck`: exit 0. Focused 11-file command listed in stage 27: 192 tests passed; final baseline-specific two-file run: 15 passed. Full `npm.cmd test -- --maxWorkers=4`: exit 0, 181 files passed / 2 skipped, 2017 tests passed / 10 skipped / 0 failed, 106.28 s. Coverage checker: AC927/927, F210/210, exit 0. Initial failures and their resolution recorded in stage 27.
+- Normative docs and network ownership formats unchanged. Full installed cancellation ≤1 s and new live start/stop/egress/IPv6 acceptance remain unverified; current connection was not changed.
+- `npm.cmd run dist:win`: exit 0, eight packaged-ASAR markers verified; main SHA256 b45dc2614702858c815dc2fea5f91dc37d95465c2a3a2e39bbf497ac9c386f04. Installer `vpn-tunnel-enforcer/dist/VPN-Tunnel-Enforcer-Setup-1.1.22.exe`, 139166458 bytes, 23:18:45 MSK, SHA256 BEE4F9D7ACAE234DFFFBF8072ED5F55A59E4810DA12FECDF86139FA92B0B0EAF, Authenticode NotSigned. Optional V8 snapshot remains unavailable; application builds successfully. Artifact supersedes the previous same-version installer and was not installed by the agent.
+
+### Rollback
+- Revert the scoped route/IP/cancel change. Settings, profile and ownership manifest formats remain compatible. Own temporary test/build logs removed after recording results.

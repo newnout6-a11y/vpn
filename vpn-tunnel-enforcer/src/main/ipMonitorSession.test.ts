@@ -20,6 +20,7 @@ beforeEach(async () => {
   module.ipMonitor.setVpnIp('203.0.113.1')
   await Promise.resolve()
   module.ipMonitor.stopMonitoring()
+  await module.fetchPublicIp()
   vi.mocked(axios.get).mockClear()
 })
 afterEach(() => { module.ipMonitor.stopMonitoring(); vi.clearAllTimers(); vi.useRealTimers() })
@@ -83,7 +84,7 @@ describe('IP monitor session ownership (AT-00-003 / AT-02-005)', () => {
   it.each([false, true])('coalesces rebaseline only for the same owner; scoped=%s', async scoped => {
     // Keep the periodic monitor active so adoption does not start another probe.
     module.ipMonitor.startMonitoring()
-    await Promise.resolve()
+    await module.fetchPublicIp()
     const pending = held()
     vi.mocked(axios.get).mockClear().mockReturnValue(pending.promise)
     const guard = scoped ? () => true : undefined

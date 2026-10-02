@@ -2055,6 +2055,7 @@ async function restartDirectVpnForSelectedProfile(profile: ServerProfile): Promi
             }
           }
           const ipInfo = await ipMonitor.recheck(true)
+          if (!ipInfo.ip) throw new Error('Fresh public IP baseline unavailable')
           releaseDeferredResume()
           logEvent('info', 'server-picker', 'direct VPN IP baseline refreshed after profile switch', {
             id: profile.id,

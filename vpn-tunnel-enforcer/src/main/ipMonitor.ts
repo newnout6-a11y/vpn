@@ -16,6 +16,15 @@ let intervalId: ReturnType<typeof setInterval> | null = null
 let ipCallbacks: ((ip: string, isLeak: boolean) => void)[] = []
 let checkInterval = 30000 // 30 seconds
 let lastSuccessAt = 0
+let readGeneration = 0
+const publicIpReads = new Map<(() => boolean) | undefined, { promise: Promise<string | null>; controller: AbortController }>()
+const providerBackoff = new Map<string, number>()
+
+function cancelPublicIpReads(): void {
+  readGeneration += 1
+  for (const read of publicIpReads.values()) read.controller.abort()
+  publicIpReads.clear()
+}
 
 // ─── suspended state ──────────────────────────────────────────────────────
 // While `suppressed === true`, every public surface that could compute or emit
@@ -49,13 +58,17 @@ export function setIpMonitorRecoveryCallback(cb: ((source: string) => void) | nu
   ipMonitorRecoveryCallback = cb
 }
 
-export async function fetchPublicIpFrom(url: string, canPublish?: () => boolean): Promise<string> {
+export async function fetchPublicIpFrom(url: string, canPublish?: () => boolean, signal?: AbortSignal): Promise<string> {
   try {
+    if (signal?.aborted) throw new Error('IP probe cancelled')
+    if ((providerBackoff.get(url) ?? 0) > Date.now()) throw new Error('IP provider backoff active')
     const resp = await axios.get(url, {
+      signal,
       timeout: 10000,
       responseType: 'text',
       transformResponse: (d) => d
     })
+    if (signal?.aborted) throw new Error('IP probe cancelled')
     const raw = typeof resp.data === 'string' ? resp.data.trim() : JSON.stringify(resp.data)
     let ip: string | null = null
     if (typeof resp.data === 'object' && resp.data !== null && !Array.isArray(resp.data)) {
@@ -90,35 +103,53 @@ export async function fetchPublicIpFrom(url: string, canPublish?: () => boolean)
     }
     throw new Error('response did not contain a valid IP')
   } catch (err: any) {
-    logEvent('debug', 'ip-monitor', 'public IP endpoint failed', { url, error: err.message || String(err) })
+    if (!signal?.aborted && err?.response?.status === 429) {
+      const retrySeconds = Number(err.response.headers?.['retry-after'])
+      const delayMs = Number.isFinite(retrySeconds) && retrySeconds > 0 ? Math.min(retrySeconds * 1000, 300000) : 60000
+      providerBackoff.set(url, Date.now() + delayMs)
+    }
+    if (!signal?.aborted) logEvent('debug', 'ip-monitor', 'public IP endpoint failed', { url, error: err.message || String(err) })
     throw err
   }
 }
 
 export async function fetchPublicIp(canPublish?: () => boolean): Promise<string | null> {
   if (canPublish && !canPublish()) return null
-  try {
-    return await Promise.any(IP_CHECK_URLS.map(url => fetchPublicIpFrom(url, canPublish)))
-  } catch {
-    logEvent('warn', 'ip-monitor', 'all public IP endpoints failed')
-    return null
-  }
+  const existing = publicIpReads.get(canPublish)
+  if (existing) return existing.promise
+  const controller = new AbortController(), generation = readGeneration
+  const isCurrent = () => generation === readGeneration && !controller.signal.aborted && (!canPublish || canPublish())
+  const promise = (async () => {
+    try {
+      const ip = await Promise.any(IP_CHECK_URLS.map(url => fetchPublicIpFrom(url, isCurrent, controller.signal)))
+      return isCurrent() ? ip : null
+    } catch {
+      if (isCurrent()) logEvent('warn', 'ip-monitor', 'all public IP endpoints failed')
+      return null
+    } finally { controller.abort() }
+  })().finally(() => {
+    if (publicIpReads.get(canPublish)?.controller === controller) publicIpReads.delete(canPublish)
+  })
+  publicIpReads.set(canPublish, { promise, controller })
+  return promise
 }
 
 function notifyCallbacks(ip: string, leak: boolean) {
   ipCallbacks.forEach(cb => cb(ip, leak))
 }
 
-function startMonitoring() {
+function startMonitoring(initialCheck = true) {
   if (intervalId) return
   // Initial check
-  checkIp()
+  if (initialCheck) void checkIp()
   intervalId = setInterval(checkIp, checkInterval)
 }
 
 async function checkIp() {
+  if (suppressed) return
+  const generation = readGeneration
   const ip = await fetchPublicIp()
-  if (suppressed) {
+  if (suppressed || generation !== readGeneration) {
     // Drop the result on the floor — we're inside a stop-tun rollback and
     // anything we'd compute here is a false positive.
     return
@@ -199,12 +230,15 @@ export const ipMonitor = {
       if (suppressed && !rebaseline) {
         return { ip: currentIp, isLeak: false, vpnIp }
       }
+      // A baseline requires a fresh successful sample. Preserve cached state
+      // on provider failure, but do not present it as a successful rebaseline.
+      if (rebaseline && !ip) return { ip: null, isLeak, vpnIp }
       if (ip) {
         currentIp = ip
         if (rebaseline) {
           vpnIp = ip
           isLeak = false
-          startMonitoring()
+          startMonitoring(false)
         } else if (vpnIp) {
           isLeak = ip !== vpnIp
         }
@@ -231,6 +265,7 @@ export const ipMonitor = {
   },
 
   clearVpnIp() {
+    cancelPublicIpReads()
     vpnIp = null
     isLeak = false
     stopMonitoring()
@@ -253,19 +288,21 @@ export const ipMonitor = {
   },
 
   /**
-   * Pause leak detection. Existing in-flight HTTP requests are allowed to
-   * complete but their results are discarded. While suspended, all public
+   * Pause leak detection. Abort in-flight provider waves and discard late
+   * results even if a provider ignores cancellation. While suspended, public
    * methods return the cached state with `isLeak=false` and notify callbacks
    * are never invoked. Idempotent.
    */
   suspend() {
     if (suppressed) return
     suppressed = true
+    cancelPublicIpReads()
     logEvent('info', 'ip-monitor', 'leak detection suspended (stop-tun rollback)')
   },
 
   /** Hold a later resume until the caller has installed a fresh VPN baseline. */
   deferResume() {
+    cancelPublicIpReads()
     resumeDeferred = true
     suppressed = true
     logEvent('info', 'ip-monitor', 'leak detection resume deferred (protected profile switch)')
