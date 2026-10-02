@@ -1,5 +1,6 @@
 import { recordOwnedTunAdapter, strictRecoveryRequired, readRecoveryManifest } from './recoveryManifest'
 import { executeRecoveryOperation, RecoveryWorkerError } from './recoveryPsWorker'
+import { OWNED_RUNTIME_STOP_SCRIPT } from './recoveryPsProtocol'
 import { exec as execCb, execFile as execFileCb } from 'child_process'
 import { writeFile, mkdir, copyFile, access, rename, stat, readFile } from 'fs/promises'
 import { join, dirname } from 'path'
@@ -1308,35 +1309,22 @@ export async function killOwnedTunRuntimeProcesses(): Promise<{ success: boolean
   if (process.platform !== 'win32') return { success: true, candidates: 0, killed: 0, names: [] }
   try {
     const runtimeDir = getTunRuntimeDir()
-    const stdout = await runPowerShell(`
-$runtimeDir = ${psSingleQuote(runtimeDir)}
-$names = @(${psSingleQuote(RUNTIME_EXE_NAME)}, 'vpnte-etw-sidecar.exe', 'vpnte-xray.exe')
-$rows = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-  Where-Object {
-    ($names -contains $_.Name) -and
-    $_.ExecutablePath -and
-    $_.ExecutablePath.StartsWith($runtimeDir, [System.StringComparison]::OrdinalIgnoreCase)
-  })
-$killed = @()
-foreach ($p in $rows) {
-  try {
-    Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop
-    $killed += [pscustomobject]@{ name = [string]$p.Name; pid = [int]$p.ProcessId }
-  } catch {}
-}
-[pscustomobject]@{
-  candidates = [int]$rows.Count
-  killed = [int]$killed.Count
-  names = @($killed | ForEach-Object { $_.name })
-} | ConvertTo-Json -Compress -Depth 3
-`, 8000)
-    const parsed = JSON.parse(String(stdout || '{}').trim() || '{}')
-    const names = Array.isArray(parsed.names) ? parsed.names.map((name: any) => String(name)) : []
+    let stdout: string
+    try { stdout = await executeRecoveryOperation({ op: 'stop-runtime', runtimeDir }, 8000) }
+    catch (error) {
+      // A lost reply may follow termination. Never replay a dispatched stop.
+      if (!(error instanceof RecoveryWorkerError) || error.code !== 'unavailable') throw error
+      stdout = await runPowerShell(`$runtimeDir = ${psSingleQuote(runtimeDir)}\n${OWNED_RUNTIME_STOP_SCRIPT}`, 8000)
+    }
+    const parsed = JSON.parse(String(stdout).trim())
+    if (!parsed || Object.keys(parsed).sort().join(',') !== 'candidates,killed,names' ||
+        !Number.isSafeInteger(parsed.candidates) || parsed.candidates < 0 || !Number.isSafeInteger(parsed.killed) || parsed.killed < 0 || parsed.killed > parsed.candidates ||
+        !Array.isArray(parsed.names) || parsed.names.length !== parsed.killed || parsed.names.some((name: unknown) => typeof name !== 'string' || !['vpnte-sing-box.exe', 'vpnte-etw-sidecar.exe', 'vpnte-xray.exe'].includes(name.toLowerCase()))) throw new Error('Owned runtime stop response is invalid')
     return {
       success: true,
-      candidates: Number(parsed.candidates) || 0,
-      killed: Number(parsed.killed) || 0,
-      names
+      candidates: parsed.candidates,
+      killed: parsed.killed,
+      names: parsed.names
     }
   } catch (err: any) {
     logEvent('debug', 'tun', 'killOwnedRuntimeProcesses failed', err)

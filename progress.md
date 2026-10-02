@@ -583,3 +583,20 @@
 ### Откат
 
 - Revert scoped adapter/cancellation change; сетевые baseline/settings/profiles совместимы. Возвращает прежние повторные native операции и apply после отмены.
+
+## 2026-10-03 — WP-3 / WP-2 / WP-0: baseline rollback и остановка runtime
+
+- Владелец разрешил следующий измеренный участок и запросил тесты. Начальный checkout cf3b16b, чистый. Установленная сборка этапа29: cold start4938 / warm3037/3116 ms, stops3394/3198 ms, cancel2221 ms. Baseline обычных stops1104/1118 ms; runtime stop788/787 ms + отдельный fresh exit wait231/171 ms. Adapter cancellation уже прерывает новые эффекты в snapshot phase.
+- Девять typed baseline restore/read-back и WinINet notification объединены в один PowerShell. SID guard, trusted journal, независимые шаги, сохранение manifest при partial/notification/malformed outcome и operation lock сохранены. Новый baseline native phase timing разделяет registryMs/notifyMs.
+- Остановка трёх фиксированных owned runtime exe передана existing recovery worker через закрытый stop-runtime request; прежний 8000 ms deadline и отдельный fresh exit proof сохранены. Только типизированный unavailable до dispatch допускает fallback. Unknown/dispatched failures не переигрываются. Malformed counts/names и CIM query failure не превращаются в успех. Прежний prefix ownership predicate сохранён; external proxy исключён.
+- Actual Windows benchmarks, три alternating pairs: runtime fresh PS489/455/441 vs warm worker150/92/92 ms; baseline two PS975/796/811 vs merged573/545/526 ms. Остановка только собственных renamed Node children в unique .tmp fixture; tracked exits и свежий inspect-runtime доказаны 6/6, workerExited/cleanupOk=true. Baseline только unique HKCU subtree, 9 verified slots / 6 types / cleanupOk во всех 6 samples. WinINet declaration компилируется, DLL calls подменены; реальные уведомления и сетевые настройки не изменялись. Это компоненты, полные installed stop/cancel ещё не подтверждены.
+- Focused baseline до изменений: 224 passed / 1 skipped. Expanded final nine-suite command из lifecycle journal этапа30: 299 passed / 1 skipped / 0 failed, exit0,52.62 s. Первый expanded focused и первый full run выявили два устаревших source oracles после переноса fixed stop script; они обновлены на shared production script / stop-runtime с сохранением исключения external proxy. Полный первый run2127 passed/1 failed/10 skipped не принят как окончательная проверка.
+- `npm.cmd run typecheck` повторён после последнего test oracle fix: exit0. `python -X utf8 ../docs/04-приёмочные-тесты/traceability/check-coverage.py`: exit0,AC927/927,F210/210. Нормативные docs не менялись.
+- Окончательный `npm.cmd test -- --maxWorkers=4` — **184 files passed / 2 skipped, 2128 tests passed / 10 skipped / 0 failed**, exit 0, **106.17 s**. Последние три focused suites — **132 passed**, exit 0. Typecheck после последней правки — exit 0; runtime/test source затем не менялся. Ожидаемый RootErrorBoundary stderr сохранён. Точные команды и первые отказы записаны в lifecycle journal этапа 30.
+- `npm.cmd run dist:win`: exit0, Electron44.4.3 NSIS. Optional snapshot пропущен как прежде. 6 packaged-ASAR markers, main совпадает с compiled output; SHA2561763c21247e138d95973fe701ceb3aae3a6ce6f8796f3474d66c581fc5206527. Installer dist/VPN-Tunnel-Enforcer-Setup-1.1.22.exe:139168882 bytes,03.10.2026 01:04:20 MSK,SHA25668AAA3C8FBB630D4952A0D16EE0890FFD32510FCBE803C47C2C6007A885BC6B6,NotSigned. Агентом не установлен, заменяет предыдущий same-version artifact. Runtime source после сборки не менялся, последний fix только test oracle.
+
+- Итоговые traceability AC 927/927 / F 210/210 и `git diff --check` — exit 0. Удалены 12 собственных временных файлов этапа 30; предыдущие артефакты сохранены.
+
+### Откат
+
+- Revert scoped baseline/stop change; manifest/settings/profile форматы совместимы. Возвращает два baseline процесса и свежий PowerShell для runtime stop.

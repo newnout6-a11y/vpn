@@ -19,6 +19,10 @@ function Get-CimInstance { [CmdletBinding()]param($ClassName)
   [pscustomobject]@{Name=$name;ExecutablePath=$path;ProcessId=1}
 }
 function Test-Path { [CmdletBinding()]param($LiteralPath) return -not ($global:variant -eq 'storageMissing' -or ($global:variant -eq 'absent' -and $LiteralPath -like '*firewall.json')) }
+function Stop-Process { [CmdletBinding()]param($Id,[switch]$Force)
+  if($Id -ne 1 -or -not $Force){throw 'Unexpected fixture stop'}
+  if($global:variant -eq 'stopError'){throw 'Fixture stop refused'}
+}
 function Get-Item { [CmdletBinding()]param($LiteralPath,[switch]$Force)
   $isFile=$LiteralPath -like '*.json' -or $LiteralPath -like '*tmp-*'
   $parent=$LiteralPath -eq [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
@@ -55,6 +59,30 @@ $value=Invoke-RecoveryOperation $request
   return JSON.parse(stdout.replace(/^\uFEFF/,'').trim())
 }
 describe('fixed recovery dispatcher native proof', () => {
+  it.skipIf(!native).each([
+    ['trusted', 1, 1, ['vpnte-sing-box.exe']], ['ownedSidecar', 1, 1, ['vpnte-etw-sidecar.exe']],
+    ['ownedXray', 1, 1, ['vpnte-xray.exe']], ['caseRuntime', 1, 1, ['vpnte-sing-box.exe']],
+    ['prefixRuntime', 1, 1, ['vpnte-sing-box.exe']],
+    ['foreignRuntime', 0, 0, []], ['wrongName', 0, 0, []], ['missingPath', 0, 0, []],
+    ['runtimeAbsent', 0, 0, []], ['stopError', 1, 0, []]
+  ])('stops only the fixed owned runtime set: %s', (variant, candidates, killed, names) => {
+    const result = run({ op: 'stop-runtime', runtimeDir: 'C:\\VPNTE-fixture-runtime' }, variant as string)
+    expect(JSON.parse(result.value)).toEqual({ candidates, killed, names })
+    expect(result).toMatchObject({ set: 0, removed: 0, queries: 1 })
+  }, 20000)
+  it.skipIf(!native)('does not treat a failed stop query as an empty successful result', () => {
+    expect(() => run({ op: 'stop-runtime', runtimeDir: 'C:\\VPNTE-fixture-runtime' }, 'queryError')).toThrow()
+  }, 20000)
+  it.skipIf(!native).each([
+    { op: 'stop-runtime', runtimeDir: 'relative' },
+    { op: 'stop-runtime', runtimeDir: 'C:\\..\\runtime' },
+    { op: 'stop-runtime', runtimeDir: 'C:\\runtime', pid: 1 },
+    { op: 'stop-runtime', runtimeDir: 'C:\\runtime', names: ['arbitrary.exe'] },
+    { op: 'stop-runtime', runtimeDir: 'C:\\runtime', script: 'Stop-Process' },
+    { op: 'STOP-RUNTIME', runtimeDir: 'C:\\runtime' }
+  ])('rejects expanded stop requests before native effects: %j', request => {
+    expect(() => run(request)).toThrow()
+  }, 20000)
   it.skipIf(!native).each([
     ['runtimeAbsent', 'false'], ['ownedSingBox', 'true'], ['ownedSidecar', 'true'], ['ownedXray', 'true'],
     ['wrongName', 'false'], ['foreignRuntime', 'false'], ['missingPath', 'false'], ['caseRuntime', 'true'],

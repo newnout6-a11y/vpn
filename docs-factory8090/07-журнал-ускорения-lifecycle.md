@@ -845,3 +845,49 @@ Durable write path (unique wx + fsync + ACL + rename) не изменён. Known
 - После записи результатов удалены **11 собственных временных файлов этого этапа** из `.tmp`; файлы предыдущих этапов не затронуты.
 
 **Откат:** revert scoped adapter/cancellation change. Manifest/settings/profile форматы совместимы; вернёт повторный Disable/reg.exe и прежний post-abort apply.
+
+### 2026-10-03 — этап 30: baseline rollback и остановка ядер (WP-3 / WP-2 / WP-0)
+
+**Граница:** владелец разрешил следующий участок и запросил тесты. Начальный checkout `cf3b16b`, чистый. Прочитаны требования системной безопасности, WP-3 / WP-0 и решения раздела 10 ТЗ-06. Сохранены AT-03-007/012, AT-02-001/005 и AT-00-003; нормативные `docs/` не менялись. Полный L3 acceptance и cancellation ≤1 s этим этапом не объявляются выполненными.
+
+#### Установленная сборка этапа 29
+
+- После перезапуска в 00:39:28 МСК установленный main совпадал с этапом 29 (`ab4a2493…`). Холодный start-direct-vpn **4938 ms**, тёплые **3037 / 3116 ms**; обычные stop-tun **3394 / 3198 ms**; cancel-tun **2221 ms**. Отменённый start **1866 ms**, success=false, не засчитывается как успешное подключение. Analyzer: 0 invalid lines / 0 out-of-order / 0 незавершённых IPC. Свежие IP/probe ответы успешны, это не полный leak acceptance.
+- Обычный stop: runtime-stop **788 / 787 ms**, отдельный exit wait **231 / 171 ms**, baseline rollback **1104 / 1118 ms**, firewall restore **564 / 520 ms**, adapters restore **322 / 284 ms**. После ранней отмены baseline **1048 ms** при окончательном stop **1281 ms**. Поэтому изменяется запуск PowerShell в baseline и runtime stop.
+- Этап 29 подтверждён: adapter native batch **691 / 558 / 537 ms**, общий lockdown **2179 / 1344 / 838 ms**. Cancel signal 00:40:06.189, adapter cancel 06.498 (309 ms), phase=snapshot, pendingRecovery=false, applied=false: после отмены новый mutation batch не запускался.
+
+#### Реализация
+
+- Baseline восстанавливает девять независимых typed registry snapshots с прежним read-back и уведомляет WinINet в **одном** PowerShell. SID guard, trusted manifest, operation lock и точные типы значений сохранены. Отказ одного шага не отменяет остальные и уведомление; malformed report / notification failure / partial restore сохраняют manifest. Удаление снимка требует всех девяти успешных результатов и успешного уведомления. Новое `baseline native phase timing` показывает registryMs / notifyMs.
+- Fixed `stop-runtime` request использует уже существующий recovery worker: только main-owned runtimeDir, три фиксированных имени ядер, прежний ownership predicate по пути. Произвольные PID, executable names и scripts запрещены на Node и PowerShell границах. Ошибка CIM query теперь возвращает отказ, а не пустой успех. Частичная остановка остаётся видимой владельцу cleanup.
+- Прежний deadline 8000 ms сохранён. Fallback на свежий PowerShell допускается только при типизированном `unavailable` до dispatch. Timeout, lost reply, worker exit, protocol/rejected/busy/closed и forged error не запускают повторную остановку. Ответ проверяется по полям, целочисленным counts и фиксированным именам; `{}` больше не означает успех.
+- Результат Stop-Process **не** является exit proof: прежняя свежая проверка отсутствия процессов, startup/native owner wait и сохранение защиты до доказанного выхода не удалены. Изменения не усиливают прежний prefix ownership predicate и не объявляют отдельные находки ownership полностью закрытыми.
+
+#### Нативные замеры на Windows
+
+Три пары с чередованием порядка, production функции до/после `cf3b16b`. Действующий VPN и установленный клиент не менялись.
+
+| Пара | Runtime stop: свежий PS / worker | Baseline: два PS / один PS |
+| --- | ---: | ---: |
+| 0 | 489 / 150 ms | 975 / 573 ms |
+| 1 | 455 / 92 ms | 796 / 545 ms |
+| 2 | 441 / 92 ms | 811 / 526 ms |
+
+- Runtime fixture: собственный Node child с переименованным executable в уникальной `.tmp/StopFixture-<uuid>` директории и отдельный настоящий recovery worker. Во всех 6 samples candidates=1 / killed=1, tracked child exit и последующий свежий inspect-runtime подтверждены. cleanupOk=true / workerExited=true. Измерен warm worker dispatch; его первоначальный запуск и полное отключение VPN в таблицу не включены.
+- Baseline fixture: уникальный HKCU subtree, настоящие production restore/read-back для девяти slots и шести типов Registry, включая отсутствие значения. WinINet Add-Type declaration действительно компилируется; DLL calls заменены проверкой fixture, реальные уведомления WinINet не отправлялись. В каждом sample 9 verified steps / 6 verified types, journalClearedAfterProof=true, fixtureCleanupOk=true. Merged registry **88 / 79 / 78 ms**, notification compilation **95 / 95 / 90 ms**. Реальные proxy/DNS/HKLM значения не менялись; protected manifest I/O и фактическая доставка WinINet notification этим benchmark не измерены.
+- Полученные числа подтверждают ускорение компонентов. Новые полные installed stop/cancel времена требуют установки артефакта и свежих логов.
+
+#### Проверки
+
+- До изменений: `npx.cmd vitest run src/main/systemNetwork.test.ts src/main/tunRuntimeExitProof.test.ts src/main/ownedRuntimeStatus.test.ts src/main/recoveryPsProtocol.test.ts src/main/recoveryPsWorker.test.ts src/main/recoveryPsWorkerNative.test.ts src/main/lifecycleCleanup.test.ts --maxWorkers=4` — **7 files / 224 passed / 1 skipped**, exit 0, 36.68 s.
+- Первый expanded focused run: **298 passed / 1 failed / 1 skipped**. Старый test oracle запрещал любое использование worker для stop; обновлён на различение fixed stop-runtime и read-only inspect-runtime. После исправления две suites отдельно: **48 passed**, exit 0.
+- Финальный `npx.cmd vitest run src/main/systemNetwork.test.ts src/main/ownedRuntimeStop.test.ts src/main/tunRuntimeExitProof.test.ts src/main/ownedRuntimeStatus.test.ts src/main/recoveryPsProtocol.test.ts src/main/recoveryPsWorker.test.ts src/main/recoveryPsWorkerNative.test.ts src/main/lifecycleCleanup.test.ts src/main/auditFixesRegression.test.ts --maxWorkers=4` — **9 files / 299 passed / 1 skipped / 0 failed**, exit 0, **52.62 s**. Native dispatcher fixtures подменяют Stop-Process, не завершают системные процессы. Baseline fixtures подменяют уведомление WinINet, сохраняют настоящие registry type/read-back checks.
+- Финальный `npm.cmd run typecheck` — exit 0. `python -X utf8 ../docs/04-приёмочные-тесты/traceability/check-coverage.py` — exit 0, **AC 927/927 / F 210/210**.
+
+- Первый полный `npm.cmd test -- --maxWorkers=4`: **2127 passed / 1 failed / 10 skipped**, 183 files passed / 1 failed / 2 skipped, exit 1, 111.54 s. Ещё один source test искал прежний inline stop script; теперь проверяет production shared script, его вызов и исключение external proxy. Поведенческие/native ownership tests сохранены.
+- После последней правки: `npx.cmd vitest run src/main/tunControllerRecoverySource.test.ts src/main/ownedRuntimeStop.test.ts src/main/recoveryPsProtocol.test.ts --maxWorkers=4` — **3 files / 132 passed**, exit 0, 55.84 s. Повторный окончательный `npm.cmd test -- --maxWorkers=4` — **184 files passed / 2 skipped, 2128 tests passed / 10 skipped / 0 failed**, exit 0, **106.17 s**. Ожидаемый stderr RootErrorBoundary сохранён. Повторный typecheck после последней правки — exit 0. Runtime/test source после этого не менялся.
+- `npm.cmd run dist:win` — exit 0, Electron 44.4.3 / NSIS. Optional V8 snapshot пропущен (`@electron/mksnapshot` отсутствует). Шесть новых/сохранённых markers проверены внутри packaged ASAR; main побайтово равен compiled output, SHA256 **1763c21247e138d95973fe701ceb3aae3a6ce6f8796f3474d66c581fc5206527**. Последующее исправление затронуло только test oracle, runtime source после сборки не менялся.
+- Новый установщик `vpn-tunnel-enforcer/dist/VPN-Tunnel-Enforcer-Setup-1.1.22.exe`: **139168882 bytes**, **03.10.2026 01:04:20 МСК**, SHA256 **68AAA3C8FBB630D4952A0D16EE0890FFD32510FCBE803C47C2C6007A885BC6B6**, Authenticode **NotSigned**. Заменяет предыдущий artifact с тем же номером; агентом не установлен. Полные новые stop/cancel и L3/boot acceptance ещё не измерены.
+- Финальные traceability **AC 927/927 / F 210/210** и `git diff --check` — exit 0. После записи результатов удалены **12 собственных временных файлов этапа 30**, прежние `.tmp` артефакты сохранены.
+
+**Откат:** revert scoped baseline/stop change. Manifest/settings/profile форматы совместимы; возвращаются отдельный notification процесс и свежий PowerShell для runtime stop.

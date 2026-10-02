@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import ts from 'typescript'
 import { describe, expect, it, vi } from 'vitest'
 import { RecoveryWorkerError } from './recoveryPsWorker'
-import { validateRecoveryRequest, type RecoveryRequest } from './recoveryPsProtocol'
+import { OWNED_RUNTIME_STOP_SCRIPT, validateRecoveryRequest, type RecoveryRequest } from './recoveryPsProtocol'
 
 const source = readFileSync(join(process.cwd(), 'src/main/tunController.ts'), 'utf8')
 const ast = ts.createSourceFile('tunController.ts', source, ts.ScriptTarget.Latest, true)
@@ -22,6 +22,7 @@ function harness(platform = 'win32') {
     getTunRuntimeDir: () => runtimeDir,
     executeRecoveryOperation: vi.fn(async (_request: RecoveryRequest, _deadline: number) => 'false'),
     RecoveryWorkerError,
+    OWNED_RUNTIME_STOP_SCRIPT,
     RUNTIME_EXE_NAME: 'vpnte-sing-box.exe',
     psSingleQuote: (text: string) => `'${text.replace(/'/g, "''")}'`,
     runPowerShell: vi.fn(async (_script: string, _deadline: number) => 'false'),
@@ -91,11 +92,12 @@ describe('fresh owned runtime status', () => {
   })
   it('does not route process termination through the readonly operation', async () => {
     const h = harness()
-    h.runPowerShell.mockResolvedValue('{"candidates":1,"killed":1,"names":["vpnte-sing-box.exe"]}')
+    h.executeRecoveryOperation.mockResolvedValue('{"candidates":1,"killed":1,"names":["vpnte-sing-box.exe"]}')
     const kill = new Function(...Object.keys(h), compile('killOwnedTunRuntimeProcesses'))(...Object.values(h)) as () => Promise<unknown>
     expect(await kill()).toMatchObject({ success: true, candidates: 1, killed: 1 })
-    expect(h.executeRecoveryOperation).not.toHaveBeenCalled()
-    expect(h.runPowerShell.mock.calls[0][0]).toContain('Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop')
+    expect(h.executeRecoveryOperation).toHaveBeenCalledExactlyOnceWith({ op: 'stop-runtime', runtimeDir }, 8000)
+    expect(h.executeRecoveryOperation).not.toHaveBeenCalledWith({ op: 'inspect-runtime', runtimeDir }, expect.anything())
+    expect(h.runPowerShell).not.toHaveBeenCalled()
   })
   it('keeps fresh proof in the wait loop and after its deadline', async () => {
     const isOwnedTunRuntimeRunning = vi.fn(async (_proof: boolean) => true).mockResolvedValueOnce(true).mockResolvedValueOnce(false)
