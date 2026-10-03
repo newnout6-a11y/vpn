@@ -645,6 +645,7 @@ export function Servers() {
 
   const handleSelect = async (id: string) => {
     if (id === activeId || switchingId) return
+    if (useAppStore.getState().serverSwitchingName || useAppStore.getState().connectionBusy) return
     const wasConnected = tunRunning
     const profile = profiles.find((p) => p.id === id)
     const profileName = profile?.name ?? id
@@ -654,7 +655,12 @@ export function Servers() {
     }
     setSwitchingId(id)
     try {
-      await window.electronAPI.serversSelect(id)
+      const result = await window.electronAPI.serversSelect(id)
+      if (result?.cancelled) {
+        await fetchProfiles(false)
+        emitServerChanged()
+        return
+      }
       setActiveId(id)
       emitServerChanged()
     } catch (err: any) {

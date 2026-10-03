@@ -229,7 +229,7 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
     // second click here is rejected while the first transition is still in
     // flight. Without this the user could double-start the tunnel (main does
     // guard it, but the UI used to still allow the click and then "broke").
-    if (useAppStore.getState().connectionBusy) return
+    if (useAppStore.getState().connectionBusy || useAppStore.getState().serverSwitchingName) return
     const transitionSeq = ++connectionTransitionSeq.current
     setConnectionBusy('connecting')
     addLog('info', t('dashboard.connecting'))
@@ -412,11 +412,14 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
     useAppStore.getState().setConnectionCancelling(true)
     setConfirmDisconnect(false)
     const cancellationTarget = isServerSwitching ? 'смену сервера' : 'подключение'
+    let switchCancellationRequested = false
     addLog('warn', `Отменяем ${cancellationTarget}…`)
     try {
       if (isServerSwitching) {
-        await window.electronAPI.serversCancelSwitch().catch(() => undefined)
+        await window.electronAPI.serversCancelSwitch()
         await window.electronAPI.cancelTransition()
+        useAppStore.getState().acknowledgeServerSwitchCancellation()
+        switchCancellationRequested = true
         addLog('info', 'Отмена смены сервера запрошена; текущий защищённый переход завершит очистку сам.')
       } else {
         const result = await window.electronAPI.cancelTun()
@@ -442,8 +445,12 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
       showToast('error', t('dashboard.cancelFailed'), err?.message || String(err))
       addLog('error', `Не удалось отменить ${cancellationTarget}: ${err?.message || String(err)}`)
     } finally {
-      useAppStore.getState().setConnectionCancelling(false)
-      setConnectionBusy(null)
+      // These IPCs only acknowledge the request. The selection owner releases
+      // cancellation after restart/rollback has actually completed.
+      if (!switchCancellationRequested || !useAppStore.getState().serverSwitchingName) {
+        useAppStore.getState().setConnectionCancelling(false)
+        setConnectionBusy(null)
+      }
     }
   }
 

@@ -989,7 +989,7 @@ export interface SplitTunnelChannels {
 /** Server/Profile Picker IPC channels */
 export interface ServerChannels {
   'servers:list': () => ServerProfile[]
-  'servers:select': (id: string) => void
+  'servers:select': (id: string) => void | { cancelled: true }
   'servers:get-active': () => { profile: ServerProfile | null; activeId: string | null }
   'servers:ping-all': () => ServerProfile[]
   'servers:resolve-ips': () => ServerProfile[]

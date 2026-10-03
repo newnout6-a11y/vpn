@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, lazy, Suspense } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import i18n from 'i18next'
-import { useAppStore } from './store'
+import { applyTerminalTunStatus, useAppStore } from './store'
 import { Sidebar, type SidebarPage } from './components/Sidebar'
 import { FirstRunWizard } from './components/FirstRunWizard'
 import { MacToast } from './design-system'
@@ -184,7 +184,7 @@ export default function App() {
       // still in progress and other UI (e.g. uptime pill) shouldn't snap to
       // the stopped state until tunController emits 'stopped'. Same for
       // 'adapting', where the protection never comes down at all.
-      if (!isTransitioning && !(isServerSwitching && status === 'stopped')) {
+      if (!isTransitioning) {
         store.setTunRunning(tunUp)
         store.setProxyDown(status === 'proxy-down')
       }
@@ -202,13 +202,11 @@ export default function App() {
       // Reset stale connection state on terminal transitions so the UI
       // doesn't show old VPN IP, leak results, or traffic stats after
       // a crash or disconnect.
-      if ((status === 'stopped' || status === 'killswitch-active') && !isServerSwitching) {
-        store.resetConnectionState()
-      }
+      applyTerminalTunStatus(status)
       if (!tunUp && !isRestarting && !isTransitioning && !isServerSwitching && store.mode === 'hard') store.setMode('off')
       if (status === 'running') {
         addLog('info', 'Защита включена — весь трафик идёт через VPN.')
-      } else if (status === 'stopped' && !isServerSwitching) {
+      } else if (status === 'stopped') {
         addLog('info', 'Защита выключена. Трафик идёт по обычному маршруту.')
       } else if (isStopping) {
         addLog('info', 'Останавливаем защиту — откатываем DNS, IPv6, файрвол…')

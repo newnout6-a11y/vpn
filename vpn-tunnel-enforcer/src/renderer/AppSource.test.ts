@@ -48,13 +48,22 @@ describe('App source regressions', () => {
     expect(source).toContain('90_000 * (2 ** failures)')
   })
 
-  it('keeps server-switch stop/start transitions from surfacing leak and disconnect UI', () => {
+  it('suppresses transient switch leak verdicts while applying definitive stop events (AT-00-008)', () => {
     const source = appSource()
 
     expect(source).toContain('store.serverSwitchingName && isLeak')
-    expect(source).toContain("isServerSwitching && status === 'stopped'")
-    expect(source).toContain("status === 'stopped' && !isServerSwitching")
+    expect(source).not.toContain("isServerSwitching && status === 'stopped'")
+    expect(source).toContain('applyTerminalTunStatus(status)')
     expect(source).toContain('stoppingNowRef.current || useAppStore.getState().serverSwitchingName')
+  })
+
+  it('all server selectors reject competing operations and distinguish cancelled IPC results (AT-00-007)', () => {
+    const inline = readFileSync(join(process.cwd(), 'src', 'renderer', 'components', 'ProfileSelectorInline.tsx'), 'utf8')
+    for (const source of [inline, dashboardSideSource(), serversSource()]) {
+      expect(source).toContain('useAppStore.getState().serverSwitchingName || useAppStore.getState().connectionBusy')
+      expect(source).toContain('if (result?.cancelled) {')
+    }
+    expect(serversSource()).toContain('await fetchProfiles(false)')
   })
 
   it("treats the protected-restart 'adapting' status as a transition, not a disconnect", () => {
@@ -69,7 +78,7 @@ describe('App source regressions', () => {
     expect(source).toContain('const isTransitioning = isStopping || isAdapting')
     expect(source).toContain('stoppingNowRef.current = isTransitioning')
     expect(source).toContain('if (isTransitioning) {')
-    expect(source).toContain("if (!isTransitioning && !(isServerSwitching && status === 'stopped'))")
+    expect(source).toContain('if (!isTransitioning) {')
     expect(source).toContain('!isRestarting && !isTransitioning && !isServerSwitching')
     expect(source).toContain('файрвол и защита остаются включёнными')
   })

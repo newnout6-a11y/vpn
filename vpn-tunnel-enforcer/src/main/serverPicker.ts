@@ -2592,18 +2592,31 @@ export function registerServerPickerHandlers(): void {
     if (profileSwitchInProgress) throw new Error('Переключение сервера уже выполняется')
 
     profileSwitchInProgress = true
+    const generation = ++profileSwitchGeneration
+    let cancellationCleanupFailed = false
     try {
-      const generation = ++profileSwitchGeneration
       // Invalidate adaptive work before ANY await (including network identity).
       await profileSwitchHooks?.begin()
       if (generation !== profileSwitchGeneration) throw new Error('Переключение сервера отменено')
       selectProfile(id)
       await restartDirectVpnForSelectedProfile(profile)
       if (generation !== profileSwitchGeneration) {
-        await tunController.stop().catch((err) => logEvent('warn', 'server-picker', 'failed to stop cancelled profile switch', err))
+        await tunController.stop().catch((err) => {
+          cancellationCleanupFailed = true
+          logEvent('warn', 'server-picker', 'failed to stop cancelled profile switch', err)
+          throw err
+        })
         ipMonitor.clearVpnIp()
         throw new Error('Переключение сервера отменено')
       }
+    } catch (err) {
+      // Cancellation can surface as an upstream startup error. The generation,
+      // rather than translated error text, identifies the cancelled owner.
+      if (generation !== profileSwitchGeneration && !cancellationCleanupFailed) {
+        logEvent('info', 'server-picker', 'profile switch cancelled')
+        return { cancelled: true as const }
+      }
+      throw err
     } finally {
       profileSwitchInProgress = false
       profileSwitchHooks?.end()
