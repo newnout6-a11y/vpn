@@ -66,14 +66,16 @@ describe('App source regressions', () => {
     expect(serversSource()).toContain('await fetchProfiles(false)')
   })
 
-  it('localizes cancelled selection feedback in both pickers (AT-09-011 / F-121)', () => {
+  it('localizes QuickServers cancellation feedback (AT-09-011 / F-121)', () => {
     const source = dashboardSideSource()
     const compactSource = source.replace(/\s+/g, '')
     expect(compactSource).toContain("addLog('info',t('dashboard.serverSwitchCancelled'))")
 
-    const deps = source.match(/,\s*\[([^\]]*\bconnectionMode\b[^\]]*)\]\s*\)/s)
-    expect(deps).not.toBeNull()
-    expect(deps?.[1].split(',').map(dependency => dependency.trim())).toContain('t')
+    const memoDependencies = Array.from(source.matchAll(/,\s*\[([^\]]*)\]\s*\)/gs))
+      .map(match => match[1].split(',').map(dependency => dependency.trim()))
+    expect(memoDependencies.some(dependencies =>
+      dependencies.includes('connectionMode') && dependencies.includes('t')
+    )).toBe(true)
   })
 
   it('awaits React updates in cancellation regressions (AT-00-003)', () => {
@@ -83,6 +85,7 @@ describe('App source regressions', () => {
       expect(actCalls.length).toBeGreaterThan(0)
       for (const call of actCalls) {
         expect(source.slice(0, call.index).trimEnd()).toMatch(/\bawait$/)
+        expect(source.slice(call.index)).toMatch(/^act\s*\(\s*async\b/)
       }
     }
   })

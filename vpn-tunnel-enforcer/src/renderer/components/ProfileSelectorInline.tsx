@@ -30,7 +30,8 @@ function groupBadgeVariant(status: ServerGroup['status']): BadgeVariant {
  *
  * Always backed by the server-picker store (servers:list / servers:get-active /
  * servers:select). Used to be split between localProxy and directVpn modes
- * with separate caches; in V2 there is one source of truth.
+ * with separate caches; in V2 there is one source of truth. Cancellation
+ * feedback follows the active UI locale.
  */
 export function ProfileSelectorInline() {
   const { t } = useTranslation()

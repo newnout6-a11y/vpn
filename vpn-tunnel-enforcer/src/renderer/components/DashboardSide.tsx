@@ -76,7 +76,8 @@ function groupPillTone(status: ServerGroup['status']): string {
 
 /**
  * Compact list of all available profiles. Same data as the Servers page,
- * always read from the unified server-picker store via IPC.
+ * always read from the unified server-picker store via IPC. Cancellation
+ * feedback follows the active UI locale.
  */
 function QuickServers() {
   const { t } = useTranslation()
@@ -695,6 +696,7 @@ function RecentSites() {
 
 // ─── Aggregate ─────────────────────────────────────────────────────────────
 
+/** Composes the dashboard's server, traffic, and recent-site panels. */
 export function DashboardSide() {
   return (
     <div className="flex flex-col gap-4 min-h-0">
