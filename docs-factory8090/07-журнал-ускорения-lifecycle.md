@@ -946,3 +946,38 @@ Durable write path (unique wx + fsync + ACL + rename) не изменён. Known
 - `git diff --check`: exit 0.
 
 Установщик в этом repair не пересобирался и не устанавливался; предыдущий dist artifact не содержит этап 32. Живой VPN агентом не переключался. Windows installed latency, packet leakage и boot recovery здесь не проверялись. Нормативные docs не изменены.
+
+### 2026-10-03 — этап 33: ускорение DNS при смене сервера (WP-2 / WP-0)
+
+**Исходные данные:** по прямому запросу владельца ускорить смену. Исходный checkout 52837aa, worktree чистый; PR #16 соответствует remote newnout6-a11y/vpn и ветке codex/hotspot-lifecycle-server-switch. На remote обнаружен дополнительный пустой ee254b2 (chore: refresh PR checks), выполнен fast-forward: runtime/test source не менялся. Прочитаны AGENTS, AT-02-002/004/005 и нормативный lifecycle; сохранены fresh route/IP barrier, >=2/3 adaptive health и обязательное разрешение native graph до config/spawn. Нормативные docs не изменялись.
+
+#### Измеренный участок
+
+Установленная сборка после ручного обновления содержит main repair 52837aa (SHA256 9d489d2ac9ee2969bd9fa119672631421f741e96e76cc846b3886787e9bf56e2). JSONL app.log, 03.10.2026 МСК:
+
+- 20:15:17.048–20.382: Sweden switch **3334 ms**, network identity **499 ms**, protected stop **445 ms**, Xray **186 ms**, TUN start **1035 ms**. Fresh IP после running примерно **779 ms**.
+- 20:15:30.853–37.013: Norway switch **6160 ms**, identity **461 ms**, protected stop **300 ms**, Xray **3186 ms**, TUN start **4029 ms**. resolve-connection-graph **3029 ms**, один resolve4 вернул положительный ответ за **3025 ms**; остальные DNS чтения около 11 ms. Fresh IP после running примерно **793 ms**. Это положительный задержанный DNS, а не доказанный отказ удалённого сервера.
+- 20:16:02 adaptive health **3/3**; последующие self-tests physicalAdapterReached=false / publicIpMismatch=false / dnsLeakDetected=false. Это наблюдения текущей сессии, не полная L3 приёмка.
+
+#### Изменение
+
+- `resolveXrayEndpoint` даёт effective c-ares resolver 100 ms, затем параллельно запускает существующий IPv4 system lookup. Первый валидный IPv4 завершает чтение. Если основной DNS быстро отвечает, дополнительного lookup нет; при раннем отказе fallback начинается сразу. Ошибка/невалидный ответ одной ветки не побеждает ещё работающую другую ветку.
+- Собственный Resolver применяется и без внешнего AbortSignal; отменяется только незавершённое чтение данной операции. Глобальные DNS server overrides сохраняются. Никакой новый application DNS cache между сетями/сессиями не создан: используется системный resolver с его собственным cache. Нет нового firewall исключения или DNS/route mutation.
+- При отмене/победе удаляются таймер и listener, поздний uncancellable OS lookup потребляется без публикации и логов. Исправлен двойной Resolver.cancel при позднем ответе после abort.
+- DNS diagnostics сохраняют метод/код/время; добавлены totalElapsedMs и hedged для успешного/невалидного OS результата. Host/IP/профиль в детали не попадают. Эти DNS результаты не объявляют VPN здоровым.
+
+#### Проверки
+
+- Первый focused run: **6 files, 138 passed / 2 failed**, exit 1. Новые cancellation tests обнаружили повторный cancel при позднем ответе; исправлен guard в readWithAbort, ожидания не ослаблены.
+- Окончательный `cd vpn-tunnel-enforcer; npx.cmd vitest run src/main/xrayDns.test.ts src/main/xrayDnsNative.test.ts src/main/nativeXrayCompatibility.test.ts src/main/lifecycleCleanup.test.ts src/main/serverPickerSwitch.test.ts src/main/protectedIpTransition.test.ts --maxWorkers=4 --reporter=verbose --silent=false`: exit 0, **6 files / 140 passed**, 8.20 s.
+- Fake clock: primary ответ за 3025 ms + system lookup 20 ms даёт итог **120 ms**. Реальный Windows/Node стенд, UDP DNS только на loopback и hostname localhost: последовательный primary **3053 ms**, новый путь **115 ms**. Реальный system lookup и отмена собственного Resolver проверены; Windows DNS настройки не менялись. Это компонентный стенд, не время installed server switch и не доказательство скорости Happ.
+- `npm.cmd run typecheck`: exit 0, повторён после последней runtime правки.
+- `npm.cmd test -- --maxWorkers=4`: exit 0, **189 files passed / 2 skipped; 2183 tests passed / 10 skipped / 0 failed**, **132.10 s**. Ожидаемый RootErrorBoundary crash stderr относится к его тесту.
+- `python -X utf8 ../docs/04-приёмочные-тесты/traceability/check-coverage.py`: exit 0, **AC 927/927, F 210/210**. Counts подтверждают трассировку, не выполнение всей OS acceptance matrix.
+
+**Ограничения и откат:** выигрыш возможен, когда OS resolver отвечает быстрее c-ares; если он недоступен при protected restart, остаётся основной путь. Новый installed switch/start/stop/cancel и packet/boot acceptance не измерены, агент VPN не переключал и установщик не устанавливал. Revert scoped xrayDns change возвращает последовательное DNS ожидание; settings/profile/manifest форматы совместимы.
+
+- `npm.cmd run dist:win`: exit 0, Electron **44.4.3** / NSIS; typecheck внутри сборки exit 0. Optional @electron/mksnapshot отсутствует, snapshot штатно пропущен. Packaged main/preload побайтово равны compiled outputs; все 4 main markers (100 ms delayed lookup, hedged DNS, totalElapsedMs, strict native graph failure) подтверждены.
+- Main SHA256 **0c26e9868cc2c304d6f951b9756dd8dba88b021da9013f6022885e7b267880c3**, preload **304534f83a73680dadfdc0c6296a9f356c337b506d4da44e03b36087290e3663**.
+- Installer `vpn-tunnel-enforcer/dist/VPN-Tunnel-Enforcer-Setup-1.1.22.exe`: **139170825 bytes**, **03.10.2026 20:30:50 МСК**, SHA256 **6875F8B743AAEEF6E378DEF6CBC5AFDB739FF521CCB7E88DDD9D68CF2511AA72**, Authenticode **NotSigned**. Заменяет предыдущий artifact с тем же номером версии; агентом не установлен. Подпись кода не менялась.
+- Итоговый `git diff --check`: exit 0. Временные файлы этапом не создавались.
