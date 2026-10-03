@@ -66,16 +66,25 @@ describe('App source regressions', () => {
     expect(serversSource()).toContain('await fetchProfiles(false)')
   })
 
+  /** Ensures QuickServers cancellation feedback and memo dependencies follow locale changes. */
   it('localizes QuickServers cancellation feedback (AT-09-011 / F-121)', () => {
     const source = dashboardSideSource()
-    const compactSource = source.replace(/\s+/g, '')
-    expect(compactSource).toContain("addLog('info',t('dashboard.serverSwitchCancelled'))")
+    const quickServersStart = source.indexOf('function QuickServers(')
+    const liveTrafficStart = source.indexOf('function LiveTraffic(', quickServersStart)
+    expect(quickServersStart).toBeGreaterThanOrEqual(0)
+    expect(liveTrafficStart).toBeGreaterThan(quickServersStart)
+    const quickServersSource = source.slice(quickServersStart, liveTrafficStart)
 
-    const memoDependencies = Array.from(source.matchAll(/,\s*\[([^\]]*)\]\s*\)/gs))
-      .map(match => match[1].split(',').map(dependency => dependency.trim()))
-    expect(memoDependencies.some(dependencies =>
-      dependencies.includes('connectionMode') && dependencies.includes('t')
-    )).toBe(true)
+    const clustersStart = quickServersSource.indexOf('const clusters = useMemo')
+    const activeRowsStart = quickServersSource.indexOf('const activeRowsTotal', clustersStart)
+    expect(clustersStart).toBeGreaterThanOrEqual(0)
+    expect(activeRowsStart).toBeGreaterThan(clustersStart)
+    const clustersMemo = quickServersSource.slice(clustersStart, activeRowsStart)
+
+    expect(clustersMemo.replace(/\s+/g, '')).toContain("addLog('info',t('dashboard.serverSwitchCancelled'))")
+    const dependencies = clustersMemo.match(/,\s*\[([^\]]*)\]\s*\)\s*$/s)
+    expect(dependencies).not.toBeNull()
+    expect(dependencies?.[1].split(',').map(dependency => dependency.trim())).toContain('t')
   })
 
   it('awaits React updates in cancellation regressions (AT-00-003)', () => {
