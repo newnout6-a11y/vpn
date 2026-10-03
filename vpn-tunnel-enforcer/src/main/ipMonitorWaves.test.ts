@@ -79,7 +79,7 @@ describe('IP provider wave budget', () => {
     module.ipMonitor.onIpChange(notify)
     vi.mocked(axios.get).mockRejectedValue(new Error('unreachable'))
     expect(await module.ipMonitor.recheck(true)).toEqual({ ip: null, vpnIp: '198.51.100.1', isLeak: false })
-    expect(notify).not.toHaveBeenCalled()
+    expect(notify).toHaveBeenCalledWith('198.51.100.1', false, { vpnIp: '198.51.100.1', verdict: 'not-checked' })
     expect((await module.ipMonitor.getCurrentIp()).ip).toBe('198.51.100.1')
     expect(vi.getTimerCount()).toBe(0)
   })

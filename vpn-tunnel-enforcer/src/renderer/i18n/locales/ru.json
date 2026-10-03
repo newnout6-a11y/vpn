@@ -2,6 +2,8 @@
   "dashboard": {
     "title": "Панель управления",
     "vpnToggle": "Защита VPN",
+    "ipChangedUnverified": "VPN-IP изменился, требуется проверка",
+    "ipNotChecked": "VPN-IP не проверен",
     "connecting": "Подключение...",
     "connected": "Подключено",
     "disconnected": "Отключено",

@@ -2,6 +2,8 @@
   "dashboard": {
     "title": "Dashboard",
     "vpnToggle": "VPN Protection",
+    "ipChangedUnverified": "VPN IP changed, verification required",
+    "ipNotChecked": "VPN IP not checked",
     "connecting": "Connecting...",
     "connected": "Connected",
     "disconnected": "Disconnected",

@@ -1,6 +1,7 @@
 import { isIP } from 'net'
 import axios from 'axios'
 import { logEvent } from './appLogger'
+import type { PublicIpEvidence, PublicIpVerdict } from '../shared/publicIp'
 
 export const IP_CHECK_URLS = [
   'https://cloudflare.com/cdn-cgi/trace',
@@ -13,7 +14,8 @@ let currentIp: string | null = null
 let vpnIp: string | null = null
 let isLeak = false
 let intervalId: ReturnType<typeof setInterval> | null = null
-let ipCallbacks: ((ip: string, isLeak: boolean) => void)[] = []
+let verdict: PublicIpVerdict = 'not-checked'
+let ipCallbacks: ((ip: string, isLeak: boolean, evidence: PublicIpEvidence) => void)[] = []
 let checkInterval = 30000 // 30 seconds
 let lastSuccessAt = 0
 let readGeneration = 0
@@ -135,7 +137,15 @@ export async function fetchPublicIp(canPublish?: () => boolean): Promise<string 
 }
 
 function notifyCallbacks(ip: string, leak: boolean) {
-  ipCallbacks.forEach(cb => cb(ip, leak))
+  ipCallbacks.forEach(cb => cb(ip, leak, { vpnIp, verdict }))
+}
+
+function observeIp(ip: string): void {
+  currentIp = ip
+  // A different VPN egress (rotation, anycast, split routes) is inconclusive.
+  // Actual leak alarms come from the independent physical-adapter self-test.
+  isLeak = false
+  verdict = vpnIp ? (ip === vpnIp ? 'passed' : 'indeterminate') : 'not-checked'
 }
 
 function startMonitoring(initialCheck = true) {
@@ -154,15 +164,10 @@ async function checkIp() {
     // anything we'd compute here is a false positive.
     return
   }
-  if (ip && ip !== currentIp) {
-    currentIp = ip
-
-    if (vpnIp) {
-      isLeak = ip !== vpnIp
-    }
-
-    notifyCallbacks(ip, isLeak)
-  }
+  const previousIp = currentIp, previousVerdict = verdict
+  if (ip) observeIp(ip)
+  else verdict = 'not-checked'
+  if (currentIp && (currentIp !== previousIp || verdict !== previousVerdict)) notifyCallbacks(currentIp, isLeak)
 }
 
 function stopMonitoring() {
@@ -176,6 +181,13 @@ export const ipMonitor = {
   startMonitoring,
   stopMonitoring,
   setRecoveryCallback: setIpMonitorRecoveryCallback,
+  getEvidence(): PublicIpEvidence { return { vpnIp, verdict } },
+  invalidateVpnIpBaseline() {
+    vpnIp = null
+    isLeak = false
+    verdict = 'not-checked'
+    if (currentIp) notifyCallbacks(currentIp, false)
+  },
   async getCurrentIp(canPublish?: () => boolean): Promise<{ ip: string | null; isLeak: boolean; vpnIp: string | null }> {
     if (canPublish && !canPublish()) return { ip: currentIp, isLeak, vpnIp }
     if (suppressed) {
@@ -183,16 +195,16 @@ export const ipMonitor = {
       // suspended — see the suspended-state comment block above.
       return { ip: currentIp, isLeak: false, vpnIp }
     }
+    const generation = readGeneration
     const ip = await fetchPublicIp(canPublish)
+    if (generation !== readGeneration) return { ip: currentIp, isLeak, vpnIp }
     if (canPublish && !canPublish()) return { ip: currentIp, isLeak, vpnIp }
     if (suppressed) {
       // We may have been suspended while the HTTP request was in flight.
       return { ip: currentIp, isLeak: false, vpnIp }
     }
-    if (ip) {
-      currentIp = ip
-      if (vpnIp) isLeak = ip !== vpnIp
-    }
+    if (ip) observeIp(ip)
+    else verdict = 'not-checked'
     return { ip: currentIp, isLeak, vpnIp }
   },
 
@@ -225,23 +237,28 @@ export const ipMonitor = {
     }
 
     const doRecheck = async (): Promise<{ ip: string | null; isLeak: boolean; vpnIp: string | null }> => {
+      const generation = readGeneration
       const ip = await fetchPublicIp(canPublish)
+      if (generation !== readGeneration) return { ip: rebaseline ? null : currentIp, isLeak, vpnIp }
       if (canPublish && !canPublish()) return { ip: currentIp, isLeak, vpnIp }
       if (suppressed && !rebaseline) {
         return { ip: currentIp, isLeak: false, vpnIp }
       }
       // A baseline requires a fresh successful sample. Preserve cached state
       // on provider failure, but do not present it as a successful rebaseline.
-      if (rebaseline && !ip) return { ip: null, isLeak, vpnIp }
+      if (!ip) {
+        verdict = 'not-checked'
+        if (!suppressed && currentIp) notifyCallbacks(currentIp, isLeak)
+        return { ip: rebaseline ? null : currentIp, isLeak, vpnIp }
+      }
       if (ip) {
         currentIp = ip
         if (rebaseline) {
           vpnIp = ip
           isLeak = false
+          verdict = 'passed'
           startMonitoring(false)
-        } else if (vpnIp) {
-          isLeak = ip !== vpnIp
-        }
+        } else observeIp(ip)
         // An explicit rebaseline is the end of a protected transition. It is
         // safe to publish the clean result even while the deferred resume is
         // still held; the caller releases the monitor immediately afterwards.
@@ -261,6 +278,7 @@ export const ipMonitor = {
   setVpnIp(ip: string) {
     vpnIp = ip
     isLeak = false
+    verdict = currentIp === ip ? 'passed' : 'not-checked'
     startMonitoring()
   },
 
@@ -268,6 +286,7 @@ export const ipMonitor = {
     cancelPublicIpReads()
     vpnIp = null
     isLeak = false
+    verdict = 'not-checked'
     stopMonitoring()
   },
 
@@ -279,7 +298,7 @@ export const ipMonitor = {
     }
   },
 
-  onIpChange(callback: (ip: string, isLeak: boolean) => void) {
+  onIpChange(callback: (ip: string, isLeak: boolean, evidence: PublicIpEvidence) => void) {
     ipCallbacks.push(callback)
   },
 

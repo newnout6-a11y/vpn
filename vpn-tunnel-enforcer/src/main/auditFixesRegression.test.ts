@@ -96,7 +96,13 @@ describe('Audit Fixes Regression: leak detector self-blinding prevention', () =>
   })
 
   it('checks areTunRoutesActive in serverPicker fallback before calling recheck(true)', () => {
-    expect(serverPickerSource).toContain('TUN routes are not active after profile switch; skipping ipMonitor.recheck(true)')
+    const barrier = readNormalized('src/main/protectedIpTransition.ts')
+    expect(serverPickerSource).toContain('areRoutesActive: () => tunController.areTunRoutesActive()')
+    const routeCheck = barrier.indexOf('const routesActive = await options.areRoutesActive()')
+    const freshRead = barrier.indexOf('ipMonitor.recheck(true, options.isCurrent)')
+    expect(routeCheck).toBeGreaterThanOrEqual(0)
+    expect(freshRead).toBeGreaterThan(routeCheck)
+    expect(barrier.slice(routeCheck, freshRead)).toContain('if (!routesActive) break')
   })
 })
 

@@ -10,6 +10,7 @@ const state = vi.hoisted(() => ({
   stop: vi.fn(async () => undefined),
   ipMonitor: {
     getCurrentIp: vi.fn(async () => ({ ip: '198.51.100.1' })),
+    invalidateVpnIpBaseline: vi.fn(),
     deferResume: vi.fn(),
     releaseDeferredResume: vi.fn(),
     clearVpnIp: vi.fn(),
@@ -126,10 +127,33 @@ beforeEach(async () => {
 })
 
 describe('server profile switching', () => {
+  it('invalidates adaptive work before selecting or waiting for network identity (AT-10-003)', async () => {
+    const { setProfileSwitchHooks } = await import('./serverPicker')
+    const end = vi.fn()
+    const gate = deferred<void>()
+    const begin = vi.fn(() => gate.promise)
+    setProfileSwitchHooks({ begin, end })
+    const pending = selectProfileHandler({}, 'a')
+    expect(begin).toHaveBeenCalledOnce()
+    expect(state.storeData.get('activeProfileId')).toBeUndefined()
+    expect(state.restartProtected).not.toHaveBeenCalled()
+    gate.resolve()
+    await pending
+    expect(state.storeData.get('activeProfileId')).toBe('a')
+    expect(end).toHaveBeenCalledOnce()
+  })
+  it('does not wait for an unreachable old server IP (AT-07-012)', async () => {
+    state.ipMonitor.getCurrentIp.mockImplementationOnce(() => new Promise(() => {}))
+    await selectProfileHandler({}, 'a')
+    expect(state.ipMonitor.getCurrentIp).not.toHaveBeenCalled()
+    expect(state.restartProtected).toHaveBeenCalledOnce()
+    expect(state.ipMonitor.recheck).toHaveBeenCalledOnce()
+  })
   it('retries a failed fresh baseline instead of releasing deferred monitoring with cached data (AT-07-012)', async () => {
     state.ipMonitor.recheck.mockResolvedValueOnce({ ip: null as any })
     await expect(selectProfileHandler({}, 'a')).resolves.toBeUndefined()
     expect(state.ipMonitor.recheck).toHaveBeenCalledTimes(2)
+    expect(state.ipMonitor.getCurrentIp).not.toHaveBeenCalled()
     expect(state.ipMonitor.releaseDeferredResume).toHaveBeenCalledOnce()
     expect(state.ipMonitor.releaseDeferredResume.mock.invocationCallOrder[0]).toBeGreaterThan(state.ipMonitor.recheck.mock.invocationCallOrder[1])
   })

@@ -86,6 +86,20 @@ describe('tunnelHttpProbe target list', () => {
 })
 
 describe('tunnelHttpProbe egress validation', () => {
+  it('aborts providers on manual selection and discards late success (AT-10-003 / AT-10-006)', async () => {
+    let complete!: (value: any) => void
+    axiosGet.mockReturnValue(new Promise(resolve => { complete = resolve }))
+    const { tunnelHttpProbe, getLastSuccessfulTunnelProbeAt } = await import('./serverPicker')
+    const controller = new AbortController()
+    const pending = tunnelHttpProbe(true, 1, controller.signal)
+    const signals = axiosGet.mock.calls.map(call => call[1].signal)
+    controller.abort()
+    expect(signals.every(signal => signal.aborted)).toBe(true)
+    complete({ status: 204, data: '' })
+    expect(await pending).toBeNull()
+    expect(getLastSuccessfulTunnelProbeAt()).toBe(0)
+    expect(diagnostics).not.toHaveBeenCalled()
+  })
   it('logs per-target error codes and core diagnostics before returning failure (AT-07-002 / AT-08-001)', async () => {
     axiosGet.mockRejectedValue(Object.assign(new Error('private.example 192.0.2.1'), { code: 'ETIMEDOUT' }))
     const { tunnelHttpProbe } = await import('./serverPicker')

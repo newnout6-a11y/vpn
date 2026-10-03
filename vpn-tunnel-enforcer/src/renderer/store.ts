@@ -1,3 +1,4 @@
+import type { PublicIpVerdict } from '../shared/publicIp'
 import { create } from 'zustand'
 
 /**
@@ -197,6 +198,7 @@ interface AppState {
   mode: Mode
   publicIp: string | null
   isLeak: boolean
+  publicIpVerdict: PublicIpVerdict
   vpnIp: string | null
   proxy: ProxyInfo | null
   detecting: boolean
@@ -234,7 +236,7 @@ interface AppState {
   settings: AppSettings
 
   setMode: (mode: Mode) => void
-  setPublicIp: (ip: string | null, isLeak: boolean) => void
+  setPublicIp: (ip: string | null, isLeak: boolean, verdict?: PublicIpVerdict) => void
   setVpnIp: (ip: string | null) => void
   setProxy: (proxy: ProxyInfo | null) => void
   setDetecting: (d: boolean) => void
@@ -321,6 +323,7 @@ export const useAppStore = create<AppState>((set) => ({
   mode: 'off',
   publicIp: null,
   isLeak: false,
+  publicIpVerdict: 'not-checked',
   vpnIp: null,
   proxy: null,
   detecting: false,
@@ -394,10 +397,11 @@ export const useAppStore = create<AppState>((set) => ({
   },
 
   setMode: (mode) => set({ mode }),
-  setPublicIp: (ip, isLeak) => set((state) => ({
+  setPublicIp: (ip, isLeak, verdict) => set((state) => ({
     publicIp: ip,
     isLeak,
-    proxyDown: ip && !isLeak ? false : state.proxyDown
+    publicIpVerdict: verdict ?? (isLeak ? 'failed' : ip ? 'passed' : 'not-checked'),
+    proxyDown: ip && !isLeak && (!verdict || verdict === 'passed') ? false : state.proxyDown
   })),
   setVpnIp: (ip) => set({ vpnIp: ip }),
   setProxy: (proxy) => set({ proxy }),
@@ -451,6 +455,7 @@ export const useAppStore = create<AppState>((set) => ({
     vpnIp: null,
     publicIp: null,
     isLeak: false,
+    publicIpVerdict: 'not-checked',
     proxyDown: false,
     leakSelfTestResult: null,
     leakChecks: null,

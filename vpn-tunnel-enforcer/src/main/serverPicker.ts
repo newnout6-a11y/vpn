@@ -22,6 +22,7 @@ import { promisify } from 'util'
 import axios from 'axios'
 import { randomUUID } from 'crypto'
 import { logEvent } from './appLogger'
+import { withProtectedIpTransition } from './protectedIpTransition'
 import { compactForIpcLog } from './ipcLogging'
 import { copySecretToClipboard } from './secretClipboard'
 import { withSecretExportConsent } from './secretExportConsent'
@@ -273,7 +274,8 @@ export async function pingServer(
  * fire identical requests against the same CDN (the tunnel itself is the
  * bottleneck — every profile would return the same number anyway).
  */
-export async function tunnelHttpProbe(skipCache = false, maxRetries = 1): Promise<number | null> {
+export async function tunnelHttpProbe(skipCache = false, maxRetries = 1, signal?: AbortSignal): Promise<number | null> {
+  if (signal?.aborted) return null
   const sessionKey = currentTunnelProbeSessionKey()
   if (!sessionKey) return null
 
@@ -290,9 +292,10 @@ export async function tunnelHttpProbe(skipCache = false, maxRetries = 1): Promis
   }
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (signal?.aborted) return null
     if (attempt > 0) {
       await new Promise((resolve) => setTimeout(resolve, 300))
-      if (currentTunnelProbeSessionKey() !== sessionKey) return null
+      if (signal?.aborted || currentTunnelProbeSessionKey() !== sessionKey) return null
     }
 
     // Fire every probe in parallel. We accept the response only when its
@@ -303,6 +306,8 @@ export async function tunnelHttpProbe(skipCache = false, maxRetries = 1): Promis
     // a pooled TLS session.
     const start = performance.now()
     const cancellation = new AbortController()
+    const abort = () => cancellation.abort()
+    signal?.addEventListener('abort', abort, { once: true })
     const outcomes: Array<Record<string, unknown>> = []
     const races = TUNNEL_PROBE_TARGETS.map((target, index) =>
       axios
@@ -333,7 +338,7 @@ export async function tunnelHttpProbe(skipCache = false, maxRetries = 1): Promis
       // requests so they cannot keep loading a slow hotspot after success.
       const ms = await Promise.any(races)
       cancellation.abort()
-      if (currentTunnelProbeSessionKey() !== sessionKey) return null
+      if (signal?.aborted || currentTunnelProbeSessionKey() !== sessionKey) return null
       lastSuccessfulTunnelProbeAt = Date.now()
       tunnelProbeCache = { value: ms, at: Date.now(), sessionKey }
       try {
@@ -342,7 +347,7 @@ export async function tunnelHttpProbe(skipCache = false, maxRetries = 1): Promis
       return ms
     } catch (err) {
       cancellation.abort()
-      if (currentTunnelProbeSessionKey() !== sessionKey) return null
+      if (signal?.aborted || currentTunnelProbeSessionKey() !== sessionKey) return null
       logEvent('info', 'server-picker', 'tunnel HTTPS probe results', {
         sessionStartedAt: tunController.getStatus().startedAt, attempt: attempt + 1, outcomes,
         stage: 'os-tun-https', elapsedMs: Math.round(performance.now() - start)
@@ -367,9 +372,11 @@ export async function tunnelHttpProbe(skipCache = false, maxRetries = 1): Promis
         })
       }
       await logTunnelFailureDiagnostics(sessionKey)
-      if (currentTunnelProbeSessionKey() !== sessionKey) return null
+      if (signal?.aborted || currentTunnelProbeSessionKey() !== sessionKey) return null
       tunnelProbeCache = { value: null, at: Date.now(), sessionKey }
       return null
+    } finally {
+      signal?.removeEventListener('abort', abort)
     }
   }
 
@@ -1989,107 +1996,34 @@ async function restartDirectVpnForSelectedProfile(profile: ServerProfile): Promi
     profile: vpnProfile,
     networkIdentity
   })
-  const previousIp = await ipMonitor.getCurrentIp().then((info) => info.ip).catch(() => null)
-  ipMonitor.deferResume()
-  let deferredResumeReleased = false
-  const releaseDeferredResume = () => {
-    if (deferredResumeReleased) return
-    deferredResumeReleased = true
-    ipMonitor.releaseDeferredResume()
-  }
+  const isCurrent = () => switchGeneration === profileSwitchGeneration && tunController.getStatus().running
   logEvent('info', 'server-picker', 'hot-reloading direct VPN after profile selection', {
-    id: profile.id,
-    name: profile.name,
-    protocol: profile.protocol
+    id: profile.id, name: profile.name, protocol: profile.protocol
   })
-
-  // Protected swap: the firewall kill-switch, network baseline and adapter
-  // lockdown stay applied across the stop→start pair. A plain stop() would roll
-  // all three back and rebuild them, leaving seconds of unprotected egress on
-  // every single server switch. restartProtected() also guarantees a full
-  // rollback if the new server fails to come up, so we can't strand the user
-  // behind a kill-switch with no tunnel.
-  let restarted: { success: boolean; error?: string }
-  try {
-    restarted = await tunController.restartProtected('server switch', {
-      mode: 'directVpn',
-      vpnProfile,
-      proxyType: 'socks5',
+  const restarted = await withProtectedIpTransition({
+    reason: 'server switch',
+    isCurrent,
+    isOwner: () => switchGeneration === profileSwitchGeneration,
+    areRoutesActive: () => tunController.areTunRoutesActive(),
+    restart: () => tunController.restartProtected('server switch', {
+      mode: 'directVpn', vpnProfile, proxyType: 'socks5',
       enableFirewallKillSwitch: settings.firewallKillSwitch,
       enableAdapterLockdown: settings.strictAdapterLockdown,
       publicWifiCompatibility: settings.publicWifiCompatibility,
-      stealthMode: settings.stealthMode,
-      adaptiveMode: adaptive.mode,
+      stealthMode: settings.stealthMode, adaptiveMode: adaptive.mode,
       proxyEngine: tunController.getLastStartOptions?.()?.proxyEngine ?? settings.proxyEngine
     })
-  } catch (err) {
-    ipMonitor.clearVpnIp()
-    releaseDeferredResume()
-    throw err
-  }
-  if (!restarted.success) {
-    ipMonitor.clearVpnIp()
-    releaseDeferredResume()
-    throw new Error(restarted.error || 'Failed to start tunnel with selected server')
-  }
-
-  // Keep the explicit resume call for the normal lifecycle contract. During
-  // this protected swap it is intentionally a no-op until the fresh baseline
-  // below releases the deferred resume.
-  ipMonitor.resume()
-  try {
-    for (let attempt = 1; attempt <= 6; attempt++) {
-      try {
-        // getCurrentIp() intentionally serves cached state while suspended;
-        // probeCurrentIp() lets us observe route convergence without allowing
-        // the transient real IP to become a leak verdict.
-        const currentIp = await ipMonitor.probeCurrentIp()
-        const shouldRebaseline = Boolean(currentIp && (currentIp !== previousIp || attempt === 6))
-        if (shouldRebaseline) {
-          if (currentIp === previousIp && attempt === 6) {
-            const routesActive = await tunController.areTunRoutesActive().catch(() => false)
-            if (!routesActive) {
-              logEvent('warn', 'server-picker', 'TUN routes are not active after profile switch; skipping ipMonitor.recheck(true) and leaving IP baseline unchanged')
-              releaseDeferredResume()
-              return
-            }
-          }
-          const ipInfo = await ipMonitor.recheck(true)
-          if (!ipInfo.ip) throw new Error('Fresh public IP baseline unavailable')
-          releaseDeferredResume()
-          logEvent('info', 'server-picker', 'direct VPN IP baseline refreshed after profile switch', {
-            id: profile.id,
-            name: profile.name,
-            ip: ipInfo.ip,
-            previousIp,
-            attempt
-          })
-          return
-        }
-      } catch (err) {
-        logEvent('warn', 'server-picker', 'direct VPN IP rebaseline after profile switch failed', {
-          id: profile.id,
-          name: profile.name,
-          attempt,
-          error: (err as Error)?.message || String(err)
-        })
-      }
-      await wait(500)
-    }
-
-    releaseDeferredResume()
-    logEvent('warn', 'server-picker', 'direct VPN profile switch finished without a fresh public IP baseline', {
-      id: profile.id,
-      name: profile.name
-    })
-  } catch (err) {
-    releaseDeferredResume()
-    throw err
-  }
+  })
+  if (!restarted.success) throw new Error(restarted.error || 'Failed to start tunnel with selected server')
 }
 
 let profileSwitchGeneration = 0
 let profileSwitchInProgress = false
+let profileSwitchHooks: { begin: () => void | Promise<void>; end: () => void } | null = null
+
+export function setProfileSwitchHooks(hooks: typeof profileSwitchHooks): void {
+  profileSwitchHooks = hooks
+}
 
 export function cancelProfileSwitch(): void {
   profileSwitchGeneration++
@@ -2522,12 +2456,16 @@ export function registerServerPickerHandlers(): void {
     id = requireString(id, 'id', { maxLength: 200 })
     const profile = getProfiles().find((p) => p.id === id)
     if (!profile) throw new Error('Profile not found')
+    if (profile.enabled === false || profile.removedFromSubscriptionAt) throw new Error('Profile is unavailable')
     if (profileSwitchInProgress) throw new Error('Переключение сервера уже выполняется')
 
     profileSwitchInProgress = true
     try {
-      selectProfile(id)
       const generation = ++profileSwitchGeneration
+      // Invalidate adaptive work before ANY await (including network identity).
+      await profileSwitchHooks?.begin()
+      if (generation !== profileSwitchGeneration) throw new Error('Переключение сервера отменено')
+      selectProfile(id)
       await restartDirectVpnForSelectedProfile(profile)
       if (generation !== profileSwitchGeneration) {
         await tunController.stop().catch((err) => logEvent('warn', 'server-picker', 'failed to stop cancelled profile switch', err))
@@ -2536,6 +2474,7 @@ export function registerServerPickerHandlers(): void {
       }
     } finally {
       profileSwitchInProgress = false
+      profileSwitchHooks?.end()
     }
   })
 

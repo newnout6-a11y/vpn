@@ -9,13 +9,15 @@ describe('serverPicker source regressions', () => {
     const source = serverPickerSource()
     const restartStart = source.indexOf('async function restartDirectVpnForSelectedProfile')
     const restartCall = source.indexOf("tunController.restartProtected('server switch'", restartStart)
-    const resumeCall = source.indexOf('ipMonitor.resume()', restartCall)
-    const rebaselineCall = source.indexOf('ipMonitor.recheck(true)', resumeCall)
+    const barrierCall = source.indexOf('withProtectedIpTransition({', restartStart)
+    const helper = readFileSync(join(process.cwd(), 'src/main/protectedIpTransition.ts'), 'utf8')
 
     expect(restartStart).toBeGreaterThanOrEqual(0)
     expect(restartCall).toBeGreaterThan(restartStart)
-    expect(resumeCall).toBeGreaterThan(restartCall)
-    expect(rebaselineCall).toBeGreaterThan(resumeCall)
+    expect(barrierCall).toBeGreaterThan(restartStart)
+    expect(barrierCall).toBeLessThan(restartCall)
+    expect(helper).toContain('ipMonitor.recheck(true, options.isCurrent)')
+    expect(helper).toContain('ipMonitor.releaseDeferredResume()')
   })
 
   it('keeps the kill-switch applied across a server switch', () => {
@@ -24,7 +26,7 @@ describe('serverPicker source regressions', () => {
     // in start() — seconds of unprotected egress on every server switch.
     const source = serverPickerSource()
     const restartStart = source.indexOf('async function restartDirectVpnForSelectedProfile')
-    const restartEnd = source.indexOf('direct VPN profile switch finished without', restartStart)
+    const restartEnd = source.indexOf('let profileSwitchGeneration', restartStart)
     const body = source.slice(restartStart, restartEnd)
 
     expect(restartEnd).toBeGreaterThan(restartStart)

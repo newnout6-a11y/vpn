@@ -16,6 +16,8 @@ import type { SessionOutcome, SessionOutcomeEvidence, SessionOutcomeKind } from 
 import { readRecentXrayOutboundFault, getXrayStatus, stopXray } from './xrayEngine'
 import { classifyNavigation } from './navigationPolicy'
 import { ipMonitor } from './ipMonitor'
+import { withProtectedIpTransition } from './protectedIpTransition'
+import { collectAdaptiveSamples } from './adaptiveVerification'
 import { autoconfig } from './autoconfig'
 import { createTray, updateTrayState, type TrayStatus } from './tray'
 import { settingsStore, type AppSettings } from './settings'
@@ -60,7 +62,7 @@ import { resolveVpnProfile, resolveVpnProfiles, redactSensitiveConfig, type VpnP
 
 // ─── V2 Feature Modules ──────────────────────────────────────────────────────
 import { registerSplitTunnelHandlers } from './splitTunneling'
-import { registerServerPickerHandlers, serverPicker } from './serverPicker'
+import { registerServerPickerHandlers, serverPicker, setProfileSwitchHooks } from './serverPicker'
 import {
   registerServerGroupsHandlers,
   startServerGroupAutoRefresh,
@@ -334,6 +336,28 @@ function recordStartFailure(
   } catch { /* history write is best-effort */ }
 }
 let adaptiveVerificationGeneration = 0
+let adaptiveVerificationAbort: AbortController | null = null
+let adaptiveTransitionInFlight: Promise<{ success: boolean; error?: string }> | null = null
+let manualProfileSwitchActive = false
+
+setProfileSwitchHooks({
+  begin: async () => {
+    manualProfileSwitchActive = true
+    adaptiveVerificationGeneration += 1
+    adaptiveVerificationAbort?.abort()
+    ipMonitor.suspend()
+    invalidateAdaptiveLearningContext()
+    activeAdaptiveContext = null
+    logEvent('info', 'adaptive-bypass', 'manual profile switch invalidated adaptive verification')
+    // A dispatched OS transition must settle before another owner can start.
+    await adaptiveTransitionInFlight?.catch(() => undefined)
+  },
+  end: () => {
+    manualProfileSwitchActive = false
+    ipMonitor.resume()
+    ensureAdaptiveMonitoringForRunningTunnel()
+  }
+})
 let activeAdaptiveContext: {
   profile?: Record<string, any>
   capabilities: AdaptiveCapabilities
@@ -343,7 +367,7 @@ let activeAdaptiveContext: {
   serverFallbackAttempted: boolean
 } | null = null
 
-function nextDirectVpnSibling(context: NonNullable<typeof activeAdaptiveContext>): VpnProfile | null {
+function nextDirectVpnSibling(context: NonNullable<typeof activeAdaptiveContext>): { id: string; profile: VpnProfile } | null {
   if (
     !settingsStore.get().adaptiveBypassServerFallback ||
     !context.serverFallbackEnabled ||
@@ -354,19 +378,20 @@ function nextDirectVpnSibling(context: NonNullable<typeof activeAdaptiveContext>
   if (!active?.groupId) return null
   const candidate = serverPicker.getProfiles().find(profile =>
     profile.id !== active.id &&
+    profile.enabled !== false && !profile.removedFromSubscriptionAt &&
     profile.groupId === active.groupId &&
     profile.status !== 'offline' &&
     profile.outbound && typeof profile.outbound === 'object'
   )
   if (!candidate?.outbound) return null
   context.serverFallbackAttempted = true
-  return {
+  return { id: candidate.id, profile: {
     name: candidate.name,
     protocol: candidate.protocol as VpnProfile['protocol'],
     outbound: candidate.outbound,
     clientDevice: candidate.clientDevice,
     clientFingerprint: candidate.clientFingerprint
-  }
+  } }
 }
 
 function adaptiveOutboundFaultMessage(fault: SingBoxOutboundFault): string {
@@ -381,7 +406,7 @@ function adaptiveOutboundFaultMessage(fault: SingBoxOutboundFault): string {
 }
 
 function ensureAdaptiveMonitoringForRunningTunnel(): void {
-  if (activeAdaptiveContext || !settingsStore.get().adaptiveBypassEnabled) return
+  if (manualProfileSwitchActive || adaptiveTransitionInFlight || activeAdaptiveContext || !settingsStore.get().adaptiveBypassEnabled) return
   const tun = tunController.getStatus()
   if (!tun.running || !tun.mode) return
   const active = tun.mode === 'directVpn' ? serverPicker.getActiveProfile() : null
@@ -405,8 +430,37 @@ function ensureAdaptiveMonitoringForRunningTunnel(): void {
   scheduleAdaptiveVerification()
 }
 
+async function restartAdaptiveWithFreshIp(
+  mode: Parameters<typeof tunController.restartForAdaptiveChange>[0],
+  reason: string,
+  isOwner: () => boolean,
+  sibling?: { id: string; profile: VpnProfile }
+): Promise<{ success: boolean; error?: string }> {
+  if (!isOwner()) return { success: false, error: 'Adaptive verification superseded' }
+  const transition = withProtectedIpTransition({
+    reason: `adaptive: ${reason}`,
+    isCurrent: () => isOwner() && tunController.getStatus().running,
+    isOwner,
+    areRoutesActive: () => tunController.areTunRoutesActive(),
+    restart: () => tunController.restartForAdaptiveChange(mode, reason, sibling ? { vpnProfile: sibling.profile } : {}),
+    onRestarted: () => {
+      if (sibling && isOwner()) {
+        serverPicker.selectProfile(sibling.id)
+        sendToMainWindow('server-active-changed', { profileId: sibling.id, profileName: sibling.profile.name })
+      }
+    }
+  })
+  adaptiveTransitionInFlight = transition
+  try { return await transition }
+  finally { if (adaptiveTransitionInFlight === transition) adaptiveTransitionInFlight = null }
+}
+
 function scheduleAdaptiveVerification(): void {
-  void verifyAdaptiveConnection().catch(err => {
+  const context = activeAdaptiveContext
+  const verification = verifyAdaptiveConnection()
+  const generation = adaptiveVerificationGeneration
+  void verification.catch(err => {
+    if (generation !== adaptiveVerificationGeneration || context !== activeAdaptiveContext || manualProfileSwitchActive) return
     logEvent('warn', 'adaptive-bypass', 'adaptive verification failed unexpectedly', err)
     markAdaptiveFailure(err?.message || String(err))
   })
@@ -415,7 +469,13 @@ function scheduleAdaptiveVerification(): void {
 async function verifyAdaptiveConnection(): Promise<void> {
   const context = activeAdaptiveContext
   const generation = ++adaptiveVerificationGeneration
-  if (!context || !tunController.getStatus().running) return
+  adaptiveVerificationAbort?.abort()
+  const controller = new AbortController()
+  adaptiveVerificationAbort = controller
+  const initialStartedAt = tunController.getStatus().startedAt
+  const isOwner = () => generation === adaptiveVerificationGeneration && activeAdaptiveContext === context && !manualProfileSwitchActive && !controller.signal.aborted
+  const isCurrent = () => isOwner() && tunController.getStatus().running && tunController.getStatus().startedAt === initialStartedAt
+  if (!context || !isCurrent()) return
   if (!context.enabled) {
     await markAdaptiveSuccess(context.profile)
     return
@@ -428,28 +488,13 @@ async function verifyAdaptiveConnection(): Promise<void> {
   }
 
   markAdaptiveVerifying()
-  // Require a stable verification window before persisting adaptive learning.
-  // One transient successful request must not change the remembered mode.
-  await new Promise(resolve => setTimeout(resolve, 20_000))
-  if (generation !== adaptiveVerificationGeneration || !tunController.getStatus().running) return
-
   const { tunnelHttpProbe } = await import('./serverPicker')
-  // Require a STABLE success before persisting adaptive learning. A single
-  // transient probe that happens to succeed (success → fail → fail) must NOT
-  // flip the remembered mode — the comment above promises a stable window.
-  // Count successes and keep the LAST successful sample for the latency log;
-  // succeed only when a majority (≥2 of 3) of probes got through.
-  const samples: number[] = []
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const sample = await tunnelHttpProbe(true)
-    if (sample !== null) samples.push(sample)
-    if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 2500))
-  }
-  if (generation !== adaptiveVerificationGeneration || !tunController.getStatus().running) return
+  const samples = await collectAdaptiveSamples(isCurrent, controller.signal, signal => tunnelHttpProbe(true, 1, signal))
+  if (!samples || !isCurrent()) return
   if (samples.length >= 2) {
     const latency = samples[samples.length - 1]
     await markAdaptiveSuccess(context.profile)
-    if (generation !== adaptiveVerificationGeneration || !tunController.getStatus().running) return
+    if (!isCurrent()) return
     logEvent('info', 'adaptive-bypass', 'tunnel verification succeeded', { latency, successes: samples.length })
     try {
       tunController.recoverProxyIfAlive('adaptive-probe')
@@ -466,19 +511,22 @@ async function verifyAdaptiveConnection(): Promise<void> {
   const outboundFault = getXrayStatus().running
     ? (await readRecentXrayOutboundFault()) || (await readRecentSingBoxOutboundFault())
     : await readRecentSingBoxOutboundFault()
-  if (generation !== adaptiveVerificationGeneration || !tunController.getStatus().running) return
+  if (!isCurrent()) return
   if (outboundFault) {
     logEvent('warn', 'adaptive-bypass', 'tunnel verification failed — sing-box outbound fault', { fault: outboundFault })
     const sibling = nextDirectVpnSibling(context)
     if (sibling) {
       markAdaptiveServerFallback()
-      const restarted = await tunController.restartForAdaptiveChange(
+      const restarted = await restartAdaptiveWithFreshIp(
         getAdaptiveBypassStatus().mode,
         `sing-box outbound fault: ${outboundFault}`,
-        { vpnProfile: sibling }
+        isOwner, sibling
       )
+      if (!isOwner()) return
       if (restarted.success) {
-        context.profile = sibling
+        context.profile = sibling.profile
+        context.capabilities = resolveAdaptiveCapabilities('directVpn', sibling.profile)
+        invalidateAdaptiveLearningContext()
         scheduleAdaptiveVerification()
         return
       }
@@ -495,13 +543,16 @@ async function verifyAdaptiveConnection(): Promise<void> {
     const sibling = nextDirectVpnSibling(context)
     if (sibling) {
       markAdaptiveServerFallback()
-      const restarted = await tunController.restartForAdaptiveChange(
+      const restarted = await restartAdaptiveWithFreshIp(
         afterProbe.mode,
         'adaptive compatible profile failed tunnel health check',
-        { vpnProfile: sibling }
+        isOwner, sibling
       )
+      if (!isOwner()) return
       if (restarted.success) {
-        context.profile = sibling
+        context.profile = sibling.profile
+        context.capabilities = resolveAdaptiveCapabilities('directVpn', sibling.profile)
+        invalidateAdaptiveLearningContext()
         scheduleAdaptiveVerification()
         return
       }
@@ -513,7 +564,8 @@ async function verifyAdaptiveConnection(): Promise<void> {
   }
 
   markAdaptiveTransition(next)
-  const restarted = await tunController.restartForAdaptiveChange(next, 'adaptive tunnel health check failed')
+  const restarted = await restartAdaptiveWithFreshIp(next, 'adaptive tunnel health check failed', isOwner)
+  if (!isOwner()) return
   if (!restarted.success) {
     markAdaptiveFailure(restarted.error || 'Не удалось применить совместимый режим')
     return
@@ -1857,16 +1909,16 @@ app.whenReady().then(async () => {
   })
 
   handleLogged('get-public-ip', async () => {
-    return ipMonitor.getCurrentIp()
+    return { ...await ipMonitor.getCurrentIp(), ...ipMonitor.getEvidence() }
   })
 
   handleLogged('recheck-public-ip', async (_e, rebaseline?: boolean) => {
     const wantsRebaseline = rebaseline === true
     if (wantsRebaseline && !tunController.getStatus().running) {
       logEvent('warn', 'tun', 'recheck-public-ip requested rebaseline while tunnel is not running — skipping rebaseline to avoid setting real IP as vpnIp')
-      return ipMonitor.recheck(false)
+      return { ...await ipMonitor.recheck(false), ...ipMonitor.getEvidence() }
     }
-    return ipMonitor.recheck(wantsRebaseline)
+    return { ...await ipMonitor.recheck(wantsRebaseline), ...ipMonitor.getEvidence() }
   })
 
   handleLogged('start-tun', async (_e, proxyAddr: string, proxyType?: 'socks5' | 'http') => {
@@ -2495,14 +2547,14 @@ app.whenReady().then(async () => {
     } catch {}
   })
 
-  ipMonitor.onIpChange((ip: string, isLeak: boolean) => {
+  ipMonitor.onIpChange((ip, isLeak, evidence) => {
     latestPublicIp = ip
-    if (ip && !isLeak) {
+    if (ip && evidence.verdict === 'passed') {
       try {
         tunController.recoverProxyIfAlive('ipMonitor')
       } catch {}
     }
-    sendToMainWindow('ip-changed', { ip, isLeak })
+    sendToMainWindow('ip-changed', { ip, isLeak, ...evidence })
     refreshTrayState({ status: isLeak ? 'leak' : tunController.getStatus().running ? 'protected' : 'off', publicIp: ip })
     if (isLeak) {
       notify('error', 'Виден ваш реальный IP', `Текущий публичный IP: ${ip}. Включите защиту или проверьте VPN-клиент.`, 'leakDetected')

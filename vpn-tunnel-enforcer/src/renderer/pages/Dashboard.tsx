@@ -105,6 +105,7 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
   const publicIp = useAppStore(s => s.publicIp)
   const vpnIp = useAppStore(s => s.vpnIp)
   const isLeak = useAppStore(s => s.isLeak)
+  const publicIpVerdict = useAppStore(s => s.publicIpVerdict)
   const traffic = useAppStore(s => s.traffic)
   const firewallKillSwitchActive = useAppStore(s => s.firewallKillSwitchActive)
   const routingHealth = useAppStore(s => s.routingHealth)
@@ -145,7 +146,7 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
   // Only after VPN IP is confirmed — avoids geolocating the user's real IP.
   // Skipped entirely when disableGeoLookup is ON (privacy setting).
   useEffect(() => {
-    if (!publicIp || isLeak || !tunRunning || !vpnIp || settings?.disableGeoLookup) {
+    if (!publicIp || isLeak || publicIpVerdict !== 'passed' || !tunRunning || !vpnIp || settings?.disableGeoLookup) {
       setIpGeo({ country: null, city: null })
       return
     }
@@ -189,7 +190,7 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
       cancelled = true
       controller.abort()
     }
-  }, [publicIp, isLeak, tunRunning, vpnIp, settings?.disableGeoLookup])
+  }, [publicIp, isLeak, publicIpVerdict, tunRunning, vpnIp, settings?.disableGeoLookup])
 
   // ─── Toast management ───────────────────────────────────────────────────
 
@@ -276,7 +277,7 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
           setTimeout(async () => {
             try {
               const ipInfo = await window.electronAPI.getPublicIp()
-              setPublicIp(ipInfo.ip, ipInfo.isLeak)
+              setPublicIp(ipInfo.ip, ipInfo.isLeak, ipInfo.verdict)
             } catch {}
           }, 2000)
         } else {
@@ -334,7 +335,7 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
           setTimeout(async () => {
             try {
               const ipInfo = await window.electronAPI.getPublicIp()
-              setPublicIp(ipInfo.ip, ipInfo.isLeak)
+              setPublicIp(ipInfo.ip, ipInfo.isLeak, ipInfo.verdict)
             } catch {}
           }, 2000)
         } else {
@@ -819,7 +820,7 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
         {/* Connection info chips */}
         {isConnected && (
           <div className="flex flex-wrap items-center justify-center gap-2 text-xs">
-            {publicIp && !visibleLeak && vpnIp && publicIp === vpnIp ? (
+            {publicIp && !visibleLeak && publicIpVerdict === 'passed' && vpnIp && publicIp === vpnIp ? (
               <span className="flex items-center gap-1.5 rounded-full bg-[var(--color-success)]/10 px-3 py-1.5 text-[var(--color-success)]">
                 <CheckCircle2 className="w-3.5 h-3.5" />
                 {ipGeo.country && (
@@ -837,6 +838,12 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
                 <AlertTriangle className="w-3.5 h-3.5" />
                 <span className="font-mono">{publicIp}</span>
                 <span className="opacity-80">— утечка</span>
+              </span>
+            ) : publicIp && isConnected && (publicIpVerdict === 'indeterminate' || publicIpVerdict === 'not-checked') ? (
+              <span className="flex items-center gap-1.5 rounded-full bg-[var(--color-warning)]/10 px-3 py-1.5 text-[var(--color-warning)]" role="status">
+                <AlertTriangle className="w-3.5 h-3.5" />
+                <span className="font-mono">{publicIp}</span>
+                <span>— {publicIpVerdict === 'indeterminate' ? t('dashboard.ipChangedUnverified') : t('dashboard.ipNotChecked')}</span>
               </span>
             ) : isConnected ? (
               <span className="flex items-center gap-1.5 rounded-full glass px-3 py-1.5 text-[var(--color-text-secondary)]">

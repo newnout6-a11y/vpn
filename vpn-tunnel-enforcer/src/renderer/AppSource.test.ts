@@ -210,7 +210,7 @@ describe('App source regressions', () => {
     expect(detail).toContain('fetch(`https://ipapi.co/${host}/json/`')
     expect(detail).toContain('}, [open, profile, disableGeoLookup])')
     expect(detail).toContain('(ipInfo || (!disableGeoLookup && fallbackCountry))')
-    expect(dashboardSource()).toContain('}, [publicIp, isLeak, tunRunning, vpnIp, settings?.disableGeoLookup])')
+    expect(dashboardSource()).toContain('}, [publicIp, isLeak, publicIpVerdict, tunRunning, vpnIp, settings?.disableGeoLookup])')
     expect(browserIp).not.toContain('https://ipinfo.io/json')
   })
 
