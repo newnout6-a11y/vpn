@@ -1095,3 +1095,23 @@ Installed main SHA256 `e23e253ea04b817641e9c7ad6ca498f854339878546954c2f77d9f227
 - `git diff --check` — exit 0. Временные файлы не создавались.
 
 **Ограничение и откат:** Windows/L3 и живое воспроизведение UI после установки этого artifact не выполнены. Скорость backend этим ремонтом не меняется; свежая route/IP проверка не удалена. Revert scoped commit возвращает прежние UI/cancellation обработчики; форматы stores/settings совместимы.
+
+### 2026-10-03 — этап 37: замечания Revix к отмене переключения (WP-9)
+
+**Граница:** владелец поручил исправить подтверждённые замечания Revix к PR #18. PR уже слит (`vpn/main` = `0d4e7ae`), открытых PR на начало работы нет; чистая ветка `codex/revix-cancellation-polish` создана от этого main. Следующие исправления коммитятся в один открытый PR до его слияния, согласно команде владельца. Прочитаны AGENTS, WP-9 acceptance, нормативный §5.3 и план/решения владельца. Нормативные документы не изменены. Трассировка: AT-09-011 / F-121, смежные AT-00-003/008 и F-020.
+
+- В inline и боковом выборе сервера сообщение отмены использует общий `t('dashboard.serverSwitchCancelled')`, новый ключ присутствует в ru/en. В dependencies бокового memo добавлен `t` для обновления обработчиков при смене локали.
+- Синхронные `act` в двух регрессионных React-файлах заменены на `await act(async () => ...)`. Компонентный тест использует отдельный настоящий i18next instance и реальные словари; проверяет русский и английский cancellation log, отсутствие ошибки/ложного успеха и освобождение switch flag.
+- Добавлены source contracts для двух translated callers / зависимости `t` и ожидания всех `act` в этих cancellation tests.
+- Третье замечание отклонено: установленный jest-dom не предоставляет `toMatchTextContent`; используемый `toHaveTextContent('Norway')` уже проверяет подстроку. Корректный matcher сохранён. Параметры сети, IPC и lifecycle не изменены.
+
+**Проверки из `vpn-tunnel-enforcer`:**
+
+- `npx.cmd vitest run src/renderer/components/ProfileSelectorInline.cancel.test.tsx src/renderer/pages/Dashboard.cancel.test.tsx src/renderer/AppSource.test.ts --maxWorkers=4` — exit 0, **3 files / 44 passed**, 3.76 s на окончательном source.
+- `npm.cmd run typecheck` — exit 0; повторён внутри build.
+- `npm.cmd test -- --maxWorkers=4` — exit 0, **192 files passed / 2 skipped; 2256 tests passed / 10 skipped / 0 failed**, 110.76 s. RootErrorBoundary crash stderr штатен для его теста.
+- `python -X utf8 ../docs/04-приёмочные-тесты/traceability/check-coverage.py` — exit 0, **AC 927/927, F 210/210**. Это проверка трассировки, не всей acceptance matrix.
+- `npm.cmd run dist:win` — exit 0, Electron 44.4.3 / NSIS, optional mksnapshot штатно пропущен. **185 output files** в ASAR побайтово равны compiled files; translation key и обе строки ru/en найдены в packaged renderer.
+- Main SHA256 `ae519e5c05b236d66f87e3a760f7c3ae7f2a6b2da11adc7e2d69bbe0843cf7ef`; preload `304534f83a73680dadfdc0c6296a9f356c337b506d4da44e03b36087290e3663`.
+- Installer `vpn-tunnel-enforcer/dist/VPN-Tunnel-Enforcer-Setup-1.1.22.exe`: **139172724 bytes**, **03.10.2026 22:40:07 МСК**, SHA256 `DC8962B938AD5EC8CA18F2F9B371E6C5DA21D6F0613159E668E6F49619FF72E5`, Authenticode `NotSigned`. Заменяет artifact этапа 36; агентом не установлен.
+- `git diff --check` — exit 0. Временные файлы не создавались. Живой UI после установки, NVDA и Windows/L3 этим этапом не проверялись. Revert scoped commit возвращает hardcoded cancellation log и прежнее оформление tests, формат stores/settings совместим.

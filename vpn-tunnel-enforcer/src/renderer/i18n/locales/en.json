@@ -10,6 +10,7 @@
     "connectionError": "Connection failed",
     "cancelConnection": "Cancel connection",
     "cancelServerSwitch": "Cancel server switch",
+    "serverSwitchCancelled": "Server switch cancelled",
     "cancelling": "Cancelling…",
     "connectionCancelled": "Connection cancelled",
     "cancelledWithWarnings": "Connection cancelled with warnings",

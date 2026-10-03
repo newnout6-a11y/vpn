@@ -181,7 +181,7 @@ function QuickServers() {
         try {
           const result = await window.electronAPI.serversSelect(profile.id)
           if (result?.cancelled) {
-            addLog('info', 'Смена сервера отменена')
+            addLog('info', t('dashboard.serverSwitchCancelled'))
             emitServerChanged()
             return
           }
@@ -219,7 +219,7 @@ function QuickServers() {
     }
     if (orphans.length > 0) out.push({ group: null, rows: orphans })
     return out
-  }, [profiles, groups, groupsAvailable, activeId, addLog, refresh, tunRunning, connectionMode, setServerSwitchingName])
+  }, [profiles, groups, groupsAvailable, activeId, addLog, refresh, tunRunning, connectionMode, setServerSwitchingName, t])
 
   const activeRowsTotal = useMemo(
     () => clusters.reduce((sum, c) => sum + c.rows.filter(row => !row.removed).length, 0),

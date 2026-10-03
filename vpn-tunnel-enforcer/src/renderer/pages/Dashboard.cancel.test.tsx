@@ -55,7 +55,7 @@ describe('Dashboard cancellation', () => {
     render(<Dashboard />)
     fireEvent.click(screen.getByRole('button', { name: 'Отменить смену сервера' }))
     await waitFor(() => expect(window.electronAPI.cancelTransition).toHaveBeenCalledOnce())
-    act(() => {
+    await act(async () => {
       applyTerminalTunStatus('stopped')
       useAppStore.getState().setServerSwitchingName(null)
     })
@@ -74,12 +74,12 @@ describe('Dashboard cancellation', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Отменить смену сервера' }))
     await waitFor(() => expect(window.electronAPI.cancelTransition).toHaveBeenCalledOnce())
     expect(screen.getByRole('button', { name: 'Отменяем…', busy: true })).toBeDisabled()
-    act(() => applyTerminalTunStatus('stopped'))
+    await act(async () => applyTerminalTunStatus('stopped'))
     view.unmount()
     render(<Dashboard />)
     expect(screen.getByRole('button', { name: 'Отменяем…', busy: true })).toBeDisabled()
     expect(useAppStore.getState().tunRunning).toBe(false)
-    act(() => useAppStore.getState().setServerSwitchingName(null))
+    await act(async () => useAppStore.getState().setServerSwitchingName(null))
     expect(screen.getByRole('button', { name: 'Отключено' })).toBeInTheDocument()
     expect(screen.getByRole('status')).toHaveTextContent('Отключено')
     expect(window.electronAPI.cancelTun).not.toHaveBeenCalled()
@@ -132,7 +132,7 @@ describe('Dashboard cancellation', () => {
     expect(screen.getByRole('status')).toHaveClass('sr-only')
     fireEvent.click(cancelButton)
     expect(window.electronAPI.cancelTun).toHaveBeenCalledTimes(1)
-    act(() => {
+    await act(async () => {
       useAppStore.getState().setTunRunning(false)
       useAppStore.getState().setConnectionBusy(null)
     })

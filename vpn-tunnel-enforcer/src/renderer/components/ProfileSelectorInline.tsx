@@ -165,7 +165,7 @@ export function ProfileSelectorInline() {
     try {
       const result = await window.electronAPI.serversSelect(id)
       if (result?.cancelled) {
-        addLog('info', 'Смена сервера отменена')
+        addLog('info', t('dashboard.serverSwitchCancelled'))
         emitServerChanged()
         return
       }
