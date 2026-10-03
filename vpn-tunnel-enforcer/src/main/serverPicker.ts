@@ -12,7 +12,7 @@
 
 import { app, dialog, ipcMain, type IpcMainInvokeEvent } from 'electron'
 import { networkInterfaces } from 'os'
-import { Socket } from 'net'
+import { Socket, isIP } from 'net'
 import { promises as dns } from 'dns'
 import { writeFile } from 'fs/promises'
 import { join } from 'path'
@@ -86,6 +86,11 @@ interface AddProfilesOptions {
 const CLIENT_DEVICES = ['pc', 'android', 'ios', 'mac'] as const
 
 const COUNTRY_GEO_VERSION = 3
+const GEO_COUNTRY_TTL_MS = 5 * 60_000
+const geoCountries = new Map<string, { country: string | null; expiresAt: number }>()
+const geoCountryReads = new Map<string, Promise<string | null>>()
+const geoProviderBackoff = new Map<string, { failures: number; retryAt: number }>()
+let activeCountryGeneration = 0
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -1133,12 +1138,15 @@ async function fetchGeoJson<T>(
     })
     return null
   }
+  const provider = new URL(url).origin
+  if ((geoProviderBackoff.get(provider)?.retryAt ?? 0) > Date.now()) return null
   const errors: string[] = []
   const method = options.method ?? 'GET'
   for (const route of currentBootstrapRoutes()) {
     const args = [
       '-sS',
       '--fail',
+      '--dump-header', '-',
       // Belt-and-braces with isHttpsGeoUrl above: refuse the request at the
       // curl level too if anything but https is ever reached, redirects
       // included (we don't pass -L, but the flags cost nothing).
@@ -1161,10 +1169,26 @@ async function fetchGeoJson<T>(
         encoding: 'utf8',
         maxBuffer: 1024 * 1024 * 4
       })
-      return { data: JSON.parse(stdout) as T, route: route.label }
+      const response = parseGeoResponse(stdout)
+      const data = JSON.parse(response.body) as T
+      geoProviderBackoff.delete(provider)
+      return { data, route: route.label }
     } catch (err: any) {
       const stderr = typeof err?.stderr === 'string' ? err.stderr.trim() : ''
       errors.push(`${route.label}: ${stderr || err?.message || String(err)}`)
+      const response = parseGeoResponse(typeof err?.stdout === 'string' ? err.stdout : '')
+      if (response.status === 429 || /requested URL returned error: 429\b/i.test(stderr)) {
+        const failures = (geoProviderBackoff.get(provider)?.failures ?? 0) + 1
+        const exponentialMs = Math.min(15 * 60_000, 60_000 * 2 ** Math.min(failures - 1, 4))
+        const seconds = Number(response.retryAfter)
+        const retryAfterMs = response.retryAfter === null ? 0 : /^\d+$/.test(response.retryAfter)
+          ? seconds * 1000 : Math.max(0, Date.parse(response.retryAfter) - Date.now())
+        const delayMs = Math.max(exponentialMs, Number.isFinite(retryAfterMs) ? retryAfterMs : 0)
+        geoProviderBackoff.set(provider, { failures, retryAt: Date.now() + delayMs })
+        logEvent('debug', 'server-picker', 'geo provider rate limited', { provider, delayMs })
+        // Another route cannot fix the provider's quota; avoid replaying it.
+        break
+      }
     }
   }
   logEvent('debug', 'server-picker', 'geo bootstrap lookup failed on all routes', {
@@ -1172,6 +1196,21 @@ async function fetchGeoJson<T>(
     errors: errors.slice(-4)
   })
   return null
+}
+
+function parseGeoResponse(stdout: string): { body: string; status: number | null; retryAfter: string | null } {
+  let body = stdout
+  let status: number | null = null
+  let retryAfter: string | null = null
+  // curl may prepend a proxy CONNECT response before the provider headers.
+  while (body.startsWith('HTTP/')) {
+    const header = /^HTTP\/[\d.]+\s+(\d{3})[^\r\n]*\r?\n((?:[^\r\n]+\r?\n)*)\r?\n/.exec(body)
+    if (!header) break
+    status = Number(header[1])
+    retryAfter = /^retry-after:\s*([^\r\n]+)/im.exec(header[2])?.[1]?.trim() ?? null
+    body = body.slice(header[0].length)
+  }
+  return { body, status, retryAfter }
 }
 
 function chooseGeoCountry(ip: string, votes: GeoVote[]): string | null {
@@ -1320,9 +1359,20 @@ async function batchGeolocateIps(ips: string[]): Promise<Map<string, string>> {
 }
 
 export async function geolocateIp(ip: string): Promise<string | null> {
-  if (geoLookupDisabled()) return null
-  const map = await batchGeolocateIps([ip])
-  return map.get(ip) ?? null
+  if (geoLookupDisabled() || !isIP(ip)) return null
+  const cached = geoCountries.get(ip)
+  if (cached && cached.expiresAt > Date.now()) return cached.country
+  const pending = geoCountryReads.get(ip)
+  if (pending) return pending
+  const read = batchGeolocateIps([ip]).then(map => {
+    if (geoLookupDisabled()) return null
+    const country = map.get(ip) ?? null
+    if (geoCountries.size >= 256) geoCountries.delete(geoCountries.keys().next().value!)
+    geoCountries.set(ip, { country, expiresAt: Date.now() + (country ? GEO_COUNTRY_TTL_MS : 5000) })
+    return country
+  }).finally(() => { geoCountryReads.delete(ip) })
+  geoCountryReads.set(ip, read)
+  return read
 }
 
 export function updateActiveProfileCountry(country: string, ip?: string | null): ServerProfile | null {
@@ -1360,6 +1410,28 @@ export function updateActiveProfileCountry(country: string, ip?: string | null):
     ip: cleanIp ?? null
   })
   return updated
+}
+
+export async function verifyActiveCountryForIp(cleanIp: string, isCurrent: () => boolean = () => true) {
+  if (geoLookupDisabled()) return { ok: false as const, reason: 'geo-lookup-disabled' }
+  if (!isIP(cleanIp)) return { ok: false as const, reason: 'invalid-ip' }
+  if (!isCurrent()) return { ok: false as const, reason: 'superseded' }
+  if (profileSwitchInProgress) return { ok: false as const, reason: 'profile-switch-in-progress' }
+  const activeId = getActiveProfileId()
+  if (!activeId) return { ok: false as const, reason: 'active-profile-not-found' }
+  const generation = ++activeCountryGeneration
+  const session = { ...tunController.getStatus() }
+  const country = await geolocateIp(cleanIp)
+  if (geoLookupDisabled()) return { ok: false as const, reason: 'geo-lookup-disabled' }
+  const currentSession = tunController.getStatus()
+  if (!isCurrent() || generation !== activeCountryGeneration || activeId !== getActiveProfileId() || profileSwitchInProgress ||
+      session.startedAt !== currentSession.startedAt || session.running !== currentSession.running) {
+    return { ok: false as const, reason: 'superseded' }
+  }
+  if (!country) return { ok: false as const, reason: 'geo-lookup-failed' }
+  const profile = updateActiveProfileCountry(country, cleanIp)
+  if (!profile) return { ok: false as const, reason: 'active-profile-not-found', country }
+  return { ok: true as const, country, profile }
 }
 
 export async function verifyProfileCountry(id: string): Promise<ServerProfile | null> {
@@ -1940,6 +2012,7 @@ export function selectProfile(id: string): void {
     return
   }
   store.set('activeProfileId', id)
+  activeCountryGeneration += 1
   logEvent('info', 'server-picker', 'profile selected', { id })
 }
 
@@ -2509,11 +2582,7 @@ export function registerServerPickerHandlers(): void {
     const cleanIp = requireString(ip, 'ip', { allowEmpty: true, maxLength: 128 })
     if (!cleanIp) return { ok: false as const, reason: 'missing-ip' }
     if (geoLookupDisabled()) return { ok: false as const, reason: 'geo-lookup-disabled' }
-    const country = await geolocateIp(cleanIp)
-    if (!country) return { ok: false as const, reason: 'geo-lookup-failed' }
-    const profile = updateActiveProfileCountry(country, cleanIp)
-    if (!profile) return { ok: false as const, reason: 'active-profile-not-found', country }
-    return { ok: true as const, country, profile }
+    return verifyActiveCountryForIp(cleanIp)
   })
 
   handleLogged('servers:verify-country', async (_event, id: string) => {

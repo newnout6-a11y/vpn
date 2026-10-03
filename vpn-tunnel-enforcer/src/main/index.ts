@@ -1222,9 +1222,8 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
           if (exitIp) {
             void (async () => {
               try {
-                const { geolocateIp, updateActiveProfileCountry } = await import('./serverPicker')
-                const country = await geolocateIp(exitIp)
-                if (country) updateActiveProfileCountry(country, exitIp)
+                const { verifyActiveCountryForIp } = await import('./serverPicker')
+                await verifyActiveCountryForIp(exitIp, isCurrentVpnIpPoll)
               } catch {}
             })()
           }
@@ -1250,9 +1249,8 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
           refreshTrayState({ status: 'protected', publicIp: exitIp, proxyAddr })
           void (async () => {
             try {
-              const { geolocateIp, updateActiveProfileCountry } = await import('./serverPicker')
-              const country = await geolocateIp(exitIp)
-              if (country) updateActiveProfileCountry(country, exitIp)
+              const { verifyActiveCountryForIp } = await import('./serverPicker')
+              await verifyActiveCountryForIp(exitIp, isCurrentVpnIpPoll)
             } catch {}
           })()
         }
@@ -1490,9 +1488,8 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
           if (exitIp) {
             void (async () => {
               try {
-                const { geolocateIp, updateActiveProfileCountry } = await import('./serverPicker')
-                const country = await geolocateIp(exitIp)
-                if (country) updateActiveProfileCountry(country, exitIp)
+                const { verifyActiveCountryForIp } = await import('./serverPicker')
+                await verifyActiveCountryForIp(exitIp, isCurrentVpnIpPoll)
               } catch {}
             })()
           }
@@ -1517,9 +1514,8 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
           refreshTrayState({ status: 'protected', publicIp: exitIp, proxyAddr: profile.name })
           void (async () => {
             try {
-              const { geolocateIp, updateActiveProfileCountry } = await import('./serverPicker')
-              const country = await geolocateIp(exitIp)
-              if (country) updateActiveProfileCountry(country, exitIp)
+              const { verifyActiveCountryForIp } = await import('./serverPicker')
+              await verifyActiveCountryForIp(exitIp, isCurrentVpnIpPoll)
             } catch {}
           })()
         }

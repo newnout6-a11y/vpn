@@ -54,6 +54,7 @@ import type { PhysicalAdapterDnsSource } from './physicalAdapterLockdown'
 import type { AdaptiveBypassMode } from './adaptiveBypass'
 import { resolveProxyEngine, type ProxyEngineMode } from './proxyEngine'
 import { startXray, stopXray, getXrayRuntimeExePath } from './xrayEngine'
+import { waitForTunRelease } from './tunRestartReadiness'
 
 const exec = promisify(execCb)
 const execFile = promisify(execFileCb)
@@ -3260,11 +3261,11 @@ export const tunController = {
 
       // Poll for sing-box.exe presence.
       let attempts = 0
-      const maxAttempts = 30 // 30 * 250ms = 7.5s (same ceiling, finer granularity)
+      const maxAttempts = 31 // Immediate probe + 30 * 250ms = 7.5s.
       let successHandled = false
       let pollInFlight = false
       const processWaitStarted = phaseStart()
-      const poller = setInterval(async () => {
+      const pollRuntime = async () => {
         if (pollInFlight) return
         pollInFlight = true
         let releasePoll!: () => void
@@ -3738,7 +3739,10 @@ export const tunController = {
           pollInFlight = false
           releasePoll()
         }
-      }, 250)
+      }
+      const poller = setInterval(pollRuntime, 250)
+      // Keep the same exit/ownership/firewall gates; skip the initial idle tick.
+      void pollRuntime()
     })
     } finally {
       // Stop must wait for the whole startup owner, including failure cleanup.
@@ -4006,13 +4010,13 @@ export const tunController = {
   async restartProtected(
     reason: string,
     nextOptions: StartOptions,
-    options: { settleMs?: number } = {}
+    options: { releaseTimeoutMs?: number } = {}
   ): Promise<{ success: boolean; error?: string; warning?: string | null }> {
-    const settleMs = options.settleMs ?? 500
+    const releaseTimeoutMs = options.releaseTimeoutMs ?? 5000
     logEvent('info', 'tun', 'protected tunnel restart', {
       reason,
       mode: nextOptions.mode ?? 'localProxy',
-      settleMs
+      releaseTimeoutMs
     })
     // Fired while the tunnel is still up (traffic counters valid) so index.ts
     // can close the current connection-history session for a node switch.
@@ -4030,7 +4034,12 @@ export const tunController = {
       return { success: false, error: stopped.error, warning: stopped.warning ?? null }
     }
 
-    if (transitionCancelRequested) {
+    const releaseStarted = performance.now()
+    const release = await waitForTunRelease(() => transitionCancelRequested, releaseTimeoutMs)
+    logEvent('info', 'tun', 'protected restart interface release', {
+      outcome: release, durationMs: Math.round(performance.now() - releaseStarted)
+    })
+    if (transitionCancelRequested || release === 'cancelled') {
       transitionCancelRequested = false
       try {
         await this.stop()
@@ -4041,9 +4050,12 @@ export const tunController = {
       return cancelledResult
     }
 
-    // Brief pause so the runtime fully releases the TUN adapter before we
-    // recreate it — mirrors the delay the old split-tunnel hot-reload used.
-    if (settleMs > 0) await new Promise((resolve) => setTimeout(resolve, settleMs))
+    if (release !== 'released') {
+      const error = 'Освобождение прежнего TUN-интерфейса не подтверждено; защита сохранена'
+      currentStatus = { ...currentStatus, warning: error }
+      notifyStatus('error')
+      return { success: false, error }
+    }
 
     const settings = settingsStore.get()
     nextOptions = {
@@ -4135,7 +4147,7 @@ export const tunController = {
     return this.restartProtected(
       `adaptive transition to ${nextMode}: ${reason}`,
       { ...snapshot, ...overrides, adaptiveMode: nextMode },
-      { settleMs: 250 }
+      { releaseTimeoutMs: 5000 }
     )
   },
 
