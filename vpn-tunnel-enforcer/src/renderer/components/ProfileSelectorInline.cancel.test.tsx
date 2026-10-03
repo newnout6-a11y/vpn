@@ -2,8 +2,11 @@
 import '@testing-library/jest-dom/vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createInstance } from 'i18next'
+import ru from '../i18n/locales/ru.json'
+import en from '../i18n/locales/en.json'
 
-vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string, fallback?: string) => fallback ?? key }) }))
+vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: testI18n.t.bind(testI18n) }) }))
 vi.mock('./CountryFlagIcon', () => ({ CountryFlagIcon: () => null }))
 
 import { ProfileSelectorInline } from './ProfileSelectorInline'
@@ -20,8 +23,10 @@ const profiles = ['Sweden', 'Norway', 'Netherlands'].map(name => ({
   id: name, name, protocol: 'vless', server: 'fixture.example', port: 443
 }))
 let activeId: string
+const testI18n = createInstance()
 
-beforeEach(() => {
+beforeEach(async () => {
+  await testI18n.init({ lng: 'ru', fallbackLng: false, resources: { ru: { translation: ru }, en: { translation: en } } })
   vi.spyOn(window, 'scrollTo').mockImplementation(() => undefined)
   activeId = 'Sweden'
   useAppStore.setState({ mode: 'hard', tunRunning: true, serverSwitchingName: null,
@@ -37,12 +42,24 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
 
 async function select(name: string) {
-  const picker = await screen.findByRole('button', { name: /Текущий профиль/ })
+  const picker = await screen.findByRole('button', { name: new RegExp(String(testI18n.t('profileSelector.current'))) })
   fireEvent.click(picker)
   fireEvent.click(await screen.findByRole('button', { name: new RegExp(`^${name}`) }))
 }
 
 describe('inline picker cancellation', () => {
+  it.each(['ru', 'en'])('uses the %s cancellation translation (AT-09-011 / F-121)', async locale => {
+    await testI18n.changeLanguage(locale)
+    vi.mocked(window.electronAPI.serversSelect).mockResolvedValue({ cancelled: true })
+    render(<ProfileSelectorInline />)
+    await select('Norway')
+    const expected = locale === 'ru' ? 'Смена сервера отменена' : 'Server switch cancelled'
+    await waitFor(() => expect(useAppStore.getState().logs.some(log => log.message === expected)).toBe(true))
+    expect(useAppStore.getState().logs.some(log => log.level === 'error')).toBe(false)
+    const successPrefix = locale === 'ru' ? 'Сервер выбран:' : 'Server selected:'
+    expect(useAppStore.getState().logs.some(log => log.message.startsWith(successPrefix))).toBe(false)
+    expect(useAppStore.getState().serverSwitchingName).toBeNull()
+  })
   it('holds ownership across terminal stop/remount, releases it after backend cleanup and then selects offline (AT-00-008)', async () => {
     const pending = deferred<void | { cancelled: true }>()
     vi.mocked(window.electronAPI.serversSelect).mockReturnValueOnce(pending.promise)
@@ -50,7 +67,7 @@ describe('inline picker cancellation', () => {
     await select('Norway')
     expect(window.electronAPI.serversSelect).toHaveBeenCalledExactlyOnceWith('Norway')
     expect(useAppStore.getState().serverSwitchingName).toBe('Norway')
-    act(() => {
+    await act(async () => {
       useAppStore.getState().setConnectionCancelling(true)
       applyTerminalTunStatus('stopped')
     })
@@ -60,7 +77,7 @@ describe('inline picker cancellation', () => {
     expect(window.electronAPI.serversSelect).toHaveBeenCalledTimes(1)
     expect(useAppStore.getState().connectionCancelling).toBe(true)
     activeId = 'Norway'
-    act(() => useAppStore.getState().acknowledgeServerSwitchCancellation())
+    await act(async () => useAppStore.getState().acknowledgeServerSwitchCancellation())
     await act(async () => pending.resolve({ cancelled: true }))
     expect(useAppStore.getState().serverSwitchingName).toBeNull()
     expect(useAppStore.getState().connectionCancelling).toBe(false)

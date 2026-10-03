@@ -10,6 +10,7 @@
     "connectionError": "Ошибка подключения",
     "cancelConnection": "Отменить подключение",
     "cancelServerSwitch": "Отменить смену сервера",
+    "serverSwitchCancelled": "Смена сервера отменена",
     "cancelling": "Отменяем…",
     "connectionCancelled": "Подключение отменено",
     "cancelledWithWarnings": "Подключение отменено с предупреждениями",

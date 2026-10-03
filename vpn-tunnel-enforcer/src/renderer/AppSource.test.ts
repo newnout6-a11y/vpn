@@ -66,6 +66,39 @@ describe('App source regressions', () => {
     expect(serversSource()).toContain('await fetchProfiles(false)')
   })
 
+  /** Ensures QuickServers cancellation feedback and memo dependencies follow locale changes. */
+  it('localizes QuickServers cancellation feedback (AT-09-011 / F-121)', () => {
+    const source = dashboardSideSource()
+    const quickServersStart = source.indexOf('function QuickServers(')
+    const liveTrafficStart = source.indexOf('function LiveTraffic(', quickServersStart)
+    expect(quickServersStart).toBeGreaterThanOrEqual(0)
+    expect(liveTrafficStart).toBeGreaterThan(quickServersStart)
+    const quickServersSource = source.slice(quickServersStart, liveTrafficStart)
+
+    const clustersStart = quickServersSource.indexOf('const clusters = useMemo')
+    const activeRowsStart = quickServersSource.indexOf('const activeRowsTotal', clustersStart)
+    expect(clustersStart).toBeGreaterThanOrEqual(0)
+    expect(activeRowsStart).toBeGreaterThan(clustersStart)
+    const clustersMemo = quickServersSource.slice(clustersStart, activeRowsStart)
+
+    expect(clustersMemo.replace(/\s+/g, '')).toContain("addLog('info',t('dashboard.serverSwitchCancelled'))")
+    const dependencies = clustersMemo.match(/,\s*\[([^\]]*)\]\s*\)\s*$/s)
+    expect(dependencies).not.toBeNull()
+    expect(dependencies?.[1].split(',').map(dependency => dependency.trim())).toContain('t')
+  })
+
+  it('awaits React updates in cancellation regressions (AT-00-003)', () => {
+    for (const relative of ['components/ProfileSelectorInline.cancel.test.tsx', 'pages/Dashboard.cancel.test.tsx']) {
+      const source = readFileSync(join(process.cwd(), 'src', 'renderer', relative), 'utf8')
+      const actCalls = Array.from(source.matchAll(/\bact\s*\(/g))
+      expect(actCalls.length).toBeGreaterThan(0)
+      for (const call of actCalls) {
+        expect(source.slice(0, call.index).trimEnd()).toMatch(/\bawait$/)
+        expect(source.slice(call.index)).toMatch(/^act\s*\(\s*async\b/)
+      }
+    }
+  })
+
   it("treats the protected-restart 'adapting' status as a transition, not a disconnect", () => {
     // Protected restarts (server switch, rotation, routing change, adaptive
     // transition) emit 'adapting' while the kill-switch stays applied. Treating

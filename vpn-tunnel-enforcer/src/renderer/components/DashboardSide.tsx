@@ -76,7 +76,8 @@ function groupPillTone(status: ServerGroup['status']): string {
 
 /**
  * Compact list of all available profiles. Same data as the Servers page,
- * always read from the unified server-picker store via IPC.
+ * always read from the unified server-picker store via IPC. Cancellation
+ * feedback follows the active UI locale.
  */
 function QuickServers() {
   const { t } = useTranslation()
@@ -160,8 +161,10 @@ function QuickServers() {
     onSelect: () => void
   }
 
-  // Build clusters per group, falling back to a single ungrouped cluster
-  // when IPC isn't available.
+  /**
+   * Groups profiles for display, falling back to one ungrouped cluster when
+   * group IPC is unavailable. Captured state keeps selection labels current.
+   */
   const clusters = useMemo<Array<{ group: ServerGroup | null; rows: Row[] }>>(() => {
     const makeRow = (profile: ServerProfile): Row => ({
       key: profile.id,
@@ -181,7 +184,7 @@ function QuickServers() {
         try {
           const result = await window.electronAPI.serversSelect(profile.id)
           if (result?.cancelled) {
-            addLog('info', 'Смена сервера отменена')
+            addLog('info', t('dashboard.serverSwitchCancelled'))
             emitServerChanged()
             return
           }
@@ -219,7 +222,7 @@ function QuickServers() {
     }
     if (orphans.length > 0) out.push({ group: null, rows: orphans })
     return out
-  }, [profiles, groups, groupsAvailable, activeId, addLog, refresh, tunRunning, connectionMode, setServerSwitchingName])
+  }, [profiles, groups, groupsAvailable, activeId, addLog, refresh, tunRunning, connectionMode, setServerSwitchingName, t])
 
   const activeRowsTotal = useMemo(
     () => clusters.reduce((sum, c) => sum + c.rows.filter(row => !row.removed).length, 0),
@@ -695,6 +698,7 @@ function RecentSites() {
 
 // ─── Aggregate ─────────────────────────────────────────────────────────────
 
+/** Composes the dashboard's server, traffic, and recent-site panels. */
 export function DashboardSide() {
   return (
     <div className="flex flex-col gap-4 min-h-0">

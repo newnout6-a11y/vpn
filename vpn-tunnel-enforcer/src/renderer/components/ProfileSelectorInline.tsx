@@ -30,7 +30,8 @@ function groupBadgeVariant(status: ServerGroup['status']): BadgeVariant {
  *
  * Always backed by the server-picker store (servers:list / servers:get-active /
  * servers:select). Used to be split between localProxy and directVpn modes
- * with separate caches; in V2 there is one source of truth.
+ * with separate caches; in V2 there is one source of truth. Cancellation
+ * feedback follows the active UI locale.
  */
 export function ProfileSelectorInline() {
   const { t } = useTranslation()
@@ -150,6 +151,7 @@ export function ProfileSelectorInline() {
     return out
   }, [profiles, groups, groupsAvailable])
 
+  /** Selects a profile and reports success, cancellation, or backend failure. */
   const handleSelect = async (id: string) => {
     setOpen(false)
     if (id === current?.id) return
@@ -165,7 +167,7 @@ export function ProfileSelectorInline() {
     try {
       const result = await window.electronAPI.serversSelect(id)
       if (result?.cancelled) {
-        addLog('info', 'Смена сервера отменена')
+        addLog('info', t('dashboard.serverSwitchCancelled'))
         emitServerChanged()
         return
       }
