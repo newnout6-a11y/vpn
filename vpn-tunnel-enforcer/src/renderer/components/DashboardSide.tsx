@@ -161,8 +161,10 @@ function QuickServers() {
     onSelect: () => void
   }
 
-  // Build clusters per group, falling back to a single ungrouped cluster
-  // when IPC isn't available.
+  /**
+   * Groups profiles for display, falling back to one ungrouped cluster when
+   * group IPC is unavailable. Captured state keeps selection labels current.
+   */
   const clusters = useMemo<Array<{ group: ServerGroup | null; rows: Row[] }>>(() => {
     const makeRow = (profile: ServerProfile): Row => ({
       key: profile.id,
