@@ -1025,3 +1025,73 @@ Durable write path (unique wx + fsync + ACL + rename) не изменён. Known
 - Packaged main/preload побайтово равны compiled outputs, все 8 readiness/geo markers подтверждены внутри ASAR. Main SHA256 `9d439a46a63f2e4d257e1a15ab477a29b841a14ae794a760d772ab39d1242a33`, preload `304534f83a73680dadfdc0c6296a9f356c337b506d4da44e03b36087290e3663`.
 - Установщик `vpn-tunnel-enforcer/dist/VPN-Tunnel-Enforcer-Setup-1.1.22.exe`: 139172014 bytes, 03.10.2026 21:26:20 МСК, SHA256 `1CF12CB5A2C76C061169BB50372E88BA8BAC03F5746112FA6D503DE9F49C790E`, Authenticode `NotSigned`. Заменяет предыдущий artifact с тем же номером. Агентом не установлен.
 - `git diff --check` — exit 0. Временные файлы этапом не создавались; существующие `.tmp` файлы не изменялись.
+
+### 2026-10-03 — этап 35: общий deadline и отмена геопроверок (WP-0 / WP-7)
+
+**Граница:** команда владельца «давай тестируй и чини» после разбора 19-секундного определения страны. PR #17 уже слит; новая ветка `codex/geo-deadline-cancellation` от актуального `vpn/main` (`4d4ffd1`). Рабочее дерево исходно чистое. Прочитаны AGENTS, AT-00-003, AT-07-003/007/012, нормативный раздел 4.2 и решение 10.1 по геосервисам. Нормативные `docs/` не изменены.
+
+#### Измеренный дефект
+
+Установленный main SHA256 `9d439a46a63f2e4d257e1a15ab477a29b841a14ae794a760d772ab39d1242a33` соответствует этапу 34. В `app.log` 03.10.2026 МСК: смена на Sweden завершилась в 21:38:15.996 за 3349 ms; следующая фоновая геопроверка 21:38:15.997–35.141 заняла **19144 ms**. Первый этап: geojs DNS timeout 10011 ms и два неуспешных локальных proxy fallback примерно по 2 s; затем четыре вторичных источника параллельно, ещё около 4.9 s. За это время пользователь сменил сервер на Netherlands и Norway. Поздняя публикация уже блокировалась, но сами процессы и fallback продолжались. Это задержка географии, не длительность подключения и не доказательство отказа VPN.
+
+#### Изменение
+
+- Пять источников запускаются параллельно; все маршруты и источники одной проверки делят **6000 ms**. На каждый curl передаются `AbortSignal`, timeout и `--max-time`, ограниченные оставшимся временем. По deadline/отмене завершается ожидание callers и сигналом прекращаются процессы; поздние callbacks не записывают cache и не удаляют новую проверку того же IP.
+- У shared read отдельные подписчики с проверкой актуальности. Каждые 25 ms отменяются подписчики прежнего профиля/generation/сессии, отключения, privacy или фонового владельца. Последний ушедший владелец отменяет всю волну. Если этот же IP ещё нужен актуальной ручной проверке, она продолжает shared read; отмена одного подписчика её не прерывает.
+- При работающем собственном TUN и `bootstrapRouteMode=auto` curl использует системный маршрут, без перебора старых локальных proxy/Happ портов. Offline auto и явно выбранный `localProxy` сохраняют bootstrap-маршруты, но также ограничены общим deadline.
+- HTTPS-only, voting стран, cache TTL, объединение дубликатов, privacy и provider 429/Retry-After сохранены. Deadline и отмена не кешируются как успешная или отрицательная геопроверка. Добавлен журнал `geo lookup finished` с `outcome` и `durationMs`, без адреса IP/endpoint.
+
+Трассировка: AT-00-003 / AT-07-007, смежные AT-07-003/012; F-021/F-072 в пределах геопроверки. Общий limiter для множества разных IP, весь WP и Windows/L3 acceptance этим изменением не объявляются завершёнными.
+
+#### Проверки
+
+Команды из `vpn-tunnel-enforcer`:
+
+- `npx.cmd vitest run src/main/serverPickerGeoLifecycle.test.ts src/main/serverPickerGeoTransport.test.ts src/main/serverPickerSwitch.test.ts src/main/mainIpcRegression.test.ts src/main/bootstrapRoute.test.ts --maxWorkers=4` — exit 0, **5 files / 76 passed**, 2.37 s на окончательном source.
+- `npm.cmd run typecheck` — exit 0; повторён внутри сборки.
+- `npm.cmd test -- --maxWorkers=4` — exit 0, **191 files passed / 2 skipped; 2231 tests passed / 10 skipped / 0 failed**, 117.52 s. RootErrorBoundary crash stderr ожидается его тестом.
+- `python -X utf8 ../docs/04-приёмочные-тесты/traceability/check-coverage.py` — exit 0, **AC 927/927, F 210/210**; это трассировка, не исполнение всей acceptance matrix.
+- Fake clock: все зависшие источники завершаются за 6000 ms; route retries получают оставшийся бюджет; отмена на 600/3000/5400 ms реагирует не позднее следующего 25 ms tick. Синтетические source delays 3500/4000 ms завершаются параллельно за **4000 ms**, вместо суммы 7500 ms. Это компонентные проверки, не новая installed latency.
+- Проверены 50 одинаковых запросов, current duplicate, смена профиля A→B→A, session/disconnect/privacy/background/new-IP cancellation, ручной shared owner, late callback после новой проверки того же IP, cache, offline/explicit routes, HTTPS и 429.
+- Native Windows/Node: production `fetchGeoJson` передаёт signal/timeout пяти настоящим ожидающим дочерним Node-процессам вместо curl. Отмена дожидается `close` всех пяти и подтверждает их завершение. Внешние endpoints и состояние VPN/Windows этим тестом не менялись; сам HTTP transport остаётся замоканным.
+- `npm.cmd run dist:win` — exit 0, Electron 44.4.3 / NSIS. Optional mksnapshot отсутствует, snapshot штатно пропущен. Packaged main/preload побайтово равны compiled outputs; все шесть deadline/cancellation markers подтверждены в ASAR.
+- Main SHA256 `e23e253ea04b817641e9c7ad6ca498f854339878546954c2f77d9f22790043ee`; preload `304534f83a73680dadfdc0c6296a9f356c337b506d4da44e03b36087290e3663`.
+- Установщик `vpn-tunnel-enforcer/dist/VPN-Tunnel-Enforcer-Setup-1.1.22.exe`: **139172591 bytes**, **03.10.2026 21:55:20 МСК**, SHA256 `94BA471623D89804A6A36FBBC7E9C81A9B950926004882A516AF42D3CA24F6A9`, Authenticode `NotSigned`. Заменяет предыдущий artifact того же номера; агентом не установлен.
+- `git diff --check` — exit 0. Временные файлы не создавались.
+
+**Ограничение и откат:** на недоступных/медленных сервисах страна может остаться неподтверждённой после deadline; не выдаётся выдуманная страна. Новый installed geo latency и Windows/L3 packets/boot после установки не измерены. Revert этого изменения возвращает последовательные provider waves и отсутствие общей отмены; формат stores/settings не менялся.
+
+### 2026-10-03 — этап 36: UI после отмены смены сервера (WP-0 / WP-9)
+
+**Граница:** команда владельца «чини . и что там по скорости?» после подтверждения зависшего UI. Ветка `codex/geo-deadline-cancellation`, PR #18 открыт, исходный HEAD `692503c`; рабочее дерево перед ремонтом чистое. Прочитаны AGENTS, WP-0/WP-9 acceptance, lifecycle §1.2 и решения владельца §10.1. Нормативные `docs/` не изменены. Трассировка: AT-00-003/004/007/008, F-019/F-021; это ремонт конкретной гонки, не завершение всего координатора или WP.
+
+#### Измеренный дефект и скорость установленной версии
+
+Installed main SHA256 `e23e253ea04b817641e9c7ad6ca498f854339878546954c2f77d9f22790043ee` подтверждает установку этапа 35. В `app.log` 03.10.2026 МСК: смена Sweden 22:00:22.638–25.908 заняла **3270 ms**. До защищённого перезапуска около 603 ms (CIM identity 529 ms); остановка 633 ms; запуск 1193 ms; свежая route/IP baseline до завершения IPC около 841 ms. Это один измеренный успешный switch, не статистическая оценка.
+
+Отмена Norway запрошена в 22:00:28.624. Xray startup отменился, rollback завершился в 22:00:30.375 (около **1751 ms**). UI получил `stopped` в 30.376 при ещё установленном `serverSwitchingName` и пропустил обновление tunRunning/mode/IP. Затем picker снял флаг без восстановления состояния; последующие выборы занимали **23–50 ms**, поскольку backend был выключен и только сохранял профиль. Это не ускоренная смена работающего VPN. Повторное явное отключение в 22:00:43 исправляло UI.
+
+Подключение 22:00:11.803–16.120: **4317 ms**; повторное 22:00:46.423–49.142: **2719 ms**. Фоновая геопроверка последнего профиля закончилась за **659 ms**. Проверки прежних профилей отменены после 3530/1744 ms при следующем switch. Сравнение с прежними 19 s ограничено разными сетевыми ответами; ускорение UI-ремонта на установленном приложении ещё не измерено.
+
+#### Изменение
+
+- Финальные `stopped` / `killswitch-active` всегда применяют фактическую остановку, очищают прежние VPN/public IP, проверки, трафик и uptime, снимают hard mode. `adapting` / `stopping` остаются переходными; состояние файрвола не подменяется.
+- Два подтверждения запроса отмены ещё не означают завершение cleanup. Глобальный cancellation остаётся занятым до завершения исходного `servers:select`; порядок «owner закончился раньше ACK» тоже защищён. Флаг переживает unmount/remount.
+- Все три выбора серверов и подключение отвергают конкурирующие операции. После реальной остановки offline выбор не выдаётся за переподключение.
+- `servers:select` имеет совместимый тип результата `void | { cancelled: true }` в main/preload/shared. Generation определяет отменённого владельца; три renderer callers не показывают штатную отмену как ошибку Xray или успешное переподключение. Страница «Серверы» немедленно перечитывает выбор. Настоящие startup/cleanup ошибки сохраняются; отказ подтвердить остановку процесса не маскируется cancellation result.
+
+#### Проверки окончательного source
+
+Команды из `vpn-tunnel-enforcer`:
+
+- `npx.cmd vitest run src/main/serverPickerSwitch.test.ts src/renderer/AppSource.test.ts src/renderer/store.connectionBusy.test.ts src/renderer/pages/Dashboard.cancel.test.tsx src/renderer/components/ProfileSelectorInline.cancel.test.tsx --maxWorkers=4` — exit 0, **5 files / 69 passed**, 3.47 s.
+- `npm.cmd run typecheck` — exit 0, также повторён внутри сборки.
+- `npm.cmd test -- --maxWorkers=4` — exit 0, **192 files passed / 2 skipped; 2252 tests passed / 10 skipped / 0 failed**, 119.56 s. Предшествующие прогоны 2250/2251 тоже зелёные; окончательный результат относится к source с сохранением cleanup errors. RootErrorBoundary crash stderr ожидается его тестом.
+- `python -X utf8 ../docs/04-приёмочные-тесты/traceability/check-coverage.py` — exit 0, **AC 927/927, F 210/210**; трассировка не заменяет исполнение acceptance matrix.
+- Runtime компонентные тесты: отмена перед selection/network identity, после старта, late successful restart, Xray cancellation, настоящий startup failure, отказ cleanup; guard до окончания backend. React tests воспроизводят Dashboard и inline picker, remount, terminal status раньше завершения select, ACK после owner, повторный выбор/подключение и ошибки запроса. Store tests сохраняют firewall state при killswitch-active и не сбрасывают protected adapting/stopping.
+- `npm.cmd run dist:win` — exit 0, Electron 44.4.3 / NSIS. Optional mksnapshot отсутствует, snapshot штатно пропущен. **185 packaged output files** побайтово равны compiled outputs; пять cancellation markers в ASAR main/renderer подтверждены.
+- Main SHA256 `ae519e5c05b236d66f87e3a760f7c3ae7f2a6b2da11adc7e2d69bbe0843cf7ef`; preload `304534f83a73680dadfdc0c6296a9f356c337b506d4da44e03b36087290e3663`.
+- Установщик `vpn-tunnel-enforcer/dist/VPN-Tunnel-Enforcer-Setup-1.1.22.exe`: **139172837 bytes**, **03.10.2026 22:22:06 МСК**, SHA256 `562D6FD249C36C79A0E08EB7B9FB479D9372F0A0464F3CDE087D84EF51B7CD8A`, Authenticode `NotSigned`. Заменяет artifact этапа 35 с тем же номером; агентом не установлен.
+- `git diff --check` — exit 0. Временные файлы не создавались.
+
+**Ограничение и откат:** Windows/L3 и живое воспроизведение UI после установки этого artifact не выполнены. Скорость backend этим ремонтом не меняется; свежая route/IP проверка не удалена. Revert scoped commit возвращает прежние UI/cancellation обработчики; форматы stores/settings совместимы.

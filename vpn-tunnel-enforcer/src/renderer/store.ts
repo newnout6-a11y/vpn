@@ -216,6 +216,7 @@ interface AppState {
   // tunnel and broke routing. null = idle.
   connectionBusy: 'connecting' | 'disconnecting' | null
   connectionCancelling: boolean
+  serverSwitchCancelAcknowledged: boolean
   serverSwitchingName: string | null
   // True iff the firewall kill-switch rules are currently installed. Used to
   // drive the Dashboard banner that appears when sing-box died but the rules
@@ -245,6 +246,7 @@ interface AppState {
   setRestarting: (progress: string | null) => void
   setConnectionBusy: (busy: 'connecting' | 'disconnecting' | null) => void
   setConnectionCancelling: (cancelling: boolean) => void
+  acknowledgeServerSwitchCancellation: () => void
   setServerSwitchingName: (name: string | null) => void
   setFirewallKillSwitchActive: (active: boolean) => void
   setCompetingTun: (name: string | null) => void
@@ -332,6 +334,7 @@ export const useAppStore = create<AppState>((set) => ({
   restartingProgress: null,
   connectionBusy: null,
   connectionCancelling: false,
+  serverSwitchCancelAcknowledged: false,
   serverSwitchingName: null,
   firewallKillSwitchActive: false,
   competingTun: null,
@@ -422,9 +425,19 @@ export const useAppStore = create<AppState>((set) => ({
   })),
   setConnectionCancelling: (cancelling) => set((state) => ({
     connectionCancelling: cancelling,
+    serverSwitchCancelAcknowledged: false,
     connectionBusy: cancelling ? 'disconnecting' : state.connectionBusy
   })),
-  setServerSwitchingName: (name) => set({ serverSwitchingName: name }),
+  acknowledgeServerSwitchCancellation: () => set((state) => ({
+    serverSwitchCancelAcknowledged: true,
+    ...(!state.serverSwitchingName && state.connectionCancelling
+      ? { connectionCancelling: false, connectionBusy: null } : {})
+  })),
+  setServerSwitchingName: (name) => set((state) => ({
+    serverSwitchingName: name,
+    ...(name === null && state.serverSwitchingName && state.connectionCancelling && state.serverSwitchCancelAcknowledged
+      ? { connectionCancelling: false, connectionBusy: null } : {})
+  })),
   setFirewallKillSwitchActive: (active) => set({ firewallKillSwitchActive: active }),
   setCompetingTun: (name) => set({ competingTun: name }),
   setProxyDown: (v) => set({ proxyDown: v }),
@@ -514,3 +527,13 @@ export const useAppStore = create<AppState>((set) => ({
     set((s) => ({ globalToasts: s.globalToasts.filter(t => t.id !== id) }))
   }
 }))
+
+/** Final runtime events remain authoritative while a server-selection IPC settles. */
+export function applyTerminalTunStatus(status: string): void {
+  if (status !== 'stopped' && status !== 'killswitch-active') return
+  const store = useAppStore.getState()
+  store.setTunRunning(false)
+  store.setTunStartedAt(null)
+  store.resetConnectionState()
+  if (store.mode === 'hard') store.setMode('off')
+}

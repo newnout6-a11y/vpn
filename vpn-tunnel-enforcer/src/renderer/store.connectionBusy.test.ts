@@ -16,10 +16,10 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { useAppStore } from './store'
+import { applyTerminalTunStatus, useAppStore } from './store'
 
 function reset() {
-  useAppStore.setState({ globalToasts: [], restartingProgress: null, connectionCancelling: false })
+  useAppStore.setState({ globalToasts: [], restartingProgress: null, connectionCancelling: false, serverSwitchingName: null })
   useAppStore.getState().setConnectionBusy(null)
   useAppStore.getState().setTunRunning(false)
 }
@@ -37,6 +37,54 @@ describe('store.connectionBusy', () => {
     expect(useAppStore.getState().connectionBusy).toBeNull()
   })
   beforeEach(reset)
+
+  it.each(['stopped', 'killswitch-active'])('applies final %s while selection is pending (AT-00-008)', status => {
+    useAppStore.setState({ mode: 'hard', tunRunning: true, vpnIp: '198.51.100.1', publicIp: '198.51.100.1',
+      publicIpVerdict: 'passed', serverSwitchingName: 'Norway', firewallKillSwitchActive: status === 'killswitch-active' })
+    useAppStore.getState().setConnectionCancelling(true)
+    applyTerminalTunStatus(status)
+    const store = useAppStore.getState()
+    expect(store.tunRunning).toBe(false)
+    expect(store.mode).toBe('off')
+    expect(store.vpnIp).toBeNull()
+    expect(store.publicIp).toBeNull()
+    expect(store.publicIpVerdict).toBe('not-checked')
+    expect(store.firewallKillSwitchActive).toBe(status === 'killswitch-active')
+    expect(store.serverSwitchingName).toBe('Norway')
+    expect(store.connectionCancelling).toBe(true)
+    expect(store.connectionBusy).toBe('disconnecting')
+    store.acknowledgeServerSwitchCancellation()
+    store.setServerSwitchingName(null)
+    expect(useAppStore.getState().connectionCancelling).toBe(false)
+    expect(useAppStore.getState().connectionBusy).toBeNull()
+    expect(useAppStore.getState().tunRunning).toBe(false)
+  })
+
+  it.each(['adapting', 'stopping', 'running', 'proxy-down', 'restarting:1/3'])('does not apply a final reset for %s (AT-00-008)', status => {
+    useAppStore.setState({ mode: 'hard', tunRunning: true, vpnIp: '198.51.100.1', serverSwitchingName: 'Norway' })
+    applyTerminalTunStatus(status)
+    expect(useAppStore.getState().tunRunning).toBe(true)
+    expect(useAppStore.getState().mode).toBe('hard')
+    expect(useAppStore.getState().vpnIp).toBe('198.51.100.1')
+  })
+
+  it('does not release an unrelated cancellation when an idle picker clears its name (AT-00-003)', () => {
+    useAppStore.getState().setConnectionCancelling(true)
+    useAppStore.getState().setServerSwitchingName(null)
+    expect(useAppStore.getState().connectionCancelling).toBe(true)
+    expect(useAppStore.getState().connectionBusy).toBe('disconnecting')
+  })
+
+  it('holds cancellation if selection settles before the cancellation requests are acknowledged (AT-00-007)', () => {
+    useAppStore.getState().setServerSwitchingName('Norway')
+    useAppStore.getState().setConnectionCancelling(true)
+    useAppStore.getState().setServerSwitchingName(null)
+    expect(useAppStore.getState().connectionCancelling).toBe(true)
+    expect(useAppStore.getState().connectionBusy).toBe('disconnecting')
+    useAppStore.getState().acknowledgeServerSwitchCancellation()
+    expect(useAppStore.getState().connectionCancelling).toBe(false)
+    expect(useAppStore.getState().connectionBusy).toBeNull()
+  })
 
   it('defaults to null (idle)', () => {
     expect(useAppStore.getState().connectionBusy).toBeNull()

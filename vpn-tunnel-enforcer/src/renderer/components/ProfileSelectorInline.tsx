@@ -153,6 +153,7 @@ export function ProfileSelectorInline() {
   const handleSelect = async (id: string) => {
     setOpen(false)
     if (id === current?.id) return
+    if (useAppStore.getState().serverSwitchingName || useAppStore.getState().connectionBusy) return
     const wasConnected = tunRunning
     const profile = profiles.find(p => p.id === id)
     const profileName = profile?.name ?? id
@@ -162,7 +163,12 @@ export function ProfileSelectorInline() {
     setActiveId(id)
     setPingMs(null)
     try {
-      await window.electronAPI.serversSelect(id)
+      const result = await window.electronAPI.serversSelect(id)
+      if (result?.cancelled) {
+        addLog('info', 'Смена сервера отменена')
+        emitServerChanged()
+        return
+      }
       addLog('info', `Сервер выбран: ${profileName}`)
       emitServerChanged()
       if (wasConnected && connectionMode === 'directVpn') {

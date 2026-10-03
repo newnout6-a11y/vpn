@@ -1,10 +1,12 @@
-// AT-07-007 / AT-00-003: shared geo reads, provider backoff, stale session results.
+// AT-07-007 / AT-00-003: shared geo reads, common deadline, process cancellation,
+// provider backoff and stale session results (F-021 / F-072, scoped coverage).
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const state = vi.hoisted(() => ({
   data: new Map<string, any>(), handlers: new Map<string, (...args: any[]) => any>(),
   settings: {} as Record<string, unknown>, session: { running: true, startedAt: 1 },
-  curl: vi.fn<(url: string) => Promise<string>>()
+  curl: vi.fn<(url: string, options?: { signal?: AbortSignal; timeout?: number; args?: string[] }) => Promise<string>>(),
+  aborted: vi.fn()
 }))
 vi.mock('electron', () => ({
   app: { getPath: () => '/tmp/vpnte-test', getAppPath: () => '/tmp/vpnte-test' }, dialog: {},
@@ -19,7 +21,18 @@ vi.mock('child_process', async importOriginal => {
   const { promisify } = await import('util')
   const execFile = Object.assign((_bin: string, args: string[], _options: unknown, callback: (...args: any[]) => void) => {
     state.curl(args[args.length - 1]).then(stdout => callback(null, stdout, ''), error => callback(error, error.stdout ?? '', error.stderr ?? ''))
-  }, { [promisify.custom]: async (_bin: string, args: string[]) => ({ stdout: await state.curl(args[args.length - 1]), stderr: '' }) })
+  }, { [promisify.custom]: (_bin: string, args: string[], options: { signal?: AbortSignal; timeout?: number }) => new Promise((resolve, reject) => {
+    const abort = () => { state.aborted(); reject(Object.assign(new Error('cancelled'), { name: 'AbortError' })) }
+    if (options.signal?.aborted) { abort(); return }
+    options.signal?.addEventListener('abort', abort, { once: true })
+    state.curl(args[args.length - 1], { ...options, args }).then(stdout => {
+      options.signal?.removeEventListener('abort', abort)
+      resolve({stdout,stderr:''})
+    }, error => {
+      options.signal?.removeEventListener('abort', abort)
+      reject(error)
+    })
+  }) })
   return { ...actual, default: { ...actual, execFile }, execFile }
 })
 vi.mock('axios', () => ({ default: { get: vi.fn() } }))
@@ -51,6 +64,7 @@ beforeEach(async () => {
   vi.resetModules(); vi.useFakeTimers()
   state.data.clear(); state.handlers.clear(); state.settings = {bootstrapRouteMode:'auto'}
   state.session = {running:true,startedAt:1}
+  state.aborted.mockClear()
   state.data.set('activeProfileId', 'a')
   state.data.set('profiles', ['a','b'].map(id => ({id,name:id,server:`${id}.test`,port:443,protocol:'vless',enabled:true,country:'Original'})))
   state.curl.mockReset().mockImplementation(async url => url.includes('geojs.io') ? response() : '{}')
@@ -65,7 +79,8 @@ describe('country verification lifecycle', () => {
     const held = deferred<string>()
     state.curl.mockImplementation(async url => url.includes('geojs.io') ? held.promise : '{}')
     const reads = Array.from({length:50}, () => picker.geolocateIp(ip))
-    expect(state.curl).toHaveBeenCalledOnce()
+    // All five providers start together; duplicate callers share that wave.
+    expect(state.curl).toHaveBeenCalledTimes(5)
     held.resolve(response())
     expect(await Promise.all(reads)).toEqual(Array(50).fill('Norway'))
     expect(state.curl).toHaveBeenCalledTimes(5)
@@ -137,6 +152,159 @@ describe('country verification lifecycle', () => {
     await vi.advanceTimersByTimeAsync(5000)
     state.curl.mockImplementation(async url => url.includes('geojs.io') ? response() : '{}')
     expect(await picker.geolocateIp(ip)).toBe('Norway')
+  })
+  it('bounds an entirely hung wave to six seconds and aborts every process', async () => {
+    state.curl.mockImplementation(() => new Promise(() => {}))
+    const result = picker.geolocateIp(ip)
+    expect(state.curl).toHaveBeenCalledTimes(5)
+    expect(state.curl.mock.calls.every(([, options]) => options?.signal && options.timeout! <= 6000)).toBe(true)
+    await vi.advanceTimersByTimeAsync(5999)
+    expect(state.aborted).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(await result).toBeNull()
+    expect(state.aborted).toHaveBeenCalledTimes(5)
+    expect(vi.getTimerCount()).toBe(0)
+    // Timeout is not a verified or negative cache entry: a fresh retry works.
+    state.curl.mockImplementation(async url => url.includes('geojs.io') ? response() : '{}')
+    expect(await picker.geolocateIp(ip)).toBe('Norway')
+  })
+  it('runs providers in parallel rather than adding primary and secondary latency', async () => {
+    const start = Date.now()
+    state.curl.mockImplementation(url => new Promise(resolve => setTimeout(() => resolve(url.includes('geojs.io') ? response() : '{}'), url.includes('geojs.io') ? 3500 : 4000)))
+    const result = picker.geolocateIp(ip)
+    await vi.advanceTimersByTimeAsync(4000)
+    expect(await result).toBe('Norway')
+    expect(Date.now() - start).toBe(4000)
+    expect(state.curl).toHaveBeenCalledTimes(5)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+  it.each(['selected profile', 'same profile reselected', 'tunnel session', 'disconnect', 'privacy', 'background owner', 'new IP'])('aborts obsolete curl work within 25 ms after %s changes', async kind => {
+    const held = deferred<string>()
+    state.curl.mockImplementation(() => held.promise)
+    let current = true
+    const pending = picker.verifyActiveCountryForIp(ip, () => current)
+    if (kind === 'selected profile') picker.selectProfile('b')
+    if (kind === 'same profile reselected') { picker.selectProfile('b'); picker.selectProfile('a') }
+    if (kind === 'tunnel session') state.session.startedAt = 2
+    if (kind === 'disconnect') state.session.running = false
+    if (kind === 'privacy') state.settings.disableGeoLookup = true
+    if (kind === 'background owner') current = false
+    if (kind === 'new IP') {
+      state.curl.mockImplementation(async url => url.includes('geojs.io') ? response('SE','198.51.100.21') : '{}')
+      expect(await picker.verifyActiveCountryForIp('198.51.100.21')).toMatchObject({ok:true})
+    }
+    await vi.advanceTimersByTimeAsync(25)
+    expect(await pending).toMatchObject({ok:false})
+    expect(state.aborted).toHaveBeenCalledTimes(5)
+    held.resolve(response())
+    await vi.advanceTimersByTimeAsync(0)
+    expect(state.data.get('profiles').map((profile: any) => profile.country)).toEqual(kind === 'new IP' ? ['Sweden','Original'] : ['Original','Original'])
+    expect(vi.getTimerCount()).toBe(0)
+  })
+  it('cancels only the obsolete subscriber while a manual owner still needs the shared read', async () => {
+    const held = deferred<string>()
+    state.curl.mockImplementation(async url => url.includes('geojs.io') ? held.promise : '{}')
+    const active = verify({},ip)
+    const manual = picker.geolocateIp(ip)
+    picker.selectProfile('b')
+    await vi.advanceTimersByTimeAsync(25)
+    expect(await active).toMatchObject({ok:false,reason:'superseded'})
+    expect(state.aborted).not.toHaveBeenCalled()
+    held.resolve(response())
+    expect(await manual).toBe('Norway')
+    expect(state.curl).toHaveBeenCalledTimes(5)
+    expect(state.data.get('profiles')[1].country).toBe('Original')
+  })
+  it('does not let a late cancelled wave remove or cache over a newer read of the same IP', async () => {
+    const old = deferred<string>()
+    state.curl.mockImplementation(() => old.promise)
+    let current = true
+    const first = picker.geolocateIp(ip, () => current)
+    current = false
+    await vi.advanceTimersByTimeAsync(25)
+    expect(await first).toBeNull()
+    const next = deferred<string>()
+    state.curl.mockImplementation(async url => url.includes('geojs.io') ? next.promise : '{}')
+    const fresh = picker.geolocateIp(ip)
+    old.resolve(response('SE'))
+    await vi.advanceTimersByTimeAsync(0)
+    const shared = picker.geolocateIp(ip)
+    expect(state.curl).toHaveBeenCalledTimes(10)
+    next.resolve(response())
+    expect(await fresh).toBe('Norway')
+    expect(await shared).toBe('Norway')
+    expect(await picker.geolocateIp(ip)).toBe('Norway')
+  })
+  it('does not retry failed auto geo requests through stale local proxies while our TUN runs', async () => {
+    state.curl.mockRejectedValue(new Error('network failure'))
+    expect(await picker.geolocateIp(ip)).toBeNull()
+    expect(state.curl).toHaveBeenCalledTimes(5)
+    expect(state.curl.mock.calls.every(([, options]) => !options?.args?.includes('--proxy'))).toBe(true)
+  })
+  it.each(['offline auto', 'explicit proxy'])('preserves %s bootstrap routes within the same six-second budget', async mode => {
+    state.session.running = mode !== 'offline auto'
+    state.settings = {bootstrapRouteMode:mode === 'offline auto' ? 'auto' : 'localProxy',proxyOverride:'127.0.0.1:10808',proxyType:'socks5'}
+    state.curl.mockRejectedValue(new Error('network failure'))
+    expect(await picker.geolocateIp(ip)).toBeNull()
+    expect(state.curl.mock.calls.some(([, options]) => options?.args?.includes('--proxy'))).toBe(true)
+    if (mode === 'explicit proxy') expect(state.curl.mock.calls.every(([, options]) => options?.args?.includes('--proxy'))).toBe(true)
+    expect(state.curl.mock.calls.every(([, options]) => options?.timeout! <= 6000)).toBe(true)
+  })
+  it('shares the remaining deadline across offline route retries', async () => {
+    state.session.running = false
+    state.curl.mockImplementation((_url, options) => options?.args?.includes('--proxy')
+      ? new Promise(() => {}) : new Promise((_resolve, reject) => setTimeout(() => reject(new Error('DNS timeout')), 3000)))
+    const read = picker.geolocateIp(ip)
+    await vi.advanceTimersByTimeAsync(3000)
+    expect(state.curl).toHaveBeenCalledTimes(10)
+    expect(state.curl.mock.calls.slice(5).every(([, options]) => options?.timeout! <= 3000)).toBe(true)
+    await vi.advanceTimersByTimeAsync(3000)
+    expect(await read).toBeNull()
+    expect(state.aborted).toHaveBeenCalledTimes(5)
+    expect(state.curl).toHaveBeenCalledTimes(10)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+  it.each([600, 3000, 5400])('cancels at %i ms without waiting for the six-second deadline', async at => {
+    state.curl.mockImplementation(() => new Promise(() => {}))
+    let current = true
+    const read = picker.geolocateIp(ip, () => current)
+    await vi.advanceTimersByTimeAsync(at)
+    current = false
+    await vi.advanceTimersByTimeAsync(25)
+    expect(await read).toBeNull()
+    expect(state.aborted).toHaveBeenCalledTimes(5)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+  it('terminates actual owned child processes through the production AbortSignal', async () => {
+    vi.useRealTimers()
+    const native = await vi.importActual<typeof import('child_process')>('child_process')
+    const children: import('child_process').ChildProcess[] = []
+    const ready: Promise<void>[] = []
+    const closed: Promise<void>[] = []
+    state.curl.mockImplementation((_url, options) => new Promise((resolve, reject) => {
+      // No external network: substitute a waiting Node process for curl while
+      // retaining the exact execFile timeout/signal delivered by fetchGeoJson.
+      const child = native.execFile(process.execPath, ['-e', 'process.stdout.write("ready"); setInterval(() => {}, 1000)'], {
+        signal: options?.signal, timeout: options?.timeout, windowsHide: true
+      }, (error, stdout) => error ? reject(error) : resolve(String(stdout)))
+      children.push(child)
+      ready.push(new Promise(done => child.stdout!.once('data', () => done())))
+      closed.push(new Promise(done => child.once('close', () => done())))
+    }))
+    let current = true
+    const read = picker.geolocateIp(ip, () => current)
+    try {
+      await Promise.all(ready)
+      expect(children).toHaveLength(5)
+      current = false
+      expect(await read).toBeNull()
+      await Promise.all(closed)
+      expect(children.every(child => child.exitCode !== null || child.signalCode !== null)).toBe(true)
+      expect(state.aborted).toHaveBeenCalledTimes(5)
+    } finally {
+      current = false
+      for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill()
+    }
   })
   it.each(['120', 'invalid', 'date'])('backs off HTTP 429 with Retry-After %s without replaying other routes', async retryAfter => {
     vi.setSystemTime(new Date('2026-10-03T18:00:00Z'))

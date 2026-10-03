@@ -174,11 +174,17 @@ function QuickServers() {
       removed: !!profile.removedFromSubscriptionAt,
       onSelect: async () => {
         if (profile.id === activeId || profile.removedFromSubscriptionAt) return
+        if (useAppStore.getState().serverSwitchingName || useAppStore.getState().connectionBusy) return
         const shouldAnimateSwitch = tunRunning && connectionMode === 'directVpn'
         if (shouldAnimateSwitch) setServerSwitchingName(profile.name)
         setActiveId(profile.id)
         try {
-          await window.electronAPI.serversSelect(profile.id)
+          const result = await window.electronAPI.serversSelect(profile.id)
+          if (result?.cancelled) {
+            addLog('info', 'Смена сервера отменена')
+            emitServerChanged()
+            return
+          }
           addLog('info', `Сервер выбран: ${profile.name}`)
           emitServerChanged()
         } catch (err: unknown) {

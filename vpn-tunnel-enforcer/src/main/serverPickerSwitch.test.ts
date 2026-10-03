@@ -117,7 +117,7 @@ beforeEach(async () => {
   state.settings = {}
   state.networkIdentity.mockReset().mockResolvedValue('fixture-network-hmac')
   state.restartProtected.mockReset().mockResolvedValue({ success: true })
-  state.stop.mockClear()
+  state.stop.mockReset().mockResolvedValue(undefined)
   for (const mock of Object.values(state.ipMonitor)) mock.mockClear()
 
   const serverPicker = await import('./serverPicker')
@@ -172,11 +172,11 @@ describe('server profile switching', () => {
     const identity = deferred<string>()
     state.networkIdentity.mockReturnValue(identity.promise)
     const pending = selectProfileHandler({}, 'a')
-    const rejected = expect(pending).rejects.toThrow('Переключение сервера отменено')
+    const cancelled = expect(pending).resolves.toEqual({ cancelled: true })
     await vi.waitFor(() => expect(state.networkIdentity).toHaveBeenCalledOnce())
     await cancelSwitchHandler({})
     identity.resolve('fixture-network-hmac')
-    await rejected
+    await cancelled
     expect(state.restartProtected).not.toHaveBeenCalled()
   })
   it('does not restart a tunnel stopped while the network identity was pending', async () => {
@@ -226,10 +226,55 @@ describe('server profile switching', () => {
     await expect(cancelSwitchHandler({})).resolves.toEqual({ cancelled: true })
 
     pendingRestart.resolve({ success: true })
-    await expect(firstSwitch).rejects.toThrow('Переключение сервера отменено')
+    await expect(firstSwitch).resolves.toEqual({ cancelled: true })
     expect(state.stop).toHaveBeenCalledTimes(1)
 
     await expect(selectProfileHandler({}, 'b')).resolves.toBeUndefined()
     expect(state.storeData.get('activeProfileId')).toBe('b')
+  })
+
+  it('returns cancellation after Xray startup rollback, holds the guard until cleanup completes (AT-00-003)', async () => {
+    const restart = deferred<{ success: boolean; error?: string }>()
+    state.restartProtected.mockReturnValueOnce(restart.promise)
+    const pending = selectProfileHandler({}, 'a')
+    await vi.waitFor(() => expect(state.restartProtected).toHaveBeenCalledOnce())
+    await cancelSwitchHandler({})
+    await expect(selectProfileHandler({}, 'b')).rejects.toThrow('уже выполняется')
+    state.tunnelStatus.running = false
+    restart.resolve({ success: false, error: 'Ошибка запуска движка xray-core: Xray startup cancelled' })
+    await expect(pending).resolves.toEqual({ cancelled: true })
+    await expect(selectProfileHandler({}, 'b')).resolves.toBeUndefined()
+    expect(state.restartProtected).toHaveBeenCalledOnce()
+  })
+
+  it('preserves a real startup failure without a cancellation request (AT-00-004)', async () => {
+    state.restartProtected.mockResolvedValueOnce({ success: false, error: 'Xray startup failed' })
+    await expect(selectProfileHandler({}, 'a')).rejects.toThrow('Xray startup failed')
+  })
+
+  it('does not disguise failed cancellation cleanup as an ordinary cancelled result (AT-00-004)', async () => {
+    const restart = deferred<{ success: boolean }>()
+    state.restartProtected.mockReturnValueOnce(restart.promise)
+    state.stop.mockRejectedValueOnce(new Error('Owned runtime exit not proven'))
+    const pending = selectProfileHandler({}, 'a')
+    await vi.waitFor(() => expect(state.restartProtected).toHaveBeenCalledOnce())
+    await cancelSwitchHandler({})
+    restart.resolve({ success: true })
+    await expect(pending).rejects.toThrow('Owned runtime exit not proven')
+    expect(state.ipMonitor.clearVpnIp).not.toHaveBeenCalled()
+  })
+
+  it('cancels before profile selection when begin is still pending (AT-00-003)', async () => {
+    const { setProfileSwitchHooks } = await import('./serverPicker')
+    const gate = deferred<void>()
+    const end = vi.fn()
+    setProfileSwitchHooks({ begin: () => gate.promise, end })
+    const pending = selectProfileHandler({}, 'a')
+    await cancelSwitchHandler({})
+    gate.resolve()
+    await expect(pending).resolves.toEqual({ cancelled: true })
+    expect(state.storeData.get('activeProfileId')).toBeUndefined()
+    expect(state.restartProtected).not.toHaveBeenCalled()
+    expect(end).toHaveBeenCalledOnce()
   })
 })

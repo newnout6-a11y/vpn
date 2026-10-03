@@ -92,7 +92,7 @@ export interface ElectronAPI {
   splitTunnelRemoveApp: (appId: string) => Promise<void>
   // Server Picker
   serversList: () => Promise<any[]>
-  serversSelect: (id: string) => Promise<void>
+  serversSelect: (id: string) => Promise<void | { cancelled: true }>
   serversCancelSwitch: () => Promise<{ cancelled: boolean }>
   serversGetActive: () => Promise<{ profile: any | null; activeId: string | null }>
   serversPingAll: () => Promise<any[]>
