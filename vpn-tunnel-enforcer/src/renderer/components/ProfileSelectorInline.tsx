@@ -151,6 +151,7 @@ export function ProfileSelectorInline() {
     return out
   }, [profiles, groups, groupsAvailable])
 
+  /** Selects a profile and reports success, cancellation, or backend failure. */
   const handleSelect = async (id: string) => {
     setOpen(false)
     if (id === current?.id) return
