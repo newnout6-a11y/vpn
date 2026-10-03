@@ -926,3 +926,23 @@ Durable write path (unique wx + fsync + ACL + rename) не изменён. Known
 - Окончательный `npm.cmd test -- --maxWorkers=4`: **188 files passed / 2 skipped, 2156 tests passed / 10 skipped / 0 failed**, exit 0, **129.93 s**. Ожидаемый crash stderr тестов RootErrorBoundary сохранён. Typecheck и traceability повторены на final source — exit 0. Runtime/test source после этого не менялся.
 - `npm.cmd run dist:win`: exit 0, Electron **44.4.3** / NSIS. Optional `@electron/mksnapshot` отсутствует, snapshot пропущен; сборка не прервана. Packaged main/preload побайтово равны compiled outputs; подтверждены **6 main / 3 renderer markers**. Packaged main SHA256 **50f1a1c68d92edad6509eaf96f8d273db72f23290959a099badc7c84244f48d1**.
 - Установщик `vpn-tunnel-enforcer/dist/VPN-Tunnel-Enforcer-Setup-1.1.22.exe`: **139170274 bytes**, **03.10.2026 12:02:17 МСК**, SHA256 **4368E9C63E696578947055D94B9C67D83A1D459A98492863AB4BBC5927E2547F**, Authenticode **NotSigned**. Заменяет предыдущий same-version artifact. Агентом не установлен; текущий VPN сохранён. Новый installed switch/start/stop/cancel и полная L3 matrix пока не измерены.
+
+### 2026-10-03 — этап 32: исправления ревью PR #16 (WP-2 / WP-4 / WP-7 / WP-10)
+
+Перед изменениями подтверждены remote newnout6-a11y/vpn, ветка codex/hotspot-lifecycle-server-switch и совпадение локального/удалённого head 4f119420d13ebcc217577f4dcab5f31baed5d8c4. Рабочее дерево было чистым. Все три приложенных замечания подтверждены.
+
+- P1, index.ts: убрана публикация sibling сразу после локального restart. Общий barrier уведомляет только после свежих route/IP доказательств; затем provisional sibling проходит настоящее окно 20 s и 3 HTTP-пробы. Select/persist и server-active-changed выполняются только при >=2 успехах, текущем owner и том же startedAt. При отсутствии route/IP proof либо провале health временный runtime останавливается с preserveNetworkProtection:true, прежний выбранный профиль сохраняется, IP evidence очищается, adaptive status получает ошибку. Старый неработающий сервер не запускается повторно; выбран безопасный остановленный контур с сохранением защиты. Переход остаётся сериализованным до конца проверки/cleanup; ручная смена отменяет окно и поздние результаты. Повторное 20-секундное окно после уже проверенного sibling устранено.
+- P2, protectedIpTransition.ts: false/исключение route proof теперь приводит к задержке 500 ms и следующей попытке (до 3), а не break. IP-запрос не выполняется без доказанных маршрутов. Постоянная ошибка остаётся not-checked; superseded owner не выполняет повторные effects.
+- P2, xrayEngine.ts: null/пустой/невалидный ответ resolver для hostname native graph вызывает явную ошибку до изменения адресов, записи конфига, preflight и spawn. Весь граф обновляется только после успешного разрешения всех hostname; исходный профиль и SNI сохраняются. Подтверждены literal IPv4/IPv6 и resolved IPv6. Адрес узла не включается в новое сообщение ошибки.
+
+Трассировка: AT-10-003/004/006, AT-07-006/012, AT-04-006, AT-02-002/004; F-124/125/127, F-050, F-086, F-022/023/024. Это регрессии соответствующих механизмов, не доказательство всей L3/chaos acceptance matrix.
+
+Проверки окончательного source:
+
+- `cd vpn-tunnel-enforcer; npx.cmd vitest run src/main/adaptiveFallbackTransition.test.ts src/main/adaptiveVerification.test.ts src/main/protectedIpTransition.test.ts src/main/profileTransitionWiring.test.ts src/main/nativeXrayCompatibility.test.ts src/main/lifecycleCleanup.test.ts --maxWorkers=4`: exit 0, 6 files / 121 passed / 0 failed, 6.50 s. Затем обновлён старый source oracle auditFixesRegression для continue вместо break и выполнен полный suite.
+- `npm.cmd run typecheck`: exit 0 (повторён после окончательных правок).
+- `npm.cmd test -- --maxWorkers=4`: exit 0, 189 files passed / 2 skipped; 2172 tests passed / 10 skipped / 0 failed, 96.16 s. Ожидаемый crash stderr RootErrorBoundary не является падением suite.
+- `python -X utf8 ../docs/04-приёмочные-тесты/traceability/check-coverage.py`: exit 0, AC 927/927, F 210/210.
+- `git diff --check`: exit 0.
+
+Установщик в этом repair не пересобирался и не устанавливался; предыдущий dist artifact не содержит этап 32. Живой VPN агентом не переключался. Windows installed latency, packet leakage и boot recovery здесь не проверялись. Нормативные docs не изменены.

@@ -178,6 +178,29 @@ describe('AT-04-002 / AT-04-006 / AT-02-002: preserved Xray connection pipeline'
     expect(config.outbounds[0].settings.vnext[0].address).toBe('one.example.com')
   })
 
+  // AT-04-006 / AT-02-004: no native graph is published with unresolved leaves.
+  it.each([null, '', 'invalid-address'])('rejects resolver result %s without partially mutating endpoints', async unresolved => {
+    const { config } = compile()
+    const endpoints = config.outbounds.filter((o: any) => o.settings?.vnext?.length)
+    endpoints[0].settings.vnext[0].address = 'good.example.com'
+    endpoints[1].settings.vnext[0].address = 'unresolved.example.com'
+    const before = JSON.stringify(config)
+    const resolver = vi.fn(async (host: string) => host === 'good.example.com' ? '192.0.2.44' : unresolved)
+    await expect(resolveXrayConfigEndpoints(config, resolver)).rejects.toThrow('Не удалось разрешить адрес узла native Xray')
+    expect(JSON.stringify(config)).toBe(before)
+  })
+
+  it('retains literal IPv4/IPv6 endpoints and accepts resolved IPv6 without changing SNI', async () => {
+    const config = { outbounds: [
+      { protocol: 'vless', settings: { vnext: [{ address: '192.0.2.1' }, { address: '2001:db8::1' }, { address: 'leaf.example.com' }] }, streamSettings: { tlsSettings: { serverName: 'front.example.com' } } }
+    ] }
+    const resolver = vi.fn(async () => '2001:db8::2')
+    await resolveXrayConfigEndpoints(config, resolver)
+    expect(resolver).toHaveBeenCalledExactlyOnceWith('leaf.example.com')
+    expect(config.outbounds[0].settings.vnext.map(node => node.address)).toEqual(['192.0.2.1', '2001:db8::1', '2001:db8::2'])
+    expect(config.outbounds[0].streamSettings.tlsSettings.serverName).toBe('front.example.com')
+  })
+
   it('requires Xray for native JSON and refuses to export it as a degraded URI', () => {
     const { profile } = compile()
     expect(resolveProxyEngine(profile.outbound, 'auto')).toBe('xray')

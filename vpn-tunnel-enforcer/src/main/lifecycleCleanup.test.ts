@@ -378,6 +378,15 @@ return startXray;
   return { start, ...os }
 }
 describe('Xray startup phase measurements (AT-02-002 / AT-02-004)', () => {
+  it('fails unresolved native graph before config write, preflight or process spawn', async () => {
+    const h = xrayStartHarness()
+    h.getNativeXrayProfile.mockReturnValue({ entry: { outboundTag: 'proxy' } })
+    h.resolveXrayConfigEndpoints.mockRejectedValue(new Error('native endpoint unresolved'))
+    await expect(h.start({ server: '192.0.2.1' })).rejects.toThrow('native endpoint unresolved')
+    expect(h.writeFile).not.toHaveBeenCalled()
+    expect(h.runXrayConfigPreflight).not.toHaveBeenCalled()
+    expect(h.spawn).not.toHaveBeenCalled()
+  })
   it.each([true, false])('classifies a firewall rejection with cancelled=%s without hiding real errors', async cancelled => {
     const h = xrayStartHarness(), owner = new AbortController(), error = new Error('firewall fixture')
     h.ensureKillSwitchProgramAllowed.mockImplementation(async () => {

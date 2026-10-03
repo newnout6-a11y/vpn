@@ -27,3 +27,17 @@ export async function collectAdaptiveSamples(
   }
   return current() ? samples : null
 }
+
+/** A provisional sibling must pass the stability window before publication. */
+export async function verifyAdaptiveFallback(options: {
+  isCurrent: () => boolean
+  signal: AbortSignal
+  probe: (signal: AbortSignal) => Promise<number | null>
+  commit: () => void
+}): Promise<boolean | null> {
+  const samples = await collectAdaptiveSamples(options.isCurrent, options.signal, options.probe)
+  if (!samples || options.signal.aborted || !options.isCurrent()) return null
+  if (samples.length < 2) return false
+  options.commit()
+  return true
+}

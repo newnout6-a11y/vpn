@@ -473,7 +473,8 @@ export async function resolveXrayConfigEndpoints(config: Record<string, any>,
     while (next < hosts.length) {
       const host = hosts[next++]
       const ip = await resolver(host)
-      if (ip && isIP(ip)) resolved.set(host, ip)
+      if (!ip || !isIP(ip)) throw new Error('Не удалось разрешить адрес узла native Xray до запуска туннеля')
+      resolved.set(host, ip)
     }
   }))
   for (const node of nodes) if (resolved.has(node.address)) node.address = resolved.get(node.address)

@@ -8,7 +8,7 @@ export async function withProtectedIpTransition<T extends { success: boolean }>(
   isCurrent: () => boolean
   isOwner?: () => boolean
   areRoutesActive: () => Promise<boolean>
-  onRestarted?: () => void | Promise<void>
+  onVerified?: () => void | Promise<void>
 }): Promise<T> {
   const startedAt = Date.now()
   ipMonitor.deferResume()
@@ -20,16 +20,19 @@ export async function withProtectedIpTransition<T extends { success: boolean }>(
       return result
     }
     if (!options.isCurrent()) return result
-    await options.onRestarted?.()
     for (let attempt = 1; attempt <= 3 && options.isCurrent(); attempt++) {
       const routesActive = await options.areRoutesActive().catch(() => false)
       if (!options.isCurrent()) return result
-      if (!routesActive) break
+      if (!routesActive) {
+        if (attempt < 3) await new Promise(resolve => setTimeout(resolve, 500))
+        continue
+      }
       // One provider wave: never wait for the dead old server, never adopt a
       // cached IP, and never reject a valid shared egress merely for equality.
       const info = await ipMonitor.recheck(true, options.isCurrent)
       if (!options.isCurrent()) return result
       if (info.ip) {
+        await options.onVerified?.()
         logEvent('info', 'ip-monitor', 'protected transition IP baseline refreshed', {
           reason: options.reason, attempt, elapsedMs: Date.now() - startedAt
         })

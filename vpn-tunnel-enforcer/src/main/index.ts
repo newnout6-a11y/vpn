@@ -17,7 +17,7 @@ import { readRecentXrayOutboundFault, getXrayStatus, stopXray } from './xrayEngi
 import { classifyNavigation } from './navigationPolicy'
 import { ipMonitor } from './ipMonitor'
 import { withProtectedIpTransition } from './protectedIpTransition'
-import { collectAdaptiveSamples } from './adaptiveVerification'
+import { collectAdaptiveSamples, verifyAdaptiveFallback } from './adaptiveVerification'
 import { autoconfig } from './autoconfig'
 import { createTray, updateTrayState, type TrayStatus } from './tray'
 import { settingsStore, type AppSettings } from './settings'
@@ -62,7 +62,7 @@ import { resolveVpnProfile, resolveVpnProfiles, redactSensitiveConfig, type VpnP
 
 // ─── V2 Feature Modules ──────────────────────────────────────────────────────
 import { registerSplitTunnelHandlers } from './splitTunneling'
-import { registerServerPickerHandlers, serverPicker, setProfileSwitchHooks } from './serverPicker'
+import { registerServerPickerHandlers, serverPicker, setProfileSwitchHooks, tunnelHttpProbe } from './serverPicker'
 import {
   registerServerGroupsHandlers,
   startServerGroupAutoRefresh,
@@ -434,22 +434,42 @@ async function restartAdaptiveWithFreshIp(
   mode: Parameters<typeof tunController.restartForAdaptiveChange>[0],
   reason: string,
   isOwner: () => boolean,
+  signal: AbortSignal,
   sibling?: { id: string; profile: VpnProfile }
 ): Promise<{ success: boolean; error?: string }> {
   if (!isOwner()) return { success: false, error: 'Adaptive verification superseded' }
-  const transition = withProtectedIpTransition({
-    reason: `adaptive: ${reason}`,
-    isCurrent: () => isOwner() && tunController.getStatus().running,
-    isOwner,
-    areRoutesActive: () => tunController.areTunRoutesActive(),
-    restart: () => tunController.restartForAdaptiveChange(mode, reason, sibling ? { vpnProfile: sibling.profile } : {}),
-    onRestarted: () => {
-      if (sibling && isOwner()) {
+  const transition = (async () => {
+    let ipVerified = false
+    const restarted = await withProtectedIpTransition({
+      reason: `adaptive: ${reason}`,
+      isCurrent: () => isOwner() && tunController.getStatus().running,
+      isOwner,
+      areRoutesActive: () => tunController.areTunRoutesActive(),
+      restart: () => tunController.restartForAdaptiveChange(mode, reason, sibling ? { vpnProfile: sibling.profile } : {}),
+      onVerified: () => { ipVerified = true }
+    })
+    if (!restarted.success || !sibling || !isOwner()) return restarted
+    const startedAt = tunController.getStatus().startedAt
+    const isCurrent = () => isOwner() && tunController.getStatus().running && tunController.getStatus().startedAt === startedAt
+    if (!isCurrent()) return { success: false, error: 'Adaptive verification superseded' }
+    const healthy = ipVerified && await verifyAdaptiveFallback({
+      isCurrent, signal,
+      probe: probeSignal => tunnelHttpProbe(true, 1, probeSignal),
+      commit: () => {
         serverPicker.selectProfile(sibling.id)
         sendToMainWindow('server-active-changed', { profileId: sibling.id, profileName: sibling.profile.name })
       }
+    })
+    if (!isCurrent()) return { success: false, error: 'Adaptive verification superseded' }
+    if (!healthy) {
+      // Keep the previous selection and firewall/adapter protection. The failed
+      // provisional runtime must not remain displayed as a connected server.
+      await tunController.stop({ preserveNetworkProtection: true })
+      if (isOwner()) ipMonitor.clearVpnIp()
+      return { success: false, error: 'Соседний сервер не прошёл проверку выхода в интернет через туннель' }
     }
-  })
+    return restarted
+  })()
   adaptiveTransitionInFlight = transition
   try { return await transition }
   finally { if (adaptiveTransitionInFlight === transition) adaptiveTransitionInFlight = null }
@@ -520,14 +540,14 @@ async function verifyAdaptiveConnection(): Promise<void> {
       const restarted = await restartAdaptiveWithFreshIp(
         getAdaptiveBypassStatus().mode,
         `sing-box outbound fault: ${outboundFault}`,
-        isOwner, sibling
+        isOwner, controller.signal, sibling
       )
       if (!isOwner()) return
       if (restarted.success) {
         context.profile = sibling.profile
         context.capabilities = resolveAdaptiveCapabilities('directVpn', sibling.profile)
         invalidateAdaptiveLearningContext()
-        scheduleAdaptiveVerification()
+        await markAdaptiveSuccess(context.profile)
         return
       }
       markAdaptiveFailure(restarted.error || adaptiveOutboundFaultMessage(outboundFault))
@@ -546,14 +566,14 @@ async function verifyAdaptiveConnection(): Promise<void> {
       const restarted = await restartAdaptiveWithFreshIp(
         afterProbe.mode,
         'adaptive compatible profile failed tunnel health check',
-        isOwner, sibling
+        isOwner, controller.signal, sibling
       )
       if (!isOwner()) return
       if (restarted.success) {
         context.profile = sibling.profile
         context.capabilities = resolveAdaptiveCapabilities('directVpn', sibling.profile)
         invalidateAdaptiveLearningContext()
-        scheduleAdaptiveVerification()
+        await markAdaptiveSuccess(context.profile)
         return
       }
       markAdaptiveFailure(restarted.error || 'Не удалось подключиться к соседнему серверу')
@@ -564,7 +584,7 @@ async function verifyAdaptiveConnection(): Promise<void> {
   }
 
   markAdaptiveTransition(next)
-  const restarted = await restartAdaptiveWithFreshIp(next, 'adaptive tunnel health check failed', isOwner)
+  const restarted = await restartAdaptiveWithFreshIp(next, 'adaptive tunnel health check failed', isOwner, controller.signal)
   if (!isOwner()) return
   if (!restarted.success) {
     markAdaptiveFailure(restarted.error || 'Не удалось применить совместимый режим')

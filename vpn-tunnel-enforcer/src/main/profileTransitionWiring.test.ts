@@ -19,10 +19,13 @@ describe('adaptive profile transition wiring', () => {
     expect(verify.match(/await restartAdaptiveWithFreshIp\(/g)).toHaveLength(3)
     expect(verify).not.toContain('await tunController.restartForAdaptiveChange(')
   })
-  it('commits the actual fallback profile and notifies the existing renderer channel under the same owner', () => {
+  it('publishes fallback only through health verification and stops failed provisional runtime with protection', () => {
     const restart = source.slice(source.indexOf('async function restartAdaptiveWithFreshIp'), source.indexOf('function scheduleAdaptiveVerification'))
     expect(restart).toContain('withProtectedIpTransition({')
-    expect(restart).toContain('if (sibling && isOwner())')
+    expect(restart).not.toContain('onRestarted:')
+    expect(restart).toContain('const healthy = ipVerified && await verifyAdaptiveFallback({')
+    expect(restart).toContain('tunController.getStatus().startedAt === startedAt')
+    expect(restart).toContain('await tunController.stop({ preserveNetworkProtection: true })')
     expect(restart).toContain('serverPicker.selectProfile(sibling.id)')
     expect(restart).toContain("sendToMainWindow('server-active-changed', { profileId: sibling.id, profileName: sibling.profile.name })")
   })
