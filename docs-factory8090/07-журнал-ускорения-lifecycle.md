@@ -1025,3 +1025,38 @@ Durable write path (unique wx + fsync + ACL + rename) не изменён. Known
 - Packaged main/preload побайтово равны compiled outputs, все 8 readiness/geo markers подтверждены внутри ASAR. Main SHA256 `9d439a46a63f2e4d257e1a15ab477a29b841a14ae794a760d772ab39d1242a33`, preload `304534f83a73680dadfdc0c6296a9f356c337b506d4da44e03b36087290e3663`.
 - Установщик `vpn-tunnel-enforcer/dist/VPN-Tunnel-Enforcer-Setup-1.1.22.exe`: 139172014 bytes, 03.10.2026 21:26:20 МСК, SHA256 `1CF12CB5A2C76C061169BB50372E88BA8BAC03F5746112FA6D503DE9F49C790E`, Authenticode `NotSigned`. Заменяет предыдущий artifact с тем же номером. Агентом не установлен.
 - `git diff --check` — exit 0. Временные файлы этапом не создавались; существующие `.tmp` файлы не изменялись.
+
+### 2026-10-03 — этап 35: общий deadline и отмена геопроверок (WP-0 / WP-7)
+
+**Граница:** команда владельца «давай тестируй и чини» после разбора 19-секундного определения страны. PR #17 уже слит; новая ветка `codex/geo-deadline-cancellation` от актуального `vpn/main` (`4d4ffd1`). Рабочее дерево исходно чистое. Прочитаны AGENTS, AT-00-003, AT-07-003/007/012, нормативный раздел 4.2 и решение 10.1 по геосервисам. Нормативные `docs/` не изменены.
+
+#### Измеренный дефект
+
+Установленный main SHA256 `9d439a46a63f2e4d257e1a15ab477a29b841a14ae794a760d772ab39d1242a33` соответствует этапу 34. В `app.log` 03.10.2026 МСК: смена на Sweden завершилась в 21:38:15.996 за 3349 ms; следующая фоновая геопроверка 21:38:15.997–35.141 заняла **19144 ms**. Первый этап: geojs DNS timeout 10011 ms и два неуспешных локальных proxy fallback примерно по 2 s; затем четыре вторичных источника параллельно, ещё около 4.9 s. За это время пользователь сменил сервер на Netherlands и Norway. Поздняя публикация уже блокировалась, но сами процессы и fallback продолжались. Это задержка географии, не длительность подключения и не доказательство отказа VPN.
+
+#### Изменение
+
+- Пять источников запускаются параллельно; все маршруты и источники одной проверки делят **6000 ms**. На каждый curl передаются `AbortSignal`, timeout и `--max-time`, ограниченные оставшимся временем. По deadline/отмене завершается ожидание callers и сигналом прекращаются процессы; поздние callbacks не записывают cache и не удаляют новую проверку того же IP.
+- У shared read отдельные подписчики с проверкой актуальности. Каждые 25 ms отменяются подписчики прежнего профиля/generation/сессии, отключения, privacy или фонового владельца. Последний ушедший владелец отменяет всю волну. Если этот же IP ещё нужен актуальной ручной проверке, она продолжает shared read; отмена одного подписчика её не прерывает.
+- При работающем собственном TUN и `bootstrapRouteMode=auto` curl использует системный маршрут, без перебора старых локальных proxy/Happ портов. Offline auto и явно выбранный `localProxy` сохраняют bootstrap-маршруты, но также ограничены общим deadline.
+- HTTPS-only, voting стран, cache TTL, объединение дубликатов, privacy и provider 429/Retry-After сохранены. Deadline и отмена не кешируются как успешная или отрицательная геопроверка. Добавлен журнал `geo lookup finished` с `outcome` и `durationMs`, без адреса IP/endpoint.
+
+Трассировка: AT-00-003 / AT-07-007, смежные AT-07-003/012; F-021/F-072 в пределах геопроверки. Общий limiter для множества разных IP, весь WP и Windows/L3 acceptance этим изменением не объявляются завершёнными.
+
+#### Проверки
+
+Команды из `vpn-tunnel-enforcer`:
+
+- `npx.cmd vitest run src/main/serverPickerGeoLifecycle.test.ts src/main/serverPickerGeoTransport.test.ts src/main/serverPickerSwitch.test.ts src/main/mainIpcRegression.test.ts src/main/bootstrapRoute.test.ts --maxWorkers=4` — exit 0, **5 files / 76 passed**, 2.37 s на окончательном source.
+- `npm.cmd run typecheck` — exit 0; повторён внутри сборки.
+- `npm.cmd test -- --maxWorkers=4` — exit 0, **191 files passed / 2 skipped; 2231 tests passed / 10 skipped / 0 failed**, 117.52 s. RootErrorBoundary crash stderr ожидается его тестом.
+- `python -X utf8 ../docs/04-приёмочные-тесты/traceability/check-coverage.py` — exit 0, **AC 927/927, F 210/210**; это трассировка, не исполнение всей acceptance matrix.
+- Fake clock: все зависшие источники завершаются за 6000 ms; route retries получают оставшийся бюджет; отмена на 600/3000/5400 ms реагирует не позднее следующего 25 ms tick. Синтетические source delays 3500/4000 ms завершаются параллельно за **4000 ms**, вместо суммы 7500 ms. Это компонентные проверки, не новая installed latency.
+- Проверены 50 одинаковых запросов, current duplicate, смена профиля A→B→A, session/disconnect/privacy/background/new-IP cancellation, ручной shared owner, late callback после новой проверки того же IP, cache, offline/explicit routes, HTTPS и 429.
+- Native Windows/Node: production `fetchGeoJson` передаёт signal/timeout пяти настоящим ожидающим дочерним Node-процессам вместо curl. Отмена дожидается `close` всех пяти и подтверждает их завершение. Внешние endpoints и состояние VPN/Windows этим тестом не менялись; сам HTTP transport остаётся замоканным.
+- `npm.cmd run dist:win` — exit 0, Electron 44.4.3 / NSIS. Optional mksnapshot отсутствует, snapshot штатно пропущен. Packaged main/preload побайтово равны compiled outputs; все шесть deadline/cancellation markers подтверждены в ASAR.
+- Main SHA256 `e23e253ea04b817641e9c7ad6ca498f854339878546954c2f77d9f22790043ee`; preload `304534f83a73680dadfdc0c6296a9f356c337b506d4da44e03b36087290e3663`.
+- Установщик `vpn-tunnel-enforcer/dist/VPN-Tunnel-Enforcer-Setup-1.1.22.exe`: **139172591 bytes**, **03.10.2026 21:55:20 МСК**, SHA256 `94BA471623D89804A6A36FBBC7E9C81A9B950926004882A516AF42D3CA24F6A9`, Authenticode `NotSigned`. Заменяет предыдущий artifact того же номера; агентом не установлен.
+- `git diff --check` — exit 0. Временные файлы не создавались.
+
+**Ограничение и откат:** на недоступных/медленных сервисах страна может остаться неподтверждённой после deadline; не выдаётся выдуманная страна. Новый installed geo latency и Windows/L3 packets/boot после установки не измерены. Revert этого изменения возвращает последовательные provider waves и отсутствие общей отмены; формат stores/settings не менялся.
