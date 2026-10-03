@@ -56,7 +56,8 @@ describe('inline picker cancellation', () => {
     const expected = locale === 'ru' ? 'Смена сервера отменена' : 'Server switch cancelled'
     await waitFor(() => expect(useAppStore.getState().logs.some(log => log.message === expected)).toBe(true))
     expect(useAppStore.getState().logs.some(log => log.level === 'error')).toBe(false)
-    expect(useAppStore.getState().logs.some(log => log.message.includes('Сервер выбран'))).toBe(false)
+    const successPrefix = locale === 'ru' ? 'Сервер выбран:' : 'Server selected:'
+    expect(useAppStore.getState().logs.some(log => log.message.startsWith(successPrefix))).toBe(false)
     expect(useAppStore.getState().serverSwitchingName).toBeNull()
   })
   it('holds ownership across terminal stop/remount, releases it after backend cleanup and then selects offline (AT-00-008)', async () => {

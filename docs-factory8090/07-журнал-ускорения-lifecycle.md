@@ -1115,3 +1115,12 @@ Installed main SHA256 `e23e253ea04b817641e9c7ad6ca498f854339878546954c2f77d9f227
 - Main SHA256 `ae519e5c05b236d66f87e3a760f7c3ae7f2a6b2da11adc7e2d69bbe0843cf7ef`; preload `304534f83a73680dadfdc0c6296a9f356c337b506d4da44e03b36087290e3663`.
 - Installer `vpn-tunnel-enforcer/dist/VPN-Tunnel-Enforcer-Setup-1.1.22.exe`: **139172724 bytes**, **03.10.2026 22:40:07 МСК**, SHA256 `DC8962B938AD5EC8CA18F2F9B371E6C5DA21D6F0613159E668E6F49619FF72E5`, Authenticode `NotSigned`. Заменяет artifact этапа 36; агентом не установлен.
 - `git diff --check` — exit 0. Временные файлы не создавались. Живой UI после установки, NVDA и Windows/L3 этим этапом не проверялись. Revert scoped commit возвращает hardcoded cancellation log и прежнее оформление tests, формат stores/settings совместим.
+
+### 2026-10-03 — этап 38: уточнение проверок ревью PR #19
+
+- Английская итерация cancellation-теста теперь проверяет отсутствие английского сообщения об успехе, русская — русского.
+- Удалена дублирующая source-проверка inline picker: его локаль уже проверяется компонентным тестом с реальными словарями.
+- Проверка DashboardSide нормализует пробелы и проверяет наличие `t` в списке зависимостей без привязки к порядку. Проверка React `act` допускает любое количество пробелов перед вызовом и отдельно требует `await` перед каждым вызовом.
+- CodeRabbit Docstring Coverage остался предупреждением автоматической оценки стиля тестовых функций; не добавляли формальные docstring без предметного пояснения.
+
+**Проверки:** целевые Vitest — 3 файла / 44 теста прошли; `npm.cmd run typecheck` — exit 0; полный `npm.cmd test -- --maxWorkers=4` — 192 файла прошли, 2 пропущены, 2256 тестов прошли, 10 пропущены; `python -X utf8 docs\04-приёмочные-тесты\traceability\check-coverage.py` — AC 927/927, F 210/210; `git diff --check` — exit 0. Installer не пересобирался: изменены только тесты и журнал.
