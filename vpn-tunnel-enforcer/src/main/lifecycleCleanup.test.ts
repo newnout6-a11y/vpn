@@ -26,6 +26,67 @@ function compile<T>(text: string, dependencies: Record<string, unknown>): T {
 const noop = () => vi.fn((..._args: any[]) => {})
 const done = () => vi.fn(async () => {})
 
+function protectedRestartHarness() {
+  const os = {
+    waitForTunRelease: vi.fn(async (_isCancelled: () => boolean, _timeoutMs: number): Promise<string> => 'released'),
+    logEvent: noop(), notifyStatus: noop(),
+    settingsStore: { get: () => ({ proxyEngine: 'singbox' }) },
+    stop: vi.fn(async (): Promise<any> => ({ success: true })),
+    start: vi.fn(async (): Promise<any> => ({ success: true }))
+  }
+  const control = compile<{ restart: () => Promise<any>; cancel: () => void }>(`
+let transitionCancelRequested=false,currentStatus={running:false},lastStartOptions=null;
+const protectedRestartCallback=null;
+const controller={stop,start,${body('tunController.ts','restartProtected')}};
+return {restart:()=>controller.restartProtected('fixture',{mode:'directVpn'}),cancel:()=>{transitionCancelRequested=true}};
+`, os)
+  return { ...os, ...control }
+}
+
+describe('protected restart readiness (AT-02-002/004/005 / AT-00-003)', () => {
+  it('waits for successful stop and interface release before launching', async () => {
+    const h = protectedRestartHarness()
+    let release!: (outcome: string) => void
+    h.waitForTunRelease.mockReturnValue(new Promise(done => { release = done }))
+    const pending = h.restart()
+    await vi.waitFor(() => expect(h.waitForTunRelease).toHaveBeenCalledOnce())
+    expect(h.stop).toHaveBeenCalledExactlyOnceWith({preserveNetworkProtection:true,preserveLastStartOptions:true})
+    expect(h.start).not.toHaveBeenCalled()
+    release('released')
+    expect(await pending).toMatchObject({success:true})
+    expect(h.start).toHaveBeenCalledOnce()
+  })
+  it('retains protection with an explicit error if release cannot be verified', async () => {
+    const h = protectedRestartHarness()
+    h.waitForTunRelease.mockResolvedValue('unverified')
+    expect(await h.restart()).toMatchObject({success:false,error:expect.stringContaining('не подтверждено')})
+    expect(h.start).not.toHaveBeenCalled()
+    expect(h.stop).toHaveBeenCalledOnce()
+    expect(h.notifyStatus).toHaveBeenCalledWith('error')
+  })
+  it('finishes cancellation during release with ordinary cleanup and no new start', async () => {
+    const h = protectedRestartHarness()
+    let release!: (outcome: string) => void
+    h.waitForTunRelease.mockReturnValue(new Promise(done => { release = done }))
+    const pending = h.restart()
+    await vi.waitFor(() => expect(h.waitForTunRelease).toHaveBeenCalledOnce())
+    h.cancel()
+    expect(h.waitForTunRelease.mock.calls[0][0]()).toBe(true)
+    release('cancelled')
+    expect(await pending).toMatchObject({success:false,error:'Перезапуск отменён'})
+    expect(h.start).not.toHaveBeenCalled()
+    expect(h.stop).toHaveBeenCalledTimes(2)
+    expect(h.stop.mock.calls[1]).toEqual([])
+  })
+  it('does not await interface release after a failed process stop', async () => {
+    const h = protectedRestartHarness()
+    h.stop.mockResolvedValueOnce({success:false,error:'exit not confirmed'})
+    expect(await h.restart()).toMatchObject({success:false})
+    expect(h.waitForTunRelease).not.toHaveBeenCalled()
+    expect(h.start).not.toHaveBeenCalled()
+  })
+})
+
 function stopHarness(startupController: AbortController | null = null, startupCompletion: Promise<void> | null = null) {
   const os = {
     startupController,

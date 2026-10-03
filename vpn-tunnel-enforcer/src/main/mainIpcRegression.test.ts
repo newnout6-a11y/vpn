@@ -231,7 +231,7 @@ describe('main IPC regressions', () => {
     expect(source).toContain('if (geoLookupDisabled()) return null')
     expect(activeHandler).toContain("reason: 'geo-lookup-disabled'")
     expect(activeHandler.indexOf("reason: 'geo-lookup-disabled'")).toBeLessThan(
-      activeHandler.indexOf('geolocateIp(cleanIp)')
+      activeHandler.indexOf('verifyActiveCountryForIp(cleanIp)')
     )
     expect(verifyHandler).toContain("reason: 'geo-lookup-disabled'")
     expect(verifyHandler.indexOf("reason: 'geo-lookup-disabled'")).toBeLessThan(

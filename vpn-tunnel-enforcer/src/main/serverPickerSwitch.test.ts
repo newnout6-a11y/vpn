@@ -127,6 +127,16 @@ beforeEach(async () => {
 })
 
 describe('server profile switching', () => {
+  it('does not attach geo evidence to an in-progress profile switch (AT-00-003)', async () => {
+    const held = deferred<{ success: boolean }>()
+    state.restartProtected.mockReturnValueOnce(held.promise)
+    const pending = selectProfileHandler({}, 'a')
+    await vi.waitFor(() => expect(state.restartProtected).toHaveBeenCalledOnce())
+    expect(await state.ipcHandlers.get('servers:verify-active-country')!({}, '198.51.100.20'))
+      .toMatchObject({ok:false,reason:'profile-switch-in-progress'})
+    held.resolve({success:true})
+    await pending
+  })
   it('invalidates adaptive work before selecting or waiting for network identity (AT-10-003)', async () => {
     const { setProfileSwitchHooks } = await import('./serverPicker')
     const end = vi.fn()

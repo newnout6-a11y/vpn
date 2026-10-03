@@ -5,10 +5,10 @@ import ts from 'typescript'
 import { describe, expect, it, vi } from 'vitest'
 
 const source = readFileSync(join(process.cwd(), 'src/main/tunController.ts'), 'utf8')
-const start = source.indexOf('const poller = setInterval(async () => {')
-const end = source.indexOf('}, 250)', start)
+const start = source.indexOf('const pollRuntime = async () => {')
+const end = source.indexOf('const poller = setInterval(pollRuntime, 250)', start)
 if (start < 0 || end < 0) throw new Error('Production startup callback not found')
-const callback = source.slice(start + 'const poller = setInterval('.length, end + 1)
+const callback = source.slice(start + 'const pollRuntime = '.length, end).trim()
 
 function harness() {
   const os = {
@@ -40,7 +40,7 @@ let resolved=false, successHandled=false, pollInFlight=false, stopRequested=fals
 let attempts=0, startAbortedReason=null, pendingKillSwitch=null, settleFirewallAdapter=null;
 let startupPollCompletion=null;
 let startupCompensationStarted=false;
-const maxAttempts=30, poller=1, wantKillSwitch=true, adapterLockdownPromise=null;
+const maxAttempts=31, poller=1, wantKillSwitch=true, adapterLockdownPromise=null;
 const runtime={singbox:'fixture.exe'}, proxyOwnerProgramPaths=[], processWaitStarted=0;
 const phases={},phaseDurations={},tStart=Date.now();
 let currentStatus={running:false,pid:null,startedAt:null,warning:null};
@@ -56,6 +56,27 @@ return {poll: ${callback}, requestStop: () => {stopRequested=true}, exit: () => 
 }
 
 describe('startup callback fault boundaries', () => {
+  it('probes immediately and keeps the 250 ms retry timer (AT-02-002)', () => {
+    const registrationStart = source.indexOf('const poller = setInterval(pollRuntime, 250)')
+    const registrationEnd = source.indexOf('void pollRuntime()', registrationStart) + 'void pollRuntime()'.length
+    const schedule = vi.fn(() => 1)
+    const probe = vi.fn(async () => {})
+    new Function('setInterval', 'pollRuntime', source.slice(registrationStart, registrationEnd))(schedule, probe)
+    expect(schedule).toHaveBeenCalledExactlyOnceWith(probe, 250)
+    expect(probe).toHaveBeenCalledOnce()
+  })
+  it('never overlaps the immediate probe with an interval tick (AT-02-005)', async () => {
+    const h = harness()
+    h.recordOwnedTunAdapter.mockResolvedValue(undefined)
+    let release!: (value: boolean) => void
+    h.isSingboxRunning.mockReturnValue(new Promise(done => { release = done }))
+    const pending = h.poll()
+    await h.poll()
+    expect(h.isSingboxRunning).toHaveBeenCalledOnce()
+    release(true)
+    await pending
+    expect(h.onFinish).toHaveBeenCalledOnce()
+  })
   it.each(['process', 'ownership', 'metric', 'firewall'])('ignores late %s success after process exit (AT-00-003 / AT-02-005)', async phase => {
     const h = harness()
     h.recordOwnedTunAdapter.mockResolvedValue(undefined)
@@ -81,7 +102,7 @@ describe('startup callback fault boundaries', () => {
   it('awaits timeout compensation and stops an owned zombie before network rollback (AT-02-004)', async () => {
     const h = harness()
     h.isSingboxRunning.mockResolvedValue(false)
-    for (let i=0;i<29;i++) await h.poll()
+    for (let i=0;i<30;i++) await h.poll()
     let release!: () => void
     h.killOwnedRuntimeProcesses.mockReturnValue(new Promise<void>(done => { release = done }))
     const pending = h.poll()
@@ -99,7 +120,7 @@ describe('startup callback fault boundaries', () => {
     const h = harness()
     h.isSingboxRunning.mockResolvedValue(false)
     h.waitForOwnedRuntimeToExit.mockResolvedValue(false)
-    for (let i=0;i<30;i++) await h.poll()
+    for (let i=0;i<31;i++) await h.poll()
     expect(h.disableKillSwitchIfActive).not.toHaveBeenCalled()
     expect(h.rollbackEarlyAdapterLockdown).not.toHaveBeenCalled()
     expect(h.stopXray).toHaveBeenCalledOnce()

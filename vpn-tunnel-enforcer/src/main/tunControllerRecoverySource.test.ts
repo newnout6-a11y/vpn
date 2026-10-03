@@ -148,7 +148,7 @@ describe('tunController recovery cancellation guards', () => {
     expect(rollback).toBeGreaterThan(start)
   })
 
-  it('never leaves a failed protected restart behind a stale kill-switch', async () => {
+  it('tears down failed runtimes and explicitly reports an unverified interface release', async () => {
     const source = await readFile(join(here, 'tunController.ts'), 'utf8')
     const fnStart = source.indexOf('async restartProtected(')
     const fnEnd = source.indexOf('async restartWithLastOptions(', fnStart)
@@ -158,8 +158,10 @@ describe('tunController recovery cancellation guards', () => {
     // must run the ordinary full teardown before returning.
     const failureReturns = body.match(/return \{ success: false/g) ?? []
     const teardowns = body.match(/await this\.stop\(\)\.catch/g) ?? []
-    expect(failureReturns.length).toBe(2)
+    expect(failureReturns.length).toBe(3)
     expect(teardowns.length).toBe(2)
+    expect(body).toContain("if (release !== 'released')")
+    expect(body).toContain("notifyStatus('error')")
     // A thrown start() must be caught, not propagated — otherwise the teardown
     // below it never runs.
     expect(body).toContain('started = await this.start(nextOptions)')

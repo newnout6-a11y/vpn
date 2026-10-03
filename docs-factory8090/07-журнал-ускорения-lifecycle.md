@@ -981,3 +981,47 @@ Durable write path (unique wx + fsync + ACL + rename) не изменён. Known
 - Main SHA256 **0c26e9868cc2c304d6f951b9756dd8dba88b021da9013f6022885e7b267880c3**, preload **304534f83a73680dadfdc0c6296a9f356c337b506d4da44e03b36087290e3663**.
 - Installer `vpn-tunnel-enforcer/dist/VPN-Tunnel-Enforcer-Setup-1.1.22.exe`: **139170825 bytes**, **03.10.2026 20:30:50 МСК**, SHA256 **6875F8B743AAEEF6E378DEF6CBC5AFDB739FF521CCB7E88DDD9D68CF2511AA72**, Authenticode **NotSigned**. Заменяет предыдущий artifact с тем же номером версии; агентом не установлен. Подпись кода не менялась.
 - Итоговый `git diff --check`: exit 0. Временные файлы этапом не создавались.
+
+### 2026-10-03 — этап 34: готовность при смене сервера и повторные геозапросы (WP-2 / WP-0 / WP-7)
+
+**Граница:** прямое разрешение владельца «давай чини тестируй». Исходный checkout `ea5d8b1`, ветка `codex/hotspot-lifecycle-server-switch`, рабочее дерево чистое. Прочитаны AGENTS, WP-2/0/7 acceptance, соответствующие требования сетевого ядра и lifecycle, раздел 10 ТЗ-06 и реестр решений владельца. Нормативные `docs/` не менялись.
+
+#### Свежий установленный baseline
+
+Установленный main SHA256 `0c26e9868cc2c304d6f951b9756dd8dba88b021da9013f6022885e7b267880c3` совпал с compiled output предыдущего этапа. Логи 03.10.2026 МСК:
+
+- 21:04:50 — успешный start-direct-vpn 4121 ms; 21:05:13 — успешный повтор 2423 ms. Start 21:05:09 отменён, 1725 ms не засчитывается как подключение.
+- Stop 21:05:05 — 2246 ms; cancel 21:05:10 — 1750 ms, отмена до native adapter apply, cleanup завершён.
+- Sweden 21:05:20 — servers:select 3726 ms; Norway 21:05:26 — 3668 ms. Fresh route/IP baseline с первой попытки. DNS 11–111 ms. Protected stop 403/380 ms, pause 500 ms, TUN start 1333/1365 ms, wait-singbox-process 470/494 ms. С учётом network identity (~0.6 s) и IP proof (~0.8 s) это объясняет измеренный общий switch.
+- Adaptive verification 3/3; последующие leak-test physicalAdapterReached/publicIpMismatch/dnsLeakDetected=false. Эти наблюдения не заменяют полную L3 приёмку.
+- Повторные concurrent servers:verify-active-country; один запрос завершился через 19540 ms, geo provider 429. В исходном коде await geolocateIp затем updateActiveProfileCountry выбирал профиль в момент завершения, позволяя старому ответу изменить новый выбранный профиль.
+
+#### Изменения
+
+- Fixed 500 ms (250 ms adaptive) заменены read-only ожиданием исчезновения собственного активного IPv4/IPv6 адреса на текущем/известном TUN-алиасе после успешного stop и существующего native runtime exit proof. Первый read выполняется сразу; повтор 25 ms, предел 5 s. Ошибка/timeout не дают новый start: явный error, защита сохранена. Отмена проверяется до read и между reads; после отмены обычный stop очищает сохранённую защиту. OS чтение не меняет интерфейсы, маршруты или DNS.
+- Startup process probe запускается сразу с прежними ownership/TUN/firewall/compensation gates. Interval 250 ms остаётся для retries, pollInFlight исключает overlap. 31 попытка = immediate + 30 intervals; retry window не урезан на одну попытку. Поздние результаты после exit/cancel не публикуются.
+- geolocateIp делит одно чтение одного IP между callers. Только географическая информация кешируется на 5 min, bounded 256 entries; отсутствие результата — на 5 s для подавления повторов. Это не VPN-IP/egress baseline и не доказательство здоровья. Privacy gate применяется до cache/read и после completion.
+- Единый verifyActiveCountryForIp применяется из IPC и всех четырёх startup background sites. Публикация проверяет owner, generation, active profile, running/startedAt и отсутствие profile switch; новая проверка/выбор профиля/смена сессии отбрасывает старый ответ. Неподтверждённая страна не пишется в профиль.
+- curl собирает HTTP headers; parser отделяет тело после proxy CONNECT/provider headers. HTTP 429 прекращает replay через остальные bootstrap routes и вводит общий backoff provider origin: 60/120/240/480/900 s с учётом Retry-After seconds/date. HTTPS-only ограничения сохранены. Общий бюджет запросов для всей batch-матрицы этим этапом не объявляется реализованным; F-072 не закрывается целиком.
+
+Трассировка регрессий: AT-02-002/004/005, AT-00-003/007, AT-07-007; смежные F-021/F-022/F-072. Whole-WP, Windows packet/leak/boot acceptance здесь не объявляются выполненными.
+
+#### Проверки и замеры
+
+- Первый focused run: 6 files passed, 2 failed, 148 passed / 14 failed. Причина — новые test mocks Node CJS default exports. Initial typecheck: две ошибки tuple typing в новом mock. Исправлены mocks/типизация; runtime ожидания тестов не ослаблены.
+- Финальный `cd vpn-tunnel-enforcer; npx.cmd vitest run src/main/tunRestartReadiness.test.ts src/main/tunControllerStartup.test.ts src/main/lifecycleCleanup.test.ts src/main/tunControllerRecoverySource.test.ts src/main/serverPickerGeoLifecycle.test.ts src/main/serverPickerGeoTransport.test.ts src/main/serverPickerSwitch.test.ts src/main/protectedIpTransition.test.ts src/main/mainIpcRegression.test.ts src/main/profileTransitionWiring.test.ts --maxWorkers=4` — exit 0, 10 files / 193 passed, 7.82 s.
+- `npm.cmd run typecheck` — exit 0 на final runtime/test source.
+- `npm.cmd test -- --maxWorkers=4` — exit 0, 191 files passed / 2 skipped; 2212 tests passed / 10 skipped / 0 failed, 103.92 s. RootErrorBoundary пишет ожидаемый crash stderr в своём тесте.
+- `python -X utf8 ../docs/04-приёмочные-тесты/traceability/check-coverage.py` — exit 0, AC 927/927, F 210/210. Это сверка трассировки, а не исполнение всей acceptance matrix.
+- Fake clock проверяет release без начальной задержки, release через 75 ms, retained address/timeout, read failure, cancel ≤25 ms, IPv4/IPv6/legacy aliases. Production callback тестирует immediate dispatch, отсутствие overlap и прежние failure cleanup gates. Production restart body запрещает start до release и после отказа/отмены.
+- 50 одинаковых геозапросов дают один набор из 5 provider requests; cache повтор не отправляет запросы, TTL expiry отправляет новый набор. Проверены out-of-order IP, profile A→B→A, смена startedAt, disconnect, privacy, background owner, invalid IP, null retry и 429 seconds/date/invalid Retry-After с exponential backoff.
+- Read-only Windows/Node benchmark настоящего production isSingboxRunning по уже работающему процессу, три чередующихся пары: old 250 ms tick + query 413/407/401 ms; immediate query 154/175/143 ms. Все 6 running=true. VPN/OS state не менялся. Это компонентное измерение при работающем ядре, не новое installed switch время.
+
+**Ограничение:** обновлённый installed switch/start/stop/cancel и L3 packets/boot после установки пока не измерены. Агент действующий VPN не переключал. Следующие замеры доступны в логе `protected restart interface release` (outcome/durationMs), существующих startup phases и servers:select IPC.
+
+**Откат:** revert scoped readiness/geo change; settings/profile/manifest форматы совместимы. Вернёт fixed pause, initial polling delay, duplicate geo reads и возможность поздней геозаписи.
+
+- `npm.cmd run dist:win` — exit 0; Electron 44.4.3 / NSIS, build включает повторный typecheck. Optional `@electron/mksnapshot` отсутствует, snapshot штатно пропущен.
+- Packaged main/preload побайтово равны compiled outputs, все 8 readiness/geo markers подтверждены внутри ASAR. Main SHA256 `9d439a46a63f2e4d257e1a15ab477a29b841a14ae794a760d772ab39d1242a33`, preload `304534f83a73680dadfdc0c6296a9f356c337b506d4da44e03b36087290e3663`.
+- Установщик `vpn-tunnel-enforcer/dist/VPN-Tunnel-Enforcer-Setup-1.1.22.exe`: 139172014 bytes, 03.10.2026 21:26:20 МСК, SHA256 `1CF12CB5A2C76C061169BB50372E88BA8BAC03F5746112FA6D503DE9F49C790E`, Authenticode `NotSigned`. Заменяет предыдущий artifact с тем же номером. Агентом не установлен.
+- `git diff --check` — exit 0. Временные файлы этапом не создавались; существующие `.tmp` файлы не изменялись.
