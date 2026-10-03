@@ -87,8 +87,12 @@ const CLIENT_DEVICES = ['pc', 'android', 'ios', 'mac'] as const
 
 const COUNTRY_GEO_VERSION = 3
 const GEO_COUNTRY_TTL_MS = 5 * 60_000
+const GEO_LOOKUP_DEADLINE_MS = 6000
+interface GeoLookupContext { signal: AbortSignal; deadlineAt: number }
+interface GeoConsumer { isCurrent: () => boolean; resolve: (country: string | null) => void }
+interface GeoCountryRead { consumers: Set<GeoConsumer>; controller: AbortController }
 const geoCountries = new Map<string, { country: string | null; expiresAt: number }>()
-const geoCountryReads = new Map<string, Promise<string | null>>()
+const geoCountryReads = new Map<string, GeoCountryRead>()
 const geoProviderBackoff = new Map<string, { failures: number; retryAt: number }>()
 let activeCountryGeneration = 0
 
@@ -1102,6 +1106,12 @@ function addGeoVote(votes: GeoVote[], source: string, country: unknown, countryC
 function currentBootstrapRoutes(): BootstrapRouteAttempt[] {
   try {
     const settings = settingsStore.get()
+    // With our TUN running, the system route already reaches proxy-out. Auto
+    // bootstrap must not replay a failed geo request through stale local ports.
+    // Explicit proxy-only policy and offline bootstrap retain their routes.
+    if ((!settings.bootstrapRouteMode || settings.bootstrapRouteMode === 'auto') && tunController.getStatus().running) {
+      return buildBootstrapRouteAttempts({ mode: 'direct' })
+    }
     return buildBootstrapRouteAttempts({
       mode: settings.bootstrapRouteMode,
       proxyAddr: settings.proxyOverride,
@@ -1130,7 +1140,7 @@ export function isHttpsGeoUrl(url: string): boolean {
 
 async function fetchGeoJson<T>(
   url: string,
-  options: { method?: 'GET' | 'POST'; body?: unknown; headers?: string[]; timeoutSeconds?: number } = {}
+  options: { method?: 'GET' | 'POST'; body?: unknown; headers?: string[]; timeoutSeconds?: number } & Partial<GeoLookupContext> = {}
 ): Promise<{ data: T; route: string } | null> {
   if (!isHttpsGeoUrl(url)) {
     logEvent('warn', 'server-picker', 'refused non-HTTPS geo lookup', {
@@ -1143,6 +1153,9 @@ async function fetchGeoJson<T>(
   const errors: string[] = []
   const method = options.method ?? 'GET'
   for (const route of currentBootstrapRoutes()) {
+    if (options.signal?.aborted || geoLookupDisabled()) return null
+    const remainingMs = Math.min((options.timeoutSeconds ?? 8) * 1000, (options.deadlineAt ?? Infinity) - Date.now())
+    if (remainingMs <= 0) return null
     const args = [
       '-sS',
       '--fail',
@@ -1155,7 +1168,7 @@ async function fetchGeoJson<T>(
       '--proto-redir',
       '=https',
       '--max-time',
-      String(options.timeoutSeconds ?? 8),
+      String(remainingMs / 1000),
       ...route.curlArgs,
       ...(options.headers ?? []).flatMap(header => ['-H', header]),
       ...(method === 'POST' ? ['-X', 'POST'] : []),
@@ -1165,15 +1178,18 @@ async function fetchGeoJson<T>(
     try {
       const { stdout } = await execFile(CURL_BIN, args, {
         windowsHide: true,
-        timeout: (options.timeoutSeconds ?? 8) * 1000 + 2000,
+        timeout: Math.max(1, Math.ceil(remainingMs)),
+        signal: options.signal,
         encoding: 'utf8',
         maxBuffer: 1024 * 1024 * 4
       })
+      if (options.signal?.aborted || geoLookupDisabled()) return null
       const response = parseGeoResponse(stdout)
       const data = JSON.parse(response.body) as T
       geoProviderBackoff.delete(provider)
       return { data, route: route.label }
     } catch (err: any) {
+      if (options.signal?.aborted || geoLookupDisabled() || Date.now() >= (options.deadlineAt ?? Infinity)) return null
       const stderr = typeof err?.stderr === 'string' ? err.stderr.trim() : ''
       errors.push(`${route.label}: ${stderr || err?.message || String(err)}`)
       const response = parseGeoResponse(typeof err?.stdout === 'string' ? err.stdout : '')
@@ -1235,18 +1251,18 @@ function chooseGeoCountry(ip: string, votes: GeoVote[]): string | null {
   return winner.country
 }
 
-async function fetchSecondaryGeoVote(ip: string, source: 'ipwho.is' | 'ipinfo.is' | 'ipinfo.io' | 'iplocation.net'): Promise<GeoVote | null> {
+async function fetchSecondaryGeoVote(ip: string, source: 'ipwho.is' | 'ipinfo.is' | 'ipinfo.io' | 'iplocation.net', context: GeoLookupContext): Promise<GeoVote | null> {
   if (geoLookupDisabled()) return null
   try {
     if (source === 'ipwho.is') {
-      const resp = await fetchGeoJson<any>(`https://ipwho.is/${encodeURIComponent(ip)}`, { timeoutSeconds: 5 })
+      const resp = await fetchGeoJson<any>(`https://ipwho.is/${encodeURIComponent(ip)}`, { timeoutSeconds: 5, ...context })
       if (!resp || resp.data?.success === false) return null
       const votes: GeoVote[] = []
       addGeoVote(votes, source, resp.data?.country, resp.data?.country_code)
       return votes[0] ?? null
     }
     if (source === 'ipinfo.is') {
-      const resp = await fetchGeoJson<any>(`https://ipinfo.is/${encodeURIComponent(ip)}`, { timeoutSeconds: 5 })
+      const resp = await fetchGeoJson<any>(`https://ipinfo.is/${encodeURIComponent(ip)}`, { timeoutSeconds: 5, ...context })
       if (!resp) return null
       const votes: GeoVote[] = []
       addGeoVote(
@@ -1258,7 +1274,7 @@ async function fetchSecondaryGeoVote(ip: string, source: 'ipwho.is' | 'ipinfo.is
       return votes[0] ?? null
     }
     if (source === 'ipinfo.io') {
-      const resp = await fetchGeoJson<any>(`https://ipinfo.io/${encodeURIComponent(ip)}/json`, { timeoutSeconds: 5 })
+      const resp = await fetchGeoJson<any>(`https://ipinfo.io/${encodeURIComponent(ip)}/json`, { timeoutSeconds: 5, ...context })
       if (!resp) return null
       const votes: GeoVote[] = []
       addGeoVote(votes, source, undefined, resp.data?.country)
@@ -1266,7 +1282,7 @@ async function fetchSecondaryGeoVote(ip: string, source: 'ipwho.is' | 'ipinfo.is
     }
     const url = new URL('https://api.iplocation.net/')
     url.searchParams.set('ip', ip)
-    const resp = await fetchGeoJson<any>(url.toString(), { timeoutSeconds: 5 })
+    const resp = await fetchGeoJson<any>(url.toString(), { timeoutSeconds: 5, ...context })
     if (!resp) return null
     if (String(resp.data?.response_code ?? '') !== '200') return null
     const votes: GeoVote[] = []
@@ -1300,7 +1316,7 @@ async function fetchSecondaryGeoVote(ip: string, source: 'ipwho.is' | 'ipinfo.is
  *
  * Returns a Map ip→country (missing = lookup failed / private IP).
  */
-async function batchGeolocateIps(ips: string[]): Promise<Map<string, string>> {
+async function batchGeolocateIps(ips: string[], context: GeoLookupContext): Promise<Map<string, string>> {
   const out = new Map<string, string>()
   const unique = [...new Set(ips.filter(Boolean))]
   if (geoLookupDisabled() || unique.length === 0) return out
@@ -1308,48 +1324,57 @@ async function batchGeolocateIps(ips: string[]): Promise<Map<string, string>> {
   for (const ip of unique) votesByIp.set(ip, [])
 
   const CHUNK = 100
-  for (let i = 0; i < unique.length; i += CHUNK) {
-    const chunk = unique.slice(i, i + CHUNK)
-    try {
-      // `ip=a,b,c` returns an array of {ip, country, country_3, name}. The
-      // echoed `ip` maps results back to inputs regardless of order; an
-      // unknown address comes back with empty strings, which addGeoVote drops.
-      const url = new URL('https://get.geojs.io/v1/ip/country.json')
-      url.searchParams.set('ip', chunk.join(','))
-      const resp = await fetchGeoJson<any[]>(url.toString(), { timeoutSeconds: 10 })
-      const rows = Array.isArray(resp?.data) ? resp.data : []
-      for (const row of rows) {
-        if (row && row.ip) {
-          const votes = votesByIp.get(String(row.ip))
-          if (votes) addGeoVote(votes, 'geojs.io', row.name, row.country)
+  // Primary and secondary providers share one deadline and run concurrently.
+  // A slow primary must not postpone the secondary wave by ten seconds.
+  const primary = async () => {
+    for (let i = 0; i < unique.length; i += CHUNK) {
+      if (context.signal.aborted) return
+      const chunk = unique.slice(i, i + CHUNK)
+      try {
+        // `ip=a,b,c` returns an array of {ip, country, country_3, name}. The
+        // echoed `ip` maps results back to inputs regardless of order; an
+        // unknown address comes back with empty strings, which addGeoVote drops.
+        const url = new URL('https://get.geojs.io/v1/ip/country.json')
+        url.searchParams.set('ip', chunk.join(','))
+        const resp = await fetchGeoJson<any[]>(url.toString(), { timeoutSeconds: 10, ...context })
+        const rows = Array.isArray(resp?.data) ? resp.data : []
+        for (const row of rows) {
+          if (row && row.ip) {
+            const votes = votesByIp.get(String(row.ip))
+            if (votes) addGeoVote(votes, 'geojs.io', row.name, row.country)
+          }
         }
+      } catch (err) {
+        logEvent('debug', 'server-picker', 'batch geolocate chunk failed', { size: chunk.length, err: (err as Error)?.message })
+        // Leave this chunk's countries empty — the next pass retries.
       }
-    } catch (err) {
-      logEvent('debug', 'server-picker', 'batch geolocate chunk failed', { size: chunk.length, err: (err as Error)?.message })
-      // Leave this chunk's countries empty — the next pass retries.
-    }
-    // Be a polite client of a free service even with many chunks.
-    if (i + CHUNK < unique.length) await new Promise(r => setTimeout(r, 1500))
-  }
-
-  const CONCURRENCY = 8
-  for (let i = 0; i < unique.length; i += CONCURRENCY) {
-    const batch = unique.slice(i, i + CONCURRENCY)
-    const rows = await Promise.all(batch.map(async (ip) => {
-      const [ipwho, ipinfoIs, ipinfoIo, iplocation] = await Promise.all([
-        fetchSecondaryGeoVote(ip, 'ipwho.is'),
-        fetchSecondaryGeoVote(ip, 'ipinfo.is'),
-        fetchSecondaryGeoVote(ip, 'ipinfo.io'),
-        fetchSecondaryGeoVote(ip, 'iplocation.net')
-      ])
-      return { ip, votes: [ipwho, ipinfoIs, ipinfoIo, iplocation].filter((v): v is GeoVote => !!v) }
-    }))
-    for (const row of rows) {
-      const votes = votesByIp.get(row.ip) ?? []
-      votes.push(...row.votes)
-      votesByIp.set(row.ip, votes)
+      // Be a polite client of a free service even with many chunks.
+      if (i + CHUNK < unique.length) await new Promise(r => setTimeout(r, 1500))
     }
   }
+  const secondary = async () => {
+    const CONCURRENCY = 8
+    for (let i = 0; i < unique.length; i += CONCURRENCY) {
+      if (context.signal.aborted) return
+      const batch = unique.slice(i, i + CONCURRENCY)
+      const rows = await Promise.all(batch.map(async (ip) => {
+        const [ipwho, ipinfoIs, ipinfoIo, iplocation] = await Promise.all([
+          fetchSecondaryGeoVote(ip, 'ipwho.is', context),
+          fetchSecondaryGeoVote(ip, 'ipinfo.is', context),
+          fetchSecondaryGeoVote(ip, 'ipinfo.io', context),
+          fetchSecondaryGeoVote(ip, 'iplocation.net', context)
+        ])
+        return { ip, votes: [ipwho, ipinfoIs, ipinfoIo, iplocation].filter((v): v is GeoVote => !!v) }
+      }))
+      for (const row of rows) {
+        const votes = votesByIp.get(row.ip) ?? []
+        votes.push(...row.votes)
+        votesByIp.set(row.ip, votes)
+      }
+    }
+  }
+  await Promise.all([primary(), secondary()])
+  if (context.signal.aborted) return out
 
   for (const [ip, votes] of votesByIp) {
     const country = chooseGeoCountry(ip, votes)
@@ -1358,21 +1383,50 @@ async function batchGeolocateIps(ips: string[]): Promise<Map<string, string>> {
   return out
 }
 
-export async function geolocateIp(ip: string): Promise<string | null> {
-  if (geoLookupDisabled() || !isIP(ip)) return null
+export async function geolocateIp(ip: string, isCurrent: () => boolean = () => true): Promise<string | null> {
+  if (geoLookupDisabled() || !isIP(ip) || !isCurrent()) return null
   const cached = geoCountries.get(ip)
   if (cached && cached.expiresAt > Date.now()) return cached.country
-  const pending = geoCountryReads.get(ip)
-  if (pending) return pending
-  const read = batchGeolocateIps([ip]).then(map => {
-    if (geoLookupDisabled()) return null
-    const country = map.get(ip) ?? null
-    if (geoCountries.size >= 256) geoCountries.delete(geoCountries.keys().next().value!)
-    geoCountries.set(ip, { country, expiresAt: Date.now() + (country ? GEO_COUNTRY_TTL_MS : 5000) })
-    return country
-  }).finally(() => { geoCountryReads.delete(ip) })
-  geoCountryReads.set(ip, read)
-  return read
+  return new Promise(resolve => {
+    const consumer = { isCurrent, resolve }
+    const pending = geoCountryReads.get(ip)
+    if (pending) { pending.consumers.add(consumer); return }
+
+    const read: GeoCountryRead = { consumers: new Set([consumer]), controller: new AbortController() }
+    geoCountryReads.set(ip, read)
+    const startedAt = Date.now()
+    let settled = false
+    const finish = (country: string | null, outcome: 'completed' | 'cancelled' | 'deadline' | 'failed') => {
+      if (settled) return
+      settled = true
+      clearTimeout(deadline)
+      clearInterval(ownerWatch)
+      if (geoCountryReads.get(ip) === read) geoCountryReads.delete(ip)
+      // Aborting execFile terminates each owned curl process. A late callback
+      // cannot populate the cache or remove a newer read of the same IP.
+      read.controller.abort()
+      const currentConsumers = [...read.consumers].filter(c => !geoLookupDisabled() && c.isCurrent())
+      if (outcome === 'completed' && currentConsumers.length) {
+        if (geoCountries.size >= 256) geoCountries.delete(geoCountries.keys().next().value!)
+        geoCountries.set(ip, { country, expiresAt: Date.now() + (country ? GEO_COUNTRY_TTL_MS : 5000) })
+      }
+      for (const c of read.consumers) c.resolve(currentConsumers.includes(c) ? country : null)
+      read.consumers.clear()
+      logEvent('debug', 'server-picker', 'geo lookup finished', { outcome, durationMs: Date.now() - startedAt })
+    }
+    const deadline = setTimeout(() => finish(null, 'deadline'), GEO_LOOKUP_DEADLINE_MS)
+    const ownerWatch = setInterval(() => {
+      if (geoLookupDisabled()) { finish(null, 'cancelled'); return }
+      for (const c of read.consumers) {
+        if (!c.isCurrent()) { read.consumers.delete(c); c.resolve(null) }
+      }
+      // A cancelled subscriber must not abort work still owned by another
+      // current subscriber (including a manual lookup of the same IP).
+      if (!read.consumers.size) finish(null, 'cancelled')
+    }, 25)
+    void batchGeolocateIps([ip], { signal: read.controller.signal, deadlineAt: startedAt + GEO_LOOKUP_DEADLINE_MS })
+      .then(map => finish(map.get(ip) ?? null, 'completed'), () => finish(null, 'failed'))
+  })
 }
 
 export function updateActiveProfileCountry(country: string, ip?: string | null): ServerProfile | null {
@@ -1421,7 +1475,12 @@ export async function verifyActiveCountryForIp(cleanIp: string, isCurrent: () =>
   if (!activeId) return { ok: false as const, reason: 'active-profile-not-found' }
   const generation = ++activeCountryGeneration
   const session = { ...tunController.getStatus() }
-  const country = await geolocateIp(cleanIp)
+  const ownsLookup = () => {
+    const current = tunController.getStatus()
+    return isCurrent() && generation === activeCountryGeneration && activeId === getActiveProfileId() &&
+      !profileSwitchInProgress && session.startedAt === current.startedAt && session.running === current.running
+  }
+  const country = await geolocateIp(cleanIp, ownsLookup)
   if (geoLookupDisabled()) return { ok: false as const, reason: 'geo-lookup-disabled' }
   const currentSession = tunController.getStatus()
   if (!isCurrent() || generation !== activeCountryGeneration || activeId !== getActiveProfileId() || profileSwitchInProgress ||
