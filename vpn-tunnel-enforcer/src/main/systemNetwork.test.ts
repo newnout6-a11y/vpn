@@ -4,7 +4,7 @@ import { execFileSync } from 'child_process'
 const state = vi.hoisted(() => ({
   manifest: null as any, failRead: false, failWrite: false, failApply: false,
   failNetsh: false, failNotify: false, failedSteps: [] as number[], scripts: [] as string[],
-  writes: [] as any[], operations: [] as string[], nativeFailure: false
+  writes: [] as any[], operations: [] as string[], nativeFailure: false, reportPatch: null as any
 }))
 const fixture = () => ({
   schemaVersion: 1, owner: 'VPNTE', createdAt: 1780000000000, userSid: 'S-1-5-21-1-2-3-1001',
@@ -31,8 +31,9 @@ function response(command: string) {
     if (state.failApply) throw new Error('apply failed')
     return { stdout: 'BASELINE_APPLIED', stderr: '' }
   }
-  if (script.includes('ConvertTo-Json -InputObject @($results)')) return {
-    stdout: JSON.stringify(state.manifest.values.map((s: any, i: number) => ({ name: `${s.target}/${s.name}`, success: !state.failedSteps.includes(i), error: state.failedSteps.includes(i) ? 'injected failure' : null }))), stderr: ''
+  if (script.includes('steps=@($results)')) return {
+    stdout: JSON.stringify({ steps: state.manifest.values.map((s: any, i: number) => ({ name: `${s.target}/${s.name}`, success: !state.failedSteps.includes(i), error: state.failedSteps.includes(i) ? 'injected failure' : null })),
+      notification: { success: !state.failNotify, error: state.failNotify ? 'notification failed' : null }, timings: { registryMs: 1, notifyMs: 2 }, ...state.reportPatch }), stderr: ''
   }
   if (script.includes('InternetSetOption') && state.failNotify) throw new Error('notification failed')
   return { stdout: '', stderr: '' }
@@ -65,11 +66,30 @@ const platform = Object.getOwnPropertyDescriptor(process, 'platform')!
 beforeEach(() => {
   state.manifest = null; state.failRead = false; state.failWrite = false; state.failApply = false
   state.failNetsh = false; state.failNotify = false; state.failedSteps = []; state.scripts = []; state.writes = []; state.operations = []
-  state.nativeFailure = false
+  state.nativeFailure = false; state.reportPatch = null
   Object.defineProperty(process, 'platform', { configurable: true, value: 'win32' })
 })
 afterEach(() => Object.defineProperty(process, 'platform', platform))
 describe('trusted typed network baseline', () => {
+  it('restores all values and notifies WinINet in one native process', async () => {
+    state.manifest = fixture()
+    expect((await rollbackTunNetworkBaseline()).success).toBe(true)
+    expect(state.scripts).toHaveLength(1)
+    expect(state.scripts[0]).toContain('try { Send-WinInetSettingsChanged }')
+    expect(state.operations).toEqual(['ps', 'clear'])
+  })
+  it.each([
+    { notification: undefined }, { notification: { success: true, error: 'unverified' } },
+    { notification: { success: false, error: null } }, { timings: undefined },
+    { timings: { registryMs: -1, notifyMs: 0 } }, { timings: { registryMs: 1, notifyMs: '0' } },
+    { steps: [] }, { steps: fixture().values.map(s => ({ name: `${s.target}/${s.name}`, success: 'true', error: null })) }
+  ])('retains journal on malformed combined recovery report: %j', patch => {
+    state.manifest = fixture(); state.reportPatch = patch
+    return rollbackTunNetworkBaseline().then(result => {
+      expect(result.success).toBe(false)
+      expect(state.manifest).not.toBeNull()
+    })
+  })
   it.skipIf(process.platform !== 'win32')('native restore/read-back handles all registry types in an isolated test subtree', async () => {
     const manifest = fixture()
     manifest.values = [
@@ -93,11 +113,12 @@ describe('trusted typed network baseline', () => {
     const script = `$ProgressPreference='SilentlyContinue';${helpers}
 $testRoot='Software\\VPNTE-Recovery-Test-'+[Guid]::NewGuid().ToString('N')
 function Get-BaseKey($target) { return [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($testRoot) }
+function Send-WinInetSettingsChanged {}
 try { ${report} }
 finally { [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree($testRoot,$false) }`
     const stdout = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand',
       Buffer.from(script, 'utf16le').toString('base64')], { encoding: 'utf8', windowsHide: true, timeout: 10000 })
-    const steps = JSON.parse(stdout.trim())
+    const steps = JSON.parse(stdout.trim()).steps
     expect(steps).toHaveLength(9)
     expect(steps.every((step: any) => step.success && step.error === null)).toBe(true)
   })
@@ -109,10 +130,10 @@ finally { [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree($testRoot,$fa
       await rollbackTunNetworkBaseline()
       const productionReport = state.scripts[0].slice(state.scripts[0].indexOf('$values ='))
       const failedName = failedStep === null ? '' : fixture().values[failedStep].name
-      const script = `$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';function Restore-Snapshot($s) { if ($s.name -eq '${failedName}') { throw 'injected native failure' } }\n${productionReport}`
+      const script = `$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';function Send-WinInetSettingsChanged {};function Restore-Snapshot($s) { if ($s.name -eq '${failedName}') { throw 'injected native failure' } }\n${productionReport}`
       const stdout = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand',
         Buffer.from(script, 'utf16le').toString('base64')], { encoding: 'utf8', windowsHide: true, timeout: 10000 })
-      const steps = JSON.parse(stdout.trim())
+      const steps = JSON.parse(stdout.trim()).steps
       expect(steps).toHaveLength(9)
       expect(steps.map((step: any) => step.name)).toEqual(fixture().values.map(s => `${s.target}/${s.name}`))
       expect(steps.map((step: any) => step.success)).toEqual(fixture().values.map((_s, i) => i !== failedStep))
@@ -126,6 +147,18 @@ finally { [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree($testRoot,$fa
     expect(result.warnings?.[0]).not.toContain('-EncodedCommand')
     expect(result.warnings?.[0].length).toBeLessThan(200)
     expect(state.manifest).not.toBeNull()
+  })
+  it.skipIf(process.platform !== 'win32')('native notification failure preserves the nine independent step results', async () => {
+    state.manifest = fixture(); await rollbackTunNetworkBaseline()
+    const report = state.scripts[0].slice(state.scripts[0].indexOf('$values ='))
+    const script = `$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';function Restore-Snapshot($s) {};function Send-WinInetSettingsChanged {throw 'injected notification failure'};${report}`
+    const stdout = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], { encoding: 'utf8', windowsHide: true, timeout: 10000 })
+    const result = JSON.parse(stdout.trim())
+    expect(result.steps).toHaveLength(9)
+    expect(result.steps.every((s: any) => s.success)).toBe(true)
+    expect(result.notification).toEqual({ success: false, error: 'injected notification failure' })
+    expect(result.timings.registryMs).toBeGreaterThanOrEqual(0)
+    expect(result.timings.notifyMs).toBeGreaterThanOrEqual(0)
   })
   it('uses canonical trusted storage rather than AppData or arbitrary reg files', () => {
     expect(getTunNetworkBaselineManifestPath()).toBe('C:\\ProgramData\\VPNTE\\manifests\\latest-tun-network-baseline.json')

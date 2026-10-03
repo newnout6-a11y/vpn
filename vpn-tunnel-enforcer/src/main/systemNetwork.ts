@@ -144,13 +144,16 @@ foreach ($target in @('internet','environment','winhttp')) {
   await writeRecoveryManifest(BASELINE_NAME, manifest, validateNetworkBackupManifest)
   return manifest
 }
-async function notifyWinInetSettingsChanged() {
-  await ps(`
+const WININET_NOTIFY_FUNCTION = `
+function Send-WinInetSettingsChanged {
 $sig='[DllImport("wininet.dll", SetLastError=true)] public static extern bool InternetSetOption(IntPtr hInternet, int dwOption, IntPtr lpBuffer, int dwBufferLength);'
 $type=Add-Type -MemberDefinition $sig -Name WinInet -Namespace Native -PassThru
 if (-not $type::InternetSetOption([IntPtr]::Zero,39,[IntPtr]::Zero,0)) { throw 'WinINet settings notification failed' }
 if (-not $type::InternetSetOption([IntPtr]::Zero,37,[IntPtr]::Zero,0)) { throw 'WinINet refresh failed' }
-`, false, 10000)
+}
+`
+async function notifyWinInetSettingsChanged() {
+  await ps(`${WININET_NOTIFY_FUNCTION}\nSend-WinInetSettingsChanged`, false, 10000)
 }
 
 export function applyTunNetworkBaseline(): Promise<SystemNetworkResult> { return withBaselineOpLock(applyUnlocked) }
@@ -191,24 +194,40 @@ async function rollbackUnlocked(): Promise<SystemNetworkResult> {
     const manifest = await readManifest()
     if (!manifest) return { success: true, skipped: true, message: 'Активный VPNTE network baseline не найден' }
     const { stdout } = await ps(`${REGISTRY_HELPERS}
+${WININET_NOTIFY_FUNCTION}
 if ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne '${manifest.userSid}') { throw 'Baseline user identity mismatch' }
 # ConvertFrom-Json emits the decoded array as one pipeline object in Windows
 # PowerShell 5.1. An extra @() would nest it and collapse nine steps into one.
 $values = ${psJson(manifest.values)}
 $results = @()
+$watch = [Diagnostics.Stopwatch]::StartNew()
 foreach ($s in $values) {
   try { Restore-Snapshot $s; $results += [pscustomobject]@{name=($s.target+'/'+$s.name);success=$true;error=$null} }
   catch { $results += [pscustomobject]@{name=($s.target+'/'+$s.name);success=$false;error=[string]$_} }
 }
-ConvertTo-Json -InputObject @($results) -Depth 5 -Compress`, true)
-    const steps = JSON.parse(String(stdout).trim()) as Array<{ name: string; success: boolean; error: string | null }>
-    if (!Array.isArray(steps) || steps.length !== 9 || steps.some((s, i) => s.name !== `${manifest.values[i].target}/${manifest.values[i].name}` || typeof s.success !== 'boolean')) throw new Error('Invalid baseline recovery report')
+$registryMs = $watch.ElapsedMilliseconds
+$watch.Restart()
+$notification = [pscustomobject]@{success=$true;error=$null}
+try { Send-WinInetSettingsChanged }
+catch { $notification = [pscustomobject]@{success=$false;error=[string]$_} }
+$watch.Stop()
+[pscustomobject]@{steps=@($results);notification=$notification;timings=@{registryMs=$registryMs;notifyMs=$watch.ElapsedMilliseconds}} | ConvertTo-Json -Depth 6 -Compress`, true)
+    const report = JSON.parse(String(stdout).trim()) as {
+      steps: Array<{ name: string; success: boolean; error: string | null }>
+      notification: { success: boolean; error: string | null }
+      timings: { registryMs: number; notifyMs: number }
+    }
+    const validOutcome = (s: { success: boolean; error: string | null }) => s && typeof s.success === 'boolean' && (s.success ? s.error === null : typeof s.error === 'string')
+    const steps = report?.steps
+    if (!Array.isArray(steps) || steps.length !== 9 || steps.some((s, i) => !validOutcome(s) || s.name !== `${manifest.values[i].target}/${manifest.values[i].name}`) ||
+        !validOutcome(report.notification) || !report.timings || [report.timings.registryMs, report.timings.notifyMs].some(ms => !Number.isSafeInteger(ms) || ms < 0)) throw new Error('Invalid baseline recovery report')
+    for (const [phase, durationMs] of Object.entries(report.timings)) logEvent('debug', 'system-network', 'baseline native phase timing', { phase, durationMs })
     const warnings: string[] = []
     for (const step of steps) {
       logEvent(step.success ? 'info' : 'error', 'system-network', 'baseline rollback step', step)
       if (!step.success) warnings.push(`${step.name}: ${step.error}`)
     }
-    try { await notifyWinInetSettingsChanged() } catch (error) { warnings.push(`WinINet notification: ${String(error)}`) }
+    if (!report.notification.success) warnings.push(`WinINet notification: ${report.notification.error}`)
     if (warnings.length) return { success: false, message: 'Baseline восстановлен частично; снимок сохранён', warnings, details: warnings.join(' | ') }
     await removeRecoveryManifest(BASELINE_NAME)
     return { success: true, message: 'Сетевые настройки восстановлены и проверены', details: `Backup created at: ${new Date(manifest.createdAt).toISOString()}` }

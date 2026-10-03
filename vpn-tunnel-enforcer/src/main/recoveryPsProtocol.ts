@@ -5,7 +5,7 @@ export type RecoveryRequest =
   | { op: 'read' | 'binary' | 'remove'; name: string }
   | { op: 'protect'; name: string }
   | { op: 'inspect-tun'; alias: string }
-  | { op: 'inspect-runtime'; runtimeDir: string }
+  | { op: 'inspect-runtime' | 'stop-runtime'; runtimeDir: string }
 
 export function validateRecoveryRequest(value: RecoveryRequest): void {
   const fields = Object.keys(value).sort().join(',')
@@ -13,7 +13,7 @@ export function validateRecoveryRequest(value: RecoveryRequest): void {
     if (fields === 'op') return
   } else if (value.op === 'inspect-tun') {
     if (fields === 'alias,op' && typeof value.alias === 'string' && /^(Ethernet (?:[5-9]|1[0-2])|VPNTE-TUN|awg-tun)$/.test(value.alias)) return
-  } else if (value.op === 'inspect-runtime') {
+  } else if (value.op === 'inspect-runtime' || value.op === 'stop-runtime') {
     if (fields === 'op,runtimeDir' && typeof value.runtimeDir === 'string' && value.runtimeDir.length <= 2048 &&
         /^[a-z]:\\/i.test(value.runtimeDir) && !/[\x00-\x1f"/]/.test(value.runtimeDir) &&
         !value.runtimeDir.slice(2).includes(':') && !value.runtimeDir.split('\\').some(part => part === '..' || part === '.')) return
@@ -34,6 +34,25 @@ $found = @(Get-CimInstance Win32_Process -ErrorAction Stop |
     $_.ExecutablePath.StartsWith($runtimeDir, [System.StringComparison]::OrdinalIgnoreCase)
   } | Select-Object -First 1)
 if ($found.Count -gt 0) { 'true' } else { 'false' }
+`
+
+/** Fixed stop command; its result is never used as proof that runtime exited. */
+export const OWNED_RUNTIME_STOP_SCRIPT = String.raw`
+$names = @('vpnte-sing-box.exe', 'vpnte-etw-sidecar.exe', 'vpnte-xray.exe')
+$rows = @(Get-CimInstance Win32_Process -ErrorAction Stop |
+  Where-Object {
+    ($names -contains $_.Name) -and
+    $_.ExecutablePath -and
+    $_.ExecutablePath.StartsWith($runtimeDir, [System.StringComparison]::OrdinalIgnoreCase)
+  })
+$killed = @()
+foreach ($p in $rows) {
+  try {
+    Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop
+    $killed += [pscustomobject]@{name=[string]$p.Name;pid=[int]$p.ProcessId}
+  } catch {}
+}
+[pscustomobject]@{candidates=[int]$rows.Count;killed=[int]$killed.Count;names=@($killed | ForEach-Object { $_.name })} | ConvertTo-Json -Compress -Depth 3
 `
 
 /** Fixed, read-only baseline reader shared by the typed worker and pre-dispatch fallback. */
@@ -65,6 +84,9 @@ ${DNS_POLICY_SNAPSHOT_SCRIPT}
 }
 function Read-OwnedRuntimeStatus([string]$runtimeDir) {
 ${OWNED_RUNTIME_STATUS_QUERY_SCRIPT}
+}
+function Stop-OwnedRuntime([string]$runtimeDir) {
+${OWNED_RUNTIME_STOP_SCRIPT}
 }
 function Assert-TrustedArtifact($path, $directory) {
   $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
@@ -104,13 +126,14 @@ function Assert-RecoveryDirectories($root, [bool]$create) {
   return $true
 }
 function Invoke-RecoveryOperation($request) {
-  if ($request.op -isnot [string] -or @('warmup','inspect-tun','inspect-runtime','inspect-dns-policy','ensure','read','binary','remove','protect') -cnotcontains $request.op) { throw 'Unknown recovery worker operation' }
+  if ($request.op -isnot [string] -or @('warmup','inspect-tun','inspect-runtime','stop-runtime','inspect-dns-policy','ensure','read','binary','remove','protect') -cnotcontains $request.op) { throw 'Unknown recovery worker operation' }
   $fields = @($request.PSObject.Properties.Name | Sort-Object) -join ','
   switch -Exact ($request.op) {
-    'inspect-runtime' {
+    { $_ -cin @('inspect-runtime','stop-runtime') } {
       if ($fields -cne 'op,runtimeDir' -or $request.runtimeDir -isnot [string] -or $request.runtimeDir.Length -gt 2048 -or
           $request.runtimeDir -notmatch '^[a-z]:\\' -or $request.runtimeDir -match '[\x00-\x1f"/]' -or
           $request.runtimeDir.Substring(2).Contains(':') -or @($request.runtimeDir.Split([char]92) | Where-Object { $_ -ceq '..' -or $_ -ceq '.' }).Count) { throw 'Invalid runtime observation directory' }
+      if ($request.op -ceq 'stop-runtime') { return (Stop-OwnedRuntime $request.runtimeDir) }
       return (Read-OwnedRuntimeStatus $request.runtimeDir)
     }
     'inspect-dns-policy' {

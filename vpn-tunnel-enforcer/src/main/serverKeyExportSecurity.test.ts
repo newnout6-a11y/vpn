@@ -67,6 +67,7 @@ vi.mock('./vpnProfiles', () => ({
   normalizeClientDevice: vi.fn(),
   resolveVpnProfiles: vi.fn(),
   exportOutboundToUri: state.uri,
+  exportOutboundForSharing: (...args: any[]) => { const content = state.uri(...args); return content ? { content, format: content.startsWith('{') ? 'json' : 'uri' } : null },
   exportOutboundToProxyLine: state.proxyLine
 }))
 vi.mock('./tunController', () => ({
@@ -119,6 +120,31 @@ afterEach(async () => {
 })
 
 describe('main-owned export approval (AT-01-008)', () => {
+  it('saves native JSON with a JSON file suggestion and preserves main-owned clipboard handling', async () => {
+    const secretJson = JSON.stringify({ remarks: 'Native', outbounds: [{ protocol: 'vless', settings: { id: 'FAKE-PRIVATE-KEY' } }], routing: { balancers: [{ tag: 'bridge' }] } })
+    state.uri.mockReturnValue(secretJson)
+    state.nativePrompt.mockResolvedValue({ response: 1 })
+    expect((await invoke('servers:export-key-file')).ok).toBe(true)
+    expect(state.saveDialog.mock.calls[0][0].defaultPath).toMatch(/\.json$/)
+    expect(readFileSync(exportPath, 'utf8').trim()).toBe(secretJson)
+    const copied = await invoke('servers:copy-key')
+    expect(state.clipboardWrite).toHaveBeenCalledWith(secretJson)
+    expect(JSON.stringify(copied)).not.toContain('FAKE-PRIVATE-KEY')
+    expect((await invoke('servers:export-key')).format).toBe('json')
+    expect((await invoke('servers:export-all-keys-file')).exported).toBe(1)
+    expect(readFileSync(exportPath, 'utf8')).toContain(secretJson)
+  })
+  it('exports a mixed set as a complete JSON array instead of ambiguous JSON/URI lines', async () => {
+    state.nativePrompt.mockResolvedValue({ response: 1 })
+    const profiles = state.storeData.get('profiles')
+    state.storeData.set('profiles', [...profiles, { ...profiles[0], id: 'native', name: 'Native' }])
+    const native = { remarks: 'Native', outbounds: [{ protocol: 'vless' }], routing: { balancers: [{ tag: 'bridge' }] } }
+    state.uri.mockImplementation(profile => profile.name === 'Native' ? JSON.stringify(native) : secretUri)
+    const result = await invoke('servers:export-all-keys-file')
+    expect(result).toMatchObject({ ok: true, total: 2, exported: 2, skipped: 0 })
+    expect(state.saveDialog.mock.calls[0][0].defaultPath).toMatch(/\.json$/)
+    expect(JSON.parse(readFileSync(exportPath, 'utf8'))).toEqual([secretUri, native])
+  })
   it.each(channels)('a direct IPC call cannot bypass native consent: %s', async channel => {
     const result = await invoke(channel)
     expect(result).toEqual({ ok: false, cancelled: true })

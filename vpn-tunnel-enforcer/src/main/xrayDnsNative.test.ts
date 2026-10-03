@@ -56,6 +56,24 @@ async function answer(host: string) {
 }
 
 describe('native scoped Xray DNS (local fixture, no public requests)', () => {
+  it('bypasses a 3025 ms held DNS reply through real OS localhost resolution (AT-02-002)', async () => {
+    const previousStarted = performance.now()
+    const previous = dns.resolve4('localhost')
+    await received('localhost')
+    await new Promise(done => setTimeout(done, 3025))
+    await answer('localhost')
+    expect(await previous).toEqual(['198.51.100.42'])
+    const previousMs = Math.round(performance.now() - previousStarted)
+    queries.clear()
+
+    const report: Record<string, unknown>[] = [], started = performance.now()
+    expect(await resolveXrayEndpoint('localhost', owner().signal, details => report.push(details))).toBe('127.0.0.1')
+    const hedgedMs = Math.round(performance.now() - started)
+    expect(queries.has('localhost')).toBe(true)
+    expect(report).toEqual([expect.objectContaining({ method: 'system-lookup', ok: true, hedged: true })])
+    expect(hedgedMs).toBeLessThan(1000)
+    console.info(JSON.stringify({ fixture: 'local-held-DNS', previousMs, hedgedMs }))
+  }, 8000)
   it('reacts to a held real DNS query cancellation within one second', async () => {
     const current = owner()
     const pending = resolveXrayEndpoint('held.fixture.invalid', current.signal)

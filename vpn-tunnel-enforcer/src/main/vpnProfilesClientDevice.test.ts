@@ -39,6 +39,12 @@ describe('client device identity', () => {
     expect(applyClientDeviceToOutbound(plain, 'android')).toEqual(plain)
   })
 
+  it('preserves the provider fingerprint and ALPN when applying device defaults (AT-04-006)', () => {
+    const original = { type: 'vless', tls: { enabled: true, utls: { enabled: true, fingerprint: 'firefox' }, alpn: ['http/1.1'] } }
+    expect(applyClientDeviceToOutbound(original, 'pc')).toEqual(original)
+    expect(applyClientDeviceToOutbound(original, 'android')).toEqual(original)
+  })
+
   it('normalizes subscription redirect locations that curl -L cannot follow', () => {
     const base = 'https://sub.example.com/a/b?token=1'
 

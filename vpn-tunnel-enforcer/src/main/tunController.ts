@@ -1,5 +1,6 @@
-import { recordOwnedTunAdapter, strictRecoveryRequired } from './recoveryManifest'
+import { recordOwnedTunAdapter, strictRecoveryRequired, readRecoveryManifest } from './recoveryManifest'
 import { executeRecoveryOperation, RecoveryWorkerError } from './recoveryPsWorker'
+import { OWNED_RUNTIME_STOP_SCRIPT } from './recoveryPsProtocol'
 import { exec as execCb, execFile as execFileCb } from 'child_process'
 import { writeFile, mkdir, copyFile, access, rename, stat, readFile } from 'fs/promises'
 import { join, dirname } from 'path'
@@ -714,23 +715,12 @@ export function sanitizeProxyOutbound(outbound: Record<string, any>): { outbound
   delete result.domain_strategy
   delete result.domain_resolver
 
-  // Multiplexing: under modern DPI, arbitrary multiplexing is generally stripped.
-  // However, for VLESS/Reality, multiplexing with padding is a critical defence
-  // against TSPU Signal 3 (freezing / blocking parallel ClientHello handshakes to same SNI).
-  // Preserve multiplex for VLESS/Reality if present, and normalise legacy mux.
-  const isRealityOutbound = Boolean(
-    result.tls &&
-    typeof result.tls === 'object' &&
-    result.tls.reality &&
-    typeof result.tls.reality === 'object' &&
-    result.tls.reality.enabled !== false
-  )
-  const isVlessRealityOutbound = (String(result.type || '').toLowerCase() === 'vless') && isRealityOutbound
-
-  if (!isVlessRealityOutbound) {
-    if (result.multiplex !== undefined) delete result.multiplex
-    if (result.mux !== undefined) delete result.mux
-  } else {
+  // Preserve explicit provider multiplex settings on supported sing-box protocols.
+  // Unknown combinations must be rejected rather than silently downgraded.
+  if (result.multiplex !== undefined || result.mux !== undefined) {
+    if (!['vless', 'vmess', 'trojan', 'shadowsocks'].includes(String(result.type || '').toLowerCase())) {
+      throw new Error('Multiplex не поддерживается этим протоколом sing-box')
+    }
     if (!result.multiplex && result.mux && typeof result.mux === 'object') {
       result.multiplex = {
         enabled: (result.mux as any).enabled !== false,
@@ -968,12 +958,13 @@ export function generateSingboxConfig(
     const realityEnabled = tls.reality && typeof tls.reality === 'object'
       && tls.reality.enabled !== false
 
+    const sourceFingerprint = tls.utls?.enabled !== false && tls.utls?.fingerprint
     if (!tls.utls || typeof tls.utls !== 'object' || tls.utls.enabled === false) {
       tls.utls = { enabled: true, fingerprint: 'chrome' }
     } else if (!tls.utls.fingerprint) {
       tls.utls.fingerprint = 'chrome'
     }
-    if (explicitClientDevice) {
+    if (explicitClientDevice && !sourceFingerprint) {
       tls.utls.fingerprint = clientFingerprintForDevice(explicitClientDevice)
     }
     if (!Array.isArray(tls.alpn) || tls.alpn.length === 0) {
@@ -987,7 +978,7 @@ export function generateSingboxConfig(
     // server-side allowlists/sticky sessions) but different outbounds
     // within the same subscription look like different browsers, which
     // makes a big subscription harder to bulk-block by a single fp pattern.
-    if (tlsCompatibility && !realityEnabled && !explicitClientDevice && tls.utls && typeof tls.utls === 'object') {
+    if (tlsCompatibility && !realityEnabled && !explicitClientDevice && !sourceFingerprint && tls.utls && typeof tls.utls === 'object') {
       // Windows-plausible fingerprints only. Safari does not exist on Windows,
       // so a "safari" uTLS fp on a Windows client is itself an anomaly DPI can
       // flag — drop it. chrome/firefox/edge are all native to Windows. Keep
@@ -1318,35 +1309,22 @@ export async function killOwnedTunRuntimeProcesses(): Promise<{ success: boolean
   if (process.platform !== 'win32') return { success: true, candidates: 0, killed: 0, names: [] }
   try {
     const runtimeDir = getTunRuntimeDir()
-    const stdout = await runPowerShell(`
-$runtimeDir = ${psSingleQuote(runtimeDir)}
-$names = @(${psSingleQuote(RUNTIME_EXE_NAME)}, 'vpnte-etw-sidecar.exe', 'vpnte-xray.exe')
-$rows = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-  Where-Object {
-    ($names -contains $_.Name) -and
-    $_.ExecutablePath -and
-    $_.ExecutablePath.StartsWith($runtimeDir, [System.StringComparison]::OrdinalIgnoreCase)
-  })
-$killed = @()
-foreach ($p in $rows) {
-  try {
-    Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop
-    $killed += [pscustomobject]@{ name = [string]$p.Name; pid = [int]$p.ProcessId }
-  } catch {}
-}
-[pscustomobject]@{
-  candidates = [int]$rows.Count
-  killed = [int]$killed.Count
-  names = @($killed | ForEach-Object { $_.name })
-} | ConvertTo-Json -Compress -Depth 3
-`, 8000)
-    const parsed = JSON.parse(String(stdout || '{}').trim() || '{}')
-    const names = Array.isArray(parsed.names) ? parsed.names.map((name: any) => String(name)) : []
+    let stdout: string
+    try { stdout = await executeRecoveryOperation({ op: 'stop-runtime', runtimeDir }, 8000) }
+    catch (error) {
+      // A lost reply may follow termination. Never replay a dispatched stop.
+      if (!(error instanceof RecoveryWorkerError) || error.code !== 'unavailable') throw error
+      stdout = await runPowerShell(`$runtimeDir = ${psSingleQuote(runtimeDir)}\n${OWNED_RUNTIME_STOP_SCRIPT}`, 8000)
+    }
+    const parsed = JSON.parse(String(stdout).trim())
+    if (!parsed || Object.keys(parsed).sort().join(',') !== 'candidates,killed,names' ||
+        !Number.isSafeInteger(parsed.candidates) || parsed.candidates < 0 || !Number.isSafeInteger(parsed.killed) || parsed.killed < 0 || parsed.killed > parsed.candidates ||
+        !Array.isArray(parsed.names) || parsed.names.length !== parsed.killed || parsed.names.some((name: unknown) => typeof name !== 'string' || !['vpnte-sing-box.exe', 'vpnte-etw-sidecar.exe', 'vpnte-xray.exe'].includes(name.toLowerCase()))) throw new Error('Owned runtime stop response is invalid')
     return {
       success: true,
-      candidates: Number(parsed.candidates) || 0,
-      killed: Number(parsed.killed) || 0,
-      names
+      candidates: parsed.candidates,
+      killed: parsed.killed,
+      names: parsed.names
     }
   } catch (err: any) {
     logEvent('debug', 'tun', 'killOwnedRuntimeProcesses failed', err)
@@ -1373,13 +1351,39 @@ async function waitForOwnedRuntimeToExit(timeoutMs = 3000): Promise<boolean> {
 export async function areTunRoutesActive(): Promise<boolean> {
   if (process.platform !== 'win32') return true
   try {
+    if (!currentStatus.running) return false
+    const runtimePid = currentStatus.pid, runtimeStartedAt = currentStatus.startedAt
+    const alias = getTunAdapterAlias()
+    const owner = await readRecoveryManifest<{ interfaceGuid: string }>('tun-owner.json', (value: any) => {
+      if (!value || value.schemaVersion !== 1 || value.owner !== 'VPNTE' || value.alias !== alias
+        || !/^\{?[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\}?$/i.test(value.interfaceGuid)) {
+        throw new Error('Invalid TUN ownership snapshot')
+      }
+      return value
+    })
+    if (!owner) return false
     const stdout = await runPowerShell(`
-$aliases = @(${ALL_KNOWN_ALIASES.map(a => psSingleQuote(a)).join(', ')})
-$routes = @(Get-NetRoute -DestinationPrefix '0.0.0.0/0', '0.0.0.0/1' -ErrorAction SilentlyContinue |
-  Where-Object { $aliases -contains $_.InterfaceAlias })
-if ($routes.Count -gt 0) { 'true' } else { 'false' }
+$ErrorActionPreference = 'Stop'
+$namespace = 'root/StandardCimv2'
+$adapter = @(Get-CimInstance -Namespace $namespace -ClassName MSFT_NetAdapter | Where-Object { $_.Name -eq ${psSingleQuote(alias)} })
+if ($adapter.Count -ne 1 -or $adapter[0].InterfaceOperationalStatus -ne 1 -or
+    [string]$adapter[0].InterfaceGuid -ne ${psSingleQuote(owner.interfaceGuid)} -or
+    $adapter[0].DriverDescription -notmatch '^Wintun\\b' -or $adapter[0].PnPDeviceID -notlike 'SWD\\Wintun\\*') { 'false'; return }
+$index = $adapter[0].InterfaceIndex
+$addresses = @(Get-CimInstance -Namespace $namespace -ClassName MSFT_NetIPAddress -Filter "InterfaceIndex = $index" |
+  Where-Object { $_.IPAddress -eq '192.168.250.253' -and $_.PrefixLength -eq 30 })
+if ($addresses.Count -ne 1) { 'false'; return }
+# Ask Windows for the selected route, including fragmented prefixes and more
+# specific competing routes. These lookups send no packets to the canaries.
+foreach ($destination in @('1.1.1.1', '8.8.8.8', '208.67.222.222')) {
+  $found = Invoke-CimMethod -Namespace $namespace -ClassName MSFT_NetRoute -MethodName Find -Arguments @{RemoteIPAddress=$destination}
+  $routes = @($found.CmdletOutput | Where-Object { $_.DestinationPrefix })
+  if ($found.ReturnValue -ne 0 -or $routes.Count -ne 1 -or $routes[0].InterfaceIndex -ne $index) { 'false'; return }
+}
+'true'
 `, 3000)
-    return String(stdout || '').toLowerCase().includes('true')
+    return currentStatus.running && currentStatus.pid === runtimePid && currentStatus.startedAt === runtimeStartedAt
+      && getTunAdapterAlias() === alias && String(stdout || '').trim().toLowerCase() === 'true'
   } catch (err) {
     logEvent('debug', 'tun', 'areTunRoutesActive probe failed', err)
     return false
@@ -2560,15 +2564,21 @@ export const tunController = {
           const lock = await timeAsync(
             'adapter-lockdown',
             () => applyPhysicalAdapterLockdown(TUN_IPV4_RESOLVER, {
-              forceDns: adapterLockdownForceDns
+              forceDns: adapterLockdownForceDns,
+              signal: startAbortController.signal
             }),
             { forceDns: adapterLockdownForceDns, parallel: true }
           )
           logEvent('info', 'tun', 'adapter lockdown result', {
             applied: lock.applied,
+            cancelled: lock.cancelled === true,
             adapters: lock.adapters,
             warnings: lock.warnings
           })
+          if (lock.cancelled || startAbortController.signal.aborted) {
+            adapterLockdownEngaged = lock.applied
+            return
+          }
           if (lock.applied) {
             adapterLockdownEngaged = true
             if (lock.warnings.length > 0) {
@@ -3832,10 +3842,18 @@ export const tunController = {
     stopProxyWatchdog()
     await timedStop('stop-xray', () => stopXray('tun stopped')).catch(err => rememberCleanupError('xray process stop', err))
     try {
-      await timedStop('stop-runtime', () => killOwnedRuntimeProcesses())
-      if (!(await timedStop('wait-runtime-exit', () => waitForOwnedRuntimeToExit()))) {
-        cleanupErrors.push('runtime process stop: vpnte-sing-box.exe is still running')
-        logEvent('warn', 'tun', 'runtime process still running after stop')
+      // A cancelled early start may never have launched sing-box. Prove that
+      // no owned runtime remains after its owner settles before skipping kill.
+      const runtimePresent = currentStatus.running || await timedStop('runtime-stop-preflight',
+        () => isOwnedTunRuntimeRunning(true)).catch(() => true)
+      if (runtimePresent) {
+        await timedStop('stop-runtime', () => killOwnedRuntimeProcesses())
+        if (!(await timedStop('wait-runtime-exit', () => waitForOwnedRuntimeToExit()))) {
+          cleanupErrors.push('runtime process stop: vpnte-sing-box.exe is still running')
+          logEvent('warn', 'tun', 'runtime process still running after stop')
+        }
+      } else {
+        logEvent('info', 'tun', 'runtime stop skipped after fresh exit proof')
       }
     } catch (err) {
       rememberCleanupError('runtime process stop', err)

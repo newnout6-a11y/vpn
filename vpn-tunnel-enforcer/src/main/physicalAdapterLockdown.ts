@@ -62,7 +62,7 @@ interface AdapterSnapshot {
 }
 
 export function isTetheringSubnetIp(ip: string): boolean {
-  if (!ip || typeof ip !== 'string') return false
+  if (!ip || typeof ip !== 'string' || isIP(ip.trim()) !== 4) return false
   const trimmed = ip.trim()
   return /^192\.168\.(43|137|225|8)\./.test(trimmed) || /^172\.20\.10\./.test(trimmed)
 }
@@ -76,12 +76,16 @@ export function isCellularOrTetheringAdapter(
   alias: string,
   description = '',
   dnsServers: string[] = [],
-  gateways: string[] = []
+  gateways: string[] = [],
+  networkProfiles: string[] = []
 ): boolean {
   const pattern = /\b(rndis|cellular|mobile|wwan|lte|[345]g|modem|tether|tethering)\b|remote ndis|apple mobile device/i
   if (pattern.test(alias) || pattern.test(description)) return true
   if (dnsServers.some((ip) => isTetheringSubnetIp(ip))) return true
   if (gateways.some((ip) => isTetheringSubnetIp(ip))) return true
+  // Current Android hotspots may use arbitrary 10/8 DHCP subnets. A private
+  // address alone cannot identify tethering; use the connected profile name.
+  if (networkProfiles.some(name => /\b(galaxy|iphone|pixel|android|redmi|poco|oneplus)\b|\bmobile hotspot\b|\bточка доступа\b/i.test(name))) return true
   return false
 }
 
@@ -115,6 +119,7 @@ interface LockdownManifest {
 
 interface LockdownOptions {
   forceDns?: boolean
+  signal?: AbortSignal
 }
 
 interface RollbackOptions {
@@ -222,7 +227,13 @@ function psSingleQuote(s: string): string {
   return `'${s.replace(/'/g, "''")}'`
 }
 
-async function runPS(script: string, timeoutMs = 30000): Promise<string> {
+async function runPS(script: string, timeoutMs = 30000, signal?: AbortSignal): Promise<string> {
+  const checkCancellation = () => {
+    if (signal?.aborted) throw Object.assign(new Error('Adapter apply cancelled before dispatch'), {
+      code: 'physical-lockdown-cancelled-before-dispatch'
+    })
+  }
+  checkCancellation()
   // CRITICAL: force UTF-8 output. On Russian Windows the default
   // Console.OutputEncoding is CP866, which gives us mojibake for adapter
   // names like "Беспроводная сеть". When we then pipe that mojibake string
@@ -242,13 +253,21 @@ async function runPS(script: string, timeoutMs = 30000): Promise<string> {
   // Use persistent PS helper if available — avoids 300-800ms
   // powershell.exe startup overhead per call.
   if (isElevatedPsHelperRunning()) {
+    let result: Awaited<ReturnType<typeof execElevatedPs>> | undefined
     try {
-      const result = await execElevatedPs(utf8Prefix + script, timeoutMs, 'physical-adapter-lockdown')
+      result = await execElevatedPs(utf8Prefix + script, timeoutMs, 'physical-adapter-lockdown')
+    } catch (err: any) {
+      // A lost reply may follow native effects. Only a known rejection before
+      // dispatch permits replay through the fallback transport.
+      if (!['elevated-helper-script-rejected', 'elevated-helper-script-too-large', 'elevated-helper-unavailable'].includes(err?.code)) throw err
+      logEvent('debug', 'phys-lockdown', 'helper fallback', { code: err.code })
+    }
+    if (result) {
+      if (result.exitCode) throw new Error(result.stderr || `Adapter command failed (exit ${result.exitCode})`)
       return result.stdout
-    } catch {
-      // PS helper failed — fall back to execElevated
     }
   }
+  checkCancellation()
   const { stdout } = await execElevated(cmd, { timeout: timeoutMs })
   return stdout.toString()
 }
@@ -314,6 +333,7 @@ foreach ($a in $adapters) {
   $mediaType = [string]$a.MediaType
   $physMedia = [string]$a.PhysicalMediaType
   $gw4 = @((Get-NetRoute -InterfaceIndex $a.ifIndex -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue).NextHop)
+  $profiles = @((Get-NetConnectionProfile -InterfaceIndex $a.ifIndex -ErrorAction SilentlyContinue).Name)
   $isHotspotSubnet = [bool](
     ($dns4 | Where-Object { $_ -match '^192\\.168\\.(43|137|225|8)\\.' -or $_ -match '^172\\.20\\.10\\.' }) -or
     ($gw4 | Where-Object { $_ -match '^192\\.168\\.(43|137|225|8)\\.' -or $_ -match '^172\\.20\\.10\\.' })
@@ -337,6 +357,8 @@ foreach ($a in $adapters) {
     description  = [string]$a.InterfaceDescription
     ipv6Enabled  = [bool]($bind6 -and $bind6.Enabled)
     ipv4Dns      = @($dns4)
+    gateways     = @($gw4)
+    networkProfiles = @($profiles)
     ipv4DnsSource = $(if ([string]::IsNullOrWhiteSpace($nameServer)) { 'dhcp' } else { 'static' })
     isCellularOrTethering = $isCellularOrTether
   }
@@ -358,7 +380,21 @@ $rows | ConvertTo-Json -Compress -Depth 4
       const alias = String(row.alias || '')
       const description = String(row.description || '')
       const dnsServers = Array.isArray(row.ipv4Dns) ? row.ipv4Dns.map((x: any) => String(x)) : []
-      const isCellularOrTethering = Boolean(row.isCellularOrTethering) || isCellularOrTetheringAdapter(alias, description, dnsServers)
+      const gateways = Array.isArray(row.gateways) ? row.gateways.map(String) : []
+      const profiles = Array.isArray(row.networkProfiles) ? row.networkProfiles.map(String) : []
+      const nativeMobile = Boolean(row.isCellularOrTethering)
+      const knownMobile = isCellularOrTetheringAdapter(alias, description, dnsServers, gateways)
+      const profileMobile = isCellularOrTetheringAdapter('', '', [], [], profiles)
+      const isCellularOrTethering = nativeMobile || knownMobile || profileMobile
+      logEvent('info', 'phys-lockdown', 'physical uplink classification', {
+        ifIndex: Number(row.ifIndex),
+        mobile: isCellularOrTethering,
+        method: knownMobile ? 'device-or-subnet' : nativeMobile ? 'native-media-or-v6-only' : profileMobile ? 'mobile-network-profile' : 'ordinary-network',
+        v6EnabledBefore: Boolean(row.ipv6Enabled),
+        v4DefaultCount: gateways.length,
+        configuredResolverCount: dnsServers.length,
+        resolverSource: row.ipv4DnsSource
+      })
       return {
         ifIndex: Number(row.ifIndex),
         interfaceGuid: String(row.interfaceGuid || ''),
@@ -466,6 +502,22 @@ finally { if ($key) { $key.Close() } }
 `
 }
 
+function registryApplyLine(tag: string, key: string, name: string): string {
+  return `
+$key = $null
+try {
+  $key = [Microsoft.Win32.Registry]::LocalMachine.CreateSubKey(${psSingleQuote(key.replace(/^HKLM\\/, ''))})
+  $alreadyOff = @($key.GetValueNames()) -contains ${psSingleQuote(name)}
+  if ($alreadyOff) { $alreadyOff = $key.GetValueKind(${psSingleQuote(name)}) -eq [Microsoft.Win32.RegistryValueKind]::DWord -and [int]$key.GetValue(${psSingleQuote(name)}) -eq 1 }
+  if (-not $alreadyOff) { $key.SetValue(${psSingleQuote(name)},[int]1,[Microsoft.Win32.RegistryValueKind]::DWord) }
+  if ($key.GetValueKind(${psSingleQuote(name)}) -ne [Microsoft.Win32.RegistryValueKind]::DWord -or [int]$key.GetValue(${psSingleQuote(name)}) -ne 1) { throw 'Registry value read-back mismatch' }
+  if ($alreadyOff) { Write-Output '${tag}:already-off' }
+  Write-Output '${tag}:off'
+} catch { Write-Output "${tag}_err: $_" }
+finally { if ($key) { $key.Close() } }
+`
+}
+
 async function snapshotDnsRegistryPolicy(): Promise<DnsRegistryPolicySnapshot> {
   try {
     let out: string
@@ -509,12 +561,20 @@ async function snapshotDnsRegistryPolicy(): Promise<DnsRegistryPolicySnapshot> {
  * Wi-Fi compatibility is enabled, force IPv4 DNS to the TUN's resolver. Each
  * step is logged separately so a partial failure is recoverable.
  */
-export async function applyPhysicalAdapterLockdown(tunDnsIpv4: string, options: LockdownOptions = {}): Promise<{ applied: boolean; adapters: number; warnings: string[] }> {
+export async function applyPhysicalAdapterLockdown(tunDnsIpv4: string, options: LockdownOptions = {}): Promise<{ applied: boolean; adapters: number; warnings: string[]; cancelled?: boolean }> {
   if (process.platform !== 'win32') {
     return { applied: false, adapters: 0, warnings: ['platform is not Windows'] }
   }
+  const cancelled = (phase: string, applied = false, adapters = 0) => {
+    logEvent('info', 'phys-lockdown', 'lockdown cancelled before native apply', { phase, pendingRecovery: applied })
+    return { applied, adapters, warnings: [] as string[], cancelled: true }
+  }
+  if (options.signal?.aborted) return cancelled('entry')
   const forceDns = options.forceDns !== false
   let existing = await readManifest()
+  // Reading a baseline is safe to finish; cancellation must prevent the next
+  // mutation. An existing journal still belongs to lifecycle compensation.
+  if (options.signal?.aborted) return cancelled('manifest-read', !!existing, existing?.adapters.length ?? 0)
   if (existing && (existing.tunDnsIpv4 !== tunDnsIpv4 || (existing.forceDns !== false) !== forceDns)) {
     logEvent('warn', 'phys-lockdown', 'existing lockdown options differ; rolling back before reapply', {
       existingTunDnsIpv4: existing.tunDnsIpv4,
@@ -531,6 +591,7 @@ export async function applyPhysicalAdapterLockdown(tunDnsIpv4: string, options: 
       }
     }
     existing = null
+    if (options.signal?.aborted) return cancelled('previous-rollback')
   }
   if (existing) {
     logEvent('info', 'phys-lockdown', 'lockdown already applied — skipping (idempotent)', {
@@ -544,6 +605,7 @@ export async function applyPhysicalAdapterLockdown(tunDnsIpv4: string, options: 
     snapshotTransitionAdapters(),
     snapshotDnsRegistryPolicy()
   ])
+  if (options.signal?.aborted) return cancelled('snapshot')
   if (adapters.length === 0) {
     logEvent('error', 'phys-lockdown', 'lockdown not checked: no physical adapters were discovered')
     return { applied: false, adapters: 0, warnings: ['no physical adapters found; lockdown was not applied'] }
@@ -571,6 +633,9 @@ export async function applyPhysicalAdapterLockdown(tunDnsIpv4: string, options: 
     transitionAdapters,
     dnsRegistryPolicy
   })
+  // Once the durable journal exists, keep it for the normal recovery owner.
+  // Never interrupt an admitted native batch or race its compensation.
+  if (options.signal?.aborted) return cancelled('pending-manifest', true, adapters.length)
 
   const warnings: string[] = []
   
@@ -582,7 +647,17 @@ export async function applyPhysicalAdapterLockdown(tunDnsIpv4: string, options: 
       : `Write-Output "A${i}_dns:skip"`
     const ipv6Line = a.isCellularOrTethering
       ? `Write-Output "A${i}_ipv6:skip"`
-      : `try { Disable-NetAdapterBinding -InterfaceAlias $ownedAdapter.Name -ComponentID ms_tcpip6 -ErrorAction Stop; if ((Get-NetAdapterBinding -InterfaceAlias $ownedAdapter.Name -ComponentID ms_tcpip6 -ErrorAction Stop).Enabled) { throw 'IPv6 read-back mismatch' }; Write-Output "A${i}_ipv6:off" } catch { Write-Output "A${i}_ipv6_err: $_" }`
+      : `try {
+  $binding = @(Get-NetAdapterBinding -InterfaceAlias $ownedAdapter.Name -ComponentID ms_tcpip6 -ErrorAction Stop)
+  if ($binding.Count -ne 1 -or $binding[0].Enabled -isnot [bool]) { throw 'IPv6 binding not verified' }
+  if ($binding[0].Enabled) {
+    Disable-NetAdapterBinding -InterfaceAlias $ownedAdapter.Name -ComponentID ms_tcpip6 -ErrorAction Stop
+    $binding = @(Get-NetAdapterBinding -InterfaceAlias $ownedAdapter.Name -ComponentID ms_tcpip6 -ErrorAction Stop)
+    if ($binding.Count -ne 1 -or $binding[0].Enabled -isnot [bool] -or $binding[0].Enabled) { throw 'IPv6 read-back mismatch' }
+    Write-Output "A${i}_ipv6:changed"
+  } else { Write-Output "A${i}_ipv6:already-off" }
+  Write-Output "A${i}_ipv6:off"
+} catch { Write-Output "A${i}_ipv6_err: $_" }`
     combinedScript += `
 $ownedAdapter = @(Get-NetAdapter -ErrorAction Stop | Where-Object { [string]$_.InterfaceGuid -eq ${psSingleQuote(a.interfaceGuid || '')} })
 if ($ownedAdapter.Count -eq 1) {
@@ -598,19 +673,20 @@ ${dnsLine}
 ${transitionAdapters.teredoType ? `try { netsh interface teredo set state type=disabled | Out-Null; if ($LASTEXITCODE -ne 0) { throw 'native command failed' }; Write-Output 'TRANS_teredo:disabled' } catch { Write-Output "TRANS_teredo_err: $_" }` : "Write-Output 'TRANS_teredo:absent'"}
 ${transitionAdapters.sixToFourState ? `try { netsh interface 6to4 set state state=disabled | Out-Null; if ($LASTEXITCODE -ne 0) { throw 'native command failed' }; Write-Output 'TRANS_6to4:disabled' } catch { Write-Output "TRANS_6to4_err: $_" }` : "Write-Output 'TRANS_6to4:absent'"}
 ${transitionAdapters.isatapState ? `try { netsh interface isatap set state state=disabled | Out-Null; if ($LASTEXITCODE -ne 0) { throw 'native command failed' }; Write-Output 'TRANS_isatap:disabled' } catch { Write-Output "TRANS_isatap_err: $_" }` : "Write-Output 'TRANS_isatap:absent'"}
-try { reg add "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\DNSClient" /v DisableSmartNameResolution /t REG_DWORD /d 1 /f | Out-Null; Write-Output 'DNS_SMNR:off' } catch { Write-Output "DNS_SMNR_err: $_" }
-try { reg add "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Dnscache\\Parameters" /v DisableParallelAandAAAA /t REG_DWORD /d 1 /f | Out-Null; Write-Output 'DNS_PARALLEL:off' } catch { Write-Output "DNS_PARALLEL_err: $_" }
+${registryApplyLine('DNS_SMNR', 'HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\DNSClient', 'DisableSmartNameResolution')}
+${registryApplyLine('DNS_PARALLEL', 'HKLM\\SYSTEM\\CurrentControlSet\\Services\\Dnscache\\Parameters', 'DisableParallelAandAAAA')}
 try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}
 `
 
   try {
-    const out = await runPS(combinedScript, 30000)
+    const out = await runPS(combinedScript, 30000, options.signal)
     
     // Parse results for physical adapters
     for (let i = 0; i < adapters.length; i++) {
       const a = adapters[i]
       try {
         const ipv6Off = new RegExp(`A${i}_ipv6:off`).test(out)
+        const ipv6AlreadyOff = new RegExp(`A${i}_ipv6:already-off`).test(out)
         const ipv6Skipped = new RegExp(`A${i}_ipv6:skip`).test(out)
         const dnsSet = new RegExp(`A${i}_dns:set`).test(out)
         const dnsSkipped = new RegExp(`A${i}_dns:skip`).test(out)
@@ -622,7 +698,7 @@ try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}
           const errs = out.trim().split(/\r?\n/).filter(l => new RegExp(`A${i}_.*err:`).test(l)).join('; ')
           warnings.push(`${a.alias}: ${errs || 'partial'}`)
         }
-        logEvent('info', 'phys-lockdown', `locked down ${a.alias}`, { ipv6Off, ipv6Skipped, dnsSet, dnsSkipped, isCellularOrTethering: a.isCellularOrTethering })
+        logEvent('info', 'phys-lockdown', `locked down ${a.alias}`, { ipv6Off, ipv6AlreadyOff, ipv6Skipped, dnsSet, dnsSkipped, isCellularOrTethering: a.isCellularOrTethering })
       } catch (err: any) {
         warnings.push(`${a.alias}: ${err?.message ?? String(err)}`)
         logEvent('warn', 'phys-lockdown', `lockdown failed for ${a.alias}`, err)
@@ -636,8 +712,20 @@ try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}
     for (const line of out.trim().split(/\r?\n/).filter(x => /DNS_.*_err/.test(x))) {
       warnings.push(line)
     }
+    for (const tag of ['DNS_SMNR', 'DNS_PARALLEL']) {
+      if (!out.trim().split(/\r?\n/).includes(`${tag}:off`) && !warnings.some(line => line.startsWith(`${tag}_err:`))) {
+        warnings.push(`${tag}_err: policy not verified`)
+      }
+    }
     logEvent('info', 'phys-lockdown', 'transition adapters disabled', { snapshot: transitionAdapters, out: out.trim() })
+    // A failed read-back can follow a successful mutation. Preserve the
+    // conservative journal rather than replacing it with missing markers.
+    if (warnings.length > 0) {
+      clearPhysicalAdaptersSnapshotCache()
+      return { applied: true, adapters: adapters.length, warnings }
+    }
   } catch (err: any) {
+    if (err?.code === 'physical-lockdown-cancelled-before-dispatch') return cancelled('native-dispatch', true, adapters.length)
     warnings.push(`Batch PS error: ${err?.message ?? String(err)}`)
     logEvent('warn', 'phys-lockdown', 'batch lockdown failed', err)
     // CRITICAL: Do NOT overwrite the pending manifest with unmutated adapters.
@@ -647,6 +735,7 @@ try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}
     // stays disabled + DNS pinned to dead TUN resolver.
     // Instead, keep the pending manifest (which assumes all changes were made)
     // so rollback will attempt to restore everything.
+    clearPhysicalAdaptersSnapshotCache()
     return { applied: true, adapters: adapters.length, warnings }
   }
 

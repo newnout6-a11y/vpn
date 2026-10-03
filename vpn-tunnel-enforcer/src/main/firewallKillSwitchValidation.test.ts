@@ -92,7 +92,7 @@ describe('external proxy kill-switch allow-list', () => {
   it('exposes an idempotent helper for adding a program allow rule while kill-switch is already active', () => {
     expect(source).toContain('export async function ensureKillSwitchProgramAllowed')
     expect(source).toContain('if (!(await isKillSwitchActive()))')
-    expect(source).toContain('New-NetFirewallRule')
+    expect(source).toContain('New-VpnteFirewallRule')
     expect(source).toContain('-Program $program')
   })
 })

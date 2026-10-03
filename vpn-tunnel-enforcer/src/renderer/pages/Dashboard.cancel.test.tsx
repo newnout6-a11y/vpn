@@ -45,6 +45,23 @@ beforeEach(() => {
 afterEach(() => { cleanup() })
 
 describe('Dashboard cancellation', () => {
+  it.each(['indeterminate', 'not-checked'] as const)('shows %s IP evidence without a false leak warning (AT-07-001 / AT-07-006)', verdict => {
+    useAppStore.setState({ mode: 'hard', tunRunning: true, connectionBusy: null,
+      publicIp: '13.143.217.2', vpnIp: verdict === 'indeterminate' ? '198.51.100.1' : null,
+      publicIpVerdict: verdict, isLeak: false })
+    render(<Dashboard />)
+    expect(screen.getByText('13.143.217.2')).toBeInTheDocument()
+    expect(screen.getByText(`— ${verdict === 'indeterminate' ? ru.dashboard.ipChangedUnverified : ru.dashboard.ipNotChecked}`)).toBeInTheDocument()
+    expect(screen.queryByText('Виден ваш реальный IP')).not.toBeInTheDocument()
+    expect(screen.queryByText('— утечка')).not.toBeInTheDocument()
+  })
+  it('keeps the explicit leak alarm visible (AT-07-001)', () => {
+    useAppStore.setState({ mode: 'hard', tunRunning: true, connectionBusy: null,
+      publicIp: '198.51.100.3', vpnIp: '198.51.100.1', publicIpVerdict: 'failed', isLeak: true })
+    render(<Dashboard />)
+    expect(screen.getByText('Виден ваш реальный IP')).toBeInTheDocument()
+    expect(screen.getByText('— утечка')).toBeInTheDocument()
+  })
   it('responds immediately, prevents repeated clicks, survives remount and waits for cleanup', async () => {
     const cancellation = deferred<{ success: boolean }>()
     vi.mocked(window.electronAPI.cancelTun).mockReturnValue(cancellation.promise)

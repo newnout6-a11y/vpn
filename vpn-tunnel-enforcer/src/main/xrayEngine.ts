@@ -29,6 +29,7 @@ import {
 } from './tunController'
 import { clientFingerprintForDevice } from './vpnProfiles'
 import type { ClientDevice } from '../shared/ipc-types'
+import { compileNativeXrayProfile, getNativeXrayProfile, nativeXraySelectedOutbound, type NativeXrayProfile } from './nativeXrayProfile'
 
 export const XRAY_RUNTIME_EXE_NAME = 'vpnte-xray.exe'
 const XRAY_PID_FILE = 'xray.pid'
@@ -85,6 +86,7 @@ export interface XrayEngineStatus {
 }
 
 interface XrayState {
+  dialTarget?: { host: string; port: number }
   running: boolean
   proc: ChildProcess | null
   socksPort: number | null
@@ -127,6 +129,19 @@ export function toXrayOutbound(
   sbOutbound: Record<string, any>,
   options: XrayOutboundOptions = {}
 ): Record<string, any> {
+  const native = getNativeXrayProfile(sbOutbound)
+  if (native) {
+    const outbound = nativeXraySelectedOutbound(native)
+    outbound.tag = 'proxy'
+    if (options.resolvedIp) {
+      const node = outbound.settings?.vnext?.[0] || outbound.settings?.servers?.[0]
+      if (node) node.address = options.resolvedIp
+      else if (outbound.settings?.address) outbound.settings.address = options.resolvedIp
+    }
+    // Physical probe detours are applied to graph leaves by the config builder;
+    // replacing the selected dialer here would erase the provider's bridge.
+    return outbound
+  }
   const type = String(sbOutbound.type || '').toLowerCase()
   const server = String(sbOutbound.server || '').trim()
   const port = Number(sbOutbound.server_port || 443)
@@ -140,10 +155,10 @@ export function toXrayOutbound(
     : null
 
   let fingerprint = 'chrome'
-  if (options.clientDevice) {
-    fingerprint = clientFingerprintForDevice(options.clientDevice)
-  } else if (tls?.utls && typeof tls.utls === 'object' && typeof tls.utls.fingerprint === 'string' && tls.utls.fingerprint) {
+  if (tls?.utls && typeof tls.utls === 'object' && typeof tls.utls.fingerprint === 'string' && tls.utls.fingerprint) {
     fingerprint = tls.utls.fingerprint
+  } else if (options.clientDevice) {
+    fingerprint = clientFingerprintForDevice(options.clientDevice)
   }
 
   const transport = sbOutbound.transport && typeof sbOutbound.transport === 'object'
@@ -176,7 +191,7 @@ export function toXrayOutbound(
     network = 'grpc'
     streamSettings.grpcSettings = {
       serviceName: transport.service_name || '',
-      multiMode: Boolean(transport.idle_timeout)
+      multiMode: transport.multi_mode === true
     }
   } else if (transportType === 'httpupgrade') {
     network = 'httpupgrade'
@@ -198,6 +213,8 @@ export function toXrayOutbound(
       path: transport.path || '/',
       host: transport.host || tls?.server_name || server
     }
+    if (transport.mode || transport.method) streamSettings.xhttpSettings.mode = transport.mode || transport.method
+    if (transport.extra && typeof transport.extra === 'object') streamSettings.xhttpSettings.extra = JSON.parse(JSON.stringify(transport.extra))
   }
 
   streamSettings.network = network
@@ -315,13 +332,13 @@ export function toXrayOutbound(
 export function buildXrayConfig(
   xrayOutbound: Record<string, any>,
   socksPort: number,
-  options: { logPath?: string } = {}
+  options: { logPath?: string; nativeProfile?: NativeXrayProfile | null; leafDialerProxy?: string } = {}
 ): Record<string, any> {
   const logOutput = options.logPath
     ? options.logPath.replace(/\\/g, '/')
     : join(getTunRuntimeDir(), 'xray.log').replace(/\\/g, '/')
 
-  return {
+  const config: Record<string, any> = {
     // `info`, not `warning`: xray logs dial/handshake failures
     // ("failed to find an available destination", "dial tcp … i/o timeout")
     // at Info level — at `warning` the log is silent on every failure and
@@ -371,6 +388,21 @@ export function buildXrayConfig(
       ]
     }
   }
+  if (options.nativeProfile) {
+    const graph = compileNativeXrayProfile(options.nativeProfile, xrayOutbound, options.leafDialerProxy)
+    config.outbounds = [...graph.outbounds, { tag: 'direct', protocol: 'freedom' }, { tag: 'block', protocol: 'blackhole' }]
+    config.routing.rules = [
+      { ...config.routing.rules[0], inboundTag: ['in'] },
+      ...graph.rules,
+      { type: 'field', inboundTag: ['in'], network: 'tcp,udp', ...graph.entry },
+      { type: 'field', network: 'tcp,udp', outboundTag: 'block' }
+    ]
+    if (graph.balancers.length) config.routing.balancers = graph.balancers
+    if (graph.observatory) config.observatory = graph.observatory
+    if (graph.burstObservatory) config.burstObservatory = graph.burstObservatory
+    if (graph.policy) config.policy = graph.policy
+  }
+  return config
 }
 
 /**
@@ -393,7 +425,11 @@ export function buildXrayProbeConfig(
     dialerProxy: dialerProxyTag
   })
 
-  const baseConfig = buildXrayConfig(xrayOutbound, socksPort, { logPath: options.logPath })
+  const baseConfig = buildXrayConfig(xrayOutbound, socksPort, {
+    logPath: options.logPath,
+    nativeProfile: getNativeXrayProfile(sbOutbound),
+    leafDialerProxy: dialerProxyTag
+  })
 
   if (options.directProxy) {
     baseConfig.outbounds.push({
@@ -418,7 +454,35 @@ export function buildXrayProbeConfig(
  * adapter lockdown is active.
  */
 export async function resolveServerAddress(server: string, signal?: AbortSignal): Promise<string | null> {
-  return resolveXrayEndpoint(server, signal)
+  return resolveXrayEndpoint(server, signal, details => logEvent('info', 'xray', 'bootstrap resolution stage', details))
+}
+
+/** Bootstrap every reachable VPN endpoint, including bridge and balancer leaves. */
+export async function resolveXrayConfigEndpoints(config: Record<string, any>,
+  resolver: (host: string) => Promise<string | null>): Promise<void> {
+  const nodes: Record<string, any>[] = []
+  for (const outbound of config.outbounds || []) {
+    if (!['vless', 'vmess', 'trojan', 'shadowsocks', 'hysteria'].includes(outbound.protocol)) continue
+    nodes.push(...(outbound.settings?.vnext || []), ...(outbound.settings?.servers || []))
+    if (typeof outbound.settings?.address === 'string') nodes.push(outbound.settings)
+  }
+  const hosts = [...new Set(nodes.map(node => String(node.address || '')).filter(host => host && isIP(host) === 0))]
+  let next = 0
+  const resolved = new Map<string, string>()
+  await Promise.all(Array.from({ length: Math.min(4, hosts.length) }, async () => {
+    while (next < hosts.length) {
+      const host = hosts[next++]
+      const ip = await resolver(host)
+      if (!ip || !isIP(ip)) throw new Error('Не удалось разрешить адрес узла native Xray до запуска туннеля')
+      resolved.set(host, ip)
+    }
+  }))
+  for (const node of nodes) if (resolved.has(node.address)) node.address = resolved.get(node.address)
+}
+
+// Internal diagnostic input; never publish the address in diagnostic details.
+export function getXrayDialTarget(): { host: string; port: number } | null {
+  return activeXrayState.running ? activeXrayState.dialTarget ?? null : null
 }
 
 /**
@@ -525,6 +589,13 @@ export async function startXray(
     if (!resolvedIp && isIP(server) === 0) {
       resolvedIp = await timed('resolve-server', () => resolveServerAddress(server, options.signal))
     }
+    logEvent('info', 'xray', 'bootstrap destination selected', {
+      method: options.resolvedIp ? 'supplied-resolution' : isIP(server) ? 'literal' : resolvedIp ? 'resolved' : 'engine-resolution-required',
+      family: isIP(resolvedIp || server),
+      port: Number(sbOutbound.server_port),
+      stage: 'before-process-start'
+    })
+    const dialTarget = { host: resolvedIp || server, port: Number(sbOutbound.server_port) }
 
     const socksPort = options.portOverride ?? (await timed('pick-port', pickFreeLocalPort))
 
@@ -534,7 +605,20 @@ export async function startXray(
       resolvedIp
     })
 
-    const config = buildXrayConfig(xrayOutbound, socksPort, { logPath })
+    const nativeProfile = getNativeXrayProfile(sbOutbound)
+    const config = buildXrayConfig(xrayOutbound, socksPort, { logPath, nativeProfile })
+    if (nativeProfile) {
+      await timed('resolve-connection-graph', () => resolveXrayConfigEndpoints(config, host => resolveServerAddress(host, options.signal)))
+    }
+    logEvent('info', 'xray', 'effective connection configuration', {
+      source: nativeProfile ? 'preserved-xray-json' : 'translated-profile',
+      fingerprint: xrayOutbound.streamSettings?.realitySettings?.fingerprint || xrayOutbound.streamSettings?.tlsSettings?.fingerprint || null,
+      muxEnabled: xrayOutbound.mux?.enabled === true,
+      outboundCount: config.outbounds.length,
+      balancerCount: config.routing.balancers?.length || 0,
+      virtualRouteCount: config.routing.rules.filter((rule: any) => rule.inboundTag?.some((tag: string) => tag.startsWith('vpnte-loop:'))).length,
+      providerEntry: nativeProfile?.entry.balancerTag ? 'balancer' : 'outbound'
+    })
     await timed('write-config', () => writeFile(configPath, JSON.stringify(config, null, 2), 'utf8'))
 
     // Run preflight test: xray run -test -c <config>
@@ -550,9 +634,9 @@ export async function startXray(
     const pid = child.pid ?? 0
     // Own the spawned child before any asynchronous persistence or readiness.
     activeXrayState = { running: false, proc: child, socksPort, exePath, configPath,
-      logPath, startedAt: Date.now(), resolvedIp }
+      logPath, startedAt: Date.now(), resolvedIp, dialTarget }
     let childStderr = ''
-    child.stderr?.on('data', (chunk) => { childStderr += chunk.toString() })
+    child.stderr?.on('data', (chunk) => { childStderr = (childStderr + chunk.toString()).slice(-64 * 1024) })
     child.on('error', (error) => {
       if (!child.pid) exitedChildren.add(child) // Spawn failure; no process exists.
       logEvent('warn', 'xray', 'xray process error', error)
@@ -590,7 +674,8 @@ export async function startXray(
           logEvent('warn', 'xray', 'kill-switch allow rule for xray not confirmed', { message: res.message })
         }
       }).catch((err) => {
-        logEvent('warn', 'xray', 'failed to ensure xray kill-switch allow rule', err)
+        if (options.signal?.aborted) logEvent('info', 'xray', 'xray startup cancelled while awaiting firewall')
+        else logEvent('warn', 'xray', 'failed to ensure xray kill-switch allow rule', err)
       })
 
       try {
@@ -609,13 +694,16 @@ export async function startXray(
         configPath,
         logPath,
         startedAt: Date.now(),
-        resolvedIp
+        resolvedIp,
+        dialTarget
       }
 
       logEvent('info', 'xray', 'xray engine started successfully', {
         socksPort,
         pid,
-        resolvedIp
+        resolvedIp,
+        stage: 'local-socks-ready',
+        remoteVerified: false
       })
 
       completed = true

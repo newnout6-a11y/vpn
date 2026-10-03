@@ -22,6 +22,7 @@ import { promisify } from 'util'
 import axios from 'axios'
 import { randomUUID } from 'crypto'
 import { logEvent } from './appLogger'
+import { withProtectedIpTransition } from './protectedIpTransition'
 import { compactForIpcLog } from './ipcLogging'
 import { copySecretToClipboard } from './secretClipboard'
 import { withSecretExportConsent } from './secretExportConsent'
@@ -34,12 +35,13 @@ import {
   normalizeClientDevice,
   resolveVpnProfiles,
   exportOutboundToUri,
+  exportOutboundForSharing,
   exportOutboundToProxyLine,
   type VpnProfile
 } from './vpnProfiles'
 import { settingsStore } from './settings'
 import { getDirectProxyPort, tunController } from './tunController'
-import { beginAdaptiveConnection } from './adaptiveBypass'
+import { beginAdaptiveConnection, readAdaptiveNetworkFingerprint } from './adaptiveBypass'
 import { ipMonitor } from './ipMonitor'
 import {
   serverGroups,
@@ -51,6 +53,7 @@ import {
 import type { ClientDevice, ServerProfile } from '../shared/ipc-types'
 import { inferCountryMetadata } from '../shared/countries'
 import { reliableSocksTcpPing } from './socksPing'
+import { networkFailureCode } from './networkFailureDiagnostics'
 import { serverPickerStore as store } from './sharedStores'
 
 const RESOLVED_IP_TTL_MS = 5 * 60_000
@@ -116,14 +119,15 @@ const PING_CONCURRENCY = 5
 // captive-portal interstitial returning "200 OK" can't be mistaken for a
 // real round-trip through the exit node.
 const TUNNEL_PROBE_TARGETS: ReadonlyArray<{
+  id: string
   url: string
   accept: (status: number, body: string) => boolean
 }> = [
-  { url: 'https://www.gstatic.com/generate_204', accept: (s) => s === 204 },
-  { url: 'https://www.google.com/generate_204', accept: (s) => s === 204 },
-  { url: 'https://cp.cloudflare.com/generate_204', accept: (s) => s === 204 },
+  { id: 'gstatic-204', url: 'https://www.gstatic.com/generate_204', accept: (s) => s === 204 },
+  { id: 'google-204', url: 'https://www.google.com/generate_204', accept: (s) => s === 204 },
+  { id: 'cloudflare-204', url: 'https://cp.cloudflare.com/generate_204', accept: (s) => s === 204 },
   // IP literal — no DNS dependency, proves the tunnel moves raw packets.
-  { url: 'https://1.1.1.1/cdn-cgi/trace', accept: (s, b) => s === 200 && /(^|\n)ip=/.test(b) }
+  { id: 'cloudflare-ip-trace', url: 'https://1.1.1.1/cdn-cgi/trace', accept: (s, b) => s === 200 && /(^|\n)ip=/.test(b) }
 ]
 
 // Cache the last tunnel-probe result for a short window so a `pingAll`
@@ -144,6 +148,36 @@ const TUNNEL_PROBE_SUCCESS_CACHE_MS = 3500
 const TUNNEL_PROBE_FAILURE_CACHE_MS = 1500
 let tunnelProbeCache: { value: number | null; at: number; sessionKey: string } | null = null
 let lastSuccessfulTunnelProbeAt = 0
+let failureDiagnostics: { sessionKey: string; at: number; promise: Promise<void> } | null = null
+
+async function logTunnelFailureDiagnostics(sessionKey: string): Promise<void> {
+  if (failureDiagnostics?.sessionKey === sessionKey && Date.now() - failureDiagnostics.at < 30000) {
+    await failureDiagnostics.promise
+    return
+  }
+  const promise = (async () => {
+    try {
+      const [{ collectTunnelFailureDiagnostics }, xray, runtime] = await Promise.all([
+        import('./networkFailureDiagnostics'), import('./xrayEngine'), import('./tunController')
+      ])
+      if (currentTunnelProbeSessionKey() !== sessionKey) return
+      const status = tunController.getStatus()
+      const engine = xray.getXrayStatus()
+      const details = await collectTunnelFailureDiagnostics({
+        runtimeDir: runtime.getTunRuntimeDir(), startedAt: status.startedAt ?? Date.now(),
+        xrayStartedAt: engine.startedAt, xrayPort: engine.running ? engine.socksPort : null,
+        directPort: getDirectProxyPort(), dialTarget: xray.getXrayDialTarget()
+      })
+      if (currentTunnelProbeSessionKey() === sessionKey) {
+        logEvent('warn', 'server-picker', 'tunnel failure path diagnostics', details)
+      }
+    } catch (error) {
+      if (currentTunnelProbeSessionKey() === sessionKey) logEvent('warn', 'server-picker', 'tunnel failure diagnostics unavailable', { code: networkFailureCode(error) })
+    }
+  })()
+  failureDiagnostics = { sessionKey, at: Date.now(), promise }
+  await promise
+}
 
 export function getLastSuccessfulTunnelProbeAt(): number {
   return lastSuccessfulTunnelProbeAt
@@ -240,7 +274,8 @@ export async function pingServer(
  * fire identical requests against the same CDN (the tunnel itself is the
  * bottleneck — every profile would return the same number anyway).
  */
-export async function tunnelHttpProbe(skipCache = false, maxRetries = 1): Promise<number | null> {
+export async function tunnelHttpProbe(skipCache = false, maxRetries = 1, signal?: AbortSignal): Promise<number | null> {
+  if (signal?.aborted) return null
   const sessionKey = currentTunnelProbeSessionKey()
   if (!sessionKey) return null
 
@@ -257,9 +292,10 @@ export async function tunnelHttpProbe(skipCache = false, maxRetries = 1): Promis
   }
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (signal?.aborted) return null
     if (attempt > 0) {
       await new Promise((resolve) => setTimeout(resolve, 300))
-      if (currentTunnelProbeSessionKey() !== sessionKey) return null
+      if (signal?.aborted || currentTunnelProbeSessionKey() !== sessionKey) return null
     }
 
     // Fire every probe in parallel. We accept the response only when its
@@ -269,10 +305,15 @@ export async function tunnelHttpProbe(skipCache = false, maxRetries = 1): Promis
     // close` ensures we measure a fresh round-trip rather than the warmth of
     // a pooled TLS session.
     const start = performance.now()
-    const races = TUNNEL_PROBE_TARGETS.map(target =>
+    const cancellation = new AbortController()
+    const abort = () => cancellation.abort()
+    signal?.addEventListener('abort', abort, { once: true })
+    const outcomes: Array<Record<string, unknown>> = []
+    const races = TUNNEL_PROBE_TARGETS.map((target, index) =>
       axios
         .get(target.url, {
           timeout: TUNNEL_PROBE_URL_TIMEOUT_MS,
+          signal: cancellation.signal,
           validateStatus: () => true,
           responseType: 'text',
           transformResponse: (d) => d,
@@ -280,17 +321,24 @@ export async function tunnelHttpProbe(skipCache = false, maxRetries = 1): Promis
         })
         .then(resp => {
           if (!target.accept(resp.status, typeof resp.data === 'string' ? resp.data : String(resp.data ?? ''))) {
-            throw new Error(`probe rejected: ${target.url} -> ${resp.status}`)
+            throw Object.assign(new Error('probe response rejected'), { code: 'PROBE_RESPONSE_REJECTED', status: resp.status })
           }
+          outcomes[index] = { target: target.id, ok: true, elapsedMs: Math.round(performance.now() - start), status: resp.status }
           return Math.round(performance.now() - start)
+        })
+        .catch(error => {
+          outcomes[index] = { target: target.id, ok: false, elapsedMs: Math.round(performance.now() - start), code: networkFailureCode(error), status: typeof error?.status === 'number' ? error.status : undefined }
+          throw error
         })
     )
 
     try {
       // Promise.any is native in the project's Node >=22.13 runtime, so no
-      // polyfill is needed. First successful response wins; the
-      // rest keep going harmlessly until their per-request timeout fires.
+      // polyfill is needed. First successful response wins; cancel the other
+      // requests so they cannot keep loading a slow hotspot after success.
       const ms = await Promise.any(races)
+      cancellation.abort()
+      if (signal?.aborted || currentTunnelProbeSessionKey() !== sessionKey) return null
       lastSuccessfulTunnelProbeAt = Date.now()
       tunnelProbeCache = { value: ms, at: Date.now(), sessionKey }
       try {
@@ -298,6 +346,12 @@ export async function tunnelHttpProbe(skipCache = false, maxRetries = 1): Promis
       } catch {}
       return ms
     } catch (err) {
+      cancellation.abort()
+      if (signal?.aborted || currentTunnelProbeSessionKey() !== sessionKey) return null
+      logEvent('info', 'server-picker', 'tunnel HTTPS probe results', {
+        sessionStartedAt: tunController.getStatus().startedAt, attempt: attempt + 1, outcomes,
+        stage: 'os-tun-https', elapsedMs: Math.round(performance.now() - start)
+      })
       if (attempt < maxRetries) {
         logEvent('debug', 'server-picker', 'tunnel probe attempt failed, retrying before mode change', {
           attempt: attempt + 1,
@@ -312,13 +366,17 @@ export async function tunnelHttpProbe(skipCache = false, maxRetries = 1): Promis
       if (err instanceof AggregateError) {
         logEvent('debug', 'server-picker', 'tunnel probe: every target failed after retries', {
           reasons: err.errors.map((e: unknown, i: number) => ({
-            url: TUNNEL_PROBE_TARGETS[i]?.url,
-            error: e instanceof Error ? e.message : String(e)
+            target: TUNNEL_PROBE_TARGETS[i]?.id,
+            code: networkFailureCode(e)
           }))
         })
       }
+      await logTunnelFailureDiagnostics(sessionKey)
+      if (signal?.aborted || currentTunnelProbeSessionKey() !== sessionKey) return null
       tunnelProbeCache = { value: null, at: Date.now(), sessionKey }
       return null
+    } finally {
+      signal?.removeEventListener('abort', abort)
     }
   }
 
@@ -1348,7 +1406,7 @@ export function setProfileClientDevice(id: string, device: ClientDevice): Server
     outbound,
     clientDevice,
     clientFingerprint: outbound && typeof outbound === 'object' && outbound.tls && typeof outbound.tls === 'object'
-      ? clientFingerprintForDevice(clientDevice)
+      ? outbound.tls.utls?.fingerprint || clientFingerprintForDevice(clientDevice)
       : undefined
   }
   profiles[idx] = updated
@@ -1927,112 +1985,45 @@ async function restartDirectVpnForSelectedProfile(profile: ServerProfile): Promi
 
   const settings = settingsStore.get()
   const vpnProfile = toVpnProfile(profile)
+  const switchGeneration = profileSwitchGeneration
+  const networkIdentity = settings.adaptiveBypassEnabled ? await readAdaptiveNetworkFingerprint() : null
+  if (switchGeneration !== profileSwitchGeneration) throw new Error('Переключение сервера отменено')
+  if (!tunController.getStatus().running) return
   const adaptive = beginAdaptiveConnection({
     enabled: settings.adaptiveBypassEnabled,
     legacyStealthMode: settings.stealthMode,
     mode: 'directVpn',
-    profile: vpnProfile
+    profile: vpnProfile,
+    networkIdentity
   })
-  const previousIp = await ipMonitor.getCurrentIp().then((info) => info.ip).catch(() => null)
-  ipMonitor.deferResume()
-  let deferredResumeReleased = false
-  const releaseDeferredResume = () => {
-    if (deferredResumeReleased) return
-    deferredResumeReleased = true
-    ipMonitor.releaseDeferredResume()
-  }
+  const isCurrent = () => switchGeneration === profileSwitchGeneration && tunController.getStatus().running
   logEvent('info', 'server-picker', 'hot-reloading direct VPN after profile selection', {
-    id: profile.id,
-    name: profile.name,
-    protocol: profile.protocol
+    id: profile.id, name: profile.name, protocol: profile.protocol
   })
-
-  // Protected swap: the firewall kill-switch, network baseline and adapter
-  // lockdown stay applied across the stop→start pair. A plain stop() would roll
-  // all three back and rebuild them, leaving seconds of unprotected egress on
-  // every single server switch. restartProtected() also guarantees a full
-  // rollback if the new server fails to come up, so we can't strand the user
-  // behind a kill-switch with no tunnel.
-  let restarted: { success: boolean; error?: string }
-  try {
-    restarted = await tunController.restartProtected('server switch', {
-      mode: 'directVpn',
-      vpnProfile,
-      proxyType: 'socks5',
+  const restarted = await withProtectedIpTransition({
+    reason: 'server switch',
+    isCurrent,
+    isOwner: () => switchGeneration === profileSwitchGeneration,
+    areRoutesActive: () => tunController.areTunRoutesActive(),
+    restart: () => tunController.restartProtected('server switch', {
+      mode: 'directVpn', vpnProfile, proxyType: 'socks5',
       enableFirewallKillSwitch: settings.firewallKillSwitch,
       enableAdapterLockdown: settings.strictAdapterLockdown,
       publicWifiCompatibility: settings.publicWifiCompatibility,
-      stealthMode: settings.stealthMode,
-      adaptiveMode: adaptive.mode,
+      stealthMode: settings.stealthMode, adaptiveMode: adaptive.mode,
       proxyEngine: tunController.getLastStartOptions?.()?.proxyEngine ?? settings.proxyEngine
     })
-  } catch (err) {
-    ipMonitor.clearVpnIp()
-    releaseDeferredResume()
-    throw err
-  }
-  if (!restarted.success) {
-    ipMonitor.clearVpnIp()
-    releaseDeferredResume()
-    throw new Error(restarted.error || 'Failed to start tunnel with selected server')
-  }
-
-  // Keep the explicit resume call for the normal lifecycle contract. During
-  // this protected swap it is intentionally a no-op until the fresh baseline
-  // below releases the deferred resume.
-  ipMonitor.resume()
-  try {
-    for (let attempt = 1; attempt <= 6; attempt++) {
-      try {
-        // getCurrentIp() intentionally serves cached state while suspended;
-        // probeCurrentIp() lets us observe route convergence without allowing
-        // the transient real IP to become a leak verdict.
-        const currentIp = await ipMonitor.probeCurrentIp()
-        const shouldRebaseline = Boolean(currentIp && (currentIp !== previousIp || attempt === 6))
-        if (shouldRebaseline) {
-          if (currentIp === previousIp && attempt === 6) {
-            const routesActive = await tunController.areTunRoutesActive().catch(() => false)
-            if (!routesActive) {
-              logEvent('warn', 'server-picker', 'TUN routes are not active after profile switch; skipping ipMonitor.recheck(true) and leaving IP baseline unchanged')
-              releaseDeferredResume()
-              return
-            }
-          }
-          const ipInfo = await ipMonitor.recheck(true)
-          releaseDeferredResume()
-          logEvent('info', 'server-picker', 'direct VPN IP baseline refreshed after profile switch', {
-            id: profile.id,
-            name: profile.name,
-            ip: ipInfo.ip,
-            previousIp,
-            attempt
-          })
-          return
-        }
-      } catch (err) {
-        logEvent('warn', 'server-picker', 'direct VPN IP rebaseline after profile switch failed', {
-          id: profile.id,
-          name: profile.name,
-          attempt,
-          error: (err as Error)?.message || String(err)
-        })
-      }
-      await wait(500)
-    }
-
-    releaseDeferredResume()
-    logEvent('warn', 'server-picker', 'direct VPN profile switch finished without a fresh public IP baseline', {
-      id: profile.id,
-      name: profile.name
-    })
-  } catch (err) {
-    releaseDeferredResume()
-    throw err
-  }
+  })
+  if (!restarted.success) throw new Error(restarted.error || 'Failed to start tunnel with selected server')
 }
 
 let profileSwitchGeneration = 0
 let profileSwitchInProgress = false
+let profileSwitchHooks: { begin: () => void | Promise<void>; end: () => void } | null = null
+
+export function setProfileSwitchHooks(hooks: typeof profileSwitchHooks): void {
+  profileSwitchHooks = hooks
+}
 
 export function cancelProfileSwitch(): void {
   profileSwitchGeneration++
@@ -2117,7 +2108,7 @@ function vpnProfileToServerProfile(
     outbound,
     clientDevice,
     clientFingerprint: outbound.tls && typeof outbound.tls === 'object'
-      ? clientFingerprintForDevice(clientDevice)
+      ? outbound.tls.utls?.fingerprint || clientFingerprintForDevice(clientDevice)
       : undefined,
     groupId,
     sourceUri: sourceUri ?? vpnProfile.sourceUri,
@@ -2465,12 +2456,16 @@ export function registerServerPickerHandlers(): void {
     id = requireString(id, 'id', { maxLength: 200 })
     const profile = getProfiles().find((p) => p.id === id)
     if (!profile) throw new Error('Profile not found')
+    if (profile.enabled === false || profile.removedFromSubscriptionAt) throw new Error('Profile is unavailable')
     if (profileSwitchInProgress) throw new Error('Переключение сервера уже выполняется')
 
     profileSwitchInProgress = true
     try {
-      selectProfile(id)
       const generation = ++profileSwitchGeneration
+      // Invalidate adaptive work before ANY await (including network identity).
+      await profileSwitchHooks?.begin()
+      if (generation !== profileSwitchGeneration) throw new Error('Переключение сервера отменено')
+      selectProfile(id)
       await restartDirectVpnForSelectedProfile(profile)
       if (generation !== profileSwitchGeneration) {
         await tunController.stop().catch((err) => logEvent('warn', 'server-picker', 'failed to stop cancelled profile switch', err))
@@ -2479,6 +2474,7 @@ export function registerServerPickerHandlers(): void {
       }
     } finally {
       profileSwitchInProgress = false
+      profileSwitchHooks?.end()
     }
   })
 
@@ -2568,11 +2564,8 @@ export function registerServerPickerHandlers(): void {
     removeProfile(id)
   })
 
-  // Export an entry back to its scheme URI (vless://, trojan://, …) so the
-  // user can move the key to another device or another client. Returns
-  // {ok: true, uri, profile} on success, or {ok: false, reason} when the
-  // outbound shape isn't representable as a single-line URI (custom
-  // sing-box JSON profiles fall in that bucket).
+  // Export a URI or complete JSON when a single URI would lose settings.
+  // Consent and clipboard ownership remain in main for either format.
   const exportProfileKey = (id: string) => {
     id = requireString(id, 'id', { maxLength: 200 })
     const profile = getProfiles().find(p => p.id === id)
@@ -2580,13 +2573,14 @@ export function registerServerPickerHandlers(): void {
     if (!profile.outbound || typeof profile.outbound !== 'object') {
       return { ok: false as const, reason: 'no-outbound' }
     }
-    const uri = exportOutboundToUri({
+    const exported = exportOutboundForSharing({
       name: profile.name,
       protocol: profile.protocol,
       outbound: profile.outbound
     })
-    if (!uri) return { ok: false as const, reason: 'unsupported-protocol', protocol: profile.protocol }
-    return { ok: true as const, uri, name: profile.name, protocol: profile.protocol }
+    if (!exported) return { ok: false as const, reason: 'unsupported-protocol', protocol: profile.protocol }
+    // Keep the legacy IPC field name; content can be a URI or complete JSON.
+    return { ok: true as const, uri: exported.content, format: exported.format, name: profile.name, protocol: profile.protocol }
   }
   handleLogged('servers:export-key', async (event, id: string) => {
     id = requireString(id, 'id', { maxLength: 200 })
@@ -2602,7 +2596,7 @@ export function registerServerPickerHandlers(): void {
     })
   })
 
-  // Save the exported URI to a .txt file via the OS save dialog. Used when
+  // Save a URI as .txt or a complete connection as .json via the OS dialog. Used when
   // the user wants to keep a backup, store keys in a password manager, or
   // share the key out-of-band — clipboard is fine for one-shot paste, but
   // a file is what people actually archive. Returns:
@@ -2617,26 +2611,27 @@ export function registerServerPickerHandlers(): void {
       if (!profile.outbound || typeof profile.outbound !== 'object') {
         return { ok: false as const, reason: 'no-outbound' }
       }
-      const uri = exportOutboundToUri({
+      const exported = exportOutboundForSharing({
         name: profile.name,
         protocol: profile.protocol,
         outbound: profile.outbound
     })
-    if (!uri) return { ok: false as const, reason: 'unsupported-protocol', protocol: profile.protocol }
+    if (!exported) return { ok: false as const, reason: 'unsupported-protocol', protocol: profile.protocol }
 
-    // Pick a sane default filename: "<protocol>-<sanitised-name>.txt".
+    // Pick "<protocol>-<sanitised-name>" with the matching format extension.
     // Stripping non-filename characters makes the dialog suggestion usable on
     // Windows without the user having to retype.
     const safeName = (profile.name || profile.protocol)
       .replace(/[<>:"/\\|?*\u0000-\u001F]/g, '')
       .replace(/\s+/g, '-')
       .slice(0, 60) || profile.protocol
-    const defaultFileName = `${profile.protocol}-${safeName}.txt`
+    const defaultFileName = `${profile.protocol}-${safeName}.${exported.format === 'json' ? 'json' : 'txt'}`
 
     const choice = await dialog.showSaveDialog({
       title: 'Сохранить ключ VPN — файл содержит секрет доступа',
       defaultPath: join(app.getPath('desktop'), defaultFileName),
       filters: [
+        ...(exported.format === 'json' ? [{ name: 'Конфигурация JSON', extensions: ['json'] }] : []),
         { name: 'Текстовый файл', extensions: ['txt'] },
         { name: 'Все файлы', extensions: ['*'] }
       ]
@@ -2647,10 +2642,8 @@ export function registerServerPickerHandlers(): void {
     }
 
     try {
-      // We persist just the URI on a single line plus a trailing newline.
-      // Most clients accept extra leading/trailing whitespace, but minimum
-      // surprise is "the file is exactly the URI".
-      await writeFile(choice.filePath, uri + '\n', 'utf8')
+      // Persist the complete URI or JSON, with only a trailing newline.
+      await writeFile(choice.filePath, exported.content + '\n', 'utf8')
       return { ok: true as const, path: choice.filePath, name: profile.name, protocol: profile.protocol }
     } catch (err: any) {
       logEvent('warn', 'server-picker', 'export-key-file write failed', {
@@ -2662,10 +2655,8 @@ export function registerServerPickerHandlers(): void {
     })
   })
 
-  // Bulk export: dump every saved profile (one URI per line) into a single
-  // .txt file via the OS save dialog. Profiles that don't have a single-line
-  // representation (custom sing-box JSON, missing outbound) are skipped and
-  // their count is returned so the UI can mention them.
+  // Bulk export uses URI lines or a JSON array when any profile needs JSON.
+  // Missing/unsupported outbounds are counted so the UI can report omissions.
   //
   // Returns the same shape as the single-key handler, plus counts:
   //   {ok: true, path, total, exported, skipped}
@@ -2680,13 +2671,13 @@ export function registerServerPickerHandlers(): void {
       let skipped = 0
       for (const profile of profiles) {
         if (!profile.outbound || typeof profile.outbound !== 'object') { skipped++; continue }
-        const uri = exportOutboundToUri({
+        const exported = exportOutboundForSharing({
           name: profile.name,
           protocol: profile.protocol,
           outbound: profile.outbound
         })
-        if (!uri) { skipped++; continue }
-        lines.push(uri)
+        if (!exported) { skipped++; continue }
+        lines.push(exported.content)
       }
 
       if (!lines.length) {
@@ -2694,12 +2685,14 @@ export function registerServerPickerHandlers(): void {
       }
 
       const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
-      const defaultFileName = `vpn-keys-${stamp}.txt`
+      const hasJson = lines.some(line => line.startsWith('{'))
+      const defaultFileName = `vpn-keys-${stamp}.${hasJson ? 'json' : 'txt'}`
 
       const choice = await dialog.showSaveDialog({
         title: 'Сохранить все ключи VPN — файл содержит пароли/ключи',
         defaultPath: join(app.getPath('desktop'), defaultFileName),
         filters: [
+          ...(hasJson ? [{ name: 'Конфигурации JSON', extensions: ['json'] }] : []),
           { name: 'Текстовый файл', extensions: ['txt'] },
           { name: 'Все файлы', extensions: ['*'] }
         ]
@@ -2719,7 +2712,9 @@ export function registerServerPickerHandlers(): void {
     ].join('\n')
 
     try {
-      await writeFile(choice.filePath, header + lines.join('\n') + '\n', 'utf8')
+      const content = hasJson ? JSON.stringify(lines.map(line => line.startsWith('{') ? JSON.parse(line) : line))
+        : header + lines.join('\n')
+      await writeFile(choice.filePath, content + '\n', 'utf8')
       logEvent('info', 'server-picker', 'export-all-keys-file', {
         path: choice.filePath,
         total: profiles.length,

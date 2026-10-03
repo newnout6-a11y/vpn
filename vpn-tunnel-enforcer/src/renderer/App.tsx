@@ -97,7 +97,7 @@ export default function App() {
 
   // Listen for IPC events
   useEffect(() => {
-    const unsubIp = window.electronAPI.onIpChanged(({ ip, isLeak }) => {
+    const unsubIp = window.electronAPI.onIpChanged(({ ip, isLeak, vpnIp, verdict }) => {
       if (stoppingNowRef.current) {
         // Drop on the floor — we're in the middle of stop-tun rollback. The
         // ipMonitor in main is being told to suspend via IPC below, but the
@@ -109,15 +109,16 @@ export default function App() {
       if (store.serverSwitchingName && isLeak) {
         return
       }
-      store.setPublicIp(ip, isLeak)
-      if (!isLeak && store.tunRunning) {
-        store.setVpnIp(ip)
-      }
-      if (ip && !isLeak && store.proxyDown) {
+      store.setPublicIp(ip, isLeak, verdict)
+      if (verdict) store.setVpnIp(vpnIp ?? null)
+      else if (!isLeak && store.tunRunning) store.setVpnIp(ip)
+      if (ip && !isLeak && (!verdict || verdict === 'passed') && store.proxyDown) {
         store.setProxyDown(false)
       }
       if (isLeak) {
         addLog('error', `ОБНАРУЖЕНА УТЕЧКА IP! Текущий: ${ip}`)
+      } else if (verdict === 'indeterminate' || verdict === 'not-checked') {
+        addLog('warn', verdict === 'indeterminate' ? 'VPN-IP изменился; отсутствие утечки не подтверждено' : 'VPN-IP пока не проверен')
       } else {
         addLog('info', `Публичный IP: ${ip}`)
         void verifyActiveServerCountry(ip)
@@ -471,9 +472,10 @@ export default function App() {
               addLog('warn', 'Ignored stale initial IP check after a newer transition')
               return
             }
-            liveStore.setPublicIp(ipInfo.ip, ipInfo.isLeak)
+            liveStore.setPublicIp(ipInfo.ip, ipInfo.isLeak, ipInfo.verdict)
+            if (ipInfo.verdict) liveStore.setVpnIp(ipInfo.vpnIp ?? null)
             if (ipInfo.ip) addLog('info', `Текущий публичный IP: ${ipInfo.ip}`)
-            if (ipInfo.ip && !ipInfo.isLeak && ipInfo.vpnIp) void verifyActiveServerCountry(ipInfo.ip)
+            if (ipInfo.ip && !ipInfo.isLeak && ipInfo.vpnIp && (!ipInfo.verdict || ipInfo.verdict === 'passed')) void verifyActiveServerCountry(ipInfo.ip)
           } catch (err: any) {
             addLog('error', `Ошибка проверки IP: ${err.message}`)
           }

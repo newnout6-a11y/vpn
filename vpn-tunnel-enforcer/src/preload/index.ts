@@ -1,3 +1,4 @@
+import type { PublicIpInfo } from '../shared/publicIp'
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
   ClientDevice,
@@ -15,8 +16,8 @@ import type {
 
 export interface ElectronAPI {
   detectHapp: () => Promise<any>
-  getPublicIp: () => Promise<{ ip: string | null; isLeak: boolean; vpnIp: string | null }>
-  recheckPublicIp: (rebaseline?: boolean) => Promise<{ ip: string | null; isLeak: boolean; vpnIp: string | null }>
+  getPublicIp: () => Promise<PublicIpInfo>
+  recheckPublicIp: (rebaseline?: boolean) => Promise<PublicIpInfo>
   startTun: (proxyAddr: string, proxyType?: 'socks5' | 'http') => Promise<{ success: boolean; error?: string; warning?: string | null; vpnIp?: string | null }>
   startDirectVpn: () => Promise<{ success: boolean; error?: string; warning?: string | null; vpnIp?: string | null }>
   stopTun: () => Promise<{ success: boolean; error?: string; warning?: string }>
@@ -239,7 +240,7 @@ export interface ElectronAPI {
   externalProxyList: (country?: string) => Promise<ExternalProxyProfileRow[]>
   externalProxyRotate: (slot?: number) => Promise<ExternalProxyStatus>
   // Event listeners
-  onIpChanged: (callback: (data: { ip: string; isLeak: boolean }) => void) => () => void
+  onIpChanged: (callback: (data: PublicIpInfo) => void) => () => void
   onTunStatusChanged: (callback: (status: string) => void) => () => void
   onSoftStatusChanged?: (callback: (connected: boolean) => void) => () => void
   onTrafficStats: (callback: (stats: TrafficStats) => void) => () => void
@@ -676,8 +677,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   externalProxyList: (country?: string) => ipcRenderer.invoke('external-proxy:list', assertOptionalString(country, 'country')),
   externalProxyRotate: (slot?: number) => ipcRenderer.invoke('external-proxy:rotate', assertExternalProxySlot(slot)),
   // Event listeners
-  onIpChanged: (callback: (data: { ip: string; isLeak: boolean }) => void) => {
-    const handler = (_event: any, data: { ip: string; isLeak: boolean }) => callback(data)
+  onIpChanged: (callback: (data: PublicIpInfo) => void) => {
+    const handler = (_event: any, data: PublicIpInfo) => callback(data)
     ipcRenderer.on('ip-changed', handler)
     return () => ipcRenderer.removeListener('ip-changed', handler)
   },

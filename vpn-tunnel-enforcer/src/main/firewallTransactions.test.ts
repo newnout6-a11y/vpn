@@ -2,6 +2,8 @@ import { execFileSync } from 'child_process'
 import { mkdirSync, mkdtempSync, writeFileSync, unlinkSync, rmdirSync } from 'fs'
 import { join } from 'path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { FIREWALL_RULES_API_PS } from './firewallRulesApi'
+import { FIREWALL_RULES_BOUNDARY_FIXTURE_PS } from './testFixtures/firewallRulesBoundary'
 const state = vi.hoisted(() => ({ manifest: null as any, writes: [] as any[], scripts: [] as string[],
   snapshot: ['Domain','Private','Public'].map(name => ({ name, defaultOutbound: 'Block' })),
   failWrite: false, failApply: false, failRestore: false, invalidRead: false,
@@ -82,13 +84,13 @@ import { enableKillSwitch, disableKillSwitch, isKillSwitchActive, updateKillSwit
 import { logEvent } from './appLogger'
 const originalPlatform = process.platform
 const options = { singboxExePath: 'C:\\VPNTE\\sing-box.exe' }
-function executeNativeFixture(script: string): string {
+function executeNativeFixture(script: string, productionApi = false): string {
   const temporaryRoot = join(process.cwd(), '.tmp')
   mkdirSync(temporaryRoot, { recursive: true })
   const temporary = mkdtempSync(join(temporaryRoot, 'firewall-transaction-'))
   const scriptPath = join(temporary, 'harness.ps1')
   try {
-    writeFileSync(scriptPath, '\ufeff' + script)
+    writeFileSync(scriptPath, '\ufeff' + (productionApi ? script : FIREWALL_RULES_BOUNDARY_FIXTURE_PS + script.replace(FIREWALL_RULES_API_PS, '')))
     return execFileSync(process.env.VPNTE_PWSH || 'powershell.exe',
       ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', scriptPath],
       { encoding: 'utf8', timeout: 15000, stdio: ['ignore', 'pipe', 'pipe'] })
@@ -126,6 +128,8 @@ describe('firewall transaction fault injection (AT-03-003/004/007; F-030, F-186)
       ['debug', 'firewall-killswitch', 'native phase timing', { phase: 'initial-set-block', durationMs: 0 }]
     ])
     expect(vi.mocked(logEvent).mock.calls.flatMap(call => call.slice(2)).join(' ')).not.toContain('private-server.example')
+    const backends = vi.mocked(logEvent).mock.calls.filter(call => call[2] === 'command timing').map(call => (call[3] as any)?.ruleBackend)
+    expect(new Set(backends)).toEqual(new Set(['netsecurity', 'com']))
   })
   it('refuses an unverified exception result even with well-formed native timings (AT-03-007)', async () => {
     state.nativeTimings = 'VPNTE_FW_TIMING:initial-exceptions:1\n'; state.liveMissingMarker = true
@@ -273,7 +277,7 @@ Write-Output ('RESULT:' + (@($script:fixtureRules.Values | Where-Object {$_.Disp
     const values = raw ? JSON.parse(raw) : []
     expect((Array.isArray(values) ? values : [values]).sort()).toEqual([...cidrs].sort())
   }, 20000)
-  it.skipIf(process.platform !== 'win32' && !process.env.VPNTE_PWSH).each(['valid', 'set-error', 'readback-error'])(
+  it.skipIf(process.platform !== 'win32' && !process.env.VPNTE_PWSH).each(['valid', 'set-error', 'readback-error', 'com-error'])(
     'preserves independent native restore/readbacks with timings: %s (AT-03-004/007)', async mode => {
       await enableKillSwitch(options)
       await disableKillSwitch('native fixture')
@@ -293,14 +297,15 @@ function Get-NetFirewallProfile { param($Profile)
 }
 function Get-NetFirewallRule { param($DisplayName) @($script:rules.Values)|Where-Object{$_.DisplayName -like $DisplayName} }
 function Remove-NetFirewallRule { param([Parameter(ValueFromPipeline=$true)]$Rule) process { if($Rule){$script:rules.Remove('own')} } }
+${mode === 'com-error' ? "function New-Object { param($ComObject) throw 'Fixture COM unavailable' }" : ''}
 $success=$false
 try {${restore}
 $success=$true
 }catch{}
 Write-Output ('RESULT:'+(@{success=$success;attempts=$script:attempts.ToArray();ownRemains=$script:rules.ContainsKey('own');foreignRemains=$script:rules.ContainsKey('foreign')}|ConvertTo-Json -Compress))
-`)
+`, mode === 'com-error')
       const result = JSON.parse(output.split(/\r?\n/).find(line => line.startsWith('RESULT:'))!.slice(7))
-      expect(result).toEqual({ success: mode === 'valid', attempts: ['Domain', 'Private', 'Public'], ownRemains: false, foreignRemains: true })
+      expect(result).toEqual({ success: mode === 'valid', attempts: ['Domain', 'Private', 'Public'], ownRemains: mode === 'com-error', foreignRemains: true })
       expect([...output.matchAll(/^VPNTE_FW_TIMING:([a-z-]+):(\d+)\r?$/gm)].map(match => match[1])).toEqual(['restore-profiles', 'restore-remove-rules'])
       expect(output.includes('RESTORED')).toBe(mode === 'valid')
     }, 20000)
@@ -426,7 +431,8 @@ function New-NetFirewallRule { param($DisplayName,$Direction,$Action,$Profile,$E
 }
 function Get-NetFirewallAddressFilter { param([Parameter(ValueFromPipeline=$true)]$Rule) process { [pscustomobject]@{RemoteAddress=$Rule.RemoteAddress} } }
 function Get-NetFirewallApplicationFilter { param([Parameter(ValueFromPipeline=$true)]$Rule) process { [pscustomobject]@{Program=$Rule.Program} } }
-${state.scripts[0]}
+${FIREWALL_RULES_BOUNDARY_FIXTURE_PS}
+${state.scripts[0].replace(FIREWALL_RULES_API_PS, '')}
 Write-Output ('RESULT:' + (@($script:rules.Values | ForEach-Object { $_.RemoteAddress }) | ConvertTo-Json -Compress))
 `
     const output = execFileSync(process.env.VPNTE_PWSH || 'powershell.exe',

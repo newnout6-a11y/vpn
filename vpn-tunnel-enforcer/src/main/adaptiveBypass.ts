@@ -4,6 +4,8 @@ import { safeStorage } from 'electron'
 import Store from 'electron-store'
 import { logEvent } from './appLogger'
 import { ALL_KNOWN_ALIASES, getTunAdapterAlias, isOwnTunAddress } from './tunAdapter'
+import { isIP } from 'net'
+import { readAdaptiveNetworkIdentity, type AdaptiveNetworkIdentity } from './adaptiveNetworkIdentity'
 
 export type AdaptiveBypassMode =
   | 'baseline'
@@ -50,6 +52,10 @@ interface AdaptiveBypassStoreSchema {
 
 const LEARNING_TTL_MS = 30 * 24 * 60 * 60 * 1000
 const MAX_LEARNING_RECORDS = 24
+const LEARNING_KEY_VERSION = 'v2:'
+let activeLearningKey: string | null = null
+let activeLearningNetwork: string | null = null
+let learningGeneration = 0
 
 const store = new Store<AdaptiveBypassStoreSchema>({
   name: 'adaptive-bypass',
@@ -109,37 +115,61 @@ export function isTunOrVpnAdapter(name: string): boolean {
   return /wintun|sing-box|singbox|sing-tun|\btun\b|wireguard|openvpn|tap-windows|vpnte/i.test(name)
 }
 
-export function networkFingerprint(customInterfaces?: NodeJS.Dict<import('os').NetworkInterfaceInfo[]>): string {
+function canonicalJson(value: any): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  if (value && typeof value === 'object') return `{${Object.keys(value).sort()
+    .filter(key => value[key] !== undefined).map(key => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`
+  return JSON.stringify(value) ?? 'null'
+}
+
+export function networkFingerprint(customInterfaces?: NodeJS.Dict<import('os').NetworkInterfaceInfo[]>, identity: AdaptiveNetworkIdentity[] = []): string {
   const interfaces = Object.entries(customInterfaces ?? networkInterfaces())
     .flatMap(([name, values]) => {
       if (isTunOrVpnAdapter(name)) return []
       return (values ?? [])
         .filter(value => !value.internal && value.mac && value.mac !== '00:00:00:00:00:00' && !isOwnTunAddress(value.address))
-        .map(value => `${name}:${value.mac}`)
+        .filter(value => isIP(value.address) === 4 || !(values ?? []).some(v => !v.internal && isIP(v.address) === 4 && !isOwnTunAddress(v.address)))
+        .map(value => {
+          // DHCP host-address changes and IPv6 privacy addresses are not a new network.
+          const prefix = isIP(value.address) === 4 && isIP(value.netmask) === 4
+            ? value.address.split('.').map((part, i) => Number(part) & Number(value.netmask.split('.')[i])).join('.') + '/' + value.netmask
+            : ''
+          return `${name}:${value.mac.toLowerCase()}:${prefix}`
+        })
     })
     .sort()
 
-  return hmac(interfaces.join('|') || 'unknown-network')
+  const networks = identity.map(row => ({ ...row, profiles: [...row.profiles].sort(), gateways: [...row.gateways].sort() }))
+    .sort((a, b) => canonicalJson(a).localeCompare(canonicalJson(b)))
+  return hmac(canonicalJson({ interfaces: [...new Set(interfaces)], networks }))
 }
 
-function profileFingerprint(profile: Record<string, any> | undefined): string {
+export async function readAdaptiveNetworkFingerprint(): Promise<string | null> {
+  const started = performance.now()
+  const identity = await readAdaptiveNetworkIdentity()
+  const fingerprint = identity?.length ? networkFingerprint(undefined, identity) : null
+  logEvent('info', 'adaptive-bypass', 'Network identity read completed', {
+    reader: 'cim', durationMs: Math.round(performance.now() - started), known: fingerprint !== null
+  })
+  return fingerprint
+}
+
+export function profileFingerprint(profile: Record<string, any> | undefined): string {
   if (!profile) return hmac('local-proxy')
   const outbound = profile.outbound && typeof profile.outbound === 'object' ? profile.outbound : profile
-  return hmac([
-    String(outbound.type || ''),
-    String(outbound.server || ''),
-    String(outbound.server_port || ''),
-    String(outbound.tls?.server_name || '')
-  ].join('|'))
+  const connection = { ...outbound }
+  for (const key of ['tag', 'detour', 'bind_interface', 'domain_strategy', 'domain_resolver']) delete connection[key]
+  return hmac(canonicalJson({ connection, clientDevice: profile.clientDevice ?? null,
+    clientFingerprint: profile.clientFingerprint ?? null }))
 }
 
-function learningKey(profile: Record<string, any> | undefined): string {
-  return `${networkFingerprint()}:${profileFingerprint(profile)}`
+function learningKey(profile: Record<string, any> | undefined, network: string): string {
+  return `${LEARNING_KEY_VERSION}${network}:${profileFingerprint(profile)}`
 }
 
 function compactLearning(now = Date.now()): Record<string, AdaptiveLearningRecord> {
   const fresh = Object.entries(store.get('learning') ?? {})
-    .filter(([, value]) => value && value.expiresAt > now)
+    .filter(([key, value]) => key.startsWith(LEARNING_KEY_VERSION) && value && value.expiresAt > now)
     .sort(([, a], [, b]) => b.lastUsedAt - a.lastUsedAt)
     .slice(0, MAX_LEARNING_RECORDS)
   const next = Object.fromEntries(fresh)
@@ -184,6 +214,7 @@ export function nextAdaptiveMode(
 }
 
 function setStatus(patch: Partial<AdaptiveBypassStatus>): AdaptiveBypassStatus {
+  learningGeneration++ // Fence late learning publication after any lifecycle status change.
   currentStatus = { ...currentStatus, ...patch, updatedAt: Date.now() }
   return getAdaptiveBypassStatus()
 }
@@ -193,22 +224,31 @@ export function beginAdaptiveConnection(input: {
   legacyStealthMode: boolean
   mode: 'localProxy' | 'directVpn'
   profile?: Record<string, any>
+  networkIdentity?: string | null
 }): { mode: AdaptiveBypassMode; capabilities: AdaptiveCapabilities } {
   const capabilities = resolveAdaptiveCapabilities(input.mode, input.profile)
   let mode: AdaptiveBypassMode = capabilities.externallyManaged ? 'external-managed' : 'baseline'
+  learningGeneration++
+  activeLearningNetwork = input.networkIdentity || null
+  activeLearningKey = input.enabled && !capabilities.externallyManaged && activeLearningNetwork
+    ? learningKey(input.profile, activeLearningNetwork) : null
+  let reusedLearning = false
 
   if (!capabilities.externallyManaged && input.enabled) {
-    const learned = compactLearning()[learningKey(input.profile)]
-    if (learned) {
+    const learning = compactLearning()
+    const learned = activeLearningKey ? learning[activeLearningKey] : undefined
+    if (learned && (learned.mode === 'mtu-compatibility' && capabilities.canUseMtuCompatibility
+      || learned.mode === 'tls-compatibility' && capabilities.canUseTlsCompatibility)) {
       mode = learned.mode
-      const learning = compactLearning()
-      learning[learningKey(input.profile)] = { ...learned, lastUsedAt: Date.now() }
+      reusedLearning = true
+      learning[activeLearningKey!] = { ...learned, lastUsedAt: Date.now() }
       store.set('learning', learning)
     } else if (input.legacyStealthMode) {
       mode = capabilities.canUseTlsCompatibility ? 'tls-compatibility' : 'mtu-compatibility'
     }
   }
 
+  logEvent('info', 'adaptive-bypass', 'learning decision', { version: 2, knownNetwork: Boolean(activeLearningNetwork), reused: reusedLearning, mode })
   setStatus({
     phase: 'connecting',
     mode,
@@ -225,12 +265,20 @@ export function markAdaptiveVerifying(): AdaptiveBypassStatus {
   return setStatus({ phase: 'verifying', message: 'Проверяем соединение...' })
 }
 
-export function markAdaptiveSuccess(profile?: Record<string, any>): AdaptiveBypassStatus {
+export async function markAdaptiveSuccess(profile?: Record<string, any>): Promise<AdaptiveBypassStatus> {
   const status = currentStatus
-  if (status.mode === 'tls-compatibility' || status.mode === 'mtu-compatibility') {
+  const generation = learningGeneration, key = activeLearningKey, network = activeLearningNetwork
+  if (key && network && (status.mode === 'tls-compatibility' || status.mode === 'mtu-compatibility')) {
+    const currentNetwork = await readAdaptiveNetworkFingerprint()
+    if (generation !== learningGeneration) return getAdaptiveBypassStatus()
+    if (currentNetwork !== network || key !== learningKey(profile, network)) {
+      activeLearningKey = null
+      logEvent('info', 'adaptive-bypass', 'skipped learning after connection identity changed')
+      return setStatus({ phase: 'connected', message: 'Соединение работает', reason: status.reason })
+    }
     const now = Date.now()
     const learning = compactLearning(now)
-    learning[learningKey(profile)] = {
+    learning[key] = {
       mode: status.mode,
       learnedAt: now,
       lastUsedAt: now,
@@ -271,6 +319,7 @@ export function getAdaptiveBypassStatus(): AdaptiveBypassStatus {
 }
 
 export function resetAdaptiveBypassStatus(): AdaptiveBypassStatus {
+  invalidateAdaptiveLearningContext()
   return setStatus({
     phase: 'idle',
     mode: 'baseline',
@@ -281,6 +330,13 @@ export function resetAdaptiveBypassStatus(): AdaptiveBypassStatus {
 }
 
 export function resetAdaptiveBypassLearning(): void {
+  invalidateAdaptiveLearningContext()
   store.set('learning', {})
   logEvent('info', 'adaptive-bypass', 'cleared learned compatibility decisions')
+}
+
+export function invalidateAdaptiveLearningContext(): void {
+  learningGeneration++
+  activeLearningKey = null
+  activeLearningNetwork = null
 }

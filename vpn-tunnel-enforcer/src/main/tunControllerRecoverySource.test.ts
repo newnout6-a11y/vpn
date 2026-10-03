@@ -3,6 +3,7 @@ import { dirname, join } from 'path'
 import { fileURLToPath } from 'url'
 import { describe, expect, it } from 'vitest'
 import ts from 'typescript'
+import { OWNED_RUNTIME_STOP_SCRIPT } from './recoveryPsProtocol'
 
 const here = dirname(fileURLToPath(import.meta.url))
 
@@ -80,9 +81,13 @@ describe('tunController recovery cancellation guards', () => {
     )
 
     expect(cleanup).toContain('const runtimeDir = getTunRuntimeDir()')
-    expect(cleanup).toContain("$names = @(${psSingleQuote(RUNTIME_EXE_NAME)}, 'vpnte-etw-sidecar.exe', 'vpnte-xray.exe')")
-    expect(cleanup).toContain('$_.ExecutablePath')
-    expect(cleanup).toContain('StartsWith($runtimeDir')
+    expect(cleanup).toContain("{ op: 'stop-runtime', runtimeDir }")
+    expect(cleanup).toContain('${OWNED_RUNTIME_STOP_SCRIPT}')
+    expect(OWNED_RUNTIME_STOP_SCRIPT).toContain("$names = @('vpnte-sing-box.exe', 'vpnte-etw-sidecar.exe', 'vpnte-xray.exe')")
+    expect(OWNED_RUNTIME_STOP_SCRIPT).toContain('$_.ExecutablePath')
+    expect(OWNED_RUNTIME_STOP_SCRIPT).toContain('StartsWith($runtimeDir')
+    expect(OWNED_RUNTIME_STOP_SCRIPT).not.toContain('vpnte-external-proxy.exe')
+    expect(OWNED_RUNTIME_STOP_SCRIPT).not.toContain('external-proxy-runtime')
     expect(cleanup).not.toContain('vpnte-external-proxy.exe')
     expect(cleanup).not.toContain('external-proxy-runtime')
   })

@@ -11,6 +11,7 @@ import { logEvent } from './appLogger'
 import { randomUUID, createHash } from 'crypto'
 import { getRecoveryManifestDir, recoveryManifestPath, readRecoveryManifest, writeRecoveryManifest, writeRecoveryArtifact, removeRecoveryManifest, strictRecoveryRequired } from './recoveryManifest'
 import { TUN_ADAPTER_ALIAS, TUN_IPV4_NETWORK_CIDR, getTunAdapterAlias } from './tunAdapter'
+import { withFirewallRulesApi } from './firewallRulesApi'
 
 const execFile = promisify(execFileCb)
 
@@ -162,6 +163,8 @@ function logNativeFirewallTimings(stdout: string): void {
 }
 
 async function ps(script: string, elevated = false, timeout = 30000) {
+  const ruleBackend = /\b(?:Get-VpnteFirewallRuleNames|New-VpnteFirewallRule|Remove-VpnteFirewallRules)\b/.test(script) ? 'com' : 'netsecurity'
+  script = withFirewallRulesApi(script)
   // The persistent helper executes source from its pipe. A protected .ps1 is
   // needed only by the fallback; writing it first adds two cold PS launches.
   if (isElevatedPsHelperRunning()) {
@@ -179,7 +182,7 @@ async function ps(script: string, elevated = false, timeout = 30000) {
     }
     if (result) {
       logEvent('debug', 'firewall-killswitch', 'command timing', {
-        transport: 'helper', durationMs: Math.round(performance.now() - started)
+        transport: 'helper', ruleBackend, durationMs: Math.round(performance.now() - started)
       })
       if (result.exitCode) throw new Error(result.stderr || `Firewall command failed (exit ${result.exitCode})`)
       logNativeFirewallTimings(result.stdout)
@@ -223,7 +226,7 @@ async function ps(script: string, elevated = false, timeout = 30000) {
     }
   } finally {
     logEvent('debug', 'firewall-killswitch', 'command timing', {
-      transport: elevated ? 'elevated-file' : 'file', persistMs,
+      transport: elevated ? 'elevated-file' : 'file', ruleBackend, persistMs,
       durationMs: Math.round(performance.now() - executionStarted)
     })
     if (!elevated) {
@@ -284,7 +287,7 @@ function stableRuleSuffix(value: string): string {
 
 /**
  * Validate a user-supplied IP/CIDR exception before it is interpolated into a
- * New-NetFirewallRule -RemoteAddress argument. We accept:
+ * New-VpnteFirewallRule -RemoteAddress argument. We accept:
  *   - IPv4 (optionally /0-32):     203.0.113.4   203.0.113.0/24
  *   - IPv6 (optionally /0-128):    2001:db8::1   2001:db8::/32
  * Anything else (hostnames, ranges, garbage, injection attempts) is rejected.
@@ -343,9 +346,8 @@ export async function ensureKillSwitchProgramAllowed(
   const script = `
 $ruleName = ${psSingleQuote(ruleName)}
 $program = ${psSingleQuote(trimmed)}
-Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue |
-  Remove-NetFirewallRule -ErrorAction SilentlyContinue
-New-NetFirewallRule \`
+Remove-VpnteFirewallRules -DisplayName $ruleName -ErrorAction Stop
+New-VpnteFirewallRule \`
   -DisplayName $ruleName \`
   -Description ${psSingleQuote(description)} \`
   -Direction Outbound -Action Allow \`
@@ -458,7 +460,7 @@ function exceptionPolicyScript(policy: FirewallExceptionPolicy): string {
   const createRule = `
   $ruleParams=@{DisplayName=$r.name;Direction='Outbound';Action='Allow';Profile='Any';Enabled='True'}
   if($r.program){$ruleParams.Program=$r.program}else{$ruleParams.RemoteAddress=$r.remote}
-  New-NetFirewallRule @ruleParams -ErrorAction Stop | Out-Null`
+  New-VpnteFirewallRule @ruleParams -ErrorAction Stop | Out-Null`
   return `
 $ErrorActionPreference='Stop'
 $profiles=@(Get-NetFirewallProfile -Profile Domain,Private,Public -ErrorAction Stop)
@@ -468,7 +470,7 @@ if ($profiles.Count -ne 3 -or @($profiles | Where-Object { [string]$_.DefaultOut
 # before the requested policy has been validated. Never set DefaultOutboundAction.
 # One native lookup for the same two disjoint stale groups. The final set
 # read-back below is a new query after removal/creation, never this result.
-Get-NetFirewallRule -DisplayName @('${RULE_PREFIX}-user-*','${RULE_PREFIX}-allow-extra-ip') -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction Stop
+Remove-VpnteFirewallRules -DisplayName @('${RULE_PREFIX}-user-*','${RULE_PREFIX}-allow-extra-ip') -ErrorAction Stop
 $requested=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}')) | ConvertFrom-Json
 # Association queries cost one CIM round trip per application. For larger sets,
 # read the same default PersistentStore once; never reuse this operation's index.
@@ -497,7 +499,7 @@ ${bulkApplicationReadback ? '' : createRule}
     if(@($filter.RemoteAddress).Count -ne 1 -or [string]@($filter.RemoteAddress)[0] -ne [string]$r.remote){throw 'Remote filter read-back mismatch'}
   }
 }
-$actualNames=@(Get-NetFirewallRule -DisplayName '${RULE_PREFIX}-user-*' -ErrorAction SilentlyContinue | ForEach-Object { [string]$_.DisplayName })
+$actualNames=@(Get-VpnteFirewallRuleNames -DisplayName '${RULE_PREFIX}-user-*' -ErrorAction Stop)
 if($actualNames.Count -ne $requested.Count -or @($actualNames | Where-Object { $_ -notin @($requested.name) }).Count){throw 'Exception set read-back mismatch'}
 Write-Output 'EXCEPTIONS_VERIFIED'
 `
@@ -608,7 +610,7 @@ async function enableKillSwitchUnlocked(opts: KillSwitchOptions): Promise<Firewa
     const ruleName = `${RULE_PREFIX}-allow-proxy-${i}`
     proxyAllowParts.push(`
 try {
-  New-NetFirewallRule \`
+  New-VpnteFirewallRule \`
     -DisplayName ${psSingleQuote(ruleName)} \`
     -Description 'VPN Tunnel Enforcer kill-switch: allow upstream proxy process outbound.' \`
     -Direction Outbound -Action Allow \`
@@ -635,8 +637,7 @@ $savedJson = ${psSingleQuote(JSON.stringify(savedProfiles))}
 
 # --- Step 2: Clean stale rules ---
 $nativePhaseWatch = [Diagnostics.Stopwatch]::StartNew()
-Get-NetFirewallRule -DisplayName '${RULE_PREFIX}*' -ErrorAction SilentlyContinue |
-  Remove-NetFirewallRule -ErrorAction SilentlyContinue
+Remove-VpnteFirewallRules -DisplayName '${RULE_PREFIX}*' -ErrorAction Stop
 Write-Output ('VPNTE_FW_TIMING:initial-stale-cleanup:' + $nativePhaseWatch.ElapsedMilliseconds)
 $nativePhaseWatch.Restart()
 
@@ -646,7 +647,7 @@ $rules = @()
 
 # 3a. Allow the TUN runtime (sing-box.exe) outbound.
 try {
-  New-NetFirewallRule \`
+  New-VpnteFirewallRule \`
     -DisplayName ${psSingleQuote(singboxAllow)} \`
     -Description 'VPN Tunnel Enforcer kill-switch: allow VPNTE sing-box outbound.' \`
     -Direction Outbound -Action Allow \`
@@ -657,7 +658,7 @@ try {
 
 # 3a-bis. Allow the Electron application binary (process.execPath) outbound.
 try {
-  New-NetFirewallRule \`
+  New-VpnteFirewallRule \`
     -DisplayName ${psSingleQuote(appAllow)} \`
     -Description 'VPN Tunnel Enforcer kill-switch: allow Electron app outbound.' \`
     -Direction Outbound -Action Allow \`
@@ -678,7 +679,7 @@ ${proxyAllowParts.join('\n')}
 ${adapterWaitScript}
 if ($tunAliasFound) {
   try {
-    New-NetFirewallRule \`
+    New-VpnteFirewallRule \`
       -DisplayName ${psSingleQuote(tunInterfaceAllow)} \`
       -Description 'VPN Tunnel Enforcer kill-switch: allow captured app traffic through ${tunAlias}.' \`
       -Direction Outbound -Action Allow \`
@@ -693,14 +694,14 @@ if ($tunAliasFound) {
 # 3c-bis. Dedicated Outbound Allow rules for loopback (IPv4 127.0.0.0/8 and IPv6 ::1/128).
 # Windows Firewall rejects mixing IPv4 and IPv6 CIDRs in a single rule, so we create separate rules.
 try {
-  New-NetFirewallRule \`
+  New-VpnteFirewallRule \`
     -DisplayName ${psSingleQuote(loopbackOutAllow)} \`
     -Description 'VPN Tunnel Enforcer kill-switch: allow loopback outbound (IPv4).' \`
     -Direction Outbound -Action Allow \`
     -RemoteAddress '127.0.0.0/8' \`
     -Profile Any -Enabled True | Out-Null
   try {
-    New-NetFirewallRule \`
+    New-VpnteFirewallRule \`
       -DisplayName ${psSingleQuote(loopbackOutAllow)} \`
       -Description 'VPN Tunnel Enforcer kill-switch: allow loopback outbound (IPv6).' \`
       -Direction Outbound -Action Allow \`
@@ -714,14 +715,14 @@ try {
 # Allows background listening workers (kimi-webbridge.exe on 127.0.0.1:10086 and Daimon standalone
 # runtime on dynamic WebSocket ports) to receive local IPC connections on any port.
 try {
-  New-NetFirewallRule \`
+  New-VpnteFirewallRule \`
     -DisplayName ${psSingleQuote(loopbackInAllow)} \`
     -Description 'VPN Tunnel Enforcer kill-switch: allow loopback inbound for local IPC workers (IPv4).' \`
     -Direction Inbound -Action Allow \`
     -LocalAddress '127.0.0.0/8' \`
     -Profile Any -Enabled True | Out-Null
   try {
-    New-NetFirewallRule \`
+    New-VpnteFirewallRule \`
       -DisplayName ${psSingleQuote(loopbackInAllow)} \`
       -Description 'VPN Tunnel Enforcer kill-switch: allow loopback inbound for local IPC workers (IPv6).' \`
       -Direction Inbound -Action Allow \`
@@ -733,7 +734,7 @@ try {
 
 # 3d. Allow IPv4 LAN ranges outbound (printers, NAS, router, mDNS).
 try {
-  New-NetFirewallRule \`
+  New-VpnteFirewallRule \`
     -DisplayName ${psSingleQuote(lanAllow)} \`
     -Description 'VPN Tunnel Enforcer kill-switch: allow private-LAN destinations.' \`
     -Direction Outbound -Action Allow \`
@@ -744,7 +745,7 @@ try {
 
 # 3e. Allow TUN subnet (${TUN_IPV4_NETWORK_CIDR}) so sing-box TUN traffic works.
 try {
-  New-NetFirewallRule \`
+  New-VpnteFirewallRule \`
     -DisplayName ${psSingleQuote(tunAllow)} \`
     -Description 'VPN Tunnel Enforcer kill-switch: allow TUN subnet.' \`
     -Direction Outbound -Action Allow \`
@@ -755,7 +756,7 @@ try {
 
 # 3f. Allow DHCP (UDP 67/68) so Wi-Fi lease renewal works.
 try {
-  New-NetFirewallRule \`
+  New-VpnteFirewallRule \`
     -DisplayName ${psSingleQuote(dhcpAllow)} \`
     -Description 'VPN Tunnel Enforcer kill-switch: allow DHCP.' \`
     -Direction Outbound -Action Allow \`
@@ -766,7 +767,7 @@ try {
 
 # 3g. Allow NTP (UDP 123) so Windows Time service keeps clocks synced for Reality/TLS.
 try {
-  New-NetFirewallRule \`
+  New-VpnteFirewallRule \`
     -DisplayName ${psSingleQuote(ntpAllow)} \`
     -Description 'VPN Tunnel Enforcer kill-switch: allow NTP clock sync.' \`
     -Direction Outbound -Action Allow \`
@@ -795,8 +796,7 @@ $requiredRules = @(
 $missingRequired = @($requiredRules | Where-Object { $rules -notcontains $_ })
 if ($missingRequired.Count -gt 0) {
   Write-Output ("FATAL: missing required allow rules before Block: " + ($missingRequired -join ','))
-  Get-NetFirewallRule -DisplayName '${RULE_PREFIX}*' -ErrorAction SilentlyContinue |
-    Remove-NetFirewallRule -ErrorAction SilentlyContinue
+  Remove-VpnteFirewallRules -DisplayName '${RULE_PREFIX}*' -ErrorAction Stop
   throw ("Missing required allow rules before DefaultOutboundAction=Block: " + ($missingRequired -join ','))
 }
 Write-Output ('VPNTE_FW_TIMING:initial-create-allows:' + $nativePhaseWatch.ElapsedMilliseconds)
@@ -806,8 +806,7 @@ try {
 } catch {
   Write-Output "FATAL set-block: $_"
   # Rollback: remove rules we just added
-  Get-NetFirewallRule -DisplayName '${RULE_PREFIX}*' -ErrorAction SilentlyContinue |
-    Remove-NetFirewallRule -ErrorAction SilentlyContinue
+  Remove-VpnteFirewallRules -DisplayName '${RULE_PREFIX}*' -ErrorAction Stop
   throw
 }
 Write-Output ('VPNTE_FW_TIMING:initial-set-block:' + $nativePhaseWatch.ElapsedMilliseconds)
@@ -921,8 +920,8 @@ ${restores}
 Write-Output ('VPNTE_FW_TIMING:restore-profiles:' + $nativePhaseWatch.ElapsedMilliseconds)
 $nativePhaseWatch.Restart()
 try {
-  Get-NetFirewallRule -DisplayName '${RULE_PREFIX}*' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction Stop
-  if ((Get-NetFirewallRule -DisplayName '${RULE_PREFIX}*' -ErrorAction SilentlyContinue | Measure-Object).Count -ne 0) { throw 'VPNTE rules remain' }
+  Remove-VpnteFirewallRules -DisplayName '${RULE_PREFIX}*' -ErrorAction Stop
+  if ((Get-VpnteFirewallRuleNames -DisplayName '${RULE_PREFIX}*' -ErrorAction Stop | Measure-Object).Count -ne 0) { throw 'VPNTE rules remain' }
 } catch { $errors += 'rules: ' + [string]$_ }
 Write-Output ('VPNTE_FW_TIMING:restore-remove-rules:' + $nativePhaseWatch.ElapsedMilliseconds)
 if ($errors.Count -gt 0) { throw ($errors -join ' | ') }
@@ -994,7 +993,7 @@ async function probeFirewallForOurRules(): Promise<boolean> {
   if (process.platform !== 'win32') return false
   try {
     const { stdout } = await ps(
-      `(Get-NetFirewallRule -DisplayName '${RULE_PREFIX}*' -ErrorAction SilentlyContinue | Measure-Object).Count`,
+      `(Get-VpnteFirewallRuleNames -DisplayName '${RULE_PREFIX}*' -ErrorAction Stop | Measure-Object).Count`,
       false,
       15000
     )
@@ -1097,7 +1096,7 @@ export async function getFirewallRepairHealth(
 
   try {
     const { stdout } = await ps(`
-$rules = (Get-NetFirewallRule -DisplayName '${RULE_PREFIX}*' -ErrorAction SilentlyContinue | Measure-Object).Count
+$rules = (Get-VpnteFirewallRuleNames -DisplayName '${RULE_PREFIX}*' -ErrorAction Stop | Measure-Object).Count
 $services = @(Get-Service -Name BFE,MpsSvc -ErrorAction SilentlyContinue | ForEach-Object {
   [pscustomobject]@{ name = [string]$_.Name; status = [string]$_.Status }
 })

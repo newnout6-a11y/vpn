@@ -658,3 +658,326 @@ Durable write path (unique wx + fsync + ACL + rename) не изменён. Known
 - Commit cherry-picked на новую `codex/snapshot-direct-powershell` от `vpn/main` (merge tree совпадает с parent `ec58a33`), опубликован как **5b5f7cc**. Создан и привязан к задаче открытый **PR15**: https://github.com/newnout6-a11y/vpn/pull/15; base `main` 95bbfc9; head `codex/snapshot-direct-powershell` 5b5f7cc. PR body содержит фактические результаты typecheck, 12 targeted и 1890/3 full tests и WP-0 scope.
 - После создания PR15 выполнен force-with-lease reset старой ветки `codex/electron44-lifecycle-recovery` с **6109d76** обратно на **ec58a33** — точный прежний head основного PR, вошедший в merge; новый PR теперь отдельно сохраняет snapshot fix. Обе операции подтверждены `git ls-remote`: старая ветка ec58a33, новая ветка 5b5f7cc, main 95bbfc9. Приоритет PR review, merge и проверка нового installer остаются за владельцем; дополнительных изменений main не делалось.
 - После review PR15 сверены открытый PR и его текущая ветка: замечание ссылается на `6a1cd556`, но GitHub не находит такой SHA; review был создан для `5b5f7cc7bc`. У `5b5f7cc` author уже был Vladimir Sakharov, однако committer ошибочно оставался `User <user@example.com>`. Коммит пересоздан как **b43a2e0** с author и committer `Vladimir Sakharov <newnout6@gmail.com>`; patch/tree snapshot-изменения побуквенно сохранены. Запись relocation повторно создана как **1a61d97** с тем же owner identity. PR15 остался open, base `main` **95bbfc9**, head `codex/snapshot-direct-powershell` **1a61d97**. Это исправление только provenance; тесты повторно не запускались, `git diff --check` прошёл.
+
+### 2026-10-02 — два цикла на установщике после merge PR14/PR15
+
+- Локальный `main` — merge PR15 **b44e48d**, содержащий PR14 **95bbfc9**. `npm.cmd run dist:win` завершился с exit 0; typecheck прошёл. Новый `VPN-Tunnel-Enforcer-Setup-1.1.22.exe`: **139156368 bytes**, SHA256 **6F77584AB62827E05653B7441ACD4CC4569E52CB9F4BFD0B10EC09BEFF8A7427**. `app.asar` внутри `dist/win-unpacked` проверен: compiled main содержит прямой snapshot вызов `execFile('powershell.exe', ...)`. Необязательная генерация V8 snapshot пропущена (`@electron/mksnapshot` отсутствует); Authenticode **NotSigned**.
+- `node scripts/analyze-lifecycle-log.mjs <app.log>` exit 0: **0** invalid lines, **0** out-of-order records и **0** незавершённых IPC пар. Два последовательных `start-direct-vpn` завершились штатно за **7257 ms** (13:40:09.675–13:40:16.932 МСК) и **5579 ms** (13:40:26.348–13:40:31.928 МСК). Соответствующий `stop-tun` занял **3924 ms** (13:40:21.123–13:40:25.047) и **3649 ms** (13:40:36.056–13:40:39.705). Первый start превышает цель 5 s на 2257 ms; второй — на 579 ms. Оба stop укладываются в цель 6 s.
+- Внутренние `tun start` durations: **6410 / 4966 ms**; `xray start`: **1301 / 1065 ms**. Самая длинная ожидательная фаза старта — `firewall-kill-switch-await`: **3197 / 2627 ms**; `adapter-lockdown`: **2895 / 2132 ms**, выполняется параллельно, её длительность нельзя прибавлять к firewall wait. Внутренние `tun stop`: **3702 / 3433 ms**; основные фазы — `disable-firewall` **1686 / 1644 ms**, `rollback-baseline` **846 / 807 ms**, `stop-runtime` **611 / 573 ms**.
+- В логе есть ещё внутренний `tun stop timing` **1599 ms** в 13:41:13 МСК без соответствующей пользовательской `stop-tun` IPC пары; он не включён в эти два замера, его причина по этому срезу не установлена. Log timings и успешный IPC terminal не доказывают egress/route/leak качество или восстановление после перезагрузки; такие проверки не выполнялись. По скорости цель 5/6 s полностью не достигнута: оба обычных выключения укладываются, включения пока оба превышают лимит.
+
+### 2026-10-02 — этап 26: регрессия определения сети и прямое CIM-чтение
+
+**Граница:** разрешённое владельцем исправление WP-10 / наблюдаемость WP-0, AT-10-007 / AT-00-005, F-126/F-128/F-143. Нормативные документы не меняются. Начальный checkout — `613ed97`, без незакоммиченных изменений.
+
+#### Установленное приложение и Happ: факты исследования
+
+| Цикл (МСК) | start-direct-vpn IPC | tun start | xray start | firewall await |
+| --- | ---: | ---: | ---: | ---: |
+| 20:09, после native-graph исправления | 6503 ms | 5584 ms | 1311 ms | 3057 ms |
+| 20:51, после adaptive follow-up | 9939 ms | 6519 ms | 1729 ms | 3161 ms |
+| 20:52, повтор | 8504 ms | 5379 ms | 1097 ms | 2867 ms |
+
+- Источник: `%APPDATA%/vpn-tunnel-enforcer/logs/app.log`, read-only анализатор `scripts/analyze-lifecycle-log.mjs`; 0 invalid lines / незавершённых IPC. Установленный и packaged compiled main совпадали по SHA256 `089e1f7f7543b25e87481817e141b1e67b11a174ad68d5852dc8a0ffdc915b2a`, оба содержали последовательный `await readAdaptiveNetworkFingerprint()` до запуска TUN. Между выбором профиля и adaptive decision прошло **2617 / 2489 ms**; этот интервал включает чтение идентичности, но отдельного замера reader тогда ещё не было.
+- Это регрессия нашего control path: новый дочерний PowerShell загружал NetAdapter/NetTCPIP заново, несмотря на прогретый elevated helper. Первое read-only сравнение прежнего production reader и CIM-прототипа: **2949→602, 2882→513, 3221→669 ms**, 3/3 совпадения идентичности на текущей сети.
+- Firewall остаётся отдельной задержкой: native initial apply **2771 / 2432 ms**, из них cleanup **558/500**, create allows **897/808**, Block **171/132**, exceptions **1066/977 ms**. Xray allow-firewall queue overhead **799/451 ms**. Нельзя объяснять эти интервалы скоростью VPN-сервера или складывать параллельные этапы.
+- Фактически осмотрен установленный Happ **4.3.0.610**: TUN Sing-box, system proxy off; уже работающий `HappService` / `happd.exe`. В `C:/ProgramData/Happ/logs/happd.log` наблюдались ожидания интерфейса **238–703 ms**, задание DNS **5–24 ms**. Это часть control path, полный click→HTTPS не измерялся. В daemon binary присутствуют `SetInterfaceDnsSettings`, `GetAdaptersAddresses`, process APIs, `FwpmEngineOpen`, `INetFwPolicy`: признак прямого native control path, а не доказательство всех runtime веток или качества защиты. [Официальный репозиторий Happ](https://github.com/Happ-proxy/happ-desktop) содержит README/releases, исходного клиента там нет. Настройки и действующее VPN-соединение не изменялись.
+
+#### Исправление
+
+- Три свежих read-only запроса `Get-CimInstance` к `root/StandardCimv2`: `MSFT_NetAdapter`, `MSFT_NetConnectionProfile`, `MSFT_NetRoute`. Профили/маршруты выбираются один раз и сопоставляются по InterfaceIndex. Сохранены NLA Name/InstanceID, adapter alias/GUID, default gateways и приватный HMAC v2; кэш сетевых снимков не добавлен.
+- Учтены Windows derived properties: Up = InterfaceOperationalStatus 1; MacAddress выводится из первого NetworkAddresses, поэтому исключён пустой первый элемент; скрытые адаптеры исключены. Это сверено с установленными Microsoft `NetAdapter.Types.ps1xml` и cmdletDefinition.cdxml. Сохранён прежний фильтр туннелей; маршруты ограничены действующими default routes (`Store=1`), [ActiveStore по документации Microsoft](https://learn.microsoft.com/en-us/powershell/module/nettcpip/get-netroute?view=windowsserver2025-ps#-policystore). Provider query без IncludeAllCompartments сохраняет default compartment.
+- Ошибки CIM, deadline, malformed JSON оставляют identity unknown и не разрешают reuse/learning. Сохраняются hidden execFile, UTF-16 encoded argv, UTF-8 output, timeout **4000 ms**, maxBuffer **256 KiB**, IPv4 preference на dual-stack. Исправлен выявленный тестами пустой `.NextHop`: прежнее property expansion превращало отсутствие шлюза в `[null]`; теперь profile-only identity имеет `gateways: []`, отсутствие обеих частей даёт `[]`.
+- Новое событие `adaptive-bypass / Network identity read completed`: только `reader=cim`, монотонный `durationMs`, `known`; без SSID, GUID, IP, MAC, gateway, fingerprint или текста native error. Замер есть до подключения и при проверке идентичности после стабильного окна.
+- Native сравнение итогового production script с `git show HEAD:...` на той же машине, 3 пары с чередованием порядка: **2329→448, 2270→429, 2403→469 ms**, 3/3 идентичности совпали. Все 6 процессов завершились штатно, raw network values не печатались и не записывались. Это измерение reader на текущей сети; полное время установленного подключения после исправления пока не измерено.
+
+#### Проверки
+
+- `npm.cmd run typecheck` — exit 0.
+- `npx.cmd vitest run src/main/adaptiveNetworkIdentity.test.ts src/main/adaptiveBypass.test.ts src/main/serverPickerSwitch.test.ts src/main/profileRotation.test.ts src/main/lifecycleCleanup.test.ts --maxWorkers=4` — **5 files / 122 tests passed**, exit 0. Native PowerShell запускает production script с fake CIM boundary: hidden/down/foreign/MAC-empty исключения, Unicode/InstanceID, profile-only/gateway-only/empty, default-route filter, ошибки каждого query. Дополнительно mocked transport проверяет deadline/truncated JSON/IPv6/deduplication; privacy logger проверен для known и unknown.
+- Первый focused run: 120 passed / 2 failed — обе ошибки обнаружили `[null]` при пустом gateway list; production исправлен, повторный focused зелёный. Проверочные пороги безопасности не ослаблялись.
+- `npm.cmd test -- --maxWorkers=4` — **179 files passed / 2 skipped, 1981 tests passed / 10 skipped / 0 failed**, exit 0, **83.97 s**. Прежние skips сохранены; ожидаемый stderr RootErrorBoundary не является провалом. `python -X utf8 ../docs/04-приёмочные-тесты/traceability/check-coverage.py` — exit 0, **AC 927/927 / F 210/210**; `git diff --check` — exit 0.
+- Read-only benchmark: `node .tmp/inspect-adaptive-identity-latency.mjs` — exit 0, 3/3 equality на текущей сети; собственный временный script удаляется после записи результатов. Новые сетевые настройки не применялись. Firewall native API ускорение остаётся следующим отдельным этапом; мгновенное подключение всей системы этим исправлением не заявляется.
+- `npm.cmd run dist:win` — exit 0, typecheck повторно зелёный; NSIS / Electron 44.4.3. Семь CIM/timing/adapter-boundary маркеров в `dist/win-unpacked/resources/app.asar` подтверждены; SHA256 compiled main **ebdf080c8ebb71337ed2cb7f5b4d03baa8935f901225d216958861f9054fab06**. Необязательный V8 snapshot по-прежнему пропущен: `@electron/mksnapshot` отсутствует.
+- Установщик `vpn-tunnel-enforcer/dist/VPN-Tunnel-Enforcer-Setup-1.1.22.exe`: **139165757 bytes**, 02.10 **21:30:02 МСК**, SHA256 **AAB87DB5754FEEB3429856F93F31A110AA1C11CBD79797B6F0C629022CAB00D1**, Authenticode **NotSigned**. Это новый artifact с прежним номером 1.1.22; установленный клиент агентом не заменён, actual connect latency после установки ещё не измерена.
+
+### 2026-10-02 — этап 27: маршруты TUN, волны IP-проверок и ранняя отмена
+
+**Граница:** исправления WP-0 / WP-2 / WP-6 / WP-7 по явной команде владельца. Начальный checkout `310e38d`, чистый. Трассировка: AT-00-003/005, AT-02-002/004/005, поддерживающие проверки AT-06-003 и AT-07-007/012. Native unit/fixture проверки не заменяют L3 egress/утечки. Нормативные документы и решения по подписи не изменены.
+
+#### Измерено в установленном клиенте до этих исправлений
+
+Источник — `%APPDATA%/vpn-tunnel-enforcer/logs/app.log`, read-only анализатор. Для рассмотренного среза: 0 invalid lines, 0 out-of-order, 0 незавершённых IPC. Время ниже — МСК, 02.10.2026.
+
+| Операция | Начало → конец | IPC | tun | Основные фазы |
+| --- | --- | ---: | ---: | --- |
+| start-direct-vpn | 21:32:36.054 → 21:32:42.926 | 6872 ms | 5739 ms | CIM identity 498; Xray 1600; firewall await 2791; parallel adapter 2650 |
+| stop-tun | 21:32:48.072 → 21:32:51.834 | 3762 ms | 3568 ms | runtime kill 634; exit wait 191; baseline 874; firewall 1495; adapter 253 |
+| отменённый start | 21:32:53.621 → 21:32:56.619 | 2998 ms | — | result.success=false |
+| cancel-tun | 21:32:55.306 → 21:32:58.708 | 3402 ms | stop 1913 ms | unwind старта ~1313; kill 524; exit wait 143; baseline 801; firewall 416; adapter 8 |
+| start-direct-vpn | 21:32:59.910 → 21:33:05.330 | 5420 ms | 4376 ms | CIM identity 474; Xray 905; firewall await 2351 |
+| stop-tun | 21:33:08.158 → 21:33:11.852 | 3694 ms | 3446 ms | kill 631; exit wait 147; baseline 853; firewall 1510; adapter 251 |
+| start-direct-vpn | 21:33:12.732 → 21:33:18.181 | 5449 ms | 4394 ms | CIM identity 469; Xray 944; firewall await 2326 |
+
+- Предыдущий CIM reader действительно работает в установленном клиенте: 498/474/469 ms. Обычный startup ещё превышает цель 5 s; firewall await остаётся главным измеренным ожиданием. Параллельные фазы нельзя складывать.
+- При отмене startup ещё завершал native adapter apply/rollback. Baseline: 9/9 шагов успешны. Предупреждение Xray в 21:32:55.539 имело `isCancellation=true`; это отменённое ожидание firewall, а не доказательство отдельной ошибки правила.
+- После последнего старта — 57 успешных ответов IP-провайдеров за 10 s. Начальный IP снимался уже после запуска TUN; сравнение двух post-start адресов часто не находило «смены», удерживая 16 волн каждые 500 ms.
+- В 21:33:28.204 старый checker объявил маршруты неактивными. Native read-only чтение показало Up, 60 маршрутов своего TUN, фрагментированные IPv4 префиксы, без `/0` и `/1`. В 21:33:44.034 adaptive verification имела 3 успешные пробы, последняя 190 ms. Отсутствие двух конкретных длин префикса не доказывало отказ маршрутизации.
+
+#### Исправления
+
+- Route checker читает доверенный `tun-owner.json`, сверяет schema/owner/alias/GUID, свежий Up Wintun/PnPDeviceID и IPv4 192.168.250.253/30. Затем спрашивает Windows о **выбранном** маршруте к трём контрольным IPv4 адресам через `MSFT_NetRoute.Find`; InterfaceIndex не навязывается запросу, поэтому более специфичный конкурирующий маршрут не маскируется. Фрагментированные префиксы допускаются. Неизвестное владение, ошибки, deadline, malformed output, смена runtime/alias возвращают false. Hidden read-only процесс ограничен 3000 ms. Метод: [Microsoft MSFT_NetRoute.Find](https://learn.microsoft.com/en-us/windows/win32/fwp/wmi/nettcpipprov/find-msft-netroute). Lookup не отправляет пакеты; три выбранных IPv4 маршрута не доказывают all-traffic/IPv6 leak безопасность.
+- Read-only вызовы самого CIM Find на текущем активном интерфейсе: ReturnValue=0, один выбранный route, usesTun=true для всех трёх адресов; 100/23/27 ms. Это тёплые API вызовы внутри уже запущенного PowerShell, не latency полного production процесса. Системные настройки не менялись.
+- В обоих режимах фоновые попытки ограничены четырьмя ожиданиями по 2 s с финальным route check. HTTP rebaseline выполняется после route proof; одинаковый post-start IP допускается. Успешный свежий sample принимается один раз. Первоначальный фоновый IP-запрос не блокирует native startup.
+- Одновременные IP-чтения одного владельца объединены в одну волну из четырёх провайдеров; результаты между завершёнными волнами не кешируются. Первый валидный ответ отменяет остаточные HTTP запросы. 429 включает provider backoff (Retry-After в секундах, максимум 5 min; без валидного значения 60 s). suspend/clear/deferResume отменяют волны; generation и owner guards отбрасывают поздний ответ, даже если транспорт проигнорировал abort. Успешный rebaseline запускает периодический таймер без дополнительной немедленной волны.
+- Полный отказ IP-сервисов оставляет внутренний cache, но `recheck(true)` возвращает ip=null: сохранённый адрес не выдаётся за свежую baseline. Переключение профиля повторяет проверку вместо успешного сообщения и преждевременного освобождения deferred monitoring после такого результата.
+- При ранней отмене stop по-прежнему ждёт завершения владельца старта и native компенсаций. Когда status уже не running, свежий inspect-runtime может подтвердить отсутствие собственных процессов: тогда повторные kill/wait пропускаются, с отдельной фазой `runtime-stop-preflight` и событием `runtime stop skipped after fresh exit proof`. Неизвестность/ошибка сохраняет обычный kill+wait; baseline/firewall/adapter rollback не пропускается. Обычный running stop сохраняет прежний путь. Результат предыдущего stop не кешируется.
+- Отменённое ожидание Xray firewall записывается как info cancellation; настоящий отказ без abort сохраняет warn. Форматы manifest/settings не меняются.
+
+#### Проверки окончательного кода
+
+- `npm.cmd run typecheck` — exit 0, повторён после финальной правки переключения профиля.
+- `npx.cmd vitest run src/main/ipMonitor.test.ts src/main/ipMonitorSession.test.ts src/main/ipMonitorWaves.test.ts src/main/tunRouteProbe.test.ts src/main/lifecycleCleanup.test.ts src/main/tunControllerStartup.test.ts src/main/auditFixesRegression.test.ts src/main/serverPickerSwitch.test.ts src/main/profileRotation.test.ts src/main/connectionLifecycle.test.ts src/main/lifecycleTimingAnalysis.test.ts --maxWorkers=4` — 11 files / 192 tests passed, exit 0. После добавления отказа baseline при переключении: `npx.cmd vitest run src/main/serverPickerSwitch.test.ts src/main/ipMonitorWaves.test.ts --maxWorkers=4` — 2 files / 15 tests passed, exit 0.
+- Новый route suite исполняет извлечённый production PowerShell с fake CIM boundary: fragmented prefixes, competing route, missing route, GUID/Up/driver/address mismatch, query failure; TypeScript boundary проверяет manifest, malformed reply и late session. IP suite проверяет 50 одновременных читателей, distinct owners, abort losers, late ignored abort, 429/backoff, отсутствие duplicate immediate wave и null baseline. Cleanup suite подтверждает свежий exit proof, обязательный kill при present/unknown и сохранение network rollback/native owner wait. Analyzer regression сохраняет новую preflight фазу отдельно от kill.
+- Первый focused run до исправления setup ожидания уже начавшейся IP-волны: 121 passed / 1 failed; setup теперь явно ждёт завершения этой волны. Первый полный run пересёкся с поздней правкой serverPicker и новым тестом: 2015 passed / 1 failed / 10 skipped, 101.64 s; он не принят как проверка окончательного дерева. Новый тест отдельно после правки прошёл.
+- Повторный `npm.cmd test -- --maxWorkers=4` на окончательном коде — **181 files passed / 2 skipped, 2017 tests passed / 10 skipped / 0 failed**, exit 0, **106.28 s**. Ожидаемый stderr RootErrorBoundary сохранён. `python -X utf8 ../docs/04-приёмочные-тесты/traceability/check-coverage.py` — exit 0, **AC 927/927 / F 210/210**. `git diff --check` — exit 0.
+- Изменения не доказывают AT-00-003 ≤1 s для полного native rollback: измеренная отмена до исправления была 3402 ms, после новой установки замер ещё нужен. Firewall startup/ordinary stop остаётся отдельным измеренным bottleneck. Live connect→egress, IPv6/утечки и новые start/stop/cancel времена этим прогоном не измерялись; действующий VPN и установленный клиент не менялись.
+- `npm.cmd run dist:win` — exit 0, повторный typecheck зелёный, Electron 44.4.3 / NSIS. Необязательный V8 snapshot пропущен: `@electron/mksnapshot` отсутствует. Проверены 8 новых маркеров compiled main внутри packaged ASAR; SHA256 main `b45dc2614702858c815dc2fea5f91dc37d95465c2a3a2e39bbf497ac9c386f04`.
+- Новый установщик `vpn-tunnel-enforcer/dist/VPN-Tunnel-Enforcer-Setup-1.1.22.exe`: **139166458 bytes**, **02.10.2026 23:18:45 МСК**, SHA256 **BEE4F9D7ACAE234DFFFBF8072ED5F55A59E4810DA12FECDF86139FA92B0B0EAF**, Authenticode **NotSigned**. Заменяет предыдущий artifact с тем же номером 1.1.22. Клиент агентом не установлен; новые фактические времена подключения/отмены пока не подтверждены. Собственные временные test/build логи удаляются после записи результатов.
+
+**Откат:** revert этого scoped исправления; profiles/settings/manifests совместимы с предыдущей сборкой. Вернёт прежнюю эвристику маршрутов и лишние IP/cleanup волны.
+
+
+### 2026-10-02 — этап 28: прямой API правил Windows Firewall (WP-3 / WP-0)
+
+**Граница:** владелец разрешил исправление и замеры следующего firewall участка. Начальный checkout `74c5019`, чистый. AT-03-003/004/007/008/009 и AT-00-005; сохранены условия AC-LEAK-KS/RCV, F-030/F-035/F-036/F-186. Нормативные документы не меняются. L3 leak/boot/OS-матрица этим этапом не объявляется выполненной.
+
+#### Установленный клиент перед изменением
+
+- Повторно прочитан текущий `app.log` через `node scripts/analyze-lifecycle-log.mjs <app.log>`: exit 0, 0 invalid lines, 0 out-of-order records, 0 незавершённых IPC. Последние штатные start-direct-vpn (23:21–23:22 МСК): **6306 / 5085 / 5198 ms**, stop-tun **3555 / 3349 ms**, cancel-tun **2871 ms**. Это сборка этапа 27, не COM-изменение.
+- Firewall await старта **2383 / 2105 / 2247 ms**, native apply **2140 / 1831 / 1952 ms**. Два тёплых apply: stale cleanup **346 / 381**, create allows **659 / 662**, set Block **98 / 131**, exceptions **714 / 766 ms**. Два обычных restore: profiles **188 / 194**, remove rules **1136 / 1137 ms**. Поэтому меняется именно доступ к правилам.
+
+#### Реальные Windows-замеры
+
+Замеры выполнялись в отдельном скрытом elevated процессе на **выключенных** временных правилах с уникальным `VPNTE-benchmark-<guid>-` префиксом. Настройки профилей не менялись. Существующие VPNTE-killswitch правила не создавались, не удалялись и не переключались. Пары выполнялись с чередованием порядка CIM→COM / COM→CIM. Новые правила независимо проверялись через NetSecurity/CIM.
+
+1. Read-only текущие собственные правила: первый CIM/COM **501/136 ms**, тёплые **364/31**, **361/63 ms**, counts **11/11**, имена совпали во всех парах.
+2. Базовый набор 11 отключённых Allow-правил, 3 пары:
+
+| Пара | Создание CIM / COM | Чтение CIM / COM | Удаление CIM / COM |
+| --- | ---: | ---: | ---: |
+| 0 | 609 / 83 ms | 399 / 26 ms | 450 / 175 ms |
+| 1 | 621 / 42 ms | 408 / 35 ms | 442 / 132 ms |
+| 2 | 616 / 42 ms | 449 / 40 ms | 495 / 143 ms |
+
+3. Набор production типов: program, interface, IPv4 loopback in/out, LAN CIDR set, TUN CIDR, DHCP UDP 67/68, NTP UDP 123, user app/IP. Попыток 12, реально 10 правил: IPv6 loopback `::1/128` **отклоняется обоими API** на этой Windows; прежние optional catch/WARN сохранены. Использован фактический production prelude, заменён только namespace тестовых правил и Enabled=False. Независимые CIM signatures сравнивали Direction/Action/Enabled/Profile/EdgeTraversalPolicy, Program, Remote/LocalAddress, Protocol/Remote/LocalPort, InterfaceAlias, PolicyStoreSourceType. **3/3 полных набора совпали**.
+
+| Пара | Создание CIM / COM | Чтение CIM / COM | Удаление с новым доказательством CIM / COM |
+| --- | ---: | ---: | ---: |
+| 0 | 604 / 212 ms | 326 / 77 ms | 954 / 172 ms |
+| 1 | 562 / 72 ms | 333 / 25 ms | 1022 / 157 ms |
+| 2 | 590 / 73 ms | 346 / 35 ms | 1149 / 167 ms |
+
+4. Расширенный набор: ещё обычные IPv6 remote/local `2001:db8::1/128` и **две разные IPv4 записи с одним DisplayName**, 14 реально созданных правил. Прогон совпал по времени с первым полным suite, поэтому нагрузка выше; не смешивается с тёплыми числами предыдущей таблицы. **3/3 signatures совпали**, обе одноимённые записи удалены; counts перед удалением 14 в каждом API.
+
+| Пара | Создание CIM / COM | Чтение CIM / COM | Удаление с доказательством CIM / COM |
+| --- | ---: | ---: | ---: |
+| 0 | 1350 / 315 ms | 508 / 124 ms | 2217 / 340 ms |
+| 1 | 1175 / 108 ms | 589 / 40 ms | 1909 / 320 ms |
+| 2 | 1237 / 119 ms | 617 / 37 ms | 1798 / 283 ms |
+
+Все законченные прогоны: cleanupOk=true, profilesUnchanged=true; production shaped и expanded также activeOwnRulesUnchanged=true. Первый строгий benchmark остановился на старом IPv6 loopback HRESULT 0x80070057 и удалил свои артефакты; затем failures регистрировались отдельно для каждой shape и сравнивались наборы реально созданных правил. Первое сравнение выявило ошибку нового интерфейсного setter: string[] не подходит COM Automation. Простое приведение к object[] в legacy host сохраняло string[] через covariance; исправлено явным `[Array]::CreateInstance([object], count)` и заполнением строками. Тест с реальным **не зарегистрированным** FwRule проверяет setter production функции, а Add подменён объектом в памяти, без системных эффектов.
+
+#### Реализация и границы безопасности
+
+- `firewallRulesApi.ts`: New/Get/Remove через `HNetCfg.FwPolicy2` / `HNetCfg.FwRule`, ленивый handle на команду; коллекции и доказательства не кешируются. Profile Any — NET_FW_PROFILE2_ALL, protocol ставится до ports, EdgeTraversal=false. Input создания ограничен нашими именами/Allow/Any/in-or-out/boolean/TCP-or-UDP. Query принимает только собственный namespace, сохраняя видимость старых prefix имён. После удаления — свежая проверка нулевого остатка, включая duplicates; factory/query/remove/add/null failures не превращаются в успех.
+- Профили по-прежнему snapshot/set/restore через NetSecurity, сохраняется NotConfigured и независимый read-back каждого профиля. Ленивый COM factory позволяет выполнить все три независимых profile restore даже при недоступном rule API; такая компенсация остаётся ошибкой, manifest не удаляется как успешно завершённый.
+- Durable prepared journal, trusted TUN barrier, обязательные allows до Block, exception validation и независимый CIM filter read-back сохранены. Автоматического повторения после COM ошибок/неизвестного helper outcome нет. Известный отказ helper до dispatch сохраняет прежний защищённый file fallback. Physical-adapter policy отдельно запрещает firewall COM и новые primitives; общие опасные токены не разрешались.
+- `command timing` дополнен фиксированным `ruleBackend: com | netsecurity`; native phase markers сохранены. Это наблюдаемость, не доказательство защищённости.
+- Справка Microsoft: [INetFwRule Interfaces](https://learn.microsoft.com/en-us/windows/win32/api/netfw/nf-netfw-inetfwrule-put_interfaces), [ALL profiles](https://learn.microsoft.com/en-us/windows/win32/api/icftypes/ne-icftypes-net_fw_profile_type2), [Add](https://learn.microsoft.com/en-us/windows/win32/api/netfw/nf-netfw-inetfwrules-add), [Remove](https://learn.microsoft.com/en-us/windows/win32/api/netfw/nf-netfw-inetfwrules-remove). Поведение проверено на текущем хосте; равенство выключенных фильтров не заменяет L3 egress/IPv6/утечки/Group Policy/boot recovery acceptance.
+
+#### Проверки
+
+- Focused: `npx.cmd vitest run src/main/firewallRulesApi.test.ts src/main/firewallTransactions.test.ts src/main/firewallExceptionReadback.test.ts src/main/firewallManifestSecurity.test.ts src/main/firewallKillSwitchValidation.test.ts src/main/elevatedPsHelper.test.ts --maxWorkers=4` — **6 files passed, 139 tests passed / 1 skipped**, exit 0, 13.62 s. Последующая проверка фиксированного backend logging включена в окончательный full suite.
+- До адаптации старых NetSecurity fixtures первый focused run: 29 failed / 94 passed / 1 skipped. Затем исправлены fixture boundary, sort/path oracle и интерфейсный setter; проверка helper также поймала запрещённый токен в комментарии. Удалён только этот комментарный токен, blacklist не ослаблен. Промежуточные failed runs не приняты за успех.
+- Первый full `npm.cmd test -- --maxWorkers=4`: **182 files passed / 2 skipped, 2039 tests passed / 10 skipped / 0 failed**, exit 0, 109.76 s. После него добавлены legacy-prefix regression и backend log oracle, запущен повторный полный suite на окончательном коде.
+- `python -X utf8 ../docs/04-приёмочные-тесты/traceability/check-coverage.py`: exit 0, **AC927/927 F210/210**.
+
+**Откат:** revert scoped firewall API change; профили, settings и recovery manifest форматы совместимы. Вернёт более медленные NetSecurity операции с правилами. Компонентные замеры подтверждают ускорение, полный установленный start/stop/cancel новой сборки пока не измерен.
+
+- Окончательный `npm.cmd run typecheck` — exit 0; повторён сборкой. Финальный `npm.cmd test -- --maxWorkers=4` — **182 files passed / 2 skipped, 2040 tests passed / 10 skipped / 0 failed**, exit 0, **109.29 s**. Ожидаемый stderr RootErrorBoundary сохранён. После этого runtime/test source не менялся. `git diff --check` exit 0.
+- `npm.cmd run dist:win` — exit 0, Electron 44.4.3 / NSIS. Необязательный V8 snapshot пропущен (`@electron/mksnapshot` отсутствует). Первый artifact verifier использовал POSIX путь внутри Windows ASAR и не нашёл файл; исправлен только временный verifier на native path separators. Повторная проверка прошла: **10 маркеров** нового backend/старых safety checks, packaged main побайтово равен `out/main/index.js`; SHA256 **62b4552ec859d52b45cfd0f82df2f23e2cbfb11d09925a6fb31b4031e05d3949**.
+- Финальное read-only сравнение на окончательном source: **CIM11 / COM11, имена совпали**. Отдельный свежий NetSecurity query: **0 VPNTE-benchmark правил осталось**. Удаление собственных временных benchmark/test/build/verifier файлов дважды отклонено автоматической проверкой инструментов: `blocked by policy`, иной причины не предоставлено. Файлы оставлены в `.tmp`; прежние чужие файлы сохранены.
+- Установщик `vpn-tunnel-enforcer/dist/VPN-Tunnel-Enforcer-Setup-1.1.22.exe`: **139167722 bytes**, **03.10.2026 00:02:15 МСК**, SHA256 **DDEDA7E356AD54EDD40BDEE8AFC59972845F1FBE5CFF634B77755E89623C16BC**, Authenticode **NotSigned**. Заменяет предыдущий artifact с тем же номером 1.1.22. Агент его не устанавливал, действующий VPN сохранён; full installed start/stop/cancel и L3 на этой сборке пока не измерены.
+
+### 2026-10-03 — этап 29: отмена и повторные изменения физического адаптера (WP-3 / WP-0)
+
+**Граница:** владелец разрешил продолжать ускорение по прежней схеме. Начальный checkout `2a5c410`, чистый. Прочитаны критерии WP-3 и WP-0; сохранены AT-03-006/007/010/011/012, AT-00-003 и требования AC-LEAK-NET/RCV. Соответствующие условия F-038/F-039/F-040/F-043/F-044/F-150/F-152 не объявляются полностью закрытыми этим этапом. Опровергнутые находки не исправляются, нормативные `docs/` не меняются.
+
+#### Установленная сборка этапа 28: исходные измерения
+
+- Установленный main совпадает с packaged main этапа 28 (`62b4552e…`). После перезапуска в 00:08:32 МСК свежие успешные start-direct-vpn: **4501 / 3578 / 3273 ms**, обычные stop-tun **3276 / 2966 ms**, cancel-tun **3296 ms**. Отменённый start **2819 ms** не засчитывается как успешное подключение. Analyzer: 0 invalid lines, 0 out-of-order, 0 незавершённых IPC. Последующие свежие public-IP ответы успешны; это не полная L3 проверка утечек.
+- Firewall await уже **502 / 643 / 403 ms**; обычный remove собственных правил **316 / 197 ms**. Остаток: полный adapter lockdown **2621 ms** холодный / **1833 / 1813 ms** тёплые; mutation batch **1130 / 1132 ms**, хотя snapshot фиксирует IPv6=false и forceDns=false. Baseline rollback обычного stop **1005 / 1056 ms**, runtime kill **743 / 700 ms**, exit wait **221 / 145 ms**.
+- Firewall program allow исполняется за **29 / 28 ms**, но его roundtrip **476 / 472 ms**: большая часть ожидания совпадает с предыдущими physical snapshot/transition командами. Оба policy используют один последовательный runner. Само правило не является причиной этих ~450 ms очереди.
+- Cancel signal **00:09:12.752**, Xray exit доказан **13.244**, однако physical mutation batch начинается **13.262**, длится **1020 ms**, затем adapter rollback **237 ms**. Старый apply не получает AbortSignal и продолжает новые изменения после отмены. Startup завершает компенсацию в **14.598**, окончательный cancel — **16.048**; финальный stop сохраняет fresh exit proof и обязательный baseline rollback **1020 ms**.
+
+#### Исправления
+
+- Startup передаёт свой AbortSignal в adapter apply. Проверки отмены стоят на входе, после trusted manifest read, предыдущего rollback, завершения общих snapshot reads, durable pending journal и непосредственно перед native/fallback dispatch. Отмена до journal/native effects возвращает cancelled без новых изменений. После journal ownership остаётся у обычной компенсации; уже отправленный native пакет не прерывается, startup ждёт результат и откат. Отмена в очереди после отправки пакета остаётся этим безопасным путём; параллельный mutation runner не добавлен.
+- Tun wrapper сохраняет adapter recovery ownership при отмене, включая поздний native отказ; компенсация остаётся у владельца старта после runtime exit proof. Добавлены диагностические поля cancelled, phase/pendingRecovery и ipv6AlreadyOff. Отмена до native apply не выдаётся за ошибку защиты.
+- IPv6 отключается только если свежая binding query одного найденного по GUID адаптера вернула ровно одно состояние boolean=true. Свежий false даёт already-off без повторного Disable-NetAdapterBinding. Пустой/двойной/неboolean ответ и неуспешный read-back дают предупреждение, без ложного подтверждения. Для мобильного uplink прежнее исключение сохранено: ms_tcpip6 не отключается.
+- Два `reg.exe add` заменены прямым .NET Registry API, уже применяемым в recovery. Значение DWORD=1, подтверждённое свежим чтением, повторно не пишется. После настоящей записи проверяются тип/значение; handle закрывается. Snapshot и точное восстановление прежнего DWORD/отсутствия сохранены. Без native proof обеих политик apply не признаётся проверенным.
+- Physical PS transport теперь допускает fallback только для известных отказов **до dispatch**: script-rejected / script-too-large / unavailable. Timeout, process exit/stop, неизвестная ошибка и nonzero helper reply не переигрывают пакет; консервативный journal остаётся для восстановления. Он также сохраняется при частичных native предупреждениях: failed read-back мог следовать успешной записи, поэтому отсутствие success marker не означает отсутствие эффекта.
+
+#### Безопасные замеры
+
+1. Старый и новый production apply исполнялись с одинаковыми управляемыми OS boundaries: abort во время snapshot. Старый код после abort отправляет **1 mutation batch / 2 journal writes**, новый — **0 / 0**. Это проверка количества действий в воспроизведении, не live IPC latency.
+2. Из нового production native блока извлечена read-only проверка текущего физического адаптера по GUID, IPv6 и двух DNS-политик. Disable cmdlet затенён отказом, registry handles открыты только для чтения; DNS/transition mutations и cache flush не выполняются. Первый sample **433 ms**, тёплые **343 / 313 / 336 / 330 / 306 ms**. Во всех 6 samples ipv6AlreadyOff/ipv6Verified/policiesVerified=true; bindingUnchanged=true. Это время проверок, а не полного apply: его нельзя считать напрямую эквивалентным старому mutation batch **1130 / 1132 ms**.
+3. Реальная запись/идемпотентность Registry API измерена на уникальном **HKCU\\Software\\VPNTE-Benchmark\\<guid>** fixture, с чередованием reg→.NET / .NET→reg. При исходном DWORD=0: reg **27 / 12 / 12 ms**, .NET **62 / 0 / 0 ms**; первый .NET sample холодный и медленнее. При уже установленном DWORD=1: reg **11 / 11 / 11 ms**, .NET **0 / 1 / 0 ms**. 0 ms означает меньше разрешения миллисекундного Stopwatch, не нулевую стоимость. Все **12 результатов** независимо подтверждены `reg.exe query` как REG_DWORD=1; fixture удалён, cleanupOk=true. HKLM, действующий VPN и настройки реальных адаптеров не менялись.
+
+#### Проверки и артефакт
+
+- `npm.cmd run typecheck` — exit 0. Первоначальная проверка нашла только ошибку типизации аргументов нового test mock; она исправлена. Начальный focused run прошёл 165 tests, но дочерний PowerShell печатал progress CLIXML; тестовый ProgressPreference исправлен. Первый native read-only benchmark отказался работать из-за второго виртуального Up интерфейса; выбор стенда ограничен HardwareInterface, изменения системы до отказа не выполнялись.
+- Финальный `npx.cmd vitest run src/main/physicalAdapterLifecycle.test.ts src/main/physicalAdapterHotspot.test.ts src/main/physicalAdapterLockdownSource.test.ts src/main/dnsPolicySnapshot.test.ts src/main/lifecycleCleanup.test.ts src/main/tunControllerStartup.test.ts src/main/elevatedPsHelper.test.ts --maxWorkers=4` — **7 files / 174 tests passed**, exit 0. Проверены начальный/поздний abort, journal boundary, уже отправленный native пакет, compensation ownership, missing proof, helper replay/fallback, полный helper policy. Извлечённые production PowerShell блоки выполняются с fake cmdlets/registry object: disabled/enabled/empty/ambiguous/nonboolean binding, failed read-back, absent/zero/already-1/wrong-kind registry.
+- `npm.cmd test -- --maxWorkers=4` — **183 files passed / 2 skipped, 2073 tests passed / 10 skipped / 0 failed**, exit 0, **113.14 s**. Ожидаемый RootErrorBoundary crash stderr сохранён. `python -X utf8 ../docs/04-приёмочные-тесты/traceability/check-coverage.py` — exit 0, **AC927/927 / F210/210**. `git diff --check` — exit 0.
+- `npm.cmd run dist:win` — exit 0, Electron 44.4.3 / NSIS, повторный build typecheck зелёный; optional V8 snapshot пропущен как прежде. Семь маркеров проверены внутри packaged ASAR, main совпадает с compiled output: SHA256 **ab4a2493df59584735f6e33949d3c5821067722828fc959242747b8d119f81a2**.
+- Установщик `vpn-tunnel-enforcer/dist/VPN-Tunnel-Enforcer-Setup-1.1.22.exe`: **139168386 bytes**, **03.10.2026 00:32:56 МСК**, SHA256 **1C830BDB249EB61B2BE2DBD7CA92E7A3ABC9E4014F5334BD20E0FABE376ABC53**, Authenticode **NotSigned**. Заменяет предыдущий файл того же номера. Агентом не установлен; новые полные start/stop/cancel времена, AT-00-003 ≤1 s и L3 egress/leaks/NAT64/boot ещё не подтверждены. Baseline rollback около 1 s остаётся измеренным следующим участком.
+- После записи результатов удалены **11 собственных временных файлов этого этапа** из `.tmp`; файлы предыдущих этапов не затронуты.
+
+**Откат:** revert scoped adapter/cancellation change. Manifest/settings/profile форматы совместимы; вернёт повторный Disable/reg.exe и прежний post-abort apply.
+
+### 2026-10-03 — этап 30: baseline rollback и остановка ядер (WP-3 / WP-2 / WP-0)
+
+**Граница:** владелец разрешил следующий участок и запросил тесты. Начальный checkout `cf3b16b`, чистый. Прочитаны требования системной безопасности, WP-3 / WP-0 и решения раздела 10 ТЗ-06. Сохранены AT-03-007/012, AT-02-001/005 и AT-00-003; нормативные `docs/` не менялись. Полный L3 acceptance и cancellation ≤1 s этим этапом не объявляются выполненными.
+
+#### Установленная сборка этапа 29
+
+- После перезапуска в 00:39:28 МСК установленный main совпадал с этапом 29 (`ab4a2493…`). Холодный start-direct-vpn **4938 ms**, тёплые **3037 / 3116 ms**; обычные stop-tun **3394 / 3198 ms**; cancel-tun **2221 ms**. Отменённый start **1866 ms**, success=false, не засчитывается как успешное подключение. Analyzer: 0 invalid lines / 0 out-of-order / 0 незавершённых IPC. Свежие IP/probe ответы успешны, это не полный leak acceptance.
+- Обычный stop: runtime-stop **788 / 787 ms**, отдельный exit wait **231 / 171 ms**, baseline rollback **1104 / 1118 ms**, firewall restore **564 / 520 ms**, adapters restore **322 / 284 ms**. После ранней отмены baseline **1048 ms** при окончательном stop **1281 ms**. Поэтому изменяется запуск PowerShell в baseline и runtime stop.
+- Этап 29 подтверждён: adapter native batch **691 / 558 / 537 ms**, общий lockdown **2179 / 1344 / 838 ms**. Cancel signal 00:40:06.189, adapter cancel 06.498 (309 ms), phase=snapshot, pendingRecovery=false, applied=false: после отмены новый mutation batch не запускался.
+
+#### Реализация
+
+- Baseline восстанавливает девять независимых typed registry snapshots с прежним read-back и уведомляет WinINet в **одном** PowerShell. SID guard, trusted manifest, operation lock и точные типы значений сохранены. Отказ одного шага не отменяет остальные и уведомление; malformed report / notification failure / partial restore сохраняют manifest. Удаление снимка требует всех девяти успешных результатов и успешного уведомления. Новое `baseline native phase timing` показывает registryMs / notifyMs.
+- Fixed `stop-runtime` request использует уже существующий recovery worker: только main-owned runtimeDir, три фиксированных имени ядер, прежний ownership predicate по пути. Произвольные PID, executable names и scripts запрещены на Node и PowerShell границах. Ошибка CIM query теперь возвращает отказ, а не пустой успех. Частичная остановка остаётся видимой владельцу cleanup.
+- Прежний deadline 8000 ms сохранён. Fallback на свежий PowerShell допускается только при типизированном `unavailable` до dispatch. Timeout, lost reply, worker exit, protocol/rejected/busy/closed и forged error не запускают повторную остановку. Ответ проверяется по полям, целочисленным counts и фиксированным именам; `{}` больше не означает успех.
+- Результат Stop-Process **не** является exit proof: прежняя свежая проверка отсутствия процессов, startup/native owner wait и сохранение защиты до доказанного выхода не удалены. Изменения не усиливают прежний prefix ownership predicate и не объявляют отдельные находки ownership полностью закрытыми.
+
+#### Нативные замеры на Windows
+
+Три пары с чередованием порядка, production функции до/после `cf3b16b`. Действующий VPN и установленный клиент не менялись.
+
+| Пара | Runtime stop: свежий PS / worker | Baseline: два PS / один PS |
+| --- | ---: | ---: |
+| 0 | 489 / 150 ms | 975 / 573 ms |
+| 1 | 455 / 92 ms | 796 / 545 ms |
+| 2 | 441 / 92 ms | 811 / 526 ms |
+
+- Runtime fixture: собственный Node child с переименованным executable в уникальной `.tmp/StopFixture-<uuid>` директории и отдельный настоящий recovery worker. Во всех 6 samples candidates=1 / killed=1, tracked child exit и последующий свежий inspect-runtime подтверждены. cleanupOk=true / workerExited=true. Измерен warm worker dispatch; его первоначальный запуск и полное отключение VPN в таблицу не включены.
+- Baseline fixture: уникальный HKCU subtree, настоящие production restore/read-back для девяти slots и шести типов Registry, включая отсутствие значения. WinINet Add-Type declaration действительно компилируется; DLL calls заменены проверкой fixture, реальные уведомления WinINet не отправлялись. В каждом sample 9 verified steps / 6 verified types, journalClearedAfterProof=true, fixtureCleanupOk=true. Merged registry **88 / 79 / 78 ms**, notification compilation **95 / 95 / 90 ms**. Реальные proxy/DNS/HKLM значения не менялись; protected manifest I/O и фактическая доставка WinINet notification этим benchmark не измерены.
+- Полученные числа подтверждают ускорение компонентов. Новые полные installed stop/cancel времена требуют установки артефакта и свежих логов.
+
+#### Проверки
+
+- До изменений: `npx.cmd vitest run src/main/systemNetwork.test.ts src/main/tunRuntimeExitProof.test.ts src/main/ownedRuntimeStatus.test.ts src/main/recoveryPsProtocol.test.ts src/main/recoveryPsWorker.test.ts src/main/recoveryPsWorkerNative.test.ts src/main/lifecycleCleanup.test.ts --maxWorkers=4` — **7 files / 224 passed / 1 skipped**, exit 0, 36.68 s.
+- Первый expanded focused run: **298 passed / 1 failed / 1 skipped**. Старый test oracle запрещал любое использование worker для stop; обновлён на различение fixed stop-runtime и read-only inspect-runtime. После исправления две suites отдельно: **48 passed**, exit 0.
+- Финальный `npx.cmd vitest run src/main/systemNetwork.test.ts src/main/ownedRuntimeStop.test.ts src/main/tunRuntimeExitProof.test.ts src/main/ownedRuntimeStatus.test.ts src/main/recoveryPsProtocol.test.ts src/main/recoveryPsWorker.test.ts src/main/recoveryPsWorkerNative.test.ts src/main/lifecycleCleanup.test.ts src/main/auditFixesRegression.test.ts --maxWorkers=4` — **9 files / 299 passed / 1 skipped / 0 failed**, exit 0, **52.62 s**. Native dispatcher fixtures подменяют Stop-Process, не завершают системные процессы. Baseline fixtures подменяют уведомление WinINet, сохраняют настоящие registry type/read-back checks.
+- Финальный `npm.cmd run typecheck` — exit 0. `python -X utf8 ../docs/04-приёмочные-тесты/traceability/check-coverage.py` — exit 0, **AC 927/927 / F 210/210**.
+
+- Первый полный `npm.cmd test -- --maxWorkers=4`: **2127 passed / 1 failed / 10 skipped**, 183 files passed / 1 failed / 2 skipped, exit 1, 111.54 s. Ещё один source test искал прежний inline stop script; теперь проверяет production shared script, его вызов и исключение external proxy. Поведенческие/native ownership tests сохранены.
+- После последней правки: `npx.cmd vitest run src/main/tunControllerRecoverySource.test.ts src/main/ownedRuntimeStop.test.ts src/main/recoveryPsProtocol.test.ts --maxWorkers=4` — **3 files / 132 passed**, exit 0, 55.84 s. Повторный окончательный `npm.cmd test -- --maxWorkers=4` — **184 files passed / 2 skipped, 2128 tests passed / 10 skipped / 0 failed**, exit 0, **106.17 s**. Ожидаемый stderr RootErrorBoundary сохранён. Повторный typecheck после последней правки — exit 0. Runtime/test source после этого не менялся.
+- `npm.cmd run dist:win` — exit 0, Electron 44.4.3 / NSIS. Optional V8 snapshot пропущен (`@electron/mksnapshot` отсутствует). Шесть новых/сохранённых markers проверены внутри packaged ASAR; main побайтово равен compiled output, SHA256 **1763c21247e138d95973fe701ceb3aae3a6ce6f8796f3474d66c581fc5206527**. Последующее исправление затронуло только test oracle, runtime source после сборки не менялся.
+- Новый установщик `vpn-tunnel-enforcer/dist/VPN-Tunnel-Enforcer-Setup-1.1.22.exe`: **139168882 bytes**, **03.10.2026 01:04:20 МСК**, SHA256 **68AAA3C8FBB630D4952A0D16EE0890FFD32510FCBE803C47C2C6007A885BC6B6**, Authenticode **NotSigned**. Заменяет предыдущий artifact с тем же номером; агентом не установлен. Полные новые stop/cancel и L3/boot acceptance ещё не измерены.
+- Финальные traceability **AC 927/927 / F 210/210** и `git diff --check` — exit 0. После записи результатов удалены **12 собственных временных файлов этапа 30**, прежние `.tmp` артефакты сохранены.
+
+**Откат:** revert scoped baseline/stop change. Manifest/settings/profile форматы совместимы; возвращаются отдельный notification процесс и свежий PowerShell для runtime stop.
+
+### 2026-10-03 — этап 31: переключение серверов и ложная утечка IP (WP-0 / WP-7 / WP-10)
+
+**Граница:** владелец явно разрешил исправить все четыре подтверждённых дефекта после разбора последних логов. Начальный checkout `0c38ac7`, чистый. Прочитаны AGENTS, ТЗ-06/раздел 10, нормативные lifecycle/priority/check-verdict разделы и критерии WP-2/7/10. Сохраняются AT-00-003, AT-07-001/005/006/012, AT-10-003/006 и AC-CONN-ADAPT-001…006. Участок конкуренции ручной смены с adaptive retry относится к F-125/F-127; полная координация schedule/rotation/AutoPilot и все их AT этим этапом не объявляются закрытыми. Нормативные `docs/` не менялись.
+
+#### Подтверждённая цепочка в установленной сборке
+
+- 11:32:21.207 МСК — ручной `servers:select` Norway; завершён 11:32:33.775, **12568 ms**. Network identity **905 ms**. После него **8467 ms** ожидания публичного IP старого недоступного Germany перед первым protected restart. Новый runtime готов через **2217 ms** от начала hot reload, затем свежая IP-база. Защитные меры по логам сохранены.
+- 11:32:35.317 — прежняя незавершённая adaptive verification запускает fallback; 11:32:35.963 — стартует Fastest, 11:32:37.400 — TUN готов. База IP остаётся от Norway, интерфейс также продолжает показывать Norway.
+- 11:32:50.977 — новый публичный IP; 50.986 renderer объявляет утечку только из-за `ip !== vpnIp`. Фоновый независимый leak-self-test после переключения неоднократно фиксирует physicalAdapterReached=false, publicIpMismatch=false, dnsLeakDetected=false. Это не полная L3 приёмка.
+- Свежие TLS-запросы к api.ipify.org и icanhazip.com через SOCKS текущего принадлежащего приложению Xray подтвердили адрес на скриншоте как VPN egress: **316 / 257 ms**. В публичном журнале адрес не дублируется. Действующий VPN и сетевые настройки во время работы агента не переключались.
+
+#### Исправления
+
+- `servers:select` немедленно инвалидирует generation/context адаптивной проверки, отменяет её AbortController и IP-запросы до ожидания fingerprint. Если нативный adaptive restart уже отправлен, ручная смена ждёт его завершения; старый владелец после этого не меняет профиль/IP/статус. Во время ручной смены running event не запускает ещё одну адаптивную проверку. После завершения создаётся контекст выбранного сервера.
+- `collectAdaptiveSamples` проверяет владельца и отмену после каждого ожидания/пробы, сохраняет окно 20 s и правило ≥2 из 3. Проверка также привязана к startedAt текущего runtime. `tunnelHttpProbe` принимает AbortSignal, отменяет текущую волну и не публикует поздние success/cache/diagnostics прежней проверки.
+- Ручная смена и все три adaptive restart пути используют `withProtectedIpTransition`: defer IP monitoring → invalidate прежней базы → прежний protected native restart → свежий route proof → одна свежая provider wave для rebaseline → release. Owner fence проверяется после асинхронных границ. Новое egress равное старому допустимо при свежих доказательствах; шесть лишних проб для такого случая убраны. Старый сетевой запрос IP до restart полностью удалён. Недоступность провайдеров или маршрутов остаётся `not-checked`; старый кеш не принимается за новую базу. Ошибка устаревшего владельца не очищает состояние новой операции.
+- При успешном нативном adaptive fallback выбранный сервер и существующий `server-active-changed` IPC обновляются под тем же владельцем. UI получает фактический профиль. Capabilities пересчитываются, learning прежнего профиля инвалидируется. Disabled/removed profiles не используются как fallback и отклоняются в ручной IPC-смене.
+- Public-IP монитор передаёт typed evidence через preload: совпадение с базой — `passed` для IP-наблюдения, расхождение — `indeterminate`, недоступность/отсутствие базы — `not-checked`. Это не доказательство полной защиты. Разный egress сам по себе больше не фабрикует real-IP leak. Renderer сохраняет baseline из main, показывает отдельную жёлтую пометку и не геолокирует неподтверждённый IP. Независимые physical/DNS leak alarms сохранены; ru/en строки добавлены.
+- Логи содержат причину, номер попытки и elapsedMs обновления базы или `not checked`. Изменение verdict при том же IP также публикуется; одинаковые периодические наблюдения не создают повторных уведомлений.
+
+#### Проверки и ограничения
+
+- Первая целевая команда (10 suites из списка ниже): **96 passed / 2 failed**. Устарели source oracle dependencies Dashboard и ожидание полного отсутствия callbacks при недоступности baseline. Новая публикация явно содержит `not-checked`, не cached success. Оба ожидания обновлены.
+- `npx.cmd vitest run src/main/serverPickerSwitch.test.ts src/main/serverPickerSource.test.ts src/main/serverPickerTunnelProbe.test.ts src/main/adaptiveVerification.test.ts src/main/protectedIpTransition.test.ts src/main/publicIpEvidence.test.ts src/main/ipMonitorSession.test.ts src/main/ipMonitorWaves.test.ts src/renderer/AppSource.test.ts src/main/mainIpcRegression.test.ts src/renderer/pages/Dashboard.cancel.test.tsx --maxWorkers=4`: **11 files / 108 passed / 0 failed**, exit 0, 5.37 s.
+- Первый `npm.cmd test -- --maxWorkers=4`: **186 files passed / 1 failed / 2 skipped, 2150 passed / 1 failed / 10 skipped**, exit 1, 127.44 s. Старый `auditFixesRegression` искал route guard по тексту внутри serverPicker. Проверка перенесена на общий helper, с обязательной проверкой порядка route proof до свежего rebaseline и отказа при !routesActive.
+- Дополнительный `npx.cmd vitest run src/main/protectedIpTransition.test.ts src/main/auditFixesRegression.test.ts src/main/serverPickerSwitch.test.ts src/renderer/AppSource.test.ts --maxWorkers=4`: **4 files / 59 passed / 0 failed**, exit 0, 2.73 s. Далее добавлены wiring assertions для всех adaptive branches; полный suite повторяется на окончательном source.
+- `npm.cmd run typecheck`: exit 0. `python -X utf8 ../docs/04-приёмочные-тесты/traceability/check-coverage.py`: exit 0, **AC 927/927 / F 210/210**. Эти counts показывают трассировку, не выполнение всей Windows acceptance matrix.
+- Регрессия с никогда не завершающимся old-IP getter подтверждает, что ручная смена больше его не вызывает и завершается. Installed switch latency после обновления пока не измерена; **8.47 s** — удалённое ожидание в старом логе, не обещание нового итогового времени.
+
+**Откат:** revert scoped profile/IP transition change. Settings/profile/manifest форматы совместимы; вернёт прежнюю задержку, гонку и сравнение IP как утечку.
+
+- Окончательный `npm.cmd test -- --maxWorkers=4`: **188 files passed / 2 skipped, 2156 tests passed / 10 skipped / 0 failed**, exit 0, **129.93 s**. Ожидаемый crash stderr тестов RootErrorBoundary сохранён. Typecheck и traceability повторены на final source — exit 0. Runtime/test source после этого не менялся.
+- `npm.cmd run dist:win`: exit 0, Electron **44.4.3** / NSIS. Optional `@electron/mksnapshot` отсутствует, snapshot пропущен; сборка не прервана. Packaged main/preload побайтово равны compiled outputs; подтверждены **6 main / 3 renderer markers**. Packaged main SHA256 **50f1a1c68d92edad6509eaf96f8d273db72f23290959a099badc7c84244f48d1**.
+- Установщик `vpn-tunnel-enforcer/dist/VPN-Tunnel-Enforcer-Setup-1.1.22.exe`: **139170274 bytes**, **03.10.2026 12:02:17 МСК**, SHA256 **4368E9C63E696578947055D94B9C67D83A1D459A98492863AB4BBC5927E2547F**, Authenticode **NotSigned**. Заменяет предыдущий same-version artifact. Агентом не установлен; текущий VPN сохранён. Новый installed switch/start/stop/cancel и полная L3 matrix пока не измерены.
+
+### 2026-10-03 — этап 32: исправления ревью PR #16 (WP-2 / WP-4 / WP-7 / WP-10)
+
+Перед изменениями подтверждены remote newnout6-a11y/vpn, ветка codex/hotspot-lifecycle-server-switch и совпадение локального/удалённого head 4f119420d13ebcc217577f4dcab5f31baed5d8c4. Рабочее дерево было чистым. Все три приложенных замечания подтверждены.
+
+- P1, index.ts: убрана публикация sibling сразу после локального restart. Общий barrier уведомляет только после свежих route/IP доказательств; затем provisional sibling проходит настоящее окно 20 s и 3 HTTP-пробы. Select/persist и server-active-changed выполняются только при >=2 успехах, текущем owner и том же startedAt. При отсутствии route/IP proof либо провале health временный runtime останавливается с preserveNetworkProtection:true, прежний выбранный профиль сохраняется, IP evidence очищается, adaptive status получает ошибку. Старый неработающий сервер не запускается повторно; выбран безопасный остановленный контур с сохранением защиты. Переход остаётся сериализованным до конца проверки/cleanup; ручная смена отменяет окно и поздние результаты. Повторное 20-секундное окно после уже проверенного sibling устранено.
+- P2, protectedIpTransition.ts: false/исключение route proof теперь приводит к задержке 500 ms и следующей попытке (до 3), а не break. IP-запрос не выполняется без доказанных маршрутов. Постоянная ошибка остаётся not-checked; superseded owner не выполняет повторные effects.
+- P2, xrayEngine.ts: null/пустой/невалидный ответ resolver для hostname native graph вызывает явную ошибку до изменения адресов, записи конфига, preflight и spawn. Весь граф обновляется только после успешного разрешения всех hostname; исходный профиль и SNI сохраняются. Подтверждены literal IPv4/IPv6 и resolved IPv6. Адрес узла не включается в новое сообщение ошибки.
+
+Трассировка: AT-10-003/004/006, AT-07-006/012, AT-04-006, AT-02-002/004; F-124/125/127, F-050, F-086, F-022/023/024. Это регрессии соответствующих механизмов, не доказательство всей L3/chaos acceptance matrix.
+
+Проверки окончательного source:
+
+- `cd vpn-tunnel-enforcer; npx.cmd vitest run src/main/adaptiveFallbackTransition.test.ts src/main/adaptiveVerification.test.ts src/main/protectedIpTransition.test.ts src/main/profileTransitionWiring.test.ts src/main/nativeXrayCompatibility.test.ts src/main/lifecycleCleanup.test.ts --maxWorkers=4`: exit 0, 6 files / 121 passed / 0 failed, 6.50 s. Затем обновлён старый source oracle auditFixesRegression для continue вместо break и выполнен полный suite.
+- `npm.cmd run typecheck`: exit 0 (повторён после окончательных правок).
+- `npm.cmd test -- --maxWorkers=4`: exit 0, 189 files passed / 2 skipped; 2172 tests passed / 10 skipped / 0 failed, 96.16 s. Ожидаемый crash stderr RootErrorBoundary не является падением suite.
+- `python -X utf8 ../docs/04-приёмочные-тесты/traceability/check-coverage.py`: exit 0, AC 927/927, F 210/210.
+- `git diff --check`: exit 0.
+
+Установщик в этом repair не пересобирался и не устанавливался; предыдущий dist artifact не содержит этап 32. Живой VPN агентом не переключался. Windows installed latency, packet leakage и boot recovery здесь не проверялись. Нормативные docs не изменены.
+
+### 2026-10-03 — этап 33: ускорение DNS при смене сервера (WP-2 / WP-0)
+
+**Исходные данные:** по прямому запросу владельца ускорить смену. Исходный checkout 52837aa, worktree чистый; PR #16 соответствует remote newnout6-a11y/vpn и ветке codex/hotspot-lifecycle-server-switch. На remote обнаружен дополнительный пустой ee254b2 (chore: refresh PR checks), выполнен fast-forward: runtime/test source не менялся. Прочитаны AGENTS, AT-02-002/004/005 и нормативный lifecycle; сохранены fresh route/IP barrier, >=2/3 adaptive health и обязательное разрешение native graph до config/spawn. Нормативные docs не изменялись.
+
+#### Измеренный участок
+
+Установленная сборка после ручного обновления содержит main repair 52837aa (SHA256 9d489d2ac9ee2969bd9fa119672631421f741e96e76cc846b3886787e9bf56e2). JSONL app.log, 03.10.2026 МСК:
+
+- 20:15:17.048–20.382: Sweden switch **3334 ms**, network identity **499 ms**, protected stop **445 ms**, Xray **186 ms**, TUN start **1035 ms**. Fresh IP после running примерно **779 ms**.
+- 20:15:30.853–37.013: Norway switch **6160 ms**, identity **461 ms**, protected stop **300 ms**, Xray **3186 ms**, TUN start **4029 ms**. resolve-connection-graph **3029 ms**, один resolve4 вернул положительный ответ за **3025 ms**; остальные DNS чтения около 11 ms. Fresh IP после running примерно **793 ms**. Это положительный задержанный DNS, а не доказанный отказ удалённого сервера.
+- 20:16:02 adaptive health **3/3**; последующие self-tests physicalAdapterReached=false / publicIpMismatch=false / dnsLeakDetected=false. Это наблюдения текущей сессии, не полная L3 приёмка.
+
+#### Изменение
+
+- `resolveXrayEndpoint` даёт effective c-ares resolver 100 ms, затем параллельно запускает существующий IPv4 system lookup. Первый валидный IPv4 завершает чтение. Если основной DNS быстро отвечает, дополнительного lookup нет; при раннем отказе fallback начинается сразу. Ошибка/невалидный ответ одной ветки не побеждает ещё работающую другую ветку.
+- Собственный Resolver применяется и без внешнего AbortSignal; отменяется только незавершённое чтение данной операции. Глобальные DNS server overrides сохраняются. Никакой новый application DNS cache между сетями/сессиями не создан: используется системный resolver с его собственным cache. Нет нового firewall исключения или DNS/route mutation.
+- При отмене/победе удаляются таймер и listener, поздний uncancellable OS lookup потребляется без публикации и логов. Исправлен двойной Resolver.cancel при позднем ответе после abort.
+- DNS diagnostics сохраняют метод/код/время; добавлены totalElapsedMs и hedged для успешного/невалидного OS результата. Host/IP/профиль в детали не попадают. Эти DNS результаты не объявляют VPN здоровым.
+
+#### Проверки
+
+- Первый focused run: **6 files, 138 passed / 2 failed**, exit 1. Новые cancellation tests обнаружили повторный cancel при позднем ответе; исправлен guard в readWithAbort, ожидания не ослаблены.
+- Окончательный `cd vpn-tunnel-enforcer; npx.cmd vitest run src/main/xrayDns.test.ts src/main/xrayDnsNative.test.ts src/main/nativeXrayCompatibility.test.ts src/main/lifecycleCleanup.test.ts src/main/serverPickerSwitch.test.ts src/main/protectedIpTransition.test.ts --maxWorkers=4 --reporter=verbose --silent=false`: exit 0, **6 files / 140 passed**, 8.20 s.
+- Fake clock: primary ответ за 3025 ms + system lookup 20 ms даёт итог **120 ms**. Реальный Windows/Node стенд, UDP DNS только на loopback и hostname localhost: последовательный primary **3053 ms**, новый путь **115 ms**. Реальный system lookup и отмена собственного Resolver проверены; Windows DNS настройки не менялись. Это компонентный стенд, не время installed server switch и не доказательство скорости Happ.
+- `npm.cmd run typecheck`: exit 0, повторён после последней runtime правки.
+- `npm.cmd test -- --maxWorkers=4`: exit 0, **189 files passed / 2 skipped; 2183 tests passed / 10 skipped / 0 failed**, **132.10 s**. Ожидаемый RootErrorBoundary crash stderr относится к его тесту.
+- `python -X utf8 ../docs/04-приёмочные-тесты/traceability/check-coverage.py`: exit 0, **AC 927/927, F 210/210**. Counts подтверждают трассировку, не выполнение всей OS acceptance matrix.
+
+**Ограничения и откат:** выигрыш возможен, когда OS resolver отвечает быстрее c-ares; если он недоступен при protected restart, остаётся основной путь. Новый installed switch/start/stop/cancel и packet/boot acceptance не измерены, агент VPN не переключал и установщик не устанавливал. Revert scoped xrayDns change возвращает последовательное DNS ожидание; settings/profile/manifest форматы совместимы.
+
+- `npm.cmd run dist:win`: exit 0, Electron **44.4.3** / NSIS; typecheck внутри сборки exit 0. Optional @electron/mksnapshot отсутствует, snapshot штатно пропущен. Packaged main/preload побайтово равны compiled outputs; все 4 main markers (100 ms delayed lookup, hedged DNS, totalElapsedMs, strict native graph failure) подтверждены.
+- Main SHA256 **0c26e9868cc2c304d6f951b9756dd8dba88b021da9013f6022885e7b267880c3**, preload **304534f83a73680dadfdc0c6296a9f356c337b506d4da44e03b36087290e3663**.
+- Installer `vpn-tunnel-enforcer/dist/VPN-Tunnel-Enforcer-Setup-1.1.22.exe`: **139170825 bytes**, **03.10.2026 20:30:50 МСК**, SHA256 **6875F8B743AAEEF6E378DEF6CBC5AFDB739FF521CCB7E88DDD9D68CF2511AA72**, Authenticode **NotSigned**. Заменяет предыдущий artifact с тем же номером версии; агентом не установлен. Подпись кода не менялась.
+- Итоговый `git diff --check`: exit 0. Временные файлы этапом не создавались.
