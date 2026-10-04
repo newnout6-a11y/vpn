@@ -1,7 +1,7 @@
 import { app } from 'electron'
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process'
 import { existsSync } from 'fs'
-import { appendFile, mkdir, readdir, readFile, rm, writeFile } from 'fs/promises'
+import { appendFile, mkdir, open, readdir, readFile, rm, writeFile } from 'fs/promises'
 import { release as osRelease, type as osType, version as osVersion } from 'os'
 import { basename, dirname, join, resolve } from 'path'
 import { execElevated } from './admin'
@@ -28,6 +28,7 @@ export type TrafficForensicsEngine = 'pktmon' | 'netsh'
 export interface TrafficForensicsStatus {
   enabled: boolean
   running: boolean
+  cleanupPending?: boolean
   engine: TrafficForensicsEngine | null
   sessionId: string | null
   sessionDir: string | null
@@ -85,6 +86,10 @@ const PKTMON_WFP_LEVEL = 255
 const PKTMON_AFD_LEVEL = 255
 const PKTMON_WEBIO_LEVEL = 255
 let runtimeState: SessionManifest | null = null
+// Only a successfully started provider in this process may bypass a later ACL
+// refusal for path-free cleanup. A disk manifest cannot grant that authority.
+let ownedCapture: { sessionId: string; engine: TrafficForensicsEngine } | null = null
+let stopInFlight: Promise<TrafficForensicsStatus> | null = null
 let sidecarProcess: ChildProcessWithoutNullStreams | null = null
 
 // When this main process started. A persisted session whose `startedAt` predates
@@ -201,6 +206,29 @@ function getLatestManifestPath(): string {
   return join(getRootDir(), 'latest-session.json')
 }
 
+const LEGACY_CAPTURE_WARNING = 'LegacyCaptureCleanupRequired: остановка захвата старого клиента не подтверждена. Отключите VPN и штатно закройте старый клиент до обновления; новый захват заблокирован.'
+
+/** Old AppData files are hints only: never import paths, PIDs or executable input. */
+async function legacyCaptureCleanupPending(): Promise<boolean> {
+  if (process.platform !== 'win32') return false
+  const legacyRoot = join(app.getPath('userData'), 'traffic-forensics')
+  if (resolve(legacyRoot).toLowerCase() === resolve(getRootDir()).toLowerCase()) return false
+  let handle: Awaited<ReturnType<typeof open>> | undefined
+  try {
+    handle = await open(join(legacyRoot, 'latest-session.json'), 'r')
+    const bytes = Buffer.alloc(64 * 1024 + 1)
+    const { bytesRead } = await handle.read(bytes, 0, bytes.length, 0)
+    if (bytesRead === bytes.length) return true
+    const legacy: unknown = JSON.parse(bytes.subarray(0, bytesRead).toString('utf8'))
+    return !legacy || typeof legacy !== 'object' ||
+      (legacy as { running?: unknown }).running !== false
+  } catch (error: any) {
+    return error?.code !== 'ENOENT'
+  } finally {
+    await handle?.close()
+  }
+}
+
 function appVersion(): string | null {
   try {
     return typeof app.getVersion === 'function' ? app.getVersion() : null
@@ -297,9 +325,11 @@ async function writeJson(path: string, value: unknown): Promise<void> {
         await writeFile(path, JSON.stringify(value, null, 2), 'utf-8')
       } catch (innerErr) {
         logEvent('warn', 'traffic-forensics', 'failed to write json even after mkdir', { path, error: String(innerErr) })
+        throw innerErr
       }
     } else {
       logEvent('warn', 'traffic-forensics', 'failed to write json', { path, error: String(err) })
+      throw err
     }
   }
 }
@@ -325,12 +355,12 @@ async function readSummaryForStatus(path: string | null | undefined): Promise<Tr
 
 async function writeManifest(manifest: SessionManifest): Promise<void> {
   const normalized = normalizeManifest(manifest)
-  runtimeState = normalized
   await ensureLayout()
   if (normalized.sessionDir) {
     await writeJson(join(normalized.sessionDir, 'session-manifest.json'), normalized)
   }
   await writeJson(getLatestManifestPath(), normalized)
+  runtimeState = normalized
 }
 
 export async function recordTrafficForensicsAppEvent(input: TrafficForensicsAppEventInput): Promise<boolean> {
@@ -474,45 +504,6 @@ async function readSidecarEventProbe(sessionDir: string | null | undefined): Pro
   }
 }
 
-function hasStopArtifacts(files: TrafficForensicsArtifactFile[]): boolean {
-  const names = new Set(files.map(file => file.name))
-  return (
-    names.has('pktmon-stop.ps1') ||
-    names.has('pktmon-stop.txt') ||
-    names.has('netsh-stop.ps1') ||
-    names.has('netsh-stop.txt') ||
-    names.has('pktmon-trace.txt') ||
-    names.has('pktmon-trace.pcapng')
-  )
-}
-
-async function reconcileStoppedCaptureManifest(
-  manifest: SessionManifest | null,
-  files: TrafficForensicsArtifactFile[]
-): Promise<SessionManifest | null> {
-  if (!manifest?.running || !manifest.sessionDir) return manifest
-  if (!hasStopArtifacts(files)) return manifest
-  const stoppedAt = Math.max(...files.map(file => file.mtimeMs).filter(Number.isFinite), Date.now())
-  const sidecar = manifest.sidecar ?? defaultSidecarState(join(manifest.sessionDir, 'events.ndjson'))
-  const next = normalizeManifest({
-    ...manifest,
-    running: false,
-    stoppedAt: manifest.stoppedAt ?? stoppedAt,
-    stopReason: manifest.stopReason ?? 'status-reconciled-stop',
-    sidecar: {
-      ...sidecar,
-      running: false,
-      stoppedAt: sidecar.stoppedAt ?? stoppedAt,
-      pid: null
-    }
-  })
-  await writeManifest(next)
-  logEvent('warn', 'traffic-forensics', 'reconciled running manifest with stop artifacts during status read', {
-    sessionId: next.sessionId,
-    engine: next.engine
-  })
-  return next
-}
 
 function emptyHealth(): TrafficForensicsStatus['health'] {
   return {
@@ -648,9 +639,7 @@ async function reconcileStaleRunningManifest(manifest: SessionManifest | null): 
   const sidecar = manifest.sidecar ?? defaultSidecarState(manifest.sessionDir ? join(manifest.sessionDir, 'events.ndjson') : null)
   const next = normalizeManifest({
     ...manifest,
-    running: false,
-    stoppedAt: manifest.stoppedAt ?? stoppedAt,
-    stopReason: manifest.stopReason ?? 'zombie-recovery',
+    lastError: manifest.lastError ?? 'CaptureStopUnconfirmed: sidecar exited; packet capture may still be active',
     sidecar: {
       ...sidecar,
       running: false,
@@ -659,8 +648,8 @@ async function reconcileStaleRunningManifest(manifest: SessionManifest | null): 
       lastError: sidecar.lastError ?? 'orphaned traffic forensics sidecar after app restart or installer update'
     }
   })
-  await writeManifest(next)
-  logEvent('warn', 'traffic-forensics', 'recovered stale running manifest during status read', {
+  runtimeState = next
+  logEvent('warn', 'traffic-forensics', 'sidecar is gone; provider stop remains unconfirmed', {
     sessionId: next.sessionId,
     engine: next.engine
   })
@@ -848,7 +837,23 @@ export function buildPktmonStartScript(etlPath: string, sizeMb: number): string 
       `--file-name ${quoted(etlPath)}`,
       `--file-size ${sizeMb}`,
       '--log-mode circular'
-    ].join(' ')
+    ].join(' '),
+    'if ($LASTEXITCODE -ne 0) { throw "CaptureStartFailed: pktmon start failed" }'
+  ].join('; ')
+}
+
+/** Stop only the fixed provider, without reading or writing rejected runtime storage. */
+export function buildCaptureProviderStopScript(engine: TrafficForensicsEngine): string {
+  if (engine !== 'pktmon' && engine !== 'netsh') throw new Error('CaptureStopUnconfirmed: unknown provider')
+  const invocation = engine === 'pktmon'
+    ? "& ([IO.Path]::Combine([Environment]::SystemDirectory, 'pktmon.exe')) stop"
+    : "& ([IO.Path]::Combine([Environment]::SystemDirectory, 'netsh.exe')) trace stop sessionname=VPNTrafficForensics"
+  return [
+    '$ErrorActionPreference = "Stop"',
+    '$global:LASTEXITCODE = 0',
+    invocation,
+    'if ($LASTEXITCODE -ne 0) { throw "CaptureStopUnconfirmed: native stop failed" }',
+    `Write-Output 'VPNTE_CAPTURE_STOPPED:${engine}'`
   ].join('; ')
 }
 
@@ -856,18 +861,18 @@ export function buildPktmonStopScript(sessionDir: string, etlPath: string): stri
   const statusPath = join(sessionDir, 'pktmon-status.txt')
   const countersPath = join(sessionDir, 'pktmon-counters.json')
   const dropsPath = join(sessionDir, 'pktmon-drop-counters.json')
-  const stopPath = join(sessionDir, 'pktmon-stop.txt')
+
   const txtPath = join(sessionDir, 'pktmon-trace.txt')
   const pcapPath = join(sessionDir, 'pktmon-trace.pcapng')
   const wfpEventsPath = join(sessionDir, 'wfp-netevents.xml')
   const wfpStatePath = join(sessionDir, 'wfp-state.xml')
   const errorsPath = join(sessionDir, 'traffic-forensics-stop-errors.txt')
 
-  return bestEffortPowerShellScript(errorsPath, [
+  return buildCaptureProviderStopScript('pktmon') + '; ' + bestEffortPowerShellScript(errorsPath, [
     { label: 'pktmon-status', command: `pktmon status | Out-File -FilePath ${quoted(statusPath)} -Encoding utf8` },
     { label: 'pktmon-counters', command: `pktmon counters --json | Out-File -FilePath ${quoted(countersPath)} -Encoding utf8` },
     { label: 'pktmon-drop-counters', command: `pktmon counters --json --drop-reason | Out-File -FilePath ${quoted(dropsPath)} -Encoding utf8` },
-    { label: 'pktmon-stop', command: `$pktmonStop = pktmon stop 2>&1 | Out-String; Set-Content -Path ${quoted(stopPath)} -Value $pktmonStop -Encoding UTF8` },
+
     { label: 'pktmon-etl2txt', command: `if (Test-Path ${quoted(etlPath)}) { pktmon etl2txt ${quoted(etlPath)} --out ${quoted(txtPath)} --timestamp --metadata | Out-Null }` },
     { label: 'pktmon-etl2pcap', command: `if (Test-Path ${quoted(etlPath)}) { pktmon etl2pcap ${quoted(etlPath)} --out ${quoted(pcapPath)} | Out-Null }` },
     { label: 'wfp-netevents', command: `netsh wfp show netevents file=${quoted(wfpEventsPath)} timewindow=900 | Out-Null` },
@@ -913,12 +918,11 @@ function buildNetshStartCommand(etlPath: string, sizeMb: number): string {
 }
 
 function buildNetshStopScript(sessionDir: string): string {
-  const stopPath = join(sessionDir, 'netsh-trace-stop.txt')
+
   const wfpEventsPath = join(sessionDir, 'wfp-netevents.xml')
   const wfpStatePath = join(sessionDir, 'wfp-state.xml')
   const errorsPath = join(sessionDir, 'traffic-forensics-stop-errors.txt')
-  return bestEffortPowerShellScript(errorsPath, [
-    { label: 'netsh-trace-stop', command: `$netshStop = netsh trace stop sessionname=${NETSH_SESSION_NAME} 2>&1 | Out-String; Set-Content -Path ${quoted(stopPath)} -Value $netshStop -Encoding UTF8` },
+  return buildCaptureProviderStopScript('netsh') + '; ' + bestEffortPowerShellScript(errorsPath, [
     { label: 'wfp-netevents', command: `netsh wfp show netevents file=${quoted(wfpEventsPath)} timewindow=900 | Out-Null` },
     { label: 'wfp-state', command: `netsh wfp show state file=${quoted(wfpStatePath)} | Out-Null` }
   ])
@@ -994,7 +998,9 @@ export async function startTrafficForensicsSession(
   context: { mode: 'localProxy' | 'directVpn'; target: string }
 ): Promise<TrafficForensicsStatus> {
   const settings = getSettings()
-  if (process.platform !== 'win32' || !settings.enabled) {
+  if (await legacyCaptureCleanupPending()) throw new Error(LEGACY_CAPTURE_WARNING)
+  if (process.platform === 'win32' && !settings.enabled) return getTrafficForensicsStatus()
+  if (process.platform !== 'win32') {
     return {
       enabled: settings.enabled,
       running: false,
@@ -1008,7 +1014,7 @@ export async function startTrafficForensicsSession(
       maxSizeMb: settings.maxSizeMb,
       retainSessions: settings.retainSessions,
       stopReason: null,
-      lastError: process.platform === 'win32' ? null : 'Windows-only capture backend',
+      lastError: 'Windows-only capture backend',
       schemaVersion: null,
       summaryPath: null,
       summaryGeneratedAt: null,
@@ -1061,6 +1067,8 @@ export async function startTrafficForensicsSession(
       timeout: 45000,
       maxBuffer: 1024 * 1024 * 8
     })
+    ownedCapture = { sessionId, engine: 'pktmon' }
+    runtimeState = normalizeManifest({ ...manifest, running: true, engine: 'pktmon' })
     logEvent('info', 'traffic-forensics', 'started deep traffic capture', {
       engine: 'pktmon',
       mode: context.mode,
@@ -1073,12 +1081,15 @@ export async function startTrafficForensicsSession(
     const sidecar = await startSidecar(runningManifest)
     return finalizeManifest(runningManifest, { sidecar })
   } catch (pktmonErr: any) {
+    if (ownedCapture?.sessionId === sessionId) throw pktmonErr
     const netshEtlPath = join(sessionDir, 'netsh-trace.etl')
     try {
       await execElevated(buildNetshStartCommand(netshEtlPath, settings.maxSizeMb), {
         timeout: 45000,
         maxBuffer: 1024 * 1024 * 8
       })
+      ownedCapture = { sessionId, engine: 'netsh' }
+      runtimeState = normalizeManifest({ ...manifest, running: true, engine: 'netsh', etlPath: netshEtlPath })
       logEvent('warn', 'traffic-forensics', 'pktmon start failed, fell back to netsh trace', {
         sessionId,
         mode: context.mode,
@@ -1096,6 +1107,7 @@ export async function startTrafficForensicsSession(
       const sidecar = await startSidecar(runningManifest)
       return finalizeManifest(runningManifest, { sidecar })
     } catch (netshErr: any) {
+      if (ownedCapture?.sessionId === sessionId) throw netshErr
       const lastError = [
         `pktmon: ${pktmonErr?.message || String(pktmonErr)}`,
         `netsh: ${netshErr?.message || String(netshErr)}`
@@ -1118,81 +1130,84 @@ export async function startTrafficForensicsSession(
 }
 
 export async function stopTrafficForensicsSession(reason: string): Promise<TrafficForensicsStatus> {
-  const manifest = await readLatestManifest()
-  if (!manifest) return getTrafficForensicsStatus()
+  if (stopInFlight) return stopInFlight
+  stopInFlight = stopCapture(reason)
+  try { return await stopInFlight } finally { stopInFlight = null }
+}
 
-  if (!manifest.running || !manifest.engine || !manifest.sessionDir) {
-    if (manifest.stopReason !== reason || manifest.stoppedAt === null) {
-      const sidecar = stopSidecar(manifest, reason)
-      return finalizeManifest(manifest, {
-        running: false,
-        stoppedAt: manifest.stoppedAt ?? Date.now(),
-        stopReason: manifest.stopReason ?? reason,
-        sidecar
-      })
-    }
+async function stopCapture(reason: string): Promise<TrafficForensicsStatus> {
+  const manifest = await readLatestManifest()
+  if (!manifest?.running) {
+    if (await legacyCaptureCleanupPending()) throw new Error(LEGACY_CAPTURE_WARNING)
     return getTrafficForensicsStatus()
   }
 
   const sidecar = stopSidecar(manifest, reason)
-
+  let trusted = false
+  let trustError: unknown
   try {
     await assertForensicsExecutionTrusted(manifest)
-    if (manifest.engine === 'pktmon' && manifest.etlPath) {
-      const scriptPath = join(manifest.sessionDir, 'pktmon-stop.ps1')
-      await writeFile(scriptPath, Buffer.from('\uFEFF' + buildPktmonStopScript(manifest.sessionDir, manifest.etlPath), 'utf8'))
-      await execElevated(`powershell -NoProfile -ExecutionPolicy Bypass -File ${cmdQuoted(scriptPath)}`, {
-        timeout: 90000,
-        maxBuffer: 1024 * 1024 * 16
-      })
-    } else if (manifest.engine === 'netsh') {
-      const scriptPath = join(manifest.sessionDir, 'netsh-stop.ps1')
-      await writeFile(scriptPath, Buffer.from('\uFEFF' + buildNetshStopScript(manifest.sessionDir), 'utf8'))
-      await execElevated(`powershell -NoProfile -ExecutionPolicy Bypass -File ${cmdQuoted(scriptPath)}`, {
-        timeout: 90000,
-        maxBuffer: 1024 * 1024 * 16
-      })
+    trusted = true
+  } catch (error) { trustError = error }
+
+  try {
+    const engine = manifest.engine
+    if (engine !== 'pktmon' && engine !== 'netsh') throw new Error('unknown capture provider')
+    const owned = ownedCapture?.sessionId === manifest.sessionId && ownedCapture.engine === engine
+    if (!trusted && !owned) throw trustError
+
+    let command: string
+    if (trusted && manifest.sessionDir && (engine === 'netsh' || manifest.etlPath)) {
+      const scriptPath = join(manifest.sessionDir, `${engine}-stop.ps1`)
+      const script = engine === 'pktmon'
+        ? buildPktmonStopScript(manifest.sessionDir, manifest.etlPath!)
+        : buildNetshStopScript(manifest.sessionDir)
+      await writeFile(scriptPath, Buffer.from('\uFEFF' + script, 'utf8'))
+      command = `powershell -NoProfile -ExecutionPolicy Bypass -File ${cmdQuoted(scriptPath)}`
+    } else {
+      command = `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encodedPowerShell(buildCaptureProviderStopScript(engine))}`
     }
-  } catch (err: any) {
-    logEvent('warn', 'traffic-forensics', 'deep traffic capture stop hit an error', {
-      sessionId: manifest.sessionId,
-      engine: manifest.engine,
-      reason,
-      error: err?.message || String(err)
+    const { stdout } = await execElevated(command, { timeout: 90000, maxBuffer: 1024 * 1024 * 16 })
+    if (!String(stdout).split(/\r?\n/).some(line => line.trim() === `VPNTE_CAPTURE_STOPPED:${engine}`)) {
+      throw new Error('native stop acknowledgement missing')
+    }
+  } catch (error: any) {
+    const lastError = `CaptureStopUnconfirmed: ${error?.message || String(error)}`
+    runtimeState = normalizeManifest({ ...manifest, running: true, stoppedAt: null, lastError, sidecar })
+    if (trusted) await writeManifest(runtimeState).catch(() => undefined)
+    logEvent('warn', 'traffic-forensics', 'provider stop remains unconfirmed; cleanup can be retried', {
+      sessionId: manifest.sessionId, engine: manifest.engine, reason, lastError
     })
-    return finalizeManifest(manifest, {
-      running: false,
-      stoppedAt: Date.now(),
-      stopReason: reason,
-      lastError: err?.message || String(err),
-      sidecar
-    })
+    throw new Error(lastError)
   }
 
+  ownedCapture = null
+  const stopped = normalizeManifest({
+    ...manifest, running: false, stoppedAt: Date.now(), stopReason: reason, lastError: null, sidecar
+  })
+  // Provider success is independent from artifact persistence. Retain the
+  // confirmed stop even if the directory becomes untrusted before manifest I/O.
+  runtimeState = stopped
+  try {
+    if (!trusted) throw trustError
+    await finalizeManifest(stopped, {})
+  } catch (error: any) {
+    runtimeState = { ...stopped, lastError: `CaptureStoppedArtifactsUnavailable: ${error?.message || String(error)}` }
+    logEvent('warn', 'traffic-forensics', 'capture stopped but artifacts could not be finalized', {
+      sessionId: manifest.sessionId, lastError: runtimeState.lastError
+    })
+  }
   logEvent('info', 'traffic-forensics', 'stopped deep traffic capture', {
-    sessionId: manifest.sessionId,
-    engine: manifest.engine,
-    reason
+    sessionId: manifest.sessionId, engine: manifest.engine, reason
   })
-  await pruneOldSessions(manifest.retainSessions, manifest.sessionId)
-  return finalizeManifest(manifest, {
-    running: false,
-    stoppedAt: Date.now(),
-    stopReason: reason,
-    sidecar
-  })
+  return getTrafficForensicsStatus()
 }
 
 export async function restartTrafficForensicsSession(reason = 'manual-restart'): Promise<TrafficForensicsStatus> {
   const current = await readLatestManifest()
   const mode = current?.mode
   const target = current?.target
-  await stopTrafficForensicsSession(reason).catch(err => {
-    logEvent('warn', 'traffic-forensics', 'forced traffic-forensics restart hit stop error', {
-      reason,
-      error: (err as Error)?.message || String(err)
-    })
-  })
+  await stopTrafficForensicsSession(reason)
   if ((mode !== 'localProxy' && mode !== 'directVpn') || !target) {
     return getTrafficForensicsStatus()
   }
@@ -1201,10 +1216,10 @@ export async function restartTrafficForensicsSession(reason = 'manual-restart'):
 
 export async function getTrafficForensicsStatus(): Promise<TrafficForensicsStatus> {
   const settings = getSettings()
-  let manifest = await reconcileStaleRunningManifest(await readLatestManifest())
+  const legacyPending = await legacyCaptureCleanupPending()
+  const manifest = await reconcileStaleRunningManifest(await readLatestManifest())
   const artifactFiles = await listTrafficForensicsArtifacts(manifest?.sessionDir ?? null)
-  manifest = await reconcileStoppedCaptureManifest(manifest, artifactFiles)
-  if (!settings.enabled && !manifest?.running) {
+  if (!settings.enabled && !manifest?.running && !legacyPending) {
     return {
       enabled: false,
       running: false,
@@ -1243,6 +1258,7 @@ export async function getTrafficForensicsStatus(): Promise<TrafficForensicsStatu
   return {
     enabled: settings.enabled,
     running: Boolean(manifest?.running),
+    cleanupPending: legacyPending || Boolean(manifest?.running && manifest.lastError?.startsWith('CaptureStopUnconfirmed:')),
     engine: manifest?.engine ?? null,
     sessionId: manifest?.sessionId ?? null,
     sessionDir: manifest?.sessionDir ?? null,
@@ -1253,14 +1269,17 @@ export async function getTrafficForensicsStatus(): Promise<TrafficForensicsStatu
     maxSizeMb: settings.maxSizeMb,
     retainSessions: settings.retainSessions,
     stopReason: manifest?.stopReason ?? null,
-    lastError: manifest?.lastError ?? null,
+    lastError: legacyPending ? LEGACY_CAPTURE_WARNING : (manifest?.lastError ?? null),
     schemaVersion: manifest?.schemaVersion ?? null,
     summaryPath: manifest?.summaryPath ?? null,
     summaryGeneratedAt: manifest?.summaryGeneratedAt ?? null,
     summary,
     sidecar,
     artifactFiles,
-    health: buildTrafficForensicsHealth(artifactFiles, summary, sidecar, sidecarProbe, manifest?.startedAt, settings.enabled)
+    health: {
+      ...buildTrafficForensicsHealth(artifactFiles, summary, sidecar, sidecarProbe, manifest?.startedAt, settings.enabled),
+      ...(legacyPending ? { warnings: [LEGACY_CAPTURE_WARNING] } : {})
+    }
   }
 }
 

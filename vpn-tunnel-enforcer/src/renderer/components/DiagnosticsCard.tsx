@@ -5,6 +5,7 @@ import { MacCard, MacButton } from '../design-system'
 
 const FORENSICS_RUNNING_POLL_INTERVAL_MS = 10_000
 const FORENSICS_IDLE_POLL_INTERVAL_MS = 30_000
+const UNKNOWN_CAPTURE_STATUS = { cleanupPending: true, lastError: 'Не удалось проверить состояние захвата; остановка не подтверждена' }
 
 /**
  * The "everything you need to debug a not-working app" surface.
@@ -32,8 +33,8 @@ export function DiagnosticsCard() {
     try {
       const status = await window.electronAPI.getTrafficForensicsStatus()
       setForensicsStatus(status)
-    } catch (err) {
-      // Status is best-effort UI telemetry; the export button remains usable.
+    } catch {
+      setForensicsStatus(UNKNOWN_CAPTURE_STATUS)
     }
   }
 
@@ -54,9 +55,11 @@ export function DiagnosticsCard() {
         if (cancelled) return
         setForensicsStatus(status)
         scheduleNext(Boolean(status?.running))
-      } catch (err) {
-        // Status is best-effort UI telemetry; the export button remains usable.
-        if (!cancelled) scheduleNext(false)
+      } catch {
+        if (!cancelled) {
+          setForensicsStatus(UNKNOWN_CAPTURE_STATUS)
+          scheduleNext(false)
+        }
       }
     }
 
@@ -172,7 +175,11 @@ export function DiagnosticsCard() {
   let forensicsText = 'СБОР ОСТАНОВЛЕН'
   let forensicsTooltip = 'Сбор пакетов остановлен'
 
-  if (isForensicsRunning) {
+  if (forensicsStatus?.cleanupPending) {
+    forensicsDotColor = 'bg-[var(--color-warning)]'
+    forensicsText = 'ОСТАНОВКА НЕ ПОДТВЕРЖДЕНА'
+    forensicsTooltip = forensicsStatus.lastError || 'Захват может продолжаться; повторите остановку'
+  } else if (isForensicsRunning) {
     forensicsDotColor = 'bg-[var(--color-success)] animate-pulse'
     forensicsText = 'СБОР ПАКЕТОВ'
     forensicsTooltip = 'Идёт сбор пакетов'
@@ -279,7 +286,12 @@ export function DiagnosticsCard() {
             )}
           </div>
         )}
-        {forensicsHealth?.warnings?.length > 0 && (
+        {forensicsStatus?.cleanupPending && (
+          <p role="alert" className="text-[11px] text-[var(--color-warning)] mt-1">
+            {forensicsStatus.lastError || 'Захват может продолжаться; повторите остановку'}
+          </p>
+        )}
+        {!forensicsStatus?.cleanupPending && forensicsHealth?.warnings?.length > 0 && (
           <p className="text-[11px] text-[var(--color-warning)] mt-1">
             {forensicsHealth.warnings[0]}
           </p>

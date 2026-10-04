@@ -2,6 +2,7 @@ import { app, shell } from 'electron'
 import { mkdir, open, readFile, stat, writeFile, appendFile, unlink } from 'fs/promises'
 import { join } from 'path'
 import { getPrivilegedRuntimeDir } from './runtimePaths'
+import { directoryExists, verifyDirectoryHardened } from './runtimeDirSecurity'
 import { redactSensitiveConfig, redactSensitiveText } from './vpnProfiles'
 
 export type AppLogLevel = 'debug' | 'info' | 'warn' | 'error'
@@ -313,14 +314,21 @@ export async function getFullLogs(): Promise<LogFileSnapshot[]> {
 }
 
 export async function clearAppLog(): Promise<void> {
-  queue = queue.then(async () => {
+  queue = queue.catch(() => undefined).then(async () => {
     await ensureLogDir()
-    await mkdir(getTunLogDir(), { recursive: true }).catch(() => undefined)
+    const tunLogDir = getTunLogDir()
+    const hasTunLogs = await directoryExists(tunLogDir)
+    if (hasTunLogs) {
+      const acl = await verifyDirectoryHardened(tunLogDir)
+      if (!acl.hardened) throw new Error('RuntimeSecurityAclError: TUN log cleanup namespace is untrusted')
+    }
     await Promise.all([
       writeFile(getAppLogPath(), '', 'utf8'),
       unlink(getAppLogPrevPath()).catch(() => undefined),
-      writeFile(join(getTunLogDir(), 'sing-box.log'), '', 'utf8').catch(() => undefined),
-      unlink(join(getTunLogDir(), 'sing-box.prev.log')).catch(() => undefined)
+      ...(hasTunLogs ? [
+        writeFile(join(tunLogDir, 'sing-box.log'), '', 'utf8').catch(() => undefined),
+        unlink(join(tunLogDir, 'sing-box.prev.log')).catch(() => undefined)
+      ] : [])
     ])
     currentLogBytes = 0
   })

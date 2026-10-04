@@ -112,3 +112,27 @@ Preload экспорт проверяет `redacted | secrets` до IPC. Startup
 Промежуточный default-worker full run: два существующих bundled-core preflight теста превысили 5 s. Изолированный повтор — 85/85 PASS; полный повтор с четырьмя workers — PASS без изменения таймаутов. Cleanup проверен после native/migration run, не только по дочернему PASS marker.
 
 Полный 15.5M envelope fuzz повторно не запускался: main envelope/schema/redactor contract не менялся; новый preload enum покрыт focused/full regression. **Это не полный AT-01-009/L3 PASS:** elevated ProgramData bootstrap/launch, concurrent OS ACL abuse, VM/installed/OS matrix по-прежнему NOT-CHECKED. Clipboard и действующая сеть не трогались; ограничения настоящего 42→44 и старого rollback reader сохраняются.
+
+## Второй проход ревью: очистка логов и provider stop
+
+Подтверждены `discussion_r4177892597` (unsafe runtime mkdir при очистке логов), `discussion_r4177892600` (developer path в fixtures) и архитектурная находка CodeRabbit о ложном `running=false` после отказа ACL/ошибки stop.
+
+- `clearAppLog` не создаёт runtime namespace. Существующие TUN logs изменяются только после проверки ACL; отказ не отравляет следующую операцию в очереди. Регрессии AT-01-009/F-005/F-006: missing namespace, existing logs, hostile namespace и повтор очистки.
+- Форензические fixtures, staging и sidecar находятся в уникальном `mkdtemp(os.tmpdir())`, удаляемом после suite; production ProgramData и чужие профили не используются.
+- Mandatory provider stop отделён от best-effort diagnostics: фиксированный системный `pktmon.exe` / `netsh.exe`, обязательный native exit=0 и stdout acknowledgement. Ошибка, timeout или отсутствие acknowledgement сохраняют `running=true`, `stoppedAt=null`, `CaptureStopUnconfirmed` и возможность повторить stop; restart/удаление artifacts не могут игнорировать этот отказ. Concurrent stops объединяются.
+- При отказе runtime ACL только capture, успешно запущенный текущим процессом, получает path-free EncodedCommand cleanup без чтения/записи/исполнения runtime scripts. Disk manifest не даёт такого полномочия. При подтверждённой остановке и отказе persistence сохраняется отдельный `CaptureStoppedArtifactsUnavailable`, а не ложная ошибка провайдера.
+- Manifest persistence больше не меняет память до ACL/layout/write proof и не подавляет ошибки JSON I/O. Успешный старт регистрирует in-memory ownership до artifact finalization; последующая ошибка persistence не запускает второй provider поверх первого.
+- Stop artifacts и выход сайдкара больше не переводят packet provider в stopped (F-198). UI показывает `cleanupPending` и ошибку запроса статуса как «ОСТАНОВКА НЕ ПОДТВЕРЖДЕНА», в том числе при выключенной настройке capture.
+- Старый AppData manifest читается только как ограниченный 64 KiB недоверенный hint. Running/повреждённый/нечитаемый marker означает warning и отказ нового capture; чужие пути/PID не импортируются, legacy scripts не выполняются, старые данные не переписываются. **Это не OS ownership proof и не полноценный installer handoff:** legacy file может быть подделан или удалён; автоматический reclaim глобального pktmon по нему небезопасен. Контролируемый shutdown/прерванный installed upgrade остаётся отдельной задачей WP-11, не объявляется исправленным/принятым.
+- Предложение `discussion_r4177863955` о `SuppressedError` не принято: helper намеренно агрегирует две самостоятельные ошибки, сохраняет primary как cause и проверен 10 Node-тестами. Это не потеря исходной ошибки.
+
+### Проверки актуального исходника
+
+- `npm run typecheck`, production build, `npm run dist:win`: exit 0.
+- Финальный `npm test -- --maxWorkers=4 --reporter=dot`: **206 files passed / 2 skipped; 2459 passed / 10 skipped / 0 failed**, 98.86 s. Предыдущий промежуточный полный прогон тоже зелёный: 2458 passed до добавления UI status-failure regression.
+- Focused capture/log/security/UI suite: 67/67 PASS до последнего UI regression; все новые тесты входят в финальный full run. `node --test scripts/wp1-test-cleanup.test.mjs`: 10/10 PASS.
+- Native PowerShell проверяет настоящий exit/acknowledgement control flow для обоих провайдеров, но сами provider calls заранее заменены безвредными scriptblocks. Реальный pktmon/netsh stop, elevated writes и действующий VPN не запускались.
+- Traceability: AC927/927, F210/210, exit 0; полнота ссылок, не исполнение всех AT.
+- NSIS EXE 1.1.22 пересобран, **NotSigned**, не устанавливался. SHA-256: `AEEA3D7D04098422D50C72F72100C6C7D9CAC6F08DD08CE6831BE374ED177EC6`. Упакованные main/preload/renderer index совпадают с `out/` по SHA-256; main содержит новые stop/legacy markers. `dist/checksums.txt` обновлён для installer и blockmap.
+
+AT-08-004/005 и AT-01-009 имеют новые L1/L2 регрессии, **не полный L3 PASS**. Native live-capture/OS matrix, installed-upgrade, VM, cross-version 42→44 и rollback-reader остаются NOT-CHECKED. Нормативные `docs/` не изменены.

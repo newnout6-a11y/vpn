@@ -791,11 +791,11 @@ export function buildActiveProfileDiagnosticItems(activeProfile: ServerProfile |
 
 async function getTrafficForensicsItems(): Promise<SystemDiagnosticItem[]> {
   const status = await getTrafficForensicsStatus()
-  if (!status.enabled) {
+  if (!status.enabled && !status.running && !status.cleanupPending) {
     return [item('traffic-forensics', 'Network', 'Deep traffic capture', 'info', 'disabled', 'Deep packet capture is disabled in settings')]
   }
 
-  const state = status.running ? 'running' : (status.sessionId ? 'idle' : 'ready')
+  const state = status.cleanupPending ? 'cleanup unconfirmed' : status.running ? 'running' : (status.sessionId ? 'idle' : 'ready')
   const details = [
     `engine=${status.engine || 'n/a'}`,
     `mode=${status.mode || 'n/a'}`,

@@ -54,7 +54,8 @@ Split tunneling — по **имени процесса** (direct/vpn/none), hot-
 - Сессии: elevated `pktmon` (провайдеры TCPIP/WFP/Winsock-AFD/WebIO, circular capture 128–2048 MiB, default 512), fallback — `netsh trace`. Хранилище `%ProgramData%\VPNTE\runtime\<instance-hash>\traffic-forensics\sessions\<timestamp>`, retention 1–10 сессий (default 3). Ошибка доверенной ACL/namespace-проверки блокирует выполнение скриптов.
 - **Rust ETW-сайдкар** (`native/vpnte-etw-sidecar/`, `ferrisetw`): 5 провайдеров (TCPIP, DNS-Client, WFP, Winsock-AFD, WebIO), heartbeat каждые 30 с, лимит 250 000 data-событий с backpressure, только метаданные (5-tuple, DNS-имена — не пейлоады), стабильная kernel-сессия `VPNTE-ETW` с reclaim осиротевшей. Честная оговорка: PowerShell-фолбэк (`vpnte-etw-sidecar.ps1`) — это поллинг Event Log, а не настоящий ETW, и на части систем теряет события.
 - Summary: `summary.json`, `timeline.ndjson`, `flows.ndjson`, `dns.ndjson`, `drops.ndjson`, `tcp-health.ndjson`, вердикты (`leak`, `TUN path`, `kill-switch block`, `reset`, `timeout/loss`, `MTU`, `sing-box failure`, `insufficient evidence`).
-- Zombie recovery протухших `running: true`, 30-секундный warmup без варнингов, stop-артефакты переопределяют stale-статусы.
+- 30-секундный warmup без варнингов. Завершение сайдкара и stop-артефакты не доказывают остановку `pktmon/netsh`: ошибка остановки сохраняет активную сессию с `cleanupPending` и возможностью повторить cleanup. При отказе ACL провайдер, запущенный текущим процессом, останавливается фиксированной командой без runtime-скриптов; недоверенный manifest не даёт такого полномочия.
+- Старый AppData `latest-session.json` используется только как ограниченный по размеру недоверенный признак незавершённого захвата. При активном/повреждённом/нечитаемом marker UI показывает «остановка не подтверждена», новый захват блокируется даже при выключенной настройке форензики. Автоматический legacy process/session handoff и installed-upgrade oracle не реализованы.
 - Экспорт — с redaction: IPv4/IPv6/MAC/домены → стабильные токены, raw ETL/PCAPNG не экспортируются, маппинг токенов не сохраняется.
 
 ## Диагностика и UI
@@ -141,7 +142,7 @@ npm run dev        # из корня репозитория тоже работ�
 
 ## Тесты
 
-Последний локальный Windows-прогон (04.10.2026): **200 файлов passed / 2 skipped; 2397 тестов passed / 10 skipped / 0 failed**. Отдельно выполнены native Electron smoke и локальные подмножества WP-1. Пропущенные/VM-проверки не считаются PASS; актуальные итоги — вывод `npm test` и [отчёт WP-1](vpn-tunnel-enforcer/docs/wp1-security-acceptance-2026-10-04.md).
+Последний локальный Windows-прогон (04.10.2026): **206 файлов passed / 2 skipped; 2459 тестов passed / 10 skipped / 0 failed**. Отдельно выполнены native Electron smoke и локальные подмножества WP-1. Пропущенные/VM-проверки не считаются PASS; актуальные итоги — вывод `npm test` и [отчёт WP-1](vpn-tunnel-enforcer/docs/wp1-security-acceptance-2026-10-04.md).
 
 ```bash
 npm test                                            # полный набор

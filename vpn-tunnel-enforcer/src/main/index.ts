@@ -2200,6 +2200,8 @@ app.whenReady().then(async () => {
   })
 
   handleLogged('clear-diagnostic-artifacts', async () => {
+    const capture = await stopTrafficForensicsSession('manual diagnostics artifact clear')
+    if (capture.running || capture.cleanupPending) throw new Error('CaptureStopUnconfirmed: diagnostic artifacts retained')
     const forensicRoot = getPrivilegedRuntimeDir('traffic-forensics')
     const targets = [getSnapshotsDir()]
     if (await directoryExists(forensicRoot)) {
@@ -2207,7 +2209,6 @@ app.whenReady().then(async () => {
       if (!acl.hardened) throw new Error('RuntimeSecurityAclError: diagnostic cleanup namespace is untrusted')
       targets.push(forensicRoot)
     }
-    await stopTrafficForensicsSession('manual diagnostics artifact clear').catch(() => undefined)
     await Promise.all(targets.map(path => rm(path, { recursive: true, force: true }).catch(() => undefined)))
     await clearAppLog()
     logEvent('info', 'app', 'diagnostic artifacts cleared', { targets })
