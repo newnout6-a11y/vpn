@@ -11,12 +11,26 @@ vi.mock('./settings', () => ({ settingsStore: { get: () => ({ deepTrafficInspect
 vi.mock('./runtimeDirSecurity', () => ({ ensureElevatedRuntimeDirHardened: vi.fn(), verifyDirectoryHardened: fixture.acl }))
 vi.mock('child_process', () => ({ spawn: fixture.spawn, default: { spawn: fixture.spawn } }))
 vi.mock('fs/promises', () => {
-  const api = { readFile: fixture.read, writeFile: fixture.write, mkdir: fixture.mkdir, appendFile: vi.fn(), readdir: vi.fn(), rm: vi.fn(),
+  const api = { readFile: fixture.read, writeFile: fixture.write, mkdir: fixture.mkdir, appendFile: vi.fn(), readdir: vi.fn(async () => []), rm: vi.fn(),
     open: vi.fn(async () => { throw Object.assign(new Error('missing fixture'), { code: 'ENOENT' }) }) }
   return { ...api, default: api }
 })
 beforeEach(() => { vi.resetModules(); vi.clearAllMocks() })
 describe('forensics session path boundary', () => {
+  it.each([1, undefined, Date.now() + 86400000])('warns about an unowned running capture with startedAt=%s after restart (AT-08-004, F-198)', async startedAt => {
+    const sessionDir = join(ROOT, 'sessions', 'fixture')
+    fixture.read.mockResolvedValue(JSON.stringify({
+      sessionId: 'fixture', sessionDir, etlPath: join(sessionDir, 'pktmon.etl'),
+      running: true, engine: 'pktmon', startedAt, lastError: null, sidecar: { running: false }
+    }))
+    const { getTrafficForensicsStatus } = await import('./trafficForensics')
+    const status = await getTrafficForensicsStatus()
+    expect(status.running).toBe(true)
+    expect(status.cleanupPending).toBe(true)
+    expect(fixture.exec).not.toHaveBeenCalled()
+    expect(fixture.write).not.toHaveBeenCalled()
+    expect(fixture.mkdir).not.toHaveBeenCalled()
+  })
   it('does not grant path-free stop authority to an untrusted disk manifest (AT-01-009)', async () => {
     const sessionDir = join(ROOT, 'sessions', 'fixture')
     fixture.read.mockResolvedValue(JSON.stringify({ sessionId: 'fixture', sessionDir, etlPath: join(sessionDir, 'pktmon.etl'), running: true, engine: 'pktmon' }))

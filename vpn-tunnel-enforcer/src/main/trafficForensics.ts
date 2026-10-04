@@ -89,7 +89,14 @@ let runtimeState: SessionManifest | null = null
 // Only a successfully started provider in this process may bypass a later ACL
 // refusal for path-free cleanup. A disk manifest cannot grant that authority.
 let ownedCapture: { sessionId: string; engine: TrafficForensicsEngine } | null = null
-let stopInFlight: Promise<TrafficForensicsStatus> | null = null
+let captureQueue: Promise<void> = Promise.resolve()
+
+// Include finalization in the transition so an old writer cannot replace a new capture.
+function serializeCapture<T>(operation: () => Promise<T>): Promise<T> {
+  const result = captureQueue.then(operation)
+  captureQueue = result.then(() => undefined, () => undefined)
+  return result
+}
 let sidecarProcess: ChildProcessWithoutNullStreams | null = null
 
 // When this main process started. A persisted session whose `startedAt` predates
@@ -220,8 +227,11 @@ async function legacyCaptureCleanupPending(): Promise<boolean> {
     const { bytesRead } = await handle.read(bytes, 0, bytes.length, 0)
     if (bytesRead === bytes.length) return true
     const legacy: unknown = JSON.parse(bytes.subarray(0, bytesRead).toString('utf8'))
-    return !legacy || typeof legacy !== 'object' ||
-      (legacy as { running?: unknown }).running !== false
+    if (!legacy || typeof legacy !== 'object' || Array.isArray(legacy)) return true
+    const hint = legacy as { running?: unknown; lastError?: unknown; stoppedAt?: unknown; stopReason?: unknown; sidecar?: { running?: unknown } }
+    return hint.running !== false || (hint.lastError != null && hint.lastError !== '') ||
+      typeof hint.stoppedAt !== 'number' || !Number.isFinite(hint.stoppedAt) || hint.stoppedAt <= 0 ||
+      hint.sidecar?.running === true || hint.stopReason === 'status-reconciled-stop' || hint.stopReason === 'zombie-recovery'
   } catch (error: any) {
     return error?.code !== 'ENOENT'
   } finally {
@@ -609,7 +619,11 @@ export function sidecarArgs(eventsPath: string, sessionId: string, powerShellSty
 }
 
 function persistSidecarState(state: SessionManifest): void {
-  writeManifest(preserveObservedSidecarStop(state)).catch(err => {
+  serializeCapture(async () => {
+    if (runtimeState?.sessionId !== state.sessionId || runtimeState.sidecar?.startedAt !== state.sidecar?.startedAt) return
+    // Merge the observation with current provider state, not the callback's stale snapshot.
+    await writeManifest({ ...runtimeState, sidecar: state.sidecar })
+  }).catch(err => {
     logEvent('warn', 'traffic-forensics', 'failed to persist sidecar state', { err: (err as Error)?.message })
   })
 }
@@ -648,7 +662,6 @@ async function reconcileStaleRunningManifest(manifest: SessionManifest | null): 
       lastError: sidecar.lastError ?? 'orphaned traffic forensics sidecar after app restart or installer update'
     }
   })
-  runtimeState = next
   logEvent('warn', 'traffic-forensics', 'sidecar is gone; provider stop remains unconfirmed', {
     sessionId: next.sessionId,
     engine: next.engine
@@ -707,10 +720,9 @@ async function startSidecar(manifest: SessionManifest): Promise<SessionManifest[
       appendFile(stderrPath, chunk).catch(() => {})
     })
     launchedProcess.once('error', err => {
-      if (sidecarProcess === launchedProcess) sidecarProcess = null
-      const current = runtimeState?.sessionId === manifest.sessionId
-        ? runtimeState
-        : normalizeManifest({ ...manifest, sidecar: startedSidecar })
+      if (sidecarProcess !== launchedProcess || runtimeState?.sessionId !== manifest.sessionId) return
+      sidecarProcess = null
+      const current = runtimeState
       const next = normalizeManifest({
         ...current,
         sidecar: {
@@ -725,10 +737,9 @@ async function startSidecar(manifest: SessionManifest): Promise<SessionManifest[
       persistSidecarState(next)
     })
     launchedProcess.once('exit', (code, signal) => {
-      if (sidecarProcess === launchedProcess) sidecarProcess = null
-      const current = runtimeState?.sessionId === manifest.sessionId
-        ? runtimeState
-        : normalizeManifest({ ...manifest, sidecar: startedSidecar })
+      if (sidecarProcess !== launchedProcess || runtimeState?.sessionId !== manifest.sessionId) return
+      sidecarProcess = null
+      const current = runtimeState
       const next = normalizeManifest({
         ...current,
         sidecar: {
@@ -994,7 +1005,13 @@ async function finalizeManifest(
   return getTrafficForensicsStatus()
 }
 
-export async function startTrafficForensicsSession(
+export function startTrafficForensicsSession(
+  context: { mode: 'localProxy' | 'directVpn'; target: string }
+): Promise<TrafficForensicsStatus> {
+  return serializeCapture(() => startCapture(context))
+}
+
+async function startCapture(
   context: { mode: 'localProxy' | 'directVpn'; target: string }
 ): Promise<TrafficForensicsStatus> {
   const settings = getSettings()
@@ -1029,7 +1046,7 @@ export async function startTrafficForensicsSession(
   if (current?.running) {
     if (!hasManagedSidecarProcess()) {
       logEvent('warn', 'traffic-forensics', 'found zombie session (running=true but no sidecar), force-stopping')
-      await stopTrafficForensicsSession('zombie-recovery')
+      await stopCapture('zombie-recovery')
     } else {
       return getTrafficForensicsStatus()
     }
@@ -1129,10 +1146,8 @@ export async function startTrafficForensicsSession(
   }
 }
 
-export async function stopTrafficForensicsSession(reason: string): Promise<TrafficForensicsStatus> {
-  if (stopInFlight) return stopInFlight
-  stopInFlight = stopCapture(reason)
-  try { return await stopInFlight } finally { stopInFlight = null }
+export function stopTrafficForensicsSession(reason: string): Promise<TrafficForensicsStatus> {
+  return serializeCapture(() => stopCapture(reason))
 }
 
 async function stopCapture(reason: string): Promise<TrafficForensicsStatus> {
@@ -1203,15 +1218,19 @@ async function stopCapture(reason: string): Promise<TrafficForensicsStatus> {
   return getTrafficForensicsStatus()
 }
 
-export async function restartTrafficForensicsSession(reason = 'manual-restart'): Promise<TrafficForensicsStatus> {
+export function restartTrafficForensicsSession(reason = 'manual-restart'): Promise<TrafficForensicsStatus> {
+  return serializeCapture(() => restartCapture(reason))
+}
+
+async function restartCapture(reason: string): Promise<TrafficForensicsStatus> {
   const current = await readLatestManifest()
   const mode = current?.mode
   const target = current?.target
-  await stopTrafficForensicsSession(reason)
+  await stopCapture(reason)
   if ((mode !== 'localProxy' && mode !== 'directVpn') || !target) {
     return getTrafficForensicsStatus()
   }
-  return startTrafficForensicsSession({ mode, target })
+  return startCapture({ mode, target })
 }
 
 export async function getTrafficForensicsStatus(): Promise<TrafficForensicsStatus> {
@@ -1258,7 +1277,10 @@ export async function getTrafficForensicsStatus(): Promise<TrafficForensicsStatu
   return {
     enabled: settings.enabled,
     running: Boolean(manifest?.running),
-    cleanupPending: legacyPending || Boolean(manifest?.running && manifest.lastError?.startsWith('CaptureStopUnconfirmed:')),
+    cleanupPending: legacyPending || Boolean(manifest?.running && (
+      ownedCapture?.sessionId !== manifest.sessionId || ownedCapture.engine !== manifest.engine ||
+      manifest.lastError?.startsWith('CaptureStopUnconfirmed:')
+    )),
     engine: manifest?.engine ?? null,
     sessionId: manifest?.sessionId ?? null,
     sessionDir: manifest?.sessionDir ?? null,
@@ -1342,7 +1364,11 @@ async function copyDirRedacted(src: string, dest: string, redactor: ForensicsRed
   }
 }
 
-export async function stageTrafficForensicsArtifacts(stageDir: string): Promise<boolean> {
+export function stageTrafficForensicsArtifacts(stageDir: string): Promise<boolean> {
+  return serializeCapture(() => stageArtifacts(stageDir))
+}
+
+async function stageArtifacts(stageDir: string): Promise<boolean> {
   const rootDir = getRootDir()
   if (!existsSync(rootDir)) return false
   const settings = getSettings()

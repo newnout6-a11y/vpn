@@ -71,6 +71,11 @@ vi.mock('./settings', () => ({
   }
 }))
 
+vi.mock('./trafficForensicsSummary', async importOriginal => {
+  const actual = await importOriginal<typeof import('./trafficForensicsSummary')>()
+  return { ...actual, generateTrafficForensicsSummary: vi.fn(actual.generateTrafficForensicsSummary) }
+})
+import { generateTrafficForensicsSummary } from './trafficForensicsSummary'
 import { ensureElevatedRuntimeDirHardened, verifyDirectoryHardened } from './runtimeDirSecurity'
 
 import {
@@ -191,7 +196,54 @@ describe('trafficForensics', () => {
     expect((await getTrafficForensicsStatus()).running).toBe(true)
   })
 
-  it('coalesces concurrent provider stops instead of losing a second failure (AT-08-005)', async () => {
+  it.each([false, true])('orders stop/start and a subsequent stop=%s across finalization (AT-08-005, F-198)', async stopAgain => {
+    execElevatedMock.mockResolvedValue({ stdout: STOP_ACK, stderr: '' })
+    await startTrafficForensicsSession({ mode: 'directVpn', target: 'old' })
+    execElevatedMock.mockClear()
+    let release!: () => void
+    let entered!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const finalizing = new Promise<void>(resolve => { entered = resolve })
+    vi.mocked(generateTrafficForensicsSummary).mockImplementationOnce(async manifest => {
+      entered()
+      await gate
+      return manifest
+    })
+    const stopping = stopTrafficForensicsSession('first')
+    await finalizing
+    const starting = startTrafficForensicsSession({ mode: 'directVpn', target: 'new' })
+    const lastStop = stopAgain ? stopTrafficForensicsSession('last') : Promise.resolve()
+    try {
+      await new Promise(resolve => setTimeout(resolve, 20))
+      expect(execElevatedMock).toHaveBeenCalledTimes(1)
+    } finally {
+      release()
+      await Promise.all([stopping, starting, lastStop])
+    }
+    const started = await starting
+    const status = await getTrafficForensicsStatus()
+    const saved = JSON.parse(readFileSync(join(fixturePaths.data, 'privileged', 'traffic-forensics', 'latest-session.json'), 'utf8'))
+    expect(started.running).toBe(true)
+    expect(started.cleanupPending).toBe(false)
+    expect(status.target).toBe('new')
+    expect(status.running).toBe(!stopAgain)
+    expect(saved.sessionId).toBe(started.sessionId)
+    expect(saved.running).toBe(!stopAgain)
+    expect(execElevatedMock).toHaveBeenCalledTimes(stopAgain ? 3 : 2)
+  })
+
+  it('orders restart before a subsequent stop without nested queue waits (AT-08-005)', async () => {
+    execElevatedMock.mockResolvedValue({ stdout: STOP_ACK, stderr: '' })
+    await startTrafficForensicsSession({ mode: 'directVpn', target: 'fixture' })
+    execElevatedMock.mockClear()
+    const [restarted, stopped] = await Promise.all([restartTrafficForensicsSession(), stopTrafficForensicsSession('last')])
+    expect(restarted.running).toBe(true)
+    expect(stopped.running).toBe(false)
+    expect((await getTrafficForensicsStatus()).running).toBe(false)
+    expect(execElevatedMock).toHaveBeenCalledTimes(3)
+  })
+
+  it('serializes concurrent provider stops without executing a stopped provider twice (AT-08-005)', async () => {
     execElevatedMock.mockResolvedValue({ stdout: STOP_ACK, stderr: '' })
     await startTrafficForensicsSession({ mode: 'directVpn', target: 'fixture' })
     execElevatedMock.mockClear()
@@ -219,10 +271,29 @@ describe('trafficForensics', () => {
     expect(readFileSync(join(legacyDir, 'latest-session.json'), 'utf8')).toBe(body)
   })
 
-  it('allows a confirmed stopped legacy manifest without migrating its paths (AT-01-009/AT-08-004)', async () => {
+  it.each([
+    { lastError: 'native stop failed', stoppedAt: 1 },
+    { lastError: null },
+    { lastError: null, stoppedAt: 1, stopReason: 'status-reconciled-stop' },
+    { lastError: null, stoppedAt: 1, stopReason: 'zombie-recovery' },
+    { lastError: null, stoppedAt: 1, sidecar: { running: true } }
+  ])('rejects a legacy false-stopped hint %j without modifying it (AT-08-004, F-198)', async metadata => {
     const legacyDir = join(fixturePaths.data, 'traffic-forensics')
     mkdirSync(legacyDir, { recursive: true })
-    writeFileSync(join(legacyDir, 'latest-session.json'), JSON.stringify({ running: false, sessionDir: 'C:/hostile' }))
+    const body = JSON.stringify({ running: false, sessionDir: 'C:/hostile', ...metadata })
+    const path = join(legacyDir, 'latest-session.json')
+    writeFileSync(path, body)
+    expect((await getTrafficForensicsStatus()).cleanupPending).toBe(true)
+    await expect(startTrafficForensicsSession({ mode: 'directVpn', target: 'fixture' })).rejects.toThrow('LegacyCaptureCleanupRequired')
+    expect(execElevatedMock).not.toHaveBeenCalled()
+    expect(spawnMock).not.toHaveBeenCalled()
+    expect(readFileSync(path, 'utf8')).toBe(body)
+  })
+
+  it('allows a stopped legacy hint without migrating its paths (AT-01-009/AT-08-004)', async () => {
+    const legacyDir = join(fixturePaths.data, 'traffic-forensics')
+    mkdirSync(legacyDir, { recursive: true })
+    writeFileSync(join(legacyDir, 'latest-session.json'), JSON.stringify({ running: false, stoppedAt: 1, lastError: null, sessionDir: 'C:/hostile' }))
     execElevatedMock.mockResolvedValue({ stdout: STOP_ACK, stderr: '' })
     const status = await startTrafficForensicsSession({ mode: 'directVpn', target: 'fixture' })
     expect(status.running).toBe(true)
@@ -312,6 +383,60 @@ describe('trafficForensics', () => {
     expect(refreshed.sidecar?.lastError).toContain('sidecar exited code=9009')
     expect(manifest.sidecar.running).toBe(false)
     expect(manifest.sidecar.lastError).toContain('sidecar exited code=9009')
+  })
+
+  it('preserves a sidecar exit observed during manifest I/O (AT-08-004, F-198)', async () => {
+    execElevatedMock.mockResolvedValue({ stdout: STOP_ACK, stderr: '' })
+    mkdirSync(dirname(fixturePaths.sidecar), { recursive: true })
+    writeFileSync(fixturePaths.sidecar, '@echo off\r\n')
+    process.env.VPNTE_TRAFFIC_FORENSICS_SIDECAR = fixturePaths.sidecar
+    const child = mockChildProcess()
+    spawnMock.mockReturnValue(child)
+    const started = await startTrafficForensicsSession({ mode: 'directVpn', target: 'fixture' })
+    let release!: () => void
+    let entered!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const writing = new Promise<void>(resolve => { entered = resolve })
+    vi.mocked(generateTrafficForensicsSummary).mockImplementationOnce(async manifest => {
+      vi.mocked(ensureElevatedRuntimeDirHardened).mockImplementationOnce(async () => {
+        entered()
+        await gate
+        return { hardened: true, message: 'stubbed' }
+      })
+      return manifest
+    })
+    const staging = stageTrafficForensicsArtifacts(fixturePaths.stage)
+    await writing
+    try { child.emit('exit', 9009, null) } finally { release(); await staging }
+    await vi.waitFor(() => {
+      const saved = JSON.parse(readFileSync(join(started.sessionDir!, 'session-manifest.json'), 'utf8'))
+      expect(saved.sidecar.running).toBe(false)
+      expect(saved.sidecar.lastError).toContain('sidecar exited code=9009')
+      expect(saved.running).toBe(true)
+    })
+    expect((await getTrafficForensicsStatus()).sidecar?.running).toBe(false)
+  })
+
+  it.each(['exit', 'error'])('ignores a late old-sidecar %s after restart (AT-08-005, F-198)', async event => {
+    execElevatedMock.mockResolvedValue({ stdout: STOP_ACK, stderr: '' })
+    mkdirSync(dirname(fixturePaths.sidecar), { recursive: true })
+    writeFileSync(fixturePaths.sidecar, '@echo off\r\n')
+    process.env.VPNTE_TRAFFIC_FORENSICS_SIDECAR = fixturePaths.sidecar
+    const oldChild = mockChildProcess(4242)
+    const newChild = mockChildProcess(4243)
+    spawnMock.mockReturnValueOnce(oldChild).mockReturnValueOnce(newChild)
+    await startTrafficForensicsSession({ mode: 'directVpn', target: 'fixture' })
+    const restarted = await restartTrafficForensicsSession()
+    if (event === 'exit') oldChild.emit('exit', 9009, null)
+    else oldChild.emit('error', new Error('late old-child error'))
+    await new Promise(resolve => setTimeout(resolve, 20))
+    const status = await getTrafficForensicsStatus()
+    const saved = JSON.parse(readFileSync(join(restarted.sessionDir!, 'session-manifest.json'), 'utf8'))
+    expect(status.sessionId).toBe(restarted.sessionId)
+    expect(status.running).toBe(true)
+    expect(status.sidecar?.pid).toBe(4243)
+    expect(status.sidecar?.running).toBe(true)
+    expect(saved.sidecar.pid).toBe(4243)
   })
 
   it('keeps provider cleanup pending when the managed sidecar is already gone (AT-08-004, F-198)', async () => {

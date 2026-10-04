@@ -136,3 +136,16 @@ Preload экспорт проверяет `redacted | secrets` до IPC. Startup
 - NSIS EXE 1.1.22 пересобран, **NotSigned**, не устанавливался. SHA-256: `AEEA3D7D04098422D50C72F72100C6C7D9CAC6F08DD08CE6831BE374ED177EC6`. Упакованные main/preload/renderer index совпадают с `out/` по SHA-256; main содержит новые stop/legacy markers. `dist/checksums.txt` обновлён для installer и blockmap.
 
 AT-08-004/005 и AT-01-009 имеют новые L1/L2 регрессии, **не полный L3 PASS**. Native live-capture/OS matrix, installed-upgrade, VM, cross-version 42→44 и rollback-reader остаются NOT-CHECKED. Нормативные `docs/` не изменены.
+
+## Третий проход ревью: гонка переходов и предупреждения
+
+- Гонка stop/start воспроизведена до исправления: оба новых regression cases запускали новый provider до окончания старой finalization (ожидался 1 native call, получено 2). Общая небольшая promise-очередь теперь охватывает start/stop/restart и staging вместе с записью manifest; внутренние restart/zombie recovery не ждут собственную очередь. Последующий stop не теряется за предыдущим stop.
+- Sidecar callbacks проверяют принадлежность текущему child/session; поздние error/exit старого child не заменяют новую сессию. Отложенная запись наблюдения sidecar объединяется с текущим provider state. Status reconciliation не изменяет runtimeState из устаревшего снимка.
+- `discussion_r4178028247`: legacy `running:false` с ошибкой, без положительного stoppedAt, с активным sidecar или ложным reconciliation reason остаётся pending. Legacy marker по-прежнему только недоверенный hint; scripts/PID/paths не импортируются, данные не меняются, полноценный installer handoff не заявляется.
+- `discussion_r4178041325`: running manifest без in-memory ownership текущего процесса означает cleanupPending независимо от startedAt (прошлое/отсутствует/будущее). Работающий capture текущего процесса без sidecar не получает ложное предупреждение.
+- `discussion_r4178028250`: новые warnings и затронутый status block используют совпадающие RU/EN ключи и `useTranslation`; legacy backend marker отображается локализованно. UI regressions используют настоящий i18next, включая смену языка без перемонтирования.
+- Production delta: +57 строк net, включая 24 строки locale JSON; без новых зависимостей/классов/менеджеров. Добавлено 17 regression cases.
+- `npm run typecheck`, `npm run build`, `npm run dist:win`: exit 0. Focused capture/security/UI: **59/59 PASS**. Full `npm test -- --maxWorkers=4 --reporter=dot`: **206 files passed / 2 skipped; 2476 passed / 10 skipped / 0 failed**, 109.40 s. Traceability: AC927/927, F210/210, exit 0 (покрытие ссылками, не исполнение всех AT).
+- Пересобран NSIS installer 1.1.22: **139180033 bytes, NotSigned**, без установки. SHA-256: `7C42C3F6F08F12B827C4C64BD429FF25A2CCFA4DEAA0FF8DE4FFC3DD15BA8DD4`. 40 packaged main/preload/renderer files совпали с out по SHA-256; новые queue/legacy и RU/EN markers присутствуют. `dist/checksums.txt` обновлён для EXE/blockmap.
+
+Проверки выполнялись на изолированных fixtures с mocked capture providers. Реальный elevated capture, установленный клиент, VPN/Firewall/DNS/clipboard не изменялись; VM отсутствует и не запускалась. Ранее перечисленные L3/upgrade/42→44/rollback ограничения сохраняются, полный WP-1 PASS не заявляется.
