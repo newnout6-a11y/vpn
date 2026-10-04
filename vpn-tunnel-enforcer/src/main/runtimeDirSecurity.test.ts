@@ -80,9 +80,13 @@ function decodeEncodedCommand(text: string): string {
   return Buffer.from(text.slice(index + marker.length).trim(), 'base64').toString('utf16le')
 }
 
+// AT-01-009: a clean root is not proof that its descendants were inspected.
+const treeProof = { directory: true, reparse: false, childrenInspected: true, children: [] }
+
 /** The DACL shape we consider hardened. */
 function hardenedAcl(owner = SID_ADMINS) {
   return JSON.stringify({
+    ...treeProof,
     owner,
     protected: true,
     rules: [
@@ -95,6 +99,7 @@ function hardenedAcl(owner = SID_ADMINS) {
 /** The default %APPDATA% shape: the interactive user owns it and can write. */
 function weakAcl() {
   return JSON.stringify({
+    ...treeProof,
     owner: SID_USER,
     protected: false,
     rules: [
@@ -103,6 +108,15 @@ function weakAcl() {
       { sid: SID_USER, rights: 'FullControl', type: 'Allow' }
     ]
   })
+}
+
+function childAcl(overrides: Record<string, unknown> = {}) {
+  const root = JSON.parse(hardenedAcl())
+  return { owner: root.owner, protected: false, rules: root.rules,
+    path: RUNTIME_DIR + '\\runtime.exe', directory: false, reparse: false, ...overrides }
+}
+function treeAcl(children: unknown[]) {
+  return JSON.stringify({ ...JSON.parse(hardenedAcl()), children })
 }
 
 /** Queue of stdout values the mocked inspect calls return, in order. */
@@ -121,7 +135,103 @@ beforeEach(() => {
   execElevatedMock.mockResolvedValue({ stdout: 'HARDENED', stderr: '' })
 })
 
+describe('ACL PowerShell module authority (AT-01-009)', () => {
+  it.each(['inspect', 'harden'])('pins the builtin Security manifest before %s operations', async operation => {
+    let script: string
+    if (operation === 'harden') {
+      inspectResponses = [weakAcl(), hardenedAcl()]
+      await ensureElevatedRuntimeDirHardened(RUNTIME_DIR, 'tun-runtime')
+      script = decodeEncodedCommand(String(execElevatedMock.mock.calls[0][0]))
+    } else {
+      await verifyDirectoryHardened(RUNTIME_DIR)
+      script = Buffer.from(execFileMock.mock.calls[0][1][4], 'base64').toString('utf16le')
+    }
+    const pinnedImport = "Import-Module -Name (Join-Path $PSHOME 'Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1') -ErrorAction Stop;"
+    expect(script.startsWith(pinnedImport)).toBe(true)
+    expect(script.match(/\bImport-Module\b/g)).toHaveLength(1)
+    expect(script).not.toMatch(/Import-Module\s+(?:-Name\s+)?['"]?Microsoft\.PowerShell\.Security(?:['"]|\s|;|$)/)
+    expect(script).not.toMatch(/\$env:PSModulePath\s*=|SetEnvironmentVariable|Set-Item\s+Env:/i)
+  })
+  it('does not treat a module import error as native ACL refusal proof', async () => {
+    inspectImpl = () => { throw new Error('Pinned Security module import failed') }
+    const result = await verifyDirectoryHardened(RUNTIME_DIR)
+    expect(result.hardened).toBe(false)
+    expect(result.message).toContain('Pinned Security module import failed')
+    expect(result.offenders).toBeUndefined()
+    expect(execElevatedMock).not.toHaveBeenCalled()
+  })
+  it('fails closed without accepting readback when the hardening prelude cannot import', async () => {
+    inspectResponses = [weakAcl()]
+    execElevatedMock.mockRejectedValueOnce(new Error('Pinned Security module import failed'))
+    const result = await ensureElevatedRuntimeDirHardened(RUNTIME_DIR, 'tun-runtime')
+    expect(result.hardened).toBe(false)
+    expect(result.message).toContain('Pinned Security module import failed')
+    expect(execFileMock).toHaveBeenCalledTimes(1)
+  })
+})
+
 describe('verifyDirectoryHardened', () => {
+  it.each(['childrenInspected', 'children', 'directory', 'reparse', 'rules', 'protected'])('requires explicit %s proof (AT-01-009)', async field => {
+    const snapshot = JSON.parse(hardenedAcl()); delete snapshot[field]
+    inspectResponses = [JSON.stringify(snapshot)]
+    expect((await verifyDirectoryHardened(RUNTIME_DIR)).hardened).toBe(false)
+  })
+  it.each([
+    { childrenInspected: false }, { children: null }, { children: {} }, { reparse: true },
+    { directory: false }, { rules: [] }, { rules: [{ sid: SID_USER }] },
+    { rules: [{ sid: SID_USER, rights: '2032127', type: 'Allow' }] },
+    { rules: [{ sid: SID_USER, rights: 'FullControl', type: 'Unknown' }] }
+  ])('rejects malformed or incomplete tree/ACL proof (AT-01-009): %j', async patch => {
+    inspectResponses = [JSON.stringify({ ...JSON.parse(hardenedAcl()), ...patch })]
+    expect((await verifyDirectoryHardened(RUNTIME_DIR)).hardened).toBe(false)
+  })
+  it.each([false, true])('rejects a user-owned child, directory=%s (AT-01-009)', async directory => {
+    inspectResponses = [treeAcl([childAcl({ owner: SID_USER, directory })])]
+    const result = await verifyDirectoryHardened(RUNTIME_DIR)
+    expect(result.hardened).toBe(false)
+    expect(result.offenders?.join(' ')).toContain('runtime.exe')
+    expect(result.offenders?.join(' ')).toContain(SID_USER)
+  })
+  it.each(['WriteData', 'AppendData', 'WriteExtendedAttributes', 'WriteAttributes', 'Delete', 'DeleteSubdirectoriesAndFiles', 'ChangePermissions', 'TakeOwnership'])('rejects child write right %s (AT-01-009)', async rights => {
+    const child = childAcl(); child.rules = [...child.rules, { sid: SID_USER, rights, type: 'Allow' }]
+    inspectResponses = [treeAcl([child])]
+    expect((await verifyDirectoryHardened(RUNTIME_DIR)).hardened).toBe(false)
+  })
+  it.each([false, true])('rejects a child reparse point before accepting its ACL, directory=%s (AT-01-009)', async directory => {
+    inspectResponses = [treeAcl([childAcl({ directory, reparse: true })])]
+    expect((await verifyDirectoryHardened(RUNTIME_DIR)).hardened).toBe(false)
+  })
+  it.each(['owner', 'rules', 'path', 'reparse', 'directory', 'protected'])('does not infer missing child %s proof (AT-01-009)', async field => {
+    const child: Record<string, unknown> = childAcl(); delete child[field]
+    inspectResponses = [treeAcl([child])]
+    expect((await verifyDirectoryHardened(RUNTIME_DIR)).hardened).toBe(false)
+  })
+  it('accepts inherited child ACLs only under a protected, fully inspected clean tree (AT-01-009)', async () => {
+    const child = childAcl({ path: RUNTIME_DIR + '\\nested\\runtime.exe' })
+    child.rules = [...child.rules, { sid: SID_USER, rights: 'ReadAndExecute, Synchronize', type: 'Allow' }]
+    inspectResponses = [treeAcl([childAcl({ path: RUNTIME_DIR + '\\nested', directory: true }), child])]
+    expect((await verifyDirectoryHardened(RUNTIME_DIR)).hardened).toBe(true)
+  })
+  it.each([
+    [childAcl({ path: 'C:\\unrelated\\runtime.exe' })],
+    [childAcl({ path: RUNTIME_DIR + '\\missing-parent\\runtime.exe' })],
+    [childAcl(), childAcl()]
+  ])('rejects out-of-tree, incomplete or duplicate child paths (AT-01-009): %j', async (...children) => {
+    inspectResponses = [treeAcl(children)]
+    expect((await verifyDirectoryHardened(RUNTIME_DIR)).hardened).toBe(false)
+  })
+  it('uses a checked manual walk and never recursive enumeration (AT-01-009)', async () => {
+    await verifyDirectoryHardened(RUNTIME_DIR)
+    const script = Buffer.from(execFileMock.mock.calls[0][1][4], 'base64').toString('utf16le')
+    expect(script).toContain("$root['childrenInspected'] = $true")
+    expect(script).toContain('Get-ChildItem -LiteralPath')
+    expect(script).toContain('ReparsePoint')
+    expect(script).not.toMatch(/-Recurse|-ErrorAction\s+SilentlyContinue/)
+  })
+  it('fails closed when the read-back cannot establish the owner (AT-01-009)', async () => {
+    inspectResponses = [JSON.stringify({ ...treeProof, owner: null, protected: true, rules: [] })]
+    expect((await verifyDirectoryHardened(RUNTIME_DIR)).hardened).toBe(false)
+  })
   it('accepts a protected admin-only DACL', async () => {
     inspectResponses = [hardenedAcl()]
     const result = await verifyDirectoryHardened(RUNTIME_DIR)
@@ -143,6 +253,7 @@ describe('verifyDirectoryHardened', () => {
     // access at will, so an admin-only rule list is not enough on its own.
     inspectResponses = [
       JSON.stringify({
+        ...treeProof,
         owner: SID_USER,
         protected: true,
         rules: [
@@ -160,6 +271,7 @@ describe('verifyDirectoryHardened', () => {
   it('rejects an inherited DACL even when it currently looks clean', async () => {
     inspectResponses = [
       JSON.stringify({
+        ...treeProof,
         owner: SID_ADMINS,
         protected: false,
         rules: [{ sid: SID_ADMINS, rights: 'FullControl', type: 'Allow' }]
@@ -176,6 +288,7 @@ describe('verifyDirectoryHardened', () => {
     // it or re-permission it.
     inspectResponses = [
       JSON.stringify({
+        ...treeProof,
         owner: SID_ADMINS,
         protected: true,
         rules: [
@@ -192,6 +305,7 @@ describe('verifyDirectoryHardened', () => {
   it('does not mistake a Deny rule for a grant', async () => {
     inspectResponses = [
       JSON.stringify({
+        ...treeProof,
         owner: SID_ADMINS,
         protected: true,
         rules: [
@@ -208,6 +322,7 @@ describe('verifyDirectoryHardened', () => {
   it('handles a single-rule DACL that ConvertTo-Json emitted as an object', async () => {
     inspectResponses = [
       JSON.stringify({
+        ...treeProof,
         owner: SID_ADMINS,
         protected: true,
         rules: { sid: SID_ADMINS, rights: 'FullControl', type: 'Allow' }
@@ -230,6 +345,58 @@ describe('verifyDirectoryHardened', () => {
 })
 
 describe('ensureElevatedRuntimeDirHardened', () => {
+  it.each(['Runtime child owner reset failed', 'Runtime child ACL reset failed', 'Runtime child owner readback failed', 'Runtime child ACL readback failed'])('rejects child hardening failure: %s (AT-01-009)', async message => {
+    inspectResponses = [treeAcl([childAcl({ owner: SID_USER })])]
+    execElevatedMock.mockRejectedValueOnce(new Error(message))
+    const result = await ensureElevatedRuntimeDirHardened(RUNTIME_DIR, 'tun-runtime')
+    expect(result.hardened).toBe(false)
+    expect(result.message).toContain(message)
+    expect(execFileMock).toHaveBeenCalledTimes(1)
+  })
+  it('aborts on a reparse preflight failure instead of accepting the clean root (AT-01-009)', async () => {
+    inspectResponses = [treeAcl([childAcl({ reparse: true })])]
+    execElevatedMock.mockRejectedValueOnce(new Error('Runtime path is a reparse point'))
+    expect((await ensureElevatedRuntimeDirHardened(RUNTIME_DIR, 'tun-runtime')).hardened).toBe(false)
+    const script = decodeEncodedCommand(String(execElevatedMock.mock.calls[0][0]))
+    expect(script.indexOf('$children = @(Get-RuntimeChildren $dir)')).toBeLessThan(script.indexOf('Set-Acl -LiteralPath $dir'))
+  })
+  it('repairs children even when the root itself is already clean (AT-01-009)', async () => {
+    inspectResponses = [treeAcl([childAcl({ owner: SID_USER })]), treeAcl([childAcl()])]
+    const result = await ensureElevatedRuntimeDirHardened(RUNTIME_DIR, 'tun-runtime')
+    expect(result.hardened).toBe(true)
+    expect(execElevatedMock).toHaveBeenCalledTimes(1)
+    expect(execFileMock).toHaveBeenCalledTimes(2)
+  })
+  it.each([
+    childAcl({ owner: SID_USER }), childAcl({ reparse: true }),
+    childAcl({ rules: [{ sid: SID_USER, rights: 'FullControl', type: 'Allow' }] })
+  ])('fails closed if a child remains untrusted after successful hardening (AT-01-009): %j', async child => {
+    inspectResponses = [treeAcl([childAcl({ owner: SID_USER })]), treeAcl([child])]
+    expect((await ensureElevatedRuntimeDirHardened(RUNTIME_DIR, 'tun-runtime')).hardened).toBe(false)
+    expect(execElevatedMock).toHaveBeenCalledTimes(1)
+  })
+  it('does not accept a legacy root-only readback after hardening (AT-01-009)', async () => {
+    const legacy = JSON.parse(hardenedAcl()); delete legacy.childrenInspected
+    inspectResponses = [weakAcl(), JSON.stringify(legacy)]
+    expect((await ensureElevatedRuntimeDirHardened(RUNTIME_DIR, 'tun-runtime')).hardened).toBe(false)
+  })
+  it('rechecks child ownership after an earlier successful connection (AT-01-009)', async () => {
+    inspectResponses = [treeAcl([childAcl()]), treeAcl([childAcl({ owner: SID_USER })])]
+    expect((await ensureElevatedRuntimeDirHardened(RUNTIME_DIR, 'tun-runtime')).hardened).toBe(true)
+    isProcessElevatedMock.mockResolvedValue(false)
+    expect((await ensureElevatedRuntimeDirHardened(RUNTIME_DIR, 'tun-runtime')).hardened).toBe(false)
+    expect(execFileMock).toHaveBeenCalledTimes(2)
+  })
+  it('shares only concurrent work, not a completed proof (AT-01-009)', async () => {
+    const results = await Promise.all([
+      ensureElevatedRuntimeDirHardened(RUNTIME_DIR, 'tun-runtime'),
+      ensureElevatedRuntimeDirHardened(RUNTIME_DIR, 'tun-runtime')
+    ])
+    expect(results.every(result => result.hardened)).toBe(true)
+    expect(execFileMock).toHaveBeenCalledTimes(1)
+    await ensureElevatedRuntimeDirHardened(RUNTIME_DIR, 'tun-runtime')
+    expect(execFileMock).toHaveBeenCalledTimes(2)
+  })
   it('skips the elevated call when the directory is already hardened', async () => {
     inspectResponses = [hardenedAcl()]
     const result = await ensureElevatedRuntimeDirHardened(RUNTIME_DIR, 'tun-runtime')
@@ -254,16 +421,24 @@ describe('ensureElevatedRuntimeDirHardened', () => {
     // Well-known SIDs, not localized names.
     expect(script).toContain(SID_SYSTEM)
     expect(script).toContain(SID_ADMINS)
-    // Existing children must lose their own explicit ACEs...
-    expect(script).toContain('/reset /T')
-    // ...but the reset must target children only, NEVER `$dir` itself.
-    // `icacls /reset` makes its target inherit from *its own* parent — run on
-    // `$dir` itself that immediately undoes the `Set-Acl` two lines above,
-    // re-inheriting the still-writable-by-the-user parent DACL. This was a
-    // real, live bug: every "hardening succeeded" run was silently reverting
-    // itself before the read-back verification ever ran.
-    expect(script).toContain('icacls "$dir\\*"')
+    // AT-01-009: repair each checked child without following its target.
+    expect(script).toContain('/setowner')
+    expect(script).toContain('/reset /L')
+    expect(script).not.toMatch(/\/T\b|-Recurse|-ErrorAction\s+SilentlyContinue/)
+    expect(script).not.toContain('"$dir\\*"')
     expect(script).not.toMatch(/icacls\s+\$dir\s+\/reset/)
+    expect(script.indexOf('$children = @(Get-RuntimeChildren $dir)')).toBeLessThan(script.indexOf('Set-Acl -LiteralPath $dir'))
+    const commands = script.split('\n').filter(line => /^\s*& icacls/.test(line))
+    expect(commands).toHaveLength(2)
+    expect(commands.every(line => /\/L\b/.test(line))).toBe(true)
+    expect(script).toContain('Runtime child owner reset failed')
+    expect(script).toContain('Runtime child ACL reset failed')
+    expect(script).toContain('Runtime child owner readback failed')
+    expect(script).toContain('Runtime child ACL readback failed')
+    expect(script).toContain('$components.Push($candidate)')
+    expect(script).toContain('Get-Item -LiteralPath ($components.Pop())')
+    expect(script).toContain('$info.Create($acl)')
+    expect(script).not.toContain('New-Item -ItemType Directory')
     // Paths are passed literally so spaces and brackets survive.
     expect(script).toContain('-LiteralPath $dir')
     expect(script).toContain(RUNTIME_DIR)
@@ -327,7 +502,7 @@ describe('ensureElevatedRuntimeDirHardened', () => {
     expect(execElevatedMock).not.toHaveBeenCalled()
   })
 
-  it('caches success so repeat connects cost nothing', async () => {
+  it('reads ACL again before every later connection (AT-01-009)', async () => {
     inspectResponses = [weakAcl(), hardenedAcl()]
     const first = await ensureElevatedRuntimeDirHardened(RUNTIME_DIR, 'tun-runtime')
     const elevatedCallsAfterFirst = execElevatedMock.mock.calls.length
@@ -338,7 +513,14 @@ describe('ensureElevatedRuntimeDirHardened', () => {
     expect(first.hardened).toBe(true)
     expect(second.hardened).toBe(true)
     expect(execElevatedMock.mock.calls.length).toBe(elevatedCallsAfterFirst)
-    expect(execFileMock.mock.calls.length).toBe(inspectCallsAfterFirst)
+    expect(execFileMock.mock.calls.length).toBe(inspectCallsAfterFirst + 1)
+  })
+
+  it('rejects a weakened directory after an earlier successful connection (AT-01-009)', async () => {
+    inspectResponses = [hardenedAcl(), weakAcl()]
+    expect((await ensureElevatedRuntimeDirHardened(RUNTIME_DIR, 'tun-runtime')).hardened).toBe(true)
+    isProcessElevatedMock.mockResolvedValue(false)
+    expect((await ensureElevatedRuntimeDirHardened(RUNTIME_DIR, 'tun-runtime')).hardened).toBe(false)
   })
 
   it('retries after a failure instead of caching it', async () => {

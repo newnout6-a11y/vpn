@@ -16,6 +16,7 @@ describe('renderer production boundary', () => {
     expect(webPreferences).toContain('contextIsolation: true')
     expect(webPreferences).toContain('nodeIntegration: false')
     expect(webPreferences).toContain('sandbox: true')
-    expect(webPreferences).not.toContain('app.isPackaged')
+    expect(webPreferences).toContain('devTools: !app.isPackaged')
+    expect(webPreferences).not.toMatch(/(?:sandbox|nodeIntegration|contextIsolation):\s*(?:!?app\.|process\.)/)
   })
 })

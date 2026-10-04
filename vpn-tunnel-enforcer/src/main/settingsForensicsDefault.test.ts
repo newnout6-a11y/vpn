@@ -21,6 +21,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const storeState = vi.hoisted(() => ({ data: {} as Record<string, any> }))
+vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
 
 vi.mock('electron', () => ({
   app: {

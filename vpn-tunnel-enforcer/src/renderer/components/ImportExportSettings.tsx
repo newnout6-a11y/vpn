@@ -2,7 +2,6 @@ import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Download, Upload, CheckCircle2, AlertTriangle } from 'lucide-react'
 import { MacCard, MacButton, MacModal } from '../design-system'
-import { confirmSecretExport } from '../utils/secretClipboard'
 
 type ConflictResolution = 'replace' | 'merge'
 
@@ -15,7 +14,7 @@ interface ValidationResult {
 }
 
 interface ConfigApi {
-  configExport: () => Promise<{ success: boolean; path?: string; error?: string }>
+  configExport: (mode?: 'redacted' | 'secrets') => Promise<{ success: boolean; path?: string; error?: string }>
   configBrowseImport: () => Promise<string | null>
   configImport: (filePath: string) => Promise<{ success: boolean; sections: string[]; conflicts: string[]; error?: string }>
   configImportApply: (filePath: string, sections: string[], conflictResolution: 'replace' | 'merge') => Promise<{ success: boolean; error?: string }>
@@ -64,12 +63,11 @@ export function ImportExportSettings() {
     return key ? t(`settings.${key}`) : section
   }
 
-  const handleExport = async () => {
-    if (!confirmSecretExport('file')) return
+  const handleExport = async (mode: 'redacted' | 'secrets' = 'redacted') => {
     setExporting(true)
     setExportSuccess(false)
     try {
-      const result = await getApi().configExport()
+      const result = await getApi().configExport(mode)
       if (result.success) {
         setExportSuccess(true)
         setTimeout(() => setExportSuccess(false), 3000)
@@ -174,7 +172,7 @@ export function ImportExportSettings() {
           <div className="flex flex-wrap gap-3">
             <MacButton
               variant="secondary"
-              onClick={handleExport}
+              onClick={() => handleExport()}
               loading={exporting}
               disabled={exporting}
             >
@@ -187,6 +185,15 @@ export function ImportExportSettings() {
               ) : (
                 t('settings.exportSettings')
               )}
+            </MacButton>
+
+            <MacButton
+              variant="secondary"
+              onClick={() => handleExport('secrets')}
+              disabled={exporting}
+              aria-busy={exporting}
+            >
+              {t('settings.exportSettingsWithSecrets')}
             </MacButton>
 
             <MacButton

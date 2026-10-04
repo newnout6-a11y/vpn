@@ -24,6 +24,8 @@ import { readFileSync, readSync, writeFileSync, openSync, closeSync, fstatSync }
 import Store from 'electron-store'
 import { logEvent } from './appLogger'
 import { compactForIpcLog } from './ipcLogging'
+import { withSecretExportConsent } from './secretExportConsent'
+import { redactConfigExport } from './configExportPolicy'
 import { requireEnum, requireString, requireStringArray } from './ipcValidation'
 import { serverPickerStore, serverGroupsStore, granularKillSwitchStore } from './sharedStores'
 import type {
@@ -567,24 +569,29 @@ function writeConfigToStores(config: ConfigExportData, sections: ConfigSection[]
 /**
  * Exports all settings to a JSON file via save dialog.
  */
-async function exportConfig(): Promise<{ success: boolean; path?: string; error?: string }> {
+async function exportConfig(sender: WebContents, mode: 'redacted' | 'secrets' = 'redacted'): Promise<{ success: boolean; path?: string; error?: string }> {
   try {
+    if (mode === 'secrets') {
+      const consent = await withSecretExportConsent(sender, 'file', () => true)
+      if (consent !== true) return { success: false, error: 'Export cancelled' }
+    }
+    if (sender.isDestroyed()) return { success: false, error: 'Export cancelled' }
     const result = await dialog.showSaveDialog({
-      title: 'Экспорт конфигурации — содержит пароли и приватные ключи VPN',
-      buttonLabel: 'Сохранить файл с секретами',
+      title: mode === 'secrets' ? 'Экспорт конфигурации с секретами' : 'Экспорт конфигурации без секретов',
+      buttonLabel: mode === 'secrets' ? 'Сохранить файл с секретами' : 'Сохранить',
       defaultPath: `vpn-tunnel-enforcer-config-${Date.now()}.json`,
       filters: [{ name: 'JSON Files', extensions: ['json'] }]
     })
 
-    if (result.canceled || !result.filePath) {
+    if (result.canceled || !result.filePath || sender.isDestroyed()) {
       return { success: false, error: 'Export cancelled' }
     }
 
     const config = collectCurrentConfig()
-    const json = JSON.stringify(config, null, 2)
+    const json = JSON.stringify(mode === 'secrets' ? config : redactConfigExport(config), null, 2)
     writeFileSync(result.filePath, json, 'utf-8')
 
-    logEvent('info', 'config-manager', 'config exported', { path: result.filePath })
+    logEvent('info', 'config-manager', 'config exported', { path: result.filePath, mode })
     return { success: true, path: result.filePath }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
@@ -800,8 +807,8 @@ function readSelectedConfig(path: string): string {
 
 export function registerConfigManagerIpcHandlers(): void {
   // config:export — exports all settings and saves to file via dialog
-  handleLogged('config:export', async () => {
-    return await configManager.exportConfig()
+  handleLogged('config:export', async (event, mode: unknown = 'redacted') => {
+    return await configManager.exportConfig(event.sender, requireEnum(mode, 'mode', ['redacted', 'secrets']))
   })
 
   // config:import — validates a file and returns sections/conflicts

@@ -40,6 +40,7 @@
 import { stat } from 'fs/promises'
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
+import { win32 } from 'path'
 import { execElevated, isProcessElevated } from './admin'
 import { logEvent } from './appLogger'
 
@@ -76,8 +77,12 @@ const DANGEROUS_RIGHTS = [
   'TakeOwnership'
 ]
 
+const KNOWN_RIGHTS = new Set([...DANGEROUS_RIGHTS,
+  'ReadData', 'ListDirectory', 'ReadExtendedAttributes', 'Traverse', 'ExecuteFile',
+  'ReadAttributes', 'ReadPermissions', 'Synchronize', 'Read', 'ReadAndExecute'])
+
 export interface DirectoryHardeningResult {
-  /** True only when the directory is confirmed admin-only afterwards. */
+  /** True only when the directory and all existing descendants are trusted. */
   hardened: boolean
   /** True when hardening was skipped because it does not apply (non-Windows). */
   skipped?: boolean
@@ -94,7 +99,10 @@ function psSingleQuote(value: string): string {
 }
 
 function encodedPowerShell(script: string): string {
+  // A host PSModulePath can put PS7 modules before Windows PowerShell 5.1's.
+  // Pin ACL cmdlets to this process's builtin manifest, never module discovery.
   const prelude =
+    "Import-Module -Name (Join-Path $PSHOME 'Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1') -ErrorAction Stop;" +
     '$OutputEncoding=[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new();' +
     '$ProgressPreference="SilentlyContinue";'
   return Buffer.from(prelude + script, 'utf16le').toString('base64')
@@ -117,114 +125,174 @@ async function runPowerShell(script: string, elevated: boolean, timeout: number)
   return String(stdout ?? '')
 }
 
-/**
- * Build the exact DACL we want and stamp it onto the directory, then let
- * every PRE-EXISTING CHILD inherit it.
- *
- * BUG THIS FIXES (live for weeks, silently no-op): the reset step used to be
- * `icacls $dir /reset /T /C /Q` — `$dir` itself, plus `/T` to recurse. Per
- * `icacls` semantics, `/reset` makes its target(s) inherit their DACL from
- * *their own* parent. Applied to `$dir` itself, that undoes the `Set-Acl`
- * two lines above in the same script — `$dir` immediately re-inherits from
- * `%APPDATA%\...` (still fully writable by the interactive user), and the
- * directory ends right back where it started. Every "ACL hardening
- * succeeded" run was reverting itself before the verification read-back
- * ever ran, which is why `verifyDirectoryHardened` kept reporting the
- * interactive user's SID as an offender on every single connect. The fix:
- * reset only `$dir`'s children (`$dir\*`), never `$dir` itself — new items
- * created after `Set-Acl` already inherit the protected DACL by normal NTFS
- * rules, so this step only matters for items that existed before hardening
- * ever ran (e.g. binaries staged by an older build of this app).
- *
- * `-LiteralPath` throughout: runtime paths contain spaces and may contain
- * brackets, which PowerShell would otherwise treat as wildcards.
- */
+// AT-01-009: manual, parent-before-child traversal. Neither enumeration nor
+// icacls may recursively follow an untrusted junction. Recheck paths before use.
+const RUNTIME_TREE_HELPERS = `
+function Get-RuntimeItem($path) {
+  $components = New-Object 'System.Collections.Generic.Stack[string]'
+  $candidate = [IO.Path]::GetFullPath($path)
+  while ($candidate) {
+    $components.Push($candidate)
+    $candidate = [IO.Path]::GetDirectoryName($candidate.TrimEnd([char]92))
+  }
+  while ($components.Count -gt 0) {
+    $item = Get-Item -LiteralPath ($components.Pop()) -Force -ErrorAction Stop
+    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Runtime path is a reparse point' }
+    if ($components.Count -gt 0 -and -not $item.PSIsContainer) { throw 'Runtime ancestor is not a directory' }
+  }
+  return $item
+}
+function Get-RuntimeChildren($root) {
+  $pending = New-Object 'System.Collections.Generic.Stack[string]'
+  $pending.Push($root)
+  while ($pending.Count -gt 0) {
+    $parent = Get-RuntimeItem ($pending.Pop())
+    if (-not $parent.PSIsContainer) { throw 'Runtime directory changed type' }
+    foreach ($entry in @(Get-ChildItem -LiteralPath $parent.FullName -Force -ErrorAction Stop)) {
+      $item = Get-RuntimeItem $entry.FullName
+      Write-Output $item
+      if ($item.PSIsContainer) { $pending.Push($item.FullName) }
+    }
+  }
+}
+`
+
+/** Protect the root, then repair checked children individually. Resetting the
+ * root would undo its protected DACL; resetting children alone leaves their
+ * old owner with implicit WRITE_DAC, so both owner and ACL must be repaired. */
 function buildHardenScript(dir: string): string {
-  const quoted = psSingleQuote(dir)
   return `
 $ErrorActionPreference = 'Stop'
-$dir = ${quoted}
-if (-not (Test-Path -LiteralPath $dir -PathType Container)) {
-  New-Item -ItemType Directory -Path $dir -Force | Out-Null
-}
+$dir = ${psSingleQuote(dir)}
+${RUNTIME_TREE_HELPERS}
 $system = New-Object System.Security.Principal.SecurityIdentifier('${SID_SYSTEM}')
 $admins = New-Object System.Security.Principal.SecurityIdentifier('${SID_ADMINISTRATORS}')
 $acl = New-Object System.Security.AccessControl.DirectorySecurity
-# $true = protect from inheritance, $false = do NOT copy the inherited rules in.
 $acl.SetAccessRuleProtection($true, $false)
 foreach ($sid in @($system, $admins)) {
   $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
     $sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
 }
-# The owner implicitly holds WRITE_DAC. Leaving the interactive user as owner
-# would let them undo everything above, so this is load-bearing.
 $acl.SetOwner($admins)
+$parent = Get-RuntimeItem ([IO.Path]::GetDirectoryName($dir))
+if (-not $parent.PSIsContainer) { throw 'Runtime parent is not a directory' }
+try { $null = Get-Item -LiteralPath $dir -Force -ErrorAction Stop }
+catch [System.Management.Automation.ItemNotFoundException] {
+  $info = New-Object System.IO.DirectoryInfo($dir)
+  $info.Create($acl)
+}
+$root = Get-RuntimeItem $dir
+if (-not $root.PSIsContainer) { throw 'Runtime root is not a directory' }
+# Reject the entire existing reparse tree before modifying any existing ACL.
+$children = @(Get-RuntimeChildren $dir)
+$null = Get-RuntimeItem $dir
 Set-Acl -LiteralPath $dir -AclObject $acl
-# Existing children keep their own explicit ACEs unless we reset them — but
-# NEVER pass $dir itself to /reset (see the function doc comment above: that
-# reintroduces inheritance from $dir's own parent and undoes the Set-Acl on
-# the line above). Only touch children, and only if any exist.
-if (Get-ChildItem -LiteralPath $dir -Force -ErrorAction SilentlyContinue | Select-Object -First 1) {
-  & icacls "$dir\\*" /reset /T /C /Q | Out-Null
+foreach ($child in $children) {
+  $path = $child.FullName
+  $null = Get-RuntimeItem $path
+  & icacls $path /setowner '*${SID_ADMINISTRATORS}' /L /Q | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw 'Runtime child owner reset failed' }
+  $null = Get-RuntimeItem $path
+  & icacls $path /reset /L /Q | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw 'Runtime child ACL reset failed' }
+  $null = Get-RuntimeItem $path
+  $childAcl = Get-Acl -LiteralPath $path -ErrorAction Stop
+  if ($childAcl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne '${SID_ADMINISTRATORS}') {
+    throw 'Runtime child owner readback failed'
+  }
+  foreach ($rule in $childAcl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
+    if ($rule.AccessControlType -eq 'Allow' -and $rule.IdentityReference.Value -notin @('${SID_SYSTEM}', '${SID_ADMINISTRATORS}') -and
+        ([int]$rule.FileSystemRights -band 0x500D0156) -ne 0) { throw 'Runtime child ACL readback failed' }
+  }
 }
 Write-Output 'HARDENED'
 `
 }
 
-/**
- * Read the DACL back and report anyone outside the allow-list who can write.
- * Reading an ACL needs no elevation, so diagnostics can call this freely.
- */
+/** One read-only PowerShell call inspects the complete existing tree. A partial
+ * traversal, inaccessible child or unknown owner must never produce success. */
 function buildInspectScript(dir: string): string {
   return `
 $ErrorActionPreference = 'Stop'
 $dir = ${psSingleQuote(dir)}
-$acl = Get-Acl -LiteralPath $dir
-$owner = try { $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value } catch { $null }
-$rules = @()
-foreach ($rule in $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
-  $rules += [ordered]@{
-    sid = $rule.IdentityReference.Value
-    rights = $rule.FileSystemRights.ToString()
-    type = $rule.AccessControlType.ToString()
+${RUNTIME_TREE_HELPERS}
+function Get-RuntimeAcl($path) {
+  $item = Get-RuntimeItem $path
+  $acl = Get-Acl -LiteralPath $path -ErrorAction Stop
+  $after = Get-RuntimeItem $path
+  if ([bool]$item.PSIsContainer -ne [bool]$after.PSIsContainer) { throw 'Runtime artifact changed type' }
+  $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+  $rules = @()
+  foreach ($rule in $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
+    $rules += [ordered]@{
+      sid = $rule.IdentityReference.Value
+      rights = $rule.FileSystemRights.ToString()
+      type = $rule.AccessControlType.ToString()
+    }
+  }
+  return [ordered]@{
+    path = $item.FullName
+    directory = [bool]$item.PSIsContainer
+    reparse = $false
+    owner = $owner
+    protected = $acl.AreAccessRulesProtected
+    rules = $rules
   }
 }
-[ordered]@{
-  owner = $owner
-  protected = $acl.AreAccessRulesProtected
-  rules = $rules
-} | ConvertTo-Json -Depth 4 -Compress
+$root = Get-RuntimeAcl $dir
+if (-not $root.directory) { throw 'Runtime root is not a directory' }
+$children = @(foreach ($child in @(Get-RuntimeChildren $dir)) { Get-RuntimeAcl $child.FullName })
+$root['children'] = $children
+$root['childrenInspected'] = $true
+$root | ConvertTo-Json -Depth 6 -Compress
 `
 }
 
 interface AclSnapshot {
-  owner: string | null
+  owner: string
   protected: boolean
-  rules: Array<{ sid: string; rights: string; type: string }>
+  directory: boolean
+  reparse: boolean
+  rules: Array<{ sid: string; rights: string; type: 'Allow' | 'Deny' }>
+}
+interface RuntimeTreeSnapshot extends AclSnapshot {
+  children: Array<AclSnapshot & { path: string }>
 }
 
-function parseAclSnapshot(stdout: string): AclSnapshot | null {
-  const text = stdout.trim()
-  if (!text) return null
-  try {
-    const parsed = JSON.parse(text)
-    // ConvertTo-Json emits a bare object for one rule and an array for many.
-    const rawRules = parsed?.rules
-    const rules = Array.isArray(rawRules) ? rawRules : rawRules ? [rawRules] : []
-    return {
-      owner: typeof parsed?.owner === 'string' ? parsed.owner : null,
-      protected: parsed?.protected === true,
-      rules: rules
-        .filter((r: any) => r && typeof r.sid === 'string')
-        .map((r: any) => ({
-          sid: String(r.sid),
-          rights: String(r.rights ?? ''),
-          type: String(r.type ?? '')
-        }))
-    }
-  } catch {
-    return null
+function parseAcl(value: unknown): AclSnapshot | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const parsed = value as Record<string, unknown>
+  if (typeof parsed.owner !== 'string' || !/^S-\d+(?:-\d+)+$/.test(parsed.owner) ||
+      typeof parsed.protected !== 'boolean' || typeof parsed.directory !== 'boolean' || typeof parsed.reparse !== 'boolean') return null
+  // Preserve compatibility with single-rule PS snapshots, but never discard a
+  // malformed rule or interpret missing/null/empty rules as a safe DACL.
+  const rawRules = Array.isArray(parsed.rules) ? parsed.rules : [parsed.rules]
+  if (!rawRules.length) return null
+  const rules: AclSnapshot['rules'] = []
+  for (const raw of rawRules) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+    const rule = raw as Record<string, unknown>
+    if (typeof rule.sid !== 'string' || !/^S-\d+(?:-\d+)+$/.test(rule.sid) ||
+        typeof rule.rights !== 'string' || !rule.rights.split(',').every(right => KNOWN_RIGHTS.has(right.trim())) ||
+        (rule.type !== 'Allow' && rule.type !== 'Deny')) return null
+    rules.push({ sid: rule.sid, rights: rule.rights, type: rule.type })
   }
+  return { owner: parsed.owner, protected: parsed.protected, directory: parsed.directory, reparse: parsed.reparse, rules }
+}
+
+function parseAclSnapshot(stdout: string): RuntimeTreeSnapshot | null {
+  try {
+    const parsed = JSON.parse(stdout)
+    const root = parseAcl(parsed)
+    if (!root || parsed.childrenInspected !== true || !Array.isArray(parsed.children)) return null
+    const children: RuntimeTreeSnapshot['children'] = []
+    for (const raw of parsed.children) {
+      const child = parseAcl(raw)
+      if (!child || typeof raw.path !== 'string' || !win32.isAbsolute(raw.path)) return null
+      children.push({ ...child, path: raw.path })
+    }
+    return { ...root, children }
+  } catch { return null }
 }
 
 function findOffenders(snapshot: AclSnapshot): string[] {
@@ -244,9 +312,9 @@ function findOffenders(snapshot: AclSnapshot): string[] {
 }
 
 /**
- * Inspect a directory's DACL without changing anything. Returns `hardened:
- * true` only when the DACL is protected, admin-owned, and grants no write-ish
- * right to anyone outside SYSTEM/Administrators.
+ * Inspect the root and every descendant without changing anything. Child ACLs
+ * may inherit from the verified tree, but every owner and write grant is checked.
+ * Only the root must be protected against inheritance from outside that tree.
  */
 export async function verifyDirectoryHardened(dir: string): Promise<DirectoryHardeningResult> {
   if (process.platform !== 'win32') {
@@ -255,14 +323,31 @@ export async function verifyDirectoryHardened(dir: string): Promise<DirectoryHar
   try {
     const stdout = await runPowerShell(buildInspectScript(dir), false, 15000)
     const snapshot = parseAclSnapshot(stdout)
-    if (!snapshot) {
-      return { hardened: false, message: 'не удалось прочитать ACL каталога' }
+    if (!snapshot || !snapshot.directory || snapshot.reparse || snapshot.children.some(child => child.reparse)) {
+      return { hardened: false, message: 'не удалось подтвердить ACL и отсутствие reparse во всём runtime-дереве' }
     }
-    const offenders = findOffenders(snapshot)
+    const normalize = (path: string) => win32.resolve(path).toLowerCase()
+    const root = normalize(dir)
+    const paths = new Set([root])
+    const directories = new Set([root])
+    for (const child of snapshot.children) {
+      const path = normalize(child.path)
+      const relative = win32.relative(root, path)
+      if (!relative || relative === '..' || relative.startsWith('..\\') || win32.isAbsolute(relative) || paths.has(path)) {
+        return { hardened: false, message: 'некорректный путь в снимке runtime-дерева' }
+      }
+      paths.add(path)
+      if (child.directory) directories.add(path)
+    }
+    if (snapshot.children.some(child => !directories.has(normalize(win32.dirname(child.path))))) {
+      return { hardened: false, message: 'неполный снимок каталогов runtime-дерева' }
+    }
+    const offenders = [...findOffenders(snapshot), ...snapshot.children.flatMap(child =>
+      findOffenders(child).map(offender => `${child.path}: ${offender}`))]
     if (offenders.length > 0) {
       return {
         hardened: false,
-        message: `каталог доступен на запись не только администраторам: ${offenders.join('; ')}`,
+        message: `runtime-дерево доступно на запись не только администраторам: ${offenders.join('; ')}`,
         offenders,
         owner: snapshot.owner
       }
@@ -276,18 +361,15 @@ export async function verifyDirectoryHardened(dir: string): Promise<DirectoryHar
         owner: snapshot.owner
       }
     }
-    return { hardened: true, message: 'каталог доступен на запись только администраторам', owner: snapshot.owner }
+    return { hardened: true, message: 'каталог и его содержимое доступны на запись только администраторам', owner: snapshot.owner }
   } catch (err: any) {
     return { hardened: false, message: `проверка ACL не удалась: ${err?.message || String(err)}` }
   }
 }
 
 /**
- * Per-directory memo. Hardening costs an elevated PowerShell round-trip
- * (~300-800ms) and the result cannot change under us while we hold the only
- * write access, so once per process is enough. A FAILED attempt is not cached:
- * the next connect retries, which matters when the first failure was transient
- * (a file locked by a still-exiting sing-box, for instance).
+ * Share an in-flight inspection only. A previous successful inspection cannot
+ * authorize a later launch: ACLs and owners can change between connections.
  */
 const hardenedDirs = new Map<string, Promise<DirectoryHardeningResult>>()
 
@@ -296,8 +378,7 @@ async function hardenOnce(dir: string, label: string): Promise<DirectoryHardenin
     return { hardened: true, skipped: true, message: 'ACL hardening не применяется (не Windows)' }
   }
 
-  // Already correct (e.g. hardened by a previous run) — nothing to do. This is
-  // the common case on every connect after the first.
+  // A fresh proof of the entire existing tree can avoid all elevated writes.
   const before = await verifyDirectoryHardened(dir)
   if (before.hardened) {
     logEvent('debug', 'runtime-acl', `${label}: ACL already hardened`, { dir })
@@ -334,8 +415,8 @@ async function hardenOnce(dir: string, label: string): Promise<DirectoryHardenin
     return { hardened: false, message: `не удалось ужесточить ACL: ${message}` }
   }
 
-  // Never trust the write — read the DACL back. A script that "succeeded" but
-  // left the user with Modify is the failure mode that matters here.
+  // Never trust the write: reread the entire tree, including child owners.
+  // An exit code or a clean root alone cannot authorize privileged execution.
   const after = await verifyDirectoryHardened(dir)
   if (after.hardened) {
     logEvent('info', 'runtime-acl', `${label}: ACL hardened to admin-only`, { dir, owner: after.owner ?? null })
@@ -351,7 +432,7 @@ async function hardenOnce(dir: string, label: string): Promise<DirectoryHardenin
 
 /**
  * Make `dir` writable only by SYSTEM and Administrators, creating it if needed.
- * Idempotent, memoized per process, and safe to call on every connect.
+ * Idempotent, with fresh read-back on every connect.
  *
  * Call this BEFORE staging anything executable into the directory — otherwise
  * there is a window where an attacker's file is already in place.
@@ -362,16 +443,11 @@ export async function ensureElevatedRuntimeDirHardened(
 ): Promise<DirectoryHardeningResult> {
   const key = dir.toLowerCase()
   const cached = hardenedDirs.get(key)
-  if (cached) {
-    const result = await cached
-    if (result.hardened || result.skipped) return result
-    // Previous attempt failed — fall through and retry.
-  }
+  if (cached) return cached
   const attempt = hardenOnce(dir, label)
   hardenedDirs.set(key, attempt)
-  const result = await attempt
-  if (!result.hardened && !result.skipped) hardenedDirs.delete(key)
-  return result
+  try { return await attempt }
+  finally { if (hardenedDirs.get(key) === attempt) hardenedDirs.delete(key) }
 }
 
 /** Test seam: drop the memo so a suite can exercise the retry path. */

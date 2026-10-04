@@ -1130,7 +1130,7 @@ export interface DomainRoutingChannels {
 
 /** Import/Export IPC channels */
 export interface ImportExportChannels {
-  'config:export': () => { success: boolean; path?: string; error?: string }
+  'config:export': (mode?: 'redacted' | 'secrets') => { success: boolean; path?: string; error?: string }
   'config:import': (filePath: string) => {
     success: boolean
     sections: string[]

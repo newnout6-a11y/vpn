@@ -294,6 +294,8 @@ const SECRET_KEYS = new Set([
 
 export function redactSensitiveText(value: string): string {
   return value
+    .replace(/\b(?:password|passwd|token|secret|private[_-]?key|public[_-]?key|api[_-]?key|auth[_-]?str|pbk|sid|x-hwid)\s*[:=]\s*(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)/gi, '<redacted-credential>')
+    .replace(/\b[A-Za-z0-9+/]{43}=|\b[A-Za-z0-9+/]{86}==/g, '<redacted-key>')
     .replace(/\b(?:vless|trojan|ss|vmess|hysteria2|hy2|naive|anytls|shadowtls|tuic|wg|wireguard|happ|mantaray):\/\/\S+/gi, '<redacted-vpn-uri>')
     .replace(/\bhttps?:\/\/[^\s"'<>]{8,}/gi, '<redacted-url>')
     .replace(/\b(Could not resolve host|No such host is known|resolve host):\s*[^\s"'<>]+/gi, '$1: <redacted-host>')
@@ -2611,7 +2613,7 @@ export function redactSensitiveConfig(value: unknown): unknown {
     const result: Record<string, unknown> = {}
     for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
       const lower = key.toLowerCase()
-      if (key === NATIVE_XRAY_FIELD || SECRET_KEYS.has(lower) || /uuid|password|token|secret|private[_-]?key|public[_-]?key|short[_-]?id|^id$/i.test(key)) {
+      if (key === NATIVE_XRAY_FIELD || SECRET_KEYS.has(lower) || /uuid|password|token|secret|private[_-]?key|public[_-]?key|short[_-]?id|auth|credential|cookie|headers|api[_-]?key|^pbk$|^sid$|^id$/i.test(key)) {
         result[key] = '<redacted>'
       } else {
         result[key] = redactSensitiveConfig(raw)

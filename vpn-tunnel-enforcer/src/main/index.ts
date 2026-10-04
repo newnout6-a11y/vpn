@@ -21,6 +21,7 @@ import { collectAdaptiveSamples, verifyAdaptiveFallback } from './adaptiveVerifi
 import { autoconfig } from './autoconfig'
 import { createTray, updateTrayState, type TrayStatus } from './tray'
 import { settingsStore, type AppSettings } from './settings'
+import { readSecureStartupSettings } from './secureStartup'
 import { runLeakCheck } from './leakDiagnostics'
 import { applyLocationPrivacy, getLocationPrivacyStatus, rollbackLocationPrivacy } from './locationPrivacy'
 import {
@@ -164,6 +165,7 @@ function restoreAndFocusMainWindow(): void {
 }
 let isQuitting = false
 let shutdownInProgress = false
+let secureStartupRefused = false
 let latestPublicIp: string | null = null
 let latestTraffic: TrafficStats = trafficMonitor.getCurrentStats()
 let latestTrayStatus: TrayStatus = 'off'
@@ -740,6 +742,7 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      devTools: !app.isPackaged,
       backgroundThrottling: false
     },
     // Must track --rgb-bg of the dark theme (themeManager DARK_THEME.background).
@@ -1755,17 +1758,18 @@ app.whenReady().then(async () => {
   // the door on injected-script / data-exfil vectors if any renderer input is
   // ever mishandled. 'unsafe-inline' for style is required by our CSS-in-JS
   // (design tokens injected as inline <style>); script stays locked to 'self'.
-  // connect-src allows https/wss because the renderer talks to ipapi.co /
-  // ipify and the dev server uses ws for HMR. Note there is no `http:` in
-  // connect-src — plaintext lookups are refused at the policy level too.
+  // Named exceptions to the normative lookup list: BrowserIpCard measures
+  // actual browser egress through ipify/myip; the sandboxed OSM frame uses
+  // frame-src. No wildcard HTTPS/WSS hosts are authorized in production.
   if (app.isPackaged) {
     const csp = [
-      "default-src 'self'",
+      "default-src 'none'",
       "script-src 'self'",
       "style-src 'self' 'unsafe-inline'",
-      "img-src 'self' data: https:",
-      "font-src 'self' data:",
-      "connect-src 'self' https: wss:",
+      "img-src 'self' data:",
+      "font-src 'self'",
+      "connect-src 'self' https://ipapi.co https://ipwho.is https://api.github.com https://api.ipify.org https://api6.ipify.org https://api.myip.com",
+      "frame-src https://www.openstreetmap.org",
       "object-src 'none'",
       "base-uri 'self'",
       "frame-ancestors 'none'",
@@ -1788,13 +1792,16 @@ app.whenReady().then(async () => {
   }
 
   let initialSettings: ReturnType<typeof settingsStore.get>
-  try { initialSettings = settingsStore.get() }
-  catch {
-    logEvent('error', 'security', 'Secure settings migration unavailable; startup refused without changing network protection')
+  try { initialSettings = readSecureStartupSettings() }
+  catch (error) {
+    secureStartupRefused = true
+    logEvent('error', 'security', 'Secure store preflight failed; startup refused without changing network protection', error)
     await dialog.showMessageBox({ type: 'error', title: 'VPNTE: защищённое хранилище',
-      message: 'Не удалось открыть или мигрировать защищённые настройки.',
+      message: 'Не удалось открыть или мигрировать защищённые настройки и профили.',
       detail: 'Запуск отменён без сброса сетевой защиты. Восстановите доступ к Windows DPAPI / safeStorage. Приложение не сообщает об успешной VPN-защите.', buttons: ['Закрыть'] })
-    app.exit(1)
+    // Graceful quit flushes Chromium's encryption-key state after any completed
+    // migration. The before-quit guard below preserves existing network protection.
+    app.quit()
     return
   }
   settingsStore.syncLoginItem()
@@ -2638,6 +2645,15 @@ app.whenReady().then(async () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
     else restoreAndFocusMainWindow()
   })
+}).catch(async error => {
+  logEvent('error', 'app', 'startup failed; saved configuration retained', error)
+  await dialog.showMessageBox({
+    type: 'error', title: 'Не удалось безопасно открыть VPN Tunnel Enforcer',
+    message: 'Запуск остановлен. Сохранённые настройки не заменены пустыми данными.',
+    detail: 'Если недоступно защищённое хранилище Windows, повторите запуск в исходной учётной записи после восстановления доступа. Подробности доступны в журнале приложения.',
+    buttons: ['Закрыть']
+  })
+  app.quit()
 })
 
 // Coordinated shutdown: stop TUN, roll back any global system-proxy edits we made, and
@@ -2745,6 +2761,10 @@ async function performShutdownCleanup(reason: string): Promise<void> {
 }
 
 app.on('before-quit', async (event) => {
+  if (secureStartupRefused) {
+    isQuitting = true
+    return
+  }
   if (shutdownInProgress) {
     // Already cleaning up — prevent Electron from quitting mid-cleanup.
     event.preventDefault()

@@ -489,6 +489,9 @@ export function getXrayDialTarget(): { host: string; port: number } | null {
  * Stages the bundled xray.exe binary into the writable tun-runtime folder.
  */
 export async function stageXrayRuntime(): Promise<string> {
+  const { ensureElevatedRuntimeDirHardened } = await import('./runtimeDirSecurity')
+  const acl = await ensureElevatedRuntimeDirHardened(getTunRuntimeDir(), 'xray-runtime')
+  if (!acl.hardened) throw new Error('Xray runtime directory is untrusted: ' + acl.message)
   const dst = getXrayRuntimeExePath()
   const src = getBundledResource('xray.exe')
   await copyResourceIfStale(src, dst)

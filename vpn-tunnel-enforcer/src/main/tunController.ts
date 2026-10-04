@@ -8,6 +8,7 @@ import { promisify } from 'util'
 import { createConnection, createServer, isIP } from 'net'
 import { networkInterfaces } from 'os'
 import { app } from 'electron'
+import { stageVerifiedRuntimeArtifact } from './runtimeArtifact'
 import sudo from 'sudo-prompt'
 import { execElevated, isProcessElevated } from './admin'
 import { logEvent } from './appLogger'
@@ -411,30 +412,11 @@ export function getBundledResource(name: string): string {
   return join(app.getAppPath(), 'resources', name)
 }
 
-// Cheap "did the source change?" check for sing-box.exe (~30 MB) and wintun.dll.
-// Both binaries live in app-resources and only change when the user installs a
-// new app build, so on 99% of restarts they are byte-identical to the copy
-// already sitting under userData/tun-runtime. Stat-based comparison (mtime+size)
-// matches the heuristic Node uses for its own dependency-cache invalidation
-// and is good enough — when in doubt we still fall back to a plain copyFile,
-// so we can never end up with no destination file.
+// Existing callers keep the staging API, but size/mtime are not integrity
+// evidence. Authenticate bytes against bundled resources after the ACL barrier;
+// rejected paths or unverifiable artifacts must not reach an elevated launch.
 export async function copyResourceIfStale(src: string, dst: string): Promise<boolean> {
-  try {
-    const [srcStat, dstStat] = await Promise.all([stat(src), stat(dst)])
-    if (
-      dstStat.size === srcStat.size &&
-      dstStat.mtimeMs === srcStat.mtimeMs
-    ) {
-      return false
-    }
-  } catch {
-    // dst doesn't exist, stat failed, or anything else odd — fall through to
-    // the unconditional copyFile path below, which is the same behaviour we
-    // had before this helper existed. We never want to silently skip the copy
-    // and leave a stale (or missing) binary in the runtime dir.
-  }
-  await copyFile(src, dst)
-  return true
+  return stageVerifiedRuntimeArtifact(src, dst)
 }
 
 export function parseProxyAddress(proxyAddr: string): { host: string; port: number } {

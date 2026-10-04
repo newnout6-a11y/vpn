@@ -78,7 +78,7 @@ export interface ElectronAPI {
   getTrafficForensicsStatus: () => Promise<any>
   restartTrafficForensics: () => Promise<any>
   // Config Import/Export
-  configExport: () => Promise<{ success: boolean; path?: string; error?: string }>
+  configExport: (mode?: 'redacted' | 'secrets') => Promise<{ success: boolean; path?: string; error?: string }>
   configBrowseImport: () => Promise<string | null>
   configImport: (filePath: string) => Promise<{ success: boolean; sections: string[]; conflicts: string[]; error?: string }>
   configImportApply: (filePath: string, sections: string[], conflictResolution: 'replace' | 'merge') => Promise<{ success: boolean; error?: string }>
@@ -600,7 +600,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => ipcRenderer.removeListener('traffic-history:enrichment-updated', listener)
   },
   // Config Import/Export
-  configExport: () => ipcRenderer.invoke('config:export'),
+  configExport: (mode = 'redacted') => ipcRenderer.invoke('config:export', mode),
   configBrowseImport: () => ipcRenderer.invoke('config:browse-import'),
   configImport: (filePath: string) => ipcRenderer.invoke('config:import', assertString(filePath, 'filePath')),
   configImportApply: (filePath: string, sections: string[], conflictResolution: 'replace' | 'merge') =>

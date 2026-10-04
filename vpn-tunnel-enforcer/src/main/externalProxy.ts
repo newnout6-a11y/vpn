@@ -1083,11 +1083,15 @@ async function stageExternalProxyRuntime(
 ): Promise<{ exe: string; config: string; cwd: string }> {
   const runtimeDir = externalRuntimeDir()
   await mkdir(runtimeDir, { recursive: true })
+  const { ensureElevatedRuntimeDirHardened } = await import('./runtimeDirSecurity')
+  const acl = await ensureElevatedRuntimeDirHardened(runtimeDir, 'external-proxy-runtime')
+  if (!acl.hardened) throw new Error('External proxy runtime directory is untrusted: ' + acl.message)
   const src = bundledResource('sing-box.exe')
   const exe = join(runtimeDir, RUNTIME_EXE_NAME)
   const config = externalProxyConfigPath(slot)
   await access(src)
-  await copyIfStale(src, exe)
+  const { stageVerifiedRuntimeArtifact } = await import('./runtimeArtifact')
+  await stageVerifiedRuntimeArtifact(src, exe)
   const resolvedProfile = await resolveExternalProxyEndpoint(profile)
   await writeFile(config, JSON.stringify(buildExternalProxyConfig(resolvedProfile, port), null, 2), 'utf8')
   return { exe, config, cwd: runtimeDir }
@@ -1976,9 +1980,10 @@ export function isTrustedExternalProxyHostHeader(host: string | undefined, local
   return normalized === `${CONTROL_HOST}:${localPort}` || normalized === `localhost:${localPort}`
 }
 
-async function handleControlRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+export async function handleControlRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const localPort = Number(req.socket.localPort)
   if (!isTrustedExternalProxyHostHeader(req.headers.host, localPort)) {
+    logEvent('warn', 'external-proxy', 'control request rejected', { reason: 'untrusted-host', status: 'error' })
     return send(res, 421, controlError('untrusted-host', 'Host header must target the loopback control endpoint'))
   }
   if (req.method === 'OPTIONS') return send(res, 204, '', true)

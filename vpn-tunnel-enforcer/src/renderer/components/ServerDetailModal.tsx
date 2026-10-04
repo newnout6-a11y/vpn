@@ -515,6 +515,7 @@ export function ServerDetailModal({ open, profile, onClose, onProfileUpdated }: 
         {mapUrl && (
           <div className="rounded-[var(--radius-md)] overflow-hidden border border-[var(--color-border)]">
             <iframe
+              sandbox="allow-scripts"
               src={mapUrl}
               width="100%"
               height="220"
