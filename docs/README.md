@@ -7,7 +7,7 @@
 ## Приёмочные тесты (критерии приёмки в виде тестов)
 
 ### [04-приёмочные-тесты/](./04-приёмочные-тесты/)
-*Исполняемая система проверки: 139 детальных тестов + 5 сквозных прогонов, покрывающих все 927 критериев приёмки и находки F-001…F-210.*
+*Исполняемая система проверки: 140 детальных тестов + 5 сквозных прогонов, покрывающих все 927 критериев приёмки и находки F-001…F-210.*
 - **Методология (`00`):** уровни L0–L4 (static/contract → unit → integration → Windows E2E → exploratory), таксономия из 15 типов тестов (property-based, metamorphic, fuzzing, fault injection/chaos, model-based, pairwise, soak, a11y, localization и др.), вердикты PASS/FAIL/NOT-CHECKED/INDETERMINATE, двойные оракулы для инвариантов безопасности, матрица сред и сетевых профилей, гейты качества.
 - **Наборы по рабочим пакетам (`01`…`13`):** каждый тест `AT-<WP>-<NNN>` с трассировкой на AC/REQ/F/WP, средой, шагами и измеримым оракулом.
 - **Сквозные прогоны (`14`):** pairwise-матрица ОС×режим×протокол×сеть, бюджеты производительности, soak 72 ч, исследовательские уставы, регрессионный контур аудита.
@@ -61,9 +61,9 @@
 
 | # | Пакет | Почему в этой позиции | Срок / условие |
 |---|---|---|---|
-| 1 | **WP-11 (только миграция Electron 42 → 44)** | Единственный жёсткий внешний дедлайн: после окончания окна поддержки Electron 42 перестаёт получать security-патчи Chromium. | **До 20.10.2026** |
-| 2 | **WP-1** Секреты, IPC и доверенная граница | Открытые критичные дефекты: plaintext-секреты (F-001, F-189), отсутствие проверки `senderFrame` (F-139). | **Завершён ✅ (30.09.2026)** |
-| 3 | **WP-3** Firewall, baseline, recovery | Fail-closed, транзакционный откат, Boot Recovery, узкие CLAT-исключения без обхода kill-switch. | **Завершён ✅ (30.09.2026)** |
+| 1 | **WP-11 (только миграция Electron 42 → 44)** | Единственный жёсткий внешний дедлайн: после окончания окна поддержки Electron 42 перестаёт получать security-патчи Chromium. | **Миграция выполнена 30.09.2026** (44.4.3, native smoke и build); оставшаяся приёмка WP-11 отдельно. Исходный дедлайн — 20.10.2026. |
+| 2 | **WP-1** Секреты, IPC и доверенная граница | Защита секретов и sender/origin реализована; остаётся полная проверка доверенной границы. | **Частично (сверка 04.10.2026)**: код/регрессии и native smoke subsets есть; полные migration/secret scan/IPC/CSP/ACL AT не приняты. |
+| 3 | **WP-3** Firewall, baseline, recovery | Fail-closed, транзакционный откат, Boot Recovery, узкие CLAT-исключения без обхода kill-switch. | **Частично (сверка 04.10.2026)**: код/native fixtures/benchmarks есть; packet oracle, SYSTEM reboot, NAT64/hot-plug/OS matrix не приняты. |
 | 4 | **WP-0** Контракты, FSM, наблюдаемость | Фундамент для WP-2 и WP-10: единый автомат состояний, `operationId`, `AbortController`. | До WP-2 и WP-10 |
 | 5 | **WP-2** Процессы, runtime, lifecycle туннеля | Зомби-процессы, гонки таймаутов, порядок запуска Xray (F-022, F-025, F-191, F-194). | После WP-0 |
 | 6 | **WP-10** Scheduler, rotation, AutoPilot, adaptive bypass | Health-Before-Commit ротации (F-124), баг ночных окон (F-193). | После WP-0 |
@@ -79,3 +79,44 @@
 
 - [docs-factory8090/](../docs-factory8090/): Полный архивный каталог Software Factory 8090, включающий 44 фичи по подсистемам, журнал аудита находок F-001..F-210 (210 находок), реестр вопросов и архитектурные контейнеры.
 - [vpn-tunnel-enforcer/docs/](../vpn-tunnel-enforcer/docs/): Технические RFC и дорожные карты приложения (Censorship Resilience Phases 1-8, Traffic Observability RFC, Adaptive Bypass, Multi-Account Isolation).
+
+## Реестр сверки статусов реализации — 04.10.2026
+
+Срезы реализации находятся в конце каждого из трёх томов. Ниже перечислены источники, учтённые при их исправлении: требования, записанные результаты, границы планов и адресные проверки текущего кода. Записанный старый PASS не означает повторный запуск сейчас; наличие AC/F в таблице трассировки не означает PASS его оракула. Полный набор Vitest и Windows/L3-приёмка в этой документационной задаче не запускались.
+
+| Источник | Что сверено и как отражено в срезах |
+| --- | --- |
+| [Том 1](./01-ТЗ-СЕТЕВОЕ-ЯДРО-ПРОТОКОЛЫ-И-МАРШРУТИЗАЦИЯ.md), [том 2](./02-ТЗ-СИСТЕМНАЯ-БЕЗОПАСНОСТЬ-ЗАЩИТА-ОТ-УТЕЧЕК-И-ОС.md), [том 3](./03-ТЗ-ЖИЗНЕННЫЙ-ЦИКЛ-АВТОМАТИЗАЦИЯ-UI-И-ДИАГНОСТИКА.md) | Нормативные разделы сопоставлены со статусами; существующий текст требований сохранён. Исправлены WireGuard endpoints, периодическая ротация, adaptive chain, границы мониторинга и состав onboarding. |
+| [Методология AT](./04-приёмочные-тесты/00-методология.md) и наборы WP-1/2/3/6/7/9/10/11 | Критерии затронутых утверждений: native smoke не равен всем AT-01; fixtures не равны AT-03 L3; AT-02-008 требует WG endpoints; AT-10-004 требует health-before-commit; AT-09-013 проверяет persistence, AT-09-014 отдельно проверяет импорт ключа и автозапуск. Это сверка критериев, не их исполнение. |
+| [ТЗ-06](../docs-factory8090/06-ТЗ-исправление-и-развитие.md) и [решения владельца](../docs-factory8090/05-открытые-вопросы.md) | Пакеты и границы принятых решений; WP-1/WP-3 исправлены на «частично», WP-11 разделён на выполненную миграцию и остаток. Подпись не решена, WP-12 остаётся планом. |
+| [Журнал аудита F](../docs-factory8090/00-журнал-аудита.md) и [исходный аудит сентября](../vpn-tunnel-enforcer/docs/audit-findings-2026-09.md) | Сопоставлены статусы и более поздние изменения. Старое F не объявляется закрытым только по новому описанию; опровергнутые находки не возвращаются в план исправлений. |
+| [Журнал ускорения lifecycle](../docs-factory8090/07-журнал-ускорения-lifecycle.md), этапы 1–38 | Тематическая сверка изменений, замеров и ограничений: firewall/rollback, recovery worker, startup/stop ownership, CIM/COM, маршруты/IP, DNS, геопроверки, смена сервера и отмена UI. Учитываются ранние этапы, а не только 31–38; benchmark отдельных helpers не засчитывается как время всей операции. |
+| [Журнал прогресса](../progress.md) | Миграция Electron 44, восемь native smoke checks и build; отдельно указаны непроверенные cross-version store migration и Windows install/upgrade/uninstall matrix. |
+| [Happ compatibility audit](../vpn-tunnel-enforcer/docs/happ-compatibility-audit-2026-10-02.md) | Native Xray JSON/graph, transport/mux/Reality и границы подтверждённой совместимости; успешная конкретная раздача не считается всей протокольной матрицей. |
+| [Roadmap](../vpn-tunnel-enforcer/docs/censorship-resilience-roadmap.md) и [индекс фаз](../vpn-tunnel-enforcer/docs/censorship-resilience-phases/README.md) | Даты и локальные статусы фаз имеют приоритет над общим старым roadmap. Фазы 3–6 содержат выполненный слой и конкретный остаток, а не полную приёмку. |
+| [Фаза 1 — sing-box](../vpn-tunnel-enforcer/docs/censorship-resilience-phases/phase-01-sing-box-upgrade.md) | Записаны bundled 1.13.13, staging/diagnostics и проверки конфигурации; это не доказывает матрицу 1.13/1.14. |
+| [Фаза 2 — rule-set](../vpn-tunnel-enforcer/docs/censorship-resilience-phases/phase-02-dynamic-rule-sets.md) | Managed cache, размер/SHA-256, temp+rename и bundled fallback учтены как сделанные части. Независимый источник доверенного checksum/signature остаётся отдельным требованием. |
+| [Фаза 3 — протоколы](../vpn-tunnel-enforcer/docs/censorship-resilience-phases/phase-03-protocol-coverage.md) | URI/JSON parser/export для новых протоколов не равен успешному handshake. В документе прямо оставлена WireGuard endpoint/route integration; текущий генератор подтверждает этот остаток. |
+| [Фаза 4 — Naive/ECH](../vpn-tunnel-enforcer/docs/censorship-resilience-phases/phase-04-naive-ech.md) | Parser/config/export и capability diagnostics есть по записанным результатам; known-good remote Naive/ECH matrix и stealth presets остаются. |
+| [Фаза 5 — Hysteria2](../vpn-tunnel-enforcer/docs/censorship-resilience-phases/phase-05-hysteria2-advanced.md) | Salamander/mport/hop/bandwidth normalization, capability warnings и schema checks — реализованный слой. Реальный known-good handshake и расширения 1.14 этим не подтверждены. |
+| [Фаза 6 — bootstrap](../vpn-tunnel-enforcer/docs/censorship-resilience-phases/phase-06-bootstrap-chaining.md) | Общая policy auto/direct/localProxy для служебных загрузок существует по документу; cold-start через selected VPN profile и external bootstrap profile не реализованы. |
+| [Фаза 7 — AmneziaWG](../vpn-tunnel-enforcer/docs/censorship-resilience-phases/phase-07-amneziawg-spike.md), [фаза 8 — CoreAdapter/Mihomo](../vpn-tunnel-enforcer/docs/censorship-resilience-phases/phase-08-core-adapter-mihomo.md) | Проектные чеклисты и лабораторные границы; production runner/adapter и допуск по WP-12 не засчитаны как выполненные. |
+| [Adaptive plan](../vpn-tunnel-enforcer/docs/adaptive-bypass-plan.md) и [implementation log](../vpn-tunnel-enforcer/docs/adaptive-bypass-implementation-log.md) | Старые compatibility retries сверены с более поздним этапом 32. Наличие fallback и health window не доказывает нормативный порядок Direct → Reality → HY2 → SS. |
+| [Traffic Observability RFC](../vpn-tunnel-enforcer/docs/traffic-observability-rfc.md) | Отделена реализованная фаза ETW sidecar от проектных flow correlation/driver и постоянного монитора WP-12. Ограничение PID attribution сохранено. |
+| [Multi-account isolation plan](../vpn-tunnel-enforcer/docs/multi-account-isolation-plan.md) | Исторический проект архитектуры; production Browser Boxes не реализованы. Решения владельца проверяются по ТЗ-06, а не по старому списку вопросов этого плана. |
+| [VLESS/QUIC investigation](../vpn-tunnel-enforcer/docs/vless-quic-fallback-investigation.md) | Историческое исследование транспорта; не принимается за свежий proof всех UDP/QUIC маршрутов. |
+| [Architecture README](../vpn-tunnel-enforcer/docs/architecture/README.md), [module map](../vpn-tunnel-enforcer/docs/architecture/module-map.md), [review guide](../vpn-tunnel-enforcer/docs/architecture/review-guide.md) | Карта модулей и границ проверки использована для адресной сверки parser/generator, rotation, adaptive bypass и wizard. |
+| [Split tunneling](../vpn-tunnel-enforcer/src/main/splitTunneling.ts), [NSIS hooks](../vpn-tunnel-enforcer/build/installer.nsh), [config export](../vpn-tunnel-enforcer/src/main/configManager.ts) | Адресная сверка замечаний PR #20: F-076 открыт — каталог теряется, создаётся `process_name`; F-183 открыт — forced kill без подтверждённого rollback; F-144 открыт — полный экспорт секретов вместо default masking и отдельного подтверждённого opt-in. Остатки обозначены как недостающая реализация; после неё нужны AT-06-008, AT-11-002 и проверки экспорта по тому 2 §4.2. |
+| [Scheduler](../vpn-tunnel-enforcer/src/main/scheduler.ts), [domain routing](../vpn-tunnel-enforcer/src/main/domainRouting.ts), [availability verdict](../vpn-tunnel-enforcer/src/main/urlAvailability.ts), [speed test](../vpn-tunnel-enforcer/src/main/speedTest.ts) | Повторно подтверждены F-193 (нет предыдущего дня `dayOffset=-1`), F-011 (hit recorder отсутствует и постоянного счётчика нет), F-210/F-085 (direct-only 401/403 даёт ложный `works-only-with-vpn`) и F-010 (egress mismatch подавляется пустым catch). Обновлены срезы требований и статусы WP-6/7/10; адресные проверочные сценарии привязаны к AT-10-002, AT-06-003 и AT-07-006. |
+
+Архивные 44 feature requirements/blueprint пары из `docs-factory8090/01…04` не перепроверялись построчно в этой сверке. Их находки учитываются через журнал F, ТЗ-06 и нормативные тома; этот реестр не заявляет полного повторного чтения всех Markdown репозитория.
+
+### Записанные измерения, учтённые в статусе производительности
+
+Этап 36 lifecycle-журнала фиксирует connect **4317/2719 мс**, смену на Sweden **3270 мс**, отмену Norway **1751 мс**. Это отдельные пользовательские IPC-операции; отмена не засчитывается как успешное подключение. Прежние 23–50 мс после отмены были сохранением offline-профиля и не отражали реальную смену туннеля. Этапы 14/28 фиксируют ускорение recovery transport и Firewall API, но их microbenchmarks не заменяют эти измерения. Выборки для продуктовой медианы и прямого сопоставимого замера Happ недостаточно.
+
+### Проверки этой документационной сверки
+
+- В `vpn-tunnel-enforcer/`: `npm.cmd run typecheck` — exit 0; `npx.cmd vitest run src/renderer/components/LiveServerCheckSection.test.tsx --maxWorkers=4` — 1 файл, 4 теста passed, exit 0. Это адресная регрессия history IPC, а не проверка всех 10 diff-веток.
+- Из корня: `python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py` — exit 0, AC 927/927, F 210/210.
+- Проверены 42 локальные Markdown-ссылки в пяти изменённых файлах, четыре столбца таблиц среза и неизменность нормативного текста до срезов; `git diff --check` — exit 0.
