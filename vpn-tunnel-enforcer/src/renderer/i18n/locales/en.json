@@ -1,4 +1,9 @@
 {
+  "shutdown": {
+    "title": "VPNTE: shutdown not confirmed",
+    "unconfirmed": "Capture or network cleanup could not be confirmed. The client remains open and updating is blocked. Retry Exit after resolving the problem; do not force-close the client to update.",
+    "retryLater": "Keep open"
+  },
   "diagnosticsCapture": {
     "stoppedLabel": "CAPTURE STOPPED",
     "stopped": "Packet capture is stopped",

@@ -86,7 +86,9 @@ import { registerDomainRoutingIpcHandlers } from './domainRouting'
 import { registerConfigManagerIpcHandlers } from './configManager'
 import { clearOwnedSecretClipboard } from './secretClipboard'
 import { registerNotificationPrefsIpcHandlers } from './notificationPrefs'
-import { registerI18nIpcHandlers } from './i18n'
+import { i18nBackend, registerI18nIpcHandlers } from './i18n'
+import { shutdown as shutdownEn } from '../renderer/i18n/locales/en.json'
+import { shutdown as shutdownRu } from '../renderer/i18n/locales/ru.json'
 import { registerThemeIpcHandlers } from './themeManager'
 import { externalProxy } from './externalProxy'
 import { requirePlainObject, requireStringArray } from './ipcValidation'
@@ -167,6 +169,7 @@ function restoreAndFocusMainWindow(): void {
 }
 let isQuitting = false
 let shutdownInProgress = false
+let installerShutdownRequested = false
 let secureStartupRefused = false
 let latestPublicIp: string | null = null
 let latestTraffic: TrafficStats = trafficMonitor.getCurrentStats()
@@ -692,8 +695,18 @@ if (app.isPackaged && !app.requestSingleInstanceLock()) {
   // We are the second instance. Do NOT run any cleanup/recovery — that would
   // touch the first instance's live firewall/adapter state. Just exit hard.
   app.exit(0)
+} else if (app.isPackaged && process.argv.includes('--shutdown-for-update')) {
+  // A shutdown probe without an existing primary must not start VPN/recovery.
+  app.exit(0)
 } else {
-  app.on('second-instance', () => {
+  app.on('second-instance', async (_event, commandLine) => {
+    if (commandLine.includes('--shutdown-for-update')) {
+      if (isQuitting || shutdownInProgress) return
+      installerShutdownRequested = true
+      await app.whenReady()
+      app.quit()
+      return
+    }
     restoreAndFocusMainWindow()
   })
 
@@ -2411,6 +2424,7 @@ app.whenReady().then(async () => {
   })
 
   handleLogged('restart-traffic-forensics', async () => {
+    if (isQuitting || shutdownInProgress) throw new Error('ShutdownInProgress')
     return restartTrafficForensicsSession('manual-ui-restart')
   })
 
@@ -2669,9 +2683,16 @@ app.whenReady().then(async () => {
 async function performShutdownCleanup(reason: string): Promise<void> {
   if (shutdownInProgress) return
   shutdownInProgress = true
+  const failedSteps: string[] = []
   adaptiveVerificationGeneration += 1
-  await connectionLifecycle.close().catch(err => logEvent('warn', 'app', 'pending main lifecycle during shutdown failed', err))
-  await clearOwnedSecretClipboard()
+  await connectionLifecycle.close().catch(err => {
+    failedSteps.push('connection-lifecycle')
+    logEvent('warn', 'app', 'pending main lifecycle during shutdown failed', err)
+  })
+  await clearOwnedSecretClipboard().catch(err => {
+    failedSteps.push('clipboard')
+    logEvent('warn', 'app', 'clipboard cleanup during shutdown failed', err)
+  })
   logEvent('info', 'app', `shutdown cleanup started: ${reason}`)
 
   // Close any live session as an app-quit BEFORE tunController.stop() emits
@@ -2692,12 +2713,14 @@ async function performShutdownCleanup(reason: string): Promise<void> {
   try {
     await stopXray(`shutdown: ${reason}`)
   } catch (err) {
+    failedSteps.push('xray')
     logEvent('warn', 'app', 'stopXray during shutdown failed', err)
   }
 
   try {
     await killOwnedTunRuntimeProcesses()
   } catch (err) {
+    failedSteps.push('runtime')
     logEvent('warn', 'app', 'killOwnedTunRuntimeProcesses during shutdown failed', err)
   }
 
@@ -2706,13 +2729,16 @@ async function performShutdownCleanup(reason: string): Promise<void> {
     // independently spawned external sing-box processes behind.
     await externalProxy.stopAll(`shutdown: ${reason}`)
   } catch (err) {
+    failedSteps.push('external-proxy')
     logEvent('warn', 'external-proxy', 'failed to stop proxies during shutdown', err)
   }
 
   if (!networkCleanup?.baseline) {
     try {
-      await rollbackTunNetworkBaselineIfApplied(`shutdown: ${reason}`)
+      const baseline = await rollbackTunNetworkBaselineIfApplied(`shutdown: ${reason}`)
+      if (!baseline.success) throw new Error('baseline rollback unconfirmed')
     } catch (err) {
+      failedSteps.push('baseline')
       logEvent('warn', 'app', 'baseline rollback during shutdown failed', err)
     }
   }
@@ -2721,8 +2747,10 @@ async function performShutdownCleanup(reason: string): Promise<void> {
     try {
       // Always disengage the firewall kill-switch on app exit. Leaving it in
       // place would lock the user out of the internet between sessions.
-      await disableKillSwitchIfActive(`shutdown: ${reason}`)
+      const firewall = await disableKillSwitchIfActive(`shutdown: ${reason}`)
+      if (!firewall.success) throw new Error('firewall rollback unconfirmed')
     } catch (err) {
+      failedSteps.push('firewall')
       logEvent('warn', 'app', 'kill-switch disable during shutdown failed', err)
     }
   }
@@ -2732,14 +2760,17 @@ async function performShutdownCleanup(reason: string): Promise<void> {
       // Same for the adapter lockdown: never leave IPv6 disabled / DNS overridden
       // across sessions. tunController.stop() already does this, but a forced
       // shutdown path (no Stop button click) needs it as a backstop.
-      await rollbackPhysicalAdapterLockdownIfApplied(`shutdown: ${reason}`)
+      const adapters = await rollbackPhysicalAdapterLockdownIfApplied(`shutdown: ${reason}`)
+      if (!adapters.rolledBack && !adapters.skipped) throw new Error('adapter rollback unconfirmed')
     } catch (err) {
+      failedSteps.push('adapters')
       logEvent('warn', 'app', 'adapter lockdown rollback during shutdown failed', err)
     }
 
     try {
       await repairOrphanedPhysicalAdapterDns(`shutdown: ${reason}`)
     } catch (err) {
+      failedSteps.push('dns')
       logEvent('warn', 'app', 'orphaned DNS repair during shutdown failed', err)
     }
   }
@@ -2749,21 +2780,32 @@ async function performShutdownCleanup(reason: string): Promise<void> {
     const envApplied = status.find(t => t.id === 'env')?.applied
     if (envApplied) {
       logEvent('info', 'app', 'rolling back env autoconfig (setx HTTP_PROXY) on shutdown')
-      await autoconfig.rollback(['env'])
+      const restored = await autoconfig.rollback(['env'])
+      if (restored.env !== true) throw new Error('environment proxy rollback unconfirmed')
     }
   } catch (err) {
+    failedSteps.push('autoconfig')
     logEvent('warn', 'app', 'env autoconfig rollback during shutdown failed', err)
   }
 
-  // Stop the persistent elevated PS helper process.
-  await stopRecoveryPsWorker().catch(err => logEvent('warn', 'app', 'recovery worker shutdown failed', err))
+  // Drain queued capture transitions before disposing the helper or exiting.
   try {
-    stopElevatedPsHelper()
-  } catch {}
-
+    const capture = await stopTrafficForensicsSession(`shutdown: ${reason}`)
+    if (capture.running || capture.cleanupPending) throw new Error('capture stop unconfirmed')
+  } catch (err) {
+    failedSteps.push('capture')
+    logEvent('warn', 'app', 'capture cleanup during shutdown failed', err)
+  }
   stopServerGroupAutoRefresh()
   stopBackgroundTrafficHistory()
   stopTrafficConnectionSampler()
+  if (failedSteps.length) throw new Error(`ShutdownCleanupUnconfirmed: ${failedSteps.join(', ')}`)
+
+  // Keep helpers available for retry if capture/network cleanup was unconfirmed.
+  await stopRecoveryPsWorker()
+  try {
+    stopElevatedPsHelper()
+  } catch {}
 }
 
 app.on('before-quit', async (event) => {
@@ -2776,8 +2818,20 @@ app.on('before-quit', async (event) => {
   isQuitting = true
   logEvent('info', 'app', 'before quit')
   event.preventDefault()
-  await performShutdownCleanup('before-quit')
-  app.exit(0)
+  try {
+    await performShutdownCleanup('before-quit')
+    // The installer waits on the original process handle; ordinary exit/crash is not an acknowledgement.
+    app.exit(installerShutdownRequested ? 73 : 0)
+  } catch (err) {
+    shutdownInProgress = false
+    isQuitting = false
+    installerShutdownRequested = false
+    logEvent('error', 'app', 'shutdown refused: cleanup remains unconfirmed', err)
+    restoreAndFocusMainWindow()
+    const text = i18nBackend.getLocale() === 'ru' ? shutdownRu : shutdownEn
+    await dialog.showMessageBox({ type: 'error', title: text.title, message: text.unconfirmed, buttons: [text.retryLater] })
+      .catch(error => logEvent('warn', 'app', 'failed to show shutdown warning', error))
+  }
 })
 
 app.on('window-all-closed', async () => {

@@ -1,33 +1,46 @@
 ; Custom NSIS hooks for VPN Tunnel Enforcer.
 ;
-; Goal: make the installer fully self-service. The user double-clicks the new
-; setup and everything else (closing the running app, stopping our sing-box
-; runtime, removing the previous version, cleaning a stale group cache so the
-; smart per-subscription migration re-runs) happens automatically — no manual
-; "uninstall first / close the app" steps.
-;
-; electron-builder already auto-runs the previous version's uninstaller on
-; install when perMachine is set; these macros add the process-killing and
-; cache-cleanup that electron-builder doesn't do on its own.
+; Request main-owned shutdown before replacement/removal, and wait for its
+; cleanup acknowledgement and process release. Timeout/failure aborts safely.
+; Older clients without the shutdown command must be exited manually first.
+; electron-builder still chains the previous uninstaller; user data is retained.
 
 !include "WinCore.nsh"
+!define /file VPNTE_SHUTDOWN_COMMAND "${PROJECT_DIR}\build\shutdown-for-update.base64"
 
-!macro killRunningApp
-  ; Stop our own background sing-box runtime first (it holds the TUN adapter
-  ; and would otherwise block file replacement / leave a half-running tunnel).
-  nsExec::Exec 'taskkill /F /IM vpnte-sing-box.exe /T'
-  nsExec::Exec 'taskkill /F /IM vpnte-xray.exe /T'
-  ; Then the app itself. /T also takes child processes. Ignore errors — the
-  ; process may simply not be running.
-  nsExec::Exec 'taskkill /F /IM "VPN Tunnel Enforcer.exe" /T'
-  ; Give Windows a moment to release file handles before we touch Program Files.
-  Sleep 800
+!macro requestSafeShutdown
+  ; Embed the command: never execute a replaceable script from the user's temp tree.
+  ; Pass the path as literal process environment, not interpolated PowerShell code.
+  System::Call 'kernel32::SetEnvironmentVariableW(w "VPNTE_INSTALL_DIR", w "$INSTDIR") i.r2'
+  ${If} $2 == 0
+    StrCpy $0 1
+    StrCpy $1 "Could not pass the installation path safely"
+  ${Else}
+    nsExec::ExecToStack /TIMEOUT=150000 '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${VPNTE_SHUTDOWN_COMMAND}'
+    Pop $0
+    Pop $1
+    System::Call 'kernel32::SetEnvironmentVariableW(w "VPNTE_INSTALL_DIR", p 0)'
+  ${EndIf}
+  ${If} $0 != 0
+    ${If} $LANGUAGE == 1049
+      MessageBox MB_OK|MB_ICONSTOP "Завершение VPNTE не подтверждено. Штатно выйдите из клиента и повторите попытку. Установка/удаление остановлены без принудительного завершения процессов.$\r$\n$1" /SD IDOK
+    ${Else}
+      MessageBox MB_OK|MB_ICONSTOP "VPNTE shutdown was not confirmed. Exit the client normally and retry. Installation/removal has stopped; no processes were force-killed.$\r$\n$1" /SD IDOK
+    ${EndIf}
+    SetErrorLevel 1
+    Quit
+  ${EndIf}
+!macroend
+
+; Override electron-builder's default check too: it otherwise falls back to force-kill.
+!macro customCheckAppRunning
+  !insertmacro requestSafeShutdown
 !macroend
 
 ; Runs at the very start of the (silent or UI) install, BEFORE files are laid
 ; down and BEFORE electron-builder chains the old uninstaller.
 !macro customInit
-  !insertmacro killRunningApp
+  !insertmacro requestSafeShutdown
 !macroend
 
 !macro customInstall
@@ -66,11 +79,9 @@
   nsExec::ExecToLog 'ie4uinit.exe -show'
 !macroend
 
-; Runs at the start of uninstall (both the standalone uninstaller and the
-; auto-uninstall electron-builder triggers before an upgrade). Kill the app so
-; the uninstaller never fails on locked files.
+; Standalone and chained uninstall use the same fail-closed shutdown gate.
 !macro customUnInit
-  !insertmacro killRunningApp
+  !insertmacro requestSafeShutdown
 !macroend
 
 ; Make the finish page window movable. NSIS finish pages sometimes lock the

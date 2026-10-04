@@ -44,8 +44,10 @@ describe('xrayEngine architectural invariants', () => {
     expect(electronBuilderSrc).toContain('to: xray.exe')
   })
 
-  it('installer.nsh terminates vpnte-xray.exe before installing', () => {
-    expect(installerSrc).toContain('taskkill /F /IM vpnte-xray.exe /T')
+  it('installer gates replacement on safe shutdown instead of killing Xray by name (AT-11-002)', () => {
+    expect(installerSrc).toContain('!macro customCheckAppRunning')
+    expect(installerSrc).toContain('!insertmacro requestSafeShutdown')
+    expect(installerSrc).not.toContain('taskkill')
   })
 
   it('settings.ts includes proxyEngine in AppSettings and defaults', () => {
