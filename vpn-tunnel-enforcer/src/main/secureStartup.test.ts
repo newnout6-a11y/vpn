@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 const reads = vi.hoisted(() => ({ settings: vi.fn(), profiles: vi.fn(), groups: vi.fn() }))
 vi.mock('./settings', () => ({ settingsStore: { get: reads.settings } }))
 vi.mock('./sharedStores', () => ({ serverPickerStore: { get: reads.profiles }, serverGroupsStore: { get: reads.groups } }))
-import { readSecureStartupSettings } from './secureStartup'
+import { readSecureStartupSettings, startupFailureDetail, handleSecureStartupBeforeQuit } from './secureStartup'
 beforeEach(() => {
   reads.settings.mockReset().mockReturnValue({ mode: 'hard' })
   reads.profiles.mockReset().mockReturnValue([])
@@ -39,21 +39,38 @@ describe('secure startup preflight', () => {
     for (const effect of ['startElevatedPsHelper()', 'await performCrashRecovery()', 'createWindow()']) {
       expect(source.indexOf(effect, start)).toBeGreaterThan(end)
     }
-    expect(refusal).toContain('protection\', error)')
+    expect(refusal).toContain("startupFailureDetail(error, 'secure-store-preflight')")
   })
-  it('allows Electron to flush key state without invoking ordinary shutdown on a secure-store refusal', () => {
+  it.each([true, false])('uses the real quit guard: refused=%s', refused => {
+    const markQuitting = vi.fn(), event = { preventDefault: vi.fn() }, cleanup = vi.fn()
+    const beforeQuit = () => {
+      if (handleSecureStartupBeforeQuit(refused, markQuitting)) return
+      event.preventDefault()
+      cleanup()
+    }
+    beforeQuit()
+    expect(markQuitting).toHaveBeenCalledTimes(refused ? 1 : 0)
+    expect(event.preventDefault).toHaveBeenCalledTimes(refused ? 0 : 1)
+    expect(cleanup).toHaveBeenCalledTimes(refused ? 0 : 1)
+  })
+  it('wires the exported quit guard before ordinary shutdown in production', () => {
     const source = readFileSync(join(__dirname, 'index.ts'), 'utf8')
     const beforeQuit = source.indexOf("app.on('before-quit'")
-    const guardStart = source.indexOf('if (secureStartupRefused)', beforeQuit)
-    const normalStart = source.indexOf('if (shutdownInProgress)', beforeQuit)
+    const guard = 'if (handleSecureStartupBeforeQuit(secureStartupRefused, () => { isQuitting = true })) return'
+    const guardStart = source.indexOf(guard, beforeQuit)
     expect(guardStart).toBeGreaterThan(beforeQuit)
-    expect(guardStart).toBeLessThan(normalStart)
-    const run = new Function('secureStartupRefused', 'event', 'cleanup', `let isQuitting = false; ${source.slice(guardStart, normalStart)} cleanup()`)
-    const event = { preventDefault: vi.fn() }, cleanup = vi.fn()
-    run(true, event, cleanup)
-    expect(cleanup).not.toHaveBeenCalled()
-    expect(event.preventDefault).not.toHaveBeenCalled()
-    run(false, event, cleanup)
-    expect(cleanup).toHaveBeenCalledOnce()
+    expect(guardStart).toBeLessThan(source.indexOf('if (shutdownInProgress)', beforeQuit))
+    expect(guardStart).toBeLessThan(source.indexOf('event.preventDefault()', beforeQuit))
+    expect(guardStart).toBeLessThan(source.indexOf("await performShutdownCleanup('before-quit')", beforeQuit))
+  })
+  it.each(['secure-store-preflight', 'startup'] as const)('keeps %s failure details allowlisted without reading exception text', stage => {
+    const error = new Error('FAKE-STARTUP-CREDENTIAL')
+    for (const key of ['name', 'message', 'stack', 'code']) {
+      Object.defineProperty(error, key, { get: () => { throw new Error('exception text must not be inspected') } })
+    }
+    expect(startupFailureDetail(error, stage)).toEqual({
+      code: stage === 'startup' ? 'STARTUP_FAILED' : 'SECURE_STORE_PREFLIGHT_FAILED', type: 'Error'
+    })
+    expect(startupFailureDetail('FAKE-STARTUP-CREDENTIAL', stage).type).toBe('NonError')
   })
 })

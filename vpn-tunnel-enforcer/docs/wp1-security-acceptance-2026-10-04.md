@@ -14,12 +14,14 @@
 - Settings, profiles и groups открываются до startup recovery/автоматизации. При отказе безопасного хранилища приложение показывает ошибку и завершает запуск **без обычного сетевого shutdown**. Завершение graceful: Chromium должен сохранить Local State ключа шифрования после уже выполненной миграции.
 - Экспорт конфигурации по умолчанию маскирует секреты и неизвестные поля. Полный экспорт — отдельный режим через main-owned native consent. ID/FK приложения сохраняются; ID внутри outbound не считается безопасным полем. Renderer получает результат/путь, не файл с секретами.
 - IPC: типизированный `IpcValidationError`, ограниченные audit-события с correlation ID, без отвергнутых payload/URL. Production CSP — явный список источников; OSM iframe sandboxed, packaged DevTools выключены. Обоснованные исключения CSP: inline styles для темы/motion, browser-egress ipify/myip и sandboxed OSM frame.
-- Runtime: fresh owner/ACL/reparse inspection всего существующего дерева; успешный прошлый результат не кешируется между операциями. Hardening не использует recursive traversal через junction; children требуют проверки owner и прав. ACL cmdlets загружаются из manifest под `$PSHOME`, а не из унаследованного PS7 `PSModulePath`.
+- Runtime (уточнён после ревью PR #21): privileged execution перенесён в `%ProgramData%\VPNTE\runtime\<instance-hash>\`; свежая owner/ACL/reparse-проверка охватывает всё дерево и всех предков до volume root. Проверяются эффективные права удаления/подмены namespace, InheritOnly ACE и owner implicit WRITE_DAC. Даже существующий runtime требует сверки ProgramData с Windows known folder. Bootstrap атомарно создаёт только отсутствующие application-компоненты с защищённым DACL; существующие небезопасные каталоги не исправляются/не получают доверие автоматически. Успешный прошлый результат не кешируется. ACL cmdlets загружаются из manifest под `$PSHOME`, а не из унаследованного PS7 `PSModulePath`.
 - Staging проверяет SHA-256 относительно bundled-источника, дескрипторы/идентичность файлов и компоненты пути; неподтверждённые файлы не допускаются к запуску. Публикация через проверенный временный файл и rename. Это не независимая подпись bundled-источника и не handle-level доказательство отсутствия всех Windows TOCTOU.
 
 Основная трассировка: AT-01-001…011; F-001/004/005/006/038/055/130/132/139…145/158/206; AC-SET-CFG-001…003 и AC-SRV-EXP-001…003. Статусы отдельных F не объявляются закрытыми этим списком.
 
-## Выполненные команды
+## Выполненные команды исходного коммита `333adad`
+
+Результаты повторной проверки после ревью приведены в конце отчёта.
 
 Команды ниже выполняются из `vpn-tunnel-enforcer/`, если не указано иначе.
 
@@ -56,7 +58,7 @@ Seed: 1004. Каждый из **155 preload-invokable каналов** пров�
 | AT-01-006 | Настоящий Electron, CSP из собранного production meta: inline/eval/remote script/style/image блокируются | Не installed-сборка/OS matrix; inline styles — явное исключение политики. Local frame разрешён только в отдельной hostile-IPC fixture, не в CSP oracle |
 | AT-01-007 | Production preload в изолированных native windows, безопасные preferences, dev-loopback smoke и source regressions | Это subsets, не вся матрица BrowserWindow/BrowserView установленной сборки |
 | AT-01-008 | Default masking и opt-in consent покрыты main/renderer регрессиями; clipboard ownership/TTL — unit-тестами | Реальный clipboard **не трогался**, native 60s oracle NOT-CHECKED; интерактивный installed export отдельно не выполнен |
-| AT-01-009 | Fresh tree ACL contract, staging/hash/path regressions; реальный user-owned каталог отказан с независимым owner read-back | Elevation/Everyone:Write/tampered binary и concurrent OS abuse matrix не запускались; нет VM |
+| AT-01-009 | Fresh tree + parent namespace ACL contract, staging/hash/path regressions; native read-only known-folder и policy predicates; реальный user-owned namespace отказан с типизированным маркером security refusal и независимым owner read-back | Elevation/Everyone:Write/tampered binary и concurrent OS abuse matrix не запускались; нет VM |
 | AT-01-010 | Native unavailable safeStorage: store bytes неизменны; unit отказ записи; startup-refusal guard не вызывает network cleanup | Не все системные account/DPAPI failure сценарии установленного клиента |
 | AT-01-011 | 3 × 100k property cases, clean-value metamorphic checks, отдельный default-deny export | Полная schema/default-deny проверка каждого глобального logging/telemetry поля не заявляется |
 
@@ -76,3 +78,37 @@ Seed: 1004. Каждый из **155 preload-invokable каналов** пров�
 Новые секреты/backup имеют версионированный формат; текущий reader понимает legacy raw-base64. **Откат на прежний executable после записи нового prefix нельзя считать безопасным:** старый reader префикс не понимает. Нужна отдельно проверенная совместимость rollback-reader/миграции; не вручную менять ciphertext и не удалять защищённые backup.
 
 Installer не пересобирался и не устанавливался; действующий клиент не менялся. Подпись кода не выбиралась, WP-12 не затрагивался. Нормативные `docs/` не редактировались.
+
+## Исправления ревью PR #21 и повторная проверка
+
+### Runtime namespace
+
+Замечание `discussion_r4177564146` подтверждено: защищённый DACL дочернего runtime не исключал его rename/replace через родителя. Исправление использует разрешённый томом 1 §1.3 ProgramData runtime и защищает namespace, а не выдаёт повторный pathname-check за устранение TOCTOU.
+
+- Единый getter разделяет пользователей/instances по SHA-256 нормализованного userData path. TUN/Xray, external proxy, forensics scripts, firewall allow-list, PID/getter consumers и log/diagnostic readers используют согласованные пути.
+- Parent-before-child проверка охватывает owner, reparse/type и эффективные DELETE_CHILD/DELETE/WRITE_DAC/WRITE_OWNER/GENERIC_ALL. Системные предки допускают SYSTEM/Admins/TrustedInstaller. Право создать соседний объект не равно праву заменить существующий защищённый child; InheritOnly проверяется отдельно. Runtime-права проверяются численно, включая generic write/all; наследуемые write-гранты для будущих artifacts тоже запрещены.
+- Bootstrap сначала подтверждает known folder и системную цепочку, затем создаёт только отсутствующие VPNTE/runtime/instance/leaf компоненты через `DirectoryInfo.Create(DirectorySecurity)` с owner Administrators и protected DACL. Существующие недоверенные компоненты/contents не «лечатся» через Set-Acl/icacls. Это исключает перенос доверия на заранее открытые user-writable artifacts.
+- Diagnostic runtime `version` не запускается до ACL proof. Форензика теперь действительно fail-closed (раньше ACL failure только логировался); sessionDir/etlPath не могут указывать на старый root или произвольную директорию.
+- AppData и системные ancestor ACL не изменяются. Старые runtime/forensics каталоги не читаются как execution source, не копируются и не удаляются автоматически. Перед обновлением следует штатно остановить старый клиент; миграция его процессов/сессий и installed-upgrade oracle не реализованы.
+
+### Остальные замечания
+
+Preload экспорт проверяет `redacted | secrets` до IPC. Startup logs используют только фиксированный code/type без exception message/stack, обычные Error получают post-redaction size limit. Quit guard вынесен в тестируемый helper без `new Function`, graceful Chromium key flush сохранён. Runner cleanup сохраняет primary error и cleanup error (AggregateError), cleanup failure завершает run nonzero, общий PASS печатается после очистки. Broad secret-key redaction намеренно не ослаблена: `id` может быть credential; application ID/FK уже имеют отдельную context-aware export policy.
+
+### Фактические результаты повторного прогона
+
+| Проверка | Результат |
+| --- | --- |
+| `npm run typecheck`, `npm run build` | exit 0; существующие bundler warnings о mixed imports |
+| `npm test -- --maxWorkers=4 --reporter=dot` | exit 0; **203 files passed / 2 skipped; 2439 passed / 10 skipped / 0 failed**; 99.45 s |
+| Runtime ACL/path + systemDiagnostics + trafficForensics focused suites | **123/123 PASS**; отдельные hostile session paths **4/4 PASS** |
+| `node --test scripts/wp1-test-cleanup.test.mjs` | **10/10 PASS** |
+| Native PowerShell tests внутри runtimeDirSecurity suite | Actual inspection/bootstrap AST parse, real read-only system namespace, real numeric policy predicates, forged ProgramData refusal — PASS; никаких elevated writes |
+| `node scripts/test-electron-runtime.mjs` | 8 checks PASS, Electron 44.4.3 |
+| `node scripts/test-wp1-native.mjs` | 6 local subsets PASS; production runtime getter заменён явно объявленным isolated userData shim **только для L2 ZIP fixture**, не для native ACL helper |
+| `node scripts/test-wp1-migration.mjs --same-version` | seed44/fail44/migrate44/unavailable44/restart44 PASS; 42→44 NOT-CHECKED |
+| Traceability checker | exit 0; AC927/927, F210/210 |
+
+Промежуточный default-worker full run: два существующих bundled-core preflight теста превысили 5 s. Изолированный повтор — 85/85 PASS; полный повтор с четырьмя workers — PASS без изменения таймаутов. Cleanup проверен после native/migration run, не только по дочернему PASS marker.
+
+Полный 15.5M envelope fuzz повторно не запускался: main envelope/schema/redactor contract не менялся; новый preload enum покрыт focused/full regression. **Это не полный AT-01-009/L3 PASS:** elevated ProgramData bootstrap/launch, concurrent OS ACL abuse, VM/installed/OS matrix по-прежнему NOT-CHECKED. Clipboard и действующая сеть не трогались; ограничения настоящего 42→44 и старого rollback reader сохраняются.

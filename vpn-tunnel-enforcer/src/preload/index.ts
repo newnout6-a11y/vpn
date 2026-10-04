@@ -600,7 +600,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => ipcRenderer.removeListener('traffic-history:enrichment-updated', listener)
   },
   // Config Import/Export
-  configExport: (mode = 'redacted') => ipcRenderer.invoke('config:export', mode),
+  configExport: (mode = 'redacted') => ipcRenderer.invoke('config:export', assertEnum(mode, ['redacted', 'secrets'] as const, 'mode')),
   configBrowseImport: () => ipcRenderer.invoke('config:browse-import'),
   configImport: (filePath: string) => ipcRenderer.invoke('config:import', assertString(filePath, 'filePath')),
   configImportApply: (filePath: string, sections: string[], conflictResolution: 'replace' | 'merge') =>

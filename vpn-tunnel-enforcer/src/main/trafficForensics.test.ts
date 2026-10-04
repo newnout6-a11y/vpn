@@ -16,6 +16,11 @@ vi.mock('electron', () => ({
   }
 }))
 
+// Filesystem fixtures must never write to the production ProgramData runtime.
+vi.mock('./runtimePaths', () => ({
+  getPrivilegedRuntimeDir: (name: string) => join('C:/Users/Redmi/CascadeProjects/vpn/.tmp/vpnte-traffic-forensics', name)
+}))
+
 vi.mock('./admin', () => ({
   execElevated: execElevatedMock
 }))
@@ -51,6 +56,8 @@ vi.mock('./settings', () => ({
     })
   }
 }))
+
+import { ensureElevatedRuntimeDirHardened, verifyDirectoryHardened } from './runtimeDirSecurity'
 
 import {
   getTrafficForensicsStatus,
@@ -89,6 +96,8 @@ describe('trafficForensics', () => {
     execElevatedMock.mockReset()
     spawnMock.mockReset()
     trafficSettingsMock.enabled = true
+    vi.mocked(ensureElevatedRuntimeDirHardened).mockResolvedValue({ hardened: true, message: 'stubbed' })
+    vi.mocked(verifyDirectoryHardened).mockResolvedValue({ hardened: true, message: 'stubbed' })
     process.env.VPNTE_TRAFFIC_FORENSICS_SIDECAR = '0'
     if (existsSync('C:/Users/Redmi/CascadeProjects/vpn/.tmp/vpnte-traffic-forensics')) {
       rmSync('C:/Users/Redmi/CascadeProjects/vpn/.tmp/vpnte-traffic-forensics', { recursive: true, force: true })
@@ -96,6 +105,26 @@ describe('trafficForensics', () => {
     if (existsSync('C:/Users/Redmi/CascadeProjects/vpn/.tmp/vpnte-traffic-stage')) {
       rmSync('C:/Users/Redmi/CascadeProjects/vpn/.tmp/vpnte-traffic-stage', { recursive: true, force: true })
     }
+  })
+
+  it('fails closed before script/network effects when the forensics namespace is untrusted (AT-01-009)', async () => {
+    await resetForensicsState()
+    execElevatedMock.mockClear()
+    vi.mocked(ensureElevatedRuntimeDirHardened).mockResolvedValue({ hardened: false, message: 'unsafe parent' })
+    await expect(startTrafficForensicsSession({ mode: 'directVpn', target: 'fixture' })).rejects.toThrow('RuntimeSecurityAclError')
+    expect(execElevatedMock).not.toHaveBeenCalled()
+    expect(spawnMock).not.toHaveBeenCalled()
+  })
+
+  it('never executes a stop script when a later namespace check fails (AT-01-009)', async () => {
+    await resetForensicsState()
+    execElevatedMock.mockResolvedValue({ stdout: '', stderr: '' })
+    await startTrafficForensicsSession({ mode: 'directVpn', target: 'fixture' })
+    execElevatedMock.mockClear()
+    vi.mocked(verifyDirectoryHardened).mockResolvedValueOnce({ hardened: false, message: 'unsafe parent' })
+    const status = await stopTrafficForensicsSession('security-test')
+    expect(execElevatedMock).not.toHaveBeenCalled()
+    expect(status.lastError).toContain('RuntimeSecurityAclError')
   })
 
   it('starts pktmon capture with full packets, ETW providers, and bounded circular logs', async () => {

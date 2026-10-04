@@ -219,7 +219,7 @@ async function getRuntimeItems(): Promise<SystemDiagnosticItem[]> {
   ]
 }
 
-async function getBinaryItems(): Promise<SystemDiagnosticItem[]> {
+export async function getBinaryItems(): Promise<SystemDiagnosticItem[]> {
   const resourceDir = app.isPackaged ? process.resourcesPath : join(app.getAppPath(), 'resources')
   const singBox = join(resourceDir, 'sing-box.exe')
   const wintun = join(resourceDir, 'wintun.dll')
@@ -250,27 +250,34 @@ async function getBinaryItems(): Promise<SystemDiagnosticItem[]> {
     rows.push(`bundled sing-box version failed: ${shortError(err)}`)
   }
 
-  try {
-    await stat(runtimeSingBox)
-    const { stdout, stderr } = await execFile(runtimeSingBox, ['version'], {
-      windowsHide: true,
-      timeout: 5000,
-      maxBuffer: MAX_BUFFER,
-      encoding: 'utf8',
-      cwd: getTunRuntimeDir()
-    })
-    rows.push(`runtime sing-box version: ${(stdout || stderr).trim().replace(/\s+/g, ' ')}`)
-  } catch (err: any) {
-    rows.push(`runtime sing-box version: not staged or failed: ${shortError(err)}`)
+  // Diagnostics must inspect, never repair, the execution boundary. Even a
+  // version probe executes runtime code with the application's privileges.
+  const acl = await verifyDirectoryHardened(getTunRuntimeDir()).catch((err: unknown) => ({
+    hardened: false,
+    message: `Runtime ACL verification failed: ${shortError(err)}`,
+    owner: null,
+    offenders: [] as string[]
+  }))
+  if (acl.hardened) {
+    try {
+      await stat(runtimeSingBox)
+      const { stdout, stderr } = await execFile(runtimeSingBox, ['version'], {
+        windowsHide: true,
+        timeout: 5000,
+        maxBuffer: MAX_BUFFER,
+        encoding: 'utf8',
+        cwd: getTunRuntimeDir()
+      })
+      rows.push(`runtime sing-box version: ${(stdout || stderr).trim().replace(/\s+/g, ' ')}`)
+    } catch (err: any) {
+      rows.push(`runtime sing-box version: not staged or failed: ${shortError(err)}`)
+    }
+  } else {
+    rows.push('runtime sing-box version: blocked — runtime directory security not verified')
   }
 
   const config = join(getTunRuntimeDir(), 'sing-box.json')
   const log = join(getTunRuntimeDir(), 'sing-box.log')
-  // We launch the staged sing-box elevated, so "who else can write here" is a
-  // security property worth surfacing rather than only logging. A weak DACL
-  // means an unprivileged process running as the same user can swap the binary
-  // or plant a DLL beside it and inherit our administrator rights.
-  const acl = await verifyDirectoryHardened(getTunRuntimeDir())
   return [
     item('binaries', 'TUN', 'Bundled binaries', missing ? 'fail' : 'ok', missing ? 'missing files' : 'present', joinRows(rows, 8)),
     item('runtime-paths', 'TUN', 'Runtime files', 'info', getTunRuntimeDir(), `config=${config} | log=${log}`),
@@ -278,8 +285,8 @@ async function getBinaryItems(): Promise<SystemDiagnosticItem[]> {
       'runtime-acl',
       'TUN',
       'Runtime directory permissions',
-      acl.hardened ? 'ok' : 'warn',
-      acl.hardened ? 'только администраторы' : 'доступен на запись пользователю',
+      acl.hardened ? 'ok' : 'fail',
+      acl.hardened ? 'только администраторы' : 'не проверено — выполнение заблокировано',
       [acl.message, acl.owner ? `owner=${acl.owner}` : null, ...(acl.offenders ?? [])]
         .filter(Boolean)
         .join(' | ')

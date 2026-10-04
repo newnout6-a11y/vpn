@@ -7,8 +7,10 @@ import { execFile as execFileCb } from 'child_process'
 import { rm } from 'fs/promises'
 import { promisify } from 'util'
 import { join } from 'path'
+import { getPrivilegedRuntimeDir } from './runtimePaths'
+import { directoryExists, verifyDirectoryHardened } from './runtimeDirSecurity'
 import { happDetector } from './happDetector'
-import { tunController, detectForeignTun, killOwnedTunRuntimeProcesses, isOwnedTunRuntimeRunning, readRecentSingBoxOutboundFault, areTunRoutesActive, getLastSingBoxExit, onProtectedRestart } from './tunController'
+import { tunController, getTunRuntimeDir, detectForeignTun, killOwnedTunRuntimeProcesses, isOwnedTunRuntimeRunning, readRecentSingBoxOutboundFault, areTunRoutesActive, getLastSingBoxExit, onProtectedRestart } from './tunController'
 import type { NetworkCleanupReceipt, SingBoxOutboundFault } from './tunController'
 import { ConnectionLifecycle } from './connectionLifecycle'
 import { makeOutcome, outcomeKindToDisconnectReason, isNodeSwitchRestartReason } from './sessionOutcome'
@@ -21,7 +23,7 @@ import { collectAdaptiveSamples, verifyAdaptiveFallback } from './adaptiveVerifi
 import { autoconfig } from './autoconfig'
 import { createTray, updateTrayState, type TrayStatus } from './tray'
 import { settingsStore, type AppSettings } from './settings'
-import { readSecureStartupSettings } from './secureStartup'
+import { readSecureStartupSettings, startupFailureDetail, handleSecureStartupBeforeQuit } from './secureStartup'
 import { runLeakCheck } from './leakDiagnostics'
 import { applyLocationPrivacy, getLocationPrivacyStatus, rollbackLocationPrivacy } from './locationPrivacy'
 import {
@@ -1795,7 +1797,7 @@ app.whenReady().then(async () => {
   try { initialSettings = readSecureStartupSettings() }
   catch (error) {
     secureStartupRefused = true
-    logEvent('error', 'security', 'Secure store preflight failed; startup refused without changing network protection', error)
+    logEvent('error', 'security', 'Secure store preflight failed; startup refused without changing network protection', startupFailureDetail(error, 'secure-store-preflight'))
     await dialog.showMessageBox({ type: 'error', title: 'VPNTE: защищённое хранилище',
       message: 'Не удалось открыть или мигрировать защищённые настройки и профили.',
       detail: 'Запуск отменён без сброса сетевой защиты. Восстановите доступ к Windows DPAPI / safeStorage. Приложение не сообщает об успешной VPN-защите.', buttons: ['Закрыть'] })
@@ -2198,10 +2200,13 @@ app.whenReady().then(async () => {
   })
 
   handleLogged('clear-diagnostic-artifacts', async () => {
-    const targets = [
-      getSnapshotsDir(),
-      join(app.getPath('userData'), 'traffic-forensics')
-    ]
+    const forensicRoot = getPrivilegedRuntimeDir('traffic-forensics')
+    const targets = [getSnapshotsDir()]
+    if (await directoryExists(forensicRoot)) {
+      const acl = await verifyDirectoryHardened(forensicRoot)
+      if (!acl.hardened) throw new Error('RuntimeSecurityAclError: diagnostic cleanup namespace is untrusted')
+      targets.push(forensicRoot)
+    }
     await stopTrafficForensicsSession('manual diagnostics artifact clear').catch(() => undefined)
     await Promise.all(targets.map(path => rm(path, { recursive: true, force: true }).catch(() => undefined)))
     await clearAppLog()
@@ -2295,7 +2300,7 @@ app.whenReady().then(async () => {
   })
 
   handleLogged('open-tun-log-folder', async () => {
-    const folder = join(app.getPath('userData'), 'tun-runtime')
+    const folder = getTunRuntimeDir()
     await shell.openPath(folder)
     return folder
   })
@@ -2646,7 +2651,7 @@ app.whenReady().then(async () => {
     else restoreAndFocusMainWindow()
   })
 }).catch(async error => {
-  logEvent('error', 'app', 'startup failed; saved configuration retained', error)
+  logEvent('error', 'app', 'startup failed; saved configuration retained', startupFailureDetail(error, 'startup'))
   await dialog.showMessageBox({
     type: 'error', title: 'Не удалось безопасно открыть VPN Tunnel Enforcer',
     message: 'Запуск остановлен. Сохранённые настройки не заменены пустыми данными.',
@@ -2761,10 +2766,7 @@ async function performShutdownCleanup(reason: string): Promise<void> {
 }
 
 app.on('before-quit', async (event) => {
-  if (secureStartupRefused) {
-    isQuitting = true
-    return
-  }
+  if (handleSecureStartupBeforeQuit(secureStartupRefused, () => { isQuitting = true })) return
   if (shutdownInProgress) {
     // Already cleaning up — prevent Electron from quitting mid-cleanup.
     event.preventDefault()

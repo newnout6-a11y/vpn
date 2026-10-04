@@ -10,6 +10,7 @@ import { userInfo } from 'os'
 import Store from 'electron-store'
 import { serverPicker } from './serverPicker'
 import { logEvent } from './appLogger'
+import { getPrivilegedRuntimeDir } from './runtimePaths'
 import { cleanupManagedChildPidFile, removeManagedChildPidFile, writeManagedChildPidFile } from './managedChildProcess'
 import { ensureKillSwitchProgramAllowed } from './firewallKillSwitch'
 import {
@@ -276,7 +277,7 @@ let controlServerStarting = false
 let controlServerPort: number | null = null
 
 function externalRuntimeDir(): string {
-  return join(app.getPath('userData'), 'external-proxy-runtime')
+  return getPrivilegedRuntimeDir('external-proxy-runtime')
 }
 
 export function externalProxyPortForSlot(slot: number): number {
@@ -1082,7 +1083,6 @@ async function stageExternalProxyRuntime(
   port: number
 ): Promise<{ exe: string; config: string; cwd: string }> {
   const runtimeDir = externalRuntimeDir()
-  await mkdir(runtimeDir, { recursive: true })
   const { ensureElevatedRuntimeDirHardened } = await import('./runtimeDirSecurity')
   const acl = await ensureElevatedRuntimeDirHardened(runtimeDir, 'external-proxy-runtime')
   if (!acl.hardened) throw new Error('External proxy runtime directory is untrusted: ' + acl.message)

@@ -490,7 +490,7 @@ export function getXrayDialTarget(): { host: string; port: number } | null {
  */
 export async function stageXrayRuntime(): Promise<string> {
   const { ensureElevatedRuntimeDirHardened } = await import('./runtimeDirSecurity')
-  const acl = await ensureElevatedRuntimeDirHardened(getTunRuntimeDir(), 'xray-runtime')
+  const acl = await ensureElevatedRuntimeDirHardened(getTunRuntimeDir(), 'tun-runtime')
   if (!acl.hardened) throw new Error('Xray runtime directory is untrusted: ' + acl.message)
   const dst = getXrayRuntimeExePath()
   const src = getBundledResource('xray.exe')

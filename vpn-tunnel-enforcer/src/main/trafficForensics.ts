@@ -3,11 +3,12 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'child_process'
 import { existsSync } from 'fs'
 import { appendFile, mkdir, readdir, readFile, rm, writeFile } from 'fs/promises'
 import { release as osRelease, type as osType, version as osVersion } from 'os'
-import { basename, dirname, join } from 'path'
+import { basename, dirname, join, resolve } from 'path'
 import { execElevated } from './admin'
 import { logEvent } from './appLogger'
 import { settingsStore } from './settings'
-import { ensureElevatedRuntimeDirHardened } from './runtimeDirSecurity'
+import { ensureElevatedRuntimeDirHardened, verifyDirectoryHardened } from './runtimeDirSecurity'
+import { getPrivilegedRuntimeDir } from './runtimePaths'
 import {
   createForensicsRedactor,
   redactJsonDocument,
@@ -189,7 +190,7 @@ function getSettings() {
 }
 
 function getRootDir(): string {
-  return join(app.getPath('userData'), 'traffic-forensics')
+  return getPrivilegedRuntimeDir('traffic-forensics')
 }
 
 function getSessionsDir(): string {
@@ -270,22 +271,20 @@ function normalizeManifest(manifest: SessionManifest): SessionManifest {
 }
 
 async function ensureLayout(): Promise<void> {
-  await mkdir(getSessionsDir(), { recursive: true })
-  // We write .ps1 scripts into the session directories and immediately run them
-  // elevated (`-File`). Under the default %APPDATA% ACL the interactive user has
-  // Full Control, so an unprivileged process running as the same user could
-  // rewrite the script between our write and the elevated exec — a write→exec
-  // TOCTOU that yields code execution as administrator. Locking the forensics
-  // root to SYSTEM + Administrators closes it, and the session directories
-  // inherit that DACL.
+  // These sessions contain elevated scripts. Create their ProgramData root
+  // only after proving the entire namespace; a protected leaf in AppData could
+  // still be replaced through its user-writable parent. Session directories
+  // inherit the verified admin-only DACL.
   const acl = await ensureElevatedRuntimeDirHardened(getRootDir(), 'traffic-forensics')
-  if (!acl.hardened && !acl.skipped) {
+  if (!acl.hardened) {
     logEvent('warn', 'traffic-forensics', 'forensics directory is not admin-only — elevated script could be tampered with', {
       dir: getRootDir(),
       reason: acl.message,
       offenders: acl.offenders ?? []
     })
+    throw new Error('RuntimeSecurityAclError: forensics runtime is untrusted')
   }
+  await mkdir(getSessionsDir(), { recursive: true })
 }
 
 async function writeJson(path: string, value: unknown): Promise<void> {
@@ -356,10 +355,30 @@ export async function recordTrafficForensicsAppEvent(input: TrafficForensicsAppE
   }
 }
 
+function assertSessionPaths(manifest: SessionManifest): void {
+  if (!manifest.sessionDir) return
+  const id = manifest.sessionId
+  if (!id || !/^[a-zA-Z0-9_-]{1,100}$/.test(id) ||
+      resolve(manifest.sessionDir).toLowerCase() !== resolve(getSessionsDir(), id).toLowerCase()) {
+    throw new Error('RuntimeSecurityAclError: untrusted forensics session path')
+  }
+  if (manifest.etlPath && !['pktmon.etl', 'netsh-trace.etl'].some(name =>
+    resolve(manifest.etlPath!).toLowerCase() === resolve(manifest.sessionDir!, name).toLowerCase())) {
+    throw new Error('RuntimeSecurityAclError: untrusted forensics capture path')
+  }
+}
+
 async function readLatestManifest(): Promise<SessionManifest | null> {
-  if (runtimeState) return runtimeState
-  const manifest = await readJson<SessionManifest>(getLatestManifestPath())
-  return manifest ? normalizeManifest(manifest) : null
+  const manifest = runtimeState ?? await readJson<SessionManifest>(getLatestManifestPath())
+  if (!manifest) return null
+  assertSessionPaths(manifest)
+  return normalizeManifest(manifest)
+}
+
+async function assertForensicsExecutionTrusted(manifest: SessionManifest): Promise<void> {
+  assertSessionPaths(manifest)
+  const acl = await verifyDirectoryHardened(getRootDir())
+  if (!acl.hardened) throw new Error('RuntimeSecurityAclError: forensics execution boundary is untrusted')
 }
 
 function artifactSize(files: TrafficForensicsArtifactFile[], name: string): number {
@@ -922,6 +941,7 @@ async function refreshTrafficForensicsArtifacts(): Promise<void> {
   if (!manifest?.running || !manifest.engine || !manifest.sessionDir || !manifest.etlPath) return
 
   try {
+    await assertForensicsExecutionTrusted(manifest)
     const scriptPath = join(manifest.sessionDir, 'live-snapshot.ps1')
     let scriptBody = ''
     if (manifest.engine === 'pktmon') {
@@ -1117,6 +1137,7 @@ export async function stopTrafficForensicsSession(reason: string): Promise<Traff
   const sidecar = stopSidecar(manifest, reason)
 
   try {
+    await assertForensicsExecutionTrusted(manifest)
     if (manifest.engine === 'pktmon' && manifest.etlPath) {
       const scriptPath = join(manifest.sessionDir, 'pktmon-stop.ps1')
       await writeFile(scriptPath, Buffer.from('\uFEFF' + buildPktmonStopScript(manifest.sessionDir, manifest.etlPath), 'utf8'))

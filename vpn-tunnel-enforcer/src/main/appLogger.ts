@@ -1,6 +1,7 @@
 import { app, shell } from 'electron'
 import { mkdir, open, readFile, stat, writeFile, appendFile, unlink } from 'fs/promises'
 import { join } from 'path'
+import { getPrivilegedRuntimeDir } from './runtimePaths'
 import { redactSensitiveConfig, redactSensitiveText } from './vpnProfiles'
 
 export type AppLogLevel = 'debug' | 'info' | 'warn' | 'error'
@@ -116,7 +117,7 @@ async function rotateIfNeeded(incomingBytes: number): Promise<void> {
 }
 
 function getTunLogDir(): string {
-  return join(app.getPath('userData'), 'tun-runtime')
+  return getPrivilegedRuntimeDir('tun-runtime')
 }
 
 function redactTopologyText(value: string): string {
@@ -148,11 +149,8 @@ function redactTopologyValue(value: unknown, key?: string): unknown {
 
 function normalizeDetail(value: unknown): unknown {
   if (value instanceof Error) {
-    return redactTopologyValue(redactSensitiveConfig({
-      name: value.name,
-      message: value.message,
-      stack: value.stack
-    }))
+    // Error fields need the same post-redaction size bound as other objects.
+    value = { name: value.name, message: value.message, stack: value.stack }
   }
 
   if (typeof value === 'string') {

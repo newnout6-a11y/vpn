@@ -85,10 +85,13 @@ app.whenReady().then(async () => {
   const acl = await verifyDirectoryHardened(weak)
   const nativeOwner = ps(`(Get-Acl -LiteralPath '${weak.replace(/'/g, "''")}').GetOwner([System.Security.Principal.SecurityIdentifier]).Value`).trim()
   assert.match(nativeOwner, /^S-\d+(?:-\d+)+$/)
-  assert.equal(acl.owner, nativeOwner, 'an inspection error is not proof of an unsafe owner')
   assert.equal(acl.hardened, false)
-  assert.ok(acl.offenders?.some(offender => offender.includes(nativeOwner)))
-  checks.push('AT-01-009 real user-owned ACL refused with independent owner read-back (no elevated launch in this subset)')
+  // Namespace refusal intentionally happens before reading a leaf behind an
+  // unsafe parent. The independent oracle must prove the user-controlled chain,
+  // not accept any unrelated reader/import failure as a successful security test.
+  assert.ok(acl.refusalCode === 'namespace-untrusted' || acl.offenders?.some(offender => offender.includes(nativeOwner)), 'an unrelated inspection/import failure is not an ACL refusal oracle')
+  assert.ok(!['S-1-5-18', 'S-1-5-32-544'].includes(nativeOwner))
+  checks.push('AT-01-009 user-owned isolated namespace refused; independent native owner readback; no elevated launch/ProgramData bootstrap in this subset')
 
   const { serverPickerStore } = await import('../../src/main/sharedStores')
   serverPickerStore.set('profiles', [{ id: 'p1', name: 'Fixture', protocol: 'vless', server: 'vpn.test', port: 443,

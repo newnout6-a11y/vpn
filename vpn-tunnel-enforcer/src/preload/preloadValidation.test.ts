@@ -51,6 +51,28 @@ describe('preload IPC argument validation', () => {
     expect(invokeMock).not.toHaveBeenCalled()
   })
 
+  // AT-01-004/008, F-139/F-144: reject malformed export modes at the bridge.
+  it.each([null, false, 1, '', 'with-secrets', 'REDACTED', {}, ['secrets']])('rejects invalid config export mode %j without invoking IPC', async mode => {
+    const api = await loadApi()
+
+    expect(() => api.configExport(mode)).toThrow(TypeError)
+    expect(invokeMock).not.toHaveBeenCalled()
+  })
+
+  it.each([undefined, 'redacted', 'secrets'])('passes supported config export mode %s through IPC', async mode => {
+    const api = await loadApi()
+
+    await api.configExport(mode)
+
+    expect(invokeMock).toHaveBeenCalledExactlyOnceWith('config:export', mode ?? 'redacted')
+  })
+
+  it('defaults omitted config export mode to redacted', async () => {
+    const api = await loadApi()
+    await api.configExport()
+    expect(invokeMock).toHaveBeenCalledExactlyOnceWith('config:export', 'redacted')
+  })
+
   it('passes validated arguments through to ipcRenderer.invoke', async () => {
     const api = await loadApi()
 

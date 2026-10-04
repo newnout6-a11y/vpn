@@ -85,7 +85,7 @@ describe('external proxy kill-switch allow-list', () => {
   it('always includes the VPNTE external proxy runtime path in kill-switch program rules', () => {
     expect(source).toContain("const EXTERNAL_PROXY_RUNTIME_EXE_NAME = 'vpnte-external-proxy.exe'")
     expect(source).toContain('externalProxyProgramPath()')
-    expect(source).toContain("join(app.getPath('userData'), 'external-proxy-runtime', EXTERNAL_PROXY_RUNTIME_EXE_NAME)")
+    expect(source).toContain("join(getPrivilegedRuntimeDir('external-proxy-runtime'), EXTERNAL_PROXY_RUNTIME_EXE_NAME)")
     expect(source).toContain('...(opts.proxyOwnerProgramPaths ?? []), externalProxyProgramPath()')
   })
 

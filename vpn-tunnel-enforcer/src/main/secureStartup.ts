@@ -9,3 +9,21 @@ export function readSecureStartupSettings(): AppSettings {
   serverGroupsStore.get('groups')
   return settings
 }
+
+/** Do not inspect exception text/properties: startup errors may contain secrets. */
+export function startupFailureDetail(error: unknown, stage: 'secure-store-preflight' | 'startup'): {
+  code: 'SECURE_STORE_PREFLIGHT_FAILED' | 'STARTUP_FAILED'
+  type: 'Error' | 'NonError'
+} {
+  return {
+    code: stage === 'secure-store-preflight' ? 'SECURE_STORE_PREFLIGHT_FAILED' : 'STARTUP_FAILED',
+    type: error instanceof Error ? 'Error' : 'NonError'
+  }
+}
+
+/** AT-01-001/010: let app.quit() flush Chromium keys, without network cleanup. */
+export function handleSecureStartupBeforeQuit(refused: boolean, markQuitting: () => void): boolean {
+  if (!refused) return false
+  markQuitting()
+  return true
+}

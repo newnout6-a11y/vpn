@@ -2,7 +2,7 @@ import { recordOwnedTunAdapter, strictRecoveryRequired, readRecoveryManifest } f
 import { executeRecoveryOperation, RecoveryWorkerError } from './recoveryPsWorker'
 import { OWNED_RUNTIME_STOP_SCRIPT } from './recoveryPsProtocol'
 import { exec as execCb, execFile as execFileCb } from 'child_process'
-import { writeFile, mkdir, copyFile, access, rename, stat, readFile } from 'fs/promises'
+import { writeFile, copyFile, access, rename, stat, readFile } from 'fs/promises'
 import { join, dirname } from 'path'
 import { promisify } from 'util'
 import { createConnection, createServer, isIP } from 'net'
@@ -51,6 +51,7 @@ import {
 import { getPreferredSmartRouteRuleSetSourceDir } from './ruleSetManager'
 import { selectTunMtu } from './networkCompatibility'
 import { ensureElevatedRuntimeDirHardened } from './runtimeDirSecurity'
+import { getPrivilegedRuntimeDir } from './runtimePaths'
 import type { PhysicalAdapterDnsSource } from './physicalAdapterLockdown'
 import type { AdaptiveBypassMode } from './adaptiveBypass'
 import { resolveProxyEngine, type ProxyEngineMode } from './proxyEngine'
@@ -362,7 +363,7 @@ const EXTERNAL_PROXY_PROCESS_NAMES = [
 ]
 
 export function getTunRuntimeDir(): string {
-  return join(app.getPath('userData'), 'tun-runtime')
+  return getPrivilegedRuntimeDir('tun-runtime')
 }
 
 export type SingBoxOutboundFault = 'reality-key-mismatch' | 'tls-handshake-failed' | 'upstream-unreachable'
@@ -2009,22 +2010,11 @@ async function prepareRuntime(
   } = {}
 ): Promise<{ singbox: string; config: string }> {
   const runtimeDir = getTunRuntimeDir()
-  await mkdir(runtimeDir, { recursive: true })
-
-  // Lock the runtime directory to SYSTEM + Administrators BEFORE staging any
-  // binary into it. The app always runs elevated (requireAdministrator in
-  // electron-builder.yml) and launches sing-box from this directory, which lives
-  // under %APPDATA% where the interactive user has Full Control by default —
-  // so without this, any unprivileged process running as the same user could
-  // swap vpnte-sing-box.exe or plant its own wintun.dll beside it and get code
-  // execution as administrator on the next connect. DLL planting is the easier
-  // half: copyResourceIfStale only compares size+mtime, so it would never
-  // notice a same-size replacement anyway.
-  //
-  // Order matters: hardening after the copy leaves a window where a planted
-  // file is already sitting in the directory when we lock it.
+  // The security helper creates the trusted root with its restricted ACL.
+  // Creating it recursively here would expose a writable directory before
+  // verification, allowing binary or DLL planting before elevated execution.
   const acl = await ensureElevatedRuntimeDirHardened(runtimeDir, 'tun-runtime')
-  if (!acl.hardened && !acl.skipped) {
+  if (!acl.hardened) {
     logEvent('error', 'tun', 'refusing to stage privileged binaries in an untrusted runtime directory', {
       runtimeDir,
       reason: acl.message,
