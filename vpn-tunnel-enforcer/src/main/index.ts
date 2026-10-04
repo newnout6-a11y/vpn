@@ -2718,7 +2718,8 @@ async function performShutdownCleanup(reason: string): Promise<void> {
   }
 
   try {
-    await killOwnedTunRuntimeProcesses()
+    const runtime = await killOwnedTunRuntimeProcesses()
+    if (!runtime.success || runtime.killed < runtime.candidates) throw new Error('owned runtime stop unconfirmed')
   } catch (err) {
     failedSteps.push('runtime')
     logEvent('warn', 'app', 'killOwnedTunRuntimeProcesses during shutdown failed', err)
@@ -2776,8 +2777,7 @@ async function performShutdownCleanup(reason: string): Promise<void> {
   }
 
   try {
-    const status = await autoconfig.getStatus()
-    const envApplied = status.find(t => t.id === 'env')?.applied
+    const envApplied = await autoconfig.isApplied('env')
     if (envApplied) {
       logEvent('info', 'app', 'rolling back env autoconfig (setx HTTP_PROXY) on shutdown')
       const restored = await autoconfig.rollback(['env'])

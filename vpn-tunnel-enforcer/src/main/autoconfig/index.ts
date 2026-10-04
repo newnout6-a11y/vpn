@@ -74,6 +74,14 @@ export const autoconfig = {
     return results
   },
 
+  // Unlike the UI status list, shutdown must not treat read failures as unapplied.
+  async isApplied(targetId: string): Promise<boolean> {
+    if (!Object.prototype.hasOwnProperty.call(targets, targetId)) {
+      throw new Error(`Unknown autoconfig target: ${targetId}`)
+    }
+    return targets[targetId].isApplied()
+  },
+
   async getStatus(): Promise<AutoconfigTarget[]> {
     const result: AutoconfigTarget[] = []
     for (const [id, target] of Object.entries(targets)) {

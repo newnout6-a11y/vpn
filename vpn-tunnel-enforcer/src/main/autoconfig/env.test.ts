@@ -56,6 +56,10 @@ vi.mock('fs/promises', async (importOriginal) => {
 
 import { env } from './env'
 
+function missingRegistryValue(message = 'The system was unable to find the specified registry key or value.'): Error {
+  return Object.assign(new Error(message), { code: 1, stderr: message })
+}
+
 describe('env autoconfig backup and rollback', () => {
   const backupFile = join(homedir(), '.vpnte', 'env-proxy-backup.json')
 
@@ -92,7 +96,7 @@ describe('env autoconfig backup and rollback', () => {
         if (varName === 'NO_PROXY') {
           return { stdout: 'HKEY_CURRENT_USER\\Environment\n    NO_PROXY    REG_SZ    localhost,internal.corp' }
         }
-        return new Error('The system was unable to find the specified registry key or value.')
+        return missingRegistryValue()
       }
       return { stdout: '', stderr: '' }
     })
@@ -253,13 +257,15 @@ describe('env autoconfig backup and rollback', () => {
     expect(ok).toBe(false)
     expect(mockFs[backupFile]).toBeDefined()
   })
-  it('blocks apply and rollback on malformed backup without changing registry', async () => {
-    mockFs[backupFile] = '{}'
-    expect(await env.apply('127.0.0.1:1080')).toBe(false)
-    expect(await env.rollback()).toBe(false)
-    expect(mockExecFile).not.toHaveBeenCalled()
-    expect(mockFs[backupFile]).toBe('{}')
-  })
+  it.each(['{}', '{"httpProxy":null,"httpsProxy":null,"allProxy":null}'])(
+    'blocks apply and rollback on malformed or partial backup without changing registry: %s', async (backup) => {
+      mockFs[backupFile] = backup
+      expect(await env.apply('127.0.0.1:1080')).toBe(false)
+      expect(await env.rollback()).toBe(false)
+      expect(mockExecFile).not.toHaveBeenCalled()
+      expect(mockFs[backupFile]).toBe(backup)
+    }
+  )
   it('blocks apply when reading original environment is denied', async () => {
     mockExecFile.mockReturnValue(new Error('Access denied'))
     expect(await env.apply('127.0.0.1:1080')).toBe(false)
@@ -267,4 +273,82 @@ describe('env autoconfig backup and rollback', () => {
     expect(mockFs[backupFile]).toBeUndefined()
   })
 
+  // AT-11-002 / F-183: unknown environment status must block shutdown, not skip cleanup.
+  describe('strict isApplied status', () => {
+    it.each([
+      '    HTTP_PROXY    REG_SZ    socks5h://127.0.0.1:10808',
+      '    HTTP_PROXY    REG_EXPAND_SZ    http://%PROXY_HOST%:8080',
+      '    http_proxy    REG_SZ    http://corporate:8080',
+      '    HTTP_PROXY    REG_SZ    '
+    ])('reports a successfully read value as present, including an empty string: %s', async (valueLine) => {
+      mockExecFile.mockReturnValue({ stdout: `HKEY_CURRENT_USER\\Environment\r\n${valueLine}\r\n`, stderr: '' })
+      expect(await env.isApplied()).toBe(true)
+      expect(mockExecFile).toHaveBeenCalledExactlyOnceWith(
+        'reg', ['query', 'HKCU\\Environment', '/v', 'HTTP_PROXY'],
+        { windowsHide: true, timeout: 10000, encoding: 'utf8' }
+      )
+    })
+
+    it.each([
+      'The system was unable to find the specified registry key or value.',
+      'Не удается найти указанный раздел или параметр реестра.'
+    ])('reports false only for confirmed absence: %s', async (message) => {
+      mockExecFile.mockReturnValue(missingRegistryValue(message))
+      expect(await env.isApplied()).toBe(false)
+    })
+
+    it.each([
+      Object.assign(new Error('Access denied'), { code: 1, stderr: 'ERROR: Access is denied.' }),
+      Object.assign(new Error('reg query timed out'), { code: 'ETIMEDOUT', killed: true, signal: 'SIGTERM' }),
+      Object.assign(missingRegistryValue(), { killed: true, signal: 'SIGTERM' }),
+      Object.assign(missingRegistryValue(), { code: 'ENOENT' })
+    ])('propagates read failures and preserves backup without rollback: %s', async (error) => {
+      const backup = JSON.stringify({ createdAt: 1000, httpProxy: 'http://corporate:8080', httpsProxy: null, allProxy: null, noProxy: null })
+      mockFs[backupFile] = backup
+      mockExecFile.mockReturnValue(error)
+      const fs = await import('fs/promises')
+
+      await expect(env.isApplied()).rejects.toBe(error)
+      expect(mockFs[backupFile]).toBe(backup)
+      expect(fs.writeFile).not.toHaveBeenCalled()
+      expect(fs.unlink).not.toHaveBeenCalled()
+      expect(mockExecFile).toHaveBeenCalledTimes(1)
+      expect(mockExecFile.mock.calls[0].slice(0, 2)).toEqual(['reg', ['query', 'HKCU\\Environment', '/v', 'HTTP_PROXY']])
+    })
+
+    it.each([
+      '',
+      'HKEY_CURRENT_USER\\Environment\r\n',
+      '    HTTP_PROXY_OTHER    REG_SZ    http://corporate:8080',
+      '    HTTP_PROXY    REG_DWORD    0x1',
+      '    HTTP_PROXY    unexpected output'
+    ])('rejects unparseable successful output without deleting backup: %s', async (stdout) => {
+      mockFs[backupFile] = 'preserve this backup'
+      mockExecFile.mockReturnValue({ stdout, stderr: '' })
+      const fs = await import('fs/promises')
+
+      await expect(env.isApplied()).rejects.toThrow('Unable to parse registry value HTTP_PROXY')
+      expect(mockFs[backupFile]).toBe('preserve this backup')
+      expect(fs.writeFile).not.toHaveBeenCalled()
+      expect(fs.unlink).not.toHaveBeenCalled()
+      expect(mockExecFile).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  // AT-11-002 / F-183: failed backup reads must precede any environment mutation.
+  it.each(['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY'])(
+    'blocks apply without partial backup or registry writes when %s cannot be parsed', async (unparseableKey) => {
+      mockExecFile.mockImplementation((_cmd: string, args: string[]) => ({
+        stdout: args[3] === unparseableKey ? '' : `    ${args[3]}    REG_SZ    http://corporate:8080`,
+        stderr: ''
+      }))
+      const fs = await import('fs/promises')
+
+      expect(await env.apply('127.0.0.1:1080')).toBe(false)
+      expect(mockFs[backupFile]).toBeUndefined()
+      expect(fs.writeFile).not.toHaveBeenCalled()
+      expect(fs.unlink).not.toHaveBeenCalled()
+      expect(mockExecFile.mock.calls.every(([cmd, args]) => cmd === 'reg' && args[0] === 'query')).toBe(true)
+    }
+  )
 })

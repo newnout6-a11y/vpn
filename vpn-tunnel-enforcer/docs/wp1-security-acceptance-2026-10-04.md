@@ -164,3 +164,15 @@ AT-08-004/005 и AT-01-009 имеют новые L1/L2 регрессии, **н�
 - EXE 1.1.22 пересобран: **139180341 bytes, NotSigned**, не установлен. SHA-256 `F08247EA9B97B6651EE6A19AC62E0391F1607D83D8DDD41010380025B07C1F4B`; 40 packaged main/preload/renderer files совпадают с out, новые shutdown markers присутствуют. `dist/checksums.txt` обновлён для EXE/blockmap.
 
 **Предел доказательства:** native tests не завершают установленный VPNTE и не трогают реальные capture/Firewall/DNS/clipboard. NSIS сборка и L1/L2 control-flow не заменяют AT-11-002/AT-08-005 L3. VM отсутствует и не запускалась; полный installed active-upgrade/uninstall/OS matrix, прошлые legacy orphan sessions и credential rollback остаются NOT-CHECKED. Нормативные docs не изменялись.
+
+## Follow-up ревью be104c1: не подтверждать неизвестный результат shutdown
+
+Трассировка: AT-11-002/F-183, Том 2 §7.1. Исправлены оба actionable замечания CodeRabbit без расширения credential rollback или legacy capture recovery:
+
+- `performShutdownCleanup` отклоняет `{success:false}` и неполный `killed/candidates` от owned-runtime stop, а не только исключения. Независимые cleanup steps продолжаются; при отказе helpers остаются для retry и before-quit не выдаёт installer acknowledgement 73.
+- Shutdown вызывает строгий `autoconfig.isApplied('env')`, не UI `getStatus()` с fallback. Ошибка доступа, timeout и непарсируемый registry stdout остаются неизвестным состоянием и блокируют shutdown; backup не удаляется, blind rollback не запускается. Только распознанный missing-value error с exit 1 без termination indicators подтверждает отсутствие. Общий parser также прерывает backup preparation до apply при неполном чтении. UI контракт не менялся.
+- Nitpick Revix закрыт переносом 10 harmless native cases в `.itest.ts` и opt-in `npm run test:installer-shutdown`; обычный unit glob исключает их. Добавлены 35 regression cases с mocked registry/targets/runtime; ни реальный клиент, ни registry не менялись.
+- Typecheck/build/dist:win exit 0; focused **134/134**, integration **10/10**; full **208 files passed / 2 skipped; 2525 passed / 10 skipped / 0 failed**, 90.36 s. AC927/927, F210/210 exit 0. Промежуточная syntax error при правке Vitest config исправлена до финального полного прогона.
+- EXE 1.1.22: **139180693 bytes, NotSigned**, SHA-256 `D157455011C95E1580DFA4E6FCF260330746E09AD78EB74228C7E0423909B70F`. Все **185 файлов out/** сверены с packaged ASAR по SHA-256, strict shutdown markers присутствуют; `dist/checksums.txt` обновлён для EXE/blockmap. Не устанавливался и не публиковался как release.
+
+VM отсутствует, live VPN/Firewall/DNS/capture/registry не трогались. Этот L1/L2 follow-up не заменяет installed upgrade/uninstall AT-11-002 L3; ранее перечисленные legacy/rollback/OS ограничения сохраняются. Нормативные docs не менялись.

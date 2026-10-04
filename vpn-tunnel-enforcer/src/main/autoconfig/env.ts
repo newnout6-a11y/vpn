@@ -59,17 +59,18 @@ async function getUserEnvValue(name: string): Promise<string | null> {
     })) as { stdout: string; stderr: string }
     const lines = stdout.split(/\r?\n/)
     for (const line of lines) {
-      const trimmed = line.trim()
-      if (trimmed.startsWith(name)) {
-        const parts = trimmed.split(/\s+/)
-        if (parts.length >= 3) {
-          return parts.slice(2).join(' ')
-        }
+      const match = line.trim().match(/^(\S+)\s+(REG_SZ|REG_EXPAND_SZ)(?:\s+(.*))?$/i)
+      if (match && match[1].toUpperCase() === name.toUpperCase()) {
+        return match[3] ?? ''
       }
     }
-    return null
+    throw new Error(`Unable to parse registry value ${name}`)
   } catch (err: any) {
-    if (/unable to find|не удается найти|не удалось найти/i.test(String(err?.stderr || err?.message || ''))) return null
+    const text = String(err?.stderr || err?.message || '')
+    if (err?.code === 1 && !err?.killed && !err?.signal &&
+        /unable to find the specified registry key or value|не удается найти указанный раздел или параметр|не удалось найти указанный раздел или параметр/i.test(text)) {
+      return null
+    }
     throw err
   }
 }
@@ -204,15 +205,6 @@ export const env = {
   },
 
   async isApplied(): Promise<boolean> {
-    try {
-      const { stdout } = (await execFileAsync('reg', ['query', 'HKCU\\Environment', '/v', 'HTTP_PROXY'], {
-        windowsHide: true,
-        timeout: 10000,
-        encoding: 'utf8'
-      })) as { stdout: string; stderr: string }
-      return stdout.includes('HTTP_PROXY')
-    } catch {
-      return false
-    }
+    return (await getUserEnvValue('HTTP_PROXY')) !== null
   }
 }
