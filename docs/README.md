@@ -107,6 +107,7 @@
 | [VLESS/QUIC investigation](../vpn-tunnel-enforcer/docs/vless-quic-fallback-investigation.md) | Историческое исследование транспорта; не принимается за свежий proof всех UDP/QUIC маршрутов. |
 | [Architecture README](../vpn-tunnel-enforcer/docs/architecture/README.md), [module map](../vpn-tunnel-enforcer/docs/architecture/module-map.md), [review guide](../vpn-tunnel-enforcer/docs/architecture/review-guide.md) | Карта модулей и границ проверки использована для адресной сверки parser/generator, rotation, adaptive bypass и wizard. |
 | [Split tunneling](../vpn-tunnel-enforcer/src/main/splitTunneling.ts), [NSIS hooks](../vpn-tunnel-enforcer/build/installer.nsh), [config export](../vpn-tunnel-enforcer/src/main/configManager.ts) | Адресная сверка замечаний PR #20: F-076 открыт — каталог теряется, создаётся `process_name`; F-183 открыт — forced kill без подтверждённого rollback; F-144 открыт — полный экспорт секретов вместо default masking и отдельного подтверждённого opt-in. Остатки обозначены как недостающая реализация; после неё нужны AT-06-008, AT-11-002 и проверки экспорта по тому 2 §4.2. |
+| [Scheduler](../vpn-tunnel-enforcer/src/main/scheduler.ts), [domain routing](../vpn-tunnel-enforcer/src/main/domainRouting.ts), [availability verdict](../vpn-tunnel-enforcer/src/main/urlAvailability.ts), [speed test](../vpn-tunnel-enforcer/src/main/speedTest.ts) | Повторно подтверждены F-193 (нет предыдущего дня `dayOffset=-1`), F-011 (hit recorder отсутствует и постоянного счётчика нет), F-210/F-085 (direct-only 401/403 даёт ложный `works-only-with-vpn`) и F-010 (egress mismatch подавляется пустым catch). Обновлены срезы требований и статусы WP-6/7/10; адресные проверочные сценарии привязаны к AT-10-002, AT-06-003 и AT-07-006. |
 
 Архивные 44 feature requirements/blueprint пары из `docs-factory8090/01…04` не перепроверялись построчно в этой сверке. Их находки учитываются через журнал F, ТЗ-06 и нормативные тома; этот реестр не заявляет полного повторного чтения всех Markdown репозитория.
 
@@ -118,4 +119,4 @@
 
 - В `vpn-tunnel-enforcer/`: `npm.cmd run typecheck` — exit 0; `npx.cmd vitest run src/renderer/components/LiveServerCheckSection.test.tsx --maxWorkers=4` — 1 файл, 4 теста passed, exit 0. Это адресная регрессия history IPC, а не проверка всех 10 diff-веток.
 - Из корня: `python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py` — exit 0, AC 927/927, F 210/210.
-- Проверены 38 локальных Markdown-ссылок в пяти изменённых файлах, четыре столбца таблиц среза и неизменность нормативного текста до срезов; `git diff --check` — exit 0.
+- Проверены 42 локальные Markdown-ссылки в пяти изменённых файлах, четыре столбца таблиц среза и неизменность нормативного текста до срезов; `git diff --check` — exit 0.
