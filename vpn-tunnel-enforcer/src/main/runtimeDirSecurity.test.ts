@@ -26,6 +26,9 @@ function proof() {
   return { ...acl(), childrenInspected: true, ancestorsInspected: true, ancestors, children: [] as ReturnType<typeof acl>[] }
 }
 function reply(value = proof()) { mocks.read.mockResolvedValue({ stdout: JSON.stringify(value), stderr: '' }) }
+const diagnostic = (reason = 'RuntimeAclNotProtected') => ({ operation: 'validate-acl', path: 'C:\\ProgramData\\VPNTE',
+  reason, errorType: 'System.Management.Automation.RuntimeException', hresult: -2146233087, principal: ADMINS, rights: null })
+function receipt(value: unknown = diagnostic()) { return 'VPNTE_RUNTIME_FAILURE:' + JSON.stringify(value) }
 function script(call: any[], elevated = false) {
   const encoded = elevated ? call[0].split('EncodedCommand ')[1] : call[1][3]
   return Buffer.from(encoded, 'base64').toString('utf16le')
@@ -159,13 +162,30 @@ describe.skipIf(process.platform !== 'win32')('native read-only PowerShell polic
     vi.stubEnv('ProgramData', 'C:\\not-the-known-folder')
     const inspect = await inspectionSource()
     const data = Buffer.from(inspect).toString('base64')
-    expect(await run(`$ProgressPreference='SilentlyContinue';$ErrorActionPreference='Stop';$s=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${data}'));try{& ([ScriptBlock]::Create($s));throw 'Unexpected acceptance'}catch{if($_.Exception.Message -notlike '*ProgramData environment does not match*'){throw};Write-Output 'FORGED_ENV_REFUSED'}`)).toBe('FORGED_ENV_REFUSED')
+    expect(await run(`$ProgressPreference='SilentlyContinue';$ErrorActionPreference='Stop';$s=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${data}'));try{& ([ScriptBlock]::Create($s));throw 'Unexpected acceptance'}catch{if($_.Exception.Message -ne 'RuntimeProgramDataMismatch'){throw};Write-Output 'FORGED_ENV_REFUSED'}`)).toMatch(/^VPNTE_RUNTIME_FAILURE:.*RuntimeProgramDataMismatch.*\r?\nFORGED_ENV_REFUSED$/)
   })
   it('reads and accepts the real system known-folder namespace without changing ACLs', async () => {
     const source = await inspectionSource()
     const helpers = source.slice(0, source.indexOf('$ancestors = @(Get-RuntimeAncestors $dir)'))
     const result = await run(helpers + `\n$known=[Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData);$proof=@(Get-RuntimeAncestors (Join-Path $known 'read-only-probe'));if($proof.Count -lt 2){throw 'Incomplete native namespace'};Write-Output 'NAMESPACE_VERIFIED'`)
     expect(result).toBe('NAMESPACE_VERIFIED')
+  })
+  it.each(['owner', 'inheritance', 'write-access', 'access-denied'])('emits a native failure receipt for %s with nonzero exit, without mutations (AT-01-002/009)', async kind => {
+    const source = await inspectionSource()
+    const helpers = source.slice(0, source.indexOf('$ancestors = @(Get-RuntimeAncestors $dir)'))
+    const fixture = kind === 'access-denied'
+      ? `function Get-Item { [pscustomobject]@{FullName='C:\\ProgramData\\VPNTE';Attributes=[IO.FileAttributes]::Directory} };function Get-Acl { throw [UnauthorizedAccessException]::new('FAKE-secret') };Get-RuntimeAcl 'C:\\ProgramData\\VPNTE'`
+      : `$sample=@{path='C:\\ProgramData\\VPNTE';owner='${kind === 'owner' ? USER : ADMINS}';directory=$true;protected=$${kind === 'inheritance' ? 'false' : 'true'};rules=@(@{sid='${USER}';rights=64;type='Allow';inheritOnly=$false})};Assert-RuntimeAcl $sample $false`
+    let failure: any
+    try { await run(helpers + '\n' + fixture) } catch (error) { failure = error }
+    expect(failure?.status).not.toBe(0)
+    const stdout = String(failure?.stdout ?? '')
+    const detail = JSON.parse(stdout.trim().split(/\r?\n/).find(line => line.startsWith('VPNTE_RUNTIME_FAILURE:'))!.slice('VPNTE_RUNTIME_FAILURE:'.length))
+    expect(detail.path).toBe('C:\\ProgramData\\VPNTE')
+    expect(detail.operation).toBe(kind === 'access-denied' ? 'read-acl' : 'validate-acl')
+    expect(detail.reason).toBe(({ owner: 'RuntimeNamespaceUntrustedOwner', inheritance: 'RuntimeAclNotProtected', 'write-access': 'RuntimeNamespaceUntrustedAccess', 'access-denied': 'PowerShellError' })[kind])
+    expect(detail.errorType).toContain(kind === 'access-denied' ? 'UnauthorizedAccessException' : 'RuntimeException')
+    expect(stdout).not.toContain('FAKE-secret')
   })
   it('executes the real ACL predicate against DELETE_CHILD, owner, generic and inheritance-only fixtures', async () => {
     const source = await inspectionSource()
@@ -210,6 +230,40 @@ describe('trusted bootstrap, never repair unsafe existing directories', () => {
     mocks.read.mockRejectedValueOnce(new Error('missing')); mocks.elevated.mockResolvedValueOnce(false)
     expect((await ensureElevatedRuntimeDirHardened(DIR, 'tun')).hardened).toBe(false)
     expect(mocks.write).not.toHaveBeenCalled()
+  })
+  it.each(['RuntimeAclNotProtected', 'RuntimeNamespaceUntrustedOwner', 'RuntimeNamespaceUntrustedAccess', 'PowerShellError'])('logs bounded bootstrap reason/path for %s without raw output (AT-01-002/009)', async reason => {
+    mocks.read.mockRejectedValueOnce(new Error('missing'))
+    const detail = { ...diagnostic(reason), principal: USER, rights: 64, password: 'FAKE-secret' }
+    mocks.write.mockRejectedValueOnce(Object.assign(new Error('vless://FAKE-secret@host -EncodedCommand FAKE-command'), {
+      stdout: receipt(detail), stderr: 'FAKE-secret'
+    }))
+    const result = await ensureElevatedRuntimeDirHardened(DIR, 'tun')
+    expect(result.hardened).toBe(false)
+    expect(result.diagnostic).toMatchObject({ operation: 'validate-acl', path: 'C:\\ProgramData\\VPNTE', reason, principal: USER, rights: 64 })
+    expect(mocks.log).toHaveBeenCalledWith('error', 'runtime-acl', 'tun: runtime bootstrap refused', expect.objectContaining({ dir: DIR, diagnostic: result.diagnostic }))
+    expect(JSON.stringify([result, mocks.log.mock.calls])).not.toMatch(/FAKE-secret|FAKE-command|EncodedCommand/)
+    expect(mocks.read).toHaveBeenCalledTimes(1)
+  })
+  it.each(['{broken', receipt({ ...diagnostic(), operation: 'FAKE-secret' }), receipt({ ...diagnostic(), reason: 'FAKE-secret' }), receipt({ ...diagnostic(), path: 'x'.repeat(5000) })])('does not trust a malformed diagnostic receipt (AT-01-002/009)', async stdout => {
+    mocks.read.mockRejectedValueOnce(new Error('missing'))
+    mocks.write.mockRejectedValueOnce({ stdout, stderr: 'FAKE-secret' })
+    const result = await ensureElevatedRuntimeDirHardened(DIR, 'tun')
+    expect(result.hardened).toBe(false)
+    expect(result.diagnostic?.reason).toBe('DiagnosticUnavailable')
+    expect(JSON.stringify(mocks.log.mock.calls)).not.toContain('FAKE-secret')
+  })
+  it('a failure receipt cannot be hidden by a successful exit/confirmation (AT-01-009)', async () => {
+    mocks.read.mockRejectedValueOnce(new Error('missing'))
+    mocks.write.mockResolvedValueOnce({ stdout: receipt() + '\nHARDENED' })
+    expect((await ensureElevatedRuntimeDirHardened(DIR, 'tun')).hardened).toBe(false)
+    expect(mocks.read).toHaveBeenCalledTimes(1)
+  })
+  it('logs readback failures and uses the direct PowerShell transport for long scripts (AT-01-009)', async () => {
+    mocks.read.mockRejectedValueOnce(new Error('missing')).mockRejectedValueOnce({ stdout: receipt(diagnostic('RuntimeNamespaceUntrustedAccess')) })
+    const result = await ensureElevatedRuntimeDirHardened(DIR, 'tun')
+    expect(result.refusalCode).toBe('namespace-untrusted')
+    expect(mocks.log).toHaveBeenCalledWith('error', 'runtime-acl', 'tun: runtime readback refused', { dir: DIR, result })
+    expect(mocks.write.mock.calls[0][0]).toMatch(/^powershell\.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand [A-Za-z0-9+/]+={0,2}$/)
   })
   it('rechecks parents on each connection; only concurrent work shares a proof', async () => {
     await Promise.all([ensureElevatedRuntimeDirHardened(DIR, 'tun'), ensureElevatedRuntimeDirHardened(DIR, 'tun')])

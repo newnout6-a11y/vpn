@@ -29,11 +29,56 @@ export interface DirectoryHardeningResult {
   message: string
   offenders?: string[]
   owner?: string | null
+  diagnostic?: RuntimeFailureDiagnostic
+}
+
+interface RuntimeFailureDiagnostic {
+  operation: string
+  path: string
+  reason: string
+  errorType: string
+  hresult?: number
+  principal?: string
+  rights?: number
+}
+const FAILURE_PREFIX = 'VPNTE_RUNTIME_FAILURE:'
+const POLICY_FAILURE = /^(RuntimeNamespaceUntrusted(?:Owner|Type|Reparse|Access)|RuntimeAclNotProtected|RuntimeAclMissingRules|RuntimeProgramDataMismatch|RuntimeOutsideBoundary)$/
+
+// Only consume our bounded metadata receipt, never log stderr/argv/exception text.
+function failureDiagnostic(error: unknown): RuntimeFailureDiagnostic {
+  const failure = error as { stdout?: unknown; code?: unknown; killed?: unknown }
+  const line = typeof failure?.stdout === 'string' ? failure.stdout.split(/\r?\n/).find(s => s.startsWith(FAILURE_PREFIX)) : undefined
+  try {
+    const v = line && line.length <= 4096 ? JSON.parse(line.slice(FAILURE_PREFIX.length)) : null
+    if (v && /^(import-acl-module|known-folder|runtime-boundary|read-item|read-acl|validate-acl|list-children|create-directory)$/.test(v.operation) &&
+        typeof v.path === 'string' && v.path.length <= 1024 && (v.path === '' || win32.isAbsolute(v.path)) &&
+        (v.reason === 'PowerShellError' || POLICY_FAILURE.test(v.reason)) &&
+        typeof v.errorType === 'string' && /^[A-Za-z][A-Za-z0-9.]{0,160}$/.test(v.errorType) && Number.isInteger(v.hresult)) {
+      return { operation: v.operation, path: v.path, reason: v.reason, errorType: v.errorType, hresult: v.hresult,
+        ...(typeof v.principal === 'string' && /^S-\d+(?:-\d+)+$/.test(v.principal) ? { principal: v.principal } : {}),
+        ...(Number.isSafeInteger(v.rights) && v.rights >= 0 && v.rights <= 0xFFFFFFFF ? { rights: v.rights } : {}) }
+    }
+  } catch { /* A missing/malformed diagnostic never authorizes the runtime. */ }
+  return { operation: 'powershell', path: '', reason: failure?.killed === true ? 'ProcessTerminated' : 'DiagnosticUnavailable',
+    errorType: typeof failure?.code === 'number' ? `ExitCode.${failure.code}` : 'ProcessError' }
 }
 
 function psSingleQuote(value: string): string { return `'${value.replace(/'/g, "''")}'` }
 function encodedPowerShell(script: string): string {
-  const prelude =
+  const prelude = `
+$ErrorActionPreference='Stop'
+$script:runtimeOperation='import-acl-module'; $script:runtimePath=''; $script:runtimePrincipal=$null; $script:runtimeRights=$null
+trap {
+  $reason='PowerShellError'
+  if ($_.Exception.Message -match '${POLICY_FAILURE.source}') { $reason=$_.Exception.Message }
+  $cause=$_.Exception
+  while ($cause.InnerException) { $cause=$cause.InnerException }
+  $diagnostic=[ordered]@{operation=$script:runtimeOperation;path=$script:runtimePath;reason=$reason;
+    errorType=$cause.GetType().FullName;hresult=$cause.HResult;principal=$script:runtimePrincipal;rights=$script:runtimeRights}
+  [Console]::Out.WriteLine('${FAILURE_PREFIX}' + ($diagnostic | ConvertTo-Json -Compress))
+  break
+}
+` +
     "Import-Module -Name (Join-Path $PSHOME 'Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1') -ErrorAction Stop;" +
     '$OutputEncoding=[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new();$ProgressPreference="SilentlyContinue";'
   return Buffer.from(prelude + script, 'utf16le').toString('base64')
@@ -41,25 +86,34 @@ function encodedPowerShell(script: string): string {
 async function runPowerShell(script: string, elevated: boolean, timeout: number): Promise<string> {
   const encoded = encodedPowerShell(script)
   if (elevated) {
-    const { stdout } = await execElevated(`powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encoded}`, { timeout, maxBuffer: 4 * 1024 * 1024 })
-    return String(stdout ?? '')
+    const { stdout } = await execElevated(`powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encoded}`, { timeout, maxBuffer: 4 * 1024 * 1024 })
+    return checkedPowerShellOutput(stdout)
   }
   const { stdout } = await execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], {
     windowsHide: true, timeout, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024
   })
-  return String(stdout ?? '').replace(/^\uFEFF/, '').trim()
+  return checkedPowerShellOutput(stdout)
+}
+function checkedPowerShellOutput(value: unknown): string {
+  const stdout = String(value ?? '').replace(/^\uFEFF/, '').trim()
+  if (stdout.split(/\r?\n/).some(line => line.startsWith(FAILURE_PREFIX))) {
+    throw Object.assign(new Error('Runtime PowerShell refused'), { stdout })
+  }
+  return stdout
 }
 
 const RUNTIME_TREE_HELPERS = `
 $artifactSids = @('${SID_SYSTEM}', '${SID_ADMINISTRATORS}')
 $ancestorSids = @('${SID_SYSTEM}', '${SID_ADMINISTRATORS}', '${SID_TRUSTED_INSTALLER}')
 function Get-RuntimeItem($path) {
+  $script:runtimeOperation='read-item'; $script:runtimePath=$path; $script:runtimePrincipal=$null; $script:runtimeRights=$null
   $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
   if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'RuntimeNamespaceUntrustedReparse' }
   return $item
 }
 function Get-RuntimeAcl($path) {
   $item = Get-RuntimeItem $path
+  $script:runtimeOperation='read-acl'
   $acl = Get-Acl -LiteralPath $path -ErrorAction Stop
   $rules = @()
   foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
@@ -80,15 +134,19 @@ function Get-RuntimeAcl($path) {
   }
 }
 function Assert-RuntimeAcl($snapshot, $ancestor) {
+  $script:runtimeOperation='validate-acl'; $script:runtimePath=$snapshot.path; $script:runtimePrincipal=$snapshot.owner; $script:runtimeRights=$null
   $allowed = $artifactSids; $mask = ${ARTIFACT_WRITE_MASK}
   if ($ancestor) { $allowed = $ancestorSids; $mask = ${NAMESPACE_WRITE_MASK} }
   if ($allowed -notcontains $snapshot.owner) { throw 'RuntimeNamespaceUntrustedOwner' }
   if ($ancestor -and -not $snapshot.directory) { throw 'RuntimeNamespaceUntrustedType' }
-  if (-not $ancestor -and -not $snapshot.protected) { throw 'Runtime ACL is not protected' }
-  if ($snapshot.rules.Count -eq 0) { throw 'Missing runtime ACL rules' }
+  if (-not $ancestor -and -not $snapshot.protected) { throw 'RuntimeAclNotProtected' }
+  if ($snapshot.rules.Count -eq 0) { throw 'RuntimeAclMissingRules' }
   foreach ($rule in $snapshot.rules) {
     if ((-not $ancestor -or -not $rule.inheritOnly) -and $rule.type -eq 'Allow' -and $allowed -notcontains $rule.sid -and
-        ($rule.rights -band $mask) -ne 0) { throw 'RuntimeNamespaceUntrustedAccess' }
+        ($rule.rights -band $mask) -ne 0) {
+      $script:runtimePrincipal=$rule.sid; $script:runtimeRights=$rule.rights
+      throw 'RuntimeNamespaceUntrustedAccess'
+    }
   }
 }
 function Get-RuntimeAncestors($path) {
@@ -110,7 +168,8 @@ function Get-RuntimeChildren($root) {
   $pending.Push($root)
   while ($pending.Count -gt 0) {
     $parent = Get-RuntimeItem ($pending.Pop())
-    if (-not $parent.PSIsContainer) { throw 'Runtime directory changed type' }
+    if (-not $parent.PSIsContainer) { throw 'RuntimeNamespaceUntrustedType' }
+    $script:runtimeOperation='list-children'
     foreach ($entry in @(Get-ChildItem -LiteralPath $parent.FullName -Force -ErrorAction Stop)) {
       $item = Get-RuntimeItem $entry.FullName
       Write-Output (Get-RuntimeAcl $item.FullName)
@@ -122,10 +181,11 @@ function Get-RuntimeChildren($root) {
 
 function knownFolderCheck(): string {
   const programData = process.env.ProgramData || 'C:\\ProgramData'
-  return `$knownProgramData = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
+  return `$script:runtimeOperation='known-folder'; $script:runtimePath=${psSingleQuote(programData)}
+$knownProgramData = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
 if (-not [string]::Equals([IO.Path]::GetFullPath(${psSingleQuote(programData)}).TrimEnd([char]92),
     [IO.Path]::GetFullPath($knownProgramData).TrimEnd([char]92), [StringComparison]::OrdinalIgnoreCase)) {
-  throw 'ProgramData environment does not match the Windows known folder'
+  throw 'RuntimeProgramDataMismatch'
 }`
 }
 
@@ -137,7 +197,7 @@ ${knownFolderCheck()}
 # The parent chain is walked root-first and must be authorized before children.
 $ancestors = @(Get-RuntimeAncestors $dir)
 $root = Get-RuntimeAcl $dir
-if (-not $root.directory) { throw 'Runtime root is not a directory' }
+if (-not $root.directory) { throw 'RuntimeNamespaceUntrustedType' }
 $root['ancestors'] = $ancestors
 $root['ancestorsInspected'] = $true
 $root['children'] = @(Get-RuntimeChildren $dir)
@@ -155,10 +215,11 @@ ${RUNTIME_TREE_HELPERS}
 ${knownFolderCheck()}
 $base = Join-Path $knownProgramData 'VPNTE'
 $runtimeBase = Join-Path $base 'runtime'
+$script:runtimeOperation='runtime-boundary'; $script:runtimePath=$dir
 $relative = [IO.Path]::GetFullPath($dir).Substring($runtimeBase.Length)
 if (-not $dir.StartsWith($runtimeBase + [char]92, [StringComparison]::OrdinalIgnoreCase) -or
     $relative -notmatch '^\\\\[a-f0-9]{32}\\\\(tun-runtime|external-proxy-runtime|traffic-forensics)$') {
-  throw 'Runtime directory is outside the application runtime boundary'
+  throw 'RuntimeOutsideBoundary'
 }
 $null = @(Get-RuntimeAncestors (Join-Path $knownProgramData 'boundary'))
 $acl = New-Object Security.AccessControl.DirectorySecurity
@@ -172,12 +233,13 @@ $instance = [IO.Path]::GetDirectoryName($dir)
 foreach ($component in @($base, $runtimeBase, $instance, $dir)) {
   # The containing namespace was already proven safe. Never reset an existing
   # DACL/owner, recursively create, or accept contents from untrusted storage.
+  $script:runtimeOperation='create-directory'; $script:runtimePath=$component; $script:runtimePrincipal=$null; $script:runtimeRights=$null
   if (-not (Test-Path -LiteralPath $component -ErrorAction Stop)) {
     $info = New-Object IO.DirectoryInfo($component)
     $info.Create($acl)
   }
   $snapshot = Get-RuntimeAcl $component
-  if (-not $snapshot.directory) { throw 'Runtime component is not a directory' }
+  if (-not $snapshot.directory) { throw 'RuntimeNamespaceUntrustedType' }
   Assert-RuntimeAcl $snapshot $false
 }
 Write-Output 'HARDENED'`
@@ -265,11 +327,13 @@ export async function verifyDirectoryHardened(dir: string): Promise<DirectoryHar
   } catch (error: unknown) {
     const failure = error as { stderr?: unknown; message?: unknown }
     const text = `${String(failure?.stderr ?? '')} ${String(failure?.message ?? '')}`
-    const namespaceRefusal = /RuntimeNamespaceUntrusted(?:Owner|Type|Reparse|Access)/.test(text)
+    const diagnostic = failureDiagnostic(error)
+    const namespaceRefusal = /RuntimeNamespaceUntrusted(?:Owner|Type|Reparse|Access)/.test(`${diagnostic.reason} ${text}`)
     return {
       hardened: false,
       refusalCode: namespaceRefusal ? 'namespace-untrusted' : 'inspection-failed',
-      message: namespaceRefusal ? 'небезопасная родительская цепочка runtime: запуск запрещён' : 'не удалось проверить ACL/владельца/reparse родительской цепочки runtime'
+      message: namespaceRefusal ? 'небезопасная родительская цепочка runtime: запуск запрещён' : 'не удалось проверить ACL/владельца/reparse родительской цепочки runtime',
+      diagnostic
     }
   }
 }
@@ -278,16 +342,20 @@ const hardenedDirs = new Map<string, Promise<DirectoryHardeningResult>>()
 async function hardenOnce(dir: string, label: string): Promise<DirectoryHardeningResult> {
   const before = await verifyDirectoryHardened(dir)
   if (before.hardened) return before
-  if (!await isProcessElevated()) return { hardened: false, message: 'нет прав администратора для создания доверенного runtime' }
+  if (!await isProcessElevated()) {
+    logEvent('error', 'runtime-acl', `${label}: runtime elevation required`, { dir, before })
+    return { hardened: false, message: 'нет прав администратора для создания доверенного runtime' }
+  }
   try {
     const stdout = await runPowerShell(buildBootstrapScript(dir), true, 60000)
     if (!stdout.split(/\r?\n/).includes('HARDENED')) throw new Error('Missing runtime bootstrap confirmation')
-  } catch {
-    logEvent('error', 'runtime-acl', `${label}: runtime bootstrap refused`)
-    return { hardened: false, message: 'RuntimeSecurityAclError: создание доверенного runtime отклонено; существующие небезопасные каталоги не исправляются автоматически' }
+  } catch (error: unknown) {
+    const diagnostic = failureDiagnostic(error)
+    logEvent('error', 'runtime-acl', `${label}: runtime bootstrap refused`, { dir, diagnostic, before })
+    return { hardened: false, diagnostic, message: 'RuntimeSecurityAclError: создание доверенного runtime отклонено; существующие небезопасные каталоги не исправляются автоматически. Причина и путь — в журнале runtime-acl' }
   }
   const after = await verifyDirectoryHardened(dir)
-  if (!after.hardened) logEvent('error', 'runtime-acl', `${label}: runtime readback refused`)
+  if (!after.hardened) logEvent('error', 'runtime-acl', `${label}: runtime readback refused`, { dir, result: after })
   return after
 }
 export async function ensureElevatedRuntimeDirHardened(dir: string, label: string): Promise<DirectoryHardeningResult> {
