@@ -56,6 +56,7 @@ import type { PhysicalAdapterDnsSource } from './physicalAdapterLockdown'
 import type { AdaptiveBypassMode } from './adaptiveBypass'
 import { resolveProxyEngine, type ProxyEngineMode } from './proxyEngine'
 import { startXray, stopXray, getXrayRuntimeExePath } from './xrayEngine'
+import { getNativeXrayProfile } from './nativeXrayProfile'
 import { waitForTunRelease } from './tunRestartReadiness'
 
 const exec = promisify(execCb)
@@ -840,6 +841,11 @@ export function shouldBlockQuicUdp443(
   if (proxyType === 'http') return true
   if (isDirectVpn) {
     if (!isVpnOutboundUdpCapable(proxyOutbound)) return true
+    // A native connection can select any retained bridge through its balancers.
+    // Respect provider Mux policy; Xray defaults UDP/443 to reject when omitted.
+    const native = getNativeXrayProfile(proxyOutbound)
+    if (native?.outbounds.some(outbound => outbound.mux?.enabled === true &&
+      (!outbound.mux.xudpProxyUDP443 || outbound.mux.xudpProxyUDP443 === 'reject'))) return true
 
     // Some VLESS servers accept the TCP tunnel but do not relay XUDP reliably. Keep QUIC
     // on TCP fallback unless the profile explicitly opts into a known UDP packet encoding.
@@ -1046,12 +1052,14 @@ export function generateSingboxConfig(
     (bootstrapSources ?? []).flatMap((source) => source.ipv4DnsServers)
   )
   const bootstrapPrimaryServer = bootstrapUpstreams[0] || '1.1.1.1'
+  // A local SOCKS listener does not describe the upstream protocol's UDP policy.
+  const udpPolicyOutbound = isDirectVpn && options.xraySocksPort ? upstream.outbound : proxyOutbound
   const quicUdp443BlockRules =
-    shouldBlockQuicUdp443(proxyOutbound, proxyType, isDirectVpn)
-      ? [{ network: 'udp', port: 443, action: 'reject', method: 'drop' }]
+    shouldBlockQuicUdp443(udpPolicyOutbound, proxyType, isDirectVpn)
+      ? [{ network: 'udp', port: 443, action: 'reject', method: 'default' }]
       : []
   const allUdpBlockRules =
-    isTcpOnlyNetworkOutbound(proxyOutbound) && isDirectVpn
+    isTcpOnlyNetworkOutbound(udpPolicyOutbound) && isDirectVpn
       ? [{ network: 'udp', action: 'reject', method: 'drop' }]
       : []
   const needsSniff = true // Always sniff so that SNI and HTTP Host are available for routing and proxying
@@ -3816,7 +3824,6 @@ export const tunController = {
     }
 
     stopProxyWatchdog()
-    await timedStop('stop-xray', () => stopXray('tun stopped')).catch(err => rememberCleanupError('xray process stop', err))
     try {
       // A cancelled early start may never have launched sing-box. Prove that
       // no owned runtime remains after its owner settles before skipping kill.
@@ -3834,6 +3841,9 @@ export const tunController = {
     } catch (err) {
       rememberCleanupError('runtime process stop', err)
     }
+    // Keep the upstream available until sing-box's exit is observed. Otherwise
+    // captured requests race teardown and dial a closed local SOCKS listener.
+    await timedStop('stop-xray', () => stopXray('tun stopped')).catch(err => rememberCleanupError('xray process stop', err))
 
     currentStatus = {
       running: false,

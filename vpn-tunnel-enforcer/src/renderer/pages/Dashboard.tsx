@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { tunnelStartedMessageKey } from '../tunnelMessages'
 import { motion } from 'framer-motion'
 import { PageTip } from '../components/PageTip'
 import { MacCard } from '../design-system/MacCard'
@@ -270,7 +271,7 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
             setVpnIp(result.vpnIp)
             setPublicIp(result.vpnIp, false)
           }
-          addLog('info', 'Защита включена — Direct VPN.')
+          addLog('info', t(tunnelStartedMessageKey(saved.smartRuSplit)))
           if (result.warning) addLog('warn', result.warning)
           // Refresh public IP a bit later so the leak banner clears once
           // the tunnel routes have settled.
@@ -328,7 +329,7 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
             setVpnIp(result.vpnIp)
             setPublicIp(result.vpnIp, false)
           }
-          addLog('info', 'Защита включена — весь трафик идёт через VPN.')
+          addLog('info', t(tunnelStartedMessageKey(saved.smartRuSplit)))
           if (result.warning) addLog('warn', result.warning)
           // Refresh public IP a bit later so the leak banner clears once
           // the tunnel routes have settled.

@@ -4,24 +4,38 @@ import { execFileSync } from 'node:child_process'
 import { DNS_POLICY_SNAPSHOT_SCRIPT, recoveryWorkerFunctions, recoveryWorkerScript } from './recoveryPsProtocol'
 
 const native = process.platform === 'win32' || Boolean(process.env.VPNTE_PWSH)
-function run(request: unknown, variant = 'trusted'): {value: string; set: number; removed: number; queries: number} {
+function run(request: unknown, variant = 'trusted'): {value: string; set: number; removed: number; queries: number; order: string[]} {
   const serialized = Buffer.from(JSON.stringify(request)).toString('base64')
   const fixture = String.raw`
 $global:variant='${variant}'
 $global:sets=0;$global:removed=0;$global:queries=0
+$global:steps=@()
 function Get-CimInstance { [CmdletBinding()]param($ClassName)
   $global:queries++
   if ($ClassName -ne 'Win32_Process') { throw 'Unexpected CIM class' }
   if ($global:variant -eq 'queryError') { throw 'Fixture CIM error' }
   if ($global:variant -eq 'runtimeAbsent') { return }
+  if ($global:variant -eq 'upstreamFirst') {
+    [pscustomobject]@{Name='vpnte-xray.exe';ExecutablePath='C:\VPNTE-fixture-runtime\vpnte-xray.exe';ProcessId=2}
+    [pscustomobject]@{Name='vpnte-sing-box.exe';ExecutablePath='C:\VPNTE-fixture-runtime\vpnte-sing-box.exe';ProcessId=1}
+    return
+  }
   $name=switch($global:variant){ 'ownedSidecar' {'vpnte-etw-sidecar.exe'} 'ownedXray' {'vpnte-xray.exe'} 'wrongName' {'sing-box.exe'} default {'vpnte-sing-box.exe'} }
   $path=switch($global:variant){ 'foreignRuntime' {'C:\foreign\vpnte-sing-box.exe'} 'missingPath' {$null} 'caseRuntime' {'c:\VPNTE-FIXTURE-RUNTIME\vpnte-sing-box.exe'} 'prefixRuntime' {'C:\VPNTE-fixture-runtime-extra\vpnte-sing-box.exe'} default {'C:\VPNTE-fixture-runtime\vpnte-sing-box.exe'} }
   [pscustomobject]@{Name=$name;ExecutablePath=$path;ProcessId=1}
 }
 function Test-Path { [CmdletBinding()]param($LiteralPath) return -not ($global:variant -eq 'storageMissing' -or ($global:variant -eq 'absent' -and $LiteralPath -like '*firewall.json')) }
-function Stop-Process { [CmdletBinding()]param($Id,[switch]$Force)
-  if($Id -ne 1 -or -not $Force){throw 'Unexpected fixture stop'}
+function Stop-Process { [CmdletBinding()]param($Id,[switch]$Force,[switch]$PassThru)
+  if($Id -notin @(1,2) -or -not $Force -or -not $PassThru){throw 'Unexpected fixture stop'}
   if($global:variant -eq 'stopError'){throw 'Fixture stop refused'}
+  $global:steps += 'stop:'+$Id
+  $p=[pscustomobject]@{Id=$Id}
+  $p|Add-Member ScriptMethod WaitForExit { param($timeout)
+    if($timeout -ne 3000){throw 'Unexpected exit deadline'}
+    $global:steps += 'wait:'+$this.Id
+    return $global:variant -ne 'exitTimeout'
+  }
+  $p
 }
 function Get-Item { [CmdletBinding()]param($LiteralPath,[switch]$Force)
   $isFile=$LiteralPath -like '*.json' -or $LiteralPath -like '*tmp-*'
@@ -49,7 +63,7 @@ function Get-NetIPAddress { [CmdletBinding()]param($InterfaceIndex,$AddressFamil
 ${recoveryWorkerFunctions(variant === 'environmentMismatch' ? 'C:\\different-programdata' : process.env.ProgramData || 'C:\\ProgramData')}
 $request=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${serialized}'))|ConvertFrom-Json
 $value=Invoke-RecoveryOperation $request
-[pscustomobject]@{value=$value;set=$global:sets;removed=$global:removed;queries=$global:queries}|ConvertTo-Json -Compress
+[pscustomobject]@{value=$value;set=$global:sets;removed=$global:removed;queries=$global:queries;order=@($global:steps)}|ConvertTo-Json -Compress
 `
   const env = {...process.env}
   for(const key of Object.keys(env))if(key.toLowerCase()==='psmodulepath')delete env[key]
@@ -59,6 +73,15 @@ $value=Invoke-RecoveryOperation $request
   return JSON.parse(stdout.replace(/^\uFEFF/,'').trim())
 }
 describe('fixed recovery dispatcher native proof', () => {
+  it.skipIf(!native)('waits for sing-box before stopping Xray even when CIM lists the upstream first (AT-02-009)', () => {
+    const result = run({ op: 'stop-runtime', runtimeDir: 'C:\\VPNTE-fixture-runtime' }, 'upstreamFirst')
+    expect(result.order).toEqual(['stop:1', 'wait:1', 'stop:2'])
+    expect(JSON.parse(result.value)).toEqual({ candidates: 2, killed: 2, names: ['vpnte-sing-box.exe', 'vpnte-xray.exe'] })
+  }, 20000)
+  it.skipIf(!native)('does not report termination success without consumer exit proof (AT-02-005)', () => {
+    const result = run({ op: 'stop-runtime', runtimeDir: 'C:\\VPNTE-fixture-runtime' }, 'exitTimeout')
+    expect(JSON.parse(result.value)).toEqual({ candidates: 1, killed: 0, names: [] })
+  }, 20000)
   it.skipIf(!native).each([
     ['trusted', 1, 1, ['vpnte-sing-box.exe']], ['ownedSidecar', 1, 1, ['vpnte-etw-sidecar.exe']],
     ['ownedXray', 1, 1, ['vpnte-xray.exe']], ['caseRuntime', 1, 1, ['vpnte-sing-box.exe']],
@@ -88,7 +111,7 @@ describe('fixed recovery dispatcher native proof', () => {
     ['wrongName', 'false'], ['foreignRuntime', 'false'], ['missingPath', 'false'], ['caseRuntime', 'true'],
     ['prefixRuntime', 'true'] // Preserve the conservative legacy prefix: hold, never a false exit.
   ])('fresh runtime observation preserves the legacy predicate: %s', (variant, value) => {
-    expect(run({ op: 'inspect-runtime', runtimeDir: 'C:\\VPNTE-fixture-runtime' }, variant)).toEqual({ value, set: 0, removed: 0, queries: 1 })
+    expect(run({ op: 'inspect-runtime', runtimeDir: 'C:\\VPNTE-fixture-runtime' }, variant)).toEqual({ value, set: 0, removed: 0, queries: 1, order: [] })
   }, 20000)
   it.skipIf(!native)('refuses to confirm runtime exit on a CIM query failure', () => {
     expect(() => run({ op: 'inspect-runtime', runtimeDir: 'C:\\VPNTE-fixture-runtime' }, 'queryError')).toThrow()

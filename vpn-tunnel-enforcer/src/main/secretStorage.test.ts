@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, symlinkSync, readdirSync } from 'fs'
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, symlinkSync, readdirSync, statSync, utimesSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -174,6 +174,56 @@ describe('safeStorage secret references (AT-01-001, AT-01-010)', () => {
     writeFileSync(source, 'PRIVATE-TOKEN'); symlinkSync(source, backup)
     expect(() => protectLegacySecretBackup(backup)).toThrow('artifact')
     expect(readFileSync(source, 'utf8')).toBe('PRIVATE-TOKEN')
+  })
+
+  it('authenticates unchanged encrypted backups once without repeated audit writes (AT-01-001)', () => {
+    directory = mkdtempSync(join(tmpdir(), 'vpnte-backup-cache-'))
+    const backup = join(directory, 'store.bak')
+    writeFileSync(backup, JSON.stringify({ __vpnteEncryptedBackup: 1, contents: encryptSecret('FAKE-SECRET') }))
+    safeStorageMock.decryptString.mockClear()
+    protectLegacySecretBackup(backup)
+    const logs = vi.mocked(logEvent).mock.calls.length
+    for (let i = 0; i < 20; i++) protectLegacySecretBackup(backup)
+    expect(safeStorageMock.decryptString).toHaveBeenCalledTimes(1)
+    expect(logEvent).toHaveBeenCalledTimes(logs)
+  })
+
+  it('rechecks changed encrypted bytes and fails closed on corruption (AT-01-001/010)', () => {
+    directory = mkdtempSync(join(tmpdir(), 'vpnte-backup-cache-'))
+    const backup = join(directory, 'store.bak')
+    const write = (text: string) => writeFileSync(backup, JSON.stringify({ __vpnteEncryptedBackup: 1, contents: encryptSecret(text) }))
+    write('FAKE-FIRST'); protectLegacySecretBackup(backup)
+    const original = statSync(backup)
+    safeStorageMock.decryptString.mockClear()
+    write('FAKE-OTHER')
+    utimesSync(backup, original.atime, original.mtime)
+    expect(statSync(backup).size).toBe(original.size)
+    protectLegacySecretBackup(backup)
+    expect(safeStorageMock.decryptString).toHaveBeenCalledTimes(1)
+    const corrupted = { __vpnteEncryptedBackup: 1, contents: { __vpnteSecretRef: 'vpnte-safe-storage-v1', ciphertext: 'invalid!' } }
+    writeFileSync(backup, JSON.stringify(corrupted))
+    expect(() => protectLegacySecretBackup(backup)).toThrow('encoding')
+    expect(JSON.parse(readFileSync(backup, 'utf8'))).toEqual(corrupted)
+  })
+
+  it('still fails closed when encryption becomes unavailable after a cache hit (AT-01-010)', () => {
+    directory = mkdtempSync(join(tmpdir(), 'vpnte-backup-cache-'))
+    const backup = join(directory, 'store.bak')
+    writeFileSync(backup, JSON.stringify({ __vpnteEncryptedBackup: 1, contents: encryptSecret('FAKE-SECRET') }))
+    protectLegacySecretBackup(backup); protectLegacySecretBackup(backup)
+    safeStorageMock.packaged = true; safeStorageMock.available = false
+    expect(() => protectLegacySecretBackup(backup)).toThrow('unavailable')
+  })
+
+  it('compares actual bytes even when malformed UTF-8 decodes identically (AT-01-001)', () => {
+    directory = mkdtempSync(join(tmpdir(), 'vpnte-backup-cache-'))
+    const backup = join(directory, 'store.bak')
+    const prefix = JSON.stringify({ __vpnteEncryptedBackup: 1, contents: encryptSecret('FAKE-SECRET') }).slice(0, -1)
+    const bytes = (invalid: number) => Buffer.concat([Buffer.from(prefix + ',"extra":"'), Buffer.from([invalid]), Buffer.from('"}')])
+    writeFileSync(backup, bytes(0x80)); protectLegacySecretBackup(backup)
+    safeStorageMock.decryptString.mockClear()
+    writeFileSync(backup, bytes(0x81)); protectLegacySecretBackup(backup)
+    expect(safeStorageMock.decryptString).toHaveBeenCalledTimes(1)
   })
 
 })

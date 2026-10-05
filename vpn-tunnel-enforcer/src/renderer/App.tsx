@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, lazy, Suspense } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import i18n from 'i18next'
+import { tunnelStartedMessageKey } from './tunnelMessages'
 import { applyTerminalTunStatus, useAppStore } from './store'
 import { Sidebar, type SidebarPage } from './components/Sidebar'
 import { FirstRunWizard } from './components/FirstRunWizard'
@@ -205,7 +206,7 @@ export default function App() {
       applyTerminalTunStatus(status)
       if (!tunUp && !isRestarting && !isTransitioning && !isServerSwitching && store.mode === 'hard') store.setMode('off')
       if (status === 'running') {
-        addLog('info', 'Защита включена — весь трафик идёт через VPN.')
+        addLog('info', i18n.t(tunnelStartedMessageKey(store.settings.smartRuSplit)))
       } else if (status === 'stopped') {
         addLog('info', 'Защита выключена. Трафик идёт по обычному маршруту.')
       } else if (isStopping) {

@@ -118,6 +118,7 @@ function gen(
     directProxyPortOverride?: number
     tunnelProbePortOverride?: number
     clashPortOverride?: number
+    xraySocksPort?: number
   } = {}
 ): SingboxConfig {
   return generateSingboxConfig(upstream, proxyType, directProcessNames, options) as unknown as SingboxConfig
@@ -360,6 +361,45 @@ describe('generateSingboxConfig stealth mode', () => {
 })
 
 // ─── UDP blocking ─────────────────────────────────────────────────────────────
+
+describe('Xray bridge UDP policy (AT-02-008 / AT-06-001)', () => {
+  const blockedQuic = (cfg: SingboxConfig) => cfg.route.rules.find(rule => rule.network === 'udp' && rule.port === 443 && rule.action === 'reject')
+  const native = (mux: Record<string, unknown>) => ({ type: 'vless', server: 'example.com', server_port: 443,
+    uuid: 'SYNTHETIC', packet_encoding: 'xudp', vpnte_xray: { version: 1, selectedTag: 'leaf', entry: { outboundTag: 'leaf' },
+      outbounds: [{ tag: 'leaf', protocol: 'vless', mux }] } })
+
+  it.each([
+    { mux: { enabled: true }, blocked: true },
+    { mux: { enabled: true, xudpProxyUDP443: 'reject' }, blocked: true },
+    { mux: { enabled: true, xudpConcurrency: -1, xudpProxyUDP443: 'reject' }, blocked: true },
+    { mux: { enabled: true, xudpProxyUDP443: 'allow' }, blocked: false },
+    { mux: { enabled: true, xudpProxyUDP443: 'skip' }, blocked: false },
+    { mux: { enabled: false, xudpProxyUDP443: 'reject' }, blocked: false }
+  ])('honours retained Mux policy through local SOCKS: $mux', ({ mux, blocked }) => {
+    const outbound = native(mux)
+    const before = structuredClone(outbound)
+    const cfg = gen({ outbound }, 'socks5', [], { xraySocksPort: 50123 })
+    expect(Boolean(blockedQuic(cfg))).toBe(blocked)
+    if (blocked) expect(blockedQuic(cfg)?.method).toBe('default')
+    expect(cfg.route.rules.some(rule => rule.network === 'udp' && rule.port === undefined && rule.action === 'reject')).toBe(false)
+    expect(outbound).toEqual(before)
+  })
+
+  it('keeps conservative VLESS and TCP-only policy behind a SOCKS listener', () => {
+    const ordinary = gen({ outbound: { ...plainTlsOutbound } }, 'socks5', [], { xraySocksPort: 50123 })
+    expect(blockedQuic(ordinary)).toBeDefined()
+    const tcp = gen({ outbound: { ...plainTlsOutbound, network: 'tcp' } }, 'socks5', [], { xraySocksPort: 50123 })
+    const dnsIndex = tcp.route.rules.findIndex(rule => rule.action === 'hijack-dns')
+    const blockIndex = tcp.route.rules.findIndex(rule => rule.network === 'udp' && rule.port === undefined && rule.action === 'reject')
+    expect(blockIndex).toBeGreaterThan(dnsIndex)
+  })
+
+  it('accounts for a rejecting bridge beyond the selected leaf', () => {
+    const outbound = native({ enabled: true, xudpProxyUDP443: 'allow' })
+    outbound.vpnte_xray.outbounds.push({ tag: 'bridge', protocol: 'vless', mux: { enabled: true } })
+    expect(blockedQuic(gen({ outbound }, 'socks5', [], { xraySocksPort: 50123 }))).toBeDefined()
+  })
+})
 
 describe('generateSingboxConfig UDP rules', () => {
   it('blocks all UDP only when a VLESS profile is explicitly TCP-only', () => {

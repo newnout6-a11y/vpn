@@ -46,9 +46,14 @@ $rows = @(Get-CimInstance Win32_Process -ErrorAction Stop |
     $_.ExecutablePath.StartsWith($runtimeDir, [System.StringComparison]::OrdinalIgnoreCase)
   })
 $killed = @()
-foreach ($p in $rows) {
+# The upstream must stay alive until the TUN consumer has exited, regardless
+# of CIM enumeration order. This also applies to orphan/shutdown cleanup.
+foreach ($p in ($rows | Sort-Object { if ($_.Name -ieq 'vpnte-sing-box.exe') { 0 } else { 1 } })) {
   try {
-    Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop
+    $stopped = Stop-Process -Id $p.ProcessId -Force -PassThru -ErrorAction Stop
+    if ($p.Name -ieq 'vpnte-sing-box.exe' -and -not $stopped.WaitForExit(3000)) {
+      throw 'Owned TUN consumer exit was not confirmed'
+    }
     $killed += [pscustomobject]@{name=[string]$p.Name;pid=[int]$p.ProcessId}
   } catch {}
 }
