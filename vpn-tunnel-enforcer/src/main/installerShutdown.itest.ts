@@ -25,7 +25,7 @@ try {
     })
     expect(stdout).toContain(`BOUND_EXIT:${code}`)
   }, 20000)
-  it.each(['success', 'absent', 'timeout', 'exit-zero', 'crash', 'foreign', 'query-error', 'remaining'] as const)('handles %s without forced termination', async scenario => {
+  it.each(['success', 'absent', 'timeout', 'exit-zero', 'crash', 'foreign', 'query-error', 'remaining', 'released-after-polls'] as const)('handles %s without forced termination', async scenario => {
     const script = `
 . '${helperPath.replace(/'/g, "''")}' -InstallDir 'C:\\fixture\\vpn'
 $global:scenario='${scenario}'; $global:queries=0; $global:launched=$false; $global:disposed=$false
@@ -34,7 +34,9 @@ function Get-VpnteProcesses {
   if ($global:scenario -eq 'query-error') { throw 'fixture query failed' }
   if ($global:scenario -eq 'absent') { return }
   if ($global:queries -gt 1) {
-    if ($global:scenario -eq 'remaining') { return [pscustomobject]@{Name='vpnte-xray.exe'} }
+    if ($global:scenario -eq 'remaining' -or ($global:scenario -eq 'released-after-polls' -and $global:queries -lt 4)) {
+      return [pscustomobject]@{Name='vpnte-xray.exe'}
+    }
     return
   }
   $path=if($global:scenario -eq 'foreign') {'C:\\foreign\\VPN Tunnel Enforcer.exe'} else {'C:\\fixture\\vpn\\VPN Tunnel Enforcer.exe'}
@@ -52,17 +54,31 @@ function Start-Process {param($FilePath,$ArgumentList,$ErrorAction)
   if($FilePath -ne 'C:\\fixture\\vpn\\VPN Tunnel Enforcer.exe' -or $ArgumentList -ne '--shutdown-for-update'){throw 'unexpected fixture launch'}
   $global:launched=$true
 }
-# Advance only the residual-process deadline, never touch a real process.
-function Start-Sleep {param($Milliseconds) if($global:scenario -eq 'remaining'){throw 'fixture background process remains'}}
+# Use real sleep so the production poll reaches its deadline; all process data is mocked.
 try { Invoke-VpnteShutdown 'C:\\fixture\\vpn' 1; 'RESULT:success' }
-catch { 'RESULT:refused' }
+catch { 'RESULT:refused'; 'REASON:'+$_.Exception.Message }
 'LAUNCHED:'+$global:launched
 'DISPOSED:'+$global:disposed
+'QUERIES:'+$global:queries
 `
     const { stdout } = await execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], {
       timeout: 10000, windowsHide: true, encoding: 'utf8'
     })
-    expect(stdout).toContain(['success', 'absent'].includes(scenario) ? 'RESULT:success' : 'RESULT:refused')
+    expect(stdout).toContain(['success', 'absent', 'released-after-polls'].includes(scenario) ? 'RESULT:success' : 'RESULT:refused')
+    const reasons: Partial<Record<typeof scenario, string>> = {
+      timeout: 'Client cleanup timed out; update refused.',
+      'exit-zero': 'Client exited without cleanup acknowledgement; update refused.',
+      crash: 'Client exited without cleanup acknowledgement; update refused.',
+      foreign: 'Cannot identify the installed primary client.',
+      'query-error': 'fixture query failed',
+      remaining: 'VPNTE background processes remain; update refused.'
+    }
+    const reason = reasons[scenario]
+    if (reason) expect(stdout).toContain(`REASON:${reason}`)
+    else expect(stdout).not.toContain('REASON:')
+    if (['remaining', 'released-after-polls'].includes(scenario)) {
+      expect(Number(stdout.match(/QUERIES:(\d+)/)?.[1])).toBeGreaterThanOrEqual(4)
+    }
     expect(stdout).toContain(['absent', 'foreign', 'query-error'].includes(scenario) ? 'LAUNCHED:False' : 'LAUNCHED:True')
     expect(stdout).toContain(['absent', 'foreign', 'query-error'].includes(scenario) ? 'DISPOSED:False' : 'DISPOSED:True')
   }, 15000)

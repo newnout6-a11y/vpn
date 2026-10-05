@@ -5,6 +5,8 @@ import { join } from 'path'
 import { promisify } from 'util'
 
 const execFileAsync = promisify(execFile)
+// The receipt remains a cleanup obligation until verified rollback retires it.
+let cleanupPending = false
 
 export interface EnvProxyBackup {
   createdAt: number
@@ -100,9 +102,10 @@ async function deleteUserEnvValue(name: string): Promise<void> {
 async function saveBackupIfMissing(): Promise<void> {
   try {
     parseBackup(await readFile(backupPath(), 'utf8'))
+    cleanupPending = true
     return
   } catch (err: any) {
-    if (err?.code !== 'ENOENT') {
+    if (err?.code !== 'ENOENT' || cleanupPending) {
       throw err
     }
   }
@@ -115,6 +118,7 @@ async function saveBackupIfMissing(): Promise<void> {
     noProxy: await getUserEnvValue('NO_PROXY')
   }
   await writeFile(backupPath(), JSON.stringify(backup, null, 2), 'utf8')
+  cleanupPending = true
 }
 
 export const env = {
@@ -162,23 +166,32 @@ export const env = {
 
   async rollback(): Promise<boolean> {
     try {
-      let backup: EnvProxyBackup | null = null
+      let backup: EnvProxyBackup
       try {
         backup = parseBackup(await readFile(backupPath(), 'utf8'))
+        cleanupPending = true
       } catch {
-        // No backup file found — cannot restore unknown prior environment
+        // Missing or unreadable backup — cannot restore unknown prior environment
         return false
       }
 
       let hasErrors = false
 
-      const restoreOrDelete = async (name: string, value: string | null | undefined) => {
+      const restoreOrDelete = async (name: string, value: string | null) => {
         try {
-          if (value !== null && value !== undefined) {
-            await setUserEnvValue(name, value)
+          if (await getUserEnvValue(name) !== value) {
+            if (value !== null) {
+              await setUserEnvValue(name, value)
+            } else {
+              await deleteUserEnvValue(name)
+            }
+            if (await getUserEnvValue(name) !== value) {
+              throw new Error(`Unable to verify environment restoration for ${name}`)
+            }
+          }
+          if (value !== null) {
             process.env[name] = value
           } else {
-            await deleteUserEnvValue(name)
             delete process.env[name]
           }
         } catch {
@@ -186,17 +199,18 @@ export const env = {
         }
       }
 
-      await restoreOrDelete('HTTP_PROXY', backup?.httpProxy ?? null)
-      await restoreOrDelete('HTTPS_PROXY', backup?.httpsProxy ?? null)
-      await restoreOrDelete('ALL_PROXY', backup?.allProxy ?? null)
-      await restoreOrDelete('NO_PROXY', backup?.noProxy ?? null)
+      await restoreOrDelete('HTTP_PROXY', backup.httpProxy)
+      await restoreOrDelete('HTTPS_PROXY', backup.httpsProxy)
+      await restoreOrDelete('ALL_PROXY', backup.allProxy)
+      await restoreOrDelete('NO_PROXY', backup.noProxy)
 
       if (hasErrors) {
         // Preserve backup file if restore operations failed, so rollback can be retried
         return false
       }
 
-      await unlink(backupPath()).catch(() => undefined)
+      await unlink(backupPath())
+      cleanupPending = false
       await broadcastEnvironmentChanged()
       return true
     } catch {
@@ -205,6 +219,13 @@ export const env = {
   },
 
   async isApplied(): Promise<boolean> {
-    return (await getUserEnvValue('HTTP_PROXY')) !== null
+    try {
+      parseBackup(await readFile(backupPath(), 'utf8'))
+      cleanupPending = true
+      return true
+    } catch (err: any) {
+      if (err?.code === 'ENOENT' && !cleanupPending) return false
+      throw err
+    }
   }
 }
