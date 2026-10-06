@@ -3814,7 +3814,6 @@ export const tunController = {
     ipMonitor.suspend()
     leakMonitorSuspended = true
     cancelLeakSelfTest()
-    stopCompetingTunWatch()
 
     const cleanupErrors: string[] = []
     const rememberCleanupError = (label: string, err: unknown) => {
@@ -3843,6 +3842,7 @@ export const tunController = {
       notifyStatus('error')
       return { success: false, error: currentStatus.warning, networkCleanup }
     }
+    stopCompetingTunWatch()
     stopProxyWatchdog()
     // Keep the upstream available until sing-box's exit is observed. Otherwise
     // captured requests race teardown and dial a closed local SOCKS listener.

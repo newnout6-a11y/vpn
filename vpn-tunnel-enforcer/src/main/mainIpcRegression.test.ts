@@ -179,7 +179,7 @@ describe('main IPC regressions', () => {
     expect(source).toContain("reason: 'unsupported-all'")
   })
 
-  it('stops all external proxies before the main VPN disconnect', () => {
+  it('stops external proxies only after the main VPN stop succeeds', () => {
     const source = mainIndexSource()
     const stopStart = source.indexOf('async function stopProtection(')
     const tunStop = source.indexOf('const result = await tunController.stop()', stopStart)
@@ -187,7 +187,8 @@ describe('main IPC regressions', () => {
 
     expect(stopStart).toBeGreaterThanOrEqual(0)
     expect(proxyStop).toBeGreaterThan(stopStart)
-    expect(proxyStop).toBeLessThan(tunStop)
+    expect(proxyStop).toBeGreaterThan(tunStop)
+    expect(source.indexOf('if (!result.success) return outcome', stopStart)).toBeLessThan(proxyStop)
   })
 
   it('stops all external proxies during application shutdown', () => {
