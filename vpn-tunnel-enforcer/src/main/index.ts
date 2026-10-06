@@ -48,7 +48,7 @@ import {
   rollbackPhysicalAdapterLockdownIfApplied
 } from './physicalAdapterLockdown'
 import { relaunchElevatedIfNeeded } from './admin'
-import { clearAppLog, getFullLogs, logEvent, openLogFolder, type AppLogLevel } from './appLogger'
+import { clearAppLog, getFullLogs, logEvent, openLogFolder, startEngineLogRetention, type AppLogLevel } from './appLogger'
 import { runSystemDiagnostics } from './systemDiagnostics'
 import { combinedPreStartProbe, getRoutingPlan } from './connectionPlanner'
 import { getSmartRouteRuleSetState, maybeRefreshSmartRouteRuleSets, refreshSmartRouteRuleSets } from './ruleSetManager'
@@ -1752,6 +1752,8 @@ async function performCrashRecovery(): Promise<void> {
 Menu.setApplicationMenu(null)
 
 app.whenReady().then(async () => {
+  const stopLogRetention = startEngineLogRetention()
+  app.once('will-quit', () => { void stopLogRetention() })
   // Must run before the first feature calls ipcMain.handle. Wrapping the
   // primitive once prevents future channels from silently omitting the
   // senderFrame/origin checks required by the trusted boundary.

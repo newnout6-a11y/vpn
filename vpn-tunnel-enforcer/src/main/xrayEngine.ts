@@ -344,7 +344,7 @@ export function buildXrayConfig(
     // at Info level — at `warning` the log is silent on every failure and
     // `readRecentXrayOutboundFault` can never see a fault to trigger
     // server-fallback. Matches sing-box's `level: 'info'`. The log is rotated
-    // to xray.prev.log on each start so a long session can't grow it forever.
+    // on startup and bounded during long sessions by engineLogRetention.
     log: {
       loglevel: 'info',
       access: '',
@@ -586,8 +586,7 @@ export async function startXray(
       logEvent('warn', 'xray', message, details)
     })).catch(() => undefined)
 
-    // Rotate the previous run's log so a fresh session starts clean and a long
-    // uptime at `info` verbosity can't grow it unbounded.
+    // Preserve the previous run; engineLogRetention bounds logs during uptime.
     await timed('rotate-log', () => rename(logPath, join(runtimeDir, 'xray.prev.log'))).catch(() => undefined)
 
     const server = String(sbOutbound.server || '')
