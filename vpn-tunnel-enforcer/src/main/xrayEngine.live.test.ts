@@ -9,11 +9,12 @@
  */
 import { describe, it, expect } from 'vitest'
 import { existsSync } from 'fs'
-import { writeFile, mkdtemp, rm } from 'fs/promises'
+import { writeFile, mkdtemp, mkdir, readFile, rm } from 'fs/promises'
 import { spawn } from 'child_process'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { Socket } from 'net'
+import { createServer, Socket, type AddressInfo } from 'net'
+import { once } from 'events'
 import { SocksClient } from 'socks'
 import { toXrayOutbound, buildXrayConfig } from './xrayEngine'
 
@@ -60,6 +61,106 @@ d('xrayEngine live — config validity', () => {
       await rm(dir, { recursive: true, force: true })
     }
   })
+})
+
+// A synthetic ClientHello is enough to exercise Xray's TLS sniffer. This test
+// only forwards bytes between loopback sockets; it does not bypass TLS checks.
+function clientHelloWithSni(name: string): Buffer {
+  const u16 = (n: number) => Buffer.from([n >> 8, n & 255])
+  const host = Buffer.from(name)
+  const entry = Buffer.concat([Buffer.from([0]), u16(host.length), host])
+  const sni = Buffer.concat([u16(entry.length), entry])
+  const extensions = Buffer.concat([u16(0), u16(sni.length), sni])
+  const body = Buffer.concat([
+    Buffer.from([3, 3]), Buffer.alloc(32), Buffer.from([0]),
+    u16(2), Buffer.from([0, 0x2f, 1, 0]), u16(extensions.length), extensions
+  ])
+  const handshake = Buffer.concat([Buffer.from([1, 0]), u16(body.length), body])
+  return Buffer.concat([Buffer.from([22, 3, 1]), u16(handshake.length), handshake])
+}
+
+d('AT-02-008 / AT-06-001: real Xray sniffing preserves the requested endpoint', () => {
+  it.each(['http', 'tls'] as const)('routes by %s domain but retains the original IP and nonstandard port', async (protocol) => {
+    const name = 'search.vpnte-sniff.invalid'
+    const payload = protocol === 'tls' ? clientHelloWithSni(name)
+      : Buffer.from(`GET /search HTTP/1.1\r\nHost: ${name}\r\nConnection: close\r\n\r\n`)
+    const peers = new Set<Socket>()
+    let received = Buffer.alloc(0)
+    const endpoint = createServer(peer => {
+      peers.add(peer)
+      peer.once('close', () => peers.delete(peer))
+      peer.on('data', chunk => {
+        received = Buffer.concat([received, chunk])
+        if (received.length >= payload.length) peer.end('original-endpoint')
+      })
+    })
+    const root = join(process.cwd(), '.tmp')
+    await mkdir(root, { recursive: true })
+    const dir = await mkdtemp(join(root, 'xray-sniff-'))
+    const reservation = createServer()
+    let proc: ReturnType<typeof spawn> | undefined
+    let tunnel: Socket | undefined
+    try {
+      endpoint.listen(0, '127.0.0.1')
+      await once(endpoint, 'listening')
+      const destinationPort = (endpoint.address() as AddressInfo).port
+      reservation.listen(0, '127.0.0.1')
+      await once(reservation, 'listening')
+      const socksPort = (reservation.address() as AddressInfo).port
+      await new Promise<void>(resolve => reservation.close(() => resolve()))
+      const logPath = join(dir, 'xray.log')
+      // The fixture egress is local. Both tags use freedom, and the domain
+      // rule proves sniffing still selects proxy instead of the private-IP rule.
+      const config = buildXrayConfig({ protocol: 'freedom' }, socksPort, { logPath })
+      config.routing.rules.unshift({ type: 'field', domain: [`full:${name}`], outboundTag: 'proxy' })
+      const configPath = join(dir, 'xray.json')
+      await writeFile(configPath, JSON.stringify(config))
+      proc = spawn(XRAY, ['run', '-c', configPath], { cwd: dir, windowsHide: true, stdio: 'ignore' })
+      for (let attempt = 0; attempt < 40; attempt++) {
+        const ready = await new Promise<boolean>(resolve => {
+          const probe = new Socket()
+          const done = (ok: boolean) => { probe.destroy(); resolve(ok) }
+          probe.setTimeout(100)
+          probe.once('connect', () => done(true))
+          probe.once('error', () => done(false))
+          probe.once('timeout', () => done(false))
+          probe.connect(socksPort, '127.0.0.1')
+        })
+        if (ready) break
+        await new Promise(resolve => setTimeout(resolve, 50))
+      }
+      const connected = await SocksClient.createConnection({
+        proxy: { host: '127.0.0.1', port: socksPort, type: 5 }, command: 'connect', timeout: 3000,
+        destination: { host: '127.0.0.1', port: destinationPort }
+      })
+      tunnel = connected.socket
+      const response = await new Promise<string>((resolve, reject) => {
+        let data = ''
+        tunnel!.setTimeout(3000)
+        tunnel!.on('data', chunk => { data += chunk.toString() })
+        tunnel!.once('end', () => resolve(data))
+        tunnel!.once('error', reject)
+        tunnel!.once('timeout', () => reject(new Error('original endpoint did not respond')))
+        tunnel!.write(payload)
+      })
+      expect(response).toBe('original-endpoint')
+      expect(received).toEqual(payload)
+      const log = await readFile(logPath, 'utf8')
+      expect(log).toContain(`sniffed domain: ${name}`)
+      expect(log).toContain('taking detour [proxy]')
+    } finally {
+      tunnel?.destroy()
+      for (const peer of peers) peer.destroy()
+      if (proc && proc.exitCode === null && proc.signalCode === null) {
+        const closed = once(proc, 'close')
+        proc.kill()
+        await closed
+      }
+      await new Promise<void>(resolve => endpoint.close(() => resolve()))
+      if (reservation.listening) await new Promise<void>(resolve => reservation.close(() => resolve()))
+      await rm(dir, { recursive: true, force: true })
+    }
+  }, 15000)
 })
 
 const LIVE_URI = process.env.VPNTE_LIVE_XRAY_URI

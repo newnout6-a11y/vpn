@@ -361,7 +361,10 @@ export function buildXrayConfig(
         },
         sniffing: {
           enabled: true,
-          destOverride: ['tls', 'http', 'quic']
+          destOverride: ['tls', 'http', 'quic'],
+          // Browser proxies can carry a different TLS SNI / HTTP Host. Use it
+          // for routing without replacing the requested proxy endpoint.
+          routeOnly: true
         }
       }
     ],
