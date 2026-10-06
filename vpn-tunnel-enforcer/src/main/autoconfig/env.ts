@@ -211,8 +211,8 @@ export const env = {
         return false
       }
 
-      await unlink(backupPath())
       await unlink(`${backupPath()}.pending`)
+      await unlink(backupPath())
       cleanupPending = false
       await broadcastEnvironmentChanged()
       return true

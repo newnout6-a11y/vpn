@@ -328,7 +328,7 @@ describe('env autoconfig backup and verified rollback', () => {
     expect(mockRegistry).toEqual(vpnValues)
   })
 
-  it('retains pending cleanup across restart when marker retirement fails after verified restoration', async () => {
+  it('retains retryable cleanup across restart when marker retirement fails after verified restoration', async () => {
     seedRegistry(originalValues)
     expect(await env.apply('127.0.0.1:10808')).toBe(true)
     const remove = vi.mocked(unlink).getMockImplementation()!
@@ -339,9 +339,17 @@ describe('env autoconfig backup and verified rollback', () => {
     expect(await env.rollback()).toBe(false)
     expect(mockRegistry).toEqual(originalValues)
     expect(mockFs[pendingFile]).toBeDefined()
+    expect(mockFs[backupFile]).toBeDefined()
     vi.resetModules()
     env = (await import('./env')).env
-    await expect(env.isApplied()).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await env.isApplied()).toBe(true)
+    vi.mocked(unlink).mockImplementation(remove)
+    mockExecFile.mockClear()
+    expect(await env.rollback()).toBe(true)
+    expect(mutations()).toEqual([])
+    expect(mockFs[pendingFile]).toBeUndefined()
+    expect(mockFs[backupFile]).toBeUndefined()
+    expect(await env.isApplied()).toBe(false)
   })
 
   it.each(['EACCES', 'EPERM', 'EIO'])('fails closed on backup read error %s without registry access', async (code) => {
@@ -474,7 +482,10 @@ describe('env autoconfig backup and verified rollback', () => {
   it.each(['denied', 'vanished'])('retains the obligation when receipt unlink is %s', async (failure) => {
     const receipt = saveBackup(originalValues)
     seedRegistry(vpnValues)
-    vi.mocked(unlink).mockImplementationOnce(async () => {
+    const remove = vi.mocked(unlink).getMockImplementation()!
+    vi.mocked(unlink).mockImplementation(async path => {
+      if (path !== backupFile) return remove(path)
+      vi.mocked(unlink).mockImplementation(remove)
       if (failure === 'vanished') delete mockFs[backupFile]
       throw fileError(failure === 'denied' ? 'EACCES' : 'ENOENT')
     })
@@ -482,7 +493,11 @@ describe('env autoconfig backup and verified rollback', () => {
     expect(mockRegistry).toEqual(originalValues)
     if (failure === 'denied') {
       expect(mockFs[backupFile]).toBe(receipt)
+      expect(mockFs[pendingFile]).toBeUndefined()
+      vi.resetModules()
+      env = (await import('./env')).env
       expect(await env.isApplied()).toBe(true)
+      expect(mockFs[pendingFile]).toBeDefined()
     } else {
       for (let retry = 0; retry < 2; retry++) await expect(env.isApplied()).rejects.toMatchObject({ code: 'ENOENT' })
       expect(await env.rollback()).toBe(false)
