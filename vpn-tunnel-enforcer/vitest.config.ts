@@ -10,9 +10,34 @@ export default defineConfig(({ mode }) => ({
   },
   test: {
     globals: true,
-    environment: mode === 'integration' ? 'node' : 'jsdom',
+    maxWorkers: 2,
+    isolate: true,
+    environment: 'node',
     setupFiles: [],
-    include: mode === 'integration' ? ['src/**/*.itest.ts'] : ['src/**/*.{test,spec}.{ts,tsx}'],
+    // Keep the inherited include empty: Vite merges project include arrays.
+    include: mode === 'integration' ? ['src/**/*.itest.ts'] : [],
+    ...(mode === 'integration' ? {} : {
+      projects: [
+        {
+          extends: true,
+          test: {
+            name: 'node',
+            environment: 'node',
+            include: ['src/**/*.{test,spec}.{ts,tsx}'],
+            exclude: ['src/renderer/**', 'src/main/recoveryManifestStorage.test.ts']
+          }
+        },
+        {
+          extends: true,
+          test: {
+            name: 'jsdom',
+            environment: 'jsdom',
+            // This native fixture relies on jsdom's child_process mock resolution.
+            include: ['src/renderer/**/*.{test,spec}.{ts,tsx}', 'src/main/recoveryManifestStorage.test.ts']
+          }
+        }
+      ]
+    }),
     coverage: {
       provider: 'v8',
       reporter: ['text', 'lcov'],

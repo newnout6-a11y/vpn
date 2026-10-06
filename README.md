@@ -142,10 +142,11 @@ npm run dev        # из корня репозитория тоже работ�
 
 ## Тесты
 
-Последний локальный Windows-прогон (04.10.2026): **206 файлов passed / 2 skipped; 2459 тестов passed / 10 skipped / 0 failed**. Отдельно выполнены native Electron smoke и локальные подмножества WP-1. Пропущенные/VM-проверки не считаются PASS; актуальные итоги — вывод `npm test` и [отчёт WP-1](vpn-tunnel-enforcer/docs/wp1-security-acceptance-2026-10-04.md).
+Последний локальный Windows-прогон (05.10.2026): **211 файлов passed / 2 skipped; 2613 тестов passed / 10 skipped / 0 failed**, 151.22 с с двумя workers. Native Electron smoke и локальные подмножества WP-1 выполнены ранее и в этом прогоне не повторялись. Пропущенные/VM-проверки не считаются PASS; актуальные итоги — вывод `npm test`, [журнал прогресса](progress.md) и [отчёт WP-1](vpn-tunnel-enforcer/docs/wp1-security-acceptance-2026-10-04.md).
 
 ```bash
 npm test                                            # полный набор
+npm --prefix vpn-tunnel-enforcer test -- --maxWorkers=1 # минимальная одновременная нагрузка
 npm --prefix vpn-tunnel-enforcer run test:watch     # watch-режим
 npm --prefix vpn-tunnel-enforcer run test:coverage  # покрытие
 npm run typecheck                                   # tsc --noEmit
@@ -153,6 +154,8 @@ npm --prefix vpn-tunnel-enforcer run test:wp1:fuzz   # полный бюджет
 npm --prefix vpn-tunnel-enforcer run test:wp1:native # build + изолированные native subsets, без clipboard
 npm --prefix vpn-tunnel-enforcer run test:wp1:migration:local # DPAPI/store на Electron 44, не 42→44
 ```
+
+Обычный запуск ограничен двумя workers с сохранением изоляции файлов. Тесты main/shared/preload выполняются в Node.js, renderer — в jsdom. Native-фикстура `recoveryManifestStorage.test.ts` сохраняет jsdom из-за различий разрешения mock `child_process`. Режим `integration` по-прежнему собирает только `*.itest.ts` в Node.js; бюджеты fuzz и настройки coverage сохранены. `testRunnerConfig.test.ts` проверяет через реальную коллекцию Vitest, что файлы не потеряны и не дублируются, а окружения и изоляция соответствуют этим условиям.
 
 Полная cross-version проверка `test:wp1:migration` требует пути к настоящему Electron 42 в `VPNTE_ELECTRON42_EXE`; без него выводит `NOT-CHECKED` и завершается с кодом 77.
 

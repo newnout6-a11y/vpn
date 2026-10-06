@@ -1,4 +1,4 @@
-param([switch]$RegisterTask)
+param([switch]$RegisterTask, [switch]$UnregisterTask)
 # VPN Tunnel Enforcer — Boot-time Network Recovery
 # Runs via scheduled task at system startup (before user logon).
 # Recovers from a BSOD/crash that left the firewall blocking, DNS pinned,
@@ -89,6 +89,33 @@ function Resolve-RecoveryPrincipalSid([string]$userId) {
         $account = New-Object Security.Principal.NTAccount($userId)
         return $account.Translate([Security.Principal.SecurityIdentifier]).Value
     } catch { throw 'Recovery task read-back mismatch: principal account cannot be resolved' }
+}
+function Get-BootRecoveryTaskOrNull {
+    try { return Get-ScheduledTask -TaskName 'BootRecoveryTask' -TaskPath '\VPNTE\' -ErrorAction Stop }
+    catch {
+        if ($_.CategoryInfo.Category -eq [Management.Automation.ErrorCategory]::ObjectNotFound) { return $null }
+        throw
+    }
+}
+function Remove-BootRecoveryTask([string]$RecoveryScript) {
+    $task = Get-BootRecoveryTaskOrNull
+    if (-not $task) { return }
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes("& '" + $RecoveryScript.Replace("'", "''") + "'"))
+    $expectedArguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ' + $encoded
+    $expectedExe = "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe"
+    if (@($task.Actions).Count -ne 1 -or $task.Actions.Execute -ne $expectedExe -or $task.Actions.Arguments -ne $expectedArguments -or (Resolve-RecoveryPrincipalSid $task.Principal.UserId) -ne 'S-1-5-18') {
+        throw 'Refusing to remove a recovery task not owned by this installation'
+    }
+    Unregister-ScheduledTask -TaskName 'BootRecoveryTask' -TaskPath '\VPNTE\' -Confirm:$false -ErrorAction Stop
+    if (Get-BootRecoveryTaskOrNull) { throw 'Recovery task removal could not be verified' }
+}
+if ($UnregisterTask) {
+    try {
+        if ($RegisterTask) { throw 'Task registration and removal are mutually exclusive' }
+        Remove-BootRecoveryTask $PSCommandPath
+        Write-Output 'RECOVERY_TASK_REMOVED'
+        exit 0
+    } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }
 }
 # Registration is used by both the installer and application repair path.
 if ($RegisterTask) {

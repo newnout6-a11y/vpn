@@ -35,11 +35,18 @@ describe('privileged TUN log cleanup', () => {
     mkdirSync(runtime, { recursive: true })
     writeFileSync(join(runtime, 'sing-box.log'), 'current')
     writeFileSync(join(runtime, 'sing-box.prev.log'), 'previous')
-    const { clearAppLog } = await import('./appLogger')
-    await clearAppLog()
-    expect(acl).toHaveBeenCalledExactlyOnceWith(runtime)
-    expect(readFileSync(join(runtime, 'sing-box.log'), 'utf8')).toBe('')
-    expect(existsSync(join(runtime, 'sing-box.prev.log'))).toBe(false)
+    writeFileSync(join(runtime, 'xray.log'), 'current xray')
+    writeFileSync(join(runtime, 'xray.prev.log'), 'previous xray')
+    const { clearAppLog, startEngineLogRetention } = await import('./appLogger')
+    const stop = startEngineLogRetention()
+    try {
+      await clearAppLog()
+      expect(acl).toHaveBeenCalledExactlyOnceWith(runtime)
+      expect(readFileSync(join(runtime, 'sing-box.log'), 'utf8')).toBe('')
+      expect(existsSync(join(runtime, 'sing-box.prev.log'))).toBe(false)
+      expect(readFileSync(join(runtime, 'xray.log'), 'utf8')).toBe('')
+      expect(existsSync(join(runtime, 'xray.prev.log'))).toBe(false)
+    } finally { await stop() }
   })
 
   it('refuses untrusted runtime writes without poisoning a later cleanup attempt', async () => {

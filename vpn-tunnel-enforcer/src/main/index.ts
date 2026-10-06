@@ -48,7 +48,7 @@ import {
   rollbackPhysicalAdapterLockdownIfApplied
 } from './physicalAdapterLockdown'
 import { relaunchElevatedIfNeeded } from './admin'
-import { clearAppLog, getFullLogs, logEvent, openLogFolder, type AppLogLevel } from './appLogger'
+import { clearAppLog, getFullLogs, logEvent, openLogFolder, startEngineLogRetention, type AppLogLevel } from './appLogger'
 import { runSystemDiagnostics } from './systemDiagnostics'
 import { combinedPreStartProbe, getRoutingPlan } from './connectionPlanner'
 import { getSmartRouteRuleSetState, maybeRefreshSmartRouteRuleSets, refreshSmartRouteRuleSets } from './ruleSetManager'
@@ -255,11 +255,11 @@ function writeSessionEntry(s: LiveSession, stats: TrafficStats, outcome: Session
 }
 
 /** Write the current session to history and clear it. No-op if none is open. */
-function closeSession(outcome: SessionOutcome): void {
+function closeSession(outcome: SessionOutcome, stats: TrafficStats = trafficMonitor.getCurrentStats()): void {
   const s = currentSession
   currentSession = null
   if (!s) return
-  writeSessionEntry(s, trafficMonitor.getCurrentStats(), outcome)
+  writeSessionEntry(s, stats, outcome)
 }
 
 const OUTBOUND_FAULT_HINT = /прокси .*не отвеч|proxy .*(unreachable|not answ)|не отвечает/i
@@ -1031,6 +1031,7 @@ function trayStatusFromTunStatus(status: string): TrayStatus {
   if (status === 'proxy-down') return 'proxy-down'
   if (status === 'killswitch-active') return 'killswitch'
   if (status.startsWith('restarting:')) return 'restarting'
+  if (tunController.getStatus().running) return 'proxy-down'
   return 'off'
 }
 
@@ -1564,21 +1565,19 @@ async function stopProtection(
 ): Promise<{ success: boolean; error?: string; warning?: string }> {
   return connectionLifecycle.stop(async () => {
   adaptiveVerificationGeneration += 1
+  // Capture counters before status listeners reset them; close history only after exit.
+  const endingStats = currentSession ? trafficMonitor.getCurrentStats() : undefined
+  const endingOutcome = currentSession ? makeOutcome(stopKind, {
+    ...sessionEgressEvidence(), leakDetectedDuringSession: currentSession.leakDetected
+  }) : null
+  stopInProgress = true
+  const result = await tunController.stop().finally(() => { stopInProgress = false })
+  // Keep internal cleanup evidence inside main; IPC exposes the user outcome.
+  const { networkCleanup: _cleanup, ...outcome } = result
+  if (!result.success) return outcome
+  if (endingOutcome) closeSession(endingOutcome, endingStats)
   await rollbackSoftAutoconfigIfApplied('protection stop')
   activeAdaptiveContext = null
-  // Record the connection BEFORE we stop, so traffic counters are still valid.
-  // `stopInProgress` ensures the status-change handler doesn't double-record
-  // when tunController emits 'stopped' as a result of the call below.
-  stopInProgress = true
-  if (currentSession) {
-    const leak = currentSession.leakDetected
-    closeSession(
-      makeOutcome(stopKind, {
-        ...sessionEgressEvidence(),
-        leakDetectedDuringSession: leak
-      })
-    )
-  }
 
   stopPeriodicSnapshots()
   stopPeriodicLeakTest()
@@ -1589,15 +1588,13 @@ async function stopProtection(
     logEvent('warn', 'app', 'failed to stop traffic forensics session', err)
   })
 
-  // External proxies are tied to the VPN session. Stop them first, so they
-  // cannot remain available while the main TUN is still rolling back.
+  // External proxies are tied to the VPN session; retain them if its stop failed.
   try {
     await externalProxy.stopAll('vpn-stop')
   } catch (err) {
-    logEvent('warn', 'external-proxy', 'failed to stop proxies before VPN stop', err)
+    logEvent('warn', 'external-proxy', 'failed to stop proxies after VPN stop', err)
   }
 
-  const result = await tunController.stop()
   ipMonitor.clearVpnIp()
   trafficMonitor.stop()
   if (!result.networkCleanup?.adapters) {
@@ -1627,9 +1624,6 @@ async function stopProtection(
 
   refreshTrayState({ status: 'off', restartingProgress: null })
   captureSnapshot('tun-post-stop').catch(() => undefined)
-  stopInProgress = false
-  // Keep internal cleanup evidence inside main; IPC exposes the user outcome.
-  const { networkCleanup: _cleanup, ...outcome } = result
   return outcome
   })
 }
@@ -1752,6 +1746,8 @@ async function performCrashRecovery(): Promise<void> {
 Menu.setApplicationMenu(null)
 
 app.whenReady().then(async () => {
+  const stopLogRetention = startEngineLogRetention()
+  app.once('will-quit', () => { void stopLogRetention() })
   // Must run before the first feature calls ipcMain.handle. Wrapping the
   // primitive once prevents future channels from silently omitting the
   // senderFrame/origin checks required by the trusted boundary.
@@ -2637,7 +2633,7 @@ app.whenReady().then(async () => {
     if (status === 'running' || status === 'proxy-down') {
       trafficMonitor.start()
       startTrafficConnectionSampler()
-    } else {
+    } else if (!tunController.getStatus().running) {
       trafficMonitor.stop()
       stopTrafficConnectionSampler()
       // Stop traffic forensics session if it was running (status became stopped/killswitch-active/restarting)
@@ -2695,19 +2691,38 @@ async function performShutdownCleanup(reason: string): Promise<void> {
   })
   logEvent('info', 'app', `shutdown cleanup started: ${reason}`)
 
-  // Close any live session as an app-quit BEFORE tunController.stop() emits
-  // 'stopped' (which the status handler would otherwise log as a crash).
-  if (currentSession) {
-    stopInProgress = true
-    closeSession(makeOutcome('app-quit', sessionEgressEvidence()))
-  }
-
+  const endingStats = currentSession ? trafficMonitor.getCurrentStats() : undefined
+  const endingOutcome = currentSession ? makeOutcome('app-quit', sessionEgressEvidence()) : null
+  stopInProgress = true
   let networkCleanup: NetworkCleanupReceipt | undefined
+  let runtimeStopped = false
   try {
-    const stopped = await tunController.stop()
-    networkCleanup = stopped.networkCleanup
-  } catch (err) {
-    logEvent('warn', 'app', 'tunController.stop during shutdown failed', err)
+    try {
+      const stopped = await tunController.stop()
+      networkCleanup = stopped.networkCleanup
+      runtimeStopped = stopped.success
+      if (!stopped.success) throw new Error(stopped.error || 'owned runtime stop unconfirmed')
+    } catch (err) {
+      logEvent('warn', 'app', 'tunController.stop during shutdown failed', err)
+    }
+
+    try {
+      const runtime = await killOwnedTunRuntimeProcesses()
+      if (!runtime.success || runtime.killed < runtime.candidates || await isOwnedTunRuntimeRunning(true)) {
+        throw new Error('owned runtime stop unconfirmed')
+      }
+      if (!runtimeStopped) {
+        const stopped = await tunController.stop()
+        if (!stopped.success) throw new Error(stopped.error || 'owned runtime stop unconfirmed')
+        networkCleanup = stopped.networkCleanup
+      }
+    } catch (err) {
+      logEvent('warn', 'app', 'owned runtime exit during shutdown unconfirmed', err)
+      throw new Error('ShutdownCleanupUnconfirmed: runtime', { cause: err })
+    }
+    if (endingOutcome) closeSession(endingOutcome, endingStats)
+  } finally {
+    stopInProgress = false
   }
 
   try {
@@ -2715,14 +2730,6 @@ async function performShutdownCleanup(reason: string): Promise<void> {
   } catch (err) {
     failedSteps.push('xray')
     logEvent('warn', 'app', 'stopXray during shutdown failed', err)
-  }
-
-  try {
-    const runtime = await killOwnedTunRuntimeProcesses()
-    if (!runtime.success || runtime.killed < runtime.candidates) throw new Error('owned runtime stop unconfirmed')
-  } catch (err) {
-    failedSteps.push('runtime')
-    logEvent('warn', 'app', 'killOwnedTunRuntimeProcesses during shutdown failed', err)
   }
 
   try {

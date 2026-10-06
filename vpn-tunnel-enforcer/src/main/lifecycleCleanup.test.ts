@@ -9,10 +9,11 @@ import { ConnectionLifecycle } from './connectionLifecycle'
 
 function body(file: string, name: string): string {
   const source = ts.createSourceFile(file, readFileSync(join(process.cwd(), 'src/main', file), 'utf8'), ts.ScriptTarget.Latest, true)
-  let found: ts.FunctionDeclaration | ts.MethodDeclaration | ts.VariableDeclaration | undefined
+  let found: ts.FunctionDeclaration | ts.MethodDeclaration | ts.VariableDeclaration | ts.ArrowFunction | undefined
   function visit(node: ts.Node) {
     if ((ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node)) && node.name?.getText(source) === name) found = node
     if (ts.isVariableDeclaration(node) && node.name.getText(source) === name && node.initializer && ts.isArrowFunction(node.initializer)) found = node
+    if (ts.isCallExpression(node) && node.expression.getText(source) === name && node.arguments[0] && ts.isArrowFunction(node.arguments[0])) found = node.arguments[0]
     ts.forEachChild(node, visit)
   }
   visit(source)
@@ -88,18 +89,21 @@ describe('protected restart readiness (AT-02-002/004/005 / AT-00-003)', () => {
 })
 
 function stopHarness(startupController: AbortController | null = null, startupCompletion: Promise<void> | null = null) {
+  const state = { runtime: true, upstream: true, watchdog: true, competing: true, baseline: true, firewall: true, adapters: true }
   const os = {
     startupController,
     startupCompletion,
     isOwnedTunRuntimeRunning: vi.fn(async () => false),
-    stopXray: done(), killOwnedRuntimeProcesses: done(), waitForOwnedRuntimeToExit: vi.fn(async () => true),
-    rollbackTunNetworkBaselineIfApplied: vi.fn(async () => ({ success: true, message: 'restored' })),
-    disableKillSwitchIfActive: vi.fn(async () => ({ success: true, message: 'restored' })),
-    rollbackPhysicalAdapterLockdownIfApplied: vi.fn(async (): Promise<{ rolledBack: boolean; skipped?: boolean }> => ({ rolledBack: true })),
+    stopXray: vi.fn(async () => { state.upstream = false }), killOwnedRuntimeProcesses: done(),
+    waitForOwnedRuntimeToExit: vi.fn(async () => { state.runtime = false; return true }),
+    rollbackTunNetworkBaselineIfApplied: vi.fn(async () => { state.baseline = false; return { success: true, message: 'restored' } }),
+    disableKillSwitchIfActive: vi.fn(async () => { state.firewall = false; return { success: true, message: 'restored' } }),
+    rollbackPhysicalAdapterLockdownIfApplied: vi.fn(async (): Promise<{ rolledBack: boolean; skipped?: boolean }> => { state.adapters = false; return { rolledBack: true } }),
     repairOrphanedPhysicalAdapterDns: vi.fn(async () => ({ repaired: false, adapters: [] })),
     ipMonitor: { suspend: noop(), resume: noop() },
     logEvent: noop(), notify: noop(), notifyStatus: noop(), recordForensicTunEvent: noop(),
-    clearRestartTimers: noop(), cancelLeakSelfTest: noop(), stopCompetingTunWatch: noop(), stopProxyWatchdog: noop()
+    clearRestartTimers: noop(), cancelLeakSelfTest: noop(), stopCompetingTunWatch: vi.fn(() => { state.competing = false }),
+    stopProxyWatchdog: vi.fn(() => { state.watchdog = false })
   }
   const stop = compile<((options?: { preserveNetworkProtection?: boolean }) => Promise<any>) & { setRunning(running: boolean): void }>(`
 let startInProgress=false,stopRequested=false,stopInProgress=false,userInitiatedStop=false,activeStartAbortController=startupController;
@@ -109,13 +113,14 @@ let currentStatus={running:true,mode:'directVpn'},clashApiInfo=null,directProxyP
 const controller = {${body('tunController.ts', 'stop')}};
 return Object.assign(controller.stop.bind(controller), { setRunning: (running) => { currentStatus.running = running } });
 `, os)
-  return { stop, ...os }
+  return { stop, ...os, state }
 }
-function mainHarness(name: 'performShutdownCleanup' | 'stopProtection') {
+function mainHarness(name: 'performShutdownCleanup' | 'stopProtection', session: object | null = null) {
   const os = {
     connectionLifecycle: new ConnectionLifecycle(() => {}),
     tunController: { stop: vi.fn(async (): Promise<any> => ({ success: true, networkCleanup: { baseline: true, firewall: true, adapters: true } })) },
     clearOwnedSecretClipboard: done(), stopXray: done(),
+    isOwnedTunRuntimeRunning: vi.fn(async () => false),
     killOwnedTunRuntimeProcesses: vi.fn(async () => ({ success: true, candidates: 0, killed: 0, names: [] })), externalProxy: { stopAll: done() },
     rollbackTunNetworkBaselineIfApplied: vi.fn(async () => ({ success: true })),
     disableKillSwitchIfActive: vi.fn(async () => ({ success: true })),
@@ -125,14 +130,16 @@ function mainHarness(name: 'performShutdownCleanup' | 'stopProtection') {
     stopServerGroupAutoRefresh: noop(), stopBackgroundTrafficHistory: noop(), stopTrafficConnectionSampler: noop(),
     rollbackSoftAutoconfigIfApplied: done(), stopPeriodicSnapshots: noop(), stopPeriodicLeakTest: noop(), stopNetworkChangeWatcher: noop(),
     stopTrafficForensicsSession: vi.fn(async (): Promise<any> => ({ running: false, cleanupPending: false })),
-    ipMonitor: { clearVpnIp: noop() }, trafficMonitor: { stop: noop() },
+    ipMonitor: { clearVpnIp: noop() }, trafficMonitor: { stop: noop(), getCurrentStats: vi.fn(() => ({ downloadBytes: 123 })) },
+    session, sessionEgressEvidence: () => ({ egressIp: '203.0.113.1' }), makeOutcome: (kind: string, evidence: object) => ({ kind, evidence }), writeSessionEntry: noop(),
     getLocationPrivacyStatus: vi.fn(async () => ({ applied: false })), rollbackLocationPrivacy: done(),
     settingsStore: { save: noop() }, refreshTrayState: noop(), captureSnapshot: done()
   }
-  const run = compile<(reason?: string) => Promise<any>>(`
-let shutdownInProgress=false,currentSession=null,stopInProgress=false,adaptiveVerificationGeneration=0,activeAdaptiveContext=null;
+  const run = compile<((reason?: string) => Promise<any>) & { state(): { session: object | null; stopping: boolean } }>(`
+let shutdownInProgress=false,currentSession=session,stopInProgress=false,adaptiveVerificationGeneration=0,activeAdaptiveContext=null;
+${body('index.ts', 'closeSession')}
 ${body('index.ts', name)}
-return ${name};
+return Object.assign(${name}, {state:()=>({session:currentSession,stopping:stopInProgress})});
 `, os)
   return { run, ...os }
 }
@@ -167,6 +174,111 @@ return {start:()=>controller.start('127.0.0.1:1080'),state:()=>({starting:startI
 }
 
 describe('lifecycle cleanup evidence and retries (AT-02-005 / AT-03-007)', () => {
+  it.each(['refused', 'thrown'])('manual stop retains the live session and monitoring when %s, then allows retry (AT-02-009)', async failure => {
+    const session = { leakDetected: false }
+    const h = mainHarness('stopProtection', session)
+    if (failure === 'thrown') h.tunController.stop.mockRejectedValueOnce(new Error('stop failed'))
+    else h.tunController.stop.mockResolvedValueOnce({ success: false, error: 'exit unconfirmed', networkCleanup: { adapters: false } })
+    if (failure === 'thrown') await expect(h.run()).rejects.toThrow('stop failed')
+    else expect(await h.run()).toEqual({ success: false, error: 'exit unconfirmed' })
+    expect(h.run.state()).toEqual({ session, stopping: false })
+    for (const step of [h.writeSessionEntry, h.rollbackSoftAutoconfigIfApplied, h.externalProxy.stopAll, h.stopPeriodicSnapshots, h.stopPeriodicLeakTest, h.stopNetworkChangeWatcher, h.stopTrafficForensicsSession, h.ipMonitor.clearVpnIp, h.trafficMonitor.stop, h.repairOrphanedPhysicalAdapterDns, h.getLocationPrivacyStatus, h.refreshTrayState]) expect(step).not.toHaveBeenCalled()
+    expect(await h.run()).toMatchObject({ success: true })
+    expect(h.writeSessionEntry).toHaveBeenCalledOnce()
+    expect(h.run.state()).toEqual({ session: null, stopping: false })
+  })
+  it.each(['stopProtection', 'performShutdownCleanup'] as const)('waits to close history and clean up in %s, preserving pre-stop counters (AT-02-009)', async name => {
+    const session = { leakDetected: false }, h = mainHarness(name, session)
+    let release!: () => void
+    h.tunController.stop.mockImplementationOnce(() => new Promise(resolve => {
+      release = () => { h.trafficMonitor.getCurrentStats.mockReturnValue({ downloadBytes: 0 }); resolve({ success: true }) }
+    }))
+    const pending = h.run('test')
+    await vi.waitFor(() => expect(h.tunController.stop).toHaveBeenCalledOnce())
+    try {
+      expect(h.run.state()).toEqual({ session, stopping: true })
+      for (const step of [h.writeSessionEntry, h.externalProxy.stopAll, h.stopPeriodicSnapshots, h.stopTrafficForensicsSession, h.repairOrphanedPhysicalAdapterDns]) expect(step).not.toHaveBeenCalled()
+    } finally { release(); await pending }
+    expect(h.writeSessionEntry).toHaveBeenCalledWith(session, { downloadBytes: 123 }, expect.objectContaining({ kind: name === 'stopProtection' ? 'test' : 'app-quit' }))
+    expect(h.run.state()).toEqual({ session: null, stopping: false })
+  })
+  it.each(['refused', 'thrown'])('shutdown fallback requires fresh exit proof after controller stop is %s (AT-11-002)', async failure => {
+    const h = mainHarness('performShutdownCleanup')
+    if (failure === 'thrown') h.tunController.stop.mockRejectedValueOnce(new Error('stop failed'))
+    else h.tunController.stop.mockResolvedValueOnce({ success: false, error: 'exit unconfirmed' })
+    h.tunController.stop.mockResolvedValueOnce({ success: true, networkCleanup: { baseline: false, firewall: false, adapters: false } })
+    await h.run('test')
+    expect(h.isOwnedTunRuntimeRunning).toHaveBeenCalledExactlyOnceWith(true)
+    expect(h.killOwnedTunRuntimeProcesses.mock.invocationCallOrder[0]).toBeLessThan(h.isOwnedTunRuntimeRunning.mock.invocationCallOrder[0])
+    expect(h.tunController.stop).toHaveBeenCalledTimes(2)
+    expect(h.isOwnedTunRuntimeRunning.mock.invocationCallOrder[0]).toBeLessThan(h.tunController.stop.mock.invocationCallOrder[1])
+    for (const step of [h.stopXray, h.rollbackTunNetworkBaselineIfApplied, h.disableKillSwitchIfActive, h.rollbackPhysicalAdapterLockdownIfApplied]) expect(h.isOwnedTunRuntimeRunning.mock.invocationCallOrder[0]).toBeLessThan(step.mock.invocationCallOrder[0])
+  })
+  it.each(['refused', 'thrown'])('refuses shutdown if the controller still reports %s after native exit proof (AT-11-002)', async failure => {
+    const h = mainHarness('performShutdownCleanup', { leakDetected: false })
+    h.tunController.stop.mockResolvedValueOnce({ success: false, error: 'exit unconfirmed' })
+    if (failure === 'thrown') h.tunController.stop.mockRejectedValueOnce(new Error('stop failed again'))
+    else h.tunController.stop.mockResolvedValueOnce({ success: false, error: 'stop failed again' })
+    await expect(h.run('test')).rejects.toThrow('ShutdownCleanupUnconfirmed: runtime')
+    for (const step of [h.writeSessionEntry, h.stopXray, h.disableKillSwitchIfActive, h.repairOrphanedPhysicalAdapterDns, h.stopRecoveryPsWorker]) expect(step).not.toHaveBeenCalled()
+    expect(h.run.state().stopping).toBe(false)
+  })
+  it.each(['alive', 'unknown'])('refuses shutdown after acknowledged native stop when runtime is %s (AT-11-002)', async state => {
+    const session = { leakDetected: false }, h = mainHarness('performShutdownCleanup', session)
+    h.tunController.stop.mockResolvedValueOnce({ success: false, error: 'exit unconfirmed' })
+    if (state === 'alive') h.isOwnedTunRuntimeRunning.mockResolvedValueOnce(true)
+    else h.isOwnedTunRuntimeRunning.mockRejectedValueOnce(new Error('query denied'))
+    await expect(h.run('test')).rejects.toThrow('ShutdownCleanupUnconfirmed: runtime')
+    expect(h.run.state()).toEqual({ session, stopping: false })
+    for (const step of [h.writeSessionEntry, h.stopXray, h.externalProxy.stopAll, h.rollbackTunNetworkBaselineIfApplied, h.disableKillSwitchIfActive, h.rollbackPhysicalAdapterLockdownIfApplied, h.repairOrphanedPhysicalAdapterDns, h.stopTrafficForensicsSession, h.stopRecoveryPsWorker, h.stopElevatedPsHelper]) expect(step).not.toHaveBeenCalled()
+  })
+  it.each([
+    { status: 'stopping', running: true }, { status: 'error', running: true }, { status: 'adapting', running: true },
+    { status: 'stopped', running: false }, { status: 'error', running: false }, { status: 'restarting:1/3', running: false }
+  ])('status $status with running=$running retains monitoring only while the runtime is live (AT-02-009)', ({ status, running }) => {
+    const h = mainHarness('stopProtection')
+    const os = { ...h, tunController: { getStatus: () => ({ running }) }, sendToMainWindow: noop(), granularKillSwitch: { setVpnConnected: noop() },
+      startTrafficConnectionSampler: noop(), resetAdaptiveBypassStatus: noop(), isKillSwitchActive: vi.fn(async () => true) }
+    const onStatus = compile<(status: string) => void>(`
+let currentSession=null,stopInProgress=false,adaptiveVerificationGeneration=0,activeAdaptiveContext=null;
+${body('index.ts', 'trayStatusFromTunStatus')}
+return ${body('index.ts', 'tunController.onStatusChange')};`, os)
+    onStatus(status)
+    for (const step of [h.trafficMonitor.stop, h.stopTrafficConnectionSampler, h.stopTrafficForensicsSession]) expect(step).toHaveBeenCalledTimes(running ? 0 : 1)
+    const trayStatus = h.refreshTrayState.mock.calls[0][0].status
+    if (running) expect(['off', 'protected']).not.toContain(trayStatus)
+  })
+  it('keeps upstream, watchdog and protection active until runtime exit is proved (AT-02-009)', async () => {
+    const h = stopHarness()
+    let release!: () => void
+    h.waitForOwnedRuntimeToExit.mockImplementationOnce(() => new Promise(resolve => {
+      release = () => { h.state.runtime = false; resolve(true) }
+    }))
+    const pending = h.stop()
+    await vi.waitFor(() => expect(h.waitForOwnedRuntimeToExit).toHaveBeenCalledOnce())
+    try { expect(h.state).toEqual({ runtime: true, upstream: true, watchdog: true, competing: true, baseline: true, firewall: true, adapters: true }) }
+    finally { release() }
+    expect(await pending).toMatchObject({ success: true, networkCleanup: { baseline: true, firewall: true, adapters: true } })
+    expect(h.state).toEqual({ runtime: false, upstream: false, watchdog: false, competing: false, baseline: false, firewall: false, adapters: false })
+  })
+  it.each(['stop denied', 'exit timeout', 'exit query failed'])('retains live runtime supervision and protection after %s', async failure => {
+    const h = stopHarness()
+    if (failure === 'stop denied') h.killOwnedRuntimeProcesses.mockRejectedValueOnce(new Error('native denied'))
+    if (failure === 'exit timeout') h.waitForOwnedRuntimeToExit.mockResolvedValueOnce(false)
+    if (failure === 'exit query failed') h.waitForOwnedRuntimeToExit.mockRejectedValueOnce(new Error('query denied'))
+    expect(await h.stop()).toMatchObject({ success: false, networkCleanup: { baseline: false, firewall: false, adapters: false } })
+    expect(h.state).toEqual({ runtime: true, upstream: true, watchdog: true, competing: true, baseline: true, firewall: true, adapters: true })
+    expect(h.notifyStatus).toHaveBeenLastCalledWith('error')
+    expect(h.ipMonitor.resume).toHaveBeenCalledOnce()
+  })
+  it('can retry a failed stop without leaving the live runtime unsupervised', async () => {
+    const h = stopHarness()
+    h.killOwnedRuntimeProcesses.mockRejectedValueOnce(new Error('native denied'))
+    expect((await h.stop()).success).toBe(false)
+    expect(h.state).toEqual({ runtime: true, upstream: true, watchdog: true, competing: true, baseline: true, firewall: true, adapters: true })
+    expect((await h.stop()).success).toBe(true)
+    expect(h.state).toEqual({ runtime: false, upstream: false, watchdog: false, competing: false, baseline: false, firewall: false, adapters: false })
+  })
   it('awaits capture finalization before releasing shutdown helpers (AT-08-005 / AT-11-002)', async () => {
     const h = mainHarness('performShutdownCleanup')
     let release!: () => void
@@ -195,7 +307,7 @@ describe('lifecycle cleanup evidence and retries (AT-02-005 / AT-03-007)', () =>
   })
   it.each(['baseline', 'firewall', 'adapters'])('refuses installer acknowledgement for incomplete %s rollback (AT-11-002)', async step => {
     const h = mainHarness('performShutdownCleanup')
-    h.tunController.stop.mockResolvedValue({ success: false, networkCleanup: { baseline: false, firewall: false, adapters: false } })
+    h.tunController.stop.mockResolvedValue({ success: true, networkCleanup: { baseline: false, firewall: false, adapters: false } })
     if (step === 'baseline') h.rollbackTunNetworkBaselineIfApplied.mockResolvedValueOnce({ success: false })
     if (step === 'firewall') h.disableKillSwitchIfActive.mockResolvedValueOnce({ success: false })
     if (step === 'adapters') h.rollbackPhysicalAdapterLockdownIfApplied.mockResolvedValueOnce({ rolledBack: false })
@@ -218,8 +330,7 @@ describe('lifecycle cleanup evidence and retries (AT-02-005 / AT-03-007)', () =>
     const h = mainHarness('performShutdownCleanup')
     h.killOwnedTunRuntimeProcesses.mockResolvedValueOnce(result)
     await expect(h.run('test')).rejects.toThrow('ShutdownCleanupUnconfirmed: runtime')
-    expect(h.externalProxy.stopAll).toHaveBeenCalledOnce()
-    expect(h.stopTrafficForensicsSession).toHaveBeenCalledOnce()
+    for (const step of [h.stopXray, h.externalProxy.stopAll, h.stopTrafficForensicsSession, h.rollbackTunNetworkBaselineIfApplied, h.disableKillSwitchIfActive, h.rollbackPhysicalAdapterLockdownIfApplied, h.repairOrphanedPhysicalAdapterDns]) expect(step).not.toHaveBeenCalled()
     expect(h.stopRecoveryPsWorker).not.toHaveBeenCalled()
     expect(h.stopElevatedPsHelper).not.toHaveBeenCalled()
   })
@@ -244,7 +355,7 @@ describe('lifecycle cleanup evidence and retries (AT-02-005 / AT-03-007)', () =>
   })
   it('retains the recovery worker until all shutdown network backstops complete', async () => {
     const h = mainHarness('performShutdownCleanup')
-    h.tunController.stop.mockResolvedValue({success:false,networkCleanup:{baseline:false,firewall:false,adapters:false}})
+    h.tunController.stop.mockResolvedValue({success:true,networkCleanup:{baseline:false,firewall:false,adapters:false}})
     await h.run('test')
     expect(h.stopRecoveryPsWorker).toHaveBeenCalledOnce()
     for(const step of [h.rollbackTunNetworkBaselineIfApplied,h.disableKillSwitchIfActive,h.rollbackPhysicalAdapterLockdownIfApplied,h.repairOrphanedPhysicalAdapterDns]) {
@@ -417,7 +528,7 @@ describe('lifecycle cleanup evidence and retries (AT-02-005 / AT-03-007)', () =>
     expect((await h.stop()).networkCleanup.adapters).toBe(true)
     expect(h.repairOrphanedPhysicalAdapterDns).toHaveBeenCalledOnce()
   })
-  it.each(['runtime', 'baseline', 'firewall', 'adapters', 'dns'])('continues independent cleanup after %s failure', async failing => {
+  it.each(['runtime', 'baseline', 'firewall', 'adapters', 'dns'])('requires runtime exit before independent cleanup: %s failure', async failing => {
     const h = stopHarness()
     const error = new Error(`${failing} failed`)
     if (failing === 'runtime') h.killOwnedRuntimeProcesses.mockRejectedValue(error)
@@ -429,6 +540,13 @@ describe('lifecycle cleanup evidence and retries (AT-02-005 / AT-03-007)', () =>
       h.repairOrphanedPhysicalAdapterDns.mockRejectedValue(error)
     }
     const result = await h.stop()
+    if (failing === 'runtime') {
+      expect(result).toMatchObject({ success: false, error: expect.stringContaining('runtime failed') })
+      for (const cleanup of [h.stopXray, h.rollbackTunNetworkBaselineIfApplied, h.disableKillSwitchIfActive, h.rollbackPhysicalAdapterLockdownIfApplied]) expect(cleanup).not.toHaveBeenCalled()
+      expect(h.notifyStatus).toHaveBeenCalledWith('error')
+      expect(h.ipMonitor.resume).toHaveBeenCalledOnce()
+      return
+    }
     expect(result.warning).toContain(`${failing} failed`)
     expect(h.rollbackTunNetworkBaselineIfApplied).toHaveBeenCalledOnce()
     expect(h.disableKillSwitchIfActive).toHaveBeenCalledOnce()
@@ -461,7 +579,7 @@ describe('lifecycle cleanup evidence and retries (AT-02-005 / AT-03-007)', () =>
   })
   it.each(['baseline', 'firewall', 'adapters', 'thrown'])('keeps shutdown backstops for an unconfirmed %s step', async failed => {
     const h = mainHarness('performShutdownCleanup')
-    if (failed === 'thrown') h.tunController.stop.mockRejectedValue(new Error('stop failed'))
+    if (failed === 'thrown') h.tunController.stop.mockRejectedValueOnce(new Error('stop failed')).mockResolvedValueOnce({ success: true })
     else h.tunController.stop.mockResolvedValue({ success: true, networkCleanup: { baseline: true, firewall: true, adapters: true, [failed]: false } })
     await h.run('test')
     expect(h.rollbackTunNetworkBaselineIfApplied).toHaveBeenCalledTimes(failed === 'baseline' || failed === 'thrown' ? 1 : 0)

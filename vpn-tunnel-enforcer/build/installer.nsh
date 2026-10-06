@@ -56,13 +56,7 @@
   ; Keep user data intact on upgrade/reinstall. Server groups are user state:
   ; deleting them here can resurrect old subscriptions from legacy caches.
 
-  ; NGEN pre-compile PowerShell assemblies — makes every PowerShell spawn
-  ; ~10x faster by avoiding JIT compilation on each invocation. The app
-  ; spawns PowerShell 5-10 times during a connect cycle, so this saves
-  ; ~200-500ms per spawn. Safe: ngen is a standard Windows tool; if it
-  ; fails (non-admin, missing .NET), the install continues normally.
-  ; Note: NSIS treats $$ as literal $, so PS variables need double-$.
-  nsExec::ExecToLog 'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "try { [Environment]::SetEnvironmentVariable("DOTNET_NGEN_OPT","1","Machine"); $${asm}=[System.Reflection.Assembly]::LoadWithPartialName("System.Management.Automation"); if($${asm}){ $${ng}=Join-Path $${env:WINDIR} "Microsoft.NET\Framework64\v4.0.30319\ngen.exe"; if(Test-Path $${ng}){ & $${ng} install $${asm}.Location /nologo /silent; & $${ng} update /nologo /silent } } } catch {}"'
+  ; Do not change global .NET settings or run system-wide NGEN maintenance.
 
   ; Remove the stale dev-mode "Electron.lnk" that running the app from source
   ; drops in the Start Menu (target: node_modules\electron\dist\electron.exe,
@@ -82,6 +76,21 @@
 ; Standalone and chained uninstall use the same fail-closed shutdown gate.
 !macro customUnInit
   !insertmacro requestSafeShutdown
+!macroend
+
+; During an upgrade the new installer owns recovery registration. A standalone
+; uninstall must remove our task BEFORE deleting the script it references.
+!macro customUnInstall
+  ${IfNot} ${isUpdated}
+    nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\resources\vpnte-recover.ps1" -UnregisterTask'
+    Pop $0
+    Pop $1
+    ${If} $0 != 0
+      MessageBox MB_ICONSTOP "VPNTE Boot Recovery removal failed: $1"
+      SetErrorLevel 1
+      Abort
+    ${EndIf}
+  ${EndIf}
 !macroend
 
 ; Make the finish page window movable. NSIS finish pages sometimes lock the

@@ -4,6 +4,7 @@ import { join } from 'path'
 import { getPrivilegedRuntimeDir } from './runtimePaths'
 import { directoryExists, verifyDirectoryHardened } from './runtimeDirSecurity'
 import { redactSensitiveConfig, redactSensitiveText } from './vpnProfiles'
+import { watchEngineLogs } from './engineLogRetention'
 
 export type AppLogLevel = 'debug' | 'info' | 'warn' | 'error'
 
@@ -54,6 +55,23 @@ export function repairMojibake(value: string): string {
 // and start a fresh file. We keep exactly one previous generation — enough for
 // support to see what happened before the roll, bounded at 2x the cap total.
 const MAX_LOG_BYTES = 5 * 1024 * 1024
+
+// 2 x 5 MiB app generations + 2 x 10 MiB for each engine = 50 MiB.
+let engineLogWatcher: ReturnType<typeof watchEngineLogs> | null = null
+export function startEngineLogRetention(): () => Promise<void> {
+  if (!engineLogWatcher) {
+    const directory = getTunLogDir()
+    engineLogWatcher = watchEngineLogs(directory, async () => {
+      const acl = await verifyDirectoryHardened(directory)
+      if (!acl.hardened) throw new Error('RuntimeSecurityAclError: engine log namespace is untrusted')
+    }, error => logEvent('warn', 'logs', 'Engine log rotation failed; will retry', error))
+  }
+  return async () => {
+    const watcher = engineLogWatcher
+    engineLogWatcher = null
+    await watcher?.stop()
+  }
+}
 
 let queue = Promise.resolve()
 // Cheap in-memory tally so we don't `stat()` the file on every single log
@@ -307,6 +325,8 @@ export async function getFullLogs(): Promise<LogFileSnapshot[]> {
     getAppLogPrevPath(),
     join(getTunLogDir(), 'sing-box.log'),
     join(getTunLogDir(), 'sing-box.prev.log'),
+    join(getTunLogDir(), 'xray.log'),
+    join(getTunLogDir(), 'xray.prev.log'),
     join(getTunLogDir(), 'sing-box.json')
   ]
   const snapshots = await Promise.all(files.map(file => readTail(file)))
@@ -315,22 +335,33 @@ export async function getFullLogs(): Promise<LogFileSnapshot[]> {
 
 export async function clearAppLog(): Promise<void> {
   queue = queue.catch(() => undefined).then(async () => {
-    await ensureLogDir()
-    const tunLogDir = getTunLogDir()
-    const hasTunLogs = await directoryExists(tunLogDir)
-    if (hasTunLogs) {
-      const acl = await verifyDirectoryHardened(tunLogDir)
-      if (!acl.hardened) throw new Error('RuntimeSecurityAclError: TUN log cleanup namespace is untrusted')
+    // A pending rollover must finish before clearing, otherwise it could
+    // republish a previous generation after the user has cleared the logs.
+    const watcher = engineLogWatcher
+    engineLogWatcher = null
+    await watcher?.stop()
+    try {
+      await ensureLogDir()
+      const tunLogDir = getTunLogDir()
+      const hasTunLogs = await directoryExists(tunLogDir)
+      if (hasTunLogs) {
+        const acl = await verifyDirectoryHardened(tunLogDir)
+        if (!acl.hardened) throw new Error('RuntimeSecurityAclError: TUN log cleanup namespace is untrusted')
+      }
+      await Promise.all([
+        writeFile(getAppLogPath(), '', 'utf8'),
+        unlink(getAppLogPrevPath()).catch(() => undefined),
+        ...(hasTunLogs ? [
+          writeFile(join(tunLogDir, 'sing-box.log'), '', 'utf8').catch(() => undefined),
+          unlink(join(tunLogDir, 'sing-box.prev.log')).catch(() => undefined),
+          writeFile(join(tunLogDir, 'xray.log'), '', 'utf8').catch(() => undefined),
+          unlink(join(tunLogDir, 'xray.prev.log')).catch(() => undefined)
+        ] : [])
+      ])
+      currentLogBytes = 0
+    } finally {
+      if (watcher) startEngineLogRetention()
     }
-    await Promise.all([
-      writeFile(getAppLogPath(), '', 'utf8'),
-      unlink(getAppLogPrevPath()).catch(() => undefined),
-      ...(hasTunLogs ? [
-        writeFile(join(tunLogDir, 'sing-box.log'), '', 'utf8').catch(() => undefined),
-        unlink(join(tunLogDir, 'sing-box.prev.log')).catch(() => undefined)
-      ] : [])
-    ])
-    currentLogBytes = 0
   })
   await queue
 }

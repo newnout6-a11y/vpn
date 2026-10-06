@@ -64,6 +64,16 @@ function compile(doc = document()) {
 }
 
 describe('AT-04-002 / AT-04-006 / AT-02-002: preserved Xray connection pipeline', () => {
+  it('AT-02-008 / AT-06-001: keeps sniffed domains for routing without rewriting native graph destinations', () => {
+    const { config } = compile()
+    expect(config.inbounds[0].sniffing).toEqual({
+      enabled: true, destOverride: ['tls', 'http', 'quic'], routeOnly: true
+    })
+    expect(config.routing.rules.find((rule: any) => rule.inboundTag?.includes('in') && rule.balancerTag))
+      .toMatchObject({ balancerTag: 'vpnte-balancer:l1' })
+    expect(config.routing.balancers.find((balancer: any) => balancer.tag === 'vpnte-balancer:l1'))
+      .toMatchObject({ fallbackTag: 'vpnte-source:LOOP-L2' })
+  })
   it('exports complete JSON and re-imports the bridge graph without provider listeners or application bypass', () => {
     const { profile, config } = compile()
     const shared = exportOutboundForSharing(profile)!

@@ -1,4 +1,8 @@
 {
+  "tunnel": {
+    "started": "Tunnel started. VPN connectivity is being checked.",
+    "startedSmartRu": "Tunnel started with Smart RU: selected Russian resources connect directly. VPN connectivity is being checked."
+  },
   "shutdown": {
     "title": "VPNTE: shutdown not confirmed",
     "unconfirmed": "Capture or network cleanup could not be confirmed. The client remains open and updating is blocked. Retry Exit after resolving the problem; do not force-close the client to update.",

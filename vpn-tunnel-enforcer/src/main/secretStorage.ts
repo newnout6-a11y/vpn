@@ -1,10 +1,13 @@
 import * as electron from 'electron'
 import { existsSync, lstatSync, readFileSync, openSync, writeFileSync, fsyncSync, closeSync, renameSync, unlinkSync } from 'fs'
-import { randomUUID } from 'crypto'
+import { createHash, randomUUID } from 'crypto'
 import { logEvent } from './appLogger'
 
 export const SECRET_REF_KIND = 'vpnte-safe-storage-v1' as const
 const DPAPI_PREFIX = 'enc:dpapi:v1:'
+// Cache only authenticated encrypted bytes, never plaintext or file timestamps.
+// Every access still checks the artifact and reads its current contents.
+const verifiedBackupDigests = new Map<string, string>()
 
 export interface SecretRef {
   __vpnteSecretRef: typeof SECRET_REF_KIND
@@ -79,10 +82,12 @@ export function protectLegacySecretBackup(
   const step = sourcePath ? 'backup-create' : 'backup-existing'
   try {
     const result = protectSecretBackup(backupPath, sourcePath)
+    if (result === 'unchanged') return
     logEvent('info', 'secret-migration', 'secret backup step completed', {
       store, step, status: result === 'skipped' ? 'skipped' : 'success', result
     })
   } catch (error) {
+    verifiedBackupDigests.delete(backupPath)
     // Paths, file contents and exception text can contain credentials.
     logEvent('error', 'secret-migration', 'secret backup step failed; original data retained', {
       store, step, status: 'error'
@@ -91,19 +96,28 @@ export function protectLegacySecretBackup(
   }
 }
 
-function protectSecretBackup(backupPath: string, sourcePath?: string): 'created' | 'protected' | 'verified' | 'skipped' {
+function protectSecretBackup(backupPath: string, sourcePath?: string): 'created' | 'protected' | 'verified' | 'skipped' | 'unchanged' {
   const exists = existsSync(backupPath)
   const input = exists ? backupPath : sourcePath
-  if (!input || !existsSync(input)) return 'skipped'
+  if (!input || !existsSync(input)) {
+    verifiedBackupDigests.delete(backupPath)
+    return 'skipped'
+  }
   const info = lstatSync(input)
   if (!info.isFile() || info.isSymbolicLink() || info.size > 16 * 1024 * 1024) throw new Error('Invalid secret migration backup artifact')
-  const raw = readFileSync(input, 'utf8')
+  const bytes = readFileSync(input)
+  const digest = createHash('sha256').update(bytes).digest('hex')
+  if (exists && isSecretEncryptionAvailable() && verifiedBackupDigests.get(backupPath) === digest) return 'unchanged'
+  verifiedBackupDigests.delete(backupPath)
+  const raw = bytes.toString('utf8')
   if (exists) {
     let parsed: any
     try { parsed = JSON.parse(raw) } catch { /* Legacy stores can contain malformed JSON; encrypt the original bytes. */ }
     if (parsed?.__vpnteEncryptedBackup === 1) {
       if (!isSecretRef(parsed.contents)) throw new Error('Invalid encrypted migration backup')
       decryptSecret(parsed.contents) // Authenticate/read-back before calling it protected.
+      if (verifiedBackupDigests.size >= 8) verifiedBackupDigests.delete(verifiedBackupDigests.keys().next().value!)
+      verifiedBackupDigests.set(backupPath, digest)
       return 'verified'
     }
   }
