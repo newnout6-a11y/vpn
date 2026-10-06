@@ -115,13 +115,17 @@ function mainHarness(name: 'performShutdownCleanup' | 'stopProtection') {
   const os = {
     connectionLifecycle: new ConnectionLifecycle(() => {}),
     tunController: { stop: vi.fn(async (): Promise<any> => ({ success: true, networkCleanup: { baseline: true, firewall: true, adapters: true } })) },
-    clearOwnedSecretClipboard: done(), stopXray: done(), killOwnedTunRuntimeProcesses: done(), externalProxy: { stopAll: done() },
-    rollbackTunNetworkBaselineIfApplied: done(), disableKillSwitchIfActive: done(), rollbackPhysicalAdapterLockdownIfApplied: done(),
+    clearOwnedSecretClipboard: done(), stopXray: done(),
+    killOwnedTunRuntimeProcesses: vi.fn(async () => ({ success: true, candidates: 0, killed: 0, names: [] })), externalProxy: { stopAll: done() },
+    rollbackTunNetworkBaselineIfApplied: vi.fn(async () => ({ success: true })),
+    disableKillSwitchIfActive: vi.fn(async () => ({ success: true })),
+    rollbackPhysicalAdapterLockdownIfApplied: vi.fn(async (): Promise<{ rolledBack: boolean; skipped?: boolean }> => ({ rolledBack: true })),
     repairOrphanedPhysicalAdapterDns: done(), logEvent: noop(), stopElevatedPsHelper: noop(), stopRecoveryPsWorker: done(),
-    autoconfig: { getStatus: vi.fn(async () => []), rollback: done() },
+    autoconfig: { isApplied: vi.fn(async () => false), rollback: vi.fn(async () => ({ env: true })) },
     stopServerGroupAutoRefresh: noop(), stopBackgroundTrafficHistory: noop(), stopTrafficConnectionSampler: noop(),
     rollbackSoftAutoconfigIfApplied: done(), stopPeriodicSnapshots: noop(), stopPeriodicLeakTest: noop(), stopNetworkChangeWatcher: noop(),
-    stopTrafficForensicsSession: done(), ipMonitor: { clearVpnIp: noop() }, trafficMonitor: { stop: noop() },
+    stopTrafficForensicsSession: vi.fn(async (): Promise<any> => ({ running: false, cleanupPending: false })),
+    ipMonitor: { clearVpnIp: noop() }, trafficMonitor: { stop: noop() },
     getLocationPrivacyStatus: vi.fn(async () => ({ applied: false })), rollbackLocationPrivacy: done(),
     settingsStore: { save: noop() }, refreshTrayState: noop(), captureSnapshot: done()
   }
@@ -163,6 +167,81 @@ return {start:()=>controller.start('127.0.0.1:1080'),state:()=>({starting:startI
 }
 
 describe('lifecycle cleanup evidence and retries (AT-02-005 / AT-03-007)', () => {
+  it('awaits capture finalization before releasing shutdown helpers (AT-08-005 / AT-11-002)', async () => {
+    const h = mainHarness('performShutdownCleanup')
+    let release!: () => void
+    const pending = new Promise<void>(resolve => { release = resolve })
+    h.stopTrafficForensicsSession.mockImplementationOnce(async () => {
+      await pending
+      return { running: false, cleanupPending: false }
+    })
+    const shutdown = h.run('test')
+    try {
+      await vi.waitFor(() => expect(h.stopTrafficForensicsSession).toHaveBeenCalledOnce())
+      expect(h.stopRecoveryPsWorker).not.toHaveBeenCalled()
+      expect(h.stopElevatedPsHelper).not.toHaveBeenCalled()
+    } finally { release(); await shutdown }
+    expect(h.stopTrafficForensicsSession.mock.invocationCallOrder[0]).toBeLessThan(h.stopRecoveryPsWorker.mock.invocationCallOrder[0])
+  })
+  it.each(['reject', 'running', 'pending'])('refuses shutdown for an unconfirmed capture: %s (AT-08-005 / AT-11-002)', async outcome => {
+    const h = mainHarness('performShutdownCleanup')
+    if (outcome === 'reject') h.stopTrafficForensicsSession.mockRejectedValueOnce(new Error('native stop failed'))
+    else h.stopTrafficForensicsSession.mockResolvedValueOnce({ running: outcome === 'running', cleanupPending: outcome === 'pending' })
+    await expect(h.run('test')).rejects.toThrow('ShutdownCleanupUnconfirmed: capture')
+    expect(h.tunController.stop).toHaveBeenCalledOnce()
+    expect(h.externalProxy.stopAll).toHaveBeenCalledOnce()
+    expect(h.stopRecoveryPsWorker).not.toHaveBeenCalled()
+    expect(h.stopElevatedPsHelper).not.toHaveBeenCalled()
+  })
+  it.each(['baseline', 'firewall', 'adapters'])('refuses installer acknowledgement for incomplete %s rollback (AT-11-002)', async step => {
+    const h = mainHarness('performShutdownCleanup')
+    h.tunController.stop.mockResolvedValue({ success: false, networkCleanup: { baseline: false, firewall: false, adapters: false } })
+    if (step === 'baseline') h.rollbackTunNetworkBaselineIfApplied.mockResolvedValueOnce({ success: false })
+    if (step === 'firewall') h.disableKillSwitchIfActive.mockResolvedValueOnce({ success: false })
+    if (step === 'adapters') h.rollbackPhysicalAdapterLockdownIfApplied.mockResolvedValueOnce({ rolledBack: false })
+    await expect(h.run('test')).rejects.toThrow(`ShutdownCleanupUnconfirmed: ${step}`)
+    expect(h.stopTrafficForensicsSession).toHaveBeenCalledOnce()
+    expect(h.stopRecoveryPsWorker).not.toHaveBeenCalled()
+  })
+  it('refuses shutdown when the environment proxy rollback returns false (AT-11-002)', async () => {
+    const h = mainHarness('performShutdownCleanup')
+    h.autoconfig.isApplied.mockResolvedValueOnce(true)
+    h.autoconfig.rollback.mockResolvedValueOnce({ env: false })
+    await expect(h.run('test')).rejects.toThrow('ShutdownCleanupUnconfirmed: autoconfig')
+    expect(h.stopTrafficForensicsSession).toHaveBeenCalledOnce()
+    expect(h.stopRecoveryPsWorker).not.toHaveBeenCalled()
+  })
+  it.each([
+    { success: false, candidates: 0, killed: 0, names: [] },
+    { success: true, candidates: 2, killed: 1, names: [] }
+  ])('refuses shutdown for failed or partial runtime stop: %j (AT-11-002 / F-183)', async result => {
+    const h = mainHarness('performShutdownCleanup')
+    h.killOwnedTunRuntimeProcesses.mockResolvedValueOnce(result)
+    await expect(h.run('test')).rejects.toThrow('ShutdownCleanupUnconfirmed: runtime')
+    expect(h.externalProxy.stopAll).toHaveBeenCalledOnce()
+    expect(h.stopTrafficForensicsSession).toHaveBeenCalledOnce()
+    expect(h.stopRecoveryPsWorker).not.toHaveBeenCalled()
+    expect(h.stopElevatedPsHelper).not.toHaveBeenCalled()
+  })
+  it('refuses shutdown on unknown env status without blind rollback (AT-11-002 / F-183)', async () => {
+    const h = mainHarness('performShutdownCleanup')
+    h.autoconfig.isApplied.mockRejectedValueOnce(new Error('registry read failed'))
+    await expect(h.run('test')).rejects.toThrow('ShutdownCleanupUnconfirmed: autoconfig')
+    expect(h.autoconfig.isApplied).toHaveBeenCalledExactlyOnceWith('env')
+    expect(h.autoconfig.rollback).not.toHaveBeenCalled()
+    expect(h.stopTrafficForensicsSession).toHaveBeenCalledOnce()
+    expect(h.stopRecoveryPsWorker).not.toHaveBeenCalled()
+    expect(h.stopElevatedPsHelper).not.toHaveBeenCalled()
+  })
+  it.each([true, false])('allows confirmed env status and restores only when applied=%s (AT-11-002)', async applied => {
+    const h = mainHarness('performShutdownCleanup')
+    h.autoconfig.isApplied.mockResolvedValueOnce(applied)
+    await h.run('test')
+    expect(h.autoconfig.isApplied).toHaveBeenCalledExactlyOnceWith('env')
+    if (applied) expect(h.autoconfig.rollback).toHaveBeenCalledExactlyOnceWith(['env'])
+    else expect(h.autoconfig.rollback).not.toHaveBeenCalled()
+    expect(h.stopRecoveryPsWorker).toHaveBeenCalledOnce()
+  })
   it('retains the recovery worker until all shutdown network backstops complete', async () => {
     const h = mainHarness('performShutdownCleanup')
     h.tunController.stop.mockResolvedValue({success:false,networkCleanup:{baseline:false,firewall:false,adapters:false}})

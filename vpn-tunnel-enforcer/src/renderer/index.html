@@ -3,10 +3,12 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <!-- file:// documents do not receive session response headers. -->
+  <!-- file:// requires meta CSP. Explicit exceptions: BrowserIpCard measures
+       browser egress via ipify/myip; the OSM map is an isolated allow-scripts
+       frame. Inline styles are required by theme tokens and motion. -->
   <meta
     http-equiv="Content-Security-Policy"
-    content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' https: wss:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'none'"
+    content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://ipapi.co https://ipwho.is https://api.github.com https://api.ipify.org https://api6.ipify.org https://api.myip.com; frame-src https://www.openstreetmap.org; object-src 'none'; base-uri 'self'; form-action 'none'"
   />
   <title>VPN Туннель — Принудитель</title>
 </head>

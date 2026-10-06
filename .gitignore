@@ -1,6 +1,7 @@
 node_modules/
 dist/
 out/
+vpn-tunnel-enforcer/build/shutdown-for-update.base64
 .env
 *.log
 .DS_Store

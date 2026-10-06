@@ -9,13 +9,13 @@
  * We tail the log file, grep for these patterns, and aggregate by domain.
  */
 
-import { ipcMain, app, BrowserWindow } from 'electron'
+import { ipcMain, BrowserWindow } from 'electron'
 import { open, stat } from 'fs/promises'
 import { join } from 'path'
 import { logEvent } from './appLogger'
 import { domainEnrichmentService, buildEnrichmentProxyRules, type DomainEnrichment } from './domainEnrichment'
 import { settingsStore } from './settings'
-import { tunController } from './tunController'
+import { getTunRuntimeDir, tunController } from './tunController'
 import {
   clearRecordedTrafficDomains,
   getInfraHosts,
@@ -90,11 +90,11 @@ let backgroundEnrichmentTimer: ReturnType<typeof setInterval> | null = null
 let backgroundEnrichmentInFlight = false
 
 function getSingboxLogPath(): string {
-  return join(app.getPath('userData'), 'tun-runtime', 'sing-box.log')
+  return join(getTunRuntimeDir(), 'sing-box.log')
 }
 
 function getPrevSingboxLogPath(): string {
-  return join(app.getPath('userData'), 'tun-runtime', 'sing-box.prev.log')
+  return join(getTunRuntimeDir(), 'sing-box.prev.log')
 }
 
 /**

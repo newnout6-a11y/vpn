@@ -133,10 +133,10 @@ describe('configuration native-selection capability', () => {
     expect((await invoke('config:import-apply', sender, file, ['notifications'], 'replace')).success).toBe(false)
     await expect(invoke('config:import', sender, file)).rejects.toThrow('native-dialog')
   })
-  it('native export confirmation warns about plaintext secrets and cancel writes nothing', async () => {
+  it('default export uses the masked variant and a cancelled save creates nothing (AT-01-008)', async () => {
     expect((await invoke('config:export', sender)).success).toBe(false)
     expect(dialog.showSaveDialog).toHaveBeenCalledWith(expect.objectContaining({
-      title: expect.stringContaining('приватные ключи'), buttonLabel: expect.stringContaining('секретами')
+      title: 'Экспорт конфигурации без секретов', buttonLabel: 'Сохранить'
     }))
   })
 })

@@ -1,9 +1,15 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { mkdtempSync, readFileSync, writeFileSync, existsSync, rmSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { logEvent } from './appLogger'
 
 const state = vi.hoisted(() => ({
   stores: {} as Record<string, Record<string, any>>,
   failOnEncryptCall: 0,
-  encryptCalls: 0
+  encryptCalls: 0,
+  failDecrypt: false,
+  directory: ''
 }))
 
 vi.mock('electron', () => ({
@@ -14,9 +20,13 @@ vi.mock('electron', () => ({
       if (state.failOnEncryptCall === state.encryptCalls) throw new Error('injected safeStorage failure')
       return Buffer.from(`encrypted:${value}`, 'utf8')
     },
-    decryptString: (value: Buffer) => value.toString('utf8').replace(/^encrypted:/, '')
+    decryptString: (value: Buffer) => {
+      if (state.failDecrypt) throw new Error('FAKE-DECRYPT-ERROR')
+      return value.toString('utf8').replace(/^encrypted:/, '')
+    }
   }
 }))
+vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
 
 vi.mock('electron-store', () => ({
   default: class MockStore {
@@ -30,18 +40,25 @@ vi.mock('electron-store', () => ({
     }
     set(key: string, value: unknown) {
       state.stores[this.name][key] = value
+      if (state.directory) writeFileSync(this.path, JSON.stringify(state.stores[this.name]))
     }
     get path() {
-      return `/path-that-does-not-exist/${this.name}.json`
+      return state.directory ? join(state.directory, `${this.name}.json`) : `/path-that-does-not-exist/${this.name}.json`
     }
     get store() {
       return state.stores[this.name]
     }
     set store(value: Record<string, any>) {
       state.stores[this.name] = value
+      if (state.directory) writeFileSync(this.path, JSON.stringify(value))
     }
   }
 }))
+
+afterEach(() => {
+  if (state.directory) rmSync(state.directory, { recursive: true, force: true })
+  state.directory = ''; state.failDecrypt = false
+})
 
 function plaintextProfile(id: string) {
   return {
@@ -86,6 +103,51 @@ describe('server profile safeStorage migration (AT-01-001)', () => {
     const { serverPickerStore } = await import('./sharedStores')
     expect(() => serverPickerStore.get('profiles')).toThrow(/injected safeStorage failure/)
     expect(JSON.stringify(state.stores['server-picker'])).toBe(before)
+  })
+})
+
+describe('shared-store backup audit and rollback (AT-01-001/010)', () => {
+  beforeEach(() => {
+    vi.resetModules(); vi.mocked(logEvent).mockClear()
+    state.encryptCalls = 0; state.failOnEncryptCall = 0; state.failDecrypt = false
+    state.directory = mkdtempSync(join(tmpdir(), 'vpnte-shared-backup-'))
+    state.stores = {
+      'server-picker': { schemaVersion: 1, profiles: [plaintextProfile('FAKE-UUID')], activeProfileId: 'FAKE-UUID' },
+      'server-groups': { groups: [{ id: 'group', name: 'group', source: 'subscription', sourceUrl: 'https://sub.test/FAKE-TOKEN' }] }
+    }
+    for (const [name, data] of Object.entries(state.stores)) writeFileSync(join(state.directory, `${name}.json`), JSON.stringify(data))
+  })
+  it.each([
+    ['server-picker', 'existing', 'encrypt'], ['server-picker', 'create', 'encrypt'],
+    ['server-picker', 'existing', 'decrypt'], ['server-picker', 'create', 'decrypt'],
+    ['server-groups', 'existing', 'encrypt'], ['server-groups', 'create', 'encrypt'],
+    ['server-groups', 'existing', 'decrypt'], ['server-groups', 'create', 'decrypt']
+  ] as const)('audits %s %s backup %s failure and retries without loss', async (name, mode, fault) => {
+    const path = join(state.directory, `${name}.json`); const backup = path + '.pre-safe-storage-v1.bak'
+    const before = readFileSync(path)
+    if (mode === 'existing') writeFileSync(backup, before)
+    // Groups prepare one encrypted entry before creating a new backup.
+    state.failOnEncryptCall = fault === 'encrypt' ? (name === 'server-groups' && mode === 'create' ? 2 : 1) : 0
+    state.failDecrypt = fault === 'decrypt'
+    const { serverPickerStore, serverGroupsStore } = await import('./sharedStores')
+    const read = () => name === 'server-picker' ? serverPickerStore.get('profiles') : serverGroupsStore.get('groups')
+    expect(read).toThrow()
+    expect(readFileSync(path)).toEqual(before)
+    expect(JSON.stringify(state.stores[name])).toBe(before.toString())
+    if (mode === 'existing') expect(readFileSync(backup)).toEqual(before)
+    else expect(existsSync(backup)).toBe(false)
+    expect(logEvent).toHaveBeenLastCalledWith('error', 'secret-migration', 'secret backup step failed; original data retained', {
+      store: name, step: mode === 'existing' ? 'backup-existing' : 'backup-create', status: 'error'
+    })
+    const audit = JSON.stringify(vi.mocked(logEvent).mock.calls)
+    expect(audit).not.toContain('FAKE-'); expect(audit).not.toContain(state.directory)
+    state.failOnEncryptCall = 0; state.failDecrypt = false
+    const restored = read()[0]
+    if (name === 'server-picker') expect(restored).toEqual(plaintextProfile('FAKE-UUID'))
+    else expect(restored).toMatchObject({ sourceUrl: 'https://sub.test/FAKE-TOKEN' })
+    expect(readFileSync(path, 'utf8')).not.toContain('FAKE-TOKEN')
+    const { decryptSecret } = await import('./secretStorage')
+    expect(decryptSecret(JSON.parse(readFileSync(backup, 'utf8')).contents)).toBe(before.toString())
   })
 })
 

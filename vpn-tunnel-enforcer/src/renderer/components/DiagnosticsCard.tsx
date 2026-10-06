@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { useAppStore, type LeakSelfTestResultClient } from '../store'
 import { AlertTriangle, CheckCircle2, FileArchive, FolderOpen, Loader2, Radar, RefreshCw, Send, ShieldAlert } from 'lucide-react'
 import { MacCard, MacButton } from '../design-system'
 
 const FORENSICS_RUNNING_POLL_INTERVAL_MS = 10_000
 const FORENSICS_IDLE_POLL_INTERVAL_MS = 30_000
+const UNKNOWN_CAPTURE_STATUS = { cleanupPending: true, statusUnavailable: true }
 
 /**
  * The "everything you need to debug a not-working app" surface.
@@ -16,6 +18,7 @@ const FORENSICS_IDLE_POLL_INTERVAL_MS = 30_000
  *   3. Export diagnostics: bundles logs and artifacts into a ZIP for support.
  */
 export function DiagnosticsCard() {
+  const { t } = useTranslation()
   const leakResult = useAppStore((s) => s.leakSelfTestResult)
   const setLeakResult = useAppStore((s) => s.setLeakSelfTestResult)
   const lastErr = useAppStore((s) => s.lastMainError)
@@ -32,8 +35,8 @@ export function DiagnosticsCard() {
     try {
       const status = await window.electronAPI.getTrafficForensicsStatus()
       setForensicsStatus(status)
-    } catch (err) {
-      // Status is best-effort UI telemetry; the export button remains usable.
+    } catch {
+      setForensicsStatus(UNKNOWN_CAPTURE_STATUS)
     }
   }
 
@@ -54,9 +57,11 @@ export function DiagnosticsCard() {
         if (cancelled) return
         setForensicsStatus(status)
         scheduleNext(Boolean(status?.running))
-      } catch (err) {
-        // Status is best-effort UI telemetry; the export button remains usable.
-        if (!cancelled) scheduleNext(false)
+      } catch {
+        if (!cancelled) {
+          setForensicsStatus(UNKNOWN_CAPTURE_STATUS)
+          scheduleNext(false)
+        }
       }
     }
 
@@ -168,18 +173,27 @@ export function DiagnosticsCard() {
     : '—'
   const showSidecarDetails = Boolean(forensicsStatus?.sidecar?.running || dataEvents > 0)
 
+  const cleanupWarning = forensicsStatus?.statusUnavailable
+    ? t('diagnosticsCapture.statusUnavailable')
+    : forensicsStatus?.lastError?.startsWith('LegacyCaptureCleanupRequired:')
+      ? t('diagnosticsCapture.legacyCleanupRequired')
+      : forensicsStatus?.lastError || t('diagnosticsCapture.stopUnconfirmed')
   let forensicsDotColor = 'bg-[var(--color-text-muted)]'
-  let forensicsText = 'СБОР ОСТАНОВЛЕН'
-  let forensicsTooltip = 'Сбор пакетов остановлен'
+  let forensicsText = t('diagnosticsCapture.stoppedLabel')
+  let forensicsTooltip = t('diagnosticsCapture.stopped')
 
-  if (isForensicsRunning) {
+  if (forensicsStatus?.cleanupPending) {
+    forensicsDotColor = 'bg-[var(--color-warning)]'
+    forensicsText = t('diagnosticsCapture.pendingLabel')
+    forensicsTooltip = cleanupWarning
+  } else if (isForensicsRunning) {
     forensicsDotColor = 'bg-[var(--color-success)] animate-pulse'
-    forensicsText = 'СБОР ПАКЕТОВ'
-    forensicsTooltip = 'Идёт сбор пакетов'
+    forensicsText = t('diagnosticsCapture.runningLabel')
+    forensicsTooltip = t('diagnosticsCapture.running')
   } else if (isForensicsFailed) {
     forensicsDotColor = 'bg-[var(--color-danger)]'
-    forensicsText = 'ОШИБКА СБОРА'
-    forensicsTooltip = forensicsStatus?.lastError || 'Не удалось запустить сбор пакетов'
+    forensicsText = t('diagnosticsCapture.failedLabel')
+    forensicsTooltip = forensicsStatus?.lastError || t('diagnosticsCapture.startFailed')
   }
 
   return (
@@ -279,7 +293,12 @@ export function DiagnosticsCard() {
             )}
           </div>
         )}
-        {forensicsHealth?.warnings?.length > 0 && (
+        {forensicsStatus?.cleanupPending && (
+          <p role="alert" className="text-[11px] text-[var(--color-warning)] mt-1">
+            {cleanupWarning}
+          </p>
+        )}
+        {!forensicsStatus?.cleanupPending && forensicsHealth?.warnings?.length > 0 && (
           <p className="text-[11px] text-[var(--color-warning)] mt-1">
             {forensicsHealth.warnings[0]}
           </p>

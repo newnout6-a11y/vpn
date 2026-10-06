@@ -1,4 +1,21 @@
 {
+  "shutdown": {
+    "title": "VPNTE: shutdown not confirmed",
+    "unconfirmed": "Capture or network cleanup could not be confirmed. The client remains open and updating is blocked. Retry Exit after resolving the problem; do not force-close the client to update.",
+    "retryLater": "Keep open"
+  },
+  "diagnosticsCapture": {
+    "stoppedLabel": "CAPTURE STOPPED",
+    "stopped": "Packet capture is stopped",
+    "runningLabel": "CAPTURING PACKETS",
+    "running": "Packet capture is running",
+    "failedLabel": "CAPTURE FAILED",
+    "startFailed": "Could not start packet capture",
+    "pendingLabel": "STOP NOT CONFIRMED",
+    "stopUnconfirmed": "Capture may still be running; retry stopping it",
+    "statusUnavailable": "Could not check capture status; stopping is not confirmed",
+    "legacyCleanupRequired": "Stopping the old client's capture is not confirmed. Disconnect the VPN and close the old client normally before updating; new capture is blocked."
+  },
   "dashboard": {
     "title": "Dashboard",
     "vpnToggle": "VPN Protection",
@@ -102,9 +119,10 @@
     "dnsValidating": "Validating...",
     "dnsInvalidAddress": "Invalid DNS address",
     "importExport": "Import / Export",
-    "exportSettings": "Export Settings",
+    "exportSettings": "Export without secrets",
+    "exportSettingsWithSecrets": "Export with passwords and keys",
     "importSettings": "Import Settings",
-    "importExportDescription": "Export or import application configuration",
+    "importExportDescription": "Normal exports mask passwords and keys: enter them again to connect. To transfer profiles, use the export with secrets and confirm in the security dialog.",
     "exportSuccess": "Settings exported successfully",
     "importSections": "Sections to import",
     "importConflicts": "Conflicts detected",

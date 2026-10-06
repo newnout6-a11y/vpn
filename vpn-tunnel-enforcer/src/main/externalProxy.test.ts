@@ -56,6 +56,8 @@ vi.mock('electron-store', () => ({
 }))
 
 vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
+vi.mock('./runtimeDirSecurity', () => ({ ensureElevatedRuntimeDirHardened: vi.fn(async () => ({ hardened: true })) }))
+vi.mock('./runtimeArtifact', () => ({ stageVerifiedRuntimeArtifact: vi.fn(async () => true) }))
 
 vi.mock('./firewallKillSwitch', () => ({
   ensureKillSwitchProgramAllowed: ensureKillSwitchProgramAllowedMock

@@ -1,7 +1,7 @@
 import { defineConfig } from 'vitest/config'
 import { resolve } from 'path'
 
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
   resolve: {
     alias: {
       '@': resolve(__dirname, 'src/renderer'),
@@ -10,14 +10,14 @@ export default defineConfig({
   },
   test: {
     globals: true,
-    environment: 'jsdom',
+    environment: mode === 'integration' ? 'node' : 'jsdom',
     setupFiles: [],
-    include: ['src/**/*.{test,spec}.{ts,tsx}'],
+    include: mode === 'integration' ? ['src/**/*.itest.ts'] : ['src/**/*.{test,spec}.{ts,tsx}'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'lcov'],
       include: ['src/**/*.{ts,tsx}'],
-      exclude: ['src/**/*.{test,spec}.{ts,tsx}', 'src/**/index.ts']
+      exclude: ['src/**/*.{test,spec,itest}.{ts,tsx}', 'src/**/index.ts']
     }
   }
-})
+}))

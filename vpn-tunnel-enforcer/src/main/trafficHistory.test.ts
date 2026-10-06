@@ -13,6 +13,7 @@ vi.mock('electron', () => ({
   BrowserWindow: { getAllWindows: () => [] }
 }))
 vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
+vi.mock('./runtimePaths', () => ({ getPrivilegedRuntimeDir: (name: string) => join(state.userData, name) }))
 vi.mock('./domainEnrichment', () => ({
   buildEnrichmentProxyRules: vi.fn(),
   domainEnrichmentService: {
@@ -26,6 +27,7 @@ vi.mock('./settings', () => ({
   settingsStore: { get: () => ({ domainEnrichmentEnabled: false }) }
 }))
 vi.mock('./tunController', () => ({
+  getTunRuntimeDir: () => join(state.userData, 'tun-runtime'),
   tunController: { getStatus: () => ({ running: false }) }
 }))
 vi.mock('./trafficConnections', () => ({

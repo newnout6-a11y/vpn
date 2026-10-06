@@ -1,5 +1,9 @@
 import { ipcMain, type IpcMainInvokeEvent, type WebContents } from 'electron'
 import * as electron from 'electron'
+import { logEvent } from './appLogger'
+import { randomUUID } from 'crypto'
+import { IpcValidationError } from './ipcValidation'
+export { IpcValidationError } from './ipcValidation'
 
 const PATCH_MARK = Symbol.for('vpnte.ipc.trusted-boundary.installed')
 const MAX_IPC_DEPTH = 12
@@ -72,10 +76,10 @@ export function assertSafeIpcPayload(value: unknown): void {
 
   const visit = (candidate: unknown, depth: number): void => {
     nodes += 1
-    if (nodes > MAX_IPC_NODES) throw new Error('Invalid IPC payload: too many values')
-    if (depth > MAX_IPC_DEPTH) throw new Error('Invalid IPC payload: nesting is too deep')
+    if (nodes > MAX_IPC_NODES) throw new IpcValidationError('Invalid IPC payload: too many values')
+    if (depth > MAX_IPC_DEPTH) throw new IpcValidationError('Invalid IPC payload: nesting is too deep')
     if (typeof candidate === 'number' && !Number.isFinite(candidate)) {
-      throw new Error('Invalid IPC payload: number must be finite')
+      throw new IpcValidationError('Invalid IPC payload: number must be finite')
     }
     if (
       candidate === null ||
@@ -84,17 +88,17 @@ export function assertSafeIpcPayload(value: unknown): void {
       typeof candidate === 'number'
     ) return
     if (typeof candidate === 'string') {
-      if (candidate.length > MAX_IPC_STRING_LENGTH) throw new Error('Invalid IPC payload: string is too long')
+      if (candidate.length > MAX_IPC_STRING_LENGTH) throw new IpcValidationError('Invalid IPC payload: string is too long')
       return
     }
     if (typeof candidate !== 'object') {
-      throw new Error(`Invalid IPC payload: unsupported ${typeof candidate} value`)
+      throw new IpcValidationError(`Invalid IPC payload: unsupported ${typeof candidate} value`)
     }
     if (Buffer.isBuffer(candidate) || candidate instanceof Uint8Array) {
-      if (candidate.byteLength > MAX_IPC_STRING_LENGTH) throw new Error('Invalid IPC payload: binary value is too large')
+      if (candidate.byteLength > MAX_IPC_STRING_LENGTH) throw new IpcValidationError('Invalid IPC payload: binary value is too large')
       return
     }
-    if (seen.has(candidate)) throw new Error('Invalid IPC payload: cyclic object')
+    if (seen.has(candidate)) throw new IpcValidationError('Invalid IPC payload: cyclic object')
     seen.add(candidate)
     try {
       if (Array.isArray(candidate)) {
@@ -103,10 +107,10 @@ export function assertSafeIpcPayload(value: unknown): void {
       }
       const prototype = Object.getPrototypeOf(candidate)
       if (prototype !== Object.prototype && prototype !== null) {
-        throw new Error('Invalid IPC payload: only plain objects are allowed')
+        throw new IpcValidationError('Invalid IPC payload: only plain objects are allowed')
       }
       for (const [key, item] of Object.entries(candidate as Record<string, unknown>)) {
-        if (FORBIDDEN_KEYS.has(key)) throw new Error(`Invalid IPC payload: forbidden key ${key}`)
+        if (FORBIDDEN_KEYS.has(key)) throw new IpcValidationError(`Invalid IPC payload: forbidden key ${key}`)
         visit(item, depth + 1)
       }
     } finally {
@@ -129,8 +133,20 @@ export function installTrustedIpcBoundary(): void {
   const originalHandle = ipcMain.handle.bind(ipcMain)
   ipcMain.handle = ((channel: string, listener: Parameters<typeof ipcMain.handle>[1]) => {
     return originalHandle(channel, async (event, ...args) => {
-      assertTrustedIpcSender(event)
-      assertSafeIpcPayload(args)
+      try {
+        assertTrustedIpcSender(event)
+        assertSafeIpcPayload(args)
+      } catch (error) {
+        // Never log rejected payloads, frame URLs, or exception text supplied
+        // by the caller: the source can include credentials and huge strings.
+        logEvent('warn', 'ipc-security', 'IPC request rejected', {
+          channel, correlationId: `ipc_${randomUUID().replaceAll('-', '')}`, status: 'error',
+          senderId: event.sender?.id ?? null,
+          mainFrame: Boolean(event.senderFrame && event.senderFrame === event.sender?.mainFrame),
+          reason: error instanceof IpcValidationError ? 'invalid-payload' : 'untrusted-sender'
+        })
+        throw error
+      }
       return listener(event, ...args)
     })
   }) as typeof ipcMain.handle

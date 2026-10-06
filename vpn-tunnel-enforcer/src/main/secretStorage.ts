@@ -1,8 +1,10 @@
 import * as electron from 'electron'
 import { existsSync, lstatSync, readFileSync, openSync, writeFileSync, fsyncSync, closeSync, renameSync, unlinkSync } from 'fs'
 import { randomUUID } from 'crypto'
+import { logEvent } from './appLogger'
 
 export const SECRET_REF_KIND = 'vpnte-safe-storage-v1' as const
+const DPAPI_PREFIX = 'enc:dpapi:v1:'
 
 export interface SecretRef {
   __vpnteSecretRef: typeof SECRET_REF_KIND
@@ -33,7 +35,7 @@ export function encryptSecret(value: string): SecretRef {
   if (safeStorage?.isEncryptionAvailable?.()) {
     return {
       __vpnteSecretRef: SECRET_REF_KIND,
-      ciphertext: safeStorage.encryptString(value).toString('base64')
+      ciphertext: DPAPI_PREFIX + safeStorage.encryptString(value).toString('base64')
     }
   }
   if (testCipherAvailable()) {
@@ -53,7 +55,10 @@ export function decryptSecret(ref: SecretRef): string {
   if (!safeStorage?.isEncryptionAvailable?.()) {
     throw new Error('Secure storage is unavailable; encrypted VPN secrets cannot be opened')
   }
-  return safeStorage.decryptString(Buffer.from(ref.ciphertext, 'base64'))
+  // Previously released SecretRefs used raw base64; preserve read compatibility.
+  const ciphertext = ref.ciphertext.startsWith(DPAPI_PREFIX) ? ref.ciphertext.slice(DPAPI_PREFIX.length) : ref.ciphertext
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(ciphertext)) throw new Error('Invalid encrypted secret encoding')
+  return safeStorage.decryptString(Buffer.from(ciphertext, 'base64'))
 }
 
 export function encryptJsonSecret(value: unknown): SecretRef {
@@ -66,10 +71,30 @@ export function decryptJsonSecret<T>(ref: SecretRef): T {
 
 /** Protect existing plaintext migration backups and create new ones without a
  * plaintext temporary file. The original source is never changed on failure. */
-export function protectLegacySecretBackup(backupPath: string, sourcePath?: string): void {
+export function protectLegacySecretBackup(
+  backupPath: string,
+  sourcePath?: string,
+  store: 'settings' | 'server-picker' | 'server-groups' | 'secrets' = 'secrets'
+): void {
+  const step = sourcePath ? 'backup-create' : 'backup-existing'
+  try {
+    const result = protectSecretBackup(backupPath, sourcePath)
+    logEvent('info', 'secret-migration', 'secret backup step completed', {
+      store, step, status: result === 'skipped' ? 'skipped' : 'success', result
+    })
+  } catch (error) {
+    // Paths, file contents and exception text can contain credentials.
+    logEvent('error', 'secret-migration', 'secret backup step failed; original data retained', {
+      store, step, status: 'error'
+    })
+    throw error
+  }
+}
+
+function protectSecretBackup(backupPath: string, sourcePath?: string): 'created' | 'protected' | 'verified' | 'skipped' {
   const exists = existsSync(backupPath)
   const input = exists ? backupPath : sourcePath
-  if (!input || !existsSync(input)) return
+  if (!input || !existsSync(input)) return 'skipped'
   const info = lstatSync(input)
   if (!info.isFile() || info.isSymbolicLink() || info.size > 16 * 1024 * 1024) throw new Error('Invalid secret migration backup artifact')
   const raw = readFileSync(input, 'utf8')
@@ -79,7 +104,7 @@ export function protectLegacySecretBackup(backupPath: string, sourcePath?: strin
     if (parsed?.__vpnteEncryptedBackup === 1) {
       if (!isSecretRef(parsed.contents)) throw new Error('Invalid encrypted migration backup')
       decryptSecret(parsed.contents) // Authenticate/read-back before calling it protected.
-      return
+      return 'verified'
     }
   }
   const contents = encryptSecret(raw)
@@ -93,4 +118,5 @@ export function protectLegacySecretBackup(backupPath: string, sourcePath?: strin
   } finally {
     try { unlinkSync(temporary) } catch (error: any) { if (error?.code !== 'ENOENT') throw error }
   }
+  return exists ? 'protected' : 'created'
 }

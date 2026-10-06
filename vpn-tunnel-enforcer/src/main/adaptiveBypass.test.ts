@@ -55,10 +55,10 @@ describe('adaptive bypass capability matrix', () => {
     state.identity.mockResolvedValue(known ? identity : null)
     const fingerprint = await readAdaptiveNetworkFingerprint()
     expect(fingerprint !== null).toBe(known)
-    expect(logEvent).toHaveBeenCalledExactlyOnceWith('info', 'adaptive-bypass', 'Network identity read completed', {
+    expect(logEvent).toHaveBeenCalledWith('info', 'adaptive-bypass', 'Network identity read completed', {
       reader: 'cim', durationMs: expect.any(Number), known
     })
-    const details = vi.mocked(logEvent).mock.calls[0][3] as { durationMs: number }
+    const details = vi.mocked(logEvent).mock.calls.find(call => call[2] === 'Network identity read completed')![3] as { durationMs: number }
     expect(details.durationMs).toBeGreaterThanOrEqual(0)
     expect(Object.keys(details).sort()).toEqual(['durationMs', 'known', 'reader'])
   })

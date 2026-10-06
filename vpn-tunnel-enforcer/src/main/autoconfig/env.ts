@@ -1,10 +1,12 @@
 import { execFile } from 'child_process'
-import { mkdir, readFile, unlink, writeFile } from 'fs/promises'
+import { lstat, mkdir, readFile, unlink, writeFile } from 'fs/promises'
 import { homedir } from 'os'
 import { join } from 'path'
 import { promisify } from 'util'
 
 const execFileAsync = promisify(execFile)
+// The receipt remains a cleanup obligation until verified rollback retires it.
+let cleanupPending = false
 
 export interface EnvProxyBackup {
   createdAt: number
@@ -24,6 +26,16 @@ function parseBackup(raw: string): EnvProxyBackup {
 
 function backupPath(): string {
   return join(homedir(), '.vpnte', 'env-proxy-backup.json')
+}
+
+async function retainCleanupPending(): Promise<void> {
+  cleanupPending = true
+  try {
+    // Exclusive creation never truncates or follows an existing marker.
+    await writeFile(`${backupPath()}.pending`, '', { flag: 'wx' })
+  } catch (err: any) {
+    if (err?.code !== 'EEXIST') throw err
+  }
 }
 
 function proxyUrl(proxyAddr: string, proxyType: 'socks5' | 'http'): string {
@@ -59,17 +71,18 @@ async function getUserEnvValue(name: string): Promise<string | null> {
     })) as { stdout: string; stderr: string }
     const lines = stdout.split(/\r?\n/)
     for (const line of lines) {
-      const trimmed = line.trim()
-      if (trimmed.startsWith(name)) {
-        const parts = trimmed.split(/\s+/)
-        if (parts.length >= 3) {
-          return parts.slice(2).join(' ')
-        }
+      const match = line.trim().match(/^(\S+)\s+(REG_SZ|REG_EXPAND_SZ)(?:\s+(.*))?$/i)
+      if (match && match[1].toUpperCase() === name.toUpperCase()) {
+        return match[3] ?? ''
       }
     }
-    return null
+    throw new Error(`Unable to parse registry value ${name}`)
   } catch (err: any) {
-    if (/unable to find|не удается найти|не удалось найти/i.test(String(err?.stderr || err?.message || ''))) return null
+    const text = String(err?.stderr || err?.message || '')
+    if (err?.code === 1 && !err?.killed && !err?.signal &&
+        /unable to find the specified registry key or value|не удается найти указанный раздел или параметр|не удалось найти указанный раздел или параметр/i.test(text)) {
+      return null
+    }
     throw err
   }
 }
@@ -97,14 +110,7 @@ async function deleteUserEnvValue(name: string): Promise<void> {
 }
 
 async function saveBackupIfMissing(): Promise<void> {
-  try {
-    parseBackup(await readFile(backupPath(), 'utf8'))
-    return
-  } catch (err: any) {
-    if (err?.code !== 'ENOENT') {
-      throw err
-    }
-  }
+  if (await env.isApplied()) return
   await mkdir(join(homedir(), '.vpnte'), { recursive: true })
   const backup: EnvProxyBackup = {
     createdAt: Date.now(),
@@ -114,6 +120,7 @@ async function saveBackupIfMissing(): Promise<void> {
     noProxy: await getUserEnvValue('NO_PROXY')
   }
   await writeFile(backupPath(), JSON.stringify(backup, null, 2), 'utf8')
+  await retainCleanupPending()
 }
 
 export const env = {
@@ -161,23 +168,32 @@ export const env = {
 
   async rollback(): Promise<boolean> {
     try {
-      let backup: EnvProxyBackup | null = null
+      let backup: EnvProxyBackup
       try {
         backup = parseBackup(await readFile(backupPath(), 'utf8'))
+        await retainCleanupPending()
       } catch {
-        // No backup file found — cannot restore unknown prior environment
+        // Missing or unreadable backup — cannot restore unknown prior environment
         return false
       }
 
       let hasErrors = false
 
-      const restoreOrDelete = async (name: string, value: string | null | undefined) => {
+      const restoreOrDelete = async (name: string, value: string | null) => {
         try {
-          if (value !== null && value !== undefined) {
-            await setUserEnvValue(name, value)
+          if (await getUserEnvValue(name) !== value) {
+            if (value !== null) {
+              await setUserEnvValue(name, value)
+            } else {
+              await deleteUserEnvValue(name)
+            }
+            if (await getUserEnvValue(name) !== value) {
+              throw new Error(`Unable to verify environment restoration for ${name}`)
+            }
+          }
+          if (value !== null) {
             process.env[name] = value
           } else {
-            await deleteUserEnvValue(name)
             delete process.env[name]
           }
         } catch {
@@ -185,17 +201,19 @@ export const env = {
         }
       }
 
-      await restoreOrDelete('HTTP_PROXY', backup?.httpProxy ?? null)
-      await restoreOrDelete('HTTPS_PROXY', backup?.httpsProxy ?? null)
-      await restoreOrDelete('ALL_PROXY', backup?.allProxy ?? null)
-      await restoreOrDelete('NO_PROXY', backup?.noProxy ?? null)
+      await restoreOrDelete('HTTP_PROXY', backup.httpProxy)
+      await restoreOrDelete('HTTPS_PROXY', backup.httpsProxy)
+      await restoreOrDelete('ALL_PROXY', backup.allProxy)
+      await restoreOrDelete('NO_PROXY', backup.noProxy)
 
       if (hasErrors) {
         // Preserve backup file if restore operations failed, so rollback can be retried
         return false
       }
 
-      await unlink(backupPath()).catch(() => undefined)
+      await unlink(`${backupPath()}.pending`)
+      await unlink(backupPath())
+      cleanupPending = false
       await broadcastEnvironmentChanged()
       return true
     } catch {
@@ -205,14 +223,19 @@ export const env = {
 
   async isApplied(): Promise<boolean> {
     try {
-      const { stdout } = (await execFileAsync('reg', ['query', 'HKCU\\Environment', '/v', 'HTTP_PROXY'], {
-        windowsHide: true,
-        timeout: 10000,
-        encoding: 'utf8'
-      })) as { stdout: string; stderr: string }
-      return stdout.includes('HTTP_PROXY')
-    } catch {
-      return false
+      parseBackup(await readFile(backupPath(), 'utf8'))
+      await retainCleanupPending()
+      return true
+    } catch (err: any) {
+      if (err?.code === 'ENOENT' && !cleanupPending) {
+        try { await lstat(`${backupPath()}.pending`) }
+        catch (markerError: any) {
+          if (markerError?.code === 'ENOENT') return false
+          throw markerError
+        }
+        cleanupPending = true
+      }
+      throw err
     }
   }
 }

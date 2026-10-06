@@ -3,6 +3,7 @@ import { networkInterfaces } from 'os'
 import { safeStorage } from 'electron'
 import Store from 'electron-store'
 import { logEvent } from './appLogger'
+import { decryptSecret, encryptSecret, SECRET_REF_KIND } from './secretStorage'
 import { ALL_KNOWN_ALIASES, getTunAdapterAlias, isOwnTunAddress } from './tunAdapter'
 import { isIP } from 'net'
 import { readAdaptiveNetworkIdentity, type AdaptiveNetworkIdentity } from './adaptiveNetworkIdentity'
@@ -76,30 +77,33 @@ function getInstallSecret(): string {
   if (cachedInstallSecret) return cachedInstallSecret
 
   const encrypted = store.get('encryptedInstallSecret')
-  if (encrypted && safeStorage?.isEncryptionAvailable?.()) {
-    try {
-      cachedInstallSecret = safeStorage.decryptString(Buffer.from(encrypted, 'base64'))
-      return cachedInstallSecret
-    } catch {
-      store.delete('encryptedInstallSecret')
-    }
+  if (encrypted) {
+    if (!safeStorage?.isEncryptionAvailable?.()) throw new Error('Adaptive secure storage unavailable; saved identity was left unchanged')
+    cachedInstallSecret = decryptSecret({ __vpnteSecretRef: SECRET_REF_KIND, ciphertext: encrypted })
+    return cachedInstallSecret
   }
 
   const fallback = store.get('fallbackInstallSecret')
   if (fallback) {
+    if (!safeStorage?.isEncryptionAvailable?.()) throw new Error('Adaptive secret migration requires secure storage; saved identity was left unchanged')
+    const protectedSecret = encryptSecret(fallback)
+    if (decryptSecret(protectedSecret) !== fallback) throw new Error('Adaptive secret read-back failed')
+    store.store = { learning: store.get('learning') ?? {}, encryptedInstallSecret: protectedSecret.ciphertext }
     cachedInstallSecret = fallback
     return fallback
   }
 
   const secret = randomBytes(32).toString('base64')
-  cachedInstallSecret = secret
   if (safeStorage?.isEncryptionAvailable?.()) {
-    store.set('encryptedInstallSecret', safeStorage.encryptString(secret).toString('base64'))
+    const protectedSecret = encryptSecret(secret)
+    if (decryptSecret(protectedSecret) !== secret) throw new Error('Adaptive secret read-back failed')
+    store.set('encryptedInstallSecret', protectedSecret.ciphertext)
   } else {
-    // Development and unsupported platforms do not provide DPAPI/Keychain.
-    // This value is only a local HMAC key and never leaves the machine.
-    store.set('fallbackInstallSecret', secret)
+    // No plaintext fallback. An ephemeral identity cannot reuse saved learning
+    // after restart, but keeps non-secret discovery available in this session.
+    logEvent('warn', 'adaptive', 'secure storage unavailable; using session-only identity')
   }
+  cachedInstallSecret = secret
   return secret
 }
 

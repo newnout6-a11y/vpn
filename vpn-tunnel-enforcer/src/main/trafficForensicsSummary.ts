@@ -1,7 +1,7 @@
 import { existsSync } from 'fs'
 import * as fsp from 'fs/promises'
 import { join } from 'path'
-import { app } from 'electron'
+import { getPrivilegedRuntimeDir } from './runtimePaths'
 
 export type TrafficForensicsSummaryEngine = 'pktmon' | 'netsh'
 
@@ -281,7 +281,7 @@ function looksPhysical(value: string, tunnelAliases?: Set<string>): boolean {
 async function readRuntimeTunnelAliases(): Promise<Set<string>> {
   const aliases = new Set<string>()
   try {
-    const runtimeConfigPath = join(app.getPath('userData'), 'tun-runtime', 'sing-box.json')
+    const runtimeConfigPath = join(getPrivilegedRuntimeDir('tun-runtime'), 'sing-box.json')
     const text = await readTextIfExists(runtimeConfigPath)
     if (!text) return aliases
     const config = JSON.parse(text)

@@ -1,4 +1,16 @@
-import { describe, it, expect, vi } from 'vitest'
+import { beforeEach, describe, it, expect, vi } from 'vitest'
+const runtimeProbe = vi.hoisted(() => ({ exec: vi.fn(), acl: vi.fn() }))
+vi.mock('child_process', () => {
+  const execFile = vi.fn()
+  ;(execFile as any)[Symbol.for('nodejs.util.promisify.custom')] = runtimeProbe.exec
+  const api = { execFile, exec: vi.fn() }
+  return { ...api, default: api }
+})
+vi.mock('fs/promises', async importOriginal => {
+  const api = { ...await importOriginal<typeof import('fs/promises')>(), stat: vi.fn(async () => ({ size: 1024 })) }
+  return { ...api, default: api }
+})
+vi.mock('./runtimeDirSecurity', () => ({ verifyDirectoryHardened: runtimeProbe.acl }))
 import { readFileSync } from 'fs'
 import { join } from 'path'
 import type { ServerProfile } from '../shared/ipc-types'
@@ -6,6 +18,7 @@ import type { ServerProfile } from '../shared/ipc-types'
 vi.mock('electron', () => ({
   app: {
     getVersion: () => '1.1.0-test',
+    getAppPath: () => '/bundled',
     getPath: () => '/tmp/vpnte-test',
     isPackaged: false
   }
@@ -28,7 +41,7 @@ vi.mock('./tunController', () => ({
 }))
 vi.mock('./serverPicker', () => ({ getActiveProfile: vi.fn(() => null) }))
 
-import { buildActiveProfileDiagnosticItems, isBenignSingBoxLogNoise } from './systemDiagnostics'
+import { buildActiveProfileDiagnosticItems, getBinaryItems, isBenignSingBoxLogNoise } from './systemDiagnostics'
 
 const systemDiagnosticsSource = () => readFileSync(join(process.cwd(), 'src', 'main', 'systemDiagnostics.ts'), 'utf8')
 
@@ -44,6 +57,31 @@ function profile(partial: Partial<ServerProfile> & { outbound?: Record<string, a
     ...partial
   } as ServerProfile
 }
+
+describe('runtime diagnostic execution boundary (AT-01-009)', () => {
+  beforeEach(() => {
+    runtimeProbe.exec.mockReset().mockResolvedValue({ stdout: 'fixture version', stderr: '' })
+    runtimeProbe.acl.mockReset().mockResolvedValue({ hardened: true, message: 'fixture' })
+  })
+  it('does not execute the runtime version probe after ACL refusal', async () => {
+    runtimeProbe.acl.mockResolvedValue({ hardened: false, message: 'unsafe parent' })
+    const rows = await getBinaryItems()
+    expect(runtimeProbe.exec).toHaveBeenCalledTimes(1)
+    expect(runtimeProbe.exec.mock.calls.some(call => String(call[0]).endsWith('vpnte-sing-box.exe'))).toBe(false)
+    expect(rows.find(row => row.id === 'runtime-acl')?.status).toBe('fail')
+  })
+  it('checks the namespace before executing even a read-only runtime version command', async () => {
+    await getBinaryItems()
+    expect(runtimeProbe.exec).toHaveBeenCalledTimes(2)
+    expect(runtimeProbe.acl.mock.invocationCallOrder[0]).toBeLessThan(runtimeProbe.exec.mock.invocationCallOrder[1])
+  })
+  it('does not execute the runtime version probe when inspection rejects', async () => {
+    runtimeProbe.acl.mockRejectedValue(new Error('reader failed'))
+    const rows = await getBinaryItems()
+    expect(runtimeProbe.exec).toHaveBeenCalledTimes(1)
+    expect(rows.find(row => row.id === 'runtime-acl')?.status).toBe('fail')
+  })
+})
 
 describe('buildActiveProfileDiagnosticItems', () => {
   it('does not include legacy Microsoft Store repair diagnostics in the VPN system report', () => {

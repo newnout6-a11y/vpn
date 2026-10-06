@@ -175,8 +175,9 @@ const defaults: AppSettings = {
 
 type PersistedAppSettings = Omit<
   AppSettings,
-  'directVpnInput' | 'directVpnCachedInput' | 'directVpnCachedSource' | 'directVpnCachedProfiles'
+  'proxyOverride' | 'directVpnInput' | 'directVpnCachedInput' | 'directVpnCachedSource' | 'directVpnCachedProfiles'
 > & {
+  proxyOverride: string | SecretRef
   directVpnInput: string | SecretRef
   directVpnCachedInput: string | SecretRef
   directVpnCachedSource: string | SecretRef
@@ -185,11 +186,12 @@ type PersistedAppSettings = Omit<
 
 const store = new Store<{ settings: PersistedAppSettings | AppSettings; schemaVersion: number; migration?: unknown }>({
   name: 'settings',
-  defaults: { settings: defaults, schemaVersion: 1 }
+  defaults: { settings: defaults, schemaVersion: 2 }
 })
 
 function hasPlaintextSettingsSecrets(value: PersistedAppSettings | AppSettings): boolean {
   return Boolean(
+    (typeof value.proxyOverride === 'string' && /@/.test(value.proxyOverride)) ||
     (typeof value.directVpnInput === 'string' && value.directVpnInput) ||
     (typeof value.directVpnCachedInput === 'string' && value.directVpnCachedInput) ||
     (typeof value.directVpnCachedSource === 'string' && value.directVpnCachedSource) ||
@@ -200,6 +202,7 @@ function hasPlaintextSettingsSecrets(value: PersistedAppSettings | AppSettings):
 function decodePersistedSettings(value: PersistedAppSettings | AppSettings): AppSettings {
   return {
     ...value,
+    proxyOverride: isSecretRef(value.proxyOverride) ? decryptSecret(value.proxyOverride) : value.proxyOverride,
     directVpnInput: isSecretRef(value.directVpnInput) ? decryptSecret(value.directVpnInput) : value.directVpnInput,
     directVpnCachedInput: isSecretRef(value.directVpnCachedInput) ? decryptSecret(value.directVpnCachedInput) : value.directVpnCachedInput,
     directVpnCachedSource: isSecretRef(value.directVpnCachedSource) ? decryptSecret(value.directVpnCachedSource) : value.directVpnCachedSource,
@@ -212,6 +215,7 @@ function decodePersistedSettings(value: PersistedAppSettings | AppSettings): App
 function encodeSettings(value: AppSettings): PersistedAppSettings {
   return {
     ...value,
+    proxyOverride: /@/.test(value.proxyOverride) ? encryptSecret(value.proxyOverride) : value.proxyOverride,
     directVpnInput: value.directVpnInput ? encryptSecret(value.directVpnInput) : '',
     directVpnCachedInput: value.directVpnCachedInput ? encryptSecret(value.directVpnCachedInput) : '',
     directVpnCachedSource: value.directVpnCachedSource ? encryptSecret(value.directVpnCachedSource) : '',
@@ -222,7 +226,7 @@ function encodeSettings(value: AppSettings): PersistedAppSettings {
 }
 
 function readSettingsWithMigration(): AppSettings {
-  protectLegacySecretBackup(`${store.path}.pre-safe-storage-v1.bak`)
+  protectLegacySecretBackup(`${store.path}.pre-safe-storage-v1.bak`, undefined, 'settings')
   const persisted = store.get('settings')
   const decoded = decodePersistedSettings(persisted)
   if (!hasPlaintextSettingsSecrets(persisted)) return decoded
@@ -230,20 +234,26 @@ function readSettingsWithMigration(): AppSettings {
     throw new Error('Settings migration requires Windows secure storage; plaintext data was left unchanged')
   }
 
-  protectLegacySecretBackup(`${store.path}.pre-safe-storage-v1.bak`, store.path)
-  store.store = {
-    settings: encodeSettings(decoded),
-    schemaVersion: 1,
-    migration: {
-      id: 'safe-storage-v1',
-      completedAt: Date.now()
+  protectLegacySecretBackup(`${store.path}.pre-safe-storage-v1.bak`, store.path, 'settings')
+  logEvent('info', 'secret-migration', 'settings migration started', { step: 'encrypt' })
+  try {
+    const encoded = encodeSettings(decoded)
+    decodePersistedSettings(encoded) // Read-back before the atomic commit.
+    store.store = {
+      settings: encoded, schemaVersion: 2,
+      migration: { id: 'safe-storage-v1', completedAt: Date.now() }
     }
+    logEvent('info', 'secret-migration', 'settings migration completed', { step: 'commit', status: 'success' })
+  } catch (error) {
+    logEvent('error', 'secret-migration', 'settings migration failed; original data retained', { step: 'encrypt-or-commit', status: 'error' })
+    throw error
   }
   return decoded
 }
 
 function persistSettings(value: AppSettings): void {
   const containsSecrets = Boolean(
+    /@/.test(value.proxyOverride) ||
     value.directVpnInput ||
     value.directVpnCachedInput ||
     value.directVpnCachedSource ||
@@ -253,7 +263,7 @@ function persistSettings(value: AppSettings): void {
     throw new Error('Secure storage is unavailable; settings containing VPN secrets were not written')
   }
   store.set('settings', encodeSettings(value))
-  store.set('schemaVersion', 1)
+  store.set('schemaVersion', 2)
 }
 
 function normalizeSettings(input: Partial<AppSettings> | undefined): AppSettings {

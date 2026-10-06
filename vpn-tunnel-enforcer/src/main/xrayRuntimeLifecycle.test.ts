@@ -21,6 +21,7 @@ vi.mock('fs/promises', () => {
   return { ...api, default: api }
 })
 vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
+vi.mock('./runtimeDirSecurity', () => ({ ensureElevatedRuntimeDirHardened: vi.fn(async () => ({ hardened: true })) }))
 vi.mock('./vpnProfiles', () => ({ clientFingerprintForDevice: () => 'chrome' }))
 vi.mock('./tunController', () => ({ getTunRuntimeDir: () => 'C:\\fixture', getBundledResource: () => 'xray.exe',
   copyResourceIfStale: vi.fn(async () => true), pickFreeLocalPort: vi.fn(async () => 50123) }))

@@ -6,6 +6,6 @@ export function compactForIpcLog(value: unknown): string {
     if (!raw) return ''
     return raw.length > 2000 ? `${raw.slice(0, 2000)}...<truncated>` : raw
   } catch {
-    return String(value)
+    return '[unserializable IPC payload]'
   }
 }

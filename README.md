@@ -17,7 +17,7 @@ Windows-клиент (10/11 x64, версия 1.1.22) для изоляции с
 **Hard Mode (directVpn)** — требует прав администратора:
 - Wintun-адаптер (алиас маскируется под `Ethernet 5..12`, подсеть `192.168.250.252/30`, адрес `.253`, резолвер `.254`, метрика 5, IPv4-only).
 - Ядро `sing-box` (основное), сателлит `xray-core` для VLESS-REALITY (SOCKS на `127.0.0.1`, случайный порт).
-- Поднятие туннеля — ~10 шагов: pre-flight (чужой TUN → отказ с объяснением), lockdown физических адаптеров (IPv6 off, DNS → `.254`, `DisableSmartNameResolution`), копирование бинарей в рантайм (только если устарели — по size+mtime), генерация конфига + `sing-box check -c`, запуск, ожидание `Status=Up` у TUN, и **только потом** kill-switch (иначе правило по `-InterfaceAlias` молча не создастся).
+- Поднятие туннеля — ~10 шагов: pre-flight (чужой TUN → отказ с объяснением), lockdown физических адаптеров (IPv6 off, DNS → `.254`, `DisableSmartNameResolution`), проверка ACL/владельцев runtime и SHA-256 бинарей относительно bundled-ресурсов, атомарный staging при несовпадении, генерация конфига + `sing-box check -c`, запуск, ожидание `Status=Up` у TUN, и **только потом** kill-switch (иначе правило по `-InterfaceAlias` молча не создастся).
 - Watchdog: directVpn — проверка egress-IP каждые 15 с; localProxy — TCP-проба прокси каждые 5 с, 3 промаха → `proxy-down` без роняния TUN. Авторестарт с бэкоффом 2/5/10 с, затем post-trial failover по соседним ключам группы.
 
 **Soft Mode (localProxy)** — без админ-прав: прямое локальное SOCKS5/HTTP-проксирование. TCP-проба upstream + `validateProxyFullTunnel` (curl-гонка через прокси vs прямой IP — проверка, что прокси не отдаёт мой же IP). Автоконфиг окружения разработчика: Android Studio, Git, Gradle, переменные `HTTP_PROXY`/`HTTPS_PROXY` в `HKCU\Environment` (для SOCKS5 пишется `socks5h://`, чтобы DNS тоже шёл через прокси).
@@ -51,10 +51,11 @@ Split tunneling — по **имени процесса** (direct/vpn/none), hot-
 
 ## Форензика трафика
 
-- Сессии: elevated `pktmon` (провайдеры TCPIP/WFP/Winsock-AFD/WebIO, circular capture 128–2048 MiB, default 512), fallback — `netsh trace`. Хранилище `<userData>/traffic-forensics/sessions/<timestamp>`, retention 1–10 сессий (default 3).
+- Сессии: elevated `pktmon` (провайдеры TCPIP/WFP/Winsock-AFD/WebIO, circular capture 128–2048 MiB, default 512), fallback — `netsh trace`. Хранилище `%ProgramData%\VPNTE\runtime\<instance-hash>\traffic-forensics\sessions\<timestamp>`, retention 1–10 сессий (default 3). Ошибка доверенной ACL/namespace-проверки блокирует выполнение скриптов.
 - **Rust ETW-сайдкар** (`native/vpnte-etw-sidecar/`, `ferrisetw`): 5 провайдеров (TCPIP, DNS-Client, WFP, Winsock-AFD, WebIO), heartbeat каждые 30 с, лимит 250 000 data-событий с backpressure, только метаданные (5-tuple, DNS-имена — не пейлоады), стабильная kernel-сессия `VPNTE-ETW` с reclaim осиротевшей. Честная оговорка: PowerShell-фолбэк (`vpnte-etw-sidecar.ps1`) — это поллинг Event Log, а не настоящий ETW, и на части систем теряет события.
 - Summary: `summary.json`, `timeline.ndjson`, `flows.ndjson`, `dns.ndjson`, `drops.ndjson`, `tcp-health.ndjson`, вердикты (`leak`, `TUN path`, `kill-switch block`, `reset`, `timeout/loss`, `MTU`, `sing-box failure`, `insufficient evidence`).
-- Zombie recovery протухших `running: true`, 30-секундный warmup без варнингов, stop-артефакты переопределяют stale-статусы.
+- 30-секундный warmup без варнингов. Завершение сайдкара и stop-артефакты не доказывают остановку `pktmon/netsh`: ошибка остановки сохраняет активную сессию с `cleanupPending` и возможностью повторить cleanup. При отказе ACL провайдер, запущенный текущим процессом, останавливается фиксированной командой без runtime-скриптов; недоверенный manifest не даёт такого полномочия.
+- Старый AppData `latest-session.json` используется только как ограниченный по размеру недоверенный признак незавершённого захвата. При активном/повреждённом/нечитаемом marker UI показывает «остановка не подтверждена», новый захват блокируется даже при выключенной настройке форензики. Автоматический legacy process/session handoff и installed-upgrade oracle не реализованы.
 - Экспорт — с redaction: IPv4/IPv6/MAC/домены → стабильные токены, raw ETL/PCAPNG не экспортируются, маппинг токенов не сохраняется.
 
 ## Диагностика и UI
@@ -86,7 +87,9 @@ Split tunneling — по **имени процесса** (direct/vpn/none), hot-
 **Есть (реализовано в WP-1 и WP-3):**
 - **Шифрование секретов:** ключи VPN, токены, UUID и ссылки подписок шифруются через Electron `safeStorage` (Windows DPAPI); хранилища групп серверов и бэкапы миграции защищены.
 - **Доверенная IPC-граница:** строгая проверка `senderFrame` (только mainFrame), точного origin/file entry point, валидация structured-clone (лимиты глубины, размера строк/бинарников, запрет `__proto__`, NaN/Infinity); действенный `<meta>` CSP для `file://`.
-- **Безопасный экспорт и импорт:** экспорт ключей требует нативного системного диалога подтверждения в main-процессе; очистка буфера обмена через 60 с по SHA-256 таймеру; импорт конфигов и правил доменов привязан к одноразовым capability-токенам нативного диалога.
+- **Безопасный экспорт и импорт:** экспорт конфигурации по умолчанию маскирует секреты; отдельный экспорт с секретами и экспорт ключей требуют нативного подтверждения в main-процессе; очистка буфера обмена через 60 с по SHA-256 таймеру; импорт конфигов и правил доменов привязан к одноразовым capability-токенам нативного диалога.
+- **Доверенный runtime:** sing-box/Xray, внешний прокси и исполняемые скрипты форензики размещаются в `%ProgramData%\VPNTE\runtime\<instance-hash>\`. Перед staging проверяются владельцы, эффективные права подмены/удаления и reparse points всей родительской цепочки. Отсутствующие application-каталоги создаются сразу с защищённым DACL; существующие небезопасные каталоги не получают доверие автоматически. AppData ACL не изменяются. Старые runtime/forensics-каталоги не копируются и не используются для запуска; перед обновлением следует штатно остановить старый клиент, поскольку автоматическая миграция его процессов/сессий не реализована.
+- **Границы WP-1:** код и локальные регрессии не означают полной Windows/L3-приёмки. Результаты и непроверенные сценарии — в [локальном отчёте WP-1](vpn-tunnel-enforcer/docs/wp1-security-acceptance-2026-10-04.md).
 - **Транзакционный Firewall и Boot Recovery:** манифесты хранятся в `%ProgramData%\VPNTE\manifests\` с защитой ACL (SYSTEM/Admins only) и защитой от symlinks; регистрация задачи `BootRecoveryTask` в packaged-сборках проверена (UTF-16LE EncodedCommand); независимый покомпонентный откат (DNS, IPv6, Firewall, WinINet); fail-closed блокировка при strictMode; защита от удаления физических сетевых адаптеров.
 - Скрытие приватных данных устройства (HWID, заголовки) из командной строки `curl` (передаются через stdin).
 
@@ -139,14 +142,19 @@ npm run dev        # из корня репозитория тоже работ�
 
 ## Тесты
 
-134 тест-файла на Vitest (1164 теста). Последний прогон в Linux-песочнице (28.09.2026): 1109 passed, 43 failed (преимущественно Windows-специфика: пути/PowerShell), 12 skipped; на Windows набор зелёный. Актуальные итоги — вывод `npm test`.
+Последний локальный Windows-прогон (04.10.2026): **206 файлов passed / 2 skipped; 2459 тестов passed / 10 skipped / 0 failed**. Отдельно выполнены native Electron smoke и локальные подмножества WP-1. Пропущенные/VM-проверки не считаются PASS; актуальные итоги — вывод `npm test` и [отчёт WP-1](vpn-tunnel-enforcer/docs/wp1-security-acceptance-2026-10-04.md).
 
 ```bash
 npm test                                            # полный набор
 npm --prefix vpn-tunnel-enforcer run test:watch     # watch-режим
 npm --prefix vpn-tunnel-enforcer run test:coverage  # покрытие
 npm run typecheck                                   # tsc --noEmit
+npm --prefix vpn-tunnel-enforcer run test:wp1:fuzz   # полный бюджет IPC envelope / redactor
+npm --prefix vpn-tunnel-enforcer run test:wp1:native # build + изолированные native subsets, без clipboard
+npm --prefix vpn-tunnel-enforcer run test:wp1:migration:local # DPAPI/store на Electron 44, не 42→44
 ```
+
+Полная cross-version проверка `test:wp1:migration` требует пути к настоящему Electron 42 в `VPNTE_ELECTRON42_EXE`; без него выводит `NOT-CHECKED` и завершается с кодом 77.
 
 ## Сборка
 

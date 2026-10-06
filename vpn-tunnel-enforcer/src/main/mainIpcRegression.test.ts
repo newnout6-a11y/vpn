@@ -10,6 +10,16 @@ const ipMonitorSource = () => readFileSync(join(process.cwd(), 'src', 'main', 'i
 const leakDiagnosticsSource = () => readFileSync(join(process.cwd(), 'src', 'main', 'leakDiagnostics.ts'), 'utf8')
 
 describe('main IPC regressions', () => {
+  it('retains diagnostic artifacts if provider cleanup fails or remains unknown (AT-08-005)', () => {
+    const source = mainIndexSource()
+    const start = source.indexOf("handleLogged('clear-diagnostic-artifacts'")
+    const end = source.indexOf("handleLogged('rollback-tun-network-baseline'", start)
+    const handler = source.slice(start, end)
+    expect(handler).toContain('capture.running || capture.cleanupPending')
+    expect(handler).not.toContain("stopTrafficForensicsSession('manual diagnostics artifact clear').catch")
+    expect(handler.indexOf('await stopTrafficForensicsSession')).toBeLessThan(handler.indexOf('targets.map'))
+    expect(handler.indexOf('capture.cleanupPending')).toBeLessThan(handler.indexOf('targets.map'))
+  })
   it('bounds inspect-vpn-input before resolving or persisting input', () => {
     const source = mainIndexSource()
     const handlerStart = source.indexOf("handleLogged('inspect-vpn-input'")

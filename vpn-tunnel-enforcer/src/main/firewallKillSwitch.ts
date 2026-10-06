@@ -8,6 +8,7 @@ import { promisify } from 'util'
 import { execElevated } from './admin'
 import { execElevatedPs, isElevatedPsHelperRunning } from './elevatedPsHelper'
 import { logEvent } from './appLogger'
+import { getPrivilegedRuntimeDir } from './runtimePaths'
 import { randomUUID, createHash } from 'crypto'
 import { getRecoveryManifestDir, recoveryManifestPath, readRecoveryManifest, writeRecoveryManifest, writeRecoveryArtifact, removeRecoveryManifest, strictRecoveryRequired } from './recoveryManifest'
 import { TUN_ADAPTER_ALIAS, TUN_IPV4_NETWORK_CIDR, getTunAdapterAlias } from './tunAdapter'
@@ -278,7 +279,7 @@ function psSingleQuote(value: string): string {
 }
 
 function externalProxyProgramPath(): string {
-  return join(app.getPath('userData'), 'external-proxy-runtime', EXTERNAL_PROXY_RUNTIME_EXE_NAME)
+  return join(getPrivilegedRuntimeDir('external-proxy-runtime'), EXTERNAL_PROXY_RUNTIME_EXE_NAME)
 }
 
 function stableRuleSuffix(value: string): string {

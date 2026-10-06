@@ -1,4 +1,18 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
+
+const fixturePaths = vi.hoisted(() => {
+  const fs = require('fs') as typeof import('fs')
+  const path = require('path') as typeof import('path')
+  const root = fs.mkdtempSync(path.join(require('os').tmpdir(), 'vpnte-traffic-forensics-'))
+  return {
+    root,
+    data: path.join(root, 'user-data'),
+    stage: path.join(root, 'stage'),
+    sidecar: path.join(root, 'sidecar', 'vpnte-etw-sidecar.cmd')
+  }
+})
+const STOP_ACK = 'VPNTE_CAPTURE_STOPPED:pktmon\nVPNTE_CAPTURE_STOPPED:netsh\n'
+afterAll(() => rmSync(fixturePaths.root, { recursive: true, force: true }))
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { dirname, join } from 'path'
 import { EventEmitter } from 'events'
@@ -10,10 +24,15 @@ process.env.VPNTE_TRAFFIC_FORENSICS_SIDECAR = '0'
 
 vi.mock('electron', () => ({
   app: {
-    getPath: () => 'C:/Users/Redmi/CascadeProjects/vpn/.tmp/vpnte-traffic-forensics',
+    getPath: () => fixturePaths.data,
     getVersion: () => '1.1.0-test',
     isPackaged: false
   }
+}))
+
+// Filesystem fixtures must never write to the production ProgramData runtime.
+vi.mock('./runtimePaths', () => ({
+  getPrivilegedRuntimeDir: (name: string) => join(fixturePaths.data, 'privileged', name)
 }))
 
 vi.mock('./admin', () => ({
@@ -52,9 +71,17 @@ vi.mock('./settings', () => ({
   }
 }))
 
+vi.mock('./trafficForensicsSummary', async importOriginal => {
+  const actual = await importOriginal<typeof import('./trafficForensicsSummary')>()
+  return { ...actual, generateTrafficForensicsSummary: vi.fn(actual.generateTrafficForensicsSummary) }
+})
+import { generateTrafficForensicsSummary } from './trafficForensicsSummary'
+import { ensureElevatedRuntimeDirHardened, verifyDirectoryHardened } from './runtimeDirSecurity'
+
 import {
   getTrafficForensicsStatus,
   recordTrafficForensicsAppEvent,
+  restartTrafficForensicsSession,
   stageTrafficForensicsArtifacts,
   startTrafficForensicsSession,
   stopTrafficForensicsSession
@@ -85,22 +112,198 @@ async function resetForensicsState(): Promise<void> {
 
 describe('trafficForensics', () => {
   afterEach(async () => {
+    execElevatedMock.mockResolvedValue({ stdout: STOP_ACK, stderr: '' })
+    vi.mocked(ensureElevatedRuntimeDirHardened).mockResolvedValue({ hardened: true, message: 'stubbed' })
+    vi.mocked(verifyDirectoryHardened).mockResolvedValue({ hardened: true, message: 'stubbed' })
+    rmSync(join(fixturePaths.data, 'traffic-forensics', 'latest-session.json'), { force: true })
     await resetForensicsState()
     execElevatedMock.mockReset()
     spawnMock.mockReset()
     trafficSettingsMock.enabled = true
+    vi.mocked(ensureElevatedRuntimeDirHardened).mockResolvedValue({ hardened: true, message: 'stubbed' })
+    vi.mocked(verifyDirectoryHardened).mockResolvedValue({ hardened: true, message: 'stubbed' })
     process.env.VPNTE_TRAFFIC_FORENSICS_SIDECAR = '0'
-    if (existsSync('C:/Users/Redmi/CascadeProjects/vpn/.tmp/vpnte-traffic-forensics')) {
-      rmSync('C:/Users/Redmi/CascadeProjects/vpn/.tmp/vpnte-traffic-forensics', { recursive: true, force: true })
+    if (existsSync(fixturePaths.data)) {
+      rmSync(fixturePaths.data, { recursive: true, force: true })
     }
-    if (existsSync('C:/Users/Redmi/CascadeProjects/vpn/.tmp/vpnte-traffic-stage')) {
-      rmSync('C:/Users/Redmi/CascadeProjects/vpn/.tmp/vpnte-traffic-stage', { recursive: true, force: true })
+    if (existsSync(fixturePaths.stage)) {
+      rmSync(fixturePaths.stage, { recursive: true, force: true })
     }
+  })
+
+  it('fails closed before script/network effects when the forensics namespace is untrusted (AT-01-009)', async () => {
+    await resetForensicsState()
+    execElevatedMock.mockClear()
+    vi.mocked(ensureElevatedRuntimeDirHardened).mockResolvedValue({ hardened: false, message: 'unsafe parent' })
+    await expect(startTrafficForensicsSession({ mode: 'directVpn', target: 'fixture' })).rejects.toThrow('RuntimeSecurityAclError')
+    expect(execElevatedMock).not.toHaveBeenCalled()
+    expect(spawnMock).not.toHaveBeenCalled()
+  })
+
+  it('stops its owned provider without runtime scripts after ACL refusal (AT-01-009/AT-08-005)', async () => {
+    await resetForensicsState()
+    execElevatedMock.mockResolvedValue({ stdout: STOP_ACK, stderr: '' })
+    await startTrafficForensicsSession({ mode: 'directVpn', target: 'fixture' })
+    execElevatedMock.mockClear()
+    vi.mocked(verifyDirectoryHardened).mockResolvedValueOnce({ hardened: false, message: 'unsafe parent' })
+    const status = await stopTrafficForensicsSession('security-test')
+    expect(execElevatedMock).toHaveBeenCalledTimes(1)
+    const command = execElevatedMock.mock.calls[0][0] as string
+    expect(command).not.toContain('-File')
+    expect(decodeEncodedCommand(command)).toContain("[Environment]::SystemDirectory, 'pktmon.exe'")
+    expect(decodeEncodedCommand(command)).not.toContain(fixturePaths.data)
+    expect(existsSync(join(status.sessionDir!, 'pktmon-stop.ps1'))).toBe(false)
+    expect(status.running).toBe(false)
+    expect(status.lastError).toContain('CaptureStoppedArtifactsUnavailable')
+  })
+
+  it.each(['pktmon', 'netsh'] as const)('preserves %s cleanup ownership and retries after stop failure (AT-08-005)', async engine => {
+    execElevatedMock.mockResolvedValue({ stdout: STOP_ACK, stderr: '' })
+    if (engine === 'netsh') execElevatedMock.mockRejectedValueOnce(new Error('pktmon unavailable'))
+    const started = await startTrafficForensicsSession({ mode: 'directVpn', target: 'fixture' })
+    expect(started.engine).toBe(engine)
+    execElevatedMock.mockClear().mockRejectedValueOnce(new Error('stop failed'))
+    await expect(stopTrafficForensicsSession('failure-test')).rejects.toThrow('CaptureStopUnconfirmed')
+    const pending = await getTrafficForensicsStatus()
+    expect(pending.running).toBe(true)
+    expect(pending.cleanupPending).toBe(true)
+    expect(pending.stoppedAt).toBeNull()
+    expect(JSON.parse(readFileSync(join(started.sessionDir!, 'session-manifest.json'), 'utf8')).running).toBe(true)
+    const retried = await stopTrafficForensicsSession('retry')
+    expect(retried.running).toBe(false)
+    expect(retried.cleanupPending).toBe(false)
+    expect(execElevatedMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not overwrite an active provider when manifest persistence fails (AT-01-009/AT-08-005)', async () => {
+    execElevatedMock.mockResolvedValue({ stdout: STOP_ACK, stderr: '' })
+    await startTrafficForensicsSession({ mode: 'directVpn', target: 'fixture' })
+    execElevatedMock.mockClear().mockRejectedValueOnce(new Error('stop failed'))
+    vi.mocked(ensureElevatedRuntimeDirHardened).mockResolvedValue({ hardened: false, message: 'unsafe parent' })
+    await expect(stopTrafficForensicsSession('failure-test')).rejects.toThrow('CaptureStopUnconfirmed')
+    expect((await getTrafficForensicsStatus()).running).toBe(true)
+    expect((await getTrafficForensicsStatus()).stoppedAt).toBeNull()
+    execElevatedMock.mockClear().mockRejectedValueOnce(new Error('still running'))
+    await expect(restartTrafficForensicsSession()).rejects.toThrow('CaptureStopUnconfirmed')
+    expect(execElevatedMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('refuses a successful process exit without a provider stop acknowledgement (AT-08-005)', async () => {
+    execElevatedMock.mockResolvedValue({ stdout: STOP_ACK, stderr: '' })
+    await startTrafficForensicsSession({ mode: 'directVpn', target: 'fixture' })
+    execElevatedMock.mockResolvedValueOnce({ stdout: '', stderr: '' })
+    await expect(stopTrafficForensicsSession('empty-result')).rejects.toThrow('acknowledgement missing')
+    expect((await getTrafficForensicsStatus()).running).toBe(true)
+  })
+
+  it.each([false, true])('orders stop/start and a subsequent stop=%s across finalization (AT-08-005, F-198)', async stopAgain => {
+    execElevatedMock.mockResolvedValue({ stdout: STOP_ACK, stderr: '' })
+    await startTrafficForensicsSession({ mode: 'directVpn', target: 'old' })
+    execElevatedMock.mockClear()
+    let release!: () => void
+    let entered!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const finalizing = new Promise<void>(resolve => { entered = resolve })
+    vi.mocked(generateTrafficForensicsSummary).mockImplementationOnce(async manifest => {
+      entered()
+      await gate
+      return manifest
+    })
+    const stopping = stopTrafficForensicsSession('first')
+    await finalizing
+    const starting = startTrafficForensicsSession({ mode: 'directVpn', target: 'new' })
+    const lastStop = stopAgain ? stopTrafficForensicsSession('last') : Promise.resolve()
+    try {
+      await new Promise(resolve => setTimeout(resolve, 20))
+      expect(execElevatedMock).toHaveBeenCalledTimes(1)
+    } finally {
+      release()
+      await Promise.all([stopping, starting, lastStop])
+    }
+    const started = await starting
+    const status = await getTrafficForensicsStatus()
+    const saved = JSON.parse(readFileSync(join(fixturePaths.data, 'privileged', 'traffic-forensics', 'latest-session.json'), 'utf8'))
+    expect(started.running).toBe(true)
+    expect(started.cleanupPending).toBe(false)
+    expect(status.target).toBe('new')
+    expect(status.running).toBe(!stopAgain)
+    expect(saved.sessionId).toBe(started.sessionId)
+    expect(saved.running).toBe(!stopAgain)
+    expect(execElevatedMock).toHaveBeenCalledTimes(stopAgain ? 3 : 2)
+  })
+
+  it('orders restart before a subsequent stop without nested queue waits (AT-08-005)', async () => {
+    execElevatedMock.mockResolvedValue({ stdout: STOP_ACK, stderr: '' })
+    await startTrafficForensicsSession({ mode: 'directVpn', target: 'fixture' })
+    execElevatedMock.mockClear()
+    const [restarted, stopped] = await Promise.all([restartTrafficForensicsSession(), stopTrafficForensicsSession('last')])
+    expect(restarted.running).toBe(true)
+    expect(stopped.running).toBe(false)
+    expect((await getTrafficForensicsStatus()).running).toBe(false)
+    expect(execElevatedMock).toHaveBeenCalledTimes(3)
+  })
+
+  it('serializes concurrent provider stops without executing a stopped provider twice (AT-08-005)', async () => {
+    execElevatedMock.mockResolvedValue({ stdout: STOP_ACK, stderr: '' })
+    await startTrafficForensicsSession({ mode: 'directVpn', target: 'fixture' })
+    execElevatedMock.mockClear()
+    await Promise.all([stopTrafficForensicsSession('first'), stopTrafficForensicsSession('second')])
+    expect(execElevatedMock).toHaveBeenCalledTimes(1)
+    expect((await getTrafficForensicsStatus()).running).toBe(false)
+  })
+
+  it.each(['running', 'corrupt', 'oversized'] as const)('warns about %s legacy state even with capture disabled, without executing it (AT-08-004)', async kind => {
+    const legacyDir = join(fixturePaths.data, 'traffic-forensics')
+    mkdirSync(legacyDir, { recursive: true })
+    const body = kind === 'corrupt' ? '{' : kind === 'oversized' ? 'x'.repeat(65537) : JSON.stringify({
+      running: true, engine: 'pktmon', sessionDir: 'C:/hostile', etlPath: 'C:/hostile/script.ps1', sidecar: { pid: 4 }
+    })
+    writeFileSync(join(legacyDir, 'latest-session.json'), body)
+    trafficSettingsMock.enabled = false
+    execElevatedMock.mockClear()
+    const status = await getTrafficForensicsStatus()
+    expect(status.cleanupPending).toBe(true)
+    expect(status.lastError).toContain('LegacyCaptureCleanupRequired')
+    await expect(startTrafficForensicsSession({ mode: 'directVpn', target: 'fixture' })).rejects.toThrow('LegacyCaptureCleanupRequired')
+    await expect(stopTrafficForensicsSession('legacy')).rejects.toThrow('LegacyCaptureCleanupRequired')
+    expect(execElevatedMock).not.toHaveBeenCalled()
+    expect(spawnMock).not.toHaveBeenCalled()
+    expect(readFileSync(join(legacyDir, 'latest-session.json'), 'utf8')).toBe(body)
+  })
+
+  it.each([
+    { lastError: 'native stop failed', stoppedAt: 1 },
+    { lastError: null },
+    { lastError: null, stoppedAt: 1, stopReason: 'status-reconciled-stop' },
+    { lastError: null, stoppedAt: 1, stopReason: 'zombie-recovery' },
+    { lastError: null, stoppedAt: 1, sidecar: { running: true } }
+  ])('rejects a legacy false-stopped hint %j without modifying it (AT-08-004, F-198)', async metadata => {
+    const legacyDir = join(fixturePaths.data, 'traffic-forensics')
+    mkdirSync(legacyDir, { recursive: true })
+    const body = JSON.stringify({ running: false, sessionDir: 'C:/hostile', ...metadata })
+    const path = join(legacyDir, 'latest-session.json')
+    writeFileSync(path, body)
+    expect((await getTrafficForensicsStatus()).cleanupPending).toBe(true)
+    await expect(startTrafficForensicsSession({ mode: 'directVpn', target: 'fixture' })).rejects.toThrow('LegacyCaptureCleanupRequired')
+    expect(execElevatedMock).not.toHaveBeenCalled()
+    expect(spawnMock).not.toHaveBeenCalled()
+    expect(readFileSync(path, 'utf8')).toBe(body)
+  })
+
+  it('allows a stopped legacy hint without migrating its paths (AT-01-009/AT-08-004)', async () => {
+    const legacyDir = join(fixturePaths.data, 'traffic-forensics')
+    mkdirSync(legacyDir, { recursive: true })
+    writeFileSync(join(legacyDir, 'latest-session.json'), JSON.stringify({ running: false, stoppedAt: 1, lastError: null, sessionDir: 'C:/hostile' }))
+    execElevatedMock.mockResolvedValue({ stdout: STOP_ACK, stderr: '' })
+    const status = await startTrafficForensicsSession({ mode: 'directVpn', target: 'fixture' })
+    expect(status.running).toBe(true)
+    expect(status.sessionDir).toContain(join('privileged', 'traffic-forensics'))
+    expect(status.cleanupPending).toBe(false)
   })
 
   it('starts pktmon capture with full packets, ETW providers, and bounded circular logs', async () => {
     await resetForensicsState()
-    execElevatedMock.mockResolvedValue({ stdout: '', stderr: '' })
+    execElevatedMock.mockResolvedValue({ stdout: STOP_ACK, stderr: '' })
 
     const status = await startTrafficForensicsSession({
       mode: 'localProxy',
@@ -129,8 +332,8 @@ describe('trafficForensics', () => {
 
   it('launches cmd sidecar through cmd.exe so packaged Windows builds do not hit spawn EINVAL', async () => {
     await resetForensicsState()
-    execElevatedMock.mockResolvedValue({ stdout: '', stderr: '' })
-    const sidecarPath = 'C:/Users/Redmi/CascadeProjects/vpn/.tmp/vpnte-test-sidecar/vpnte-etw-sidecar.cmd'
+    execElevatedMock.mockResolvedValue({ stdout: STOP_ACK, stderr: '' })
+    const sidecarPath = fixturePaths.sidecar
     rmSync(dirname(sidecarPath), { recursive: true, force: true })
     mkdirSync(dirname(sidecarPath), { recursive: true })
     writeFileSync(sidecarPath, '@echo off\r\n')
@@ -157,8 +360,8 @@ describe('trafficForensics', () => {
 
   it('persists immediate sidecar exits instead of leaving a zombie running state', async () => {
     await resetForensicsState()
-    execElevatedMock.mockResolvedValue({ stdout: '', stderr: '' })
-    const sidecarPath = 'C:/Users/Redmi/CascadeProjects/vpn/.tmp/vpnte-test-sidecar/vpnte-etw-sidecar.cmd'
+    execElevatedMock.mockResolvedValue({ stdout: STOP_ACK, stderr: '' })
+    const sidecarPath = fixturePaths.sidecar
     rmSync(dirname(sidecarPath), { recursive: true, force: true })
     mkdirSync(dirname(sidecarPath), { recursive: true })
     writeFileSync(sidecarPath, '@echo off\r\nexit /b 9009\r\n')
@@ -182,10 +385,64 @@ describe('trafficForensics', () => {
     expect(manifest.sidecar.lastError).toContain('sidecar exited code=9009')
   })
 
-  it('clears stale running status when the managed sidecar is already gone', async () => {
+  it('preserves a sidecar exit observed during manifest I/O (AT-08-004, F-198)', async () => {
+    execElevatedMock.mockResolvedValue({ stdout: STOP_ACK, stderr: '' })
+    mkdirSync(dirname(fixturePaths.sidecar), { recursive: true })
+    writeFileSync(fixturePaths.sidecar, '@echo off\r\n')
+    process.env.VPNTE_TRAFFIC_FORENSICS_SIDECAR = fixturePaths.sidecar
+    const child = mockChildProcess()
+    spawnMock.mockReturnValue(child)
+    const started = await startTrafficForensicsSession({ mode: 'directVpn', target: 'fixture' })
+    let release!: () => void
+    let entered!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const writing = new Promise<void>(resolve => { entered = resolve })
+    vi.mocked(generateTrafficForensicsSummary).mockImplementationOnce(async manifest => {
+      vi.mocked(ensureElevatedRuntimeDirHardened).mockImplementationOnce(async () => {
+        entered()
+        await gate
+        return { hardened: true, message: 'stubbed' }
+      })
+      return manifest
+    })
+    const staging = stageTrafficForensicsArtifacts(fixturePaths.stage)
+    await writing
+    try { child.emit('exit', 9009, null) } finally { release(); await staging }
+    await vi.waitFor(() => {
+      const saved = JSON.parse(readFileSync(join(started.sessionDir!, 'session-manifest.json'), 'utf8'))
+      expect(saved.sidecar.running).toBe(false)
+      expect(saved.sidecar.lastError).toContain('sidecar exited code=9009')
+      expect(saved.running).toBe(true)
+    })
+    expect((await getTrafficForensicsStatus()).sidecar?.running).toBe(false)
+  })
+
+  it.each(['exit', 'error'])('ignores a late old-sidecar %s after restart (AT-08-005, F-198)', async event => {
+    execElevatedMock.mockResolvedValue({ stdout: STOP_ACK, stderr: '' })
+    mkdirSync(dirname(fixturePaths.sidecar), { recursive: true })
+    writeFileSync(fixturePaths.sidecar, '@echo off\r\n')
+    process.env.VPNTE_TRAFFIC_FORENSICS_SIDECAR = fixturePaths.sidecar
+    const oldChild = mockChildProcess(4242)
+    const newChild = mockChildProcess(4243)
+    spawnMock.mockReturnValueOnce(oldChild).mockReturnValueOnce(newChild)
+    await startTrafficForensicsSession({ mode: 'directVpn', target: 'fixture' })
+    const restarted = await restartTrafficForensicsSession()
+    if (event === 'exit') oldChild.emit('exit', 9009, null)
+    else oldChild.emit('error', new Error('late old-child error'))
+    await new Promise(resolve => setTimeout(resolve, 20))
+    const status = await getTrafficForensicsStatus()
+    const saved = JSON.parse(readFileSync(join(restarted.sessionDir!, 'session-manifest.json'), 'utf8'))
+    expect(status.sessionId).toBe(restarted.sessionId)
+    expect(status.running).toBe(true)
+    expect(status.sidecar?.pid).toBe(4243)
+    expect(status.sidecar?.running).toBe(true)
+    expect(saved.sidecar.pid).toBe(4243)
+  })
+
+  it('keeps provider cleanup pending when the managed sidecar is already gone (AT-08-004, F-198)', async () => {
     await resetForensicsState()
-    execElevatedMock.mockResolvedValue({ stdout: '', stderr: '' })
-    const sidecarPath = 'C:/Users/Redmi/CascadeProjects/vpn/.tmp/vpnte-test-sidecar/vpnte-etw-sidecar.cmd'
+    execElevatedMock.mockResolvedValue({ stdout: STOP_ACK, stderr: '' })
+    const sidecarPath = fixturePaths.sidecar
     rmSync(dirname(sidecarPath), { recursive: true, force: true })
     mkdirSync(dirname(sidecarPath), { recursive: true })
     writeFileSync(sidecarPath, '@echo off\r\n')
@@ -201,17 +458,17 @@ describe('trafficForensics', () => {
 
     const refreshed = await getTrafficForensicsStatus()
     const manifest = JSON.parse(readFileSync(join(status.sessionDir!, 'session-manifest.json'), 'utf-8'))
-    expect(refreshed.running).toBe(false)
-    expect(refreshed.stopReason).toBe('zombie-recovery')
+    expect(refreshed.running).toBe(true)
+    expect(refreshed.cleanupPending).toBe(true)
+    expect(refreshed.stoppedAt).toBeNull()
     expect(refreshed.sidecar?.running).toBe(false)
-    expect(manifest.running).toBe(false)
-    expect(manifest.stopReason).toBe('zombie-recovery')
-    expect(manifest.sidecar.running).toBe(false)
+    expect(manifest.running).toBe(true)
+    expect(manifest.stoppedAt).toBeNull()
   })
 
   it('does not surface old stopped sessions when deep capture is disabled', async () => {
     await resetForensicsState()
-    execElevatedMock.mockResolvedValue({ stdout: '', stderr: '' })
+    execElevatedMock.mockResolvedValue({ stdout: STOP_ACK, stderr: '' })
 
     const started = await startTrafficForensicsSession({
       mode: 'directVpn',
@@ -233,8 +490,8 @@ describe('trafficForensics', () => {
 
   it('reports packet capture health and sidecar silence in status', async () => {
     await resetForensicsState()
-    execElevatedMock.mockResolvedValue({ stdout: '', stderr: '' })
-    const sidecarPath = 'C:/Users/Redmi/CascadeProjects/vpn/.tmp/vpnte-test-sidecar/vpnte-etw-sidecar.cmd'
+    execElevatedMock.mockResolvedValue({ stdout: STOP_ACK, stderr: '' })
+    const sidecarPath = fixturePaths.sidecar
     rmSync(dirname(sidecarPath), { recursive: true, force: true })
     mkdirSync(dirname(sidecarPath), { recursive: true })
     writeFileSync(sidecarPath, '@echo off\r\n')
@@ -263,10 +520,10 @@ describe('trafficForensics', () => {
 
   it('warns when sidecar stays lifecycle-only after the warmup window', async () => {
     await resetForensicsState()
-    execElevatedMock.mockResolvedValue({ stdout: '', stderr: '' })
+    execElevatedMock.mockResolvedValue({ stdout: STOP_ACK, stderr: '' })
     const startTime = new Date('2026-06-19T00:00:00.000Z')
     vi.useFakeTimers()
-    const sidecarPath = 'C:/Users/Redmi/CascadeProjects/vpn/.tmp/vpnte-test-sidecar/vpnte-etw-sidecar.cmd'
+    const sidecarPath = fixturePaths.sidecar
     try {
       vi.setSystemTime(startTime)
       rmSync(dirname(sidecarPath), { recursive: true, force: true })
@@ -298,8 +555,8 @@ describe('trafficForensics', () => {
 
   it('counts native ETW data events and clears the lifecycle-only warning', async () => {
     await resetForensicsState()
-    execElevatedMock.mockResolvedValue({ stdout: '', stderr: '' })
-    const sidecarPath = 'C:/Users/Redmi/CascadeProjects/vpn/.tmp/vpnte-test-sidecar/vpnte-etw-sidecar.cmd'
+    execElevatedMock.mockResolvedValue({ stdout: STOP_ACK, stderr: '' })
+    const sidecarPath = fixturePaths.sidecar
     rmSync(dirname(sidecarPath), { recursive: true, force: true })
     mkdirSync(dirname(sidecarPath), { recursive: true })
     writeFileSync(sidecarPath, '@echo off\r\n')
@@ -358,12 +615,12 @@ describe('trafficForensics', () => {
   it('does not surface a stopped previous-run session\'s stale ETW data as live', async () => {
     await resetForensicsState()
     vi.useFakeTimers()
-    const sidecarPath = 'C:/Users/Redmi/CascadeProjects/vpn/.tmp/vpnte-test-sidecar/vpnte-etw-sidecar.cmd'
+    const sidecarPath = fixturePaths.sidecar
     try {
       // A session that started long before this process did — i.e. a leftover
       // from a previous launch or an app reinstall (userData survives uninstall).
       vi.setSystemTime(new Date('2020-01-01T00:00:00.000Z'))
-      execElevatedMock.mockResolvedValue({ stdout: '', stderr: '' })
+      execElevatedMock.mockResolvedValue({ stdout: STOP_ACK, stderr: '' })
       rmSync(dirname(sidecarPath), { recursive: true, force: true })
       mkdirSync(dirname(sidecarPath), { recursive: true })
       writeFileSync(sidecarPath, '@echo off\r\n')
@@ -395,10 +652,10 @@ describe('trafficForensics', () => {
     }
   })
 
-  it('clears running status when stop artifacts already exist', async () => {
+  it('does not mistake stop artifacts or sidecar exit for provider termination (AT-08-005, F-198)', async () => {
     await resetForensicsState()
-    execElevatedMock.mockResolvedValue({ stdout: '', stderr: '' })
-    const sidecarPath = 'C:/Users/Redmi/CascadeProjects/vpn/.tmp/vpnte-test-sidecar/vpnte-etw-sidecar.cmd'
+    execElevatedMock.mockResolvedValue({ stdout: STOP_ACK, stderr: '' })
+    const sidecarPath = fixturePaths.sidecar
     rmSync(dirname(sidecarPath), { recursive: true, force: true })
     mkdirSync(dirname(sidecarPath), { recursive: true })
     writeFileSync(sidecarPath, '@echo off\r\n')
@@ -417,11 +674,11 @@ describe('trafficForensics', () => {
 
     const refreshed = await getTrafficForensicsStatus()
     const manifest = JSON.parse(readFileSync(join(status.sessionDir!, 'session-manifest.json'), 'utf-8'))
-    expect(refreshed.running).toBe(false)
-    expect(refreshed.stopReason).toBe('status-reconciled-stop')
+    expect(refreshed.running).toBe(true)
+    expect(refreshed.stoppedAt).toBeNull()
     expect(refreshed.sidecar?.running).toBe(false)
-    expect(manifest.running).toBe(false)
-    expect(manifest.stopReason).toBe('status-reconciled-stop')
+    expect(manifest.running).toBe(true)
+    expect(manifest.stoppedAt).toBeNull()
   })
 
   it('keeps the bundled cmd sidecar as a PowerShell wrapper', () => {
@@ -435,7 +692,7 @@ describe('trafficForensics', () => {
     await resetForensicsState()
     execElevatedMock
       .mockRejectedValueOnce(new Error('pktmon driver unavailable'))
-      .mockResolvedValueOnce({ stdout: '', stderr: '' })
+      .mockResolvedValueOnce({ stdout: STOP_ACK, stderr: '' })
 
     const status = await startTrafficForensicsSession({
       mode: 'directVpn',
@@ -452,7 +709,7 @@ describe('trafficForensics', () => {
 
   it('stops capture and stages artifacts for diagnostics export', async () => {
     await resetForensicsState()
-    execElevatedMock.mockResolvedValue({ stdout: '', stderr: '' })
+    execElevatedMock.mockResolvedValue({ stdout: STOP_ACK, stderr: '' })
 
     const started = await startTrafficForensicsSession({
       mode: 'localProxy',
@@ -471,6 +728,9 @@ describe('trafficForensics', () => {
     const match = stopCommandLine.match(/-File "([^"]+)"/) || stopCommandLine.match(/-File ([^\s]+)/)
     expect(match).toBeTruthy()
     const stopCommand = readFileSync(match![1], 'utf-8')
+    expect(stopCommand).toContain('VPNTE_CAPTURE_STOPPED:pktmon')
+    expect(stopCommand).toContain('if ($LASTEXITCODE -ne 0)')
+    expect(stopCommand.indexOf('VPNTE_CAPTURE_STOPPED:pktmon')).toBeLessThan(stopCommand.indexOf('Invoke-VpnteBestEffort'))
     expect(stopCommand).toContain('pktmon counters --json')
     expect(stopCommand).toContain('pktmon etl2pcap')
     expect(stopCommand).toContain('netsh wfp show netevents')
@@ -482,10 +742,10 @@ describe('trafficForensics', () => {
     expect(stopCommand).toContain('Get-NetFirewallRule')
     expect(stopCommand).not.toContain('--brief')
 
-    const staged = await stageTrafficForensicsArtifacts('C:/Users/Redmi/CascadeProjects/vpn/.tmp/vpnte-traffic-stage')
+    const staged = await stageTrafficForensicsArtifacts(fixturePaths.stage)
     expect(staged).toBe(true)
-    expect(existsSync('C:/Users/Redmi/CascadeProjects/vpn/.tmp/vpnte-traffic-stage/traffic-forensics/latest-session.json')).toBe(true)
-    expect(existsSync(`C:/Users/Redmi/CascadeProjects/vpn/.tmp/vpnte-traffic-stage/traffic-forensics/sessions/${started.sessionId}/session-manifest.json`)).toBe(true)
+    expect(existsSync(join(fixturePaths.stage, 'traffic-forensics', 'latest-session.json'))).toBe(true)
+    expect(existsSync(`${fixturePaths.stage}/traffic-forensics/sessions/${started.sessionId}/session-manifest.json`)).toBe(true)
     expect(existsSync(join(started.sessionDir!, 'summary.json'))).toBe(true)
     expect(existsSync(join(started.sessionDir!, 'timeline.ndjson'))).toBe(true)
     expect(existsSync(join(started.sessionDir!, 'drops.ndjson'))).toBe(true)
@@ -506,7 +766,7 @@ describe('trafficForensics', () => {
 
   it('stages a live pktmon snapshot even while capture is still running', async () => {
     await resetForensicsState()
-    execElevatedMock.mockResolvedValue({ stdout: '', stderr: '' })
+    execElevatedMock.mockResolvedValue({ stdout: STOP_ACK, stderr: '' })
 
     const started = await startTrafficForensicsSession({
       mode: 'directVpn',
@@ -514,10 +774,10 @@ describe('trafficForensics', () => {
     })
     expect(started.running).toBe(true)
 
-    const staged = await stageTrafficForensicsArtifacts('C:/Users/Redmi/CascadeProjects/vpn/.tmp/vpnte-traffic-stage')
+    const staged = await stageTrafficForensicsArtifacts(fixturePaths.stage)
     expect(staged).toBe(true)
     expect(execElevatedMock).toHaveBeenCalledTimes(2)
-    expect(existsSync(`C:/Users/Redmi/CascadeProjects/vpn/.tmp/vpnte-traffic-stage/traffic-forensics/sessions/${started.sessionId}/session-manifest.json`)).toBe(true)
+    expect(existsSync(`${fixturePaths.stage}/traffic-forensics/sessions/${started.sessionId}/session-manifest.json`)).toBe(true)
 
     const execCommand = execElevatedMock.mock.calls[1][0]
     expect(execCommand).toContain('-File')
@@ -542,7 +802,7 @@ describe('trafficForensics', () => {
 
   it('normalizes WFP, DNS, and TCP health signals into evidence-linked artifacts', async () => {
     await resetForensicsState()
-    execElevatedMock.mockResolvedValue({ stdout: '', stderr: '' })
+    execElevatedMock.mockResolvedValue({ stdout: STOP_ACK, stderr: '' })
 
     const started = await startTrafficForensicsSession({
       mode: 'directVpn',
@@ -602,7 +862,7 @@ describe('trafficForensics', () => {
 
   it('normalizes pktmon packet and drop counters into packet metrics', async () => {
     await resetForensicsState()
-    execElevatedMock.mockResolvedValue({ stdout: '', stderr: '' })
+    execElevatedMock.mockResolvedValue({ stdout: STOP_ACK, stderr: '' })
 
     const started = await startTrafficForensicsSession({
       mode: 'directVpn',
@@ -649,7 +909,7 @@ describe('trafficForensics', () => {
 
   it('ingests sidecar events.ndjson into timeline, records, and verdicts', async () => {
     await resetForensicsState()
-    execElevatedMock.mockResolvedValue({ stdout: '', stderr: '' })
+    execElevatedMock.mockResolvedValue({ stdout: STOP_ACK, stderr: '' })
 
     const started = await startTrafficForensicsSession({
       mode: 'directVpn',
@@ -725,7 +985,7 @@ describe('trafficForensics', () => {
 
   it('marks DNS and traffic leaks only when physical-interface evidence exists', async () => {
     await resetForensicsState()
-    execElevatedMock.mockResolvedValue({ stdout: '', stderr: '' })
+    execElevatedMock.mockResolvedValue({ stdout: STOP_ACK, stderr: '' })
 
     const started = await startTrafficForensicsSession({
       mode: 'localProxy',
@@ -762,10 +1022,10 @@ describe('trafficForensics', () => {
 
   it('does not mark the runtime TUN interface as a physical DNS leak', async () => {
     await resetForensicsState()
-    execElevatedMock.mockResolvedValue({ stdout: '', stderr: '' })
+    execElevatedMock.mockResolvedValue({ stdout: STOP_ACK, stderr: '' })
 
-    const userData = 'C:/Users/Redmi/CascadeProjects/vpn/.tmp/vpnte-traffic-forensics'
-    const runtimeDir = join(userData, 'tun-runtime')
+    const userData = fixturePaths.data
+    const runtimeDir = join(userData, 'privileged', 'tun-runtime')
     mkdirSync(runtimeDir, { recursive: true })
     writeFileSync(join(runtimeDir, 'sing-box.json'), JSON.stringify({
       inbounds: [
@@ -800,7 +1060,7 @@ describe('trafficForensics', () => {
 
   it('bridges app lifecycle events into summary verdict evidence', async () => {
     await resetForensicsState()
-    execElevatedMock.mockResolvedValue({ stdout: '', stderr: '' })
+    execElevatedMock.mockResolvedValue({ stdout: STOP_ACK, stderr: '' })
 
     const started = await startTrafficForensicsSession({
       mode: 'directVpn',
@@ -863,8 +1123,8 @@ describe('trafficForensics', () => {
    */
   it('pseudonymizes staged forensics artifacts instead of copying them verbatim', async () => {
     await resetForensicsState()
-    execElevatedMock.mockResolvedValue({ stdout: '', stderr: '' })
-    const stageDir = 'C:/Users/Redmi/CascadeProjects/vpn/.tmp/vpnte-traffic-stage'
+    execElevatedMock.mockResolvedValue({ stdout: STOP_ACK, stderr: '' })
+    const stageDir = fixturePaths.stage
 
     const started = await startTrafficForensicsSession({
       mode: 'directVpn',
@@ -929,8 +1189,8 @@ describe('trafficForensics', () => {
 
   it('never exports raw packet captures, redacted or otherwise', async () => {
     await resetForensicsState()
-    execElevatedMock.mockResolvedValue({ stdout: '', stderr: '' })
-    const stageDir = 'C:/Users/Redmi/CascadeProjects/vpn/.tmp/vpnte-traffic-stage'
+    execElevatedMock.mockResolvedValue({ stdout: STOP_ACK, stderr: '' })
+    const stageDir = fixturePaths.stage
 
     const started = await startTrafficForensicsSession({
       mode: 'directVpn',
@@ -960,8 +1220,8 @@ describe('trafficForensics', () => {
     // readFile('utf-8') + redact + writeFile, so raw bytes cannot survive — which
     // is what the old `cp()` fallback allowed.
     await resetForensicsState()
-    execElevatedMock.mockResolvedValue({ stdout: '', stderr: '' })
-    const stageDir = 'C:/Users/Redmi/CascadeProjects/vpn/.tmp/vpnte-traffic-stage'
+    execElevatedMock.mockResolvedValue({ stdout: STOP_ACK, stderr: '' })
+    const stageDir = fixturePaths.stage
 
     const started = await startTrafficForensicsSession({
       mode: 'directVpn',

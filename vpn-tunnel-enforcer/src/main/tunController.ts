@@ -2,12 +2,13 @@ import { recordOwnedTunAdapter, strictRecoveryRequired, readRecoveryManifest } f
 import { executeRecoveryOperation, RecoveryWorkerError } from './recoveryPsWorker'
 import { OWNED_RUNTIME_STOP_SCRIPT } from './recoveryPsProtocol'
 import { exec as execCb, execFile as execFileCb } from 'child_process'
-import { writeFile, mkdir, copyFile, access, rename, stat, readFile } from 'fs/promises'
+import { writeFile, copyFile, access, rename, stat, readFile } from 'fs/promises'
 import { join, dirname } from 'path'
 import { promisify } from 'util'
 import { createConnection, createServer, isIP } from 'net'
 import { networkInterfaces } from 'os'
 import { app } from 'electron'
+import { stageVerifiedRuntimeArtifact } from './runtimeArtifact'
 import sudo from 'sudo-prompt'
 import { execElevated, isProcessElevated } from './admin'
 import { logEvent } from './appLogger'
@@ -50,6 +51,7 @@ import {
 import { getPreferredSmartRouteRuleSetSourceDir } from './ruleSetManager'
 import { selectTunMtu } from './networkCompatibility'
 import { ensureElevatedRuntimeDirHardened } from './runtimeDirSecurity'
+import { getPrivilegedRuntimeDir } from './runtimePaths'
 import type { PhysicalAdapterDnsSource } from './physicalAdapterLockdown'
 import type { AdaptiveBypassMode } from './adaptiveBypass'
 import { resolveProxyEngine, type ProxyEngineMode } from './proxyEngine'
@@ -361,7 +363,7 @@ const EXTERNAL_PROXY_PROCESS_NAMES = [
 ]
 
 export function getTunRuntimeDir(): string {
-  return join(app.getPath('userData'), 'tun-runtime')
+  return getPrivilegedRuntimeDir('tun-runtime')
 }
 
 export type SingBoxOutboundFault = 'reality-key-mismatch' | 'tls-handshake-failed' | 'upstream-unreachable'
@@ -411,30 +413,11 @@ export function getBundledResource(name: string): string {
   return join(app.getAppPath(), 'resources', name)
 }
 
-// Cheap "did the source change?" check for sing-box.exe (~30 MB) and wintun.dll.
-// Both binaries live in app-resources and only change when the user installs a
-// new app build, so on 99% of restarts they are byte-identical to the copy
-// already sitting under userData/tun-runtime. Stat-based comparison (mtime+size)
-// matches the heuristic Node uses for its own dependency-cache invalidation
-// and is good enough — when in doubt we still fall back to a plain copyFile,
-// so we can never end up with no destination file.
+// Existing callers keep the staging API, but size/mtime are not integrity
+// evidence. Authenticate bytes against bundled resources after the ACL barrier;
+// rejected paths or unverifiable artifacts must not reach an elevated launch.
 export async function copyResourceIfStale(src: string, dst: string): Promise<boolean> {
-  try {
-    const [srcStat, dstStat] = await Promise.all([stat(src), stat(dst)])
-    if (
-      dstStat.size === srcStat.size &&
-      dstStat.mtimeMs === srcStat.mtimeMs
-    ) {
-      return false
-    }
-  } catch {
-    // dst doesn't exist, stat failed, or anything else odd — fall through to
-    // the unconditional copyFile path below, which is the same behaviour we
-    // had before this helper existed. We never want to silently skip the copy
-    // and leave a stale (or missing) binary in the runtime dir.
-  }
-  await copyFile(src, dst)
-  return true
+  return stageVerifiedRuntimeArtifact(src, dst)
 }
 
 export function parseProxyAddress(proxyAddr: string): { host: string; port: number } {
@@ -2027,22 +2010,11 @@ async function prepareRuntime(
   } = {}
 ): Promise<{ singbox: string; config: string }> {
   const runtimeDir = getTunRuntimeDir()
-  await mkdir(runtimeDir, { recursive: true })
-
-  // Lock the runtime directory to SYSTEM + Administrators BEFORE staging any
-  // binary into it. The app always runs elevated (requireAdministrator in
-  // electron-builder.yml) and launches sing-box from this directory, which lives
-  // under %APPDATA% where the interactive user has Full Control by default —
-  // so without this, any unprivileged process running as the same user could
-  // swap vpnte-sing-box.exe or plant its own wintun.dll beside it and get code
-  // execution as administrator on the next connect. DLL planting is the easier
-  // half: copyResourceIfStale only compares size+mtime, so it would never
-  // notice a same-size replacement anyway.
-  //
-  // Order matters: hardening after the copy leaves a window where a planted
-  // file is already sitting in the directory when we lock it.
+  // The security helper creates the trusted root with its restricted ACL.
+  // Creating it recursively here would expose a writable directory before
+  // verification, allowing binary or DLL planting before elevated execution.
   const acl = await ensureElevatedRuntimeDirHardened(runtimeDir, 'tun-runtime')
-  if (!acl.hardened && !acl.skipped) {
+  if (!acl.hardened) {
     logEvent('error', 'tun', 'refusing to stage privileged binaries in an untrusted runtime directory', {
       runtimeDir,
       reason: acl.message,
