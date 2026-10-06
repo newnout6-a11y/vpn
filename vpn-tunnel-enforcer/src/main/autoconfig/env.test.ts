@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mkdir, readFile, unlink, writeFile } from 'fs/promises'
+import { lstat, mkdir, readFile, unlink, writeFile } from 'fs/promises'
 import { homedir } from 'os'
 import { join } from 'path'
 
@@ -22,12 +22,13 @@ vi.mock('child_process', async (importOriginal) => {
 
 vi.mock('fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('fs/promises')>()
-  const methods = { readFile: vi.fn(), writeFile: vi.fn(), mkdir: vi.fn(), unlink: vi.fn() }
+  const methods = { lstat: vi.fn(), readFile: vi.fn(), writeFile: vi.fn(), mkdir: vi.fn(), unlink: vi.fn() }
   return { ...actual, default: { ...actual, ...methods }, ...methods }
 })
 
 const proxyKeys = ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY'] as const
 const backupFile = join(homedir(), '.vpnte', 'env-proxy-backup.json')
+const pendingFile = `${backupFile}.pending`
 const originalValues = {
   HTTP_PROXY: 'http://corporate:8080',
   HTTPS_PROXY: 'http://secure-corporate:8443',
@@ -108,7 +109,12 @@ describe('env autoconfig backup and verified rollback', () => {
       if (mockFs[String(path)] !== undefined) return mockFs[String(path)]
       throw fileError('ENOENT')
     })
-    vi.mocked(writeFile).mockImplementation(async (path: any, content: any) => {
+    vi.mocked(lstat).mockImplementation(async (path: any): Promise<any> => {
+      if (mockFs[String(path)] !== undefined) return {}
+      throw fileError('ENOENT')
+    })
+    vi.mocked(writeFile).mockImplementation(async (path: any, content: any, options: any) => {
+      if (options?.flag === 'wx' && mockFs[String(path)] !== undefined) throw fileError('EEXIST')
       mockFs[String(path)] = String(content)
     })
     vi.mocked(mkdir).mockResolvedValue(undefined)
@@ -134,6 +140,7 @@ describe('env autoconfig backup and verified rollback', () => {
     seedRegistry(originalValues)
     expect(await env.apply('127.0.0.1:10808')).toBe(true)
     const receipt = mockFs[backupFile]
+    expect(mockFs[pendingFile]).toBeDefined()
     expect(JSON.parse(receipt)).toEqual({
       createdAt: expect.any(Number),
       httpProxy: originalValues.HTTP_PROXY,
@@ -148,7 +155,7 @@ describe('env autoconfig backup and verified rollback', () => {
     mockExecFile.mockClear()
     expect(await env.apply('127.0.0.1:10809', 'http')).toBe(true)
     expect(mockFs[backupFile]).toBe(receipt)
-    expect(writeFile).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(writeFile).mock.calls.filter(([path]) => path === backupFile)).toHaveLength(1)
     expect(queriedKeys()).toEqual([])
     expect(mockRegistry.HTTP_PROXY).toBe('http://127.0.0.1:10809')
   })
@@ -169,7 +176,11 @@ describe('env autoconfig backup and verified rollback', () => {
     expect(mockRegistry).toEqual(originals)
     for (const key of proxyKeys) expect(process.env[key]).toBe(originals[key as keyof typeof originals])
     expect(mockFs[backupFile]).toBeUndefined()
-    expect(unlink).toHaveBeenCalledExactlyOnceWith(backupFile)
+    expect(unlink).toHaveBeenCalledWith(backupFile)
+    expect(mockFs[pendingFile]).toBeUndefined()
+    expect(await env.isApplied()).toBe(false)
+    vi.resetModules()
+    env = (await import('./env')).env
     expect(await env.isApplied()).toBe(false)
   })
 
@@ -222,7 +233,7 @@ describe('env autoconfig backup and verified rollback', () => {
   })
 
   it.each(['status', 'apply', 'failed first setx', 'failed first setx with existing backup', 'rollback'])(
-    'does not forget a vanished receipt after %s, including repeated status/apply/rollback retries', async (source) => {
+    'does not forget a vanished receipt after %s and a process restart, including repeated retries', async (source) => {
       seedRegistry(originalValues)
       if (source !== 'apply' && source !== 'failed first setx') saveBackup(originalValues)
       if (source === 'status') expect(await env.isApplied()).toBe(true)
@@ -242,6 +253,8 @@ describe('env autoconfig backup and verified rollback', () => {
       }
       expect(mockFs[backupFile]).toBeDefined()
       delete mockFs[backupFile]
+      vi.resetModules()
+      env = (await import('./env')).env
       const values = { ...mockRegistry }
       mockExecFile.mockClear()
       vi.mocked(writeFile).mockClear()
@@ -258,6 +271,78 @@ describe('env autoconfig backup and verified rollback', () => {
       expect(unlink).not.toHaveBeenCalled()
     }
   )
+
+  it.each(['EACCES', 'EIO'])('does not change proxies when persisting the cleanup marker fails: %s (AT-11-002)', async code => {
+    seedRegistry(originalValues)
+    const write = vi.mocked(writeFile).getMockImplementation()!
+    vi.mocked(writeFile).mockImplementation(async (...args: any[]) => {
+      if (args[0] === pendingFile) throw fileError(code)
+      return write(...args as Parameters<typeof writeFile>)
+    })
+    expect(await env.apply('127.0.0.1:10808')).toBe(false)
+    expect(mutations()).toEqual([])
+    expect(mockRegistry).toEqual(originalValues)
+    expect(mockFs[backupFile]).toBeDefined()
+    await expect(env.isApplied()).rejects.toMatchObject({ code })
+  })
+
+  it.each(['EACCES', 'EPERM', 'EIO'])('treats an unreadable marker as unknown, preserving foreign settings: %s', async code => {
+    seedRegistry(originalValues)
+    vi.mocked(lstat).mockRejectedValue(fileError(code))
+    await expect(env.isApplied()).rejects.toMatchObject({ code })
+    expect(await env.apply('127.0.0.1:10808')).toBe(false)
+    expect(await env.rollback()).toBe(false)
+    expect(mutations()).toEqual([])
+    expect(mockRegistry).toEqual(originalValues)
+    expect(writeFile).not.toHaveBeenCalled()
+  })
+
+  it.each(proxyKeys)('retains cleanup after partial %s restoration, receipt loss and restart (AT-03-007)', async key => {
+    seedRegistry(originalValues)
+    expect(await env.apply('127.0.0.1:10808')).toBe(true)
+    mockExecFile.mockImplementation((cmd: string, args: string[]) => (
+      cmd === 'reg' && args[0] === 'query' && args[3] === key
+        ? new Error('Readback denied') : registryCommand(cmd, args)
+    ))
+    expect(await env.rollback()).toBe(false)
+    expect(mockRegistry[key]).toBe(vpnValues[key])
+    expect(mockFs[pendingFile]).toBeDefined()
+    delete mockFs[backupFile]
+    vi.resetModules()
+    env = (await import('./env')).env
+    mockExecFile.mockClear()
+    await expect(env.isApplied()).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await env.apply('127.0.0.1:10809')).toBe(false)
+    expect(await env.rollback()).toBe(false)
+    expect(mockExecFile).not.toHaveBeenCalled()
+  })
+
+  it('keeps an empty marker pending after receipt loss and restart', async () => {
+    seedRegistry(originalValues)
+    expect(await env.apply('127.0.0.1:10808')).toBe(true)
+    mockFs[pendingFile] = ''
+    delete mockFs[backupFile]
+    vi.resetModules()
+    env = (await import('./env')).env
+    await expect(env.isApplied()).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(mockRegistry).toEqual(vpnValues)
+  })
+
+  it('retains pending cleanup across restart when marker retirement fails after verified restoration', async () => {
+    seedRegistry(originalValues)
+    expect(await env.apply('127.0.0.1:10808')).toBe(true)
+    const remove = vi.mocked(unlink).getMockImplementation()!
+    vi.mocked(unlink).mockImplementation(async path => {
+      if (path === pendingFile) throw fileError('EACCES')
+      return remove(path)
+    })
+    expect(await env.rollback()).toBe(false)
+    expect(mockRegistry).toEqual(originalValues)
+    expect(mockFs[pendingFile]).toBeDefined()
+    vi.resetModules()
+    env = (await import('./env')).env
+    await expect(env.isApplied()).rejects.toMatchObject({ code: 'ENOENT' })
+  })
 
   it.each(['EACCES', 'EPERM', 'EIO'])('fails closed on backup read error %s without registry access', async (code) => {
     const receipt = saveBackup(originalValues)
@@ -356,7 +441,7 @@ describe('env autoconfig backup and verified rollback', () => {
         expect(mockRegistry).toEqual(originals)
         for (const name of proxyKeys) expect(process.env[name]).toBe(originals[name])
         expect(mockFs[backupFile]).toBeUndefined()
-        expect(unlink).toHaveBeenCalledExactlyOnceWith(backupFile)
+        expect(unlink).toHaveBeenCalledWith(backupFile)
         expect(await env.isApplied()).toBe(false)
       }
     )

@@ -1,5 +1,5 @@
 import { execFile } from 'child_process'
-import { mkdir, readFile, unlink, writeFile } from 'fs/promises'
+import { lstat, mkdir, readFile, unlink, writeFile } from 'fs/promises'
 import { homedir } from 'os'
 import { join } from 'path'
 import { promisify } from 'util'
@@ -26,6 +26,16 @@ function parseBackup(raw: string): EnvProxyBackup {
 
 function backupPath(): string {
   return join(homedir(), '.vpnte', 'env-proxy-backup.json')
+}
+
+async function retainCleanupPending(): Promise<void> {
+  cleanupPending = true
+  try {
+    // Exclusive creation never truncates or follows an existing marker.
+    await writeFile(`${backupPath()}.pending`, '', { flag: 'wx' })
+  } catch (err: any) {
+    if (err?.code !== 'EEXIST') throw err
+  }
 }
 
 function proxyUrl(proxyAddr: string, proxyType: 'socks5' | 'http'): string {
@@ -100,15 +110,7 @@ async function deleteUserEnvValue(name: string): Promise<void> {
 }
 
 async function saveBackupIfMissing(): Promise<void> {
-  try {
-    parseBackup(await readFile(backupPath(), 'utf8'))
-    cleanupPending = true
-    return
-  } catch (err: any) {
-    if (err?.code !== 'ENOENT' || cleanupPending) {
-      throw err
-    }
-  }
+  if (await env.isApplied()) return
   await mkdir(join(homedir(), '.vpnte'), { recursive: true })
   const backup: EnvProxyBackup = {
     createdAt: Date.now(),
@@ -118,7 +120,7 @@ async function saveBackupIfMissing(): Promise<void> {
     noProxy: await getUserEnvValue('NO_PROXY')
   }
   await writeFile(backupPath(), JSON.stringify(backup, null, 2), 'utf8')
-  cleanupPending = true
+  await retainCleanupPending()
 }
 
 export const env = {
@@ -169,7 +171,7 @@ export const env = {
       let backup: EnvProxyBackup
       try {
         backup = parseBackup(await readFile(backupPath(), 'utf8'))
-        cleanupPending = true
+        await retainCleanupPending()
       } catch {
         // Missing or unreadable backup — cannot restore unknown prior environment
         return false
@@ -210,6 +212,7 @@ export const env = {
       }
 
       await unlink(backupPath())
+      await unlink(`${backupPath()}.pending`)
       cleanupPending = false
       await broadcastEnvironmentChanged()
       return true
@@ -221,10 +224,17 @@ export const env = {
   async isApplied(): Promise<boolean> {
     try {
       parseBackup(await readFile(backupPath(), 'utf8'))
-      cleanupPending = true
+      await retainCleanupPending()
       return true
     } catch (err: any) {
-      if (err?.code === 'ENOENT' && !cleanupPending) return false
+      if (err?.code === 'ENOENT' && !cleanupPending) {
+        try { await lstat(`${backupPath()}.pending`) }
+        catch (markerError: any) {
+          if (markerError?.code === 'ENOENT') return false
+          throw markerError
+        }
+        cleanupPending = true
+      }
       throw err
     }
   }

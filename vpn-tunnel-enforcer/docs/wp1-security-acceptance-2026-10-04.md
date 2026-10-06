@@ -188,3 +188,21 @@ VM отсутствует, live VPN/Firewall/DNS/capture/registry не трог�
 - EXE 1.1.22 пересобран: **139180562 bytes, NotSigned**, SHA-256 `721C1083EE77336116F35A6DB2D679738FA51B1C604F65DEBD278546C711947C`. Все 185 файлов out/ совпали с packaged ASAR по SHA-256; readback/shutdown markers присутствуют; `dist/checksums.txt` обновлён для EXE/blockmap. Установка и Release upload не выполнялись.
 
 **Границы:** backup используется как существующая recovery metadata, не как новый защищённый ownership store. Потерянный между процессами receipt не восстанавливается in-memory флагом; автоматическое восстановление таких/legacy состояний не добавлялось. VM отсутствует и не запускалась; live VPN/Firewall/DNS/capture/registry не изменялись. Installed active-upgrade/uninstall L3, OS matrix, настоящий 42→44, credential downgrade и legacy capture recovery сохраняют предыдущие NOT-CHECKED/retained ограничения. Полный WP-1/L3 PASS не заявляется, нормативные docs не менялись.
+
+## Follow-up 2026-10-06: сохранять env cleanup после перезапуска
+
+Исправлено `discussion_r4186342978`, трассировка AT-11-002/F-183 и AT-03-007. Отдельный пустой `env-proxy-backup.json.pending` создаётся эксклюзивно до изменения переменных; существующий backup также получает маркер. Он удаляется последним, после readback всех четырёх переменных и удаления backup. Потеря backup при наличии маркера после перезапуска остаётся неизвестным состоянием: shutdown не подтверждается, повторный apply не подменяет исходные настройки новым snapshot. Ошибки доступа/записи/удаления не скрываются. Без обоих файлов и process-local obligation чужие proxy values по-прежнему не считаются своими.
+
+Production delta: **+10 строк net**, без зависимостей и изменения схемы backup. Добавлено 11 regression cases; существующие сценарии потери backup теперь также перезагружают модуль, проверяя границу процесса. До патча env suite: 17 failed / 71 passed; после исправления focused suite: 186/186 PASS.
+
+Проверки из `vpn-tunnel-enforcer/`:
+
+- `npx.cmd vitest run src/main/autoconfig/env.test.ts src/main/autoconfig/index.test.ts src/main/lifecycleCleanup.test.ts --maxWorkers=2 --reporter=dot`: 186/186 PASS, 3 файла, exit 0.
+- `npm.cmd test -- --maxWorkers=2 --reporter=dot --reporter=json --outputFile=.tmp/pr21-env-recovery-tests-20261006-verified.json`: **208 files passed / 2 skipped; 2597 passed / 10 skipped / 0 failed**, 236.78 s, exit 0.
+- `npm.cmd run typecheck` и `npm.cmd run build`: exit 0; build сохранил предупреждения Vite о mixed static/dynamic imports и размере renderer chunk.
+- `node --test scripts/wp1-test-cleanup.test.mjs`: 10/10 PASS, exit 0.
+- `python -X utf8 ../docs/04-приёмочные-тесты/traceability/check-coverage.py`: AC927/927, F210/210, exit 0; это полнота ссылок, не исполнение всех AT.
+
+Первый full run из чистого worktree: 2589 passed / 14 skipped / 4 failed, 219.58 s. Все четыре отказа — отсутствие ignored bundled Xray/sing-box ресурсов в worktree (ENOENT); production код для них не менялся. Локальные ресурсы подключены hard links без дублирования бинарников на диске.
+
+**Границы текущего исправления:** маркер сохраняет обязанность очистки, но не восстанавливает потерянные исходные значения. Одновременная потеря backup и маркера, а также уже потерянный legacy backup до обновления автоматически не определяются. Реальный registry/VPN и установленный клиент не изменялись, NSIS installer в этом проходе не пересобирался и не устанавливался; прежние L3/OS/upgrade ограничения сохраняются. Suggestions о новом runtime-ACL policy и замене `AggregateError` не включены в этот env fix; обе ошибки cleanup helper по-прежнему сохраняются и проверены 10 Node-тестами. Нормативные `docs/` не менялись, новых Markdown-файлов нет.
