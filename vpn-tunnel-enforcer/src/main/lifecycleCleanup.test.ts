@@ -88,18 +88,21 @@ describe('protected restart readiness (AT-02-002/004/005 / AT-00-003)', () => {
 })
 
 function stopHarness(startupController: AbortController | null = null, startupCompletion: Promise<void> | null = null) {
+  const state = { runtime: true, upstream: true, watchdog: true, baseline: true, firewall: true, adapters: true }
   const os = {
     startupController,
     startupCompletion,
     isOwnedTunRuntimeRunning: vi.fn(async () => false),
-    stopXray: done(), killOwnedRuntimeProcesses: done(), waitForOwnedRuntimeToExit: vi.fn(async () => true),
-    rollbackTunNetworkBaselineIfApplied: vi.fn(async () => ({ success: true, message: 'restored' })),
-    disableKillSwitchIfActive: vi.fn(async () => ({ success: true, message: 'restored' })),
-    rollbackPhysicalAdapterLockdownIfApplied: vi.fn(async (): Promise<{ rolledBack: boolean; skipped?: boolean }> => ({ rolledBack: true })),
+    stopXray: vi.fn(async () => { state.upstream = false }), killOwnedRuntimeProcesses: done(),
+    waitForOwnedRuntimeToExit: vi.fn(async () => { state.runtime = false; return true }),
+    rollbackTunNetworkBaselineIfApplied: vi.fn(async () => { state.baseline = false; return { success: true, message: 'restored' } }),
+    disableKillSwitchIfActive: vi.fn(async () => { state.firewall = false; return { success: true, message: 'restored' } }),
+    rollbackPhysicalAdapterLockdownIfApplied: vi.fn(async (): Promise<{ rolledBack: boolean; skipped?: boolean }> => { state.adapters = false; return { rolledBack: true } }),
     repairOrphanedPhysicalAdapterDns: vi.fn(async () => ({ repaired: false, adapters: [] })),
     ipMonitor: { suspend: noop(), resume: noop() },
     logEvent: noop(), notify: noop(), notifyStatus: noop(), recordForensicTunEvent: noop(),
-    clearRestartTimers: noop(), cancelLeakSelfTest: noop(), stopCompetingTunWatch: noop(), stopProxyWatchdog: noop()
+    clearRestartTimers: noop(), cancelLeakSelfTest: noop(), stopCompetingTunWatch: noop(),
+    stopProxyWatchdog: vi.fn(() => { state.watchdog = false })
   }
   const stop = compile<((options?: { preserveNetworkProtection?: boolean }) => Promise<any>) & { setRunning(running: boolean): void }>(`
 let startInProgress=false,stopRequested=false,stopInProgress=false,userInitiatedStop=false,activeStartAbortController=startupController;
@@ -109,7 +112,7 @@ let currentStatus={running:true,mode:'directVpn'},clashApiInfo=null,directProxyP
 const controller = {${body('tunController.ts', 'stop')}};
 return Object.assign(controller.stop.bind(controller), { setRunning: (running) => { currentStatus.running = running } });
 `, os)
-  return { stop, ...os }
+  return { stop, ...os, state }
 }
 function mainHarness(name: 'performShutdownCleanup' | 'stopProtection') {
   const os = {
@@ -167,6 +170,37 @@ return {start:()=>controller.start('127.0.0.1:1080'),state:()=>({starting:startI
 }
 
 describe('lifecycle cleanup evidence and retries (AT-02-005 / AT-03-007)', () => {
+  it('keeps upstream, watchdog and protection active until runtime exit is proved (AT-02-009)', async () => {
+    const h = stopHarness()
+    let release!: () => void
+    h.waitForOwnedRuntimeToExit.mockImplementationOnce(() => new Promise(resolve => {
+      release = () => { h.state.runtime = false; resolve(true) }
+    }))
+    const pending = h.stop()
+    await vi.waitFor(() => expect(h.waitForOwnedRuntimeToExit).toHaveBeenCalledOnce())
+    try { expect(h.state).toEqual({ runtime: true, upstream: true, watchdog: true, baseline: true, firewall: true, adapters: true }) }
+    finally { release() }
+    expect(await pending).toMatchObject({ success: true, networkCleanup: { baseline: true, firewall: true, adapters: true } })
+    expect(h.state).toEqual({ runtime: false, upstream: false, watchdog: false, baseline: false, firewall: false, adapters: false })
+  })
+  it.each(['stop denied', 'exit timeout', 'exit query failed'])('retains live runtime supervision and protection after %s', async failure => {
+    const h = stopHarness()
+    if (failure === 'stop denied') h.killOwnedRuntimeProcesses.mockRejectedValueOnce(new Error('native denied'))
+    if (failure === 'exit timeout') h.waitForOwnedRuntimeToExit.mockResolvedValueOnce(false)
+    if (failure === 'exit query failed') h.waitForOwnedRuntimeToExit.mockRejectedValueOnce(new Error('query denied'))
+    expect(await h.stop()).toMatchObject({ success: false, networkCleanup: { baseline: false, firewall: false, adapters: false } })
+    expect(h.state).toEqual({ runtime: true, upstream: true, watchdog: true, baseline: true, firewall: true, adapters: true })
+    expect(h.notifyStatus).toHaveBeenLastCalledWith('error')
+    expect(h.ipMonitor.resume).toHaveBeenCalledOnce()
+  })
+  it('can retry a failed stop without leaving the live runtime unsupervised', async () => {
+    const h = stopHarness()
+    h.killOwnedRuntimeProcesses.mockRejectedValueOnce(new Error('native denied'))
+    expect((await h.stop()).success).toBe(false)
+    expect(h.state).toEqual({ runtime: true, upstream: true, watchdog: true, baseline: true, firewall: true, adapters: true })
+    expect((await h.stop()).success).toBe(true)
+    expect(h.state).toEqual({ runtime: false, upstream: false, watchdog: false, baseline: false, firewall: false, adapters: false })
+  })
   it('awaits capture finalization before releasing shutdown helpers (AT-08-005 / AT-11-002)', async () => {
     const h = mainHarness('performShutdownCleanup')
     let release!: () => void

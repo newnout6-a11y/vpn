@@ -3823,7 +3823,6 @@ export const tunController = {
       logEvent('warn', 'tun', `${label} after stop failed`, err)
     }
 
-    stopProxyWatchdog()
     try {
       // A cancelled early start may never have launched sing-box. Prove that
       // no owned runtime remains after its owner settles before skipping kill.
@@ -3844,6 +3843,7 @@ export const tunController = {
       notifyStatus('error')
       return { success: false, error: currentStatus.warning, networkCleanup }
     }
+    stopProxyWatchdog()
     // Keep the upstream available until sing-box's exit is observed. Otherwise
     // captured requests race teardown and dial a closed local SOCKS listener.
     await timedStop('stop-xray', () => stopXray('tun stopped')).catch(err => rememberCleanupError('xray process stop', err))
