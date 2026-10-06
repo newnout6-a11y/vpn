@@ -55,7 +55,7 @@ foreach ($p in ($rows | Sort-Object { if ($_.Name -ieq 'vpnte-sing-box.exe') { 0
       throw 'Owned TUN consumer exit was not confirmed'
     }
     $killed += [pscustomobject]@{name=[string]$p.Name;pid=[int]$p.ProcessId}
-  } catch {}
+  } catch { if ($p.Name -ieq 'vpnte-sing-box.exe') { break } }
 }
 [pscustomobject]@{candidates=[int]$rows.Count;killed=[int]$killed.Count;names=@($killed | ForEach-Object { $_.name })} | ConvertTo-Json -Compress -Depth 3
 `

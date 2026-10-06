@@ -15,7 +15,7 @@ function Get-CimInstance { [CmdletBinding()]param($ClassName)
   if ($ClassName -ne 'Win32_Process') { throw 'Unexpected CIM class' }
   if ($global:variant -eq 'queryError') { throw 'Fixture CIM error' }
   if ($global:variant -eq 'runtimeAbsent') { return }
-  if ($global:variant -eq 'upstreamFirst') {
+  if ($global:variant -in @('upstreamFirst','exitTimeout','consumerStopDenied')) {
     [pscustomobject]@{Name='vpnte-xray.exe';ExecutablePath='C:\VPNTE-fixture-runtime\vpnte-xray.exe';ProcessId=2}
     [pscustomobject]@{Name='vpnte-sing-box.exe';ExecutablePath='C:\VPNTE-fixture-runtime\vpnte-sing-box.exe';ProcessId=1}
     return
@@ -29,6 +29,7 @@ function Stop-Process { [CmdletBinding()]param($Id,[switch]$Force,[switch]$PassT
   if($Id -notin @(1,2) -or -not $Force -or -not $PassThru){throw 'Unexpected fixture stop'}
   if($global:variant -eq 'stopError'){throw 'Fixture stop refused'}
   $global:steps += 'stop:'+$Id
+  if($global:variant -eq 'consumerStopDenied' -and $Id -eq 1){throw 'Fixture consumer stop refused'}
   $p=[pscustomobject]@{Id=$Id}
   $p|Add-Member ScriptMethod WaitForExit { param($timeout)
     if($timeout -ne 3000){throw 'Unexpected exit deadline'}
@@ -78,9 +79,10 @@ describe('fixed recovery dispatcher native proof', () => {
     expect(result.order).toEqual(['stop:1', 'wait:1', 'stop:2'])
     expect(JSON.parse(result.value)).toEqual({ candidates: 2, killed: 2, names: ['vpnte-sing-box.exe', 'vpnte-xray.exe'] })
   }, 20000)
-  it.skipIf(!native)('does not report termination success without consumer exit proof (AT-02-005)', () => {
-    const result = run({ op: 'stop-runtime', runtimeDir: 'C:\\VPNTE-fixture-runtime' }, 'exitTimeout')
-    expect(JSON.parse(result.value)).toEqual({ candidates: 1, killed: 0, names: [] })
+  it.skipIf(!native).each(['exitTimeout', 'consumerStopDenied'])('keeps Xray alive without consumer exit proof: %s (AT-02-005)', variant => {
+    const result = run({ op: 'stop-runtime', runtimeDir: 'C:\\VPNTE-fixture-runtime' }, variant)
+    expect(JSON.parse(result.value)).toEqual({ candidates: 2, killed: 0, names: [] })
+    expect(result.order).toEqual(variant === 'exitTimeout' ? ['stop:1', 'wait:1'] : ['stop:1'])
   }, 20000)
   it.skipIf(!native).each([
     ['trusted', 1, 1, ['vpnte-sing-box.exe']], ['ownedSidecar', 1, 1, ['vpnte-etw-sidecar.exe']],

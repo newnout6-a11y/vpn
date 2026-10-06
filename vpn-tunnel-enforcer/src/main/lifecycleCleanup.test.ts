@@ -417,7 +417,7 @@ describe('lifecycle cleanup evidence and retries (AT-02-005 / AT-03-007)', () =>
     expect((await h.stop()).networkCleanup.adapters).toBe(true)
     expect(h.repairOrphanedPhysicalAdapterDns).toHaveBeenCalledOnce()
   })
-  it.each(['runtime', 'baseline', 'firewall', 'adapters', 'dns'])('continues independent cleanup after %s failure', async failing => {
+  it.each(['runtime', 'baseline', 'firewall', 'adapters', 'dns'])('requires runtime exit before independent cleanup: %s failure', async failing => {
     const h = stopHarness()
     const error = new Error(`${failing} failed`)
     if (failing === 'runtime') h.killOwnedRuntimeProcesses.mockRejectedValue(error)
@@ -429,6 +429,13 @@ describe('lifecycle cleanup evidence and retries (AT-02-005 / AT-03-007)', () =>
       h.repairOrphanedPhysicalAdapterDns.mockRejectedValue(error)
     }
     const result = await h.stop()
+    if (failing === 'runtime') {
+      expect(result).toMatchObject({ success: false, error: expect.stringContaining('runtime failed') })
+      for (const cleanup of [h.stopXray, h.rollbackTunNetworkBaselineIfApplied, h.disableKillSwitchIfActive, h.rollbackPhysicalAdapterLockdownIfApplied]) expect(cleanup).not.toHaveBeenCalled()
+      expect(h.notifyStatus).toHaveBeenCalledWith('error')
+      expect(h.ipMonitor.resume).toHaveBeenCalledOnce()
+      return
+    }
     expect(result.warning).toContain(`${failing} failed`)
     expect(h.rollbackTunNetworkBaselineIfApplied).toHaveBeenCalledOnce()
     expect(h.disableKillSwitchIfActive).toHaveBeenCalledOnce()

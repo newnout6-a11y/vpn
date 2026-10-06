@@ -3832,14 +3832,17 @@ export const tunController = {
       if (runtimePresent) {
         await timedStop('stop-runtime', () => killOwnedRuntimeProcesses())
         if (!(await timedStop('wait-runtime-exit', () => waitForOwnedRuntimeToExit()))) {
-          cleanupErrors.push('runtime process stop: vpnte-sing-box.exe is still running')
-          logEvent('warn', 'tun', 'runtime process still running after stop')
+          throw new Error('Owned runtime exit was not confirmed')
         }
       } else {
         logEvent('info', 'tun', 'runtime stop skipped after fresh exit proof')
       }
     } catch (err) {
       rememberCleanupError('runtime process stop', err)
+      // Preserve upstream, status and network protection until exit is proved.
+      currentStatus.warning = cleanupErrors.join(' | ')
+      notifyStatus('error')
+      return { success: false, error: currentStatus.warning, networkCleanup }
     }
     // Keep the upstream available until sing-box's exit is observed. Otherwise
     // captured requests race teardown and dial a closed local SOCKS listener.
@@ -3869,8 +3872,8 @@ export const tunController = {
       cleanupErrors
     })
 
-    // Every cleanup step is independent. A failed taskkill or baseline rollback
-    // must not prevent us from removing firewall/DNS changes; that is exactly how
+    // After runtime exit is proved, every network cleanup step is independent.
+    // A failed baseline rollback must not prevent remaining cleanup; otherwise
     // the app can leave Windows with "VPN off, internet broken".
     if (!preserveNetworkProtection) {
     try {
