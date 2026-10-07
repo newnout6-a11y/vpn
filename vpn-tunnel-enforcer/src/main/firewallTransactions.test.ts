@@ -8,7 +8,7 @@ const state = vi.hoisted(() => ({ manifest: null as any, writes: [] as any[], sc
   snapshot: ['Domain','Private','Public'].map(name => ({ name, defaultOutbound: 'Block' })),
   failWrite: false, failApply: false, failRestore: false, invalidRead: false, readError: null as Error | null,
   quarantines: [] as string[], failQuarantine: false, ownedRules: false,
-  wfpCalls: [] as string[], wfpActive: false, wfpFailApply: 0, wfpFailRemove: false, wfpFailVerify: false,
+  wfpCalls: [] as string[], wfpActive: false, wfpFailApply: 0, wfpFailRemove: false, wfpFailVerify: false, wfpConflict: false,
   manifestReads: 0,
   liveFailures: 0, liveMissingMarker: false, failCommit: false,
   artifacts: [] as string[], helperAvailable: true, helperFailure: null as any, helperExitCode: 0, longApps: false,
@@ -24,6 +24,7 @@ vi.mock('./wfpIpv6', async importOriginal => ({
   applyWfpIpv6Policy: async () => {
     state.wfpCalls.push('apply')
     if (!state.manifest?.ipv6Policy) throw new Error('WFP effects without recovery journal')
+    if (state.wfpConflict) throw new Error('IPv6 WFP priority conflict: sing-tun')
     if (state.wfpFailApply > 0) { state.wfpFailApply--; throw new Error('WFP apply failure') }
     state.wfpActive = true
   },
@@ -124,7 +125,7 @@ beforeEach(() => {
   state.manifest = null; state.writes = []; state.scripts = []
   state.failWrite = false; state.failApply = false; state.failRestore = false; state.invalidRead = false
   state.readError = null; state.quarantines = []; state.failQuarantine = false; state.ownedRules = false
-  state.wfpCalls = []; state.wfpActive = false; state.wfpFailApply = 0; state.wfpFailRemove = false; state.wfpFailVerify = false
+  state.wfpCalls = []; state.wfpActive = false; state.wfpFailApply = 0; state.wfpFailRemove = false; state.wfpFailVerify = false; state.wfpConflict = false
   state.manifestReads = 0
   state.liveFailures = 0; state.liveMissingMarker = false; state.failCommit = false
   state.artifacts = []; state.helperAvailable = true; state.helperFailure = null; state.helperExitCode = 0
@@ -179,6 +180,16 @@ describe('firewall transaction fault injection (AT-03-003/004/007; F-030, F-186)
   it('does not engage firewall or commit active state after WFP failure (AT-03-010)', async () => {
     state.wfpFailApply = 1
     expect((await enableKillSwitch(options)).success).toBe(false)
+    expect(state.scripts.some(script => script.includes('# --- Step 2:'))).toBe(false)
+    expect(state.wfpCalls).toEqual(['prepare','apply','remove'])
+    expect(state.manifest).toBeNull()
+  })
+  it('explains a foreign hard-permit conflict and rolls back instead of reporting protection (AT-03-010)', async () => {
+    state.wfpConflict = true
+    const result = await enableKillSwitch(options)
+    expect(result).toMatchObject({ success: false })
+    expect(result.message).toContain('Конфликт IPv6-фильтров WFP')
+    expect(result.details).toContain('sing-tun')
     expect(state.scripts.some(script => script.includes('# --- Step 2:'))).toBe(false)
     expect(state.wfpCalls).toEqual(['prepare','apply','remove'])
     expect(state.manifest).toBeNull()

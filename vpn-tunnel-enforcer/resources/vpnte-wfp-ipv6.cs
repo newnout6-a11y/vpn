@@ -89,6 +89,8 @@ namespace VPNTE.IPv6 {
     // Our permits stay soft so foreign blocks can still restrict the VPN.
     const ushort SublayerWeight = 0xffff;
     IntPtr handle;
+    bool checkingPriority;
+    ushort actualSublayerWeight;
     [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] struct Display { [MarshalAs(UnmanagedType.LPWStr)] public string Name, Description; }
     [StructLayout(LayoutKind.Explicit, Size=16)] struct Value { [FieldOffset(0)] public uint Type; [FieldOffset(8)] public IntPtr Pointer; [FieldOffset(8)] public byte Byte; }
     [StructLayout(LayoutKind.Sequential)] struct Blob { public uint Size; public IntPtr Data; }
@@ -134,7 +136,17 @@ namespace VPNTE.IPv6 {
     static byte[] Bytes(IntPtr pointer, int size) { if (pointer == IntPtr.Zero || size < 1 || size > 16384) throw new InvalidOperationException("Invalid WFP buffer"); var bytes = new byte[size]; Marshal.Copy(pointer, bytes, 0, size); return bytes; }
     static string ReadAppId(IntPtr pointer) { var blob = Read<Blob>(pointer); return BitConverter.ToString(Bytes(blob.Data, checked((int)blob.Size))).Replace("-", ""); }
     public static string AppId(string path) { IntPtr pointer = IntPtr.Zero; try { Check(FwpmGetAppIdFromFileName0(path, out pointer)); return ReadAppId(pointer); } finally { if (pointer != IntPtr.Zero) FwpmFreeMemory0(ref pointer); } }
-    public void EnsureSublayer() { CheckSublayer(true); }
+    public void EnsureSublayer() { CheckSublayer(true); VerifyPriority(); }
+    public void VerifyPriority() { checkingPriority=true; try { ReadOwned(); } finally { checkingPriority=false; } }
+    static bool HigherHardPermit(Filter filter, ushort weight, ushort ownWeight) {
+      return weight >= ownWeight && (filter.Flags & 0x28) == 8 && filter.Action.Type == 0x1002 &&
+        (filter.Layer == Layer || filter.Layer == InboundLayer || filter.Layer == BootLayer);
+    }
+    static bool FilterFlagsValid(uint flags, bool boot) {
+      // Windows may add INDEXED (0x40); it changes lookup, not policy semantics.
+      // Disabled is valid only for boot filters after the BFE transition.
+      return (flags & ~(boot ? 0x60u : 0x40u)) == (boot ? 2u : 1u);
+    }
     bool CheckSublayer(bool create) {
       Guid key = Policy.Sublayer; IntPtr pointer = IntPtr.Zero;
       try {
@@ -146,20 +158,25 @@ namespace VPNTE.IPv6 {
           Check(FwpmSubLayerGetByKey0(handle, ref key, out pointer));
         } else Check(error);
         var actual = Read<Sublayer>(pointer);
-        if (actual.Key != key || actual.Display.Name != Policy.Marker || actual.Display.Description != Policy.Marker || actual.Flags != 1 || actual.Weight != SublayerWeight || actual.Provider != IntPtr.Zero || actual.ProviderData.Size != 0) throw new InvalidOperationException("Foreign WFP sublayer; unchanged");
+        if (actual.Key != key || actual.Display.Name != Policy.Marker || actual.Display.Description != Policy.Marker || actual.Flags != 1 || actual.Weight == 0 || (actualSublayerWeight != 0 && actual.Weight != actualSublayerWeight) || actual.Provider != IntPtr.Zero || actual.ProviderData.Size != 0) throw new InvalidOperationException("Foreign WFP sublayer; unchanged");
+        // BFE may return a lower weight when the requested priority is occupied.
+        // Identity and priority safety are checked separately, against read-back.
+        actualSublayerWeight=actual.Weight;
         return true;
       } finally { if (pointer != IntPtr.Zero) FwpmFreeMemory0(ref pointer); }
     }
     public Rule[] ReadOwned() {
       if (!CheckSublayer(false)) return new Rule[0];
+      var rules = new List<Rule>(); uint total = 0;
+      // A non-null enum template requires an actual layer GUID (zero is invalid).
+      foreach (var requestedLayer in new[]{Layer, InboundLayer, BootLayer}) {
       IntPtr enumeration, template = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(EnumTemplate)));
       try {
         // Default enumeration hides boot/disabled filters: neither verification
         // nor cleanup may interpret an incomplete snapshot as an empty policy.
-        Marshal.StructureToPtr(new EnumTemplate { Flags=0x08 | 0x10, Actions=0xffffffff }, template, false);
+        Marshal.StructureToPtr(new EnumTemplate { Layer=requestedLayer, Flags=0x08 | 0x10, Actions=0xffffffff }, template, false);
         Check(FwpmFilterCreateEnumHandle0(handle, template, out enumeration));
       } finally { Marshal.FreeHGlobal(template); }
-      var rules = new List<Rule>(); uint total = 0;
       try {
         while (true) {
           IntPtr entries = IntPtr.Zero; uint count;
@@ -168,12 +185,19 @@ namespace VPNTE.IPv6 {
             if (total > 100000) throw new InvalidOperationException("WFP enumeration limit");
             for (int i=0; i<count; i++) {
               var filter = Read<Filter>(Marshal.ReadIntPtr(entries, i * IntPtr.Size));
+              if (checkingPriority && filter.Sublayer != Policy.Sublayer && (filter.Flags & 8) != 0 && filter.Action.Type == 0x1002) {
+                IntPtr sublayer = IntPtr.Zero; Guid subkey=filter.Sublayer;
+                try {
+                  Check(FwpmSubLayerGetByKey0(handle, ref subkey, out sublayer));
+                  if (HigherHardPermit(filter, Read<Sublayer>(sublayer).Weight, actualSublayerWeight)) throw new InvalidOperationException("IPv6 WFP priority conflict: " + filter.Display.Name + "; layer=" + filter.Layer + "; sublayer=" + filter.Sublayer + "; weight=" + Read<Sublayer>(sublayer).Weight + "; conditions=" + filter.Count);
+                } finally { if (sublayer != IntPtr.Zero) FwpmFreeMemory0(ref sublayer); }
+              }
               if (filter.Sublayer != Policy.Sublayer) continue;
               bool boot=filter.Layer == BootLayer;
               // Boot filters are inactive after BFE's atomic transition to persistent filters.
-              if ((filter.Layer != Layer && filter.Layer != InboundLayer && !boot) || (boot ? (filter.Flags & ~0x20u) != 2 : filter.Flags != 1) || filter.Provider != IntPtr.Zero || filter.ProviderData.Size != 0 || filter.Count > 3 ||
+              if ((filter.Layer != Layer && filter.Layer != InboundLayer && !boot) || !FilterFlagsValid(filter.Flags, boot) || filter.Provider != IntPtr.Zero || filter.ProviderData.Size != 0 || filter.Count > 3 ||
                   filter.Display.Name != Policy.Marker + "/" + filter.Key.ToString() || filter.Display.Description == null || !filter.Display.Description.StartsWith(Policy.Marker + "/") ||
-                  filter.Weight.Type != 1 || filter.Weight.Byte != (filter.Action.Type == 0x1001 ? 0 : 15) || filter.Action.Key != Guid.Empty || filter.Context.Raw != 0) throw new InvalidOperationException("Unrecognized/disabled WFP filter; unchanged");
+                  filter.Weight.Type != 1 || filter.Weight.Byte != (filter.Action.Type == 0x1001 ? 0 : 15) || filter.Action.Key != Guid.Empty || filter.Context.Raw != 0) throw new InvalidOperationException("Unrecognized/disabled WFP filter; unchanged: " + filter.Display.Name + "; flags=" + filter.Flags + "; layer=" + filter.Layer + "; weightType=" + filter.Weight.Type + "; weightByte=" + filter.Weight.Byte + "; action=" + filter.Action.Type + "; actionKey=" + filter.Action.Key + "; context=" + filter.Context.Raw + "; conditions=" + filter.Count);
               var rule = new Rule { Id=filter.Key, Role=filter.Display.Description.Substring(Policy.Marker.Length + 1), Inbound=filter.Layer == InboundLayer, Boot=boot };
               if (filter.Action.Type != (rule.Block ? 0x1001u : 0x1002u)) throw new InvalidOperationException("WFP action mismatch");
               var seen = new HashSet<Guid>();
@@ -193,6 +217,7 @@ namespace VPNTE.IPv6 {
           } finally { if (entries != IntPtr.Zero) FwpmFreeMemory0(ref entries); }
         }
       } finally { Check(FwpmFilterDestroyEnumHandle0(handle, enumeration)); }
+      }
       return rules.ToArray();
     }
     public void Delete(Guid id) { Check(FwpmFilterDeleteByKey0(handle, ref id)); }

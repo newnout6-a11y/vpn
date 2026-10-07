@@ -8,7 +8,7 @@ import { Resolver } from 'dns/promises'
 import { logEvent } from './appLogger'
 import { readRecoveryManifest } from './recoveryManifest'
 
-export const WFP_SOURCE_SHA256 = '99382d8ef48069fa80ca8cb5811e7dec708e4440f98a04e74eed2a742d69997e'
+export const WFP_SOURCE_SHA256 = '26aa1dd13059f6a3582ebbae2421833323d03340771bfbce5198d1dad628e712'
 export interface Ipv6Rule {
   id: string
   role: 'block' | 'lan' | 'tun' | 'vpn' | 'exception-app' | 'exception-ip'
@@ -117,9 +117,10 @@ export async function prepareWfpIpv6Policy(opts: { corePrograms: string[]; serve
     return v as { interfaceGuid: string }
   })
   if (!owner) throw new Error('Owned TUN identity is required for IPv6 policy')
-  const addresses = opts.serverHost ? await resolveTransportIpv6(opts.serverHost, opts.signal) : []
+  let addresses: string[] = []
   opts.signal?.throwIfAborted()
-  const { stdout } = await run(`${await wfpPrelude()}
+  const prelude = await wfpPrelude()
+  const prepare = (addresses: string[]) => run(`${prelude}
 $owned=@(Get-NetAdapter -ErrorAction Stop | Where-Object { [string]$_.InterfaceGuid -eq ${quote(owner.interfaceGuid)} })
 if ($owned.Count -ne 1 -or $owned[0].Status -ne 'Up' -or $owned[0].Name -ne ${quote(opts.tunAlias)} -or $owned[0].DriverDescription -notmatch '^Wintun\\b' -or $owned[0].PnPDeviceID -notlike 'SWD\\Wintun\\*') { throw 'Owned TUN not verified for WFP' }
 if (-not @(Get-NetIPAddress -InterfaceIndex $owned[0].ifIndex -AddressFamily IPv4 -ErrorAction Stop | Where-Object { $_.IPAddress -eq '192.168.250.253' -and $_.PrefixLength -eq 30 }).Count) { throw 'Owned TUN subnet mismatch' }
@@ -139,8 +140,20 @@ foreach($ip in @($addresses | Select-Object -Unique)) {
   $luid=[VPNTE.IPv6.NativeEngine]::InterfaceLuid([string]$physical[0].InterfaceGuid)
   foreach($program in @(${opts.corePrograms.map(quote).join(',')})) { $vpn += [pscustomobject]@{appId=[VPNTE.IPv6.NativeEngine]::AppId($program);remote=([string]$ip+'/128');luid=$luid} }
 }` : ''}
-Write-Output ('WFP_PREPARED:'+([pscustomobject]@{tunLuid=$tunLuid;appIds=@($appIds);vpn=@($vpn)} | ConvertTo-Json -Depth 5 -Compress))`)
-  const native = parseMarker(stdout, 'WFP_PREPARED:') as { tunLuid: string; appIds: string[]; vpn: Array<{ appId: string; remote: string; luid: string }> }
+$physical=@(Get-NetAdapter -Physical -ErrorAction Stop | Where-Object { $_.Status -eq 'Up' })
+$ipv6Uplink=[bool](@(Get-NetRoute -AddressFamily IPv6 -ErrorAction Stop | Where-Object { $_.DestinationPrefix -eq '::/0' -and $_.InterfaceIndex -in $physical.ifIndex }).Count -gt 0)
+Write-Output ('WFP_PREPARED:'+([pscustomobject]@{tunLuid=$tunLuid;appIds=@($appIds);vpn=@($vpn);ipv6Uplink=$ipv6Uplink} | ConvertTo-Json -Depth 5 -Compress))`)
+  type NativePlan = { tunLuid: string; appIds: string[]; vpn: Array<{ appId: string; remote: string; luid: string }>; ipv6Uplink: boolean }
+  let native = parseMarker((await prepare([])).stdout, 'WFP_PREPARED:') as NativePlan
+  if (!native || typeof native.ipv6Uplink !== 'boolean') throw new Error('Physical IPv6 uplink not verified')
+  opts.signal?.throwIfAborted()
+  // Use the existing local preparation snapshot: ordinary IPv4-only uplinks
+  // incur no DNS discovery and no extra helper roundtrip.
+  if (opts.serverHost && native.ipv6Uplink) {
+    addresses = await resolveTransportIpv6(opts.serverHost, opts.signal)
+    opts.signal?.throwIfAborted()
+    if (addresses.length) native = parseMarker((await prepare(addresses)).stdout, 'WFP_PREPARED:') as NativePlan
+  }
   if (!native || !Array.isArray(native.appIds) || native.appIds.length !== opts.apps.length || !Array.isArray(native.vpn)) throw new Error('Incomplete IPv6 preparation')
   if (opts.serverHost && (native.vpn.length !== addresses.length * opts.corePrograms.length ||
       addresses.some(address => native.vpn.filter(scope => scope.remote === `${new Address6(address).correctForm()}/128`).length !== opts.corePrograms.length))) throw new Error('Incomplete IPv6 transport scopes')
@@ -162,6 +175,17 @@ export async function applyWfpIpv6Policy(policy: WfpIpv6Policy, run: Run): Promi
 $engine=New-Object VPNTE.IPv6.NativeEngine
 try { [VPNTE.IPv6.Policy]::Apply($engine,$rules); Write-Output 'WFP_IPV6_VERIFIED' } finally { $engine.Dispose() }`)
   if (!String(stdout).split(/\r?\n/).includes('WFP_IPV6_VERIFIED')) throw new Error('IPv6 WFP apply not verified')
+}
+export async function reserveWfpIpv6Priority(run: Run): Promise<void> {
+  const { stdout } = await run(`${await wfpPrelude()}
+$engine=New-Object VPNTE.IPv6.NativeEngine
+try {
+  $engine.Begin()
+  try { $engine.EnsureSublayer(); $engine.Commit() } catch { $engine.Abort(); throw }
+  $engine.VerifyPriority()
+  Write-Output 'WFP_PRIORITY_VERIFIED'
+} finally { $engine.Dispose() }`)
+  if (!String(stdout).split(/\r?\n/).includes('WFP_PRIORITY_VERIFIED')) throw new Error('IPv6 WFP priority not verified')
 }
 export async function prepareWfpIpv6Exceptions(previous: WfpIpv6Policy, apps: string[], cidrs: string[], run: Run): Promise<WfpIpv6Policy> {
   validateWfpIpv6Policy(previous)
@@ -191,7 +215,7 @@ try { Write-Output ('WFP_COUNT:'+ $engine.ReadOwned().Length) } finally { $engin
 export async function verifyWfpIpv6Policy(policy: WfpIpv6Policy, run: Run): Promise<void> {
   const { stdout } = await run(`${await wfpPrelude()}${policyScript(policy)}
 $engine=New-Object VPNTE.IPv6.NativeEngine
-try { [VPNTE.IPv6.Policy]::Validate($rules); [VPNTE.IPv6.Policy]::AssertSame($engine.ReadOwned(),$rules); Write-Output 'WFP_IPV6_VERIFIED' } finally { $engine.Dispose() }`)
+try { $engine.VerifyPriority(); [VPNTE.IPv6.Policy]::Validate($rules); [VPNTE.IPv6.Policy]::AssertSame($engine.ReadOwned(),$rules); Write-Output 'WFP_IPV6_VERIFIED' } finally { $engine.Dispose() }`)
   if (!String(stdout).split(/\r?\n/).includes('WFP_IPV6_VERIFIED')) throw new Error('IPv6 WFP coverage not verified')
 }
 export async function removeWfpIpv6Protection(run: Run): Promise<void> {

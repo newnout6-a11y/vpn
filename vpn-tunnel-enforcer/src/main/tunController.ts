@@ -19,6 +19,7 @@ import {
   disableKillSwitch,
   disableKillSwitchIfActive,
   enableKillSwitch,
+  reserveKillSwitchIpv6Priority,
   isKillSwitchActive
 } from './firewallKillSwitch'
 import {
@@ -2506,6 +2507,13 @@ export const tunController = {
         'потому что так чаще всего ломаются DNS и интернет. Оставьте текущий VPN/TUN включенным или выключите TUN в VPN-клиенте и оставьте только локальный proxy.'
       logEvent('warn', 'tun', 'start refused because another TUN/VPN is already active', { foreign, mode, proxyAddr, proxyType })
       return finishStart({ success: false, error: message })
+    }
+    // Reserve the sublayer before sing-box strict_route creates its hard permits.
+    // This commits only an empty owned container; traffic rules still require
+    // the verified TUN and durable recovery journal below.
+    if (wantKillSwitch) {
+      try { await timeAsync('wfp-priority-reserve', () => reserveKillSwitchIpv6Priority(startAbortController.signal)) }
+      catch (err: any) { return finishStart({ success: false, error: err?.message || String(err) }) }
     }
     mark('preflight')
     const warning = null

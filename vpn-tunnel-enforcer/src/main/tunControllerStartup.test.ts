@@ -57,6 +57,26 @@ return {poll: ${callback}, signal: startAbortController.signal, requestStop: () 
 }
 
 describe('startup callback fault boundaries', () => {
+  it('awaits WFP priority reservation before continuing startup and stops on conflict (AT-03-010)', async () => {
+    const reserveStart = source.indexOf('// Reserve the sublayer before sing-box')
+    const reserveEnd = source.indexOf("mark('preflight')", reserveStart)
+    expect(reserveStart).toBeGreaterThan(-1)
+    expect(reserveEnd).toBeLessThan(source.indexOf('await startXray(', reserveEnd))
+    const compiled = ts.transpileModule(`return async function(){${source.slice(reserveStart, reserveEnd)} return {success:true}}`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
+    let release!: () => void
+    const reserve = vi.fn(() => new Promise<void>(done => { release = done }))
+    const signal = new AbortController().signal
+    const run = new Function('wantKillSwitch','timeAsync','reserveKillSwitchIpv6Priority','startAbortController','finishStart',compiled)(true,async (_phase: string, effect: Function) => effect(),reserve,{signal},(result: unknown)=>result)
+    const done = vi.fn()
+    const pending = run().then(done)
+    expect(reserve).toHaveBeenCalledExactlyOnceWith(signal)
+    await Promise.resolve()
+    expect(done).not.toHaveBeenCalled()
+    release();await pending
+    expect(done).toHaveBeenCalledWith({success:true})
+    reserve.mockRejectedValueOnce(new Error('WFP conflict'))
+    expect(await run()).toEqual({success:false,error:'WFP conflict'})
+  })
   it('probes immediately and keeps the 250 ms retry timer (AT-02-002)', () => {
     const registrationStart = source.indexOf('const poller = setInterval(pollRuntime, 250)')
     const registrationEnd = source.indexOf('void pollRuntime()', registrationStart) + 'void pollRuntime()'.length

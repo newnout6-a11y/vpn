@@ -13,7 +13,7 @@ import { randomUUID, createHash } from 'crypto'
 import { getRecoveryManifestDir, recoveryManifestPath, readRecoveryManifest, writeRecoveryManifest, writeRecoveryArtifact, removeRecoveryManifest, strictRecoveryRequired, RecoveryManifestReadError, quarantineRecoveryManifest } from './recoveryManifest'
 import { TUN_ADAPTER_ALIAS, TUN_IPV4_NETWORK_CIDR, getTunAdapterAlias } from './tunAdapter'
 import { withFirewallRulesApi } from './firewallRulesApi'
-import { type WfpIpv6Policy, validateWfpIpv6Policy, prepareWfpIpv6Policy, prepareWfpIpv6Exceptions, applyWfpIpv6Policy, verifyWfpIpv6Policy, removeWfpIpv6Protection, hasWfpIpv6Protection, sameWfpCoreScopes } from './wfpIpv6'
+import { type WfpIpv6Policy, validateWfpIpv6Policy, prepareWfpIpv6Policy, prepareWfpIpv6Exceptions, applyWfpIpv6Policy, verifyWfpIpv6Policy, removeWfpIpv6Protection, hasWfpIpv6Protection, sameWfpCoreScopes, reserveWfpIpv6Priority } from './wfpIpv6'
 
 const execFile = promisify(execFileCb)
 
@@ -885,7 +885,9 @@ Write-Output "SAVED:$savedJson"
     logEvent('error', 'firewall-killswitch', 'failed to install kill-switch', err)
     return {
       success: false,
-      message: 'Не удалось установить kill-switch (DefaultOutboundAction)',
+      message: String(err?.stderr || err?.message || err).includes('IPv6 WFP priority conflict')
+        ? 'Конфликт IPv6-фильтров WFP: другое VPN-ядро может обходить блокировку. Остановите его TUN/VPN и повторите подключение'
+        : 'Не удалось установить kill-switch (Windows Firewall / IPv6 WFP)',
       details: err?.stderr || err?.message || String(err)
     }
   }
@@ -1061,6 +1063,19 @@ async function probeFirewallForOurRules(): Promise<boolean> {
  */
 export async function recoverStaleKillSwitch(isSingboxRunning: () => Promise<boolean>): Promise<void> {
   return serializeFirewall(() => recoverStaleKillSwitchUnlocked(isSingboxRunning))
+}
+export async function reserveKillSwitchIpv6Priority(signal: AbortSignal): Promise<void> {
+  return serializeFirewall(async () => {
+    signal.throwIfAborted()
+    try { await reserveWfpIpv6Priority(script => ps(script, true)) }
+    catch (err: any) {
+      if (String(err?.stderr || err?.message || err).includes('IPv6 WFP priority conflict')) {
+        throw new Error('Конфликт IPv6-фильтров WFP: остановите TUN/VPN другого приложения и повторите подключение')
+      }
+      throw err
+    }
+    signal.throwIfAborted()
+  })
 }
 async function recoverStaleKillSwitchUnlocked(isSingboxRunning: () => Promise<boolean>): Promise<void> {
   if (process.platform !== 'win32') return
