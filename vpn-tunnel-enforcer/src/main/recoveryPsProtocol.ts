@@ -66,19 +66,32 @@ foreach ($p in ($rows | Sort-Object { if ($_.Name -ieq 'vpnte-sing-box.exe') { 0
 
 /** Fixed quarantine operation; callers provide only a checked artifact and hash. */
 export const RECOVERY_QUARANTINE_SCRIPT = String.raw`
-Assert-TrustedArtifact $path $false
-$stream=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read -bor [IO.FileShare]::Delete)
-try {
+function Get-QuarantineContentHash($stream) {
   if ($stream.Length -gt ${RECOVERY_MAX_BYTES}) { throw 'Recovery manifest exceeds limit' }
   $reader=New-Object IO.StreamReader($stream,[Text.Encoding]::UTF8,$true)
   $body=$reader.ReadToEnd().TrimStart([char]0xfeff).Trim()
   $sha=[Security.Cryptography.SHA256]::Create()
-  try { $hash=([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($body)))).Replace('-','').ToLowerInvariant() } finally { $sha.Dispose() }
+  try { return ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($body)))).Replace('-','').ToLowerInvariant() } finally { $sha.Dispose() }
+}
+Assert-TrustedArtifact $path $false
+$stream=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read -bor [IO.FileShare]::Delete)
+try {
+  $hash=Get-QuarantineContentHash $stream
   if ($hash -ne $expectedHash) { throw 'Recovery manifest changed since rejection; quarantine refused' }
   $quarantine=$path+'.corrupt-'+[Guid]::NewGuid().ToString()
   Move-Item -LiteralPath $path -Destination $quarantine -ErrorAction Stop
 } finally { $stream.Dispose() }
 Assert-TrustedArtifact $quarantine $false
+# Share.Delete allows another writer's atomic replacement during the first read.
+# Validate the file actually moved, denying writes/replacements during this read.
+$moved=[IO.File]::Open($quarantine,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+try { $movedHash=Get-QuarantineContentHash $moved } finally { $moved.Dispose() }
+if ($movedHash -ne $expectedHash) {
+  # File.Move refuses an existing destination: never overwrite a newer baseline.
+  try { [IO.File]::Move($quarantine,$path) }
+  catch { throw 'Recovery quarantine raced with replacement; newer baseline and quarantined data preserved' }
+  throw 'Recovery manifest changed during quarantine; replacement restored'
+}
 if (Test-Path -LiteralPath $path) { throw 'Recovery quarantine not confirmed' }
 return 'RECOVERY_ARTIFACT_QUARANTINED'
 `

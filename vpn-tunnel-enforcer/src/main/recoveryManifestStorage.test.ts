@@ -77,13 +77,21 @@ describe('trusted recovery storage', () => {
     expect(mocks.worker.mock.calls[0][0]).toEqual({ op: 'quarantine', name: 'firewall.json', contentHash: hash })
     expect(mocks.elevated).not.toHaveBeenCalled()
   })
-  it.skipIf(process.platform !== 'win32' && !process.env.VPNTE_PWSH).each(['same', 'changed', 'untrusted'])('executes native quarantine with %s content in an isolated temporary folder (AT-03-003/012)', variant => {
+  it.skipIf(process.platform !== 'win32' && !process.env.VPNTE_PWSH).each(['same', 'changed', 'untrusted', 'replaced', 'replaced-again'])('executes native quarantine with %s content in an isolated temporary folder (AT-03-003/012)', variant => {
     const root = join(process.cwd(), '.tmp'); mkdirSync(root, { recursive: true })
     const folder = mkdtempSync(join(root, 'quarantine-native-')); const path = join(folder, 'firewall.json')
     const body = variant === 'changed' ? '{"schemaVersion":1}' : '{'
     writeFileSync(path, body, 'utf8')
     const script = `$ErrorActionPreference='Stop'
 function Assert-TrustedArtifact($path,$directory) { ${variant === 'untrusted' ? "throw 'Untrusted fixture'" : ''} }
+${variant.startsWith('replaced') ? `
+function Move-Item {param($LiteralPath,$Destination,$ErrorAction)
+  $new=$LiteralPath+'.new';$backup=$LiteralPath+'.previous'
+  [IO.File]::WriteAllText($new,'{"schemaVersion":1}')
+  [IO.File]::Replace($new,$LiteralPath,$backup);[IO.File]::Delete($backup)
+  [IO.File]::Move($LiteralPath,$Destination)
+  ${variant === 'replaced-again' ? `[IO.File]::WriteAllText($LiteralPath,'{"schemaVersion":1,"newer":true}')` : ''}
+}` : ''}
 $path='${path.replace(/'/g, "''")}'
 $expectedHash='${createHash('sha256').update('{').digest('hex')}'
 ${RECOVERY_QUARANTINE_SCRIPT}`
@@ -94,6 +102,12 @@ ${RECOVERY_QUARANTINE_SCRIPT}`
         const files = readdirSync(folder); expect(files).toHaveLength(1)
         expect(files[0]).toMatch(/^firewall\.json\.corrupt-/)
         expect(readFileSync(join(folder, files[0]), 'utf8')).toBe(body)
+      } else if (variant.startsWith('replaced')) {
+        expect(invoke).toThrow()
+        expect(readFileSync(path, 'utf8')).toBe(variant === 'replaced' ? '{"schemaVersion":1}' : '{"schemaVersion":1,"newer":true}')
+        const quarantined = readdirSync(folder).filter(name => name.startsWith('firewall.json.corrupt-'))
+        expect(quarantined).toHaveLength(variant === 'replaced-again' ? 1 : 0)
+        if (quarantined.length) expect(readFileSync(join(folder, quarantined[0]), 'utf8')).toBe('{"schemaVersion":1}')
       } else { expect(invoke).toThrow(); expect(readdirSync(folder)).toEqual(['firewall.json']); expect(readFileSync(path, 'utf8')).toBe(body) }
     } finally { for (const name of readdirSync(folder)) unlinkSync(join(folder, name)); rmdirSync(folder) }
   }, 20000)

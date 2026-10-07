@@ -221,6 +221,23 @@ namespace VPNTE.IPv6.Tests {
       Assert(!(bool)checkPriority.Invoke(null,new object[]{filter,(ushort)65532,(ushort)65533}),"lower permit cannot bypass block");
       filterType.GetField("Flags").SetValue(filter,40u);
       Assert(!(bool)checkPriority.Invoke(null,new object[]{filter,(ushort)65535,(ushort)65533}),"disabled permit is inactive");
+      // A deciding driver callout can return PERMIT and clear ACTION_WRITE.
+      // Its future result cannot be proven safe from the static action alone.
+      foreach(var layerId in new[]{"4a72393b-319f-44bc-84c3-ba54dcb3b6b4","a3b42c97-9f04-4672-b87e-cee9c483257f","a3b3ab6b-3564-488c-9117-f34e82142763"}){
+        filterType.GetField("Layer").SetValue(filter,new Guid(layerId));
+        foreach(var kind in new uint[]{0x5003,0x4005})foreach(var mask in new uint[]{0,8,16,24}){
+          actionType.GetField("Type").SetValue(action,kind);filterType.GetField("Action").SetValue(filter,action);filterType.GetField("Flags").SetValue(filter,mask);
+          Assert((bool)checkPriority.Invoke(null,new object[]{filter,(ushort)65535,(ushort)65533}),"higher deciding callout must be rejected");
+          Assert((bool)checkPriority.Invoke(null,new object[]{filter,(ushort)65533,(ushort)65533}),"equal deciding callout is ambiguous");
+          Assert(!(bool)checkPriority.Invoke(null,new object[]{filter,(ushort)65532,(ushort)65533}),"lower callout cannot override hard block");
+          filterType.GetField("Flags").SetValue(filter,mask|32u);
+          Assert(!(bool)checkPriority.Invoke(null,new object[]{filter,(ushort)65535,(ushort)65533}),"disabled callout is inactive");
+        }
+        foreach(var kind in new uint[]{0x6004,0x1001,0x1002}){
+          actionType.GetField("Type").SetValue(action,kind);filterType.GetField("Action").SetValue(filter,action);filterType.GetField("Flags").SetValue(filter,0u);
+          Assert(!(bool)checkPriority.Invoke(null,new object[]{filter,(ushort)65535,(ushort)65533}),"inspection, block and soft permit do not bypass protection");
+        }
+      }
       Assert(Marshal.SizeOf(layout.GetNestedType("Sublayer",flags))==72,"FWPM_SUBLAYER0 x64 ABI");
       Assert(Marshal.SizeOf(layout.GetNestedType("Condition",flags))==40,"FWPM_FILTER_CONDITION0 x64 ABI");
       Assert(Marshal.SizeOf(layout.GetNestedType("EnumTemplate",flags))==72,"FWPM_FILTER_ENUM_TEMPLATE0 x64 ABI");

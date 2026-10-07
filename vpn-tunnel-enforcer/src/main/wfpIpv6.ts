@@ -8,7 +8,7 @@ import { Resolver } from 'dns/promises'
 import { logEvent } from './appLogger'
 import { readRecoveryManifest } from './recoveryManifest'
 
-export const WFP_SOURCE_SHA256 = '26aa1dd13059f6a3582ebbae2421833323d03340771bfbce5198d1dad628e712'
+export const WFP_SOURCE_SHA256 = '6eebcb4430e2b8969d94d9afb09eb803296dfd8cbea5eaf24b8a78407db06249'
 export interface Ipv6Rule {
   id: string
   role: 'block' | 'lan' | 'tun' | 'vpn' | 'exception-app' | 'exception-ip'

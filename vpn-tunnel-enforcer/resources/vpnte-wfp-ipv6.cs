@@ -138,8 +138,15 @@ namespace VPNTE.IPv6 {
     public static string AppId(string path) { IntPtr pointer = IntPtr.Zero; try { Check(FwpmGetAppIdFromFileName0(path, out pointer)); return ReadAppId(pointer); } finally { if (pointer != IntPtr.Zero) FwpmFreeMemory0(ref pointer); } }
     public void EnsureSublayer() { CheckSublayer(true); VerifyPriority(); }
     public void VerifyPriority() { checkingPriority=true; try { ReadOwned(); } finally { checkingPriority=false; } }
+    static bool MayHardPermit(Filter filter) {
+      // Deciding callouts can return PERMIT and clear ACTION_WRITE at runtime,
+      // even without a static CLEAR_ACTION_RIGHT flag. Inspection cannot permit.
+      return (filter.Flags & 0x20) == 0 &&
+        ((filter.Action.Type == 0x1002 && (filter.Flags & 8) != 0) ||
+          filter.Action.Type == 0x5003 || filter.Action.Type == 0x4005);
+    }
     static bool HigherHardPermit(Filter filter, ushort weight, ushort ownWeight) {
-      return weight >= ownWeight && (filter.Flags & 0x28) == 8 && filter.Action.Type == 0x1002 &&
+      return weight >= ownWeight && MayHardPermit(filter) &&
         (filter.Layer == Layer || filter.Layer == InboundLayer || filter.Layer == BootLayer);
     }
     static bool FilterFlagsValid(uint flags, bool boot) {
@@ -185,11 +192,11 @@ namespace VPNTE.IPv6 {
             if (total > 100000) throw new InvalidOperationException("WFP enumeration limit");
             for (int i=0; i<count; i++) {
               var filter = Read<Filter>(Marshal.ReadIntPtr(entries, i * IntPtr.Size));
-              if (checkingPriority && filter.Sublayer != Policy.Sublayer && (filter.Flags & 8) != 0 && filter.Action.Type == 0x1002) {
+              if (checkingPriority && filter.Sublayer != Policy.Sublayer && MayHardPermit(filter)) {
                 IntPtr sublayer = IntPtr.Zero; Guid subkey=filter.Sublayer;
                 try {
                   Check(FwpmSubLayerGetByKey0(handle, ref subkey, out sublayer));
-                  if (HigherHardPermit(filter, Read<Sublayer>(sublayer).Weight, actualSublayerWeight)) throw new InvalidOperationException("IPv6 WFP priority conflict: " + filter.Display.Name + "; layer=" + filter.Layer + "; sublayer=" + filter.Sublayer + "; weight=" + Read<Sublayer>(sublayer).Weight + "; conditions=" + filter.Count);
+                  if (HigherHardPermit(filter, Read<Sublayer>(sublayer).Weight, actualSublayerWeight)) throw new InvalidOperationException("IPv6 WFP priority conflict: " + filter.Display.Name + "; layer=" + filter.Layer + "; sublayer=" + filter.Sublayer + "; weight=" + Read<Sublayer>(sublayer).Weight + "; action=" + filter.Action.Type + "; conditions=" + filter.Count);
                 } finally { if (sublayer != IntPtr.Zero) FwpmFreeMemory0(ref sublayer); }
               }
               if (filter.Sublayer != Policy.Sublayer) continue;

@@ -96,7 +96,7 @@ function Invoke-VpnteWfpIpv6Recovery {
     $source=(Get-Content -LiteralPath $sourcePath -Raw -Encoding UTF8 -ErrorAction Stop).Replace("`r`n","`n")
     $hasher=[Security.Cryptography.SHA256]::Create()
     try {$hash=([BitConverter]::ToString($hasher.ComputeHash([Text.Encoding]::UTF8.GetBytes($source)))).Replace('-','').ToLowerInvariant()} finally {$hasher.Dispose()}
-    if($hash -ne '26aa1dd13059f6a3582ebbae2421833323d03340771bfbce5198d1dad628e712'){throw 'WFP helper source integrity mismatch'}
+    if($hash -ne '6eebcb4430e2b8969d94d9afb09eb803296dfd8cbea5eaf24b8a78407db06249'){throw 'WFP helper source integrity mismatch'}
     if(-not ('VPNTE.IPv6.Policy' -as [type])){Add-Type -TypeDefinition $source -ErrorAction Stop}
     $engine=New-Object VPNTE.IPv6.NativeEngine
     try { [VPNTE.IPv6.Policy]::Remove($engine); Log 'IPv6 WFP: owned filters removed and verified' } finally {$engine.Dispose()}
