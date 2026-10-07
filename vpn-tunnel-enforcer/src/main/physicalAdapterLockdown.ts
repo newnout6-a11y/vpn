@@ -571,6 +571,25 @@ export async function applyPhysicalAdapterLockdown(tunDnsIpv4: string, options: 
   }
   if (options.signal?.aborted) return cancelled('entry')
   const forceDns = options.forceDns !== false
+  const verifyAdapterSet = async (expected: AdapterSnapshot[]) => {
+    clearPhysicalAdaptersSnapshotCache()
+    let warning = 'physical adapter set changed; lockdown coverage is not verified'
+    try {
+      const current = await snapshotPhysicalAdapters()
+      const identity = (a: AdapterSnapshot) => (a.interfaceGuid || '').replace(/[{}]/g, '').toLowerCase()
+      const expectedIds = new Set(expected.map(identity))
+      if (current.length > 0 && current.length === expected.length && expectedIds.size === expected.length &&
+          !expectedIds.has('') && new Set(current.map(identity)).size === current.length && current.every(a => expectedIds.has(identity(a)))) return null
+    } catch (err) {
+      warning = `physical adapter set could not be verified: ${String(err)}`
+    }
+    logEvent('warn', 'phys-lockdown', warning)
+    let rolledBack = false
+    try { rolledBack = (await rollbackPhysicalAdapterLockdownIfApplied(warning)).rolledBack } catch (err) {
+      logEvent('warn', 'phys-lockdown', 'adapter coverage rollback failed', err)
+    }
+    return { applied: !rolledBack, adapters: expected.length, warnings: [warning, ...(!rolledBack ? ['adapter coverage rollback did not complete; recovery journal retained'] : [])] }
+  }
   let existing = await readManifest()
   // Reading a baseline is safe to finish; cancellation must prevent the next
   // mutation. An existing journal still belongs to lifecycle compensation.
@@ -594,12 +613,15 @@ export async function applyPhysicalAdapterLockdown(tunDnsIpv4: string, options: 
     if (options.signal?.aborted) return cancelled('previous-rollback')
   }
   if (existing) {
+    const coverageFailure = await verifyAdapterSet(existing.adapters)
+    if (coverageFailure) return coverageFailure
     logEvent('info', 'phys-lockdown', 'lockdown already applied — skipping (idempotent)', {
       adapters: existing.adapters.length
     })
     return { applied: true, adapters: existing.adapters.length, warnings: [] }
   }
 
+  clearPhysicalAdaptersSnapshotCache()
   const [adapters, transitionAdapters, dnsRegistryPolicy] = await Promise.all([
     snapshotPhysicalAdapters(),
     snapshotTransitionAdapters(),
@@ -741,6 +763,8 @@ try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}
 
   // Only overwrite the pending manifest if the PS script completed
   // successfully — we can trust the parsed markers to reflect actual state.
+  const coverageFailure = await verifyAdapterSet(adapters)
+  if (coverageFailure) return coverageFailure
   const manifest: LockdownManifest = {
     appliedAt: Date.now(),
     tunDnsIpv4,

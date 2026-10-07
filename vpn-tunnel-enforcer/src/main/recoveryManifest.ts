@@ -9,6 +9,9 @@ import { type RecoveryRequest } from './recoveryPsProtocol'
 
 const execFile = promisify(execFileCb)
 const MAX_MANIFEST_BYTES = 1024 * 1024
+export class RecoveryManifestReadError extends Error {
+  constructor(public reason: 'invalid-content' | 'unsupported-version', message: string) { super(message) }
+}
 // Only pre-dispatch unavailability may fall back. Rejection/timeout/unknown
 // completion must not replay recovery mutations in a second process.
 async function tryRecoveryWorker(request: RecoveryRequest): Promise<string | undefined> {
@@ -126,7 +129,25 @@ Assert-TrustedArtifact ${quote(target)} $false
 if ((Get-Item -LiteralPath ${quote(target)}).Length -gt ${MAX_MANIFEST_BYTES}) { throw 'Recovery manifest exceeds limit' }
 Get-Content -LiteralPath ${quote(target)} -Raw -Encoding UTF8`)
   if (raw === 'RECOVERY_ARTIFACT_ABSENT') return null
-  return validate(JSON.parse(raw))
+  let value: any
+  try { value = JSON.parse(raw) }
+  catch { throw new RecoveryManifestReadError('invalid-content', `Invalid recovery JSON: ${name}`) }
+  if (typeof value?.schemaVersion === 'number' && value.schemaVersion !== 1) {
+    throw new RecoveryManifestReadError('unsupported-version', `Unsupported recovery manifest version: ${name}`)
+  }
+  try { return validate(value) }
+  catch (error) { throw new RecoveryManifestReadError('invalid-content', String(error)) }
+}
+export async function quarantineRecoveryManifest(name: string): Promise<void> {
+  const target = recoveryManifestPath(name)
+  const quarantine = recoveryManifestPath(`${name}.corrupt-${randomUUID()}`)
+  const proof = await runTrustedRead(`
+Assert-TrustedArtifact ${quote(target)} $false
+Move-Item -LiteralPath ${quote(target)} -Destination ${quote(quarantine)} -ErrorAction Stop
+Assert-TrustedArtifact ${quote(quarantine)} $false
+if (Test-Path -LiteralPath ${quote(target)}) { throw 'Recovery quarantine not confirmed' }
+Write-Output 'RECOVERY_ARTIFACT_QUARANTINED'`)
+  if (proof !== 'RECOVERY_ARTIFACT_QUARANTINED') throw new Error('Recovery quarantine not confirmed')
 }
 /** Unique temp + fsync + admin-owned protected file ACL + rename commit point. */
 export async function writeRecoveryArtifact(name: string, content: string | Buffer): Promise<void> {

@@ -105,6 +105,41 @@ describe('physical adapter apply cancellation', () => {
     expect(await h.apply('192.168.250.254', { forceDns: false })).toMatchObject({ applied: true, warnings: ['DNS_SMNR_err: policy not verified', 'DNS_PARALLEL_err: policy not verified'] })
     expect(h.writeManifest).toHaveBeenCalledOnce()
   })
+  it.each(['added', 'removed', 'replaced', 'unknown'])('rolls back instead of claiming coverage when adapter set is %s during apply (AT-03-006)', async change => {
+    const h = harness()
+    h.snapshotPhysicalAdapters.mockResolvedValueOnce([adapter()])
+    if (change === 'unknown') h.snapshotPhysicalAdapters.mockRejectedValueOnce(new Error('adapter query failed'))
+    else h.snapshotPhysicalAdapters.mockResolvedValueOnce(change === 'removed' ? [] : change === 'added'
+      ? [adapter(), { ...adapter(), interfaceGuid: '22222222-2222-2222-2222-222222222222' }]
+      : [{ ...adapter(), interfaceGuid: '22222222-2222-2222-2222-222222222222' }])
+    const result = await h.apply('192.168.250.254', { forceDns: false })
+    expect(result).toMatchObject({ applied: false, warnings: [expect.stringContaining('adapter')] })
+    expect(h.rollbackPhysicalAdapterLockdownIfApplied).toHaveBeenCalledOnce()
+    expect(h.writeManifest).toHaveBeenCalledOnce()
+    expect(h.snapshotPhysicalAdapters).toHaveBeenCalledTimes(2)
+  })
+  it('retains recovery ownership when hot-plug compensation fails (AT-03-006/007)', async () => {
+    const h = harness()
+    h.snapshotPhysicalAdapters.mockResolvedValueOnce([adapter()]).mockResolvedValueOnce([])
+    h.rollbackPhysicalAdapterLockdownIfApplied.mockResolvedValue({ rolledBack: false })
+    expect(await h.apply('192.168.250.254', { forceDns: false })).toMatchObject({ applied: true, warnings: expect.arrayContaining([expect.stringContaining('rollback')]) })
+    expect(h.writeManifest).toHaveBeenCalledOnce()
+  })
+  it('accepts a rename only for the same GUID set (AT-03-006)', async () => {
+    const h = harness()
+    h.snapshotPhysicalAdapters.mockResolvedValueOnce([adapter()]).mockResolvedValueOnce([{ ...adapter(), alias: 'Renamed Wi-Fi' }])
+    expect(await h.apply('192.168.250.254', { forceDns: false })).toMatchObject({ applied: true, warnings: [] })
+    expect(h.snapshotPhysicalAdapters).toHaveBeenCalledTimes(2)
+    expect(h.rollbackPhysicalAdapterLockdownIfApplied).not.toHaveBeenCalled()
+  })
+  it('verifies an existing journal against fresh adapters before idempotent success (AT-03-006)', async () => {
+    const h = harness()
+    h.readManifest.mockResolvedValue({ tunDnsIpv4: '192.168.250.254', forceDns: false, adapters: [adapter()] })
+    h.snapshotPhysicalAdapters.mockResolvedValue([])
+    expect(await h.apply('192.168.250.254', { forceDns: false })).toMatchObject({ applied: false, warnings: [expect.stringContaining('adapter')] })
+    expect(h.rollbackPhysicalAdapterLockdownIfApplied).toHaveBeenCalledOnce()
+    expect(h.runPS).not.toHaveBeenCalled()
+  })
   it.each([false, true])('passes startup cancellation and retains compensation ownership (native failure=%s)', nativeFailure => {
     const tun = readFileSync(join(process.cwd(), 'src/main/tunController.ts'), 'utf8')
     const begin = tun.indexOf('const adapterLockdownPromise:')

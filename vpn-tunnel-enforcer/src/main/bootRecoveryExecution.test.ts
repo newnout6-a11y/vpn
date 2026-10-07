@@ -4,13 +4,13 @@ import { execFileSync } from 'child_process'
 import { readFileSync, mkdirSync, mkdtempSync, writeFileSync, unlinkSync, rmdirSync } from 'fs'
 import { join } from 'path'
 import { describe, expect, it } from 'vitest'
-const pwsh = process.env.VPNTE_PWSH
+const pwsh = process.env.VPNTE_PWSH || (process.platform === 'win32' ? 'powershell.exe' : undefined)
 const source = readFileSync(join(process.cwd(), 'resources/vpnte-recover.ps1'), 'utf8')
 const fixtures = () => ({
   policy: { schemaVersion: 1, owner: 'VPNTE', strictMode: false },
   firewall: null as any, tun: null as any, untrusted: false, failProfile: '',
   adapters: [{ Name: 'Other VPN', InterfaceGuid: '11111111-1111-1111-1111-111111111111', InterfaceDescription: 'sing-tun Tunnel', DriverDescription: 'Wintun Userspace Tunnel', PnPDeviceID: 'SWD\\Wintun\\fixture', ifIndex: 10, Status: 'Up' }],
-  rules: false
+  rules: false, extra: {} as Record<string, unknown>, corrupt: '', untrustedFile: ''
 })
 function run(patch: Partial<ReturnType<typeof fixtures>> = {}) {
   const fixture = { ...fixtures(), ...patch }
@@ -20,13 +20,14 @@ $env:ProgramData=if([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT)
 $global:f = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}')) | ConvertFrom-Json
 $global:profiles = @{Domain='Block';Private='Block';Public='Block'}
 $global:removed=$false
+$global:quarantined=@{}
 function Get-Item {
  param($LiteralPath,[switch]$Force,$ErrorAction)
- [pscustomobject]@{Attributes=[IO.FileAttributes]::Normal;PSIsContainer=($LiteralPath -notmatch '\\.json$');Length=100}
+ [pscustomobject]@{Attributes=[IO.FileAttributes]::Normal;PSIsContainer=($LiteralPath -notmatch '\\.json(?:\\.corrupt-.*)?$');Length=100}
 }
 function Get-Acl {
  param($LiteralPath,$ErrorAction)
- $acl=[pscustomobject]@{AreAccessRulesProtected=(-not $global:f.untrusted)}
+ $acl=[pscustomobject]@{AreAccessRulesProtected=(-not $global:f.untrusted -and -not ($global:f.untrustedFile -and $LiteralPath.EndsWith($global:f.untrustedFile)))}
  $acl|Add-Member ScriptMethod GetOwner { param($type) [pscustomobject]@{Value='S-1-5-32-544'} }
  $acl|Add-Member ScriptMethod GetAccessRules { param($a,$b,$type) @([pscustomobject]@{AccessControlType='Allow';IdentityReference=[pscustomobject]@{Value='S-1-5-18'}}) }
  return $acl
@@ -34,6 +35,9 @@ function Get-Acl {
 function Test-Path {
  param($LiteralPath,$Path)
  $p=if($LiteralPath){$LiteralPath}else{$Path}
+ $name=Split-Path $p -Leaf
+ if($global:quarantined.ContainsKey($name)){return $false}
+ if($name -eq $global:f.corrupt -or $global:f.extra.PSObject.Properties.Name -contains $name){return $true}
  switch -Regex ($p) {
   'recovery-policy.json$' { return $true }
   'firewall.json$' { return [bool]$global:f.firewall }
@@ -44,6 +48,9 @@ function Test-Path {
 }
 function Get-Content {
  param($LiteralPath,[switch]$Raw,$Encoding)
+ $name=Split-Path $LiteralPath -Leaf
+ if($name -eq $global:f.corrupt){return '{'}
+ if($global:f.extra.PSObject.Properties.Name -contains $name){return ($global:f.extra.$name|ConvertTo-Json -Depth 10 -Compress)}
  if($LiteralPath -match 'recovery-policy.json$'){return ($global:f.policy|ConvertTo-Json -Depth 10 -Compress)}
  if($LiteralPath -match 'firewall.json$'){return ($global:f.firewall|ConvertTo-Json -Depth 10 -Compress)}
  if($LiteralPath -match 'tun-owner.json$'){return ($global:f.tun|ConvertTo-Json -Depth 10 -Compress)}
@@ -55,7 +62,7 @@ function Set-NetFirewallProfile {
 }
 function Get-NetFirewallProfile {param($Profile,$ErrorAction) [pscustomobject]@{DefaultOutboundAction=$global:profiles[$Profile]}}
 function Get-NetFirewallRule {param($DisplayName,$ErrorAction) if($global:f.rules -and -not $global:removed){[pscustomobject]@{DisplayName='VPNTE-killswitch-test'}}}
-function Remove-NetFirewallRule {param([Parameter(ValueFromPipeline=$true)]$InputObject,$ErrorAction) process{$global:removed=$true;Write-Output 'REMOVE_RULE'}}
+function Remove-NetFirewallRule {[CmdletBinding()]param([Parameter(ValueFromPipeline=$true)]$InputObject) process{$global:removed=$true;Write-Output 'REMOVE_RULE'}}
 function Get-NetAdapter {param($ErrorAction) @($global:f.adapters)}
 function Get-NetIPAddress {param($InterfaceIndex,$AddressFamily,$ErrorAction) [pscustomobject]@{IPAddress='192.168.250.253';PrefixLength=30}}
 function Get-DnsClientServerAddress {param($InterfaceAlias,$AddressFamily,$ErrorAction) [pscustomobject]@{ServerAddresses=@('192.168.250.254')}}
@@ -63,6 +70,7 @@ function Clear-DnsClientCache {param($ErrorAction)}
 function Remove-NetAdapter {param($Name,$Confirm,$ErrorAction) Write-Output "REMOVE_ADAPTER:$Name"}
 function Disable-NetAdapter {param($Name,$Confirm,$ErrorAction) Write-Output "DISABLE_ADAPTER:$Name"}
 function Remove-Item {param($LiteralPath,$Path,[switch]$Force,$ErrorAction) Write-Output "DELETE:$LiteralPath$Path"}
+function Move-Item {param($LiteralPath,$Destination,$ErrorAction) $global:quarantined[(Split-Path $LiteralPath -Leaf)]=$true;Write-Host "QUARANTINE:$LiteralPath"}
 `
   // Replace only report I/O using an AST-delimited definition; keep all recovery control flow.
   const quotedSource = Buffer.from(source).toString('base64')
@@ -72,7 +80,7 @@ $tokens=$null;$errors=$null
 $ast=[System.Management.Automation.Language.Parser]::ParseInput($source,[ref]$tokens,[ref]$errors)
 if($errors.Count){throw 'Source syntax error'}
 $fn=$ast.Find({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Write-RecoveryReport'},$true)
-$source=$source.Remove($fn.Extent.StartOffset,$fn.Extent.EndOffset-$fn.Extent.StartOffset).Insert($fn.Extent.StartOffset,'function Write-RecoveryReport([string]$status) { Write-Output ("REPORT:"+$status) }')
+$source=$source.Remove($fn.Extent.StartOffset,$fn.Extent.EndOffset-$fn.Extent.StartOffset).Insert($fn.Extent.StartOffset,'function Write-RecoveryReport([string]$status) { Write-Output ("REPORT:"+$status); $script:recoveryMessages | ForEach-Object { Write-Output $_.message } }')
 & ([scriptblock]::Create($source))
 `
   // Windows cannot pass this full-script harness within its command-line limit.
@@ -87,6 +95,33 @@ $source=$source.Remove($fn.Extent.StartOffset,$fn.Extent.EndOffset-$fn.Extent.St
   finally { unlinkSync(harnessPath); rmdirSync(tempDir) }
 }
 describe.skipIf(!pwsh)('actual boot recovery control flow on mocked system APIs', () => {
+  it.each(['recovery-policy.json', 'firewall.json', 'latest-physical-adapter-lockdown.json', 'latest-tun-network-baseline.json', 'tun-owner.json'])('rejects an unsupported %s version before any network effects (AT-03-003)', name => {
+    const result = run({ rules: true, extra: { [name]: { schemaVersion: 2, owner: 'VPNTE', strictMode: true } } })
+    expect(result.status).toBe(1)
+    expect(result.output).not.toMatch(/PROFILE:|REMOVE_RULE|REMOVE_ADAPTER:|QUARANTINE:/)
+    expect(result.output).toContain('Unsupported recovery manifest version')
+  })
+  it('quarantines corrupt trusted firewall data and reports unknown Allow fallback (AT-03-003)', () => {
+    const result = run({ rules: true, corrupt: 'firewall.json' })
+    expect(result.status).toBe(1)
+    expect(result.output).toMatch(/QUARANTINE:.*firewall\.json/)
+    expect(result.output).toContain('PROFILE:Public/Allow')
+    expect(result.output).not.toContain('/Block')
+    expect(result.output).toContain('protection unknown')
+    expect(result.output).toContain('REPORT:warnings')
+  })
+  it('keeps explicitly selected strict protection when the firewall snapshot is corrupt (AT-03-003)', () => {
+    const result = run({ policy: { schemaVersion: 1, owner: 'VPNTE', strictMode: true }, corrupt: 'firewall.json', rules: true })
+    expect(result.status).toBe(1)
+    expect(result.output).toContain('QUARANTINE:')
+    expect(result.output).toContain('PROFILE:Public/Block')
+    expect(result.output).not.toMatch(/\/Allow|REMOVE_RULE/)
+  })
+  it('rejects an untrusted later manifest before firewall rollback, without quarantine (AT-03-012)', () => {
+    const result = run({ rules: true, extra: { 'tun-owner.json': { schemaVersion: 1, owner: 'VPNTE' } }, untrustedFile: 'tun-owner.json' })
+    expect(result.status).toBe(1)
+    expect(result.output).not.toMatch(/PROFILE:|REMOVE_RULE|QUARANTINE:/)
+  })
   it('does not alter a foreign Block profile without VPNTE ownership', () => {
     const result = run()
     expect(result.status).toBe(0)

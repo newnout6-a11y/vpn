@@ -24,7 +24,7 @@ vi.mock('child_process', () => {
   }
   return { execFile, default: { execFile } }
 })
-import { ensureRecoveryManifestDir, readRecoveryManifest, readRecoveryArtifact, removeRecoveryManifest, recordOwnedTunAdapter, recoveryManifestPath, strictRecoveryRequired, writeRecoveryArtifact } from './recoveryManifest'
+import { ensureRecoveryManifestDir, readRecoveryManifest, readRecoveryArtifact, removeRecoveryManifest, recordOwnedTunAdapter, recoveryManifestPath, strictRecoveryRequired, writeRecoveryArtifact, RecoveryManifestReadError, quarantineRecoveryManifest } from './recoveryManifest'
 
 const platform = Object.getOwnPropertyDescriptor(process, 'platform')!
 const originalProgramData = process.env.ProgramData
@@ -45,6 +45,23 @@ afterEach(() => {
 })
 
 describe('trusted recovery storage', () => {
+  it('distinguishes unsupported versions from corrupt trusted content before validation (AT-03-003)', async () => {
+    const validate = vi.fn(value => value)
+    mocks.read.mockReturnValueOnce('{"schemaVersion":2}').mockReturnValueOnce('{')
+    await expect(readRecoveryManifest('firewall.json', validate)).rejects.toMatchObject({ reason: 'unsupported-version' })
+    await expect(readRecoveryManifest('firewall.json', validate)).rejects.toBeInstanceOf(RecoveryManifestReadError)
+    expect(validate).not.toHaveBeenCalled()
+    expect(mocks.elevated).not.toHaveBeenCalled()
+  })
+  it('quarantines within the checked directory and requires rename read-back (AT-03-003/012)', async () => {
+    mocks.read.mockReturnValueOnce('RECOVERY_ARTIFACT_QUARANTINED').mockReturnValueOnce('')
+    await quarantineRecoveryManifest('firewall.json')
+    await expect(quarantineRecoveryManifest('firewall.json')).rejects.toThrow('not confirmed')
+    const script = decode('powershell ' + mocks.read.mock.calls[0][1].at(-1))
+    expect(script).toContain('Move-Item -LiteralPath')
+    expect(script).toContain('firewall.json.corrupt-')
+    expect(script).toContain('Untrusted recovery ACE')
+  })
   it('uses typed worker for fresh reads instead of spawning legacy PowerShell (AT-03-012)', async () => {
     mocks.worker.mockResolvedValueOnce('{"schemaVersion":1}').mockRejectedValueOnce(new RecoveryWorkerError('rejected', 'ACL changed'))
     expect(await readRecoveryManifest('firewall.json', value => value)).toEqual({ schemaVersion: 1 })

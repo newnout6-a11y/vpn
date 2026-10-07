@@ -6,7 +6,8 @@ import { FIREWALL_RULES_API_PS } from './firewallRulesApi'
 import { FIREWALL_RULES_BOUNDARY_FIXTURE_PS } from './testFixtures/firewallRulesBoundary'
 const state = vi.hoisted(() => ({ manifest: null as any, writes: [] as any[], scripts: [] as string[],
   snapshot: ['Domain','Private','Public'].map(name => ({ name, defaultOutbound: 'Block' })),
-  failWrite: false, failApply: false, failRestore: false, invalidRead: false,
+  failWrite: false, failApply: false, failRestore: false, invalidRead: false, readError: null as Error | null,
+  quarantines: [] as string[], failQuarantine: false, ownedRules: false,
   liveFailures: 0, liveMissingMarker: false, failCommit: false,
   artifacts: [] as string[], helperAvailable: true, helperFailure: null as any, helperExitCode: 0, longApps: false,
   nativeTimings: '', fileProbe: vi.fn((..._args: any[]) => '0'),
@@ -23,10 +24,12 @@ vi.mock('fs/promises', async importOriginal => {
   }
   return { ...api, default: api }
 })
-vi.mock('./recoveryManifest', () => ({
+vi.mock('./recoveryManifest', async importOriginal => ({
+  ...await importOriginal<typeof import('./recoveryManifest')>(),
   getRecoveryManifestDir: () => 'C:\\ProgramData\\VPNTE\\manifests',
   recoveryManifestPath: (name: string) => `C:\\ProgramData\\VPNTE\\manifests\\${name}`,
   readRecoveryManifest: async (_name: string, validate: Function) => {
+    if (state.readError) throw state.readError
     if (state.invalidRead) throw new Error('untrusted ACL')
     return state.manifest ? validate(state.manifest) : null
   },
@@ -36,7 +39,9 @@ vi.mock('./recoveryManifest', () => ({
     state.manifest = validate(value); state.writes.push(structuredClone(state.manifest))
   },
   writeRecoveryArtifact: vi.fn(async (name: string) => { state.artifacts.push(name) }),
-  removeRecoveryManifest: async () => { state.manifest = null }
+  removeRecoveryManifest: async () => { state.manifest = null },
+  strictRecoveryRequired: async () => false,
+  quarantineRecoveryManifest: async (name: string) => { if (state.failQuarantine) throw new Error('quarantine refused'); state.quarantines.push(name) }
 }))
 vi.mock('./admin', () => ({ execElevated: (...args: any[]) => state.fallback(...args), isProcessElevated: async () => false }))
 vi.mock('child_process', async importOriginal => {
@@ -77,10 +82,11 @@ vi.mock('./elevatedPsHelper', () => ({ isElevatedPsHelperRunning: () => state.he
       if (state.failRestore) throw new Error('restore failed')
       return { stdout: 'RESTORED', stderr: '' }
     }
-    return { stdout: '0', stderr: '' }
+    return { stdout: state.ownedRules && script.includes('Get-VpnteFirewallRuleNames') ? '1' : '0', stderr: '' }
   }
 }))
-import { enableKillSwitch, disableKillSwitch, isKillSwitchActive, updateKillSwitchExceptions } from './firewallKillSwitch'
+import { enableKillSwitch, disableKillSwitch, isKillSwitchActive, updateKillSwitchExceptions, recoverStaleKillSwitch } from './firewallKillSwitch'
+import { RecoveryManifestReadError } from './recoveryManifest'
 import { logEvent } from './appLogger'
 const originalPlatform = process.platform
 const options = { singboxExePath: 'C:\\VPNTE\\sing-box.exe' }
@@ -100,6 +106,7 @@ beforeEach(() => {
   Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
   state.manifest = null; state.writes = []; state.scripts = []
   state.failWrite = false; state.failApply = false; state.failRestore = false; state.invalidRead = false
+  state.readError = null; state.quarantines = []; state.failQuarantine = false; state.ownedRules = false
   state.liveFailures = 0; state.liveMissingMarker = false; state.failCommit = false
   state.artifacts = []; state.helperAvailable = true; state.helperFailure = null; state.helperExitCode = 0
   state.longApps = false
@@ -109,6 +116,25 @@ beforeEach(() => {
 })
 afterEach(() => { Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true }) })
 describe('firewall transaction fault injection (AT-03-003/004/007; F-030, F-186)', () => {
+  it.each(['unsupported-version', 'untrusted', 'quarantine-failure'])('does not change owned firewall rules after %s recovery rejection (AT-03-003/012)', async mode => {
+    state.readError = mode === 'untrusted' ? new Error('untrusted ACL') : new RecoveryManifestReadError(mode === 'unsupported-version' ? mode : 'invalid-content', 'fixture invalid manifest')
+    state.failQuarantine = mode === 'quarantine-failure'
+    state.ownedRules = true
+    state.fileProbe.mockReturnValue('1')
+    expect((await disableKillSwitch('rejected snapshot')).success).toBe(false)
+    await recoverStaleKillSwitch(async () => false)
+    expect(state.scripts).toEqual([])
+    expect(state.quarantines).toEqual([])
+  })
+  it('quarantines corrupt trusted firewall data before unknown Allow fallback (AT-03-003)', async () => {
+    state.readError = new RecoveryManifestReadError('invalid-content', 'corrupt JSON')
+    state.ownedRules = true
+    state.fileProbe.mockReturnValue('1')
+    expect((await disableKillSwitch('corrupt snapshot')).success).toBe(true)
+    expect(state.quarantines).toEqual(['firewall.json'])
+    expect(state.scripts.some(script => script.includes("-DefaultOutboundAction Allow"))).toBe(true)
+    expect(logEvent).toHaveBeenCalledWith('error', 'firewall-killswitch', expect.stringContaining('CRITICAL_SECURITY_EVENT'), expect.anything())
+  })
   it('logs only bounded unique native phases without treating them as security proof (AT-00-005/AT-03-007)', async () => {
     state.nativeTimings = [
       'VPNTE_FW_TIMING:initial-stale-cleanup:240',

@@ -10,7 +10,7 @@ import { execElevatedPs, isElevatedPsHelperRunning } from './elevatedPsHelper'
 import { logEvent } from './appLogger'
 import { getPrivilegedRuntimeDir } from './runtimePaths'
 import { randomUUID, createHash } from 'crypto'
-import { getRecoveryManifestDir, recoveryManifestPath, readRecoveryManifest, writeRecoveryManifest, writeRecoveryArtifact, removeRecoveryManifest, strictRecoveryRequired } from './recoveryManifest'
+import { getRecoveryManifestDir, recoveryManifestPath, readRecoveryManifest, writeRecoveryManifest, writeRecoveryArtifact, removeRecoveryManifest, strictRecoveryRequired, type RecoveryManifestReadError, quarantineRecoveryManifest } from './recoveryManifest'
 import { TUN_ADAPTER_ALIAS, TUN_IPV4_NETWORK_CIDR, getTunAdapterAlias } from './tunAdapter'
 import { withFirewallRulesApi } from './firewallRulesApi'
 
@@ -107,11 +107,18 @@ export function validateFirewallManifest(value: unknown): FirewallManifest {
 export function getKillSwitchManifestPath(): string { return recoveryManifestPath('firewall.json') }
 function backupDir(): string { return getRecoveryManifestDir() }
 let manifestReadFailure: string | null = null
+let manifestRecoveryRejected = false
 async function readManifest(): Promise<FirewallManifest | null> {
   manifestReadFailure = null
+  manifestRecoveryRejected = false
   try { return await readRecoveryManifest('firewall.json', validateFirewallManifest) }
   catch (error) {
     manifestReadFailure = error instanceof Error ? error.message : String(error)
+    manifestRecoveryRejected = true
+    if (error instanceof Error && (error as RecoveryManifestReadError).reason === 'invalid-content') {
+      try { await quarantineRecoveryManifest('firewall.json'); manifestRecoveryRejected = false }
+      catch (quarantineError) { logEvent('error', 'firewall-killswitch', 'recovery quarantine failed; network unchanged', { error: String(quarantineError) }) }
+    }
     logEvent('error', 'firewall-killswitch', 'CRITICAL_SECURITY_EVENT: recovery manifest rejected', { error: manifestReadFailure })
     return null
   }
@@ -901,6 +908,7 @@ Write-Output "SAVED:$savedJson"
  */
 async function restoreAndCleanup(snapshot?: FirewallManifest): Promise<void> {
   const manifest = snapshot ?? await readManifest()
+  if (!snapshot && manifestRecoveryRejected) throw new Error(`Recovery rejected; network unchanged: ${manifestReadFailure}`)
   if (!manifest && !(await probeFirewallForOurRules())) {
     if (manifestReadFailure) throw new Error('Invalid recovery manifest; no proven VPNTE rules, no system changes allowed')
     return // Never change a foreign Block policy without proof of ownership.
@@ -1017,6 +1025,10 @@ async function probeFirewallForOurRules(): Promise<boolean> {
 export async function recoverStaleKillSwitch(isSingboxRunning: () => Promise<boolean>): Promise<void> {
   if (process.platform !== 'win32') return
   const manifest = await readManifest()
+  if (manifestRecoveryRejected) {
+    reportRecoveryWarning(`Восстановление защиты отклонено; сеть не изменена: ${manifestReadFailure}`)
+    return
+  }
   if (manifest?.strictMode || await strictRecoveryRequired()) {
     logEvent('info', 'firewall-killswitch', 'strict recovery keeps firewall blocked until explicit user action')
     return
