@@ -8,6 +8,8 @@ const state = vi.hoisted(() => ({ manifest: null as any, writes: [] as any[], sc
   snapshot: ['Domain','Private','Public'].map(name => ({ name, defaultOutbound: 'Block' })),
   failWrite: false, failApply: false, failRestore: false, invalidRead: false, readError: null as Error | null,
   quarantines: [] as string[], failQuarantine: false, ownedRules: false,
+  wfpCalls: [] as string[], wfpActive: false, wfpFailApply: 0, wfpFailRemove: false, wfpFailVerify: false,
+  manifestReads: 0,
   liveFailures: 0, liveMissingMarker: false, failCommit: false,
   artifacts: [] as string[], helperAvailable: true, helperFailure: null as any, helperExitCode: 0, longApps: false,
   nativeTimings: '', fileProbe: vi.fn((..._args: any[]) => '0'),
@@ -15,6 +17,20 @@ const state = vi.hoisted(() => ({ manifest: null as any, writes: [] as any[], sc
 vi.mock('electron', () => ({ app: { getPath: () => 'C:\\VPNTE' },
   BrowserWindow: { getAllWindows: () => [] }, dialog: { showMessageBox: vi.fn(async () => ({})) } }))
 vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
+vi.mock('./wfpIpv6', async importOriginal => ({
+  ...await importOriginal<typeof import('./wfpIpv6')>(),
+  prepareWfpIpv6Policy: async () => { state.wfpCalls.push('prepare'); return { schemaVersion: 1, rules: ['connect','accept','boot'].map((layer, i) => ({ id: `00000000-0000-0000-0000-00000000000${i + 1}`, role: 'block', appId: '', remote: '', luid: '', originalApp: false, inbound: layer === 'accept', boot: layer === 'boot' })) } },
+  prepareWfpIpv6Exceptions: async (previous: unknown) => previous,
+  applyWfpIpv6Policy: async () => {
+    state.wfpCalls.push('apply')
+    if (!state.manifest?.ipv6Policy) throw new Error('WFP effects without recovery journal')
+    if (state.wfpFailApply > 0) { state.wfpFailApply--; throw new Error('WFP apply failure') }
+    state.wfpActive = true
+  },
+  verifyWfpIpv6Policy: async () => { state.wfpCalls.push('verify'); if (state.wfpFailVerify) throw new Error('WFP coverage changed') },
+  removeWfpIpv6Protection: async () => { state.wfpCalls.push('remove'); if (state.wfpFailRemove) throw new Error('WFP remove failure'); state.wfpActive = false },
+  hasWfpIpv6Protection: async () => state.wfpActive
+}))
 vi.mock('fs/promises', async importOriginal => {
   const actual = await importOriginal<typeof import('fs/promises')>()
   const api = { ...actual,
@@ -29,6 +45,7 @@ vi.mock('./recoveryManifest', async importOriginal => ({
   getRecoveryManifestDir: () => 'C:\\ProgramData\\VPNTE\\manifests',
   recoveryManifestPath: (name: string) => `C:\\ProgramData\\VPNTE\\manifests\\${name}`,
   readRecoveryManifest: async (_name: string, validate: Function) => {
+    state.manifestReads++
     if (state.readError) throw state.readError
     if (state.invalidRead) throw new Error('untrusted ACL')
     return state.manifest ? validate(state.manifest) : null
@@ -85,7 +102,7 @@ vi.mock('./elevatedPsHelper', () => ({ isElevatedPsHelperRunning: () => state.he
     return { stdout: state.ownedRules && script.includes('Get-VpnteFirewallRuleNames') ? '1' : '0', stderr: '' }
   }
 }))
-import { enableKillSwitch, disableKillSwitch, isKillSwitchActive, updateKillSwitchExceptions, recoverStaleKillSwitch } from './firewallKillSwitch'
+import { enableKillSwitch, disableKillSwitch, isKillSwitchActive, killSwitchManifestExists, updateKillSwitchExceptions, recoverStaleKillSwitch } from './firewallKillSwitch'
 import { RecoveryManifestReadError } from './recoveryManifest'
 import { logEvent } from './appLogger'
 const originalPlatform = process.platform
@@ -107,6 +124,8 @@ beforeEach(() => {
   state.manifest = null; state.writes = []; state.scripts = []
   state.failWrite = false; state.failApply = false; state.failRestore = false; state.invalidRead = false
   state.readError = null; state.quarantines = []; state.failQuarantine = false; state.ownedRules = false
+  state.wfpCalls = []; state.wfpActive = false; state.wfpFailApply = 0; state.wfpFailRemove = false; state.wfpFailVerify = false
+  state.manifestReads = 0
   state.liveFailures = 0; state.liveMissingMarker = false; state.failCommit = false
   state.artifacts = []; state.helperAvailable = true; state.helperFailure = null; state.helperExitCode = 0
   state.longApps = false
@@ -116,6 +135,55 @@ beforeEach(() => {
 })
 afterEach(() => { Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true }) })
 describe('firewall transaction fault injection (AT-03-003/004/007; F-030, F-186)', () => {
+  it('still removes owned WFP protection after firewall rollback fails (AT-03-007)', async () => {
+    await enableKillSwitch(options); state.failRestore = true
+    expect((await disableKillSwitch('independent rollback')).success).toBe(false)
+    expect(state.wfpActive).toBe(false)
+    expect(state.wfpCalls).toContain('remove')
+    expect(state.manifest).not.toBeNull()
+  })
+  it('does not quarantine from concurrent read-only probes (AT-03-003/012)', async () => {
+    state.readError = new RecoveryManifestReadError('invalid-content', 'corrupt JSON')
+    await expect(killSwitchManifestExists()).rejects.toThrow('corrupt JSON')
+    await expect(isKillSwitchActive()).rejects.toThrow('corrupt JSON')
+    expect(state.quarantines).toEqual([])
+    expect(state.scripts).toEqual([])
+  })
+  it('rejects a future IPv6 journal without quarantine or native effects (AT-03-003)', async () => {
+    await enableKillSwitch(options); state.manifest.ipv6Policy.schemaVersion = 2; state.scripts = []; state.wfpCalls = []
+    expect((await disableKillSwitch('future nested schema')).success).toBe(false)
+    expect(state.quarantines).toEqual([])
+    expect(state.scripts).toEqual([])
+    expect(state.wfpCalls).toEqual([])
+  })
+  it('does not engage firewall or commit active state after WFP failure (AT-03-010)', async () => {
+    state.wfpFailApply = 1
+    expect((await enableKillSwitch(options)).success).toBe(false)
+    expect(state.scripts.some(script => script.includes('# --- Step 2:'))).toBe(false)
+    expect(state.wfpCalls).toEqual(['prepare','apply','remove'])
+    expect(state.manifest).toBeNull()
+  })
+  it('preserves the recovery journal when WFP removal cannot be verified (AT-03-007)', async () => {
+    expect((await enableKillSwitch(options)).success).toBe(true)
+    state.wfpFailRemove = true
+    expect((await disableKillSwitch('WFP removal failure')).success).toBe(false)
+    expect(state.manifest).not.toBeNull()
+    expect(state.wfpActive).toBe(true)
+  })
+  it('checks existing native IPv6 coverage before idempotent activation (AT-03-010)', async () => {
+    await enableKillSwitch(options)
+    state.scripts = []; state.wfpFailVerify = true
+    expect(await enableKillSwitch(options)).toMatchObject({ success: false, state: 'unknown' })
+    expect(state.scripts).toEqual([])
+    expect(state.manifest.phase).toBe('active')
+  })
+  it('detects orphan WFP protection and cleans only owned filters without changing foreign profiles (AT-03-003)', async () => {
+    state.wfpActive = true
+    expect(await isKillSwitchActive()).toBe(true)
+    expect((await disableKillSwitch('orphan WFP')).success).toBe(false)
+    expect(state.wfpActive).toBe(false)
+    expect(state.scripts.some(script => script.includes('Set-NetFirewallProfile'))).toBe(false)
+  })
   it.each(['unsupported-version', 'untrusted', 'quarantine-failure'])('does not change owned firewall rules after %s recovery rejection (AT-03-003/012)', async mode => {
     state.readError = mode === 'untrusted' ? new Error('untrusted ACL') : new RecoveryManifestReadError(mode === 'unsupported-version' ? mode : 'invalid-content', 'fixture invalid manifest')
     state.failQuarantine = mode === 'quarantine-failure'
@@ -177,11 +245,13 @@ describe('firewall transaction fault injection (AT-03-003/004/007; F-030, F-186)
     expect(state.scripts.filter(script => script.length > 64 * 1024)).toHaveLength(2)
     expect(state.manifest.pendingExceptionPolicy).toBeUndefined()
   })
-  it('prepares in parallel but waits for verified TUN before applying policy (AT-03-004)', async () => {
+  it('waits for verified TUN before preparing IPv6 scopes or applying policy (AT-03-004)', async () => {
     let confirm!: (ready: boolean) => void
     const tunAdapterReady = new Promise<boolean>(resolve => { confirm = resolve })
     const pending = enableKillSwitch({ ...options, tunAdapterReady, extraAllowedRemoteCidrs: ['192.0.2.1'] })
-    await vi.waitFor(() => expect(state.manifest?.phase).toBe('prepared'))
+    await vi.waitFor(() => expect(state.manifestReads).toBeGreaterThan(0))
+    expect(state.manifest).toBeNull()
+    expect(state.wfpCalls).toEqual([])
     expect(state.scripts.some(s => s.includes('# --- Step 2:'))).toBe(false)
     confirm(true)
     expect((await pending).success).toBe(true)
@@ -198,7 +268,8 @@ describe('firewall transaction fault injection (AT-03-003/004/007; F-030, F-186)
     const tunAdapterReady = reason === 'cancelled' ? Promise.resolve(false) : Promise.reject(new Error('ownership failed'))
     expect((await enableKillSwitch({ ...options, tunAdapterReady })).success).toBe(false)
     expect(state.scripts.some(s => s.includes('# --- Step 2:'))).toBe(false)
-    expect(state.scripts.some(s => s.includes("Write-Output 'RESTORED'"))).toBe(true)
+    expect(state.scripts).toEqual([])
+    expect(state.wfpCalls).toEqual([])
     expect(state.manifest).toBeNull()
   })
   it('retains the bounded native wait for callers without an ownership barrier (AT-03-004)', async () => {
@@ -417,6 +488,13 @@ describe('differential live firewall fault injection (AT-03-008/009)', () => {
     expect(result.state).toBe('unknown')
     expect(state.manifest.pendingExceptionPolicy).toEqual({ apps: [], cidrs: ['198.51.100.2'] })
     expect(state.manifest.savedProfiles).toEqual(state.snapshot)
+  })
+  it('compensates firewall exceptions even if WFP update and compensation both fail (AT-03-007/008)', async () => {
+    await active(); state.wfpFailApply = 2
+    expect(await updateKillSwitchExceptions([], ['198.51.100.2'])).toMatchObject({ success: false, state: 'unknown' })
+    expect(state.scripts).toHaveLength(1)
+    expect(state.scripts[0]).toContain('EXCEPTIONS_VERIFIED')
+    expect(state.manifest.pendingExceptionPolicy).toBeDefined()
   })
   it('rejects unsafe values before persistence or native calls', async () => {
     await active()

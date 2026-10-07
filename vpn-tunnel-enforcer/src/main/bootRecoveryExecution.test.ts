@@ -10,7 +10,7 @@ const fixtures = () => ({
   policy: { schemaVersion: 1, owner: 'VPNTE', strictMode: false },
   firewall: null as any, tun: null as any, untrusted: false, failProfile: '',
   adapters: [{ Name: 'Other VPN', InterfaceGuid: '11111111-1111-1111-1111-111111111111', InterfaceDescription: 'sing-tun Tunnel', DriverDescription: 'Wintun Userspace Tunnel', PnPDeviceID: 'SWD\\Wintun\\fixture', ifIndex: 10, Status: 'Up' }],
-  rules: false, extra: {} as Record<string, unknown>, corrupt: '', untrustedFile: ''
+  rules: false, extra: {} as Record<string, unknown>, corrupt: '', untrustedFile: '', wfpRules: false, wfpFailure: false
 })
 function run(patch: Partial<ReturnType<typeof fixtures>> = {}) {
   const fixture = { ...fixtures(), ...patch }
@@ -81,6 +81,9 @@ $ast=[System.Management.Automation.Language.Parser]::ParseInput($source,[ref]$to
 if($errors.Count){throw 'Source syntax error'}
 $fn=$ast.Find({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Write-RecoveryReport'},$true)
 $source=$source.Remove($fn.Extent.StartOffset,$fn.Extent.EndOffset-$fn.Extent.StartOffset).Insert($fn.Extent.StartOffset,'function Write-RecoveryReport([string]$status) { Write-Output ("REPORT:"+$status); $script:recoveryMessages | ForEach-Object { Write-Output $_.message } }')
+$ast=[System.Management.Automation.Language.Parser]::ParseInput($source,[ref]$tokens,[ref]$errors)
+$fn=$ast.Find({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Invoke-VpnteWfpIpv6Recovery'},$true)
+$source=$source.Remove($fn.Extent.StartOffset,$fn.Extent.EndOffset-$fn.Extent.StartOffset).Insert($fn.Extent.StartOffset,'function Invoke-VpnteWfpIpv6Recovery { if($global:f.wfpFailure){throw "injected WFP failure"}; if($global:f.wfpRules){Write-Output "WFP_CLEANUP"} }')
 & ([scriptblock]::Create($source))
 `
   // Windows cannot pass this full-script harness within its command-line limit.
@@ -136,13 +139,34 @@ describe.skipIf(!pwsh)('actual boot recovery control flow on mocked system APIs'
     expect(result.output).not.toContain('REPORT:')
   })
   it('strict recovery never sets Allow or cleans adapters/rules', () => {
-    const result = run({ policy: { schemaVersion: 1, owner: 'VPNTE', strictMode: true }, rules: true })
+    const result = run({ policy: { schemaVersion: 1, owner: 'VPNTE', strictMode: true }, rules: true, wfpRules: true })
     expect(result.status).toBe(0)
     expect(result.output).toContain('PROFILE:Public/Block')
     expect(result.output).not.toContain('/Allow')
     expect(result.output).not.toContain('REMOVE_RULE')
     expect(result.output).not.toContain('REMOVE_ADAPTER')
+    expect(result.output).not.toContain('WFP_CLEANUP')
     expect(result.output).toContain('REPORT:strict-retained')
+  })
+  it('removes orphaned owned WFP filters even without a firewall journal (AT-03-003)', () => {
+    const result = run({ wfpRules: true })
+    expect(result.status).toBe(0)
+    expect(result.output).toContain('WFP_CLEANUP')
+    expect(result.output).not.toContain('PROFILE:')
+  })
+  it('reports WFP recovery failure while continuing independent firewall/TUN recovery (AT-03-007)', () => {
+    const firewall = { schemaVersion: 1, owner: 'VPNTE', strictMode: false, phase: 'active', savedProfiles: ['Domain','Private','Public'].map(name => ({ name, defaultOutbound: 'Allow' })) }
+    const result = run({ firewall, wfpFailure: true, rules: true })
+    expect(result.status).toBe(1)
+    expect(result.output).toContain('PROFILE:Public/Allow')
+    expect(result.output).toContain('IPv6 WFP recovery failed')
+    expect(result.output).toContain('REPORT:warnings')
+    expect(result.output).not.toMatch(/DELETE:.*firewall\.json/)
+  })
+  it('rejects a future nested IPv6 policy before firewall or WFP effects (AT-03-003)', () => {
+    const result = run({ firewall: { schemaVersion: 1, owner: 'VPNTE', ipv6Policy: { schemaVersion: 2 } }, rules: true, wfpRules: true })
+    expect(result.status).toBe(1)
+    expect(result.output).not.toMatch(/PROFILE:|REMOVE_RULE|WFP_CLEANUP|QUARANTINE:/)
   })
   it('continues independent profile restoration and preserves the snapshot on failure', () => {
     const firewall = { schemaVersion: 1, owner: 'VPNTE', strictMode: false, phase: 'active', savedProfiles: ['Domain','Private','Public'].map(name => ({ name, defaultOutbound: 'Allow' })) }

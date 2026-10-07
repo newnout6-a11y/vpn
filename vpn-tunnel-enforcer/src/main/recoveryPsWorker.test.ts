@@ -6,6 +6,8 @@ import type { ChildProcess, spawn } from 'node:child_process'
 import { spawn as nativeSpawn } from 'node:child_process'
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
+import { gzipSync, gunzipSync } from 'node:zlib'
+import { createHash } from 'node:crypto'
 vi.mock('./admin', () => ({ isProcessElevated: vi.fn(async () => false) }))
 vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
 import { RecoveryPsWorker } from './recoveryPsWorker'
@@ -48,7 +50,9 @@ describe('typed recovery worker ownership', () => {
   })
   it.each([
     {op:'ensure',script:'Get-Item'}, {op:'protect',name:'firewall.json'}, {op:'read',name:'../x'},
-    {op:'read',name:'a\\b'}, {op:'read',name:'x',path:'C:\\x'}, {op:'inspect-tun',alias:'Ethernet 5;evil'}, {op:'unknown'}
+    {op:'read',name:'a\\b'}, {op:'read',name:'x',path:'C:\\x'}, {op:'inspect-tun',alias:'Ethernet 5;evil'}, {op:'unknown'},
+    {op:'quarantine',name:'../firewall.json',contentHash:'a'.repeat(64)}, {op:'quarantine',name:'firewall.json',contentHash:'evil'},
+    {op:'quarantine',name:'firewall.json',contentHash:'a'.repeat(64),script:'evil'}
   ])('rejects unexpected fields, paths and operations before dispatch: %j', request => {
     expect(() => validateRecoveryRequest(request as any)).toThrow('Invalid')
   })
@@ -164,13 +168,16 @@ describe('typed recovery worker ownership', () => {
     // Only the trusted storage boundary is stubbed; dispatcher, Get-Item,
     // Get-Content, PS 5.1 serialization, pipes and JS receiver are production.
     const isolatedSpawn: typeof nativeSpawn = ((command: string, args: string[], options: any) => {
-      const script = Buffer.from(args.at(-1)!, 'base64').toString('utf16le')
+      const launcher = Buffer.from(args.at(-1)!, 'base64').toString('utf16le')
+      const compressed = launcher.match(/FromBase64String\('([^']+)'\)/)![1]
+      const script = gunzipSync(Buffer.from(compressed, 'base64')).toString('utf8')
       const isolated = script.replace("[Console]::Out.WriteLine('{\"id\":0", `
 function Get-RecoveryRoot { return '${root.replace(/'/g, "''")}' }
 function Assert-RecoveryDirectories($root, [bool]$create) { return $true }
 function Assert-TrustedArtifact($path, $directory) { }
 [Console]::Out.WriteLine('{"id":0`)
-      return nativeSpawn(command, [...args.slice(0, -1), Buffer.from(isolated, 'utf16le').toString('base64')], options)
+      const isolatedLauncher = launcher.replace(compressed, gzipSync(Buffer.from(isolated, 'utf8')).toString('base64'))
+      return nativeSpawn(command, [...args.slice(0, -1), Buffer.from(isolatedLauncher, 'utf16le').toString('base64')], options)
     }) as typeof nativeSpawn
     const worker = new RecoveryPsWorker(process.env.ProgramData || 'C:\\ProgramData', isolatedSpawn)
     try {
@@ -187,6 +194,10 @@ function Assert-TrustedArtifact($path, $directory) { }
       expect(await worker.execute({ op: 'read', name: 'absent.json' })).toBe('RECOVERY_ARTIFACT_ABSENT')
       await expect(worker.execute({ op: 'read', name: 'empty.json' })).rejects.toMatchObject({ code: 'rejected' })
       expect(await worker.execute({ op: 'read', name: 'recovery-result.json' })).toBe(report)
+      writeFileSync(join(root, 'corrupt.json'), '{\r\n', 'utf8')
+      await expect(worker.execute({ op: 'quarantine', name: 'corrupt.json', contentHash: 'a'.repeat(64) })).rejects.toMatchObject({ code: 'rejected' })
+      expect(await worker.execute({ op: 'quarantine', name: 'corrupt.json', contentHash: createHash('sha256').update('{').digest('hex') })).toBe('RECOVERY_ARTIFACT_QUARANTINED')
+      expect(await worker.execute({ op: 'read', name: 'corrupt.json' })).toBe('RECOVERY_ARTIFACT_ABSENT')
     } finally { await worker.stop(); rmSync(root, { recursive: true, force: true }) }
     expect(worker.hasExited).toBe(true)
   },25000)

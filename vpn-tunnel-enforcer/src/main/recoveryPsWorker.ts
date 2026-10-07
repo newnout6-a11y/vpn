@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from 'child_process'
 import { StringDecoder } from 'string_decoder'
 import { resolve } from 'path'
+import { gzipSync } from 'zlib'
 import { isProcessElevated } from './admin'
 import { logEvent } from './appLogger'
 import { RECOVERY_MAX_BYTES, recoveryWorkerScript, validateRecoveryRequest, type RecoveryRequest } from './recoveryPsProtocol'
@@ -49,8 +50,17 @@ export class RecoveryPsWorker {
     const decoder = new StringDecoder('utf8')
     let buffer = ''
     try {
+      // Encoded UTF-16 grows beyond Windows' 32767-character command limit.
+      // Transport the fixed source compressed in memory, without script files.
+      const compressed = gzipSync(Buffer.from(recoveryWorkerScript(programData), 'utf8')).toString('base64')
+      const launcher = `$bytes=[Convert]::FromBase64String('${compressed}');
+$stream=New-Object IO.MemoryStream(,$bytes);
+$gzip=New-Object IO.Compression.GZipStream($stream,[IO.Compression.CompressionMode]::Decompress);
+$reader=New-Object IO.StreamReader($gzip,[Text.Encoding]::UTF8);
+try { $source=$reader.ReadToEnd() } finally { $reader.Dispose(); $gzip.Dispose(); $stream.Dispose() };
+& ([scriptblock]::Create($source))`
       const proc = spawnProcess('powershell.exe', ['-NoProfile', '-NoLogo', '-NonInteractive', '-EncodedCommand',
-        Buffer.from(recoveryWorkerScript(programData), 'utf16le').toString('base64')], { env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
+        Buffer.from(launcher, 'utf16le').toString('base64')], { env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
       this.proc = proc
       // Register lifetime listeners before any IO or first command.
       proc.once('error', () => {

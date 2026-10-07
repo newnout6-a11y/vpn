@@ -3320,12 +3320,9 @@ export const tunController = {
             let killSwitchPromise: Promise<{ engaged: boolean; warning: string | null }> | null = null
             if (wantKillSwitch) {
               killSwitchPromise = (async () => {
-                if (await isKillSwitchActive()) {
-                  logEvent('info', 'tun', 'kill-switch already active — reusing existing rules')
-                  return { engaged: true, warning: null }
-                }
                 const ks = await enableKillSwitch({
                   singboxExePath: runtime.singbox,
+                  vpnServerHost: mode === 'directVpn' && typeof vpnProfile?.outbound?.server === 'string' ? vpnProfile.outbound.server : undefined,
                   strictMode: await strictRecoveryRequired(),
                   proxyOwnerProgramPaths,
                   appExceptionPaths: readGranularKillSwitchExceptions('app'),

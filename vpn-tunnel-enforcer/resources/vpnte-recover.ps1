@@ -88,6 +88,19 @@ function Quarantine-TrustedManifest($name) {
     $script:hasWarnings = $true
     Log "CRITICAL_SECURITY_EVENT: corrupt $name quarantined; protection unknown"
 }
+function Invoke-VpnteWfpIpv6Recovery {
+    # The source is shipped next to this script; execute only the pinned build.
+    $sourcePath=Join-Path $PSScriptRoot 'vpnte-wfp-ipv6.cs'
+    $item=Get-Item -LiteralPath $sourcePath -Force -ErrorAction Stop
+    if($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $item.Length -gt 131072){throw 'WFP helper source path rejected'}
+    $source=(Get-Content -LiteralPath $sourcePath -Raw -Encoding UTF8 -ErrorAction Stop).Replace("`r`n","`n")
+    $hasher=[Security.Cryptography.SHA256]::Create()
+    try {$hash=([BitConverter]::ToString($hasher.ComputeHash([Text.Encoding]::UTF8.GetBytes($source)))).Replace('-','').ToLowerInvariant()} finally {$hasher.Dispose()}
+    if($hash -ne '99382d8ef48069fa80ca8cb5811e7dec708e4440f98a04e74eed2a742d69997e'){throw 'WFP helper source integrity mismatch'}
+    if(-not ('VPNTE.IPv6.Policy' -as [type])){Add-Type -TypeDefinition $source -ErrorAction Stop}
+    $engine=New-Object VPNTE.IPv6.NativeEngine
+    try { [VPNTE.IPv6.Policy]::Remove($engine); Log 'IPv6 WFP: owned filters removed and verified' } finally {$engine.Dispose()}
+}
 function Read-TrustedManifest($name) {
     if ($script:recoveryInputs.ContainsKey($name)) { return $script:recoveryInputs[$name] }
     $path = Join-Path $trustedManifestDir $name
@@ -178,6 +191,8 @@ $firewallManifest = $null
 try {
     # Check every journal before ANY network effect, including journals used later.
     foreach ($name in @('recovery-policy.json','firewall.json','latest-physical-adapter-lockdown.json','latest-tun-network-baseline.json','tun-owner.json')) { $null = Read-TrustedManifest $name }
+    $preflightFirewall=Read-TrustedManifest 'firewall.json'
+    if($preflightFirewall -and $preflightFirewall.ipv6Policy -and $preflightFirewall.ipv6Policy.schemaVersion -ne 1){throw 'Unsupported recovery manifest version: firewall IPv6 policy'}
     $policy = Read-TrustedManifest 'recovery-policy.json'
     if ($policy -and $policy.strictMode -isnot [bool]) { throw 'Invalid strict policy' }
     $strictRequired = $policy -and $policy.strictMode
@@ -278,8 +293,13 @@ if ($firewallManifest -or $vpnteRules -gt 0) {
         Get-NetFirewallRule -DisplayName 'VPNTE-killswitch*' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction Stop
         if (@(Get-NetFirewallRule -DisplayName 'VPNTE-killswitch*' -ErrorAction SilentlyContinue).Count -gt 0) { throw 'VPNTE rules remain' }
     } catch { $firewallRecovered = $false; $hasWarnings = $true; Log 'Firewall rule cleanup failed' }
+}
+
+try {
+    Invoke-VpnteWfpIpv6Recovery
     if ($firewallRecovered -and $firewallManifest) { Remove-Item -LiteralPath (Join-Path $trustedManifestDir 'firewall.json') -Force -ErrorAction Stop }
 }
+catch { $hasWarnings=$true; Log "IPv6 WFP recovery failed; filters retained: $($_.Exception.Message)" }
 
 # 2. DNS: reset any adapter still pinned to VPNTE resolver (192.168.250.254/253)
 $vpnteDns = @('192.168.250.253', '192.168.250.254')

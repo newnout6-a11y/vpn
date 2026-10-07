@@ -4,6 +4,7 @@ export type RecoveryRequest =
   | { op: 'ensure' | 'warmup' | 'inspect-dns-policy' }
   | { op: 'read' | 'binary' | 'remove'; name: string }
   | { op: 'protect'; name: string }
+  | { op: 'quarantine'; name: string; contentHash: string }
   | { op: 'inspect-tun'; alias: string }
   | { op: 'inspect-runtime' | 'stop-runtime'; runtimeDir: string }
 
@@ -17,6 +18,8 @@ export function validateRecoveryRequest(value: RecoveryRequest): void {
     if (fields === 'op,runtimeDir' && typeof value.runtimeDir === 'string' && value.runtimeDir.length <= 2048 &&
         /^[a-z]:\\/i.test(value.runtimeDir) && !/[\x00-\x1f"/]/.test(value.runtimeDir) &&
         !value.runtimeDir.slice(2).includes(':') && !value.runtimeDir.split('\\').some(part => part === '..' || part === '.')) return
+  } else if (value.op === 'quarantine') {
+    if (fields === 'contentHash,name,op' && typeof value.contentHash === 'string' && /^[a-f0-9]{64}$/.test(value.contentHash) && typeof value.name === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,160}\.json$/.test(value.name)) return
   } else if (['read', 'binary', 'remove', 'protect'].includes(value.op) && 'name' in value) {
     if (fields === 'name,op' && typeof value.name === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,160}$/.test(value.name) &&
         (value.op !== 'protect' || /^tmp-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(value.name))) return
@@ -57,7 +60,27 @@ foreach ($p in ($rows | Sort-Object { if ($_.Name -ieq 'vpnte-sing-box.exe') { 0
     $killed += [pscustomobject]@{name=[string]$p.Name;pid=[int]$p.ProcessId}
   } catch { if ($p.Name -ieq 'vpnte-sing-box.exe') { break } }
 }
+
 [pscustomobject]@{candidates=[int]$rows.Count;killed=[int]$killed.Count;names=@($killed | ForEach-Object { $_.name })} | ConvertTo-Json -Compress -Depth 3
+`
+
+/** Fixed quarantine operation; callers provide only a checked artifact and hash. */
+export const RECOVERY_QUARANTINE_SCRIPT = String.raw`
+Assert-TrustedArtifact $path $false
+$stream=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read -bor [IO.FileShare]::Delete)
+try {
+  if ($stream.Length -gt ${RECOVERY_MAX_BYTES}) { throw 'Recovery manifest exceeds limit' }
+  $reader=New-Object IO.StreamReader($stream,[Text.Encoding]::UTF8,$true)
+  $body=$reader.ReadToEnd().TrimStart([char]0xfeff).Trim()
+  $sha=[Security.Cryptography.SHA256]::Create()
+  try { $hash=([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($body)))).Replace('-','').ToLowerInvariant() } finally { $sha.Dispose() }
+  if ($hash -ne $expectedHash) { throw 'Recovery manifest changed since rejection; quarantine refused' }
+  $quarantine=$path+'.corrupt-'+[Guid]::NewGuid().ToString()
+  Move-Item -LiteralPath $path -Destination $quarantine -ErrorAction Stop
+} finally { $stream.Dispose() }
+Assert-TrustedArtifact $quarantine $false
+if (Test-Path -LiteralPath $path) { throw 'Recovery quarantine not confirmed' }
+return 'RECOVERY_ARTIFACT_QUARANTINED'
 `
 
 /** Fixed, read-only baseline reader shared by the typed worker and pre-dispatch fallback. */
@@ -131,7 +154,7 @@ function Assert-RecoveryDirectories($root, [bool]$create) {
   return $true
 }
 function Invoke-RecoveryOperation($request) {
-  if ($request.op -isnot [string] -or @('warmup','inspect-tun','inspect-runtime','stop-runtime','inspect-dns-policy','ensure','read','binary','remove','protect') -cnotcontains $request.op) { throw 'Unknown recovery worker operation' }
+  if ($request.op -isnot [string] -or @('warmup','inspect-tun','inspect-runtime','stop-runtime','inspect-dns-policy','ensure','read','binary','remove','protect','quarantine') -cnotcontains $request.op) { throw 'Unknown recovery worker operation' }
   $fields = @($request.PSObject.Properties.Name | Sort-Object) -join ','
   switch -Exact ($request.op) {
     { $_ -cin @('inspect-runtime','stop-runtime') } {
@@ -163,6 +186,9 @@ function Invoke-RecoveryOperation($request) {
       return ([pscustomobject]@{schemaVersion=1;owner='VPNTE';alias=[string]$adapter.Name;interfaceGuid=[string]$adapter.InterfaceGuid} | ConvertTo-Json -Compress)
     }
     'ensure' { if ($fields -ne 'op') { throw 'Invalid recovery worker fields' } }
+    'quarantine' {
+      if ($fields -cne 'contentHash,name,op' -or $request.contentHash -isnot [string] -or $request.contentHash -cnotmatch '^[a-f0-9]{64}$' -or $request.name -isnot [string] -or $request.name -cnotmatch '^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,160}\.json$') { throw 'Invalid recovery quarantine request' }
+    }
     { $_ -cin @('read','binary','remove','protect') } {
       if ($fields -ne 'name,op' -or $request.name -isnot [string] -or $request.name -cnotmatch '^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,160}$') { throw 'Invalid recovery artifact name' }
       if ($request.op -eq 'protect' -and $request.name -notmatch '^tmp-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$') { throw 'Invalid recovery temporary name' }
@@ -193,6 +219,10 @@ function Invoke-RecoveryOperation($request) {
     return 'RECOVERY_ARTIFACT_ABSENT'
   }
   Assert-TrustedArtifact $path $false
+  if ($request.op -eq 'quarantine') {
+    $expectedHash=$request.contentHash
+${RECOVERY_QUARANTINE_SCRIPT}
+  }
   if ($request.op -eq 'remove') {
     Remove-Item -LiteralPath $path -Force -ErrorAction Stop
     return 'RECOVERY_ARTIFACT_REMOVED'
