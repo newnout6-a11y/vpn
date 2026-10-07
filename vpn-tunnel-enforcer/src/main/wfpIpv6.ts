@@ -4,6 +4,8 @@ import { join } from 'path'
 import { createHash, randomUUID } from 'crypto'
 import { Address6 } from 'ip-address'
 import { isIP } from 'net'
+import { Resolver } from 'dns/promises'
+import { logEvent } from './appLogger'
 import { readRecoveryManifest } from './recoveryManifest'
 
 export const WFP_SOURCE_SHA256 = '99382d8ef48069fa80ca8cb5811e7dec708e4440f98a04e74eed2a742d69997e'
@@ -82,23 +84,41 @@ export function synthesizeNat64Endpoint(ipv4: string, discovery: string[]): stri
   }
   return [...endpoints]
 }
-async function resolveTransportIpv6(host: string, run: Run): Promise<string[]> {
+async function resolveTransportIpv6(host: string, signal?: AbortSignal): Promise<string[]> {
+  signal?.throwIfAborted()
   if (isIP(host) === 6 && !host.includes('%')) return [new Address6(host).correctForm()]
   const ipv4 = isIP(host) === 4
-  const { stdout } = await run(`$ErrorActionPreference='Stop'
-$answers=@(Resolve-DnsName -Name ${quote(ipv4 ? 'ipv4only.arpa' : host)} -Type AAAA -DnsOnly -ErrorAction SilentlyContinue | Where-Object { $_.Type -eq 'AAAA' } | Select-Object -ExpandProperty IPAddress)
-Write-Output ('WFP_DNS:'+ (ConvertTo-Json -InputObject @($answers) -Compress))`)
-  const answers = parseMarker(stdout, 'WFP_DNS:')
+  // Discovery grants only narrow permits. Missing/timed-out answers keep IPv6
+  // blocked; never stall cancellation on the system resolver's retry schedule.
+  const resolver = new Resolver({ timeout: 1000, tries: 1 })
+  const cancel = () => resolver.cancel()
+  const deadline = setTimeout(cancel, 1500)
+  signal?.addEventListener('abort', cancel, { once: true })
+  let answers: string[]
+  try {
+    answers = await resolver.resolve6(ipv4 ? 'ipv4only.arpa' : host)
+  } catch (error: any) {
+    signal?.throwIfAborted()
+    if (!['ENODATA', 'ENOTFOUND', 'ETIMEOUT', 'ECANCELLED', 'ESERVFAIL', 'EREFUSED', 'ECONNREFUSED'].includes(error?.code)) throw error
+    logEvent('debug', 'firewall-killswitch', 'IPv6 DNS discovery unavailable; transport permits omitted', { code: error.code })
+    answers = []
+  } finally {
+    clearTimeout(deadline)
+    signal?.removeEventListener('abort', cancel)
+  }
+  signal?.throwIfAborted()
   if (!Array.isArray(answers) || answers.length > 64 || answers.some(ip => typeof ip !== 'string' || isIP(ip) !== 6 || ip.includes('%'))) throw new Error('Unverified IPv6 DNS response')
   return ipv4 ? synthesizeNat64Endpoint(host, answers) : [...new Set(answers)]
 }
-export async function prepareWfpIpv6Policy(opts: { corePrograms: string[]; serverHost?: string; tunAlias: string; apps: string[]; cidrs: string[] }, run: Run): Promise<WfpIpv6Policy> {
+export async function prepareWfpIpv6Policy(opts: { corePrograms: string[]; serverHost?: string; tunAlias: string; apps: string[]; cidrs: string[]; signal?: AbortSignal }, run: Run): Promise<WfpIpv6Policy> {
+  opts.signal?.throwIfAborted()
   const owner = await readRecoveryManifest('tun-owner.json', (v: any) => {
     if (!v || v.schemaVersion !== 1 || v.owner !== 'VPNTE' || typeof v.interfaceGuid !== 'string' || !guid.test(v.interfaceGuid.replace(/[{}]/g, ''))) throw new Error('Invalid owned TUN identity')
     return v as { interfaceGuid: string }
   })
   if (!owner) throw new Error('Owned TUN identity is required for IPv6 policy')
-  const addresses = opts.serverHost ? await resolveTransportIpv6(opts.serverHost, run) : []
+  const addresses = opts.serverHost ? await resolveTransportIpv6(opts.serverHost, opts.signal) : []
+  opts.signal?.throwIfAborted()
   const { stdout } = await run(`${await wfpPrelude()}
 $owned=@(Get-NetAdapter -ErrorAction Stop | Where-Object { [string]$_.InterfaceGuid -eq ${quote(owner.interfaceGuid)} })
 if ($owned.Count -ne 1 -or $owned[0].Status -ne 'Up' -or $owned[0].Name -ne ${quote(opts.tunAlias)} -or $owned[0].DriverDescription -notmatch '^Wintun\\b' -or $owned[0].PnPDeviceID -notlike 'SWD\\Wintun\\*') { throw 'Owned TUN not verified for WFP' }
@@ -132,8 +152,9 @@ Write-Output ('WFP_PREPARED:'+([pscustomobject]@{tunLuid=$tunLuid;appIds=@($appI
 }
 function policyScript(policy: WfpIpv6Policy): string {
   validateWfpIpv6Policy(policy)
-  return `$rules=[VPNTE.IPv6.Rule[]]@(${quote(JSON.stringify(policy.rules))} | ConvertFrom-Json | ForEach-Object {
-  $r=New-Object VPNTE.IPv6.Rule; $r.Id=[Guid]$_.id; $r.Role=$_.role; $r.AppId=$_.appId; $r.Remote=$_.remote; $r.Luid=$_.luid; $r.OriginalApp=$_.originalApp; $r.Inbound=$_.inbound; $r.Boot=$_.boot; $r
+  return `$decodedRules=${quote(JSON.stringify(policy.rules))} | ConvertFrom-Json
+$rules=[VPNTE.IPv6.Rule[]]@(foreach ($row in $decodedRules) {
+  $r=New-Object VPNTE.IPv6.Rule; $r.Id=[Guid]$row.id; $r.Role=$row.role; $r.AppId=$row.appId; $r.Remote=$row.remote; $r.Luid=$row.luid; $r.OriginalApp=$row.originalApp; $r.Inbound=$row.inbound; $r.Boot=$row.boot; $r
 })\n`
 }
 export async function applyWfpIpv6Policy(policy: WfpIpv6Policy, run: Run): Promise<void> {

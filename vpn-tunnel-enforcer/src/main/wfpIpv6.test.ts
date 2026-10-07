@@ -4,7 +4,14 @@ import { readFileSync, mkdirSync, mkdtempSync, writeFileSync, unlinkSync, rmdirS
 import { join } from 'path'
 import { createHash, randomUUID } from 'crypto'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-const state = vi.hoisted(() => ({ owner: null as any, source: null as string | null }))
+const state = vi.hoisted(() => ({ owner: null as any, source: null as string | null, resolve6: vi.fn(), cancelDns: vi.fn() }))
+vi.mock('dns/promises', () => ({ Resolver: class {
+  constructor(public options: unknown) {}
+  resolve6(host: string) { return state.resolve6(host) }
+  cancel() { state.cancelDns() }
+} }))
+vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
+vi.mock('./admin', () => ({ isProcessElevated: async () => false }))
 vi.mock('electron', () => ({ app: { isPackaged: false } }))
 vi.mock('./recoveryManifest', () => ({ readRecoveryManifest: async (_name: string, validate: Function) => state.owner ? validate(state.owner) : null }))
 vi.mock('fs/promises', async importOriginal => {
@@ -12,9 +19,13 @@ vi.mock('fs/promises', async importOriginal => {
   return { ...actual, readFile: (...args: Parameters<typeof actual.readFile>) => state.source === null ? actual.readFile(...args) : Promise.resolve(state.source) }
 })
 import { applyWfpIpv6Policy, hasWfpIpv6Protection, prepareWfpIpv6Policy, prepareWfpIpv6Exceptions, removeWfpIpv6Protection, validateWfpIpv6Policy, verifyWfpIpv6Policy, wfpPrelude, WFP_SOURCE_SHA256, synthesizeNat64Endpoint, type WfpIpv6Policy } from './wfpIpv6'
+import { execElevatedPs } from './elevatedPsHelper'
 const source = readFileSync(join(process.cwd(), 'resources/vpnte-wfp-ipv6.cs'), 'utf8').replace(/\r\n/g, '\n')
 const blocks = (): WfpIpv6Policy => ({ schemaVersion: 1, rules: ['connect','accept','boot'].map(layer => ({ id: randomUUID(), role: 'block', remote: '', appId: '', luid: '', originalApp: false, inbound: layer === 'accept', boot: layer === 'boot' })) })
-beforeEach(() => { state.owner = { schemaVersion: 1, owner: 'VPNTE', interfaceGuid: '11111111-1111-1111-1111-111111111111' }; state.source = null })
+beforeEach(() => {
+  state.owner = { schemaVersion: 1, owner: 'VPNTE', interfaceGuid: '11111111-1111-1111-1111-111111111111' }; state.source = null
+  state.resolve6.mockReset().mockResolvedValue([]); state.cancelDns.mockReset()
+})
 describe('independent IPv6 WFP lifecycle', () => {
   it('pins the exact same source in main and boot recovery before compilation (AT-03-012)', async () => {
     expect(createHash('sha256').update(source).digest('hex')).toBe(WFP_SOURCE_SHA256)
@@ -29,19 +40,85 @@ describe('independent IPv6 WFP lifecycle', () => {
     expect(run).not.toHaveBeenCalled()
   })
   it('builds independent blocks and narrow app/address/interface VPN permits (AT-03-001/010)', async () => {
-    const run = vi.fn(async (script: string) => ({ stdout: script.includes('WFP_DNS:') ? 'WFP_DNS:["64:ff9b::cb00:7101"]' : 'WFP_PREPARED:' + JSON.stringify({ tunLuid: '12', appIds: [], vpn: [{ appId: 'AABB', remote: '64:ff9b::cb00:7101/128', luid: '17' }] }) }))
+    state.resolve6.mockResolvedValue(['64:ff9b::cb00:7101'])
+    const run = vi.fn(async (_script: string) => ({ stdout: 'WFP_PREPARED:' + JSON.stringify({ tunLuid: '12', appIds: [], vpn: [{ appId: 'AABB', remote: '64:ff9b::cb00:7101/128', luid: '17' }] }) }))
     const policy = await prepareWfpIpv6Policy({ corePrograms: ['C:\\VPNTE\\core.exe'], serverHost: 'vpn.example', tunAlias: 'VPNTE', apps: [], cidrs: [] }, run)
     expect(policy.rules.filter(r => r.role === 'block')).toHaveLength(3)
     expect(policy.rules.filter(r => r.role === 'vpn')).toEqual(expect.arrayContaining([expect.objectContaining({ appId: 'AABB', remote: '64:ff9b::cb00:7101/128', luid: '17', inbound: false })]))
     expect(policy.rules.filter(r => r.role === 'exception-ip')).toEqual([])
-    const script = run.mock.calls[1][0]
+    const script = run.mock.calls[0][0]
     expect(script).toContain('Find-NetRoute')
     expect(script).toContain('Owned TUN subnet mismatch')
     expect(script).not.toContain('Disable-NetAdapterBinding')
   })
   it('refuses an incomplete native transport plan instead of reporting IPv6 ready (AT-03-010)', async () => {
-    const run = vi.fn(async (script: string) => ({ stdout: script.includes('WFP_DNS:') ? 'WFP_DNS:["2001:db8::1"]' : 'WFP_PREPARED:{"tunLuid":"12","appIds":[],"vpn":[]}' }))
+    state.resolve6.mockResolvedValue(['2001:db8::1'])
+    const run = vi.fn(async (_script: string) => ({ stdout: 'WFP_PREPARED:{"tunLuid":"12","appIds":[],"vpn":[]}' }))
     await expect(prepareWfpIpv6Policy({ corePrograms: ['C:\\VPNTE\\core.exe'], serverHost: 'vpn.example', tunAlias: 'VPNTE', apps: [], cidrs: [] }, run)).rejects.toThrow('Incomplete IPv6 transport scopes')
+  })
+  it('bounds stalled DNS discovery and keeps IPv6 blocked without transport permits (AT-03-010)', async () => {
+    vi.useFakeTimers()
+    try {
+      state.resolve6.mockImplementation(() => new Promise((_resolve, reject) => {
+        state.cancelDns.mockImplementation(() => reject(Object.assign(new Error('cancelled'), { code: 'ECANCELLED' })))
+      }))
+      const run = vi.fn(async () => ({ stdout: 'WFP_PREPARED:{"tunLuid":"12","appIds":[],"vpn":[]}' }))
+      const preparing = prepareWfpIpv6Policy({ corePrograms: ['C:\\VPNTE\\core.exe'], serverHost: '203.0.113.1', tunAlias: 'VPNTE', apps: [], cidrs: [] }, run)
+      await vi.advanceTimersByTimeAsync(1500)
+      const policy = await preparing
+      expect(state.cancelDns).toHaveBeenCalledOnce()
+      expect(state.resolve6).toHaveBeenCalledWith('ipv4only.arpa')
+      expect(policy.rules.filter(r => r.role === 'block')).toHaveLength(3)
+      expect(policy.rules.filter(r => r.role === 'vpn')).toEqual([])
+      expect(run).toHaveBeenCalledOnce()
+      expect(vi.getTimerCount()).toBe(0)
+    } finally { vi.useRealTimers() }
+  })
+  it('cancels DNS immediately before any native preparation or policy effects (AT-03-007/010)', async () => {
+    const controller = new AbortController()
+    let started!: () => void
+    const querying = new Promise<void>(resolve => { started = resolve })
+    state.resolve6.mockImplementation(() => new Promise((_resolve, reject) => {
+      state.cancelDns.mockImplementation(() => reject(Object.assign(new Error('cancelled'), { code: 'ECANCELLED' })))
+      started()
+    }))
+    const run = vi.fn()
+    const preparing = prepareWfpIpv6Policy({ corePrograms: [], serverHost: 'vpn.example', tunAlias: 'VPNTE', apps: [], cidrs: [], signal: controller.signal }, run)
+    const rejected = expect(preparing).rejects.toMatchObject({ name: 'AbortError' })
+    await querying
+    controller.abort()
+    await rejected
+    expect(state.cancelDns).toHaveBeenCalledOnce()
+    expect(run).not.toHaveBeenCalled()
+  })
+  it('does not discover DNS for literal IPv6 endpoints or already cancelled starts (AT-03-010)', async () => {
+    const run = vi.fn(async () => ({ stdout: 'WFP_PREPARED:{"tunLuid":"12","appIds":[],"vpn":[]}' }))
+    await prepareWfpIpv6Policy({ corePrograms: [], serverHost: '2001:db8::1', tunAlias: 'VPNTE', apps: [], cidrs: [] }, run)
+    expect(state.resolve6).not.toHaveBeenCalled()
+    const controller = new AbortController(); controller.abort(); run.mockClear()
+    await expect(prepareWfpIpv6Policy({ corePrograms: [], serverHost: 'vpn.example', tunAlias: 'VPNTE', apps: [], cidrs: [], signal: controller.signal }, run)).rejects.toMatchObject({ name: 'AbortError' })
+    expect(run).not.toHaveBeenCalled()
+  })
+  it.each(['ENODATA', 'ENOTFOUND', 'ETIMEOUT'])('omits permits after DNS %s without bypassing IPv6 blocks (AT-03-010)', async code => {
+    state.resolve6.mockRejectedValue(Object.assign(new Error('DNS unavailable'), { code }))
+    const run = vi.fn(async () => ({ stdout: 'WFP_PREPARED:{"tunLuid":"12","appIds":[],"vpn":[]}' }))
+    const policy = await prepareWfpIpv6Policy({ corePrograms: ['C:\\VPNTE\\core.exe'], serverHost: 'vpn.example', tunAlias: 'VPNTE', apps: [], cidrs: [] }, run)
+    expect(policy.rules.filter(r => r.role === 'vpn')).toEqual([])
+    expect(policy.rules.filter(r => r.role === 'block')).toHaveLength(3)
+  })
+  it('accepts the actual pinned generated WFP scripts through the dedicated helper policy (AT-03-012)', async () => {
+    const check = async (script: string) => {
+      // A non-elevated fixture must reach unavailability, never policy rejection.
+      await expect(execElevatedPs(script, 1000, 'wfp-ipv6')).rejects.toMatchObject({ code: 'elevated-helper-unavailable' })
+      return { stdout: 'WFP_IPV6_VERIFIED\nWFP_IPV6_REMOVED\nWFP_COUNT:0\nWFP_APPS:[]\nWFP_PREPARED:{"tunLuid":"12","appIds":[],"vpn":[]}' }
+    }
+    const policy = blocks()
+    await applyWfpIpv6Policy(policy, check)
+    await verifyWfpIpv6Policy(policy, check)
+    await removeWfpIpv6Protection(check)
+    expect(await hasWfpIpv6Protection(check)).toBe(false)
+    await prepareWfpIpv6Exceptions(policy, [], [], check)
+    await prepareWfpIpv6Policy({ corePrograms: [], tunAlias: 'VPNTE', apps: [], cidrs: [] }, check)
   })
   it.each([
     ['2001:db8::', 32, '2001:db8:c000:aa::', '2001:db8:c000:ab::', '2001:db8:cb00:7101::'],
@@ -84,7 +161,7 @@ describe('independent IPv6 WFP lifecycle', () => {
 })
 
 describe.skipIf(process.platform !== 'win32' && !process.env.VPNTE_PWSH)('compiled production C# policy with fake WFP engine', () => {
-  it('executes transaction, compensation, validation and SDK ABI regressions without changing the network', () => {
+  it('executes generated PowerShell rules and transaction/ABI regressions without changing the network', async () => {
     const fixture = `
 namespace VPNTE.IPv6.Tests {
   public sealed class Fake : IEngine {
@@ -136,10 +213,17 @@ namespace VPNTE.IPv6.Tests {
     const root = join(process.cwd(), '.tmp'); mkdirSync(root, { recursive: true })
     const dir = mkdtempSync(join(root, 'wfp-native-')); const path = join(dir, 'harness.ps1')
     try {
+      const policy = blocks()
+      policy.rules.push({ ...policy.rules[0], id: randomUUID(), role: 'vpn', appId: 'AABB', remote: '2001:db8::1/128', luid: '17' })
+      const scripts: string[] = []
+      const capture = async (script: string) => { scripts.push(script.replaceAll('$engine=New-Object VPNTE.IPv6.NativeEngine', '$engine=$fixtureEngine')); return { stdout: 'WFP_IPV6_VERIFIED' } }
+      await applyWfpIpv6Policy(policy, capture)
+      await verifyWfpIpv6Policy(policy, capture)
       const encoded = Buffer.from(source + fixture).toString('base64')
-      writeFileSync(path, `$ErrorActionPreference='Stop'\nAdd-Type -TypeDefinition ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}')))\n[VPNTE.IPv6.Tests.Run]::All()`, 'utf8')
+      writeFileSync(path, `$ErrorActionPreference='Stop'\nAdd-Type -TypeDefinition ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}')))\n[VPNTE.IPv6.Tests.Run]::All()\n$fixtureEngine=New-Object VPNTE.IPv6.Tests.Fake\n${scripts.join('\n')}\nif($fixtureEngine.Rules.Count -ne 4){throw 'Generated rule array incomplete'}\nif($fixtureEngine.Rules[3].Signature -ne $rules[3].Signature){throw 'Generated scope changed'}\nWrite-Output 'WFP_PS_RULES_PASS'`, 'utf8')
       const output = execFileSync(process.env.VPNTE_PWSH || 'powershell.exe', ['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path], { encoding: 'utf8', windowsHide: true, timeout: 15000 })
       expect(output).toContain('WFP_POLICY_FIXTURES_PASS')
+      expect(output).toContain('WFP_PS_RULES_PASS')
     } finally { unlinkSync(path); rmdirSync(dir) }
   }, 20000)
 })

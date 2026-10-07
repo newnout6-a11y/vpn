@@ -30,7 +30,7 @@ const MAX_RESTARTS = 3
 const MAX_SCRIPT_CHARS = 64 * 1024
 const MAX_PENDING_COMMANDS = 8
 
-export type ElevatedPsPolicy = 'firewall-killswitch' | 'physical-adapter-lockdown'
+export type ElevatedPsPolicy = 'firewall-killswitch' | 'physical-adapter-lockdown' | 'wfp-ipv6'
 
 const BLOCKED_SCRIPT_TOKENS = [
   /\bInvoke-Expression\b/i,
@@ -59,6 +59,7 @@ const BLOCKED_SCRIPT_TOKENS = [
 ]
 
 const POLICY_REQUIRED_TOKENS: Record<ElevatedPsPolicy, RegExp[]> = {
+  'wfp-ipv6': [/\bVPNTE\.IPv6\.NativeEngine\b/, /\bWFP_APPS:/],
   'firewall-killswitch': [
     /\bGet-VpnteFirewallRuleNames\b/i,
     /\bNew-VpnteFirewallRule\b/i,
@@ -82,6 +83,15 @@ const POLICY_REQUIRED_TOKENS: Record<ElevatedPsPolicy, RegExp[]> = {
 }
 
 const POLICY_FORBIDDEN_TOKENS: Record<ElevatedPsPolicy, RegExp[]> = {
+  'wfp-ipv6': [
+    /\b(?:Set|New|Remove)-NetFirewall\w*\b/i,
+    /\b(?:Set|Disable|Enable|Remove|New)-Net(?:Adapter|IP|Route|TCP)\w*\b/i,
+    /\bSet-DnsClientServerAddress\b/i,
+    /\bHNetCfg\b/i,
+    /\bnetsh\b/i,
+    /\breg\s+add\b/i,
+    /\b(?:New|Remove)-VpnteFirewall\w*\b/i
+  ],
   'firewall-killswitch': [
     /\bGet-NetAdapter\b/i,
     /\bGet-NetAdapterBinding\b/i,
@@ -331,7 +341,16 @@ export async function execElevatedPs(
   if (pendingCommands.size >= MAX_PENDING_COMMANDS) {
     throw new Error(`PS helper queue is full (${pendingCommands.size} pending)`)
   }
-  validateScriptPolicy(script, policy)
+  let policySource = script
+  if (policy === 'wfp-ipv6') {
+    // Exempt only the exact bundled, SHA-256-verified loader. Add-Type remains
+    // prohibited in caller-supplied bodies and every other helper policy.
+    const { wfpPrelude } = await import('./wfpIpv6')
+    const prelude = await wfpPrelude()
+    if (!script.startsWith(prelude)) throw new ElevatedPsHelperError('elevated-helper-script-rejected', 'Untrusted WFP loader')
+    policySource = script.slice(prelude.length)
+  }
+  validateScriptPolicy(policySource, policy)
 
   if (!isElevatedPsHelperRunning()) {
     if (restartCount < MAX_RESTARTS) {

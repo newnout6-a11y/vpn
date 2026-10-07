@@ -19,7 +19,7 @@ vi.mock('electron', () => ({ app: { getPath: () => 'C:\\VPNTE' },
 vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
 vi.mock('./wfpIpv6', async importOriginal => ({
   ...await importOriginal<typeof import('./wfpIpv6')>(),
-  prepareWfpIpv6Policy: async () => { state.wfpCalls.push('prepare'); return { schemaVersion: 1, rules: ['connect','accept','boot'].map((layer, i) => ({ id: `00000000-0000-0000-0000-00000000000${i + 1}`, role: 'block', appId: '', remote: '', luid: '', originalApp: false, inbound: layer === 'accept', boot: layer === 'boot' })) } },
+  prepareWfpIpv6Policy: async (opts: { signal?: AbortSignal }) => { state.wfpCalls.push('prepare'); opts.signal?.throwIfAborted(); return { schemaVersion: 1, rules: ['connect','accept','boot'].map((layer, i) => ({ id: `00000000-0000-0000-0000-00000000000${i + 1}`, role: 'block', appId: '', remote: '', luid: '', originalApp: false, inbound: layer === 'accept', boot: layer === 'boot' })) } },
   prepareWfpIpv6Exceptions: async (previous: unknown) => previous,
   applyWfpIpv6Policy: async () => {
     state.wfpCalls.push('apply')
@@ -135,6 +135,26 @@ beforeEach(() => {
 })
 afterEach(() => { Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true }) })
 describe('firewall transaction fault injection (AT-03-003/004/007; F-030, F-186)', () => {
+  it('does not journal or mutate an already cancelled startup (AT-03-007)', async () => {
+    const controller = new AbortController(); controller.abort()
+    await expect(enableKillSwitch({ ...options, signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' })
+    expect(state.writes).toEqual([])
+    expect(state.wfpCalls).toEqual([])
+    expect(state.scripts).toEqual([])
+  })
+  it('stops before IPv6 preparation when cancelled during the adapter barrier (AT-03-007)', async () => {
+    const controller = new AbortController()
+    let ready!: (value: boolean) => void
+    const barrier = new Promise<boolean>(resolve => { ready = resolve })
+    const pending = enableKillSwitch({ ...options, tunAdapterReady: barrier, signal: controller.signal })
+    await vi.waitFor(() => expect(state.manifestReads).toBeGreaterThan(0))
+    controller.abort(); ready(true)
+    const result = await pending
+    expect(result.success).toBe(false)
+    expect(state.writes).toEqual([])
+    expect(state.wfpCalls).toEqual(['prepare'])
+    expect(state.scripts).toEqual([])
+  })
   it('still removes owned WFP protection after firewall rollback fails (AT-03-007)', async () => {
     await enableKillSwitch(options); state.failRestore = true
     expect((await disableKillSwitch('independent rollback')).success).toBe(false)

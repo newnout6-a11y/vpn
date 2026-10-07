@@ -18,7 +18,7 @@ function harness() {
     applyLowTunInterfaceMetric: vi.fn(async () => {}),
     runPowerShell: vi.fn(async () => '5'),
     isKillSwitchActive: vi.fn(async () => false),
-    enableKillSwitch: vi.fn(async (opts: { tunAdapterReady?: Promise<boolean> }) => ({ success: await opts.tunAdapterReady })),
+    enableKillSwitch: vi.fn(async (opts: { tunAdapterReady?: Promise<boolean>; signal: AbortSignal }) => ({ success: await opts.tunAdapterReady })),
     strictRecoveryRequired: vi.fn(async () => false),
     readGranularKillSwitchExceptions: vi.fn(() => []),
     getTunAdapterAlias: () => 'Ethernet 5',
@@ -39,6 +39,7 @@ function harness() {
 let resolved=false, successHandled=false, pollInFlight=false, stopRequested=false;
 let attempts=0, startAbortedReason=null, pendingKillSwitch=null, settleFirewallAdapter=null;
 let startupPollCompletion=null;
+const startAbortController=new AbortController();
 let startupCompensationStarted=false;
 const maxAttempts=31, poller=1, wantKillSwitch=true, adapterLockdownPromise=null;
 const runtime={singbox:'fixture.exe'}, proxyOwnerProgramPaths=[], processWaitStarted=0;
@@ -50,8 +51,8 @@ const wantAdapterLockdown=false,startOptions={},STABLE_RESET_MS=60000;
 let killSwitchEngaged=false,killSwitchWarning=null,restartAttempt=0,lastStartOptions=null;
 let stopInProgress=false,userInitiatedStop=false,stableTimer=null;
 function finish(result){if(!resolved){resolved=true;onFinish(result)}}
-return {poll: ${callback}, requestStop: () => {stopRequested=true}, exit: () => {resolved=true;settleFirewallAdapter?.(false)}, completion: () => startupPollCompletion};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
-  const control = new Function(...Object.keys(os), compiled)(...Object.values(os)) as { poll: () => Promise<void>; requestStop: () => void; exit: () => void; completion: () => Promise<void> | null }
+return {poll: ${callback}, signal: startAbortController.signal, requestStop: () => {stopRequested=true;startAbortController.abort()}, exit: () => {resolved=true;settleFirewallAdapter?.(false)}, completion: () => startupPollCompletion};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
+  const control = new Function(...Object.keys(os), compiled)(...Object.values(os)) as { poll: () => Promise<void>; signal: AbortSignal; requestStop: () => void; exit: () => void; completion: () => Promise<void> | null }
   return { ...control, ...os }
 }
 
@@ -133,6 +134,7 @@ describe('startup callback fault boundaries', () => {
     const pending = h.poll()
     await vi.waitFor(() => expect(h.recordOwnedTunAdapter).toHaveBeenCalledOnce())
     const gate = h.enableKillSwitch.mock.calls[0][0].tunAdapterReady!
+    expect(h.enableKillSwitch.mock.calls[0][0].signal).toBe(h.signal)
     const observed = vi.fn()
     void gate.then(observed)
     await Promise.resolve()

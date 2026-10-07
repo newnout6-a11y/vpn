@@ -3322,6 +3322,7 @@ export const tunController = {
               killSwitchPromise = (async () => {
                 const ks = await enableKillSwitch({
                   singboxExePath: runtime.singbox,
+                  signal: startAbortController.signal,
                   vpnServerHost: mode === 'directVpn' && typeof vpnProfile?.outbound?.server === 'string' ? vpnProfile.outbound.server : undefined,
                   strictMode: await strictRecoveryRequired(),
                   proxyOwnerProgramPaths,

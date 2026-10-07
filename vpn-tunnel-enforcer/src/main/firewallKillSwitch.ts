@@ -181,7 +181,8 @@ async function ps(script: string, elevated = false, timeout = 30000) {
     const started = performance.now()
     let result: Awaited<ReturnType<typeof execElevatedPs>> | undefined
     try {
-      result = await execElevatedPs(script, timeout, 'firewall-killswitch')
+      const policy = script.startsWith("$ErrorActionPreference='Stop'\nif (-not ('VPNTE.IPv6.Policy'") ? 'wfp-ipv6' : 'firewall-killswitch'
+      result = await execElevatedPs(script, timeout, policy)
     } catch (err: any) {
       // Only a known rejection before execution permits a fallback. A timeout
       // or lost reply may follow effects; replaying would duplicate mutation.
@@ -434,6 +435,7 @@ export interface KillSwitchOptions {
   tunAdapterReady?: Promise<boolean>
   strictMode?: boolean
   vpnServerHost?: string
+  signal?: AbortSignal
 }
 export async function enableKillSwitch(opts: KillSwitchOptions): Promise<FirewallKillSwitchResult> {
   // Attach the rejection handler before entering the serialized queue.
@@ -576,6 +578,7 @@ function reportRecoveryWarning(message: string): void {
   void dialog.showMessageBox({ type: 'warning', title: 'VPNTE: защита не подтверждена', message }).catch(() => undefined)
 }
 async function enableKillSwitchUnlocked(opts: KillSwitchOptions): Promise<FirewallKillSwitchResult> {
+  opts.signal?.throwIfAborted()
   if (process.platform !== 'win32') {
     return { success: true, message: 'Firewall kill-switch недоступен (не Windows)' }
   }
@@ -594,7 +597,7 @@ async function enableKillSwitchUnlocked(opts: KillSwitchOptions): Promise<Firewa
   let ipv6Policy: WfpIpv6Policy
   try {
     ipv6Policy = await prepareWfpIpv6Policy({ corePrograms: [opts.singboxExePath, ...(opts.proxyOwnerProgramPaths ?? [])],
-      serverHost: opts.vpnServerHost, tunAlias: opts.tunAdapterAlias || getTunAdapterAlias(),
+      serverHost: opts.vpnServerHost, signal: opts.signal, tunAlias: opts.tunAdapterAlias || getTunAdapterAlias(),
       apps: initialExceptions?.apps ?? previous?.exceptionPolicy?.apps ?? [], cidrs: initialExceptions?.cidrs ?? previous?.exceptionPolicy?.cidrs ?? [] }, script => ps(script, true))
   } catch (error) { return { success: false, state: 'unknown', message: 'IPv6 policy preparation failed; firewall unchanged', details: String(error) } }
   if (previous?.phase === 'active' && previous.ipv6Policy && sameWfpCoreScopes(previous.ipv6Policy, ipv6Policy)) {
@@ -605,6 +608,7 @@ async function enableKillSwitchUnlocked(opts: KillSwitchOptions): Promise<Firewa
     }
     return { success: true, skipped: true, message: 'Active firewall preserved; use differential exceptions update' }
   }
+  opts.signal?.throwIfAborted()
   const savedProfiles = previous?.savedProfiles ?? await timedFirewallPhase('snapshot-profiles', snapshotFirewallProfiles)
   const prepared: FirewallManifest = {
     schemaVersion: 1, owner: 'VPNTE', operationId: previous?.operationId ?? randomUUID(),
@@ -855,7 +859,9 @@ Write-Output "SAVED:$savedJson"
 
   let installedRules: string[] = []
   try {
+    opts.signal?.throwIfAborted()
     await applyWfpIpv6Policy(ipv6Policy, script => ps(script, true))
+    opts.signal?.throwIfAborted()
     const { stdout } = await timedFirewallPhase('initial-apply-policy', () => ps(script, true, 60000))
     const output = String(stdout || '')
     const lines = output.split('\n').map((l) => l.trim())
