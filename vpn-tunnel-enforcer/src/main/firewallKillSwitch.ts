@@ -38,7 +38,8 @@ const LAN_BYPASS_CIDRS = [
   '192.168.0.0/16',
   '169.254.0.0/16',
   '224.0.0.0/4',
-  '::1/128',
+  // Windows Firewall's COM address setter rejects IPv6 loopback. Keep it in
+  // the separate WFP loopback policy rather than invalidating this LAN rule.
   'fc00::/7',
   'fe80::/10',
   'ff00::/8'
@@ -727,7 +728,7 @@ if ($tunAliasFound) {
 }
 
 # 3c-bis. Dedicated Outbound Allow rules for loopback (IPv4 127.0.0.0/8 and IPv6 ::1/128).
-# Windows Firewall rejects mixing IPv4 and IPv6 CIDRs in a single rule, so we create separate rules.
+# IPv6 loopback can be rejected by the native address setter; WFP permits it separately.
 try {
   New-VpnteFirewallRule \`
     -DisplayName ${psSingleQuote(loopbackOutAllow)} \`
@@ -767,7 +768,7 @@ try {
   $rules += ${psSingleQuote(loopbackInAllow)}
 } catch { Write-Output "WARN allow-loopback-in: $_" }
 
-# 3d. Allow IPv4 LAN ranges outbound (printers, NAS, router, mDNS).
+# 3d. Allow IPv4/IPv6 LAN ranges outbound (printers, NAS, router, mDNS).
 try {
   New-VpnteFirewallRule \`
     -DisplayName ${psSingleQuote(lanAllow)} \`

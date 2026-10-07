@@ -373,6 +373,33 @@ describe('firewall transaction fault injection (AT-03-003/004/007; F-030, F-186)
     expect(state.manifest.phase).toBe('prepared')
     expect(state.manifest.pendingExceptionPolicy.cidrs).toEqual(['192.0.2.1'])
   })
+  it.skipIf(originalPlatform !== 'win32')('creates the generated LAN allow with real Windows COM address validation (AT-03-001/010)', async () => {
+    await enableKillSwitch(options)
+    const transaction = state.scripts.find(script => script.includes('# --- Step 2:'))!
+    const lanRule = transaction.slice(transaction.indexOf('# 3d.'), transaction.indexOf('# 3e.'))
+    // Only the rule object is native: Add stays in memory and cannot change OS policy.
+    const output = executeNativeFixture(`
+$ErrorActionPreference='Stop'
+$fixtureRules=[Collections.Generic.List[object]]::new()
+$fixturePolicy=[pscustomobject]@{Rules=$fixtureRules}
+function New-Object {param($ComObject)
+  if($ComObject -eq 'HNetCfg.FwPolicy2'){return $fixturePolicy}
+  Microsoft.PowerShell.Utility\\New-Object -ComObject $ComObject
+}
+${FIREWALL_RULES_API_PS}
+$rules=@()
+${lanRule}
+@{created=$fixtureRules.Count;names=@($rules);addresses=@($fixtureRules|ForEach-Object{$_.RemoteAddresses})}|ConvertTo-Json -Compress
+`, true)
+    const result = JSON.parse(output.trim().split(/\r?\n/).at(-1)!)
+    expect(result.created, output).toBe(1)
+    expect(result.names).toEqual(['VPNTE-killswitch-allow-lan'])
+    expect(result.addresses[0].split(',').sort()).toEqual([
+      '127.0.0.0/255.0.0.0', '10.0.0.0/255.0.0.0', '172.16.0.0/255.240.0.0',
+      '192.168.0.0/255.255.0.0', '169.254.0.0/255.255.0.0', '224.0.0.0/240.0.0.0',
+      'fc00::/7', 'fe80::/10', 'ff00::/8'
+    ].sort())
+  }, 20000)
   it.skipIf(process.platform !== 'win32' && !process.env.VPNTE_PWSH).each([
     { cidrs: [], ready: false }, { cidrs: ['192.0.2.1'], ready: false }, { cidrs: ['192.0.2.1', '198.51.100.2'], ready: false },
     { cidrs: [], ready: true }, { cidrs: ['192.0.2.1'], ready: true }, { cidrs: ['192.0.2.1', '198.51.100.2'], ready: true }
