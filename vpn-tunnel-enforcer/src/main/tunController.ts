@@ -2019,8 +2019,11 @@ async function prepareRuntime(
     smartRuDirectDnsSources?: PhysicalAdapterDnsSource[]
     xraySocksPort?: number
     resolvedVpnEndpointIp?: string | null
+    xrayStartup?: Promise<{ socksPort: number; resolvedIp: string | null }>
+    signal?: AbortSignal
   } = {}
 ): Promise<{ singbox: string; config: string }> {
+  options.signal?.throwIfAborted()
   const runtimeDir = getTunRuntimeDir()
   // The security helper creates the trusted root with its restricted ACL.
   // Creating it recursively here would expose a writable directory before
@@ -2037,6 +2040,7 @@ async function prepareRuntime(
       'Бинарные файлы не были скопированы и туннель не запускался.'
     )
   }
+  options.signal?.throwIfAborted()
 
   const singboxSrc = getBundledResource('sing-box.exe')
   const wintunSrc = getBundledResource('wintun.dll')
@@ -2162,8 +2166,15 @@ async function prepareRuntime(
   const existingAliases = (options.smartRuDirectDnsSources ?? []).map((s: PhysicalAdapterDnsSource) => s.alias)
   updateTunAdapterAlias(existingAliases.length > 0 ? existingAliases : undefined)
 
+  // Files/ACL inspection can overlap Xray startup. Configuration still waits
+  // for its actual listener and resolved endpoint; no guessed port is written.
+  const { xrayStartup, signal, ...configOptions } = options
+  const xray = await xrayStartup
+  signal?.throwIfAborted()
   const config = generateSingboxConfig(upstream, proxyType, directProcessNames, {
-    ...options,
+    ...configOptions,
+    xraySocksPort: xray?.socksPort ?? options.xraySocksPort,
+    resolvedVpnEndpointIp: xray ? xray.resolvedIp : options.resolvedVpnEndpointIp,
     // If staging failed, smartRuRuleSetDir is undefined. Force the whole
     // feature OFF for this run (rather than letting generateSingboxConfig fall
     // back to the dangerous `remote` download path) so the tunnel still starts
@@ -2698,12 +2709,32 @@ export const tunController = {
         let resolvedVpnEndpointIp: string | null = null
         if (engine === 'xray') {
           try {
-            const xr = await startXray(vpnProfile.outbound, {
+            const xrayStartup = startXray(vpnProfile.outbound, {
               clientDevice: vpnProfile.clientDevice,
               stealthMode: startOptions.stealthMode === true,
               resolvedIp: vpnProfile.resolvedIp,
               signal: startAbortController.signal
             })
+            runtimePromise = timePromise('prepare-runtime', smartRouteRuntimeOptsPromise.then(runtimeOpts => {
+              startAbortController.signal.throwIfAborted()
+              return prepareRuntime(
+                { outbound: vpnProfile.outbound, proxyType, clientDevice: vpnProfile.clientDevice },
+                proxyType,
+                uniqueProcessNames([...proxyOwnerProcessNames, 'vpnte-xray.exe']),
+                {
+                  stealthMode: startOptions.stealthMode === true,
+                  adaptiveMode: startOptions.adaptiveMode,
+                  publicWifiCompatibility,
+                  xrayStartup,
+                  signal: startAbortController.signal,
+                  ...runtimeOpts
+                }
+              )
+            }), { mode, parallel: true })
+            // Do not release this start owner while cancelled/failed staging
+            // can still write files that the next connection would consume.
+            startupCleanupTasks.push(runtimePromise.then(() => undefined, () => undefined))
+            const xr = await xrayStartup
             xraySocksPort = xr.socksPort
             resolvedVpnEndpointIp = xr.resolvedIp
             proxyOwnerProgramPaths = [...new Set([...proxyOwnerProgramPaths, xr.exePath])]
@@ -2739,7 +2770,7 @@ export const tunController = {
           await rollbackEarlyAdapterLockdown('start cancelled while reading DNS sources')
           return finishStart({ success: false, error: 'Запуск отменён' })
         }
-        runtimePromise = timePromise('prepare-runtime', prepareRuntime(
+        if (!runtimePromise) runtimePromise = timePromise('prepare-runtime', prepareRuntime(
           { outbound: vpnProfile.outbound, proxyType, clientDevice: vpnProfile.clientDevice },
           proxyType,
           proxyOwnerProcessNames,

@@ -61,7 +61,7 @@ describe('startup callback fault boundaries', () => {
     const reserveStart = source.indexOf('// Reserve the sublayer before sing-box')
     const reserveEnd = source.indexOf("mark('preflight')", reserveStart)
     expect(reserveStart).toBeGreaterThan(-1)
-    expect(reserveEnd).toBeLessThan(source.indexOf('await startXray(', reserveEnd))
+    expect(reserveEnd).toBeLessThan(source.indexOf('startXray(', reserveEnd))
     const compiled = ts.transpileModule(`return async function(){${source.slice(reserveStart, reserveEnd)} return {success:true}}`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
     let release!: () => void
     const reserve = vi.fn(() => new Promise<void>(done => { release = done }))

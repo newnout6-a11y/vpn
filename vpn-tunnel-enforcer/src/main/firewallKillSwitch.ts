@@ -350,7 +350,9 @@ export async function ensureKillSwitchProgramAllowed(
   if (!trimmed) {
     return { success: false, message: 'Kill-switch allow rule: program path is empty' }
   }
-  if (!(await isKillSwitchActive())) {
+  // This rule affects Windows Firewall only. WFP presence is a cleanup gate;
+  // its IPv6 permits require the separately journalled endpoint/App ID policy.
+  if (!(await readManifest()) && !(await probeFirewallForOurRules())) {
     return { success: true, skipped: true, message: 'Kill-switch inactive' }
   }
 

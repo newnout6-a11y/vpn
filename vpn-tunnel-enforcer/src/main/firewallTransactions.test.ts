@@ -30,7 +30,7 @@ vi.mock('./wfpIpv6', async importOriginal => ({
   },
   verifyWfpIpv6Policy: async () => { state.wfpCalls.push('verify'); if (state.wfpFailVerify) throw new Error('WFP coverage changed') },
   removeWfpIpv6Protection: async () => { state.wfpCalls.push('remove'); if (state.wfpFailRemove) throw new Error('WFP remove failure'); state.wfpActive = false },
-  hasWfpIpv6Protection: async () => state.wfpActive
+  hasWfpIpv6Protection: async () => { state.wfpCalls.push('presence'); return state.wfpActive }
 }))
 vi.mock('fs/promises', async importOriginal => {
   const actual = await importOriginal<typeof import('fs/promises')>()
@@ -103,7 +103,7 @@ vi.mock('./elevatedPsHelper', () => ({ isElevatedPsHelperRunning: () => state.he
     return { stdout: state.ownedRules && script.includes('Get-VpnteFirewallRuleNames') ? '1' : '0', stderr: '' }
   }
 }))
-import { enableKillSwitch, disableKillSwitch, isKillSwitchActive, killSwitchManifestExists, updateKillSwitchExceptions, recoverStaleKillSwitch } from './firewallKillSwitch'
+import { enableKillSwitch, disableKillSwitch, isKillSwitchActive, killSwitchManifestExists, updateKillSwitchExceptions, recoverStaleKillSwitch, ensureKillSwitchProgramAllowed } from './firewallKillSwitch'
 import { RecoveryManifestReadError } from './recoveryManifest'
 import { logEvent } from './appLogger'
 const originalPlatform = process.platform
@@ -136,6 +136,28 @@ beforeEach(() => {
 })
 afterEach(() => { Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true }) })
 describe('firewall transaction fault injection (AT-03-003/004/007; F-030, F-186)', () => {
+  it('skips the Windows Firewall program rule without probing WFP-only protection (AT-03-003/010)', async () => {
+    state.wfpActive = true
+    expect(await ensureKillSwitchProgramAllowed('C:\\VPNTE\\xray.exe')).toMatchObject({ success: true, skipped: true })
+    expect(state.wfpCalls).toEqual([])
+    expect(state.scripts.some(script => script.replace(FIREWALL_RULES_API_PS, '').includes('New-VpnteFirewallRule'))).toBe(false)
+    expect(await isKillSwitchActive()).toBe(true)
+    expect(state.wfpCalls).toEqual(['presence'])
+  })
+  it.each(['manifest', 'orphan firewall'])('allows Xray through %s without a WFP presence round-trip (AT-03-004/010)', async mode => {
+    if (mode === 'manifest') await enableKillSwitch(options)
+    else { state.ownedRules = true; state.fileProbe.mockReturnValue('1') }
+    state.wfpCalls = []; state.scripts = []
+    expect(await ensureKillSwitchProgramAllowed('C:\\VPNTE\\xray.exe', 'xray-engine')).toMatchObject({ success: true })
+    expect(state.wfpCalls).toEqual([])
+    expect(state.scripts.some(script => script.includes('New-VpnteFirewallRule') && script.includes('VPNTE-killswitch-allow-xray-engine'))).toBe(true)
+  })
+  it('refuses a program rule when the recovery journal is untrusted (AT-03-012)', async () => {
+    state.readError = new Error('untrusted ACL')
+    await expect(ensureKillSwitchProgramAllowed('C:\\VPNTE\\xray.exe')).rejects.toThrow('untrusted ACL')
+    expect(state.scripts).toEqual([])
+    expect(state.wfpCalls).toEqual([])
+  })
   it('does not journal or mutate an already cancelled startup (AT-03-007)', async () => {
     const controller = new AbortController(); controller.abort()
     await expect(enableKillSwitch({ ...options, signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' })
