@@ -62,16 +62,26 @@
 | # | Пакет | Почему в этой позиции | Срок / условие |
 |---|---|---|---|
 | 1 | **WP-11 (только миграция Electron 42 → 44)** | Единственный жёсткий внешний дедлайн: после окончания окна поддержки Electron 42 перестаёт получать security-патчи Chromium. | **Миграция выполнена 30.09.2026** (44.4.3, native smoke и build); оставшаяся приёмка WP-11 отдельно. Исходный дедлайн — 20.10.2026. |
-| 2 | **WP-1** Секреты, IPC и доверенная граница | Защита секретов и sender/origin реализована; остаётся полная проверка доверенной границы. | **Частично (сверка 04.10.2026)**: код/регрессии и native smoke subsets есть; полные migration/secret scan/IPC/CSP/ACL AT не приняты. |
-| 3 | **WP-3** Firewall, baseline, recovery | Fail-closed, транзакционный откат, Boot Recovery, узкие CLAT-исключения без обхода kill-switch. | **Частично (сверка 04.10.2026)**: код/native fixtures/benchmarks есть; packet oracle, SYSTEM reboot, NAT64/hot-plug/OS matrix не приняты. |
+| 2 | **WP-1** Секреты, IPC и доверенная граница | Защита секретов, безопасный экспорт и доверенная граница расширены в PR #21. | **Частично (сверка 07.10.2026)**: #21 слит (`5764bc8`); default masking/opt-in export, DPAPI preflight, IPC/CSP и runtime ACL/SHA-256 реализованы. Полные AT-01, настоящий 42→44/downgrade, secret scan, installed/ACL/clipboard matrix не приняты. |
+| 3 | **WP-3** Firewall, baseline, recovery | Fail-closed, транзакционный откат, Boot Recovery, узкие CLAT-исключения без обхода kill-switch. | **Частично (сверка 07.10.2026), следующий фокус**: исходный код и локальные проверки есть; #22 сохраняет защиту до runtime exit proof. Все 12 AT нужно адресно сверить; packet oracle, SYSTEM reboot, NAT64/hot-plug/OS matrix не приняты. |
 | 4 | **WP-0** Контракты, FSM, наблюдаемость | Фундамент для WP-2 и WP-10: единый автомат состояний, `operationId`, `AbortController`. | До WP-2 и WP-10 |
 | 5 | **WP-2** Процессы, runtime, lifecycle туннеля | Зомби-процессы, гонки таймаутов, порядок запуска Xray (F-022, F-025, F-191, F-194). | После WP-0 |
 | 6 | **WP-10** Scheduler, rotation, AutoPilot, adaptive bypass | Health-Before-Commit ротации (F-124), баг ночных окон (F-193). | После WP-0 |
 | 7 | **WP-6**, **WP-4** Маршрутизация и импорт | Целостность rule-sets, `process_path` в split tunneling, парсеры протоколов. | Параллельно |
 | 8 | **WP-7**, **WP-8** Мониторинг и диагностика | Честные статусы проверок, OOM-защита форензики (F-197). | Параллельно |
 | 9 | **WP-5**, **WP-9** История проверок, Soft-режим, UI | Пользовательский слой, a11y, декомпозиция монолитных компонентов. | Параллельно |
-| 10 | **WP-11 (остаток)** | NSIS shutdown с rollback, `checksums.txt`, `binaries-manifest.json`, автообновление. | Перед первым публичным релизом |
+| 10 | **WP-11 (остаток)** | Installed upgrade/uninstall, release integrity и автообновление. NSIS controlled shutdown уже реализован в #21/#22. | До публичного релиза: собрать installer с последними stop/env fixes и выполнить AT-11/OS matrix; publication `checksums.txt`/`binaries-manifest.json` и update E2E не приняты. |
 | 11 | **WP-12** Planned features | AmneziaWG, Mihomo, Chromium Browser Boxes, ETW-процессный монитор. Каждый трек выпускается **отдельным релизом** и стартует только после закрытия WP-0…WP-11. | Последним |
+
+### Следующая рекомендуемая итерация — WP-3 (сверка 07.10.2026)
+
+WP-3 уже реализовывался в PR #13 и lifecycle-работах; PR #21/#22 дополнительно усилили runtime/shutdown boundary. Это не пакет с нулевой реализацией и не полностью принятый пакет. Следующая работа — составить адресную матрицу [AT-03-001…012](./04-приёмочные-тесты/04-WP-3-firewall-baseline-recovery.md): код/регрессия, фактический результат, оставшаяся реализация или непроверенный системный оракул.
+
+- Вначале сверить доступные L1/L2: частичный отказ независимых шагов rollback и честный общий результат (AT-03-007), конкурентное обновление исключений (008), canonical path/IP/CIDR validation (009), локальные ветки повреждённых манифестов (003).
+- Затем Windows/L3: двойной packet oracle при разрыве (001), настоящий SYSTEM reboot recovery (002), чужие firewall rules (004), отсутствие NIC и hot-plug (005/006), IPv6/NAT64/464XLAT (010), DNS failure (011), поддельные ACL-манифесты (012) и поддерживаемая OS-матрица. L2 fixtures не заменяют эти проверки.
+- По выявленным пробелам — небольшие адресные исправления; при отсутствии требуемой среды сохранять NOT-CHECKED, а не закрывать пакет по unit PASS.
+
+После этого в рекомендуемом порядке идёт **WP-0**, затем WP-2 и WP-10. Остаток приёмки WP-1 остаётся открытым и учитывается отдельно по [матрице отчёта WP-1](../vpn-tunnel-enforcer/docs/wp1-security-acceptance-2026-10-04.md#границы-по-at). Переход к сверке WP-3 не означает завершения WP-1. Раздел 7 ТЗ-06 согласован с этим порядком; исторические записи о завершении WP-1/WP-3 не являются текущим вердиктом.
 
 ---
 
@@ -82,7 +92,9 @@
 
 ## Реестр сверки статусов реализации — 04.10.2026
 
-Срезы реализации находятся в конце каждого из трёх томов. Ниже перечислены источники, учтённые при их исправлении: требования, записанные результаты, границы планов и адресные проверки текущего кода. Записанный старый PASS не означает повторный запуск сейчас; наличие AC/F в таблице трассировки не означает PASS его оракула. Полный набор Vitest и Windows/L3-приёмка в этой документационной задаче не запускались.
+**Дополнение 07.10.2026:** адресно обновлены WP-1/WP-3/WP-11 в порядке работ, плане ТЗ-06 и срезе тома 2; в томе 3 уточнены lifecycle, env cleanup и форензика. Основание — слитые PR #21 (`5764bc8`) и #22 (`324c7cc`), текущие функции экспорта/остановки и NSIS hooks. Остальные срезы от 04.10 не объявляются заново проверенными; нормативные требования перед срезами не изменены.
+
+Срезы реализации находятся в конце каждого из трёх томов. Ниже перечислены источники, учтённые при их исправлении: требования, записанные результаты, границы планов и адресные проверки текущего кода. Записанный старый PASS не означает повторный запуск сейчас; наличие AC/F в таблице трассировки не означает PASS его оракула. В сверке 04.10 полный Vitest и Windows/L3-приёмка не запускались; проверки уточнения 07.10 перечислены отдельно ниже.
 
 | Источник | Что сверено и как отражено в срезах |
 | --- | --- |
@@ -106,7 +118,9 @@
 | [Multi-account isolation plan](../vpn-tunnel-enforcer/docs/multi-account-isolation-plan.md) | Исторический проект архитектуры; production Browser Boxes не реализованы. Решения владельца проверяются по ТЗ-06, а не по старому списку вопросов этого плана. |
 | [VLESS/QUIC investigation](../vpn-tunnel-enforcer/docs/vless-quic-fallback-investigation.md) | Историческое исследование транспорта; не принимается за свежий proof всех UDP/QUIC маршрутов. |
 | [Architecture README](../vpn-tunnel-enforcer/docs/architecture/README.md), [module map](../vpn-tunnel-enforcer/docs/architecture/module-map.md), [review guide](../vpn-tunnel-enforcer/docs/architecture/review-guide.md) | Карта модулей и границ проверки использована для адресной сверки parser/generator, rotation, adaptive bypass и wizard. |
-| [Split tunneling](../vpn-tunnel-enforcer/src/main/splitTunneling.ts), [NSIS hooks](../vpn-tunnel-enforcer/build/installer.nsh), [config export](../vpn-tunnel-enforcer/src/main/configManager.ts) | Адресная сверка замечаний PR #20: F-076 открыт — каталог теряется, создаётся `process_name`; F-183 открыт — forced kill без подтверждённого rollback; F-144 открыт — полный экспорт секретов вместо default masking и отдельного подтверждённого opt-in. Остатки обозначены как недостающая реализация; после неё нужны AT-06-008, AT-11-002 и проверки экспорта по тому 2 §4.2. |
+| [Split tunneling](../vpn-tunnel-enforcer/src/main/splitTunneling.ts), [NSIS hooks](../vpn-tunnel-enforcer/build/installer.nsh), [config export](../vpn-tunnel-enforcer/src/main/configManager.ts) | Сверка PR #20 за 04.10 фиксировала отсутствие трёх реализаций. Уточнение 07.10: F-076 по `process_name` сохраняет прежний остаток; #21 реализовал default masking и main-owned opt-in export (F-144), controlled shutdown вместо force-kill в NSIS hooks (F-183); #22 усилил exit proof. Полные AT-01-008/AT-11-002/009 не приняты; реализация этих участков не равна закрытию всех находок/пакетов. |
+| [PR #21](https://github.com/newnout6-a11y/vpn/pull/21), [отчёт WP-1](../vpn-tunnel-enforcer/docs/wp1-security-acceptance-2026-10-04.md) | 10 коммитов, merge `5764bc8` от 06.10. DPAPI/SecretRef, export policy, IPC/CSP, runtime ACL/hash; связанные capture/shutdown/env cleanup fixes. Матрица AT-01 различает native subsets, envelope fuzz, same-version migration и полный installed/L3 остаток. |
+| [PR #22](https://github.com/newnout6-a11y/vpn/pull/22), [progress](../progress.md) | Merge `324c7cc` от 06.10: сохранение upstream/watchdog/защиты при неподтверждённом runtime stop (`14b33fe`, `dcabbb2`, `18ee27c`), engine-log retention, installer task cleanup и Xray routeOnly. Это поддерживает WP-2/3/8/11; не закрывает все AT-03. Последний NSIS на `9b7bc93` предшествует последующим stop/env fixes. |
 | [Scheduler](../vpn-tunnel-enforcer/src/main/scheduler.ts), [domain routing](../vpn-tunnel-enforcer/src/main/domainRouting.ts), [availability verdict](../vpn-tunnel-enforcer/src/main/urlAvailability.ts), [speed test](../vpn-tunnel-enforcer/src/main/speedTest.ts) | Повторно подтверждены F-193 (нет предыдущего дня `dayOffset=-1`), F-011 (hit recorder отсутствует и постоянного счётчика нет), F-210/F-085 (direct-only 401/403 даёт ложный `works-only-with-vpn`) и F-010 (egress mismatch подавляется пустым catch). Обновлены срезы требований и статусы WP-6/7/10; адресные проверочные сценарии привязаны к AT-10-002, AT-06-003 и AT-07-006. |
 
 Архивные 44 feature requirements/blueprint пары из `docs-factory8090/01…04` не перепроверялись построчно в этой сверке. Их находки учитываются через журнал F, ТЗ-06 и нормативные тома; этот реестр не заявляет полного повторного чтения всех Markdown репозитория.
@@ -115,8 +129,15 @@
 
 Этап 36 lifecycle-журнала фиксирует connect **4317/2719 мс**, смену на Sweden **3270 мс**, отмену Norway **1751 мс**. Это отдельные пользовательские IPC-операции; отмена не засчитывается как успешное подключение. Прежние 23–50 мс после отмены были сохранением offline-профиля и не отражали реальную смену туннеля. Этапы 14/28 фиксируют ускорение recovery transport и Firewall API, но их microbenchmarks не заменяют эти измерения. Выборки для продуктовой медианы и прямого сопоставимого замера Happ недостаточно.
 
-### Проверки этой документационной сверки
+### Проверки документационной сверки 04.10.2026
 
 - В `vpn-tunnel-enforcer/`: `npm.cmd run typecheck` — exit 0; `npx.cmd vitest run src/renderer/components/LiveServerCheckSection.test.tsx --maxWorkers=4` — 1 файл, 4 теста passed, exit 0. Это адресная регрессия history IPC, а не проверка всех 10 diff-веток.
 - Из корня: `python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py` — exit 0, AC 927/927, F 210/210.
 - Проверены 42 локальные Markdown-ссылки в пяти изменённых файлах, четыре столбца таблиц среза и неизменность нормативного текста до срезов; `git diff --check` — exit 0.
+
+### Проверки адресного уточнения 07.10.2026
+
+- В `vpn-tunnel-enforcer/`: `npm.cmd run typecheck` — exit 0; `npm.cmd test -- --reporter=dot` — **211 файлов passed / 2 skipped; 2648 тестов passed / 9 skipped / 0 failed**, 157.84 с, exit 0.
+- Из корня: `python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py` — AC 927/927, F 210/210, exit 0.
+- Inline Python-проверка (`python -X utf8 -`): 52 локальные ссылки, четыре столбца таблиц срезов, неизменность требований перед срезами томов 2/3 и согласованность следующего WP-3 → WP-0 — PASS. Первый запуск проверки завершился на слишком строгом строковом ожидании формулировки порядка; после исправления самого checker все проверки прошли.
+- `git diff --check` — exit 0. Изменена только документация; installed/Windows L3, native acceptance, полный fuzz, миграция 42→44 и сборка NSIS в этой задаче не выполнялись. Новых закрытий F/AC/AT не объявлено.
