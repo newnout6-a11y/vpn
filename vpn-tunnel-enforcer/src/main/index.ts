@@ -1573,8 +1573,8 @@ async function stopProtection(
   stopInProgress = true
   const result = await tunController.stop().finally(() => { stopInProgress = false })
   // Keep internal cleanup evidence inside main; IPC exposes the user outcome.
-  const { networkCleanup: _cleanup, ...outcome } = result
-  if (!result.success) return outcome
+  const { networkCleanup: _cleanup, runtimeStopped: _runtimeStopped, ...outcome } = result
+  if (!result.success && result.runtimeStopped !== true) return outcome
   if (endingOutcome) closeSession(endingOutcome, endingStats)
   await rollbackSoftAutoconfigIfApplied('protection stop')
   activeAdaptiveContext = null
@@ -1588,7 +1588,7 @@ async function stopProtection(
     logEvent('warn', 'app', 'failed to stop traffic forensics session', err)
   })
 
-  // External proxies are tied to the VPN session; retain them if its stop failed.
+  // External proxies are tied to the runtime; retain them until its exit is proved.
   try {
     await externalProxy.stopAll('vpn-stop')
   } catch (err) {
@@ -2700,8 +2700,8 @@ async function performShutdownCleanup(reason: string): Promise<void> {
     try {
       const stopped = await tunController.stop()
       networkCleanup = stopped.networkCleanup
-      runtimeStopped = stopped.success
-      if (!stopped.success) throw new Error(stopped.error || 'owned runtime stop unconfirmed')
+      runtimeStopped = stopped.success || stopped.runtimeStopped === true
+      if (!runtimeStopped) throw new Error(stopped.error || 'owned runtime stop unconfirmed')
     } catch (err) {
       logEvent('warn', 'app', 'tunController.stop during shutdown failed', err)
     }
@@ -2713,7 +2713,7 @@ async function performShutdownCleanup(reason: string): Promise<void> {
       }
       if (!runtimeStopped) {
         const stopped = await tunController.stop()
-        if (!stopped.success) throw new Error(stopped.error || 'owned runtime stop unconfirmed')
+        if (!stopped.success && stopped.runtimeStopped !== true) throw new Error(stopped.error || 'owned runtime stop unconfirmed')
         networkCleanup = stopped.networkCleanup
       }
     } catch (err) {

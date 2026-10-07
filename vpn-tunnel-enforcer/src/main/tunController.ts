@@ -81,6 +81,9 @@ export interface NetworkCleanupReceipt {
 }
 export interface TunStopResult {
   success: boolean
+  // Exit was freshly proved, but a later cleanup step failed. Main may close
+  // the session and retry recovery without treating this as a live runtime.
+  runtimeStopped?: boolean
   error?: string
   warning?: string
   networkCleanup?: NetworkCleanupReceipt
@@ -3931,9 +3934,11 @@ export const tunController = {
         notifyStatus('adapting')
         return { success: true, warning, networkCleanup }
       }
-      notify('warn', 'Защита отключена с предупреждениями', warning, 'vpnDisconnect')
-      notifyStatus('stopped')
-      return { success: true, warning, networkCleanup }
+      const error = `${warning}. Повторите остановку защиты и проверьте диагностику сети.`
+      currentStatus.warning = error
+      notify('error', 'Отключение защиты не завершено', error, 'vpnDisconnect')
+      notifyStatus('error')
+      return { success: false, runtimeStopped: true, error, warning, networkCleanup }
     }
 
     // Cleanup finished — let the leak-detector run again. The next tunnel
