@@ -12,11 +12,7 @@ vi.mock('fs/promises', () => {
 vi.mock('./recoveryManifest', () => ({ recoveryManifestPath: () => 'C:\\fixture\\manifest.json', readRecoveryManifest: vi.fn(async () => null), writeRecoveryManifest: fixture.persist, removeRecoveryManifest: vi.fn() }))
 vi.mock('./recoveryPsWorker', () => ({
   RecoveryWorkerError: class extends Error {},
-  executeRecoveryOperation: vi.fn(async ({op}: {op: string}) => op === 'inspect-physical-adapters' ? JSON.stringify({
-    ifIndex: 17, interfaceGuid: '11111111-1111-1111-1111-111111111111', alias: 'Беспроводная сеть',
-    description: 'MediaTek Wi-Fi', ipv6Enabled: fixture.v6, ipv4Dns: ['77.88.8.7'], ipv4DnsSource: 'static',
-    gateways: ['10.253.112.13'], networkProfiles: [fixture.profile], isCellularOrTethering: false
-  }) : JSON.stringify(['smartNameResolution', 'parallelAandAAAA'].map(tag => ({ tag, exists: false, type: null, data: null }))))
+  executeRecoveryOperation: vi.fn(async () => JSON.stringify(['smartNameResolution', 'parallelAandAAAA'].map(tag => ({ tag, exists: false, type: null, data: null }))))
 }))
 vi.mock('./elevatedPsHelper', () => ({ isElevatedPsHelperRunning: () => true, execElevatedPs: fixture.ps }))
 

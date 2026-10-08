@@ -1,9 +1,7 @@
-/** AT-03-005/006/010: fixed read-only adapter snapshot shared by both transports. */
+/** AT-03-005/006/010: fixed adapter selection; DNS discovery is not a lockdown proof. */
 import { ALL_KNOWN_ALIASES } from './tunAdapter'
 
-export const PHYSICAL_ADAPTER_SNAPSHOT_SCRIPT = `
-$ErrorActionPreference = 'SilentlyContinue'
-$rows = @()
+const PHYSICAL_ADAPTER_SELECTION = `
 $knownAliases = @(${ALL_KNOWN_ALIASES.map(alias => `'${alias.replace(/'/g, "''")}'`).join(',')})
 $adapters = Get-NetAdapter |
   Where-Object {
@@ -12,6 +10,22 @@ $adapters = Get-NetAdapter |
     $_.InterfaceDescription -notmatch 'Wintun|TAP-Windows|Tailscale|WireGuard|Hyper-V|Loopback|vEthernet|VPN|VirtualBox|VMware|Bluetooth' -and
     $_.MacAddress -and $_.MacAddress -ne '00-00-00-00-00-00'
   }
+`
+
+export const PHYSICAL_ADAPTER_DNS_SCRIPT = `
+$ErrorActionPreference = 'Stop'
+${PHYSICAL_ADAPTER_SELECTION}
+$rows = @(foreach ($a in $adapters) {
+  $dns4 = (Get-DnsClientServerAddress -InterfaceAlias $a.Name -AddressFamily IPv4 -ErrorAction Stop).ServerAddresses
+  [pscustomobject]@{ ifIndex = [int]$a.ifIndex; alias = [string]$a.Name; ipv4Dns = @($dns4 | Where-Object { $_ }) }
+})
+$rows | ConvertTo-Json -Compress -Depth 3
+`
+
+export const PHYSICAL_ADAPTER_SNAPSHOT_SCRIPT = `
+$ErrorActionPreference = 'SilentlyContinue'
+$rows = @()
+${PHYSICAL_ADAPTER_SELECTION}
 foreach ($a in $adapters) {
   $bind6 = Get-NetAdapterBinding -InterfaceAlias $a.Name -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue
   $dns4 = (Get-DnsClientServerAddress -InterfaceAlias $a.Name -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses

@@ -3,9 +3,10 @@ import { describe, expect, it } from 'vitest'
 import { execFileSync } from 'node:child_process'
 import { gzipSync } from 'node:zlib'
 import { DNS_POLICY_SNAPSHOT_SCRIPT, recoveryWorkerFunctions, recoveryWorkerScript } from './recoveryPsProtocol'
+import { PHYSICAL_ADAPTER_SNAPSHOT_SCRIPT } from './physicalAdapterSnapshot'
 
 const native = process.platform === 'win32' || Boolean(process.env.VPNTE_PWSH)
-function run(request: unknown, variant = 'trusted'): {value: string; set: number; removed: number; queries: number; order: string[]} {
+function run(request: unknown, variant = 'trusted', fullSnapshot = false): {value: string; set: number; removed: number; queries: number; order: string[]} {
   const serialized = Buffer.from(JSON.stringify(request)).toString('base64')
   const fixture = String.raw`
 $global:variant='${variant}'
@@ -65,20 +66,21 @@ function Get-NetAdapter { [CmdletBinding()]param($Name)
   $a=[pscustomobject]@{Name=$(if($global:variant -eq 'renamed'){'Ethernet 6'}else{'Ethernet 5'});Status=$(if($global:variant -eq 'down'){'Disconnected'}else{'Up'});DriverDescription=$(if($global:variant -eq 'driver'){'Physical NIC'}else{'Wintun Userspace Tunnel'});PnPDeviceID=$(if($global:variant -eq 'pnp'){'ROOT\NIC\x'}else{'SWD\Wintun\fixture'});ifIndex=5;InterfaceGuid=$(if($global:variant -eq 'guid'){'invalid'}else{'00000000-0000-0000-0000-000000000005'})}
   $a;if($global:variant -eq 'duplicate'){$a}
 }
-function Get-NetAdapterBinding { [CmdletBinding()]param($InterfaceAlias,$ComponentID) [pscustomobject]@{Enabled=$true} }
+function Get-NetAdapterBinding { [CmdletBinding()]param($InterfaceAlias,$ComponentID) if($global:variant -eq 'dnsOnly'){throw 'DNS discovery queried bindings'}; [pscustomobject]@{Enabled=$true} }
 function Get-DnsClientServerAddress { [CmdletBinding()]param($InterfaceAlias,$AddressFamily) [pscustomobject]@{ServerAddresses=@('1.1.1.1')} }
 function Get-NetRoute { [CmdletBinding()]param($InterfaceIndex,$DestinationPrefix)
+  if($global:variant -eq 'dnsOnly'){throw 'DNS discovery queried routes'}
   if ($DestinationPrefix -eq '::/0' -and $global:variant -eq 'physicalIpv6Only') { [pscustomobject]@{NextHop='fe80::1'} }
   if ($DestinationPrefix -eq '0.0.0.0/0' -and $global:variant -ne 'physicalIpv6Only') { [pscustomobject]@{NextHop='10.0.0.1'} }
 }
-function Get-NetConnectionProfile { [CmdletBinding()]param($InterfaceIndex) [pscustomobject]@{Name='Office'} }
-function Get-ItemProperty { [CmdletBinding()]param($Path,$Name) [pscustomobject]@{NameServer='1.1.1.1'} }
+function Get-NetConnectionProfile { [CmdletBinding()]param($InterfaceIndex) if($global:variant -eq 'dnsOnly'){throw 'DNS discovery queried profiles'}; [pscustomobject]@{Name='Office'} }
+function Get-ItemProperty { [CmdletBinding()]param($Path,$Name) if($global:variant -eq 'dnsOnly'){throw 'DNS discovery queried registry'}; [pscustomobject]@{NameServer='1.1.1.1'} }
 function Get-NetIPAddress { [CmdletBinding()]param($InterfaceIndex,$AddressFamily)
   [pscustomobject]@{IPAddress=$(if($global:variant -eq 'ip'){'192.168.250.254'}else{'192.168.250.253'});PrefixLength=$(if($global:variant -eq 'prefix'){24}else{30})}
 }
 ${recoveryWorkerFunctions(variant === 'environmentMismatch' ? 'C:\\different-programdata' : process.env.ProgramData || 'C:\\ProgramData')}
 $request=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${serialized}'))|ConvertFrom-Json
-$value=Invoke-RecoveryOperation $request
+$value=${fullSnapshot ? `& { ${PHYSICAL_ADAPTER_SNAPSHOT_SCRIPT} }` : 'Invoke-RecoveryOperation $request'}
 [pscustomobject]@{value=$value;set=$global:sets;removed=$global:removed;queries=$global:queries;order=@($global:steps)}|ConvertTo-Json -Compress
 `
   const env = {...process.env}
@@ -90,20 +92,21 @@ $value=Invoke-RecoveryOperation $request
   return JSON.parse(stdout.replace(/^\uFEFF/,'').trim())
 }
 describe('fixed recovery dispatcher native proof', () => {
-  it.skipIf(!native)('returns the fixed physical adapter identity and DNS baseline without mutations (AT-03-006)', () => {
-    const result = run({ op: 'inspect-physical-adapters' })
-    expect(JSON.parse(result.value)).toMatchObject({ ifIndex: 17, interfaceGuid: '11111111-1111-1111-1111-111111111111', alias: 'Беспроводная сеть',
-      ipv6Enabled: true, ipv4Dns: ['1.1.1.1'], ipv4DnsSource: 'static', gateways: ['10.0.0.1'], networkProfiles: ['Office'], isCellularOrTethering: false })
+  it.skipIf(!native)('reads only the selected adapter DNS without baseline queries or mutations (AT-03-006)', () => {
+    const result = run({ op: 'inspect-physical-dns' }, 'dnsOnly')
+    expect(JSON.parse(result.value)).toEqual({ ifIndex: 17, alias: 'Беспроводная сеть', ipv4Dns: ['1.1.1.1'] })
     expect(result).toMatchObject({ set: 0, removed: 0, queries: 0 })
   }, 20000)
   it.skipIf(!native)('preserves IPv6-only physical uplink classification (AT-03-010)', () => {
-    expect(JSON.parse(run({ op: 'inspect-physical-adapters' }, 'physicalIpv6Only').value)).toMatchObject({ isCellularOrTethering: true })
-    expect(run({ op: 'inspect-physical-adapters' }, 'noPhysicalAdapters').value).toBe('[]')
+    const baseline = JSON.parse(run({ op: 'inspect-physical-dns' }, 'physicalIpv6Only', true).value)
+    expect(baseline).toMatchObject({ interfaceGuid: '11111111-1111-1111-1111-111111111111', ipv6Enabled: true,
+      ipv4Dns: ['1.1.1.1'], ipv4DnsSource: 'static', networkProfiles: ['Office'], isCellularOrTethering: true })
+    expect(run({ op: 'inspect-physical-dns' }, 'noPhysicalAdapters').value).toBe('[]')
   }, 20000)
   it.skipIf(!native).each([
-    { op: 'inspect-physical-adapters', script: 'Get-NetAdapter' },
-    { op: 'inspect-physical-adapters', alias: 'arbitrary' },
-    { op: 'INSPECT-PHYSICAL-ADAPTERS' }
+    { op: 'inspect-physical-dns', script: 'Get-NetAdapter' },
+    { op: 'inspect-physical-dns', alias: 'arbitrary' },
+    { op: 'INSPECT-PHYSICAL-DNS' }
   ])('rejects expanded physical inspection requests: %j (AT-03-012)', request => {
     expect(() => run(request)).toThrow()
   }, 20000)

@@ -1,7 +1,7 @@
 import { recoveryManifestPath, readRecoveryManifest, writeRecoveryManifest, removeRecoveryManifest } from './recoveryManifest'
 import { executeRecoveryOperation, RecoveryWorkerError } from './recoveryPsWorker'
 import { DNS_POLICY_SNAPSHOT_SCRIPT } from './recoveryPsProtocol'
-import { PHYSICAL_ADAPTER_SNAPSHOT_SCRIPT } from './physicalAdapterSnapshot'
+import { PHYSICAL_ADAPTER_DNS_SCRIPT, PHYSICAL_ADAPTER_SNAPSHOT_SCRIPT } from './physicalAdapterSnapshot'
 import { isIP } from 'net'
 /**
  * Hard lockdown of the physical adapter while TUN is up.
@@ -203,7 +203,7 @@ function sanitizeDnsServers(values: unknown): string[] {
   return out
 }
 
-function summarizeDnsSources(adapters: AdapterSnapshot[]): PhysicalAdapterDnsSource[] {
+function summarizeDnsSources(adapters: PhysicalAdapterDnsSource[]): PhysicalAdapterDnsSource[] {
   return adapters
     .map((adapter) => ({
       ifIndex: adapter.ifIndex,
@@ -309,14 +309,8 @@ async function snapshotPhysicalAdapters(): Promise<AdapterSnapshot[]> {
   }
 
   snapshotPromise = (async () => {
-    let stdout: string
-    try {
-      stdout = await executeRecoveryOperation({ op: 'inspect-physical-adapters' }, 20000)
-    } catch (error) {
-      // Only unavailability before dispatch permits another transport.
-      if (!(error instanceof RecoveryWorkerError) || error.code !== 'unavailable') throw error
-      stdout = await runPS(PHYSICAL_ADAPTER_SNAPSHOT_SCRIPT, 20000)
-    }
+  // Full baseline/read-back stays with adapter mutations, never in the ACL queue.
+  const stdout = await runPS(PHYSICAL_ADAPTER_SNAPSHOT_SCRIPT, 20000)
   const text = stdout.trim()
   if (!text || text === 'null') return []
   let parsed: any
@@ -846,24 +840,42 @@ export async function isPhysicalAdapterLockdownApplied(): Promise<boolean> {
 }
 
 let dnsSourcesCache: { value: PhysicalAdapterDnsSource[]; at: number } | null = null
+let dnsSourcesPromise: Promise<PhysicalAdapterDnsSource[]> | null = null
 const DNS_SOURCES_CACHE_MS = 60000
 
 export async function getPhysicalAdapterDnsSources(): Promise<PhysicalAdapterDnsSource[]> {
   if (process.platform !== 'win32') return []
-  // Cache for 60s — adapter DNS sources don't change frequently and the
-  // PowerShell snapshot takes ~1-2s. This is only used for smart-RU split
-  // routing config generation, not for the actual lockdown.
+  // Routing-only cache; never consumed as evidence for lockdown or rollback.
   if (dnsSourcesCache && Date.now() - dnsSourcesCache.at < DNS_SOURCES_CACHE_MS) {
     return dnsSourcesCache.value
   }
+  if (!dnsSourcesPromise) {
+    dnsSourcesPromise = readPhysicalAdapterDnsSources().finally(() => { dnsSourcesPromise = null })
+  }
+  return dnsSourcesPromise
+}
+
+async function readPhysicalAdapterDnsSources(): Promise<PhysicalAdapterDnsSource[]> {
   const manifest = await readManifest()
   if (manifest?.adapters?.length) {
     const result = summarizeDnsSources(manifest.adapters)
     dnsSourcesCache = { value: result, at: Date.now() }
     return result
   }
-  const snapshot = await snapshotPhysicalAdapters()
-  const result = summarizeDnsSources(snapshot)
+  let stdout: string
+  try { stdout = await executeRecoveryOperation({ op: 'inspect-physical-dns' }, 20000) }
+  catch (error) {
+    if (!(error instanceof RecoveryWorkerError) || error.code !== 'unavailable') throw error
+    stdout = await runPS(PHYSICAL_ADAPTER_DNS_SCRIPT, 20000)
+  }
+  const parsed = JSON.parse(stdout.trim() || '[]')
+  const rows = parsed === null ? [] : Array.isArray(parsed) ? parsed : [parsed]
+  if (rows.length > 256 || rows.some((row: any) => !row || !Number.isSafeInteger(row.ifIndex) || row.ifIndex <= 0 ||
+      typeof row.alias !== 'string' || !row.alias || row.alias.length > 256 || /[\x00-\x1f]/.test(row.alias) ||
+      !Array.isArray(row.ipv4Dns) || row.ipv4Dns.some((ip: unknown) => typeof ip !== 'string' || isIP(ip) !== 4))) {
+    throw new Error('Invalid physical adapter DNS snapshot')
+  }
+  const result = summarizeDnsSources(rows.map((row: any) => ({ ifIndex: row.ifIndex, alias: row.alias, ipv4DnsServers: row.ipv4Dns })))
   dnsSourcesCache = { value: result, at: Date.now() }
   return result
 }
