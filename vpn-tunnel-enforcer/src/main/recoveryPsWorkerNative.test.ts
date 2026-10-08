@@ -5,6 +5,24 @@ vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
 import { RecoveryPsWorker } from './recoveryPsWorker'
 
 describe('persistent DNS policy reader native proof', () => {
+  it.skipIf(process.platform !== 'win32')('reads network identity twice without breaking later frames (AT-10-007/AT-03-012)', async () => {
+    const worker = new RecoveryPsWorker(process.env.ProgramData || 'C:\\ProgramData')
+    try {
+      for (let read = 0; read < 2; read++) {
+        const rows = JSON.parse(await worker.execute({ op: 'inspect-network-identity' }, 4000))
+        expect(Array.isArray(rows)).toBe(true)
+        for (const row of rows) {
+          expect(Object.keys(row).sort()).toEqual(['alias', 'gateways', 'guid', 'profiles'])
+          expect(typeof row.alias).toBe('string')
+          expect(typeof row.guid).toBe('string')
+          expect(Array.isArray(row.profiles)).toBe(true)
+          expect(Array.isArray(row.gateways)).toBe(true)
+        }
+        expect(JSON.parse(await worker.execute({ op: 'inspect-dns-policy' }))).toHaveLength(2)
+      }
+    } finally { await worker.stop() }
+    expect(worker.hasExited).toBe(true)
+  }, 20000)
   it.skipIf(process.platform !== 'win32')('returns fresh routing DNS frames without full adapter baselines (AT-03-006)', async () => {
     const worker = new RecoveryPsWorker(process.env.ProgramData || 'C:\\ProgramData')
     try {

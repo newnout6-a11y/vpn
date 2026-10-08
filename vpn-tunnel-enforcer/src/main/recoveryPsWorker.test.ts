@@ -55,7 +55,8 @@ describe('typed recovery worker ownership', () => {
     {op:'quarantine',name:'firewall.json',contentHash:'a'.repeat(64),script:'evil'},
     {op:'inspect-runtime-acl',runtimeDir:'C:\\runtime',script:'Get-Acl'},
     ...['relative', 'C:\\..\\runtime', 'C:\\runtime:stream'].map(runtimeDir => ({op:'inspect-runtime-acl',runtimeDir})),
-    {op:'inspect-physical-dns',script:'Get-NetAdapter'}, {op:'inspect-physical-dns',alias:'Wi-Fi'}, {op:'inspect-physical-adapters'}
+    {op:'inspect-physical-dns',script:'Get-NetAdapter'}, {op:'inspect-physical-dns',alias:'Wi-Fi'}, {op:'inspect-physical-adapters'},
+    {op:'inspect-network-identity',script:'Get-CimInstance'}, {op:'inspect-network-identity',alias:'Wi-Fi'}
   ])('rejects unexpected fields, paths and operations before dispatch: %j', request => {
     expect(() => validateRecoveryRequest(request as any)).toThrow('Invalid')
   })

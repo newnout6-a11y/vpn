@@ -1,9 +1,10 @@
 /** AT-03-012: closed data protocol; no scripts or arbitrary artifact paths. */
 import { runtimeAclWorkerFunction } from './runtimeAclInspection'
 import { PHYSICAL_ADAPTER_DNS_SCRIPT } from './physicalAdapterSnapshot'
+import { ADAPTIVE_NETWORK_IDENTITY_SCRIPT } from './adaptiveNetworkIdentityScript'
 export const RECOVERY_MAX_BYTES = 1024 * 1024
 export type RecoveryRequest =
-  | { op: 'ensure' | 'warmup' | 'inspect-dns-policy' | 'inspect-physical-dns' }
+  | { op: 'ensure' | 'warmup' | 'inspect-dns-policy' | 'inspect-physical-dns' | 'inspect-network-identity' }
   | { op: 'read' | 'binary' | 'remove'; name: string }
   | { op: 'protect'; name: string }
   | { op: 'quarantine'; name: string; contentHash: string }
@@ -12,7 +13,7 @@ export type RecoveryRequest =
 
 export function validateRecoveryRequest(value: RecoveryRequest): void {
   const fields = Object.keys(value).sort().join(',')
-  if (value.op === 'ensure' || value.op === 'warmup' || value.op === 'inspect-dns-policy' || value.op === 'inspect-physical-dns') {
+  if (value.op === 'ensure' || value.op === 'warmup' || value.op === 'inspect-dns-policy' || value.op === 'inspect-physical-dns' || value.op === 'inspect-network-identity') {
     if (fields === 'op') return
   } else if (value.op === 'inspect-tun') {
     if (fields === 'alias,op' && typeof value.alias === 'string' && /^(Ethernet (?:[5-9]|1[0-2])|VPNTE-TUN|awg-tun)$/.test(value.alias)) return
@@ -129,6 +130,9 @@ ${DNS_POLICY_SNAPSHOT_SCRIPT}
 function Read-PhysicalAdapterDns {
 ${PHYSICAL_ADAPTER_DNS_SCRIPT}
 }
+function Read-AdaptiveNetworkIdentity {
+${ADAPTIVE_NETWORK_IDENTITY_SCRIPT}
+}
 function Read-OwnedRuntimeStatus([string]$runtimeDir) {
 ${OWNED_RUNTIME_STATUS_QUERY_SCRIPT}
 }
@@ -173,7 +177,7 @@ function Assert-RecoveryDirectories($root, [bool]$create) {
   return $true
 }
 function Invoke-RecoveryOperation($request) {
-  if ($request.op -isnot [string] -or @('warmup','inspect-tun','inspect-runtime','inspect-runtime-acl','stop-runtime','inspect-dns-policy','inspect-physical-dns','ensure','read','binary','remove','protect','quarantine') -cnotcontains $request.op) { throw 'Unknown recovery worker operation' }
+  if ($request.op -isnot [string] -or @('warmup','inspect-tun','inspect-runtime','inspect-runtime-acl','stop-runtime','inspect-dns-policy','inspect-physical-dns','inspect-network-identity','ensure','read','binary','remove','protect','quarantine') -cnotcontains $request.op) { throw 'Unknown recovery worker operation' }
   $fields = @($request.PSObject.Properties.Name | Sort-Object) -join ','
   switch -Exact ($request.op) {
     { $_ -cin @('inspect-runtime','inspect-runtime-acl','stop-runtime') } {
@@ -193,6 +197,10 @@ function Invoke-RecoveryOperation($request) {
       $snapshot = Read-PhysicalAdapterDns
       if ($null -eq $snapshot) { return '[]' }
       return $snapshot
+    }
+    'inspect-network-identity' {
+      if ($fields -cne 'op') { throw 'Invalid recovery worker fields' }
+      return (Read-AdaptiveNetworkIdentity)
     }
     'warmup' {
       if ($fields -ne 'op') { throw 'Invalid recovery worker fields' }

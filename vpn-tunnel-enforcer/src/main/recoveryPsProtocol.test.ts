@@ -104,6 +104,9 @@ describe('fixed recovery dispatcher native proof', () => {
     expect(run({ op: 'inspect-physical-dns' }, 'noPhysicalAdapters').value).toBe('[]')
   }, 20000)
   it.skipIf(!native).each([
+    { op: 'inspect-network-identity', script: 'Get-CimInstance' },
+    { op: 'inspect-network-identity', alias: 'arbitrary' },
+    { op: 'INSPECT-NETWORK-IDENTITY' },
     { op: 'inspect-physical-dns', script: 'Get-NetAdapter' },
     { op: 'inspect-physical-dns', alias: 'arbitrary' },
     { op: 'INSPECT-PHYSICAL-DNS' }
