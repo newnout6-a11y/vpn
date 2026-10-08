@@ -52,7 +52,9 @@ describe('typed recovery worker ownership', () => {
     {op:'ensure',script:'Get-Item'}, {op:'protect',name:'firewall.json'}, {op:'read',name:'../x'},
     {op:'read',name:'a\\b'}, {op:'read',name:'x',path:'C:\\x'}, {op:'inspect-tun',alias:'Ethernet 5;evil'}, {op:'unknown'},
     {op:'quarantine',name:'../firewall.json',contentHash:'a'.repeat(64)}, {op:'quarantine',name:'firewall.json',contentHash:'evil'},
-    {op:'quarantine',name:'firewall.json',contentHash:'a'.repeat(64),script:'evil'}
+    {op:'quarantine',name:'firewall.json',contentHash:'a'.repeat(64),script:'evil'},
+    {op:'inspect-runtime-acl',runtimeDir:'C:\\runtime',script:'Get-Acl'},
+    ...['relative', 'C:\\..\\runtime', 'C:\\runtime:stream'].map(runtimeDir => ({op:'inspect-runtime-acl',runtimeDir}))
   ])('rejects unexpected fields, paths and operations before dispatch: %j', request => {
     expect(() => validateRecoveryRequest(request as any)).toThrow('Invalid')
   })

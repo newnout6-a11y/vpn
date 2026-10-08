@@ -42,13 +42,14 @@ function Get-Item { [CmdletBinding()]param($LiteralPath,[switch]$Force)
   $isFile=$LiteralPath -like '*.json' -or $LiteralPath -like '*tmp-*'
   $parent=$LiteralPath -eq [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
   $reparse=($global:variant -eq 'parentReparse' -and $parent) -or ($global:variant -eq 'directoryReparse' -and -not $isFile -and -not $parent) -or ($global:variant -eq 'fileReparse' -and $isFile)
-  [pscustomobject]@{PSIsContainer=((-not $isFile) -or ($global:variant -eq 'fileType' -and $isFile));Attributes=$(if($reparse){[IO.FileAttributes]::ReparsePoint}else{[IO.FileAttributes]::Normal});Length=$(if($global:variant -eq 'oversized' -and $isFile){1048577}else{10})}
+  [pscustomobject]@{FullName=$LiteralPath;PSIsContainer=((-not $isFile) -or ($global:variant -eq 'fileType' -and $isFile));Attributes=$(if($reparse){[IO.FileAttributes]::ReparsePoint}else{[IO.FileAttributes]::Normal});Length=$(if($global:variant -eq 'oversized' -and $isFile){1048577}else{10})}
 }
+function Get-ChildItem { [CmdletBinding()]param($LiteralPath,[switch]$Force) }
 function Get-Acl { [CmdletBinding()]param($LiteralPath)
   $isFile=$LiteralPath -like '*.json' -or $LiteralPath -like '*tmp-*'
-  $acl=[pscustomobject]@{IsFile=$isFile;AreAccessRulesProtected=($global:variant -ne 'unprotected' -and -not ($global:variant -eq 'postUnprotected' -and $global:sets -gt 0))}
+  $acl=[pscustomobject]@{Path=$LiteralPath;IsFile=$isFile;AreAccessRulesProtected=($global:variant -ne 'unprotected' -and -not ($global:variant -eq 'postUnprotected' -and $global:sets -gt 0))}
   $acl|Add-Member ScriptMethod GetOwner {param($type) [pscustomobject]@{Value=$(if($global:variant -eq 'owner' -or ($global:variant -eq 'fileOwner' -and $this.IsFile)){'S-1-5-32-545'}else{'S-1-5-32-544'})} }
-  $acl|Add-Member ScriptMethod GetAccessRules {param($a,$b,$c) [pscustomobject]@{AccessControlType='Allow';IdentityReference=[pscustomobject]@{Value=$(if($global:variant -eq 'ace'){'S-1-5-32-545'}else{'S-1-5-18'})}} }
+  $acl|Add-Member ScriptMethod GetAccessRules {param($a,$b,$c) [pscustomobject]@{FileSystemRights=[Security.AccessControl.FileSystemRights]::FullControl;PropagationFlags=[Security.AccessControl.PropagationFlags]::None;AccessControlType='Allow';IdentityReference=[pscustomobject]@{Value=$(if($global:variant -eq 'ace' -or ($global:variant -eq 'aclParentAccess' -and $this.Path -eq [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData))){'S-1-5-32-545'}else{'S-1-5-18'})}} }
   $acl
 }
 function Get-Content { [CmdletBinding()]param($LiteralPath,[switch]$Raw,$Encoding) return ([pscustomobject]@{owner='VPNTE';text='сеть'}|ConvertTo-Json -Compress) }
@@ -74,6 +75,26 @@ $value=Invoke-RecoveryOperation $request
   return JSON.parse(stdout.replace(/^\uFEFF/,'').trim())
 }
 describe('fixed recovery dispatcher native proof', () => {
+  it.skipIf(!native)('returns the complete runtime ACL namespace proof without mutations (AT-01-009)', () => {
+    const result = run({ op: 'inspect-runtime-acl', runtimeDir: 'C:\\ProgramData\\VPNTE-fixture-runtime' })
+    expect(JSON.parse(result.value)).toMatchObject({ path: 'C:\\ProgramData\\VPNTE-fixture-runtime', owner: 'S-1-5-32-544', protected: true,
+      ancestorsInspected: true, childrenInspected: true, children: [] })
+    expect(JSON.parse(result.value).ancestors.map((a: {path: string}) => a.path)).toEqual(['C:\\', 'C:\\ProgramData'])
+    expect(result).toMatchObject({ set: 0, removed: 0, queries: 0 })
+  }, 20000)
+  it.skipIf(!native)('refuses a writable runtime parent at the native boundary (AT-01-009)', () => {
+    const result = run({ op: 'inspect-runtime-acl', runtimeDir: 'C:\\ProgramData\\VPNTE-fixture-runtime' }, 'aclParentAccess')
+    expect(JSON.parse(result.value.slice('VPNTE_RUNTIME_FAILURE:'.length))).toMatchObject({
+      operation: 'validate-acl', path: 'C:\\ProgramData', reason: 'RuntimeNamespaceUntrustedAccess' })
+    expect(result).toMatchObject({ set: 0, removed: 0, queries: 0 })
+  }, 20000)
+  it.skipIf(!native).each([
+    { op: 'inspect-runtime-acl', runtimeDir: 'C:\\runtime', script: 'Get-Acl' },
+    { op: 'inspect-runtime-acl', runtimeDir: 'C:\\..\\runtime' },
+    { op: 'inspect-runtime-acl', runtimeDir: 'C:\\runtime:stream' }
+  ])('rejects expanded ACL inspection requests: %j (AT-03-012)', request => {
+    expect(() => run(request)).toThrow()
+  }, 20000)
   it.skipIf(!native)('waits for sing-box before stopping Xray even when CIM lists the upstream first (AT-02-009)', () => {
     const result = run({ op: 'stop-runtime', runtimeDir: 'C:\\VPNTE-fixture-runtime' }, 'upstreamFirst')
     expect(result.order).toEqual(['stop:1', 'wait:1', 'stop:2'])

@@ -1,4 +1,5 @@
 /** AT-03-012: closed data protocol; no scripts or arbitrary artifact paths. */
+import { runtimeAclWorkerFunction } from './runtimeAclInspection'
 export const RECOVERY_MAX_BYTES = 1024 * 1024
 export type RecoveryRequest =
   | { op: 'ensure' | 'warmup' | 'inspect-dns-policy' }
@@ -6,7 +7,7 @@ export type RecoveryRequest =
   | { op: 'protect'; name: string }
   | { op: 'quarantine'; name: string; contentHash: string }
   | { op: 'inspect-tun'; alias: string }
-  | { op: 'inspect-runtime' | 'stop-runtime'; runtimeDir: string }
+  | { op: 'inspect-runtime' | 'inspect-runtime-acl' | 'stop-runtime'; runtimeDir: string }
 
 export function validateRecoveryRequest(value: RecoveryRequest): void {
   const fields = Object.keys(value).sort().join(',')
@@ -14,7 +15,7 @@ export function validateRecoveryRequest(value: RecoveryRequest): void {
     if (fields === 'op') return
   } else if (value.op === 'inspect-tun') {
     if (fields === 'alias,op' && typeof value.alias === 'string' && /^(Ethernet (?:[5-9]|1[0-2])|VPNTE-TUN|awg-tun)$/.test(value.alias)) return
-  } else if (value.op === 'inspect-runtime' || value.op === 'stop-runtime') {
+  } else if (value.op === 'inspect-runtime' || value.op === 'inspect-runtime-acl' || value.op === 'stop-runtime') {
     if (fields === 'op,runtimeDir' && typeof value.runtimeDir === 'string' && value.runtimeDir.length <= 2048 &&
         /^[a-z]:\\/i.test(value.runtimeDir) && !/[\x00-\x1f"/]/.test(value.runtimeDir) &&
         !value.runtimeDir.slice(2).includes(':') && !value.runtimeDir.split('\\').some(part => part === '..' || part === '.')) return
@@ -120,6 +121,7 @@ export function recoveryWorkerFunctions(programData: string): string {
   const literal = `'${programData.replace(/'/g, "''")}'`
   return String.raw`
 $expectedProgramData=${literal}
+${runtimeAclWorkerFunction(programData)}
 function Read-DnsPolicySnapshot {
 ${DNS_POLICY_SNAPSHOT_SCRIPT}
 }
@@ -167,14 +169,15 @@ function Assert-RecoveryDirectories($root, [bool]$create) {
   return $true
 }
 function Invoke-RecoveryOperation($request) {
-  if ($request.op -isnot [string] -or @('warmup','inspect-tun','inspect-runtime','stop-runtime','inspect-dns-policy','ensure','read','binary','remove','protect','quarantine') -cnotcontains $request.op) { throw 'Unknown recovery worker operation' }
+  if ($request.op -isnot [string] -or @('warmup','inspect-tun','inspect-runtime','inspect-runtime-acl','stop-runtime','inspect-dns-policy','ensure','read','binary','remove','protect','quarantine') -cnotcontains $request.op) { throw 'Unknown recovery worker operation' }
   $fields = @($request.PSObject.Properties.Name | Sort-Object) -join ','
   switch -Exact ($request.op) {
-    { $_ -cin @('inspect-runtime','stop-runtime') } {
+    { $_ -cin @('inspect-runtime','inspect-runtime-acl','stop-runtime') } {
       if ($fields -cne 'op,runtimeDir' -or $request.runtimeDir -isnot [string] -or $request.runtimeDir.Length -gt 2048 -or
           $request.runtimeDir -notmatch '^[a-z]:\\' -or $request.runtimeDir -match '[\x00-\x1f"/]' -or
           $request.runtimeDir.Substring(2).Contains(':') -or @($request.runtimeDir.Split([char]92) | Where-Object { $_ -ceq '..' -or $_ -ceq '.' }).Count) { throw 'Invalid runtime observation directory' }
       if ($request.op -ceq 'stop-runtime') { return (Stop-OwnedRuntime $request.runtimeDir) }
+      if ($request.op -ceq 'inspect-runtime-acl') { return (Read-RuntimeAclSnapshot $request.runtimeDir) }
       return (Read-OwnedRuntimeStatus $request.runtimeDir)
     }
     'inspect-dns-policy' {
@@ -183,6 +186,7 @@ function Invoke-RecoveryOperation($request) {
     }
     'warmup' {
       if ($fields -ne 'op') { throw 'Invalid recovery worker fields' }
+      Import-Module -Name (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1') -ErrorAction Stop
       Import-Module NetAdapter,NetTCPIP -ErrorAction Stop
       return 'RECOVERY_MODULES_READY'
     }

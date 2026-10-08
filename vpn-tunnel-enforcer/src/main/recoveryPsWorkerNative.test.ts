@@ -5,6 +5,18 @@ vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
 import { RecoveryPsWorker } from './recoveryPsWorker'
 
 describe('persistent DNS policy reader native proof', () => {
+  it.skipIf(process.platform !== 'win32')('keeps frames synchronized after a fresh ACL refusal (AT-01-009/AT-03-012)', async () => {
+    const worker = new RecoveryPsWorker('C:\\VPNTE-invalid-programdata')
+    try {
+      for (let read = 0; read < 2; read++) {
+        const value = await worker.execute({ op: 'inspect-runtime-acl', runtimeDir: 'C:\\VPNTE-never-created-fixture' })
+        expect(value).toMatch(/^VPNTE_RUNTIME_FAILURE:/)
+        expect(JSON.parse(value.slice('VPNTE_RUNTIME_FAILURE:'.length))).toMatchObject({ operation: 'known-folder', reason: 'RuntimeProgramDataMismatch' })
+        expect(JSON.parse(await worker.execute({ op: 'inspect-dns-policy' }))).toHaveLength(2)
+      }
+    } finally { await worker.stop() }
+    expect(worker.hasExited).toBe(true)
+  }, 25000)
   it.skipIf(process.platform !== 'win32')('returns complete fresh frames and confirms worker exit', async () => {
     const worker = new RecoveryPsWorker(process.env.ProgramData || 'C:\\ProgramData')
     try {

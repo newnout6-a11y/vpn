@@ -1,7 +1,7 @@
 // AT-01-009, F-002/F-104: root DACL is insufficient without a stable namespace.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { win32 } from 'path'
-const mocks = vi.hoisted(() => ({ read: vi.fn(), write: vi.fn(), elevated: vi.fn(), log: vi.fn() }))
+const mocks = vi.hoisted(() => ({ read: vi.fn(), write: vi.fn(), elevated: vi.fn(), log: vi.fn(), worker: vi.fn() }))
 vi.mock('child_process', () => {
   const execFile = vi.fn()
   ;(execFile as any)[Symbol.for('nodejs.util.promisify.custom')] = mocks.read
@@ -9,6 +9,7 @@ vi.mock('child_process', () => {
 })
 vi.mock('./admin', () => ({ execElevated: mocks.write, isProcessElevated: mocks.elevated }))
 vi.mock('./appLogger', () => ({ logEvent: mocks.log }))
+vi.mock('./recoveryPsWorker', () => ({ executeRecoveryOperation: mocks.worker }))
 import { ensureElevatedRuntimeDirHardened, resetRuntimeDirHardeningCache, verifyDirectoryHardened } from './runtimeDirSecurity'
 const SYSTEM = 'S-1-5-18', ADMINS = 'S-1-5-32-544', USER = 'S-1-5-21-1-2-3-1001'
 const TI = 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
@@ -37,10 +38,41 @@ beforeEach(() => {
   vi.clearAllMocks(); resetRuntimeDirHardeningCache()
   mocks.elevated.mockResolvedValue(true)
   mocks.write.mockResolvedValue({ stdout: 'HARDENED', stderr: '' })
+  mocks.worker.mockRejectedValue(Object.assign(new Error('Unavailable before dispatch'), { code: 'unavailable' }))
   reply()
 })
 afterEach(() => vi.unstubAllEnvs())
 describe('verified runtime tree and namespace', () => {
+  it('reads fresh worker ACLs on every attempt and refuses a changed parent (AT-01-009)', async () => {
+    mocks.worker.mockResolvedValueOnce(JSON.stringify(proof()))
+    const changed = proof(); changed.ancestors[1].rules.push(ace(USER, 0x40))
+    mocks.worker.mockResolvedValueOnce(JSON.stringify(changed))
+    expect((await verifyDirectoryHardened(DIR)).hardened).toBe(true)
+    expect((await verifyDirectoryHardened(DIR)).hardened).toBe(false)
+    expect(mocks.worker).toHaveBeenCalledTimes(2)
+    expect(mocks.worker).toHaveBeenCalledWith({ op: 'inspect-runtime-acl', runtimeDir: DIR }, 15000)
+    expect(mocks.read).not.toHaveBeenCalled()
+    expect(mocks.write).not.toHaveBeenCalled()
+  })
+  it('preserves a worker namespace refusal without retrying in another process (AT-01-009)', async () => {
+    mocks.worker.mockResolvedValue(receipt(diagnostic('RuntimeNamespaceUntrustedAccess')))
+    const result = await verifyDirectoryHardened(DIR)
+    expect(result).toMatchObject({ hardened: false, refusalCode: 'namespace-untrusted',
+      diagnostic: { operation: 'validate-acl', path: 'C:\\ProgramData\\VPNTE', reason: 'RuntimeNamespaceUntrustedAccess' } })
+    expect(mocks.read).not.toHaveBeenCalled()
+  })
+  it.each(['closed', 'busy', 'timeout', 'exited', 'protocol', 'rejected'])('does not fall back after worker %s (AT-03-012)', async code => {
+    mocks.worker.mockRejectedValue(Object.assign(new Error('Worker refused'), { code }))
+    expect((await verifyDirectoryHardened(DIR)).hardened).toBe(false)
+    expect(mocks.read).not.toHaveBeenCalled()
+    expect(mocks.write).not.toHaveBeenCalled()
+  })
+  it('refuses incomplete worker tree proof without falling back (AT-01-009)', async () => {
+    const incomplete: any = proof(); delete incomplete.childrenInspected
+    mocks.worker.mockResolvedValue(JSON.stringify(incomplete))
+    expect((await verifyDirectoryHardened(DIR)).hardened).toBe(false)
+    expect(mocks.read).not.toHaveBeenCalled()
+  })
   it('accepts a complete protected tree under an admin-owned parent chain', async () => {
     expect((await verifyDirectoryHardened(DIR)).hardened).toBe(true)
     expect(mocks.write).not.toHaveBeenCalled()
