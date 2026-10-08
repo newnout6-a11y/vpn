@@ -16,6 +16,7 @@ export class ConnectionLifecycle {
   constructor(private readonly cancelControllerStartup: () => void) {}
 
   get starting(): boolean { return this.startup !== null }
+  get busy(): boolean { return this.closed || this.startup !== null || this.stopping !== null }
 
   async start<T>(effect: (owner: ConnectionStartupOwner) => Promise<T>): Promise<T | RejectedConnection> {
     if (this.closed || this.stopping) return { success: false, error: 'Остановка защиты ещё выполняется — подождите' }

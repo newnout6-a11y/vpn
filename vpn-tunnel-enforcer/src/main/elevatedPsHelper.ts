@@ -160,12 +160,21 @@ const HELPER_WARMUP_COMMANDS: ReadonlyArray<{ policy: ElevatedPsPolicy; script: 
 ]
 
 /** Prepare this helper only; query results are discarded, never reused as evidence. */
-export async function warmElevatedPsHelper(): Promise<void> {
+export async function warmElevatedPsHelper(shouldDefer: () => boolean = () => false): Promise<void> {
   const owner = helperProcess
   if (!owner || !isElevatedPsHelperRunning()) return
   for (const command of HELPER_WARMUP_COMMANDS) {
-    // Do not restart a stopped helper or warm a replacement during shutdown.
-    if (helperProcess !== owner || !isElevatedPsHelperRunning() || pendingCommands.size > 0) break
+    const module = command.script.match(/^Import-Module (\w+)/)![1]
+    let deferred = false
+    for (;;) {
+      // Never restart this helper or dispatch into its replacement.
+      if (helperProcess !== owner || !isElevatedPsHelperRunning()) return
+      if (pendingCommands.size === 0 && !shouldDefer()) break
+      if (!deferred) logEvent('debug', 'ps-helper', 'warm-up deferred', { module })
+      deferred = true
+      await new Promise<void>(done => { setTimeout(done, 100).unref?.() })
+    }
+    if (deferred) logEvent('debug', 'ps-helper', 'warm-up resumed', { module })
     const started = performance.now()
     let outcome = 'failed'
     try {
@@ -175,7 +184,7 @@ export async function warmElevatedPsHelper(): Promise<void> {
     } catch {
       logEvent('warn', 'ps-helper', 'fixed read-only warm-up unavailable', { policy: command.policy })
     } finally {
-      logEvent('debug', 'ps-helper', 'warm-up timing', { policy: command.policy, outcome,
+      logEvent('debug', 'ps-helper', 'warm-up timing', { policy: command.policy, module, outcome,
         durationMs: Math.round(performance.now() - started) })
     }
   }

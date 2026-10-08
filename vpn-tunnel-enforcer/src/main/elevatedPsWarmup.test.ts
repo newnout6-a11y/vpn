@@ -2,12 +2,13 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import ts from 'typescript'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 vi.mock('./admin', () => ({ isProcessElevated: vi.fn(async () => false) }))
 vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
 const source = readFileSync(join(process.cwd(), 'src/main/elevatedPsHelper.ts'), 'utf8')
 const ast = ts.createSourceFile('elevatedPsHelper.ts', source, ts.ScriptTarget.Latest, true)
 const success = { stdout: '', stderr: '', exitCode: 0 }
+afterEach(() => vi.useRealTimers())
 function harness() {
   const fn = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'warmElevatedPsHelper')
   const commands = ast.statements.find(node => ts.isVariableStatement(node) && node.declarationList.declarations.some(decl => decl.name.getText(ast) === 'HELPER_WARMUP_COMMANDS'))
@@ -45,10 +46,17 @@ describe('same helper fixed read-only warm-up', () => {
     }
     expect(h.logEvent.mock.calls.filter((call: unknown[]) => call[2] === 'warm-up timing')).toHaveLength(5)
   })
-  it('skips optional warm-up when a native command is already admitted (AT-02-005)', async () => {
+  it('resumes after admitted native work drains instead of abandoning all imports (AT-02-005)', async () => {
+    vi.useFakeTimers()
     const h = harness(); h.pendingCommands.set(1, {})
-    await h.warm()
+    const pending = h.warm()
+    await vi.advanceTimersByTimeAsync(500)
     expect(h.execElevatedPs).not.toHaveBeenCalled()
+    h.pendingCommands.clear()
+    await vi.advanceTimersByTimeAsync(100)
+    await pending
+    expect(h.execElevatedPs).toHaveBeenCalledTimes(5)
+    expect(vi.getTimerCount()).toBe(0)
   })
   it('does not start a missing helper', async () => {
     const h = harness(); h.setOwner(null)
@@ -56,11 +64,39 @@ describe('same helper fixed read-only warm-up', () => {
     expect(h.execElevatedPs).not.toHaveBeenCalled()
   })
   it('yields between module imports when a connect command arrives (AT-02-005)', async () => {
+    vi.useFakeTimers()
     const h = harness()
     h.execElevatedPs.mockImplementationOnce(async () => success)
     h.execElevatedPs.mockImplementationOnce(async () => { h.pendingCommands.set(99, {}); return success })
-    await h.warm()
+    const pending = h.warm()
+    await vi.advanceTimersByTimeAsync(300)
     expect(h.execElevatedPs).toHaveBeenCalledTimes(2)
+    h.pendingCommands.clear()
+    await vi.advanceTimersByTimeAsync(100)
+    await pending
+    expect(h.execElevatedPs.mock.calls.map((call: unknown[]) => call[0])).toEqual(h.commands.map((command: { script: string }) => command.script))
+    expect(vi.getTimerCount()).toBe(0)
+  })
+  it('defers during a whole connection or cancellation even when its native queue is empty (AT-02-005)', async () => {
+    vi.useFakeTimers()
+    const h = harness(); let busy = true
+    const pending = h.warm(() => busy)
+    await vi.advanceTimersByTimeAsync(500)
+    expect(h.execElevatedPs).not.toHaveBeenCalled()
+    busy = false
+    await vi.advanceTimersByTimeAsync(100)
+    await pending
+    expect(h.execElevatedPs).toHaveBeenCalledTimes(5)
+  })
+  it.each([null, {}])('drops deferred warm-up when its original helper is stopped/replaced: %j (AT-03-007)', async owner => {
+    vi.useFakeTimers()
+    const h = harness(); h.pendingCommands.set(1, {})
+    const pending = h.warm()
+    h.setOwner(owner)
+    await vi.advanceTimersByTimeAsync(100)
+    await pending
+    expect(h.execElevatedPs).not.toHaveBeenCalled()
+    expect(vi.getTimerCount()).toBe(0)
   })
   it('does not dispatch into a stopped helper', async () => {
     const h = harness(); h.isElevatedPsHelperRunning.mockReturnValue(false)
@@ -86,13 +122,15 @@ describe('same helper fixed read-only warm-up', () => {
 })
 
 describe('app preparation order', () => {
-  function appStage() {
+  function appStage(guards: Record<string, boolean> = {}) {
     const appSource = readFileSync(join(process.cwd(), 'src/main/index.ts'), 'utf8')
     const begin = appSource.indexOf('const helperStartup = startElevatedPsHelper()')
     const end = appSource.indexOf('createWindow()', begin)
     if (begin < 0 || end < 0) throw new Error('Production helper/recovery preparation stage not found')
     const deps = { startElevatedPsHelper: vi.fn(async () => {}), performCrashRecovery: vi.fn(async () => {}),
-      warmElevatedPsHelper: vi.fn(async () => {}), warmRecoveryPsWorker: vi.fn(), logEvent: vi.fn() }
+      warmElevatedPsHelper: vi.fn(async () => {}), warmRecoveryPsWorker: vi.fn(), logEvent: vi.fn(),
+      connectionLifecycle: { busy: Boolean(guards.busy) }, tunController: { getStatus: () => ({ running: Boolean(guards.running) }) },
+      isQuitting: Boolean(guards.isQuitting), shutdownInProgress: Boolean(guards.shutdownInProgress) }
     const run = new Function(...Object.keys(deps), 'return async () => {' + appSource.slice(begin, end) + '}')(...Object.values(deps))
     return { ...deps, run }
   }
@@ -116,5 +154,20 @@ describe('app preparation order', () => {
     await Promise.resolve()
     expect(h.warmElevatedPsHelper).toHaveBeenCalledOnce()
     finish()
+  })
+  it.each(['busy', 'running', 'isQuitting', 'shutdownInProgress'])('pauses helper preparation for %s (AT-02-005)', async guard => {
+    const h = appStage({ [guard]: true })
+    await h.run()
+    await Promise.resolve()
+    const shouldDefer = (h.warmElevatedPsHelper.mock.calls[0] as unknown[])[0] as () => boolean
+    expect(shouldDefer()).toBe(true)
+  })
+  it('allows helper preparation after a full connection lifecycle settles', async () => {
+    const h = appStage({ busy: true })
+    await h.run()
+    await Promise.resolve()
+    const shouldDefer = (h.warmElevatedPsHelper.mock.calls[0] as unknown[])[0] as () => boolean
+    h.connectionLifecycle.busy = false
+    expect(shouldDefer()).toBe(false)
   })
 })

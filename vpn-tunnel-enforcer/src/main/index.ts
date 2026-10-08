@@ -1831,7 +1831,8 @@ app.whenReady().then(async () => {
   )
 
   // Recovery gets priority. Warm the actual helper without caching network state.
-  void helperStartup.then(() => warmElevatedPsHelper())
+  void helperStartup.then(() => warmElevatedPsHelper(() =>
+    isQuitting || shutdownInProgress || connectionLifecycle.busy || tunController.getStatus().running))
   // Only module loading; every connect still reads fresh ownership/ACL evidence.
   void warmRecoveryPsWorker()
 
