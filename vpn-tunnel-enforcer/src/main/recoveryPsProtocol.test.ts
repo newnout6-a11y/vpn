@@ -1,6 +1,7 @@
 // AT-03-003/006/007/012: actual dispatcher with fake cmdlets, no system writes.
 import { describe, expect, it } from 'vitest'
 import { execFileSync } from 'node:child_process'
+import { gzipSync } from 'node:zlib'
 import { DNS_POLICY_SNAPSHOT_SCRIPT, recoveryWorkerFunctions, recoveryWorkerScript } from './recoveryPsProtocol'
 
 const native = process.platform === 'win32' || Boolean(process.env.VPNTE_PWSH)
@@ -56,9 +57,22 @@ function Get-Content { [CmdletBinding()]param($LiteralPath,[switch]$Raw,$Encodin
 function Remove-Item { [CmdletBinding()]param($LiteralPath,[switch]$Force) $global:removed++;if($global:variant -eq 'removeError'){throw 'Fixture remove failure'} }
 function Set-Acl { [CmdletBinding()]param($LiteralPath,$AclObject) $global:sets++;if($global:variant -eq 'setError'){throw 'Fixture ACL failure'} }
 function Get-NetAdapter { [CmdletBinding()]param($Name)
+  if (-not $Name) {
+    if ($global:variant -eq 'noPhysicalAdapters') { return }
+    [pscustomobject]@{Name='Беспроводная сеть';Status='Up';InterfaceDescription='MediaTek Wi-Fi';MacAddress='00-11-22-33-44-55';ifIndex=17;InterfaceGuid='11111111-1111-1111-1111-111111111111';MediaType='802.11';PhysicalMediaType='Native802_11'}
+    return
+  }
   $a=[pscustomobject]@{Name=$(if($global:variant -eq 'renamed'){'Ethernet 6'}else{'Ethernet 5'});Status=$(if($global:variant -eq 'down'){'Disconnected'}else{'Up'});DriverDescription=$(if($global:variant -eq 'driver'){'Physical NIC'}else{'Wintun Userspace Tunnel'});PnPDeviceID=$(if($global:variant -eq 'pnp'){'ROOT\NIC\x'}else{'SWD\Wintun\fixture'});ifIndex=5;InterfaceGuid=$(if($global:variant -eq 'guid'){'invalid'}else{'00000000-0000-0000-0000-000000000005'})}
   $a;if($global:variant -eq 'duplicate'){$a}
 }
+function Get-NetAdapterBinding { [CmdletBinding()]param($InterfaceAlias,$ComponentID) [pscustomobject]@{Enabled=$true} }
+function Get-DnsClientServerAddress { [CmdletBinding()]param($InterfaceAlias,$AddressFamily) [pscustomobject]@{ServerAddresses=@('1.1.1.1')} }
+function Get-NetRoute { [CmdletBinding()]param($InterfaceIndex,$DestinationPrefix)
+  if ($DestinationPrefix -eq '::/0' -and $global:variant -eq 'physicalIpv6Only') { [pscustomobject]@{NextHop='fe80::1'} }
+  if ($DestinationPrefix -eq '0.0.0.0/0' -and $global:variant -ne 'physicalIpv6Only') { [pscustomobject]@{NextHop='10.0.0.1'} }
+}
+function Get-NetConnectionProfile { [CmdletBinding()]param($InterfaceIndex) [pscustomobject]@{Name='Office'} }
+function Get-ItemProperty { [CmdletBinding()]param($Path,$Name) [pscustomobject]@{NameServer='1.1.1.1'} }
 function Get-NetIPAddress { [CmdletBinding()]param($InterfaceIndex,$AddressFamily)
   [pscustomobject]@{IPAddress=$(if($global:variant -eq 'ip'){'192.168.250.254'}else{'192.168.250.253'});PrefixLength=$(if($global:variant -eq 'prefix'){24}else{30})}
 }
@@ -69,12 +83,30 @@ $value=Invoke-RecoveryOperation $request
 `
   const env = {...process.env}
   for(const key of Object.keys(env))if(key.toLowerCase()==='psmodulepath')delete env[key]
-  // Direct argv (no cmd.exe); keep the growing fake-cmdlet fixture below the
-  // CreateProcess limit instead of inflating it with UTF-16/base64 encoding.
-  const stdout=execFileSync(process.env.VPNTE_PWSH || 'powershell.exe', ['-NoProfile','-NonInteractive','-Command',"$ErrorActionPreference='Stop';[Console]::OutputEncoding=[Text.Encoding]::UTF8;"+fixture], {env,timeout:15000,encoding:'utf8',stdio:['ignore','pipe','pipe']})
+  // Compress fixed test source, as the production worker does, to fit CreateProcess.
+  const compressed=gzipSync(Buffer.from("$ErrorActionPreference='Stop';[Console]::OutputEncoding=[Text.Encoding]::UTF8;"+fixture)).toString('base64')
+  const launcher=`$stream=New-Object IO.MemoryStream(,[Convert]::FromBase64String('${compressed}'));$gzip=New-Object IO.Compression.GZipStream($stream,[IO.Compression.CompressionMode]::Decompress);$reader=New-Object IO.StreamReader($gzip,[Text.Encoding]::UTF8);try{$source=$reader.ReadToEnd()}finally{$reader.Dispose();$gzip.Dispose();$stream.Dispose()}; & ([ScriptBlock]::Create($source))`
+  const stdout=execFileSync(process.env.VPNTE_PWSH || 'powershell.exe', ['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(launcher,'utf16le').toString('base64')], {env,timeout:15000,encoding:'utf8',stdio:['ignore','pipe','pipe']})
   return JSON.parse(stdout.replace(/^\uFEFF/,'').trim())
 }
 describe('fixed recovery dispatcher native proof', () => {
+  it.skipIf(!native)('returns the fixed physical adapter identity and DNS baseline without mutations (AT-03-006)', () => {
+    const result = run({ op: 'inspect-physical-adapters' })
+    expect(JSON.parse(result.value)).toMatchObject({ ifIndex: 17, interfaceGuid: '11111111-1111-1111-1111-111111111111', alias: 'Беспроводная сеть',
+      ipv6Enabled: true, ipv4Dns: ['1.1.1.1'], ipv4DnsSource: 'static', gateways: ['10.0.0.1'], networkProfiles: ['Office'], isCellularOrTethering: false })
+    expect(result).toMatchObject({ set: 0, removed: 0, queries: 0 })
+  }, 20000)
+  it.skipIf(!native)('preserves IPv6-only physical uplink classification (AT-03-010)', () => {
+    expect(JSON.parse(run({ op: 'inspect-physical-adapters' }, 'physicalIpv6Only').value)).toMatchObject({ isCellularOrTethering: true })
+    expect(run({ op: 'inspect-physical-adapters' }, 'noPhysicalAdapters').value).toBe('[]')
+  }, 20000)
+  it.skipIf(!native).each([
+    { op: 'inspect-physical-adapters', script: 'Get-NetAdapter' },
+    { op: 'inspect-physical-adapters', alias: 'arbitrary' },
+    { op: 'INSPECT-PHYSICAL-ADAPTERS' }
+  ])('rejects expanded physical inspection requests: %j (AT-03-012)', request => {
+    expect(() => run(request)).toThrow()
+  }, 20000)
   it.skipIf(!native)('returns the complete runtime ACL namespace proof without mutations (AT-01-009)', () => {
     const result = run({ op: 'inspect-runtime-acl', runtimeDir: 'C:\\ProgramData\\VPNTE-fixture-runtime' })
     expect(JSON.parse(result.value)).toMatchObject({ path: 'C:\\ProgramData\\VPNTE-fixture-runtime', owner: 'S-1-5-32-544', protected: true,

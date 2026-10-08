@@ -5,6 +5,28 @@ vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
 import { RecoveryPsWorker } from './recoveryPsWorker'
 
 describe('persistent DNS policy reader native proof', () => {
+  it.skipIf(process.platform !== 'win32')('returns fresh native physical adapter frames in the same worker (AT-03-006)', async () => {
+    const worker = new RecoveryPsWorker(process.env.ProgramData || 'C:\\ProgramData')
+    try {
+      await worker.execute({ op: 'warmup' })
+      for (let read = 0; read < 2; read++) {
+        const value = await worker.execute({ op: 'inspect-physical-adapters' }, 20000)
+        const parsed = value.trim() ? JSON.parse(value) : []
+        const rows = Array.isArray(parsed) ? parsed : [parsed]
+        for (const row of rows) {
+          expect(Number.isInteger(row.ifIndex)).toBe(true)
+          expect(typeof row.interfaceGuid).toBe('string')
+          expect(typeof row.alias).toBe('string')
+          expect(typeof row.ipv6Enabled).toBe('boolean')
+          expect(Array.isArray(row.ipv4Dns)).toBe(true)
+          expect(Array.isArray(row.networkProfiles)).toBe(true)
+          expect(typeof row.isCellularOrTethering).toBe('boolean')
+        }
+        expect(JSON.parse(await worker.execute({ op: 'inspect-dns-policy' }))).toHaveLength(2)
+      }
+    } finally { await worker.stop() }
+    expect(worker.hasExited).toBe(true)
+  }, 30000)
   it.skipIf(process.platform !== 'win32')('keeps frames synchronized after a fresh ACL refusal (AT-01-009/AT-03-012)', async () => {
     const worker = new RecoveryPsWorker('C:\\VPNTE-invalid-programdata')
     try {

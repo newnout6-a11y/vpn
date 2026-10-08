@@ -151,8 +151,7 @@ export function isElevatedPsHelperRunning(): boolean {
 }
 
 const HELPER_WARMUP_COMMANDS: ReadonlyArray<{ policy: ElevatedPsPolicy; script: string }> = [
-  { policy: 'firewall-killswitch', script: 'Import-Module NetSecurity -ErrorAction Stop; Get-NetFirewallProfile -Profile Domain,Private,Public -ErrorAction Stop | Out-Null' },
-  { policy: 'physical-adapter-lockdown', script: 'Import-Module NetAdapter,DnsClient,NetTCPIP -ErrorAction Stop; Get-NetAdapter -ErrorAction Stop | Out-Null' }
+  { policy: 'firewall-killswitch', script: 'Import-Module NetSecurity -ErrorAction Stop; Get-NetFirewallProfile -Profile Domain,Private,Public -ErrorAction Stop | Out-Null' }
 ]
 
 /** Prepare this helper only; query results are discarded, never reused as evidence. */
@@ -161,7 +160,7 @@ export async function warmElevatedPsHelper(): Promise<void> {
   if (!owner || !isElevatedPsHelperRunning()) return
   for (const command of HELPER_WARMUP_COMMANDS) {
     // Do not restart a stopped helper or warm a replacement during shutdown.
-    if (helperProcess !== owner || !isElevatedPsHelperRunning()) break
+    if (helperProcess !== owner || !isElevatedPsHelperRunning() || pendingCommands.size > 0) break
     const started = performance.now()
     let outcome = 'failed'
     try {

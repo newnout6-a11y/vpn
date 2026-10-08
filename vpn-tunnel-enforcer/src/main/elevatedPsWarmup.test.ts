@@ -12,7 +12,8 @@ function harness() {
   const fn = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'warmElevatedPsHelper')
   const commands = ast.statements.find(node => ts.isVariableStatement(node) && node.declarationList.declarations.some(decl => decl.name.getText(ast) === 'HELPER_WARMUP_COMMANDS'))
   if (!fn || !commands) throw new Error('Production helper warm-up not found')
-  const deps = { execElevatedPs: vi.fn(async () => success), logEvent: vi.fn(), isElevatedPsHelperRunning: vi.fn(() => true) }
+  const pendingCommands = new Map()
+  const deps = { execElevatedPs: vi.fn(async () => success), logEvent: vi.fn(), isElevatedPsHelperRunning: vi.fn(() => true), pendingCommands }
   const compiled = ts.transpileModule(commands.getText(ast) + '\n' + fn.getText(ast).replace(/^export\s+/, '') + `
     return { warm: warmElevatedPsHelper, commands: HELPER_WARMUP_COMMANDS, setOwner(value) { helperProcess = value; } };`, {
     compilerOptions: { target: ts.ScriptTarget.ES2022 }
@@ -21,7 +22,7 @@ function harness() {
   return { ...deps, ...fixture }
 }
 describe('same helper fixed read-only warm-up', () => {
-  it.skipIf(process.platform !== 'win32')('keeps both actual scripts within the existing helper policies', async () => {
+  it.skipIf(process.platform !== 'win32')('keeps the remaining warm-up within the existing helper policy', async () => {
     const h = harness()
     const { execElevatedPs } = await import('./elevatedPsHelper')
     for (const command of h.commands) {
@@ -32,16 +33,20 @@ describe('same helper fixed read-only warm-up', () => {
   it('runs bounded fixed commands in policy order and discards native data', async () => {
     const h = harness()
     await h.warm()
-    expect(h.execElevatedPs).toHaveBeenCalledTimes(2)
+    expect(h.execElevatedPs).toHaveBeenCalledOnce()
     expect(h.execElevatedPs).toHaveBeenNthCalledWith(1, h.commands[0].script, 15000, 'firewall-killswitch')
-    expect(h.execElevatedPs).toHaveBeenNthCalledWith(2, h.commands[1].script, 15000, 'physical-adapter-lockdown')
     expect(h.commands[0].script).toContain('Get-NetFirewallProfile')
-    expect(h.commands[1].script).toContain('Get-NetAdapter')
+    expect(h.commands.some((command: {script: string}) => command.script.includes('Get-NetAdapter'))).toBe(false)
     for (const command of h.commands) {
       expect(command.script).toContain('Out-Null')
       expect(command.script).not.toMatch(/\b(?:Set-|Disable-|Enable-|Remove-|New-)\w+|reg\s+add|netsh/i)
     }
-    expect(h.logEvent.mock.calls.filter((call: unknown[]) => call[2] === 'warm-up timing')).toHaveLength(2)
+    expect(h.logEvent.mock.calls.filter((call: unknown[]) => call[2] === 'warm-up timing')).toHaveLength(1)
+  })
+  it('skips optional warm-up when a native command is already admitted (AT-02-005)', async () => {
+    const h = harness(); h.pendingCommands.set(1, {})
+    await h.warm()
+    expect(h.execElevatedPs).not.toHaveBeenCalled()
   })
   it('does not start a missing helper', async () => {
     const h = harness(); h.setOwner(null)
@@ -59,12 +64,12 @@ describe('same helper fixed read-only warm-up', () => {
     await h.warm()
     expect(h.execElevatedPs).toHaveBeenCalledOnce()
   })
-  it.each(['throw', 'exitCode'])('reports %s failure without native payloads and still warms independent modules', async kind => {
+  it.each(['throw', 'exitCode'])('reports %s failure without native payloads', async kind => {
     const h = harness()
     if (kind === 'throw') h.execElevatedPs.mockRejectedValueOnce(new Error('PRIVATE_NATIVE_ERROR'))
     else h.execElevatedPs.mockResolvedValueOnce({ stdout: 'PRIVATE_STDOUT', stderr: 'PRIVATE_STDERR', exitCode: 1 })
     await expect(h.warm()).resolves.toBeUndefined()
-    expect(h.execElevatedPs).toHaveBeenCalledTimes(2)
+    expect(h.execElevatedPs).toHaveBeenCalledOnce()
     expect(h.logEvent).toHaveBeenCalledWith('warn', 'ps-helper', 'fixed read-only warm-up unavailable', { policy: 'firewall-killswitch' })
     expect(h.logEvent.mock.calls.some((call: unknown[]) => call[2] === 'warm-up timing' && (call[3] as any)?.outcome === 'failed')).toBe(true)
     expect(JSON.stringify(h.logEvent.mock.calls)).not.toMatch(/PRIVATE_|stdout|stderr|script/)

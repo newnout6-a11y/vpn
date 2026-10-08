@@ -20,7 +20,7 @@ const commands = new Function(ts.transpileModule(warmup.getText(ast), { compiler
 describe.skipIf(process.platform !== 'win32')('native helper timing envelope', () => {
   it('executes fixed warm-up and fresh native reads in the same production runner', () => {
     const requests = commands.map((command: { script: string }, index: number) => ({ id: index + 1, script: command.script }))
-    requests.push({ id: 3, script: "Get-NetFirewallProfile -Profile Domain,Private,Public -ErrorAction Stop | ForEach-Object { [string]$_.Name }" })
+    requests.push({ id: 2, script: "Get-NetFirewallProfile -Profile Domain,Private,Public -ErrorAction Stop | ForEach-Object { [string]$_.Name }" })
     const result = spawnSync(shell, ['-NoProfile', '-NoLogo', '-NonInteractive', '-Command', runner], {
       input: requests.map((item: unknown) => JSON.stringify(item)).join('\n') + '\n__EXIT__\n',
       encoding: 'utf8', windowsHide: true, timeout: 20000
@@ -28,11 +28,10 @@ describe.skipIf(process.platform !== 'win32')('native helper timing envelope', (
     expect(result.error).toBeUndefined()
     expect(result.status).toBe(0)
     const replies = result.stdout.trim().split(/\r?\n/).map(line => JSON.parse(line))
-    expect(replies.map(item => item.id)).toEqual([1, 2, 3])
+    expect(replies.map(item => item.id)).toEqual([1, 2])
     for (const reply of replies) expect(reply).toMatchObject({ success: true, exitCode: 0 })
     expect(replies[0].stdout.trim()).toBe('')
-    expect(replies[1].stdout.trim()).toBe('')
-    expect(replies[2].stdout.trim().split(/\s+/).sort()).toEqual(['Domain', 'Private', 'Public'])
+    expect(replies[1].stdout.trim().split(/\s+/).sort()).toEqual(['Domain', 'Private', 'Public'])
   }, 25000)
   it('preserves command IDs, outputs and failures while reporting execution cost', () => {
     const requests = [
