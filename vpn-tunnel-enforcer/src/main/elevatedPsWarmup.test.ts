@@ -155,12 +155,14 @@ describe('app preparation order', () => {
     expect(h.warmElevatedPsHelper).toHaveBeenCalledOnce()
     finish()
   })
-  it.each(['busy', 'running', 'isQuitting', 'shutdownInProgress'])('pauses helper preparation for %s (AT-02-005)', async guard => {
+  it.each(['busy', 'running', 'isQuitting', 'shutdownInProgress'])('pauses both preparations for %s (AT-02-005)', async guard => {
     const h = appStage({ [guard]: true })
     await h.run()
     await Promise.resolve()
     const shouldDefer = (h.warmElevatedPsHelper.mock.calls[0] as unknown[])[0] as () => boolean
     expect(shouldDefer()).toBe(true)
+    const recoveryGate = (h.warmRecoveryPsWorker.mock.calls[0] as unknown[])[0] as () => boolean
+    expect(recoveryGate()).toBe(true)
   })
   it('allows helper preparation after a full connection lifecycle settles', async () => {
     const h = appStage({ busy: true })

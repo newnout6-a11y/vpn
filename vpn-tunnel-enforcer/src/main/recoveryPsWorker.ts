@@ -4,7 +4,7 @@ import { resolve } from 'path'
 import { gzipSync } from 'zlib'
 import { isProcessElevated } from './admin'
 import { logEvent } from './appLogger'
-import { RECOVERY_MAX_BYTES, recoveryWorkerScript, validateRecoveryRequest, type RecoveryRequest } from './recoveryPsProtocol'
+import { ADAPTER_WARMUP_MODULES, RECOVERY_MAX_BYTES, recoveryWorkerScript, validateRecoveryRequest, type RecoveryRequest } from './recoveryPsProtocol'
 
 export class RecoveryWorkerError extends Error {
   constructor(public readonly code: 'unavailable' | 'closed' | 'busy' | 'timeout' | 'exited' | 'protocol' | 'rejected', message: string) {
@@ -42,7 +42,7 @@ export class RecoveryPsWorker {
   private idleExitTimer?: ReturnType<typeof setTimeout>
   private exitSent = false
 
-  constructor(public readonly programData: string, spawnProcess: typeof spawn = spawn) {
+  constructor(public readonly programData: string, spawnProcess: typeof spawn = spawn, scope: 'recovery' | 'adapters' = 'recovery') {
     this.ready.catch(() => undefined)
     const env = { ...process.env }
     // Do not inherit PowerShell 7 module paths into Windows PowerShell 5.1.
@@ -52,7 +52,7 @@ export class RecoveryPsWorker {
     try {
       // Encoded UTF-16 grows beyond Windows' 32767-character command limit.
       // Transport the fixed source compressed in memory, without script files.
-      const compressed = gzipSync(Buffer.from(recoveryWorkerScript(programData), 'utf8')).toString('base64')
+      const compressed = gzipSync(Buffer.from(recoveryWorkerScript(programData, scope === 'adapters'), 'utf8')).toString('base64')
       const launcher = `$bytes=[Convert]::FromBase64String('${compressed}');
 $stream=New-Object IO.MemoryStream(,$bytes);
 $gzip=New-Object IO.Compression.GZipStream($stream,[IO.Compression.CompressionMode]::Decompress);
@@ -179,44 +179,83 @@ try { $source=$reader.ReadToEnd() } finally { $reader.Dispose(); $gzip.Dispose()
     this.pump() // settle admitted work before terminating this process
     await this.closed
   }
+  /** Optional imports yield between steps; never interrupt admitted native work. */
+  async warmAdapters(shouldDefer: () => boolean): Promise<void> {
+    await this.ready // Recheck lifecycle after process readiness, before admitting an import.
+    for (const module of ADAPTER_WARMUP_MODULES) {
+      let deferred = false
+      while (this.accepting && (this.active || this.queue.length || shouldDefer())) {
+        if (!deferred) logEvent('debug', 'adapter-worker', 'warm-up deferred', { module })
+        deferred = true
+        await new Promise<void>(done => { setTimeout(done, 100).unref?.() })
+      }
+      if (!this.accepting) return
+      if (deferred) logEvent('debug', 'adapter-worker', 'warm-up resumed', { module })
+      const started = performance.now()
+      let outcome = 'failed'
+      try {
+        if (await this.execute({ op: 'warmup-adapters', module }) !== 'RECOVERY_MODULES_READY') throw new Error('Adapter warm-up not confirmed')
+        outcome = 'complete'
+      }
+      catch { logEvent('warn', 'adapter-worker', 'read-only module warm-up unavailable', { module }) }
+      finally { logEvent('debug', 'adapter-worker', 'warm-up timing', { module, outcome, durationMs: Math.round(performance.now() - started) }) }
+    }
+  }
   get hasExited(): boolean { return this.finished }
 }
 
-let worker: RecoveryPsWorker | null = null
-let starting: Promise<RecoveryPsWorker> | null = null
+// Adapter reads must not block runtime ACL/recovery or the firewall helper.
+const workers: Record<'recovery' | 'adapters', { worker: RecoveryPsWorker | null; starting: Promise<RecoveryPsWorker> | null }> = {
+  recovery: { worker: null, starting: null }, adapters: { worker: null, starting: null }
+}
 let admissionClosed = false
-async function getWorker(): Promise<RecoveryPsWorker> {
+async function getWorker(scope: keyof typeof workers = 'recovery'): Promise<RecoveryPsWorker> {
   if (admissionClosed) throw new RecoveryWorkerError('closed', 'Recovery shutdown has closed admission')
-  if (worker?.hasExited) worker = null
-  if (worker) {
-    if (resolve(worker.programData).toLowerCase() !== resolve(process.env.ProgramData || 'C:\\ProgramData').toLowerCase()) throw new RecoveryWorkerError('rejected', 'Recovery ProgramData changed during worker lifetime')
-    return worker
+  const state = workers[scope]
+  if (state.worker?.hasExited) state.worker = null
+  if (state.worker) {
+    if (resolve(state.worker.programData).toLowerCase() !== resolve(process.env.ProgramData || 'C:\\ProgramData').toLowerCase()) throw new RecoveryWorkerError('rejected', 'Recovery ProgramData changed during worker lifetime')
+    return state.worker
   }
-  if (starting) return starting
-  starting = (async () => {
+  if (state.starting) return state.starting
+  state.starting = (async () => {
     if (process.platform !== 'win32' || !(await isProcessElevated())) throw new RecoveryWorkerError('unavailable', 'Recovery worker requires elevated Windows main')
     if (admissionClosed) throw new RecoveryWorkerError('closed', 'Recovery shutdown has closed admission')
-    worker = new RecoveryPsWorker(process.env.ProgramData || 'C:\\ProgramData')
-    return worker
+    state.worker = new RecoveryPsWorker(process.env.ProgramData || 'C:\\ProgramData', spawn, scope)
+    return state.worker
   })()
-  try { return await starting } finally { starting = null }
+  try { return await state.starting } finally { state.starting = null }
 }
 export async function executeRecoveryOperation(request: RecoveryRequest, timeoutMs = 15000): Promise<string> {
   validateRecoveryRequest(request)
   if (!Number.isFinite(timeoutMs) || timeoutMs < 1 || timeoutMs > 30000) throw new Error('Invalid recovery worker deadline')
   const started = performance.now()
-  try { return await (await getWorker()).execute(request, timeoutMs) }
-  finally { logEvent('debug', 'recovery-worker', 'operation timing', { operation: request.op, durationMs: Math.round(performance.now() - started) }) }
+  // These fixed reads need the same prepared Net modules as full snapshots.
+  const scope = request.op === 'inspect-physical-dns' || request.op === 'inspect-tun' ? 'adapters' : 'recovery'
+  try { return await (await getWorker(scope)).execute(request, timeoutMs) }
+  finally { logEvent('debug', scope === 'adapters' ? 'adapter-worker' : 'recovery-worker', 'operation timing', { operation: request.op, durationMs: Math.round(performance.now() - started) }) }
 }
-export async function warmRecoveryPsWorker(): Promise<void> {
+export async function executeAdapterInspection(op: 'inspect-physical-adapters' | 'inspect-transition-adapters', timeoutMs = 15000): Promise<string> {
+  if (op !== 'inspect-physical-adapters' && op !== 'inspect-transition-adapters') throw new Error('Invalid adapter inspection operation')
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 1 || timeoutMs > 30000) throw new Error('Invalid adapter inspection deadline')
   const started = performance.now()
-  try { await executeRecoveryOperation({ op: 'warmup' }) }
+  try { return await (await getWorker('adapters')).execute({ op }, timeoutMs) }
+  finally { logEvent('debug', 'adapter-worker', 'operation timing', { operation: op, durationMs: Math.round(performance.now() - started) }) }
+}
+export async function warmRecoveryPsWorker(shouldDefer: () => boolean = () => false): Promise<void> {
+  const started = performance.now()
+  try { await Promise.all([
+    executeRecoveryOperation({ op: 'warmup' }).finally(() =>
+      logEvent('debug', 'recovery-worker', 'warm-up timing', { durationMs: Math.round(performance.now() - started) })),
+    getWorker('adapters').then(owner => owner.warmAdapters(shouldDefer))
+  ]) }
   catch { logEvent('warn', 'recovery-worker', 'read-only module warm-up unavailable') }
-  finally { logEvent('debug', 'recovery-worker', 'warm-up timing', { durationMs: Math.round(performance.now() - started) }) }
 }
 export async function stopRecoveryPsWorker(): Promise<void> {
   admissionClosed = true
-  if (starting) await starting.catch(() => undefined)
-  await worker?.stop()
-  worker = null
+  await Promise.all(Object.values(workers).map(async state => {
+    if (state.starting) await state.starting.catch(() => undefined)
+    await state.worker?.stop()
+    state.worker = null
+  }))
 }

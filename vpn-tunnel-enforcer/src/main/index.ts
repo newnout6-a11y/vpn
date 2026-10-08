@@ -1834,7 +1834,8 @@ app.whenReady().then(async () => {
   void helperStartup.then(() => warmElevatedPsHelper(() =>
     isQuitting || shutdownInProgress || connectionLifecycle.busy || tunController.getStatus().running))
   // Only module loading; every connect still reads fresh ownership/ACL evidence.
-  void warmRecoveryPsWorker()
+  void warmRecoveryPsWorker(() =>
+    isQuitting || shutdownInProgress || connectionLifecycle.busy || tunController.getStatus().running)
 
   createWindow()
   tray = createTray(mainWindow!, {

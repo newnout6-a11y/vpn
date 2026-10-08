@@ -78,6 +78,18 @@ function Get-ItemProperty { [CmdletBinding()]param($Path,$Name) if($global:varia
 function Get-NetIPAddress { [CmdletBinding()]param($InterfaceIndex,$AddressFamily)
   [pscustomobject]@{IPAddress=$(if($global:variant -eq 'ip'){'192.168.250.254'}else{'192.168.250.253'});PrefixLength=$(if($global:variant -eq 'prefix'){24}else{30})}
 }
+function Import-Module { [CmdletBinding()]param($Name)
+  if ($Name -notin @('NetAdapter','DnsClient','NetTCPIP','NetConnection') -and $Name -notlike '*Microsoft.PowerShell.Security.psd1') { throw 'Unexpected import' }
+  $global:steps += 'import:'+$Name
+}
+function netsh {
+  switch ($args -join ' ') {
+    'interface teredo show state' { 'Type : client' }
+    'interface 6to4 show state' { '6to4 Service State : enabled' }
+    'interface isatap show state' { 'ISATAP State : disabled' }
+    default { throw 'Unexpected native command' }
+  }
+}
 ${recoveryWorkerFunctions(variant === 'environmentMismatch' ? 'C:\\different-programdata' : process.env.ProgramData || 'C:\\ProgramData')}
 $request=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${serialized}'))|ConvertFrom-Json
 $value=${fullSnapshot ? `& { ${PHYSICAL_ADAPTER_SNAPSHOT_SCRIPT} }` : 'Invoke-RecoveryOperation $request'}
@@ -85,10 +97,10 @@ $value=${fullSnapshot ? `& { ${PHYSICAL_ADAPTER_SNAPSHOT_SCRIPT} }` : 'Invoke-Re
 `
   const env = {...process.env}
   for(const key of Object.keys(env))if(key.toLowerCase()==='psmodulepath')delete env[key]
-  // Compress fixed test source, as the production worker does, to fit CreateProcess.
+  // Send the larger fixture on stdin so assertions cannot pass on CreateProcess overflow.
   const compressed=gzipSync(Buffer.from("$ErrorActionPreference='Stop';[Console]::OutputEncoding=[Text.Encoding]::UTF8;"+fixture)).toString('base64')
-  const launcher=`$stream=New-Object IO.MemoryStream(,[Convert]::FromBase64String('${compressed}'));$gzip=New-Object IO.Compression.GZipStream($stream,[IO.Compression.CompressionMode]::Decompress);$reader=New-Object IO.StreamReader($gzip,[Text.Encoding]::UTF8);try{$source=$reader.ReadToEnd()}finally{$reader.Dispose();$gzip.Dispose();$stream.Dispose()}; & ([ScriptBlock]::Create($source))`
-  const stdout=execFileSync(process.env.VPNTE_PWSH || 'powershell.exe', ['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(launcher,'utf16le').toString('base64')], {env,timeout:15000,encoding:'utf8',stdio:['ignore','pipe','pipe']})
+  const launcher=`$stream=New-Object IO.MemoryStream(,[Convert]::FromBase64String([Console]::In.ReadToEnd()));$gzip=New-Object IO.Compression.GZipStream($stream,[IO.Compression.CompressionMode]::Decompress);$reader=New-Object IO.StreamReader($gzip,[Text.Encoding]::UTF8);try{$source=$reader.ReadToEnd()}finally{$reader.Dispose();$gzip.Dispose();$stream.Dispose()}; & ([ScriptBlock]::Create($source))`
+  const stdout=execFileSync(process.env.VPNTE_PWSH || 'powershell.exe', ['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(launcher,'utf16le').toString('base64')], {env,input:compressed,timeout:15000,encoding:'utf8',stdio:['pipe','pipe','pipe']})
   return JSON.parse(stdout.replace(/^\uFEFF/,'').trim())
 }
 describe('fixed recovery dispatcher native proof', () => {
@@ -98,10 +110,27 @@ describe('fixed recovery dispatcher native proof', () => {
     expect(result).toMatchObject({ set: 0, removed: 0, queries: 0 })
   }, 20000)
   it.skipIf(!native)('preserves IPv6-only physical uplink classification (AT-03-010)', () => {
-    const baseline = JSON.parse(run({ op: 'inspect-physical-dns' }, 'physicalIpv6Only', true).value)
+    const baseline = JSON.parse(run({ op: 'inspect-physical-adapters' }, 'physicalIpv6Only').value)
     expect(baseline).toMatchObject({ interfaceGuid: '11111111-1111-1111-1111-111111111111', ipv6Enabled: true,
       ipv4Dns: ['1.1.1.1'], ipv4DnsSource: 'static', networkProfiles: ['Office'], isCellularOrTethering: true })
     expect(run({ op: 'inspect-physical-dns' }, 'noPhysicalAdapters').value).toBe('[]')
+    expect(run({ op: 'inspect-physical-adapters' }, 'noPhysicalAdapters').value).toBe('[]')
+  }, 20000)
+  it.skipIf(!native)('returns the identical full baseline through the fixed dispatcher without writes', () => {
+    const result = run({ op: 'inspect-physical-adapters' })
+    expect(JSON.parse(result.value)).toEqual(JSON.parse(run({op:'inspect-physical-dns'}, 'trusted', true).value))
+    expect(result).toMatchObject({set:0,removed:0,queries:0,order:[]})
+    const transitions = run({ op: 'inspect-transition-adapters' })
+    expect(JSON.parse(transitions.value)).toEqual({ teredo: 'Type : client', sixToFour: '6to4 Service State : enabled', isatap: 'ISATAP State : disabled' })
+    expect(transitions).toMatchObject({set:0,removed:0,queries:0,order:[]})
+  }, 20000)
+  it.skipIf(!native)('limits each adapter warm-up to one fixed module and leaves recovery warm-up short', () => {
+    for (const module of ['NetAdapter','DnsClient','NetTCPIP','NetConnection']) {
+      expect(run({op:'warmup-adapters',module})).toMatchObject({value:'RECOVERY_MODULES_READY',set:0,removed:0,queries:0,order:['import:'+module]})
+    }
+    const recovery = run({op:'warmup'})
+    expect(recovery.order).toHaveLength(1)
+    expect(recovery.order[0]).toContain('Microsoft.PowerShell.Security.psd1')
   }, 20000)
   it.skipIf(!native).each([
     { op: 'inspect-network-identity', script: 'Get-CimInstance' },
@@ -109,9 +138,14 @@ describe('fixed recovery dispatcher native proof', () => {
     { op: 'INSPECT-NETWORK-IDENTITY' },
     { op: 'inspect-physical-dns', script: 'Get-NetAdapter' },
     { op: 'inspect-physical-dns', alias: 'arbitrary' },
-    { op: 'INSPECT-PHYSICAL-DNS' }
+    { op: 'INSPECT-PHYSICAL-DNS' },
+    { op: 'inspect-physical-adapters', script: 'Get-NetAdapter' },
+    { op: 'inspect-transition-adapters', path: 'arbitrary' },
+    { op: 'warmup-adapters', module: 'NetAdapter;evil' },
+    { op: 'warmup-adapters', module: 'netadapter' },
+    { op: 'warmup-adapters', module: 'NetAdapter', script: 'evil' }
   ])('rejects expanded physical inspection requests: %j (AT-03-012)', request => {
-    expect(() => run(request)).toThrow()
+    expect(() => run(request)).toThrow(/Invalid .*fields|Unknown recovery worker operation/)
   }, 20000)
   it.skipIf(!native)('returns the complete runtime ACL namespace proof without mutations (AT-01-009)', () => {
     const result = run({ op: 'inspect-runtime-acl', runtimeDir: 'C:\\ProgramData\\VPNTE-fixture-runtime' })

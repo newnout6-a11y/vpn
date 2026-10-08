@@ -1,7 +1,7 @@
 import { recoveryManifestPath, readRecoveryManifest, writeRecoveryManifest, removeRecoveryManifest } from './recoveryManifest'
-import { executeRecoveryOperation, RecoveryWorkerError } from './recoveryPsWorker'
+import { executeAdapterInspection, executeRecoveryOperation, RecoveryWorkerError } from './recoveryPsWorker'
 import { DNS_POLICY_SNAPSHOT_SCRIPT } from './recoveryPsProtocol'
-import { PHYSICAL_ADAPTER_DNS_SCRIPT, PHYSICAL_ADAPTER_SNAPSHOT_SCRIPT } from './physicalAdapterSnapshot'
+import { PHYSICAL_ADAPTER_DNS_SCRIPT, PHYSICAL_ADAPTER_SNAPSHOT_SCRIPT, TRANSITION_ADAPTER_SNAPSHOT_SCRIPT } from './physicalAdapterSnapshot'
 import { isIP } from 'net'
 /**
  * Hard lockdown of the physical adapter while TUN is up.
@@ -309,8 +309,7 @@ async function snapshotPhysicalAdapters(): Promise<AdapterSnapshot[]> {
   }
 
   snapshotPromise = (async () => {
-  // Full baseline/read-back stays with adapter mutations, never in the ACL queue.
-  const stdout = await runPS(PHYSICAL_ADAPTER_SNAPSHOT_SCRIPT, 20000)
+  const stdout = await inspectAdapters('inspect-physical-adapters', PHYSICAL_ADAPTER_SNAPSHOT_SCRIPT, 20000)
   const text = stdout.trim()
   if (!text || text === 'null') return []
   let parsed: any
@@ -374,19 +373,18 @@ function netshValue(raw: string, label: string): string | null {
   return value ? value.split(/\s+/)[0].toLowerCase() : null
 }
 
+async function inspectAdapters(op: 'inspect-physical-adapters' | 'inspect-transition-adapters', script: string, timeoutMs: number): Promise<string> {
+  try { return await executeAdapterInspection(op, timeoutMs) }
+  catch (error) {
+    // Only failure before dispatch allows the existing bounded fallback.
+    if (!(error instanceof RecoveryWorkerError) || error.code !== 'unavailable') throw error
+    return runPS(script, timeoutMs)
+  }
+}
+
 async function snapshotTransitionAdapters(): Promise<TransitionAdapterSnapshot> {
-  const script = `
-$teredo = netsh interface teredo show state
-$sixToFour = netsh interface 6to4 show state
-$isatap = netsh interface isatap show state
-[pscustomobject]@{
-  teredo = ($teredo -join [Environment]::NewLine)
-  sixToFour = ($sixToFour -join [Environment]::NewLine)
-  isatap = ($isatap -join [Environment]::NewLine)
-} | ConvertTo-Json -Compress
-`
   try {
-    const raw = (await runPS(script, 15000)).trim()
+    const raw = (await inspectAdapters('inspect-transition-adapters', TRANSITION_ADAPTER_SNAPSHOT_SCRIPT, 15000)).trim()
     const parsed = JSON.parse(raw)
     return {
       teredoType: netshValue(String(parsed.teredo ?? ''), 'Type'),

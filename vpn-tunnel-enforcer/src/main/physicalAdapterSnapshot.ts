@@ -72,3 +72,14 @@ foreach ($a in $adapters) {
 }
 $rows | ConvertTo-Json -Compress -Depth 4
 `
+
+export const TRANSITION_ADAPTER_SNAPSHOT_SCRIPT = `
+$teredo = netsh interface teredo show state
+$sixToFour = netsh interface 6to4 show state
+$isatap = netsh interface isatap show state
+[pscustomobject]@{
+  teredo = ($teredo -join [Environment]::NewLine)
+  sixToFour = ($sixToFour -join [Environment]::NewLine)
+  isatap = ($isatap -join [Environment]::NewLine)
+} | ConvertTo-Json -Compress
+`

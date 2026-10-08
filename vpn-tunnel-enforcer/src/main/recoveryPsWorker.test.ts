@@ -13,7 +13,7 @@ vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
 import { RecoveryPsWorker } from './recoveryPsWorker'
 import { validateRecoveryRequest } from './recoveryPsProtocol'
 
-function fixture() {
+function fixture(ready = true) {
   const process = Object.assign(new EventEmitter(), {
     pid: 123, stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), kill: vi.fn(() => true)
   })
@@ -26,11 +26,67 @@ function fixture() {
   })
   const worker = new RecoveryPsWorker('C:\\ProgramData', (() => process as unknown as ChildProcess) as typeof spawn)
   const reply = (id: number, value: string) => process.stdout.write(JSON.stringify({ id, ok: true, value }) + '\n')
-  reply(0, 'RECOVERY_WORKER_READY')
+  if (ready) reply(0, 'RECOVERY_WORKER_READY')
   return { worker, process, writes, reply, get ended() { return ended } }
 }
 afterEach(() => vi.useRealTimers())
 describe('typed recovery worker ownership', () => {
+  it('rechecks manual priority when connection arrives before worker readiness (AT-02-005)', async () => {
+    vi.useFakeTimers()
+    const f = fixture(false); let busy = false
+    const warm = f.worker.warmAdapters(() => busy)
+    busy = true
+    const manual = f.worker.execute({op:'inspect-physical-adapters'})
+    f.reply(0, 'RECOVERY_WORKER_READY')
+    await vi.advanceTimersByTimeAsync(200)
+    expect(f.writes.map(write => write.request.op)).toEqual(['inspect-physical-adapters'])
+    f.reply(f.writes[0].id, '[]'); await manual
+    busy = false
+    await vi.advanceTimersByTimeAsync(100)
+    for (const module of ['NetAdapter','DnsClient','NetTCPIP','NetConnection']) {
+      expect(f.writes.at(-1)!.request).toEqual({op:'warmup-adapters',module})
+      f.reply(f.writes.at(-1)!.id, 'RECOVERY_MODULES_READY')
+      await vi.advanceTimersByTimeAsync(100)
+    }
+    await warm; await f.worker.stop()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+  it('yields adapter warm-up to admitted work and lifecycle, then resumes without repeating imports (AT-02-005)', async () => {
+    vi.useFakeTimers()
+    const f = fixture(); let busy = true
+    const warm = f.worker.warmAdapters(() => busy)
+    await vi.advanceTimersByTimeAsync(300)
+    expect(f.writes).toHaveLength(0)
+    busy = false
+    await vi.advanceTimersByTimeAsync(100)
+    expect(f.writes[0].request).toEqual({ op: 'warmup-adapters', module: 'NetAdapter' })
+    const manual = f.worker.execute({ op: 'inspect-physical-adapters' })
+    await Promise.resolve()
+    f.reply(f.writes[0].id, 'RECOVERY_MODULES_READY')
+    await vi.advanceTimersByTimeAsync(100)
+    expect(f.writes[1].request.op).toBe('inspect-physical-adapters')
+    expect(f.writes).toHaveLength(2)
+    f.reply(f.writes[1].id, '[]'); await manual
+    await vi.advanceTimersByTimeAsync(100)
+    for (const module of ['DnsClient', 'NetTCPIP', 'NetConnection']) {
+      expect(f.writes.at(-1)!.request).toEqual({ op: 'warmup-adapters', module })
+      f.reply(f.writes.at(-1)!.id, 'RECOVERY_MODULES_READY')
+      await vi.advanceTimersByTimeAsync(100)
+    }
+    await warm; await f.worker.stop()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+  it('abandons deferred imports when shutdown closes admission (AT-02-005)', async () => {
+    vi.useFakeTimers()
+    const f = fixture()
+    const warm = f.worker.warmAdapters(() => true)
+    await vi.advanceTimersByTimeAsync(200)
+    await f.worker.stop()
+    await vi.advanceTimersByTimeAsync(100)
+    await warm
+    expect(f.writes).toHaveLength(0)
+    expect(vi.getTimerCount()).toBe(0)
+  })
   it('holds a 5-second runtime query until confirmed child close on timeout', async () => {
     vi.useFakeTimers()
     const f = fixture()
@@ -55,7 +111,10 @@ describe('typed recovery worker ownership', () => {
     {op:'quarantine',name:'firewall.json',contentHash:'a'.repeat(64),script:'evil'},
     {op:'inspect-runtime-acl',runtimeDir:'C:\\runtime',script:'Get-Acl'},
     ...['relative', 'C:\\..\\runtime', 'C:\\runtime:stream'].map(runtimeDir => ({op:'inspect-runtime-acl',runtimeDir})),
-    {op:'inspect-physical-dns',script:'Get-NetAdapter'}, {op:'inspect-physical-dns',alias:'Wi-Fi'}, {op:'inspect-physical-adapters'},
+    {op:'inspect-physical-dns',script:'Get-NetAdapter'}, {op:'inspect-physical-dns',alias:'Wi-Fi'},
+    {op:'inspect-physical-adapters',script:'Get-NetAdapter'}, {op:'inspect-transition-adapters',path:'arbitrary'},
+    {op:'warmup-adapters',module:'NetAdapter;evil'}, {op:'warmup-adapters',module:'netadapter'},
+    {op:'warmup-adapters',module:'NetAdapter',script:'evil'}, {op:'warmup-adapters'},
     {op:'inspect-network-identity',script:'Get-CimInstance'}, {op:'inspect-network-identity',alias:'Wi-Fi'}
   ])('rejects unexpected fields, paths and operations before dispatch: %j', request => {
     expect(() => validateRecoveryRequest(request as any)).toThrow('Invalid')

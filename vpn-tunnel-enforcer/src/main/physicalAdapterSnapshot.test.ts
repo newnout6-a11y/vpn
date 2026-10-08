@@ -1,13 +1,13 @@
 // AT-03-005/006/007/012: production snapshot routing with controlled native boundaries.
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-const mocks = vi.hoisted(() => ({ worker: vi.fn(), helper: vi.fn(), elevated: vi.fn() }))
+const mocks = vi.hoisted(() => ({ worker: vi.fn(), adapter: vi.fn(), helper: vi.fn(), elevated: vi.fn() }))
 vi.mock('electron', () => ({ app: { getPath: () => 'C:\\fixture' } }))
 vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
 vi.mock('./admin', () => ({ execElevated: mocks.elevated }))
 vi.mock('./runtimeDirSecurity', () => ({ ensureElevatedRuntimeDirHardened: vi.fn() }))
 vi.mock('./recoveryManifest', () => ({ recoveryManifestPath: () => 'C:\\fixture\\manifest.json', readRecoveryManifest: vi.fn(async () => null), writeRecoveryManifest: vi.fn(), removeRecoveryManifest: vi.fn() }))
 vi.mock('./elevatedPsHelper', () => ({ isElevatedPsHelperRunning: () => true, execElevatedPs: mocks.helper }))
-vi.mock('./recoveryPsWorker', () => ({ executeRecoveryOperation: mocks.worker, RecoveryWorkerError: class extends Error {
+vi.mock('./recoveryPsWorker', () => ({ executeRecoveryOperation: mocks.worker, executeAdapterInspection: mocks.adapter, RecoveryWorkerError: class extends Error {
   constructor(public code: string, message: string) { super(message) }
 } }))
 import { executeRecoveryOperation, RecoveryWorkerError } from './recoveryPsWorker'
@@ -17,9 +17,10 @@ const row = { ifIndex: 17, interfaceGuid: '11111111-1111-1111-1111-111111111111'
 beforeEach(() => {
   vi.resetModules(); vi.clearAllMocks()
   mocks.worker.mockResolvedValue(JSON.stringify(row))
+  mocks.adapter.mockImplementation(async (op: string) => op === 'inspect-physical-adapters' ? JSON.stringify(row) : '{}')
   mocks.helper.mockResolvedValue({ stdout: JSON.stringify(row), stderr: '', exitCode: 0 })
 })
-describe.skipIf(process.platform !== 'win32')('routing DNS and full lockdown inspection use separate transports', () => {
+describe.skipIf(process.platform !== 'win32')('adapter inspection keeps firewall and ACL queues free', () => {
   it('leaves the privileged helper free while DNS discovery is still running', async () => {
     let finish!: (value: string) => void
     mocks.worker.mockReturnValue(new Promise(resolve => { finish = resolve }))
@@ -69,20 +70,41 @@ describe.skipIf(process.platform !== 'win32')('routing DNS and full lockdown ins
     expect(mocks.helper).not.toHaveBeenCalled()
   })
   it('keeps a blocked full baseline out of the runtime ACL queue and never uses DNS as a proof (AT-01-009/AT-03-006)', async () => {
-    let finish!: (value: { stdout: string }) => void
-    mocks.helper.mockImplementation((script: string) => script.includes('Get-NetConnectionProfile')
-      ? new Promise(resolve => { finish = resolve }) : Promise.resolve({ stdout: '{}' }))
+    let finish!: (value: string) => void
+    mocks.adapter.mockImplementation((op: string) => op === 'inspect-physical-adapters'
+      ? new Promise(resolve => { finish = resolve }) : Promise.resolve('{}'))
     mocks.worker.mockImplementation(async ({op}: {op: string}) => op === 'inspect-dns-policy'
       ? JSON.stringify(['smartNameResolution', 'parallelAandAAAA'].map(tag => ({tag,exists:false,type:null,data:null})))
       : op === 'inspect-runtime-acl' ? 'FRESH_ACL' : JSON.stringify(row))
     const api = await import('./physicalAdapterLockdown'), controller = new AbortController()
     await api.getPhysicalAdapterDnsSources()
     const pending = api.applyPhysicalAdapterLockdown('192.168.250.254', {signal: controller.signal})
-    await vi.waitFor(() => expect(mocks.helper).toHaveBeenCalledWith(expect.stringContaining('Get-NetConnectionProfile'), 20000, 'physical-adapter-lockdown'))
+    await vi.waitFor(() => expect(mocks.adapter).toHaveBeenCalledWith('inspect-physical-adapters', 20000))
+    expect(mocks.helper).not.toHaveBeenCalled()
     await expect(executeRecoveryOperation({op:'inspect-runtime-acl',runtimeDir:'C:\\fixture'})).resolves.toBe('FRESH_ACL')
     expect(mocks.worker.mock.calls.some(([request]) => request.op === 'inspect-physical-adapters')).toBe(false)
-    controller.abort(); finish({stdout:JSON.stringify(row)})
+    controller.abort(); finish(JSON.stringify(row))
     await expect(pending).resolves.toMatchObject({applied:false,cancelled:true})
+    expect(mocks.helper).not.toHaveBeenCalled()
+  })
+  it('falls back for a full snapshot only when inspection was unavailable before dispatch', async () => {
+    mocks.adapter.mockRejectedValue(new RecoveryWorkerError('unavailable', 'Unavailable before dispatch'))
+    mocks.worker.mockResolvedValue(JSON.stringify(['smartNameResolution', 'parallelAandAAAA'].map(tag => ({tag,exists:false,type:null,data:null}))))
+    mocks.helper.mockImplementation(async (script: string) => ({ stdout: script.includes('Get-NetConnectionProfile') ? JSON.stringify(row) : '{}', exitCode: 0 }))
+    const api = await import('./physicalAdapterLockdown'), controller = new AbortController()
+    mocks.helper.mockImplementationOnce(async () => { controller.abort(); return { stdout: JSON.stringify(row), exitCode: 0 } })
+    expect(await api.applyPhysicalAdapterLockdown('192.168.250.254', { signal: controller.signal })).toMatchObject({ applied: false, cancelled: true })
+    expect(mocks.helper).toHaveBeenCalledWith(expect.stringContaining('Get-NetConnectionProfile'), 20000, 'physical-adapter-lockdown')
+    expect(mocks.helper).toHaveBeenCalledWith(expect.stringContaining('netsh interface teredo show state'), 15000, 'physical-adapter-lockdown')
+    expect(mocks.elevated).not.toHaveBeenCalled()
+  })
+  it.each(['closed', 'busy', 'timeout', 'exited', 'protocol', 'rejected', 'generic'] as const)('never replays a failed full snapshot after %s or dispatches mutation', async code => {
+    mocks.worker.mockResolvedValue(JSON.stringify(['smartNameResolution', 'parallelAandAAAA'].map(tag => ({tag,exists:false,type:null,data:null}))))
+    const error = code === 'generic' ? new Error('Unknown failure') : new RecoveryWorkerError(code, 'Uncertain observation')
+    mocks.adapter.mockImplementation(async (op: string) => { if (op === 'inspect-physical-adapters') throw error; return '{}' })
+    const api = await import('./physicalAdapterLockdown')
+    await expect(api.applyPhysicalAdapterLockdown('192.168.250.254')).rejects.toBe(error)
+    expect(mocks.helper).not.toHaveBeenCalled(); expect(mocks.elevated).not.toHaveBeenCalled()
   })
   it.each([
     '{bad', JSON.stringify({...row,ifIndex:0}), JSON.stringify({...row,alias:'bad\nname'}),

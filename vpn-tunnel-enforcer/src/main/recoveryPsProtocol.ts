@@ -1,10 +1,12 @@
 /** AT-03-012: closed data protocol; no scripts or arbitrary artifact paths. */
 import { runtimeAclWorkerFunction } from './runtimeAclInspection'
-import { PHYSICAL_ADAPTER_DNS_SCRIPT } from './physicalAdapterSnapshot'
+import { PHYSICAL_ADAPTER_DNS_SCRIPT, PHYSICAL_ADAPTER_SNAPSHOT_SCRIPT, TRANSITION_ADAPTER_SNAPSHOT_SCRIPT } from './physicalAdapterSnapshot'
 import { ADAPTIVE_NETWORK_IDENTITY_SCRIPT } from './adaptiveNetworkIdentityScript'
 export const RECOVERY_MAX_BYTES = 1024 * 1024
+export const ADAPTER_WARMUP_MODULES = ['NetAdapter', 'DnsClient', 'NetTCPIP', 'NetConnection'] as const
 export type RecoveryRequest =
-  | { op: 'ensure' | 'warmup' | 'inspect-dns-policy' | 'inspect-physical-dns' | 'inspect-network-identity' }
+  | { op: 'ensure' | 'warmup' | 'inspect-dns-policy' | 'inspect-physical-dns' | 'inspect-network-identity' | 'inspect-physical-adapters' | 'inspect-transition-adapters' }
+  | { op: 'warmup-adapters'; module: typeof ADAPTER_WARMUP_MODULES[number] }
   | { op: 'read' | 'binary' | 'remove'; name: string }
   | { op: 'protect'; name: string }
   | { op: 'quarantine'; name: string; contentHash: string }
@@ -13,8 +15,10 @@ export type RecoveryRequest =
 
 export function validateRecoveryRequest(value: RecoveryRequest): void {
   const fields = Object.keys(value).sort().join(',')
-  if (value.op === 'ensure' || value.op === 'warmup' || value.op === 'inspect-dns-policy' || value.op === 'inspect-physical-dns' || value.op === 'inspect-network-identity') {
+  if (value.op === 'ensure' || value.op === 'warmup' || value.op === 'inspect-dns-policy' || value.op === 'inspect-physical-dns' || value.op === 'inspect-network-identity' || value.op === 'inspect-physical-adapters' || value.op === 'inspect-transition-adapters') {
     if (fields === 'op') return
+  } else if (value.op === 'warmup-adapters') {
+    if (fields === 'module,op' && ADAPTER_WARMUP_MODULES.includes(value.module)) return
   } else if (value.op === 'inspect-tun') {
     if (fields === 'alias,op' && typeof value.alias === 'string' && /^(Ethernet (?:[5-9]|1[0-2])|VPNTE-TUN|awg-tun)$/.test(value.alias)) return
   } else if (value.op === 'inspect-runtime' || value.op === 'inspect-runtime-acl' || value.op === 'stop-runtime') {
@@ -130,6 +134,12 @@ ${DNS_POLICY_SNAPSHOT_SCRIPT}
 function Read-PhysicalAdapterDns {
 ${PHYSICAL_ADAPTER_DNS_SCRIPT}
 }
+function Read-PhysicalAdapters {
+${PHYSICAL_ADAPTER_SNAPSHOT_SCRIPT}
+}
+function Read-TransitionAdapters {
+${TRANSITION_ADAPTER_SNAPSHOT_SCRIPT}
+}
 function Read-AdaptiveNetworkIdentity {
 ${ADAPTIVE_NETWORK_IDENTITY_SCRIPT}
 }
@@ -177,7 +187,7 @@ function Assert-RecoveryDirectories($root, [bool]$create) {
   return $true
 }
 function Invoke-RecoveryOperation($request) {
-  if ($request.op -isnot [string] -or @('warmup','inspect-tun','inspect-runtime','inspect-runtime-acl','stop-runtime','inspect-dns-policy','inspect-physical-dns','inspect-network-identity','ensure','read','binary','remove','protect','quarantine') -cnotcontains $request.op) { throw 'Unknown recovery worker operation' }
+  if ($request.op -isnot [string] -or @('warmup','warmup-adapters','inspect-tun','inspect-runtime','inspect-runtime-acl','stop-runtime','inspect-dns-policy','inspect-physical-dns','inspect-network-identity','inspect-physical-adapters','inspect-transition-adapters','ensure','read','binary','remove','protect','quarantine') -cnotcontains $request.op) { throw 'Unknown recovery worker operation' }
   $fields = @($request.PSObject.Properties.Name | Sort-Object) -join ','
   switch -Exact ($request.op) {
     { $_ -cin @('inspect-runtime','inspect-runtime-acl','stop-runtime') } {
@@ -205,8 +215,22 @@ function Invoke-RecoveryOperation($request) {
     'warmup' {
       if ($fields -ne 'op') { throw 'Invalid recovery worker fields' }
       Import-Module -Name (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1') -ErrorAction Stop
-      Import-Module NetAdapter,DnsClient,NetTCPIP -ErrorAction Stop
       return 'RECOVERY_MODULES_READY'
+    }
+    'warmup-adapters' {
+      if ($fields -cne 'module,op' -or $request.module -isnot [string] -or @(${ADAPTER_WARMUP_MODULES.map(name => `'${name}'`).join(',')}) -cnotcontains $request.module) { throw 'Invalid adapter warm-up fields' }
+      Import-Module $request.module -ErrorAction Stop
+      return 'RECOVERY_MODULES_READY'
+    }
+    'inspect-physical-adapters' {
+      if ($fields -cne 'op') { throw 'Invalid recovery worker fields' }
+      $snapshot = Read-PhysicalAdapters
+      if ($null -eq $snapshot) { return '[]' }
+      return $snapshot
+    }
+    'inspect-transition-adapters' {
+      if ($fields -cne 'op') { throw 'Invalid recovery worker fields' }
+      return (Read-TransitionAdapters)
     }
     'inspect-tun' {
       if ($fields -ne 'alias,op' -or $request.alias -isnot [string] -or $request.alias -cnotmatch '^(Ethernet (?:[5-9]|1[0-2])|VPNTE-TUN|awg-tun)$') { throw 'Invalid TUN alias' }
@@ -269,7 +293,7 @@ ${RECOVERY_QUARANTINE_SCRIPT}
 `
 }
 
-export function recoveryWorkerScript(programData: string): string {
+export function recoveryWorkerScript(programData: string, adapterInspectionOnly = false): string {
   return String.raw`
 $ErrorActionPreference='Stop'
 $ProgressPreference='SilentlyContinue'
@@ -285,6 +309,7 @@ while ($line = [Console]::In.ReadLine()) {
     $cmd = $line | ConvertFrom-Json -ErrorAction Stop
     if ((@($cmd.PSObject.Properties.Name | Sort-Object) -join ',') -cne 'id,request' -or $cmd.id -isnot [int] -or $cmd.id -le 0) { throw 'Invalid recovery envelope' }
     $id = $cmd.id
+    ${adapterInspectionOnly ? "if (@('warmup-adapters','inspect-physical-dns','inspect-tun','inspect-physical-adapters','inspect-transition-adapters') -cnotcontains $cmd.request.op) { throw 'Adapter inspection operation refused' }" : ''}
     $value = Invoke-RecoveryOperation $cmd.request
     if ($value -isnot [string] -or [Text.Encoding]::UTF8.GetByteCount($value) -gt ${RECOVERY_MAX_BYTES * 2}) { throw 'Invalid recovery operation output' }
     # PS 5.1 Get-Content attaches provider properties to its string. Without

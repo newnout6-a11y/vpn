@@ -12,6 +12,7 @@ vi.mock('fs/promises', () => {
 vi.mock('./recoveryManifest', () => ({ recoveryManifestPath: () => 'C:\\fixture\\manifest.json', readRecoveryManifest: vi.fn(async () => null), writeRecoveryManifest: fixture.persist, removeRecoveryManifest: vi.fn() }))
 vi.mock('./recoveryPsWorker', () => ({
   RecoveryWorkerError: class extends Error {},
+  executeAdapterInspection: vi.fn(async (op: string) => (await fixture.ps(op === 'inspect-physical-adapters' ? 'Get-NetConnectionProfile' : 'netsh interface teredo show state')).stdout),
   executeRecoveryOperation: vi.fn(async () => JSON.stringify(['smartNameResolution', 'parallelAandAAAA'].map(tag => ({ tag, exists: false, type: null, data: null }))))
 }))
 vi.mock('./elevatedPsHelper', () => ({ isElevatedPsHelperRunning: () => true, execElevatedPs: fixture.ps }))
