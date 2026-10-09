@@ -74,12 +74,25 @@ $rows | ConvertTo-Json -Compress -Depth 4
 `
 
 export const TRANSITION_ADAPTER_SNAPSHOT_SCRIPT = `
-$teredo = netsh interface teredo show state
-$sixToFour = netsh interface 6to4 show state
-$isatap = netsh interface isatap show state
+$teredo = $null
+$sixToFour = $null
+$isatap = $null
+try {
+  $t = Get-CimInstance -Namespace root/StandardCimv2 -ClassName MSFT_NetTeredoConfiguration -ErrorAction Stop
+  $s = Get-CimInstance -Namespace root/StandardCimv2 -ClassName MSFT_Net6to4Configuration -ErrorAction Stop
+  $i = Get-CimInstance -Namespace root/StandardCimv2 -ClassName MSFT_NetISATAPConfiguration -ErrorAction Stop
+  $teredoMap = @('default', 'relay', 'client', 'server', 'disabled', 'automatic', 'enterpriseclient', 'natawareclient')
+  $stateMap = @('default', 'automatic', 'enabled', 'disabled')
+  if ($null -ne $t.Type -and $t.Type -ge 0 -and $t.Type -lt $teredoMap.Length) { $teredo = 'Type : ' + $teredoMap[$t.Type] }
+  if ($null -ne $s.State -and $s.State -ge 0 -and $s.State -lt $stateMap.Length) { $sixToFour = '6to4 Service State : ' + $stateMap[$s.State] }
+  if ($null -ne $i.State -and $i.State -ge 0 -and $i.State -lt $stateMap.Length) { $isatap = 'ISATAP State : ' + $stateMap[$i.State] }
+} catch {}
+if (-not $teredo) { $teredo = (netsh interface teredo show state) -join [Environment]::NewLine }
+if (-not $sixToFour) { $sixToFour = (netsh interface 6to4 show state) -join [Environment]::NewLine }
+if (-not $isatap) { $isatap = (netsh interface isatap show state) -join [Environment]::NewLine }
 [pscustomobject]@{
-  teredo = ($teredo -join [Environment]::NewLine)
-  sixToFour = ($sixToFour -join [Environment]::NewLine)
-  isatap = ($isatap -join [Environment]::NewLine)
+  teredo = $teredo
+  sixToFour = $sixToFour
+  isatap = $isatap
 } | ConvertTo-Json -Compress
 `

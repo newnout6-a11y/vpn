@@ -1352,7 +1352,8 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
         protocol: activeServer.protocol as VpnProfile['protocol'],
         outbound,
         clientDevice: activeServer.clientDevice,
-        clientFingerprint: activeServer.clientFingerprint
+        clientFingerprint: activeServer.clientFingerprint,
+        resolvedIp: activeServer.resolvedIp || null
       }
       logEvent('info', 'tun', 'using server-picker active profile', {
         id: activeServer.id,
@@ -1838,6 +1839,7 @@ app.whenReady().then(async () => {
     isQuitting || shutdownInProgress || connectionLifecycle.busy || tunController.getStatus().running)
 
   createWindow()
+  void serverPicker.resolveAndPersistProfileIps().catch(() => undefined)
   tray = createTray(mainWindow!, {
     onStart: startProtectionFromTray,
     onStop: stopProtection,

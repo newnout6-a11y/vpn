@@ -2967,5 +2967,6 @@ export const serverPicker = {
   setProfileClientDevice,
   getLastSuccessfulTunnelProbeAt,
   hasRecentTunnelProbeConfirmation,
+  resolveAndPersistProfileIps,
   registerHandlers: registerServerPickerHandlers
 }

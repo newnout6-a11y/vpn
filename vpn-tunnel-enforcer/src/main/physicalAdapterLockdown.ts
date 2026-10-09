@@ -367,7 +367,15 @@ async function snapshotPhysicalAdapters(): Promise<AdapterSnapshot[]> {
 }
 
 function netshValue(raw: string, label: string): string | null {
-  const line = raw.split(/\r?\n/).find(x => x.trim().toLowerCase().startsWith(label.toLowerCase()))
+  const lowerLabel = label.toLowerCase()
+  const line = raw.split(/\r?\n/).find(x => {
+    const t = x.trim().toLowerCase()
+    if (t.startsWith(lowerLabel)) return true
+    if (lowerLabel === 'type' && (t.startsWith('тип') || t.startsWith('type'))) return true
+    if (lowerLabel === '6to4 service state' && (t.includes('6-на-4') || t.includes('6to4'))) return true
+    if (lowerLabel === 'isatap state' && t.includes('isatap')) return true
+    return false
+  })
   if (!line) return null
   const value = line.split(':').slice(1).join(':').trim()
   return value ? value.split(/\s+/)[0].toLowerCase() : null
