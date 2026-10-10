@@ -86,6 +86,14 @@ describe('physicalAdapterLockdown source regressions', () => {
     expect(readFileSync(join(process.cwd(), 'src/main/physicalAdapterSnapshot.ts'), 'utf8')).toContain('Get-NetConnectionProfile -InterfaceIndex $a.ifIndex')
     expect(source()).toContain('isCellularOrTetheringAdapter(alias, description, dnsServers, gateways)')
   })
+  it('reuses the IPv4 default-route query when classifying IPv6-only uplinks', () => {
+    const snapshot = readFileSync(join(process.cwd(), 'src', 'main', 'physicalAdapterSnapshot.ts'), 'utf8')
+    const ipv4DefaultRouteQuery = "Get-NetRoute -InterfaceIndex $a.ifIndex -DestinationPrefix '0.0.0.0/0'"
+
+    expect(snapshot.split(ipv4DefaultRouteQuery)).toHaveLength(2)
+    expect(snapshot).toContain('$routes4 = @(' + ipv4DefaultRouteQuery)
+    expect(snapshot).toContain('(-not $routes4)')
+  })
   it('rejects injected/ambiguous adapter, transition and registry snapshots (AT-03-012)', async () => {
     const { validateLockdownManifest } = await import('./physicalAdapterLockdown')
     const fixture = {

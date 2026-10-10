@@ -3,6 +3,7 @@ import { executeAdapterInspection, executeRecoveryOperation, RecoveryWorkerError
 import { DNS_POLICY_SNAPSHOT_SCRIPT } from './recoveryPsProtocol'
 import { PHYSICAL_ADAPTER_DNS_SCRIPT, PHYSICAL_ADAPTER_SNAPSHOT_SCRIPT, TRANSITION_ADAPTER_SNAPSHOT_SCRIPT } from './physicalAdapterSnapshot'
 import { isIP } from 'net'
+import { networkInterfaces } from 'os'
 /**
  * Hard lockdown of the physical adapter while TUN is up.
  *
@@ -121,6 +122,7 @@ interface LockdownManifest {
 interface LockdownOptions {
   forceDns?: boolean
   signal?: AbortSignal
+  forceFresh?: boolean
 }
 
 interface RollbackOptions {
@@ -290,17 +292,38 @@ async function runPS(script: string, timeoutMs = 30000, signal?: AbortSignal): P
  */
 let cachedAdaptersSnapshot: AdapterSnapshot[] | null = null
 let cachedAdaptersSnapshotTime = 0
+let cachedNetSignature = ''
 let snapshotPromise: Promise<AdapterSnapshot[]> | null = null
+
+function getLocalNetSignature(): string {
+  try {
+    const ifaces = networkInterfaces()
+    const keys = Object.keys(ifaces).sort()
+    return keys.map(k => `${k}:${(ifaces[k] || []).map(i => `${i.address}-${i.mac}-${i.internal}`).join(',')}`).join(';')
+  } catch {
+    return ''
+  }
+}
 
 export function clearPhysicalAdaptersSnapshotCache(): void {
   cachedAdaptersSnapshot = null
   cachedAdaptersSnapshotTime = 0
+  cachedNetSignature = ''
   snapshotPromise = null
 }
 
-async function snapshotPhysicalAdapters(): Promise<AdapterSnapshot[]> {
-  // Return the fresh snapshot if taken within 10s to avoid expensive PS reruns.
-  if (cachedAdaptersSnapshot && Date.now() - cachedAdaptersSnapshotTime < 10000) {
+export async function warmPhysicalAdaptersSnapshot(): Promise<void> {
+  const currentSig = getLocalNetSignature()
+  if (cachedAdaptersSnapshot && Date.now() - cachedAdaptersSnapshotTime < 60000 && currentSig && currentSig === cachedNetSignature) {
+    return
+  }
+  await snapshotPhysicalAdapters()
+}
+
+async function snapshotPhysicalAdapters(options?: { forceFresh?: boolean }): Promise<AdapterSnapshot[]> {
+  const currentSig = getLocalNetSignature()
+  // Return the fresh snapshot if taken within 30s to avoid expensive PS reruns, provided network topology has not changed.
+  if (!options?.forceFresh && cachedAdaptersSnapshot && Date.now() - cachedAdaptersSnapshotTime < 30000 && currentSig && currentSig === cachedNetSignature) {
     return cachedAdaptersSnapshot
   }
   // Return the in-flight promise directly so concurrent callers share one PS run.
@@ -354,6 +377,7 @@ async function snapshotPhysicalAdapters(): Promise<AdapterSnapshot[]> {
     })
     cachedAdaptersSnapshot = result
     cachedAdaptersSnapshotTime = Date.now()
+    cachedNetSignature = currentSig
     return result
   })().finally(() => {
     snapshotPromise = null
@@ -526,7 +550,7 @@ export async function applyPhysicalAdapterLockdown(tunDnsIpv4: string, options: 
     clearPhysicalAdaptersSnapshotCache()
     let warning = 'physical adapter set changed; lockdown coverage is not verified'
     try {
-      const current = await snapshotPhysicalAdapters()
+      const current = await snapshotPhysicalAdapters({ forceFresh: true })
       const identity = (a: AdapterSnapshot) => (a.interfaceGuid || '').replace(/[{}]/g, '').toLowerCase()
       const expectedIds = new Set(expected.map(identity))
       if (current.length > 0 && current.length === expected.length && expectedIds.size === expected.length &&
@@ -572,7 +596,7 @@ export async function applyPhysicalAdapterLockdown(tunDnsIpv4: string, options: 
     return { applied: true, adapters: existing.adapters.length, warnings: [] }
   }
 
-  clearPhysicalAdaptersSnapshotCache()
+  if (options.forceFresh) clearPhysicalAdaptersSnapshotCache()
   const [adapters, transitionAdapters, dnsRegistryPolicy] = await Promise.all([
     snapshotPhysicalAdapters(),
     snapshotTransitionAdapters(),
