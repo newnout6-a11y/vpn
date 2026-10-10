@@ -1,0 +1,245 @@
+<!--{"path":"/","title":"VPN Tunnel Enforcer — туннель упал, интернет тоже","description":"Windows-клиент с fail-closed kill-switch на уровне WFP, перехватом DNS и 10 протоколами. Не обещает безопасность — принуждает к ней.","nav":"","bodyClass":"home"}-->
+<section class="hero" data-tilt-host>
+  <canvas class="hero__canvas" id="tunnel" aria-hidden="true"></canvas>
+  <div class="glow glow--v" style="width:520px;height:520px;left:-160px;top:10%" aria-hidden="true"></div>
+  <div class="wrap hero__in" data-tilt-host>
+    <div class="hero__copy">
+      <a class="hero__badge" href="{{base}}roadmap/"><b>v1.1.22</b> Windows 10/11 · Electron 44 · sing-box {{icon:arrow-right|icon}}</a>
+      <h1 class="h1 split-words">Туннель упал? <span class="grad">Интернет — тоже.</span></h1>
+      <p class="lead" data-reveal style="--d:.25s">Tunnel Enforcer — Windows-клиент, который не доверяет сети. Туннель, kill-switch на уровне брандмауэра и перехват DNS работают как одна система: если безопасность нельзя доказать — трафик не идёт.</p>
+      <div class="hero__actions" data-reveal style="--d:.35s">
+        <a class="btn btn--primary btn--lg" href="{{base}}download/">Скачать для Windows {{icon:download|icon}}</a>
+        <a class="btn btn--ghost btn--lg" href="{{base}}how-it-works/">Как это устроено {{icon:arrow-right|icon}}</a>
+      </div>
+      <ul class="hero__meta" data-reveal style="--d:.45s">
+        <li>{{icon:check|icon}} Открытый код, MIT</li>
+        <li>{{icon:check|icon}} Без аналитики и телеметрии</li>
+        <li>{{icon:check|icon}} Секреты шифруются DPAPI</li>
+      </ul>
+    </div>
+
+    <div class="hero__visual" style="--d:.3s" data-reveal="scale">
+      <div class="float-chip float-chip--a">{{icon:shield-check|icon}} <span>Kill-switch: <b>Block</b></span></div>
+      <div class="float-chip float-chip--b">{{icon:lock|icon}} <span>DNS → туннель (DoH)</span></div>
+      <div class="appwin" id="hero-win" data-tilt role="img" aria-label="Окно приложения: статус «Защищено», живой журнал запуска туннеля">
+        <div class="appwin__bar"><i></i><i></i><i></i><span>VPN Tunnel Enforcer</span></div>
+        <div class="appwin__body">
+          <div class="status">
+            <div class="status__ring">{{icon:shield-check|icon}}</div>
+            <div><b>Защищено</b><small>Hard Mode · directVpn · TUN Up</small></div>
+          </div>
+          <div class="kv">
+            <div><small>Kill-switch</small><b class="ok">strict</b></div>
+            <div><small>Утечки</small><b class="ok">0 найдено</b></div>
+            <div><small>DNS</small><b>hijack → DoH</b></div>
+            <div><small>Watchdog</small><b>15 с · egress</b></div>
+          </div>
+          <div class="log" id="hero-log" aria-hidden="true"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="hero__scroll" aria-hidden="true">SCROLL<i></i></div>
+</section>
+
+<div class="marquee" aria-label="Поддерживаемые протоколы">
+  <div class="marquee__track">
+    <span>VLESS · REALITY</span><span>WireGuard</span><span>Hysteria2</span><span>TUIC</span><span>Shadowsocks 2022</span><span>VMess</span><span>Trojan</span><span>Naive</span><span>AnyTLS</span><span>ShadowTLS</span>
+    <span>VLESS · REALITY</span><span>WireGuard</span><span>Hysteria2</span><span>TUIC</span><span>Shadowsocks 2022</span><span>VMess</span><span>Trojan</span><span>Naive</span><span>AnyTLS</span><span>ShadowTLS</span>
+  </div>
+</div>
+
+<section class="section" id="problem">
+  <div class="wrap">
+    <div class="section__head section__head--center" data-reveal>
+      <span class="eyebrow">Проблема</span>
+      <h2 class="h2">Обычный VPN обещает защиту. <span class="grad">Enforcer — обеспечивает.</span></h2>
+      <p class="lead">Большинство клиентов исходят из того, что туннель всегда работает. Реальность: связь обрывается, адаптеры переключаются, приложения идут мимо. Посмотрите, что происходит в этот момент.</p>
+    </div>
+
+    <div class="sim" id="ks" data-reveal="scale">
+      <div class="sim__top">
+        <h3>{{icon:unplug|icon}} Симулятор: обрыв туннеля</h3>
+        <button class="btn btn--ghost btn--sm" data-ks-toggle>Оборвать туннель</button>
+        <div class="seg" role="group" aria-label="Автоматический режим"><button data-ks-auto aria-pressed="true">Авто-цикл</button></div>
+      </div>
+      <div class="sim__body">
+        <div class="ks">
+          <div class="ks__lane" data-kind="plain" data-s="ok">
+            <h4>{{icon:wifi-off|icon}} Типичный VPN-клиент</h4>
+            <small>Kill-switch как опция, часто — правило по интерфейсу</small>
+            <svg class="ks__svg" viewBox="0 0 300 150" role="img" aria-label="Схема: при обрыве туннеля пакеты уходят напрямую"></svg>
+            <div class="ks__state"><i></i><span>Трафик идёт через туннель</span></div>
+          </div>
+          <div class="ks__lane" data-kind="shield" data-s="ok">
+            <h4>{{icon:shield-check|icon}} Tunnel Enforcer</h4>
+            <small>DefaultOutboundAction=Block + allow-правила</small>
+            <svg class="ks__svg" viewBox="0 0 300 150" role="img" aria-label="Схема: при обрыве туннеля брандмауэр блокирует весь трафик"></svg>
+            <div class="ks__state"><i></i><span>Трафик идёт через туннель</span></div>
+          </div>
+        </div>
+        <p class="muted" style="margin-top:22px;font-size:14.5px;max-width:78ch">Схема упрощена. В реальности Enforcer ставит <code class="mono">DefaultOutboundAction=Block</code> на всех трёх профилях Windows Firewall и добавляет allow-правила только для sing-box, самого приложения, TUN-адаптера, DHCP, NTP и LAN. Block-правила по интерфейсу не используются: в Windows Block всегда побеждает Allow и блокировал бы сам sing-box.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section section--tight">
+  <div class="wrap">
+    <div class="stats" data-stagger>
+      <div class="stat" data-reveal><b data-count="10">0</b><span>протоколов: от VLESS-REALITY до ShadowTLS</span></div>
+      <div class="stat" data-reveal><b data-count="3">0</b><span>профиля брандмауэра под fail-closed политикой</span></div>
+      <div class="stat" data-reveal><b data-count="2874" data-sep>0</b><span>автотеста в последнем зелёном прогоне (10.10.2026)</span></div>
+      <div class="stat" data-reveal><b data-count="0">0</b><span>SDK аналитики и трекеров в клиенте</span></div>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="features">
+  <div class="wrap">
+    <div class="section__head" data-reveal>
+      <span class="eyebrow">Возможности</span>
+      <h2 class="h2">Не набор галочек, а <span class="grad">единая система</span></h2>
+      <p class="lead">Каждая функция опирается на другую: kill-switch поднимается только после готового TUN, DNS перехватывается внутри туннеля, диагностика проверяет всё это независимо.</p>
+    </div>
+    <div class="bento" data-stagger>
+      <article class="card b-4" data-reveal>
+        <div class="card__icon card__icon--g">{{icon:shield-check|icon}}</div>
+        <h3>Kill-switch, который по умолчанию блокирует</h3>
+        <p>Три режима: <code class="mono">off</code>, <code class="mono">standard</code>, <code class="mono">strict</code>. В strict при аварийном восстановлении блокировка сохраняется до явного действия пользователя. Манифест отката пишется атомарно, после сбоя приложение восстанавливает состояние само.</p>
+  <div class="tags" style="margin-top:18px"><span class="tag tag--g">fail-closed</span><span class="tag">WFP</span><span class="tag">Boot Recovery</span></div>
+      </article>
+      <article class="card b-2" data-reveal>
+        <div class="card__icon">{{icon:globe|icon}}</div>
+        <h3>DNS не доходит до провайдера</h3>
+        <p>Весь DNS из TUN перехватывается и уходит в резолвер sing-box. DoH — через туннель.</p>
+      </article>
+      <article class="card b-2" data-reveal>
+        <div class="card__icon">{{icon:route|icon}}</div>
+        <h3>Smart RU</h3>
+        <p>Госсервисы и <code class="mono">.ru</code> идут напрямую и видят реальный российский адрес, остальное — через туннель.</p>
+      </article>
+      <article class="card b-2" data-reveal>
+        <div class="card__icon">{{icon:split|icon}}</div>
+        <h3>Split tunneling по процессам</h3>
+        <p>Для каждого приложения — direct, vpn или none. Применяется без снятия защиты.</p>
+      </article>
+      <article class="card b-2" data-reveal>
+        <div class="card__icon">{{icon:radar|icon}}</div>
+        <h3>Само ищет утечки</h3>
+        <p>Активный self-test: пробует выйти в сеть через физический адаптер в обход туннеля. Вышло — это утечка.</p>
+      </article>
+      <article class="card b-3" data-reveal>
+        <div class="card__icon">{{icon:file-search|icon}}</div>
+        <h3>Форензика трафика на Rust-сайдкаре</h3>
+        <p>ETW-сессия с пятью провайдерами показывает, куда и почему пошёл пакет. Только метаданные: 5-tuple и DNS-имена, не содержимое. Экспорт — с обезличиванием.</p>
+      </article>
+      <article class="card b-3" data-reveal>
+        <div class="card__icon">{{icon:repeat|icon}}</div>
+        <h3>Планировщик, ротация и автопилот</h3>
+        <p>Окна подключения по расписанию, ротация серверов с интервалом 5–1440 минут, failover по соседним ключам группы при падении.</p>
+      </article>
+    </div>
+    <div style="margin-top:34px;text-align:center" data-reveal><a class="btn btn--ghost" href="{{base}}features/">Все возможности {{icon:arrow-right|icon}}</a></div>
+  </div>
+</section>
+
+<section class="section" id="routing" style="background:linear-gradient(180deg,transparent,rgba(124,92,255,.05),transparent)">
+  <div class="wrap">
+    <div class="section__head" data-reveal>
+      <span class="eyebrow">Интерактив</span>
+      <h2 class="h2">Куда пойдёт ваш пакет? <span class="grad">Проверьте сами.</span></h2>
+      <p class="lead">Порядок правил маршрутизации — не маркетинг, а то, как работает sing-box-конфиг клиента. Введите адрес и посмотрите, какое правило сработает первым.</p>
+    </div>
+    <div class="sim" id="rt" data-reveal="scale">
+      <div class="sim__top">
+        <h3>{{icon:workflow|icon}} Симулятор маршрутизации</h3>
+        <div class="seg" role="group" aria-label="Smart RU"><button id="rt-smart" aria-pressed="true">Smart RU: включён</button></div>
+      </div>
+      <div class="sim__body rt">
+        <div>
+          <label class="field"><span class="sr-only">Адрес</span>{{icon:search|icon}}<input id="rt-input" type="text" inputmode="url" autocomplete="off" spellcheck="false" placeholder="example.com, udp://x:443, stun.l.google.com:19302"></label>
+          <div class="chips">
+            <button class="chip" data-rt-sample="https://github.com">github.com</button>
+            <button class="chip" data-rt-sample="gosuslugi.ru">gosuslugi.ru</button>
+            <button class="chip" data-rt-sample="https://api.ipify.org">api.ipify.org</button>
+            <button class="chip" data-rt-sample="udp://youtube.com:443">QUIC :443</button>
+            <button class="chip" data-rt-sample="stun.l.google.com:19302">STUN</button>
+            <button class="chip" data-rt-sample="192.168.1.10">LAN</button>
+            <button class="chip" data-rt-sample="dns:example.com">DNS</button>
+          </div>
+          <div class="rt__result"><div class="verdict" id="rt-verdict" data-v=""></div></div>
+          <p class="muted" style="font-size:13.5px;margin-top:18px">Список упрощён: полный порядок включает пользовательские доменные правила и health-пробы.</p>
+        </div>
+        <ol class="rules" id="rt-rules" aria-label="Правила по порядку проверки"></ol>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="wrap split">
+    <div data-reveal="left">
+      <span class="eyebrow">Серверы</span>
+      <h2 class="h2" style="margin:18px 0 20px">Ваши ключи. <span class="grad">Любая точка мира.</span></h2>
+      <p class="lead" style="margin-bottom:26px">Enforcer — клиент, а не сервис: вы приносите свои подписки и ключи, а он превращает их в защищённое соединение. Серверы мы не продаём, а ваши данные не храним.</p>
+      <ul class="checks">
+        <li>{{icon:check|icon}}<span><b>Импорт подписок и ключей.</b> Парсер понимает 10 протоколов и экспортирует обратно в URI.</span></li>
+        <li>{{icon:check|icon}}<span><b>Проверка здоровья ключей.</b> Изолированное ядро, HTTPS к Cloudflare, Yandex и Gstatic, таймаут 8 с.</span></li>
+        <li>{{icon:check|icon}}<span><b>Failover по группе.</b> Упал сервер — клиент перейдёт на соседний ключ, не снимая защиту.</span></li>
+      </ul>
+      <p class="muted" style="margin-top:22px;font-size:13.5px">Города на глобусе — иллюстрация, а не список наших узлов.</p>
+    </div>
+    <div data-reveal="right" style="position:relative">
+      <div class="globe-wrap" id="globe"><canvas aria-label="Вращающийся глобус с маршрутами до серверов (иллюстрация)" role="img"></canvas><div class="globe-hint">Потяните, чтобы повернуть · <span id="globe-label"></span></div></div>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="wrap">
+    <div class="section__head section__head--center" data-reveal>
+      <span class="eyebrow">Сравнение</span>
+      <h2 class="h2">Чем это отличается от <span class="grad">типичного клиента</span></h2>
+    </div>
+    <div class="cmp scroll-x" data-reveal="scale">
+      <table>
+        <thead><tr><th>Возможность</th><th>Tunnel Enforcer</th><th>Типичный VPN-клиент</th></tr></thead>
+        <tbody>
+          <tr><td>Поведение при обрыве</td><td class="y">{{icon:check|icon}}Блокировка всего трафика вне VPN</td><td class="p">{{icon:triangle-alert|icon}}Зависит от настройки</td></tr>
+          <tr><td>Перехват DNS внутри туннеля</td><td class="y">{{icon:check|icon}}hijack-dns + DoH через туннель</td><td class="p">{{icon:triangle-alert|icon}}Часто оставляет системный DNS</td></tr>
+          <tr><td>Политика IPv6</td><td class="y">{{icon:check|icon}}IPv4-only TUN, IPv6 закрыт lockdown и WFP</td><td class="n">{{icon:x|icon}}Частый источник утечек</td></tr>
+          <tr><td>Самопроверка на утечки</td><td class="y">{{icon:check|icon}}Активный тест через физический адаптер</td><td class="n">{{icon:x|icon}}Нет</td></tr>
+          <tr><td>Split tunneling</td><td class="y">{{icon:check|icon}}По процессу, с горячей перезагрузкой</td><td class="p">{{icon:triangle-alert|icon}}Чаще всего по подсетям</td></tr>
+          <tr><td>Форензика трафика</td><td class="y">{{icon:check|icon}}ETW-сайдкар, вердикты, экспорт с redaction</td><td class="n">{{icon:x|icon}}Нет</td></tr>
+          <tr><td>Исходный код</td><td class="y">{{icon:check|icon}}Открыт, MIT</td><td class="p">{{icon:triangle-alert|icon}}Как правило закрыт</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="muted" style="text-align:center;margin-top:16px;font-size:13.5px">«Типичный клиент» — обобщение, а не конкретный продукт. Поведение конкретных клиентов отличается.</p>
+  </div>
+</section>
+
+<section class="section section--tight">
+  <div class="wrap">
+    <div class="callout callout--g" data-reveal>
+      {{icon:scale|icon}}
+      <div><b>Честность — часть продукта.</b> В репозитории есть раздел «Что пока не реализовано», а наш README прямо говорит, какие проверки не пройдены. AmneziaWG, FakeIP, DoQ и изолированные браузеры — в плане, но не в коде. <a href="{{base}}roadmap/" style="text-decoration:underline">Смотреть дорожную карту →</a></div>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="wrap">
+    <div class="cta" data-reveal="scale">
+      <div class="glow glow--g" style="width:420px;height:420px;right:-120px;bottom:-200px" aria-hidden="true"></div>
+      <span class="eyebrow eyebrow--green">Готовы проверить?</span>
+      <h2 class="h2" style="margin-top:18px">Включите защиту, которая <span class="grad">не спрашивает разрешения</span></h2>
+      <p class="lead">Установщик для Windows 10 и 11. Права администратора нужны только для Hard Mode, запрос UAC встроен в приложение.</p>
+      <div class="hero__actions">
+        <a class="btn btn--primary btn--lg" href="{{base}}download/">Скачать {{icon:download|icon}}</a>
+        <a class="btn btn--ghost btn--lg" href="https://github.com/newnout6-a11y/vpn" rel="noopener">{{icon:github|icon}} Исходный код</a>
+      </div>
+    </div>
+  </div>
+</section>

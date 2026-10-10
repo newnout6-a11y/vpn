@@ -1,0 +1,69 @@
+<!--{"path":"/download/","title":"Скачать — VPN Tunnel Enforcer для Windows","description":"Требования к системе и сборка VPN Tunnel Enforcer из исходного кода. Публичный установщик готовится.","nav":"download"}-->
+<section class="page-hero">
+  <div class="bg-grid" aria-hidden="true"></div>
+  <div class="glow glow--v" style="width:480px;height:480px;right:-100px;top:0" aria-hidden="true"></div>
+  <div class="wrap">
+    <nav class="crumbs" aria-label="Хлебные крошки"><a href="{{base}}./">Главная</a><span>/</span><span>Скачать</span></nav>
+    <h1 class="h1 split-words">Установите <span class="grad">на Windows</span></h1>
+    <p class="lead" data-reveal style="--d:.2s">Клиент для Windows 10 (сборка 19041+) и Windows 11, x64. Версия 1.1.22.</p>
+  </div>
+</section>
+
+<section class="section section--tight">
+  <div class="wrap split split--top">
+    <div data-reveal="left" style="display:grid;gap:22px">
+      <div class="os">
+        <img src="{{base}}assets/logo.svg" alt="" width="68" height="68">
+        <div>
+          <h3>VPN Tunnel Enforcer 1.1.22</h3>
+          <p class="muted" style="margin-bottom:16px">Установщик NSIS и портативная версия</p>
+          <span class="tag tag--a">публичный релиз готовится</span>
+        </div>
+      </div>
+      <div class="callout">{{icon:triangle-alert|icon}}<div><b>Публичного установщика пока нет.</b> Перед релизом нужно закрыть проверку установки и обновления на разных версиях Windows и опубликовать контрольные суммы. Решение о подписи кода тоже ещё не принято, поэтому первые сборки, вероятно, будут без подписи, и SmartScreen покажет предупреждение. Это наш вывод, а не гарантия.</div></div>
+      <a class="btn btn--primary btn--lg" href="https://github.com/newnout6-a11y/vpn/releases" rel="noopener" style="justify-self:start">{{icon:github|icon}} Страница релизов</a>
+    </div>
+    <dl class="sysreq" data-reveal="right">
+      <div><dt>ОС</dt><dd>Windows 10 (19041+) или Windows 11, x64</dd></div>
+      <div><dt>Права</dt><dd>Hard Mode — администратор (UAC встроен в приложение). Soft Mode работает без прав.</dd></div>
+      <div><dt>Сеть</dt><dd>Ваша подписка или ключ любого из 10 поддерживаемых протоколов</dd></div>
+      <div><dt>Диск</dt><dd>Нужно место для сессий форензики: по умолчанию до 3 сессий по 512 МБ</dd></div>
+      <div><dt>Лицензия</dt><dd>MIT</dd></div>
+    </dl>
+  </div>
+</section>
+
+<section class="section">
+  <div class="wrap">
+    <div class="section__head" data-reveal><span class="eyebrow">Для разработчиков</span><h2 class="h2">Соберите <span class="grad">из исходников</span></h2><p class="lead">Если вы хотите попробовать уже сейчас, клиент собирается локально. Нужен Node.js 22.13+.</p></div>
+    <div class="split split--top">
+      <div class="term" data-reveal="left">
+        <div class="term__bar"><i></i><i></i><i></i><span>PowerShell</span><button data-copy="#build-code">{{icon:copy|icon}} Копировать</button></div>
+<pre id="build-code"><span class="c"># клонирование и запуск в режиме разработки</span>
+git clone https://github.com/newnout6-a11y/vpn.git
+cd vpn/vpn-tunnel-enforcer
+npm install
+npm run dev
+
+<span class="c"># установщик Windows (NSIS)</span>
+npm run dist:win</pre>
+      </div>
+      <ul class="checks" data-reveal="right">
+        <li>{{icon:check|icon}}<span><b>Откройте окно Electron,</b> а не адрес Vite в браузере: интерфейс использует типизированный мост contextBridge.</span></li>
+        <li>{{icon:triangle-alert|icon}}<span><b>Бинарники нужно добавить вручную.</b> В репозитории нет <code class="mono">sing-box.exe</code>, <code class="mono">xray.exe</code>, <code class="mono">wintun.dll</code> и <code class="mono">libcronet.dll</code>. Положите их в <code class="mono">resources/</code> до сборки.</span></li>
+        <li>{{icon:triangle-alert|icon}}<span><b>Rust-сайдкар опционален.</b> Без cargo в установщик попадёт только PowerShell-фолбэк, он опрашивает журнал событий и на части систем теряет события.</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="wrap">
+    <div class="section__head" data-reveal><span class="eyebrow">Первый запуск</span><h2 class="h2">Три шага <span class="grad">до защиты</span></h2></div>
+    <div class="grid grid--3" data-stagger>
+      <article class="card" data-reveal><div class="card__icon">{{icon:key-round|icon}}</div><h3>1. Добавьте ключ</h3><p>Вставьте подписку или ключ любого поддерживаемого протокола. Клиент проверит его в изолированном ядре.</p></article>
+      <article class="card" data-reveal><div class="card__icon">{{icon:gauge|icon}}</div><h3>2. Planner подскажет режим</h3><p>Connection Planner проверит систему и порекомендует Hard или Soft Mode.</p></article>
+      <article class="card" data-reveal><div class="card__icon card__icon--g">{{icon:shield-check|icon}}</div><h3>3. Запустите self-test</h3><p>Проверка на утечки покажет, остаётся ли физический адаптер заблокированным.</p></article>
+    </div>
+  </div>
+</section>

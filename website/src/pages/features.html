@@ -1,0 +1,118 @@
+<!--{"path":"/features/","title":"Возможности — VPN Tunnel Enforcer","description":"Hard и Soft режимы, kill-switch WFP, перехват DNS, Smart RU, split tunneling по процессам, форензика трафика, планировщик и локальный API.","nav":"features"}-->
+<section class="page-hero">
+  <div class="bg-grid" aria-hidden="true"></div>
+  <div class="glow glow--v" style="width:480px;height:480px;right:-120px;top:0" aria-hidden="true"></div>
+  <div class="wrap">
+    <nav class="crumbs" aria-label="Хлебные крошки"><a href="{{base}}./">Главная</a><span>/</span><span>Возможности</span></nav>
+    <h1 class="h1 split-words">Всё, что нужно, чтобы <span class="grad">доверять соединению</span></h1>
+    <p class="lead" data-reveal style="--d:.2s">Клиент собирает защиту из независимых слоёв. Каждый слой можно проверить отдельно, а сбой любого заканчивается блокировкой, а не тихой утечкой.</p>
+  </div>
+</section>
+
+<section class="section section--tight">
+  <div class="wrap">
+    <div class="section__head" data-reveal><span class="eyebrow">Режимы</span><h2 class="h2">Два способа подключиться</h2></div>
+    <div class="grid grid--2" data-stagger>
+      <article class="card" data-reveal>
+        <div class="card__icon card__icon--g">{{icon:shield-check|icon}}</div>
+        <h3>Hard Mode — системный туннель</h3>
+        <p>Wintun-адаптер и ядро sing-box заворачивают весь трафик системы. Требует администратора, запрос UAC встроен в приложение.</p>
+        <ul class="tl__list">
+          <li>Wintun-адаптер под видом <code class="mono">Ethernet 5…12</code>, подсеть <code class="mono">192.168.250.252/30</code></li>
+          <li>Сателлит xray-core для VLESS-REALITY</li>
+          <li>Watchdog проверяет egress-IP каждые 15 с, авторестарт с бэкоффом 2/5/10 с</li>
+        </ul>
+      </article>
+      <article class="card" data-reveal>
+        <div class="card__icon">{{icon:plug-zap|icon}}</div>
+        <h3>Soft Mode — локальный прокси</h3>
+        <p>SOCKS5/HTTP без прав администратора. Клиент проверяет, что прокси действительно отдаёт другой IP, а не ваш собственный.</p>
+        <ul class="tl__list">
+          <li>Автонастройка окружения: Android Studio, Git, Gradle, <code class="mono">HTTP_PROXY</code></li>
+          <li>Для SOCKS5 пишется <code class="mono">socks5h://</code>, чтобы DNS тоже шёл через прокси</li>
+          <li>Проба прокси каждые 5 с, три промаха — статус <code class="mono">proxy-down</code></li>
+        </ul>
+      </article>
+    </div>
+    <div class="card" style="margin-top:18px" data-reveal>
+      <div class="split" style="gap:30px">
+        <div><div class="card__icon">{{icon:gauge|icon}}</div><h3>Connection Planner</h3><p>Перед стартом клиент одним зондом проверяет TUN, loopback и свои правила, затем выдаёт вердикт <b>ready</b>, <b>protected</b>, <b>blocked</b> или <b>broken</b> и рекомендует режим. Вместо догадок — рекомендация.</p></div>
+        <div class="tags" style="justify-content:flex-end"><span class="tag tag--g">ready</span><span class="tag tag--v">protected</span><span class="tag tag--a">blocked</span><span class="tag tag--r">broken</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="wrap">
+    <div class="section__head" data-reveal><span class="eyebrow">Защита</span><h2 class="h2">Слои, которые страхуют друг друга</h2></div>
+    <div class="layers" data-stagger>
+      <div class="layer" data-reveal><div class="card__icon card__icon--g">{{icon:shield-check|icon}}</div><div><h3>Kill-switch на WFP</h3><p>DefaultOutboundAction=Block на Domain, Private и Public профилях. Режимы off / standard / strict.</p></div><span class="layer__n">01</span></div>
+      <div class="layer" data-reveal><div class="card__icon">{{icon:globe|icon}}</div><div><h3>Перехват DNS</h3><p>hijack-dns для всего DNS из TUN, DoH через туннель, DoT и TCP/53 тоже в туннеле.</p></div><span class="layer__n">02</span></div>
+      <div class="layer" data-reveal><div class="card__icon">{{icon:wifi-off|icon}}</div><div><h3>IPv6 закрыт</h3><p>TUN работает только по IPv4, а IPv6-утечки закрывают lockdown и отдельная WFP-политика.</p></div><span class="layer__n">03</span></div>
+      <div class="layer" data-reveal><div class="card__icon">{{icon:unplug|icon}}</div><div><h3>Анти-WebRTC</h3><p>STUN-запросы (19302/3478) принудительно идут в туннель, чтобы браузер не выдал реальный адрес.</p></div><span class="layer__n">04</span></div>
+      <div class="layer" data-reveal><div class="card__icon">{{icon:globe|icon}}</div><div><h3>Hardening браузеров</h3><p>Политика WebRTC для Chromium в реестре и <code class="mono">user_pref</code> для Firefox.</p></div><span class="layer__n">05</span></div>
+      <div class="layer" data-reveal><div class="card__icon card__icon--r">{{icon:radar|icon}}</div><div><h3>Self-test утечек</h3><p>Активная попытка выйти в сеть через физический адаптер. Если вышло, это утечка.</p></div><span class="layer__n">06</span></div>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="wrap split split--top">
+    <div data-reveal="left">
+      <span class="eyebrow">Маршрутизация</span>
+      <h2 class="h2" style="margin:18px 0 20px">Умные правила, <span class="grad">понятные людям</span></h2>
+      <p class="lead" style="margin-bottom:24px">Smart RU отправляет госсервисы и российские домены напрямую, а IP-чекеры, Google и медиа принудительно через туннель. Обновление не требует перезапуска защиты.</p>
+      <a class="btn btn--ghost" href="{{base}}#routing">Попробовать симулятор {{icon:arrow-right|icon}}</a>
+    </div>
+    <div class="grid" data-stagger data-reveal="right">
+      <div class="card"><h3 style="font-size:18px">Split tunneling по процессу</h3><p>direct, vpn или none для каждого приложения. Применяется горячей перезагрузкой, защита не снимается.</p></div>
+      <div class="card"><h3 style="font-size:18px">Пользовательские доменные правила</h3><p>Свои правила стоят перед Smart RU. Импорт привязан к одноразовому токену нативного диалога.</p></div>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="wrap">
+    <div class="section__head" data-reveal><span class="eyebrow">Диагностика</span><h2 class="h2">Видно, <span class="grad">что на самом деле происходит</span></h2><p class="lead">Десять страниц интерфейса: Dashboard, Servers, SpeedTest, Availability, TrafficHistory, Schedule, Settings, Logs, Maintenance, SplitTunnel. Интерфейс на русском и английском.</p></div>
+    <div class="grid grid--3" data-stagger>
+      <article class="card" data-reveal><div class="card__icon">{{icon:file-search|icon}}</div><h3>Форензика трафика</h3><p>Сессии pktmon и Rust ETW-сайдкар. Вердикты: утечка, путь через TUN, блок kill-switch, MTU, сброс соединения, таймаут.</p><div class="tags" style="margin-top:16px"><span class="tag">5 провайдеров ETW</span><span class="tag">только метаданные</span></div></article>
+      <article class="card" data-reveal><div class="card__icon">{{icon:activity|icon}}</div><h3>Мониторинг IP</h3><p>Гонка запросов к Cloudflare, ipify, icanhazip и myip. Реакция только на смену адреса.</p></article>
+      <article class="card" data-reveal><div class="card__icon">{{icon:package|icon}}</div><h3>Экспорт диагностики</h3><p>ZIP с отчётом. IP, MAC и домены заменяются стабильными токенами, а сырой ETL/PCAPNG не выгружается.</p></article>
+      <article class="card" data-reveal><div class="card__icon">{{icon:timer|icon}}</div><h3>Speed Test и Availability</h3><p>Скорость через туннель и проверка доступности сервисов: открывается только с VPN, напрямую или нигде.</p></article>
+      <article class="card" data-reveal><div class="card__icon">{{icon:server|icon}}</div><h3>Глубокие пробы сервера</h3><p>DNS, TCP, TLS, HTTP, traceroute и throughput запускаются вручную из интерфейса.</p></article>
+      <article class="card" data-reveal><div class="card__icon">{{icon:history|icon}}</div><h3>История трафика</h3><p>Локальные метрики: Leak-Free Rate, время восстановления и чистота отката. Наружу не уходят.</p></article>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="wrap">
+    <div class="section__head" data-reveal><span class="eyebrow">Автоматизация</span><h2 class="h2">Работает, пока вы заняты <span class="grad">другим</span></h2></div>
+    <div class="grid grid--2" data-stagger>
+      <article class="card" data-reveal><div class="card__icon">{{icon:clock|icon}}</div><h3>Планировщик</h3><p>Окна подключения <code class="mono">[start, end)</code> с горизонтом 7 дней. Ночные окна привязываются к предыдущему дню.</p></article>
+      <article class="card" data-reveal><div class="card__icon">{{icon:repeat|icon}}</div><h3>Ротация серверов</h3><p>Интервал от 5 до 1440 минут, режимы sequential и random, переподключение через <code class="mono">restartProtected</code>.</p></article>
+      <article class="card" data-reveal><div class="card__icon">{{icon:rocket|icon}}</div><h3>AutoPilot</h3><p>Трогает только собственный TUN, требует рабочий прокси перед стартом и при сбое возвращает исходное состояние сети.</p></article>
+      <article class="card" data-reveal><div class="card__icon">{{icon:terminal|icon}}</div><h3>Локальный Control API</h3><p>REST на <code class="mono">127.0.0.1:17873</code> для скриптов и CI. Изменяющие запросы требуют токен в заголовке.</p></article>
+    </div>
+    <div class="term" style="margin-top:26px" data-reveal id="api-demo">
+      <div class="term__bar"><i></i><i></i><i></i><span>PowerShell</span><button data-copy="#api-code">{{icon:copy|icon}} Копировать</button></div>
+<pre id="api-code"><span class="c"># статус клиента</span>
+curl http://127.0.0.1:17873/status
+
+<span class="c"># запуск с токеном из %APPDATA%\VPN Tunnel Enforcer\</span>
+curl -X POST http://127.0.0.1:17873/start `
+  -H "X-VPNTE-Control-Token: <span class="s">$(Get-Content $env:APPDATA\"VPN Tunnel Enforcer"\external-proxy-control-token)</span>"</pre>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="wrap">
+    <div class="cta" data-reveal="scale">
+      <h2 class="h2">Увидеть всё это <span class="grad">своими глазами</span></h2>
+      <p class="lead">Установите клиент и запустите self-test на своей машине.</p>
+      <div class="hero__actions"><a class="btn btn--primary btn--lg" href="{{base}}download/">Скачать {{icon:download|icon}}</a><a class="btn btn--ghost btn--lg" href="{{base}}how-it-works/">Как это работает</a></div>
+    </div>
+  </div>
+</section>

@@ -1,0 +1,60 @@
+<!--{"path":"/protocols/","title":"Протоколы — VPN Tunnel Enforcer","description":"VLESS-REALITY, WireGuard, Hysteria2, TUIC, Shadowsocks 2022, VMess, Trojan, Naive, AnyTLS и ShadowTLS: что поддерживается и как это работает.","nav":"protocols"}-->
+<section class="page-hero">
+  <div class="bg-grid" aria-hidden="true"></div>
+  <div class="glow glow--v" style="width:460px;height:460px;right:-100px;top:20px" aria-hidden="true"></div>
+  <div class="wrap">
+    <nav class="crumbs" aria-label="Хлебные крошки"><a href="{{base}}./">Главная</a><span>/</span><span>Протоколы</span></nav>
+    <h1 class="h1 split-words">Десять протоколов, <span class="grad">один интерфейс</span></h1>
+    <p class="lead" data-reveal style="--d:.2s">Парсер разбирает подписки, ключи и URI-ссылки, а затем собирает конфигурацию для sing-box или xray-core. Сменить протокол можно, не меняя привычек.</p>
+  </div>
+</section>
+
+<section class="section section--tight">
+  <div class="wrap">
+    <div class="faq-cats" role="group" aria-label="Фильтр протоколов" id="proto-filter">
+      <button data-pf="all" aria-pressed="true">Все</button>
+      <button data-pf="tcp" aria-pressed="false">На TCP/TLS</button>
+      <button data-pf="udp" aria-pressed="false">На UDP/QUIC</button>
+      <button data-pf="stealth" aria-pressed="false">Маскировка под HTTPS</button>
+    </div>
+    <div class="grid grid--3" id="proto-grid" data-stagger>
+      <article class="card proto" data-reveal data-pt="tcp stealth"><div class="proto__top"><h3>VLESS</h3><span class="tag tag--g">REALITY</span></div><p>XTLS-Reality работает через сателлит xray-core. Vision, gRPC и WebSocket — через sing-box. Основной вариант для сетей с цензурой.</p><div class="tags"><span class="tag">TCP</span><span class="tag">uTLS chrome</span></div></article>
+      <article class="card proto" data-reveal data-pt="udp"><div class="proto__top"><h3>WireGuard</h3><span class="tag tag--v">UDP</span></div><p>Современный и компактный протокол. Поддерживается разбор и экспорт конфигурации.</p><div class="tags"><span class="tag">UDP</span><span class="tag">импорт/экспорт URI</span></div></article>
+      <article class="card proto" data-reveal data-pt="udp stealth"><div class="proto__top"><h3>Hysteria2</h3><span class="tag tag--v">QUIC</span></div><p>Работает поверх QUIC и рассчитан на каналы с потерями.</p><div class="tags"><span class="tag">UDP / QUIC</span></div></article>
+      <article class="card proto" data-reveal data-pt="udp"><div class="proto__top"><h3>TUIC</h3><span class="tag tag--v">QUIC</span></div><p>Ещё один QUIC-протокол с мультиплексированием соединений.</p><div class="tags"><span class="tag">UDP / QUIC</span></div></article>
+      <article class="card proto" data-reveal data-pt="tcp"><div class="proto__top"><h3>Shadowsocks</h3><span class="tag">2022 AEAD</span></div><p>Включая SIP002 и современный Shadowsocks 2022 с AEAD-шифрованием.</p><div class="tags"><span class="tag">TCP</span><span class="tag">SIP002</span></div></article>
+      <article class="card proto" data-reveal data-pt="tcp stealth"><div class="proto__top"><h3>Trojan</h3><span class="tag">TLS</span></div><p>Трафик выглядит как обычный HTTPS-сеанс.</p><div class="tags"><span class="tag">TCP</span><span class="tag">TLS</span></div></article>
+      <article class="card proto" data-reveal data-pt="tcp"><div class="proto__top"><h3>VMess</h3><span class="tag">AEAD</span></div><p>Только современный вариант: AEAD и <code class="mono">alterId: 0</code>. Устаревший режим не используется.</p><div class="tags"><span class="tag">TCP</span></div></article>
+      <article class="card proto" data-reveal data-pt="tcp stealth"><div class="proto__top"><h3>Naive</h3><span class="tag">HTTP/2</span></div><p>Использует сетевой стек Chromium, поэтому отпечаток соединения совпадает с браузерным.</p><div class="tags"><span class="tag">TCP</span><span class="tag">Chromium stack</span></div></article>
+      <article class="card proto" data-reveal data-pt="tcp stealth"><div class="proto__top"><h3>AnyTLS</h3><span class="tag">TLS</span></div><p>Протокол с настраиваемым выравниванием пакетов для снижения заметности.</p><div class="tags"><span class="tag">TCP</span></div></article>
+      <article class="card proto" data-reveal data-pt="tcp stealth"><div class="proto__top"><h3>ShadowTLS</h3><span class="tag">TLS</span></div><p>Подставляет настоящий TLS-рукопожатие реального сайта, а полезную нагрузку несёт внутри.</p><div class="tags"><span class="tag">TCP</span></div></article>
+    </div>
+    <p class="muted" id="proto-empty" hidden style="text-align:center;margin-top:24px">Ничего не найдено.</p>
+  </div>
+</section>
+
+<section class="section">
+  <div class="wrap split split--top">
+    <div data-reveal="left">
+      <span class="eyebrow">Anti-DPI</span>
+      <h2 class="h2" style="margin:18px 0 20px">Что делает клиент, <span class="grad">чтобы не выделяться</span></h2>
+      <p class="lead">Помимо самих протоколов клиент настраивает детали рукопожатия, по которым трафик чаще всего опознают.</p>
+    </div>
+    <ul class="checks" data-reveal="right" style="gap:20px">
+      <li>{{icon:check|icon}}<span><b>uTLS-отпечаток chrome.</b> Клиентское приветствие TLS совпадает с обычным браузером.</span></li>
+      <li>{{icon:check|icon}}<span><b>record_fragment.</b> В режиме stealth для протоколов без Reality TLS-записи дробятся, чтобы пройти простые фильтры.</span></li>
+      <li>{{icon:check|icon}}<span><b>UDP/443 отклоняется.</b> QUIC от браузеров принудительно откатывается на TCP, который контролируется туннелем.</span></li>
+      <li>{{icon:check|icon}}<span><b>Окно стабильности и проверки.</b> Адаптивный обход оценивает связь по нескольким пробам, а не по одной.</span></li>
+    </ul>
+  </div>
+</section>
+
+<section class="section">
+  <div class="wrap">
+    <div class="callout" data-reveal>{{icon:triangle-alert|icon}}<div><b>Чего пока нет.</b> AmneziaWG, FakeIP и DoQ находятся в плане (WP-12) и в коде отсутствуют. Ядро mihomo в клиенте только определяется как конкурирующее, но не используется. <a href="{{base}}roadmap/" style="text-decoration:underline">Дорожная карта →</a></div></div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="wrap"><div class="cta" data-reveal="scale"><h2 class="h2">Ваш протокол <span class="grad">уже поддерживается</span></h2><p class="lead">Импортируйте подписку или ключ — клиент разберётся сам.</p><div class="hero__actions"><a class="btn btn--primary btn--lg" href="{{base}}download/">Скачать {{icon:download|icon}}</a></div></div></div>
+</section>

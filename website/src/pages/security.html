@@ -1,0 +1,60 @@
+<!--{"path":"/security/","title":"Безопасность — VPN Tunnel Enforcer","description":"Модель угроз, шифрование секретов через DPAPI, доверенная IPC-граница, защита runtime и честный список непроверенного.","nav":"security"}-->
+<section class="page-hero">
+  <div class="bg-grid" aria-hidden="true"></div>
+  <div class="glow glow--g" style="width:420px;height:420px;right:-80px;top:40px" aria-hidden="true"></div>
+  <div class="wrap">
+    <nav class="crumbs" aria-label="Хлебные крошки"><a href="{{base}}./">Главная</a><span>/</span><span>Безопасность</span></nav>
+    <h1 class="h1 split-words">Безопасность — это <span class="grad">список проверок, а не лозунг</span></h1>
+    <p class="lead" data-reveal style="--d:.2s">Ниже — что реализовано и как, а что не проверено и почему. Мы разделяем «написано в коде» и «принято на тестовом стенде».</p>
+  </div>
+</section>
+
+<section class="section section--tight">
+  <div class="wrap">
+    <div class="section__head" data-reveal><span class="eyebrow">Реализовано</span><h2 class="h2">Что уже защищено</h2></div>
+    <div class="grid grid--2" data-stagger>
+      <article class="card" data-reveal><div class="card__icon card__icon--g">{{icon:key-round|icon}}</div><h3>Секреты шифруются DPAPI</h3><p>Ключи VPN, токены, UUID и ссылки подписок хранятся через Electron <code class="mono">safeStorage</code> (Windows DPAPI). Хранилища групп серверов и бэкапы миграции защищены так же.</p></article>
+      <article class="card" data-reveal><div class="card__icon card__icon--g">{{icon:lock|icon}}</div><h3>Доверенная IPC-граница</h3><p>Принимаются сообщения только от главного фрейма с точным origin. Структуры проверяются по глубине и размеру, запрещены <code class="mono">__proto__</code>, NaN и Infinity. Для <code class="mono">file://</code> действует CSP.</p></article>
+      <article class="card" data-reveal><div class="card__icon card__icon--g">{{icon:package|icon}}</div><h3>Безопасный экспорт и импорт</h3><p>Экспорт по умолчанию маскирует секреты. Экспорт с секретами требует нативного подтверждения, а буфер обмена очищается через 60 секунд.</p></article>
+      <article class="card" data-reveal><div class="card__icon card__icon--g">{{icon:fingerprint|icon}}</div><h3>Доверенный runtime</h3><p>sing-box, xray и скрипты запускаются из <code class="mono">%ProgramData%\VPNTE\runtime</code>. Перед запуском проверяются владельцы, права подмены и reparse points всей цепочки каталогов.</p></article>
+      <article class="card" data-reveal><div class="card__icon card__icon--g">{{icon:history|icon}}</div><h3>Транзакционный firewall и Boot Recovery</h3><p>Манифесты с ACL «только SYSTEM и Администраторы», защита от symlink, независимый откат DNS, IPv6, firewall и WinINet. После перезагрузки работает задача восстановления.</p></article>
+      <article class="card" data-reveal><div class="card__icon card__icon--g">{{icon:eye-off|icon}}</div><h3>Приватность по умолчанию</h3><p>В клиенте нет SDK аналитики. HWID и заголовки передаются в <code class="mono">curl</code> через stdin, а не через командную строку, где их видно в списке процессов.</p></article>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="wrap split split--top">
+    <div data-reveal="left">
+      <span class="eyebrow">Модель угроз</span>
+      <h2 class="h2" style="margin:18px 0 20px">От чего защищает, <span class="grad">а от чего — нет</span></h2>
+      <p class="lead">Любой честный инструмент приватности объясняет границы. Вот наши.</p>
+    </div>
+    <div class="grid" data-reveal="right">
+      <div class="card"><h3 style="font-size:18px;color:var(--green)">Защищает</h3><ul class="checks" style="margin-top:14px"><li>{{icon:check|icon}}<span>Утечки реального IP при обрыве туннеля</span></li><li>{{icon:check|icon}}<span>Утечки DNS и IPv6</span></li><li>{{icon:check|icon}}<span>Раскрытие адреса через WebRTC/STUN</span></li><li>{{icon:check|icon}}<span>Подмену бинарников и скриптов рантайма</span></li></ul></div>
+      <div class="card"><h3 style="font-size:18px;color:var(--amber)">Не защищает</h3><ul class="checks" style="margin-top:14px"><li>{{icon:x|icon}}<span style="color:var(--muted)">От администратора, уже скомпрометировавшего машину</span></li><li>{{icon:x|icon}}<span style="color:var(--muted)">От деанонимизации по аккаунтам и отпечатку браузера</span></li><li>{{icon:x|icon}}<span style="color:var(--muted)">От логов на стороне вашего VPN-сервера</span></li></ul></div>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="wrap">
+    <div class="section__head" data-reveal><span class="eyebrow">Без прикрас</span><h2 class="h2">Что <span class="grad">не проверено</span></h2><p class="lead">Эти пункты мы не объявляем готовыми.</p></div>
+    <div class="grid grid--2" data-stagger>
+      <article class="card" data-reveal><div class="card__icon">{{icon:flask-conical|icon}}</div><h3>Приёмка на OS-матрице</h3><p>Код и автотесты не означают полной приёмки на Windows. Установка нативных фильтров IPv6 WFP, packet oracle и перезагрузка в SYSTEM-контексте пока не подтверждены. WP-3 остаётся частичным.</p><div class="tags" style="margin-top:16px"><span class="tag tag--a">частично</span></div></article>
+      <article class="card" data-reveal><div class="card__icon">{{icon:file-search|icon}}</div><h3>Подпись кода</h3><p>Решение о сертификате ещё не принято, и это зафиксировано как открытый вопрос.</p><div class="tags" style="margin-top:16px"><span class="tag tag--a">открыто</span></div></article>
+      <article class="card" data-reveal><div class="card__icon">{{icon:globe|icon}}</div><h3>DNS bootstrap</h3><p>Имя VPN-сервера резолвится до подъёма туннеля, поэтому провайдер может его увидеть.</p><div class="tags" style="margin-top:16px"><span class="tag tag--a">ограничение</span></div></article>
+      <article class="card" data-reveal><div class="card__icon">{{icon:split|icon}}</div><h3>Split tunneling по имени</h3><p>Правила привязаны к имени процесса, а по ТЗ нужен абсолютный путь. Имя можно подменить.</p><div class="tags" style="margin-top:16px"><span class="tag tag--a">расхождение с ТЗ</span></div></article>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="wrap">
+    <div class="callout callout--g" data-reveal>{{icon:shield-check|icon}}<div><b>Нашли уязвимость?</b> Сообщите через <a href="https://github.com/newnout6-a11y/vpn/issues" rel="noopener" style="text-decoration:underline">GitHub Issues</a>. Не публикуйте технические детали эксплуатации в открытом виде до исправления.</div></div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="wrap"><div class="cta" data-reveal="scale"><h2 class="h2">Проверьте <span class="grad">сами</span></h2><p class="lead">Код открыт, тесты запускаются командой <code class="mono">npm test</code>.</p><div class="hero__actions"><a class="btn btn--primary btn--lg" href="https://github.com/newnout6-a11y/vpn" rel="noopener">{{icon:github|icon}} Читать исходники</a></div></div></div>
+</section>

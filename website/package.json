@@ -1,0 +1,23 @@
+{
+  "name": "vpnte-website",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Маркетинговый сайт VPN Tunnel Enforcer (статический, без сторонних ресурсов)",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "build": "node tools/build.mjs",
+    "dev": "node tools/serve.mjs",
+    "world": "node tools/gen-world.mjs",
+    "og": "node tools/gen-og.mjs"
+  },
+  "devDependencies": {
+    "d3-geo": "^3.1.1",
+    "puppeteer-core": "^24.43.1",
+    "topojson-client": "^3.1.0",
+    "world-atlas": "^2.0.2"
+  }
+}
