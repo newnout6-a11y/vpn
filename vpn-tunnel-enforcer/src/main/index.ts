@@ -44,9 +44,11 @@ import {
   recoverStaleKillSwitch
 } from './firewallKillSwitch'
 import {
+  clearPhysicalAdaptersSnapshotCache,
   isPhysicalAdapterLockdownApplied,
   repairOrphanedPhysicalAdapterDns,
-  rollbackPhysicalAdapterLockdownIfApplied
+  rollbackPhysicalAdapterLockdownIfApplied,
+  warmPhysicalAdaptersSnapshot
 } from './physicalAdapterLockdown'
 import { relaunchElevatedIfNeeded } from './admin'
 import { clearAppLog, getFullLogs, logEvent, openLogFolder, startEngineLogRetention, type AppLogLevel } from './appLogger'
@@ -1863,6 +1865,7 @@ app.whenReady().then(async () => {
     isQuitting || shutdownInProgress || connectionLifecycle.busy || tunController.getStatus().running)
 
   createWindow()
+  void warmPhysicalAdaptersSnapshot().catch(() => undefined)
   void serverPicker.resolveAndPersistProfileIps().catch(() => undefined)
   tray = createTray(mainWindow!, {
     onStart: startProtectionFromTray,
@@ -1939,6 +1942,7 @@ app.whenReady().then(async () => {
   // instead of a bare "sing-box crash".
   setNetworkChangeCallback(({ oldRowCount, newRowCount }) => {
     invalidateAdaptiveLearningContext()
+    clearPhysicalAdaptersSnapshotCache()
     lastNetworkChangeAt = Date.now()
     if (currentSession) {
       currentSession.lastNetworkTransition =

@@ -944,3 +944,34 @@
 - `python ../docs/04-приёмочные-тесты/traceability/check-coverage.py` — AC: 927/927, F: 210/210 (exit 0).
 - Коммит `973c2a7` отправлен в ветку `codex/wfp-firewall-lifecycle-perf` репозитория `vpn` (PR #23), локальный `main` синхронизирован fast-forward.
 
+## 2026-10-10 — Ускорение холодного подключения и устранение замечаний ревьюеров по PR #24
+
+### 1. Ускорение первого холодного подключения VPN
+- **CIM-пакетные запросы в PowerShell**:
+  - `src/main/physicalAdapterSnapshot.ts`: прямой опрос через `Get-CimInstance` классов `MSFT_NetAdapter`, `MSFT_NetAdapterBindingSettingData`, `MSFT_DNSClientServerAddress`, `MSFT_NetRoute`, `MSFT_NetConnectionProfile` в пространстве `root/StandardCimv2`.
+  - Устранена дорогостоящая загрузка тяжеловесного модуля `NetAdapter` на холодном старте.
+  - Сохранён 100% совместимый fallback на командлеты в блоке `catch`.
+- **Ранний фоновый прогрев адаптеров**:
+  - `src/main/physicalAdapterLockdown.ts`: функции `getLocalNetSignature()`, `warmPhysicalAdaptersSnapshot()`, кеширование снимка адаптеров с TTL 30 секунд.
+  - `src/main/index.ts`: вызов `warmPhysicalAdaptersSnapshot()` при старте окна, сброс кеша по `setNetworkChangeCallback`.
+
+### 2. Исправление замечаний ревьюеров по PR #24 (CodeRabbit & Revix)
+- **Счётчик поколений кэша** (`snapshotGeneration`) в `physicalAdapterLockdown.ts`:
+  - `clearPhysicalAdaptersSnapshotCache()` инкрементирует поколение.
+  - Асинхронный промис `snapshotPhysicalAdapters()` записывает результат в кэш только если `snapshotGeneration` не изменился с момента старта запроса.
+  - Сброс `snapshotPromise` в `.finally` защищён проверкой `snapshotPromise === p`, предотвращая затирание более новых запросов.
+- **Свежий снимок при наложении локдауна**:
+  - `applyPhysicalAdapterLockdown()` по умолчанию запрашивает свежий снимок `{ forceFresh: options.forceFresh !== false }` перед записью манифеста восстановления, гарантируя актуальность DNS и шлюзов при формировании `pendingAdapters`.
+  - `forceFresh: true` гарантированно обходит in-flight промис прогрева адаптеров.
+  - Выровнен TTL в `warmPhysicalAdaptersSnapshot` до 30 секунд в соответствии со `snapshotPhysicalAdapters`.
+- **Унификация и обработка ошибок CIM-запросов** в `physicalAdapterSnapshot.ts`:
+  - Выделен единый шаблон исключения виртуальных адаптеров `ADAPTER_EXCLUSION_PATTERN`.
+  - Дополнительные пакетные CIM-запросы (`MSFT_NetAdapterBindingSettingData`, `MSFT_DNSClientServerAddress`, `MSFT_NetRoute`, `MSFT_NetConnectionProfile`) выполняются с `-ErrorAction Stop`. При сбое любого из них управление передаётся в блок `catch` с гарантированным откатом на командлеты.
+- **Очистка PR от временных скриптов**:
+  - Удалены временные воркфлоу и скрипты триажа, ветка PR #24 сохранена строго сфокусированной на задаче ускорения холодного подключения.
+
+### 3. Тестирование и Definition of Done
+- `npm run typecheck` — 0 ошибок (exit 0).
+- `npm test` — 2879 passed / 4 skipped / 0 failed (100% зелёные), 218 тест-файлов.
+- `python ../docs/04-приёмочные-тесты/traceability/check-coverage.py` — AC: 927/927, F: 210/210 (exit 0).
+
