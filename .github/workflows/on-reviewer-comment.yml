@@ -1,0 +1,202 @@
+name: Reviewer Feedback Automation
+
+on:
+  pull_request_review:
+    types: [submitted, edited]
+  pull_request_review_comment:
+    types: [created, edited]
+  issue_comment:
+    types: [created, edited]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'Pull Request Number to inspect'
+        required: false
+        default: '24'
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: reviewer-feedback-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  triage-reviewer-feedback:
+    name: Process Reviewer Feedback
+    # Ignore comments on plain issues (must be a PR), and ignore comments made by github-actions[bot] to avoid infinite loops
+    if: >-
+      (github.event_name != 'issue_comment' || github.event.issue.pull_request != null) &&
+      github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Inspect and Triage Feedback
+        id: triage
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const eventName = context.eventName;
+            const payload = context.payload;
+
+            let prNumber = null;
+            let prTitle = '';
+            let prUrl = '';
+            let sender = payload.sender?.login || 'unknown';
+            let senderType = payload.sender?.type || 'User';
+            let reviewState = null;
+            let commentBody = '';
+            let commentUrl = '';
+            let filePath = null;
+            let lineNumber = null;
+
+            if (eventName === 'pull_request_review') {
+              prNumber = payload.pull_request.number;
+              prTitle = payload.pull_request.title;
+              prUrl = payload.pull_request.html_url;
+              reviewState = payload.review.state; // 'approved', 'changes_requested', 'commented'
+              commentBody = payload.review.body || '';
+              commentUrl = payload.review.html_url;
+            } else if (eventName === 'pull_request_review_comment') {
+              prNumber = payload.pull_request.number;
+              prTitle = payload.pull_request.title;
+              prUrl = payload.pull_request.html_url;
+              commentBody = payload.comment.body || '';
+              commentUrl = payload.comment.html_url;
+              filePath = payload.comment.path;
+              lineNumber = payload.comment.line || payload.comment.original_line;
+            } else if (eventName === 'issue_comment') {
+              prNumber = payload.issue.number;
+              prTitle = payload.issue.title;
+              prUrl = payload.issue.html_url;
+              commentBody = payload.comment.body || '';
+              commentUrl = payload.comment.html_url;
+            } else if (eventName === 'workflow_dispatch') {
+              prNumber = parseInt(context.payload.inputs?.pr_number || '24', 10);
+              const pr = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber
+              });
+              prTitle = pr.data.title;
+              prUrl = pr.data.html_url;
+              commentBody = 'Manual workflow dispatch trigger';
+            }
+
+            core.info(`Processing feedback on PR #${prNumber} from ${sender} (${senderType}) via ${eventName}`);
+
+            // Classify actionable feedback
+            const isBot = sender.toLowerCase().includes('bot') || sender.toLowerCase().includes('coderabbit');
+            const isChangesRequested = (reviewState && reviewState.toLowerCase() === 'changes_requested') || /changes requested/i.test(commentBody);
+            const isApproved = reviewState && reviewState.toLowerCase() === 'approved';
+            const hasActionable = /actionable comments posted|failed checks|warning|potential_issue|todo|fix/i.test(commentBody);
+
+            // Prepare feedback summary object
+            const feedback = {
+              timestamp: new Date().toISOString(),
+              repo: `${context.repo.owner}/${context.repo.repo}`,
+              prNumber,
+              prTitle,
+              prUrl,
+              sender,
+              senderType,
+              isBot,
+              eventName,
+              reviewState,
+              isChangesRequested,
+              isApproved,
+              hasActionable,
+              filePath,
+              lineNumber,
+              commentUrl,
+              bodySnippet: commentBody.slice(0, 500)
+            };
+
+            core.setOutput('pr_number', prNumber);
+            core.setOutput('sender', sender);
+            core.setOutput('review_state', reviewState || '');
+            core.setOutput('is_changes_requested', isChangesRequested ? 'true' : 'false');
+            core.setOutput('is_approved', isApproved ? 'true' : 'false');
+            core.setOutput('has_actionable', hasActionable ? 'true' : 'false');
+            core.setOutput('feedback_json', JSON.stringify(feedback));
+
+            // Set labels on the PR
+            const labelsToAdd = [];
+            const labelsToRemove = [];
+
+            if (isChangesRequested || hasActionable) {
+              labelsToAdd.push('changes-requested');
+              labelsToRemove.push('approved', 'ready-for-merge');
+            } else if (isApproved) {
+              labelsToAdd.push('approved', 'ready-for-merge');
+              labelsToRemove.push('changes-requested');
+            } else {
+              labelsToAdd.push('review-feedback');
+            }
+
+            for (const label of labelsToAdd) {
+              try {
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: prNumber,
+                  labels: [label]
+                });
+                core.info(`Added label "${label}" to PR #${prNumber}`);
+              } catch (err) {
+                core.warning(`Failed to add label "${label}": ${err.message}`);
+              }
+            }
+
+            for (const label of labelsToRemove) {
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: prNumber,
+                  name: label
+                });
+                core.info(`Removed label "${label}" from PR #${prNumber}`);
+              } catch (err) {
+                // Ignore 404 if label was not present
+              }
+            }
+
+            // Write Step Summary
+            await core.summary
+              .addHeading(`📬 Reviewer Feedback Received: PR #${prNumber}`, 2)
+              .addTable([
+                [{ data: 'Property', header: true }, { data: 'Value', header: true }],
+                ['Reviewer', `@${sender} (${senderType})`],
+                ['Event', eventName],
+                ['State / Outcome', reviewState || (hasActionable ? 'Actionable findings' : 'Comment')],
+                ['Target File', filePath ? `\`${filePath}:${lineNumber || 1}\`` : 'General / PR Body'],
+                ['Comment Link', `[View on GitHub](${commentUrl || prUrl})`]
+              ])
+              .addHeading('Feedback Preview', 3)
+              .addQuote(commentBody.slice(0, 1000) + (commentBody.length > 1000 ? '...' : ''))
+              .write();
+
+      - name: Save Feedback Payload
+        run: |
+          mkdir -p .automation
+          cat << 'EOF' > .automation/reviewer-feedback.json
+          ${{ steps.triage.outputs.feedback_json }}
+          EOF
+
+      - name: Upload Feedback Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: reviewer-feedback-pr-${{ steps.triage.outputs.pr_number }}
+          path: .automation/reviewer-feedback.json
+          retention-days: 7
+
+      - name: Dispatch External Webhook (if configured)
+        if: env.NOTIFICATION_WEBHOOK_URL != ''
+        env:
+          NOTIFICATION_WEBHOOK_URL: ${{ secrets.NOTIFICATION_WEBHOOK_URL }}
+        run: |
+          curl -s -X POST -H "Content-Type: application/json" \
+            -d @.automation/reviewer-feedback.json \
+            "$NOTIFICATION_WEBHOOK_URL" || echo "Webhook dispatch optional notification ignored"

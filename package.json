@@ -12,6 +12,7 @@
     "typecheck": "npm --prefix vpn-tunnel-enforcer run typecheck",
     "build": "npm --prefix vpn-tunnel-enforcer run build",
     "test": "npm --prefix vpn-tunnel-enforcer test",
+    "watch:reviews": "npm --prefix vpn-tunnel-enforcer run watch:reviews",
     "dist": "npm --prefix vpn-tunnel-enforcer run dist:win",
     "dist:win": "npm --prefix vpn-tunnel-enforcer run dist:win",
     "dist:portable": "npm --prefix vpn-tunnel-enforcer run dist:portable"

@@ -86,6 +86,14 @@ describe('physicalAdapterLockdown source regressions', () => {
     expect(readFileSync(join(process.cwd(), 'src/main/physicalAdapterSnapshot.ts'), 'utf8')).toContain('Get-NetConnectionProfile -InterfaceIndex $a.ifIndex')
     expect(source()).toContain('isCellularOrTetheringAdapter(alias, description, dnsServers, gateways)')
   })
+  it('reuses the IPv4 default-route query when classifying IPv6-only uplinks', () => {
+    const snapshot = readFileSync(join(process.cwd(), 'src', 'main', 'physicalAdapterSnapshot.ts'), 'utf8')
+    const ipv4DefaultRouteQuery = "Get-NetRoute -InterfaceIndex $a.ifIndex -DestinationPrefix '0.0.0.0/0'"
+
+    expect(snapshot.split(ipv4DefaultRouteQuery)).toHaveLength(2)
+    expect(snapshot).toContain('$routes4 = @(' + ipv4DefaultRouteQuery)
+    expect(snapshot).toContain('(-not $routes4)')
+  })
   it('rejects injected/ambiguous adapter, transition and registry snapshots (AT-03-012)', async () => {
     const { validateLockdownManifest } = await import('./physicalAdapterLockdown')
     const fixture = {
@@ -101,4 +109,22 @@ describe('physicalAdapterLockdown source regressions', () => {
     expect(() => validateLockdownManifest({ ...fixture, dnsRegistryPolicy: undefined })).toThrow()
   })
 
+  it('guards adapter snapshot cache with generation counter and requires fresh baseline on lockdown apply', () => {
+    const s = source()
+    expect(s).toContain('let snapshotGeneration = 0')
+    expect(s).toContain('snapshotGeneration++')
+    expect(s).toContain('const currentGeneration = snapshotGeneration')
+    expect(s).toContain('if (snapshotGeneration === currentGeneration)')
+    expect(s).toContain('if (snapshotPromise === p)')
+    expect(s).toContain('forceFresh: options.forceFresh !== false')
+  })
+
+  it('unifies adapter exclusion patterns and halts on auxiliary CIM query failure in snapshot script', () => {
+    const snapshotSource = readFileSync(join(process.cwd(), 'src', 'main', 'physicalAdapterSnapshot.ts'), 'utf8')
+    expect(snapshotSource).toContain('ADAPTER_EXCLUSION_PATTERN')
+    expect(snapshotSource).toContain("ClassName MSFT_NetAdapterBindingSettingData -Filter \"ComponentID = 'ms_tcpip6'\" -ErrorAction Stop")
+    expect(snapshotSource).toContain('ClassName MSFT_DNSClientServerAddress -Filter "AddressFamily = 2" -ErrorAction Stop')
+    expect(snapshotSource).toContain('ClassName MSFT_NetConnectionProfile -ErrorAction Stop')
+  })
 })
+
