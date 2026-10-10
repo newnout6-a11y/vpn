@@ -1,3 +1,17 @@
+## 2026-10-10 - Task: Auto-verify indeterminate VPN IP and disable probe socket keep-alive
+### What was done
+- Identified why `⚠️ 13.143.214.3 — VPN-IP изменился, требуется проверка` stayed indeterminate: Node's default global agent keep-alive pooled sockets across network transitions during startup, and no automatic re-verification mechanism existed to clear indeterminate states without user intervention.
+- Configured dedicated HTTP and HTTPS agents with `keepAlive: false` in `src/main/ipMonitor.ts` so public IP probes never reuse pre-transition TCP sockets.
+- Implemented `verifyIndeterminateVpnIp` in `src/main/index.ts`: when an indeterminate IP is reported while TUN is running, it verifies active routes and executes `runLeakSelfTest()`. If the physical adapter is blocked with zero leaks and egress is proven safe through TUN, it automatically calls `ipMonitor.recheck(true)` to rebaseline the IP and transition verdict to `'passed'` without requiring manual button clicks.
+- Added `setLeakSelfTestCompletedCallback` in `src/main/leakSelfTest.ts` to trigger automatic rebaseline if any periodic leak test confirms clean zero-leak operation during an indeterminate state.
+- Added automated tests in `indeterminateIpAutoVerify.test.ts`, `ipMonitor.test.ts`, and `leakSelfTest.test.ts`.
+### Testing
+- `npm run typecheck` passed (exit code 0).
+- `npm test` passed: 216 files, 2862 passed (100% green).
+- `python ../docs/04-приёмочные-тесты/traceability/check-coverage.py` passed: AC 927/927, F 210/210, 0 missing.
+### Notes
+- Git branch: `codex/wfp-firewall-lifecycle-perf` (PR #23).
+
 ## 2026-06-19 - Task: Fix stale traffic-forensics running status after reinstall
 ### What was done
 - Reconciled traffic-forensics status reads against the current managed sidecar process so stale manifests from a crash, app restart, or installer update are marked stopped with `stopReason: "zombie-recovery"` instead of keeping the UI on packet collection.
