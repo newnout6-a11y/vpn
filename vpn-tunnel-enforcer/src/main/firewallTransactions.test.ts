@@ -8,7 +8,7 @@ const state = vi.hoisted(() => ({ manifest: null as any, writes: [] as any[], sc
   snapshot: ['Domain','Private','Public'].map(name => ({ name, defaultOutbound: 'Block' })),
   failWrite: false, failApply: false, failRestore: false, invalidRead: false, readError: null as Error | null,
   quarantines: [] as string[], failQuarantine: false, ownedRules: false,
-  wfpCalls: [] as string[], wfpActive: false, wfpFailApply: 0, wfpFailRemove: false, wfpFailVerify: false, wfpConflict: false,
+  wfpCalls: [] as string[], wfpActive: false, wfpFailApply: 0, wfpFailRemove: false, wfpFailVerify: false, wfpConflict: false, wfpFailPrepareExceptions: false,
   manifestReads: 0,
   liveFailures: 0, liveMissingMarker: false, failCommit: false,
   artifacts: [] as string[], helperAvailable: true, helperFailure: null as any, helperExitCode: 0, longApps: false,
@@ -20,7 +20,10 @@ vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
 vi.mock('./wfpIpv6', async importOriginal => ({
   ...await importOriginal<typeof import('./wfpIpv6')>(),
   prepareWfpIpv6Policy: async (opts: { signal?: AbortSignal }) => { state.wfpCalls.push('prepare'); opts.signal?.throwIfAborted(); return { schemaVersion: 1, rules: ['connect','accept','boot'].map((layer, i) => ({ id: `00000000-0000-0000-0000-00000000000${i + 1}`, role: 'block', appId: '', remote: '', luid: '', originalApp: false, inbound: layer === 'accept', boot: layer === 'boot' })) } },
-  prepareWfpIpv6Exceptions: async (previous: unknown) => previous,
+  prepareWfpIpv6Exceptions: async (previous: unknown) => {
+    if (state.wfpFailPrepareExceptions) throw new Error('App ID resolution failed')
+    return previous
+  },
   applyWfpIpv6Policy: async () => {
     state.wfpCalls.push('apply')
     if (!state.manifest?.ipv6Policy) throw new Error('WFP effects without recovery journal')
@@ -126,6 +129,7 @@ beforeEach(() => {
   state.failWrite = false; state.failApply = false; state.failRestore = false; state.invalidRead = false
   state.readError = null; state.quarantines = []; state.failQuarantine = false; state.ownedRules = false
   state.wfpCalls = []; state.wfpActive = false; state.wfpFailApply = 0; state.wfpFailRemove = false; state.wfpFailVerify = false; state.wfpConflict = false
+  state.wfpFailPrepareExceptions = false
   state.manifestReads = 0
   state.liveFailures = 0; state.liveMissingMarker = false; state.failCommit = false
   state.artifacts = []; state.helperAvailable = true; state.helperFailure = null; state.helperExitCode = 0
@@ -575,6 +579,20 @@ describe('differential live firewall fault injection (AT-03-008/009)', () => {
     expect(state.scripts).toHaveLength(1)
     expect(state.scripts[0]).toContain('EXCEPTIONS_VERIFIED')
     expect(state.manifest.pendingExceptionPolicy).toBeDefined()
+  })
+  it('returns unknown without mutating firewall when IPv6 exception preparation fails (AT-03-008)', async () => {
+    await active()
+    state.wfpFailPrepareExceptions = true
+    const result = await updateKillSwitchExceptions([], ['198.51.100.2'])
+    expect(result).toMatchObject({
+      success: false,
+      state: 'unknown',
+      message: 'IPv6 exception preparation failed; firewall unchanged'
+    })
+    expect(result.details).toContain('App ID resolution failed')
+    expect(state.writes).toEqual([])
+    expect(state.scripts).toEqual([])
+    expect(state.manifest.pendingExceptionPolicy).toBeUndefined()
   })
   it('rejects unsafe values before persistence or native calls', async () => {
     await active()

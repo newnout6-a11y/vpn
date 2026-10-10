@@ -1013,8 +1013,7 @@ function refreshTrayState(patch: {
 
 async function clearStaleKillSwitchBeforeStart(context: string): Promise<{ success: boolean; error?: string }> {
   if (tunController.getStatus().running) return { success: true }
-  const settings = settingsStore.get()
-  if (!(await isKillSwitchActive({ probeWfp: settings.firewallKillSwitch }))) return { success: true }
+  if (!(await isKillSwitchActive())) return { success: true }
 
   logEvent('info', 'firewall-killswitch', `restart preflight: clearing stale kill-switch before ${context}`)
   const result = await disableKillSwitchIfActive(`restart preflight: ${context}`)

@@ -985,3 +985,40 @@ describe.each(['direct', 'proxy'] as const)('background IP startup: %s (AT-00-00
     expect(h.ipMonitor.recheck).not.toHaveBeenCalledWith(true, expect.any(Function))
   })
 })
+
+describe('clearStaleKillSwitchBeforeStart (AT-03-005 / AT-03-007)', () => {
+  it('probes kill-switch unconditionally and clears stale protection', async () => {
+    const isKillSwitchActive = vi.fn().mockResolvedValue(true)
+    const disableKillSwitchIfActive = vi.fn().mockResolvedValue({ success: true })
+    const refreshTrayState = vi.fn()
+    const logEvent = vi.fn()
+    const tunController = { getStatus: () => ({ running: false }) }
+    const fn = compile<(context: string) => Promise<any>>(`
+${body('index.ts', 'clearStaleKillSwitchBeforeStart')}
+return clearStaleKillSwitchBeforeStart;
+`, { tunController, isKillSwitchActive, disableKillSwitchIfActive, refreshTrayState, logEvent })
+
+    const result = await fn('Direct VPN start')
+    expect(result).toEqual({ success: true })
+    expect(isKillSwitchActive).toHaveBeenCalledWith()
+    expect(disableKillSwitchIfActive).toHaveBeenCalledWith('restart preflight: Direct VPN start')
+    expect(refreshTrayState).toHaveBeenCalled()
+  })
+
+  it('skips cleanup if kill-switch is inactive', async () => {
+    const isKillSwitchActive = vi.fn().mockResolvedValue(false)
+    const disableKillSwitchIfActive = vi.fn()
+    const refreshTrayState = vi.fn()
+    const logEvent = vi.fn()
+    const tunController = { getStatus: () => ({ running: false }) }
+    const fn = compile<(context: string) => Promise<any>>(`
+${body('index.ts', 'clearStaleKillSwitchBeforeStart')}
+return clearStaleKillSwitchBeforeStart;
+`, { tunController, isKillSwitchActive, disableKillSwitchIfActive, refreshTrayState, logEvent })
+
+    const result = await fn('Direct VPN start')
+    expect(result).toEqual({ success: true })
+    expect(disableKillSwitchIfActive).not.toHaveBeenCalled()
+  })
+})
+

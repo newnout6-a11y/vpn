@@ -533,7 +533,12 @@ async function updateExceptionsUnlocked(apps: string[], cidrs: string[], strictM
   const policy = validateFirewallExceptionPolicy({ apps: await Promise.all(apps.map(canonicalizeExceptionAppPath)), cidrs })
   const old = previous.exceptionPolicy ?? { apps: [], cidrs: [] }
   if (!previous.ipv6Policy) return { success: false, state: 'unknown', message: 'IPv6 protection requires reconnect before live exceptions' }
-  const ipv6Policy = await prepareWfpIpv6Exceptions(previous.ipv6Policy, policy.apps, policy.cidrs, script => ps(script, true))
+  let ipv6Policy: WfpIpv6Policy
+  try {
+    ipv6Policy = await prepareWfpIpv6Exceptions(previous.ipv6Policy, policy.apps, policy.cidrs, script => ps(script, true))
+  } catch (error) {
+    return { success: false, state: 'unknown', message: 'IPv6 exception preparation failed; firewall unchanged', details: String(error) }
+  }
   // Original baseline and core rule names are never replaced by a live update.
   await timedFirewallPhase('live-prepare-journal', () => writeManifest({ ...previous, pendingExceptionPolicy: policy }))
   try {
