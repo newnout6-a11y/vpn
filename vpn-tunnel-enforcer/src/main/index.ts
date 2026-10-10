@@ -58,7 +58,7 @@ import { notify, setInAppFallbackCallback } from './notifications'
 import { removeHijackingDevShortcut } from './taskbarIdentity'
 import { exportDiagnosticsZip } from './diagnosticsExport'
 import { captureSnapshot, getSnapshotsDir, startPeriodicSnapshots, stopPeriodicSnapshots } from './systemSnapshot'
-import { runLeakSelfTest, startPeriodicLeakTest, stopPeriodicLeakTest, setLeakDetectedCallback, setNetworkChangeCallback, startNetworkChangeWatcher, stopNetworkChangeWatcher, suppressLeakSelfTestsFor } from './leakSelfTest'
+import { runLeakSelfTest, startPeriodicLeakTest, stopPeriodicLeakTest, setLeakDetectedCallback, setLeakSelfTestCompletedCallback, setNetworkChangeCallback, startNetworkChangeWatcher, stopNetworkChangeWatcher, suppressLeakSelfTestsFor } from './leakSelfTest'
 import { getTrafficForensicsStatus, restartTrafficForensicsSession, startTrafficForensicsSession, stopTrafficForensicsSession } from './trafficForensics'
 import { trafficMonitor, type TrafficStats } from './trafficMonitor'
 import { applyBrowserLeakProtection, rollbackBrowserLeakProtection } from './browserHardening'
@@ -1027,6 +1027,68 @@ async function clearStaleKillSwitchBeforeStart(context: string): Promise<{ succe
   return { success: true }
 }
 
+let indeterminateVerificationInFlight: Promise<void> | null = null
+
+async function verifyIndeterminateVpnIp(candidateIp: string): Promise<void> {
+  if (indeterminateVerificationInFlight) return indeterminateVerificationInFlight
+  indeterminateVerificationInFlight = (async () => {
+    try {
+      if (!tunController.getStatus().running) return
+      if (ipMonitor.getEvidence().verdict !== 'indeterminate') return
+
+      const routesActive = await areTunRoutesActive().catch(() => false)
+      if (!routesActive || !tunController.getStatus().running) return
+
+      logEvent('info', 'ip-monitor', 'auto-verifying indeterminate VPN IP via leak self-test', { candidateIp })
+      const leakResult = await runLeakSelfTest()
+      if (!tunController.getStatus().running) return
+
+      // Strict safety gate: NEVER rebaseline if physical adapter was reached, or mismatch, or DNS leak detected
+      if (
+        leakResult.physicalAdapterReached ||
+        leakResult.publicIpMismatch ||
+        leakResult.dnsLeakDetected ||
+        !leakResult.defaultRoutePublicIp
+      ) {
+        logEvent('warn', 'ip-monitor', 'indeterminate IP verification failed leak self-test safety gate', {
+          candidateIp,
+          physicalAdapterReached: leakResult.physicalAdapterReached,
+          publicIpMismatch: leakResult.publicIpMismatch,
+          dnsLeakDetected: leakResult.dnsLeakDetected,
+          defaultRoutePublicIp: leakResult.defaultRoutePublicIp
+        })
+        return
+      }
+
+      logEvent('info', 'ip-monitor', 'indeterminate IP verified clean by leak self-test; adopting verified VPN IP baseline', {
+        oldVpnIp: ipMonitor.getEvidence().vpnIp,
+        verifiedIp: leakResult.defaultRoutePublicIp,
+        candidateIp
+      })
+      const isStillRunning = () => tunController.getStatus().running
+      const recheckInfo = await ipMonitor.recheck(true, isStillRunning)
+      const verifiedIp = recheckInfo.ip
+      if (verifiedIp && isStillRunning()) {
+        try {
+          sendToMainWindow('ip-changed', { ip: verifiedIp, isLeak: recheckInfo.isLeak, ...ipMonitor.getEvidence() })
+        } catch {}
+        refreshTrayState({ status: 'protected', publicIp: verifiedIp })
+        void (async () => {
+          try {
+            const { verifyActiveCountryForIp } = await import('./serverPicker')
+            await verifyActiveCountryForIp(verifiedIp, isStillRunning)
+          } catch {}
+        })()
+      }
+    } catch (err: any) {
+      logEvent('warn', 'ip-monitor', 'indeterminate IP auto-verification error', { error: err?.message || String(err) })
+    } finally {
+      indeterminateVerificationInFlight = null
+    }
+  })()
+  return indeterminateVerificationInFlight
+}
+
 function trayStatusFromTunStatus(status: string): TrayStatus {
   if (status === 'running') return 'protected'
   if (status === 'proxy-down') return 'proxy-down'
@@ -1902,6 +1964,14 @@ app.whenReady().then(async () => {
     }
   })
 
+  setLeakSelfTestCompletedCallback((r) => {
+    if (!r.physicalAdapterReached && !r.publicIpMismatch && !r.dnsLeakDetected && r.defaultRoutePublicIp) {
+      if (tunController.getStatus().running && ipMonitor.getEvidence().verdict === 'indeterminate') {
+        void verifyIndeterminateVpnIp(r.defaultRoutePublicIp)
+      }
+    }
+  })
+
   // Correlate physical-network changes and OS sleep with tunnel deaths, so the
   // connection-history record can say "network dropped" / "went to sleep"
   // instead of a bare "sing-box crash".
@@ -2607,6 +2677,8 @@ app.whenReady().then(async () => {
     refreshTrayState({ status: isLeak ? 'leak' : tunController.getStatus().running ? 'protected' : 'off', publicIp: ip })
     if (isLeak) {
       notify('error', 'Виден ваш реальный IP', `Текущий публичный IP: ${ip}. Включите защиту или проверьте VPN-клиент.`, 'leakDetected')
+    } else if (evidence.verdict === 'indeterminate' && tunController.getStatus().running) {
+      void verifyIndeterminateVpnIp(ip)
     }
   })
 

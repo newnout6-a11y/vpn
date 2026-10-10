@@ -116,4 +116,22 @@ describe('runLeakSelfTest coalescing', () => {
       vi.useRealTimers()
     }
   })
+
+  it('notifies onLeakSelfTestCompletedCb when a triggered check finishes cleanly with zero leaks', async () => {
+    const { setLeakSelfTestCompletedCallback, triggerLeakCheckNow } = await import('./leakSelfTest')
+    const completedCb = vi.fn()
+    setLeakSelfTestCompletedCallback(completedCb)
+
+    triggerLeakCheckNow('test-clean')
+    await new Promise((r) => setTimeout(r, 50))
+
+    expect(completedCb).toHaveBeenCalledWith(
+      expect.objectContaining({
+        physicalAdapterReached: false,
+        publicIpMismatch: false,
+        dnsLeakDetected: false,
+        defaultRoutePublicIp: '1.2.3.4'
+      })
+    )
+  })
 })

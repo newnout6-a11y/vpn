@@ -1,4 +1,6 @@
 import { isIP } from 'net'
+import http from 'http'
+import https from 'https'
 import axios from 'axios'
 import { logEvent } from './appLogger'
 import type { PublicIpEvidence, PublicIpVerdict } from '../shared/publicIp'
@@ -9,6 +11,9 @@ export const IP_CHECK_URLS = [
   'https://icanhazip.com',
   'https://api.myip.com'
 ]
+
+export const noKeepAliveHttpAgent = new http.Agent({ keepAlive: false })
+export const noKeepAliveHttpsAgent = new https.Agent({ keepAlive: false })
 
 let currentIp: string | null = null
 let vpnIp: string | null = null
@@ -68,7 +73,9 @@ export async function fetchPublicIpFrom(url: string, canPublish?: () => boolean,
       signal,
       timeout: 10000,
       responseType: 'text',
-      transformResponse: (d) => d
+      transformResponse: (d) => d,
+      httpAgent: noKeepAliveHttpAgent,
+      httpsAgent: noKeepAliveHttpsAgent
     })
     if (signal?.aborted) throw new Error('IP probe cancelled')
     const raw = typeof resp.data === 'string' ? resp.data.trim() : JSON.stringify(resp.data)

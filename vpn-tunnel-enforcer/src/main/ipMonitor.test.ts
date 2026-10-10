@@ -50,6 +50,20 @@ describe('fetchPublicIpFrom provider parsing', () => {
     expect(ip).toBe('203.0.113.195')
   })
 
+  it('disables HTTP keep-alive so sockets are not pooled across network transitions', async () => {
+    vi.mocked(axios.get).mockResolvedValueOnce({ data: '203.0.113.195' } as any)
+
+    await fetchPublicIpFrom('https://icanhazip.com')
+
+    expect(axios.get).toHaveBeenCalledWith(
+      'https://icanhazip.com',
+      expect.objectContaining({
+        httpAgent: expect.objectContaining({ keepAlive: false }),
+        httpsAgent: expect.objectContaining({ keepAlive: false })
+      })
+    )
+  })
+
   it('parses Cloudflare cdn-cgi/trace format (IPv6)', async () => {
     const traceBody = [
       'fl=84f22',

@@ -329,10 +329,15 @@ async function runLeakSelfTestOnce(mySession: number): Promise<LeakSelfTestResul
 
 let periodicLeakTimer: ReturnType<typeof setInterval> | null = null
 let onLeakDetectedCb: ((r: LeakSelfTestResult) => void) | null = null
+let onLeakSelfTestCompletedCb: ((r: LeakSelfTestResult) => void) | null = null
 let transitionSuppressUntil = 0
 
 export function setLeakDetectedCallback(cb: (r: LeakSelfTestResult) => void): void {
   onLeakDetectedCb = cb
+}
+
+export function setLeakSelfTestCompletedCallback(cb: ((r: LeakSelfTestResult) => void) | null): void {
+  onLeakSelfTestCompletedCb = cb
 }
 
 /**
@@ -390,6 +395,8 @@ export function triggerLeakCheckNow(reason: string): void {
       if (runSession !== activeSessionId) return
       if (r.physicalAdapterReached || r.publicIpMismatch || r.dnsLeakDetected) {
         onLeakDetectedCb?.(r)
+      } else {
+        onLeakSelfTestCompletedCb?.(r)
       }
     })
     .catch((err) => logEvent('warn', 'leak-test', 'event-triggered run threw', { err: (err as Error).message, reason }))
@@ -481,6 +488,8 @@ export function startPeriodicLeakTest(
         if (runSession !== activeSessionId) return
         if (r.physicalAdapterReached || r.publicIpMismatch || r.dnsLeakDetected) {
           onLeakDetectedCb?.(r)
+        } else {
+          onLeakSelfTestCompletedCb?.(r)
         }
       })
       .catch((err) => logEvent('warn', 'leak-test', 'periodic test threw', { err: (err as Error).message }))
