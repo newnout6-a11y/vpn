@@ -309,6 +309,7 @@ export interface LeakSelfTestResultClient {
   defaultRoutePublicIp: string | null
   dnsLeakDetected?: boolean
   dnsLeakDetail?: string
+  physicalAdapterInspectionComplete?: boolean
   perAdapter: Array<{
     alias: string
     ipv4: string | null

@@ -4,7 +4,7 @@ param([switch]$RegisterTask, [switch]$UnregisterTask)
 # Recovers from a BSOD/crash that left the firewall blocking, DNS pinned,
 # IPv6 disabled, or proxy settings wiped.
 
-$hasWarnings = $false
+$script:hasWarnings = $false
 
 $programData = if ($env:ProgramData) { $env:ProgramData } else { 'C:\ProgramData' }
 if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
@@ -74,13 +74,53 @@ function Write-RecoveryReport([string]$status) {
     } finally { if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force -ErrorAction Stop } }
 }
 
-function Read-TrustedManifest($name) {
+$script:recoveryInputs = @{}
+function Quarantine-TrustedManifest($name) {
+    Assert-TrustedArtifact (Join-Path $programData 'VPNTE') $true
+    Assert-TrustedArtifact $trustedManifestDir $true
     $path = Join-Path $trustedManifestDir $name
-    if (-not (Test-Path -LiteralPath $path)) { return $null }
+    Assert-TrustedArtifact $path $false
+    $target = $path + '.corrupt-' + [Guid]::NewGuid().ToString()
+    Move-Item -LiteralPath $path -Destination $target -ErrorAction Stop
+    Assert-TrustedArtifact $target $false
+    if (Test-Path -LiteralPath $path) { throw 'Recovery quarantine not confirmed' }
+    $script:recoveryInputs[$name] = $null
+    $script:hasWarnings = $true
+    Log "CRITICAL_SECURITY_EVENT: corrupt $name quarantined; protection unknown"
+}
+function Invoke-VpnteWfpIpv6Recovery {
+    # The source is shipped next to this script; execute only the pinned build.
+    $sourcePath=Join-Path $PSScriptRoot 'vpnte-wfp-ipv6.cs'
+    $item=Get-Item -LiteralPath $sourcePath -Force -ErrorAction Stop
+    if($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $item.Length -gt 131072){throw 'WFP helper source path rejected'}
+    $source=(Get-Content -LiteralPath $sourcePath -Raw -Encoding UTF8 -ErrorAction Stop).Replace("`r`n","`n")
+    $hasher=[Security.Cryptography.SHA256]::Create()
+    try {$hash=([BitConverter]::ToString($hasher.ComputeHash([Text.Encoding]::UTF8.GetBytes($source)))).Replace('-','').ToLowerInvariant()} finally {$hasher.Dispose()}
+    if($hash -ne '6eebcb4430e2b8969d94d9afb09eb803296dfd8cbea5eaf24b8a78407db06249'){throw 'WFP helper source integrity mismatch'}
+    if(-not ('VPNTE.IPv6.Policy' -as [type])){Add-Type -TypeDefinition $source -ErrorAction Stop}
+    $engine=New-Object VPNTE.IPv6.NativeEngine
+    try { [VPNTE.IPv6.Policy]::Remove($engine); Log 'IPv6 WFP: owned filters removed and verified' } finally {$engine.Dispose()}
+}
+function Read-TrustedManifest($name) {
+    if ($script:recoveryInputs.ContainsKey($name)) { return $script:recoveryInputs[$name] }
+    $path = Join-Path $trustedManifestDir $name
+    if (-not (Test-Path -LiteralPath $path)) { $script:recoveryInputs[$name] = $null; return $null }
     Assert-TrustedArtifact $path $false
     if ((Get-Item -LiteralPath $path).Length -gt 1048576) { throw 'Recovery manifest size limit' }
-    $value = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
-    if ($value.schemaVersion -ne 1 -or $value.owner -ne 'VPNTE') { throw 'Unsupported recovery manifest schema' }
+    $raw = Get-Content -LiteralPath $path -Raw -Encoding UTF8 -ErrorAction Stop
+    try { $value = $raw | ConvertFrom-Json -ErrorAction Stop }
+    catch {
+        Quarantine-TrustedManifest $name
+        if ($name -eq 'recovery-policy.json') { throw 'Strict recovery policy could not be verified; network unchanged' }
+        return $null
+    }
+    if ($value.schemaVersion -is [ValueType] -and $value.schemaVersion -ne 1) { throw "Unsupported recovery manifest version: $name" }
+    if ($value.schemaVersion -ne 1 -or $value.owner -ne 'VPNTE') {
+        Quarantine-TrustedManifest $name
+        if ($name -eq 'recovery-policy.json') { throw 'Strict recovery policy could not be verified; network unchanged' }
+        return $null
+    }
+    $script:recoveryInputs[$name] = $value
     return $value
 }
 function Resolve-RecoveryPrincipalSid([string]$userId) {
@@ -149,9 +189,19 @@ try {
 $strictRequired = $false
 $firewallManifest = $null
 try {
+    # Check every journal before ANY network effect, including journals used later.
+    foreach ($name in @('recovery-policy.json','firewall.json','latest-physical-adapter-lockdown.json','latest-tun-network-baseline.json','tun-owner.json')) { $null = Read-TrustedManifest $name }
+    $preflightFirewall=Read-TrustedManifest 'firewall.json'
+    if($preflightFirewall -and $preflightFirewall.ipv6Policy -and $preflightFirewall.ipv6Policy.schemaVersion -ne 1){throw 'Unsupported recovery manifest version: firewall IPv6 policy'}
     $policy = Read-TrustedManifest 'recovery-policy.json'
     if ($policy -and $policy.strictMode -isnot [bool]) { throw 'Invalid strict policy' }
     $strictRequired = $policy -and $policy.strictMode
+} catch {
+    Log "SECURITY: recovery preflight rejected; network unchanged: $($_.Exception.Message)"
+    Write-RecoveryReport 'warnings'
+    exit 1
+}
+try {
     $firewallManifest = Read-TrustedManifest 'firewall.json'
     if ($firewallManifest) {
         if ($firewallManifest.strictMode -isnot [bool] -or $firewallManifest.phase -notin @('prepared','active') -or @($firewallManifest.savedProfiles).Count -ne 3) { throw 'Invalid firewall snapshot' }
@@ -163,16 +213,15 @@ try {
         $strictRequired = $strictRequired -or $firewallManifest.strictMode
     }
 } catch {
-    $strictRequired = $true
-    $hasWarnings = $true
-    Log "SECURITY: invalid firewall recovery data, retaining Block"
+    Quarantine-TrustedManifest 'firewall.json'
+    $firewallManifest = $null
 }
 if ($strictRequired) {
     # No Allow rules or adapter/DNS cleanup may turn strict protection into fail-open.
     Set-NetFirewallProfile -Profile Domain,Private,Public -DefaultOutboundAction Block -ErrorAction Stop
     Log 'Strict protection retained until explicit user action'
     Write-RecoveryReport 'strict-retained'
-    exit 0
+    if ($hasWarnings) { exit 1 } else { exit 0 }
 }
 $candidatePaths = @((Join-Path $trustedManifestDir 'latest-physical-adapter-lockdown.json'))
 $adapterManifestPath = $null
@@ -244,8 +293,13 @@ if ($firewallManifest -or $vpnteRules -gt 0) {
         Get-NetFirewallRule -DisplayName 'VPNTE-killswitch*' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction Stop
         if (@(Get-NetFirewallRule -DisplayName 'VPNTE-killswitch*' -ErrorAction SilentlyContinue).Count -gt 0) { throw 'VPNTE rules remain' }
     } catch { $firewallRecovered = $false; $hasWarnings = $true; Log 'Firewall rule cleanup failed' }
+}
+
+try {
+    Invoke-VpnteWfpIpv6Recovery
     if ($firewallRecovered -and $firewallManifest) { Remove-Item -LiteralPath (Join-Path $trustedManifestDir 'firewall.json') -Force -ErrorAction Stop }
 }
+catch { $hasWarnings=$true; Log "IPv6 WFP recovery failed; filters retained: $($_.Exception.Message)" }
 
 # 2. DNS: reset any adapter still pinned to VPNTE resolver (192.168.250.254/253)
 $vpnteDns = @('192.168.250.253', '192.168.250.254')

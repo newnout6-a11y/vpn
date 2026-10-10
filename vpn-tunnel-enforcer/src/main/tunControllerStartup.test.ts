@@ -18,7 +18,7 @@ function harness() {
     applyLowTunInterfaceMetric: vi.fn(async () => {}),
     runPowerShell: vi.fn(async () => '5'),
     isKillSwitchActive: vi.fn(async () => false),
-    enableKillSwitch: vi.fn(async (opts: { tunAdapterReady?: Promise<boolean> }) => ({ success: await opts.tunAdapterReady })),
+    enableKillSwitch: vi.fn(async (opts: { tunAdapterReady?: Promise<boolean>; signal: AbortSignal }) => ({ success: await opts.tunAdapterReady })),
     strictRecoveryRequired: vi.fn(async () => false),
     readGranularKillSwitchExceptions: vi.fn(() => []),
     getTunAdapterAlias: () => 'Ethernet 5',
@@ -39,6 +39,7 @@ function harness() {
 let resolved=false, successHandled=false, pollInFlight=false, stopRequested=false;
 let attempts=0, startAbortedReason=null, pendingKillSwitch=null, settleFirewallAdapter=null;
 let startupPollCompletion=null;
+const startAbortController=new AbortController();
 let startupCompensationStarted=false;
 const maxAttempts=31, poller=1, wantKillSwitch=true, adapterLockdownPromise=null;
 const runtime={singbox:'fixture.exe'}, proxyOwnerProgramPaths=[], processWaitStarted=0;
@@ -50,12 +51,32 @@ const wantAdapterLockdown=false,startOptions={},STABLE_RESET_MS=60000;
 let killSwitchEngaged=false,killSwitchWarning=null,restartAttempt=0,lastStartOptions=null;
 let stopInProgress=false,userInitiatedStop=false,stableTimer=null;
 function finish(result){if(!resolved){resolved=true;onFinish(result)}}
-return {poll: ${callback}, requestStop: () => {stopRequested=true}, exit: () => {resolved=true;settleFirewallAdapter?.(false)}, completion: () => startupPollCompletion};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
-  const control = new Function(...Object.keys(os), compiled)(...Object.values(os)) as { poll: () => Promise<void>; requestStop: () => void; exit: () => void; completion: () => Promise<void> | null }
+return {poll: ${callback}, signal: startAbortController.signal, requestStop: () => {stopRequested=true;startAbortController.abort()}, exit: () => {resolved=true;settleFirewallAdapter?.(false)}, completion: () => startupPollCompletion};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
+  const control = new Function(...Object.keys(os), compiled)(...Object.values(os)) as { poll: () => Promise<void>; signal: AbortSignal; requestStop: () => void; exit: () => void; completion: () => Promise<void> | null }
   return { ...control, ...os }
 }
 
 describe('startup callback fault boundaries', () => {
+  it('awaits WFP priority reservation before continuing startup and stops on conflict (AT-03-010)', async () => {
+    const reserveStart = source.indexOf('// Reserve the sublayer before sing-box')
+    const reserveEnd = source.indexOf("mark('preflight')", reserveStart)
+    expect(reserveStart).toBeGreaterThan(-1)
+    expect(reserveEnd).toBeLessThan(source.indexOf('startXray(', reserveEnd))
+    const compiled = ts.transpileModule(`return async function(){${source.slice(reserveStart, reserveEnd)} return {success:true}}`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
+    let release!: () => void
+    const reserve = vi.fn(() => new Promise<void>(done => { release = done }))
+    const signal = new AbortController().signal
+    const run = new Function('wantKillSwitch','timeAsync','reserveKillSwitchIpv6Priority','startAbortController','finishStart',compiled)(true,async (_phase: string, effect: Function) => effect(),reserve,{signal},(result: unknown)=>result)
+    const done = vi.fn()
+    const pending = run().then(done)
+    expect(reserve).toHaveBeenCalledExactlyOnceWith(signal)
+    await Promise.resolve()
+    expect(done).not.toHaveBeenCalled()
+    release();await pending
+    expect(done).toHaveBeenCalledWith({success:true})
+    reserve.mockRejectedValueOnce(new Error('WFP conflict'))
+    expect(await run()).toEqual({success:false,error:'WFP conflict'})
+  })
   it('probes immediately and keeps the 250 ms retry timer (AT-02-002)', () => {
     const registrationStart = source.indexOf('const poller = setInterval(pollRuntime, 250)')
     const registrationEnd = source.indexOf('void pollRuntime()', registrationStart) + 'void pollRuntime()'.length
@@ -133,6 +154,7 @@ describe('startup callback fault boundaries', () => {
     const pending = h.poll()
     await vi.waitFor(() => expect(h.recordOwnedTunAdapter).toHaveBeenCalledOnce())
     const gate = h.enableKillSwitch.mock.calls[0][0].tunAdapterReady!
+    expect(h.enableKillSwitch.mock.calls[0][0].signal).toBe(h.signal)
     const observed = vi.fn()
     void gate.then(observed)
     await Promise.resolve()

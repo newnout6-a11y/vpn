@@ -667,18 +667,37 @@ describe('trafficForensics', () => {
       mode: 'directVpn',
       target: 'poland1'
     })
+    const manifestPath = join(status.sessionDir!, 'session-manifest.json')
+    let release!: () => void
+    let entered!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const writing = new Promise<void>(resolve => { entered = resolve })
+    vi.mocked(ensureElevatedRuntimeDirHardened).mockImplementationOnce(async () => {
+      // Hold the background writer in writeFile's truncate-before-write window.
+      writeFileSync(manifestPath, '')
+      entered()
+      await gate
+      return { hardened: true, message: 'stubbed' }
+    })
     child.exitCode = null
     child.killed = true
     child.emit('exit', null, 'SIGTERM')
     writeFileSync(join(status.sessionDir!, 'pktmon-stop.txt'), 'packet monitor is not running')
 
-    const refreshed = await getTrafficForensicsStatus()
-    const manifest = JSON.parse(readFileSync(join(status.sessionDir!, 'session-manifest.json'), 'utf-8'))
-    expect(refreshed.running).toBe(true)
-    expect(refreshed.stoppedAt).toBeNull()
-    expect(refreshed.sidecar?.running).toBe(false)
-    expect(manifest.running).toBe(true)
-    expect(manifest.stoppedAt).toBeNull()
+    try {
+      await writing
+      const refreshed = await getTrafficForensicsStatus()
+      expect(refreshed.running).toBe(true)
+      expect(refreshed.stoppedAt).toBeNull()
+      expect(refreshed.sidecar?.running).toBe(false)
+      release()
+      await vi.waitFor(() => {
+        const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8'))
+        expect(manifest.running).toBe(true)
+        expect(manifest.stoppedAt).toBeNull()
+        expect(manifest.sidecar.running).toBe(false)
+      })
+    } finally { release() }
   })
 
   it('keeps the bundled cmd sidecar as a PowerShell wrapper', () => {

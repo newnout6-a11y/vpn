@@ -1,10 +1,12 @@
 // AT-03-003/006/007/012: actual dispatcher with fake cmdlets, no system writes.
 import { describe, expect, it } from 'vitest'
 import { execFileSync } from 'node:child_process'
+import { gzipSync } from 'node:zlib'
 import { DNS_POLICY_SNAPSHOT_SCRIPT, recoveryWorkerFunctions, recoveryWorkerScript } from './recoveryPsProtocol'
+import { PHYSICAL_ADAPTER_SNAPSHOT_SCRIPT } from './physicalAdapterSnapshot'
 
 const native = process.platform === 'win32' || Boolean(process.env.VPNTE_PWSH)
-function run(request: unknown, variant = 'trusted'): {value: string; set: number; removed: number; queries: number; order: string[]} {
+function run(request: unknown, variant = 'trusted', fullSnapshot = false): {value: string; set: number; removed: number; queries: number; order: string[]} {
   const serialized = Buffer.from(JSON.stringify(request)).toString('base64')
   const fixture = String.raw`
 $global:variant='${variant}'
@@ -42,38 +44,129 @@ function Get-Item { [CmdletBinding()]param($LiteralPath,[switch]$Force)
   $isFile=$LiteralPath -like '*.json' -or $LiteralPath -like '*tmp-*'
   $parent=$LiteralPath -eq [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
   $reparse=($global:variant -eq 'parentReparse' -and $parent) -or ($global:variant -eq 'directoryReparse' -and -not $isFile -and -not $parent) -or ($global:variant -eq 'fileReparse' -and $isFile)
-  [pscustomobject]@{PSIsContainer=((-not $isFile) -or ($global:variant -eq 'fileType' -and $isFile));Attributes=$(if($reparse){[IO.FileAttributes]::ReparsePoint}else{[IO.FileAttributes]::Normal});Length=$(if($global:variant -eq 'oversized' -and $isFile){1048577}else{10})}
+  [pscustomobject]@{FullName=$LiteralPath;PSIsContainer=((-not $isFile) -or ($global:variant -eq 'fileType' -and $isFile));Attributes=$(if($reparse){[IO.FileAttributes]::ReparsePoint}else{[IO.FileAttributes]::Normal});Length=$(if($global:variant -eq 'oversized' -and $isFile){1048577}else{10})}
 }
+function Get-ChildItem { [CmdletBinding()]param($LiteralPath,[switch]$Force) }
 function Get-Acl { [CmdletBinding()]param($LiteralPath)
   $isFile=$LiteralPath -like '*.json' -or $LiteralPath -like '*tmp-*'
-  $acl=[pscustomobject]@{IsFile=$isFile;AreAccessRulesProtected=($global:variant -ne 'unprotected' -and -not ($global:variant -eq 'postUnprotected' -and $global:sets -gt 0))}
+  $acl=[pscustomobject]@{Path=$LiteralPath;IsFile=$isFile;AreAccessRulesProtected=($global:variant -ne 'unprotected' -and -not ($global:variant -eq 'postUnprotected' -and $global:sets -gt 0))}
   $acl|Add-Member ScriptMethod GetOwner {param($type) [pscustomobject]@{Value=$(if($global:variant -eq 'owner' -or ($global:variant -eq 'fileOwner' -and $this.IsFile)){'S-1-5-32-545'}else{'S-1-5-32-544'})} }
-  $acl|Add-Member ScriptMethod GetAccessRules {param($a,$b,$c) [pscustomobject]@{AccessControlType='Allow';IdentityReference=[pscustomobject]@{Value=$(if($global:variant -eq 'ace'){'S-1-5-32-545'}else{'S-1-5-18'})}} }
+  $acl|Add-Member ScriptMethod GetAccessRules {param($a,$b,$c) [pscustomobject]@{FileSystemRights=[Security.AccessControl.FileSystemRights]::FullControl;PropagationFlags=[Security.AccessControl.PropagationFlags]::None;AccessControlType='Allow';IdentityReference=[pscustomobject]@{Value=$(if($global:variant -eq 'ace' -or ($global:variant -eq 'aclParentAccess' -and $this.Path -eq [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData))){'S-1-5-32-545'}else{'S-1-5-18'})}} }
   $acl
 }
 function Get-Content { [CmdletBinding()]param($LiteralPath,[switch]$Raw,$Encoding) return ([pscustomobject]@{owner='VPNTE';text='сеть'}|ConvertTo-Json -Compress) }
 function Remove-Item { [CmdletBinding()]param($LiteralPath,[switch]$Force) $global:removed++;if($global:variant -eq 'removeError'){throw 'Fixture remove failure'} }
 function Set-Acl { [CmdletBinding()]param($LiteralPath,$AclObject) $global:sets++;if($global:variant -eq 'setError'){throw 'Fixture ACL failure'} }
 function Get-NetAdapter { [CmdletBinding()]param($Name)
+  if (-not $Name) {
+    if ($global:variant -eq 'noPhysicalAdapters') { return }
+    [pscustomobject]@{Name='Беспроводная сеть';Status='Up';InterfaceDescription='MediaTek Wi-Fi';MacAddress='00-11-22-33-44-55';ifIndex=17;InterfaceGuid='11111111-1111-1111-1111-111111111111';MediaType='802.11';PhysicalMediaType='Native802_11'}
+    return
+  }
   $a=[pscustomobject]@{Name=$(if($global:variant -eq 'renamed'){'Ethernet 6'}else{'Ethernet 5'});Status=$(if($global:variant -eq 'down'){'Disconnected'}else{'Up'});DriverDescription=$(if($global:variant -eq 'driver'){'Physical NIC'}else{'Wintun Userspace Tunnel'});PnPDeviceID=$(if($global:variant -eq 'pnp'){'ROOT\NIC\x'}else{'SWD\Wintun\fixture'});ifIndex=5;InterfaceGuid=$(if($global:variant -eq 'guid'){'invalid'}else{'00000000-0000-0000-0000-000000000005'})}
   $a;if($global:variant -eq 'duplicate'){$a}
 }
+function Get-NetAdapterBinding { [CmdletBinding()]param($InterfaceAlias,$ComponentID) if($global:variant -eq 'dnsOnly'){throw 'DNS discovery queried bindings'}; [pscustomobject]@{Enabled=$true} }
+function Get-DnsClientServerAddress { [CmdletBinding()]param($InterfaceAlias,$AddressFamily) [pscustomobject]@{ServerAddresses=@('1.1.1.1')} }
+function Get-NetRoute { [CmdletBinding()]param($InterfaceIndex,$DestinationPrefix)
+  if($global:variant -eq 'dnsOnly'){throw 'DNS discovery queried routes'}
+  if ($DestinationPrefix -eq '::/0' -and $global:variant -eq 'physicalIpv6Only') { [pscustomobject]@{NextHop='fe80::1'} }
+  if ($DestinationPrefix -eq '0.0.0.0/0' -and $global:variant -ne 'physicalIpv6Only') { [pscustomobject]@{NextHop='10.0.0.1'} }
+}
+function Get-NetConnectionProfile { [CmdletBinding()]param($InterfaceIndex) if($global:variant -eq 'dnsOnly'){throw 'DNS discovery queried profiles'}; [pscustomobject]@{Name='Office'} }
+function Get-ItemProperty { [CmdletBinding()]param($Path,$Name) if($global:variant -eq 'dnsOnly'){throw 'DNS discovery queried registry'}; [pscustomobject]@{NameServer='1.1.1.1'} }
 function Get-NetIPAddress { [CmdletBinding()]param($InterfaceIndex,$AddressFamily)
   [pscustomobject]@{IPAddress=$(if($global:variant -eq 'ip'){'192.168.250.254'}else{'192.168.250.253'});PrefixLength=$(if($global:variant -eq 'prefix'){24}else{30})}
 }
+function Import-Module { [CmdletBinding()]param($Name)
+  if ($Name -notin @('NetAdapter','DnsClient','NetTCPIP','NetConnection') -and $Name -notlike '*Microsoft.PowerShell.Security.psd1') { throw 'Unexpected import' }
+  $global:steps += 'import:'+$Name
+}
+function netsh {
+  switch ($args -join ' ') {
+    'interface teredo show state' { 'Type : client' }
+    'interface 6to4 show state' { '6to4 Service State : enabled' }
+    'interface isatap show state' { 'ISATAP State : disabled' }
+    default { throw 'Unexpected native command' }
+  }
+}
 ${recoveryWorkerFunctions(variant === 'environmentMismatch' ? 'C:\\different-programdata' : process.env.ProgramData || 'C:\\ProgramData')}
 $request=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${serialized}'))|ConvertFrom-Json
-$value=Invoke-RecoveryOperation $request
+$value=${fullSnapshot ? `& { ${PHYSICAL_ADAPTER_SNAPSHOT_SCRIPT} }` : 'Invoke-RecoveryOperation $request'}
 [pscustomobject]@{value=$value;set=$global:sets;removed=$global:removed;queries=$global:queries;order=@($global:steps)}|ConvertTo-Json -Compress
 `
   const env = {...process.env}
   for(const key of Object.keys(env))if(key.toLowerCase()==='psmodulepath')delete env[key]
-  // Direct argv (no cmd.exe); keep the growing fake-cmdlet fixture below the
-  // CreateProcess limit instead of inflating it with UTF-16/base64 encoding.
-  const stdout=execFileSync(process.env.VPNTE_PWSH || 'powershell.exe', ['-NoProfile','-NonInteractive','-Command',"$ErrorActionPreference='Stop';[Console]::OutputEncoding=[Text.Encoding]::UTF8;"+fixture], {env,timeout:15000,encoding:'utf8',stdio:['ignore','pipe','pipe']})
+  // Send the larger fixture on stdin so assertions cannot pass on CreateProcess overflow.
+  const compressed=gzipSync(Buffer.from("$ErrorActionPreference='Stop';[Console]::OutputEncoding=[Text.Encoding]::UTF8;"+fixture)).toString('base64')
+  const launcher=`$stream=New-Object IO.MemoryStream(,[Convert]::FromBase64String([Console]::In.ReadToEnd()));$gzip=New-Object IO.Compression.GZipStream($stream,[IO.Compression.CompressionMode]::Decompress);$reader=New-Object IO.StreamReader($gzip,[Text.Encoding]::UTF8);try{$source=$reader.ReadToEnd()}finally{$reader.Dispose();$gzip.Dispose();$stream.Dispose()}; & ([ScriptBlock]::Create($source))`
+  const stdout=execFileSync(process.env.VPNTE_PWSH || 'powershell.exe', ['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(launcher,'utf16le').toString('base64')], {env,input:compressed,timeout:15000,encoding:'utf8',stdio:['pipe','pipe','pipe']})
   return JSON.parse(stdout.replace(/^\uFEFF/,'').trim())
 }
 describe('fixed recovery dispatcher native proof', () => {
+  it.skipIf(!native)('reads only the selected adapter DNS without baseline queries or mutations (AT-03-006)', () => {
+    const result = run({ op: 'inspect-physical-dns' }, 'dnsOnly')
+    expect(JSON.parse(result.value)).toEqual({ ifIndex: 17, alias: 'Беспроводная сеть', ipv4Dns: ['1.1.1.1'] })
+    expect(result).toMatchObject({ set: 0, removed: 0, queries: 0 })
+  }, 20000)
+  it.skipIf(!native)('preserves IPv6-only physical uplink classification (AT-03-010)', () => {
+    const baseline = JSON.parse(run({ op: 'inspect-physical-adapters' }, 'physicalIpv6Only').value)
+    expect(baseline).toMatchObject({ interfaceGuid: '11111111-1111-1111-1111-111111111111', ipv6Enabled: true,
+      ipv4Dns: ['1.1.1.1'], ipv4DnsSource: 'static', networkProfiles: ['Office'], isCellularOrTethering: true })
+    expect(run({ op: 'inspect-physical-dns' }, 'noPhysicalAdapters').value).toBe('[]')
+    expect(run({ op: 'inspect-physical-adapters' }, 'noPhysicalAdapters').value).toBe('[]')
+  }, 20000)
+  it.skipIf(!native)('returns the identical full baseline through the fixed dispatcher without writes', () => {
+    const result = run({ op: 'inspect-physical-adapters' })
+    expect(JSON.parse(result.value)).toEqual(JSON.parse(run({op:'inspect-physical-dns'}, 'trusted', true).value))
+    expect(result).toMatchObject({set:0,removed:0,queries:0,order:[]})
+    const transitions = run({ op: 'inspect-transition-adapters' })
+    expect(JSON.parse(transitions.value)).toEqual({ teredo: 'Type : client', sixToFour: '6to4 Service State : enabled', isatap: 'ISATAP State : disabled' })
+    expect(transitions).toMatchObject({set:0,removed:0,queries:0,order:[]})
+  }, 20000)
+  it.skipIf(!native)('limits each adapter warm-up to one fixed module and leaves recovery warm-up short', () => {
+    for (const module of ['NetAdapter','DnsClient','NetTCPIP','NetConnection']) {
+      expect(run({op:'warmup-adapters',module})).toMatchObject({value:'RECOVERY_MODULES_READY',set:0,removed:0,queries:0,order:['import:'+module]})
+    }
+    const recovery = run({op:'warmup'})
+    expect(recovery.order).toHaveLength(1)
+    expect(recovery.order[0]).toContain('Microsoft.PowerShell.Security.psd1')
+  }, 20000)
+  it.skipIf(!native).each([
+    { op: 'inspect-network-identity', script: 'Get-CimInstance' },
+    { op: 'inspect-network-identity', alias: 'arbitrary' },
+    { op: 'INSPECT-NETWORK-IDENTITY' },
+    { op: 'inspect-physical-dns', script: 'Get-NetAdapter' },
+    { op: 'inspect-physical-dns', alias: 'arbitrary' },
+    { op: 'INSPECT-PHYSICAL-DNS' },
+    { op: 'inspect-physical-adapters', script: 'Get-NetAdapter' },
+    { op: 'inspect-transition-adapters', path: 'arbitrary' },
+    { op: 'warmup-adapters', module: 'NetAdapter;evil' },
+    { op: 'warmup-adapters', module: 'netadapter' },
+    { op: 'warmup-adapters', module: 'NetAdapter', script: 'evil' }
+  ])('rejects expanded physical inspection requests: %j (AT-03-012)', request => {
+    expect(() => run(request)).toThrow(/Invalid .*fields|Unknown recovery worker operation/)
+  }, 20000)
+  it.skipIf(!native)('returns the complete runtime ACL namespace proof without mutations (AT-01-009)', () => {
+    const result = run({ op: 'inspect-runtime-acl', runtimeDir: 'C:\\ProgramData\\VPNTE-fixture-runtime' })
+    expect(JSON.parse(result.value)).toMatchObject({ path: 'C:\\ProgramData\\VPNTE-fixture-runtime', owner: 'S-1-5-32-544', protected: true,
+      ancestorsInspected: true, childrenInspected: true, children: [] })
+    expect(JSON.parse(result.value).ancestors.map((a: {path: string}) => a.path)).toEqual(['C:\\', 'C:\\ProgramData'])
+    expect(result).toMatchObject({ set: 0, removed: 0, queries: 0 })
+  }, 20000)
+  it.skipIf(!native)('refuses a writable runtime parent at the native boundary (AT-01-009)', () => {
+    const result = run({ op: 'inspect-runtime-acl', runtimeDir: 'C:\\ProgramData\\VPNTE-fixture-runtime' }, 'aclParentAccess')
+    expect(JSON.parse(result.value.slice('VPNTE_RUNTIME_FAILURE:'.length))).toMatchObject({
+      operation: 'validate-acl', path: 'C:\\ProgramData', reason: 'RuntimeNamespaceUntrustedAccess' })
+    expect(result).toMatchObject({ set: 0, removed: 0, queries: 0 })
+  }, 20000)
+  it.skipIf(!native).each([
+    { op: 'inspect-runtime-acl', runtimeDir: 'C:\\runtime', script: 'Get-Acl' },
+    { op: 'inspect-runtime-acl', runtimeDir: 'C:\\..\\runtime' },
+    { op: 'inspect-runtime-acl', runtimeDir: 'C:\\runtime:stream' }
+  ])('rejects expanded ACL inspection requests: %j (AT-03-012)', request => {
+    expect(() => run(request)).toThrow()
+  }, 20000)
   it.skipIf(!native)('waits for sing-box before stopping Xray even when CIM lists the upstream first (AT-02-009)', () => {
     const result = run({ op: 'stop-runtime', runtimeDir: 'C:\\VPNTE-fixture-runtime' }, 'upstreamFirst')
     expect(result.order).toEqual(['stop:1', 'wait:1', 'stop:2'])

@@ -19,6 +19,7 @@ import {
   disableKillSwitch,
   disableKillSwitchIfActive,
   enableKillSwitch,
+  reserveKillSwitchIpv6Priority,
   isKillSwitchActive
 } from './firewallKillSwitch'
 import {
@@ -81,6 +82,9 @@ export interface NetworkCleanupReceipt {
 }
 export interface TunStopResult {
   success: boolean
+  // Exit was freshly proved, but a later cleanup step failed. Main may close
+  // the session and retry recovery without treating this as a live runtime.
+  runtimeStopped?: boolean
   error?: string
   warning?: string
   networkCleanup?: NetworkCleanupReceipt
@@ -2015,8 +2019,11 @@ async function prepareRuntime(
     smartRuDirectDnsSources?: PhysicalAdapterDnsSource[]
     xraySocksPort?: number
     resolvedVpnEndpointIp?: string | null
+    xrayStartup?: Promise<{ socksPort: number; resolvedIp: string | null }>
+    signal?: AbortSignal
   } = {}
 ): Promise<{ singbox: string; config: string }> {
+  options.signal?.throwIfAborted()
   const runtimeDir = getTunRuntimeDir()
   // The security helper creates the trusted root with its restricted ACL.
   // Creating it recursively here would expose a writable directory before
@@ -2033,6 +2040,7 @@ async function prepareRuntime(
       'Бинарные файлы не были скопированы и туннель не запускался.'
     )
   }
+  options.signal?.throwIfAborted()
 
   const singboxSrc = getBundledResource('sing-box.exe')
   const wintunSrc = getBundledResource('wintun.dll')
@@ -2158,8 +2166,15 @@ async function prepareRuntime(
   const existingAliases = (options.smartRuDirectDnsSources ?? []).map((s: PhysicalAdapterDnsSource) => s.alias)
   updateTunAdapterAlias(existingAliases.length > 0 ? existingAliases : undefined)
 
+  // Files/ACL inspection can overlap Xray startup. Configuration still waits
+  // for its actual listener and resolved endpoint; no guessed port is written.
+  const { xrayStartup, signal, ...configOptions } = options
+  const xray = await xrayStartup
+  signal?.throwIfAborted()
   const config = generateSingboxConfig(upstream, proxyType, directProcessNames, {
-    ...options,
+    ...configOptions,
+    xraySocksPort: xray?.socksPort ?? options.xraySocksPort,
+    resolvedVpnEndpointIp: xray ? xray.resolvedIp : options.resolvedVpnEndpointIp,
     // If staging failed, smartRuRuleSetDir is undefined. Force the whole
     // feature OFF for this run (rather than letting generateSingboxConfig fall
     // back to the dangerous `remote` download path) so the tunnel still starts
@@ -2504,6 +2519,13 @@ export const tunController = {
       logEvent('warn', 'tun', 'start refused because another TUN/VPN is already active', { foreign, mode, proxyAddr, proxyType })
       return finishStart({ success: false, error: message })
     }
+    // Reserve the sublayer before sing-box strict_route creates its hard permits.
+    // This commits only an empty owned container; traffic rules still require
+    // the verified TUN and durable recovery journal below.
+    if (wantKillSwitch) {
+      try { await timeAsync('wfp-priority-reserve', () => reserveKillSwitchIpv6Priority(startAbortController.signal)) }
+      catch (err: any) { return finishStart({ success: false, error: err?.message || String(err) }) }
+    }
     mark('preflight')
     const warning = null
 
@@ -2687,12 +2709,32 @@ export const tunController = {
         let resolvedVpnEndpointIp: string | null = null
         if (engine === 'xray') {
           try {
-            const xr = await startXray(vpnProfile.outbound, {
+            const xrayStartup = startXray(vpnProfile.outbound, {
               clientDevice: vpnProfile.clientDevice,
               stealthMode: startOptions.stealthMode === true,
               resolvedIp: vpnProfile.resolvedIp,
               signal: startAbortController.signal
             })
+            runtimePromise = timePromise('prepare-runtime', smartRouteRuntimeOptsPromise.then(runtimeOpts => {
+              startAbortController.signal.throwIfAborted()
+              return prepareRuntime(
+                { outbound: vpnProfile.outbound, proxyType, clientDevice: vpnProfile.clientDevice },
+                proxyType,
+                uniqueProcessNames([...proxyOwnerProcessNames, 'vpnte-xray.exe']),
+                {
+                  stealthMode: startOptions.stealthMode === true,
+                  adaptiveMode: startOptions.adaptiveMode,
+                  publicWifiCompatibility,
+                  xrayStartup,
+                  signal: startAbortController.signal,
+                  ...runtimeOpts
+                }
+              )
+            }), { mode, parallel: true })
+            // Do not release this start owner while cancelled/failed staging
+            // can still write files that the next connection would consume.
+            startupCleanupTasks.push(runtimePromise.then(() => undefined, () => undefined))
+            const xr = await xrayStartup
             xraySocksPort = xr.socksPort
             resolvedVpnEndpointIp = xr.resolvedIp
             proxyOwnerProgramPaths = [...new Set([...proxyOwnerProgramPaths, xr.exePath])]
@@ -2728,7 +2770,7 @@ export const tunController = {
           await rollbackEarlyAdapterLockdown('start cancelled while reading DNS sources')
           return finishStart({ success: false, error: 'Запуск отменён' })
         }
-        runtimePromise = timePromise('prepare-runtime', prepareRuntime(
+        if (!runtimePromise) runtimePromise = timePromise('prepare-runtime', prepareRuntime(
           { outbound: vpnProfile.outbound, proxyType, clientDevice: vpnProfile.clientDevice },
           proxyType,
           proxyOwnerProcessNames,
@@ -3317,12 +3359,10 @@ export const tunController = {
             let killSwitchPromise: Promise<{ engaged: boolean; warning: string | null }> | null = null
             if (wantKillSwitch) {
               killSwitchPromise = (async () => {
-                if (await isKillSwitchActive()) {
-                  logEvent('info', 'tun', 'kill-switch already active — reusing existing rules')
-                  return { engaged: true, warning: null }
-                }
                 const ks = await enableKillSwitch({
                   singboxExePath: runtime.singbox,
+                  signal: startAbortController.signal,
+                  vpnServerHost: mode === 'directVpn' && typeof vpnProfile?.outbound?.server === 'string' ? vpnProfile.outbound.server : undefined,
                   strictMode: await strictRecoveryRequired(),
                   proxyOwnerProgramPaths,
                   appExceptionPaths: readGranularKillSwitchExceptions('app'),
@@ -3931,9 +3971,11 @@ export const tunController = {
         notifyStatus('adapting')
         return { success: true, warning, networkCleanup }
       }
-      notify('warn', 'Защита отключена с предупреждениями', warning, 'vpnDisconnect')
-      notifyStatus('stopped')
-      return { success: true, warning, networkCleanup }
+      const error = `${warning}. Повторите остановку защиты и проверьте диагностику сети.`
+      currentStatus.warning = error
+      notify('error', 'Отключение защиты не завершено', error, 'vpnDisconnect')
+      notifyStatus('error')
+      return { success: false, runtimeStopped: true, error, warning, networkCleanup }
     }
 
     // Cleanup finished — let the leak-detector run again. The next tunnel

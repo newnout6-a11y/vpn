@@ -1,22 +1,32 @@
 /** AT-03-012: closed data protocol; no scripts or arbitrary artifact paths. */
+import { runtimeAclWorkerFunction } from './runtimeAclInspection'
+import { PHYSICAL_ADAPTER_DNS_SCRIPT, PHYSICAL_ADAPTER_SNAPSHOT_SCRIPT, TRANSITION_ADAPTER_SNAPSHOT_SCRIPT } from './physicalAdapterSnapshot'
+import { ADAPTIVE_NETWORK_IDENTITY_SCRIPT } from './adaptiveNetworkIdentityScript'
 export const RECOVERY_MAX_BYTES = 1024 * 1024
+export const ADAPTER_WARMUP_MODULES = ['NetAdapter', 'DnsClient', 'NetTCPIP', 'NetConnection'] as const
 export type RecoveryRequest =
-  | { op: 'ensure' | 'warmup' | 'inspect-dns-policy' }
+  | { op: 'ensure' | 'warmup' | 'inspect-dns-policy' | 'inspect-physical-dns' | 'inspect-network-identity' | 'inspect-physical-adapters' | 'inspect-transition-adapters' }
+  | { op: 'warmup-adapters'; module: typeof ADAPTER_WARMUP_MODULES[number] }
   | { op: 'read' | 'binary' | 'remove'; name: string }
   | { op: 'protect'; name: string }
+  | { op: 'quarantine'; name: string; contentHash: string }
   | { op: 'inspect-tun'; alias: string }
-  | { op: 'inspect-runtime' | 'stop-runtime'; runtimeDir: string }
+  | { op: 'inspect-runtime' | 'inspect-runtime-acl' | 'stop-runtime'; runtimeDir: string }
 
 export function validateRecoveryRequest(value: RecoveryRequest): void {
   const fields = Object.keys(value).sort().join(',')
-  if (value.op === 'ensure' || value.op === 'warmup' || value.op === 'inspect-dns-policy') {
+  if (value.op === 'ensure' || value.op === 'warmup' || value.op === 'inspect-dns-policy' || value.op === 'inspect-physical-dns' || value.op === 'inspect-network-identity' || value.op === 'inspect-physical-adapters' || value.op === 'inspect-transition-adapters') {
     if (fields === 'op') return
+  } else if (value.op === 'warmup-adapters') {
+    if (fields === 'module,op' && ADAPTER_WARMUP_MODULES.includes(value.module)) return
   } else if (value.op === 'inspect-tun') {
     if (fields === 'alias,op' && typeof value.alias === 'string' && /^(Ethernet (?:[5-9]|1[0-2])|VPNTE-TUN|awg-tun)$/.test(value.alias)) return
-  } else if (value.op === 'inspect-runtime' || value.op === 'stop-runtime') {
+  } else if (value.op === 'inspect-runtime' || value.op === 'inspect-runtime-acl' || value.op === 'stop-runtime') {
     if (fields === 'op,runtimeDir' && typeof value.runtimeDir === 'string' && value.runtimeDir.length <= 2048 &&
         /^[a-z]:\\/i.test(value.runtimeDir) && !/[\x00-\x1f"/]/.test(value.runtimeDir) &&
         !value.runtimeDir.slice(2).includes(':') && !value.runtimeDir.split('\\').some(part => part === '..' || part === '.')) return
+  } else if (value.op === 'quarantine') {
+    if (fields === 'contentHash,name,op' && typeof value.contentHash === 'string' && /^[a-f0-9]{64}$/.test(value.contentHash) && typeof value.name === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,160}\.json$/.test(value.name)) return
   } else if (['read', 'binary', 'remove', 'protect'].includes(value.op) && 'name' in value) {
     if (fields === 'name,op' && typeof value.name === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,160}$/.test(value.name) &&
         (value.op !== 'protect' || /^tmp-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(value.name))) return
@@ -57,7 +67,40 @@ foreach ($p in ($rows | Sort-Object { if ($_.Name -ieq 'vpnte-sing-box.exe') { 0
     $killed += [pscustomobject]@{name=[string]$p.Name;pid=[int]$p.ProcessId}
   } catch { if ($p.Name -ieq 'vpnte-sing-box.exe') { break } }
 }
+
 [pscustomobject]@{candidates=[int]$rows.Count;killed=[int]$killed.Count;names=@($killed | ForEach-Object { $_.name })} | ConvertTo-Json -Compress -Depth 3
+`
+
+/** Fixed quarantine operation; callers provide only a checked artifact and hash. */
+export const RECOVERY_QUARANTINE_SCRIPT = String.raw`
+function Get-QuarantineContentHash($stream) {
+  if ($stream.Length -gt ${RECOVERY_MAX_BYTES}) { throw 'Recovery manifest exceeds limit' }
+  $reader=New-Object IO.StreamReader($stream,[Text.Encoding]::UTF8,$true)
+  $body=$reader.ReadToEnd().TrimStart([char]0xfeff).Trim()
+  $sha=[Security.Cryptography.SHA256]::Create()
+  try { return ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($body)))).Replace('-','').ToLowerInvariant() } finally { $sha.Dispose() }
+}
+Assert-TrustedArtifact $path $false
+$stream=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read -bor [IO.FileShare]::Delete)
+try {
+  $hash=Get-QuarantineContentHash $stream
+  if ($hash -ne $expectedHash) { throw 'Recovery manifest changed since rejection; quarantine refused' }
+  $quarantine=$path+'.corrupt-'+[Guid]::NewGuid().ToString()
+  Move-Item -LiteralPath $path -Destination $quarantine -ErrorAction Stop
+} finally { $stream.Dispose() }
+Assert-TrustedArtifact $quarantine $false
+# Share.Delete allows another writer's atomic replacement during the first read.
+# Validate the file actually moved, denying writes/replacements during this read.
+$moved=[IO.File]::Open($quarantine,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+try { $movedHash=Get-QuarantineContentHash $moved } finally { $moved.Dispose() }
+if ($movedHash -ne $expectedHash) {
+  # File.Move refuses an existing destination: never overwrite a newer baseline.
+  try { [IO.File]::Move($quarantine,$path) }
+  catch { throw 'Recovery quarantine raced with replacement; newer baseline and quarantined data preserved' }
+  throw 'Recovery manifest changed during quarantine; replacement restored'
+}
+if (Test-Path -LiteralPath $path) { throw 'Recovery quarantine not confirmed' }
+return 'RECOVERY_ARTIFACT_QUARANTINED'
 `
 
 /** Fixed, read-only baseline reader shared by the typed worker and pre-dispatch fallback. */
@@ -84,8 +127,21 @@ export function recoveryWorkerFunctions(programData: string): string {
   const literal = `'${programData.replace(/'/g, "''")}'`
   return String.raw`
 $expectedProgramData=${literal}
+${runtimeAclWorkerFunction(programData)}
 function Read-DnsPolicySnapshot {
 ${DNS_POLICY_SNAPSHOT_SCRIPT}
+}
+function Read-PhysicalAdapterDns {
+${PHYSICAL_ADAPTER_DNS_SCRIPT}
+}
+function Read-PhysicalAdapters {
+${PHYSICAL_ADAPTER_SNAPSHOT_SCRIPT}
+}
+function Read-TransitionAdapters {
+${TRANSITION_ADAPTER_SNAPSHOT_SCRIPT}
+}
+function Read-AdaptiveNetworkIdentity {
+${ADAPTIVE_NETWORK_IDENTITY_SCRIPT}
 }
 function Read-OwnedRuntimeStatus([string]$runtimeDir) {
 ${OWNED_RUNTIME_STATUS_QUERY_SCRIPT}
@@ -131,24 +187,50 @@ function Assert-RecoveryDirectories($root, [bool]$create) {
   return $true
 }
 function Invoke-RecoveryOperation($request) {
-  if ($request.op -isnot [string] -or @('warmup','inspect-tun','inspect-runtime','stop-runtime','inspect-dns-policy','ensure','read','binary','remove','protect') -cnotcontains $request.op) { throw 'Unknown recovery worker operation' }
+  if ($request.op -isnot [string] -or @('warmup','warmup-adapters','inspect-tun','inspect-runtime','inspect-runtime-acl','stop-runtime','inspect-dns-policy','inspect-physical-dns','inspect-network-identity','inspect-physical-adapters','inspect-transition-adapters','ensure','read','binary','remove','protect','quarantine') -cnotcontains $request.op) { throw 'Unknown recovery worker operation' }
   $fields = @($request.PSObject.Properties.Name | Sort-Object) -join ','
   switch -Exact ($request.op) {
-    { $_ -cin @('inspect-runtime','stop-runtime') } {
+    { $_ -cin @('inspect-runtime','inspect-runtime-acl','stop-runtime') } {
       if ($fields -cne 'op,runtimeDir' -or $request.runtimeDir -isnot [string] -or $request.runtimeDir.Length -gt 2048 -or
           $request.runtimeDir -notmatch '^[a-z]:\\' -or $request.runtimeDir -match '[\x00-\x1f"/]' -or
           $request.runtimeDir.Substring(2).Contains(':') -or @($request.runtimeDir.Split([char]92) | Where-Object { $_ -ceq '..' -or $_ -ceq '.' }).Count) { throw 'Invalid runtime observation directory' }
       if ($request.op -ceq 'stop-runtime') { return (Stop-OwnedRuntime $request.runtimeDir) }
+      if ($request.op -ceq 'inspect-runtime-acl') { return (Read-RuntimeAclSnapshot $request.runtimeDir) }
       return (Read-OwnedRuntimeStatus $request.runtimeDir)
     }
     'inspect-dns-policy' {
       if ($fields -ne 'op') { throw 'Invalid recovery worker fields' }
       return (Read-DnsPolicySnapshot)
     }
+    'inspect-physical-dns' {
+      if ($fields -cne 'op') { throw 'Invalid recovery worker fields' }
+      $snapshot = Read-PhysicalAdapterDns
+      if ($null -eq $snapshot) { return '[]' }
+      return $snapshot
+    }
+    'inspect-network-identity' {
+      if ($fields -cne 'op') { throw 'Invalid recovery worker fields' }
+      return (Read-AdaptiveNetworkIdentity)
+    }
     'warmup' {
       if ($fields -ne 'op') { throw 'Invalid recovery worker fields' }
-      Import-Module NetAdapter,NetTCPIP -ErrorAction Stop
+      Import-Module -Name (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1') -ErrorAction Stop
       return 'RECOVERY_MODULES_READY'
+    }
+    'warmup-adapters' {
+      if ($fields -cne 'module,op' -or $request.module -isnot [string] -or @(${ADAPTER_WARMUP_MODULES.map(name => `'${name}'`).join(',')}) -cnotcontains $request.module) { throw 'Invalid adapter warm-up fields' }
+      Import-Module $request.module -ErrorAction Stop
+      return 'RECOVERY_MODULES_READY'
+    }
+    'inspect-physical-adapters' {
+      if ($fields -cne 'op') { throw 'Invalid recovery worker fields' }
+      $snapshot = Read-PhysicalAdapters
+      if ($null -eq $snapshot) { return '[]' }
+      return $snapshot
+    }
+    'inspect-transition-adapters' {
+      if ($fields -cne 'op') { throw 'Invalid recovery worker fields' }
+      return (Read-TransitionAdapters)
     }
     'inspect-tun' {
       if ($fields -ne 'alias,op' -or $request.alias -isnot [string] -or $request.alias -cnotmatch '^(Ethernet (?:[5-9]|1[0-2])|VPNTE-TUN|awg-tun)$') { throw 'Invalid TUN alias' }
@@ -163,6 +245,9 @@ function Invoke-RecoveryOperation($request) {
       return ([pscustomobject]@{schemaVersion=1;owner='VPNTE';alias=[string]$adapter.Name;interfaceGuid=[string]$adapter.InterfaceGuid} | ConvertTo-Json -Compress)
     }
     'ensure' { if ($fields -ne 'op') { throw 'Invalid recovery worker fields' } }
+    'quarantine' {
+      if ($fields -cne 'contentHash,name,op' -or $request.contentHash -isnot [string] -or $request.contentHash -cnotmatch '^[a-f0-9]{64}$' -or $request.name -isnot [string] -or $request.name -cnotmatch '^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,160}\.json$') { throw 'Invalid recovery quarantine request' }
+    }
     { $_ -cin @('read','binary','remove','protect') } {
       if ($fields -ne 'name,op' -or $request.name -isnot [string] -or $request.name -cnotmatch '^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,160}$') { throw 'Invalid recovery artifact name' }
       if ($request.op -eq 'protect' -and $request.name -notmatch '^tmp-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$') { throw 'Invalid recovery temporary name' }
@@ -193,6 +278,10 @@ function Invoke-RecoveryOperation($request) {
     return 'RECOVERY_ARTIFACT_ABSENT'
   }
   Assert-TrustedArtifact $path $false
+  if ($request.op -eq 'quarantine') {
+    $expectedHash=$request.contentHash
+${RECOVERY_QUARANTINE_SCRIPT}
+  }
   if ($request.op -eq 'remove') {
     Remove-Item -LiteralPath $path -Force -ErrorAction Stop
     return 'RECOVERY_ARTIFACT_REMOVED'
@@ -204,7 +293,7 @@ function Invoke-RecoveryOperation($request) {
 `
 }
 
-export function recoveryWorkerScript(programData: string): string {
+export function recoveryWorkerScript(programData: string, adapterInspectionOnly = false): string {
   return String.raw`
 $ErrorActionPreference='Stop'
 $ProgressPreference='SilentlyContinue'
@@ -220,6 +309,7 @@ while ($line = [Console]::In.ReadLine()) {
     $cmd = $line | ConvertFrom-Json -ErrorAction Stop
     if ((@($cmd.PSObject.Properties.Name | Sort-Object) -join ',') -cne 'id,request' -or $cmd.id -isnot [int] -or $cmd.id -le 0) { throw 'Invalid recovery envelope' }
     $id = $cmd.id
+    ${adapterInspectionOnly ? "if (@('warmup-adapters','inspect-physical-dns','inspect-tun','inspect-physical-adapters','inspect-transition-adapters') -cnotcontains $cmd.request.op) { throw 'Adapter inspection operation refused' }" : ''}
     $value = Invoke-RecoveryOperation $cmd.request
     if ($value -isnot [string] -or [Text.Encoding]::UTF8.GetByteCount($value) -gt ${RECOVERY_MAX_BYTES * 2}) { throw 'Invalid recovery operation output' }
     # PS 5.1 Get-Content attaches provider properties to its string. Without

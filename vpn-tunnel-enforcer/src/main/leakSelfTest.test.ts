@@ -28,7 +28,7 @@ vi.mock('./appLogger', () => ({
 function mockExecSuccesses(): void {
   execMock.mockImplementation((cmd: string, _opts: unknown, cb: (err: Error | null, stdout: string, stderr: string) => void) => {
     setTimeout(() => {
-      if (cmd.includes('Get-NetAdapter')) cb(null, '[]', '')
+      if (cmd.includes('Get-NetAdapter') || cmd.includes('EncodedCommand')) cb(null, '[]', '')
       else if (cmd.includes('cloudflare.com/cdn-cgi/trace')) cb(null, 'ip=1.2.3.4\n', '')
       else cb(null, '1.2.3.4', '')
     }, 5)
@@ -37,12 +37,14 @@ function mockExecSuccesses(): void {
 }
 
 describe('runLeakSelfTest coalescing', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.resetModules()
     execMock.mockReset()
     execFileMock.mockReset()
     logEventMock.mockReset()
     mockExecSuccesses()
+    const { resetLeakTestThrottlesForTest } = await import('./leakSelfTest')
+    resetLeakTestThrottlesForTest()
   })
 
   it('shares an in-flight probe between concurrent callers', async () => {
@@ -57,7 +59,7 @@ describe('runLeakSelfTest coalescing', () => {
   it('tries another DNS trace endpoint when the first one fails', async () => {
     execMock.mockImplementation((cmd: string, _opts: unknown, cb: (err: Error | null, stdout: string, stderr: string) => void) => {
       setTimeout(() => {
-        if (cmd.includes('Get-NetAdapter')) cb(null, '[]', '')
+        if (cmd.includes('Get-NetAdapter') || cmd.includes('EncodedCommand')) cb(null, '[]', '')
         else if (cmd.includes('cloudflare.com/cdn-cgi/trace')) cb(new Error('blocked'), '', 'blocked')
         else if (cmd.includes('one.one.one.one/cdn-cgi/trace')) cb(null, 'ip=1.2.3.4\n', '')
         else cb(null, '1.2.3.4', '')
@@ -80,7 +82,7 @@ describe('runLeakSelfTest coalescing', () => {
   it('does not report a DNS leak from a DNS trace IP mismatch alone', async () => {
     execMock.mockImplementation((cmd: string, _opts: unknown, cb: (err: Error | null, stdout: string, stderr: string) => void) => {
       setTimeout(() => {
-        if (cmd.includes('Get-NetAdapter')) cb(null, '[]', '')
+        if (cmd.includes('Get-NetAdapter') || cmd.includes('EncodedCommand')) cb(null, '[]', '')
         else if (cmd.includes('cloudflare.com/cdn-cgi/trace')) cb(null, 'ip=5.6.7.8\n', '')
         else cb(null, '1.2.3.4', '')
       }, 5)
@@ -114,6 +116,60 @@ describe('runLeakSelfTest coalescing', () => {
       )
     } finally {
       vi.useRealTimers()
+      const { resetLeakTestThrottlesForTest } = await import('./leakSelfTest')
+      resetLeakTestThrottlesForTest()
     }
+  })
+
+  it('notifies onLeakSelfTestCompletedCb when a triggered check finishes cleanly with zero leaks', async () => {
+    const { setLeakSelfTestCompletedCallback, triggerLeakCheckNow, resetLeakTestThrottlesForTest } = await import('./leakSelfTest')
+    resetLeakTestThrottlesForTest()
+    const completedCb = vi.fn()
+    setLeakSelfTestCompletedCallback(completedCb)
+
+    triggerLeakCheckNow('test-clean')
+    await vi.waitFor(() => {
+      expect(completedCb).toHaveBeenCalledWith(
+        expect.objectContaining({
+          physicalAdapterReached: false,
+          publicIpMismatch: false,
+          dnsLeakDetected: false,
+          defaultRoutePublicIp: '1.2.3.4',
+          physicalAdapterInspectionComplete: true
+        })
+      )
+    })
+  })
+
+  it('marks physicalAdapterInspectionComplete as false and does not notify completedCb when adapter enumeration fails', async () => {
+    execMock.mockImplementation((cmd: string, _opts: unknown, cb: (err: Error | null, stdout: string, stderr: string) => void) => {
+      setTimeout(() => {
+        if (cmd.includes('Get-NetAdapter') || cmd.includes('EncodedCommand')) cb(new Error('WMI query failed'), '', 'WMI error')
+        else if (cmd.includes('cloudflare.com/cdn-cgi/trace')) cb(null, 'ip=1.2.3.4\n', '')
+        else cb(null, '1.2.3.4', '')
+      }, 5)
+      return {}
+    })
+    const { setLeakSelfTestCompletedCallback, triggerLeakCheckNow, runLeakSelfTest } = await import('./leakSelfTest')
+    const completedCb = vi.fn()
+    setLeakSelfTestCompletedCallback(completedCb)
+
+    const result = await runLeakSelfTest()
+    expect(result.defaultRoutePublicIp).toBe('1.2.3.4')
+    expect(result.physicalAdapterInspectionComplete).toBe(false)
+    expect(result.physicalAdapterReached).toBe(false)
+
+    triggerLeakCheckNow('test-failed-enum')
+    await new Promise((r) => setTimeout(r, 50))
+    expect(completedCb).not.toHaveBeenCalled()
+  })
+
+  it('marks physicalAdapterInspectionComplete as false on cancellation', async () => {
+    const { cancelLeakSelfTest, runLeakSelfTest } = await import('./leakSelfTest')
+    const inFlight = runLeakSelfTest()
+    cancelLeakSelfTest()
+    const result = await inFlight
+    expect(result.physicalAdapterInspectionComplete).toBe(false)
+    expect(result.summary).toContain('отменён')
   })
 })

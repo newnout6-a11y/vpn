@@ -30,7 +30,7 @@ const MAX_RESTARTS = 3
 const MAX_SCRIPT_CHARS = 64 * 1024
 const MAX_PENDING_COMMANDS = 8
 
-export type ElevatedPsPolicy = 'firewall-killswitch' | 'physical-adapter-lockdown'
+export type ElevatedPsPolicy = 'firewall-killswitch' | 'physical-adapter-lockdown' | 'wfp-ipv6'
 
 const BLOCKED_SCRIPT_TOKENS = [
   /\bInvoke-Expression\b/i,
@@ -59,6 +59,7 @@ const BLOCKED_SCRIPT_TOKENS = [
 ]
 
 const POLICY_REQUIRED_TOKENS: Record<ElevatedPsPolicy, RegExp[]> = {
+  'wfp-ipv6': [/\bVPNTE\.IPv6\.NativeEngine\b/, /\bWFP_APPS:/],
   'firewall-killswitch': [
     /\bGet-VpnteFirewallRuleNames\b/i,
     /\bNew-VpnteFirewallRule\b/i,
@@ -82,6 +83,15 @@ const POLICY_REQUIRED_TOKENS: Record<ElevatedPsPolicy, RegExp[]> = {
 }
 
 const POLICY_FORBIDDEN_TOKENS: Record<ElevatedPsPolicy, RegExp[]> = {
+  'wfp-ipv6': [
+    /\b(?:Set|New|Remove)-NetFirewall\w*\b/i,
+    /\b(?:Set|Disable|Enable|Remove|New)-Net(?:Adapter|IP|Route|TCP)\w*\b/i,
+    /\bSet-DnsClientServerAddress\b/i,
+    /\bHNetCfg\b/i,
+    /\bnetsh\b/i,
+    /\breg\s+add\b/i,
+    /\b(?:New|Remove)-VpnteFirewall\w*\b/i
+  ],
   'firewall-killswitch': [
     /\bGet-NetAdapter\b/i,
     /\bGet-NetAdapterBinding\b/i,
@@ -142,16 +152,29 @@ export function isElevatedPsHelperRunning(): boolean {
 
 const HELPER_WARMUP_COMMANDS: ReadonlyArray<{ policy: ElevatedPsPolicy; script: string }> = [
   { policy: 'firewall-killswitch', script: 'Import-Module NetSecurity -ErrorAction Stop; Get-NetFirewallProfile -Profile Domain,Private,Public -ErrorAction Stop | Out-Null' },
-  { policy: 'physical-adapter-lockdown', script: 'Import-Module NetAdapter,DnsClient,NetTCPIP -ErrorAction Stop; Get-NetAdapter -ErrorAction Stop | Out-Null' }
+  // Yield to admitted work between imports; never queue one long adapter warm-up.
+  ...['NetAdapter', 'DnsClient', 'NetTCPIP', 'NetConnection'].map(moduleName => ({
+    policy: 'physical-adapter-lockdown' as const,
+    script: `Import-Module ${moduleName} -ErrorAction Stop; Get-NetAdapter -ErrorAction Stop | Out-Null`
+  }))
 ]
 
 /** Prepare this helper only; query results are discarded, never reused as evidence. */
-export async function warmElevatedPsHelper(): Promise<void> {
+export async function warmElevatedPsHelper(shouldDefer: () => boolean = () => false): Promise<void> {
   const owner = helperProcess
   if (!owner || !isElevatedPsHelperRunning()) return
   for (const command of HELPER_WARMUP_COMMANDS) {
-    // Do not restart a stopped helper or warm a replacement during shutdown.
-    if (helperProcess !== owner || !isElevatedPsHelperRunning()) break
+    const module = command.script.match(/^Import-Module (\w+)/)![1]
+    let deferred = false
+    for (;;) {
+      // Never restart this helper or dispatch into its replacement.
+      if (helperProcess !== owner || !isElevatedPsHelperRunning()) return
+      if (pendingCommands.size === 0 && !shouldDefer()) break
+      if (!deferred) logEvent('debug', 'ps-helper', 'warm-up deferred', { module })
+      deferred = true
+      await new Promise<void>(done => { setTimeout(done, 100).unref?.() })
+    }
+    if (deferred) logEvent('debug', 'ps-helper', 'warm-up resumed', { module })
     const started = performance.now()
     let outcome = 'failed'
     try {
@@ -161,7 +184,7 @@ export async function warmElevatedPsHelper(): Promise<void> {
     } catch {
       logEvent('warn', 'ps-helper', 'fixed read-only warm-up unavailable', { policy: command.policy })
     } finally {
-      logEvent('debug', 'ps-helper', 'warm-up timing', { policy: command.policy, outcome,
+      logEvent('debug', 'ps-helper', 'warm-up timing', { policy: command.policy, module, outcome,
         durationMs: Math.round(performance.now() - started) })
     }
   }
@@ -331,7 +354,16 @@ export async function execElevatedPs(
   if (pendingCommands.size >= MAX_PENDING_COMMANDS) {
     throw new Error(`PS helper queue is full (${pendingCommands.size} pending)`)
   }
-  validateScriptPolicy(script, policy)
+  let policySource = script
+  if (policy === 'wfp-ipv6') {
+    // Exempt only the exact bundled, SHA-256-verified loader. Add-Type remains
+    // prohibited in caller-supplied bodies and every other helper policy.
+    const { wfpPrelude } = await import('./wfpIpv6')
+    const prelude = await wfpPrelude()
+    if (!script.startsWith(prelude)) throw new ElevatedPsHelperError('elevated-helper-script-rejected', 'Untrusted WFP loader')
+    policySource = script.slice(prelude.length)
+  }
+  validateScriptPolicy(policySource, policy)
 
   if (!isElevatedPsHelperRunning()) {
     if (restartCount < MAX_RESTARTS) {

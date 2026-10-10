@@ -1,6 +1,9 @@
 import { isIP } from 'net'
+import http from 'http'
+import https from 'https'
 import axios from 'axios'
 import { logEvent } from './appLogger'
+import { redactSensitiveText } from './vpnProfiles'
 import type { PublicIpEvidence, PublicIpVerdict } from '../shared/publicIp'
 
 export const IP_CHECK_URLS = [
@@ -9,6 +12,9 @@ export const IP_CHECK_URLS = [
   'https://icanhazip.com',
   'https://api.myip.com'
 ]
+
+export const noKeepAliveHttpAgent = new http.Agent({ keepAlive: false })
+export const noKeepAliveHttpsAgent = new https.Agent({ keepAlive: false })
 
 let currentIp: string | null = null
 let vpnIp: string | null = null
@@ -68,7 +74,9 @@ export async function fetchPublicIpFrom(url: string, canPublish?: () => boolean,
       signal,
       timeout: 10000,
       responseType: 'text',
-      transformResponse: (d) => d
+      transformResponse: (d) => d,
+      httpAgent: noKeepAliveHttpAgent,
+      httpsAgent: noKeepAliveHttpsAgent
     })
     if (signal?.aborted) throw new Error('IP probe cancelled')
     const raw = typeof resp.data === 'string' ? resp.data.trim() : JSON.stringify(resp.data)
@@ -223,7 +231,11 @@ export const ipMonitor = {
    * Concurrent rebaseline calls are serialised — only one fetch runs at a
    * time so two callers racing to set vpnIp don't overwrite each other.
    */
-  async recheck(rebaseline = false, canPublish?: () => boolean): Promise<{ ip: string | null; isLeak: boolean; vpnIp: string | null }> {
+  async recheck(
+    rebaseline = false,
+    canPublish?: () => boolean,
+    expectedIp?: string
+  ): Promise<{ ip: string | null; isLeak: boolean; vpnIp: string | null }> {
     if (canPublish && !canPublish()) return { ip: currentIp, isLeak, vpnIp }
     if (suppressed && !rebaseline) {
       return { ip: currentIp, isLeak: false, vpnIp }
@@ -233,7 +245,7 @@ export const ipMonitor = {
       // Different sessions never share a network sample. Wait for the older
       // owner, then take a fresh sample if this caller is still current.
       await recheckInFlight.catch(() => undefined)
-      return ipMonitor.recheck(rebaseline, canPublish)
+      return ipMonitor.recheck(rebaseline, canPublish, expectedIp)
     }
 
     const doRecheck = async (): Promise<{ ip: string | null; isLeak: boolean; vpnIp: string | null }> => {
@@ -254,6 +266,15 @@ export const ipMonitor = {
       if (ip) {
         currentIp = ip
         if (rebaseline) {
+          if (expectedIp && ip !== expectedIp) {
+            logEvent('warn', 'ip-monitor', 'rebaseline rejected due to mismatch with expected baseline IP', {
+              expectedIp: redactSensitiveText(expectedIp),
+              actualIp: redactSensitiveText(ip)
+            })
+            verdict = 'indeterminate'
+            isLeak = false
+            return { ip, isLeak: false, vpnIp }
+          }
           vpnIp = ip
           isLeak = false
           verdict = 'passed'

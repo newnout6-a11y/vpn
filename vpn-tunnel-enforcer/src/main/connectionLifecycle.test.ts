@@ -9,6 +9,25 @@ function held<T>() {
 }
 
 describe('main connection lifecycle ownership',()=>{
+  it('keeps preparation deferred through startup and the entire stop effect (AT-02-005)',async()=>{
+    const lane=new ConnectionLifecycle(vi.fn()), startup=held<void>(), cleanup=held<void>()
+    expect(lane.busy).toBe(false)
+    const started=lane.start(async owner=>{await owner.wait(startup.promise);return {success:true}})
+    expect(lane.busy).toBe(true)
+    const stopped=lane.stop(()=>cleanup.promise)
+    startup.resolve()
+    expect(await started).toMatchObject({success:false})
+    expect(lane.starting).toBe(false)
+    expect(lane.busy).toBe(true)
+    cleanup.resolve()
+    await stopped
+    expect(lane.busy).toBe(false)
+  })
+  it('keeps preparation deferred after lifecycle shutdown (AT-03-007)',async()=>{
+    const lane=new ConnectionLifecycle(vi.fn())
+    await lane.close()
+    expect(lane.busy).toBe(true)
+  })
   it('preserves ownership through 100 seeded cancellation handoffs at three boundaries (AT-02-005 subset)',async()=>{
     let seed=0x8090
     for(let iteration=0;iteration<100;iteration++){

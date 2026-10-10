@@ -29,22 +29,6 @@ describe('tunController recovery cancellation guards', () => {
     expect(source).not.toContain("runtimePromise.catch(() => undefined)\n        await rollbackEarlyAdapterLockdown('proxy full-tunnel check failed")
   })
 
-  it('publishes stopped after partial cleanup warnings instead of leaving UI connected', async () => {
-    const source = await readFile(join(here, 'tunController.ts'), 'utf8')
-    const stopSignature = source.indexOf('async stop(options: { preserveNetworkProtection?: boolean; preserveLastStartOptions?: boolean } = {})')
-    const cleanupBranch = source.indexOf('if (cleanupErrors.length > 0)', stopSignature)
-    const successReturn = source.lastIndexOf('return { success: true, warning, networkCleanup }')
-    const stoppedNotify = source.indexOf("notifyStatus('stopped')", cleanupBranch)
-    const failureReturn = source.indexOf('return { success: false, error: cleanupErrors.join', cleanupBranch)
-
-    expect(stopSignature).toBeGreaterThan(0)
-    expect(cleanupBranch).toBeGreaterThan(stopSignature)
-    expect(stoppedNotify).toBeGreaterThan(cleanupBranch)
-    expect(stoppedNotify).toBeLessThan(successReturn)
-    expect(successReturn).toBeGreaterThan(cleanupBranch)
-    expect(failureReturn).toBe(-1)
-  })
-
   it('uses confirmed egress for Direct VPN watchdog and logs only state transitions', async () => {
     const source = await readFile(join(here, 'tunController.ts'), 'utf8')
     const watchdogStart = source.indexOf('function startServerWatchdog(_host: string, _port: number, label: string)')

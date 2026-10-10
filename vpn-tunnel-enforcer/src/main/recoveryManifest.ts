@@ -1,14 +1,17 @@
 import { open, rename, unlink } from 'fs/promises'
 import { join } from 'path'
-import { randomUUID } from 'crypto'
+import { createHash, randomUUID } from 'crypto'
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import { execElevated } from './admin'
 import { executeRecoveryOperation, RecoveryWorkerError } from './recoveryPsWorker'
-import { type RecoveryRequest } from './recoveryPsProtocol'
+import { type RecoveryRequest, RECOVERY_QUARANTINE_SCRIPT } from './recoveryPsProtocol'
 
 const execFile = promisify(execFileCb)
 const MAX_MANIFEST_BYTES = 1024 * 1024
+export class RecoveryManifestReadError extends Error {
+  constructor(public reason: 'invalid-content' | 'unsupported-version', message: string, public contentHash?: string) { super(message) }
+}
 // Only pre-dispatch unavailability may fall back. Rejection/timeout/unknown
 // completion must not replay recovery mutations in a second process.
 async function tryRecoveryWorker(request: RecoveryRequest): Promise<string | undefined> {
@@ -48,8 +51,12 @@ function Assert-TrustedArtifact($path, $directory) {
   }
 }
 `
-async function runRead(script: string): Promise<string> {
+async function runRead(script: string, elevated = false): Promise<string> {
   const encoded = Buffer.from("[Console]::OutputEncoding=[Text.Encoding]::UTF8;$ErrorActionPreference='Stop';" + script, 'utf16le').toString('base64')
+  if (elevated) {
+    const { stdout } = await execElevated(`powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encoded}`, { timeout: 15000 })
+    return String(stdout).replace(/^\uFEFF/, '').trim()
+  }
   const { stdout } = await execFile('powershell.exe', ['-NoProfile','-NonInteractive','-EncodedCommand',encoded], {
     windowsHide: true, timeout: 15000, encoding: 'utf8', maxBuffer: MAX_MANIFEST_BYTES * 2
   })
@@ -68,7 +75,7 @@ if (-not $parent.PSIsContainer -or ($parent.Attributes -band [IO.FileAttributes]
  * Bootstrap is needed only when a checked directory is actually absent.
  * Never retry a rejected ACL/reparse/permission check as "missing" storage.
  */
-async function runTrustedRead(script: string): Promise<string> {
+async function runTrustedRead(script: string, elevated = false): Promise<string> {
   if (process.platform !== 'win32') throw new Error('Trusted recovery storage requires Windows')
   const root = join(process.env.ProgramData || 'C:\\ProgramData', 'VPNTE')
   const checked = `${TRUST_CHECK}${programDataTrustCheck()}
@@ -77,10 +84,10 @@ foreach ($dir in @(${quote(root)},${quote(getRecoveryManifestDir())})) {
   Assert-TrustedArtifact $dir $true
 }
 ${script}`
-  const raw = await runRead(checked)
+  const raw = await runRead(checked, elevated)
   if (raw !== 'RECOVERY_STORAGE_MISSING') return raw
   await ensureRecoveryManifestDir()
-  const initialized = await runRead(checked)
+  const initialized = await runRead(checked, elevated)
   if (initialized === 'RECOVERY_STORAGE_MISSING') throw new Error('Recovery storage disappeared after bootstrap')
   return initialized
 }
@@ -126,7 +133,28 @@ Assert-TrustedArtifact ${quote(target)} $false
 if ((Get-Item -LiteralPath ${quote(target)}).Length -gt ${MAX_MANIFEST_BYTES}) { throw 'Recovery manifest exceeds limit' }
 Get-Content -LiteralPath ${quote(target)} -Raw -Encoding UTF8`)
   if (raw === 'RECOVERY_ARTIFACT_ABSENT') return null
-  return validate(JSON.parse(raw))
+  const normalized = raw.replace(/^\uFEFF/, '').trim()
+  const contentHash = createHash('sha256').update(normalized, 'utf8').digest('hex')
+  let value: any
+  try { value = JSON.parse(normalized) }
+  catch { throw new RecoveryManifestReadError('invalid-content', `Invalid recovery JSON: ${name}`, contentHash) }
+  if (typeof value?.schemaVersion === 'number' && value.schemaVersion !== 1) {
+    throw new RecoveryManifestReadError('unsupported-version', `Unsupported recovery manifest version: ${name}`)
+  }
+  try { return validate(value) }
+  catch (error) {
+    if (error instanceof RecoveryManifestReadError) throw error
+    throw new RecoveryManifestReadError('invalid-content', String(error), contentHash)
+  }
+}
+export async function quarantineRecoveryManifest(name: string, contentHash?: string): Promise<void> {
+  if (!contentHash || !/^[a-f0-9]{64}$/.test(contentHash)) throw new Error('Recovery quarantine needs the rejected content fingerprint')
+  const target = recoveryManifestPath(name)
+  const proof = await workerTrustedRead({ op: 'quarantine', name, contentHash }) ?? await runTrustedRead(`
+$path=${quote(target)}
+$expectedHash=${quote(contentHash)}
+${RECOVERY_QUARANTINE_SCRIPT}`, true)
+  if (proof !== 'RECOVERY_ARTIFACT_QUARANTINED') throw new Error('Recovery quarantine not confirmed')
 }
 /** Unique temp + fsync + admin-owned protected file ACL + rename commit point. */
 export async function writeRecoveryArtifact(name: string, content: string | Buffer): Promise<void> {

@@ -83,7 +83,7 @@ describe('physicalAdapterLockdown source regressions', () => {
     expect(isCellularOrTetheringAdapter('Wi-Fi', 'MediaTek', [], ['192.168.1.1'], ['Home'])).toBe(false)
     expect(isTetheringSubnetIp('192.168.43.999')).toBe(false)
     expect(isTetheringSubnetIp('192.168.43.evil')).toBe(false)
-    expect(source()).toContain('Get-NetConnectionProfile -InterfaceIndex $a.ifIndex')
+    expect(readFileSync(join(process.cwd(), 'src/main/physicalAdapterSnapshot.ts'), 'utf8')).toContain('Get-NetConnectionProfile -InterfaceIndex $a.ifIndex')
     expect(source()).toContain('isCellularOrTetheringAdapter(alias, description, dnsServers, gateways)')
   })
   it('rejects injected/ambiguous adapter, transition and registry snapshots (AT-03-012)', async () => {

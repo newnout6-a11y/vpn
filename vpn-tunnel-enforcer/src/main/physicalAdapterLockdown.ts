@@ -1,6 +1,7 @@
 import { recoveryManifestPath, readRecoveryManifest, writeRecoveryManifest, removeRecoveryManifest } from './recoveryManifest'
-import { executeRecoveryOperation, RecoveryWorkerError } from './recoveryPsWorker'
+import { executeAdapterInspection, executeRecoveryOperation, RecoveryWorkerError } from './recoveryPsWorker'
 import { DNS_POLICY_SNAPSHOT_SCRIPT } from './recoveryPsProtocol'
+import { PHYSICAL_ADAPTER_DNS_SCRIPT, PHYSICAL_ADAPTER_SNAPSHOT_SCRIPT, TRANSITION_ADAPTER_SNAPSHOT_SCRIPT } from './physicalAdapterSnapshot'
 import { isIP } from 'net'
 /**
  * Hard lockdown of the physical adapter while TUN is up.
@@ -202,7 +203,7 @@ function sanitizeDnsServers(values: unknown): string[] {
   return out
 }
 
-function summarizeDnsSources(adapters: AdapterSnapshot[]): PhysicalAdapterDnsSource[] {
+function summarizeDnsSources(adapters: PhysicalAdapterDnsSource[]): PhysicalAdapterDnsSource[] {
   return adapters
     .map((adapter) => ({
       ifIndex: adapter.ifIndex,
@@ -308,64 +309,7 @@ async function snapshotPhysicalAdapters(): Promise<AdapterSnapshot[]> {
   }
 
   snapshotPromise = (async () => {
-    const script = `
-$ErrorActionPreference = 'SilentlyContinue'
-$rows = @()
-$knownAliases = @(${ALL_KNOWN_ALIASES.map(a => psSingleQuote(a)).join(',')})
-$adapters = Get-NetAdapter |
-  Where-Object {
-    $_.Status -eq 'Up' -and
-    $_.Name -notin $knownAliases -and
-    $_.InterfaceDescription -notmatch 'Wintun|TAP-Windows|Tailscale|WireGuard|Hyper-V|Loopback|vEthernet|VPN|VirtualBox|VMware|Bluetooth' -and
-    $_.MacAddress -and $_.MacAddress -ne '00-00-00-00-00-00'
-  }
-foreach ($a in $adapters) {
-  $bind6 = Get-NetAdapterBinding -InterfaceAlias $a.Name -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue
-  $dns4 = (Get-DnsClientServerAddress -InterfaceAlias $a.Name -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses
-  if ($null -eq $dns4) { $dns4 = @() }
-  $nameServer = ''
-  try {
-    $regPath = "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\$($a.InterfaceGuid)"
-    $nameServer = [string]((Get-ItemProperty -Path $regPath -Name NameServer -ErrorAction SilentlyContinue).NameServer)
-  } catch {}
-  $desc = [string]$a.InterfaceDescription
-  $name = [string]$a.Name
-  $mediaType = [string]$a.MediaType
-  $physMedia = [string]$a.PhysicalMediaType
-  $gw4 = @((Get-NetRoute -InterfaceIndex $a.ifIndex -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue).NextHop)
-  $profiles = @((Get-NetConnectionProfile -InterfaceIndex $a.ifIndex -ErrorAction SilentlyContinue).Name)
-  $isHotspotSubnet = [bool](
-    ($dns4 | Where-Object { $_ -match '^192\\.168\\.(43|137|225|8)\\.' -or $_ -match '^172\\.20\\.10\\.' }) -or
-    ($gw4 | Where-Object { $_ -match '^192\\.168\\.(43|137|225|8)\\.' -or $_ -match '^172\\.20\\.10\\.' })
-  )
-  $hasClatOrIpv6Only = [bool](
-    (Get-NetRoute -InterfaceIndex $a.ifIndex -DestinationPrefix '::/0' -ErrorAction SilentlyContinue) -and
-    (-not (Get-NetRoute -InterfaceIndex $a.ifIndex -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue))
-  )
-  $isCellularOrTether = [bool](
-    ($desc -match '\\b(rndis|cellular|mobile|wwan|lte|[345]g|modem|tether|tethering)\\b|remote ndis|apple mobile device') -or
-    ($name -match '\\b(cellular|mobile|wwan|lte|[345]g|modem|tether|tethering)\\b') -or
-    ($mediaType -match 'WWAN|WirelessWan') -or
-    ($physMedia -match 'WWAN|WirelessWan') -or
-    $isHotspotSubnet -or
-    $hasClatOrIpv6Only
-  )
-  $rows += [pscustomobject]@{
-    ifIndex      = [int]$a.ifIndex
-    interfaceGuid = [string]$a.InterfaceGuid
-    alias        = [string]$a.Name
-    description  = [string]$a.InterfaceDescription
-    ipv6Enabled  = [bool]($bind6 -and $bind6.Enabled)
-    ipv4Dns      = @($dns4)
-    gateways     = @($gw4)
-    networkProfiles = @($profiles)
-    ipv4DnsSource = $(if ([string]::IsNullOrWhiteSpace($nameServer)) { 'dhcp' } else { 'static' })
-    isCellularOrTethering = $isCellularOrTether
-  }
-}
-$rows | ConvertTo-Json -Compress -Depth 4
-`
-  const stdout = await runPS(script, 20000)
+  const stdout = await inspectAdapters('inspect-physical-adapters', PHYSICAL_ADAPTER_SNAPSHOT_SCRIPT, 20000)
   const text = stdout.trim()
   if (!text || text === 'null') return []
   let parsed: any
@@ -423,25 +367,32 @@ $rows | ConvertTo-Json -Compress -Depth 4
 }
 
 function netshValue(raw: string, label: string): string | null {
-  const line = raw.split(/\r?\n/).find(x => x.trim().toLowerCase().startsWith(label.toLowerCase()))
+  const lowerLabel = label.toLowerCase()
+  const line = raw.split(/\r?\n/).find(x => {
+    const t = x.trim().toLowerCase()
+    if (t.startsWith(lowerLabel)) return true
+    if (lowerLabel === 'type' && (t.startsWith('тип') || t.startsWith('type'))) return true
+    if (lowerLabel === '6to4 service state' && (t.includes('6-на-4') || t.includes('6to4'))) return true
+    if (lowerLabel === 'isatap state' && t.includes('isatap')) return true
+    return false
+  })
   if (!line) return null
   const value = line.split(':').slice(1).join(':').trim()
   return value ? value.split(/\s+/)[0].toLowerCase() : null
 }
 
+async function inspectAdapters(op: 'inspect-physical-adapters' | 'inspect-transition-adapters', script: string, timeoutMs: number): Promise<string> {
+  try { return await executeAdapterInspection(op, timeoutMs) }
+  catch (error) {
+    // Only failure before dispatch allows the existing bounded fallback.
+    if (!(error instanceof RecoveryWorkerError) || error.code !== 'unavailable') throw error
+    return runPS(script, timeoutMs)
+  }
+}
+
 async function snapshotTransitionAdapters(): Promise<TransitionAdapterSnapshot> {
-  const script = `
-$teredo = netsh interface teredo show state
-$sixToFour = netsh interface 6to4 show state
-$isatap = netsh interface isatap show state
-[pscustomobject]@{
-  teredo = ($teredo -join [Environment]::NewLine)
-  sixToFour = ($sixToFour -join [Environment]::NewLine)
-  isatap = ($isatap -join [Environment]::NewLine)
-} | ConvertTo-Json -Compress
-`
   try {
-    const raw = (await runPS(script, 15000)).trim()
+    const raw = (await inspectAdapters('inspect-transition-adapters', TRANSITION_ADAPTER_SNAPSHOT_SCRIPT, 15000)).trim()
     const parsed = JSON.parse(raw)
     return {
       teredoType: netshValue(String(parsed.teredo ?? ''), 'Type'),
@@ -571,6 +522,25 @@ export async function applyPhysicalAdapterLockdown(tunDnsIpv4: string, options: 
   }
   if (options.signal?.aborted) return cancelled('entry')
   const forceDns = options.forceDns !== false
+  const verifyAdapterSet = async (expected: AdapterSnapshot[]) => {
+    clearPhysicalAdaptersSnapshotCache()
+    let warning = 'physical adapter set changed; lockdown coverage is not verified'
+    try {
+      const current = await snapshotPhysicalAdapters()
+      const identity = (a: AdapterSnapshot) => (a.interfaceGuid || '').replace(/[{}]/g, '').toLowerCase()
+      const expectedIds = new Set(expected.map(identity))
+      if (current.length > 0 && current.length === expected.length && expectedIds.size === expected.length &&
+          !expectedIds.has('') && new Set(current.map(identity)).size === current.length && current.every(a => expectedIds.has(identity(a)))) return null
+    } catch (err) {
+      warning = `physical adapter set could not be verified: ${String(err)}`
+    }
+    logEvent('warn', 'phys-lockdown', warning)
+    let rolledBack = false
+    try { rolledBack = (await rollbackPhysicalAdapterLockdownIfApplied(warning)).rolledBack } catch (err) {
+      logEvent('warn', 'phys-lockdown', 'adapter coverage rollback failed', err)
+    }
+    return { applied: !rolledBack, adapters: expected.length, warnings: [warning, ...(!rolledBack ? ['adapter coverage rollback did not complete; recovery journal retained'] : [])] }
+  }
   let existing = await readManifest()
   // Reading a baseline is safe to finish; cancellation must prevent the next
   // mutation. An existing journal still belongs to lifecycle compensation.
@@ -594,12 +564,15 @@ export async function applyPhysicalAdapterLockdown(tunDnsIpv4: string, options: 
     if (options.signal?.aborted) return cancelled('previous-rollback')
   }
   if (existing) {
+    const coverageFailure = await verifyAdapterSet(existing.adapters)
+    if (coverageFailure) return coverageFailure
     logEvent('info', 'phys-lockdown', 'lockdown already applied — skipping (idempotent)', {
       adapters: existing.adapters.length
     })
     return { applied: true, adapters: existing.adapters.length, warnings: [] }
   }
 
+  clearPhysicalAdaptersSnapshotCache()
   const [adapters, transitionAdapters, dnsRegistryPolicy] = await Promise.all([
     snapshotPhysicalAdapters(),
     snapshotTransitionAdapters(),
@@ -741,6 +714,8 @@ try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}
 
   // Only overwrite the pending manifest if the PS script completed
   // successfully — we can trust the parsed markers to reflect actual state.
+  const coverageFailure = await verifyAdapterSet(adapters)
+  if (coverageFailure) return coverageFailure
   const manifest: LockdownManifest = {
     appliedAt: Date.now(),
     tunDnsIpv4,
@@ -871,24 +846,42 @@ export async function isPhysicalAdapterLockdownApplied(): Promise<boolean> {
 }
 
 let dnsSourcesCache: { value: PhysicalAdapterDnsSource[]; at: number } | null = null
+let dnsSourcesPromise: Promise<PhysicalAdapterDnsSource[]> | null = null
 const DNS_SOURCES_CACHE_MS = 60000
 
 export async function getPhysicalAdapterDnsSources(): Promise<PhysicalAdapterDnsSource[]> {
   if (process.platform !== 'win32') return []
-  // Cache for 60s — adapter DNS sources don't change frequently and the
-  // PowerShell snapshot takes ~1-2s. This is only used for smart-RU split
-  // routing config generation, not for the actual lockdown.
+  // Routing-only cache; never consumed as evidence for lockdown or rollback.
   if (dnsSourcesCache && Date.now() - dnsSourcesCache.at < DNS_SOURCES_CACHE_MS) {
     return dnsSourcesCache.value
   }
+  if (!dnsSourcesPromise) {
+    dnsSourcesPromise = readPhysicalAdapterDnsSources().finally(() => { dnsSourcesPromise = null })
+  }
+  return dnsSourcesPromise
+}
+
+async function readPhysicalAdapterDnsSources(): Promise<PhysicalAdapterDnsSource[]> {
   const manifest = await readManifest()
   if (manifest?.adapters?.length) {
     const result = summarizeDnsSources(manifest.adapters)
     dnsSourcesCache = { value: result, at: Date.now() }
     return result
   }
-  const snapshot = await snapshotPhysicalAdapters()
-  const result = summarizeDnsSources(snapshot)
+  let stdout: string
+  try { stdout = await executeRecoveryOperation({ op: 'inspect-physical-dns' }, 20000) }
+  catch (error) {
+    if (!(error instanceof RecoveryWorkerError) || error.code !== 'unavailable') throw error
+    stdout = await runPS(PHYSICAL_ADAPTER_DNS_SCRIPT, 20000)
+  }
+  const parsed = JSON.parse(stdout.trim() || '[]')
+  const rows = parsed === null ? [] : Array.isArray(parsed) ? parsed : [parsed]
+  if (rows.length > 256 || rows.some((row: any) => !row || !Number.isSafeInteger(row.ifIndex) || row.ifIndex <= 0 ||
+      typeof row.alias !== 'string' || !row.alias || row.alias.length > 256 || /[\x00-\x1f]/.test(row.alias) ||
+      !Array.isArray(row.ipv4Dns) || row.ipv4Dns.some((ip: unknown) => typeof ip !== 'string' || isIP(ip) !== 4))) {
+    throw new Error('Invalid physical adapter DNS snapshot')
+  }
+  const result = summarizeDnsSources(rows.map((row: any) => ({ ifIndex: row.ifIndex, alias: row.alias, ipv4DnsServers: row.ipv4Dns })))
   dnsSourcesCache = { value: result, at: Date.now() }
   return result
 }

@@ -1,6 +1,10 @@
 // AT-03-003 / AT-03-012: fail-closed storage boundaries (Windows calls mocked).
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { execFileSync } from 'node:child_process'
+import { createHash } from 'crypto'
+import { readFileSync, mkdirSync, mkdtempSync, writeFileSync, readdirSync, unlinkSync, rmdirSync } from 'fs'
+import { join } from 'path'
+import { RECOVERY_QUARANTINE_SCRIPT } from './recoveryPsProtocol'
 
 const mocks = vi.hoisted(() => ({
   elevated: vi.fn(), read: vi.fn(), open: vi.fn(), rename: vi.fn(), unlink: vi.fn(),
@@ -24,7 +28,7 @@ vi.mock('child_process', () => {
   }
   return { execFile, default: { execFile } }
 })
-import { ensureRecoveryManifestDir, readRecoveryManifest, readRecoveryArtifact, removeRecoveryManifest, recordOwnedTunAdapter, recoveryManifestPath, strictRecoveryRequired, writeRecoveryArtifact } from './recoveryManifest'
+import { ensureRecoveryManifestDir, readRecoveryManifest, readRecoveryArtifact, removeRecoveryManifest, recordOwnedTunAdapter, recoveryManifestPath, strictRecoveryRequired, writeRecoveryArtifact, RecoveryManifestReadError, quarantineRecoveryManifest } from './recoveryManifest'
 
 const platform = Object.getOwnPropertyDescriptor(process, 'platform')!
 const originalProgramData = process.env.ProgramData
@@ -45,6 +49,75 @@ afterEach(() => {
 })
 
 describe('trusted recovery storage', () => {
+  it('distinguishes unsupported versions from corrupt trusted content before validation (AT-03-003)', async () => {
+    const validate = vi.fn(value => value)
+    mocks.read.mockReturnValueOnce('{"schemaVersion":2}').mockReturnValueOnce('{')
+    await expect(readRecoveryManifest('firewall.json', validate)).rejects.toMatchObject({ reason: 'unsupported-version' })
+    await expect(readRecoveryManifest('firewall.json', validate)).rejects.toBeInstanceOf(RecoveryManifestReadError)
+    expect(validate).not.toHaveBeenCalled()
+    expect(mocks.elevated).not.toHaveBeenCalled()
+  })
+  it('quarantines within the checked directory and requires rename read-back (AT-03-003/012)', async () => {
+    mocks.elevated.mockResolvedValueOnce({ stdout: 'RECOVERY_ARTIFACT_QUARANTINED' }).mockResolvedValueOnce({ stdout: '' })
+    const hash = createHash('sha256').update('{').digest('hex')
+    await quarantineRecoveryManifest('firewall.json', hash)
+    await expect(quarantineRecoveryManifest('firewall.json', hash)).rejects.toThrow('not confirmed')
+    const script = decode(mocks.elevated.mock.calls[0][0])
+    expect(script).toContain('Move-Item -LiteralPath')
+    expect(script).toContain("$quarantine=$path+'.corrupt-'")
+    expect(script).toContain('Untrusted recovery ACE')
+    expect(script.indexOf('Recovery manifest changed since rejection')).toBeLessThan(script.indexOf('Move-Item -LiteralPath'))
+    expect(script).toContain('[IO.FileShare]::Read -bor [IO.FileShare]::Delete')
+  })
+  it('uses the privileged typed quarantine operation and never replays uncertain completion (AT-03-003/012)', async () => {
+    const hash = createHash('sha256').update('{').digest('hex')
+    mocks.worker.mockResolvedValueOnce('RECOVERY_ARTIFACT_QUARANTINED').mockRejectedValueOnce(new RecoveryWorkerError('timeout', 'uncertain quarantine'))
+    await quarantineRecoveryManifest('firewall.json', hash)
+    await expect(quarantineRecoveryManifest('firewall.json', hash)).rejects.toThrow('uncertain quarantine')
+    expect(mocks.worker.mock.calls[0][0]).toEqual({ op: 'quarantine', name: 'firewall.json', contentHash: hash })
+    expect(mocks.elevated).not.toHaveBeenCalled()
+  })
+  it.skipIf(process.platform !== 'win32' && !process.env.VPNTE_PWSH).each(['same', 'changed', 'untrusted', 'replaced', 'replaced-again'])('executes native quarantine with %s content in an isolated temporary folder (AT-03-003/012)', variant => {
+    const root = join(process.cwd(), '.tmp'); mkdirSync(root, { recursive: true })
+    const folder = mkdtempSync(join(root, 'quarantine-native-')); const path = join(folder, 'firewall.json')
+    const body = variant === 'changed' ? '{"schemaVersion":1}' : '{'
+    writeFileSync(path, body, 'utf8')
+    const script = `$ErrorActionPreference='Stop'
+function Assert-TrustedArtifact($path,$directory) { ${variant === 'untrusted' ? "throw 'Untrusted fixture'" : ''} }
+${variant.startsWith('replaced') ? `
+function Move-Item {param($LiteralPath,$Destination,$ErrorAction)
+  $new=$LiteralPath+'.new';$backup=$LiteralPath+'.previous'
+  [IO.File]::WriteAllText($new,'{"schemaVersion":1}')
+  [IO.File]::Replace($new,$LiteralPath,$backup);[IO.File]::Delete($backup)
+  [IO.File]::Move($LiteralPath,$Destination)
+  ${variant === 'replaced-again' ? `[IO.File]::WriteAllText($LiteralPath,'{"schemaVersion":1,"newer":true}')` : ''}
+}` : ''}
+$path='${path.replace(/'/g, "''")}'
+$expectedHash='${createHash('sha256').update('{').digest('hex')}'
+${RECOVERY_QUARANTINE_SCRIPT}`
+    try {
+      const invoke = () => execFileSync(process.env.VPNTE_PWSH || 'powershell.exe', ['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script, 'utf16le').toString('base64')], { encoding: 'utf8', timeout: 15000, windowsHide: true, stdio: ['ignore','pipe','pipe'] })
+      if (variant === 'same') {
+        expect(invoke()).toContain('RECOVERY_ARTIFACT_QUARANTINED')
+        const files = readdirSync(folder); expect(files).toHaveLength(1)
+        expect(files[0]).toMatch(/^firewall\.json\.corrupt-/)
+        expect(readFileSync(join(folder, files[0]), 'utf8')).toBe(body)
+      } else if (variant.startsWith('replaced')) {
+        expect(invoke).toThrow()
+        expect(readFileSync(path, 'utf8')).toBe(variant === 'replaced' ? '{"schemaVersion":1}' : '{"schemaVersion":1,"newer":true}')
+        const quarantined = readdirSync(folder).filter(name => name.startsWith('firewall.json.corrupt-'))
+        expect(quarantined).toHaveLength(variant === 'replaced-again' ? 1 : 0)
+        if (quarantined.length) expect(readFileSync(join(folder, quarantined[0]), 'utf8')).toBe('{"schemaVersion":1}')
+      } else { expect(invoke).toThrow(); expect(readdirSync(folder)).toEqual(['firewall.json']); expect(readFileSync(path, 'utf8')).toBe(body) }
+    } finally { for (const name of readdirSync(folder)) unlinkSync(join(folder, name)); rmdirSync(folder) }
+  }, 20000)
+  it('preserves nested future-version errors and fingerprints corrupt content (AT-03-003)', async () => {
+    mocks.read.mockReturnValue('{"schemaVersion":1}')
+    await expect(readRecoveryManifest('firewall.json', () => { throw new RecoveryManifestReadError('unsupported-version', 'nested schema') })).rejects.toMatchObject({ reason: 'unsupported-version' })
+    mocks.read.mockReturnValue('{')
+    await expect(readRecoveryManifest('firewall.json', value => value)).rejects.toMatchObject({ contentHash: createHash('sha256').update('{').digest('hex') })
+    await expect(quarantineRecoveryManifest('firewall.json')).rejects.toThrow('fingerprint')
+  })
   it('uses typed worker for fresh reads instead of spawning legacy PowerShell (AT-03-012)', async () => {
     mocks.worker.mockResolvedValueOnce('{"schemaVersion":1}').mockRejectedValueOnce(new RecoveryWorkerError('rejected', 'ACL changed'))
     expect(await readRecoveryManifest('firewall.json', value => value)).toEqual({ schemaVersion: 1 })

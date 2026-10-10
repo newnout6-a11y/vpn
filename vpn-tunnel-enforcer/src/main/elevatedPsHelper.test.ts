@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+const wfpLoader = vi.hoisted(() => "$ErrorActionPreference='Stop'\nAdd-Type -TypeDefinition 'PINNED_TEST_SOURCE'\n")
+vi.mock('./wfpIpv6', () => ({ wfpPrelude: async () => wfpLoader }))
 
 vi.mock('./admin', () => ({
   isProcessElevated: vi.fn(async () => Boolean((globalThis as any).__elevatedPsHelperMock?.elevated))
@@ -92,6 +94,15 @@ describe('elevated PS helper errors', () => {
       name: 'ElevatedPsHelperError',
       code: 'elevated-helper-script-rejected'
     })
+  })
+  it('accepts only the pinned WFP loader and keeps arbitrary Add-Type blocked (AT-03-012)', async () => {
+    const { execElevatedPs } = await import('./elevatedPsHelper')
+    const body = '$engine=New-Object VPNTE.IPv6.NativeEngine; $engine.ReadOwned()'
+    await expect(execElevatedPs(wfpLoader + body, 1000, 'wfp-ipv6')).rejects.toMatchObject({ code: 'elevated-helper-unavailable' })
+    for (const script of [body, wfpLoader.replace('PINNED_TEST_SOURCE', 'CHANGED') + body, wfpLoader + body + '; Add-Type -TypeDefinition evil', wfpLoader + body + '; Set-NetFirewallProfile -DefaultOutboundAction Allow', wfpLoader + body + '; Disable-NetAdapterBinding -ComponentID ms_tcpip6']) {
+      await expect(execElevatedPs(script, 1000, 'wfp-ipv6')).rejects.toMatchObject({ code: 'elevated-helper-script-rejected' })
+    }
+    await expect(execElevatedPs(wfpLoader + body, 1000, 'firewall-killswitch')).rejects.toMatchObject({ code: 'elevated-helper-script-rejected' })
   })
 
   it('keeps the fixed registry reader outside arbitrary physical-adapter scripts (AT-03-012)', async () => {

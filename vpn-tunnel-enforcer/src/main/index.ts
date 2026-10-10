@@ -7,6 +7,7 @@ import { execFile as execFileCb } from 'child_process'
 import { rm } from 'fs/promises'
 import { promisify } from 'util'
 import { join } from 'path'
+import { isIP } from 'net'
 import { getPrivilegedRuntimeDir } from './runtimePaths'
 import { directoryExists, verifyDirectoryHardened } from './runtimeDirSecurity'
 import { happDetector } from './happDetector'
@@ -57,15 +58,16 @@ import { notify, setInAppFallbackCallback } from './notifications'
 import { removeHijackingDevShortcut } from './taskbarIdentity'
 import { exportDiagnosticsZip } from './diagnosticsExport'
 import { captureSnapshot, getSnapshotsDir, startPeriodicSnapshots, stopPeriodicSnapshots } from './systemSnapshot'
-import { runLeakSelfTest, startPeriodicLeakTest, stopPeriodicLeakTest, setLeakDetectedCallback, setNetworkChangeCallback, startNetworkChangeWatcher, stopNetworkChangeWatcher, suppressLeakSelfTestsFor } from './leakSelfTest'
+import { runLeakSelfTest, startPeriodicLeakTest, stopPeriodicLeakTest, setLeakDetectedCallback, setLeakSelfTestCompletedCallback, setNetworkChangeCallback, startNetworkChangeWatcher, stopNetworkChangeWatcher, suppressLeakSelfTestsFor } from './leakSelfTest'
 import { getTrafficForensicsStatus, restartTrafficForensicsSession, startTrafficForensicsSession, stopTrafficForensicsSession } from './trafficForensics'
 import { trafficMonitor, type TrafficStats } from './trafficMonitor'
 import { applyBrowserLeakProtection, rollbackBrowserLeakProtection } from './browserHardening'
 import { resolveVpnProfile, resolveVpnProfiles, redactSensitiveConfig, type VpnProfile } from './vpnProfiles'
+import { executeIndeterminateVpnIpAutoVerify } from './indeterminateIpAutoVerify'
 
 // ─── V2 Feature Modules ──────────────────────────────────────────────────────
 import { registerSplitTunnelHandlers } from './splitTunneling'
-import { registerServerPickerHandlers, serverPicker, setProfileSwitchHooks, tunnelHttpProbe } from './serverPicker'
+import { registerServerPickerHandlers, serverPicker, setProfileSwitchHooks, tunnelHttpProbe, RESOLVED_IP_TTL_MS } from './serverPicker'
 import {
   registerServerGroupsHandlers,
   startServerGroupAutoRefresh,
@@ -1026,6 +1028,23 @@ async function clearStaleKillSwitchBeforeStart(context: string): Promise<{ succe
   return { success: true }
 }
 
+async function verifyIndeterminateVpnIp(candidateIp: string): Promise<void> {
+  return executeIndeterminateVpnIpAutoVerify(candidateIp, {
+    onVerified: async (verifiedIp, isLeak) => {
+      try {
+        sendToMainWindow('ip-changed', { ip: verifiedIp, isLeak, ...ipMonitor.getEvidence() })
+      } catch {}
+      refreshTrayState({ status: 'protected', publicIp: verifiedIp })
+      void (async () => {
+        try {
+          const { verifyActiveCountryForIp } = await import('./serverPicker')
+          await verifyActiveCountryForIp(verifiedIp, () => tunController.getStatus().running)
+        } catch {}
+      })()
+    }
+  })
+}
+
 function trayStatusFromTunStatus(status: string): TrayStatus {
   if (status === 'running') return 'protected'
   if (status === 'proxy-down') return 'proxy-down'
@@ -1352,7 +1371,13 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
         protocol: activeServer.protocol as VpnProfile['protocol'],
         outbound,
         clientDevice: activeServer.clientDevice,
-        clientFingerprint: activeServer.clientFingerprint
+        clientFingerprint: activeServer.clientFingerprint,
+        resolvedIp: (Boolean(activeServer.resolvedIp) &&
+          (isIP(String(activeServer.server || '').trim()) !== 0 ||
+            (typeof activeServer.resolvedIpAt === 'number' &&
+              Date.now() - activeServer.resolvedIpAt < RESOLVED_IP_TTL_MS)))
+          ? (activeServer.resolvedIp || null)
+          : null
       }
       logEvent('info', 'tun', 'using server-picker active profile', {
         id: activeServer.id,
@@ -1573,8 +1598,8 @@ async function stopProtection(
   stopInProgress = true
   const result = await tunController.stop().finally(() => { stopInProgress = false })
   // Keep internal cleanup evidence inside main; IPC exposes the user outcome.
-  const { networkCleanup: _cleanup, ...outcome } = result
-  if (!result.success) return outcome
+  const { networkCleanup: _cleanup, runtimeStopped: _runtimeStopped, ...outcome } = result
+  if (!result.success && result.runtimeStopped !== true) return outcome
   if (endingOutcome) closeSession(endingOutcome, endingStats)
   await rollbackSoftAutoconfigIfApplied('protection stop')
   activeAdaptiveContext = null
@@ -1588,7 +1613,7 @@ async function stopProtection(
     logEvent('warn', 'app', 'failed to stop traffic forensics session', err)
   })
 
-  // External proxies are tied to the VPN session; retain them if its stop failed.
+  // External proxies are tied to the runtime; retain them until its exit is proved.
   try {
     await externalProxy.stopAll('vpn-stop')
   } catch (err) {
@@ -1831,11 +1856,14 @@ app.whenReady().then(async () => {
   )
 
   // Recovery gets priority. Warm the actual helper without caching network state.
-  void helperStartup.then(() => warmElevatedPsHelper())
+  void helperStartup.then(() => warmElevatedPsHelper(() =>
+    isQuitting || shutdownInProgress || connectionLifecycle.busy || tunController.getStatus().running))
   // Only module loading; every connect still reads fresh ownership/ACL evidence.
-  void warmRecoveryPsWorker()
+  void warmRecoveryPsWorker(() =>
+    isQuitting || shutdownInProgress || connectionLifecycle.busy || tunController.getStatus().running)
 
   createWindow()
+  void serverPicker.resolveAndPersistProfileIps().catch(() => undefined)
   tray = createTray(mainWindow!, {
     onStart: startProtectionFromTray,
     onStop: stopProtection,
@@ -1889,6 +1917,20 @@ app.whenReady().then(async () => {
       }
     } catch (err: any) {
       logEvent('error', 'app', 'leak notification failed — user may not be alerted', { error: err?.message || String(err), summary: r.summary })
+    }
+  })
+
+  setLeakSelfTestCompletedCallback((r) => {
+    if (
+      r.physicalAdapterInspectionComplete !== false &&
+      !r.physicalAdapterReached &&
+      !r.publicIpMismatch &&
+      !r.dnsLeakDetected &&
+      r.defaultRoutePublicIp
+    ) {
+      if (tunController.getStatus().running && ipMonitor.getEvidence().verdict === 'indeterminate') {
+        void verifyIndeterminateVpnIp(r.defaultRoutePublicIp)
+      }
     }
   })
 
@@ -2597,6 +2639,8 @@ app.whenReady().then(async () => {
     refreshTrayState({ status: isLeak ? 'leak' : tunController.getStatus().running ? 'protected' : 'off', publicIp: ip })
     if (isLeak) {
       notify('error', 'Виден ваш реальный IP', `Текущий публичный IP: ${ip}. Включите защиту или проверьте VPN-клиент.`, 'leakDetected')
+    } else if (evidence.verdict === 'indeterminate' && tunController.getStatus().running) {
+      void verifyIndeterminateVpnIp(ip)
     }
   })
 
@@ -2700,8 +2744,8 @@ async function performShutdownCleanup(reason: string): Promise<void> {
     try {
       const stopped = await tunController.stop()
       networkCleanup = stopped.networkCleanup
-      runtimeStopped = stopped.success
-      if (!stopped.success) throw new Error(stopped.error || 'owned runtime stop unconfirmed')
+      runtimeStopped = stopped.success || stopped.runtimeStopped === true
+      if (!runtimeStopped) throw new Error(stopped.error || 'owned runtime stop unconfirmed')
     } catch (err) {
       logEvent('warn', 'app', 'tunController.stop during shutdown failed', err)
     }
@@ -2713,7 +2757,7 @@ async function performShutdownCleanup(reason: string): Promise<void> {
       }
       if (!runtimeStopped) {
         const stopped = await tunController.stop()
-        if (!stopped.success) throw new Error(stopped.error || 'owned runtime stop unconfirmed')
+        if (!stopped.success && stopped.runtimeStopped !== true) throw new Error(stopped.error || 'owned runtime stop unconfirmed')
         networkCleanup = stopped.networkCleanup
       }
     } catch (err) {
