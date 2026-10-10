@@ -944,24 +944,16 @@
 - `python ../docs/04-приёмочные-тесты/traceability/check-coverage.py` — AC: 927/927, F: 210/210 (exit 0).
 - Коммит `973c2a7` отправлен в ветку `codex/wfp-firewall-lifecycle-perf` репозитория `vpn` (PR #23), локальный `main` синхронизирован fast-forward.
 
-## 2026-10-10 — Автоматизация триггеров на комментарии ревьюеров и исправление замечаний PR #24
+## 2026-10-10 — Ускорение холодного подключения и устранение замечаний ревьюеров по PR #24
 
-### 1. Автоматизация для комментариев и ревью (GitHub Actions & Local CLI)
-- **Исследованы события GitHub Actions** для автоматизации обработки обратной связи код-ревьюеров:
-  - `pull_request_review` (`types: [submitted, edited]`): триггерится при отправке формального ревью (`approved`, `changes_requested`, `commented`).
-  - `pull_request_review_comment` (`types: [created, edited]`): триггерится при публикации строчных замечаний к diff кода.
-  - `issue_comment` (`types: [created, edited]`): триггерится при комментариях в треде PR (`github.event.issue.pull_request != null`).
-  - `workflow_dispatch`: ручной запуск проверки PR.
-- **Создан рабочий процесс GitHub Actions**: `.github/workflows/on-reviewer-comment.yml`:
-  - Защита от рекурсивных циклов (`github.actor != 'github-actions[bot]'`).
-  - Автоматическая классификация замечаний (от ботов CodeRabbit, Revix, Greptile и живых ревьюеров).
-  - Автоматическое назначение и снятие меток PR (`changes-requested`, `approved`, `ready-for-merge`, `review-feedback`).
-  - Форматирование карточки в `$GITHUB_STEP_SUMMARY` с цитатой, ссылкой на файл/строку и автора.
-  - Выгрузка структурированного JSON-артефакта `reviewer-feedback.json` и опциональный диспатч вебхуков (`NOTIFICATION_WEBHOOK_URL`).
-- **Создан локальный скрипт мониторинга**: `vpn-tunnel-enforcer/scripts/watch-pr-reviews.mjs`:
-  - Команда `npm run watch:reviews` опрашивает GitHub API через `gh` CLI для текущей ветки или PR.
-  - Режим однократного отчёта (`--once`) и фонового поллинга с уведомлениями (`--watch`).
-  - Поддержка `--json` для автоматических агентов.
+### 1. Ускорение первого холодного подключения VPN
+- **CIM-пакетные запросы в PowerShell**:
+  - `src/main/physicalAdapterSnapshot.ts`: прямой опрос через `Get-CimInstance` классов `MSFT_NetAdapter`, `MSFT_NetAdapterBindingSettingData`, `MSFT_DNSClientServerAddress`, `MSFT_NetRoute`, `MSFT_NetConnectionProfile` в пространстве `root/StandardCimv2`.
+  - Устранена дорогостоящая загрузка тяжеловесного модуля `NetAdapter` на холодном старте.
+  - Сохранён 100% совместимый fallback на командлеты в блоке `catch`.
+- **Ранний фоновый прогрев адаптеров**:
+  - `src/main/physicalAdapterLockdown.ts`: функции `getLocalNetSignature()`, `warmPhysicalAdaptersSnapshot()`, кеширование снимка адаптеров с TTL 30 секунд.
+  - `src/main/index.ts`: вызов `warmPhysicalAdaptersSnapshot()` при старте окна, сброс кеша по `setNetworkChangeCallback`.
 
 ### 2. Исправление замечаний ревьюеров по PR #24 (CodeRabbit & Revix)
 - **Счётчик поколений кэша** (`snapshotGeneration`) в `physicalAdapterLockdown.ts`:
@@ -970,31 +962,16 @@
   - Сброс `snapshotPromise` в `.finally` защищён проверкой `snapshotPromise === p`, предотвращая затирание более новых запросов.
 - **Свежий снимок при наложении локдауна**:
   - `applyPhysicalAdapterLockdown()` по умолчанию запрашивает свежий снимок `{ forceFresh: options.forceFresh !== false }` перед записью манифеста восстановления, гарантируя актуальность DNS и шлюзов при формировании `pendingAdapters`.
-  - Сохранён быстрый фоновый прогрев `warmPhysicalAdaptersSnapshot()` на старте.
+  - `forceFresh: true` гарантированно обходит in-flight промис прогрева адаптеров.
+  - Выровнен TTL в `warmPhysicalAdaptersSnapshot` до 30 секунд в соответствии со `snapshotPhysicalAdapters`.
 - **Унификация и обработка ошибок CIM-запросов** в `physicalAdapterSnapshot.ts`:
   - Выделен единый шаблон исключения виртуальных адаптеров `ADAPTER_EXCLUSION_PATTERN`.
   - Дополнительные пакетные CIM-запросы (`MSFT_NetAdapterBindingSettingData`, `MSFT_DNSClientServerAddress`, `MSFT_NetRoute`, `MSFT_NetConnectionProfile`) выполняются с `-ErrorAction Stop`. При сбое любого из них управление передаётся в блок `catch` с гарантированным откатом на командлеты.
-- **Документирование JSDoc**:
-  - Добавлены docstrings для `getLocalNetSignature`, `clearPhysicalAdaptersSnapshotCache`, `warmPhysicalAdaptersSnapshot`, `snapshotPhysicalAdapters`.
+- **Очистка PR от временных скриптов**:
+  - Удалены временные воркфлоу и скрипты триажа, ветка PR #24 сохранена строго сфокусированной на задаче ускорения холодного подключения.
 
 ### 3. Тестирование и Definition of Done
 - `npm run typecheck` — 0 ошибок (exit 0).
 - `npm test` — 2879 passed / 4 skipped / 0 failed (100% зелёные), 218 тест-файлов.
 - `python ../docs/04-приёмочные-тесты/traceability/check-coverage.py` — AC: 927/927, F: 210/210 (exit 0).
-
-### 4. Автономный контур самоисправления агентом Antigravity (Gemini 3.8 Flash High Reasoning)
-- **Конфигурационный файл мультиревьюеров**: `reviewer-automation.config.json`:
-  - Распознавание ботов: CodeRabbit (`coderabbitai[bot]`), Revix (`revixappdev[bot]`), Greptile (`greptile-apps[bot]`) и живых ревьюеров.
-  - Настройка модели агента: `antigravity` + `gemini-3.8-flash-high` с `reasoningEffort: high`.
-  - Легко расширяемый список ключевых слов, меток и правил без внешних API-ключей и биллинга (работает на Google AI Pro).
-- **Скрипт автономного триажа и верификации**: `vpn-tunnel-enforcer/scripts/auto-resolve-reviews.mjs`:
-  - `npm run reviewer:check` собирает пагинированные замечания (`--paginate --slurp`) и формирует задачи в `.automation/pending-fixes.json`.
-  - Режим `npm run reviewer:check -- --check-dod` выполняет полный цикл проверок Definition of Done.
-- **Фоновый демон-крон в среде Antigravity**:
-  - Зарегистрирован постоянный фоновый daemon schedule (`schedule`, `CronExpression: '*/3 * * * *'`, `IsDaemon: true`).
-  - Каждые 3 минуты агент автономно просыпается, проверяет наличие новых замечаний ревьюеров, применяет правки, валидирует через DoD, коммитит и пушит в PR.
-- **Устранены все замечания CodeRabbit и Revix по PR #24**:
-  - `forceFresh: true` теперь обходит висящий в фоне промис `snapshotPromise` (`if (!options?.forceFresh && snapshotPromise)`).
-  - В GitHub Actions workflow вынесены `NOTIFICATION_WEBHOOK_URL` на уровень job, экранирован shell-пайплайн и подключена конфигурация.
-  - В `watch-pr-reviews.mjs` добавлена валидация интервала опроса и пагинация всех страниц API.
 

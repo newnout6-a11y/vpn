@@ -328,7 +328,7 @@ export function clearPhysicalAdaptersSnapshotCache(): void {
  */
 export async function warmPhysicalAdaptersSnapshot(): Promise<void> {
   const currentSig = getLocalNetSignature()
-  if (cachedAdaptersSnapshot && Date.now() - cachedAdaptersSnapshotTime < 60000 && currentSig && currentSig === cachedNetSignature) {
+  if (cachedAdaptersSnapshot && Date.now() - cachedAdaptersSnapshotTime < 30000 && currentSig && currentSig === cachedNetSignature) {
     return
   }
   await snapshotPhysicalAdapters()

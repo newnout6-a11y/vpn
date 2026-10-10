@@ -33,5 +33,3 @@ vpn-tunnel-enforcer/scripts/inspect-bundle.mjs
 coverage/
 .agents/
 .codebase-memory/
-.automation/
-**/.automation/
