@@ -334,8 +334,10 @@ export function isValidIpOrCidr(value: string): boolean {
   return false
 }
 
-export async function isKillSwitchActive(): Promise<boolean> {
-  return (await readManifest()) !== null || await probeFirewallForOurRules() || await hasWfpIpv6Protection(script => ps(script, true))
+export async function isKillSwitchActive(options?: { probeWfp?: boolean }): Promise<boolean> {
+  if ((await readManifest()) !== null || await probeFirewallForOurRules()) return true
+  if (options?.probeWfp === false) return false
+  return hasWfpIpv6Protection(script => ps(script, true))
 }
 
 export async function ensureKillSwitchProgramAllowed(

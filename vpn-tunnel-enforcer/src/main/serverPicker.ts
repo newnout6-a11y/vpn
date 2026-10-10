@@ -56,7 +56,7 @@ import { reliableSocksTcpPing } from './socksPing'
 import { networkFailureCode } from './networkFailureDiagnostics'
 import { serverPickerStore as store } from './sharedStores'
 
-const RESOLVED_IP_TTL_MS = 5 * 60_000
+export const RESOLVED_IP_TTL_MS = 5 * 60_000
 const DNS_RESOLUTION_TIMEOUT_MS = 2500
 const resolvedIpCache = new Map<string, { ip: string | null; resolvedAt: number }>()
 

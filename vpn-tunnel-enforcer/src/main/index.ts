@@ -7,6 +7,7 @@ import { execFile as execFileCb } from 'child_process'
 import { rm } from 'fs/promises'
 import { promisify } from 'util'
 import { join } from 'path'
+import { isIP } from 'net'
 import { getPrivilegedRuntimeDir } from './runtimePaths'
 import { directoryExists, verifyDirectoryHardened } from './runtimeDirSecurity'
 import { happDetector } from './happDetector'
@@ -65,7 +66,7 @@ import { resolveVpnProfile, resolveVpnProfiles, redactSensitiveConfig, type VpnP
 
 // ─── V2 Feature Modules ──────────────────────────────────────────────────────
 import { registerSplitTunnelHandlers } from './splitTunneling'
-import { registerServerPickerHandlers, serverPicker, setProfileSwitchHooks, tunnelHttpProbe } from './serverPicker'
+import { registerServerPickerHandlers, serverPicker, setProfileSwitchHooks, tunnelHttpProbe, RESOLVED_IP_TTL_MS } from './serverPicker'
 import {
   registerServerGroupsHandlers,
   startServerGroupAutoRefresh,
@@ -1012,7 +1013,8 @@ function refreshTrayState(patch: {
 
 async function clearStaleKillSwitchBeforeStart(context: string): Promise<{ success: boolean; error?: string }> {
   if (tunController.getStatus().running) return { success: true }
-  if (!(await isKillSwitchActive())) return { success: true }
+  const settings = settingsStore.get()
+  if (!(await isKillSwitchActive({ probeWfp: settings.firewallKillSwitch }))) return { success: true }
 
   logEvent('info', 'firewall-killswitch', `restart preflight: clearing stale kill-switch before ${context}`)
   const result = await disableKillSwitchIfActive(`restart preflight: ${context}`)
@@ -1353,7 +1355,12 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
         outbound,
         clientDevice: activeServer.clientDevice,
         clientFingerprint: activeServer.clientFingerprint,
-        resolvedIp: activeServer.resolvedIp || null
+        resolvedIp: (Boolean(activeServer.resolvedIp) &&
+          (isIP(String(activeServer.server || '').trim()) !== 0 ||
+            (typeof activeServer.resolvedIpAt === 'number' &&
+              Date.now() - activeServer.resolvedIpAt < RESOLVED_IP_TTL_MS)))
+          ? (activeServer.resolvedIp || null)
+          : null
       }
       logEvent('info', 'tun', 'using server-picker active profile', {
         id: activeServer.id,

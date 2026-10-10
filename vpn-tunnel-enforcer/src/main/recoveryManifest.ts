@@ -54,7 +54,7 @@ function Assert-TrustedArtifact($path, $directory) {
 async function runRead(script: string, elevated = false): Promise<string> {
   const encoded = Buffer.from("[Console]::OutputEncoding=[Text.Encoding]::UTF8;$ErrorActionPreference='Stop';" + script, 'utf16le').toString('base64')
   if (elevated) {
-    const { stdout } = await execElevated(`powershell.exe -NoProfile -NonInteractive -EncodedCommand ${encoded}`, { timeout: 15000 })
+    const { stdout } = await execElevated(`powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encoded}`, { timeout: 15000 })
     return String(stdout).replace(/^\uFEFF/, '').trim()
   }
   const { stdout } = await execFile('powershell.exe', ['-NoProfile','-NonInteractive','-EncodedCommand',encoded], {

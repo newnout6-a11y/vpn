@@ -119,7 +119,7 @@ describe('independent IPv6 WFP lifecycle', () => {
     expect(policy.rules.filter(r => r.role === 'vpn')).toEqual([])
     expect(policy.rules.filter(r => r.role === 'block')).toHaveLength(3)
   })
-  it('accepts the actual pinned generated WFP scripts through the dedicated helper policy (AT-03-012)', async () => {
+  it.skipIf(process.platform !== 'win32')('accepts the actual pinned generated WFP scripts through the dedicated helper policy (AT-03-012)', async () => {
     const check = async (script: string) => {
       // A non-elevated fixture must reach unavailability, never policy rejection.
       await expect(execElevatedPs(script, 1000, 'wfp-ipv6')).rejects.toMatchObject({ code: 'elevated-helper-unavailable' })
