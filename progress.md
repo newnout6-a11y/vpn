@@ -1,3 +1,17 @@
+## 2026-10-10 - Task: Address CodeRabbit and Revix review findings on PR #23
+### What was done
+- Sealed indeterminate IP auto-verification safety gates against incomplete adapter inspection (`LeakSelfTestResult.physicalAdapterInspectionComplete`): if physical adapter enumeration fails or is cancelled, rebaselining is strictly rejected.
+- Verified route ownership after leak self-test and enforced exact baseline matching (`expectedIp`) in `ipMonitor.recheck`: fresh network samples are adopted as VPN baseline only when they match `leakResult.defaultRoutePublicIp` and TUN routes remain active.
+- Redacted all public IP addresses in main-process log messages (`candidateIp`, `verifiedIp`, `defaultRoutePublicIp`, `recheckIp`) via `redactSensitiveText` in compliance with Revix rule `redact-before-log-event`.
+- Modularized auto-verification logic into `src/main/indeterminateIpAutoVerify.ts` and replaced fragile substring tests in `indeterminateIpAutoVerify.test.ts` with end-to-end behavioral tests covering clean adoption, failed adapter enumeration, physical leaks, DNS leaks, route drops, and IP sample mismatches.
+- Added regression tests in `leakSelfTest.test.ts` for adapter enumeration failure, cancellation, and clean probe notifications.
+### Testing
+- `npm run typecheck` passed (exit code 0).
+- `npm test` passed: 216 files, 2872 passed (100% green).
+- `python ../docs/04-приёмочные-тесты/traceability/check-coverage.py` passed: AC 927/927, F 210/210, 0 missing.
+### Notes
+- Git branch: `codex/wfp-firewall-lifecycle-perf` (PR #23).
+
 ## 2026-10-10 - Task: Auto-verify indeterminate VPN IP and disable probe socket keep-alive
 ### What was done
 - Identified why `⚠️ 13.143.214.3 — VPN-IP изменился, требуется проверка` stayed indeterminate: Node's default global agent keep-alive pooled sockets across network transitions during startup, and no automatic re-verification mechanism existed to clear indeterminate states without user intervention.

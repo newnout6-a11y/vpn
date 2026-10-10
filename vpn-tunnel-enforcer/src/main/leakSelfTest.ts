@@ -77,6 +77,9 @@ export interface LeakSelfTestResult {
   // and the renderer client type stay structurally compatible.
   dnsLeakDetected?: boolean
   dnsLeakDetail?: string
+  // False if adapter enumeration failed or was cancelled; true when adapter
+  // coverage was successfully checked without error.
+  physicalAdapterInspectionComplete?: boolean
 }
 
 const PROBE_URL = 'https://1.1.1.1'
@@ -101,7 +104,8 @@ function cancelledResult(): LeakSelfTestResult {
     publicIpMismatch: false,
     defaultRoutePublicIp: null,
     perAdapter: [],
-    summary: 'Тест отменён (защита остановлена)'
+    summary: 'Тест отменён (защита остановлена)',
+    physicalAdapterInspectionComplete: false
   }
 }
 
@@ -148,8 +152,8 @@ async function curlBound(ip: string, url: string, timeoutSec = 4): Promise<{ std
   }
 }
 
-async function listPhysicalAdaptersWithIPv4(): Promise<{ alias: string; ipv4: string }[]> {
-  if (process.platform !== 'win32') return []
+async function listPhysicalAdaptersWithIPv4(): Promise<{ adapters: { alias: string; ipv4: string }[]; complete: boolean }> {
+  if (process.platform !== 'win32') return { adapters: [], complete: true }
   // Mirror the lockdown filter — keep them consistent so the leak test
   // tests every adapter that the lockdown is responsible for. The UTF-8
   // prefix is mandatory: without it the alias comes back as CP866-mojibake
@@ -186,13 +190,16 @@ $rows | ConvertTo-Json -Compress
       encoding: 'utf8'
     })
     const text = String(stdout).trim()
-    if (!text || text === 'null') return []
+    if (!text || text === 'null') return { adapters: [], complete: true }
     const parsed = JSON.parse(text)
     const arr = Array.isArray(parsed) ? parsed : [parsed]
-    return arr.map((r: any) => ({ alias: String(r.Alias), ipv4: String(r.Ipv4) }))
+    return {
+      adapters: arr.map((r: any) => ({ alias: String(r.Alias), ipv4: String(r.Ipv4) })),
+      complete: true
+    }
   } catch (err) {
     logEvent('warn', 'leak-test', 'failed to list physical adapters', { err: (err as Error).message })
-    return []
+    return { adapters: [], complete: false }
   }
 }
 
@@ -232,8 +239,10 @@ async function runLeakSelfTestOnce(mySession: number): Promise<LeakSelfTestResul
   // 2. Per physical adapter: try to reach 1.1.1.1 directly bypassing the
   //    default route. If curl succeeds while TUN+kill-switch are up, that's a
   //    leak.
-  const adapters = await listPhysicalAdaptersWithIPv4()
+  const adapterList = await listPhysicalAdaptersWithIPv4()
   if (mySession !== activeSessionId) return cancelledResult()
+  const adapters = adapterList.adapters
+  const physicalAdapterInspectionComplete = adapterList.complete
 
   const perAdapter: AdapterReach[] = []
   for (const a of adapters) {
@@ -297,7 +306,8 @@ async function runLeakSelfTestOnce(mySession: number): Promise<LeakSelfTestResul
     perAdapter,
     summary,
     dnsLeakDetected,
-    dnsLeakDetail: dnsLeakDetail ?? undefined
+    dnsLeakDetail: dnsLeakDetail ?? undefined,
+    physicalAdapterInspectionComplete
   }
 
   // Final cancellation check before any side effects (logEvent + callback).
@@ -351,7 +361,16 @@ export function cancelLeakSelfTest(): void {
   activeSessionId += 1
 }
 
+export function resetLeakTestThrottlesForTest(): void {
+  transitionSuppressUntil = 0
+  lastTriggerAt = 0
+}
+
 export function suppressLeakSelfTestsFor(ms: number, reason: string): void {
+  if (ms <= 0) {
+    transitionSuppressUntil = 0
+    return
+  }
   const until = Date.now() + Math.max(0, ms)
   if (until > transitionSuppressUntil) transitionSuppressUntil = until
   cancelLeakSelfTest()
@@ -395,7 +414,7 @@ export function triggerLeakCheckNow(reason: string): void {
       if (runSession !== activeSessionId) return
       if (r.physicalAdapterReached || r.publicIpMismatch || r.dnsLeakDetected) {
         onLeakDetectedCb?.(r)
-      } else {
+      } else if (r.physicalAdapterInspectionComplete !== false) {
         onLeakSelfTestCompletedCb?.(r)
       }
     })
@@ -488,7 +507,7 @@ export function startPeriodicLeakTest(
         if (runSession !== activeSessionId) return
         if (r.physicalAdapterReached || r.publicIpMismatch || r.dnsLeakDetected) {
           onLeakDetectedCb?.(r)
-        } else {
+        } else if (r.physicalAdapterInspectionComplete !== false) {
           onLeakSelfTestCompletedCb?.(r)
         }
       })

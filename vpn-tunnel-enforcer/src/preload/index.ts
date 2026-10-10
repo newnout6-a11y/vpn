@@ -286,6 +286,7 @@ export interface LeakSelfTestResult {
   summary: string
   dnsLeakDetected?: boolean
   dnsLeakDetail?: string
+  physicalAdapterInspectionComplete?: boolean
 }
 
 const MAX_TEXT_ARG_CHARS = 4096
