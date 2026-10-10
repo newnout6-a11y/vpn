@@ -622,7 +622,7 @@ export async function applyPhysicalAdapterLockdown(tunDnsIpv4: string, options: 
   }
 
   const [adapters, transitionAdapters, dnsRegistryPolicy] = await Promise.all([
-    snapshotPhysicalAdapters({ forceFresh: options.forceFresh !== false }),
+    snapshotPhysicalAdapters({ forceFresh: Boolean(options.forceFresh) }),
     snapshotTransitionAdapters(),
     snapshotDnsRegistryPolicy()
   ])

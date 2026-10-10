@@ -28,7 +28,7 @@
 | ID / Тема | Автор | Тип | Статус | Обоснование / Решение |
 |---|---|---|---|---|
 | Счётчик поколений кэша (`snapshotGeneration`) | CodeRabbit | Bug / Race | **FIXED** | Добавлен `snapshotGeneration`, защищающий от перезаписи кэша устаревшим фоновым промисом после очистки (`clearPhysicalAdaptersSnapshotCache`). Проверено в `f370520`. |
-| Свежий снимок при локдауне (`forceFresh`) | CodeRabbit | Bug | **FIXED** | `applyPhysicalAdapterLockdown` по умолчанию запрашивает свежий снимок для записи манифеста восстановления. |
+| Опциональный `forceFresh` при локдауне | Revix, CodeRabbit | Perf / Logic | **FIXED** | Сделан `forceFresh: Boolean(options.forceFresh)` вместо принудительного `true`, благодаря чему холодное подключение мгновенно переиспользует прогретый кеш без повторного запуска PowerShell (устранено замечание Revix 4238526437). |
 | Обход in-flight промиса при `forceFresh` | Revix | Bug | **FIXED** | Проверка `if (!options?.forceFresh && snapshotPromise)` гарантирует, что принудительный снимок не переиспользует старый фоновый промис прогрева. |
 | Выравнивание TTL в `warmPhysicalAdaptersSnapshot` | Revix | Suggestion | **FIXED** | TTL в прогреве выровнен до 30 секунд (было 60с при 30с в основном снапшоте). |
 | Единый regex адаптеров и `-ErrorAction Stop` | Revix | Quality | **FIXED** | Использован единый `ADAPTER_EXCLUSION_PATTERN`. На всех вспомогательных CIM-запросах выставлен `-ErrorAction Stop` с чистым fallback в `catch`. |
