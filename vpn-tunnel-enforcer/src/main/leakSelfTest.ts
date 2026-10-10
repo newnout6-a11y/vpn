@@ -367,10 +367,6 @@ export function resetLeakTestThrottlesForTest(): void {
 }
 
 export function suppressLeakSelfTestsFor(ms: number, reason: string): void {
-  if (ms <= 0) {
-    transitionSuppressUntil = 0
-    return
-  }
   const until = Date.now() + Math.max(0, ms)
   if (until > transitionSuppressUntil) transitionSuppressUntil = until
   cancelLeakSelfTest()

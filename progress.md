@@ -3,11 +3,13 @@
 - Sealed indeterminate IP auto-verification safety gates against incomplete adapter inspection (`LeakSelfTestResult.physicalAdapterInspectionComplete`): if physical adapter enumeration fails or is cancelled, rebaselining is strictly rejected.
 - Verified route ownership after leak self-test and enforced exact baseline matching (`expectedIp`) in `ipMonitor.recheck`: fresh network samples are adopted as VPN baseline only when they match `leakResult.defaultRoutePublicIp` and TUN routes remain active.
 - Redacted all public IP addresses in main-process log messages (`candidateIp`, `verifiedIp`, `defaultRoutePublicIp`, `recheckIp`) via `redactSensitiveText` in compliance with Revix rule `redact-before-log-event`.
-- Modularized auto-verification logic into `src/main/indeterminateIpAutoVerify.ts` and replaced fragile substring tests in `indeterminateIpAutoVerify.test.ts` with end-to-end behavioral tests covering clean adoption, failed adapter enumeration, physical leaks, DNS leaks, route drops, and IP sample mismatches.
+- Modularized auto-verification logic into `src/main/indeterminateIpAutoVerify.ts` and prevented in-flight guard latching on synchronous early returns via `.finally()`.
+- Restored original `suppressLeakSelfTestsFor(ms)` cancellation semantics on zero-ms calls while maintaining test isolation via `resetLeakTestThrottlesForTest()`.
+- Replaced fragile substring checks in `indeterminateIpAutoVerify.test.ts` with end-to-end behavioral tests covering clean adoption, failed adapter enumeration, physical leaks, DNS leaks, route drops, IP sample mismatches, and sequential early returns.
 - Added regression tests in `leakSelfTest.test.ts` for adapter enumeration failure, cancellation, and clean probe notifications.
 ### Testing
 - `npm run typecheck` passed (exit code 0).
-- `npm test` passed: 216 files, 2872 passed (100% green).
+- `npm test` passed: 216 files, 2874 passed (100% green).
 - `python ../docs/04-приёмочные-тесты/traceability/check-coverage.py` passed: AC 927/927, F 210/210, 0 missing.
 ### Notes
 - Git branch: `codex/wfp-firewall-lifecycle-perf` (PR #23).

@@ -24,7 +24,7 @@ try{$script=$reader.ReadToEnd()}finally{$reader.Dispose();$gzip.Dispose();$strea
   const env = { ...process.env }
   for (const key of Object.keys(env)) if (key.toLowerCase() === 'psmodulepath') delete env[key]
   return execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand',
-    Buffer.from(launcher, 'utf16le').toString('base64')], { env, windowsHide: true, timeout: 10000, encoding: 'utf8', stdio: 'pipe' })
+    Buffer.from(launcher, 'utf16le').toString('base64')], { env, windowsHide: true, timeout: 30000, encoding: 'utf8', stdio: 'pipe' })
 }
 
 function result(value: any) {

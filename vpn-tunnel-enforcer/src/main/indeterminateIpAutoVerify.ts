@@ -28,7 +28,7 @@ export async function executeIndeterminateVpnIpAutoVerify(
   deps?: IndeterminateAutoVerifyDeps
 ): Promise<void> {
   if (indeterminateVerificationInFlight) return indeterminateVerificationInFlight
-  indeterminateVerificationInFlight = (async () => {
+  const run = (async () => {
     try {
       const isRunning = deps?.isRunning ?? (() => tunController.getStatus().running)
       const getVerdict = deps?.getVerdict ?? (() => ipMonitor.getEvidence().verdict)
@@ -102,9 +102,13 @@ export async function executeIndeterminateVpnIpAutoVerify(
       logEvent('warn', 'ip-monitor', 'indeterminate IP auto-verification error', {
         error: err?.message || String(err)
       })
-    } finally {
+    }
+  })().finally(() => {
+    if (indeterminateVerificationInFlight === run) {
       indeterminateVerificationInFlight = null
     }
-  })()
-  return indeterminateVerificationInFlight
+  })
+
+  indeterminateVerificationInFlight = run
+  return run
 }

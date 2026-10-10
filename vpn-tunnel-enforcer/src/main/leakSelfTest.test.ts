@@ -116,26 +116,29 @@ describe('runLeakSelfTest coalescing', () => {
       )
     } finally {
       vi.useRealTimers()
+      const { resetLeakTestThrottlesForTest } = await import('./leakSelfTest')
+      resetLeakTestThrottlesForTest()
     }
   })
 
   it('notifies onLeakSelfTestCompletedCb when a triggered check finishes cleanly with zero leaks', async () => {
-    const { setLeakSelfTestCompletedCallback, triggerLeakCheckNow } = await import('./leakSelfTest')
+    const { setLeakSelfTestCompletedCallback, triggerLeakCheckNow, resetLeakTestThrottlesForTest } = await import('./leakSelfTest')
+    resetLeakTestThrottlesForTest()
     const completedCb = vi.fn()
     setLeakSelfTestCompletedCallback(completedCb)
 
     triggerLeakCheckNow('test-clean')
-    await new Promise((r) => setTimeout(r, 50))
-
-    expect(completedCb).toHaveBeenCalledWith(
-      expect.objectContaining({
-        physicalAdapterReached: false,
-        publicIpMismatch: false,
-        dnsLeakDetected: false,
-        defaultRoutePublicIp: '1.2.3.4',
-        physicalAdapterInspectionComplete: true
-      })
-    )
+    await vi.waitFor(() => {
+      expect(completedCb).toHaveBeenCalledWith(
+        expect.objectContaining({
+          physicalAdapterReached: false,
+          publicIpMismatch: false,
+          dnsLeakDetected: false,
+          defaultRoutePublicIp: '1.2.3.4',
+          physicalAdapterInspectionComplete: true
+        })
+      )
+    })
   })
 
   it('marks physicalAdapterInspectionComplete as false and does not notify completedCb when adapter enumeration fails', async () => {

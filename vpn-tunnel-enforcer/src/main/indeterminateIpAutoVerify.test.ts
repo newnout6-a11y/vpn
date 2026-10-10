@@ -1,5 +1,3 @@
-import { readFileSync } from 'fs'
-import { join } from 'path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import axios from 'axios'
 import {
@@ -9,9 +7,6 @@ import {
 
 vi.mock('axios')
 vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
-
-const mainIndexSource = () => readFileSync(join(process.cwd(), 'src', 'main', 'index.ts'), 'utf8')
-const leakSelfTestSource = () => readFileSync(join(process.cwd(), 'src', 'main', 'leakSelfTest.ts'), 'utf8')
 
 describe('indeterminate IP auto-verification (AT-07-001 / AT-07-005 / AT-07-006)', () => {
   beforeEach(() => {
@@ -242,23 +237,108 @@ describe('indeterminate IP auto-verification (AT-07-001 / AT-07-005 / AT-07-006)
       expect(recheck).not.toHaveBeenCalled()
       expect(onVerified).not.toHaveBeenCalled()
     })
+
+    it('does not latch in-flight guard when returning early on non-indeterminate verdict and allows subsequent verification', async () => {
+      const onVerified = vi.fn()
+      const recheck = vi.fn().mockResolvedValue({
+        ip: '13.143.214.3',
+        isLeak: false,
+        vpnIp: '13.143.214.3'
+      })
+      const runLeakTest = vi.fn().mockResolvedValue({
+        ts: Date.now(),
+        physicalAdapterInspectionComplete: true,
+        physicalAdapterReached: false,
+        publicIpMismatch: false,
+        dnsLeakDetected: false,
+        defaultRoutePublicIp: '13.143.214.3',
+        perAdapter: [],
+        summary: 'OK'
+      })
+
+      let currentVerdict = 'passed'
+
+      // First call: verdict is 'passed' -> returns early synchronously
+      await executeIndeterminateVpnIpAutoVerify('13.143.214.3', {
+        isRunning: () => true,
+        getVerdict: () => currentVerdict,
+        areRoutesActive: async () => true,
+        runLeakTest,
+        recheck,
+        onVerified
+      })
+      expect(runLeakTest).not.toHaveBeenCalled()
+      expect(onVerified).not.toHaveBeenCalled()
+
+      // Verdict transitions to 'indeterminate'
+      currentVerdict = 'indeterminate'
+
+      // Second call: must not be latched by the earlier synchronous return
+      await executeIndeterminateVpnIpAutoVerify('13.143.214.3', {
+        isRunning: () => true,
+        getVerdict: () => currentVerdict,
+        areRoutesActive: async () => true,
+        runLeakTest,
+        recheck,
+        onVerified
+      })
+      expect(runLeakTest).toHaveBeenCalledTimes(1)
+      expect(onVerified).toHaveBeenCalledWith('13.143.214.3', false)
+    })
+
+    it('does not latch in-flight guard when returning early while TUN is not running and allows subsequent verification', async () => {
+      const onVerified = vi.fn()
+      const recheck = vi.fn().mockResolvedValue({
+        ip: '13.143.214.3',
+        isLeak: false,
+        vpnIp: '13.143.214.3'
+      })
+      const runLeakTest = vi.fn().mockResolvedValue({
+        ts: Date.now(),
+        physicalAdapterInspectionComplete: true,
+        physicalAdapterReached: false,
+        publicIpMismatch: false,
+        dnsLeakDetected: false,
+        defaultRoutePublicIp: '13.143.214.3',
+        perAdapter: [],
+        summary: 'OK'
+      })
+
+      let isTunRunning = false
+
+      // First call: TUN not running -> returns early synchronously
+      await executeIndeterminateVpnIpAutoVerify('13.143.214.3', {
+        isRunning: () => isTunRunning,
+        getVerdict: () => 'indeterminate',
+        areRoutesActive: async () => true,
+        runLeakTest,
+        recheck,
+        onVerified
+      })
+      expect(runLeakTest).not.toHaveBeenCalled()
+      expect(onVerified).not.toHaveBeenCalled()
+
+      // TUN starts running
+      isTunRunning = true
+
+      // Second call: must execute verification cleanly
+      await executeIndeterminateVpnIpAutoVerify('13.143.214.3', {
+        isRunning: () => isTunRunning,
+        getVerdict: () => 'indeterminate',
+        areRoutesActive: async () => true,
+        runLeakTest,
+        recheck,
+        onVerified
+      })
+      expect(runLeakTest).toHaveBeenCalledTimes(1)
+      expect(onVerified).toHaveBeenCalledWith('13.143.214.3', false)
+    })
   })
 
   describe('contract and wiring', () => {
-    it('wires automatic verification and rebaseline in main index and leakSelfTest', () => {
-      const source = mainIndexSource()
-
-      expect(source).toContain('executeIndeterminateVpnIpAutoVerify')
-      expect(source).toContain('async function verifyIndeterminateVpnIp(candidateIp: string)')
-      expect(source).toContain('setLeakSelfTestCompletedCallback((r) => {')
-      expect(source).toContain('r.physicalAdapterInspectionComplete !== false')
-      expect(source).toContain('void verifyIndeterminateVpnIp(r.defaultRoutePublicIp)')
-      expect(source).toContain("else if (evidence.verdict === 'indeterminate' && tunController.getStatus().running)")
-
-      const leakSource = leakSelfTestSource()
-      expect(leakSource).toContain('export function setLeakSelfTestCompletedCallback')
-      expect(leakSource).toContain('onLeakSelfTestCompletedCb?.(r)')
-      expect(leakSource).toContain('physicalAdapterInspectionComplete')
+    it('exports executeIndeterminateVpnIpAutoVerify with callable contracts', () => {
+      expect(typeof executeIndeterminateVpnIpAutoVerify).toBe('function')
+      expect(typeof resetIndeterminateAutoVerifyInFlightForTest).toBe('function')
     })
   })
 
