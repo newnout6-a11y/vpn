@@ -345,8 +345,8 @@ async function snapshotPhysicalAdapters(options?: { forceFresh?: boolean }): Pro
   if (!options?.forceFresh && cachedAdaptersSnapshot && Date.now() - cachedAdaptersSnapshotTime < 30000 && currentSig && currentSig === cachedNetSignature) {
     return cachedAdaptersSnapshot
   }
-  // Return the in-flight promise directly so concurrent callers share one PS run.
-  if (snapshotPromise) {
+  // Return the in-flight promise directly so concurrent callers share one PS run (unless a forced fresh read is requested).
+  if (!options?.forceFresh && snapshotPromise) {
     return snapshotPromise
   }
 

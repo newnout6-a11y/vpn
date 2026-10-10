@@ -982,3 +982,19 @@
 - `npm test` — 2879 passed / 4 skipped / 0 failed (100% зелёные), 218 тест-файлов.
 - `python ../docs/04-приёмочные-тесты/traceability/check-coverage.py` — AC: 927/927, F: 210/210 (exit 0).
 
+### 4. Автономный контур самоисправления агентом Antigravity (Gemini 3.8 Flash High Reasoning)
+- **Конфигурационный файл мультиревьюеров**: `reviewer-automation.config.json`:
+  - Распознавание ботов: CodeRabbit (`coderabbitai[bot]`), Revix (`revixappdev[bot]`), Greptile (`greptile-apps[bot]`) и живых ревьюеров.
+  - Настройка модели агента: `antigravity` + `gemini-3.8-flash-high` с `reasoningEffort: high`.
+  - Легко расширяемый список ключевых слов, меток и правил без внешних API-ключей и биллинга (работает на Google AI Pro).
+- **Скрипт автономного триажа и верификации**: `vpn-tunnel-enforcer/scripts/auto-resolve-reviews.mjs`:
+  - `npm run reviewer:check` собирает пагинированные замечания (`--paginate --slurp`) и формирует задачи в `.automation/pending-fixes.json`.
+  - Режим `npm run reviewer:check -- --check-dod` выполняет полный цикл проверок Definition of Done.
+- **Фоновый демон-крон в среде Antigravity**:
+  - Зарегистрирован постоянный фоновый daemon schedule (`schedule`, `CronExpression: '*/3 * * * *'`, `IsDaemon: true`).
+  - Каждые 3 минуты агент автономно просыпается, проверяет наличие новых замечаний ревьюеров, применяет правки, валидирует через DoD, коммитит и пушит в PR.
+- **Устранены все замечания CodeRabbit и Revix по PR #24**:
+  - `forceFresh: true` теперь обходит висящий в фоне промис `snapshotPromise` (`if (!options?.forceFresh && snapshotPromise)`).
+  - В GitHub Actions workflow вынесены `NOTIFICATION_WEBHOOK_URL` на уровень job, экранирован shell-пайплайн и подключена конфигурация.
+  - В `watch-pr-reviews.mjs` добавлена валидация интервала опроса и пагинация всех страниц API.
+

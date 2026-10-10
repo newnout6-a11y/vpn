@@ -12,8 +12,23 @@ describe('watch-pr-reviews automation script', () => {
     expect(content).toContain('getCurrentPrNumber')
     expect(content).toContain('fetchPrData')
     expect(content).toContain('printSummary')
-    expect(content).toContain('--watch')
-    expect(content).toContain('--json')
+    expect(content).toContain('--paginate')
+    expect(content).toContain('--slurp')
+    expect(content).toContain('loadConfig')
+    expect(content).toContain('isActionableComment')
+  })
+
+  it('reviewer automation config exists and defines recognized bots and antigravity agent', () => {
+    const configPath = join(process.cwd(), '..', 'reviewer-automation.config.json')
+    expect(existsSync(configPath)).toBe(true)
+
+    const cfg = JSON.parse(readFileSync(configPath, 'utf8'))
+    expect(cfg.agent.engine).toBe('antigravity')
+    expect(cfg.agent.model).toBe('gemini-3.8-flash-high')
+    expect(cfg.agent.reasoningEffort).toBe('high')
+    expect(cfg.reviewers.recognizedBots.some((b: any) => b.id === 'coderabbitai[bot]')).toBe(true)
+    expect(cfg.reviewers.recognizedBots.some((b: any) => b.id === 'revixappdev[bot]')).toBe(true)
+    expect(cfg.reviewers.recognizedBots.some((b: any) => b.id === 'greptile-apps[bot]')).toBe(true)
   })
 
   it('workflow for reviewer comments exists and specifies correct trigger events', () => {
@@ -28,5 +43,7 @@ describe('watch-pr-reviews automation script', () => {
     expect(workflowContent).toContain('types: [created, edited]')
     expect(workflowContent).toContain("github.actor != 'github-actions[bot]'")
     expect(workflowContent).toContain('actions/github-script@v7')
+    expect(workflowContent).toContain('NOTIFICATION_WEBHOOK_URL: ${{ secrets.NOTIFICATION_WEBHOOK_URL }}')
   })
 })
+

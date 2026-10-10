@@ -13,6 +13,7 @@
     "build": "npm --prefix vpn-tunnel-enforcer run build",
     "test": "npm --prefix vpn-tunnel-enforcer test",
     "watch:reviews": "npm --prefix vpn-tunnel-enforcer run watch:reviews",
+    "reviewer:check": "npm --prefix vpn-tunnel-enforcer run reviewer:check",
     "dist": "npm --prefix vpn-tunnel-enforcer run dist:win",
     "dist:win": "npm --prefix vpn-tunnel-enforcer run dist:win",
     "dist:portable": "npm --prefix vpn-tunnel-enforcer run dist:portable"

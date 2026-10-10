@@ -31,14 +31,42 @@ jobs:
       (github.event_name != 'issue_comment' || github.event.issue.pull_request != null) &&
       github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
+    env:
+      NOTIFICATION_WEBHOOK_URL: ${{ secrets.NOTIFICATION_WEBHOOK_URL }}
     steps:
+      - name: Checkout repository (for config)
+        uses: actions/checkout@v4
+
       - name: Inspect and Triage Feedback
         id: triage
         uses: actions/github-script@v7
         with:
           script: |
+            const fs = require('fs');
+            const path = require('path');
             const eventName = context.eventName;
             const payload = context.payload;
+
+            // Load reviewer automation config if present
+            let config = {
+              reviewers: {
+                recognizedBots: [
+                  { id: 'coderabbitai[bot]', actionableKeywords: ['Actionable comments posted', 'Failed checks', 'potential_issue', 'Quick win', 'Major', 'Critical'] },
+                  { id: 'revixappdev[bot]', actionableKeywords: ['**issue:**', '**suggestion:**', '**bug:**', 'Has issues', 'finding(s) posted'] },
+                  { id: 'greptile-apps[bot]', actionableKeywords: ['issue:', 'finding:'] }
+                ],
+                ignoredLogins: ['github-actions[bot]', 'dependabot[bot]']
+              }
+            };
+
+            try {
+              const configPath = path.join(process.env.GITHUB_WORKSPACE, 'reviewer-automation.config.json');
+              if (fs.existsSync(configPath)) {
+                config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+              }
+            } catch (err) {
+              core.info(`Using default reviewer config: ${err.message}`);
+            }
 
             let prNumber = null;
             let prTitle = '';
@@ -86,11 +114,19 @@ jobs:
 
             core.info(`Processing feedback on PR #${prNumber} from ${sender} (${senderType}) via ${eventName}`);
 
-            // Classify actionable feedback
-            const isBot = sender.toLowerCase().includes('bot') || sender.toLowerCase().includes('coderabbit');
-            const isChangesRequested = (reviewState && reviewState.toLowerCase() === 'changes_requested') || /changes requested/i.test(commentBody);
-            const isApproved = reviewState && reviewState.toLowerCase() === 'approved';
-            const hasActionable = /actionable comments posted|failed checks|warning|potential_issue|todo|fix/i.test(commentBody);
+            // Classify reviewer and actionable status based on config
+            const botEntry = config.reviewers?.recognizedBots?.find(b => b.id.toLowerCase() === sender.toLowerCase());
+            const isBot = Boolean(botEntry) || senderType === 'Bot';
+            const isChangesRequested = (reviewState && reviewState.toLowerCase() === 'changes_requested');
+            const isApproved = (reviewState && reviewState.toLowerCase() === 'approved');
+
+            let hasActionable = isChangesRequested;
+            if (botEntry && botEntry.actionableKeywords) {
+              hasActionable = isChangesRequested || botEntry.actionableKeywords.some(kw => commentBody.toLowerCase().includes(kw.toLowerCase()));
+            } else if (!isBot) {
+              // Human reviewer comment or review
+              hasActionable = isChangesRequested || /\b(fix|bug|defect|issue|error|broken|fails|regression)\b/i.test(commentBody);
+            }
 
             // Prepare feedback summary object
             const feedback = {
@@ -126,13 +162,13 @@ jobs:
             const labelsToRemove = [];
 
             if (isChangesRequested || hasActionable) {
-              labelsToAdd.push('changes-requested');
-              labelsToRemove.push('approved', 'ready-for-merge');
+              labelsToAdd.push(config.labels?.changesRequested || 'changes-requested');
+              labelsToRemove.push(config.labels?.approved || 'approved', config.labels?.readyForMerge || 'ready-for-merge');
             } else if (isApproved) {
-              labelsToAdd.push('approved', 'ready-for-merge');
-              labelsToRemove.push('changes-requested');
+              labelsToAdd.push(config.labels?.approved || 'approved', config.labels?.readyForMerge || 'ready-for-merge');
+              labelsToRemove.push(config.labels?.changesRequested || 'changes-requested');
             } else {
-              labelsToAdd.push('review-feedback');
+              labelsToAdd.push(config.labels?.reviewFeedback || 'review-feedback');
             }
 
             for (const label of labelsToAdd) {
@@ -179,11 +215,11 @@ jobs:
               .write();
 
       - name: Save Feedback Payload
+        env:
+          FEEDBACK_JSON: ${{ steps.triage.outputs.feedback_json }}
         run: |
           mkdir -p .automation
-          cat << 'EOF' > .automation/reviewer-feedback.json
-          ${{ steps.triage.outputs.feedback_json }}
-          EOF
+          echo "$FEEDBACK_JSON" > .automation/reviewer-feedback.json
 
       - name: Upload Feedback Artifact
         uses: actions/upload-artifact@v4
@@ -194,8 +230,6 @@ jobs:
 
       - name: Dispatch External Webhook (if configured)
         if: env.NOTIFICATION_WEBHOOK_URL != ''
-        env:
-          NOTIFICATION_WEBHOOK_URL: ${{ secrets.NOTIFICATION_WEBHOOK_URL }}
         run: |
           curl -s -X POST -H "Content-Type: application/json" \
             -d @.automation/reviewer-feedback.json \

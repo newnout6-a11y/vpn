@@ -1,0 +1,79 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "version": "1.0.0",
+  "description": "Configuration for automated reviewer feedback detection and resolution",
+  "reviewers": {
+    "recognizedBots": [
+      {
+        "id": "coderabbitai[bot]",
+        "name": "CodeRabbit AI",
+        "enabled": true,
+        "actionableKeywords": [
+          "Actionable comments posted",
+          "Failed checks",
+          "potential_issue",
+          "Quick win",
+          "Major",
+          "Critical",
+          "Prompt to fix",
+          "Prompt for AI Agents"
+        ]
+      },
+      {
+        "id": "revixappdev[bot]",
+        "name": "Revix AI",
+        "enabled": true,
+        "actionableKeywords": [
+          "**issue:**",
+          "**suggestion:**",
+          "**question:**",
+          "**bug:**",
+          "Has issues",
+          "finding(s) posted"
+        ]
+      },
+      {
+        "id": "greptile-apps[bot]",
+        "name": "Greptile AI",
+        "enabled": true,
+        "actionableKeywords": [
+          "issue:",
+          "finding:",
+          "suggestion:"
+        ]
+      }
+    ],
+    "humans": {
+      "enabled": true,
+      "allowAll": true,
+      "allowedLogins": []
+    },
+    "ignoredLogins": [
+      "github-actions[bot]",
+      "dependabot[bot]"
+    ]
+  },
+  "agent": {
+    "engine": "antigravity",
+    "model": "gemini-3.8-flash-high",
+    "reasoningEffort": "high",
+    "autoCommit": true,
+    "commitAuthor": {
+      "name": "Vladimir Sakharov",
+      "email": "newnout6@gmail.com"
+    },
+    "autoPush": true,
+    "definitionOfDone": {
+      "typecheckCommand": "npm run typecheck",
+      "testCommand": "npm test",
+      "traceabilityCommand": "python ../docs/04-приёмочные-тесты/traceability/check-coverage.py"
+    }
+  },
+  "labels": {
+    "changesRequested": "changes-requested",
+    "approved": "approved",
+    "readyForMerge": "ready-for-merge",
+    "reviewFeedback": "review-feedback",
+    "fixingInProgress": "agent-fixing"
+  }
+}
