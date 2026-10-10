@@ -109,4 +109,22 @@ describe('physicalAdapterLockdown source regressions', () => {
     expect(() => validateLockdownManifest({ ...fixture, dnsRegistryPolicy: undefined })).toThrow()
   })
 
+  it('guards adapter snapshot cache with generation counter and requires fresh baseline on lockdown apply', () => {
+    const s = source()
+    expect(s).toContain('let snapshotGeneration = 0')
+    expect(s).toContain('snapshotGeneration++')
+    expect(s).toContain('const currentGeneration = snapshotGeneration')
+    expect(s).toContain('if (snapshotGeneration === currentGeneration)')
+    expect(s).toContain('if (snapshotPromise === p)')
+    expect(s).toContain('forceFresh: options.forceFresh !== false')
+  })
+
+  it('unifies adapter exclusion patterns and halts on auxiliary CIM query failure in snapshot script', () => {
+    const snapshotSource = readFileSync(join(process.cwd(), 'src', 'main', 'physicalAdapterSnapshot.ts'), 'utf8')
+    expect(snapshotSource).toContain('ADAPTER_EXCLUSION_PATTERN')
+    expect(snapshotSource).toContain("ClassName MSFT_NetAdapterBindingSettingData -Filter \"ComponentID = 'ms_tcpip6'\" -ErrorAction Stop")
+    expect(snapshotSource).toContain('ClassName MSFT_DNSClientServerAddress -Filter "AddressFamily = 2" -ErrorAction Stop')
+    expect(snapshotSource).toContain('ClassName MSFT_NetConnectionProfile -ErrorAction Stop')
+  })
 })
+

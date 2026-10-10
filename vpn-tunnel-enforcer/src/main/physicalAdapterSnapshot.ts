@@ -1,13 +1,15 @@
 /** AT-03-005/006/010: fixed adapter selection; DNS discovery is not a lockdown proof. */
 import { ALL_KNOWN_ALIASES } from './tunAdapter'
 
+const ADAPTER_EXCLUSION_PATTERN = 'Wintun|TAP-Windows|Tailscale|WireGuard|Hyper-V|Loopback|vEthernet|VPN|VirtualBox|VMware|Bluetooth'
+
 const PHYSICAL_ADAPTER_SELECTION = `
 $knownAliases = @(${ALL_KNOWN_ALIASES.map(alias => `'${alias.replace(/'/g, "''")}'`).join(',')})
 $adapters = Get-NetAdapter |
   Where-Object {
     $_.Status -eq 'Up' -and
     $_.Name -notin $knownAliases -and
-    $_.InterfaceDescription -notmatch 'Wintun|TAP-Windows|Tailscale|WireGuard|Hyper-V|Loopback|vEthernet|VPN|VirtualBox|VMware|Bluetooth' -and
+    $_.InterfaceDescription -notmatch '${ADAPTER_EXCLUSION_PATTERN}' -and
     $_.MacAddress -and $_.MacAddress -ne '00-00-00-00-00-00'
   }
 `
@@ -32,13 +34,13 @@ try {
     -not $_.Hidden -and
     $_.InterfaceOperationalStatus -eq 1 -and
     $_.Name -notin $knownAliases -and
-    $_.InterfaceDescription -notmatch 'Wintun|TAP-Windows|Tailscale|WireGuard|Hyper-V|Loopback|vEthernet|VPN|VirtualBox|VMware|Bluetooth' -and
+    $_.InterfaceDescription -notmatch '${ADAPTER_EXCLUSION_PATTERN}' -and
     $_.PermanentAddress -and $_.PermanentAddress -ne '000000000000'
   })
-  $allBindings6 = @(Get-CimInstance -Namespace $namespace -ClassName MSFT_NetAdapterBindingSettingData -Filter "ComponentID = 'ms_tcpip6'" -ErrorAction SilentlyContinue)
-  $allDns = @(Get-CimInstance -Namespace $namespace -ClassName MSFT_DNSClientServerAddress -Filter "AddressFamily = 2" -ErrorAction SilentlyContinue)
-  $allRoutes = @(Get-CimInstance -Namespace $namespace -ClassName MSFT_NetRoute -Filter "Store = 1 AND (DestinationPrefix = '0.0.0.0/0' OR DestinationPrefix = '::/0')" -ErrorAction SilentlyContinue)
-  $allProfiles = @(Get-CimInstance -Namespace $namespace -ClassName MSFT_NetConnectionProfile -ErrorAction SilentlyContinue)
+  $allBindings6 = @(Get-CimInstance -Namespace $namespace -ClassName MSFT_NetAdapterBindingSettingData -Filter "ComponentID = 'ms_tcpip6'" -ErrorAction Stop)
+  $allDns = @(Get-CimInstance -Namespace $namespace -ClassName MSFT_DNSClientServerAddress -Filter "AddressFamily = 2" -ErrorAction Stop)
+  $allRoutes = @(Get-CimInstance -Namespace $namespace -ClassName MSFT_NetRoute -Filter "Store = 1 AND (DestinationPrefix = '0.0.0.0/0' OR DestinationPrefix = '::/0')" -ErrorAction Stop)
+  $allProfiles = @(Get-CimInstance -Namespace $namespace -ClassName MSFT_NetConnectionProfile -ErrorAction Stop)
 
   foreach ($a in $cimAdapters) {
     $bind6 = $allBindings6 | Where-Object { $_.Name -eq $a.Name -or $_.InterfaceDescription -eq $a.InterfaceDescription } | Select-Object -First 1

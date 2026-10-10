@@ -12,6 +12,7 @@
     "build": "npm run typecheck && electron-vite build",
     "test": "vitest --run",
     "test:watch": "vitest",
+    "watch:reviews": "node scripts/watch-pr-reviews.mjs",
     "test:installer-shutdown": "vitest --run --mode integration src/main/installerShutdown.itest.ts",
     "test:coverage": "vitest --run --coverage",
     "test:vpn-profiles": "node scripts/test-vpn-profiles.mjs",

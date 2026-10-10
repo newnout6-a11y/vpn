@@ -944,3 +944,41 @@
 - `python ../docs/04-приёмочные-тесты/traceability/check-coverage.py` — AC: 927/927, F: 210/210 (exit 0).
 - Коммит `973c2a7` отправлен в ветку `codex/wfp-firewall-lifecycle-perf` репозитория `vpn` (PR #23), локальный `main` синхронизирован fast-forward.
 
+## 2026-10-10 — Автоматизация триггеров на комментарии ревьюеров и исправление замечаний PR #24
+
+### 1. Автоматизация для комментариев и ревью (GitHub Actions & Local CLI)
+- **Исследованы события GitHub Actions** для автоматизации обработки обратной связи код-ревьюеров:
+  - `pull_request_review` (`types: [submitted, edited]`): триггерится при отправке формального ревью (`approved`, `changes_requested`, `commented`).
+  - `pull_request_review_comment` (`types: [created, edited]`): триггерится при публикации строчных замечаний к diff кода.
+  - `issue_comment` (`types: [created, edited]`): триггерится при комментариях в треде PR (`github.event.issue.pull_request != null`).
+  - `workflow_dispatch`: ручной запуск проверки PR.
+- **Создан рабочий процесс GitHub Actions**: `.github/workflows/on-reviewer-comment.yml`:
+  - Защита от рекурсивных циклов (`github.actor != 'github-actions[bot]'`).
+  - Автоматическая классификация замечаний (от ботов CodeRabbit, Revix, Greptile и живых ревьюеров).
+  - Автоматическое назначение и снятие меток PR (`changes-requested`, `approved`, `ready-for-merge`, `review-feedback`).
+  - Форматирование карточки в `$GITHUB_STEP_SUMMARY` с цитатой, ссылкой на файл/строку и автора.
+  - Выгрузка структурированного JSON-артефакта `reviewer-feedback.json` и опциональный диспатч вебхуков (`NOTIFICATION_WEBHOOK_URL`).
+- **Создан локальный скрипт мониторинга**: `vpn-tunnel-enforcer/scripts/watch-pr-reviews.mjs`:
+  - Команда `npm run watch:reviews` опрашивает GitHub API через `gh` CLI для текущей ветки или PR.
+  - Режим однократного отчёта (`--once`) и фонового поллинга с уведомлениями (`--watch`).
+  - Поддержка `--json` для автоматических агентов.
+
+### 2. Исправление замечаний ревьюеров по PR #24 (CodeRabbit & Revix)
+- **Счётчик поколений кэша** (`snapshotGeneration`) в `physicalAdapterLockdown.ts`:
+  - `clearPhysicalAdaptersSnapshotCache()` инкрементирует поколение.
+  - Асинхронный промис `snapshotPhysicalAdapters()` записывает результат в кэш только если `snapshotGeneration` не изменился с момента старта запроса.
+  - Сброс `snapshotPromise` в `.finally` защищён проверкой `snapshotPromise === p`, предотвращая затирание более новых запросов.
+- **Свежий снимок при наложении локдауна**:
+  - `applyPhysicalAdapterLockdown()` по умолчанию запрашивает свежий снимок `{ forceFresh: options.forceFresh !== false }` перед записью манифеста восстановления, гарантируя актуальность DNS и шлюзов при формировании `pendingAdapters`.
+  - Сохранён быстрый фоновый прогрев `warmPhysicalAdaptersSnapshot()` на старте.
+- **Унификация и обработка ошибок CIM-запросов** в `physicalAdapterSnapshot.ts`:
+  - Выделен единый шаблон исключения виртуальных адаптеров `ADAPTER_EXCLUSION_PATTERN`.
+  - Дополнительные пакетные CIM-запросы (`MSFT_NetAdapterBindingSettingData`, `MSFT_DNSClientServerAddress`, `MSFT_NetRoute`, `MSFT_NetConnectionProfile`) выполняются с `-ErrorAction Stop`. При сбое любого из них управление передаётся в блок `catch` с гарантированным откатом на командлеты.
+- **Документирование JSDoc**:
+  - Добавлены docstrings для `getLocalNetSignature`, `clearPhysicalAdaptersSnapshotCache`, `warmPhysicalAdaptersSnapshot`, `snapshotPhysicalAdapters`.
+
+### 3. Тестирование и Definition of Done
+- `npm run typecheck` — 0 ошибок (exit 0).
+- `npm test` — 2879 passed / 4 skipped / 0 failed (100% зелёные), 218 тест-файлов.
+- `python ../docs/04-приёмочные-тесты/traceability/check-coverage.py` — AC: 927/927, F: 210/210 (exit 0).
+
