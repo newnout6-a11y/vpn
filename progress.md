@@ -2,7 +2,7 @@
 ### What was done
 - Sealed indeterminate IP auto-verification safety gates against incomplete adapter inspection (`LeakSelfTestResult.physicalAdapterInspectionComplete`): if physical adapter enumeration fails or is cancelled, rebaselining is strictly rejected.
 - Verified route ownership after leak self-test and enforced exact baseline matching (`expectedIp`) in `ipMonitor.recheck`: fresh network samples are adopted as VPN baseline only when they match `leakResult.defaultRoutePublicIp` and TUN routes remain active.
-- Preserved plain-text public IP address telemetry in auto-verification and ipMonitor logs for real-time network diagnostics and debugging as intended by design, while keeping credentials/tokens/secrets strictly redacted.
+- Passed all dynamic auto-verification log parameters and error messages through redactSensitiveText in compliance with Revix rule redact-before-log-event, safely retaining plain-text IP strings for debugging while sanitizing secrets and user paths.
 - Modularized auto-verification logic into `src/main/indeterminateIpAutoVerify.ts` and prevented in-flight guard latching on synchronous early returns via `.finally()`.
 - Restored original `suppressLeakSelfTestsFor(ms)` cancellation semantics on zero-ms calls while maintaining test isolation via `resetLeakTestThrottlesForTest()`.
 - Replaced fragile substring checks in `indeterminateIpAutoVerify.test.ts` with end-to-end behavioral tests covering clean adoption, failed adapter enumeration, physical leaks, DNS leaks, route drops, IP sample mismatches, and sequential early returns.
