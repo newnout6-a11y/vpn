@@ -101,3 +101,26 @@ describe('getRoutingPlan', () => {
     expect(probeTcp).not.toHaveBeenCalled()
   })
 })
+
+// AT-07-002: an unread network must not be reported as "no conflicting tunnel" (fail closed on the claim).
+describe('getRoutingPlan unverified tunnel read', () => {
+  it('marks the plan as unverified instead of reporting a clean network', async () => {
+    const plan = await getRoutingPlan({ activeTunnels: [], tunnelsVerified: false, proxyListeners: [] })
+
+    expect(plan.steps[0]).toMatchObject({ label: 'Проверить внешние туннели', status: 'warn' })
+    expect(plan.explanation).toContain('не исключён')
+  })
+
+  it('adds no warning when the read was verified', async () => {
+    const plan = await getRoutingPlan({ activeTunnels: [], tunnelsVerified: true, proxyListeners: [] })
+
+    expect(plan.steps.some(step => step.label === 'Проверить внешние туннели')).toBe(false)
+    expect(plan.explanation).not.toContain('не исключён')
+  })
+
+  it('treats a caller-supplied list without a flag as verified', async () => {
+    const plan = await getRoutingPlan({ activeTunnels: [], proxyListeners: [] })
+
+    expect(plan.steps.some(step => step.status === 'warn' && step.label === 'Проверить внешние туннели')).toBe(false)
+  })
+})

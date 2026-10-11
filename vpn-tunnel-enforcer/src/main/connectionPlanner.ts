@@ -104,14 +104,15 @@ function proxyFromOverride(): ProxyInfo | null {
 let activeTunnelsScriptLogged = false
 let combinedProbeScriptLogged = false
 
-async function getActiveTunnels(): Promise<TunnelInfo[]> {
-  if (process.platform !== 'win32') return []
+/** `verified: false` means the enumeration FAILED, so an empty list is "unknown", not "no tunnels". */
+async function getActiveTunnels(): Promise<{ tunnels: TunnelInfo[]; verified: boolean }> {
+  if (process.platform !== 'win32') return { tunnels: [], verified: true }
 
   // Native iphlpapi read first (no powershell.exe spawn). It throws on any
   // error / implausible (empty) enumeration, in which case the PowerShell
   // path below runs exactly as before.
   try {
-    return nativeActiveTunnels({ vpnteAlias: getTunAdapterAlias(), vpnteIpv4Prefix: TUN_IPV4_PREFIX })
+    return { tunnels: nativeActiveTunnels({ vpnteAlias: getTunAdapterAlias(), vpnteIpv4Prefix: TUN_IPV4_PREFIX }), verified: true }
   } catch (err) {
     logEvent('debug', 'planner', 'native tunnel read unavailable, using PowerShell', { err: (err as Error).message })
   }
@@ -157,15 +158,17 @@ Get-NetAdapter -ErrorAction SilentlyContinue |
         rawPreview: raw.slice(0, 300)
       })
     }
-    return asArray<any>(parsed).map(row => ({
+    const tunnels = asArray<any>(parsed).map(row => ({
       name: String(row.Name || ''),
       description: String(row.Description || ''),
       address: String(row.Address || ''),
       isVpnte: Boolean(row.IsVpnte)
     })).filter(row => row.name)
+    // Non-empty output that did not parse is a failed read, not an empty network.
+    return { tunnels, verified: !(parsed === null && raw.trim().length > 0) }
   } catch (err) {
     logEvent('warn', 'planner', 'failed to read active tunnel adapters', err)
-    return []
+    return { tunnels: [], verified: false }
   }
 }
 
@@ -207,6 +210,8 @@ export interface CombinedPreStartProbeResult {
   manifestExists: boolean
   firewallRulesExist: boolean
   tunnels: TunnelInfo[]
+  /** false when the probe failed: `tunnels` is then unknown, not empty. */
+  tunnelsVerified: boolean
   listeners: ProxyListenerInfo[]
 }
 
@@ -234,7 +239,7 @@ export async function combinedPreStartProbe(opts: {
   killSwitchRulePrefix: string
 }): Promise<CombinedPreStartProbeResult> {
   if (process.platform !== 'win32') {
-    return { manifestExists: opts.manifestExists, firewallRulesExist: false, tunnels: [], listeners: [] }
+    return { manifestExists: opts.manifestExists, firewallRulesExist: false, tunnels: [], tunnelsVerified: true, listeners: [] }
   }
 
   const { manifestExists, killSwitchRulePrefix } = opts
@@ -322,10 +327,10 @@ Write-Host "FIREWALL:$fwCount"
 
     const firewallRulesExist = Number.isFinite(fwCount) && fwCount > 0
 
-    return { manifestExists, firewallRulesExist, tunnels, listeners }
+    return { manifestExists, firewallRulesExist, tunnels, tunnelsVerified: true, listeners }
   } catch (err) {
     logEvent('warn', 'planner', 'combinedPreStartProbe failed', err)
-    return { manifestExists, firewallRulesExist: false, tunnels: [], listeners: [] }
+    return { manifestExists, firewallRulesExist: false, tunnels: [], tunnelsVerified: false, listeners: [] }
   }
 }
 
@@ -343,15 +348,30 @@ function tunnelLabel(tunnel: TunnelInfo) {
   return `${tunnel.name}${address}`.trim()
 }
 
+const TUNNELS_UNVERIFIED_NOTE = 'Не удалось проверить наличие внешних туннелей: двойной туннель не исключён.'
+
 export async function getRoutingPlan(opts?: {
   activeTunnels?: TunnelInfo[]
+  /** Pass false when `activeTunnels` came from a probe that failed. Defaults to true. */
+  tunnelsVerified?: boolean
   proxyListeners?: ProxyListenerInfo[]
 }): Promise<RoutingPlan> {
+  const read = opts?.activeTunnels
+    ? { tunnels: opts.activeTunnels, verified: opts.tunnelsVerified ?? true }
+    : await getActiveTunnels()
+  const plan = await buildRoutingPlan(read.tunnels, opts?.proxyListeners)
+  if (read.verified) return plan
+  // Fail closed on the claim, not on availability: never report "no conflicting TUN" for an unread network.
+  plan.steps.unshift({ label: 'Проверить внешние туннели', before: TUNNELS_UNVERIFIED_NOTE, after: 'Повторите проверку; не подтверждено, что второго TUN нет.', status: 'warn' })
+  plan.explanation = `${TUNNELS_UNVERIFIED_NOTE} ${plan.explanation}`
+  return plan
+}
+
+async function buildRoutingPlan(activeTunnels: TunnelInfo[], listeners?: ProxyListenerInfo[]): Promise<RoutingPlan> {
   const settings = settingsStore.get()
   const isDirectVpn = settings.connectionMode === 'directVpn'
-  const [activeTunnels, proxyListeners, proxy] = await Promise.all([
-    opts?.activeTunnels ?? getActiveTunnels(),
-    opts?.proxyListeners ?? getProxyListeners(),
+  const [proxyListeners, proxy] = await Promise.all([
+    listeners ?? getProxyListeners(),
     isDirectVpn ? Promise.resolve<ProxyInfo | null>(null) : detectProxy()
   ])
 

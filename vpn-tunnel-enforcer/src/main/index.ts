@@ -1151,6 +1151,7 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
   // only runs proxy detection which is TCP-based, not PowerShell).
   const plan = await owner.wait(getRoutingPlan({
     activeTunnels: probe.tunnels,
+    tunnelsVerified: probe.tunnelsVerified,
     proxyListeners: probe.listeners
   }))
   if (!plan.canStartHard) {
