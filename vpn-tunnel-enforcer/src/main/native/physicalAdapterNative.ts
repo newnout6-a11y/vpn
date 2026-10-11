@@ -10,7 +10,7 @@
 import { ALL_KNOWN_ALIASES } from '../tunAdapter'
 import { ADAPTER_EXCLUSION_PATTERN } from '../physicalAdapterSnapshot'
 import { fetchNetworkProfiles } from './networkProfiles'
-import { defineStruct } from './koffiTypes'
+import { assertIfRow2Layout, defineStruct, IF_ROW2_OFFSETS, IF_ROW2_SIZE } from './koffiTypes'
 import { readNdisCharacteristicsByGuid } from './ipHelperReads'
 
 export interface NativeAdapterInfo {
@@ -134,7 +134,6 @@ const GAA_FLAGS = 0x2 | 0x4 | 0x80 // SKIP_ANYCAST | SKIP_MULTICAST | INCLUDE_GA
 const ERROR_BUFFER_OVERFLOW = 111
 const ERROR_FILE_NOT_FOUND = 2
 const ERROR_MORE_DATA = 234
-const IF_ROW2_SIZE = 1352
 const FORWARD_ROW2_SIZE = 104
 const GAA_MIN_LENGTH = 276 // through TunnelType in IP_ADAPTER_ADDRESSES_LH (x64)
 const HKLM = -2147483646n // 0xFFFFFFFF80000002 as signed 64-bit
@@ -166,20 +165,7 @@ function buildSourceFactory(): SourceFactory {
   const adv = koffi.load('advapi32.dll')
 
   // Layout guards: wrong size => refuse (fail closed).
-  const ifRow = defineStruct(koffi, 'VPNTE_MIB_IF_ROW2', {
-    InterfaceLuid: 'uint64_t', InterfaceIndex: 'uint32_t', InterfaceGuid: koffi.array('uint8_t', 16),
-    Alias: koffi.array('uint16_t', 257), Description: koffi.array('uint16_t', 257),
-    PhysicalAddressLength: 'uint32_t', PhysicalAddress: koffi.array('uint8_t', 32), PermanentPhysicalAddress: koffi.array('uint8_t', 32),
-    Mtu: 'uint32_t', Type: 'uint32_t', TunnelType: 'uint32_t', MediaType: 'uint32_t', PhysicalMediumType: 'uint32_t',
-    AccessType: 'uint32_t', DirectionType: 'uint32_t', InterfaceAndOperStatusFlags: 'uint8_t', OperStatus: 'uint32_t',
-    AdminStatus: 'uint32_t', MediaConnectState: 'uint32_t', NetworkGuid: koffi.array('uint8_t', 16), ConnectionType: 'uint32_t',
-    TransmitLinkSpeed: 'uint64_t', ReceiveLinkSpeed: 'uint64_t', InOctets: 'uint64_t', InUcastPkts: 'uint64_t',
-    InNUcastPkts: 'uint64_t', InDiscards: 'uint64_t', InErrors: 'uint64_t', InUnknownProtos: 'uint64_t',
-    InUcastOctets: 'uint64_t', InMulticastOctets: 'uint64_t', InBroadcastOctets: 'uint64_t', OutOctets: 'uint64_t',
-    OutUcastPkts: 'uint64_t', OutNUcastPkts: 'uint64_t', OutDiscards: 'uint64_t', OutErrors: 'uint64_t',
-    OutUcastOctets: 'uint64_t', OutMulticastOctets: 'uint64_t', OutBroadcastOctets: 'uint64_t', OutQLen: 'uint64_t'
-  })
-  if (koffi.sizeof(ifRow) !== IF_ROW2_SIZE) throw new Error(`native adapter snapshot: MIB_IF_ROW2 size ${koffi.sizeof(ifRow)} != ${IF_ROW2_SIZE}`)
+  assertIfRow2Layout(koffi)
   const sockaddrInet = defineStruct(koffi, 'VPNTE_SOCKADDR_INET', { raw: koffi.array('uint8_t', 28) })
   const fwdRow = defineStruct(koffi, 'VPNTE_MIB_IPFORWARD_ROW2', {
     InterfaceLuid: 'uint64_t', InterfaceIndex: 'uint32_t', DestAddr: sockaddrInet, DestPrefixLength: 'uint8_t',
@@ -287,11 +273,11 @@ function buildSourceFactory(): SourceFactory {
             ipv6Enabled: (flags & 0x100) !== 0,
             ifType: buf.readUInt32LE(o + 100),
             ipv4Dns: dnsOf(buf.readBigUInt64LE(o + 48)),
-            permanentAddressHex: row.subarray(1092, 1092 + permLen).toString('hex'),
-            filterInterface: (row[1152] & 0x2) !== 0,
+            permanentAddressHex: row.subarray(IF_ROW2_OFFSETS.permanentPhysicalAddress, IF_ROW2_OFFSETS.permanentPhysicalAddress + permLen).toString('hex'),
+            filterInterface: (row[IF_ROW2_OFFSETS.interfaceAndOperStatusFlags] & 0x2) !== 0,
             characteristics: characteristics.get(guid.toLowerCase()) ?? null,
-            mediaType: row.readUInt32LE(1136),
-            physicalMediumType: row.readUInt32LE(1140)
+            mediaType: row.readUInt32LE(IF_ROW2_OFFSETS.mediaType),
+            physicalMediumType: row.readUInt32LE(IF_ROW2_OFFSETS.physicalMediumType)
           })
         }
         const next = buf.readBigUInt64LE(o + 8)

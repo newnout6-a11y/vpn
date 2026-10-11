@@ -11,7 +11,7 @@
  * module never touch the native library. x64/arm64 only (struct offsets below
  * are the 64-bit layouts).
  */
-import { defineStruct } from './koffiTypes'
+import { assertIfRow2Layout, defineStruct, IF_ROW2_OFFSETS, IF_ROW2_SIZE } from './koffiTypes'
 import {
   assertEnumerationPlausible, formatIpv4, formatIpv6,
   type RawAdapter, type RawIfConfig, type RawRoute, type RawUnicast
@@ -26,7 +26,6 @@ const GAA_FLAGS = 0x2 | 0x4 | 0x80 // skip anycast, skip multicast, include gate
 const MAX_ADAPTERS = 4096
 const MAX_UNICAST = 1024
 const MAX_ADDRESS_NODES = 256
-const IF_ROW2_SIZE = 1352
 const FORWARD_ROW2_SIZE = 104
 
 let api: any = null
@@ -37,6 +36,7 @@ function load(): any {
   if (process.arch !== 'x64' && process.arch !== 'arm64') throw new Error(`unsupported architecture ${process.arch}`)
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const koffi = require('koffi')
+  assertIfRow2Layout(koffi) // refuse to read raw MIB_IF_ROW2 bytes if the layout is not what the offsets assume
   const ip = koffi.load('iphlpapi.dll')
   const adv = koffi.load('advapi32.dll')
   const SockAddr = defineStruct(koffi, 'VPNTE_SOCKET_ADDRESS', { lpSockaddr: 'void *', iSockaddrLength: 'int32_t' })
@@ -165,7 +165,7 @@ export function readRawAdapters(): RawAdapter[] {
   let rows: RawAdapter[]
   try {
     const n = a.koffi.decode(out[0], 'uint32_t') as number
-    if (!Number.isInteger(n) || n < 0 || n > 4096) throw new Error(`implausible interface count ${n}`)
+    if (!Number.isInteger(n) || n < 0 || n > MAX_ADAPTERS) throw new Error(`implausible interface count ${n}`)
     const raw = Buffer.from(a.koffi.decode(out[0], 'uint8_t', 8 + n * IF_ROW2_SIZE))
     const chars = readNdisCharacteristics(a)
     rows = []
@@ -181,10 +181,10 @@ export function readRawAdapters(): RawAdapter[] {
         description: utf16z(raw, o + 542, 257),
         mac: [...raw.subarray(o + 1060, o + 1060 + physLen)],
         ifType: raw.readUInt32LE(o + 1128),
-        filterInterface: (raw[o + 1152] & 0x02) !== 0,
-        operStatus: raw.readUInt32LE(o + 1156),
-        mediaConnectState: raw.readUInt32LE(o + 1164),
-        linkSpeedBps: Number(raw.readBigUInt64LE(o + 1192)),
+        filterInterface: (raw[o + IF_ROW2_OFFSETS.interfaceAndOperStatusFlags] & 0x02) !== 0,
+        operStatus: raw.readUInt32LE(o + IF_ROW2_OFFSETS.operStatus),
+        mediaConnectState: raw.readUInt32LE(o + IF_ROW2_OFFSETS.mediaConnectState),
+        linkSpeedBps: Number(raw.readBigUInt64LE(o + IF_ROW2_OFFSETS.transmitLinkSpeed)),
         characteristics: chars.has(guid.toLowerCase()) ? chars.get(guid.toLowerCase())! : null
       })
     }
