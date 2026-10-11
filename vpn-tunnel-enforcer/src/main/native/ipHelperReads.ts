@@ -96,6 +96,16 @@ function utf16z(b: Buffer, o: number, maxChars: number): string {
 }
 
 /** NDIS Characteristics by NetCfgInstanceId (lower-case GUID with braces). */
+/**
+ * Only "the entry does not exist" (ERROR_FILE_NOT_FOUND) means "no information". Any other failure
+ * (access denied, I/O ...) is an unknown, never a silent "not hidden": throw so callers fall back.
+ */
+function registryEntryExists(rc: number, what: string): boolean {
+  if (rc === 0) return true
+  if (rc === 2) return false
+  throw new Error(`${what} failed: ${rc}`)
+}
+
 function readNdisCharacteristics(a: any): Map<string, number> {
   const HKLM = 0x80000002
   const KEY = 'SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e972-e325-11ce-bfc1-08002be10318}'
@@ -114,17 +124,19 @@ function readNdisCharacteristics(a: any): Map<string, number> {
       const sub = name.subarray(0, cch[0] * 2).toString('utf16le')
       if (!/^\d{4}$/.test(sub)) continue
       const k = [0]
-      if (a.RegOpenKeyExW(root[0], sub, 0, SAM, k) !== 0) continue // access-denied instance: no entry -> not hidden info
+      if (!registryEntryExists(a.RegOpenKeyExW(root[0], sub, 0, SAM, k), `RegOpenKeyExW(${sub})`)) continue
       try {
         const type = [0]
         const buf = Buffer.alloc(256)
         const cb = [256]
-        if (a.RegQueryValueExW(k[0], 'NetCfgInstanceId', null, type, buf, cb) !== 0) continue
+        if (!registryEntryExists(a.RegQueryValueExW(k[0], 'NetCfgInstanceId', null, type, buf, cb), `RegQueryValueExW(NetCfgInstanceId, ${sub})`)) continue
         const id = buf.subarray(0, cb[0]).toString('utf16le').replace(/\0+$/, '').toLowerCase()
         const t2 = [0]
         const dw = Buffer.alloc(4)
         const cb2 = [4]
-        if (a.RegQueryValueExW(k[0], 'Characteristics', null, t2, dw, cb2) !== 0 || cb2[0] !== 4) continue
+        // No Characteristics value is a legitimate "no flags"; a value of the wrong size is not.
+        if (!registryEntryExists(a.RegQueryValueExW(k[0], 'Characteristics', null, t2, dw, cb2), `RegQueryValueExW(Characteristics, ${sub})`)) continue
+        if (cb2[0] !== 4) throw new Error(`Characteristics of ${sub} has unexpected size ${cb2[0]}`)
         out.set(id, dw.readUInt32LE(0))
       } finally {
         a.RegCloseKey(k[0])
