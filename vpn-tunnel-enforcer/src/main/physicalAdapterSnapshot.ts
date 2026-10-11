@@ -1,7 +1,7 @@
 /** AT-03-005/006/010: fixed adapter selection; DNS discovery is not a lockdown proof. */
 import { ALL_KNOWN_ALIASES } from './tunAdapter'
 
-const ADAPTER_EXCLUSION_PATTERN = 'Wintun|TAP-Windows|Tailscale|WireGuard|Hyper-V|Loopback|vEthernet|VPN|VirtualBox|VMware|Bluetooth'
+export const ADAPTER_EXCLUSION_PATTERN = 'Wintun|TAP-Windows|Tailscale|WireGuard|Hyper-V|Loopback|vEthernet|VPN|VirtualBox|VMware|Bluetooth'
 
 const PHYSICAL_ADAPTER_SELECTION = `
 $knownAliases = @(${ALL_KNOWN_ALIASES.map(alias => `'${alias.replace(/'/g, "''")}'`).join(',')})
