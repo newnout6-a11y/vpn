@@ -2,6 +2,7 @@ import { recoveryManifestPath, readRecoveryManifest, writeRecoveryManifest, remo
 import { executeAdapterInspection, executeRecoveryOperation, RecoveryWorkerError } from './recoveryPsWorker'
 import { DNS_POLICY_SNAPSHOT_SCRIPT } from './recoveryPsProtocol'
 import { PHYSICAL_ADAPTER_DNS_SCRIPT, PHYSICAL_ADAPTER_SNAPSHOT_SCRIPT, TRANSITION_ADAPTER_SNAPSHOT_SCRIPT } from './physicalAdapterSnapshot'
+import { readPhysicalAdaptersNative } from './native/physicalAdapterNative'
 import { isIP } from 'net'
 import { networkInterfaces } from 'os'
 /**
@@ -431,6 +432,11 @@ function netshValue(raw: string, label: string): string | null {
 }
 
 async function inspectAdapters(op: 'inspect-physical-adapters' | 'inspect-transition-adapters', script: string, timeoutMs: number): Promise<string> {
+  // AT-03-005: read-only native fast path; any native failure falls back to the PowerShell worker (fail closed).
+  if (op === 'inspect-physical-adapters' && process.env.VPNTE_NATIVE_ADAPTERS !== '0') {
+    try { return readPhysicalAdaptersNative() }
+    catch (error) { logEvent('warn', 'phys-lockdown', 'native adapter snapshot unavailable, using PowerShell', { err: (error as Error).message }) }
+  }
   try { return await executeAdapterInspection(op, timeoutMs) }
   catch (error) {
     // Only failure before dispatch allows the existing bounded fallback.
