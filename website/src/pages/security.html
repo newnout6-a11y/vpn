@@ -1,7 +1,6 @@
 <!--{"path":"/security/","title":"Безопасность — VPN Tunnel Enforcer","description":"Модель угроз, шифрование секретов через DPAPI, доверенная IPC-граница, защита runtime и честный список непроверенного.","nav":"security"}-->
 <section class="page-hero">
   <div class="bg-grid" aria-hidden="true"></div>
-  <div class="glow glow--g" style="width:420px;height:420px;right:-80px;top:40px" aria-hidden="true"></div>
   <div class="wrap">
     <nav class="crumbs" aria-label="Хлебные крошки"><a href="{{base}}./">Главная</a><span>/</span><span>Безопасность</span></nav>
     <h1 class="h1 split-words">Безопасность — это <span class="grad">список проверок, а не лозунг</span></h1>
@@ -32,7 +31,7 @@
     </div>
     <div class="grid" data-reveal="right">
       <div class="card"><h3 style="font-size:18px;color:var(--green)">Защищает</h3><ul class="checks" style="margin-top:14px"><li>{{icon:check|icon}}<span>Утечки реального IP при обрыве туннеля</span></li><li>{{icon:check|icon}}<span>Утечки DNS и IPv6</span></li><li>{{icon:check|icon}}<span>Раскрытие адреса через WebRTC/STUN</span></li><li>{{icon:check|icon}}<span>Подмену бинарников и скриптов рантайма</span></li></ul></div>
-      <div class="card"><h3 style="font-size:18px;color:var(--amber)">Не защищает</h3><ul class="checks" style="margin-top:14px"><li>{{icon:x|icon}}<span style="color:var(--muted)">От администратора, уже скомпрометировавшего машину</span></li><li>{{icon:x|icon}}<span style="color:var(--muted)">От деанонимизации по аккаунтам и отпечатку браузера</span></li><li>{{icon:x|icon}}<span style="color:var(--muted)">От логов на стороне вашего VPN-сервера</span></li></ul></div>
+      <div class="card"><h3 style="font-size:18px;color:var(--amber)">Не защищает</h3><ul class="checks checks--no" style="margin-top:14px"><li>{{icon:x|icon}}<span style="color:var(--muted)">От администратора, уже скомпрометировавшего машину</span></li><li>{{icon:x|icon}}<span style="color:var(--muted)">От деанонимизации по аккаунтам и отпечатку браузера</span></li><li>{{icon:x|icon}}<span style="color:var(--muted)">От логов на стороне вашего VPN-сервера</span></li></ul></div>
     </div>
   </div>
 </section>

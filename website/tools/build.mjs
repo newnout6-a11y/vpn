@@ -19,7 +19,7 @@ function icon(name, cls = '') {
     if (!existsSync(file)) throw new Error(`Иконка не найдена: ${name}`)
     const svg = read(file)
       .replace(/<!--[\s\S]*?-->/g, '')
-      .replace(/\s(class|width|height)="[^"]*"/g, '')
+      .replace(/<svg\b[^>]*>/, (tag) => tag.replace(/\s(class|width|height)="[^"]*"/g, ''))
       .replace(/\s+/g, ' ')
       .replace(/<svg /, '<svg aria-hidden="true" focusable="false" ')
       .trim()

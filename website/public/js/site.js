@@ -142,53 +142,15 @@
     requestAnimationFrame(tick)
   }
 
-  /* ---------- курсорное свечение, spotlight, магнитные кнопки, tilt ---------- */
-  function initPointerFx() {
-    if (!fine || reduce) return
-    const glow = $('.cursor-glow')
-    let tx = innerWidth / 2, ty = innerHeight / 3, cx = tx, cy = ty
-    addEventListener('pointermove', (e) => { tx = e.clientX; ty = e.clientY }, { passive: true })
-    const loop = () => {
-      cx = lerp(cx, tx, 0.08); cy = lerp(cy, ty, 0.08)
-      if (glow) { glow.style.setProperty('--cx', cx + 'px'); glow.style.setProperty('--cy', cy + 'px') }
-      requestAnimationFrame(loop)
-    }
-    loop()
-    document.addEventListener('pointermove', (e) => {
-      const c = e.target.closest?.('.card, .layer')
-      if (!c) return
-      const r = c.getBoundingClientRect()
-      c.style.setProperty('--mx', e.clientX - r.left + 'px')
-      c.style.setProperty('--my', e.clientY - r.top + 'px')
-    }, { passive: true })
-    $$('.btn--primary, .btn--lg').forEach((b) => {
-      b.addEventListener('pointermove', (e) => {
-        const r = b.getBoundingClientRect()
-        b.style.transform = `translate(${(e.clientX - r.left - r.width / 2) * 0.22}px,${(e.clientY - r.top - r.height / 2) * 0.32}px)`
-      })
-      b.addEventListener('pointerleave', () => { b.style.transform = '' })
-    })
-    $$('[data-tilt]').forEach((el) => {
-      const host = el.closest('[data-tilt-host]') || el
-      host.addEventListener('pointermove', (e) => {
-        const r = host.getBoundingClientRect()
-        const px = (e.clientX - r.left) / r.width - 0.5, py = (e.clientY - r.top) / r.height - 0.5
-        el.style.transition = 'transform .12s'
-        el.style.transform = `perspective(1100px) rotateY(${px * 10}deg) rotateX(${-py * 8}deg) translateZ(0)`
-      })
-      host.addEventListener('pointerleave', () => { el.style.transition = 'transform .8s cubic-bezier(.22,1,.36,1)'; el.style.transform = '' })
-    })
-  }
-
   /* ---------- hero: туннель из арок (canvas) ---------- */
   function initTunnel() {
     const cv = $('#tunnel'); if (!cv) return
     const ctx = cv.getContext('2d')
     let w = 0, h = 0, dpr = 1, vx = 0, vy = 0, mx = 0, my = 0, tmx = 0, tmy = 0, run = true, t = 0, last = performance.now()
-    const N = 20, P = 110
-    const parts = Array.from({ length: P }, () => ({ a: Math.random() * Math.PI * 2, r: 0.12 + Math.random() * 0.95, z: Math.random(), s: 0.3 + Math.random() * 0.9 }))
+    const N = 20, P = 34
+    const parts = Array.from({ length: P }, () => ({ a: Math.random() * Math.PI * 2, r: 0.12 + Math.random() * 0.5, z: Math.random(), s: 0.3 + Math.random() * 0.9 }))
     const mix = (c1, c2, k) => c1.map((v, i) => Math.round(lerp(v, c2[i], k)))
-    const VIO = [150, 120, 255], GRN = [52, 224, 138]
+    const VIO = [21, 20, 14], GRN = [255, 90, 31] // VIO — ближние арки (чернила), GRN — дальние (сигнальный оранжевый)
     const resize = () => {
       dpr = Math.min(devicePixelRatio || 1, 2)
       const r = cv.getBoundingClientRect(); w = r.width; h = r.height
@@ -225,30 +187,26 @@
         const W = base * 0.95 * s, H = base * 1.2 * s
         const ox = (1 - f) * -mx * 120, oy = (1 - f) * -my * 80
         const col = mix(GRN, VIO, smooth(0.0, 0.7, f))
-        const a = smooth(0, 0.07, f) * (1 - smooth(0.82, 1, f)) * 0.9
+        const a = smooth(0, 0.07, f) * (1 - smooth(0.5, 0.88, f)) * 0.8
         ctx.strokeStyle = `rgba(${col[0]},${col[1]},${col[2]},${a})`
-        ctx.lineWidth = 0.8 + f * 3.2
+        ctx.lineWidth = 0.7 + f * 2.1
         arch(cxs + ox, cys + oy, W, H); ctx.stroke()
       }
-      // свечение «выхода» в конце туннеля
-      const g = ctx.createRadialGradient(cxs, cys, 0, cxs, cys, base * 0.5)
-      g.addColorStop(0, 'rgba(52,224,138,.5)'); g.addColorStop(0.35, 'rgba(124,92,255,.18)'); g.addColorStop(1, 'rgba(124,92,255,0)')
-      ctx.fillStyle = g; ctx.fillRect(0, 0, w, h)
+      // «выход» в конце туннеля — плотная оранжевая точка
+      ctx.fillStyle = '#ff5a1f'; ctx.beginPath(); ctx.arc(cxs, cys - base * 0.02, base * 0.034, 0, Math.PI * 2); ctx.fill()
       // пакеты
-      ctx.globalCompositeOperation = 'lighter'
       for (const p of parts) {
         p.z += dt * (reduce ? 0 : 0.16 * p.s)
-        if (p.z > 1) { p.z = 0; p.a = Math.random() * Math.PI * 2; p.r = 0.12 + Math.random() * 0.95 }
+        if (p.z > 1) { p.z = 0; p.a = Math.random() * Math.PI * 2; p.r = 0.12 + Math.random() * 0.5 }
         const f0 = Math.pow(p.z, 2.5), f1 = Math.pow(Math.max(p.z - 0.03, 0), 2.5)
         const R0 = base * 1.1 * p.r * (0.03 + f0 * 2.7), R1 = base * 1.1 * p.r * (0.03 + f1 * 2.7)
         const x0 = cxs + Math.cos(p.a) * R0, y0 = cys + Math.sin(p.a) * R0 * 1.15
         const x1 = cxs + Math.cos(p.a) * R1, y1 = cys + Math.sin(p.a) * R1 * 1.15
         const col = mix(GRN, VIO, smooth(0, 0.8, f0))
-        ctx.strokeStyle = `rgba(${col[0]},${col[1]},${col[2]},${smooth(0, 0.1, f0) * (1 - smooth(0.85, 1, f0)) * 0.9})`
-        ctx.lineWidth = 0.6 + f0 * 1.8
+        ctx.strokeStyle = `rgba(255,90,31,${smooth(0, 0.1, f0) * (1 - smooth(0.45, 0.8, f0)) * 0.85})`
+        ctx.lineWidth = 0.8 + f0 * 1.4
         ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x0, y0); ctx.stroke()
       }
-      ctx.globalCompositeOperation = 'source-over'
     }
     requestAnimationFrame(frame)
   }
@@ -297,17 +255,17 @@
       const kind = lane.dataset.kind
       const svg = $('.ks__svg', lane)
       svg.innerHTML = ''
-      mk('polyline', { points: poly(topPath), fill: 'none', stroke: 'rgba(168,144,255,.35)', 'stroke-width': 1.5, 'stroke-dasharray': '4 5' }, svg)
+      mk('polyline', { points: poly(topPath), fill: 'none', stroke: 'rgba(242,238,228,.28)', 'stroke-width': 1.5, 'stroke-dasharray': '4 5' }, svg)
       const bot = mk('polyline', { points: poly(botPath), fill: 'none', stroke: 'rgba(255,255,255,.12)', 'stroke-width': 1.5, 'stroke-dasharray': '4 5' }, svg)
-      const tun = mk('rect', { x: 118, y: 22, width: 64, height: 28, rx: 8, fill: '#1d1933', stroke: 'rgba(168,144,255,.7)' }, svg)
-      const tunT = mk('text', { x: 150, y: 40, 'text-anchor': 'middle', fill: '#c9bdff', 'font-size': 10, 'font-family': 'JetBrains Mono, monospace' }, svg); tunT.textContent = 'TUN · sing-box'
-      mk('circle', { cx: 34, cy: 75, r: 15, fill: '#1d1933', stroke: 'rgba(255,255,255,.3)' }, svg)
-      const pc = mk('text', { x: 34, y: 79, 'text-anchor': 'middle', fill: '#efeef8', 'font-size': 10, 'font-family': 'JetBrains Mono, monospace' }, svg); pc.textContent = 'ПК'
-      mk('circle', { cx: 266, cy: 75, r: 15, fill: '#1d1933', stroke: 'rgba(255,255,255,.3)' }, svg)
-      const net = mk('text', { x: 266, y: 79, 'text-anchor': 'middle', fill: '#efeef8', 'font-size': 9.5, 'font-family': 'JetBrains Mono, monospace' }, svg); net.textContent = 'WEB'
+      const tun = mk('rect', { x: 118, y: 22, width: 64, height: 28, rx: 8, fill: '#1b1a13', stroke: 'rgba(242,238,228,.55)' }, svg)
+      const tunT = mk('text', { x: 150, y: 40, 'text-anchor': 'middle', fill: '#f2eee4', 'font-size': 10, 'font-family': 'Fira Mono, monospace' }, svg); tunT.textContent = 'TUN · sing-box'
+      mk('circle', { cx: 34, cy: 75, r: 15, fill: '#1b1a13', stroke: 'rgba(255,255,255,.3)' }, svg)
+      const pc = mk('text', { x: 34, y: 79, 'text-anchor': 'middle', fill: '#f2eee4', 'font-size': 10, 'font-family': 'Fira Mono, monospace' }, svg); pc.textContent = 'ПК'
+      mk('circle', { cx: 266, cy: 75, r: 15, fill: '#1b1a13', stroke: 'rgba(255,255,255,.3)' }, svg)
+      const net = mk('text', { x: 266, y: 79, 'text-anchor': 'middle', fill: '#f2eee4', 'font-size': 9.5, 'font-family': 'Fira Mono, monospace' }, svg); net.textContent = 'WEB'
       const wall = mk('g', { opacity: 0 }, svg)
-      mk('rect', { x: 146, y: 98, width: 8, height: 36, rx: 3, fill: '#34e08a' }, wall)
-      const wt = mk('text', { x: 150, y: 148, 'text-anchor': 'middle', fill: '#34e08a', 'font-size': 9, 'font-family': 'JetBrains Mono, monospace' }, wall); wt.textContent = 'WFP: BLOCK'
+      mk('rect', { x: 146, y: 98, width: 8, height: 36, rx: 3, fill: '#5fd09a' }, wall)
+      const wt = mk('text', { x: 150, y: 148, 'text-anchor': 'middle', fill: '#5fd09a', 'font-size': 9, 'font-family': 'Fira Mono, monospace' }, wall); wt.textContent = 'WFP: BLOCK'
       const pkts = Array.from({ length: 5 }, (_, i) => ({ u: i / 5, el: mk('circle', { r: 3.4, class: 'ks__pkt', cx: -10, cy: -10 }, svg), route: 'top', dead: 0 }))
       const state = $('.ks__state span', lane)
       return { lane, kind, svg, tun, tunT, bot, wall, pkts, state }
@@ -315,15 +273,15 @@
     const setState = (s, text) => { s.lane.dataset.s = text.key; s.state.textContent = text.msg }
     const apply = () => {
       sims.forEach((s) => {
-        if (phase === 'normal') { s.tun.setAttribute('stroke', 'rgba(168,144,255,.7)'); s.tun.setAttribute('fill', '#1d1933'); s.tunT.textContent = 'TUN · sing-box'; s.wall.setAttribute('opacity', 0); s.bot.setAttribute('stroke', 'rgba(255,255,255,.12)')
+        if (phase === 'normal') { s.tun.setAttribute('stroke', 'rgba(242,238,228,.55)'); s.tun.setAttribute('fill', '#1b1a13'); s.tunT.textContent = 'TUN · sing-box'; s.wall.setAttribute('opacity', 0); s.bot.setAttribute('stroke', 'rgba(255,255,255,.12)')
           setState(s, { key: 'ok', msg: 'Трафик идёт через туннель' }) }
         if (phase === 'down') {
-          s.tun.setAttribute('stroke', '#ff5d73'); s.tun.setAttribute('fill', 'rgba(255,93,115,.14)'); s.tunT.textContent = 'ТУННЕЛЬ УПАЛ'
-          if (s.kind === 'plain') { s.bot.setAttribute('stroke', 'rgba(255,93,115,.6)'); setState(s, { key: 'leak', msg: 'Утечка: пакеты ушли напрямую, виден реальный IP' }) }
+          s.tun.setAttribute('stroke', '#ff6b63'); s.tun.setAttribute('fill', 'rgba(255,107,99,.14)'); s.tunT.textContent = 'ТУННЕЛЬ УПАЛ'
+          if (s.kind === 'plain') { s.bot.setAttribute('stroke', 'rgba(255,107,99,.6)'); setState(s, { key: 'leak', msg: 'Утечка: пакеты ушли напрямую, виден реальный IP' }) }
           else { s.wall.setAttribute('opacity', 1); setState(s, { key: 'blocked', msg: 'Fail-closed: kill-switch блокирует всё вне VPN' }) }
         }
         if (phase === 'recover') {
-          s.tun.setAttribute('stroke', '#ffb454'); s.tun.setAttribute('fill', 'rgba(255,180,84,.1)'); s.tunT.textContent = 'авторестарт…'
+          s.tun.setAttribute('stroke', '#f0b24a'); s.tun.setAttribute('fill', 'rgba(240,178,74,.1)'); s.tunT.textContent = 'авторестарт…'
           s.wall.setAttribute('opacity', s.kind === 'plain' ? 0 : 1); s.bot.setAttribute('stroke', 'rgba(255,255,255,.12)')
           setState(s, { key: 'recover', msg: s.kind === 'plain' ? 'Переподключение… часть трафика уже утекла' : 'Авторестарт с бэкоффом 2/5/10 с, защита не снята' })
         }
@@ -361,7 +319,7 @@
         p.el.setAttribute('cx', x); p.el.setAttribute('cy', y)
         p.el.setAttribute('opacity', visible ? (phase === 'down' && s.kind === 'shield' && p.u > 0.3 ? 0.9 - (p.u - 0.3) * 12 : 1) : 0)
         p.el.setAttribute('class', phase === 'down' && s.kind === 'plain' ? 'ks__pkt ks__pkt--out' : 'ks__pkt')
-        p.el.style.fill = phase === 'down' && s.kind === 'plain' ? '#ff5d73' : phase === 'recover' ? '#ffb454' : ''
+        p.el.style.fill = phase === 'down' && s.kind === 'plain' ? '#ff6b63' : phase === 'recover' ? '#f0b24a' : ''
       }))
     }
     apply(); requestAnimationFrame(frame)
@@ -469,24 +427,24 @@
       const R = W * 0.4
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, W, W)
       const halo = ctx.createRadialGradient(W / 2, W / 2, R * 0.9, W / 2, W / 2, R * 1.35)
-      halo.addColorStop(0, 'rgba(124,92,255,.35)'); halo.addColorStop(1, 'rgba(124,92,255,0)')
+      halo.addColorStop(0, 'rgba(255,90,31,.13)'); halo.addColorStop(1, 'rgba(255,90,31,0)')
       ctx.fillStyle = halo; ctx.fillRect(0, 0, W, W)
       const body = ctx.createRadialGradient(W / 2 - R * 0.3, W / 2 - R * 0.35, R * 0.1, W / 2, W / 2, R)
-      body.addColorStop(0, '#1f1a3d'); body.addColorStop(1, '#0a0814')
+      body.addColorStop(0, '#26241b'); body.addColorStop(1, '#0c0b08')
       ctx.beginPath(); ctx.arc(W / 2, W / 2, R, 0, Math.PI * 2); ctx.fillStyle = body; ctx.fill()
-      ctx.strokeStyle = 'rgba(168,144,255,.35)'; ctx.lineWidth = 1; ctx.stroke()
+      ctx.strokeStyle = 'rgba(242,238,228,.28)'; ctx.lineWidth = 1; ctx.stroke()
       for (const [lo, la] of pts) {
         const p = proj(lo, la, R)
         if (p.z <= 0) continue
         const a = 0.25 + p.z * 0.75
-        ctx.fillStyle = `rgba(${Math.round(150 + p.z * 40)},${Math.round(130 + p.z * 60)},255,${a})`
+        ctx.fillStyle = `rgba(242,238,228,${a * 0.85})`
         const s = 0.9 + p.z * 1.1
         ctx.fillRect(p.x - s / 2, p.y - s / 2, s, s)
       }
       cities.forEach((c, i) => {
         const p = proj(c.lo, c.la, R); if (p.z <= 0) return
         ctx.beginPath(); ctx.arc(p.x, p.y, i === cur ? 3.6 : 2.4, 0, Math.PI * 2)
-        ctx.fillStyle = i === cur ? '#34e08a' : '#c9bdff'; ctx.fill()
+        ctx.fillStyle = i === cur ? '#ff5a1f' : '#f2eee4'; ctx.fill()
       })
       const yp = proj(you.lo, you.la, R)
       if (yp.z > 0) { ctx.beginPath(); ctx.arc(yp.x, yp.y, 4.5, 0, Math.PI * 2); ctx.fillStyle = '#fff'; ctx.fill(); ctx.strokeStyle = 'rgba(255,255,255,.4)'; ctx.stroke() }
@@ -497,10 +455,10 @@
       for (let i = 0; i <= steps * u; i++) {
         const q = arcPoint(you, target, i / steps), p = proj(q.lo, q.la, R, q.lift)
         const vis = proj(q.lo, q.la, R, 1).z > -0.05
-        if (prev && vis) { ctx.strokeStyle = `rgba(52,224,138,${0.15 + 0.85 * (i / (steps * u || 1))})`; ctx.beginPath(); ctx.moveTo(prev.x, prev.y); ctx.lineTo(p.x, p.y); ctx.stroke() }
+        if (prev && vis) { ctx.strokeStyle = `rgba(255,90,31,${0.15 + 0.85 * (i / (steps * u || 1))})`; ctx.beginPath(); ctx.moveTo(prev.x, prev.y); ctx.lineTo(p.x, p.y); ctx.stroke() }
         prev = p
       }
-      if (prev && u < 1) { ctx.beginPath(); ctx.arc(prev.x, prev.y, 4, 0, Math.PI * 2); ctx.fillStyle = '#b6ffd9'; ctx.shadowColor = '#34e08a'; ctx.shadowBlur = 14; ctx.fill(); ctx.shadowBlur = 0 }
+      if (prev && u < 1) { ctx.beginPath(); ctx.arc(prev.x, prev.y, 4, 0, Math.PI * 2); ctx.fillStyle = '#ffd2bd'; ctx.shadowColor = '#ff5a1f'; ctx.shadowBlur = 8; ctx.fill(); ctx.shadowBlur = 0 }
     }
     label && (label.textContent = cities[0].n)
     requestAnimationFrame(frame)
@@ -533,29 +491,29 @@
       apps: [0.13, 0.42], tun: [0.38, 0.42], core: [0.64, 0.42], net: [0.89, 0.42], nic: [0.64, 0.74]
     }
     const px = (n) => [N[n][0] * W, N[n][1] * H]
-    const mono = (s, w = 400) => `${w} ${s}px "JetBrains Mono", ui-monospace, monospace`
+    const mono = (s, w = 400) => `${w} ${s}px "Fira Mono", ui-monospace, monospace`
     const node = (n, label, a, o = {}) => {
       if (a <= 0.01) return
       const [x, y] = px(n), r = (o.r || 0.075) * Math.min(W, H) * 1.35
       ctx.globalAlpha = a
       ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2)
-      ctx.fillStyle = o.fill || '#1d1933'; ctx.fill()
-      ctx.strokeStyle = o.stroke || 'rgba(168,144,255,.7)'; ctx.lineWidth = o.lw || 1.6; ctx.stroke()
-      ctx.fillStyle = o.text || '#efeef8'; ctx.font = mono(Math.max(10, W * 0.026), 500); ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+      ctx.fillStyle = o.fill || '#1b1a13'; ctx.fill()
+      ctx.strokeStyle = o.stroke || 'rgba(242,238,228,.55)'; ctx.lineWidth = o.lw || 1.6; ctx.stroke()
+      ctx.fillStyle = o.text || '#f2eee4'; ctx.font = mono(Math.max(10, W * 0.026), 500); ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
       ctx.fillText(label, x, y)
-      if (o.sub) { ctx.fillStyle = '#a09db8'; ctx.font = mono(Math.max(9, W * 0.022)); ctx.fillText(o.sub, x, y + r + W * 0.035) }
+      if (o.sub) { ctx.fillStyle = '#a8a496'; ctx.font = mono(Math.max(9, W * 0.022)); ctx.fillText(o.sub, x, y + r + W * 0.035) }
       ctx.globalAlpha = 1
     }
     const link = (a, b, al, o = {}) => {
       if (al <= 0.01) return
       const [x1, y1] = px(a), [x2, y2] = px(b)
-      ctx.globalAlpha = al; ctx.strokeStyle = o.c || 'rgba(168,144,255,.55)'; ctx.lineWidth = 1.6
+      ctx.globalAlpha = al; ctx.strokeStyle = o.c || 'rgba(242,238,228,.4)'; ctx.lineWidth = 1.6
       ctx.setLineDash(o.dash || [5, 6]); ctx.lineDashOffset = -((performance.now() - t0) / 60) % 11
       ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke(); ctx.setLineDash([])
       if (o.packets) {
         for (let k = 0; k < 3; k++) {
           const u = (((performance.now() - t0) / 1600) + k / 3) % 1
-          ctx.beginPath(); ctx.arc(lerp(x1, x2, u), lerp(y1, y2, u), 3.2, 0, Math.PI * 2); ctx.fillStyle = o.pc || '#34e08a'; ctx.fill()
+          ctx.beginPath(); ctx.arc(lerp(x1, x2, u), lerp(y1, y2, u), 3.2, 0, Math.PI * 2); ctx.fillStyle = o.pc || '#5fd09a'; ctx.fill()
         }
       }
       ctx.globalAlpha = 1
@@ -571,44 +529,44 @@
       if (scanA || anim[4] < 0.99) {
         const [x, y] = px('tun'), r = 0.075 * Math.min(W, H) * 1.35
         ctx.globalAlpha = (1 - anim[4]) * (0.5 + 0.5 * Math.sin(now / 300))
-        ctx.setLineDash([4, 5]); ctx.strokeStyle = 'rgba(255,180,84,.8)'; ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([])
-        ctx.fillStyle = '#ffb454'; ctx.font = mono(Math.max(10, W * 0.026), 500); ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('?', x, y)
+        ctx.setLineDash([4, 5]); ctx.strokeStyle = 'rgba(240,178,74,.8)'; ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([])
+        ctx.fillStyle = '#f0b24a'; ctx.font = mono(Math.max(10, W * 0.026), 500); ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('?', x, y)
         ctx.globalAlpha = 1
       }
       // связи
-      link('apps', 'tun', anim[4], { packets: true, pc: '#a890ff' })
+      link('apps', 'tun', anim[4], { packets: true, pc: '#ff7a45' })
       link('tun', 'core', anim[4], { packets: true })
-      link('core', 'net', anim[3], { packets: anim[4] > 0.9, c: 'rgba(52,224,138,.55)' })
+      link('core', 'net', anim[3], { packets: anim[4] > 0.9, c: 'rgba(95,208,154,.55)' })
       // физический адаптер → интернет: напрямую, пока нет kill-switch
       const blocked = anim[5]
       if (anim[0] > 0.01) {
         const [x1, y1] = px('nic'), [x2, y2] = px('net')
-        ctx.globalAlpha = anim[0] * 0.8; ctx.strokeStyle = blocked > 0.5 ? 'rgba(255,93,115,.55)' : 'rgba(255,255,255,.22)'; ctx.setLineDash([4, 6])
+        ctx.globalAlpha = anim[0] * 0.8; ctx.strokeStyle = blocked > 0.5 ? 'rgba(255,107,99,.55)' : 'rgba(255,255,255,.22)'; ctx.setLineDash([4, 6])
         ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke(); ctx.setLineDash([])
         const mx = (x1 + x2) / 2, my = (y1 + y2) / 2
-        if (blocked > 0.4) { ctx.globalAlpha = blocked; ctx.strokeStyle = '#ff5d73'; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(mx - 9, my - 9); ctx.lineTo(mx + 9, my + 9); ctx.moveTo(mx + 9, my - 9); ctx.lineTo(mx - 9, my + 9); ctx.stroke(); ctx.lineWidth = 1.6 }
+        if (blocked > 0.4) { ctx.globalAlpha = blocked; ctx.strokeStyle = '#ff6b63'; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(mx - 9, my - 9); ctx.lineTo(mx + 9, my + 9); ctx.moveTo(mx + 9, my - 9); ctx.lineTo(mx - 9, my + 9); ctx.stroke(); ctx.lineWidth = 1.6 }
         ctx.globalAlpha = 1
       }
       // узлы
       node('apps', 'Приложения', 1, { r: 0.09, sub: '' })
-      node('nic', 'NIC', anim[0], { stroke: blocked > 0.5 ? '#ff5d73' : 'rgba(255,255,255,.4)', sub: anim[1] > 0.5 ? 'IPv6 off · DNS → .254' : 'физический адаптер' })
-      node('core', 'sing-box', anim[2], { stroke: anim[3] > 0.5 ? '#34e08a' : 'rgba(168,144,255,.7)', sub: anim[2] > 0.5 ? 'SHA-256 ✓' + (anim[3] > 0.5 ? ' · check ✓' : '') : '' })
-      node('tun', 'TUN', anim[4], { stroke: '#a890ff', sub: 'Wintun · Up' })
+      node('nic', 'NIC', anim[0], { stroke: blocked > 0.5 ? '#ff6b63' : 'rgba(255,255,255,.4)', sub: anim[1] > 0.5 ? 'IPv6 off · DNS → .254' : 'физический адаптер' })
+      node('core', 'sing-box', anim[2], { stroke: anim[3] > 0.5 ? '#5fd09a' : 'rgba(242,238,228,.55)', sub: anim[2] > 0.5 ? 'SHA-256 ✓' + (anim[3] > 0.5 ? ' · check ✓' : '') : '' })
+      node('tun', 'TUN', anim[4], { stroke: '#ff7a45', sub: 'Wintun · Up' })
       node('net', 'Сеть', Math.max(anim[0], 1) * 1, { stroke: 'rgba(255,255,255,.4)' })
       // lockdown замок
       if (anim[1] > 0.05) {
         const [x, y] = px('nic'), r = 0.075 * Math.min(W, H) * 1.35
-        ctx.globalAlpha = anim[1]; ctx.strokeStyle = '#ffb454'; ctx.lineWidth = 2
-        ctx.beginPath(); ctx.arc(x - r - 18, y - 6, 6, Math.PI, 0); ctx.stroke(); ctx.fillStyle = '#ffb454'; ctx.fillRect(x - r - 25, y - 6, 14, 10); ctx.globalAlpha = 1; ctx.lineWidth = 1.6
+        ctx.globalAlpha = anim[1]; ctx.strokeStyle = '#f0b24a'; ctx.lineWidth = 2
+        ctx.beginPath(); ctx.arc(x - r - 18, y - 6, 6, Math.PI, 0); ctx.stroke(); ctx.fillStyle = '#f0b24a'; ctx.fillRect(x - r - 25, y - 6, 14, 10); ctx.globalAlpha = 1; ctx.lineWidth = 1.6
       }
       // kill-switch: щит вокруг всей схемы
       if (blocked > 0.02) {
         ctx.globalAlpha = blocked * 0.9
         const x = W * 0.04, y = H * 0.1, w = W * 0.92, h = H * 0.86, rad = 26
         ctx.beginPath(); ctx.roundRect(x, y, w, h, rad)
-        ctx.strokeStyle = '#34e08a'; ctx.lineWidth = 2; ctx.setLineDash([10, 7]); ctx.lineDashOffset = -now / 40; ctx.stroke(); ctx.setLineDash([])
-        ctx.fillStyle = 'rgba(52,224,138,.05)'; ctx.fill()
-        ctx.fillStyle = '#34e08a'; ctx.font = mono(Math.max(10, W * 0.024), 500); ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic'
+        ctx.strokeStyle = '#5fd09a'; ctx.lineWidth = 2; ctx.setLineDash([10, 7]); ctx.lineDashOffset = -now / 40; ctx.stroke(); ctx.setLineDash([])
+        ctx.fillStyle = 'rgba(95,208,154,.05)'; ctx.fill()
+        ctx.fillStyle = '#5fd09a'; ctx.font = mono(Math.max(10, W * 0.024), 500); ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic'
         ctx.fillText('WFP · DefaultOutboundAction=Block', x + 18, y + 24)
         ctx.globalAlpha = 1; ctx.lineWidth = 1.6
       }
@@ -681,7 +639,7 @@
   }
 
   const boot = () => {
-    initScroll(); initNav(); initTransitions(); initReveal(); initPointerFx(); initTunnel(); initLog()
+    initScroll(); initNav(); initTransitions(); initReveal(); initTunnel(); initLog()
     initKillSwitch(); initRouting(); initGlobe(); initStory(); initFaq(); initProtoFilter(); initCopy(); initParallax()
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot); else boot()

@@ -1,17 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" role="img" aria-label="VPN Tunnel Enforcer">
-  <defs>
-    <linearGradient id="s" x1="12" y1="4" x2="52" y2="62" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#9a7dff"/>
-      <stop offset="1" stop-color="#4b2ee0"/>
-    </linearGradient>
-    <radialGradient id="g" cx="32" cy="37" r="6" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#b6ffd9"/>
-      <stop offset="1" stop-color="#2fdc86"/>
-    </radialGradient>
-  </defs>
-  <path d="M32 3.5 56.5 12.6v18.4c0 14.2-10.1 25.1-24.5 29.5C17.6 56.1 7.5 45.2 7.5 31V12.6Z" fill="url(#s)"/>
-  <path d="M32 3.5 56.5 12.6v18.4c0 14.2-10.1 25.1-24.5 29.5C17.6 56.1 7.5 45.2 7.5 31V12.6Z" stroke="#fff" stroke-opacity=".28" stroke-width="1"/>
-  <path d="M19.5 47V33.5a12.5 12.5 0 0 1 25 0V47" stroke="#fff" stroke-width="3" stroke-linecap="round"/>
-  <path d="M25 44V35a7 7 0 0 1 14 0v9" stroke="#fff" stroke-opacity=".7" stroke-width="2.6" stroke-linecap="round"/>
-  <circle cx="32" cy="37" r="3.1" fill="url(#g)"/>
+  <path d="M32 3.5 56.5 12.6v18.4c0 14.2-10.1 25.1-24.5 29.5C17.6 56.1 7.5 45.2 7.5 31V12.6Z" fill="#ff5a1f"/>
+  <path d="M19.5 47V33.5a12.5 12.5 0 0 1 25 0V47" stroke="#15140e" stroke-width="4" stroke-linecap="square"/>
+  <path d="M26 44V35a6 6 0 0 1 12 0v9" stroke="#15140e" stroke-width="3" stroke-linecap="square"/>
+  <circle cx="32" cy="38" r="3.2" fill="#15140e"/>
 </svg>

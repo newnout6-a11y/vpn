@@ -1,7 +1,6 @@
 <!--{"path":"/","title":"VPN Tunnel Enforcer — туннель упал, интернет тоже","description":"Windows-клиент с fail-closed kill-switch на уровне WFP, перехватом DNS и 10 протоколами. Не обещает безопасность — принуждает к ней.","nav":"","bodyClass":"home"}-->
 <section class="hero" data-tilt-host>
   <canvas class="hero__canvas" id="tunnel" aria-hidden="true"></canvas>
-  <div class="glow glow--v" style="width:520px;height:520px;left:-160px;top:10%" aria-hidden="true"></div>
   <div class="wrap hero__in" data-tilt-host>
     <div class="hero__copy">
       <a class="hero__badge" href="{{base}}roadmap/"><b>v1.1.22</b> Windows 10/11 · Electron 44 · sing-box {{icon:arrow-right|icon}}</a>
@@ -49,12 +48,12 @@
   </div>
 </div>
 
-<section class="section" id="problem">
+<section class="section dark" id="problem">
   <div class="wrap">
     <div class="section__head section__head--center" data-reveal>
       <span class="eyebrow">Проблема</span>
-      <h2 class="h2">Обычный VPN обещает защиту. <span class="grad">Enforcer — обеспечивает.</span></h2>
-      <p class="lead">Большинство клиентов исходят из того, что туннель всегда работает. Реальность: связь обрывается, адаптеры переключаются, приложения идут мимо. Посмотрите, что происходит в этот момент.</p>
+      <h2 class="h2">Что происходит, <span class="grad">когда туннель падает</span></h2>
+      <p class="lead">Большинство клиентов исходят из того, что туннель всегда работает. На деле связь обрывается, адаптеры переключаются, приложения идут мимо. Оборвите туннель сами и сравните два поведения.</p>
     </div>
 
     <div class="sim" id="ks" data-reveal="scale">
@@ -99,7 +98,7 @@
   <div class="wrap">
     <div class="section__head" data-reveal>
       <span class="eyebrow">Возможности</span>
-      <h2 class="h2">Не набор галочек, а <span class="grad">единая система</span></h2>
+      <h2 class="h2">Как устроена <span class="grad">защита</span></h2>
       <p class="lead">Каждая функция опирается на другую: kill-switch поднимается только после готового TUN, DNS перехватывается внутри туннеля, диагностика проверяет всё это независимо.</p>
     </div>
     <div class="bento" data-stagger>
@@ -144,12 +143,12 @@
   </div>
 </section>
 
-<section class="section" id="routing" style="background:linear-gradient(180deg,transparent,rgba(124,92,255,.05),transparent)">
+<section class="section" id="routing">
   <div class="wrap">
     <div class="section__head" data-reveal>
       <span class="eyebrow">Интерактив</span>
-      <h2 class="h2">Куда пойдёт ваш пакет? <span class="grad">Проверьте сами.</span></h2>
-      <p class="lead">Порядок правил маршрутизации — не маркетинг, а то, как работает sing-box-конфиг клиента. Введите адрес и посмотрите, какое правило сработает первым.</p>
+      <h2 class="h2">Куда пойдёт <span class="grad">пакет</span></h2>
+      <p class="lead">Порядок правил взят из sing-box-конфига клиента. Введите адрес и посмотрите, какое правило сработает первым.</p>
     </div>
     <div class="sim" id="rt" data-reveal="scale">
       <div class="sim__top">
@@ -177,11 +176,11 @@
   </div>
 </section>
 
-<section class="section">
+<section class="section dark">
   <div class="wrap split">
     <div data-reveal="left">
       <span class="eyebrow">Серверы</span>
-      <h2 class="h2" style="margin:18px 0 20px">Ваши ключи. <span class="grad">Любая точка мира.</span></h2>
+      <h2 class="h2" style="margin:18px 0 20px">Ваши ключи, <span class="grad">ваши серверы</span></h2>
       <p class="lead" style="margin-bottom:26px">Enforcer — клиент, а не сервис: вы приносите свои подписки и ключи, а он превращает их в защищённое соединение. Серверы мы не продаём, а ваши данные не храним.</p>
       <ul class="checks">
         <li>{{icon:check|icon}}<span><b>Импорт подписок и ключей.</b> Парсер понимает 10 протоколов и экспортирует обратно в URI.</span></li>
@@ -224,7 +223,7 @@
   <div class="wrap">
     <div class="callout callout--g" data-reveal>
       {{icon:scale|icon}}
-      <div><b>Честность — часть продукта.</b> В репозитории есть раздел «Что пока не реализовано», а наш README прямо говорит, какие проверки не пройдены. AmneziaWG, FakeIP, DoQ и изолированные браузеры — в плане, но не в коде. <a href="{{base}}roadmap/" style="text-decoration:underline">Смотреть дорожную карту →</a></div>
+      <div><b>Чего в продукте нет.</b> В репозитории есть раздел «Что пока не реализовано», а README прямо говорит, какие проверки не пройдены. AmneziaWG, FakeIP, DoQ и изолированные браузеры в плане, но не в коде. <a href="{{base}}roadmap/" style="text-decoration:underline">Смотреть дорожную карту →</a></div>
     </div>
   </div>
 </section>
@@ -232,9 +231,8 @@
 <section class="section">
   <div class="wrap">
     <div class="cta" data-reveal="scale">
-      <div class="glow glow--g" style="width:420px;height:420px;right:-120px;bottom:-200px" aria-hidden="true"></div>
       <span class="eyebrow eyebrow--green">Готовы проверить?</span>
-      <h2 class="h2" style="margin-top:18px">Включите защиту, которая <span class="grad">не спрашивает разрешения</span></h2>
+      <h2 class="h2" style="margin-top:18px">Проверьте <span class="grad">на своей машине</span></h2>
       <p class="lead">Установщик для Windows 10 и 11. Права администратора нужны только для Hard Mode, запрос UAC встроен в приложение.</p>
       <div class="hero__actions">
         <a class="btn btn--primary btn--lg" href="{{base}}download/">Скачать {{icon:download|icon}}</a>

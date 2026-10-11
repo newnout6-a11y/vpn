@@ -34,7 +34,7 @@ node tools/lint-html.mjs   # баланс тегов и битые ссылки 
 
 ## Ассеты и лицензии
 
-Geologica, Inter, JetBrains Mono (SIL OFL, через `@fontsource-variable`); иконки Lucide (ISC) и логотип GitHub из Simple Icons (CC0); GSAP (стандартная лицензия GreenSock, бесплатна для сайтов без перепродажи), Lenis (MIT); карта суши — Natural Earth (public domain) через `world-atlas`. Логотип нарисован с нуля.
+Bitter, Golos Text, Fira Mono (SIL OFL, файлы woff2 из пакетов `@fontsource-variable` и `@fontsource`); иконки Lucide (ISC) и логотип GitHub из Simple Icons (CC0); GSAP (стандартная лицензия GreenSock, бесплатна для сайтов без перепродажи), Lenis (MIT); карта суши — Natural Earth (public domain) через `world-atlas`. Логотип нарисован с нуля.
 
 ## Что нужно проверить владельцу
 
