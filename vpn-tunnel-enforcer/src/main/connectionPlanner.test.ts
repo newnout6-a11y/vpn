@@ -11,7 +11,9 @@ vi.mock('child_process', async (importOriginal) => {
       callback(null, '', '')
     },
     {
-      [Symbol.for('nodejs.util.promisify.custom')]: () => Promise.resolve({ stdout: probeOutput.value, stderr: '' })
+      [Symbol.for('nodejs.util.promisify.custom')]: () => probeOutput.value === '__FAIL__'
+        ? Promise.reject(new Error('Command failed: exit 1'))
+        : Promise.resolve({ stdout: probeOutput.value, stderr: '' })
     }
   )
 
@@ -70,6 +72,24 @@ const nativeTunnels = vi.hoisted(() => vi.fn((): unknown[] => { throw new Error(
 vi.mock('./native/nativeNetworkReads', () => ({ nativeActiveTunnels: nativeTunnels }))
 
 import { combinedPreStartProbe, getRoutingPlan } from './connectionPlanner'
+
+describe('getRoutingPlan PowerShell tunnel read verification', () => {
+  const planWith = async (stdout: string) => { probeOutput.value = stdout; return getRoutingPlan({ proxyListeners: [] }) }
+  const unverified = (plan: Awaited<ReturnType<typeof getRoutingPlan>>) => plan.steps.some(s => s.label === 'Проверить внешние туннели')
+
+  it.skipIf(process.platform !== 'win32')('treats a failed enumeration (non-zero exit) as unverified', async () => {
+    expect(unverified(await planWith('__FAIL__'))).toBe(true)
+  })
+
+  it.skipIf(process.platform !== 'win32')('treats empty output as unverified, not as "no tunnels"', async () => {
+    expect(unverified(await planWith(''))).toBe(true)
+  })
+
+  it.skipIf(process.platform !== 'win32')('verifies only an explicit successful empty result', async () => {
+    expect(unverified(await planWith('[]'))).toBe(false)
+    probeOutput.value = ''
+  })
+})
 
 describe('getRoutingPlan native tunnel read', () => {
   it.skipIf(process.platform !== 'win32')('uses the native enumeration and reports a foreign tunnel from it', async () => {

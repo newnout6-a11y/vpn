@@ -127,7 +127,7 @@ async function getActiveTunnels(): Promise<{ tunnels: TunnelInfo[]; verified: bo
 
   const script = `
 $rx='(?i)wintun|\\btun\\b|wireguard|openvpn|tap-windows|happ|hiddify|singbox|sing-tun|v2ray|xray|vpn';
-Get-NetAdapter -ErrorAction SilentlyContinue |
+try { $rows = @(Get-NetAdapter -ErrorAction Stop |
   Where-Object { $_.Status -eq 'Up' -and ($_.Name -match $rx -or $_.InterfaceDescription -match $rx) } |
   ForEach-Object {
     $adapter=$_;
@@ -140,7 +140,9 @@ Get-NetAdapter -ErrorAction SilentlyContinue |
       Address=($ips -join ', ');
       IsVpnte=($adapter.Name -eq ${aliasLiteral} -or ($ips -join ',') -match '${prefixRegex}')
     }
-  } | ConvertTo-Json -Compress
+  }) } catch { exit 1 }
+# An enumeration error must fail the read: empty output means "no tunnels" only after a successful enumeration.
+if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress }
 `
 
   if (!activeTunnelsScriptLogged) {
@@ -165,7 +167,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue |
       isVpnte: Boolean(row.IsVpnte)
     })).filter(row => row.name)
     // Non-empty output that did not parse is a failed read, not an empty network.
-    return { tunnels, verified: !(parsed === null && raw.trim().length > 0) }
+    return { tunnels, verified: parsed !== null }
   } catch (err) {
     logEvent('warn', 'planner', 'failed to read active tunnel adapters', err)
     return { tunnels: [], verified: false }
@@ -254,7 +256,8 @@ export async function combinedPreStartProbe(opts: {
 
   const script = `
 $tunnelRx='(?i)wintun|\\btun\\b|wireguard|openvpn|tap-windows|happ|hiddify|singbox|sing-tun|v2ray|xray|vpn';
-$tunnels = @(Get-NetAdapter -ErrorAction SilentlyContinue |
+$tunnelsOk = $true
+try { $tunnels = @(Get-NetAdapter -ErrorAction Stop |
   Where-Object { $_.Status -eq 'Up' -and ($_.Name -match $tunnelRx -or $_.InterfaceDescription -match $tunnelRx) } |
   ForEach-Object {
     $adapter=$_;
@@ -267,7 +270,7 @@ $tunnels = @(Get-NetAdapter -ErrorAction SilentlyContinue |
       Address=($ips -join ', ');
       IsVpnte=($adapter.Name -eq ${aliasLiteral} -or ($ips -join ',') -match '${prefixRegex}')
     }
-  });
+  }) } catch { $tunnelsOk = $false; $tunnels = @() }
 
 $listenerRx='(?i)happ|hiddify|nekoray|nekobox|v2ray|xray|sing-box|singbox|sing-tun|clash|clash-verge|flclash|mihomo|mihomo-party|shadowsocks|ss-local|trojan|outline|wireguard|openvpn|karing|streisand|surfboard|vpn';
 $listeners = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
@@ -285,7 +288,7 @@ $tunnelsJ = $tunnels | ConvertTo-Json -Compress -Depth 3
 $listenersJ = $listeners | ConvertTo-Json -Compress -Depth 3
 if (-not $tunnelsJ) { $tunnelsJ = '[]' }
 if (-not $listenersJ) { $listenersJ = '[]' }
-Write-Host "TUNNELS:$tunnelsJ"
+if ($tunnelsOk) { Write-Host "TUNNELS:$tunnelsJ" }
 Write-Host "LISTENERS:$listenersJ"
 Write-Host "FIREWALL:$fwCount"
 `
