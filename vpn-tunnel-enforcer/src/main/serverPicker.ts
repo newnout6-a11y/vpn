@@ -22,6 +22,7 @@ import { promisify } from 'util'
 import axios from 'axios'
 import { randomUUID } from 'crypto'
 import { logEvent } from './appLogger'
+import { nativePhysicalIpv4Sources } from './native/nativeNetworkReads'
 import { withProtectedIpTransition } from './protectedIpTransition'
 import { compactForIpcLog } from './ipcLogging'
 import { copySecretToClipboard } from './secretClipboard'
@@ -580,6 +581,16 @@ async function loadPhysicalIpv4Sources(): Promise<PhysicalIpv4Source[]> {
   if (fast.length > 0) {
     physicalSourceCache = { value: fast, at: Date.now() }
     return fast
+  }
+
+  // Second tier: in-process iphlpapi read (no powershell.exe). Throws on any
+  // error / implausible enumeration -> fall through to the PowerShell script.
+  try {
+    const native = nativePhysicalIpv4Sources().filter(row => row.alias && /^\d+\.\d+\.\d+\.\d+$/.test(row.ipv4))
+    physicalSourceCache = { value: native, at: Date.now() }
+    return native
+  } catch (err) {
+    logEvent('debug', 'server-picker', 'native adapter read unavailable, using PowerShell', { err: (err as Error).message })
   }
 
   const script = `

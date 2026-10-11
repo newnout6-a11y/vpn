@@ -62,7 +62,31 @@ vi.mock('./happDetector', () => ({
   }
 }))
 
+// AT-07-002 / AT-07-012: native tunnel enumeration is mocked. Default = "unavailable" (throws), which
+// keeps the legacy PowerShell path (mocked exec above) under test.
+const nativeTunnels = vi.hoisted(() => vi.fn((): unknown[] => { throw new Error('native unavailable') }))
+vi.mock('./native/nativeNetworkReads', () => ({ nativeActiveTunnels: nativeTunnels }))
+
 import { getRoutingPlan } from './connectionPlanner'
+
+describe('getRoutingPlan native tunnel read', () => {
+  it.skipIf(process.platform !== 'win32')('uses the native enumeration and reports a foreign tunnel from it', async () => {
+    nativeTunnels.mockReturnValueOnce([{ name: 'Corp VPN', description: 'WireGuard Tunnel', address: '10.8.0.2', isVpnte: false }])
+
+    const plan = await getRoutingPlan()
+
+    expect(plan.activeTunnels).toEqual([{ name: 'Corp VPN', description: 'WireGuard Tunnel', address: '10.8.0.2', isVpnte: false }])
+    expect(plan.blockers.length).toBeGreaterThan(0)
+    expect(nativeTunnels).toHaveBeenCalledWith(expect.objectContaining({ vpnteIpv4Prefix: expect.any(String) }))
+  })
+
+  it.skipIf(process.platform !== 'win32')('falls back to the PowerShell path when the native read throws', async () => {
+    const plan = await getRoutingPlan()
+
+    expect(nativeTunnels).toHaveBeenCalled()
+    expect(plan.activeTunnels).toEqual([])
+  })
+})
 
 describe('getRoutingPlan', () => {
   it('does not block directVpn on an unused local proxy override', async () => {
