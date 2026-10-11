@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
 
@@ -92,6 +92,8 @@ describe('getRoutingPlan PowerShell tunnel read verification', () => {
 })
 
 describe('getRoutingPlan native tunnel read', () => {
+  beforeEach(() => { nativeTunnels.mockClear() })
+
   it.skipIf(process.platform !== 'win32')('uses the native enumeration and reports a foreign tunnel from it', async () => {
     nativeTunnels.mockReturnValueOnce([{ name: 'Corp VPN', description: 'WireGuard Tunnel', address: '10.8.0.2', isVpnte: false }])
 
@@ -105,8 +107,18 @@ describe('getRoutingPlan native tunnel read', () => {
   it.skipIf(process.platform !== 'win32')('falls back to the PowerShell path when the native read throws', async () => {
     const plan = await getRoutingPlan()
 
-    expect(nativeTunnels).toHaveBeenCalled()
+    expect(nativeTunnels).toHaveBeenCalledTimes(1)
     expect(plan.activeTunnels).toEqual([])
+  })
+
+  it.skipIf(process.platform !== 'win32')('accepts a native empty list (no tunnel adapters) as verified without spawning PowerShell', async () => {
+    nativeTunnels.mockReturnValueOnce([])
+    probeOutput.value = '__FAIL__' // would make the PowerShell path unverified if it ran
+
+    const plan = await getRoutingPlan({ proxyListeners: [] })
+
+    expect(plan.steps.some(step => step.label === 'Проверить внешние туннели')).toBe(false)
+    probeOutput.value = ''
   })
 })
 
