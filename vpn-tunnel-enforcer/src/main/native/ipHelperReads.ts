@@ -95,7 +95,6 @@ function utf16z(b: Buffer, o: number, maxChars: number): string {
   return b.subarray(o, end).toString('utf16le')
 }
 
-/** NDIS Characteristics by NetCfgInstanceId (lower-case GUID with braces). */
 /**
  * Only "the entry does not exist" (ERROR_FILE_NOT_FOUND) means "no information". Any other failure
  * (access denied, I/O ...) is an unknown, never a silent "not hidden": throw so callers fall back.
@@ -106,6 +105,7 @@ function registryEntryExists(rc: number, what: string): boolean {
   throw new Error(`${what} failed: ${rc}`)
 }
 
+/** NDIS Characteristics by NetCfgInstanceId (lower-case GUID with braces). */
 function readNdisCharacteristics(a: any): Map<string, number> {
   const HKLM = 0x80000002
   const KEY = 'SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e972-e325-11ce-bfc1-08002be10318}'
@@ -135,7 +135,10 @@ function readNdisCharacteristics(a: any): Map<string, number> {
         const dw = Buffer.alloc(4)
         const cb2 = [4]
         // No Characteristics value is a legitimate "no flags"; a value of the wrong size is not.
-        if (!registryEntryExists(a.RegQueryValueExW(k[0], 'Characteristics', null, t2, dw, cb2), `RegQueryValueExW(Characteristics, ${sub})`)) continue
+        if (!registryEntryExists(a.RegQueryValueExW(k[0], 'Characteristics', null, t2, dw, cb2), `RegQueryValueExW(Characteristics, ${sub})`)) {
+          out.set(id, 0) // known adapter, no Characteristics value: no flags set (not "unknown")
+          continue
+        }
         if (cb2[0] !== 4) throw new Error(`Characteristics of ${sub} has unexpected size ${cb2[0]}`)
         out.set(id, dw.readUInt32LE(0))
       } finally {
