@@ -588,8 +588,11 @@ async function loadPhysicalIpv4Sources(): Promise<PhysicalIpv4Source[]> {
   // error / implausible enumeration -> fall through to the PowerShell script.
   try {
     const native = nativePhysicalIpv4Sources().filter(row => row.alias && /^\d+\.\d+\.\d+\.\d+$/.test(row.ipv4))
-    physicalSourceCache = { value: native, at: Date.now() }
-    return native
+    if (native.length > 0) {
+      physicalSourceCache = { value: native, at: Date.now() }
+      return native
+    }
+    logEvent('debug', 'server-picker', 'native adapter read returned no sources, using PowerShell')
   } catch (err) {
     logEvent('debug', 'server-picker', 'native adapter read unavailable, using PowerShell', { err: (err as Error).message })
   }

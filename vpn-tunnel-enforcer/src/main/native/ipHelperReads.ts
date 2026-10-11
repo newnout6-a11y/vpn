@@ -134,6 +134,11 @@ function readNdisCharacteristics(a: any): Map<string, number> {
 }
 
 /** All interfaces (including hidden/filter/loopback) from GetIfTable2 + NDIS hidden flag. */
+/** NDIS Characteristics by NetCfgInstanceId (lower-case GUID with braces). Throws on registry failure. */
+export function readNdisCharacteristicsByGuid(): Map<string, number> {
+  return readNdisCharacteristics(load())
+}
+
 export function readRawAdapters(): RawAdapter[] {
   const a = load()
   const out = [null as unknown]

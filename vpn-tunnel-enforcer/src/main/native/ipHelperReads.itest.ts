@@ -1,7 +1,7 @@
 // AT-07-002 / AT-07-012 / AT-08-007: native iphlpapi reads must agree with the legacy PowerShell reads.
 // Real-machine comparison: skipped off Windows and when VPNTE_SKIP_NATIVE_COMPARE=1 (CI without PowerShell).
 import { spawnSync } from 'node:child_process'
-import { describe, expect, it } from 'vitest'
+import { beforeAll, describe, expect, it, vi } from 'vitest'
 import { readRawAdapters, readRawIfConfigs, readRawRoutes } from './ipHelperReads'
 import { toActiveTunnels, toAdapterRows, toIpConfigRows, toPhysicalIpv4Sources, toRouteRows } from './ipHelperTransforms'
 
@@ -22,8 +22,12 @@ function ps(script: string): any[] {
 const split = (s: string) => String(s || '').split(',').map(x => x.trim()).filter(Boolean).sort()
 
 describe.skipIf(!enabled)('native iphlpapi reads vs PowerShell (real machine)', () => {
-  const adapters = enabled ? readRawAdapters() : []
-  const configs = enabled ? readRawIfConfigs() : []
+  // Each comparison spawns a cold powershell.exe, which can exceed the default 5 s.
+  vi.setConfig({ testTimeout: 60000, hookTimeout: 60000 })
+  // Read in a hook: a koffi load failure must be a failing test, not a collection error.
+  let adapters: ReturnType<typeof readRawAdapters> = []
+  let configs: ReturnType<typeof readRawIfConfigs> = []
+  beforeAll(() => { adapters = readRawAdapters(); configs = readRawIfConfigs() })
 
   it('lists the same visible adapters as Get-NetAdapter', () => {
     const native = toAdapterRows(adapters)

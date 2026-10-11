@@ -198,6 +198,15 @@ describe('runLeakSelfTest coalescing', () => {
     expect(execMock.mock.calls.map(([cmd]) => String(cmd)).some(c => c.includes('EncodedCommand'))).toBe(true)
   })
 
+  it.skipIf(process.platform !== 'win32')('does not treat an empty native answer as "nothing to test": asks PowerShell', async () => {
+    nativeSourcesMock.mockReturnValue([])
+    const { runLeakSelfTest } = await import('./leakSelfTest')
+
+    await runLeakSelfTest()
+
+    expect(execMock.mock.calls.map(([cmd]) => String(cmd)).some(c => c.includes('EncodedCommand'))).toBe(true)
+  })
+
   it('marks physicalAdapterInspectionComplete as false on cancellation', async () => {
     const { cancelLeakSelfTest, runLeakSelfTest } = await import('./leakSelfTest')
     const inFlight = runLeakSelfTest()

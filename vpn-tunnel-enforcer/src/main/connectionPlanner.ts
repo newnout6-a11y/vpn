@@ -311,7 +311,8 @@ Write-Host "FIREWALL:$fwCount"
       ? parseInt(firewallLine.slice('FIREWALL:'.length), 10)
       : 0
 
-    const tunnels = asArray<any>(parseJson(tunnelsRaw)).map(row => ({
+    const tunnelsParsed = parseJson(tunnelsRaw)
+    const tunnels = asArray<any>(tunnelsParsed).map(row => ({
       name: String(row.Name || ''),
       description: String(row.Description || ''),
       address: String(row.Address || ''),
@@ -327,7 +328,10 @@ Write-Host "FIREWALL:$fwCount"
 
     const firewallRulesExist = Number.isFinite(fwCount) && fwCount > 0
 
-    return { manifestExists, firewallRulesExist, tunnels, tunnelsVerified: true, listeners }
+    // A missing TUNNELS line or a section that did not parse is an unread network, not an empty one.
+    const tunnelsVerified = Boolean(tunnelsLine) && tunnelsParsed !== null
+    if (!tunnelsVerified) logEvent('warn', 'planner', 'combinedPreStartProbe: tunnel section missing or unparsable', { rawPreview: tunnelsRaw.slice(0, 300) })
+    return { manifestExists, firewallRulesExist, tunnels, tunnelsVerified, listeners }
   } catch (err) {
     logEvent('warn', 'planner', 'combinedPreStartProbe failed', err)
     return { manifestExists, firewallRulesExist: false, tunnels: [], tunnelsVerified: false, listeners: [] }
@@ -356,25 +360,40 @@ export async function getRoutingPlan(opts?: {
   tunnelsVerified?: boolean
   proxyListeners?: ProxyListenerInfo[]
 }): Promise<RoutingPlan> {
+  // Start the tunnel read together with the proxy probes (as the original single Promise.all did).
   const read = opts?.activeTunnels
-    ? { tunnels: opts.activeTunnels, verified: opts.tunnelsVerified ?? true }
-    : await getActiveTunnels()
-  const plan = await buildRoutingPlan(read.tunnels, opts?.proxyListeners)
-  if (read.verified) return plan
+    ? Promise.resolve({ tunnels: opts.activeTunnels, verified: opts.tunnelsVerified ?? true })
+    : getActiveTunnels()
+  const { plan, verified } = await buildRoutingPlan(read, opts?.proxyListeners)
+  if (verified) return plan
   // Fail closed on the claim, not on availability: never report "no conflicting TUN" for an unread network.
   plan.steps.unshift({ label: 'Проверить внешние туннели', before: TUNNELS_UNVERIFIED_NOTE, after: 'Повторите проверку; не подтверждено, что второго TUN нет.', status: 'warn' })
   plan.explanation = `${TUNNELS_UNVERIFIED_NOTE} ${plan.explanation}`
   return plan
 }
 
-async function buildRoutingPlan(activeTunnels: TunnelInfo[], listeners?: ProxyListenerInfo[]): Promise<RoutingPlan> {
+async function buildRoutingPlan(
+  tunnelRead: Promise<{ tunnels: TunnelInfo[]; verified: boolean }>,
+  listeners?: ProxyListenerInfo[]
+): Promise<{ plan: RoutingPlan; verified: boolean }> {
   const settings = settingsStore.get()
   const isDirectVpn = settings.connectionMode === 'directVpn'
-  const [proxyListeners, proxy] = await Promise.all([
+  const [read, proxyListeners, proxy] = await Promise.all([
+    tunnelRead,
     listeners ?? getProxyListeners(),
     isDirectVpn ? Promise.resolve<ProxyInfo | null>(null) : detectProxy()
   ])
 
+  const activeTunnels = read.tunnels
+  return { plan: planFrom(activeTunnels, proxyListeners, proxy, isDirectVpn), verified: read.verified }
+}
+
+function planFrom(
+  activeTunnels: TunnelInfo[],
+  proxyListeners: ProxyListenerInfo[],
+  proxy: ProxyInfo | null,
+  isDirectVpn: boolean
+): RoutingPlan {
   const activeProfile = isDirectVpn ? getActiveProfile() : null
   const tunStatus = tunController.getStatus()
   const vpnteTunnels = activeTunnels.filter(tunnel => tunnel.isVpnte)

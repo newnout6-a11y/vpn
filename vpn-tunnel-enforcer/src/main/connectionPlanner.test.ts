@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from 'vitest'
 
 vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
 
+const probeOutput = vi.hoisted(() => ({ value: '' }))
+
 vi.mock('child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('child_process')>()
   const exec = Object.assign(
@@ -9,7 +11,7 @@ vi.mock('child_process', async (importOriginal) => {
       callback(null, '', '')
     },
     {
-      [Symbol.for('nodejs.util.promisify.custom')]: () => Promise.resolve({ stdout: '', stderr: '' })
+      [Symbol.for('nodejs.util.promisify.custom')]: () => Promise.resolve({ stdout: probeOutput.value, stderr: '' })
     }
   )
 
@@ -67,7 +69,7 @@ vi.mock('./happDetector', () => ({
 const nativeTunnels = vi.hoisted(() => vi.fn((): unknown[] => { throw new Error('native unavailable') }))
 vi.mock('./native/nativeNetworkReads', () => ({ nativeActiveTunnels: nativeTunnels }))
 
-import { getRoutingPlan } from './connectionPlanner'
+import { combinedPreStartProbe, getRoutingPlan } from './connectionPlanner'
 
 describe('getRoutingPlan native tunnel read', () => {
   it.skipIf(process.platform !== 'win32')('uses the native enumeration and reports a foreign tunnel from it', async () => {
@@ -122,5 +124,30 @@ describe('getRoutingPlan unverified tunnel read', () => {
     const plan = await getRoutingPlan({ activeTunnels: [], proxyListeners: [] })
 
     expect(plan.steps.some(step => step.status === 'warn' && step.label === 'Проверить внешние туннели')).toBe(false)
+  })
+})
+
+// AT-07-002: a probe whose tunnel section is missing or unparsable must not report an empty, verified network.
+describe.skipIf(process.platform !== 'win32')('combinedPreStartProbe tunnel verification', () => {
+  const probe = () => combinedPreStartProbe({ manifestExists: false, killSwitchRulePrefix: 'VPNTE' })
+  const out = (...lines: string[]) => lines.join('\n')
+
+  it('is unverified when the TUNNELS line is absent', async () => {
+    probeOutput.value = out('LISTENERS:[]', 'FIREWALL:0')
+    expect((await probe()).tunnelsVerified).toBe(false)
+  })
+
+  it('is unverified when the TUNNELS section does not parse', async () => {
+    probeOutput.value = out('TUNNELS:{not json', 'LISTENERS:[]', 'FIREWALL:0')
+    expect((await probe()).tunnelsVerified).toBe(false)
+  })
+
+  it('is verified for a well-formed empty list and for a real tunnel', async () => {
+    probeOutput.value = out('TUNNELS:[]', 'LISTENERS:[]', 'FIREWALL:0')
+    expect((await probe()).tunnelsVerified).toBe(true)
+    probeOutput.value = out('TUNNELS:{"Name":"Corp","Description":"WireGuard","Address":"10.8.0.2","IsVpnte":false}', 'LISTENERS:[]', 'FIREWALL:0')
+    const result = await probe()
+    expect(result.tunnelsVerified).toBe(true)
+    expect(result.tunnels).toHaveLength(1)
   })
 })

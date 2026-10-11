@@ -63,6 +63,13 @@ describe.skipIf(process.platform !== 'win32')('physical IPv4 sources: native fir
     expect(state.powershell).toHaveBeenCalledTimes(1)
   })
 
+  it('does not cache or return an empty native answer: PowerShell is asked', async () => {
+    state.native.mockReturnValue([])
+
+    expect(await sources()).toEqual([{ alias: 'Wi-Fi', ipv4: '192.168.1.10' }])
+    expect(state.powershell).toHaveBeenCalledTimes(1)
+  })
+
   it('skips both when os.networkInterfaces already answers', async () => {
     state.interfaces.mockReturnValue({ 'Wi-Fi': [{ family: 'IPv4', internal: false, mac: '5c:c3:36:f5:a6:0a', address: '192.168.1.10' }] })
 

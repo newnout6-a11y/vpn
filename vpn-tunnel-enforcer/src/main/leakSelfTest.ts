@@ -160,7 +160,10 @@ async function listPhysicalAdaptersWithIPv4(): Promise<{ adapters: { alias: stri
   // never an empty "nothing to test" answer.
   try {
     const rows = nativePhysicalIpv4Sources()
-    return { adapters: rows.map(r => ({ alias: r.alias, ipv4: r.ipv4 })), complete: true }
+    // An empty native answer is not proof that there is nothing to test (it filters differently
+    // from PowerShell, e.g. address DAD state): ask PowerShell before reporting "no adapters".
+    if (rows.length > 0) return { adapters: rows.map(r => ({ alias: r.alias, ipv4: r.ipv4 })), complete: true }
+    logEvent('debug', 'leak-test', 'native adapter read returned no sources, using PowerShell')
   } catch (err) {
     logEvent('debug', 'leak-test', 'native adapter read unavailable, using PowerShell', { err: (err as Error).message })
   }

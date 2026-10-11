@@ -91,6 +91,13 @@ describe('native physical adapter snapshot: fail closed', () => {
     expect(() => snapshotFromSource(source({ listNetworkProfiles: () => { throw new Error('network profiles: elevated helper is not running') } }))).toThrow(/helper/)
     expect(JSON.parse(snapshotFromSource(source({ listNetworkProfiles: () => new Map() }))).networkProfiles).toEqual([])
   })
+  it('skips NCF_HIDDEN adapters like PowerShell Hidden, keeps ones without a class-key entry', () => {
+    const hidden = { ...wifi, ifIndex: 30, characteristics: 0x8 | 0x1 }
+    const visible = { ...wifi, ifIndex: 31, characteristics: 0x1 }
+    const unknown = { ...wifi, ifIndex: 32, characteristics: null }
+    expect(buildPhysicalAdapterRows(source({ adapters: [hidden, visible, unknown] })).map(r => r.ifIndex)).toEqual([31, 32])
+  })
+
   it('refuses a non-Windows platform and an empty adapter set', async () => {
     vi.resetModules()
     if (process.platform !== 'win32') expect(() => createKoffiSource(new Map())).toThrow(/win32/)

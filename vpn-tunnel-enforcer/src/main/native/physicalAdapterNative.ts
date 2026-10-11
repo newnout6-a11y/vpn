@@ -11,6 +11,7 @@ import { ALL_KNOWN_ALIASES } from '../tunAdapter'
 import { ADAPTER_EXCLUSION_PATTERN } from '../physicalAdapterSnapshot'
 import { fetchNetworkProfiles } from './networkProfiles'
 import { defineStruct } from './koffiTypes'
+import { readNdisCharacteristicsByGuid } from './ipHelperReads'
 
 export interface NativeAdapterInfo {
   ifIndex: number
@@ -23,6 +24,8 @@ export interface NativeAdapterInfo {
   /** MIB_IF_ROW2.PermanentPhysicalAddress (trimmed to PhysicalAddressLength) as hex, '' if none. */
   permanentAddressHex: string
   filterInterface: boolean
+  /** NDIS Characteristics; NCF_HIDDEN (0x8) adapters are skipped like PowerShell's Hidden. null/undefined = no class-key entry. */
+  characteristics?: number | null
   mediaType: number
   physicalMediumType: number
 }
@@ -62,6 +65,7 @@ const descMobileRe = new RegExp(`${B}(rndis|cellular|mobile|wwan|lte|[345]g|mode
 const nameMobileRe = new RegExp(`${B}(cellular|mobile|wwan|lte|[345]g|modem|tether|tethering)${E}`, 'iu')
 const hotspotRe = /^192\.168\.(43|137|225|8)\.|^172\.20\.10\./
 
+const NCF_HIDDEN = 0x8
 const IF_TYPE_WWANPP = 243
 const IF_TYPE_WWANPP2 = 244
 const NDIS_MEDIUM_WIRELESS_WAN = 2
@@ -75,6 +79,7 @@ export function buildPhysicalAdapterRows(source: NativeAdapterSource): PhysicalA
   const rows: PhysicalAdapterRow[] = []
   for (const a of adapters) {
     if (a.filterInterface) continue
+    if (a.characteristics != null && (a.characteristics & NCF_HIDDEN) !== 0) continue
     if (knownAliases.has(a.alias.toLowerCase())) continue
     if (exclusionRe.test(a.description)) continue
     if (!a.permanentAddressHex || /^0+$/.test(a.permanentAddressHex)) continue
@@ -215,6 +220,7 @@ function buildSourceFactory(): SourceFactory {
 
   return profiles => ({
     listUpAdapters() {
+      const characteristics = readNdisCharacteristicsByGuid()
       const size = [0]
       let rc = GetAdaptersAddresses(AF_UNSPEC, GAA_FLAGS, null, null, size)
       let buf: Buffer | null = null
@@ -283,6 +289,7 @@ function buildSourceFactory(): SourceFactory {
             ipv4Dns: dnsOf(buf.readBigUInt64LE(o + 48)),
             permanentAddressHex: row.subarray(1092, 1092 + permLen).toString('hex'),
             filterInterface: (row[1152] & 0x2) !== 0,
+            characteristics: characteristics.get(guid.toLowerCase()) ?? null,
             mediaType: row.readUInt32LE(1136),
             physicalMediumType: row.readUInt32LE(1140)
           })
