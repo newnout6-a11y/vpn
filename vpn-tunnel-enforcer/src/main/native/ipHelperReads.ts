@@ -239,6 +239,9 @@ export function readRawRoutes(family: 4 | 6): RawRoute[] {
   try {
     const n = a.koffi.decode(out[0], 'uint32_t') as number
     if (!Number.isInteger(n) || n < 0 || n > 200000) throw new Error(`implausible route count ${n}`)
+    // An IPv4 table always holds at least loopback/host routes, so zero means a failed read. IPv6 may be
+    // legitimately empty when the stack is disabled.
+    if (family === 4 && n === 0) throw new Error('GetIpForwardTable2 returned an empty IPv4 route table')
     const raw = Buffer.from(a.koffi.decode(out[0], 'uint8_t', 8 + n * FORWARD_ROW2_SIZE))
     const routes: RawRoute[] = []
     const text = (o: number): string => {

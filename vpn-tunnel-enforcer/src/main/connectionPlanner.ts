@@ -330,7 +330,7 @@ Write-Host "FIREWALL:$fwCount"
 
     // A missing TUNNELS line or a section that did not parse is an unread network, not an empty one.
     const tunnelsVerified = Boolean(tunnelsLine) && tunnelsParsed !== null
-    if (!tunnelsVerified) logEvent('warn', 'planner', 'combinedPreStartProbe: tunnel section missing or unparsable', { rawPreview: tunnelsRaw.slice(0, 300) })
+    if (!tunnelsVerified) logEvent('warn', 'planner', 'combinedPreStartProbe: tunnel section missing or unparsable', { rawLength: tunnelsRaw.length }) // length only: the section carries adapter addresses
     return { manifestExists, firewallRulesExist, tunnels, tunnelsVerified, listeners }
   } catch (err) {
     logEvent('warn', 'planner', 'combinedPreStartProbe failed', err)
