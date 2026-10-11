@@ -381,7 +381,12 @@
     }
     input.addEventListener('input', () => run(input.value))
     $$('[data-rt-sample]', root).forEach((b) => b.addEventListener('click', () => { input.value = b.dataset.rtSample; run(input.value) }))
-    smartToggle.addEventListener('click', () => { smartToggle.setAttribute('aria-pressed', String(smartToggle.getAttribute('aria-pressed') !== 'true')); run(input.value) })
+    smartToggle.addEventListener('click', () => {
+      const on = smartToggle.getAttribute('aria-pressed') !== 'true'
+      smartToggle.setAttribute('aria-pressed', String(on))
+      smartToggle.textContent = on ? 'Smart RU: включён' : 'Smart RU: выключен'
+      run(input.value)
+    })
     input.value = 'gosuslugi.ru'; run(input.value)
   }
 
@@ -590,7 +595,7 @@
   /* ---------- FAQ: фильтры и поиск ---------- */
   function initFaq() {
     const root = $('#faq'); if (!root) return
-    const items = $$('details', root), btns = $$('[data-cat]', document)
+    const items = $$('details', root), btns = $$('.faq-cats [data-cat]', document)
     const empty = $('#faq-empty'), q = $('#faq-q')
     let cat = 'all'
     const apply = () => {
