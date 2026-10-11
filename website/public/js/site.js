@@ -579,18 +579,25 @@
     }
     requestAnimationFrame(frame)
 
-    const desktop = matchMedia('(min-width:1021px)')
-    if (hasGsap() && desktop.matches && !reduce) {
-      const pin = $('.story__pin', root)
-      ScrollTrigger.create({
-        trigger: pin, start: 'top top', end: () => `+=${steps.length * 70}%`, pin: true, scrub: true,
-        onUpdate: (self) => setStep(Math.min(steps.length - 1, Math.floor(self.progress * steps.length * 0.999)))
-      })
-    } else {
-      let i = 0
-      steps.forEach((s, k) => s.addEventListener('click', () => { i = k; setStep(k) }))
-      setInterval(() => { if (run && !reduce) { i = (i + 1) % steps.length; setStep(i) } }, 3200)
+    // Режим зависит от ширины окна, поэтому пересчитывается при каждой смене медиа-запроса.
+    const wide = matchMedia('(min-width:1021px)')
+    let i = 0, trig = null, timer = null
+    steps.forEach((s, k) => s.addEventListener('click', () => { if (trig) return; i = k; setStep(k) }))
+    const mode = () => {
+      clearInterval(timer); timer = null
+      trig?.kill(true); trig = null
+      if (hasGsap() && wide.matches && !reduce) {
+        const pin = $('.story__pin', root)
+        trig = ScrollTrigger.create({
+          trigger: pin, start: 'top top', end: () => `+=${steps.length * 70}%`, pin: true, scrub: true,
+          onUpdate: (self) => setStep(Math.min(steps.length - 1, Math.floor(self.progress * steps.length * 0.999)))
+        })
+      } else {
+        timer = setInterval(() => { if (run && !reduce) { i = (i + 1) % steps.length; setStep(i) } }, 3200)
+      }
     }
+    mode()
+    wide.addEventListener('change', mode)
   }
 
   /* ---------- FAQ: фильтры и поиск ---------- */
