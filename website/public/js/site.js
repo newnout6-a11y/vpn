@@ -4,6 +4,8 @@
   'use strict'
   const $ = (s, r = document) => r.querySelector(s)
   const $$ = (s, r = document) => Array.from(r.querySelectorAll(s))
+  // Якорь из URL — это id элемента, а не селектор: «#2fa» не валидный селектор и бросает исключение.
+  const hashTarget = (h) => { try { return document.getElementById(decodeURIComponent(h.slice(1))) } catch { return null } }
   const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches
   const fine = matchMedia('(hover:hover) and (pointer:fine)').matches
   const lerp = (a, b, t) => a + (b - a) * t
@@ -54,7 +56,7 @@
     $$('a[href^="#"]').forEach((a) => a.addEventListener('click', (e) => {
       const id = a.getAttribute('href')
       if (id.length < 2) return
-      const t = $(id)
+      const t = hashTarget(id)
       if (!t) return
       e.preventDefault()
       lenis ? lenis.scrollTo(t, { offset: -80 }) : t.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth' })
@@ -306,8 +308,8 @@
         p.u += dt * 0.42
         if (p.u >= 1) { p.u = 0; p.dead = 0; p.route = phase === 'down' && s.kind === 'plain' ? 'bot' : 'top' }
         let route = p.route
-        if (phase === 'normal' || phase === 'recover') route = phase === 'recover' && s.kind === 'plain' ? 'top' : 'top'
-        if (phase === 'down') route = s.kind === 'plain' ? 'bot' : 'bot'
+        if (phase === 'normal' || phase === 'recover') route = 'top'
+        if (phase === 'down') route = 'bot'
         const pts = route === 'top' ? topPath : botPath
         let u = p.u
         let visible = true
@@ -609,7 +611,7 @@
     }
     btns.forEach((b) => b.addEventListener('click', () => { cat = b.dataset.cat; btns.forEach((x) => x.setAttribute('aria-pressed', String(x === b))); apply() }))
     q?.addEventListener('input', apply)
-    if (location.hash) { const t = $(location.hash); if (t && t.tagName === 'DETAILS') t.open = true }
+    if (location.hash) { const t = hashTarget(location.hash); if (t && t.tagName === 'DETAILS') t.open = true }
   }
 
   /* ---------- протоколы: фильтр ---------- */
@@ -627,10 +629,18 @@
 
   /* ---------- копирование команд ---------- */
   function initCopy() {
-    $$('[data-copy]').forEach((b) => b.addEventListener('click', async () => {
-      const src = $(b.dataset.copy); if (!src) return
-      try { await navigator.clipboard.writeText(src.innerText.replace(/^\$ /gm, '')); const old = b.innerHTML; b.textContent = 'Скопировано ✓'; setTimeout(() => (b.innerHTML = old), 1600) } catch { b.textContent = 'Выделите вручную' }
-    }))
+    $$('[data-copy]').forEach((b) => {
+      let original = null // исходная подпись запоминается один раз, повторный клик не сохраняет «Скопировано ✓»
+      b.addEventListener('click', async () => {
+        const src = $(b.dataset.copy); if (!src) return
+        try {
+          await navigator.clipboard.writeText(src.innerText.replace(/^\$ /gm, ''))
+          original ??= b.innerHTML
+          b.textContent = 'Скопировано ✓'
+          setTimeout(() => (b.innerHTML = original), 1600)
+        } catch { b.textContent = 'Выделите вручную' }
+      })
+    })
   }
 
   /* ---------- параллакс блоков ---------- */
