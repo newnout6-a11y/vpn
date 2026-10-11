@@ -1,0 +1,49 @@
+<!--{"path":"/faq/","title":"Вопросы и ответы — VPN Tunnel Enforcer","description":"Ответы на частые вопросы: чем это отличается от обычного VPN, где хранятся ключи, что с приватностью, лицензией и ограничениями.","nav":"faq"}-->
+<section class="page-hero">
+  <div class="bg-grid" aria-hidden="true"></div>
+  <div class="wrap">
+    <nav class="crumbs" aria-label="Хлебные крошки"><a href="{{base}}./">Главная</a><span>/</span><span>FAQ</span></nav>
+    <h1 class="h1 split-words">Частые <span class="grad">вопросы</span></h1>
+    <p class="lead" data-reveal style="--d:.2s">Если вы не нашли ответ, откройте обсуждение на GitHub.</p>
+  </div>
+</section>
+
+<section class="section section--tight">
+  <div class="wrap">
+    <label class="field" style="max-width:560px;margin:0 auto 26px"><span class="sr-only">Поиск по вопросам</span>{{icon:search|icon}}<input id="faq-q" type="search" placeholder="Поиск: kill-switch, ключи, DNS…" autocomplete="off"></label>
+    <div class="faq-cats" role="group" aria-label="Категории">
+      <button data-cat="all" aria-pressed="true">Все</button>
+      <button data-cat="basics" aria-pressed="false">Основы</button>
+      <button data-cat="privacy" aria-pressed="false">Приватность</button>
+      <button data-cat="tech" aria-pressed="false">Технические</button>
+      <button data-cat="project" aria-pressed="false">Проект</button>
+    </div>
+    <div class="faq" id="faq">
+      <details data-cat="basics"><summary>Это VPN-сервис? Вы продаёте серверы?<span>{{icon:chevron-down|icon}}</span></summary><div class="faq__a"><p>Нет. Tunnel Enforcer — клиент. Вы приносите собственную подписку или ключ, а клиент превращает их в защищённое соединение. Мы не продаём серверы и не видим ваш трафик.</p></div></details>
+      <details data-cat="basics"><summary>Чем это отличается от обычного VPN-клиента?<span>{{icon:chevron-down|icon}}</span></summary><div class="faq__a"><p>Главное отличие — поведение при сбое. Здесь действует политика fail-closed: если туннель упал, kill-switch остаётся включённым и блокирует всё вне VPN до восстановления. Дополнительно клиент перехватывает DNS внутри туннеля, закрывает IPv6 и сам проверяет утечки.</p></div></details>
+      <details data-cat="basics"><summary>Какие системы поддерживаются?<span>{{icon:chevron-down|icon}}</span></summary><div class="faq__a"><p>Только Windows 10 (сборка 19041+) и Windows 11, x64. Версий для macOS, Linux и мобильных систем нет.</p></div></details>
+      <details data-cat="basics"><summary>Нужны ли права администратора?<span>{{icon:chevron-down|icon}}</span></summary><div class="faq__a"><p>Для Hard Mode — да: нужны права на Wintun-адаптер, WFP и сетевые настройки. Запрос UAC встроен в приложение. Soft Mode (локальный прокси) работает без прав администратора.</p></div></details>
+      <details data-cat="basics"><summary>Где скачать установщик?<span>{{icon:chevron-down|icon}}</span></summary><div class="faq__a"><p>Публичного релиза пока нет. До него нужно закрыть проверку установки и обновления и опубликовать контрольные суммы. Следите за <a href="https://github.com/newnout6-a11y/vpn/releases" rel="noopener" style="text-decoration:underline">страницей релизов</a>. Сейчас клиент можно собрать из исходников — см. <a href="{{base}}download/" style="text-decoration:underline">раздел «Скачать»</a>.</p></div></details>
+
+      <details data-cat="privacy"><summary>Собирает ли клиент аналитику или телеметрию?<span>{{icon:chevron-down|icon}}</span></summary><div class="faq__a"><p>В клиенте нет SDK аналитики и трекеров. Метрики успеха (например, доля сессий без утечек) считаются локально и никуда не отправляются. Этот сайт тоже не использует cookie и сторонние ресурсы.</p></div></details>
+      <details data-cat="privacy"><summary>Где хранятся мои ключи?<span>{{icon:chevron-down|icon}}</span></summary><div class="faq__a"><p>Локально и в зашифрованном виде: ключи, токены, UUID и ссылки подписок шифруются через Electron <code>safeStorage</code>, то есть через Windows DPAPI. Экспорт по умолчанию маскирует секреты, а экспорт с секретами требует подтверждения в нативном диалоге.</p></div></details>
+      <details data-cat="privacy"><summary>Видит ли провайдер, что я использую VPN?<span>{{icon:chevron-down|icon}}</span></summary><div class="faq__a"><p>Адрес вашего VPN-сервера провайдер видеть будет — это неизбежно для любого VPN. Дополнительно есть известное ограничение: имя сервера резолвится до подъёма туннеля, поэтому DNS-запрос с этим именем виден провайдеру. Протоколы с маскировкой (REALITY, ShadowTLS, Naive) затрудняют опознание самого трафика, но не делают его невидимым.</p></div></details>
+      <details data-cat="privacy"><summary>Сохраняется ли содержимое трафика при форензике?<span>{{icon:chevron-down|icon}}</span></summary><div class="faq__a"><p>Нет. ETW-сайдкар собирает только метаданные: 5-tuple и DNS-имена. Экспорт заменяет IP, MAC и домены токенами и не выгружает сырые ETL/PCAPNG. Но сессии pktmon, которые клиент создаёт для диагностики, хранятся локально и могут содержать больше данных, поэтому ограничены по числу (по умолчанию три).</p></div></details>
+      <details data-cat="privacy"><summary>Делает ли клиент меня анонимным?<span>{{icon:chevron-down|icon}}</span></summary><div class="faq__a"><p>Нет, и никто не может это честно обещать. Клиент скрывает ваш реальный IP и защищает от утечек, но не защищает от деанонимизации по аккаунтам и отпечатку браузера, а также от логов на стороне вашего сервера.</p></div></details>
+
+      <details data-cat="tech"><summary>Что такое kill-switch и как он устроен?<span>{{icon:chevron-down|icon}}</span></summary><div class="faq__a"><p>Клиент выставляет <code>DefaultOutboundAction=Block</code> на профилях Domain, Private и Public Windows Firewall, а затем добавляет allow-правила для sing-box, самого приложения, TUN-адаптера, loopback, LAN, DHCP и NTP. Режимы: <code>off</code>, <code>standard</code> и <code>strict</code>.</p></div></details>
+      <details data-cat="tech"><summary>Почему kill-switch включается последним?<span>{{icon:chevron-down|icon}}</span></summary><div class="faq__a"><p>Правило привязано к алиасу TUN-интерфейса. Пока адаптер не получил статус Up, такое правило молча не создастся, и защита окажется мнимой. Поэтому порядок такой: готовый TUN, затем блокировка.</p></div></details>
+      <details data-cat="tech"><summary>Какие протоколы поддерживаются?<span>{{icon:chevron-down|icon}}</span></summary><div class="faq__a"><p>VLESS (REALITY, Vision, gRPC, WebSocket), WireGuard, Hysteria2, TUIC, Shadowsocks (включая 2022), VMess (AEAD), Trojan, Naive, AnyTLS и ShadowTLS. Подробности на <a href="{{base}}protocols/" style="text-decoration:underline">странице протоколов</a>.</p></div></details>
+      <details data-cat="tech"><summary>Работают ли QUIC и HTTP/3?<span>{{icon:chevron-down|icon}}</span></summary><div class="faq__a"><p>Через туннель — нет: UDP/443 отклоняется, и браузер переходит на TCP. Это осознанное решение, так как TCP-поток целиком контролируется туннелем и проще проверяется на утечки.</p></div></details>
+      <details data-cat="tech"><summary>Что с IPv6?<span>{{icon:chevron-down|icon}}</span></summary><div class="faq__a"><p>TUN работает только по IPv4. IPv6 на физических адаптерах отключается при lockdown, а утечки закрывает kill-switch и отдельная WFP-политика. Установка нативных IPv6-фильтров на матрице ОС ещё не принята — WP-3 остаётся частичным.</p></div></details>
+      <details data-cat="tech"><summary>Можно ли автоматизировать клиент?<span>{{icon:chevron-down|icon}}</span></summary><div class="faq__a"><p>Да. Есть локальный REST API на <code>127.0.0.1:17873</code>: <code>/status</code>, <code>/start</code>, <code>/stop</code>, <code>/rotate</code> и другие. Изменяющие запросы требуют заголовок <code>X-VPNTE-Control-Token</code>.</p></div></details>
+      <details data-cat="tech"><summary>Что такое Smart RU?<span>{{icon:chevron-down|icon}}</span></summary><div class="faq__a"><p>Набор правил маршрутизации: российские домены и госсервисы идут напрямую и видят реальный российский адрес, а IP-чекеры, Google и медиа принудительно идут через туннель. Остальное — через туннель по умолчанию.</p></div></details>
+
+      <details data-cat="project"><summary>Под какой лицензией проект?<span>{{icon:chevron-down|icon}}</span></summary><div class="faq__a"><p>MIT. Исходный код открыт: <a href="https://github.com/newnout6-a11y/vpn" rel="noopener" style="text-decoration:underline">github.com/newnout6-a11y/vpn</a>.</p></div></details>
+      <details data-cat="project"><summary>Насколько проект зрелый?<span>{{icon:chevron-down|icon}}</span></summary><div class="faq__a"><p>Версия 1.1.22, последний локальный прогон — 2874 теста зелёные. При этом приёмка на реальных системах для части пакетов (например, firewall и восстановление) ещё не завершена, а публичного релиза нет. Подробный статус — на <a href="{{base}}roadmap/" style="text-decoration:underline">дорожной карте</a>.</p></div></details>
+      <details data-cat="project"><summary>Будут ли AmneziaWG, mihomo и изолированные браузеры?<span>{{icon:chevron-down|icon}}</span></summary><div class="faq__a"><p>Они в плане (WP-12), но в коде их нет. Каждая функция выйдет отдельным релизом за флагом после закрытия базовых пакетов. Сроков мы не обещаем.</p></div></details>
+      <details data-cat="project"><summary>Подписан ли установщик?<span>{{icon:chevron-down|icon}}</span></summary><div class="faq__a"><p>Пока не решено. Вопрос подписи кода открыт и ждёт решения владельца проекта. Мы не будем утверждать обратное до тех пор, пока это не изменится.</p></div></details>
+    </div>
+    <p class="muted" id="faq-empty" hidden style="text-align:center;margin-top:28px">Ничего не нашлось. Попробуйте другое слово или откройте <a href="https://github.com/newnout6-a11y/vpn/issues" rel="noopener" style="text-decoration:underline">обсуждение</a>.</p>
+  </div>
+</section>

@@ -1,0 +1,62 @@
+<!--{"path":"/roadmap/","title":"Дорожная карта — VPN Tunnel Enforcer","description":"Что готово, что в работе и что только запланировано. Статусы взяты из рабочих документов проекта, без приукрашивания.","nav":"roadmap"}-->
+<section class="page-hero">
+  <div class="bg-grid" aria-hidden="true"></div>
+  <div class="wrap">
+    <nav class="crumbs" aria-label="Хлебные крошки"><a href="{{base}}./">Главная</a><span>/</span><span>Дорожная карта</span></nav>
+    <h1 class="h1 split-words">Куда мы идём — <span class="grad">и где сейчас</span></h1>
+    <p class="lead" data-reveal style="--d:.2s">Проект ведётся по рабочим пакетам (WP) с приёмочными тестами. Статусы ниже взяты из внутренних документов на 10.10.2026.</p>
+    <div class="tags" data-reveal style="--d:.3s"><span class="tag tag--g">● готово</span><span class="tag tag--a">● частично / в фокусе</span><span class="tag tag--v">● запланировано</span></div>
+  </div>
+</section>
+
+<section class="section section--tight">
+  <div class="wrap" style="max-width:calc(900px + var(--gut)*2)">
+    <div class="timeline" data-stagger>
+      <article class="tl" data-s="done" data-reveal>
+        <div class="card"><div class="tl__head"><h3>Миграция на Electron 44</h3><span class="mono muted" style="font-size:12px">WP-11 · часть 1</span><span class="tag tag--g">готово · 30.09.2026</span></div>
+        <p>Переход на Electron 44.4.3, electron-vite 5 и electron-builder 26. Нативный smoke-тест проверяет изоляцию sandbox, мост IPC и хранилище секретов в реальном окружении. Выполнено заранее: срок окончания поддержки Electron 42 — 20.10.2026.</p></div>
+      </article>
+      <article class="tl" data-s="done" data-reveal>
+        <div class="card"><div class="tl__head"><h3>Секреты, IPC и доверенная граница</h3><span class="mono muted" style="font-size:12px">WP-1</span><span class="tag tag--g">завершён · 07.10.2026</span></div>
+        <p>Шифрование секретов через DPAPI, безопасный экспорт, строгая проверка IPC, доверенный runtime с ACL и SHA-256. Завершение подтверждено владельцем проекта. Результаты отдельных проверок и непроверенные сценарии записаны в отчёте.</p></div>
+      </article>
+      <article class="tl" data-s="part" data-reveal>
+        <div class="card"><div class="tl__head"><h3>Firewall, baseline и восстановление</h3><span class="mono muted" style="font-size:12px">WP-3</span><span class="tag tag--a">частично · текущий фокус</span></div>
+        <p>Код и локальные проверки готовы: транзакционный откат, Boot Recovery, отдельная IPv6 WFP-политика. Осталась приёмка на реальных системах.</p>
+        <ul class="tl__list"><li>Фактическая установка WFP-фильтров и packet oracle</li><li>Перезагрузка в SYSTEM-контексте</li><li>NAT64, hot-plug адаптеров и матрица ОС</li></ul></div>
+      </article>
+      <article class="tl" data-s="plan" data-reveal>
+        <div class="card"><div class="tl__head"><h3>Контракты, FSM и наблюдаемость</h3><span class="mono muted" style="font-size:12px">WP-0</span><span class="tag tag--v">дальше</span></div>
+        <p>Единый автомат состояний, идентификатор операции и отмена. Фундамент для следующих двух пакетов.</p></div>
+      </article>
+      <article class="tl" data-s="plan" data-reveal>
+        <div class="card"><div class="tl__head"><h3>Процессы и жизненный цикл туннеля</h3><span class="mono muted" style="font-size:12px">WP-2</span><span class="tag tag--v">запланировано</span></div>
+        <p>Зомби-процессы, гонки таймаутов и порядок запуска xray.</p></div>
+      </article>
+      <article class="tl" data-s="plan" data-reveal>
+        <div class="card"><div class="tl__head"><h3>Планировщик, ротация и адаптивный обход</h3><span class="mono muted" style="font-size:12px">WP-10</span><span class="tag tag--v">запланировано</span></div>
+        <p>Ротация серверов по принципу «сначала проверка, потом фиксация» и исправление окон, переходящих через полночь.</p></div>
+      </article>
+      <article class="tl" data-s="plan" data-reveal>
+        <div class="card"><div class="tl__head"><h3>Маршрутизация, импорт, мониторинг и интерфейс</h3><span class="mono muted" style="font-size:12px">WP-4…9</span><span class="tag tag--v">запланировано</span></div>
+        <ul class="tl__list"><li>Целостность rule-sets и split tunneling по абсолютному пути процесса</li><li>Честные статусы проверок и защита форензики от нехватки памяти</li><li>Доступность интерфейса и декомпозиция крупных экранов</li></ul></div>
+      </article>
+      <article class="tl" data-s="part" data-reveal>
+        <div class="card"><div class="tl__head"><h3>Установка, обновление и целостность релиза</h3><span class="mono muted" style="font-size:12px">WP-11 · часть 2</span><span class="tag tag--a">до публичного релиза</span></div>
+        <p>Установка поверх старой версии, удаление, публикация контрольных сумм и автообновление. Это условие первого публичного релиза.</p></div>
+      </article>
+      <article class="tl" data-s="plan" data-reveal>
+        <div class="card"><div class="tl__head"><h3>Плановые функции</h3><span class="mono muted" style="font-size:12px">WP-12</span><span class="tag tag--v">после всего остального</span></div>
+        <p>Выпускаются отдельными релизами за флагами и не включены в production.</p>
+        <ul class="tl__list"><li><b style="color:var(--text)">AmneziaWG</b> — устойчивость к блокировкам на уровне WireGuard</li><li><b style="color:var(--text)">Ядро mihomo</b> — альтернативный движок</li><li><b style="color:var(--text)">Изолированные браузеры</b> — отдельные инстансы Chromium</li><li><b style="color:var(--text)">Монитор процессов</b> на ETW</li></ul></div>
+      </article>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="wrap">
+    <div class="callout" data-reveal>{{icon:scale|icon}}<div><b>Почему мы показываем это.</b> Продукт про доверие. Лучше честно сказать «частично», чем объявить «готово» и получить утечку у пользователя. Порядок работ определён необходимостью, а не маркетингом: безопасность важнее скорости выхода новых функций.</div></div>
+  </div>
+</section>
+<section class="section"><div class="wrap"><div class="cta" data-reveal="scale"><h2 class="h2">Следите за <span class="grad">первым релизом</span></h2><p class="lead">Нажмите Watch → Custom → Releases в репозитории, и GitHub напишет вам, когда выйдет установщик.</p><div class="hero__actions"><a class="btn btn--primary btn--lg" href="https://github.com/newnout6-a11y/vpn" rel="noopener">{{icon:github|icon}} Репозиторий</a><a class="btn btn--ghost btn--lg" href="{{base}}download/">Как установить сейчас</a></div></div></div></section>

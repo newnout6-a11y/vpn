@@ -1,0 +1,71 @@
+<!--{"path":"/how-it-works/","title":"Как это работает — VPN Tunnel Enforcer","description":"От pre-flight до kill-switch: шесть шагов запуска туннеля и почему их порядок критичен для безопасности.","nav":"how"}-->
+<section class="page-hero">
+  <div class="bg-grid" aria-hidden="true"></div>
+  <div class="wrap">
+    <nav class="crumbs" aria-label="Хлебные крошки"><a href="{{base}}./">Главная</a><span>/</span><span>Как работает</span></nav>
+    <h1 class="h1 split-words">Порядок важнее, чем <span class="grad">набор функций</span></h1>
+    <p class="lead" data-reveal style="--d:.2s">Запуск туннеля — около десяти шагов. Покажем главные шесть. Прокрутите страницу: схема справа меняется вместе с шагами.</p>
+  </div>
+</section>
+
+<section class="story dark" id="story">
+  <div class="story__pin">
+    <div class="wrap story__grid">
+      <ol class="story__steps">
+        <li class="step"><span class="step__n">01</span><div><h3>Pre-flight</h3><p>Если в системе уже есть чужой TUN-адаптер, клиент отказывается стартовать и объясняет причину. Два туннеля одновременно — это путаница маршрутов.</p></div></li>
+        <li class="step"><span class="step__n">02</span><div><h3>Lockdown адаптеров</h3><p>Физические адаптеры подчиняются туннелю: IPv6 выключается, DNS указывает на резолвер туннеля, отключается умный выбор DNS Windows.</p></div></li>
+        <li class="step"><span class="step__n">03</span><div><h3>Доверенный runtime</h3><p>Проверяются владельцы и права каталогов, а бинарники сверяются с эталоном по SHA-256. При несовпадении атомарный staging заменяет их.</p></div></li>
+        <li class="step"><span class="step__n">04</span><div><h3>Конфиг и запуск</h3><p>Конфигурация генерируется и проверяется командой <code class="mono">sing-box check -c</code>. Только после этого запускается ядро.</p></div></li>
+        <li class="step"><span class="step__n">05</span><div><h3>Ожидание TUN</h3><p>Клиент ждёт, пока адаптер получит <code class="mono">Status=Up</code>. Трафик приложений теперь идёт в Wintun и дальше в ядро.</p></div></li>
+        <li class="step"><span class="step__n">06</span><div><h3>Kill-switch</h3><p>Только теперь включается блокировка. Правило привязано к алиасу интерфейса, и до появления адаптера оно просто не создалось бы.</p></div></li>
+      </ol>
+      <div class="story__stage">
+        <canvas role="img" aria-label="Анимированная схема запуска туннеля"></canvas>
+        <div class="story__caption" aria-live="polite"></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="wrap">
+    <div class="section__head" data-reveal><span class="eyebrow">Принципы</span><h2 class="h2">Три правила, <span class="grad">на которых всё держится</span></h2></div>
+    <div class="grid grid--3" data-stagger>
+      <article class="card" data-reveal><div class="card__icon card__icon--g">{{icon:shield-check|icon}}</div><h3>Fail-closed</h3><p>При падении туннеля kill-switch намеренно остаётся включённым до авторестарта или перехода на другой ключ группы.</p></article>
+      <article class="card" data-reveal><div class="card__icon">{{icon:fingerprint|icon}}</div><h3>Доказательства вместо надежд</h3><p>Если безопасность не доказана, клиент блокирует трафик или помечает «не проверено», но не рапортует об успехе.</p></article>
+      <article class="card" data-reveal><div class="card__icon">{{icon:history|icon}}</div><h3>Откат обязателен</h3><p>Манифест изменений пишется атомарно. После падения приложения состояние восстанавливается, а в strict-режиме блокировка остаётся до вашего решения.</p></article>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="wrap split split--top">
+    <div data-reveal="left">
+      <span class="eyebrow">Watchdog</span>
+      <h2 class="h2" style="margin:18px 0 20px">Что происходит, <span class="grad">когда всё работает</span></h2>
+      <p class="lead">Туннель — это не «включил и забыл». Клиент постоянно проверяет, что трафик действительно идёт туда, куда должен.</p>
+    </div>
+    <div class="layers" data-stagger data-reveal="right">
+      <div class="layer"><div class="card__icon">{{icon:activity|icon}}</div><div><h3>Hard Mode</h3><p>Проверка egress-IP каждые 15 секунд.</p></div><span class="layer__n">15 с</span></div>
+      <div class="layer"><div class="card__icon">{{icon:plug-zap|icon}}</div><div><h3>Soft Mode</h3><p>TCP-проба прокси, три промаха — proxy-down без роняния TUN.</p></div><span class="layer__n">5 с</span></div>
+      <div class="layer"><div class="card__icon">{{icon:repeat|icon}}</div><div><h3>Авторестарт</h3><p>Бэкофф 2, 5, 10 секунд, затем failover по группе.</p></div><span class="layer__n">2/5/10</span></div>
+      <div class="layer"><div class="card__icon">{{icon:radar|icon}}</div><div><h3>Leak self-test</h3><p>Выход через физический адаптер считается утечкой.</p></div><span class="layer__n">авто</span></div>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="wrap">
+    <div class="callout" data-reveal>{{icon:triangle-alert|icon}}<div><b>Известное ограничение.</b> Чтобы узнать адрес VPN-сервера до подъёма туннеля, клиент делает bootstrap-запрос DNS напрямую. Имя сервера в этот момент видно провайдеру. Мы не скрываем это, потому что доверие строится на таких оговорках.</div></div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="wrap">
+    <div class="cta" data-reveal="scale">
+      <h2 class="h2">Хотите увидеть детали <span class="grad">в коде?</span></h2>
+      <p class="lead">Все шаги описаны в README и реализованы в открытом репозитории.</p>
+      <div class="hero__actions"><a class="btn btn--primary btn--lg" href="https://github.com/newnout6-a11y/vpn" rel="noopener">{{icon:github|icon}} Открыть на GitHub</a><a class="btn btn--ghost btn--lg" href="{{base}}security/">Модель безопасности</a></div>
+    </div>
+  </div>
+</section>
