@@ -10,7 +10,10 @@
 import { ALL_KNOWN_ALIASES } from '../tunAdapter'
 import { ADAPTER_EXCLUSION_PATTERN } from '../physicalAdapterSnapshot'
 import { fetchNetworkProfiles } from './networkProfiles'
-import { assertIfRow2Layout, defineStruct, IF_ROW2_OFFSETS, IF_ROW2_SIZE } from './koffiTypes'
+import {
+  AF_INET, AF_INET6, AF_UNSPEC, assertIfRow2Layout, defineStruct, ERROR_BUFFER_OVERFLOW, FORWARD_ROW2_SIZE, GAA_FLAGS,
+  IF_ROW2_OFFSETS, IF_ROW2_SIZE
+} from './koffiTypes'
 import { readNdisCharacteristicsByGuid } from './ipHelperReads'
 
 export interface NativeAdapterInfo {
@@ -127,14 +130,8 @@ export function snapshotFromSource(source: NativeAdapterSource): string {
 
 // ───────────────────────── FFI layer ─────────────────────────
 
-const AF_UNSPEC = 0
-const AF_INET = 2
-const AF_INET6 = 23
-const GAA_FLAGS = 0x2 | 0x4 | 0x80 // SKIP_ANYCAST | SKIP_MULTICAST | INCLUDE_GATEWAYS (kept for layout; gateways unused)
-const ERROR_BUFFER_OVERFLOW = 111
 const ERROR_FILE_NOT_FOUND = 2
 const ERROR_MORE_DATA = 234
-const FORWARD_ROW2_SIZE = 104
 const GAA_MIN_LENGTH = 276 // through TunnelType in IP_ADAPTER_ADDRESSES_LH (x64)
 const HKLM = -2147483646n // 0xFFFFFFFF80000002 as signed 64-bit
 const RRF_RT_STRINGS = 0x2 | 0x4 // REG_SZ | REG_EXPAND_SZ
@@ -264,7 +261,9 @@ function buildSourceFactory(): SourceFactory {
           row.writeUInt32LE(ifIndex, 8)
           const rr = GetIfEntry2(row)
           if (rr !== 0) throw new Error(`native adapter snapshot: GetIfEntry2(${ifIndex}) rc=${rr}`)
-          const permLen = Math.min(row.readUInt32LE(1056), 32)
+          const permLen = row.readUInt32LE(1056)
+          // A length beyond the 32-byte buffer is a decode problem, not something to clamp (fail closed).
+          if (permLen > 32) throw new Error(`native adapter snapshot: implausible PhysicalAddressLength ${permLen}`)
           result.push({
             ifIndex,
             interfaceGuid: guid,

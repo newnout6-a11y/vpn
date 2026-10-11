@@ -11,22 +11,19 @@
  * module never touch the native library. x64/arm64 only (struct offsets below
  * are the 64-bit layouts).
  */
-import { assertIfRow2Layout, defineStruct, IF_ROW2_OFFSETS, IF_ROW2_SIZE } from './koffiTypes'
+import {
+  AF_INET, AF_INET6, AF_UNSPEC, assertIfRow2Layout, defineStruct, ERROR_BUFFER_OVERFLOW, FORWARD_ROW2_SIZE, GAA_FLAGS,
+  IF_ROW2_OFFSETS, IF_ROW2_SIZE
+} from './koffiTypes'
 import {
   assertEnumerationPlausible, formatIpv4, formatIpv6,
   type RawAdapter, type RawIfConfig, type RawRoute, type RawUnicast
 } from './ipHelperTransforms'
 
-const AF_UNSPEC = 0
-const AF_INET = 2
-const AF_INET6 = 23
-const ERROR_BUFFER_OVERFLOW = 111
-const GAA_FLAGS = 0x2 | 0x4 | 0x80 // skip anycast, skip multicast, include gateways
 
 const MAX_ADAPTERS = 4096
 const MAX_UNICAST = 1024
 const MAX_ADDRESS_NODES = 256
-const FORWARD_ROW2_SIZE = 104
 
 let api: any = null
 

@@ -10,6 +10,14 @@ export function defineStruct(koffi: any, name: string, definition: Record<string
   }
 }
 
+// Win32 constants shared by every native reader, so the two cannot drift apart.
+export const AF_UNSPEC = 0
+export const AF_INET = 2
+export const AF_INET6 = 23
+export const ERROR_BUFFER_OVERFLOW = 111
+/** GAA_FLAG_SKIP_ANYCAST | SKIP_MULTICAST | INCLUDE_GATEWAYS */
+export const GAA_FLAGS = 0x2 | 0x4 | 0x80
+export const FORWARD_ROW2_SIZE = 104
 export const IF_ROW2_SIZE = 1352
 
 /** Byte offsets inside MIB_IF_ROW2 that the raw-buffer readers rely on (x64/arm64 layout, ifmib.h). */
