@@ -52,6 +52,7 @@ import {
 } from './physicalAdapterLockdown'
 import { relaunchElevatedIfNeeded } from './admin'
 import { clearAppLog, getFullLogs, logEvent, openLogFolder, startEngineLogRetention, type AppLogLevel } from './appLogger'
+import { timePhase } from './psTiming'
 import { runSystemDiagnostics } from './systemDiagnostics'
 import { combinedPreStartProbe, getRoutingPlan } from './connectionPlanner'
 import { getSmartRouteRuleSetState, maybeRefreshSmartRouteRuleSets, refreshSmartRouteRuleSets } from './ruleSetManager'
@@ -1726,11 +1727,11 @@ async function quitFromTray(): Promise<void> {
 async function performCrashRecovery(): Promise<void> {
   if (process.platform !== 'win32') return
 
-  await recoverStaleBaseline()
+  await timePhase('recovery.baseline', () => recoverStaleBaseline())
 
-  await recoverStaleKillSwitch(isOwnedTunRuntimeRunning)
+  await timePhase('recovery.killswitch', () => recoverStaleKillSwitch(isOwnedTunRuntimeRunning))
 
-  if (await isPhysicalAdapterLockdownApplied()) {
+  if (await timePhase('recovery.lockdown-check', () => isPhysicalAdapterLockdownApplied())) {
     if (!(await isOwnedTunRuntimeRunning())) {
       logEvent('warn', 'phys-lockdown', 'recovering stale adapter lockdown — sing-box not running')
       try {
@@ -1741,11 +1742,11 @@ async function performCrashRecovery(): Promise<void> {
     }
   }
 
-  await repairOrphanedPhysicalAdapterDns('startup orphaned DNS repair')
+  await timePhase('recovery.orphan-dns', () => repairOrphanedPhysicalAdapterDns('startup orphaned DNS repair'))
     .catch(err => logEvent('warn', 'phys-lockdown', 'startup orphaned DNS repair failed', err))
 
   try {
-    const status = await autoconfig.getStatus()
+    const status = await timePhase('recovery.autoconfig', () => autoconfig.getStatus())
     const envApplied = status.find(t => t.id === 'env')?.applied
     if (envApplied) {
       if (settingsStore.get().routingMode === 'soft' && settingsStore.get().connectionMode !== 'directVpn') {

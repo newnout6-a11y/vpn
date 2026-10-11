@@ -10,6 +10,7 @@ if (typeof (util as any).isFunction !== 'function') {
 }
 
 import sudo from 'sudo-prompt'
+import { timePs } from './psTiming'
 
 const exec = promisify(execCb)
 const execFile = promisify(execFileCb)
@@ -76,9 +77,17 @@ export async function isProcessElevated(): Promise<boolean> {
   return elevatedPromise
 }
 
-export async function execElevated(
+export function execElevated(
   command: string,
   options: { timeout?: number; maxBuffer?: number } = {}
+): Promise<{ stdout: string; stderr: string }> {
+  const label = command.startsWith('powershell.exe') ? 'powershell' : command.split(' ')[0]
+  return timePs('elevated-exec', label, () => execElevatedUntimed(command, options))
+}
+
+async function execElevatedUntimed(
+  command: string,
+  options: { timeout?: number; maxBuffer?: number }
 ): Promise<{ stdout: string; stderr: string }> {
   if (process.platform !== 'win32' || await isProcessElevated()) {
     const execOptions = {
