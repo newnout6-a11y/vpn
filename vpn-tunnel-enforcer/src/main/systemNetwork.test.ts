@@ -48,6 +48,19 @@ vi.mock('child_process', async importOriginal => {
   }
   return { ...actual, execFile, default: { ...actual, execFile } }
 })
+// AT-03-003 / AT-03-007: native WinINet notification is mocked; default is "koffi unavailable" so the PS fallback stays covered.
+const native = vi.hoisted(() => ({ mode: 'unavailable' as 'unavailable' | 'ok' | 'false', calls: 0 }))
+vi.mock('./native/winInet', () => {
+  class WinInetCallError extends Error {}
+  return {
+    WinInetCallError,
+    notifyWinInetSettingsChangedNative: async () => {
+      native.calls++
+      if (native.mode === 'unavailable') throw new Error('koffi load failed')
+      if (native.mode === 'false') throw new WinInetCallError('WinINet refresh failed')
+    }
+  }
+})
 vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
 vi.mock('./recoveryManifest', () => ({
   recoveryManifestPath: (name: string) => `C:\\ProgramData\\VPNTE\\manifests\\${name}`,
@@ -67,6 +80,7 @@ beforeEach(() => {
   state.manifest = null; state.failRead = false; state.failWrite = false; state.failApply = false
   state.failNetsh = false; state.failNotify = false; state.failedSteps = []; state.scripts = []; state.writes = []; state.operations = []
   state.nativeFailure = false; state.reportPatch = null
+  native.mode = 'unavailable'; native.calls = 0
   Object.defineProperty(process, 'platform', { configurable: true, value: 'win32' })
 })
 afterEach(() => Object.defineProperty(process, 'platform', platform))
@@ -191,6 +205,27 @@ finally { [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree($testRoot,$fa
     state.failApply = true
     expect((await applyTunNetworkBaseline()).success).toBe(false)
     expect(state.scripts.some(script => script.includes('foreach ($s in $values)'))).toBe(true)
+    expect(state.manifest).toBeNull()
+  })
+  it('apply notifies WinINet in-process without spawning PowerShell when native is available', async () => {
+    native.mode = 'ok'
+    expect((await applyTunNetworkBaseline()).success).toBe(true)
+    expect(native.calls).toBe(1)
+    expect(state.scripts.some(script => script.includes('InternetSetOption'))).toBe(false)
+  })
+  it('apply falls back to PowerShell when native is unavailable, and still fails closed on notify failure', async () => {
+    expect((await applyTunNetworkBaseline()).success).toBe(true)
+    expect(state.scripts.some(script => script.includes('InternetSetOption'))).toBe(true)
+    state.manifest = null; state.failNotify = true
+    expect((await applyTunNetworkBaseline()).success).toBe(false)
+  })
+  it('apply treats a native WinINet false as authoritative: no PowerShell retry, baseline rolled back', async () => {
+    native.mode = 'false'
+    const result = await applyTunNetworkBaseline()
+    expect(result.success).toBe(false)
+    expect(result.details).toContain('WinINet refresh failed')
+    // Only the (separate) combined rollback script embeds InternetSetOption; no standalone notify script ran.
+    expect(state.scripts.filter(script => script.includes('InternetSetOption') && !script.includes('steps=@($results)'))).toHaveLength(0)
     expect(state.manifest).toBeNull()
   })
   it('does not claim successful apply on WinHTTP reset failure', async () => {
