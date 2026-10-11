@@ -535,7 +535,8 @@ async function physicalSourceTcpPing(host: string, port: number): Promise<number
   return null
 }
 
-async function getPhysicalIpv4Sources(): Promise<PhysicalIpv4Source[]> {
+/** Exported for tests: cache -> os.networkInterfaces -> native iphlpapi -> PowerShell. */
+export async function getPhysicalIpv4Sources(): Promise<PhysicalIpv4Source[]> {
   if (process.platform !== 'win32') return []
   if (physicalSourceCache && Date.now() - physicalSourceCache.at < PHYSICAL_SOURCE_CACHE_MS) {
     return physicalSourceCache.value

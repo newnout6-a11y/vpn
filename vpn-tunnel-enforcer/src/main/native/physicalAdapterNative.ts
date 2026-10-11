@@ -10,6 +10,7 @@
 import { ALL_KNOWN_ALIASES } from '../tunAdapter'
 import { ADAPTER_EXCLUSION_PATTERN } from '../physicalAdapterSnapshot'
 import { fetchNetworkProfiles } from './networkProfiles'
+import { defineStruct } from './koffiTypes'
 
 export interface NativeAdapterInfo {
   ifIndex: number
@@ -139,7 +140,19 @@ function ipv4At(buf: Buffer, off: number): string {
 }
 
 
+type SourceFactory = (profiles: Map<number, string[]>) => NativeAdapterSource
+let sourceFactory: SourceFactory | null = null
+
+/** koffi types and functions are declared once per process; each snapshot only binds fresh profile names. */
 export function createKoffiSource(profiles: Map<number, string[]>): NativeAdapterSource {
+  sourceFactory ??= buildSourceFactory()
+  return sourceFactory(profiles)
+}
+
+/** Test seam: forget the cached bindings. */
+export function resetKoffiSourceForTests(): void { sourceFactory = null }
+
+function buildSourceFactory(): SourceFactory {
   if (process.platform !== 'win32') throw new Error('native adapter snapshot: win32 only')
   if (process.arch !== 'x64' && process.arch !== 'arm64') throw new Error('native adapter snapshot: unsupported architecture')
   // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -148,7 +161,7 @@ export function createKoffiSource(profiles: Map<number, string[]>): NativeAdapte
   const adv = koffi.load('advapi32.dll')
 
   // Layout guards: wrong size => refuse (fail closed).
-  const ifRow = koffi.struct('VPNTE_MIB_IF_ROW2', {
+  const ifRow = defineStruct(koffi, 'VPNTE_MIB_IF_ROW2', {
     InterfaceLuid: 'uint64_t', InterfaceIndex: 'uint32_t', InterfaceGuid: koffi.array('uint8_t', 16),
     Alias: koffi.array('uint16_t', 257), Description: koffi.array('uint16_t', 257),
     PhysicalAddressLength: 'uint32_t', PhysicalAddress: koffi.array('uint8_t', 32), PermanentPhysicalAddress: koffi.array('uint8_t', 32),
@@ -162,8 +175,8 @@ export function createKoffiSource(profiles: Map<number, string[]>): NativeAdapte
     OutUcastOctets: 'uint64_t', OutMulticastOctets: 'uint64_t', OutBroadcastOctets: 'uint64_t', OutQLen: 'uint64_t'
   })
   if (koffi.sizeof(ifRow) !== IF_ROW2_SIZE) throw new Error(`native adapter snapshot: MIB_IF_ROW2 size ${koffi.sizeof(ifRow)} != ${IF_ROW2_SIZE}`)
-  const sockaddrInet = koffi.struct('VPNTE_SOCKADDR_INET', { raw: koffi.array('uint8_t', 28) })
-  const fwdRow = koffi.struct('VPNTE_MIB_IPFORWARD_ROW2', {
+  const sockaddrInet = defineStruct(koffi, 'VPNTE_SOCKADDR_INET', { raw: koffi.array('uint8_t', 28) })
+  const fwdRow = defineStruct(koffi, 'VPNTE_MIB_IPFORWARD_ROW2', {
     InterfaceLuid: 'uint64_t', InterfaceIndex: 'uint32_t', DestAddr: sockaddrInet, DestPrefixLength: 'uint8_t',
     NextHop: sockaddrInet, SitePrefixLength: 'uint8_t', ValidLifetime: 'uint32_t', PreferredLifetime: 'uint32_t',
     Metric: 'uint32_t', Protocol: 'uint32_t', Loopback: 'uint8_t', AutoconfigureAddress: 'uint8_t', Publish: 'uint8_t',
@@ -200,7 +213,7 @@ export function createKoffiSource(profiles: Map<number, string[]>): NativeAdapte
     throw new Error('native adapter snapshot: registry value kept growing')
   }
 
-  return {
+  return profiles => ({
     listUpAdapters() {
       const size = [0]
       let rc = GetAdaptersAddresses(AF_UNSPEC, GAA_FLAGS, null, null, size)
@@ -318,7 +331,7 @@ export function createKoffiSource(profiles: Map<number, string[]>): NativeAdapte
     listNetworkProfiles() {
       return profiles
     }
-  }
+  })
 }
 
 /** JSON text equivalent to PHYSICAL_ADAPTER_SNAPSHOT_SCRIPT stdout. Throws on anything unexpected. */

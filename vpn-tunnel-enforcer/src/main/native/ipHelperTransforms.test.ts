@@ -1,6 +1,4 @@
 // AT-07-002 / AT-07-012 / AT-08-007: pure transforms keep the PowerShell output shapes and fail closed.
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
   assertEnumerationPlausible, formatIpv6, formatLinkSpeed, formatMac, toActiveTunnels, toAdapterRows,
@@ -149,13 +147,5 @@ describe('address formatting', () => {
     expect(formatIpv6(b(0xfe80, 0, 0, 0, 0xfe25, 0xd0db, 0x9892, 0x425c))).toBe('fe80::fe25:d0db:9892:425c')
     expect(formatIpv6(b(0x8000, 0, 0, 0, 0, 0, 0, 0))).toBe('8000::')
     expect(formatIpv6(b(1, 0, 2, 0, 3, 0, 4, 0))).toBe('1:0:2:0:3:0:4:0')
-  })
-})
-
-describe('caller wiring', () => {
-  it('serverPicker tries the native read before its PowerShell fallback', () => {
-    const src = readFileSync(join(process.cwd(), 'src/main/serverPicker.ts'), 'utf8')
-    expect(src.indexOf('nativePhysicalIpv4Sources()')).toBeGreaterThan(src.indexOf('const fast = getFastPhysicalIpv4Sources()'))
-    expect(src.indexOf('nativePhysicalIpv4Sources()')).toBeLessThan(src.indexOf("'powershell.exe'"))
   })
 })

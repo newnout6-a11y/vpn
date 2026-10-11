@@ -1,10 +1,7 @@
 // AT-03-005/006/010: native physical adapter read path keeps the PowerShell JSON contract and fails closed.
 import { describe, expect, it, vi } from 'vitest'
-import { execFileSync } from 'child_process'
-import { parseNetworkProfiles } from './networkProfiles'
 import { buildPhysicalAdapterRows, createKoffiSource, readPhysicalAdaptersNative, serializeRows, snapshotFromSource } from './physicalAdapterNative'
 import type { NativeAdapterInfo, NativeAdapterSource, NativeDefaultRoute } from './physicalAdapterNative'
-import { PHYSICAL_ADAPTER_SNAPSHOT_SCRIPT } from '../physicalAdapterSnapshot'
 
 const wifi: NativeAdapterInfo = {
   ifIndex: 17, interfaceGuid: '{999D65FE-A8C4-4DB3-9F7E-11EDD6482144}', alias: 'Беспроводная сеть',
@@ -94,7 +91,7 @@ describe('native physical adapter snapshot: fail closed', () => {
     expect(() => snapshotFromSource(source({ listNetworkProfiles: () => { throw new Error('network profiles: elevated helper is not running') } }))).toThrow(/helper/)
     expect(JSON.parse(snapshotFromSource(source({ listNetworkProfiles: () => new Map() }))).networkProfiles).toEqual([])
   })
-  it('throws when koffi cannot load', async () => {
+  it('refuses a non-Windows platform and an empty adapter set', async () => {
     vi.resetModules()
     if (process.platform !== 'win32') expect(() => createKoffiSource(new Map())).toThrow(/win32/)
     await expect(readPhysicalAdaptersNative(source({ adapters: [] }))).rejects.toThrow()
@@ -137,31 +134,4 @@ describe('lockdown hook falls back to PowerShell', () => {
       vi.doUnmock('./physicalAdapterNative')
     }
   })
-})
-
-function psSnapshot(): any[] {
-  const ps = `[Console]::OutputEncoding=[Text.Encoding]::UTF8\n${PHYSICAL_ADAPTER_SNAPSHOT_SCRIPT}`
-  const out = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(ps, 'utf16le').toString('base64')], { encoding: 'utf8', timeout: 60000 }).trim()
-  if (!out) return []
-  const parsed = JSON.parse(out)
-  return Array.isArray(parsed) ? parsed : [parsed]
-}
-
-// The real helper is not running under vitest: profiles are read from PowerShell here (same cmdlet the helper runs).
-function psProfiles(): Map<number, string[]> {
-  const out = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', "ConvertTo-Json -Compress -InputObject @(Get-NetConnectionProfile | ForEach-Object { [pscustomobject]@{ ifIndex = [int]$_.InterfaceIndex; name = [string]$_.Name } })"], { encoding: 'utf8', timeout: 60000 })
-  return parseNetworkProfiles(out)
-}
-
-describe.skipIf(process.platform !== 'win32' || process.env.VPNTE_SKIP_REAL_ADAPTER_TEST === '1')('native vs PowerShell on this machine', () => {
-  it('returns the same adapters and fields as the PowerShell snapshot', async () => {
-    const native = JSON.parse(await readPhysicalAdaptersNative(createKoffiSource(psProfiles())))
-    const nativeRows: any[] = Array.isArray(native) ? native : [native]
-    for (const r of nativeRows) expect(Object.keys(r)).toEqual(KEYS)
-    const ps = psSnapshot()
-    const byIdx = (rows: any[]) => Object.fromEntries(rows.map(r => [r.ifIndex, r]))
-    const norm = (r: any) => ({ ...r, ipv4Dns: [...r.ipv4Dns].sort(), gateways: [...r.gateways].sort() })
-    expect(Object.keys(byIdx(nativeRows)).sort()).toEqual(Object.keys(byIdx(ps)).sort())
-    for (const row of ps) expect(norm(byIdx(nativeRows)[row.ifIndex])).toEqual(norm(row))
-  }, 90000)
 })

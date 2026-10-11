@@ -11,6 +11,7 @@
  * module never touch the native library. x64/arm64 only (struct offsets below
  * are the 64-bit layouts).
  */
+import { defineStruct } from './koffiTypes'
 import {
   assertEnumerationPlausible, formatIpv4, formatIpv6,
   type RawAdapter, type RawIfConfig, type RawRoute, type RawUnicast
@@ -35,16 +36,16 @@ function load(): any {
   const koffi = require('koffi')
   const ip = koffi.load('iphlpapi.dll')
   const adv = koffi.load('advapi32.dll')
-  const SockAddr = koffi.struct('VPNTE_SOCKET_ADDRESS', { lpSockaddr: 'void *', iSockaddrLength: 'int32_t' })
-  const Unicast = koffi.struct('VPNTE_IP_ADAPTER_UNICAST_ADDRESS', {
+  const SockAddr = defineStruct(koffi, 'VPNTE_SOCKET_ADDRESS', { lpSockaddr: 'void *', iSockaddrLength: 'int32_t' })
+  const Unicast = defineStruct(koffi, 'VPNTE_IP_ADAPTER_UNICAST_ADDRESS', {
     Length: 'uint32_t', Flags: 'uint32_t', Next: 'void *', Address: SockAddr,
     PrefixOrigin: 'uint32_t', SuffixOrigin: 'uint32_t', DadState: 'uint32_t',
     ValidLifetime: 'uint32_t', PreferredLifetime: 'uint32_t', LeaseLifetime: 'uint32_t', OnLinkPrefixLength: 'uint8_t'
   })
-  const AddrNode = koffi.struct('VPNTE_IP_ADAPTER_ADDRESS_NODE', {
+  const AddrNode = defineStruct(koffi, 'VPNTE_IP_ADAPTER_ADDRESS_NODE', {
     Length: 'uint32_t', Reserved: 'uint32_t', Next: 'void *', Address: SockAddr
   })
-  const Adapter = koffi.struct('VPNTE_IP_ADAPTER_ADDRESSES', {
+  const Adapter = defineStruct(koffi, 'VPNTE_IP_ADAPTER_ADDRESSES', {
     Length: 'uint32_t', IfIndex: 'uint32_t', Next: 'void *', AdapterName: 'void *',
     FirstUnicastAddress: 'void *', FirstAnycastAddress: 'void *', FirstMulticastAddress: 'void *',
     FirstDnsServerAddress: 'void *', DnsSuffix: 'void *', Description: 'void *', FriendlyName: 'void *',
