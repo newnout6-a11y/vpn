@@ -206,7 +206,6 @@
         const R0 = base * 1.1 * p.r * (0.03 + f0 * 2.7), R1 = base * 1.1 * p.r * (0.03 + f1 * 2.7)
         const x0 = cxs + Math.cos(p.a) * R0, y0 = cys + Math.sin(p.a) * R0 * 1.15
         const x1 = cxs + Math.cos(p.a) * R1, y1 = cys + Math.sin(p.a) * R1 * 1.15
-        const col = mix(GRN, VIO, smooth(0, 0.8, f0))
         ctx.strokeStyle = `rgba(255,90,31,${smooth(0, 0.1, f0) * (1 - smooth(0.45, 0.8, f0)) * 0.85})`
         ctx.lineWidth = 0.8 + f0 * 1.4
         ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x0, y0); ctx.stroke()
