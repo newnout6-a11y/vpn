@@ -340,7 +340,7 @@ export async function warmPhysicalAdaptersSnapshot(): Promise<void> {
  * if the network signature has not changed within the TTL window, or querying
  * fresh adapter state from PowerShell.
  */
-async function snapshotPhysicalAdapters(options?: { forceFresh?: boolean }): Promise<AdapterSnapshot[]> {
+export async function snapshotPhysicalAdapters(options?: { forceFresh?: boolean }): Promise<AdapterSnapshot[]> {
   const currentSig = getLocalNetSignature()
   // Return the fresh snapshot if taken within 30s to avoid expensive PS reruns, provided network topology has not changed.
   if (!options?.forceFresh && cachedAdaptersSnapshot && Date.now() - cachedAdaptersSnapshotTime < 30000 && currentSig && currentSig === cachedNetSignature) {

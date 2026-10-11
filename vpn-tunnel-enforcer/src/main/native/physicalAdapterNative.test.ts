@@ -123,18 +123,15 @@ describe('lockdown hook falls back to PowerShell', () => {
     delete process.env.VPNTE_DISABLE_NATIVE_NET
     try {
       native.mockRejectedValueOnce(new Error('boom'))
-      const lock = await import('../physicalAdapterLockdown') as any
-      const snap = lock.__snapshotForTest ?? null
-      // The hook is private; drive it through the exported warm-up which snapshots adapters.
+      const lock = await import('../physicalAdapterLockdown')
       lock.clearPhysicalAdaptersSnapshotCache()
-      await lock.warmPhysicalAdaptersSnapshot()
-      expect(native).toHaveBeenCalledTimes(1)
-      expect(adapter).toHaveBeenCalledWith('inspect-physical-adapters', expect.any(Number))
-      void snap
+      // Native fails: the snapshot the hook publishes comes from the PowerShell worker.
+      expect((await lock.snapshotPhysicalAdapters()).map(a => a.alias)).toEqual(['FromPS'])
       native.mockResolvedValueOnce(snapshotFromSource(source()))
       adapter.mockClear()
       lock.clearPhysicalAdaptersSnapshotCache()
-      await lock.warmPhysicalAdaptersSnapshot()
+      // Native succeeds: its rows are published and the worker is not consulted.
+      expect((await lock.snapshotPhysicalAdapters()).map(a => a.alias)).toEqual([wifi.alias])
       expect(adapter).not.toHaveBeenCalled()
     } finally {
       if (prev === undefined) delete process.env.VPNTE_DISABLE_NATIVE_NET; else process.env.VPNTE_DISABLE_NATIVE_NET = prev

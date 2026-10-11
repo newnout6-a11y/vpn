@@ -368,7 +368,10 @@ export async function getRoutingPlan(opts?: {
   if (verified) return plan
   // Fail closed on the claim, not on availability: never report "no conflicting TUN" for an unread network.
   plan.steps.unshift({ label: 'Проверить внешние туннели', before: TUNNELS_UNVERIFIED_NOTE, after: 'Повторите проверку; не подтверждено, что второго TUN нет.', status: 'warn' })
-  plan.explanation = `${TUNNELS_UNVERIFIED_NOTE} ${plan.explanation}`
+  // A ready plan's explanation asserts "no conflicting TUN"; replace it instead of contradicting it.
+  plan.explanation = plan.status === 'ready'
+    ? `${TUNNELS_UNVERIFIED_NOTE} Остальные условия запуска выполнены, но отсутствие конфликта не подтверждено.`
+    : `${TUNNELS_UNVERIFIED_NOTE} ${plan.explanation}`
   return plan
 }
 

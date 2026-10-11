@@ -23,6 +23,9 @@ const AF_INET6 = 23
 const ERROR_BUFFER_OVERFLOW = 111
 const GAA_FLAGS = 0x2 | 0x4 | 0x80 // skip anycast, skip multicast, include gateways
 
+const MAX_ADAPTERS = 4096
+const MAX_UNICAST = 1024
+const MAX_ADDRESS_NODES = 256
 const IF_ROW2_SIZE = 1352
 const FORWARD_ROW2_SIZE = 104
 
@@ -192,9 +195,12 @@ export function readRawIfConfigs(): RawIfConfig[] {
 
   const result: RawIfConfig[] = []
   let cur: any = a.koffi.decode(buf, a.Adapter)
-  for (let guard = 0; guard < 4096; guard++) {
+  for (let guard = 0; ; guard++) {
+    // A complete read or a throw: never silently truncate at a bound.
+    if (guard >= MAX_ADAPTERS) throw new Error(`GetAdaptersAddresses: more than ${MAX_ADAPTERS} adapters`)
     const unicast: RawUnicast[] = []
-    for (let u: any = cur.FirstUnicastAddress, g = 0; u && g < 1024; g++) {
+    for (let u: any = cur.FirstUnicastAddress, g = 0; u; g++) {
+      if (g >= MAX_UNICAST) throw new Error(`GetAdaptersAddresses: more than ${MAX_UNICAST} unicast addresses on interface ${cur.IfIndex}`)
       const r: any = a.koffi.decode(u, a.Unicast)
       const s = sockaddrText(a, r.Address)
       unicast.push({ ifIndex: cur.IfIndex, family: s.family, address: s.text, dadState: r.DadState, suffixOrigin: r.SuffixOrigin })
@@ -202,7 +208,8 @@ export function readRawIfConfigs(): RawIfConfig[] {
     }
     const walk = (head: any): string[] => {
       const list: string[] = []
-      for (let p: any = head, g = 0; p && g < 256; g++) {
+      for (let p: any = head, g = 0; p; g++) {
+        if (g >= MAX_ADDRESS_NODES) throw new Error(`GetAdaptersAddresses: more than ${MAX_ADDRESS_NODES} gateway/DNS entries on interface ${cur.IfIndex}`)
         const r: any = a.koffi.decode(p, a.AddrNode)
         list.push(sockaddrText(a, r.Address).text)
         p = r.Next

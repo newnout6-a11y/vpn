@@ -111,6 +111,8 @@ describe('getRoutingPlan unverified tunnel read', () => {
 
     expect(plan.steps[0]).toMatchObject({ label: 'Проверить внешние туннели', status: 'warn' })
     expect(plan.explanation).toContain('не исключён')
+    // The ready explanation claims no conflicting TUN; that claim must not survive an unread network.
+    expect(plan.explanation).not.toContain('Конфликтующих TUN не найдено')
   })
 
   it('adds no warning when the read was verified', async () => {
