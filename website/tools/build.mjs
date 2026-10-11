@@ -9,6 +9,8 @@ const SRC = join(ROOT, 'src')
 const PUB = join(ROOT, 'public')
 const DIST = join(ROOT, 'dist')
 const SITE_URL = (process.env.SITE_URL || '').replace(/\/$/, '')
+// Путь развёртывания: «/» у корня домена, «/sub/» если SITE_URL указывает на подпапку.
+const SITE_PATH = SITE_URL ? new URL(SITE_URL).pathname.replace(/\/$/, '') + '/' : '/'
 
 const read = (p) => readFileSync(p, 'utf8')
 
@@ -62,7 +64,7 @@ function build() {
 
   for (const { file, meta, body } of pages) {
     const depth = meta.path === '/' ? 0 : meta.path.split('/').filter(Boolean).length
-    const base = meta.file === '404' ? '/' : depth === 0 ? '' : '../'.repeat(depth)
+    const base = meta.file === '404' ? SITE_PATH : depth === 0 ? '' : '../'.repeat(depth)
     const vars = {
       base,
       title: meta.title,

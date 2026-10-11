@@ -13,16 +13,25 @@ const CHROME = process.env.CHROME || 'C:\\Program Files\\Google\\Chrome\\Applica
 
 const http = await import('node:http')
 const fs = await import('node:fs')
-const { extname, normalize } = await import('node:path')
+const { extname, resolve, sep } = await import('node:path')
 const DIST = join(ROOT, 'dist')
 const T = { '.html': 'text/html; charset=utf-8', '.css': 'text/css', '.js': 'text/javascript', '.svg': 'image/svg+xml', '.woff2': 'font/woff2', '.png': 'image/png', '.txt': 'text/plain' }
+// Только файлы внутри dist; битый %-код — 400, выход за dist — 403.
+function safeFile(url) {
+  let p
+  try { p = decodeURIComponent(new URL(url, 'http://x').pathname) } catch { return { code: 400 } }
+  const file = resolve(DIST, '.' + p)
+  return file === DIST || file.startsWith(DIST + sep) ? { file } : { code: 403 }
+}
 const srv = http.createServer((req, res) => {
-  let p = decodeURIComponent(new URL(req.url, 'http://x').pathname)
-  let f = normalize(join(DIST, p))
+  const r = safeFile(req.url)
+  if (r.code) { res.writeHead(r.code).end(); return }
+  let f = r.file
   if (fs.existsSync(f) && fs.statSync(f).isDirectory()) f = join(f, 'index.html')
   if (!fs.existsSync(f)) { res.writeHead(404); res.end(fs.readFileSync(join(DIST, '404.html'))); return }
   res.writeHead(200, { 'Content-Type': T[extname(f)] || 'application/octet-stream' }); res.end(fs.readFileSync(f))
-}).listen(0)
+})
+await new Promise((r) => srv.listen(0, '127.0.0.1', r))
 const port = srv.address().port
 
 const browser = await puppeteer.launch({ executablePath: CHROME, headless: true, args: ['--no-sandbox', '--enable-unsafe-swiftshader'] })

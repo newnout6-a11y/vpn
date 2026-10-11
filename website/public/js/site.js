@@ -635,8 +635,8 @@
   /* ---------- копирование команд ---------- */
   function initCopy() {
     $$('[data-copy]').forEach((b) => {
-      let original = null // исходная подпись запоминается один раз, повторный клик не сохраняет временный текст
-      const restore = () => setTimeout(() => (b.innerHTML = original), 1600)
+      let original = null, timer = null // исходная подпись запоминается один раз, повторный клик не сохраняет временный текст
+      const restore = () => { clearTimeout(timer); timer = setTimeout(() => (b.innerHTML = original), 1600) }
       b.addEventListener('click', async () => {
         const src = $(b.dataset.copy); if (!src) return
         original ??= b.innerHTML

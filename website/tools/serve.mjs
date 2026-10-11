@@ -1,7 +1,7 @@
 // Dev-сервер без зависимостей: собирает сайт, раздаёт dist/, пересобирает при изменениях.
 import http from 'node:http'
 import { readFileSync, existsSync, statSync, watch } from 'node:fs'
-import { join, extname, dirname, normalize } from 'node:path'
+import { join, extname, dirname, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { build } from './build.mjs'
 
@@ -21,10 +21,18 @@ let timer
 const rebuild = () => { clearTimeout(timer); timer = setTimeout(() => { try { build() } catch (e) { console.error(e.message) } }, 120) }
 for (const d of ['src', 'public']) watch(join(ROOT, d), { recursive: true }, rebuild)
 
+// Только файлы внутри dist: путь декодируется и разрешается до проверки. Битый %-код даёт 400, выход за dist — 403.
+function safeFile(url) {
+  let p
+  try { p = decodeURIComponent(new URL(url, 'http://x').pathname) } catch { return { code: 400 } }
+  const file = resolve(DIST, '.' + p)
+  return file === DIST || file.startsWith(DIST + sep) ? { file } : { code: 403 }
+}
+
 http.createServer((req, res) => {
-  let p = decodeURIComponent(new URL(req.url, 'http://x').pathname)
-  let file = normalize(join(DIST, p))
-  if (!file.startsWith(DIST)) { res.writeHead(403).end(); return }
+  const r = safeFile(req.url)
+  if (r.code) { res.writeHead(r.code).end(); return }
+  let file = r.file
   if (existsSync(file) && statSync(file).isDirectory()) file = join(file, 'index.html')
   if (!existsSync(file)) {
     res.writeHead(404, { 'Content-Type': TYPES['.html'] })

@@ -3,7 +3,7 @@ import puppeteer from 'puppeteer-core'
 import { readFileSync } from 'node:fs'
 import { join, dirname, basename } from 'node:path'
 const [, , file, ch = '1500'] = process.argv
-const b = await puppeteer.launch({ executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe', headless: true })
+const b = await puppeteer.launch({ executablePath: process.env.CHROME || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe', headless: true })
 const p = await b.newPage()
 const data = readFileSync(file).toString('base64')
 await p.setContent(`<img id="i" src="data:image/png;base64,${data}">`)

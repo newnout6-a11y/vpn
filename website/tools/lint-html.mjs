@@ -11,7 +11,10 @@ walk(DIST)
 
 let problems = 0
 for (const file of pages) {
-  const html = readFileSync(file, 'utf8').replace(/<script[\s\S]*?<\/script>/g, '').replace(/<!--[\s\S]*?-->/g, '')
+  // raw — для ссылок (включая src у <script>), html без скриптов — для баланса тегов
+  const raw = readFileSync(file, 'utf8').replace(/<!--[\s\S]*?-->/g, '')
+  const html = raw.replace(/<script[\s\S]*?<\/script>/g, '')
+  let pageProblem = false
   const stack = []
   const re = /<(\/?)([a-zA-Z][\w-]*)([^>]*?)(\/?)>/g
   let m
@@ -22,15 +25,15 @@ for (const file of pages) {
     if (!close) stack.push(t)
     else {
       const top = stack.pop()
-      if (top !== t) { console.log(`✘ ${file.replace(DIST, '')}: ожидался </${top}>, найден </${t}> (поз. ${m.index})`); problems++; break }
+      if (top !== t) { console.log(`✘ ${file.replace(DIST, '')}: ожидался </${top}>, найден </${t}> (поз. ${m.index})`); problems++; pageProblem = true; break }
     }
   }
-  if (stack.length && !problems) { console.log(`✘ ${file.replace(DIST, '')}: не закрыты ${stack.slice(-3).join(',')}`); problems++ }
+  if (stack.length && !pageProblem) { console.log(`✘ ${file.replace(DIST, '')}: не закрыты ${stack.slice(-3).join(',')}`); problems++ }
   if (/\{\{[^}]*\}\}/.test(html)) { console.log(`✘ ${file.replace(DIST, '')}: остались плейсхолдеры`); problems++ }
   // локальные ссылки
-  for (const l of html.matchAll(/(?:href|src)="([^"#?]+)"/g)) {
-    const u = l[1]
-    if (/^(https?:|mailto:|data:)/.test(u)) continue
+  for (const l of raw.matchAll(/(?:href|src)="([^"]+)"/g)) {
+    const u = l[1].replace(/[?#].*$/, '') // query и fragment не влияют на файл
+    if (!u || /^(https?:|mailto:|data:)/.test(u)) continue
     const target = u.startsWith('/') ? join(DIST, u) : normalize(join(dirname(file), u))
     const ok = existsSync(target) && (!statSync(target).isDirectory() || existsSync(join(target, 'index.html')))
     if (!ok) { console.log(`✘ ${file.replace(DIST, '')}: битая ссылка ${u}`); problems++ }

@@ -1,7 +1,7 @@
 // Проверка шрифтов в реальном Chrome без скриншотов: какие семейства реально применены и загружены,
 // есть ли горизонтальный оверфлоу и ошибки консоли. node tools/fontcheck.mjs
 import puppeteer from 'puppeteer-core'
-import { join, dirname, extname, normalize } from 'node:path'
+import { join, dirname, extname, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import http from 'node:http'
 import fs from 'node:fs'
@@ -9,13 +9,22 @@ import fs from 'node:fs'
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const DIST = join(ROOT, 'dist')
 const T = { '.html': 'text/html; charset=utf-8', '.css': 'text/css', '.js': 'text/javascript', '.svg': 'image/svg+xml', '.woff2': 'font/woff2', '.png': 'image/png', '.txt': 'text/plain' }
+// Только файлы внутри dist; битый %-код — 400, выход за dist — 403.
+function safeFile(url) {
+  let p
+  try { p = decodeURIComponent(new URL(url, 'http://x').pathname) } catch { return { code: 400 } }
+  const file = resolve(DIST, '.' + p)
+  return file === DIST || file.startsWith(DIST + sep) ? { file } : { code: 403 }
+}
 const srv = http.createServer((req, res) => {
-  const p = decodeURIComponent(new URL(req.url, 'http://x').pathname)
-  let f = normalize(join(DIST, p))
+  const r = safeFile(req.url)
+  if (r.code) { res.writeHead(r.code).end(); return }
+  let f = r.file
   if (fs.existsSync(f) && fs.statSync(f).isDirectory()) f = join(f, 'index.html')
   if (!fs.existsSync(f)) { res.writeHead(404); res.end(fs.readFileSync(join(DIST, '404.html'))); return }
   res.writeHead(200, { 'Content-Type': T[extname(f)] || 'application/octet-stream' }); res.end(fs.readFileSync(f))
-}).listen(0)
+})
+await new Promise((r) => srv.listen(0, '127.0.0.1', r))
 const port = srv.address().port
 
 const PAGES = ['/', '/features/', '/how-it-works/', '/protocols/', '/security/', '/roadmap/', '/download/', '/faq/', '/nope-404/']
@@ -30,6 +39,7 @@ for (const w of [1440, 390]) {
   page.on('pageerror', (e) => errors.push('pageerror: ' + e.message))
   page.on('requestfailed', (r) => errors.push('reqfail: ' + r.url()))
   for (const path of PAGES) {
+    const seen = errors.length
     await page.goto(`http://localhost:${port}${path}`, { waitUntil: 'networkidle0' })
     await new Promise((r) => setTimeout(r, 900))
     const r = await page.evaluate(async (expect) => {
@@ -50,6 +60,9 @@ for (const w of [1440, 390]) {
     if (r.foreign.length) problems.push('чужие @font-face: ' + r.foreign.join(','))
     for (const f of ['Bitter', 'Golos Text']) if (!r.loaded.includes(f)) problems.push('не загружен ' + f)
     if (r.sw > r.cw) problems.push(`оверфлоу ${r.sw}>${r.cw}`)
+    // Ошибки консоли и сети этой страницы; ожидаемый 404 у /nope-404/ не считается.
+    const fresh = errors.slice(seen).filter((e) => !(path === '/nope-404/' && e.includes('404')))
+    if (fresh.length) problems.push(`ошибки консоли/сети: ${fresh.length}`)
     if (problems.length) bad++
     console.log(`${w} ${path.padEnd(16)} ${problems.length ? '✘ ' + problems.join('; ') : '✔'}  [загружено: ${r.loaded.join(', ')}]`)
   }
