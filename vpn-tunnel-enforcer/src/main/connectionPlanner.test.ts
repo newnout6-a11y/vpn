@@ -1,6 +1,8 @@
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
+
+const probeOutput = vi.hoisted(() => ({ value: '' }))
 
 vi.mock('child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('child_process')>()
@@ -9,7 +11,9 @@ vi.mock('child_process', async (importOriginal) => {
       callback(null, '', '')
     },
     {
-      [Symbol.for('nodejs.util.promisify.custom')]: () => Promise.resolve({ stdout: '', stderr: '' })
+      [Symbol.for('nodejs.util.promisify.custom')]: () => probeOutput.value === '__FAIL__'
+        ? Promise.reject(new Error('Command failed: exit 1'))
+        : Promise.resolve({ stdout: probeOutput.value, stderr: '' })
     }
   )
 
@@ -62,7 +66,61 @@ vi.mock('./happDetector', () => ({
   }
 }))
 
-import { getRoutingPlan } from './connectionPlanner'
+// AT-07-002 / AT-07-012: native tunnel enumeration is mocked. Default = "unavailable" (throws), which
+// keeps the legacy PowerShell path (mocked exec above) under test.
+const nativeTunnels = vi.hoisted(() => vi.fn((): unknown[] => { throw new Error('native unavailable') }))
+vi.mock('./native/nativeNetworkReads', () => ({ nativeActiveTunnels: nativeTunnels }))
+
+import { combinedPreStartProbe, getRoutingPlan } from './connectionPlanner'
+
+describe('getRoutingPlan PowerShell tunnel read verification', () => {
+  const planWith = async (stdout: string) => { probeOutput.value = stdout; return getRoutingPlan({ proxyListeners: [] }) }
+  const unverified = (plan: Awaited<ReturnType<typeof getRoutingPlan>>) => plan.steps.some(s => s.label === 'Проверить внешние туннели')
+
+  it.skipIf(process.platform !== 'win32')('treats a failed enumeration (non-zero exit) as unverified', async () => {
+    expect(unverified(await planWith('__FAIL__'))).toBe(true)
+  })
+
+  it.skipIf(process.platform !== 'win32')('treats empty output as unverified, not as "no tunnels"', async () => {
+    expect(unverified(await planWith(''))).toBe(true)
+  })
+
+  it.skipIf(process.platform !== 'win32')('verifies only an explicit successful empty result', async () => {
+    expect(unverified(await planWith('[]'))).toBe(false)
+    probeOutput.value = ''
+  })
+})
+
+describe('getRoutingPlan native tunnel read', () => {
+  beforeEach(() => { nativeTunnels.mockClear() })
+
+  it.skipIf(process.platform !== 'win32')('uses the native enumeration and reports a foreign tunnel from it', async () => {
+    nativeTunnels.mockReturnValueOnce([{ name: 'Corp VPN', description: 'WireGuard Tunnel', address: '10.8.0.2', isVpnte: false }])
+
+    const plan = await getRoutingPlan()
+
+    expect(plan.activeTunnels).toEqual([{ name: 'Corp VPN', description: 'WireGuard Tunnel', address: '10.8.0.2', isVpnte: false }])
+    expect(plan.blockers.length).toBeGreaterThan(0)
+    expect(nativeTunnels).toHaveBeenCalledWith(expect.objectContaining({ vpnteIpv4Prefix: expect.any(String) }))
+  })
+
+  it.skipIf(process.platform !== 'win32')('falls back to the PowerShell path when the native read throws', async () => {
+    const plan = await getRoutingPlan()
+
+    expect(nativeTunnels).toHaveBeenCalledTimes(1)
+    expect(plan.activeTunnels).toEqual([])
+  })
+
+  it.skipIf(process.platform !== 'win32')('accepts a native empty list (no tunnel adapters) as verified without spawning PowerShell', async () => {
+    nativeTunnels.mockReturnValueOnce([])
+    probeOutput.value = '__FAIL__' // would make the PowerShell path unverified if it ran
+
+    const plan = await getRoutingPlan({ proxyListeners: [] })
+
+    expect(plan.steps.some(step => step.label === 'Проверить внешние туннели')).toBe(false)
+    probeOutput.value = ''
+  })
+})
 
 describe('getRoutingPlan', () => {
   it('does not block directVpn on an unused local proxy override', async () => {
@@ -75,5 +133,55 @@ describe('getRoutingPlan', () => {
     expect(plan.blockers).toEqual([])
     expect(plan.steps.some(step => step.label.includes('Direct VPN'))).toBe(true)
     expect(probeTcp).not.toHaveBeenCalled()
+  })
+})
+
+// AT-07-002: an unread network must not be reported as "no conflicting tunnel" (fail closed on the claim).
+describe('getRoutingPlan unverified tunnel read', () => {
+  it('marks the plan as unverified instead of reporting a clean network', async () => {
+    const plan = await getRoutingPlan({ activeTunnels: [], tunnelsVerified: false, proxyListeners: [] })
+
+    expect(plan.steps[0]).toMatchObject({ label: 'Проверить внешние туннели', status: 'warn' })
+    expect(plan.explanation).toContain('не исключён')
+    // The ready explanation claims no conflicting TUN; that claim must not survive an unread network.
+    expect(plan.explanation).not.toContain('Конфликтующих TUN не найдено')
+  })
+
+  it('adds no warning when the read was verified', async () => {
+    const plan = await getRoutingPlan({ activeTunnels: [], tunnelsVerified: true, proxyListeners: [] })
+
+    expect(plan.steps.some(step => step.label === 'Проверить внешние туннели')).toBe(false)
+    expect(plan.explanation).not.toContain('не исключён')
+  })
+
+  it('treats a caller-supplied list without a flag as verified', async () => {
+    const plan = await getRoutingPlan({ activeTunnels: [], proxyListeners: [] })
+
+    expect(plan.steps.some(step => step.status === 'warn' && step.label === 'Проверить внешние туннели')).toBe(false)
+  })
+})
+
+// AT-07-002: a probe whose tunnel section is missing or unparsable must not report an empty, verified network.
+describe.skipIf(process.platform !== 'win32')('combinedPreStartProbe tunnel verification', () => {
+  const probe = () => combinedPreStartProbe({ manifestExists: false, killSwitchRulePrefix: 'VPNTE' })
+  const out = (...lines: string[]) => lines.join('\n')
+
+  it('is unverified when the TUNNELS line is absent', async () => {
+    probeOutput.value = out('LISTENERS:[]', 'FIREWALL:0')
+    expect((await probe()).tunnelsVerified).toBe(false)
+  })
+
+  it('is unverified when the TUNNELS section does not parse', async () => {
+    probeOutput.value = out('TUNNELS:{not json', 'LISTENERS:[]', 'FIREWALL:0')
+    expect((await probe()).tunnelsVerified).toBe(false)
+  })
+
+  it('is verified for a well-formed empty list and for a real tunnel', async () => {
+    probeOutput.value = out('TUNNELS:[]', 'LISTENERS:[]', 'FIREWALL:0')
+    expect((await probe()).tunnelsVerified).toBe(true)
+    probeOutput.value = out('TUNNELS:{"Name":"Corp","Description":"WireGuard","Address":"10.8.0.2","IsVpnte":false}', 'LISTENERS:[]', 'FIREWALL:0')
+    const result = await probe()
+    expect(result.tunnelsVerified).toBe(true)
+    expect(result.tunnels).toHaveLength(1)
   })
 })

@@ -25,6 +25,11 @@ vi.mock('./appLogger', () => ({
   logEvent: logEventMock
 }))
 
+// AT-07-002 / AT-07-012: the native iphlpapi path is mocked; by default it is "unavailable" so the
+// legacy PowerShell path below stays covered. Individual tests flip it to prove both directions.
+const nativeSourcesMock = vi.hoisted(() => vi.fn())
+vi.mock('./native/nativeNetworkReads', () => ({ nativePhysicalIpv4Sources: nativeSourcesMock }))
+
 function mockExecSuccesses(): void {
   execMock.mockImplementation((cmd: string, _opts: unknown, cb: (err: Error | null, stdout: string, stderr: string) => void) => {
     setTimeout(() => {
@@ -42,6 +47,8 @@ describe('runLeakSelfTest coalescing', () => {
     execMock.mockReset()
     execFileMock.mockReset()
     logEventMock.mockReset()
+    nativeSourcesMock.mockReset()
+    nativeSourcesMock.mockImplementation(() => { throw new Error('native unavailable') })
     mockExecSuccesses()
     const { resetLeakTestThrottlesForTest } = await import('./leakSelfTest')
     resetLeakTestThrottlesForTest()
@@ -162,6 +169,42 @@ describe('runLeakSelfTest coalescing', () => {
     triggerLeakCheckNow('test-failed-enum')
     await new Promise((r) => setTimeout(r, 50))
     expect(completedCb).not.toHaveBeenCalled()
+  })
+
+  it.skipIf(process.platform !== 'win32')('uses the native adapter read without spawning PowerShell and keeps inspection complete', async () => {
+    nativeSourcesMock.mockReturnValue([{ alias: 'Wi-Fi', ipv4: '192.168.0.10' }])
+    // Per-adapter curl --interface probe runs through execFile: make it fail cleanly (blocked = no leak).
+    execFileMock.mockImplementation((...args: unknown[]) => {
+      const cb = args[args.length - 1] as (err: Error | null, out?: { stdout: string; stderr: string }) => void
+      cb(Object.assign(new Error('Could not connect'), { code: 7, stdout: '', stderr: 'blocked' }))
+      return {}
+    })
+    const { runLeakSelfTest } = await import('./leakSelfTest')
+
+    const result = await runLeakSelfTest()
+
+    expect(result.physicalAdapterInspectionComplete).toBe(true)
+    const commands = execMock.mock.calls.map(([cmd]) => String(cmd))
+    expect(commands.some(c => c.includes('EncodedCommand'))).toBe(false)
+    expect(execFileMock.mock.calls.some(([, args]) => Array.isArray(args) && args.includes('192.168.0.10'))).toBe(true)
+  })
+
+  it.skipIf(process.platform !== 'win32')('falls back to PowerShell when the native read throws', async () => {
+    const { runLeakSelfTest } = await import('./leakSelfTest')
+
+    await runLeakSelfTest()
+
+    expect(nativeSourcesMock).toHaveBeenCalled()
+    expect(execMock.mock.calls.map(([cmd]) => String(cmd)).some(c => c.includes('EncodedCommand'))).toBe(true)
+  })
+
+  it.skipIf(process.platform !== 'win32')('does not treat an empty native answer as "nothing to test": asks PowerShell', async () => {
+    nativeSourcesMock.mockReturnValue([])
+    const { runLeakSelfTest } = await import('./leakSelfTest')
+
+    await runLeakSelfTest()
+
+    expect(execMock.mock.calls.map(([cmd]) => String(cmd)).some(c => c.includes('EncodedCommand'))).toBe(true)
   })
 
   it('marks physicalAdapterInspectionComplete as false on cancellation', async () => {

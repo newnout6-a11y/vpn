@@ -2,6 +2,8 @@ import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import { execElevated } from './admin'
 import { logEvent } from './appLogger'
+import { timePs } from './psTiming'
+import { notifyWinInetSettingsChangedNative, WinInetCallError } from './native/winInet'
 import { readRecoveryManifest, writeRecoveryManifest, removeRecoveryManifest, recoveryManifestPath } from './recoveryManifest'
 
 const execFile = promisify(execFileCb)
@@ -76,7 +78,10 @@ export function getTunNetworkBaselineManifestPath(): string { return recoveryMan
 function readManifest() { return readRecoveryManifest(BASELINE_NAME, validateNetworkBackupManifest) }
 export async function isBaselineApplied(): Promise<boolean> { return (await readManifest()) !== null }
 function psJson(value: unknown): string { return `[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(JSON.stringify(value)).toString('base64')}')) | ConvertFrom-Json` }
-async function ps(script: string, elevated = false, timeout = 30000) {
+function ps(script: string, elevated = false, timeout = 30000) {
+  return timePs('cold-ps', elevated ? 'system-network-elevated' : 'system-network', () => psUntimed(script, elevated, timeout))
+}
+async function psUntimed(script: string, elevated: boolean, timeout: number) {
   const prelude = '$OutputEncoding=[Console]::OutputEncoding=[Text.UTF8Encoding]::new();$ErrorActionPreference="Stop";'
   const command = `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${Buffer.from(prelude + script, 'utf16le').toString('base64')}`
   try {
@@ -153,6 +158,14 @@ if (-not $type::InternetSetOption([IntPtr]::Zero,37,[IntPtr]::Zero,0)) { throw '
 }
 `
 async function notifyWinInetSettingsChanged() {
+  try {
+    await notifyWinInetSettingsChangedNative()
+    return
+  } catch (error) {
+    // A real WinINet failure is authoritative. Only an unusable native binding falls back (fail closed).
+    if (error instanceof WinInetCallError) throw error
+    logEvent('warn', 'system-network', 'native WinINet notification unavailable; falling back to PowerShell', { error: String(error) })
+  }
   await ps(`${WININET_NOTIFY_FUNCTION}\nSend-WinInetSettingsChanged`, false, 10000)
 }
 

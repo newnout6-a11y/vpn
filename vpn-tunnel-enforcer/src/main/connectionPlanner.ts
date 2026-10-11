@@ -5,6 +5,7 @@ import { getActiveProfile } from './serverPicker'
 import { settingsStore } from './settings'
 import { parseProxyAddress, probeTcp, tunController } from './tunController'
 import { logEvent } from './appLogger'
+import { nativeActiveTunnels } from './native/nativeNetworkReads'
 import { TUN_ADAPTER_ALIAS, TUN_IPV4_PREFIX, getTunAdapterAlias } from './tunAdapter'
 
 const exec = promisify(execCb)
@@ -103,8 +104,19 @@ function proxyFromOverride(): ProxyInfo | null {
 let activeTunnelsScriptLogged = false
 let combinedProbeScriptLogged = false
 
-async function getActiveTunnels(): Promise<TunnelInfo[]> {
-  if (process.platform !== 'win32') return []
+/** `verified: false` means the enumeration FAILED, so an empty list is "unknown", not "no tunnels". */
+async function getActiveTunnels(): Promise<{ tunnels: TunnelInfo[]; verified: boolean }> {
+  if (process.platform !== 'win32') return { tunnels: [], verified: true }
+
+  // Native iphlpapi read first (no powershell.exe spawn). It throws on any
+  // error or when the interface enumeration itself is implausible (no
+  // interfaces at all / only loopback). A machine that simply has no tunnel
+  // adapters gets a verified empty list from here, without spawning PowerShell.
+  try {
+    return { tunnels: nativeActiveTunnels({ vpnteAlias: getTunAdapterAlias(), vpnteIpv4Prefix: TUN_IPV4_PREFIX }), verified: true }
+  } catch (err) {
+    logEvent('debug', 'planner', 'native tunnel read unavailable, using PowerShell', { err: (err as Error).message })
+  }
 
   // Build the PS regex prefix from TUN_IPV4_PREFIX so this stays in sync
   // with tunAdapter.ts. Period is regex-special so each '.' becomes '\.'
@@ -116,7 +128,7 @@ async function getActiveTunnels(): Promise<TunnelInfo[]> {
 
   const script = `
 $rx='(?i)wintun|\\btun\\b|wireguard|openvpn|tap-windows|happ|hiddify|singbox|sing-tun|v2ray|xray|vpn';
-Get-NetAdapter -ErrorAction SilentlyContinue |
+try { $rows = @(Get-NetAdapter -ErrorAction Stop |
   Where-Object { $_.Status -eq 'Up' -and ($_.Name -match $rx -or $_.InterfaceDescription -match $rx) } |
   ForEach-Object {
     $adapter=$_;
@@ -129,7 +141,9 @@ Get-NetAdapter -ErrorAction SilentlyContinue |
       Address=($ips -join ', ');
       IsVpnte=($adapter.Name -eq ${aliasLiteral} -or ($ips -join ',') -match '${prefixRegex}')
     }
-  } | ConvertTo-Json -Compress
+  }) } catch { exit 1 }
+# An enumeration error must fail the read: empty output means "no tunnels" only after a successful enumeration.
+if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress }
 `
 
   if (!activeTunnelsScriptLogged) {
@@ -147,15 +161,17 @@ Get-NetAdapter -ErrorAction SilentlyContinue |
         rawPreview: raw.slice(0, 300)
       })
     }
-    return asArray<any>(parsed).map(row => ({
+    const tunnels = asArray<any>(parsed).map(row => ({
       name: String(row.Name || ''),
       description: String(row.Description || ''),
       address: String(row.Address || ''),
       isVpnte: Boolean(row.IsVpnte)
     })).filter(row => row.name)
+    // Non-empty output that did not parse is a failed read, not an empty network.
+    return { tunnels, verified: parsed !== null }
   } catch (err) {
     logEvent('warn', 'planner', 'failed to read active tunnel adapters', err)
-    return []
+    return { tunnels: [], verified: false }
   }
 }
 
@@ -197,6 +213,8 @@ export interface CombinedPreStartProbeResult {
   manifestExists: boolean
   firewallRulesExist: boolean
   tunnels: TunnelInfo[]
+  /** false when the probe failed: `tunnels` is then unknown, not empty. */
+  tunnelsVerified: boolean
   listeners: ProxyListenerInfo[]
 }
 
@@ -224,7 +242,7 @@ export async function combinedPreStartProbe(opts: {
   killSwitchRulePrefix: string
 }): Promise<CombinedPreStartProbeResult> {
   if (process.platform !== 'win32') {
-    return { manifestExists: opts.manifestExists, firewallRulesExist: false, tunnels: [], listeners: [] }
+    return { manifestExists: opts.manifestExists, firewallRulesExist: false, tunnels: [], tunnelsVerified: true, listeners: [] }
   }
 
   const { manifestExists, killSwitchRulePrefix } = opts
@@ -239,7 +257,8 @@ export async function combinedPreStartProbe(opts: {
 
   const script = `
 $tunnelRx='(?i)wintun|\\btun\\b|wireguard|openvpn|tap-windows|happ|hiddify|singbox|sing-tun|v2ray|xray|vpn';
-$tunnels = @(Get-NetAdapter -ErrorAction SilentlyContinue |
+$tunnelsOk = $true
+try { $tunnels = @(Get-NetAdapter -ErrorAction Stop |
   Where-Object { $_.Status -eq 'Up' -and ($_.Name -match $tunnelRx -or $_.InterfaceDescription -match $tunnelRx) } |
   ForEach-Object {
     $adapter=$_;
@@ -252,7 +271,7 @@ $tunnels = @(Get-NetAdapter -ErrorAction SilentlyContinue |
       Address=($ips -join ', ');
       IsVpnte=($adapter.Name -eq ${aliasLiteral} -or ($ips -join ',') -match '${prefixRegex}')
     }
-  });
+  }) } catch { $tunnelsOk = $false; $tunnels = @() }
 
 $listenerRx='(?i)happ|hiddify|nekoray|nekobox|v2ray|xray|sing-box|singbox|sing-tun|clash|clash-verge|flclash|mihomo|mihomo-party|shadowsocks|ss-local|trojan|outline|wireguard|openvpn|karing|streisand|surfboard|vpn';
 $listeners = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
@@ -270,7 +289,7 @@ $tunnelsJ = $tunnels | ConvertTo-Json -Compress -Depth 3
 $listenersJ = $listeners | ConvertTo-Json -Compress -Depth 3
 if (-not $tunnelsJ) { $tunnelsJ = '[]' }
 if (-not $listenersJ) { $listenersJ = '[]' }
-Write-Host "TUNNELS:$tunnelsJ"
+if ($tunnelsOk) { Write-Host "TUNNELS:$tunnelsJ" }
 Write-Host "LISTENERS:$listenersJ"
 Write-Host "FIREWALL:$fwCount"
 `
@@ -296,7 +315,8 @@ Write-Host "FIREWALL:$fwCount"
       ? parseInt(firewallLine.slice('FIREWALL:'.length), 10)
       : 0
 
-    const tunnels = asArray<any>(parseJson(tunnelsRaw)).map(row => ({
+    const tunnelsParsed = parseJson(tunnelsRaw)
+    const tunnels = asArray<any>(tunnelsParsed).map(row => ({
       name: String(row.Name || ''),
       description: String(row.Description || ''),
       address: String(row.Address || ''),
@@ -312,10 +332,13 @@ Write-Host "FIREWALL:$fwCount"
 
     const firewallRulesExist = Number.isFinite(fwCount) && fwCount > 0
 
-    return { manifestExists, firewallRulesExist, tunnels, listeners }
+    // A missing TUNNELS line or a section that did not parse is an unread network, not an empty one.
+    const tunnelsVerified = Boolean(tunnelsLine) && tunnelsParsed !== null
+    if (!tunnelsVerified) logEvent('warn', 'planner', 'combinedPreStartProbe: tunnel section missing or unparsable', { rawLength: tunnelsRaw.length }) // length only: the section carries adapter addresses
+    return { manifestExists, firewallRulesExist, tunnels, tunnelsVerified, listeners }
   } catch (err) {
     logEvent('warn', 'planner', 'combinedPreStartProbe failed', err)
-    return { manifestExists, firewallRulesExist: false, tunnels: [], listeners: [] }
+    return { manifestExists, firewallRulesExist: false, tunnels: [], tunnelsVerified: false, listeners: [] }
   }
 }
 
@@ -333,18 +356,51 @@ function tunnelLabel(tunnel: TunnelInfo) {
   return `${tunnel.name}${address}`.trim()
 }
 
+const TUNNELS_UNVERIFIED_NOTE = 'Не удалось проверить наличие внешних туннелей: двойной туннель не исключён.'
+
 export async function getRoutingPlan(opts?: {
   activeTunnels?: TunnelInfo[]
+  /** Pass false when `activeTunnels` came from a probe that failed. Defaults to true. */
+  tunnelsVerified?: boolean
   proxyListeners?: ProxyListenerInfo[]
 }): Promise<RoutingPlan> {
+  // Start the tunnel read together with the proxy probes (as the original single Promise.all did).
+  const read = opts?.activeTunnels
+    ? Promise.resolve({ tunnels: opts.activeTunnels, verified: opts.tunnelsVerified ?? true })
+    : getActiveTunnels()
+  const { plan, verified } = await buildRoutingPlan(read, opts?.proxyListeners)
+  if (verified) return plan
+  // Fail closed on the claim, not on availability: never report "no conflicting TUN" for an unread network.
+  plan.steps.unshift({ label: 'Проверить внешние туннели', before: TUNNELS_UNVERIFIED_NOTE, after: 'Повторите проверку; не подтверждено, что второго TUN нет.', status: 'warn' })
+  // A ready plan's explanation asserts "no conflicting TUN"; replace it instead of contradicting it.
+  plan.explanation = plan.status === 'ready'
+    ? `${TUNNELS_UNVERIFIED_NOTE} Остальные условия запуска выполнены, но отсутствие конфликта не подтверждено.`
+    : `${TUNNELS_UNVERIFIED_NOTE} ${plan.explanation}`
+  return plan
+}
+
+async function buildRoutingPlan(
+  tunnelRead: Promise<{ tunnels: TunnelInfo[]; verified: boolean }>,
+  listeners?: ProxyListenerInfo[]
+): Promise<{ plan: RoutingPlan; verified: boolean }> {
   const settings = settingsStore.get()
   const isDirectVpn = settings.connectionMode === 'directVpn'
-  const [activeTunnels, proxyListeners, proxy] = await Promise.all([
-    opts?.activeTunnels ?? getActiveTunnels(),
-    opts?.proxyListeners ?? getProxyListeners(),
+  const [read, proxyListeners, proxy] = await Promise.all([
+    tunnelRead,
+    listeners ?? getProxyListeners(),
     isDirectVpn ? Promise.resolve<ProxyInfo | null>(null) : detectProxy()
   ])
 
+  const activeTunnels = read.tunnels
+  return { plan: planFrom(activeTunnels, proxyListeners, proxy, isDirectVpn), verified: read.verified }
+}
+
+function planFrom(
+  activeTunnels: TunnelInfo[],
+  proxyListeners: ProxyListenerInfo[],
+  proxy: ProxyInfo | null,
+  isDirectVpn: boolean
+): RoutingPlan {
   const activeProfile = isDirectVpn ? getActiveProfile() : null
   const tunStatus = tunController.getStatus()
   const vpnteTunnels = activeTunnels.filter(tunnel => tunnel.isVpnte)

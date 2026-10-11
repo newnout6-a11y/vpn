@@ -5,6 +5,7 @@ import { promisify } from 'util'
 import { app } from 'electron'
 import { isProcessElevated } from './admin'
 import { getAppLogPath, getLogDir, logEvent } from './appLogger'
+import { nativeAdapterRows, nativeIpConfigRows, nativeRouteRows } from './native/nativeNetworkReads'
 import { getRoutingPlan } from './connectionPlanner'
 import { runLeakCheck, type CheckStatus } from './leakDiagnostics'
 import { settingsStore, getBootRecoveryRegistrationStatus } from './settings'
@@ -56,6 +57,22 @@ async function ps(script: string, timeout = 15000): Promise<string> {
     }
   )
   return (stdout || stderr || '').trim()
+}
+
+const ROUTE_PREFIXES = ['0.0.0.0/0', '::/0', '0.0.0.0/1', '128.0.0.0/1', '::/1', '8000::/1']
+
+/**
+ * Native-first read: `native()` is an in-process iphlpapi read that throws on
+ * any error or implausible result; in that case the original PowerShell script
+ * runs unchanged (fail closed to the established path, never to empty data).
+ */
+export async function nativeOrPs<T>(native: () => T[], script: string, timeout = 12000): Promise<T[]> {
+  try {
+    return native()
+  } catch (err) {
+    logEvent('debug', 'diagnostics', 'native network read unavailable, using PowerShell', { err: (err as Error).message })
+  }
+  return asArray<T>(parseJson(await ps(script, timeout)))
 }
 
 function parseJson<T = any>(raw: string): T | null {
@@ -386,12 +403,11 @@ async function getWindowsNetworkItems(): Promise<SystemDiagnosticItem[]> {
   const items: SystemDiagnosticItem[] = []
 
   try {
-    const raw = await ps(`
+    const rows = await nativeOrPs<any>(() => nativeAdapterRows(), `
 Get-NetAdapter -ErrorAction SilentlyContinue |
   Select-Object Name,InterfaceDescription,Status,LinkSpeed,ifIndex |
   ConvertTo-Json -Compress
-`, 12000)
-    const rows = asArray<any>(parseJson(raw))
+`)
     const up = rows.filter(row => row.Status === 'Up')
     items.push(item(
       'adapters',
@@ -406,7 +422,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue |
   }
 
   try {
-    const raw = await ps(`
+    const rows = (await nativeOrPs<any>(() => nativeIpConfigRows(), `
 Get-NetIPConfiguration -ErrorAction SilentlyContinue |
   ForEach-Object {
     [pscustomobject]@{
@@ -417,8 +433,7 @@ Get-NetIPConfiguration -ErrorAction SilentlyContinue |
       DNS=($_.DNSServer.ServerAddresses -join ',')
     }
   } | ConvertTo-Json -Compress
-`, 12000)
-    const rows = asArray<any>(parseJson(raw)).filter(row => row.IPv4 || row.IPv6 || row.Gateway || row.DNS)
+`)).filter(row => row.IPv4 || row.IPv6 || row.Gateway || row.DNS)
     items.push(item(
       'ip-config',
       'Network',
@@ -432,15 +447,14 @@ Get-NetIPConfiguration -ErrorAction SilentlyContinue |
   }
 
   try {
-    const raw = await ps(`
+    const rows = await nativeOrPs<any>(() => nativeRouteRows(ROUTE_PREFIXES), `
 $prefixes=@('0.0.0.0/0','::/0','0.0.0.0/1','128.0.0.0/1','::/1','8000::/1');
 Get-NetRoute -ErrorAction SilentlyContinue |
   Where-Object { $prefixes -contains $_.DestinationPrefix } |
   Sort-Object AddressFamily,DestinationPrefix,RouteMetric |
   Select-Object DestinationPrefix,InterfaceAlias,NextHop,RouteMetric,Protocol |
   ConvertTo-Json -Compress
-`, 12000)
-    const rows = asArray<any>(parseJson(raw))
+`)
     const tunRoutes = rows.filter(row => String(row.InterfaceAlias || '').toLowerCase().includes('vpnte'))
     items.push(item(
       'routes',

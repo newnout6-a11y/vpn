@@ -13,6 +13,8 @@ export default defineConfig(({ mode }) => ({
     maxWorkers: 2,
     isolate: true,
     environment: 'node',
+    // Existing suites mock the PowerShell worker; keep the native adapter read off unless a test opts in.
+    env: { VPNTE_DISABLE_NATIVE_NET: '1' },
     setupFiles: [],
     // Keep the inherited include empty: Vite merges project include arrays.
     include: mode === 'integration' ? ['src/**/*.itest.ts'] : [],
