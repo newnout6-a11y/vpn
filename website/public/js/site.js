@@ -75,7 +75,9 @@
     }
     burger.addEventListener('click', () => set(burger.getAttribute('aria-expanded') !== 'true'))
     addEventListener('keydown', (e) => { if (e.key === 'Escape') set(false) })
-    $$('a', nav).forEach((a) => a.addEventListener('click', () => set(false)))
+    // Фаза capture: меню закрывается (и Lenis запускается) раньше обработчика якоря,
+    // который вызывает lenis.scrollTo; иначе скролл пришёл бы в уже остановленный Lenis.
+    nav.addEventListener('click', (e) => { if (e.target.closest('a')) set(false) }, true)
   }
 
   /* ---------- переходы между страницами ---------- */
@@ -252,7 +254,7 @@
     }
     const mk = (tag, attrs, parent) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); parent && parent.appendChild(e); return e }
     const poly = (pts) => pts.map((p) => p.join(',')).join(' ')
-    let tunnelUp = true, auto = true, tAuto = 0, phase = 'normal'
+    let auto = true, tAuto = 0, phase = 'normal'
     const sims = lanes.map((lane) => {
       const kind = lane.dataset.kind
       const svg = $('.ks__svg', lane)
@@ -289,7 +291,7 @@
         }
       })
     }
-    const setPhase = (p) => { phase = p; tunnelUp = p === 'normal'; apply(); $('[data-ks-toggle]', root).textContent = p === 'normal' ? 'Оборвать туннель' : 'Восстановить туннель' }
+    const setPhase = (p) => { phase = p; apply(); $('[data-ks-toggle]', root).textContent = p === 'normal' ? 'Оборвать туннель' : 'Восстановить туннель' }
     $('[data-ks-toggle]', root).addEventListener('click', () => { auto = false; $('[data-ks-auto]', root).setAttribute('aria-pressed', 'false'); setPhase(phase === 'normal' ? 'down' : 'normal') })
     $('[data-ks-auto]', root).addEventListener('click', (e) => { auto = !auto; e.currentTarget.setAttribute('aria-pressed', String(auto)); tAuto = 0 })
     let run = true, last = performance.now()
@@ -314,9 +316,6 @@
         let u = p.u
         let visible = true
         if (phase === 'down' && s.kind === 'shield') { u = Math.min(u, 0.34); visible = p.u < 0.37 }
-        if (phase === 'down') {
-          // в упавшем состоянии «верхний» путь пуст
-        }
         const [x, y] = pos(pts, u)
         p.el.setAttribute('cx', x); p.el.setAttribute('cy', y)
         p.el.setAttribute('opacity', visible ? (phase === 'down' && s.kind === 'shield' && p.u > 0.3 ? 0.9 - (p.u - 0.3) * 12 : 1) : 0)
@@ -630,15 +629,16 @@
   /* ---------- копирование команд ---------- */
   function initCopy() {
     $$('[data-copy]').forEach((b) => {
-      let original = null // исходная подпись запоминается один раз, повторный клик не сохраняет «Скопировано ✓»
+      let original = null // исходная подпись запоминается один раз, повторный клик не сохраняет временный текст
+      const restore = () => setTimeout(() => (b.innerHTML = original), 1600)
       b.addEventListener('click', async () => {
         const src = $(b.dataset.copy); if (!src) return
+        original ??= b.innerHTML
         try {
           await navigator.clipboard.writeText(src.innerText.replace(/^\$ /gm, ''))
-          original ??= b.innerHTML
           b.textContent = 'Скопировано ✓'
-          setTimeout(() => (b.innerHTML = original), 1600)
         } catch { b.textContent = 'Выделите вручную' }
+        restore()
       })
     })
   }
