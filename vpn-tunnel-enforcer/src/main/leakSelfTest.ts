@@ -33,6 +33,7 @@ import { exec as execCb, execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import { networkInterfaces } from 'os'
 import { logEvent } from './appLogger'
+import { nativePhysicalIpv4Sources } from './native/nativeNetworkReads'
 
 function recordForensicLeakSelfTestEvent(event: string, details: Record<string, unknown>): void {
   import('./trafficForensics')
@@ -154,6 +155,15 @@ async function curlBound(ip: string, url: string, timeoutSec = 4): Promise<{ std
 
 async function listPhysicalAdaptersWithIPv4(): Promise<{ adapters: { alias: string; ipv4: string }[]; complete: boolean }> {
   if (process.platform !== 'win32') return { adapters: [], complete: true }
+  // Native iphlpapi read first (no powershell.exe spawn). It throws on ANY
+  // error or implausible enumeration; we then use the PowerShell path below,
+  // never an empty "nothing to test" answer.
+  try {
+    const rows = nativePhysicalIpv4Sources()
+    return { adapters: rows.map(r => ({ alias: r.alias, ipv4: r.ipv4 })), complete: true }
+  } catch (err) {
+    logEvent('debug', 'leak-test', 'native adapter read unavailable, using PowerShell', { err: (err as Error).message })
+  }
   // Mirror the lockdown filter — keep them consistent so the leak test
   // tests every adapter that the lockdown is responsible for. The UTF-8
   // prefix is mandatory: without it the alias comes back as CP866-mojibake

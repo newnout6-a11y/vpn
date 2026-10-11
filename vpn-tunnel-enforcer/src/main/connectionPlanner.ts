@@ -5,6 +5,7 @@ import { getActiveProfile } from './serverPicker'
 import { settingsStore } from './settings'
 import { parseProxyAddress, probeTcp, tunController } from './tunController'
 import { logEvent } from './appLogger'
+import { nativeActiveTunnels } from './native/nativeNetworkReads'
 import { TUN_ADAPTER_ALIAS, TUN_IPV4_PREFIX, getTunAdapterAlias } from './tunAdapter'
 
 const exec = promisify(execCb)
@@ -105,6 +106,15 @@ let combinedProbeScriptLogged = false
 
 async function getActiveTunnels(): Promise<TunnelInfo[]> {
   if (process.platform !== 'win32') return []
+
+  // Native iphlpapi read first (no powershell.exe spawn). It throws on any
+  // error / implausible (empty) enumeration, in which case the PowerShell
+  // path below runs exactly as before.
+  try {
+    return nativeActiveTunnels({ vpnteAlias: getTunAdapterAlias(), vpnteIpv4Prefix: TUN_IPV4_PREFIX })
+  } catch (err) {
+    logEvent('debug', 'planner', 'native tunnel read unavailable, using PowerShell', { err: (err as Error).message })
+  }
 
   // Build the PS regex prefix from TUN_IPV4_PREFIX so this stays in sync
   // with tunAdapter.ts. Period is regex-special so each '.' becomes '\.'
