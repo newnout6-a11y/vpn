@@ -72,6 +72,7 @@ const POLICY_REQUIRED_TOKENS: Record<ElevatedPsPolicy, RegExp[]> = {
   ],
   'physical-adapter-lockdown': [
     /\bGet-NetAdapter\b/i,
+    /\bGet-NetConnectionProfile\b/i,
     /\bGet-NetAdapterBinding\b/i,
     /\bDisable-NetAdapterBinding\b/i,
     /\bEnable-NetAdapterBinding\b/i,

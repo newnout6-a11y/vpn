@@ -1,6 +1,7 @@
 // AT-03-005/006/010: native physical adapter read path keeps the PowerShell JSON contract and fails closed.
 import { describe, expect, it, vi } from 'vitest'
 import { execFileSync } from 'child_process'
+import { parseNetworkProfiles } from './networkProfiles'
 import { buildPhysicalAdapterRows, createKoffiSource, readPhysicalAdaptersNative, serializeRows, snapshotFromSource } from './physicalAdapterNative'
 import type { NativeAdapterInfo, NativeAdapterSource, NativeDefaultRoute } from './physicalAdapterNative'
 import { PHYSICAL_ADAPTER_SNAPSHOT_SCRIPT } from '../physicalAdapterSnapshot'
@@ -16,7 +17,7 @@ function source(over: Partial<NativeAdapterSource> & { adapters?: NativeAdapterI
     listUpAdapters: () => over.adapters ?? [wifi],
     listDefaultRoutes: () => over.routes ?? [{ ifIndex: 17, family: 4, nextHop: '10.0.0.1' }],
     readNameServer: () => null,
-    listNetworkProfiles: () => new Map([['{999D65FE-A8C4-4DB3-9F7E-11EDD6482144}', ['Office']]]),
+    listNetworkProfiles: () => new Map([[17, ['Office']]]),
     ...over
   }
 }
@@ -90,13 +91,13 @@ describe('native physical adapter snapshot: fail closed', () => {
     expect(() => snapshotFromSource(source({ listUpAdapters: () => { throw new Error('GetAdaptersAddresses rc=87') } }))).toThrow(/rc=87/)
     expect(() => snapshotFromSource(source({ listDefaultRoutes: () => { throw new Error('GetIpForwardTable2 rc=5') } }))).toThrow(/rc=5/)
     expect(() => snapshotFromSource(source({ readNameServer: () => { throw new Error('RegGetValueW rc=5') } }))).toThrow(/rc=5/)
-    expect(() => snapshotFromSource(source({ listNetworkProfiles: () => { throw new Error('CoCreateInstance hr=0x80070005') } }))).toThrow(/hr=/)
+    expect(() => snapshotFromSource(source({ listNetworkProfiles: () => { throw new Error('network profiles: elevated helper is not running') } }))).toThrow(/helper/)
     expect(JSON.parse(snapshotFromSource(source({ listNetworkProfiles: () => new Map() }))).networkProfiles).toEqual([])
   })
-  it('throws when koffi cannot load', () => {
+  it('throws when koffi cannot load', async () => {
     vi.resetModules()
-    if (process.platform !== 'win32') expect(() => createKoffiSource()).toThrow(/win32/)
-    expect(() => readPhysicalAdaptersNative(source({ adapters: [] }))).toThrow()
+    if (process.platform !== 'win32') expect(() => createKoffiSource(new Map())).toThrow(/win32/)
+    await expect(readPhysicalAdaptersNative(source({ adapters: [] }))).rejects.toThrow()
   })
 })
 
@@ -114,10 +115,10 @@ describe('lockdown hook falls back to PowerShell', () => {
     const adapter = vi.fn(async () => psRow)
     vi.doMock('../recoveryPsWorker', () => ({ executeRecoveryOperation: vi.fn(), executeAdapterInspection: adapter, RecoveryWorkerError: class extends Error { constructor(public code: string, m: string) { super(m) } } }))
     vi.doMock('./physicalAdapterNative', () => ({ readPhysicalAdaptersNative: native }))
-    const prev = process.env.VPNTE_NATIVE_ADAPTERS
-    process.env.VPNTE_NATIVE_ADAPTERS = '1'
+    const prev = process.env.VPNTE_DISABLE_NATIVE_NET
+    delete process.env.VPNTE_DISABLE_NATIVE_NET
     try {
-      native.mockImplementationOnce(() => { throw new Error('boom') })
+      native.mockRejectedValueOnce(new Error('boom'))
       const lock = await import('../physicalAdapterLockdown') as any
       const snap = lock.__snapshotForTest ?? null
       // The hook is private; drive it through the exported warm-up which snapshots adapters.
@@ -126,13 +127,13 @@ describe('lockdown hook falls back to PowerShell', () => {
       expect(native).toHaveBeenCalledTimes(1)
       expect(adapter).toHaveBeenCalledWith('inspect-physical-adapters', expect.any(Number))
       void snap
-      native.mockReturnValueOnce(snapshotFromSource(source()))
+      native.mockResolvedValueOnce(snapshotFromSource(source()))
       adapter.mockClear()
       lock.clearPhysicalAdaptersSnapshotCache()
       await lock.warmPhysicalAdaptersSnapshot()
       expect(adapter).not.toHaveBeenCalled()
     } finally {
-      if (prev === undefined) delete process.env.VPNTE_NATIVE_ADAPTERS; else process.env.VPNTE_NATIVE_ADAPTERS = prev
+      if (prev === undefined) delete process.env.VPNTE_DISABLE_NATIVE_NET; else process.env.VPNTE_DISABLE_NATIVE_NET = prev
       vi.doUnmock('./physicalAdapterNative')
     }
   })
@@ -146,9 +147,15 @@ function psSnapshot(): any[] {
   return Array.isArray(parsed) ? parsed : [parsed]
 }
 
+// The real helper is not running under vitest: profiles are read from PowerShell here (same cmdlet the helper runs).
+function psProfiles(): Map<number, string[]> {
+  const out = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', "ConvertTo-Json -Compress -InputObject @(Get-NetConnectionProfile | ForEach-Object { [pscustomobject]@{ ifIndex = [int]$_.InterfaceIndex; name = [string]$_.Name } })"], { encoding: 'utf8', timeout: 60000 })
+  return parseNetworkProfiles(out)
+}
+
 describe.skipIf(process.platform !== 'win32' || process.env.VPNTE_SKIP_REAL_ADAPTER_TEST === '1')('native vs PowerShell on this machine', () => {
-  it('returns the same adapters and fields as the PowerShell snapshot', () => {
-    const native = JSON.parse(readPhysicalAdaptersNative())
+  it('returns the same adapters and fields as the PowerShell snapshot', async () => {
+    const native = JSON.parse(await readPhysicalAdaptersNative(createKoffiSource(psProfiles())))
     const nativeRows: any[] = Array.isArray(native) ? native : [native]
     for (const r of nativeRows) expect(Object.keys(r)).toEqual(KEYS)
     const ps = psSnapshot()

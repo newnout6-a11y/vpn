@@ -9,6 +9,7 @@
  */
 import { ALL_KNOWN_ALIASES } from '../tunAdapter'
 import { ADAPTER_EXCLUSION_PATTERN } from '../physicalAdapterSnapshot'
+import { fetchNetworkProfiles } from './networkProfiles'
 
 export interface NativeAdapterInfo {
   ifIndex: number
@@ -34,8 +35,8 @@ export interface NativeAdapterSource {
   listDefaultRoutes(): NativeDefaultRoute[]
   /** HKLM Tcpip\Parameters\Interfaces\{guid}\NameServer; null when value absent. */
   readNameServer(interfaceGuid: string): string | null
-  /** Network Location Awareness: connection AdapterId ({GUID}, upper case) -> network names. Throws on any COM failure. */
-  listNetworkProfiles(): Map<string, string[]>
+  /** Connection profile names keyed by InterfaceIndex (as Get-NetConnectionProfile reports them). Supplied from outside: no COM in-process. */
+  listNetworkProfiles(): Map<number, string[]>
 }
 
 export interface PhysicalAdapterRow {
@@ -83,7 +84,7 @@ export function buildPhysicalAdapterRows(source: NativeAdapterSource): PhysicalA
     const hasV6Default = own.some(r => r.family === 6)
 
     const nameServer = source.readNameServer(a.interfaceGuid)
-    const networkProfiles = [...(profiles.get(a.interfaceGuid.toUpperCase()) ?? [])]
+    const networkProfiles = [...(profiles.get(a.ifIndex) ?? [])]
 
     const isHotspotSubnet = a.ipv4Dns.some(d => hotspotRe.test(d)) || gateways.some(g => hotspotRe.test(g))
     const hasClatOrIpv6Only = hasV6Default && routes4.length === 0
@@ -137,89 +138,8 @@ function ipv4At(buf: Buffer, off: number): string {
   return `${buf[off]}.${buf[off + 1]}.${buf[off + 2]}.${buf[off + 3]}`
 }
 
-const COINIT_APARTMENTTHREADED = 2
-const RPC_E_CHANGED_MODE = -2147417850
-const CLSCTX_INPROC_LOCAL = 0x1 | 0x4
 
-function guidFromBytes(b: Buffer): string {
-  const d4 = b.subarray(8, 16).toString('hex').toUpperCase()
-  const h = (n: number, w: number) => n.toString(16).toUpperCase().padStart(w, '0')
-  return `{${h(b.readUInt32LE(0), 8)}-${h(b.readUInt16LE(4), 4)}-${h(b.readUInt16LE(6), 4)}-${d4.slice(0, 4)}-${d4.slice(4)}}`
-}
-
-/**
- * INetworkListManager enumeration (read-only). Vtable slots (IDispatch-derived, 7 inherited):
- * INetworkListManager 9 GetNetworkConnections; IEnumNetworkConnections 8 Next;
- * INetworkConnection 7 GetNetwork, 12 GetAdapterId; INetwork 7 GetName.
- */
-function listNlaProfiles(koffi: any): Map<string, string[]> {
-  const ole = koffi.load('ole32.dll')
-  const oleaut = koffi.load('oleaut32.dll')
-  const Guid = koffi.struct('VPNTE_GUID', { d1: 'uint32_t', d2: 'uint16_t', d3: 'uint16_t', d4: koffi.array('uint8_t', 8) })
-  const CoInitializeEx = ole.func('int32_t __stdcall CoInitializeEx(void *reserved, uint32_t flags)')
-  const CoCreateInstance = ole.func('int32_t __stdcall CoCreateInstance(VPNTE_GUID *clsid, void *outer, uint32_t ctx, VPNTE_GUID *iid, _Out_ void **ppv)')
-  const SysFreeString = oleaut.func('void __stdcall SysFreeString(void *bstr)')
-  const pOut = koffi.proto('int32_t __stdcall VPNTE_COM_Out(void *self, _Out_ void **out)')
-  const pNext = koffi.proto('int32_t __stdcall VPNTE_COM_Next(void *self, uint32_t celt, _Out_ void **items, _Out_ uint32_t *fetched)')
-  const pGuid = koffi.proto('int32_t __stdcall VPNTE_COM_Guid(void *self, _Out_ uint8_t *guid)')
-  const pRelease = koffi.proto('uint32_t __stdcall VPNTE_COM_Release(void *self)')
-  const vcall = (obj: unknown, slot: number, proto: unknown, ...args: unknown[]): number => {
-    const vtbl = koffi.decode(obj, 'void *')
-    const fn = koffi.decode(vtbl, slot * 8, 'void *')
-    return koffi.call(fn, proto, obj, ...args)
-  }
-  const release = (obj: unknown) => { if (obj) vcall(obj, 2, pRelease) }
-  const check = (hr: number, what: string) => { if (hr < 0) throw new Error(`native adapter snapshot: ${what} hr=0x${(hr >>> 0).toString(16)}`) }
-
-  void Guid
-  const initHr = CoInitializeEx(null, COINIT_APARTMENTTHREADED)
-  if (initHr < 0 && initHr !== RPC_E_CHANGED_MODE) throw new Error(`native adapter snapshot: CoInitializeEx hr=0x${(initHr >>> 0).toString(16)}`)
-  const clsid = { d1: 0xDCB00C01, d2: 0x570F, d3: 0x4A9B, d4: [0x8D, 0x69, 0x19, 0x9F, 0xDB, 0xA5, 0x72, 0x3B] }
-  const iid = { d1: 0xDCB00000, d2: 0x570F, d3: 0x4A9B, d4: [0x8D, 0x69, 0x19, 0x9F, 0xDB, 0xA5, 0x72, 0x3B] }
-  const mgrOut: unknown[] = [null]
-  check(CoCreateInstance(clsid, null, CLSCTX_INPROC_LOCAL, iid, mgrOut), 'CoCreateInstance(NetworkListManager)')
-  const mgr = mgrOut[0]
-  if (!mgr) throw new Error('native adapter snapshot: NetworkListManager null')
-  const result = new Map<string, string[]>()
-  let enumerator: unknown = null
-  try {
-    const enumOut: unknown[] = [null]
-    check(vcall(mgr, 9, pOut, enumOut), 'GetNetworkConnections')
-    enumerator = enumOut[0]
-    if (!enumerator) throw new Error('native adapter snapshot: connection enumerator null')
-    for (let guard = 0; ; guard++) {
-      if (guard > 256) throw new Error('native adapter snapshot: connection enumeration loop')
-      const items: unknown[] = [null]
-      const fetched = [0]
-      const hr = vcall(enumerator, 8, pNext, 1, items, fetched)
-      check(hr, 'IEnumNetworkConnections::Next')
-      if (hr !== 0 || fetched[0] !== 1 || !items[0]) break
-      const conn = items[0]
-      let network: unknown = null
-      try {
-        const g = Buffer.alloc(16)
-        check(vcall(conn, 12, pGuid, g), 'GetAdapterId')
-        const netOut: unknown[] = [null]
-        check(vcall(conn, 7, pOut, netOut), 'INetworkConnection::GetNetwork')
-        network = netOut[0]
-        if (!network) throw new Error('native adapter snapshot: network null')
-        const bstrOut: unknown[] = [null]
-        check(vcall(network, 7, pOut, bstrOut), 'INetwork::GetName')
-        const bstr = bstrOut[0]
-        if (!bstr) throw new Error('native adapter snapshot: network name null')
-        const name = koffi.decode(bstr, 'char16_t', -1) as string
-        SysFreeString(bstr)
-        const key = guidFromBytes(g)
-        const list = result.get(key) ?? []
-        if (name && !list.includes(name)) list.push(name)
-        result.set(key, list)
-      } finally { release(network); release(conn) }
-    }
-  } finally { release(enumerator); release(mgr) }
-  return result
-}
-
-export function createKoffiSource(): NativeAdapterSource {
+export function createKoffiSource(profiles: Map<number, string[]>): NativeAdapterSource {
   if (process.platform !== 'win32') throw new Error('native adapter snapshot: win32 only')
   if (process.arch !== 'x64' && process.arch !== 'arm64') throw new Error('native adapter snapshot: unsupported architecture')
   // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -396,12 +316,12 @@ export function createKoffiSource(): NativeAdapterSource {
     },
 
     listNetworkProfiles() {
-      return listNlaProfiles(koffi)
+      return profiles
     }
   }
 }
 
 /** JSON text equivalent to PHYSICAL_ADAPTER_SNAPSHOT_SCRIPT stdout. Throws on anything unexpected. */
-export function readPhysicalAdaptersNative(source: NativeAdapterSource = createKoffiSource()): string {
-  return snapshotFromSource(source)
+export async function readPhysicalAdaptersNative(source?: NativeAdapterSource): Promise<string> {
+  return snapshotFromSource(source ?? createKoffiSource(await fetchNetworkProfiles()))
 }

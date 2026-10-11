@@ -433,8 +433,8 @@ function netshValue(raw: string, label: string): string | null {
 
 async function inspectAdapters(op: 'inspect-physical-adapters' | 'inspect-transition-adapters', script: string, timeoutMs: number): Promise<string> {
   // AT-03-005: read-only native fast path; any native failure falls back to the PowerShell worker (fail closed).
-  if (op === 'inspect-physical-adapters' && process.env.VPNTE_NATIVE_ADAPTERS !== '0') {
-    try { return readPhysicalAdaptersNative() }
+  if (op === 'inspect-physical-adapters' && process.env.VPNTE_DISABLE_NATIVE_NET !== '1') {
+    try { return await readPhysicalAdaptersNative() }
     catch (error) { logEvent('warn', 'phys-lockdown', 'native adapter snapshot unavailable, using PowerShell', { err: (error as Error).message }) }
   }
   try { return await executeAdapterInspection(op, timeoutMs) }
