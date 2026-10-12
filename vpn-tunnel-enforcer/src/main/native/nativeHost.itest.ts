@@ -31,6 +31,7 @@ function runE2E(workerPath: string, dir: string, skipAbort = false): string[] {
     encoding: 'utf8', timeout: 180_000, windowsHide: true
   })
   expect(result.error, String(result.error)).toBeUndefined()
+  expect(result.status, `electron exit status; stderr: ${result.stderr}`).toBe(0)
   return existsSync(outPath) ? readFileSync(outPath, 'utf8').split(/\r?\n/).filter(Boolean) : []
 }
 
@@ -46,6 +47,9 @@ function assertSurvivesHostDeath(lines: string[], expectAbort = true): void {
   if (expectAbort) {
     // The test worker dies on purpose: the request is reported as unavailable and the main process carries on.
     expect(lines.some(l => l.startsWith('abort=UNAVAILABLE')), text).toBe(true)
+    // `unavailable` also covers a timeout, so require the observed fatal exit of the worker (not a timeout kill).
+    expect(lines.some(l => l.includes('native host died') && l.includes('native host exited')), text).toBe(true)
+    expect(lines.some(l => l.includes('timed out')), text).toBe(false)
     expect(lines.some(l => l.startsWith('main-alive-after-abort')), text).toBe(true)
   }
   // A new host serves the next call.
