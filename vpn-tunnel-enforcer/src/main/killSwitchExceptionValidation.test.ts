@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { mkdtemp, rm, writeFile } from 'fs/promises'
+import { mkdtemp, realpath, rm, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 
@@ -41,7 +41,8 @@ describe('strict kill-switch exception validation (AT-03-009)', () => {
     const executable = join(dir, 'allowed.exe')
     await writeFile(executable, 'fixture')
     await expect(validateKillSwitchException({ type: 'app', value: executable, label: 'Allowed' }))
-      .resolves.toMatchObject({ type: 'app', value: executable })
+      // os.tmpdir() may be an 8.3 short path (C:UsersRUNNER~1...); the validator returns the canonical one.
+      .resolves.toMatchObject({ type: 'app', value: await realpath(executable) })
     await expect(validateKillSwitchException({ type: 'app', value: join(dir, 'missing.exe'), label: 'Missing' }))
       .rejects.toThrow()
   })
