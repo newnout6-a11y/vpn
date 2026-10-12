@@ -22,7 +22,7 @@ describe('tunController recovery cancellation guards', () => {
   // AT-06-008 / F-076: every start path (localProxy, directVpn, fallback) must hand the split-tunnel app paths to the config.
   it('passes the split-tunnel application paths to every prepareRuntime call', async () => {
     const source = await readFile(join(here, 'tunController.ts'), 'utf8')
-    const calls = source.split('prepareRuntime(').length - 1 - source.split('function prepareRuntime(').length + 1
+    const calls = source.match(/(?<!function )prepareRuntime\(/g)?.length ?? 0
     const passed = source.match(/directProcessPaths: splitTunnelDirectPaths,/g)?.length ?? 0
     expect(calls).toBeGreaterThanOrEqual(3)
     expect(passed).toBe(calls)
