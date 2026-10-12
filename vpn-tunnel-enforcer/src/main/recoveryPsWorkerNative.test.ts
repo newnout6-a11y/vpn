@@ -7,14 +7,15 @@ import { RecoveryPsWorker } from './recoveryPsWorker'
 
 // A bare CI VM can have no MSFT_DNSClientServerAddress instance at all; the reader then (correctly) refuses.
 // Detect that state explicitly instead of swallowing the reader's error text, so every other failure still fails.
-function hostHasDnsClientAddresses(): boolean {
+// Only a SUCCESSFUL probe that counts zero skips the test; a failed probe leaves the test to run (and fail on its own).
+function hostHasNoDnsClientAddresses(): boolean {
   if (process.platform !== 'win32') return false
   const probe = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
     '@(Get-CimInstance -Namespace root/StandardCimv2 -ClassName MSFT_DNSClientServerAddress -ErrorAction SilentlyContinue).Count'],
     { encoding: 'utf8', timeout: 30000, windowsHide: true })
-  return probe.status === 0 && Number.parseInt(probe.stdout.trim(), 10) > 0
+  return !probe.error && probe.status === 0 && Number.parseInt(probe.stdout.trim(), 10) === 0
 }
-const hasDnsClientAddresses = hostHasDnsClientAddresses()
+const hasNoDnsClientAddresses = hostHasNoDnsClientAddresses()
 
 describe('persistent DNS policy reader native proof', () => {
   it.skipIf(process.platform !== 'win32')('warms each adapter module and returns repeated full and transition frames without mutation (AT-03-006/010)', async () => {
@@ -54,7 +55,7 @@ describe('persistent DNS policy reader native proof', () => {
     } finally { await worker.stop() }
     expect(worker.hasExited).toBe(true)
   }, 20000)
-  it.skipIf(process.platform !== 'win32' || !hasDnsClientAddresses)('returns fresh routing DNS frames without full adapter baselines (AT-03-006)', async () => {
+  it.skipIf(process.platform !== 'win32' || hasNoDnsClientAddresses)('returns fresh routing DNS frames without full adapter baselines (AT-03-006)', async () => {
     const worker = new RecoveryPsWorker(process.env.ProgramData || 'C:\\ProgramData')
     try {
       await worker.execute({ op: 'warmup' })
