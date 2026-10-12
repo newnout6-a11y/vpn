@@ -5,7 +5,7 @@
   "description": "VPN Tunnel Enforcer monorepo / workspace",
   "license": "MIT",
   "engines": {
-    "node": ">=22.13.0"
+    "node": ">=24.21.0"
   },
   "scripts": {
     "dev": "npm --prefix vpn-tunnel-enforcer run dev",
