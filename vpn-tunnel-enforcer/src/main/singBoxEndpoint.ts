@@ -54,7 +54,11 @@ function toEndpointPeer(peer: Record<string, any>, onlyPeer: boolean): Record<st
   if (allowed_ips !== undefined && !Array.isArray(allowed_ips)) throw new Error('WireGuard: allowed_ips пира должен быть списком')
   // Every given route must be a valid CIDR; a bare address gets the host prefix, anything else is refused here
   // rather than by sing-box at check time.
-  const given: string[] = Array.isArray(allowed_ips) ? allowed_ips.map(asString).filter(Boolean).map(toPrefix) : []
+  // Each entry is checked BEFORE anything is dropped: a non-string or blank entry is an error, never a silent gap.
+  const given: string[] = (Array.isArray(allowed_ips) ? allowed_ips : []).map((entry: unknown) => {
+    if (typeof entry !== 'string' || !entry.trim()) throw new Error('WireGuard: запись allowed_ips должна быть непустой строкой')
+    return toPrefix(entry.trim())
+  })
   const routes: string[] = given.length > 0 ? given : onlyPeer ? ['0.0.0.0/0', '::/0'] : []
   if (routes.length === 0) throw new Error('WireGuard: у пира не указаны allowed_ips (при нескольких пирах обязательны)')
   return {

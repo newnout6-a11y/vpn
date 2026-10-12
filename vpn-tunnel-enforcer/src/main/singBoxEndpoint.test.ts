@@ -106,6 +106,7 @@ describe('wireguardOutboundToEndpoint', () => {
     expect(make(['not-a-route'])).toThrow(/адрес/)
     expect(make(['10.0.0.0/40'])).toThrow(/префикс/)
     expect(make('0.0.0.0/0')).toThrow(/списком/)
+    for (const bad of [[123], [null], [' '], ['10.1.0.0/16', ''], [{}]]) expect(make(bad)).toThrow(/непустой строкой/)
   })
 
   it('copies valid reserved bytes to the peer and ignores invalid ones', () => {
