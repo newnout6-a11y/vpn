@@ -36,8 +36,16 @@ function toEndpointPeer(peer: Record<string, any>): Record<string, unknown> {
   if (!address) throw new Error('WireGuard: у пира не указан адрес')
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('WireGuard: у пира некорректный порт')
   if (!publicKey) throw new Error('WireGuard: у пира не указан публичный ключ')
-  const { server: _s, server_port: _p, address: _a, port: _port, reserved, ...rest } = peer
-  return { ...rest, address, port, ...(validReserved(reserved) ? { reserved } : {}) }
+  const { pre_shared_key, allowed_ips, persistent_keepalive_interval, reserved } = peer
+  return {
+    address,
+    port,
+    public_key: publicKey,
+    ...(asString(pre_shared_key) ? { pre_shared_key: asString(pre_shared_key) } : {}),
+    ...(Array.isArray(allowed_ips) && allowed_ips.length > 0 ? { allowed_ips } : {}),
+    ...(Number.isInteger(persistent_keepalive_interval) && persistent_keepalive_interval > 0 ? { persistent_keepalive_interval } : {}),
+    ...(validReserved(reserved) ? { reserved } : {})
+  }
 }
 
 /**
@@ -50,18 +58,23 @@ export function wireguardOutboundToEndpoint(outbound: Record<string, any>): Wire
   if (Array.isArray(outbound.peers)) {
     // Multi-peer profile (hand-written JSON). Peers may still use the legacy keys server/server_port, which the
     // endpoint form does not know: translate every peer instead of copying obsolete fields into the endpoint.
-    const { type: _type, tag: _tag, local_address, dns_servers: _dns, server: _s, server_port: _p, peer_public_key: _k,
-      pre_shared_key: _psk, reserved: _r, domain_resolver, address, peers, ...rest } = outbound
+    // Only fields the endpoint knows are carried over: sing-box 1.13 rejects unknown keys (tls, multiplex, detour…).
+    const { local_address, domain_resolver, address, peers, private_key, mtu, listen_port, udp_timeout, workers, system, name } = outbound
     const addresses = toPrefixes(Array.isArray(address) ? address : local_address)
     if (addresses.length === 0) throw new Error('WireGuard: не указан локальный адрес туннеля (ip=…)')
     if (peers.length === 0) throw new Error('WireGuard: не указан ни один пир')
-    if (!asString(rest.private_key)) throw new Error('WireGuard: не указан приватный ключ')
-    if (rest.mtu !== undefined && !(Number.isInteger(rest.mtu) && rest.mtu > 0)) delete rest.mtu
+    if (!asString(private_key)) throw new Error('WireGuard: не указан приватный ключ')
     return {
       type: 'wireguard',
       tag,
-      ...rest,
       address: addresses,
+      private_key: asString(private_key),
+      ...(Number.isInteger(mtu) && mtu > 0 ? { mtu } : {}),
+      ...(Number.isInteger(listen_port) && listen_port > 0 && listen_port <= 65535 ? { listen_port } : {}),
+      ...(typeof udp_timeout === 'string' && udp_timeout ? { udp_timeout } : {}),
+      ...(Number.isInteger(workers) && workers > 0 ? { workers } : {}),
+      ...(typeof system === 'boolean' ? { system } : {}),
+      ...(typeof name === 'string' && name ? { name } : {}),
       ...(domain_resolver ? { domain_resolver } : {}),
       peers: peers.map(toEndpointPeer)
     }

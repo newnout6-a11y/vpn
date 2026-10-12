@@ -65,6 +65,15 @@ describe('wireguardOutboundToEndpoint', () => {
     expect(kept).not.toHaveProperty('mtu')
   })
 
+  it('drops fields the endpoint does not know (tls, multiplex, detour, udp_fragment…)', () => {
+    const endpoint = wireguardOutboundToEndpoint({
+      type: 'wireguard', local_address: ['10.0.0.2'], private_key: 'P', tls: { enabled: true }, multiplex: { enabled: true }, detour: 'x', udp_fragment: true,
+      peers: [{ address: 'x', port: 1, public_key: 'K', tls: {}, extra: 1, persistent_keepalive_interval: 25 }]
+    }) as any
+    expect(Object.keys(endpoint).sort()).toEqual(['address', 'peers', 'private_key', 'tag', 'type'])
+    expect(endpoint.peers[0]).toEqual({ address: 'x', port: 1, public_key: 'K', persistent_keepalive_interval: 25 })
+  })
+
   it('copies valid reserved bytes to the peer and ignores invalid ones', () => {
     expect((wireguardOutboundToEndpoint({ ...base, reserved: [1, 2, 3] }) as any).peers[0].reserved).toEqual([1, 2, 3])
     for (const reserved of [[1, 2], [1, 2, 300], 'abc', [1.5, 2, 3]]) {
