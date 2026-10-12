@@ -54,8 +54,8 @@ describe.skipIf(process.platform !== 'win32' && !process.env.VPNTE_PWSH)('native
   it.skipIf(process.platform !== 'win32')('assigns the interface property on a real unregistered COM rule without changing firewall', () => {
     // Add is an in-memory boundary; OS property validation needs no elevation.
     const native = `$ErrorActionPreference='Stop'
-$alias=[string](Get-NetAdapter -ErrorAction Stop|Where-Object{$_.Status -eq 'Up'}|Select-Object -First 1).Name
-if(-not $alias){throw 'No interface available for native property validation'}
+$aliases=@(Get-NetAdapter -ErrorAction Stop|Where-Object{$_.Status -eq 'Up'}|ForEach-Object{[string]$_.Name})
+if($aliases.Count -eq 0){throw 'No interface available for native property validation'}
 $fixtureRules=[pscustomobject]@{Created=$null}
 $fixtureRules|Add-Member -MemberType ScriptMethod -Name Add -Value {param($r)$this.Created=$r}
 $fixturePolicy=[pscustomobject]@{Rules=$fixtureRules}
@@ -64,8 +64,19 @@ function New-Object {param($ComObject)
  Microsoft.PowerShell.Utility\\New-Object -ComObject $ComObject
 }
 ${FIREWALL_RULES_API_PS}
-New-VpnteFirewallRule -DisplayName 'VPNTE-killswitch-user-test' -Direction Outbound -Action Allow -Profile Any -Enabled False -InterfaceAlias $alias
-@{accepted=(@($fixtureRules.Created.Interfaces) -contains $alias);profiles=$fixtureRules.Created.Profiles;enabled=$fixtureRules.Created.Enabled}|ConvertTo-Json -Compress`
+# The firewall only accepts interface names it knows at that moment; which Up adapter that is differs per host (a CI VM
+# can have several, some synthetic). Try each Up adapter and require that at least one real interface is accepted.
+$accepted=$false;$errors=@()
+foreach($alias in $aliases){
+ $fixtureRules.Created=$null
+ try{
+  New-VpnteFirewallRule -DisplayName 'VPNTE-killswitch-user-test' -Direction Outbound -Action Allow -Profile Any -Enabled False -InterfaceAlias $alias
+  if(@($fixtureRules.Created.Interfaces) -contains $alias){$accepted=$true;break}
+  $errors+="$alias : created but interface not recorded"
+ }catch{$errors+="$alias : $($_.Exception.Message)"}
+}
+if(-not $accepted){throw ('no Up adapter accepted as firewall interface: '+($errors -join ' | '))}
+@{accepted=$accepted;profiles=$fixtureRules.Created.Profiles;enabled=$fixtureRules.Created.Enabled}|ConvertTo-Json -Compress`
     const output = execFileSync(process.env.VPNTE_PWSH || 'powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(native, 'utf16le').toString('base64')], { windowsHide: true, encoding: 'utf8', timeout: 15000, stdio: 'pipe' })
     expect(JSON.parse(output.trim())).toEqual({ accepted: true, profiles: 2147483647, enabled: false })
   })
