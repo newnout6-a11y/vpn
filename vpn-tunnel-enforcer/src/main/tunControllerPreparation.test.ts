@@ -47,7 +47,7 @@ function harness(dns: Promise<unknown[]>, mode = 'directVpn', engine = 'xray', a
     let proxyOwnerProcessNames=[], proxyOwnerProgramPaths=[], stopRequested=false;
     const startAbortController=new AbortController();
     const proxyAddr='127.0.0.1:10808', proxyType='socks5', wantKillSwitch=true;
-    const startOptions={}, publicWifiCompatibility=true, splitTunnelDirectNames=[];
+    const startOptions={}, publicWifiCompatibility=true, splitTunnelDirectNames=[], splitTunnelDirectPaths=[];
     const vpnProfile={outbound:{type:'vless'},clientDevice:'pc',name:'fixture'};
     const startupCleanupTasks=[];
     async function run(){ try { ${preparation}
