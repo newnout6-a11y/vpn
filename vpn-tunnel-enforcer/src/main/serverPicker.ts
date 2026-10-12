@@ -343,7 +343,7 @@ export async function tunnelHttpProbe(skipCache = false, maxRetries = 1, signal?
     )
 
     try {
-      // Promise.any is native in the project's Node >=22.13 runtime, so no
+      // Promise.any is native in the project's Node >=24.21 runtime, so no
       // polyfill is needed. First successful response wins; cancel the other
       // requests so they cannot keep loading a slow hotspot after success.
       const ms = await Promise.any(races)

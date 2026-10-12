@@ -36,7 +36,7 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           # Тесты должны идти на том Node, что работает в приложении: Electron 44.4.3 содержит Node 24.21.0.
-          # На Node 22.13 (.nvmrc) fs.lstat() по пути на Windows возвращает dev: 0 (fstat — реальное значение),
+          # На Node 22.13 fs.lstat() по пути на Windows возвращает dev: 0 (fstat — реальное значение),
           # из-за чего падают 17 тестов безопасности (runtimeArtifact, engineLogRetention); на Node 24.21 это не так.
           node-version: '24.21.0'
           cache: npm
