@@ -1,9 +1,20 @@
 // AT-03-003/007/012: real persistent worker, fixed registry reads only; no OS writes.
 import { describe, expect, it, vi } from 'vitest'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 vi.mock('./admin', () => ({ isProcessElevated: vi.fn() }))
 vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
 import { RecoveryPsWorker } from './recoveryPsWorker'
+
+// A bare CI VM can have no MSFT_DNSClientServerAddress instance at all; the reader then (correctly) refuses.
+// Detect that state explicitly instead of swallowing the reader's error text, so every other failure still fails.
+function hostHasDnsClientAddresses(): boolean {
+  if (process.platform !== 'win32') return false
+  const probe = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+    '@(Get-CimInstance -Namespace root/StandardCimv2 -ClassName MSFT_DNSClientServerAddress -ErrorAction SilentlyContinue).Count'],
+    { encoding: 'utf8', timeout: 30000, windowsHide: true })
+  return probe.status === 0 && Number.parseInt(probe.stdout.trim(), 10) > 0
+}
+const hasDnsClientAddresses = hostHasDnsClientAddresses()
 
 describe('persistent DNS policy reader native proof', () => {
   it.skipIf(process.platform !== 'win32')('warms each adapter module and returns repeated full and transition frames without mutation (AT-03-006/010)', async () => {
@@ -43,17 +54,12 @@ describe('persistent DNS policy reader native proof', () => {
     } finally { await worker.stop() }
     expect(worker.hasExited).toBe(true)
   }, 20000)
-  it.skipIf(process.platform !== 'win32')('returns fresh routing DNS frames without full adapter baselines (AT-03-006)', async ctx => {
+  it.skipIf(process.platform !== 'win32' || !hasDnsClientAddresses)('returns fresh routing DNS frames without full adapter baselines (AT-03-006)', async () => {
     const worker = new RecoveryPsWorker(process.env.ProgramData || 'C:\\ProgramData')
     try {
       await worker.execute({ op: 'warmup' })
       for (let read = 0; read < 2; read++) {
-        const value = await worker.execute({ op: 'inspect-physical-dns' }, 20000).catch(error => {
-          // A host without any DNS client server address (e.g. a bare CI VM) has nothing to read: not a failure of the reader.
-          if (/No matching MSFT_DNSClientServerAddress/.test(String(error))) return null
-          throw error
-        })
-        if (value === null) { ctx.skip('host has no MSFT_DNSClientServerAddress instances'); return }
+        const value = await worker.execute({ op: 'inspect-physical-dns' }, 20000)
         const parsed = value.trim() ? JSON.parse(value) : []
         const rows = Array.isArray(parsed) ? parsed : [parsed]
         for (const row of rows) {
