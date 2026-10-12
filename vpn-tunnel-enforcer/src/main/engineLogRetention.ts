@@ -2,6 +2,7 @@
 import { constants } from 'fs'
 import { lstat, open, type FileHandle } from 'fs/promises'
 import { join } from 'path'
+import { identityDiff } from './fileIdentityDiff'
 
 export const ENGINE_LOG_BYTES = 10 * 1024 * 1024
 export const ENGINE_LOG_CHECK_MS = 5000
@@ -20,7 +21,7 @@ async function checkedFile(path: string, create = false): Promise<FileHandle | n
   const after = await file.stat()
   if (!after.isFile() || after.nlink !== 1 || (before && (before.dev !== after.dev || before.ino !== after.ino))) {
     await file.close()
-    throw new Error('Log file changed during inspection')
+    throw new Error(`Log file changed during inspection (${before ? identityDiff(before, after) : 'created'}; nlink ${after.nlink}; file ${after.isFile()})`)
   }
   return file
 }

@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'crypto'
 import { constants, type Stats } from 'fs'
 import { lstat, open, rename, unlink, type FileHandle } from 'fs/promises'
 import { basename, dirname, join, resolve } from 'path'
+import { identityDiff } from './fileIdentityDiff'
 
 function isMissing(error: unknown): boolean {
   return (error as NodeJS.ErrnoException | null)?.code === 'ENOENT'
@@ -21,7 +22,7 @@ function assertUnchanged(before: Stats, after: Stats): void {
   assertRegularFile(after)
   if (!sameIdentity(before, after) || before.size !== after.size ||
       before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) {
-    throw new Error('Runtime artifact changed during verification')
+    throw new Error(`Runtime artifact changed during verification (${identityDiff(before, after)})`)
   }
 }
 
