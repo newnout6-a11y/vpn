@@ -14,7 +14,7 @@ const note = (line: string): void => appendFileSync(outPath, `${line}\n`)
 
 const client = createHostClient({
   fork: () => utilityProcess.fork(workerPath, [], {
-    serviceName: 'VPNTE native reads e2e', stdio: 'ignore', env: { ...process.env, VPNTE_NATIVE_HOST_TEST: '1' }
+    serviceName: 'VPNTE native reads e2e', stdio: 'ignore'
   }) as unknown as HostProcess,
   defaultTimeoutMs: 30_000,
   maxDeaths: 10,
@@ -43,9 +43,11 @@ app.whenReady().then(async () => {
       await run(`r${round}.physical-snapshot`, 'physical-snapshot', { profiles: [] })
       await run(`r${round}.wininet`, 'wininet')
     }
-    // The host dies with a fatal N-API error here. If main survives to write the next line, the isolation works.
-    await run('abort', 'abort-for-test')
-    note(`main-alive-after-abort pid=${process.pid}`)
+    if (process.env.VPNTE_E2E_SKIP_ABORT !== '1') {
+      // The (test-only) host dies with a fatal N-API error here. If main survives to write the next line, the isolation works.
+      await run('abort', 'abort-for-test')
+      note(`main-alive-after-abort pid=${process.pid}`)
+    }
     await run('respawn.adapters', 'adapters')
     note('E2E_DONE')
   } catch (error) {

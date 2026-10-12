@@ -48,23 +48,7 @@ export async function runNativeOp(op: HostOp, args: unknown): Promise<unknown> {
     case 'wininet':
       await notifyWinInetInProcess()
       return true
-    case 'abort-for-test':
-      return abortForTest()
     default:
       throw new Error(`unknown native op ${String(op)}`)
   }
-}
-
-/**
- * Reproduces the real failure class on purpose (koffi.view over foreign memory is a fatal N-API error under
- * Electron), then aborts regardless. Reachable only when the host is started with VPNTE_NATIVE_HOST_TEST=1.
- */
-function abortForTest(): never {
-  if (process.env.VPNTE_NATIVE_HOST_TEST !== '1') throw new Error('abort-for-test is not available')
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const koffi = require('koffi')
-    koffi.view(koffi.alloc('int32_t', 4), 8)
-  } catch { /* fall through to the explicit abort */ }
-  process.abort()
 }

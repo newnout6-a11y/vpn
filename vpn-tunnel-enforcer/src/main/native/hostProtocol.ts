@@ -28,7 +28,7 @@ export type HostOp =
   | 'tunnels'
   | 'physical-snapshot'
   | 'wininet'
-  /** Test only: aborts the host process. Honoured solely when VPNTE_NATIVE_HOST_TEST=1 is set in the host. */
+  /** Test only: implemented by nativeHostTestWorker.ts (bundled by the e2e, never shipped); the production host rejects it. */
   | 'abort-for-test'
 
 export interface HostRequest {

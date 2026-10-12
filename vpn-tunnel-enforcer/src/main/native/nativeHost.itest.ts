@@ -18,13 +18,13 @@ function bundle(dir: string, entry: string, name: string): string {
   return outfile
 }
 
-function runE2E(workerPath: string, dir: string): string[] {
+function runE2E(workerPath: string, dir: string, skipAbort = false): string[] {
   const outPath = join(dir, 'e2e.out')
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const electronExe: string = require('electron')
   const main = bundle(dir, 'src/main/native/nativeHostE2E.ts', 'e2e-main.cjs')
   // Even an empty ELECTRON_RUN_AS_NODE switches Electron into plain Node mode: it must be absent.
-  const env: NodeJS.ProcessEnv = { ...process.env, VPNTE_E2E_WORKER: workerPath, VPNTE_E2E_OUT: outPath, VPNTE_DISABLE_NATIVE_NET: '0' }
+  const env: NodeJS.ProcessEnv = { ...process.env, VPNTE_E2E_WORKER: workerPath, VPNTE_E2E_OUT: outPath, VPNTE_DISABLE_NATIVE_NET: '0', VPNTE_E2E_SKIP_ABORT: skipAbort ? '1' : '0' }
   delete env.ELECTRON_RUN_AS_NODE
   const result = spawnSync(electronExe, [main, '--disable-gpu'], {
     env,
@@ -34,7 +34,7 @@ function runE2E(workerPath: string, dir: string): string[] {
   return existsSync(outPath) ? readFileSync(outPath, 'utf8').split(/\r?\n/).filter(Boolean) : []
 }
 
-function assertSurvivesHostDeath(lines: string[]): void {
+function assertSurvivesHostDeath(lines: string[], expectAbort = true): void {
   const text = lines.join('\n')
   expect(text, text).toContain('E2E_DONE')
   expect(text).not.toContain('E2E_FAILED')
@@ -43,9 +43,11 @@ function assertSurvivesHostDeath(lines: string[]): void {
     expect(lines.some(l => l.startsWith(`${round}.adapters=ok`)), `${round}.adapters: ${text}`).toBe(true)
     expect(lines.filter(l => l.startsWith(`${round}.`) && l.includes('UNAVAILABLE')), text).toEqual([])
   }
-  // The host dies on purpose: the request is reported as unavailable and the main process carries on.
-  expect(lines.some(l => l.startsWith('abort=UNAVAILABLE')), text).toBe(true)
-  expect(lines.some(l => l.startsWith('main-alive-after-abort')), text).toBe(true)
+  if (expectAbort) {
+    // The test worker dies on purpose: the request is reported as unavailable and the main process carries on.
+    expect(lines.some(l => l.startsWith('abort=UNAVAILABLE')), text).toBe(true)
+    expect(lines.some(l => l.startsWith('main-alive-after-abort')), text).toBe(true)
+  }
   // A new host serves the next call.
   expect(lines.some(l => l.startsWith('respawn.adapters=ok')), text).toBe(true)
 }
@@ -56,7 +58,8 @@ describe.skipIf(!enabled)('native-read host under the Electron runtime', () => {
     mkdirSync(cache, { recursive: true })
     const dir = mkdtempSync(join(cache, 'vpnte-host-e2e-'))
     try {
-      const worker = bundle(dir, 'src/main/native/nativeHostWorker.ts', 'nativeHostWorker.cjs')
+      // The TEST worker (production host + a crash op); the shipped worker has no crash op.
+      const worker = bundle(dir, 'src/main/native/nativeHostTestWorker.ts', 'nativeHostTestWorker.cjs')
       assertSurvivesHostDeath(runE2E(worker, dir))
     } finally {
       rmSync(dir, { recursive: true, force: true })
@@ -64,12 +67,13 @@ describe.skipIf(!enabled)('native-read host under the Electron runtime', () => {
   }, 240_000)
 
   // Needs `npm run dist:win` first. Proves asar + unpacked koffi.node resolution inside a utility process.
-  it.skipIf(!existsSync(packagedAsar))('works from the packaged app.asar (unpacked koffi.node)', () => {
+  it.skipIf(!existsSync(packagedAsar))('serves every read from the packaged app.asar (unpacked koffi.node)', () => {
     const cache = resolve('node_modules/.cache')
     mkdirSync(cache, { recursive: true })
     const dir = mkdtempSync(join(cache, 'vpnte-host-e2e-packaged-'))
     try {
-      assertSurvivesHostDeath(runE2E(packagedWorker, dir))
+      // The shipped worker has no crash op, so this run proves loading/serving from the asar, not crash isolation.
+      assertSurvivesHostDeath(runE2E(packagedWorker, dir, true), false)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

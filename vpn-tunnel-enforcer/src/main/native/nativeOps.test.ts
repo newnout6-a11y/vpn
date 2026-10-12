@@ -1,21 +1,19 @@
 // AT-07-002 / AT-12-007: what the native-read host accepts. Arguments are validated before any koffi call, and the
-// test-only abort is unreachable unless the host was started with VPNTE_NATIVE_HOST_TEST=1.
+// crash-injection op does not exist in the production host.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { runNativeOp } from './nativeOps'
 import { isHostResponse, NativeHostError } from './hostProtocol'
 
 const platform = Object.getOwnPropertyDescriptor(process, 'platform')!
-const savedFlag = process.env.VPNTE_NATIVE_HOST_TEST
-beforeEach(() => { Object.defineProperty(process, 'platform', { value: 'win32' }); delete process.env.VPNTE_NATIVE_HOST_TEST })
+beforeEach(() => { Object.defineProperty(process, 'platform', { value: 'win32' }) })
 afterEach(() => {
   Object.defineProperty(process, 'platform', platform)
-  if (savedFlag === undefined) delete process.env.VPNTE_NATIVE_HOST_TEST; else process.env.VPNTE_NATIVE_HOST_TEST = savedFlag
 })
 
 describe('native host operations', () => {
-  it('refuses the test-only abort unless the host runs in test mode (and does not abort)', async () => {
+  it('does not implement the test-only crash op: the production host rejects it as unknown', async () => {
     const abort = vi.spyOn(process, 'abort').mockImplementation((() => { throw new Error('process.abort was called') }) as () => never)
-    await expect(runNativeOp('abort-for-test', undefined)).rejects.toThrow('abort-for-test is not available')
+    await expect(runNativeOp('abort-for-test', undefined)).rejects.toThrow(/unknown native op/)
     expect(abort).not.toHaveBeenCalled()
     abort.mockRestore()
   })
