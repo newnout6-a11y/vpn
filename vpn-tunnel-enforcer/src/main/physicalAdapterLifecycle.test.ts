@@ -40,6 +40,21 @@ function deferred<T>() {
   return { promise, resolve }
 }
 
+// AT-03-006/007: the snapshot that feeds the rollback manifest must not come from the warm-up cache.
+describe('physical adapter apply snapshot freshness', () => {
+  it('requests a fresh adapter snapshot by default', async () => {
+    const h = harness()
+    await h.apply('192.168.250.254')
+    expect(h.snapshotPhysicalAdapters).toHaveBeenCalledWith({ forceFresh: true })
+  })
+
+  it('uses the cache only when the caller explicitly opts out', async () => {
+    const h = harness()
+    await h.apply('192.168.250.254', { forceFresh: false } as any)
+    expect(h.snapshotPhysicalAdapters).toHaveBeenCalledWith({ forceFresh: false })
+  })
+})
+
 describe('physical adapter apply cancellation', () => {
   it('admits no reads or writes after an initial abort', async () => {
     const h = harness(), controller = new AbortController(); controller.abort()
