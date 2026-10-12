@@ -3,7 +3,7 @@
  * Tests the core logic: route rule generation, app management, and config persistence.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest'
 import { mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -145,6 +145,7 @@ describe('split tunneling by application path', () => {
   const exe = join(copyDir, 'app.exe')
 
   beforeEach(() => { writeFileSync(exe, 'x') })
+  afterAll(() => { rmSync(copyDir, { recursive: true, force: true }) })
 
   it('emits a path rule and no name rule for an installed application', async () => {
     const entry = await splitTunneling.addApp(exe)
