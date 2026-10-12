@@ -18,8 +18,8 @@ const arches = [30, 60, 90, 120, 150, 180].map((r) => `<path d='M${200 - r} 400V
 const archSvg = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 400 400' fill='none' stroke='#15140e' stroke-width='3'>${arches}</svg>`
 
 const html = `<!doctype html><meta charset="utf-8"><style>
-${face('Bitter', 'bitter-cyrillic-wght.woff2', CYR)}
-${face('Bitter', 'bitter-latin-wght.woff2', LAT)}
+${face('Unbounded', 'unbounded-cyrillic-wght.woff2', CYR)}
+${face('Unbounded', 'unbounded-latin-wght.woff2', LAT)}
 ${face('Golos Text', 'golos-text-cyrillic-wght.woff2', CYR, '400 900')}
 ${face('Golos Text', 'golos-text-latin-wght.woff2', LAT, '400 900')}
 ${face('Fira Mono', 'fira-mono-cyrillic-500.woff2', CYR, '500')}
@@ -28,10 +28,10 @@ ${face('Fira Mono', 'fira-mono-latin-500.woff2', LAT, '500')}
 body{margin:0;width:1200px;height:630px;background:#efebe2;color:#15140e;font-family:"Golos Text",sans-serif;position:relative;overflow:hidden}
 .arch{position:absolute;right:-70px;bottom:-110px;width:640px;height:640px;opacity:.22;background:url("data:image/svg+xml;base64,${Buffer.from(archSvg).toString('base64')}") center/contain no-repeat}
 .c{position:absolute;left:80px;top:64px;right:80px;bottom:64px;display:flex;flex-direction:column;justify-content:space-between;border-top:2px solid #15140e;padding-top:28px}
-.b{display:flex;align-items:center;gap:16px;font:600 30px/1 "Bitter",serif}
+.b{display:flex;align-items:center;gap:16px;font:600 24px/1 "Unbounded",sans-serif;letter-spacing:-.03em}
 .b img{width:48px;height:48px}
 .b small{margin-left:auto;font:500 16px/1 "Fira Mono",monospace;letter-spacing:.12em;text-transform:uppercase;color:#5a5748}
-h1{margin:0;font:600 96px/1.04 "Bitter",serif;letter-spacing:-.02em;max-width:900px}
+h1{margin:0;font:600 72px/1.06 "Unbounded",sans-serif;letter-spacing:-.05em;max-width:900px}
 h1 span{color:#c23a05}
 p{margin:0;font-size:28px;line-height:1.4;color:#4a4739;max-width:760px}
 .row{display:flex;align-items:center;gap:22px}
@@ -52,7 +52,7 @@ await new Promise((r) => setTimeout(r, 500))
 
 // страховка: шрифты загрузились, заголовок не вылезает за карточку
 const check = await p.evaluate(() => ({
-  bitter: document.fonts.check('600 96px Bitter', 'Туннель'),
+  bitter: document.fonts.check('600 72px Unbounded', 'Туннель'),
   golos: document.fonts.check('400 28px "Golos Text"', 'Windows-клиент'),
   h1Bottom: document.getElementById('h').getBoundingClientRect().bottom,
   rowTop: document.querySelector('.row').getBoundingClientRect().top
