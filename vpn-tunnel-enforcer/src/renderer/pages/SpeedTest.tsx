@@ -179,6 +179,9 @@ export function SpeedTest() {
               {result.serverName} • {result.profileUsed} • {formatTimestamp(result.timestamp)}
             </span>
           </div>
+          {result.egressMismatch && (
+            <p className="mt-3 text-xs text-[var(--color-warning,#d97706)]">{t('speedTest.egressMismatch')}</p>
+          )}
         </MacCard>
       )}
 

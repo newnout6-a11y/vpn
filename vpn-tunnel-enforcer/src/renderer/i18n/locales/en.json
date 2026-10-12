@@ -582,6 +582,7 @@
     "runTest": "Run Test",
     "running": "Testing...",
     "results": "Results",
+    "egressMismatch": "The test saw a different external IP than the app reports, so these figures may not describe the VPN tunnel.",
     "download": "Download",
     "upload": "Upload",
     "latency": "Latency",

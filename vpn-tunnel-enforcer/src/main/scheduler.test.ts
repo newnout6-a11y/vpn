@@ -226,4 +226,20 @@ describe('computeNextEvent — overnight windows', () => {
     expect(new Date(next!.at).getHours()).toBe(6)
     expect(new Date(next!.at).getDate()).toBe(11) // Thursday
   })
+
+  // F-193: after midnight the window opened the previous day is still active; its stop must not be lost.
+  it('finds the stop at 06:00 the same morning when the window opened yesterday', () => {
+    const thu0200 = new Date(2024, 0, 11, 2, 0, 0).getTime() // Thu 02:00, window opened Wed 22:00
+    const next = computeNextEvent([overnight], thu0200)
+    expect(next?.type).toBe('stop')
+    expect(new Date(next!.at).getDate()).toBe(11)
+    expect(new Date(next!.at).getHours()).toBe(6)
+  })
+
+  it('after the morning stop the next event is the following start', () => {
+    const thu0700 = new Date(2024, 0, 11, 7, 0, 0).getTime()
+    const next = computeNextEvent([overnight], thu0700)
+    expect(next?.type).toBe('start')
+    expect(new Date(next!.at).getDate()).toBe(17) // next Wednesday
+  })
 })
