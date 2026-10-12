@@ -10,7 +10,7 @@
 import { ALL_KNOWN_ALIASES } from '../tunAdapter'
 import { ADAPTER_EXCLUSION_PATTERN } from '../physicalAdapterSnapshot'
 import {
-  AF_INET, AF_INET6, AF_UNSPEC, assertIfRow2Layout, defineStruct, ERROR_BUFFER_OVERFLOW, FORWARD_ROW2_SIZE, GAA_FLAGS,
+  AF_INET, AF_INET6, AF_UNSPEC, assertIfRow2Layout, assertKoffiAllowedHere, defineStruct, ERROR_BUFFER_OVERFLOW, FORWARD_ROW2_SIZE, GAA_FLAGS,
   IF_ROW2_OFFSETS, IF_ROW2_SIZE
 } from './koffiTypes'
 import { readNdisCharacteristicsByGuid } from './ipHelperReads'
@@ -153,6 +153,7 @@ export function createKoffiSource(profiles: Map<number, string[]>): NativeAdapte
 export function resetKoffiSourceForTests(): void { sourceFactory = null }
 
 function buildSourceFactory(): SourceFactory {
+  assertKoffiAllowedHere('native adapter snapshot')
   if (process.platform !== 'win32') throw new Error('native adapter snapshot: win32 only')
   if (process.arch !== 'x64' && process.arch !== 'arm64') throw new Error('native adapter snapshot: unsupported architecture')
   // eslint-disable-next-line @typescript-eslint/no-require-imports

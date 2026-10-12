@@ -12,7 +12,7 @@
  * are the 64-bit layouts).
  */
 import {
-  AF_INET, AF_INET6, AF_UNSPEC, assertIfRow2Layout, defineStruct, ERROR_BUFFER_OVERFLOW, FORWARD_ROW2_SIZE, GAA_FLAGS,
+  AF_INET, AF_INET6, AF_UNSPEC, assertIfRow2Layout, assertKoffiAllowedHere, defineStruct, ERROR_BUFFER_OVERFLOW, FORWARD_ROW2_SIZE, GAA_FLAGS,
   IF_ROW2_OFFSETS, IF_ROW2_SIZE
 } from './koffiTypes'
 import {
@@ -29,6 +29,7 @@ let api: any = null
 
 function load(): any {
   if (api) return api
+  assertKoffiAllowedHere('native network reads')
   if (process.platform !== 'win32') throw new Error('native network reads are Windows-only')
   if (process.arch !== 'x64' && process.arch !== 'arm64') throw new Error(`unsupported architecture ${process.arch}`)
   // eslint-disable-next-line @typescript-eslint/no-require-imports

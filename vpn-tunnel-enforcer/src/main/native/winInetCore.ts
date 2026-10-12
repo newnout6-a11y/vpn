@@ -1,5 +1,7 @@
 // WinINet change notification via koffi. Runs INSIDE the native-read host (a utility process), never in main:
 // see hostProtocol.ts. A genuine `false` is a WinInetCallError; any other error means koffi is unusable.
+import { assertKoffiAllowedHere } from './koffiTypes'
+
 const INTERNET_OPTION_SETTINGS_CHANGED = 39
 const INTERNET_OPTION_REFRESH = 37
 
@@ -12,6 +14,7 @@ type InternetSetOptionW = (handle: null, option: number, buffer: null, length: n
 let cached: Promise<InternetSetOptionW> | null = null
 
 async function loadInternetSetOption(): Promise<InternetSetOptionW> {
+  assertKoffiAllowedHere('WinINet notification')
   const mod = await import('koffi')
   // koffi is CJS: interop may expose it as `default` or as the namespace itself. Loosely typed on purpose
   // (the string-based prototype form is not covered by koffi's overloads).

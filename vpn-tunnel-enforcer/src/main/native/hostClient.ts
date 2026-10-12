@@ -38,7 +38,7 @@ export interface HostClient {
 }
 
 export function createHostClient(options: HostClientOptions): HostClient {
-  const defaultTimeoutMs = options.defaultTimeoutMs ?? 10_000
+  const defaultTimeoutMs = options.defaultTimeoutMs ?? 5_000
   const maxDeaths = options.maxDeaths ?? 3
   const deathWindowMs = options.deathWindowMs ?? 5 * 60_000
   const now = options.now ?? Date.now
