@@ -10,9 +10,12 @@ import { RecoveryPsWorker } from './recoveryPsWorker'
 // Only a SUCCESSFUL probe that counts zero skips the test; a failed probe leaves the test to run (and fail on its own).
 function hostHasNoDnsClientAddresses(): boolean {
   if (process.platform !== 'win32') return false
-  const probe = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-    '@(Get-CimInstance -Namespace root/StandardCimv2 -ClassName MSFT_DNSClientServerAddress -ErrorAction SilentlyContinue).Count'],
-    { encoding: 'utf8', timeout: 30000, windowsHide: true })
+  // Get-CimClass throws for a real failure (missing class or namespace, broken provider), so errors fail the probe
+  // instead of reading as "no instances". Only the provider's explicit "No matching ... objects" counts as zero.
+  const script = "$ErrorActionPreference='Stop';$null=Get-CimClass -Namespace root/StandardCimv2 -ClassName MSFT_DNSClientServerAddress;" +
+    "try{@(Get-CimInstance -Namespace root/StandardCimv2 -ClassName MSFT_DNSClientServerAddress).Count}" +
+    "catch{if($_.CategoryInfo.Category -eq 'ObjectNotFound' -or $_.Exception.Message -match 'No matching'){0}else{throw}}"
+  const probe = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { encoding: 'utf8', timeout: 30000, windowsHide: true })
   return !probe.error && probe.status === 0 && Number.parseInt(probe.stdout.trim(), 10) === 0
 }
 const hasNoDnsClientAddresses = hostHasNoDnsClientAddresses()
