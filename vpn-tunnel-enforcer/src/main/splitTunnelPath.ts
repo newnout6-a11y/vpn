@@ -24,3 +24,24 @@ export function normalizeProcessPath(input: string): string | null {
 export function processPathRegex(path: string): string {
   return '(?i)^' + path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$'
 }
+
+/**
+ * The spellings under which Windows can report one executable: the stored path and its canonical long form
+ * (8.3 short names expanded, links followed, `\?\` prefix removed). The process path sing-box sees comes from the
+ * system and may differ from what discovery stored, so the rule must cover both; each stays an exact anchored match.
+ * `resolve` is injectable for tests; a failure to resolve leaves just the stored spelling.
+ */
+export function windowsPathSpellings(path: string, resolve: (value: string) => string): string[] {
+  const BS = String.fromCharCode(92)
+  const spellings = [path]
+  let canonical: string | null = null
+  try { canonical = resolve(path) } catch { canonical = null }
+  if (canonical) {
+    const verbatim = BS + BS + '?' + BS
+    if (canonical.startsWith(verbatim + 'UNC' + BS)) canonical = BS + canonical.slice(verbatim.length + 3)
+    else if (canonical.startsWith(verbatim)) canonical = canonical.slice(verbatim.length)
+    const normalized = normalizeProcessPath(canonical)
+    if (normalized && !spellings.some((known) => known.toLowerCase() === normalized.toLowerCase())) spellings.push(normalized)
+  }
+  return spellings
+}

@@ -1,6 +1,6 @@
 // AT-06-008 / F-076: path normalization and the sing-box path regex.
 import { describe, expect, it } from 'vitest'
-import { normalizeProcessPath, processPathRegex } from './splitTunnelPath'
+import { normalizeProcessPath, processPathRegex, windowsPathSpellings } from './splitTunnelPath'
 
 const BS = String.fromCharCode(92)
 const win = (...parts: string[]) => parts.join(BS)
@@ -38,5 +38,31 @@ describe('processPathRegex', () => {
 
   it('treats regex metacharacters in the path literally', () => {
     expect(matches(processPathRegex(win('C:', 'a.b', 'x.exe')), win('C:', 'aXb', 'x.exe'))).toBe(false)
+  })
+})
+
+describe('windowsPathSpellings', () => {
+  const short = win('C:', 'PROGRA~1', 'App', 'app.exe')
+  const long = win('C:', 'Program Files', 'App', 'app.exe')
+
+  it('adds the canonical long path next to the stored 8.3 spelling', () => {
+    expect(windowsPathSpellings(short, () => long)).toEqual([short, long])
+  })
+
+  it('strips the verbatim prefix and converts a verbatim UNC path', () => {
+    expect(windowsPathSpellings(short, () => BS + BS + '?' + BS + long)).toEqual([short, long])
+    expect(windowsPathSpellings(win('C:', 'x', 'a.exe'), () => BS + BS + '?' + BS + 'UNC' + BS + 'srv' + BS + 'share' + BS + 'a.exe'))
+      .toEqual([win('C:', 'x', 'a.exe'), BS + BS + 'srv' + BS + 'share' + BS + 'a.exe'])
+  })
+
+  it('keeps one spelling when both are the same (any case) or resolution fails', () => {
+    expect(windowsPathSpellings(long, () => long.toUpperCase())).toEqual([long])
+    expect(windowsPathSpellings(long, () => { throw new Error('ENOENT') })).toEqual([long])
+  })
+
+  it('does not widen the match: each spelling is its own anchored regex', () => {
+    const regexes = windowsPathSpellings(short, () => long).map(processPathRegex)
+    expect(regexes.some((regex) => matches(regex, win('C:', 'Program Files', 'Other', 'app.exe')))).toBe(false)
+    expect(regexes.some((regex) => matches(regex, long))).toBe(true)
   })
 })

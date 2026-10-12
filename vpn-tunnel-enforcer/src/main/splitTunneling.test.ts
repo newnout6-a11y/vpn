@@ -151,7 +151,9 @@ describe('split tunneling by application path', () => {
     await splitTunneling.setRule(entry.id, 'direct')
     const rules = generateSplitTunnelRouteRules()
     const pathRule = rules.find((rule) => rule.process_path_regex)
-    expect(pathRule).toEqual({ process_path_regex: [processPathRegex(exe)], outbound: 'direct-out' })
+    // The runner's temp dir can be an 8.3 path: the rule then carries both spellings, the stored one among them.
+    expect(pathRule?.outbound).toBe('direct-out')
+    expect(pathRule?.process_path_regex).toContain(processPathRegex(exe))
     expect(getDirectProcessPaths().map((p) => p.toLowerCase())).toContain(exe.toLowerCase())
     expect(getDirectProcessNames()).not.toContain('app.exe')
     expect(rules.some((rule) => (rule.process_name ?? []).includes('app.exe'))).toBe(false)

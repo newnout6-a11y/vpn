@@ -13,12 +13,12 @@ import { execFile as execFileCb } from 'child_process'
 import { ipcMain, dialog, app, type IpcMainInvokeEvent } from 'electron'
 import { basename, dirname, extname, join } from 'path'
 import { access, readdir } from 'fs/promises'
-import { existsSync } from 'fs'
+import { existsSync, realpathSync } from 'fs'
 import { promisify } from 'util'
 import { randomUUID } from 'crypto'
 import Store from 'electron-store'
 import { logEvent } from './appLogger'
-import { normalizeProcessPath, processPathRegex } from './splitTunnelPath'
+import { normalizeProcessPath, processPathRegex, windowsPathSpellings } from './splitTunnelPath'
 import { compactForIpcLog } from './ipcLogging'
 import { requireEnum, requireString } from './ipcValidation'
 import { tunController } from './tunController'
@@ -631,7 +631,11 @@ function directRuleTargets(): { names: string[]; paths: string[]; inactive: Arra
     const path = normalizeProcessPath(entry.path)
     if (!path) inactive.push({ name: entry.name, path: entry.path, reason: 'not-an-absolute-path' })
     else if (!existsSync(path)) inactive.push({ name: entry.name, path, reason: 'file-missing' })
-    else if (!paths.some((known) => known.toLowerCase() === path.toLowerCase())) paths.push(path)
+    else {
+      for (const spelling of windowsPathSpellings(path, (value) => realpathSync.native(value))) {
+        if (!paths.some((known) => known.toLowerCase() === spelling.toLowerCase())) paths.push(spelling)
+      }
+    }
   }
   return { names, paths, inactive }
 }
