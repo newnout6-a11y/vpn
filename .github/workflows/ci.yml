@@ -33,7 +33,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version-file: .nvmrc
+          # Тесты должны идти на том Node, что работает в приложении: Electron 44.4.3 содержит Node 24.21.0.
+          # На Node 22.13 (.nvmrc) fs.lstat() по пути на Windows возвращает dev: 0 (fstat — реальное значение),
+          # из-за чего падают 17 тестов безопасности (runtimeArtifact, engineLogRetention); на Node 24.21 это не так.
+          node-version: '24.21.0'
           cache: npm
           cache-dependency-path: vpn-tunnel-enforcer/package-lock.json
       # В lockfile два пакета (fast-uri, js-yaml) записаны как git+ssh://git@github.com/...; у раннера нет SSH-ключа.
@@ -64,28 +67,6 @@ jobs:
           }
           Get-Engine 'https://github.com/XTLS/Xray-core/releases/download/v26.7.28/Xray-windows-64.zip' 'c7172078fca4711bcd92a4774dcd1822544579c58816197575c47533317fd8d1' 'Xray-windows-64.zip' @('xray.exe')
           Get-Engine 'https://github.com/SagerNet/sing-box/releases/download/v1.13.13/sing-box-1.13.13-windows-amd64.zip' 'aea1fa983134a2e2d0600581d1178e98bd6bb93ae12ad8c333eaacae68a1694c' 'sing-box-1.13.13-windows-amd64.zip' @('sing-box.exe')
-      # ВРЕМЕННО: почему runtimeArtifact/engineLogRetention видят «файл изменился» (сравнение lstat по пути и stat по дескриптору).
-      - name: Диагностика идентичности файла (временно)
-        run: |
-          cat > "$RUNNER_TEMP/stat-diag.cjs" <<'JS'
-          const fs = require('fs'), os = require('os'), path = require('path')
-          const show = s => ({ dev: s.dev, ino: s.ino, nlink: s.nlink, size: s.size, mtimeMs: s.mtimeMs, ctimeMs: s.ctimeMs })
-          for (const base of [os.tmpdir(), process.env.RUNNER_TEMP, process.env.GITHUB_WORKSPACE]) {
-            if (!base) continue
-            const p = path.join(base, 'vpnte-stat-diag.txt')
-            fs.writeFileSync(p, 'x')
-            const a = fs.lstatSync(p)
-            const fd = fs.openSync(p, fs.constants.O_RDWR)
-            const b = fs.fstatSync(fd)
-            const aBig = fs.lstatSync(p, { bigint: true }), bBig = fs.fstatSync(fd, { bigint: true })
-            console.log(JSON.stringify({ base, lstat: show(a), fstat: show(b), sameDev: a.dev === b.dev, sameIno: a.ino === b.ino, sameCtime: a.ctimeMs === b.ctimeMs, sameMtime: a.mtimeMs === b.mtimeMs, bigIno: [String(aBig.ino), String(bBig.ino)], bigDev: [String(aBig.dev), String(bBig.dev)] }))
-            fs.closeSync(fd)
-          }
-          JS
-          echo "=== runtime A: node from .nvmrc ($(node -v))"; node "$RUNNER_TEMP/stat-diag.cjs"
-          echo "=== runtime B: node 24.21.0"; npx -y node@24.21.0 "$RUNNER_TEMP/stat-diag.cjs" || echo "runtime B failed"
-          echo "=== runtime C: Electron's embedded Node (production)"; ELECTRON_RUN_AS_NODE=1 node_modules/electron/dist/electron.exe "$RUNNER_TEMP/stat-diag.cjs" || echo "runtime C failed"
-          echo "--- volume"; cmd //c "fsutil fsinfo volumeinfo C:" || true
       - name: Typecheck
         run: npm run typecheck
       - name: Unit-тесты
