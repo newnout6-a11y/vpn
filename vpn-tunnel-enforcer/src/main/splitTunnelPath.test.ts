@@ -22,6 +22,12 @@ describe('normalizeProcessPath', () => {
 })
 
 describe('processPathRegex', () => {
+  it('produces the exact escaped, anchored, case-insensitive pattern', () => {
+    // Every regex metacharacter is escaped with one backslash; the path separators double as escaped backslashes.
+    const expected = '(?i)^C:' + BS + BS + 'Program Files ' + BS + '(x86' + BS + ')' + BS + BS + 'App' + BS + '+1' + BS + BS + 'app' + BS + '.exe$'
+    expect(processPathRegex(win('C:', 'Program Files (x86)', 'App+1', 'app.exe'))).toBe(expected)
+  })
+
   const path = win('C:', 'Program Files (x86)', 'App+1', 'app.exe')
   const regex = processPathRegex(path)
 

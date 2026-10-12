@@ -1022,7 +1022,11 @@ describe('split tunnel path rules in the generated config', () => {
 
   it('adds one process_path_regex direct rule and keeps names for bare process entries', () => {
     const cfg = gen({ outbound: ss }, 'socks5', ['curl.exe'], { directProcessPaths: [appPath] } as any)
-    expect(cfg.route.rules).toContainEqual({ process_path_regex: [processPathRegex(appPath)], outbound: 'direct-out' })
+    // The pattern itself is asserted literally in splitTunnelPath.test.ts; here the rule must carry exactly that output.
+    const rule = cfg.route.rules.find((r) => r.process_path_regex)
+    expect(rule).toEqual({ process_path_regex: [processPathRegex(appPath)], outbound: 'direct-out' })
+    expect(rule?.process_path_regex[0].startsWith('(?i)^C:')).toBe(true)
+    expect(rule?.process_path_regex[0]).toContain('App' + String.fromCharCode(92) + '+1')
     expect(cfg.route.rules.some((rule) => Array.isArray(rule.process_name) && rule.process_name.includes('curl.exe'))).toBe(true)
   })
 
