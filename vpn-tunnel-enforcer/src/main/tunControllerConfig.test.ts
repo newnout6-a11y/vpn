@@ -960,6 +960,61 @@ describe('generateSingboxConfig with xraySocksPort', () => {
 })
 
 
+// AT-04-002 / F-047: WireGuard is an endpoint in sing-box 1.13, never an outbound.
+describe('WireGuard profile in the generated config', () => {
+  const wireguard = {
+    type: 'wireguard', tag: 'proxy-out', server: '203.0.113.5', server_port: 51820,
+    private_key: 'yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=',
+    peer_public_key: 'jS7sS5oIWW9QzHZrsxK1ZpSK8EkJcpkQyxI+C6X5tnk=',
+    local_address: ['10.0.0.2'], mtu: 1280
+  }
+
+  it('places WireGuard under endpoints and keeps proxy-out routable', () => {
+    const cfg = gen({ outbound: wireguard }) as any
+    expect(cfg.outbounds.map((o: any) => o.type)).toEqual(['direct', 'block'])
+    expect(cfg.endpoints).toHaveLength(1)
+    expect(cfg.endpoints[0]).toMatchObject({ type: 'wireguard', tag: 'proxy-out', address: ['10.0.0.2/32'], mtu: 1280 })
+    expect(cfg.route.final).toBe('proxy-out')
+  })
+
+  it('resolves a hostname peer through the bootstrap DNS, not through the tunnel', () => {
+    const cfg = gen({ outbound: { ...wireguard, server: 'vpn.example.com' } }) as any
+    expect(cfg.endpoints[0].domain_resolver).toMatchObject({ server: 'dns-bootstrap' })
+    expect(cfg.dns.servers.some((s: any) => s.tag === 'dns-bootstrap')).toBe(true)
+  })
+
+  it('adds the bootstrap resolver for a hostname in an endpoint-form peer', () => {
+    const { server: _s, server_port: _p, peer_public_key: _k, local_address: _l, ...rest } = wireguard
+    const profile = { ...rest, address: ['10.0.0.2/32'], peers: [{ address: 'vpn.example.com', port: 51820, public_key: 'K', allowed_ips: ['0.0.0.0/0'] }] }
+    const result = sanitizeProxyOutbound(profile)
+    expect(result.needsBootstrapDns).toBe(true)
+    expect(result.outbound.domain_resolver).toMatchObject({ server: 'dns-bootstrap' })
+    expect(sanitizeProxyOutbound({ ...profile, peers: [{ ...profile.peers[0], address: '203.0.113.5' }] }).needsBootstrapDns).toBe(false)
+    const second = { ...profile.peers[0], address: '203.0.113.5' }
+    expect(sanitizeProxyOutbound({ ...profile, peers: [second, profile.peers[0]] }).needsBootstrapDns).toBe(true)
+  })
+
+  it('leaves other protocols as outbounds without endpoints', () => {
+    const cfg = gen({ outbound: { type: 'shadowsocks', tag: 'proxy-out', server: '192.0.2.1', server_port: 443, method: 'chacha20-ietf-poly1305', password: 'SYNTHETIC' } }) as any
+    expect(cfg.endpoints).toBeUndefined()
+    expect(cfg.outbounds[0].type).toBe('shadowsocks')
+  })
+
+  it.runIf(process.platform === 'win32')('the full generated config passes bundled sing-box validation', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vpnte-wireguard-check-'))
+    try {
+      for (const server of ['203.0.113.5', 'vpn.example.com']) {
+        const file = join(dir, 'config.json')
+        writeFileSync(file, JSON.stringify(gen({ outbound: { ...wireguard, server } })))
+        expect(() => execFileSync(resolve('resources/sing-box.exe'), ['check', '-c', file], { windowsHide: true, stdio: 'pipe', timeout: 15000 })).not.toThrow()
+      }
+    } finally {
+      if (dirname(resolve(dir)) !== resolve(tmpdir())) throw new Error('Unsafe cleanup target')
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
 // AT-06-008 / F-076: application bypass rules are path rules in the generated config.
 describe('split tunnel path rules in the generated config', () => {
   const ss = { type: 'shadowsocks', tag: 'proxy-out', server: '192.0.2.1', server_port: 443, method: 'chacha20-ietf-poly1305', password: 'SYNTHETIC' }

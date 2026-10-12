@@ -16,6 +16,7 @@ import { rollbackTunNetworkBaselineIfApplied } from './systemNetwork'
 import { settingsStore } from './settings'
 import { notify } from './notifications'
 import { processPathRegex } from './splitTunnelPath'
+import { wireguardOutboundToEndpoint } from './singBoxEndpoint'
 import {
   disableKillSwitch,
   disableKillSwitchIfActive,
@@ -759,7 +760,9 @@ export function sanitizeProxyOutbound(outbound: Record<string, any>): { outbound
     }
   }
 
-  const needsBootstrapDns = isDomainServer(result.server)
+  // A multi-peer WireGuard profile carries its hostnames in peers[], not in the top-level server.
+  const needsBootstrapDns = isDomainServer(result.server) ||
+    (Array.isArray(result.peers) && result.peers.some((peer: any) => isDomainServer(peer?.address ?? peer?.server)))
   if (needsBootstrapDns) {
     result.domain_resolver = {
       server: BOOTSTRAP_DNS_TAG,
@@ -938,6 +941,7 @@ export function generateSingboxConfig(
       ? { type: 'http', tag: 'proxy-out', server: parsedProxy!.host, server_port: parsedProxy!.port }
       : { type: 'socks', tag: 'proxy-out', version: '5', server: parsedProxy!.host, server_port: parsedProxy!.port, udp_fragment: true }
   const { outbound: proxyOutbound, needsBootstrapDns } = sanitizeProxyOutbound(baseProxyOutbound)
+  const proxyIsWireGuard = String(proxyOutbound.type || '').toLowerCase() === 'wireguard'
 
   // Always-on anti-DPI defaults plus stealth-mode extras, applied to the
   // outbound's TLS object. Two layers:
@@ -1173,8 +1177,10 @@ export function generateSingboxConfig(
           }]
         : [])
     ],
+    // sing-box 1.13 has no wireguard outbound (F-047): it is an endpoint that shares the `proxy-out` tag.
+    ...(proxyIsWireGuard ? { endpoints: [wireguardOutboundToEndpoint(proxyOutbound)] } : {}),
     outbounds: [
-      proxyOutbound,
+      ...(proxyIsWireGuard ? [] : [proxyOutbound]),
       { type: 'direct', tag: 'direct-out' },
       { type: 'block', tag: 'block-out' }
     ],
