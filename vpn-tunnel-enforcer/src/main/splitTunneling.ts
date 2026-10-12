@@ -664,6 +664,8 @@ export function getDirectProcessNames(): string[] {
   return directRuleTargets().names
 }
 
+let lastInactiveSignature = '[]'
+
 /**
  * Returns the full paths of installed applications that should bypass the VPN. Entries that cannot be matched
  * safely (relative path, file gone) are skipped and logged: the app then follows the tunnel, which fails closed.
@@ -671,8 +673,13 @@ export function getDirectProcessNames(): string[] {
 export function getDirectProcessPaths(): string[] {
   if (!isEnabled()) return []
   const { paths, inactive } = directRuleTargets()
-  for (const entry of inactive) {
-    logEvent('warn', 'split-tunnel', 'direct rule is inactive: the application path is not usable, traffic stays in the tunnel', entry)
+  // Start and diagnostics both call this: warn only when the set of inactive entries changes.
+  const signature = JSON.stringify(inactive.map((entry) => [entry.path, entry.reason]))
+  if (signature !== lastInactiveSignature) {
+    lastInactiveSignature = signature
+    for (const entry of inactive) {
+      logEvent('warn', 'split-tunnel', 'direct rule is inactive: the application path is not usable, traffic stays in the tunnel', entry)
+    }
   }
   return paths
 }

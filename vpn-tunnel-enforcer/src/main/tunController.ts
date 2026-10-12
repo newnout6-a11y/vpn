@@ -2732,6 +2732,7 @@ export const tunController = {
                 proxyType,
                 uniqueProcessNames([...proxyOwnerProcessNames, 'vpnte-xray.exe']),
                 {
+                  directProcessPaths: splitTunnelDirectPaths,
                   stealthMode: startOptions.stealthMode === true,
                   adaptiveMode: startOptions.adaptiveMode,
                   publicWifiCompatibility,
