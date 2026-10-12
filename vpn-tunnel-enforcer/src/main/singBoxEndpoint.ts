@@ -51,7 +51,11 @@ function toEndpointPeer(peer: Record<string, any>, onlyPeer: boolean): Record<st
   const { pre_shared_key, allowed_ips, persistent_keepalive_interval, reserved } = peer
   // sing-box refuses a peer without allowed_ips. This is a full-tunnel client, so a lone peer defaults to all traffic;
   // with several peers a default would make their routes overlap, so the profile has to say which peer carries what.
-  const routes: unknown[] = Array.isArray(allowed_ips) && allowed_ips.length > 0 ? allowed_ips : onlyPeer ? ['0.0.0.0/0', '::/0'] : []
+  if (allowed_ips !== undefined && !Array.isArray(allowed_ips)) throw new Error('WireGuard: allowed_ips пира должен быть списком')
+  // Every given route must be a valid CIDR; a bare address gets the host prefix, anything else is refused here
+  // rather than by sing-box at check time.
+  const given: string[] = Array.isArray(allowed_ips) ? allowed_ips.map(asString).filter(Boolean).map(toPrefix) : []
+  const routes: string[] = given.length > 0 ? given : onlyPeer ? ['0.0.0.0/0', '::/0'] : []
   if (routes.length === 0) throw new Error('WireGuard: у пира не указаны allowed_ips (при нескольких пирах обязательны)')
   return {
     address,

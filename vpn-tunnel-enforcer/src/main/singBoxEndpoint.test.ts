@@ -100,6 +100,14 @@ describe('wireguardOutboundToEndpoint', () => {
     expect(() => wireguardOutboundToEndpoint({ type: 'wireguard', local_address: ['10.0.0.2'], private_key: 'P', peers: [peer, { ...peer, address: 'y' }] })).toThrow(/allowed_ips/)
   })
 
+  it('validates allowed_ips entries and normalizes bare addresses', () => {
+    const make = (allowed_ips: unknown) => () => wireguardOutboundToEndpoint({ type: 'wireguard', local_address: ['10.0.0.2'], private_key: 'P', peers: [{ address: 'x', port: 1, public_key: 'K', allowed_ips }] })
+    expect((make(['10.1.0.0/16', '192.0.2.7', 'fd00::/8'])() as any).peers[0].allowed_ips).toEqual(['10.1.0.0/16', '192.0.2.7/32', 'fd00::/8'])
+    expect(make(['not-a-route'])).toThrow(/адрес/)
+    expect(make(['10.0.0.0/40'])).toThrow(/префикс/)
+    expect(make('0.0.0.0/0')).toThrow(/списком/)
+  })
+
   it('copies valid reserved bytes to the peer and ignores invalid ones', () => {
     expect((wireguardOutboundToEndpoint({ ...base, reserved: [1, 2, 3] }) as any).peers[0].reserved).toEqual([1, 2, 3])
     for (const reserved of [[1, 2], [1, 2, 300], 'abc', [1.5, 2, 3]]) {
