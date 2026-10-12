@@ -17,10 +17,16 @@
 <meta property="og:image" content="{{ogImage}}">
 {{ogUrl}}
 <meta name="twitter:card" content="summary_large_image">
-<link rel="preload" href="{{base}}assets/fonts/bitter-cyrillic-wght.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="{{base}}assets/fonts/unbounded-cyrillic-wght.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="{{base}}assets/fonts/golos-text-cyrillic-wght.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="{{base}}css/site.css">
-<script>document.documentElement.className='js'</script>
+<script>
+/* Класс js прячет контент до анимации появления. Если site.js не загрузился или упал,
+   через 3 с включается js-fail и всё показывается без анимаций. vt-in — входящая арка перехода. */
+(function(d){var h=d.documentElement;h.className='js';
+try{if(sessionStorage.getItem('vt')){sessionStorage.removeItem('vt');h.className+=' vt-in'}}catch(e){}
+setTimeout(function(){if(!window.__siteReady)h.className+=' js-fail'},3000)})(document)
+</script>
 </head>
 <body class="{{bodyClass}}" data-base="{{base}}">
 <a class="skip" href="#main">К содержимому</a>

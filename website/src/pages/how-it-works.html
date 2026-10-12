@@ -17,7 +17,7 @@
         <li class="step"><span class="step__n">03</span><div><h3>Доверенный runtime</h3><p>Проверяются владельцы и права каталогов, а бинарники сверяются с эталоном по SHA-256. При несовпадении атомарный staging заменяет их.</p></div></li>
         <li class="step"><span class="step__n">04</span><div><h3>Конфиг и запуск</h3><p>Конфигурация генерируется и проверяется командой <code class="mono">sing-box check -c</code>. Только после этого запускается ядро.</p></div></li>
         <li class="step"><span class="step__n">05</span><div><h3>Ожидание TUN</h3><p>Клиент ждёт, пока адаптер получит <code class="mono">Status=Up</code>. Трафик приложений теперь идёт в Wintun и дальше в ядро.</p></div></li>
-        <li class="step"><span class="step__n">06</span><div><h3>Kill-switch</h3><p>Только теперь включается блокировка. Правило привязано к алиасу интерфейса, и до появления адаптера оно просто не создалось бы.</p></div></li>
+        <li class="step"><span class="step__n">06</span><div><h3>Kill-switch</h3><p>Только теперь включается блокировка: исходящий трафик по умолчанию запрещён на всех трёх профилях брандмауэра. Allow-правило для TUN привязано к алиасу адаптера, и до его появления оно просто не создалось бы.</p></div></li>
       </ol>
       <div class="story__stage">
         <canvas role="img" aria-label="Анимированная схема запуска туннеля"></canvas>
@@ -65,7 +65,7 @@
     <div class="cta" data-reveal="scale">
       <h2 class="h2">Хотите увидеть детали <span class="grad">в коде?</span></h2>
       <p class="lead">Все шаги описаны в README и реализованы в открытом репозитории.</p>
-      <div class="hero__actions"><a class="btn btn--primary btn--lg" href="https://github.com/newnout6-a11y/vpn" rel="noopener">{{icon:github|icon}} Открыть на GitHub</a><a class="btn btn--ghost btn--lg" href="{{base}}security/">Модель безопасности</a></div>
+      <div class="hero__actions"><a class="btn btn--primary btn--lg" href="https://github.com/newnout6-a11y/vpn" rel="noopener" data-magnet>{{icon:github|icon}} Открыть на GitHub</a><a class="btn btn--ghost btn--lg" href="{{base}}security/">Модель безопасности</a></div>
     </div>
   </div>
 </section>

@@ -28,7 +28,7 @@ await new Promise((r) => srv.listen(0, '127.0.0.1', r))
 const port = srv.address().port
 
 const PAGES = ['/', '/features/', '/how-it-works/', '/protocols/', '/security/', '/roadmap/', '/download/', '/faq/', '/nope-404/']
-const EXPECT = ['Bitter', 'Golos Text', 'Fira Mono']
+const EXPECT = ['Unbounded', 'Golos Text', 'Fira Mono']
 const browser = await puppeteer.launch({ executablePath: process.env.CHROME || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe', headless: true, args: ['--no-sandbox', '--enable-unsafe-swiftshader'] })
 let bad = 0
 for (const w of [1440, 390]) {
@@ -55,10 +55,10 @@ for (const w of [1440, 390]) {
     }, EXPECT)
     const problems = []
     if (r.body !== 'Golos Text') problems.push('body=' + r.body)
-    if (r.h1 !== 'Bitter') problems.push('h1=' + r.h1)
+    if (r.h1 !== 'Unbounded') problems.push('h1=' + r.h1)
     if (r.mono && r.mono !== 'Fira Mono') problems.push('mono=' + r.mono)
     if (r.foreign.length) problems.push('чужие @font-face: ' + r.foreign.join(','))
-    for (const f of ['Bitter', 'Golos Text']) if (!r.loaded.includes(f)) problems.push('не загружен ' + f)
+    for (const f of ['Unbounded', 'Golos Text']) if (!r.loaded.includes(f)) problems.push('не загружен ' + f)
     if (r.sw > r.cw) problems.push(`оверфлоу ${r.sw}>${r.cw}`)
     // Ошибки консоли и сети этой страницы; ожидаемый 404 у /nope-404/ не считается.
     const fresh = errors.slice(seen).filter((e) => !(path === '/nope-404/' && e.includes('404')))

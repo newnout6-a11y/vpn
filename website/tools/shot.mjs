@@ -37,6 +37,10 @@ const port = srv.address().port
 const browser = await puppeteer.launch({ executablePath: CHROME, headless: true, args: ['--no-sandbox', '--enable-unsafe-swiftshader'] })
 const page = await browser.newPage()
 await page.setViewport({ width: +w, height: +h, deviceScaleFactor: 1 })
+// REDUCE=1 — проверка статичной версии для prefers-reduced-motion.
+if (process.env.REDUCE) await page.emulateMediaFeatures([{ name: 'prefers-reduced-motion', value: 'reduce' }])
+// EVAL="js" — выполнить код на странице перед снимком (например, нажать рубильник).
+const evalJs = process.env.EVAL
 const errors = []
 page.on('console', (m) => { if (['error', 'warning'].includes(m.type())) errors.push(`[${m.type()}] ${m.text()}`) })
 page.on('pageerror', (e) => errors.push(`[pageerror] ${e.message}`))
@@ -52,8 +56,9 @@ if (mode === 'fullpage') {
 } else if (+sy) {
   await page.evaluate((v) => window.scrollTo(0, v), +sy); await new Promise((r) => setTimeout(r, 1600))
 }
+if (evalJs) { await page.evaluate(evalJs); await new Promise((r) => setTimeout(r, +(process.env.EVAL_WAIT || 1200))) }
 const overflow = await page.evaluate(() => ({ sw: document.documentElement.scrollWidth, cw: document.documentElement.clientWidth, total: document.documentElement.scrollHeight }))
-const name = `${path.replace(/\W+/g, '_') || 'home'}_${w}${mode === 'fullpage' ? '_full' : sy !== '0' ? '_y' + sy : ''}.png`
+const name = `${path.replace(/\W+/g, '_') || 'home'}_${w}${process.env.TAG ? '_' + process.env.TAG : ''}${mode === 'fullpage' ? '_full' : sy !== '0' ? '_y' + sy : ''}.png`
 await page.screenshot({ path: join(OUT, name), fullPage: mode === 'fullpage' })
 console.log(`shot: ${name}  overflowX: ${overflow.sw > overflow.cw ? 'YES ' + overflow.sw + '>' + overflow.cw : 'no'}  height: ${overflow.total}`)
 console.log(errors.length ? errors.join('\n') : 'console: clean')

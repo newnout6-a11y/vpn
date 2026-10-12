@@ -61,7 +61,7 @@
     <div data-reveal="left">
       <span class="eyebrow">Маршрутизация</span>
       <h2 class="h2" style="margin:18px 0 20px">Умные правила, <span class="grad">понятные людям</span></h2>
-      <p class="lead" style="margin-bottom:24px">Smart RU отправляет госсервисы и российские домены напрямую, а IP-чекеры, Google и медиа принудительно через туннель. Обновление не требует перезапуска защиты.</p>
+      <p class="lead" style="margin-bottom:24px">Smart RU отправляет напрямую госсервисы, банки и всё, что хостится в России: решает geoip-ru и список gov-ru, а не домен. IP-чекеры закреплены за туннелем, а остальное, включая Google и медиа, идёт через него по умолчанию. Обновление не требует перезапуска защиты.</p>
       <a class="btn btn--ghost" href="{{base}}#routing">Попробовать симулятор {{icon:arrow-right|icon}}</a>
     </div>
     <div class="grid" data-stagger data-reveal="right">
@@ -110,8 +110,8 @@ curl -X POST http://127.0.0.1:17873/start `
   <div class="wrap">
     <div class="cta" data-reveal="scale">
       <h2 class="h2">Увидеть всё это <span class="grad">своими глазами</span></h2>
-      <p class="lead">Установите клиент и запустите self-test на своей машине.</p>
-      <div class="hero__actions"><a class="btn btn--primary btn--lg" href="{{base}}download/">Скачать {{icon:download|icon}}</a><a class="btn btn--ghost btn--lg" href="{{base}}how-it-works/">Как это работает</a></div>
+      <p class="lead">Соберите клиент из исходников и запустите self-test на своей машине. Публичного установщика пока нет.</p>
+      <div class="hero__actions"><a class="btn btn--primary btn--lg" href="{{base}}download/" data-magnet>Как собрать {{icon:terminal|icon}}</a><a class="btn btn--ghost btn--lg" href="{{base}}how-it-works/">Как это работает</a></div>
     </div>
   </div>
 </section>

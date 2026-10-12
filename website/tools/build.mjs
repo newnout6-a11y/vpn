@@ -13,6 +13,8 @@ const SITE_URL = (process.env.SITE_URL || '').replace(/\/$/, '')
 const SITE_PATH = SITE_URL ? new URL(SITE_URL).pathname.replace(/\/$/, '') + '/' : '/'
 
 const read = (p) => readFileSync(p, 'utf8')
+// title и description попадают в атрибуты и в <title>: кавычка во front-matter не должна ломать разметку.
+const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 
 const iconCache = new Map()
 function icon(name, cls = '') {
@@ -29,6 +31,27 @@ function icon(name, cls = '') {
   }
   const svg = iconCache.get(name)
   return cls ? svg.replace('<svg ', `<svg class="${cls}" `) : svg
+}
+
+// Типограф для русского текста: короткие предлоги, союзы и частицы не остаются висеть в конце строки,
+// тире не начинает строку. Теги, атрибуты, код и элементы с data-notypo не трогаются.
+const SHORT = 'а|в|и|к|о|с|у|я|бы|во|да|до|же|за|из|ко|ли|на|не|ни|но|об|от|по|со|то|для|или|как|что|это|при|над|под|без'
+const RE_SHORT = new RegExp(`(^|[\\s(«„>])(${SHORT}) (?=\\S)`, 'gi')
+function typo(html) {
+  let skip = null // имя тега, до закрытия которого текст пропускается
+  return html.split(/(<[^>]+>)/).map((part) => {
+    if (part.startsWith('<')) {
+      const m = part.match(/^<(\/?)([a-zA-Z][\w-]*)/)
+      if (!m) return part
+      const [, close, tag] = m
+      if (skip) { if (close && tag === skip) skip = null }
+      else if (!close && (/^(pre|code|script|style|textarea|kbd)$/.test(tag) || / data-notypo\b/.test(part))) skip = tag
+      return part
+    }
+    if (skip) return part
+    // два прохода: «и в сети» — оба коротких слова подряд
+    return part.replace(RE_SHORT, '$1$2\u00a0').replace(RE_SHORT, '$1$2\u00a0').replace(/ (—|–)(?= )/g, '\u00a0$1')
+  }).join('')
 }
 
 function listPages(dir = join(SRC, 'pages')) {
@@ -64,11 +87,13 @@ function build() {
 
   for (const { file, meta, body } of pages) {
     const depth = meta.path === '/' ? 0 : meta.path.split('/').filter(Boolean).length
+    // 404 отдаётся с любого адреса, поэтому относительные пути там не работают. Абсолютный путь известен
+    // только при заданном SITE_URL; без него остаётся «/» — сайт в подпапке нужно собирать с SITE_URL.
     const base = meta.file === '404' ? SITE_PATH : depth === 0 ? '' : '../'.repeat(depth)
     const vars = {
       base,
-      title: meta.title,
-      description: meta.description,
+      title: esc(meta.title),
+      description: esc(meta.description),
       path: meta.path,
       nav: meta.nav || '',
       bodyClass: meta.bodyClass || '',
@@ -78,7 +103,7 @@ function build() {
       ogImage: SITE_URL ? `${SITE_URL}/assets/og.png` : `${base}assets/og.png`
     }
     const content = render(body, vars)
-    let html = render(layout, { ...vars, content })
+    let html = typo(render(layout, { ...vars, content }))
     // aria-current для активного пункта навигации
     html = html.replace(/ data-nav="([\w-]+)"/g, (m, n) => (n === vars.nav ? `${m} aria-current="page"` : m))
 
