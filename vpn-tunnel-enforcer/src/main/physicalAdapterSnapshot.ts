@@ -14,11 +14,17 @@ $adapters = Get-NetAdapter |
   }
 `
 
+// Routing-only read (never evidence for lockdown or rollback). An adapter without any IPv4 DNS entry (IPv6-only, no DNS)
+// is a normal state: the CDXML provider reports ObjectNotFound for it, so it simply has no routing DNS source and the other
+// adapters are kept. Any other error still fails the whole read. The category is not language dependent, unlike the message.
+// Keep this script compact: it is embedded in the worker's encoded command (limit 32767 characters; see the length test).
 export const PHYSICAL_ADAPTER_DNS_SCRIPT = `
 $ErrorActionPreference = 'Stop'
 ${PHYSICAL_ADAPTER_SELECTION}
 $rows = @(foreach ($a in $adapters) {
-  $dns4 = (Get-DnsClientServerAddress -InterfaceAlias $a.Name -AddressFamily IPv4 -ErrorAction Stop).ServerAddresses
+  $dns4 = @()
+  try { $dns4 = (Get-DnsClientServerAddress -InterfaceAlias $a.Name -AddressFamily IPv4 -ErrorAction Stop).ServerAddresses }
+  catch { if ($_.CategoryInfo.Category -ne 'ObjectNotFound') { throw } }
   [pscustomobject]@{ ifIndex = [int]$a.ifIndex; alias = [string]$a.Name; ipv4Dns = @($dns4 | Where-Object { $_ }) }
 })
 $rows | ConvertTo-Json -Compress -Depth 3
