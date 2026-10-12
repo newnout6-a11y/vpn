@@ -58,6 +58,13 @@ describe('wireguardOutboundToEndpoint', () => {
     expect(bad({ server: 'x', server_port: 1 })).toThrow(/публичный ключ/)
   })
 
+  it('validates the interface fields of a multi-peer profile too', () => {
+    const peer = { address: 'x', port: 1, public_key: 'K' }
+    expect(() => wireguardOutboundToEndpoint({ type: 'wireguard', local_address: ['10.0.0.2'], private_key: '', peers: [peer] })).toThrow(/приватный ключ/)
+    const kept = wireguardOutboundToEndpoint({ type: 'wireguard', local_address: ['10.0.0.2'], private_key: 'P', mtu: -5, peers: [peer] })
+    expect(kept).not.toHaveProperty('mtu')
+  })
+
   it('copies valid reserved bytes to the peer and ignores invalid ones', () => {
     expect((wireguardOutboundToEndpoint({ ...base, reserved: [1, 2, 3] }) as any).peers[0].reserved).toEqual([1, 2, 3])
     for (const reserved of [[1, 2], [1, 2, 300], 'abc', [1.5, 2, 3]]) {

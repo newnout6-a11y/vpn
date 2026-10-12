@@ -760,8 +760,8 @@ export function sanitizeProxyOutbound(outbound: Record<string, any>): { outbound
   }
 
   // A multi-peer WireGuard profile carries its hostnames in peers[], not in the top-level server.
-  const firstPeer = Array.isArray(result.peers) && result.peers.length > 0 ? result.peers[0] : null
-  const needsBootstrapDns = isDomainServer(result.server) || isDomainServer(firstPeer?.address ?? firstPeer?.server)
+  const needsBootstrapDns = isDomainServer(result.server) ||
+    (Array.isArray(result.peers) && result.peers.some((peer: any) => isDomainServer(peer?.address ?? peer?.server)))
   if (needsBootstrapDns) {
     result.domain_resolver = {
       server: BOOTSTRAP_DNS_TAG,

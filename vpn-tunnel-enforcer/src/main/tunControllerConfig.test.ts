@@ -989,6 +989,8 @@ describe('WireGuard profile in the generated config', () => {
     expect(result.needsBootstrapDns).toBe(true)
     expect(result.outbound.domain_resolver).toMatchObject({ server: 'dns-bootstrap' })
     expect(sanitizeProxyOutbound({ ...profile, peers: [{ ...profile.peers[0], address: '203.0.113.5' }] }).needsBootstrapDns).toBe(false)
+    const second = { ...profile.peers[0], address: '203.0.113.5' }
+    expect(sanitizeProxyOutbound({ ...profile, peers: [second, profile.peers[0]] }).needsBootstrapDns).toBe(true)
   })
 
   it('leaves other protocols as outbounds without endpoints', () => {

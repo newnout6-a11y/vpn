@@ -55,6 +55,8 @@ export function wireguardOutboundToEndpoint(outbound: Record<string, any>): Wire
     const addresses = toPrefixes(Array.isArray(address) ? address : local_address)
     if (addresses.length === 0) throw new Error('WireGuard: не указан локальный адрес туннеля (ip=…)')
     if (peers.length === 0) throw new Error('WireGuard: не указан ни один пир')
+    if (!asString(rest.private_key)) throw new Error('WireGuard: не указан приватный ключ')
+    if (rest.mtu !== undefined && !(Number.isInteger(rest.mtu) && rest.mtu > 0)) delete rest.mtu
     return {
       type: 'wireguard',
       tag,
