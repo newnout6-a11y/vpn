@@ -42,7 +42,8 @@ describe.runIf(process.platform === 'win32')('routing DNS reader script', () => 
 
   it('still fails the whole read on any other error category (no silent empty result)', () => {
     // "Cellular" raises InvalidData: the read must fail, not return a list that looks complete.
-    expect(() => run(`${fakeCmdlets(['Wi-Fi', 'Ethernet 4', 'Cellular'])}\n${PHYSICAL_ADAPTER_DNS_SCRIPT}`)).toThrow()
+    // Matching the injected message proves the read failed because of THIS error, not a broken fixture or a syntax error.
+    expect(() => run(`${fakeCmdlets(['Wi-Fi', 'Ethernet 4', 'Cellular'])}\n${PHYSICAL_ADAPTER_DNS_SCRIPT}`)).toThrow(/provider broke/)
   })
 })
 
