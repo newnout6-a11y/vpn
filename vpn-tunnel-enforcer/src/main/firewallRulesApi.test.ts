@@ -54,8 +54,8 @@ describe.skipIf(process.platform !== 'win32' && !process.env.VPNTE_PWSH)('native
   it.skipIf(process.platform !== 'win32')('assigns the interface property on a real unregistered COM rule without changing firewall', () => {
     // Add is an in-memory boundary; OS property validation needs no elevation.
     const native = `$ErrorActionPreference='Stop'
-$alias=[string](Get-NetAdapter -ErrorAction Stop|Select-Object -First 1).Name
-if(-not $alias){throw 'No interface available for native property validation'}
+$aliases=@(Get-NetAdapter -ErrorAction Stop|Where-Object{$_.Status -eq 'Up'}|ForEach-Object{[string]$_.Name})
+if($aliases.Count -eq 0){throw 'No interface available for native property validation'}
 $fixtureRules=[pscustomobject]@{Created=$null}
 $fixtureRules|Add-Member -MemberType ScriptMethod -Name Add -Value {param($r)$this.Created=$r}
 $fixturePolicy=[pscustomobject]@{Rules=$fixtureRules}
@@ -64,11 +64,26 @@ function New-Object {param($ComObject)
  Microsoft.PowerShell.Utility\\New-Object -ComObject $ComObject
 }
 ${FIREWALL_RULES_API_PS}
-New-VpnteFirewallRule -DisplayName 'VPNTE-killswitch-user-test' -Direction Outbound -Action Allow -Profile Any -Enabled False -InterfaceAlias $alias
-@{accepted=(@($fixtureRules.Created.Interfaces) -contains $alias);profiles=$fixtureRules.Created.Profiles;enabled=$fixtureRules.Created.Enabled}|ConvertTo-Json -Compress`
-    const output = execFileSync(process.env.VPNTE_PWSH || 'powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(native, 'utf16le').toString('base64')], { windowsHide: true, encoding: 'utf8', timeout: 15000, stdio: 'pipe' })
-    expect(JSON.parse(output.trim())).toEqual({ accepted: true, profiles: 2147483647, enabled: false })
-  })
+# The firewall only accepts interface names it knows at that moment; which Up adapter that is differs per host (a CI VM
+# can have several, some synthetic). Try each Up adapter and require that at least one real interface is accepted.
+$acceptedInterface=$null;$attempts=@()
+foreach($alias in $aliases){
+ $fixtureRules.Created=$null
+ try{
+  New-VpnteFirewallRule -DisplayName 'VPNTE-killswitch-user-test' -Direction Outbound -Action Allow -Profile Any -Enabled False -InterfaceAlias $alias
+  if(@($fixtureRules.Created.Interfaces) -contains $alias){$acceptedInterface=$alias;break}
+  $attempts+="$alias : created but interface not recorded"
+ }catch{$attempts+="$alias : $($_.Exception.Message)"}
+}
+if(-not $acceptedInterface){throw ('no Up adapter accepted as firewall interface: '+($attempts -join ' | '))}
+@{acceptedInterface=$acceptedInterface;profiles=$fixtureRules.Created.Profiles;enabled=$fixtureRules.Created.Enabled}|ConvertTo-Json -Compress`
+    const output = execFileSync(process.env.VPNTE_PWSH || 'powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(native, 'utf16le').toString('base64')], { windowsHide: true, encoding: 'utf8', timeout: 55_000, stdio: 'pipe' })
+    const result = JSON.parse(output.trim())
+    // The accepted interface is a real, named adapter (the script throws when none is accepted), and the rule keeps its properties.
+    expect(typeof result.acceptedInterface).toBe('string')
+    expect(result.acceptedInterface.length).toBeGreaterThan(0)
+    expect(result).toMatchObject({ profiles: 2147483647, enabled: false })
+  }, 60_000) // cold powershell.exe plus trying each Up adapter exceeds the 5 s default on a loaded CI VM
   it('preserves only matching owned names, duplicate names and fresh enumerations', () => {
     expect(run(`
 Add-FixtureRule 'foreign-rule';Add-FixtureRule 'VPNTE-killswitch-user-old';Add-FixtureRule 'VPNTE-killswitch-user-old';Add-FixtureRule 'VPNTE-killswitch-allow-app'

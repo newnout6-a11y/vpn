@@ -30,6 +30,8 @@ describe.skipIf(!enabled)('native readers under the Electron runtime', () => {
       const output = `${result.stdout}\n${result.stderr}`
       expect(output).not.toContain('FATAL ERROR')
       expect(output).toContain('round2')
+      // koffi must really load and enumerate under Electron (a silent throw everywhere would also "not crash").
+      expect(output).toMatch(/round2 adapters=\d+/)
       expect(output).toContain('PROBE_DONE')
       expect(result.status).toBe(0)
     } finally {
