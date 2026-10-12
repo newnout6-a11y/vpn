@@ -357,7 +357,7 @@ async function runSpeedTest(): Promise<SpeedTestResult> {
         const currentIp = await ipMonitor.getCurrentIp()
         if (currentIp.ip && testIp !== currentIp.ip) {
           egressMismatch = true
-          logEvent('warn', 'speed-test', 'egress IP mismatch: speed test may not have used the active VPN tunnel', { testIp, currentIp: currentIp.ip })
+          logEvent('warn', 'speed-test', 'egress IP mismatch: speed test may not have used the active VPN tunnel')
         }
       }
     } catch { /* non-critical verification */ }
