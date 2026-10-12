@@ -19,6 +19,15 @@ describe('tunController recovery cancellation guards', () => {
     expect(source).toContain("WSAEACCES retry cancelled by stop")
   })
 
+  // AT-06-008 / F-076: every start path (localProxy, directVpn, fallback) must hand the split-tunnel app paths to the config.
+  it('passes the split-tunnel application paths to every prepareRuntime call', async () => {
+    const source = await readFile(join(here, 'tunController.ts'), 'utf8')
+    const calls = source.match(/(?<!function )prepareRuntime\(/g)?.length ?? 0
+    const passed = source.match(/directProcessPaths: splitTunnelDirectPaths,/g)?.length ?? 0
+    expect(calls).toBeGreaterThanOrEqual(3)
+    expect(passed).toBe(calls)
+  })
+
   it('validates localProxy full-tunnel before preparing runtime files', async () => {
     const source = await readFile(join(here, 'tunController.ts'), 'utf8')
     const validationIndex = source.indexOf('validateProxyFullTunnel(host, port, proxyType)')

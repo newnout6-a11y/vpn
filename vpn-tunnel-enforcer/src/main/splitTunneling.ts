@@ -13,10 +13,12 @@ import { execFile as execFileCb } from 'child_process'
 import { ipcMain, dialog, app, type IpcMainInvokeEvent } from 'electron'
 import { basename, dirname, extname, join } from 'path'
 import { access, readdir } from 'fs/promises'
+import { existsSync, realpathSync } from 'fs'
 import { promisify } from 'util'
 import { randomUUID } from 'crypto'
 import Store from 'electron-store'
 import { logEvent } from './appLogger'
+import { normalizeProcessPath, processPathRegex, windowsPathSpellings } from './splitTunnelPath'
 import { compactForIpcLog } from './ipcLogging'
 import { requireEnum, requireString } from './ipcValidation'
 import { tunController } from './tunController'
@@ -611,9 +613,38 @@ async function removeApp(appId: string): Promise<void> {
 // ─── Sing-box Route Rule Generation ─────────────────────────────────────────
 
 /**
+ * Splits the direct-rule entries by how they may be matched (F-076, AT-06-008):
+ *   - 'process' entries are bare command names by design and match by name;
+ *   - 'app' entries match by their full path. An app entry whose path is not an absolute path or no longer exists on
+ *     disk (renamed/moved/uninstalled) gets NO rule - it is reported, never silently matched by file name.
+ */
+function directRuleTargets(): { names: string[]; paths: string[]; inactive: Array<{ name: string; path: string; reason: string }> } {
+  const names: string[] = []
+  const paths: string[] = []
+  const inactive: Array<{ name: string; path: string; reason: string }> = []
+  for (const entry of getApps().filter((a) => a.rule === 'direct')) {
+    if (entry.kind === 'process') {
+      const name = normalizeProcessName(entry.path)
+      if (name) names.push(name)
+      continue
+    }
+    const path = normalizeProcessPath(entry.path)
+    if (!path) inactive.push({ name: entry.name, path: entry.path, reason: 'not-an-absolute-path' })
+    else if (!existsSync(path)) inactive.push({ name: entry.name, path, reason: 'file-missing' })
+    else {
+      for (const spelling of windowsPathSpellings(path, (value) => realpathSync.native(value))) {
+        if (!paths.some((known) => known.toLowerCase() === spelling.toLowerCase())) paths.push(spelling)
+      }
+    }
+  }
+  return { names, paths, inactive }
+}
+
+/**
  * Generates sing-box route rules for split tunnel configuration.
  *
- * - Apps with 'direct' rule → route through 'direct-out' (bypass VPN)
+ * - Apps with 'direct' rule → route through 'direct-out' (bypass VPN) by their full path
+ * - Bare process names with 'direct' rule → route through 'direct-out' by name
  * - Apps with 'vpn' / 'none' -> no special rule (follow default proxy-out)
  *
  * Returns an array of sing-box route rule objects to be inserted into the config.
@@ -621,36 +652,40 @@ async function removeApp(appId: string): Promise<void> {
 export function generateSplitTunnelRouteRules(): Array<Record<string, any>> {
   if (!isEnabled()) return []
 
-  const apps = getApps()
+  const { names, paths } = directRuleTargets()
   const rules: Array<Record<string, any>> = []
-
-  // Collect process names for direct routing
-  const directProcessNames = apps
-    .filter((a) => a.rule === 'direct')
-    .map((a) => normalizeProcessName(a.path))
-    .filter((name): name is string => Boolean(name))
-
-  if (directProcessNames.length > 0) {
-    rules.push({
-      process_name: directProcessNames,
-      outbound: 'direct-out'
-    })
-  }
-
+  if (names.length > 0) rules.push({ process_name: names, outbound: 'direct-out' })
+  if (paths.length > 0) rules.push({ process_path_regex: paths.map(processPathRegex), outbound: 'direct-out' })
   return rules
 }
 
 /**
- * Returns the list of process names that should bypass the VPN (direct routing).
- * Used by tunController when generating the sing-box config.
+ * Returns the bare process names that should bypass the VPN (matched by name).
+ * Installed applications are matched by path instead: see getDirectProcessPaths.
  */
 export function getDirectProcessNames(): string[] {
   if (!isEnabled()) return []
-  const apps = getApps()
-  return apps
-    .filter((a) => a.rule === 'direct')
-    .map((a) => normalizeProcessName(a.path))
-    .filter((name): name is string => Boolean(name))
+  return directRuleTargets().names
+}
+
+let lastInactiveSignature = '[]'
+
+/**
+ * Returns the full paths of installed applications that should bypass the VPN. Entries that cannot be matched
+ * safely (relative path, file gone) are skipped and logged: the app then follows the tunnel, which fails closed.
+ */
+export function getDirectProcessPaths(): string[] {
+  if (!isEnabled()) return []
+  const { paths, inactive } = directRuleTargets()
+  // Start and diagnostics both call this: warn only when the set of inactive entries changes.
+  const signature = JSON.stringify(inactive.map((entry) => [entry.path, entry.reason]))
+  if (signature !== lastInactiveSignature) {
+    lastInactiveSignature = signature
+    for (const entry of inactive) {
+      logEvent('warn', 'split-tunnel', 'direct rule is inactive: the application path is not usable, traffic stays in the tunnel', entry)
+    }
+  }
+  return paths
 }
 
 /**
@@ -851,6 +886,7 @@ export const splitTunneling = {
   normalizeProcessName,
   removeApp,
   getDirectProcessNames,
+  getDirectProcessPaths,
   getVpnProcessNames,
   generateSplitTunnelRouteRules,
   discoverInstalledApps,

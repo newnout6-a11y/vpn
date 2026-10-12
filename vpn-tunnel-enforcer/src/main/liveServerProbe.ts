@@ -2833,7 +2833,8 @@ export function summarizeThroughputSamples(
 export function summarizeSplitTunnelDiagnostics(
   enabled: boolean,
   directProcessNames: string[],
-  vpnProcessNames: string[]
+  vpnProcessNames: string[],
+  directProcessPaths: string[] = []
 ): LiveSplitTunnelDiagnostics {
   const allNames = [...directProcessNames, ...vpnProcessNames]
   const counts = new Map<string, number>()
@@ -2852,15 +2853,15 @@ export function summarizeSplitTunnelDiagnostics(
     directProcessNames,
     vpnProcessNames,
     duplicateProcessNames,
-    directRuleCount: directProcessNames.length > 0 ? 1 : 0,
+    directRuleCount: (directProcessNames.length > 0 ? 1 : 0) + (directProcessPaths.length > 0 ? 1 : 0),
     vpnRuleCount: 0,
     defaultOutbound: 'proxy-out',
     detail: !enabled
       ? 'Split tunneling выключен: весь трафик следует обычному default route.'
       : duplicateProcessNames.length > 0
         ? `Одинаковые process_name встречаются в правилах: ${duplicateProcessNames.join(', ')}.`
-        : directProcessNames.length > 0
-          ? `Прямой маршрут назначен ${directProcessNames.length} process_name; остальные приложения идут через proxy-out.`
+        : directProcessNames.length + directProcessPaths.length > 0
+          ? `Прямой маршрут назначен ${directProcessNames.length} process_name и ${directProcessPaths.length} путям приложений; остальные приложения идут через proxy-out.`
           : 'Явных direct-правил нет: приложения идут через proxy-out.'
   }
 }
@@ -2873,7 +2874,8 @@ export async function collectSplitTunnelDiagnostics(): Promise<LiveSplitTunnelDi
     return summarizeSplitTunnelDiagnostics(
       config.enabled === true,
       splitTunneling.getDirectProcessNames(),
-      splitTunneling.getVpnProcessNames()
+      splitTunneling.getVpnProcessNames(),
+      splitTunneling.getDirectProcessPaths()
     )
   } catch (error: any) {
     return {

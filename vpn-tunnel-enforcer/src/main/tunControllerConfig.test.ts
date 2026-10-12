@@ -16,6 +16,7 @@
 
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { sanitizeProxyOutbound } from './tunController'
+import { processPathRegex } from './splitTunnelPath'
 import { execFileSync } from 'child_process'
 import { mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
@@ -1007,6 +1008,38 @@ describe('WireGuard profile in the generated config', () => {
         writeFileSync(file, JSON.stringify(gen({ outbound: { ...wireguard, server } })))
         expect(() => execFileSync(resolve('resources/sing-box.exe'), ['check', '-c', file], { windowsHide: true, stdio: 'pipe', timeout: 15000 })).not.toThrow()
       }
+    } finally {
+      if (dirname(resolve(dir)) !== resolve(tmpdir())) throw new Error('Unsafe cleanup target')
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+// AT-06-008 / F-076: application bypass rules are path rules in the generated config.
+describe('split tunnel path rules in the generated config', () => {
+  const ss = { type: 'shadowsocks', tag: 'proxy-out', server: '192.0.2.1', server_port: 443, method: 'chacha20-ietf-poly1305', password: 'SYNTHETIC' }
+  const appPath = ['C:', 'Program Files (x86)', 'App+1', 'app.exe'].join(String.fromCharCode(92))
+
+  it('adds one process_path_regex direct rule and keeps names for bare process entries', () => {
+    const cfg = gen({ outbound: ss }, 'socks5', ['curl.exe'], { directProcessPaths: [appPath] } as any)
+    // The pattern itself is asserted literally in splitTunnelPath.test.ts; here the rule must carry exactly that output.
+    const rule = cfg.route.rules.find((r) => r.process_path_regex)
+    expect(rule).toEqual({ process_path_regex: [processPathRegex(appPath)], outbound: 'direct-out' })
+    expect(rule?.process_path_regex[0].startsWith('(?i)^C:')).toBe(true)
+    expect(rule?.process_path_regex[0]).toContain('App' + String.fromCharCode(92) + '+1')
+    expect(cfg.route.rules.some((rule) => Array.isArray(rule.process_name) && rule.process_name.includes('curl.exe'))).toBe(true)
+  })
+
+  it('adds no path rule when there are no application paths', () => {
+    expect(gen({ outbound: ss }).route.rules.some((rule) => rule.process_path_regex)).toBe(false)
+  })
+
+  it.runIf(process.platform === 'win32')('the generated config with a path rule passes bundled sing-box validation', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vpnte-split-check-'))
+    try {
+      const file = join(dir, 'config.json')
+      writeFileSync(file, JSON.stringify(gen({ outbound: ss }, 'socks5', [], { directProcessPaths: [appPath] } as any)))
+      expect(() => execFileSync(resolve('resources/sing-box.exe'), ['check', '-c', file], { windowsHide: true, stdio: 'pipe', timeout: 15000 })).not.toThrow()
     } finally {
       if (dirname(resolve(dir)) !== resolve(tmpdir())) throw new Error('Unsafe cleanup target')
       rmSync(dir, { recursive: true, force: true })
