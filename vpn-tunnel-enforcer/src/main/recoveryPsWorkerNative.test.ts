@@ -4,21 +4,19 @@ import { spawn, spawnSync } from 'node:child_process'
 vi.mock('./admin', () => ({ isProcessElevated: vi.fn() }))
 vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
 import { RecoveryPsWorker } from './recoveryPsWorker'
+import { PHYSICAL_ADAPTER_DNS_SCRIPT } from './physicalAdapterSnapshot'
 
-// A bare CI VM can have no MSFT_DNSClientServerAddress instance at all; the reader then (correctly) refuses.
-// Detect that state explicitly instead of swallowing the reader's error text, so every other failure still fails.
-// Only a SUCCESSFUL probe that counts zero skips the test; a failed probe leaves the test to run (and fail on its own).
-function hostHasNoDnsClientAddresses(): boolean {
+// The routing-DNS reader asks Get-DnsClientServerAddress for EVERY selected physical adapter with -ErrorAction Stop and
+// refuses ("No matching MSFT_DNSClientServerAddress objects found") when one adapter has no IPv4 DNS entry (e.g. a bare
+// CI VM NIC). The same script is run here as the precondition: only that explicit refusal skips the test; any other
+// failure of the probe, or a successful run, leaves the test to run on its own.
+function hostHasAdapterWithoutIpv4Dns(): boolean {
   if (process.platform !== 'win32') return false
-  // Get-CimClass throws for a real failure (missing class or namespace, broken provider), so errors fail the probe
-  // instead of reading as "no instances". Only the provider's explicit "No matching ... objects" counts as zero.
-  const script = "$ErrorActionPreference='Stop';$null=Get-CimClass -Namespace root/StandardCimv2 -ClassName MSFT_DNSClientServerAddress;" +
-    "try{@(Get-CimInstance -Namespace root/StandardCimv2 -ClassName MSFT_DNSClientServerAddress).Count}" +
-    "catch{if($_.CategoryInfo.Category -eq 'ObjectNotFound' -or $_.Exception.Message -match 'No matching'){0}else{throw}}"
-  const probe = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { encoding: 'utf8', timeout: 30000, windowsHide: true })
-  return !probe.error && probe.status === 0 && Number.parseInt(probe.stdout.trim(), 10) === 0
+  const probe = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(PHYSICAL_ADAPTER_DNS_SCRIPT, 'utf16le').toString('base64')],
+    { encoding: 'utf8', timeout: 60000, windowsHide: true })
+  return !probe.error && probe.status !== 0 && /No matching MSFT_DNSClientServerAddress/.test(`${probe.stderr}${probe.stdout}`)
 }
-const hasNoDnsClientAddresses = hostHasNoDnsClientAddresses()
+const hostLacksIpv4Dns = hostHasAdapterWithoutIpv4Dns()
 
 describe('persistent DNS policy reader native proof', () => {
   it.skipIf(process.platform !== 'win32')('warms each adapter module and returns repeated full and transition frames without mutation (AT-03-006/010)', async () => {
@@ -58,7 +56,7 @@ describe('persistent DNS policy reader native proof', () => {
     } finally { await worker.stop() }
     expect(worker.hasExited).toBe(true)
   }, 20000)
-  it.skipIf(process.platform !== 'win32' || hasNoDnsClientAddresses)('returns fresh routing DNS frames without full adapter baselines (AT-03-006)', async () => {
+  it.skipIf(process.platform !== 'win32' || hostLacksIpv4Dns)('returns fresh routing DNS frames without full adapter baselines (AT-03-006)', async () => {
     const worker = new RecoveryPsWorker(process.env.ProgramData || 'C:\\ProgramData')
     try {
       await worker.execute({ op: 'warmup' })

@@ -54,7 +54,7 @@ describe.skipIf(process.platform !== 'win32' && !process.env.VPNTE_PWSH)('native
   it.skipIf(process.platform !== 'win32')('assigns the interface property on a real unregistered COM rule without changing firewall', () => {
     // Add is an in-memory boundary; OS property validation needs no elevation.
     const native = `$ErrorActionPreference='Stop'
-$alias=[string](Get-NetAdapter -ErrorAction Stop|Select-Object -First 1).Name
+$alias=[string](Get-NetAdapter -ErrorAction Stop|Where-Object{$_.Status -eq 'Up'}|Select-Object -First 1).Name
 if(-not $alias){throw 'No interface available for native property validation'}
 $fixtureRules=[pscustomobject]@{Created=$null}
 $fixtureRules|Add-Member -MemberType ScriptMethod -Name Add -Value {param($r)$this.Created=$r}
