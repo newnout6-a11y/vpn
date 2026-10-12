@@ -982,6 +982,15 @@ describe('WireGuard profile in the generated config', () => {
     expect(cfg.dns.servers.some((s: any) => s.tag === 'dns-bootstrap')).toBe(true)
   })
 
+  it('adds the bootstrap resolver for a hostname in an endpoint-form peer', () => {
+    const { server: _s, server_port: _p, peer_public_key: _k, local_address: _l, ...rest } = wireguard
+    const profile = { ...rest, address: ['10.0.0.2/32'], peers: [{ address: 'vpn.example.com', port: 51820, public_key: 'K', allowed_ips: ['0.0.0.0/0'] }] }
+    const result = sanitizeProxyOutbound(profile)
+    expect(result.needsBootstrapDns).toBe(true)
+    expect(result.outbound.domain_resolver).toMatchObject({ server: 'dns-bootstrap' })
+    expect(sanitizeProxyOutbound({ ...profile, peers: [{ ...profile.peers[0], address: '203.0.113.5' }] }).needsBootstrapDns).toBe(false)
+  })
+
   it('leaves other protocols as outbounds without endpoints', () => {
     const cfg = gen({ outbound: { type: 'shadowsocks', tag: 'proxy-out', server: '192.0.2.1', server_port: 443, method: 'chacha20-ietf-poly1305', password: 'SYNTHETIC' } }) as any
     expect(cfg.endpoints).toBeUndefined()

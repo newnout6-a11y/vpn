@@ -32,10 +32,37 @@ describe('wireguardOutboundToEndpoint', () => {
     expect(wireguardOutboundToEndpoint({ ...base, dns_servers: ['1.1.1.1'] })).not.toHaveProperty('dns_servers')
   })
 
-  it('passes a hand-written endpoint (peers present) through under the proxy tag', () => {
+  it('keeps an endpoint-form multi-peer profile as it is', () => {
     const peers = [{ address: 'x', port: 1, public_key: 'K', allowed_ips: ['0.0.0.0/0'] }]
     expect(wireguardOutboundToEndpoint({ type: 'wireguard', tag: 'proxy-out', address: ['10.0.0.2/32'], private_key: 'P', peers }))
       .toEqual({ type: 'wireguard', tag: 'proxy-out', address: ['10.0.0.2/32'], private_key: 'P', peers })
+  })
+
+  it('translates legacy peers (server/server_port) instead of copying obsolete fields', () => {
+    const endpoint = wireguardOutboundToEndpoint({
+      type: 'wireguard', tag: 'proxy-out', local_address: ['10.0.0.2'], private_key: 'P',
+      peers: [{ server: 'a.example.com', server_port: 51820, public_key: 'K1', allowed_ips: ['0.0.0.0/0'], reserved: [1, 2, 3] }, { server: '203.0.113.9', server_port: 2408, public_key: 'K2' }]
+    }) as any
+    expect(endpoint.address).toEqual(['10.0.0.2/32'])
+    expect(endpoint.peers).toEqual([
+      { address: 'a.example.com', port: 51820, public_key: 'K1', allowed_ips: ['0.0.0.0/0'], reserved: [1, 2, 3] },
+      { address: '203.0.113.9', port: 2408, public_key: 'K2' }
+    ])
+    expect(JSON.stringify(endpoint)).not.toMatch(/server/)
+  })
+
+  it('refuses a multi-peer profile with an unusable peer', () => {
+    const bad = (peer: object) => () => wireguardOutboundToEndpoint({ type: 'wireguard', local_address: ['10.0.0.2'], private_key: 'P', peers: [peer] })
+    expect(bad({ server: '', server_port: 1, public_key: 'K' })).toThrow(/адрес/)
+    expect(bad({ server: 'x', server_port: 0, public_key: 'K' })).toThrow(/порт/)
+    expect(bad({ server: 'x', server_port: 1 })).toThrow(/публичный ключ/)
+  })
+
+  it('copies valid reserved bytes to the peer and ignores invalid ones', () => {
+    expect((wireguardOutboundToEndpoint({ ...base, reserved: [1, 2, 3] }) as any).peers[0].reserved).toEqual([1, 2, 3])
+    for (const reserved of [[1, 2], [1, 2, 300], 'abc', [1.5, 2, 3]]) {
+      expect((wireguardOutboundToEndpoint({ ...base, reserved }) as any).peers[0]).not.toHaveProperty('reserved')
+    }
   })
 
   it.each([
