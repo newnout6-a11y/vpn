@@ -74,6 +74,25 @@ describe('wireguardOutboundToEndpoint', () => {
     expect(endpoint.peers[0]).toEqual({ address: 'x', port: 1, public_key: 'K', persistent_keepalive_interval: 25 })
   })
 
+  it('coerces numeric strings from hand-written JSON on both paths', () => {
+    const multi = wireguardOutboundToEndpoint({
+      type: 'wireguard', local_address: ['10.0.0.2'], private_key: 'P', mtu: '1280', listen_port: '51820',
+      peers: [{ address: 'x', port: '51820', public_key: 'K' }]
+    }) as any
+    expect(multi.mtu).toBe(1280)
+    expect(multi.listen_port).toBe(51820)
+    expect(multi.peers[0].port).toBe(51820)
+    expect((wireguardOutboundToEndpoint({ ...base, server_port: '51820', mtu: '1280' }) as any).mtu).toBe(1280)
+  })
+
+  it.each(['x/y', '10.0.0.2/33', '10.0.0.2/-1', '10.0.0.2/24/8', 'fd00::2/129', '10.0.0.2/'])('rejects the malformed local address %j before sing-box does', address => {
+    expect(() => wireguardOutboundToEndpoint({ ...base, local_address: [address] })).toThrow(/адрес|префикс/)
+  })
+
+  it('accepts valid CIDR addresses as they are', () => {
+    expect((wireguardOutboundToEndpoint({ ...base, local_address: ['10.0.0.2/24', 'fd00::2/64'] }) as any).address).toEqual(['10.0.0.2/24', 'fd00::2/64'])
+  })
+
   it('copies valid reserved bytes to the peer and ignores invalid ones', () => {
     expect((wireguardOutboundToEndpoint({ ...base, reserved: [1, 2, 3] }) as any).peers[0].reserved).toEqual([1, 2, 3])
     for (const reserved of [[1, 2], [1, 2, 300], 'abc', [1.5, 2, 3]]) {

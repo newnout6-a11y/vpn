@@ -9,13 +9,25 @@ function asString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : ''
 }
 
-/** sing-box wants a CIDR prefix; the share-link `ip=10.0.0.2` carries none. */
+/** Integer from a number or a numeric string (hand-written JSON often quotes numbers); NaN otherwise. */
+function toInt(value: unknown): number {
+  if (typeof value === 'number') return Number.isInteger(value) ? value : NaN
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value)
+    return Number.isInteger(parsed) ? parsed : NaN
+  }
+  return NaN
+}
+
+/** sing-box wants a validated CIDR; the share-link `ip=10.0.0.2` carries no prefix, so add the host prefix. */
 function toPrefix(address: string): string {
-  if (address.includes('/')) return address
-  const family = isIP(address)
-  if (family === 4) return `${address}/32`
-  if (family === 6) return `${address}/128`
-  throw new Error(`WireGuard: некорректный локальный адрес «${address}»`)
+  const [host, prefix, ...extra] = address.split('/')
+  const family = isIP(host)
+  if (family === 0 || extra.length > 0) throw new Error(`WireGuard: некорректный локальный адрес «${address}»`)
+  if (prefix === undefined) return family === 4 ? `${host}/32` : `${host}/128`
+  const length = /^[0-9]{1,3}$/.test(prefix) ? Number(prefix) : NaN
+  if (!(length >= 0 && length <= (family === 4 ? 32 : 128))) throw new Error(`WireGuard: некорректная длина префикса в адресе «${address}»`)
+  return address
 }
 
 function toPrefixes(value: unknown): string[] {
@@ -31,7 +43,7 @@ function validReserved(value: unknown): value is number[] {
 /** One peer, from either the endpoint form (address/port) or the legacy form (server/server_port). */
 function toEndpointPeer(peer: Record<string, any>): Record<string, unknown> {
   const address = asString(peer?.address) || asString(peer?.server)
-  const port = Number(peer?.port ?? peer?.server_port)
+  const port = toInt(peer?.port ?? peer?.server_port)
   const publicKey = asString(peer?.public_key)
   if (!address) throw new Error('WireGuard: у пира не указан адрес')
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('WireGuard: у пира некорректный порт')
@@ -43,7 +55,7 @@ function toEndpointPeer(peer: Record<string, any>): Record<string, unknown> {
     public_key: publicKey,
     ...(asString(pre_shared_key) ? { pre_shared_key: asString(pre_shared_key) } : {}),
     ...(Array.isArray(allowed_ips) && allowed_ips.length > 0 ? { allowed_ips } : {}),
-    ...(Number.isInteger(persistent_keepalive_interval) && persistent_keepalive_interval > 0 ? { persistent_keepalive_interval } : {}),
+    ...(toInt(persistent_keepalive_interval) > 0 ? { persistent_keepalive_interval: toInt(persistent_keepalive_interval) } : {}),
     ...(validReserved(reserved) ? { reserved } : {})
   }
 }
@@ -69,10 +81,10 @@ export function wireguardOutboundToEndpoint(outbound: Record<string, any>): Wire
       tag,
       address: addresses,
       private_key: asString(private_key),
-      ...(Number.isInteger(mtu) && mtu > 0 ? { mtu } : {}),
-      ...(Number.isInteger(listen_port) && listen_port > 0 && listen_port <= 65535 ? { listen_port } : {}),
+      ...(toInt(mtu) > 0 ? { mtu: toInt(mtu) } : {}),
+      ...(toInt(listen_port) > 0 && toInt(listen_port) <= 65535 ? { listen_port: toInt(listen_port) } : {}),
       ...(typeof udp_timeout === 'string' && udp_timeout ? { udp_timeout } : {}),
-      ...(Number.isInteger(workers) && workers > 0 ? { workers } : {}),
+      ...(toInt(workers) > 0 ? { workers: toInt(workers) } : {}),
       ...(typeof system === 'boolean' ? { system } : {}),
       ...(typeof name === 'string' && name ? { name } : {}),
       ...(domain_resolver ? { domain_resolver } : {}),
@@ -81,7 +93,7 @@ export function wireguardOutboundToEndpoint(outbound: Record<string, any>): Wire
   }
 
   const server = asString(outbound.server)
-  const port = Number(outbound.server_port)
+  const port = toInt(outbound.server_port)
   const privateKey = asString(outbound.private_key)
   const publicKey = asString(outbound.peer_public_key)
   if (!server) throw new Error('WireGuard: не указан адрес сервера')
@@ -93,7 +105,7 @@ export function wireguardOutboundToEndpoint(outbound: Record<string, any>): Wire
   if (addresses.length === 0) throw new Error('WireGuard: не указан локальный адрес туннеля (ip=…)')
 
   const presharedKey = asString(outbound.pre_shared_key)
-  const mtu = Number(outbound.mtu)
+  const mtu = toInt(outbound.mtu)
   return {
     type: 'wireguard',
     tag,
