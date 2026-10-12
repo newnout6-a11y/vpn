@@ -32,7 +32,8 @@ describe.skipIf(!enabled)('native iphlpapi reads vs PowerShell (real machine)', 
   it('lists the same visible adapters as Get-NetAdapter', () => {
     const native = toAdapterRows(adapters)
     const legacy = ps('Get-NetAdapter | Select-Object Name,InterfaceDescription,Status,LinkSpeed,ifIndex | ConvertTo-Json -Compress')
-    const key = (r: any) => `${r.ifIndex}|${r.Name}|${r.InterfaceDescription}`
+    // GetIfTable2 keeps the uniqueness suffix of duplicate descriptions ("sing-tun Tunnel #2"); Get-NetAdapter drops it.
+    const key = (r: any) => `${r.ifIndex}|${r.Name}|${String(r.InterfaceDescription).replace(/\s+#\d+$/, '')}`
     // Known, deliberate divergence: GetIfTable2 also lists stale non-Up interfaces (e.g. a
     // disconnected Bluetooth PAN, a removed Wintun) that the NetAdapter WMI provider omits.
     // Native must be a SUPERSET of Get-NetAdapter and must agree on every adapter that is Up.

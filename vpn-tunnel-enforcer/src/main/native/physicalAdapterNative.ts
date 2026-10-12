@@ -292,10 +292,11 @@ function buildSourceFactory(): SourceFactory {
       const rc = GetIpForwardTable2(AF_UNSPEC, out)
       if (rc !== 0 || !out[0]) throw new Error(`native adapter snapshot: GetIpForwardTable2 rc=${rc}`)
       try {
-        const head = Buffer.from(koffi.view(out[0], 8))
-        const count = head.readUInt32LE(0)
+        // koffi.decode COPIES into a normal Buffer. koffi.view makes an external ArrayBuffer over foreign memory,
+        // which Electron's V8 forbids (fatal napi error that kills the whole process), so never use it here.
+        const count = koffi.decode(out[0], 'uint32_t') as number
         if (count > 100000) throw new Error('native adapter snapshot: implausible route count')
-        const table = Buffer.from(koffi.view(out[0], 8 + count * FORWARD_ROW2_SIZE))
+        const table = Buffer.from(koffi.decode(out[0], 'uint8_t', 8 + count * FORWARD_ROW2_SIZE))
         const routes: NativeDefaultRoute[] = []
         for (let i = 0; i < count; i++) {
           const r = 8 + i * FORWARD_ROW2_SIZE
