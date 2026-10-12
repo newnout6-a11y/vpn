@@ -959,7 +959,7 @@ describe('generateSingboxConfig with xraySocksPort', () => {
 })
 
 
-// AT-04-010 / F-047: WireGuard is an endpoint in sing-box 1.13, never an outbound.
+// AT-04-002 / F-047: WireGuard is an endpoint in sing-box 1.13, never an outbound.
 describe('WireGuard profile in the generated config', () => {
   const wireguard = {
     type: 'wireguard', tag: 'proxy-out', server: '203.0.113.5', server_port: 51820,

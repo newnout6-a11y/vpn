@@ -1,4 +1,4 @@
-// AT-04-010 / F-047: legacy WireGuard outbound → sing-box 1.13 endpoint.
+// AT-04-002 / F-047: legacy WireGuard outbound → sing-box 1.13 endpoint.
 import { describe, expect, it } from 'vitest'
 import { wireguardOutboundToEndpoint } from './singBoxEndpoint'
 

@@ -1,4 +1,4 @@
-// AT-04-010 / F-047: sing-box 1.13 removed the `wireguard` outbound; WireGuard is an `endpoint` now.
+// AT-04-002 / F-047: sing-box 1.13 removed the `wireguard` outbound; WireGuard is an `endpoint` now.
 // The stored profile keeps the legacy outbound shape (parser, URI export and the server/server_port readers rely on it);
 // the translation happens only when the sing-box config is built.
 import { isIP } from 'node:net'
