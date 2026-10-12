@@ -4,6 +4,9 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
 
 // Mock electron modules
 vi.mock('electron', () => ({
@@ -47,11 +50,14 @@ import {
   fallbackAppNameFromPath,
   generateSplitTunnelRouteRules,
   getDirectProcessNames,
+  getDirectProcessPaths,
   getVpnProcessNames,
   sanitizeAppDisplayName,
   normalizeProcessName,
   splitTunneling
 } from './splitTunneling'
+import { processPathRegex } from './splitTunnelPath'
+import { logEvent } from './appLogger'
 
 describe('splitTunneling', () => {
   describe('generateSplitTunnelRouteRules', () => {
@@ -130,5 +136,39 @@ describe('splitTunneling', () => {
       expect(getVpnProcessNames()).toEqual(['curl.exe'])
       expect(generateSplitTunnelRouteRules().some((rule) => rule.outbound === 'proxy-out')).toBe(false)
     })
+  })
+})
+
+// AT-06-008 / F-076: installed applications bypass the VPN by their full path, not by file name.
+describe('split tunneling by application path', () => {
+  const copyDir = mkdtempSync(join(tmpdir(), 'vpnte-split-path-'))
+  const exe = join(copyDir, 'app.exe')
+
+  beforeEach(() => { writeFileSync(exe, 'x') })
+
+  it('emits a path rule and no name rule for an installed application', async () => {
+    const entry = await splitTunneling.addApp(exe)
+    await splitTunneling.setRule(entry.id, 'direct')
+    const rules = generateSplitTunnelRouteRules()
+    const pathRule = rules.find((rule) => rule.process_path_regex)
+    expect(pathRule).toEqual({ process_path_regex: [processPathRegex(exe)], outbound: 'direct-out' })
+    expect(getDirectProcessPaths().map((p) => p.toLowerCase())).toContain(exe.toLowerCase())
+    expect(getDirectProcessNames()).not.toContain('app.exe')
+    expect(rules.some((rule) => (rule.process_name ?? []).includes('app.exe'))).toBe(false)
+  })
+
+  it('drops the rule (and logs it) when the file is gone: no silent match by name', async () => {
+    const entry = await splitTunneling.addApp(exe)
+    await splitTunneling.setRule(entry.id, 'direct')
+    rmSync(exe)
+    expect(getDirectProcessPaths().map((p) => p.toLowerCase())).not.toContain(exe.toLowerCase())
+    expect(generateSplitTunnelRouteRules().some((rule) => JSON.stringify(rule).includes('app.exe'))).toBe(false)
+    expect(logEvent).toHaveBeenCalledWith('warn', 'split-tunnel', expect.stringContaining('inactive'), expect.objectContaining({ reason: 'file-missing' }))
+  })
+
+  it('keeps bare process names matched by name', async () => {
+    const entry = await addProcessName('curl')
+    await splitTunneling.setRule(entry.id, 'direct')
+    expect(getDirectProcessNames()).toContain('curl.exe')
   })
 })

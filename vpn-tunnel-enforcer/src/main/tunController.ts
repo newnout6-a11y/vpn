@@ -15,6 +15,7 @@ import { logEvent } from './appLogger'
 import { rollbackTunNetworkBaselineIfApplied } from './systemNetwork'
 import { settingsStore } from './settings'
 import { notify } from './notifications'
+import { processPathRegex } from './splitTunnelPath'
 import {
   disableKillSwitch,
   disableKillSwitchIfActive,
@@ -881,6 +882,8 @@ export function generateSingboxConfig(
     physicalDnsSources?: PhysicalAdapterDnsSource[]
     xraySocksPort?: number
     resolvedVpnEndpointIp?: string | null
+    /** Full paths of applications that bypass the VPN; matched by path, not by file name (F-076). */
+    directProcessPaths?: string[]
   } = {}
 ): object {
   // Network-compatibility knobs adjust the TUN MTU:
@@ -918,6 +921,7 @@ export function generateSingboxConfig(
     directDnsTag: SMART_DIRECT_DNS_TAG,
     ruleSetDir: options.smartRuRuleSetDir
   }
+  const directPathRegexes = (options.directProcessPaths ?? []).map(processPathRegex)
   const parsedProxy = typeof upstream === 'string' ? parseProxyAddress(upstream) : null
   const proxyCoreProcesses = isDirectVpn
     ? uniqueProcessNames([...EXTERNAL_PROXY_PROCESS_NAMES, ...directProcessNames])
@@ -1186,6 +1190,9 @@ export function generateSingboxConfig(
             }]
             : []
         ),
+        ...(directPathRegexes.length > 0
+          ? [{ process_path_regex: directPathRegexes, outbound: 'direct-out' }]
+          : []),
         // QUIC handling (see shouldBlockQuicUdp443): drop UDP/443 for HTTP-proxy
         // chains and VLESS profiles without explicit packet encoding so browsers
         // fall back to HTTPS/TCP when the remote server may not relay XUDP reliably.
@@ -2021,6 +2028,7 @@ async function prepareRuntime(
     resolvedVpnEndpointIp?: string | null
     xrayStartup?: Promise<{ socksPort: number; resolvedIp: string | null }>
     signal?: AbortSignal
+    directProcessPaths?: string[]
   } = {}
 ): Promise<{ singbox: string; config: string }> {
   options.signal?.throwIfAborted()
@@ -2535,14 +2543,16 @@ export const tunController = {
     // was never wired into config generation. Lazy import avoids the
     // tunController↔splitTunneling circular dependency.
     let splitTunnelDirectNames: string[] = []
+    let splitTunnelDirectPaths: string[] = []
     const splitTunnelStarted = phaseStart()
     try {
       const { splitTunneling } = await import('./splitTunneling')
       splitTunnelDirectNames = splitTunneling.getDirectProcessNames()
+      splitTunnelDirectPaths = splitTunneling.getDirectProcessPaths()
     } catch (err) {
       logEvent('debug', 'tun', 'could not read split-tunnel direct names', err)
     } finally {
-      endPhase('split-tunnel-rules', splitTunnelStarted, { count: splitTunnelDirectNames.length })
+      endPhase('split-tunnel-rules', splitTunnelStarted, { count: splitTunnelDirectNames.length + splitTunnelDirectPaths.length })
     }
 
     // Adapter lockdown can run while we validate the proxy and prepare the
@@ -2775,6 +2785,7 @@ export const tunController = {
           proxyType,
           proxyOwnerProcessNames,
           {
+            directProcessPaths: splitTunnelDirectPaths,
             stealthMode: startOptions.stealthMode === true,
             adaptiveMode: startOptions.adaptiveMode,
             publicWifiCompatibility,
@@ -2841,6 +2852,7 @@ export const tunController = {
           proxyType,
           proxyOwnerProcessNames,
           {
+            directProcessPaths: splitTunnelDirectPaths,
             stealthMode: startOptions.stealthMode === true,
             adaptiveMode: startOptions.adaptiveMode,
             publicWifiCompatibility,
