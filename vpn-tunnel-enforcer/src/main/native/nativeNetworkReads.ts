@@ -1,45 +1,32 @@
 /**
  * AT-07-002 / AT-07-012 / AT-08-007: caller-facing native network reads.
  *
- * Each function returns data in the same shape the corresponding PowerShell
- * script produced, or THROWS. Callers must treat a throw as "native path
- * unavailable" and run their existing PowerShell path - never as an empty
- * (= "clean") answer. `VPNTE_DISABLE_NATIVE_NET=1` forces the PowerShell path.
+ * Each function resolves with data in the same shape the corresponding PowerShell script produced, or REJECTS.
+ * The reads run in a separate utility process (nativeHost.ts), so even a fatal koffi error cannot take the
+ * application down. Callers must treat a rejection as "native path unavailable" and run their existing
+ * PowerShell path - never as an empty (= "clean") answer. `VPNTE_DISABLE_NATIVE_NET=1` forces PowerShell.
  */
-import { readRawAdapters, readRawIfConfigs, readRawRoutes } from './ipHelperReads'
-import {
-  toActiveTunnels, toAdapterRows, toIpConfigRows, toPhysicalIpv4Sources, toRouteRows,
-  type NativeAdapterRow, type NativeIpConfigRow, type NativePhysicalSource, type NativeRouteRow, type NativeTunnelRow
-} from './ipHelperTransforms'
+import { callNativeHost } from './nativeHost'
+import type { NativeAdapterRow, NativeIpConfigRow, NativePhysicalSource, NativeRouteRow, NativeTunnelRow } from './ipHelperTransforms'
 
 export type { NativeAdapterRow, NativeIpConfigRow, NativePhysicalSource, NativeRouteRow, NativeTunnelRow }
 
-function guard(): void {
-  if (process.platform !== 'win32') throw new Error('native network reads are Windows-only')
-  if (process.env.VPNTE_DISABLE_NATIVE_NET === '1') throw new Error('native network reads disabled by VPNTE_DISABLE_NATIVE_NET')
+export function nativePhysicalIpv4Sources(): Promise<NativePhysicalSource[]> {
+  return callNativeHost('physical-sources')
 }
 
-export function nativePhysicalIpv4Sources(): NativePhysicalSource[] {
-  guard()
-  return toPhysicalIpv4Sources(readRawAdapters(), readRawIfConfigs())
+export function nativeActiveTunnels(opts: { vpnteAlias: string; vpnteIpv4Prefix: string }): Promise<NativeTunnelRow[]> {
+  return callNativeHost('tunnels', opts)
 }
 
-export function nativeActiveTunnels(opts: { vpnteAlias: string; vpnteIpv4Prefix: string }): NativeTunnelRow[] {
-  guard()
-  return toActiveTunnels(readRawAdapters(), readRawIfConfigs(), opts)
+export function nativeAdapterRows(): Promise<NativeAdapterRow[]> {
+  return callNativeHost('adapters')
 }
 
-export function nativeAdapterRows(): NativeAdapterRow[] {
-  guard()
-  return toAdapterRows(readRawAdapters())
+export function nativeIpConfigRows(): Promise<NativeIpConfigRow[]> {
+  return callNativeHost('ipconfig')
 }
 
-export function nativeIpConfigRows(): NativeIpConfigRow[] {
-  guard()
-  return toIpConfigRows(readRawAdapters(), readRawIfConfigs())
-}
-
-export function nativeRouteRows(prefixes: string[]): NativeRouteRow[] {
-  guard()
-  return toRouteRows(readRawAdapters(), [...readRawRoutes(4), ...readRawRoutes(6)], prefixes)
+export function nativeRouteRows(prefixes: string[]): Promise<NativeRouteRow[]> {
+  return callNativeHost('routes', { prefixes })
 }

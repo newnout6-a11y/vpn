@@ -12,7 +12,7 @@
     "build": "npm run typecheck && electron-vite build",
     "test": "vitest --run",
     "test:watch": "vitest",
-    "test:electron-probe": "vitest --run --mode integration src/main/native/electronRuntime.itest.ts",
+    "test:electron-probe": "vitest --run --mode integration src/main/native/nativeHost.itest.ts",
     "test:native-itest": "vitest --run --mode integration src/main/native",
     "test:installer-shutdown": "vitest --run --mode integration src/main/installerShutdown.itest.ts",
     "test:coverage": "vitest --run --coverage",

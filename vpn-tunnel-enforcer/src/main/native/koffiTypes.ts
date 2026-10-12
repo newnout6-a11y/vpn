@@ -66,3 +66,15 @@ export function assertIfRow2Layout(koffi: any): void {
     if (actual !== offset) throw new Error(`MIB_IF_ROW2.${member} offset ${actual} != ${offset}`)
   }
 }
+
+/**
+ * koffi may only run inside the native-read host (a utility process) or under plain Node (tests, tooling).
+ * In the Electron main process (process.type === 'browser') a fatal koffi/N-API error aborts the whole elevated
+ * application, which is exactly what #26 did. Loaders call this first: the throw is catchable, so the caller
+ * falls back to PowerShell instead of risking an uncatchable abort.
+ */
+export function assertKoffiAllowedHere(what: string): void {
+  if ((process as { type?: string }).type === 'browser') {
+    throw new Error(`${what}: koffi must not run in the Electron main process; use the native-read host`)
+  }
+}
