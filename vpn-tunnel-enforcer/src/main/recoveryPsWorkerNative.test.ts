@@ -1,21 +1,9 @@
 // AT-03-003/007/012: real persistent worker, fixed registry reads only; no OS writes.
 import { describe, expect, it, vi } from 'vitest'
-import { spawn, spawnSync } from 'node:child_process'
+import { spawn } from 'node:child_process'
 vi.mock('./admin', () => ({ isProcessElevated: vi.fn() }))
 vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
 import { RecoveryPsWorker } from './recoveryPsWorker'
-import { PHYSICAL_ADAPTER_DNS_SCRIPT } from './physicalAdapterSnapshot'
-
-// The routing-DNS reader asks Get-DnsClientServerAddress for EVERY selected physical adapter with -ErrorAction Stop and
-// refuses ("No matching MSFT_DNSClientServerAddress objects found") when one adapter has no IPv4 DNS entry (e.g. a bare
-// CI VM NIC). The same script is run here as the precondition: only that explicit refusal skips the test; any other
-// failure of the probe, or a successful run, leaves the test to run on its own.
-function hostHasAdapterWithoutIpv4Dns(): boolean {
-  if (process.platform !== 'win32') return false
-  const probe = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(PHYSICAL_ADAPTER_DNS_SCRIPT, 'utf16le').toString('base64')],
-    { encoding: 'utf8', timeout: 60000, windowsHide: true })
-  return !probe.error && probe.status !== 0 && /No matching MSFT_DNSClientServerAddress/.test(`${probe.stderr}${probe.stdout}`)
-}
 
 describe('persistent DNS policy reader native proof', () => {
   it.skipIf(process.platform !== 'win32')('warms each adapter module and returns repeated full and transition frames without mutation (AT-03-006/010)', async () => {
@@ -55,9 +43,7 @@ describe('persistent DNS policy reader native proof', () => {
     } finally { await worker.stop() }
     expect(worker.hasExited).toBe(true)
   }, 20000)
-  it.skipIf(process.platform !== 'win32')('returns fresh routing DNS frames without full adapter baselines (AT-03-006)', async ctx => {
-    // Probed inside the test (not at import) and skipped WITH a reason that shows in the report.
-    if (hostHasAdapterWithoutIpv4Dns()) ctx.skip('a physical adapter on this host has no IPv4 DNS entry; the routing-DNS reader refuses by design')
+  it.skipIf(process.platform !== 'win32')('returns fresh routing DNS frames without full adapter baselines (AT-03-006)', async () => {
     const worker = new RecoveryPsWorker(process.env.ProgramData || 'C:\\ProgramData')
     try {
       await worker.execute({ op: 'warmup' })
