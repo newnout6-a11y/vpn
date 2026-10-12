@@ -66,18 +66,18 @@ function New-Object {param($ComObject)
 ${FIREWALL_RULES_API_PS}
 # The firewall only accepts interface names it knows at that moment; which Up adapter that is differs per host (a CI VM
 # can have several, some synthetic). Try each Up adapter and require that at least one real interface is accepted.
-$accepted=$false;$errors=@()
+$accepted=$false;$attempts=@()
 foreach($alias in $aliases){
  $fixtureRules.Created=$null
  try{
   New-VpnteFirewallRule -DisplayName 'VPNTE-killswitch-user-test' -Direction Outbound -Action Allow -Profile Any -Enabled False -InterfaceAlias $alias
   if(@($fixtureRules.Created.Interfaces) -contains $alias){$accepted=$true;break}
-  $errors+="$alias : created but interface not recorded"
- }catch{$errors+="$alias : $($_.Exception.Message)"}
+  $attempts+="$alias : created but interface not recorded"
+ }catch{$attempts+="$alias : $($_.Exception.Message)"}
 }
-if(-not $accepted){throw ('no Up adapter accepted as firewall interface: '+($errors -join ' | '))}
+if(-not $accepted){throw ('no Up adapter accepted as firewall interface: '+($attempts -join ' | '))}
 @{accepted=$accepted;profiles=$fixtureRules.Created.Profiles;enabled=$fixtureRules.Created.Enabled}|ConvertTo-Json -Compress`
-    const output = execFileSync(process.env.VPNTE_PWSH || 'powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(native, 'utf16le').toString('base64')], { windowsHide: true, encoding: 'utf8', timeout: 15000, stdio: 'pipe' })
+    const output = execFileSync(process.env.VPNTE_PWSH || 'powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(native, 'utf16le').toString('base64')], { windowsHide: true, encoding: 'utf8', timeout: 55_000, stdio: 'pipe' })
     expect(JSON.parse(output.trim())).toEqual({ accepted: true, profiles: 2147483647, enabled: false })
   }, 60_000) // cold powershell.exe plus trying each Up adapter exceeds the 5 s default on a loaded CI VM
   it('preserves only matching owned names, duplicate names and fresh enumerations', () => {
