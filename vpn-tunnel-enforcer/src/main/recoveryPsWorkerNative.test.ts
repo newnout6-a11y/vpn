@@ -16,7 +16,6 @@ function hostHasAdapterWithoutIpv4Dns(): boolean {
     { encoding: 'utf8', timeout: 60000, windowsHide: true })
   return !probe.error && probe.status !== 0 && /No matching MSFT_DNSClientServerAddress/.test(`${probe.stderr}${probe.stdout}`)
 }
-const hostLacksIpv4Dns = hostHasAdapterWithoutIpv4Dns()
 
 describe('persistent DNS policy reader native proof', () => {
   it.skipIf(process.platform !== 'win32')('warms each adapter module and returns repeated full and transition frames without mutation (AT-03-006/010)', async () => {
@@ -56,7 +55,9 @@ describe('persistent DNS policy reader native proof', () => {
     } finally { await worker.stop() }
     expect(worker.hasExited).toBe(true)
   }, 20000)
-  it.skipIf(process.platform !== 'win32' || hostLacksIpv4Dns)('returns fresh routing DNS frames without full adapter baselines (AT-03-006)', async () => {
+  it.skipIf(process.platform !== 'win32')('returns fresh routing DNS frames without full adapter baselines (AT-03-006)', async ctx => {
+    // Probed inside the test (not at import) and skipped WITH a reason that shows in the report.
+    if (hostHasAdapterWithoutIpv4Dns()) ctx.skip('a physical adapter on this host has no IPv4 DNS entry; the routing-DNS reader refuses by design')
     const worker = new RecoveryPsWorker(process.env.ProgramData || 'C:\\ProgramData')
     try {
       await worker.execute({ op: 'warmup' })
