@@ -32,8 +32,11 @@ export async function runNativeOp(op: HostOp, args: unknown): Promise<unknown> {
       return toAdapterRows(readRawAdapters())
     case 'ipconfig':
       return toIpConfigRows(readRawAdapters(), readRawIfConfigs())
-    case 'routes':
-      return toRouteRows(readRawAdapters(), [...readRawRoutes(4), ...readRawRoutes(6)], stringArray(a.prefixes, 'routes prefixes'))
+    case 'routes': {
+      // Validate before any native read: call arguments are evaluated left to right.
+      const prefixes = stringArray(a.prefixes, 'routes prefixes')
+      return toRouteRows(readRawAdapters(), [...readRawRoutes(4), ...readRawRoutes(6)], prefixes)
+    }
     case 'physical-sources':
       return toPhysicalIpv4Sources(readRawAdapters(), readRawIfConfigs())
     case 'tunnels': {

@@ -1,13 +1,9 @@
 // AT-07-002 / AT-12-007: koffi must never run in the Electron main process (process.type === 'browser').
 // A fatal koffi error there aborts the whole elevated application (#26); the guard turns it into a catchable throw
 // so callers fall back to PowerShell. Under plain Node (tests, tooling) and in the utility host nothing changes.
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-
-const koffi = vi.hoisted(() => ({ requested: 0 }))
-vi.mock('koffi', () => {
-  koffi.requested++
-  return { default: { load: () => { throw new Error('koffi.load must not be reached in main') } } }
-})
+// The guard's own message is the proof that it fired before any koffi load: past it the loaders would either load
+// the real koffi or fail with a different error.
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { readRawAdapters, readRawIfConfigs, readRawRoutes } from './ipHelperReads'
 import { createKoffiSource, resetKoffiSourceForTests } from './physicalAdapterCore'
@@ -25,7 +21,6 @@ beforeEach(() => {
   Object.defineProperty(process, 'platform', { value: 'win32' })
   resetKoffiSourceForTests()
   resetWinInetNativeForTests()
-  koffi.requested = 0
 })
 afterEach(() => {
   Object.defineProperty(process, 'platform', platform)
