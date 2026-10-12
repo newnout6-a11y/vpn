@@ -82,7 +82,9 @@ jobs:
             fs.closeSync(fd)
           }
           JS
-          node "$RUNNER_TEMP/stat-diag.cjs"
+          echo "=== runtime A: node from .nvmrc ($(node -v))"; node "$RUNNER_TEMP/stat-diag.cjs"
+          echo "=== runtime B: node 24.21.0"; npx -y node@24.21.0 "$RUNNER_TEMP/stat-diag.cjs" || echo "runtime B failed"
+          echo "=== runtime C: Electron's embedded Node (production)"; ELECTRON_RUN_AS_NODE=1 node_modules/electron/dist/electron.exe "$RUNNER_TEMP/stat-diag.cjs" || echo "runtime C failed"
           echo "--- volume"; cmd //c "fsutil fsinfo volumeinfo C:" || true
       - name: Typecheck
         run: npm run typecheck
