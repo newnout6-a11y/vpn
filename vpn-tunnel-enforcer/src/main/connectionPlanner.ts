@@ -113,7 +113,7 @@ async function getActiveTunnels(): Promise<{ tunnels: TunnelInfo[]; verified: bo
   // interfaces at all / only loopback). A machine that simply has no tunnel
   // adapters gets a verified empty list from here, without spawning PowerShell.
   try {
-    return { tunnels: nativeActiveTunnels({ vpnteAlias: getTunAdapterAlias(), vpnteIpv4Prefix: TUN_IPV4_PREFIX }), verified: true }
+    return { tunnels: await nativeActiveTunnels({ vpnteAlias: getTunAdapterAlias(), vpnteIpv4Prefix: TUN_IPV4_PREFIX }), verified: true }
   } catch (err) {
     logEvent('debug', 'planner', 'native tunnel read unavailable, using PowerShell', { err: (err as Error).message })
   }

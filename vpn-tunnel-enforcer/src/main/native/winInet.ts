@@ -1,39 +1,17 @@
-// In-process WinINet change notification via koffi (replaces a cold powershell.exe + Add-Type).
-// Fail closed: any load/call error is thrown to the caller, which falls back to PowerShell.
-const INTERNET_OPTION_SETTINGS_CHANGED = 39
-const INTERNET_OPTION_REFRESH = 37
+// AT-03-003 / AT-03-007: WinINet change notification through the native-read host.
+// Fail closed: a crash or any other host problem rejects with a NativeHostError and the caller uses PowerShell.
+// A genuine `false` from WinINet is authoritative: it is re-thrown as WinInetCallError and never retried.
+import { callNativeHost } from './nativeHost'
+import { NativeHostError } from './hostProtocol'
+import { WinInetCallError } from './winInetCore'
 
-/** A genuine `false` from WinINet: authoritative, must NOT be retried through PowerShell. */
-export class WinInetCallError extends Error {
-  constructor(message: string) { super(message); this.name = 'WinInetCallError' }
-}
+export { WinInetCallError }
 
-type InternetSetOptionW = (handle: null, option: number, buffer: null, length: number) => boolean
-let cached: Promise<InternetSetOptionW> | null = null
-
-async function loadInternetSetOption(): Promise<InternetSetOptionW> {
-  const mod = await import('koffi')
-  // koffi is CJS: interop may expose it as `default` or as the namespace itself. Loosely typed on purpose
-  // (the string-based prototype form is not covered by koffi's overloads).
-  type KoffiLike = { load(name: string): { func(...args: unknown[]): unknown } }
-  const koffi = ((mod as unknown as { default?: KoffiLike }).default ?? mod) as unknown as KoffiLike
-  const lib = koffi.load('wininet.dll')
-  return lib.func('InternetSetOptionW', 'bool', ['void*', 'uint32', 'void*', 'uint32'], '__stdcall') as InternetSetOptionW
-}
-
-/** Lazy-loads koffi on first use; a failed load is not cached so the next call retries. */
-function getInternetSetOption(): Promise<InternetSetOptionW> {
-  if (!cached) cached = loadInternetSetOption().catch(error => { cached = null; throw error })
-  return cached
-}
-
-/** Throws WinInetCallError if WinINet returns false; any other error means koffi is unusable (caller falls back). */
 export async function notifyWinInetSettingsChangedNative(): Promise<void> {
-  if (process.platform !== 'win32') throw new Error('WinINet notification is only available on Windows')
-  const internetSetOption = await getInternetSetOption()
-  if (!internetSetOption(null, INTERNET_OPTION_SETTINGS_CHANGED, null, 0)) throw new WinInetCallError('WinINet settings notification failed')
-  if (!internetSetOption(null, INTERNET_OPTION_REFRESH, null, 0)) throw new WinInetCallError('WinINet refresh failed')
+  try {
+    await callNativeHost('wininet')
+  } catch (error) {
+    if (error instanceof NativeHostError && error.kind === 'wininet-false') throw new WinInetCallError(error.message)
+    throw error
+  }
 }
-
-/** Test seam: forget the cached binding. */
-export function resetWinInetNativeForTests(): void { cached = null }

@@ -53,6 +53,7 @@ import {
 import { relaunchElevatedIfNeeded } from './admin'
 import { clearAppLog, getFullLogs, logEvent, openLogFolder, startEngineLogRetention, type AppLogLevel } from './appLogger'
 import { timePhase } from './psTiming'
+import { shutdownNativeHost } from './native/nativeHost'
 import { runSystemDiagnostics } from './systemDiagnostics'
 import { combinedPreStartProbe, getRoutingPlan } from './connectionPlanner'
 import { getSmartRouteRuleSetState, maybeRefreshSmartRouteRuleSets, refreshSmartRouteRuleSets } from './ruleSetManager'
@@ -1776,7 +1777,7 @@ Menu.setApplicationMenu(null)
 
 app.whenReady().then(async () => {
   const stopLogRetention = startEngineLogRetention()
-  app.once('will-quit', () => { void stopLogRetention() })
+  app.once('will-quit', () => { void stopLogRetention(); shutdownNativeHost() })
   // Must run before the first feature calls ipcMain.handle. Wrapping the
   // primitive once prevents future channels from silently omitting the
   // senderFrame/origin checks required by the trusted boundary.

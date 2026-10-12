@@ -587,7 +587,7 @@ async function loadPhysicalIpv4Sources(): Promise<PhysicalIpv4Source[]> {
   // Second tier: in-process iphlpapi read (no powershell.exe). Throws on any
   // error / implausible enumeration -> fall through to the PowerShell script.
   try {
-    const native = nativePhysicalIpv4Sources().filter(row => row.alias && /^\d+\.\d+\.\d+\.\d+$/.test(row.ipv4))
+    const native = (await nativePhysicalIpv4Sources()).filter(row => row.alias && /^\d+\.\d+\.\d+\.\d+$/.test(row.ipv4))
     if (native.length > 0) {
       physicalSourceCache = { value: native, at: Date.now() }
       return native

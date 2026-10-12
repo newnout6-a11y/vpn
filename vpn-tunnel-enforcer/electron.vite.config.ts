@@ -44,7 +44,9 @@ export default defineConfig({
       outDir: 'out/main',
       rollupOptions: {
         input: {
-          index: resolve(__dirname, 'src/main/index.ts')
+          index: resolve(__dirname, 'src/main/index.ts'),
+          // Native reads run in an Electron utility process: a fatal koffi error must not take main down.
+          nativeHostWorker: resolve(__dirname, 'src/main/native/nativeHostWorker.ts')
         }
       }
     }

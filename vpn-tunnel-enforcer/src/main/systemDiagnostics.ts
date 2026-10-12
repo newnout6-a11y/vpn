@@ -62,13 +62,13 @@ async function ps(script: string, timeout = 15000): Promise<string> {
 const ROUTE_PREFIXES = ['0.0.0.0/0', '::/0', '0.0.0.0/1', '128.0.0.0/1', '::/1', '8000::/1']
 
 /**
- * Native-first read: `native()` is an in-process iphlpapi read that throws on
- * any error or implausible result; in that case the original PowerShell script
+ * Native-first read: `native()` is an iphlpapi read (run in the native-read host process) that rejects on
+ * any error, crash or implausible result; in that case the original PowerShell script
  * runs unchanged (fail closed to the established path, never to empty data).
  */
-export async function nativeOrPs<T>(native: () => T[], script: string, timeout = 12000): Promise<T[]> {
+export async function nativeOrPs<T>(native: () => T[] | Promise<T[]>, script: string, timeout = 12000): Promise<T[]> {
   try {
-    return native()
+    return await native()
   } catch (err) {
     logEvent('debug', 'diagnostics', 'native network read unavailable, using PowerShell', { err: (err as Error).message })
   }
