@@ -41,12 +41,12 @@ describe('wireguardOutboundToEndpoint', () => {
   it('translates legacy peers (server/server_port) instead of copying obsolete fields', () => {
     const endpoint = wireguardOutboundToEndpoint({
       type: 'wireguard', tag: 'proxy-out', local_address: ['10.0.0.2'], private_key: 'P',
-      peers: [{ server: 'a.example.com', server_port: 51820, public_key: 'K1', allowed_ips: ['0.0.0.0/0'], reserved: [1, 2, 3] }, { server: '203.0.113.9', server_port: 2408, public_key: 'K2' }]
+      peers: [{ server: 'a.example.com', server_port: 51820, public_key: 'K1', allowed_ips: ['0.0.0.0/0'], reserved: [1, 2, 3] }, { server: '203.0.113.9', server_port: 2408, public_key: 'K2', allowed_ips: ['10.1.0.0/16'] }]
     }) as any
     expect(endpoint.address).toEqual(['10.0.0.2/32'])
     expect(endpoint.peers).toEqual([
       { address: 'a.example.com', port: 51820, public_key: 'K1', allowed_ips: ['0.0.0.0/0'], reserved: [1, 2, 3] },
-      { address: '203.0.113.9', port: 2408, public_key: 'K2' }
+      { address: '203.0.113.9', port: 2408, public_key: 'K2', allowed_ips: ['10.1.0.0/16'] }
     ])
     expect(JSON.stringify(endpoint)).not.toMatch(/server/)
   })
@@ -71,7 +71,7 @@ describe('wireguardOutboundToEndpoint', () => {
       peers: [{ address: 'x', port: 1, public_key: 'K', tls: {}, extra: 1, persistent_keepalive_interval: 25 }]
     }) as any
     expect(Object.keys(endpoint).sort()).toEqual(['address', 'peers', 'private_key', 'tag', 'type'])
-    expect(endpoint.peers[0]).toEqual({ address: 'x', port: 1, public_key: 'K', persistent_keepalive_interval: 25 })
+    expect(endpoint.peers[0]).toEqual({ address: 'x', port: 1, public_key: 'K', allowed_ips: ['0.0.0.0/0', '::/0'], persistent_keepalive_interval: 25 })
   })
 
   it('coerces numeric strings from hand-written JSON on both paths', () => {
@@ -91,6 +91,13 @@ describe('wireguardOutboundToEndpoint', () => {
 
   it('accepts valid CIDR addresses as they are', () => {
     expect((wireguardOutboundToEndpoint({ ...base, local_address: ['10.0.0.2/24', 'fd00::2/64'] }) as any).address).toEqual(['10.0.0.2/24', 'fd00::2/64'])
+  })
+
+  it('defaults a lone peer without allowed_ips to a full tunnel but demands them with several peers', () => {
+    const peer = { address: 'x', port: 1, public_key: 'K' }
+    const lone = wireguardOutboundToEndpoint({ type: 'wireguard', local_address: ['10.0.0.2'], private_key: 'P', peers: [peer] }) as any
+    expect(lone.peers[0].allowed_ips).toEqual(['0.0.0.0/0', '::/0'])
+    expect(() => wireguardOutboundToEndpoint({ type: 'wireguard', local_address: ['10.0.0.2'], private_key: 'P', peers: [peer, { ...peer, address: 'y' }] })).toThrow(/allowed_ips/)
   })
 
   it('copies valid reserved bytes to the peer and ignores invalid ones', () => {

@@ -41,7 +41,7 @@ function validReserved(value: unknown): value is number[] {
 }
 
 /** One peer, from either the endpoint form (address/port) or the legacy form (server/server_port). */
-function toEndpointPeer(peer: Record<string, any>): Record<string, unknown> {
+function toEndpointPeer(peer: Record<string, any>, onlyPeer: boolean): Record<string, unknown> {
   const address = asString(peer?.address) || asString(peer?.server)
   const port = toInt(peer?.port ?? peer?.server_port)
   const publicKey = asString(peer?.public_key)
@@ -49,12 +49,16 @@ function toEndpointPeer(peer: Record<string, any>): Record<string, unknown> {
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('WireGuard: у пира некорректный порт')
   if (!publicKey) throw new Error('WireGuard: у пира не указан публичный ключ')
   const { pre_shared_key, allowed_ips, persistent_keepalive_interval, reserved } = peer
+  // sing-box refuses a peer without allowed_ips. This is a full-tunnel client, so a lone peer defaults to all traffic;
+  // with several peers a default would make their routes overlap, so the profile has to say which peer carries what.
+  const routes: unknown[] = Array.isArray(allowed_ips) && allowed_ips.length > 0 ? allowed_ips : onlyPeer ? ['0.0.0.0/0', '::/0'] : []
+  if (routes.length === 0) throw new Error('WireGuard: у пира не указаны allowed_ips (при нескольких пирах обязательны)')
   return {
     address,
     port,
     public_key: publicKey,
     ...(asString(pre_shared_key) ? { pre_shared_key: asString(pre_shared_key) } : {}),
-    ...(Array.isArray(allowed_ips) && allowed_ips.length > 0 ? { allowed_ips } : {}),
+    allowed_ips: routes,
     ...(toInt(persistent_keepalive_interval) > 0 ? { persistent_keepalive_interval: toInt(persistent_keepalive_interval) } : {}),
     ...(validReserved(reserved) ? { reserved } : {})
   }
@@ -88,7 +92,7 @@ export function wireguardOutboundToEndpoint(outbound: Record<string, any>): Wire
       ...(typeof system === 'boolean' ? { system } : {}),
       ...(typeof name === 'string' && name ? { name } : {}),
       ...(domain_resolver ? { domain_resolver } : {}),
-      peers: peers.map(toEndpointPeer)
+      peers: peers.map((peer: Record<string, any>) => toEndpointPeer(peer, peers.length === 1))
     }
   }
 
