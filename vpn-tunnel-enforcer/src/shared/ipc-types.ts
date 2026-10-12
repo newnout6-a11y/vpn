@@ -626,6 +626,8 @@ export interface SpeedTestResult {
   latencyMs: number
   serverName: string
   profileUsed: string
+  /** True when the egress IP seen by the test differs from the app's current IP: the figures may not describe the VPN tunnel. */
+  egressMismatch?: boolean
 }
 
 /** Kill-switch severity level */

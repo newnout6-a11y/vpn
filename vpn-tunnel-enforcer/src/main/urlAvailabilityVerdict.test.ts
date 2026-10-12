@@ -72,6 +72,14 @@ describe('deriveVerdict — geo-block aware', () => {
     expect(deriveVerdict(report(), report()).verdict).toBe('works-both')
   })
 
+  it('direct-only 401/403 is unproven → unknown, not works-only-with-vpn (F-210)', () => {
+    for (const status of [401, 403]) {
+      const v = deriveVerdict(null, report({ http: { status, ms: 40, server: null } }))
+      expect(v.verdict).toBe('unknown')
+      expect(v.recommendation).toContain('VPN')
+    }
+  })
+
   it('classic 200-vs-403 still maps to works-only-with-vpn', () => {
     const tunnel = report({ http: { status: 200, ms: 50, server: null } })
     const direct = report({ http: { status: 403, ms: 40, server: null } })

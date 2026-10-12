@@ -131,8 +131,10 @@ export function computeNextEvent(schedules: ScheduleEntry[], now: number): NextE
     if (startMinutes === endMinutes) continue // zero-length window — no events
     const overnight = startMinutes > endMinutes
 
-    // Check up to 8 days ahead to find the next event
-    for (let dayOffset = 0; dayOffset <= 7; dayOffset++) {
+    // Check up to 8 days ahead to find the next event. An overnight window listed YESTERDAY is still open in
+    // the early morning and its stop event (endTime today) lies ahead, so overnight schedules also scan day -1
+    // (F-193). Start events from day -1 are in the past and filtered out by `> now`.
+    for (let dayOffset = overnight ? -1 : 0; dayOffset <= 7; dayOffset++) {
       const candidateDate = new Date(now)
       candidateDate.setDate(candidateDate.getDate() + dayOffset)
       const dayOfWeek = candidateDate.getDay()

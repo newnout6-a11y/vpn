@@ -347,6 +347,8 @@ async function runSpeedTest(): Promise<SpeedTestResult> {
 
     // Verify VPN egress IP — if the tunnel is leaking, the test measured
     // the direct connection, not VPN performance. Log a warning.
+    // A failed lookup stays non-critical, but a genuine mismatch is recorded on the result so the user sees it (F-010).
+    let egressMismatch = false
     try {
       const ipResp = await axios.get('https://api.ipify.org?format=json', { timeout: 6000 })
       const testIp = ipResp.data?.ip
@@ -354,7 +356,8 @@ async function runSpeedTest(): Promise<SpeedTestResult> {
         const { ipMonitor } = await import('./ipMonitor')
         const currentIp = await ipMonitor.getCurrentIp()
         if (currentIp.ip && testIp !== currentIp.ip) {
-          throw new Error('Egress IP mismatch: speed test did not use the active VPN tunnel')
+          egressMismatch = true
+          logEvent('warn', 'speed-test', 'egress IP mismatch: speed test may not have used the active VPN tunnel')
         }
       }
     } catch { /* non-critical verification */ }
@@ -369,7 +372,8 @@ async function runSpeedTest(): Promise<SpeedTestResult> {
       uploadMbps,
       latencyMs,
       serverName: download.name,
-      profileUsed: status.vpnProfileName || 'Unknown'
+      profileUsed: status.vpnProfileName || 'Unknown',
+      ...(egressMismatch ? { egressMismatch } : {})
     }
 
     // Save to history

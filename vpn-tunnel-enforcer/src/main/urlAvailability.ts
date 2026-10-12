@@ -511,9 +511,10 @@ export function deriveVerdict(
   if (!tunnel && direct) {
     if (direct.available) {
       if (direct.http?.status === 403 || direct.http?.status === 401) {
+        // Without a tunnel measurement "works only with VPN" is unproven: the site refuses us, nobody checked the VPN path (F-210).
         return {
-          verdict: 'works-only-with-vpn',
-          recommendation: 'Сам сайт запрещает доступ (отдаёт ошибку доступа 403). Скорее всего, он блокирует пользователей по IP. Включите VPN.'
+          verdict: 'unknown',
+          recommendation: 'Сайт отвечает ошибкой доступа (401/403): он, скорее всего, блокирует по IP или требует вход. Через VPN путь ещё не измерен — включите VPN и повторите проверку.'
         }
       }
       return {
