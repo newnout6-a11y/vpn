@@ -8,16 +8,18 @@ import { notifyWinInetSettingsChangedNative } from './winInet'
 async function main(): Promise<void> {
   for (let round = 1; round <= 2; round++) {
     const lines: string[] = []
-    const step = (name: string, fn: () => unknown) => { const r = fn(); lines.push(`${name}=${Array.isArray(r) ? r.length : 'ok'}`) }
+    // A thrown JS error is the designed fail-closed path (callers fall back to PowerShell), e.g. on a CI runner
+    // without a physical adapter. Only a process abort (not catchable) is a failure of this probe.
+    const step = (name: string, fn: () => unknown) => {
+      try { const r = fn(); lines.push(`${name}=${Array.isArray(r) ? r.length : 'ok'}`) } catch (error) { lines.push(`${name}=threw(${(error as Error).message.slice(0, 60)})`) }
+    }
     step('adapters', () => nativeAdapterRows())
     step('ipconfig', () => nativeIpConfigRows())
     step('routes', () => nativeRouteRows(['0.0.0.0/0']))
     step('physicalSources', () => nativePhysicalIpv4Sources())
     step('tunnels', () => nativeActiveTunnels({ vpnteAlias: 'VPNTE', vpnteIpv4Prefix: '10.250.' }))
-    const snapshot = await readPhysicalAdaptersNative(createKoffiSource(new Map()))
-    lines.push(`snapshot=${JSON.parse(snapshot) ? 'ok' : ''}`)
-    await notifyWinInetSettingsChangedNative()
-    lines.push('wininet=ok')
+    try { JSON.parse(await readPhysicalAdaptersNative(createKoffiSource(new Map()))); lines.push('snapshot=ok') } catch (error) { lines.push(`snapshot=threw(${(error as Error).message.slice(0, 60)})`) }
+    try { await notifyWinInetSettingsChangedNative(); lines.push('wininet=ok') } catch (error) { lines.push(`wininet=threw(${(error as Error).message.slice(0, 60)})`) }
     console.log(`round${round} ${lines.join(' ')}`)
   }
   console.log('PROBE_DONE')

@@ -1,0 +1,89 @@
+# Автоматическая проверка на Windows: приложение зависит от Win32, PowerShell и Electron, поэтому на Linux
+# эти проверки ничего не доказывают. Запускается только на pull_request и push в main (не от комментариев),
+# без секретов и с правами только на чтение.
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONUTF8: '1'
+
+jobs:
+  app:
+    name: Приложение (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+        working-directory: vpn-tunnel-enforcer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          # Тесты должны идти на том Node, что работает в приложении: Electron 44.4.3 содержит Node 24.21.0.
+          # На Node 22.13 (.nvmrc) fs.lstat() по пути на Windows возвращает dev: 0 (fstat — реальное значение),
+          # из-за чего падают 17 тестов безопасности (runtimeArtifact, engineLogRetention); на Node 24.21 это не так.
+          node-version: '24.21.0'
+          cache: npm
+          cache-dependency-path: vpn-tunnel-enforcer/package-lock.json
+      # В lockfile два пакета (fast-uri, js-yaml) записаны как git+ssh://git@github.com/...; у раннера нет SSH-ключа.
+      - name: Читать GitHub-зависимости по https
+        run: |
+          git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+          git config --global --add url."https://github.com/".insteadOf "git@github.com:"
+      - run: npm ci
+      # resources/*.exe не хранятся в git (.gitignore), а часть тестов запускает настоящие движки
+      # (проверка конфигов Xray/sing-box). Версии закреплены, SHA-256 сверяется с хешами из GitHub API.
+      - name: Движки для тестов (версии закреплены, SHA-256 проверяется)
+        shell: pwsh
+        run: |
+          $tmp = Join-Path $env:RUNNER_TEMP 'engines'
+          New-Item -ItemType Directory -Force $tmp | Out-Null
+          function Get-Engine([string]$Url, [string]$Sha256, [string]$ZipName, [string[]]$Files) {
+            $zip = Join-Path $tmp $ZipName
+            Invoke-WebRequest -Uri $Url -OutFile $zip
+            $actual = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+            if ($actual -ne $Sha256) { throw "SHA-256 mismatch for ${ZipName}: $actual" }
+            $dir = Join-Path $tmp ([IO.Path]::GetFileNameWithoutExtension($ZipName))
+            Expand-Archive $zip $dir -Force
+            foreach ($name in $Files) {
+              $found = Get-ChildItem $dir -Recurse -Filter $name | Select-Object -First 1
+              if (-not $found) { throw "$name not found in $ZipName" }
+              Copy-Item $found.FullName (Join-Path $env:GITHUB_WORKSPACE "vpn-tunnel-enforcer/resources/$name")
+            }
+          }
+          Get-Engine 'https://github.com/XTLS/Xray-core/releases/download/v26.7.28/Xray-windows-64.zip' 'c7172078fca4711bcd92a4774dcd1822544579c58816197575c47533317fd8d1' 'Xray-windows-64.zip' @('xray.exe')
+          Get-Engine 'https://github.com/SagerNet/sing-box/releases/download/v1.13.13/sing-box-1.13.13-windows-amd64.zip' 'aea1fa983134a2e2d0600581d1178e98bd6bb93ae12ad8c333eaacae68a1694c' 'sing-box-1.13.13-windows-amd64.zip' @('sing-box.exe')
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Unit-тесты
+        run: npm test
+      - name: Трассировка приёмочных тестов
+        working-directory: .
+        run: python docs/04-приёмочные-тесты/traceability/check-coverage.py
+      # Нативные чтения запускаются под настоящим Electron: фатальная ошибка koffi под Electron не видна из Node.
+      - name: Нативные чтения под Electron
+        run: npm run test:electron-probe
+
+  sidecar:
+    name: ETW-сайдкар (Rust)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: cargo test
+        shell: bash
+        run: cargo test --locked --manifest-path vpn-tunnel-enforcer/native/vpnte-etw-sidecar/Cargo.toml
