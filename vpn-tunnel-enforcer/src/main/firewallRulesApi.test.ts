@@ -79,7 +79,7 @@ if(-not $accepted){throw ('no Up adapter accepted as firewall interface: '+($err
 @{accepted=$accepted;profiles=$fixtureRules.Created.Profiles;enabled=$fixtureRules.Created.Enabled}|ConvertTo-Json -Compress`
     const output = execFileSync(process.env.VPNTE_PWSH || 'powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(native, 'utf16le').toString('base64')], { windowsHide: true, encoding: 'utf8', timeout: 15000, stdio: 'pipe' })
     expect(JSON.parse(output.trim())).toEqual({ accepted: true, profiles: 2147483647, enabled: false })
-  })
+  }, 60_000) // cold powershell.exe plus trying each Up adapter exceeds the 5 s default on a loaded CI VM
   it('preserves only matching owned names, duplicate names and fresh enumerations', () => {
     expect(run(`
 Add-FixtureRule 'foreign-rule';Add-FixtureRule 'VPNTE-killswitch-user-old';Add-FixtureRule 'VPNTE-killswitch-user-old';Add-FixtureRule 'VPNTE-killswitch-allow-app'
