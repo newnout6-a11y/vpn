@@ -116,7 +116,6 @@ describe('physicalAdapterLockdown source regressions', () => {
     expect(s).toContain('const currentGeneration = snapshotGeneration')
     expect(s).toContain('if (snapshotGeneration === currentGeneration)')
     expect(s).toContain('if (snapshotPromise === p)')
-    expect(s).toContain('forceFresh: Boolean(options.forceFresh)')
   })
 
   it('unifies adapter exclusion patterns and halts on auxiliary CIM query failure in snapshot script', () => {

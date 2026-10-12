@@ -628,7 +628,9 @@ export async function applyPhysicalAdapterLockdown(tunDnsIpv4: string, options: 
   }
 
   const [adapters, transitionAdapters, dnsRegistryPolicy] = await Promise.all([
-    snapshotPhysicalAdapters({ forceFresh: Boolean(options.forceFresh) }),
+    // Fresh by default: the rollback manifest records this snapshot, so it must reflect the DNS/adapter state
+    // right now, not a warm-up cache up to 30 s old. Callers that knowingly accept the cache pass false.
+    snapshotPhysicalAdapters({ forceFresh: options.forceFresh !== false }),
     snapshotTransitionAdapters(),
     snapshotDnsRegistryPolicy()
   ])
