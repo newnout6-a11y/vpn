@@ -42,6 +42,28 @@ jobs:
           git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
           git config --global --add url."https://github.com/".insteadOf "git@github.com:"
       - run: npm ci
+      # resources/*.exe не хранятся в git (.gitignore), а часть тестов запускает настоящие движки
+      # (проверка конфигов Xray/sing-box). Версии закреплены, SHA-256 сверяется с хешами из GitHub API.
+      - name: Движки для тестов (версии закреплены, SHA-256 проверяется)
+        shell: pwsh
+        run: |
+          $tmp = Join-Path $env:RUNNER_TEMP 'engines'
+          New-Item -ItemType Directory -Force $tmp | Out-Null
+          function Get-Engine([string]$Url, [string]$Sha256, [string]$ZipName, [string[]]$Files) {
+            $zip = Join-Path $tmp $ZipName
+            Invoke-WebRequest -Uri $Url -OutFile $zip
+            $actual = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+            if ($actual -ne $Sha256) { throw "SHA-256 mismatch for ${ZipName}: $actual" }
+            $dir = Join-Path $tmp ([IO.Path]::GetFileNameWithoutExtension($ZipName))
+            Expand-Archive $zip $dir -Force
+            foreach ($name in $Files) {
+              $found = Get-ChildItem $dir -Recurse -Filter $name | Select-Object -First 1
+              if (-not $found) { throw "$name not found in $ZipName" }
+              Copy-Item $found.FullName (Join-Path $env:GITHUB_WORKSPACE "vpn-tunnel-enforcer/resources/$name")
+            }
+          }
+          Get-Engine 'https://github.com/XTLS/Xray-core/releases/download/v26.7.28/Xray-windows-64.zip' 'c7172078fca4711bcd92a4774dcd1822544579c58816197575c47533317fd8d1' 'Xray-windows-64.zip' @('xray.exe')
+          Get-Engine 'https://github.com/SagerNet/sing-box/releases/download/v1.13.13/sing-box-1.13.13-windows-amd64.zip' 'aea1fa983134a2e2d0600581d1178e98bd6bb93ae12ad8c333eaacae68a1694c' 'sing-box-1.13.13-windows-amd64.zip' @('sing-box.exe')
       - name: Typecheck
         run: npm run typecheck
       - name: Unit-тесты
