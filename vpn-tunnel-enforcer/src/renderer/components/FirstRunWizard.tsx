@@ -14,6 +14,8 @@ import {
   Lock,
   Sparkles,
   TriangleAlert,
+  KeyRound,
+  Power,
 } from 'lucide-react'
 import { MacButton } from '../design-system/MacButton'
 import { MacCard } from '../design-system/MacCard'
@@ -37,9 +39,9 @@ interface Props {
   onSkip: () => void
 }
 
-type Step = 'language' | 'theme' | 'detect' | 'mode' | 'killswitch' | 'complete'
+type Step = 'language' | 'theme' | 'detect' | 'mode' | 'killswitch' | 'key' | 'autostart' | 'complete'
 
-const STEPS: Step[] = ['language', 'theme', 'detect', 'mode', 'killswitch', 'complete']
+const STEPS: Step[] = ['language', 'theme', 'detect', 'mode', 'killswitch', 'key', 'autostart', 'complete']
 const TOTAL_STEPS = STEPS.length
 
 const slideVariants = {
@@ -77,6 +79,11 @@ export function FirstRunWizard({ onComplete, onSkip }: Props) {
   const [selectedTheme, setSelectedTheme] = useState<'light' | 'dark' | 'system'>('system')
   const [selectedMode, setSelectedMode] = useState<'hard' | 'soft' | 'direct'>('hard')
   const [killSwitchLevel, setKillSwitchLevel] = useState<'off' | 'standard' | 'strict'>('standard')
+  // AT-09-014: optional key import and autostart. A key is kept only after the app has validated it.
+  const [keyText, setKeyText] = useState('')
+  const [keyState, setKeyState] = useState<{ status: 'idle' | 'checking' | 'valid' | 'invalid'; count?: number; message?: string }>({ status: 'idle' })
+  const [importedKey, setImportedKey] = useState<string | null>(null)
+  const [autoStart, setAutoStart] = useState(false)
   const [finishing, setFinishing] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
 
@@ -126,6 +133,32 @@ export function FirstRunWizard({ onComplete, onSkip }: Props) {
     }
   }
 
+  async function handleImportKey() {
+    const text = keyText.trim()
+    if (!text) return
+    setKeyState({ status: 'checking' })
+    try {
+      const inspected = await window.electronAPI.inspectVpnInput(text)
+      if (inspected && inspected.count > 0) {
+        setImportedKey(text)
+        setKeyState({ status: 'valid', count: inspected.count })
+      } else {
+        setImportedKey(null)
+        setKeyState({ status: 'invalid', message: t('onboarding.keyInvalid') })
+      }
+    } catch (err: any) {
+      setImportedKey(null)
+      setKeyState({ status: 'invalid', message: err?.message || t('onboarding.keyInvalid') })
+    }
+  }
+
+  function handleKeyTextChange(value: string) {
+    setKeyText(value)
+    // An edited text is no longer the validated one.
+    setImportedKey(null)
+    setKeyState({ status: 'idle' })
+  }
+
   function handleLanguageChange(lang: 'en' | 'ru') {
     setSelectedLang(lang)
     i18n.changeLanguage(lang)
@@ -159,6 +192,15 @@ export function FirstRunWizard({ onComplete, onSkip }: Props) {
         throw new Error(`Не удалось применить язык: ${err?.message || err}`)
       }
 
+      // Optional steps the user explicitly chose: a failure is shown instead of silently dropped.
+      if (autoStart) {
+        try {
+          await window.electronAPI.setLoginItem(true)
+        } catch (err: any) {
+          throw new Error(`${t('onboarding.autostartFailed')}: ${err?.message || err}`)
+        }
+      }
+
       // 3. Persist onboarding completion only after mandatory operations succeed.
       //    routingMode keeps the hard/soft choice alive — connectionMode alone
       //    cannot, because both hard and soft use the 'localProxy' upstream.
@@ -167,6 +209,7 @@ export function FirstRunWizard({ onComplete, onSkip }: Props) {
         firewallKillSwitch: killSwitchLevel !== 'off',
         connectionMode: selectedMode === 'direct' ? 'directVpn' : 'localProxy',
         routingMode: selectedMode === 'soft' ? 'soft' : 'hard',
+        ...(importedKey ? { directVpnInput: importedKey } : {}),
       })
       updateSettings({ firstRunComplete: true })
 
@@ -193,6 +236,8 @@ export function FirstRunWizard({ onComplete, onSkip }: Props) {
       case 'detect': return <Search size={16} />
       case 'mode': return <Zap size={16} />
       case 'killswitch': return <Lock size={16} />
+      case 'key': return <KeyRound size={16} />
+      case 'autostart': return <Power size={16} />
       case 'complete': return <Sparkles size={16} />
     }
   }
@@ -292,6 +337,18 @@ export function FirstRunWizard({ onComplete, onSkip }: Props) {
                   onChange={setKillSwitchLevel}
                   t={t}
                 />
+              )}
+              {step === 'key' && (
+                <StepKey
+                  text={keyText}
+                  state={keyState}
+                  onChange={handleKeyTextChange}
+                  onImport={() => void handleImportKey()}
+                  t={t}
+                />
+              )}
+              {step === 'autostart' && (
+                <StepAutostart enabled={autoStart} onChange={setAutoStart} t={t} />
               )}
               {step === 'complete' && (
                 <StepComplete t={t} />
@@ -668,6 +725,71 @@ function StepKillSwitch({ level, onChange, t }: StepProps & { level: 'off' | 'st
             {level === 'strict' && t('onboarding.killSwitchStrictDesc')}
           </p>
         </motion.div>
+      </div>
+    </div>
+  )
+}
+
+function StepKey({ text, state, onChange, onImport, t }: StepProps & {
+  text: string
+  state: { status: 'idle' | 'checking' | 'valid' | 'invalid'; count?: number; message?: string }
+  onChange: (value: string) => void
+  onImport: () => void
+}) {
+  return (
+    <div className="space-y-6">
+      <div className="text-center">
+        <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-[var(--color-accent)]/10 mb-4">
+          <KeyRound size={32} className="text-[var(--color-accent)]" />
+        </div>
+        <h2 className="text-2xl font-semibold text-[var(--color-text)]">{t('onboarding.importKey')}</h2>
+        <p className="text-sm text-[var(--color-text-secondary)] mt-2">{t('onboarding.importKeyDescription')}</p>
+      </div>
+
+      <div className="max-w-md mx-auto space-y-3">
+        <textarea
+          value={text}
+          onChange={(e) => onChange(e.target.value)}
+          rows={4}
+          spellCheck={false}
+          aria-label={t('onboarding.importKey')}
+          placeholder={t('onboarding.importKeyPlaceholder')}
+          className="w-full rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[var(--color-bg)] p-3 text-xs font-mono text-[var(--color-text)]"
+        />
+        <div className="flex items-center gap-3">
+          <MacButton variant="primary" onClick={onImport} disabled={!text.trim() || state.status === 'checking'} loading={state.status === 'checking'}>
+            {t('onboarding.importKeyButton')}
+          </MacButton>
+          {state.status === 'valid' && (
+            <span role="status" className="text-xs text-green-600">{t('onboarding.keyImported', { count: state.count })}</span>
+          )}
+          {state.status === 'invalid' && (
+            <span role="alert" className="text-xs text-red-400">{state.message}</span>
+          )}
+        </div>
+        <p className="text-xs text-[var(--color-text-secondary)]">{t('onboarding.importKeyOptional')}</p>
+      </div>
+    </div>
+  )
+}
+
+function StepAutostart({ enabled, onChange, t }: StepProps & { enabled: boolean; onChange: (value: boolean) => void }) {
+  return (
+    <div className="space-y-6">
+      <div className="text-center">
+        <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-[var(--color-accent)]/10 mb-4">
+          <Power size={32} className="text-[var(--color-accent)]" />
+        </div>
+        <h2 className="text-2xl font-semibold text-[var(--color-text)]">{t('onboarding.autostart')}</h2>
+        <p className="text-sm text-[var(--color-text-secondary)] mt-2">{t('onboarding.autostartDescription')}</p>
+      </div>
+
+      <div className="max-w-sm mx-auto">
+        <label className="flex items-center gap-3 p-4 rounded-[var(--radius-md)] bg-[var(--color-border)]/20 border border-[var(--color-border)] cursor-pointer">
+          <input type="checkbox" checked={enabled} onChange={(e) => onChange(e.target.checked)} className="w-4 h-4" />
+          <span className="text-sm text-[var(--color-text)]">{t('onboarding.autostartEnable')}</span>
+        </label>
+        <p className="text-xs text-[var(--color-text-secondary)] mt-3">{t('onboarding.autostartAdmin')}</p>
       </div>
     </div>
   )

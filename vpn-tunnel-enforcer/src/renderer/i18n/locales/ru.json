@@ -501,6 +501,18 @@
     "custom": "Пользовательская"
   },
   "onboarding": {
+    "importKey": "Импорт ключа",
+    "importKeyDescription": "Вставьте ссылку на ключ или подписку, чтобы сразу получить рабочий профиль.",
+    "importKeyPlaceholder": "vless://… или ссылка на подписку",
+    "importKeyButton": "Проверить и импортировать",
+    "importKeyOptional": "Шаг необязателен: ключ можно добавить позже в настройках.",
+    "keyImported": "Ключ принят, профилей: {{count}}",
+    "keyInvalid": "Не удалось распознать ключ или подписку.",
+    "autostart": "Автозапуск",
+    "autostartDescription": "Запускать защиту при входе в Windows.",
+    "autostartEnable": "Запускать VPN Tunnel Enforcer при входе в систему",
+    "autostartAdmin": "Приложению нужны права администратора, поэтому автозапуск оформляется задачей планировщика с повышенными правами.",
+    "autostartFailed": "Не удалось включить автозапуск",
     "welcome": "Добро пожаловать в VPN Tunnel Enforcer",
     "selectLanguage": "Выберите язык",
     "selectTheme": "Выберите тему",

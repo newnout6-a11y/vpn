@@ -49,8 +49,8 @@ describe('<FirstRunWizard /> save error handling', () => {
 
     render(<FirstRunWizard onComplete={onComplete} onSkip={onSkip} />)
 
-    // Navigate through all steps to the complete step (5 Next clicks)
-    for (let i = 0; i < 5; i++) {
+    // Navigate through all steps to the complete step (7 Next clicks)
+    for (let i = 0; i < 7; i++) {
       const nextBtn = screen.getByText('onboarding.next')
       fireEvent.click(nextBtn)
     }
@@ -80,7 +80,7 @@ describe('<FirstRunWizard /> save error handling', () => {
 
     render(<FirstRunWizard onComplete={onComplete} onSkip={onSkip} />)
 
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 7; i++) {
       const nextBtn = screen.getByText('onboarding.next')
       fireEvent.click(nextBtn)
     }
@@ -102,7 +102,7 @@ describe('<FirstRunWizard /> save error handling', () => {
 
     render(<FirstRunWizard onComplete={onComplete} onSkip={onSkip} />)
 
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 7; i++) {
       const nextBtn = screen.getByText('onboarding.next')
       fireEvent.click(nextBtn)
     }
@@ -122,11 +122,79 @@ describe('<FirstRunWizard /> save error handling', () => {
     api[method].mockRejectedValueOnce(new Error('Preference failed'))
     const onComplete = vi.fn()
     render(<FirstRunWizard onComplete={onComplete} onSkip={vi.fn()} />)
-    for (let i = 0; i < 5; i++) fireEvent.click(screen.getByText('onboarding.next'))
+    for (let i = 0; i < 7; i++) fireEvent.click(screen.getByText('onboarding.next'))
     fireEvent.click(await screen.findByText('onboarding.finish'))
     expect(await screen.findByRole('alert')).toHaveTextContent('Preference failed')
     expect(api.saveSettings).not.toHaveBeenCalled()
     expect(onComplete).not.toHaveBeenCalled()
+  })
+
+
+  // AT-09-014: optional key import and autostart steps.
+  const next = (times: number) => { for (let i = 0; i < times; i++) fireEvent.click(screen.getByText('onboarding.next')) }
+
+  it('imports a validated key and enables autostart on finish', async () => {
+    const api = window.electronAPI as any
+    api.inspectVpnInput = vi.fn().mockResolvedValue({ count: 1, protocols: { vless: 1 }, profiles: [], fetched: false, source: 'text' })
+    api.setLoginItem = vi.fn().mockResolvedValue({})
+    const onComplete = vi.fn()
+    render(<FirstRunWizard onComplete={onComplete} onSkip={vi.fn()} />)
+    next(5)
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: ' vless://key ' } })
+    fireEvent.click(screen.getByText('onboarding.importKeyButton'))
+    expect(await screen.findByRole('status')).toBeInTheDocument()
+    next(1)
+    fireEvent.click(screen.getByRole('checkbox'))
+    next(1)
+    fireEvent.click(await screen.findByText('onboarding.finish'))
+    await waitFor(() => expect(onComplete).toHaveBeenCalled())
+    expect(api.inspectVpnInput).toHaveBeenCalledTimes(1)
+    expect(api.setLoginItem).toHaveBeenCalledWith(true)
+    expect(api.saveSettings).toHaveBeenCalledWith(expect.objectContaining({ directVpnInput: 'vless://key' }))
+  })
+
+  it('does not keep a key the app rejected, and an edit drops a previous validation', async () => {
+    const api = window.electronAPI as any
+    api.inspectVpnInput = vi.fn().mockResolvedValueOnce({ count: 1, protocols: {}, profiles: [], fetched: false, source: 'text' }).mockResolvedValueOnce({ count: 0, protocols: {}, profiles: [], fetched: false, source: 'text' })
+    render(<FirstRunWizard onComplete={vi.fn()} onSkip={vi.fn()} />)
+    next(5)
+    const box = screen.getByRole('textbox')
+    fireEvent.change(box, { target: { value: 'vless://good' } })
+    fireEvent.click(screen.getByText('onboarding.importKeyButton'))
+    await screen.findByRole('status')
+    fireEvent.change(box, { target: { value: 'garbage' } })
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByText('onboarding.importKeyButton'))
+    expect(await screen.findByRole('alert')).toHaveTextContent('onboarding.keyInvalid')
+    next(2)
+    fireEvent.click(await screen.findByText('onboarding.finish'))
+    await waitFor(() => expect(api.saveSettings).toHaveBeenCalled())
+    expect(api.saveSettings.mock.calls[0][0]).not.toHaveProperty('directVpnInput')
+  })
+
+  it('keeps onboarding incomplete when the chosen autostart cannot be enabled', async () => {
+    const api = window.electronAPI as any
+    api.setLoginItem = vi.fn().mockRejectedValue(new Error('schtasks refused'))
+    const onComplete = vi.fn()
+    render(<FirstRunWizard onComplete={onComplete} onSkip={vi.fn()} />)
+    next(6)
+    fireEvent.click(screen.getByRole('checkbox'))
+    next(1)
+    fireEvent.click(await screen.findByText('onboarding.finish'))
+    expect(await screen.findByRole('alert')).toHaveTextContent('schtasks refused')
+    expect(api.saveSettings).not.toHaveBeenCalled()
+    expect(onComplete).not.toHaveBeenCalled()
+  })
+
+  it('skipping both optional steps changes nothing', async () => {
+    const api = window.electronAPI as any
+    api.setLoginItem = vi.fn()
+    render(<FirstRunWizard onComplete={vi.fn()} onSkip={vi.fn()} />)
+    next(7)
+    fireEvent.click(await screen.findByText('onboarding.finish'))
+    await waitFor(() => expect(api.saveSettings).toHaveBeenCalled())
+    expect(api.setLoginItem).not.toHaveBeenCalled()
+    expect(api.saveSettings.mock.calls[0][0]).not.toHaveProperty('directVpnInput')
   })
 
 })
