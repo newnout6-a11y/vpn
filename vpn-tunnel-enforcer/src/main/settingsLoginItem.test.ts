@@ -37,11 +37,29 @@ vi.mock('./admin', () => ({
   execElevated: execElevatedMock
 }))
 
+// Mimics the OS: Create/Delete flip the task, the encoded query script reports it, everything else is a verified registration.
+let taskPresent = false
+function queryScript(command: string): boolean {
+  const match = /-EncodedCommand ([A-Za-z0-9+/]+={0,2})$/.exec(command)
+  return !!match && Buffer.from(match[1], 'base64').toString('utf16le').includes('LOGIN_TASK_QUERY')
+}
+function statefulElevated(overrides: (command: string) => Promise<{ stdout: string; stderr: string }> | undefined = () => undefined) {
+  return async (command: string) => {
+    const custom = overrides(command)
+    if (custom) return custom
+    if (command.includes('/Create')) taskPresent = true
+    if (command.includes('/Delete')) taskPresent = false
+    if (queryScript(command)) return { stdout: taskPresent ? 'PRESENT' : 'ABSENT', stderr: '' }
+    return { stdout: 'RECOVERY_TASK_VERIFIED', stderr: '' }
+  }
+}
+
 describe('settings login item side effects', () => {
   beforeEach(() => {
     storeState.data = {}
     execElevatedMock.mockReset()
-    execElevatedMock.mockResolvedValue({ stdout: 'RECOVERY_TASK_VERIFIED', stderr: '' })
+    taskPresent = false
+    execElevatedMock.mockImplementation(statefulElevated())
     dialogMock.mockReset()
     dialogMock.mockResolvedValue({ response: 0 })
     reportMock.mockReset()
@@ -62,70 +80,95 @@ describe('settings login item side effects', () => {
 
   it('setLoginItemChecked reports a failed scheduled-task command and keeps the saved setting', async () => {
     const { settingsStore } = await import('./settings')
-    execElevatedMock.mockImplementation(async (command: string) => {
-      if (command.includes('/Delete')) throw new Error('schtasks delete refused')
-      return { stdout: 'RECOVERY_TASK_VERIFIED', stderr: '' }
-    })
     await settingsStore.setLoginItemChecked(true)
     expect(settingsStore.get().autoStart).toBe(true)
+    execElevatedMock.mockImplementation(statefulElevated((command) => (command.includes('/Delete') ? Promise.reject(new Error('schtasks delete refused')) : undefined)))
     await expect(settingsStore.setLoginItemChecked(false)).rejects.toThrow('schtasks delete refused')
     // The OS still has the task, so the stored value must not claim otherwise.
     expect(settingsStore.get().autoStart).toBe(true)
   })
 
-  it('setLoginItemChecked persists the setting once the command succeeded', async () => {
+  it('setLoginItemChecked persists the setting once the command succeeded and the task reads back', async () => {
     const { settingsStore } = await import('./settings')
     await expect(settingsStore.setLoginItemChecked(true)).resolves.toMatchObject({ autoStart: true })
     expect(execElevatedMock.mock.calls.some(([command]) => String(command).includes('/Create'))).toBe(true)
+    expect(execElevatedMock.mock.calls.some(([command]) => queryScript(String(command)))).toBe(true)
     expect(settingsStore.get().autoStart).toBe(true)
   })
 
-  it('setLoginItemChecked reads the task back and refuses a state that does not match', async () => {
+  it('setLoginItemChecked refuses a task state that does not read back, and puts the previous state back', async () => {
     const { settingsStore } = await import('./settings')
-    // Create "succeeds" but the task is not there afterwards (query: not found).
-    execElevatedMock.mockImplementation(async (command: string) => {
-      if (command.includes('/Query')) throw Object.assign(new Error('not found'), { code: 1 })
-      return { stdout: 'RECOVERY_TASK_VERIFIED', stderr: '' }
-    })
+    // Create "succeeds" but the query keeps saying the task is absent.
+    execElevatedMock.mockImplementation(statefulElevated((command) => (queryScript(command) ? Promise.resolve({ stdout: 'ABSENT', stderr: '' }) : undefined)))
     await expect(settingsStore.setLoginItemChecked(true)).rejects.toThrow(/readback/)
     expect(settingsStore.get().autoStart).toBe(false)
-    expect(execElevatedMock.mock.calls.some(([command]) => String(command).includes('/Query'))).toBe(true)
+    expect(execElevatedMock.mock.calls.some(([command]) => String(command).includes('/Delete'))).toBe(true)
   })
 
-  it('setLoginItemChecked treats an unclassifiable query failure as unknown, not as absent', async () => {
+  it('a query failure that is not "task not found" is an unknown state, never absence', async () => {
     const { settingsStore } = await import('./settings')
     await settingsStore.setLoginItemChecked(true)
-    execElevatedMock.mockImplementation(async (command: string) => {
-      if (command.includes('/Query')) throw Object.assign(new Error('access denied'), { code: 5 })
-      return { stdout: 'RECOVERY_TASK_VERIFIED', stderr: '' }
-    })
+    // schtasks-style failure: exit code 1 for access denied. It must not be read as "the task is gone".
+    execElevatedMock.mockImplementation(statefulElevated((command) => (queryScript(command) ? Promise.reject(Object.assign(new Error('Access is denied'), { code: 1 })) : undefined)))
     await expect(settingsStore.setLoginItemChecked(false)).rejects.toThrow()
     expect(settingsStore.get().autoStart).toBe(true)
   })
 
+  it('an unrecognised query answer is an unknown state', async () => {
+    const { settingsStore } = await import('./settings')
+    execElevatedMock.mockImplementation(statefulElevated((command) => (queryScript(command) ? Promise.resolve({ stdout: 'something else', stderr: '' }) : undefined)))
+    await expect(settingsStore.setLoginItemChecked(true)).rejects.toThrow()
+    expect(settingsStore.get().autoStart).toBe(false)
+  })
+
   it('setLoginItemChecked keeps a settings save that completed while the task command was running', async () => {
     const { settingsStore } = await import('./settings')
-    execElevatedMock.mockImplementation(async (command: string) => {
-      if (command.includes('/Create')) settingsStore.save({ stealthMode: true })
-      return { stdout: 'RECOVERY_TASK_VERIFIED', stderr: '' }
-    })
+    execElevatedMock.mockImplementation(statefulElevated((command) => {
+      if (command.includes('/Create')) { taskPresent = true; settingsStore.save({ stealthMode: true }); return Promise.resolve({ stdout: 'RECOVERY_TASK_VERIFIED', stderr: '' }) }
+      return undefined
+    }))
     const saved = await settingsStore.setLoginItemChecked(true)
     expect(saved.stealthMode).toBe(true)
     expect(settingsStore.get().stealthMode).toBe(true)
     expect(settingsStore.get().autoStart).toBe(true)
   })
 
-  it('setLoginItemChecked restores the previous task state when saving fails afterwards, and reports an unconfirmed restore', async () => {
-    const { settingsStore } = await import('./settings')
-    // Make persisting fail only for the checked change: the store write throws once.
-    const realSet = (storeState.data as any)
+  /** Makes the first write of the settings object fail, once. */
+  function failFirstSettingsWrite() {
     let failNextWrite = true
-    const handler = { set(target: any, key: string, value: any) { if (failNextWrite && key === 'settings') { failNextWrite = false; throw new Error('Disk full') } target[key] = value; return true } }
-    storeState.data = new Proxy(realSet, handler)
+    storeState.data = new Proxy(storeState.data as any, {
+      set(target: any, key: string, value: any) {
+        if (failNextWrite && key === 'settings') { failNextWrite = false; throw new Error('Disk full') }
+        target[key] = value
+        return true
+      }
+    })
+  }
+
+  it('setLoginItemChecked puts the task back when saving fails afterwards', async () => {
+    const { settingsStore } = await import('./settings')
+    failFirstSettingsWrite()
     await expect(settingsStore.setLoginItemChecked(true)).rejects.toThrow('Disk full')
     const commands = execElevatedMock.mock.calls.map(([command]) => String(command))
     expect(commands.some((command) => command.includes('/Create'))).toBe(true)
     expect(commands.some((command) => command.includes('/Delete'))).toBe(true)
+    expect(taskPresent).toBe(false)
+    expect(settingsStore.get().autoStart).toBe(false)
+  })
+
+  it('reports an unknown state, with both causes reachable, when the restore after a failed save is not confirmed', async () => {
+    const { settingsStore } = await import('./settings')
+    failFirstSettingsWrite()
+    execElevatedMock.mockImplementation(statefulElevated((command) => (command.includes('/Delete') ? Promise.reject(new Error('delete refused')) : undefined)))
+    const error: any = await settingsStore.setLoginItemChecked(true).catch((e) => e)
+    expect(error.message).toMatch(/Autostart state is unknown/)
+    expect(error.message).toContain('Disk full')
+    expect(error.message).toContain('delete refused')
+    expect(error.cause).toBeInstanceOf(Error)
+    expect(error.cause.message).toBe('delete refused')
+    expect(error.originalCause).toBeInstanceOf(Error)
+    expect(error.originalCause.message).toBe('Disk full')
+    expect(settingsStore.get().autoStart).toBe(false)
   })
 
   it('the plain setLoginItem stays fire-and-forget and never rejects on a failed command', async () => {

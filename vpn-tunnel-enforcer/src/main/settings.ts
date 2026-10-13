@@ -366,15 +366,26 @@ export function buildBootRecoveryTaskCommand(recoverScript: string): string {
 
 const LOGIN_TASK_NAME = 'VPN Tunnel Enforcer'
 
-/** Whether the autostart scheduled task exists. Exit code 1 of schtasks means "not found"; anything else is unknown. */
+// schtasks /Query exits with 1 for "not found" but also for other errors (e.g. access denied), and its text is localised,
+// so the exit code cannot tell them apart. The cmdlet reports a missing task as a locale-independent ObjectNotFound
+// category; any other failure propagates as an unknown state.
+const LOGIN_TASK_QUERY_SCRIPT = [
+  '# LOGIN_TASK_QUERY',
+  'try { $null = Get-ScheduledTask -TaskName ' + "'" + LOGIN_TASK_NAME + "'" + ' -ErrorAction Stop; Write-Output PRESENT }',
+  "catch { if ($_.CategoryInfo.Category -eq 'ObjectNotFound') { Write-Output ABSENT } else { throw } }"
+].join('\n')
+
+/** Whether the autostart scheduled task exists; any answer other than PRESENT/ABSENT is an unknown state and throws. */
 async function loginTaskExists(): Promise<boolean> {
-  try {
-    await execElevated(`schtasks /Query /TN "${LOGIN_TASK_NAME}"`, { timeout: 15000 })
-    return true
-  } catch (error) {
-    if ((error as { code?: unknown })?.code === 1) return false
-    throw error
-  }
+  const encoded = Buffer.from(LOGIN_TASK_QUERY_SCRIPT, 'utf16le').toString('base64')
+  const { stdout } = await execElevated(
+    `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encoded}`,
+    { timeout: 15000 }
+  )
+  const answer = String(stdout ?? '').trim()
+  if (answer === 'PRESENT') return true
+  if (answer === 'ABSENT') return false
+  throw new Error('Autostart task state could not be read back')
 }
 
 /** Fresh readback after a create/delete. Only the packaged Windows build uses a scheduled task. */
@@ -393,7 +404,11 @@ async function restoreLoginTask(previous: boolean, cause: unknown): Promise<void
   } catch (restoreError) {
     const reason = (value: unknown) => (value instanceof Error ? value.message : String(value)).slice(0, 300)
     logEvent('error', 'settings', 'autostart state is unknown: restore after a failed change was not confirmed', { cause: reason(cause), restore: reason(restoreError) })
-    throw new Error(`Autostart state is unknown: ${reason(cause)}; restoring the previous state failed: ${reason(restoreError)}`)
+    // Keep both original errors reachable for higher-level handlers: the restore failure as the cause, the change failure alongside.
+    throw Object.assign(
+      new Error(`Autostart state is unknown: ${reason(cause)}; restoring the previous state failed: ${reason(restoreError)}`, { cause: restoreError }),
+      { originalCause: cause }
+    )
   }
 }
 
