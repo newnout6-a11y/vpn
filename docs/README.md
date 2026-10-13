@@ -136,7 +136,7 @@ WP-3 уже реализовывался в PR #13 и lifecycle-работах; 
 | [Roadmap](../vpn-tunnel-enforcer/docs/censorship-resilience-roadmap.md) и индекс фаз | Файлы отдельных фаз удалены 2026-10-13, их итоговые статусы — в строках ниже. Даты и статусы фаз имеют приоритет над общим старым roadmap. Фазы 3–6 содержат выполненный слой и конкретный остаток, а не полную приёмку. |
 | Фаза 1 — sing-box | Записаны bundled 1.13.13, staging/diagnostics и проверки конфигурации; это не доказывает матрицу 1.13/1.14. |
 | Фаза 2 — rule-set | Managed cache, размер/SHA-256, temp+rename и bundled fallback учтены как сделанные части. Независимый источник доверенного checksum/signature остаётся отдельным требованием. |
-| Фаза 3 — протоколы | URI/JSON parser/export для новых протоколов не равен успешному handshake. В документе прямо оставлена WireGuard endpoint/route integration; текущий генератор подтверждает этот остаток. |
+| Фаза 3 — протоколы | URI/JSON parser/export и генерация WireGuard endpoint реализованы, но это не равно успешному handshake. Не подтверждены golden-матрица на обоих бинарниках sing-box 1.13/1.14, Windows handshake и маршрутный тест на настоящем сервере WireGuard. |
 | Фаза 4 — Naive/ECH | Parser/config/export и capability diagnostics есть по записанным результатам; known-good remote Naive/ECH matrix и stealth presets остаются. |
 | Фаза 5 — Hysteria2 | Salamander/mport/hop/bandwidth normalization, capability warnings и schema checks — реализованный слой. Реальный known-good handshake и расширения 1.14 этим не подтверждены. |
 | Фаза 6 — bootstrap | Общая policy auto/direct/localProxy для служебных загрузок существует по документу; cold-start через selected VPN profile и external bootstrap profile не реализованы. |

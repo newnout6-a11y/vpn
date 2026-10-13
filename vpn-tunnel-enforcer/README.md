@@ -144,7 +144,7 @@ The test suite is run with `npm test -- --reporter=dot`; current totals are repo
 1. Selects a Direct VPN profile or detects a local SOCKS5/HTTP proxy from any supported client
 2. Generates sing-box config: TUN inbound (`mixed` stack, `auto_route`, `strict_route`, `route_exclude_address` for private ranges), DNS hijack, `proxy-out` final route
 3. Applies physical adapter lockdown: IPv6 disabled, DNS pinned to TUN resolver, `DisableSmartNameResolution`, transition adapters off
-4. Launches `vpnte-sing-box.exe` elevated from writable user-data runtime folder
+4. Launches `vpnte-sing-box.exe` elevated from the hardened `%ProgramData%VPNTEuntime<instance-hash>	un-runtime` directory
 5. Waits for TUN adapter via `os.networkInterfaces()` (no PowerShell spawn)
 6. Sets TUN interface metric to 5 (wins route tiebreak over Wi-Fi)
 7. Engages firewall kill-switch (`DefaultOutboundAction=Block` + Allow rules for sing-box/proxy/TUN)
