@@ -499,6 +499,19 @@
     "custom": "Custom"
   },
   "onboarding": {
+    "autostartRestoreFailed": "Could not restore the previous autostart setting: {{error}}",
+    "importKey": "Import a key",
+    "importKeyDescription": "Paste a key link or a subscription link to get a working profile right away.",
+    "importKeyPlaceholder": "vless://… or a subscription link",
+    "importKeyButton": "Check and import",
+    "importKeyOptional": "This step is optional: you can add a key later in Settings.",
+    "keyImported": "Key accepted, profiles: {{count}}",
+    "keyInvalid": "The key or subscription could not be recognised.",
+    "autostart": "Autostart",
+    "autostartDescription": "Start protection when you sign in to Windows.",
+    "autostartEnable": "Start VPN Tunnel Enforcer when I sign in",
+    "autostartAdmin": "The app needs administrator rights, so autostart is set up as an elevated scheduled task.",
+    "autostartFailed": "Could not enable autostart",
     "welcome": "Welcome to VPN Tunnel Enforcer",
     "selectLanguage": "Select Language",
     "selectTheme": "Choose Theme",
@@ -597,6 +610,8 @@
     "phaseComplete": "Test complete"
   },
   "domainRouting": {
+    "hits": "connections: {{count}}",
+    "hitsTitle": "Connections this session whose domain matches the rule pattern",
     "title": "Domain Routing",
     "description": "Route traffic for specific domains through VPN, directly, or block them",
     "noRules": "No domain routing rules configured",

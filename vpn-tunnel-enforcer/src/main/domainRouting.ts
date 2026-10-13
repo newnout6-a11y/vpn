@@ -41,6 +41,20 @@ const domainRoutingStore = new Store<DomainRoutingStoreSchema>({
 /** In-memory hit counts for the current session, keyed by rule ID */
 const sessionHitCounts = new Map<string, number>()
 
+/**
+ * Records a hit for the rule whose pattern matches `host`. This counts connections whose host matches the pattern during
+ * this session; it does not claim that this rule routed the connection (process, private-IP and DNS rules run before it).
+ * Returns null when no rules exist so the caller can skip the work.
+ */
+export function createHitRecorder(): ((host: string) => void) | null {
+  const rules = domainRoutingStore.get('domainRules')
+  if (!Array.isArray(rules) || rules.length === 0) return null
+  return (host: string) => {
+    const rule = matchDomain(rules, host)
+    if (rule) sessionHitCounts.set(rule.id, (sessionHitCounts.get(rule.id) ?? 0) + 1)
+  }
+}
+
 function normalizeDomainPattern(raw: string): string {
   const trimmed = String(raw || '').trim().toLowerCase()
   if (!trimmed) return ''
@@ -332,11 +346,8 @@ export const domainRoutingService = {
   reorderRules,
   importFromFile,
 
-  // Note: hit-count tracking (recordHit/matchAndRecord/resetHitCounts) was
-  // removed — recordHit was never called from anywhere (sing-box routes
-  // internally, no callback to the app). sessionHitCounts always stays
-  // empty, so hitCount is always 0 in the UI. The hitCount field remains
-  // in DomainRule for interface compatibility but will always be 0.
+  // Hit counts are fed by the traffic connection sampler (createHitRecorder): sing-box routes internally and has no
+  // callback, so new connections seen in the Clash API poll are matched against the rules.
 }
 
 interface ApprovedDomainImport { path: string; text: string; expiresAt: number; release: () => void }
