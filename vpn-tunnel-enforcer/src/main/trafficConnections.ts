@@ -140,7 +140,7 @@ export type SamplerSeen = Map<string, { up: number; down: number }>
 /**
  * Fold one `/connections` snapshot into the domain map. Mutates `domains` and
  * `seen` in place. A connection id seen for the first time bumps its domain's
- * `count`; repeat sightings only accrue the byte delta. Connections that have
+ * `count` (and is reported to `onNewConnection`); repeat sightings only accrue the byte delta. Connections that have
  * dropped out of the snapshot are pruned from `seen`.
  */
 export function mergeConnectionSample(
@@ -148,7 +148,8 @@ export function mergeConnectionSample(
   snapshot: ClashConnectionsSnapshot | null | undefined,
   seen: SamplerSeen,
   infraHosts: ReadonlySet<string>,
-  now: number
+  now: number,
+  onNewConnection?: (host: string) => void
 ): { changed: boolean } {
   let changed = false
   const live = new Set<string>()
@@ -177,6 +178,7 @@ export function mergeConnectionSample(
       rec.bytesDown += down
       seen.set(conn.id, { up, down })
       changed = true
+      onNewConnection?.(host)
     } else {
       const dUp = Math.max(0, up - prev.up)
       const dDown = Math.max(0, down - prev.down)
@@ -287,6 +289,16 @@ function flush(force: boolean): void {
   }
 }
 
+/** Counts new connections against the user's domain rules (F-011); null when there are no rules to count. */
+function hitRecorder(): ((host: string) => void) | undefined {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    return (require('./domainRouting') as typeof import('./domainRouting')).createHitRecorder() ?? undefined
+  } catch {
+    return undefined
+  }
+}
+
 async function pollOnce(): Promise<void> {
   if (polling) return
   let info: { port: number; secret: string } | null = null
@@ -317,7 +329,8 @@ async function pollOnce(): Promise<void> {
       resp.data,
       seen,
       getInfraHosts(),
-      Date.now()
+      Date.now(),
+      hitRecorder()
     )
     if (changed) flush(false)
   } catch (err) {

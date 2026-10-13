@@ -11,6 +11,7 @@ interface DomainRule {
   pattern: string
   action: DomainAction
   priority: number
+  hitCount?: number
 }
 
 type DomainRuleDragItem = DomainRule & DragItem
@@ -214,6 +215,11 @@ export function DomainRouting() {
             {rule.pattern}
           </span>
         </div>
+        {(rule.hitCount ?? 0) > 0 && (
+          <span className="text-xs text-[var(--color-text-secondary)] shrink-0" title={t('domainRouting.hitsTitle')}>
+            {t('domainRouting.hits', { count: rule.hitCount })}
+          </span>
+        )}
         <MacBadge variant={getActionBadgeVariant(rule.action)}>
           {getActionLabel(rule.action)}
         </MacBadge>

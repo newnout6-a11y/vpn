@@ -609,6 +609,8 @@
     "phaseComplete": "Test complete"
   },
   "domainRouting": {
+    "hits": "connections: {{count}}",
+    "hitsTitle": "Connections this session whose domain matches the rule pattern",
     "title": "Domain Routing",
     "description": "Route traffic for specific domains through VPN, directly, or block them",
     "noRules": "No domain routing rules configured",
