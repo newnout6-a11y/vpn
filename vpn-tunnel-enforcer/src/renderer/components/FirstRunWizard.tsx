@@ -767,10 +767,10 @@ function StepKey({ text, state, onChange, onImport, t }: StepProps & {
             {t('onboarding.importKeyButton')}
           </MacButton>
           {state.status === 'valid' && (
-            <span role="status" className="text-xs text-green-600">{t('onboarding.keyImported', { count: state.count })}</span>
+            <span role="status" className="text-xs text-[var(--color-success)]">{t('onboarding.keyImported', { count: state.count })}</span>
           )}
           {state.status === 'invalid' && (
-            <span role="alert" className="text-xs text-red-400">{state.message}</span>
+            <span role="alert" className="text-xs text-[var(--color-danger)]">{state.message}</span>
           )}
         </div>
         <p className="text-xs text-[var(--color-text-secondary)]">{t('onboarding.importKeyOptional')}</p>
