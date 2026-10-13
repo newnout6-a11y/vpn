@@ -230,7 +230,7 @@ export function FirstRunWizard({ onComplete, onSkip }: Props) {
         try {
           await window.electronAPI.setLoginItem(previousAutoStart)
         } catch (restoreErr: any) {
-          addLog('warn', `Не удалось вернуть прежнее значение автозапуска: ${restoreErr?.message || restoreErr}`)
+          addLog('warn', t('onboarding.autostartRestoreFailed', { error: restoreErr?.message || String(restoreErr) }))
         }
       }
       const msg = err?.message || 'Не удалось сохранить настройки. Пожалуйста, попробуйте снова.'

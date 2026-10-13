@@ -499,6 +499,7 @@
     "custom": "Custom"
   },
   "onboarding": {
+    "autostartRestoreFailed": "Could not restore the previous autostart setting: {{error}}",
     "importKey": "Import a key",
     "importKeyDescription": "Paste a key link or a subscription link to get a working profile right away.",
     "importKeyPlaceholder": "vless://… or a subscription link",

@@ -1,6 +1,6 @@
 import '@testing-library/jest-dom/vitest'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { FirstRunWizard } from './FirstRunWizard'
 import { useAppStore } from '../store'
 
@@ -175,15 +175,16 @@ describe('<FirstRunWizard /> save error handling', () => {
   it('ignores an inspection result that arrives after the text was edited', async () => {
     const api = window.electronAPI as any
     let resolveInspect: (value: unknown) => void = () => {}
-    api.inspectVpnInput = vi.fn().mockReturnValue(new Promise((resolve) => { resolveInspect = resolve }))
+    const pending = new Promise((resolve) => { resolveInspect = resolve })
+    api.inspectVpnInput = vi.fn().mockReturnValue(pending)
     render(<FirstRunWizard onComplete={vi.fn()} onSkip={vi.fn()} />)
     next(5)
     const box = screen.getByRole('textbox')
     fireEvent.change(box, { target: { value: 'vless://old' } })
     fireEvent.click(screen.getByText('onboarding.importKeyButton'))
     fireEvent.change(box, { target: { value: 'vless://new' } })
-    resolveInspect({ count: 1, protocols: {}, profiles: [], fetched: false, source: 'text' })
-    await Promise.resolve(); await Promise.resolve()
+    // Resolve and let the component's continuation run to completion before asserting (no fixed tick count).
+    await act(async () => { resolveInspect({ count: 1, protocols: {}, profiles: [], fetched: false, source: 'text' }); await pending })
     expect(screen.queryByRole('status')).not.toBeInTheDocument()
     next(2)
     fireEvent.click(await screen.findByText('onboarding.finish'))
