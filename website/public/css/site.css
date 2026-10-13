@@ -463,8 +463,8 @@ code.mono,.card code,.faq__a code,.prose code{font-size:.9em;background:rgba(21,
 .footer .brand{color:var(--ink)}
 .footer p.about{color:var(--muted);font-size:14.5px;max-width:34ch;margin-top:16px}
 .footer__bot{display:flex;flex-wrap:wrap;gap:14px 30px;justify-content:space-between;margin-top:54px;padding-top:26px;border-top:1px solid var(--line);font-size:13.5px;color:var(--faint)}
-.footer__word{font:700 clamp(38px,10.2vw,158px)/.9 var(--f-head);letter-spacing:-.06em;text-align:center;margin-top:56px;color:rgba(242,238,228,.16);user-select:none;white-space:nowrap;overflow:hidden;padding-bottom:.06em}
-.footer__word .ch{display:inline-block;font-weight:var(--w,700);color:rgba(242,238,228,var(--a,.16))}
+.footer__word{font:400 clamp(38px,10.2vw,158px)/.9 var(--f-head);letter-spacing:-.06em;text-align:center;margin-top:56px;color:rgba(242,238,228,.14);user-select:none;white-space:nowrap;overflow:hidden;padding-bottom:.06em}
+.footer__word .ch{display:inline-block;font-weight:var(--w,400);color:rgba(242,238,228,var(--a,.14))}
 
 /* ---------- внутренние страницы ---------- */
 .page-hero{position:relative;padding-top:calc(var(--header-h) + clamp(56px,9vw,120px));padding-bottom:clamp(40px,6vw,80px);overflow:hidden}

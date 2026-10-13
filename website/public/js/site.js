@@ -166,7 +166,7 @@
   function initWeight(host, getChars, o) {
     if (!fine || reduce) return
     let mx = 0, my = 0, inside = false, raf = 0
-    const cur = new WeakMap()
+    const cur = new WeakMap(), near = new WeakMap() // near — сглаженная близость курсора (0…1), от неё считается яркость
     const frame = () => {
       raf = 0
       let moving = false
@@ -181,7 +181,13 @@
         w = lerp(w, want, 0.14); cur.set(s, w)
         if (Math.abs(w - want) > 1) moving = true
         s.style.setProperty('--w', Math.round(w))
-        if (o.alpha) s.style.setProperty('--a', (lerp(o.alpha[0], o.alpha[1], clamp((w - o.far) / (o.near - o.far), 0, 1))).toFixed(3))
+        // Яркость зависит от близости курсора, а не от жирности: иначе буквы в покое (жирность rest) светились бы
+        // ярче, чем под курсором вдали от них.
+        if (o.alpha) {
+          const n = lerp(near.get(s) ?? 0, f, 0.14); near.set(s, n)
+          if (Math.abs(n - f) > 0.004) moving = true
+          s.style.setProperty('--a', lerp(o.alpha[0], o.alpha[1], n * n * (3 - 2 * n)).toFixed(3))
+        }
       })
       if (moving) raf = requestAnimationFrame(frame)
     }
@@ -573,7 +579,7 @@
   function initFooterWord() {
     const el = $('.footer__word'); if (!el || !fine || reduce) return
     const chars = splitChars(el)
-    initWeight(el.closest('.footer'), () => chars, { rest: 700, far: 300, near: 900, radius: 340, alpha: [0.1, 0.95] })
+    initWeight(el.closest('.footer'), () => chars, { rest: 400, far: 400, near: 900, radius: 360, alpha: [0.14, 0.95] })
   }
 
   /* ---------- бегущие строки: скорость и наклон от скорости скролла ---------- */
