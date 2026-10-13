@@ -20,6 +20,21 @@ describe('main IPC regressions', () => {
     expect(handler.indexOf('await stopTrafficForensicsSession')).toBeLessThan(handler.indexOf('targets.map'))
     expect(handler.indexOf('capture.cleanupPending')).toBeLessThan(handler.indexOf('targets.map'))
   })
+  it('inspect-vpn-input never persists the raw input as directVpnInput (inspecting is not accepting)', () => {
+    const source = mainIndexSource()
+    const handlerStart = source.indexOf("handleLogged('inspect-vpn-input'")
+    const handlerEnd = source.indexOf("handleLogged('", handlerStart + 10)
+    // Comments may explain the rule, so only code is scanned.
+    const handler = source.slice(handlerStart, handlerEnd).split('\n').filter((line) => !line.trim().startsWith('//')).join('\n')
+
+    expect(handlerStart).toBeGreaterThanOrEqual(0)
+    expect(handler).toContain('cacheInspectionResult(')
+    expect(handler).not.toContain('settingsStore.save({')
+    // No form of the key may be written here: literal, shorthand, computed key, or a spread of existing settings.
+    expect(handler).not.toMatch(/directVpnInput/)
+    expect(handler).not.toMatch(/\.\.\.\s*(?:settings|input|resolved)\b/)
+  })
+
   it('bounds inspect-vpn-input before resolving or persisting input', () => {
     const source = mainIndexSource()
     const handlerStart = source.indexOf("handleLogged('inspect-vpn-input'")

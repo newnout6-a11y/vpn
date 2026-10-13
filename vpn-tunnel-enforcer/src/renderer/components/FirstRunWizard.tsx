@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useTranslation } from 'react-i18next'
 import {
@@ -83,7 +83,9 @@ export function FirstRunWizard({ onComplete, onSkip }: Props) {
   const [keyText, setKeyText] = useState('')
   const [keyState, setKeyState] = useState<{ status: 'idle' | 'checking' | 'valid' | 'invalid'; count?: number; message?: string }>({ status: 'idle' })
   const [importedKey, setImportedKey] = useState<string | null>(null)
-  const [autoStart, setAutoStart] = useState(false)
+  // Bumped on every import attempt and every edit: an inspection result for an older text is ignored.
+  const inspectSeq = useRef(0)
+  const [autoStart, setAutoStart] = useState(settings.autoStart === true)
   const [finishing, setFinishing] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
 
@@ -136,9 +138,11 @@ export function FirstRunWizard({ onComplete, onSkip }: Props) {
   async function handleImportKey() {
     const text = keyText.trim()
     if (!text) return
+    const seq = ++inspectSeq.current
     setKeyState({ status: 'checking' })
     try {
       const inspected = await window.electronAPI.inspectVpnInput(text)
+      if (seq !== inspectSeq.current) return
       if (inspected && inspected.count > 0) {
         setImportedKey(text)
         setKeyState({ status: 'valid', count: inspected.count })
@@ -147,6 +151,7 @@ export function FirstRunWizard({ onComplete, onSkip }: Props) {
         setKeyState({ status: 'invalid', message: t('onboarding.keyInvalid') })
       }
     } catch (err: any) {
+      if (seq !== inspectSeq.current) return
       setImportedKey(null)
       setKeyState({ status: 'invalid', message: err?.message || t('onboarding.keyInvalid') })
     }
@@ -154,7 +159,8 @@ export function FirstRunWizard({ onComplete, onSkip }: Props) {
 
   function handleKeyTextChange(value: string) {
     setKeyText(value)
-    // An edited text is no longer the validated one.
+    // An edited text is no longer the validated one, and a pending inspection of the old text is void.
+    inspectSeq.current += 1
     setImportedKey(null)
     setKeyState({ status: 'idle' })
   }
@@ -167,6 +173,10 @@ export function FirstRunWizard({ onComplete, onSkip }: Props) {
   async function handleFinish() {
     setFinishing(true)
     setSaveError(null)
+    // Autostart is applied before onboarding completion is saved: remember what to restore if a later step fails.
+    const previousAutoStart = settings.autoStart === true
+    let autostartApplied = false
+    let restoreFailure: string | null = null
 
     try {
       // 1. Mandatory security setting: apply chosen kill switch level first
@@ -193,9 +203,12 @@ export function FirstRunWizard({ onComplete, onSkip }: Props) {
       }
 
       // Optional steps the user explicitly chose: a failure is shown instead of silently dropped.
-      if (autoStart) {
+      if (autoStart !== previousAutoStart) {
         try {
-          await window.electronAPI.setLoginItem(true)
+          // Set before the call: a failure after the setting was persisted or the OS state changed is an unknown
+          // outcome, and restoring the baseline value is safe in every case.
+          autostartApplied = true
+          await window.electronAPI.setLoginItem(autoStart)
         } catch (err: any) {
           throw new Error(`${t('onboarding.autostartFailed')}: ${err?.message || err}`)
         }
@@ -215,7 +228,18 @@ export function FirstRunWizard({ onComplete, onSkip }: Props) {
 
       onComplete()
     } catch (err: any) {
-      const msg = err?.message || 'Не удалось сохранить настройки. Пожалуйста, попробуйте снова.'
+      if (autostartApplied) {
+        // The wizard stays incomplete, so do not leave the autostart change it applied behind.
+        try {
+          await window.electronAPI.setLoginItem(previousAutoStart)
+        } catch (restoreErr: any) {
+          restoreFailure = t('onboarding.autostartRestoreFailed', { error: restoreErr?.message || String(restoreErr) })
+          addLog('warn', restoreFailure)
+        }
+      }
+      const baseMsg = err?.message || 'Не удалось сохранить настройки. Пожалуйста, попробуйте снова.'
+      // A failed restore is shown next to the original error, not only written to the log.
+      const msg = restoreFailure ? `${baseMsg} ${restoreFailure}` : baseMsg
       setSaveError(msg)
       addLog('error', `Ошибка завершения первого запуска: ${msg}`)
     } finally {
@@ -761,10 +785,10 @@ function StepKey({ text, state, onChange, onImport, t }: StepProps & {
             {t('onboarding.importKeyButton')}
           </MacButton>
           {state.status === 'valid' && (
-            <span role="status" className="text-xs text-green-600">{t('onboarding.keyImported', { count: state.count })}</span>
+            <span role="status" className="text-xs text-[var(--color-success)]">{t('onboarding.keyImported', { count: state.count })}</span>
           )}
           {state.status === 'invalid' && (
-            <span role="alert" className="text-xs text-red-400">{state.message}</span>
+            <span role="alert" className="text-xs text-[var(--color-danger)]">{state.message}</span>
           )}
         </div>
         <p className="text-xs text-[var(--color-text-secondary)]">{t('onboarding.importKeyOptional')}</p>

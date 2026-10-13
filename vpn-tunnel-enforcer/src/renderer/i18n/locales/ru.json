@@ -501,6 +501,7 @@
     "custom": "Пользовательская"
   },
   "onboarding": {
+    "autostartRestoreFailed": "Не удалось вернуть прежнее значение автозапуска: {{error}}",
     "importKey": "Импорт ключа",
     "importKeyDescription": "Вставьте ссылку на ключ или подписку, чтобы сразу получить рабочий профиль.",
     "importKeyPlaceholder": "vless://… или ссылка на подписку",
