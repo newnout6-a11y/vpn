@@ -80,6 +80,54 @@ describe('settings login item side effects', () => {
     expect(settingsStore.get().autoStart).toBe(true)
   })
 
+  it('setLoginItemChecked reads the task back and refuses a state that does not match', async () => {
+    const { settingsStore } = await import('./settings')
+    // Create "succeeds" but the task is not there afterwards (query: not found).
+    execElevatedMock.mockImplementation(async (command: string) => {
+      if (command.includes('/Query')) throw Object.assign(new Error('not found'), { code: 1 })
+      return { stdout: 'RECOVERY_TASK_VERIFIED', stderr: '' }
+    })
+    await expect(settingsStore.setLoginItemChecked(true)).rejects.toThrow(/readback/)
+    expect(settingsStore.get().autoStart).toBe(false)
+    expect(execElevatedMock.mock.calls.some(([command]) => String(command).includes('/Query'))).toBe(true)
+  })
+
+  it('setLoginItemChecked treats an unclassifiable query failure as unknown, not as absent', async () => {
+    const { settingsStore } = await import('./settings')
+    await settingsStore.setLoginItemChecked(true)
+    execElevatedMock.mockImplementation(async (command: string) => {
+      if (command.includes('/Query')) throw Object.assign(new Error('access denied'), { code: 5 })
+      return { stdout: 'RECOVERY_TASK_VERIFIED', stderr: '' }
+    })
+    await expect(settingsStore.setLoginItemChecked(false)).rejects.toThrow()
+    expect(settingsStore.get().autoStart).toBe(true)
+  })
+
+  it('setLoginItemChecked keeps a settings save that completed while the task command was running', async () => {
+    const { settingsStore } = await import('./settings')
+    execElevatedMock.mockImplementation(async (command: string) => {
+      if (command.includes('/Create')) settingsStore.save({ stealthMode: true })
+      return { stdout: 'RECOVERY_TASK_VERIFIED', stderr: '' }
+    })
+    const saved = await settingsStore.setLoginItemChecked(true)
+    expect(saved.stealthMode).toBe(true)
+    expect(settingsStore.get().stealthMode).toBe(true)
+    expect(settingsStore.get().autoStart).toBe(true)
+  })
+
+  it('setLoginItemChecked restores the previous task state when saving fails afterwards, and reports an unconfirmed restore', async () => {
+    const { settingsStore } = await import('./settings')
+    // Make persisting fail only for the checked change: the store write throws once.
+    const realSet = (storeState.data as any)
+    let failNextWrite = true
+    const handler = { set(target: any, key: string, value: any) { if (failNextWrite && key === 'settings') { failNextWrite = false; throw new Error('Disk full') } target[key] = value; return true } }
+    storeState.data = new Proxy(realSet, handler)
+    await expect(settingsStore.setLoginItemChecked(true)).rejects.toThrow('Disk full')
+    const commands = execElevatedMock.mock.calls.map(([command]) => String(command))
+    expect(commands.some((command) => command.includes('/Create'))).toBe(true)
+    expect(commands.some((command) => command.includes('/Delete'))).toBe(true)
+  })
+
   it('the plain setLoginItem stays fire-and-forget and never rejects on a failed command', async () => {
     const { settingsStore } = await import('./settings')
     execElevatedMock.mockRejectedValue(new Error('schtasks refused'))

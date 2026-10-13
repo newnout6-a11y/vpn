@@ -364,6 +364,39 @@ export function buildBootRecoveryTaskCommand(recoverScript: string): string {
   return `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${Buffer.from(script, 'utf16le').toString('base64')}`
 }
 
+const LOGIN_TASK_NAME = 'VPN Tunnel Enforcer'
+
+/** Whether the autostart scheduled task exists. Exit code 1 of schtasks means "not found"; anything else is unknown. */
+async function loginTaskExists(): Promise<boolean> {
+  try {
+    await execElevated(`schtasks /Query /TN "${LOGIN_TASK_NAME}"`, { timeout: 15000 })
+    return true
+  } catch (error) {
+    if ((error as { code?: unknown })?.code === 1) return false
+    throw error
+  }
+}
+
+/** Fresh readback after a create/delete. Only the packaged Windows build uses a scheduled task. */
+async function verifyLoginTask(expected: boolean): Promise<void> {
+  if (!(process.platform === 'win32' && app.isPackaged)) return
+  if ((await loginTaskExists()) !== expected) {
+    throw new Error(`Autostart task readback does not match the requested state (expected ${expected ? 'present' : 'absent'})`)
+  }
+}
+
+/** Puts the OS task back to the previous state after a failed step; an unconfirmed restore is reported as unknown. */
+async function restoreLoginTask(previous: boolean, cause: unknown): Promise<void> {
+  try {
+    await applyLoginItem(previous, { propagateTaskFailure: true })
+    await verifyLoginTask(previous)
+  } catch (restoreError) {
+    const reason = (value: unknown) => (value instanceof Error ? value.message : String(value)).slice(0, 300)
+    logEvent('error', 'settings', 'autostart state is unknown: restore after a failed change was not confirmed', { cause: reason(cause), restore: reason(restoreError) })
+    throw new Error(`Autostart state is unknown: ${reason(cause)}; restoring the previous state failed: ${reason(restoreError)}`)
+  }
+}
+
 /**
  * Applies the autostart state. By default the scheduled-task command is fire-and-forget (an unrelated settings save must
  * not wait for it or fail because of it). With `propagateTaskFailure` the returned promise settles with the command, so a
@@ -371,7 +404,7 @@ export function buildBootRecoveryTaskCommand(recoverScript: string): string {
  */
 function applyLoginItem(autoStart: boolean, options: { ensureBootRecovery?: boolean; propagateTaskFailure?: boolean } = {}): Promise<void> | void {
   if (process.platform === 'win32' && app.isPackaged) {
-    const taskName = 'VPN Tunnel Enforcer'
+    const taskName = LOGIN_TASK_NAME
     const exe = `\\"${process.execPath.replace(/"/g, '\\"')}\\"`
     app.setLoginItemSettings({ openAtLogin: false })
 
@@ -463,10 +496,19 @@ export const settingsStore = {
    * setting untouched when that fails, so the stored value never claims an autostart state the OS does not have.
    */
   async setLoginItemChecked(openAtLogin: boolean): Promise<AppSettings> {
-    const settings = normalizeSettings({ ...normalizeSettings(readSettingsWithMigration()), autoStart: openAtLogin })
-    await applyLoginItem(settings.autoStart, { ensureBootRecovery: true, propagateTaskFailure: true })
-    persistSettings(settings)
-    return settings
+    const previous = normalizeSettings(readSettingsWithMigration()).autoStart
+    await applyLoginItem(openAtLogin, { ensureBootRecovery: true, propagateTaskFailure: true })
+    try {
+      // The command finishing is not the task being in the requested state: read it back.
+      await verifyLoginTask(openAtLogin)
+      // Re-read after the awaits so a settings save that completed meanwhile is kept; only autoStart changes.
+      const settings = normalizeSettings({ ...normalizeSettings(readSettingsWithMigration()), autoStart: openAtLogin })
+      persistSettings(settings)
+      return settings
+    } catch (error) {
+      await restoreLoginTask(previous, error)
+      throw error
+    }
   },
 
   setLoginItem(openAtLogin: boolean): AppSettings {
