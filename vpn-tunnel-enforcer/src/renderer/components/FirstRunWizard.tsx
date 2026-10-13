@@ -85,7 +85,7 @@ export function FirstRunWizard({ onComplete, onSkip }: Props) {
   const [importedKey, setImportedKey] = useState<string | null>(null)
   // Bumped on every import attempt and every edit: an inspection result for an older text is ignored.
   const inspectSeq = useRef(0)
-  const [autoStart, setAutoStart] = useState(false)
+  const [autoStart, setAutoStart] = useState(settings.autoStart === true)
   const [finishing, setFinishing] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
 
@@ -202,9 +202,9 @@ export function FirstRunWizard({ onComplete, onSkip }: Props) {
       }
 
       // Optional steps the user explicitly chose: a failure is shown instead of silently dropped.
-      if (autoStart) {
+      if (autoStart !== previousAutoStart) {
         try {
-          await window.electronAPI.setLoginItem(true)
+          await window.electronAPI.setLoginItem(autoStart)
           autostartApplied = true
         } catch (err: any) {
           throw new Error(`${t('onboarding.autostartFailed')}: ${err?.message || err}`)

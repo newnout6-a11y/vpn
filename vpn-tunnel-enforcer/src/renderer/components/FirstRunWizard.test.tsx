@@ -220,6 +220,21 @@ describe('<FirstRunWizard /> save error handling', () => {
     expect(api.setLoginItem).toHaveBeenNthCalledWith(2, false)
   })
 
+  it('shows the current autostart state and applies a change to it, not just enabling', async () => {
+    const api = window.electronAPI as any
+    api.setLoginItem = vi.fn().mockResolvedValue({})
+    useAppStore.setState({ settings: { ...useAppStore.getState().settings, autoStart: true } })
+    render(<FirstRunWizard onComplete={vi.fn()} onSkip={vi.fn()} />)
+    next(6)
+    expect(screen.getByRole('checkbox')).toBeChecked()
+    fireEvent.click(screen.getByRole('checkbox'))
+    next(1)
+    fireEvent.click(await screen.findByText('onboarding.finish'))
+    await waitFor(() => expect(api.saveSettings).toHaveBeenCalled())
+    expect(api.setLoginItem).toHaveBeenCalledWith(false)
+    useAppStore.setState({ settings: { ...useAppStore.getState().settings, autoStart: false } })
+  })
+
   it('skipping both optional steps changes nothing', async () => {
     const api = window.electronAPI as any
     api.setLoginItem = vi.fn()
