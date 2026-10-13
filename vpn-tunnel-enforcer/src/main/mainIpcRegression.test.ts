@@ -28,7 +28,8 @@ describe('main IPC regressions', () => {
     const handler = source.slice(handlerStart, handlerEnd).split('\n').filter((line) => !line.trim().startsWith('//')).join('\n')
 
     expect(handlerStart).toBeGreaterThanOrEqual(0)
-    expect(handler).toContain('settingsStore.save(')
+    expect(handler).toContain('cacheInspectionResult(')
+    expect(handler).not.toContain('settingsStore.save({')
     // No form of the key may be written here: literal, shorthand, computed key, or a spread of existing settings.
     expect(handler).not.toMatch(/directVpnInput/)
     expect(handler).not.toMatch(/\.\.\.\s*(?:settings|input|resolved)\b/)

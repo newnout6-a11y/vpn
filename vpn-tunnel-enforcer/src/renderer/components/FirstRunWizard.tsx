@@ -204,8 +204,10 @@ export function FirstRunWizard({ onComplete, onSkip }: Props) {
       // Optional steps the user explicitly chose: a failure is shown instead of silently dropped.
       if (autoStart !== previousAutoStart) {
         try {
-          await window.electronAPI.setLoginItem(autoStart)
+          // Set before the call: a failure after the setting was persisted or the OS state changed is an unknown
+          // outcome, and restoring the baseline value is safe in every case.
           autostartApplied = true
+          await window.electronAPI.setLoginItem(autoStart)
         } catch (err: any) {
           throw new Error(`${t('onboarding.autostartFailed')}: ${err?.message || err}`)
         }

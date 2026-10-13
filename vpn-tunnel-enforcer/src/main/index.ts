@@ -1,5 +1,6 @@
 import './snapshotBootstrap'
 import { startElevatedPsHelper, stopElevatedPsHelper, warmElevatedPsHelper } from './elevatedPsHelper'
+import { cacheInspectionResult } from './vpnInspectionCache'
 import { warmRecoveryPsWorker, stopRecoveryPsWorker } from './recoveryPsWorker'
 import { app, BrowserWindow, dialog, ipcMain, Tray, shell, session, Menu, powerMonitor, type IpcMainInvokeEvent } from 'electron'
 import { exec as execCb } from 'child_process'
@@ -2169,25 +2170,9 @@ app.whenReady().then(async () => {
     for (const profile of resolved.profiles) {
       protocols[profile.protocol] = (protocols[profile.protocol] || 0) + 1
     }
-    // Only overwrite the cached profile list when the new probe actually
-    // produced something — otherwise a typo or a not-yet-supported share
-    // link (e.g. Happ encrypted subscription) would silently wipe the
-    // user's previously-imported servers. The raw text is NOT written to
-    // directVpnInput here: inspecting a key is not accepting it, so a rejected
-    // key must not stay persisted. The caller saves directVpnInput itself once
-    // the user confirms (the first-run wizard does so on finish).
-    if (resolved.profiles.length > 0) {
-      settingsStore.save({
-        directVpnCachedInput: input.trim(),
-        directVpnCachedSource: resolved.source,
-        directVpnCachedAt: Date.now(),
-        directVpnCachedProfiles: resolved.profiles
-      })
-    } else {
-      settingsStore.save({
-        directVpnCachedAt: Date.now()
-      })
-    }
+    // Inspecting is not accepting: only the inspection cache is written (see vpnInspectionCache.ts); the caller
+    // saves directVpnInput itself once the user confirms (the first-run wizard does so on finish).
+    cacheInspectionResult((patch) => settingsStore.save(patch), input, resolved)
     return {
       count: resolved.profiles.length,
       protocols,
