@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useTranslation } from 'react-i18next'
 import {
@@ -83,6 +83,8 @@ export function FirstRunWizard({ onComplete, onSkip }: Props) {
   const [keyText, setKeyText] = useState('')
   const [keyState, setKeyState] = useState<{ status: 'idle' | 'checking' | 'valid' | 'invalid'; count?: number; message?: string }>({ status: 'idle' })
   const [importedKey, setImportedKey] = useState<string | null>(null)
+  // Bumped on every import attempt and every edit: an inspection result for an older text is ignored.
+  const inspectSeq = useRef(0)
   const [autoStart, setAutoStart] = useState(false)
   const [finishing, setFinishing] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
@@ -136,9 +138,11 @@ export function FirstRunWizard({ onComplete, onSkip }: Props) {
   async function handleImportKey() {
     const text = keyText.trim()
     if (!text) return
+    const seq = ++inspectSeq.current
     setKeyState({ status: 'checking' })
     try {
       const inspected = await window.electronAPI.inspectVpnInput(text)
+      if (seq !== inspectSeq.current) return
       if (inspected && inspected.count > 0) {
         setImportedKey(text)
         setKeyState({ status: 'valid', count: inspected.count })
@@ -147,6 +151,7 @@ export function FirstRunWizard({ onComplete, onSkip }: Props) {
         setKeyState({ status: 'invalid', message: t('onboarding.keyInvalid') })
       }
     } catch (err: any) {
+      if (seq !== inspectSeq.current) return
       setImportedKey(null)
       setKeyState({ status: 'invalid', message: err?.message || t('onboarding.keyInvalid') })
     }
@@ -154,7 +159,8 @@ export function FirstRunWizard({ onComplete, onSkip }: Props) {
 
   function handleKeyTextChange(value: string) {
     setKeyText(value)
-    // An edited text is no longer the validated one.
+    // An edited text is no longer the validated one, and a pending inspection of the old text is void.
+    inspectSeq.current += 1
     setImportedKey(null)
     setKeyState({ status: 'idle' })
   }

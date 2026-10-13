@@ -20,6 +20,17 @@ describe('main IPC regressions', () => {
     expect(handler.indexOf('await stopTrafficForensicsSession')).toBeLessThan(handler.indexOf('targets.map'))
     expect(handler.indexOf('capture.cleanupPending')).toBeLessThan(handler.indexOf('targets.map'))
   })
+  it('inspect-vpn-input never persists the raw input as directVpnInput (inspecting is not accepting)', () => {
+    const source = mainIndexSource()
+    const handlerStart = source.indexOf("handleLogged('inspect-vpn-input'")
+    const handlerEnd = source.indexOf("handleLogged('", handlerStart + 10)
+    const handler = source.slice(handlerStart, handlerEnd)
+
+    expect(handlerStart).toBeGreaterThanOrEqual(0)
+    expect(handler).toContain('settingsStore.save(')
+    expect(handler).not.toMatch(/directVpnInput\s*:/)
+  })
+
   it('bounds inspect-vpn-input before resolving or persisting input', () => {
     const source = mainIndexSource()
     const handlerStart = source.indexOf("handleLogged('inspect-vpn-input'")

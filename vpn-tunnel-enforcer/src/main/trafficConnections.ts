@@ -289,12 +289,19 @@ function flush(force: boolean): void {
   }
 }
 
-/** Counts new connections against the user's domain rules (F-011); null when there are no rules to count. */
-function hitRecorder(): ((host: string) => void) | undefined {
+let hitRecorderFailureLogged = false
+
+/** Counts new connections against the user's domain rules (F-011); undefined when there are no rules to count. */
+async function hitRecorder(): Promise<((host: string) => void) | undefined> {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    return (require('./domainRouting') as typeof import('./domainRouting')).createHitRecorder() ?? undefined
-  } catch {
+    // Dynamic import breaks the domainRouting <-> traffic sampler cycle.
+    return (await import('./domainRouting')).createHitRecorder() ?? undefined
+  } catch (err) {
+    // Hit counts are best-effort and must never break the sampler, but a permanent failure should leave a trace.
+    if (!hitRecorderFailureLogged) {
+      hitRecorderFailureLogged = true
+      logEvent('warn', 'traffic-history', 'domain rule hit counting is unavailable', { error: (err as Error)?.message })
+    }
     return undefined
   }
 }
@@ -330,7 +337,7 @@ async function pollOnce(): Promise<void> {
       seen,
       getInfraHosts(),
       Date.now(),
-      hitRecorder()
+      await hitRecorder()
     )
     if (changed) flush(false)
   } catch (err) {

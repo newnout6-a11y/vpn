@@ -172,6 +172,25 @@ describe('<FirstRunWizard /> save error handling', () => {
     expect(api.saveSettings.mock.calls[0][0]).not.toHaveProperty('directVpnInput')
   })
 
+  it('ignores an inspection result that arrives after the text was edited', async () => {
+    const api = window.electronAPI as any
+    let resolveInspect: (value: unknown) => void = () => {}
+    api.inspectVpnInput = vi.fn().mockReturnValue(new Promise((resolve) => { resolveInspect = resolve }))
+    render(<FirstRunWizard onComplete={vi.fn()} onSkip={vi.fn()} />)
+    next(5)
+    const box = screen.getByRole('textbox')
+    fireEvent.change(box, { target: { value: 'vless://old' } })
+    fireEvent.click(screen.getByText('onboarding.importKeyButton'))
+    fireEvent.change(box, { target: { value: 'vless://new' } })
+    resolveInspect({ count: 1, protocols: {}, profiles: [], fetched: false, source: 'text' })
+    await Promise.resolve(); await Promise.resolve()
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    next(2)
+    fireEvent.click(await screen.findByText('onboarding.finish'))
+    await waitFor(() => expect(api.saveSettings).toHaveBeenCalled())
+    expect(api.saveSettings.mock.calls[0][0]).not.toHaveProperty('directVpnInput')
+  })
+
   it('keeps onboarding incomplete when the chosen autostart cannot be enabled', async () => {
     const api = window.electronAPI as any
     api.setLoginItem = vi.fn().mockRejectedValue(new Error('schtasks refused'))

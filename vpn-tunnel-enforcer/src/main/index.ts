@@ -2172,11 +2172,12 @@ app.whenReady().then(async () => {
     // Only overwrite the cached profile list when the new probe actually
     // produced something — otherwise a typo or a not-yet-supported share
     // link (e.g. Happ encrypted subscription) would silently wipe the
-    // user's previously-imported servers. We always update the input
-    // text and last-checked timestamp so the UI shows what was inspected.
+    // user's previously-imported servers. The raw text is NOT written to
+    // directVpnInput here: inspecting a key is not accepting it, so a rejected
+    // key must not stay persisted. The caller saves directVpnInput itself once
+    // the user confirms (the first-run wizard does so on finish).
     if (resolved.profiles.length > 0) {
       settingsStore.save({
-        directVpnInput: input,
         directVpnCachedInput: input.trim(),
         directVpnCachedSource: resolved.source,
         directVpnCachedAt: Date.now(),
@@ -2184,7 +2185,6 @@ app.whenReady().then(async () => {
       })
     } else {
       settingsStore.save({
-        directVpnInput: input,
         directVpnCachedAt: Date.now()
       })
     }
