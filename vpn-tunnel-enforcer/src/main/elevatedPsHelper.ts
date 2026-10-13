@@ -1,6 +1,7 @@
 import { spawn, execFile as execFileCb, type ChildProcess } from 'child_process'
 import { isProcessElevated } from './admin'
 import { logEvent } from './appLogger'
+import { SECURITY_MODULE_IMPORT_LINE } from './runtimeAclInspection'
 
 interface PendingCommand {
   resolve: (result: { stdout: string; stderr: string; exitCode: number }) => void
@@ -30,7 +31,10 @@ const MAX_RESTARTS = 3
 const MAX_SCRIPT_CHARS = 64 * 1024
 const MAX_PENDING_COMMANDS = 8
 
-export type ElevatedPsPolicy = 'firewall-killswitch' | 'physical-adapter-lockdown' | 'wfp-ipv6'
+export type ElevatedPsPolicy = 'firewall-killswitch' | 'physical-adapter-lockdown' | 'wfp-ipv6' | 'runtime-acl'
+
+/** The only directories the runtime-acl policy may create: the per-instance application components under VPNTE\runtime. */
+const RUNTIME_ACL_DIR = /^[A-Za-z]:\\[^\\\r\n]+\\VPNTE\\runtime\\[a-f0-9]{32}\\(?:tun-runtime|external-proxy-runtime|traffic-forensics)$/i
 
 const BLOCKED_SCRIPT_TOKENS = [
   /\bInvoke-Expression\b/i,
@@ -60,6 +64,7 @@ const BLOCKED_SCRIPT_TOKENS = [
 
 const POLICY_REQUIRED_TOKENS: Record<ElevatedPsPolicy, RegExp[]> = {
   'wfp-ipv6': [/\bVPNTE\.IPv6\.NativeEngine\b/, /\bWFP_APPS:/],
+  'runtime-acl': [/\bGet-RuntimeAncestors\b/, /\bSetAccessRuleProtection\b/],
   'firewall-killswitch': [
     /\bGet-VpnteFirewallRuleNames\b/i,
     /\bNew-VpnteFirewallRule\b/i,
@@ -84,6 +89,22 @@ const POLICY_REQUIRED_TOKENS: Record<ElevatedPsPolicy, RegExp[]> = {
 }
 
 const POLICY_FORBIDDEN_TOKENS: Record<ElevatedPsPolicy, RegExp[]> = {
+  // Creating a protected directory needs none of the network, firewall, registry or file-write commands.
+  'runtime-acl': [
+    /\b(?:Get|Set|New|Remove|Enable|Disable)-NetFirewall\w*\b/i,
+    /\b(?:Get|Set|Enable|Disable|Remove|New)-Net(?:Adapter|IP|Route|TCP|ConnectionProfile)\w*\b/i,
+    /\b(?:Set|Clear)-DnsClient\w*\b/i,
+    /\b(?:Get|New|Remove)-Vpnte\w*\b/i,
+    /\bHNetCfg\b/i,
+    /\bnetsh\b/i,
+    /\breg(?:\.exe)?\s+(?:add|delete|import)\b/i,
+    /\broute\s+(?:add|change|delete)\b/i,
+    /\bicacls\b/i,
+    /\bSet-Acl\b/i,
+    /\b(?:Set|Add|Out)-(?:Content|File)\b/i,
+    /\b(?:New|Copy|Move)-Item\b/i,
+    /-Recurse\b/i
+  ],
   'wfp-ipv6': [
     /\b(?:Set|New|Remove)-NetFirewall\w*\b/i,
     /\b(?:Set|Disable|Enable|Remove|New)-Net(?:Adapter|IP|Route|TCP)\w*\b/i,
@@ -402,7 +423,23 @@ export async function execElevatedPs(
   })
 }
 
-function validateScriptPolicy(script: string, policy: ElevatedPsPolicy): void {
+export function validateScriptPolicy(script: string, policy: ElevatedPsPolicy): void {
+  if (policy === 'runtime-acl') {
+    // The script creates exactly one directory: its literal must sit inside the VPNTE runtime boundary.
+    const dir = /^\$dir = '([^'\r\n]+)'/m.exec(script)?.[1]
+    if (!dir || !RUNTIME_ACL_DIR.test(dir)) {
+      throw new ElevatedPsHelperError(
+        'elevated-helper-script-rejected',
+        'PS helper script rejected by runtime-acl policy: directory outside the runtime boundary'
+      )
+    }
+    // Exempt only the exact built-in module pin from the blocked-word scan (the module name contains "PowerShell");
+    // any other mention of the word, and every other line, is scanned as usual.
+    if (!script.includes(SECURITY_MODULE_IMPORT_LINE)) {
+      throw new ElevatedPsHelperError('elevated-helper-script-rejected', 'PS helper script rejected by runtime-acl policy: missing module pin')
+    }
+    script = script.replace(SECURITY_MODULE_IMPORT_LINE, '')
+  }
   for (const token of BLOCKED_SCRIPT_TOKENS) {
     if (token.test(script)) {
       throw new ElevatedPsHelperError(
