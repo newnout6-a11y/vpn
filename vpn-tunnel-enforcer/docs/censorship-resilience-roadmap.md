@@ -37,7 +37,7 @@ Strong points already present:
 Current architectural limits:
 
 - transport import is still narrow: `ws`, `grpc`, `httpupgrade`, `http/h2`
-- `wireguard://` URI импортируется/экспортируется, но runtime sing-box 1.13 его не принимает (legacy outbound, F-047); `amneziawg` — нет ни импорта, ни runtime
+- `wireguard://` URI импортируется/экспортируется, на момент аудита runtime sing-box 1.13 его не принимал (legacy outbound, F-047); с 2026-10-13 профиль собирается как `endpoint` (PR #36), живой handshake не проверялся; `amneziawg` — нет ни импорта, ни runtime
 - no full remote rule-provider channel management beyond the current managed Smart-RU cache
 - no proxy chaining / bootstrap chaining model similar to `dialer-proxy`
 - no ECH-first UX or validation surface

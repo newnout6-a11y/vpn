@@ -6,7 +6,7 @@
 [![TailwindCSS](https://img.shields.io/badge/TailwindCSS-3.4-38B2AC?logo=tailwindcss&logoColor=white)](https://tailwindcss.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Windows-клиент (10/11 x64, версия 1.1.22) для изоляции сетевого трафика и обхода блокировок: системный TUN через Wintun + sing-box, fail-closed WFP kill-switch, перехват DNS, Smart RU маршрутизация, форензика трафика на Rust ETW-сайдкаре, планировщик и ротация серверов.
+Windows-клиент (10/11 x64, версия 1.1.24) для изоляции сетевого трафика и обхода блокировок: системный TUN через Wintun + sing-box, fail-closed WFP kill-switch, перехват DNS, Smart RU маршрутизация, форензика трафика на Rust ETW-сайдкаре, планировщик и ротация серверов.
 
 > **Честная оговорка:** в `docs/` и `docs-factory8090/` лежит ТЗ — это план развития, а не описание текущего состояния. Раздел [«Что пока не реализовано»](#что-пока-не-реализовано-план) ниже перечисляет фичи из ТЗ/старого README, которых в коде нет.
 
@@ -26,7 +26,7 @@ Windows-клиент (10/11 x64, версия 1.1.22) для изоляции с
 
 ## Протоколы
 
-Реально поддерживаются парсером `vpnProfiles.ts` (подписки, ключи, экспорт URI): **VLESS** (XTLS-Reality через xray; Vision/gRPC/WebSocket через sing-box), **WireGuard**, **Hysteria2**, **TUIC**, **Shadowsocks** (в т.ч. 2022 AEAD, SIP002), **VMess** (AEAD, `alterId: 0`), **Trojan**, **Naive**, **AnyTLS**, **ShadowTLS**. uTLS-отпечаток `chrome`, `record_fragment` в stealth для non-Reality.
+Реально поддерживаются парсером `vpnProfiles.ts` (подписки, ключи, экспорт URI): **VLESS** (XTLS-Reality через xray; Vision/gRPC/WebSocket через sing-box), **WireGuard** (собирается как `endpoint` sing-box 1.13, `singBoxEndpoint.ts`; профиль хранится в прежнем виде, конфигурация проверяется настоящим `sing-box check` в тестах и CI; живой handshake не проверялся), **Hysteria2**, **TUIC**, **Shadowsocks** (в т.ч. 2022 AEAD, SIP002), **VMess** (AEAD, `alterId: 0`), **Trojan**, **Naive**, **AnyTLS**, **ShadowTLS**. uTLS-отпечаток `chrome`, `record_fragment` в stealth для non-Reality.
 
 ## DNS
 
@@ -47,7 +47,7 @@ Windows-клиент (10/11 x64, версия 1.1.22) для изоляции с
 
 Порядок правил sing-box (упрощённо): `mixed-direct-in` (127.0.0.1) → direct (диагностика) → `live-check-in` → proxy-out (health-пробы) → процессы прокси-ядер (Happ.exe, xray.exe…) → direct (анти-петля) → UDP/443 → reject (TCP-only outbound) → `hijack-dns` → `ip_is_private` → direct (**строго после** hijack, чтобы DNS на шлюз перехватывался) → весь UDP → reject (directVpn + TCP-only) → STUN 19302/3478 → proxy-out (анти-WebRTC) → пользовательские доменные правила → Smart RU (IP-чекеры/Google/медиа → proxy-out; gov-ru/geosite/geoip-ru → direct-out по локальным `geoip-ru.srs`, `geosite-category-gov-ru.srs`) → final → proxy-out.
 
-Split tunneling — по **имени процесса** (direct/vpn/none), hot-reload через рестарт без снятия защиты. Честная оговорка: ТЗ требует абсолютный путь процесса (имя подвержено подмене) — пока расхождение.
+Split tunneling (direct/vpn/none), hot-reload через рестарт без снятия защиты. Установленные приложения направляются в обход по **полному пути** (`process_path_regex`, без учёта регистра, с якорями; для пути учитываются и сохранённая запись, и каноническая с раскрытыми именами 8.3), поэтому копия с тем же именем из другого каталога под правило не попадает; голые имена процессов (`curl.exe`) по-прежнему идут по имени. Если путь не абсолютный или файл исчез (переименован, перемещён, удалён), правила нет и трафик остаётся в туннеле (запись в журнал). Не проверено на живой машине: совпадение пути, который sing-box видит у процесса, с нормализованным (AT-06-008).
 
 ## Форензика трафика
 
@@ -60,7 +60,7 @@ Split tunneling — по **имени процесса** (direct/vpn/none), hot-
 
 ## Диагностика и UI
 
-10 страниц: Dashboard, Servers, SpeedTest, Availability, TrafficHistory, Schedule, Settings, Logs, Maintenance, SplitTunnel. React 18 + Zustand (IPC-first стор, без кешей), i18n ru/en (~615 ключей).
+10 страниц: Dashboard, Servers, SpeedTest, Availability, TrafficHistory, Schedule, Settings, Logs, Maintenance, SplitTunnel. React 18 + Zustand (IPC-first стор, без кешей), i18n ru/en (~590 ключей).
 
 - **DiagnosticsCard**: активный leak self-test (`curl.exe --interface <IPv4 физ. адаптера>` к api.ipify.org — leak, если физ. адаптер вышел в интернет или его IP ≠ TUN IP), routing self-test (VPN-путь vs direct-путь через `mixed-direct-in`), статус ETW-сайдкара (движок, категории, топ-домены, heartbeat), экспорт диагностики в ZIP, рестарт форензики.
 - `runSystemDiagnostics()`: runtime, TUN, DNS, адаптеры, маршруты, процессы/листенеры, endpoints, службы Windows, логи, forensics status.
@@ -68,7 +68,7 @@ Split tunneling — по **имени процесса** (direct/vpn/none), hot-
 
 ## Автоматизация
 
-- **Scheduler**: окна `[start, end)`, overnight-привязка к предыдущему дню, горизонт 7 дней.
+- **Scheduler**: окна `[start, end)`, overnight-привязка к предыдущему дню (утренняя остановка ночного окна находится и после полуночи), горизонт 7 дней. Полная матрица DST/пересечений расписаний не принята.
 - **AutoPilot**: трогает только собственный VPNTE TUN, требует рабочий прокси перед стартом TUN, при failure восстанавливает baseline.
 - **Rotation**: интервал 5–1440 мин, sequential/random, reconnect через `restartProtected`. Честная оговорка: commit профиля происходит **до** успешного reconnect — атомарного health-before-commit пока нет.
 - **keyHealthChecker**: изолированный sing-box/xray во временной директории, HTTPS через профиль к Cloudflare/Yandex/Gstatic, timeout 8 с, concurrency 5.
@@ -93,11 +93,21 @@ Split tunneling — по **имени процесса** (direct/vpn/none), hot-
 - **Транзакционный Firewall и Boot Recovery:** манифесты хранятся в `%ProgramData%\VPNTE\manifests\` с защитой ACL (SYSTEM/Admins only) и защитой от symlinks; регистрация задачи `BootRecoveryTask` в packaged-сборках проверена (UTF-16LE EncodedCommand); независимый покомпонентный откат (DNS, IPv6, Firewall, WinINet); fail-closed блокировка при strictMode; защита от удаления физических сетевых адаптеров.
 - **IPv6 WFP (WP-3, 07.10.2026):** собственная persistent/boot-time политика с узкими разрешениями App ID + точный VPN endpoint + LUID; NAT64-синтез по доказанному DNS64-префиксу. Политика записывается в доверенный журнал до применения, заменяется WFP-транзакцией с read-back и независимо очищается при rollback. Повреждённые журналы карантинируются через привилегированный recovery worker; неизвестная версия прекращает восстановление без сетевых изменений. Компиляция C#/native ABI, fault injection и PowerShell control flow проверяются автоматически. Установка нативных фильтров, packet oracle, CLAT и SYSTEM reboot на OS-матрице **не проверены**; WP-3 остаётся частичным.
 - Скрытие приватных данных устройства (HWID, заголовки) из командной строки `curl` (передаются через stdin).
+- **Elevated-helper и создание runtime-каталога (WP-1, 13.10.2026):** защищённый runtime-каталог создаётся через постоянный helper под политикой `runtime-acl` (запретный список команд, граница `%ProgramData%\VPNTE\runtime\<32 hex>\…`, единственный литерал `$dir`), без пути через голый `execElevated`; если helper недоступен, создание отклоняется (fail-closed). Сквозной тест выполняется на раннере CI с правами администратора.
+- **Нативные чтения сети в отдельном процессе:** чтения через koffi (iphlpapi, реестр, WinINet) идут в `utilityProcess`; фатальная ошибка koffi убивает только хост, основное приложение переживает и перезапускает его, любой сбой хоста — откат на PowerShell (fail-closed). `koffi.view` в основном процессе запрещён.
 
 **Открыто (плановые задачи):**
 - Подпись кода (ожидает решения владельца по сертификату, раздел 10.8 ТЗ-06);
 
 **Миграция WP-11:** зависимости переведены на Electron 44.4.3, electron-vite 5.0.0 и electron-builder 26.15.3. `npm run test:electron` проверяет настоящий runtime с production-preload, изоляцией sandbox/contextBridge, доверенной границей IPC и native safeStorage в отдельном userData. Полная VM-матрица установки/обновления с активным туннелем проверяется отдельно.
+
+## Что реализовано не до конца
+
+- **Счётчики попаданий доменных правил** ведутся только за сессию по опросу подключений (смысл: домен подходит под шаблон, а не «правило провело подключение»); постоянного хранилища нет, счётчики Smart RU не добавлялись.
+- **Мастер первого запуска** имеет шаги импорта ключа и автозапуска; E2E на чистом профиле Windows (AT-09-014) не проводился.
+- **Вердикт доступности** при прямом 401/403 без замера через VPN теперь `unknown`; отдельного статуса «требует авторизации» нет.
+- **Тест скорости** при несовпадении внешнего IP показывает предупреждение у последнего результата; в списке истории флаг не отображается.
+- **Живая приёмка** пакетов WP не проведена: см. разделы статуса в [ТЗ-06](docs-factory8090/06-ТЗ-исправление-и-развитие.md) и таблицы статуса реализации в томах ТЗ.
 
 ## Что пока не реализовано (план)
 
@@ -113,14 +123,14 @@ vpn/
 ├── docs-factory8090/                     # База знаний: аудит (210 находок F-001…F-210), 44 фичи (88 документов), компоненты, открытые вопросы, план WP-0..WP-12
 ├── vpn-tunnel-enforcer/                  # Исходный код приложения (Electron + React)
 │   ├── src/
-│   │   ├── main/                         # Главный процесс: сеть, IPC, безопасность, форензика (~270 файлов)
+│   │   ├── main/                         # Главный процесс: сеть, IPC, безопасность, форензика (~100 модулей, ~330 файлов с тестами)
 │   │   ├── preload/                      # contextBridge-мост, валидация аргументов
 │   │   ├── renderer/                     # UI: 10 страниц, компоненты, i18n ru/en
 │   │   └── shared/                       # Общие типы (75 типов IPC), схемы
 │   ├── native/vpnte-etw-sidecar/          # Rust ETW-сайдкар (ferrisetw)
 │   ├── resources/                        # .srs-правила, .ps1/.cmd скрипты, иконки
 │   ├── scripts/                          # build-sidecar.mjs и др.
-│   └── package.json                      # Версия приложения 1.1.22
+│   └── package.json                      # Версия приложения 1.1.24
 ├── progress.md                           # Журнал выполненных задач
 └── README.md                             # Этот документ
 ```
@@ -143,7 +153,7 @@ npm run dev        # из корня репозитория тоже работ�
 
 ## Тесты
 
-Последний локальный Windows-прогон (05.10.2026): **211 файлов passed / 2 skipped; 2613 тестов passed / 10 skipped / 0 failed**, 151.22 с с двумя workers. Native Electron smoke и локальные подмножества WP-1 выполнены ранее и в этом прогоне не повторялись. Пропущенные/VM-проверки не считаются PASS; актуальные итоги — вывод `npm test`, [журнал прогресса](progress.md) и [отчёт WP-1](vpn-tunnel-enforcer/docs/wp1-security-acceptance-2026-10-04.md).
+Последний полный прогон (13.10.2026, CI на Windows-раннере GitHub, PR #39): **233 файла passed / 1 skipped; 3093 теста passed / 4 skipped / 0 failed**; те же проверки идут на каждый PR в `main` (см. «Непрерывная проверка» ниже). Native Electron smoke и локальные подмножества WP-1 в этом прогоне не повторялись. Пропущенные/VM-проверки не считаются PASS; актуальные итоги — вывод `npm test`, [журнал прогресса](progress.md) и [отчёт WP-1](vpn-tunnel-enforcer/docs/wp1-security-acceptance-2026-10-04.md).
 
 ```bash
 npm test                                            # полный набор
@@ -160,6 +170,15 @@ npm --prefix vpn-tunnel-enforcer run test:wp1:migration:local # DPAPI/store на
 
 Полная cross-version проверка `test:wp1:migration` требует пути к настоящему Electron 42 в `VPNTE_ELECTRON42_EXE`; без него выводит `NOT-CHECKED` и завершается с кодом 77.
 
+## Непрерывная проверка (CI)
+
+Файл `.github/workflows/ci.yml`, Windows-раннер GitHub, запускается на каждый PR в `main` и на каждый пуш в него. Две задачи:
+
+- **«Приложение (Windows)»**: Node 24.21.0, `npm ci`, загрузка движков Xray и sing-box с проверкой SHA-256, `npm run typecheck`, `npm test`, скрипт трассировки приёмочных тестов (`check-coverage.py`), нативные чтения под настоящим Electron (`test:electron-probe`). Тесты с повышенными правами (например сквозной тест создания runtime-каталога через helper) выполняются здесь, потому что раннер запущен администратором; на обычном ПК они пропускаются.
+- **«ETW-сайдкар (Rust)»**: сборка и проверка Rust-части.
+
+`main` защищён: слияние только через PR с зелёными обязательными проверками. Версии действий закреплены по хешам коммитов.
+
 ## Сборка
 
 ```bash
@@ -167,9 +186,9 @@ npm run dist:win       # NSIS-инсталлятор
 npm run dist:portable  # портативная версия
 ```
 
-Артефакты — в `vpn-tunnel-enforcer/dist/`, например `VPN-Tunnel-Enforcer-Setup-1.1.22.exe`.
+Артефакты — в `vpn-tunnel-enforcer/dist/`, например `VPN-Tunnel-Enforcer-Setup-1.1.24.exe`.
 
-> **Важно для сборки:** в `resources/` репозитория **нет** `sing-box.exe`, `xray.exe`, `wintun.dll`, `libcronet.dll`, `vpnte-etw-sidecar.exe` — их нужно положить вручную до `dist`. `npm run build:sidecar` требует Rust/cargo на Windows; без него сборка молча пропускается и в установщик попадёт только PowerShell-фолбэк сайдкара.
+> **Важно для сборки:** в `resources/` репозитория **нет** `sing-box.exe`, `xray.exe`, `wintun.dll`, `libcronet.dll`, `vpnte-etw-sidecar.exe` — их нужно положить вручную до `dist` (CI скачивает Xray и sing-box с проверкой SHA-256 по закреплённым версиям; в `package.json` версии движков не фиксируются). `npm run build:sidecar` требует Rust/cargo на Windows; без него сборка молча пропускается и в установщик попадёт только PowerShell-фолбэк сайдкара.
 
 ## Лицензия
 

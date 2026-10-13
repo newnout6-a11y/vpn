@@ -5,7 +5,7 @@ Windows Electron app that forces all traffic through a controlled VPN path. Runs
 ## Capabilities
 
 ### VPN Modes
-- **Direct VPN**: imports `vless://`, `trojan://`, `ss://`, `vmess://`, `hysteria2://`, `naive://`, `anytls://`, `shadowtls://`, `tuic://`, sing-box outbound JSON, Clash YAML, Xray JSON, subscription URLs, and `happ://add/...` deep links
+- **Direct VPN**: imports `vless://`, `trojan://`, `ss://`, `vmess://`, `hysteria2://`, `naive://`, `anytls://`, `shadowtls://`, `tuic://`, `wireguard://` (built as a sing-box 1.13 `endpoint`), sing-box outbound JSON, Clash YAML, Xray JSON, subscription URLs, and `happ://add/...` deep links
 - **Hard mode (TUN)**: Wintun adapter via sing-box with `mixed` TCP stack (native Windows kernel + gVisor UDP), `strict_route` DNS hijack, `route_exclude_address` for private ranges, firewall kill-switch, physical adapter lockdown (IPv6 off + DNS pinning), and `DisableSmartNameResolution` registry hardening
 - **Soft mode (Autoconfig)**: configures Android Studio, Gradle, Git, and `HTTP_PROXY` / `HTTPS_PROXY` environment variables via `setx` (uses `socks5h://` to force DNS through proxy), with rollback support
 - **External proxy mode**: independent sing-box processes exposing mixed HTTP/SOCKS proxies on loopback ports starting at `127.0.0.1:17990`, controlled via HTTP API on port 17873 by default
@@ -28,6 +28,12 @@ Automatically detects local proxies from:
 - Per-profile client device identity (PC/Android/iOS/macOS) with uTLS fingerprint emulation
 - Geolocation via 5-source voting (geojs.io batch + ipwho.is + ipinfo.is + ipinfo.io + iplocation.net); ip-api.com intentionally excluded (plaintext HTTP)
 - Export keys to URI (all protocols) or bulk file
+
+### Per-Application Split Tunneling
+- Installed applications bypass the VPN by their **full path** (`process_path_regex`, case-insensitive, anchored): a copy of the same executable name in another folder is not matched. Both the stored spelling and the canonical long path (8.3 short names expanded) are covered.
+- Bare process names (`curl.exe`) are still matched by name.
+- A rule whose path is not absolute or whose file no longer exists is inactive (logged) and the traffic stays in the tunnel — it never falls back to name matching.
+- Not verified on a live machine: that the process path sing-box reports matches the normalised one (AT-06-008).
 
 ### Smart RU Split Routing
 - RU government/geosite rule-sets bundled as local `.srs` files (no remote download = no FATAL sing-box startup failure)
@@ -69,6 +75,8 @@ Automatically detects local proxies from:
 - **Global toast notifications**: visible on all pages via Zustand store
 - **Micro-interactions**: button hover scale, tap shrink, card hover lift
 - **Settings persistence**: the main Settings page saves via the «Сохранить» button; notification and kill-switch toggles apply immediately
+- **First-run wizard**: language, theme, VPN client detection, mode, kill-switch level, optional key import (validated before it is kept) and optional autostart (elevated scheduled task, read back and rolled back on failure)
+- **Domain rule hit counts**: connections seen in the sing-box connection poll whose host matches a rule pattern, shown per rule for the current session
 - **Hot-reload with notification**: domain routing and split tunneling changes show "Применяем изменения" before tunnel restart
 
 ## Prerequisites
@@ -109,7 +117,7 @@ Open the Electron window, not the plain Vite URL — the renderer expects the pr
 npm run dist:win
 ```
 
-Installer: `dist/VPN-Tunnel-Enforcer-Setup-<version>.exe` (current `1.1.22`, ~112 MB)
+Installer: `dist/VPN-Tunnel-Enforcer-Setup-<version>.exe` (current `1.1.24`, ~133 MB)
 
 Portable: `npm run dist:portable`
 
@@ -129,7 +137,7 @@ cd native/vpnte-etw-sidecar && cargo build --release
 npm test
 ```
 
-The test suite is run with `npm test -- --reporter=dot`; current totals are reported by Vitest. Windows-only networking operations are guarded and unit-tested where possible.
+The test suite is run with `npm test -- --reporter=dot`; current totals are reported by Vitest (the CI run on 2026-10-13: 3093 passed / 4 skipped). Windows-only networking operations are guarded and unit-tested where possible. Tests that need administrator rights (for example the end-to-end runtime-directory bootstrap through the elevated helper) skip themselves on an ordinary session and run on the CI runner. `sing-box check` tests use the bundled `resources/sing-box.exe` and run on Windows only. CI (`.github/workflows/ci.yml`) runs typecheck, tests, AT traceability and the native-read probe under real Electron on every PR to `main`.
 
 ## How Hard Mode Works
 
@@ -188,7 +196,7 @@ Each `/list` row includes `status` (`online`, `offline`, or `unknown`), `lastChe
 
 ## Tech Stack
 
-- **Electron 42** + React 18 + electron-vite 3
+- **Electron 44.4.3** + React 18 + electron-vite 5
 - TypeScript 5.4 (`^5.4.0` in package.json)
 - Zustand for shared renderer state
 - TailwindCSS 3 + class-variance-authority + framer-motion

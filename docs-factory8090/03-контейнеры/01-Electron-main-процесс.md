@@ -12,7 +12,7 @@
 
 ## Infrastructure
 
-* Windows desktop runtime на Electron 42.
+* Windows desktop runtime на Electron 44.4.3 (на момент исследования 2026-09 — Electron 42; миграция выполнена 2026-09-30). Нативные чтения сети (koffi) вынесены в `utilityProcess`.
 * Main bundle собирается `electron-vite` в `out/main`.
 * В packaged-режиме single-instance lock запрашивается только при `app.isPackaged`.
 * Приложение может требовать административные права через установщик и запускает сетевые операции с повышенными правами.

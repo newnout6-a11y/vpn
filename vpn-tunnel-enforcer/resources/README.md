@@ -9,3 +9,5 @@ Place the following binaries here before building:
 - **xray.exe** — Download from https://github.com/XTLS/Xray-core/releases (Windows 64-bit, v26.7.x or later). Used as secondary proxy engine for modern REALITY inbounds.
 
 These will be bundled into the installer via `extraResources` in electron-builder.
+
+CI downloads and checks (SHA-256) these pinned versions: **sing-box v1.13.13** and **Xray v26.7.28** (see `.github/workflows/ci.yml`). Tests that validate generated sing-box configurations run the real `sing-box.exe check` from this folder on Windows, so the version here should match.

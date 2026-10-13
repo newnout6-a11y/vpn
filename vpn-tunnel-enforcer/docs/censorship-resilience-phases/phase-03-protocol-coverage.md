@@ -85,6 +85,6 @@ parser уже уже, чем возможности sing-box.
 
 ## Осталось в фазе 3
 
-- WireGuard не включён в этот слой: в sing-box 1.13 старый WireGuard outbound требует отдельной endpoint/route интеграции, это нельзя безопасно добавить простым parser change.
+- WireGuard не был включён в этот слой: в sing-box 1.13 старый WireGuard outbound требует отдельной endpoint/route интеграции. Эта интеграция выполнена отдельно 2026-10-13 (PR #36, `singBoxEndpoint.ts`): профиль хранится в прежнем виде и при сборке конфигурации переводится в `endpoints`.
 - Более широкие предупреждения для partially-supported профилей за пределами уже добавленных Naive/ECH/Hysteria2 cases.
 - Больше тестов на реальные provider subscription samples.

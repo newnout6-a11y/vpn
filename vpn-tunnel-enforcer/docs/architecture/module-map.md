@@ -34,10 +34,12 @@ src/
 
 | Домен | Основные файлы | Граница ответственности |
 | --- | --- | --- |
-| Tunnel runtime | `tunController.ts`, `tunAdapter.ts`, `connectionPlanner.ts`, `managedChildProcess.ts` | Создание и остановка sing-box/TUN, процессные recovery-сценарии |
+| Tunnel runtime | `tunController.ts`, `tunAdapter.ts`, `connectionPlanner.ts`, `managedChildProcess.ts`, `singBoxEndpoint.ts` | Создание и остановка sing-box/TUN, процессные recovery-сценарии; `singBoxEndpoint.ts` переводит WireGuard-профиль в `endpoints` sing-box 1.13 |
+| Native reads | `native/nativeHost.ts`, `native/hostClient.ts`, `native/nativeOps.ts`, `native/ipHelperReads.ts`, `native/winInet.ts`, `native/physicalAdapterNative.ts` | Низкоуровневые чтения сети (koffi: iphlpapi, реестр, WinINet) в отдельном `utilityProcess`; фатальная ошибка koffi убивает только хост, любой сбой — откат на PowerShell; `koffi` в основном процессе запрещён |
+| Elevated helper | `elevatedPsHelper.ts`, `admin.ts`, `runtimeDirSecurity.ts`, `runtimeAclInspection.ts` | Постоянный elevated PowerShell под политиками команд (`firewall-killswitch`, `physical-adapter-lockdown`, `wfp-ipv6`, `runtime-acl`); создание защищённого runtime-каталога идёт только через него |
 | Network safety | `systemNetwork.ts`, `firewallKillSwitch.ts`, `physicalAdapterLockdown.ts`, `browserHardening.ts` | Windows baseline, kill-switch, DNS/IPv6 и rollback |
-| Profiles | `vpnProfiles.ts`, `serverPicker.ts`, `serverGroups.ts`, `serverProbe.ts` | Нормализация ключей, группы, выбор, health checks, миграции |
-| Routing | `smartRoute.ts`, `ruleSetManager.ts`, `domainRouting.ts`, `dnsProfiles.ts` | split routing, rule sets, DNS profiles и пользовательские правила |
+| Profiles | `vpnProfiles.ts`, `serverPicker.ts`, `serverGroups.ts`, `serverProbe.ts`, `vpnInspectionCache.ts` | Нормализация ключей, группы, выбор, health checks, миграции; `vpnInspectionCache.ts` — что проверка ключа вправе сохранить (только кэш, не `directVpnInput`) |
+| Routing | `smartRoute.ts`, `ruleSetManager.ts`, `domainRouting.ts`, `dnsProfiles.ts`, `splitTunneling.ts`, `splitTunnelPath.ts` | split routing, rule sets, DNS profiles и пользовательские правила; приложения в обход идут по полному пути (`splitTunnelPath.ts`), счётчики попаданий доменных правил — `createHitRecorder` в `domainRouting.ts` |
 | Observability | `appLogger.ts`, `systemDiagnostics.ts`, `leakDiagnostics.ts`, `trafficForensics.ts`, `systemSnapshot.ts` | Логи, диагностика, leak tests, packet forensics и экспорт |
 | Automation | `scheduler.ts`, `profileRotation.ts`, `autoPilot.ts`, `adaptiveBypass.ts` | Планировщик, ротация профилей и автоматический recovery/выбор |
 | UI support | `notifications.ts`, `themeManager.ts`, `i18n.ts`, `configManager.ts` | Уведомления, тема, локализация и импорт/экспорт настроек |
