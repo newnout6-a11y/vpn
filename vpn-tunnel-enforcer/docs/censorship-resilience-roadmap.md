@@ -1,6 +1,6 @@
 # Roadmap: censorship resilience and next protocol/features pass
 
-> **Статус (актуализировано 2026-09-28):** исследовательский документ. Фаза 1 выполнена (sing-box обновлён до 1.13.13 — см. `censorship-resilience-phases/phase-01-sing-box-upgrade.md`); остальные фазы — планы. Текущие статусы фаз — только в `censorship-resilience-phases/*.md`, при расхождении с этим файлом верить фазам. Находки по рассинхрону: F-174, F-175.
+> **Статус (актуализировано 2026-09-28):** исследовательский документ. Фаза 1 выполнена (sing-box обновлён до 1.13.13 ); остальные фазы — планы. Файлы отдельных фаз удалены 2026-10-13; итоговые статусы фаз 1–8 записаны в `docs/README.md`, при расхождении с этим файлом верить им. Находки по рассинхрону: F-174, F-175.
 
 ## Goal
 
@@ -14,8 +14,7 @@ This document is based on:
 - practical fit with the existing `tunController` / `vpnProfiles` / `serverGroups`
   / `externalProxy` / diagnostics model
 
-Подробные планы по фазам лежат в
-[`censorship-resilience-phases/`](./censorship-resilience-phases/README.md).
+Подробные планы по фазам (каталог `censorship-resilience-phases/`) удалены 2026-10-13 как завершённые или исторические; они сохранены в истории git, итоги — в `docs/README.md`.
 
 ## Current state in this repo
 
@@ -37,7 +36,7 @@ Strong points already present:
 Current architectural limits:
 
 - transport import is still narrow: `ws`, `grpc`, `httpupgrade`, `http/h2`
-- `wireguard://` URI импортируется/экспортируется, но runtime sing-box 1.13 его не принимает (legacy outbound, F-047); `amneziawg` — нет ни импорта, ни runtime
+- `wireguard://` URI импортируется/экспортируется, на момент аудита runtime sing-box 1.13 его не принимал (legacy outbound, F-047); с 2026-10-13 профиль собирается как `endpoint` (PR #36), живой handshake не проверялся; `amneziawg` — нет ни импорта, ни runtime
 - no full remote rule-provider channel management beyond the current managed Smart-RU cache
 - no proxy chaining / bootstrap chaining model similar to `dialer-proxy`
 - no ECH-first UX or validation surface

@@ -66,14 +66,16 @@
 | 3 | **WP-3** Firewall, baseline, recovery | Fail-closed, транзакционный откат, Boot Recovery, узкие CLAT-исключения без обхода kill-switch. | **Частично (сверка 07.10.2026), следующий фокус**: исходный код и локальные проверки есть; #22 сохраняет защиту до runtime exit proof. Все 12 AT нужно адресно сверить; packet oracle, SYSTEM reboot, NAT64/hot-plug/OS matrix не приняты. |
 | 4 | **WP-0** Контракты, FSM, наблюдаемость | Фундамент для WP-2 и WP-10: единый автомат состояний, `operationId`, `AbortController`. | До WP-2 и WP-10 |
 | 5 | **WP-2** Процессы, runtime, lifecycle туннеля | Зомби-процессы, гонки таймаутов, порядок запуска Xray (F-022, F-025, F-191, F-194). | После WP-0 |
-| 6 | **WP-10** Scheduler, rotation, AutoPilot, adaptive bypass | Health-Before-Commit ротации (F-124), баг ночных окон (F-193). | После WP-0 |
-| 7 | **WP-6**, **WP-4** Маршрутизация и импорт | Целостность rule-sets, `process_path` в split tunneling, парсеры протоколов. | Параллельно |
+| 6 | **WP-10** Scheduler, rotation, AutoPilot, adaptive bypass | Health-Before-Commit ротации (F-124), баг ночных окон (F-193; исправлен по коду 2026-10-13, PR #34). | После WP-0 |
+| 7 | **WP-6**, **WP-4** Маршрутизация и импорт | Целостность rule-sets, `process_path` в split tunneling (F-076; исправлен по коду 2026-10-13, PR #37), WireGuard endpoint (F-047; PR #36), парсеры протоколов. | Параллельно |
 | 8 | **WP-7**, **WP-8** Мониторинг и диагностика | Честные статусы проверок, OOM-защита форензики (F-197). | Параллельно |
 | 9 | **WP-5**, **WP-9** История проверок, Soft-режим, UI | Пользовательский слой, a11y, декомпозиция монолитных компонентов. | Параллельно |
 | 10 | **WP-11 (остаток)** | Installed upgrade/uninstall, release integrity и автообновление. NSIS controlled shutdown уже реализован в #21/#22. | До публичного релиза: собрать installer с последними stop/env fixes и выполнить AT-11/OS matrix; publication `checksums.txt`/`binaries-manifest.json` и update E2E не приняты. |
 | 11 | **WP-12** Planned features | AmneziaWG, Mihomo, Chromium Browser Boxes, ETW-процессный монитор. Каждый трек выпускается **отдельным релизом** и стартует только после закрытия WP-0…WP-11. | Последним |
 
 ### Следующая рекомендуемая итерация — WP-3 (сверка 07.10.2026)
+
+> **Примечание 2026-10-13.** В сессии 13.10.2026 по просьбе владельца выполнялись отдельные находки пакетов WP-4, WP-6, WP-7, WP-9, WP-10 и остаток WP-1 (см. `progress.md` и статусы в ТЗ-06), то есть вне порядка этой таблицы. Рекомендация ниже про WP-3 остаётся в силе.
 
 WP-3 уже реализовывался в PR #13 и lifecycle-работах; PR #21/#22 дополнительно усилили runtime/shutdown boundary. 07.10 исправлены ложный успех Stop при неполном rollback, preflight повреждённых/будущих recovery-схем и смена NIC внутри apply; добавлены отдельная IPv6 WFP-политика и независимый откат WFP/Firewall. Следующий шаг — Windows/L3 по [AT-03-001…012](./04-приёмочные-тесты/04-WP-3-firewall-baseline-recovery.md), включая фактическую установку фильтров и positive/negative CLAT. Код и автоматические регрессии не закрывают системную приёмку; пакет остаётся частичным.
 
@@ -85,10 +87,36 @@ WP-3 уже реализовывался в PR #13 и lifecycle-работах; 
 
 ---
 
+## Где читать по каждому WP
+
+Открыв пакет, берите материал отсюда. Для каждого WP три составные части: **требования** (разделы томов ТЗ), **план** (раздел WP в [ТЗ-06](../docs-factory8090/06-ТЗ-исправление-и-развитие.md): «Покрывает», «Работы», «Тесты», статус на дату) и **проверки** (файл набора тестов в [04-приёмочные-тесты/](./04-приёмочные-тесты/)). Сами дефекты — в [журнале аудита](../docs-factory8090/00-журнал-аудита.md) по номерам F. Фактическое состояние по разделам — таблица «Срез реализации» в конце каждого тома; формулировки критериев AC — `../docs-factory8090/02-фичи/*/requirements.md`.
+
+Тома: **том 1** — `01-ТЗ-СЕТЕВОЕ-ЯДРО-ПРОТОКОЛЫ-И-МАРШРУТИЗАЦИЯ.md`, **том 2** — `02-ТЗ-СИСТЕМНАЯ-БЕЗОПАСНОСТЬ-ЗАЩИТА-ОТ-УТЕЧЕК-И-ОС.md`, **том 3** — `03-ТЗ-ЖИЗНЕННЫЙ-ЦИКЛ-АВТОМАТИЗАЦИЯ-UI-И-ДИАГНОСТИКА.md`. Номера разделов относятся к соответствующему тому. Звёздочка (*) — в заголовке раздела нет метки WP, раздел отнесён по смыслу.
+
+| WP | Требования (том, разделы) | Файл приёмочных тестов (`04-приёмочные-тесты/`) | Находки (полный список — ТЗ-06) |
+|---|---|---|---|
+| **WP-0** Контракты, FSM, наблюдаемость | том 3: 1.1 (модель состояний), 1.2 (приоритеты операций) | `01-WP-0-контракты-и-наблюдаемость.md` | F-019, F-021, F-074, F-138, F-143 |
+| **WP-1** Секреты, IPC, доверенная граница | том 2: 4.1 (DPAPI/safeStorage), 4.2 (экспорт и буфер), 4.3 (маскирование), 5.1 (IPC) | `02-WP-1-секреты-ipc-доверенная-граница.md` | F-001, F-004…F-006, F-038, F-055, F-130, F-132, F-139…F-145, F-158, F-206 |
+| **WP-2** Процессы, runtime, lifecycle | том 1: 1.1–1.3 (ядра, совместимость, управление процессами)*, 2.1 (Wintun)*; том 3: 1.3 (супервизор процессов) | `03-WP-2-процессы-runtime-lifecycle.md` | F-002, F-003, F-012, F-013, F-018, F-022…F-029, F-131, F-133…F-135, F-207 |
+| **WP-3** Firewall, baseline, адаптеры, DNS, recovery | том 2: 1.1 (kill-switch), 1.2 (исключения), 2.1 (манифесты), 2.2 (повреждённый манифест)*, 2.3 (Boot Recovery)*, 3.1 (адаптеры, lockdown) | `04-WP-3-firewall-baseline-recovery.md` | F-016, F-017, F-030…F-044, F-146, F-147, F-150, F-152, F-202…F-205 |
+| **WP-4** Импорт, протоколы, подписки | том 1: 3.1 (WireGuard)*, 3.4 (протоколы)*; том 3: 3.1 (импорт ключей), 3.2 (подписки) | `05-WP-4-импорт-подписки-совместимость.md` | F-045…F-056, F-063, F-064, F-073…F-079, F-093, F-097…F-101, F-140, F-144…F-148 |
+| **WP-5** Проверки серверов и история | том 3: 3.3 (история проверок) | `06-WP-5-проверка-серверов-и-история.md` | F-057…F-062, F-065…F-072, F-181, F-185; REQ-SRV-CHK-001…006 |
+| **WP-6** Маршрутизация, Smart RU, доменные правила, DNS | том 1: 4.1 (Smart RU), 4.2 (приоритеты правил), 4.3 (split tunneling), 5.1 (DNS)* | `07-WP-6-маршрутизация-smart-ru-dns.md` | F-007…F-011, F-074…F-079, F-087…F-092, F-147 |
+| **WP-7** Утечки, доступность, скорость, мониторинг | том 3: 4.1 (мониторинг), 4.2 (доступность и утечки), 4.3 (тест скорости) | `08-WP-7-мониторинг-утечки-доступность.md` | F-010, F-080…F-096, F-102…F-112, F-177, F-179 |
+| **WP-8** Диагностика, экспорт, форензика | том 3: 4.4 (экспорт диагностики), 4.5 (форензика, ETW-сайдкар) | `09-WP-8-диагностика-экспорт-форензика.md` | F-004, F-015, F-092, F-096, F-113…F-119, F-131, F-170…F-172, F-176, F-178 |
+| **WP-9** Soft-режим, браузеры, UI | том 2: 6.1 (Browser Hardening); том 3: 2.4 (Soft-режим), 5.1–5.2 (UI, настройки), 5.3 (локализация)*, 5.4 (мастер первого запуска)* | `10-WP-9-soft-режим-браузеры-ui.md` | F-014, F-036, F-037, F-040, F-042, F-120, F-121, F-153…F-161 |
+| **WP-10** Планировщик, ротация, AutoPilot, адаптивный обход | том 3: 1.2 (приоритеты операций), 2.1 (планировщик), 2.2 (ротация), 2.3 (адаптивный обход) | `11-WP-10-автоматизация.md` | F-122…F-129, F-150, F-156; REQ-AUTO-*, REQ-CONN-ADAPT-* |
+| **WP-11** Установщик, целостность релиза, зависимости | том 2: 7.1 (NSIS-хуки), 7.2 (контрольные суммы и подпись), 7.3 (поддержка ОС, стек) | `12-WP-11-установщик-релиз.md` | F-163…F-169, F-182…F-184, F-209 |
+| **WP-12** Плановые функции (только за флагами) | том 1: 3.2 (AmneziaWG), 3.3 (Mihomo); том 2: 6.2 (Browser Boxes); том 3: 4.5 (процессный монитор) | `13-WP-12-плановые-функции.md` | F-166…F-180 (расхождения roadmap) |
+
+Сквозные прогоны всех пакетов (pairwise-матрица, soak, бюджеты производительности): `04-приёмочные-тесты/14-сквозные-прогоны.md`; методология и уровни проверок: `00-методология.md`.
+
+---
+
 ## Связанные папки и репозитории документации
 
-- [docs-factory8090/](../docs-factory8090/): Полный архивный каталог Software Factory 8090, включающий 44 фичи по подсистемам, журнал аудита находок F-001..F-210 (210 находок), реестр вопросов и архитектурные контейнеры.
-- [vpn-tunnel-enforcer/docs/](../vpn-tunnel-enforcer/docs/): Технические RFC и дорожные карты приложения (Censorship Resilience Phases 1-8, Traffic Observability RFC, Adaptive Bypass, Multi-Account Isolation).
+- [docs-factory8090/](../docs-factory8090/): Полный архивный каталог Software Factory 8090, включающий требования 44 фич (`02-фичи/*/requirements.md`), журнал аудита находок F-001..F-210 (210 находок), реестр вопросов, план работ ТЗ-06 и сводный обзор архитектуры (`01-обзор-и-архитектура.md`).
+- [vpn-tunnel-enforcer/docs/](../vpn-tunnel-enforcer/docs/): Технические RFC и дорожные карты приложения (Censorship Resilience roadmap, Traffic Observability RFC, Adaptive Bypass, Multi-Account Isolation), карта модулей и отчёт WP-1. Отдельные файлы фаз Censorship Resilience удалены 2026-10-13, итоги — в таблице ниже.
 
 ## Реестр сверки статусов реализации — 04.10.2026
 
@@ -101,22 +129,22 @@ WP-3 уже реализовывался в PR #13 и lifecycle-работах; 
 | [Том 1](./01-ТЗ-СЕТЕВОЕ-ЯДРО-ПРОТОКОЛЫ-И-МАРШРУТИЗАЦИЯ.md), [том 2](./02-ТЗ-СИСТЕМНАЯ-БЕЗОПАСНОСТЬ-ЗАЩИТА-ОТ-УТЕЧЕК-И-ОС.md), [том 3](./03-ТЗ-ЖИЗНЕННЫЙ-ЦИКЛ-АВТОМАТИЗАЦИЯ-UI-И-ДИАГНОСТИКА.md) | Нормативные разделы сопоставлены со статусами; существующий текст требований сохранён. Исправлены WireGuard endpoints, периодическая ротация, adaptive chain, границы мониторинга и состав onboarding. |
 | [Методология AT](./04-приёмочные-тесты/00-методология.md) и наборы WP-1/2/3/6/7/9/10/11 | Критерии затронутых утверждений: native smoke не равен всем AT-01; fixtures не равны AT-03 L3; AT-02-008 требует WG endpoints; AT-10-004 требует health-before-commit; AT-09-013 проверяет persistence, AT-09-014 отдельно проверяет импорт ключа и автозапуск. Это сверка критериев, не их исполнение. |
 | [ТЗ-06](../docs-factory8090/06-ТЗ-исправление-и-развитие.md) и [решения владельца](../docs-factory8090/05-открытые-вопросы.md) | Пакеты и границы принятых решений; В сверке 04.10 WP-1/WP-3 отмечались частичными; 07.10 владелец подтвердил завершение WP-1. WP-3 остаётся частичным, WP-11 разделён на выполненную миграцию и остаток. Подпись не решена, WP-12 остаётся планом. |
-| [Журнал аудита F](../docs-factory8090/00-журнал-аудита.md) и [исходный аудит сентября](../vpn-tunnel-enforcer/docs/audit-findings-2026-09.md) | Сопоставлены статусы и более поздние изменения. Старое F не объявляется закрытым только по новому описанию; опровергнутые находки не возвращаются в план исправлений. |
+| [Журнал аудита F](../docs-factory8090/00-журнал-аудита.md) и исходный аудит сентября | Сопоставлены статусы и более поздние изменения. Старое F не объявляется закрытым только по новому описанию; опровергнутые находки не возвращаются в план исправлений. |
 | [Журнал ускорения lifecycle](../docs-factory8090/07-журнал-ускорения-lifecycle.md), этапы 1–38 | Тематическая сверка изменений, замеров и ограничений: firewall/rollback, recovery worker, startup/stop ownership, CIM/COM, маршруты/IP, DNS, геопроверки, смена сервера и отмена UI. Учитываются ранние этапы, а не только 31–38; benchmark отдельных helpers не засчитывается как время всей операции. |
 | [Журнал прогресса](../progress.md) | Миграция Electron 44, восемь native smoke checks и build; отдельно указаны непроверенные cross-version store migration и Windows install/upgrade/uninstall matrix. |
-| [Happ compatibility audit](../vpn-tunnel-enforcer/docs/happ-compatibility-audit-2026-10-02.md) | Native Xray JSON/graph, transport/mux/Reality и границы подтверждённой совместимости; успешная конкретная раздача не считается всей протокольной матрицей. |
-| [Roadmap](../vpn-tunnel-enforcer/docs/censorship-resilience-roadmap.md) и [индекс фаз](../vpn-tunnel-enforcer/docs/censorship-resilience-phases/README.md) | Даты и локальные статусы фаз имеют приоритет над общим старым roadmap. Фазы 3–6 содержат выполненный слой и конкретный остаток, а не полную приёмку. |
-| [Фаза 1 — sing-box](../vpn-tunnel-enforcer/docs/censorship-resilience-phases/phase-01-sing-box-upgrade.md) | Записаны bundled 1.13.13, staging/diagnostics и проверки конфигурации; это не доказывает матрицу 1.13/1.14. |
-| [Фаза 2 — rule-set](../vpn-tunnel-enforcer/docs/censorship-resilience-phases/phase-02-dynamic-rule-sets.md) | Managed cache, размер/SHA-256, temp+rename и bundled fallback учтены как сделанные части. Независимый источник доверенного checksum/signature остаётся отдельным требованием. |
-| [Фаза 3 — протоколы](../vpn-tunnel-enforcer/docs/censorship-resilience-phases/phase-03-protocol-coverage.md) | URI/JSON parser/export для новых протоколов не равен успешному handshake. В документе прямо оставлена WireGuard endpoint/route integration; текущий генератор подтверждает этот остаток. |
-| [Фаза 4 — Naive/ECH](../vpn-tunnel-enforcer/docs/censorship-resilience-phases/phase-04-naive-ech.md) | Parser/config/export и capability diagnostics есть по записанным результатам; known-good remote Naive/ECH matrix и stealth presets остаются. |
-| [Фаза 5 — Hysteria2](../vpn-tunnel-enforcer/docs/censorship-resilience-phases/phase-05-hysteria2-advanced.md) | Salamander/mport/hop/bandwidth normalization, capability warnings и schema checks — реализованный слой. Реальный known-good handshake и расширения 1.14 этим не подтверждены. |
-| [Фаза 6 — bootstrap](../vpn-tunnel-enforcer/docs/censorship-resilience-phases/phase-06-bootstrap-chaining.md) | Общая policy auto/direct/localProxy для служебных загрузок существует по документу; cold-start через selected VPN profile и external bootstrap profile не реализованы. |
-| [Фаза 7 — AmneziaWG](../vpn-tunnel-enforcer/docs/censorship-resilience-phases/phase-07-amneziawg-spike.md), [фаза 8 — CoreAdapter/Mihomo](../vpn-tunnel-enforcer/docs/censorship-resilience-phases/phase-08-core-adapter-mihomo.md) | Проектные чеклисты и лабораторные границы; production runner/adapter и допуск по WP-12 не засчитаны как выполненные. |
-| [Adaptive plan](../vpn-tunnel-enforcer/docs/adaptive-bypass-plan.md) и [implementation log](../vpn-tunnel-enforcer/docs/adaptive-bypass-implementation-log.md) | Старые compatibility retries сверены с более поздним этапом 32. Наличие fallback и health window не доказывает нормативный порядок Direct → Reality → HY2 → SS. |
+| Happ compatibility audit | Native Xray JSON/graph, transport/mux/Reality и границы подтверждённой совместимости; успешная конкретная раздача не считается всей протокольной матрицей. |
+| [Roadmap](../vpn-tunnel-enforcer/docs/censorship-resilience-roadmap.md) и индекс фаз | Файлы отдельных фаз удалены 2026-10-13, их итоговые статусы — в строках ниже. Даты и статусы фаз имеют приоритет над общим старым roadmap. Фазы 3–6 содержат выполненный слой и конкретный остаток, а не полную приёмку. |
+| Фаза 1 — sing-box | Записаны bundled 1.13.13, staging/diagnostics и проверки конфигурации; это не доказывает матрицу 1.13/1.14. |
+| Фаза 2 — rule-set | Managed cache, размер/SHA-256, temp+rename и bundled fallback учтены как сделанные части. Независимый источник доверенного checksum/signature остаётся отдельным требованием. |
+| Фаза 3 — протоколы | URI/JSON parser/export и генерация WireGuard endpoint реализованы, но это не равно успешному handshake. Не подтверждены golden-матрица на обоих бинарниках sing-box 1.13/1.14, Windows handshake и маршрутный тест на настоящем сервере WireGuard. |
+| Фаза 4 — Naive/ECH | Parser/config/export и capability diagnostics есть по записанным результатам; known-good remote Naive/ECH matrix и stealth presets остаются. |
+| Фаза 5 — Hysteria2 | Salamander/mport/hop/bandwidth normalization, capability warnings и schema checks — реализованный слой. Реальный known-good handshake и расширения 1.14 этим не подтверждены. |
+| Фаза 6 — bootstrap | Общая policy auto/direct/localProxy для служебных загрузок существует по документу; cold-start через selected VPN profile и external bootstrap profile не реализованы. |
+| Фаза 7 — AmneziaWG, фаза 8 — CoreAdapter/Mihomo | Проектные чеклисты и лабораторные границы; production runner/adapter и допуск по WP-12 не засчитаны как выполненные. |
+| [Adaptive plan](../vpn-tunnel-enforcer/docs/adaptive-bypass-plan.md) и implementation log | Старые compatibility retries сверены с более поздним этапом 32. Наличие fallback и health window не доказывает нормативный порядок Direct → Reality → HY2 → SS. |
 | [Traffic Observability RFC](../vpn-tunnel-enforcer/docs/traffic-observability-rfc.md) | Отделена реализованная фаза ETW sidecar от проектных flow correlation/driver и постоянного монитора WP-12. Ограничение PID attribution сохранено. |
 | [Multi-account isolation plan](../vpn-tunnel-enforcer/docs/multi-account-isolation-plan.md) | Исторический проект архитектуры; production Browser Boxes не реализованы. Решения владельца проверяются по ТЗ-06, а не по старому списку вопросов этого плана. |
-| [VLESS/QUIC investigation](../vpn-tunnel-enforcer/docs/vless-quic-fallback-investigation.md) | Историческое исследование транспорта; не принимается за свежий proof всех UDP/QUIC маршрутов. |
+| VLESS/QUIC investigation | Историческое исследование транспорта; не принимается за свежий proof всех UDP/QUIC маршрутов. |
 | [Architecture README](../vpn-tunnel-enforcer/docs/architecture/README.md), [module map](../vpn-tunnel-enforcer/docs/architecture/module-map.md), [review guide](../vpn-tunnel-enforcer/docs/architecture/review-guide.md) | Карта модулей и границ проверки использована для адресной сверки parser/generator, rotation, adaptive bypass и wizard. |
 | [Split tunneling](../vpn-tunnel-enforcer/src/main/splitTunneling.ts), [NSIS hooks](../vpn-tunnel-enforcer/build/installer.nsh), [config export](../vpn-tunnel-enforcer/src/main/configManager.ts) | Сверка PR #20 за 04.10 фиксировала отсутствие трёх реализаций. Уточнение 07.10: F-076 по `process_name` сохраняет прежний остаток; #21 реализовал default masking и main-owned opt-in export (F-144), controlled shutdown вместо force-kill в NSIS hooks (F-183); #22 усилил exit proof. Полные AT-01-008/AT-11-002/009 не приняты; реализация этих участков не равна закрытию всех находок/пакетов. |
 | [PR #21](https://github.com/newnout6-a11y/vpn/pull/21), [отчёт WP-1](../vpn-tunnel-enforcer/docs/wp1-security-acceptance-2026-10-04.md) | 10 коммитов, merge `5764bc8` от 06.10. DPAPI/SecretRef, export policy, IPC/CSP, runtime ACL/hash; связанные capture/shutdown/env cleanup fixes. Матрица AT-01 различает native subsets, envelope fuzz, same-version migration и полный installed/L3 остаток. |
