@@ -54,6 +54,22 @@ describe('runtime-acl helper policy', () => {
     expect(() => validateScriptPolicy(real + '\n' + extra, 'runtime-acl')).toThrow(/rejected by runtime-acl policy/)
   })
 
+  it('checks the path that is actually used: concatenation, trailing code and a second $dir assignment are refused', () => {
+    const line = `$dir = '${DIR}'`
+    const withLine = (replacement: string) => real.replace(line, replacement)
+    expect(real).toContain(line)
+    for (const hostile of [
+      `$dir = '${DIR}' + '${BS}..${BS}..'`,
+      `$dir = '${DIR}'; $dir = 'C:${BS}Windows'`,
+      `$dir = '${DIR}' # trailing`,
+      `${line}\n$dir='C:${BS}Windows${BS}Temp'`,
+      `${line}\n$dir  =  'C:${BS}Windows${BS}Temp'`
+    ]) {
+      expect(() => validateScriptPolicy(withLine(hostile), 'runtime-acl')).toThrow(/runtime boundary/)
+    }
+    expect(() => validateScriptPolicy(real + '\nSet-Variable dir C:' + BS + 'Windows', 'runtime-acl')).toThrow(/forbidden command/)
+  })
+
   it('rejects a script that is not the bootstrap even with a legitimate directory line', () => {
     const body = `$dir = '${DIR}'\nWrite-Output 'HARDENED'`
     expect(() => validateScriptPolicy(body, 'runtime-acl')).toThrow(/missing module pin/)

@@ -111,6 +111,7 @@ const POLICY_FORBIDDEN_TOKENS: Record<ElevatedPsPolicy, RegExp[]> = {
     /\bSet-Acl\b/i,
     /\b(?:Set|Add|Out)-(?:Content|File)\b/i,
     /\b(?:New|Copy|Move)-Item\b/i,
+    /\b(?:Set|New|Clear)-Variable\b/i,
     /-Recurse\b/i
   ],
   'wfp-ipv6': [
@@ -434,8 +435,11 @@ export async function execElevatedPs(
 export function validateScriptPolicy(script: string, policy: ElevatedPsPolicy): void {
   if (policy === 'runtime-acl') {
     // The script creates exactly one directory: its literal must sit inside the VPNTE runtime boundary.
-    const dir = /^\$dir = '([^'\r\n]+)'/m.exec(script)?.[1]
-    if (!dir || !isRuntimeAclDir(dir)) {
+    // The WHOLE line must be the single quoted literal (no concatenation or trailing code after it), and that must
+    // be the only assignment to $dir anywhere in the script, so the path that is checked is the path that is used.
+    const dir = /^\$dir = '([^'\r\n]+)'[ \t]*$/m.exec(script.replace(/\r/g, ''))?.[1]
+    const assignments = script.match(/\$dir\s*=(?!=)/gi)?.length ?? 0
+    if (!dir || assignments !== 1 || !isRuntimeAclDir(dir)) {
       throw new ElevatedPsHelperError(
         'elevated-helper-script-rejected',
         'PS helper script rejected by runtime-acl policy: directory outside the runtime boundary'
