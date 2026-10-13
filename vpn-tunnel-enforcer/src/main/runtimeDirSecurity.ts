@@ -6,9 +6,10 @@ import { stat } from 'fs/promises'
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import { win32 } from 'path'
-import { execElevated, isProcessElevated } from './admin'
+import { isProcessElevated } from './admin'
+import { execElevatedPs } from './elevatedPsHelper'
 import { logEvent } from './appLogger'
-import { SID_ADMINISTRATORS, ALLOWED_SIDS, ANCESTOR_SIDS, ARTIFACT_WRITE_MASK, NAMESPACE_WRITE_MASK, POLICY_FAILURE, RUNTIME_TREE_HELPERS, knownFolderCheck, buildInspectScript } from './runtimeAclInspection'
+import { SECURITY_MODULE_IMPORT_LINE, SID_ADMINISTRATORS, ALLOWED_SIDS, ANCESTOR_SIDS, ARTIFACT_WRITE_MASK, NAMESPACE_WRITE_MASK, POLICY_FAILURE, RUNTIME_TREE_HELPERS, knownFolderCheck, buildInspectScript } from './runtimeAclInspection'
 import { executeRecoveryOperation } from './recoveryPsWorker'
 
 const execFile = promisify(execFileCb)
@@ -73,12 +74,14 @@ trap {
   return Buffer.from(prelude + script, 'utf16le').toString('base64')
 }
 async function runPowerShell(script: string, elevated: boolean, timeout: number): Promise<string> {
-  const encoded = encodedPowerShell(script)
   if (elevated) {
-    const { stdout } = await execElevated(`powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encoded}`, { timeout, maxBuffer: 4 * 1024 * 1024 })
+    // Elevated work goes through the persistent helper so its command policy applies (no bare execElevated).
+    // The script reports failures as a receipt line in stdout; a non-zero exit is a helper-level failure.
+    const { stdout, stderr, exitCode } = await execElevatedPs(script, timeout, 'runtime-acl')
+    if (exitCode !== 0) throw Object.assign(new Error('Runtime PowerShell failed'), { stdout, stderr })
     return checkedPowerShellOutput(stdout)
   }
-  const { stdout } = await execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], {
+  const { stdout } = await execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodedPowerShell(script)], {
     windowsHide: true, timeout, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024
   })
   return checkedPowerShellOutput(stdout)
@@ -147,6 +150,31 @@ foreach ($component in @($base, $runtimeBase, $instance, $dir)) {
   Assert-RuntimeAcl $snapshot $false
 }
 Write-Output 'HARDENED'`
+}
+
+/**
+ * The bootstrap as the persistent elevated helper runs it. The helper executes every script in a child scope and
+ * captures only its output, so: failures are reported as a VPNTE_RUNTIME_FAILURE receipt line through the output
+ * stream (a trap/break or a console write would bypass the capture), and the script-scope diagnostics variables are
+ * removed afterwards so nothing stays behind in the shared session.
+ * Exported for the policy tests.
+ */
+export function buildHelperBootstrapScript(dir: string): string {
+  return `try {
+$script:runtimeOperation='import-acl-module'; $script:runtimePath=''; $script:runtimePrincipal=$null; $script:runtimeRights=$null
+${SECURITY_MODULE_IMPORT_LINE}
+${buildBootstrapScript(dir)}
+} catch {
+  $reason='PowerShellError'
+  if ($_.Exception.Message -match '${POLICY_FAILURE.source}') { $reason=$_.Exception.Message }
+  $cause=$_.Exception
+  while ($cause.InnerException) { $cause=$cause.InnerException }
+  $diagnostic=[ordered]@{operation=$script:runtimeOperation;path=$script:runtimePath;reason=$reason;
+    errorType=$cause.GetType().FullName;hresult=$cause.HResult;principal=$script:runtimePrincipal;rights=$script:runtimeRights}
+  Write-Output ('${FAILURE_PREFIX}' + ($diagnostic | ConvertTo-Json -Compress))
+} finally {
+  Remove-Variable -Name runtimeOperation,runtimePath,runtimePrincipal,runtimeRights -Scope Script -ErrorAction SilentlyContinue
+}`
 }
 
 interface AclSnapshot {
@@ -251,7 +279,7 @@ async function hardenOnce(dir: string, label: string): Promise<DirectoryHardenin
     return { hardened: false, message: 'нет прав администратора для создания доверенного runtime' }
   }
   try {
-    const stdout = await runPowerShell(buildBootstrapScript(dir), true, 60000)
+    const stdout = await runPowerShell(buildHelperBootstrapScript(dir), true, 60000)
     if (!stdout.split(/\r?\n/).includes('HARDENED')) throw new Error('Missing runtime bootstrap confirmation')
   } catch (error: unknown) {
     const diagnostic = failureDiagnostic(error)

@@ -140,3 +140,9 @@ function Read-RuntimeAclSnapshot([string]$dir) {
   }
 }`
 }
+
+/**
+ * The exact line that pins the built-in security module by its full path. The elevated helper's policy exempts only
+ * this line from its blocked-word scan (the module name contains "PowerShell"); any variation is scanned as usual.
+ */
+export const SECURITY_MODULE_IMPORT_LINE = "Import-Module -Name (Join-Path $PSHOME 'Modules" + String.fromCharCode(92) + "Microsoft.PowerShell.Security" + String.fromCharCode(92) + "Microsoft.PowerShell.Security.psd1') -ErrorAction Stop"

@@ -7,7 +7,8 @@ vi.mock('child_process', () => {
   ;(execFile as any)[Symbol.for('nodejs.util.promisify.custom')] = mocks.read
   return { execFile, default: { execFile } }
 })
-vi.mock('./admin', () => ({ execElevated: mocks.write, isProcessElevated: mocks.elevated }))
+vi.mock('./admin', () => ({ isProcessElevated: mocks.elevated }))
+vi.mock('./elevatedPsHelper', () => ({ execElevatedPs: mocks.write }))
 vi.mock('./appLogger', () => ({ logEvent: mocks.log }))
 vi.mock('./recoveryPsWorker', () => ({ executeRecoveryOperation: mocks.worker }))
 import { ensureElevatedRuntimeDirHardened, resetRuntimeDirHardeningCache, verifyDirectoryHardened } from './runtimeDirSecurity'
@@ -31,13 +32,14 @@ const diagnostic = (reason = 'RuntimeAclNotProtected') => ({ operation: 'validat
   reason, errorType: 'System.Management.Automation.RuntimeException', hresult: -2146233087, principal: ADMINS, rights: null })
 function receipt(value: unknown = diagnostic()) { return 'VPNTE_RUNTIME_FAILURE:' + JSON.stringify(value) }
 function script(call: any[], elevated = false) {
-  const encoded = elevated ? call[0].split('EncodedCommand ')[1] : call[1][3]
-  return Buffer.from(encoded, 'base64').toString('utf16le')
+  // Elevated bootstrap goes to the helper as plain script text; the read-only inspection is still an encoded command.
+  if (elevated) return call[0] as string
+  return Buffer.from(call[1][3], 'base64').toString('utf16le')
 }
 beforeEach(() => {
   vi.clearAllMocks(); resetRuntimeDirHardeningCache()
   mocks.elevated.mockResolvedValue(true)
-  mocks.write.mockResolvedValue({ stdout: 'HARDENED', stderr: '' })
+  mocks.write.mockResolvedValue({ stdout: 'HARDENED', stderr: '', exitCode: 0 })
   mocks.worker.mockRejectedValue(Object.assign(new Error('Unavailable before dispatch'), { code: 'unavailable' }))
   reply()
 })
@@ -254,7 +256,7 @@ describe('trusted bootstrap, never repair unsafe existing directories', () => {
     expect((await ensureElevatedRuntimeDirHardened(DIR, 'tun')).hardened).toBe(false)
   })
   it('requires an exact successful bootstrap receipt', async () => {
-    mocks.read.mockRejectedValueOnce(new Error('missing')); mocks.write.mockResolvedValueOnce({ stdout: 'NOT-HARDENED' })
+    mocks.read.mockRejectedValueOnce(new Error('missing')); mocks.write.mockResolvedValueOnce({ stdout: 'NOT-HARDENED', stderr: '', exitCode: 0 })
     expect((await ensureElevatedRuntimeDirHardened(DIR, 'tun')).hardened).toBe(false)
     expect(mocks.read).toHaveBeenCalledTimes(1)
   })
@@ -266,9 +268,8 @@ describe('trusted bootstrap, never repair unsafe existing directories', () => {
   it.each(['RuntimeAclNotProtected', 'RuntimeNamespaceUntrustedOwner', 'RuntimeNamespaceUntrustedAccess', 'PowerShellError'])('logs bounded bootstrap reason/path for %s without raw output (AT-01-002/009)', async reason => {
     mocks.read.mockRejectedValueOnce(new Error('missing'))
     const detail = { ...diagnostic(reason), principal: USER, rights: 64, password: 'FAKE-secret' }
-    mocks.write.mockRejectedValueOnce(Object.assign(new Error('vless://FAKE-secret@host -EncodedCommand FAKE-command'), {
-      stdout: receipt(detail), stderr: 'FAKE-secret'
-    }))
+    // The helper script reports failures as a receipt line in stdout and still exits normally.
+    mocks.write.mockResolvedValueOnce({ stdout: receipt(detail), stderr: 'FAKE-secret', exitCode: 0 })
     const result = await ensureElevatedRuntimeDirHardened(DIR, 'tun')
     expect(result.hardened).toBe(false)
     expect(result.diagnostic).toMatchObject({ operation: 'validate-acl', path: 'C:\\ProgramData\\VPNTE', reason, principal: USER, rights: 64 })
@@ -290,12 +291,13 @@ describe('trusted bootstrap, never repair unsafe existing directories', () => {
     expect((await ensureElevatedRuntimeDirHardened(DIR, 'tun')).hardened).toBe(false)
     expect(mocks.read).toHaveBeenCalledTimes(1)
   })
-  it('logs readback failures and uses the direct PowerShell transport for long scripts (AT-01-009)', async () => {
+  it('logs readback failures and runs the bootstrap through the helper policy (AT-01-009)', async () => {
     mocks.read.mockRejectedValueOnce(new Error('missing')).mockRejectedValueOnce({ stdout: receipt(diagnostic('RuntimeNamespaceUntrustedAccess')) })
     const result = await ensureElevatedRuntimeDirHardened(DIR, 'tun')
     expect(result.refusalCode).toBe('namespace-untrusted')
     expect(mocks.log).toHaveBeenCalledWith('error', 'runtime-acl', 'tun: runtime readback refused', { dir: DIR, result })
-    expect(mocks.write.mock.calls[0][0]).toMatch(/^powershell\.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand [A-Za-z0-9+/]+={0,2}$/)
+    // The bootstrap is submitted to the persistent helper under its own policy, never as a bare elevated command.
+    expect(mocks.write).toHaveBeenCalledWith(expect.stringContaining('$dir = '), 60000, 'runtime-acl')
   })
   it('rechecks parents on each connection; only concurrent work shares a proof', async () => {
     await Promise.all([ensureElevatedRuntimeDirHardened(DIR, 'tun'), ensureElevatedRuntimeDirHardened(DIR, 'tun')])
