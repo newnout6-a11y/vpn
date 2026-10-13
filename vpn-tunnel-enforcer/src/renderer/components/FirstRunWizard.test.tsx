@@ -205,6 +205,20 @@ describe('<FirstRunWizard /> save error handling', () => {
     expect(onComplete).not.toHaveBeenCalled()
   })
 
+  it('restores the previous autostart when saving onboarding completion fails afterwards', async () => {
+    const api = window.electronAPI as any
+    api.setLoginItem = vi.fn().mockResolvedValue({})
+    api.saveSettings.mockRejectedValueOnce(new Error('Disk full'))
+    render(<FirstRunWizard onComplete={vi.fn()} onSkip={vi.fn()} />)
+    next(6)
+    fireEvent.click(screen.getByRole('checkbox'))
+    next(1)
+    fireEvent.click(await screen.findByText('onboarding.finish'))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Disk full')
+    expect(api.setLoginItem).toHaveBeenNthCalledWith(1, true)
+    expect(api.setLoginItem).toHaveBeenNthCalledWith(2, false)
+  })
+
   it('skipping both optional steps changes nothing', async () => {
     const api = window.electronAPI as any
     api.setLoginItem = vi.fn()

@@ -24,11 +24,14 @@ describe('main IPC regressions', () => {
     const source = mainIndexSource()
     const handlerStart = source.indexOf("handleLogged('inspect-vpn-input'")
     const handlerEnd = source.indexOf("handleLogged('", handlerStart + 10)
-    const handler = source.slice(handlerStart, handlerEnd)
+    // Comments may explain the rule, so only code is scanned.
+    const handler = source.slice(handlerStart, handlerEnd).split('\n').filter((line) => !line.trim().startsWith('//')).join('\n')
 
     expect(handlerStart).toBeGreaterThanOrEqual(0)
     expect(handler).toContain('settingsStore.save(')
-    expect(handler).not.toMatch(/directVpnInput\s*:/)
+    // No form of the key may be written here: literal, shorthand, computed key, or a spread of existing settings.
+    expect(handler).not.toMatch(/directVpnInput/)
+    expect(handler).not.toMatch(/\.\.\.\s*(?:settings|input|resolved)\b/)
   })
 
   it('bounds inspect-vpn-input before resolving or persisting input', () => {

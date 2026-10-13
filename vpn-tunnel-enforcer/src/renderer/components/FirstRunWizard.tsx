@@ -173,6 +173,9 @@ export function FirstRunWizard({ onComplete, onSkip }: Props) {
   async function handleFinish() {
     setFinishing(true)
     setSaveError(null)
+    // Autostart is applied before onboarding completion is saved: remember what to restore if a later step fails.
+    const previousAutoStart = settings.autoStart === true
+    let autostartApplied = false
 
     try {
       // 1. Mandatory security setting: apply chosen kill switch level first
@@ -202,6 +205,7 @@ export function FirstRunWizard({ onComplete, onSkip }: Props) {
       if (autoStart) {
         try {
           await window.electronAPI.setLoginItem(true)
+          autostartApplied = true
         } catch (err: any) {
           throw new Error(`${t('onboarding.autostartFailed')}: ${err?.message || err}`)
         }
@@ -221,6 +225,14 @@ export function FirstRunWizard({ onComplete, onSkip }: Props) {
 
       onComplete()
     } catch (err: any) {
+      if (autostartApplied) {
+        // The wizard stays incomplete, so do not leave the autostart change it applied behind.
+        try {
+          await window.electronAPI.setLoginItem(previousAutoStart)
+        } catch (restoreErr: any) {
+          addLog('warn', `Не удалось вернуть прежнее значение автозапуска: ${restoreErr?.message || restoreErr}`)
+        }
+      }
       const msg = err?.message || 'Не удалось сохранить настройки. Пожалуйста, попробуйте снова.'
       setSaveError(msg)
       addLog('error', `Ошибка завершения первого запуска: ${msg}`)

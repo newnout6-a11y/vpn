@@ -291,17 +291,30 @@ function flush(force: boolean): void {
 
 let hitRecorderFailureLogged = false
 
+/** Hit counts are best-effort and must never break the sampler, but a permanent failure should leave a trace. */
+function noteHitRecorderFailure(err: unknown): void {
+  if (hitRecorderFailureLogged) return
+  hitRecorderFailureLogged = true
+  logEvent('warn', 'traffic-history', 'domain rule hit counting is unavailable', { error: (err as Error)?.message })
+}
+
 /** Counts new connections against the user's domain rules (F-011); undefined when there are no rules to count. */
 async function hitRecorder(): Promise<((host: string) => void) | undefined> {
   try {
     // Dynamic import breaks the domainRouting <-> traffic sampler cycle.
-    return (await import('./domainRouting')).createHitRecorder() ?? undefined
-  } catch (err) {
-    // Hit counts are best-effort and must never break the sampler, but a permanent failure should leave a trace.
-    if (!hitRecorderFailureLogged) {
-      hitRecorderFailureLogged = true
-      logEvent('warn', 'traffic-history', 'domain rule hit counting is unavailable', { error: (err as Error)?.message })
+    const recorder = (await import('./domainRouting')).createHitRecorder()
+    if (!recorder) return undefined
+    // A malformed imported rule must not stop the sampler: the connection is already marked seen, so an exception
+    // here would also lose its domain/byte accounting. Count what can be counted and trace the failure once.
+    return (host: string) => {
+      try {
+        recorder(host)
+      } catch (err) {
+        noteHitRecorderFailure(err)
+      }
     }
+  } catch (err) {
+    noteHitRecorderFailure(err)
     return undefined
   }
 }
