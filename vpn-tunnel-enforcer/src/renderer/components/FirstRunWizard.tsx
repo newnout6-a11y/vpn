@@ -176,6 +176,7 @@ export function FirstRunWizard({ onComplete, onSkip }: Props) {
     // Autostart is applied before onboarding completion is saved: remember what to restore if a later step fails.
     const previousAutoStart = settings.autoStart === true
     let autostartApplied = false
+    let restoreFailure: string | null = null
 
     try {
       // 1. Mandatory security setting: apply chosen kill switch level first
@@ -232,10 +233,13 @@ export function FirstRunWizard({ onComplete, onSkip }: Props) {
         try {
           await window.electronAPI.setLoginItem(previousAutoStart)
         } catch (restoreErr: any) {
-          addLog('warn', t('onboarding.autostartRestoreFailed', { error: restoreErr?.message || String(restoreErr) }))
+          restoreFailure = t('onboarding.autostartRestoreFailed', { error: restoreErr?.message || String(restoreErr) })
+          addLog('warn', restoreFailure)
         }
       }
-      const msg = err?.message || 'Не удалось сохранить настройки. Пожалуйста, попробуйте снова.'
+      const baseMsg = err?.message || 'Не удалось сохранить настройки. Пожалуйста, попробуйте снова.'
+      // A failed restore is shown next to the original error, not only written to the log.
+      const msg = restoreFailure ? `${baseMsg} ${restoreFailure}` : baseMsg
       setSaveError(msg)
       addLog('error', `Ошибка завершения первого запуска: ${msg}`)
     } finally {

@@ -60,6 +60,33 @@ describe('settings login item side effects', () => {
     }
   })
 
+  it('setLoginItemChecked reports a failed scheduled-task command and keeps the saved setting', async () => {
+    const { settingsStore } = await import('./settings')
+    execElevatedMock.mockImplementation(async (command: string) => {
+      if (command.includes('/Delete')) throw new Error('schtasks delete refused')
+      return { stdout: 'RECOVERY_TASK_VERIFIED', stderr: '' }
+    })
+    await settingsStore.setLoginItemChecked(true)
+    expect(settingsStore.get().autoStart).toBe(true)
+    await expect(settingsStore.setLoginItemChecked(false)).rejects.toThrow('schtasks delete refused')
+    // The OS still has the task, so the stored value must not claim otherwise.
+    expect(settingsStore.get().autoStart).toBe(true)
+  })
+
+  it('setLoginItemChecked persists the setting once the command succeeded', async () => {
+    const { settingsStore } = await import('./settings')
+    await expect(settingsStore.setLoginItemChecked(true)).resolves.toMatchObject({ autoStart: true })
+    expect(execElevatedMock.mock.calls.some(([command]) => String(command).includes('/Create'))).toBe(true)
+    expect(settingsStore.get().autoStart).toBe(true)
+  })
+
+  it('the plain setLoginItem stays fire-and-forget and never rejects on a failed command', async () => {
+    const { settingsStore } = await import('./settings')
+    execElevatedMock.mockRejectedValue(new Error('schtasks refused'))
+    expect(() => settingsStore.setLoginItem(true)).not.toThrow()
+    await Promise.resolve()
+  })
+
   it('does not recreate scheduled tasks on unrelated settings saves', async () => {
     const { settingsStore } = await import('./settings')
 

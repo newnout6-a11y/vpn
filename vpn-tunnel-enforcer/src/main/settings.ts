@@ -364,7 +364,12 @@ export function buildBootRecoveryTaskCommand(recoverScript: string): string {
   return `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${Buffer.from(script, 'utf16le').toString('base64')}`
 }
 
-function applyLoginItem(autoStart: boolean, options: { ensureBootRecovery?: boolean } = {}) {
+/**
+ * Applies the autostart state. By default the scheduled-task command is fire-and-forget (an unrelated settings save must
+ * not wait for it or fail because of it). With `propagateTaskFailure` the returned promise settles with the command, so a
+ * caller that needs to know whether the OS state really changed can await it.
+ */
+function applyLoginItem(autoStart: boolean, options: { ensureBootRecovery?: boolean; propagateTaskFailure?: boolean } = {}): Promise<void> | void {
   if (process.platform === 'win32' && app.isPackaged) {
     const taskName = 'VPN Tunnel Enforcer'
     const exe = `\\"${process.execPath.replace(/"/g, '\\"')}\\"`
@@ -374,7 +379,8 @@ function applyLoginItem(autoStart: boolean, options: { ensureBootRecovery?: bool
       ? `schtasks /Create /TN "${taskName}" /SC ONLOGON /RL HIGHEST /TR "${exe}" /F`
       : `schtasks /Delete /TN "${taskName}" /F`
 
-    execElevated(command, { timeout: 15000 }).catch(() => undefined)
+    const loginTask = execElevated(command, { timeout: 15000 })
+    loginTask.catch(() => undefined)
 
     if (options.ensureBootRecovery && !bootRecoveryTaskEnsured) {
       // Reserve immediately so multiple settings operations in the same tick
@@ -424,7 +430,7 @@ function applyLoginItem(autoStart: boolean, options: { ensureBootRecovery?: bool
         })
     }
 
-    return
+    return options.propagateTaskFailure ? loginTask.then(() => undefined) : undefined
   }
 
   app.setLoginItemSettings({
@@ -449,6 +455,17 @@ export const settingsStore = {
     if (settings.autoStart !== previous.autoStart) {
       applyLoginItem(settings.autoStart, { ensureBootRecovery: true })
     }
+    return settings
+  },
+
+  /**
+   * Like setLoginItem, but settles only after the scheduled task was really created or deleted, and leaves the saved
+   * setting untouched when that fails, so the stored value never claims an autostart state the OS does not have.
+   */
+  async setLoginItemChecked(openAtLogin: boolean): Promise<AppSettings> {
+    const settings = normalizeSettings({ ...normalizeSettings(readSettingsWithMigration()), autoStart: openAtLogin })
+    await applyLoginItem(settings.autoStart, { ensureBootRecovery: true, propagateTaskFailure: true })
+    persistSettings(settings)
     return settings
   },
 

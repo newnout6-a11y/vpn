@@ -2183,7 +2183,7 @@ app.whenReady().then(async () => {
   })
 
   handleLogged('set-login-item', async (_e, openAtLogin: boolean) => {
-    return settingsStore.setLoginItem(openAtLogin)
+    return settingsStore.setLoginItemChecked(openAtLogin)
   })
 
   handleLogged('run-leak-check', async (_e, options?: { proxyAddr?: string; proxyType?: 'socks5' | 'http' }) => {

@@ -220,6 +220,20 @@ describe('<FirstRunWizard /> save error handling', () => {
     expect(api.setLoginItem).toHaveBeenNthCalledWith(2, false)
   })
 
+  it('shows a failed autostart restore next to the original save error', async () => {
+    const api = window.electronAPI as any
+    api.setLoginItem = vi.fn().mockResolvedValueOnce({}).mockRejectedValueOnce(new Error('schtasks delete refused'))
+    api.saveSettings.mockRejectedValueOnce(new Error('Disk full'))
+    render(<FirstRunWizard onComplete={vi.fn()} onSkip={vi.fn()} />)
+    next(6)
+    fireEvent.click(screen.getByRole('checkbox'))
+    next(1)
+    fireEvent.click(await screen.findByText('onboarding.finish'))
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('Disk full')
+    expect(alert).toHaveTextContent('onboarding.autostartRestoreFailed')
+  })
+
   it('shows the current autostart state and applies a change to it, not just enabling', async () => {
     const api = window.electronAPI as any
     api.setLoginItem = vi.fn().mockResolvedValue({})
