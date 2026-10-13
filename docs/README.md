@@ -66,8 +66,8 @@
 | 3 | **WP-3** Firewall, baseline, recovery | Fail-closed, транзакционный откат, Boot Recovery, узкие CLAT-исключения без обхода kill-switch. | **Частично (сверка 07.10.2026), следующий фокус**: исходный код и локальные проверки есть; #22 сохраняет защиту до runtime exit proof. Все 12 AT нужно адресно сверить; packet oracle, SYSTEM reboot, NAT64/hot-plug/OS matrix не приняты. |
 | 4 | **WP-0** Контракты, FSM, наблюдаемость | Фундамент для WP-2 и WP-10: единый автомат состояний, `operationId`, `AbortController`. | До WP-2 и WP-10 |
 | 5 | **WP-2** Процессы, runtime, lifecycle туннеля | Зомби-процессы, гонки таймаутов, порядок запуска Xray (F-022, F-025, F-191, F-194). | После WP-0 |
-| 6 | **WP-10** Scheduler, rotation, AutoPilot, adaptive bypass | Health-Before-Commit ротации (F-124), баг ночных окон (F-193). | После WP-0 |
-| 7 | **WP-6**, **WP-4** Маршрутизация и импорт | Целостность rule-sets, `process_path` в split tunneling, парсеры протоколов. | Параллельно |
+| 6 | **WP-10** Scheduler, rotation, AutoPilot, adaptive bypass | Health-Before-Commit ротации (F-124), баг ночных окон (F-193; исправлен по коду 2026-10-13, PR #34). | После WP-0 |
+| 7 | **WP-6**, **WP-4** Маршрутизация и импорт | Целостность rule-sets, `process_path` в split tunneling (F-076; исправлен по коду 2026-10-13, PR #37), WireGuard endpoint (F-047; PR #36), парсеры протоколов. | Параллельно |
 | 8 | **WP-7**, **WP-8** Мониторинг и диагностика | Честные статусы проверок, OOM-защита форензики (F-197). | Параллельно |
 | 9 | **WP-5**, **WP-9** История проверок, Soft-режим, UI | Пользовательский слой, a11y, декомпозиция монолитных компонентов. | Параллельно |
 | 10 | **WP-11 (остаток)** | Installed upgrade/uninstall, release integrity и автообновление. NSIS controlled shutdown уже реализован в #21/#22. | До публичного релиза: собрать installer с последними stop/env fixes и выполнить AT-11/OS matrix; publication `checksums.txt`/`binaries-manifest.json` и update E2E не приняты. |
