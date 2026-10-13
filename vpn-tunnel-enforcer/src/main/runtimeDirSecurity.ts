@@ -161,8 +161,8 @@ Write-Output 'HARDENED'`
  */
 export function buildHelperBootstrapScript(dir: string): string {
   return `try {
-${SECURITY_MODULE_IMPORT_LINE}
 $script:runtimeOperation='import-acl-module'; $script:runtimePath=''; $script:runtimePrincipal=$null; $script:runtimeRights=$null
+${SECURITY_MODULE_IMPORT_LINE}
 ${buildBootstrapScript(dir)}
 } catch {
   $reason='PowerShellError'

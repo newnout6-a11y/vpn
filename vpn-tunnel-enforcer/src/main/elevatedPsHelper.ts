@@ -34,7 +34,15 @@ const MAX_PENDING_COMMANDS = 8
 export type ElevatedPsPolicy = 'firewall-killswitch' | 'physical-adapter-lockdown' | 'wfp-ipv6' | 'runtime-acl'
 
 /** The only directories the runtime-acl policy may create: the per-instance application components under VPNTE\runtime. */
-const RUNTIME_ACL_DIR = /^[A-Za-z]:\\[^\\\r\n]+\\VPNTE\\runtime\\[a-f0-9]{32}\\(?:tun-runtime|external-proxy-runtime|traffic-forensics)$/i
+function isRuntimeAclDir(dir: string): boolean {
+  // Rooted at %ProgramData% (the script itself re-checks this against the OS known folder before creating anything),
+  // so the helper cannot be pointed at a VPNTE runtime tree under a user-writable parent.
+  const root = (process.env.ProgramData || 'C:\\ProgramData').replace(/[\\/]+$/, '')
+  const prefix = `${root}\\VPNTE\\runtime\\`.toLowerCase()
+  const lower = dir.toLowerCase()
+  return lower.startsWith(prefix) &&
+    /^[a-f0-9]{32}\\(?:tun-runtime|external-proxy-runtime|traffic-forensics)$/.test(lower.slice(prefix.length))
+}
 
 const BLOCKED_SCRIPT_TOKENS = [
   /\bInvoke-Expression\b/i,
@@ -427,7 +435,7 @@ export function validateScriptPolicy(script: string, policy: ElevatedPsPolicy): 
   if (policy === 'runtime-acl') {
     // The script creates exactly one directory: its literal must sit inside the VPNTE runtime boundary.
     const dir = /^\$dir = '([^'\r\n]+)'/m.exec(script)?.[1]
-    if (!dir || !RUNTIME_ACL_DIR.test(dir)) {
+    if (!dir || !isRuntimeAclDir(dir)) {
       throw new ElevatedPsHelperError(
         'elevated-helper-script-rejected',
         'PS helper script rejected by runtime-acl policy: directory outside the runtime boundary'

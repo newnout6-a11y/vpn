@@ -11,22 +11,26 @@ import { SECURITY_MODULE_IMPORT_LINE } from './runtimeAclInspection'
 
 const BS = String.fromCharCode(92)
 const win = (...parts: string[]) => parts.join(BS)
-const DIR = win('C:', 'ProgramData', 'VPNTE', 'runtime', '0123456789abcdef0123456789abcdef', 'tun-runtime')
+const PROGRAM_DATA = process.env.ProgramData || win('C:', 'ProgramData')
+const DIR = win(PROGRAM_DATA, 'VPNTE', 'runtime', '0123456789abcdef0123456789abcdef', 'tun-runtime')
 const real = buildHelperBootstrapScript(DIR)
 
 describe('runtime-acl helper policy', () => {
   it('accepts the real bootstrap script for each application component', () => {
     for (const part of ['tun-runtime', 'external-proxy-runtime', 'traffic-forensics']) {
-      expect(() => validateScriptPolicy(buildHelperBootstrapScript(win('C:', 'ProgramData', 'VPNTE', 'runtime', '0123456789abcdef0123456789abcdef', part)), 'runtime-acl')).not.toThrow()
+      expect(() => validateScriptPolicy(buildHelperBootstrapScript(win(PROGRAM_DATA, 'VPNTE', 'runtime', '0123456789abcdef0123456789abcdef', part)), 'runtime-acl')).not.toThrow()
     }
   })
 
   it.each([
     ['a directory outside the VPNTE runtime tree', win('C:', 'Windows', 'System32', 'drivers')],
-    ['the runtime root itself', win('C:', 'ProgramData', 'VPNTE', 'runtime')],
-    ['an unknown component', win('C:', 'ProgramData', 'VPNTE', 'runtime', '0123456789abcdef0123456789abcdef', 'evil')],
-    ['an instance id of the wrong shape', win('C:', 'ProgramData', 'VPNTE', 'runtime', 'ZZZ', 'tun-runtime')],
-    ['a traversal out of the component', win('C:', 'ProgramData', 'VPNTE', 'runtime', '0123456789abcdef0123456789abcdef', 'tun-runtime', '..', 'x')]
+    ['the runtime root itself', win(PROGRAM_DATA, 'VPNTE', 'runtime')],
+    ['the right tree under a user-writable parent', win('C:', 'Users', 'Public', 'VPNTE', 'runtime', '0123456789abcdef0123456789abcdef', 'tun-runtime')],
+    ['the right tree under another drive', win('Z:', 'ProgramData', 'VPNTE', 'runtime', '0123456789abcdef0123456789abcdef', 'tun-runtime')],
+    ['a lookalike parent of ProgramData', win(PROGRAM_DATA + 'X', 'VPNTE', 'runtime', '0123456789abcdef0123456789abcdef', 'tun-runtime')],
+    ['an unknown component', win(PROGRAM_DATA, 'VPNTE', 'runtime', '0123456789abcdef0123456789abcdef', 'evil')],
+    ['an instance id of the wrong shape', win(PROGRAM_DATA, 'VPNTE', 'runtime', 'ZZZ', 'tun-runtime')],
+    ['a traversal out of the component', win(PROGRAM_DATA, 'VPNTE', 'runtime', '0123456789abcdef0123456789abcdef', 'tun-runtime', '..', 'x')]
   ])('rejects %s', (_name, dir) => {
     expect(() => validateScriptPolicy(buildHelperBootstrapScript(dir), 'runtime-acl')).toThrow(/runtime boundary/)
   })
@@ -81,7 +85,7 @@ describe.runIf(process.platform === 'win32')('helper-style execution of the boot
 
   it('reports a refused boundary as a receipt line in the captured output and leaves no state behind', async () => {
     // Inside ProgramData but outside the allowed components: the script refuses before it creates anything.
-    const dir = win('C:', 'ProgramData', 'VPNTE', 'runtime', 'not-an-instance')
+    const dir = win(PROGRAM_DATA, 'VPNTE', 'runtime', 'not-an-instance')
     const out = await runLikeHelper(buildHelperBootstrapScript(dir))
     expect(out).toMatch(/VPNTE_RUNTIME_FAILURE:.*RuntimeOutsideBoundary/)
     expect(out).not.toContain('HARDENED')
