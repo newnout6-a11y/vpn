@@ -41,11 +41,6 @@ jobs:
           node-version: '24.21.0'
           cache: npm
           cache-dependency-path: vpn-tunnel-enforcer/package-lock.json
-      # В lockfile два пакета (fast-uri, js-yaml) записаны как git+ssh://git@github.com/...; у раннера нет SSH-ключа.
-      - name: Читать GitHub-зависимости по https
-        run: |
-          git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
-          git config --global --add url."https://github.com/".insteadOf "git@github.com:"
       - run: npm ci
       # resources/*.exe не хранятся в git (.gitignore), а часть тестов запускает настоящие движки
       # (проверка конфигов Xray/sing-box). Версии закреплены, SHA-256 сверяется с хешами из GitHub API.
