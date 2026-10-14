@@ -75,6 +75,27 @@ jobs:
       - name: Нативные чтения под Electron
         run: npm run test:electron-probe
 
+  website:
+    name: Сайт (сборка и HTML)
+    # Сборщик и линтер — чистый Node без зависимостей и без Win32: хватает Linux-раннера.
+    # Проверки в браузере (tools/check.mjs, fontcheck.mjs) требуют Chrome и сюда не входят.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: website
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false # токен не нужен после загрузки кода и не должен остаться в .git/config
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.21.0'
+      - name: Сборка
+        run: node tools/build.mjs
+      - name: Баланс тегов и ссылки
+        run: node tools/lint-html.mjs
+
   sidecar:
     name: ETW-сайдкар (Rust)
     runs-on: windows-latest
