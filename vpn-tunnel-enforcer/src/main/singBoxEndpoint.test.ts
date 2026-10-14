@@ -74,13 +74,24 @@ describe('wireguardOutboundToEndpoint', () => {
     expect(endpoint.peers[0]).toEqual({ address: 'x', port: 1, public_key: 'K', allowed_ips: ['0.0.0.0/0', '::/0'], persistent_keepalive_interval: 25 })
   })
 
+  it('never lets a multi-peer profile create a host interface or open a listening port', () => {
+    const endpoint = wireguardOutboundToEndpoint({
+      type: 'wireguard', local_address: ['10.0.0.2'], private_key: 'P', mtu: 1280, udp_timeout: '5m', workers: 2,
+      system: true, name: 'wg-evil', listen_port: 51820,
+      peers: [{ address: 'x', port: 1, public_key: 'K' }]
+    }) as any
+    expect(endpoint).not.toHaveProperty('system')
+    expect(endpoint).not.toHaveProperty('name')
+    expect(endpoint).not.toHaveProperty('listen_port')
+    expect(endpoint).toMatchObject({ mtu: 1280, udp_timeout: '5m', workers: 2 })
+  })
+
   it('coerces numeric strings from hand-written JSON on both paths', () => {
     const multi = wireguardOutboundToEndpoint({
-      type: 'wireguard', local_address: ['10.0.0.2'], private_key: 'P', mtu: '1280', listen_port: '51820',
+      type: 'wireguard', local_address: ['10.0.0.2'], private_key: 'P', mtu: '1280',
       peers: [{ address: 'x', port: '51820', public_key: 'K' }]
     }) as any
     expect(multi.mtu).toBe(1280)
-    expect(multi.listen_port).toBe(51820)
     expect(multi.peers[0].port).toBe(51820)
     expect((wireguardOutboundToEndpoint({ ...base, server_port: '51820', mtu: '1280' }) as any).mtu).toBe(1280)
   })
