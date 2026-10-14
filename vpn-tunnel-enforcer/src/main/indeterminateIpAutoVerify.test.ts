@@ -7,6 +7,18 @@ import {
 
 vi.mock('axios')
 vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
+import { logEvent } from './appLogger'
+
+const cleanLeakResult = (ip: string) => ({
+  ts: Date.now(),
+  physicalAdapterInspectionComplete: true,
+  physicalAdapterReached: false,
+  publicIpMismatch: false,
+  dnsLeakDetected: false,
+  defaultRoutePublicIp: ip,
+  perAdapter: [],
+  summary: 'OK'
+})
 
 describe('indeterminate IP auto-verification (AT-07-001 / AT-07-005 / AT-07-006)', () => {
   beforeEach(() => {
@@ -206,6 +218,66 @@ describe('indeterminate IP auto-verification (AT-07-001 / AT-07-005 / AT-07-006)
 
       expect(recheck).toHaveBeenCalledWith(true, expect.any(Function), '13.143.214.3')
       expect(onVerified).not.toHaveBeenCalled()
+    })
+
+    it('does not adopt the IP when the connection is replaced during the leak test (AT-07-005)', async () => {
+      const onVerified = vi.fn()
+      const recheck = vi.fn()
+      let connection = 1
+
+      await executeIndeterminateVpnIpAutoVerify('13.143.214.3', {
+        isRunning: () => true,
+        getConnectionId: () => connection,
+        getVerdict: () => 'indeterminate',
+        areRoutesActive: async () => true,
+        runLeakTest: async () => {
+          connection = 2 // reconnect: running again, but a different connection
+          return cleanLeakResult('13.143.214.3')
+        },
+        recheck,
+        onVerified
+      })
+
+      expect(recheck).not.toHaveBeenCalled()
+      expect(onVerified).not.toHaveBeenCalled()
+    })
+
+    it('binds the final recheck to the connection that produced the candidate (AT-07-005)', async () => {
+      const onVerified = vi.fn()
+      let connection = 1
+      let publishAllowed: boolean | undefined
+      const recheck = vi.fn(async (_rebaseline: boolean, canPublish?: () => boolean) => {
+        connection = 2 // reconnect while the fresh sample is being taken
+        publishAllowed = canPublish?.()
+        return { ip: '13.143.214.3', isLeak: false, vpnIp: '13.143.214.3' }
+      })
+
+      await executeIndeterminateVpnIpAutoVerify('13.143.214.3', {
+        isRunning: () => true,
+        getConnectionId: () => connection,
+        getVerdict: () => 'indeterminate',
+        areRoutesActive: async () => true,
+        runLeakTest: async () => cleanLeakResult('13.143.214.3'),
+        recheck,
+        onVerified
+      })
+
+      expect(recheck).toHaveBeenCalledTimes(1)
+      expect(publishAllowed).toBe(false)
+      expect(onVerified).not.toHaveBeenCalled()
+    })
+
+    it('logs the candidate and verified public IPs in the clear', async () => {
+      vi.mocked(logEvent).mockClear()
+      await executeIndeterminateVpnIpAutoVerify('13.143.214.3', {
+        isRunning: () => true,
+        getVerdict: () => 'indeterminate',
+        areRoutesActive: async () => true,
+        runLeakTest: async () => cleanLeakResult('13.143.214.4'),
+        recheck: async () => ({ ip: '13.143.214.4', isLeak: false, vpnIp: '13.143.214.4' })
+      })
+      const adopted = vi.mocked(logEvent).mock.calls.find(([, , message]) => String(message).includes('adopting verified VPN IP'))
+      expect(adopted?.[3]).toMatchObject({ candidateIp: '13.143.214.3', verifiedIp: '13.143.214.4' })
     })
 
     it('aborts when TUN stops running during verification', async () => {
