@@ -342,6 +342,20 @@ export async function isKillSwitchActive(options?: { probeWfp?: boolean }): Prom
   return hasWfpIpv6Protection(wfpRun)
 }
 
+/**
+ * Kill-switch state for the UI. isKillSwitchActive() throws when the recovery manifest cannot be trusted; start
+ * and recovery paths rely on that (fail closed). The status query reports the state as active but unverified
+ * instead of failing the call: the user sees the block and disabling goes through recovery, which handles it.
+ */
+export async function getKillSwitchStatusForUi(): Promise<{ active: boolean; unverified?: true }> {
+  try {
+    return { active: await isKillSwitchActive() }
+  } catch (error) {
+    logEvent('error', 'firewall-killswitch', 'kill-switch state unreadable — reporting active (unverified)', { error: String(error) })
+    return { active: true, unverified: true }
+  }
+}
+
 export async function ensureKillSwitchProgramAllowed(
   programPath: string,
   ruleSuffix = 'program',

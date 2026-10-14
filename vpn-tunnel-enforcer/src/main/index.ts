@@ -38,6 +38,7 @@ import {
   disableKillSwitchIfActive,
   getFirewallRepairHealth,
   isKillSwitchActive,
+  getKillSwitchStatusForUi,
   KILL_SWITCH_RULE_PREFIX,
   killSwitchManifestExists,
   nuclearFirewallReset,
@@ -2282,9 +2283,7 @@ app.whenReady().then(async () => {
     return tunController.disableFirewallKillSwitch('manual override from UI')
   })
 
-  handleLogged('get-firewall-kill-switch-status', async () => {
-    return { active: await isKillSwitchActive() }
-  })
+  handleLogged('get-firewall-kill-switch-status', async () => getKillSwitchStatusForUi())
 
   // Detect another active VPN/TUN adapter (Happ, WireGuard, OpenVPN, …) that
   // would intercept our latency probes. When such an adapter is up, every
