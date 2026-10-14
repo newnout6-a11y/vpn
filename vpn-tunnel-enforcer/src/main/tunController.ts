@@ -260,6 +260,10 @@ const DIRECT_VPN_WATCHDOG_INTERVAL_MS = 15000
 // Cleared on a user-initiated stop so we don't try to "recover" from a
 // deliberate shutdown.
 let lastStartOptions: StartOptions | null = null
+// Split-tunnel direct rules the current/last start read. A rule change made while a start is still in flight
+// skips the hot reload (the tunnel is not running yet); splitTunneling compares this against the store once
+// the tunnel reports running and re-applies through a protected restart.
+let appliedSplitTunnelRules: { names: string[]; paths: string[] } | null = null
 let restartAttempt = 0
 let restartTimer: ReturnType<typeof setTimeout> | null = null
 let stableTimer: ReturnType<typeof setTimeout> | null = null
@@ -2551,10 +2555,12 @@ export const tunController = {
     let splitTunnelDirectNames: string[] = []
     let splitTunnelDirectPaths: string[] = []
     const splitTunnelStarted = phaseStart()
+    appliedSplitTunnelRules = null
     try {
       const { splitTunneling } = await import('./splitTunneling')
       splitTunnelDirectNames = splitTunneling.getDirectProcessNames()
       splitTunnelDirectPaths = splitTunneling.getDirectProcessPaths()
+      appliedSplitTunnelRules = { names: [...splitTunnelDirectNames], paths: [...splitTunnelDirectPaths] }
     } catch (err) {
       logEvent('debug', 'tun', 'could not read split-tunnel direct names', err)
     } finally {
@@ -4203,6 +4209,13 @@ export const tunController = {
 
   getStatus(): TunStatus {
     return { ...currentStatus }
+  },
+
+  /** Split-tunnel direct rules read by the latest start, or null when they could not be read. */
+  getAppliedSplitTunnelRules(): { names: string[]; paths: string[] } | null {
+    return appliedSplitTunnelRules
+      ? { names: [...appliedSplitTunnelRules.names], paths: [...appliedSplitTunnelRules.paths] }
+      : null
   },
 
   getLastStartOptions(): StartOptions | null {
