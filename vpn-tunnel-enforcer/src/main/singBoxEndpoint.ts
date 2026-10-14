@@ -83,7 +83,10 @@ export function wireguardOutboundToEndpoint(outbound: Record<string, any>): Wire
     // Multi-peer profile (hand-written JSON). Peers may still use the legacy keys server/server_port, which the
     // endpoint form does not know: translate every peer instead of copying obsolete fields into the endpoint.
     // Only fields the endpoint knows are carried over: sing-box 1.13 rejects unknown keys (tls, multiplex, detour…).
-    const { local_address, domain_resolver, address, peers, private_key, mtu, listen_port, udp_timeout, workers, system, name } = outbound
+    // `system`, `name` and `listen_port` are dropped on purpose: the client owns the only system interface (tun-in),
+    // and a profile must not make the privileged core create another interface or open a listening port that the
+    // stop and crash-recovery paths know nothing about.
+    const { local_address, domain_resolver, address, peers, private_key, mtu, udp_timeout, workers } = outbound
     const addresses = toPrefixes(Array.isArray(address) ? address : local_address)
     if (addresses.length === 0) throw new Error('WireGuard: не указан локальный адрес туннеля (ip=…)')
     if (peers.length === 0) throw new Error('WireGuard: не указан ни один пир')
@@ -94,11 +97,8 @@ export function wireguardOutboundToEndpoint(outbound: Record<string, any>): Wire
       address: addresses,
       private_key: asString(private_key),
       ...(toInt(mtu) > 0 ? { mtu: toInt(mtu) } : {}),
-      ...(toInt(listen_port) > 0 && toInt(listen_port) <= 65535 ? { listen_port: toInt(listen_port) } : {}),
       ...(typeof udp_timeout === 'string' && udp_timeout ? { udp_timeout } : {}),
       ...(toInt(workers) > 0 ? { workers: toInt(workers) } : {}),
-      ...(typeof system === 'boolean' ? { system } : {}),
-      ...(typeof name === 'string' && name ? { name } : {}),
       ...(domain_resolver ? { domain_resolver } : {}),
       peers: peers.map((peer: Record<string, any>) => toEndpointPeer(peer, peers.length === 1))
     }

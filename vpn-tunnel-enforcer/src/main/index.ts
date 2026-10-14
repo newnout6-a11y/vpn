@@ -38,6 +38,7 @@ import {
   disableKillSwitchIfActive,
   getFirewallRepairHealth,
   isKillSwitchActive,
+  getKillSwitchStatusForUi,
   KILL_SWITCH_RULE_PREFIX,
   killSwitchManifestExists,
   nuclearFirewallReset,
@@ -48,8 +49,7 @@ import {
   clearPhysicalAdaptersSnapshotCache,
   isPhysicalAdapterLockdownApplied,
   repairOrphanedPhysicalAdapterDns,
-  rollbackPhysicalAdapterLockdownIfApplied,
-  warmPhysicalAdaptersSnapshot
+  rollbackPhysicalAdapterLockdownIfApplied
 } from './physicalAdapterLockdown'
 import { relaunchElevatedIfNeeded } from './admin'
 import { clearAppLog, getFullLogs, logEvent, openLogFolder, startEngineLogRetention, type AppLogLevel } from './appLogger'
@@ -1869,7 +1869,6 @@ app.whenReady().then(async () => {
     isQuitting || shutdownInProgress || connectionLifecycle.busy || tunController.getStatus().running)
 
   createWindow()
-  void warmPhysicalAdaptersSnapshot().catch(() => undefined)
   void serverPicker.resolveAndPersistProfileIps().catch(() => undefined)
   tray = createTray(mainWindow!, {
     onStart: startProtectionFromTray,
@@ -2282,9 +2281,7 @@ app.whenReady().then(async () => {
     return tunController.disableFirewallKillSwitch('manual override from UI')
   })
 
-  handleLogged('get-firewall-kill-switch-status', async () => {
-    return { active: await isKillSwitchActive() }
-  })
+  handleLogged('get-firewall-kill-switch-status', async () => getKillSwitchStatusForUi())
 
   // Detect another active VPN/TUN adapter (Happ, WireGuard, OpenVPN, …) that
   // would intercept our latency probes. When such an adapter is up, every

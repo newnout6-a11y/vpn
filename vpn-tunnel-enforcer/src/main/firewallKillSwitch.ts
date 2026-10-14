@@ -6,7 +6,7 @@ import { execFile as execFileCb } from 'child_process'
 import { isIP } from 'net'
 import { promisify } from 'util'
 import { execElevated } from './admin'
-import { execElevatedPs, isElevatedPsHelperRunning } from './elevatedPsHelper'
+import { execElevatedPs, isElevatedPsHelperRunning, type ElevatedPsPolicy } from './elevatedPsHelper'
 import { logEvent } from './appLogger'
 import { getPrivilegedRuntimeDir } from './runtimePaths'
 import { randomUUID, createHash } from 'crypto'
@@ -173,7 +173,10 @@ function logNativeFirewallTimings(stdout: string): void {
   }
 }
 
-async function ps(script: string, elevated = false, timeout = 30000) {
+/** Runner for the WFP IPv6 module: its scripts are checked against the wfp-ipv6 helper policy. */
+const wfpRun = (script: string) => ps(script, true, 30000, 'wfp-ipv6')
+
+async function ps(script: string, elevated = false, timeout = 30000, policy: ElevatedPsPolicy = 'firewall-killswitch') {
   const ruleBackend = /\b(?:Get-VpnteFirewallRuleNames|New-VpnteFirewallRule|Remove-VpnteFirewallRules)\b/.test(script) ? 'com' : 'netsecurity'
   script = withFirewallRulesApi(script)
   // The persistent helper executes source from its pipe. A protected .ps1 is
@@ -182,7 +185,6 @@ async function ps(script: string, elevated = false, timeout = 30000) {
     const started = performance.now()
     let result: Awaited<ReturnType<typeof execElevatedPs>> | undefined
     try {
-      const policy = script.startsWith("$ErrorActionPreference='Stop'\nif (-not ('VPNTE.IPv6.Policy'") ? 'wfp-ipv6' : 'firewall-killswitch'
       result = await execElevatedPs(script, timeout, policy)
     } catch (err: any) {
       // Only a known rejection before execution permits a fallback. A timeout
@@ -337,7 +339,21 @@ export function isValidIpOrCidr(value: string): boolean {
 export async function isKillSwitchActive(options?: { probeWfp?: boolean }): Promise<boolean> {
   if ((await readManifest()) !== null || await probeFirewallForOurRules()) return true
   if (options?.probeWfp === false) return false
-  return hasWfpIpv6Protection(script => ps(script, true))
+  return hasWfpIpv6Protection(wfpRun)
+}
+
+/**
+ * Kill-switch state for the UI. isKillSwitchActive() throws when the recovery manifest cannot be trusted; start
+ * and recovery paths rely on that (fail closed). The status query reports the state as active but unverified
+ * instead of failing the call: the user sees the block and disabling goes through recovery, which handles it.
+ */
+export async function getKillSwitchStatusForUi(): Promise<{ active: boolean; unverified?: true }> {
+  try {
+    return { active: await isKillSwitchActive() }
+  } catch (error) {
+    logEvent('error', 'firewall-killswitch', 'kill-switch state unreadable — reporting active (unverified)', { error: String(error) })
+    return { active: true, unverified: true }
+  }
 }
 
 export async function ensureKillSwitchProgramAllowed(
@@ -535,14 +551,14 @@ async function updateExceptionsUnlocked(apps: string[], cidrs: string[], strictM
   if (!previous.ipv6Policy) return { success: false, state: 'unknown', message: 'IPv6 protection requires reconnect before live exceptions' }
   let ipv6Policy: WfpIpv6Policy
   try {
-    ipv6Policy = await prepareWfpIpv6Exceptions(previous.ipv6Policy, policy.apps, policy.cidrs, script => ps(script, true))
+    ipv6Policy = await prepareWfpIpv6Exceptions(previous.ipv6Policy, policy.apps, policy.cidrs, wfpRun)
   } catch (error) {
     return { success: false, state: 'unknown', message: 'IPv6 exception preparation failed; firewall unchanged', details: String(error) }
   }
   // Original baseline and core rule names are never replaced by a live update.
   await timedFirewallPhase('live-prepare-journal', () => writeManifest({ ...previous, pendingExceptionPolicy: policy }))
   try {
-    await applyWfpIpv6Policy(ipv6Policy, script => ps(script, true))
+    await applyWfpIpv6Policy(ipv6Policy, wfpRun)
     const { stdout } = await timedFirewallPhase('live-apply-policy', () => ps(exceptionPolicyScript(policy), true, 30000))
     if (!String(stdout).split(/\r?\n/).includes('EXCEPTIONS_VERIFIED')) throw new Error('Exception verification marker missing')
     const { pendingExceptionPolicy: _pending, ...committed } = previous
@@ -552,7 +568,7 @@ async function updateExceptionsUnlocked(apps: string[], cidrs: string[], strictM
   } catch (error) {
     try {
       const failures: unknown[] = []
-      try { await applyWfpIpv6Policy(previous.ipv6Policy, script => ps(script, true)) } catch (failure) { failures.push(failure) }
+      try { await applyWfpIpv6Policy(previous.ipv6Policy, wfpRun) } catch (failure) { failures.push(failure) }
       try {
         const { stdout } = await ps(exceptionPolicyScript(old), true, 30000)
         if (!String(stdout).split(/\r?\n/).includes('EXCEPTIONS_VERIFIED')) throw new Error('Exception compensation not verified')
@@ -608,10 +624,10 @@ async function enableKillSwitchUnlocked(opts: KillSwitchOptions): Promise<Firewa
   try {
     ipv6Policy = await prepareWfpIpv6Policy({ corePrograms: [opts.singboxExePath, ...(opts.proxyOwnerProgramPaths ?? [])],
       serverHost: opts.vpnServerHost, signal: opts.signal, tunAlias: opts.tunAdapterAlias || getTunAdapterAlias(),
-      apps: initialExceptions?.apps ?? previous?.exceptionPolicy?.apps ?? [], cidrs: initialExceptions?.cidrs ?? previous?.exceptionPolicy?.cidrs ?? [] }, script => ps(script, true))
+      apps: initialExceptions?.apps ?? previous?.exceptionPolicy?.apps ?? [], cidrs: initialExceptions?.cidrs ?? previous?.exceptionPolicy?.cidrs ?? [] }, wfpRun)
   } catch (error) { return { success: false, state: 'unknown', message: 'IPv6 policy preparation failed; firewall unchanged', details: String(error) } }
   if (previous?.phase === 'active' && previous.ipv6Policy && sameWfpCoreScopes(previous.ipv6Policy, ipv6Policy)) {
-    try { await verifyWfpIpv6Policy(previous.ipv6Policy, script => ps(script, true)) }
+    try { await verifyWfpIpv6Policy(previous.ipv6Policy, wfpRun) }
     catch (error) { return { success: false, state: 'unknown', message: 'Existing IPv6 coverage not verified', details: String(error) } }
     if (opts.appExceptionPaths !== undefined || opts.extraAllowedRemoteCidrs !== undefined || opts.strictMode !== undefined) {
       return updateExceptionsUnlocked(opts.appExceptionPaths ?? previous.exceptionPolicy?.apps ?? [], opts.extraAllowedRemoteCidrs ?? previous.exceptionPolicy?.cidrs ?? [], opts.strictMode)
@@ -870,7 +886,7 @@ Write-Output "SAVED:$savedJson"
   let installedRules: string[] = []
   try {
     opts.signal?.throwIfAborted()
-    await applyWfpIpv6Policy(ipv6Policy, script => ps(script, true))
+    await applyWfpIpv6Policy(ipv6Policy, wfpRun)
     opts.signal?.throwIfAborted()
     const { stdout } = await timedFirewallPhase('initial-apply-policy', () => ps(script, true, 60000))
     const output = String(stdout || '')
@@ -949,8 +965,8 @@ async function restoreAndCleanup(snapshot?: FirewallManifest): Promise<void> {
   const recovery = snapshot ? { manifest: snapshot, corrupt: false } : await readManifestForRecovery()
   const { manifest } = recovery
   if (!manifest && !(await probeFirewallForOurRules())) {
-    if (await hasWfpIpv6Protection(script => ps(script, true))) {
-      await removeWfpIpv6Protection(script => ps(script, true))
+    if (await hasWfpIpv6Protection(wfpRun)) {
+      await removeWfpIpv6Protection(wfpRun)
       reportRecoveryWarning('Осиротевшая IPv6-защита снята. Исходная firewall policy неизвестна; профили не изменены.')
       throw new Error('IPv6 orphan cleanup verified but firewall baseline unknown')
     }
@@ -983,7 +999,7 @@ if ($errors.Count -gt 0) { throw ($errors -join ' | ') }
 Write-Output 'RESTORED'`, true, 30000)
     if (!String(stdout).split(/\r?\n/).includes('RESTORED')) throw new Error('Firewall rollback read-back was not confirmed')
   } catch (failure) { failures.push(failure) }
-  try { await removeWfpIpv6Protection(script => ps(script, true)) } catch (failure) { failures.push(failure) }
+  try { await removeWfpIpv6Protection(wfpRun) } catch (failure) { failures.push(failure) }
   if (failures.length) throw new AggregateError(failures, `Network rollback incomplete: ${failures.map(String).join(' | ')}`)
 }
 export async function disableKillSwitch(reason: string): Promise<FirewallKillSwitchResult> {
@@ -1077,7 +1093,7 @@ export async function recoverStaleKillSwitch(isSingboxRunning: () => Promise<boo
 export async function reserveKillSwitchIpv6Priority(signal: AbortSignal): Promise<void> {
   return serializeFirewall(async () => {
     signal.throwIfAborted()
-    try { await reserveWfpIpv6Priority(script => ps(script, true)) }
+    try { await reserveWfpIpv6Priority(wfpRun) }
     catch (err: any) {
       if (String(err?.stderr || err?.message || err).includes('IPv6 WFP priority conflict')) {
         throw new Error('Конфликт IPv6-фильтров WFP: остановите TUN/VPN другого приложения и повторите подключение')
@@ -1100,7 +1116,7 @@ async function recoverStaleKillSwitchUnlocked(isSingboxRunning: () => Promise<bo
     return
   }
   const manifestSaysActive = manifest !== null
-  const firewallSaysActive = manifestSaysActive || await probeFirewallForOurRules() || await hasWfpIpv6Protection(script => ps(script, true))
+  const firewallSaysActive = manifestSaysActive || await probeFirewallForOurRules() || await hasWfpIpv6Protection(wfpRun)
   const stuckBlockDefault = false // A foreign Block policy is not evidence of VPNTE ownership.
   if (!manifestSaysActive && !firewallSaysActive && !stuckBlockDefault) return
   if (await isSingboxRunning()) {

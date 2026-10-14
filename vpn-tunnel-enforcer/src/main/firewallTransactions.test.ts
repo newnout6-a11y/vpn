@@ -106,7 +106,7 @@ vi.mock('./elevatedPsHelper', () => ({ isElevatedPsHelperRunning: () => state.he
     return { stdout: state.ownedRules && script.includes('Get-VpnteFirewallRuleNames') ? '1' : '0', stderr: '' }
   }
 }))
-import { enableKillSwitch, disableKillSwitch, isKillSwitchActive, killSwitchManifestExists, updateKillSwitchExceptions, recoverStaleKillSwitch, ensureKillSwitchProgramAllowed } from './firewallKillSwitch'
+import { enableKillSwitch, disableKillSwitch, isKillSwitchActive, getKillSwitchStatusForUi, killSwitchManifestExists, updateKillSwitchExceptions, recoverStaleKillSwitch, ensureKillSwitchProgramAllowed } from './firewallKillSwitch'
 import { RecoveryManifestReadError } from './recoveryManifest'
 import { logEvent } from './appLogger'
 const originalPlatform = process.platform
@@ -169,7 +169,8 @@ describe('firewall transaction fault injection (AT-03-003/004/007; F-030, F-186)
     expect(state.wfpCalls).toEqual([])
     expect(state.scripts).toEqual([])
   })
-  it('stops before IPv6 preparation when cancelled during the adapter barrier (AT-03-007)', async () => {
+  // IPv6 preparation is entered (it owns the abort check) but must abort with no journal and no native script.
+  it('aborts IPv6 preparation without effects when cancelled during the adapter barrier (AT-03-007)', async () => {
     const controller = new AbortController()
     let ready!: (value: boolean) => void
     const barrier = new Promise<boolean>(resolve => { ready = resolve })
@@ -195,6 +196,13 @@ describe('firewall transaction fault injection (AT-03-003/004/007; F-030, F-186)
     await expect(isKillSwitchActive()).rejects.toThrow('corrupt JSON')
     expect(state.quarantines).toEqual([])
     expect(state.scripts).toEqual([])
+  })
+  it('reports an unreadable manifest to the UI as an unverified active block instead of failing (AT-03-003)', async () => {
+    state.readError = new RecoveryManifestReadError('invalid-content', 'corrupt JSON')
+    await expect(getKillSwitchStatusForUi()).resolves.toEqual({ active: true, unverified: true })
+    expect(state.quarantines).toEqual([])
+    state.readError = null
+    await expect(getKillSwitchStatusForUi()).resolves.toEqual({ active: false })
   })
   it('rejects a future IPv6 journal without quarantine or native effects (AT-03-003)', async () => {
     await enableKillSwitch(options); state.manifest.ipv6Policy.schemaVersion = 2; state.scripts = []; state.wfpCalls = []
