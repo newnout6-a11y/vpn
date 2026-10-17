@@ -2,9 +2,18 @@
  * Unit tests for scheduler pure functions.
  */
 
-import { describe, it, expect } from 'vitest'
-import { isScheduleActive, computeNextEvent, parseTimeToMinutes } from './scheduler'
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest'
+import { isScheduleActive, computeNextEvent, parseTimeToMinutes, schedulerService } from './scheduler'
 import type { ScheduleEntry } from '../shared/ipc-types'
+
+vi.mock('electron', () => ({ ipcMain: { handle: vi.fn() } }))
+vi.mock('electron-store', () => ({
+  default: class {
+    private schedules: ScheduleEntry[] = []
+    get() { return this.schedules }
+    set(_key: string, schedules: ScheduleEntry[]) { this.schedules = schedules }
+  }
+}))
 
 // ─── Helper ──────────────────────────────────────────────────────────────────
 
@@ -145,7 +154,7 @@ describe('computeNextEvent', () => {
     }
   })
 
-  it('picks the chronologically nearest event across multiple schedules', () => {
+  it('returns the end of the combined window across overlapping schedules (AT-10-002)', () => {
     // Wednesday 2024-01-10 at 15:00
     const wed1500 = new Date(2024, 0, 10, 15, 0, 0).getTime()
 
@@ -164,9 +173,65 @@ describe('computeNextEvent', () => {
 
     const result = computeNextEvent([schedule1, schedule2], wed1500)
     expect(result).not.toBeNull()
-    // 15:30 start is closer than 17:00 stop
-    expect(result!.type).toBe('start')
+    expect(result!.type).toBe('stop')
     expect(result!.schedule.id).toBe('s2')
+    expect(result!.at).toBe(new Date(2024, 0, 10, 20).getTime())
+  })
+})
+
+describe('merged schedule windows — AT-10-002 / F-123', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(2024, 0, 10, 8, 59))
+    for (const schedule of schedulerService.getSchedules()) schedulerService.deleteSchedule(schedule.id)
+  })
+
+  afterEach(() => {
+    schedulerService.stop()
+    for (const schedule of schedulerService.getSchedules()) schedulerService.deleteSchedule(schedule.id)
+    schedulerService.stop()
+    vi.useRealTimers()
+  })
+
+  it.each([
+    ['overlap', '09:30', '11:00'],
+    ['adjacent', '10:00', '11:00'],
+    ['same end', '09:30', '10:00'],
+    ['nested', '09:15', '09:45']
+  ])('connects once and stops only after the last %s window closes', (_kind, startTime, endTime) => {
+    schedulerService.createSchedule(makeSchedule({ startTime: '09:00', endTime: '10:00' }))
+    schedulerService.createSchedule(makeSchedule({ startTime, endTime }))
+    const onConnect = vi.fn(), onDisconnect = vi.fn()
+    schedulerService.init({ onConnect, onDisconnect })
+
+    const endHour = endTime === '11:00' ? 11 : 10
+    vi.advanceTimersByTime(new Date(2024, 0, 10, endHour).getTime() - Date.now() - 1)
+    expect(onConnect).toHaveBeenCalledTimes(1)
+    expect(onDisconnect).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(1)
+    expect(onDisconnect).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps an overnight window active while the next day window still requires VPN', () => {
+    const overnight = makeSchedule({ id: 'night', days: [3], startTime: '22:00', endTime: '06:00' })
+    const morning = makeSchedule({ id: 'morning', days: [4], startTime: '05:00', endTime: '08:00' })
+    for (const schedules of [[overnight, morning], [morning, overnight]]) {
+      expect(computeNextEvent(schedules, new Date(2024, 0, 11, 2).getTime())).toMatchObject({
+        type: 'stop', at: new Date(2024, 0, 11, 8).getTime(), schedule: { id: 'morning' }
+      })
+    }
+  })
+
+  it('does not merge a disabled window or a real gap between windows', () => {
+    const first = makeSchedule({ startTime: '09:00', endTime: '10:00' })
+    const disabled = makeSchedule({ enabled: false, startTime: '09:30', endTime: '12:00' })
+    const later = makeSchedule({ startTime: '10:01', endTime: '11:00' })
+    expect(computeNextEvent([first, disabled, later], new Date(2024, 0, 10, 9, 30).getTime())).toMatchObject({
+      type: 'stop', at: new Date(2024, 0, 10, 10).getTime()
+    })
+    expect(computeNextEvent([first, disabled, later], new Date(2024, 0, 10, 10).getTime())).toMatchObject({
+      type: 'start', at: new Date(2024, 0, 10, 10, 1).getTime()
+    })
   })
 })
 

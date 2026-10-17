@@ -112,8 +112,8 @@ export function isScheduleActive(schedule: ScheduleEntry, timestamp: number): bo
 }
 
 /**
- * Computes the chronologically nearest future start or stop event across all
- * enabled schedules.
+ * Computes the next start or stop of the union of enabled schedule windows.
+ * Overlapping or adjacent windows keep protection active without reconnecting.
  *
  * Returns null if no schedules are enabled or no future event can be found
  * within the next 7 days.
@@ -121,6 +121,7 @@ export function isScheduleActive(schedule: ScheduleEntry, timestamp: number): bo
 export function computeNextEvent(schedules: ScheduleEntry[], now: number): NextEvent | null {
   const enabledSchedules = schedules.filter((s) => s.enabled && s.days.length > 0)
   if (enabledSchedules.length === 0) return null
+  const isAnyActive = (at: number) => enabledSchedules.some((s) => isScheduleActive(s, at))
 
   let nearest: NextEvent | null = null
 
@@ -146,7 +147,7 @@ export function computeNextEvent(schedules: ScheduleEntry[], now: number): NextE
       startEvent.setHours(Math.floor(startMinutes / 60), startMinutes % 60, 0, 0)
       const startTs = startEvent.getTime()
 
-      if (startTs > now) {
+      if (startTs > now && !isAnyActive(startTs - 1)) {
         if (!nearest || startTs < nearest.at) {
           nearest = { type: 'start', at: startTs, schedule }
         }
@@ -162,7 +163,7 @@ export function computeNextEvent(schedules: ScheduleEntry[], now: number): NextE
       }
       const stopTs = stopEvent.getTime()
 
-      if (stopTs > now) {
+      if (stopTs > now && !isAnyActive(stopTs)) {
         if (!nearest || stopTs < nearest.at) {
           nearest = { type: 'stop', at: stopTs, schedule }
         }
