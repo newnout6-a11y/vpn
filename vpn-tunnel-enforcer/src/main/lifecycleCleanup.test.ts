@@ -853,6 +853,25 @@ describe('Xray startup phase measurements (AT-02-002 / AT-02-004)', () => {
 })
 
 describe('baseline recovery callers (AT-03-007)', () => {
+  it.each(['pending', 'rejected'])('continues startup recovery when the warning dialog is %s (AT-03-003/007)', async outcome => {
+    let dismiss!: (value: {}) => void
+    const notification = new Promise<{}>(resolve => { dismiss = resolve })
+    const dialogError = new Error('native warning unavailable')
+    const deps = { process: { platform: 'win32' }, isBaselineApplied: vi.fn(async () => true),
+      isOwnedTunRuntimeRunning: vi.fn(async () => false),
+      rollbackTunNetworkBaselineOrThrow: vi.fn(async () => { throw new Error('partial baseline rollback') }),
+      dialog: { showMessageBox: vi.fn(() => outcome === 'pending' ? notification : Promise.reject(dialogError)) }, logEvent: noop() }
+    const recover = compile<() => Promise<void>>(`${body('index.ts', 'recoverStaleBaseline')}\nreturn recoverStaleBaseline;`, deps)
+    const nextRecovery = vi.fn()
+    let status = 'pending'
+    const recovery = recover().then(() => { nextRecovery(); status = 'completed' }, () => { status = 'rejected' })
+    try {
+      await vi.waitFor(() => expect(status).toBe('completed'), { timeout: 500 })
+      expect(nextRecovery).toHaveBeenCalledOnce()
+      expect(deps.dialog.showMessageBox).toHaveBeenCalledOnce()
+      if (outcome === 'rejected') expect(deps.logEvent).toHaveBeenCalledWith('warn', 'app', 'crash-recovery warning dialog failed', dialogError)
+    } finally { dismiss({}); await recovery }
+  })
   it.each(['failed', 'restored', 'live runtime', 'unknown runtime', 'untrusted baseline', 'no baseline'])('startup recovery surfaces %s before a renderer exists', async outcome => {
     const recoveryError = new Error('environment/HTTP_PROXY: access denied. Повторите восстановление сети.')
     const deps = { process: { platform: 'win32' }, isBaselineApplied: vi.fn(async () => {
@@ -875,7 +894,8 @@ describe('baseline recovery callers (AT-03-007)', () => {
       type: 'warning', title: 'Восстановление сети не завершено', detail: recoveryError.message
     }))
     if (outcome === 'unknown runtime' || outcome === 'untrusted baseline') expect(deps.dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({
-      type: 'warning', detail: expect.stringContaining(outcome === 'unknown runtime' ? 'runtime query denied' : 'untrusted storage')
+      type: 'warning', title: 'Восстановление сети не проверено',
+      detail: expect.stringContaining(outcome === 'unknown runtime' ? 'runtime query denied' : 'untrusted storage')
     }))
   })
   it.each([false, true])('logs rejected baseline recovery in onExit, emergency=%s', async emergency => {

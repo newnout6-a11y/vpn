@@ -1442,6 +1442,7 @@ CI/review нового SHA проверяются отдельно после pu
   234 files passed / 2 skipped, 127.01 s, exit 0. Typecheck — exit 0;
   python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py —
   AC 927/927, F 210/210, exit 0; git diff --check — exit 0.
+
 - После push этого тестового коммита оставить SHA стабильным до CI/review,
   проверить новые замечания отдельно от переякоренных старых. Следующая
   доступная работа WP-3 — оставшаяся partial-manifest матрица AT-03-003;
@@ -1487,3 +1488,26 @@ CI/review нового SHA проверяются отдельно после pu
   5 skipped, 234 files passed / 2 skipped, 128.34 s, exit 0.
   python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py —
   AC 927/927, F 210/210, exit 0; git diff --check — exit 0.
+
+### WP-3: предупреждение не задерживает startup recovery (CodeRabbit 4304147637)
+
+- CodeRabbit review fdfac87 (5559652610) опубликован: одно новое Minor.
+  Status CodeRabbit Review completed/success. Замечание подтверждено:
+  await native warning удерживал recoverStaleBaseline, остальные recovery
+  и createWindow до нажатия ОК; rejected dialog прерывал recovery.
+- Четыре новые/уточнённые проверки до ремонта дали 4 failed / 4 passed /
+  132 skipped (startup subset): pending/rejected dialog и неверный заголовок
+  при ошибке runtime/storage preflight. Это воспроизведение дефекта, а не
+  системная Windows/L3-приёмка.
+- recoverStaleBaseline больше не ждёт закрытия диалога. Rejection показа
+  логируется отдельно и не прерывает цепочку восстановления. Сообщение
+  различает неудачный rollback и отказ предварительной проверки, при котором
+  rollback ещё не запускался; runtime exit barrier сохранён.
+- npm.cmd test -- src/main/lifecycleCleanup.test.ts
+  src/main/bootRecoveryBehavior.test.ts src/main/bootRecoveryExecution.test.ts
+  src/main/firewallStatus.test.ts — 223 passed, 4 files passed, 16.44 s,
+  exit 0. npm.cmd run typecheck и npm.cmd run build — exit 0.
+- Финальный npm.cmd test — 3236 passed / 5 skipped, 234 files passed /
+  2 skipped, 128.34 s, exit 0. Traceability AC 927/927, F 210/210;
+  git diff --check — exit 0. Новые SHA отправляются вместе после завершения
+  проверки fdfac87; текущие CI/review должны быть проверены отдельно.

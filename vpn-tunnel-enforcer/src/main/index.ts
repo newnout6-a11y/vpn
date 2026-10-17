@@ -964,6 +964,7 @@ function handleLogged<T>(
 // vars stay wiped forever. On startup, if no sing-box is left running, restore them.
 async function recoverStaleBaseline(): Promise<void> {
   if (process.platform !== 'win32') return
+  let rollbackStarted = false
   try {
     if (!(await isBaselineApplied())) return
     if (await isOwnedTunRuntimeRunning(true)) {
@@ -971,13 +972,18 @@ async function recoverStaleBaseline(): Promise<void> {
       return
     }
     logEvent('warn', 'app', 'stale baseline detected on startup (sing-box not running) — rolling back')
+    rollbackStarted = true
     await rollbackTunNetworkBaselineOrThrow('crash recovery on startup')
   } catch (err: any) {
-    logEvent('warn', 'app', 'crash-recovery rollback failed', err)
+    logEvent('warn', 'app', 'crash-recovery baseline restore unconfirmed', err)
     // Recovery runs before createWindow: renderer IPC would silently drop this warning.
-    await dialog.showMessageBox({ type: 'warning', title: 'Восстановление сети не завершено',
-      message: 'Не удалось полностью восстановить сетевые настройки предыдущего сеанса. Проверьте диагностику и повторите восстановление сети.',
+    // Do not delay the remaining recovery steps while waiting for dismissal.
+    void dialog.showMessageBox({ type: 'warning', title: rollbackStarted ? 'Восстановление сети не завершено' : 'Восстановление сети не проверено',
+      message: rollbackStarted
+        ? 'Не удалось полностью восстановить сетевые настройки предыдущего сеанса. Проверьте диагностику и повторите восстановление сети.'
+        : 'Не удалось проверить состояние сетевых настроек предыдущего сеанса. Проверьте диагностику перед повторным подключением.',
       detail: err?.message || String(err), buttons: ['ОК'] })
+      .catch(dialogErr => logEvent('warn', 'app', 'crash-recovery warning dialog failed', dialogErr))
   }
 }
 

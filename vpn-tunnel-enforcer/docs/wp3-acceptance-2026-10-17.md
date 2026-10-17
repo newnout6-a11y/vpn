@@ -343,6 +343,21 @@ src/main/bootRecoveryExecution.test.ts src/main/firewallStatus.test.ts` —
 3236 passed, 5 skipped, 234 files passed / 2 skipped, 128.34 s, exit 0.
 Typecheck, build, traceability (AC 927/927, F 210/210), diff check — exit 0.
 
+### Startup recovery: неблокирующее предупреждение
+
+CodeRabbit 4304147637 подтверждён: ожидание закрытия диалога задерживало
+остальные recovery steps до появления main window; отказ показа мог прервать
+startup recovery. Теперь диалог не ожидается, его rejection логируется
+отдельно. Заголовок и текст отличают отказ preflight от неудачного rollback.
+Условие подтверждённого runtime exit перед восстановлением не изменилось.
+
+В lifecycleCleanup.test.ts pending/rejected dialog не мешают завершению
+recoverStaleBaseline и переходу к следующему recovery. Runtime/storage
+preflight failures не запускают rollback и получают сообщение «не проверено».
+До исправления startup subset: 4 failed / 4 passed / 132 skipped; после —
+все 223 теста четырёх адресных suites прошли. Финальные полные проверки выше
+выполнены после исправления production кода; build также exit 0.
+
 ## Условие перехода дальше
 
 Закрыть доступные пробелы L1/L2, получить и сохранить реальные L3-доказательства
