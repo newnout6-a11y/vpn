@@ -1090,3 +1090,34 @@ npm.cmd test
   точному пути из Hyper-V — отсутствует.
 - Следующая доступная работа в WP-3: correlation id rollback-событий,
   расширение L1/L2 матрицы и разбор замечаний/проверок PR #46.
+
+### WP-3: корреляция rollback, seeded race и реальные 8.3 paths
+
+- В `systemNetwork.ts` baseline rollback получает UUID и возвращает его в
+  `SystemNetworkResult.operationId`. Тот же ID есть у начала, двух native timings,
+  девяти registry outcomes, WinINet notification, завершения/ошибки. Retry имеет
+  новый ID. В журнал начала включается причина автоматического отката.
+  Это корреляция baseline; общий контекст всех подсистем Stop ещё не доказан.
+- Новые assertions сначала дали 11 failed / 40 passed / 1 skipped. После
+  исправления `npm.cmd test -- src/main/systemNetwork.test.ts src/main/lifecycleCleanup.test.ts`
+  — 171 passed / 1 skipped, exit 0.
+- `granularKillSwitch.test.ts`: 50 смешанных add/remove (seed 30008). Проверены
+  каждый native exception set, итоговые in-memory/store данные и audit-порядок.
+- Там же: настоящий Win32 GetShortPathName для созданного `.exe`, затем
+  отклонение 8.3 alias как эквивалентного длинному пути. На томах без alias
+  сценарий явно SKIP; локально он прошёл. `npm.cmd test -- src/main/granularKillSwitch.test.ts`
+  — 12 passed, exit 0. Изолированный временный каталог удалён самим тестом.
+- CI на `9f8e26f`: Windows success, Rust success, Revix success.
+  https://github.com/newnout6-a11y/vpn/actions/runs/39055637354/job/117463031596
+  Нативный BFE smoke: `ok=true`, `aborted=true`, `rules=23`, `priority=verified`.
+  Подтверждён ABI/read-back на runner; это не packet/reboot/CLAT/OS acceptance.
+- Подтверждён ещё один дефект текущего main: `isKillSwitchActive()` считает
+  манифеста достаточным для active; IPC отдаёт только boolean, Dashboard по нему
+  утверждает «Интернет заблокирован файрволом». Полнота фактических правил,
+  профилей и WFP не проверяется; неудачный refresh сохраняет прошлое значение.
+  Требуются свежий verifier и обработка unknown во всех потребителях. Этот
+  остаток WP-3 не исправлен текущим baseline-коммитом и не считается закрытым.
+- Финальные проверки перед baseline-коммитом: `npm.cmd run typecheck` — exit 0;
+  `npm.cmd test` — **3117 passed, 5 skipped, 0 failed**, 232 files passed,
+  2 skipped, 164.69 s, exit 0. Трассировка AC 927/927, F 210/210 и
+  `git diff --check` — exit 0. После push CI/review нового SHA проверяются заново.

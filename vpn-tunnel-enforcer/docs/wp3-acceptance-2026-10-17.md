@@ -30,9 +30,9 @@
 | 03-004 | `firewallTransactions.test.ts`, `bootRecoveryExecution.test.ts`: сохранение исходных Block, удаление только собственных правил, независимый read-back | **NOT-CHECKED L3:** три реальных цикла apply/stop и сравнение экспортов чужих Block/Allow |
 | 03-005 | `physicalAdapterSnapshot.test.ts`, `physicalAdapterLifecycle.test.ts`, `lifecycleCleanup.test.ts`: отсутствие фиктивных адаптеров и проверки запуска/отката | **NOT-CHECKED L3:** VM без NIC, отсутствие созданных правил и правдивый статус в UI |
 | 03-006 | `physicalAdapterLifecycle.test.ts`, `physicalAdapterSnapshot.test.ts`, `physicalAdapterHotspot.test.ts`: свежий snapshot, добавление/удаление/замена GUID, смена alias, компенсация | **NOT-CHECKED L3:** настоящий hot-plug/переименование во время apply, итоговый набор фильтров и UI |
-| 03-007 | `systemNetwork.test.ts`: отказ каждого из 9 registry-шагов, реальный PowerShell с подставным Restore-Snapshot; `firewallTransactions.test.ts` и `lifecycleCleanup.test.ts`: независимость Firewall/WFP/baseline/adapters, failure через IPC и retry | **Частично L2:** свести независимые отказы разных подсистем в один протокол; подтвердить correlation id событий каждого шага и отображение сводки в UI |
-| 03-008 | `granularKillSwitch.test.ts`, `firewallTransactions.test.ts`: 50 конкурентных обновлений, journal-before-effects, store/system compensation, сохранение core/upstream | **Частично L2:** seeded смешанный сценарий UI + scheduler с сопоставлением итогового store/native policy и журнала всех операций |
-| 03-009 | `firewallKillSwitchValidation.test.ts`, `killSwitchExceptionValidation.test.ts`: generated IPv4/IPv6 и маски, невалидные числовые формы, локальный readable `.exe`/realpath; `firewallTransactions.test.ts`: отказ до записи и native effects | **Частично L1:** явная проверка эквивалентности реальных 8.3/длинных путей и дубликатов; расширенный генератор типов/путей/длин. Новые prefix-регрессии не закрывают AT целиком |
+| 03-007 | `systemNetwork.test.ts`: отказ каждого из 9 registry-шагов, реальный PowerShell с подставным Restore-Snapshot, общий operationId шагов/итога и новый ID retry; `firewallTransactions.test.ts` и `lifecycleCleanup.test.ts`: независимость Firewall/WFP/baseline/adapters, failure через IPC и retry | **Частично L2:** свести независимые отказы разных подсистем в один протокол; проверить общий correlation id остальных подсистем и отображение сводки в UI |
+| 03-008 | `granularKillSwitch.test.ts`, `firewallTransactions.test.ts`: 50 конкурентных обновлений, seeded mixed add/remove, сверка каждого native set, конечного store и всех audit-событий; journal-before-effects, store/system compensation, сохранение core/upstream | Доступные L2-сценарии прошли; системные API подставлены. Полное реальное применение Windows/WFP остаётся отдельной системной проверкой |
+| 03-009 | `firewallKillSwitchValidation.test.ts`, `killSwitchExceptionValidation.test.ts`: generated IPv4/IPv6 и маски, невалидные числовые формы, readable `.exe`/realpath; `granularKillSwitch.test.ts`: настоящий GetShortPathName и отклонение 8.3-дубликата; `firewallTransactions.test.ts`: отказ до записи/native effects | **Частично L1:** расширенный генератор типов/путей/длин; локальный 8.3 PASS не объявляет проверенными файловые системы без этой возможности |
 | 03-010 | `wfpIpv6.test.ts`, `physicalAdapterHotspot.test.ts`, `firewallTransactions.test.ts`: production C# с fake engine, AND scope, NAT64 endpoint, отсутствие широких permit, независимая компенсация | **NOT-CHECKED L3:** полная OS-матрица, настоящий BFE/boot-time, pktmon + внешний capture, physical mobile 464XLAT positive/negative и byte-equivalent restore |
 | 03-011 | `physicalAdapterLifecycle.test.ts`, `physicalAdapterDnsScript.test.ts`, `systemNetwork.test.ts`: read-back DNS, частичные отказы и сохранение recovery-обязанности | **NOT-CHECKED L3:** отказ DNS посередине apply, полный baseline restore, причина в UI и успешная повторная попытка |
 | 03-012 | `recoveryManifestStorage.test.ts`, `firewallManifestSecurity.test.ts`, `bootRecoveryExecution.test.ts`: trust-before-effects, ACL/owner/reparse отказ, строгая схема | **NOT-CHECKED L3:** настоящие ослабленные ACL/подложный манифест на отдельной VM, reboot, SYSTEM и положительный легитимный контроль |
@@ -87,6 +87,42 @@ Commit остаётся no-op независимо от вызовов productio
 
 PR: https://github.com/newnout6-a11y/vpn/pull/46. Финальные CI/review проверяются
 по SHA последнего коммита; версия первого коммита не доказывает новую версию.
+
+CI на `9f8e26ffb93fb550d6d312f0b09eae70ba614d62`: Windows success, Rust success,
+Revix success. В [нативном шаге](https://github.com/newnout6-a11y/vpn/actions/runs/39055637354/job/117463031596)
+реальный BFE вернул `ok=true`, `aborted=true`, `rules=23`, `priority=verified`.
+Это доказательство ABI/read-back в откатываемой транзакции на runner;
+фильтрация настоящего трафика и boot-time поведение не проверены.
+
+### AT-03-007/008/009: trace и дополнительные локальные сценарии
+
+Baseline rollback теперь возвращает `operationId` и добавляет тот же UUID
+к старту, native timings, каждому из 9 шагов, WinINet notification и итогу.
+Ошибки чтения также имеют ID; повторная попытка имеет отдельный UUID.
+Это корреляция внутри baseline, а не заявленная сквозная корреляция всего Stop.
+Новые fault-injection assertions до исправления: 11 failed, 40 passed, 1 skipped.
+
+Для исключений добавлены 50 смешанных add/remove с seed 30008: после каждой
+операции проверяется следующий native set, итоговые in-memory/store данные
+и порядок audit-событий. Отдельно настоящий Win32 GetShortPathName выдаёт
+8.3 alias созданного `.exe`; granular API отклоняет его как дубликат длинного
+пути. Если том не создаёт alias, тест явно SKIP; локально он прошёл без SKIP.
+
+Последние проверки: `npm.cmd run typecheck` — exit 0; `npm.cmd test` —
+3117 passed, 5 skipped, 0 failed; 232 files passed, 2 skipped; 164.69 с,
+exit 0. Трассировка AC 927/927, F 210/210 и `git diff --check` — exit 0.
+
+## Дополнительный подтверждённый пробел статуса
+
+`get-firewall-kill-switch-status` в `src/main/index.ts` возвращает только
+`active: await isKillSwitchActive()`. Последняя функция считает наличия
+доверенного манифеста достаточным и не проверяет фактическую полноту текущих
+правил/профилей/WFP. `Dashboard.tsx` по этому boolean выводит «Интернет
+заблокирован файрволом» и утверждает предотвращение утечки. При prepared/stale
+манифесте это не доказано; ошибки refresh также оставляют прошлый boolean.
+Нужны свежий verifier, состояние unknown/unverified и его обработка во всех
+потребителях. Этот путь пока не исправлен; он относится к остатку WP-3,
+а не откладывается под видом завершённой приёмки.
 
 ## Условие перехода дальше
 

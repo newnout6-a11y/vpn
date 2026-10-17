@@ -1,5 +1,6 @@
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
+import { randomUUID } from 'crypto'
 import { execElevated } from './admin'
 import { logEvent } from './appLogger'
 import { timePs } from './psTiming'
@@ -10,6 +11,7 @@ const execFile = promisify(execFileCb)
 const BASELINE_NAME = 'latest-tun-network-baseline.json'
 export interface SystemNetworkResult {
   success: boolean
+  operationId?: string
   message: string
   details?: string
   warnings?: string[]
@@ -201,11 +203,16 @@ Write-Output 'BASELINE_APPLIED'`)
   }
 }
 export function rollbackTunNetworkBaseline(): Promise<SystemNetworkResult> { return withBaselineOpLock(rollbackUnlocked) }
-async function rollbackUnlocked(): Promise<SystemNetworkResult> {
+async function rollbackUnlocked(reason = 'manual'): Promise<SystemNetworkResult> {
   if (process.platform !== 'win32') return { success: false, message: 'Rollback доступен только на Windows' }
+  const operationId = randomUUID()
+  logEvent('info', 'system-network', 'baseline rollback started', { operationId, reason })
   try {
     const manifest = await readManifest()
-    if (!manifest) return { success: true, skipped: true, message: 'Активный VPNTE network baseline не найден' }
+    if (!manifest) {
+      logEvent('info', 'system-network', 'baseline rollback completed', { operationId, success: true, skipped: true })
+      return { success: true, operationId, skipped: true, message: 'Активный VPNTE network baseline не найден' }
+    }
     const { stdout } = await ps(`${REGISTRY_HELPERS}
 ${WININET_NOTIFY_FUNCTION}
 if ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne '${manifest.userSid}') { throw 'Baseline user identity mismatch' }
@@ -234,25 +241,27 @@ $watch.Stop()
     const steps = report?.steps
     if (!Array.isArray(steps) || steps.length !== 9 || steps.some((s, i) => !validOutcome(s) || s.name !== `${manifest.values[i].target}/${manifest.values[i].name}`) ||
         !validOutcome(report.notification) || !report.timings || [report.timings.registryMs, report.timings.notifyMs].some(ms => !Number.isSafeInteger(ms) || ms < 0)) throw new Error('Invalid baseline recovery report')
-    for (const [phase, durationMs] of Object.entries(report.timings)) logEvent('debug', 'system-network', 'baseline native phase timing', { phase, durationMs })
+    for (const [phase, durationMs] of Object.entries(report.timings)) logEvent('debug', 'system-network', 'baseline native phase timing', { operationId, phase, durationMs })
     const warnings: string[] = []
     for (const step of steps) {
-      logEvent(step.success ? 'info' : 'error', 'system-network', 'baseline rollback step', step)
+      logEvent(step.success ? 'info' : 'error', 'system-network', 'baseline rollback step', { ...step, operationId })
       if (!step.success) warnings.push(`${step.name}: ${step.error}`)
     }
+    logEvent(report.notification.success ? 'info' : 'error', 'system-network', 'baseline rollback notification', { ...report.notification, operationId })
     if (!report.notification.success) warnings.push(`WinINet notification: ${report.notification.error}`)
-    if (warnings.length) return { success: false, message: 'Baseline восстановлен частично; снимок сохранён', warnings, details: warnings.join(' | ') }
+    if (warnings.length) {
+      logEvent('error', 'system-network', 'baseline rollback completed', { operationId, success: false, warnings })
+      return { success: false, operationId, message: 'Baseline восстановлен частично; снимок сохранён', warnings, details: warnings.join(' | ') }
+    }
     await removeRecoveryManifest(BASELINE_NAME)
-    return { success: true, message: 'Сетевые настройки восстановлены и проверены', details: `Backup created at: ${new Date(manifest.createdAt).toISOString()}` }
+    logEvent('info', 'system-network', 'baseline rollback completed', { operationId, success: true })
+    return { success: true, operationId, message: 'Сетевые настройки восстановлены и проверены', details: `Backup created at: ${new Date(manifest.createdAt).toISOString()}` }
   } catch (error) {
-    logEvent('error', 'system-network', 'CRITICAL_SECURITY_EVENT: baseline recovery unknown', { error: String(error) })
-    return { success: false, message: 'Baseline recovery не подтверждён; снимок сохранён', warnings: [String(error)] }
+    logEvent('error', 'system-network', 'CRITICAL_SECURITY_EVENT: baseline recovery unknown', { operationId, error: String(error) })
+    return { success: false, operationId, message: 'Baseline recovery не подтверждён; снимок сохранён', warnings: [String(error)] }
   }
 }
 export function rollbackTunNetworkBaselineIfApplied(reason: string): Promise<SystemNetworkResult> {
   if (process.platform !== 'win32') return Promise.resolve({ success: true, skipped: true, message: 'Rollback недоступен (не Windows)' })
-  return withBaselineOpLock(async () => {
-    logEvent('info', 'system-network', `auto-rollback baseline: ${reason}`)
-    return rollbackUnlocked()
-  })
+  return withBaselineOpLock(() => rollbackUnlocked(reason))
 }
