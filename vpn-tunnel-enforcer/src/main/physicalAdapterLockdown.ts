@@ -128,6 +128,7 @@ interface LockdownOptions {
 
 interface RollbackOptions {
   resetDnsToDhcp?: boolean
+  operationId?: string
 }
 
 export interface PhysicalAdapterDnsSource {
@@ -793,11 +794,15 @@ try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}
  * -ResetServerAddresses` does.
  */
 export async function rollbackPhysicalAdapterLockdownIfApplied(reason: string, options: RollbackOptions = {}): Promise<{ rolledBack: boolean; skipped?: boolean }> {
+  const { operationId } = options
   if (process.platform !== 'win32') return { rolledBack: false, skipped: true }
   const m = await readManifest()
   // Only a successful trusted read proving absence is a no-op. Trust errors
   // propagate; incomplete rollback still returns rolledBack:false without skip.
-  if (!m) return { rolledBack: false, skipped: true }
+  if (!m) {
+    logEvent('info', 'phys-lockdown', 'adapter rollback skipped: no owned baseline', { operationId, reason })
+    return { rolledBack: false, skipped: true }
+  }
 
   let combinedScript = `$ErrorActionPreference = 'Continue'\n`
   
@@ -842,10 +847,10 @@ try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}`
       const ipv6Ok = new RegExp(`A${i}_ipv6:on|A${i}_ipv6:noop`).test(out)
       const dnsOk = new RegExp(`A${i}_dns:restore|A${i}_dns:reset|A${i}_dns:noop`).test(out)
       if (!ipv6Ok || !dnsOk) {
-        logEvent('warn', 'phys-lockdown', `partial rollback failure for ${a.alias}`, { reason, ipv6Ok, dnsOk })
+        logEvent('warn', 'phys-lockdown', `partial rollback failure for ${a.alias}`, { operationId, reason, ipv6Ok, dnsOk })
         rollbackSuccess = false
       } else {
-        logEvent('info', 'phys-lockdown', `rolled back ${a.alias}`, { reason })
+        logEvent('info', 'phys-lockdown', `rolled back ${a.alias}`, { operationId, reason, ipv6Ok, dnsOk })
       }
     }
     if (m.transitionAdapters) {
@@ -856,44 +861,45 @@ try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}`
       const sixTo4Ok = /TRANS_6to4:restore/.test(out) || sixTo4Unknown
       const isatapOk = /TRANS_isatap:restore/.test(out) || isatapUnknown
       if (!teredoOk || !sixTo4Ok || !isatapOk) {
-        logEvent('warn', 'phys-lockdown', 'partial transition adapter rollback', { reason, teredoOk, sixTo4Ok, isatapOk })
+        logEvent('warn', 'phys-lockdown', 'partial transition adapter rollback', { operationId, reason, teredoOk, sixTo4Ok, isatapOk })
         rollbackSuccess = false
       } else if (teredoUnknown || sixTo4Unknown || isatapUnknown) {
-        logEvent('warn', 'phys-lockdown', 'transition adapter prior state unknown; left disabled instead of restoring default', { reason, teredoUnknown, sixTo4Unknown, isatapUnknown })
+        logEvent('warn', 'phys-lockdown', 'transition adapter prior state unknown; left disabled instead of restoring default', { operationId, reason, teredoUnknown, sixTo4Unknown, isatapUnknown })
       } else {
-        logEvent('info', 'phys-lockdown', 'transition adapters restored', { reason })
+        logEvent('info', 'phys-lockdown', 'transition adapters restored', { operationId, reason })
       }
     }
     const dnsSmnrOk = /DNS_SMNR:restore|DNS_SMNR:delete/.test(out)
     const dnsParallelOk = /DNS_PARALLEL:restore|DNS_PARALLEL:delete/.test(out)
+    logEvent(dnsSmnrOk && dnsParallelOk ? 'info' : 'warn', 'phys-lockdown',
+      dnsSmnrOk && dnsParallelOk ? 'DNS registry policy restored' : 'partial DNS registry policy rollback', { operationId, reason, dnsSmnrOk, dnsParallelOk })
     if (!dnsSmnrOk || !dnsParallelOk) {
-      logEvent('warn', 'phys-lockdown', 'partial DNS registry policy rollback', { reason, dnsSmnrOk, dnsParallelOk })
       rollbackSuccess = false
     }
   } catch (err) {
-    logEvent('warn', 'phys-lockdown', `batch rollback failed`, err)
+    logEvent('warn', 'phys-lockdown', `batch rollback failed`, { operationId, reason, error: String(err) })
     rollbackSuccess = false
   }
 
   if (rollbackSuccess) {
     await deleteManifest()
   } else {
-    logEvent('warn', 'phys-lockdown', 'manifest kept for retry on next startup — rollback was incomplete', { reason })
+    logEvent('warn', 'phys-lockdown', 'manifest kept for retry on next startup — rollback was incomplete', { operationId, reason })
   }
   clearPhysicalAdaptersSnapshotCache()
   return { rolledBack: rollbackSuccess }
 }
 
-export async function repairOrphanedPhysicalAdapterDns(reason: string): Promise<{ repaired: boolean; adapters: string[] }> {
+export async function repairOrphanedPhysicalAdapterDns(reason: string, operationId?: string): Promise<{ repaired: boolean; adapters: string[] }> {
   if (process.platform !== 'win32') return { repaired: false, adapters: [] }
   // A private resolver address is not proof that VPNTE changed an adapter.
   // Automatic restoration needs the exact trusted ownership/baseline snapshot.
   const manifest = await readManifest()
   if (manifest) {
-    const result = await rollbackPhysicalAdapterLockdownIfApplied(reason)
+    const result = await rollbackPhysicalAdapterLockdownIfApplied(reason, { operationId })
     return { repaired: result.rolledBack, adapters: result.rolledBack ? manifest.adapters.map(a => a.alias) : [] }
   }
-  logEvent('warn', 'phys-lockdown', 'DNS recovery not verified: no owned adapter baseline; foreign settings preserved', { reason })
+  logEvent('warn', 'phys-lockdown', 'DNS recovery not verified: no owned adapter baseline; foreign settings preserved', { operationId, reason })
   return { repaired: false, adapters: [] }
 }
 

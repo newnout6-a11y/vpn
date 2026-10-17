@@ -202,10 +202,9 @@ Write-Output 'BASELINE_APPLIED'`)
     return { success: false, message: 'Baseline не применён; проверьте отчёт восстановления', warnings, details: warnings.join(' | ') }
   }
 }
-export function rollbackTunNetworkBaseline(): Promise<SystemNetworkResult> { return withBaselineOpLock(rollbackUnlocked) }
-async function rollbackUnlocked(reason = 'manual'): Promise<SystemNetworkResult> {
+export function rollbackTunNetworkBaseline(): Promise<SystemNetworkResult> { return withBaselineOpLock(() => rollbackUnlocked()) }
+async function rollbackUnlocked(reason = 'manual', operationId: string = randomUUID()): Promise<SystemNetworkResult> {
   if (process.platform !== 'win32') return { success: false, message: 'Rollback доступен только на Windows' }
-  const operationId = randomUUID()
   logEvent('info', 'system-network', 'baseline rollback started', { operationId, reason })
   try {
     const manifest = await readManifest()
@@ -261,7 +260,7 @@ $watch.Stop()
     return { success: false, operationId, message: 'Baseline recovery не подтверждён; снимок сохранён', warnings: [String(error)] }
   }
 }
-export function rollbackTunNetworkBaselineIfApplied(reason: string): Promise<SystemNetworkResult> {
+export function rollbackTunNetworkBaselineIfApplied(reason: string, operationId?: string): Promise<SystemNetworkResult> {
   if (process.platform !== 'win32') return Promise.resolve({ success: true, skipped: true, message: 'Rollback недоступен (не Windows)' })
-  return withBaselineOpLock(() => rollbackUnlocked(reason))
+  return withBaselineOpLock(() => rollbackUnlocked(reason, operationId))
 }

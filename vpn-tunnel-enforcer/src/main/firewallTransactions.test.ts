@@ -110,7 +110,7 @@ vi.mock('./elevatedPsHelper', () => ({ isElevatedPsHelperRunning: () => state.he
     return { stdout: state.ownedRules && script.includes('Get-VpnteFirewallRuleNames') ? '1' : '0', stderr: '' }
   }
 }))
-import { enableKillSwitch, disableKillSwitch, isKillSwitchActive, getFirewallKillSwitchStatus, killSwitchManifestExists, updateKillSwitchExceptions, recoverStaleKillSwitch, ensureKillSwitchProgramAllowed } from './firewallKillSwitch'
+import { enableKillSwitch, disableKillSwitch, disableKillSwitchIfActive, isKillSwitchActive, getFirewallKillSwitchStatus, killSwitchManifestExists, updateKillSwitchExceptions, recoverStaleKillSwitch, ensureKillSwitchProgramAllowed } from './firewallKillSwitch'
 import { RecoveryManifestReadError } from './recoveryManifest'
 import { logEvent } from './appLogger'
 const originalPlatform = process.platform
@@ -235,6 +235,24 @@ describe('firewall transaction fault injection (AT-03-003/004/007; F-030, F-186)
     expect(state.writes).toEqual([])
     expect(state.wfpCalls).toEqual(['prepare'])
     expect(state.scripts).toEqual([])
+  })
+  it.each(['success', 'firewall', 'wfp'])('inherits Stop correlation through independent firewall rollback: %s (AT-03-007)', async failing => {
+    await enableKillSwitch(options)
+    state.failRestore = failing === 'firewall'
+    state.wfpFailRemove = failing === 'wfp'
+    vi.mocked(logEvent).mockClear()
+    const operationId = '00000000-0000-4000-8000-000000000007'
+    expect((await disableKillSwitchIfActive('TUN stopped', operationId)).success).toBe(failing === 'success')
+    const events = vi.mocked(logEvent).mock.calls
+    const steps = events.filter(call => call[2] === 'firewall rollback step')
+    expect(steps.map(call => call[3])).toEqual([
+      { operationId, step: 'profiles-and-rules', success: failing !== 'firewall', ...(failing === 'firewall' ? { error: expect.stringContaining('restore failed') } : {}) },
+      { operationId, step: 'ipv6-wfp', success: failing !== 'wfp', ...(failing === 'wfp' ? { error: expect.stringContaining('WFP remove failure') } : {}) }
+    ])
+    for (const event of events.filter(call => call[2] === 'phase timing' || call[2].startsWith('auto-disable') || call[2].startsWith('kill-switch disengaged') || call[2] === 'failed to fully restore kill-switch')) {
+      expect(event[3]).toMatchObject({ operationId })
+    }
+    expect(state.manifest === null).toBe(failing === 'success')
   })
   it('still removes owned WFP protection after firewall rollback fails (AT-03-007)', async () => {
     await enableKillSwitch(options); state.failRestore = true

@@ -74,7 +74,7 @@ vi.mock('./recoveryManifest', () => ({
   },
   removeRecoveryManifest: async () => { state.manifest = null; state.operations.push('clear') }
 }))
-import { applyTunNetworkBaseline, getTunNetworkBaselineManifestPath, rollbackTunNetworkBaseline, validateNetworkBackupManifest } from './systemNetwork'
+import { applyTunNetworkBaseline, getTunNetworkBaselineManifestPath, rollbackTunNetworkBaseline, rollbackTunNetworkBaselineIfApplied, validateNetworkBackupManifest } from './systemNetwork'
 import { logEvent } from './appLogger'
 const platform = Object.getOwnPropertyDescriptor(process, 'platform')!
 beforeEach(() => {
@@ -250,6 +250,15 @@ finally { [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree($testRoot,$fa
     for (const [index, event] of events.entries()) {
       expect(event[3]).toMatchObject({ operationId: result.operationId, success: index !== step })
     }
+  })
+  it('inherits the Stop ID in all baseline rollback events (AT-03-007)', async () => {
+    state.manifest = fixture()
+    const operationId = '00000000-0000-4000-8000-000000000007'
+    const result = await rollbackTunNetworkBaselineIfApplied('TUN stopped', operationId)
+    expect(result).toMatchObject({ success: true, operationId })
+    const events = vi.mocked(logEvent).mock.calls.filter(call => call[1] === 'system-network')
+    expect(events.filter(call => call[2] === 'baseline rollback step')).toHaveLength(9)
+    for (const event of events) expect(event[3]).toMatchObject({ operationId })
   })
   it('correlates the failed rollback and successful retry separately (AT-03-007)', async () => {
     state.manifest = fixture(); state.failedSteps = [3]

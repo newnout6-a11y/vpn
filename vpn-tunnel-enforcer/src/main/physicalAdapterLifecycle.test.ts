@@ -40,6 +40,38 @@ function deferred<T>() {
   return { promise, resolve }
 }
 
+describe('adapter rollback correlation (AT-03-007)', () => {
+  it.each(['success', 'adapter', 'policy', 'native'])('retains Stop ID and independent outcomes: %s', async failing => {
+    const operationId = '00000000-0000-4000-8000-000000000007'
+    const deps = {
+      process: { platform: 'win32' }, logEvent: vi.fn(), psSingleQuote: quote,
+      readManifest: vi.fn(async () => ({ adapters: [adapter(), { ...adapter(), alias: 'Ethernet' }], dnsRegistryPolicy: {} })),
+      registryRestoreLine: vi.fn(() => ''), deleteManifest: vi.fn(), clearPhysicalAdaptersSnapshotCache: vi.fn(),
+      runPS: vi.fn(async () => {
+        if (failing === 'native') throw new Error('helper failed')
+        return `A0_ipv6:${failing === 'adapter' ? 'error' : 'noop'}\nA0_dns:noop\nA1_ipv6:noop\nA1_dns:noop\nDNS_SMNR:${failing === 'policy' ? 'error' : 'delete'}\nDNS_PARALLEL:delete`
+      })
+    }
+    const rollback = compile<(reason: string, options: { operationId: string }) => Promise<any>>('rollbackPhysicalAdapterLockdownIfApplied', deps)
+    expect((await rollback('TUN stopped', { operationId })).rolledBack).toBe(failing === 'success')
+    expect(deps.logEvent.mock.calls.length).toBeGreaterThan(0)
+    for (const event of deps.logEvent.mock.calls) expect(event[3]).toMatchObject({ operationId })
+    expect(deps.deleteManifest).toHaveBeenCalledTimes(failing === 'success' ? 1 : 0)
+    if (failing !== 'native') {
+      expect(deps.logEvent).toHaveBeenCalledWith('info', 'phys-lockdown', 'rolled back Ethernet', expect.objectContaining({ operationId, ipv6Ok: true, dnsOk: true }))
+      expect(deps.logEvent).toHaveBeenCalledWith(failing === 'policy' ? 'warn' : 'info', 'phys-lockdown', failing === 'policy' ? 'partial DNS registry policy rollback' : 'DNS registry policy restored', expect.objectContaining({ operationId, dnsSmnrOk: failing !== 'policy', dnsParallelOk: true }))
+    }
+  })
+  it('preserves Stop ID when DNS safety repair retries the trusted adapter rollback', async () => {
+    const operationId = '00000000-0000-4000-8000-000000000007'
+    const deps = { process: { platform: 'win32' }, readManifest: async () => ({ adapters: [adapter()] }),
+      rollbackPhysicalAdapterLockdownIfApplied: vi.fn(async () => ({ rolledBack: true })) }
+    const repair = compile<(reason: string, id: string) => Promise<any>>('repairOrphanedPhysicalAdapterDns', deps)
+    expect(await repair('safety repair', operationId)).toEqual({ repaired: true, adapters: ['Wi-Fi'] })
+    expect(deps.rollbackPhysicalAdapterLockdownIfApplied).toHaveBeenCalledWith('safety repair', { operationId })
+  })
+})
+
 // AT-03-006/007: the snapshot that feeds the rollback manifest must not come from the warm-up cache.
 describe('physical adapter apply snapshot freshness', () => {
   it('requests a fresh adapter snapshot by default', async () => {

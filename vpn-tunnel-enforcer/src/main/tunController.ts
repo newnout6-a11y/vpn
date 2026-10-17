@@ -7,6 +7,7 @@ import { join, dirname } from 'path'
 import { promisify } from 'util'
 import { createConnection, createServer, isIP } from 'net'
 import { networkInterfaces } from 'os'
+import { randomUUID } from 'node:crypto'
 import { app } from 'electron'
 import { stageVerifiedRuntimeArtifact } from './runtimeArtifact'
 import sudo from 'sudo-prompt'
@@ -84,6 +85,7 @@ export interface NetworkCleanupReceipt {
 }
 export interface TunStopResult {
   success: boolean
+  operationId?: string
   // Exit was freshly proved, but a later cleanup step failed. Main may close
   // the session and retry recovery without treating this as a live runtime.
   runtimeStopped?: boolean
@@ -3810,22 +3812,38 @@ export const tunController = {
     // Reserve admission synchronously so a new start cannot slip into the wait.
     stopInProgress = true
     activeStopPreservesProtection = options.preserveNetworkProtection === true
+    const operationId = randomUUID()
     const cleanup = async (): Promise<TunStopResult> => {
     const stopStarted = performance.now()
     const stopPhases: Record<string, number> = {}
-    const timedStop = async <T>(name: string, effect: () => Promise<T>): Promise<T> => {
+    const timedStop = async <T>(name: string, effect: () => Promise<T>, succeeded: (value: T) => boolean = () => true): Promise<T> => {
       const started = performance.now()
-      try { return await effect() }
-      finally { stopPhases[name] = Math.round(performance.now() - started) }
+      let success = false
+      let error: string | undefined
+      logEvent('info', 'tun', 'stop step started', { operationId, step: name })
+      try {
+        const result = await effect()
+        success = succeeded(result)
+        return result
+      } catch (err) {
+        error = String(err)
+        throw err
+      } finally {
+        stopPhases[name] = Math.round(performance.now() - started)
+        logEvent(success ? 'info' : 'warn', 'tun', 'stop step completed', {
+          operationId, step: name, success, error, durationMs: stopPhases[name]
+        })
+      }
     }
     const networkCleanup: NetworkCleanupReceipt = { baseline: false, firewall: false, adapters: false }
     stopRequested = true
     activeStartAbortController?.abort()
     const preserveNetworkProtection = options.preserveNetworkProtection === true
+    logEvent('info', 'tun', 'stop started', { operationId, preserveNetworkProtection })
     // Retain native effect ownership until startup/failure compensation settles.
     // Two seconds of waiting was not evidence that DNS/firewall had finished.
     if (activeStartCompletion) {
-      logEvent('info', 'tun', 'stop() called while start() in progress — waiting for start to finish')
+      logEvent('info', 'tun', 'stop() called while start() in progress — waiting for start to finish', { operationId })
       await activeStartCompletion
     }
     stopInProgress = true
@@ -3843,6 +3861,7 @@ export const tunController = {
     userInitiatedStop = true
     recoveryCancelGeneration += 1
     recordForensicTunEvent('tun-stop-requested', {
+      operationId,
       wasRunning: currentStatus.running,
       mode: currentStatus.mode ?? null,
       restartAttempt
@@ -3878,7 +3897,7 @@ export const tunController = {
     const rememberCleanupError = (label: string, err: unknown) => {
       const message = (err as Error)?.message || String(err)
       cleanupErrors.push(`${label}: ${message}`)
-      logEvent('warn', 'tun', `${label} after stop failed`, err)
+      logEvent('warn', 'tun', `${label} after stop failed`, { operationId, error: message })
     }
 
     try {
@@ -3888,11 +3907,11 @@ export const tunController = {
         () => isOwnedTunRuntimeRunning(true)).catch(() => true)
       if (runtimePresent) {
         await timedStop('stop-runtime', () => killOwnedRuntimeProcesses())
-        if (!(await timedStop('wait-runtime-exit', () => waitForOwnedRuntimeToExit()))) {
+        if (!(await timedStop('wait-runtime-exit', () => waitForOwnedRuntimeToExit(), exited => exited))) {
           throw new Error('Owned runtime exit was not confirmed')
         }
       } else {
-        logEvent('info', 'tun', 'runtime stop skipped after fresh exit proof')
+        logEvent('info', 'tun', 'runtime stop skipped after fresh exit proof', { operationId })
       }
     } catch (err) {
       rememberCleanupError('runtime process stop', err)
@@ -3926,8 +3945,9 @@ export const tunController = {
     clashApiInfo = null
     directProxyPort = null
     tunnelProbePort = null
-    logEvent('info', 'tun', 'TUN stopped')
+    logEvent('info', 'tun', 'TUN stopped', { operationId })
     recordForensicTunEvent('tun-stopped', {
+      operationId,
       cleanupErrors
     })
 
@@ -3936,29 +3956,29 @@ export const tunController = {
     // the app can leave Windows with "VPN off, internet broken".
     if (!preserveNetworkProtection) {
     try {
-      const baseline = await timedStop('rollback-baseline', () => rollbackTunNetworkBaselineIfApplied('TUN stopped'))
+      const baseline = await timedStop('rollback-baseline', () => rollbackTunNetworkBaselineIfApplied('TUN stopped', operationId), result => result.success)
       networkCleanup.baseline = baseline.success
       if (!baseline.success) {
         cleanupErrors.push(`baseline auto-rollback: ${baseline.message}`)
-        logEvent('warn', 'tun', 'baseline auto-rollback after stop failed', baseline)
+        logEvent('warn', 'tun', 'baseline auto-rollback after stop failed', { ...baseline, operationId })
       }
     } catch (err) {
       rememberCleanupError('baseline auto-rollback', err)
     }
 
     try {
-      const killSwitch = await timedStop('disable-firewall', () => disableKillSwitchIfActive('TUN stopped'))
+      const killSwitch = await timedStop('disable-firewall', () => disableKillSwitchIfActive('TUN stopped', operationId), result => result.success)
       networkCleanup.firewall = killSwitch.success
       if (!killSwitch.success) {
         cleanupErrors.push(`kill-switch disable: ${killSwitch.message}`)
-        logEvent('warn', 'tun', 'kill-switch disable after stop failed', killSwitch)
+        logEvent('warn', 'tun', 'kill-switch disable after stop failed', { ...killSwitch, operationId })
       }
     } catch (err) {
       rememberCleanupError('kill-switch disable', err)
     }
 
     try {
-      const adapters = await timedStop('rollback-adapters', () => rollbackPhysicalAdapterLockdownIfApplied('TUN stopped'))
+      const adapters = await timedStop('rollback-adapters', () => rollbackPhysicalAdapterLockdownIfApplied('TUN stopped', { operationId }), result => result.rolledBack || result.skipped === true)
       networkCleanup.adapters = adapters.rolledBack || adapters.skipped === true
     } catch (err) {
       rememberCleanupError('adapter lockdown rollback', err)
@@ -3966,7 +3986,7 @@ export const tunController = {
 
     if (!networkCleanup.adapters) {
       try {
-        const repair = await timedStop('repair-dns', () => repairOrphanedPhysicalAdapterDns('TUN stopped safety repair'))
+        const repair = await timedStop('repair-dns', () => repairOrphanedPhysicalAdapterDns('TUN stopped safety repair', operationId), result => result.repaired)
         networkCleanup.adapters = repair.repaired
         if (!repair.repaired) cleanupErrors.push('adapter lockdown rollback: восстановление не подтверждено; требуется повторная проверка')
       } catch (err) {
@@ -3974,7 +3994,7 @@ export const tunController = {
       }
     }
     } else {
-      logEvent('info', 'tun', 'preserved kill-switch, baseline, and adapter lockdown for adaptive transition')
+      logEvent('info', 'tun', 'preserved kill-switch, baseline, and adapter lockdown for adaptive transition', { operationId })
     }
 
     if (cleanupErrors.length > 0) {
@@ -4009,16 +4029,23 @@ export const tunController = {
 
     return { success: true, networkCleanup }
     } finally {
-      logEvent('info', 'tun', 'stop timing', { phaseDurations: stopPhases,
+      logEvent('info', 'tun', 'stop timing', { operationId, phaseDurations: stopPhases,
         totalMs: Math.round(performance.now() - stopStarted), preserveNetworkProtection, networkCleanup })
       resumeLeakMonitor()
       stopInProgress = false
       if (!startInProgress && !currentStatus.running && !preserveNetworkProtection) transitionCancelRequested = false
     }
     }
-    const stopped = Promise.resolve().then(cleanup)
+    const stopped = Promise.resolve().then(cleanup).then(result => ({ ...result, operationId }))
     activeStopCompletion = stopped
-    try { return await stopped }
+    try {
+      const result = await stopped
+      logEvent(result.success ? 'info' : 'warn', 'tun', 'stop completed', result)
+      return result
+    } catch (error) {
+      logEvent('error', 'tun', 'stop failed', { operationId, error: String(error) })
+      throw error
+    }
     finally {
       if (activeStopCompletion === stopped) activeStopCompletion = null
       stopInProgress = false

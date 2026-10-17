@@ -1204,3 +1204,46 @@ WP-3 остаётся частичным: packet oracle, SYSTEM reboot, OS matri
 — AC 927/927, F 210/210, exit 0; git diff --check — exit 0.
 Сборка предыдущего f1b22f7 проверена; после этого изменения её не повторяли.
 CI/review нового SHA проверяются отдельно после push.
+
+### WP-3: общий operationId остановки и независимых rollback (AT-03-007)
+
+- На c697842 проверены live CI: Windows 117470594831, Rust 117470595030,
+  Revix 117470608305 — success. Windows: 3170 passed / 4 skipped,
+  235 files passed / 1 skipped, 136.08 s; BFE ABI transaction aborted=true,
+  priority=verified. CodeRabbit на этом SHA всё ещё сообщает Review in progress;
+  опубликованный подробный review пока относится к e622512, а не к c697842.
+- Stop создаёт UUID после синхронного допуска операции и передаёт его baseline,
+  firewall/WFP, adapter rollback и DNS safety repair. Одновременные Stop
+  возвращают ID общей операции; самостоятельный retry получает новый UUID.
+- Старт/результат каждого controller шага, общий итог и forensic-события имеют
+  operationId. Promise fulfillment с success:false/rolledBack:false/repaired:false
+  не записывается как успешный шаг. Результаты внутренних baseline registry,
+  Firewall/WFP и adapter/DNS rollback сохраняют тот же ID.
+- Порядок teardown и защита до свежего runtime exit proof сохранены. Эта работа
+  не вводит общий FSM WP-0 и не объявляет корреляцию всех фоновых transport timings,
+  startup/crash/shutdown-backstop путей. Другие вызовы baseline сохраняют свой UUID.
+- Добавлены fault-injection regression: runtime/Xray/baseline/firewall/adapters/DNS,
+  concurrent Stop и retry, Firewall/WFP partial failure, продолжение следующего
+  адаптера/DNS policy. Настоящий Dashboard на IPC fixture показывает полный
+  перечень неудачных шагов и рекомендацию повторить остановку без success toast.
+- До реализации: 8 новых controller tests FAIL из-за отсутствия operationId;
+  первый дополнительный baseline test также упал из-за пропущенного import
+  в самом тесте (исправлен). Адресные проверки после реализации: 314 passed,
+  2 skipped, exit 0; дополнительный renderer/adapter/source прогон: 74 passed.
+- Первый полный прогон: 3185 passed / 1 failed / 5 skipped, 127.99 s. Единственный
+  отказ — source assertion старого текста DNS warning; прежний текст сохранён,
+  поведенческий тест проверяет warn и оба DNS результата. Полный прогон повторён.
+- При чтении обнаружен следующий WP-3 пробел, пока без исправления: resolved
+  success:false baseline rollback игнорируется в autoPilot.ts и failure/startup
+  путях index.ts (они ловят только rejection). Нужно проверить вывод recovery
+  warnings в UI; CodeRabbit отмечал это как существующий caller-contract gap.
+- Матрица AT обновлена в ненормативном отчёте. WP-3 остаётся частичным;
+  L3 packet/SYSTEM reboot/OS matrix/физический 464XLAT не приняты.
+
+Финальные проверки перед correlation-коммитом:
+- Из vpn-tunnel-enforcer: npm.cmd run typecheck — exit 0.
+- npm.cmd test — 3187 passed / 5 skipped / 0 failed; 234 files passed,
+  2 skipped; 122.16 s; exit 0.
+- Из корня: python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py
+  — AC 927/927, F 210/210, exit 0; git diff --check — exit 0.
+- npm.cmd run build — exit 0 на финальном коде; Vite warnings о смешанных imports/размере чанка сохранены.

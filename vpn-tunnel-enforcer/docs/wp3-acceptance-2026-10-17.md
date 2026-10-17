@@ -30,7 +30,7 @@
 | 03-004 | `firewallTransactions.test.ts`, `bootRecoveryExecution.test.ts`: сохранение исходных Block, удаление только собственных правил, независимый read-back | **NOT-CHECKED L3:** три реальных цикла apply/stop и сравнение экспортов чужих Block/Allow |
 | 03-005 | `physicalAdapterSnapshot.test.ts`, `physicalAdapterLifecycle.test.ts`, `lifecycleCleanup.test.ts`: отсутствие фиктивных адаптеров и проверки запуска/отката | **NOT-CHECKED L3:** VM без NIC, отсутствие созданных правил и правдивый статус в UI |
 | 03-006 | `physicalAdapterLifecycle.test.ts`, `physicalAdapterSnapshot.test.ts`, `physicalAdapterHotspot.test.ts`: свежий snapshot, добавление/удаление/замена GUID, смена alias, компенсация | **NOT-CHECKED L3:** настоящий hot-plug/переименование во время apply, итоговый набор фильтров и UI |
-| 03-007 | `systemNetwork.test.ts`: отказ каждого из 9 registry-шагов, реальный PowerShell с подставным Restore-Snapshot, общий operationId шагов/итога и новый ID retry; `firewallTransactions.test.ts` и `lifecycleCleanup.test.ts`: независимость Firewall/WFP/baseline/adapters, failure через IPC и retry | **Частично L2:** свести независимые отказы разных подсистем в один протокол; проверить общий correlation id остальных подсистем и отображение сводки в UI |
+| 03-007 | `systemNetwork.test.ts`: отказ каждого из 9 registry-шагов и реальный PowerShell с подставным Restore-Snapshot; `firewallTransactions.test.ts`, `physicalAdapterLifecycle.test.ts`, `lifecycleCleanup.test.ts`: общий Stop operationId, независимость Firewall/WFP/baseline/adapters, явные результаты шагов, failure через IPC, общий ID concurrent Stop и новый ID retry; `Dashboard.cancel.test.tsx`: видимые перечень отказов и рекомендация вместо success | Доступные L2-сценарии проверены на production bodies и renderer с подставными системными/IPC границами. Сквозной ID этой задачи относится к controller Stop и вызываемым rollback, не ко всем startup/crash/shutdown-backstop путям; системные эффекты этим прогоном не доказаны |
 | 03-008 | `granularKillSwitch.test.ts`, `firewallTransactions.test.ts`: 50 конкурентных обновлений, seeded mixed add/remove, сверка каждого native set, конечного store и всех audit-событий; journal-before-effects, store/system compensation, сохранение core/upstream | Доступные L2-сценарии прошли; системные API подставлены. Полное реальное применение Windows/WFP остаётся отдельной системной проверкой |
 | 03-009 | `firewallKillSwitchValidation.test.ts`, `killSwitchExceptionValidation.test.ts`: generated IPv4/IPv6 и маски, невалидные числовые формы, readable `.exe`/realpath; `granularKillSwitch.test.ts`: настоящий GetShortPathName и отклонение 8.3-дубликата; `firewallTransactions.test.ts`: отказ до записи/native effects | **Частично L1:** расширенный генератор типов/путей/длин; локальный 8.3 PASS не объявляет проверенными файловые системы без этой возможности |
 | 03-010 | `wfpIpv6.test.ts`, `physicalAdapterHotspot.test.ts`, `firewallTransactions.test.ts`: production C# с fake engine, AND scope, NAT64 endpoint, отсутствие широких permit, независимая компенсация | **NOT-CHECKED L3:** полная OS-матрица, настоящий BFE/boot-time, pktmon + внешний capture, physical mobile 464XLAT positive/negative и byte-equivalent restore |
@@ -180,6 +180,34 @@ Windows/Rust CI на f1b22f7 — success; Revix — neutral. Исправлен�
 0 failed**, 234 files passed, 2 skipped, 124.12 с, exit 0. Трассировка —
 AC 927/927, F 210/210; `git diff --check` — exit 0. Повторная production
 сборка после этих небольших уточнений не запускалась.
+
+### AT-03-007: общая корреляция Stop и независимых rollback
+
+Controller создаёт UUID один раз при допуске Stop. Одновременные вызовы,
+ожидающие ту же остановку, получают один ID; самостоятельная повторная
+попытка получает новый. ID возвращается в TunStopResult, записывается
+в start/step/timing/completion и forensic-события и передаётся в baseline,
+firewall, adapter rollback и DNS safety repair. Baseline сохраняет отдельный
+UUID для самостоятельного вызова вне Stop. Результат false не записывается
+как успешный шаг, даже если Promise исполнился без исключения.
+
+Коррелируются результаты Firewall/WFP rollback, adapter/DNS/transition
+результаты и 9 baseline registry-шагов. Это не введение глобального контекста
+логирования: низкоуровневые transport timings, сторонние фоновые события и
+другие lifecycle-пути не объявляются сквозно коррелированными этой задачей.
+
+Регрессии исполняют production controller с инъекцией отказов runtime,
+Xray, baseline, firewall, adapter и DNS; проверяют продолжение допустимых
+шагов, отказ после неподтверждённого runtime exit, общий ID и отдельный retry.
+Firewall tests проверяют независимые read-back результаты Firewall/WFP,
+adapter tests — продолжение следующего адаптера и DNS policy после отказа.
+Настоящий Dashboard на IPC fixture показывает полный текст неудачных шагов
+и рекомендацию повторной остановки; success notification отсутствует.
+
+Проверки correlation-изменения: `npm.cmd run typecheck` — exit 0;
+`npm.cmd test` — **3187 passed, 5 skipped, 0 failed**, 234 files passed,
+2 skipped, 122.16 с, exit 0. Трассировка — AC 927/927, F 210/210;
+`git diff --check` — exit 0.
 
 ## Условие перехода дальше
 

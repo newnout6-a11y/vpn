@@ -447,7 +447,7 @@ Write-Output "RULE:$ruleName"
  * the script fails partway, only harmless extra Allow rules remain.
  */
 let firewallQueue: Promise<unknown> = Promise.resolve()
-async function timedFirewallPhase<T>(phase: string, operation: () => Promise<T>): Promise<T> {
+async function timedFirewallPhase<T>(phase: string, operation: () => Promise<T>, operationId?: string): Promise<T> {
   const started = performance.now()
   let outcome = 'rejected'
   try {
@@ -456,7 +456,7 @@ async function timedFirewallPhase<T>(phase: string, operation: () => Promise<T>)
     return result
   } finally {
     logEvent('debug', 'firewall-killswitch', 'phase timing', {
-      phase, outcome, durationMs: Math.round(performance.now() - started)
+      operationId, phase, outcome, durationMs: Math.round(performance.now() - started)
     })
   }
 }
@@ -981,7 +981,7 @@ Write-Output "SAVED:$savedJson"
  * Restore DefaultOutboundAction to saved values and remove all our rules.
  * Order: restore defaults FIRST (so traffic flows), then remove allow rules.
  */
-async function restoreAndCleanup(snapshot?: FirewallManifest): Promise<void> {
+async function restoreAndCleanup(snapshot?: FirewallManifest, operationId?: string): Promise<void> {
   const recovery = snapshot ? { manifest: snapshot, corrupt: false } : await readManifestForRecovery()
   const { manifest } = recovery
   if (!manifest && !(await probeFirewallForOurRules())) {
@@ -1018,23 +1018,33 @@ Write-Output ('VPNTE_FW_TIMING:restore-remove-rules:' + $nativePhaseWatch.Elapse
 if ($errors.Count -gt 0) { throw ($errors -join ' | ') }
 Write-Output 'RESTORED'`, true, 30000)
     if (!String(stdout).split(/\r?\n/).includes('RESTORED')) throw new Error('Firewall rollback read-back was not confirmed')
-  } catch (failure) { failures.push(failure) }
-  try { await removeWfpIpv6Protection(script => ps(script, true)) } catch (failure) { failures.push(failure) }
+    logEvent('info', 'firewall-killswitch', 'firewall rollback step', { operationId, step: 'profiles-and-rules', success: true })
+  } catch (failure) {
+    failures.push(failure)
+    logEvent('warn', 'firewall-killswitch', 'firewall rollback step', { operationId, step: 'profiles-and-rules', success: false, error: String(failure) })
+  }
+  try {
+    await removeWfpIpv6Protection(script => ps(script, true))
+    logEvent('info', 'firewall-killswitch', 'firewall rollback step', { operationId, step: 'ipv6-wfp', success: true })
+  } catch (failure) {
+    failures.push(failure)
+    logEvent('warn', 'firewall-killswitch', 'firewall rollback step', { operationId, step: 'ipv6-wfp', success: false, error: String(failure) })
+  }
   if (failures.length) throw new AggregateError(failures, `Network rollback incomplete: ${failures.map(String).join(' | ')}`)
 }
-export async function disableKillSwitch(reason: string): Promise<FirewallKillSwitchResult> {
-  return serializeFirewall(() => disableKillSwitchUnlocked(reason))
+export async function disableKillSwitch(reason: string, operationId?: string): Promise<FirewallKillSwitchResult> {
+  return serializeFirewall(() => disableKillSwitchUnlocked(reason, operationId))
 }
-async function disableKillSwitchUnlocked(reason: string): Promise<FirewallKillSwitchResult> {
+async function disableKillSwitchUnlocked(reason: string, operationId?: string): Promise<FirewallKillSwitchResult> {
   if (process.platform !== 'win32') {
     return { success: true, message: 'Firewall kill-switch недоступен (не Windows)' }
   }
 
   try {
-    await timedFirewallPhase('restore-policy', () => restoreAndCleanup())
-    await timedFirewallPhase('clear-journal', clearManifest)
+    await timedFirewallPhase('restore-policy', () => restoreAndCleanup(undefined, operationId), operationId)
+    await timedFirewallPhase('clear-journal', clearManifest, operationId)
   } catch (err: any) {
-    logEvent('warn', 'firewall-killswitch', 'failed to fully restore kill-switch', err)
+    logEvent('warn', 'firewall-killswitch', 'failed to fully restore kill-switch', { operationId, reason, error: String(err) })
     return {
       success: false,
       message: 'Часть правил kill-switch не снялась — проверьте Windows Firewall вручную',
@@ -1042,7 +1052,7 @@ async function disableKillSwitchUnlocked(reason: string): Promise<FirewallKillSw
     }
   }
 
-  logEvent('info', 'firewall-killswitch', `kill-switch disengaged: ${reason}`)
+  logEvent('info', 'firewall-killswitch', `kill-switch disengaged: ${reason}`, { operationId })
   return { success: true, message: 'Firewall kill-switch снят' }
 }
 
@@ -1051,7 +1061,8 @@ async function disableKillSwitchUnlocked(reason: string): Promise<FirewallKillSw
  * currently active.
  */
 export async function disableKillSwitchIfActive(
-  reason: string
+  reason: string,
+  operationId?: string
 ): Promise<FirewallKillSwitchResult> {
   if (process.platform !== 'win32') {
     return { success: true, skipped: true, message: 'Firewall kill-switch недоступен (не Windows)' }
@@ -1061,11 +1072,11 @@ export async function disableKillSwitchIfActive(
     // BEFORE the renderer's own disable-IPC arrives. Logging at `warn` made
     // the user think something went wrong every time. It didn't — the
     // kill-switch is just already gone.
-    logEvent('debug', 'firewall-killswitch', 'kill-switch already inactive — skip', { reason })
+    logEvent('debug', 'firewall-killswitch', 'kill-switch already inactive — skip', { operationId, reason })
     return { success: true, skipped: true, message: 'Kill-switch already inactive' }
   }
-  logEvent('info', 'firewall-killswitch', `auto-disable kill-switch: ${reason}`)
-  return disableKillSwitch(reason)
+  logEvent('info', 'firewall-killswitch', `auto-disable kill-switch: ${reason}`, { operationId })
+  return disableKillSwitch(reason, operationId)
 }
 
 async function probeForStuckBlockDefault(): Promise<boolean> {

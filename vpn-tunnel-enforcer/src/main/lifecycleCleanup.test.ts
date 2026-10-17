@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { isIP } from 'node:net'
 import { EventEmitter } from 'node:events'
+import { randomUUID } from 'node:crypto'
 import ts from 'typescript'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ConnectionLifecycle } from './connectionLifecycle'
@@ -93,6 +94,7 @@ function stopHarness(startupController: AbortController | null = null, startupCo
   const os = {
     startupController,
     startupCompletion,
+    randomUUID,
     isOwnedTunRuntimeRunning: vi.fn(async () => false),
     stopXray: vi.fn(async () => { state.upstream = false }), killOwnedRuntimeProcesses: done(),
     waitForOwnedRuntimeToExit: vi.fn(async () => { state.runtime = false; return true }),
@@ -174,6 +176,51 @@ return {start:()=>controller.start('127.0.0.1:1080'),state:()=>({starting:startI
 }
 
 describe('lifecycle cleanup evidence and retries (AT-02-005 / AT-03-007)', () => {
+  it.each(['success', 'baseline', 'firewall', 'adapters', 'dns', 'runtime', 'xray'])('correlates Stop steps and their actual outcomes: %s (AT-03-007)', async failing => {
+    const h = stopHarness()
+    if (failing === 'baseline') h.rollbackTunNetworkBaselineIfApplied.mockResolvedValueOnce({ success: false, message: 'baseline failed' })
+    if (failing === 'firewall') h.disableKillSwitchIfActive.mockRejectedValueOnce(new Error('firewall failed'))
+    if (failing === 'adapters' || failing === 'dns') h.rollbackPhysicalAdapterLockdownIfApplied.mockResolvedValueOnce({ rolledBack: false })
+    if (failing === 'dns') h.repairOrphanedPhysicalAdapterDns.mockRejectedValueOnce(new Error('DNS failed'))
+    if (failing === 'runtime') h.waitForOwnedRuntimeToExit.mockResolvedValueOnce(false)
+    if (failing === 'xray') h.stopXray.mockRejectedValueOnce(new Error('Xray failed'))
+    const result = await h.stop()
+    expect(result.success).toBe(failing === 'success')
+    expect(result.operationId).toMatch(/^[a-f0-9-]{36}$/)
+    const events = h.logEvent.mock.calls.filter(call => call[1] === 'tun')
+    expect(events.length).toBeGreaterThan(0)
+    for (const event of events) expect(event[3]).toMatchObject({ operationId: result.operationId })
+    const steps = events.filter(call => call[2] === 'stop step completed').map(call => call[3] as any)
+    const expectedSteps = failing === 'runtime' ? ['stop-runtime', 'wait-runtime-exit'] :
+      ['stop-runtime', 'wait-runtime-exit', 'stop-xray', 'rollback-baseline', 'disable-firewall', 'rollback-adapters',
+        ...(['adapters', 'dns'].includes(failing) ? ['repair-dns'] : [])]
+    expect(steps.map(step => step.step)).toEqual(expectedSteps)
+    const failedSteps = { baseline: ['rollback-baseline'], firewall: ['disable-firewall'], adapters: ['rollback-adapters', 'repair-dns'],
+      dns: ['rollback-adapters', 'repair-dns'], runtime: ['wait-runtime-exit'], xray: ['stop-xray'], success: [] }[failing]!
+    expect(steps.filter(step => !step.success).map(step => step.step)).toEqual(failedSteps)
+    expect(events.find(call => call[2] === 'stop completed')?.[3]).toMatchObject({ success: result.success })
+    if (failing !== 'runtime') {
+      expect(h.rollbackTunNetworkBaselineIfApplied).toHaveBeenCalledWith('TUN stopped', result.operationId)
+      expect(h.disableKillSwitchIfActive).toHaveBeenCalledWith('TUN stopped', result.operationId)
+      expect(h.rollbackPhysicalAdapterLockdownIfApplied).toHaveBeenCalledWith('TUN stopped', { operationId: result.operationId })
+    }
+    if (['adapters', 'dns'].includes(failing)) expect(h.repairOrphanedPhysicalAdapterDns)
+      .toHaveBeenCalledWith('TUN stopped safety repair', result.operationId)
+  })
+  it('coalesces concurrent Stop IDs and gives a retry a new ID (AT-03-007)', async () => {
+    const h = stopHarness()
+    let release!: () => void
+    h.waitForOwnedRuntimeToExit.mockImplementationOnce(() => new Promise(resolve => { release = () => resolve(false) }))
+    const first = h.stop(), concurrent = h.stop()
+    await vi.waitFor(() => expect(h.waitForOwnedRuntimeToExit).toHaveBeenCalledOnce())
+    release()
+    const [failed, coalesced] = await Promise.all([first, concurrent])
+    expect(coalesced.operationId).toBe(failed.operationId)
+    const retried = await h.stop()
+    expect(retried.success).toBe(true)
+    expect(retried.operationId).not.toBe(failed.operationId)
+    expect(h.logEvent.mock.calls.filter(call => call[2] === 'stop started')).toHaveLength(2)
+  })
   it.each(['refused', 'thrown'])('manual stop retains the live session and monitoring when %s, then allows retry (AT-02-009)', async failure => {
     const session = { leakDetected: false }
     const h = mainHarness('stopProtection', session)
@@ -655,7 +702,7 @@ return ${body('index.ts', 'tunController.onStatusChange')};`, os)
   it('distinguishes trusted manifest absence from a rejected trust check', async () => {
     const readManifest = vi.fn(async (): Promise<unknown> => null)
     const text = body('physicalAdapterLockdown.ts', 'rollbackPhysicalAdapterLockdownIfApplied').replace(/^export /, '')
-    const rollback = compile<(reason: string) => Promise<any>>(`${text}\nreturn rollbackPhysicalAdapterLockdownIfApplied;`, { readManifest, process: { platform: 'win32' } })
+    const rollback = compile<(reason: string) => Promise<any>>(`${text}\nreturn rollbackPhysicalAdapterLockdownIfApplied;`, { readManifest, process: { platform: 'win32' }, logEvent: noop() })
     expect(await rollback('test')).toEqual({ rolledBack: false, skipped: true })
     readManifest.mockRejectedValue(new Error('untrusted ACL'))
     await expect(rollback('test')).rejects.toThrow('untrusted ACL')

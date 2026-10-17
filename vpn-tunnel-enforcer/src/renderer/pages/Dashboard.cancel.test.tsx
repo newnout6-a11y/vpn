@@ -45,6 +45,18 @@ beforeEach(() => {
 afterEach(() => { cleanup() })
 
 describe('Dashboard cancellation', () => {
+  it('shows failed rollback steps and the retry recommendation instead of success (AT-03-007)', async () => {
+    const error = 'baseline auto-rollback: environment/HTTP_PROXY: access denied | kill-switch disable: WFP removal failed. Повторите остановку защиты и проверьте диагностику сети.'
+    Object.assign(window.electronAPI, { stopTun: vi.fn().mockResolvedValue({ success: false, error }) })
+    useAppStore.setState({ connectionBusy: null, mode: 'hard', tunRunning: true })
+    render(<Dashboard />)
+    fireEvent.click(screen.getByRole('button', { name: ru.dashboard.connected }))
+    fireEvent.click(screen.getByRole('button', { name: 'Да, отключить' }))
+    expect(await screen.findByText(error)).toBeVisible()
+    expect(screen.getByText(ru.dashboard.connectionError)).toBeVisible()
+    expect(screen.queryByText('Защита выключена с предупреждениями')).not.toBeInTheDocument()
+    expect(useAppStore.getState().logs.some(log => log.level === 'error' && log.message.includes(error))).toBe(true)
+  })
   it('does not present a cleanup alert before status checking has completed (AT-03-001)', () => {
     useAppStore.setState({ connectionBusy: null, firewallKillSwitchStatus: { state: 'unknown', cleanupRequired: true, reason: 'checking' } })
     render(<Dashboard />)
