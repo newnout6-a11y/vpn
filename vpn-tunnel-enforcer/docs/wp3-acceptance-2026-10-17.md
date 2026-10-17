@@ -585,3 +585,35 @@ Authenticode `NotSigned`. Recovery resource по-прежнему совпада
 по SHA-256 `155c175332855980933b7c7081db58784af8c9bd2e09b2dda76f2b4fa414e490`.
 Coverage — AC 927/927, F 210/210, exit 0; `git diff --check` — exit 0.
 Установка и L3 не выполнялись; CI/review нового head проверяются отдельно.
+
+## Follow-up P2 из PR #46 — 18.10.2026
+
+Комментарий `4304712554` (https://github.com/newnout6-a11y/vpn/pull/46#discussion_r4304712554)
+подтвердился в Boot Recovery и ordinary rollback: доверенный `adapters:[]`
+позволял сообщить успех и удалить журнал без восстановления физических NIC.
+Комментарий появился до merge #46, но был пропущен в итоговой сверке;
+переход к WP-0 приостановлен до исправления и CI/review follow-up PR.
+
+Новые тесты воспроизвели 2 ошибки при 1 положительном сценарии до фикса.
+Теперь пустой снимок даёт warnings/exit 1 в production-скрипте и
+rolledBack:false в ordinary rollback. Журнал сохраняется, NIC без снимка
+не меняется; независимые валидные transition/DNS-policy записи выполняются.
+Положительный непустой снимок по-прежнему восстанавливается полностью.
+
+Адресная матрица bootRecoveryExecution/bootRecoveryBehavior/
+physicalAdapterLifecycle/physicalAdapterSnapshot: **121 passed**, 20.23 s,
+exit 0. Typecheck и coverage (AC 927/927, F 210/210) — exit 0.
+Полный прогон и CI/review нового head фиксируются отдельно.
+Это L2 с подставными системными API. L3 — **«Пропущено владельцем»**,
+без переименования в PASS или «не проверено». CodeRabbit больше не ожидается.
+
+Полный `npm.cmd test` follow-up: **3292 passed / 5 skipped / 0 failed**,
+234 файла passed / 2 skipped, 188.19 s, exit 0;
+`.tmp/pr46-empty-adapters-full.log`. Это локальный результат нового исправления;
+CI/review и содержимое новой сборки проверяются отдельно.
+
+`npm.cmd run dist:win` — exit 0. Recovery resource исходник/сборка совпадает:
+SHA-256 `36399cd3020f1a774a4c30d155b01db75170034aaaf7770e2733e370d4bd23b7`.
+Setup 1.1.24: 139729025 bytes,
+SHA-256 `0383c425d75109230a50d1b269c28d02900dffff0d2d29eb0430e24f3ab84298`,
+Authenticode NotSigned; установка не выполнялась.

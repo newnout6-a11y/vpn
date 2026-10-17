@@ -1765,3 +1765,46 @@ CI/review нового SHA проверяются отдельно после pu
   Логи `.tmp/wp3-review-final-dist.log` и `.tmp/wp3-review-final-artifacts.json`.
   Установка и L3 не выполнялись. Coverage: AC 927/927, F 210/210, exit 0;
   `git diff --check` — exit 0. CI/review следующего head проверяются отдельно.
+
+## 18.10.2026 — возврат к P2 PR #46: пустой снимок физических NIC
+
+- По прямому запросу владельца проверен комментарий
+  https://github.com/newnout6-a11y/vpn/pull/46#discussion_r4304712554.
+  Замечание подтверждено. Оно появилось до merge PR #46 и было пропущено
+  при итоговой сверке; прежний вывод о только minor-остатке был неполным.
+  PR #46 уже слит (`d786e30`), исправление ведётся отдельным follow-up PR.
+- WP-0 временно отложен. Его незавершённые изменения сохранены адресным
+  stash `WP-0 in progress before PR46 P2 follow-up`, без посторонних файлов.
+  Прежний полный прогон WP-0: 3290 passed / 5 skipped / 1 failed
+  (adaptiveNetworkIdentity profile-only: default Vitest timeout 5000 ms),
+  200.02 s, exit 1; это не PASS. Лог `.tmp/wp0-initial-full.log`.
+- Production Boot Recovery принимал adapters:[] без предупреждения,
+  удалял журнал и писал restored. Обычный TypeScript rollback имел тот же
+  дефект. До исправления новые регрессии: **2 failed / 1 passed / 79 skipped**,
+  exit 1; `.tmp/pr46-empty-adapters-before.log`. Положительный соседний
+  сценарий уже проходил, поэтому отказ не вызван поломанной фикстурой.
+- Пустой исходный снимок теперь явно неполный: Boot Recovery возвращает
+  warnings/exit 1 и сохраняет журнал; ordinary rollback возвращает
+  rolledBack:false с предупреждением. Валидные transition и обе DNS-policy
+  записи продолжают восстанавливаться; NIC без ownership snapshot не меняется.
+  Strict read/write validation отклоняет пустой снимок. Непустой валидный
+  снимок по-прежнему восстанавливает NIC и разрешает удаление журнала.
+- `npm.cmd test -- src/main/bootRecoveryExecution.test.ts src/main/bootRecoveryBehavior.test.ts src/main/physicalAdapterLifecycle.test.ts src/main/physicalAdapterSnapshot.test.ts`
+  — **121 passed / 0 failed**, 4 файла, 20.23 s, exit 0.
+- `npm.cmd run typecheck` — exit 0;
+  `python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py`
+  — AC 927/927, F 210/210, exit 0; `git diff --check` — exit 0.
+- Полный прогон и CI/review follow-up head учитываются ниже. WP-3 требует
+  закрытия этого подтверждённого P2 до возврата к WP-0. L3 остаётся
+  **«Пропущено владельцем»**, CodeRabbit по решению владельца не ожидается.
+- Финальный локальный `npm.cmd test` — **3292 passed / 5 skipped / 0 failed**,
+  234 файла passed / 2 skipped, 188.19 s, exit 0.
+  Лог `.tmp/pr46-empty-adapters-full.log`. Локальный timeout из предыдущего
+  прогона WP-0 здесь не повторился; production и тестовые таймауты не менялись.
+- `npm.cmd run dist:win` — exit 0 (включая build/typecheck).
+  Recovery resource в dist/win-unpacked совпадает с исходником:
+  SHA-256 `36399cd3020f1a774a4c30d155b01db75170034aaaf7770e2733e370d4bd23b7`.
+  Setup 1.1.24: 139729025 bytes,
+  SHA-256 `0383c425d75109230a50d1b269c28d02900dffff0d2d29eb0430e24f3ab84298`,
+  Authenticode NotSigned. Установка не выполнялась. Логи
+  `.tmp/pr46-empty-adapters-dist.log`, `.tmp/pr46-empty-adapters-artifacts.json`.

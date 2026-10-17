@@ -175,6 +175,9 @@ export function validateLockdownManifest(value: unknown, rejected?: string[]): L
       return false
     }
   }
+  check('physical adapters', () => {
+    if (v.adapters.length === 0) throw new Error('Missing physical adapter snapshot')
+  })
   v.adapters = v.adapters.filter((a: AdapterSnapshot, index: number) => check(`adapter entry ${index}`, () => {
     if (!a || !Number.isInteger(a.ifIndex) || a.ifIndex <= 0 || typeof a.alias !== 'string' || a.alias.length > 256 ||
         /[\x00-\x1f]/.test(a.alias) || typeof a.ipv6Enabled !== 'boolean' || typeof a.forcedIpv6Off !== 'boolean' ||
