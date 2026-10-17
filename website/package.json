@@ -9,6 +9,7 @@
     "node": ">=24.21.0"
   },
   "scripts": {
+    "test": "node --test",
     "build": "node tools/build.mjs",
     "dev": "node tools/serve.mjs",
     "world": "node tools/gen-world.mjs",

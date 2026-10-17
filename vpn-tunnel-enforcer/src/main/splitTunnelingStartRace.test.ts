@@ -132,4 +132,27 @@ describe('split tunneling rule change during tunnel start', () => {
     await vi.waitFor(() => expect(tun.restart).toHaveBeenCalledTimes(2))
     expect(tun.applied?.names).toEqual(['aria2c.exe'])
   })
+
+  it.each(['failure', 'throw'])('does not retry recursively after restart %s (AT-06-008)', async outcome => {
+    await splitTunneling.addProcessName('curl')
+    tun.applied = { names: [], paths: [] }
+    tun.running = true
+    let attempts = 0
+    tun.restart.mockImplementation(async () => {
+      // Bound the broken implementation so the regression itself cannot hang.
+      if (++attempts === 3) tun.running = false
+      if (outcome === 'throw') throw new Error('restart fixture failure')
+      return { success: false, error: 'restart fixture failure' }
+    })
+
+    await splitTunneling.reapplyIfRulesChanged()
+    expect(tun.restart).toHaveBeenCalledTimes(1)
+
+    // A later explicit request can retry after the underlying failure is fixed.
+    tun.running = true
+    tun.restart.mockImplementation(async () => { snapshotRules(); return { success: true } })
+    await splitTunneling.reapplyIfRulesChanged()
+    expect(tun.restart).toHaveBeenCalledTimes(2)
+    expect(tun.applied?.names).toEqual(['curl.exe'])
+  })
 })

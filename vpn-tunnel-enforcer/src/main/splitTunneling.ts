@@ -728,6 +728,7 @@ async function restartForRuleChange(reason: string): Promise<void> {
   // The restart in flight re-checks the store when it finishes.
   if (ruleRestartInFlight) return
   ruleRestartInFlight = true
+  let restarted = false
   logEvent('info', 'split-tunnel', 'hot-reloading split tunnel rules while TUN is active')
 
   try {
@@ -736,6 +737,7 @@ async function restartForRuleChange(reason: string): Promise<void> {
       try { win.webContents.send('inapp-notification', { level: 'info', title: 'Применяем изменения', body: 'Перезапускаем защиту с обновлёнными правилами split tunneling', ts: Date.now() }) } catch {}
     })
     const result = await tunController.restartWithLastOptions(reason)
+    restarted = result.success
     if (!result.success) {
       logEvent('warn', 'split-tunnel', 'hot-reload restart failed — tunnel may be down', {
         error: result.error
@@ -747,7 +749,7 @@ async function restartForRuleChange(reason: string): Promise<void> {
     ruleRestartInFlight = false
   }
   // A change made during this restart may have been read too late (its 'running' arrived while in flight).
-  await reapplyIfRulesChanged()
+  if (restarted) await reapplyIfRulesChanged()
 }
 
 function sameRuleSet(a: string[], b: string[]): boolean {

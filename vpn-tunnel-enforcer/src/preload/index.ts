@@ -2,6 +2,7 @@ import type { PublicIpInfo } from '../shared/publicIp'
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
   ClientDevice,
+  FirewallKillSwitchStatus,
   ExternalProxyBatchStartResult,
   ExternalProxyStartOptions,
   ExternalProxyStatus,
@@ -52,7 +53,7 @@ export interface ElectronAPI {
   clearDiagnosticArtifacts: () => Promise<{ success: boolean; message: string; cleared: string[] }>
   rollbackTunNetworkBaseline: () => Promise<any>
   disableFirewallKillSwitch: () => Promise<{ success: boolean; message: string; skipped?: boolean }>
-  getFirewallKillSwitchStatus: () => Promise<{ active: boolean; unverified?: true }>
+  getFirewallKillSwitchStatus: () => Promise<FirewallKillSwitchStatus>
   firewallNuclearReset: (confirmationToken: string) => Promise<{ success: boolean; message: string }>
   firewallRepairHealth: () => Promise<any>
   firewallRepairVpnteRules: () => Promise<any>

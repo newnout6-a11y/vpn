@@ -13,9 +13,14 @@ try {
   $fixture=@'
 namespace VPNTE.IPv6.Tests {
   public sealed class RollbackEngine : IEngine {
-    public readonly NativeEngine Native=new NativeEngine();
-    public bool Aborted;
-    public void Begin(){Native.Begin();} public void Commit(){} public void Abort(){Native.Abort();Aborted=true;}
+    public readonly IEngine Native;
+    public bool Active, Aborted;
+    public RollbackEngine():this(new NativeEngine()){}
+    public RollbackEngine(IEngine native){Native=native;}
+    public void Begin(){Native.Begin();Active=true;}
+    public void Commit(){} // Never commit, including when production Apply asks.
+    public void Abort(){if(!Active)return;Native.Abort();Active=false;Aborted=true;}
+    public void VerifyPriority(){((NativeEngine)Native).VerifyPriority();}
     // ABI tests remain inside an aborted transaction even on hosts with a
     // conflicting third-party VPN. Production Apply still checks priority.
     public void EnsureSublayer(){typeof(NativeEngine).GetMethod("CheckSublayer",System.Reflection.BindingFlags.NonPublic|System.Reflection.BindingFlags.Instance).Invoke(Native,new object[]{true});}
@@ -40,8 +45,10 @@ namespace VPNTE.IPv6.Tests {
 }
 '@
   Add-Type -TypeDefinition ($source+$fixture)
-  $adapter=Get-NetAdapter -Physical -ErrorAction Stop | Where-Object Status -eq 'Up' | Select-Object -First 1
-  if(-not $adapter){throw 'No physical interface for native smoke test'}
+  # An active VM interface suffices for ABI/LUID read-back. This does not test
+  # physical-interface ownership, packet filtering, CLAT or reboot acceptance.
+  $adapter=Get-NetAdapter -ErrorAction Stop | Where-Object Status -eq 'Up' | Select-Object -First 1
+  if(-not $adapter){throw 'No active interface for native smoke test'}
   $appId=[VPNTE.IPv6.NativeEngine]::AppId((Get-Process -Id $PID).Path)
   $luid=[VPNTE.IPv6.NativeEngine]::InterfaceLuid([string]$adapter.InterfaceGuid)
   $engine=New-Object VPNTE.IPv6.Tests.RollbackEngine
@@ -49,16 +56,16 @@ namespace VPNTE.IPv6.Tests {
     # Run() owns Begin(); even failed apply calls Abort. A second Abort can
     # report NO_TXN_IN_PROGRESS, so success tracks the pending transaction.
     $result.rules=[VPNTE.IPv6.Tests.NativeSmoke]::Run($engine,$appId,$luid)
-    try {$engine.Native.VerifyPriority();$result.priority='verified'} catch {
+    try {$engine.VerifyPriority();$result.priority='verified'} catch {
       if($_.Exception.ToString() -notlike '*IPv6 WFP priority conflict*'){throw}
       $result.priority='conflict';$result.conflict=$_.Exception.Message
     }
     $engine.Abort();$result.aborted=$true
     $result.ok=$true
   } finally {
-    try {if(-not $engine.Aborted){$engine.Abort()};$result.aborted=$engine.Aborted} finally {$engine.Dispose()}
+    try {if($engine.Active){$engine.Abort()};$result.aborted=$engine.Aborted} finally {$engine.Dispose()}
   }
-} catch {$result.error=$_.Exception.ToString()}
+} catch {$result.ok=$false;$result.error=$_.Exception.ToString()}
 $json=$result | ConvertTo-Json -Depth 5
 if($OutputPath){$json | Set-Content -LiteralPath $OutputPath -Encoding UTF8}
 $json

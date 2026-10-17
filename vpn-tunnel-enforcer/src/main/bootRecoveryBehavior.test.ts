@@ -75,6 +75,43 @@ it.skipIf(!powerShell)('recovery handles failed deletion, zero values and missin
   expect(result.calls).toContain('set:DisableSmartNameResolution/0')
 }, 20000)
 
+it.skipIf(!powerShell).each(['missing', 'wrong-type', 'overflow'].flatMap(invalid => [
+  { invalid, invalidFirst: true }, { invalid, invalidFirst: false }
+]))('restores the valid DNS policy step beside $invalid input (invalidFirst=$invalidFirst; AT-03-003/007)', fixture => {
+  const invalid = fixture.invalid === 'missing' ? null : {
+    exists: true, type: fixture.invalid === 'wrong-type' ? 'REG_SZ' : 'REG_DWORD', data: fixture.invalid === 'wrong-type' ? '0' : '4294967296'
+  }
+  const valid = { exists: true, type: 'REG_DWORD', data: '0' }
+  const encoded = Buffer.from(JSON.stringify(fixture.invalidFirst ? [invalid, valid] : [valid, invalid])).toString('base64')
+  const result = run(String.raw`
+$snapshots=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}'))|ConvertFrom-Json
+$script:hasWarnings=$false;$script:calls=@();$script:messages=@()
+$script:values=@{DisableSmartNameResolution=1;DisableParallelAandAAAA=1}
+function Log($message) {$script:messages+=$message}
+function Get-RecoveryRegistryKey($path) {
+  $key=[pscustomobject]@{}
+  $key|Add-Member ScriptMethod SetValue {param($name,$data,$kind) $script:calls+=$name;$script:values[$name]=$data}
+  $key|Add-Member ScriptMethod GetValueNames {@('DisableSmartNameResolution','DisableParallelAandAAAA')}
+  $key|Add-Member ScriptMethod GetValueKind {param($name) [Microsoft.Win32.RegistryValueKind]::DWord}
+  $key|Add-Member ScriptMethod GetValue {param($name) $script:values[$name]}
+  $key|Add-Member ScriptMethod Close {}
+  return $key
+}
+${restore}
+Restore-RegValue 'HKLM\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient' 'DisableSmartNameResolution' $snapshots[0] 'DisableSmartNameResolution'
+Restore-RegValue 'HKLM\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters' 'DisableParallelAandAAAA' $snapshots[1] 'DisableParallelAandAAAA'
+@{warning=$script:hasWarnings;calls=@($script:calls);values=$script:values;messages=@($script:messages)}|ConvertTo-Json -Compress
+`)
+  const invalidName = fixture.invalidFirst ? 'DisableSmartNameResolution' : 'DisableParallelAandAAAA'
+  const validName = fixture.invalidFirst ? 'DisableParallelAandAAAA' : 'DisableSmartNameResolution'
+  expect(result.warning).toBe(true)
+  expect(result.calls).toEqual([validName])
+  expect(result.values).toEqual({ [invalidName]: 1, [validName]: 0 })
+  expect(result.messages).toEqual(fixture.invalidFirst ? [
+    `Registry: failed to restore ${invalidName}`, `Registry: restored and verified ${validName}`
+  ] : [`Registry: restored and verified ${validName}`, `Registry: failed to restore ${invalidName}`])
+}, 20000)
+
 it.skipIf(!powerShell)('recovery preserves unrelated snapshots and all snapshots on warnings', () => {
   const result = run(`
     function Log($message) {}

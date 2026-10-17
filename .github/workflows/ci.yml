@@ -41,6 +41,7 @@ jobs:
           node-version: '24.21.0'
           cache: npm
           cache-dependency-path: vpn-tunnel-enforcer/package-lock.json
+      # fast-uri и js-yaml уже закреплены на registry.npmjs.org в lockfile (PR #38); SSH rewrite не нужен.
       - run: npm ci
       # resources/*.exe не хранятся в git (.gitignore), а часть тестов запускает настоящие движки
       # (проверка конфигов Xray/sing-box). Версии закреплены, SHA-256 сверяется с хешами из GitHub API.
@@ -71,6 +72,11 @@ jobs:
       - name: Трассировка приёмочных тестов
         working-directory: .
         run: python docs/04-приёмочные-тесты/traceability/check-coverage.py
+      # Real BFE ABI/read-back inside an aborted transaction; never commits
+      # filters. This supplements mocks, not packet/reboot/OS-matrix L3.
+      - name: IPv6 WFP — нативный ABI и откат транзакции
+        shell: powershell
+        run: ./scripts/test-wfp-ipv6-native.ps1 -OutputPath "$env:RUNNER_TEMP/wp3-wfp-native.json"
       # Нативные чтения запускаются под настоящим Electron: фатальная ошибка koffi под Electron не видна из Node.
       - name: Нативные чтения под Electron
         run: npm run test:electron-probe
@@ -93,6 +99,8 @@ jobs:
           node-version: '24.21.0'
       - name: Сборка
         run: node tools/build.mjs
+      - name: Тесты таймеров
+        run: node --test
       - name: Баланс тегов и ссылки
         run: node tools/lint-html.mjs
 

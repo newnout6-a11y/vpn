@@ -1,5 +1,6 @@
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
+import { randomUUID } from 'crypto'
 import { execElevated } from './admin'
 import { logEvent } from './appLogger'
 import { timePs } from './psTiming'
@@ -10,6 +11,7 @@ const execFile = promisify(execFileCb)
 const BASELINE_NAME = 'latest-tun-network-baseline.json'
 export interface SystemNetworkResult {
   success: boolean
+  operationId?: string
   message: string
   details?: string
   warnings?: string[]
@@ -38,18 +40,22 @@ export interface NetworkBackupManifest {
 
 // No paths, registry keys, executable commands or import files come from disk.
 // The whitelist defines every value VPNTE may modify or restore.
-export function validateNetworkBackupManifest(value: unknown): NetworkBackupManifest {
+// Only recovery supplies rejected, after the storage layer verifies ACL/owner.
+export function validateNetworkBackupManifest(value: unknown, rejected?: string[]): NetworkBackupManifest {
   const v = value as NetworkBackupManifest
   if (!v || v.schemaVersion !== 1 || v.owner !== 'VPNTE' || !Number.isSafeInteger(v.createdAt) || v.createdAt <= 0 ||
-      typeof v.userSid !== 'string' || !/^S-1-5-21-\d+-\d+-\d+-\d+$/.test(v.userSid) || !Array.isArray(v.values) || v.values.length !== 9) {
+      typeof v.userSid !== 'string' || !/^S-1-5-21-\d+-\d+-\d+-\d+$/.test(v.userSid) || !Array.isArray(v.values) ||
+      (rejected ? v.values.length > 9 : v.values.length !== 9)) {
     throw new Error('Invalid network baseline schema or identity')
   }
   const seen = new Set<string>()
-  const values = v.values.map(s => {
+  const values = v.values.flatMap((s, index) => {
+    try {
     if (!s || !Object.hasOwn(TARGETS, s.target) || typeof s.name !== 'string' ||
         !(TARGETS[s.target].names as readonly string[]).includes(s.name) || typeof s.exists !== 'boolean') throw new Error('Invalid baseline registry target')
     const id = `${s.target}/${s.name}`
-    if (seen.has(id)) throw new Error('Duplicate baseline registry target')
+    // Reject every conflicting entry, including the first; disk order is not authority.
+    if (v.values.filter(other => other?.target === s.target && other?.name === s.name).length !== 1) throw new Error('Duplicate baseline registry target')
     seen.add(id)
     let valid = !s.exists && s.kind === null && s.data === null
     if (s.exists) {
@@ -63,8 +69,16 @@ export function validateNetworkBackupManifest(value: unknown): NetworkBackupMani
       }
     }
     if (!valid) throw new Error('Invalid baseline registry value or type')
-    return { target: s.target, name: s.name, exists: s.exists, kind: s.kind, data: s.data }
+    return [{ target: s.target, name: s.name, exists: s.exists, kind: s.kind, data: s.data }]
+    } catch (error) {
+      if (!rejected) throw error
+      rejected.push(`baseline entry ${index}: invalid or conflicting snapshot; skipped`)
+      return []
+    }
   })
+  if (rejected) for (const [target, spec] of Object.entries(TARGETS)) {
+    for (const name of spec.names) if (!seen.has(`${target}/${name}`)) rejected.push(`${target}/${name}: missing snapshot; skipped`)
+  }
   return { schemaVersion: 1, owner: 'VPNTE', createdAt: v.createdAt, userSid: v.userSid, values }
 }
 
@@ -75,8 +89,8 @@ function withBaselineOpLock<T>(operation: () => Promise<T>): Promise<T> {
   return result
 }
 export function getTunNetworkBaselineManifestPath(): string { return recoveryManifestPath(BASELINE_NAME) }
-function readManifest() { return readRecoveryManifest(BASELINE_NAME, validateNetworkBackupManifest) }
-export async function isBaselineApplied(): Promise<boolean> { return (await readManifest()) !== null }
+function readManifest(rejected?: string[]) { return readRecoveryManifest(BASELINE_NAME, value => validateNetworkBackupManifest(value, rejected)) }
+export async function isBaselineApplied(recovery = false): Promise<boolean> { return (await readManifest(recovery ? [] : undefined)) !== null }
 function psJson(value: unknown): string { return `[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(JSON.stringify(value)).toString('base64')}')) | ConvertFrom-Json` }
 function ps(script: string, elevated = false, timeout = 30000) {
   return timePs('cold-ps', elevated ? 'system-network-elevated' : 'system-network', () => psUntimed(script, elevated, timeout))
@@ -200,12 +214,22 @@ Write-Output 'BASELINE_APPLIED'`)
     return { success: false, message: 'Baseline не применён; проверьте отчёт восстановления', warnings, details: warnings.join(' | ') }
   }
 }
-export function rollbackTunNetworkBaseline(): Promise<SystemNetworkResult> { return withBaselineOpLock(rollbackUnlocked) }
-async function rollbackUnlocked(): Promise<SystemNetworkResult> {
+export function rollbackTunNetworkBaseline(): Promise<SystemNetworkResult> { return withBaselineOpLock(() => rollbackUnlocked()) }
+async function rollbackUnlocked(reason = 'manual', operationId: string = `baseline_${randomUUID().replaceAll('-', '')}`): Promise<SystemNetworkResult> {
   if (process.platform !== 'win32') return { success: false, message: 'Rollback доступен только на Windows' }
+  logEvent('info', 'system-network', 'baseline rollback started', { operationId, reason })
   try {
-    const manifest = await readManifest()
-    if (!manifest) return { success: true, skipped: true, message: 'Активный VPNTE network baseline не найден' }
+    const warnings: string[] = []
+    const manifest = await readManifest(warnings)
+    if (!manifest) {
+      logEvent('info', 'system-network', 'baseline rollback completed', { operationId, success: true, skipped: true })
+      return { success: true, operationId, skipped: true, message: 'Активный VPNTE network baseline не найден' }
+    }
+    for (const error of warnings) logEvent('error', 'system-network', 'baseline rollback step rejected', { operationId, error, success: false })
+    if (!manifest.values.length) {
+      logEvent('error', 'system-network', 'baseline rollback completed', { operationId, success: false, warnings })
+      return { success: false, operationId, message: 'Нет валидных шагов baseline; снимок сохранён', warnings }
+    }
     const { stdout } = await ps(`${REGISTRY_HELPERS}
 ${WININET_NOTIFY_FUNCTION}
 if ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne '${manifest.userSid}') { throw 'Baseline user identity mismatch' }
@@ -232,27 +256,38 @@ $watch.Stop()
     }
     const validOutcome = (s: { success: boolean; error: string | null }) => s && typeof s.success === 'boolean' && (s.success ? s.error === null : typeof s.error === 'string')
     const steps = report?.steps
-    if (!Array.isArray(steps) || steps.length !== 9 || steps.some((s, i) => !validOutcome(s) || s.name !== `${manifest.values[i].target}/${manifest.values[i].name}`) ||
+    if (!Array.isArray(steps) || steps.length !== manifest.values.length || steps.some((s, i) => !validOutcome(s) || s.name !== `${manifest.values[i].target}/${manifest.values[i].name}`) ||
         !validOutcome(report.notification) || !report.timings || [report.timings.registryMs, report.timings.notifyMs].some(ms => !Number.isSafeInteger(ms) || ms < 0)) throw new Error('Invalid baseline recovery report')
-    for (const [phase, durationMs] of Object.entries(report.timings)) logEvent('debug', 'system-network', 'baseline native phase timing', { phase, durationMs })
-    const warnings: string[] = []
+    for (const [phase, durationMs] of Object.entries(report.timings)) logEvent('debug', 'system-network', 'baseline native phase timing', { operationId, phase, durationMs })
     for (const step of steps) {
-      logEvent(step.success ? 'info' : 'error', 'system-network', 'baseline rollback step', step)
+      logEvent(step.success ? 'info' : 'error', 'system-network', 'baseline rollback step', { ...step, operationId })
       if (!step.success) warnings.push(`${step.name}: ${step.error}`)
     }
+    logEvent(report.notification.success ? 'info' : 'error', 'system-network', 'baseline rollback notification', { ...report.notification, operationId })
     if (!report.notification.success) warnings.push(`WinINet notification: ${report.notification.error}`)
-    if (warnings.length) return { success: false, message: 'Baseline восстановлен частично; снимок сохранён', warnings, details: warnings.join(' | ') }
+    if (warnings.length) {
+      logEvent('error', 'system-network', 'baseline rollback completed', { operationId, success: false, warnings })
+      return { success: false, operationId, message: 'Baseline восстановлен частично; снимок сохранён', warnings, details: warnings.join(' | ') }
+    }
     await removeRecoveryManifest(BASELINE_NAME)
-    return { success: true, message: 'Сетевые настройки восстановлены и проверены', details: `Backup created at: ${new Date(manifest.createdAt).toISOString()}` }
+    logEvent('info', 'system-network', 'baseline rollback completed', { operationId, success: true })
+    return { success: true, operationId, message: 'Сетевые настройки восстановлены и проверены', details: `Backup created at: ${new Date(manifest.createdAt).toISOString()}` }
   } catch (error) {
-    logEvent('error', 'system-network', 'CRITICAL_SECURITY_EVENT: baseline recovery unknown', { error: String(error) })
-    return { success: false, message: 'Baseline recovery не подтверждён; снимок сохранён', warnings: [String(error)] }
+    logEvent('error', 'system-network', 'CRITICAL_SECURITY_EVENT: baseline recovery unknown', { operationId, error: String(error) })
+    return { success: false, operationId, message: 'Baseline recovery не подтверждён; снимок сохранён', warnings: [String(error)] }
   }
 }
-export function rollbackTunNetworkBaselineIfApplied(reason: string): Promise<SystemNetworkResult> {
+export function rollbackTunNetworkBaselineIfApplied(reason: string, operationId?: string): Promise<SystemNetworkResult> {
   if (process.platform !== 'win32') return Promise.resolve({ success: true, skipped: true, message: 'Rollback недоступен (не Windows)' })
-  return withBaselineOpLock(async () => {
-    logEvent('info', 'system-network', `auto-rollback baseline: ${reason}`)
-    return rollbackUnlocked()
-  })
+  return withBaselineOpLock(() => rollbackUnlocked(reason, operationId))
+}
+
+/** For recovery callers using catch: trusted absence is a no-op; partial recovery rejects. */
+export async function rollbackTunNetworkBaselineOrThrow(reason: string): Promise<SystemNetworkResult> {
+  const result = await rollbackTunNetworkBaselineIfApplied(reason)
+  if (!result.success) {
+    const details = result.details || result.warnings?.join(' | ')
+    throw new Error(`${result.message}${details ? `: ${details}` : ''}. Повторите восстановление сети и проверьте диагностику.`)
+  }
+  return result
 }

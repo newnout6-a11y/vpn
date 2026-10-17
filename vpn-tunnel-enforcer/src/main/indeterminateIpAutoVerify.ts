@@ -4,7 +4,6 @@ import { ipMonitor } from './ipMonitor'
 import { tunController, areTunRoutesActive } from './tunController'
 import { runLeakSelfTest, type LeakSelfTestResult } from './leakSelfTest'
 
-// Public IPs are logged in the clear: they are the evidence this check is about.
 export interface IndeterminateAutoVerifyDeps {
   isRunning?: () => boolean
   /** Identity of the current connection; a reconnect during the check changes it. */
@@ -51,7 +50,7 @@ export async function executeIndeterminateVpnIpAutoVerify(
       if (!routesActive || !isRunning()) return
 
       logEvent('info', 'ip-monitor', 'auto-verifying indeterminate VPN IP via leak self-test', {
-        candidateIp: candidateIp
+        candidateIp: redactSensitiveText(candidateIp)
       })
       const leakResult = await runLeakTestFn()
       if (!isRunning()) return
@@ -66,12 +65,12 @@ export async function executeIndeterminateVpnIpAutoVerify(
         !leakResult.defaultRoutePublicIp
       ) {
         logEvent('warn', 'ip-monitor', 'indeterminate IP verification failed leak self-test safety gate', {
-          candidateIp: candidateIp,
+          candidateIp: redactSensitiveText(candidateIp),
           physicalAdapterInspectionComplete: leakResult.physicalAdapterInspectionComplete,
           physicalAdapterReached: leakResult.physicalAdapterReached,
           publicIpMismatch: leakResult.publicIpMismatch,
           dnsLeakDetected: leakResult.dnsLeakDetected,
-          defaultRoutePublicIp: leakResult.defaultRoutePublicIp || ''
+          defaultRoutePublicIp: redactSensitiveText(leakResult.defaultRoutePublicIp || '')
         })
         return
       }
@@ -80,25 +79,25 @@ export async function executeIndeterminateVpnIpAutoVerify(
       const routesStillActive = await areRoutesActiveFn().catch(() => false)
       if (!routesStillActive || !isRunning()) {
         logEvent('warn', 'ip-monitor', 'TUN routes no longer active after leak self-test; aborting rebaseline', {
-          candidateIp: candidateIp
+          candidateIp: redactSensitiveText(candidateIp)
         })
         return
       }
 
       const verifiedIp = leakResult.defaultRoutePublicIp
       logEvent('info', 'ip-monitor', 'indeterminate IP verified clean by leak self-test; adopting verified VPN IP baseline', {
-        oldVpnIp: ipMonitor.getEvidence().vpnIp || '',
-        verifiedIp: verifiedIp,
-        candidateIp: candidateIp
+        oldVpnIp: redactSensitiveText(ipMonitor.getEvidence().vpnIp || ''),
+        verifiedIp: redactSensitiveText(verifiedIp),
+        candidateIp: redactSensitiveText(candidateIp)
       })
 
       const recheckInfo = await recheckFn(true, isRunning, verifiedIp)
       if (recheckInfo.ip !== verifiedIp || recheckInfo.vpnIp !== verifiedIp || !isRunning()) {
         logEvent('warn', 'ip-monitor', 'indeterminate IP rebaseline sample mismatch; rejecting adoption', {
-          candidateIp: candidateIp,
-          verifiedIp: verifiedIp,
-          recheckIp: recheckInfo.ip || '',
-          recheckVpnIp: recheckInfo.vpnIp || ''
+          candidateIp: redactSensitiveText(candidateIp),
+          verifiedIp: redactSensitiveText(verifiedIp),
+          recheckIp: redactSensitiveText(recheckInfo.ip || ''),
+          recheckVpnIp: redactSensitiveText(recheckInfo.vpnIp || '')
         })
         return
       }

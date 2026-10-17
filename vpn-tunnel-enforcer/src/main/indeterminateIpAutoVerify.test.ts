@@ -280,6 +280,28 @@ describe('indeterminate IP auto-verification (AT-07-001 / AT-07-005 / AT-07-006)
       expect(adopted?.[3]).toMatchObject({ candidateIp: '13.143.214.3', verifiedIp: '13.143.214.4' })
     })
 
+    it.each(['adopt', 'safety', 'routes', 'mismatch'])('redacts credentials before logEvent in the %s branch (AT-01-002)', async branch => {
+      vi.mocked(logEvent).mockClear()
+      const candidate = '198.51.100.3 token=pr44-candidate-secret'
+      const verified = '198.51.100.4 token=pr44-verified-secret'
+      let routeChecks = 0
+      await executeIndeterminateVpnIpAutoVerify(candidate, {
+        isRunning: () => true,
+        getVerdict: () => 'indeterminate',
+        areRoutesActive: async () => ++routeChecks === 1 || branch !== 'routes',
+        runLeakTest: async () => ({ ...cleanLeakResult(verified), dnsLeakDetected: branch === 'safety' }),
+        recheck: async () => ({
+          ip: branch === 'mismatch' ? candidate : verified,
+          vpnIp: verified, isLeak: false
+        })
+      })
+      expect(logEvent).toHaveBeenCalled()
+      const logged = JSON.stringify(vi.mocked(logEvent).mock.calls)
+      expect(logged).not.toContain('pr44-candidate-secret')
+      expect(logged).not.toContain('pr44-verified-secret')
+      expect(logged).toContain('<redacted-credential>')
+    })
+
     it('aborts when TUN stops running during verification', async () => {
       const onVerified = vi.fn()
       const recheck = vi.fn()
