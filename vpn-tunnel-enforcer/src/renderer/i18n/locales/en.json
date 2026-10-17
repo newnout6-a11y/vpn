@@ -21,6 +21,9 @@
     "legacyCleanupRequired": "Stopping the old client's capture is not confirmed. Disconnect the VPN and close the old client normally before updating; new capture is blocked."
   },
   "dashboard": {
+    "proxyDownFirewallCheck": "The VPN server is not responding. Checking the route and kill-switch state. Check your VPN client (Happ).",
+    "runtimeFailedFirewallCheck": "sing-box stopped unexpectedly. Checking the kill-switch state; traffic blocking is not yet verified.",
+
     "firewallVerifiedTitle": "Kill-switch policy verified",
     "firewallVerifiedBody": "Windows Firewall profiles, rules and IPv6 WFP match the checked policy. Allowed exceptions still apply; configuration checks do not replace traffic leak tests.",
     "firewallUnknownTitle": "Traffic blocking is unverified",

@@ -45,6 +45,12 @@ beforeEach(() => {
 afterEach(() => { cleanup() })
 
 describe('Dashboard cancellation', () => {
+  it('does not present a cleanup alert before status checking has completed (AT-03-001)', () => {
+    useAppStore.setState({ connectionBusy: null, firewallKillSwitchStatus: { state: 'unknown', cleanupRequired: true, reason: 'checking' } })
+    render(<Dashboard />)
+    expect(screen.queryByText(ru.dashboard.firewallUnknownTitle)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Снять блокировку' })).not.toBeInTheDocument()
+  })
   it('shows unknown firewall evidence without claiming Internet blocking; recheck can establish absence (AT-03-001/003)', async () => {
     useAppStore.setState({ connectionBusy: null, firewallKillSwitchStatus: { state: 'unknown', cleanupRequired: true, reason: 'read-back-failed' } })
     render(<Dashboard />)

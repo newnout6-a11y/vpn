@@ -258,6 +258,7 @@ finally { [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree($testRoot,$fa
     const retried = await rollbackTunNetworkBaseline()
     expect(failed.success).toBe(false)
     expect(retried.success).toBe(true)
+    expect(state.manifest).toBeNull()
     expect(failed).toHaveProperty('operationId', expect.stringMatching(/^[a-f0-9-]{36}$/))
     expect(retried).toHaveProperty('operationId', expect.stringMatching(/^[a-f0-9-]{36}$/))
     expect(failed.operationId).not.toBe(retried.operationId)

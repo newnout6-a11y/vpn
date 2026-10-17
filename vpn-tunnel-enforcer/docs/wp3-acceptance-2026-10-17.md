@@ -168,6 +168,19 @@ PNG просмотрены; 414 px визуально проверен. Изме
 0 failed**, 234 files passed, 2 skipped, 132.11 с, exit 0. Трассировка —
 AC 927/927, F 210/210; `git diff --check` — exit 0.
 
+### Уточнения после review f1b22f7
+
+Windows/Rust CI на f1b22f7 — success; Revix — neutral. Исправлено issue
+с локализацией двух App log messages (en/ru). Начальный checking больше
+не показывает cleanup alert; failed unknown после чтения сохраняет
+предупреждение, поскольку отказ проверки не доказывает отсутствие правил.
+Добавлен UI regression и assertion очистки baseline manifest после retry.
+
+`npm.cmd run typecheck` — exit 0; `npm.cmd test` — **3169 passed, 5 skipped,
+0 failed**, 234 files passed, 2 skipped, 124.12 с, exit 0. Трассировка —
+AC 927/927, F 210/210; `git diff --check` — exit 0. Повторная production
+сборка после этих небольших уточнений не запускалась.
+
 ## Условие перехода дальше
 
 Закрыть доступные пробелы L1/L2, получить и сохранить реальные L3-доказательства

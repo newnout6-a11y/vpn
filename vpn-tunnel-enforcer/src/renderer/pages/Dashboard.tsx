@@ -466,6 +466,7 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
   const visibleLeak = isLeak && !isServerSwitching
   const showKillSwitchBanner =
     firewallStatus.state !== 'inactive' &&
+    firewallStatus.reason !== 'checking' &&
     !tunRunning &&
     !isServerSwitching &&
     !connecting &&

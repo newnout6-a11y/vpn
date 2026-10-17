@@ -1176,3 +1176,31 @@ npm.cmd test
 WP-3 остаётся частичным: packet oracle, SYSTEM reboot, OS matrix и физический
 464XLAT не приняты. Следом — проверки/ревью нового SHA PR #46 и остаток WP-3;
 переход к WP-0 не выполнен.
+
+### WP-3: review f1b22f7 и небольшие уточнения UI
+
+- f1b22f78a03ba9ffd2c25d17867c86a5d0e536e7 опубликован в PR #46.
+  Windows job 117468856033 success, Rust 117468856338 success,
+  Revix 117468871161 neutral. Windows: 3169 passed / 4 skipped;
+  нативный BFE smoke ok=true, aborted=true, priority=verified.
+  Это не L3 packet/boot acceptance.
+- Проверено issue Revix 4303919025: два изменённых log сообщения App.tsx
+  вынесены в i18n.t с en/ru keys.
+- Suggestion 4303919028 принято частично: баннер не показывается во время
+  checking, когда read-back ещё не завершён. Не скрываем unknown/unavailable
+  после отказа: недоступный helper не доказывает отсутствие orphan правил.
+  Отдельный UI regression подтверждает отсутствие cleanup alert до ответа.
+- Позднее опубликованный minor CodeRabbit по e622512 подтверждён: retry после
+  отказа шага baseline теперь проверяет очистку state.manifest после success.
+- Сверка следующего AT-03-007: общий Stop уже отдаёт частичные отказы в UI
+  как error, но общего operationId для baseline/firewall/adapters ещё нет.
+  Следующая работа остаётся внутри WP-3.
+
+Проверки текущего уточнения из vpn-tunnel-enforcer:
+- npm.cmd run typecheck — exit 0.
+- npm.cmd test — 3169 passed, 5 skipped, 0 failed; 234 files passed,
+  2 skipped; 124.12 s; exit 0.
+Из корня: python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py
+— AC 927/927, F 210/210, exit 0; git diff --check — exit 0.
+Сборка предыдущего f1b22f7 проверена; после этого изменения её не повторяли.
+CI/review нового SHA проверяются отдельно после push.

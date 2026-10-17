@@ -213,9 +213,9 @@ export default function App() {
       } else if (isAdapting) {
         addLog('info', 'Переподключаем туннель — файрвол и защита остаются включёнными.')
       } else if (status === 'proxy-down') {
-        addLog('warn', 'VPN-сервер не отвечает. Проверяем маршрут и состояние kill-switch. Проверьте ваш VPN-клиент (Happ).')
+        addLog('warn', i18n.t('dashboard.proxyDownFirewallCheck'))
       } else if (status === 'killswitch-active') {
-        addLog('error', 'sing-box остановился аварийно. Проверяем состояние kill-switch; блокировка трафика пока не подтверждена.')
+        addLog('error', i18n.t('dashboard.runtimeFailedFirewallCheck'))
       } else if (isRestarting) {
         const [n, total] = status.slice('restarting:'.length).split('/')
         addLog('warn', `Авто-перезапуск защиты (попытка ${n} из ${total})…`)
