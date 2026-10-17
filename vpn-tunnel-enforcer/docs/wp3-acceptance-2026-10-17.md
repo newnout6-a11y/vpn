@@ -26,7 +26,7 @@
 | --- | --- | --- |
 | 03-001 | `firewallTransactions.test.ts`, `granularKillSwitch.test.ts`, `wfpIpv6.test.ts`: установка защиты до разрыва, отказ вместо ложного успеха, форма политик | **NOT-CHECKED L3:** фактические WFP counters, pktmon и внешний capture; три способа разрыва, окно 60 с, UI ≤2 с |
 | 03-002 | `bootRecoveryRegistration.test.ts`, `bootRecoveryTaskReadBack.test.ts`, `bootRecoveryExecution.test.ts`, `bootRecoveryBehavior.test.ts`: команда задачи, read-back, исполнение production-скрипта на подставных системных API, проверка GUID/driver/subnet | **NOT-CHECKED L3:** установленная сборка, жёсткое убийство, настоящий reboot, SYSTEM, итоговый отчёт в UI |
-| 03-003 | `recoveryManifestStorage.test.ts`, `firewallTransactions.test.ts`, `bootRecoveryExecution.test.ts`, `systemNetwork.test.ts`: corrupt/missing/future schema, карантин, сохранение strict, отсутствие эффектов для недоверенных данных; `lifecycleCleanup.test.ts`: startup warning до создания окна при неполном baseline recovery | **Частично:** полная матрица частичных манифестов и реальный boot/обычный rollback; mocks не доказывают системные ACL |
+| 03-003 | `recoveryManifestStorage.test.ts`, `firewallTransactions.test.ts`, `bootRecoveryExecution.test.ts`, `systemNetwork.test.ts`: corrupt/missing/future schema, карантин, сохранение strict, отсутствие эффектов для недоверенных данных; `bootRecoveryExecution.test.ts`: независимость recovery при частичном firewall/adapter/baseline/TUN документе; `bootRecoveryBehavior.test.ts`: валидный DNS registry step рядом с отсутствующим/невалидным; `lifecycleCleanup.test.ts`: startup warning до создания окна при неполном baseline recovery | **Частично:** смысл «шагов без подписи» требует уточнения; полный обычный rollback частичного документа и реальный boot не приняты; mocks не доказывают системные ACL |
 | 03-004 | `firewallTransactions.test.ts`, `bootRecoveryExecution.test.ts`: сохранение исходных Block, удаление только собственных правил, независимый read-back | **NOT-CHECKED L3:** три реальных цикла apply/stop и сравнение экспортов чужих Block/Allow |
 | 03-005 | `physicalAdapterSnapshot.test.ts`, `physicalAdapterLifecycle.test.ts`, `lifecycleCleanup.test.ts`: отсутствие фиктивных адаптеров и проверки запуска/отката | **NOT-CHECKED L3:** VM без NIC, отсутствие созданных правил и правдивый статус в UI |
 | 03-006 | `physicalAdapterLifecycle.test.ts`, `physicalAdapterSnapshot.test.ts`, `physicalAdapterHotspot.test.ts`: свежий snapshot, добавление/удаление/замена GUID, смена alias, компенсация | **NOT-CHECKED L3:** настоящий hot-plug/переименование во время apply, итоговый набор фильтров и UI |
@@ -306,6 +306,42 @@ Fixtures теперь создают проектную `.tmp` перед mkdtem
 2 skipped, 127.01 с, exit 0; typecheck, traceability (AC 927/927, F 210/210)
 и `git diff --check` — exit 0. Production build проверен на 36611ed;
 после него менялись только тесты и этот отчёт/журнал.
+
+### AT-03-003: частичные документы и независимые DNS registry steps
+
+Production boot recovery исполняется на fake Windows API с четырьмя новыми
+вариантами: неполные firewall profiles, вторая запись адаптера без identity,
+четыре из девяти baseline values, TUN record без GUID. Каждая ошибка даёт
+warnings/exit 1; другие валидные манифесты продолжают восстановление.
+Повреждённый firewall snapshot карантинируется, fallback Allow явно сообщает
+protection unknown. Неподтверждённые adapter/baseline/TUN записи не удаляются.
+
+Шесть native fixtures исполняют production Restore-RegValue: missing,
+неверный registry type и DWORD overflow в каждом из двух DNS policy steps.
+Валидный соседний step выполняется и проходит read-back, невалидный не меняет
+fixture registry; результат обоих шагов присутствует в журнале, warning=true.
+Настоящие сетевые ключи и настройки Windows этим harness не затрагиваются.
+
+**Не закрыто:** формулировка AT-03-003(c) «половина шагов без подписи» не
+определяет вид подписи. Текущий формат проверяет ACL/owner/schema, отдельных
+криптографических подписей шагов нет. Обычные baseline/adapter validators
+также требуют полный документ. Владельцу задано уточнение смысла подписи;
+до ответа нельзя считать эти fixtures доказательством всего пункта (c).
+Нормативные документы не менялись.
+
+Revix fdfac87: исправлены 4304125808 (ExecutionPolicy только дочернего
+fixture-процесса, как у boot harness) и 4304125811 (явная assert наличия rule).
+4304125817 о .itest suffix — оставлено как minor: перенос исключил бы эту
+L2-матрицу из обычного npm test/Windows CI, текущая сборка тестов сознательно
+включает другие native PowerShell fixtures. Результат ревью не объявляется
+APPROVED на основании этих исправлений.
+
+Адресный прогон вместе с startup regression suite: `npm.cmd test --
+src/main/lifecycleCleanup.test.ts src/main/bootRecoveryBehavior.test.ts
+src/main/bootRecoveryExecution.test.ts src/main/firewallStatus.test.ts` —
+223 passed, 4 files passed, 16.44 s, exit 0. Финальный `npm.cmd test` —
+3236 passed, 5 skipped, 234 files passed / 2 skipped, 128.34 s, exit 0.
+Typecheck, build, traceability (AC 927/927, F 210/210), diff check — exit 0.
 
 ## Условие перехода дальше
 

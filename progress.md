@@ -1447,3 +1447,43 @@ CI/review нового SHA проверяются отдельно после pu
   доступная работа WP-3 — оставшаяся partial-manifest матрица AT-03-003;
   L3 packet/SYSTEM reboot/OS matrix/physical 464XLAT остаются NOT-CHECKED.
   WP-3 не завершён, WP-0/WP-2 не начаты.
+
+### WP-3: CI fdfac87 и матрица частичных recovery inputs
+
+- Windows CI 117481176778 — success на merge fdfac87 в c76d45a:
+  3225 passed / 4 skipped, 235 files passed / 1 skipped; traceability
+  AC 927/927, F 210/210. BFE smoke ok=true, aborted=true,
+  priority=verified; Electron native reads 1 passed / 1 skipped.
+  Rust 117481176884 success; Revix 117481188119 neutral/COMMENTED.
+  CodeRabbit для fdfac87 ещё pending; head не менялся во время его проверки.
+- Boot recovery: четыре production-script fixtures с частичными firewall,
+  adapter, baseline и TUN inputs подтверждают продолжение других валидных
+  recovery, явный warnings/exit 1 и сохранение неподтверждённых записей.
+  Неполный firewall snapshot карантинируется; Allow fallback помечен unknown.
+- Restore-RegValue: шесть native fixtures проверяют missing snapshot,
+  неверный registry type и DWORD overflow на обеих позициях DNS policy.
+  Только валидный step меняет fake registry; read-back и отдельные сообщения
+  по обоим steps обязательны. Физическая сеть/системные registry keys не менялись.
+- Первый адресный прогон: 77 passed / 6 failed из-за потерянных обратных
+  слешей в новом TypeScript template harness. Исправлен сам harness на
+  String.raw; повтор npm.cmd test -- src/main/bootRecoveryBehavior.test.ts
+  src/main/bootRecoveryExecution.test.ts src/main/firewallStatus.test.ts —
+  83 passed, 3 files passed, 10.05 s, exit 0.
+- Revix 4304125808: fixture.ps1 запускается с process-only ExecutionPolicy,
+  как boot harness. 4304125811: вместо postfix non-null assertion — assert
+  с именем отсутствующего rule. Нит 4304125817 о .itest suffix пока не принят:
+  перенос убрал бы L2-матрицу из default npm test/Windows CI; другие native
+  fixtures здесь также собираются обычным режимом. Статуса APPROVED нет.
+- Расхождение/неоднозначность AT-03-003(c) записаны в отчёте: «шаги без
+  подписи» не определены; есть ACL/owner/schema trust, криптографических
+  подписей шагов нет. Обычный baseline/adapter validator требует полный
+  документ. Владельцу задано уточнение, норматив docs не менялся; полный
+  PASS этой матрицы не заявляется. WP-3 остаётся частичным.
+- До startup-dialog fix полный npm.cmd test — 3234 passed / 5 skipped,
+  234 files passed / 2 skipped, 129.86 s, exit 0; typecheck — exit 0.
+  После разделения wrong-type и overflow inputs (у wrong-type валидное data=0)
+  и следующего startup fix: четыре адресных suites — 223 passed,
+  4 files passed, 16.44 s, exit 0. Финальный полный прогон — 3236 passed /
+  5 skipped, 234 files passed / 2 skipped, 128.34 s, exit 0.
+  python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py —
+  AC 927/927, F 210/210, exit 0; git diff --check — exit 0.

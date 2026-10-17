@@ -66,6 +66,10 @@ function Remove-NetFirewallRule {[CmdletBinding()]param([Parameter(ValueFromPipe
 function Get-NetAdapter {param($ErrorAction) @($global:f.adapters)}
 function Get-NetIPAddress {param($InterfaceIndex,$AddressFamily,$ErrorAction) [pscustomobject]@{IPAddress='192.168.250.253';PrefixLength=30}}
 function Get-DnsClientServerAddress {param($InterfaceAlias,$AddressFamily,$ErrorAction) [pscustomobject]@{ServerAddresses=@('192.168.250.254')}}
+function Set-DnsClientServerAddress {param($InterfaceAlias,$ServerAddresses,[switch]$ResetServerAddresses,$ErrorAction) Write-Output "RESTORE_DNS:$InterfaceAlias"}
+function Enable-NetAdapterBinding {param($InterfaceAlias,$ComponentID,$ErrorAction) Write-Output "RESTORE_BINDING:$InterfaceAlias"}
+function Get-NetAdapterBinding {param($InterfaceAlias,$ComponentID,$ErrorAction) [pscustomobject]@{Enabled=$true}}
+function Get-ItemProperty {param($LiteralPath,$Name,$ErrorAction) throw 'Unexpected registry read in boot fixture'}
 function Clear-DnsClientCache {param($ErrorAction)}
 function Remove-NetAdapter {param($Name,$Confirm,$ErrorAction) Write-Output "REMOVE_ADAPTER:$Name"}
 function Disable-NetAdapter {param($Name,$Confirm,$ErrorAction) Write-Output "DISABLE_ADAPTER:$Name"}
@@ -98,6 +102,43 @@ $source=$source.Remove($fn.Extent.StartOffset,$fn.Extent.EndOffset-$fn.Extent.St
   finally { unlinkSync(harnessPath); rmdirSync(tempDir) }
 }
 describe.skipIf(!pwsh)('actual boot recovery control flow on mocked system APIs', () => {
+  it.each(['firewall', 'adapter', 'baseline', 'tun'] as const)('keeps independent valid recovery after a partial %s manifest (AT-03-003/007)', kind => {
+    const profiles = ['Domain','Private','Public'].map(name => ({ name, defaultOutbound: 'Block' }))
+    const firewall = { schemaVersion: 1, owner: 'VPNTE', strictMode: false, phase: 'active', savedProfiles: profiles }
+    const tun = { schemaVersion: 1, owner: 'VPNTE', interfaceGuid: fixtures().adapters[0].InterfaceGuid }
+    const physical = { ...fixtures().adapters[0], Name: 'Fixture Ethernet', InterfaceDescription: 'Physical fixture', MacAddress: '02-00-00-00-00-01' }
+    const partial: Record<string, unknown> = kind === 'adapter' ? {
+      'latest-physical-adapter-lockdown.json': { schemaVersion: 1, owner: 'VPNTE', adapters: [
+        { ifIndex: 10, alias: physical.Name, interfaceGuid: physical.InterfaceGuid, ipv6Enabled: true, forcedIpv6Off: true, forcedDnsTo: ['192.168.250.254'], ipv4DnsSource: 'static', ipv4DnsServers: ['192.0.2.53'] },
+        { ifIndex: 11 } // Interrupted write: no ownership identity or previous state.
+      ] }
+    } : kind === 'baseline' ? {
+      'latest-tun-network-baseline.json': { schemaVersion: 1, owner: 'VPNTE', userSid: 'S-1-5-21-1-2-3-1001',
+        values: ['ProxyEnable','ProxyServer','AutoConfigURL','AutoDetect'].map(name => ({ target: 'internet', name, exists: false, kind: null, data: null })) }
+    } : {}
+    const result = run({ rules: true, firewall: kind === 'firewall' ? { ...firewall, savedProfiles: profiles.slice(0, 1) } : firewall,
+      tun: kind === 'tun' ? { ...tun, interfaceGuid: '' } : tun, extra: partial,
+      adapters: [...fixtures().adapters, physical] })
+    expect(result.status).toBe(1)
+    expect(result.output).toContain('REPORT:warnings')
+    expect(result.output).toContain('REMOVE_RULE')
+    expect(result.output).not.toMatch(/RESTORE_DNS:|RESTORE_BINDING:|Unexpected registry read/)
+    if (kind === 'firewall') {
+      expect(result.output).toMatch(/QUARANTINE:.*firewall\.json/)
+      expect(result.output).toContain('protection unknown')
+      for (const name of ['Domain','Private','Public']) expect(result.output).toContain(`PROFILE:${name}/Allow`)
+    } else {
+      for (const name of ['Domain','Private','Public']) expect(result.output).toContain(`PROFILE:${name}/Block`)
+      expect(result.output).toMatch(/DELETE:.*firewall\.json/)
+    }
+    if (kind === 'tun') {
+      expect(result.output).toContain('TUN recovery failed; ownership record preserved')
+      expect(result.output).not.toMatch(/REMOVE_ADAPTER:|DELETE:.*tun-owner\.json/)
+    } else expect(result.output).toContain('REMOVE_ADAPTER:Other VPN')
+    if (kind === 'adapter') expect(result.output).toContain('SECURITY: rejected adapter manifest')
+    if (kind === 'baseline') expect(result.output).toContain('Baseline recovery failed; trusted snapshot retained')
+    expect(result.output).not.toMatch(/DELETE:.*latest-(?:physical-adapter-lockdown|tun-network-baseline)\.json/)
+  })
   it.each(['recovery-policy.json', 'firewall.json', 'latest-physical-adapter-lockdown.json', 'latest-tun-network-baseline.json', 'tun-owner.json'])('rejects an unsupported %s version before any network effects (AT-03-003)', name => {
     const result = run({ rules: true, extra: { [name]: { schemaVersion: 2, owner: 'VPNTE', strictMode: true } } })
     expect(result.status).toBe(1)

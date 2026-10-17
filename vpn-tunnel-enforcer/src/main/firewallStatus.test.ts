@@ -1,5 +1,5 @@
 // AT-03-001/003/004/009/010: effective policy evidence, fail-closed status.
-import { describe, expect, it } from 'vitest'
+import { assert, describe, expect, it } from 'vitest'
 import { FIREWALL_STATUS_PS, parseFirewallStatusSnapshot } from './firewallStatus'
 import { execFileSync } from 'child_process'
 import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'fs'
@@ -7,6 +7,11 @@ import { join } from 'path'
 
 import { firewallStatusFixture as fixture } from './testFixtures/firewallStatus'
 const prefix = 'VPNTE-killswitch-allow-'
+function requireRule(snapshot: ReturnType<typeof fixture>['snapshot'], name: string) {
+  const rule = snapshot.rules.find(r => r.name === prefix + name)
+  assert(rule, `Missing firewall fixture rule: ${name}`)
+  return rule
+}
 describe('effective firewall evidence', () => {
   it.skipIf(process.platform !== 'win32').each(['small', 'large', 'no-owned', 'missing-rule-id', 'missing-filter-id',
     ...['Application', 'Address', 'Port', 'Interface'].flatMap(kind => [`missing-${kind}`, `duplicate-${kind}`, `query-error-${kind}`])])(
@@ -61,7 +66,7 @@ $actual=&{${FIREWALL_STATUS_PS}}
     const directory = mkdtempSync(join(process.cwd(), '.tmp', 'vpnte-status-'))
     try {
       const file = join(directory, 'fixture.ps1'); writeFileSync(file, '\ufeff' + script)
-      const run = () => execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-File', file], { encoding: 'utf8', windowsHide: true, timeout: 15000, stdio: ['pipe', 'pipe', 'pipe'] })
+      const run = () => execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', file], { encoding: 'utf8', windowsHide: true, timeout: 15000, stdio: ['pipe', 'pipe', 'pipe'] })
       if (['small', 'large', 'no-owned'].includes(variant)) {
         const actual = JSON.parse(run())
         expect(parseFirewallStatusSnapshot(actual.snapshot)).toEqual({ ...snapshot, foreignAllows: 1 })
@@ -78,16 +83,16 @@ $actual=&{${FIREWALL_STATUS_PS}}
   })
   it('recognizes the dotted IPv4 subnet masks returned by real ActiveStore (AT-03-001/009)', () => {
     const { snapshot, matches } = fixture()
-    snapshot.rules.find(r => r.name === prefix + 'loopback-out')!.remote = ['127.0.0.0/255.0.0.0']
-    snapshot.rules.find(r => r.name === prefix + 'loopback-in')!.local = ['127.0.0.0/255.0.0.0']
-    snapshot.rules.find(r => r.name === prefix + 'lan')!.remote = ['127.0.0.0/255.0.0.0', '10.0.0.0/255.0.0.0']
-    snapshot.rules.find(r => r.name === prefix + 'tun')!.remote = ['192.168.250.252/255.255.255.252']
+    requireRule(snapshot, 'loopback-out').remote = ['127.0.0.0/255.0.0.0']
+    requireRule(snapshot, 'loopback-in').local = ['127.0.0.0/255.0.0.0']
+    requireRule(snapshot, 'lan').remote = ['127.0.0.0/255.0.0.0', '10.0.0.0/255.0.0.0']
+    requireRule(snapshot, 'tun').remote = ['192.168.250.252/255.255.255.252']
     expect(matches()).toBe(true)
   })
   it('does not accept invalid or broader dotted masks (AT-03-009)', () => {
     for (const mask of ['255.0.255.0', '0.0.0.0', '255.255.255.0']) {
       const { snapshot, matches } = fixture()
-      snapshot.rules.find(r => r.name === prefix + 'tun')!.remote = ['192.168.250.252/' + mask]
+      requireRule(snapshot, 'tun').remote = ['192.168.250.252/' + mask]
       expect(matches()).toBe(false)
     }
   })
@@ -111,7 +116,7 @@ $actual=&{${FIREWALL_STATUS_PS}}
   ] as const)(
     'refuses broadened %s %s independently despite the correct display name', (name, field) => {
       const { snapshot, matches } = fixture()
-      const rule = snapshot.rules.find(r => r.name === prefix + name)!
+      const rule = requireRule(snapshot, name)
       if (field === 'program' || field === 'protocol') rule[field] = 'Any'
       else rule[field] = ['Any']
       expect(matches()).toBe(false)
