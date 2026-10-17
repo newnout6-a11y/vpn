@@ -164,6 +164,41 @@ describe('granularKillSwitch level application', () => {
     await expect(granularKillSwitch.setLevel('off')).rejects.toThrow('disengage')
     expect(granularKillSwitch.getLevel()).toBe('strict')
   })
+  it('rejects generated invalid IPC types and lengths before store/native effects (AT-03-009)', async () => {
+    const { ipcMain } = await import('electron')
+    const { granularKillSwitch, registerKillSwitchIpc } = await import('./granularKillSwitch')
+    vi.mocked(ipcMain.handle).mockClear()
+    registerKillSwitchIpc()
+    const handler = vi.mocked(ipcMain.handle).mock.calls.find(([channel]) => channel === 'kill-switch:add-exception')![1]
+    const nonString = fc.oneof(fc.integer(), fc.boolean(), fc.constant(null), fc.array(fc.integer()), fc.dictionary(fc.string(), fc.integer()))
+    const invalid = fc.oneof(
+      fc.tuple(fc.constantFrom('type', 'value', 'label'), nonString),
+      fc.string().filter(value => !['app', 'ip'].includes(value)).map(value => ['type', value] as const),
+      fc.integer({ min: 201, max: 250 }).map(length => ['label', 'x'.repeat(length)] as const),
+      fc.integer({ min: 2049, max: 2100 }).map(length => ['value', 'x'.repeat(length)] as const)
+    )
+    await fc.assert(fc.asyncProperty(invalid, async ([field, value]) => {
+      await expect(handler({} as any, { type: 'ip', value: '192.0.2.1', label: 'fixture', [field]: value }))
+        .rejects.toThrow(`exception.${field}`)
+      expect(granularKillSwitch.getExceptions()).toEqual([])
+      expect(storeData.has('killSwitchExceptions')).toBe(false)
+    }), { seed: 30012, numRuns: 200, examples: [[['label', '']], [['label', 'x'.repeat(201)]], [['value', '']], [['value', 'x'.repeat(2049)]]] })
+    expect(enableKillSwitchMock).not.toHaveBeenCalled()
+    expect(updateExceptionsMock).not.toHaveBeenCalled()
+  })
+  it('rejects generated normalized CIDR duplicates without a second commit (AT-03-009)', async () => {
+    isKillSwitchActiveMock.mockResolvedValue(true)
+    const { granularKillSwitch } = await import('./granularKillSwitch')
+    granularKillSwitch.init('C:\\Tools\\sing-box.exe')
+    const first = await granularKillSwitch.addException({ type: 'ip', value: '192.0.2.1/24', label: 'first' })
+    await fc.assert(fc.asyncProperty(fc.integer({ min: 0, max: 4 }), fc.constantFrom('', ' ', '\t', '\r\n'), async (zeros, padding) => {
+      await expect(granularKillSwitch.addException({ type: 'ip', value: `${padding}192.0.2.1/${'0'.repeat(zeros)}24${padding}`, label: 'duplicate' }))
+        .rejects.toThrow('equivalent')
+      expect(granularKillSwitch.getExceptions()).toEqual([first])
+      expect(storeData.get('killSwitchExceptions')).toEqual([first])
+    }), { seed: 30013, numRuns: 50 })
+    expect(updateExceptionsMock).toHaveBeenCalledTimes(1)
+  })
   it('serializes 50 concurrent changes and commits the complete exception set (AT-03-008)', async () => {
     isKillSwitchActiveMock.mockResolvedValue(true)
     const { granularKillSwitch } = await import('./granularKillSwitch')

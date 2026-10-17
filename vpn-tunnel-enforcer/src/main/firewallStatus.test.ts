@@ -2,7 +2,7 @@
 import { describe, expect, it } from 'vitest'
 import { FIREWALL_STATUS_PS, parseFirewallStatusSnapshot } from './firewallStatus'
 import { execFileSync } from 'child_process'
-import { mkdtempSync, writeFileSync, rmSync } from 'fs'
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'fs'
 import { join } from 'path'
 
 import { firewallStatusFixture as fixture } from './testFixtures/firewallStatus'
@@ -57,6 +57,7 @@ function Get-NetFirewallPortFilter { [CmdletBinding()]param([switch]$All,$Policy
 function Get-NetFirewallInterfaceFilter { [CmdletBinding()]param([switch]$All,$PolicyStore) Read-FixtureFilter 'Interface' $All $PolicyStore }
 $actual=&{${FIREWALL_STATUS_PS}}
 [pscustomobject]@{snapshot=$actual;calls=$global:filterCalls}|ConvertTo-Json -Compress`
+    mkdirSync(join(process.cwd(), '.tmp'), { recursive: true })
     const directory = mkdtempSync(join(process.cwd(), '.tmp', 'vpnte-status-'))
     try {
       const file = join(directory, 'fixture.ps1'); writeFileSync(file, '\ufeff' + script)
@@ -103,11 +104,16 @@ $actual=&{${FIREWALL_STATUS_PS}}
       if (kind === 'unknown-helper') { snapshot.rules[0].name = prefix + 'xray-engine'; snapshot.storedNames[0] = snapshot.rules[0].name; manifest.ruleNames[0] = snapshot.rules[0].name }
       expect(matches()).toBe(false)
     })
-  it.each(['singbox', 'app', 'tun-interface', 'loopback-out', 'loopback-in', 'lan', 'tun', 'dhcp', 'ntp'])(
-    'refuses broadened %s scope despite the correct display name', name => {
+  it.each([
+    ['singbox', 'program'], ['app', 'program'], ['tun-interface', 'interfaces'],
+    ['loopback-out', 'remote'], ['loopback-in', 'local'], ['lan', 'remote'], ['tun', 'remote'],
+    ['dhcp', 'protocol'], ['dhcp', 'remotePorts'], ['ntp', 'protocol'], ['ntp', 'remotePorts']
+  ] as const)(
+    'refuses broadened %s %s independently despite the correct display name', (name, field) => {
       const { snapshot, matches } = fixture()
       const rule = snapshot.rules.find(r => r.name === prefix + name)!
-      rule.program = 'Any'; rule.interfaces = ['Any']; rule.remote = ['Any']; rule.local = ['Any']; rule.protocol = 'Any'; rule.remotePorts = ['Any']
+      if (field === 'program' || field === 'protocol') rule[field] = 'Any'
+      else rule[field] = ['Any']
       expect(matches()).toBe(false)
     })
   it.each(['enabled', 'action', 'direction', 'profile'] as const)('refuses incorrect %s and duplicate names', field => {

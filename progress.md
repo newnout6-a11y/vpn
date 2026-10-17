@@ -1381,3 +1381,69 @@ CI/review нового SHA проверяются отдельно после pu
   controller constant и query. Сейчас оба vpnte-sing-box.exe, расхождения нет;
   добавить проверку согласованности в существующую runtime suite следующим
   тестовым изменением. Windows CI и CodeRabbit для этого SHA ещё не закончены.
+
+### WP-3: генераторы типов, путей, длин и дубликатов (AT-03-009)
+
+- 36611ed опубликован в PR #46. Windows CI предыдущего 9cf85bb
+  (117478370005) завершился success, Rust success, Revix neutral; CodeRabbit
+  ещё не опубликовал новый подробный review. Проверки нового SHA независимы.
+- IPC production handler kill-switch:add-exception проверен fast-check:
+  non-string type/value/label, неизвестные строковые типы, label >200/value
+  >2048 и пустые строки. Каждый отказ называет поле; exceptions/store остаются
+  пустыми, native effects отсутствуют. Seed 30012, 200 runs + явные границы.
+- Seed 30013: 50 normalized-CIDR duplicate attempts с ведущими нулями маски
+  и пробелами/переводами строк не добавляют второй entry, commit или native
+  update; исходный store остаётся неизменным.
+- Seeds 30014/30015: по 50 canonical/negative path cases. Реальные readable
+  files с ./ дают один realpath; labels длины 1 и 200 нормализуются (явные
+  examples). Control chars, relative/UNC/ADS/.. и неверные расширения отвергаются;
+  readable directory.exe не принимается за файл. Файлы только в .tmp,
+  созданная тестом директория удаляется его finally/afterEach.
+- Revix 4304071624 закрыт проверкой согласованности имени: существующий AST
+  harness извлекает controller RUNTIME_EXE_NAME и требует его в status/stop
+  scripts. Production поведение этим тестовым коммитом не меняется.
+- npm.cmd test -- src/main/granularKillSwitch.test.ts
+  src/main/killSwitchExceptionValidation.test.ts src/main/ownedRuntimeStatus.test.ts
+  — 52 passed, 3 files passed, 1.04 s, exit 0 (до добавления явных examples).
+  Typecheck после examples — exit 0. Полный набор запущен; traceability
+  AC 927/927, F 210/210 и git diff --check — exit 0.
+
+### WP-3: проверка замечаний Revix на 36611ed
+
+- Windows CI 36611ed (117479394378) success: 3219 passed / 4 skipped,
+  235 files passed / 1 skipped. BFE smoke ok=true, aborted=true,
+  priority=verified; Electron read smoke 1 passed / 1 skipped. Rust success,
+  Revix neutral. CodeRabbit status на этом SHA — pending, Review in progress.
+- Issue 4304097366 про «unchecked scope broadened to Any» проверен по
+  enableKillSwitchUnlocked и matchesFirewallPolicy. Для sing-box/app правила
+  создаются с Program и прочими scopes Any; для TUN — InterfaceAlias;
+  LAN/TUN/loopback — соответствующая address scope; DHCP/NTP — UDP+ports.
+  Поэтому приведённый remote Any у sing-box совпадает с создаваемой политикой,
+  а не расширяет её. Другие неограниченные поля уже Any. Контрпример утечки
+  не подтверждён; production policy по этому замечанию не менялась.
+- Связанное замечание 4304097372 к комбинированному regression обосновано:
+  теперь каждый из 11 ограничивающих scope fields проверяется независимо,
+  включая protocol и ports отдельно у DHCP/NTP. Тесты PASS на production
+  matcher; enabled/direction/action/profile и duplicate scopes проверяются
+  существующими отдельными cases. Это не packet/системная приёмка.
+- 4304097382 про отсутствующую .tmp: тесты теперь создают проектную .tmp
+  перед mkdtemp, сохраняя требование AGENTS.md о проектной временной папке.
+  Для новых generated path fixtures добавлена та же подготовка. Корень .tmp
+  и чужие файлы не удаляются; finally удаляет только свой mkdtemp child.
+- Финальные 4 адресные suites: npm.cmd test -- src/main/firewallStatus.test.ts
+  src/main/killSwitchExceptionValidation.test.ts src/main/granularKillSwitch.test.ts
+  src/main/ownedRuntimeStatus.test.ts — 102 passed, 4 files passed, 6.15 s,
+  exit 0. npm.cmd run typecheck — exit 0.
+- Полный прогон до последних scope/tmp regression: 3222 passed / 5 skipped,
+  234 files passed / 2 skipped, 126.26 s, exit 0. Финальный полный повтор
+  запущен после всех тестовых изменений. Production source не менялся с
+  проверенного build 36611ed; повторная сборка для test-only diff не нужна.
+- Финальный полный прогон: npm.cmd test — 3224 passed / 5 skipped,
+  234 files passed / 2 skipped, 127.01 s, exit 0. Typecheck — exit 0;
+  python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py —
+  AC 927/927, F 210/210, exit 0; git diff --check — exit 0.
+- После push этого тестового коммита оставить SHA стабильным до CI/review,
+  проверить новые замечания отдельно от переякоренных старых. Следующая
+  доступная работа WP-3 — оставшаяся partial-manifest матрица AT-03-003;
+  L3 packet/SYSTEM reboot/OS matrix/physical 464XLAT остаются NOT-CHECKED.
+  WP-3 не завершён, WP-0/WP-2 не начаты.

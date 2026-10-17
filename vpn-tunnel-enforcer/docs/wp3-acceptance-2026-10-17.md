@@ -32,7 +32,7 @@
 | 03-006 | `physicalAdapterLifecycle.test.ts`, `physicalAdapterSnapshot.test.ts`, `physicalAdapterHotspot.test.ts`: свежий snapshot, добавление/удаление/замена GUID, смена alias, компенсация | **NOT-CHECKED L3:** настоящий hot-plug/переименование во время apply, итоговый набор фильтров и UI |
 | 03-007 | `systemNetwork.test.ts`: отказ каждого из 9 registry-шагов и реальный PowerShell с подставным Restore-Snapshot; `firewallTransactions.test.ts`, `physicalAdapterLifecycle.test.ts`, `lifecycleCleanup.test.ts`: общий Stop operationId, независимость Firewall/WFP/baseline/adapters, явные результаты шагов, failure через IPC, общий ID concurrent Stop и новый ID retry; `Dashboard.cancel.test.tsx`: видимые перечень отказов и рекомендация вместо success | Доступные L2-сценарии проверены на production bodies и renderer с подставными системными/IPC границами. Сквозной ID этой задачи относится к controller Stop и вызываемым rollback, не ко всем startup/crash/shutdown-backstop путям; системные эффекты этим прогоном не доказаны |
 | 03-008 | `granularKillSwitch.test.ts`, `firewallTransactions.test.ts`: 50 конкурентных обновлений, seeded mixed add/remove, сверка каждого native set, конечного store и всех audit-событий; journal-before-effects, store/system compensation, сохранение core/upstream | Доступные L2-сценарии прошли; системные API подставлены. Полное реальное применение Windows/WFP остаётся отдельной системной проверкой |
-| 03-009 | `firewallKillSwitchValidation.test.ts`, `killSwitchExceptionValidation.test.ts`: generated IPv4/IPv6 и маски, невалидные числовые формы, readable `.exe`/realpath; `granularKillSwitch.test.ts`: настоящий GetShortPathName и отклонение 8.3-дубликата; `firewallTransactions.test.ts`: отказ до записи/native effects | **Частично L1:** расширенный генератор типов/путей/длин; локальный 8.3 PASS не объявляет проверенными файловые системы без этой возможности |
+| 03-009 | `firewallKillSwitchValidation.test.ts`, `killSwitchExceptionValidation.test.ts`: generated IPv4/IPv6, маски, типы путей, canonical dot paths, readable `.exe`/realpath и directory rejection; `granularKillSwitch.test.ts`: IPC field types/lengths, normalized CIDR duplicates без store/native effects, настоящий GetShortPathName и отклонение 8.3-дубликата; `firewallTransactions.test.ts`: отказ до записи/native effects | Подтверждены перечисленные L1-поднаборы на текущей Windows. Локальный 8.3 PASS не объявляет проверенными файловые системы без этой возможности; системная приёмка WP-3 остаётся отдельным условием |
 | 03-010 | `wfpIpv6.test.ts`, `physicalAdapterHotspot.test.ts`, `firewallTransactions.test.ts`: production C# с fake engine, AND scope, NAT64 endpoint, отсутствие широких permit, независимая компенсация | **NOT-CHECKED L3:** полная OS-матрица, настоящий BFE/boot-time, pktmon + внешний capture, physical mobile 464XLAT positive/negative и byte-equivalent restore |
 | 03-011 | `physicalAdapterLifecycle.test.ts`, `physicalAdapterDnsScript.test.ts`, `systemNetwork.test.ts`: read-back DNS, частичные отказы и сохранение recovery-обязанности | **NOT-CHECKED L3:** отказ DNS посередине apply, полный baseline restore, причина в UI и успешная повторная попытка |
 | 03-012 | `recoveryManifestStorage.test.ts`, `firewallManifestSecurity.test.ts`, `bootRecoveryExecution.test.ts`: trust-before-effects, ACL/owner/reparse отказ, строгая схема | **NOT-CHECKED L3:** настоящие ослабленные ACL/подложный манифест на отдельной VM, reboot, SYSTEM и положительный легитимный контроль |
@@ -276,6 +276,36 @@ src/main/firewallTransactions.test.ts` — 135 passed, 1 skipped, exit 0.
 Финальный `npm.cmd test` — 3218 passed, 5 skipped, 234 files passed,
 2 skipped, 129.39 с, exit 0. `npm.cmd run typecheck`, `npm.cmd run build`,
 traceability (AC 927/927, F 210/210) и `git diff --check` — exit 0.
+
+### AT-03-009: расширенные seeded properties
+
+IPC handler проверяет non-string и неизвестные type, неверные value/label,
+пустые строки и границы 200/2048 с указанием поля до store/native effects.
+Generated normalized CIDR duplicates не создают второй entry/native update.
+Readable `.exe` с повторными `./` возвращает canonical path; readable directory
+с расширением `.exe`, control chars, relative/UNC/ADS/`..` и неверное расширение
+отвергаются. Seeds 30012…30015: 200/50/50/50 runs с явными length examples.
+Новые свойства исполняют production API/IPC handler; сетевые cmdlet подставлены.
+Предыдущая реальная 8.3 проверка остаётся отдельным доказательством.
+
+В existing runtime suite добавлена проверка controller имени в status/stop
+scripts (Revix 4304071624), предотвращающая будущий drift. Production код
+этим расширением тестов не менялся.
+
+Review 36611ed: сценарий broadened remote Any у allow-singbox не подтвердился
+как дефект verifier: production создаёт эту rule с Program и remote Any;
+остальные поля без ограничений также уже Any. Для остальных core rules
+проверены соответствующие ограничения creation script. Слабый combined test
+заменён 11 независимыми изменениями program/interface/address/protocol/ports;
+каждое расширение ограничивающего поля отвергается. Это проверка текущей
+объявленной политики, не доказательство отсутствия packet leaks.
+Fixtures теперь создают проектную `.tmp` перед mkdtemp (clean-checkout case).
+Финальные четыре адресных suites — 102 passed, без пропусков, exit 0.
+
+Финальный полный `npm.cmd test` — 3224 passed, 5 skipped, 234 files passed,
+2 skipped, 127.01 с, exit 0; typecheck, traceability (AC 927/927, F 210/210)
+и `git diff --check` — exit 0. Production build проверен на 36611ed;
+после него менялись только тесты и этот отчёт/журнал.
 
 ## Условие перехода дальше
 

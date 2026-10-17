@@ -54,6 +54,10 @@ describe('fresh owned runtime status', () => {
     expect(script).toContain("@('vpnte-sing-box.exe', 'vpnte-etw-sidecar.exe', 'vpnte-xray.exe')")
     expect(script).toContain('Get-CimInstance Win32_Process -ErrorAction Stop')
     expect(script).toContain(OWNED_RUNTIME_STATUS_QUERY_SCRIPT)
+    const runtimeName = source.match(/const RUNTIME_EXE_NAME = '([^']+)'/)?.[1]
+    expect(runtimeName).toBeDefined()
+    expect(OWNED_RUNTIME_STATUS_QUERY_SCRIPT).toContain(`'${runtimeName}'`)
+    expect(OWNED_RUNTIME_STOP_SCRIPT).toContain(`'${runtimeName}'`)
     expect(script).not.toMatch(/(?:Stop-|Set-|Remove-|Start-|New-)\w+/)
   })
   it.each(['timeout', 'exited', 'protocol', 'rejected', 'busy', 'closed'] as const)('rejects %s rather than claiming exit or replaying', async code => {
