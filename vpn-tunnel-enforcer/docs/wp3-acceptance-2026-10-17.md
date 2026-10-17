@@ -256,6 +256,27 @@ Worker и standalone fallback используют один readonly запро�
 5 skipped, 234 files passed, 2 skipped, 123.97 с, exit 0; typecheck/build,
 traceability (AC 927/927, F 210/210) и `git diff --check` — exit 0.
 
+### Status read-back: четыре filter query на снимок
+
+Проверено замечание CodeRabbit 4304029954: вместо четырёх CIM association
+queries на каждое правило выполняются четыре bulk ActiveStore reads.
+Фильтры индексируются по InstanceID и связываются с rule.Name, сохраняя
+проверку ровно одной записи каждого типа и прежние поля результата.
+Ошибки чтения, пропуски, повторные записи и пустые ID не дают успешного статуса.
+Индексы создаются заново на каждом запросе.
+
+17 native fixtures проверяют малый/110-rule/пустой набор, два одинаковых
+DisplayName с разными native ID/scopes, обратный порядок фильтров и отрицательные
+ветки каждого типа. Успешный снимок требует ровно четырёх queries независимо
+от размера. Адресно: `npm.cmd test -- src/main/firewallStatus.test.ts
+src/main/firewallTransactions.test.ts` — 135 passed, 1 skipped, exit 0.
+Системные cmdlet подставлены; ускорение реального привилегированного чтения
+и отсутствие status timeout на произвольных установках этим не доказаны.
+
+Финальный `npm.cmd test` — 3218 passed, 5 skipped, 234 files passed,
+2 skipped, 129.39 с, exit 0. `npm.cmd run typecheck`, `npm.cmd run build`,
+traceability (AC 927/927, F 210/210) и `git diff --check` — exit 0.
+
 ## Условие перехода дальше
 
 Закрыть доступные пробелы L1/L2, получить и сохранить реальные L3-доказательства

@@ -3,17 +3,24 @@ import { describe, expect, it } from 'vitest'
 import { FIREWALL_STATUS_PS, parseFirewallStatusSnapshot } from './firewallStatus'
 import { execFileSync } from 'child_process'
 import { mkdtempSync, writeFileSync, rmSync } from 'fs'
-import { tmpdir } from 'os'
 import { join } from 'path'
 
 import { firewallStatusFixture as fixture } from './testFixtures/firewallStatus'
 const prefix = 'VPNTE-killswitch-allow-'
 describe('effective firewall evidence', () => {
-  it.skipIf(process.platform !== 'win32')('executes the production read-only snapshot against native cmdlet fixtures (AT-03-001/004)', () => {
+  it.skipIf(process.platform !== 'win32').each(['small', 'large', 'no-owned', 'missing-rule-id', 'missing-filter-id',
+    ...['Application', 'Address', 'Port', 'Interface'].flatMap(kind => [`missing-${kind}`, `duplicate-${kind}`, `query-error-${kind}`])])(
+    'reads effective filters in four bulk queries and keeps one-to-one evidence: %s (AT-03-001/004)', variant => {
     const { snapshot } = fixture()
+    // The two rules share a display name, but have different native identities/scopes.
+    snapshot.rules.push({ ...snapshot.rules[0], program: 'C:\\fixture\\second.exe' })
+    if (variant === 'large') snapshot.rules.push(...Array.from({ length: 100 }, (_, i) => ({ ...snapshot.rules[0], name: `${prefix}extra-${i}` })))
+    if (variant === 'no-owned') snapshot.rules = []
+    snapshot.storedNames = snapshot.rules.map(rule => rule.name)
     const encoded = Buffer.from(JSON.stringify(snapshot)).toString('base64')
     const script = `
 $fixture=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}')) | ConvertFrom-Json
+$global:filterCalls=@{}
 function Get-Service { [CmdletBinding()]param($Name) $fixture.services | ForEach-Object { [pscustomobject]@{Name=$_.name;Status=$_.status} } }
 function Get-NetFirewallProfile { [CmdletBinding()]param($PolicyStore,$Profile)
   if($PolicyStore -ne 'ActiveStore'){throw 'Must read effective profiles'}
@@ -21,19 +28,44 @@ function Get-NetFirewallProfile { [CmdletBinding()]param($PolicyStore,$Profile)
 }
 function Get-NetFirewallRule { [CmdletBinding()]param($PolicyStore)
   if($PolicyStore -notin @('ActiveStore','PersistentStore')){throw 'Missing policy store'}
-  foreach($r in $fixture.rules){ [pscustomobject]@{DisplayName=$r.name;Enabled=$r.enabled;Direction=$r.direction;Action=$r.action;Profile=$r.profile;Scope=$r} }
+  for($i=0;$i -lt $fixture.rules.Count;$i++){ $r=$fixture.rules[$i]; [pscustomobject]@{Name=$(if($i -eq 0 -and '${variant}' -eq 'missing-rule-id'){''}else{'rule-'+$i});DisplayName=$r.name;Enabled=$r.enabled;Direction=$r.direction;Action=$r.action;Profile=$r.profile;Scope=$r} }
   if($PolicyStore -eq 'ActiveStore'){[pscustomobject]@{DisplayName='Foreign allow';Enabled='True';Direction='Outbound';Action='Allow'}}
 }
-function Get-NetFirewallApplicationFilter { [CmdletBinding()]param([Parameter(ValueFromPipeline=$true)]$Rule) process { [pscustomobject]@{Program=$Rule.Scope.program} } }
-function Get-NetFirewallAddressFilter { [CmdletBinding()]param([Parameter(ValueFromPipeline=$true)]$Rule) process { [pscustomobject]@{RemoteAddress=$Rule.Scope.remote;LocalAddress=$Rule.Scope.local} } }
-function Get-NetFirewallPortFilter { [CmdletBinding()]param([Parameter(ValueFromPipeline=$true)]$Rule) process { [pscustomobject]@{Protocol=$Rule.Scope.protocol;RemotePort=$Rule.Scope.remotePorts} } }
-function Get-NetFirewallInterfaceFilter { [CmdletBinding()]param([Parameter(ValueFromPipeline=$true)]$Rule) process { [pscustomobject]@{InterfaceAlias=$Rule.Scope.interfaces} } }
-${FIREWALL_STATUS_PS}`
-    const directory = mkdtempSync(join(tmpdir(), 'vpnte-status-'))
+function Read-FixtureFilter($kind,$All,$PolicyStore) {
+  if(-not $All -or $PolicyStore -ne 'ActiveStore'){throw 'Bulk ActiveStore read required'}
+  if($global:filterCalls.ContainsKey($kind)){throw 'Repeated filter query'}
+  $global:filterCalls[$kind]=1
+  if('${variant}' -eq ('query-error-'+$kind)){throw 'Fixture filter query denied'}
+  # Filter enumeration order must not determine its association with a rule.
+  for($i=$fixture.rules.Count-1;$i -ge 0;$i--){
+    if($i -eq 0 -and '${variant}' -eq ('missing-'+$kind)){continue}
+    $r=$fixture.rules[$i]
+    $filter=switch($kind){
+      'Application' {[pscustomobject]@{InstanceID=('rule-'+$i);Program=$r.program}}
+      'Address' {[pscustomobject]@{InstanceID=('rule-'+$i);RemoteAddress=$r.remote;LocalAddress=$r.local}}
+      'Port' {[pscustomobject]@{InstanceID=('rule-'+$i);Protocol=$r.protocol;RemotePort=$r.remotePorts}}
+      'Interface' {[pscustomobject]@{InstanceID=('rule-'+$i);InterfaceAlias=$r.interfaces}}
+    }
+    if($i -eq 0 -and '${variant}' -eq 'missing-filter-id'){$filter.InstanceID=''}
+    $filter
+    if($i -eq 0 -and '${variant}' -eq ('duplicate-'+$kind)){$filter}
+  }
+}
+function Get-NetFirewallApplicationFilter { [CmdletBinding()]param([switch]$All,$PolicyStore) Read-FixtureFilter 'Application' $All $PolicyStore }
+function Get-NetFirewallAddressFilter { [CmdletBinding()]param([switch]$All,$PolicyStore) Read-FixtureFilter 'Address' $All $PolicyStore }
+function Get-NetFirewallPortFilter { [CmdletBinding()]param([switch]$All,$PolicyStore) Read-FixtureFilter 'Port' $All $PolicyStore }
+function Get-NetFirewallInterfaceFilter { [CmdletBinding()]param([switch]$All,$PolicyStore) Read-FixtureFilter 'Interface' $All $PolicyStore }
+$actual=&{${FIREWALL_STATUS_PS}}
+[pscustomobject]@{snapshot=$actual;calls=$global:filterCalls}|ConvertTo-Json -Compress`
+    const directory = mkdtempSync(join(process.cwd(), '.tmp', 'vpnte-status-'))
     try {
       const file = join(directory, 'fixture.ps1'); writeFileSync(file, '\ufeff' + script)
-      const actual = parseFirewallStatusSnapshot(execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-File', file], { encoding: 'utf8', windowsHide: true, timeout: 15000 }))
-      expect(actual).toEqual({ ...snapshot, foreignAllows: 1 })
+      const run = () => execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-File', file], { encoding: 'utf8', windowsHide: true, timeout: 15000, stdio: ['pipe', 'pipe', 'pipe'] })
+      if (['small', 'large', 'no-owned'].includes(variant)) {
+        const actual = JSON.parse(run())
+        expect(parseFirewallStatusSnapshot(actual.snapshot)).toEqual({ ...snapshot, foreignAllows: 1 })
+        expect(actual.calls).toEqual({ Application: 1, Address: 1, Port: 1, Interface: 1 })
+      } else expect(run).toThrow(variant.startsWith('query-error-') ? 'Fixture filter query denied' : 'Incomplete firewall filter read-back')
     } finally { rmSync(directory, { recursive: true, force: true }) }
   })
   it('accepts a complete scoped snapshot and both loopback families', () => {

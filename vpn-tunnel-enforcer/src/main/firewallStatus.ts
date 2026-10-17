@@ -16,12 +16,29 @@ $profiles=@(Get-NetFirewallProfile -PolicyStore ActiveStore -Profile Domain,Priv
 $active=@(Get-NetFirewallRule -PolicyStore ActiveStore -ErrorAction Stop)
 $stored=@(Get-NetFirewallRule -PolicyStore PersistentStore -ErrorAction Stop | Where-Object { $_.DisplayName -like 'VPNTE-killswitch*' } | ForEach-Object { [string]$_.DisplayName })
 $foreign=@($active | Where-Object { $_.DisplayName -notlike 'VPNTE-killswitch*' -and [string]$_.Enabled -eq 'True' -and [string]$_.Direction -eq 'Outbound' -and [string]$_.Action -eq 'Allow' }).Count
+function Get-VpnteStatusFilterIndex($filters) {
+  $index=@{}
+  foreach($filter in $filters){
+    $key=[string]$filter.InstanceID
+    if(-not $key){throw 'Incomplete firewall filter read-back'}
+    if($index.ContainsKey($key)){$index[$key]=@($index[$key])+@($filter)}
+    else{$index[$key]=@($filter)}
+  }
+  return $index
+}
+# One CIM read per type; never reuse indices across status requests.
+$appIndex=Get-VpnteStatusFilterIndex @(Get-NetFirewallApplicationFilter -All -PolicyStore ActiveStore -ErrorAction Stop)
+$addressIndex=Get-VpnteStatusFilterIndex @(Get-NetFirewallAddressFilter -All -PolicyStore ActiveStore -ErrorAction Stop)
+$portIndex=Get-VpnteStatusFilterIndex @(Get-NetFirewallPortFilter -All -PolicyStore ActiveStore -ErrorAction Stop)
+$interfaceIndex=Get-VpnteStatusFilterIndex @(Get-NetFirewallInterfaceFilter -All -PolicyStore ActiveStore -ErrorAction Stop)
 $owned=@($active | Where-Object { $_.DisplayName -like 'VPNTE-killswitch*' } | ForEach-Object {
   $rule=$_
-  $app=@($rule | Get-NetFirewallApplicationFilter -ErrorAction Stop)
-  $address=@($rule | Get-NetFirewallAddressFilter -ErrorAction Stop)
-  $port=@($rule | Get-NetFirewallPortFilter -ErrorAction Stop)
-  $interface=@($rule | Get-NetFirewallInterfaceFilter -ErrorAction Stop)
+  $key=[string]$rule.Name
+  if(-not $key -or -not $appIndex.ContainsKey($key) -or -not $addressIndex.ContainsKey($key) -or -not $portIndex.ContainsKey($key) -or -not $interfaceIndex.ContainsKey($key)){throw 'Incomplete firewall filter read-back'}
+  $app=@($appIndex[$key])
+  $address=@($addressIndex[$key])
+  $port=@($portIndex[$key])
+  $interface=@($interfaceIndex[$key])
   if($app.Count -ne 1 -or $address.Count -ne 1 -or $port.Count -ne 1 -or $interface.Count -ne 1){throw 'Incomplete firewall filter read-back'}
   [pscustomobject]@{name=[string]$rule.DisplayName;enabled=[string]$rule.Enabled;direction=[string]$rule.Direction;action=[string]$rule.Action;profile=[string]$rule.Profile;
     program=[string]$app[0].Program;remote=@($address[0].RemoteAddress);local=@($address[0].LocalAddress);

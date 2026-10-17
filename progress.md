@@ -1348,3 +1348,36 @@ CI/review нового SHA проверяются отдельно после pu
   BFE ok=true, aborted=true, priority=verified. Это ABI/read-back с Abort,
   не packet oracle или reboot. Отдельный Electron native smoke: 1 passed /
   1 skipped. CI/review следующего SHA проверяются после push.
+
+### WP-3: пакетный read-back firewall status (CodeRabbit 4304029954)
+
+- Замечание Minor подтверждено: четыре association CIM-запроса на каждое
+  собственное правило давали линейный рост native round trips при фиксированном
+  status timeout 15 s. Превышение таймаута на рабочем хосте не воспроизводилось.
+- FIREWALL_STATUS_PS теперь один раз читает каждый из Application/Address/Port/
+  Interface filters с -All -PolicyStore ActiveStore. На каждом вызове строятся
+  новые индексы InstanceID; join идёт по rule.Name, не DisplayName. Дубликаты
+  не затираются: для каждого собственного правила по-прежнему нужен ровно один
+  filter каждого типа. Пустые ID/неполный read-back/ошибки чтения дают отказ.
+  Никаких повторов через иной privilege path или старый cache не добавлено.
+- Native fixture сначала дал 11 failed / 31 skipped (старый reader пытался
+  вызывать per-rule cmdlet). После реализации: 129 passed / 1 skipped в двух
+  suites. Расширенный окончательный адресный прогон: npm.cmd test --
+  src/main/firewallStatus.test.ts src/main/firewallTransactions.test.ts —
+  135 passed / 1 skipped, 2 files passed, 6.22 s, exit 0.
+- Матрица из 17 native fixtures: малый/110-rule/пустой набор, одинаковые
+  DisplayName с разными scopes/Name, обратный порядок фильтров, пропущенные и
+  повторные фильтры всех четырёх типов, пустые rule/filter ID, отказ каждого
+  cmdlet. Успех требует ровно четырёх filter queries и неизменного snapshot.
+- Метаданные всех четырёх настоящих cmdlet на хосте подтвердили поддержку All
+  и PolicyStore. Производственный привилегированный snapshot локально не
+  запускался; tests исполняют production script на fake native boundaries.
+- npm.cmd run typecheck — exit 0; npm.cmd run build — exit 0. Полный набор
+  выполняется; traceability AC 927/927, F 210/210 и git diff --check — exit 0.
+- Полный набор на финальном batch reader: npm.cmd test — 3218 passed /
+  5 skipped, 234 files passed / 2 skipped, 129.39 s, exit 0.
+- Revix review 9cf85bb (5559549646) — COMMENTED/neutral; единственное новое
+  предложение 4304071624: защита от будущего drift имени sing-box между
+  controller constant и query. Сейчас оба vpnte-sing-box.exe, расхождения нет;
+  добавить проверку согласованности в существующую runtime suite следующим
+  тестовым изменением. Windows CI и CodeRabbit для этого SHA ещё не закончены.
