@@ -26,7 +26,7 @@
 | --- | --- | --- |
 | 03-001 | `firewallTransactions.test.ts`, `granularKillSwitch.test.ts`, `wfpIpv6.test.ts`: установка защиты до разрыва, отказ вместо ложного успеха, форма политик | **NOT-CHECKED L3:** фактические WFP counters, pktmon и внешний capture; три способа разрыва, окно 60 с, UI ≤2 с |
 | 03-002 | `bootRecoveryRegistration.test.ts`, `bootRecoveryTaskReadBack.test.ts`, `bootRecoveryExecution.test.ts`, `bootRecoveryBehavior.test.ts`: команда задачи, read-back, исполнение production-скрипта на подставных системных API, проверка GUID/driver/subnet | **NOT-CHECKED L3:** установленная сборка, жёсткое убийство, настоящий reboot, SYSTEM, итоговый отчёт в UI |
-| 03-003 | `recoveryManifestStorage.test.ts`, `firewallTransactions.test.ts`, `bootRecoveryExecution.test.ts`, `systemNetwork.test.ts`: corrupt/missing/future schema, карантин, сохранение strict, отсутствие эффектов для недоверенных данных | **Частично:** полная матрица частичных манифестов и реальный boot/обычный rollback; mocks не доказывают системные ACL |
+| 03-003 | `recoveryManifestStorage.test.ts`, `firewallTransactions.test.ts`, `bootRecoveryExecution.test.ts`, `systemNetwork.test.ts`: corrupt/missing/future schema, карантин, сохранение strict, отсутствие эффектов для недоверенных данных; `lifecycleCleanup.test.ts`: startup warning до создания окна при неполном baseline recovery | **Частично:** полная матрица частичных манифестов и реальный boot/обычный rollback; mocks не доказывают системные ACL |
 | 03-004 | `firewallTransactions.test.ts`, `bootRecoveryExecution.test.ts`: сохранение исходных Block, удаление только собственных правил, независимый read-back | **NOT-CHECKED L3:** три реальных цикла apply/stop и сравнение экспортов чужих Block/Allow |
 | 03-005 | `physicalAdapterSnapshot.test.ts`, `physicalAdapterLifecycle.test.ts`, `lifecycleCleanup.test.ts`: отсутствие фиктивных адаптеров и проверки запуска/отката | **NOT-CHECKED L3:** VM без NIC, отсутствие созданных правил и правдивый статус в UI |
 | 03-006 | `physicalAdapterLifecycle.test.ts`, `physicalAdapterSnapshot.test.ts`, `physicalAdapterHotspot.test.ts`: свежий snapshot, добавление/удаление/замена GUID, смена alias, компенсация | **NOT-CHECKED L3:** настоящий hot-plug/переименование во время apply, итоговый набор фильтров и UI |
@@ -208,6 +208,35 @@ adapter tests — продолжение следующего адаптера �
 `npm.cmd test` — **3187 passed, 5 skipped, 0 failed**, 234 files passed,
 2 skipped, 122.16 с, exit 0. Трассировка — AC 927/927, F 210/210;
 `git diff --check` — exit 0.
+
+### AT-03-003/007: вызывающий код не теряет неполный baseline rollback
+
+Result API baseline сохраняется для Stop/shutdown, которые проверяют success.
+Добавлен явный OrThrow API для recovery-кода, использующего catch: resolved
+success:false превращается в отказ с message, подробностями failed steps
+и рекомендацией повторить восстановление; trusted absence остаётся no-op.
+
+Ручной proxy/direct start возвращает обе ошибки — исходную ошибку запуска
+и ошибку восстановления. AutoPilot включает failed recovery step в steps
+и дополняет итоговый message. Обычный/emergency crash callback теперь пишет
+отказ при resolved success:false; прежний emergency catch не теряет его.
+Startup recovery показывает нативный warning dialog до createWindow:
+renderer IPC на этой стадии не имел бы получателя. Ошибка доверенного чтения
+baseline также попадает в эту boundary. Вместо tasklist/fall-through используется
+isOwnedTunRuntimeRunning(true): unknown runtime запрещает rollback; живой
+owned runtime сохраняет baseline. Только доказанное отсутствие допускает откат.
+
+`systemNetwork.test.ts` исполняет настоящий rollback через подставные OS API:
+отказ registry step, WinINet notification, untrusted storage, сохранение
+снимка и успешный retry. `lifecycleCleanup.test.ts` проверяет обе start ветки,
+startup dialog/no-op/live-runtime и обычный/emergency onExit на production
+bodies; `autoPilot.test.ts` — failed step и обе ошибки в result.message.
+Адресный прогон этих трёх файлов: 209 passed, 1 skipped, exit 0.
+
+Финальные проверки: `npm.cmd run typecheck` и `npm.cmd run build` — exit 0;
+`npm.cmd test` — 3202 passed, 5 skipped, 234 files passed, 2 skipped,
+123.10 с, exit 0. Проверка трассировки — AC 927/927, F 210/210;
+`git diff --check` — exit 0. Это L1/L2; системная приёмка не добавлена.
 
 ## Условие перехода дальше
 

@@ -13,7 +13,7 @@ import { stageVerifiedRuntimeArtifact } from './runtimeArtifact'
 import sudo from 'sudo-prompt'
 import { execElevated, isProcessElevated } from './admin'
 import { logEvent } from './appLogger'
-import { rollbackTunNetworkBaselineIfApplied } from './systemNetwork'
+import { rollbackTunNetworkBaselineIfApplied, rollbackTunNetworkBaselineOrThrow } from './systemNetwork'
 import { settingsStore } from './settings'
 import { notify } from './notifications'
 import { processPathRegex } from './splitTunnelPath'
@@ -3121,7 +3121,7 @@ export const tunController = {
               return
             }
 
-            rollbackTunNetworkBaselineIfApplied('sing-box exited').catch(err =>
+            rollbackTunNetworkBaselineOrThrow('sing-box exited').catch(err =>
               logEvent('warn', 'tun', 'baseline auto-rollback after sing-box exit failed', err)
             )
 
@@ -3271,7 +3271,8 @@ export const tunController = {
           notifyStatus('stopped')
         } catch (onExitErr) {
           logEvent('error', 'tun', 'onExit handler threw — performing emergency cleanup', onExitErr)
-          rollbackTunNetworkBaselineIfApplied('onExit emergency').catch(() => undefined)
+          rollbackTunNetworkBaselineOrThrow('onExit emergency').catch(err =>
+            logEvent('warn', 'tun', 'emergency baseline rollback failed', err))
           disableKillSwitchIfActive('onExit emergency').catch(() => undefined)
           rollbackPhysicalAdapterLockdownIfApplied('onExit emergency').catch(() => undefined)
           repairOrphanedPhysicalAdapterDns('onExit emergency').catch(() => undefined)

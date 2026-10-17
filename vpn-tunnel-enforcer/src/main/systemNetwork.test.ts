@@ -74,7 +74,7 @@ vi.mock('./recoveryManifest', () => ({
   },
   removeRecoveryManifest: async () => { state.manifest = null; state.operations.push('clear') }
 }))
-import { applyTunNetworkBaseline, getTunNetworkBaselineManifestPath, rollbackTunNetworkBaseline, rollbackTunNetworkBaselineIfApplied, validateNetworkBackupManifest } from './systemNetwork'
+import { applyTunNetworkBaseline, getTunNetworkBaselineManifestPath, rollbackTunNetworkBaseline, rollbackTunNetworkBaselineIfApplied, rollbackTunNetworkBaselineOrThrow, validateNetworkBackupManifest } from './systemNetwork'
 import { logEvent } from './appLogger'
 const platform = Object.getOwnPropertyDescriptor(process, 'platform')!
 beforeEach(() => {
@@ -87,6 +87,26 @@ beforeEach(() => {
 })
 afterEach(() => Object.defineProperty(process, 'platform', platform))
 describe('trusted typed network baseline', () => {
+  it.each(['step', 'notification', 'untrusted'])('rejects incomplete %s recovery for callers using exceptions (AT-03-007)', async failure => {
+    state.manifest = fixture()
+    if (failure === 'step') state.failedSteps = [3]
+    if (failure === 'notification') state.failNotify = true
+    if (failure === 'untrusted') state.failRead = true
+    const failed = await rollbackTunNetworkBaselineOrThrow('failed start').catch(error => error as Error)
+    expect(failed).toBeInstanceOf(Error)
+    expect((failed as Error).message).toContain('Повторите восстановление сети')
+    expect((failed as Error).message).toContain(failure === 'step' ? 'injected' : failure === 'notification' ? 'notification failed' : 'Untrusted storage')
+    expect(state.manifest).not.toBeNull()
+  })
+  it('accepts trusted absence and successful retry without changing the result contract (AT-03-007)', async () => {
+    expect(await rollbackTunNetworkBaselineOrThrow('no baseline')).toMatchObject({ success: true, skipped: true })
+    state.manifest = fixture()
+    state.failedSteps = [3]
+    await expect(rollbackTunNetworkBaselineOrThrow('failed recovery')).rejects.toThrow('injected failure')
+    state.failedSteps = []
+    expect(await rollbackTunNetworkBaselineOrThrow('retry')).toMatchObject({ success: true })
+    expect(state.manifest).toBeNull()
+  })
   it('restores all values and notifies WinINet in one native process', async () => {
     state.manifest = fixture()
     expect((await rollbackTunNetworkBaseline()).success).toBe(true)

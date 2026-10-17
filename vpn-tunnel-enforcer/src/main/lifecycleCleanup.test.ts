@@ -852,6 +852,51 @@ describe('Xray startup phase measurements (AT-02-002 / AT-02-004)', () => {
   })
 })
 
+describe('baseline recovery callers (AT-03-007)', () => {
+  it.each(['failed', 'restored', 'live runtime', 'unknown runtime', 'untrusted baseline', 'no baseline'])('startup recovery surfaces %s before a renderer exists', async outcome => {
+    const recoveryError = new Error('environment/HTTP_PROXY: access denied. Повторите восстановление сети.')
+    const deps = { process: { platform: 'win32' }, isBaselineApplied: vi.fn(async () => {
+        if (outcome === 'untrusted baseline') throw new Error('untrusted storage')
+        return outcome !== 'no baseline'
+      }),
+      isOwnedTunRuntimeRunning: vi.fn(async () => { if (outcome === 'unknown runtime') throw new Error('runtime query denied'); return outcome === 'live runtime' }),
+      rollbackTunNetworkBaselineOrThrow: vi.fn(async () => { if (outcome === 'failed') throw recoveryError }),
+      dialog: { showMessageBox: vi.fn(async () => ({})) }, logEvent: noop() }
+    const recover = compile<() => Promise<void>>(`${body('index.ts', 'recoverStaleBaseline')}\nreturn recoverStaleBaseline;`, deps)
+    await recover()
+    expect(deps.rollbackTunNetworkBaselineOrThrow).toHaveBeenCalledTimes(['failed', 'restored'].includes(outcome) ? 1 : 0)
+    expect(deps.isOwnedTunRuntimeRunning).toHaveBeenCalledTimes(['untrusted baseline', 'no baseline'].includes(outcome) ? 0 : 1)
+    if (['failed', 'restored'].includes(outcome)) {
+      expect(deps.isOwnedTunRuntimeRunning).toHaveBeenCalledWith(true)
+      expect(deps.isOwnedTunRuntimeRunning.mock.invocationCallOrder[0]).toBeLessThan(deps.rollbackTunNetworkBaselineOrThrow.mock.invocationCallOrder[0])
+    }
+    expect(deps.dialog.showMessageBox).toHaveBeenCalledTimes(['failed', 'unknown runtime', 'untrusted baseline'].includes(outcome) ? 1 : 0)
+    if (outcome === 'failed') expect(deps.dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'warning', title: 'Восстановление сети не завершено', detail: recoveryError.message
+    }))
+    if (outcome === 'unknown runtime' || outcome === 'untrusted baseline') expect(deps.dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'warning', detail: expect.stringContaining(outcome === 'unknown runtime' ? 'runtime query denied' : 'untrusted storage')
+    }))
+  })
+  it.each([false, true])('logs rejected baseline recovery in onExit, emergency=%s', async emergency => {
+    const recoveryError = new Error('partial baseline recovery')
+    const deps = { logEvent: noop(), recordForensicTunEvent: noop(), stopProxyWatchdog: noop(), notifyStatus: noop(), notify: noop(),
+      settingsStore: { get: () => { if (emergency) throw new Error('settings failed'); return { autoRestartOnCrash: false } } },
+      rollbackTunNetworkBaselineOrThrow: vi.fn().mockRejectedValue(recoveryError),
+      disableKillSwitchIfActive: done(), rollbackPhysicalAdapterLockdownIfApplied: done(), repairOrphanedPhysicalAdapterDns: done(), stopXray: done() }
+    const exit = compile<() => void>(`
+let currentStatus={running:true},mode='directVpn',lastSingBoxExit=null,restartAttempt=0,lastStartOptions=null;
+let userInitiatedStop=false,stopInProgress=false,resolved=true,adapterLockdownEngaged=false,killSwitchEngaged=false;
+const RESTART_BACKOFF_MS=[1000];
+${body('tunController.ts', 'onExit')}
+return onExit;`, deps)
+    exit()
+    await Promise.resolve()
+    expect(deps.logEvent).toHaveBeenCalledWith('warn', 'tun', 'baseline auto-rollback after sing-box exit failed', recoveryError)
+    if (emergency) expect(deps.logEvent).toHaveBeenCalledWith('warn', 'tun', 'emergency baseline rollback failed', recoveryError)
+  })
+})
+
 function ipStartupHarness(mode: 'direct' | 'proxy') {
   let running = false
   const settings = { autoNetworkBaseline: false, directVpnInput: '' }
@@ -868,6 +913,7 @@ function ipStartupHarness(mode: 'direct' | 'proxy') {
     tunController: { start: vi.fn(async (): Promise<any> => { running = true; return { success: true } }), getStatus: () => ({ running }),
       stop: vi.fn(async () => ({ success:true,networkCleanup:{baseline:true,firewall:true,adapters:true} })) },
     applyTunNetworkBaseline: vi.fn(async (): Promise<any> => ({ success: true })), rollbackTunNetworkBaselineIfApplied: done(),
+    rollbackTunNetworkBaselineOrThrow: done(),
     markAdaptiveFailure: noop(), readRecentSingBoxOutboundFault: vi.fn(async () => null), scheduleAdaptiveVerification: noop(),
     ipMonitor: { clearVpnIp:noop(),startMonitoring: noop(), getCurrentIp: vi.fn(async (_guard?: () => boolean) => ({ ip: '203.0.113.1' })),
       recheck: vi.fn(async (_rebaseline: boolean, _guard?: () => boolean) => ({ ip: '203.0.113.1', isLeak: false })) },
@@ -889,6 +935,16 @@ return {start: () => ${name}(${mode === 'proxy' ? "'127.0.0.1:1080','socks5'" : 
 }
 describe.each(['direct', 'proxy'] as const)('background IP startup: %s (AT-00-003 / AT-02-002)', mode => {
   afterEach(() => { vi.clearAllTimers(); vi.useRealTimers() })
+  it('keeps both start and baseline recovery failures in the IPC result (AT-03-007)', async () => {
+    const h = ipStartupHarness(mode)
+    h.tunController.start.mockResolvedValueOnce({ success: false, error: 'native launch failed' })
+    h.rollbackTunNetworkBaselineOrThrow.mockRejectedValueOnce(new Error('environment/HTTP_PROXY: access denied. Повторите восстановление сети.'))
+    const result = await h.start()
+    expect(result.success).toBe(false)
+    expect(result.error).toContain('native launch failed')
+    expect(result.error).toContain('environment/HTTP_PROXY: access denied')
+    expect(result.error).toContain('Повторите восстановление сети')
+  })
   it('adopts an unchanged post-start IP once routes are confirmed, without a 16-wave HTTP loop (AT-07-007)', async () => {
     vi.useFakeTimers()
     const h = ipStartupHarness(mode)

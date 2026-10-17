@@ -1247,3 +1247,60 @@ CI/review нового SHA проверяются отдельно после pu
 - Из корня: python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py
   — AC 927/927, F 210/210, exit 0; git diff --check — exit 0.
 - npm.cmd run build — exit 0 на финальном коде; Vite warnings о смешанных imports/размере чанка сохранены.
+
+### WP-3: ошибки baseline recovery в вызывающем коде (AT-03-003/007)
+
+- Windows job 117473468125 на 966bf95 — success: 3188 passed / 4 skipped,
+  235 files passed / 1 skipped, 199.73 s. Native BFE smoke: aborted=true,
+  priority=verified. Rust 117473468357 success; Revix 117473468622 neutral.
+- Проверен вопрос Revix 4303983423 про cleanupRequired при unavailable:
+  отсутствие helper на Windows не доказывает отсутствие persistent/orphan
+  защиты, поэтому inactive по одному этому факту запрещён. Non-Windows —
+  неподдерживаемая для продукта среда; консервативный placeholder не доказывает
+  работоспособность там. Это question без нового production defect, не approve.
+  CodeRabbit для нового SHA подробный review пока не опубликовал.
+- Подтверждён caller-contract gap: baseline возвращает success:false с
+  сохранённым снимком; прежние catch в start-tun/direct-vpn/AutoPilot/startup
+  и crash callbacks его не замечали. Начальный новый прогон: 7 failed,
+  194 passed, 1 skipped; четыре failure — отсутствующий новый API, три —
+  реально потерянный recovery error в итоговом результате запуска.
+- Добавлен явный rollbackTunNetworkBaselineOrThrow для exception-based callers.
+  Существующий result API Stop/shutdown не изменён; trusted absence остаётся
+  no-op. Отказ включает сообщение, failed-step details и рекомендацию повторить
+  восстановление. Сам снимок не удаляется при неполном recovery.
+- Ручной start сохраняет исходную ошибку и добавляет recovery error в IPC;
+  AutoPilot добавляет failed recovery step и подробности в message.
+  Обычный/emergency onExit теперь пишет отказ и при resolved success:false.
+- Startup recovery выполняется ДО createWindow: IPC toast в этот момент
+  потерялся бы. Отказ показан нативным warning dialog с подробностями.
+  Тесты используют подставной dialog и не открывают окно на рабочем хосте.
+- Адресный прогон: npm.cmd test -- src/main/systemNetwork.test.ts
+  src/main/autoPilot.test.ts src/main/lifecycleCleanup.test.ts — 206 passed,
+  1 skipped, 3 files passed, exit 0. npm.cmd run typecheck — exit 0.
+  npm.cmd run build — exit 0; обычные Vite warnings сохранены.
+- Полный набор запущен отдельно. Трассировка AC 927/927, F 210/210 и
+  git diff --check — exit 0. Нормативные docs/ не менялись.
+- Первый полный прогон текущего исправления: 3198 passed / 1 failed / 5 skipped,
+  132.96 s. Единственный failure — adaptiveNetworkIdentity.test.ts,
+  MSFT_NetRoute native fixture: Test timed out in 5000ms (не assertion результата).
+  Отдельно npm.cmd test -- src/main/adaptiveNetworkIdentity.test.ts:
+  25 passed, 2.46 s, exit 0. Причина задержки не установлена; полный набор повторён.
+- Дополнительная сверка startup recovery выявила две связанные ветки:
+  isBaselineApplied() мог бросить до обработчика предупреждения; ошибка tasklist
+  раньше означала fall-through к rollback без exit proof. Новые regression:
+  2 failed / 4 passed при изолированном прогоне startup cases.
+- recoverStaleBaseline теперь проверяет доверенный baseline и вызывает
+  isOwnedTunRuntimeRunning(true) в общей error boundary. Unknown runtime или
+  untrusted baseline дают предупреждение без rollback; живой owned runtime
+  сохраняет baseline. Подтверждённое отсутствие допускает восстановление.
+  Адресный повтор трёх файлов: 209 passed / 1 skipped, 11.07 s, exit 0.
+- Повтор полного набора на предыдущем срезе (до усиления startup boundary): 3199 passed / 5 skipped, 234 files passed / 2 skipped, 125.74 s, exit 0. Для финального startup-кода DoD запускается заново.
+- Финальный startup-код: npm.cmd run typecheck — exit 0; npm.cmd run build —
+  exit 0; npm.cmd test — 3202 passed / 5 skipped, 234 files passed / 2 skipped,
+  123.10 s, exit 0. python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py
+  — AC 927/927, F 210/210, exit 0; git diff --check — exit 0.
+- CodeRabbit завершил review 966bf95: один Minor (4304029954) про четыре
+  CIM filter query на каждое firewall rule. Проверка и отдельный repair следуют
+  после текущего коммита. Следом также проверить negative runtime proof:
+  существующий observer исключает процессы с нечитаемым ExecutablePath.
+  L3 по-прежнему NOT-CHECKED; WP-0/WP-2 не начаты.

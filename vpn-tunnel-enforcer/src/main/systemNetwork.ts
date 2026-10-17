@@ -264,3 +264,13 @@ export function rollbackTunNetworkBaselineIfApplied(reason: string, operationId?
   if (process.platform !== 'win32') return Promise.resolve({ success: true, skipped: true, message: 'Rollback недоступен (не Windows)' })
   return withBaselineOpLock(() => rollbackUnlocked(reason, operationId))
 }
+
+/** For recovery callers using catch: trusted absence is a no-op; partial recovery rejects. */
+export async function rollbackTunNetworkBaselineOrThrow(reason: string): Promise<SystemNetworkResult> {
+  const result = await rollbackTunNetworkBaselineIfApplied(reason)
+  if (!result.success) {
+    const details = result.details || result.warnings?.join(' | ')
+    throw new Error(`${result.message}${details ? `: ${details}` : ''}. Повторите восстановление сети и проверьте диагностику.`)
+  }
+  return result
+}

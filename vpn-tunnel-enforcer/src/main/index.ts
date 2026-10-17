@@ -32,7 +32,8 @@ import {
   applyTunNetworkBaseline,
   isBaselineApplied,
   rollbackTunNetworkBaseline,
-  rollbackTunNetworkBaselineIfApplied
+  rollbackTunNetworkBaselineIfApplied,
+  rollbackTunNetworkBaselineOrThrow
 } from './systemNetwork'
 import {
   disableKillSwitchIfActive,
@@ -963,24 +964,21 @@ function handleLogged<T>(
 // vars stay wiped forever. On startup, if no sing-box is left running, restore them.
 async function recoverStaleBaseline(): Promise<void> {
   if (process.platform !== 'win32') return
-  if (!(await isBaselineApplied())) return
   try {
-    const { stdout } = await exec('tasklist /FI "IMAGENAME eq vpnte-sing-box.exe" /FO CSV /NH', {
-      windowsHide: true,
-      timeout: 5000,
-      encoding: 'utf8'
-    })
-    if (String(stdout).toLowerCase().includes('vpnte-sing-box.exe')) {
+    if (!(await isBaselineApplied())) return
+    if (await isOwnedTunRuntimeRunning(true)) {
       logEvent('info', 'app', 'baseline marker found and sing-box is still running — keeping baseline')
       return
     }
-  } catch {
-    // fall through to rollback
-  }
-  logEvent('warn', 'app', 'stale baseline detected on startup (sing-box not running) — rolling back')
-  await rollbackTunNetworkBaselineIfApplied('crash recovery on startup').catch(err =>
+    logEvent('warn', 'app', 'stale baseline detected on startup (sing-box not running) — rolling back')
+    await rollbackTunNetworkBaselineOrThrow('crash recovery on startup')
+  } catch (err: any) {
     logEvent('warn', 'app', 'crash-recovery rollback failed', err)
-  )
+    // Recovery runs before createWindow: renderer IPC would silently drop this warning.
+    await dialog.showMessageBox({ type: 'warning', title: 'Восстановление сети не завершено',
+      message: 'Не удалось полностью восстановить сетевые настройки предыдущего сеанса. Проверьте диагностику и повторите восстановление сети.',
+      detail: err?.message || String(err), buttons: ['ОК'] })
+  }
 }
 
 function refreshTrayState(patch: {
@@ -1217,12 +1215,14 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
     // Wait for the baseline to finish before rolling back so the manifest
     // exists for rollbackTunNetworkBaselineIfApplied to find.
     if (baselinePromise) await owner.wait(baselinePromise)
-    await rollbackTunNetworkBaselineIfApplied('start-tun failed').catch(err =>
+    let recoveryWarning: string | undefined
+    await rollbackTunNetworkBaselineOrThrow('start-tun failed').catch(err => {
       logEvent('warn', 'app', 'rollback after start-tun failure failed', err)
-    )
+      recoveryWarning = err?.message || String(err)
+    })
     owner.assertActive()
     captureSnapshot('tun-start-failed').catch(() => undefined)
-    return result
+    return recoveryWarning ? { ...result, error: `${errorMsg}. ${recoveryWarning}` } : result
   }
 
   // The baseline is very likely already done (start() took several seconds),
@@ -1488,12 +1488,14 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
       { outboundFault: await owner.wait(readRecentSingBoxOutboundFault().catch(() => null)) }
     )
     if (baselinePromise) await owner.wait(baselinePromise)
-    await rollbackTunNetworkBaselineIfApplied('direct-vpn start failed').catch(err =>
+    let recoveryWarning: string | undefined
+    await rollbackTunNetworkBaselineOrThrow('direct-vpn start failed').catch(err => {
       logEvent('warn', 'app', 'rollback after direct-vpn start failure failed', err)
-    )
+      recoveryWarning = err?.message || String(err)
+    })
     owner.assertActive()
     captureSnapshot('tun-start-failed').catch(() => undefined)
-    return result
+    return recoveryWarning ? { ...result, error: `${errorMsg}. ${recoveryWarning}` } : result
   }
   if (baselinePromise) await owner.wait(baselinePromise)
   owner.assertActive()

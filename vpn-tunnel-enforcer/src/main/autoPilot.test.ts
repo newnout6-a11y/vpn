@@ -41,7 +41,7 @@ const {
     mockRoutingPlan,
     mockGetRoutingPlan: vi.fn(async () => ({ ...mockRoutingPlan })),
     mockApplyBaseline: vi.fn(async () => ({ success: true, message: 'ok' })),
-    mockRollbackBaseline: vi.fn(async (_reason?: string) => ({ rolledBack: true }))
+    mockRollbackBaseline: vi.fn(async (_reason?: string) => ({ success: true, message: 'restored' }))
   }
 })
 
@@ -72,7 +72,7 @@ vi.mock('./connectionPlanner', () => ({
 
 vi.mock('./systemNetwork', () => ({
   applyTunNetworkBaseline: () => mockApplyBaseline(),
-  rollbackTunNetworkBaselineIfApplied: (reason: string) => mockRollbackBaseline(reason)
+  rollbackTunNetworkBaselineOrThrow: (reason: string) => mockRollbackBaseline(reason)
 }))
 
 vi.mock('./tunAdapter', () => ({
@@ -102,6 +102,7 @@ describe('autoPilot', () => {
     mockSettings.autoNetworkBaseline = false
     mockTunStop.mockResolvedValue({ success: true })
     mockTunStart.mockResolvedValue({ success: true })
+    mockRollbackBaseline.mockResolvedValue({ success: true, message: 'restored' })
     mockProbeTcp.mockResolvedValue(true)
   })
 
@@ -252,6 +253,19 @@ describe('autoPilot', () => {
       expect(result.mode).toBe('hard')
     })
 
+    it('includes failed baseline recovery in the result and step summary (AT-03-007)', async () => {
+      mockSettings.autoNetworkBaseline = true
+      mockRoutingPlan.proxyListeners = [{ host: '127.0.0.1', port: 10808, process: 'xray', pid: 123 }]
+      vi.mocked(SocksClient.createConnection).mockResolvedValueOnce({ socket: { destroy: vi.fn() } } as any)
+      mockTunStart.mockResolvedValueOnce({ success: false, error: 'Wintun driver error' })
+      const recoveryError = 'environment/HTTP_PROXY: access denied. Повторите восстановление сети.'
+      mockRollbackBaseline.mockRejectedValueOnce(new Error(recoveryError))
+      const result = await runAutoPilot()
+      expect(result).toMatchObject({ summary: 'fail', mode: 'off' })
+      expect(result.message).toContain('Wintun driver error')
+      expect(result.message).toContain(recoveryError)
+      expect(result.steps).toContainEqual(expect.objectContaining({ status: 'fail', after: recoveryError }))
+    })
     it('rolls back baseline if TUN start fails', async () => {
       mockSettings.autoNetworkBaseline = true
       mockRoutingPlan.proxyListeners = [{ host: '127.0.0.1', port: 10808, process: 'xray', pid: 123 }]
