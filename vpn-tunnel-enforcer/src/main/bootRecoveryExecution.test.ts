@@ -84,7 +84,7 @@ $tokens=$null;$errors=$null
 $ast=[System.Management.Automation.Language.Parser]::ParseInput($source,[ref]$tokens,[ref]$errors)
 if($errors.Count){throw 'Source syntax error'}
 $fn=$ast.Find({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Write-RecoveryReport'},$true)
-$source=$source.Remove($fn.Extent.StartOffset,$fn.Extent.EndOffset-$fn.Extent.StartOffset).Insert($fn.Extent.StartOffset,'function Write-RecoveryReport([string]$status) { Write-Output ("REPORT:"+$status); $script:recoveryMessages | ForEach-Object { Write-Output $_.message } }')
+$source=$source.Remove($fn.Extent.StartOffset,$fn.Extent.EndOffset-$fn.Extent.StartOffset).Insert($fn.Extent.StartOffset,'function Write-RecoveryReport([string]$status) { Write-Output ("REPORT:"+$status); $script:recoveryMessages | ForEach-Object { Write-Output $_.message }; foreach($name in @("Domain","Private","Public")){Write-Output ("PROFILE_STATE:"+$name+"/"+(Get-NetFirewallProfile -Profile $name -ErrorAction Stop).DefaultOutboundAction)} }')
 $ast=[System.Management.Automation.Language.Parser]::ParseInput($source,[ref]$tokens,[ref]$errors)
 $fn=$ast.Find({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Invoke-VpnteWfpIpv6Recovery'},$true)
 $source=$source.Remove($fn.Extent.StartOffset,$fn.Extent.EndOffset-$fn.Extent.StartOffset).Insert($fn.Extent.StartOffset,'function Invoke-VpnteWfpIpv6Recovery { if($global:f.wfpFailure){throw "injected WFP failure"}; if($global:f.wfpRules){Write-Output "WFP_CLEANUP"} }')
@@ -106,10 +106,11 @@ describe.skipIf(!pwsh)('actual boot recovery control flow on mocked system APIs'
     const profiles = ['Domain','Private','Public'].map(name => ({ name, defaultOutbound: 'Block' }))
     const firewall = { schemaVersion: 1, owner: 'VPNTE', strictMode: false, phase: 'active', savedProfiles: profiles }
     const tun = { schemaVersion: 1, owner: 'VPNTE', interfaceGuid: fixtures().adapters[0].InterfaceGuid }
-    const physical = { ...fixtures().adapters[0], Name: 'Fixture Ethernet', InterfaceDescription: 'Physical fixture', MacAddress: '02-00-00-00-00-01' }
+    const physical = { Name: 'Fixture Ethernet', InterfaceGuid: '33333333-3333-3333-3333-333333333333', ifIndex: 12,
+      InterfaceDescription: 'Physical fixture', DriverDescription: 'Physical fixture driver', PnPDeviceID: 'PCI\\fixture', MacAddress: '02-00-00-00-00-01', Status: 'Up' }
     const partial: Record<string, unknown> = kind === 'adapter' ? {
       'latest-physical-adapter-lockdown.json': { schemaVersion: 1, owner: 'VPNTE', adapters: [
-        { ifIndex: 10, alias: physical.Name, interfaceGuid: physical.InterfaceGuid, ipv6Enabled: true, forcedIpv6Off: true, forcedDnsTo: ['192.168.250.254'], ipv4DnsSource: 'static', ipv4DnsServers: ['192.0.2.53'] },
+        { ifIndex: physical.ifIndex, alias: physical.Name, interfaceGuid: physical.InterfaceGuid, ipv6Enabled: true, forcedIpv6Off: true, forcedDnsTo: ['192.168.250.254'], ipv4DnsSource: 'static', ipv4DnsServers: ['192.0.2.53'] },
         { ifIndex: 11 } // Interrupted write: no ownership identity or previous state.
       ] }
     } : kind === 'baseline' ? {
@@ -127,14 +128,21 @@ describe.skipIf(!pwsh)('actual boot recovery control flow on mocked system APIs'
       expect(result.output).toMatch(/QUARANTINE:.*firewall\.json/)
       expect(result.output).toContain('protection unknown')
       for (const name of ['Domain','Private','Public']) expect(result.output).toContain(`PROFILE:${name}/Allow`)
+      for (const name of ['Domain','Private','Public']) expect(result.output).toContain(`PROFILE_STATE:${name}/Allow`)
     } else {
       for (const name of ['Domain','Private','Public']) expect(result.output).toContain(`PROFILE:${name}/Block`)
+      for (const name of ['Domain','Private','Public']) expect(result.output).toContain(`PROFILE_STATE:${name}/Block`)
       expect(result.output).toMatch(/DELETE:.*firewall\.json/)
     }
     if (kind === 'tun') {
       expect(result.output).toContain('TUN recovery failed; ownership record preserved')
       expect(result.output).not.toMatch(/REMOVE_ADAPTER:|DELETE:.*tun-owner\.json/)
-    } else expect(result.output).toContain('REMOVE_ADAPTER:Other VPN')
+    } else {
+      expect(result.output).toContain('REMOVE_ADAPTER:Other VPN')
+      expect(result.output).toMatch(/DELETE:.*tun-owner\.json/)
+      expect(result.output).not.toContain('TUN recovery failed')
+    }
+    expect(result.output).not.toContain('REMOVE_ADAPTER:Fixture Ethernet')
     if (kind === 'adapter') expect(result.output).toContain('SECURITY: rejected adapter manifest')
     if (kind === 'baseline') expect(result.output).toContain('Baseline recovery failed; trusted snapshot retained')
     expect(result.output).not.toMatch(/DELETE:.*latest-(?:physical-adapter-lockdown|tun-network-baseline)\.json/)
@@ -215,6 +223,9 @@ describe.skipIf(!pwsh)('actual boot recovery control flow on mocked system APIs'
     expect(result.status).toBe(1)
     expect(result.output).toContain('PROFILE:Private/Allow')
     expect(result.output).toContain('PROFILE:Public/Allow')
+    expect(result.output).toContain('PROFILE_STATE:Domain/Block')
+    expect(result.output).toContain('PROFILE_STATE:Private/Allow')
+    expect(result.output).toContain('PROFILE_STATE:Public/Allow')
     expect(result.output).not.toMatch(/DELETE:.*firewall\.json/)
     expect(result.output).toContain('REPORT:warnings')
   })
