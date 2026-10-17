@@ -240,6 +240,7 @@ try {
     $adapterManifest = Read-TrustedManifest 'latest-physical-adapter-lockdown.json'
     if ($adapterManifest) {
         if ($adapterManifest.adapters -isnot [array] -or $adapterManifest.adapters.Count -gt 256) { throw 'Invalid adapter manifest' }
+        if ($adapterManifest.adapters.Count -eq 0) { $hasWarnings=$true; Log 'Physical adapter snapshot missing; skipped' }
         $validAdapters = @()
         $adapterIndex = 0
         foreach ($a in $adapterManifest.adapters) {

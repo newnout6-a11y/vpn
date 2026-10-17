@@ -118,6 +118,37 @@ $source=$source.Replace('[Microsoft.Win32.Registry]::Users.OpenSubKey($sid,$true
   finally { unlinkSync(harnessPath); rmdirSync(tempDir) }
 }
 describe.skipIf(!pwsh)('actual boot recovery control flow on mocked system APIs', () => {
+  it.each(['empty', 'complete'] as const)('handles a trusted %s physical adapter snapshot without losing recovery evidence (AT-03-003c/007)', kind => {
+    const physical = { Name: 'Fixture Ethernet', InterfaceGuid: '33333333-3333-3333-3333-333333333333', ifIndex: 12,
+      InterfaceDescription: 'Physical fixture', DriverDescription: 'Physical fixture driver', PnPDeviceID: 'PCI\\fixture', MacAddress: '02-00-00-00-00-01', Status: 'Up' }
+    const snapshot = { ifIndex: 12, interfaceGuid: physical.InterfaceGuid, alias: physical.Name, ipv6Enabled: true, forcedIpv6Off: true,
+      ipv4DnsServers: ['192.0.2.53'], ipv4DnsSource: 'static', forcedDnsTo: ['192.168.250.254'] }
+    const result = run({ adapters: [physical], extra: { 'latest-physical-adapter-lockdown.json': {
+      schemaVersion: 1, owner: 'VPNTE', appliedAt: 1, tunDnsIpv4: '192.168.250.254',
+      adapters: kind === 'empty' ? [] : [snapshot],
+      transitionAdapters: { teredoType: 'client', sixToFourState: 'enabled', isatapState: 'disabled' },
+      dnsRegistryPolicy: { smartNameResolution: { exists: false }, parallelAandAAAA: { exists: true, type: 'REG_DWORD', data: '0x0' } }
+    } } })
+    expect(result.output).toContain('NETSH:interface teredo set state type=client')
+    expect(result.output).toContain('NETSH:interface 6to4 set state state=enabled')
+    expect(result.output).toContain('NETSH:interface isatap set state state=disabled')
+    expect(result.output).toContain('Registry: restored and verified DisableSmartNameResolution')
+    expect(result.output).toContain('Registry: restored and verified DisableParallelAandAAAA')
+    expect(result.output).not.toContain('QUARANTINE:')
+    if (kind === 'empty') {
+      expect(result.status).toBe(1)
+      expect(result.output).toContain('Physical adapter snapshot missing; skipped')
+      expect(result.output).toContain('REPORT:warnings')
+      expect(result.output).not.toContain('REPORT:restored')
+      expect(result.output).not.toMatch(/RESTORE_DNS:|RESTORE_BINDING:|DELETE:.*latest-physical-adapter-lockdown\.json/)
+    } else {
+      expect(result.status).toBe(0)
+      expect(result.output).toContain('REPORT:restored')
+      expect(result.output).toContain('RESTORE_DNS:Fixture Ethernet')
+      expect(result.output).toContain('RESTORE_BINDING:Fixture Ethernet')
+      expect(result.output).toMatch(/DELETE:.*latest-physical-adapter-lockdown\.json/)
+    }
+  })
   it.each(['missing', 'invalid'] as const)('reports a %s transition field while restoring valid neighbors (AT-03-003c)', kind => {
     const transitionAdapters: any = { teredoType: 'client', sixToFourState: 'enabled', isatapState: null }
     if (kind === 'missing') delete transitionAdapters.teredoType

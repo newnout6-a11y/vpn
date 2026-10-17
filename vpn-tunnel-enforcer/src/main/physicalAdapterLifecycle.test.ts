@@ -42,7 +42,7 @@ function deferred<T>() {
 }
 
 describe('adapter rollback correlation (AT-03-007)', () => {
-  it.each(['adapter', 'duplicate', 'transition', 'policy'] as const)('recovers valid neighbors of a bad %s record (AT-03-003c)', async failure => {
+  it.each(['adapter', 'duplicate', 'transition', 'policy', 'empty'] as const)('recovers valid neighbors of a bad %s record (AT-03-003c)', async failure => {
     const valid = { ...adapter(), ipv4DnsSource: 'static', forcedIpv6Off: true, ipv6Enabled: true }
     const disk: any = { schemaVersion: 1, owner: 'VPNTE', appliedAt: Date.now(), tunDnsIpv4: '192.168.250.254',
       adapters: [valid, { ...valid, interfaceGuid: '22222222-2222-2222-2222-222222222222', alias: 'Ethernet' }],
@@ -52,6 +52,7 @@ describe('adapter rollback correlation (AT-03-007)', () => {
     if (failure === 'duplicate') disk.adapters.push({ ...valid, interfaceGuid: `{${valid.interfaceGuid!.toUpperCase()}}` })
     if (failure === 'transition') disk.transitionAdapters.teredoType = 'invalid'
     if (failure === 'policy') disk.dnsRegistryPolicy.smartNameResolution = { exists: true, type: 'REG_DWORD', data: 'overflow' }
+    if (failure === 'empty') disk.adapters = []
     const validate = compile<(value: unknown, rejected?: string[]) => any>('validateLockdownManifest', { isIP })
     const deps = {
       process: { platform: 'win32' }, logEvent: vi.fn(), psSingleQuote: quote,
@@ -71,7 +72,12 @@ describe('adapter rollback correlation (AT-03-007)', () => {
     const script = deps.runPS.mock.calls[0][0] as string
     expect(script).not.toContain('invalid')
     expect(script).not.toContain('overflow')
-    expect(script).toContain('22222222-2222-2222-2222-222222222222')
+    if (failure === 'empty') {
+      expect(script).not.toMatch(/Get-NetAdapter|Set-DnsClientServerAddress|Enable-NetAdapterBinding/)
+      expect(script).toContain('netsh interface teredo set state type=')
+      expect(script).toContain('DisableSmartNameResolution')
+      expect(script).toContain('DisableParallelAandAAAA')
+    } else expect(script).toContain('22222222-2222-2222-2222-222222222222')
     if (failure === 'duplicate') expect(script).not.toContain(valid.interfaceGuid)
     if (failure === 'policy') {
       expect(script).not.toMatch(/(?:SetValue|DeleteValue)\('DisableSmartNameResolution'/)
