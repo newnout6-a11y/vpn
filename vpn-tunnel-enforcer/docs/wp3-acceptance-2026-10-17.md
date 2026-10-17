@@ -66,6 +66,28 @@ cleanup возвращает `WFP error 0x8032000D` (нет активной т�
 исходный отказ. `ok=false`, `aborted=false`; это не подтверждение работы BFE.
 Нужны исправление harness и отдельный запуск на привилегированном CI runner.
 
+### AT-03-007/010: нативный smoke и CI
+
+Harness теперь запоминает успешный Begin: при отказе начала не пытается
+откатывать отсутствующую транзакцию, повторный Abort не отправляется в BFE.
+Commit остаётся no-op независимо от вызовов production Policy.Apply; cleanup
+ошибка не может оставить `ok=true`. Регрессия компилирует настоящий C# wrapper
+из smoke-скрипта с fake IEngine и проверяет отказ Begin, запрет commit и ровно
+один Abort. Физические адаптеры не нужны для отдельного ABI/LUID smoke:
+на CI допускается активный виртуальный интерфейс; это не проверка NIC ownership.
+
+- `npm.cmd test -- src/main/wfpIpv6.test.ts`: 28 passed, exit 0.
+- Повторный `npm.cmd run typecheck`: exit 0.
+- Повторный `npm.cmd test`: 3113 passed, 5 skipped, 0 failed;
+  232 files passed, 2 skipped; 171.67 с, exit 0.
+- Нативный smoke после исправления: exit 1, исходный **WFP 0x00000005
+  (Access denied) на Begin** теперь сохранён. Транзакция не начата.
+- В Windows CI добавлен обязательный шаг реального BFE smoke с выводом
+  JSON в RUNNER_TEMP и job log. До фактического результата CI PASS не заявлен.
+
+PR: https://github.com/newnout6-a11y/vpn/pull/46. Финальные CI/review проверяются
+по SHA последнего коммита; версия первого коммита не доказывает новую версию.
+
 ## Условие перехода дальше
 
 Закрыть доступные пробелы L1/L2, получить и сохранить реальные L3-доказательства

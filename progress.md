@@ -1062,3 +1062,31 @@ npm.cmd test
   в CI и разобрать её результат. Это не заменяет packet/reboot/OS acceptance.
 - WP-3 остаётся частичным; локальный PASS и трассировка не дают основания
   объявить его принятым или перейти к WP-0. Нормативные `docs/` не менялись.
+
+### WP-3: PR #46 и нативная проверка BFE
+
+- Коммит `094662f` опубликован в PR #46:
+  https://github.com/newnout6-a11y/vpn/pull/46 (base main, отдельная ветка WP-3).
+- Исправлен smoke harness `scripts/test-wfp-ipv6-native.ps1`: отмечается только
+  успешно начатая транзакция, нет Abort после отказа Begin/повторного Abort,
+  Commit никогда не передаётся в native engine. Любая ошибка, включая Dispose,
+  снимает `ok`. ABI/LUID fixture может использовать виртуальную NIC CI;
+  это не приёмка физических интерфейсов или утечек.
+- Добавлен fault-injection тест compiled C# wrapper с fake IEngine:
+  исходная ошибка Begin сохраняется; несуществующая транзакция не откатывается;
+  Commit не вызывается; начатая транзакция откатывается один раз.
+- Добавлен обязательный Windows CI шаг «IPv6 WFP — нативный ABI и откат
+  транзакции». Скрипт проверяет настоящие Windows API, не коммитит фильтры,
+  результат пишет в RUNNER_TEMP и job log. Нужен фактический PASS на head PR.
+- `npm.cmd test -- src/main/wfpIpv6.test.ts` — 28 passed, exit 0.
+- `npm.cmd run typecheck` — exit 0.
+- `npm.cmd test` — 3113 passed, 5 skipped, 0 failed;
+  232 files passed, 2 skipped; 171.67 s, exit 0.
+- Трассировка — AC 927/927, F 210/210, exit 0; `git diff --check` — exit 0.
+- Повторный локальный native smoke — exit 1 с истинной причиной:
+  `WFP error 0x00000005` (Access denied) на Begin. Транзакция не началась;
+  L3 не пройден. Поиск доступных VHD/VHDX/ISO в Downloads/Public Documents
+  не нашёл готового образа; зарегистрированный VHDX повторно проверен по
+  точному пути из Hyper-V — отсутствует.
+- Следующая доступная работа в WP-3: correlation id rollback-событий,
+  расширение L1/L2 матрицы и разбор замечаний/проверок PR #46.
