@@ -4,6 +4,9 @@ import { join } from 'node:path'
 import { isIP } from 'node:net'
 import { EventEmitter } from 'node:events'
 import { randomUUID } from 'node:crypto'
+import { execFileSync } from 'node:child_process'
+import { RecoveryWorkerError } from './recoveryPsWorker'
+import { OWNED_RUNTIME_STATUS_QUERY_SCRIPT } from './recoveryPsProtocol'
 import ts from 'typescript'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ConnectionLifecycle } from './connectionLifecycle'
@@ -853,6 +856,49 @@ describe('Xray startup phase measurements (AT-02-002 / AT-02-004)', () => {
 })
 
 describe('baseline recovery callers (AT-03-007)', () => {
+  it.skipIf(process.platform !== 'win32').each(['owned', 'mixed', 'unknown', 'absent', 'unknown at firewall', 'unknown at adapter'])(
+    'keeps the entire startup cleanup behind fresh runtime exit proof: %s (AT-03-003/007)', async outcome => {
+      const processes = [
+        ...(['owned', 'mixed'].includes(outcome) ? [{ Name: 'vpnte-sing-box.exe', ExecutablePath: 'C:\\startup-fixture\\vpnte-sing-box.exe' }] : []),
+        ...(['unknown', 'mixed'].includes(outcome) ? [{ Name: 'vpnte-xray.exe', ExecutablePath: null }] : [])
+      ]
+      const encoded = Buffer.from(JSON.stringify(processes)).toString('base64')
+      const script = String.raw`$ErrorActionPreference='Stop';$runtimeDir='C:\startup-fixture'
+$fixture=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}'))|ConvertFrom-Json
+function Get-CimInstance {param($ClassName,$ErrorAction) $fixture}
+${OWNED_RUNTIME_STATUS_QUERY_SCRIPT}`
+      const logEvent = noop()
+      let observations = 0
+      const runtimeDeps = { process: { platform: 'win32' }, getTunRuntimeDir: () => 'C:\\startup-fixture',
+        executeRecoveryOperation: vi.fn(async () => {
+          observations++
+          if (outcome === 'unknown at firewall' && observations === 2 || outcome === 'unknown at adapter' && observations === 3) {
+            throw new Error('runtime observation unavailable')
+          }
+          try { return execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')],
+            { encoding: 'utf8', windowsHide: true, timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'] }) }
+          catch { throw new Error('runtime observation unavailable') }
+        }), RecoveryWorkerError, logEvent }
+      const isOwnedTunRuntimeRunning = compile<(proof?: boolean) => Promise<boolean>>(
+        `${body('tunController.ts', 'isOwnedTunRuntimeRunning').replace(/^export /, '')}\nreturn isOwnedTunRuntimeRunning;`, runtimeDeps)
+      const disable = done()
+      const recoverStaleKillSwitch = compile<(read: () => Promise<boolean>) => Promise<void>>(
+        `${body('firewallKillSwitch.ts', 'recoverStaleKillSwitchUnlocked')}\nreturn recoverStaleKillSwitchUnlocked;`, {
+          process: { platform: 'win32' }, readManifestForRecovery: async () => ({ manifest: { strictMode: false } }),
+          strictRecoveryRequired: async () => false, disableKillSwitchUnlocked: disable, logEvent
+        })
+      const deps = { process: { platform: 'win32' }, isOwnedTunRuntimeRunning, recoverStaleKillSwitch, logEvent,
+        timePhase: async (_name: string, work: () => Promise<unknown>) => work(), recoverStaleBaseline: done(),
+        isPhysicalAdapterLockdownApplied: async () => true, rollbackPhysicalAdapterLockdownIfApplied: done(), repairOrphanedPhysicalAdapterDns: done(),
+        autoconfig: { getStatus: async () => [{ id: 'env', applied: true }], rollback: done() },
+        settingsStore: { get: () => ({ routingMode: 'hard', connectionMode: 'directVpn' }) }, dialog: { showMessageBox: vi.fn(async () => ({})) } }
+      const recover = compile<() => Promise<void>>(`${body('index.ts', 'performCrashRecovery')}\nreturn performCrashRecovery;`, deps)
+      await recover()
+      for (const cleanup of [disable, deps.rollbackPhysicalAdapterLockdownIfApplied, deps.repairOrphanedPhysicalAdapterDns, deps.autoconfig.rollback]) {
+        expect(cleanup).toHaveBeenCalledTimes(outcome === 'absent' || outcome === 'unknown at adapter' && cleanup === disable ? 1 : 0)
+      }
+      expect(deps.dialog.showMessageBox).toHaveBeenCalledTimes(['mixed', 'unknown', 'unknown at firewall', 'unknown at adapter'].includes(outcome) ? 1 : 0)
+    })
   it.each(['pending', 'rejected'])('continues startup recovery when the warning dialog is %s (AT-03-003/007)', async outcome => {
     let dismiss!: (value: {}) => void
     const notification = new Promise<{}>(resolve => { dismiss = resolve })

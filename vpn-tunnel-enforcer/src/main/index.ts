@@ -1738,46 +1738,57 @@ async function quitFromTray(): Promise<void> {
 
 async function performCrashRecovery(): Promise<void> {
   if (process.platform !== 'win32') return
+  try {
+    if (await timePhase('recovery.runtime', () => isOwnedTunRuntimeRunning(true))) {
+      logEvent('info', 'app', 'owned runtime is still running — preserving startup network state')
+      return
+    }
+    await timePhase('recovery.baseline', () => recoverStaleBaseline())
 
-  await timePhase('recovery.baseline', () => recoverStaleBaseline())
+    await timePhase('recovery.killswitch', () => recoverStaleKillSwitch(() => isOwnedTunRuntimeRunning(true)))
 
-  await timePhase('recovery.killswitch', () => recoverStaleKillSwitch(isOwnedTunRuntimeRunning))
-
-  if (await timePhase('recovery.lockdown-check', () => isPhysicalAdapterLockdownApplied())) {
-    if (!(await isOwnedTunRuntimeRunning())) {
-      logEvent('warn', 'phys-lockdown', 'recovering stale adapter lockdown — sing-box not running')
-      try {
-        await rollbackPhysicalAdapterLockdownIfApplied('startup recovery — sing-box not running')
-      } catch (err) {
-        logEvent('warn', 'phys-lockdown', 'startup rollback failed', err)
+    if (await timePhase('recovery.lockdown-check', () => isPhysicalAdapterLockdownApplied())) {
+      if (!(await isOwnedTunRuntimeRunning(true))) {
+        logEvent('warn', 'phys-lockdown', 'recovering stale adapter lockdown — sing-box not running')
+        try {
+          await rollbackPhysicalAdapterLockdownIfApplied('startup recovery — sing-box not running')
+        } catch (err) {
+          logEvent('warn', 'phys-lockdown', 'startup rollback failed', err)
+        }
       }
     }
-  }
 
-  await timePhase('recovery.orphan-dns', () => repairOrphanedPhysicalAdapterDns('startup orphaned DNS repair'))
-    .catch(err => logEvent('warn', 'phys-lockdown', 'startup orphaned DNS repair failed', err))
+    await timePhase('recovery.orphan-dns', () => repairOrphanedPhysicalAdapterDns('startup orphaned DNS repair'))
+      .catch(err => logEvent('warn', 'phys-lockdown', 'startup orphaned DNS repair failed', err))
 
-  try {
-    const status = await timePhase('recovery.autoconfig', () => autoconfig.getStatus())
-    const envApplied = status.find(t => t.id === 'env')?.applied
-    if (envApplied) {
-      if (settingsStore.get().routingMode === 'soft' && settingsStore.get().connectionMode !== 'directVpn') {
-        logEvent('info', 'app', 'preserving env autoconfig during Soft-mode crash recovery')
-      } else {
-        logEvent('info', 'app', 'rolling back env autoconfig (setx HTTP_PROXY) on crash recovery')
-        await autoconfig.rollback(['env'])
+    try {
+      const status = await timePhase('recovery.autoconfig', () => autoconfig.getStatus())
+      const envApplied = status.find(t => t.id === 'env')?.applied
+      if (envApplied) {
+        if (settingsStore.get().routingMode === 'soft' && settingsStore.get().connectionMode !== 'directVpn') {
+          logEvent('info', 'app', 'preserving env autoconfig during Soft-mode crash recovery')
+        } else {
+          logEvent('info', 'app', 'rolling back env autoconfig (setx HTTP_PROXY) on crash recovery')
+          await autoconfig.rollback(['env'])
+        }
       }
+    } catch (err) {
+      logEvent('warn', 'app', 'env autoconfig rollback during crash recovery failed', err)
     }
-  } catch (err) {
-    logEvent('warn', 'app', 'env autoconfig rollback during crash recovery failed', err)
-  }
 
-  try {
-    const { tunController } = await import('./tunController')
-    if (tunController && !tunController.getStatus().running) {
-      logEvent('info', 'app', 'checking for stale TUN adapter during crash recovery')
-    }
-  } catch { /* non-critical */ }
+    try {
+      const { tunController } = await import('./tunController')
+      if (tunController && !tunController.getStatus().running) {
+        logEvent('info', 'app', 'checking for stale TUN adapter during crash recovery')
+      }
+    } catch { /* non-critical */ }
+  } catch (err: any) {
+    logEvent('warn', 'app', 'startup network recovery unconfirmed', err)
+    void dialog.showMessageBox({ type: 'warning', title: 'Восстановление сети не подтверждено',
+      message: 'Не удалось подтвердить завершение сетевого восстановления. Проверьте диагностику перед повторным подключением.',
+      detail: err?.message || String(err), buttons: ['ОК'] })
+      .catch(dialogErr => logEvent('warn', 'app', 'crash-recovery warning dialog failed', dialogErr))
+  }
 }
 
 // Disable the default application menu before app.ready — we use a
