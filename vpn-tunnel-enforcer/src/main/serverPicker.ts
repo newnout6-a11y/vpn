@@ -1591,7 +1591,7 @@ let geolocateInFlight = false
 /**
  * One-time migration from the legacy "directVpnCachedProfiles" stored in
  * settings.json into the server-picker store. Runs only when the picker is
- * empty AND legacy profiles exist, so it is safe to call on every startup.
+ * empty AND legacy profiles belong to the accepted input.
  *
  * Why: V2 unifies server management around the server-picker store; the
  * Settings page no longer ingests subscriptions. Without this migration,
@@ -1603,6 +1603,9 @@ export function migrateLegacyDirectVpnProfiles(): void {
   if (existing.length > 0) return
 
   const settings = settingsStore.get()
+  // The cache also holds wizard previews; editing or skipping a key never accepts it.
+  const acceptedInput = settings.directVpnInput.trim()
+  if (!acceptedInput || acceptedInput !== settings.directVpnCachedInput.trim()) return
   const legacy = Array.isArray(settings.directVpnCachedProfiles)
     ? settings.directVpnCachedProfiles
     : []
