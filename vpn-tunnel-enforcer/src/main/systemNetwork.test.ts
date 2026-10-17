@@ -35,7 +35,7 @@ function response(command: string) {
     return { stdout: 'BASELINE_APPLIED', stderr: '' }
   }
   if (script.includes('steps=@($results)')) return {
-    stdout: JSON.stringify({ steps: state.manifest.values.map((s: any, i: number) => ({ name: `${s.target}/${s.name}`, success: !state.failedSteps.includes(i), error: state.failedSteps.includes(i) ? 'injected failure' : null })),
+    stdout: JSON.stringify({ steps: JSON.parse(Buffer.from(/\$values = .*FromBase64String\('([^']+)'\)/.exec(script)![1], 'base64').toString('utf8')).map((s: any, i: number) => ({ name: `${s.target}/${s.name}`, success: !state.failedSteps.includes(i), error: state.failedSteps.includes(i) ? 'injected failure' : null })),
       notification: { success: !state.failNotify, error: state.failNotify ? 'notification failed' : null }, timings: { registryMs: 1, notifyMs: 2 }, ...state.reportPatch }), stderr: ''
   }
   if (script.includes('InternetSetOption') && state.failNotify) throw new Error('notification failed')
@@ -90,6 +90,35 @@ beforeEach(() => {
 })
 afterEach(() => Object.defineProperty(process, 'platform', platform))
 describe('trusted typed network baseline', () => {
+  it.each(['missing', 'invalid', 'duplicate'] as const)('restores valid baseline records after %s records, retaining the journal (AT-03-003c)', async kind => {
+    const original = fixture()
+    state.manifest = structuredClone(original)
+    if (kind === 'missing') state.manifest.values.splice(0, 4)
+    if (kind === 'invalid') for (let i = 0; i < 4; i++) state.manifest.values[i].exists = 'false'
+    if (kind === 'duplicate') state.manifest.values[0] = { ...state.manifest.values[1] }
+    const result = await rollbackTunNetworkBaseline()
+    expect(result.success).toBe(false)
+    expect(result.warnings?.length).toBeGreaterThan(0)
+    expect(state.manifest).not.toBeNull()
+    expect(state.operations).not.toContain('clear')
+    const steps = vi.mocked(logEvent).mock.calls.filter(call => call[2] === 'baseline rollback step')
+    expect(steps.map(call => (call[3] as any).name)).toEqual(original.values.slice(kind === 'duplicate' ? 2 : 4).map(s => `${s.target}/${s.name}`))
+    expect(steps.every(call => (call[3] as any).success)).toBe(true)
+    expect(vi.mocked(logEvent).mock.calls.some(call => call[2] === 'baseline rollback step rejected')).toBe(true)
+    expect(() => validateNetworkBackupManifest(state.manifest)).toThrow()
+  })
+  it('performs no native effects when no baseline records are valid (AT-03-003c)', async () => {
+    state.manifest = { ...fixture(), values: [] }
+    const result = await rollbackTunNetworkBaseline()
+    expect(result).toMatchObject({ success: false, warnings: expect.any(Array) })
+    expect(result.warnings).toHaveLength(9)
+    expect(state.operations).toEqual([])
+  })
+  it.each([{ owner: 'foreign' }, { schemaVersion: 2 }, { userSid: 'invalid' }])('does not salvage records across an invalid envelope %j (AT-03-003/012)', async patch => {
+    state.manifest = { ...fixture(), ...patch }
+    expect((await rollbackTunNetworkBaseline()).success).toBe(false)
+    expect(state.operations).toEqual([])
+  })
   it('keeps receipt IDs distinct through real logger/redaction/file writes across a failed rollback and retry (AT-03-007)', async () => {
     const temporary = join(process.cwd(), '.tmp'); mkdirSync(temporary, { recursive: true })
     state.logDirectory = mkdtempSync(join(temporary, 'baseline-log-correlation-'))

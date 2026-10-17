@@ -153,7 +153,7 @@ npm run dev        # из корня репозитория тоже работ�
 
 ## Тесты
 
-Последний полный прогон (13.10.2026, CI на Windows-раннере GitHub, PR #39): **233 файла passed / 1 skipped; 3093 теста passed / 4 skipped / 0 failed**; те же проверки идут на каждый PR в `main` (см. «Непрерывная проверка» ниже). Native Electron smoke и локальные подмножества WP-1 в этом прогоне не повторялись. Пропущенные/VM-проверки не считаются PASS; актуальные итоги — вывод `npm test`, [журнал прогресса](progress.md) и [отчёт WP-1](vpn-tunnel-enforcer/docs/wp1-security-acceptance-2026-10-04.md).
+Исторический полный прогон (13.10.2026, CI на Windows-раннере GitHub, PR #39): **233 файла passed / 1 skipped; 3093 теста passed / 4 skipped / 0 failed**; те же проверки идут на каждый PR в `main` (см. «Непрерывная проверка» ниже). Native Electron smoke и локальные подмножества WP-1 в этом прогоне не повторялись. Пропущенные/VM-проверки не считаются PASS; актуальные итоги с указанием проверенного коммита — [журнал прогресса](progress.md), [отчёт WP-3](vpn-tunnel-enforcer/docs/wp3-acceptance-2026-10-17.md) и [отчёт WP-1](vpn-tunnel-enforcer/docs/wp1-security-acceptance-2026-10-04.md).
 
 ```bash
 npm test                                            # полный набор

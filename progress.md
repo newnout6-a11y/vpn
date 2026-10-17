@@ -1641,3 +1641,78 @@ CI/review нового SHA проверяются отдельно после pu
   234 files passed / 2 skipped, 155.93 s, exit 0. Логи первого и повторного
   прогонов: vpn-tunnel-enforcer/.tmp/wp3-owner-skip-full.log и
   vpn-tunnel-enforcer/.tmp/wp3-owner-skip-full-recheck.log.
+
+### 18.10.2026 — review 251a634 и решение о частичных записях AT-03-003(c)
+
+- Windows CI 117506906954 на 251a634 — success: 3260 passed / 4 skipped,
+  235 files passed / 1 skipped, 212.40 s; AC 927/927, F 210/210. Electron
+  native reads: 1 passed / 1 skipped. Rust 117506906749 — success.
+  Лог: vpn-tunnel-enforcer/.tmp/wp3-ci-117506906954.log.
+- CodeRabbit review 5560162474 завершён в 21:24 UTC, проверены изменения
+  0d175b5 → 251a634, включая исправления P1/P2. Осталось одно Minor:
+  прогон 13 октября назван последним в README. Исправлено на исторический
+  прогон со ссылкой на актуальные отчёты. Revix 117506917043 — neutral;
+  старый заголовок 2 issue(s) found не равен формальному APPROVED. Новых
+  inline findings для 251a634 нет. Minor-only gate этого SHA соблюдён;
+  новые изменения требуют собственной проверки.
+- Владелец пояснил, что подписи EXE нет; после отделения этого вопроса от
+  записей файла отката подтвердил: «Да, восстановить исправные записи».
+  Решение §10.13: невалидные записи доверенного файла пропускаются с явной
+  ошибкой; валидные независимые соседи восстанавливаются. Подпись EXE
+  остаётся отложенной. L3 имеет отдельный статус «Пропущено владельцем».
+- Baseline, saved firewall profiles и adapter snapshots теперь допускают
+  частичные записи только при recovery после проверки доверия и общего
+  документа. Apply/write/passive status сохраняют строгую схему. Дубли
+  target/profile/GUID отклоняются целиком, включая первую запись.
+  DNS policy и transition records обрабатываются независимо. Неполный
+  откат возвращает ошибку и сохраняет исходный файл; детали идут в Stop/UI
+  и startup warning без ожидания закрытия диалога.
+- Production boot script восстанавливает валидных соседей того же файла,
+  логирует пропущенные записи, сохраняет incomplete journals и strict.
+  Native fixture подставляет сетевые API и registry handles; реальные
+  firewall/DNS/сетевые ключи Windows не менялись.
+- Адресный npm.cmd test -- src/main/systemNetwork.test.ts — 64 passed /
+  1 skipped, 4.35 s. Промежуточные проверки нашли устаревшее ожидание состава
+  логов и недостающую зависимость netshState в тестовом harness; исправлено.
+  Семь suites systemNetwork/firewallTransactions/physicalAdapterLifecycle/
+  physicalAdapterLockdownSource/bootRecoveryExecution/bootRecoveryBehavior/
+  lifecycleCleanup — 399 passed / 2 skipped, 26.95 s, exit 0.
+- npm.cmd run typecheck и npm.cmd run build — exit 0; coverage — AC 927/927,
+  F 210/210, exit 0. После усиления boot per-record guards:
+  npm.cmd test -- src/main/bootRecoveryExecution.test.ts
+  src/main/bootRecoveryBehavior.test.ts src/main/physicalAdapterLifecycle.test.ts
+  — 88 passed, 15.96 s, exit 0. Дополнительные strict/startup/source suites:
+  firewallTransactions/bootRecoveryExecution/bootRecoveryScriptSource/
+  lifecycleCleanup — 271 passed / 1 skipped, 23.69 s, exit 0.
+- Первый полный прогон изменений — 3279 passed / 1 failed / 5 skipped,
+  176.95 s: source-test firewallKillSwitchValidation ошибочно проверял
+  условие из другой функции. Ожидание ограничено фактическим helper body.
+  npm.cmd test -- src/main/firewallKillSwitchValidation.test.ts
+  src/main/firewallTransactions.test.ts — 122 passed / 1 skipped, 8.09 s,
+  exit 0. Полный повтор и dist:win проверяются отдельно ниже.
+- Полный повтор `.tmp/wp3-partial-full-final.log` — 3281 passed / 5 skipped,
+  189.32 s, exit 0. Следующий `.tmp/wp3-partial-frozen-full.log` —
+  3283 passed / 5 skipped, 193.23 s, exit 0. Во время второго прогона
+  self-review выявил пропущенные поля transition snapshot: boot теперь
+  отличает missing от допустимого null, пропускает запись с ошибкой и
+  сохраняет журнал. Boundary netsh в native fixture подставлен, системные
+  переходные адаптеры не меняются. Адресный
+  `npm.cmd test -- src/main/bootRecoveryExecution.test.ts src/main/bootRecoveryScriptSource.test.ts`
+  — 35 passed, 20.10 s, exit 0. Итоговый полный прогон после этих правок
+  записывается отдельно ниже, код до его окончания не меняется.
+- `npm.cmd run typecheck` — exit 0. `npm.cmd run dist:win` — exit 0,
+  Electron 44.4.3, NSIS 1.1.24; production build/typecheck выполнены внутри
+  команды. Финальный ресурс находится в `dist/win-unpacked/resources/`,
+  SHA-256 совпадает с исходником vpnte-recover.ps1:
+  `155c175332855980933b7c7081db58784af8c9bd2e09b2dda76f2b4fa414e490`.
+  Setup 139728889 bytes, SHA-256
+  `dc085e8fd4867f1eaadefae48a6f6a415cb844f3f0b5404bd866cab5ccc4d23e`.
+  Get-AuthenticodeSignature: NotSigned. Установщик не устанавливался.
+  Логи: `.tmp/wp3-partial-frozen-dist.log`, `.tmp/wp3-partial-frozen-artifacts.json`.
+- Финальный неизменявшийся код: `npm.cmd test` — **3285 passed / 5 skipped /
+  0 failed**, 234 files passed / 2 skipped, 181.74 s, exit 0.
+  Лог: `.tmp/wp3-partial-commit-full.log`. `npm.cmd run typecheck` — exit 0;
+  `python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py` —
+  AC 927/927, F 210/210, exit 0; `git diff --check` — exit 0. Оставшиеся
+  L3-сценарии не запускались: **«Пропущено владельцем»**. Новые CI/review
+  после отправки коммита учитываются отдельно; WP-0/WP-2 ещё не начаты.

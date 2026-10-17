@@ -162,36 +162,57 @@ function programDataManifestPath(): string {
   return getLockdownManifestPaths().programData
 }
 
-export function validateLockdownManifest(value: unknown): LockdownManifest {
-  const v = value as any
+// Recovery-only tolerance never relaxes the trusted envelope or the write schema.
+export function validateLockdownManifest(value: unknown, rejected?: string[]): LockdownManifest {
+  const v = structuredClone(value) as any
   if (!v || v.schemaVersion !== 1 || v.owner !== 'VPNTE' || !Number.isSafeInteger(v.appliedAt) ||
       !isIP(v.tunDnsIpv4) || !Array.isArray(v.adapters) || v.adapters.length > 256) throw new Error('Invalid lockdown manifest')
-  for (const a of v.adapters) {
+  const check = (step: string, validate: () => void): boolean => {
+    try { validate(); return true }
+    catch (error) {
+      if (!rejected) throw error
+      rejected.push(`${step}: invalid or conflicting snapshot; skipped`)
+      return false
+    }
+  }
+  v.adapters = v.adapters.filter((a: AdapterSnapshot, index: number) => check(`adapter entry ${index}`, () => {
     if (!a || !Number.isInteger(a.ifIndex) || a.ifIndex <= 0 || typeof a.alias !== 'string' || a.alias.length > 256 ||
         /[\x00-\x1f]/.test(a.alias) || typeof a.ipv6Enabled !== 'boolean' || typeof a.forcedIpv6Off !== 'boolean' ||
         typeof a.interfaceGuid !== 'string' || !/^\{?[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\}?$/i.test(a.interfaceGuid) ||
-        !['dhcp','static','unknown'].includes(a.ipv4DnsSource) ||
+        !['dhcp','static','unknown'].includes(a.ipv4DnsSource || '') ||
         !Array.isArray(a.ipv4DnsServers) || a.ipv4DnsServers.some((ip: unknown) => typeof ip !== 'string' || !isIP(ip)) ||
         !(a.forcedDnsTo === null || (Array.isArray(a.forcedDnsTo) && a.forcedDnsTo.every((ip: string) => isIP(ip))))) throw new Error('Invalid adapter snapshot')
-  }
+    if (v.adapters.filter((other: AdapterSnapshot) => typeof other?.interfaceGuid === 'string' &&
+        other.interfaceGuid.replace(/[{}]/g, '').toLowerCase() === a.interfaceGuid!.replace(/[{}]/g, '').toLowerCase()).length !== 1) throw new Error('Duplicate adapter identity')
+  }))
+  if (v.transitionAdapters && !check('transition adapters', () => {
+    if (typeof v.transitionAdapters !== 'object' || Array.isArray(v.transitionAdapters)) throw new Error('Invalid transition snapshot')
+  })) delete v.transitionAdapters
   if (v.transitionAdapters) {
     for (const [key, values] of Object.entries({
       teredoType: ['disabled','default','client','enterpriseclient','natclient','server'],
       sixToFourState: ['disabled','default','enabled'], isatapState: ['disabled','default','enabled']
     })) {
-      const state = v.transitionAdapters[key]
-      if (state !== null && !values.includes(state)) throw new Error('Invalid transition snapshot')
+      if (!check(`transition/${key}`, () => {
+        const state = v.transitionAdapters[key]
+        if (state !== null && !values.includes(state)) throw new Error('Invalid transition snapshot')
+      })) v.transitionAdapters[key] = null
     }
   }
-  if (!v.dnsRegistryPolicy) throw new Error('Missing DNS policy snapshot')
+  if (!v.dnsRegistryPolicy) {
+    if (!rejected) throw new Error('Missing DNS policy snapshot')
+    v.dnsRegistryPolicy = {}
+  }
   for (const key of ['smartNameResolution','parallelAandAAAA']) {
-    const r = v.dnsRegistryPolicy[key]
-    if (!r || typeof r.exists !== 'boolean' || (r.exists && (r.type !== 'REG_DWORD' || typeof r.data !== 'string' || !/^(?:0x[a-f0-9]{1,8}|[0-9]{1,10})$/i.test(r.data) || Number(r.data) > 0xffffffff))) throw new Error('Invalid DNS registry snapshot')
+    if (!check(`DNS policy/${key}`, () => {
+      const r = v.dnsRegistryPolicy[key]
+      if (!r || typeof r.exists !== 'boolean' || (r.exists && (r.type !== 'REG_DWORD' || typeof r.data !== 'string' || !/^(?:0x[a-f0-9]{1,8}|[0-9]{1,10})$/i.test(r.data) || Number(r.data) > 0xffffffff))) throw new Error('Invalid DNS registry snapshot')
+    })) delete v.dnsRegistryPolicy[key]
   }
   return v
 }
-async function readManifest(): Promise<LockdownManifest | null> {
-  return readRecoveryManifest(MANIFEST_BASENAME, validateLockdownManifest)
+async function readManifest(rejected?: string[]): Promise<LockdownManifest | null> {
+  return readRecoveryManifest(MANIFEST_BASENAME, value => validateLockdownManifest(value, rejected))
 }
 
 function sanitizeDnsServers(values: unknown): string[] {
@@ -793,10 +814,11 @@ try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}
  * empty list means "back to DHCP", which is what `Set-DnsClientServerAddress
  * -ResetServerAddresses` does.
  */
-export async function rollbackPhysicalAdapterLockdownIfApplied(reason: string, options: RollbackOptions = {}): Promise<{ rolledBack: boolean; skipped?: boolean }> {
+export async function rollbackPhysicalAdapterLockdownIfApplied(reason: string, options: RollbackOptions = {}): Promise<{ rolledBack: boolean; skipped?: boolean; warnings?: string[] }> {
   const { operationId } = options
   if (process.platform !== 'win32') return { rolledBack: false, skipped: true }
-  const m = await readManifest()
+  const rejected: string[] = []
+  const m = await readManifest(rejected)
   // Only a successful trusted read proving absence is a no-op. Trust errors
   // propagate; incomplete rollback still returns rolledBack:false without skip.
   if (!m) {
@@ -804,6 +826,7 @@ export async function rollbackPhysicalAdapterLockdownIfApplied(reason: string, o
     return { rolledBack: false, skipped: true }
   }
 
+  for (const error of rejected) logEvent('error', 'phys-lockdown', 'adapter rollback step rejected', { operationId, reason, error, success: false })
   let combinedScript = `$ErrorActionPreference = 'Continue'\n`
   
   for (let i = 0; i < m.adapters.length; i++) {
@@ -839,7 +862,7 @@ ${registryRestoreLine('DNS_SMNR', 'HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows 
 ${registryRestoreLine('DNS_PARALLEL', 'HKLM\\SYSTEM\\CurrentControlSet\\Services\\Dnscache\\Parameters', 'DisableParallelAandAAAA', m.dnsRegistryPolicy?.parallelAandAAAA)}
 try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}`
 
-  let rollbackSuccess = true
+  let rollbackSuccess = rejected.length === 0
   try {
     const out = await runPS(combinedScript, 30000)
     for (let i = 0; i < m.adapters.length; i++) {
@@ -887,14 +910,14 @@ try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}`
     logEvent('warn', 'phys-lockdown', 'manifest kept for retry on next startup — rollback was incomplete', { operationId, reason })
   }
   clearPhysicalAdaptersSnapshotCache()
-  return { rolledBack: rollbackSuccess }
+  return { rolledBack: rollbackSuccess, ...(rejected.length ? { warnings: rejected } : {}) }
 }
 
 export async function repairOrphanedPhysicalAdapterDns(reason: string, operationId?: string): Promise<{ repaired: boolean; adapters: string[] }> {
   if (process.platform !== 'win32') return { repaired: false, adapters: [] }
   // A private resolver address is not proof that VPNTE changed an adapter.
   // Automatic restoration needs the exact trusted ownership/baseline snapshot.
-  const manifest = await readManifest()
+  const manifest = await readManifest([])
   if (manifest) {
     const result = await rollbackPhysicalAdapterLockdownIfApplied(reason, { operationId })
     return { repaired: result.rolledBack, adapters: result.rolledBack ? manifest.adapters.map(a => a.alias) : [] }
@@ -903,8 +926,8 @@ export async function repairOrphanedPhysicalAdapterDns(reason: string, operation
   return { repaired: false, adapters: [] }
 }
 
-export async function isPhysicalAdapterLockdownApplied(): Promise<boolean> {
-  return (await readManifest()) !== null
+export async function isPhysicalAdapterLockdownApplied(recovery = false): Promise<boolean> {
+  return (await readManifest(recovery ? [] : undefined)) !== null
 }
 
 let dnsSourcesCache: { value: PhysicalAdapterDnsSource[]; at: number } | null = null

@@ -103,7 +103,7 @@ function stopHarness(startupController: AbortController | null = null, startupCo
     waitForOwnedRuntimeToExit: vi.fn(async () => { state.runtime = false; return true }),
     rollbackTunNetworkBaselineIfApplied: vi.fn(async () => { state.baseline = false; return { success: true, message: 'restored' } }),
     disableKillSwitchIfActive: vi.fn(async () => { state.firewall = false; return { success: true, message: 'restored' } }),
-    rollbackPhysicalAdapterLockdownIfApplied: vi.fn(async (): Promise<{ rolledBack: boolean; skipped?: boolean }> => { state.adapters = false; return { rolledBack: true } }),
+    rollbackPhysicalAdapterLockdownIfApplied: vi.fn(async (): Promise<{ rolledBack: boolean; skipped?: boolean; warnings?: string[] }> => { state.adapters = false; return { rolledBack: true } }),
     repairOrphanedPhysicalAdapterDns: vi.fn(async () => ({ repaired: false, adapters: [] })),
     ipMonitor: { suspend: noop(), resume: noop() },
     logEvent: noop(), notify: noop(), notifyStatus: noop(), recordForensicTunEvent: noop(),
@@ -179,6 +179,13 @@ return {start:()=>controller.start('127.0.0.1:1080'),state:()=>({starting:startI
 }
 
 describe('lifecycle cleanup evidence and retries (AT-02-005 / AT-03-007)', () => {
+  it('includes rejected manifest records in the Stop error delivered to UI (AT-03-003c)', async () => {
+    const h = stopHarness()
+    h.rollbackPhysicalAdapterLockdownIfApplied.mockResolvedValue({ rolledBack: false, warnings: ['adapter entry 0: invalid snapshot; skipped'] })
+    const result = await h.stop()
+    expect(result).toMatchObject({ success: false, networkCleanup: { adapters: false } })
+    expect(result.error).toContain('adapter entry 0: invalid snapshot; skipped')
+  })
   it.each(['success', 'baseline', 'firewall', 'adapters', 'dns', 'runtime', 'xray'])('correlates Stop steps and their actual outcomes: %s (AT-03-007)', async failing => {
     const h = stopHarness()
     if (failing === 'baseline') h.rollbackTunNetworkBaselineIfApplied.mockResolvedValueOnce({ success: false, message: 'baseline failed' })
@@ -856,6 +863,26 @@ describe('Xray startup phase measurements (AT-02-002 / AT-02-004)', () => {
 })
 
 describe('baseline recovery callers (AT-03-007)', () => {
+  it.each(['pending', 'rejected'] as const)('surfaces partial adapter recovery and continues when its warning is %s (AT-03-003c)', async outcome => {
+    let dismiss!: (value: {}) => void
+    const notification = new Promise<{}>(resolve => { dismiss = resolve })
+    const deps = { process: { platform: 'win32' }, isOwnedTunRuntimeRunning: vi.fn(async () => false),
+      timePhase: async (_name: string, work: () => Promise<unknown>) => work(), recoverStaleBaseline: done(), recoverStaleKillSwitch: done(),
+      isPhysicalAdapterLockdownApplied: vi.fn(async () => true),
+      rollbackPhysicalAdapterLockdownIfApplied: vi.fn(async () => ({ rolledBack: false, warnings: ['adapter entry 0: invalid snapshot; skipped'] })),
+      repairOrphanedPhysicalAdapterDns: done(), autoconfig: { getStatus: vi.fn(async () => []) }, logEvent: noop(),
+      dialog: { showMessageBox: vi.fn(() => outcome === 'pending' ? notification : Promise.reject(new Error('dialog unavailable'))) } }
+    const recover = compile<() => Promise<void>>(`${body('index.ts', 'performCrashRecovery')}\nreturn performCrashRecovery;`, deps)
+    try {
+      await recover()
+      expect(deps.isPhysicalAdapterLockdownApplied).toHaveBeenCalledWith(true)
+      expect(deps.repairOrphanedPhysicalAdapterDns).toHaveBeenCalledOnce()
+      expect(deps.autoconfig.getStatus).toHaveBeenCalledOnce()
+      expect(deps.dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({
+        title: 'Восстановление адаптеров не завершено', detail: expect.stringContaining('adapter entry 0: invalid snapshot; skipped')
+      }))
+    } finally { dismiss({}) }
+  })
   it.skipIf(process.platform !== 'win32').each(['owned', 'mixed', 'unknown', 'absent', 'unknown at firewall', 'unknown at adapter'])(
     'keeps the entire startup cleanup behind fresh runtime exit proof: %s (AT-03-003/007)', async outcome => {
       const processes = [
@@ -889,7 +916,7 @@ ${OWNED_RUNTIME_STATUS_QUERY_SCRIPT}`
         })
       const deps = { process: { platform: 'win32' }, isOwnedTunRuntimeRunning, recoverStaleKillSwitch, logEvent,
         timePhase: async (_name: string, work: () => Promise<unknown>) => work(), recoverStaleBaseline: done(),
-        isPhysicalAdapterLockdownApplied: async () => true, rollbackPhysicalAdapterLockdownIfApplied: done(), repairOrphanedPhysicalAdapterDns: done(),
+        isPhysicalAdapterLockdownApplied: async () => true, rollbackPhysicalAdapterLockdownIfApplied: vi.fn(async () => ({ rolledBack: true })), repairOrphanedPhysicalAdapterDns: done(),
         autoconfig: { getStatus: async () => [{ id: 'env', applied: true }], rollback: done() },
         settingsStore: { get: () => ({ routingMode: 'hard', connectionMode: 'directVpn' }) }, dialog: { showMessageBox: vi.fn(async () => ({})) } }
       const recover = compile<() => Promise<void>>(`${body('index.ts', 'performCrashRecovery')}\nreturn performCrashRecovery;`, deps)
@@ -929,6 +956,7 @@ ${OWNED_RUNTIME_STATUS_QUERY_SCRIPT}`
       dialog: { showMessageBox: vi.fn(async () => ({})) }, logEvent: noop() }
     const recover = compile<() => Promise<void>>(`${body('index.ts', 'recoverStaleBaseline')}\nreturn recoverStaleBaseline;`, deps)
     await recover()
+    expect(deps.isBaselineApplied).toHaveBeenCalledWith(true)
     expect(deps.rollbackTunNetworkBaselineOrThrow).toHaveBeenCalledTimes(['failed', 'restored'].includes(outcome) ? 1 : 0)
     expect(deps.isOwnedTunRuntimeRunning).toHaveBeenCalledTimes(['untrusted baseline', 'no baseline'].includes(outcome) ? 0 : 1)
     if (['failed', 'restored'].includes(outcome)) {

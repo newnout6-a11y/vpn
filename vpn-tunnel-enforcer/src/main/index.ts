@@ -966,7 +966,7 @@ async function recoverStaleBaseline(): Promise<void> {
   if (process.platform !== 'win32') return
   let rollbackStarted = false
   try {
-    if (!(await isBaselineApplied())) return
+    if (!(await isBaselineApplied(true))) return
     if (await isOwnedTunRuntimeRunning(true)) {
       logEvent('info', 'app', 'baseline marker found and sing-box is still running — keeping baseline')
       return
@@ -1747,13 +1747,17 @@ async function performCrashRecovery(): Promise<void> {
 
     await timePhase('recovery.killswitch', () => recoverStaleKillSwitch(() => isOwnedTunRuntimeRunning(true)))
 
-    if (await timePhase('recovery.lockdown-check', () => isPhysicalAdapterLockdownApplied())) {
+    if (await timePhase('recovery.lockdown-check', () => isPhysicalAdapterLockdownApplied(true))) {
       if (!(await isOwnedTunRuntimeRunning(true))) {
         logEvent('warn', 'phys-lockdown', 'recovering stale adapter lockdown — sing-box not running')
         try {
-          await rollbackPhysicalAdapterLockdownIfApplied('startup recovery — sing-box not running')
+          const rollback = await rollbackPhysicalAdapterLockdownIfApplied('startup recovery — sing-box not running')
+          if (!rollback.rolledBack && !rollback.skipped) throw new Error(rollback.warnings?.join(' | ') || 'Adapter rollback incomplete; snapshot retained')
         } catch (err) {
           logEvent('warn', 'phys-lockdown', 'startup rollback failed', err)
+          void dialog.showMessageBox({ type: 'warning', title: 'Восстановление адаптеров не завершено',
+            message: 'Часть настроек адаптеров не восстановлена. Проверьте диагностику и повторите восстановление сети.',
+            detail: String(err), buttons: ['ОК'] }).catch(dialogErr => logEvent('warn', 'app', 'adapter recovery warning dialog failed', dialogErr))
         }
       }
     }

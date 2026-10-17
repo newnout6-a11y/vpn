@@ -21,6 +21,19 @@ $global:f = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encod
 $global:profiles = @{Domain='Block';Private='Block';Public='Block'}
 $global:removed=$false
 $global:quarantined=@{}
+$global:restoredDns=@{}
+$global:registryValues=@{}
+function Get-FixtureUserHive {
+ $key=[pscustomobject]@{}
+ $key | Add-Member ScriptMethod CreateSubKey {param($path) Get-FixtureUserHive}
+ $key | Add-Member ScriptMethod SetValue {param($name,$data,$kind) $global:registryValues[$name]=@{data=$data;kind=$kind};Write-Host "REGISTRY_SET:$name"}
+ $key | Add-Member ScriptMethod DeleteValue {param($name,$strict) $global:registryValues.Remove($name);Write-Host "REGISTRY_DELETE:$name"}
+ $key | Add-Member ScriptMethod GetValueNames { @($global:registryValues.Keys) }
+ $key | Add-Member ScriptMethod GetValueKind {param($name) $global:registryValues[$name].kind}
+ $key | Add-Member ScriptMethod GetValue {param($name,$fallback,$options) return ,$global:registryValues[$name].data}
+ $key | Add-Member ScriptMethod Close {}
+ return $key
+}
 function Get-Item {
  param($LiteralPath,[switch]$Force,$ErrorAction)
  [pscustomobject]@{Attributes=[IO.FileAttributes]::Normal;PSIsContainer=($LiteralPath -notmatch '\\.json(?:\\.corrupt-.*)?$');Length=100}
@@ -65,11 +78,12 @@ function Get-NetFirewallRule {param($DisplayName,$ErrorAction) if($global:f.rule
 function Remove-NetFirewallRule {[CmdletBinding()]param([Parameter(ValueFromPipeline=$true)]$InputObject) process{$global:removed=$true;Write-Output 'REMOVE_RULE'}}
 function Get-NetAdapter {param($ErrorAction) @($global:f.adapters)}
 function Get-NetIPAddress {param($InterfaceIndex,$AddressFamily,$ErrorAction) [pscustomobject]@{IPAddress='192.168.250.253';PrefixLength=30}}
-function Get-DnsClientServerAddress {param($InterfaceAlias,$AddressFamily,$ErrorAction) [pscustomobject]@{ServerAddresses=@('192.168.250.254')}}
-function Set-DnsClientServerAddress {param($InterfaceAlias,$ServerAddresses,[switch]$ResetServerAddresses,$ErrorAction) Write-Output "RESTORE_DNS:$InterfaceAlias"}
+function Get-DnsClientServerAddress {param($InterfaceAlias,$AddressFamily,$ErrorAction) [pscustomobject]@{ServerAddresses=$(if($global:restoredDns.ContainsKey($InterfaceAlias)){$global:restoredDns[$InterfaceAlias]}else{@('192.168.250.254')})}}
+function Set-DnsClientServerAddress {param($InterfaceAlias,$ServerAddresses,[switch]$ResetServerAddresses,$ErrorAction) $global:restoredDns[$InterfaceAlias]=@($ServerAddresses);Write-Output "RESTORE_DNS:$InterfaceAlias"}
 function Enable-NetAdapterBinding {param($InterfaceAlias,$ComponentID,$ErrorAction) Write-Output "RESTORE_BINDING:$InterfaceAlias"}
 function Get-NetAdapterBinding {param($InterfaceAlias,$ComponentID,$ErrorAction) [pscustomobject]@{Enabled=$true}}
 function Get-ItemProperty {param($LiteralPath,$Name,$ErrorAction) throw 'Unexpected registry read in boot fixture'}
+function netsh { Write-Host ('NETSH:'+($args -join ' ')); $global:LASTEXITCODE=0 }
 function Clear-DnsClientCache {param($ErrorAction)}
 function Remove-NetAdapter {param($Name,$Confirm,$ErrorAction) Write-Output "REMOVE_ADAPTER:$Name"}
 function Disable-NetAdapter {param($Name,$Confirm,$ErrorAction) Write-Output "DISABLE_ADAPTER:$Name"}
@@ -88,6 +102,8 @@ $source=$source.Remove($fn.Extent.StartOffset,$fn.Extent.EndOffset-$fn.Extent.St
 $ast=[System.Management.Automation.Language.Parser]::ParseInput($source,[ref]$tokens,[ref]$errors)
 $fn=$ast.Find({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Invoke-VpnteWfpIpv6Recovery'},$true)
 $source=$source.Remove($fn.Extent.StartOffset,$fn.Extent.EndOffset-$fn.Extent.StartOffset).Insert($fn.Extent.StartOffset,'function Invoke-VpnteWfpIpv6Recovery { if($global:f.wfpFailure){throw "injected WFP failure"}; if($global:f.wfpRules){Write-Output "WFP_CLEANUP"} }')
+# Substitute only registry handles; production validation and restore/read-back remain intact.
+$source=$source.Replace('[Microsoft.Win32.Registry]::Users.OpenSubKey($sid,$true)','(Get-FixtureUserHive)').Replace('[Microsoft.Win32.Registry]::LocalMachine','(Get-FixtureUserHive)')
 & ([scriptblock]::Create($source))
 `
   // Windows cannot pass this full-script harness within its command-line limit.
@@ -102,6 +118,61 @@ $source=$source.Remove($fn.Extent.StartOffset,$fn.Extent.EndOffset-$fn.Extent.St
   finally { unlinkSync(harnessPath); rmdirSync(tempDir) }
 }
 describe.skipIf(!pwsh)('actual boot recovery control flow on mocked system APIs', () => {
+  it.each(['missing', 'invalid'] as const)('reports a %s transition field while restoring valid neighbors (AT-03-003c)', kind => {
+    const transitionAdapters: any = { teredoType: 'client', sixToFourState: 'enabled', isatapState: null }
+    if (kind === 'missing') delete transitionAdapters.teredoType
+    else transitionAdapters.teredoType = 'invalid'
+    const result = run({ extra: { 'latest-physical-adapter-lockdown.json': {
+      schemaVersion: 1, owner: 'VPNTE', adapters: [], transitionAdapters,
+      dnsRegistryPolicy: { smartNameResolution: { exists: false }, parallelAandAAAA: { exists: false } }
+    } } })
+    expect(result.status).toBe(1)
+    expect(result.output).toContain('Transition teredo snapshot rejected; skipped')
+    expect(result.output).toContain('REPORT:warnings')
+    expect(result.output).not.toMatch(/DELETE:.*latest-physical-adapter-lockdown\.json/)
+    expect(result.output).not.toContain('NETSH:interface teredo set state')
+    expect(result.output).toContain('NETSH:interface 6to4 set state state=enabled')
+  })
+  it.each(['duplicate', 'dns-null'] as const)('rejects ambiguous or invalid adapter records: %s (AT-03-003c/012)', kind => {
+    const physical = { Name: 'Fixture Ethernet', InterfaceGuid: '33333333-3333-3333-3333-333333333333', ifIndex: 12,
+      InterfaceDescription: 'Physical fixture', DriverDescription: 'Physical fixture driver', PnPDeviceID: 'PCI\\fixture', MacAddress: '02-00-00-00-00-01', Status: 'Up' }
+    const snapshot = { ifIndex: 12, interfaceGuid: physical.InterfaceGuid, alias: physical.Name, ipv6Enabled: true, forcedIpv6Off: true,
+      ipv4DnsServers: ['192.0.2.53'], ipv4DnsSource: 'static', forcedDnsTo: ['192.168.250.254'] }
+    const result = run({ adapters: [physical], extra: { 'latest-physical-adapter-lockdown.json': {
+      schemaVersion: 1, owner: 'VPNTE', adapters: kind === 'duplicate' ? [snapshot, { ...snapshot, interfaceGuid: `{${snapshot.interfaceGuid}}` }] : [{ ...snapshot, ipv4DnsServers: [null] }]
+    } } })
+    expect(result.status).toBe(1)
+    expect(result.output).toContain('Adapter entry rejected: 0; skipped')
+    expect(result.output).not.toMatch(/RESTORE_DNS:|RESTORE_BINDING:|DELETE:.*latest-physical-adapter-lockdown\.json/)
+  })
+  it.each(['invalid', 'duplicate', 'empty'] as const)('restores only valid baseline entries after %s records (AT-03-003c)', kind => {
+    const values: any[] = [
+      ...['ProxyEnable','ProxyServer','AutoConfigURL','AutoDetect'].map(name => ({ target: 'internet', name, exists: false, kind: null, data: null })),
+      ...['HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY'].map(name => ({ target: 'environment', name, exists: false, kind: null, data: null })),
+      { target: 'winhttp', name: 'WinHttpSettings', exists: false, kind: null, data: null }
+    ]
+    if (kind === 'invalid') for (let i = 0; i < 4; i++) values[i].exists = 'false'
+    if (kind === 'duplicate') values[0] = { ...values[1] }
+    const result = run({ extra: { 'latest-tun-network-baseline.json': {
+      schemaVersion: 1, owner: 'VPNTE', userSid: 'S-1-5-21-1-2-3-1001', values: kind === 'empty' ? [] : values
+    } } })
+    expect(result.status).toBe(1)
+    expect(result.output).toContain('REPORT:warnings')
+    expect(result.output).not.toMatch(/DELETE:.*latest-tun-network-baseline\.json/)
+    const expected = kind === 'empty' ? [] : values.slice(kind === 'invalid' ? 4 : 2)
+    const restored = [...result.output.matchAll(/^Baseline restored: (.+)$/gm)].map(match => match[1].trim())
+    expect(restored).toEqual(expected.map(value => `${value.target}/${value.name}`))
+    if (kind === 'empty') expect(result.output).not.toMatch(/REGISTRY_(SET|DELETE):/)
+    else expect(result.output).toContain('Baseline entry rejected: 0; skipped')
+  })
+  it('retains strict protection despite invalid saved profile entries (AT-03-003c)', () => {
+    const result = run({ firewall: { schemaVersion: 1, owner: 'VPNTE', strictMode: true, phase: 'active', savedProfiles: [
+      { name: 'Domain', defaultOutbound: 'Block' }, { name: 'Private', defaultOutbound: 'invalid' }
+    ] }, rules: true })
+    expect(result.output).toContain('REPORT:strict-retained')
+    expect(result.output).not.toMatch(/REMOVE_RULE|RESTORE_DNS:|REGISTRY_(SET|DELETE):|PROFILE:.*\/Allow/)
+    expect(result.output).not.toMatch(/QUARANTINE:|DELETE:.*firewall\.json/)
+  })
   it.each(['firewall', 'adapter', 'baseline', 'tun'] as const)('keeps independent valid recovery after a partial %s manifest (AT-03-003/007)', kind => {
     const profiles = ['Domain','Private','Public'].map(name => ({ name, defaultOutbound: 'Block' }))
     const firewall = { schemaVersion: 1, owner: 'VPNTE', strictMode: false, phase: 'active', savedProfiles: profiles }
@@ -123,12 +194,17 @@ describe.skipIf(!pwsh)('actual boot recovery control flow on mocked system APIs'
     expect(result.status).toBe(1)
     expect(result.output).toContain('REPORT:warnings')
     expect(result.output).toContain('REMOVE_RULE')
-    expect(result.output).not.toMatch(/RESTORE_DNS:|RESTORE_BINDING:|Unexpected registry read/)
+    expect(result.output).not.toContain('Unexpected registry read')
+    if (kind === 'adapter') {
+      expect(result.output).toContain('RESTORE_DNS:Fixture Ethernet')
+      expect(result.output).toContain('RESTORE_BINDING:Fixture Ethernet')
+      expect(result.output).not.toContain('DNS read-back mismatch')
+    } else expect(result.output).not.toMatch(/RESTORE_DNS:|RESTORE_BINDING:/)
     if (kind === 'firewall') {
-      expect(result.output).toMatch(/QUARANTINE:.*firewall\.json/)
-      expect(result.output).toContain('protection unknown')
-      for (const name of ['Domain','Private','Public']) expect(result.output).toContain(`PROFILE:${name}/Allow`)
-      for (const name of ['Domain','Private','Public']) expect(result.output).toContain(`PROFILE_STATE:${name}/Allow`)
+      expect(result.output).not.toMatch(/QUARANTINE:|DELETE:.*firewall\.json/)
+      expect(result.output).toContain('Firewall profile restored: Domain')
+      expect(result.output).not.toMatch(/PROFILE:(Private|Public)\//)
+      for (const name of ['Domain','Private','Public']) expect(result.output).toContain(`PROFILE_STATE:${name}/Block`)
     } else {
       for (const name of ['Domain','Private','Public']) expect(result.output).toContain(`PROFILE:${name}/Block`)
       for (const name of ['Domain','Private','Public']) expect(result.output).toContain(`PROFILE_STATE:${name}/Block`)
@@ -143,8 +219,11 @@ describe.skipIf(!pwsh)('actual boot recovery control flow on mocked system APIs'
       expect(result.output).not.toContain('TUN recovery failed')
     }
     expect(result.output).not.toContain('REMOVE_ADAPTER:Fixture Ethernet')
-    if (kind === 'adapter') expect(result.output).toContain('SECURITY: rejected adapter manifest')
-    if (kind === 'baseline') expect(result.output).toContain('Baseline recovery failed; trusted snapshot retained')
+    if (kind === 'adapter') expect(result.output).toContain('Adapter entry rejected: 1; skipped')
+    if (kind === 'baseline') {
+      for (const name of ['ProxyEnable','ProxyServer','AutoConfigURL','AutoDetect']) expect(result.output).toContain(`Baseline restored: internet/${name}`)
+      expect(result.output).toContain('Baseline snapshot missing: environment/HTTP_PROXY; skipped')
+    }
     expect(result.output).not.toMatch(/DELETE:.*latest-(?:physical-adapter-lockdown|tun-network-baseline)\.json/)
   })
   it.each(['recovery-policy.json', 'firewall.json', 'latest-physical-adapter-lockdown.json', 'latest-tun-network-baseline.json', 'tun-owner.json'])('rejects an unsupported %s version before any network effects (AT-03-003)', name => {

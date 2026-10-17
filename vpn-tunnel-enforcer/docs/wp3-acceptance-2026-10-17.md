@@ -8,7 +8,9 @@
 Владелец сообщил, что лаборатории нет и она не нужна, и назначил отдельный
 статус **«Пропущено владельцем»** (`SKIPPED_BY_OWNER`). Решение записано
 в ТЗ-06 §10.12. Оно охватывает оставшиеся L3-сценарии WP-3 и OS-матрицу.
-Доступные L1/L2, уточнение AT-03-003(c) и проверка PR учитываются отдельно.
+Смысл AT-03-003(c) уточнён владельцем в §10.13; исправные записи доверенного
+файла восстанавливаются, испорченные пропускаются с ошибкой. Проверки L1/L2
+и review новых исправлений учитываются отдельно.
 
 ## Среда и границы
 
@@ -28,7 +30,7 @@
 | --- | --- | --- |
 | 03-001 | `firewallTransactions.test.ts`, `granularKillSwitch.test.ts`, `wfpIpv6.test.ts`: установка защиты до разрыва, отказ вместо ложного успеха, форма политик | **ПРОПУЩЕНО ВЛАДЕЛЬЦЕМ (18.10.2026):** фактические WFP counters, pktmon и внешний capture; три способа разрыва, окно 60 с, UI ≤2 с |
 | 03-002 | `bootRecoveryRegistration.test.ts`, `bootRecoveryTaskReadBack.test.ts`, `bootRecoveryExecution.test.ts`, `bootRecoveryBehavior.test.ts`: команда задачи, read-back, исполнение production-скрипта на подставных системных API, проверка GUID/driver/subnet | **ПРОПУЩЕНО ВЛАДЕЛЬЦЕМ (18.10.2026):** установленная сборка, жёсткое убийство, настоящий reboot, SYSTEM, итоговый отчёт в UI |
-| 03-003 | `recoveryManifestStorage.test.ts`, `firewallTransactions.test.ts`, `bootRecoveryExecution.test.ts`, `systemNetwork.test.ts`: corrupt/missing/future schema, карантин, сохранение strict, отсутствие эффектов для недоверенных данных; `bootRecoveryExecution.test.ts`: независимость recovery при частичном firewall/adapter/baseline/TUN документе; `bootRecoveryBehavior.test.ts`: валидный DNS registry step рядом с отсутствующим/невалидным; `lifecycleCleanup.test.ts`: startup warning до создания окна при неполном baseline recovery | **Частично:** смысл «шагов без подписи» требует уточнения; обычный rollback частичного документа требует уточнения; L3 boot/системные ACL — **ПРОПУЩЕНО ВЛАДЕЛЬЦЕМ (18.10.2026)** |
+| 03-003 | `recoveryManifestStorage.test.ts`, `firewallTransactions.test.ts`, `bootRecoveryExecution.test.ts`, `systemNetwork.test.ts`: corrupt/missing/future schema, карантин, сохранение strict, отсутствие эффектов для недоверенных данных; `systemNetwork.test.ts`, `firewallTransactions.test.ts`, `physicalAdapterLifecycle.test.ts`: обычный rollback валидных соседей невалидной/отсутствующей/конфликтующей записи, отказ и сохранение журнала; `bootRecoveryExecution.test.ts`, `bootRecoveryBehavior.test.ts`: те же границы в production PowerShell на подставных API; `lifecycleCleanup.test.ts`: детали пропуска в Stop error и startup warning до создания окна | Смысл (c) принят владельцем (§10.13); реализация и L2-матрица дополнены, проверки нового кода и PR review перечислены ниже. L3 boot/системные ACL — **ПРОПУЩЕНО ВЛАДЕЛЬЦЕМ (18.10.2026)** |
 | 03-004 | `firewallTransactions.test.ts`, `bootRecoveryExecution.test.ts`: сохранение исходных Block, удаление только собственных правил, независимый read-back | **ПРОПУЩЕНО ВЛАДЕЛЬЦЕМ (18.10.2026):** три реальных цикла apply/stop и сравнение экспортов чужих Block/Allow |
 | 03-005 | `physicalAdapterSnapshot.test.ts`, `physicalAdapterLifecycle.test.ts`, `lifecycleCleanup.test.ts`: отсутствие фиктивных адаптеров и проверки запуска/отката | **ПРОПУЩЕНО ВЛАДЕЛЬЦЕМ (18.10.2026):** VM без NIC, отсутствие созданных правил и правдивый статус в UI |
 | 03-006 | `physicalAdapterLifecycle.test.ts`, `physicalAdapterSnapshot.test.ts`, `physicalAdapterHotspot.test.ts`: свежий snapshot, добавление/удаление/замена GUID, смена alias, компенсация | **ПРОПУЩЕНО ВЛАДЕЛЬЦЕМ (18.10.2026):** настоящий hot-plug/переименование во время apply, итоговый набор фильтров и UI |
@@ -324,7 +326,7 @@ protection unknown. Неподтверждённые adapter/baseline/TUN зап
 fixture registry; результат обоих шагов присутствует в журнале, warning=true.
 Настоящие сетевые ключи и настройки Windows этим harness не затрагиваются.
 
-**Не закрыто:** формулировка AT-03-003(c) «половина шагов без подписи» не
+**На момент fdfac87 оставалось открыто (уточнено 18.10.2026, §10.13):** формулировка AT-03-003(c) «половина шагов без подписи» не
 определяет вид подписи. Текущий формат проверяет ACL/owner/schema, отдельных
 криптографических подписей шагов нет. Обычные baseline/adapter validators
 также требуют полный документ. Владельцу задано уточнение смысла подписи;
@@ -480,9 +482,70 @@ rules, отсутствие NIC/hot-plug, DNS failure, IPv6/NAT64/mobile 464XLAT
 также входит в решение. В матрице выше этот статус указан по сценариям.
 Формулировки тестовых оракулов и записанные локальные результаты сохранены.
 
+## CI и review 251a634 (18.10.2026)
+
+Windows job 117506906954 завершён success на 251a634: 3260 passed /
+4 skipped, 235 files passed / 1 skipped, 212.40 s; AC 927/927, F 210/210.
+Electron native read smoke: 1 passed / 1 skipped. Rust job 117506906749 —
+success. Лог: `.tmp/wp3-ci-117506906954.log`. Это автоматические результаты;
+статус L3 остаётся «Пропущено владельцем» по §10.12.
+
+CodeRabbit review 5560162474 завершён 17.10.2026 в 21:24 UTC и охватывает
+изменения 0d175b5 → 251a634, включая P1/P2 исправления. Единственное
+замечание — Minor к README: прогон 13 октября ошибочно назван последним.
+Запись исправлена на историческую со ссылкой на этот отчёт и журнал.
+Существенных новых замечаний в этом review нет; формального APPROVED нет.
+Revix check 117506917043 завершён neutral, без новых inline findings для
+251a634; заголовок сохраняет 2 issue(s) found и старую Needs changes summary.
+Neutral не трактуется как APPROVED. Условие minor-only review соблюдено
+для проверенного 251a634; проверка последующих коммитов учитывается отдельно.
+
+## AT-03-003(c): решение владельца и частичные записи, 18.10.2026
+
+Владелец подтвердил: «Да, восстановить исправные записи» доверенного файла
+отката, пропуская испорченные с явной ошибкой. Это не подпись EXE и не новое
+требование сертификата; решение записано в ТЗ-06 §10.13.
+
+Recovery-режим валидаторов baseline, firewall profiles и adapter snapshots
+сохраняет проверки общего документа, доверенного хранилища и версии схемы.
+Отдельные невалидные записи не мешают валидным соседям. Конфликтующие дубли
+одного target/profile/GUID не исполняются; первая запись не получает приоритета.
+DNS registry policy и transition snapshots проверяются независимо. Apply,
+запись манифестов и passive status по-прежнему требуют полной строгой схемы.
+Startup и обычный Stop допускают частичный документ только на пути recovery.
+
+Пропуски отражаются в логах и результате/UI. Итог неполного отката — ошибка;
+исходный манифест не переписывается и не удаляется. Boot recovery выполняет
+валидацию до эффектов каждого шага, сохраняет strict и поддерживает независимость
+валидных записей того же файла. Native fixtures используют подставные сетевые
+API и registry handles; рабочие firewall, DNS и сетевые ключи не менялись.
+
+Self-review дополнительно различает отсутствующее transition-поле и явный
+`null`: missing/невалидное значение даёт warning с сохранением журнала,
+валидный соседний переходный механизм восстанавливается. В fixture команда
+netsh подставлена. Адресный прогон
+`npm.cmd test -- src/main/bootRecoveryExecution.test.ts src/main/bootRecoveryScriptSource.test.ts`
+— 35 passed, 20.10 s, exit 0. Полные промежуточные прогоны — 3281 passed /
+5 skipped (189.32 s) и 3283 passed / 5 skipped (193.23 s), exit 0.
+
+`npm.cmd run typecheck` и `npm.cmd run dist:win` — exit 0. SHA-256 исходного
+и упакованного `resources/vpnte-recover.ps1` совпадает:
+`155c175332855980933b7c7081db58784af8c9bd2e09b2dda76f2b4fa414e490`.
+`dist/VPN-Tunnel-Enforcer-Setup-1.1.24.exe`: 139728889 bytes, SHA-256
+`dc085e8fd4867f1eaadefae48a6f6a415cb844f3f0b5404bd866cab5ccc4d23e`;
+реальный Authenticode status — `NotSigned`. Установка/системный reboot
+не выполнялись. Логи сборки и хэшей находятся в `.tmp/wp3-partial-frozen-*`.
+
+Финальный полный `npm.cmd test` после последних изменений — **3285 passed /
+5 skipped / 0 failed**, 234 files passed / 2 skipped, 181.74 s, exit 0
+(`.tmp/wp3-partial-commit-full.log`). `npm.cmd run typecheck` — exit 0;
+`python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py` —
+AC 927/927, F 210/210, exit 0; `git diff --check` — exit 0. Это завершённые
+локальные проверки; CI/review нового коммита фиксируются после отправки.
+
 ## Условие перехода дальше
 
-Закрыть доступные пробелы L1/L2 и уточнение AT-03-003(c); CI и review на
+Закрыть доступные пробелы L1/L2; смысл AT-03-003(c) принят в §10.13. CI и review на
 текущем SHA должны быть без существенных замечаний. L3-сценарии со статусом
 «Пропущено владельцем» исключены из ожидаемых запусков по решению §10.12;
 отсутствие этой лаборатории больше не является условием ожидания.

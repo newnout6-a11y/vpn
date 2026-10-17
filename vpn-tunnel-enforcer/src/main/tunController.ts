@@ -3952,7 +3952,7 @@ export const tunController = {
       const baseline = await timedStop('rollback-baseline', () => rollbackTunNetworkBaselineIfApplied('TUN stopped', operationId), result => result.success)
       networkCleanup.baseline = baseline.success
       if (!baseline.success) {
-        cleanupErrors.push(`baseline auto-rollback: ${baseline.message}`)
+        cleanupErrors.push(`baseline auto-rollback: ${baseline.message}${baseline.warnings?.length ? `: ${baseline.warnings.join(' | ')}` : ''}`)
         logEvent('warn', 'tun', 'baseline auto-rollback after stop failed', { ...baseline, operationId })
       }
     } catch (err) {
@@ -3963,7 +3963,7 @@ export const tunController = {
       const killSwitch = await timedStop('disable-firewall', () => disableKillSwitchIfActive('TUN stopped', operationId), result => result.success)
       networkCleanup.firewall = killSwitch.success
       if (!killSwitch.success) {
-        cleanupErrors.push(`kill-switch disable: ${killSwitch.message}`)
+        cleanupErrors.push(`kill-switch disable: ${killSwitch.message}${killSwitch.details ? `: ${killSwitch.details}` : ''}`)
         logEvent('warn', 'tun', 'kill-switch disable after stop failed', { ...killSwitch, operationId })
       }
     } catch (err) {
@@ -3973,6 +3973,7 @@ export const tunController = {
     try {
       const adapters = await timedStop('rollback-adapters', () => rollbackPhysicalAdapterLockdownIfApplied('TUN stopped', { operationId }), result => result.rolledBack || result.skipped === true)
       networkCleanup.adapters = adapters.rolledBack || adapters.skipped === true
+      if (adapters.warnings?.length) cleanupErrors.push(`adapter lockdown rollback: ${adapters.warnings.join(' | ')}`)
     } catch (err) {
       rememberCleanupError('adapter lockdown rollback', err)
     }

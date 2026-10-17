@@ -110,7 +110,7 @@ vi.mock('./elevatedPsHelper', () => ({ isElevatedPsHelperRunning: () => state.he
     return { stdout: state.ownedRules && script.includes('Get-VpnteFirewallRuleNames') ? '1' : '0', stderr: '' }
   }
 }))
-import { enableKillSwitch, disableKillSwitch, disableKillSwitchIfActive, isKillSwitchActive, getFirewallKillSwitchStatus, killSwitchManifestExists, updateKillSwitchExceptions, recoverStaleKillSwitch, ensureKillSwitchProgramAllowed } from './firewallKillSwitch'
+import { enableKillSwitch, disableKillSwitch, disableKillSwitchIfActive, isKillSwitchActive, getFirewallKillSwitchStatus, killSwitchManifestExists, updateKillSwitchExceptions, recoverStaleKillSwitch, ensureKillSwitchProgramAllowed, validateFirewallManifest } from './firewallKillSwitch'
 import { RecoveryManifestReadError } from './recoveryManifest'
 import { logEvent } from './appLogger'
 const originalPlatform = process.platform
@@ -145,6 +145,42 @@ beforeEach(() => {
 })
 afterEach(() => { Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true }) })
 describe('firewall transaction fault injection (AT-03-003/004/007; F-030, F-186)', () => {
+  it('warns about partial strict recovery without removing protection (AT-03-003c)', async () => {
+    await enableKillSwitch(options)
+    state.manifest.strictMode = true
+    state.manifest.savedProfiles[0].defaultOutbound = 'invalid'
+    state.scripts = []; state.wfpCalls = []
+    const { dialog } = await import('electron')
+    vi.mocked(dialog.showMessageBox).mockClear()
+    await recoverStaleKillSwitch(async () => false)
+    expect(state.scripts).toEqual([])
+    expect(state.wfpCalls).toEqual([])
+    expect(state.manifest).not.toBeNull()
+    expect(dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining('Strict-защита сохранена') }))
+  })
+  it.each(['missing', 'invalid', 'duplicate'] as const)('restores only valid saved profiles after %s entries (AT-03-003c)', async kind => {
+    await enableKillSwitch(options)
+    const original = structuredClone(state.manifest)
+    if (kind === 'missing') state.manifest.savedProfiles.splice(0, 2)
+    if (kind === 'invalid') state.manifest.savedProfiles[0].defaultOutbound = 'arbitrary'
+    if (kind === 'duplicate') state.manifest.savedProfiles[0] = { ...state.manifest.savedProfiles[1] }
+    state.scripts = []; state.wfpCalls = []; vi.mocked(logEvent).mockClear()
+    expect(await getFirewallKillSwitchStatus()).toMatchObject({ state: 'unknown' })
+    const result = await disableKillSwitchIfActive('partial recovery', 'stop_fixture')
+    expect(result.success).toBe(false)
+    expect(result.details).toContain('skipped')
+    expect(state.manifest).not.toBeNull()
+    expect(() => validateFirewallManifest(state.manifest)).toThrow()
+    expect(state.quarantines).toEqual([])
+    const script = state.scripts.find(script => script.includes("Write-Output 'RESTORED'"))!
+    const expected = kind === 'invalid' ? original.savedProfiles.slice(1) : original.savedProfiles.slice(2)
+    for (const profile of original.savedProfiles) {
+      expect(script.includes(`-Profile '${profile.name}' -DefaultOutboundAction`)).toBe(expected.some((p: any) => p.name === profile.name))
+    }
+    expect(state.wfpCalls).toContain('remove')
+    const receipts = vi.mocked(logEvent).mock.calls.filter(call => call[2] === 'firewall profile rollback step')
+    expect(receipts.map(call => (call[3] as any).step)).toEqual(expected.map((p: any) => `profile/${p.name}`))
+  })
   it('distinguishes proven absence from a failed passive read (AT-03-001/003)', async () => {
     expect(await getFirewallKillSwitchStatus()).toEqual({ state: 'inactive', cleanupRequired: false, reason: 'no-owned-protection' })
     state.helperExitCode = 1
