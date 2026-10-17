@@ -187,7 +187,6 @@ describe('merged schedule windows — AT-10-002 / F-123', () => {
   })
 
   afterEach(() => {
-    schedulerService.stop()
     for (const schedule of schedulerService.getSchedules()) schedulerService.deleteSchedule(schedule.id)
     schedulerService.stop()
     vi.useRealTimers()
@@ -231,6 +230,82 @@ describe('merged schedule windows — AT-10-002 / F-123', () => {
     })
     expect(computeNextEvent([first, disabled, later], new Date(2024, 0, 10, 10).getTime())).toMatchObject({
       type: 'start', at: new Date(2024, 0, 10, 10, 1).getTime()
+    })
+  })
+})
+
+describe('local DST boundaries — AT-10-001 / AT-10-002', () => {
+  afterEach(() => {
+    for (const schedule of schedulerService.getSchedules()) schedulerService.deleteSchedule(schedule.id)
+    schedulerService.stop()
+    vi.useRealTimers()
+    vi.unstubAllEnvs()
+  })
+
+  it.each([
+    ['America/New_York', '2024-03-10T01:00:00-05:00', '02:30', '2024-03-10T03:30:00-04:00', '2024-03-10T04:00:00-04:00'],
+    ['Australia/Lord_Howe', '2024-10-06T01:00:00+10:30', '02:15', '2024-10-06T02:45:00+11:00', '2024-10-06T04:00:00+11:00'],
+    ['America/New_York', '2024-11-03T00:00:00-04:00', '01:30', '2024-11-03T01:30:00-04:00', '2024-11-03T04:00:00-05:00']
+  ])('preserves one start and the following stop in %s (%s)', (zone, before, startTime, start, stop) => {
+    vi.stubEnv('TZ', zone)
+    const schedule = makeSchedule({ days: [0], startTime, endTime: '04:00' })
+    const startTs = Date.parse(start), stopTs = Date.parse(stop)
+    // Verify that Node really uses the requested zone, independently of the host OS.
+    expect(new Date(stopTs).getHours()).toBe(4)
+    expect(computeNextEvent([schedule], Date.parse(before))).toMatchObject({ type: 'start', at: startTs })
+    expect(isScheduleActive(schedule, startTs - 1)).toBe(false)
+    expect(isScheduleActive(schedule, startTs)).toBe(true)
+    expect(computeNextEvent([schedule], startTs)).toMatchObject({ type: 'stop', at: stopTs })
+    expect(isScheduleActive(schedule, stopTs - 1)).toBe(true)
+    expect(isScheduleActive(schedule, stopTs)).toBe(false)
+  })
+
+  it('does not reactivate a completed window in the second occurrence of a repeated hour', () => {
+    vi.stubEnv('TZ', 'America/New_York')
+    const schedule = makeSchedule({ days: [0], startTime: '01:15', endTime: '01:45' })
+    expect(isScheduleActive(schedule, Date.parse('2024-11-03T01:30:00-04:00'))).toBe(true)
+    expect(isScheduleActive(schedule, Date.parse('2024-11-03T01:30:00-05:00'))).toBe(false)
+  })
+
+  it('resolves an overnight end on its own calendar day after a DST gap', () => {
+    vi.stubEnv('TZ', 'America/New_York')
+    const schedule = makeSchedule({ days: [0], startTime: '22:00', endTime: '02:30' })
+    expect(computeNextEvent([schedule], Date.parse('2024-03-10T23:00:00-04:00'))).toMatchObject({
+      type: 'stop', at: Date.parse('2024-03-11T02:30:00-04:00')
+    })
+  })
+
+  it('merges a normalized gap start into an already active window', () => {
+    vi.stubEnv('TZ', 'America/New_York')
+    const first = makeSchedule({ days: [0], startTime: '01:00', endTime: '03:45' })
+    const second = makeSchedule({ days: [0], startTime: '02:30', endTime: '04:00' })
+    expect(computeNextEvent([first, second], Date.parse('2024-03-10T01:30:00-05:00'))).toMatchObject({
+      type: 'stop', at: Date.parse('2024-03-10T04:00:00-04:00')
+    })
+  })
+
+  it('connects once at the normalized start and disconnects at the end', () => {
+    vi.stubEnv('TZ', 'America/New_York')
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2024-03-10T01:00:00-05:00'))
+    schedulerService.createSchedule(makeSchedule({ days: [0], startTime: '02:30', endTime: '04:00' }))
+    const onConnect = vi.fn(), onDisconnect = vi.fn()
+    schedulerService.init({ onConnect, onDisconnect })
+    expect(onConnect).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(Date.parse('2024-03-10T03:30:00-04:00') - Date.now())
+    expect(onConnect).toHaveBeenCalledTimes(1)
+    expect(onDisconnect).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(30 * 60 * 1000)
+    expect(onConnect).toHaveBeenCalledTimes(1)
+    expect(onDisconnect).toHaveBeenCalledTimes(1)
+  })
+
+  it('skips a window reversed by gap normalization instead of emitting a lone stop', () => {
+    vi.stubEnv('TZ', 'America/New_York')
+    const schedule = makeSchedule({ days: [0], startTime: '02:30', endTime: '03:00' })
+    expect(isScheduleActive(schedule, Date.parse('2024-03-10T03:15:00-04:00'))).toBe(false)
+    expect(computeNextEvent([schedule], Date.parse('2024-03-10T01:00:00-05:00'))).toMatchObject({
+      type: 'start', at: Date.parse('2024-03-17T02:30:00-04:00')
     })
   })
 })

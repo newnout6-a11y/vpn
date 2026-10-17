@@ -32,12 +32,14 @@ import {
   applyTunNetworkBaseline,
   isBaselineApplied,
   rollbackTunNetworkBaseline,
-  rollbackTunNetworkBaselineIfApplied
+  rollbackTunNetworkBaselineIfApplied,
+  rollbackTunNetworkBaselineOrThrow
 } from './systemNetwork'
 import {
   disableKillSwitchIfActive,
   getFirewallRepairHealth,
   isKillSwitchActive,
+  getFirewallKillSwitchStatus,
   KILL_SWITCH_RULE_PREFIX,
   killSwitchManifestExists,
   nuclearFirewallReset,
@@ -962,24 +964,27 @@ function handleLogged<T>(
 // vars stay wiped forever. On startup, if no sing-box is left running, restore them.
 async function recoverStaleBaseline(): Promise<void> {
   if (process.platform !== 'win32') return
-  if (!(await isBaselineApplied())) return
+  let rollbackStarted = false
   try {
-    const { stdout } = await exec('tasklist /FI "IMAGENAME eq vpnte-sing-box.exe" /FO CSV /NH', {
-      windowsHide: true,
-      timeout: 5000,
-      encoding: 'utf8'
-    })
-    if (String(stdout).toLowerCase().includes('vpnte-sing-box.exe')) {
+    if (!(await isBaselineApplied(true))) return
+    if (await isOwnedTunRuntimeRunning(true)) {
       logEvent('info', 'app', 'baseline marker found and sing-box is still running — keeping baseline')
       return
     }
-  } catch {
-    // fall through to rollback
+    logEvent('warn', 'app', 'stale baseline detected on startup (sing-box not running) — rolling back')
+    rollbackStarted = true
+    await rollbackTunNetworkBaselineOrThrow('crash recovery on startup')
+  } catch (err: any) {
+    logEvent('warn', 'app', 'crash-recovery baseline restore unconfirmed', err)
+    // Recovery runs before createWindow: renderer IPC would silently drop this warning.
+    // Do not delay the remaining recovery steps while waiting for dismissal.
+    void dialog.showMessageBox({ type: 'warning', title: rollbackStarted ? 'Восстановление сети не завершено' : 'Восстановление сети не проверено',
+      message: rollbackStarted
+        ? 'Не удалось полностью восстановить сетевые настройки предыдущего сеанса. Проверьте диагностику и повторите восстановление сети.'
+        : 'Не удалось проверить состояние сетевых настроек предыдущего сеанса. Проверьте диагностику перед повторным подключением.',
+      detail: err?.message || String(err), buttons: ['ОК'] })
+      .catch(dialogErr => logEvent('warn', 'app', 'crash-recovery warning dialog failed', dialogErr))
   }
-  logEvent('warn', 'app', 'stale baseline detected on startup (sing-box not running) — rolling back')
-  await rollbackTunNetworkBaselineIfApplied('crash recovery on startup').catch(err =>
-    logEvent('warn', 'app', 'crash-recovery rollback failed', err)
-  )
 }
 
 function refreshTrayState(patch: {
@@ -1216,12 +1221,14 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
     // Wait for the baseline to finish before rolling back so the manifest
     // exists for rollbackTunNetworkBaselineIfApplied to find.
     if (baselinePromise) await owner.wait(baselinePromise)
-    await rollbackTunNetworkBaselineIfApplied('start-tun failed').catch(err =>
+    let recoveryWarning: string | undefined
+    await rollbackTunNetworkBaselineOrThrow('start-tun failed').catch(err => {
       logEvent('warn', 'app', 'rollback after start-tun failure failed', err)
-    )
+      recoveryWarning = err?.message || String(err)
+    })
     owner.assertActive()
     captureSnapshot('tun-start-failed').catch(() => undefined)
-    return result
+    return recoveryWarning ? { ...result, error: `${errorMsg}. ${recoveryWarning}` } : result
   }
 
   // The baseline is very likely already done (start() took several seconds),
@@ -1487,12 +1494,14 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
       { outboundFault: await owner.wait(readRecentSingBoxOutboundFault().catch(() => null)) }
     )
     if (baselinePromise) await owner.wait(baselinePromise)
-    await rollbackTunNetworkBaselineIfApplied('direct-vpn start failed').catch(err =>
+    let recoveryWarning: string | undefined
+    await rollbackTunNetworkBaselineOrThrow('direct-vpn start failed').catch(err => {
       logEvent('warn', 'app', 'rollback after direct-vpn start failure failed', err)
-    )
+      recoveryWarning = err?.message || String(err)
+    })
     owner.assertActive()
     captureSnapshot('tun-start-failed').catch(() => undefined)
-    return result
+    return recoveryWarning ? { ...result, error: `${errorMsg}. ${recoveryWarning}` } : result
   }
   if (baselinePromise) await owner.wait(baselinePromise)
   owner.assertActive()
@@ -1729,46 +1738,61 @@ async function quitFromTray(): Promise<void> {
 
 async function performCrashRecovery(): Promise<void> {
   if (process.platform !== 'win32') return
+  try {
+    if (await timePhase('recovery.runtime', () => isOwnedTunRuntimeRunning(true))) {
+      logEvent('info', 'app', 'owned runtime is still running — preserving startup network state')
+      return
+    }
+    await timePhase('recovery.baseline', () => recoverStaleBaseline())
 
-  await timePhase('recovery.baseline', () => recoverStaleBaseline())
+    await timePhase('recovery.killswitch', () => recoverStaleKillSwitch(() => isOwnedTunRuntimeRunning(true)))
 
-  await timePhase('recovery.killswitch', () => recoverStaleKillSwitch(isOwnedTunRuntimeRunning))
-
-  if (await timePhase('recovery.lockdown-check', () => isPhysicalAdapterLockdownApplied())) {
-    if (!(await isOwnedTunRuntimeRunning())) {
-      logEvent('warn', 'phys-lockdown', 'recovering stale adapter lockdown — sing-box not running')
-      try {
-        await rollbackPhysicalAdapterLockdownIfApplied('startup recovery — sing-box not running')
-      } catch (err) {
-        logEvent('warn', 'phys-lockdown', 'startup rollback failed', err)
+    if (await timePhase('recovery.lockdown-check', () => isPhysicalAdapterLockdownApplied(true))) {
+      if (!(await isOwnedTunRuntimeRunning(true))) {
+        logEvent('warn', 'phys-lockdown', 'recovering stale adapter lockdown — sing-box not running')
+        try {
+          const rollback = await rollbackPhysicalAdapterLockdownIfApplied('startup recovery — sing-box not running')
+          if (!rollback.rolledBack && !rollback.skipped) throw new Error(rollback.warnings?.join(' | ') || 'Adapter rollback incomplete; snapshot retained')
+        } catch (err) {
+          logEvent('warn', 'phys-lockdown', 'startup rollback failed', err)
+          void dialog.showMessageBox({ type: 'warning', title: 'Восстановление адаптеров не завершено',
+            message: 'Часть настроек адаптеров не восстановлена. Проверьте диагностику и повторите восстановление сети.',
+            detail: String(err), buttons: ['ОК'] }).catch(dialogErr => logEvent('warn', 'app', 'adapter recovery warning dialog failed', dialogErr))
+        }
       }
     }
-  }
 
-  await timePhase('recovery.orphan-dns', () => repairOrphanedPhysicalAdapterDns('startup orphaned DNS repair'))
-    .catch(err => logEvent('warn', 'phys-lockdown', 'startup orphaned DNS repair failed', err))
+    await timePhase('recovery.orphan-dns', () => repairOrphanedPhysicalAdapterDns('startup orphaned DNS repair'))
+      .catch(err => logEvent('warn', 'phys-lockdown', 'startup orphaned DNS repair failed', err))
 
-  try {
-    const status = await timePhase('recovery.autoconfig', () => autoconfig.getStatus())
-    const envApplied = status.find(t => t.id === 'env')?.applied
-    if (envApplied) {
-      if (settingsStore.get().routingMode === 'soft' && settingsStore.get().connectionMode !== 'directVpn') {
-        logEvent('info', 'app', 'preserving env autoconfig during Soft-mode crash recovery')
-      } else {
-        logEvent('info', 'app', 'rolling back env autoconfig (setx HTTP_PROXY) on crash recovery')
-        await autoconfig.rollback(['env'])
+    try {
+      const status = await timePhase('recovery.autoconfig', () => autoconfig.getStatus())
+      const envApplied = status.find(t => t.id === 'env')?.applied
+      if (envApplied) {
+        if (settingsStore.get().routingMode === 'soft' && settingsStore.get().connectionMode !== 'directVpn') {
+          logEvent('info', 'app', 'preserving env autoconfig during Soft-mode crash recovery')
+        } else {
+          logEvent('info', 'app', 'rolling back env autoconfig (setx HTTP_PROXY) on crash recovery')
+          await autoconfig.rollback(['env'])
+        }
       }
+    } catch (err) {
+      logEvent('warn', 'app', 'env autoconfig rollback during crash recovery failed', err)
     }
-  } catch (err) {
-    logEvent('warn', 'app', 'env autoconfig rollback during crash recovery failed', err)
-  }
 
-  try {
-    const { tunController } = await import('./tunController')
-    if (tunController && !tunController.getStatus().running) {
-      logEvent('info', 'app', 'checking for stale TUN adapter during crash recovery')
-    }
-  } catch { /* non-critical */ }
+    try {
+      const { tunController } = await import('./tunController')
+      if (tunController && !tunController.getStatus().running) {
+        logEvent('info', 'app', 'checking for stale TUN adapter during crash recovery')
+      }
+    } catch { /* non-critical */ }
+  } catch (err: any) {
+    logEvent('warn', 'app', 'startup network recovery unconfirmed', err)
+    void dialog.showMessageBox({ type: 'warning', title: 'Восстановление сети не подтверждено',
+      message: 'Не удалось подтвердить завершение сетевого восстановления. Проверьте диагностику перед повторным подключением.',
+      detail: err?.message || String(err), buttons: ['ОК'] })
+      .catch(dialogErr => logEvent('warn', 'app', 'crash-recovery warning dialog failed', dialogErr))
+  }
 }
 
 // Disable the default application menu before app.ready — we use a
@@ -2283,7 +2307,7 @@ app.whenReady().then(async () => {
   })
 
   handleLogged('get-firewall-kill-switch-status', async () => {
-    return { active: await isKillSwitchActive() }
+    return getFirewallKillSwitchStatus()
   })
 
   // Detect another active VPN/TUN adapter (Happ, WireGuard, OpenVPN, …) that

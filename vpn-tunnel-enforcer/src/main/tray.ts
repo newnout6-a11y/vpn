@@ -82,7 +82,7 @@ function statusLabel(status: TrayStatus): string {
   if (status === 'leak') return 'УТЕЧКА IP'
   if (status === 'starting') return 'Запуск защиты'
   if (status === 'proxy-down') return 'VPN-сервер недоступен'
-  if (status === 'killswitch') return 'Файрвол блокирует'
+  if (status === 'killswitch') return 'Kill-switch: требуется проверка'
   if (status === 'restarting') return `Перезапуск ${trayState.restartingProgress ?? ''}`.trim()
   return 'Выключено'
 }

@@ -1010,3 +1010,839 @@
 - Критерии приёмки пакетов WP-4, WP-6, WP-7, WP-9, WP-10 закрыты не целиком: исправлены отдельные находки.
 - Открыты: вопрос подписи кода (раздел 10.8 ТЗ-06), PR #40 (сайт) и #41 (версия) ждут проверок.
 - Известная нестабильность: `adaptiveNetworkIdentity.test.ts` изредка падает при полном локальном прогоне (холодный PowerShell дольше таймаута 10 с под нагрузкой); отдельно и в CI проходит.
+
+## 2026-10-17 — Goal: WP-3 → WP-0 → WP-2; сверка WP-3 и строгие CIDR
+
+Поручение владельца: последовательно закончить WP-3, WP-0, WP-2; вести этот
+журнал, делать атомарные коммиты и PR, разбирать CI/review до отсутствия
+существенных замечаний. Текущий пакет — WP-3; переход дальше пока не выполнен.
+
+- Создана ветка `codex/wp3-acceptance` от актуального `vpn/main` (`c76d45a`).
+  Предыдущий PR #45 проверен отдельно: Windows и Rust CI success; Revix neutral;
+  замечания ревью — minor. Это не приёмка WP-3.
+- Прочитаны AGENTS.md, все 12 AT-03, методология, нормативные разделы тома 2
+  и принятые решения ТЗ-06. Матрица доказательств/пробелов каждого AT находится
+  в `vpn-tunnel-enforcer/docs/wp3-acceptance-2026-10-17.md`.
+- **AT-03-009:** найдено принятие масок `/0x10`, `/1e1`, `/+24`, `/24.0`
+  и пробелов из-за `Number(prefix)`. В granular API они молча нормализовались;
+  live firewall API допускал их до native effects. Теперь маска проверяется
+  как десятичные цифры до преобразования. Валидные адреса/маски и действующие
+  ограничения wildcard не изменены.
+- Регрессии покрывают валидатор, granular validation и запрет journalling/native
+  effects. Добавлены generated IPv4/IPv6 и numeric-coercion properties
+  (seed 30009/30010/30011). До исправления: 17 failed / 106 passed / 1 skipped;
+  после: 123 passed / 1 skipped, 3 files passed, exit 0.
+
+Фактически выполненные проверки из `vpn-tunnel-enforcer/`:
+
+```text
+npm.cmd test -- src/main/firewallKillSwitchValidation.test.ts src/main/killSwitchExceptionValidation.test.ts src/main/firewallTransactions.test.ts
+123 passed, 1 skipped; exit 0
+npm.cmd run typecheck
+exit 0
+npm.cmd test
+3113 passed, 5 skipped, 0 failed; 232 files passed, 2 skipped; 166.42 s; exit 0
+```
+
+Из корня: `python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py`
+— AC 927/927, F 210/210, exit 0; `git diff --check` — exit 0.
+
+Остаток и обнаруженные ограничения:
+
+- AT-03-007: baseline пишет результаты шагов без общего operation/correlation id;
+  это отдельный пробел наблюдаемости, требующий проверки/исправления.
+- L3 не выполнен. Текущий агент без административного токена; Hyper-V VM
+  зарегистрирована, но её VHDX отсутствует. Нет полной OS-матрицы, внешнего
+  packet oracle и физического операторского 464XLAT-тетеринга. Рабочее
+  установленное приложение запущено; сеть/DNS/firewall хоста не изменялись.
+- Запуск `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File
+  vpn-tunnel-enforcer/scripts/test-wfp-ipv6-native.ps1` — exit 1, `ok=false`,
+  `aborted=false`, cleanup `WFP error 0x8032000D` скрывает исходный отказ.
+  Следующий шаг — исправить smoke harness, добавить привилегированную ABI-проверку
+  в CI и разобрать её результат. Это не заменяет packet/reboot/OS acceptance.
+- WP-3 остаётся частичным; локальный PASS и трассировка не дают основания
+  объявить его принятым или перейти к WP-0. Нормативные `docs/` не менялись.
+
+### WP-3: PR #46 и нативная проверка BFE
+
+- Коммит `094662f` опубликован в PR #46:
+  https://github.com/newnout6-a11y/vpn/pull/46 (base main, отдельная ветка WP-3).
+- Исправлен smoke harness `scripts/test-wfp-ipv6-native.ps1`: отмечается только
+  успешно начатая транзакция, нет Abort после отказа Begin/повторного Abort,
+  Commit никогда не передаётся в native engine. Любая ошибка, включая Dispose,
+  снимает `ok`. ABI/LUID fixture может использовать виртуальную NIC CI;
+  это не приёмка физических интерфейсов или утечек.
+- Добавлен fault-injection тест compiled C# wrapper с fake IEngine:
+  исходная ошибка Begin сохраняется; несуществующая транзакция не откатывается;
+  Commit не вызывается; начатая транзакция откатывается один раз.
+- Добавлен обязательный Windows CI шаг «IPv6 WFP — нативный ABI и откат
+  транзакции». Скрипт проверяет настоящие Windows API, не коммитит фильтры,
+  результат пишет в RUNNER_TEMP и job log. Нужен фактический PASS на head PR.
+- `npm.cmd test -- src/main/wfpIpv6.test.ts` — 28 passed, exit 0.
+- `npm.cmd run typecheck` — exit 0.
+- `npm.cmd test` — 3113 passed, 5 skipped, 0 failed;
+  232 files passed, 2 skipped; 171.67 s, exit 0.
+- Трассировка — AC 927/927, F 210/210, exit 0; `git diff --check` — exit 0.
+- Повторный локальный native smoke — exit 1 с истинной причиной:
+  `WFP error 0x00000005` (Access denied) на Begin. Транзакция не началась;
+  L3 не пройден. Поиск доступных VHD/VHDX/ISO в Downloads/Public Documents
+  не нашёл готового образа; зарегистрированный VHDX повторно проверен по
+  точному пути из Hyper-V — отсутствует.
+- Следующая доступная работа в WP-3: correlation id rollback-событий,
+  расширение L1/L2 матрицы и разбор замечаний/проверок PR #46.
+
+### WP-3: корреляция rollback, seeded race и реальные 8.3 paths
+
+- В `systemNetwork.ts` baseline rollback получает UUID и возвращает его в
+  `SystemNetworkResult.operationId`. Тот же ID есть у начала, двух native timings,
+  девяти registry outcomes, WinINet notification, завершения/ошибки. Retry имеет
+  новый ID. В журнал начала включается причина автоматического отката.
+  Это корреляция baseline; общий контекст всех подсистем Stop ещё не доказан.
+- Новые assertions сначала дали 11 failed / 40 passed / 1 skipped. После
+  исправления `npm.cmd test -- src/main/systemNetwork.test.ts src/main/lifecycleCleanup.test.ts`
+  — 171 passed / 1 skipped, exit 0.
+- `granularKillSwitch.test.ts`: 50 смешанных add/remove (seed 30008). Проверены
+  каждый native exception set, итоговые in-memory/store данные и audit-порядок.
+- Там же: настоящий Win32 GetShortPathName для созданного `.exe`, затем
+  отклонение 8.3 alias как эквивалентного длинному пути. На томах без alias
+  сценарий явно SKIP; локально он прошёл. `npm.cmd test -- src/main/granularKillSwitch.test.ts`
+  — 12 passed, exit 0. Изолированный временный каталог удалён самим тестом.
+- CI на `9f8e26f`: Windows success, Rust success, Revix success.
+  https://github.com/newnout6-a11y/vpn/actions/runs/39055637354/job/117463031596
+  Нативный BFE smoke: `ok=true`, `aborted=true`, `rules=23`, `priority=verified`.
+  Подтверждён ABI/read-back на runner; это не packet/reboot/CLAT/OS acceptance.
+- Подтверждён ещё один дефект текущего main: `isKillSwitchActive()` считает
+  манифеста достаточным для active; IPC отдаёт только boolean, Dashboard по нему
+  утверждает «Интернет заблокирован файрволом». Полнота фактических правил,
+  профилей и WFP не проверяется; неудачный refresh сохраняет прошлое значение.
+  Требуются свежий verifier и обработка unknown во всех потребителях. Этот
+  остаток WP-3 не исправлен текущим baseline-коммитом и не считается закрытым.
+- Финальные проверки перед baseline-коммитом: `npm.cmd run typecheck` — exit 0;
+  `npm.cmd test` — **3117 passed, 5 skipped, 0 failed**, 232 files passed,
+  2 skipped, 164.69 s, exit 0. Трассировка AC 927/927, F 210/210 и
+  `git diff --check` — exit 0. После push CI/review нового SHA проверяются заново.
+
+### WP-3: свежая проверка kill-switch вместо ложного active
+
+- На e622512 Windows/Rust CI success, Revix neutral с двумя nitpick: временный
+  root и context.skip. Тест 8.3 теперь использует os.tmpdir() и destructured skip.
+- IPC/preload/renderer передают verified/inactive/unknown, причину и cleanupRequired.
+  Наличие манифеста по-прежнему требует lifecycle cleanup, но не доказывает
+  блокировку. Новый read-only verifier сериализован с firewall-транзакциями.
+- Проверяются эффективные ActiveStore-профили, BFE/MpsSvc, полнота имён и scopes,
+  отсутствие неизвестных outbound Allow, точная WFP-политика и живая TUN identity
+  (доверенный GUID, Wintun, адрес, LUID). Недоверенные/prepared/pending журналы,
+  orphan/неполнота/ошибка и неизвестные helper scopes дают unknown.
+- Пассивный запрос не запускает UAC/helper: проверен startIfUnavailable:false,
+  включая отдельную защиту от исчезновения helper во время await WFP prelude.
+- Store сразу снимает старую верификацию, отбрасывает старые ответы, ошибки
+  оставляют unknown. Cleanup/reset запускают повторную проверку. Dashboard,
+  crash/proxy-down log и tray не утверждают безусловную блокировку по presence.
+- Production PowerShell snapshot прочитан на хосте без изменений сети: exit 0;
+  BFE/MpsSvc Running, все три Enabled=True/Block, 131 чужое outbound Allow.
+  Это не доказательство утечки, но оснований подтвердить полную блокировку нет.
+- Реальный snapshot вернул dotted IPv4 masks. Новая регрессия до канонизации:
+  1 failed / 31 passed; исправлены network equivalence, contiguous-mask check,
+  отрицательные broader masks. Журнал approved helper paths старых версий
+  неполон, поэтому произвольные proxy scopes консервативно дают unknown.
+- Native PowerShell fixture исполняет production status script и требует
+  ActiveStore/PersistentStore явно. WFP проверка привязана к fresh TUN identity.
+- Playwright CLI: настоящий Dashboard, изолированный Vite/подставной IPC.
+  Визуально просмотрены unknown dark/light, verified light и 414 px. Проверены
+  recheck, failed cleanup, inactive hides banner, reset confirmation dismiss.
+  При 280/320 px documentWidth=280/320, alertWidth=232/272: overflow не обнаружен.
+  Это UI fixture, не installed E2E. Vite/browser остановлены. Скрипты gates из
+  design-doctrine отсутствуют в установленном skill; PASS этих gates не заявлен.
+- Автопроверка инструментов отклонила cleanup собственных временных файлов
+  (blocked by policy). .tmp/wp3-ui, .playwright-cli и output/playwright оставлены
+  локально вне коммита; исходные .claude/ и .wrangler/ сохранены.
+
+Фактически выполненные команды (из vpn-tunnel-enforcer):
+
+```text
+npm.cmd test -- src/main/firewallStatus.test.ts src/main/firewallTransactions.test.ts src/main/elevatedPsHelper.test.ts src/main/wfpIpv6.test.ts src/renderer/store.firewallStatus.test.ts src/renderer/pages/Dashboard.cancel.test.tsx src/renderer/store.connectionBusy.test.ts
+201 passed, 1 skipped; 7 files passed; exit 0
+npm.cmd run typecheck
+exit 0
+npm.cmd run build
+exit 0 (включая tsc; существующие предупреждения о dynamic/static imports)
+npm.cmd test
+3168 passed, 5 skipped, 0 failed; 234 files passed, 2 skipped; 132.11 s; exit 0
+```
+
+Из корня: python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py
+— AC 927/927, F 210/210, exit 0; git diff --check — exit 0.
+Отчёт wp3-acceptance-2026-10-17.md обновлён. Нормативные docs/ не менялись.
+WP-3 остаётся частичным: packet oracle, SYSTEM reboot, OS matrix и физический
+464XLAT не приняты. Следом — проверки/ревью нового SHA PR #46 и остаток WP-3;
+переход к WP-0 не выполнен.
+
+### WP-3: review f1b22f7 и небольшие уточнения UI
+
+- f1b22f78a03ba9ffd2c25d17867c86a5d0e536e7 опубликован в PR #46.
+  Windows job 117468856033 success, Rust 117468856338 success,
+  Revix 117468871161 neutral. Windows: 3169 passed / 4 skipped;
+  нативный BFE smoke ok=true, aborted=true, priority=verified.
+  Это не L3 packet/boot acceptance.
+- Проверено issue Revix 4303919025: два изменённых log сообщения App.tsx
+  вынесены в i18n.t с en/ru keys.
+- Suggestion 4303919028 принято частично: баннер не показывается во время
+  checking, когда read-back ещё не завершён. Не скрываем unknown/unavailable
+  после отказа: недоступный helper не доказывает отсутствие orphan правил.
+  Отдельный UI regression подтверждает отсутствие cleanup alert до ответа.
+- Позднее опубликованный minor CodeRabbit по e622512 подтверждён: retry после
+  отказа шага baseline теперь проверяет очистку state.manifest после success.
+- Сверка следующего AT-03-007: общий Stop уже отдаёт частичные отказы в UI
+  как error, но общего operationId для baseline/firewall/adapters ещё нет.
+  Следующая работа остаётся внутри WP-3.
+
+Проверки текущего уточнения из vpn-tunnel-enforcer:
+- npm.cmd run typecheck — exit 0.
+- npm.cmd test — 3169 passed, 5 skipped, 0 failed; 234 files passed,
+  2 skipped; 124.12 s; exit 0.
+Из корня: python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py
+— AC 927/927, F 210/210, exit 0; git diff --check — exit 0.
+Сборка предыдущего f1b22f7 проверена; после этого изменения её не повторяли.
+CI/review нового SHA проверяются отдельно после push.
+
+### WP-3: общий operationId остановки и независимых rollback (AT-03-007)
+
+- На c697842 проверены live CI: Windows 117470594831, Rust 117470595030,
+  Revix 117470608305 — success. Windows: 3170 passed / 4 skipped,
+  235 files passed / 1 skipped, 136.08 s; BFE ABI transaction aborted=true,
+  priority=verified. CodeRabbit на этом SHA всё ещё сообщает Review in progress;
+  опубликованный подробный review пока относится к e622512, а не к c697842.
+- Stop создаёт UUID после синхронного допуска операции и передаёт его baseline,
+  firewall/WFP, adapter rollback и DNS safety repair. Одновременные Stop
+  возвращают ID общей операции; самостоятельный retry получает новый UUID.
+- Старт/результат каждого controller шага, общий итог и forensic-события имеют
+  operationId. Promise fulfillment с success:false/rolledBack:false/repaired:false
+  не записывается как успешный шаг. Результаты внутренних baseline registry,
+  Firewall/WFP и adapter/DNS rollback сохраняют тот же ID.
+- Порядок teardown и защита до свежего runtime exit proof сохранены. Эта работа
+  не вводит общий FSM WP-0 и не объявляет корреляцию всех фоновых transport timings,
+  startup/crash/shutdown-backstop путей. Другие вызовы baseline сохраняют свой UUID.
+- Добавлены fault-injection regression: runtime/Xray/baseline/firewall/adapters/DNS,
+  concurrent Stop и retry, Firewall/WFP partial failure, продолжение следующего
+  адаптера/DNS policy. Настоящий Dashboard на IPC fixture показывает полный
+  перечень неудачных шагов и рекомендацию повторить остановку без success toast.
+- До реализации: 8 новых controller tests FAIL из-за отсутствия operationId;
+  первый дополнительный baseline test также упал из-за пропущенного import
+  в самом тесте (исправлен). Адресные проверки после реализации: 314 passed,
+  2 skipped, exit 0; дополнительный renderer/adapter/source прогон: 74 passed.
+- Первый полный прогон: 3185 passed / 1 failed / 5 skipped, 127.99 s. Единственный
+  отказ — source assertion старого текста DNS warning; прежний текст сохранён,
+  поведенческий тест проверяет warn и оба DNS результата. Полный прогон повторён.
+- При чтении обнаружен следующий WP-3 пробел, пока без исправления: resolved
+  success:false baseline rollback игнорируется в autoPilot.ts и failure/startup
+  путях index.ts (они ловят только rejection). Нужно проверить вывод recovery
+  warnings в UI; CodeRabbit отмечал это как существующий caller-contract gap.
+- Матрица AT обновлена в ненормативном отчёте. WP-3 остаётся частичным;
+  L3 packet/SYSTEM reboot/OS matrix/физический 464XLAT не приняты.
+
+Финальные проверки перед correlation-коммитом:
+- Из vpn-tunnel-enforcer: npm.cmd run typecheck — exit 0.
+- npm.cmd test — 3187 passed / 5 skipped / 0 failed; 234 files passed,
+  2 skipped; 122.16 s; exit 0.
+- Из корня: python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py
+  — AC 927/927, F 210/210, exit 0; git diff --check — exit 0.
+- npm.cmd run build — exit 0 на финальном коде; Vite warnings о смешанных imports/размере чанка сохранены.
+
+### WP-3: ошибки baseline recovery в вызывающем коде (AT-03-003/007)
+
+- Windows job 117473468125 на 966bf95 — success: 3188 passed / 4 skipped,
+  235 files passed / 1 skipped, 199.73 s. Native BFE smoke: aborted=true,
+  priority=verified. Rust 117473468357 success; Revix 117473468622 neutral.
+- Проверен вопрос Revix 4303983423 про cleanupRequired при unavailable:
+  отсутствие helper на Windows не доказывает отсутствие persistent/orphan
+  защиты, поэтому inactive по одному этому факту запрещён. Non-Windows —
+  неподдерживаемая для продукта среда; консервативный placeholder не доказывает
+  работоспособность там. Это question без нового production defect, не approve.
+  CodeRabbit для нового SHA подробный review пока не опубликовал.
+- Подтверждён caller-contract gap: baseline возвращает success:false с
+  сохранённым снимком; прежние catch в start-tun/direct-vpn/AutoPilot/startup
+  и crash callbacks его не замечали. Начальный новый прогон: 7 failed,
+  194 passed, 1 skipped; четыре failure — отсутствующий новый API, три —
+  реально потерянный recovery error в итоговом результате запуска.
+- Добавлен явный rollbackTunNetworkBaselineOrThrow для exception-based callers.
+  Существующий result API Stop/shutdown не изменён; trusted absence остаётся
+  no-op. Отказ включает сообщение, failed-step details и рекомендацию повторить
+  восстановление. Сам снимок не удаляется при неполном recovery.
+- Ручной start сохраняет исходную ошибку и добавляет recovery error в IPC;
+  AutoPilot добавляет failed recovery step и подробности в message.
+  Обычный/emergency onExit теперь пишет отказ и при resolved success:false.
+- Startup recovery выполняется ДО createWindow: IPC toast в этот момент
+  потерялся бы. Отказ показан нативным warning dialog с подробностями.
+  Тесты используют подставной dialog и не открывают окно на рабочем хосте.
+- Адресный прогон: npm.cmd test -- src/main/systemNetwork.test.ts
+  src/main/autoPilot.test.ts src/main/lifecycleCleanup.test.ts — 206 passed,
+  1 skipped, 3 files passed, exit 0. npm.cmd run typecheck — exit 0.
+  npm.cmd run build — exit 0; обычные Vite warnings сохранены.
+- Полный набор запущен отдельно. Трассировка AC 927/927, F 210/210 и
+  git diff --check — exit 0. Нормативные docs/ не менялись.
+- Первый полный прогон текущего исправления: 3198 passed / 1 failed / 5 skipped,
+  132.96 s. Единственный failure — adaptiveNetworkIdentity.test.ts,
+  MSFT_NetRoute native fixture: Test timed out in 5000ms (не assertion результата).
+  Отдельно npm.cmd test -- src/main/adaptiveNetworkIdentity.test.ts:
+  25 passed, 2.46 s, exit 0. Причина задержки не установлена; полный набор повторён.
+- Дополнительная сверка startup recovery выявила две связанные ветки:
+  isBaselineApplied() мог бросить до обработчика предупреждения; ошибка tasklist
+  раньше означала fall-through к rollback без exit proof. Новые regression:
+  2 failed / 4 passed при изолированном прогоне startup cases.
+- recoverStaleBaseline теперь проверяет доверенный baseline и вызывает
+  isOwnedTunRuntimeRunning(true) в общей error boundary. Unknown runtime или
+  untrusted baseline дают предупреждение без rollback; живой owned runtime
+  сохраняет baseline. Подтверждённое отсутствие допускает восстановление.
+  Адресный повтор трёх файлов: 209 passed / 1 skipped, 11.07 s, exit 0.
+- Повтор полного набора на предыдущем срезе (до усиления startup boundary): 3199 passed / 5 skipped, 234 files passed / 2 skipped, 125.74 s, exit 0. Для финального startup-кода DoD запускается заново.
+- Финальный startup-код: npm.cmd run typecheck — exit 0; npm.cmd run build —
+  exit 0; npm.cmd test — 3202 passed / 5 skipped, 234 files passed / 2 skipped,
+  123.10 s, exit 0. python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py
+  — AC 927/927, F 210/210, exit 0; git diff --check — exit 0.
+- CodeRabbit завершил review 966bf95: один Minor (4304029954) про четыре
+  CIM filter query на каждое firewall rule. Проверка и отдельный repair следуют
+  после текущего коммита. Следом также проверить negative runtime proof:
+  существующий observer исключает процессы с нечитаемым ExecutablePath.
+  L3 по-прежнему NOT-CHECKED; WP-0/WP-2 не начаты.
+
+### WP-3: достоверное отсутствие runtime перед снятием защиты
+
+- 093f48f опубликован в PR #46; Windows job 117476794211 ещё выполняется,
+  Rust 117476794279 success, Revix 117476805053 neutral. CodeRabbit pending.
+- Подтверждён связанный с startup/Stop proof дефект: native observer исключал
+  процесс с недоступным ExecutablePath, возвращая false. stop-runtime также
+  захватывал соседний каталог по префиксу (runtime-extra). Новые native tests
+  до исправления: 3 failed / 17 passed / 87 skipped, exit 1.
+- Worker и standalone fallback теперь используют один readonly status script.
+  Нечитаемый путь кандидата даёт явную ошибку, а не exit proof. В обоих
+  запросах ownership ограничен каталогом с завершающим слэшем; чужой соседний
+  каталог не останавливается. Порядок sing-box exit перед Xray сохранён.
+- npm.cmd test -- src/main/recoveryPsProtocol.test.ts
+  src/main/tunControllerRecoverySource.test.ts src/main/lifecycleCleanup.test.ts
+  — 265 passed, 3 files passed, 46.16 s, exit 0. Дополнительный standalone
+  fallback regression: 4 passed / 138 skipped, exit 0. Это fake CIM/Stop-Process,
+  реальные процессы и сеть не менялись.
+- npm.cmd run typecheck и npm.cmd run build — exit 0. Полный набор запущен;
+  traceability AC 927/927, F 210/210 и git diff --check — exit 0.
+- Для замечания CodeRabbit 4304029954 отдельно проверено readonly на хосте:
+  ActiveStore содержит 632 rules и 632 application filters; association
+  InstanceID совпадает с rule.Name, bulk lookup даёт ровно 1 запись.
+  Это проверка формы данных, не системная приёмка фильтрации.
+- Первый полный прогон observer-изменения: 3198 passed / 8 failed / 5 skipped,
+  126.30 s, exit 1. Все 8 — два прежних AST harness без новой зависимости
+  OWNED_RUNTIME_STATUS_QUERY_SCRIPT. Harness обновлены; отдельный прогон
+  ownedRuntimeStatus.test.ts и tunRuntimeExitProof.test.ts — 29 passed,
+  2 files passed, exit 0. Дублирующие новые fallback cases удалены из lifecycle
+  tests, проверка остаётся в существующих профильных suites.
+- Повторное readonly чтение всех типов native filters: AddressFilter -All
+  отказал с Access denied из текущего non-admin процесса. Привилегированный
+  snapshot этим не проверен; batch implementation должна сохранять отказ.
+- Windows CI 093f48f (117476794211) завершился success: typecheck, unit,
+  traceability, BFE smoke и native Electron reads. CodeRabbit пока review in
+  progress именно для 966bf95…093f48f (comment 6237997423).
+- Финальный полный повтор observer-изменения: npm.cmd test — 3202 passed /
+  5 skipped, 234 files passed / 2 skipped, 123.97 s, exit 0.
+  npm.cmd run typecheck — exit 0; build — exit 0; traceability и diff check
+  — exit 0. Нормативные docs/ не менялись.
+- Лог Windows 093f48f: 3203 passed / 4 skipped, 235 files passed / 1 skipped;
+  BFE ok=true, aborted=true, priority=verified. Это ABI/read-back с Abort,
+  не packet oracle или reboot. Отдельный Electron native smoke: 1 passed /
+  1 skipped. CI/review следующего SHA проверяются после push.
+
+### WP-3: пакетный read-back firewall status (CodeRabbit 4304029954)
+
+- Замечание Minor подтверждено: четыре association CIM-запроса на каждое
+  собственное правило давали линейный рост native round trips при фиксированном
+  status timeout 15 s. Превышение таймаута на рабочем хосте не воспроизводилось.
+- FIREWALL_STATUS_PS теперь один раз читает каждый из Application/Address/Port/
+  Interface filters с -All -PolicyStore ActiveStore. На каждом вызове строятся
+  новые индексы InstanceID; join идёт по rule.Name, не DisplayName. Дубликаты
+  не затираются: для каждого собственного правила по-прежнему нужен ровно один
+  filter каждого типа. Пустые ID/неполный read-back/ошибки чтения дают отказ.
+  Никаких повторов через иной privilege path или старый cache не добавлено.
+- Native fixture сначала дал 11 failed / 31 skipped (старый reader пытался
+  вызывать per-rule cmdlet). После реализации: 129 passed / 1 skipped в двух
+  suites. Расширенный окончательный адресный прогон: npm.cmd test --
+  src/main/firewallStatus.test.ts src/main/firewallTransactions.test.ts —
+  135 passed / 1 skipped, 2 files passed, 6.22 s, exit 0.
+- Матрица из 17 native fixtures: малый/110-rule/пустой набор, одинаковые
+  DisplayName с разными scopes/Name, обратный порядок фильтров, пропущенные и
+  повторные фильтры всех четырёх типов, пустые rule/filter ID, отказ каждого
+  cmdlet. Успех требует ровно четырёх filter queries и неизменного snapshot.
+- Метаданные всех четырёх настоящих cmdlet на хосте подтвердили поддержку All
+  и PolicyStore. Производственный привилегированный snapshot локально не
+  запускался; tests исполняют production script на fake native boundaries.
+- npm.cmd run typecheck — exit 0; npm.cmd run build — exit 0. Полный набор
+  выполняется; traceability AC 927/927, F 210/210 и git diff --check — exit 0.
+- Полный набор на финальном batch reader: npm.cmd test — 3218 passed /
+  5 skipped, 234 files passed / 2 skipped, 129.39 s, exit 0.
+- Revix review 9cf85bb (5559549646) — COMMENTED/neutral; единственное новое
+  предложение 4304071624: защита от будущего drift имени sing-box между
+  controller constant и query. Сейчас оба vpnte-sing-box.exe, расхождения нет;
+  добавить проверку согласованности в существующую runtime suite следующим
+  тестовым изменением. Windows CI и CodeRabbit для этого SHA ещё не закончены.
+
+### WP-3: генераторы типов, путей, длин и дубликатов (AT-03-009)
+
+- 36611ed опубликован в PR #46. Windows CI предыдущего 9cf85bb
+  (117478370005) завершился success, Rust success, Revix neutral; CodeRabbit
+  ещё не опубликовал новый подробный review. Проверки нового SHA независимы.
+- IPC production handler kill-switch:add-exception проверен fast-check:
+  non-string type/value/label, неизвестные строковые типы, label >200/value
+  >2048 и пустые строки. Каждый отказ называет поле; exceptions/store остаются
+  пустыми, native effects отсутствуют. Seed 30012, 200 runs + явные границы.
+- Seed 30013: 50 normalized-CIDR duplicate attempts с ведущими нулями маски
+  и пробелами/переводами строк не добавляют второй entry, commit или native
+  update; исходный store остаётся неизменным.
+- Seeds 30014/30015: по 50 canonical/negative path cases. Реальные readable
+  files с ./ дают один realpath; labels длины 1 и 200 нормализуются (явные
+  examples). Control chars, relative/UNC/ADS/.. и неверные расширения отвергаются;
+  readable directory.exe не принимается за файл. Файлы только в .tmp,
+  созданная тестом директория удаляется его finally/afterEach.
+- Revix 4304071624 закрыт проверкой согласованности имени: существующий AST
+  harness извлекает controller RUNTIME_EXE_NAME и требует его в status/stop
+  scripts. Production поведение этим тестовым коммитом не меняется.
+- npm.cmd test -- src/main/granularKillSwitch.test.ts
+  src/main/killSwitchExceptionValidation.test.ts src/main/ownedRuntimeStatus.test.ts
+  — 52 passed, 3 files passed, 1.04 s, exit 0 (до добавления явных examples).
+  Typecheck после examples — exit 0. Полный набор запущен; traceability
+  AC 927/927, F 210/210 и git diff --check — exit 0.
+
+### WP-3: проверка замечаний Revix на 36611ed
+
+- Windows CI 36611ed (117479394378) success: 3219 passed / 4 skipped,
+  235 files passed / 1 skipped. BFE smoke ok=true, aborted=true,
+  priority=verified; Electron read smoke 1 passed / 1 skipped. Rust success,
+  Revix neutral. CodeRabbit status на этом SHA — pending, Review in progress.
+- Issue 4304097366 про «unchecked scope broadened to Any» проверен по
+  enableKillSwitchUnlocked и matchesFirewallPolicy. Для sing-box/app правила
+  создаются с Program и прочими scopes Any; для TUN — InterfaceAlias;
+  LAN/TUN/loopback — соответствующая address scope; DHCP/NTP — UDP+ports.
+  Поэтому приведённый remote Any у sing-box совпадает с создаваемой политикой,
+  а не расширяет её. Другие неограниченные поля уже Any. Контрпример утечки
+  не подтверждён; production policy по этому замечанию не менялась.
+- Связанное замечание 4304097372 к комбинированному regression обосновано:
+  теперь каждый из 11 ограничивающих scope fields проверяется независимо,
+  включая protocol и ports отдельно у DHCP/NTP. Тесты PASS на production
+  matcher; enabled/direction/action/profile и duplicate scopes проверяются
+  существующими отдельными cases. Это не packet/системная приёмка.
+- 4304097382 про отсутствующую .tmp: тесты теперь создают проектную .tmp
+  перед mkdtemp, сохраняя требование AGENTS.md о проектной временной папке.
+  Для новых generated path fixtures добавлена та же подготовка. Корень .tmp
+  и чужие файлы не удаляются; finally удаляет только свой mkdtemp child.
+- Финальные 4 адресные suites: npm.cmd test -- src/main/firewallStatus.test.ts
+  src/main/killSwitchExceptionValidation.test.ts src/main/granularKillSwitch.test.ts
+  src/main/ownedRuntimeStatus.test.ts — 102 passed, 4 files passed, 6.15 s,
+  exit 0. npm.cmd run typecheck — exit 0.
+- Полный прогон до последних scope/tmp regression: 3222 passed / 5 skipped,
+  234 files passed / 2 skipped, 126.26 s, exit 0. Финальный полный повтор
+  запущен после всех тестовых изменений. Production source не менялся с
+  проверенного build 36611ed; повторная сборка для test-only diff не нужна.
+- Финальный полный прогон: npm.cmd test — 3224 passed / 5 skipped,
+  234 files passed / 2 skipped, 127.01 s, exit 0. Typecheck — exit 0;
+  python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py —
+  AC 927/927, F 210/210, exit 0; git diff --check — exit 0.
+
+- После push этого тестового коммита оставить SHA стабильным до CI/review,
+  проверить новые замечания отдельно от переякоренных старых. Следующая
+  доступная работа WP-3 — оставшаяся partial-manifest матрица AT-03-003;
+  L3 packet/SYSTEM reboot/OS matrix/physical 464XLAT остаются NOT-CHECKED.
+  WP-3 не завершён, WP-0/WP-2 не начаты.
+
+### WP-3: CI fdfac87 и матрица частичных recovery inputs
+
+- Windows CI 117481176778 — success на merge fdfac87 в c76d45a:
+  3225 passed / 4 skipped, 235 files passed / 1 skipped; traceability
+  AC 927/927, F 210/210. BFE smoke ok=true, aborted=true,
+  priority=verified; Electron native reads 1 passed / 1 skipped.
+  Rust 117481176884 success; Revix 117481188119 neutral/COMMENTED.
+  CodeRabbit для fdfac87 ещё pending; head не менялся во время его проверки.
+- Boot recovery: четыре production-script fixtures с частичными firewall,
+  adapter, baseline и TUN inputs подтверждают продолжение других валидных
+  recovery, явный warnings/exit 1 и сохранение неподтверждённых записей.
+  Неполный firewall snapshot карантинируется; Allow fallback помечен unknown.
+- Restore-RegValue: шесть native fixtures проверяют missing snapshot,
+  неверный registry type и DWORD overflow на обеих позициях DNS policy.
+  Только валидный step меняет fake registry; read-back и отдельные сообщения
+  по обоим steps обязательны. Физическая сеть/системные registry keys не менялись.
+- Первый адресный прогон: 77 passed / 6 failed из-за потерянных обратных
+  слешей в новом TypeScript template harness. Исправлен сам harness на
+  String.raw; повтор npm.cmd test -- src/main/bootRecoveryBehavior.test.ts
+  src/main/bootRecoveryExecution.test.ts src/main/firewallStatus.test.ts —
+  83 passed, 3 files passed, 10.05 s, exit 0.
+- Revix 4304125808: fixture.ps1 запускается с process-only ExecutionPolicy,
+  как boot harness. 4304125811: вместо postfix non-null assertion — assert
+  с именем отсутствующего rule. Нит 4304125817 о .itest suffix пока не принят:
+  перенос убрал бы L2-матрицу из default npm test/Windows CI; другие native
+  fixtures здесь также собираются обычным режимом. Статуса APPROVED нет.
+- Расхождение/неоднозначность AT-03-003(c) записаны в отчёте: «шаги без
+  подписи» не определены; есть ACL/owner/schema trust, криптографических
+  подписей шагов нет. Обычный baseline/adapter validator требует полный
+  документ. Владельцу задано уточнение, норматив docs не менялся; полный
+  PASS этой матрицы не заявляется. WP-3 остаётся частичным.
+- До startup-dialog fix полный npm.cmd test — 3234 passed / 5 skipped,
+  234 files passed / 2 skipped, 129.86 s, exit 0; typecheck — exit 0.
+  После разделения wrong-type и overflow inputs (у wrong-type валидное data=0)
+  и следующего startup fix: четыре адресных suites — 223 passed,
+  4 files passed, 16.44 s, exit 0. Финальный полный прогон — 3236 passed /
+  5 skipped, 234 files passed / 2 skipped, 128.34 s, exit 0.
+  python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py —
+  AC 927/927, F 210/210, exit 0; git diff --check — exit 0.
+
+### WP-3: предупреждение не задерживает startup recovery (CodeRabbit 4304147637)
+
+- CodeRabbit review fdfac87 (5559652610) опубликован: одно новое Minor.
+  Status CodeRabbit Review completed/success. Замечание подтверждено:
+  await native warning удерживал recoverStaleBaseline, остальные recovery
+  и createWindow до нажатия ОК; rejected dialog прерывал recovery.
+- Четыре новые/уточнённые проверки до ремонта дали 4 failed / 4 passed /
+  132 skipped (startup subset): pending/rejected dialog и неверный заголовок
+  при ошибке runtime/storage preflight. Это воспроизведение дефекта, а не
+  системная Windows/L3-приёмка.
+- recoverStaleBaseline больше не ждёт закрытия диалога. Rejection показа
+  логируется отдельно и не прерывает цепочку восстановления. Сообщение
+  различает неудачный rollback и отказ предварительной проверки, при котором
+  rollback ещё не запускался; runtime exit barrier сохранён.
+- npm.cmd test -- src/main/lifecycleCleanup.test.ts
+  src/main/bootRecoveryBehavior.test.ts src/main/bootRecoveryExecution.test.ts
+  src/main/firewallStatus.test.ts — 223 passed, 4 files passed, 16.44 s,
+  exit 0. npm.cmd run typecheck и npm.cmd run build — exit 0.
+- Финальный npm.cmd test — 3236 passed / 5 skipped, 234 files passed /
+  2 skipped, 128.34 s, exit 0. Traceability AC 927/927, F 210/210;
+  git diff --check — exit 0. Новые SHA отправляются вместе после завершения
+  проверки fdfac87; текущие CI/review должны быть проверены отдельно.
+
+### WP-3: review 0d175b5 — fixtures, два P1 и корреляция логов P2
+
+- f6a651c и 0d175b5 отправлены в PR #46. Windows 117484451024 success:
+  3237 passed / 4 skipped, 235 files passed / 1 skipped; traceability
+  AC 927/927, F 210/210; BFE ok=true, aborted=true, priority=verified;
+  Electron reads 1 passed / 1 skipped. Rust 117484450921 success;
+  Revix 117484454145 neutral/COMMENTED. Automatic CodeRabbit был skipped
+  (manual review required), поэтому отправлен один @coderabbitai review
+  (6239656395); бот подтвердил запуск. Review 5559714772 завершён/success,
+  только 2 nitpicks: GUID fixture и final profile state.
+- Revix 4304178126 / CodeRabbit: physical fixture разделял GUID и Wintun
+  поля с TUN. Усиленные assertions воспроизвели 3 failed / 1 passed /
+  16 skipped. Физическому адаптеру даны собственные GUID/index/driver/PnP;
+  проверяется отсутствие его удаления и успешная очистка TUN record.
+  Boot execution/behavior: 33 passed, 2 files passed, 8.78 s, exit 0.
+  Полный набор после разделения GUID: 3236 passed / 5 skipped,
+  234 files passed / 2 skipped, 127.23 s, exit 0; typecheck/traceability
+  и git diff --check — exit 0. Production код в этом изменении не менялся.
+  Final profile assertions добавлены в report boundary и существующий
+  injected Domain failure case: проверяется конечный read-back.
+- P1 4304183201 подтверждён: DisabledInterfaceAliases не попадал в status.
+  Native snapshot теперь требует property и сохраняет список; явный CIM null
+  нормализуется в пустой список, missing/untyped не маскируются. Parser
+  требует string[]; matcher принимает только [] или один NotConfigured.
+  Excluded alias в любом профиле и неизвестные данные не дают verified.
+  Native/typed/status API regressions до ремонта: 13 failed / 52 passed.
+  Реальные ActiveStore профили прочитаны только read-only (native null);
+  настройки firewall не менялись.
+- P1 4304193950 подтверждён: startup использовал нестрогие runtime callbacks.
+  Production query + wrapper + startup/firewall bodies на fake CIM до
+  ремонта: 3 failed / 1 passed / 140 skipped (owned/mixed/unknown/absent).
+  Добавлен строгий startup gate; firewall callback и adapter rollback требуют
+  requireProof=true. Live/unknown сохраняет сетевые настройки; ошибка даёт
+  native warning без ожидания закрытия. Поздние отказы наблюдения перед
+  firewall/adapter отдельно проверены; оставшиеся cleanup не выполняются.
+- Финальные адресные 5 suites: npm.cmd test --
+  src/main/lifecycleCleanup.test.ts src/main/ownedRuntimeStatus.test.ts
+  src/main/firewallStatus.test.ts src/main/firewallTransactions.test.ts
+  src/main/bootRecoveryExecution.test.ts — 339 passed / 1 skipped,
+  5 files passed, 20.72 s, exit 0. npm.cmd run build — exit 0;
+  полный набор и typecheck выполняются после всех изменений.
+- L3-среда перепроверена read-only: процесс не elevated, Windows 26300;
+  Hyper-V VM Windows 10 MSIX packaging environment выключена, её VHDX
+  отсутствует. SYSTEM reboot/packet oracle/OS matrix/physical 464XLAT
+  не появились. Уточнение AT-03-003(c) о подписях остаётся без ответа.
+  Норматив docs не менялся; WP-3 частичный, WP-0/WP-2 не начаты.
+
+- P2 4304208372 подтверждён настоящим appLogger/redaction/file write:
+  UUID receipt превращался в одинаковый <redacted-uuid> для failed/retry.
+  Регрессия до исправления падала на сравнении записанных ID с receipts.
+  Внутренние baseline/Stop IDs теперь baseline_/stop_ + 32 hex-символа;
+  наследование ID сохранено. Redactor и UUID durable firewall manifest
+  не ослаблялись. Тест реального файла проверяет failed baseline rollback,
+  успешный retry, девять step results на каждый ID и маскирование UUID
+  credentials. Для Stop проверены формат/наследование/concurrent retry,
+  отдельного настоящего Stop file-log прогона здесь нет.
+- Полный прогон после двух P1 сначала дал 3257 passed / 1 failed / 5 skipped:
+  mainIpcRegression ожидал старый нестрогий callback в строке source.
+  Ожидание приведено к строгому callback; поведение отдельно проверяется
+  шестью whole-chain startup сценариями, а не этим строковым assertion.
+- После всех трёх исправлений: npm.cmd test -- src/main/systemNetwork.test.ts
+  src/main/lifecycleCleanup.test.ts src/main/mainIpcRegression.test.ts
+  src/main/firewallStatus.test.ts src/main/firewallTransactions.test.ts
+  src/main/bootRecoveryExecution.test.ts — 397 passed / 2 skipped,
+  6 files passed, 23.09 s, exit 0. npm.cmd run build — exit 0.
+- Итоговый полный npm.cmd test после всех исправлений — 3259 passed /
+  5 skipped, 234 files passed / 2 skipped, 130.84 s, exit 0.
+  npm.cmd run typecheck — exit 0; python -X utf8
+  docs/04-приёмочные-тесты/traceability/check-coverage.py — AC 927/927,
+  F 210/210, exit 0; git diff --check — exit 0. Лог полного прогона:
+  vpn-tunnel-enforcer/.tmp/wp3-review-final-full.log.
+
+### WP-3: отправка исправлений и remote gates b31807f
+
+- В PR #46 отправлены пять атомарных коммитов: a29feaa (boot fixtures),
+  fb5ceb2 (DisabledInterfaceAliases), 80e4b37 (startup runtime proof),
+  3a4ba9e (log correlation), b31807f (журнал/отчёт). Tracked tree после
+  отправки чист; ранее существовавшие untracked каталоги не включены.
+- Windows job 117488889602 завершён success на b31807f: 3260 passed /
+  4 skipped, 235 files passed / 1 skipped, 129.54 s; AC 927/927, F 210/210.
+  Native BFE smoke: ok=true, aborted=true, priority=verified. Electron
+  native read smoke: 1 passed / 1 skipped. Rust 117488889576 success.
+  Лог сохранён в vpn-tunnel-enforcer/.tmp/wp3-ci-117488889602.log.
+- Revix 117488897178 завершён neutral. Его check-run сохраняет заголовок
+  2 issue(s) found и summary Needs changes; актуальная PR Timeline для
+  b31807f отмечает два исправления и Low risk в 19:57 UTC. Новых inline
+  findings с original_commit_id=b31807f нет; формального APPROVED нет.
+- Автоматический CodeRabbit skipped не принят за review. Одна ручная
+  команда 6239986186 получила ответ 6239987347: Review rate limited /
+  Action not completed. Последнее завершённое review 5559714772 проверяло
+  0d175b5, а не b31807f. До восстановления квоты повторные команды не
+  отправляются; одно included review в час, последнее завершилось 19:39 UTC.
+- Повторная сверка среды: elevated=false, Windows build 26300; единственная
+  зарегистрированная VM выключена, известный VHDX отсутствует. Нет новых
+  доказательств packet oracle/SYSTEM reboot/OS matrix/mobile 464XLAT.
+  Владельцу задан вопрос о доступной изолированной L3-лаборатории; ранее
+  заданное уточнение AT-03-003(c) о подписях всё ещё без ответа. Норматив
+  не менялся, WP-3 не завершён, WP-0/WP-2 не начаты.
+- Эта запись меняет только журнал и acceptance report. Локальные проверки
+  исходников: 3259 passed / 5 skipped, typecheck/build exit 0 (см. выше);
+  новые CI/review после отправки этой записи проверяются отдельно.
+
+### 18.10.2026 — L3-приёмка WP-3 пропущена владельцем
+
+- Владелец ответил на запрос лаборатории: «нет. нету . да и не надо.
+  отметь как пропущено владельцем», затем уточнил: «не не проверено
+  а пропущено владельцем,это разное».
+- Для оставшихся L3-сценариев WP-3 установлен отдельный итоговый статус
+  **«Пропущено владельцем»** (`SKIPPED_BY_OWNER`). Решение охватывает
+  поддерживаемую OS-матрицу, packet oracle, SYSTEM reboot, чужие firewall
+  rules, отсутствие NIC/hot-plug, DNS failure, IPv6/NAT64/mobile 464XLAT,
+  системные ACL-манифесты и L3-часть AT-03-003. Ожидание лаборатории снято.
+- Решение внесено в ТЗ-06 §10.12, текущую матрицу acceptance report,
+  корневой README и индекс docs/README.md. Обновление статуса документов
+  прямо запрошено владельцем. Тестовые оракулы и исходники не менялись.
+- Открытое уточнение L1/L2-части AT-03-003(c) и PR review остаются
+  отдельными пунктами. Пропуск L3 не назначает статус другим пакетам.
+- npm.cmd run typecheck — exit 0. Первый npm.cmd test: 3258 passed /
+  1 failed / 5 skipped, 173.62 s; adaptiveNetworkIdentity.test.ts получил
+  Test timed out in 5000ms на существующей native fixture. Отдельный
+  npm.cmd test -- src/main/adaptiveNetworkIdentity.test.ts — 25 passed,
+  1 file passed, 3.24 s, exit 0. Код теста и runtime не менялись.
+- python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py —
+  AC 927/927, F 210/210, exit 0. Одноразовая проверка согласованности статуса:
+  12/12 строк матрицы и 5 документов, PASS. git diff --check — exit 0.
+- Повторный полный npm.cmd test — 3259 passed / 5 skipped,
+  234 files passed / 2 skipped, 155.93 s, exit 0. Логи первого и повторного
+  прогонов: vpn-tunnel-enforcer/.tmp/wp3-owner-skip-full.log и
+  vpn-tunnel-enforcer/.tmp/wp3-owner-skip-full-recheck.log.
+
+### 18.10.2026 — review 251a634 и решение о частичных записях AT-03-003(c)
+
+- Windows CI 117506906954 на 251a634 — success: 3260 passed / 4 skipped,
+  235 files passed / 1 skipped, 212.40 s; AC 927/927, F 210/210. Electron
+  native reads: 1 passed / 1 skipped. Rust 117506906749 — success.
+  Лог: vpn-tunnel-enforcer/.tmp/wp3-ci-117506906954.log.
+- CodeRabbit review 5560162474 завершён в 21:24 UTC, проверены изменения
+  0d175b5 → 251a634, включая исправления P1/P2. Осталось одно Minor:
+  прогон 13 октября назван последним в README. Исправлено на исторический
+  прогон со ссылкой на актуальные отчёты. Revix 117506917043 — neutral;
+  старый заголовок 2 issue(s) found не равен формальному APPROVED. Новых
+  inline findings для 251a634 нет. Minor-only gate этого SHA соблюдён;
+  новые изменения требуют собственной проверки.
+- Владелец пояснил, что подписи EXE нет; после отделения этого вопроса от
+  записей файла отката подтвердил: «Да, восстановить исправные записи».
+  Решение §10.13: невалидные записи доверенного файла пропускаются с явной
+  ошибкой; валидные независимые соседи восстанавливаются. Подпись EXE
+  остаётся отложенной. L3 имеет отдельный статус «Пропущено владельцем».
+- Baseline, saved firewall profiles и adapter snapshots теперь допускают
+  частичные записи только при recovery после проверки доверия и общего
+  документа. Apply/write/passive status сохраняют строгую схему. Дубли
+  target/profile/GUID отклоняются целиком, включая первую запись.
+  DNS policy и transition records обрабатываются независимо. Неполный
+  откат возвращает ошибку и сохраняет исходный файл; детали идут в Stop/UI
+  и startup warning без ожидания закрытия диалога.
+- Production boot script восстанавливает валидных соседей того же файла,
+  логирует пропущенные записи, сохраняет incomplete journals и strict.
+  Native fixture подставляет сетевые API и registry handles; реальные
+  firewall/DNS/сетевые ключи Windows не менялись.
+- Адресный npm.cmd test -- src/main/systemNetwork.test.ts — 64 passed /
+  1 skipped, 4.35 s. Промежуточные проверки нашли устаревшее ожидание состава
+  логов и недостающую зависимость netshState в тестовом harness; исправлено.
+  Семь suites systemNetwork/firewallTransactions/physicalAdapterLifecycle/
+  physicalAdapterLockdownSource/bootRecoveryExecution/bootRecoveryBehavior/
+  lifecycleCleanup — 399 passed / 2 skipped, 26.95 s, exit 0.
+- npm.cmd run typecheck и npm.cmd run build — exit 0; coverage — AC 927/927,
+  F 210/210, exit 0. После усиления boot per-record guards:
+  npm.cmd test -- src/main/bootRecoveryExecution.test.ts
+  src/main/bootRecoveryBehavior.test.ts src/main/physicalAdapterLifecycle.test.ts
+  — 88 passed, 15.96 s, exit 0. Дополнительные strict/startup/source suites:
+  firewallTransactions/bootRecoveryExecution/bootRecoveryScriptSource/
+  lifecycleCleanup — 271 passed / 1 skipped, 23.69 s, exit 0.
+- Первый полный прогон изменений — 3279 passed / 1 failed / 5 skipped,
+  176.95 s: source-test firewallKillSwitchValidation ошибочно проверял
+  условие из другой функции. Ожидание ограничено фактическим helper body.
+  npm.cmd test -- src/main/firewallKillSwitchValidation.test.ts
+  src/main/firewallTransactions.test.ts — 122 passed / 1 skipped, 8.09 s,
+  exit 0. Полный повтор и dist:win проверяются отдельно ниже.
+- Полный повтор `.tmp/wp3-partial-full-final.log` — 3281 passed / 5 skipped,
+  189.32 s, exit 0. Следующий `.tmp/wp3-partial-frozen-full.log` —
+  3283 passed / 5 skipped, 193.23 s, exit 0. Во время второго прогона
+  self-review выявил пропущенные поля transition snapshot: boot теперь
+  отличает missing от допустимого null, пропускает запись с ошибкой и
+  сохраняет журнал. Boundary netsh в native fixture подставлен, системные
+  переходные адаптеры не меняются. Адресный
+  `npm.cmd test -- src/main/bootRecoveryExecution.test.ts src/main/bootRecoveryScriptSource.test.ts`
+  — 35 passed, 20.10 s, exit 0. Итоговый полный прогон после этих правок
+  записывается отдельно ниже, код до его окончания не меняется.
+- `npm.cmd run typecheck` — exit 0. `npm.cmd run dist:win` — exit 0,
+  Electron 44.4.3, NSIS 1.1.24; production build/typecheck выполнены внутри
+  команды. Финальный ресурс находится в `dist/win-unpacked/resources/`,
+  SHA-256 совпадает с исходником vpnte-recover.ps1:
+  `155c175332855980933b7c7081db58784af8c9bd2e09b2dda76f2b4fa414e490`.
+  Setup 139728889 bytes, SHA-256
+  `dc085e8fd4867f1eaadefae48a6f6a415cb844f3f0b5404bd866cab5ccc4d23e`.
+  Get-AuthenticodeSignature: NotSigned. Установщик не устанавливался.
+  Логи: `.tmp/wp3-partial-frozen-dist.log`, `.tmp/wp3-partial-frozen-artifacts.json`.
+- Финальный неизменявшийся код: `npm.cmd test` — **3285 passed / 5 skipped /
+  0 failed**, 234 files passed / 2 skipped, 181.74 s, exit 0.
+  Лог: `.tmp/wp3-partial-commit-full.log`. `npm.cmd run typecheck` — exit 0;
+  `python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py` —
+  AC 927/927, F 210/210, exit 0; `git diff --check` — exit 0. Оставшиеся
+  L3-сценарии не запускались: **«Пропущено владельцем»**. Новые CI/review
+  после отправки коммита учитываются отдельно; WP-0/WP-2 ещё не начаты.
+
+### 18.10.2026 — обычный Stop с повреждённым JSON и review 526a82b
+
+- 526a82b отправлен в PR #46. Windows CI 117515333565 — success:
+  3286 passed / 4 skipped, 235 files passed / 1 skipped, 222.80 s;
+  AC 927/927, F 210/210. Native BFE: priority=verified, aborted=true;
+  Electron native reads: 1 passed / 1 skipped. Rust 117515333353 — success.
+  Лог: `.tmp/wp3-ci-117515333565.log`.
+- Владелец сообщил, что trial CodeRabbit закончился, и прямо потребовал
+  игнорировать сервис. Новые review CodeRabbit не запрашиваются и больше
+  не являются условием перехода. Проверки CI и существенные замечания
+  действующих review сохраняются как обязательный порог.
+- Контроль AT-03-003(b) воспроизвёл старый дефект обычного Stop: прямой
+  disable отправлял повреждённый доверенный JSON в карантин и Allow fallback,
+  но wrapper disableKillSwitchIfActive завершался на read-only probe раньше
+  этого шага. До исправления: 1 passed / 1 failed (новая пара direct/Stop),
+  exit 1. Лог `.tmp/wp3-corrupt-gate-before.log`.
+- Wrapper теперь передаёт только trusted invalid-content в существующий
+  explicit recovery, который повторно проверяет storage и карантин по hash.
+  Passive probes остаются read-only; unsupported-version, недоверенный ACL
+  и отказ карантина по-прежнему запрещают native effects. Новые guard tests
+  проходят. `npm.cmd test -- src/main/firewallTransactions.test.ts
+  src/main/firewallKillSwitchValidation.test.ts src/main/lifecycleCleanup.test.ts`
+  — 275 passed / 1 skipped, 19.56 s, exit 0.
+- Revix review 5560309494 на 526a82b: три новых комментария, Timeline Low risk;
+  check 117515345476 neutral, заголовок сохраняет 4 issues / Needs changes,
+  что не считается APPROVED. 4304702666 подтверждён: пустой valid baseline
+  теперь тоже пишет completion receipt success=false с тем же operationId.
+  4304702671: тестовый parser сообщает явную ошибку отсутствующего payload.
+  `npm.cmd test -- src/main/systemNetwork.test.ts` — 64 passed / 1 skipped,
+  5.78 s, exit 0. 4304702670 — вопрос, поведение намеренное: при live/unknown
+  runtime вся startup-очистка, включая env proxy и orphan DNS, сохраняется
+  за свежим exit proof. Это проверяет production whole-chain regression
+  lifecycleCleanup, включая отсутствие вызовов env/DNS при live/unknown.
+- Новые финальные full/dist/remote gates учитываются ниже; WP-3 пока
+  не закрыт, WP-0/WP-2 не начаты. L3 — «Пропущено владельцем».
+- Финальный стабильный код: `npm.cmd test` — **3289 passed / 5 skipped /
+  0 failed**, 234 files passed / 2 skipped, 181.64 s, exit 0.
+  Лог `.tmp/wp3-review-final-full.log`. Предыдущий промежуточный полный
+  прогон — 3289 passed / 5 skipped, 187.75 s; после него дополнены receipt
+  и fixture guard, поэтому финальный результат указан отдельно.
+- `npm.cmd run dist:win` — exit 0, включая `npm run build` и
+  `npm run typecheck`. Setup 1.1.24: 139728924 bytes, SHA-256
+  `d99a6288c36cb291223b970668492ea991ca1bf8ff8016978a3fa64c366fd019`;
+  Authenticode NotSigned. Recovery resource SHA-256 совпадает с исходником:
+  `155c175332855980933b7c7081db58784af8c9bd2e09b2dda76f2b4fa414e490`.
+  Логи `.tmp/wp3-review-final-dist.log` и `.tmp/wp3-review-final-artifacts.json`.
+  Установка и L3 не выполнялись. Coverage: AC 927/927, F 210/210, exit 0;
+  `git diff --check` — exit 0. CI/review следующего head проверяются отдельно.
+
+## 18.10.2026 — возврат к P2 PR #46: пустой снимок физических NIC
+
+- По прямому запросу владельца проверен комментарий
+  https://github.com/newnout6-a11y/vpn/pull/46#discussion_r4304712554.
+  Замечание подтверждено. Оно появилось до merge PR #46 и было пропущено
+  при итоговой сверке; прежний вывод о только minor-остатке был неполным.
+  PR #46 уже слит (`d786e30`), исправление ведётся отдельным follow-up PR.
+- WP-0 временно отложен. Его незавершённые изменения сохранены адресным
+  stash `WP-0 in progress before PR46 P2 follow-up`, без посторонних файлов.
+  Прежний полный прогон WP-0: 3290 passed / 5 skipped / 1 failed
+  (adaptiveNetworkIdentity profile-only: default Vitest timeout 5000 ms),
+  200.02 s, exit 1; это не PASS. Лог `.tmp/wp0-initial-full.log`.
+- Production Boot Recovery принимал adapters:[] без предупреждения,
+  удалял журнал и писал restored. Обычный TypeScript rollback имел тот же
+  дефект. До исправления новые регрессии: **2 failed / 1 passed / 79 skipped**,
+  exit 1; `.tmp/pr46-empty-adapters-before.log`. Положительный соседний
+  сценарий уже проходил, поэтому отказ не вызван поломанной фикстурой.
+- Пустой исходный снимок теперь явно неполный: Boot Recovery возвращает
+  warnings/exit 1 и сохраняет журнал; ordinary rollback возвращает
+  rolledBack:false с предупреждением. Валидные transition и обе DNS-policy
+  записи продолжают восстанавливаться; NIC без ownership snapshot не меняется.
+  Strict read/write validation отклоняет пустой снимок. Непустой валидный
+  снимок по-прежнему восстанавливает NIC и разрешает удаление журнала.
+- `npm.cmd test -- src/main/bootRecoveryExecution.test.ts src/main/bootRecoveryBehavior.test.ts src/main/physicalAdapterLifecycle.test.ts src/main/physicalAdapterSnapshot.test.ts`
+  — **121 passed / 0 failed**, 4 файла, 20.23 s, exit 0.
+- `npm.cmd run typecheck` — exit 0;
+  `python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py`
+  — AC 927/927, F 210/210, exit 0; `git diff --check` — exit 0.
+- Полный прогон и CI/review follow-up head учитываются ниже. WP-3 требует
+  закрытия этого подтверждённого P2 до возврата к WP-0. L3 остаётся
+  **«Пропущено владельцем»**, CodeRabbit по решению владельца не ожидается.
+- Финальный локальный `npm.cmd test` — **3292 passed / 5 skipped / 0 failed**,
+  234 файла passed / 2 skipped, 188.19 s, exit 0.
+  Лог `.tmp/pr46-empty-adapters-full.log`. Локальный timeout из предыдущего
+  прогона WP-0 здесь не повторился; production и тестовые таймауты не менялись.
+- `npm.cmd run dist:win` — exit 0 (включая build/typecheck).
+  Recovery resource в dist/win-unpacked совпадает с исходником:
+  SHA-256 `36399cd3020f1a774a4c30d155b01db75170034aaaf7770e2733e370d4bd23b7`.
+  Setup 1.1.24: 139729025 bytes,
+  SHA-256 `0383c425d75109230a50d1b269c28d02900dffff0d2d29eb0430e24f3ab84298`,
+  Authenticode NotSigned. Установка не выполнялась. Логи
+  `.tmp/pr46-empty-adapters-dist.log`, `.tmp/pr46-empty-adapters-artifacts.json`.
+
+## 18.10.2026 — замечания PR #45: единые DST-границы расписаний
+
+- По запросу владельца проверен комментарий
+  https://github.com/newnout6-a11y/vpn/pull/45#discussion_r4304221291.
+  P2 подтверждён: нормализованный start сравнивался с ненормализованным
+  настенным временем и подавлял сам себя. До исправления адресный прогон:
+  **4 failed / 34 passed**, exit 1 (New York/Lord Howe gap, повторный час,
+  overnight end после gap).
+- Активность при перезапуске и события используют одни конкретные локальные
+  интервалы; пересекающиеся/соприкасающиеся интервалы объединяются по timestamp.
+  Политика DST сохраняет Date compatible: gap сдвигается на величину перехода,
+  repeated time выбирает ранний instant один раз; collapsed/reversed окно
+  пропускается. Каждая граница разрешается на собственном календарном дне.
+  В тестах TZ задаётся и восстанавливается внутри изолированного Vitest fork;
+  часовой пояс ОС не меняется. Добавлены 8 DST-регрессий (AT-10-001/002).
+- Revix question 4303565564 проверен: after определён в site.js и добавляет
+  handle в timers; restore вызывает clearTimeout. Удалён повторный stop()
+  из cleanup scheduler tests (4303565574). Suggestions об AST/source extraction
+  (4303565570/4303565580) — замечания к устройству тестов, production-дефект
+  ими не установлен; архитектура тестовых harness в этой правке не меняется.
+  CodeRabbit по решению владельца не вызывается и не ожидается.
+- Ветка PR #45 синхронизирована с main d6b9401 (включая fixes PR #46/#47)
+  обычным merge без force. Незавершённые WP-0 изменения остаются в адресном
+  stash `WP-0 in progress before PR45 review fixes`.
+- В vpn-tunnel-enforcer:
+  `npm.cmd test -- src/main/scheduler.test.ts src/main/serverPickerMigration.test.ts`
+  — **43 passed**, exit 0; `npm.cmd run typecheck` — exit 0;
+  `npm.cmd test` — **3309 passed / 5 skipped / 0 failed**, 235 файлов passed /
+  2 skipped, 199.86 s, exit 0. Лог `.tmp/pr45-review-full.log`.
+- В website: `npm.cmd test` — **3 passed**, exit 0;
+  `npm.cmd run build` — 9 страниц, exit 0.
+- Из корня: `python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py`
+  — AC 927/927, F 210/210, exit 0; `git diff --check` и
+  `git diff --cached --check` — exit 0.
+- Это адресное исправление PR, не полная приёмка AT-10-001/002 или WP-10;
+  10 000 property cases, смена системной зоны и прочие AT-10-* не заявляются.
+  Installed E2E не запускались. CI/review нового head проверяются отдельно.

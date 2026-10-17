@@ -76,6 +76,11 @@ jobs:
       - name: Трассировка приёмочных тестов
         working-directory: .
         run: python docs/04-приёмочные-тесты/traceability/check-coverage.py
+      # Real BFE ABI/read-back inside an aborted transaction; never commits
+      # filters. This supplements mocks, not packet/reboot/OS-matrix L3.
+      - name: IPv6 WFP — нативный ABI и откат транзакции
+        shell: powershell
+        run: ./scripts/test-wfp-ipv6-native.ps1 -OutputPath "$env:RUNNER_TEMP/wp3-wfp-native.json"
       # Нативные чтения запускаются под настоящим Electron: фатальная ошибка koffi под Electron не видна из Node.
       - name: Нативные чтения под Electron
         run: npm run test:electron-probe

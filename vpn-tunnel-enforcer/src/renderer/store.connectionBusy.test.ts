@@ -40,7 +40,7 @@ describe('store.connectionBusy', () => {
 
   it.each(['stopped', 'killswitch-active'])('applies final %s while selection is pending (AT-00-008)', status => {
     useAppStore.setState({ mode: 'hard', tunRunning: true, vpnIp: '198.51.100.1', publicIp: '198.51.100.1',
-      publicIpVerdict: 'passed', serverSwitchingName: 'Norway', firewallKillSwitchActive: status === 'killswitch-active' })
+      publicIpVerdict: 'passed', serverSwitchingName: 'Norway', firewallKillSwitchStatus: { state: 'unknown', cleanupRequired: true, reason: 'incomplete-policy' } })
     useAppStore.getState().setConnectionCancelling(true)
     applyTerminalTunStatus(status)
     const store = useAppStore.getState()
@@ -49,7 +49,7 @@ describe('store.connectionBusy', () => {
     expect(store.vpnIp).toBeNull()
     expect(store.publicIp).toBeNull()
     expect(store.publicIpVerdict).toBe('not-checked')
-    expect(store.firewallKillSwitchActive).toBe(status === 'killswitch-active')
+    expect(store.firewallKillSwitchStatus.state).toBe('unknown')
     expect(store.serverSwitchingName).toBe('Norway')
     expect(store.connectionCancelling).toBe(true)
     expect(store.connectionBusy).toBe('disconnecting')

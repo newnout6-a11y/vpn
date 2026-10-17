@@ -34,26 +34,27 @@ export function validateRecoveryRequest(value: RecoveryRequest): void {
   throw new Error('Invalid recovery worker request')
 }
 
-/** Same conservative ownership predicate as the legacy lifecycle status read. */
+/** A missing executable path cannot prove exit; match only children of this runtime. */
 export const OWNED_RUNTIME_STATUS_QUERY_SCRIPT = String.raw`
 $names = @('vpnte-sing-box.exe', 'vpnte-etw-sidecar.exe', 'vpnte-xray.exe')
-$found = @(Get-CimInstance Win32_Process -ErrorAction Stop |
-  Where-Object {
-    ($names -contains $_.Name) -and
-    $_.ExecutablePath -and
-    $_.ExecutablePath.StartsWith($runtimeDir, [System.StringComparison]::OrdinalIgnoreCase)
-  } | Select-Object -First 1)
+$runtimePrefix = $runtimeDir.TrimEnd('\') + '\'
+$candidates = @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object { $names -contains $_.Name })
+if (@($candidates | Where-Object { [string]::IsNullOrWhiteSpace($_.ExecutablePath) }).Count -gt 0) {
+  throw 'Cannot prove runtime exit: executable path unavailable'
+}
+$found = @($candidates | Where-Object { $_.ExecutablePath.StartsWith($runtimePrefix, [System.StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1)
 if ($found.Count -gt 0) { 'true' } else { 'false' }
 `
 
 /** Fixed stop command; its result is never used as proof that runtime exited. */
 export const OWNED_RUNTIME_STOP_SCRIPT = String.raw`
 $names = @('vpnte-sing-box.exe', 'vpnte-etw-sidecar.exe', 'vpnte-xray.exe')
+$runtimePrefix = $runtimeDir.TrimEnd('\') + '\'
 $rows = @(Get-CimInstance Win32_Process -ErrorAction Stop |
   Where-Object {
     ($names -contains $_.Name) -and
     $_.ExecutablePath -and
-    $_.ExecutablePath.StartsWith($runtimeDir, [System.StringComparison]::OrdinalIgnoreCase)
+    $_.ExecutablePath.StartsWith($runtimePrefix, [System.StringComparison]::OrdinalIgnoreCase)
   })
 $killed = @()
 # The upstream must stay alive until the TUN consumer has exited, regardless

@@ -27,6 +27,19 @@ beforeEach(() => {
   state.resolve6.mockReset().mockResolvedValue([]); state.cancelDns.mockReset()
 })
 describe('independent IPv6 WFP lifecycle', () => {
+  it('binds passive status verification to fresh trusted TUN identity, LUID and subnet (AT-03-001/006/012)', async () => {
+    const policy = blocks()
+    policy.rules.push({ id: randomUUID(), role: 'tun', remote: '', appId: '', luid: '123', originalApp: false, inbound: false, boot: false },
+      { id: randomUUID(), role: 'tun', remote: '', appId: '', luid: '123', originalApp: false, inbound: true, boot: false })
+    const run = vi.fn(async (_script: string) => ({ stdout: 'WFP_IPV6_VERIFIED' }))
+    await verifyWfpIpv6Policy(policy, run, 'Ethernet 5')
+    expect(run.mock.calls[0][0]).toContain("-ne '123'")
+    expect(run.mock.calls[0][0]).toContain("-ne 'Ethernet 5'")
+    expect(run.mock.calls[0][0]).toContain('Owned TUN subnet mismatch')
+    state.owner = null; run.mockClear()
+    await expect(verifyWfpIpv6Policy(policy, run, 'Ethernet 5')).rejects.toThrow('identity is required')
+    expect(run).not.toHaveBeenCalled()
+  })
   it('pins the exact same source in main and boot recovery before compilation (AT-03-012)', async () => {
     expect(createHash('sha256').update(source).digest('hex')).toBe(WFP_SOURCE_SHA256)
     expect(readFileSync(join(process.cwd(), 'resources/vpnte-recover.ps1'), 'utf8')).toContain(`$hash -ne '${WFP_SOURCE_SHA256}'`)
@@ -187,13 +200,16 @@ describe('independent IPv6 WFP lifecycle', () => {
 
 describe.skipIf(process.platform !== 'win32' && !process.env.VPNTE_PWSH)('compiled production C# policy with fake WFP engine', () => {
   it('executes generated PowerShell rules and transaction/ABI regressions without changing the network', async () => {
+    const smokeScript = readFileSync(join(process.cwd(), 'scripts/test-wfp-ipv6-native.ps1'), 'utf8')
+    const smokeFixture = smokeScript.match(/\$fixture=@'\r?\n([\s\S]*?)\r?\n'@/)?.[1]
+    if (!smokeFixture) throw new Error('Missing native smoke rollback fixture')
     const fixture = `
 namespace VPNTE.IPv6.Tests {
   public sealed class Fake : IEngine {
     public System.Collections.Generic.List<Rule> Rules = new System.Collections.Generic.List<Rule>();
     System.Collections.Generic.List<Rule> before;
-    public int Adds, Commits, Aborts, Reads; public bool FailAdd, FailReadback, FailCommit, FailDelete, FailAfterCommit;
-    public void Begin(){before=Rules.ToList();} public void EnsureSublayer(){} public void VerifyPriority(){}
+    public int Adds, Commits, Aborts, Reads; public bool FailBegin, FailAdd, FailReadback, FailCommit, FailDelete, FailAfterCommit;
+    public void Begin(){if(FailBegin)throw new Exception("begin failure");before=Rules.ToList();} public void EnsureSublayer(){} public void VerifyPriority(){}
     public void Commit(){if(FailCommit)throw new Exception("commit failure");Commits++;}
     public void Abort(){Rules=before;Aborts++;} public void Dispose(){}
     public Rule[] ReadOwned(){Reads++;if((FailReadback && Adds>0) || (FailAfterCommit && Commits>0))return new Rule[0];return Rules.ToArray();}
@@ -204,6 +220,16 @@ namespace VPNTE.IPv6.Tests {
     static void Assert(bool b,string why){if(!b)throw new Exception(why);}
     static Rule[] Blocks(){return new[]{new Rule{Id=Guid.NewGuid(),Role="block"},new Rule{Id=Guid.NewGuid(),Role="block",Inbound=true},new Rule{Id=Guid.NewGuid(),Role="block",Boot=true}};}
     public static void All(){
+      // AT-03-007/010: smoke cleanup must preserve a failed Begin and never
+      // forward Commit to BFE, even if production Apply requests it.
+      var denied=new Fake{FailBegin=true};var deniedGuard=new RollbackEngine(denied);
+      string deniedError="";try{deniedGuard.Begin();}catch(Exception e){deniedError=e.Message;}finally{deniedGuard.Abort();}
+      Assert(deniedError=="begin failure" && denied.Aborts==0 && !deniedGuard.Active,"failed Begin must not abort a nonexistent transaction");
+      var pending=new Fake();var pendingGuard=new RollbackEngine(pending);
+      pendingGuard.Begin();pendingGuard.Commit();
+      Assert(pending.Commits==0 && pendingGuard.Active,"smoke must never commit traffic filters");
+      pendingGuard.Abort();pendingGuard.Abort();
+      Assert(pending.Aborts==1 && pendingGuard.Aborted && !pendingGuard.Active,"smoke abort is exactly once");
       var layout=typeof(NativeEngine); var flags=System.Reflection.BindingFlags.NonPublic;
       Assert(Marshal.SizeOf(layout.GetNestedType("Filter",flags))==200,"FWPM_FILTER0 x64 ABI");
       Assert((ushort)layout.GetField("SublayerWeight",flags|System.Reflection.BindingFlags.Static).GetRawConstantValue()==0xffff,"request highest priority and verify actual priority");
@@ -275,7 +301,7 @@ namespace VPNTE.IPv6.Tests {
       const capture = async (script: string) => { scripts.push(script.replaceAll('$engine=New-Object VPNTE.IPv6.NativeEngine', '$engine=$fixtureEngine')); return { stdout: 'WFP_IPV6_VERIFIED' } }
       await applyWfpIpv6Policy(policy, capture)
       await verifyWfpIpv6Policy(policy, capture)
-      const encoded = Buffer.from(source + fixture).toString('base64')
+      const encoded = Buffer.from(source + smokeFixture + fixture).toString('base64')
       writeFileSync(path, `$ErrorActionPreference='Stop'\nAdd-Type -TypeDefinition ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}')))\n[VPNTE.IPv6.Tests.Run]::All()\n$fixtureEngine=New-Object VPNTE.IPv6.Tests.Fake\n${scripts.join('\n')}\nif($fixtureEngine.Rules.Count -ne 4){throw 'Generated rule array incomplete'}\nif($fixtureEngine.Rules[3].Signature -ne $rules[3].Signature){throw 'Generated scope changed'}\nWrite-Output 'WFP_PS_RULES_PASS'`, 'utf8')
       const output = execFileSync(process.env.VPNTE_PWSH || 'powershell.exe', ['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path], { encoding: 'utf8', windowsHide: true, timeout: 15000 })
       expect(output).toContain('WFP_POLICY_FIXTURES_PASS')

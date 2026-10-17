@@ -57,121 +57,70 @@ export function parseTimeToMinutes(time: string): number {
   return hours * 60 + minutes
 }
 
-/**
- * Determines if a schedule is active at the given timestamp.
- *
- * A schedule is active if:
- * 1. The timestamp's day-of-week matches (see overnight note below).
- * 2. The timestamp's time-of-day falls within [startTime, endTime).
- *
- * Overnight windows: when startTime > endTime (e.g. 22:00–06:00) the window
- * wraps past midnight. We treat the schedule as active when EITHER:
- *   - it's a listed day and the time is >= startTime (the evening part), OR
- *   - the PREVIOUS day is a listed day and the time is < endTime (the morning
- *     part that belongs to the window opened the night before).
- * Without this an overnight schedule was silently dead — the old
- * `current >= start && current < end` is an empty set when start > end, so the
- * VPN never came on. A "22:00–06:00 protect me overnight" entry is a very
- * natural thing for a user to create.
- *
- * Times are in "HH:mm" format. Days use 0=Sun, 1=Mon, ..., 6=Sat.
- */
-export function isScheduleActive(schedule: ScheduleEntry, timestamp: number): boolean {
-  if (!schedule.enabled) return false
-  if (!Array.isArray(schedule.days) || schedule.days.length === 0) return false
-
-  const startMinutes = parseTimeToMinutes(schedule.startTime)
-  const endMinutes = parseTimeToMinutes(schedule.endTime)
-  if (isNaN(startMinutes) || isNaN(endMinutes)) return false
-  // Equal start/end is a zero-length (never-active) window — reject explicitly
-  // so it doesn't masquerade as "always on".
-  if (startMinutes === endMinutes) return false
-
-  const date = new Date(timestamp)
-  const dayOfWeek = date.getDay()
-  const currentMinutes = date.getHours() * 60 + date.getMinutes()
-
-  if (startMinutes < endMinutes) {
-    // Normal same-day window.
-    if (!schedule.days.includes(dayOfWeek)) return false
-    return currentMinutes >= startMinutes && currentMinutes < endMinutes
-  }
-
-  // Overnight window (wraps midnight).
-  // Evening segment: today is a listed day and we're at/after start.
-  if (schedule.days.includes(dayOfWeek) && currentMinutes >= startMinutes) {
-    return true
-  }
-  // Morning segment: the window was opened YESTERDAY (a listed day) and we're
-  // still before end.
-  const prevDayOfWeek = (dayOfWeek + 6) % 7
-  if (schedule.days.includes(prevDayOfWeek) && currentMinutes < endMinutes) {
-    return true
-  }
-  return false
+interface ScheduleWindow {
+  start: number
+  stop: number
+  schedule: ScheduleEntry
 }
 
 /**
- * Computes the next start or stop of the union of enabled schedule windows.
- * Overlapping or adjacent windows keep protection active without reconnecting.
- *
- * Returns null if no schedules are enabled or no future event can be found
- * within the next 7 days.
+ * Resolve both boundaries on their own local calendar day using Date's compatible
+ * DST policy: shift missing times forward by the gap; choose the earlier instant
+ * for repeated times. Skip windows collapsed/reversed by that normalization.
+ * The same concrete intervals drive restart detection and scheduled events.
+ */
+function scheduleWindows(schedule: ScheduleEntry, now: number, daysAhead = 0): ScheduleWindow[] {
+  if (!schedule.enabled || !Array.isArray(schedule.days) || schedule.days.length === 0) return []
+  const start = parseTimeToMinutes(schedule.startTime)
+  const end = parseTimeToMinutes(schedule.endTime)
+  if (isNaN(start) || isNaN(end) || start === end) return []
+
+  const date = new Date(now)
+  const year = date.getFullYear(), month = date.getMonth(), day = date.getDate()
+  const windows: ScheduleWindow[] = []
+  // Yesterday is needed for overnight windows still active this morning (F-193).
+  for (let offset = -1; offset <= daysAhead; offset++) {
+    const calendarDay = new Date(year, month, day + offset)
+    if (!schedule.days.includes(calendarDay.getDay())) continue
+    const startTs = new Date(year, month, day + offset, Math.floor(start / 60), start % 60).getTime()
+    const stopTs = new Date(year, month, day + offset + (start > end ? 1 : 0), Math.floor(end / 60), end % 60).getTime()
+    if (stopTs > startTs) windows.push({ start: startTs, stop: stopTs, schedule })
+  }
+  return windows
+}
+
+/** Active inside a resolved local [start, stop) interval, including overnight. */
+export function isScheduleActive(schedule: ScheduleEntry, timestamp: number): boolean {
+  return scheduleWindows(schedule, timestamp).some((window) => window.start <= timestamp && timestamp < window.stop)
+}
+
+/**
+ * Return the next boundary of the union of enabled local schedule windows.
+ * Overlapping/adjacent windows connect once and stop only at the final end.
  */
 export function computeNextEvent(schedules: ScheduleEntry[], now: number): NextEvent | null {
-  const enabledSchedules = schedules.filter((s) => s.enabled && s.days.length > 0)
-  if (enabledSchedules.length === 0) return null
-  const isAnyActive = (at: number) => enabledSchedules.some((s) => isScheduleActive(s, at))
+  // Include a look-ahead day so truncation cannot create a spurious stop at the
+  // weekly search horizon when another window continues protection beyond it.
+  const windows = schedules.flatMap((schedule) => scheduleWindows(schedule, now, 8))
+    .sort((a, b) => a.start - b.start)
+  const date = new Date(now)
+  const horizon = new Date(date.getFullYear(), date.getMonth(), date.getDate() + 8).getTime()
 
-  let nearest: NextEvent | null = null
-
-  for (const schedule of enabledSchedules) {
-    const startMinutes = parseTimeToMinutes(schedule.startTime)
-    const endMinutes = parseTimeToMinutes(schedule.endTime)
-    if (isNaN(startMinutes) || isNaN(endMinutes)) continue
-    if (startMinutes === endMinutes) continue // zero-length window — no events
-    const overnight = startMinutes > endMinutes
-
-    // Check up to 8 days ahead to find the next event. An overnight window listed YESTERDAY is still open in
-    // the early morning and its stop event (endTime today) lies ahead, so overnight schedules also scan day -1
-    // (F-193). Start events from day -1 are in the past and filtered out by `> now`.
-    for (let dayOffset = overnight ? -1 : 0; dayOffset <= 7; dayOffset++) {
-      const candidateDate = new Date(now)
-      candidateDate.setDate(candidateDate.getDate() + dayOffset)
-      const dayOfWeek = candidateDate.getDay()
-
-      if (!schedule.days.includes(dayOfWeek)) continue
-
-      // Start event: always at startTime on each listed day.
-      const startEvent = new Date(candidateDate)
-      startEvent.setHours(Math.floor(startMinutes / 60), startMinutes % 60, 0, 0)
-      const startTs = startEvent.getTime()
-
-      if (startTs > now && !isAnyActive(startTs - 1)) {
-        if (!nearest || startTs < nearest.at) {
-          nearest = { type: 'start', at: startTs, schedule }
-        }
-      }
-
-      // Stop event: at endTime. For a same-day window it's on the listed day;
-      // for an overnight window the window opened on the listed day closes on
-      // the NEXT calendar day, so push the stop 24h forward.
-      const stopEvent = new Date(candidateDate)
-      stopEvent.setHours(Math.floor(endMinutes / 60), endMinutes % 60, 0, 0)
-      if (overnight) {
-        stopEvent.setDate(stopEvent.getDate() + 1)
-      }
-      const stopTs = stopEvent.getTime()
-
-      if (stopTs > now && !isAnyActive(stopTs)) {
-        if (!nearest || stopTs < nearest.at) {
-          nearest = { type: 'stop', at: stopTs, schedule }
-        }
-      }
+  for (let i = 0; i < windows.length; i++) {
+    const first = windows[i]
+    let last = first
+    while (i + 1 < windows.length && windows[i + 1].start <= last.stop) {
+      const next = windows[++i]
+      if (next.stop > last.stop) last = next
+    }
+    if (first.start > now && first.start < horizon) {
+      return { type: 'start', at: first.start, schedule: first.schedule }
+    }
+    if (last.stop > now && last.stop < horizon) {
+      return { type: 'stop', at: last.stop, schedule: last.schedule }
     }
   }
-
-  return nearest
+  return null
 }
 
 // ─── Timer Management ────────────────────────────────────────────────────────

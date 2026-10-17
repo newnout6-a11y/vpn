@@ -182,7 +182,7 @@ describe('main IPC regressions', () => {
     expect(readyStart).toBeGreaterThanOrEqual(0)
     expect(recoveryCall).toBeGreaterThan(readyStart)
     expect(recoveryCall).toBeLessThan(windowCall)
-    expect(source).toContain('recoverStaleKillSwitch(isOwnedTunRuntimeRunning)')
+    expect(source).toContain('recoverStaleKillSwitch(() => isOwnedTunRuntimeRunning(true))')
   })
 
   it('keeps proxy-list export as a separate server picker IPC path', () => {

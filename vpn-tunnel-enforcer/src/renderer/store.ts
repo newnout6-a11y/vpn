@@ -1,4 +1,5 @@
 import type { PublicIpVerdict } from '../shared/publicIp'
+import type { FirewallKillSwitchStatus } from '../shared/ipc-types'
 import { create } from 'zustand'
 
 /**
@@ -11,7 +12,7 @@ import { create } from 'zustand'
  *
  * 1. **Connection state (this store)** — Shared across Dashboard, Sidebar, widgets, and Settings.
  *    Contains: tunRunning, tunStartedAt, publicIp, isLeak, vpnIp, proxy, detecting,
- *    firewallKillSwitchActive, traffic, settings, logs, etc.
+ *    firewallKillSwitchStatus, traffic, settings, logs, etc.
  *
  * 2. **Theme** — Managed by ThemeProvider (React Context) in providers/ThemeProvider.tsx.
  *    Applies CSS custom properties and listens for system theme changes via IPC.
@@ -222,7 +223,7 @@ interface AppState {
   // drive the Dashboard banner that appears when sing-box died but the rules
   // are still in place — the user has to either restart TUN or manually drop
   // the rules.
-  firewallKillSwitchActive: boolean
+  firewallKillSwitchStatus: FirewallKillSwitchStatus
   // Name+IP of a foreign VPN/TUN adapter that appeared while our tunnel is
   // running (e.g. user flipped Happ to TUN mode mid-session). null when the
   // runtime watchdog sees a clean state. Drives a Dashboard banner so the
@@ -248,7 +249,8 @@ interface AppState {
   setConnectionCancelling: (cancelling: boolean) => void
   acknowledgeServerSwitchCancellation: () => void
   setServerSwitchingName: (name: string | null) => void
-  setFirewallKillSwitchActive: (active: boolean) => void
+  refreshFirewallKillSwitchStatus: () => Promise<void>
+  invalidateFirewallKillSwitchStatus: () => void
   setCompetingTun: (name: string | null) => void
   proxyDown: boolean
   setProxyDown: (v: boolean) => void
@@ -321,6 +323,12 @@ export interface LeakSelfTestResultClient {
 }
 
 const globalToastTimers = new Map<string, ReturnType<typeof setTimeout>>()
+let firewallStatusRequest = 0
+const unknownFirewallStatus = (reason: FirewallKillSwitchStatus['reason']): FirewallKillSwitchStatus => ({ state: 'unknown', cleanupRequired: true, reason })
+const firewallStatusReasons = {
+  verified: ['policy-verified'], inactive: ['no-owned-protection'],
+  unknown: ['checking', 'unavailable', 'untrusted-manifest', 'incomplete-policy', 'read-back-failed']
+}
 
 export const useAppStore = create<AppState>((set) => ({
   mode: 'off',
@@ -337,7 +345,7 @@ export const useAppStore = create<AppState>((set) => ({
   connectionCancelling: false,
   serverSwitchCancelAcknowledged: false,
   serverSwitchingName: null,
-  firewallKillSwitchActive: false,
+  firewallKillSwitchStatus: unknownFirewallStatus('checking'),
   competingTun: null,
   proxyDown: false,
   leakSelfTestResult: null,
@@ -439,7 +447,25 @@ export const useAppStore = create<AppState>((set) => ({
     ...(name === null && state.serverSwitchingName && state.connectionCancelling && state.serverSwitchCancelAcknowledged
       ? { connectionCancelling: false, connectionBusy: null } : {})
   })),
-  setFirewallKillSwitchActive: (active) => set({ firewallKillSwitchActive: active }),
+  refreshFirewallKillSwitchStatus: async () => {
+    const request = ++firewallStatusRequest
+    set({ firewallKillSwitchStatus: unknownFirewallStatus('checking') })
+    let status: FirewallKillSwitchStatus
+    try {
+      status = await window.electronAPI.getFirewallKillSwitchStatus()
+      if (!status || !['verified', 'inactive', 'unknown'].includes(status.state) ||
+          typeof status.cleanupRequired !== 'boolean' ||
+          (status.state === 'inactive' && status.cleanupRequired) || (status.state !== 'inactive' && !status.cleanupRequired) ||
+          !firewallStatusReasons[status.state].includes(status.reason)) {
+        throw new Error('Invalid firewall status reply')
+      }
+    } catch { status = unknownFirewallStatus('unavailable') }
+    if (request === firewallStatusRequest) set({ firewallKillSwitchStatus: status })
+  },
+  invalidateFirewallKillSwitchStatus: () => {
+    ++firewallStatusRequest
+    set({ firewallKillSwitchStatus: unknownFirewallStatus('checking') })
+  },
   setCompetingTun: (name) => set({ competingTun: name }),
   setProxyDown: (v) => set({ proxyDown: v }),
   setAutoconfigTargets: (targets) => set({ autoconfigTargets: targets }),

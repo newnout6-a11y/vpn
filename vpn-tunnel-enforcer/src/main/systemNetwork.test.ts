@@ -1,11 +1,14 @@
 // AT-03-003 / AT-03-007 / AT-03-012: baseline fault injection, not Windows L3.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { execFileSync } from 'child_process'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'fs'
+import { join } from 'path'
 const state = vi.hoisted(() => ({
   manifest: null as any, failRead: false, failWrite: false, failApply: false,
   failNetsh: false, failNotify: false, failedSteps: [] as number[], scripts: [] as string[],
-  writes: [] as any[], operations: [] as string[], nativeFailure: false, reportPatch: null as any
+  writes: [] as any[], operations: [] as string[], nativeFailure: false, reportPatch: null as any, logDirectory: ''
 }))
+vi.mock('electron', () => ({ app: { getPath: () => state.logDirectory }, shell: { openPath: vi.fn() } }))
 const fixture = () => ({
   schemaVersion: 1, owner: 'VPNTE', createdAt: 1780000000000, userSid: 'S-1-5-21-1-2-3-1001',
   values: [
@@ -31,9 +34,13 @@ function response(command: string) {
     if (state.failApply) throw new Error('apply failed')
     return { stdout: 'BASELINE_APPLIED', stderr: '' }
   }
-  if (script.includes('steps=@($results)')) return {
-    stdout: JSON.stringify({ steps: state.manifest.values.map((s: any, i: number) => ({ name: `${s.target}/${s.name}`, success: !state.failedSteps.includes(i), error: state.failedSteps.includes(i) ? 'injected failure' : null })),
-      notification: { success: !state.failNotify, error: state.failNotify ? 'notification failed' : null }, timings: { registryMs: 1, notifyMs: 2 }, ...state.reportPatch }), stderr: ''
+  if (script.includes('steps=@($results)')) {
+    const valuesPayload = /\$values = .*FromBase64String\('([^']+)'\)/.exec(script)?.[1]
+    if (!valuesPayload) throw new Error('Baseline rollback fixture: missing encoded values payload')
+    return {
+      stdout: JSON.stringify({ steps: JSON.parse(Buffer.from(valuesPayload, 'base64').toString('utf8')).map((s: any, i: number) => ({ name: `${s.target}/${s.name}`, success: !state.failedSteps.includes(i), error: state.failedSteps.includes(i) ? 'injected failure' : null })),
+        notification: { success: !state.failNotify, error: state.failNotify ? 'notification failed' : null }, timings: { registryMs: 1, notifyMs: 2 }, ...state.reportPatch }), stderr: ''
+    }
   }
   if (script.includes('InternetSetOption') && state.failNotify) throw new Error('notification failed')
   return { stdout: '', stderr: '' }
@@ -74,9 +81,11 @@ vi.mock('./recoveryManifest', () => ({
   },
   removeRecoveryManifest: async () => { state.manifest = null; state.operations.push('clear') }
 }))
-import { applyTunNetworkBaseline, getTunNetworkBaselineManifestPath, rollbackTunNetworkBaseline, validateNetworkBackupManifest } from './systemNetwork'
+import { applyTunNetworkBaseline, getTunNetworkBaselineManifestPath, rollbackTunNetworkBaseline, rollbackTunNetworkBaselineIfApplied, rollbackTunNetworkBaselineOrThrow, validateNetworkBackupManifest } from './systemNetwork'
+import { logEvent } from './appLogger'
 const platform = Object.getOwnPropertyDescriptor(process, 'platform')!
 beforeEach(() => {
+  vi.mocked(logEvent).mockClear()
   state.manifest = null; state.failRead = false; state.failWrite = false; state.failApply = false
   state.failNetsh = false; state.failNotify = false; state.failedSteps = []; state.scripts = []; state.writes = []; state.operations = []
   state.nativeFailure = false; state.reportPatch = null
@@ -85,6 +94,96 @@ beforeEach(() => {
 })
 afterEach(() => Object.defineProperty(process, 'platform', platform))
 describe('trusted typed network baseline', () => {
+  it.each(['missing', 'invalid', 'duplicate'] as const)('restores valid baseline records after %s records, retaining the journal (AT-03-003c)', async kind => {
+    const original = fixture()
+    state.manifest = structuredClone(original)
+    if (kind === 'missing') state.manifest.values.splice(0, 4)
+    if (kind === 'invalid') for (let i = 0; i < 4; i++) state.manifest.values[i].exists = 'false'
+    if (kind === 'duplicate') state.manifest.values[0] = { ...state.manifest.values[1] }
+    const result = await rollbackTunNetworkBaseline()
+    expect(result.success).toBe(false)
+    expect(result.warnings?.length).toBeGreaterThan(0)
+    expect(state.manifest).not.toBeNull()
+    expect(state.operations).not.toContain('clear')
+    const steps = vi.mocked(logEvent).mock.calls.filter(call => call[2] === 'baseline rollback step')
+    expect(steps.map(call => (call[3] as any).name)).toEqual(original.values.slice(kind === 'duplicate' ? 2 : 4).map(s => `${s.target}/${s.name}`))
+    expect(steps.every(call => (call[3] as any).success)).toBe(true)
+    expect(vi.mocked(logEvent).mock.calls.some(call => call[2] === 'baseline rollback step rejected')).toBe(true)
+    expect(() => validateNetworkBackupManifest(state.manifest)).toThrow()
+  })
+  it('performs no native effects when no baseline records are valid (AT-03-003c)', async () => {
+    state.manifest = { ...fixture(), values: [] }
+    const result = await rollbackTunNetworkBaseline()
+    expect(result).toMatchObject({ success: false, warnings: expect.any(Array) })
+    expect(result.warnings).toHaveLength(9)
+    expect(state.operations).toEqual([])
+    expect(logEvent).toHaveBeenCalledWith('error', 'system-network', 'baseline rollback completed', expect.objectContaining({ operationId: result.operationId, success: false, warnings: result.warnings }))
+  })
+  it.each([{ owner: 'foreign' }, { schemaVersion: 2 }, { userSid: 'invalid' }])('does not salvage records across an invalid envelope %j (AT-03-003/012)', async patch => {
+    state.manifest = { ...fixture(), ...patch }
+    expect((await rollbackTunNetworkBaseline()).success).toBe(false)
+    expect(state.operations).toEqual([])
+  })
+  it('keeps receipt IDs distinct through real logger/redaction/file writes across a failed rollback and retry (AT-03-007)', async () => {
+    const temporary = join(process.cwd(), '.tmp'); mkdirSync(temporary, { recursive: true })
+    state.logDirectory = mkdtempSync(join(temporary, 'baseline-log-correlation-'))
+    const logger = await vi.importActual<typeof import('./appLogger')>('./appLogger')
+    vi.mocked(logEvent).mockImplementation(logger.logEvent)
+    const consoleSpies = [vi.spyOn(console, 'log'), vi.spyOn(console, 'warn'), vi.spyOn(console, 'error')]
+    for (const spy of consoleSpies) spy.mockImplementation(() => undefined)
+    const credentialUuid = '12345678-1234-4123-8123-123456789abc'
+    try {
+      state.manifest = fixture(); state.failedSteps = [3]
+      const failed = await rollbackTunNetworkBaselineIfApplied('failed attempt')
+      state.failedSteps = []
+      const retried = await rollbackTunNetworkBaselineIfApplied('retry')
+      logger.logEvent('info', 'test', 'credential masking remains active', { note: credentialUuid })
+      logger.logEvent('debug', 'test', 'correlation write barrier')
+      let raw = ''
+      let records: Array<{ scope: string; message: string; details?: any }> = []
+      await vi.waitFor(() => {
+        raw = readFileSync(logger.getAppLogPath(), 'utf8')
+        records = raw.trim().split(/\r?\n/).map(line => JSON.parse(line))
+        expect(records.at(-1)?.message).toBe('correlation write barrier')
+      })
+      expect(failed.success).toBe(false)
+      expect(retried.success).toBe(true)
+      expect(failed.operationId).not.toBe(retried.operationId)
+      const events = records.filter(record => record.scope === 'system-network')
+      expect(new Set(events.map(record => record.details?.operationId))).toEqual(new Set([failed.operationId, retried.operationId]))
+      for (const receipt of [failed, retried]) {
+        const operation = events.filter(record => record.details?.operationId === receipt.operationId)
+        expect(operation.filter(record => record.message === 'baseline rollback step')).toHaveLength(9)
+        expect(operation.find(record => record.message === 'baseline rollback completed')?.details.success).toBe(receipt.success)
+      }
+      expect(raw).not.toContain(credentialUuid)
+      expect(raw).toContain('<redacted-uuid>')
+    } finally {
+      vi.mocked(logEvent).mockReset()
+      for (const spy of consoleSpies) spy.mockRestore()
+      rmSync(state.logDirectory, { recursive: true, force: true })
+    }
+  })
+  it.each(['step', 'notification', 'untrusted'])('rejects incomplete %s recovery for callers using exceptions (AT-03-007)', async failure => {
+    state.manifest = fixture()
+    if (failure === 'step') state.failedSteps = [3]
+    if (failure === 'notification') state.failNotify = true
+    if (failure === 'untrusted') state.failRead = true
+    const failed = await rollbackTunNetworkBaselineOrThrow('failed start').catch(error => error as Error)
+    expect(failed).toBeInstanceOf(Error)
+    expect((failed as Error).message).toContain('Повторите восстановление сети')
+    expect((failed as Error).message).toContain(failure === 'step' ? 'injected' : failure === 'notification' ? 'notification failed' : 'Untrusted storage')
+    expect(state.manifest).not.toBeNull()
+  })
+  it('accepts trusted absence and successful retry without changing the result contract (AT-03-007)', async () => {
+    expect(await rollbackTunNetworkBaselineOrThrow('no baseline')).toMatchObject({ success: true, skipped: true })
+    state.manifest = fixture()
+    state.failedSteps = [3]
+    await expect(rollbackTunNetworkBaselineOrThrow('failed recovery')).rejects.toThrow('injected failure')
+    state.failedSteps = []
+    expect(await rollbackTunNetworkBaselineOrThrow('retry')).toMatchObject({ success: true })
+    expect(state.manifest).toBeNull()
+  })
   it('restores all values and notifies WinINet in one native process', async () => {
     state.manifest = fixture()
     expect((await rollbackTunNetworkBaseline()).success).toBe(true)
@@ -242,6 +341,51 @@ finally { [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree($testRoot,$fa
     expect(state.scripts[0]).toContain('foreach ($s in $values)')
     expect(state.scripts[0]).toContain('catch { $results +=')
     expect(state.scripts[0]).toContain('Registry read-back mismatch')
+    expect(result).toHaveProperty('operationId', expect.any(String))
+    const events = vi.mocked(logEvent).mock.calls.filter(call => call[2] === 'baseline rollback step')
+    expect(events).toHaveLength(9)
+    for (const [index, event] of events.entries()) {
+      expect(event[3]).toMatchObject({ operationId: result.operationId, success: index !== step })
+    }
+  })
+  it('inherits the Stop ID in all baseline rollback events (AT-03-007)', async () => {
+    state.manifest = fixture()
+    const operationId = '00000000-0000-4000-8000-000000000007'
+    const result = await rollbackTunNetworkBaselineIfApplied('TUN stopped', operationId)
+    expect(result).toMatchObject({ success: true, operationId })
+    const events = vi.mocked(logEvent).mock.calls.filter(call => call[1] === 'system-network')
+    expect(events.filter(call => call[2] === 'baseline rollback step')).toHaveLength(9)
+    for (const event of events) expect(event[3]).toMatchObject({ operationId })
+  })
+  it('correlates the failed rollback and successful retry separately (AT-03-007)', async () => {
+    state.manifest = fixture(); state.failedSteps = [3]
+    const failed = await rollbackTunNetworkBaseline()
+    state.failedSteps = []
+    const retried = await rollbackTunNetworkBaseline()
+    expect(failed.success).toBe(false)
+    expect(retried.success).toBe(true)
+    expect(state.manifest).toBeNull()
+    expect(failed).toHaveProperty('operationId', expect.stringMatching(/^baseline_[a-f0-9]{32}$/))
+    expect(retried).toHaveProperty('operationId', expect.stringMatching(/^baseline_[a-f0-9]{32}$/))
+    expect(failed.operationId).not.toBe(retried.operationId)
+    const events = vi.mocked(logEvent).mock.calls.filter(call => call[1] === 'system-network')
+    expect(events.every(call => [failed.operationId, retried.operationId].includes((call[3] as any)?.operationId))).toBe(true)
+    const completions = events.filter(call => call[2] === 'baseline rollback completed')
+    expect(completions.map(call => call[3])).toEqual([
+      expect.objectContaining({ operationId: failed.operationId, success: false }),
+      expect.objectContaining({ operationId: retried.operationId, success: true })
+    ])
+  })
+  it('correlates untrusted reads without inventing completed rollback steps (AT-03-007/012)', async () => {
+    state.failRead = true
+    const result = await rollbackTunNetworkBaseline()
+    expect(result.success).toBe(false)
+    expect(result).toHaveProperty('operationId', expect.any(String))
+    const events = vi.mocked(logEvent).mock.calls
+    expect(events.find(call => call[2] === 'CRITICAL_SECURITY_EVENT: baseline recovery unknown')?.[3])
+      .toMatchObject({ operationId: result.operationId })
+    expect(events.some(call => call[2] === 'baseline rollback step')).toBe(false)
+    expect(state.scripts).toEqual([])
   })
   it('retains snapshot on notification failure, clears only after verified recovery', async () => {
     state.manifest = fixture(); state.failNotify = true
