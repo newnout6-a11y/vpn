@@ -358,6 +358,87 @@ preflight failures не запускают rollback и получают сооб
 все 223 теста четырёх адресных suites прошли. Финальные полные проверки выше
 выполнены после исправления production кода; build также exit 0.
 
+### Уточнение native fixtures после review 0d175b5
+
+Revix 4304178126 и CodeRabbit 5559714772 подтвердили коллизию GUID:
+physical fixture наследовал TUN GUID/driver/PnP. Теперь у физического адаптера
+отдельные GUID/ifIndex/driver/PnP. Обязательны отсутствие его удаления,
+удаление только TUN и очистка TUN ownership record при успешном шаге.
+Новые отрицательные assertions до ремонта фикстуры: 3 failed / 1 passed /
+16 skipped. После ремонта boot execution/behavior — 33 passed, exit 0.
+Write-RecoveryReport fixture также читает конечные профили через
+Get-NetFirewallProfile; проверяются финальные Allow/Block и сохранённый
+Domain Block после injected failure, а не только вызовы setter.
+
+### P1: исключённые интерфейсы профиля не доказывают firewall protection
+
+Review 4304183201 подтверждён: DisabledInterfaceAliases раньше терялся при
+чтении ActiveStore. Теперь snapshot содержит обязательный disabledInterfaces.
+Отсутствующее native property отклоняется; явный native CIM null (проверен
+read-only на текущем хосте) означает пустой список. Штатный NotConfigured
+разрешён только как единственное значение. Реальные excluded aliases,
+пустая строка или неподтверждённая форма дают unknown, без native writes.
+
+Нативные fixtures проверяют excluded alias, NotConfigured, null, missing
+property и неверный тип; TypeScript — все три профиля и неполные данные;
+настоящий status API с fake OS boundaries возвращает incomplete-policy или
+read-back-failed вместо verified. До ремонта 13 failed / 52 passed.
+Реальные firewall settings при расследовании и проверке не менялись.
+
+### P1: startup требует подтверждённого runtime exit
+
+Review 4304193950 подтверждён на production query + production wrapper +
+production startup/firewall-recovery bodies. Старый нестрогий wrapper при
+ошибке CIM возвращал false и разрешал cleanup. До исправления: owned,
+mixed (known owned + unknown path), unknown дали 3 failed; absent — passed.
+
+performCrashRecovery теперь сначала требует свежую строгую runtime proof,
+при live/unknown не запускает cleanup, при unknown показывает native warning
+без ожидания закрытия. Callback firewall recovery и проверка перед adapter
+rollback также используют requireProof=true; поздняя ошибка останавливает
+оставшиеся шаги. Тестируются шесть сценариев: owned/mixed/unknown/absent,
+потеря наблюдения перед firewall cleanup и перед adapter rollback.
+Внешние Windows API подставлены; это не SYSTEM reboot/packet acceptance.
+
+Пять адресных suites: `npm.cmd test -- src/main/lifecycleCleanup.test.ts
+src/main/ownedRuntimeStatus.test.ts src/main/firewallStatus.test.ts
+src/main/firewallTransactions.test.ts src/main/bootRecoveryExecution.test.ts`
+— 339 passed / 1 skipped, 5 files passed, 20.72 s, exit 0.
+`npm.cmd run build` — exit 0; полный набор выполняется.
+
+### P2: correlation ID сохраняется в настоящем app.log
+
+Review 4304208372 подтверждён: production redactor маскировал randomUUID()
+внутренней операции тем же маркером, что VPN credential UUID. Новый тест
+настоящего appLogger, redactor и очереди записи файла до исправления падал:
+два разных receipt ID в файле превращались в один <redacted-uuid>.
+
+Baseline и Stop теперь генерируют baseline_/stop_ + 32 hex-символа.
+Наследуемый ID не меняется; общий redactor и UUID-схема durable firewall
+manifest сохранены. File-log regression проверяет две операции baseline
+(failed rollback и successful retry): ID совпадает с receipt, различается
+между операциями, присутствует на девяти шагах и в завершении с правильным
+success. Синтетический credential UUID по-прежнему маскируется. Для Stop
+проверены формат, наследование ID и concurrent/retry lifecycle; отдельный
+настоящий Stop file-log этим тестом не проверяется. OS boundaries подменены.
+
+Полный прогон после P1 сначала обнаружил одно устаревшее строковое ожидание
+mainIpcRegression (3257 passed / 1 failed / 5 skipped); оно исправлено на
+строгий callback. Whole-chain startup поведение проверяется отдельно.
+После всех исправлений `npm.cmd test -- src/main/systemNetwork.test.ts
+src/main/lifecycleCleanup.test.ts src/main/mainIpcRegression.test.ts
+src/main/firewallStatus.test.ts src/main/firewallTransactions.test.ts
+src/main/bootRecoveryExecution.test.ts` — 397 passed / 2 skipped,
+6 files passed, 23.09 s, exit 0; `npm.cmd run build` — exit 0.
+
+Финальный полный `npm.cmd test` — 3259 passed / 5 skipped,
+234 files passed / 2 skipped, 130.84 s, exit 0. `npm.cmd run typecheck` —
+exit 0. Из корня `python -X utf8
+docs/04-приёмочные-тесты/traceability/check-coverage.py` — AC 927/927,
+F 210/210, exit 0; `git diff --check` — exit 0. Полный лог сохранён в
+`.tmp/wp3-review-final-full.log`; это локальные проверки, CI/review нового
+SHA проверяются отдельно.
+
 ## Условие перехода дальше
 
 Закрыть доступные пробелы L1/L2, получить и сохранить реальные L3-доказательства

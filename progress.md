@@ -1511,3 +1511,75 @@ CI/review нового SHA проверяются отдельно после pu
   2 skipped, 128.34 s, exit 0. Traceability AC 927/927, F 210/210;
   git diff --check — exit 0. Новые SHA отправляются вместе после завершения
   проверки fdfac87; текущие CI/review должны быть проверены отдельно.
+
+### WP-3: review 0d175b5 — fixtures, два P1 и корреляция логов P2
+
+- f6a651c и 0d175b5 отправлены в PR #46. Windows 117484451024 success:
+  3237 passed / 4 skipped, 235 files passed / 1 skipped; traceability
+  AC 927/927, F 210/210; BFE ok=true, aborted=true, priority=verified;
+  Electron reads 1 passed / 1 skipped. Rust 117484450921 success;
+  Revix 117484454145 neutral/COMMENTED. Automatic CodeRabbit был skipped
+  (manual review required), поэтому отправлен один @coderabbitai review
+  (6239656395); бот подтвердил запуск. Review 5559714772 завершён/success,
+  только 2 nitpicks: GUID fixture и final profile state.
+- Revix 4304178126 / CodeRabbit: physical fixture разделял GUID и Wintun
+  поля с TUN. Усиленные assertions воспроизвели 3 failed / 1 passed /
+  16 skipped. Физическому адаптеру даны собственные GUID/index/driver/PnP;
+  проверяется отсутствие его удаления и успешная очистка TUN record.
+  Boot execution/behavior: 33 passed, 2 files passed, 8.78 s, exit 0.
+  Полный набор после разделения GUID: 3236 passed / 5 skipped,
+  234 files passed / 2 skipped, 127.23 s, exit 0; typecheck/traceability
+  и git diff --check — exit 0. Production код в этом изменении не менялся.
+  Final profile assertions добавлены в report boundary и существующий
+  injected Domain failure case: проверяется конечный read-back.
+- P1 4304183201 подтверждён: DisabledInterfaceAliases не попадал в status.
+  Native snapshot теперь требует property и сохраняет список; явный CIM null
+  нормализуется в пустой список, missing/untyped не маскируются. Parser
+  требует string[]; matcher принимает только [] или один NotConfigured.
+  Excluded alias в любом профиле и неизвестные данные не дают verified.
+  Native/typed/status API regressions до ремонта: 13 failed / 52 passed.
+  Реальные ActiveStore профили прочитаны только read-only (native null);
+  настройки firewall не менялись.
+- P1 4304193950 подтверждён: startup использовал нестрогие runtime callbacks.
+  Production query + wrapper + startup/firewall bodies на fake CIM до
+  ремонта: 3 failed / 1 passed / 140 skipped (owned/mixed/unknown/absent).
+  Добавлен строгий startup gate; firewall callback и adapter rollback требуют
+  requireProof=true. Live/unknown сохраняет сетевые настройки; ошибка даёт
+  native warning без ожидания закрытия. Поздние отказы наблюдения перед
+  firewall/adapter отдельно проверены; оставшиеся cleanup не выполняются.
+- Финальные адресные 5 suites: npm.cmd test --
+  src/main/lifecycleCleanup.test.ts src/main/ownedRuntimeStatus.test.ts
+  src/main/firewallStatus.test.ts src/main/firewallTransactions.test.ts
+  src/main/bootRecoveryExecution.test.ts — 339 passed / 1 skipped,
+  5 files passed, 20.72 s, exit 0. npm.cmd run build — exit 0;
+  полный набор и typecheck выполняются после всех изменений.
+- L3-среда перепроверена read-only: процесс не elevated, Windows 26300;
+  Hyper-V VM Windows 10 MSIX packaging environment выключена, её VHDX
+  отсутствует. SYSTEM reboot/packet oracle/OS matrix/physical 464XLAT
+  не появились. Уточнение AT-03-003(c) о подписях остаётся без ответа.
+  Норматив docs не менялся; WP-3 частичный, WP-0/WP-2 не начаты.
+
+- P2 4304208372 подтверждён настоящим appLogger/redaction/file write:
+  UUID receipt превращался в одинаковый <redacted-uuid> для failed/retry.
+  Регрессия до исправления падала на сравнении записанных ID с receipts.
+  Внутренние baseline/Stop IDs теперь baseline_/stop_ + 32 hex-символа;
+  наследование ID сохранено. Redactor и UUID durable firewall manifest
+  не ослаблялись. Тест реального файла проверяет failed baseline rollback,
+  успешный retry, девять step results на каждый ID и маскирование UUID
+  credentials. Для Stop проверены формат/наследование/concurrent retry,
+  отдельного настоящего Stop file-log прогона здесь нет.
+- Полный прогон после двух P1 сначала дал 3257 passed / 1 failed / 5 skipped:
+  mainIpcRegression ожидал старый нестрогий callback в строке source.
+  Ожидание приведено к строгому callback; поведение отдельно проверяется
+  шестью whole-chain startup сценариями, а не этим строковым assertion.
+- После всех трёх исправлений: npm.cmd test -- src/main/systemNetwork.test.ts
+  src/main/lifecycleCleanup.test.ts src/main/mainIpcRegression.test.ts
+  src/main/firewallStatus.test.ts src/main/firewallTransactions.test.ts
+  src/main/bootRecoveryExecution.test.ts — 397 passed / 2 skipped,
+  6 files passed, 23.09 s, exit 0. npm.cmd run build — exit 0.
+- Итоговый полный npm.cmd test после всех исправлений — 3259 passed /
+  5 skipped, 234 files passed / 2 skipped, 130.84 s, exit 0.
+  npm.cmd run typecheck — exit 0; python -X utf8
+  docs/04-приёмочные-тесты/traceability/check-coverage.py — AC 927/927,
+  F 210/210, exit 0; git diff --check — exit 0. Лог полного прогона:
+  vpn-tunnel-enforcer/.tmp/wp3-review-final-full.log.
