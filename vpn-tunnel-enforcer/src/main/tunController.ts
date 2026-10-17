@@ -1,6 +1,6 @@
 import { recordOwnedTunAdapter, strictRecoveryRequired, readRecoveryManifest } from './recoveryManifest'
 import { executeRecoveryOperation, RecoveryWorkerError } from './recoveryPsWorker'
-import { OWNED_RUNTIME_STOP_SCRIPT } from './recoveryPsProtocol'
+import { OWNED_RUNTIME_STATUS_QUERY_SCRIPT, OWNED_RUNTIME_STOP_SCRIPT } from './recoveryPsProtocol'
 import { exec as execCb, execFile as execFileCb } from 'child_process'
 import { writeFile, copyFile, access, rename, stat, readFile } from 'fs/promises'
 import { join, dirname } from 'path'
@@ -1413,15 +1413,7 @@ export async function isOwnedTunRuntimeRunning(requireProof = false): Promise<bo
       // Query failure/deadline/closed admission cannot prove that the runtime exited.
       stdout = await runPowerShell(`
 $runtimeDir = ${psSingleQuote(runtimeDir)}
-$names = @(${psSingleQuote(RUNTIME_EXE_NAME)}, 'vpnte-etw-sidecar.exe', 'vpnte-xray.exe')
-$found = @(Get-CimInstance Win32_Process -ErrorAction Stop |
-  Where-Object {
-    ($names -contains $_.Name) -and
-    $_.ExecutablePath -and
-    $_.ExecutablePath.StartsWith($runtimeDir, [System.StringComparison]::OrdinalIgnoreCase)
-  } |
-  Select-Object -First 1)
-if ($found.Count -gt 0) { 'true' } else { 'false' }
+${OWNED_RUNTIME_STATUS_QUERY_SCRIPT}
 `, 5000)
     }
     const result = String(stdout || '').trim().toLowerCase()

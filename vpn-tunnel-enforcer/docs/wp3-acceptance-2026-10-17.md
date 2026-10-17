@@ -238,6 +238,24 @@ bodies; `autoPilot.test.ts` — failed step и обе ошибки в result.mes
 123.10 с, exit 0. Проверка трассировки — AC 927/927, F 210/210;
 `git diff --check` — exit 0. Это L1/L2; системная приёмка не добавлена.
 
+### AT-03-007: отсутствие runtime требует доступного пути
+
+Наблюдатель CIM теперь отклоняет недоступный ExecutablePath кандидата:
+невозможность установить владельца не означает, что процесс завершился.
+Worker и standalone fallback используют один readonly запрос. Status и stop
+проверяют границу runtime-каталога с завершающим слэшем; соседний каталог
+`runtime-extra` больше не попадает в принудительную остановку.
+
+Нативные regression fixtures воспроизвели три прежние ошибки (3 failed,
+17 passed), затем профильные 3 suites дали 265 passed. Stop-Process/CIM
+подставлены; это проверка production dispatcher, не завершение реального ядра.
+Тесты fallback и строгого результата сохранены в `ownedRuntimeStatus.test.ts`
+и `tunRuntimeExitProof.test.ts` (29 passed после обновления AST dependencies).
+
+Финальная проверка observer-изменения: `npm.cmd test` — 3202 passed,
+5 skipped, 234 files passed, 2 skipped, 123.97 с, exit 0; typecheck/build,
+traceability (AC 927/927, F 210/210) и `git diff --check` — exit 0.
+
 ## Условие перехода дальше
 
 Закрыть доступные пробелы L1/L2, получить и сохранить реальные L3-доказательства

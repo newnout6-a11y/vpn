@@ -1304,3 +1304,47 @@ CI/review нового SHA проверяются отдельно после pu
   после текущего коммита. Следом также проверить negative runtime proof:
   существующий observer исключает процессы с нечитаемым ExecutablePath.
   L3 по-прежнему NOT-CHECKED; WP-0/WP-2 не начаты.
+
+### WP-3: достоверное отсутствие runtime перед снятием защиты
+
+- 093f48f опубликован в PR #46; Windows job 117476794211 ещё выполняется,
+  Rust 117476794279 success, Revix 117476805053 neutral. CodeRabbit pending.
+- Подтверждён связанный с startup/Stop proof дефект: native observer исключал
+  процесс с недоступным ExecutablePath, возвращая false. stop-runtime также
+  захватывал соседний каталог по префиксу (runtime-extra). Новые native tests
+  до исправления: 3 failed / 17 passed / 87 skipped, exit 1.
+- Worker и standalone fallback теперь используют один readonly status script.
+  Нечитаемый путь кандидата даёт явную ошибку, а не exit proof. В обоих
+  запросах ownership ограничен каталогом с завершающим слэшем; чужой соседний
+  каталог не останавливается. Порядок sing-box exit перед Xray сохранён.
+- npm.cmd test -- src/main/recoveryPsProtocol.test.ts
+  src/main/tunControllerRecoverySource.test.ts src/main/lifecycleCleanup.test.ts
+  — 265 passed, 3 files passed, 46.16 s, exit 0. Дополнительный standalone
+  fallback regression: 4 passed / 138 skipped, exit 0. Это fake CIM/Stop-Process,
+  реальные процессы и сеть не менялись.
+- npm.cmd run typecheck и npm.cmd run build — exit 0. Полный набор запущен;
+  traceability AC 927/927, F 210/210 и git diff --check — exit 0.
+- Для замечания CodeRabbit 4304029954 отдельно проверено readonly на хосте:
+  ActiveStore содержит 632 rules и 632 application filters; association
+  InstanceID совпадает с rule.Name, bulk lookup даёт ровно 1 запись.
+  Это проверка формы данных, не системная приёмка фильтрации.
+- Первый полный прогон observer-изменения: 3198 passed / 8 failed / 5 skipped,
+  126.30 s, exit 1. Все 8 — два прежних AST harness без новой зависимости
+  OWNED_RUNTIME_STATUS_QUERY_SCRIPT. Harness обновлены; отдельный прогон
+  ownedRuntimeStatus.test.ts и tunRuntimeExitProof.test.ts — 29 passed,
+  2 files passed, exit 0. Дублирующие новые fallback cases удалены из lifecycle
+  tests, проверка остаётся в существующих профильных suites.
+- Повторное readonly чтение всех типов native filters: AddressFilter -All
+  отказал с Access denied из текущего non-admin процесса. Привилегированный
+  snapshot этим не проверен; batch implementation должна сохранять отказ.
+- Windows CI 093f48f (117476794211) завершился success: typecheck, unit,
+  traceability, BFE smoke и native Electron reads. CodeRabbit пока review in
+  progress именно для 966bf95…093f48f (comment 6237997423).
+- Финальный полный повтор observer-изменения: npm.cmd test — 3202 passed /
+  5 skipped, 234 files passed / 2 skipped, 123.97 s, exit 0.
+  npm.cmd run typecheck — exit 0; build — exit 0; traceability и diff check
+  — exit 0. Нормативные docs/ не менялись.
+- Лог Windows 093f48f: 3203 passed / 4 skipped, 235 files passed / 1 skipped;
+  BFE ok=true, aborted=true, priority=verified. Это ABI/read-back с Abort,
+  не packet oracle или reboot. Отдельный Electron native smoke: 1 passed /
+  1 skipped. CI/review следующего SHA проверяются после push.
