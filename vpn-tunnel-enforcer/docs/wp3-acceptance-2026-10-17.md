@@ -112,17 +112,61 @@ Baseline rollback теперь возвращает `operationId` и добав�
 3117 passed, 5 skipped, 0 failed; 232 files passed, 2 skipped; 164.69 с,
 exit 0. Трассировка AC 927/927, F 210/210 и `git diff --check` — exit 0.
 
-## Дополнительный подтверждённый пробел статуса
+## AT-03-001/003/004/010: достоверность статуса kill-switch
 
-`get-firewall-kill-switch-status` в `src/main/index.ts` возвращает только
-`active: await isKillSwitchActive()`. Последняя функция считает наличия
-доверенного манифеста достаточным и не проверяет фактическую полноту текущих
-правил/профилей/WFP. `Dashboard.tsx` по этому boolean выводит «Интернет
-заблокирован файрволом» и утверждает предотвращение утечки. При prepared/stale
-манифесте это не доказано; ошибки refresh также оставляют прошлый boolean.
-Нужны свежий verifier, состояние unknown/unverified и его обработка во всех
-потребителях. Этот путь пока не исправлен; он относится к остатку WP-3,
-а не откладывается под видом завершённой приёмки.
+Устранён прежний путь `manifest → active:boolean → «Интернет заблокирован»`.
+IPC/preload/store теперь передают `verified / inactive / unknown` с причиной
+и отдельным признаком необходимости cleanup. `isKillSwitchActive()` сохраняет
+семантику наличия артефактов для lifecycle; это не доказательство блокировки.
+
+Пассивный verifier читает свежий доверенный манифест и выполняется в очереди
+firewall. Проверяются BFE/MpsSvc, Enabled и DefaultOutboundAction=Block всех
+трёх профилей **ActiveStore**, полнота ожидаемых имён, области разрешений,
+отсутствие неизвестных исходящих Allow, точный WFP read-back и соответствие
+TUN доверенному GUID, драйверу Wintun, адресу и LUID. Prepared/pending journal,
+осиротевшие артефакты, ошибка/неполнота чтения и неизвестные scopes дают unknown.
+Отсутствие защиты требует доказанного отсутствия manifest/Firewall/WFP.
+
+Проверка не запускает helper/UAC и не использует fallback. Если helper исчезает
+между подготовкой WFP script и отправкой, `startIfUnavailable:false` запрещает
+его автоматический запуск. Нет helper — unknown. Чужие правила не меняются.
+Неизвестные helper/proxy paths старых журналов также остаются unknown:
+произвольные approved program paths в них не сохранены.
+
+Renderer немедленно снимает старую верификацию при новом запросе/ручной мутации,
+игнорирует старые ответы и сохраняет unknown при ошибках. После cleanup/reset
+выполняется повторная проверка вместо присваивания false по одному success.
+Dashboard различает проверенную конфигурацию и неизвестность, предоставляет
+повторную проверку; tray и crash/proxy-down сообщения не утверждают, что
+файрвол гарантированно блокирует трафик. Проверка конфигурации прямо отделена
+в UI от проверки утечек пакетов.
+
+Нативный read-only запуск production snapshot на рабочем хосте: exit 0,
+BFE/MpsSvc Running, три профиля Enabled=True/Block, **131 чужое outbound Allow**.
+Это не доказывает фактическую утечку, но не позволяет подтвердить полноту
+блокировки. Изменений правил/DNS/адаптеров этим чтением не выполнялось.
+Тот же запуск обнаружил реальную форму IPv4 `address/dotted-mask`; добавлена
+канонизация сетевых областей. Новая регрессия до исправления: 1 failed,
+31 passed; после — PASS, включая отрицательные non-contiguous/broader masks.
+
+Проверки статуса, очереди, WFP ownership, helper no-start и UI races:
+`npm.cmd test -- src/main/firewallStatus.test.ts src/main/firewallTransactions.test.ts src/main/elevatedPsHelper.test.ts src/main/wfpIpv6.test.ts src/renderer/store.firewallStatus.test.ts src/renderer/pages/Dashboard.cancel.test.tsx src/renderer/store.connectionBusy.test.ts`
+— **201 passed, 1 skipped**, 7 files passed, exit 0.
+`npm.cmd test -- src/main/firewallStatus.test.ts src/main/granularKillSwitch.test.ts`
+до последнего расширения масок — 42 passed, exit 0; реальная 8.3 ветка без skip.
+
+Playwright CLI проверил настоящий Dashboard в изолированном Vite harness с
+подставным IPC: unknown в dark/light, verified, исчезновение баннера при
+inactive, повторную проверку, неуспешное снятие и отказ от reset confirmation.
+PNG просмотрены; 414 px визуально проверен. Измерения overflow при 280/320 px
+записаны в журнале. Это UI fixture, не installed E2E. Скрипты gates,
+на которые ссылается локальный design-doctrine, в установленном skill
+отсутствуют; их PASS не заявляется.
+
+Финальные проверки текущего изменения: `npm.cmd run typecheck` — exit 0;
+`npm.cmd run build` — exit 0; `npm.cmd test` — **3168 passed, 5 skipped,
+0 failed**, 234 files passed, 2 skipped, 132.11 с, exit 0. Трассировка —
+AC 927/927, F 210/210; `git diff --check` — exit 0.
 
 ## Условие перехода дальше
 

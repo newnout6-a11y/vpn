@@ -13,6 +13,8 @@ import { randomUUID, createHash } from 'crypto'
 import { getRecoveryManifestDir, recoveryManifestPath, readRecoveryManifest, writeRecoveryManifest, writeRecoveryArtifact, removeRecoveryManifest, strictRecoveryRequired, RecoveryManifestReadError, quarantineRecoveryManifest } from './recoveryManifest'
 import { TUN_ADAPTER_ALIAS, TUN_IPV4_NETWORK_CIDR, getTunAdapterAlias } from './tunAdapter'
 import { withFirewallRulesApi } from './firewallRulesApi'
+import type { FirewallKillSwitchStatus } from '../shared/ipc-types'
+import { FIREWALL_STATUS_PS, parseFirewallStatusSnapshot, matchesFirewallPolicy } from './firewallStatus'
 import { type WfpIpv6Policy, validateWfpIpv6Policy, prepareWfpIpv6Policy, prepareWfpIpv6Exceptions, applyWfpIpv6Policy, verifyWfpIpv6Policy, removeWfpIpv6Protection, hasWfpIpv6Protection, sameWfpCoreScopes, reserveWfpIpv6Priority } from './wfpIpv6'
 
 const execFile = promisify(execFileCb)
@@ -340,6 +342,38 @@ export async function isKillSwitchActive(options?: { probeWfp?: boolean }): Prom
   if ((await readManifest()) !== null || await probeFirewallForOurRules()) return true
   if (options?.probeWfp === false) return false
   return hasWfpIpv6Protection(script => ps(script, true))
+}
+
+/** Presence above remains a cleanup gate. UI evidence must use this fresh read. */
+export function getFirewallKillSwitchStatus(): Promise<FirewallKillSwitchStatus> {
+  return serializeFirewall(async () => {
+    const unknown = (reason: FirewallKillSwitchStatus['reason']): FirewallKillSwitchStatus => ({ state: 'unknown', cleanupRequired: true, reason })
+    if (process.platform !== 'win32' || !isElevatedPsHelperRunning()) return unknown('unavailable')
+    let manifest: FirewallManifest | null
+    try { manifest = await readManifest() }
+    catch { return unknown('untrusted-manifest') }
+    // Bypass ps(): passive reads must never fall back to UAC or restart a helper.
+    const run = async (script: string, policy: 'firewall-killswitch' | 'wfp-ipv6') => {
+      const result = await execElevatedPs(script, 15000, policy, { startIfUnavailable: false })
+      if (result.exitCode) throw new Error('Firewall status read-back failed')
+      return result
+    }
+    try {
+      const snapshot = parseFirewallStatusSnapshot((await run(FIREWALL_STATUS_PS, 'firewall-killswitch')).stdout)
+      if (!manifest) {
+        const wfpPresent = await hasWfpIpv6Protection(script => run(script, 'wfp-ipv6'))
+        if (snapshot.rules.length || snapshot.storedNames.length || wfpPresent) return unknown('incomplete-policy')
+        return { state: 'inactive', cleanupRequired: false, reason: 'no-owned-protection' }
+      }
+      if (manifest.phase !== 'active' || manifest.pendingExceptionPolicy || !manifest.ipv6Policy ||
+          !matchesFirewallPolicy(snapshot, manifest, { app: process.execPath, proxy: externalProxyProgramPath() },
+            getTunAdapterAlias(), LAN_BYPASS_CIDRS, TUN_IPV4_NETWORK_CIDR)) return unknown('incomplete-policy')
+      await verifyWfpIpv6Policy(manifest.ipv6Policy, script => run(script, 'wfp-ipv6'), getTunAdapterAlias())
+      return { state: 'verified', cleanupRequired: true, reason: 'policy-verified' }
+    } catch {
+      return unknown('read-back-failed')
+    }
+  })
 }
 
 export async function ensureKillSwitchProgramAllowed(

@@ -212,8 +212,25 @@ try { Write-Output ('WFP_COUNT:'+ $engine.ReadOwned().Length) } finally { $engin
   if (!Number.isSafeInteger(count) || (count as number) < 0) throw new Error('IPv6 WFP state unknown')
   return (count as number) > 0
 }
-export async function verifyWfpIpv6Policy(policy: WfpIpv6Policy, run: Run): Promise<void> {
+export async function verifyWfpIpv6Policy(policy: WfpIpv6Policy, run: Run, tunAlias?: string): Promise<void> {
+  let tunProof = ''
+  if (tunAlias !== undefined) {
+    const owner = await readRecoveryManifest('tun-owner.json', (v: any) => {
+      if (!v || v.schemaVersion !== 1 || v.owner !== 'VPNTE' || typeof v.interfaceGuid !== 'string' || !guid.test(v.interfaceGuid.replace(/[{}]/g, ''))) throw new Error('Invalid owned TUN identity')
+      return v as { interfaceGuid: string }
+    })
+    if (!owner) throw new Error('Owned TUN identity is required for status')
+    const luids = [...new Set(policy.rules.filter(r => r.role === 'tun').map(r => r.luid))]
+    if (luids.length !== 1) throw new Error('Owned TUN scope is incomplete')
+    tunProof = `
+$owned=@(Get-NetAdapter -ErrorAction Stop | Where-Object { [string]$_.InterfaceGuid -eq ${quote(owner.interfaceGuid)} })
+if ($owned.Count -ne 1 -or $owned[0].Status -ne 'Up' -or $owned[0].Name -ne ${quote(tunAlias)} -or $owned[0].DriverDescription -notmatch '^Wintun\\b' -or $owned[0].PnPDeviceID -notlike 'SWD\\Wintun\\*') { throw 'Owned TUN not verified for status' }
+if ([VPNTE.IPv6.NativeEngine]::InterfaceLuid([string]$owned[0].InterfaceGuid) -ne ${quote(luids[0])}) { throw 'Owned TUN LUID changed' }
+if (-not @(Get-NetIPAddress -InterfaceIndex $owned[0].ifIndex -AddressFamily IPv4 -ErrorAction Stop | Where-Object { $_.IPAddress -eq '192.168.250.253' -and $_.PrefixLength -eq 30 }).Count) { throw 'Owned TUN subnet mismatch' }
+`
+  }
   const { stdout } = await run(`${await wfpPrelude()}${policyScript(policy)}
+${tunProof}
 $engine=New-Object VPNTE.IPv6.NativeEngine
 try { $engine.VerifyPriority(); [VPNTE.IPv6.Policy]::Validate($rules); [VPNTE.IPv6.Policy]::AssertSame($engine.ReadOwned(),$rules); Write-Output 'WFP_IPV6_VERIFIED' } finally { $engine.Dispose() }`)
   if (!String(stdout).split(/\r?\n/).includes('WFP_IPV6_VERIFIED')) throw new Error('IPv6 WFP coverage not verified')

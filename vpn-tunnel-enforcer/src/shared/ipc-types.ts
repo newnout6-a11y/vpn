@@ -633,6 +633,13 @@ export interface SpeedTestResult {
 /** Kill-switch severity level */
 export type KillSwitchLevel = 'off' | 'standard' | 'strict'
 
+/** Fresh configuration read-back; never a claim that packet/L3 acceptance passed. */
+export interface FirewallKillSwitchStatus {
+  state: 'verified' | 'inactive' | 'unknown'
+  cleanupRequired: boolean
+  reason: 'policy-verified' | 'no-owned-protection' | 'checking' | 'unavailable' | 'untrusted-manifest' | 'incomplete-policy' | 'read-back-failed'
+}
+
 /** Kill-switch exception entry */
 export interface KillSwitchException {
   id: string

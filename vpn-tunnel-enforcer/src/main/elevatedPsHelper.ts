@@ -374,7 +374,8 @@ function terminateHungHelper(cause: Error): void {
 export async function execElevatedPs(
   script: string,
   timeoutMs = 30000,
-  policy: ElevatedPsPolicy
+  policy: ElevatedPsPolicy,
+  options?: { startIfUnavailable?: boolean }
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   if (process.platform !== 'win32') {
     throw new Error('execElevatedPs is only available on Windows')
@@ -397,6 +398,9 @@ export async function execElevatedPs(
   validateScriptPolicy(policySource, policy)
 
   if (!isElevatedPsHelperRunning()) {
+    if (options?.startIfUnavailable === false) {
+      throw new ElevatedPsHelperError('elevated-helper-unavailable', 'Passive read requires an already running PS helper')
+    }
     if (restartCount < MAX_RESTARTS) {
       restartCount++
       await startElevatedPsHelper()

@@ -70,6 +70,17 @@ describe('elevated PS helper errors', () => {
     await expect(execElevatedPs('Get-NetFirewallProfile', 30000, 'firewall-killswitch')).rejects.toBeInstanceOf(ElevatedPsHelperError)
   })
 
+  it('never launches a helper or UAC for a passive read, even with an elevated token (AT-03-001)', async () => {
+    ;(globalThis as any).__elevatedPsHelperMock = { elevated: true }
+    const { execElevatedPs } = await import('./elevatedPsHelper')
+    const { spawn } = await import('child_process')
+    vi.mocked(spawn).mockClear(); mockExecFile.mockClear()
+    await expect(execElevatedPs('Get-NetFirewallProfile', 1000, 'firewall-killswitch', { startIfUnavailable: false }))
+      .rejects.toMatchObject({ code: 'elevated-helper-unavailable' })
+    expect(spawn).not.toHaveBeenCalled()
+    expect(mockExecFile).not.toHaveBeenCalled()
+  })
+
   it('rejects pending commands with a typed stopped error on shutdown', async () => {
     ;(globalThis as any).__elevatedPsHelperMock = { elevated: true }
     const { execElevatedPs, startElevatedPsHelper, stopElevatedPsHelper } = await import('./elevatedPsHelper')

@@ -38,6 +38,7 @@ import {
   disableKillSwitchIfActive,
   getFirewallRepairHealth,
   isKillSwitchActive,
+  getFirewallKillSwitchStatus,
   KILL_SWITCH_RULE_PREFIX,
   killSwitchManifestExists,
   nuclearFirewallReset,
@@ -2283,7 +2284,7 @@ app.whenReady().then(async () => {
   })
 
   handleLogged('get-firewall-kill-switch-status', async () => {
-    return { active: await isKillSwitchActive() }
+    return getFirewallKillSwitchStatus()
   })
 
   // Detect another active VPN/TUN adapter (Happ, WireGuard, OpenVPN, …) that

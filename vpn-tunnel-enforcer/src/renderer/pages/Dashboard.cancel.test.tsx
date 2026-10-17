@@ -32,10 +32,10 @@ beforeEach(() => {
   useAppStore.setState({ settings: { ...defaults, connectionMode: 'directVpn' },
     connectionBusy: 'connecting', connectionCancelling: false, mode: 'off', tunRunning: false,
     vpnIp: null, publicIp: null, restartingProgress: null, serverSwitchingName: null,
-    firewallKillSwitchActive: false, logs: [], competingTun: null })
+    firewallKillSwitchStatus: { state: 'inactive', cleanupRequired: false, reason: 'no-owned-protection' }, logs: [], competingTun: null })
   ;(window as any).electronAPI = {
     cancelTun: vi.fn().mockResolvedValue({ success: true }),
-    getFirewallKillSwitchStatus: vi.fn().mockResolvedValue({ active: false }),
+    getFirewallKillSwitchStatus: vi.fn().mockResolvedValue({ state: 'inactive', cleanupRequired: false, reason: 'no-owned-protection' }),
     serversGetActive: vi.fn().mockResolvedValue({ profile: { name: 'fixture' } }),
     saveSettings: vi.fn().mockImplementation(async settings => settings),
     startDirectVpn: vi.fn().mockResolvedValue({ success: true }),
@@ -45,6 +45,27 @@ beforeEach(() => {
 afterEach(() => { cleanup() })
 
 describe('Dashboard cancellation', () => {
+  it('shows unknown firewall evidence without claiming Internet blocking; recheck can establish absence (AT-03-001/003)', async () => {
+    useAppStore.setState({ connectionBusy: null, firewallKillSwitchStatus: { state: 'unknown', cleanupRequired: true, reason: 'read-back-failed' } })
+    render(<Dashboard />)
+    expect(screen.getByText(ru.dashboard.firewallUnknownTitle)).toBeInTheDocument()
+    expect(screen.queryByText('Интернет заблокирован файрволом')).not.toBeInTheDocument()
+    expect(screen.queryByText(ru.dashboard.firewallVerifiedTitle)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Снять блокировку' })).toBeEnabled()
+    fireEvent.click(screen.getByRole('button', { name: ru.dashboard.firewallRecheck }))
+    await waitFor(() => expect(screen.queryByText(ru.dashboard.firewallUnknownTitle)).not.toBeInTheDocument())
+  })
+  it('keeps the warning after a failed manual cleanup and a failed status refresh (AT-03-003/007)', async () => {
+    Object.assign(window.electronAPI, { disableFirewallKillSwitch: vi.fn().mockResolvedValue({ success: false, message: 'Partial rollback' }),
+      getFirewallKillSwitchStatus: vi.fn().mockRejectedValue(new Error('helper unavailable')) })
+    useAppStore.setState({ connectionBusy: null, firewallKillSwitchStatus: { state: 'verified', cleanupRequired: true, reason: 'policy-verified' } })
+    render(<Dashboard />)
+    expect(screen.getByText(ru.dashboard.firewallVerifiedTitle)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Снять блокировку' }))
+    await waitFor(() => expect(useAppStore.getState().firewallKillSwitchStatus.reason).toBe('unavailable'))
+    expect(screen.getByText(ru.dashboard.firewallUnknownTitle)).toBeInTheDocument()
+    expect(screen.queryByText(ru.dashboard.firewallVerifiedTitle)).not.toBeInTheDocument()
+  })
   it('keeps the power button locked if selection settles before cancelTransition replies (AT-00-007)', async () => {
     const acknowledgement = deferred<{ requested: boolean }>()
     Object.assign(window.electronAPI, {

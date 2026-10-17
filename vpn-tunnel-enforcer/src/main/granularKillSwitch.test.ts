@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import fc from 'fast-check'
 import { execFileSync } from 'node:child_process'
-import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 const storeData = vi.hoisted(() => new Map<string, any>())
@@ -200,10 +201,8 @@ describe('granularKillSwitch level application', () => {
     expect(audit.map(call => call[3].value)).toEqual(order.map(change => change.value))
     expect(audit.map(call => call[2])).toEqual(order.map(change => `exception ${change.kind === 'add' ? 'added' : 'removed'} and synchronized`))
   })
-  it.skipIf(process.platform !== 'win32')('rejects a real 8.3 alias as a duplicate of the long executable path (AT-03-009)', async context => {
-    const root = join(process.cwd(), '.tmp')
-    await mkdir(root, { recursive: true })
-    const directory = await mkdtemp(join(root, 'kill-switch-path-'))
+  it.skipIf(process.platform !== 'win32')('rejects a real 8.3 alias as a duplicate of the long executable path (AT-03-009)', async ({ skip }) => {
+    const directory = await mkdtemp(join(tmpdir(), 'kill-switch-path-'))
     try {
       const executable = join(directory, 'Long application name.exe')
       await writeFile(executable, 'fixture')
@@ -213,7 +212,7 @@ $buffer=New-Object Text.StringBuilder 32768
 if([ShortPathFixture]::GetShortPathName('${executable.replace(/'/g, "''")}', $buffer, $buffer.Capacity) -eq 0){throw 'Short path lookup failed'}
 $buffer.ToString()`
       const shortPath = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], { encoding: 'utf8', timeout: 15000, windowsHide: true }).trim()
-      if (shortPath.toLowerCase() === executable.toLowerCase()) context.skip('This NTFS volume does not create 8.3 aliases')
+      if (shortPath.toLowerCase() === executable.toLowerCase()) skip('This NTFS volume does not create 8.3 aliases')
       const { granularKillSwitch } = await import('./granularKillSwitch')
       granularKillSwitch.init('C:\\Tools\\sing-box.exe')
       const added = await granularKillSwitch.addException({ type: 'app', value: executable, label: 'Long path' })

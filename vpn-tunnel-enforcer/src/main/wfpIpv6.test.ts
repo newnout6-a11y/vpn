@@ -27,6 +27,19 @@ beforeEach(() => {
   state.resolve6.mockReset().mockResolvedValue([]); state.cancelDns.mockReset()
 })
 describe('independent IPv6 WFP lifecycle', () => {
+  it('binds passive status verification to fresh trusted TUN identity, LUID and subnet (AT-03-001/006/012)', async () => {
+    const policy = blocks()
+    policy.rules.push({ id: randomUUID(), role: 'tun', remote: '', appId: '', luid: '123', originalApp: false, inbound: false, boot: false },
+      { id: randomUUID(), role: 'tun', remote: '', appId: '', luid: '123', originalApp: false, inbound: true, boot: false })
+    const run = vi.fn(async (_script: string) => ({ stdout: 'WFP_IPV6_VERIFIED' }))
+    await verifyWfpIpv6Policy(policy, run, 'Ethernet 5')
+    expect(run.mock.calls[0][0]).toContain("-ne '123'")
+    expect(run.mock.calls[0][0]).toContain("-ne 'Ethernet 5'")
+    expect(run.mock.calls[0][0]).toContain('Owned TUN subnet mismatch')
+    state.owner = null; run.mockClear()
+    await expect(verifyWfpIpv6Policy(policy, run, 'Ethernet 5')).rejects.toThrow('identity is required')
+    expect(run).not.toHaveBeenCalled()
+  })
   it('pins the exact same source in main and boot recovery before compilation (AT-03-012)', async () => {
     expect(createHash('sha256').update(source).digest('hex')).toBe(WFP_SOURCE_SHA256)
     expect(readFileSync(join(process.cwd(), 'resources/vpnte-recover.ps1'), 'utf8')).toContain(`$hash -ne '${WFP_SOURCE_SHA256}'`)

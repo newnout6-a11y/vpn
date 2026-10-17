@@ -21,6 +21,13 @@
     "legacyCleanupRequired": "Stopping the old client's capture is not confirmed. Disconnect the VPN and close the old client normally before updating; new capture is blocked."
   },
   "dashboard": {
+    "firewallVerifiedTitle": "Kill-switch policy verified",
+    "firewallVerifiedBody": "Windows Firewall profiles, rules and IPv6 WFP match the checked policy. Allowed exceptions still apply; configuration checks do not replace traffic leak tests.",
+    "firewallUnknownTitle": "Traffic blocking is unverified",
+    "firewallUnknownBody": "The full kill-switch policy could not be verified. Rules may remain installed. Do not assume the connection is protected; retry the check or remove VPNTE rules.",
+    "firewallChecking": "Checking…",
+    "firewallRecheck": "Check again",
+
     "title": "Dashboard",
     "vpnToggle": "VPN Protection",
     "ipChangedUnverified": "VPN IP changed, verification required",

@@ -108,7 +108,7 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
   const isLeak = useAppStore(s => s.isLeak)
   const publicIpVerdict = useAppStore(s => s.publicIpVerdict)
   const traffic = useAppStore(s => s.traffic)
-  const firewallKillSwitchActive = useAppStore(s => s.firewallKillSwitchActive)
+  const firewallStatus = useAppStore(s => s.firewallKillSwitchStatus)
   const routingHealth = useAppStore(s => s.routingHealth)
   const leakChecks = useAppStore(s => s.leakChecks)
   const restartingProgress = useAppStore(s => s.restartingProgress)
@@ -120,7 +120,7 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
   const setVpnIp = useAppStore(s => s.setVpnIp)
   const setPublicIp = useAppStore(s => s.setPublicIp)
   const setSettings = useAppStore(s => s.setSettings)
-  const setFirewallKillSwitchActive = useAppStore(s => s.setFirewallKillSwitchActive)
+  const refreshFirewallStatus = useAppStore(s => s.refreshFirewallKillSwitchStatus)
   const setLeakChecks = useAppStore(s => s.setLeakChecks)
   const addLog = useAppStore(s => s.addLog)
 
@@ -245,9 +245,7 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
     }, 30000)
 
     const refreshKillSwitchState = () => {
-      window.electronAPI.getFirewallKillSwitchStatus()
-        .then(({ active }) => setFirewallKillSwitchActive(active))
-        .catch(() => undefined)
+      void refreshFirewallStatus()
     }
 
     try {
@@ -467,7 +465,7 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
 
   const visibleLeak = isLeak && !isServerSwitching
   const showKillSwitchBanner =
-    firewallKillSwitchActive &&
+    firewallStatus.state !== 'inactive' &&
     !tunRunning &&
     !isServerSwitching &&
     !connecting &&
@@ -478,10 +476,10 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
 
   const handleDisengageKillSwitch = async () => {
     setDisengaging(true)
+    useAppStore.getState().invalidateFirewallKillSwitchStatus()
     try {
       const result = await window.electronAPI.disableFirewallKillSwitch()
       if (result.success) {
-        setFirewallKillSwitchActive(false)
         // `skipped:true` means main found nothing to disable — kill-switch was
         // already off (typical: user clicks the banner just after the auto-
         // rollback fired on TUN stop). Don't pretend the user "did" anything,
@@ -495,6 +493,7 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
     } catch (err: any) {
       addLog('error', `Ошибка снятия kill-switch: ${err.message}`)
     } finally {
+      void refreshFirewallStatus()
       setDisengaging(false)
     }
   }
@@ -508,10 +507,10 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
     )
     if (!confirmed) return
     setNuclearResetting(true)
+    useAppStore.getState().invalidateFirewallKillSwitchStatus()
     try {
       const result = await window.electronAPI.firewallNuclearReset('RESET_WINDOWS_FIREWALL_CONFIRMED')
       if (result.success) {
-        setFirewallKillSwitchActive(false)
         showToast('info', 'Firewall сброшен', result.message)
         addLog('warn', `Полный сброс firewall: ${result.message}`)
       } else {
@@ -522,6 +521,7 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
       showToast('error', 'Ошибка сброса firewall', err.message || String(err))
       addLog('error', `Ошибка сброса firewall: ${err.message}`)
     } finally {
+      void refreshFirewallStatus()
       setNuclearResetting(false)
     }
   }
@@ -663,13 +663,20 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
             <Lock className="w-8 h-8 text-[var(--color-danger)] flex-shrink-0 mt-0.5" />
             <div className="flex-1">
               <p className="text-lg font-bold text-[var(--color-danger)]">
-                Интернет заблокирован файрволом
+                {t(firewallStatus.state === 'verified' ? 'dashboard.firewallVerifiedTitle' : 'dashboard.firewallUnknownTitle')}
               </p>
               <p className="text-sm text-[var(--color-danger)]/90 mt-1">
-                VPN отключён, но Windows Firewall всё ещё блокирует трафик чтобы предотвратить утечку IP.
-                Сайты не будут открываться, пока вы не снимете блокировку или не включите защиту заново.
+                {t(firewallStatus.state === 'verified' ? 'dashboard.firewallVerifiedBody' : 'dashboard.firewallUnknownBody')}
               </p>
               <div className="flex flex-wrap gap-2 mt-3">
+                <button
+                  onClick={() => void refreshFirewallStatus()}
+                  disabled={firewallStatus.reason === 'checking' || disengaging || nuclearResetting}
+                  aria-busy={firewallStatus.reason === 'checking'}
+                  className="text-sm font-medium px-4 py-2 rounded-[var(--radius-sm)] border border-[var(--color-danger)] text-[var(--color-danger)] hover:bg-[var(--color-danger)]/10 transition-colors duration-[var(--transition-fast)] disabled:opacity-50"
+                >
+                  {t(firewallStatus.reason === 'checking' ? 'dashboard.firewallChecking' : 'dashboard.firewallRecheck')}
+                </button>
                 <button
                   onClick={handleDisengageKillSwitch}
                   disabled={disengaging || nuclearResetting}

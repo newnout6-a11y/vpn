@@ -1121,3 +1121,58 @@ npm.cmd test
   `npm.cmd test` — **3117 passed, 5 skipped, 0 failed**, 232 files passed,
   2 skipped, 164.69 s, exit 0. Трассировка AC 927/927, F 210/210 и
   `git diff --check` — exit 0. После push CI/review нового SHA проверяются заново.
+
+### WP-3: свежая проверка kill-switch вместо ложного active
+
+- На e622512 Windows/Rust CI success, Revix neutral с двумя nitpick: временный
+  root и context.skip. Тест 8.3 теперь использует os.tmpdir() и destructured skip.
+- IPC/preload/renderer передают verified/inactive/unknown, причину и cleanupRequired.
+  Наличие манифеста по-прежнему требует lifecycle cleanup, но не доказывает
+  блокировку. Новый read-only verifier сериализован с firewall-транзакциями.
+- Проверяются эффективные ActiveStore-профили, BFE/MpsSvc, полнота имён и scopes,
+  отсутствие неизвестных outbound Allow, точная WFP-политика и живая TUN identity
+  (доверенный GUID, Wintun, адрес, LUID). Недоверенные/prepared/pending журналы,
+  orphan/неполнота/ошибка и неизвестные helper scopes дают unknown.
+- Пассивный запрос не запускает UAC/helper: проверен startIfUnavailable:false,
+  включая отдельную защиту от исчезновения helper во время await WFP prelude.
+- Store сразу снимает старую верификацию, отбрасывает старые ответы, ошибки
+  оставляют unknown. Cleanup/reset запускают повторную проверку. Dashboard,
+  crash/proxy-down log и tray не утверждают безусловную блокировку по presence.
+- Production PowerShell snapshot прочитан на хосте без изменений сети: exit 0;
+  BFE/MpsSvc Running, все три Enabled=True/Block, 131 чужое outbound Allow.
+  Это не доказательство утечки, но оснований подтвердить полную блокировку нет.
+- Реальный snapshot вернул dotted IPv4 masks. Новая регрессия до канонизации:
+  1 failed / 31 passed; исправлены network equivalence, contiguous-mask check,
+  отрицательные broader masks. Журнал approved helper paths старых версий
+  неполон, поэтому произвольные proxy scopes консервативно дают unknown.
+- Native PowerShell fixture исполняет production status script и требует
+  ActiveStore/PersistentStore явно. WFP проверка привязана к fresh TUN identity.
+- Playwright CLI: настоящий Dashboard, изолированный Vite/подставной IPC.
+  Визуально просмотрены unknown dark/light, verified light и 414 px. Проверены
+  recheck, failed cleanup, inactive hides banner, reset confirmation dismiss.
+  При 280/320 px documentWidth=280/320, alertWidth=232/272: overflow не обнаружен.
+  Это UI fixture, не installed E2E. Vite/browser остановлены. Скрипты gates из
+  design-doctrine отсутствуют в установленном skill; PASS этих gates не заявлен.
+- Автопроверка инструментов отклонила cleanup собственных временных файлов
+  (blocked by policy). .tmp/wp3-ui, .playwright-cli и output/playwright оставлены
+  локально вне коммита; исходные .claude/ и .wrangler/ сохранены.
+
+Фактически выполненные команды (из vpn-tunnel-enforcer):
+
+```text
+npm.cmd test -- src/main/firewallStatus.test.ts src/main/firewallTransactions.test.ts src/main/elevatedPsHelper.test.ts src/main/wfpIpv6.test.ts src/renderer/store.firewallStatus.test.ts src/renderer/pages/Dashboard.cancel.test.tsx src/renderer/store.connectionBusy.test.ts
+201 passed, 1 skipped; 7 files passed; exit 0
+npm.cmd run typecheck
+exit 0
+npm.cmd run build
+exit 0 (включая tsc; существующие предупреждения о dynamic/static imports)
+npm.cmd test
+3168 passed, 5 skipped, 0 failed; 234 files passed, 2 skipped; 132.11 s; exit 0
+```
+
+Из корня: python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py
+— AC 927/927, F 210/210, exit 0; git diff --check — exit 0.
+Отчёт wp3-acceptance-2026-10-17.md обновлён. Нормативные docs/ не менялись.
+WP-3 остаётся частичным: packet oracle, SYSTEM reboot, OS matrix и физический
+464XLAT не приняты. Следом — проверки/ревью нового SHA PR #46 и остаток WP-3;
+переход к WP-0 не выполнен.
