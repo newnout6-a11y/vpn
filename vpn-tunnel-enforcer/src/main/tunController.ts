@@ -3805,7 +3805,7 @@ export const tunController = {
     // Reserve admission synchronously so a new start cannot slip into the wait.
     stopInProgress = true
     activeStopPreservesProtection = options.preserveNetworkProtection === true
-    const operationId = randomUUID()
+    const operationId = `stop_${randomUUID().replaceAll('-', '')}`
     const cleanup = async (): Promise<TunStopResult> => {
     const stopStarted = performance.now()
     const stopPhases: Record<string, number> = {}

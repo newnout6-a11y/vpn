@@ -203,7 +203,7 @@ Write-Output 'BASELINE_APPLIED'`)
   }
 }
 export function rollbackTunNetworkBaseline(): Promise<SystemNetworkResult> { return withBaselineOpLock(() => rollbackUnlocked()) }
-async function rollbackUnlocked(reason = 'manual', operationId: string = randomUUID()): Promise<SystemNetworkResult> {
+async function rollbackUnlocked(reason = 'manual', operationId: string = `baseline_${randomUUID().replaceAll('-', '')}`): Promise<SystemNetworkResult> {
   if (process.platform !== 'win32') return { success: false, message: 'Rollback доступен только на Windows' }
   logEvent('info', 'system-network', 'baseline rollback started', { operationId, reason })
   try {

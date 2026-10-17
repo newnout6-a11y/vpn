@@ -189,7 +189,7 @@ describe('lifecycle cleanup evidence and retries (AT-02-005 / AT-03-007)', () =>
     if (failing === 'xray') h.stopXray.mockRejectedValueOnce(new Error('Xray failed'))
     const result = await h.stop()
     expect(result.success).toBe(failing === 'success')
-    expect(result.operationId).toMatch(/^[a-f0-9-]{36}$/)
+    expect(result.operationId).toMatch(/^stop_[a-f0-9]{32}$/)
     const events = h.logEvent.mock.calls.filter(call => call[1] === 'tun')
     expect(events.length).toBeGreaterThan(0)
     for (const event of events) expect(event[3]).toMatchObject({ operationId: result.operationId })

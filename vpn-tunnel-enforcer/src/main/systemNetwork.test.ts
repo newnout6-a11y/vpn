@@ -1,11 +1,14 @@
 // AT-03-003 / AT-03-007 / AT-03-012: baseline fault injection, not Windows L3.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { execFileSync } from 'child_process'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'fs'
+import { join } from 'path'
 const state = vi.hoisted(() => ({
   manifest: null as any, failRead: false, failWrite: false, failApply: false,
   failNetsh: false, failNotify: false, failedSteps: [] as number[], scripts: [] as string[],
-  writes: [] as any[], operations: [] as string[], nativeFailure: false, reportPatch: null as any
+  writes: [] as any[], operations: [] as string[], nativeFailure: false, reportPatch: null as any, logDirectory: ''
 }))
+vi.mock('electron', () => ({ app: { getPath: () => state.logDirectory }, shell: { openPath: vi.fn() } }))
 const fixture = () => ({
   schemaVersion: 1, owner: 'VPNTE', createdAt: 1780000000000, userSid: 'S-1-5-21-1-2-3-1001',
   values: [
@@ -87,6 +90,46 @@ beforeEach(() => {
 })
 afterEach(() => Object.defineProperty(process, 'platform', platform))
 describe('trusted typed network baseline', () => {
+  it('keeps receipt IDs distinct through real logger/redaction/file writes across a failed rollback and retry (AT-03-007)', async () => {
+    const temporary = join(process.cwd(), '.tmp'); mkdirSync(temporary, { recursive: true })
+    state.logDirectory = mkdtempSync(join(temporary, 'baseline-log-correlation-'))
+    const logger = await vi.importActual<typeof import('./appLogger')>('./appLogger')
+    vi.mocked(logEvent).mockImplementation(logger.logEvent)
+    const consoleSpies = [vi.spyOn(console, 'log'), vi.spyOn(console, 'warn'), vi.spyOn(console, 'error')]
+    for (const spy of consoleSpies) spy.mockImplementation(() => undefined)
+    const credentialUuid = '12345678-1234-4123-8123-123456789abc'
+    try {
+      state.manifest = fixture(); state.failedSteps = [3]
+      const failed = await rollbackTunNetworkBaselineIfApplied('failed attempt')
+      state.failedSteps = []
+      const retried = await rollbackTunNetworkBaselineIfApplied('retry')
+      logger.logEvent('info', 'test', 'credential masking remains active', { note: credentialUuid })
+      logger.logEvent('debug', 'test', 'correlation write barrier')
+      let raw = ''
+      let records: Array<{ scope: string; message: string; details?: any }> = []
+      await vi.waitFor(() => {
+        raw = readFileSync(logger.getAppLogPath(), 'utf8')
+        records = raw.trim().split(/\r?\n/).map(line => JSON.parse(line))
+        expect(records.at(-1)?.message).toBe('correlation write barrier')
+      })
+      expect(failed.success).toBe(false)
+      expect(retried.success).toBe(true)
+      expect(failed.operationId).not.toBe(retried.operationId)
+      const events = records.filter(record => record.scope === 'system-network')
+      expect(new Set(events.map(record => record.details?.operationId))).toEqual(new Set([failed.operationId, retried.operationId]))
+      for (const receipt of [failed, retried]) {
+        const operation = events.filter(record => record.details?.operationId === receipt.operationId)
+        expect(operation.filter(record => record.message === 'baseline rollback step')).toHaveLength(9)
+        expect(operation.find(record => record.message === 'baseline rollback completed')?.details.success).toBe(receipt.success)
+      }
+      expect(raw).not.toContain(credentialUuid)
+      expect(raw).toContain('<redacted-uuid>')
+    } finally {
+      vi.mocked(logEvent).mockReset()
+      for (const spy of consoleSpies) spy.mockRestore()
+      rmSync(state.logDirectory, { recursive: true, force: true })
+    }
+  })
   it.each(['step', 'notification', 'untrusted'])('rejects incomplete %s recovery for callers using exceptions (AT-03-007)', async failure => {
     state.manifest = fixture()
     if (failure === 'step') state.failedSteps = [3]
@@ -288,8 +331,8 @@ finally { [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree($testRoot,$fa
     expect(failed.success).toBe(false)
     expect(retried.success).toBe(true)
     expect(state.manifest).toBeNull()
-    expect(failed).toHaveProperty('operationId', expect.stringMatching(/^[a-f0-9-]{36}$/))
-    expect(retried).toHaveProperty('operationId', expect.stringMatching(/^[a-f0-9-]{36}$/))
+    expect(failed).toHaveProperty('operationId', expect.stringMatching(/^baseline_[a-f0-9]{32}$/))
+    expect(retried).toHaveProperty('operationId', expect.stringMatching(/^baseline_[a-f0-9]{32}$/))
     expect(failed.operationId).not.toBe(retried.operationId)
     const events = vi.mocked(logEvent).mock.calls.filter(call => call[1] === 'system-network')
     expect(events.every(call => [failed.operationId, retried.operationId].includes((call[3] as any)?.operationId))).toBe(true)
