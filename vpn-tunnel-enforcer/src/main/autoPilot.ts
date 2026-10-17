@@ -3,7 +3,7 @@ import { SocksClient } from 'socks'
 import { getRoutingPlan, type RoutingPlan, type ProxyListenerInfo } from './connectionPlanner'
 import { logEvent } from './appLogger'
 import { settingsStore } from './settings'
-import { applyTunNetworkBaseline, rollbackTunNetworkBaselineIfApplied } from './systemNetwork'
+import { applyTunNetworkBaseline, rollbackTunNetworkBaselineOrThrow } from './systemNetwork'
 import { probeTcp, tunController } from './tunController'
 import { TUN_ADAPTER_ALIAS } from './tunAdapter'
 
@@ -273,12 +273,14 @@ async function doRunAutoPilot(): Promise<AutoPilotResult> {
     stealthMode: settingsStore.get().stealthMode
   })
   changed = true
+  let recoveryWarning: string | undefined
   if (!start.success) {
     // We may have applied the network baseline above; if TUN didn't come up, undo it so
     // the user is not left with both no-VPN and no-original-proxy-config.
-    await rollbackTunNetworkBaselineIfApplied('autopilot start failed').catch(err =>
+    await rollbackTunNetworkBaselineOrThrow('autopilot start failed').catch(err => {
       logEvent('warn', 'autopilot', 'baseline rollback after start failure failed', err)
-    )
+      recoveryWarning = err?.message || String(err)
+    })
   }
   steps.push({
     label: 'Включить один системный TUN',
@@ -289,6 +291,13 @@ async function doRunAutoPilot(): Promise<AutoPilotResult> {
     status: start.success ? 'ok' : 'fail'
   })
 
+  if (recoveryWarning) steps.push({
+    label: 'Восстановить системные proxy',
+    before: 'TUN не запустился; требуется откат network baseline.',
+    after: recoveryWarning,
+    status: 'fail'
+  })
+
   const finalPlan = await getRoutingPlan()
   return {
     ranAt: Date.now(),
@@ -297,7 +306,7 @@ async function doRunAutoPilot(): Promise<AutoPilotResult> {
     title: start.success ? 'Автопилот включил Hard TUN' : 'Автопилот не смог включить Hard TUN',
     message: start.success
       ? 'Безопасный сценарий применен автоматически: один TUN, один proxy, без двойного туннеля.'
-      : start.error || 'Запуск TUN завершился ошибкой.',
+      : [start.error || 'Запуск TUN завершился ошибкой.', recoveryWarning].filter(Boolean).join('. '),
     changed,
     steps,
     plan: finalPlan

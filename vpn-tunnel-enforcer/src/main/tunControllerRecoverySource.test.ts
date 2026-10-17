@@ -78,7 +78,7 @@ describe('tunController recovery cancellation guards', () => {
     expect(cleanup).toContain('${OWNED_RUNTIME_STOP_SCRIPT}')
     expect(OWNED_RUNTIME_STOP_SCRIPT).toContain("$names = @('vpnte-sing-box.exe', 'vpnte-etw-sidecar.exe', 'vpnte-xray.exe')")
     expect(OWNED_RUNTIME_STOP_SCRIPT).toContain('$_.ExecutablePath')
-    expect(OWNED_RUNTIME_STOP_SCRIPT).toContain('StartsWith($runtimeDir')
+    expect(OWNED_RUNTIME_STOP_SCRIPT).toContain('StartsWith($runtimePrefix')
     expect(OWNED_RUNTIME_STOP_SCRIPT).not.toContain('vpnte-external-proxy.exe')
     expect(OWNED_RUNTIME_STOP_SCRIPT).not.toContain('external-proxy-runtime')
     expect(cleanup).not.toContain('vpnte-external-proxy.exe')

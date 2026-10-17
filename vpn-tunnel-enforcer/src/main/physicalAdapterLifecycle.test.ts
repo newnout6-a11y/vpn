@@ -2,6 +2,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
+import { isIP } from 'node:net'
 import ts from 'typescript'
 import { describe, expect, it, vi } from 'vitest'
 
@@ -39,6 +40,75 @@ function deferred<T>() {
   const promise = new Promise<T>(done => { resolve = done })
   return { promise, resolve }
 }
+
+describe('adapter rollback correlation (AT-03-007)', () => {
+  it.each(['adapter', 'duplicate', 'transition', 'policy'] as const)('recovers valid neighbors of a bad %s record (AT-03-003c)', async failure => {
+    const valid = { ...adapter(), ipv4DnsSource: 'static', forcedIpv6Off: true, ipv6Enabled: true }
+    const disk: any = { schemaVersion: 1, owner: 'VPNTE', appliedAt: Date.now(), tunDnsIpv4: '192.168.250.254',
+      adapters: [valid, { ...valid, interfaceGuid: '22222222-2222-2222-2222-222222222222', alias: 'Ethernet' }],
+      transitionAdapters: { teredoType: 'client', sixToFourState: null, isatapState: null },
+      dnsRegistryPolicy: { smartNameResolution: { exists: false }, parallelAandAAAA: { exists: false } } }
+    if (failure === 'adapter') disk.adapters[0].interfaceGuid = "';invalid"
+    if (failure === 'duplicate') disk.adapters.push({ ...valid, interfaceGuid: `{${valid.interfaceGuid!.toUpperCase()}}` })
+    if (failure === 'transition') disk.transitionAdapters.teredoType = 'invalid'
+    if (failure === 'policy') disk.dnsRegistryPolicy.smartNameResolution = { exists: true, type: 'REG_DWORD', data: 'overflow' }
+    const validate = compile<(value: unknown, rejected?: string[]) => any>('validateLockdownManifest', { isIP })
+    const deps = {
+      process: { platform: 'win32' }, logEvent: vi.fn(), psSingleQuote: quote,
+      readManifest: vi.fn(async (rejected?: string[]) => validate(disk, rejected)),
+      netshRestoreLine: compile('netshRestoreLine', { netshState: compile('netshState', {}) }),
+      registryRestoreLine: compile('registryRestoreLine', { psSingleQuote: quote }),
+      deleteManifest: vi.fn(), clearPhysicalAdaptersSnapshotCache: vi.fn(),
+      runPS: vi.fn(async (_script: string) => 'A0_ipv6:on\nA0_dns:noop\nA1_ipv6:on\nA1_dns:noop\nTRANS_teredo:restore\nTRANS_6to4:unknown\nTRANS_isatap:unknown\nDNS_SMNR:delete\nDNS_PARALLEL:delete')
+    }
+    const rollback = compile<(reason: string, options: { operationId: string }) => Promise<any>>('rollbackPhysicalAdapterLockdownIfApplied', deps)
+    const result = await rollback('partial recovery', { operationId: 'stop_fixture' })
+    expect(result).toMatchObject({ rolledBack: false, warnings: expect.any(Array) })
+    expect(result.warnings.length).toBeGreaterThan(0)
+    expect(deps.deleteManifest).not.toHaveBeenCalled()
+    expect(() => validate(disk)).toThrow()
+    expect(deps.runPS).toHaveBeenCalledOnce()
+    const script = deps.runPS.mock.calls[0][0] as string
+    expect(script).not.toContain('invalid')
+    expect(script).not.toContain('overflow')
+    expect(script).toContain('22222222-2222-2222-2222-222222222222')
+    if (failure === 'duplicate') expect(script).not.toContain(valid.interfaceGuid)
+    if (failure === 'policy') {
+      expect(script).not.toMatch(/(?:SetValue|DeleteValue)\('DisableSmartNameResolution'/)
+      expect(script).toContain('DisableParallelAandAAAA')
+    }
+    expect(deps.logEvent).toHaveBeenCalledWith('error', 'phys-lockdown', 'adapter rollback step rejected', expect.objectContaining({ operationId: 'stop_fixture', success: false }))
+  })
+  it.each(['success', 'adapter', 'policy', 'native'])('retains Stop ID and independent outcomes: %s', async failing => {
+    const operationId = '00000000-0000-4000-8000-000000000007'
+    const deps = {
+      process: { platform: 'win32' }, logEvent: vi.fn(), psSingleQuote: quote,
+      readManifest: vi.fn(async () => ({ adapters: [adapter(), { ...adapter(), alias: 'Ethernet' }], dnsRegistryPolicy: {} })),
+      registryRestoreLine: vi.fn(() => ''), deleteManifest: vi.fn(), clearPhysicalAdaptersSnapshotCache: vi.fn(),
+      runPS: vi.fn(async () => {
+        if (failing === 'native') throw new Error('helper failed')
+        return `A0_ipv6:${failing === 'adapter' ? 'error' : 'noop'}\nA0_dns:noop\nA1_ipv6:noop\nA1_dns:noop\nDNS_SMNR:${failing === 'policy' ? 'error' : 'delete'}\nDNS_PARALLEL:delete`
+      })
+    }
+    const rollback = compile<(reason: string, options: { operationId: string }) => Promise<any>>('rollbackPhysicalAdapterLockdownIfApplied', deps)
+    expect((await rollback('TUN stopped', { operationId })).rolledBack).toBe(failing === 'success')
+    expect(deps.logEvent.mock.calls.length).toBeGreaterThan(0)
+    for (const event of deps.logEvent.mock.calls) expect(event[3]).toMatchObject({ operationId })
+    expect(deps.deleteManifest).toHaveBeenCalledTimes(failing === 'success' ? 1 : 0)
+    if (failing !== 'native') {
+      expect(deps.logEvent).toHaveBeenCalledWith('info', 'phys-lockdown', 'rolled back Ethernet', expect.objectContaining({ operationId, ipv6Ok: true, dnsOk: true }))
+      expect(deps.logEvent).toHaveBeenCalledWith(failing === 'policy' ? 'warn' : 'info', 'phys-lockdown', failing === 'policy' ? 'partial DNS registry policy rollback' : 'DNS registry policy restored', expect.objectContaining({ operationId, dnsSmnrOk: failing !== 'policy', dnsParallelOk: true }))
+    }
+  })
+  it('preserves Stop ID when DNS safety repair retries the trusted adapter rollback', async () => {
+    const operationId = '00000000-0000-4000-8000-000000000007'
+    const deps = { process: { platform: 'win32' }, readManifest: async () => ({ adapters: [adapter()] }),
+      rollbackPhysicalAdapterLockdownIfApplied: vi.fn(async () => ({ rolledBack: true })) }
+    const repair = compile<(reason: string, id: string) => Promise<any>>('repairOrphanedPhysicalAdapterDns', deps)
+    expect(await repair('safety repair', operationId)).toEqual({ repaired: true, adapters: ['Wi-Fi'] })
+    expect(deps.rollbackPhysicalAdapterLockdownIfApplied).toHaveBeenCalledWith('safety repair', { operationId })
+  })
+})
 
 // AT-03-006/007: the snapshot that feeds the rollback manifest must not come from the warm-up cache.
 describe('physical adapter apply snapshot freshness', () => {

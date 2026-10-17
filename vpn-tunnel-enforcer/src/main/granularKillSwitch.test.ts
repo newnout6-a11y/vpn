@@ -1,4 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import fc from 'fast-check'
+import { execFileSync } from 'node:child_process'
+import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 const storeData = vi.hoisted(() => new Map<string, any>())
 const enableKillSwitchMock = vi.hoisted(() => vi.fn())
@@ -159,6 +164,41 @@ describe('granularKillSwitch level application', () => {
     await expect(granularKillSwitch.setLevel('off')).rejects.toThrow('disengage')
     expect(granularKillSwitch.getLevel()).toBe('strict')
   })
+  it('rejects generated invalid IPC types and lengths before store/native effects (AT-03-009)', async () => {
+    const { ipcMain } = await import('electron')
+    const { granularKillSwitch, registerKillSwitchIpc } = await import('./granularKillSwitch')
+    vi.mocked(ipcMain.handle).mockClear()
+    registerKillSwitchIpc()
+    const handler = vi.mocked(ipcMain.handle).mock.calls.find(([channel]) => channel === 'kill-switch:add-exception')![1]
+    const nonString = fc.oneof(fc.integer(), fc.boolean(), fc.constant(null), fc.array(fc.integer()), fc.dictionary(fc.string(), fc.integer()))
+    const invalid = fc.oneof(
+      fc.tuple(fc.constantFrom('type', 'value', 'label'), nonString),
+      fc.string().filter(value => !['app', 'ip'].includes(value)).map(value => ['type', value] as const),
+      fc.integer({ min: 201, max: 250 }).map(length => ['label', 'x'.repeat(length)] as const),
+      fc.integer({ min: 2049, max: 2100 }).map(length => ['value', 'x'.repeat(length)] as const)
+    )
+    await fc.assert(fc.asyncProperty(invalid, async ([field, value]) => {
+      await expect(handler({} as any, { type: 'ip', value: '192.0.2.1', label: 'fixture', [field]: value }))
+        .rejects.toThrow(`exception.${field}`)
+      expect(granularKillSwitch.getExceptions()).toEqual([])
+      expect(storeData.has('killSwitchExceptions')).toBe(false)
+    }), { seed: 30012, numRuns: 200, examples: [[['label', '']], [['label', 'x'.repeat(201)]], [['value', '']], [['value', 'x'.repeat(2049)]]] })
+    expect(enableKillSwitchMock).not.toHaveBeenCalled()
+    expect(updateExceptionsMock).not.toHaveBeenCalled()
+  })
+  it('rejects generated normalized CIDR duplicates without a second commit (AT-03-009)', async () => {
+    isKillSwitchActiveMock.mockResolvedValue(true)
+    const { granularKillSwitch } = await import('./granularKillSwitch')
+    granularKillSwitch.init('C:\\Tools\\sing-box.exe')
+    const first = await granularKillSwitch.addException({ type: 'ip', value: '192.0.2.1/24', label: 'first' })
+    await fc.assert(fc.asyncProperty(fc.integer({ min: 0, max: 4 }), fc.constantFrom('', ' ', '\t', '\r\n'), async (zeros, padding) => {
+      await expect(granularKillSwitch.addException({ type: 'ip', value: `${padding}192.0.2.1/${'0'.repeat(zeros)}24${padding}`, label: 'duplicate' }))
+        .rejects.toThrow('equivalent')
+      expect(granularKillSwitch.getExceptions()).toEqual([first])
+      expect(storeData.get('killSwitchExceptions')).toEqual([first])
+    }), { seed: 30013, numRuns: 50 })
+    expect(updateExceptionsMock).toHaveBeenCalledTimes(1)
+  })
   it('serializes 50 concurrent changes and commits the complete exception set (AT-03-008)', async () => {
     isKillSwitchActiveMock.mockResolvedValue(true)
     const { granularKillSwitch } = await import('./granularKillSwitch')
@@ -169,6 +209,55 @@ describe('granularKillSwitch level application', () => {
     expect(updateExceptionsMock.mock.calls.map(c => c[1].length)).toEqual(Array.from({ length: 50 }, (_, i) => i+1))
     expect(storeData.get('killSwitchExceptions')).toHaveLength(50)
   })
+  it('keeps native policy, store and audit aligned for 50 seeded mixed mutations (AT-03-008)', async () => {
+    const { granularKillSwitch } = await import('./granularKillSwitch')
+    granularKillSwitch.init('C:\\Tools\\sing-box.exe')
+    const initial = await Promise.all(Array.from({ length: 25 }, (_, i) =>
+      granularKillSwitch.addException({ type: 'ip', value: `192.0.2.${i+1}`, label: `initial-${i}` })))
+    const changes = [
+      ...initial.map(entry => ({ kind: 'remove' as const, value: entry.value, id: entry.id })),
+      ...Array.from({ length: 25 }, (_, i) => ({ kind: 'add' as const, value: `198.51.100.${i+1}`, id: '' }))
+    ]
+    const order = fc.sample(fc.shuffledSubarray(changes, { minLength: 50, maxLength: 50 }), { seed: 30008, numRuns: 1 })[0]
+    isKillSwitchActiveMock.mockResolvedValue(true)
+    updateExceptionsMock.mockClear(); logEventMock.mockClear()
+    await Promise.all(order.map(change => change.kind === 'remove'
+      ? granularKillSwitch.removeException(change.id)
+      : granularKillSwitch.addException({ type: 'ip', value: change.value, label: 'UI fixture' })))
+    let expected = initial.map(entry => entry.value)
+    expect(updateExceptionsMock).toHaveBeenCalledTimes(50)
+    for (const [index, change] of order.entries()) {
+      expected = change.kind === 'remove' ? expected.filter(value => value !== change.value) : [...expected, change.value]
+      expect(updateExceptionsMock.mock.calls[index][1]).toEqual(expected)
+    }
+    expect(granularKillSwitch.getExceptions().map(entry => entry.value)).toEqual(expected)
+    expect(storeData.get('killSwitchExceptions')).toEqual(granularKillSwitch.getExceptions())
+    const audit = logEventMock.mock.calls.filter(call => call[2].startsWith('exception '))
+    expect(audit.map(call => call[3].value)).toEqual(order.map(change => change.value))
+    expect(audit.map(call => call[2])).toEqual(order.map(change => `exception ${change.kind === 'add' ? 'added' : 'removed'} and synchronized`))
+  })
+  it.skipIf(process.platform !== 'win32')('rejects a real 8.3 alias as a duplicate of the long executable path (AT-03-009)', async ({ skip }) => {
+    const directory = await mkdtemp(join(tmpdir(), 'kill-switch-path-'))
+    try {
+      const executable = join(directory, 'Long application name.exe')
+      await writeFile(executable, 'fixture')
+      const script = `$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';[Console]::OutputEncoding=[Text.UTF8Encoding]::new()
+Add-Type -TypeDefinition 'using System; using System.Text; using System.Runtime.InteropServices; public static class ShortPathFixture { [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] public static extern uint GetShortPathName(string path, StringBuilder result, uint size); }'
+$buffer=New-Object Text.StringBuilder 32768
+if([ShortPathFixture]::GetShortPathName('${executable.replace(/'/g, "''")}', $buffer, $buffer.Capacity) -eq 0){throw 'Short path lookup failed'}
+$buffer.ToString()`
+      const shortPath = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], { encoding: 'utf8', timeout: 15000, windowsHide: true }).trim()
+      if (shortPath.toLowerCase() === executable.toLowerCase()) skip('This NTFS volume does not create 8.3 aliases')
+      const { granularKillSwitch } = await import('./granularKillSwitch')
+      granularKillSwitch.init('C:\\Tools\\sing-box.exe')
+      const added = await granularKillSwitch.addException({ type: 'app', value: executable, label: 'Long path' })
+      expect(added.value).toBe(await realpath(executable))
+      await expect(granularKillSwitch.addException({ type: 'app', value: shortPath, label: 'Short path' }))
+        .rejects.toThrow('equivalent')
+      expect(storeData.get('killSwitchExceptions')).toEqual([added])
+      expect(updateExceptionsMock).not.toHaveBeenCalled()
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  }, 20000)
   it('does not persist proposed exceptions after system failure', async () => {
     isKillSwitchActiveMock.mockResolvedValue(true)
     updateExceptionsMock.mockResolvedValueOnce({ success: false, message: 'read-back failed' })

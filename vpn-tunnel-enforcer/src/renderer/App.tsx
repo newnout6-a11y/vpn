@@ -129,10 +129,9 @@ export default function App() {
     const unsubTun = window.electronAPI.onTunStatusChanged((status) => {
       tunEventSeqRef.current += 1
       const store = useAppStore.getState()
-      // 'proxy-down' means TUN is still up but upstream proxy is unreachable — we keep
-      // tunRunning=true so the kill-switch state is reflected (traffic blocked, not leaked).
-      // 'killswitch-active' means sing-box died unexpectedly, TUN is gone, but the
-      // firewall kill-switch is still blocking outbound traffic on the physical adapter.
+      // 'proxy-down' keeps the TUN up while upstream is unreachable.
+      // 'killswitch-active' is a cleanup obligation after runtime failure;
+      // only the separate fresh status read can verify firewall configuration.
       // 'restarting:N/M' is fired by the auto-restart loop while we wait between
       // attempts — TUN is down but we expect it to come back without user action.
       // 'stopping' is fired at the top of tunController.stop() BEFORE rollback —
@@ -214,9 +213,9 @@ export default function App() {
       } else if (isAdapting) {
         addLog('info', 'Переподключаем туннель — файрвол и защита остаются включёнными.')
       } else if (status === 'proxy-down') {
-        addLog('warn', 'VPN-сервер не отвечает — трафик заблокирован для безопасности. Проверьте ваш VPN-клиент (Happ).')
+        addLog('warn', i18n.t('dashboard.proxyDownFirewallCheck'))
       } else if (status === 'killswitch-active') {
-        addLog('error', 'sing-box упал. Файрвол блокирует весь трафик, пока вы не перезапустите защиту.')
+        addLog('error', i18n.t('dashboard.runtimeFailedFirewallCheck'))
       } else if (isRestarting) {
         const [n, total] = status.slice('restarting:'.length).split('/')
         addLog('warn', `Авто-перезапуск защиты (попытка ${n} из ${total})…`)
@@ -235,9 +234,7 @@ export default function App() {
       }
       // Refresh kill-switch state after every TUN transition so the Dashboard
       // banner reflects reality without polling.
-      window.electronAPI.getFirewallKillSwitchStatus()
-        .then(({ active }) => store.setFirewallKillSwitchActive(active))
-        .catch(() => undefined)
+      void store.refreshFirewallKillSwitchStatus()
       // Pull the fresh startedAt from main so the uptime pill is correct.
       window.electronAPI.getTunStatus()
         .then((s) => store.setTunStartedAt(s.startedAt ?? null))
@@ -328,9 +325,7 @@ export default function App() {
           store.setTunStartedAt(s.startedAt ?? null)
         })
         .catch(() => undefined)
-      window.electronAPI.getFirewallKillSwitchStatus()
-        .then(({ active }) => useAppStore.getState().setFirewallKillSwitchActive(active))
-        .catch(() => undefined)
+      void useAppStore.getState().refreshFirewallKillSwitchStatus()
       window.electronAPI.recheckPublicIp(false).catch(() => undefined)
     })
 
@@ -481,10 +476,10 @@ export default function App() {
         })()
       })
 
-      const [tunStatusRes, trafficRes, ksRes, targetsRes, privacyRes] = await Promise.allSettled([
+      const [tunStatusRes, trafficRes, , targetsRes, privacyRes] = await Promise.allSettled([
         window.electronAPI.getTunStatus(),
         window.electronAPI.getTrafficStats(),
-        window.electronAPI.getFirewallKillSwitchStatus(),
+        store.refreshFirewallKillSwitchStatus(),
         window.electronAPI.getAutoconfigStatus(),
         window.electronAPI.getLocationPrivacy()
       ])
@@ -508,10 +503,6 @@ export default function App() {
 
       if (trafficRes.status === 'fulfilled') {
         store.setTrafficStats(trafficRes.value)
-      }
-
-      if (ksRes.status === 'fulfilled') {
-        store.setFirewallKillSwitchActive(ksRes.value.active)
       }
 
       if (targetsRes.status === 'fulfilled') {

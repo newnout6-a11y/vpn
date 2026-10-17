@@ -188,6 +188,7 @@ try {
 }
 $strictRequired = $false
 $firewallManifest = $null
+$firewallPartial = $false
 try {
     # Check every journal before ANY network effect, including journals used later.
     foreach ($name in @('recovery-policy.json','firewall.json','latest-physical-adapter-lockdown.json','latest-tun-network-baseline.json','tun-owner.json')) { $null = Read-TrustedManifest $name }
@@ -204,13 +205,22 @@ try {
 try {
     $firewallManifest = Read-TrustedManifest 'firewall.json'
     if ($firewallManifest) {
-        if ($firewallManifest.strictMode -isnot [bool] -or $firewallManifest.phase -notin @('prepared','active') -or @($firewallManifest.savedProfiles).Count -ne 3) { throw 'Invalid firewall snapshot' }
-        $names = @()
-        foreach ($p in $firewallManifest.savedProfiles) {
-            if ($p.name -notin @('Domain','Private','Public') -or $p.name -in $names -or $p.defaultOutbound -notin @('Allow','Block','NotConfigured')) { throw 'Invalid firewall profile or policy' }
-            $names += $p.name
-        }
+        if ($firewallManifest.strictMode -is [bool] -and $firewallManifest.strictMode) { $strictRequired=$true }
+        if ($firewallManifest.strictMode -isnot [bool] -or $firewallManifest.phase -notin @('prepared','active') -or $firewallManifest.savedProfiles -isnot [array] -or $firewallManifest.savedProfiles.Count -gt 3) { throw 'Invalid firewall snapshot' }
         $strictRequired = $strictRequired -or $firewallManifest.strictMode
+        $names = @()
+        $validProfiles = @()
+        foreach ($p in $firewallManifest.savedProfiles) {
+            if ($p.name -notin @('Domain','Private','Public') -or @($firewallManifest.savedProfiles | Where-Object { $_.name -eq $p.name }).Count -ne 1 -or $p.defaultOutbound -notin @('Allow','Block','NotConfigured')) {
+                $firewallPartial=$true; $hasWarnings=$true; Log 'Firewall profile entry rejected; skipped'; continue
+            }
+            $names += $p.name
+            $validProfiles += $p
+        }
+        foreach ($name in @('Domain','Private','Public')) {
+            if ($name -notin $names) { $firewallPartial=$true; $hasWarnings=$true; Log "Firewall profile snapshot missing: $name; skipped" }
+        }
+        $firewallManifest.savedProfiles = @($validProfiles)
     }
 } catch {
     Quarantine-TrustedManifest 'firewall.json'
@@ -229,12 +239,30 @@ $adapterManifest = $null
 try {
     $adapterManifest = Read-TrustedManifest 'latest-physical-adapter-lockdown.json'
     if ($adapterManifest) {
-        if (-not $adapterManifest.adapters -or @($adapterManifest.adapters).Count -gt 256) { throw 'Invalid adapter manifest' }
+        if ($adapterManifest.adapters -isnot [array] -or $adapterManifest.adapters.Count -gt 256) { throw 'Invalid adapter manifest' }
+        $validAdapters = @()
+        $adapterIndex = 0
         foreach ($a in $adapterManifest.adapters) {
-            if ($a.ifIndex -le 0 -or $a.alias -isnot [string] -or $a.ipv6Enabled -isnot [bool] -or $a.forcedIpv6Off -isnot [bool] -or $a.interfaceGuid -notmatch '^\{?[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}\}?$') { throw 'Invalid adapter snapshot' }
-            foreach ($ip in @($a.ipv4DnsServers) + @($a.forcedDnsTo)) {
-                if ($ip) { $parsedIP = $null; if (-not [Net.IPAddress]::TryParse([string]$ip, [ref]$parsedIP)) { throw 'Invalid DNS snapshot' } }
-            }
+          try {
+            if (($a.ifIndex -isnot [int] -and $a.ifIndex -isnot [long]) -or $a.ifIndex -le 0 -or
+                $a.alias -isnot [string] -or $a.alias.Length -gt 256 -or $a.alias -match '[\x00-\x1f]' -or
+                $a.ipv6Enabled -isnot [bool] -or $a.forcedIpv6Off -isnot [bool] -or
+                $a.interfaceGuid -isnot [string] -or $a.interfaceGuid -notmatch '^\{?[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}\}?$' -or
+                $a.ipv4DnsSource -notin @('dhcp','static','unknown') -or $a.ipv4DnsServers -isnot [array] -or
+                ($null -ne $a.forcedDnsTo -and $a.forcedDnsTo -isnot [array])) { throw 'Invalid adapter snapshot' }
+            foreach ($field in @('ipv4DnsServers','forcedDnsTo')) { if ($null -ne $a.$field) {
+                foreach ($ip in $a.$field) {
+                    $parsedIP = $null; if ($ip -isnot [string] -or -not [Net.IPAddress]::TryParse($ip, [ref]$parsedIP)) { throw 'Invalid DNS snapshot' }
+                }
+            } }
+            if (@($adapterManifest.adapters | Where-Object { ([string]$_.interfaceGuid).Trim('{}') -eq ([string]$a.interfaceGuid).Trim('{}') }).Count -ne 1) { throw 'Duplicate adapter identity' }
+            $validAdapters += $a
+          } catch { $hasWarnings=$true; Log "Adapter entry rejected: $adapterIndex; skipped" }
+          $adapterIndex++
+        }
+        $adapterManifest.adapters = @($validAdapters)
+        if ($null -ne $adapterManifest.transitionAdapters -and $adapterManifest.transitionAdapters -isnot [pscustomobject]) {
+            $hasWarnings=$true; Log 'Transition adapter snapshot rejected; skipped'; $adapterManifest.transitionAdapters=$null
         }
         $adapterManifestPath = $candidatePaths[0]
     }
@@ -282,11 +310,12 @@ if ($firewallManifest -or $vpnteRules -gt 0) {
         Log 'CRITICAL_SECURITY_EVENT: missing manifest; Allow fallback, protection unknown'
         @('Domain','Private','Public') | ForEach-Object { [pscustomobject]@{name=$_;defaultOutbound='Allow'} }
     }
-    $firewallRecovered = $true
+    $firewallRecovered = -not $firewallPartial
     foreach ($p in $profiles) {
         try {
             Set-NetFirewallProfile -Profile $p.name -DefaultOutboundAction $p.defaultOutbound -ErrorAction Stop
             if ([string](Get-NetFirewallProfile -Profile $p.name -ErrorAction Stop).DefaultOutboundAction -ne $p.defaultOutbound) { throw 'Firewall read-back mismatch' }
+            Log "Firewall profile restored: $($p.name)"
         } catch { $firewallRecovered = $false; $hasWarnings = $true; Log "Firewall profile restore failed: $($p.name)" }
     }
     try {
@@ -365,26 +394,26 @@ if ($adapterManifest -and $adapterManifest.transitionAdapters) {
             Log "Transition adapters: failed to restore teredo state (exit code $LASTEXITCODE)"
             $hasWarnings = $true
         }
-    }
+    } elseif ($t.PSObject.Properties.Name -notcontains 'teredoType' -or $null -ne $t.teredoType) { $hasWarnings=$true; Log 'Transition teredo snapshot rejected; skipped' }
     if ($t.sixToFourState -in @('disabled','default','enabled')) {
         netsh interface 6to4 set state state=$($t.sixToFourState) | Out-Null
         if ($LASTEXITCODE -ne 0) {
             Log "Transition adapters: failed to restore 6to4 state (exit code $LASTEXITCODE)"
             $hasWarnings = $true
         }
-    }
+    } elseif ($t.PSObject.Properties.Name -notcontains 'sixToFourState' -or $null -ne $t.sixToFourState) { $hasWarnings=$true; Log 'Transition 6to4 snapshot rejected; skipped' }
     if ($t.isatapState -in @('disabled','default','enabled')) {
         netsh interface isatap set state state=$($t.isatapState) | Out-Null
         if ($LASTEXITCODE -ne 0) {
             Log "Transition adapters: failed to restore isatap state (exit code $LASTEXITCODE)"
             $hasWarnings = $true
         }
-    }
+    } elseif ($t.PSObject.Properties.Name -notcontains 'isatapState' -or $null -ne $t.isatapState) { $hasWarnings=$true; Log 'Transition isatap snapshot rejected; skipped' }
     Log "Transition adapters: restored from manifest where known"
 }
 
 # 5. Registry: restore pre-existing DNS policy values, or delete app-created ones.
-if ($adapterManifest -and $adapterManifest.dnsRegistryPolicy) {
+if ($adapterManifest) {
     Restore-RegValue "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient" "DisableSmartNameResolution" $adapterManifest.dnsRegistryPolicy.smartNameResolution "DisableSmartNameResolution"
     Restore-RegValue "HKLM\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters" "DisableParallelAandAAAA" $adapterManifest.dnsRegistryPolicy.parallelAandAAAA "DisableParallelAandAAAA"
 } else {
@@ -408,30 +437,40 @@ $userHive = $null
 try {
     $baseline = Read-TrustedManifest 'latest-tun-network-baseline.json'
     if ($baseline) {
-        if ($baseline.userSid -notmatch '^S-1-5-21-\d+-\d+-\d+-\d+$' -or @($baseline.values).Count -ne 9) { throw 'Invalid baseline identity or values' }
+        if ($baseline.userSid -notmatch '^S-1-5-21-\d+-\d+-\d+-\d+$' -or $baseline.values -isnot [array] -or $baseline.values.Count -gt 9) { throw 'Invalid baseline identity or values' }
         $targets = @{
             internet=@{key='Software\Microsoft\Windows\CurrentVersion\Internet Settings';names=@('ProxyEnable','ProxyServer','AutoConfigURL','AutoDetect')}
             environment=@{key='Environment';names=@('HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY')}
             winhttp=@{key='SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings\Connections';names=@('WinHttpSettings')}
         }
         $seen = @{}
+        $validValues = @()
+        $baselinePartial = $false
+        $valueIndex = 0
         foreach ($v in @($baseline.values)) {
+          try {
             $id = [string]$v.target + '/' + [string]$v.name
-            if (-not $targets.ContainsKey([string]$v.target) -or $v.name -cnotin $targets[[string]$v.target].names -or $seen.ContainsKey($id) -or $v.exists -isnot [bool]) { throw 'Invalid baseline target' }
+            if ($v.target -cnotin @('internet','environment','winhttp') -or $v.name -cnotin $targets[[string]$v.target].names -or
+                @($baseline.values | Where-Object { $_.target -ceq $v.target -and $_.name -ceq $v.name }).Count -ne 1 -or $v.exists -isnot [bool]) { throw 'Invalid baseline target' }
             $seen[$id]=$true
             if (-not $v.exists) {
                 if ($null -ne $v.kind -or $null -ne $v.data) { throw 'Invalid absent registry snapshot' }
-                continue
-            }
-            switch ($v.kind) {
+            } else { switch ($v.kind) {
                 {$_ -in @('String','ExpandString')} { if ($v.data -isnot [string] -or $v.data.Length -gt 65536) { throw 'Invalid string' } }
                 'DWord' { if ($v.data -isnot [long] -and $v.data -isnot [int]) { throw 'Invalid DWORD' }; $null=[int]$v.data }
                 'QWord' { if ($v.data -isnot [string] -or $v.data -notmatch '^-?\d{1,19}$') { throw 'Invalid QWORD' }; $null=[long]$v.data }
                 'Binary' { if ($v.data -isnot [array] -or $v.data.Count -gt 65536) { throw 'Invalid binary' }; foreach($b in $v.data){ if(($b -isnot [int] -and $b -isnot [long]) -or $b -lt 0 -or $b -gt 255){throw 'Invalid byte'} } }
                 'MultiString' { if ($v.data -isnot [array] -or $v.data.Count -gt 1024) { throw 'Invalid multistring' }; foreach($x in $v.data){if($x -isnot [string] -or $x.Length -gt 65536){throw 'Invalid multistring item'}} }
                 default { throw 'Unsupported registry type' }
-            }
+            } }
+            $validValues += $v
+          } catch { $hasWarnings=$true; $baselinePartial=$true; Log "Baseline entry rejected: $valueIndex; skipped" }
+          $valueIndex++
         }
+        foreach ($target in $targets.Keys) { foreach ($name in $targets[$target].names) {
+            if (-not $seen.ContainsKey($target+'/'+$name)) { $hasWarnings=$true; $baselinePartial=$true; Log "Baseline snapshot missing: $target/$name; skipped" }
+        } }
+        if (-not $validValues.Count) { throw 'No valid baseline steps' }
         $sid = [string]$baseline.userSid
         $userHive = [Microsoft.Win32.Registry]::Users.OpenSubKey($sid,$true)
         if (-not $userHive) {
@@ -450,8 +489,8 @@ try {
             $userHive=[Microsoft.Win32.Registry]::Users.OpenSubKey($mountName,$true)
             if (-not $userHive) { throw 'Mounted user hive not readable' }
         }
-        $baselineRecovered=$true
-        foreach ($v in @($baseline.values)) {
+        $baselineRecovered=-not $baselinePartial
+        foreach ($v in @($validValues)) {
             $key=$null
             try {
                 $base=if($v.target -eq 'winhttp'){[Microsoft.Win32.Registry]::LocalMachine}else{$userHive}

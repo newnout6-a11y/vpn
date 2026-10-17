@@ -4,6 +4,8 @@ import { join } from 'path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { FIREWALL_RULES_API_PS } from './firewallRulesApi'
 import { FIREWALL_RULES_BOUNDARY_FIXTURE_PS } from './testFixtures/firewallRulesBoundary'
+import { firewallStatusFixture } from './testFixtures/firewallStatus'
+import { getTunAdapterAlias } from './tunAdapter'
 const state = vi.hoisted(() => ({ manifest: null as any, writes: [] as any[], scripts: [] as string[],
   snapshot: ['Domain','Private','Public'].map(name => ({ name, defaultOutbound: 'Block' })),
   failWrite: false, failApply: false, failRestore: false, invalidRead: false, readError: null as Error | null,
@@ -13,6 +15,7 @@ const state = vi.hoisted(() => ({ manifest: null as any, writes: [] as any[], sc
   liveFailures: 0, liveMissingMarker: false, failCommit: false,
   artifacts: [] as string[], helperAvailable: true, helperFailure: null as any, helperExitCode: 0, longApps: false,
   nativeTimings: '', fileProbe: vi.fn((..._args: any[]) => '0'),
+  statusSnapshot: '' as string,
   fallback: vi.fn(async (..._args: any[]) => ({ stdout: 'SNAPSHOT:[]', stderr: '' })) }))
 vi.mock('electron', () => ({ app: { getPath: () => 'C:\\VPNTE' },
   BrowserWindow: { getAllWindows: () => [] }, dialog: { showMessageBox: vi.fn(async () => ({})) } }))
@@ -83,6 +86,7 @@ vi.mock('./elevatedPsHelper', () => ({ isElevatedPsHelperRunning: () => state.he
       return helper.execElevatedPs(script, 1000, 'firewall-killswitch')
     }
     if (state.helperExitCode) return { stdout: '', stderr: 'native command failed', exitCode: state.helperExitCode }
+    if (script.includes('$foreign=@')) return { stdout: state.statusSnapshot, stderr: '', exitCode: 0 }
     if (script.includes('# --- Step 2:')) {
       if (!state.manifest || state.manifest.phase !== 'prepared') throw new Error('mutated without a durable snapshot')
       if (state.failApply) throw new Error('apply failed')
@@ -106,7 +110,7 @@ vi.mock('./elevatedPsHelper', () => ({ isElevatedPsHelperRunning: () => state.he
     return { stdout: state.ownedRules && script.includes('Get-VpnteFirewallRuleNames') ? '1' : '0', stderr: '' }
   }
 }))
-import { enableKillSwitch, disableKillSwitch, isKillSwitchActive, killSwitchManifestExists, updateKillSwitchExceptions, recoverStaleKillSwitch, ensureKillSwitchProgramAllowed } from './firewallKillSwitch'
+import { enableKillSwitch, disableKillSwitch, disableKillSwitchIfActive, isKillSwitchActive, getFirewallKillSwitchStatus, killSwitchManifestExists, updateKillSwitchExceptions, recoverStaleKillSwitch, ensureKillSwitchProgramAllowed, validateFirewallManifest } from './firewallKillSwitch'
 import { RecoveryManifestReadError } from './recoveryManifest'
 import { logEvent } from './appLogger'
 const originalPlatform = process.platform
@@ -135,11 +139,105 @@ beforeEach(() => {
   state.artifacts = []; state.helperAvailable = true; state.helperFailure = null; state.helperExitCode = 0
   state.longApps = false
   state.nativeTimings = ''; vi.mocked(logEvent).mockClear()
+  state.statusSnapshot = JSON.stringify({ services: [], profiles: [], storedNames: [], foreignAllows: 0, rules: [] })
   state.fallback.mockReset().mockRejectedValue(new Error('Fallback boundary refused'))
   state.fileProbe.mockReset().mockReturnValue('0')
 })
 afterEach(() => { Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true }) })
 describe('firewall transaction fault injection (AT-03-003/004/007; F-030, F-186)', () => {
+  it('warns about partial strict recovery without removing protection (AT-03-003c)', async () => {
+    await enableKillSwitch(options)
+    state.manifest.strictMode = true
+    state.manifest.savedProfiles[0].defaultOutbound = 'invalid'
+    state.scripts = []; state.wfpCalls = []
+    const { dialog } = await import('electron')
+    vi.mocked(dialog.showMessageBox).mockClear()
+    await recoverStaleKillSwitch(async () => false)
+    expect(state.scripts).toEqual([])
+    expect(state.wfpCalls).toEqual([])
+    expect(state.manifest).not.toBeNull()
+    expect(dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining('Strict-защита сохранена') }))
+  })
+  it.each(['missing', 'invalid', 'duplicate'] as const)('restores only valid saved profiles after %s entries (AT-03-003c)', async kind => {
+    await enableKillSwitch(options)
+    const original = structuredClone(state.manifest)
+    if (kind === 'missing') state.manifest.savedProfiles.splice(0, 2)
+    if (kind === 'invalid') state.manifest.savedProfiles[0].defaultOutbound = 'arbitrary'
+    if (kind === 'duplicate') state.manifest.savedProfiles[0] = { ...state.manifest.savedProfiles[1] }
+    state.scripts = []; state.wfpCalls = []; vi.mocked(logEvent).mockClear()
+    expect(await getFirewallKillSwitchStatus()).toMatchObject({ state: 'unknown' })
+    const result = await disableKillSwitchIfActive('partial recovery', 'stop_fixture')
+    expect(result.success).toBe(false)
+    expect(result.details).toContain('skipped')
+    expect(state.manifest).not.toBeNull()
+    expect(() => validateFirewallManifest(state.manifest)).toThrow()
+    expect(state.quarantines).toEqual([])
+    const script = state.scripts.find(script => script.includes("Write-Output 'RESTORED'"))!
+    const expected = kind === 'invalid' ? original.savedProfiles.slice(1) : original.savedProfiles.slice(2)
+    for (const profile of original.savedProfiles) {
+      expect(script.includes(`-Profile '${profile.name}' -DefaultOutboundAction`)).toBe(expected.some((p: any) => p.name === profile.name))
+    }
+    expect(state.wfpCalls).toContain('remove')
+    const receipts = vi.mocked(logEvent).mock.calls.filter(call => call[2] === 'firewall profile rollback step')
+    expect(receipts.map(call => (call[3] as any).step)).toEqual(expected.map((p: any) => `profile/${p.name}`))
+  })
+  it('distinguishes proven absence from a failed passive read (AT-03-001/003)', async () => {
+    expect(await getFirewallKillSwitchStatus()).toEqual({ state: 'inactive', cleanupRequired: false, reason: 'no-owned-protection' })
+    state.helperExitCode = 1
+    expect(await getFirewallKillSwitchStatus()).toMatchObject({ state: 'unknown', cleanupRequired: true })
+    expect(state.writes).toEqual([])
+    expect(state.fallback).not.toHaveBeenCalled()
+  })
+  it.each(['helper-down', 'untrusted', 'orphan-wfp', 'orphan-firewall', 'malformed'])(
+    'keeps %s unknown without mutation or fallback (AT-03-001/003/012)', async kind => {
+      if (kind === 'helper-down') state.helperAvailable = false
+      if (kind === 'untrusted') state.invalidRead = true
+      if (kind === 'orphan-wfp') state.wfpActive = true
+      if (kind === 'orphan-firewall') state.statusSnapshot = JSON.stringify({ services: [], profiles: [], rules: [], foreignAllows: 0, storedNames: ['VPNTE-killswitch-orphan'] })
+      if (kind === 'malformed') state.statusSnapshot = '{}'
+      expect(await getFirewallKillSwitchStatus()).toMatchObject({ state: 'unknown', cleanupRequired: true })
+      expect(state.writes).toEqual([])
+      expect(state.fallback).not.toHaveBeenCalled()
+      if (kind === 'helper-down' || kind === 'untrusted') expect(state.scripts).toEqual([])
+    })
+  it('serializes a fresh status after mutations; presence alone is insufficient (AT-03-001/008)', async () => {
+    const [applied, status] = await Promise.all([enableKillSwitch(options), getFirewallKillSwitchStatus()])
+    expect(applied.success).toBe(true)
+    expect(await isKillSwitchActive()).toBe(true)
+    expect(status).toMatchObject({ state: 'unknown', reason: 'incomplete-policy' })
+    expect(state.manifest.phase).toBe('active')
+  })
+  it('verifies effective policy and WFP, then invalidates it on WFP failure or an unfinished journal (AT-03-001/008/010)', async () => {
+    await enableKillSwitch(options)
+    const { snapshot, manifest } = firewallStatusFixture()
+    snapshot.rules.find(r => r.name === 'VPNTE-killswitch-allow-app')!.program = process.execPath
+    snapshot.rules.find(r => r.name === 'VPNTE-killswitch-allow-tun-interface')!.interfaces = [getTunAdapterAlias()]
+    snapshot.rules.find(r => r.name === 'VPNTE-killswitch-allow-lan')!.remote = ['127.0.0.0/8', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '169.254.0.0/16', '224.0.0.0/4', 'fc00::/7', 'fe80::/10', 'ff00::/8']
+    state.manifest.ruleNames = manifest.ruleNames
+    state.statusSnapshot = JSON.stringify(snapshot)
+    const writesBefore = state.writes.length
+    state.wfpCalls = []
+    expect(await getFirewallKillSwitchStatus()).toEqual({ state: 'verified', cleanupRequired: true, reason: 'policy-verified' })
+    expect(state.wfpCalls).toEqual(['verify'])
+    snapshot.profiles[0].disabledInterfaces = ['Fixture Ethernet']
+    state.statusSnapshot = JSON.stringify(snapshot)
+    expect(await getFirewallKillSwitchStatus()).toMatchObject({ state: 'unknown', reason: 'incomplete-policy' })
+    expect(state.wfpCalls).toEqual(['verify'])
+    state.statusSnapshot = JSON.stringify({ ...snapshot, profiles: snapshot.profiles.map(p => ({ ...p, disabledInterfaces: undefined })) })
+    expect(await getFirewallKillSwitchStatus()).toMatchObject({ state: 'unknown', reason: 'read-back-failed' })
+    snapshot.profiles[0].disabledInterfaces = []
+    state.statusSnapshot = JSON.stringify(snapshot)
+    state.wfpFailVerify = true
+    expect(await getFirewallKillSwitchStatus()).toMatchObject({ state: 'unknown', reason: 'read-back-failed' })
+    state.wfpFailVerify = false
+    state.manifest.pendingExceptionPolicy = { apps: [], cidrs: [] }
+    expect(await getFirewallKillSwitchStatus()).toMatchObject({ state: 'unknown', reason: 'incomplete-policy' })
+    delete state.manifest.pendingExceptionPolicy
+    state.manifest.phase = 'prepared'
+    expect(await getFirewallKillSwitchStatus()).toMatchObject({ state: 'unknown', reason: 'incomplete-policy' })
+    expect(state.writes).toHaveLength(writesBefore)
+    expect(state.fallback).not.toHaveBeenCalled()
+  })
   it('skips the Windows Firewall program rule without probing WFP-only protection (AT-03-003/010)', async () => {
     state.wfpActive = true
     expect(await ensureKillSwitchProgramAllowed('C:\\VPNTE\\xray.exe')).toMatchObject({ success: true, skipped: true })
@@ -181,6 +279,24 @@ describe('firewall transaction fault injection (AT-03-003/004/007; F-030, F-186)
     expect(state.writes).toEqual([])
     expect(state.wfpCalls).toEqual(['prepare'])
     expect(state.scripts).toEqual([])
+  })
+  it.each(['success', 'firewall', 'wfp'])('inherits Stop correlation through independent firewall rollback: %s (AT-03-007)', async failing => {
+    await enableKillSwitch(options)
+    state.failRestore = failing === 'firewall'
+    state.wfpFailRemove = failing === 'wfp'
+    vi.mocked(logEvent).mockClear()
+    const operationId = '00000000-0000-4000-8000-000000000007'
+    expect((await disableKillSwitchIfActive('TUN stopped', operationId)).success).toBe(failing === 'success')
+    const events = vi.mocked(logEvent).mock.calls
+    const steps = events.filter(call => call[2] === 'firewall rollback step')
+    expect(steps.map(call => call[3])).toEqual([
+      { operationId, step: 'profiles-and-rules', success: failing !== 'firewall', ...(failing === 'firewall' ? { error: expect.stringContaining('restore failed') } : {}) },
+      { operationId, step: 'ipv6-wfp', success: failing !== 'wfp', ...(failing === 'wfp' ? { error: expect.stringContaining('WFP remove failure') } : {}) }
+    ])
+    for (const event of events.filter(call => call[2] === 'phase timing' || call[2].startsWith('auto-disable') || call[2].startsWith('kill-switch disengaged') || call[2] === 'failed to fully restore kill-switch')) {
+      expect(event[3]).toMatchObject({ operationId })
+    }
+    expect(state.manifest === null).toBe(failing === 'success')
   })
   it('still removes owned WFP protection after firewall rollback fails (AT-03-007)', async () => {
     await enableKillSwitch(options); state.failRestore = true
@@ -251,14 +367,24 @@ describe('firewall transaction fault injection (AT-03-003/004/007; F-030, F-186)
     expect(state.scripts).toEqual([])
     expect(state.quarantines).toEqual([])
   })
-  it('quarantines corrupt trusted firewall data before unknown Allow fallback (AT-03-003)', async () => {
+  it.each([['direct', disableKillSwitch], ['ordinary Stop', disableKillSwitchIfActive]] as const)('quarantines corrupt trusted firewall data via %s before unknown Allow fallback (AT-03-003)', async (_name, disable) => {
     state.readError = new RecoveryManifestReadError('invalid-content', 'corrupt JSON')
     state.ownedRules = true
     state.fileProbe.mockReturnValue('1')
-    expect((await disableKillSwitch('corrupt snapshot')).success).toBe(true)
+    expect((await disable('corrupt snapshot')).success).toBe(true)
     expect(state.quarantines).toEqual(['firewall.json'])
     expect(state.scripts.some(script => script.includes("-DefaultOutboundAction Allow"))).toBe(true)
     expect(logEvent).toHaveBeenCalledWith('error', 'firewall-killswitch', expect.stringContaining('CRITICAL_SECURITY_EVENT'), expect.anything())
+  })
+  it.each(['unsupported-version', 'untrusted', 'quarantine-failure'])('keeps the ordinary Stop gate closed after %s (AT-03-003/012)', async mode => {
+    state.readError = mode === 'untrusted' ? new Error('untrusted ACL') : new RecoveryManifestReadError(mode === 'unsupported-version' ? mode : 'invalid-content', 'fixture invalid manifest')
+    state.failQuarantine = mode === 'quarantine-failure'
+    state.ownedRules = true
+    const result = await disableKillSwitchIfActive('rejected snapshot').catch(() => ({ success: false }))
+    expect(result.success).toBe(false)
+    expect(state.scripts).toEqual([])
+    expect(state.quarantines).toEqual([])
+    expect(state.wfpCalls).toEqual([])
   })
   it('logs only bounded unique native phases without treating them as security proof (AT-00-005/AT-03-007)', async () => {
     state.nativeTimings = [
@@ -602,6 +728,14 @@ describe('differential live firewall fault injection (AT-03-008/009)', () => {
     expect(state.writes).toEqual([])
     expect(state.scripts).toEqual([])
   })
+  it.each(['192.0.2.1/0x10', '192.0.2.1/+24', '2001:db8::1/1e1', '2001:db8::1/64.0'])(
+    'rejects malformed CIDR %s before journalling or native effects (AT-03-009)', async value => {
+      await active()
+      await expect(updateKillSwitchExceptions([], [value])).rejects.toThrow()
+      expect(state.writes).toEqual([])
+      expect(state.scripts).toEqual([])
+    }
+  )
   it('serializes 50 concurrent policy replacements with a durable commit for each', async () => {
     await active()
     const results = await Promise.all(Array.from({ length: 50 }, (_, i) => updateKillSwitchExceptions([], [`192.0.2.${i+2}`])))

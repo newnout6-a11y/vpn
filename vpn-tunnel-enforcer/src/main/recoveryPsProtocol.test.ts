@@ -180,7 +180,7 @@ describe('fixed recovery dispatcher native proof', () => {
   it.skipIf(!native).each([
     ['trusted', 1, 1, ['vpnte-sing-box.exe']], ['ownedSidecar', 1, 1, ['vpnte-etw-sidecar.exe']],
     ['ownedXray', 1, 1, ['vpnte-xray.exe']], ['caseRuntime', 1, 1, ['vpnte-sing-box.exe']],
-    ['prefixRuntime', 1, 1, ['vpnte-sing-box.exe']],
+    ['prefixRuntime', 0, 0, []],
     ['foreignRuntime', 0, 0, []], ['wrongName', 0, 0, []], ['missingPath', 0, 0, []],
     ['runtimeAbsent', 0, 0, []], ['stopError', 1, 0, []]
   ])('stops only the fixed owned runtime set: %s', (variant, candidates, killed, names) => {
@@ -203,13 +203,13 @@ describe('fixed recovery dispatcher native proof', () => {
   }, 20000)
   it.skipIf(!native).each([
     ['runtimeAbsent', 'false'], ['ownedSingBox', 'true'], ['ownedSidecar', 'true'], ['ownedXray', 'true'],
-    ['wrongName', 'false'], ['foreignRuntime', 'false'], ['missingPath', 'false'], ['caseRuntime', 'true'],
-    ['prefixRuntime', 'true'] // Preserve the conservative legacy prefix: hold, never a false exit.
-  ])('fresh runtime observation preserves the legacy predicate: %s', (variant, value) => {
+    ['wrongName', 'false'], ['foreignRuntime', 'false'], ['caseRuntime', 'true'],
+    ['prefixRuntime', 'false']
+  ])('fresh runtime observation checks exact runtime directory ownership: %s', (variant, value) => {
     expect(run({ op: 'inspect-runtime', runtimeDir: 'C:\\VPNTE-fixture-runtime' }, variant)).toEqual({ value, set: 0, removed: 0, queries: 1, order: [] })
   }, 20000)
-  it.skipIf(!native)('refuses to confirm runtime exit on a CIM query failure', () => {
-    expect(() => run({ op: 'inspect-runtime', runtimeDir: 'C:\\VPNTE-fixture-runtime' }, 'queryError')).toThrow()
+  it.skipIf(!native).each(['queryError', 'missingPath'])('refuses to confirm runtime exit on %s (AT-03-007)', variant => {
+    expect(() => run({ op: 'inspect-runtime', runtimeDir: 'C:\\VPNTE-fixture-runtime' }, variant)).toThrow()
   }, 20000)
   it.skipIf(!native).each([
     { op: 'inspect-runtime', runtimeDir: 'C:\\runtime', script: 'Get-Process' },

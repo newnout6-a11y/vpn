@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import ts from 'typescript'
 import { describe, expect, it, vi } from 'vitest'
 import { RecoveryWorkerError } from './recoveryPsWorker'
-import { OWNED_RUNTIME_STOP_SCRIPT, validateRecoveryRequest, type RecoveryRequest } from './recoveryPsProtocol'
+import { OWNED_RUNTIME_STATUS_QUERY_SCRIPT, OWNED_RUNTIME_STOP_SCRIPT, validateRecoveryRequest, type RecoveryRequest } from './recoveryPsProtocol'
 
 const source = readFileSync(join(process.cwd(), 'src/main/tunController.ts'), 'utf8')
 const ast = ts.createSourceFile('tunController.ts', source, ts.ScriptTarget.Latest, true)
@@ -23,6 +23,7 @@ function harness(platform = 'win32') {
     executeRecoveryOperation: vi.fn(async (_request: RecoveryRequest, _deadline: number) => 'false'),
     RecoveryWorkerError,
     OWNED_RUNTIME_STOP_SCRIPT,
+    OWNED_RUNTIME_STATUS_QUERY_SCRIPT,
     RUNTIME_EXE_NAME: 'vpnte-sing-box.exe',
     psSingleQuote: (text: string) => `'${text.replace(/'/g, "''")}'`,
     runPowerShell: vi.fn(async (_script: string, _deadline: number) => 'false'),
@@ -43,7 +44,7 @@ describe('fresh owned runtime status', () => {
     expect(h.executeRecoveryOperation).toHaveBeenCalledWith({ op: 'inspect-runtime', runtimeDir }, 5000)
     expect(h.runPowerShell).not.toHaveBeenCalled()
   })
-  it('keeps the original conservative fixed reader only on pre-dispatch unavailability', async () => {
+  it('uses the shared fixed reader only on pre-dispatch unavailability', async () => {
     const h = harness()
     h.executeRecoveryOperation.mockRejectedValue(new RecoveryWorkerError('unavailable', 'fixture'))
     expect(await h.read(true)).toBe(false)
@@ -52,7 +53,11 @@ describe('fresh owned runtime status', () => {
     expect(script).toContain("$runtimeDir = 'C:\\VPNTE-fixture-runtime'")
     expect(script).toContain("@('vpnte-sing-box.exe', 'vpnte-etw-sidecar.exe', 'vpnte-xray.exe')")
     expect(script).toContain('Get-CimInstance Win32_Process -ErrorAction Stop')
-    expect(script).toContain('StartsWith($runtimeDir, [System.StringComparison]::OrdinalIgnoreCase)')
+    expect(script).toContain(OWNED_RUNTIME_STATUS_QUERY_SCRIPT)
+    const runtimeName = source.match(/const RUNTIME_EXE_NAME = '([^']+)'/)?.[1]
+    expect(runtimeName).toBeDefined()
+    expect(OWNED_RUNTIME_STATUS_QUERY_SCRIPT).toContain(`'${runtimeName}'`)
+    expect(OWNED_RUNTIME_STOP_SCRIPT).toContain(`'${runtimeName}'`)
     expect(script).not.toMatch(/(?:Stop-|Set-|Remove-|Start-|New-)\w+/)
   })
   it.each(['timeout', 'exited', 'protocol', 'rejected', 'busy', 'closed'] as const)('rejects %s rather than claiming exit or replaying', async code => {
