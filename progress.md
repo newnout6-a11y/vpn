@@ -1613,3 +1613,31 @@ CI/review нового SHA проверяются отдельно после pu
 - Эта запись меняет только журнал и acceptance report. Локальные проверки
   исходников: 3259 passed / 5 skipped, typecheck/build exit 0 (см. выше);
   новые CI/review после отправки этой записи проверяются отдельно.
+
+### 18.10.2026 — L3-приёмка WP-3 пропущена владельцем
+
+- Владелец ответил на запрос лаборатории: «нет. нету . да и не надо.
+  отметь как пропущено владельцем», затем уточнил: «не не проверено
+  а пропущено владельцем,это разное».
+- Для оставшихся L3-сценариев WP-3 установлен отдельный итоговый статус
+  **«Пропущено владельцем»** (`SKIPPED_BY_OWNER`). Решение охватывает
+  поддерживаемую OS-матрицу, packet oracle, SYSTEM reboot, чужие firewall
+  rules, отсутствие NIC/hot-plug, DNS failure, IPv6/NAT64/mobile 464XLAT,
+  системные ACL-манифесты и L3-часть AT-03-003. Ожидание лаборатории снято.
+- Решение внесено в ТЗ-06 §10.12, текущую матрицу acceptance report,
+  корневой README и индекс docs/README.md. Обновление статуса документов
+  прямо запрошено владельцем. Тестовые оракулы и исходники не менялись.
+- Открытое уточнение L1/L2-части AT-03-003(c) и PR review остаются
+  отдельными пунктами. Пропуск L3 не назначает статус другим пакетам.
+- npm.cmd run typecheck — exit 0. Первый npm.cmd test: 3258 passed /
+  1 failed / 5 skipped, 173.62 s; adaptiveNetworkIdentity.test.ts получил
+  Test timed out in 5000ms на существующей native fixture. Отдельный
+  npm.cmd test -- src/main/adaptiveNetworkIdentity.test.ts — 25 passed,
+  1 file passed, 3.24 s, exit 0. Код теста и runtime не менялись.
+- python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py —
+  AC 927/927, F 210/210, exit 0. Одноразовая проверка согласованности статуса:
+  12/12 строк матрицы и 5 документов, PASS. git diff --check — exit 0.
+- Повторный полный npm.cmd test — 3259 passed / 5 skipped,
+  234 files passed / 2 skipped, 155.93 s, exit 0. Логи первого и повторного
+  прогонов: vpn-tunnel-enforcer/.tmp/wp3-owner-skip-full.log и
+  vpn-tunnel-enforcer/.tmp/wp3-owner-skip-full-recheck.log.

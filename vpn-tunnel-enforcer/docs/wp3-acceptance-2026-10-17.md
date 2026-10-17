@@ -4,9 +4,11 @@
 §10.2 и §10.11 ТЗ-06, набор `AT-03-001…012` и методология L0–L4.
 Это отчёт о доказательствах, а не изменение нормативных требований.
 
-**Статус пакета: частично; переход к WP-0 ещё не обоснован.**
-Наличие реализации, CI PASS и полная трассировка не заменяют обязательный L3.
-Подтверждённые локальные поднаборы ниже не означают PASS всего AT.
+**Статус пакета: частично; L3-приёмка — ПРОПУЩЕНО ВЛАДЕЛЬЦЕМ (18.10.2026).**
+Владелец сообщил, что лаборатории нет и она не нужна, и назначил отдельный
+статус **«Пропущено владельцем»** (`SKIPPED_BY_OWNER`). Решение записано
+в ТЗ-06 §10.12. Оно охватывает оставшиеся L3-сценарии WP-3 и OS-матрицу.
+Доступные L1/L2, уточнение AT-03-003(c) и проверка PR учитываются отдельно.
 
 ## Среда и границы
 
@@ -22,20 +24,20 @@
 
 ## Матрица всех 12 AT
 
-| AT | Доступное подтверждение в коде и тестах | Что ещё требуется для полного PASS |
+| AT | Доступное подтверждение в коде и тестах | Статус и оставшийся объём |
 | --- | --- | --- |
-| 03-001 | `firewallTransactions.test.ts`, `granularKillSwitch.test.ts`, `wfpIpv6.test.ts`: установка защиты до разрыва, отказ вместо ложного успеха, форма политик | **NOT-CHECKED L3:** фактические WFP counters, pktmon и внешний capture; три способа разрыва, окно 60 с, UI ≤2 с |
-| 03-002 | `bootRecoveryRegistration.test.ts`, `bootRecoveryTaskReadBack.test.ts`, `bootRecoveryExecution.test.ts`, `bootRecoveryBehavior.test.ts`: команда задачи, read-back, исполнение production-скрипта на подставных системных API, проверка GUID/driver/subnet | **NOT-CHECKED L3:** установленная сборка, жёсткое убийство, настоящий reboot, SYSTEM, итоговый отчёт в UI |
-| 03-003 | `recoveryManifestStorage.test.ts`, `firewallTransactions.test.ts`, `bootRecoveryExecution.test.ts`, `systemNetwork.test.ts`: corrupt/missing/future schema, карантин, сохранение strict, отсутствие эффектов для недоверенных данных; `bootRecoveryExecution.test.ts`: независимость recovery при частичном firewall/adapter/baseline/TUN документе; `bootRecoveryBehavior.test.ts`: валидный DNS registry step рядом с отсутствующим/невалидным; `lifecycleCleanup.test.ts`: startup warning до создания окна при неполном baseline recovery | **Частично:** смысл «шагов без подписи» требует уточнения; полный обычный rollback частичного документа и реальный boot не приняты; mocks не доказывают системные ACL |
-| 03-004 | `firewallTransactions.test.ts`, `bootRecoveryExecution.test.ts`: сохранение исходных Block, удаление только собственных правил, независимый read-back | **NOT-CHECKED L3:** три реальных цикла apply/stop и сравнение экспортов чужих Block/Allow |
-| 03-005 | `physicalAdapterSnapshot.test.ts`, `physicalAdapterLifecycle.test.ts`, `lifecycleCleanup.test.ts`: отсутствие фиктивных адаптеров и проверки запуска/отката | **NOT-CHECKED L3:** VM без NIC, отсутствие созданных правил и правдивый статус в UI |
-| 03-006 | `physicalAdapterLifecycle.test.ts`, `physicalAdapterSnapshot.test.ts`, `physicalAdapterHotspot.test.ts`: свежий snapshot, добавление/удаление/замена GUID, смена alias, компенсация | **NOT-CHECKED L3:** настоящий hot-plug/переименование во время apply, итоговый набор фильтров и UI |
-| 03-007 | `systemNetwork.test.ts`: отказ каждого из 9 registry-шагов и реальный PowerShell с подставным Restore-Snapshot; `firewallTransactions.test.ts`, `physicalAdapterLifecycle.test.ts`, `lifecycleCleanup.test.ts`: общий Stop operationId, независимость Firewall/WFP/baseline/adapters, явные результаты шагов, failure через IPC, общий ID concurrent Stop и новый ID retry; `Dashboard.cancel.test.tsx`: видимые перечень отказов и рекомендация вместо success | Доступные L2-сценарии проверены на production bodies и renderer с подставными системными/IPC границами. Сквозной ID этой задачи относится к controller Stop и вызываемым rollback, не ко всем startup/crash/shutdown-backstop путям; системные эффекты этим прогоном не доказаны |
-| 03-008 | `granularKillSwitch.test.ts`, `firewallTransactions.test.ts`: 50 конкурентных обновлений, seeded mixed add/remove, сверка каждого native set, конечного store и всех audit-событий; journal-before-effects, store/system compensation, сохранение core/upstream | Доступные L2-сценарии прошли; системные API подставлены. Полное реальное применение Windows/WFP остаётся отдельной системной проверкой |
-| 03-009 | `firewallKillSwitchValidation.test.ts`, `killSwitchExceptionValidation.test.ts`: generated IPv4/IPv6, маски, типы путей, canonical dot paths, readable `.exe`/realpath и directory rejection; `granularKillSwitch.test.ts`: IPC field types/lengths, normalized CIDR duplicates без store/native effects, настоящий GetShortPathName и отклонение 8.3-дубликата; `firewallTransactions.test.ts`: отказ до записи/native effects | Подтверждены перечисленные L1-поднаборы на текущей Windows. Локальный 8.3 PASS не объявляет проверенными файловые системы без этой возможности; системная приёмка WP-3 остаётся отдельным условием |
-| 03-010 | `wfpIpv6.test.ts`, `physicalAdapterHotspot.test.ts`, `firewallTransactions.test.ts`: production C# с fake engine, AND scope, NAT64 endpoint, отсутствие широких permit, независимая компенсация | **NOT-CHECKED L3:** полная OS-матрица, настоящий BFE/boot-time, pktmon + внешний capture, physical mobile 464XLAT positive/negative и byte-equivalent restore |
-| 03-011 | `physicalAdapterLifecycle.test.ts`, `physicalAdapterDnsScript.test.ts`, `systemNetwork.test.ts`: read-back DNS, частичные отказы и сохранение recovery-обязанности | **NOT-CHECKED L3:** отказ DNS посередине apply, полный baseline restore, причина в UI и успешная повторная попытка |
-| 03-012 | `recoveryManifestStorage.test.ts`, `firewallManifestSecurity.test.ts`, `bootRecoveryExecution.test.ts`: trust-before-effects, ACL/owner/reparse отказ, строгая схема | **NOT-CHECKED L3:** настоящие ослабленные ACL/подложный манифест на отдельной VM, reboot, SYSTEM и положительный легитимный контроль |
+| 03-001 | `firewallTransactions.test.ts`, `granularKillSwitch.test.ts`, `wfpIpv6.test.ts`: установка защиты до разрыва, отказ вместо ложного успеха, форма политик | **ПРОПУЩЕНО ВЛАДЕЛЬЦЕМ (18.10.2026):** фактические WFP counters, pktmon и внешний capture; три способа разрыва, окно 60 с, UI ≤2 с |
+| 03-002 | `bootRecoveryRegistration.test.ts`, `bootRecoveryTaskReadBack.test.ts`, `bootRecoveryExecution.test.ts`, `bootRecoveryBehavior.test.ts`: команда задачи, read-back, исполнение production-скрипта на подставных системных API, проверка GUID/driver/subnet | **ПРОПУЩЕНО ВЛАДЕЛЬЦЕМ (18.10.2026):** установленная сборка, жёсткое убийство, настоящий reboot, SYSTEM, итоговый отчёт в UI |
+| 03-003 | `recoveryManifestStorage.test.ts`, `firewallTransactions.test.ts`, `bootRecoveryExecution.test.ts`, `systemNetwork.test.ts`: corrupt/missing/future schema, карантин, сохранение strict, отсутствие эффектов для недоверенных данных; `bootRecoveryExecution.test.ts`: независимость recovery при частичном firewall/adapter/baseline/TUN документе; `bootRecoveryBehavior.test.ts`: валидный DNS registry step рядом с отсутствующим/невалидным; `lifecycleCleanup.test.ts`: startup warning до создания окна при неполном baseline recovery | **Частично:** смысл «шагов без подписи» требует уточнения; обычный rollback частичного документа требует уточнения; L3 boot/системные ACL — **ПРОПУЩЕНО ВЛАДЕЛЬЦЕМ (18.10.2026)** |
+| 03-004 | `firewallTransactions.test.ts`, `bootRecoveryExecution.test.ts`: сохранение исходных Block, удаление только собственных правил, независимый read-back | **ПРОПУЩЕНО ВЛАДЕЛЬЦЕМ (18.10.2026):** три реальных цикла apply/stop и сравнение экспортов чужих Block/Allow |
+| 03-005 | `physicalAdapterSnapshot.test.ts`, `physicalAdapterLifecycle.test.ts`, `lifecycleCleanup.test.ts`: отсутствие фиктивных адаптеров и проверки запуска/отката | **ПРОПУЩЕНО ВЛАДЕЛЬЦЕМ (18.10.2026):** VM без NIC, отсутствие созданных правил и правдивый статус в UI |
+| 03-006 | `physicalAdapterLifecycle.test.ts`, `physicalAdapterSnapshot.test.ts`, `physicalAdapterHotspot.test.ts`: свежий snapshot, добавление/удаление/замена GUID, смена alias, компенсация | **ПРОПУЩЕНО ВЛАДЕЛЬЦЕМ (18.10.2026):** настоящий hot-plug/переименование во время apply, итоговый набор фильтров и UI |
+| 03-007 | `systemNetwork.test.ts`: отказ каждого из 9 registry-шагов и реальный PowerShell с подставным Restore-Snapshot; `firewallTransactions.test.ts`, `physicalAdapterLifecycle.test.ts`, `lifecycleCleanup.test.ts`: общий Stop operationId, независимость Firewall/WFP/baseline/adapters, явные результаты шагов, failure через IPC, общий ID concurrent Stop и новый ID retry; `Dashboard.cancel.test.tsx`: видимые перечень отказов и рекомендация вместо success | Доступные L2-сценарии проверены на production bodies и renderer с подставными системными/IPC границами. Сквозной ID этой задачи относится к controller Stop и вызываемым rollback, не ко всем startup/crash/shutdown-backstop путям; оставшиеся системные L3-запуски — **ПРОПУЩЕНО ВЛАДЕЛЬЦЕМ (18.10.2026)** |
+| 03-008 | `granularKillSwitch.test.ts`, `firewallTransactions.test.ts`: 50 конкурентных обновлений, seeded mixed add/remove, сверка каждого native set, конечного store и всех audit-событий; journal-before-effects, store/system compensation, сохранение core/upstream | Доступные L2-сценарии прошли; системные API подставлены. Оставшаяся L3-приёмка Windows/WFP — **ПРОПУЩЕНО ВЛАДЕЛЬЦЕМ (18.10.2026)** |
+| 03-009 | `firewallKillSwitchValidation.test.ts`, `killSwitchExceptionValidation.test.ts`: generated IPv4/IPv6, маски, типы путей, canonical dot paths, readable `.exe`/realpath и directory rejection; `granularKillSwitch.test.ts`: IPC field types/lengths, normalized CIDR duplicates без store/native effects, настоящий GetShortPathName и отклонение 8.3-дубликата; `firewallTransactions.test.ts`: отказ до записи/native effects | Подтверждены перечисленные L1-поднаборы на текущей Windows. Локальный 8.3 PASS относится к использованной файловой системе; оставшаяся L3-приёмка WP-3 — **ПРОПУЩЕНО ВЛАДЕЛЬЦЕМ (18.10.2026)** |
+| 03-010 | `wfpIpv6.test.ts`, `physicalAdapterHotspot.test.ts`, `firewallTransactions.test.ts`: production C# с fake engine, AND scope, NAT64 endpoint, отсутствие широких permit, независимая компенсация | **ПРОПУЩЕНО ВЛАДЕЛЬЦЕМ (18.10.2026):** полная OS-матрица, настоящий BFE/boot-time, pktmon + внешний capture, physical mobile 464XLAT positive/negative и byte-equivalent restore |
+| 03-011 | `physicalAdapterLifecycle.test.ts`, `physicalAdapterDnsScript.test.ts`, `systemNetwork.test.ts`: read-back DNS, частичные отказы и сохранение recovery-обязанности | **ПРОПУЩЕНО ВЛАДЕЛЬЦЕМ (18.10.2026):** отказ DNS посередине apply, полный baseline restore, причина в UI и успешная повторная попытка |
+| 03-012 | `recoveryManifestStorage.test.ts`, `firewallManifestSecurity.test.ts`, `bootRecoveryExecution.test.ts`: trust-before-effects, ACL/owner/reparse отказ, строгая схема | **ПРОПУЩЕНО ВЛАДЕЛЬЦЕМ (18.10.2026):** настоящие ослабленные ACL/подложный манифест на отдельной VM, reboot, SYSTEM и положительный легитимный контроль |
 
 ## Исправления этой итерации
 
@@ -465,9 +467,22 @@ CodeRabbit автоматически skipped; ручная команда 62399
 местоположение доступной изолированной лаборатории. Вопрос о смысле подписи
 в AT-03-003(c) остаётся без ответа; требование не переопределено.
 
+## Решение владельца от 18.10.2026
+
+Ответ на вопрос об изолированной L3-среде: «нет. нету . да и не надо.
+отметь как пропущено владельцем». Владелец отдельно уточнил статус:
+«не не проверено  а пропущено владельцем,это разное».
+
+Итоговый статус оставшейся L3-приёмки WP-3 — **ПРОПУЩЕНО ВЛАДЕЛЬЦЕМ**
+(`SKIPPED_BY_OWNER`). Объём: packet oracle, SYSTEM reboot, чужие firewall
+rules, отсутствие NIC/hot-plug, DNS failure, IPv6/NAT64/mobile 464XLAT,
+системные ACL-манифесты и поддерживаемая OS-матрица; L3-часть AT-03-003
+также входит в решение. В матрице выше этот статус указан по сценариям.
+Формулировки тестовых оракулов и записанные локальные результаты сохранены.
+
 ## Условие перехода дальше
 
-Закрыть доступные пробелы L1/L2, получить и сохранить реальные L3-доказательства
-для всех требуемых сред/оракулов; CI и review на текущем SHA должны быть без
-существенных замечаний. Пока это не выполнено, WP-3 не объявлять завершённым
-и WP-0/WP-2 не объявлять начатыми по факту этой сверки.
+Закрыть доступные пробелы L1/L2 и уточнение AT-03-003(c); CI и review на
+текущем SHA должны быть без существенных замечаний. L3-сценарии со статусом
+«Пропущено владельцем» исключены из ожидаемых запусков по решению §10.12;
+отсутствие этой лаборатории больше не является условием ожидания.
