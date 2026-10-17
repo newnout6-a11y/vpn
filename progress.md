@@ -1583,3 +1583,33 @@ CI/review нового SHA проверяются отдельно после pu
   docs/04-приёмочные-тесты/traceability/check-coverage.py — AC 927/927,
   F 210/210, exit 0; git diff --check — exit 0. Лог полного прогона:
   vpn-tunnel-enforcer/.tmp/wp3-review-final-full.log.
+
+### WP-3: отправка исправлений и remote gates b31807f
+
+- В PR #46 отправлены пять атомарных коммитов: a29feaa (boot fixtures),
+  fb5ceb2 (DisabledInterfaceAliases), 80e4b37 (startup runtime proof),
+  3a4ba9e (log correlation), b31807f (журнал/отчёт). Tracked tree после
+  отправки чист; ранее существовавшие untracked каталоги не включены.
+- Windows job 117488889602 завершён success на b31807f: 3260 passed /
+  4 skipped, 235 files passed / 1 skipped, 129.54 s; AC 927/927, F 210/210.
+  Native BFE smoke: ok=true, aborted=true, priority=verified. Electron
+  native read smoke: 1 passed / 1 skipped. Rust 117488889576 success.
+  Лог сохранён в vpn-tunnel-enforcer/.tmp/wp3-ci-117488889602.log.
+- Revix 117488897178 завершён neutral. Его check-run сохраняет заголовок
+  2 issue(s) found и summary Needs changes; актуальная PR Timeline для
+  b31807f отмечает два исправления и Low risk в 19:57 UTC. Новых inline
+  findings с original_commit_id=b31807f нет; формального APPROVED нет.
+- Автоматический CodeRabbit skipped не принят за review. Одна ручная
+  команда 6239986186 получила ответ 6239987347: Review rate limited /
+  Action not completed. Последнее завершённое review 5559714772 проверяло
+  0d175b5, а не b31807f. До восстановления квоты повторные команды не
+  отправляются; одно included review в час, последнее завершилось 19:39 UTC.
+- Повторная сверка среды: elevated=false, Windows build 26300; единственная
+  зарегистрированная VM выключена, известный VHDX отсутствует. Нет новых
+  доказательств packet oracle/SYSTEM reboot/OS matrix/mobile 464XLAT.
+  Владельцу задан вопрос о доступной изолированной L3-лаборатории; ранее
+  заданное уточнение AT-03-003(c) о подписях всё ещё без ответа. Норматив
+  не менялся, WP-3 не завершён, WP-0/WP-2 не начаты.
+- Эта запись меняет только журнал и acceptance report. Локальные проверки
+  исходников: 3259 passed / 5 skipped, typecheck/build exit 0 (см. выше);
+  новые CI/review после отправки этой записи проверяются отдельно.

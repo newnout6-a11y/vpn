@@ -439,6 +439,32 @@ F 210/210, exit 0; `git diff --check` — exit 0. Полный лог сохра
 `.tmp/wp3-review-final-full.log`; это локальные проверки, CI/review нового
 SHA проверяются отдельно.
 
+### Remote gates после исправлений: b31807f
+
+Windows job 117488889602: success, 3260 passed / 4 skipped,
+235 files passed / 1 skipped, 129.54 s; AC 927/927, F 210/210.
+Native BFE smoke: ok=true, aborted=true, priority=verified; Electron native
+reads: 1 passed / 1 skipped. Rust job 117488889576: success. Эти результаты
+относятся к b31807f, а не к будущим коммитам. BFE ABI/read-back с Abort
+не подтверждает packet filtering, boot-time или физический 464XLAT.
+
+Revix check 117488897178 завершён neutral: check-run ещё содержит старую
+Needs changes summary и 2 issue(s) found, а актуальная PR Timeline отмечает
+исправления и Low risk для b31807f в 19:57 UTC. Новых inline findings,
+созданных для b31807f, нет. Формальный APPROVED не получен.
+
+CodeRabbit автоматически skipped; ручная команда 6239986186 получила
+ответ 6239987347 «Review rate limited / Action not completed». Последнее
+завершённое review 5559714772 относится к 0d175b5. Новый head пока не
+проверен этим reviewer; skipped success не считается review. До доступной
+квоты повторные команды не отправляются (последний review — 19:39 UTC,
+план сообщает одно included review в час).
+
+Требуемая L3-среда не появилась: процесс non-admin, build 26300,
+зарегистрированная VM выключена, её известный VHDX отсутствует. Запрошено
+местоположение доступной изолированной лаборатории. Вопрос о смысле подписи
+в AT-03-003(c) остаётся без ответа; требование не переопределено.
+
 ## Условие перехода дальше
 
 Закрыть доступные пробелы L1/L2, получить и сохранить реальные L3-доказательства
