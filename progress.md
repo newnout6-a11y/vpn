@@ -1808,3 +1808,41 @@ CI/review нового SHA проверяются отдельно после pu
   SHA-256 `0383c425d75109230a50d1b269c28d02900dffff0d2d29eb0430e24f3ab84298`,
   Authenticode NotSigned. Установка не выполнялась. Логи
   `.tmp/pr46-empty-adapters-dist.log`, `.tmp/pr46-empty-adapters-artifacts.json`.
+
+## 18.10.2026 — замечания PR #45: единые DST-границы расписаний
+
+- По запросу владельца проверен комментарий
+  https://github.com/newnout6-a11y/vpn/pull/45#discussion_r4304221291.
+  P2 подтверждён: нормализованный start сравнивался с ненормализованным
+  настенным временем и подавлял сам себя. До исправления адресный прогон:
+  **4 failed / 34 passed**, exit 1 (New York/Lord Howe gap, повторный час,
+  overnight end после gap).
+- Активность при перезапуске и события используют одни конкретные локальные
+  интервалы; пересекающиеся/соприкасающиеся интервалы объединяются по timestamp.
+  Политика DST сохраняет Date compatible: gap сдвигается на величину перехода,
+  repeated time выбирает ранний instant один раз; collapsed/reversed окно
+  пропускается. Каждая граница разрешается на собственном календарном дне.
+  В тестах TZ задаётся и восстанавливается внутри изолированного Vitest fork;
+  часовой пояс ОС не меняется. Добавлены 8 DST-регрессий (AT-10-001/002).
+- Revix question 4303565564 проверен: after определён в site.js и добавляет
+  handle в timers; restore вызывает clearTimeout. Удалён повторный stop()
+  из cleanup scheduler tests (4303565574). Suggestions об AST/source extraction
+  (4303565570/4303565580) — замечания к устройству тестов, production-дефект
+  ими не установлен; архитектура тестовых harness в этой правке не меняется.
+  CodeRabbit по решению владельца не вызывается и не ожидается.
+- Ветка PR #45 синхронизирована с main d6b9401 (включая fixes PR #46/#47)
+  обычным merge без force. Незавершённые WP-0 изменения остаются в адресном
+  stash `WP-0 in progress before PR45 review fixes`.
+- В vpn-tunnel-enforcer:
+  `npm.cmd test -- src/main/scheduler.test.ts src/main/serverPickerMigration.test.ts`
+  — **43 passed**, exit 0; `npm.cmd run typecheck` — exit 0;
+  `npm.cmd test` — **3309 passed / 5 skipped / 0 failed**, 235 файлов passed /
+  2 skipped, 199.86 s, exit 0. Лог `.tmp/pr45-review-full.log`.
+- В website: `npm.cmd test` — **3 passed**, exit 0;
+  `npm.cmd run build` — 9 страниц, exit 0.
+- Из корня: `python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py`
+  — AC 927/927, F 210/210, exit 0; `git diff --check` и
+  `git diff --cached --check` — exit 0.
+- Это адресное исправление PR, не полная приёмка AT-10-001/002 или WP-10;
+  10 000 property cases, смена системной зоны и прочие AT-10-* не заявляются.
+  Installed E2E не запускались. CI/review нового head проверяются отдельно.
