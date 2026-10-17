@@ -1716,3 +1716,52 @@ CI/review нового SHA проверяются отдельно после pu
   AC 927/927, F 210/210, exit 0; `git diff --check` — exit 0. Оставшиеся
   L3-сценарии не запускались: **«Пропущено владельцем»**. Новые CI/review
   после отправки коммита учитываются отдельно; WP-0/WP-2 ещё не начаты.
+
+### 18.10.2026 — обычный Stop с повреждённым JSON и review 526a82b
+
+- 526a82b отправлен в PR #46. Windows CI 117515333565 — success:
+  3286 passed / 4 skipped, 235 files passed / 1 skipped, 222.80 s;
+  AC 927/927, F 210/210. Native BFE: priority=verified, aborted=true;
+  Electron native reads: 1 passed / 1 skipped. Rust 117515333353 — success.
+  Лог: `.tmp/wp3-ci-117515333565.log`.
+- Владелец сообщил, что trial CodeRabbit закончился, и прямо потребовал
+  игнорировать сервис. Новые review CodeRabbit не запрашиваются и больше
+  не являются условием перехода. Проверки CI и существенные замечания
+  действующих review сохраняются как обязательный порог.
+- Контроль AT-03-003(b) воспроизвёл старый дефект обычного Stop: прямой
+  disable отправлял повреждённый доверенный JSON в карантин и Allow fallback,
+  но wrapper disableKillSwitchIfActive завершался на read-only probe раньше
+  этого шага. До исправления: 1 passed / 1 failed (новая пара direct/Stop),
+  exit 1. Лог `.tmp/wp3-corrupt-gate-before.log`.
+- Wrapper теперь передаёт только trusted invalid-content в существующий
+  explicit recovery, который повторно проверяет storage и карантин по hash.
+  Passive probes остаются read-only; unsupported-version, недоверенный ACL
+  и отказ карантина по-прежнему запрещают native effects. Новые guard tests
+  проходят. `npm.cmd test -- src/main/firewallTransactions.test.ts
+  src/main/firewallKillSwitchValidation.test.ts src/main/lifecycleCleanup.test.ts`
+  — 275 passed / 1 skipped, 19.56 s, exit 0.
+- Revix review 5560309494 на 526a82b: три новых комментария, Timeline Low risk;
+  check 117515345476 neutral, заголовок сохраняет 4 issues / Needs changes,
+  что не считается APPROVED. 4304702666 подтверждён: пустой valid baseline
+  теперь тоже пишет completion receipt success=false с тем же operationId.
+  4304702671: тестовый parser сообщает явную ошибку отсутствующего payload.
+  `npm.cmd test -- src/main/systemNetwork.test.ts` — 64 passed / 1 skipped,
+  5.78 s, exit 0. 4304702670 — вопрос, поведение намеренное: при live/unknown
+  runtime вся startup-очистка, включая env proxy и orphan DNS, сохраняется
+  за свежим exit proof. Это проверяет production whole-chain regression
+  lifecycleCleanup, включая отсутствие вызовов env/DNS при live/unknown.
+- Новые финальные full/dist/remote gates учитываются ниже; WP-3 пока
+  не закрыт, WP-0/WP-2 не начаты. L3 — «Пропущено владельцем».
+- Финальный стабильный код: `npm.cmd test` — **3289 passed / 5 skipped /
+  0 failed**, 234 files passed / 2 skipped, 181.64 s, exit 0.
+  Лог `.tmp/wp3-review-final-full.log`. Предыдущий промежуточный полный
+  прогон — 3289 passed / 5 skipped, 187.75 s; после него дополнены receipt
+  и fixture guard, поэтому финальный результат указан отдельно.
+- `npm.cmd run dist:win` — exit 0, включая `npm run build` и
+  `npm run typecheck`. Setup 1.1.24: 139728924 bytes, SHA-256
+  `d99a6288c36cb291223b970668492ea991ca1bf8ff8016978a3fa64c366fd019`;
+  Authenticode NotSigned. Recovery resource SHA-256 совпадает с исходником:
+  `155c175332855980933b7c7081db58784af8c9bd2e09b2dda76f2b4fa414e490`.
+  Логи `.tmp/wp3-review-final-dist.log` и `.tmp/wp3-review-final-artifacts.json`.
+  Установка и L3 не выполнялись. Coverage: AC 927/927, F 210/210, exit 0;
+  `git diff --check` — exit 0. CI/review следующего head проверяются отдельно.

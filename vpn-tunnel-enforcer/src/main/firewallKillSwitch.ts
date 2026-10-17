@@ -1077,7 +1077,12 @@ export async function disableKillSwitchIfActive(
   if (process.platform !== 'win32') {
     return { success: true, skipped: true, message: 'Firewall kill-switch недоступен (не Windows)' }
   }
-  if (!(await isKillSwitchActive({ recovery: true }))) {
+  const active = await isKillSwitchActive({ recovery: true }).catch(error => {
+    if (!(error instanceof RecoveryManifestReadError) || error.reason !== 'invalid-content') throw error
+    // Explicit recovery must reach trusted quarantine/fallback. Passive probes stay read-only.
+    return true
+  })
+  if (!active) {
     // This path is hit on every stop-tun: tunController.stop() calls us
     // BEFORE the renderer's own disable-IPC arrives. Logging at `warn` made
     // the user think something went wrong every time. It didn't — the

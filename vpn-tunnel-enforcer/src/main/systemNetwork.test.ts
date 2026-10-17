@@ -34,9 +34,13 @@ function response(command: string) {
     if (state.failApply) throw new Error('apply failed')
     return { stdout: 'BASELINE_APPLIED', stderr: '' }
   }
-  if (script.includes('steps=@($results)')) return {
-    stdout: JSON.stringify({ steps: JSON.parse(Buffer.from(/\$values = .*FromBase64String\('([^']+)'\)/.exec(script)![1], 'base64').toString('utf8')).map((s: any, i: number) => ({ name: `${s.target}/${s.name}`, success: !state.failedSteps.includes(i), error: state.failedSteps.includes(i) ? 'injected failure' : null })),
-      notification: { success: !state.failNotify, error: state.failNotify ? 'notification failed' : null }, timings: { registryMs: 1, notifyMs: 2 }, ...state.reportPatch }), stderr: ''
+  if (script.includes('steps=@($results)')) {
+    const valuesPayload = /\$values = .*FromBase64String\('([^']+)'\)/.exec(script)?.[1]
+    if (!valuesPayload) throw new Error('Baseline rollback fixture: missing encoded values payload')
+    return {
+      stdout: JSON.stringify({ steps: JSON.parse(Buffer.from(valuesPayload, 'base64').toString('utf8')).map((s: any, i: number) => ({ name: `${s.target}/${s.name}`, success: !state.failedSteps.includes(i), error: state.failedSteps.includes(i) ? 'injected failure' : null })),
+        notification: { success: !state.failNotify, error: state.failNotify ? 'notification failed' : null }, timings: { registryMs: 1, notifyMs: 2 }, ...state.reportPatch }), stderr: ''
+    }
   }
   if (script.includes('InternetSetOption') && state.failNotify) throw new Error('notification failed')
   return { stdout: '', stderr: '' }
@@ -113,6 +117,7 @@ describe('trusted typed network baseline', () => {
     expect(result).toMatchObject({ success: false, warnings: expect.any(Array) })
     expect(result.warnings).toHaveLength(9)
     expect(state.operations).toEqual([])
+    expect(logEvent).toHaveBeenCalledWith('error', 'system-network', 'baseline rollback completed', expect.objectContaining({ operationId: result.operationId, success: false, warnings: result.warnings }))
   })
   it.each([{ owner: 'foreign' }, { schemaVersion: 2 }, { userSid: 'invalid' }])('does not salvage records across an invalid envelope %j (AT-03-003/012)', async patch => {
     state.manifest = { ...fixture(), ...patch }

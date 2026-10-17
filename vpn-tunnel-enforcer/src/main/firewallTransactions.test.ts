@@ -367,14 +367,24 @@ describe('firewall transaction fault injection (AT-03-003/004/007; F-030, F-186)
     expect(state.scripts).toEqual([])
     expect(state.quarantines).toEqual([])
   })
-  it('quarantines corrupt trusted firewall data before unknown Allow fallback (AT-03-003)', async () => {
+  it.each([['direct', disableKillSwitch], ['ordinary Stop', disableKillSwitchIfActive]] as const)('quarantines corrupt trusted firewall data via %s before unknown Allow fallback (AT-03-003)', async (_name, disable) => {
     state.readError = new RecoveryManifestReadError('invalid-content', 'corrupt JSON')
     state.ownedRules = true
     state.fileProbe.mockReturnValue('1')
-    expect((await disableKillSwitch('corrupt snapshot')).success).toBe(true)
+    expect((await disable('corrupt snapshot')).success).toBe(true)
     expect(state.quarantines).toEqual(['firewall.json'])
     expect(state.scripts.some(script => script.includes("-DefaultOutboundAction Allow"))).toBe(true)
     expect(logEvent).toHaveBeenCalledWith('error', 'firewall-killswitch', expect.stringContaining('CRITICAL_SECURITY_EVENT'), expect.anything())
+  })
+  it.each(['unsupported-version', 'untrusted', 'quarantine-failure'])('keeps the ordinary Stop gate closed after %s (AT-03-003/012)', async mode => {
+    state.readError = mode === 'untrusted' ? new Error('untrusted ACL') : new RecoveryManifestReadError(mode === 'unsupported-version' ? mode : 'invalid-content', 'fixture invalid manifest')
+    state.failQuarantine = mode === 'quarantine-failure'
+    state.ownedRules = true
+    const result = await disableKillSwitchIfActive('rejected snapshot').catch(() => ({ success: false }))
+    expect(result.success).toBe(false)
+    expect(state.scripts).toEqual([])
+    expect(state.quarantines).toEqual([])
+    expect(state.wfpCalls).toEqual([])
   })
   it('logs only bounded unique native phases without treating them as security proof (AT-00-005/AT-03-007)', async () => {
     state.nativeTimings = [

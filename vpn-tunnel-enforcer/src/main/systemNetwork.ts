@@ -226,7 +226,10 @@ async function rollbackUnlocked(reason = 'manual', operationId: string = `baseli
       return { success: true, operationId, skipped: true, message: 'Активный VPNTE network baseline не найден' }
     }
     for (const error of warnings) logEvent('error', 'system-network', 'baseline rollback step rejected', { operationId, error, success: false })
-    if (!manifest.values.length) return { success: false, operationId, message: 'Нет валидных шагов baseline; снимок сохранён', warnings }
+    if (!manifest.values.length) {
+      logEvent('error', 'system-network', 'baseline rollback completed', { operationId, success: false, warnings })
+      return { success: false, operationId, message: 'Нет валидных шагов baseline; снимок сохранён', warnings }
+    }
     const { stdout } = await ps(`${REGISTRY_HELPERS}
 ${WININET_NOTIFY_FUNCTION}
 if ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne '${manifest.userSid}') { throw 'Baseline user identity mismatch' }

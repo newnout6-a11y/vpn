@@ -549,3 +549,39 @@ AC 927/927, F 210/210, exit 0; `git diff --check` — exit 0. Это завер�
 текущем SHA должны быть без существенных замечаний. L3-сценарии со статусом
 «Пропущено владельцем» исключены из ожидаемых запусков по решению §10.12;
 отсутствие этой лаборатории больше не является условием ожидания.
+
+## Review 526a82b и ordinary Stop, 18.10.2026
+
+Windows CI 117515333565 — success: 3286 passed / 4 skipped, 222.80 s;
+AC 927/927, F 210/210; native BFE priority=verified/aborted=true,
+Electron reads 1 passed / 1 skipped. Rust 117515333353 — success.
+Владелец прямо исключил CodeRabbit из ожидания: trial закончился.
+Новые запросы сервису не отправляются. CI и действующие review обязательны.
+
+Revix 5560309494: три новых комментария, Timeline Low risk; check neutral
+с накопительным заголовком 4 issues / Needs changes не считается APPROVED.
+Исправлены отсутствие completion receipt при нуле валидных baseline-шагов
+(4304702666) и неясная диагностика fixture regex (4304702671).
+Вопрос 4304702670: ранний выход startup намеренно сохраняет env proxy и DNS
+при live/unknown runtime. Иначе рабочий runtime теряет сетевую конфигурацию
+без доказанного exit. Whole-chain lifecycle regression проверяет эту границу.
+
+AT-03-003(b): direct rollback уже карантинировал повреждённый trusted JSON,
+но ordinary Stop wrapper прерывался раньше на пассивном чтении. Новая пара
+тестов дала 1 passed / 1 failed до ремонта. Теперь только invalid-content
+передаётся в существующий explicit recovery с повторной проверкой доверия,
+quarantine hash и ownership-before-Allow. Недоверенный ACL, будущая версия
+и отказ карантина остаются отказами без native effects. Адресные проверки:
+firewallTransactions/firewallKillSwitchValidation/lifecycleCleanup —
+275 passed / 1 skipped, 19.56 s; systemNetwork — 64 passed / 1 skipped,
+5.78 s, exit 0. Финальные результаты следующего коммита записываются отдельно.
+
+Финальный `npm.cmd test` — **3289 passed / 5 skipped / 0 failed**,
+234 files passed / 2 skipped, 181.64 s, exit 0. Лог
+`.tmp/wp3-review-final-full.log`. `npm.cmd run dist:win`, включая production
+build/typecheck, — exit 0. Финальный Setup 1.1.24: 139728924 bytes, SHA-256
+`d99a6288c36cb291223b970668492ea991ca1bf8ff8016978a3fa64c366fd019`,
+Authenticode `NotSigned`. Recovery resource по-прежнему совпадает с исходником
+по SHA-256 `155c175332855980933b7c7081db58784af8c9bd2e09b2dda76f2b4fa414e490`.
+Coverage — AC 927/927, F 210/210, exit 0; `git diff --check` — exit 0.
+Установка и L3 не выполнялись; CI/review нового head проверяются отдельно.
