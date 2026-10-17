@@ -36,6 +36,13 @@ describe('strict kill-switch exception validation (AT-03-009)', () => {
     }
   )
 
+  it.each(['192.0.2.1/0x10', '192.0.2.1/+24', '2001:db8::1/1e1', '2001:db8::1/64.0'])(
+    'does not normalize malformed CIDR %s into a saved exception (AT-03-009)', async value => {
+      await expect(validateKillSwitchException({ type: 'ip', value, label: 'test' }))
+        .rejects.toThrow('exception.value')
+    }
+  )
+
   it('requires an existing readable executable and returns its canonical path', async () => {
     dir = await mkdtemp(join(tmpdir(), 'vpnte-exception-'))
     const executable = join(dir, 'allowed.exe')

@@ -602,6 +602,14 @@ describe('differential live firewall fault injection (AT-03-008/009)', () => {
     expect(state.writes).toEqual([])
     expect(state.scripts).toEqual([])
   })
+  it.each(['192.0.2.1/0x10', '192.0.2.1/+24', '2001:db8::1/1e1', '2001:db8::1/64.0'])(
+    'rejects malformed CIDR %s before journalling or native effects (AT-03-009)', async value => {
+      await active()
+      await expect(updateKillSwitchExceptions([], [value])).rejects.toThrow()
+      expect(state.writes).toEqual([])
+      expect(state.scripts).toEqual([])
+    }
+  )
   it('serializes 50 concurrent policy replacements with a durable commit for each', async () => {
     await active()
     const results = await Promise.all(Array.from({ length: 50 }, (_, i) => updateKillSwitchExceptions([], [`192.0.2.${i+2}`])))

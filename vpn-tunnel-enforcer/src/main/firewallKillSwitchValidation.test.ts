@@ -8,6 +8,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import fc from 'fast-check'
 
 vi.mock('electron', () => ({
   app: { getPath: () => '/tmp/vpnte-test' }
@@ -56,6 +57,33 @@ describe('isValidIpOrCidr', () => {
     expect(isValidIpOrCidr('10.0.0.0/33')).toBe(false)
     expect(isValidIpOrCidr('2001:db8::/129')).toBe(false)
     expect(isValidIpOrCidr('10.0.0.0/-1')).toBe(false)
+  })
+
+  it.each(['+24', '24.0', '0x10', '0b10', '0o10', '1e1', ' 24', '\t24', '', 'Infinity', 'NaN'])(
+    'rejects non-decimal CIDR prefix %j (AT-03-009; F-042/F-147)', prefix => {
+      expect(isValidIpOrCidr(`192.0.2.1/${prefix}`)).toBe(false)
+      expect(isValidIpOrCidr(`2001:db8::1/${prefix}`)).toBe(false)
+    }
+  )
+
+  it('accepts generated IPv4/IPv6 decimal prefixes within their bounds (AT-03-009)', () => {
+    fc.assert(fc.property(fc.ipV4(), fc.integer({ min: 1, max: 32 }), (address, prefix) => {
+      fc.pre(address !== '0.0.0.0')
+      expect(isValidIpOrCidr(`${address}/${prefix}`)).toBe(true)
+    }), { seed: 30009, numRuns: 200 })
+    fc.assert(fc.property(fc.ipV6(), fc.integer({ min: 1, max: 128 }), (address, prefix) => {
+      fc.pre(address !== '::')
+      expect(isValidIpOrCidr(`${address}/${prefix}`)).toBe(true)
+    }), { seed: 30010, numRuns: 200 })
+  })
+
+  it('rejects generated numeric coercions of otherwise valid prefixes (AT-03-009)', () => {
+    fc.assert(fc.property(fc.integer({ min: 1, max: 32 }), prefix => {
+      for (const coerced of [`+${prefix}`, `${prefix}.0`, `${prefix}e0`, `0x${prefix.toString(16)}`, ` ${prefix}`]) {
+        expect(isValidIpOrCidr(`192.0.2.1/${coerced}`)).toBe(false)
+        expect(isValidIpOrCidr(`2001:db8::1/${coerced}`)).toBe(false)
+      }
+    }), { seed: 30011, numRuns: 100 })
   })
 
   it('rejects hostnames and ranges', () => {

@@ -1010,3 +1010,55 @@
 - Критерии приёмки пакетов WP-4, WP-6, WP-7, WP-9, WP-10 закрыты не целиком: исправлены отдельные находки.
 - Открыты: вопрос подписи кода (раздел 10.8 ТЗ-06), PR #40 (сайт) и #41 (версия) ждут проверок.
 - Известная нестабильность: `adaptiveNetworkIdentity.test.ts` изредка падает при полном локальном прогоне (холодный PowerShell дольше таймаута 10 с под нагрузкой); отдельно и в CI проходит.
+
+## 2026-10-17 — Goal: WP-3 → WP-0 → WP-2; сверка WP-3 и строгие CIDR
+
+Поручение владельца: последовательно закончить WP-3, WP-0, WP-2; вести этот
+журнал, делать атомарные коммиты и PR, разбирать CI/review до отсутствия
+существенных замечаний. Текущий пакет — WP-3; переход дальше пока не выполнен.
+
+- Создана ветка `codex/wp3-acceptance` от актуального `vpn/main` (`c76d45a`).
+  Предыдущий PR #45 проверен отдельно: Windows и Rust CI success; Revix neutral;
+  замечания ревью — minor. Это не приёмка WP-3.
+- Прочитаны AGENTS.md, все 12 AT-03, методология, нормативные разделы тома 2
+  и принятые решения ТЗ-06. Матрица доказательств/пробелов каждого AT находится
+  в `vpn-tunnel-enforcer/docs/wp3-acceptance-2026-10-17.md`.
+- **AT-03-009:** найдено принятие масок `/0x10`, `/1e1`, `/+24`, `/24.0`
+  и пробелов из-за `Number(prefix)`. В granular API они молча нормализовались;
+  live firewall API допускал их до native effects. Теперь маска проверяется
+  как десятичные цифры до преобразования. Валидные адреса/маски и действующие
+  ограничения wildcard не изменены.
+- Регрессии покрывают валидатор, granular validation и запрет journalling/native
+  effects. Добавлены generated IPv4/IPv6 и numeric-coercion properties
+  (seed 30009/30010/30011). До исправления: 17 failed / 106 passed / 1 skipped;
+  после: 123 passed / 1 skipped, 3 files passed, exit 0.
+
+Фактически выполненные проверки из `vpn-tunnel-enforcer/`:
+
+```text
+npm.cmd test -- src/main/firewallKillSwitchValidation.test.ts src/main/killSwitchExceptionValidation.test.ts src/main/firewallTransactions.test.ts
+123 passed, 1 skipped; exit 0
+npm.cmd run typecheck
+exit 0
+npm.cmd test
+3113 passed, 5 skipped, 0 failed; 232 files passed, 2 skipped; 166.42 s; exit 0
+```
+
+Из корня: `python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py`
+— AC 927/927, F 210/210, exit 0; `git diff --check` — exit 0.
+
+Остаток и обнаруженные ограничения:
+
+- AT-03-007: baseline пишет результаты шагов без общего operation/correlation id;
+  это отдельный пробел наблюдаемости, требующий проверки/исправления.
+- L3 не выполнен. Текущий агент без административного токена; Hyper-V VM
+  зарегистрирована, но её VHDX отсутствует. Нет полной OS-матрицы, внешнего
+  packet oracle и физического операторского 464XLAT-тетеринга. Рабочее
+  установленное приложение запущено; сеть/DNS/firewall хоста не изменялись.
+- Запуск `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File
+  vpn-tunnel-enforcer/scripts/test-wfp-ipv6-native.ps1` — exit 1, `ok=false`,
+  `aborted=false`, cleanup `WFP error 0x8032000D` скрывает исходный отказ.
+  Следующий шаг — исправить smoke harness, добавить привилегированную ABI-проверку
+  в CI и разобрать её результат. Это не заменяет packet/reboot/OS acceptance.
+- WP-3 остаётся частичным; локальный PASS и трассировка не дают основания
+  объявить его принятым или перейти к WP-0. Нормативные `docs/` не менялись.

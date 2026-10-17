@@ -311,6 +311,8 @@ export function isValidIpOrCidr(value: string): boolean {
   if (!v) return false
   const [addr, prefix, ...rest] = v.split('/')
   if (rest.length > 0) return false
+  // CIDR lengths are decimal digits, not JavaScript numeric expressions.
+  if (prefix !== undefined && !/^[0-9]+$/.test(prefix)) return false
 
   const ipVersion = isIP(addr)
   if (ipVersion === 4) {
