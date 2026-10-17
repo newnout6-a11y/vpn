@@ -520,7 +520,7 @@
       if (state === 'ok') return
       blocked += 3 + Math.floor(Math.random() * 9)
       if (nEl) nEl.textContent = blocked.toLocaleString('ru-RU')
-      setTimeout(count, 90)
+      after(90, count)
     }
     const restore = () => {
       timers.forEach(clearTimeout); timers = []
