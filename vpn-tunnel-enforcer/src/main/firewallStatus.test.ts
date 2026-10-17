@@ -14,6 +14,7 @@ function requireRule(snapshot: ReturnType<typeof fixture>['snapshot'], name: str
 }
 describe('effective firewall evidence', () => {
   it.skipIf(process.platform !== 'win32').each(['small', 'large', 'no-owned', 'missing-rule-id', 'missing-filter-id',
+    'profile-disabled-interface', 'profile-not-configured', 'profile-null', 'profile-missing-field', 'profile-invalid-value',
     ...['Application', 'Address', 'Port', 'Interface'].flatMap(kind => [`missing-${kind}`, `duplicate-${kind}`, `query-error-${kind}`])])(
     'reads effective filters in four bulk queries and keeps one-to-one evidence: %s (AT-03-001/004)', variant => {
     const { snapshot } = fixture()
@@ -21,6 +22,8 @@ describe('effective firewall evidence', () => {
     snapshot.rules.push({ ...snapshot.rules[0], program: 'C:\\fixture\\second.exe' })
     if (variant === 'large') snapshot.rules.push(...Array.from({ length: 100 }, (_, i) => ({ ...snapshot.rules[0], name: `${prefix}extra-${i}` })))
     if (variant === 'no-owned') snapshot.rules = []
+    if (variant === 'profile-disabled-interface') Object.assign(snapshot.profiles[0], { disabledInterfaces: ['Fixture Ethernet'] })
+    if (variant === 'profile-not-configured') Object.assign(snapshot.profiles[0], { disabledInterfaces: ['NotConfigured'] })
     snapshot.storedNames = snapshot.rules.map(rule => rule.name)
     const encoded = Buffer.from(JSON.stringify(snapshot)).toString('base64')
     const script = `
@@ -29,7 +32,12 @@ $global:filterCalls=@{}
 function Get-Service { [CmdletBinding()]param($Name) $fixture.services | ForEach-Object { [pscustomobject]@{Name=$_.name;Status=$_.status} } }
 function Get-NetFirewallProfile { [CmdletBinding()]param($PolicyStore,$Profile)
   if($PolicyStore -ne 'ActiveStore'){throw 'Must read effective profiles'}
-  $fixture.profiles | ForEach-Object { [pscustomobject]@{Name=$_.name;Enabled=$_.enabled;DefaultOutboundAction=$_.outbound} }
+  $fixture.profiles | ForEach-Object {
+    $profile=[pscustomobject]@{Name=$_.name;Enabled=$_.enabled;DefaultOutboundAction=$_.outbound;DisabledInterfaceAliases=$(if('${variant}' -eq 'profile-null'){$null}else{$_.disabledInterfaces})}
+    if('${variant}' -eq 'profile-missing-field'){$profile.PSObject.Properties.Remove('DisabledInterfaceAliases')}
+    if('${variant}' -eq 'profile-invalid-value'){$profile.DisabledInterfaceAliases=17}
+    $profile
+  }
 }
 function Get-NetFirewallRule { [CmdletBinding()]param($PolicyStore)
   if($PolicyStore -notin @('ActiveStore','PersistentStore')){throw 'Missing policy store'}
@@ -67,11 +75,13 @@ $actual=&{${FIREWALL_STATUS_PS}}
     try {
       const file = join(directory, 'fixture.ps1'); writeFileSync(file, '\ufeff' + script)
       const run = () => execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', file], { encoding: 'utf8', windowsHide: true, timeout: 15000, stdio: ['pipe', 'pipe', 'pipe'] })
-      if (['small', 'large', 'no-owned'].includes(variant)) {
+      if (['small', 'large', 'no-owned', 'profile-disabled-interface', 'profile-not-configured', 'profile-null'].includes(variant)) {
         const actual = JSON.parse(run())
         expect(parseFirewallStatusSnapshot(actual.snapshot)).toEqual({ ...snapshot, foreignAllows: 1 })
         expect(actual.calls).toEqual({ Application: 1, Address: 1, Port: 1, Interface: 1 })
-      } else expect(run).toThrow(variant.startsWith('query-error-') ? 'Fixture filter query denied' : 'Incomplete firewall filter read-back')
+      } else if (variant === 'profile-invalid-value') expect(() => parseFirewallStatusSnapshot(JSON.parse(run()).snapshot)).toThrow('Incomplete firewall status snapshot')
+      else expect(run).toThrow(variant.startsWith('query-error-') ? 'Fixture filter query denied' :
+        variant === 'profile-missing-field' ? 'Incomplete firewall profile read-back' : 'Incomplete firewall filter read-back')
     } finally { rmSync(directory, { recursive: true, force: true }) }
   })
   it('accepts a complete scoped snapshot and both loopback families', () => {
@@ -81,6 +91,27 @@ $actual=&{${FIREWALL_STATUS_PS}}
     snapshot.rules.push({ ...snapshot.rules[3], remote: ['::1/128'] })
     expect(matches()).toBe(true)
   })
+  it.each(['Domain', 'Private', 'Public'])('refuses disabled physical interfaces in the %s profile (AT-03-001)', name => {
+    const { snapshot, matches } = fixture()
+    const profile = snapshot.profiles.find(p => p.name === name)
+    assert(profile, `Missing firewall fixture profile: ${name}`)
+    profile.disabledInterfaces = ['Fixture Ethernet']
+    expect(matches()).toBe(false)
+  })
+  it('accepts explicit NotConfigured without excluded interfaces (AT-03-001)', () => {
+    const { snapshot, matches } = fixture()
+    for (const profile of snapshot.profiles) Object.assign(profile, { disabledInterfaces: ['NotConfigured'] })
+    expect(matches()).toBe(true)
+  })
+  it.each([undefined, null, 'NotConfigured', [null], [17], [''], ['NotConfigured', 'Fixture Ethernet']])(
+    'never verifies an incomplete or excluded interface scope: %j (AT-03-001)', disabledInterfaces => {
+      const { snapshot, matches } = fixture()
+      Object.assign(snapshot.profiles[0], { disabledInterfaces })
+      if (Array.isArray(disabledInterfaces) && disabledInterfaces.every(x => typeof x === 'string')) {
+        expect(parseFirewallStatusSnapshot(JSON.stringify(snapshot))).toEqual(snapshot)
+      } else expect(() => parseFirewallStatusSnapshot(JSON.stringify(snapshot))).toThrow()
+      expect(matches()).toBe(false)
+    })
   it('recognizes the dotted IPv4 subnet masks returned by real ActiveStore (AT-03-001/009)', () => {
     const { snapshot, matches } = fixture()
     requireRule(snapshot, 'loopback-out').remote = ['127.0.0.0/255.0.0.0']

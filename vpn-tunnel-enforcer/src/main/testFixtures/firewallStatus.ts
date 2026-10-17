@@ -13,7 +13,7 @@ export function firewallStatusFixture() {
     protocol: ['dhcp', 'ntp'].includes(name) ? 'UDP' : 'Any', remotePorts: name === 'dhcp' ? ['67', '68'] : name === 'ntp' ? ['123'] : ['Any']
   }))
   const snapshot: FirewallStatusSnapshot = { services: ['BFE', 'MpsSvc'].map(name => ({ name, status: 'Running' })),
-    profiles: ['Domain', 'Private', 'Public'].map(name => ({ name, enabled: 'True', outbound: 'Block' })),
+    profiles: ['Domain', 'Private', 'Public'].map(name => ({ name, enabled: 'True', outbound: 'Block', disabledInterfaces: [] })),
     rules, storedNames: rules.map(r => r.name), foreignAllows: 0 }
   const manifest: FirewallManifest = { schemaVersion: 1, owner: 'VPNTE', operationId: randomUUID(), phase: 'active', strictMode: false,
     createdAt: 1, ruleNames: [...snapshot.storedNames], singboxExePath: 'C:\\VPNTE\\sing-box.exe', savedProfiles: [] }

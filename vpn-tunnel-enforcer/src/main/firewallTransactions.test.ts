@@ -183,6 +183,14 @@ describe('firewall transaction fault injection (AT-03-003/004/007; F-030, F-186)
     state.wfpCalls = []
     expect(await getFirewallKillSwitchStatus()).toEqual({ state: 'verified', cleanupRequired: true, reason: 'policy-verified' })
     expect(state.wfpCalls).toEqual(['verify'])
+    snapshot.profiles[0].disabledInterfaces = ['Fixture Ethernet']
+    state.statusSnapshot = JSON.stringify(snapshot)
+    expect(await getFirewallKillSwitchStatus()).toMatchObject({ state: 'unknown', reason: 'incomplete-policy' })
+    expect(state.wfpCalls).toEqual(['verify'])
+    state.statusSnapshot = JSON.stringify({ ...snapshot, profiles: snapshot.profiles.map(p => ({ ...p, disabledInterfaces: undefined })) })
+    expect(await getFirewallKillSwitchStatus()).toMatchObject({ state: 'unknown', reason: 'read-back-failed' })
+    snapshot.profiles[0].disabledInterfaces = []
+    state.statusSnapshot = JSON.stringify(snapshot)
     state.wfpFailVerify = true
     expect(await getFirewallKillSwitchStatus()).toMatchObject({ state: 'unknown', reason: 'read-back-failed' })
     state.wfpFailVerify = false

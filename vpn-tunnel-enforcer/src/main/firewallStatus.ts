@@ -11,7 +11,12 @@ export const FIREWALL_STATUS_PS = `
 $ErrorActionPreference='Stop'
 $services=@(Get-Service -Name BFE,MpsSvc -ErrorAction Stop | ForEach-Object { [pscustomobject]@{name=[string]$_.Name;status=[string]$_.Status} })
 $profiles=@(Get-NetFirewallProfile -PolicyStore ActiveStore -Profile Domain,Private,Public -ErrorAction Stop | ForEach-Object {
-  [pscustomobject]@{name=[string]$_.Name;enabled=[string]$_.Enabled;outbound=[string]$_.DefaultOutboundAction}
+  $field=$_.PSObject.Properties['DisabledInterfaceAliases']
+  if($null -eq $field){throw 'Incomplete firewall profile read-back'}
+  # Native CIM null explicitly means no excluded interfaces; a missing field is unknown.
+  $disabled=@()
+  if($null -ne $field.Value){$disabled=@($field.Value)}
+  [pscustomobject]@{name=[string]$_.Name;enabled=[string]$_.Enabled;outbound=[string]$_.DefaultOutboundAction;disabledInterfaces=$disabled}
 })
 $active=@(Get-NetFirewallRule -PolicyStore ActiveStore -ErrorAction Stop)
 $stored=@(Get-NetFirewallRule -PolicyStore PersistentStore -ErrorAction Stop | Where-Object { $_.DisplayName -like 'VPNTE-killswitch*' } | ForEach-Object { [string]$_.DisplayName })
@@ -49,7 +54,7 @@ $owned=@($active | Where-Object { $_.DisplayName -like 'VPNTE-killswitch*' } | F
 
 export interface FirewallStatusSnapshot {
   services: Array<{ name: string; status: string }>
-  profiles: Array<{ name: string; enabled: string; outbound: string }>
+  profiles: Array<{ name: string; enabled: string; outbound: string; disabledInterfaces: string[] }>
   storedNames: string[]
   foreignAllows: number
   rules: Array<{ name: string; enabled: string; direction: string; action: string; profile: string;
@@ -62,7 +67,7 @@ export function parseFirewallStatusSnapshot(stdout: string): FirewallStatusSnaps
   if (!v || !Array.isArray(v.services) || !Array.isArray(v.profiles) || !Array.isArray(v.rules) || !strings(v.storedNames) ||
       !Number.isSafeInteger(v.foreignAllows) || v.foreignAllows < 0 ||
       v.services.some(s => !s || typeof s.name !== 'string' || typeof s.status !== 'string') ||
-      v.profiles.some(p => !p || ['name', 'enabled', 'outbound'].some(k => typeof p[k as keyof typeof p] !== 'string')) ||
+      v.profiles.some(p => !p || ['name', 'enabled', 'outbound'].some(k => typeof p[k as keyof typeof p] !== 'string') || !strings(p.disabledInterfaces)) ||
       v.rules.some(r => !r || ['name', 'enabled', 'direction', 'action', 'profile', 'program', 'protocol'].some(k => typeof r[k as keyof typeof r] !== 'string') ||
         ![r.remote, r.local, r.interfaces, r.remotePorts].every(strings))) throw new Error('Incomplete firewall status snapshot')
   return v
@@ -105,7 +110,8 @@ export function matchesFirewallPolicy(snapshot: FirewallStatusSnapshot, manifest
   if (snapshot.foreignAllows !== 0 || !same(snapshot.services.map(s => s.name.toLowerCase()), ['bfe', 'mpssvc']) ||
       snapshot.services.some(s => s.status !== 'Running') || snapshot.profiles.length !== 3 ||
       !same(snapshot.profiles.map(p => p.name), ['Domain', 'Private', 'Public']) ||
-      snapshot.profiles.some(p => p.enabled !== 'True' || p.outbound !== 'Block') ||
+      snapshot.profiles.some(p => p.enabled !== 'True' || p.outbound !== 'Block' || !Array.isArray(p.disabledInterfaces) ||
+        !(p.disabledInterfaces.length === 0 || same(p.disabledInterfaces, ['NotConfigured']))) ||
       coreNames.some(n => !manifest.ruleNames.includes(n)) ||
       !same([...new Set(snapshot.storedNames)], manifest.ruleNames) ||
       !same([...new Set(snapshot.rules.map(r => r.name))], manifest.ruleNames)) return false
