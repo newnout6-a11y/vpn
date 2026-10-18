@@ -2,26 +2,16 @@ import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Download, Upload, CheckCircle2, AlertTriangle } from 'lucide-react'
 import { MacCard, MacButton, MacModal } from '../design-system'
+import type { ElectronAPI } from '../../shared/electron-api'
+import { ipcError, isIpcRemoteErrorData } from '../../shared/ipc-result'
 
 type ConflictResolution = 'replace' | 'merge'
 
-interface ValidationResult {
-  success: boolean
-  sections: string[]
-  conflicts: string[]
-  error?: string
-  filePath: string
-}
-
-interface ConfigApi {
-  configExport: (mode?: 'redacted' | 'secrets') => Promise<{ success: boolean; path?: string; error?: string }>
-  configBrowseImport: () => Promise<string | null>
-  configImport: (filePath: string) => Promise<{ success: boolean; sections: string[]; conflicts: string[]; error?: string }>
-  configImportApply: (filePath: string, sections: string[], conflictResolution: 'replace' | 'merge') => Promise<{ success: boolean; error?: string }>
-}
+type ConfigApi = Pick<ElectronAPI, 'configExport' | 'configBrowseImport' | 'configImport' | 'configImportApply'>
+type ValidationResult = Awaited<ReturnType<ConfigApi['configImport']>> & { filePath: string }
 
 function getApi(): ConfigApi {
-  return window.electronAPI as unknown as ConfigApi
+  return window.electronAPI
 }
 
 const SECTION_KEYS: Record<string, string> = {
@@ -37,7 +27,7 @@ const SECTION_KEYS: Record<string, string> = {
 }
 
 export function ImportExportSettings() {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
 
   const [exporting, setExporting] = useState(false)
   const [exportSuccess, setExportSuccess] = useState(false)
@@ -57,6 +47,9 @@ export function ImportExportSettings() {
 
   // Success state for import
   const [importSuccess, setImportSuccess] = useState(false)
+  const showError = (error: unknown) => setErrorModal({ open: true, message:
+    isIpcRemoteErrorData(error) ? error.message : ipcError('internal', i18n?.language?.startsWith('ru') ? 'ru' : 'en').message
+  })
 
   const getSectionLabel = (section: string): string => {
     const key = SECTION_KEYS[section]
@@ -67,15 +60,11 @@ export function ImportExportSettings() {
     setExporting(true)
     setExportSuccess(false)
     try {
-      const result = await getApi().configExport(mode)
-      if (result.success) {
-        setExportSuccess(true)
-        setTimeout(() => setExportSuccess(false), 3000)
-      } else if (result.error && result.error !== 'Export cancelled') {
-        setErrorModal({ open: true, message: result.error })
-      }
-    } catch (err: any) {
-      setErrorModal({ open: true, message: err.message || String(err) })
+      await getApi().configExport(mode)
+      setExportSuccess(true)
+      setTimeout(() => setExportSuccess(false), 3000)
+    } catch (err: unknown) {
+      if (!isIpcRemoteErrorData(err) || err.category !== 'cancelled') showError(err)
     } finally {
       setExporting(false)
     }
@@ -93,15 +82,6 @@ export function ImportExportSettings() {
       }
 
       const result = await getApi().configImport(filePath)
-      if (!result.success) {
-        setErrorModal({
-          open: true,
-          message: result.error || t('settings.importErrorDescription')
-        })
-        setImporting(false)
-        return
-      }
-
       // Show validation results with sections and conflicts
       setValidation({
         ...result,
@@ -109,8 +89,8 @@ export function ImportExportSettings() {
       })
       setSelectedSections([...result.sections])
       setConflictResolution('replace')
-    } catch (err: any) {
-      setErrorModal({ open: true, message: err.message || String(err) })
+    } catch (err: unknown) {
+      showError(err)
     } finally {
       setImporting(false)
     }
@@ -121,23 +101,16 @@ export function ImportExportSettings() {
 
     setApplying(true)
     try {
-      const result = await getApi().configImportApply(
+      await getApi().configImportApply(
         validation.filePath,
         selectedSections,
         conflictResolution
       )
-      if (result.success) {
-        setImportSuccess(true)
-        setValidation(null)
-        setTimeout(() => setImportSuccess(false), 3000)
-      } else {
-        setErrorModal({
-          open: true,
-          message: result.error || t('settings.importErrorDescription')
-        })
-      }
-    } catch (err: any) {
-      setErrorModal({ open: true, message: err.message || String(err) })
+      setImportSuccess(true)
+      setValidation(null)
+      setTimeout(() => setImportSuccess(false), 3000)
+    } catch (err: unknown) {
+      showError(err)
     } finally {
       setApplying(false)
     }

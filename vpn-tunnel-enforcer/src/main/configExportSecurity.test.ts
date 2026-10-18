@@ -48,7 +48,7 @@ describe('main configuration export authority', () => {
     expect(JSON.stringify(collectCurrentConfig()).replace(/"exportedAt":\d+/, '')).toBe(before.replace(/"exportedAt":\d+/, ''))
   })
   it('cancelling consent does not open a save dialog or write any file', async () => {
-    expect(await invoke('secrets')).toEqual({ success: false, error: 'Export cancelled' })
+    await expect(invoke('secrets')).rejects.toMatchObject({ category: 'cancelled' })
     expect(state.save).not.toHaveBeenCalled(); expect(existsSync(destination)).toBe(false)
   })
   it('only native consent authorizes a full export; no payload containing secrets returns over IPC', async () => {
@@ -66,7 +66,7 @@ describe('main configuration export authority', () => {
   it('does not write after the requesting window closes during native save', async () => {
     state.prompt.mockResolvedValue({ response: 1 })
     state.save.mockImplementation(async () => { sender.isDestroyed = () => true; return { canceled: false, filePath: destination } })
-    expect((await invoke('secrets')).success).toBe(false)
+    await expect(invoke('secrets')).rejects.toMatchObject({ category: 'cancelled' })
     expect(existsSync(destination)).toBe(false)
   })
   it.each([

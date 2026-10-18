@@ -27,6 +27,7 @@ import { compactForIpcLog } from './ipcLogging'
 import { withSecretExportConsent } from './secretExportConsent'
 import { redactConfigExport } from './configExportPolicy'
 import { requireEnum, requireString, requireStringArray } from './ipcValidation'
+import { IpcFault, classifyIpcError } from '../shared/ipc-result'
 import { serverPickerStore, serverGroupsStore, granularKillSwitchStore } from './sharedStores'
 import type {
   SplitTunnelApp,
@@ -191,7 +192,7 @@ export function validateImportData(data: unknown): {
   sections: ConfigSection[]
   error?: string
 } {
-  if (!data || typeof data !== 'object') {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
     return { valid: false, sections: [], error: 'Invalid format: expected a JSON object' }
   }
 
@@ -242,7 +243,7 @@ export function validateImportData(data: unknown): {
 
   // Object sections
   if ('rotation' in obj) {
-    if (!obj.rotation || typeof obj.rotation !== 'object') {
+    if (!obj.rotation || typeof obj.rotation !== 'object' || Array.isArray(obj.rotation)) {
       return {
         valid: false,
         sections: [],
@@ -253,7 +254,7 @@ export function validateImportData(data: unknown): {
   }
 
   if ('killSwitch' in obj) {
-    if (!obj.killSwitch || typeof obj.killSwitch !== 'object') {
+    if (!obj.killSwitch || typeof obj.killSwitch !== 'object' || Array.isArray(obj.killSwitch)) {
       return {
         valid: false,
         sections: [],
@@ -264,7 +265,7 @@ export function validateImportData(data: unknown): {
   }
 
   if ('notifications' in obj) {
-    if (!obj.notifications || typeof obj.notifications !== 'object') {
+    if (!obj.notifications || typeof obj.notifications !== 'object' || Array.isArray(obj.notifications)) {
       return {
         valid: false,
         sections: [],
@@ -295,30 +296,30 @@ export function validateImportData(data: unknown): {
  */
 export function detectConflicts(
   existing: ConfigExportData,
-  incoming: ConfigExportData
+  incoming: Partial<ConfigExportData>
 ): ConfigSection[] {
   const conflicts: ConfigSection[] = []
 
   // Array sections: conflict if both have non-empty arrays
-  if (existing.profiles.length > 0 && incoming.profiles.length > 0) {
+  if (existing.profiles.length > 0 && (incoming.profiles?.length ?? 0) > 0) {
     conflicts.push('profiles')
   }
-  if (existing.serverGroups.length > 0 && incoming.serverGroups.length > 0) {
+  if (existing.serverGroups.length > 0 && (incoming.serverGroups?.length ?? 0) > 0) {
     conflicts.push('serverGroups')
   }
-  if (existing.schedules.length > 0 && incoming.schedules.length > 0) {
+  if (existing.schedules.length > 0 && (incoming.schedules?.length ?? 0) > 0) {
     conflicts.push('schedules')
   }
-  if (existing.splitTunnel.length > 0 && incoming.splitTunnel.length > 0) {
+  if (existing.splitTunnel.length > 0 && (incoming.splitTunnel?.length ?? 0) > 0) {
     conflicts.push('splitTunnel')
   }
-  if (existing.dns.length > 0 && incoming.dns.length > 0) {
+  if (existing.dns.length > 0 && (incoming.dns?.length ?? 0) > 0) {
     conflicts.push('dns')
   }
-  if (existing.domainRouting.length > 0 && incoming.domainRouting.length > 0) {
+  if (existing.domainRouting.length > 0 && (incoming.domainRouting?.length ?? 0) > 0) {
     conflicts.push('domainRouting')
   }
-  if (existing.themes.length > 0 && incoming.themes.length > 0) {
+  if (existing.themes.length > 0 && (incoming.themes?.length ?? 0) > 0) {
     conflicts.push('themes')
   }
 
@@ -326,7 +327,7 @@ export function detectConflicts(
   if (existing.rotation.enabled || existing.rotation.profileIds.length > 0) {
     if (
       incoming.rotation &&
-      (incoming.rotation.enabled || incoming.rotation.profileIds.length > 0)
+      (incoming.rotation.enabled || (incoming.rotation.profileIds?.length ?? 0) > 0)
     ) {
       conflicts.push('rotation')
     }
@@ -335,7 +336,7 @@ export function detectConflicts(
   if (existing.killSwitch.level !== 'off' || existing.killSwitch.exceptions.length > 0) {
     if (
       incoming.killSwitch &&
-      (incoming.killSwitch.level !== 'off' || incoming.killSwitch.exceptions.length > 0)
+      (incoming.killSwitch.level !== 'off' || (incoming.killSwitch.exceptions?.length ?? 0) > 0)
     ) {
       conflicts.push('killSwitch')
     }
@@ -534,7 +535,7 @@ export function collectCurrentConfig(): ConfigExportData {
 /**
  * Writes sections from a ConfigExportData object back to the respective stores.
  */
-function writeConfigToStores(config: ConfigExportData, sections: ConfigSection[]): void {
+function writeConfigToStores(config: ConfigExportData, sections: ConfigSection[], restoring = false): void {
   for (const section of sections) {
     switch (section) {
       case 'profiles':
@@ -555,9 +556,11 @@ function writeConfigToStores(config: ConfigExportData, sections: ConfigSection[]
         dnsStore.set('customProfiles', custom)
         // Restore the active-profile selection when the import names one that
         // exists among the profiles we just wrote (custom or builtin).
+        // Rollback must preserve the exact snapshot, including null (system DNS).
         if (
-          config.activeDnsProfileId &&
-          config.dns.some((d) => d.id === config.activeDnsProfileId)
+          restoring || (
+            config.activeDnsProfileId && config.dns.some((d) => d.id === config.activeDnsProfileId)
+          )
         ) {
           dnsStore.set('activeProfileId', config.activeDnsProfileId)
         } else {
@@ -590,13 +593,13 @@ function writeConfigToStores(config: ConfigExportData, sections: ConfigSection[]
 /**
  * Exports all settings to a JSON file via save dialog.
  */
-async function exportConfig(sender: WebContents, mode: 'redacted' | 'secrets' = 'redacted'): Promise<{ success: boolean; path?: string; error?: string }> {
+async function exportConfig(sender: WebContents, mode: 'redacted' | 'secrets' = 'redacted'): Promise<{ success: true; path: string }> {
   try {
     if (mode === 'secrets') {
       const consent = await withSecretExportConsent(sender, 'file', () => true)
-      if (consent !== true) return { success: false, error: 'Export cancelled' }
+      if (consent !== true) throw new IpcFault('cancelled')
     }
-    if (sender.isDestroyed()) return { success: false, error: 'Export cancelled' }
+    if (sender.isDestroyed()) throw new IpcFault('cancelled')
     const result = await dialog.showSaveDialog({
       title: mode === 'secrets' ? 'Экспорт конфигурации с секретами' : 'Экспорт конфигурации без секретов',
       buttonLabel: mode === 'secrets' ? 'Сохранить файл с секретами' : 'Сохранить',
@@ -605,7 +608,7 @@ async function exportConfig(sender: WebContents, mode: 'redacted' | 'secrets' = 
     })
 
     if (result.canceled || !result.filePath || sender.isDestroyed()) {
-      return { success: false, error: 'Export cancelled' }
+      throw new IpcFault('cancelled')
     }
 
     const config = collectCurrentConfig()
@@ -615,9 +618,8 @@ async function exportConfig(sender: WebContents, mode: 'redacted' | 'secrets' = 
     logEvent('info', 'config-manager', 'config exported', { path: result.filePath, mode })
     return { success: true, path: result.filePath }
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
-    logEvent('error', 'config-manager', 'export failed', { error: message })
-    return { success: false, error: message }
+    logEvent('error', 'config-manager', 'export failed', { reason: classifyIpcError(err) })
+    throw err
   }
 }
 
@@ -626,25 +628,23 @@ async function exportConfig(sender: WebContents, mode: 'redacted' | 'secrets' = 
 /**
  * Validates an import file and returns available sections and conflicts.
  */
+function parseImportJson(raw: string): unknown {
+  try { return JSON.parse(raw) }
+  catch { throw new IpcFault('validation') }
+}
+
 function importValidate(filePath: string, approvedRaw?: string): {
-  success: boolean
+  success: true
   sections: string[]
   conflicts: string[]
-  error?: string
 } {
   try {
     const raw = approvedRaw ?? readFileSync(filePath, 'utf-8')
-    let parsed: unknown
-
-    try {
-      parsed = JSON.parse(raw)
-    } catch {
-      return { success: false, sections: [], conflicts: [], error: 'Invalid JSON format' }
-    }
+    const parsed = parseImportJson(raw)
 
     const validation = validateImportData(parsed)
     if (!validation.valid) {
-      return { success: false, sections: [], conflicts: [], error: validation.error }
+      throw new IpcFault('validation')
     }
 
     // Detect conflicts with current config
@@ -667,9 +667,8 @@ function importValidate(filePath: string, approvedRaw?: string): {
       conflicts: relevantConflicts
     }
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
-    logEvent('error', 'config-manager', 'import validation failed', { error: message })
-    return { success: false, sections: [], conflicts: [], error: message }
+    logEvent('error', 'config-manager', 'import validation failed', { reason: classifyIpcError(err) })
+    throw err
   }
 }
 
@@ -683,15 +682,15 @@ function importApply(
   sections: string[],
   conflictResolution: 'replace' | 'merge',
   approvedRaw?: string
-): { success: boolean; error?: string } {
+): { success: true } {
   try {
     const raw = approvedRaw ?? readFileSync(filePath, 'utf-8')
-    const parsed = JSON.parse(raw) as ConfigExportData
+    const parsed = parseImportJson(raw)
 
     // Re-validate
     const validation = validateImportData(parsed)
     if (!validation.valid) {
-      return { success: false, error: validation.error }
+      throw new IpcFault('validation')
     }
 
     // Filter to only valid sections
@@ -699,20 +698,21 @@ function importApply(
       ALL_SECTIONS.includes(s as ConfigSection)
     ) as ConfigSection[]
 
-    if (validSections.length === 0) {
-      return { success: false, error: 'No valid sections selected for import' }
+    if (validSections.length === 0 || validSections.length !== sections.length
+      || validSections.some(section => !validation.sections.includes(section))) {
+      throw new IpcFault('validation')
     }
 
     const existing = collectCurrentConfig()
-    const merged = applySelectiveImport(existing, parsed, validSections, conflictResolution)
+    const merged = applySelectiveImport(existing, parsed as ConfigExportData, validSections, conflictResolution)
 
     // Write as a transaction from the caller's perspective: restore the
     // exact pre-import snapshot if any store rejects a write.
     try {
       writeConfigToStores(merged, validSections)
     } catch (writeError) {
-      try { writeConfigToStores(existing, validSections) } catch (rollbackError) {
-        logEvent('error', 'config-manager', 'config import rollback failed', { rollbackError })
+      try { writeConfigToStores(existing, validSections, true) } catch (rollbackError) {
+        logEvent('error', 'config-manager', 'config import rollback failed', { reason: classifyIpcError(rollbackError) })
       }
       throw writeError
     }
@@ -740,7 +740,7 @@ function importApply(
         granularKillSwitch.reloadFromStore?.()
       }
     } catch (err) {
-      logEvent('warn', 'config-manager', 'post-import service refresh failed', { err: (err as Error)?.message })
+      logEvent('warn', 'config-manager', 'post-import service refresh failed', { reason: classifyIpcError(err) })
     }
 
     logEvent('info', 'config-manager', 'import applied', {
@@ -751,9 +751,8 @@ function importApply(
 
     return { success: true }
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
-    logEvent('error', 'config-manager', 'import apply failed', { error: message })
-    return { success: false, error: message }
+    logEvent('error', 'config-manager', 'import apply failed', { reason: classifyIpcError(err) })
+    throw err
   }
 }
 
@@ -780,7 +779,7 @@ function handleLogged<T>(
       logEvent('debug', 'ipc', `${channel} finished`, { ms: Date.now() - started })
       return result
     } catch (err) {
-      logEvent('error', 'ipc', `${channel} failed`, err)
+      logEvent('error', 'ipc', `${channel} failed`, { reason: classifyIpcError(err) })
       throw err
     }
   })
@@ -798,7 +797,7 @@ function requireApprovedConfigImport(sender: WebContents, path: string): Approve
   const approved = approvedConfigImports.get(sender)
   if (approved && (sender.isDestroyed?.() || Date.now() >= approved.expiresAt)) approved.release()
   if (!approved || approvedConfigImports.get(sender) !== approved || approved.path !== path) {
-    throw new Error('Configuration import requires this renderer’s native-dialog selection')
+    throw new IpcFault('permission')
   }
   return approved
 }
@@ -808,7 +807,7 @@ function readSelectedConfig(path: string): string {
   try {
     const before = fstatSync(fd)
     if (!before.isFile() || before.size > MAX_CONFIG_IMPORT_BYTES) {
-      throw new Error('Configuration import must be a regular file up to 16 MiB')
+      throw new IpcFault('validation')
     }
     // Do not use an unbounded readFileSync: the file can grow after fstat.
     const buffer = Buffer.alloc(before.size + 1)
@@ -820,7 +819,7 @@ function readSelectedConfig(path: string): string {
     }
     const after = fstatSync(fd)
     if (length !== before.size || after.size !== before.size || after.mtimeMs !== before.mtimeMs) {
-      throw new Error('Configuration import file changed while reading')
+      throw new IpcFault('conflict')
     }
     return buffer.subarray(0, length).toString('utf8')
   } finally { closeSync(fd) }
@@ -868,7 +867,7 @@ export function registerConfigManagerIpcHandlers(): void {
     if (configImportDialogs.get(event.sender) !== request) return null
     configImportDialogs.delete(event.sender)
     if (result.canceled || result.filePaths.length === 0) return null
-    if (event.sender.isDestroyed?.()) throw new Error('Configuration import renderer closed')
+    if (event.sender.isDestroyed?.()) throw new IpcFault('cancelled')
     const path = result.filePaths[0]
     const raw = readSelectedConfig(path)
     let timer: ReturnType<typeof setTimeout>

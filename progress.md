@@ -2605,6 +2605,67 @@ CI/review нового SHA проверяются отдельно после pu
   это docs-only follow-up, runtime/test sources после полного suite не менялись.
 
 
+## 18.10.2026 — #55 CI и главный ревьюер Qodo
+
+- PR #55, head `0a9f579d638797ddc50e0d7fd73c11c282ba8f35`: workflow_dispatch
+  [39136948809](https://github.com/newnout6-a11y/vpn/actions/runs/39136948809)
+  завершён success. Windows job 117703346355: 3849 passed / 4 skipped,
+  247 файлов passed / 1 skipped, 229.18 s. Typecheck, трассировка, настоящий
+  IPC/CSP smoke, WFP ABI/transaction-abort и Electron native reads зелёные;
+  native reads отдельно 1 passed / 1 skipped. Rust и сайт success.
+- Владелец уточнил: «теперь появился новый ревьюер. qodo .он теперь главый».
+  Главный ревьюер — Qodo. Revix summary при исчерпанной квоте не approval;
+  CodeRabbit/Greptile с окончившимся trial не блокируют работу.
+  При REST-проверке #54/#55 комментариев/review Qodo ещё не было.
+  PR #54/#55 не слиты; запрет владельца на merge #54 сохраняется.
+
+## 18.10.2026 — WP-0: доменные ошибки импорта/экспорта конфигурации
+
+- Четыре настоящих handler config:export/import/import-apply/browse-import
+  проверяются вместе с production installTrustedIpcBoundary. Внутренние
+  `{success:false,error:<raw>}` у export/import/apply заменены исключениями,
+  которые boundary преобразует в canonical ok:false/category/code/correlation.
+  Ошибки JSON/формата/выбора разделов — validation; отсутствие selection
+  capability — permission; отмена сохранения/закрытый renderer — cancelled;
+  изменение файла при чтении — conflict. Отмена browse остаётся успешным null.
+- Config public types содержат только успешные значения; компонент использует
+  shared ElectronAPI и canonical rejection. Неизвестный/поддельный текст ошибки
+  заменяется локализованным internal. Cancelled export не показывает ошибку
+  или успех. Ошибки и refresh warnings логируют только bounded reason.
+- Регрессии: array вместо object section отклоняется; partial import не падает
+  в detectConflicts на отсутствующих разделах; пустые/отсутствующие/неизвестные
+  выбранные разделы отклоняются до записи. Ошибка позднего store write
+  восстанавливает прежние значения, включая activeDnsProfileId:null (system DNS),
+  и не оставляет повторно используемой selection capability.
+- Новый configIpcErrors.test.ts инжектирует 7 категорий в store/dialog I/O
+  каждого настоящего feature handler; response проверяется целиком, без
+  FAKE-SECRET/stack/Windows absolute paths. Используется реальный временный
+  выбранный JSON; файловая read/write логика не заменена fake handler.
+  Это локальная fault-injection matrix, а не нативный UI/file-permission E2E.
+- До исправления `npm.cmd test -- src/main/configIpcErrors.test.ts` —
+  12 failed, exit 1 (.tmp/wp0-config-errors-before-final.log).
+- `npm.cmd test -- src/main/configIpcErrors.test.ts src/main/configManager.test.ts src/main/configImportSecurity.test.ts src/main/configExportSecurity.test.ts src/main/ipcResultContract.test.ts src/renderer/components/ImportExportSettings.test.tsx`
+  — 97 passed / 6 файлов, 13.14 s, exit 0 (.tmp/wp0-config-errors-focused-3.log).
+  Старые authority/snapshot/single-use/security assertions сохранены; legacy
+  failure-result expectations обновлены на canonical rejection.
+- `npm.cmd run typecheck` — exit 0, 157 listeners / 0 public any
+  (.tmp/wp0-config-errors-typecheck.log). `python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py`
+  — AC 927/927, F 210/210, exit 0; `git diff --check` — exit 0.
+  Полный suite выполняется. AT-00-004 целиком и WP-0 не объявлены PASS.
+
+- Полный `npm.cmd test` — 3875 passed / 5 skipped / 0 failed,
+  247 файлов passed / 2 skipped, 174.42 s, exit 0
+  (.tmp/wp0-config-errors-full.log). `npm.cmd run build` — exit 0
+  (.tmp/wp0-config-errors-build.log); `node scripts/test-electron-runtime.mjs`
+  — ELECTRON_SMOKE_PASS, exit 0 (.tmp/wp0-config-errors-native.log).
+  Native smoke проверяет общий production bridge en/ru; реальные config handlers
+  отдельно проверены fault-injection matrix, эти два доказательства не смешиваются.
+- По прямому поручению владельца Qodo запрошен комментариями
+  `@qodo review this PR` в #54 (6251357932) и #55 (6251358101).
+  Синтаксис подтверждён официальной docs.qodo.ai/code-review/use-qodo-in-prs/code-review.
+  Отправка команды не объявляется завершённым review или approval.
+
+
 ## 18.10.2026 — Qodo #55: некорректные profiles в импорте
 
 - По прямому поручению владельца отправлен `@qodo review this PR` в #54
