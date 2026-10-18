@@ -11,6 +11,13 @@ import type {
   SessionOutcomeEvidence,
   SessionOutcomeKind
 } from '../shared/ipc-types'
+import type { ConnectionProvenance } from '../shared/connection-provenance'
+
+/** Confidence in the cause classification; never an attestation of protection. */
+export function sessionOutcomeConfidence(kind: SessionOutcomeKind): ConnectionProvenance['confidence'] {
+  if (kind === 'unknown') return 'indeterminate'
+  return ['user-stop', 'app-quit', 'server-switch', 'rotation', 'schedule', 'start-failed'].includes(kind) ? 'observed' : 'inferred'
+}
 
 type DisconnectReason = ConnectionLogEntry['disconnectReason']
 

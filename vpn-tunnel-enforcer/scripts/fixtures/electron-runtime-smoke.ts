@@ -11,7 +11,7 @@ import { IPC_ERRORS, IpcFault, ipcError, isIpcRemoteErrorData, type IpcErrorCate
 import type { ServerProfile } from '../../src/shared/ipc-types'
 import { ConnectionLifecycle } from '../../src/main/connectionLifecycle'
 import { TunnelStateMachine } from '../../src/main/tunnelStateMachine'
-import { currentCorrelationId } from '../../src/main/actionCorrelation'
+import { currentCorrelationId, currentActionMetadata } from '../../src/main/actionCorrelation'
 
 const work = process.env.VPNTE_SMOKE_DIR!
 app.setPath('userData', join(work, 'userData'))
@@ -70,6 +70,7 @@ app.whenReady().then(async () => {
   let startupGate = new Promise<void>(resolve => { finishStartup = resolve })
   ipcMain.handle('start-direct-vpn', () => lane.start(async owner => {
     assert.equal(owner.operation.correlationId, currentCorrelationId())
+    assert.deepEqual(currentActionMetadata(), { source: 'ipc', owner: 'manual' })
     assert.match(owner.operation.correlationId, /^ipc_[0-9a-f]{32}$/)
     tunnelEvidence.running = true; tunnelEvidence.pid = 123
     tunnel.runtimeChanged('running'); startBegan()
@@ -105,6 +106,7 @@ app.whenReady().then(async () => {
   let faultCorrelation: string | undefined
   ipcMain.handle('get-settings', () => {
     faultCorrelation = currentCorrelationId()
+    assert.deepEqual(currentActionMetadata(), { source: 'ipc', owner: 'unknown' })
     throw Object.assign(new IpcFault(faultCategory), { message: 'raw-secret at C:\\private\\file' })
   })
   const file = pathToFileURL(join(work, 'renderer.html')).href

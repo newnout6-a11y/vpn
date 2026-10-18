@@ -3463,3 +3463,48 @@ CI/review нового SHA проверяются отдельно после pu
   (.tmp/wp0-session-correlation-qodo63-electron.log).
   `node scripts/test-wp1-native.mjs --ipc-only` — WP1_NATIVE_PASS, exit 0
   (.tmp/wp0-session-correlation-qodo63-csp.log). Native/fake OS границы сохранены.
+
+### PR #63 — итоговая проверка и слияние
+
+- Итоговый head a1ec56750c41e7737a0b1ec59043afa149a24f2f: Qodo 1541648
+  completed, прежний finding implemented, новых нет. CI 39163970896
+  completed/success, attempt 1, все три jobs зелёные на этом SHA.
+- PR #63 слит после проверок по разрешению владельца; REST GET merged=true,
+  merge 865c2db576727594b82c549fb69128c3d0f2d109.
+
+## WP-0 — provenance истории сессии (18.10.2026)
+
+- AT-00-005 / F-143: новые записи history требуют source/owner/route/confidence.
+  Source берётся с границы действия, owner — из фактического admission, origin
+  хранится в LiveSession до закрытия. Новый stop не переписывает происхождение.
+  Runtime без контекста получает runtime/unknown; missing-proxy tray failure —
+  tray/manual. Lifecycle сохраняет metadata вместе с ID для drain/timer/events.
+- Route — настроенный механизм tun/soft-env либо unconfirmed на failed start;
+  не аттестация маршрута каждого пакета. Confidence классифицирует причину
+  завершения: observed/inferred/indeterminate, не степень защиты соединения.
+- Legacy read без provenance сохранён; new write без него запрещён. Reader
+  отвергает недопустимые enums, лишние поля и mismatch route/mode, сохраняя
+  повреждённые записи с history.corrupted. JSON/CSV и повторный real Conf read
+  сохраняют все четыре поля. Нормативные docs не изменялись; F-021 не исправляется.
+- До исправления `npm.cmd test -- src/main/connectionHistoryStorage.test.ts` —
+  **29 failed / 47 passed**, 4.35 s, exit 1
+  (.tmp/wp0-session-provenance-before.log).
+- `npm.cmd test -- src/main/connectionHistoryStorage.test.ts src/main/connectionHistory.test.ts src/main/actionCorrelationScope.test.ts src/main/schedulerActionCorrelation.test.ts src/main/connectionOperations.test.ts src/main/lifecycleCleanup.test.ts`
+  — **311 passed / 6 files**, 26.20 s, exit 0
+  (.tmp/wp0-session-provenance-focused-final.log).
+- `npm.cmd run typecheck` — exit 0, 158 channels / 0 public any
+  (.tmp/wp0-session-provenance-typecheck-final.log).
+- AT-00-005 целиком не закрыт: monotonic ordering, фактические Soft sessions
+  и полная матрица background paths остаются. Fixture mode coverage не заменяет
+  интеграцию каждого реального entrypoint.
+- Полный `npm.cmd test` — **4149 passed / 5 skipped / 0 failed**,
+  262 files passed / 2 skipped, 203.71 s, exit 0
+  (.tmp/wp0-session-provenance-full.log). `python ../docs/04-приёмочные-тесты/traceability/check-coverage.py`
+  — AC 927/927, F 210/210, exit 0; `git diff --check` — exit 0.
+- `npm.cmd run build` — exit 0 (.tmp/wp0-session-provenance-build.log).
+  `node scripts/test-electron-runtime.mjs` — ELECTRON_SMOKE_PASS, exit 0
+  (.tmp/wp0-session-provenance-electron.log); добавлены assertions source/owner
+  в production guarded IPC и настоящем lifecycle под Electron 44.4.3.
+  `node scripts/test-wp1-native.mjs --ipc-only` — WP1_NATIVE_PASS, exit 0
+  (.tmp/wp0-session-provenance-csp.log). Это native IPC/CSP с fake OS effects,
+  не Windows packet/resource acceptance.

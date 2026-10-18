@@ -1,10 +1,34 @@
 // AT-00-005: async isolation, nested scope restoration and late native drain.
 import { afterEach, expect, it, vi } from 'vitest'
-import { currentCorrelationId, withCorrelation } from './actionCorrelation'
+import { currentCorrelationId, currentActionMetadata, withCorrelation } from './actionCorrelation'
 import { ConnectionLifecycle } from './connectionLifecycle'
 
 const a = 'ipc_00000000000040008000000000000001', b = 'ipc_00000000000040008000000000000002'
 afterEach(() => vi.useRealTimers())
+
+it('isolates action metadata, restores nested owner and returns a defensive context snapshot (AT-00-005)', async () => {
+  await withCorrelation(a, async () => {
+    expect(currentActionMetadata()).toEqual({ source: 'tray', owner: 'manual' })
+    const snapshot = currentActionMetadata()!
+    snapshot.owner = 'recovery'
+    expect(currentActionMetadata()?.owner).toBe('manual')
+    withCorrelation(a, () => expect(currentActionMetadata()).toEqual({ source: 'tray', owner: 'recovery' }), { owner: 'recovery' })
+    expect(currentActionMetadata()).toEqual({ source: 'tray', owner: 'manual' })
+    await withCorrelation(b, async () => {
+      await Promise.resolve()
+      expect(currentActionMetadata()).toEqual({ source: 'ipc', owner: 'unknown' })
+    })
+    expect(currentActionMetadata()).toEqual({ source: 'tray', owner: 'manual' })
+  }, { source: 'tray', owner: 'manual' })
+  expect(currentActionMetadata()).toBeUndefined()
+})
+
+it.each([{ source: 'raw-secret' }, { owner: 'raw-secret' }, { owner: 'constructor' }])('refuses invalid action metadata %j (AT-00-005)', metadata => {
+  const effect = vi.fn()
+  expect(() => withCorrelation(a, effect, metadata as never)).toThrow('Invalid action metadata')
+  expect(effect).not.toHaveBeenCalled()
+  expect(currentActionMetadata()).toBeUndefined()
+})
 
 it('restores nested action scopes after synchronous and async failure', async () => {
   expect(currentCorrelationId()).toBeUndefined()
@@ -80,6 +104,7 @@ it.each(['sync', 'resolved', 'rejected'] as const)('expires %s action context be
     else await result
   }
   expect(await observed).toBeUndefined()
+  expect(currentActionMetadata()).toBeUndefined()
 })
 
 it('expires recurring tunnel work after startup completes (AT-00-005)', async () => {
