@@ -2,7 +2,10 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import ts from 'typescript'
+import { spawnSync } from 'node:child_process'
 import { describe, expect, it, vi } from 'vitest'
+import { TunnelStateMachine } from './tunnelStateMachine'
+import { ConnectionLifecycle } from './connectionLifecycle'
 
 const source = readFileSync(join(process.cwd(), 'src/main/tunController.ts'), 'utf8')
 const start = source.indexOf('const pollRuntime = async () => {')
@@ -13,6 +16,7 @@ const callback = source.slice(start + 'const pollRuntime = '.length, end).trim()
 function harness() {
   const os = {
     isSingboxRunning: vi.fn(async () => true),
+    readOwnedSingboxPid: vi.fn(async () => 731),
     recordOwnedTunAdapter: vi.fn(async (): Promise<void> => { throw new Error('driver identity mismatch') }),
     waitForTunInterface: vi.fn(async () => true),
     applyLowTunInterfaceMetric: vi.fn(async () => {}),
@@ -51,12 +55,60 @@ const wantAdapterLockdown=false,startOptions={},STABLE_RESET_MS=60000;
 let killSwitchEngaged=false,killSwitchWarning=null,restartAttempt=0,lastStartOptions=null;
 let stopInProgress=false,userInitiatedStop=false,stableTimer=null;
 function finish(result){if(!resolved){resolved=true;onFinish(result)}}
-return {poll: ${callback}, signal: startAbortController.signal, requestStop: () => {stopRequested=true;startAbortController.abort()}, exit: () => {resolved=true;settleFirewallAdapter?.(false)}, completion: () => startupPollCompletion};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
-  const control = new Function(...Object.keys(os), compiled)(...Object.values(os)) as { poll: () => Promise<void>; signal: AbortSignal; requestStop: () => void; exit: () => void; completion: () => Promise<void> | null }
+return {poll: ${callback}, status:()=>currentStatus, signal: startAbortController.signal, requestStop: () => {stopRequested=true;startAbortController.abort()}, exit: () => {resolved=true;settleFirewallAdapter?.(false)}, completion: () => startupPollCompletion};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
+  const control = new Function(...Object.keys(os), compiled)(...Object.values(os)) as { poll: () => Promise<void>; status: () => { running: boolean; pid: number | null }; signal: AbortSignal; requestStop: () => void; exit: () => void; completion: () => Promise<void> | null }
   return { ...control, ...os }
 }
 
 describe('startup callback fault boundaries', () => {
+  it.each(['owned', 'foreign', 'prefix collision', 'ambiguous', 'unreadable'] as const)('requires one exact executable path for startup PID: %s', async outcome => {
+    const executable = 'C:\\VPN\\runtime\\vpnte-sing-box.exe'
+    const row = { ExecutablePath: executable, ProcessId: 731 }
+    const rows = outcome === 'owned' ? [row] : outcome === 'ambiguous' ? [row, { ...row, ProcessId: 732 }]
+      : [{ ...row, ExecutablePath: outcome === 'unreadable' ? null : outcome === 'foreign'
+        ? 'C:\\Foreign\\vpnte-sing-box.exe' : 'C:\\VPN\\runtime-evil\\vpnte-sing-box.exe' }]
+    const tree = ts.createSourceFile('tunController.ts', source, ts.ScriptTarget.Latest, true)
+    const helper = tree.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'readOwnedSingboxPid')!
+    const encodedRows = Buffer.from(JSON.stringify(rows)).toString('base64')
+    const runPowerShell = async (script: string) => {
+      const prefix = `$fixture=ConvertFrom-Json ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encodedRows}'))); function Get-CimInstance { [CmdletBinding()] param([string]$ClassName,[string]$Filter) $fixture };`
+      const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(prefix + script, 'utf16le').toString('base64')], { encoding: 'utf8', windowsHide: true, timeout: 10_000 })
+      if (result.status !== 0) throw new Error('Runtime observation failed')
+      return result.stdout
+    }
+    const code = ts.transpileModule(helper.getText(tree) + '; return readOwnedSingboxPid;', { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
+    const readPid = new Function('runPowerShell', 'psSingleQuote', code)(runPowerShell, (value: string) => `'${value.replaceAll("'", "''")}'`)
+    if (outcome === 'owned') expect(await readPid(executable)).toBe(731)
+    else await expect(readPid(executable)).rejects.toThrow('Runtime observation failed')
+  }, 15_000)
+  it('feeds the actual successful poll status and owned PID into the production FSM/lane (AT-00-002)', async () => {
+    const h = harness()
+    h.recordOwnedTunAdapter.mockResolvedValue(undefined)
+    const model = new TunnelStateMachine(() => ({ ...h.status(), softApplied: false }))
+    const lane = new ConnectionLifecycle(() => {}, undefined, undefined, model)
+    const result = await lane.start(async () => { await h.poll(); return h.onFinish.mock.calls[0][0] })
+    expect(result.success).toBe(true)
+    expect(h.readOwnedSingboxPid).toHaveBeenCalledExactlyOnceWith('fixture.exe')
+    expect(model.snapshot).toMatchObject({ state: 'connected', mode: 'tun', pid: 731 })
+  })
+
+  it.each(['denied', 'cancelled', 'exited'])('compensates %s during owned PID confirmation (AT-00-003/AT-02-004)', async outcome => {
+    const h = harness()
+    h.recordOwnedTunAdapter.mockResolvedValue(undefined)
+    h.readOwnedSingboxPid.mockImplementationOnce(async () => {
+      if (outcome === 'denied') throw new Error('PID read denied')
+      if (outcome === 'cancelled') h.requestStop()
+      else h.exit()
+      return 731
+    })
+    await h.poll()
+    expect(h.notifyStatus).not.toHaveBeenCalledWith('running')
+    expect(h.status().running).toBe(false)
+    if (outcome !== 'exited') {
+      expect(h.killOwnedRuntimeProcesses).toHaveBeenCalledOnce()
+      expect(h.onFinish).toHaveBeenCalledWith(expect.objectContaining({ success: false }))
+    }
+  })
   it('awaits WFP priority reservation before continuing startup and stops on conflict (AT-03-010)', async () => {
     const reserveStart = source.indexOf('// Reserve the sublayer before sing-box')
     const reserveEnd = source.indexOf("mark('preflight')", reserveStart)

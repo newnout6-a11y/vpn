@@ -3000,3 +3000,50 @@ CI/review нового SHA проверяются отдельно после pu
   158 channels / 0 public any (.tmp/wp0-fsm-typecheck.log). Coverage и diff check
   повторно exit 0. WP-0 и общий goal остаются в работе.
 - Повторные build/Electron/native IPC-CSP на окончательном коде — exit 0: .tmp/wp0-fsm-final-build.log, .tmp/wp0-fsm-final-electron.log, .tmp/wp0-fsm-final-csp.log.
+
+
+### PR #58 — первый Qodo: пять подтверждённых интеграционных дефектов
+
+- Head 27043513fd54e5463e287bcb28fdc96397c9ae4b опубликован в #58.
+  CI run 39149486195 success на этом SHA. Qodo run 1540362 completed:
+  три action_required и два remediation_recommended. Слияние не выполнялось.
+- Критический gap fake evidence: успешный native poll оставлял pid:null.
+  PID теперь читается из Win32_Process с точным сравнением ExecutablePath
+  и требованием одного процесса; чужой путь, prefix collision, несколько
+  процессов и непрочитанный путь отклоняются. Production poll передаёт этот
+  PID в status, затем real FSM/lane подтверждает connected. Отмена/exit/PID
+  query failure не публикуют running, failure выполняет прежнюю компенсацию.
+  Если main confirmation всё же не получено, lane вызывает cleanup вместо
+  оставления startup runtime без владельца. Общий PID Supervisor — ещё WP-2.
+- Старые apply-autoconfig/rollback-autoconfig отделяют env от прочих targets:
+  env проходит owned Soft start/stop, возвращая false при конфликте/отказе.
+  Прямой rollback env под активным native connection отклоняется; повторный
+  apply не изменяет уже подключённую защиту. Renderer bootstrap использует
+  owned API, не меняет env за спиной FSM и не очищает unknown; сохранённый
+  подтверждённый Soft не запускает повторно.
+- App после setTunnelSnapshot читает новый Zustand state. Реальные callbacks
+  прогоняются вместе с real store/model/lane: IP/leak принимаются после connect,
+  подавляются во время stop, старые revision не меняют guard. Это закрывает
+  gap между component frames и настоящим App listener wiring.
+- Tray сохраняет confirmed firewall lock и leak warning при disconnected.
+  Failed adaptive fallback после preserveNetworkProtection stop устанавливает
+  unknown без бесконечного reconnecting; throw stop также завершает transition.
+  Полная acceptance матрица всех фоновых owner callbacks остаётся открытой.
+- Первый focused после правок: 205 passed / 5 files, 23.21 s, exit 0
+  (.tmp/wp0-qodo58-focused.log). Затем добавлены исполняемые PowerShell predicate
+  fixtures для PID, main confirmation compensation и stop-throw regression.
+  `npm.cmd run typecheck` — exit 0, 158 channels / 0 public any
+  (.tmp/wp0-qodo58-typecheck.log). Финальные результаты записываются ниже.
+- Финальный focused `npm.cmd test -- src/main/tunControllerStartup.test.ts src/main/adaptiveFallbackTransition.test.ts src/main/lifecycleCleanup.test.ts src/main/trayState.test.ts src/main/tunnelStateMachine.test.ts src/renderer/App.lifecycle.test.ts`:
+  229 passed / 6 files, 26.27 s, exit 0 (.tmp/wp0-qodo58-focused-final.log).
+- Первый полный после Qodo fixes: 1 failed / 4005 passed / 5 skipped,
+  178.11 s, exit 1 (.tmp/wp0-qodo58-full.log). Единственный отказ — старый
+  source assertion auditFixesRegression требовал удалённый прямой env apply.
+  Заменён на owned Soft startup и запрет raw env apply; реальные App bootstrap
+  и env owner paths уже покрыты исполняемыми регрессиями, не только source check.
+  Повторный полный suite запущен на окончательном runtime/test коде.
+- Окончательный `npm.cmd test` на замороженных runtime/tests: **4006 passed /
+  5 skipped / 0 failed**, 253 files passed / 2 skipped, 176.60 s, exit 0
+  (.tmp/wp0-qodo58-verified-full.log). Typecheck 158/0 any, coverage AC 927/927,
+  F 210/210 и diff check — повторно exit 0. Traceability не подменяет AT.
+- После пяти Qodo fixes: npm.cmd run build, node scripts/test-electron-runtime.mjs и node scripts/test-wp1-native.mjs --ipc-only — exit 0 (.tmp/wp0-qodo58-build.log, .tmp/wp0-qodo58-electron.log, .tmp/wp0-qodo58-csp.log).

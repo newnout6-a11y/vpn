@@ -1327,6 +1327,20 @@ async function isSingboxRunning(): Promise<boolean> {
   }
 }
 
+async function readOwnedSingboxPid(executable: string): Promise<number> {
+  const stdout = await runPowerShell(`
+$ErrorActionPreference = 'Stop'
+$rows = @(Get-CimInstance Win32_Process -Filter "Name = 'vpnte-sing-box.exe'" -ErrorAction Stop)
+if (@($rows | Where-Object { [string]::IsNullOrWhiteSpace($_.ExecutablePath) }).Count) { throw 'Runtime path unavailable' }
+$owned = @($rows | Where-Object { [string]::Equals($_.ExecutablePath, ${psSingleQuote(executable)}, [StringComparison]::OrdinalIgnoreCase) })
+if ($owned.Count -ne 1) { throw 'Exactly one owned sing-box process required' }
+[string]$owned[0].ProcessId
+`, 5000)
+  const pid = Number(String(stdout).trim())
+  if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error('Owned sing-box PID unavailable')
+  return pid
+}
+
 function psSingleQuote(value: string): string {
   return `'${value.replace(/'/g, "''")}'`
 }
@@ -3606,6 +3620,9 @@ export const tunController = {
             }
 
             const combinedWarning = [warning, killSwitchWarning].filter(Boolean).join(' | ') || null
+            const runtimePid = await timeAsync('runtime-pid', () => readOwnedSingboxPid(runtime.singbox))
+            if (resolved) return
+            if (stopRequested) throw new Error('Startup cancelled during PID confirmation')
             currentStatus = {
               running: true,
               mode,
@@ -3613,7 +3630,7 @@ export const tunController = {
               proxyType,
               vpnProfileName: vpnProfile?.name ?? null,
               vpnProtocol: vpnProfile?.protocol ?? null,
-              pid: null,
+              pid: runtimePid,
               warning: combinedWarning,
               proxyReachable: true,
               startedAt: Date.now(),

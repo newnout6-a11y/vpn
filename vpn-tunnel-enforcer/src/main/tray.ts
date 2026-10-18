@@ -5,8 +5,10 @@ import type { TunnelSnapshot } from '../shared/tunnel-state'
 
 export type TrayStatus = 'protected' | 'leak' | 'off' | 'starting' | 'proxy-down' | 'killswitch' | 'restarting' | 'stopping' | 'error' | 'unknown'
 
-export function trayStatusForTunnel(snapshot: TunnelSnapshot, leak: boolean): TrayStatus {
+export function trayStatusForTunnel(snapshot: TunnelSnapshot, leak: boolean, firewallActive = false): TrayStatus {
   if (snapshot.transition) return ({ connecting: 'starting', disconnecting: 'stopping', reconnecting: 'restarting' } as const)[snapshot.transition]
+  if (leak) return 'leak'
+  if (firewallActive && snapshot.state !== 'connected') return 'killswitch'
   if (snapshot.state === 'blocked') return 'killswitch'
   if (snapshot.state === 'error' || snapshot.state === 'unknown') return snapshot.state
   if (snapshot.state === 'connected') return leak ? 'leak' : snapshot.proxyStatus === 'proxy-down' ? 'proxy-down' : snapshot.health === 'degraded' ? 'unknown' : 'protected'

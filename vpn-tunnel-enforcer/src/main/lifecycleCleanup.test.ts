@@ -1062,31 +1062,54 @@ return onExit;`, deps)
 
 function softStartupHarness() {
   let applied = false
+  let readProtection = () => false
+  const tunnelState = new TunnelStateMachine(() => ({ running: false, pid: null, softApplied: readProtection() }))
   const os = {
     ...mainHarness('stopProtection'),
+    tunnelState,
+    connectionLifecycle: new ConnectionLifecycle(() => {}, undefined, undefined, tunnelState),
     settingsStore: { get: () => ({ proxyType: 'http' }) },
     tunController: { getStatus: () => ({ running: false }), stop: vi.fn(async () => ({ success: true })) },
     autoconfig: {
-      apply: vi.fn(async () => { applied = true; return { env: true } }),
+      apply: vi.fn(async (targets: string[]) => { if (targets.includes('env')) applied = true; return Object.fromEntries(targets.map(target => [target, true])) }),
+      rollback: vi.fn(async (targets: string[]) => Object.fromEntries(targets.map(target => [target, true]))),
       rollbackApplied: vi.fn(async () => { const previous = applied; applied = false; return previous })
     },
     recordStartFailure: noop(), sendToMainWindow: noop()
   }
   // Load the actual cleanup helper as well, rather than the generic stop mock.
   const { rollbackSoftAutoconfigIfApplied: _stub, ...dependencies } = os
-  const control = compile<{ start: () => Promise<any>; stop: () => Promise<any> }>(`
+  const control = compile<{ start: () => Promise<any>; stop: () => Promise<any>; protected: () => boolean;
+    apply: (targets: string[]) => Promise<Record<string, boolean>>; rollback: (targets: string[]) => Promise<Record<string, boolean>> }>(`
 let adaptiveVerificationGeneration=0,activeAdaptiveContext=null,currentSession=null,stopInProgress=false,softProtectionApplied=false;
 ${body('index.ts', 'rollbackSoftAutoconfigIfApplied')}
 ${body('index.ts', 'startSoftProtectionEffects')}
 ${body('index.ts', 'startSoftProtection')}
 ${body('index.ts', 'stopProtectionEffects')}
 ${body('index.ts', 'stopProtection')}
-return {start:()=>startSoftProtection('127.0.0.1:8080','http'),stop:stopProtection};
+${body('index.ts', 'applyOwnedAutoconfig')}
+${body('index.ts', 'rollbackOwnedAutoconfig')}
+return {start:()=>startSoftProtection('127.0.0.1:8080','http'),stop:stopProtection,protected:()=>softProtectionApplied,
+apply:targets=>applyOwnedAutoconfig(targets,'127.0.0.1:8080','http'),rollback:rollbackOwnedAutoconfig};
 `, dependencies)
+  readProtection = control.protected
   return { ...dependencies, ...control }
 }
 
 describe('owned Soft startup (AT-00-003/007 subset)', () => {
+  it('routes legacy env apply and rollback through real main effects and the canonical FSM', async () => {
+    const h = softStartupHarness()
+    expect(await h.apply(['git', 'env'])).toEqual({ git: true, env: true })
+    expect(h.tunnelState.snapshot).toMatchObject({ state: 'connected', mode: 'soft' })
+    expect(h.autoconfig.apply.mock.calls.map(([targets]) => targets)).toEqual([['git'], ['env']])
+    expect(await h.apply(['env'])).toEqual({ env: false })
+    expect(h.tunnelState.snapshot.state).toBe('connected')
+    h.autoconfig.rollbackApplied.mockRejectedValueOnce(new Error('env denied'))
+    expect(await h.rollback(['env'])).toEqual({ env: false })
+    expect(h.tunnelState.snapshot).toMatchObject({ state: 'error', cleanupRequired: true })
+    expect(await h.rollback(['env', 'git'])).toEqual({ git: true, env: true })
+    expect(h.tunnelState.snapshot).toMatchObject({ state: 'disconnected', mode: null })
+  })
   it('waits for cancelled env apply, then rolls it back without publishing protection', async () => {
     const h = softStartupHarness()
     let release!: (result: { env: boolean }) => void

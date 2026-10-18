@@ -126,7 +126,11 @@ export class ConnectionLifecycle {
       const result = await effect(owner)
       await Promise.all(effects)
       assertActive()
-      if (!failed(result) && this.stateMachine && !this.stateMachine.canConfirmStart()) throw new Error('Connection confirmation missing')
+      if (!failed(result) && this.stateMachine && !this.stateMachine.canConfirmStart()) {
+        // A failed confirmation must not abandon a process started by this owner.
+        await this.cleanupCancelled?.()
+        throw new Error('Connection confirmation missing')
+      }
       startup.operation = { ...startup.operation, status: failed(result) ? 'error' : 'success' }
       return result
     } catch (error) {

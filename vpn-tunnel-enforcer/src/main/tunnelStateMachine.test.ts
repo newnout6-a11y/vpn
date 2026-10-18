@@ -142,6 +142,14 @@ describe('canonical tunnel state', () => {
     expect(h.model.snapshot).toMatchObject({ state: 'unknown', health: null, cleanupRequired: true })
   })
 
+  it('compensates runtime effects when main cannot confirm the successful start', async () => {
+    const h = harness()
+    await expect(h.lane.start(async () => { h.evidence.running = true; return { success: true } })).rejects.toThrow('Connection confirmation missing')
+    expect(h.cleanup).toHaveBeenCalledOnce()
+    expect(h.evidence).toMatchObject({ running: false, pid: null, softApplied: false })
+    expect(h.model.snapshot).toMatchObject({ state: 'error', transition: null })
+  })
+
   it('retains a transient evidence failure until owned recovery even when the getter recovers', async () => {
     let unreadable = false
     const os = { running: false, pid: null as number | null, softApplied: false }

@@ -524,3 +524,22 @@ Native Electron smoke использует production preload/contextBridge, р�
 FSM/lane, fake OS evidence и isolated userData: ранний running остаётся pending,
 owned Soft проходит validation, stop очищает состояние, disposer снимает listener.
 Старые security/CSP assertions сохранены. Точные команды/результаты — progress.md.
+
+
+### Qodo #58 — реальные producers и entrypoints
+
+Начальные model/component fixtures задавали positive PID самостоятельно и не
+доказали совместимость с native status producer. Production startup poll теперь
+получает PID с точным ExecutablePath/единственностью и передаёт его в FSM.
+Новый integration regression исполняет сам poll callback и настоящий lane/model;
+PowerShell predicate отдельно исполняется с подменённым CIM enumeration для
+owned/foreign/prefix collision/ambiguous/unreadable. Настоящий Windows runtime
+этими тестами не запускается. Неудачная main confirmation вызывает cleanup.
+
+Env через legacy autoconfig IPC проходит тот же Soft owner; прямой rollback под
+active native mode отклоняется. App bootstrap использует owned Soft method и
+не перезапускает retained Soft, не очищает unknown. Исполняемые App callbacks
+с настоящим Zustand/FSM/lane проверяют leak guard после connect и во время stop,
+включая stale revision. Tray сохраняет firewall/leak warnings без active process.
+Failed adaptive fallback устанавливает unknown после stop/failure, завершая
+transient reconnect. Это пять проверенных замечаний Qodo, не общая приёмка WP-0.

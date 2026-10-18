@@ -6,6 +6,12 @@ import { TunnelStateMachine } from './tunnelStateMachine'
 import { ConnectionLifecycle } from './connectionLifecycle'
 
 describe('canonical tray state', () => {
+  it('retains leak and confirmed firewall warnings while disconnected', () => {
+    const model = new TunnelStateMachine(() => ({ running: false, pid: null, softApplied: false }))
+    expect(trayStatusForTunnel(model.snapshot, false, true)).toBe('killswitch')
+    expect(trayStatusForTunnel(model.snapshot, true)).toBe('leak')
+    expect(trayStatusForTunnel(model.snapshot, false, false)).toBe('off')
+  })
   it('distinguishes degraded competing-interface evidence from a failed server', async () => {
     const os = { running: false, pid: null as number | null, softApplied: false }
     const model = new TunnelStateMachine(() => os)

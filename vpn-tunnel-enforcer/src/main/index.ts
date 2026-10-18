@@ -482,8 +482,13 @@ async function restartAdaptiveWithFreshIp(
     if (!healthy) {
       // Keep the previous selection and firewall/adapter protection. The failed
       // provisional runtime must not remain displayed as a connected server.
-      await tunController.stop({ preserveNetworkProtection: true })
-      if (isOwner()) ipMonitor.clearVpnIp()
+      try { await tunController.stop({ preserveNetworkProtection: true }) }
+      finally {
+        if (isOwner()) {
+          tunnelState.fault('unknown')
+          ipMonitor.clearVpnIp()
+        }
+      }
       return { success: false, error: 'Соседний сервер не прошёл проверку выхода в интернет через туннель' }
     }
     return restarted
@@ -1013,7 +1018,7 @@ function refreshTrayState(patch: {
   }
 
   if (!tray) return
-  latestTrayStatus = trayStatusForTunnel(tunnelState.snapshot, latestTrayStatus === 'leak')
+  latestTrayStatus = trayStatusForTunnel(tunnelState.snapshot, latestTrayStatus === 'leak', latestKillSwitchActive)
   updateTrayState(tray, {
     status: latestTrayStatus,
     publicIp: latestPublicIp,
@@ -1084,6 +1089,22 @@ async function resolveProxyForTrayStart(): Promise<{ proxyAddr: string; proxyTyp
  */
 async function startSoftProtection(proxyAddr: string, proxyType?: 'socks5' | 'http'): Promise<ConnectionStartResult> {
   return connectionLifecycle.start(owner => startSoftProtectionEffects(owner, proxyAddr, proxyType))
+}
+
+async function applyOwnedAutoconfig(targets: string[], proxyAddr: string, proxyType?: 'socks5' | 'http'): Promise<Record<string, boolean>> {
+  const results = await autoconfig.apply(targets.filter(target => target !== 'env'), proxyAddr, proxyType ?? settingsStore.get().proxyType)
+  if (targets.includes('env')) results.env = (await startSoftProtection(proxyAddr, proxyType)).success
+  return results
+}
+
+async function rollbackOwnedAutoconfig(targets: string[]): Promise<Record<string, boolean>> {
+  const results = await autoconfig.rollback(targets.filter(target => target !== 'env'))
+  if (targets.includes('env')) {
+    // Restoring Soft env is a protection stop. Never silently remove or alter
+    // env underneath an active native connection through this legacy API.
+    results.env = tunnelState.snapshot.mode === 'tun' ? false : (await stopProtection()).success
+  }
+  return results
 }
 
 async function startSoftProtectionEffects(owner: ConnectionStartupOwner, proxyAddr: string, proxyType?: 'socks5' | 'http'): Promise<ConnectionStartResult> {
@@ -2146,11 +2167,11 @@ app.whenReady().then(async () => {
   })
 
   handleLogged('apply-autoconfig', async (_e, targets: string[], proxyAddr: string, proxyType?: 'socks5' | 'http') => {
-    return autoconfig.apply(targets, proxyAddr, proxyType ?? settingsStore.get().proxyType)
+    return applyOwnedAutoconfig(targets, proxyAddr, proxyType)
   })
 
   handleLogged('rollback-autoconfig', async (_e, targets: string[]) => {
-    return autoconfig.rollback(targets)
+    return rollbackOwnedAutoconfig(targets)
   })
 
   handleLogged('get-autoconfig-status', async () => {

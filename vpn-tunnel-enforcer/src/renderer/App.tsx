@@ -57,6 +57,14 @@ const scheduleIdle = (fn: () => void) => {
   }
 }
 
+async function restoreSoftStartup(proxy: { host: string; port: number; type: 'socks5' | 'http' }): Promise<void> {
+  const { lifecycle } = await window.electronAPI.getTunStatus()
+  if (lifecycle.state === 'connected' && lifecycle.mode === 'soft') return
+  if (lifecycle.state !== 'disconnected' || lifecycle.transition) throw new Error('Сначала восстановите состояние защиты')
+  const result = await window.electronAPI.startSoftProtection(`${proxy.host}:${proxy.port}`, proxy.type)
+  if (!result.success) throw new Error(result.error || 'Soft startup failed')
+}
+
 export default function App() {
   const [page, setPage] = useState<Page>('dashboard')
   const [visitedPages, setVisitedPages] = useState<Set<Page>>(() => new Set(['dashboard']))
@@ -130,7 +138,7 @@ export default function App() {
       tunEventSeqRef.current += 1
       const store = useAppStore.getState()
       store.setTunnelSnapshot(snapshot)
-      stoppingNowRef.current = Boolean(store.tunnelSnapshot?.transition)
+      stoppingNowRef.current = Boolean(useAppStore.getState().tunnelSnapshot?.transition)
       void store.refreshFirewallKillSwitchStatus()
     })
 
@@ -384,12 +392,7 @@ export default function App() {
         store.setProxy(manualProxy)
         addLog('info', `Используется ручной прокси: ${manualProxy.host}:${manualProxy.port} (${manualProxy.type})`)
         if (settings.routingMode === 'soft') {
-          softStartupPromise = window.electronAPI.applyAutoconfig(['env'], `${manualProxy.host}:${manualProxy.port}`, manualProxy.type)
-            .then(results => {
-              const liveStore = useAppStore.getState()
-              liveStore.setMode(results?.env ? 'soft' : 'off')
-              liveStore.setTunRunning(false)
-            })
+          softStartupPromise = restoreSoftStartup(manualProxy)
             .catch((err: any) => addLog('warn', `Не удалось восстановить Soft-режим: ${err.message}`))
         }
       } else {
@@ -401,11 +404,7 @@ export default function App() {
                 return
               }
               useAppStore.getState().setProxy(proxy)
-              return window.electronAPI.applyAutoconfig(['env'], `${proxy.host}:${proxy.port}`, proxy.type).then(results => {
-                const liveStore = useAppStore.getState()
-                liveStore.setMode(results?.env ? 'soft' : 'off')
-                liveStore.setTunRunning(false)
-              })
+              return restoreSoftStartup(proxy)
             })
             .catch((err: any) => addLog('error', `Ошибка восстановления Soft-режима: ${err.message}`))
         }
