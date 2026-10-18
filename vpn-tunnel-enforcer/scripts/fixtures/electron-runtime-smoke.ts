@@ -69,9 +69,10 @@ app.whenReady().then(async () => {
   await bridge(trusted)
   checks.push('contextBridge survives reload')
   const badPayload = await trusted.webContents.executeJavaScript(`
-    window.electronAPI.saveSettings({ value: NaN }).then(() => 'accepted', e => e.message)
+    window.electronAPI.saveSettings({ value: NaN }).then(() => ({ message: 'accepted' }), e => ({ message: e.message, stack: e.stack }))
   `)
-  assert.equal(badPayload, 'Некорректные параметры операции')
+  assert.equal(badPayload.message, 'Некорректные параметры операции')
+  assert.doesNotMatch(badPayload.stack ?? '', /\bat |[A-Z]:[\\/]|file:\/\//i)
   assert.equal(settingsCalls, 0)
   checks.push('invalid IPC rejected before handler')
 

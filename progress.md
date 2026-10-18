@@ -2091,3 +2091,10 @@ CI/review нового SHA проверяются отдельно после pu
   Норматив docs/ не менялся. После коммита — PR, exact-head CI и Revix;
   CodeRabbit исключён владельцем. Остаток пакета и границы доказательств
   обновлены в vpn-tunnel-enforcer/docs/wp0-acceptance-2026-10-18.md.
+
+- Создан PR https://github.com/newnout6-a11y/vpn/pull/49, начальный head
+  1bbc3c1168542233e462fae1650b8fba009127d7; CI и Revix запущены.
+  Native smoke усилен проверкой main-world Error.stack: нет `at `,
+  file:// или абсолютного Windows path. Повторный
+  `node scripts/test-electron-runtime.mjs` — exit 0; production код после
+  полного unit-прогона не менялся (только type imports/comment и native oracle).
