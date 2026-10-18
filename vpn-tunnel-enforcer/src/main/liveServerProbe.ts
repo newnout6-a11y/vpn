@@ -1,3 +1,4 @@
+import { asJsonObject } from '../shared/json'
 import { ipcMain } from 'electron'
 import { promises as dnsPromises } from 'dns'
 import * as net from 'net'
@@ -2373,13 +2374,14 @@ export async function probeTunnelHandshakeAndEgress(
 
         const markHandshakeEstablished = () => {
           if (establishedHandshake) return
+          const alpn = asJsonObject(outbound.tls)?.alpn
           establishedHandshake = {
             status: 'ok',
             durationMs: Date.now() - started,
             protocol: profile.protocol,
             evidence: {
-              transport: outbound.type || profile.protocol,
-              alpn: outbound.tls?.alpn?.[0],
+              transport: typeof outbound.type === 'string' && outbound.type || profile.protocol,
+              alpn: Array.isArray(alpn) && typeof alpn[0] === 'string' ? alpn[0] : undefined,
               inboundPort
             }
           }
@@ -2590,7 +2592,7 @@ export async function probeTunnelHandshakeAndEgress(
             protocol: profile.protocol,
             error: handshakeError,
             evidence: {
-              transport: outbound.type || profile.protocol,
+              transport: typeof outbound.type === 'string' && outbound.type || profile.protocol,
               detail: classified
             }
           }
@@ -2646,7 +2648,7 @@ export async function probeTunnelHandshakeAndEgress(
             protocol: profile.protocol,
             error: err?.message || classified,
             evidence: {
-              transport: profile?.outbound?.type || profile?.protocol,
+              transport: typeof outbound.type === 'string' && outbound.type || profile.protocol,
               detail: classified
             }
           },
@@ -3240,9 +3242,10 @@ export async function runLiveServerCheck(
         if (!host) host = found.server
         if (!port) port = found.port
         endpointCountry = found.country
-        profileTlsEnabled = found.outbound?.tls?.enabled
-        if (found.outbound?.tls?.server_name) {
-          sniHostname = found.outbound.tls.server_name
+        const tls = asJsonObject(found.outbound?.tls)
+        profileTlsEnabled = typeof tls?.enabled === 'boolean' ? tls.enabled : undefined
+        if (typeof tls?.server_name === 'string' && tls.server_name) {
+          sniHostname = tls.server_name
         }
       }
     } catch {}

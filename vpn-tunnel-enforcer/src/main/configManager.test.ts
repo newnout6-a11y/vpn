@@ -90,6 +90,18 @@ function makeDns(id: string, isBuiltin = false) {
 // ─── validateImportData ──────────────────────────────────────────────────────
 
 describe('validateImportData', () => {
+  it.each([null, {}, { ...makeProfile('p'), id: 1 }, { ...makeProfile('p'), port: 0 },
+    { ...makeProfile('p'), status: 'connected' }, { ...makeProfile('p'), status: ['online'] },
+    { ...makeProfile('p'), status: { toString: 'online' } }, { ...makeProfile('p'), outbound: [] },
+    { ...makeProfile('p'), country: 1 }, { ...makeProfile('p'), enabled: 'false' }
+  ])('rejects malformed profile entries before typed IPC publication (AT-00-001): %j', profile => {
+    expect(validateImportData({ version: CONFIG_VERSION, profiles: [profile] }).valid).toBe(false)
+  })
+  it('accepts legacy profiles without outbound and keeps nested protocol extensions (AT-00-001)', () => {
+    expect(validateImportData({ version: CONFIG_VERSION, profiles: [makeProfile('legacy'), {
+      ...makeProfile('modern'), outbound: { type: 'vless', extension: { values: [null, true, 1, 'x'] } }
+    }] }).valid).toBe(true)
+  })
   it('rejects null', () => {
     const result = validateImportData(null)
     expect(result.valid).toBe(false)

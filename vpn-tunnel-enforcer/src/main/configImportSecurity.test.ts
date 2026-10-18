@@ -6,7 +6,7 @@ import { join } from 'path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const state = vi.hoisted(() => ({
   handlers: new Map<string, Function>(), selection: [] as string[],
-  stores: new Map<string, Record<string, any>>()
+  stores: new Map<string, Record<string, any>>(), profiles: [] as unknown[]
 }))
 vi.mock('electron', () => ({
   ipcMain: { handle: (channel: string, handler: Function) => state.handlers.set(channel, handler) },
@@ -25,7 +25,7 @@ vi.mock('electron-store', () => ({ default: class {
   set(key: string, value: any) { state.stores.get(this.name)![key] = value }
 } }))
 vi.mock('./sharedStores', () => ({
-  serverPickerStore: { get: () => [], set: vi.fn() },
+  serverPickerStore: { get: () => state.profiles, set: vi.fn((_key: string, value: unknown[]) => { state.profiles = value }) },
   serverGroupsStore: { get: () => [], set: vi.fn() },
   granularKillSwitchStore: { get: (key: string) => key === 'killSwitchLevel' ? 'off' : [], set: vi.fn() }
 }))
@@ -49,13 +49,24 @@ function selected(name = 'config.json', sound = false) {
 }
 beforeEach(() => {
   directory = mkdtempSync(join(tmpdir(), 'vpnte-config-capability-'))
-  sender = new Sender(); state.selection = []; state.handlers.clear()
+  sender = new Sender(); state.selection = []; state.handlers.clear(); state.profiles = []
   vi.mocked(dialog.showOpenDialog).mockReset().mockImplementation(async () => ({ canceled: state.selection.length === 0, filePaths: state.selection }))
   state.stores.get('notification-prefs')!.notificationPrefs.sound = true
   registerConfigManagerIpcHandlers()
 })
 afterEach(() => { sender.destroy(); rmSync(directory, { recursive: true, force: true }); vi.useRealTimers() })
 describe('configuration native-selection capability', () => {
+  it('rejects null imported profiles before replacing the existing store (AT-00-001)', async () => {
+    const profile = { id: 'kept', name: 'Kept', protocol: 'vless', server: 'vpn.test', port: 443, status: 'unknown' }
+    state.profiles = [profile]
+    const file = selected()
+    writeFileSync(file, JSON.stringify({ version: '2.0', profiles: [null] }))
+    await invoke('config:browse-import', sender)
+    expect((await invoke('config:import', sender, file)).success).toBe(false)
+    expect((await invoke('config:import-apply', sender, file, ['profiles'], 'replace')).success).toBe(false)
+    expect(state.profiles).toEqual([profile])
+    await expect(invoke('config:import', sender, file)).rejects.toThrow('native-dialog')
+  })
   it('rejects arbitrary paths and cannot accept a renderer-supplied raw snapshot', async () => {
     const file = selected()
     await expect(invoke('config:import', sender, file, JSON.stringify(collectCurrentConfig()))).rejects.toThrow('native-dialog')

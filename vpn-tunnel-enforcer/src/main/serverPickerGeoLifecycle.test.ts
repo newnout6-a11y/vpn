@@ -75,6 +75,19 @@ beforeEach(async () => {
 afterEach(() => { vi.useRealTimers() })
 
 describe('country verification lifecycle', () => {
+  it('preserves nested protocol JSON in list and active profile results (AT-00-001)', async () => {
+    const outbound = {
+      type: 'vless', server: 'a.test', server_port: 443,
+      tls: { enabled: true, utls: { fingerprint: 'chrome' }, alpn: ['h2', 'http/1.1'] },
+      custom_protocol_extension: { options: [null, true, 0, 'value', { nested: ['x'] }] }
+    }
+    state.data.set('profiles', [{ id: 'a', name: 'a', server: 'a.test', port: 443, protocol: 'vless', status: 'unknown', outbound }])
+    const listed = await state.handlers.get('servers:list')!({})
+    const active = await state.handlers.get('servers:get-active')!({})
+    expect(listed[0].outbound).toEqual(outbound)
+    expect(active).toMatchObject({ activeId: 'a', profile: { id: 'a', outbound } })
+  })
+
   it('shares one five-provider lookup across 50 duplicate requests and caches the country', async () => {
     const held = deferred<string>()
     state.curl.mockImplementation(async url => url.includes('geojs.io') ? held.promise : '{}')

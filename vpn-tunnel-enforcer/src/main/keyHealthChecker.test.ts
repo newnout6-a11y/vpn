@@ -43,6 +43,19 @@ function profile(outbound: Record<string, any>): ServerProfile {
 }
 
 describe('describeProbeTarget tlsLeaksSni', () => {
+  it('does not treat a JSON array as Reality camouflage (AT-00-001)', () => {
+    const target = describeProbeTarget(profile({
+      server: 'vpn.example.test', server_port: 443,
+      tls: { enabled: true, server_name: 'private-front.example.test', reality: [] }
+    }))!
+    expect(target).toMatchObject({ needsTls: true, tlsLeaksSni: true, serverName: 'private-front.example.test' })
+  })
+
+  it.each([null, [], 'tls', 42, true])('ignores a non-object TLS container: %j (AT-00-001)', tls => {
+    const target = describeProbeTarget(profile({ server: 'vpn.example.test', server_port: 443, tls }))!
+    expect(target).toMatchObject({ needsTls: false, tlsLeaksSni: false, serverName: 'vpn.example.test' })
+  })
+
   it('plain TLS leaks SNI → tlsLeaksSni true, needsTls true', () => {
     const t = describeProbeTarget(profile({
       server: 'real.feodorn.com', server_port: 443,

@@ -923,7 +923,7 @@ async function resolveExternalProxyEndpoint(profile: ServerProfile): Promise<Ser
     }
   }
 
-  const outbound = JSON.parse(JSON.stringify(profile.outbound)) as Record<string, unknown>
+  const outbound = JSON.parse(JSON.stringify(profile.outbound)) as NonNullable<ServerProfile['outbound']>
   outbound.server = address
   if (outbound.tls && typeof outbound.tls === 'object') {
     const tls = outbound.tls as Record<string, unknown>

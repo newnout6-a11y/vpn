@@ -1,3 +1,4 @@
+import { asJsonObject } from '../shared/json'
 import type { SystemDiagnosticItem, SystemDiagnosticResult } from '../shared/diagnostics'
 export type { SystemDiagnosticItem, SystemDiagnosticResult } from '../shared/diagnostics'
 import { exec as execCb, execFile as execFileCb } from 'child_process'
@@ -760,14 +761,14 @@ export function buildActiveProfileDiagnosticItems(activeProfile: ServerProfile |
   const detailRows = [
     `id=${activeProfile.id}`,
     `name=${redactSensitiveText(activeProfile.name || 'unnamed')}`,
-    `server=${redactSensitiveText(activeProfile.server || outbound.server || 'unknown')}:${activeProfile.port || outbound.server_port || 'n/a'}`,
+    `server=${redactSensitiveText(activeProfile.server || String(outbound.server || 'unknown'))}:${activeProfile.port || outbound.server_port || 'n/a'}`,
     `protocol=${capabilities.protocol}`,
     `stealthPreset=${capabilities.stealthPreset}`,
     `tlsConfigured=${capabilities.tlsConfigured}`,
     `echConfigured=${capabilities.echConfigured}`,
     isHysteria2 ? 'hy2Transport=QUIC/UDP' : '',
     isHysteria2 && outbound.obfs && typeof outbound.obfs === 'object'
-      ? `hy2Obfs=${String(outbound.obfs.type || 'configured')}`
+      ? `hy2Obfs=${String(asJsonObject(outbound.obfs)?.type || 'configured')}`
       : '',
     isHysteria2 && typeof outbound.server_ports === 'string' && outbound.server_ports
       ? `hy2ServerPorts=${outbound.server_ports}`
