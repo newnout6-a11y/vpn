@@ -1869,11 +1869,14 @@ async function adoptRetainedSoftProtection(): Promise<void> {
   if (settings.routingMode !== 'soft' || settings.connectionMode === 'directVpn') return
   try {
     if (await autoconfig.isApplied('env') && tunnelState.snapshot.state === 'disconnected') {
-      await connectionLifecycle.start(async owner => {
-        owner.assertActive()
-        softProtectionApplied = true
-        return { success: true }
+      const result = await connectionLifecycle.start(async owner => {
+        // A backup proves a cleanup obligation, not that all proxy writes
+        // succeeded before the previous process exited. Reconcile under owner.
+        const proxy = await owner.wait(resolveProxyForTrayStart())
+        if (!proxy) return { success: false, error: 'Soft proxy unavailable' }
+        return startSoftProtectionEffects(owner, proxy.proxyAddr, proxy.proxyType)
       }, { owner: 'recovery' })
+      if (!result.success) throw new Error('Retained Soft protection reconciliation failed')
     }
   } catch (error) {
     tunnelState.fault('unknown')

@@ -909,25 +909,22 @@ describe('baseline recovery callers (AT-03-007)', () => {
     expect(deps.tunnelState.snapshot.state).toBe(outcome.endsWith('denied') ? 'unknown' : 'disconnected')
   })
 
-  it.each(['trusted', 'untrusted', 'recovery failed', 'absent'] as const)('adopts retained Soft through the actual coordinator only when %s (AT-00-002/008)', async outcome => {
-    let readApplied = () => false
-    const model = new TunnelStateMachine(() => ({ running: false, pid: null, softApplied: readApplied() }))
-    if (outcome === 'recovery failed') model.fault('unknown')
-    const lane = new ConnectionLifecycle(vi.fn(), undefined, undefined, model)
-    const deps = { tunnelState: model, connectionLifecycle: lane,
-      settingsStore: { get: () => ({ routingMode: 'soft' }) }, logEvent: noop(),
-      autoconfig: { isApplied: vi.fn(async () => { if (outcome === 'untrusted') throw new Error('ACL denied'); return outcome !== 'absent' }) } }
-    const h = compile<{ run: () => Promise<void>; applied: () => boolean }>(`
-      let softProtectionApplied=false;
-      ${body('index.ts', 'adoptRetainedSoftProtection')}
-      return {run:adoptRetainedSoftProtection,applied:()=>softProtectionApplied};`, deps)
-    readApplied = h.applied
-    await h.run()
-    expect(model.snapshot).toMatchObject(outcome === 'trusted' ? { state: 'connected', mode: 'soft', pid: null, operation: { owner: 'recovery', status: 'success' } }
+  it.each(['trusted', 'untrusted', 'recovery failed', 'absent', 'apply failed', 'missing proxy', 'resolver rejected'] as const)('adopts retained Soft only after real owned reconciliation: %s (AT-00-002/008)', async outcome => {
+    const h = softStartupHarness(true)
+    if (outcome === 'untrusted') h.autoconfig.isApplied.mockRejectedValueOnce(new Error('receipt unreadable'))
+    if (outcome === 'recovery failed') h.tunnelState.fault('unknown')
+    if (outcome === 'absent') h.autoconfig.isApplied.mockResolvedValueOnce(false)
+    if (outcome === 'apply failed') h.autoconfig.apply.mockResolvedValueOnce({ env: false })
+    if (outcome === 'missing proxy') h.resolveProxyForTrayStart.mockResolvedValueOnce(null)
+    if (outcome === 'resolver rejected') h.resolveProxyForTrayStart.mockRejectedValueOnce(new Error('detector unavailable'))
+    await h.adopt()
+    expect(h.tunnelState.snapshot).toMatchObject(outcome === 'trusted'
+      ? { state: 'connected', mode: 'soft', pid: null, operation: { owner: 'recovery', status: 'success' } }
       : { state: outcome === 'absent' ? 'disconnected' : 'unknown', mode: null })
-    expect(h.applied()).toBe(outcome === 'trusted')
+    expect(h.protected()).toBe(outcome === 'trusted')
+    expect(h.autoconfig.apply).toHaveBeenCalledTimes(['trusted', 'apply failed'].includes(outcome) ? 1 : 0)
+    if (outcome === 'trusted') expect(h.autoconfig.apply).toHaveBeenCalledWith(['env'], '127.0.0.1:8080', 'http')
   })
-
   it.each(['pending', 'rejected'] as const)('surfaces partial adapter recovery and continues when its warning is %s (AT-03-003c)', async outcome => {
     let dismiss!: (value: {}) => void
     const notification = new Promise<{}>(resolve => { dismiss = resolve })
@@ -1060,17 +1057,19 @@ return onExit;`, deps)
   })
 })
 
-function softStartupHarness() {
-  let applied = false
+function softStartupHarness(retained = false) {
+  let applied = retained
   let readProtection = () => false
   const tunnelState = new TunnelStateMachine(() => ({ running: false, pid: null, softApplied: readProtection() }))
   const os = {
     ...mainHarness('stopProtection'),
     tunnelState,
     connectionLifecycle: new ConnectionLifecycle(() => {}, undefined, undefined, tunnelState),
-    settingsStore: { get: () => ({ proxyType: 'http' }) },
+    settingsStore: { get: () => ({ proxyType: 'http', routingMode: 'soft', connectionMode: 'localProxy' }) },
+    resolveProxyForTrayStart: vi.fn(async (): Promise<{ proxyAddr: string; proxyType: 'http' } | null> => ({ proxyAddr: '127.0.0.1:8080', proxyType: 'http' })),
     tunController: { getStatus: () => ({ running: false }), stop: vi.fn(async () => ({ success: true })) },
     autoconfig: {
+      isApplied: vi.fn(async () => applied),
       apply: vi.fn(async (targets: string[]) => { if (targets.includes('env')) applied = true; return Object.fromEntries(targets.map(target => [target, true])) }),
       rollback: vi.fn(async (targets: string[]) => Object.fromEntries(targets.map(target => [target, true]))),
       rollbackApplied: vi.fn(async () => { const previous = applied; applied = false; return previous })
@@ -1079,7 +1078,7 @@ function softStartupHarness() {
   }
   // Load the actual cleanup helper as well, rather than the generic stop mock.
   const { rollbackSoftAutoconfigIfApplied: _stub, ...dependencies } = os
-  const control = compile<{ start: (proxyAddr?: string, proxyType?: 'http' | 'socks5') => Promise<any>; stop: () => Promise<any>; protected: () => boolean;
+  const control = compile<{ start: (proxyAddr?: string, proxyType?: 'http' | 'socks5') => Promise<any>; stop: () => Promise<any>; protected: () => boolean; adopt: () => Promise<void>;
     apply: (targets: string[]) => Promise<Record<string, boolean>>; rollback: (targets: string[]) => Promise<Record<string, boolean>> }>(`
 let adaptiveVerificationGeneration=0,activeAdaptiveContext=null,currentSession=null,stopInProgress=false,softProtectionApplied=false;
 ${body('index.ts', 'rollbackSoftAutoconfigIfApplied')}
@@ -1089,7 +1088,8 @@ ${body('index.ts', 'stopProtectionEffects')}
 ${body('index.ts', 'stopProtection')}
 ${body('index.ts', 'applyOwnedAutoconfig')}
 ${body('index.ts', 'rollbackOwnedAutoconfig')}
-return {start:(addr='127.0.0.1:8080',type='http')=>startSoftProtection(addr,type),stop:stopProtection,protected:()=>softProtectionApplied,
+${body('index.ts', 'adoptRetainedSoftProtection')}
+return {start:(addr='127.0.0.1:8080',type='http')=>startSoftProtection(addr,type),stop:stopProtection,protected:()=>softProtectionApplied,adopt:adoptRetainedSoftProtection,
 apply:targets=>applyOwnedAutoconfig(targets,'127.0.0.1:8080','http'),rollback:rollbackOwnedAutoconfig};
 `, dependencies)
   readProtection = control.protected

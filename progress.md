@@ -3107,3 +3107,32 @@ CI/review нового SHA проверяются отдельно после pu
   — ELECTRON_SMOKE_PASS, exit 0 (.tmp/wp0-qodo58-compensation-electron.log);
   `node scripts/test-wp1-native.mjs --ipc-only` — WP1_NATIVE_PASS, exit 0
   (.tmp/wp0-qodo58-compensation-csp.log). Traceability/smoke не подменяют L3.
+
+### PR #58 — собственная проверка boot adoption Soft
+
+- Qodo run 1540585 completed на 470d679: все семь прежних findings implemented,
+  новых нет. Собственная проверка обнаружила дополнительный дефект текущего PR:
+  startup adoption приравнивала наличие env-backup к успешному прежнему apply.
+  Сохранившийся после failed/partial apply receipt давал ложный connected.
+- Recovery owner теперь разрешает выбранный proxy и выполняет actual Soft effects
+  перед connected. Missing proxy, detector/apply/read failure дают unknown;
+  существующий recovery fault не очищается. Backup доказывает cleanup obligation,
+  а не активность env. Регрессии исполняют actual adoption + actual Soft effects
+  с production lane/FSM и fake OS; исходные trusted/untrusted/absent/fault cases
+  сохранены и дополнены apply/resolver failure.
+- До fix `npm.cmd test -- src/main/lifecycleCleanup.test.ts -t 'adopts retained Soft only'`:
+  4 failed / 3 passed / 163 skipped, 2.92 s, exit 1
+  (.tmp/wp0-qodo58-adoption-before.log). После
+  `npm.cmd test -- src/main/lifecycleCleanup.test.ts src/main/autoconfig/env.test.ts src/main/autoconfig/index.test.ts src/renderer/App.lifecycle.test.ts`:
+  284 passed / 4 files, 29.71 s, exit 0 (.tmp/wp0-qodo58-adoption-after.log).
+- `npm.cmd run typecheck` — exit 0, 158 channels / 0 public any
+  (.tmp/wp0-qodo58-adoption-typecheck.log). Coverage AC 927/927, F 210/210 и
+  diff check — exit 0; дальнейшие окончательные проверки — ниже.
+- На 470d679 CI run 39152571062 success; слияние не выполнялось из-за
+  дополнительно найденного boot adoption defect. Финальный `npm.cmd test`
+  после исправления: **4023 passed / 5 skipped / 0 failed**, 253 files passed /
+  2 skipped, 208.83 s, exit 0 (.tmp/wp0-qodo58-adoption-full.log).
+  `npm.cmd run build` — exit 0 (.tmp/wp0-qodo58-adoption-build.log);
+  `node scripts/test-electron-runtime.mjs` — ELECTRON_SMOKE_PASS, exit 0
+  (.tmp/wp0-qodo58-adoption-electron.log); `node scripts/test-wp1-native.mjs --ipc-only`
+  — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-qodo58-adoption-csp.log).

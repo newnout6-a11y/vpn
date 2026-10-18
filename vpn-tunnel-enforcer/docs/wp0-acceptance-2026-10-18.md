@@ -575,3 +575,14 @@ FSM (не успешным применением новых настроек); 
 mutation, отказ snapshot read и повторный отказ компенсации; original baseline
 впоследствии восстанавливается штатным stop. Windows registry/process.env
 подменены; это L1/L2, не натурная приёмка глобального environment broadcast.
+
+### Собственная проверка #58 — startup receipt не доказывает active Soft
+
+Qodo run 1540585 completed на 470d679: все семь прежних findings implemented,
+новых нет. Дополнительная собственная регрессия обнаружила, что boot adoption
+принимала backup receipt за доказательство ранее успешного env.apply. Теперь
+recovery owner разрешает выбранный прокси и выполняет настоящий Soft apply
+перед первым connected. Отсутствующий прокси, ошибка детектора/apply или чтения
+receipt дают unknown. Существующий recovery fault не очищается автоматически.
+Исполняется actual adoption + actual Soft effects + production lane/FSM с fake OS;
+backup остаётся основанием cleanup, а не самостоятельным protection evidence.
