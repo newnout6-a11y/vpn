@@ -1,294 +1,19 @@
 import type { PublicIpInfo } from '../shared/publicIp'
 import { contextBridge, ipcRenderer } from 'electron'
+import { assertIpcRequest, type IpcChannel, type IpcRequest, type IpcResponse } from '../shared/ipc-contract'
+import { unwrapIpcResult, IpcRemoteError, ipcError, type IpcErrorLocale } from '../shared/ipc-result'
 import type {
   ClientDevice,
-  FirewallKillSwitchStatus,
-  ExternalProxyBatchStartResult,
   ExternalProxyStartOptions,
-  ExternalProxyStatus,
-  ExternalProxyProfileRow,
   LiveCheckProgress,
   LiveServerBatchCheckOptions,
   LiveServerBatchCheckProgress,
   LiveServerBatchCheckResult,
-  LiveServerCheck,
   LiveServerCheckOptions
 } from '../shared/ipc-types'
 
-export interface ElectronAPI {
-  detectHapp: () => Promise<any>
-  getPublicIp: () => Promise<PublicIpInfo>
-  recheckPublicIp: (rebaseline?: boolean) => Promise<PublicIpInfo>
-  startTun: (proxyAddr: string, proxyType?: 'socks5' | 'http') => Promise<{ success: boolean; error?: string; warning?: string | null; vpnIp?: string | null }>
-  startDirectVpn: () => Promise<{ success: boolean; error?: string; warning?: string | null; vpnIp?: string | null }>
-  stopTun: () => Promise<{ success: boolean; error?: string; warning?: string }>
-  cancelTun: () => Promise<{ success: boolean; error?: string; warning?: string }>
-  cancelTransition: () => Promise<{ requested: boolean }>
-  getTunStatus: () => Promise<{ running: boolean; proxyAddr: string | null; proxyType: 'socks5' | 'http' | null; pid: number | null; warning?: string | null; startedAt?: number | null; restartAttempt?: number }>
-  getTrafficStats: () => Promise<TrafficStats>
-  applyAutoconfig: (targets: string[], proxyAddr: string, proxyType?: 'socks5' | 'http') => Promise<Record<string, boolean>>
-  rollbackAutoconfig: (targets: string[]) => Promise<Record<string, boolean>>
-  getAutoconfigStatus: () => Promise<any[]>
-  getSettings: () => Promise<any>
-  saveSettings: (settings: any) => Promise<any>
-  adaptiveBypassGetStatus: () => Promise<any>
-  adaptiveBypassRetry: () => Promise<any>
-  adaptiveBypassResetLearning: () => Promise<any>
-  smartRouteRuleSetsGetState: () => Promise<any>
-  smartRouteRuleSetsRefresh: (force?: boolean) => Promise<any>
-  inspectVpnInput: (input: string) => Promise<{ count: number; protocols: Record<string, number>; profiles: Array<{ index: number; name: string; protocol: string }>; fetched: boolean; source: string }>
-  setLoginItem: (openAtLogin: boolean) => Promise<any>
-  runLeakCheck: (options?: { proxyAddr?: string; proxyType?: 'socks5' | 'http' }) => Promise<any>
-  runSystemDiagnostics: () => Promise<any>
-  getRoutingPlan: () => Promise<any>
-  applyBrowserLeakProtection: () => Promise<any>
-  rollbackBrowserLeakProtection: () => Promise<any>
-  runAutoPilot: () => Promise<any>
-  repairOrphanedDns: () => Promise<any>
-  rollbackAdapterLockdown: () => Promise<any>
-  killStaleSingbox: () => Promise<{ success: boolean; message: string; skipped?: boolean; blocked?: boolean; candidates?: number; killed?: number; names?: string[]; error?: string }>
-  logRenderer: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => Promise<any>
-  getFullLogs: () => Promise<any>
-  clearAppLog: () => Promise<any>
-  clearDiagnosticArtifacts: () => Promise<{ success: boolean; message: string; cleared: string[] }>
-  rollbackTunNetworkBaseline: () => Promise<any>
-  disableFirewallKillSwitch: () => Promise<{ success: boolean; message: string; skipped?: boolean }>
-  getFirewallKillSwitchStatus: () => Promise<FirewallKillSwitchStatus>
-  firewallNuclearReset: (confirmationToken: string) => Promise<{ success: boolean; message: string }>
-  firewallRepairHealth: () => Promise<any>
-  firewallRepairVpnteRules: () => Promise<any>
-  detectForeignVpn: () => Promise<{ foreign: string | null }>
-  getLocationPrivacy: () => Promise<any>
-  applyLocationPrivacy: () => Promise<any>
-  rollbackLocationPrivacy: () => Promise<any>
-  openTunLogFolder: () => Promise<string>
-  openLogFolder: () => Promise<string>
-  exportDiagnostics: () => Promise<{ success: boolean; path?: string; error?: string; cancelled?: boolean }>
-  runLeakSelfTest: () => Promise<LeakSelfTestResult>
-  runRoutingSelfTest: () => Promise<{
-    ranAt: number
-    tunnelActive: boolean
-    vpnIp: string | null
-    directIp: string | null
-    splitWorks: boolean
-    smartRu: { enabled: boolean; ruHostIp: string | null; ruGoesDirect: boolean | null }
-    verdict: 'ok' | 'partial' | 'leak' | 'tunnel-off' | 'inconclusive'
-    message: string
-  }>
-  openSnapshotsFolder: () => Promise<{ success: boolean; path?: string; error?: string }>
-  getTrafficForensicsStatus: () => Promise<any>
-  restartTrafficForensics: () => Promise<any>
-  // Config Import/Export
-  configExport: (mode?: 'redacted' | 'secrets') => Promise<{ success: boolean; path?: string; error?: string }>
-  configBrowseImport: () => Promise<string | null>
-  configImport: (filePath: string) => Promise<{ success: boolean; sections: string[]; conflicts: string[]; error?: string }>
-  configImportApply: (filePath: string, sections: string[], conflictResolution: 'replace' | 'merge') => Promise<{ success: boolean; error?: string }>
-  // Split Tunneling
-  splitTunnelGetApps: () => Promise<any[]>
-  splitTunnelRefreshApps: () => Promise<{ apps: any[]; added: number }>
-  splitTunnelGetConfig: () => Promise<any>
-  splitTunnelSetRule: (appId: string, rule: 'vpn' | 'direct' | 'none') => Promise<void>
-  splitTunnelAddApp: (exePath: string) => Promise<any>
-  splitTunnelAddProcess: (name: string) => Promise<any>
-  splitTunnelRemoveApp: (appId: string) => Promise<void>
-  // Server Picker
-  serversList: () => Promise<any[]>
-  serversSelect: (id: string) => Promise<void | { cancelled: true }>
-  serversCancelSwitch: () => Promise<{ cancelled: boolean }>
-  serversGetActive: () => Promise<{ profile: any | null; activeId: string | null }>
-  serversPingAll: () => Promise<any[]>
-  serversResolveIps: () => Promise<any[]>
-  serversPingOne: (host: string, port: number) => Promise<number | null>
-  serversVerifyActiveCountry: (ip: string) => Promise<
-    | { ok: true; country: string; profile: any }
-    | { ok: false; reason: string; country?: string }
-  >
-  serversVerifyCountry: (id: string) => Promise<
-    | { ok: true; country: string; profile: any }
-    | { ok: false; reason: string; country?: string }
-  >
-  serversAdd: (input: string, options?: { clientDevice?: ClientDevice }) => Promise<any[]>
-  serversAddToGroup: (input: string, groupId: string | null, options?: { clientDevice?: ClientDevice }) => Promise<any[]>
-  serversSetClientDevice: (id: string, clientDevice: ClientDevice) => Promise<any>
-  serversRemove: (id: string) => Promise<void>
-  serversCopyKey: (id: string) => Promise<
-    | { ok: true; clearAfterMs: number }
-    | { ok: false; cancelled: true }
-    | { ok: false; reason: string; protocol?: string }
-  >
-  serversExportKey: (id: string) => Promise<
-    | { ok: true; uri: string; name: string; protocol: string }
-    | { ok: false; cancelled: true }
-    | { ok: false; reason: string; protocol?: string }
-  >
-  serversExportKeyToFile: (id: string) => Promise<
-    | { ok: true; path: string; name: string; protocol: string }
-    | { ok: false; cancelled: true }
-    | { ok: false; reason: string; protocol?: string; error?: string }
-  >
-  serversExportAllKeysToFile: () => Promise<
-    | { ok: true; path: string; total: number; exported: number; skipped: number }
-    | { ok: false; cancelled: true }
-    | { ok: false; reason: string; error?: string; total?: number; skipped?: number }
-  >
-  serversExportAllProxiesToFile: () => Promise<
-    | { ok: true; path: string; total: number; exported: number; skipped: number }
-    | { ok: false; cancelled: true }
-    | { ok: false; reason: string; error?: string; total?: number; skipped?: number }
-  >
-  // Server Groups — origin tracking and post-trial-aware refresh.
-  groupsList: () => Promise<any[]>
-  groupsGet: (id: string) => Promise<any | null>
-  groupsRename: (id: string, name: string) => Promise<any | null>
-  groupsDelete: (id: string, deleteServers: boolean) => Promise<{ ok: boolean }>
-  groupsRefresh: (id: string) => Promise<
-    | { ok: true; group: any; addedCount: number; updatedCount: number; removedCount: number }
-    | { ok: false; error: string }
-  >
-  groupsSetRefreshPolicy: (id: string, intervalMinutes: number | null) => Promise<any | null>
-  groupsCheckHealth: (id: string) => Promise<
-    | { ok: true; results: Array<{ profileId: string; online: boolean; latencyMs: number | null; reason?: string }> }
-    | { ok: false; error: string }
-  >
-  serverProbe: (host: string, knownPort?: number) => Promise<any>
-  serverLiveCheck: (options: LiveServerCheckOptions) => Promise<LiveServerCheck>
-  serverLiveCheckBatch: (options: LiveServerBatchCheckOptions) => Promise<LiveServerBatchCheckResult>
-  serverLiveCheckCancel: (requestId?: string) => Promise<{ cancelled: boolean; reason?: string }>
-  serverLiveCheckHistory: (filter?: { profileId?: string; host?: string }) => Promise<LiveServerCheck[]>
-  onLiveCheckProgress: (callback: (progress: LiveCheckProgress) => void) => () => void
-  onLiveBatchCheckProgress: (callback: (progress: LiveServerBatchCheckProgress) => void) => () => void
-  urlAvailabilityCheck: (url: string) => Promise<any>
-  urlAvailabilityHistory: () => Promise<any[]>
-  urlAvailabilityClearHistory: () => Promise<void>
-  // Scheduler
-  schedulerList: () => Promise<any[]>
-  schedulerCreate: (entry: any) => Promise<any>
-  schedulerUpdate: (id: string, patch: any) => Promise<any>
-  schedulerDelete: (id: string) => Promise<void>
-  schedulerNextEvent: () => Promise<any>
-  // Profile Rotation
-  rotationGetConfig: () => Promise<any>
-  rotationSetConfig: (config: any) => Promise<any>
-  rotationRotateNow: () => Promise<{ success: boolean; newProfile: string }>
-  // Kill-Switch
-  killSwitchGetLevel: () => Promise<any>
-  killSwitchSetLevel: (level: 'off' | 'standard' | 'strict') => Promise<any>
-  killSwitchGetExceptions: () => Promise<any[]>
-  killSwitchAddException: (exception: { type: 'app' | 'ip'; value: string; label: string }) => Promise<any>
-  killSwitchRemoveException: (id: string) => Promise<any>
-  killSwitchBrowseApp: () => Promise<{ path: string; name: string } | null>
-  // DNS Profiles
-  dnsList: () => Promise<any[]>
-  dnsGetActive: () => Promise<string | null>
-  dnsCreate: (profile: { name: string; primary: string; secondary: string; type: 'plain' | 'doh' | 'dot'; primaryType?: 'plain' | 'doh' | 'dot'; secondaryType?: 'plain' | 'doh' | 'dot' }) => Promise<any>
-  dnsUpdate: (id: string, patch: any) => Promise<any>
-  dnsDelete: (id: string) => Promise<void>
-  dnsSelect: (id: string) => Promise<void>
-  dnsValidate: (address: string) => Promise<{ valid: boolean; type: 'plain' | 'doh' | 'dot'; error?: string }>
-  // Domain Routing
-  domainRoutingList: () => Promise<any[]>
-  domainRoutingAdd: (rule: { pattern: string; action: 'vpn' | 'direct' | 'block'; priority: number }) => Promise<any>
-  domainRoutingUpdate: (id: string, patch: any) => Promise<any>
-  domainRoutingDelete: (id: string) => Promise<void>
-  domainRoutingReorder: (ids: string[]) => Promise<any[]>
-  domainRoutingImport: (filePath: string) => Promise<any[]>
-  domainRoutingBrowseFile: () => Promise<string | null>
-  // Connection History
-  connectionHistoryList: () => Promise<any[]>
-  connectionHistoryFilter: (filters: any) => Promise<any[]>
-  connectionHistoryStats: (period: 'day' | 'week' | 'month') => Promise<any>
-  connectionHistoryExportCsv: () => Promise<string>
-  connectionHistoryExportJson: () => Promise<string>
-  connectionHistoryClear: () => Promise<{ success: boolean }>
-  // Traffic History
-  trafficHistoryList: (vpnIp?: string, scheduleEnrichment?: boolean) => Promise<any[]>
-  trafficHistoryClear: () => Promise<{ success: boolean }>
-  onTrafficHistoryUpdated: (callback: () => void) => () => void
-  // Notification Preferences
-  notificationsGetPrefs: () => Promise<any>
-  notificationsSetPrefs: (prefs: any) => Promise<any>
-  checkOsNotificationState: () => Promise<{ osNotificationsEnabled: boolean; appUserModelId: string | null }>
-  notificationsResetOsBlock: () => Promise<{ ok: true; cleared: string[]; errors: string[] } | { ok: false; error: string }>
-  notificationsOpenWindowsSettings: () => Promise<{ ok: true } | { ok: false; error: string }>
-  onInAppNotification: (callback: (data: { level: 'info' | 'warn' | 'error'; title: string; body: string; ts: number }) => void) => () => void
-  // ip-monitor suspend/resume — leak detection guard during stop-tun rollback.
-  ipMonitorSuspend: () => Promise<{ ok: true } | undefined>
-  ipMonitorResume: () => Promise<{ ok: true } | undefined>
-  // i18n
-  i18nGetLocale: () => Promise<string>
-  i18nSetLocale: (locale: string) => Promise<void>
-  i18nGetSystemLocale: () => Promise<string>
-  // Theme
-  themeList: () => Promise<any[]>
-  themeGetActive: () => Promise<any>
-  themeSetActive: (id: string) => Promise<void>
-  themeCreate: (theme: any) => Promise<any>
-  themeDelete: (id: string) => Promise<void>
-  onThemeChanged: (callback: (theme: any) => void) => () => void
-  onServerActiveChanged: (callback: (data: { profileId: string; profileName: string; nextProfileId?: string }) => void) => () => void
-  onKillSwitchTrafficBlocked: (callback: (data: { reason: string; steps?: string[] }) => void) => () => void
-  onI18nLocaleChanged: (callback: (locale: string) => void) => () => void
-  // Speed Test
-  speedTestRun: () => Promise<any>
-  speedTestHistory: () => Promise<any[]>
-  onSpeedTestProgress: (callback: (data: { percent: number; phase: string }) => void) => () => void
-  // External Proxy
-  externalProxyStatus: (slot?: number) => Promise<ExternalProxyStatus>
-  externalProxyStart: (options?: ExternalProxyStartOptions) => Promise<ExternalProxyStatus>
-  externalProxyStartProfiles: (profileIds: string[]) => Promise<ExternalProxyBatchStartResult>
-  externalProxyStop: (slot?: number) => Promise<ExternalProxyStatus>
-  externalProxyStopAll: () => Promise<ExternalProxyStatus>
-  externalProxyList: (country?: string) => Promise<ExternalProxyProfileRow[]>
-  externalProxyRotate: (slot?: number) => Promise<ExternalProxyStatus>
-  // Event listeners
-  onIpChanged: (callback: (data: PublicIpInfo) => void) => () => void
-  onTunStatusChanged: (callback: (status: string) => void) => () => void
-  onSoftStatusChanged?: (callback: (connected: boolean) => void) => () => void
-  onTrafficStats: (callback: (stats: TrafficStats) => void) => () => void
-  onLeakDetected: (callback: (result: LeakSelfTestResult) => void) => () => void
-  onMainError: (callback: (data: { code: string; message: string }) => void) => () => void
-  onAppShuttingDown: (callback: () => void) => () => void
-  onAppResumedFromSleep?: (callback: () => void) => () => void
-}
-
-export interface TrafficStats {
-  ts: number
-  running: boolean
-  adapterName: string
-  adapterFound: boolean
-  downloadBps: number
-  uploadBps: number
-  smoothedDownloadBps: number
-  smoothedUploadBps: number
-  downloadBurstinessPct: number
-  uploadBurstinessPct: number
-  totalDownloadBytes: number
-  totalUploadBytes: number
-  sessionDownloadBytes: number
-  sessionUploadBytes: number
-  peakDownloadBps: number
-  peakUploadBps: number
-  startedAt: number | null
-}
-
-export interface LeakSelfTestAdapter {
-  alias: string
-  ipv4: string | null
-  publicIpViaThisAdapter: string | null
-  curlExitCode: number | null
-  curlStderrTail: string | null
-}
-export interface LeakSelfTestResult {
-  ts: number
-  physicalAdapterReached: boolean
-  publicIpMismatch: boolean
-  defaultRoutePublicIp: string | null
-  perAdapter: LeakSelfTestAdapter[]
-  summary: string
-  dnsLeakDetected?: boolean
-  dnsLeakDetail?: string
-  physicalAdapterInspectionComplete?: boolean
-}
+import type { ElectronAPI, TrafficStats, LeakSelfTestResult } from '../shared/electron-api'
+export type { ElectronAPI, TrafficStats, LeakSelfTestAdapter, LeakSelfTestResult } from '../shared/electron-api'
 
 const MAX_TEXT_ARG_CHARS = 4096
 const MAX_VPN_INPUT_CHARS = 256 * 1024
@@ -417,104 +142,115 @@ function assertLiveCheckOptions(value: unknown): LiveServerCheckOptions {
   }
 }
 
+let ipcLocale: IpcErrorLocale = typeof navigator !== 'undefined' && navigator.language?.startsWith('ru') ? 'ru' : 'en'
+function rememberIpcLocale(locale: unknown): void { if (locale === 'en' || locale === 'ru') ipcLocale = locale }
+
+function invoke<C extends IpcChannel>(channel: C, ...args: IpcRequest<C>): Promise<IpcResponse<C>> {
+  assertIpcRequest(channel, args)
+  return ipcRenderer.invoke(channel, ...args).then(
+    response => unwrapIpcResult<IpcResponse<C>>(response, ipcLocale),
+    () => { throw new IpcRemoteError(ipcError('internal', ipcLocale)) }
+  )
+}
+
 contextBridge.exposeInMainWorld('electronAPI', {
-  detectHapp: () => ipcRenderer.invoke('detect-happ'),
-  getPublicIp: () => ipcRenderer.invoke('get-public-ip'),
-  recheckPublicIp: (rebaseline?: boolean) => ipcRenderer.invoke('recheck-public-ip', assertOptionalBoolean(rebaseline, 'rebaseline') === true),
+  detectHapp: () => invoke('detect-happ'),
+  getPublicIp: () => invoke('get-public-ip'),
+  recheckPublicIp: (rebaseline?: boolean) => invoke('recheck-public-ip', assertOptionalBoolean(rebaseline, 'rebaseline') === true),
   startTun: (proxyAddr: string, proxyType?: 'socks5' | 'http') =>
-    ipcRenderer.invoke('start-tun', assertString(proxyAddr, 'proxyAddr'), proxyType === undefined ? undefined : assertEnum(proxyType, ['socks5', 'http'] as const, 'proxyType')),
-  startDirectVpn: () => ipcRenderer.invoke('start-direct-vpn'),
-  stopTun: () => ipcRenderer.invoke('stop-tun'),
-  cancelTun: () => ipcRenderer.invoke('cancel-tun'),
-  cancelTransition: () => ipcRenderer.invoke('cancel-transition'),
-  getTunStatus: () => ipcRenderer.invoke('get-tun-status'),
-  getTrafficStats: () => ipcRenderer.invoke('get-traffic-stats'),
+    invoke('start-tun', assertString(proxyAddr, 'proxyAddr'), proxyType === undefined ? undefined : assertEnum(proxyType, ['socks5', 'http'] as const, 'proxyType')),
+  startDirectVpn: () => invoke('start-direct-vpn'),
+  stopTun: () => invoke('stop-tun'),
+  cancelTun: () => invoke('cancel-tun'),
+  cancelTransition: () => invoke('cancel-transition'),
+  getTunStatus: () => invoke('get-tun-status'),
+  getTrafficStats: () => invoke('get-traffic-stats'),
   applyAutoconfig: (targets: string[], proxyAddr: string, proxyType?: 'socks5' | 'http') =>
-    ipcRenderer.invoke('apply-autoconfig', assertStringArray(targets, 'targets'), assertString(proxyAddr, 'proxyAddr'), proxyType === undefined ? undefined : assertEnum(proxyType, ['socks5', 'http'] as const, 'proxyType')),
-  rollbackAutoconfig: (targets: string[]) => ipcRenderer.invoke('rollback-autoconfig', assertStringArray(targets, 'targets')),
-  getAutoconfigStatus: () => ipcRenderer.invoke('get-autoconfig-status'),
-  getSettings: () => ipcRenderer.invoke('get-settings'),
-  saveSettings: (settings: any) => ipcRenderer.invoke('save-settings', assertPlainObject(settings, 'settings')),
-  adaptiveBypassGetStatus: () => ipcRenderer.invoke('adaptive-bypass:get-status'),
-  adaptiveBypassRetry: () => ipcRenderer.invoke('adaptive-bypass:retry'),
-  adaptiveBypassResetLearning: () => ipcRenderer.invoke('adaptive-bypass:reset-learning'),
-  smartRouteRuleSetsGetState: () => ipcRenderer.invoke('smart-route:rule-sets-state'),
-  smartRouteRuleSetsRefresh: (force?: boolean) => ipcRenderer.invoke('smart-route:rule-sets-refresh', assertOptionalBoolean(force, 'force') === true),
-  inspectVpnInput: (input: string) => ipcRenderer.invoke('inspect-vpn-input', assertString(input, 'input', MAX_VPN_INPUT_CHARS)),
-  setLoginItem: (openAtLogin: boolean) => ipcRenderer.invoke('set-login-item', assertBoolean(openAtLogin, 'openAtLogin')),
-  runLeakCheck: (options?: { proxyAddr?: string; proxyType?: 'socks5' | 'http' }) => ipcRenderer.invoke('run-leak-check', assertLeakOptions(options)),
-  runSystemDiagnostics: () => ipcRenderer.invoke('run-system-diagnostics'),
-  getRoutingPlan: () => ipcRenderer.invoke('get-routing-plan'),
-  applyBrowserLeakProtection: () => ipcRenderer.invoke('apply-browser-leak-protection'),
-  rollbackBrowserLeakProtection: () => ipcRenderer.invoke('rollback-browser-leak-protection'),
-  runAutoPilot: () => ipcRenderer.invoke('run-auto-pilot'),
-  repairOrphanedDns: () => ipcRenderer.invoke('network:repair-orphaned-dns'),
-  rollbackAdapterLockdown: () => ipcRenderer.invoke('network:rollback-adapter-lockdown'),
-  killStaleSingbox: () => ipcRenderer.invoke('tun:kill-stale-singbox'),
+    invoke('apply-autoconfig', assertStringArray(targets, 'targets'), assertString(proxyAddr, 'proxyAddr'), proxyType === undefined ? undefined : assertEnum(proxyType, ['socks5', 'http'] as const, 'proxyType')),
+  rollbackAutoconfig: (targets: string[]) => invoke('rollback-autoconfig', assertStringArray(targets, 'targets')),
+  getAutoconfigStatus: () => invoke('get-autoconfig-status'),
+  getSettings: () => invoke('get-settings'),
+  saveSettings: (settings: any) => invoke('save-settings', assertPlainObject(settings, 'settings')),
+  adaptiveBypassGetStatus: () => invoke('adaptive-bypass:get-status'),
+  adaptiveBypassRetry: () => invoke('adaptive-bypass:retry'),
+  adaptiveBypassResetLearning: () => invoke('adaptive-bypass:reset-learning'),
+  smartRouteRuleSetsGetState: () => invoke('smart-route:rule-sets-state'),
+  smartRouteRuleSetsRefresh: (force?: boolean) => invoke('smart-route:rule-sets-refresh', assertOptionalBoolean(force, 'force') === true),
+  inspectVpnInput: (input: string) => invoke('inspect-vpn-input', assertString(input, 'input', MAX_VPN_INPUT_CHARS)),
+  setLoginItem: (openAtLogin: boolean) => invoke('set-login-item', assertBoolean(openAtLogin, 'openAtLogin')),
+  runLeakCheck: (options?: { proxyAddr?: string; proxyType?: 'socks5' | 'http' }) => invoke('run-leak-check', assertLeakOptions(options)),
+  runSystemDiagnostics: () => invoke('run-system-diagnostics'),
+  getRoutingPlan: () => invoke('get-routing-plan'),
+  applyBrowserLeakProtection: () => invoke('apply-browser-leak-protection'),
+  rollbackBrowserLeakProtection: () => invoke('rollback-browser-leak-protection'),
+  runAutoPilot: () => invoke('run-auto-pilot'),
+  repairOrphanedDns: () => invoke('network:repair-orphaned-dns'),
+  rollbackAdapterLockdown: () => invoke('network:rollback-adapter-lockdown'),
+  killStaleSingbox: () => invoke('tun:kill-stale-singbox'),
   logRenderer: (level: 'debug' | 'info' | 'warn' | 'error', message: string) =>
-    ipcRenderer.invoke('renderer-log', assertEnum(level, ['debug', 'info', 'warn', 'error'] as const, 'level'), assertString(message, 'message', 16 * 1024)),
-  getFullLogs: () => ipcRenderer.invoke('get-full-logs'),
-  clearAppLog: () => ipcRenderer.invoke('clear-app-log'),
-  clearDiagnosticArtifacts: () => ipcRenderer.invoke('clear-diagnostic-artifacts'),
-  rollbackTunNetworkBaseline: () => ipcRenderer.invoke('rollback-tun-network-baseline'),
-  disableFirewallKillSwitch: () => ipcRenderer.invoke('disable-firewall-kill-switch'),
-  getFirewallKillSwitchStatus: () => ipcRenderer.invoke('get-firewall-kill-switch-status'),
-  firewallNuclearReset: (confirmationToken: string) => ipcRenderer.invoke('firewall:nuclear-reset', assertString(confirmationToken, 'confirmationToken', 80)),
-  firewallRepairHealth: () => ipcRenderer.invoke('firewall:repair-health'),
-  firewallRepairVpnteRules: () => ipcRenderer.invoke('firewall:repair-vpnte-rules'),
-  detectForeignVpn: () => ipcRenderer.invoke('system:detect-foreign-vpn'),
-  getLocationPrivacy: () => ipcRenderer.invoke('get-location-privacy'),
-  applyLocationPrivacy: () => ipcRenderer.invoke('apply-location-privacy'),
-  rollbackLocationPrivacy: () => ipcRenderer.invoke('rollback-location-privacy'),
-  openTunLogFolder: () => ipcRenderer.invoke('open-tun-log-folder'),
-  openLogFolder: () => ipcRenderer.invoke('open-log-folder'),
-  exportDiagnostics: () => ipcRenderer.invoke('export-diagnostics'),
-  runLeakSelfTest: () => ipcRenderer.invoke('run-leak-self-test'),
-  runRoutingSelfTest: () => ipcRenderer.invoke('run-routing-self-test'),
-  openSnapshotsFolder: () => ipcRenderer.invoke('open-snapshots-folder'),
-  getTrafficForensicsStatus: () => ipcRenderer.invoke('get-traffic-forensics-status'),
-  restartTrafficForensics: () => ipcRenderer.invoke('restart-traffic-forensics'),
+    invoke('renderer-log', assertEnum(level, ['debug', 'info', 'warn', 'error'] as const, 'level'), assertString(message, 'message', 16 * 1024)),
+  getFullLogs: () => invoke('get-full-logs'),
+  clearAppLog: () => invoke('clear-app-log'),
+  clearDiagnosticArtifacts: () => invoke('clear-diagnostic-artifacts'),
+  rollbackTunNetworkBaseline: () => invoke('rollback-tun-network-baseline'),
+  disableFirewallKillSwitch: () => invoke('disable-firewall-kill-switch'),
+  getFirewallKillSwitchStatus: () => invoke('get-firewall-kill-switch-status'),
+  firewallNuclearReset: (confirmationToken: string) => invoke('firewall:nuclear-reset', assertString(confirmationToken, 'confirmationToken', 80)),
+  firewallRepairHealth: () => invoke('firewall:repair-health'),
+  firewallRepairVpnteRules: () => invoke('firewall:repair-vpnte-rules'),
+  detectForeignVpn: () => invoke('system:detect-foreign-vpn'),
+  getLocationPrivacy: () => invoke('get-location-privacy'),
+  applyLocationPrivacy: () => invoke('apply-location-privacy'),
+  rollbackLocationPrivacy: () => invoke('rollback-location-privacy'),
+  openTunLogFolder: () => invoke('open-tun-log-folder'),
+  openLogFolder: () => invoke('open-log-folder'),
+  exportDiagnostics: () => invoke('export-diagnostics'),
+  runLeakSelfTest: () => invoke('run-leak-self-test'),
+  runRoutingSelfTest: () => invoke('run-routing-self-test'),
+  openSnapshotsFolder: () => invoke('open-snapshots-folder'),
+  getTrafficForensicsStatus: () => invoke('get-traffic-forensics-status'),
+  restartTrafficForensics: () => invoke('restart-traffic-forensics'),
   // Split Tunneling
-  splitTunnelGetApps: () => ipcRenderer.invoke('split-tunnel:get-apps'),
-  splitTunnelRefreshApps: () => ipcRenderer.invoke('split-tunnel:refresh-apps'),
-  splitTunnelGetConfig: () => ipcRenderer.invoke('split-tunnel:get-config'),
+  splitTunnelGetApps: () => invoke('split-tunnel:get-apps'),
+  splitTunnelRefreshApps: () => invoke('split-tunnel:refresh-apps'),
+  splitTunnelGetConfig: () => invoke('split-tunnel:get-config'),
   splitTunnelSetRule: (appId: string, rule: 'vpn' | 'direct' | 'none') =>
-    ipcRenderer.invoke('split-tunnel:set-rule', assertString(appId, 'appId'), assertEnum(rule, ['vpn', 'direct', 'none'] as const, 'rule')),
-  splitTunnelAddApp: (exePath: string) => ipcRenderer.invoke('split-tunnel:add-app', assertString(exePath, 'exePath')),
-  splitTunnelAddProcess: (name: string) => ipcRenderer.invoke('split-tunnel:add-process', assertString(name, 'name')),
-  splitTunnelRemoveApp: (appId: string) => ipcRenderer.invoke('split-tunnel:remove-app', assertString(appId, 'appId')),
+    invoke('split-tunnel:set-rule', assertString(appId, 'appId'), assertEnum(rule, ['vpn', 'direct', 'none'] as const, 'rule')),
+  splitTunnelAddApp: (exePath: string) => invoke('split-tunnel:add-app', assertString(exePath, 'exePath')),
+  splitTunnelAddProcess: (name: string) => invoke('split-tunnel:add-process', assertString(name, 'name')),
+  splitTunnelRemoveApp: (appId: string) => invoke('split-tunnel:remove-app', assertString(appId, 'appId')),
   // Server Picker
-  serversList: () => ipcRenderer.invoke('servers:list'),
-  serversSelect: (id: string) => ipcRenderer.invoke('servers:select', assertString(id, 'id')),
-  serversCancelSwitch: () => ipcRenderer.invoke('servers:cancel-switch'),
-  serversGetActive: () => ipcRenderer.invoke('servers:get-active'),
-  serversPingAll: () => ipcRenderer.invoke('servers:ping-all'),
-  serversResolveIps: () => ipcRenderer.invoke('servers:resolve-ips'),
-  serversPingOne: (host: string, port: number) => ipcRenderer.invoke('servers:ping-one', assertString(host, 'host'), assertRequiredPort(port, 'port')),
-  serversVerifyActiveCountry: (ip: string) => ipcRenderer.invoke('servers:verify-active-country', assertString(ip, 'ip')),
-  serversVerifyCountry: (id: string) => ipcRenderer.invoke('servers:verify-country', assertString(id, 'id')),
-  serversAdd: (input: string, options?: { clientDevice?: ClientDevice }) => ipcRenderer.invoke('servers:add', assertString(input, 'input', MAX_VPN_INPUT_CHARS), assertClientDeviceOptions(options)),
+  serversList: () => invoke('servers:list'),
+  serversSelect: (id: string) => invoke('servers:select', assertString(id, 'id')),
+  serversCancelSwitch: () => invoke('servers:cancel-switch'),
+  serversGetActive: () => invoke('servers:get-active'),
+  serversPingAll: () => invoke('servers:ping-all'),
+  serversResolveIps: () => invoke('servers:resolve-ips'),
+  serversPingOne: (host: string, port: number) => invoke('servers:ping-one', assertString(host, 'host'), assertRequiredPort(port, 'port')),
+  serversVerifyActiveCountry: (ip: string) => invoke('servers:verify-active-country', assertString(ip, 'ip')),
+  serversVerifyCountry: (id: string) => invoke('servers:verify-country', assertString(id, 'id')),
+  serversAdd: (input: string, options?: { clientDevice?: ClientDevice }) => invoke('servers:add', assertString(input, 'input', MAX_VPN_INPUT_CHARS), assertClientDeviceOptions(options)),
   serversAddToGroup: (input: string, groupId: string | null, options?: { clientDevice?: ClientDevice }) =>
-    ipcRenderer.invoke('servers:add-to-group', assertString(input, 'input', MAX_VPN_INPUT_CHARS), assertNullableString(groupId, 'groupId'), assertClientDeviceOptions(options)),
-  serversSetClientDevice: (id: string, clientDevice: ClientDevice) => ipcRenderer.invoke('servers:set-client-device', assertString(id, 'id'), assertClientDevice(clientDevice)),
-  serversRemove: (id: string) => ipcRenderer.invoke('servers:remove', assertString(id, 'id')),
-  serversCopyKey: (id: string) => ipcRenderer.invoke('servers:copy-key', assertString(id, 'id')),
-  serversExportKey: (id: string) => ipcRenderer.invoke('servers:export-key', assertString(id, 'id')),
-  serversExportKeyToFile: (id: string) => ipcRenderer.invoke('servers:export-key-file', assertString(id, 'id')),
-  serversExportAllKeysToFile: () => ipcRenderer.invoke('servers:export-all-keys-file'),
-  serversExportAllProxiesToFile: () => ipcRenderer.invoke('servers:export-all-proxies-file'),
+    invoke('servers:add-to-group', assertString(input, 'input', MAX_VPN_INPUT_CHARS), assertNullableString(groupId, 'groupId'), assertClientDeviceOptions(options)),
+  serversSetClientDevice: (id: string, clientDevice: ClientDevice) => invoke('servers:set-client-device', assertString(id, 'id'), assertClientDevice(clientDevice)),
+  serversRemove: (id: string) => invoke('servers:remove', assertString(id, 'id')),
+  serversCopyKey: (id: string) => invoke('servers:copy-key', assertString(id, 'id')),
+  serversExportKey: (id: string) => invoke('servers:export-key', assertString(id, 'id')),
+  serversExportKeyToFile: (id: string) => invoke('servers:export-key-file', assertString(id, 'id')),
+  serversExportAllKeysToFile: () => invoke('servers:export-all-keys-file'),
+  serversExportAllProxiesToFile: () => invoke('servers:export-all-proxies-file'),
   // Server Groups — origin tracking and post-trial-aware refresh.
-  groupsList: () => ipcRenderer.invoke('groups:list'),
-  groupsGet: (id: string) => ipcRenderer.invoke('groups:get', assertString(id, 'id')),
-  groupsRename: (id: string, name: string) => ipcRenderer.invoke('groups:rename', assertString(id, 'id'), assertString(name, 'name')),
-  groupsDelete: (id: string, deleteServers: boolean) => ipcRenderer.invoke('groups:delete', assertString(id, 'id'), assertBoolean(deleteServers, 'deleteServers')),
-  groupsRefresh: (id: string) => ipcRenderer.invoke('groups:refresh', assertString(id, 'id')),
+  groupsList: () => invoke('groups:list'),
+  groupsGet: (id: string) => invoke('groups:get', assertString(id, 'id')),
+  groupsRename: (id: string, name: string) => invoke('groups:rename', assertString(id, 'id'), assertString(name, 'name')),
+  groupsDelete: (id: string, deleteServers: boolean) => invoke('groups:delete', assertString(id, 'id'), assertBoolean(deleteServers, 'deleteServers')),
+  groupsRefresh: (id: string) => invoke('groups:refresh', assertString(id, 'id')),
   groupsSetRefreshPolicy: (id: string, intervalMinutes: number | null) =>
-    ipcRenderer.invoke('groups:set-refresh-policy', assertString(id, 'id'), intervalMinutes === null ? null : assertInteger(intervalMinutes, 'intervalMinutes')),
-  groupsCheckHealth: (id: string) => ipcRenderer.invoke('groups:check-health', assertString(id, 'id')),
-  serverProbe: (host: string, knownPort?: number) => ipcRenderer.invoke('server:probe', assertString(host, 'host'), assertPort(knownPort, 'knownPort')),
+    invoke('groups:set-refresh-policy', assertString(id, 'id'), intervalMinutes === null ? null : assertInteger(intervalMinutes, 'intervalMinutes')),
+  groupsCheckHealth: (id: string) => invoke('groups:check-health', assertString(id, 'id')),
+  serverProbe: (host: string, knownPort?: number) => invoke('server:probe', assertString(host, 'host'), assertPort(knownPort, 'knownPort')),
   serverLiveCheck: (options: LiveServerCheckOptions) =>
-    ipcRenderer.invoke('server:live-check', assertLiveCheckOptions(options)),
+    invoke('server:live-check', assertLiveCheckOptions(options)),
   serverLiveCheckBatch: (options: LiveServerBatchCheckOptions) => {
     const checked = assertPlainObject<Record<string, unknown>>(options, 'options')
     if (!Array.isArray(checked.profileIds)) throw new TypeError('options.profileIds must be an array')
@@ -522,7 +258,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     if (profileIds.length < 1 || profileIds.length > 12) {
       throw new RangeError('options.profileIds must contain between 1 and 12 profiles')
     }
-    return ipcRenderer.invoke('server:live-check-batch', {
+    return invoke('server:live-check-batch', {
       requestId: assertOptionalString(checked.requestId, 'options.requestId'),
       profileIds,
       mode: checked.mode === undefined
@@ -531,9 +267,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     }) as Promise<LiveServerBatchCheckResult>
   },
   serverLiveCheckCancel: (requestId?: string) =>
-    ipcRenderer.invoke('server:live-check-cancel', assertOptionalString(requestId, 'requestId')),
+    invoke('server:live-check-cancel', assertOptionalString(requestId, 'requestId')),
   serverLiveCheckHistory: (filter?: { profileId?: string; host?: string }) =>
-    ipcRenderer.invoke('server:live-check-history', assertOptionalPlainObject(filter, 'filter')),
+    invoke('server:live-check-history', assertOptionalPlainObject(filter, 'filter')),
   onLiveCheckProgress: (callback: (progress: LiveCheckProgress) => void) => {
     const handler = (_event: any, data: LiveCheckProgress) => callback(data)
     ipcRenderer.on('server:live-check-progress', handler)
@@ -546,76 +282,76 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   // URL Availability — paste a link, get verdict + diagnostics for both
   // the tunnel path and the direct path (clash-direct-out when VPN is on).
-  urlAvailabilityCheck: (url: string) => ipcRenderer.invoke('url-availability:check', assertString(url, 'url', MAX_VPN_INPUT_CHARS)),
-  urlAvailabilityHistory: () => ipcRenderer.invoke('url-availability:history'),
-  urlAvailabilityClearHistory: () => ipcRenderer.invoke('url-availability:clear-history'),
+  urlAvailabilityCheck: (url: string) => invoke('url-availability:check', assertString(url, 'url', MAX_VPN_INPUT_CHARS)),
+  urlAvailabilityHistory: () => invoke('url-availability:history'),
+  urlAvailabilityClearHistory: () => invoke('url-availability:clear-history'),
   // Scheduler
-  schedulerList: () => ipcRenderer.invoke('scheduler:list'),
-  schedulerCreate: (entry: any) => ipcRenderer.invoke('scheduler:create', assertPlainObject(entry, 'entry')),
-  schedulerUpdate: (id: string, patch: any) => ipcRenderer.invoke('scheduler:update', assertString(id, 'id'), assertPlainObject(patch, 'patch')),
-  schedulerDelete: (id: string) => ipcRenderer.invoke('scheduler:delete', assertString(id, 'id')),
-  schedulerNextEvent: () => ipcRenderer.invoke('scheduler:next-event'),
+  schedulerList: () => invoke('scheduler:list'),
+  schedulerCreate: (entry: any) => invoke('scheduler:create', assertPlainObject(entry, 'entry')),
+  schedulerUpdate: (id: string, patch: any) => invoke('scheduler:update', assertString(id, 'id'), assertPlainObject(patch, 'patch')),
+  schedulerDelete: (id: string) => invoke('scheduler:delete', assertString(id, 'id')),
+  schedulerNextEvent: () => invoke('scheduler:next-event'),
   // Kill-Switch
-  killSwitchGetLevel: () => ipcRenderer.invoke('kill-switch:get-level'),
-  killSwitchSetLevel: (level: 'off' | 'standard' | 'strict') => ipcRenderer.invoke('kill-switch:set-level', assertEnum(level, ['off', 'standard', 'strict'] as const, 'level')),
-  killSwitchGetExceptions: () => ipcRenderer.invoke('kill-switch:get-exceptions'),
-  killSwitchAddException: (exception: { type: 'app' | 'ip'; value: string; label: string }) => ipcRenderer.invoke('kill-switch:add-exception', assertPlainObject(exception, 'exception')),
-  killSwitchRemoveException: (id: string) => ipcRenderer.invoke('kill-switch:remove-exception', assertString(id, 'id')),
-  killSwitchBrowseApp: () => ipcRenderer.invoke('kill-switch:browse-app'),
+  killSwitchGetLevel: () => invoke('kill-switch:get-level'),
+  killSwitchSetLevel: (level: 'off' | 'standard' | 'strict') => invoke('kill-switch:set-level', assertEnum(level, ['off', 'standard', 'strict'] as const, 'level')),
+  killSwitchGetExceptions: () => invoke('kill-switch:get-exceptions'),
+  killSwitchAddException: (exception: { type: 'app' | 'ip'; value: string; label: string }) => invoke('kill-switch:add-exception', assertPlainObject(exception, 'exception')),
+  killSwitchRemoveException: (id: string) => invoke('kill-switch:remove-exception', assertString(id, 'id')),
+  killSwitchBrowseApp: () => invoke('kill-switch:browse-app'),
   // Profile Rotation
-  rotationGetConfig: () => ipcRenderer.invoke('rotation:get-config'),
-  rotationSetConfig: (config: any) => ipcRenderer.invoke('rotation:set-config', assertPlainObject(config, 'config')),
-  rotationRotateNow: () => ipcRenderer.invoke('rotation:rotate-now'),
+  rotationGetConfig: () => invoke('rotation:get-config'),
+  rotationSetConfig: (config: any) => invoke('rotation:set-config', assertPlainObject(config, 'config')),
+  rotationRotateNow: () => invoke('rotation:rotate-now'),
   // DNS Profiles
-  dnsList: () => ipcRenderer.invoke('dns:list'),
-  dnsGetActive: () => ipcRenderer.invoke('dns:get-active'),
-  dnsCreate: (profile: { name: string; primary: string; secondary: string; type: 'plain' | 'doh' | 'dot'; primaryType?: 'plain' | 'doh' | 'dot'; secondaryType?: 'plain' | 'doh' | 'dot' }) => ipcRenderer.invoke('dns:create', assertPlainObject(profile, 'profile')),
-  dnsUpdate: (id: string, patch: any) => ipcRenderer.invoke('dns:update', assertString(id, 'id'), assertPlainObject(patch, 'patch')),
-  dnsDelete: (id: string) => ipcRenderer.invoke('dns:delete', assertString(id, 'id')),
-  dnsSelect: (id: string) => ipcRenderer.invoke('dns:select', assertString(id, 'id')),
-  dnsValidate: (address: string) => ipcRenderer.invoke('dns:validate', assertString(address, 'address')),
+  dnsList: () => invoke('dns:list'),
+  dnsGetActive: () => invoke('dns:get-active'),
+  dnsCreate: (profile: { name: string; primary: string; secondary: string; type: 'plain' | 'doh' | 'dot'; primaryType?: 'plain' | 'doh' | 'dot'; secondaryType?: 'plain' | 'doh' | 'dot' }) => invoke('dns:create', assertPlainObject(profile, 'profile')),
+  dnsUpdate: (id: string, patch: any) => invoke('dns:update', assertString(id, 'id'), assertPlainObject(patch, 'patch')),
+  dnsDelete: (id: string) => invoke('dns:delete', assertString(id, 'id')),
+  dnsSelect: (id: string) => invoke('dns:select', assertString(id, 'id')),
+  dnsValidate: (address: string) => invoke('dns:validate', assertString(address, 'address')),
   // Domain Routing
-  domainRoutingList: () => ipcRenderer.invoke('domain-routing:list'),
-  domainRoutingAdd: (rule: { pattern: string; action: 'vpn' | 'direct' | 'block'; priority: number }) => ipcRenderer.invoke('domain-routing:add', assertPlainObject(rule, 'rule')),
-  domainRoutingUpdate: (id: string, patch: any) => ipcRenderer.invoke('domain-routing:update', assertString(id, 'id'), assertPlainObject(patch, 'patch')),
-  domainRoutingDelete: (id: string) => ipcRenderer.invoke('domain-routing:delete', assertString(id, 'id')),
-  domainRoutingReorder: (ids: string[]) => ipcRenderer.invoke('domain-routing:reorder', assertStringArray(ids, 'ids')),
-  domainRoutingImport: (filePath: string) => ipcRenderer.invoke('domain-routing:import', assertString(filePath, 'filePath')),
-  domainRoutingBrowseFile: () => ipcRenderer.invoke('domain-routing:browse-file'),
+  domainRoutingList: () => invoke('domain-routing:list'),
+  domainRoutingAdd: (rule: { pattern: string; action: 'vpn' | 'direct' | 'block'; priority: number }) => invoke('domain-routing:add', assertPlainObject(rule, 'rule')),
+  domainRoutingUpdate: (id: string, patch: any) => invoke('domain-routing:update', assertString(id, 'id'), assertPlainObject(patch, 'patch')),
+  domainRoutingDelete: (id: string) => invoke('domain-routing:delete', assertString(id, 'id')),
+  domainRoutingReorder: (ids: string[]) => invoke('domain-routing:reorder', assertStringArray(ids, 'ids')),
+  domainRoutingImport: (filePath: string) => invoke('domain-routing:import', assertString(filePath, 'filePath')),
+  domainRoutingBrowseFile: () => invoke('domain-routing:browse-file'),
   // Connection History
-  connectionHistoryList: () => ipcRenderer.invoke('connection-history:list'),
-  connectionHistoryFilter: (filters: any) => ipcRenderer.invoke('connection-history:filter', assertPlainObject(filters, 'filters')),
-  connectionHistoryStats: (period: 'day' | 'week' | 'month') => ipcRenderer.invoke('connection-history:stats', assertEnum(period, ['day', 'week', 'month'] as const, 'period')),
-  connectionHistoryExportCsv: () => ipcRenderer.invoke('connection-history:export-csv'),
-  connectionHistoryExportJson: () => ipcRenderer.invoke('connection-history:export-json'),
-  connectionHistoryClear: () => ipcRenderer.invoke('connection-history:clear'),
+  connectionHistoryList: () => invoke('connection-history:list'),
+  connectionHistoryFilter: (filters: any) => invoke('connection-history:filter', assertPlainObject(filters, 'filters')),
+  connectionHistoryStats: (period: 'day' | 'week' | 'month') => invoke('connection-history:stats', assertEnum(period, ['day', 'week', 'month'] as const, 'period')),
+  connectionHistoryExportCsv: () => invoke('connection-history:export-csv'),
+  connectionHistoryExportJson: () => invoke('connection-history:export-json'),
+  connectionHistoryClear: () => invoke('connection-history:clear'),
   // Traffic History
-  trafficHistoryList: (vpnIp?: string, scheduleEnrichment?: boolean) => ipcRenderer.invoke(
+  trafficHistoryList: (vpnIp?: string, scheduleEnrichment?: boolean) => invoke(
     'traffic-history:list',
     assertOptionalString(vpnIp, 'vpnIp'),
     assertOptionalBoolean(scheduleEnrichment, 'scheduleEnrichment') === true
   ),
-  trafficHistoryClear: () => ipcRenderer.invoke('traffic-history:clear'),
+  trafficHistoryClear: () => invoke('traffic-history:clear'),
   onTrafficHistoryUpdated: (callback: () => void) => {
     const listener = () => callback()
     ipcRenderer.on('traffic-history:enrichment-updated', listener)
     return () => ipcRenderer.removeListener('traffic-history:enrichment-updated', listener)
   },
   // Config Import/Export
-  configExport: (mode = 'redacted') => ipcRenderer.invoke('config:export', assertEnum(mode, ['redacted', 'secrets'] as const, 'mode')),
-  configBrowseImport: () => ipcRenderer.invoke('config:browse-import'),
-  configImport: (filePath: string) => ipcRenderer.invoke('config:import', assertString(filePath, 'filePath')),
+  configExport: (mode = 'redacted') => invoke('config:export', assertEnum(mode, ['redacted', 'secrets'] as const, 'mode')),
+  configBrowseImport: () => invoke('config:browse-import'),
+  configImport: (filePath: string) => invoke('config:import', assertString(filePath, 'filePath')),
   configImportApply: (filePath: string, sections: string[], conflictResolution: 'replace' | 'merge') =>
-    ipcRenderer.invoke('config:import-apply', assertString(filePath, 'filePath'), assertStringArray(sections, 'sections'), assertEnum(conflictResolution, ['replace', 'merge'] as const, 'conflictResolution')),
+    invoke('config:import-apply', assertString(filePath, 'filePath'), assertStringArray(sections, 'sections'), assertEnum(conflictResolution, ['replace', 'merge'] as const, 'conflictResolution')),
   // Notification Preferences
-  notificationsGetPrefs: () => ipcRenderer.invoke('notifications:get-prefs'),
-  notificationsSetPrefs: (prefs: any) => ipcRenderer.invoke('notifications:set-prefs', assertPlainObject(prefs, 'prefs')),
-  checkOsNotificationState: () => ipcRenderer.invoke('notifications:check-os-state'),
+  notificationsGetPrefs: () => invoke('notifications:get-prefs'),
+  notificationsSetPrefs: (prefs: any) => invoke('notifications:set-prefs', assertPlainObject(prefs, 'prefs')),
+  checkOsNotificationState: () => invoke('notifications:check-os-state'),
   // Clear the Windows-side notification block (registry "Enabled = 0" set
   // when the user clicked "Don't show notifications" on a toast). Returns
   // a structured ok/error shape — never throws.
-  notificationsResetOsBlock: () => ipcRenderer.invoke('notifications:reset-os-block'),
-  notificationsOpenWindowsSettings: () => ipcRenderer.invoke('notifications:open-windows-settings'),
+  notificationsResetOsBlock: () => invoke('notifications:reset-os-block'),
+  notificationsOpenWindowsSettings: () => invoke('notifications:open-windows-settings'),
   // In-app notification fallback: fired when notify() can't deliver an OS
   // toast (Windows blocks us, or platform unsupported). Returns an
   // unsubscribe handle.
@@ -624,21 +360,21 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('inapp-notification', handler)
     return () => ipcRenderer.removeListener('inapp-notification', handler)
   },
-  // ip-monitor suspend/resume bridge — main self-registers these on
-  // process.type==='browser'. Renderer flips them when TUN status moves
+  // Main registers these after installing the IPC boundary. Renderer flips
+  // them when TUN status moves
   // to 'stopping'/'stopped' to silence false-positive leak events.
-  ipMonitorSuspend: () => ipcRenderer.invoke('ip-monitor:suspend'),
-  ipMonitorResume: () => ipcRenderer.invoke('ip-monitor:resume'),
+  ipMonitorSuspend: () => invoke('ip-monitor:suspend'),
+  ipMonitorResume: () => invoke('ip-monitor:resume'),
   // i18n
-  i18nGetLocale: () => ipcRenderer.invoke('i18n:get-locale'),
-  i18nSetLocale: (locale: string) => ipcRenderer.invoke('i18n:set-locale', assertString(locale, 'locale')),
-  i18nGetSystemLocale: () => ipcRenderer.invoke('i18n:get-system-locale'),
+  i18nGetLocale: () => invoke('i18n:get-locale').then(locale => { rememberIpcLocale(locale); return locale }),
+  i18nSetLocale: (locale: string) => invoke('i18n:set-locale', assertString(locale, 'locale')).then(result => { rememberIpcLocale(locale); return result }),
+  i18nGetSystemLocale: () => invoke('i18n:get-system-locale'),
   // Theme
-  themeList: () => ipcRenderer.invoke('theme:list'),
-  themeGetActive: () => ipcRenderer.invoke('theme:get-active'),
-  themeSetActive: (id: string) => ipcRenderer.invoke('theme:set-active', assertString(id, 'id')),
-  themeCreate: (theme: any) => ipcRenderer.invoke('theme:create', assertPlainObject(theme, 'theme')),
-  themeDelete: (id: string) => ipcRenderer.invoke('theme:delete', assertString(id, 'id')),
+  themeList: () => invoke('theme:list'),
+  themeGetActive: () => invoke('theme:get-active'),
+  themeSetActive: (id: string) => invoke('theme:set-active', assertString(id, 'id')),
+  themeCreate: (theme: any) => invoke('theme:create', assertPlainObject(theme, 'theme')),
+  themeDelete: (id: string) => invoke('theme:delete', assertString(id, 'id')),
   onThemeChanged: (callback: (theme: any) => void) => {
     const handler = (_event: any, theme: any) => callback(theme)
     ipcRenderer.on('theme-changed', handler)
@@ -655,29 +391,29 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => ipcRenderer.removeListener('kill-switch:traffic-blocked', handler)
   },
   onI18nLocaleChanged: (callback: (locale: string) => void) => {
-    const handler = (_event: any, locale: string) => callback(locale)
+    const handler = (_event: any, locale: string) => { rememberIpcLocale(locale); callback(locale) }
     ipcRenderer.on('i18n:locale-changed', handler)
     return () => ipcRenderer.removeListener('i18n:locale-changed', handler)
   },
   // Speed Test
-  speedTestRun: () => ipcRenderer.invoke('speed-test:run'),
-  speedTestHistory: () => ipcRenderer.invoke('speed-test:history'),
+  speedTestRun: () => invoke('speed-test:run'),
+  speedTestHistory: () => invoke('speed-test:history'),
   onSpeedTestProgress: (callback: (data: { percent: number; phase: string }) => void) => {
     const handler = (_event: any, data: { percent: number; phase: string }) => callback(data)
     ipcRenderer.on('speed-test:progress', handler)
     return () => ipcRenderer.removeListener('speed-test:progress', handler)
   },
   // External Proxy
-  externalProxyStatus: (slot?: number) => ipcRenderer.invoke('external-proxy:status', assertExternalProxySlot(slot)),
-  externalProxyStart: (options?: ExternalProxyStartOptions) => ipcRenderer.invoke('external-proxy:start', assertExternalProxyStartOptions(options)),
-  externalProxyStartProfiles: (profileIds: string[]) => ipcRenderer.invoke(
+  externalProxyStatus: (slot?: number) => invoke('external-proxy:status', assertExternalProxySlot(slot)),
+  externalProxyStart: (options?: ExternalProxyStartOptions) => invoke('external-proxy:start', assertExternalProxyStartOptions(options)),
+  externalProxyStartProfiles: (profileIds: string[]) => invoke(
     'external-proxy:start-profiles',
     assertStringArray(profileIds, 'profileIds', MAX_EXTERNAL_PROXY_BATCH_PROFILE_IDS)
   ),
-  externalProxyStop: (slot?: number) => ipcRenderer.invoke('external-proxy:stop', assertExternalProxySlot(slot)),
-  externalProxyStopAll: () => ipcRenderer.invoke('external-proxy:stop-all'),
-  externalProxyList: (country?: string) => ipcRenderer.invoke('external-proxy:list', assertOptionalString(country, 'country')),
-  externalProxyRotate: (slot?: number) => ipcRenderer.invoke('external-proxy:rotate', assertExternalProxySlot(slot)),
+  externalProxyStop: (slot?: number) => invoke('external-proxy:stop', assertExternalProxySlot(slot)),
+  externalProxyStopAll: () => invoke('external-proxy:stop-all'),
+  externalProxyList: (country?: string) => invoke('external-proxy:list', assertOptionalString(country, 'country')),
+  externalProxyRotate: (slot?: number) => invoke('external-proxy:rotate', assertExternalProxySlot(slot)),
   // Event listeners
   onIpChanged: (callback: (data: PublicIpInfo) => void) => {
     const handler = (_event: any, data: PublicIpInfo) => callback(data)

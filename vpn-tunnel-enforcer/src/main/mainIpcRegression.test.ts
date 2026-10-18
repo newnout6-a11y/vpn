@@ -49,7 +49,7 @@ describe('main IPC regressions', () => {
   it('uses owned runtime cleanup for stale runtime repair instead of dynamic child_process import', () => {
     const source = mainIndexSource()
     const handlerStart = source.indexOf("handleLogged('tun:kill-stale-singbox'")
-    const handlerEnd = source.indexOf("handleLogged('diagnostics:run-leak-check'", handlerStart)
+    const handlerEnd = source.indexOf("handleLogged('open-log-folder'", handlerStart)
     const handler = source.slice(handlerStart, handlerEnd)
 
     expect(handler).toContain('if (tunController.getStatus().running)')

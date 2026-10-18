@@ -2002,3 +2002,141 @@ CI/review нового SHA проверяются отдельно после pu
   После доработки требуется новый head CI/review; результаты не переносятся.
   Далее в том же WP-0 — разрешение wrapper-регистраций IPC и AT-00-001,
   затем остальные незавершённые строки матрицы. WP-2 не начат.
+
+## 18.10.2026 — PR #48 слит; следующий участок WP-0 — IPC
+
+- PR https://github.com/newnout6-a11y/vpn/pull/48 слит: merge
+  `87b185f6dc48f72e15cfc6f20c61afc6f8efc9ad`. Проверенный head
+  `ad9e0b5f7954f536d8c57c9e7f8b8d9fbe589920`: все три CI success,
+  run 39115674950. Windows 117640852250 — 3367 passed / 4 skipped,
+  239 файлов passed / 1 skipped; typecheck и coverage AC 927/927,
+  F 210/210 зелёные; WFP aborted:true, Electron 1 passed / 1 skipped.
+  Rust 117640852208 и сайт 117640852102 — success.
+  Полный лог `.tmp/wp0-final-ci.log` внутри приложения.
+- Свежий Revix 117640867586 на том же head: completed/neutral, Low risk;
+  review 5562375204. 4306503597 закрыт сохранением rejected records и
+  общим SESSION_OUTCOME_KINDS. 4306503603 проверен: writeSessionEntry
+  и recordStartFailure catches; исключение истории не выходит в teardown.
+- Остаток review — незначительные рекомендации: 4306523719 предлагает
+  общие const arrays и для остальных enum-полей; это учесть при общей
+  модели WP-0, текущие значения совпадают и unknown entries сохраняются.
+  4306523722 предлагает backup повреждённого JSON: AT-00-010 допускает
+  честную отметку history.corrupted без backup; текущая политика явна.
+  4306523723: повторный assert намеренно выполняет второе чтение и вместе
+  с одним событием проверяет dedup. Блокирующих дефектов не установлено.
+- Создана ветка codex/wp0-ipc-contracts от актуального vpn/main.
+  `git diff ad9e0b5 HEAD --exit-code` — 0: merge не изменил проверенное дерево.
+  В локальном DoD последней code-версии: typecheck/build exit 0;
+  полный npm.cmd test 3366 passed / 5 skipped, 154.57 s; coverage exit 0.
+  Этот коммит дописывает только журнал; код после проверки не менялся.
+- Разрешены девять AST wrapper-регистраций handleLogged: фактически
+  158 main invoke handlers против 157 preload invoke channels; missing
+  handlers нет. Единственный unexposed handler — diagnostics:run-leak-check
+  (дублирует run-leak-check); shared имеет 78 деклараций, включая progress
+  notifications. Артефакт `.tmp/wp0-ipc-resolved-inventory.json`.
+  Следующий шаг — точный request/event registry, schemas, typed envelope
+  и контрактный тест вместо string presence. Это не приёмка AT-00-001.
+  WP-0 остаётся в работе, WP-2 не начат; цель не завершена.
+
+## 18.10.2026 — WP-0: общий IPC transport и паритет 157 каналов
+
+- Ветка codex/wp0-ipc-contracts. Добавлен общий request registry с методом
+  API и runtime-схемой каждого из 157 каналов; прежний ElectronAPI вынесен
+  в shared с совместимыми type exports preload. Старые частичные *Channels
+  и единственный неэкспонированный alias diagnostics:run-leak-check удалены.
+  AST checker разрешает девять wrappers реальных main registrations,
+  сравнивает main/preload/shared, именует drift/duplicates/method mismatch,
+  отклоняет динамические неопределённые каналы и raw bridge invoke в обход
+  decoder. Checker обязателен в typecheck/build.
+- Исправлен обход guard: ipMonitor раньше регистрировал suspend/resume
+  при импорте, до installTrustedIpcBoundary в app.whenReady. Теперь main
+  вызывает registrar явно после guard; regression проверяет отсутствие
+  import-time handlers при process.type=browser и zero effects чужому frame.
+- Guard проверяет sender, общие лимиты и channel schema перед listener;
+  возвращает version=1 ok/result/error с UUIDv4. Исключения классифицируются
+  в validation/permission/network/conflict/internal/cancelled/timeout с
+  константными code/message; raw exception не передаётся renderer. Getter
+  code/name, который сам бросает исключение, тоже закрыт safe envelope.
+  Preload снимает envelope, сохраняет прежние domain results/undefined,
+  sanitizes повреждённый response и Electron transport reject.
+- 157 channels проверены через production guard с контролируемыми listeners:
+  valid args, неправильный тип каждого аргумента, extra args, чужой frame,
+  все 7 категорий исключений, audit correlation и отсутствие secret/path.
+  Это не semantic matrix 157 реальных feature handlers. Plain-object
+  legacy inputs пока не все имеют глубокие field schemas; any публичного
+  API и domain-result error payloads остаются дальнейшей работой WP-0.
+  contextBridge не гарантирует перенос custom Error properties: в main
+  world подтверждено canonical message, code/category проверены в preload
+  realm. Типизированные ошибки в main world ещё требуют bridge adapter.
+  AT-00-001/004 и весь WP-0 целиком PASS не объявлены.
+- `npm.cmd run typecheck` — exit 0, checker 157 channels. Адресный прогон
+  `npm.cmd test -- src/main/ipMonitorIpc.test.ts src/main/ipcContractAcceptance.test.ts src/main/ipcChannelContract.test.ts src/preload/preloadValidation.test.ts src/renderer/AppSource.test.ts`
+  — 378 passed, 5 файлов, 4.12 s. После добавления отрицательных типов:
+  `npm.cmd test -- src/main/ipcContractAcceptance.test.ts src/main/windowCrashRecovery.test.ts`
+  — 328 passed, 2 файла, 0.70 s. Полный `npm.cmd test` — 3698 passed /
+  5 skipped / 0 failed, 240 файлов passed / 2 skipped, 199.07 s, exit 0;
+  `.tmp/wp0-ipc-full-final.log`. Первый полный прогон нашёл три устаревших
+  source assertions (перенос interface и helper invoke); они исправлены.
+- `npm.cmd run build` — exit 0, `.tmp/wp0-ipc-build.log`.
+  `node scripts/test-electron-runtime.mjs` — exit 0: Electron 44.4.3,
+  safeStorage, production preload/contextBridge/reload, loopback dev,
+  payload/unknown sender/navigated origin rejection. Лог
+  `.tmp/wp0-ipc-electron.log`. `node scripts/test-wp1-native.mjs --ipc-only`
+  — exit 0, настоящий hostile subframe zero effects, production CSP;
+  `.tmp/wp0-ipc-native.log`. В native fixture koffi сохранён external:
+  esbuild не должен встраивать .node binary. IPC-only не выполняет ACL,
+  ZIP или clipboard и не подменяет полную L3/OS matrix.
+- `python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py`
+  — AC 927/927, F 210/210, exit 0; `git diff --check` — exit 0.
+  Норматив docs/ не менялся. После коммита — PR, exact-head CI и Revix;
+  CodeRabbit исключён владельцем. Остаток пакета и границы доказательств
+  обновлены в vpn-tunnel-enforcer/docs/wp0-acceptance-2026-10-18.md.
+
+- Создан PR https://github.com/newnout6-a11y/vpn/pull/49, начальный head
+  1bbc3c1168542233e462fae1650b8fba009127d7; CI и Revix запущены.
+  Native smoke усилен проверкой main-world Error.stack: нет `at `,
+  file:// или абсолютного Windows path. Повторный
+  `node scripts/test-electron-runtime.mjs` — exit 0; production код после
+  полного unit-прогона не менялся (только type imports/comment и native oracle).
+
+## 18.10.2026 — PR #49: доработка Revix
+
+- Начальный head 45dc8c4 завершил все три CI success, run 39117643651:
+  Windows 117646629483 — 3699 passed / 4 skipped; traceability 927/927 AC,
+  210/210 F; WFP transaction aborted:true; native Electron 1 passed /
+  1 skipped. Rust 117646629770 и сайт 117646629939 — success. Полный
+  Windows лог `.tmp/wp0-ipc-initial-ci.log`. Эти результаты относятся
+  к начальному head, а не автоматически к последующим исправлениям.
+- Revix 117646578791, review 5562483215: issue 4306608229 подтверждён.
+  Logger редактирует голый UUID. Audit correlation теперь равен ipc_ +
+  response UUID без дефисов: обратимое соответствие всех 128 бит.
+  Redactor не ослаблен. Новый ipcAuditLog.test.ts использует production
+  guard, logger, redactor и настоящий файл app.log; отдельно доказывает,
+  что голый UUID по-прежнему скрывается, а opaque correlation сохраняется
+  для отказа валидации и исключения listener, без секретов/путей.
+- Question 4306608232: прежний renderer не переводил canonical сообщения.
+  Добавлены en/ru сообщения непосредственно в decoder. Язык совпадает с
+  начальным navigator renderer i18n, затем обновляется persisted get-locale,
+  успешным set-locale и межоконным событием. Произвольный текст main error
+  всё равно отбрасывается. Unit проверяет оба языка и event/set изменение;
+  настоящий Electron smoke — смену en/ru и ошибку через contextBridge.
+- Suggestion 4306608234: утверждение о глубокой semantic schema сужено
+  в комментарии реестра и acceptance report. object() без fields обозначает
+  bounded legacy object, не полный контракт бизнес-полей; остаток WP-0
+  не скрыт и полный AT-00-001/004 не объявлен PASS.
+- `npm.cmd test -- src/main/ipcAuditLog.test.ts src/main/ipcContractAcceptance.test.ts src/preload/preloadValidation.test.ts src/main/ipcChannelContract.test.ts`
+  — 356 passed, 4 файла, 1.44 s, exit 0. `npm.cmd run build` (включает
+  typecheck/157-channel check) — exit 0, `.tmp/wp0-ipc-review-build.log`.
+  `node scripts/test-electron-runtime.mjs` и
+  `node scripts/test-wp1-native.mjs --ipc-only` — exit 0; после усиления
+  native locale assertions первый smoke повторён, exit 0.
+  Coverage — AC 927/927, F 210/210, exit 0; diff checks — exit 0.
+- Первый полный прогон доработки: 3701 passed / 1 failed / 5 skipped,
+  207.02 s. Единственный отказ — 5 s timeout существующего read-only
+  PowerShell parser fixture runtimeDirSecurity.test.ts (5806 ms), без
+  изменения этих production scripts. Отдельный повтор
+  `npm.cmd test -- src/main/runtimeDirSecurity.test.ts` — 103 passed,
+  5.55 s, exit 0. Полный прогон повторён без параллельных native/build;
+  итог: `npm.cmd test` — 3702 passed / 5 skipped / 0 failed, 241 файлов
+  passed / 2 skipped, 187.16 s, exit 0; `.tmp/wp0-ipc-review-full-final.log`.
+  Повторный `npm.cmd run typecheck` — exit 0, 157 channels.

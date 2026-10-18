@@ -19,7 +19,7 @@ import { makeOutcome, outcomeKindToDisconnectReason, isNodeSwitchRestartReason }
 import type { SessionOutcome, SessionOutcomeEvidence, SessionOutcomeKind } from '../shared/ipc-types'
 import { readRecentXrayOutboundFault, getXrayStatus, stopXray } from './xrayEngine'
 import { classifyNavigation } from './navigationPolicy'
-import { ipMonitor } from './ipMonitor'
+import { ipMonitor, registerIpMonitorIpcHandlers } from './ipMonitor'
 import { withProtectedIpTransition } from './protectedIpTransition'
 import { collectAdaptiveSamples, verifyAdaptiveFallback } from './adaptiveVerification'
 import { autoconfig } from './autoconfig'
@@ -1806,6 +1806,7 @@ app.whenReady().then(async () => {
   // primitive once prevents future channels from silently omitting the
   // senderFrame/origin checks required by the trusted boundary.
   installTrustedIpcBoundary()
+  registerIpMonitorIpcHandlers()
 
   logEvent('info', 'app', 'application ready', {
     version: app.getVersion(),
@@ -2419,10 +2420,6 @@ app.whenReady().then(async () => {
     } catch (err: any) {
       return { success: false, message: `Не удалось завершить процессы: ${err?.message || err}` }
     }
-  })
-
-  handleLogged('diagnostics:run-leak-check', async () => {
-    return runLeakCheck()
   })
 
   handleLogged('open-log-folder', async () => {

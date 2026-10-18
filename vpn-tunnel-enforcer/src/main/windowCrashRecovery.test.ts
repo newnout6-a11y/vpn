@@ -54,7 +54,8 @@ describe('Window Crash & Sleep Lifecycle Recovery Regressions', () => {
 
   it('exposes onAppResumedFromSleep in preload IPC bridge', () => {
     const source = preloadSource()
-    expect(source).toContain('onAppResumedFromSleep?: (callback: () => void) => () => void')
+    const api = readFileSync(join(process.cwd(), 'src', 'shared', 'electron-api.ts'), 'utf8')
+    expect(api).toContain('onAppResumedFromSleep?: (callback: () => void) => () => void')
     expect(source).toContain("ipcRenderer.on('app:resumed-from-sleep'")
   })
 

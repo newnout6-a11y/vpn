@@ -8,7 +8,7 @@
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "node scripts/check-ipc-contract.mjs && tsc --noEmit",
     "build": "npm run typecheck && electron-vite build",
     "test": "vitest --run",
     "test:watch": "vitest",

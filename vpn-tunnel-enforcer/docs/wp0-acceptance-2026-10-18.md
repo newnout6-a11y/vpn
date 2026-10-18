@@ -9,10 +9,10 @@ CodeRabbit исключён из ожидания владельцем; CI и д
 
 | AT | Найденная реализация / доказательства | Остаток до приёмки |
 | --- | --- | --- |
-| 00-001 | `ipcChannelContract.test.ts` проверяет упоминание preload-каналов в main | Точное сравнение трёх множеств, реальные регистрации, схемы входа и единый типизированный envelope всех каналов; упоминание строки недостаточно |
+| 00-001 | AST-проверка 157 main/preload/shared request channels, общий реестр входов и versioned transport envelope; защита IP-monitor регистрации | Уточнение глубоких схем legacy object inputs и устранение `any` на публичной границе; общий PASS пока не заявлен |
 | 00-002 | `tunController.ts`, lifecycle fault-injection tests | Единая модель и интегрированный координатор; все туры ≤6, недопустимые события, ресурсные инварианты |
 | 00-003 | Локальная отмена в отдельных подсистемах | Реестр connect/refresh/speed/import/export/rotation; отмена на 10/50/90%, deadline, запрет поздних эффектов |
-| 00-004 | IPC trust boundary реализована в WP-1 | Полная typed taxonomy на каждом privileged канале, негативная матрица и отсутствие stack/absolute path |
+| 00-004 | Общая классификация исключений transport; 157 каналов × 7 категорий на настоящей guard, safe decode в preload | Миграция legacy domain-result `{success:false,error}` и semantic matrix настоящих feature handlers; transport fixtures не доказывают её |
 | 00-005 | `appLogger.ts`, `connectionHistory.ts`; новый regression passive rejection dedup | Сквозной correlation id, монотонный порядок, source/owner/route/confidence истории и redaction всех полей |
 | 00-006 | Локальные миграции, в том числе `readSettingsWithMigration` | Централизованный упорядоченный реестр, fixtures всех исторических версий, future-version hash invariance |
 | 00-007 | Lifecycle tests отдельных гонок | Seeded 200 команд из 10 потоков, typed losers, итог последней принятой команды и 0 child PID при disconnected |
@@ -81,3 +81,76 @@ preload, 78 строковых деклараций в *Channels интерфе�
 не доказывает отсутствия 113 main handlers: большая часть зарегистрирована
 через wrapper. Полный паритет, схемы входа и envelope остаются открытыми.
 Артефакт первичного сканирования: .tmp/wp0-ipc-inventory.json (не норматив).
+
+## Реализованная граница IPC — 18.10.2026
+
+`shared/ipc-contract.ts` (реэкспорт из ipc-types) содержит 157 request channels,
+имена публичных методов и runtime-схемы wire arguments. `electron-api.ts`
+содержит прежний публичный API; preload сохраняет прежние типовые экспорты.
+События не смешиваются с request registry. Неиспользуемый дубликат
+`diagnostics:run-leak-check` и осиротевшие старые *Channels удалены.
+
+`scripts/check-ipc-contract.mjs` разбирает TypeScript AST реальных исходников,
+разрешает девять обёрток регистрации, сравнивает множества и имена методов.
+Комментарии не считаются регистрациями; неизвестные динамические регистрации,
+дубликаты, лишние декларации, прямой обход preload decoder вызывают ошибку
+с указанием имени. Проверка входит в typecheck и build.
+
+Все зарегистрированные handlers проходят sender-frame/origin guard,
+ограничение структуры/размера и схему аргументов перед вызовом listener.
+`ipMonitor` больше не регистрирует handlers при импорте: main явно вызывает
+registrar после установки guard. Регрессия проверяет импорт с process.type=browser,
+отказ чужому кадру без эффектов и успешные suspend/resume через guard.
+
+Wire response: `{version:1, correlationId:UUIDv4, ok:true, result}` либо
+`{version:1, correlationId:UUIDv4, ok:false, error:{category,code,message}}`.
+Preload снимает transport envelope; существующие domain result, в том числе
+`undefined` и `{ok:false}`, сохраняются. Исключения и отказы transport становятся
+`IpcRemoteError`; повреждённый ответ и reject Electron имеют безопасную
+внутреннюю ошибку. contextBridge переносит Error.message, но не гарантирует
+сохранение нестандартных свойств Error в main world; native oracle использует
+каноническое сообщение, unit oracle проверяет code/category/correlationId
+в preload realm. Сквозная domain correlation AT-00-005 ещё не реализована.
+
+| category | Стабильный code | Условие transport |
+| --- | --- | --- |
+| validation | IPC_VALIDATION_ERROR | Отказ схемы/лимитов либо typed validation fault |
+| permission | IPC_PERMISSION_DENIED | Чужой sender/frame/origin, EACCES, EPERM |
+| network | IPC_NETWORK_ERROR | ECONNRESET/ECONNREFUSED/ENOTFOUND/EAI_AGAIN/ENETUNREACH/EHOSTUNREACH |
+| conflict | IPC_STATE_CONFLICT | Явный IpcFault(conflict) |
+| internal | IPC_INTERNAL_ERROR | Неизвестное исключение/некорректный transport |
+| cancelled | IPC_CANCELLED | AbortError либо typed fault |
+| timeout | IPC_TIMEOUT | ETIMEDOUT либо typed fault |
+
+Сообщения заданы константами в `ipc-result.ts`; произвольный текст исключения
+не сериализуется. Даже бросающий getter code/name остаётся внутри safe envelope.
+Bounded guard audit metadata использует обратимое `ipc_` + UUID без дефисов:
+все 128 бит сохранены и однозначно соответствуют envelope correlationId.
+Голый UUID redactor справедливо скрывает как потенциальный credential;
+политика редактирования секретов не ослаблена. `ipcAuditLog.test.ts` проверяет
+настоящую guard, настоящий logger/redactor и файл app.log, включая positive
+control скрытия голого UUID. Это закрывает Revix issue 4306608229.
+
+Canonical сообщения имеют en/ru варианты. Preload выбирает исходный язык
+из navigator так же, как renderer i18n, затем учитывает persisted get-locale,
+успешный set-locale и межоконное событие locale-changed. Текст main exception
+при этом по-прежнему не используется. Unit и native smoke подтверждают
+English/Russian без зависимости от языка Windows. Это ответ на 4306608232.
+Suggestion 4306608234 учтён сужением документации и комментария реестра:
+bounded legacy object не объявлен полной field schema; остаток явный.
+
+`ipcContractAcceptance.test.ts` проводит все 157 channels через production guard:
+допустимые wire args, неверный тип каждого аргумента, лишний аргумент, чужой
+кадр и все семь исключений. Feature listeners в этой матрице заменены на
+контролируемые эффекты; это не исполнение 157 настоящих подсистем.
+Plain-object inputs legacy API ограничены по размеру/форме, но не все имеют
+глубокую field schema. Старые domain-result ошибки пока не переведены
+в новую taxonomy. Поэтому AT-00-001/004 и WP-0 целиком не объявлены PASS.
+
+Native Electron 44.4.3: `node scripts/test-electron-runtime.mjs` — exit 0,
+production preload/contextBridge, reload, loopback dev parity, unknown sender,
+navigation rejection, native safeStorage. `node scripts/test-wp1-native.mjs --ipc-only`
+— exit 0, настоящий hostile subframe с нулём effects и production CSP.
+Режим явно ограничен IPC/CSP, не выполняет ACL/ZIP/clipboard или OS matrix.
+Исправлена сборка native fixture: koffi остаётся external native dependency.
+Полные команды DoD и результаты записаны в progress.md.

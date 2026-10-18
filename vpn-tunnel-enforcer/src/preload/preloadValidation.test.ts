@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { ipcRenderer } from 'electron'
 
 const exposed = vi.hoisted(() => ({ api: null as any }))
 const invokeMock = vi.hoisted(() => vi.fn())
@@ -25,8 +26,57 @@ async function loadApi() {
 
 describe('preload IPC argument validation', () => {
   beforeEach(() => {
+    vi.stubGlobal('navigator', { language: 'en-US' })
     invokeMock.mockReset()
-    invokeMock.mockResolvedValue(undefined)
+    invokeMock.mockResolvedValue({ version: 1, correlationId: '00000000-0000-4000-8000-000000000000', ok: true, result: undefined })
+  })
+  afterEach(() => vi.unstubAllGlobals())
+
+  // AT-00-001/004: transport envelopes must not change public domain results.
+  it.each([undefined, { running: false }, { ok: false, error: 'domain result' }])('decodes successful transport result %j', async result => {
+    const api = await loadApi()
+    invokeMock.mockResolvedValue({ version: 1, correlationId: '00000000-0000-4000-8000-000000000000', ok: true, result })
+    await expect(api.getTunStatus()).resolves.toEqual(result)
+  })
+
+  it('returns a canonical remote error with correlation and no exception text', async () => {
+    const api = await loadApi()
+    invokeMock.mockResolvedValue({ version: 1, correlationId: '00000000-0000-4000-8000-000000000000', ok: false,
+      error: { category: 'permission', code: 'unknown', message: 'raw-secret at C:\\private\\file' } })
+    await expect(api.getTunStatus()).rejects.toMatchObject({ name: 'IpcRemoteError', category: 'permission',
+      code: 'IPC_PERMISSION_DENIED', message: 'Permission denied', correlationId: '00000000-0000-4000-8000-000000000000' })
+  })
+
+  it('sanitizes malformed responses and rejected Electron transports', async () => {
+    const api = await loadApi()
+    invokeMock.mockResolvedValueOnce({ raw: 'raw-secret at C:\\private\\file' })
+    invokeMock.mockRejectedValueOnce(new Error('raw-secret at C:\\private\\file'))
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await expect(api.getTunStatus()).rejects.toMatchObject({ category: 'internal', code: 'IPC_INTERNAL_ERROR', message: 'Operation failed' })
+    }
+  })
+
+  it.each(['en', 'ru'])('uses persisted %s for canonical errors without trusting main error text', async locale => {
+    const api = await loadApi()
+    invokeMock.mockResolvedValueOnce({ version: 1, correlationId: '00000000-0000-4000-8000-000000000000', ok: true, result: locale })
+    await api.i18nGetLocale()
+    invokeMock.mockResolvedValueOnce({ version: 1, correlationId: '00000000-0000-4000-8000-000000000000', ok: false, error: { category: 'permission', message: 'raw-secret' } })
+    await expect(api.getTunStatus()).rejects.toMatchObject({ code: 'IPC_PERMISSION_DENIED',
+      message: locale === 'en' ? 'Permission denied' : 'Недостаточно прав для операции' })
+  })
+
+  it('updates error language after a successful setting change and cross-window event', async () => {
+    const api = await loadApi()
+    await api.i18nSetLocale('ru')
+    invokeMock.mockRejectedValueOnce(new Error('raw-secret'))
+    await expect(api.getTunStatus()).rejects.toMatchObject({ message: 'Не удалось выполнить операцию' })
+    const callback = vi.fn()
+    api.onI18nLocaleChanged(callback)
+    const handler = [...vi.mocked(ipcRenderer.on).mock.calls].reverse().find(call => call[0] === 'i18n:locale-changed')![1]
+    handler({} as never, 'en')
+    invokeMock.mockRejectedValueOnce(new Error('raw-secret'))
+    await expect(api.getTunStatus()).rejects.toMatchObject({ message: 'Operation failed' })
+    expect(callback).toHaveBeenCalledWith('en')
   })
 
   it('rejects oversized VPN inspection input before ipcRenderer.invoke', async () => {

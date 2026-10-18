@@ -23,14 +23,14 @@ describe('guarded handler acceptance', () => {
   it('rejects foreign/missing/navigated frames before effects and audits a bounded source', async () => {
     installTrustedIpcBoundary()
     const effects = vi.fn(); const { ipcMain } = await import('electron')
-    ipcMain.handle('acceptance:side-effect', effects)
+    ipcMain.handle('get-settings', effects)
     const event = owner()
     for (const bad of [{ ...event, senderFrame: null }, { ...event, senderFrame: { url } },
       { ...event, sender: { ...event.sender } }]) {
-      await expect(state.handlers.get('acceptance:side-effect')!(bad)).rejects.toThrow('Rejected IPC')
+      await expect(state.handlers.get('get-settings')!(bad)).resolves.toMatchObject({ ok: false, error: { category: 'permission' } })
     }
     event.sender.mainFrame.url = 'https://evil.test/FAKE-SECRET'
-    await expect(state.handlers.get('acceptance:side-effect')!(event)).rejects.toThrow('Rejected IPC')
+    await expect(state.handlers.get('get-settings')!(event)).resolves.toMatchObject({ ok: false, error: { category: 'permission' } })
     expect(effects).not.toHaveBeenCalled()
     expect(logEvent).toHaveBeenCalledWith('warn', 'ipc-security', 'IPC request rejected', expect.objectContaining({
       correlationId: expect.any(String), senderId: 17, status: 'error'
@@ -70,8 +70,9 @@ describe('guarded handler acceptance', () => {
       const channelHistogram = new Uint32Array(52)
       for (let iteration = 0; iteration < budget; iteration++) {
         const started = performance.now()
-        try { await handler(event, { [`field_${iteration}`]: bad[iteration % bad.length], sequence: iteration }); throw new Error('Invalid payload accepted') }
-        catch (error) { if (!(error instanceof IpcValidationError)) throw error; rejected++ }
+        const response = await handler(event, { [`field_${iteration}`]: bad[iteration % bad.length], sequence: iteration })
+        expect(response).toMatchObject({ ok: false, error: { category: 'validation' } })
+        rejected++
         const bucket = Math.min(51, Math.ceil(performance.now() - started))
         histogram[bucket]++; channelHistogram[bucket]++; timedCases++
         vi.mocked(logEvent).mockClear()

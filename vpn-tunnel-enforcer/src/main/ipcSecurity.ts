@@ -3,6 +3,8 @@ import * as electron from 'electron'
 import { logEvent } from './appLogger'
 import { randomUUID } from 'crypto'
 import { IpcValidationError } from './ipcValidation'
+import { assertIpcRequest, isIpcChannel } from '../shared/ipc-contract'
+import { IPC_VERSION, classifyIpcError, ipcError, type IpcResult } from '../shared/ipc-result'
 export { IpcValidationError } from './ipcValidation'
 
 const PATCH_MARK = Symbol.for('vpnte.ipc.trusted-boundary.installed')
@@ -132,22 +134,36 @@ export function installTrustedIpcBoundary(): void {
 
   const originalHandle = ipcMain.handle.bind(ipcMain)
   ipcMain.handle = ((channel: string, listener: Parameters<typeof ipcMain.handle>[1]) => {
-    return originalHandle(channel, async (event, ...args) => {
+    if (!isIpcChannel(channel)) throw new IpcValidationError(`Unregistered IPC channel: ${channel}`)
+    return originalHandle(channel, async (event, ...args): Promise<IpcResult<unknown>> => {
+      const correlationId = randomUUID()
+      // A bare UUID is a credential-shaped value to the logger redactor.
+      // This reversible opaque form preserves all 128 bits without weakening it.
+      const auditCorrelationId = `ipc_${correlationId.replaceAll('-', '')}`
+      let trusted = false
       try {
         assertTrustedIpcSender(event)
+        trusted = true
         assertSafeIpcPayload(args)
+        assertIpcRequest(channel, args)
       } catch (error) {
         // Never log rejected payloads, frame URLs, or exception text supplied
         // by the caller: the source can include credentials and huge strings.
         logEvent('warn', 'ipc-security', 'IPC request rejected', {
-          channel, correlationId: `ipc_${randomUUID().replaceAll('-', '')}`, status: 'error',
+          channel, correlationId: auditCorrelationId, status: 'error',
           senderId: event.sender?.id ?? null,
           mainFrame: Boolean(event.senderFrame && event.senderFrame === event.sender?.mainFrame),
           reason: error instanceof IpcValidationError ? 'invalid-payload' : 'untrusted-sender'
         })
-        throw error
+        return { version: IPC_VERSION, correlationId, ok: false, error: ipcError(trusted ? 'validation' : 'permission') }
       }
-      return listener(event, ...args)
+      try {
+        return { version: IPC_VERSION, correlationId, ok: true, result: await listener(event, ...args) }
+      } catch (error) {
+        const category = classifyIpcError(error)
+        logEvent('error', 'ipc-security', 'IPC request failed', { channel, correlationId: auditCorrelationId, status: 'error', reason: category })
+        return { version: IPC_VERSION, correlationId, ok: false, error: ipcError(category) }
+      }
     })
   }) as typeof ipcMain.handle
 
