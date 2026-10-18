@@ -2238,3 +2238,31 @@ CI/review нового SHA проверяются отдельно после pu
   (.tmp/wp0-renderer-review-full.log). Coverage — AC 927/927, F 210/210,
   exit 0; `git diff --check` — exit 0. Свежий exact-head CI/review после
   push ещё обязателен до merge; WP-0 остаётся в работе.
+
+## 18.10.2026 — PR #50 слит; продолжение WP-0
+
+- PR https://github.com/newnout6-a11y/vpn/pull/50 слит, merge
+  784d0aef6b15b2f1dd74d382206a79adc82abd16. Проверенный head
+  527662e59581fa7507b5ea7db5f99a29b22fbcc5; `git diff 527662e vpn/main
+  --exit-code` — 0, merge сохранил проверенное дерево.
+- Fresh exact-head CI run 39120778884: Windows 117655775050, Rust
+  117655774936, сайт 117655775135 — success. Windows: 3730 passed /
+  4 skipped / 0 failed, 245 файлов passed / 1 skipped, 148.41 s.
+  Typecheck/157-channel checker, AC 927/927 и F 210/210 — exit 0;
+  новый production build/contextBridge/CSP step — success, оба native
+  PASS markers. WFP aborted:true; native Electron probe 1 passed /
+  1 skipped. Полный Windows лог .tmp/wp0-renderer-final-ci.log.
+- Fresh Revix check 117655785807 — completed/neutral, Low risk,
+  1 minor nitpick. Реальное suggestion 4306715099 исправлено в 527662e,
+  ответ 4306729531. Оставшийся nitpick 4306715102 уже удовлетворён
+  import node:assert/strict (ответ 4306721060); review thread переиспользован,
+  новый review id не выдумывается. Новый check проверен на exact head.
+- Следующая ветка codex/wp0-ipc-object-schemas от vpn/main. Продолжение
+  AT-00-001: глубокие схемы object inputs и типы публичного API для
+  расписания/ротации/DNS/правил/предпочтений/темы/фильтров истории.
+  Семантика clamp/defaults и прежние поддержанные поля сохраняются;
+  feature validators остаются последним semantic oracle.
+- WP-0 в работе; миграция оставшихся legacy domain failures/any, интеграция
+  coordinator/FSM, cancellation/deadline, migration registry, correlation,
+  event history и flags/races/UI не объявлены выполненными. WP-2 ещё
+  не начат. Нормативные docs/ не менялись; цель остаётся active.
