@@ -1970,3 +1970,35 @@ CI/review нового SHA проверяются отдельно после pu
   `npm.cmd run build` (включая typecheck) — exit 0;
   `.tmp/wp0-history-build.log`. Coverage — AC 927/927, F 210/210, exit 0;
   `git diff --check` и staged diff check — exit 0.
+
+## 18.10.2026 — WP-0 PR #48: проверка Revix Low risk
+
+- PR https://github.com/newnout6-a11y/vpn/pull/48 создан на head
+  `2a672792868053b52f76155db6bce742da2aa9c5`, оба адресных исправления
+  закоммичены и запушены. Revix check 117639398277 — completed/neutral,
+  Low risk: suggestion 4306503597 и question 4306503603.
+- Question об исключении addEntry проверен по настоящим call sites:
+  index.ts writeSessionEntry оборачивает addEntry в try/catch и логирует
+  предупреждение; recordStartFailure тоже catches. Ошибка истории не выходит
+  из этих границ и не обрывает teardown. Код остановки менять не требуется.
+- Suggestion подтверждён: unknown outcome из нового приложения нельзя
+  уничтожать при следующей записи старым reader. Теперь отбракованные
+  элементы сохраняются в rejectedConnectionHistory внутри того же store;
+  не возвращаются как валидные записи и не попадают в log payload.
+  Повторные записи не дублируют их; явная пользовательская очистка удаляет
+  и обычную, и отбракованную историю. Добавлены файловые регрессии.
+- Runtime SESSION_OUTCOME_KINDS стал общим источником union-типа и проверки
+  истории; дублирующий ручной список удалён. Каждое значение общего списка
+  проходит write/reload regression. Полные проверки нового head — ниже.
+
+- Финальные проверки доработки Revix: `npm.cmd run typecheck` — exit 0;
+  `npm.cmd test -- src/main/connectionHistoryStorage.test.ts src/main/connectionHistory.test.ts src/main/sessionOutcome.test.ts src/main/auditFixesRegression.test.ts`
+  — 104 passed, 4 файла, 1.27 s, exit 0. Полный `npm.cmd test` —
+  3366 passed / 5 skipped / 0 failed, 238 файлов passed / 2 skipped,
+  154.57 s, exit 0; `.tmp/wp0-review-full.log`. `npm.cmd run build`
+  (включая typecheck) — exit 0, `.tmp/wp0-review-build.log`.
+  Coverage — AC 927/927, F 210/210, exit 0; diff checks — exit 0.
+- Исходный PR head 2a67279 завершил все три CI success (run 39115166050).
+  После доработки требуется новый head CI/review; результаты не переносятся.
+  Далее в том же WP-0 — разрешение wrapper-регистраций IPC и AT-00-001,
+  затем остальные незавершённые строки матрицы. WP-2 не начат.

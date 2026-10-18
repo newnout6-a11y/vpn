@@ -18,6 +18,7 @@ import { ipcMain } from 'electron'
 import Store from 'electron-store'
 import { createHash, randomUUID } from 'crypto'
 import type { ConnectionLogEntry } from '../shared/ipc-types'
+import { SESSION_OUTCOME_KINDS } from '../shared/ipc-types'
 import { logEvent } from './appLogger'
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -54,6 +55,8 @@ export interface AggregatedStats {
 
 interface ConnectionHistoryStoreSchema {
   connectionHistory: ConnectionLogEntry[]
+  /** Preserved for a newer reader or manual recovery; never rendered as valid entries. */
+  rejectedConnectionHistory?: unknown[]
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -62,11 +65,7 @@ const isText = (value: unknown): value is string => typeof value === 'string'
 const isNumber = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value)
 const isNonNegative = (value: unknown): value is number => isNumber(value) && value >= 0
 const optional = (value: unknown, check: (value: unknown) => boolean) => value == null || check(value)
-const outcomeKinds = new Set([
-  'user-stop', 'app-quit', 'server-switch', 'rotation', 'schedule', 'proxy-unreachable',
-  'server-rejected-key', 'server-down', 'singbox-crash', 'killswitch', 'tun-setup-failed',
-  'network-lost', 'system-sleep', 'start-failed', 'unknown'
-])
+const outcomeKinds = new Set<string>(SESSION_OUTCOME_KINDS)
 
 function validEntry(value: unknown): value is ConnectionLogEntry {
   if (!isRecord(value) || !isText(value.id) || !isText(value.profileId) || !isText(value.profileName)
@@ -110,13 +109,23 @@ function deserializeHistory(raw: string): ConnectionHistoryStoreSchema {
     corrupted(raw, 'invalid-schema')
     return { connectionHistory: [] }
   }
-  const entries = parsed.connectionHistory.filter(validEntry)
-  const rejected = parsed.connectionHistory.length - entries.length
-  if (rejected) corrupted(raw, 'invalid-schema', rejected)
+  const entries: ConnectionLogEntry[] = []
+  const rejected: unknown[] = []
+  for (const entry of parsed.connectionHistory) {
+    if (validEntry(entry)) entries.push(entry)
+    else rejected.push(entry)
+  }
+  if (rejected.length) corrupted(raw, 'invalid-schema', rejected.length)
   else corruptFingerprint = undefined
   // Conf atomically saves this repaired view on the next write; never log raw
   // corrupt data, which can include credentials or personal profile names.
-  return { ...parsed, connectionHistory: entries }
+  return {
+    ...parsed, connectionHistory: entries,
+    rejectedConnectionHistory: [
+      ...(Array.isArray(parsed.rejectedConnectionHistory) ? parsed.rejectedConnectionHistory : []),
+      ...rejected
+    ]
+  }
 }
 
 const historyStore = new Store<ConnectionHistoryStoreSchema>({
@@ -326,7 +335,7 @@ function addEntry(entry: Omit<ConnectionLogEntry, 'id'>): ConnectionLogEntry {
 }
 
 function clearHistory(): void {
-  historyStore.set('connectionHistory', [])
+  historyStore.set({ connectionHistory: [], rejectedConnectionHistory: [] })
   corruptFingerprint = undefined
 }
 

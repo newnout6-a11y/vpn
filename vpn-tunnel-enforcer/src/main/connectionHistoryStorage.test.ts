@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import type { ConnectionLogEntry } from '../shared/ipc-types'
+import { SESSION_OUTCOME_KINDS } from '../shared/ipc-types'
 
 const state = vi.hoisted(() => ({ dir: '', logEvent: vi.fn() }))
 vi.mock('electron', () => ({ ipcMain: { handle: vi.fn() } }))
@@ -40,6 +41,13 @@ afterEach(async () => {
 })
 
 describe('connection history persistence (AT-00-010; F-143)', () => {
+  it.each(SESSION_OUTCOME_KINDS)('roundtrips shared outcome kind %s', async kind => {
+    const service = await reload()
+    const written = service.addEntry({ ...entry, outcome: { kind, headline: kind } })
+    expect((await reload()).getEntries()).toEqual([written])
+    expect(corruptionEvents()).toEqual([])
+  })
+
   it('preserves 100 events and legacy optional fields across reload', async () => {
     const service = await reload()
     const written = Array.from({ length: 100 }, () => service.addEntry(entry))
@@ -83,6 +91,21 @@ describe('connection history persistence (AT-00-010; F-143)', () => {
     expect(JSON.stringify(state.logEvent.mock.calls)).not.toContain('must-not-log')
     const next = restarted.addEntry(entry)
     expect((await reload()).getEntries()).toEqual([good, next])
+    expect(JSON.parse(await readFile(file(), 'utf8')).rejectedConnectionHistory).toEqual(bad)
+    restarted.addEntry(entry)
+    expect(JSON.parse(await readFile(file(), 'utf8')).rejectedConnectionHistory).toEqual(bad)
+    restarted.clearHistory()
+    expect(JSON.parse(await readFile(file(), 'utf8')).rejectedConnectionHistory).toEqual([])
+  })
+
+  it('preserves an outcome from a newer build when appending valid history', async () => {
+    const service = await reload()
+    const good = service.addEntry(entry)
+    const future = { ...good, outcome: { kind: 'future-outcome', headline: 'Newer version', futureEvidence: { version: 2 } } }
+    await writeFile(file(), JSON.stringify({ connectionHistory: [good, future] }))
+    expect((await reload()).getEntries()).toEqual([good])
+    service.addEntry(entry)
+    expect(JSON.parse(await readFile(file(), 'utf8')).rejectedConnectionHistory).toEqual([future])
   })
 
   it.each([null, [], 'secret-value', { connectionHistory: {} }])('reports an invalid root instead of silently dropping history: %j', async value => {

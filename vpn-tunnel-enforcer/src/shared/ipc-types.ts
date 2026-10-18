@@ -877,25 +877,27 @@ export interface WidgetLayout {
  * `disconnectReason`, which stays as a coarse 5-bucket field for the filter
  * UI and CSV compatibility (see `outcomeKindToDisconnectReason`).
  */
-export type SessionOutcomeKind =
+export const SESSION_OUTCOME_KINDS = [
   // intentional
-  | 'user-stop' // the user pressed "Отключить"
-  | 'app-quit' // the app was closed
-  | 'server-switch' // the user switched to another server (session continued on it)
-  | 'rotation' // auto-rotation moved to the next profile
-  | 'schedule' // a schedule window ended
+  'user-stop', // the user pressed "Отключить"
+  'app-quit', // the app was closed
+  'server-switch', // the user switched to another server (session continued on it)
+  'rotation', // auto-rotation moved to the next profile
+  'schedule', // a schedule window ended
   // node / connectivity problem
-  | 'proxy-unreachable' // the upstream proxy/server stopped answering (watchdog)
-  | 'server-rejected-key' // REALITY/TLS handshake refused — key / SNI / cert mismatch
-  | 'server-down' // connection refused / timeout to the node
-  | 'singbox-crash' // the tunnel process exited unexpectedly
-  | 'killswitch' // kill-switch engaged and is holding traffic
-  | 'tun-setup-failed' // Wintun / routes / DNS bring-up failed
-  | 'network-lost' // the physical network dropped or changed under the tunnel
-  | 'system-sleep' // the machine suspended
+  'proxy-unreachable', // the upstream proxy/server stopped answering (watchdog)
+  'server-rejected-key', // REALITY/TLS handshake refused — key / SNI / cert mismatch
+  'server-down', // connection refused / timeout to the node
+  'singbox-crash', // the tunnel process exited unexpectedly
+  'killswitch', // kill-switch engaged and is holding traffic
+  'tun-setup-failed', // Wintun / routes / DNS bring-up failed
+  'network-lost', // the physical network dropped or changed under the tunnel
+  'system-sleep', // the machine suspended
   // never came up
-  | 'start-failed'
-  | 'unknown'
+  'start-failed',
+  'unknown'
+] as const
+export type SessionOutcomeKind = typeof SESSION_OUTCOME_KINDS[number]
 
 /** Machine-readable evidence backing a {@link SessionOutcome}. All optional. */
 export interface SessionOutcomeEvidence {
