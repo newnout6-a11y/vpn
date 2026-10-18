@@ -1147,6 +1147,7 @@ async function startSoftProtectionEffects(owner: ConnectionStartupOwner, proxyAd
       try {
         if (previous.proxyAddr && previous.proxyType) retained = await owner.wait(autoconfig.isEnvProxyConfigured(previous.proxyAddr, previous.proxyType))
       } catch { owner.assertActive() } // Read failure is uncertainty; cancellation must not write late history.
+      if (retained) retained = tunnelState.confirmRetainedSoft(owner.operation.operationId).success
       if (!retained) {
         closeSession(makeOutcome('unknown', {}, 'Не удалось подтвердить прежние настройки Soft после ошибки обновления'))
         softProtectionApplied = false

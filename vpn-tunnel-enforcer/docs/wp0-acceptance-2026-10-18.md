@@ -818,6 +818,9 @@ Failed refresh сохраняет предыдущую live-сессию тол�
 четырёх переменных реестра и process env для прежнего endpoint. Несовпадение
 или ошибка чтения закрывает её с confidence=indeterminate, переводит FSM в
 unknown и сохраняет cleanup obligation. Попытка записывается отдельно.
+При подтверждённом прежнем endpoint неуспешная операция остаётся error, но
+FSM и renderer сохраняют connected/soft. Это отдельное подтверждение текущего
+refresh, не переносимое на следующую операцию, fault или отмену.
 Отмена/late completion не открывают сессию. Native status/restart callbacks
 не подменяют историю env-only маршрута.
 

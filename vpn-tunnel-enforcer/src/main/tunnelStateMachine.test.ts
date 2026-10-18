@@ -15,6 +15,68 @@ function harness() {
 }
 
 describe('canonical tunnel state', () => {
+  it('keeps confirmed Soft protection while reporting a failed refresh, and requires fresh evidence next time (AT-00-002/008)', async () => {
+    const h = harness()
+    await h.lane.start(async () => { h.evidence.softApplied = true; return { success: true } })
+    expect(await h.lane.start(async owner => {
+      expect(h.model.confirmRetainedSoft(owner.operation.operationId)).toEqual({ success: true })
+      return { success: false, error: 'refresh failed' }
+    }, { refreshSoft: true })).toMatchObject({ success: false })
+    expect(h.model.snapshot).toMatchObject({ state: 'connected', mode: 'soft', transition: null, operation: { status: 'error' } })
+    await h.lane.start(async () => ({ success: false }), { refreshSoft: true })
+    expect(h.model.snapshot.state).toBe('error')
+  })
+
+  it.each(['initial', 'native', 'stale', 'fault', 'lost-env', 'internal'] as const)('does not invent retained Soft protection for %s (AT-00-002)', async failure => {
+    const h = harness()
+    if (failure === 'native') {
+      await h.connect()
+      const before = h.model.snapshot
+      expect(h.model.confirmRetainedSoft(before.operation!.operationId)).toMatchObject({ success: false })
+      expect(h.model.snapshot).toEqual(before)
+      return
+    }
+    else if (failure !== 'initial') await h.lane.start(async () => { h.evidence.softApplied = true; return { success: true } })
+    const refresh = h.lane.start(async owner => {
+      if (failure === 'fault') h.model.fault('unknown')
+      if (failure === 'lost-env') h.evidence.softApplied = false
+      const id = failure === 'stale' ? 'previous-operation' : owner.operation.operationId
+      const before = h.model.snapshot
+      const result = h.model.confirmRetainedSoft(id)
+      if (failure === 'internal') {
+        expect(result.success).toBe(true)
+        throw new Error('later internal error')
+      }
+      expect(result).toMatchObject({ success: false, code: 'FSM_INVALID_TRANSITION' })
+      expect(h.model.snapshot).toEqual(before)
+      return { success: false }
+    }, { refreshSoft: true })
+    if (failure === 'internal') await expect(refresh).rejects.toThrow('later internal error')
+    else await refresh
+    expect(h.model.snapshot.state).not.toBe('connected')
+  })
+
+  it.each(['native', 'fault', 'cancel'] as const)('invalidates confirmed Soft retention on later %s (AT-00-002/003)', async failure => {
+    const h = harness()
+    await h.lane.start(async () => { h.evidence.softApplied = true; return { success: true } })
+    let id = ''
+    const refresh = h.lane.start(async owner => {
+      id = owner.operation.operationId
+      expect(h.model.confirmRetainedSoft(id).success).toBe(true)
+      if (failure === 'native') { h.evidence.running = true; h.evidence.pid = 123 }
+      else if (failure === 'fault') h.model.fault('unknown')
+      else await new Promise<void>(resolve => owner.signal.addEventListener('abort', () => resolve(), { once: true }))
+      return { success: false }
+    }, { refreshSoft: true })
+    const stop = failure === 'cancel' ? h.lane.stop(h.cleanup) : null
+    await refresh
+    if (stop) await stop
+    expect(h.model.snapshot.state).not.toBe('connected')
+    const before = h.model.snapshot
+    expect(h.model.confirmRetainedSoft(id)).toMatchObject({ success: false })
+    expect(h.model.snapshot).toEqual(before)
+  })
+
   it('keeps native running separate from connected until every main effect finishes', async () => {
     const h = harness()
     let release!: () => void

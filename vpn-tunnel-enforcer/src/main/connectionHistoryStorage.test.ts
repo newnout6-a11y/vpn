@@ -184,6 +184,7 @@ describe('connection history persistence (AT-00-010; F-143)', () => {
     expect(await withCorrelation(failure, () => tracking.soft.start('127.0.0.1:10808', 'socks5'))).toMatchObject({ success: false })
     expect(service.getEntries()).toMatchObject([{ correlationId: failure, outcome: { kind: 'start-failed' } }])
     expect(tracking.autoconfig.isEnvProxyConfigured).toHaveBeenCalledWith('127.0.0.1:8080', 'http')
+    expect(tracking.snapshot()).toMatchObject({ state: 'connected', mode: 'soft', transition: null, operation: { status: 'error' } })
     await tracking.soft.stop()
     expect((await reload()).getEntries().map(entry => [entry.correlationId, entry.outcome?.kind])).toEqual([
       [failure, 'start-failed'], [original, 'user-stop']

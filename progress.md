@@ -3678,3 +3678,32 @@ CI/review нового SHA проверяются отдельно после pu
   (.tmp/wp0-soft-qodo66-electron.log); `node scripts/test-wp1-native.mjs --ipc-only`
   — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-soft-qodo66-csp.log).
   Проверки прежнего head не используются как evidence исправленного коммита.
+
+### Qodo #66 — неуспех refresh отдельно от состояния прежней защиты
+
+- Qodo 1542154 completed на ffdf0816381ca7a576321ccb2f92fe006b6e494d:
+  три прежних findings implemented; новый c6d41002-0c06-4eaf-a886-778c2f1ce12c
+  action_required подтверждён. При доказанном старом endpoint history оставалась,
+  но failed operation переводила FSM в error и настоящий renderer ставил mode=off.
+- FSM принимает отдельное подтверждение сохранённого Soft endpoint только
+  для текущей connecting operation поверх прежнего connected/soft. Failed
+  refresh остаётся operation.status=error / result.success=false; состояние
+  защиты остаётся connected/soft. Подтверждение не переносится на следующую
+  операцию и не переживает fault, cancel, stale ID, потерю env или native PID.
+  Internal exception после read-back не маскируется сохранённой защитой.
+- Regression до fix `npm.cmd test -- src/main/connectionHistoryStorage.test.ts`
+  — **1 failed / 101 passed**, 3.87 s, exit 1
+  (.tmp/wp0-soft-qodo66-retained-before.log): фактический snapshot был error/null.
+- `npm.cmd test -- src/main/connectionHistoryStorage.test.ts src/main/tunnelStateMachine.test.ts src/renderer/App.lifecycle.test.ts src/main/lifecycleCleanup.test.ts src/main/connectionOperations.test.ts src/main/actionCorrelationScope.test.ts`
+  — **340 passed / 6 files**, 24.96 s, exit 0
+  (.tmp/wp0-soft-qodo66-retained-focused-final.log). Actual main + Conf history,
+  production FSM/lane и настоящий App callback с Zustand. OS effects заменены.
+- `npm.cmd run typecheck` — exit 0, 158 channels / 0 public any
+  (.tmp/wp0-soft-qodo66-retained-typecheck.log); `git diff --check` — exit 0.
+- Полный `npm.cmd test` — **4205 passed / 5 skipped / 0 failed**,
+  264 files passed / 2 skipped, 155.70 s, exit 0
+  (.tmp/wp0-soft-qodo66-retained-full.log). Coverage AC 927/927, F 210/210 — exit 0.
+- `npm.cmd run build` — exit 0 (.tmp/wp0-soft-qodo66-retained-build.log);
+  `node scripts/test-electron-runtime.mjs` — ELECTRON_SMOKE_PASS, exit 0
+  (.tmp/wp0-soft-qodo66-retained-electron.log); `node scripts/test-wp1-native.mjs --ipc-only`
+  — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-soft-qodo66-retained-csp.log).
