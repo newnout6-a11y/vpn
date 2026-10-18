@@ -2378,3 +2378,32 @@ CI/review нового SHA проверяются отдельно после pu
   244 файлов passed / 2 skipped, 136.14 s, exit 0
   (.tmp/wp0-settings-schema-final-full.log). Итоговый production behavior
   после build/native checks не менялся; требуется exact-head CI/review PR.
+
+## 18.10.2026 — PR #52 слит; типы ответов IPC
+
+- PR https://github.com/newnout6-a11y/vpn/pull/52 слит, merge
+  f3b953f2f8340d1c11589c64045b158e06bf0e22; проверенный head
+  d0a2be9ee9d25bc9e22b643fc2fd53a7b04e59f0. `git diff d0a2be9 vpn/main
+  --exit-code` — 0: merge сохранил проверенное дерево.
+- Exact-head CI 39123146766: Windows 117662700166, Rust 117662700001
+  и сайт 117662700174 — success. Windows: 3809 passed / 4 skipped /
+  0 failed, 245 файлов passed / 1 skipped, 251.14 s. Typecheck/checker
+  157 channels и coverage AC 927/927, F 210/210 — exit 0. Native IPC/CSP
+  markers PASS; WFP aborted:true; Electron native probe 1 passed / 1 skipped.
+  Лог .tmp/wp0-settings-schema-final-ci.log. Локальный full перед PR:
+  3808 passed / 5 skipped / 0 failed; код после него не менялся.
+- Revix 117662716829 — completed/neutral, Low risk. Question 4306835706
+  проверен на неизменённых production guard/schema: `node
+  .tmp/wp0-aggregate-review.cjs` — exit 0. Каждый из двух profiles с
+  10000 outbound values принимается отдельно; общий request 40143 bytes
+  проходит channel schema, но assertSafeIpcPayload(args) отклоняет его
+  общим node budget до listener. Installed boundary: validation, 0 effects.
+  Счётчик один на args целиком; helper outbound действительно имеет свой
+  локальный бюджет. Ответ 4306847958, production patch не нужен.
+- Новая ветка codex/wp0-diagnostic-results от проверенного vpn/main.
+  Следующий участок AT-00-001: legacy any в результатах диагностики,
+  main/shared/renderer type parity и автоматическая проверка результатов.
+  Инвентаризация всех 157 listeners нашла 51 канал с явным any в public
+  result, ещё 4 расхождения literal widening. Это не завершение WP-0:
+  domain failures, FSM/coordinator, cancellation/deadline, migrations,
+  correlation/history/flags/races/UI остаются. WP-2 не начат; цель active.
