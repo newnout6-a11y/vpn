@@ -2002,3 +2002,38 @@ CI/review нового SHA проверяются отдельно после pu
   После доработки требуется новый head CI/review; результаты не переносятся.
   Далее в том же WP-0 — разрешение wrapper-регистраций IPC и AT-00-001,
   затем остальные незавершённые строки матрицы. WP-2 не начат.
+
+## 18.10.2026 — PR #48 слит; следующий участок WP-0 — IPC
+
+- PR https://github.com/newnout6-a11y/vpn/pull/48 слит: merge
+  `87b185f6dc48f72e15cfc6f20c61afc6f8efc9ad`. Проверенный head
+  `ad9e0b5f7954f536d8c57c9e7f8b8d9fbe589920`: все три CI success,
+  run 39115674950. Windows 117640852250 — 3367 passed / 4 skipped,
+  239 файлов passed / 1 skipped; typecheck и coverage AC 927/927,
+  F 210/210 зелёные; WFP aborted:true, Electron 1 passed / 1 skipped.
+  Rust 117640852208 и сайт 117640852102 — success.
+  Полный лог `.tmp/wp0-final-ci.log` внутри приложения.
+- Свежий Revix 117640867586 на том же head: completed/neutral, Low risk;
+  review 5562375204. 4306503597 закрыт сохранением rejected records и
+  общим SESSION_OUTCOME_KINDS. 4306503603 проверен: writeSessionEntry
+  и recordStartFailure catches; исключение истории не выходит в teardown.
+- Остаток review — незначительные рекомендации: 4306523719 предлагает
+  общие const arrays и для остальных enum-полей; это учесть при общей
+  модели WP-0, текущие значения совпадают и unknown entries сохраняются.
+  4306523722 предлагает backup повреждённого JSON: AT-00-010 допускает
+  честную отметку history.corrupted без backup; текущая политика явна.
+  4306523723: повторный assert намеренно выполняет второе чтение и вместе
+  с одним событием проверяет dedup. Блокирующих дефектов не установлено.
+- Создана ветка codex/wp0-ipc-contracts от актуального vpn/main.
+  `git diff ad9e0b5 HEAD --exit-code` — 0: merge не изменил проверенное дерево.
+  В локальном DoD последней code-версии: typecheck/build exit 0;
+  полный npm.cmd test 3366 passed / 5 skipped, 154.57 s; coverage exit 0.
+  Этот коммит дописывает только журнал; код после проверки не менялся.
+- Разрешены девять AST wrapper-регистраций handleLogged: фактически
+  158 main invoke handlers против 157 preload invoke channels; missing
+  handlers нет. Единственный unexposed handler — diagnostics:run-leak-check
+  (дублирует run-leak-check); shared имеет 78 деклараций, включая progress
+  notifications. Артефакт `.tmp/wp0-ipc-resolved-inventory.json`.
+  Следующий шаг — точный request/event registry, schemas, typed envelope
+  и контрактный тест вместо string presence. Это не приёмка AT-00-001.
+  WP-0 остаётся в работе, WP-2 не начат; цель не завершена.
