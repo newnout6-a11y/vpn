@@ -8,7 +8,7 @@
 18.10 владелец разрешил продолжать WP-0 при открытом PR #54, сохраняя запрет
 его слияния до отдельного решения. Полного Revix для #54 не было из-за квоты.
 Позднее 18.10 владелец разрешил сливать PR после пройденных проверок.
-#54/#55/#56/#57/#58/#59/#60 слиты в main после exact-head CI success и completed Qodo,
+#54/#55/#56/#57/#58/#59/#60/#61 слиты в main после exact-head CI success и completed Qodo,
 без открытых findings; прежний запрет слияния отменён.
 
 ## Полная область и первоначальная инвентаризация
@@ -19,7 +19,7 @@
 | 00-002 | Production TunnelStateMachine интегрирована в main lane/IPC/Soft/tray/UI; 4096 stable tours и 117649 tours семи событий глубиной 6, включая timeout/cancel и native completion, с fake PID/TUN ledger и балансом operation events; sticky faults и generation fencing | Общая durable operation history/counters; все blocked/unknown/background paths; native Windows resources; общий admission фоновых restart |
 | 00-003 | Main connection lane: UUIDv4, owner, deadline запуска, priority admission; ручные Hard/Direct и Soft из tray, scheduled startup вместе с proxy detection; отмена на 10/50/90% управляемого connect fixture | Общий реестр refresh/speed/import/export/rotation; deadline остановки, интеграция всех entrypoints и полная матрица поздних эффектов |
 | 00-004 | Общая классификация transport; 157 каналов × 7 категорий через guard; native contextBridge сохраняет code/category/correlation в en/ru; typed local validation; 4 настоящих config handlers × 7 категорий, canonical domain failures | Миграция legacy domain-result `{success:false,error}` и semantic matrix настоящих feature handlers; transport fixtures не доказывают её |
-| 00-005 | `appLogger.ts`, `connectionHistory.ts`; новый regression passive rejection dedup | Сквозной correlation id, монотонный порядок, source/owner/route/confidence истории и redaction всех полей |
+| 00-005 | Один action correlation id в guarded IPC response/error, lifecycle connect/stop и JSONL logger; async isolation, native wait/drain, diagnostic read-back с повторной redaction | Подключить durable connection history к контексту; монотонный порядок, source/owner/route/confidence истории и полная матрица событий |
 | 00-006 | Локальные миграции; общий version admission для 20 electron-store файлов / 28 constructors; future-version SHA-256 invariance на real Conf backend до defaults/repair и при записи через ранее открытый handle | Централизованный упорядоченный migration registry, fixtures всех исторических преобразований, остальные persisted JSON, полноценный upgrade/downgrade и межпроцессная координация |
 | 00-007 | Seed 0x5eed003: 200 commands/10 async workers с production lane/FSM, typed losers, парные terminal events, финальный disconnect и 0 fake PID/TUN | Натурный PID-реестр Windows и полная матрица фоновых entrypoints |
 | 00-008 | Dashboard component frames с production FSM/lane; revision fence; Soft через owned IPC; visual fixtures light/dark; native production contextBridge snapshots/disposer | Полная матрица всех операций, тем, размеров и entrypoints; browser fixtures не заменяют native resources |
@@ -687,3 +687,42 @@ Qodo run 1541078 на b979009 подтвердил пробел oracle: если
 операция disconnect. Два mutation fixtures запускают настоящие start/stop,
 удаляя оба события connect либо disconnect: oracle обязан отклонить такой ledger.
 До исправления обе регрессии падали (Missing expected exception).
+
+## AT-00-005 — общий ID действия в IPC, lifecycle и JSONL
+
+До изменения transport возвращал bare UUID, audit писал ipc_<hex>, а lifecycle
+создавал отдельный op_<hex>. Один IPC action теперь получает main-generated
+ipc_<UUIDv4 hex>: ровно эта строка проходит response/error, audit details,
+operation events и top-level correlationId JSONL. AsyncLocalStorage сохраняет
+ID через native waits и late drain; независимые параллельные действия и nested
+scopes изолированы. Standalone lifecycle по-прежнему создаёт op_<UUIDv4 hex>.
+Manual stop имеет ID своего нового действия; timeout recovery сохраняет ID
+прерванного старта. Контекст принимает только canonical main ID, не raw payload.
+
+Shared decoder/serializer поддерживает новые prefixed IDs и прежний UUIDv4
+без изменения wire version. Политика redaction credentials не ослаблена.
+Интеграционный fixture пишет JSONL на настоящий диск и читает его production
+getFullLogs с повторной redaction: ID сохраняется, credential UUID и password
+отсутствуют. Native Electron fixture проверяет production contextBridge для
+всех семи error categories в обеих локалях и context до/после native wait.
+
+До исправления адресная регрессия — 1 failed: IPC и operation IDs различались.
+Точные команды и результаты итоговой проверки записываются в progress.md.
+Durable connection history ещё не включена в этот контекст; source/owner/route/
+confidence и monotonic ordering остаются. Это subset, не PASS всего AT-00-005.
+
+### Qodo #62 — время жизни action context
+
+Qodo 1541356 completed на 11b8acc подтвердил два дефекта: timer расписания
+наследовал ID редактирования и повторно использовал его при re-arm; периодические
+tunnel timers сохраняли ID завершённого connect. Контекст теперь содержит lease,
+который истекает по sync return/throw или settlement исходного Promise. Унаследованный
+store в detached callbacks после этого не выдаёт ID. Identity/rejection Promise
+не меняются. Внутренняя native drain task имеет отдельный lease до фактического
+завершения, поэтому caller cancellation не обрывает нужную корреляцию.
+
+Регрессии используют настоящие Node timers: sync/async success/rejection,
+периодическая tunnel работа, late native drain и production scheduler с тремя
+последовательными connect/stop/connect. Только большие задержки планировщика
+сжаты, fake timers не используются для проверки AsyncLocalStorage inheritance.
+До исправления — 6 failed / 6 passed; после адресный набор — 74 passed.

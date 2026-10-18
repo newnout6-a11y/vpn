@@ -69,7 +69,7 @@ const failures: Array<[IpcErrorCategory, () => unknown]> = [
   ['timeout', () => Object.assign(new Error(raw), { code: 'ETIMEDOUT' })]
 ]
 function expectFailure(response: any, category: IpcErrorCategory) {
-  expect(response).toEqual({ version: IPC_VERSION, correlationId: expect.stringMatching(/^[\da-f-]{36}$/), ok: false, error: ipcError(category) })
+  expect(response).toEqual({ version: IPC_VERSION, correlationId: expect.stringMatching(/^ipc_[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}$/), ok: false, error: ipcError(category) })
   expect(JSON.stringify(response)).not.toMatch(/FAKE-SECRET|\bat |[A-Z]:[\\/]/)
   const errors = vi.mocked(logEvent).mock.calls.filter(([level]) => level === 'error')
   expect(JSON.stringify(errors)).not.toContain('FAKE-SECRET')

@@ -140,7 +140,7 @@ describe('wire contracts on every registered channel (AT-00-001/004; F-138/F-074
     const failure = await handler({ ...event, senderFrame: { url } }, ...args)
     expect(failure).toMatchObject({ ok: false, error: { category: 'permission' } })
     expect(effect).toHaveBeenCalledTimes(1)
-    expect(logEvent).toHaveBeenCalledWith('warn', 'ipc-security', 'IPC request rejected', expect.objectContaining({ correlationId: `ipc_${failure.correlationId.replaceAll('-', '')}` }))
+    expect(logEvent).toHaveBeenCalledWith('warn', 'ipc-security', 'IPC request rejected', expect.objectContaining({ correlationId: failure.correlationId }))
   })
   it.each(channels)('%s sanitizes every error category', async channel => {
     const errors = {
