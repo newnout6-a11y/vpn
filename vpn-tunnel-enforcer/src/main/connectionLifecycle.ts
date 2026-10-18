@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { OPERATION_PRIORITY, type ConnectionOperation, type ConnectionOperationRejection, type OperationOwner } from '../shared/operation'
 import type { TunnelStateMachine } from './tunnelStateMachine'
+import { currentCorrelationId, withCorrelation } from './actionCorrelation'
 
 /** Main startup owns baseline effects as well as the controller startup. */
 export interface ConnectionStartupOwner {
@@ -52,10 +53,12 @@ export class ConnectionLifecycle {
   }
 
   private publish(operation: ConnectionOperation): void {
-    this.lastOperation = operation
-    this.stateMachine?.operationChanged(operation)
-    // An observer is not allowed to strand native ownership or cleanup.
-    try { this.onOperation({ ...operation }) } catch { /* telemetry is best effort */ }
+    withCorrelation(operation.correlationId, () => {
+      this.lastOperation = operation
+      this.stateMachine?.operationChanged(operation)
+      // An observer is not allowed to strand native ownership or cleanup.
+      try { this.onOperation({ ...operation }) } catch { /* telemetry is best effort */ }
+    })
   }
 
   async start<T>(effect: (owner: ConnectionStartupOwner) => Promise<T>, options: StartOptions = {}): Promise<T | ConnectionOperationRejection> {
@@ -82,7 +85,7 @@ export class ConnectionLifecycle {
     const startedAt = Date.now()
     const operationId = randomUUID()
     const startup: Startup = { controller, completion, operation: {
-      version: 1, operationId, correlationId: 'op_' + operationId.replaceAll('-', ''), kind: 'connect', owner: operationOwner,
+      version: 1, operationId, correlationId: currentCorrelationId() ?? 'op_' + operationId.replaceAll('-', ''), kind: 'connect', owner: operationOwner,
       startedAt, deadline: startedAt + timeoutMs, status: 'running'
     } }
     this.startup = startup
@@ -91,7 +94,7 @@ export class ConnectionLifecycle {
       const category = startup.abortCategory ?? 'cancelled'
       return rejection(category, category === 'timeout' ? 'Истекло время запуска защиты' : 'Запуск отменён', startup.operation.operationId)
     }
-    const timer = setTimeout(() => {
+    const timer = setTimeout(() => withCorrelation(startup.operation.correlationId, () => {
       startup.abortCategory = 'timeout'
       startup.operation = { ...startup.operation, status: 'error', category: 'timeout' }
       this.publish(startup.operation)
@@ -101,7 +104,7 @@ export class ConnectionLifecycle {
       controller.abort()
       if (this.cleanupCancelled) void this.stop(this.cleanupCancelled, { owner: 'recovery' }).catch(() => undefined)
       else { try { this.cancelControllerStartup() } catch { /* startup still drains */ } }
-    }, timeoutMs)
+    }), timeoutMs)
     timer.unref?.()
     let onAbort!: () => void
     let failure: { error: unknown } | undefined
@@ -144,7 +147,7 @@ export class ConnectionLifecycle {
     }
     // The caller may leave on abort; this task alone releases the native lease.
     // Promise.race also observes late rejection after the caller has returned.
-    const drained = (async () => {
+    const drained = withCorrelation(startup.operation.correlationId, async () => {
       try {
         assertActive()
         const result = await effect(owner)
@@ -173,7 +176,7 @@ export class ConnectionLifecycle {
         if (this.startup === startup) this.startup = null
         release()
       }
-    })()
+    })
     try { return await Promise.race([drained, cancelled]) }
     finally { controller.signal.removeEventListener('abort', onAbort) }
   }
@@ -189,12 +192,12 @@ export class ConnectionLifecycle {
     const cancellationErrors: unknown[] = []
     const operationId = randomUUID()
     const operation: ConnectionOperation = {
-      version: 1, operationId, correlationId: 'op_' + operationId.replaceAll('-', ''), owner, kind: 'disconnect',
+      version: 1, operationId, correlationId: currentCorrelationId() ?? 'op_' + operationId.replaceAll('-', ''), owner, kind: 'disconnect',
       startedAt: Date.now(), deadline: null, status: 'running'
     }
     const stopped = Promise.resolve().then(async () => {
       if (startup) await startup.completion
-      const result = await effect()
+      const result = await withCorrelation(operation.correlationId, effect)
       if (!failed(result) && this.stateMachine && !this.stateMachine.canConfirmStop()) throw new Error('Runtime cleanup confirmation missing')
       if (cancellationErrors.length) throw cancellationErrors[0]
       this.stopOperation = { ...operation, status: failed(result) ? 'error' : 'success' }

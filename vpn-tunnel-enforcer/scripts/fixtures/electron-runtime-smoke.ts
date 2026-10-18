@@ -11,6 +11,7 @@ import { IPC_ERRORS, IpcFault, ipcError, isIpcRemoteErrorData, type IpcErrorCate
 import type { ServerProfile } from '../../src/shared/ipc-types'
 import { ConnectionLifecycle } from '../../src/main/connectionLifecycle'
 import { TunnelStateMachine } from '../../src/main/tunnelStateMachine'
+import { currentCorrelationId } from '../../src/main/actionCorrelation'
 
 const work = process.env.VPNTE_SMOKE_DIR!
 app.setPath('userData', join(work, 'userData'))
@@ -68,9 +69,12 @@ app.whenReady().then(async () => {
   const began = new Promise<void>(resolve => { startBegan = resolve })
   let startupGate = new Promise<void>(resolve => { finishStartup = resolve })
   ipcMain.handle('start-direct-vpn', () => lane.start(async owner => {
+    assert.equal(owner.operation.correlationId, currentCorrelationId())
+    assert.match(owner.operation.correlationId, /^ipc_[0-9a-f]{32}$/)
     tunnelEvidence.running = true; tunnelEvidence.pid = 123
     tunnel.runtimeChanged('running'); startBegan()
     await owner.wait(startupGate)
+    assert.equal(owner.operation.correlationId, currentCorrelationId())
     return { success: true }
   }))
   let softCalls = 0
@@ -98,7 +102,11 @@ app.whenReady().then(async () => {
   let scheduleCalls = 0
   ipcMain.handle('scheduler:update', () => { scheduleCalls++ })
   let faultCategory: IpcErrorCategory = 'internal'
-  ipcMain.handle('get-settings', () => { throw Object.assign(new IpcFault(faultCategory), { message: 'raw-secret at C:\\private\\file' }) })
+  let faultCorrelation: string | undefined
+  ipcMain.handle('get-settings', () => {
+    faultCorrelation = currentCorrelationId()
+    throw Object.assign(new IpcFault(faultCategory), { message: 'raw-secret at C:\\private\\file' })
+  })
   const file = pathToFileURL(join(work, 'renderer.html')).href
   const trusted = window()
   registerTrustedRenderer(trusted.webContents, file)
@@ -138,11 +146,13 @@ app.whenReady().then(async () => {
       assert.ok(isIpcRemoteErrorData(failure.data))
       assert.deepEqual(failure.data, { name: 'IpcRemoteError', ...ipcError(category, selected), correlationId: failure.data.correlationId })
       assert.ok(failure.data.correlationId)
+      assert.equal(failure.data.correlationId, faultCorrelation)
       assert.ok(!failureIds.has(failure.data.correlationId))
       failureIds.add(failure.data.correlationId)
       assert.doesNotMatch(JSON.stringify(failure.data), /raw-secret|\bat |[A-Z]:[\\/]|file:\/\//i)
     }
   }
+  checks.push('exact main action correlation survives production contextBridge failure serialization in both locales (AT-00-005)')
   const localFailure = await trusted.webContents.executeJavaScript(`window.electronAPI.saveSettings('not-an-object').catch(e => e)`)
   assert.ok(isIpcRemoteErrorData(localFailure))
   assert.equal(localFailure.category, 'validation'); assert.equal(localFailure.correlationId, undefined)

@@ -7,6 +7,7 @@ import { getPrivilegedRuntimeDir } from './runtimePaths'
 import { directoryExists, verifyDirectoryHardened } from './runtimeDirSecurity'
 import { redactSensitiveConfig, redactSensitiveText } from './vpnProfiles'
 import { watchEngineLogs } from './engineLogRetention'
+import { currentCorrelationId } from './actionCorrelation'
 
 export type AppLogLevel = 'debug' | 'info' | 'warn' | 'error'
 
@@ -185,12 +186,14 @@ function normalizeDetail(value: unknown): unknown {
 
 function formatLine(level: AppLogLevel, scope: string, message: string, details?: unknown): string {
   const normalizedMessage = redactTopologyText(redactSensitiveText(repairMojibake(message)))
+  const correlationId = currentCorrelationId()
   return JSON.stringify({
     ts: new Date().toISOString(),
     level,
     scope,
     message: normalizedMessage,
-    details
+    details,
+    ...(correlationId ? { correlationId } : {})
   }) + '\n'
 }
 

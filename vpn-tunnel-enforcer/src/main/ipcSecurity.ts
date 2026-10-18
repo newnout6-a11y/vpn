@@ -2,6 +2,7 @@ import { ipcMain, type IpcMainInvokeEvent, type WebContents } from 'electron'
 import * as electron from 'electron'
 import { logEvent } from './appLogger'
 import { randomUUID } from 'crypto'
+import { withCorrelation } from './actionCorrelation'
 import { IpcValidationError } from './ipcValidation'
 import { assertIpcRequest, isIpcChannel } from '../shared/ipc-contract'
 import { IPC_VERSION, classifyIpcError, ipcError, type IpcResult } from '../shared/ipc-result'
@@ -136,36 +137,37 @@ export function installTrustedIpcBoundary(): void {
   ipcMain.handle = ((channel: string, listener: Parameters<typeof ipcMain.handle>[1]) => {
     if (!isIpcChannel(channel)) throw new IpcValidationError(`Unregistered IPC channel: ${channel}`)
     return originalHandle(channel, async (event, ...args): Promise<IpcResult<unknown>> => {
-      const correlationId = randomUUID()
+      const correlationId = `ipc_${randomUUID().replaceAll('-', '')}`
       // A bare UUID is a credential-shaped value to the logger redactor.
       // This reversible opaque form preserves all 128 bits without weakening it.
-      const auditCorrelationId = `ipc_${correlationId.replaceAll('-', '')}`
-      let trusted = false
-      try {
-        assertTrustedIpcSender(event)
-        trusted = true
-        assertSafeIpcPayload(args)
-        assertIpcRequest(channel, args)
-      } catch (error) {
-        // Never log rejected payloads, frame URLs, or exception text supplied
-        // by the caller: the source can include credentials and huge strings.
-        logEvent('warn', 'ipc-security', 'IPC request rejected', {
-          channel, correlationId: auditCorrelationId, status: 'error',
-          senderId: event.sender?.id ?? null,
-          mainFrame: Boolean(event.senderFrame && event.senderFrame === event.sender?.mainFrame),
-          reason: error instanceof IpcValidationError ? 'invalid-payload' : 'untrusted-sender'
-        })
-        return { version: IPC_VERSION, correlationId, ok: false, error: ipcError(trusted ? 'validation' : 'permission') }
-      }
-      try {
-        return { version: IPC_VERSION, correlationId, ok: true, result: await listener(event, ...args) }
-      } catch (error) {
-        const category = classifyIpcError(error)
-        logEvent(category === 'cancelled' ? 'debug' : 'error', 'ipc-security', 'IPC request failed', {
-          channel, correlationId: auditCorrelationId, status: category === 'cancelled' ? 'cancelled' : 'error', reason: category
-        })
-        return { version: IPC_VERSION, correlationId, ok: false, error: ipcError(category) }
-      }
+      return withCorrelation(correlationId, async (): Promise<IpcResult<unknown>> => {
+        let trusted = false
+        try {
+          assertTrustedIpcSender(event)
+          trusted = true
+          assertSafeIpcPayload(args)
+          assertIpcRequest(channel, args)
+        } catch (error) {
+          // Never log rejected payloads, frame URLs, or exception text supplied
+          // by the caller: the source can include credentials and huge strings.
+          logEvent('warn', 'ipc-security', 'IPC request rejected', {
+            channel, correlationId, status: 'error',
+            senderId: event.sender?.id ?? null,
+            mainFrame: Boolean(event.senderFrame && event.senderFrame === event.sender?.mainFrame),
+            reason: error instanceof IpcValidationError ? 'invalid-payload' : 'untrusted-sender'
+          })
+          return { version: IPC_VERSION, correlationId, ok: false, error: ipcError(trusted ? 'validation' : 'permission') }
+        }
+        try {
+          return { version: IPC_VERSION, correlationId, ok: true, result: await listener(event, ...args) }
+        } catch (error) {
+          const category = classifyIpcError(error)
+          logEvent(category === 'cancelled' ? 'debug' : 'error', 'ipc-security', 'IPC request failed', {
+            channel, correlationId, status: category === 'cancelled' ? 'cancelled' : 'error', reason: category
+          })
+          return { version: IPC_VERSION, correlationId, ok: false, error: ipcError(category) }
+        }
+      })
     })
   }) as typeof ipcMain.handle
 

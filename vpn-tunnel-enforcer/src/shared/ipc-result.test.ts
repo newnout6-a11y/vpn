@@ -1,8 +1,22 @@
 import { describe, expect, it } from 'vitest'
-import { IPC_ERRORS, IpcFault, IpcValidationError, IpcRemoteError, ipcError, isIpcRemoteErrorData, serializeIpcError, type IpcErrorCategory } from './ipc-result'
+import { IPC_ERRORS, IpcFault, IpcValidationError, IpcRemoteError, ipcError, isIpcRemoteErrorData, serializeIpcError, unwrapIpcResult, type IpcErrorCategory } from './ipc-result'
 
 const correlationId = '00000000-0000-4000-8000-000000000000'
 describe('cloneable IPC failure data (AT-00-004; F-074)', () => {
+  it.each(['ipc_', 'op_'])('preserves %s action IDs through transport, localization and structured clone (AT-00-005)', prefix => {
+    const actionId = prefix + correlationId.replaceAll('-', '')
+    expect(unwrapIpcResult({ version: 1, correlationId: actionId, ok: true, result: 42 })).toBe(42)
+    for (const category of Object.keys(IPC_ERRORS) as IpcErrorCategory[]) {
+      let remote: unknown
+      try { unwrapIpcResult({ version: 1, correlationId: actionId, ok: false, error: ipcError(category) }) }
+      catch (error) { remote = error }
+      for (const locale of ['en', 'ru'] as const) {
+        const data = structuredClone(serializeIpcError(remote, locale))
+        expect(data).toEqual({ name: 'IpcRemoteError', ...ipcError(category, locale), correlationId: actionId })
+        expect(isIpcRemoteErrorData(data)).toBe(true)
+      }
+    }
+  })
   it.each(Object.keys(IPC_ERRORS) as IpcErrorCategory[])('preserves %s code/category/correlation, with canonical messages in both locales', category => {
     for (const locale of ['en', 'ru'] as const) {
       const error = new IpcRemoteError({ ...ipcError(category), message: 'raw-secret at C:\\private\\file' }, correlationId)
@@ -30,6 +44,8 @@ describe('cloneable IPC failure data (AT-00-004; F-074)', () => {
   it.each([undefined, null, [], {}, { name: 'IpcRemoteError', ...ipcError('permission'), code: 'IPC_NETWORK_ERROR' },
     { name: 'IpcRemoteError', ...ipcError('permission'), message: 'raw-secret' },
     { name: 'IpcRemoteError', ...ipcError('permission'), correlationId: 'wrong' },
+    ...['ipc_' + '0'.repeat(32), 'op_' + 'f'.repeat(32), 'ipc_' + correlationId.replaceAll('-', '') + '\n', correlationId + '\n']
+      .map(correlationId => ({ name: 'IpcRemoteError', ...ipcError('permission'), correlationId })),
     Object.defineProperty({}, 'name', { get() { throw new Error('raw-secret') } })])('rejects confused failure data', value => {
     expect(isIpcRemoteErrorData(value)).toBe(false)
   })

@@ -3300,3 +3300,55 @@ CI/review нового SHA проверяются отдельно после pu
   259 files passed / 2 skipped, 191.21 s, exit 0 (.tmp/wp0-model-qodo61-full.log).
   `git diff --check` — exit 0. Production-код не менялся; локальные build/native
   smoke повторно не запускались. Это исправление model oracle, не WFP runtime.
+
+### PR #61 слит; AT-00-005 — общий action correlation
+
+- #61 head 76e253dc944e8631baa69a95f1345f2e937796bf: Qodo 1541166 completed,
+  прежнее замечание implemented, новых findings нет. CI 39158907423 completed/
+  success, все jobs зелёные. REST merge с expected SHA подтверждён повторным GET:
+  merged=true, merge commit 63017cfcae7404384fd9505cd01000def4dd3855.
+  База следующей ветки codex/wp0-action-correlation — этот merge. Повторный REST
+  список открытых PR перед публикацией текущего участка — пуст.
+- Подтверждённый разрыв: transport UUID, audit ipc_<hex> и lifecycle op_<hex>
+  не совпадали для одного действия. `npm.cmd test -- src/main/actionCorrelation.test.ts`
+  до исправления — **1 failed**, 522 ms, exit 1
+  (.tmp/wp0-action-correlation-before.log). Main теперь генерирует один prefixed
+  UUIDv4, сохраняет его в async context и передаёт без преобразований через IPC,
+  connect/stop operation events и JSONL logger. Таймаут/recovery и late drain
+  сохраняют исходное действие; ручной stop получает собственное. Raw UUID/строки
+  с payload в trusted context запрещены. Decoder поддерживает legacy UUIDv4.
+- Focused `npm.cmd test -- src/main/actionCorrelation.test.ts src/main/actionCorrelationScope.test.ts src/main/ipcAuditLog.test.ts src/main/connectionOperationLogging.test.ts src/shared/ipc-result.test.ts src/main/ipcContractAcceptance.test.ts src/main/connectionOperations.test.ts`
+  — **433 passed / 7 files**, 1.29 s, exit 0
+  (.tmp/wp0-action-correlation-focused-final.log). После добавления assertions
+  production getFullLogs с повторной redaction — те же **433 passed**, 1.32 s,
+  exit 0 (.tmp/wp0-action-correlation-readback.log). В fixture настоящие JSONL
+  disk writes, параллельные actions завершаются в обратном порядке; credentials
+  не сохраняются, correlationId переживает diagnostic read-back. Scope fixtures
+  проверяют nested sync/async failure, canonical ID, timeout и manual stop.
+- Временная папка первого failed fixture .tmp/action-correlation-2v2R0u осталась
+  ignored: автоматическая policy отклонила её удаление. Обход не выполнялся.
+  Следующие fixtures ждут завершения очереди записи перед assertions/cleanup.
+  Durable connection history, source/owner/route/confidence и monotonic ordering
+  пока не входят в изменение; весь AT-00-005 и WP-0 не объявляются PASS.
+- Первый полный `npm.cmd test` — **32 failed / 4065 passed / 5 skipped**,
+  186.49 s, exit 1 (.tmp/wp0-action-correlation-full.log). Все падения — общий
+  expectFailure в configIpcErrors: прежний regex допускал только bare UUID.
+  Обновлён на строгий ipc_<UUIDv4 hex>; `npm.cmd test -- src/main/configIpcErrors.test.ts`
+  — **38 passed**, 504 ms, exit 0 (.tmp/wp0-action-correlation-config.log).
+  Повторный полный `npm.cmd test` на итоговом коде с diagnostic read-back —
+  **4097 passed / 5 skipped / 0 failed**, 261 files passed / 2 skipped,
+  179.42 s, exit 0 (.tmp/wp0-action-correlation-full-final.log).
+- `npm.cmd run typecheck` после native fixture и read-back assertions — exit 0,
+  158 channels / 0 public any (.tmp/wp0-action-correlation-typecheck-native.log).
+  `python docs/04-приёмочные-тесты/traceability/check-coverage.py` из корня — exit 0,
+  AC 927/927, F 210/210: только трассировка, не исполнение AT.
+- `npm.cmd run build` — exit 0 (.tmp/wp0-action-correlation-build.log).
+  `node scripts/test-electron-runtime.mjs` — ELECTRON_SMOKE_PASS, exit 0
+  (.tmp/wp0-action-correlation-electron.log): actual production contextBridge
+  сохраняет общий correlation ID для семи error categories в обеих локалях,
+  lifecycle context остаётся тем же до/после native wait. `node scripts/test-wp1-native.mjs --ipc-only`
+  — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-action-correlation-csp.log).
+  Повторные `python ../docs/04-приёмочные-тесты/traceability/check-coverage.py`
+  из app (AC 927/927, F 210/210) и `git diff --check` — exit 0.
+  Native smoke использует настоящий Electron с fake OS effects; это не Windows
+  packet/PID oracle, не вся история действий и не полный AT-00-005.

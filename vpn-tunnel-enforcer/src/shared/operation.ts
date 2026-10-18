@@ -6,7 +6,7 @@ export type OperationOwner = keyof typeof OPERATION_PRIORITY
 export interface ConnectionOperation {
   readonly version: 1
   readonly operationId: string
-  /** Non-secret log key derived from operationId; survives credential UUID masking. */
+  /** Non-secret action key shared with IPC when present; survives UUID masking. */
   readonly correlationId: string
   readonly owner: OperationOwner
   readonly kind: 'connect' | 'disconnect'
