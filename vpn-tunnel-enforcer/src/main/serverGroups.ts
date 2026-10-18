@@ -374,7 +374,25 @@ export function refreshGroup(
   groupId: string,
   options: RefreshGroupOptions = {}
 ): Promise<RefreshGroupResult> {
-  return operations.run('refresh', lease => refreshGroupUnlocked(groupId, options, lease), {
+  return operations.run('refresh', async lease => {
+    const original = getGroup(groupId)
+    const onAbort = () => {
+      // This is the deadline transition itself, never a late network callback.
+      // Ordinary cancellation preserves the last provider outcome.
+      if (lease.operation.category !== 'timeout' || !original?.sourceUrl) return
+      try {
+        const current = getGroup(groupId)
+        if (current?.sourceUrl === original.sourceUrl && current.source === original.source) {
+          updateGroup(groupId, { status: 'unreachable', lastFetchAttemptAt: Date.now(), lastFetchError: new IpcFault('timeout').message })
+        }
+      } catch (error) {
+        logEvent('error', 'server-groups', 'refresh deadline metadata failed', { category: error instanceof IpcFault ? error.category : 'internal' })
+      }
+    }
+    lease.signal.addEventListener('abort', onAbort, { once: true })
+    try { return await refreshGroupUnlocked(groupId, options, lease) }
+    finally { lease.signal.removeEventListener('abort', onAbort) }
+  }, {
     resource: `refresh:${groupId}`, owner: options.owner, signal: options.signal
   })
 }
@@ -397,6 +415,9 @@ async function refreshGroupUnlocked(
   }
 
   const now = Date.now()
+  // Record admission before asynchronous effects. A cancelled/blocked request
+  // must not make the periodic sweep hammer the same panel every minute.
+  updateGroup(groupId, { lastFetchAttemptAt: now })
   // Fetching may go through the user's local proxy — pull it from settings
   // the same way `addFromInput` does. Defensive: if `settingsStore.get()`
   // throws (it shouldn't, but it touches disk), we just fetch directly.
@@ -743,6 +764,7 @@ export async function refreshDueServerGroups(now = Date.now(), signal?: AbortSig
       if (result.ok) refreshed++
       else failed++
     } catch (error) {
+      if (error instanceof IpcFault && error.category === 'cancelled') continue
       failed++
       logEvent('warn', 'server-groups', 'automatic refresh failed', { groupId: group.id, error })
     }

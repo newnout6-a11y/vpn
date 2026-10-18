@@ -896,7 +896,11 @@ Commit сериализован с существующим append импорт�
 перечитывается актуальный массив профилей. Поздний fetch не затирает другую
 группу, concurrent import или переименование. Удалённая группа не воскресает.
 Остановка scheduled sweep отменяет его запрос и запрещает запуск следующей
-группы. Cancel не обновляет lastFetched/error/profile metadata.
+группы. При допуске фиксируется lastFetchAttemptAt; cancel сохраняет последний
+provider outcome. Сам deadline переводит существующий неизменённый источник
+в unreachable с явной timeout error и новым attempt time, обеспечивая backoff
+до следующего штатного интервала. Поздний network callback ничего не пишет.
+Отмена sweep/manual replacement не увеличивает счётчик failed.
 
 L2 выполняет production refresh/registry/IPC guard с управляемыми границами:
 отмена между device fetches и перед queued commit, deadline, shutdown и manual
@@ -905,3 +909,8 @@ Conf backend: проверяются завершение процесса/со�
 отмены и сохранение параллельных записей после повторного чтения с диска.
 Хранилище в этом стенде подменяет Electron/DPAPI boundary; это не новая
 проверка шифрования. Полная AT-00-003 остаётся открытой, UI не менялся.
+
+Production refresh дополнительно проверен с настоящими logger/redactor и JSONL:
+две concurrent группы имеют различные operationKey и собственный IPC correlation,
+одна cancelled, вторая success; diagnostic read-back сохраняет эти связи после
+повторного redaction. Raw UUID и контрольный пароль отсутствуют в обоих выводах.

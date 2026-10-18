@@ -3941,3 +3941,46 @@ CI/review нового SHA проверяются отдельно после pu
   `.tmp/subscription-operations-nddlFF` оставлена: отдельная уборка через
   проверенный абсолютный PowerShell path отклонена execution policy; обхода
   запрета не выполнял. Папка ignored, в коммит/PR не включается.
+
+### PR #68 — Qodo: deadline backoff, отменённые sweep и actual refresh JSONL
+
+- PR #68 открыт на 36cea43021bcc9a491177917707dd15f3d9fce6a; CI
+  **39175789188 success** относится к initial head. Qodo **1542619 completed**:
+  одно action_required, два remediation_recommended и одно informational.
+- 69f0c091-2013-44eb-96ef-e0e0be5480f8: raw UUID маскируется намеренно,
+  обратимый operationKey уже присутствует. Production менять не потребовалось;
+  вместо mocked logger fixture теперь использует настоящие logger/redactor,
+  actual refresh/guard/curl/Conf. Две параллельные группы cancelled/success
+  имеют разные keys, исходный IPC correlation сохраняется на running/terminal
+  в disk JSONL и diagnostic read-back; raw UUID/контрольный пароль скрыты.
+- 301c2658-237d-4139-939f-2fa3af64413c подтверждён: timeout оставлял attempt
+  устаревшим. Admission записывает attempt до async boundary; сам deadline
+  синхронно записывает unreachable/typed timeout и момент завершения попытки.
+  Late network callbacks не пишут. Source/deletion guard исключает обновление
+  уже заменённой группы; ошибки служебной записи не ломают отмену/lease.
+  Regression проверяет отсутствие due через минуту и due на штатном интервале,
+  неизменность после late settlement и замену source перед timeout.
+- 92bda823-a170-4f95-811d-def44a510055 подтверждён: stopped/preempted sweep
+  больше не увеличивает failed и не пишет automatic refresh failed. Настоящие
+  сетевые ошибки/empty responses продолжают учитываться как failed.
+- 67e7fafa-c6ab-4fdf-865d-7cf3203a5856 (informational): второй manual call
+  получает типизированный conflict вместо присоединения к чужой операции.
+  Это выбранная политика exclusive owner, согласованная с AT-00-003/007:
+  проигравший caller не получает успех чужой операции и собственную отмену
+  не переносит на другого владельца. UI-обработка conflict остаётся отдельной
+  матрицей; общий auto/manual приоритет покрыт production registry tests.
+- `npm.cmd test -- src/main/serverGroupsRefresh.test.ts src/main/subscriptionOperations.test.ts src/main/vpnProfilesRegression.test.ts src/main/actionCorrelation.test.ts`
+  — **52 passed / 4 files**, 2.25 s, exit 0
+  (.tmp/wp0-refresh-qodo68-focused-final.log). Промежуточный fixture ожидал
+  deadline timestamp после vi.waitFor, который сдвигает fake clock на 100 ms;
+  исправлено сравнение с заранее вычисленным deadline, production не менялся.
+- Окончательный `npm.cmd run typecheck` — exit 0, 160 channels / 0 public any
+  (.tmp/wp0-refresh-qodo68-typecheck.log). Полный `npm.cmd test` — **4285 passed /
+  5 skipped / 0 failed**, 267 files passed / 2 skipped, 190.69 s, exit 0
+  (.tmp/wp0-refresh-qodo68-full.log). Traceability AC 927/927 / F 210/210 и
+  `git diff --check` — exit 0.
+- `npm.cmd run build` — exit 0 (.tmp/wp0-refresh-qodo68-build.log).
+  `node scripts/test-electron-runtime.mjs` — ELECTRON_SMOKE_PASS, exit 0
+  (.tmp/wp0-refresh-qodo68-electron.log); `node scripts/test-wp1-native.mjs --ipc-only`
+  — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-refresh-qodo68-csp.log). После push нужен
+  новый completed Qodo и CI на окончательном SHA; initial CI их не заменяет.

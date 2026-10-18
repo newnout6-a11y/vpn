@@ -142,6 +142,7 @@ beforeEach(() => {
   resetStores()
   resolveVpnProfilesMock.mockReset()
   healthMock.mockReset()
+  vi.mocked(logEvent).mockClear()
 })
 
 describe('owned subscription refresh (AT-00-003/005/007; F-063/F-070)', () => {
@@ -158,8 +159,8 @@ describe('owned subscription refresh (AT-00-003/005/007; F-063/F-070)', () => {
       expect(options.signal).toBeInstanceOf(AbortSignal)
       return resolveVpnProfilesMock.mock.calls.length === boundary + 1 ? gate.promise : Promise.resolve({ profiles: [makeVpnProfile('fresh.example.com', 443)], source: 'subscription', fetched: true })
     })
-    const before = JSON.stringify(storeData.current)
     const run = refreshGroup(group.id, { signal: controller.signal })
+    const before = JSON.stringify(storeData.current) // Includes the admitted attempt timestamp.
     const rejected = expect(run).rejects.toMatchObject({ category: 'cancelled' })
     await vi.waitFor(() => expect(resolveVpnProfilesMock).toHaveBeenCalledTimes(boundary + 1))
     const signal = resolveVpnProfilesMock.mock.calls[boundary][1].signal
@@ -179,15 +180,37 @@ describe('owned subscription refresh (AT-00-003/005/007; F-063/F-070)', () => {
     const group = seed(), gate = heldRefresh()
     resolveVpnProfilesMock.mockReturnValue(gate.promise)
     vi.useFakeTimers()
+    const deadlineAt = Date.now() + 120_000
     const run = refreshGroup(group.id)
     const rejected = expect(run).rejects.toMatchObject({ category: 'timeout' })
     await vi.advanceTimersByTimeAsync(120_000)
     await rejected
     expect(operations.isBusy(`refresh:${group.id}`)).toBe(true)
+    const terminalSnapshot = JSON.stringify(storeData.current)
     gate.release()
     await vi.waitFor(() => expect(operations.isBusy(`refresh:${group.id}`)).toBe(false))
     expect(pickerProfiles().map(p => p.id)).toEqual(['saved', 'android'])
     expect(serverGroups.getGroup(group.id)?.lastFetchedAt).toBeUndefined()
+    expect(serverGroups.getGroup(group.id)).toMatchObject({ status: 'unreachable', lastFetchAttemptAt: deadlineAt })
+    expect(serverGroups.getGroup(group.id)?.lastFetchError).toBeTruthy()
+    expect(isServerGroupRefreshDue(serverGroups.getGroup(group.id)!, Date.now() + 60_000)).toBe(false)
+    expect(isServerGroupRefreshDue(serverGroups.getGroup(group.id)!, Date.now() + DEFAULT_SERVER_GROUP_REFRESH_INTERVAL_MS)).toBe(true)
+    expect(JSON.stringify(storeData.current)).toBe(terminalSnapshot)
+  })
+
+  it('does not publish a deadline failure onto a replaced subscription source', async () => {
+    const group = seed(), gate = heldRefresh()
+    resolveVpnProfilesMock.mockReturnValue(gate.promise)
+    vi.useFakeTimers()
+    const run = refreshGroup(group.id)
+    const rejected = expect(run).rejects.toMatchObject({ category: 'timeout' })
+    serverGroups.updateGroup(group.id, { sourceUrl: 'https://sub.example.test/replaced' })
+    const before = JSON.stringify(storeData.current)
+    await vi.advanceTimersByTimeAsync(120_000)
+    await rejected
+    gate.release()
+    await vi.waitFor(() => expect(operations.isBusy(`refresh:${group.id}`)).toBe(false))
+    expect(JSON.stringify(storeData.current)).toBe(before)
   })
 
   it('lets manual refresh replace an automatic one only after its physical drain', async () => {
@@ -202,7 +225,7 @@ describe('owned subscription refresh (AT-00-003/005/007; F-063/F-070)', () => {
     expect(resolveVpnProfilesMock).toHaveBeenCalledTimes(1)
     gate.release()
     expect(await manual).toMatchObject({ ok: true })
-    expect(await automatic).toEqual({ refreshed: 0, failed: 1 })
+    expect(await automatic).toEqual({ refreshed: 0, failed: 0 })
     expect(pickerProfiles().some(p => p.server === 'late.example.com')).toBe(false)
     expect(pickerProfiles().some(p => p.server === 'manual.example.com')).toBe(true)
   })
@@ -226,10 +249,10 @@ describe('owned subscription refresh (AT-00-003/005/007; F-063/F-070)', () => {
     const { id: _id, ...input } = first
     serverGroups.createGroup({ ...input, sourceUrl: 'https://sub.example.test/second' })
     resolveVpnProfilesMock.mockReturnValue(gate.promise)
-    const before = JSON.stringify(storeData.current)
     vi.useFakeTimers()
     serverGroups.startAutoRefresh()
     await vi.advanceTimersByTimeAsync(10_000)
+    const before = JSON.stringify(storeData.current)
     expect(resolveVpnProfilesMock).toHaveBeenCalledTimes(1)
     serverGroups.stopAutoRefresh()
     expect(resolveVpnProfilesMock.mock.calls[0][1].signal.aborted).toBe(true)
@@ -238,6 +261,7 @@ describe('owned subscription refresh (AT-00-003/005/007; F-063/F-070)', () => {
     await vi.advanceTimersByTimeAsync(120_000)
     expect(resolveVpnProfilesMock).toHaveBeenCalledTimes(1)
     expect(JSON.stringify(storeData.current)).toBe(before)
+    expect(vi.mocked(logEvent).mock.calls.some(call => call[2] === 'automatic refresh failed')).toBe(false)
   })
 
   it('preserves profiles and user edits made while another group fetch is pending', async () => {
@@ -268,8 +292,8 @@ describe('owned subscription refresh (AT-00-003/005/007; F-063/F-070)', () => {
     const group = seed(), gate = heldRefresh(), controller = new AbortController()
     const blockingImport = withProfileStoreWriteLock(() => gate.promise)
     resolveVpnProfilesMock.mockResolvedValue({ profiles: [makeVpnProfile('queued.example.com', 443)], source: 'subscription', fetched: true })
-    const before = JSON.stringify(storeData.current)
     const run = refreshGroup(group.id, { signal: controller.signal })
+    const before = JSON.stringify(storeData.current)
     const rejected = expect(run).rejects.toMatchObject({ category: 'cancelled' })
     await vi.waitFor(() => expect(resolveVpnProfilesMock).toHaveBeenCalledTimes(2))
     controller.abort()
