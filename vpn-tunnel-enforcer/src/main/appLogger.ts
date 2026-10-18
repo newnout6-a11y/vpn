@@ -8,6 +8,7 @@ import { directoryExists, verifyDirectoryHardened } from './runtimeDirSecurity'
 import { redactSensitiveConfig, redactSensitiveText } from './vpnProfiles'
 import { watchEngineLogs } from './engineLogRetention'
 import { currentCorrelationId } from './actionCorrelation'
+import { eventTimestamp } from './eventClock'
 
 export type AppLogLevel = 'debug' | 'info' | 'warn' | 'error'
 
@@ -188,7 +189,7 @@ function formatLine(level: AppLogLevel, scope: string, message: string, details?
   const normalizedMessage = redactTopologyText(redactSensitiveText(repairMojibake(message)))
   const correlationId = currentCorrelationId()
   return JSON.stringify({
-    ts: new Date().toISOString(),
+    ts: new Date(eventTimestamp()).toISOString(),
     level,
     scope,
     message: normalizedMessage,

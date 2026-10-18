@@ -17,6 +17,7 @@ import { tunController, getTunRuntimeDir, detectForeignTun, killOwnedTunRuntimeP
 import type { NetworkCleanupReceipt, SingBoxOutboundFault } from './tunController'
 import { ConnectionLifecycle, type ConnectionStartupOwner } from './connectionLifecycle'
 import { currentCorrelationId, currentActionMetadata, withCorrelation } from './actionCorrelation'
+import { eventTimestamp } from './eventClock'
 import { TunnelStateMachine } from './tunnelStateMachine'
 import type { ConnectionStartResult, ConnectionStopResult } from '../shared/operation'
 import { runScheduledConnection } from './scheduledConnection'
@@ -219,7 +220,7 @@ function captureSessionOrigin(mode: LiveSession['profile']['mode'], opened: bool
 function openSession(profile: LiveSession['profile']): void {
   const correlationId = currentCorrelationId()
   currentSession = {
-    startedAt: Date.now(),
+    startedAt: eventTimestamp(),
     ...(correlationId ? { correlationId } : {}),
     origin: captureSessionOrigin(profile.mode, true),
     profile,
@@ -265,7 +266,7 @@ function writeSessionEntry(s: LiveSession, stats: TrafficStats, outcome: Session
       startedAt: s.startedAt,
       ...(s.correlationId ? { correlationId: s.correlationId } : {}),
       provenance: { ...s.origin, confidence: sessionOutcomeConfidence(outcome.kind) },
-      endedAt: Date.now(),
+      endedAt: eventTimestamp(),
       profileName: s.profile.name,
       profileId: s.profile.id,
       mode: s.profile.mode,
@@ -352,7 +353,7 @@ function recordStartFailure(
   // A transient 'running' during the failed start may have opened a provisional
   // session via ensureSessionForRunningTunnel — drop it, this attempt failed.
   currentSession = null
-  const now = Date.now()
+  const now = eventTimestamp()
   const correlationId = currentCorrelationId()
   try {
     connectionHistoryService.addEntry({
@@ -2035,7 +2036,7 @@ app.whenReady().then(async () => {
   // at which point real toasts come back.
   setInAppFallbackCallback((level, title, body) => {
     try {
-      sendToMainWindow('inapp-notification', { level, title, body, ts: Date.now() })
+      sendToMainWindow('inapp-notification', { level, title, body, ts: eventTimestamp() })
     } catch {
       // Window may be torn down (close-on-quit race). Nothing to recover from.
     }

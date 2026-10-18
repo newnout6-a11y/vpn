@@ -14,6 +14,7 @@ it('keeps concurrent IPC actions correlated through native waits, operation even
   mkdirSync(root, { recursive: true })
   state.directory = mkdtempSync(join(root, 'action-correlation-'))
   for (const method of ['log', 'warn', 'error'] as const) vi.spyOn(console, method).mockImplementation(() => {})
+  vi.setSystemTime(new Date('2026-10-19T00:00:00Z'))
   try {
     const { ipcMain } = await import('electron')
     const { installTrustedIpcBoundary, registerTrustedRenderer } = await import('./ipcSecurity')
@@ -45,6 +46,8 @@ it('keeps concurrent IPC actions correlated through native waits, operation even
     const invoke = state.handlers.get('start-direct-vpn')!
     const first = invoke(event), second = invoke(event)
     expect(release).toHaveLength(2)
+    // A Windows/NTP clock correction must not reorder this action's events.
+    vi.setSystemTime(new Date('2026-10-18T23:00:00Z'))
     release[1]()
     const b = await second as { correlationId: string }
     release[0]()
@@ -64,6 +67,9 @@ it('keeps concurrent IPC actions correlated through native waits, operation even
     await expect.poll(() => { try { return readFileSync(getAppLogPath(), 'utf8').trim().split('\n').length } catch { return 0 } }).toBe(9)
     const raw = readFileSync(getAppLogPath(), 'utf8')
     const rows = raw.trim().split('\n').map(line => JSON.parse(line))
+    const timestamps = rows.map(row => Date.parse(row.ts))
+    expect(timestamps.every(Number.isFinite)).toBe(true)
+    expect(timestamps).toEqual([...timestamps].sort((left, right) => left - right))
     for (const [action, response] of [['a', a], ['b', b]] as const) {
       const actionRows = rows.filter(row => row.scope.endsWith(`-${action}`))
       expect(actionRows).toHaveLength(4)
@@ -79,6 +85,7 @@ it('keeps concurrent IPC actions correlated through native waits, operation even
     expect(exportedRows.map(row => row.correlationId)).toEqual(rows.map(row => row.correlationId))
     expect(exported.content).not.toMatch(/must-not-log|private-test-password|8093a2ec|settings\.json/)
   } finally {
+    vi.useRealTimers()
     vi.restoreAllMocks()
     if (dirname(state.directory) !== root) throw new Error('Unsafe owned correlation fixture cleanup')
     rmSync(state.directory, { recursive: true, force: true })

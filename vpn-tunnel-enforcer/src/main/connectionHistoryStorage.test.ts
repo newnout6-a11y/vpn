@@ -42,9 +42,10 @@ async function sessionTracking(service: Awaited<ReturnType<typeof reload>>) {
   expect(names.every(name => functions.some(node => ts.isFunctionDeclaration(node) && node.name?.text === name))).toBe(true)
   const { currentCorrelationId, currentActionMetadata, withCorrelation } = await import('./actionCorrelation')
   const { randomUUID } = await import('node:crypto')
+  const { eventTimestamp } = await import('./eventClock')
   const { makeOutcome, outcomeKindToDisconnectReason, sessionOutcomeConfidence } = await import('./sessionOutcome')
   const notificationIds: Array<string | undefined> = []
-  const dependencies = { currentCorrelationId, currentActionMetadata, withCorrelation, randomUUID, connectionHistoryService: service, makeOutcome, outcomeKindToDisconnectReason, sessionOutcomeConfidence,
+  const dependencies = { currentCorrelationId, currentActionMetadata, withCorrelation, randomUUID, eventTimestamp, connectionHistoryService: service, makeOutcome, outcomeKindToDisconnectReason, sessionOutcomeConfidence,
     settingsStore: { get: () => ({ connectionMode: 'localProxy', routingMode: 'hard' }) },
     resolveProxyForTrayStart: async () => null, notify: () => notificationIds.push(currentCorrelationId()),
     restoreAndFocusMainWindow: () => {},
@@ -72,6 +73,20 @@ afterEach(async () => {
 })
 
 describe('connection history persistence (AT-00-010; F-143)', () => {
+  it('keeps persisted session times ordered when the system clock moves backwards (AT-00-005)', async () => {
+    const service = await reload(), tracking = await sessionTracking(service)
+    const wallClock = vi.spyOn(Date, 'now').mockReturnValue(1792368000000)
+    try {
+      tracking.open()
+      wallClock.mockReturnValue(1792364400000)
+      tracking.close()
+      tracking.failure()
+      const [saved, failed] = (await reload()).getEntries()
+      expect(saved.endedAt).toBeGreaterThanOrEqual(saved.startedAt)
+      expect(failed.startedAt).toBeGreaterThanOrEqual(saved.endedAt!)
+      expect(failed.endedAt).toBe(failed.startedAt)
+    } finally { wallClock.mockRestore() }
+  })
   it.each(['ipc', 'tray', 'lifecycle'] as const)('retains %s provenance and every admitted owner after a different stop action (AT-00-005)', async source => {
     const service = await reload(), tracking = await sessionTracking(service)
     const { withCorrelation } = await import('./actionCorrelation')

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { OPERATION_PRIORITY, type ConnectionOperation, type ConnectionOperationRejection, type OperationOwner } from '../shared/operation'
 import type { TunnelStateMachine } from './tunnelStateMachine'
 import { currentCorrelationId, currentActionMetadata, withCorrelation, type ActionMetadata } from './actionCorrelation'
+import { eventTimestamp } from './eventClock'
 
 /** Main startup owns baseline effects as well as the controller startup. */
 export interface ConnectionStartupOwner {
@@ -83,7 +84,7 @@ export class ConnectionLifecycle {
     const controller = new AbortController()
     let release!: () => void
     const completion = new Promise<void>(done => { release = done })
-    const startedAt = Date.now()
+    const startedAt = eventTimestamp()
     const operationId = randomUUID()
     const metadata: ActionMetadata = { source: currentActionMetadata()?.source ?? 'lifecycle', owner: operationOwner }
     const startup: Startup = { controller, completion, metadata, operation: {
@@ -196,7 +197,7 @@ export class ConnectionLifecycle {
     const metadata: ActionMetadata = { source: currentActionMetadata()?.source ?? 'lifecycle', owner }
     const operation: ConnectionOperation = {
       version: 1, operationId, correlationId: currentCorrelationId() ?? 'op_' + operationId.replaceAll('-', ''), owner, kind: 'disconnect',
-      startedAt: Date.now(), deadline: null, status: 'running'
+      startedAt: eventTimestamp(), deadline: null, status: 'running'
     }
     const stopped = Promise.resolve().then(async () => {
       if (startup) await startup.completion
