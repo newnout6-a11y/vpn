@@ -3,7 +3,8 @@
 Статус: **в работе**. Основание: том 3 §1.1–1.2, ТЗ-06 WP-0
 и решения владельца §10, AT-00-001…010. WP-3 завершён в PR #46;
 его L3 `SKIPPED_BY_OWNER` не распространяется на WP-0.
-CodeRabbit исключён из ожидания владельцем; CI и действующий review обязательны.
+Главный ревьюер — Qodo по решению владельца от 18.10. CodeRabbit исключён
+из ожидания; окончание trial Greptile не блокирует работу. CI и review обязательны.
 18.10 владелец разрешил продолжать WP-0 при открытом PR #54, сохраняя запрет
 его слияния до отдельного решения. Полного Revix для #54 не было из-за квоты.
 
@@ -14,7 +15,7 @@ CodeRabbit исключён из ожидания владельцем; CI и д
 | 00-001 | AST-проверка 157 main/preload/shared request channels, общий реестр входов и versioned transport envelope; object contracts проверяют поля/массивы, save-settings покрывает все 39 общих полей AppSettings; TypeScript checker проверяет results всех 157 listeners, public results с `any` больше нет; native contextBridge сохраняет JSON профиля и nullable active result | Завершить проверку текущего PR; отдельная semantic matrix ошибок остаётся в 00-004 |
 | 00-002 | `tunController.ts`, lifecycle fault-injection tests | Единая модель и интегрированный координатор; все туры ≤6, недопустимые события, ресурсные инварианты |
 | 00-003 | Локальная отмена в отдельных подсистемах | Реестр connect/refresh/speed/import/export/rotation; отмена на 10/50/90%, deadline, запрет поздних эффектов |
-| 00-004 | Общая классификация transport; 157 каналов × 7 категорий через guard; native contextBridge сохраняет code/category/correlation в en/ru; typed local validation | Миграция legacy domain-result `{success:false,error}` и semantic matrix настоящих feature handlers; transport fixtures не доказывают её |
+| 00-004 | Общая классификация transport; 157 каналов × 7 категорий через guard; native contextBridge сохраняет code/category/correlation в en/ru; typed local validation; 4 настоящих config handlers × 7 категорий, canonical domain failures | Миграция legacy domain-result `{success:false,error}` и semantic matrix настоящих feature handlers; transport fixtures не доказывают её |
 | 00-005 | `appLogger.ts`, `connectionHistory.ts`; новый regression passive rejection dedup | Сквозной correlation id, монотонный порядок, source/owner/route/confidence истории и redaction всех полей |
 | 00-006 | Локальные миграции, в том числе `readSettingsWithMigration` | Централизованный упорядоченный реестр, fixtures всех исторических версий, future-version hash invariance |
 | 00-007 | Lifecycle tests отдельных гонок | Seeded 200 команд из 10 потоков, typed losers, итог последней принятой команды и 0 child PID при disconnected |
@@ -347,6 +348,39 @@ Typecheck проверяет 157 listeners и 0 legacy any. Contract regression 
 canonical domain failures и весь WP-2 не объявлены завершёнными.
 
 
+## AT-00-004 — доменные ошибки конфигурации
+
+Config export/import/apply больше не возвращают raw business error внутри
+успешного transport envelope. Handler бросает исходную ошибку для общей
+классификации либо IpcFault с явной категорией; boundary возвращает стабильные
+IPC_* code, category, canonical message и correlationId. Shared ElectronAPI
+описывает только успешные results. ImportExportSettings обрабатывает canonical
+rejection; raw/поддельный message заменяется generic internal, отмена save
+остаётся без уведомления об успехе/ошибке. Browse cancellation сохраняет null.
+
+configIpcErrors.test.ts использует настоящие feature handlers и production
+installTrustedIpcBoundary. Ошибки всех семи категорий внедряются на store.get
+и native-dialog boundary, проверяя отсутствие FAKE-SECRET, stack и абсолютных
+Windows paths в ошибках renderer. Electron/dialog/store mocked; выбранный JSON
+и файловая логика настоящие. Дополнительно проверяются malformed JSON/version,
+array object sections, отсутствующая selection capability, cancelled save,
+partial import и rollback после ошибки поздней записи. Capability после apply
+расходуется даже при ошибке. Откат сохраняет system DNS (null), вместо выбора
+первого builtin профиля. Пустой/неизвестный/отсутствующий выбранный раздел не
+вызывает запись. Полная валидация содержимого каждого раздела этим изменением
+не заявляется; проверки контейнеров не заменяют nested schema validation.
+
+Компонентные тесты проверяют canonical ошибки на export/browse/import/apply,
+локализованный fallback, отсутствие успеха после ошибок/отмены, выбор режима
+экспорта, pending state и успешный apply. Имеющиеся security tests сохраняют
+проверки native consent, sender authority, snapshot bytes, expiry и single-use.
+
+Это адресная матрица четырёх каналов. AT-00-004 требует semantic error matrix
+остальных privileged features; общий guard и native contextBridge fixtures
+не заменяют её. FSM/coordinator, cancellation/deadline, correlation/history,
+migrations, flags и race/UI остаются в работе. Команды и CI — в progress.md.
+
+
 ### Qodo #55 — импорт должен сохранять profile result contract
 
 Qodo 6251403696 подтвердил сквозную дыру: typed ServerProfile[] не мешает
@@ -357,3 +391,36 @@ strings, numeric port, status и типы известных optional metadata. 
 outbound поддерживается для backward compatibility; вложенные JSON extensions
 сохраняются. Это validation входного config, а не полная protocol semantics
 или отдельная приёмка уже повреждённых исторических stores. Результаты в progress.md.
+
+### Qodo #56 — успешный DNS import и диагностика отказов
+
+Успешный DNS import сохраняет null (system DNS), включая импорт без active id
+при прежнем null. Явный imported null заменяет прежний custom выбор; отсутствие
+поля сохраняет прежний выбор. Это проверяется настоящими selected-file handlers
+с production IPC boundary; store и Electron/dialog остаются test doubles.
+
+Cancelled export сохраняет canonical rejection без error-level записей feature,
+wrapper и boundary. Для остальных отказов в config logs сохраняются ограниченные
+I/O codes из allowlist. Произвольный error.code и raw message/stack не попадают
+в журналы. Отказы JSON/schema/section selection получают стабильный validationCode,
+который позволяет различить безопасные причины без содержимого файла.
+
+Замечания Qodo подтверждены регрессиями до исправления. Эти тесты не заменяют
+матрицу остальных privileged features, интегрированный lifecycle или L3.
+Фактические результаты локальных проверок и CI фиксируются в progress.md.
+
+### Второй проход Qodo #56 — форма rotation и файловые отказы
+
+Структурированный Qodo API подтвердил implemented для четырёх прежних находок
+на 132c3e5 и сообщил два новых замечания. При импорте rotation проверяются все
+обязательные поля RotationConfig, включая profileIds, числовые поля, enabled и
+order. Неполный объект отклоняется до persistence; сохранность прежних stores
+и работоспособность следующего корректного импорта проверяются настоящими
+feature handlers. Это не миграция уже повреждённых historical stores и не
+полная nested schema validation остальных разделов.
+
+File-size, non-regular и changed-during-read отказы теперь имеют ограниченные
+диагностические коды; категории validation/conflict сохранены. Тесты также
+проверяют отсутствие capability и listener после отказа. Итоги Qodo читаются
+через get-pr-review-findings, включая status и commit_sha, вместо интерпретации
+пустого GitHub summary. Статусы findings вручную не менялись.

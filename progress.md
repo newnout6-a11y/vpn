@@ -2605,6 +2605,67 @@ CI/review нового SHA проверяются отдельно после pu
   это docs-only follow-up, runtime/test sources после полного suite не менялись.
 
 
+## 18.10.2026 — #55 CI и главный ревьюер Qodo
+
+- PR #55, head `0a9f579d638797ddc50e0d7fd73c11c282ba8f35`: workflow_dispatch
+  [39136948809](https://github.com/newnout6-a11y/vpn/actions/runs/39136948809)
+  завершён success. Windows job 117703346355: 3849 passed / 4 skipped,
+  247 файлов passed / 1 skipped, 229.18 s. Typecheck, трассировка, настоящий
+  IPC/CSP smoke, WFP ABI/transaction-abort и Electron native reads зелёные;
+  native reads отдельно 1 passed / 1 skipped. Rust и сайт success.
+- Владелец уточнил: «теперь появился новый ревьюер. qodo .он теперь главый».
+  Главный ревьюер — Qodo. Revix summary при исчерпанной квоте не approval;
+  CodeRabbit/Greptile с окончившимся trial не блокируют работу.
+  При REST-проверке #54/#55 комментариев/review Qodo ещё не было.
+  PR #54/#55 не слиты; запрет владельца на merge #54 сохраняется.
+
+## 18.10.2026 — WP-0: доменные ошибки импорта/экспорта конфигурации
+
+- Четыре настоящих handler config:export/import/import-apply/browse-import
+  проверяются вместе с production installTrustedIpcBoundary. Внутренние
+  `{success:false,error:<raw>}` у export/import/apply заменены исключениями,
+  которые boundary преобразует в canonical ok:false/category/code/correlation.
+  Ошибки JSON/формата/выбора разделов — validation; отсутствие selection
+  capability — permission; отмена сохранения/закрытый renderer — cancelled;
+  изменение файла при чтении — conflict. Отмена browse остаётся успешным null.
+- Config public types содержат только успешные значения; компонент использует
+  shared ElectronAPI и canonical rejection. Неизвестный/поддельный текст ошибки
+  заменяется локализованным internal. Cancelled export не показывает ошибку
+  или успех. Ошибки и refresh warnings логируют только bounded reason.
+- Регрессии: array вместо object section отклоняется; partial import не падает
+  в detectConflicts на отсутствующих разделах; пустые/отсутствующие/неизвестные
+  выбранные разделы отклоняются до записи. Ошибка позднего store write
+  восстанавливает прежние значения, включая activeDnsProfileId:null (system DNS),
+  и не оставляет повторно используемой selection capability.
+- Новый configIpcErrors.test.ts инжектирует 7 категорий в store/dialog I/O
+  каждого настоящего feature handler; response проверяется целиком, без
+  FAKE-SECRET/stack/Windows absolute paths. Используется реальный временный
+  выбранный JSON; файловая read/write логика не заменена fake handler.
+  Это локальная fault-injection matrix, а не нативный UI/file-permission E2E.
+- До исправления `npm.cmd test -- src/main/configIpcErrors.test.ts` —
+  12 failed, exit 1 (.tmp/wp0-config-errors-before-final.log).
+- `npm.cmd test -- src/main/configIpcErrors.test.ts src/main/configManager.test.ts src/main/configImportSecurity.test.ts src/main/configExportSecurity.test.ts src/main/ipcResultContract.test.ts src/renderer/components/ImportExportSettings.test.tsx`
+  — 97 passed / 6 файлов, 13.14 s, exit 0 (.tmp/wp0-config-errors-focused-3.log).
+  Старые authority/snapshot/single-use/security assertions сохранены; legacy
+  failure-result expectations обновлены на canonical rejection.
+- `npm.cmd run typecheck` — exit 0, 157 listeners / 0 public any
+  (.tmp/wp0-config-errors-typecheck.log). `python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py`
+  — AC 927/927, F 210/210, exit 0; `git diff --check` — exit 0.
+  Полный suite выполняется. AT-00-004 целиком и WP-0 не объявлены PASS.
+
+- Полный `npm.cmd test` — 3875 passed / 5 skipped / 0 failed,
+  247 файлов passed / 2 skipped, 174.42 s, exit 0
+  (.tmp/wp0-config-errors-full.log). `npm.cmd run build` — exit 0
+  (.tmp/wp0-config-errors-build.log); `node scripts/test-electron-runtime.mjs`
+  — ELECTRON_SMOKE_PASS, exit 0 (.tmp/wp0-config-errors-native.log).
+  Native smoke проверяет общий production bridge en/ru; реальные config handlers
+  отдельно проверены fault-injection matrix, эти два доказательства не смешиваются.
+- По прямому поручению владельца Qodo запрошен комментариями
+  `@qodo review this PR` в #54 (6251357932) и #55 (6251358101).
+  Синтаксис подтверждён официальной docs.qodo.ai/code-review/use-qodo-in-prs/code-review.
+  Отправка команды не объявляется завершённым review или approval.
+
+
 ## 18.10.2026 — Qodo #55: некорректные profiles в импорте
 
 - По прямому поручению владельца отправлен `@qodo review this PR` в #54
@@ -2635,3 +2696,109 @@ CI/review нового SHA проверяются отдельно после pu
   246 файлов passed / 2 skipped, 162.18 s, exit 0 (.tmp/wp0-qodo55-full.log).
   Runtime sources после проверки не менялись. Повторное ревью запрашивается
   у Qodo на новом commit; отсутствие ревью не переименовано в approval.
+
+## 18.10.2026 — Qodo #56: DNS и ограниченная диагностика ошибок
+
+- PR #55 на `580d18852f87a7350ae87dec1726dcb6db2ee2f8` прошёл
+  [CI 39139062588](https://github.com/newnout6-a11y/vpn/actions/runs/39139062588):
+  Windows job 117709516806 — 3861 passed / 4 skipped, 247 файлов passed /
+  1 skipped, 225.17 s. Typecheck, трассировка, Electron IPC/CSP, WFP native,
+  native reads, Rust и сайт success. Новый вывод Qodo пока не подтверждён;
+  пустой обновлённый comment 6251403696 не считается approval.
+- PR #56 перебазирован на исправленный #55. Прежний
+  [CI 39138333330](https://github.com/newnout6-a11y/vpn/actions/runs/39138333330)
+  на `ff1a0433ca86c8a69f36a5405b82ec9b35d61acb` success: Windows
+  3876 passed / 4 skipped, 248 файлов passed / 1 skipped, 223.36 s;
+  он не проверяет последующие изменения.
+- Проверены все четыре замечания [Qodo #56](https://github.com/newnout6-a11y/vpn/pull/56#issuecomment-6251403107).
+  Успешный DNS import теперь сохраняет system DNS (null); explicit imported null
+  переключает с прежнего custom resolver на системный, omitted selection
+  сохраняет прежний выбор. Откат по-прежнему восстанавливает точный snapshot.
+- Cancelled export остаётся canonical cancelled на IPC, но feature handler,
+  logging wrapper и общий boundary пишут debug вместо error. Остальные
+  категории сохраняют error. Логи ошибок config содержат category и allowlisted
+  I/O code (например EACCES/ENOSPC/EIO), без произвольных code/message/stack.
+  Причины отказа импорта представлены стабильными validationCode, включая
+  invalid-json, missing-version, incompatible-version и section-type:<section>;
+  сырые значения файла не отражаются в них.
+- Новые регрессии до исправления: `npm.cmd test -- src/main/configIpcErrors.test.ts`
+  — 14 failed / 19 passed, 515 ms, exit 1 (.tmp/wp0-qodo56-before.log).
+  После исправления семь затронутых test files — 131 passed, 9.40 s, exit 0
+  (.tmp/wp0-qodo56-focused.log). Затем добавлена проверка arbitrary exception code,
+  которая входит в полный suite. `npm.cmd run typecheck` — exit 0,
+  157 channels / 0 public any (.tmp/wp0-qodo56-typecheck.log).
+- Решение владельца: после #55 ручные запросы Qodo больше не отправлять.
+  Существующий запрос #56 не повторяется; читается автоматическое ревью.
+  #54 и зависимые PR не сливаются. AT-00-004 целиком, WP-0 и WP-2 не закрыты.
+- Точная focused-команда: `npm.cmd test -- src/main/configIpcErrors.test.ts src/main/configManager.test.ts src/main/configImportSecurity.test.ts src/main/configExportSecurity.test.ts src/main/ipcSecurity.test.ts src/main/ipcResultContract.test.ts src/renderer/components/ImportExportSettings.test.tsx`.
+- Полный `npm.cmd test` на перебазированной ветке с исправлениями #55/#56:
+  3902 passed / 5 skipped / 0 failed, 247 файлов passed / 2 skipped,
+  162.16 s, exit 0 (.tmp/wp0-qodo56-full.log).
+  `python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py` —
+  AC 927/927, F 210/210, exit 0; `git diff --check` — exit 0.
+- `npm.cmd run build` — exit 0 (.tmp/wp0-qodo56-build.log);
+  `node scripts/test-electron-runtime.mjs` — ELECTRON_SMOKE_PASS, exit 0
+  (.tmp/wp0-qodo56-native.log). Production contextBridge сохраняет все семь
+  canonical категорий, коды и correlationId на en/ru; config I/O проверяется
+  отдельно реальными handlers в local fault matrix, а не этим native fixture.
+
+## 18.10.2026 — Qodo API: точное состояние ревью и второй проход #56
+
+- По предоставленному владельцем доступу проверен официальный MCP endpoint
+  `https://sdk.qodo.ai/v1/tools/mcp/`. Ключ не записан в проект, Git или отчёт.
+  `litegit-search-repos` подтвердил доступ к newnout6-a11y/vpn;
+  `get-pr-review-findings` прочитал структурированные результаты трёх PR.
+- #54: completed, run 1539400, commit 9ce9298, findings 0.
+  #55: completed, run 1539479, commit 580d188; единственная находка
+  ce603cfd имеет attribution_status `implemented`. Это подтверждение Qodo API,
+  а не вывод из пустого GitHub summary или ручное снятие блокировки.
+- #56: completed, run 1539547, commit 132c3e5. Все четыре прежние находки
+  получили `implemented`. Новые: 382ce5a8 (action_required) — rotation:{}
+  записывается и ломает следующий import; 81f01bf3 (informational) — file-size,
+  non-regular и tamper rejections не имеют диагностического кода.
+  Ручные запросы review и ручное изменение статусов findings не выполнялись.
+- Новые tests до исправления: `npm.cmd test -- src/main/configIpcErrors.test.ts src/main/configManager.test.ts`
+  — 13 failed / 74 passed, 850 ms, exit 1 (.tmp/wp0-qodo56-round2-before.log).
+  validateImportData теперь проверяет полную форму RotationConfig до записи;
+  обработчики отклоняют rotation:{} и сохраняют прежние stores. Следующий
+  корректный import другого раздела работает. Уже повреждённые historical
+  stores этим исправлением не мигрируются.
+- readSelectedConfig пишет warn с file-too-large / file-not-regular /
+  file-changed; последняя причина сохраняет canonical conflict, первые две —
+  validation. При отказе capability не выдаётся, listener не остаётся.
+  Regression использует реальный большой файл; fstat для non-regular/tamper
+  управляется test double, остальные filesystem операции настоящие.
+- `npm.cmd test -- src/main/configIpcErrors.test.ts src/main/configManager.test.ts src/main/configImportSecurity.test.ts`
+  — 99 passed / 3 files, 1.10 s, exit 0 (.tmp/wp0-qodo56-round2-focused.log).
+  `npm.cmd run typecheck` — exit 0, 157 channels / 0 public any
+  (.tmp/wp0-qodo56-round2-typecheck.log). Coverage — AC 927/927, F 210/210;
+  diff check exit 0. Полный suite выполняется.
+- [CI 39139840826](https://github.com/newnout6-a11y/vpn/actions/runs/39139840826)
+  на 132c3e5: failure в отдельном native CSP fixture (assert script-src).
+  Windows unit: 3903 passed / 4 skipped, 248 файлов passed / 1 skipped,
+  201.29 s; typecheck, coverage, build и Electron smoke прошли, Rust и сайт success.
+  В CSP fixture ожидание отчётов ограничено фиксированными 500 ms.
+  Локальный `node scripts/test-wp1-native.mjs --ipc-only` без правок fixture —
+  WP1_NATIVE_PASS, exit 0 (.tmp/wp0-qodo56-csp-recheck.log).
+  Причина различия CI/local не объявлена доказанной; новый CI проверит повторно.
+- Полный `npm.cmd test` второго прохода — 3915 passed / 5 skipped / 0 failed,
+  247 файлов passed / 2 skipped, 201.99 s, exit 0
+  (.tmp/wp0-qodo56-round2-full.log). Новая проверка RotationConfig и три
+  файловых диагностических отказа входят в этот прогон.
+- Финальный `npm.cmd run typecheck` — exit 0, 157 channels / 0 public any
+  (.tmp/wp0-qodo56-round2-final-typecheck.log); `npm.cmd run build` — exit 0
+  (.tmp/wp0-qodo56-round2-build.log); `node scripts/test-electron-runtime.mjs`
+  — ELECTRON_SMOKE_PASS, exit 0 (.tmp/wp0-qodo56-round2-native.log).
+
+### Нативный CSP fixture — ожидание обязательных отчётов
+
+- Вместо фиксированной паузы 500 ms fixture ждёт появления всех четырёх
+  обязательных CSP directives, с пределом 5 s. Assertions не ослаблены:
+  inline/eval не должны исполниться, каждый требуемый отчёт обязан появиться.
+  Это синхронизация асинхронного oracle; production CSP не меняется.
+- `node scripts/test-wp1-native.mjs --ipc-only` после изменения fixture —
+  WP1_NATIVE_PASS, exit 0 (.tmp/wp0-qodo56-round2-csp.log). Проверены настоящий
+  production meta CSP, hostile subframe, unknown WebContents и preferences.
+  Это локальные IPC/CSP subsets, а не полный WP-1 L3. Typecheck и build также
+  выполнены после изменения fixture. Повтор полного unit suite не нужен:
+  fixture запускается отдельно, runtime sources после 3915-pass suite не менялись.

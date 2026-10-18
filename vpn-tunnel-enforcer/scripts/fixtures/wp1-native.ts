@@ -55,7 +55,13 @@ app.whenReady().then(async () => {
     const evalScript = document.createElement('script'); evalScript.src = './eval.js'; document.body.append(evalScript);
     const style = document.createElement('link'); style.rel = 'stylesheet'; style.href = 'https://evil.invalid/style.css'; document.head.append(style);
     const image = document.createElement('img'); image.src = 'https://evil.invalid/leak'; document.body.append(image);
-    await new Promise(resolve => setTimeout(resolve, 500));
+    // Local script loading and CSP report delivery are asynchronous. Wait for
+    // the required reports rather than assuming they all arrive in 500 ms.
+    const expected = ['script-src-elem', 'script-src', 'style-src-elem', 'img-src'];
+    const deadline = performance.now() + 5000;
+    while (!expected.every(directive => reports.includes(directive)) && performance.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
     return { reports, inline: !!window.INLINE_RAN, evaluated: !!window.EVAL_RAN };
   })()`)
   assert.equal(violations.inline, false); assert.equal(violations.evaluated, false)

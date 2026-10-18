@@ -62,25 +62,25 @@ describe('configuration native-selection capability', () => {
     const file = selected()
     writeFileSync(file, JSON.stringify({ version: '2.0', profiles: [null] }))
     await invoke('config:browse-import', sender)
-    expect((await invoke('config:import', sender, file)).success).toBe(false)
-    expect((await invoke('config:import-apply', sender, file, ['profiles'], 'replace')).success).toBe(false)
+    await expect(invoke('config:import', sender, file)).rejects.toMatchObject({ category: 'validation' })
+    await expect(invoke('config:import-apply', sender, file, ['profiles'], 'replace')).rejects.toMatchObject({ category: 'validation' })
     expect(state.profiles).toEqual([profile])
-    await expect(invoke('config:import', sender, file)).rejects.toThrow('native-dialog')
+    await expect(invoke('config:import', sender, file)).rejects.toMatchObject({ category: 'permission' })
   })
   it('rejects arbitrary paths and cannot accept a renderer-supplied raw snapshot', async () => {
     const file = selected()
-    await expect(invoke('config:import', sender, file, JSON.stringify(collectCurrentConfig()))).rejects.toThrow('native-dialog')
-    await expect(invoke('config:import-apply', sender, file, ['notifications'], 'replace')).rejects.toThrow('native-dialog')
+    await expect(invoke('config:import', sender, file, JSON.stringify(collectCurrentConfig()))).rejects.toMatchObject({ category: 'permission' })
+    await expect(invoke('config:import-apply', sender, file, ['notifications'], 'replace')).rejects.toMatchObject({ category: 'permission' })
     expect(collectCurrentConfig().notifications.sound).toBe(true)
   })
   it('binds to the exact sender and pathname; apply is single-use', async () => {
     const file = selected(); await invoke('config:browse-import', sender)
-    await expect(invoke('config:import', new Sender(), file)).rejects.toThrow('native-dialog')
-    await expect(invoke('config:import', sender, file + '.other')).rejects.toThrow('native-dialog')
+    await expect(invoke('config:import', new Sender(), file)).rejects.toMatchObject({ category: 'permission' })
+    await expect(invoke('config:import', sender, file + '.other')).rejects.toMatchObject({ category: 'permission' })
     expect((await invoke('config:import', sender, file)).success).toBe(true)
     expect((await invoke('config:import-apply', sender, file, ['notifications'], 'replace')).success).toBe(true)
     expect(collectCurrentConfig().notifications.sound).toBe(false)
-    await expect(invoke('config:import-apply', sender, file, ['notifications'], 'replace')).rejects.toThrow('native-dialog')
+    await expect(invoke('config:import-apply', sender, file, ['notifications'], 'replace')).rejects.toMatchObject({ category: 'permission' })
   })
   it('validates and applies the captured bytes even after pathname replacement', async () => {
     const file = selected(); await invoke('config:browse-import', sender)
@@ -94,20 +94,20 @@ describe('configuration native-selection capability', () => {
     vi.useFakeTimers()
     const file = selected(); await invoke('config:browse-import', sender)
     vi.setSystemTime(Date.now() + 60_000)
-    await expect(invoke('config:import', sender, file)).rejects.toThrow('native-dialog')
+    await expect(invoke('config:import', sender, file)).rejects.toMatchObject({ category: 'permission' })
     expect(sender.listenerCount('destroyed')).toBe(0)
   })
   it('clears captured secrets and listeners on renderer destruction', async () => {
     const file = selected(); await invoke('config:browse-import', sender)
     sender.destroy()
-    await expect(invoke('config:import', sender, file)).rejects.toThrow('native-dialog')
+    await expect(invoke('config:import', sender, file)).rejects.toMatchObject({ category: 'permission' })
     expect(sender.listenerCount('destroyed')).toBe(0)
   })
   it('a canceled replacement dialog revokes the previous capability', async () => {
     const file = selected(); await invoke('config:browse-import', sender)
     state.selection = []
     expect(await invoke('config:browse-import', sender)).toBeNull()
-    await expect(invoke('config:import', sender, file)).rejects.toThrow('native-dialog')
+    await expect(invoke('config:import', sender, file)).rejects.toMatchObject({ category: 'permission' })
   })
   it('late older dialogs cannot replace the newest selected snapshot', async () => {
     const olderFile = selected('older.json', true)
@@ -118,7 +118,7 @@ describe('configuration native-selection capability', () => {
     expect(await invoke('config:browse-import', sender)).toBe(newerFile)
     finishOlder({ canceled: false, filePaths: [olderFile] })
     expect(await older).toBeNull()
-    await expect(invoke('config:import', sender, olderFile)).rejects.toThrow('native-dialog')
+    await expect(invoke('config:import', sender, olderFile)).rejects.toMatchObject({ category: 'permission' })
     expect((await invoke('config:import-apply', sender, newerFile, ['notifications'], 'replace')).success).toBe(true)
     expect(collectCurrentConfig().notifications.sound).toBe(false)
   })
@@ -127,25 +127,25 @@ describe('configuration native-selection capability', () => {
     vi.mocked(dialog.showOpenDialog).mockImplementationOnce(async () => {
       sender.destroy(); return { canceled: false, filePaths: [file] }
     })
-    await expect(invoke('config:browse-import', sender)).rejects.toThrow('renderer closed')
-    await expect(invoke('config:import', sender, file)).rejects.toThrow('native-dialog')
+    await expect(invoke('config:browse-import', sender)).rejects.toMatchObject({ category: 'cancelled' })
+    await expect(invoke('config:import', sender, file)).rejects.toMatchObject({ category: 'permission' })
   })
   it('rejects oversized and non-regular files before validation', async () => {
     const file = join(directory, 'large.json'); writeFileSync(file, 'x'.repeat(16 * 1024 * 1024 + 1))
     state.selection = [file]
-    await expect(invoke('config:browse-import', sender)).rejects.toThrow('16 MiB')
+    await expect(invoke('config:browse-import', sender)).rejects.toMatchObject({ category: 'validation' })
     state.selection = [directory]
-    await expect(invoke('config:browse-import', sender)).rejects.toThrow('regular file')
+    await expect(invoke('config:browse-import', sender)).rejects.toMatchObject({ category: 'validation' })
     expect(sender.listenerCount('destroyed')).toBe(0)
   })
   it('consumes the capability even if JSON validation fails on apply', async () => {
     const file = selected(); writeFileSync(file, '{broken')
     await invoke('config:browse-import', sender)
-    expect((await invoke('config:import-apply', sender, file, ['notifications'], 'replace')).success).toBe(false)
-    await expect(invoke('config:import', sender, file)).rejects.toThrow('native-dialog')
+    await expect(invoke('config:import-apply', sender, file, ['notifications'], 'replace')).rejects.toMatchObject({ category: 'validation' })
+    await expect(invoke('config:import', sender, file)).rejects.toMatchObject({ category: 'permission' })
   })
   it('default export uses the masked variant and a cancelled save creates nothing (AT-01-008)', async () => {
-    expect((await invoke('config:export', sender)).success).toBe(false)
+    await expect(invoke('config:export', sender)).rejects.toMatchObject({ category: 'cancelled' })
     expect(dialog.showSaveDialog).toHaveBeenCalledWith(expect.objectContaining({
       title: 'Экспорт конфигурации без секретов', buttonLabel: 'Сохранить'
     }))

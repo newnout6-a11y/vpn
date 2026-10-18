@@ -91,10 +91,10 @@ export interface ElectronAPI {
   getTrafficForensicsStatus: () => Promise<TrafficForensicsStatus>
   restartTrafficForensics: () => Promise<TrafficForensicsStatus>
   // Config Import/Export
-  configExport: (mode?: 'redacted' | 'secrets') => Promise<{ success: boolean; path?: string; error?: string }>
+  configExport: (mode?: 'redacted' | 'secrets') => Promise<{ success: true; path: string }>
   configBrowseImport: () => Promise<string | null>
-  configImport: (filePath: string) => Promise<{ success: boolean; sections: string[]; conflicts: string[]; error?: string }>
-  configImportApply: (filePath: string, sections: string[], conflictResolution: 'replace' | 'merge') => Promise<{ success: boolean; error?: string }>
+  configImport: (filePath: string) => Promise<{ success: true; sections: string[]; conflicts: string[] }>
+  configImportApply: (filePath: string, sections: string[], conflictResolution: 'replace' | 'merge') => Promise<{ success: true }>
   // Split Tunneling
   splitTunnelGetApps: () => Promise<SplitTunnelApp[]>
   splitTunnelRefreshApps: () => Promise<{ apps: SplitTunnelApp[]; added: number }>
