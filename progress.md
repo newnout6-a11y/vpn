@@ -1846,3 +1846,46 @@ CI/review нового SHA проверяются отдельно после pu
 - Это адресное исправление PR, не полная приёмка AT-10-001/002 или WP-10;
   10 000 property cases, смена системной зоны и прочие AT-10-* не заявляются.
   Installed E2E не запускались. CI/review нового head проверяются отдельно.
+
+## 18.10.2026 — до WP-0 закрыть все открытые PR: #43, #44, #45
+
+- Владелец изменил приоритет: сначала исправить и слить все открытые PR,
+  затем возвращаться к WP-0. На момент запроса открыты ровно #43/#44/#45.
+  WP-0 stash сохранён; CodeRabbit не вызывается и не ожидается.
+- PR #45: head 9ce7b43d53f3990dc42457de85b17a0ba4b275bd прошёл Windows
+  и Rust CI, run 39077186370. Windows — **3310 passed / 4 skipped**, 209.80 s;
+  AC 927/927, F 210/210; WFP rollback aborted:true, Electron native probe
+  1 passed / 1 skipped. Revix neutral: проверенный вопрос after и два
+  предложения к устройству тестов. Merge **bfd0d97d3380f88d42eb2cce677dcbd276034c66**.
+- PR #43: документация решения владельца о командах по имени; функциональных
+  замечаний нет, Windows/Rust CI и Revix Ready to merge на aa0e2e2 — success.
+  Merge **0b70a7a21ddd425f54b719e72f31b78eb49b1c21**. Уточнения формулировок
+  и дубль README входят в зависимый PR #44.
+- PR #44: был mergeable:false/dirty, название docs не отражало кодовые изменения.
+  При merge актуального main разрешены пять конфликтов. Старый active/unverified
+  fallback не возвращается: сохранён более сильный свежий read-back статуса
+  firewall из WP-3 и его IPC-контракт; новые rollback/correlation тесты сохранены.
+  WFP helper получает явную policy во всех путях, включая обновлённый rollback.
+- Revix 4269895276 подтверждён: failed/throw restart при работающем TUN и
+  устаревших правилах вызывал немедленную рекурсию. Теперь автоматическая
+  перепроверка выполняется только после успешного restart; явный повтор позже
+  разрешён. Две регрессии сначала провалились (3 попытки вместо 1).
+- Revix 4269895286 уточнён: redactSensitiveText сохраняет публичный IP,
+  но удаляет credentials/URI. Его удаление нарушало redaction до logEvent.
+  Вызовы восстановлены, четыре регрессии проверяют отсутствие синтетического
+  токена в payload logEvent (success, safety gate, route loss, mismatch).
+  В сумме до исправления **6 failed / 21 passed**, exit 1.
+- Revix 4269895267 проверен: fast-uri 4.1.5 и js-yaml 4.3.2 уже берутся из
+  registry.npmjs.org, git+ssh/ssh URL в lockfile нет; SSH rewrite не требуется.
+  Website CI дополнен запуском тестов таймеров из PR #45.
+- Адресно: scheduler-independent PR #44 suite (splitTunnelingStartRace,
+  indeterminateIpAutoVerify, firewallPolicySelection, firewallTransactions,
+  firewallStatus, physicalAdapterLifecycle, singBoxEndpoint) — **270 passed /
+  1 skipped / 0 failed**, 7 файлов, 9.73 s, exit 0.
+- `npm.cmd run typecheck` — exit 0; coverage — AC 927/927, F 210/210, exit 0.
+  В website: `node tools/build.mjs` — 9 страниц; `node tools/lint-html.mjs`
+  — теги/ссылки корректны; `npm.cmd test` — 3 passed, все exit 0.
+  `npm.cmd test` — **3327 passed / 5 skipped / 0 failed**, 237 файлов passed /
+  2 skipped, 164.13 s, exit 0; лог `.tmp/pr44-review-full.log`.
+  После уточнения AT-метки повторно `npm.cmd test -- src/main/indeterminateIpAutoVerify.test.ts`
+  — 20 passed, exit 0. CI/review нового head PR #44 учитываются отдельно.

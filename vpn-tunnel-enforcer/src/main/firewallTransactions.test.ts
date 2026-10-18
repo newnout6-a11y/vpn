@@ -267,7 +267,8 @@ describe('firewall transaction fault injection (AT-03-003/004/007; F-030, F-186)
     expect(state.wfpCalls).toEqual([])
     expect(state.scripts).toEqual([])
   })
-  it('stops before IPv6 preparation when cancelled during the adapter barrier (AT-03-007)', async () => {
+  // IPv6 preparation is entered (it owns the abort check) but must abort with no journal and no native script.
+  it('aborts IPv6 preparation without effects when cancelled during the adapter barrier (AT-03-007)', async () => {
     const controller = new AbortController()
     let ready!: (value: boolean) => void
     const barrier = new Promise<boolean>(resolve => { ready = resolve })

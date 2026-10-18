@@ -50,8 +50,7 @@ import {
   clearPhysicalAdaptersSnapshotCache,
   isPhysicalAdapterLockdownApplied,
   repairOrphanedPhysicalAdapterDns,
-  rollbackPhysicalAdapterLockdownIfApplied,
-  warmPhysicalAdaptersSnapshot
+  rollbackPhysicalAdapterLockdownIfApplied
 } from './physicalAdapterLockdown'
 import { relaunchElevatedIfNeeded } from './admin'
 import { clearAppLog, getFullLogs, logEvent, openLogFolder, startEngineLogRetention, type AppLogLevel } from './appLogger'
@@ -1893,7 +1892,6 @@ app.whenReady().then(async () => {
     isQuitting || shutdownInProgress || connectionLifecycle.busy || tunController.getStatus().running)
 
   createWindow()
-  void warmPhysicalAdaptersSnapshot().catch(() => undefined)
   void serverPicker.resolveAndPersistProfileIps().catch(() => undefined)
   tray = createTray(mainWindow!, {
     onStart: startProtectionFromTray,

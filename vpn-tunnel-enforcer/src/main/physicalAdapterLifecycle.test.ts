@@ -118,6 +118,12 @@ describe('adapter rollback correlation (AT-03-007)', () => {
 
 // AT-03-006/007: the snapshot that feeds the rollback manifest must not come from the warm-up cache.
 describe('physical adapter apply snapshot freshness', () => {
+  it('does not pre-warm an adapter snapshot at startup that connect would ignore anyway', () => {
+    const indexSource = readFileSync(join(process.cwd(), 'src/main/index.ts'), 'utf8')
+    expect(indexSource).not.toMatch(/warmPhysicalAdaptersSnapshot|snapshotPhysicalAdapters\(/)
+    expect(source).not.toMatch(/function warmPhysicalAdaptersSnapshot/)
+  })
+
   it('requests a fresh adapter snapshot by default', async () => {
     const h = harness()
     await h.apply('192.168.250.254')

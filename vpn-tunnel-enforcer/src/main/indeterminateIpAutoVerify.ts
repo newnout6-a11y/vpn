@@ -6,6 +6,8 @@ import { runLeakSelfTest, type LeakSelfTestResult } from './leakSelfTest'
 
 export interface IndeterminateAutoVerifyDeps {
   isRunning?: () => boolean
+  /** Identity of the current connection; a reconnect during the check changes it. */
+  getConnectionId?: () => unknown
   getVerdict?: () => string
   areRoutesActive?: () => Promise<boolean>
   runLeakTest?: () => Promise<LeakSelfTestResult>
@@ -30,7 +32,12 @@ export async function executeIndeterminateVpnIpAutoVerify(
   if (indeterminateVerificationInFlight) return indeterminateVerificationInFlight
   const run = (async () => {
     try {
-      const isRunning = deps?.isRunning ?? (() => tunController.getStatus().running)
+      const isTunRunning = deps?.isRunning ?? (() => tunController.getStatus().running)
+      const getConnectionId = deps?.getConnectionId ?? (() => tunController.getStatus().startedAt ?? null)
+      // Bind every step to the connection that produced the candidate: after a stop/start (or a protected
+      // restart) the tunnel is running again, but its IP belongs to another connection and must not be adopted.
+      const connectionId = getConnectionId()
+      const isRunning = () => isTunRunning() && getConnectionId() === connectionId
       const getVerdict = deps?.getVerdict ?? (() => ipMonitor.getEvidence().verdict)
       const areRoutesActiveFn = deps?.areRoutesActive ?? areTunRoutesActive
       const runLeakTestFn = deps?.runLeakTest ?? runLeakSelfTest

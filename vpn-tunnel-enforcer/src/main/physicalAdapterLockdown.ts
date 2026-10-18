@@ -349,18 +349,6 @@ export function clearPhysicalAdaptersSnapshotCache(): void {
 }
 
 /**
- * Pre-warms the physical adapter snapshot in the background during application startup
- * so the initial VPN connection does not incur cold PowerShell initialization latency.
- */
-export async function warmPhysicalAdaptersSnapshot(): Promise<void> {
-  const currentSig = getLocalNetSignature()
-  if (cachedAdaptersSnapshot && Date.now() - cachedAdaptersSnapshotTime < 30000 && currentSig && currentSig === cachedNetSignature) {
-    return
-  }
-  await snapshotPhysicalAdapters()
-}
-
-/**
  * Retrieves a snapshot of physical network adapters, utilizing a cached result
  * if the network signature has not changed within the TTL window, or querying
  * fresh adapter state from PowerShell.

@@ -715,10 +715,20 @@ export function getVpnProcessNames(): string[] {
 async function hotReloadIfActive(): Promise<void> {
   const status = tunController.getStatus()
   if (!status.running) {
+    // A start in flight read the rules before this change; reapplyIfRulesChanged catches it once running.
     logEvent('debug', 'split-tunnel', 'hot-reload skipped — TUN not running')
     return
   }
+  await restartForRuleChange('split-tunnel rule change')
+}
 
+let ruleRestartInFlight = false
+
+async function restartForRuleChange(reason: string): Promise<void> {
+  // The restart in flight re-checks the store when it finishes.
+  if (ruleRestartInFlight) return
+  ruleRestartInFlight = true
+  let restarted = false
   logEvent('info', 'split-tunnel', 'hot-reloading split tunnel rules while TUN is active')
 
   try {
@@ -726,7 +736,8 @@ async function hotReloadIfActive(): Promise<void> {
     BrowserWindow.getAllWindows().forEach(win => {
       try { win.webContents.send('inapp-notification', { level: 'info', title: 'Применяем изменения', body: 'Перезапускаем защиту с обновлёнными правилами split tunneling', ts: Date.now() }) } catch {}
     })
-    const result = await tunController.restartWithLastOptions('split-tunnel rule change')
+    const result = await tunController.restartWithLastOptions(reason)
+    restarted = result.success
     if (!result.success) {
       logEvent('warn', 'split-tunnel', 'hot-reload restart failed — tunnel may be down', {
         error: result.error
@@ -734,7 +745,38 @@ async function hotReloadIfActive(): Promise<void> {
     }
   } catch (err) {
     logEvent('error', 'split-tunnel', 'hot-reload failed', err)
+  } finally {
+    ruleRestartInFlight = false
   }
+  // A change made during this restart may have been read too late (its 'running' arrived while in flight).
+  if (restarted) await reapplyIfRulesChanged()
+}
+
+function sameRuleSet(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false
+  const sorted = [...b].sort()
+  return [...a].sort().every((value, index) => value === sorted[index])
+}
+
+/**
+ * Called whenever the tunnel reports 'running'. start() reads the direct rules early; a rule changed
+ * (or a bypass revoked) before the tunnel came up skipped the hot reload, so the tunnel would keep the
+ * stale bypass. Compare what the start applied with the store and re-apply through a protected restart.
+ * The restart re-reads the store, so the comparison settles once the rules stop changing.
+ */
+export async function reapplyIfRulesChanged(): Promise<boolean> {
+  if (ruleRestartInFlight || !tunController.getStatus().running) return false
+  const applied = tunController.getAppliedSplitTunnelRules()
+  if (!applied) return false
+  const names = getDirectProcessNames()
+  const paths = getDirectProcessPaths()
+  if (sameRuleSet(applied.names, names) && sameRuleSet(applied.paths, paths)) return false
+  logEvent('warn', 'split-tunnel', 'split tunnel rules changed while the tunnel was starting — re-applying', {
+    appliedCount: applied.names.length + applied.paths.length,
+    currentCount: names.length + paths.length
+  })
+  await restartForRuleChange('split-tunnel rule changed during start')
+  return true
 }
 
 // ─── IPC Handlers ────────────────────────────────────────────────────────────
@@ -762,6 +804,10 @@ function handleLogged<T>(
  * Should be called once during app initialization.
  */
 export function registerSplitTunnelHandlers(): void {
+  tunController.onStatusChange((status) => {
+    if (status === 'running') void reapplyIfRulesChanged()
+  })
+
   handleLogged('split-tunnel:get-apps', async () => {
     const storedApps = getApps()
 
@@ -889,6 +935,7 @@ export const splitTunneling = {
   getDirectProcessPaths,
   getVpnProcessNames,
   generateSplitTunnelRouteRules,
+  reapplyIfRulesChanged,
   discoverInstalledApps,
   registerHandlers: registerSplitTunnelHandlers
 }

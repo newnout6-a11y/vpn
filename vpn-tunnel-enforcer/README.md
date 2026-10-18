@@ -30,8 +30,8 @@ Automatically detects local proxies from:
 - Export keys to URI (all protocols) or bulk file
 
 ### Per-Application Split Tunneling
-- Installed applications bypass the VPN by their **full path** (`process_path_regex`, case-insensitive, anchored): a copy of the same executable name in another folder is not matched. Both the stored spelling and the canonical long path (8.3 short names expanded) are covered. Bare commands without a path (`kind: process`) are matched by name only, by owner decision of 2026-10-13: direct route only, never a kill-switch exception. The mandatory UI warning, the log entry and a separate rule from the VPN core processes are not implemented yet.
-- Bare process names (`curl.exe`) are still matched by name.
+- Installed applications bypass the VPN by their **full path** (`process_path_regex`, case-insensitive, anchored): a copy of the same executable name in another folder is not matched. Both the stored spelling and the canonical long path (8.3 short names expanded) are covered.
+- Bare commands without a path (`kind: process`, e.g. `curl.exe`) are matched by name only, by owner decision of 2026-10-13: direct route only, never a kill-switch exception. The mandatory UI warning, the log entry and a separate rule from the VPN core processes are not implemented yet.
 - A rule whose path is not absolute or whose file no longer exists is inactive (logged) and the traffic stays in the tunnel — it never falls back to name matching.
 - Not verified on a live machine: that the process path sing-box reports matches the normalised one (AT-06-008).
 
