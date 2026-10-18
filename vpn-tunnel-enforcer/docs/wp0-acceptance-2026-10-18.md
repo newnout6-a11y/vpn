@@ -345,3 +345,15 @@ Typecheck проверяет 157 listeners и 0 legacy any. Contract regression 
 пустой legacy inventory, поэтому возврат публичного any обнаруживается. Полный
 набор тестов, CI и review записываются в progress.md; оставшиеся 9 AT WP-0,
 canonical domain failures и весь WP-2 не объявлены завершёнными.
+
+
+### Qodo #55 — импорт должен сохранять profile result contract
+
+Qodo 6251403696 подтвердил сквозную дыру: typed ServerProfile[] не мешает
+config import записать profiles:[null]. Новый regression вызывает настоящий
+selected-file import/apply и проверяет отказ до записи и неизменность прежних
+профилей. validateImportData проверяет поля ServerProfile, включая required
+strings, numeric port, status и типы известных optional metadata. Профиль без
+outbound поддерживается для backward compatibility; вложенные JSON extensions
+сохраняются. Это validation входного config, а не полная protocol semantics
+или отдельная приёмка уже повреждённых исторических stores. Результаты в progress.md.

@@ -2603,3 +2603,35 @@ CI/review нового SHA проверяются отдельно после pu
   доказанного: исправлена классификация reality:[], но активная SNI-утечка
   и её устранение не доказаны. PR body и acceptance report исправлены;
   это docs-only follow-up, runtime/test sources после полного suite не менялись.
+
+
+## 18.10.2026 — Qodo #55: некорректные profiles в импорте
+
+- По прямому поручению владельца отправлен `@qodo review this PR` в #54
+  (6251357932) и #55 (6251358101); qodo-code-review[bot] подтвердил обе команды
+  реакцией eyes. Главный ревьюер — Qodo; #54 остаётся открыт без merge.
+- [Qodo #54](https://github.com/newnout6-a11y/vpn/pull/54#issuecomment-6251376742)
+  на 9ce9298: 0 Bugs / 0 Rule violations / 0 Requirement gaps, no material issues.
+- [Qodo #55](https://github.com/newnout6-a11y/vpn/pull/55#issuecomment-6251403696)
+  на 0a9f579: Medium — profiles:[null] проходит apply, после чего servers:list
+  нарушает ServerProfile[] и active lookup падает. Подтверждено новыми tests.
+- `npm.cmd test -- src/main/configManager.test.ts src/main/configImportSecurity.test.ts`
+  до исправления: 9 failed / 41 passed, 573 ms, exit 1
+  (.tmp/wp0-qodo55-before.log). Проверяется настоящий apply handler: прежний
+  profiles store должен оставаться неизменным, selection расходуется.
+- validateImportData теперь проверяет обязательные поля, port/status и типы
+  известных необязательных полей каждого профиля. Null/array/non-record,
+  отсутствующие поля и несовместимые значения отклоняются до записи. Старый
+  профиль без outbound допустим; JSON protocol extensions не отбрасываются.
+  Полная protocol-specific проверка outbound этим валидатором не заявляется.
+- Целевой `npm.cmd test -- src/main/configManager.test.ts src/main/configImportSecurity.test.ts src/main/ipcResultContract.test.ts src/main/serverPickerGeoLifecycle.test.ts`
+  — 95 passed / 4 files, 12.40 s, exit 0 (.tmp/wp0-qodo55-focused.log).
+  Затем добавлены ещё два случая array/object status без String coercion;
+  они входят в последующий полный прогон. `npm.cmd run typecheck` — exit 0,
+  157 channels / 0 public any (.tmp/wp0-qodo55-typecheck.log).
+  Coverage AC 927/927 / F 210/210 и diff check — exit 0. Полный suite выполняется.
+
+- Полный `npm.cmd test` после исправления Qodo #55: 3860 passed / 5 skipped,
+  246 файлов passed / 2 skipped, 162.18 s, exit 0 (.tmp/wp0-qodo55-full.log).
+  Runtime sources после проверки не менялись. Повторное ревью запрашивается
+  у Qodo на новом commit; отсутствие ревью не переименовано в approval.

@@ -169,6 +169,23 @@ const BUILTIN_DNS_PROFILES: DnsProfile[] = [
  *
  * Returns { valid, sections, error? } where sections lists the recognized sections present.
  */
+function isImportedProfile(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const profile = value as Record<string, unknown>
+  if (!['id', 'name', 'protocol', 'server'].every(key => typeof profile[key] === 'string')
+    || typeof profile.port !== 'number' || !Number.isInteger(profile.port) || profile.port < 1 || profile.port > 65535
+    || typeof profile.status !== 'string' || !['online', 'offline', 'unknown'].includes(profile.status)) return false
+  const strings = ['resolvedIp', 'country', 'countryVerifiedIp', 'egressIp', 'clientFingerprint', 'healthReason', 'groupId', 'sourceUri']
+  const numbers = ['resolvedIpAt', 'countryVerifiedAt', 'countryGeoVersion', 'lastChecked', 'healthCheckedAt', 'lastSeenInSubscriptionAt', 'removedFromSubscriptionAt']
+  if (!strings.every(key => profile[key] === undefined || typeof profile[key] === 'string')
+    || !numbers.every(key => profile[key] === undefined || (typeof profile[key] === 'number' && Number.isFinite(profile[key])))
+    || !['enabled', 'enabledBeforeSubscriptionRemoval'].every(key => profile[key] === undefined || typeof profile[key] === 'boolean')
+    || !['ping', 'healthLatencyMs'].every(key => profile[key] == null || (typeof profile[key] === 'number' && Number.isFinite(profile[key])))) return false
+  return (profile.healthStatus === undefined || (typeof profile.healthStatus === 'string' && ['online', 'offline', 'unknown'].includes(profile.healthStatus)))
+    && (profile.clientDevice === undefined || (typeof profile.clientDevice === 'string' && ['pc', 'android', 'ios', 'mac'].includes(profile.clientDevice)))
+    && (profile.outbound === undefined || (profile.outbound !== null && typeof profile.outbound === 'object' && !Array.isArray(profile.outbound)))
+}
+
 export function validateImportData(data: unknown): {
   valid: boolean
   sections: ConfigSection[]
@@ -217,6 +234,10 @@ export function validateImportData(data: unknown): {
       }
       foundSections.push(section)
     }
+  }
+
+  if (Array.isArray(obj.profiles) && !obj.profiles.every(isImportedProfile)) {
+    return { valid: false, sections: [], error: 'Invalid profile entry' }
   }
 
   // Object sections
