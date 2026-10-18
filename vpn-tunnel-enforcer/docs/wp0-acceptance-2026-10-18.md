@@ -9,7 +9,7 @@ CodeRabbit исключён из ожидания владельцем; CI и д
 
 | AT | Найденная реализация / доказательства | Остаток до приёмки |
 | --- | --- | --- |
-| 00-001 | AST-проверка 157 main/preload/shared request channels, общий реестр входов и versioned transport envelope; object contracts проверяют поля/массивы, save-settings покрывает все 39 общих полей AppSettings | Оставшиеся `any` результатов других функций; полный PASS пока не заявлен |
+| 00-001 | AST-проверка 157 main/preload/shared request channels, общий реестр входов и versioned transport envelope; object contracts проверяют поля/массивы, save-settings покрывает все 39 общих полей AppSettings; TypeScript checker проверяет results всех 157 listeners | 9 profile results ещё содержат `any`; полный PASS пока не заявлен |
 | 00-002 | `tunController.ts`, lifecycle fault-injection tests | Единая модель и интегрированный координатор; все туры ≤6, недопустимые события, ресурсные инварианты |
 | 00-003 | Локальная отмена в отдельных подсистемах | Реестр connect/refresh/speed/import/export/rotation; отмена на 10/50/90%, deadline, запрет поздних эффектов |
 | 00-004 | Общая классификация transport; 157 каналов × 7 категорий через guard; native contextBridge сохраняет code/category/correlation в en/ru; typed local validation | Миграция legacy domain-result `{success:false,error}` и semantic matrix настоящих feature handlers; transport fixtures не доказывают её |
@@ -282,3 +282,30 @@ renderer использует те же определения вместо не
 Это не закрывает оставшуюся задачу canonical domain failures: legacy business
 results и их тексты ещё требуют отдельного аудита. Результаты команд и CI/review
 фиксируются в progress.md; нормативные docs/ не менялись.
+
+## AT-00-001 — результаты остальных сервисов
+
+Ещё 28 public result contracts используют конкретные pure types:
+network maintenance (baseline/firewall/adapters/DNS), browser hardening/location,
+AutoPilot, rule-sets, autoconfig, traffic history/forensics, server probe,
+пять split-tunnel methods и пять group methods. Существующие модели
+SplitTunnelApp/Config и ServerGroup переиспользованы; RefreshGroupResult
+переехал в shared. У nullable splitTunnelAddApp и serverProbe сохранён null.
+Blocked/skipped branches ремонта включены в публичный тип.
+
+Типы network.ts и traffic.ts не имеют runtime dependencies. Старые main imports
+совместимы через type-only reexports. Server probe использует существующий AsnInfo
+из shared, остальные probe types добавлены в diagnostics.ts. UI-копии заменены
+shared types; локальный AutoconfigTarget дополняет transport type только UI-флагом
+enabled, который main не обещает возвращать.
+
+Read-only проверка transpilation сравнивает исполняемые токены 22 изменённых
+production-модулей с HEAD при одинаковых переводах строк: идентичны. Новые shared
+modules испускают только пустой export. Это подтверждает границу type-only change,
+а не заменяет unit/native tests. Source regression для protectedTunnelActive
+проверяет новую shared declaration и её импорт, сохраняя прежние проверки label.
+
+В inventory остаются 9 profile results с any; AT-00-001 не объявлен PASS.
+Canonical domain failures, интегрированный FSM, cancellation/deadline,
+correlation/history, migrations, flags и race/UI матрицы остаются в WP-0.
+Команды, фактические результаты полного прогона и CI/review — в progress.md.

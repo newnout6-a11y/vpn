@@ -1,17 +1,9 @@
+import type { AutoconfigTarget } from '../../shared/network'
+export type { AutoconfigTarget } from '../../shared/network'
 import { androidStudio } from './androidStudio'
 import { gradle } from './gradle'
 import { env } from './env'
 import { git } from './git'
-
-export interface AutoconfigTarget {
-  id: string
-  name: string
-  applied: boolean
-  scope?: 'user-global' | 'app-global' | 'project-local'
-  warning?: string
-  managedPath?: string
-  backupPath?: string
-}
 
 const targets: Record<string, {
   name: string

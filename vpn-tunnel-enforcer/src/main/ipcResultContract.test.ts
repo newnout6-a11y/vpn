@@ -25,7 +25,15 @@ describe('listener result parity (AT-00-001; F-138)', () => {
     expect(result.checked).toHaveLength(inventory.registered.length)
     const typed = ['detect-happ', 'adaptive-bypass:get-status', 'adaptive-bypass:retry', 'adaptive-bypass:reset-learning',
       'run-leak-check', 'run-system-diagnostics', 'get-routing-plan', 'get-full-logs',
-      'url-availability:check', 'url-availability:history', 'speed-test:run', 'speed-test:history', 'renderer-log', 'clear-app-log']
+      'url-availability:check', 'url-availability:history', 'speed-test:run', 'speed-test:history', 'renderer-log', 'clear-app-log',
+      'get-autoconfig-status', 'smart-route:rule-sets-state', 'smart-route:rule-sets-refresh',
+      'apply-browser-leak-protection', 'rollback-browser-leak-protection', 'run-auto-pilot',
+      'rollback-tun-network-baseline', 'firewall:repair-health', 'firewall:repair-vpnte-rules',
+      'get-location-privacy', 'apply-location-privacy', 'rollback-location-privacy',
+      'network:repair-orphaned-dns', 'network:rollback-adapter-lockdown',
+      'get-traffic-forensics-status', 'restart-traffic-forensics', 'traffic-history:list', 'server:probe',
+      'split-tunnel:get-apps', 'split-tunnel:refresh-apps', 'split-tunnel:get-config', 'split-tunnel:add-app', 'split-tunnel:add-process',
+      'groups:list', 'groups:get', 'groups:rename', 'groups:refresh', 'groups:set-refresh-policy']
     for (const channel of typed) expect(result.legacy, channel).not.toContain(channel)
   }, 30_000)
   it('accepts asynchronous results through a local registration wrapper', () => {

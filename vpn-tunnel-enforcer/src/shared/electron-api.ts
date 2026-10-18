@@ -1,8 +1,11 @@
 import type { AppSettings } from './settings'
 import type { PublicIpInfo } from './publicIp'
-import type { ProxyInfo, AdaptiveBypassStatus, LeakCheckResult, SystemDiagnosticResult, RoutingPlan, LogFileSnapshot, UrlAvailabilityResult } from './diagnostics'
+import type { ProxyInfo, AdaptiveBypassStatus, LeakCheckResult, SystemDiagnosticResult, RoutingPlan, LogFileSnapshot, UrlAvailabilityResult, ServerProbeResult } from './diagnostics'
+import type { AutoconfigTarget, SmartRouteRuleSetState, BrowserHardeningResult, AutoPilotResult, SystemNetworkResult, FirewallKillSwitchResult, FirewallRepairHealth, LocationPrivacyStatus } from './network'
+import type { TrafficHistoryEntry, TrafficForensicsStatus } from './traffic'
 import type {
   ClientDevice,
+  SplitTunnelApp, SplitTunnelConfig, ServerGroup, RefreshGroupResult,
   SpeedTestResult,
   ScheduleEntry, ScheduleNextEvent, RotationConfig,
   KillSwitchLevel, KillSwitchException,
@@ -37,39 +40,39 @@ export interface ElectronAPI {
   getTrafficStats: () => Promise<TrafficStats>
   applyAutoconfig: (targets: string[], proxyAddr: string, proxyType?: 'socks5' | 'http') => Promise<Record<string, boolean>>
   rollbackAutoconfig: (targets: string[]) => Promise<Record<string, boolean>>
-  getAutoconfigStatus: () => Promise<any[]>
+  getAutoconfigStatus: () => Promise<AutoconfigTarget[]>
   getSettings: () => Promise<AppSettings>
   saveSettings: (settings: Partial<AppSettings>) => Promise<AppSettings>
   adaptiveBypassGetStatus: () => Promise<AdaptiveBypassStatus>
   adaptiveBypassRetry: () => Promise<{ started: boolean; status: AdaptiveBypassStatus }>
   adaptiveBypassResetLearning: () => Promise<{ success: boolean; status: AdaptiveBypassStatus }>
-  smartRouteRuleSetsGetState: () => Promise<any>
-  smartRouteRuleSetsRefresh: (force?: boolean) => Promise<any>
+  smartRouteRuleSetsGetState: () => Promise<SmartRouteRuleSetState>
+  smartRouteRuleSetsRefresh: (force?: boolean) => Promise<SmartRouteRuleSetState>
   inspectVpnInput: (input: string) => Promise<{ count: number; protocols: Record<string, number>; profiles: Array<{ index: number; name: string; protocol: string }>; fetched: boolean; source: string }>
   setLoginItem: (openAtLogin: boolean) => Promise<AppSettings>
   runLeakCheck: (options?: { proxyAddr?: string; proxyType?: 'socks5' | 'http' }) => Promise<LeakCheckResult>
   runSystemDiagnostics: () => Promise<SystemDiagnosticResult>
   getRoutingPlan: () => Promise<RoutingPlan>
-  applyBrowserLeakProtection: () => Promise<any>
-  rollbackBrowserLeakProtection: () => Promise<any>
-  runAutoPilot: () => Promise<any>
-  repairOrphanedDns: () => Promise<any>
-  rollbackAdapterLockdown: () => Promise<any>
+  applyBrowserLeakProtection: () => Promise<BrowserHardeningResult>
+  rollbackBrowserLeakProtection: () => Promise<BrowserHardeningResult>
+  runAutoPilot: () => Promise<AutoPilotResult>
+  repairOrphanedDns: () => Promise<{ repaired: boolean; adapters: string[] }>
+  rollbackAdapterLockdown: () => Promise<{ rolledBack: boolean; skipped?: boolean; warnings?: string[]; blocked?: boolean; message?: string }>
   killStaleSingbox: () => Promise<{ success: boolean; message: string; skipped?: boolean; blocked?: boolean; candidates?: number; killed?: number; names?: string[]; error?: string }>
   logRenderer: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => Promise<{ success: boolean }>
   getFullLogs: () => Promise<LogFileSnapshot[]>
   clearAppLog: () => Promise<{ success: boolean }>
   clearDiagnosticArtifacts: () => Promise<{ success: boolean; message: string; cleared: string[] }>
-  rollbackTunNetworkBaseline: () => Promise<any>
+  rollbackTunNetworkBaseline: () => Promise<SystemNetworkResult & { blocked?: boolean }>
   disableFirewallKillSwitch: () => Promise<{ success: boolean; message: string; skipped?: boolean }>
   getFirewallKillSwitchStatus: () => Promise<FirewallKillSwitchStatus>
   firewallNuclearReset: (confirmationToken: string) => Promise<{ success: boolean; message: string }>
-  firewallRepairHealth: () => Promise<any>
-  firewallRepairVpnteRules: () => Promise<any>
+  firewallRepairHealth: () => Promise<FirewallRepairHealth>
+  firewallRepairVpnteRules: () => Promise<FirewallKillSwitchResult & { health: FirewallRepairHealth; blocked?: boolean }>
   detectForeignVpn: () => Promise<{ foreign: string | null }>
-  getLocationPrivacy: () => Promise<any>
-  applyLocationPrivacy: () => Promise<any>
-  rollbackLocationPrivacy: () => Promise<any>
+  getLocationPrivacy: () => Promise<LocationPrivacyStatus>
+  applyLocationPrivacy: () => Promise<LocationPrivacyStatus>
+  rollbackLocationPrivacy: () => Promise<LocationPrivacyStatus>
   openTunLogFolder: () => Promise<string>
   openLogFolder: () => Promise<string>
   exportDiagnostics: () => Promise<{ success: boolean; path?: string; error?: string; cancelled?: boolean }>
@@ -85,20 +88,20 @@ export interface ElectronAPI {
     message: string
   }>
   openSnapshotsFolder: () => Promise<{ success: boolean; path?: string; error?: string }>
-  getTrafficForensicsStatus: () => Promise<any>
-  restartTrafficForensics: () => Promise<any>
+  getTrafficForensicsStatus: () => Promise<TrafficForensicsStatus>
+  restartTrafficForensics: () => Promise<TrafficForensicsStatus>
   // Config Import/Export
   configExport: (mode?: 'redacted' | 'secrets') => Promise<{ success: boolean; path?: string; error?: string }>
   configBrowseImport: () => Promise<string | null>
   configImport: (filePath: string) => Promise<{ success: boolean; sections: string[]; conflicts: string[]; error?: string }>
   configImportApply: (filePath: string, sections: string[], conflictResolution: 'replace' | 'merge') => Promise<{ success: boolean; error?: string }>
   // Split Tunneling
-  splitTunnelGetApps: () => Promise<any[]>
-  splitTunnelRefreshApps: () => Promise<{ apps: any[]; added: number }>
-  splitTunnelGetConfig: () => Promise<any>
+  splitTunnelGetApps: () => Promise<SplitTunnelApp[]>
+  splitTunnelRefreshApps: () => Promise<{ apps: SplitTunnelApp[]; added: number }>
+  splitTunnelGetConfig: () => Promise<SplitTunnelConfig>
   splitTunnelSetRule: (appId: string, rule: 'vpn' | 'direct' | 'none') => Promise<void>
-  splitTunnelAddApp: (exePath: string) => Promise<any>
-  splitTunnelAddProcess: (name: string) => Promise<any>
+  splitTunnelAddApp: (exePath: string) => Promise<SplitTunnelApp | null>
+  splitTunnelAddProcess: (name: string) => Promise<SplitTunnelApp>
   splitTunnelRemoveApp: (appId: string) => Promise<void>
   // Server Picker
   serversList: () => Promise<any[]>
@@ -146,20 +149,17 @@ export interface ElectronAPI {
     | { ok: false; reason: string; error?: string; total?: number; skipped?: number }
   >
   // Server Groups — origin tracking and post-trial-aware refresh.
-  groupsList: () => Promise<any[]>
-  groupsGet: (id: string) => Promise<any | null>
-  groupsRename: (id: string, name: string) => Promise<any | null>
+  groupsList: () => Promise<ServerGroup[]>
+  groupsGet: (id: string) => Promise<ServerGroup | null>
+  groupsRename: (id: string, name: string) => Promise<ServerGroup | null>
   groupsDelete: (id: string, deleteServers: boolean) => Promise<{ ok: boolean }>
-  groupsRefresh: (id: string) => Promise<
-    | { ok: true; group: any; addedCount: number; updatedCount: number; removedCount: number }
-    | { ok: false; error: string }
-  >
-  groupsSetRefreshPolicy: (id: string, intervalMinutes: number | null) => Promise<any | null>
+  groupsRefresh: (id: string) => Promise<RefreshGroupResult>
+  groupsSetRefreshPolicy: (id: string, intervalMinutes: number | null) => Promise<ServerGroup>
   groupsCheckHealth: (id: string) => Promise<
     | { ok: true; results: Array<{ profileId: string; online: boolean; latencyMs: number | null; reason?: string }> }
     | { ok: false; error: string }
   >
-  serverProbe: (host: string, knownPort?: number) => Promise<any>
+  serverProbe: (host: string, knownPort?: number) => Promise<ServerProbeResult | null>
   serverLiveCheck: (options: LiveServerCheckOptions) => Promise<LiveServerCheck>
   serverLiveCheckBatch: (options: LiveServerBatchCheckOptions) => Promise<LiveServerBatchCheckResult>
   serverLiveCheckCancel: (requestId?: string) => Promise<{ cancelled: boolean; reason?: string }>
@@ -210,7 +210,7 @@ export interface ElectronAPI {
   connectionHistoryExportJson: () => Promise<string>
   connectionHistoryClear: () => Promise<{ success: boolean }>
   // Traffic History
-  trafficHistoryList: (vpnIp?: string, scheduleEnrichment?: boolean) => Promise<any[]>
+  trafficHistoryList: (vpnIp?: string, scheduleEnrichment?: boolean) => Promise<TrafficHistoryEntry[]>
   trafficHistoryClear: () => Promise<{ success: boolean }>
   onTrafficHistoryUpdated: (callback: () => void) => () => void
   // Notification Preferences

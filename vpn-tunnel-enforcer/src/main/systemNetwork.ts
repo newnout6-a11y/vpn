@@ -1,3 +1,5 @@
+import type { SystemNetworkResult } from '../shared/network'
+export type { SystemNetworkResult } from '../shared/network'
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import { randomUUID } from 'crypto'
@@ -9,14 +11,6 @@ import { readRecoveryManifest, writeRecoveryManifest, removeRecoveryManifest, re
 
 const execFile = promisify(execFileCb)
 const BASELINE_NAME = 'latest-tun-network-baseline.json'
-export interface SystemNetworkResult {
-  success: boolean
-  operationId?: string
-  message: string
-  details?: string
-  warnings?: string[]
-  skipped?: boolean
-}
 const PROXY_ENV_KEYS = ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy']
 const TARGETS = {
   internet: { key: 'Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings', names: ['ProxyEnable', 'ProxyServer', 'AutoConfigURL', 'AutoDetect'] },

@@ -1,3 +1,5 @@
+import type { RefreshGroupResult } from '../shared/ipc-types'
+export type { RefreshGroupResult } from '../shared/ipc-types'
 /**
  * Server Groups Service — origin tracking for server profiles.
  *
@@ -60,10 +62,6 @@ export const MAX_SERVER_GROUP_REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000
 export const MIN_MANUAL_SERVER_GROUP_REFRESH_INTERVAL_MS = 60 * 1000
 const SERVER_GROUP_REFRESH_SWEEP_INTERVAL_MS = 60 * 1000
 const SERVER_GROUP_INITIAL_REFRESH_DELAY_MS = 10 * 1000
-
-type RefreshGroupResult =
-  | { ok: true; group: ServerGroup; addedCount: number; updatedCount: number; removedCount: number }
-  | { ok: false; error: string }
 
 const refreshGroupLocks = new Map<string, Promise<RefreshGroupResult>>()
 let autoRefreshTimer: ReturnType<typeof setInterval> | null = null

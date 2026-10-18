@@ -1,3 +1,5 @@
+import type { RuleSetFileMetadata, SmartRouteRuleSetFileState, SmartRouteRuleSetState } from '../shared/network'
+export type { RuleSetFileMetadata, SmartRouteRuleSetFileState, SmartRouteRuleSetState } from '../shared/network'
 import { execFile as execFileCb } from 'child_process'
 import { createHash } from 'crypto'
 import { access, mkdir, readFile, rename, stat, unlink } from 'fs/promises'
@@ -14,46 +16,12 @@ const execFile = promisify(execFileCb)
 const RULE_SET_CACHE_DIR = 'smart-route-rule-sets'
 const DOWNLOAD_TIMEOUT_MS = 60_000
 
-interface RuleSetFileMetadata {
-  tag: string
-  fileName: string
-  url: string
-  lastCheckedAt: number | null
-  lastUpdatedAt: number | null
-  size: number | null
-  sha256: string | null
-  lastError: string | null
-  lastRoute: string | null
-}
-
 interface RuleSetMetadataStore {
   files: Record<string, RuleSetFileMetadata>
   lastRefreshStartedAt: number | null
   lastRefreshFinishedAt: number | null
   lastRefreshOk: boolean | null
   lastRefreshError: string | null
-}
-
-export interface SmartRouteRuleSetFileState extends RuleSetFileMetadata {
-  label: string
-  exists: boolean
-  path: string
-}
-
-export interface SmartRouteRuleSetState {
-  mode: AppSettings['smartRuRuleSetMode']
-  autoUpdate: boolean
-  useProxy: boolean
-  updateIntervalHours: number
-  activeSource: 'bundled' | 'managed'
-  managedComplete: boolean
-  managedDir: string
-  bundledDir: string
-  lastRefreshStartedAt: number | null
-  lastRefreshFinishedAt: number | null
-  lastRefreshOk: boolean | null
-  lastRefreshError: string | null
-  files: SmartRouteRuleSetFileState[]
 }
 
 const metadataStore = new Store<RuleSetMetadataStore>({

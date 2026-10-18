@@ -2449,3 +2449,70 @@ CI/review нового SHA проверяются отдельно после pu
   domain failures, FSM/coordinator, cancellation/deadline, migrations,
   correlation/history/flags/races/UI остаются. WP-2 не начат; цель active.
   Из нормативных docs/ ничего не менялось; впереди exact-head CI и Revix.
+
+## 18.10.2026 — PR #53 слит; оставшиеся service result contracts
+
+- PR https://github.com/newnout6-a11y/vpn/pull/53 слит, merge
+  1874794bbc35e390f6a1fa16646b51b760045deb; проверенный head
+  74a10e31c46db6cd90ff69f348893755856d2acc. `git diff 74a10e3 vpn/main
+  --exit-code` — 0: merge сохранил проверенное дерево.
+- Exact-head CI 39124566441: Windows 117666871494, Rust 117666871754,
+  сайт 117666871700 — success. Windows: 3830 passed / 4 skipped /
+  0 failed, 247 файлов passed / 1 skipped, 225.77 s. Checker всех
+  157 listeners и coverage AC 927/927, F 210/210 — exit 0. Production
+  IPC/contextBridge и CSP markers PASS, WFP aborted:true, native Electron
+  probe 1 passed / 1 skipped (.tmp/wp0-diagnostic-results-final-ci.log).
+- Revix 117666885660 — success, Ready to merge, замечаний нет. Локальный
+  финальный `npm.cmd run typecheck` — exit 0
+  (.tmp/wp0-diagnostic-results-final-typecheck.log); full 3829 passed /
+  5 skipped, 176.96 s, exit 0. Источники после этих проверок не менялись.
+- Новая ветка codex/wp0-service-results от проверенного vpn/main.
+  Следующий участок AT-00-001: 23 результата существующих сервисов
+  (network maintenance, forensics/traffic history, autoconfig, probe,
+  rule-sets/AutoPilot и split tunneling), преимущественно готовые pure types.
+  Остальные profile/group results, domain failures и вся остальная матрица
+  WP-0 остаются в работе. WP-2 не начат, цель active.
+
+## 18.10.2026 — WP-0: 28 service result contracts без изменения runtime
+
+- Ветка codex/wp0-service-results. Ещё 28 public methods получили конкретные
+  результаты: network maintenance, browser/location protection, AutoPilot,
+  rule-sets, autoconfig, traffic history/forensics, probe, split tunnel и groups.
+  Checker сохраняет все 157 listeners; public any стало 9 вместо 37.
+- Pure network/traffic types вынесены в shared/network.ts и shared/traffic.ts,
+  main imports сохраняются через type-only reexports. Probe использует общий
+  AsnInfo, остальные probe types добавлены в shared/diagnostics.ts. UI-копии
+  удалены; UI AutoconfigTarget расширяет transport type только enabled.
+  Поведение services, recovery, engines, файловые форматы не менялись.
+- Baseline `npm.cmd test -- src/main/ipcResultContract.test.ts -t 'checks all production listeners'`
+  — 1 failed / 9 skipped, exit 1 (.tmp/wp0-service-results-before.log):
+  get-autoconfig-status и ещё 27 migrated methods оставались legacy any.
+- `npm.cmd run typecheck` — exit 0, 157 listeners, 9 legacy results
+  (.tmp/wp0-service-results-typecheck.log). `npm.cmd run build` — exit 0
+  (.tmp/wp0-service-results-build.log). `node scripts/test-electron-runtime.mjs`
+  — ELECTRON_SMOKE_PASS, exit 0 (.tmp/wp0-service-results-native.log).
+- `node .tmp/wp0-service-runtime-parity.cjs` — exit 0: после одинаковой
+  нормализации CRLF/LF исполняемые transpiled tokens 22 изменённых production
+  modules совпадают с HEAD; два новых shared modules испускают только пустой
+  export (.tmp/wp0-service-runtime-parity.log). Первые попытки probe выявляли
+  различие line endings и лишних скобок arrow parameter, а не logic changes;
+  итоговая проверка не игнорирует произвольные различия runtime tokens.
+- Первый focused набор — 65 passed, 8 файлов, 11.62 s, exit 0
+  (.tmp/wp0-service-results-focused.log). Первый full `npm.cmd test` —
+  3828 passed / 1 failed / 5 skipped, 176.90 s, exit 1
+  (.tmp/wp0-service-results-full.log). Единственный отказ AppSource искал
+  protectedTunnelActive в прежнем renderer interface; теперь он проверяет
+  поле в shared/network.ts и импорт FirewallRepairHealth в Maintenance,
+  сохраняя прежние assertions protection label. Проверка не удалена.
+- Итоговый `npm.cmd test -- src/main/ipcResultContract.test.ts src/main/ipcChannelContract.test.ts src/main/serverProbe.test.ts src/main/splitTunneling.test.ts src/main/autoPilot.test.ts src/main/trafficHistory.test.ts src/main/domainEnrichment.test.ts src/renderer/AppSource.test.ts src/renderer/MaintenanceSource.test.ts src/renderer/pages/Settings.render.test.tsx`
+  — 98 passed, 10 файлов, 13.25 s, exit 0
+  (.tmp/wp0-service-results-final-focused.log). Финальный `npm.cmd run typecheck`
+  — exit 0 (.tmp/wp0-service-results-final-typecheck.log).
+- Финальный полный `npm.cmd test` — 3829 passed / 5 skipped / 0 failed,
+  246 файлов passed / 2 skipped, 174.91 s, exit 0
+  (.tmp/wp0-service-results-final-full.log).
+- Coverage: `python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py`
+  — AC 927/927, F 210/210, exit 0; `git diff --check` — exit 0.
+  9 profile results, domain failures, FSM/coordinator/cancellation/deadline,
+  migrations/correlation/history/flags/races/UI остаются в WP-0; WP-2 не начат.
+  Нормативные docs/ не менялись; цель active.

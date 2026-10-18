@@ -1,3 +1,4 @@
+import type { AutoconfigTarget as SharedAutoconfigTarget } from '../shared/network'
 import type { ProxyInfo, LeakCheckItem, LeakCheckResult } from '../shared/diagnostics'
 export type { ProxyInfo, LeakCheckItem, LeakCheckResult } from '../shared/diagnostics'
 import type { AppSettings } from '../shared/settings'
@@ -38,15 +39,8 @@ import { create } from 'zustand'
 
 export type Mode = 'off' | 'soft' | 'hard' | 'external'
 
-export interface AutoconfigTarget {
-  id: string
-  name: string
-  applied: boolean
+export interface AutoconfigTarget extends SharedAutoconfigTarget {
   enabled: boolean
-  scope?: 'user-global' | 'app-global' | 'project-local'
-  warning?: string
-  managedPath?: string
-  backupPath?: string
 }
 
 export interface LogEntry {
