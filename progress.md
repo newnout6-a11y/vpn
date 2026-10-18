@@ -2596,3 +2596,10 @@ CI/review нового SHA проверяются отдельно после pu
   (.tmp/wp0-profile-results-final-full.log). После проверок runtime-код не менялся.
   Для stacked PR CI запускается workflow_dispatch на точном head: workflow
   автоматически принимает только pull_request в main, base #54 пока не слит.
+- Self-review перед завершением PR #55 уточнил scope: production call sites
+  describeProbeTarget/tlsLeaksSni не найдены (`rg` по src без test.ts).
+  checkProfileHealth вызывает checkOutboundHealth с полным outbound, а не
+  этот классификатор. Ранее в commentary/PR draft следствие было описано шире
+  доказанного: исправлена классификация reality:[], но активная SNI-утечка
+  и её устранение не доказаны. PR body и acceptance report исправлены;
+  это docs-only follow-up, runtime/test sources после полного suite не менялись.

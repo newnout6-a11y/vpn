@@ -325,8 +325,11 @@ ServerProfile.outbound использует общий рекурсивный Ip
 Доступ к вложенным TLS/Reality/ECH/uTLS/ALPN полям уточняет контейнер и тип
 значения. asJsonObject проверяет только внешний контейнер; функция не обещает
 полную валидацию его полей. Массив reality:[] не считается camouflage:
-describeProbeTarget сохраняет tlsLeaksSni:true и не разрешает прямую TLS-пробу
-как для Reality. Реальные прежние pickServerName/describeProbeTarget извлечены
+describeProbeTarget сохраняет tlsLeaksSni:true вместо ошибочного false.
+Production call sites describeProbeTarget/tlsLeaksSni не найдены: текущий
+checkProfileHealth использует checkOutboundHealth и полный outbound, поэтому
+исправление классификатора не заявляется устранением активной SNI-утечки.
+Реальные прежние pickServerName/describeProbeTarget извлечены
 из parent и текущего файла без I/O: baseline false, исправленный true; три
 корректных случая Reality/disabled/absent совпадают. Это локальная регрессия,
 а не packet oracle или лабораторная приёмка сетевой изоляции.
