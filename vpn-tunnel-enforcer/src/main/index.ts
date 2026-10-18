@@ -201,7 +201,7 @@ interface LiveSession {
   startedMonotonicMs: number
   correlationId?: string
   origin: Omit<ConnectionProvenance, 'confidence'>
-  profile: { id: string; name: string; mode: 'hard' | 'soft' | 'direct' }
+  profile: { id: string; name: string; mode: 'hard' | 'soft' | 'direct'; proxyAddr?: string; proxyType?: 'socks5' | 'http' }
   leakDetected: boolean
   lastNetworkTransition: string | null
 }
@@ -1137,10 +1137,23 @@ async function startSoftProtectionEffects(owner: ConnectionStartupOwner, proxyAd
   }
 
   const normalizedProxyType = proxyType ?? settingsStore.get().proxyType
-  const profile = { id: `local-proxy-soft-${normalizedProxyType}`, name: `Soft proxy ${proxyAddr}`, mode: 'soft' as const }
+  const profile = { id: `local-proxy-soft-${normalizedProxyType}`, name: `Soft proxy ${proxyAddr}`, mode: 'soft' as const, proxyAddr, proxyType: normalizedProxyType }
   const results = await owner.wait(autoconfig.apply(['env'], proxyAddr, normalizedProxyType))
   if (!results.env) {
     const error = 'Не удалось применить env autoconfig'
+    if (currentSession?.profile.mode === 'soft') {
+      const previous = currentSession.profile
+      let retained = false
+      try {
+        if (previous.proxyAddr && previous.proxyType) retained = await owner.wait(autoconfig.isEnvProxyConfigured(previous.proxyAddr, previous.proxyType))
+      } catch { owner.assertActive() } // Read failure is uncertainty; cancellation must not write late history.
+      if (!retained) {
+        closeSession(makeOutcome('unknown', {}, 'Не удалось подтвердить прежние настройки Soft после ошибки обновления'))
+        softProtectionApplied = false
+        tunnelState.fault('unknown')
+        sendToMainWindow('soft-status-changed', false)
+      }
+    }
     recordStartFailure(profile, error)
     return { success: false, error }
   }
@@ -1159,7 +1172,9 @@ async function rollbackSoftAutoconfigIfApplied(reason: string): Promise<void> {
   try {
     const rolledBack = await autoconfig.rollbackApplied('env')
     softProtectionApplied = false
-    if (currentSession?.profile?.mode === 'soft' && reason !== 'protection stop') closeSession(makeOutcome('server-switch'))
+    if (currentSession?.profile?.mode === 'soft' && reason !== 'protection stop') {
+      closeSession(makeOutcome('unknown', {}, 'Soft-защита отключена перед запуском другого режима'))
+    }
     if (rolledBack) {
       logEvent('info', 'app', `rolled back env autoconfig before ${reason}`)
       sendToMainWindow('soft-status-changed', false)
@@ -1781,7 +1796,7 @@ async function startProtectionFromTrayEffects(): Promise<void> {
     const resolved = await resolveProxyForTrayStart()
     if (!resolved) {
       const errorMsg = 'Прокси не найден. Запустите VPN-клиент в режиме Proxy или задайте адрес вручную в настройках.'
-      recordStartFailure({ id: 'local-proxy-soft', name: 'Soft proxy', mode: 'soft' }, errorMsg)
+      recordStartFailure({ id: `local-proxy-soft-${settingsStore.get().proxyType}`, name: 'Soft proxy', mode: 'soft' }, errorMsg)
       notify('error', 'Прокси не найден', errorMsg, 'connectionError')
       restoreAndFocusMainWindow()
       return

@@ -3634,3 +3634,47 @@ CI/review нового SHA проверяются отдельно после pu
   AC 927/927, F 210/210, exit 0; `git diff --check` — exit 0.
   Native smoke ограничен Electron/IPC/CSP, OS/env эффекты в Soft fixtures
   заменены: полная Windows env/packet приёмка этим не заявляется.
+
+### Qodo #66 — проверка прежнего endpoint после failed refresh
+
+- Head bcd82472d9d1cd76e6505ade029782392103bbc1: Qodo 1542087 completed.
+  Finding 1077a56c-5066-45cc-82e0-9bfbc7112659 action_required подтверждён:
+  failed refresh мог частично изменить env, а compensation тоже мог отказать.
+  Одного durable backup недостаточно, чтобы продолжать прежнюю сессию.
+- Main теперь читает все четыре registry/process env значения через actual
+  env.matchesProxy и autoconfig dispatcher. Старый endpoint сохраняет history
+  только при подтверждении. Ошибка чтения/несовпадение закрывает её с unknown /
+  confidence=indeterminate, переводит FSM в unknown, сохраняя rollback receipt.
+  Evidence read участвует в owner.wait; отмена не пишет поздних событий.
+- Finding 13f591ff-c9a1-4c6c-a928-1210c73885ef remediation_recommended:
+  missing-proxy tray отказ использует тот же type-specific Soft profile ID.
+  Informational 153e616b-6aa4-41a5-a908-f36f527e228c также учтён: перед
+  Hard/Direct startup итог Soft не объявляется server-switch с продолжением
+  сессии. Запись явно говорит об отключении перед запуском другого режима,
+  достоверность следующего запуска не заявляется.
+- До production fix `npm.cmd test -- src/main/connectionHistoryStorage.test.ts src/main/autoconfig/env.test.ts`
+  — **18 failed / 184 passed**, 3.81 s, exit 1
+  (.tmp/wp0-soft-qodo66-before.log): новые read-back контракты и регрессии.
+- `npm.cmd test -- src/main/connectionHistoryStorage.test.ts src/main/lifecycleCleanup.test.ts src/main/autoconfig/env.test.ts src/main/autoconfig/index.test.ts`
+  — **396 passed / 4 files**, 22.35 s, exit 0
+  (.tmp/wp0-soft-qodo66-focused-evidence.log). Проверены partial mutation с
+  compensation failure, каждый registry/process key, read denial, cancellation
+  во время read-back и настоящая запись/reload истории. OS commands заменены.
+- `npm.cmd run typecheck` — exit 0, 158 channels / 0 public any
+  (.tmp/wp0-soft-qodo66-typecheck-final.log); coverage AC 927/927, F 210/210
+  и `git diff --check` — exit 0.
+- Первый полный `npm.cmd test` — **1 failed / 4193 passed / 5 skipped**,
+  164.76 s, exit 1 (.tmp/wp0-soft-qodo66-full.log). Единственный отказ:
+  неизменённый native PowerShell gateway-only fixture adaptiveNetworkIdentity
+  превысил Vitest timeout 5 s (10.482 s). Адресный повтор
+  `npm.cmd test -- src/main/adaptiveNetworkIdentity.test.ts` — **25 passed**,
+  2.48 s, exit 0 (.tmp/wp0-soft-qodo66-native-recheck.log).
+  Тест не отключён, лимит не ослаблен; запускается повтор полного набора.
+- Повтор полного `npm.cmd test` — **4194 passed / 5 skipped / 0 failed**,
+  264 files passed / 2 skipped, 157.51 s, exit 0
+  (.tmp/wp0-soft-qodo66-full-recheck.log).
+- `npm.cmd run build` — exit 0 (.tmp/wp0-soft-qodo66-build.log);
+  `node scripts/test-electron-runtime.mjs` — ELECTRON_SMOKE_PASS, exit 0
+  (.tmp/wp0-soft-qodo66-electron.log); `node scripts/test-wp1-native.mjs --ipc-only`
+  — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-soft-qodo66-csp.log).
+  Проверки прежнего head не используются как evidence исправленного коммита.

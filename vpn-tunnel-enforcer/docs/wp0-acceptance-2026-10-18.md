@@ -814,13 +814,18 @@ endedAt < startedAt и durationMs=65000: она остаётся сессией 
 Успешный env apply теперь открывает сессию с оригинальными correlation/source/
 owner/route/confidence. Одинаковый refresh не создаёт искусственный server-switch;
 смена адреса или протокола закрывает предыдущую сессию и открывает следующую.
-Failed refresh сохраняет предыдущую live-сессию и пишет отдельную попытку.
+Failed refresh сохраняет предыдущую live-сессию только после read-back всех
+четырёх переменных реестра и process env для прежнего endpoint. Несовпадение
+или ошибка чтения закрывает её с confidence=indeterminate, переводит FSM в
+unknown и сохраняет cleanup obligation. Попытка записывается отдельно.
 Отмена/late completion не открывают сессию. Native status/restart callbacks
 не подменяют историю env-only маршрута.
 
 Stop/shutdown сохраняют Soft session при неподтверждённом env rollback и пишут
 конечную запись только после успешного retry. Переключение на Hard/Direct
-закрывает её после проверенного env cleanup. Retained Soft reconciliation
+закрывает её после проверенного env cleanup с отдельным неопределённым итогом
+следующего запуска, без утверждения о продолжении сессии на новом сервере.
+Retained Soft reconciliation
 использует owner=recovery, а tray failure до admission — source=tray/owner=manual.
 Native counters для Soft не измеряются: нули в этих полях не доказывают отсутствие
 трафика. Duration берётся из монотонной шкалы, route остаётся configured mechanism.

@@ -430,6 +430,7 @@ describe('env autoconfig backup and verified rollback', () => {
     })
     expect(await env.apply('127.0.0.1:10809', 'http')).toBe(false)
     expect(failed).toBe(true)
+    expect(await env.matchesProxy('127.0.0.1:10808', 'socks5')).toBe(true)
     expect(mockRegistry).toEqual(vpnValues)
     for (const name of proxyKeys) expect(process.env[name]).toBe(vpnValues[name])
     expect(mockFs[backupFile]).toBe(receipt)
@@ -461,12 +462,35 @@ describe('env autoconfig backup and verified rollback', () => {
       return registryCommand(cmd, args)
     })
     expect(await env.apply('127.0.0.1:10809', 'http')).toBe(false)
+    expect(await env.matchesProxy('127.0.0.1:10808', 'socks5')).toBe(false)
     expect(mockFs[backupFile]).toBe(receipt)
     expect(mockFs[pendingFile]).toBeDefined()
     expect(await env.isApplied()).toBe(true)
     mockExecFile.mockImplementation(registryCommand)
     expect(await env.rollback()).toBe(true)
     expect(mockRegistry).toEqual(originalValues)
+  })
+
+  it.each(proxyKeys)('does not confirm a previous endpoint on %s read errors (AT-00-005)', async key => {
+    seedRegistry(vpnValues)
+    mockExecFile.mockImplementation((cmd: string, args: string[]) => cmd === 'reg' && args[0] === 'query' && args[3] === key
+      ? new Error('read denied') : registryCommand(cmd, args))
+    await expect(env.matchesProxy('127.0.0.1:10808', 'socks5')).rejects.toThrow('read denied')
+    expect(mutations()).toEqual([])
+  })
+
+  it.each(proxyKeys)('does not confirm registry-only restoration if process %s differs (AT-00-005)', async key => {
+    seedRegistry(vpnValues)
+    vi.stubEnv(key, 'different')
+    expect(await env.matchesProxy('127.0.0.1:10808', 'socks5')).toBe(false)
+    expect(mutations()).toEqual([])
+  })
+
+  it.each(proxyKeys)('does not confirm process-only restoration if registry %s differs (AT-00-005)', async key => {
+    seedRegistry(vpnValues)
+    mockRegistry[key] = 'different'
+    expect(await env.matchesProxy('127.0.0.1:10808', 'socks5')).toBe(false)
+    expect(mutations()).toEqual([])
   })
 
   describe.each(['set', 'delete'] as const)('verified %s rollback', (operation) => {

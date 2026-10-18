@@ -199,6 +199,16 @@ export const env = {
     }
   },
 
+  /** Read-back evidence for retaining an existing session after failed refresh.
+   * A backup receipt proves only cleanup ownership, never the active endpoint. */
+  async matchesProxy(proxyAddr: string, proxyType: 'socks5' | 'http'): Promise<boolean> {
+    const url = proxyUrl(proxyAddr, proxyType)
+    for (const [key, value] of [['HTTP_PROXY', url], ['HTTPS_PROXY', url], ['ALL_PROXY', url], ['NO_PROXY', 'localhost,127.0.0.1,::1']]) {
+      if (await getUserEnvValue(key) !== value || process.env[key] !== value) return false
+    }
+    return true
+  },
+
   async rollback(): Promise<boolean> {
     try {
       let backup: EnvProxyBackup

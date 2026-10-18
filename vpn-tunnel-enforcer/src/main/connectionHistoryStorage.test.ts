@@ -54,6 +54,7 @@ async function sessionTracking(service: Awaited<ReturnType<typeof reload>>) {
   const autoconfig = {
     apply: vi.fn(async (targets: string[]) => { if (targets.includes('env')) applied = true; return Object.fromEntries(targets.map(target => [target, true])) }),
     rollback: vi.fn(async (targets: string[]) => { if (targets.includes('env')) applied = false; return Object.fromEntries(targets.map(target => [target, true])) }),
+    isEnvProxyConfigured: vi.fn(async () => true),
     isApplied: vi.fn(async () => applied),
     rollbackApplied: vi.fn(async () => { const previous = applied; applied = false; return previous })
   }
@@ -90,7 +91,7 @@ ${functions.map(node => node.getText(source)).join('\n')}
 return { open: (mode = 'hard') => openSession({ id: 'profile', name: 'Test', mode }),
 close: (kind = 'user-stop') => closeSession(makeOutcome(kind)),
 failure: () => recordStartFailure({ id: 'profile', name: 'Test', mode: 'hard' }, 'Start failed'),
-tray: startProtectionFromTray, protected: () => softProtectionApplied,
+tray: startProtectionFromTray, protected: () => softProtectionApplied, snapshot: () => tunnelState.snapshot,
 nativeStatus: ${callbacks.status}, nativeRestart: ${callbacks.restart},
 soft: {start: startSoftProtection, stop: stopProtection, apply: applyOwnedAutoconfig, rollback: rollbackOwnedAutoconfig,
 adopt: adoptRetainedSoftProtection, switchToNative: () => rollbackSoftAutoconfigIfApplied('hard protection start')} };`,
@@ -101,6 +102,7 @@ adopt: adoptRetainedSoftProtection, switchToNative: () => rollbackSoftAutoconfig
     open(mode?: ConnectionLogEntry['mode']): void; close(kind?: NonNullable<ConnectionLogEntry['outcome']>['kind']): void; failure(): void; tray(): Promise<void>; notificationIds: Array<string | undefined>;
     settings: typeof settings; autoconfig: typeof autoconfig; proxy: typeof dependencies.resolveProxyForTrayStart;
     operationIds: string[]; nativeStatus(status: string): void; nativeRestart(reason: string): void; unexpected: typeof dependencies.recordUnexpectedSessionEnd;
+    snapshot(): import('../shared/tunnel-state').TunnelSnapshot;
     soft: { start(addr: string, type?: 'http' | 'socks5'): Promise<unknown>; stop(): Promise<unknown>; apply(targets: string[], addr: string, type?: 'http' | 'socks5'): Promise<unknown>;
       rollback(targets: string[]): Promise<unknown>; adopt(): Promise<void>; switchToNative(): Promise<void> }
   }
@@ -143,7 +145,7 @@ describe('connection history persistence (AT-00-010; F-143)', () => {
     tracking.settings.routingMode = 'soft'
     await tracking.tray()
     expect(tracking.autoconfig.apply).not.toHaveBeenCalled()
-    expect((await reload()).getEntries()).toMatchObject([{ mode: 'soft', correlationId: tracking.notificationIds[0],
+    expect((await reload()).getEntries()).toMatchObject([{ mode: 'soft', profileId: 'local-proxy-soft-http', correlationId: tracking.notificationIds[0],
       outcome: { kind: 'start-failed' }, provenance: { source: 'tray', owner: 'manual', route: 'unconfirmed' } }])
   })
 
@@ -181,10 +183,44 @@ describe('connection history persistence (AT-00-010; F-143)', () => {
     tracking.autoconfig.apply.mockResolvedValueOnce({ env: false })
     expect(await withCorrelation(failure, () => tracking.soft.start('127.0.0.1:10808', 'socks5'))).toMatchObject({ success: false })
     expect(service.getEntries()).toMatchObject([{ correlationId: failure, outcome: { kind: 'start-failed' } }])
+    expect(tracking.autoconfig.isEnvProxyConfigured).toHaveBeenCalledWith('127.0.0.1:8080', 'http')
     await tracking.soft.stop()
     expect((await reload()).getEntries().map(entry => [entry.correlationId, entry.outcome?.kind])).toEqual([
       [failure, 'start-failed'], [original, 'user-stop']
     ])
+  })
+
+  it.each(['mismatch', 'read error'] as const)('ends uncertain Soft history after failed refresh with %s (AT-00-005)', async failure => {
+    const service = await reload(), tracking = await sessionTracking(service)
+    await tracking.soft.start('127.0.0.1:8080', 'http')
+    tracking.autoconfig.apply.mockResolvedValueOnce({ env: false })
+    if (failure === 'mismatch') tracking.autoconfig.isEnvProxyConfigured.mockResolvedValueOnce(false)
+    else tracking.autoconfig.isEnvProxyConfigured.mockRejectedValueOnce(new Error('registry denied'))
+    expect(await tracking.soft.start('127.0.0.1:10808', 'socks5')).toMatchObject({ success: false })
+    expect((await reload()).getEntries()).toMatchObject([
+      { mode: 'soft', outcome: { kind: 'unknown' }, provenance: { confidence: 'indeterminate' } },
+      { mode: 'soft', outcome: { kind: 'start-failed' } }
+    ])
+    expect(tracking.snapshot()).toMatchObject({ state: 'unknown', cleanupRequired: true, transition: null })
+    await tracking.soft.stop()
+    expect((await reload()).getEntries()).toHaveLength(2)
+  })
+
+  it.each([true, false])('does not write late failed-refresh history after cancellation during endpoint evidence=%s (AT-00-003/005)', async retained => {
+    const service = await reload(), tracking = await sessionTracking(service)
+    await tracking.soft.start('127.0.0.1:8080', 'http')
+    tracking.autoconfig.apply.mockResolvedValueOnce({ env: false })
+    let release!: (value: boolean) => void
+    tracking.autoconfig.isEnvProxyConfigured.mockImplementationOnce(() => new Promise(done => { release = done }))
+    const pending = tracking.soft.start('127.0.0.1:10808', 'socks5')
+    await vi.waitFor(() => expect(tracking.autoconfig.isEnvProxyConfigured).toHaveBeenCalledOnce())
+    const stopped = tracking.soft.stop()
+    expect(await pending).toMatchObject({ category: 'cancelled' })
+    expect(service.getEntries()).toEqual([])
+    release(retained)
+    await stopped
+    expect((await reload()).getEntries()).toMatchObject([{ mode: 'soft', outcome: { kind: 'user-stop' } }])
+    expect(service.getEntries()).toHaveLength(1)
   })
 
   it('retains Soft history until env rollback succeeds, including a retry (AT-00-005)', async () => {
@@ -221,7 +257,7 @@ describe('connection history persistence (AT-00-010; F-143)', () => {
     await expect(tracking.soft.switchToNative()).rejects.toThrow('env denied')
     expect(service.getEntries()).toEqual([])
     await tracking.soft.switchToNative()
-    expect((await reload()).getEntries()).toMatchObject([{ mode: 'soft', outcome: { kind: 'server-switch' } }])
+    expect((await reload()).getEntries()).toMatchObject([{ mode: 'soft', outcome: { kind: 'unknown', headline: 'Soft-защита отключена перед запуском другого режима' } }])
   })
 
   it('records reconciled retained Soft protection under recovery ownership (AT-00-005)', async () => {
