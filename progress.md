@@ -3707,3 +3707,12 @@ CI/review нового SHA проверяются отдельно после pu
   `node scripts/test-electron-runtime.mjs` — ELECTRON_SMOKE_PASS, exit 0
   (.tmp/wp0-soft-qodo66-retained-electron.log); `node scripts/test-wp1-native.mjs --ipc-only`
   — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-soft-qodo66-retained-csp.log).
+
+### PR #66 — повторные ревью и слияние
+
+- Итоговый head d2728b0176c4fbf48e4704fa09ef14eccfee0b31:
+  Qodo 1542260 completed; все четыре прежних findings implemented, новых нет.
+  CI 39170872277 completed/success, все три jobs зелёные на этом SHA.
+- Слит с проверкой ожидаемого head; REST GET merged=true, state=closed,
+  merge 3f6f7f464ec20ce7544a767c24a238d1bf809937.
+  Soft history доставлена в main; WP-0 целиком не завершён.
