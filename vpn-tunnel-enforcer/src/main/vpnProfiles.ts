@@ -1,20 +1,23 @@
-import { execFile as execFileCb, spawn } from 'child_process'
+import { spawn } from 'child_process'
 import { createHash } from 'crypto'
 import { hostname, userInfo } from 'os'
-import { promisify } from 'util'
 import { brotliDecompressSync, gunzipSync, inflateRawSync, inflateSync } from 'zlib'
 import type { ClientDevice } from '../shared/ipc-types'
 import { normalizeServerPort } from '../shared/portValidation'
 import { buildBootstrapRouteAttempts, type BootstrapRouteMode } from './bootstrapRoute'
 import { NATIVE_XRAY_FIELD, getNativeXrayProfile, nativeXrayDocumentEntry, preserveNativeXrayProfile, exportNativeXrayDocument } from './nativeXrayProfile'
-
-const execFile = promisify(execFileCb)
+import { IpcFault } from '../shared/ipc-result'
 
 /**
  * Sends URL and sensitive headers through curl --config stdin. -q disables
  * user curlrc files. No subscription token, credential or device ID is in argv.
  */
-function execSubscriptionCurl(args: string[], url: string, headerLines: string[]): Promise<Buffer> {
+function assertFetchActive(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new IpcFault('cancelled')
+}
+
+function execSubscriptionCurl(args: string[], url: string, headerLines: string[], signal?: AbortSignal): Promise<Buffer> {
+  assertFetchActive(signal)
   const quoteConfig = (value: string): string => {
     if (/[\x00-\x1f\x7f]/.test(value)) throw new Error('Invalid control character in subscription request')
     return '"' + value.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"'
@@ -33,15 +36,22 @@ function execSubscriptionCurl(args: string[], url: string, headerLines: string[]
     let stdoutBytes = 0
     let stderrBytes = 0
     let settled = false
-    const timeout = setTimeout(() => {
-      child.kill()
-      finish(new Error('curl subscription request timed out'))
-    }, 30_000)
+    let stopped: Error | undefined
+    // A kill request is not physical completion. Settle only after close so
+    // the registry retains ownership of the process and its stdio handles.
+    const stop = (error: Error) => {
+      if (settled || stopped) return
+      stopped = error
+      try { child.kill() } catch { /* Keep waiting for actual close. */ }
+    }
+    const onAbort = () => stop(new IpcFault('cancelled'))
+    const timeout = setTimeout(() => stop(new Error('curl subscription request timed out')), 30_000)
 
     const finish = (error?: Error) => {
       if (settled) return
       settled = true
       clearTimeout(timeout)
+      signal?.removeEventListener('abort', onAbort)
       if (error) {
         Object.assign(error, {
           // Failed response bodies may themselves contain credential bundles.
@@ -55,10 +65,10 @@ function execSubscriptionCurl(args: string[], url: string, headerLines: string[]
     }
 
     child.stdout.on('data', (chunk: Buffer) => {
+      if (stopped) return
       stdoutBytes += chunk.length
       if (stdoutBytes > 16 * 1024 * 1024) {
-        child.kill()
-        finish(new Error('curl subscription response exceeded 16 MiB'))
+        stop(new Error('curl subscription response exceeded 16 MiB'))
         return
       }
       stdout.push(Buffer.from(chunk))
@@ -67,12 +77,15 @@ function execSubscriptionCurl(args: string[], url: string, headerLines: string[]
       const remaining = 64 * 1024 - stderrBytes
       if (remaining > 0) { const part = Buffer.from(chunk).subarray(0, remaining); stderr.push(part); stderrBytes += part.length }
     })
-    child.once('error', finish)
+    child.once('error', error => { stopped ??= error })
     child.once('close', code => {
-      if (code === 0) finish()
+      if (stopped) finish(stopped)
+      else if (code === 0) finish()
       else finish(new Error(`curl subscription request failed with exit code ${code}`))
     })
-    child.stdin.once('error', () => { child.kill(); finish(new Error('Subscription request input failed')) })
+    child.stdin.once('error', () => stop(new Error('Subscription request input failed')))
+    signal?.addEventListener('abort', onAbort, { once: true })
+    if (signal?.aborted) onAbort()
     child.stdin.end(config, 'utf8')
   })
 }
@@ -119,6 +132,7 @@ export interface SubscriptionFetchOptions {
   proxyType?: 'socks5' | 'http'
   clientDevice?: ClientDevice
   bootstrapRouteMode?: BootstrapRouteMode
+  signal?: AbortSignal
 }
 
 export type VpnProfileStealthPreset =
@@ -1939,13 +1953,13 @@ function buildFetchAttempts(options: SubscriptionFetchOptions = {}): FetchAttemp
   return attempts
 }
 
-async function resolveHostWithDoh(host: string): Promise<string[]> {
+async function resolveHostWithDoh(host: string, signal?: AbortSignal): Promise<string[]> {
   const resolvers = [
     {
       label: 'Cloudflare DoH',
       resolve: 'cloudflare-dns.com:443:1.1.1.1',
       url: `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(host)}&type=A`,
-      headers: ['-H', 'accept: application/dns-json']
+      headers: ['accept: application/dns-json']
     },
     {
       label: 'Google DoH',
@@ -1957,8 +1971,9 @@ async function resolveHostWithDoh(host: string): Promise<string[]> {
   const ips: string[] = []
   const seen = new Set<string>()
   for (const resolver of resolvers) {
+    assertFetchActive(signal)
     try {
-      const { stdout } = await execFile('curl.exe', [
+      const stdout = await execSubscriptionCurl([
         '-L',
         '-sS',
         '--fail',
@@ -1969,15 +1984,9 @@ async function resolveHostWithDoh(host: string): Promise<string[]> {
         '--connect-timeout',
         '6',
         '--resolve',
-        resolver.resolve,
-        ...resolver.headers,
-        resolver.url
-      ], {
-        windowsHide: true,
-        timeout: 15000,
-        encoding: 'buffer',
-        maxBuffer: 1024 * 1024
-      })
+        resolver.resolve
+      ], resolver.url, resolver.headers, signal)
+      assertFetchActive(signal)
       const parsed = JSON.parse(decodeSubscriptionBody(stdout as Buffer))
       const answers = Array.isArray(parsed.Answer) ? parsed.Answer : []
       for (const answer of answers) {
@@ -1988,6 +1997,7 @@ async function resolveHostWithDoh(host: string): Promise<string[]> {
       }
       if (ips.length) return ips
     } catch {
+      assertFetchActive(signal)
       // Keep trying other DNS-over-HTTPS resolvers.
     }
   }
@@ -2006,7 +2016,7 @@ async function buildDnsBypassAttempts(url: string, options: SubscriptionFetchOpt
   const host = parsed.hostname
   if (!host || /^\d{1,3}(?:\.\d{1,3}){3}$/.test(host) || host === 'localhost') return []
 
-  const ips = (await resolveHostWithDoh(host)).slice(0, 3)
+  const ips = (await resolveHostWithDoh(host, options.signal)).slice(0, 3)
   if (!ips.length) return []
   const port = parsed.port || (parsed.protocol === 'https:' ? '443' : '80')
   const clientDevice = normalizeClientDevice(options.clientDevice)
@@ -2177,11 +2187,12 @@ export function normalizeSubscriptionRedirectLocation(location: string, baseUrl:
   }
 }
 
-async function fetchSubscriptionHttpResponse(url: string, attempt: FetchAttempt): Promise<SubscriptionHttpResponse> {
+async function fetchSubscriptionHttpResponse(url: string, attempt: FetchAttempt, signal?: AbortSignal): Promise<SubscriptionHttpResponse> {
   let currentUrl = url
   const visited = new Set<string>()
 
   for (let hop = 0; hop < 6; hop++) {
+    assertFetchActive(signal)
     if (visited.has(currentUrl)) throw new Error('redirect loop while fetching subscription')
     visited.add(currentUrl)
 
@@ -2196,7 +2207,8 @@ async function fetchSubscriptionHttpResponse(url: string, attempt: FetchAttempt)
       '--max-time',
       '25',
       ...attempt.args
-    ], currentUrl, attempt.headerLines)
+    ], currentUrl, attempt.headerLines, signal)
+    assertFetchActive(signal)
 
     const raw = stdout
     const splitIdx = lastIndexOfHeaderTerminator(raw)
@@ -2378,8 +2390,10 @@ async function fetchAndParseSubscription(url: string, options?: SubscriptionFetc
   const errors: string[] = []
   const runAttempts = async (attempts: FetchAttempt[]) => {
     for (const attempt of attempts) {
+      assertFetchActive(options?.signal)
       try {
-        const response = await fetchSubscriptionHttpResponse(url, attempt)
+        const response = await fetchSubscriptionHttpResponse(url, attempt, options?.signal)
+        assertFetchActive(options?.signal)
         const userInfo = parseSubscriptionUserInfo(response.headers)
         const body = response.body
         const profiles = parseVpnProfiles(body)
@@ -2391,6 +2405,7 @@ async function fetchAndParseSubscription(url: string, options?: SubscriptionFetc
         if (profiles.length) return { profiles, source: attempt.label, userInfo }
         errors.push(`${attempt.label}: скачано (${describeSubscriptionBody(body)}), но VLESS/Trojan/SS/VMess/Hysteria2 не найдены`)
       } catch (err: any) {
+        assertFetchActive(options?.signal)
         errors.push(`${attempt.label}: ${curlErrorMessage(err)}`)
       }
     }
@@ -2400,7 +2415,9 @@ async function fetchAndParseSubscription(url: string, options?: SubscriptionFetc
   const directResult = await runAttempts(buildFetchAttempts(options))
   if (directResult) return directResult
 
+  assertFetchActive(options?.signal)
   const dnsBypassAttempts = await buildDnsBypassAttempts(url, options)
+  assertFetchActive(options?.signal)
   if (dnsBypassAttempts.length) {
     const dnsBypassResult = await runAttempts(dnsBypassAttempts)
     if (dnsBypassResult) return dnsBypassResult
@@ -2536,8 +2553,12 @@ function resolveVpnProfilesLockKey(input: string, options?: SubscriptionFetchOpt
 }
 
 export async function resolveVpnProfiles(input: string, options?: SubscriptionFetchOptions): Promise<ResolveVpnProfilesResult> {
+  assertFetchActive(options?.signal)
   const trimmed = input.trim()
   if (!trimmed) throw new Error('Вставьте VPN-ссылку, subscription URL или sing-box outbound JSON')
+  // Cancellable consumers own their effects; never coalesce with another
+  // caller whose lifetime (or lack of a signal) can outlive this owner.
+  if (options?.signal) return resolveVpnProfilesUnlocked(trimmed, options)
 
   const lockKey = resolveVpnProfilesLockKey(trimmed, options)
   const inFlight = resolveVpnProfilesLocks.get(lockKey)

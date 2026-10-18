@@ -8,7 +8,7 @@
 18.10 владелец разрешил продолжать WP-0 при открытом PR #54, сохраняя запрет
 его слияния до отдельного решения. Полного Revix для #54 не было из-за квоты.
 Позднее 18.10 владелец разрешил сливать PR после пройденных проверок.
-#54/#55/#56/#57/#58/#59/#60/#61/#62/#63/#64/#65/#66 слиты в main после exact-head CI success и completed Qodo,
+#54/#55/#56/#57/#58/#59/#60/#61/#62/#63/#64/#65/#66/#67 слиты в main после exact-head CI success и completed Qodo,
 без открытых findings; прежний запрет слияния отменён.
 
 ## Полная область и первоначальная инвентаризация
@@ -17,7 +17,7 @@
 | --- | --- | --- |
 | 00-001 | AST-проверка 160 main/preload/shared request channels, общий реестр входов и versioned transport envelope; object contracts проверяют поля/массивы, save-settings покрывает все 39 общих полей AppSettings; TypeScript checker проверяет results всех 160 listeners, public results с `any` больше нет; native contextBridge сохраняет JSON профиля и nullable active result, feature list/cancel | Завершить проверку текущего PR; отдельная semantic matrix ошибок остаётся в 00-004 |
 | 00-002 | Production TunnelStateMachine интегрирована в main lane/IPC/Soft/tray/UI; 4096 stable tours и 117649 tours семи событий глубиной 6, включая timeout/cancel и native completion, с fake PID/TUN ledger и балансом operation events; sticky faults и generation fencing | Общая durable operation history/counters; все blocked/unknown/background paths; native Windows resources; общий admission фоновых restart |
-| 00-003 | Main connection lane: UUIDv4, owner, deadline запуска, priority admission; ручные Hard/Direct и Soft из tray, scheduled startup вместе с proxy detection; общий feature registry с prompt cancellation/deadline и physical drain, первая интеграция speed test | Интеграция refresh/import/export/rotation и UI cancel/unmount; deadline остановки, все entrypoints и полная матрица поздних эффектов |
+| 00-003 | Main connection lane: UUIDv4, owner, deadline запуска, priority admission; ручные Hard/Direct и Soft из tray, scheduled startup вместе с proxy detection; общий feature registry с prompt cancellation/deadline и physical drain, speed test и refresh подписок, включая curl/DoH и commit queue | Интеграция import/export/rotation и UI cancel/unmount; deadline остановки, все entrypoints и полная матрица поздних эффектов |
 | 00-004 | Общая классификация transport; 157 каналов × 7 категорий через guard; native contextBridge сохраняет code/category/correlation в en/ru; typed local validation; 4 настоящих config handlers × 7 категорий, canonical domain failures | Миграция legacy domain-result `{success:false,error}` и semantic matrix настоящих feature handlers; transport fixtures не доказывают её |
 | 00-005 | Один action correlation id в guarded IPC response/error, lifecycle connect/stop и JSONL logger; async isolation, native wait/drain, diagnostic read-back с повторной redaction; ID исходного connect и source/owner/route/confidence в session history/JSON/CSV; JSONL clockId/monotonicMs отдельно от календарных дат и durationMs; реальные owned/legacy/tray/recovery Soft sessions | Все native/background entrypoints и полная матрица событий/истории автоматизаций, live-check и recovery |
 | 00-006 | Локальные миграции; общий version admission для 20 electron-store файлов / 28 constructors; future-version SHA-256 invariance на real Conf backend до defaults/repair и при записи через ранее открытый handle | Централизованный упорядоченный migration registry, fixtures всех исторических преобразований, остальные persisted JSON, полноценный upgrade/downgrade и межпроцессная координация |
@@ -876,3 +876,41 @@ Qodo #67 выявил четыре дополнительных границы. 
 до fallback; canPublish IP-monitor дополнен реальным abort provider wave.
 Coalescing разрешён лишь для одинаковых owner и signal. Actual JSONL/diagnostic
 read-back, before-quit callback и network-boundary fixtures проверяют эти пути.
+
+## Обновление подписок: отмена, physical drain и очередь записи
+
+`refreshGroup` использует общий registry с ресурсом конкретной группы и deadline
+120 s. Ручной вызов имеет owner=manual, автоматический — schedule. Ручной
+вызов отменяет автоматический и ждёт фактического завершения его эффектов;
+равноприоритетный конфликт возвращается типизированно. После cancel/timeout
+caller получает отказ сразу, а lease удерживается до raw settlement.
+
+Signal проходит все device/redirect/retry/DoH границы. `curl.exe` получает
+адрес и чувствительные headers через stdin; отмена вызывает kill конкретного
+дочернего процесса. Kill не считается завершением: Promise ждёт close процесса
+и stdio, в том числе для DoH fallback. Отмена не запускает следующий fallback.
+Независимые callers одного URL не делят cancellable сетевой запрос.
+
+Commit сериализован с существующим append импорта через общую очередь.
+Внутри очереди повторно проверяются lease и существование/источник группы,
+перечитывается актуальный массив профилей. Поздний fetch не затирает другую
+группу, concurrent import или переименование. Удалённая группа не воскресает.
+Остановка scheduled sweep отменяет его запрос и запрещает запуск следующей
+группы. При допуске фиксируется lastFetchAttemptAt; cancel сохраняет последний
+provider outcome. Сам deadline переводит существующий неизменённый источник
+в unreachable с явной timeout error и новым attempt time, обеспечивая backoff
+до следующего штатного интервала. Поздний network callback ничего не пишет.
+Отмена sweep/manual replacement не увеличивает счётчик failed.
+
+L2 выполняет production refresh/registry/IPC guard с управляемыми границами:
+отмена между device fetches и перед queued commit, deadline, shutdown и manual
+replacement. Отдельный стенд использует настоящий `curl.exe`, loopback HTTP и
+Conf backend: проверяются завершение процесса/сокета, неизменность файла после
+отмены и сохранение параллельных записей после повторного чтения с диска.
+Хранилище в этом стенде подменяет Electron/DPAPI boundary; это не новая
+проверка шифрования. Полная AT-00-003 остаётся открытой, UI не менялся.
+
+Production refresh дополнительно проверен с настоящими logger/redactor и JSONL:
+две concurrent группы имеют различные operationKey и собственный IPC correlation,
+одна cancelled, вторая success; diagnostic read-back сохраняет эти связи после
+повторного redaction. Raw UUID и контрольный пароль отсутствуют в обоих выводах.

@@ -56,6 +56,7 @@ import { inferCountryMetadata } from '../shared/countries'
 import { reliableSocksTcpPing } from './socksPing'
 import { networkFailureCode } from './networkFailureDiagnostics'
 import { serverPickerStore as store } from './sharedStores'
+import { withProfileStoreWriteLock } from './profileStoreQueue'
 
 export const RESOLVED_IP_TTL_MS = 5 * 60_000
 const DNS_RESOLUTION_TIMEOUT_MS = 2500
@@ -2194,13 +2195,6 @@ export function getActiveProfile(): ServerProfile | null {
 }
 
 const addFromInputLocks = new Map<string, Promise<ServerProfile[]>>()
-let profileStoreWriteQueue: Promise<void> = Promise.resolve()
-
-function withProfileStoreWriteLock<T>(operation: () => T | Promise<T>): Promise<T> {
-  const run = profileStoreWriteQueue.then(operation, operation)
-  profileStoreWriteQueue = run.then(() => undefined, () => undefined)
-  return run
-}
 
 /**
  * Removes a profile by ID.

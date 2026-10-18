@@ -3875,3 +3875,112 @@ CI/review нового SHA проверяются отдельно после pu
   build/Electron/IPC/CSP в предыдущем коммите. Новый remote CI проверит final SHA.
 - CI **39174041625 success** на aaa3d99dd209bfe81b9ad26d165bbf56a351dc96;
   три jobs зелёные. Новый commit с усиленным test требует нового CI/Qodo gate.
+
+### PR #67 — окончательная проверка и слияние
+
+- Qodo **1542542 completed** на **ab201afe21484a6d0c370bd6fa95721ada936dd5**;
+  все пять findings implemented, новых открытых замечаний нет. Attribution
+  проверен через API; вручную не менялся. Ручного запроса боту не отправлял.
+- CI **39174584878 success** на том же SHA: сайт, ETW Rust и приложение Windows
+  (6m26s) полностью зелёные, включая unit, traceability, actual IPC/CSP,
+  WFP ABI/rollback и Electron reads. Watcher завершился exit 0.
+- PR #67 слит REST merge с ожидаемым SHA; отдельный REST GET подтвердил
+  merged=true/state=closed, merge **be2dc164ee9331ccf7ea96f6f76077147ed62017**.
+  Следующий участок начат от этого main в codex/wp0-subscription-cancellation.
+
+### WP-0 — обновление подписок под общим operation registry
+
+- Production refreshGroup (IPC, повторная вставка подписки и periodic sweep)
+  использует общий registry: UUID, deadline 120 s, owner manual/schedule,
+  prompt cancellation и physical drain. Manual отменяет automatic, новый
+  запрос допускается только после raw settlement. Stop sweep отменяет active
+  fetch и не допускает следующую группу; shutdown использует общий close.
+- Signal проходит device fetches, redirects, retries и DoH fallback. curl
+  хранит URL/headers в stdin. Отмена/timeout/overflow не освобождают физическое
+  владение до close дочернего процесса/stdio. Поздний ответ не запускает retry,
+  не меняет profiles/group metadata и не пишет group refreshed.
+- Существующая очередь append импорта вынесена в profileStoreQueue и общая
+  с refresh commit. Guard проверяет lease и неизменность source группы внутри
+  очереди; commit читает актуальный массив после fetch, сохраняя concurrent
+  import/другие группы/переименование. Удалённая группа не воссоздаётся.
+- Regression до fix: `npm.cmd test -- src/main/serverGroupsRefresh.test.ts`
+  — **8 failed / 26 passed**, 16.67 s, exit 1 (.tmp/wp0-refresh-before.log).
+  Негативный прогон также имел один unhandled assertion после завершения
+  заведомо неотменяемого старого fetch; исправленный прогон этого не имеет.
+  `npm.cmd test -- src/main/vpnProfilesRegression.test.ts -t 'already cancelled'`
+  — **1 failed / 7 skipped**, 469 ms, exit 1 (.tmp/wp0-refresh-curl-before.log).
+- После интеграции три прежних mocks resolveVpnProfiles исправлены на async
+  Promise (как production), иначе lease.wait выявлял `task.then` на plain object.
+  Первый loopback/Conf fixture имел cached mock store от предыдущей временной
+  папки; исправлено lifetime fixture. Дополнительный guard test сначала ожидал
+  OPERATION_CANCELLED вместо нормативного transport IPC_CANCELLED; исправлено
+  ожидание по shared/ipc-result.ts, production envelope не менялся.
+- `npm.cmd test -- src/main/serverGroupsRefresh.test.ts src/main/subscriptionOperations.test.ts src/main/vpnProfilesRegression.test.ts src/main/vpnProfilesClientDevice.test.ts`
+  — **53 passed / 4 files**, 1.96 s, exit 0 (.tmp/wp0-refresh-focused-final.log).
+  После добавления guard case `npm.cmd test -- src/main/subscriptionOperations.test.ts`
+  — **3 passed**, 1.15 s, exit 0 (.tmp/wp0-refresh-native-final.log).
+- `npm.cmd run typecheck` — exit 0, 160 channels / 0 public any
+  (.tmp/wp0-refresh-typecheck-final.log). Первый typecheck выявил отсутствующий
+  status тестового профиля, исправлено. Traceability AC 927/927 / F 210/210 и
+  `git diff --check` — exit 0. Полный test/build/native и PR gate ниже по факту.
+- Границы: настоящее curl/loopback HTTP и Conf disk, production registry/guard;
+  Electron/DPAPI store boundary в этом стенде заменён. UI не менялся, import
+  полностью ещё не отменяем, export/rotation/stop deadline и durable audit
+  остаются в матрице. AT-00-003 и WP-0 целиком не объявляются завершёнными.
+- Полный `npm.cmd test` — **4283 passed / 5 skipped / 0 failed**,
+  267 files passed / 2 skipped, 193.28 s, exit 0 (.tmp/wp0-refresh-full.log).
+  Включён окончательный guard/loopback suite из трёх cases. stderr от
+  RootErrorBoundary — ожидаемый тестовый crash, не unhandled rejection.
+- `npm.cmd run build` — exit 0 (.tmp/wp0-refresh-build.log), включая
+  typecheck. `node scripts/test-electron-runtime.mjs` — ELECTRON_SMOKE_PASS,
+  exit 0 (.tmp/wp0-refresh-electron.log); `node scripts/test-wp1-native.mjs --ipc-only`
+  — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-refresh-csp.log). Native smoke проверяет
+  прежние production handlers/preload/guard, controlled network/OS subsets;
+  новый refresh отдельно проверен actual curl/guard/Conf loopback suite.
+- Остаточная папка собственного неуспешного fixture
+  `.tmp/subscription-operations-nddlFF` оставлена: отдельная уборка через
+  проверенный абсолютный PowerShell path отклонена execution policy; обхода
+  запрета не выполнял. Папка ignored, в коммит/PR не включается.
+
+### PR #68 — Qodo: deadline backoff, отменённые sweep и actual refresh JSONL
+
+- PR #68 открыт на 36cea43021bcc9a491177917707dd15f3d9fce6a; CI
+  **39175789188 success** относится к initial head. Qodo **1542619 completed**:
+  одно action_required, два remediation_recommended и одно informational.
+- 69f0c091-2013-44eb-96ef-e0e0be5480f8: raw UUID маскируется намеренно,
+  обратимый operationKey уже присутствует. Production менять не потребовалось;
+  вместо mocked logger fixture теперь использует настоящие logger/redactor,
+  actual refresh/guard/curl/Conf. Две параллельные группы cancelled/success
+  имеют разные keys, исходный IPC correlation сохраняется на running/terminal
+  в disk JSONL и diagnostic read-back; raw UUID/контрольный пароль скрыты.
+- 301c2658-237d-4139-939f-2fa3af64413c подтверждён: timeout оставлял attempt
+  устаревшим. Admission записывает attempt до async boundary; сам deadline
+  синхронно записывает unreachable/typed timeout и момент завершения попытки.
+  Late network callbacks не пишут. Source/deletion guard исключает обновление
+  уже заменённой группы; ошибки служебной записи не ломают отмену/lease.
+  Regression проверяет отсутствие due через минуту и due на штатном интервале,
+  неизменность после late settlement и замену source перед timeout.
+- 92bda823-a170-4f95-811d-def44a510055 подтверждён: stopped/preempted sweep
+  больше не увеличивает failed и не пишет automatic refresh failed. Настоящие
+  сетевые ошибки/empty responses продолжают учитываться как failed.
+- 67e7fafa-c6ab-4fdf-865d-7cf3203a5856 (informational): второй manual call
+  получает типизированный conflict вместо присоединения к чужой операции.
+  Это выбранная политика exclusive owner, согласованная с AT-00-003/007:
+  проигравший caller не получает успех чужой операции и собственную отмену
+  не переносит на другого владельца. UI-обработка conflict остаётся отдельной
+  матрицей; общий auto/manual приоритет покрыт production registry tests.
+- `npm.cmd test -- src/main/serverGroupsRefresh.test.ts src/main/subscriptionOperations.test.ts src/main/vpnProfilesRegression.test.ts src/main/actionCorrelation.test.ts`
+  — **52 passed / 4 files**, 2.25 s, exit 0
+  (.tmp/wp0-refresh-qodo68-focused-final.log). Промежуточный fixture ожидал
+  deadline timestamp после vi.waitFor, который сдвигает fake clock на 100 ms;
+  исправлено сравнение с заранее вычисленным deadline, production не менялся.
+- Окончательный `npm.cmd run typecheck` — exit 0, 160 channels / 0 public any
+  (.tmp/wp0-refresh-qodo68-typecheck.log). Полный `npm.cmd test` — **4285 passed /
+  5 skipped / 0 failed**, 267 files passed / 2 skipped, 190.69 s, exit 0
+  (.tmp/wp0-refresh-qodo68-full.log). Traceability AC 927/927 / F 210/210 и
+  `git diff --check` — exit 0.
+- `npm.cmd run build` — exit 0 (.tmp/wp0-refresh-qodo68-build.log).
+  `node scripts/test-electron-runtime.mjs` — ELECTRON_SMOKE_PASS, exit 0
+  (.tmp/wp0-refresh-qodo68-electron.log); `node scripts/test-wp1-native.mjs --ipc-only`
+  — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-refresh-qodo68-csp.log). После push нужен
+  новый completed Qodo и CI на окончательном SHA; initial CI их не заменяет.
