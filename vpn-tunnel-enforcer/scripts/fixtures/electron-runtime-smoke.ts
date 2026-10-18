@@ -77,18 +77,18 @@ app.whenReady().then(async () => {
   checks.push('contextBridge survives reload')
   const locale: IpcErrorLocale = await trusted.webContents.executeJavaScript(`navigator.language.startsWith('ru') ? 'ru' : 'en'`)
   const badPayload = await trusted.webContents.executeJavaScript(`
-    window.electronAPI.saveSettings({ value: NaN }).then(() => ({ message: 'accepted' }), e => ({ message: e.message, stack: e.stack, code: e.code, category: e.category, correlationId: e.correlationId }))
+    window.electronAPI.saveSettings({ checkInterval: NaN }).then(() => ({ message: 'accepted' }), e => ({ message: e.message, stack: e.stack, code: e.code, category: e.category, correlationId: e.correlationId }))
   `)
   assert.equal(badPayload.message, ipcError('validation', locale).message)
   assert.equal(badPayload.code, 'IPC_VALIDATION_ERROR')
   assert.equal(badPayload.category, 'validation')
-  assert.match(badPayload.correlationId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i)
+  assert.equal(badPayload.correlationId, undefined) // Rejected locally before main allocates a correlation.
   assert.doesNotMatch(badPayload.stack ?? '', /\bat |[A-Z]:[\\/]|file:\/\//i)
   assert.equal(settingsCalls, 0)
-  checks.push('invalid IPC rejected before handler')
+  checks.push('invalid settings rejected locally before handler')
   await trusted.webContents.executeJavaScript(`window.electronAPI.i18nGetLocale()`)
   for (const selected of ['en', 'ru'] as const) {
-    const message = await trusted.webContents.executeJavaScript(`window.electronAPI.i18nSetLocale('${selected}').then(() => window.electronAPI.saveSettings({ value: NaN })).catch(e => e.message)`)
+    const message = await trusted.webContents.executeJavaScript(`window.electronAPI.i18nSetLocale('${selected}').then(() => window.electronAPI.saveSettings({ checkInterval: NaN })).catch(e => e.message)`)
     assert.equal(message, ipcError('validation', selected).message)
   }
   assert.equal(settingsCalls, 0)
@@ -119,6 +119,12 @@ app.whenReady().then(async () => {
   await trusted.webContents.executeJavaScript(`window.electronAPI.schedulerUpdate('id', { enabled: false })`)
   assert.equal(scheduleCalls, 1)
   checks.push('nested request schemas reject invalid fields before effects and preserve valid partial updates')
+  const flagFailure = await trusted.webContents.executeJavaScript(`window.electronAPI.saveSettings({ autoStart: 'false' }).catch(e => e)`)
+  assert.ok(isIpcRemoteErrorData(flagFailure))
+  assert.equal(flagFailure.category, 'validation'); assert.equal(settingsCalls, 0)
+  await trusted.webContents.executeJavaScript(`window.electronAPI.saveSettings({ autoStart: false })`)
+  assert.equal(settingsCalls, 1)
+  checks.push('typed settings reject a string flag before effects and accept a boolean partial update')
 
   const foreign = window()
   await foreign.loadURL(file)

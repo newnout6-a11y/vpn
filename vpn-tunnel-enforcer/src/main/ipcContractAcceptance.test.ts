@@ -21,6 +21,7 @@ function example(schema: IpcArgumentSchema): unknown {
     case 'strings': return Array.from({ length: schema.min ?? 0 }, () => 'value')
     case 'array': return Array.from({ length: schema.min ?? 0 }, () => example(schema.items!))
     case 'object': return Object.fromEntries(Object.entries(schema.fields ?? {}).map(([key, field]) => [key, example(field)]))
+    case 'json-object': return {}
   }
 }
 const channels = Object.keys(IPC_REQUESTS) as IpcChannel[]
@@ -31,6 +32,19 @@ beforeAll(() => { installTrustedIpcBoundary(); registerTrustedRenderer(sender as
 
 // Real guard, malformed nested fields: no feature handler may observe these inputs.
 const invalidObjects: Array<[IpcChannel, unknown[]]> = [
+  ['save-settings', [{ autoStart: 'false' }]],
+  ['save-settings', [{ disableGeoLookup: 'false' }]],
+  ['save-settings', [{ strictAdapterLockdown: 'false' }]],
+  ['save-settings', [{ connectionMode: 'other' }]],
+  ['save-settings', [{ proxyEngine: 'mihomo' }]],
+  ['save-settings', [{ checkInterval: '5000' }]],
+  ['save-settings', [{ directVpnSelectedIndex: '0' }]],
+  ['save-settings', [{ directVpnCachedAt: 'yesterday' }]],
+  ['save-settings', [{ directVpnCachedProfiles: {} }]],
+  ['save-settings', [{ directVpnCachedProfiles: [{ name: 'Profile', protocol: 'vless', outbound: [] }] }]],
+  ['save-settings', [{ directVpnCachedProfiles: [{ name: 'Profile', protocol: false, outbound: {} }] }]],
+  ['save-settings', [{ directVpnCachedProfiles: [{ name: 'Profile', outbound: {} }] }]],
+  ['save-settings', [{ unknown: true }]],
   ['scheduler:create', [{ name: 'Work', enabled: 'yes', days: [1], startTime: '09:00', endTime: '18:00', profileId: '', mode: 'hard' }]],
   ['scheduler:create', [{ name: 'Work', enabled: true, days: ['1'], startTime: '09:00', endTime: '18:00', profileId: '', mode: 'hard' }]],
   ['scheduler:update', ['id', { days: [7] }]],
@@ -62,6 +76,12 @@ const invalidObjects: Array<[IpcChannel, unknown[]]> = [
 const legacyColors = { background: '#101010', sidebar: '#111111', cardBackground: '#222222', accent: '#123456',
   text: '#ffffff', textSecondary: '#aaaaaa', border: '#333333' }
 const validObjects: Array<[IpcChannel, unknown[]]> = [
+  ['save-settings', [{}]],
+  ['save-settings', [{ autoStart: false, firstRunComplete: true, proxyEngine: 'auto', directVpnCachedAt: null }]],
+  ['save-settings', [{ checkInterval: -5, deepTrafficInspectionMaxSizeMb: 5000, directVpnSelectedIndex: 0.5 }]],
+  ['save-settings', [{ directVpnCachedProfiles: [{ name: 'Profile', protocol: 'vless', outbound: {
+    type: 'vless', server: 'example.test', server_port: 443, tls: { enabled: true, server_name: undefined }, tags: [null, false, 1, 'test']
+  } }] }]],
   ['scheduler:create', [{ name: 'Work', enabled: true, days: [0, 6], startTime: '09:00', endTime: '18:00', profileId: '', mode: 'hard' }]],
   ['scheduler:update', ['id', {}]], ['scheduler:update', ['id', { id: 'ignored-by-service', enabled: false }]],
   ['rotation:set-config', [{ intervalMinutes: -5, profileIds: [], currentIndex: 0, nextRotationAt: null }]],

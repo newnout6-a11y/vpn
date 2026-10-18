@@ -2309,3 +2309,72 @@ CI/review нового SHA проверяются отдельно после pu
   244 файлов passed / 2 skipped, 147.07 s, exit 0
   (.tmp/wp0-object-schema-final-full.log). Production code после этого
   результата до коммита не менялся; впереди exact-head CI и Revix на PR.
+
+## 18.10.2026 — PR #51 слит; оставшийся settings contract
+
+- PR https://github.com/newnout6-a11y/vpn/pull/51 слит, merge
+  bf08d6b912a6f163bf4b878b147550339718f612; проверенный head
+  b33163ae0cbe90119e7ded63dfcc90dcf503ec15. `git diff b33163a vpn/main
+  --exit-code` — 0: merge сохранил проверенное дерево.
+- Exact-head CI run 39121998380: Windows 117659303798, Rust 117659303740
+  и сайт 117659303912 — success. Windows: 3783 passed / 4 skipped /
+  0 failed, 245 файлов passed / 1 skipped, 144.58 s; typecheck/checker
+  157 channels и coverage AC 927/927, F 210/210 — exit 0. Native IPC/CSP
+  step — оба PASS markers, WFP aborted:true; native Electron probe
+  1 passed / 1 skipped. Лог .tmp/wp0-object-schema-final-ci.log.
+- Revix 117659316373 — completed/neutral, Low risk, review 5562673468,
+  один question 4306785961. Read-only AST/runtime parity probe доказал:
+  NotificationPreferences 8/8, RotationConfig 6/6, вход
+  Omit<KillSwitchException,'id'> 3/3, missing/extra keys нет. id создаёт main,
+  он не часть create input. Ответ 4306788444; исходники не менялись.
+- Новая ветка codex/wp0-settings-contract от vpn/main. Следующий участок
+  AT-00-001 — 39 полей AppSettings, последний bounded object() save-settings,
+  и общие public settings types. Нормализация исторического persisted store
+  остаётся прежней; некорректный новый IPC input должен отклоняться до effects.
+  Далее остаются legacy any ответов/domain failures и вся общая матрица WP-0.
+  WP-0 не завершён, WP-2 не начат, цель active. Этот коммит только журнал.
+
+## 18.10.2026 — WP-0: общий settings type и схема всех 39 полей
+
+- Ветка codex/wp0-settings-contract. Дубли AppSettings из main/settings.ts и
+  renderer/store.ts заменены общим shared/settings.ts с прежними type-only
+  reexports. getSettings/saveSettings/setLoginItem типизированы этим контрактом;
+  outbound cache использует рекурсивный IpcJsonValue вместо Record<string,any>.
+- Все 39 ключей нового settings patch заданы через Record<keyof AppSettings,
+  IpcArgumentSchema>: typecheck требует обновления схемы при изменении типа.
+  Последний object() без fields устранён. Строковые флаги, неверные enum/числа,
+  неизвестные поля и неверная структура cache отклоняются до listener/effects.
+  Protocol-specific outbound — bounded JSON-shaped values; это не замена
+  semantic validation sing-box/Xray. Depth/node budgets и негативы проверены.
+- Baseline: `npm.cmd test -- src/main/ipcContractAcceptance.test.ts -t 'rejects invalid nested'`
+  — 13 failed / 27 passed / 343 skipped, exit 1
+  (.tmp/wp0-settings-schema-before.log). Ошибочные новые settings достигали
+  listener; это исправлено на обеих границах. Пустые/частичные patches,
+  numeric clamp, cachedAt:null и JSON cache остаются поддержаны.
+- Историческая normalizer/persistence/DPAPI migration не изменены. Дополнен
+  regression существующих clamp: checkInterval -5 → 5000, capture size
+  5000 → 2048, selected index 0.5 → 0. Прежние safe default/secret/login
+  tests сохранены; новые IPC inputs проходят строгую проверку до них.
+- `npm.cmd run typecheck` — exit 0, 157 channels; `npm.cmd run build` — exit 0,
+  .tmp/wp0-settings-schema-build.log. `node scripts/test-electron-runtime.mjs`
+  — exit 0 (.tmp/wp0-settings-schema-native.log): string autoStart:'false'
+  без effects, boolean autoStart:false принят. checkInterval:NaN теперь
+  отклоняется локально без main correlation; main correlation всё ещё
+  подтверждён native матрицей 7 категорий × 2 языка.
+- Первый full `npm.cmd test` — 3807 passed / 1 failed / 5 skipped,
+  243 файлов passed / 1 failed / 2 skipped, 142.52 s, exit 1
+  (.tmp/wp0-settings-schema-full.log). Единственный отказ xrayEngineSource
+  ожидал type declaration в прежнем main-файле. Архитектурный тест обновлён:
+  тип читается из shared, runtime default по-прежнему из main; проверка не
+  удалена и production code ради прежнего пути не дублировался.
+- `npm.cmd test -- src/main/ipcContractAcceptance.test.ts src/preload/preloadValidation.test.ts src/main/ipcChannelContract.test.ts src/main/settingsForensicsDefault.test.ts src/main/settingsLoginItem.test.ts src/main/settingsSecretSecurity.test.ts src/main/xrayEngineSource.test.ts src/renderer/pages/Settings.test.ts src/renderer/pages/Settings.render.test.tsx src/renderer/components/FirstRunWizard.test.tsx`
+  — 506 passed, 10 файлов, 4.14 s, exit 0
+  (.tmp/wp0-settings-schema-final-focused.log). Полный итоговый прогон повторён.
+- Coverage — AC 927/927, F 210/210, exit 0; `git diff --check` — exit 0.
+  Normative docs/ не менялись. Legacy any других ответов и domain failures,
+  coordinator/FSM, cancellation/deadline, migrations/correlation/event history,
+  flags/races/UI остаются в WP-0. Пакет не объявлен завершённым.
+- Финальный `npm.cmd test` — 3808 passed / 5 skipped / 0 failed,
+  244 файлов passed / 2 skipped, 136.14 s, exit 0
+  (.tmp/wp0-settings-schema-final-full.log). Итоговый production behavior
+  после build/native checks не менялся; требуется exact-head CI/review PR.

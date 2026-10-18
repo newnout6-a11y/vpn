@@ -1,3 +1,4 @@
+import type { AppSettings } from './settings'
 import type { PublicIpInfo } from './publicIp'
 import type {
   ClientDevice,
@@ -35,15 +36,15 @@ export interface ElectronAPI {
   applyAutoconfig: (targets: string[], proxyAddr: string, proxyType?: 'socks5' | 'http') => Promise<Record<string, boolean>>
   rollbackAutoconfig: (targets: string[]) => Promise<Record<string, boolean>>
   getAutoconfigStatus: () => Promise<any[]>
-  getSettings: () => Promise<any>
-  saveSettings: (settings: any) => Promise<any>
+  getSettings: () => Promise<AppSettings>
+  saveSettings: (settings: Partial<AppSettings>) => Promise<AppSettings>
   adaptiveBypassGetStatus: () => Promise<any>
   adaptiveBypassRetry: () => Promise<any>
   adaptiveBypassResetLearning: () => Promise<any>
   smartRouteRuleSetsGetState: () => Promise<any>
   smartRouteRuleSetsRefresh: (force?: boolean) => Promise<any>
   inspectVpnInput: (input: string) => Promise<{ count: number; protocols: Record<string, number>; profiles: Array<{ index: number; name: string; protocol: string }>; fetched: boolean; source: string }>
-  setLoginItem: (openAtLogin: boolean) => Promise<any>
+  setLoginItem: (openAtLogin: boolean) => Promise<AppSettings>
   runLeakCheck: (options?: { proxyAddr?: string; proxyType?: 'socks5' | 'http' }) => Promise<any>
   runSystemDiagnostics: () => Promise<any>
   getRoutingPlan: () => Promise<any>

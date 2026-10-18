@@ -1,8 +1,9 @@
 import type { ElectronAPI } from './electron-api'
+import type { AppSettings } from './settings'
 import { IpcValidationError } from './ipc-result'
 
 export interface IpcArgumentSchema {
-  type: 'string' | 'boolean' | 'number' | 'integer' | 'enum' | 'strings' | 'array' | 'object'
+  type: 'string' | 'boolean' | 'number' | 'integer' | 'enum' | 'strings' | 'array' | 'object' | 'json-object'
   optional?: boolean
   nullable?: boolean
   min?: number
@@ -56,10 +57,28 @@ const theme = record({ name: string, mode: oneOf(['light', 'dark', 'system']), c
   success: optional(text(7)), warning: optional(text(7)), danger: optional(text(7)) }) })
 const historyFilter = partial(record({ levels: array(oneOf(['user', 'error', 'rotation', 'schedule', 'crash'])),
   dateFrom: number, dateTo: number, text: string }))
+// keyof makes an added/removed public setting fail typecheck until its schema is updated.
+const settingsFields: Record<keyof AppSettings, IpcArgumentSchema> = {
+  connectionMode: oneOf(['localProxy', 'directVpn']), routingMode: oneOf(['hard', 'soft']),
+  proxyOverride: string, proxyType: oneOf(['socks5', 'http']), bootstrapRouteMode: oneOf(['auto', 'direct', 'localProxy']),
+  directVpnInput: text(256 * 1024), directVpnSelectedIndex: number,
+  directVpnCachedInput: text(256 * 1024), directVpnCachedSource: text(256 * 1024), directVpnCachedAt: nullable(number),
+  directVpnCachedProfiles: array(record({ name: string, protocol: string, outbound: { type: 'json-object' } }), 20_000),
+  checkInterval: number, autoStart: boolean, autoPilotEnabled: boolean, minimizeToTray: boolean,
+  locationPrivacyEnabled: boolean, domainEnrichmentEnabled: boolean, autoNetworkBaseline: boolean,
+  firewallKillSwitch: boolean, advancedMode: boolean, firstRunComplete: boolean, autoRestartOnCrash: boolean,
+  desktopNotifications: boolean, publicWifiCompatibility: boolean, strictAdapterLockdown: boolean, disableGeoLookup: boolean,
+  deepTrafficInspectionEnabled: boolean, deepTrafficInspectionMaxSizeMb: number, deepTrafficInspectionRetainSessions: number,
+  stealthMode: boolean, adaptiveBypassEnabled: boolean, adaptiveBypassServerFallback: boolean,
+  smartRuSplit: boolean, smartRuMapsDirect: boolean, smartRuRuleSetMode: oneOf(['bundled', 'managed']),
+  smartRuRuleSetAutoUpdate: boolean, smartRuRuleSetUseProxy: boolean, smartRuRuleSetUpdateIntervalHours: number,
+  proxyEngine: oneOf(['auto', 'sing-box', 'xray'])
+}
+const settingsPatch = partial(record(settingsFields))
 
-/** Request channels only; object() without fields is a bounded legacy object,
- * not a deep semantic schema. Feature validators remain authoritative there.
- * Notifications retain their separate event API. */
+/** Request channels only, with runtime field schemas. Protocol-specific outbound
+ * JSON has a recursive value schema; feature validators retain semantic checks
+ * such as DNS addresses and normalized domain patterns. Notifications stay separate. */
 export const IPC_REQUESTS = {
   'detect-happ': request('detectHapp', []),
   'get-public-ip': request('getPublicIp', []),
@@ -75,7 +94,7 @@ export const IPC_REQUESTS = {
   'rollback-autoconfig': request('rollbackAutoconfig', [strings()]),
   'get-autoconfig-status': request('getAutoconfigStatus', []),
   'get-settings': request('getSettings', []),
-  'save-settings': request('saveSettings', [object()]),
+  'save-settings': request('saveSettings', [settingsPatch]),
   'adaptive-bypass:get-status': request('adaptiveBypassGetStatus', []),
   'adaptive-bypass:retry': request('adaptiveBypassRetry', []),
   'adaptive-bypass:reset-learning': request('adaptiveBypassResetLearning', []),
@@ -226,10 +245,30 @@ export type IpcResponse<C extends IpcChannel> = Awaited<ReturnType<ElectronAPI[t
 
 export function isIpcChannel(channel: string): channel is IpcChannel { return Object.hasOwn(IPC_REQUESTS, channel) }
 
+/** Protocol-specific outbound fields are JSON-shaped, not unvalidated arbitrary objects.
+ * The main payload guard additionally bounds depth/nodes across the entire request. */
+function matchesJsonObject(value: unknown): boolean {
+  let nodes = 0
+  const json = (item: unknown, depth: number): boolean => {
+    if (++nodes > 20_000 || depth > 12) return false
+    if (item === null || item === undefined || typeof item === 'boolean') return true
+    if (typeof item === 'number') return Number.isFinite(item)
+    if (typeof item === 'string') return item.length <= 2 * 1024 * 1024
+    if (Array.isArray(item)) return Array.from(item).every(child => json(child, depth + 1))
+    if (!item || typeof item !== 'object' || ![Object.prototype, null].includes(Object.getPrototypeOf(item))) return false
+    return Object.entries(item).every(([key, child]) => !['__proto__', 'constructor', 'prototype'].includes(key) && json(child, depth + 1))
+  }
+  try {
+    return !!value && typeof value === 'object' && !Array.isArray(value)
+      && [Object.prototype, null].includes(Object.getPrototypeOf(value)) && json(value, 0)
+  } catch { return false }
+}
+
 export function matchesIpcArgument(schema: IpcArgumentSchema, value: unknown): boolean {
   if (value === undefined) return schema.optional === true
   if (value === null) return schema.nullable === true
   switch (schema.type) {
+    case 'json-object': return matchesJsonObject(value)
     case 'string': return typeof value === 'string' && value.length <= (schema.max ?? 4096)
     case 'boolean': return typeof value === 'boolean'
     case 'enum': return typeof value === 'string' && schema.values?.includes(value) === true

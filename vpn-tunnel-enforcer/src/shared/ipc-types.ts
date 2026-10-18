@@ -1021,3 +1021,4 @@ export interface ExtendedSettings {
 export { IPC_REQUESTS, assertIpcRequest } from './ipc-contract'
 export type { IpcChannel, IpcRequest, IpcResponse } from './ipc-contract'
 export type { IpcResult, IpcError, IpcRemoteErrorData } from './ipc-result'
+export type { AppSettings, IpcJsonValue } from './settings'

@@ -1,3 +1,5 @@
+import type { AppSettings } from '../shared/settings'
+export type { AppSettings } from '../shared/settings'
 import type { PublicIpVerdict } from '../shared/publicIp'
 import type { FirewallKillSwitchStatus } from '../shared/ipc-types'
 import { create } from 'zustand'
@@ -66,59 +68,6 @@ function persistRendererLog(level: LogEntry['level'], message: string) {
   } catch {
     // Logging must never break UI state updates.
   }
-}
-
-export interface AppSettings {
-  connectionMode: 'localProxy' | 'directVpn'
-  // 'hard' = TUN tunnel, 'soft' = env-proxy autoconfig without TUN.
-  routingMode: 'hard' | 'soft'
-  proxyOverride: string
-  proxyType: 'socks5' | 'http'
-  bootstrapRouteMode: 'auto' | 'direct' | 'localProxy'
-  directVpnInput: string
-  directVpnSelectedIndex: number
-  directVpnCachedInput: string
-  directVpnCachedSource: string
-  directVpnCachedAt: number | null
-  directVpnCachedProfiles: Array<{
-    name: string
-    protocol: string
-    outbound: Record<string, any>
-  }>
-  checkInterval: number
-  autoStart: boolean
-  autoPilotEnabled: boolean
-  minimizeToTray: boolean
-  locationPrivacyEnabled: boolean
-  domainEnrichmentEnabled: boolean
-  autoNetworkBaseline: boolean
-  firewallKillSwitch: boolean
-  advancedMode: boolean
-  firstRunComplete: boolean
-  autoRestartOnCrash: boolean
-  desktopNotifications: boolean
-  publicWifiCompatibility: boolean
-  strictAdapterLockdown: boolean
-  deepTrafficInspectionEnabled: boolean
-  deepTrafficInspectionMaxSizeMb: number
-  deepTrafficInspectionRetainSessions: number
-  // Anti-DPI / TSPU bypass mode. When true the main process lowers TUN
-  // MTU and adds TLS ClientHello fragmentation to non-Reality outbounds
-  // to make the encrypted flow harder to fingerprint.
-  stealthMode: boolean
-  adaptiveBypassEnabled: boolean
-  adaptiveBypassServerFallback: boolean
-  disableGeoLookup: boolean
-  // Smart RU split-routing: RU destinations (geoip-ru + curated geosite)
-  // egress direct with the real IP; everything else via VPN.
-  smartRuSplit: boolean
-  // Optional: route online maps direct for real-location results.
-  smartRuMapsDirect: boolean
-  smartRuRuleSetMode: 'bundled' | 'managed'
-  smartRuRuleSetAutoUpdate: boolean
-  smartRuRuleSetUseProxy: boolean
-  smartRuRuleSetUpdateIntervalHours: number
-  proxyEngine: 'auto' | 'sing-box' | 'xray'
 }
 
 export interface LeakCheckItem {

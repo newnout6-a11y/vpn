@@ -9,7 +9,7 @@ CodeRabbit исключён из ожидания владельцем; CI и д
 
 | AT | Найденная реализация / доказательства | Остаток до приёмки |
 | --- | --- | --- |
-| 00-001 | AST-проверка 157 main/preload/shared request channels, общий реестр входов и versioned transport envelope; 12 входных object contracts уточнены до вложенных полей/массивов, API этих функций типизирован | Глубокая схема save-settings и оставшиеся `any` результатов других функций; полный PASS пока не заявлен |
+| 00-001 | AST-проверка 157 main/preload/shared request channels, общий реестр входов и versioned transport envelope; object contracts проверяют поля/массивы, save-settings покрывает все 39 общих полей AppSettings | Оставшиеся `any` результатов других функций; полный PASS пока не заявлен |
 | 00-002 | `tunController.ts`, lifecycle fault-injection tests | Единая модель и интегрированный координатор; все туры ≤6, недопустимые события, ресурсные инварианты |
 | 00-003 | Локальная отмена в отдельных подсистемах | Реестр connect/refresh/speed/import/export/rotation; отмена на 10/50/90%, deadline, запрет поздних эффектов |
 | 00-004 | Общая классификация transport; 157 каналов × 7 категорий через guard; native contextBridge сохраняет code/category/correlation в en/ru; typed local validation | Миграция legacy domain-result `{success:false,error}` и semantic matrix настоящих feature handlers; transport fixtures не доказывают её |
@@ -223,3 +223,35 @@ Native production contextBridge smoke проверяет отказ scheduler.da
 приёмка записываются в progress.md. save-settings остаётся единственным
 object() без fields; его глубокая схема и оставшиеся any ответов — следующий
 остаток AT-00-001, наряду с общей работой WP-0 по матрице выше.
+
+## AT-00-001 — общий settings contract
+
+AppSettings больше не дублируется в main и renderer: общий тип находится
+в shared/settings.ts, старые импорты сохранены через type-only reexport.
+getSettings/saveSettings/setLoginItem используют его в public ElectronAPI.
+Схема save-settings описывает все 39 полей и имеет compile-time ключи
+Record<keyof AppSettings,...>: добавленное или удалённое поле требует
+синхронного обновления runtime-схемы. Последний object() без fields устранён.
+
+Новые IPC-патчи проверяют boolean/enum/number/string, profile arrays и
+рекурсивные JSON-shaped outbound values до любых effects. Произвольные
+функции/необычные prototype/нечисловые числа не проходят; JSON ограничен
+по глубине и числу значений. Тип outbound не содержит any; optional значения
+undefined до JSON persistence поддержаны. Это схема значений transport,
+а не замена semantic protocol validators sing-box/Xray.
+
+До исправления `npm.cmd test -- src/main/ipcContractAcceptance.test.ts -t 'rejects invalid nested'`
+— 13 failed / 27 passed / 343 skipped, exit 1
+(.tmp/wp0-settings-schema-before.log): строковые флаги и другие неверные
+типы достигали listener. Production contextBridge smoke отдельно проверяет
+строковый autoStart без эффектов и успешный boolean partial update.
+Неверный checkInterval:NaN теперь отклоняется самим preload, поэтому у
+этой локальной ошибки нет выдуманного main correlation; main correlation
+по-прежнему проверяется нативной матрицей 7 категорий × 2 языка.
+
+Нормализация исторических store и DPAPI migration не изменены. Numeric
+clamp по-прежнему выполняет settingsStore, а пустые/частичные patches,
+nullable cachedAt и вложенные cache JSON сохраняют поддержку. Целевые
+feature/renderer/migration tests и полный DoD — в progress.md. Оставшиеся
+any ответов других функций и legacy domain failures сохраняются в остатке
+WP-0; отсутствие bounded legacy object() не объявляет весь пакет завершённым.

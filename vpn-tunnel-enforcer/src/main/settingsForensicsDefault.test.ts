@@ -63,6 +63,15 @@ describe('deepTrafficInspectionEnabled default', () => {
     expect(settingsStore.get().deepTrafficInspectionEnabled).toBe(false)
   })
 
+  // AT-00-001: strict IPC types must not replace the persisted-store normalization policy.
+  it('keeps numeric clamping before persistence', async () => {
+    const { settingsStore } = await import('./settings')
+    const saved = settingsStore.save({ checkInterval: -5, deepTrafficInspectionMaxSizeMb: 5000, directVpnSelectedIndex: 0.5 })
+    expect(saved.checkInterval).toBe(5000)
+    expect(saved.deepTrafficInspectionMaxSizeMb).toBe(2048)
+    expect(saved.directVpnSelectedIndex).toBe(0)
+  })
+
   it('stays off when the key arrives as an explicit undefined', async () => {
     // The regression. A renderer patch that mentions the key without a value
     // used to read as "not false" and turn packet capture on.

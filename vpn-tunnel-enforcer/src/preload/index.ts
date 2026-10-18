@@ -181,7 +181,7 @@ contextBridge.exposeInMainWorld('electronAPI', withIpcFailures({
   rollbackAutoconfig: (targets: string[]) => invoke('rollback-autoconfig', assertStringArray(targets, 'targets')),
   getAutoconfigStatus: () => invoke('get-autoconfig-status'),
   getSettings: () => invoke('get-settings'),
-  saveSettings: (settings: any) => invoke('save-settings', assertPlainObject(settings, 'settings')),
+  saveSettings: settings => invoke('save-settings', assertPlainObject(settings, 'settings')),
   adaptiveBypassGetStatus: () => invoke('adaptive-bypass:get-status'),
   adaptiveBypassRetry: () => invoke('adaptive-bypass:retry'),
   adaptiveBypassResetLearning: () => invoke('adaptive-bypass:reset-learning'),
