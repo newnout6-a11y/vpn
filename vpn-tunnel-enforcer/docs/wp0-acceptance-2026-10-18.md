@@ -9,7 +9,7 @@ CodeRabbit исключён из ожидания владельцем; CI и д
 
 | AT | Найденная реализация / доказательства | Остаток до приёмки |
 | --- | --- | --- |
-| 00-001 | AST-проверка 157 main/preload/shared request channels, общий реестр входов и versioned transport envelope; защита IP-monitor регистрации | Уточнение глубоких схем legacy object inputs и устранение `any` на публичной границе; общий PASS пока не заявлен |
+| 00-001 | AST-проверка 157 main/preload/shared request channels, общий реестр входов и versioned transport envelope; 12 входных object contracts уточнены до вложенных полей/массивов, API этих функций типизирован | Глубокая схема save-settings и оставшиеся `any` результатов других функций; полный PASS пока не заявлен |
 | 00-002 | `tunController.ts`, lifecycle fault-injection tests | Единая модель и интегрированный координатор; все туры ≤6, недопустимые события, ресурсные инварианты |
 | 00-003 | Локальная отмена в отдельных подсистемах | Реестр connect/refresh/speed/import/export/rotation; отмена на 10/50/90%, deadline, запрет поздних эффектов |
 | 00-004 | Общая классификация transport; 157 каналов × 7 категорий через guard; native contextBridge сохраняет code/category/correlation в en/ru; typed local validation | Миграция legacy domain-result `{success:false,error}` и semantic matrix настоящих feature handlers; transport fixtures не доказывают её |
@@ -193,3 +193,33 @@ Root unhandledrejection handler тоже распознаёт типизиров
 Это покрыто функциональными renderer tests, вместе с прежним Error fallback.
 Legacy any/deep object schemas/domain-result failures и остальные AT остаются
 в работе; WP-0 не завершён.
+
+## AT-00-001 — вложенные object contracts
+
+На ветке codex/wp0-ipc-object-schemas 12 прежних bounded object inputs
+уточнены: scheduler create/update, rotation config, kill-switch exception,
+DNS create/update, domain rule add/update, history filter, notification patch,
+theme create и live-check history filter. Проверяются типы вложенных полей,
+элементы и длина массивов, числовые диапазоны и перечень разрешённых ключей.
+Массивы с пустыми слотами не обходят проверку через Array.every.
+
+Одинаковая схема применяется в production preload и main guard. До исправления
+21 некорректный объект достигал listener: `npm.cmd test -- src/main/ipcContractAcceptance.test.ts -t 'rejects invalid nested'`
+— 21 failed / 321 skipped, exit 1 (.tmp/wp0-object-schema-before.log).
+После исправления негативные запросы имеют validation и ноль эффектов.
+Таблица положительных примеров отдельно сохраняет пустые patches, дни 0/6,
+nullable/отсутствующий secondary DNS, исходные семь цветов темы, 1000 profileIds
+и конечные интервалы вне 5…1440: clamp выполняет существующий rotation service,
+wire contract не подменяет его политикой отказа.
+
+У этих функций убраны any из публичных входов/результатов. NextEvent, filters
+и aggregated stats переехали в shared с совместимыми type-only reexports из
+main. Logs использует тип фильтра. Семантические feature validators по-прежнему
+проверяют адрес DNS, доменный шаблон, время и hex-палитру. Уточнённый контракт
+не объявлен доказательством всех негативных сценариев реальных handlers.
+
+Native production contextBridge smoke проверяет отказ scheduler.days=[7]
+до effects и успешный partial update. Команды, итоговые counts и удалённая
+приёмка записываются в progress.md. save-settings остаётся единственным
+object() без fields; его глубокая схема и оставшиеся any ответов — следующий
+остаток AT-00-001, наряду с общей работой WP-0 по матрице выше.

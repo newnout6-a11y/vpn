@@ -19,6 +19,7 @@ function example(schema: IpcArgumentSchema): unknown {
     case 'enum': return schema.values![0]
     case 'integer': case 'number': return schema.min ?? 1
     case 'strings': return Array.from({ length: schema.min ?? 0 }, () => 'value')
+    case 'array': return Array.from({ length: schema.min ?? 0 }, () => example(schema.items!))
     case 'object': return Object.fromEntries(Object.entries(schema.fields ?? {}).map(([key, field]) => [key, example(field)]))
   }
 }
@@ -28,7 +29,78 @@ const frame = { url }, sender = { id: 23, mainFrame: frame }
 const event = { sender, senderFrame: frame }
 beforeAll(() => { installTrustedIpcBoundary(); registerTrustedRenderer(sender as never, url) })
 
+// Real guard, malformed nested fields: no feature handler may observe these inputs.
+const invalidObjects: Array<[IpcChannel, unknown[]]> = [
+  ['scheduler:create', [{ name: 'Work', enabled: 'yes', days: [1], startTime: '09:00', endTime: '18:00', profileId: '', mode: 'hard' }]],
+  ['scheduler:create', [{ name: 'Work', enabled: true, days: ['1'], startTime: '09:00', endTime: '18:00', profileId: '', mode: 'hard' }]],
+  ['scheduler:update', ['id', { days: [7] }]],
+  ['scheduler:update', ['id', { mode: 'other' }]],
+  ['scheduler:update', ['id', { enabled: true, unknown: true }]],
+  ['scheduler:update', ['id', { days: new Array(1) }]],
+  ['rotation:set-config', [{ intervalMinutes: '30' }]],
+  ['rotation:set-config', [{ profileIds: ['id', false] }]],
+  ['rotation:set-config', [{ currentIndex: 0.5 }]],
+  ['rotation:set-config', [{ nextRotationAt: -1 }]],
+  ['rotation:set-config', [{ profileIds: new Array(1) }]],
+  ['rotation:set-config', [{ profileIds: Array.from({ length: 1001 }, () => 'id') }]],
+  ['kill-switch:add-exception', [{ type: 'other', value: 'app.exe', label: 'App' }]],
+  ['kill-switch:add-exception', [{ type: 'app', value: 'app.exe', label: false }]],
+  ['dns:create', [{ name: 'DNS', primary: '1.1.1.1', secondary: '', type: 'udp' }]],
+  ['dns:update', ['id', { primary: ['1.1.1.1'] }]],
+  ['dns:update', ['id', { isBuiltin: 'yes' }]],
+  ['dns:update', ['id', { unknown: true }]],
+  ['domain-routing:add', [{ pattern: 'example.test', action: 'direct', priority: '1' }]],
+  ['domain-routing:update', ['id', { action: 'other' }]],
+  ['connection-history:filter', [{ levels: ['not-a-reason'] }]],
+  ['connection-history:filter', [{ dateFrom: 'yesterday' }]],
+  ['notifications:set-prefs', [{ vpnConnect: 'yes' }]],
+  ['notifications:set-prefs', [{ method: 'toast' }]],
+  ['theme:create', [{ name: 'Theme', mode: 'dark', colors: { background: 123 } }]],
+  ['theme:create', [{ name: 'Theme', mode: 'dark', colors: {} }]],
+  ['server:live-check-history', [{ profileId: ['id'] }]],
+]
+const legacyColors = { background: '#101010', sidebar: '#111111', cardBackground: '#222222', accent: '#123456',
+  text: '#ffffff', textSecondary: '#aaaaaa', border: '#333333' }
+const validObjects: Array<[IpcChannel, unknown[]]> = [
+  ['scheduler:create', [{ name: 'Work', enabled: true, days: [0, 6], startTime: '09:00', endTime: '18:00', profileId: '', mode: 'hard' }]],
+  ['scheduler:update', ['id', {}]], ['scheduler:update', ['id', { id: 'ignored-by-service', enabled: false }]],
+  ['rotation:set-config', [{ intervalMinutes: -5, profileIds: [], currentIndex: 0, nextRotationAt: null }]],
+  ['rotation:set-config', [{ intervalMinutes: 5000, enabled: false }]],
+  ['rotation:set-config', [{ profileIds: Array.from({ length: 1000 }, () => 'id') }]],
+  ['kill-switch:add-exception', [{ type: 'ip', value: '1.1.1.1', label: 'DNS' }]],
+  ['dns:create', [{ name: 'DNS', primary: '1.1.1.1', type: 'plain' }]],
+  ['dns:create', [{ name: 'DNS', primary: '1.1.1.1', type: 'plain', secondary: null }]],
+  ['dns:update', ['id', { name: 'New DNS', id: 'ignored-by-service', isBuiltin: false }]],
+  ['domain-routing:add', [{ pattern: 'example.test', action: 'direct', priority: 1 }]],
+  ['domain-routing:add', [{ pattern: `https://example.test/${'x'.repeat(300)}`, action: 'direct', priority: 1 }]],
+  ['domain-routing:update', ['id', { pattern: '*.example.test', priority: 0 }]],
+  ['connection-history:filter', [{ levels: ['user', 'crash'], dateFrom: 0, text: '' }]],
+  ['notifications:set-prefs', [{ method: 'both', sound: false }]],
+  ['theme:create', [{ name: 'Legacy theme', mode: 'dark', colors: legacyColors }]],
+  ['theme:create', [{ name: 'Full theme', mode: 'light', colors: { ...legacyColors, cardElevated: '#444444',
+    textMuted: '#999999', borderStrong: '#555555', success: '#00ff00', warning: '#ffff00', danger: '#ff0000' } }]],
+  ['server:live-check-history', [{ profileId: 'id', host: 'example.test' }]],
+]
+
 describe('wire contracts on every registered channel (AT-00-001/004; F-138/F-074)', () => {
+  it.each(validObjects)('%s preserves supported object inputs and feature defaults (%j)', async (channel, args) => {
+    const effect = vi.fn(() => 'accepted')
+    ipcMain.handle(channel, effect)
+    expect(unwrapIpcResult(await state.handlers.get(channel)!(event, ...args))).toBe('accepted')
+    expect(effect).toHaveBeenCalledExactlyOnceWith(event, ...args)
+    // New contracts are closed: misspelled keys never reach the feature service.
+    const index = args.length - 1
+    const invalid = [...args]
+    invalid[index] = { ...args[index] as object, unexpectedField: true }
+    expect(await state.handlers.get(channel)!(event, ...invalid)).toMatchObject({ ok: false, error: { category: 'validation' } })
+    expect(effect).toHaveBeenCalledTimes(1)
+  })
+  it.each(invalidObjects)('%s rejects invalid nested fields before effects (%j)', async (channel, args) => {
+    const effect = vi.fn()
+    ipcMain.handle(channel, effect)
+    expect(await state.handlers.get(channel)!(event, ...args)).toMatchObject({ ok: false, error: { category: 'validation' } })
+    expect(effect).not.toHaveBeenCalled()
+  })
   it.each(channels)('%s validates before dispatch and returns a versioned envelope', async channel => {
     const effect = vi.fn(() => ({ domainResult: { ok: false } }))
     ipcMain.handle(channel, effect)

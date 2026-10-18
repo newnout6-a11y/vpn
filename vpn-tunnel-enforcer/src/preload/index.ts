@@ -4,6 +4,7 @@ import { IPC_REQUESTS, assertIpcRequest, type IpcChannel, type IpcRequest, type 
 import { unwrapIpcResult, IpcRemoteError, IpcValidationError, ipcError, serializeIpcError, type IpcErrorLocale } from '../shared/ipc-result'
 import type {
   ClientDevice,
+  ThemeConfig,
   ExternalProxyStartOptions,
   LiveCheckProgress,
   LiveServerBatchCheckOptions,
@@ -297,8 +298,8 @@ contextBridge.exposeInMainWorld('electronAPI', withIpcFailures({
   urlAvailabilityClearHistory: () => invoke('url-availability:clear-history'),
   // Scheduler
   schedulerList: () => invoke('scheduler:list'),
-  schedulerCreate: (entry: any) => invoke('scheduler:create', assertPlainObject(entry, 'entry')),
-  schedulerUpdate: (id: string, patch: any) => invoke('scheduler:update', assertString(id, 'id'), assertPlainObject(patch, 'patch')),
+  schedulerCreate: entry => invoke('scheduler:create', assertPlainObject(entry, 'entry')),
+  schedulerUpdate: (id, patch) => invoke('scheduler:update', assertString(id, 'id'), assertPlainObject(patch, 'patch')),
   schedulerDelete: (id: string) => invoke('scheduler:delete', assertString(id, 'id')),
   schedulerNextEvent: () => invoke('scheduler:next-event'),
   // Kill-Switch
@@ -310,27 +311,27 @@ contextBridge.exposeInMainWorld('electronAPI', withIpcFailures({
   killSwitchBrowseApp: () => invoke('kill-switch:browse-app'),
   // Profile Rotation
   rotationGetConfig: () => invoke('rotation:get-config'),
-  rotationSetConfig: (config: any) => invoke('rotation:set-config', assertPlainObject(config, 'config')),
+  rotationSetConfig: config => invoke('rotation:set-config', assertPlainObject(config, 'config')),
   rotationRotateNow: () => invoke('rotation:rotate-now'),
   // DNS Profiles
   dnsList: () => invoke('dns:list'),
   dnsGetActive: () => invoke('dns:get-active'),
-  dnsCreate: (profile: { name: string; primary: string; secondary: string; type: 'plain' | 'doh' | 'dot'; primaryType?: 'plain' | 'doh' | 'dot'; secondaryType?: 'plain' | 'doh' | 'dot' }) => invoke('dns:create', assertPlainObject(profile, 'profile')),
-  dnsUpdate: (id: string, patch: any) => invoke('dns:update', assertString(id, 'id'), assertPlainObject(patch, 'patch')),
+  dnsCreate: profile => invoke('dns:create', assertPlainObject(profile, 'profile')),
+  dnsUpdate: (id, patch) => invoke('dns:update', assertString(id, 'id'), assertPlainObject(patch, 'patch')),
   dnsDelete: (id: string) => invoke('dns:delete', assertString(id, 'id')),
   dnsSelect: (id: string) => invoke('dns:select', assertString(id, 'id')),
   dnsValidate: (address: string) => invoke('dns:validate', assertString(address, 'address')),
   // Domain Routing
   domainRoutingList: () => invoke('domain-routing:list'),
   domainRoutingAdd: (rule: { pattern: string; action: 'vpn' | 'direct' | 'block'; priority: number }) => invoke('domain-routing:add', assertPlainObject(rule, 'rule')),
-  domainRoutingUpdate: (id: string, patch: any) => invoke('domain-routing:update', assertString(id, 'id'), assertPlainObject(patch, 'patch')),
+  domainRoutingUpdate: (id, patch) => invoke('domain-routing:update', assertString(id, 'id'), assertPlainObject(patch, 'patch')),
   domainRoutingDelete: (id: string) => invoke('domain-routing:delete', assertString(id, 'id')),
   domainRoutingReorder: (ids: string[]) => invoke('domain-routing:reorder', assertStringArray(ids, 'ids')),
   domainRoutingImport: (filePath: string) => invoke('domain-routing:import', assertString(filePath, 'filePath')),
   domainRoutingBrowseFile: () => invoke('domain-routing:browse-file'),
   // Connection History
   connectionHistoryList: () => invoke('connection-history:list'),
-  connectionHistoryFilter: (filters: any) => invoke('connection-history:filter', assertPlainObject(filters, 'filters')),
+  connectionHistoryFilter: filters => invoke('connection-history:filter', assertPlainObject(filters, 'filters')),
   connectionHistoryStats: (period: 'day' | 'week' | 'month') => invoke('connection-history:stats', assertEnum(period, ['day', 'week', 'month'] as const, 'period')),
   connectionHistoryExportCsv: () => invoke('connection-history:export-csv'),
   connectionHistoryExportJson: () => invoke('connection-history:export-json'),
@@ -355,7 +356,7 @@ contextBridge.exposeInMainWorld('electronAPI', withIpcFailures({
     invoke('config:import-apply', assertString(filePath, 'filePath'), assertStringArray(sections, 'sections'), assertEnum(conflictResolution, ['replace', 'merge'] as const, 'conflictResolution')),
   // Notification Preferences
   notificationsGetPrefs: () => invoke('notifications:get-prefs'),
-  notificationsSetPrefs: (prefs: any) => invoke('notifications:set-prefs', assertPlainObject(prefs, 'prefs')),
+  notificationsSetPrefs: prefs => invoke('notifications:set-prefs', assertPlainObject(prefs, 'prefs')),
   checkOsNotificationState: () => invoke('notifications:check-os-state'),
   // Clear the Windows-side notification block (registry "Enabled = 0" set
   // when the user clicked "Don't show notifications" on a toast). Returns
@@ -383,10 +384,10 @@ contextBridge.exposeInMainWorld('electronAPI', withIpcFailures({
   themeList: () => invoke('theme:list'),
   themeGetActive: () => invoke('theme:get-active'),
   themeSetActive: (id: string) => invoke('theme:set-active', assertString(id, 'id')),
-  themeCreate: (theme: any) => invoke('theme:create', assertPlainObject(theme, 'theme')),
+  themeCreate: theme => invoke('theme:create', assertPlainObject(theme, 'theme')),
   themeDelete: (id: string) => invoke('theme:delete', assertString(id, 'id')),
-  onThemeChanged: (callback: (theme: any) => void) => {
-    const handler = (_event: any, theme: any) => callback(theme)
+  onThemeChanged: callback => {
+    const handler = (_event: unknown, theme: ThemeConfig) => callback(theme)
     ipcRenderer.on('theme-changed', handler)
     return () => ipcRenderer.removeListener('theme-changed', handler)
   },

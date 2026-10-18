@@ -30,7 +30,7 @@ import {
 } from 'lucide-react'
 import { MacCard, MacInput, MacButton, MacSelect } from '../design-system'
 import { PageTip } from '../components/PageTip'
-import type { ConnectionLogEntry, SessionOutcome, SessionOutcomeKind } from '../../shared/ipc-types'
+import type { ConnectionLogEntry, ConnectionHistoryFilters, SessionOutcome, SessionOutcomeKind } from '../../shared/ipc-types'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -197,7 +197,7 @@ export function Logs() {
     const run = async () => {
       setLoading(true)
       try {
-        const filters: Record<string, unknown> = {}
+        const filters: ConnectionHistoryFilters = {}
         if (selectedReasons.length > 0) {
           filters.levels = selectedReasons
         }

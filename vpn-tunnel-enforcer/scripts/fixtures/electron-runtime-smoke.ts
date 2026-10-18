@@ -60,6 +60,8 @@ app.whenReady().then(async () => {
   ipcMain.handle('save-settings', () => { settingsCalls++; return { ok: true } })
   ipcMain.handle('i18n:get-locale', () => 'en')
   ipcMain.handle('i18n:set-locale', () => undefined)
+  let scheduleCalls = 0
+  ipcMain.handle('scheduler:update', () => { scheduleCalls++ })
   let faultCategory: IpcErrorCategory = 'internal'
   ipcMain.handle('get-settings', () => { throw Object.assign(new IpcFault(faultCategory), { message: 'raw-secret at C:\\private\\file' }) })
   const file = pathToFileURL(join(work, 'renderer.html')).href
@@ -110,6 +112,13 @@ app.whenReady().then(async () => {
   assert.ok(isIpcRemoteErrorData(localFailure))
   assert.equal(localFailure.category, 'validation'); assert.equal(localFailure.correlationId, undefined)
   checks.push('all seven typed error categories/codes/correlation IDs survive contextBridge in en/ru; local validators are typed too')
+  const nestedFailure = await trusted.webContents.executeJavaScript(`window.electronAPI.schedulerUpdate('id', { days: [7] }).catch(e => e)`)
+  assert.ok(isIpcRemoteErrorData(nestedFailure))
+  assert.equal(nestedFailure.category, 'validation'); assert.equal(nestedFailure.correlationId, undefined)
+  assert.equal(scheduleCalls, 0)
+  await trusted.webContents.executeJavaScript(`window.electronAPI.schedulerUpdate('id', { enabled: false })`)
+  assert.equal(scheduleCalls, 1)
+  checks.push('nested request schemas reject invalid fields before effects and preserve valid partial updates')
 
   const foreign = window()
   await foreign.loadURL(file)
