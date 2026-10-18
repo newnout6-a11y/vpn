@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { OPERATION_PRIORITY, type ConnectionOperation, type ConnectionOperationRejection, type OperationOwner } from '../shared/operation'
 import type { TunnelStateMachine } from './tunnelStateMachine'
-import { currentCorrelationId, withCorrelation } from './actionCorrelation'
+import { currentCorrelationId, currentActionMetadata, withCorrelation, type ActionMetadata } from './actionCorrelation'
 
 /** Main startup owns baseline effects as well as the controller startup. */
 export interface ConnectionStartupOwner {
@@ -18,6 +18,7 @@ type Startup = {
   controller: AbortController
   completion: Promise<void>
   operation: ConnectionOperation
+  metadata: ActionMetadata
   abortCategory?: 'cancelled' | 'timeout'
   terminalPublished?: boolean
 }
@@ -52,13 +53,13 @@ export class ConnectionLifecycle {
     return current ? { ...current } : null
   }
 
-  private publish(operation: ConnectionOperation): void {
+  private publish(operation: ConnectionOperation, metadata: ActionMetadata): void {
     withCorrelation(operation.correlationId, () => {
       this.lastOperation = operation
       this.stateMachine?.operationChanged(operation)
       // An observer is not allowed to strand native ownership or cleanup.
       try { this.onOperation({ ...operation }) } catch { /* telemetry is best effort */ }
-    })
+    }, metadata)
   }
 
   async start<T>(effect: (owner: ConnectionStartupOwner) => Promise<T>, options: StartOptions = {}): Promise<T | ConnectionOperationRejection> {
@@ -84,12 +85,13 @@ export class ConnectionLifecycle {
     const completion = new Promise<void>(done => { release = done })
     const startedAt = Date.now()
     const operationId = randomUUID()
-    const startup: Startup = { controller, completion, operation: {
+    const metadata: ActionMetadata = { source: currentActionMetadata()?.source ?? 'lifecycle', owner: operationOwner }
+    const startup: Startup = { controller, completion, metadata, operation: {
       version: 1, operationId, correlationId: currentCorrelationId() ?? 'op_' + operationId.replaceAll('-', ''), kind: 'connect', owner: operationOwner,
       startedAt, deadline: startedAt + timeoutMs, status: 'running'
     } }
     this.startup = startup
-    this.publish(startup.operation)
+    this.publish(startup.operation, startup.metadata)
     const cancellationResult = () => {
       const category = startup.abortCategory ?? 'cancelled'
       return rejection(category, category === 'timeout' ? 'Истекло время запуска защиты' : 'Запуск отменён', startup.operation.operationId)
@@ -97,14 +99,14 @@ export class ConnectionLifecycle {
     const timer = setTimeout(() => withCorrelation(startup.operation.correlationId, () => {
       startup.abortCategory = 'timeout'
       startup.operation = { ...startup.operation, status: 'error', category: 'timeout' }
-      this.publish(startup.operation)
+      this.publish(startup.operation, startup.metadata)
       startup.terminalPublished = true
       // Cancelling never releases a native effect. Cleanup reserves admission
       // synchronously, then waits for the actual startup completion.
       controller.abort()
       if (this.cleanupCancelled) void this.stop(this.cleanupCancelled, { owner: 'recovery' }).catch(() => undefined)
       else { try { this.cancelControllerStartup() } catch { /* startup still drains */ } }
-    }), timeoutMs)
+    }, startup.metadata), timeoutMs)
     timer.unref?.()
     let onAbort!: () => void
     let failure: { error: unknown } | undefined
@@ -172,11 +174,11 @@ export class ConnectionLifecycle {
       } finally {
         await Promise.all(effects)
         clearTimeout(timer)
-        if (!startup.terminalPublished) this.publish(startup.operation)
+        if (!startup.terminalPublished) this.publish(startup.operation, startup.metadata)
         if (this.startup === startup) this.startup = null
         release()
       }
-    })
+    }, startup.metadata)
     try { return await Promise.race([drained, cancelled]) }
     finally { controller.signal.removeEventListener('abort', onAbort) }
   }
@@ -191,13 +193,14 @@ export class ConnectionLifecycle {
     const startup = this.startup
     const cancellationErrors: unknown[] = []
     const operationId = randomUUID()
+    const metadata: ActionMetadata = { source: currentActionMetadata()?.source ?? 'lifecycle', owner }
     const operation: ConnectionOperation = {
       version: 1, operationId, correlationId: currentCorrelationId() ?? 'op_' + operationId.replaceAll('-', ''), owner, kind: 'disconnect',
       startedAt: Date.now(), deadline: null, status: 'running'
     }
     const stopped = Promise.resolve().then(async () => {
       if (startup) await startup.completion
-      const result = await withCorrelation(operation.correlationId, effect)
+      const result = await withCorrelation(operation.correlationId, effect, metadata)
       if (!failed(result) && this.stateMachine && !this.stateMachine.canConfirmStop()) throw new Error('Runtime cleanup confirmation missing')
       if (cancellationErrors.length) throw cancellationErrors[0]
       this.stopOperation = { ...operation, status: failed(result) ? 'error' : 'success' }
@@ -207,7 +210,7 @@ export class ConnectionLifecycle {
       throw error
     }).finally(() => {
       if (this.stopping === stopped) {
-        this.publish(this.stopOperation!)
+        this.publish(this.stopOperation!, metadata)
         this.stopOperation = null
         this.stopping = null
       }
@@ -215,11 +218,11 @@ export class ConnectionLifecycle {
     // Reserve admission before signalling the controller or waiting for I/O.
     this.stopping = stopped
     this.stopOperation = operation
-    this.publish(operation)
+    this.publish(operation, metadata)
     if (startup && !startup.abortCategory) {
       startup.abortCategory = 'cancelled'
       startup.operation = { ...startup.operation, status: 'cancelled', category: 'cancelled' }
-      this.publish(startup.operation)
+      this.publish(startup.operation, startup.metadata)
       startup.terminalPublished = true
     }
     startup?.controller.abort()
@@ -233,7 +236,7 @@ export class ConnectionLifecycle {
     if (this.startup && !this.startup.abortCategory) {
       this.startup.abortCategory = 'cancelled'
       this.startup.operation = { ...this.startup.operation, status: 'cancelled', category: 'cancelled' }
-      this.publish(this.startup.operation)
+      this.publish(this.startup.operation, this.startup.metadata)
       this.startup.terminalPublished = true
     }
     this.startup?.controller.abort()

@@ -16,11 +16,12 @@ import { happDetector } from './happDetector'
 import { tunController, getTunRuntimeDir, detectForeignTun, killOwnedTunRuntimeProcesses, isOwnedTunRuntimeRunning, readRecentSingBoxOutboundFault, areTunRoutesActive, getLastSingBoxExit, onProtectedRestart, onNativeStartup } from './tunController'
 import type { NetworkCleanupReceipt, SingBoxOutboundFault } from './tunController'
 import { ConnectionLifecycle, type ConnectionStartupOwner } from './connectionLifecycle'
-import { currentCorrelationId, withCorrelation } from './actionCorrelation'
+import { currentCorrelationId, currentActionMetadata, withCorrelation } from './actionCorrelation'
 import { TunnelStateMachine } from './tunnelStateMachine'
 import type { ConnectionStartResult, ConnectionStopResult } from '../shared/operation'
 import { runScheduledConnection } from './scheduledConnection'
-import { makeOutcome, outcomeKindToDisconnectReason, isNodeSwitchRestartReason } from './sessionOutcome'
+import { makeOutcome, outcomeKindToDisconnectReason, isNodeSwitchRestartReason, sessionOutcomeConfidence } from './sessionOutcome'
+import type { ConnectionProvenance } from '../shared/connection-provenance'
 import type { SessionOutcome, SessionOutcomeEvidence, SessionOutcomeKind } from '../shared/ipc-types'
 import { readRecentXrayOutboundFault, getXrayStatus, stopXray } from './xrayEngine'
 import { classifyNavigation } from './navigationPolicy'
@@ -197,6 +198,7 @@ let latestRestartingProgress: string | null = null
 interface LiveSession {
   startedAt: number
   correlationId?: string
+  origin: Omit<ConnectionProvenance, 'confidence'>
   profile: { id: string; name: string; mode: 'hard' | 'soft' | 'direct' }
   leakDetected: boolean
   lastNetworkTransition: string | null
@@ -209,11 +211,17 @@ let stopInProgress = false
 let lastNetworkChangeAt = 0
 let lastResumeAt = 0
 
+function captureSessionOrigin(mode: LiveSession['profile']['mode'], opened: boolean): LiveSession['origin'] {
+  return { ...(currentActionMetadata() ?? { source: 'runtime', owner: 'unknown' }),
+    route: opened ? mode === 'soft' ? 'soft-env' : 'tun' : 'unconfirmed' }
+}
+
 function openSession(profile: LiveSession['profile']): void {
   const correlationId = currentCorrelationId()
   currentSession = {
     startedAt: Date.now(),
     ...(correlationId ? { correlationId } : {}),
+    origin: captureSessionOrigin(profile.mode, true),
     profile,
     leakDetected: false,
     lastNetworkTransition: null
@@ -256,6 +264,7 @@ function writeSessionEntry(s: LiveSession, stats: TrafficStats, outcome: Session
     connectionHistoryService.addEntry({
       startedAt: s.startedAt,
       ...(s.correlationId ? { correlationId: s.correlationId } : {}),
+      provenance: { ...s.origin, confidence: sessionOutcomeConfidence(outcome.kind) },
       endedAt: Date.now(),
       profileName: s.profile.name,
       profileId: s.profile.id,
@@ -349,6 +358,7 @@ function recordStartFailure(
     connectionHistoryService.addEntry({
       startedAt: now,
       ...(correlationId ? { correlationId } : {}),
+      provenance: { ...captureSessionOrigin(profile.mode, false), confidence: 'observed' },
       endedAt: now,
       profileName: profile.name,
       profileId: profile.id,
@@ -1740,7 +1750,7 @@ async function stopProtectionEffects(
 }
 
 async function startProtectionFromTray(): Promise<void> {
-  return withCorrelation('op_' + randomUUID().replaceAll('-', ''), startProtectionFromTrayEffects)
+  return withCorrelation('op_' + randomUUID().replaceAll('-', ''), startProtectionFromTrayEffects, { source: 'tray', owner: 'manual' })
 }
 
 async function startProtectionFromTrayEffects(): Promise<void> {

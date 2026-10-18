@@ -1,4 +1,5 @@
 import type { IpcJsonValue } from './json'
+import type { ConnectionProvenance } from './connection-provenance'
 
 /**
  * Shared IPC type definitions for VPN Tunnel Enforcer v2.
@@ -945,6 +946,8 @@ export interface ConnectionLogEntry {
   id: string
   /** Original connect action; absent on legacy or untracked sessions. */
   correlationId?: string
+  /** Absent only on records from builds before provenance tracking. */
+  provenance?: ConnectionProvenance
   startedAt: number
   endedAt: number | null
   profileName: string
@@ -957,6 +960,9 @@ export interface ConnectionLogEntry {
   /** Structured cause + evidence. Absent on entries written before v1.1.18. */
   outcome?: SessionOutcome | null
 }
+
+/** New writes require provenance; legacy reader records remain compatible. */
+export type ConnectionHistoryEntryInput = Omit<ConnectionLogEntry, 'id' | 'provenance'> & { provenance: ConnectionProvenance }
 
 export interface ConnectionHistoryFilters {
   /** Disconnect reasons; an empty list includes all reasons. */

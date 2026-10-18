@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
-import type { ConnectionLogEntry } from '../shared/ipc-types'
+import type { ConnectionLogEntry, ConnectionHistoryEntryInput } from '../shared/ipc-types'
 import { SESSION_OUTCOME_KINDS } from '../shared/ipc-types'
+import { OPERATION_PRIORITY } from '../shared/operation'
+import { randomUUID } from 'node:crypto'
 import ts from 'typescript'
 
 const state = vi.hoisted(() => ({ dir: '', logEvent: vi.fn() }))
@@ -19,10 +21,11 @@ vi.mock('electron-store', async () => {
   } }
 })
 
-const entry: Omit<ConnectionLogEntry, 'id'> = {
+const entry: ConnectionHistoryEntryInput = {
   startedAt: 1700000000000, endedAt: 1700000001000,
   profileId: 'profile-1', profileName: 'Test', mode: 'hard',
-  bytesDown: 10, bytesUp: 20, disconnectReason: 'user'
+  bytesDown: 10, bytesUp: 20, disconnectReason: 'user',
+  provenance: { source: 'unknown', owner: 'unknown', route: 'unconfirmed', confidence: 'indeterminate' }
 }
 const file = () => join(state.dir, 'connection-history.json')
 const reload = async () => {
@@ -35,26 +38,26 @@ async function sessionTracking(service: Awaited<ReturnType<typeof reload>>) {
   // Execute the actual main session functions, replacing only their boundaries.
   const source = ts.createSourceFile('index.ts', await readFile(join(process.cwd(), 'src/main/index.ts'), 'utf8'), ts.ScriptTarget.Latest, true)
   const names = ['openSession', 'writeSessionEntry', 'closeSession', 'recordStartFailure', 'startProtectionFromTray']
-  const functions = source.statements.filter(node => ts.isFunctionDeclaration(node) && [...names, 'startProtectionFromTrayEffects'].includes(node.name?.text ?? ''))
+  const functions = source.statements.filter(node => ts.isFunctionDeclaration(node) && [...names, 'startProtectionFromTrayEffects', 'captureSessionOrigin'].includes(node.name?.text ?? ''))
   expect(names.every(name => functions.some(node => ts.isFunctionDeclaration(node) && node.name?.text === name))).toBe(true)
-  const { currentCorrelationId, withCorrelation } = await import('./actionCorrelation')
+  const { currentCorrelationId, currentActionMetadata, withCorrelation } = await import('./actionCorrelation')
   const { randomUUID } = await import('node:crypto')
-  const { makeOutcome, outcomeKindToDisconnectReason } = await import('./sessionOutcome')
+  const { makeOutcome, outcomeKindToDisconnectReason, sessionOutcomeConfidence } = await import('./sessionOutcome')
   const notificationIds: Array<string | undefined> = []
-  const dependencies = { currentCorrelationId, withCorrelation, randomUUID, connectionHistoryService: service, makeOutcome, outcomeKindToDisconnectReason,
+  const dependencies = { currentCorrelationId, currentActionMetadata, withCorrelation, randomUUID, connectionHistoryService: service, makeOutcome, outcomeKindToDisconnectReason, sessionOutcomeConfidence,
     settingsStore: { get: () => ({ connectionMode: 'localProxy', routingMode: 'hard' }) },
     resolveProxyForTrayStart: async () => null, notify: () => notificationIds.push(currentCorrelationId()),
     restoreAndFocusMainWindow: () => {},
     trafficMonitor: { getCurrentStats: () => ({ sessionDownloadBytes: 10, sessionUploadBytes: 20 }) }, logEvent: state.logEvent }
   const code = ts.transpileModule(`let currentSession = null;
 ${functions.map(node => node.getText(source)).join('\n')}
-return { open: () => openSession({ id: 'profile', name: 'Test', mode: 'hard' }),
-close: () => closeSession(makeOutcome('user-stop')),
+return { open: (mode = 'hard') => openSession({ id: 'profile', name: 'Test', mode }),
+close: (kind = 'user-stop') => closeSession(makeOutcome(kind)),
 failure: () => recordStartFailure({ id: 'profile', name: 'Test', mode: 'hard' }, 'Start failed'),
 tray: startProtectionFromTray };`,
     { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText
   return { ...new Function(...Object.keys(dependencies), code)(...Object.values(dependencies)), notificationIds } as {
-    open(): void; close(): void; failure(): void; tray(): Promise<void>; notificationIds: Array<string | undefined>
+    open(mode?: ConnectionLogEntry['mode']): void; close(kind?: NonNullable<ConnectionLogEntry['outcome']>['kind']): void; failure(): void; tray(): Promise<void>; notificationIds: Array<string | undefined>
   }
 }
 
@@ -69,6 +72,49 @@ afterEach(async () => {
 })
 
 describe('connection history persistence (AT-00-010; F-143)', () => {
+  it.each(['ipc', 'tray', 'lifecycle'] as const)('retains %s provenance and every admitted owner after a different stop action (AT-00-005)', async source => {
+    const service = await reload(), tracking = await sessionTracking(service)
+    const { withCorrelation } = await import('./actionCorrelation')
+    const { ConnectionLifecycle } = await import('./connectionLifecycle')
+    for (const owner of Object.keys(OPERATION_PRIORITY) as Array<keyof typeof OPERATION_PRIORITY>) {
+      const lane = new ConnectionLifecycle(() => {})
+      const start = () => lane.start(async () => { tracking.open(); return { success: true } }, { owner })
+      if (source === 'lifecycle') await start()
+      else await withCorrelation((source === 'ipc' ? 'ipc_' : 'op_') + randomUUID().replaceAll('-', ''), start, { source })
+      await withCorrelation('ipc_' + randomUUID().replaceAll('-', ''), () => lane.stop(async () => { tracking.close(); return { success: true } }))
+    }
+    const entries = (await reload()).getEntries()
+    const expected = Object.keys(OPERATION_PRIORITY).map(owner => ({ source, owner, route: 'tun', confidence: 'observed' }))
+    expect(entries.map(entry => entry.provenance)).toEqual(expected)
+    expect(JSON.parse(service.exportJson()).map((entry: ConnectionLogEntry) => entry.provenance)).toEqual(expected)
+    const csv = service.exportCsv().split('\n').map(row => row.split(','))
+    expect(csv.slice(1).map(row => ['source', 'owner', 'route', 'confidence'].map(key => row[csv[0].indexOf(key)])))
+      .toEqual(expected.map(p => [p.source, p.owner, p.route, p.confidence]))
+  })
+
+  it.each(['hard', 'direct', 'soft'] as const)('records the %s mechanism without attesting packet-level protection (AT-00-005)', async mode => {
+    const service = await reload(), tracking = await sessionTracking(service)
+    tracking.open(mode); tracking.close()
+    expect((await reload()).getEntries()[0]).toMatchObject({ mode, provenance: { source: 'runtime', owner: 'unknown',
+      route: mode === 'soft' ? 'soft-env' : 'tun', confidence: 'observed' } })
+  })
+
+  it.each(SESSION_OUTCOME_KINDS)('reports conservative confidence for %s (AT-00-005)', async kind => {
+    const service = await reload(), tracking = await sessionTracking(service)
+    tracking.open(); tracking.close(kind)
+    const confidence = kind === 'unknown' ? 'indeterminate'
+      : ['user-stop', 'app-quit', 'server-switch', 'rotation', 'schedule', 'start-failed'].includes(kind) ? 'observed' : 'inferred'
+    expect((await reload()).getEntries()[0]).toMatchObject({ provenance: { source: 'runtime', owner: 'unknown', route: 'tun', confidence } })
+  })
+
+  it('requires provenance on every new write while retaining legacy reads (AT-00-005)', async () => {
+    const service = await reload()
+    const { provenance: _provenance, ...legacy } = entry as ConnectionHistoryEntryInput
+    expect(() => service.addEntry(legacy as ConnectionHistoryEntryInput)).toThrow('Invalid connection history entry')
+    await writeFile(file(), JSON.stringify({ connectionHistory: [{ ...legacy, id: 'legacy' }] }))
+    expect((await reload()).getEntries()).toEqual([{ ...legacy, id: 'legacy' }])
+  })
+
   it('correlates repeated missing-proxy tray attempts before lifecycle admission (AT-00-005)', async () => {
     const service = await reload(), tracking = await sessionTracking(service)
     await tracking.tray(); await tracking.tray()
@@ -79,6 +125,7 @@ describe('connection history persistence (AT-00-010; F-143)', () => {
     expect(new Set(ids).size).toBe(2)
     expect(tracking.notificationIds).toEqual(ids)
     expect(entries.every(entry => entry.outcome?.kind === 'start-failed')).toBe(true)
+    expect(entries.every(entry => JSON.stringify(entry.provenance) === JSON.stringify({ source: 'tray', owner: 'manual', route: 'unconfirmed', confidence: 'observed' }))).toBe(true)
   })
 
   it('links guarded IPC and production session tracking to reloaded disk history (AT-00-005)', async () => {
@@ -117,7 +164,8 @@ describe('connection history persistence (AT-00-010; F-143)', () => {
     const restarted = await reload()
     expect(restarted.getEntries()).toMatchObject([{ correlationId: connectId }])
     expect(JSON.parse(restarted.exportJson())).toMatchObject([{ correlationId: connectId }])
-    expect(restarted.exportCsv().split('\n')[1].split(',').at(-1)).toBe(connectId)
+    const csv = restarted.exportCsv().split('\n').map(row => row.split(','))
+    expect(csv[1][csv[0].indexOf('correlationId')]).toBe(connectId)
   })
 
   it('persists a failed start action without inventing an ID for untracked sessions (AT-00-005)', async () => {
@@ -144,6 +192,7 @@ describe('connection history persistence (AT-00-010; F-143)', () => {
     const legacy = { ...written[0] }
     delete legacy.outcome
     delete legacy.errorMessage
+    delete legacy.provenance
     written[0] = legacy
     await writeFile(file(), JSON.stringify({ connectionHistory: written }))
     const restarted = await reload()
@@ -223,6 +272,11 @@ describe('connection history persistence (AT-00-010; F-143)', () => {
   })
 
   it.each([
+    ...[null, {}, { source: 'ipc', owner: 'manual', route: 'tun' },
+      ...['source', 'owner', 'route', 'confidence'].map(key => ({ source: 'ipc', owner: 'manual', route: 'tun', confidence: 'observed', [key]: 'raw-secret' })),
+      { source: 'ipc', owner: 'manual', route: 'soft-env', confidence: 'observed' },
+      { source: 'ipc', owner: 'manual', route: 'tun', confidence: 'observed', secret: 'raw-secret' }]
+      .map(provenance => ({ provenance })),
     ...['raw-secret', '00000000-0000-4000-8000-000000000001', 'ipc_' + '0'.repeat(32),
       'ipc_00000000000040008000000000000001\n', null, {}].map(correlationId => ({ correlationId })),
     { mode: ['hard'] }, { disconnectReason: ['user'] }, { bytesUp: '20' }, { endedAt: {} },

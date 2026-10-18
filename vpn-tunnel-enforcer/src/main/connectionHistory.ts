@@ -17,10 +17,11 @@
 import { ipcMain } from 'electron'
 import Store from './versionedStore'
 import { createHash, randomUUID } from 'crypto'
-import type { ConnectionLogEntry, ConnectionHistoryFilters, ConnectionHistoryStats as AggregatedStats } from '../shared/ipc-types'
+import type { ConnectionLogEntry, ConnectionHistoryEntryInput, ConnectionHistoryFilters, ConnectionHistoryStats as AggregatedStats } from '../shared/ipc-types'
 export type { ConnectionHistoryFilters, ConnectionHistoryStats as AggregatedStats } from '../shared/ipc-types'
 import { SESSION_OUTCOME_KINDS } from '../shared/ipc-types'
 import { isIpcCorrelationId } from '../shared/ipc-result'
+import { isConnectionProvenance } from '../shared/connection-provenance'
 import { logEvent } from './appLogger'
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -54,6 +55,9 @@ function validEntry(value: unknown): value is ConnectionLogEntry {
     || !isText(value.disconnectReason) || !['user', 'error', 'rotation', 'schedule', 'crash'].includes(value.disconnectReason)
     || !isNonNegative(value.bytesDown) || !isNonNegative(value.bytesUp)
     || !(value.correlationId === undefined || (isIpcCorrelationId(value.correlationId) && /^(ipc|op)_/.test(value.correlationId)))
+    || !(value.provenance === undefined || (isConnectionProvenance(value.provenance)
+      && (value.provenance.route !== 'soft-env' || value.mode === 'soft')
+      && (value.provenance.route !== 'tun' || value.mode !== 'soft')))
     || !optional(value.errorMessage, isText)) return false
   if (value.outcome == null) return true // Records before v1.1.18 have no outcome.
   const outcome = value.outcome
@@ -247,7 +251,8 @@ export function exportCsv(entries: ConnectionLogEntry[]): string {
     'errorMessage',
     'outcomeKind',
     'outcomeHeadline',
-    'correlationId'
+    'correlationId',
+    'source', 'owner', 'route', 'confidence'
   ]
 
   const rows = entries.map((entry) => {
@@ -264,7 +269,9 @@ export function exportCsv(entries: ConnectionLogEntry[]): string {
       escapeCsvField(entry.errorMessage ?? ''),
       escapeCsvField(entry.outcome?.kind ?? ''),
       escapeCsvField(entry.outcome?.headline ?? ''),
-      escapeCsvField(entry.correlationId ?? '')
+      escapeCsvField(entry.correlationId ?? ''),
+      entry.provenance?.source ?? '', entry.provenance?.owner ?? '',
+      entry.provenance?.route ?? '', entry.provenance?.confidence ?? ''
     ].join(',')
   })
 
@@ -295,14 +302,14 @@ function getEntries(): ConnectionLogEntry[] {
   return stored
 }
 
-function addEntry(entry: Omit<ConnectionLogEntry, 'id'>): ConnectionLogEntry {
+function addEntry(entry: ConnectionHistoryEntryInput): ConnectionLogEntry {
   const newEntry: ConnectionLogEntry = {
     ...entry,
     errorMessage: entry.errorMessage ?? null,
     outcome: entry.outcome ?? null,
     id: randomUUID()
   }
-  if (!validEntry(newEntry)) throw new Error('Invalid connection history entry')
+  if (!newEntry.provenance || !validEntry(newEntry)) throw new Error('Invalid connection history entry')
 
   const entries = getEntries()
   entries.push(newEntry)
