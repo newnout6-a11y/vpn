@@ -2140,3 +2140,101 @@ CI/review нового SHA проверяются отдельно после pu
   итог: `npm.cmd test` — 3702 passed / 5 skipped / 0 failed, 241 файлов
   passed / 2 skipped, 187.16 s, exit 0; `.tmp/wp0-ipc-review-full-final.log`.
   Повторный `npm.cmd run typecheck` — exit 0, 157 channels.
+
+## 18.10.2026 — PR #49 слит; WP-0 остаётся в работе
+
+- PR https://github.com/newnout6-a11y/vpn/pull/49 слит: merge
+  7324593c1d7534565279033a1572bc02147ff0df, проверенный head
+  7c9c8a16d4166a38b0597e21450e0d9182067aa7. `git diff 7c9c8a1 vpn/main
+  --exit-code` — 0, merge не изменил проверенное дерево.
+- Fresh exact-head CI run 39118780451 — все три success. Windows
+  117649915612: 3703 passed / 4 skipped / 0 failed, 242 файлов passed /
+  1 skipped, 240.88 s; typecheck/157 channels и coverage AC 927/927,
+  F 210/210 — exit 0; WFP aborted:true; native Electron 1 passed /
+  1 skipped. Rust 117649915618 и сайт 117649915518 — success.
+  Полный Windows лог `.tmp/wp0-ipc-final-ci.log` в приложении.
+- Fresh Revix 117649920118 — completed/neutral; review 5562529233
+  на том же head. Единственный новый комментарий 4306653327 — nitpick
+  об Array.findLast в тесте. Сохранена copied/reversed mock.calls:
+  findLast недоступен в текущем TS lib (фактически получен TS2550), менять
+  lib приложения ради теста не нужно. Ответ 4306656358. Это не Low-risk
+  badge: автоматический summary пишет needs-changes при одном nitpick;
+  фактический новый feedback только незначительный, что допускает владелец.
+  Подтверждённый issue 4306608229 исправлен реальным log test;
+  question 4306608232 закрыт en/ru и native oracle; suggestion 4306608234
+  учтён точной формулировкой оставшихся bounded object schemas.
+- Продолжение — codex/wp0-renderer-errors от нового vpn/main. Следующий
+  участок AT-00-001/004: типизированные ошибки в main world, глубокие
+  legacy schemas/any и domain-result failures. Локальный изолированный
+  native probe `.tmp/ipc-rejection-probe.mjs` уже подтвердил, что Promise
+  rejection plain object сохраняет message/code/category/correlationId
+  через contextBridge (isError=false), в отличие от custom Error props.
+  Это исследование варианта, не реализованный adapter: при миграции
+  надо сохранить существующую семантику renderer catch/instanceof Error.
+  FSM/coordinator, registry отмены/deadline, audit correlation, migrations,
+  races/UI/flags и общая operation history остаются по матрице acceptance.
+  WP-0 не завершён, WP-2 не начат; цель остаётся active.
+- Этот коммит дописывает журнал, production code после полного DoD и
+  exact-head CI не менялся. Нормативные docs/ не редактировались;
+  сохранены прежние .claude/, .wrangler/, .playwright-cli/ и output/.
+
+## 18.10.2026 — WP-0: типизированные ошибки доходят до renderer
+
+- Ветка codex/wp0-renderer-errors. Подтверждена потеря custom Error properties
+  настоящим Electron contextBridge: усиленный native smoke до исправления
+  завершился exit 1 (undefined вместо IPC_VALIDATION_ERROR), лог
+  vpn-tunnel-enforcer/.tmp/wp0-renderer-error-before.log.
+- Preload сериализует отказы request-методов в canonical plain data:
+  name/code/category/message/correlationId. Исключены произвольные тексты,
+  stack/cause и секреты. Локальная валидация возвращает rejected Promise
+  без выдуманного main correlation и без IPC effects. Подписки остаются
+  синхронными, unsubscribe проверен отдельно. Public guard позволяет
+  renderer читать эти данные вместо ненадёжного instanceof Error.
+- Исправлены отображение ошибки выбора сервера и глобальный rejection
+  logger; отказ самого logRenderer теперь наблюдается, не создавая новый
+  unhandled rejection. Добавлены функциональные renderer-регрессии.
+- Настоящие production guard/preload/contextBridge проверены для 7 категорий
+  в en/ru (14 запросов): стабильные коды, уникальные UUID, canonical messages,
+  без stack/секретов/путей. Локальный аргумент тоже проверен нативно.
+  В Windows CI добавлены build и оба native IPC/CSP smoke; удалённый
+  результат этого нового шага ещё предстоит получить на PR.
+- `npm.cmd test -- src/shared/ipc-result.test.ts src/preload/preloadValidation.test.ts src/main/ipcChannelContract.test.ts src/main/ipcContractAcceptance.test.ts src/renderer/components/DashboardSide.test.tsx src/renderer/main.test.tsx`
+  — 377 passed, 6 файлов, 2.84 s, exit 0.
+- `npm.cmd run build` (включает typecheck и 157-channel checker) — exit 0,
+  .tmp/wp0-renderer-errors-build.log. `node scripts/test-electron-runtime.mjs`
+  — exit 0, .tmp/wp0-renderer-errors-native.log;
+  `node scripts/test-wp1-native.mjs --ipc-only` — exit 0.
+- `npm.cmd test` — 3724 passed / 5 skipped / 0 failed, 244 файлов passed /
+  2 skipped, 205.43 s, exit 0; .tmp/wp0-renderer-errors-full.log.
+  `python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py`
+  — AC 927/927, F 210/210, exit 0. `git diff --check` — exit 0.
+- AT-00-004 усилен на реальной границе; весь WP-0 не объявлен завершённым.
+  Глубокие legacy schemas/any, domain-result failures, общий coordinator/FSM,
+  registry отмены/deadline, migrations, correlation/history и race/UI/flags
+  остаются в матрице. Native smoke не заменяет полную L3-приёмку.
+
+### PR #50 — проверка замечаний и доработка
+
+- Первый head 1ee6ad8bfc4ad6c6edeee355890a0980c8a5246b: CI run
+  39120313653, Windows 117654409737, Rust 117654409586 и сайт
+  117654409800 — success. Windows: 3725 passed / 4 skipped / 0 failed,
+  245 файлов passed / 1 skipped, 227.82 s; coverage AC 927/927 и
+  F 210/210. Новый native IPC/CSP шаг — success (оба PASS markers),
+  WFP aborted:true, native Electron probe 1 passed / 1 skipped.
+  .tmp/wp0-renderer-initial-ci.log. Это результаты первого head.
+- Revix 117654423546 — completed/neutral, Low risk, review 5562593204.
+  Suggestion 4306715099 обоснован: всякий TypeError/RangeError ошибочно
+  обозначался validation. Все явные preload validators теперь бросают
+  IpcValidationError; serializer больше не переименовывает случайные
+  TypeError/RangeError. Новые тесты проверяют internal для случайного
+  синхронного сбоя и validation для несерилизуемого входа без IPC effects.
+- Nitpick 4306715102 не применим: node:assert/strict уже делает assert.equal
+  строгим; ответ 4306721060 со ссылкой на существующий import.
+- Финальная доработка: целевые 6 файлов — 382 passed, 3.53 s, exit 0;
+  `npm.cmd run build` — exit 0 (.tmp/wp0-renderer-review-build.log),
+  `node scripts/test-electron-runtime.mjs` — exit 0
+  (.tmp/wp0-renderer-review-native.log). `npm.cmd test` — 3729 passed /
+  5 skipped / 0 failed, 244 файлов passed / 2 skipped, 174.91 s, exit 0
+  (.tmp/wp0-renderer-review-full.log). Coverage — AC 927/927, F 210/210,
+  exit 0; `git diff --check` — exit 0. Свежий exact-head CI/review после
+  push ещё обязателен до merge; WP-0 остаётся в работе.

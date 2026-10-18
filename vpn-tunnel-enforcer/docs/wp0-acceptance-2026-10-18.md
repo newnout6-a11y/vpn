@@ -12,7 +12,7 @@ CodeRabbit исключён из ожидания владельцем; CI и д
 | 00-001 | AST-проверка 157 main/preload/shared request channels, общий реестр входов и versioned transport envelope; защита IP-monitor регистрации | Уточнение глубоких схем legacy object inputs и устранение `any` на публичной границе; общий PASS пока не заявлен |
 | 00-002 | `tunController.ts`, lifecycle fault-injection tests | Единая модель и интегрированный координатор; все туры ≤6, недопустимые события, ресурсные инварианты |
 | 00-003 | Локальная отмена в отдельных подсистемах | Реестр connect/refresh/speed/import/export/rotation; отмена на 10/50/90%, deadline, запрет поздних эффектов |
-| 00-004 | Общая классификация исключений transport; 157 каналов × 7 категорий на настоящей guard, safe decode в preload | Миграция legacy domain-result `{success:false,error}` и semantic matrix настоящих feature handlers; transport fixtures не доказывают её |
+| 00-004 | Общая классификация transport; 157 каналов × 7 категорий через guard; native contextBridge сохраняет code/category/correlation в en/ru; typed local validation | Миграция legacy domain-result `{success:false,error}` и semantic matrix настоящих feature handlers; transport fixtures не доказывают её |
 | 00-005 | `appLogger.ts`, `connectionHistory.ts`; новый regression passive rejection dedup | Сквозной correlation id, монотонный порядок, source/owner/route/confidence истории и redaction всех полей |
 | 00-006 | Локальные миграции, в том числе `readSettingsWithMigration` | Централизованный упорядоченный реестр, fixtures всех исторических версий, future-version hash invariance |
 | 00-007 | Lifecycle tests отдельных гонок | Seeded 200 команд из 10 потоков, typed losers, итог последней принятой команды и 0 child PID при disconnected |
@@ -106,11 +106,24 @@ Wire response: `{version:1, correlationId:UUIDv4, ok:true, result}` либо
 `{version:1, correlationId:UUIDv4, ok:false, error:{category,code,message}}`.
 Preload снимает transport envelope; существующие domain result, в том числе
 `undefined` и `{ok:false}`, сохраняются. Исключения и отказы transport становятся
-`IpcRemoteError`; повреждённый ответ и reject Electron имеют безопасную
-внутреннюю ошибку. contextBridge переносит Error.message, но не гарантирует
-сохранение нестандартных свойств Error в main world; native oracle использует
-каноническое сообщение, unit oracle проверяет code/category/correlationId
-в preload realm. Сквозная domain correlation AT-00-005 ещё не реализована.
+`IpcRemoteError` внутри preload; повреждённый ответ и reject Electron имеют
+безопасную внутреннюю ошибку. Перед contextBridge request-обёртка преобразует
+исключение в `IpcRemoteErrorData`: plain-object Promise rejection с name,
+category, code, каноническим message и optional correlationId. Никакие stack,
+cause или произвольный текст exception не копируются. main world проверяет
+форму через isIpcRemoteErrorData; instanceof Error для этих данных неверен.
+Все 157 request methods выбираются из того же registry; subscriptions и их
+синхронные unsubscribe handles не оборачиваются. Даже локальная валидация
+параметров теперь отклоняет Promise, как объявлено публичным API; main IPC
+не вызывается и correlationId не выдумывается. Сквозная domain correlation
+AT-00-005 ещё не реализована.
+
+Revix PR #50 suggestion 4306715099 учтён: локальные валидаторы явно бросают
+`IpcValidationError`; неожиданные `TypeError`/`RangeError` внутри preload
+остаются `internal`. Ошибка сериализации входного объекта классифицируется
+валидатором до IPC. Регрессии различают ошибку параметров и внутренний сбой.
+Nitpick 4306715102 о loose assert не применим: native fixture уже импортирует
+`node:assert/strict`, поэтому `assert.equal` выполняет строгое сравнение.
 
 | category | Стабильный code | Условие transport |
 | --- | --- | --- |
@@ -154,3 +167,29 @@ navigation rejection, native safeStorage. `node scripts/test-wp1-native.mjs --ip
 Режим явно ограничен IPC/CSP, не выполняет ACL/ZIP/clipboard или OS matrix.
 Исправлена сборка native fixture: koffi остаётся external native dependency.
 Полные команды DoD и результаты записаны в progress.md.
+
+## Main-world typed errors — 18.10.2026, после PR #49
+
+До исправления усиленный `node scripts/test-electron-runtime.mjs` завершился
+exit 1: native renderer получил undefined вместо IPC_VALIDATION_ERROR
+(`.tmp/wp0-renderer-error-before.log`). Unit mock сохранял поля Error и
+этого не обнаруживал. Promise rejection plain object решает реальную
+границу; синхронный throw через contextBridge тоже теряет поля, поэтому
+валидация request methods возвращает rejected Promise.
+
+Теперь native Electron 44.4.3 проверяет все семь категорий в en/ru (14 вызовов)
+через production guard/preload/contextBridge, уникальный UUID каждого ответа,
+code/category/message и отсутствие exception text/stack/path. Отдельно
+проверяет typed local validation без main correlation. Listener get-settings
+в этом native стенде управляемый; полноценная semantic matrix feature handlers
+этим не подменяется. Windows CI выполняет production build, этот native smoke
+и IPC/CSP subset в каждом PR; OS/installed/L3 matrix не заявлена.
+
+Quick server picker распознаёт plain-object ошибку и показывает message,
+вместо `[object Object]`; остальные существующие `.message` catches совместимы.
+Root unhandledrejection handler тоже распознаёт типизированную ошибку.
+Оба глобальных error handlers наблюдают rejected logRenderer Promise:
+сбой самого reporting IPC не порождает рекурсивную unhandled rejection.
+Это покрыто функциональными renderer tests, вместе с прежним Error fallback.
+Legacy any/deep object schemas/domain-result failures и остальные AT остаются
+в работе; WP-0 не завершён.

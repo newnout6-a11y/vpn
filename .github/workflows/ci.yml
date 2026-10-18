@@ -72,6 +72,13 @@ jobs:
       - name: Трассировка приёмочных тестов
         working-directory: .
         run: python docs/04-приёмочные-тесты/traceability/check-coverage.py
+      # Unit mocks do not reproduce contextBridge dropping custom Error fields.
+      # Use the built production preload and real hidden windows in isolated userData.
+      - name: IPC — реальный contextBridge и production CSP
+        run: |
+          npm run build
+          node scripts/test-electron-runtime.mjs
+          node scripts/test-wp1-native.mjs --ipc-only
       # Real BFE ABI/read-back inside an aborted transaction; never commits
       # filters. This supplements mocks, not packet/reboot/OS-matrix L3.
       - name: IPv6 WFP — нативный ABI и откат транзакции

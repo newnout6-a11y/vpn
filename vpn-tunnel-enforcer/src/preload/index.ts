@@ -1,7 +1,7 @@
 import type { PublicIpInfo } from '../shared/publicIp'
 import { contextBridge, ipcRenderer } from 'electron'
-import { assertIpcRequest, type IpcChannel, type IpcRequest, type IpcResponse } from '../shared/ipc-contract'
-import { unwrapIpcResult, IpcRemoteError, ipcError, type IpcErrorLocale } from '../shared/ipc-result'
+import { IPC_REQUESTS, assertIpcRequest, type IpcChannel, type IpcRequest, type IpcResponse } from '../shared/ipc-contract'
+import { unwrapIpcResult, IpcRemoteError, IpcValidationError, ipcError, serializeIpcError, type IpcErrorLocale } from '../shared/ipc-result'
 import type {
   ClientDevice,
   ExternalProxyStartOptions,
@@ -23,8 +23,8 @@ const MAX_EXTERNAL_PROXY_SLOTS = 65535 - 17990 + 1
 const MAX_EXTERNAL_PROXY_BATCH_PROFILE_IDS = 65_535
 
 function assertString(value: unknown, name: string, maxChars = MAX_TEXT_ARG_CHARS): string {
-  if (typeof value !== 'string') throw new TypeError(`${name} must be a string`)
-  if (value.length > maxChars) throw new RangeError(`${name} is too large`)
+  if (typeof value !== 'string') throw new IpcValidationError(`${name} must be a string`)
+  if (value.length > maxChars) throw new IpcValidationError(`${name} is too large`)
   return value
 }
 
@@ -39,7 +39,7 @@ function assertNullableString(value: unknown, name: string, maxChars = MAX_TEXT_
 }
 
 function assertBoolean(value: unknown, name: string): boolean {
-  if (typeof value !== 'boolean') throw new TypeError(`${name} must be a boolean`)
+  if (typeof value !== 'boolean') throw new IpcValidationError(`${name} must be a boolean`)
   return value
 }
 
@@ -50,7 +50,7 @@ function assertOptionalBoolean(value: unknown, name: string): boolean | undefine
 
 function assertEnum<T extends string>(value: unknown, allowed: readonly T[], name: string): T {
   if (typeof value !== 'string' || !allowed.includes(value as T)) {
-    throw new TypeError(`${name} is invalid`)
+    throw new IpcValidationError(`${name} is invalid`)
   }
   return value as T
 }
@@ -58,18 +58,18 @@ function assertEnum<T extends string>(value: unknown, allowed: readonly T[], nam
 function assertPort(value: unknown, name: string): number | undefined {
   if (value === undefined || value === null) return undefined
   const port = Number(value)
-  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new TypeError(`${name} must be a valid TCP port`)
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new IpcValidationError(`${name} must be a valid TCP port`)
   return port
 }
 
 function assertRequiredPort(value: unknown, name: string): number {
   const port = assertPort(value, name)
-  if (port === undefined) throw new TypeError(`${name} must be a valid TCP port`)
+  if (port === undefined) throw new IpcValidationError(`${name} must be a valid TCP port`)
   return port
 }
 
 function assertInteger(value: unknown, name: string): number {
-  if (!Number.isInteger(value)) throw new TypeError(`${name} must be an integer`)
+  if (!Number.isInteger(value)) throw new IpcValidationError(`${name} must be an integer`)
   return value as number
 }
 
@@ -77,7 +77,7 @@ function assertExternalProxySlot(value: unknown): number | undefined {
   if (value === undefined || value === null) return undefined
   const slot = Number(value)
   if (!Number.isInteger(slot) || slot < 1 || slot > MAX_EXTERNAL_PROXY_SLOTS) {
-    throw new RangeError(`slot must be between 1 and ${MAX_EXTERNAL_PROXY_SLOTS}`)
+    throw new IpcValidationError(`slot must be between 1 and ${MAX_EXTERNAL_PROXY_SLOTS}`)
   }
   return slot
 }
@@ -94,15 +94,16 @@ function assertExternalProxyStartOptions(value: unknown): ExternalProxyStartOpti
 }
 
 function assertStringArray(value: unknown, name: string, maxItems = MAX_STRING_ARRAY_ITEMS): string[] {
-  if (!Array.isArray(value)) throw new TypeError(`${name} must be an array`)
-  if (value.length > maxItems) throw new RangeError(`${name} has too many items`)
+  if (!Array.isArray(value)) throw new IpcValidationError(`${name} must be an array`)
+  if (value.length > maxItems) throw new IpcValidationError(`${name} has too many items`)
   return value.map((item, index) => assertString(item, `${name}[${index}]`))
 }
 
 function assertPlainObject<T extends Record<string, any>>(value: unknown, name: string, maxJsonChars = MAX_OBJECT_JSON_CHARS): T {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new TypeError(`${name} must be an object`)
-  const json = JSON.stringify(value)
-  if (json.length > maxJsonChars) throw new RangeError(`${name} is too large`)
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new IpcValidationError(`${name} must be an object`)
+  let json: string
+  try { json = JSON.stringify(value) } catch { throw new IpcValidationError(`${name} must be serializable`) }
+  if (json.length > maxJsonChars) throw new IpcValidationError(`${name} is too large`)
   return value as T
 }
 
@@ -153,7 +154,16 @@ function invoke<C extends IpcChannel>(channel: C, ...args: IpcRequest<C>): Promi
   )
 }
 
-contextBridge.exposeInMainWorld('electronAPI', {
+function withIpcFailures<T extends object>(api: T): T {
+  const requests: ReadonlySet<string> = new Set(Object.values(IPC_REQUESTS).map(request => request.method))
+  return Object.fromEntries(Object.entries(api).map(([name, method]) => !requests.has(name) ? [name, method] : [name, (...args: unknown[]) => {
+    try {
+      return Promise.resolve(method(...args)).catch((error: unknown) => { throw serializeIpcError(error, ipcLocale) })
+    } catch (error) { return Promise.reject(serializeIpcError(error, ipcLocale)) }
+  }])) as T
+}
+
+contextBridge.exposeInMainWorld('electronAPI', withIpcFailures({
   detectHapp: () => invoke('detect-happ'),
   getPublicIp: () => invoke('get-public-ip'),
   recheckPublicIp: (rebaseline?: boolean) => invoke('recheck-public-ip', assertOptionalBoolean(rebaseline, 'rebaseline') === true),
@@ -253,10 +263,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     invoke('server:live-check', assertLiveCheckOptions(options)),
   serverLiveCheckBatch: (options: LiveServerBatchCheckOptions) => {
     const checked = assertPlainObject<Record<string, unknown>>(options, 'options')
-    if (!Array.isArray(checked.profileIds)) throw new TypeError('options.profileIds must be an array')
+    if (!Array.isArray(checked.profileIds)) throw new IpcValidationError('options.profileIds must be an array')
     const profileIds = assertStringArray(checked.profileIds, 'options.profileIds')
     if (profileIds.length < 1 || profileIds.length > 12) {
-      throw new RangeError('options.profileIds must contain between 1 and 12 profiles')
+      throw new IpcValidationError('options.profileIds must contain between 1 and 12 profiles')
     }
     return invoke('server:live-check-batch', {
       requestId: assertOptionalString(checked.requestId, 'options.requestId'),
@@ -455,4 +465,4 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('app:resumed-from-sleep', handler)
     return () => ipcRenderer.removeListener('app:resumed-from-sleep', handler)
   }
-} satisfies ElectronAPI)
+} satisfies ElectronAPI))

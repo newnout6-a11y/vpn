@@ -12,6 +12,12 @@ describe('IPC parity (AT-00-001; F-138)', () => {
     shared: "const IPC_REQUESTS = { 'one': request('getOne', []) } as const"
   }
   it('resolves real wrapper calls', () => { expect(inspectIpcContract(fixture).problems).toEqual([]) })
+  it('compares the actual methods inside the failure-serialization bridge wrapper', () => {
+    const preload = "contextBridge.exposeInMainWorld('electronAPI', withIpcFailures({ getOne: () => invoke('one') } satisfies ElectronAPI))"
+    expect(inspectIpcContract({ ...fixture, preload }).problems).toEqual([])
+    expect(inspectIpcContract({ ...fixture, preload: preload.replace("invoke('one')", "ipcRenderer.invoke('one')") }).problems)
+      .toContain('Preload bypasses result decoder: getOne')
+  })
   it('does not count comments or unrelated strings as handlers', () => {
     const result = inspectIpcContract({ ...fixture, main: { 'main.ts': "// ipcMain.handle('one', effect)\nconst unused = 'one'" } })
     expect(result.problems).toContain('main missing: one')

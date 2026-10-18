@@ -14,6 +14,8 @@ import type {
   LiveServerCheckOptions
 } from './ipc-types'
 
+/** Request failures reject with IpcRemoteErrorData; narrow unknown catches
+ * with isIpcRemoteErrorData rather than relying on Error identity across realms. */
 export interface ElectronAPI {
   detectHapp: () => Promise<any>
   getPublicIp: () => Promise<PublicIpInfo>

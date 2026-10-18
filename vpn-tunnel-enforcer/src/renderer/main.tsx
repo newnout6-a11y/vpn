@@ -4,6 +4,7 @@ import { MotionConfig } from 'framer-motion'
 import './i18n' // Initialize i18n before rendering
 import App from './App'
 import { RootErrorBoundary } from './components/RootErrorBoundary'
+import { isIpcRemoteErrorData } from '../shared/ipc-result'
 import './styles/globals.css'
 
 // Report uncaught window-level errors to main-process logger
@@ -11,7 +12,7 @@ if (typeof window !== 'undefined') {
   window.addEventListener('error', (event) => {
     try {
       const msg = event.error?.stack || `${event.message} at ${event.filename}:${event.lineno}:${event.colno}`
-      window.electronAPI?.logRenderer?.('error', `[window.onerror] ${msg}`)
+      void window.electronAPI?.logRenderer?.('error', `[window.onerror] ${msg}`).catch(() => undefined)
     } catch {
       /* ignore */
     }
@@ -19,8 +20,9 @@ if (typeof window !== 'undefined') {
 
   window.addEventListener('unhandledrejection', (event) => {
     try {
-      const reason = event.reason instanceof Error ? event.reason.stack || event.reason.message : String(event.reason)
-      window.electronAPI?.logRenderer?.('error', `[window.unhandledrejection] ${reason}`)
+      const reason = isIpcRemoteErrorData(event.reason) ? event.reason.message
+        : event.reason instanceof Error ? event.reason.stack || event.reason.message : String(event.reason)
+      void window.electronAPI?.logRenderer?.('error', `[window.unhandledrejection] ${reason}`).catch(() => undefined)
     } catch {
       /* ignore */
     }

@@ -7,7 +7,7 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { once } from 'node:events'
 import { installTrustedIpcBoundary, registerTrustedRenderer } from '../../src/main/ipcSecurity'
 import { encryptSecret, decryptSecret } from '../../src/main/secretStorage'
-import { ipcError, type IpcErrorLocale } from '../../src/shared/ipc-result'
+import { IPC_ERRORS, IpcFault, ipcError, isIpcRemoteErrorData, type IpcErrorCategory, type IpcErrorLocale } from '../../src/shared/ipc-result'
 
 const work = process.env.VPNTE_SMOKE_DIR!
 app.setPath('userData', join(work, 'userData'))
@@ -60,6 +60,8 @@ app.whenReady().then(async () => {
   ipcMain.handle('save-settings', () => { settingsCalls++; return { ok: true } })
   ipcMain.handle('i18n:get-locale', () => 'en')
   ipcMain.handle('i18n:set-locale', () => undefined)
+  let faultCategory: IpcErrorCategory = 'internal'
+  ipcMain.handle('get-settings', () => { throw Object.assign(new IpcFault(faultCategory), { message: 'raw-secret at C:\\private\\file' }) })
   const file = pathToFileURL(join(work, 'renderer.html')).href
   const trusted = window()
   registerTrustedRenderer(trusted.webContents, file)
@@ -73,9 +75,12 @@ app.whenReady().then(async () => {
   checks.push('contextBridge survives reload')
   const locale: IpcErrorLocale = await trusted.webContents.executeJavaScript(`navigator.language.startsWith('ru') ? 'ru' : 'en'`)
   const badPayload = await trusted.webContents.executeJavaScript(`
-    window.electronAPI.saveSettings({ value: NaN }).then(() => ({ message: 'accepted' }), e => ({ message: e.message, stack: e.stack }))
+    window.electronAPI.saveSettings({ value: NaN }).then(() => ({ message: 'accepted' }), e => ({ message: e.message, stack: e.stack, code: e.code, category: e.category, correlationId: e.correlationId }))
   `)
   assert.equal(badPayload.message, ipcError('validation', locale).message)
+  assert.equal(badPayload.code, 'IPC_VALIDATION_ERROR')
+  assert.equal(badPayload.category, 'validation')
+  assert.match(badPayload.correlationId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i)
   assert.doesNotMatch(badPayload.stack ?? '', /\bat |[A-Z]:[\\/]|file:\/\//i)
   assert.equal(settingsCalls, 0)
   checks.push('invalid IPC rejected before handler')
@@ -86,6 +91,25 @@ app.whenReady().then(async () => {
   }
   assert.equal(settingsCalls, 0)
   checks.push('canonical IPC errors follow persisted/selected English and Russian locale')
+  const failureIds = new Set<string>()
+  for (const selected of ['en', 'ru'] as const) {
+    await trusted.webContents.executeJavaScript(`window.electronAPI.i18nSetLocale('${selected}')`)
+    for (const category of Object.keys(IPC_ERRORS) as IpcErrorCategory[]) {
+      faultCategory = category
+      const failure = await trusted.webContents.executeJavaScript(`window.electronAPI.getSettings().catch(e => ({ data: e, isError: e instanceof Error }))`)
+      assert.equal(failure.isError, false)
+      assert.ok(isIpcRemoteErrorData(failure.data))
+      assert.deepEqual(failure.data, { name: 'IpcRemoteError', ...ipcError(category, selected), correlationId: failure.data.correlationId })
+      assert.ok(failure.data.correlationId)
+      assert.ok(!failureIds.has(failure.data.correlationId))
+      failureIds.add(failure.data.correlationId)
+      assert.doesNotMatch(JSON.stringify(failure.data), /raw-secret|\bat |[A-Z]:[\\/]|file:\/\//i)
+    }
+  }
+  const localFailure = await trusted.webContents.executeJavaScript(`window.electronAPI.saveSettings('not-an-object').catch(e => e)`)
+  assert.ok(isIpcRemoteErrorData(localFailure))
+  assert.equal(localFailure.category, 'validation'); assert.equal(localFailure.correlationId, undefined)
+  checks.push('all seven typed error categories/codes/correlation IDs survive contextBridge in en/ru; local validators are typed too')
 
   const foreign = window()
   await foreign.loadURL(file)

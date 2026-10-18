@@ -19,6 +19,9 @@ export type IpcErrorCategory = keyof typeof IPC_ERRORS
 export type IpcError = { [C in IpcErrorCategory]: {
   category: C; code: typeof IPC_ERRORS[C]['code']; message: string
 } }[IpcErrorCategory]
+/** Promise rejection data crosses contextBridge; custom Error properties do not. */
+export type IpcRemoteErrorData = IpcError & { name: 'IpcRemoteError'; correlationId?: string }
+const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 export type IpcResult<T> = { version: typeof IPC_VERSION; correlationId: string } & (
   | { ok: true; result: T }
   | { ok: false; error: IpcError }
@@ -37,7 +40,10 @@ export function ipcError(category: IpcErrorCategory, locale: IpcErrorLocale = 'r
 
 /** Stable categories at the privileged boundary; never serialize arbitrary errors. */
 export function classifyIpcError(error: unknown): IpcErrorCategory {
-  try { return classifyReadableIpcError(error) } catch { return 'internal' }
+  try {
+    const category = classifyReadableIpcError(error)
+    return Object.hasOwn(IPC_ERRORS, category) ? category : 'internal'
+  } catch { return 'internal' }
 }
 
 function classifyReadableIpcError(error: unknown): IpcErrorCategory {
@@ -58,10 +64,34 @@ export class IpcRemoteError extends Error {
   }
 }
 
+/** Explicit allowlist: never copy arbitrary exception message, stack or cause. */
+export function serializeIpcError(error: unknown, locale: IpcErrorLocale): IpcRemoteErrorData {
+  let category: IpcErrorCategory = 'internal', correlationId: string | undefined
+  try {
+    if (error instanceof IpcRemoteError) {
+      if (Object.hasOwn(IPC_ERRORS, error.category)) category = error.category
+      if (typeof error.correlationId === 'string' && UUID_V4.test(error.correlationId)) correlationId = error.correlationId
+    } else category = classifyIpcError(error)
+  } catch { category = 'internal' }
+  return { name: 'IpcRemoteError', ...ipcError(category, locale), ...(correlationId ? { correlationId } : {}) }
+}
+
+export function isIpcRemoteErrorData(value: unknown): value is IpcRemoteErrorData {
+  try {
+    if (!value || typeof value !== 'object' || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) return false
+    const error = value as Record<string, unknown>
+    if (error.name !== 'IpcRemoteError' || typeof error.category !== 'string' || !Object.hasOwn(IPC_ERRORS, error.category)) return false
+    const category = error.category as IpcErrorCategory
+    return error.code === IPC_ERRORS[category].code
+      && (error.message === IPC_ERRORS[category].message || error.message === IPC_ERROR_MESSAGES_EN[category])
+      && (error.correlationId === undefined || (typeof error.correlationId === 'string' && UUID_V4.test(error.correlationId)))
+  } catch { return false }
+}
+
 export function unwrapIpcResult<T>(value: unknown, locale: IpcErrorLocale = 'ru'): T {
   if (value && typeof value === 'object' && 'version' in value && value.version === IPC_VERSION
     && 'correlationId' in value && typeof value.correlationId === 'string'
-    && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value.correlationId)
+    && UUID_V4.test(value.correlationId)
     && 'ok' in value) {
     if (value.ok === true && 'result' in value) return value.result as T
     if (value.ok === false && 'error' in value && value.error && typeof value.error === 'object'
