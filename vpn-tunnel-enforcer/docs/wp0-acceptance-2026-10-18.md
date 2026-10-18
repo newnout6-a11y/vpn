@@ -538,8 +538,23 @@ owned/foreign/prefix collision/ambiguous/unreadable. Настоящий Windows 
 
 Env через legacy autoconfig IPC проходит тот же Soft owner; прямой rollback под
 active native mode отклоняется. App bootstrap использует owned Soft method и
-не перезапускает retained Soft, не очищает unknown. Исполняемые App callbacks
+не очищает unknown. Исполняемые App callbacks
 с настоящим Zustand/FSM/lane проверяют leak guard после connect и во время stop,
 включая stale revision. Tray сохраняет firewall/leak warnings без active process.
 Failed adaptive fallback устанавливает unknown после stop/failure, завершая
 transient reconnect. Это пять проверенных замечаний Qodo, не общая приёмка WP-0.
+
+### Повторный Qodo #58 — обновление выбранного Soft-прокси
+
+Qodo run 1540463 completed на cb4b134: пять прежних findings implemented,
+новый action_required — renderer reload сохранял старый env-прокси после смены
+настроек. Retained Soft теперь повторно применяет выбранный адрес и протокол
+через main connection lane. Исключение admission ограничено connected/soft
+без transition; новый native connect по-прежнему отклоняется. Это обновление
+env с сохранением исходного backup, без stop/restart TUN. Ошибка apply не даёт
+успеха; отмена удерживает native effects до drain и последующей очистки.
+
+Регрессии исполняют App bootstrap, реальные main Soft effects с production
+FSM/lane и fake OS. Тест настоящего env-модуля проверяет все три proxy values
+после смены адреса/протокола и восстановление исходного baseline. Это не
+натурная проверка доставки Windows environment notification приложениям.

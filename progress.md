@@ -3047,3 +3047,33 @@ CI/review нового SHA проверяются отдельно после pu
   (.tmp/wp0-qodo58-verified-full.log). Typecheck 158/0 any, coverage AC 927/927,
   F 210/210 и diff check — повторно exit 0. Traceability не подменяет AT.
 - После пяти Qodo fixes: npm.cmd run build, node scripts/test-electron-runtime.mjs и node scripts/test-wp1-native.mjs --ipc-only — exit 0 (.tmp/wp0-qodo58-build.log, .tmp/wp0-qodo58-electron.log, .tmp/wp0-qodo58-csp.log).
+
+### PR #58 — повторный Qodo: согласование Soft-прокси после renderer reload
+
+- Владелец разрешил сливать прошедшие проверки PR; прежний запрет отменён.
+  На cb4b134 CI run 39150959411 success (все три jobs). Qodo run 1540463
+  completed на том же SHA: пять прежних findings implemented, новый
+  action_required 86fe43a3-e9fb-43a9-8f9e-cd482b8879b4. Слияние отложено до
+  исправления: retained Soft сохранял старый env после смены proxy settings.
+- App bootstrap теперь передаёт выбранные адрес/протокол owned Soft API и для
+  retained connected/soft. Lane разрешает такой refresh только без transition,
+  сохраняя exclusivity/cancellation/deadline. Обычный повторный connect и refresh
+  поверх native connection отклоняются без эффектов. Env apply сохраняет original
+  backup; stop/restart TUN не требуется. Ошибка refresh не публикует успех.
+- До runtime fix `npm.cmd test -- src/main/lifecycleCleanup.test.ts src/renderer/App.lifecycle.test.ts`:
+  7 failed / 166 passed, 26.35 s, exit 1 (.tmp/wp0-qodo58-soft-before.log).
+  После: `npm.cmd test -- src/main/lifecycleCleanup.test.ts src/main/tunnelStateMachine.test.ts src/renderer/App.lifecycle.test.ts`:
+  193 passed / 3 files, 26.52 s, exit 0 (.tmp/wp0-qodo58-soft-after.log).
+  Дополнительно env regression сверяет все proxy values после refresh и rollback
+  к original values; actual PowerShell/Windows environment delivery не заявляется.
+- `npm.cmd run typecheck` — exit 0, 158 channels / 0 public any
+  (.tmp/wp0-qodo58-soft-typecheck.log). Coverage: AC 927/927, F 210/210, exit 0;
+  `git diff --check` — exit 0. Полный suite и native smoke фиксируются ниже.
+- Окончательный `npm.cmd test`: **4014 passed / 5 skipped / 0 failed**,
+  253 files passed / 2 skipped, 178.11 s, exit 0
+  (.tmp/wp0-qodo58-soft-full.log). Expected stderr RootErrorBoundary не означает
+  отказ suite; unhandled errors отсутствуют. После suite `npm.cmd run build` —
+  exit 0 (.tmp/wp0-qodo58-soft-build.log); `node scripts/test-electron-runtime.mjs`
+  — ELECTRON_SMOKE_PASS, exit 0 (.tmp/wp0-qodo58-soft-electron.log);
+  `node scripts/test-wp1-native.mjs --ipc-only` — WP1_NATIVE_PASS, exit 0
+  (.tmp/wp0-qodo58-soft-csp.log). Это локальные subsets с fake OS, не L3 PASS.

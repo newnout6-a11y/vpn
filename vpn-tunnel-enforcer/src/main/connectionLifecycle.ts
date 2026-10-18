@@ -11,7 +11,7 @@ export interface ConnectionStartupOwner {
   wait<T>(effect: Promise<T>): Promise<T>
 }
 
-interface StartOptions { owner?: OperationOwner; timeoutMs?: number }
+interface StartOptions { owner?: OperationOwner; timeoutMs?: number; refreshSoft?: boolean }
 type CleanupResult = { success: boolean; error?: string }
 type Startup = {
   controller: AbortController
@@ -70,7 +70,12 @@ export class ConnectionLifecycle {
       }
       return rejection('conflict', 'Запуск защиты уже выполняется')
     }
-    if (this.stateMachine && !this.stateMachine.canStart()) return rejection('conflict', 'Состояние туннеля не допускает новый запуск')
+    const snapshot = this.stateMachine?.snapshot
+    // Soft refresh reapplies the selected proxy under the same exclusive lane.
+    // It must never admit a second native core or overwrite an active transition.
+    const softRefresh = options.refreshSoft && snapshot?.state === 'connected'
+      && snapshot.mode === 'soft' && snapshot.transition === null
+    if (this.stateMachine && !this.stateMachine.canStart() && !softRefresh) return rejection('conflict', 'Состояние туннеля не допускает новый запуск')
     const controller = new AbortController()
     let release!: () => void
     const completion = new Promise<void>(done => { release = done })

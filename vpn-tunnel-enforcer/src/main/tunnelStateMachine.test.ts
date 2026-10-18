@@ -60,6 +60,15 @@ describe('canonical tunnel state', () => {
     expect(h.model.snapshot).toEqual(before)
   })
 
+  it('rejects Soft refresh over a native connection without effects or snapshot changes', async () => {
+    const h = harness(), effect = vi.fn()
+    await h.connect()
+    const before = h.model.snapshot
+    expect(await h.lane.start(effect, { refreshSoft: true })).toMatchObject({ success: false, category: 'conflict' })
+    expect(effect).not.toHaveBeenCalled()
+    expect(h.model.snapshot).toEqual(before)
+  })
+
   it('rejects unconfirmed successful start/stop instead of publishing protection or clean exit', async () => {
     const h = harness()
     await expect(h.lane.start(async () => ({ success: true }))).rejects.toThrow('Connection confirmation missing')

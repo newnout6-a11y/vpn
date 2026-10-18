@@ -158,6 +158,13 @@ describe('env autoconfig backup and verified rollback', () => {
     expect(vi.mocked(writeFile).mock.calls.filter(([path]) => path === backupFile)).toHaveLength(1)
     expect(queriedKeys()).toEqual([])
     expect(mockRegistry.HTTP_PROXY).toBe('http://127.0.0.1:10809')
+    for (const key of ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY'] as const) {
+      expect(mockRegistry[key]).toBe('http://127.0.0.1:10809')
+      expect(process.env[key]).toBe('http://127.0.0.1:10809')
+    }
+    expect(await env.rollback()).toBe(true)
+    expect(mockRegistry).toEqual(originalValues)
+    for (const key of proxyKeys) expect(process.env[key]).toBe(originalValues[key])
   })
 
   it('restores mixed original/unset values, verifies all four, and retires the receipt', async () => {

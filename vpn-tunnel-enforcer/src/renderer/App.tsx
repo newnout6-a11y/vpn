@@ -59,8 +59,10 @@ const scheduleIdle = (fn: () => void) => {
 
 async function restoreSoftStartup(proxy: { host: string; port: number; type: 'socks5' | 'http' }): Promise<void> {
   const { lifecycle } = await window.electronAPI.getTunStatus()
-  if (lifecycle.state === 'connected' && lifecycle.mode === 'soft') return
-  if (lifecycle.state !== 'disconnected' || lifecycle.transition) throw new Error('Сначала восстановите состояние защиты')
+  const retainedSoft = lifecycle.state === 'connected' && lifecycle.mode === 'soft'
+  if ((!retainedSoft && lifecycle.state !== 'disconnected') || lifecycle.transition) throw new Error('Сначала восстановите состояние защиты')
+  // Reconcile the selected endpoint even after renderer reload: retained Soft
+  // can still carry the previous settings. Main owns admission and env backup.
   const result = await window.electronAPI.startSoftProtection(`${proxy.host}:${proxy.port}`, proxy.type)
   if (!result.success) throw new Error(result.error || 'Soft startup failed')
 }

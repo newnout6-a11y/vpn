@@ -49,6 +49,13 @@ describe('canonical App event handling',()=>{
     const task=restore({host:'127.0.0.1',port:8080,type:'http'})
     if(state==='unknown')await expect(task).rejects.toThrow('Сначала восстановите')
     else await task
-    expect(api.startSoftProtection).toHaveBeenCalledTimes(state==='disconnected'?1:0)
+    expect(api.startSoftProtection).toHaveBeenCalledTimes(state==='unknown'?0:1)
+    if(state!=='unknown')expect(api.startSoftProtection).toHaveBeenCalledWith('127.0.0.1:8080','http')
+  })
+  it.each(['connecting','disconnecting','reconnecting'])('does not refresh Soft during %s',async transition=>{
+    const api={getTunStatus:vi.fn(async()=>({lifecycle:{state:'connected',mode:'soft',transition}})),startSoftProtection:vi.fn()}
+    const restore=compile('restoreSoftStartup',{window:{electronAPI:api}})
+    await expect(restore({host:'127.0.0.1',port:8080,type:'http'})).rejects.toThrow('Сначала восстановите')
+    expect(api.startSoftProtection).not.toHaveBeenCalled()
   })
 })

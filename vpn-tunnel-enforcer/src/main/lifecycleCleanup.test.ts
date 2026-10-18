@@ -1079,7 +1079,7 @@ function softStartupHarness() {
   }
   // Load the actual cleanup helper as well, rather than the generic stop mock.
   const { rollbackSoftAutoconfigIfApplied: _stub, ...dependencies } = os
-  const control = compile<{ start: () => Promise<any>; stop: () => Promise<any>; protected: () => boolean;
+  const control = compile<{ start: (proxyAddr?: string, proxyType?: 'http' | 'socks5') => Promise<any>; stop: () => Promise<any>; protected: () => boolean;
     apply: (targets: string[]) => Promise<Record<string, boolean>>; rollback: (targets: string[]) => Promise<Record<string, boolean>> }>(`
 let adaptiveVerificationGeneration=0,activeAdaptiveContext=null,currentSession=null,stopInProgress=false,softProtectionApplied=false;
 ${body('index.ts', 'rollbackSoftAutoconfigIfApplied')}
@@ -1089,7 +1089,7 @@ ${body('index.ts', 'stopProtectionEffects')}
 ${body('index.ts', 'stopProtection')}
 ${body('index.ts', 'applyOwnedAutoconfig')}
 ${body('index.ts', 'rollbackOwnedAutoconfig')}
-return {start:()=>startSoftProtection('127.0.0.1:8080','http'),stop:stopProtection,protected:()=>softProtectionApplied,
+return {start:(addr='127.0.0.1:8080',type='http')=>startSoftProtection(addr,type),stop:stopProtection,protected:()=>softProtectionApplied,
 apply:targets=>applyOwnedAutoconfig(targets,'127.0.0.1:8080','http'),rollback:rollbackOwnedAutoconfig};
 `, dependencies)
   readProtection = control.protected
@@ -1097,12 +1097,53 @@ apply:targets=>applyOwnedAutoconfig(targets,'127.0.0.1:8080','http'),rollback:ro
 }
 
 describe('owned Soft startup (AT-00-003/007 subset)', () => {
+  it('reconciles changed address and protocol while Soft remains connected', async () => {
+    const h = softStartupHarness()
+    expect(await h.start()).toMatchObject({ success: true })
+    expect(await h.start('127.0.0.1:10808', 'socks5')).toMatchObject({ success: true })
+    expect(h.autoconfig.apply).toHaveBeenLastCalledWith(['env'], '127.0.0.1:10808', 'socks5')
+    expect(h.tunnelState.snapshot).toMatchObject({ state: 'connected', mode: 'soft', transition: null })
+    expect(h.tunController.stop).not.toHaveBeenCalled()
+    expect(h.autoconfig.rollbackApplied).not.toHaveBeenCalled()
+  })
+  it('does not publish success for a failed Soft refresh', async () => {
+    const h = softStartupHarness()
+    await h.start()
+    h.autoconfig.apply.mockResolvedValueOnce({ env: false })
+    expect(await h.start('127.0.0.1:10808', 'socks5')).toMatchObject({ success: false })
+    expect(h.tunnelState.snapshot).toMatchObject({ state: 'error', transition: null, cleanupRequired: true })
+  })
+  it('keeps a cancelled Soft refresh owned until drain, then cleans it without publishing success', async () => {
+    const h = softStartupHarness()
+    await h.start()
+    vi.clearAllMocks()
+    let release!: (value: { env: boolean }) => void
+    h.autoconfig.apply.mockImplementationOnce(() => new Promise(done => { release = done }))
+    const refresh = h.start('127.0.0.1:10808', 'socks5')
+    expect(h.tunnelState.snapshot).toMatchObject({ transition: 'connecting' })
+    const duplicate = await h.start()
+    expect(duplicate).toMatchObject({ success: false, category: 'conflict' })
+    const stopped = h.stop()
+    expect(h.autoconfig.rollbackApplied).not.toHaveBeenCalled()
+    release({ env: true })
+    expect(await refresh).toMatchObject({ success: false, category: 'cancelled' })
+    expect(await stopped).toMatchObject({ success: true })
+    expect(h.tunnelState.snapshot).toMatchObject({ state: 'disconnected', transition: null })
+    expect(h.sendToMainWindow).not.toHaveBeenCalledWith('soft-status-changed', true)
+  })
+  it('does not refresh Soft over a native tunnel', async () => {
+    const h = softStartupHarness()
+    vi.spyOn(h.tunnelState, 'snapshot', 'get').mockReturnValue({ ...h.tunnelState.snapshot, state: 'connected', mode: 'tun' })
+    vi.spyOn(h.tunnelState, 'canStart').mockReturnValue(false)
+    expect(await h.start('127.0.0.1:10808', 'socks5')).toMatchObject({ success: false, category: 'conflict' })
+    expect(h.autoconfig.apply).not.toHaveBeenCalled()
+  })
   it('routes legacy env apply and rollback through real main effects and the canonical FSM', async () => {
     const h = softStartupHarness()
     expect(await h.apply(['git', 'env'])).toEqual({ git: true, env: true })
     expect(h.tunnelState.snapshot).toMatchObject({ state: 'connected', mode: 'soft' })
     expect(h.autoconfig.apply.mock.calls.map(([targets]) => targets)).toEqual([['git'], ['env']])
-    expect(await h.apply(['env'])).toEqual({ env: false })
+    expect(await h.apply(['env'])).toEqual({ env: true })
     expect(h.tunnelState.snapshot.state).toBe('connected')
     h.autoconfig.rollbackApplied.mockRejectedValueOnce(new Error('env denied'))
     expect(await h.rollback(['env'])).toEqual({ env: false })

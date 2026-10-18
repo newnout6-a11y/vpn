@@ -1088,7 +1088,7 @@ async function resolveProxyForTrayStart(): Promise<{ proxyAddr: string; proxyTyp
  * it first so the two routing modes cannot overlap.
  */
 async function startSoftProtection(proxyAddr: string, proxyType?: 'socks5' | 'http'): Promise<ConnectionStartResult> {
-  return connectionLifecycle.start(owner => startSoftProtectionEffects(owner, proxyAddr, proxyType))
+  return connectionLifecycle.start(owner => startSoftProtectionEffects(owner, proxyAddr, proxyType), { refreshSoft: true })
 }
 
 async function applyOwnedAutoconfig(targets: string[], proxyAddr: string, proxyType?: 'socks5' | 'http'): Promise<Record<string, boolean>> {
