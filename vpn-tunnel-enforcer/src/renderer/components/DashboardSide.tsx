@@ -18,6 +18,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { isIpcRemoteErrorData } from '../../shared/ipc-result'
 import { motion } from 'framer-motion'
 import {
   Activity,
@@ -191,7 +192,7 @@ function QuickServers() {
           addLog('info', `Сервер выбран: ${profile.name}`)
           emitServerChanged()
         } catch (err: unknown) {
-          const message = err instanceof Error ? err.message : String(err)
+          const message = isIpcRemoteErrorData(err) || err instanceof Error ? err.message : String(err)
           addLog('error', `Не удалось выбрать сервер: ${message}`)
           refresh()
         } finally {

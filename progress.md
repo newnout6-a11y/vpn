@@ -2177,3 +2177,38 @@ CI/review нового SHA проверяются отдельно после pu
 - Этот коммит дописывает журнал, production code после полного DoD и
   exact-head CI не менялся. Нормативные docs/ не редактировались;
   сохранены прежние .claude/, .wrangler/, .playwright-cli/ и output/.
+
+## 18.10.2026 — WP-0: типизированные ошибки доходят до renderer
+
+- Ветка codex/wp0-renderer-errors. Подтверждена потеря custom Error properties
+  настоящим Electron contextBridge: усиленный native smoke до исправления
+  завершился exit 1 (undefined вместо IPC_VALIDATION_ERROR), лог
+  vpn-tunnel-enforcer/.tmp/wp0-renderer-error-before.log.
+- Preload сериализует отказы request-методов в canonical plain data:
+  name/code/category/message/correlationId. Исключены произвольные тексты,
+  stack/cause и секреты. Локальная валидация возвращает rejected Promise
+  без выдуманного main correlation и без IPC effects. Подписки остаются
+  синхронными, unsubscribe проверен отдельно. Public guard позволяет
+  renderer читать эти данные вместо ненадёжного instanceof Error.
+- Исправлены отображение ошибки выбора сервера и глобальный rejection
+  logger; отказ самого logRenderer теперь наблюдается, не создавая новый
+  unhandled rejection. Добавлены функциональные renderer-регрессии.
+- Настоящие production guard/preload/contextBridge проверены для 7 категорий
+  в en/ru (14 запросов): стабильные коды, уникальные UUID, canonical messages,
+  без stack/секретов/путей. Локальный аргумент тоже проверен нативно.
+  В Windows CI добавлены build и оба native IPC/CSP smoke; удалённый
+  результат этого нового шага ещё предстоит получить на PR.
+- `npm.cmd test -- src/shared/ipc-result.test.ts src/preload/preloadValidation.test.ts src/main/ipcChannelContract.test.ts src/main/ipcContractAcceptance.test.ts src/renderer/components/DashboardSide.test.tsx src/renderer/main.test.tsx`
+  — 377 passed, 6 файлов, 2.84 s, exit 0.
+- `npm.cmd run build` (включает typecheck и 157-channel checker) — exit 0,
+  .tmp/wp0-renderer-errors-build.log. `node scripts/test-electron-runtime.mjs`
+  — exit 0, .tmp/wp0-renderer-errors-native.log;
+  `node scripts/test-wp1-native.mjs --ipc-only` — exit 0.
+- `npm.cmd test` — 3724 passed / 5 skipped / 0 failed, 244 файлов passed /
+  2 skipped, 205.43 s, exit 0; .tmp/wp0-renderer-errors-full.log.
+  `python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py`
+  — AC 927/927, F 210/210, exit 0. `git diff --check` — exit 0.
+- AT-00-004 усилен на реальной границе; весь WP-0 не объявлен завершённым.
+  Глубокие legacy schemas/any, domain-result failures, общий coordinator/FSM,
+  registry отмены/deadline, migrations, correlation/history и race/UI/flags
+  остаются в матрице. Native smoke не заменяет полную L3-приёмку.

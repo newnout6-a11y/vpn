@@ -989,4 +989,4 @@ export interface ExtendedSettings {
 // *Channels declarations were not used by dispatch and included orphan APIs.
 export { IPC_REQUESTS, assertIpcRequest } from './ipc-contract'
 export type { IpcChannel, IpcRequest, IpcResponse } from './ipc-contract'
-export type { IpcResult, IpcError } from './ipc-result'
+export type { IpcResult, IpcError, IpcRemoteErrorData } from './ipc-result'

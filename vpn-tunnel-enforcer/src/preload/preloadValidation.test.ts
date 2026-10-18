@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ipcRenderer } from 'electron'
+import { isIpcRemoteErrorData } from '../shared/ipc-result'
 
 const exposed = vi.hoisted(() => ({ api: null as any }))
 const invokeMock = vi.hoisted(() => vi.fn())
@@ -24,6 +25,15 @@ async function loadApi() {
   return exposed.api
 }
 
+async function expectLocalValidation(action: () => unknown): Promise<void> {
+  const result = action()
+  expect(result).toBeInstanceOf(Promise)
+  const failure = await Promise.resolve(result).catch((error: unknown) => error)
+  expect(failure).toMatchObject({ name: 'IpcRemoteError', category: 'validation', code: 'IPC_VALIDATION_ERROR', message: 'Invalid operation parameters' })
+  expect(failure).not.toBeInstanceOf(Error)
+  expect(failure).not.toHaveProperty('stack')
+}
+
 describe('preload IPC argument validation', () => {
   beforeEach(() => {
     vi.stubGlobal('navigator', { language: 'en-US' })
@@ -45,6 +55,23 @@ describe('preload IPC argument validation', () => {
       error: { category: 'permission', code: 'unknown', message: 'raw-secret at C:\\private\\file' } })
     await expect(api.getTunStatus()).rejects.toMatchObject({ name: 'IpcRemoteError', category: 'permission',
       code: 'IPC_PERMISSION_DENIED', message: 'Permission denied', correlationId: '00000000-0000-4000-8000-000000000000' })
+    const failure = await api.getTunStatus().catch((error: unknown) => error)
+    expect(isIpcRemoteErrorData(structuredClone(failure))).toBe(true)
+    expect(failure).not.toBeInstanceOf(Error)
+    expect(failure).not.toHaveProperty('stack')
+  })
+
+  it('preserves synchronous subscriptions, callback values and unsubscribe handles', async () => {
+    const api = await loadApi(), callback = vi.fn()
+    vi.mocked(ipcRenderer.on).mockClear()
+    const unsubscribe = api.onAppResumedFromSleep(callback)
+    const [channel, handler] = vi.mocked(ipcRenderer.on).mock.calls[0]
+    expect(channel).toBe('app:resumed-from-sleep')
+    handler({} as never)
+    expect(callback).toHaveBeenCalledOnce()
+    expect(typeof unsubscribe).toBe('function')
+    unsubscribe()
+    expect(ipcRenderer.removeListener).toHaveBeenCalledWith(channel, handler)
   })
 
   it('sanitizes malformed responses and rejected Electron transports', async () => {
@@ -82,22 +109,22 @@ describe('preload IPC argument validation', () => {
   it('rejects oversized VPN inspection input before ipcRenderer.invoke', async () => {
     const api = await loadApi()
 
-    expect(() => api.inspectVpnInput('x'.repeat(256 * 1024 + 1))).toThrow(/too large/)
+    await expectLocalValidation(() => api.inspectVpnInput('x'.repeat(256 * 1024 + 1)))
     expect(invokeMock).not.toHaveBeenCalled()
   })
 
   it('rejects non-object settings before ipcRenderer.invoke', async () => {
     const api = await loadApi()
 
-    expect(() => api.saveSettings('not-an-object')).toThrow(/settings must be an object/)
+    await expectLocalValidation(() => api.saveSettings('not-an-object'))
     expect(invokeMock).not.toHaveBeenCalled()
   })
 
   it('rejects invalid enum and port arguments', async () => {
     const api = await loadApi()
 
-    expect(() => api.killSwitchSetLevel('maximum')).toThrow(/level is invalid/)
-    expect(() => api.serversPingOne('example.com', 70000)).toThrow(/port/)
+    await expectLocalValidation(() => api.killSwitchSetLevel('maximum'))
+    await expectLocalValidation(() => api.serversPingOne('example.com', 70000))
     expect(invokeMock).not.toHaveBeenCalled()
   })
 
@@ -105,7 +132,7 @@ describe('preload IPC argument validation', () => {
   it.each([null, false, 1, '', 'with-secrets', 'REDACTED', {}, ['secrets']])('rejects invalid config export mode %j without invoking IPC', async mode => {
     const api = await loadApi()
 
-    expect(() => api.configExport(mode)).toThrow(TypeError)
+    await expectLocalValidation(() => api.configExport(mode))
     expect(invokeMock).not.toHaveBeenCalled()
   })
 

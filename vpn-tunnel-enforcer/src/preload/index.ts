@@ -1,7 +1,7 @@
 import type { PublicIpInfo } from '../shared/publicIp'
 import { contextBridge, ipcRenderer } from 'electron'
-import { assertIpcRequest, type IpcChannel, type IpcRequest, type IpcResponse } from '../shared/ipc-contract'
-import { unwrapIpcResult, IpcRemoteError, ipcError, type IpcErrorLocale } from '../shared/ipc-result'
+import { IPC_REQUESTS, assertIpcRequest, type IpcChannel, type IpcRequest, type IpcResponse } from '../shared/ipc-contract'
+import { unwrapIpcResult, IpcRemoteError, ipcError, serializeIpcError, type IpcErrorLocale } from '../shared/ipc-result'
 import type {
   ClientDevice,
   ExternalProxyStartOptions,
@@ -153,7 +153,16 @@ function invoke<C extends IpcChannel>(channel: C, ...args: IpcRequest<C>): Promi
   )
 }
 
-contextBridge.exposeInMainWorld('electronAPI', {
+function withIpcFailures<T extends object>(api: T): T {
+  const requests: ReadonlySet<string> = new Set(Object.values(IPC_REQUESTS).map(request => request.method))
+  return Object.fromEntries(Object.entries(api).map(([name, method]) => !requests.has(name) ? [name, method] : [name, (...args: unknown[]) => {
+    try {
+      return Promise.resolve(method(...args)).catch((error: unknown) => { throw serializeIpcError(error, ipcLocale) })
+    } catch (error) { return Promise.reject(serializeIpcError(error, ipcLocale)) }
+  }])) as T
+}
+
+contextBridge.exposeInMainWorld('electronAPI', withIpcFailures({
   detectHapp: () => invoke('detect-happ'),
   getPublicIp: () => invoke('get-public-ip'),
   recheckPublicIp: (rebaseline?: boolean) => invoke('recheck-public-ip', assertOptionalBoolean(rebaseline, 'rebaseline') === true),
@@ -455,4 +464,4 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('app:resumed-from-sleep', handler)
     return () => ipcRenderer.removeListener('app:resumed-from-sleep', handler)
   }
-} satisfies ElectronAPI)
+} satisfies ElectronAPI))

@@ -31,6 +31,7 @@ export function inspectIpcContract({ main, preload, shared }) {
   walk(parse('preload.ts', preload), node => {
     if (!called(node, 'contextBridge.exposeInMainWorld')) return
     let object = node.arguments[1]
+    if (object && called(object, 'withIpcFailures')) object = object.arguments[0]
     if (object && ts.isSatisfiesExpression(object)) object = object.expression
     if (!object || !ts.isObjectLiteralExpression(object)) { problems.push('Unresolved preload bridge'); return }
     for (const property of object.properties) {
