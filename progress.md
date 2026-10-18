@@ -3586,3 +3586,51 @@ CI/review нового SHA проверяются отдельно после pu
   — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-event-time-qodo65-csp.log).
   Coverage AC 927/927, F 210/210 и `git diff --check` — exit 0. Native scope
   не расширен до packet/resource/OS-matrix приёмки.
+
+### PR #65 — повторное ревью и слияние
+
+- Итоговый head 8f19b2e8b3549752df6e9607345df9bd617e2ffa: Qodo 1541967
+  completed, прежний finding implemented, новых нет. CI 39167728768
+  completed/success, все три jobs зелёные на этом SHA.
+- Слит после повторных проверок; REST GET merged=true,
+  merge d8e096552042a15b1ff8c5b54d35a2616c986b45.
+
+## WP-0 — фактическая история Soft sessions (19.10.2026)
+
+- AT-00-005 / F-143: успешный startSoftProtectionEffects открывает LiveSession
+  после завершения env apply. Identical refresh сохраняет origin/ID, смена
+  address/type закрывает прежнюю сессию как server-switch и открывает новую.
+  Failed refresh пишет свою попытку, сохраняя предыдущую live-сессию.
+- История проходит реальные owned/legacy env/tray/recovery entrypoints;
+  source/owner берутся из их admission. Missing-proxy Soft tray отказ теперь
+  тоже записывается до admission, с собственным tray action ID.
+- Native stop/node-switch callbacks не закрывают Soft session. Soft stop и
+  shutdown закрывают её только после успешного env rollback/доказанного отсутствия
+  obligation; отказ оставляет её для retry. Переключение на native закрывает
+  Soft после подтверждённого rollback. Hard/Direct правила native exit не ослаблены.
+- Native trafficMonitor не измеряет env-only трафик; для Soft счётчики записываются
+  нулевыми, без приписывания оставшихся native bytes. Это не доказательство
+  отсутствия трафика или packet-level защиты. Duration и provenance сохранены.
+- До production-исправления `npm.cmd test -- src/main/connectionHistoryStorage.test.ts`
+  — **8 failed / 86 passed**, 3.59 s, exit 1 (.tmp/wp0-soft-history-before.log).
+  Это регрессии отсутствия Soft session history и её происхождения.
+- `npm.cmd test -- src/main/connectionHistoryStorage.test.ts src/main/lifecycleCleanup.test.ts src/main/connectionOperations.test.ts src/main/actionCorrelationScope.test.ts`
+  — **299 passed / 4 files**, 23.01 s, exit 0
+  (.tmp/wp0-soft-history-focused-final.log). Actual main bodies, production lane/FSM,
+  callbacks, real Conf reload; OS/env operations заменены. Проверены refresh,
+  protocol/address switch, failed apply, cancellation + late completion, rollback
+  retry и shutdown ordering. Это не installed/native env acceptance.
+- `npm.cmd run typecheck` — exit 0, 158 channels / 0 public any
+  (.tmp/wp0-soft-history-typecheck.log). Общие background/native owners, общий
+  registry операций и прочие остатки WP-0 не объявляются завершёнными.
+- Полный `npm.cmd test` — **4175 passed / 5 skipped / 0 failed**,
+  264 files passed / 2 skipped, 158.36 s, exit 0
+  (.tmp/wp0-soft-history-full.log). `npm.cmd run build` — exit 0
+  (.tmp/wp0-soft-history-build.log).
+- `node scripts/test-electron-runtime.mjs` — ELECTRON_SMOKE_PASS, exit 0
+  (.tmp/wp0-soft-history-electron.log); `node scripts/test-wp1-native.mjs --ipc-only`
+  — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-soft-history-csp.log).
+  `python docs/04-приёмочные-тесты/traceability/check-coverage.py` —
+  AC 927/927, F 210/210, exit 0; `git diff --check` — exit 0.
+  Native smoke ограничен Electron/IPC/CSP, OS/env эффекты в Soft fixtures
+  заменены: полная Windows env/packet приёмка этим не заявляется.

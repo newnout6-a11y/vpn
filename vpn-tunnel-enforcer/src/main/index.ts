@@ -273,8 +273,8 @@ function writeSessionEntry(s: LiveSession, stats: TrafficStats, outcome: Session
       profileName: s.profile.name,
       profileId: s.profile.id,
       mode: s.profile.mode,
-      bytesDown: stats.sessionDownloadBytes ?? 0,
-      bytesUp: stats.sessionUploadBytes ?? 0,
+      bytesDown: s.profile.mode === 'soft' ? 0 : stats.sessionDownloadBytes ?? 0,
+      bytesUp: s.profile.mode === 'soft' ? 0 : stats.sessionUploadBytes ?? 0,
       disconnectReason: outcomeKindToDisconnectReason(outcome.kind),
       errorMessage: outcome.headline,
       outcome
@@ -353,9 +353,9 @@ function recordStartFailure(
   hint: string,
   extra: Partial<SessionOutcomeEvidence> = {}
 ): void {
-  // A transient 'running' during the failed start may have opened a provisional
-  // session via ensureSessionForRunningTunnel — drop it, this attempt failed.
-  currentSession = null
+  // A native startup can have opened a provisional session. A failed Soft
+  // refresh retains the preceding session until verified env cleanup.
+  if (profile.mode !== 'soft' || currentSession?.profile.mode !== 'soft') currentSession = null
   const now = Date.now()
   const correlationId = currentCorrelationId()
   try {
@@ -1137,13 +1137,18 @@ async function startSoftProtectionEffects(owner: ConnectionStartupOwner, proxyAd
   }
 
   const normalizedProxyType = proxyType ?? settingsStore.get().proxyType
+  const profile = { id: `local-proxy-soft-${normalizedProxyType}`, name: `Soft proxy ${proxyAddr}`, mode: 'soft' as const }
   const results = await owner.wait(autoconfig.apply(['env'], proxyAddr, normalizedProxyType))
   if (!results.env) {
     const error = 'Не удалось применить env autoconfig'
-    recordStartFailure({ id: 'local-proxy-soft', name: `Soft proxy ${proxyAddr}`, mode: 'soft' }, error)
+    recordStartFailure(profile, error)
     return { success: false, error }
   }
 
+  if (currentSession && (currentSession.profile.id !== profile.id || currentSession.profile.name !== profile.name)) {
+    closeSession(makeOutcome('server-switch'))
+  }
+  if (!currentSession) openSession(profile)
   refreshTrayState({ status: 'protected', proxyAddr })
   softProtectionApplied = true
   sendToMainWindow('soft-status-changed', true)
@@ -1154,6 +1159,7 @@ async function rollbackSoftAutoconfigIfApplied(reason: string): Promise<void> {
   try {
     const rolledBack = await autoconfig.rollbackApplied('env')
     softProtectionApplied = false
+    if (currentSession?.profile?.mode === 'soft' && reason !== 'protection stop') closeSession(makeOutcome('server-switch'))
     if (rolledBack) {
       logEvent('info', 'app', `rolled back env autoconfig before ${reason}`)
       sendToMainWindow('soft-status-changed', false)
@@ -1688,6 +1694,7 @@ async function stopProtectionEffects(
   adaptiveVerificationGeneration += 1
   // Capture counters before status listeners reset them; close history only after exit.
   const endingStats = currentSession ? trafficMonitor.getCurrentStats() : undefined
+  const endingSoftSession = currentSession?.profile?.mode === 'soft'
   const endingOutcome = currentSession ? makeOutcome(stopKind, {
     ...sessionEgressEvidence(), leakDetectedDuringSession: currentSession.leakDetected
   }) : null
@@ -1696,10 +1703,11 @@ async function stopProtectionEffects(
   // Keep internal cleanup evidence inside main; IPC exposes the user outcome.
   const { networkCleanup: _cleanup, runtimeStopped: _runtimeStopped, ...outcome } = result
   if (!result.success && result.runtimeStopped !== true) return outcome
-  if (endingOutcome) closeSession(endingOutcome, endingStats)
+  if (endingOutcome && !endingSoftSession) closeSession(endingOutcome, endingStats)
   let envRollbackFailed = false
   try { await rollbackSoftAutoconfigIfApplied('protection stop') }
   catch { envRollbackFailed = true } // Keep independent cleanup running; the helper already logged the failure.
+  if (endingOutcome && endingSoftSession && !envRollbackFailed) closeSession(endingOutcome, endingStats)
   activeAdaptiveContext = null
 
   stopPeriodicSnapshots()
@@ -1773,6 +1781,7 @@ async function startProtectionFromTrayEffects(): Promise<void> {
     const resolved = await resolveProxyForTrayStart()
     if (!resolved) {
       const errorMsg = 'Прокси не найден. Запустите VPN-клиент в режиме Proxy или задайте адрес вручную в настройках.'
+      recordStartFailure({ id: 'local-proxy-soft', name: 'Soft proxy', mode: 'soft' }, errorMsg)
       notify('error', 'Прокси не найден', errorMsg, 'connectionError')
       restoreAndFocusMainWindow()
       return
@@ -2778,7 +2787,7 @@ app.whenReady().then(async () => {
   // reason and open a fresh one for the just-selected profile.
   onProtectedRestart((reason) => {
     const kind = isNodeSwitchRestartReason(reason)
-    if (!kind || !currentSession) return
+    if (!kind || !currentSession || currentSession.profile.mode === 'soft') return
     closeSession(makeOutcome(kind, sessionEgressEvidence()))
     ensureSessionForRunningTunnel()
   })
@@ -2790,7 +2799,7 @@ app.whenReady().then(async () => {
 
     // Snapshot the ending session NOW, before trafficMonitor.stop() zeroes the
     // byte counters. Only when it ended on its own (not a user/scheduled stop).
-    const endingSession = isTerminal && currentSession && !stopInProgress ? currentSession : null
+    const endingSession = isTerminal && currentSession && currentSession.profile.mode !== 'soft' && !stopInProgress ? currentSession : null
     const endingStats = endingSession ? trafficMonitor.getCurrentStats() : null
 
     if (isTerminal) {
@@ -2865,6 +2874,7 @@ async function performShutdownCleanup(reason: string): Promise<void> {
 
   const endingStats = currentSession ? trafficMonitor.getCurrentStats() : undefined
   const endingOutcome = currentSession ? makeOutcome('app-quit', sessionEgressEvidence()) : null
+  const endingSoftSession = currentSession?.profile?.mode === 'soft'
   stopInProgress = true
   let networkCleanup: NetworkCleanupReceipt | undefined
   let runtimeStopped = false
@@ -2892,7 +2902,7 @@ async function performShutdownCleanup(reason: string): Promise<void> {
       logEvent('warn', 'app', 'owned runtime exit during shutdown unconfirmed', err)
       throw new Error('ShutdownCleanupUnconfirmed: runtime', { cause: err })
     }
-    if (endingOutcome) closeSession(endingOutcome, endingStats)
+    if (endingOutcome && !endingSoftSession) closeSession(endingOutcome, endingStats)
   } finally {
     stopInProgress = false
   }
@@ -2962,6 +2972,7 @@ async function performShutdownCleanup(reason: string): Promise<void> {
       const restored = await autoconfig.rollback(['env'])
       if (restored.env !== true) throw new Error('environment proxy rollback unconfirmed')
     }
+    if (endingOutcome && endingSoftSession) closeSession(endingOutcome, endingStats)
   } catch (err) {
     failedSteps.push('autoconfig')
     logEvent('warn', 'app', 'env autoconfig rollback during shutdown failed', err)

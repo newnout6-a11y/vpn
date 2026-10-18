@@ -8,7 +8,7 @@
 18.10 владелец разрешил продолжать WP-0 при открытом PR #54, сохраняя запрет
 его слияния до отдельного решения. Полного Revix для #54 не было из-за квоты.
 Позднее 18.10 владелец разрешил сливать PR после пройденных проверок.
-#54/#55/#56/#57/#58/#59/#60/#61/#62/#63/#64 слиты в main после exact-head CI success и completed Qodo,
+#54/#55/#56/#57/#58/#59/#60/#61/#62/#63/#64/#65 слиты в main после exact-head CI success и completed Qodo,
 без открытых findings; прежний запрет слияния отменён.
 
 ## Полная область и первоначальная инвентаризация
@@ -19,7 +19,7 @@
 | 00-002 | Production TunnelStateMachine интегрирована в main lane/IPC/Soft/tray/UI; 4096 stable tours и 117649 tours семи событий глубиной 6, включая timeout/cancel и native completion, с fake PID/TUN ledger и балансом operation events; sticky faults и generation fencing | Общая durable operation history/counters; все blocked/unknown/background paths; native Windows resources; общий admission фоновых restart |
 | 00-003 | Main connection lane: UUIDv4, owner, deadline запуска, priority admission; ручные Hard/Direct и Soft из tray, scheduled startup вместе с proxy detection; отмена на 10/50/90% управляемого connect fixture | Общий реестр refresh/speed/import/export/rotation; deadline остановки, интеграция всех entrypoints и полная матрица поздних эффектов |
 | 00-004 | Общая классификация transport; 157 каналов × 7 категорий через guard; native contextBridge сохраняет code/category/correlation в en/ru; typed local validation; 4 настоящих config handlers × 7 категорий, canonical domain failures | Миграция legacy domain-result `{success:false,error}` и semantic matrix настоящих feature handlers; transport fixtures не доказывают её |
-| 00-005 | Один action correlation id в guarded IPC response/error, lifecycle connect/stop и JSONL logger; async isolation, native wait/drain, diagnostic read-back с повторной redaction; сохранение ID исходного connect и source/owner/route/confidence в durable session history и JSON/CSV; общие монотонные временные метки main | Все background/Soft paths и полная матрица событий |
+| 00-005 | Один action correlation id в guarded IPC response/error, lifecycle connect/stop и JSONL logger; async isolation, native wait/drain, diagnostic read-back с повторной redaction; ID исходного connect и source/owner/route/confidence в session history/JSON/CSV; JSONL clockId/monotonicMs отдельно от календарных дат и durationMs; реальные owned/legacy/tray/recovery Soft sessions | Все native/background entrypoints и полная матрица событий/истории автоматизаций, live-check и recovery |
 | 00-006 | Локальные миграции; общий version admission для 20 electron-store файлов / 28 constructors; future-version SHA-256 invariance на real Conf backend до defaults/repair и при записи через ранее открытый handle | Централизованный упорядоченный migration registry, fixtures всех исторических преобразований, остальные persisted JSON, полноценный upgrade/downgrade и межпроцессная координация |
 | 00-007 | Seed 0x5eed003: 200 commands/10 async workers с production lane/FSM, typed losers, парные terminal events, финальный disconnect и 0 fake PID/TUN | Натурный PID-реестр Windows и полная матрица фоновых entrypoints |
 | 00-008 | Dashboard component frames с production FSM/lane; revision fence; Soft через owned IPC; visual fixtures light/dark; native production contextBridge snapshots/disposer | Полная матрица всех операций, тем, размеров и entrypoints; browser fixtures не заменяют native resources |
@@ -808,3 +808,24 @@ Production IPC/lane/logger пишет настоящий JSONL; real Conf sessio
 endedAt < startedAt и durationMs=65000: она остаётся сессией с длительностью 1m 5s.
 Полный AT ещё не закрыт: все реальные Soft/background entrypoints остаются
 отдельной интеграционной работой. Точные команды и результаты — progress.md.
+
+## AT-00-005 — интеграция Soft history (19.10.2026)
+
+Успешный env apply теперь открывает сессию с оригинальными correlation/source/
+owner/route/confidence. Одинаковый refresh не создаёт искусственный server-switch;
+смена адреса или протокола закрывает предыдущую сессию и открывает следующую.
+Failed refresh сохраняет предыдущую live-сессию и пишет отдельную попытку.
+Отмена/late completion не открывают сессию. Native status/restart callbacks
+не подменяют историю env-only маршрута.
+
+Stop/shutdown сохраняют Soft session при неподтверждённом env rollback и пишут
+конечную запись только после успешного retry. Переключение на Hard/Direct
+закрывает её после проверенного env cleanup. Retained Soft reconciliation
+использует owner=recovery, а tray failure до admission — source=tray/owner=manual.
+Native counters для Soft не измеряются: нули в этих полях не доказывают отсутствие
+трафика. Duration берётся из монотонной шкалы, route остаётся configured mechanism.
+
+L2 fixtures исполняют actual main functions/callbacks, production lane/FSM и real
+Conf backend для owned/legacy/tray/recovery путей, заменяя OS effects. Full native
+Windows env/packet matrix этим не заявляется. Остатки общего operation registry,
+фоновых native restarts и остальных AT сохранены. Команды/результаты — progress.md.

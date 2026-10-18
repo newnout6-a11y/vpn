@@ -37,28 +37,72 @@ const corruptionEvents = () => state.logEvent.mock.calls.filter(call => call[2] 
 async function sessionTracking(service: Awaited<ReturnType<typeof reload>>) {
   // Execute the actual main session functions, replacing only their boundaries.
   const source = ts.createSourceFile('index.ts', await readFile(join(process.cwd(), 'src/main/index.ts'), 'utf8'), ts.ScriptTarget.Latest, true)
-  const names = ['openSession', 'writeSessionEntry', 'closeSession', 'recordStartFailure', 'startProtectionFromTray']
+  const names = ['openSession', 'writeSessionEntry', 'closeSession', 'recordStartFailure', 'startProtectionFromTray',
+    'startSoftProtection', 'startSoftProtectionEffects', 'stopProtection', 'stopProtectionEffects',
+    'rollbackSoftAutoconfigIfApplied', 'applyOwnedAutoconfig', 'rollbackOwnedAutoconfig', 'adoptRetainedSoftProtection']
   const functions = source.statements.filter(node => ts.isFunctionDeclaration(node) && [...names, 'startProtectionFromTrayEffects', 'captureSessionOrigin'].includes(node.name?.text ?? ''))
   expect(names.every(name => functions.some(node => ts.isFunctionDeclaration(node) && node.name?.text === name))).toBe(true)
   const { currentCorrelationId, currentActionMetadata, withCorrelation } = await import('./actionCorrelation')
   const { randomUUID } = await import('node:crypto')
   const { monotonicTimeMs } = await import('./eventClock')
-  const { makeOutcome, outcomeKindToDisconnectReason, sessionOutcomeConfidence } = await import('./sessionOutcome')
+  const { makeOutcome, outcomeKindToDisconnectReason, sessionOutcomeConfidence, isNodeSwitchRestartReason } = await import('./sessionOutcome')
+  const { ConnectionLifecycle } = await import('./connectionLifecycle')
+  const { TunnelStateMachine } = await import('./tunnelStateMachine')
+  let readProtection = () => false, applied = false
+  const settings = { connectionMode: 'localProxy', routingMode: 'hard', proxyType: 'http' }
+  const tunnelState = new TunnelStateMachine(() => ({ running: false, pid: null, softApplied: readProtection() }))
+  const autoconfig = {
+    apply: vi.fn(async (targets: string[]) => { if (targets.includes('env')) applied = true; return Object.fromEntries(targets.map(target => [target, true])) }),
+    rollback: vi.fn(async (targets: string[]) => { if (targets.includes('env')) applied = false; return Object.fromEntries(targets.map(target => [target, true])) }),
+    isApplied: vi.fn(async () => applied),
+    rollbackApplied: vi.fn(async () => { const previous = applied; applied = false; return previous })
+  }
+  const done = async () => {}, noop = () => {}
+  const operationIds: string[] = [], callbacks: Record<string, string> = {}
+  const visit = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && node.arguments[0] && ts.isArrowFunction(node.arguments[0])) {
+      const name = node.expression.getText(source), callback = node.arguments[0].getText(source)
+      if (name === 'onProtectedRestart') callbacks.restart = callback
+      if (name === 'tunController.onStatusChange' && callback.includes("'tun-status-changed'")) callbacks.status = callback
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(source)
+  expect(Object.keys(callbacks).sort()).toEqual(['restart', 'status'])
   const notificationIds: Array<string | undefined> = []
-  const dependencies = { currentCorrelationId, currentActionMetadata, withCorrelation, randomUUID, monotonicTimeMs, connectionHistoryService: service, makeOutcome, outcomeKindToDisconnectReason, sessionOutcomeConfidence,
-    settingsStore: { get: () => ({ connectionMode: 'localProxy', routingMode: 'hard' }) },
-    resolveProxyForTrayStart: async () => null, notify: () => notificationIds.push(currentCorrelationId()),
+  const dependencies = { currentCorrelationId, currentActionMetadata, withCorrelation, randomUUID, monotonicTimeMs, connectionHistoryService: service, makeOutcome, outcomeKindToDisconnectReason, sessionOutcomeConfidence, isNodeSwitchRestartReason,
+    settingsStore: { get: () => settings, save: noop }, autoconfig, tunnelState,
+    connectionLifecycle: new ConnectionLifecycle(noop, undefined, operation => { if (operation.kind === 'connect' && operation.status === 'running') operationIds.push(operation.correlationId) }, tunnelState),
+    resolveProxyForTrayStart: vi.fn(async (): Promise<{ proxyAddr: string; proxyType: 'http' } | null> => null), notify: () => notificationIds.push(currentCorrelationId()),
     restoreAndFocusMainWindow: () => {},
-    trafficMonitor: { getCurrentStats: () => ({ sessionDownloadBytes: 10, sessionUploadBytes: 20 }) }, logEvent: state.logEvent }
-  const code = ts.transpileModule(`let currentSession = null;
+    tunController: { getStatus: () => ({ running: false }), stop: vi.fn(async () => ({ success: true, networkCleanup: { adapters: true } })) },
+    sessionEgressEvidence: () => ({}), refreshTrayState: noop, sendToMainWindow: vi.fn(),
+    stopPeriodicSnapshots: noop, stopPeriodicLeakTest: noop, stopNetworkChangeWatcher: noop,
+    stopTrafficForensicsSession: done, externalProxy: { stopAll: done }, ipMonitor: { clearVpnIp: noop },
+    repairOrphanedPhysicalAdapterDns: done, getLocationPrivacyStatus: async () => ({ applied: false }),
+    rollbackLocationPrivacy: async () => ({ applied: false }), captureSnapshot: done,
+    ensureAdaptiveMonitoringForRunningTunnel: noop, ensureSessionForRunningTunnel: noop, resetAdaptiveBypassStatus: noop,
+    startTrafficConnectionSampler: noop, stopTrafficConnectionSampler: noop, isKillSwitchActive: async () => false,
+    trayStatusFromTunStatus: () => 'off', recordUnexpectedSessionEnd: vi.fn(done),
+    trafficMonitor: { getCurrentStats: () => ({ sessionDownloadBytes: 10, sessionUploadBytes: 20 }), stop: noop }, logEvent: state.logEvent }
+  const code = ts.transpileModule(`let currentSession = null, softProtectionApplied = false, stopInProgress = false, adaptiveVerificationGeneration = 0, activeAdaptiveContext = null;
 ${functions.map(node => node.getText(source)).join('\n')}
 return { open: (mode = 'hard') => openSession({ id: 'profile', name: 'Test', mode }),
 close: (kind = 'user-stop') => closeSession(makeOutcome(kind)),
 failure: () => recordStartFailure({ id: 'profile', name: 'Test', mode: 'hard' }, 'Start failed'),
-tray: startProtectionFromTray };`,
+tray: startProtectionFromTray, protected: () => softProtectionApplied,
+nativeStatus: ${callbacks.status}, nativeRestart: ${callbacks.restart},
+soft: {start: startSoftProtection, stop: stopProtection, apply: applyOwnedAutoconfig, rollback: rollbackOwnedAutoconfig,
+adopt: adoptRetainedSoftProtection, switchToNative: () => rollbackSoftAutoconfigIfApplied('hard protection start')} };`,
     { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText
-  return { ...new Function(...Object.keys(dependencies), code)(...Object.values(dependencies)), notificationIds } as {
-    open(mode?: ConnectionLogEntry['mode']): void; close(kind?: NonNullable<ConnectionLogEntry['outcome']>['kind']): void; failure(): void; tray(): Promise<void>; notificationIds: Array<string | undefined>
+  const control = new Function(...Object.keys(dependencies), code)(...Object.values(dependencies))
+  readProtection = control.protected
+  return { ...control, notificationIds, operationIds, autoconfig, settings, proxy: dependencies.resolveProxyForTrayStart, unexpected: dependencies.recordUnexpectedSessionEnd } as {
+    open(mode?: ConnectionLogEntry['mode']): void; close(kind?: NonNullable<ConnectionLogEntry['outcome']>['kind']): void; failure(): void; tray(): Promise<void>; notificationIds: Array<string | undefined>;
+    settings: typeof settings; autoconfig: typeof autoconfig; proxy: typeof dependencies.resolveProxyForTrayStart;
+    operationIds: string[]; nativeStatus(status: string): void; nativeRestart(reason: string): void; unexpected: typeof dependencies.recordUnexpectedSessionEnd;
+    soft: { start(addr: string, type?: 'http' | 'socks5'): Promise<unknown>; stop(): Promise<unknown>; apply(targets: string[], addr: string, type?: 'http' | 'socks5'): Promise<unknown>;
+      rollback(targets: string[]): Promise<unknown>; adopt(): Promise<void>; switchToNative(): Promise<void> }
   }
 }
 
@@ -73,6 +117,124 @@ afterEach(async () => {
 })
 
 describe('connection history persistence (AT-00-010; F-143)', () => {
+  it.each(['owned', 'legacy', 'tray'] as const)('persists a successful %s Soft session with its original admission metadata (AT-00-005)', async surface => {
+    const service = await reload(), tracking = await sessionTracking(service)
+    const { withCorrelation } = await import('./actionCorrelation')
+    const id = 'ipc_' + randomUUID().replaceAll('-', '')
+    if (surface === 'tray') {
+      tracking.settings.routingMode = 'soft'
+      tracking.proxy.mockResolvedValueOnce({ proxyAddr: '127.0.0.1:8080', proxyType: 'http' })
+      await tracking.tray()
+    } else await withCorrelation(id, () => surface === 'legacy'
+      ? tracking.soft.apply(['env'], '127.0.0.1:8080', 'http')
+      : tracking.soft.start('127.0.0.1:8080', 'http'))
+    expect(service.getEntries()).toEqual([])
+    await withCorrelation('ipc_' + randomUUID().replaceAll('-', ''), () => tracking.soft.stop())
+    const saved = (await reload()).getEntries()
+    expect(saved).toHaveLength(1)
+    expect(saved[0]).toMatchObject({ mode: 'soft', bytesDown: 0, bytesUp: 0, outcome: { kind: 'user-stop' },
+      provenance: { source: surface === 'tray' ? 'tray' : 'ipc', owner: 'manual', route: 'soft-env', confidence: 'observed' } })
+    expect(saved[0].correlationId).toBe(tracking.operationIds[0])
+    if (surface !== 'tray') expect(saved[0].correlationId).toBe(id)
+  })
+
+  it('records Soft tray failures before admission when proxy discovery fails (AT-00-005)', async () => {
+    const service = await reload(), tracking = await sessionTracking(service)
+    tracking.settings.routingMode = 'soft'
+    await tracking.tray()
+    expect(tracking.autoconfig.apply).not.toHaveBeenCalled()
+    expect((await reload()).getEntries()).toMatchObject([{ mode: 'soft', correlationId: tracking.notificationIds[0],
+      outcome: { kind: 'start-failed' }, provenance: { source: 'tray', owner: 'manual', route: 'unconfirmed' } }])
+  })
+
+  it('does not end a Soft session on native runtime stop or node-switch callbacks (AT-00-005)', async () => {
+    const service = await reload(), tracking = await sessionTracking(service)
+    await tracking.soft.start('127.0.0.1:8080', 'http')
+    tracking.nativeRestart('rotation')
+    tracking.nativeStatus('stopped')
+    expect(tracking.unexpected).not.toHaveBeenCalled()
+    expect(service.getEntries()).toEqual([])
+    await tracking.soft.stop()
+    expect((await reload()).getEntries()).toMatchObject([{ mode: 'soft', outcome: { kind: 'user-stop' } }])
+  })
+
+  it('keeps identical Soft refreshes in one session and records address/protocol changes independently (AT-00-005)', async () => {
+    const service = await reload(), tracking = await sessionTracking(service)
+    const { withCorrelation } = await import('./actionCorrelation')
+    const ids = Array.from({ length: 4 }, () => 'ipc_' + randomUUID().replaceAll('-', ''))
+    await withCorrelation(ids[0], () => tracking.soft.start('127.0.0.1:8080', 'http'))
+    await withCorrelation(ids[1], () => tracking.soft.start('127.0.0.1:8080', 'http'))
+    expect(service.getEntries()).toEqual([])
+    await withCorrelation(ids[2], () => tracking.soft.start('127.0.0.1:8080', 'socks5'))
+    await withCorrelation(ids[3], () => tracking.soft.start('127.0.0.1:10808', 'socks5'))
+    await tracking.soft.stop()
+    expect((await reload()).getEntries().map(entry => [entry.correlationId, entry.outcome?.kind])).toEqual([
+      [ids[0], 'server-switch'], [ids[2], 'server-switch'], [ids[3], 'user-stop']
+    ])
+  })
+
+  it('retains the preceding Soft session after a failed refresh (AT-00-005)', async () => {
+    const service = await reload(), tracking = await sessionTracking(service)
+    const { withCorrelation } = await import('./actionCorrelation')
+    const original = 'ipc_' + randomUUID().replaceAll('-', ''), failure = 'ipc_' + randomUUID().replaceAll('-', '')
+    await withCorrelation(original, () => tracking.soft.start('127.0.0.1:8080', 'http'))
+    tracking.autoconfig.apply.mockResolvedValueOnce({ env: false })
+    expect(await withCorrelation(failure, () => tracking.soft.start('127.0.0.1:10808', 'socks5'))).toMatchObject({ success: false })
+    expect(service.getEntries()).toMatchObject([{ correlationId: failure, outcome: { kind: 'start-failed' } }])
+    await tracking.soft.stop()
+    expect((await reload()).getEntries().map(entry => [entry.correlationId, entry.outcome?.kind])).toEqual([
+      [failure, 'start-failed'], [original, 'user-stop']
+    ])
+  })
+
+  it('retains Soft history until env rollback succeeds, including a retry (AT-00-005)', async () => {
+    const service = await reload(), tracking = await sessionTracking(service)
+    await tracking.soft.start('127.0.0.1:8080', 'http')
+    tracking.autoconfig.rollbackApplied.mockRejectedValueOnce(new Error('env denied'))
+    expect(await tracking.soft.stop()).toMatchObject({ success: false })
+    expect(service.getEntries()).toEqual([])
+    expect(await tracking.soft.stop()).toMatchObject({ success: true })
+    expect((await reload()).getEntries()).toMatchObject([{ mode: 'soft', outcome: { kind: 'user-stop' } }])
+  })
+
+  it.each([false, true])('keeps cancelled Soft effects out of history with retained=%s (AT-00-003/005)', async retained => {
+    const service = await reload(), tracking = await sessionTracking(service)
+    if (retained) await tracking.soft.start('127.0.0.1:8080', 'http')
+    let release!: (value: Record<string, boolean>) => void
+    tracking.autoconfig.apply.mockImplementationOnce(() => new Promise(done => { release = done }))
+    const pending = tracking.soft.start('127.0.0.1:10808', 'socks5'), stopped = tracking.soft.stop()
+    const result = await pending
+    try { expect(service.getEntries()).toEqual([]) }
+    finally { release({ env: true }) }
+    await stopped
+    expect(result).toMatchObject({ category: 'cancelled' })
+    expect(tracking.autoconfig.rollbackApplied).toHaveBeenCalledOnce()
+    const saved = (await reload()).getEntries()
+    expect(saved).toHaveLength(retained ? 1 : 0)
+    if (retained) expect(saved[0]).toMatchObject({ correlationId: tracking.operationIds[0], outcome: { kind: 'user-stop' } })
+  })
+
+  it('ends Soft history on verified mode switch and preserves it after failed rollback (AT-00-005)', async () => {
+    const service = await reload(), tracking = await sessionTracking(service)
+    await tracking.soft.start('127.0.0.1:8080', 'http')
+    tracking.autoconfig.rollbackApplied.mockRejectedValueOnce(new Error('env denied'))
+    await expect(tracking.soft.switchToNative()).rejects.toThrow('env denied')
+    expect(service.getEntries()).toEqual([])
+    await tracking.soft.switchToNative()
+    expect((await reload()).getEntries()).toMatchObject([{ mode: 'soft', outcome: { kind: 'server-switch' } }])
+  })
+
+  it('records reconciled retained Soft protection under recovery ownership (AT-00-005)', async () => {
+    const service = await reload(), tracking = await sessionTracking(service)
+    tracking.settings.routingMode = 'soft'
+    tracking.autoconfig.isApplied.mockResolvedValueOnce(true)
+    tracking.proxy.mockResolvedValueOnce({ proxyAddr: '127.0.0.1:8080', proxyType: 'http' })
+    await tracking.soft.adopt()
+    await tracking.soft.stop()
+    expect((await reload()).getEntries()).toMatchObject([{ mode: 'soft',
+      provenance: { source: 'lifecycle', owner: 'recovery', route: 'soft-env' } }])
+  })
+
   it.each([-3_600_000, 40 * 86_400_000])('keeps calendar filters and monotonic duration after a %i ms correction (AT-00-005)', async correction => {
     const service = await reload(), tracking = await sessionTracking(service)
     const epoch = 1792368000000, corrected = epoch + correction

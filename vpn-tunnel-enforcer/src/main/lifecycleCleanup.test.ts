@@ -143,12 +143,12 @@ function mainHarness(name: 'performShutdownCleanup' | 'stopProtection', session:
     getLocationPrivacyStatus: vi.fn(async () => ({ applied: false })), rollbackLocationPrivacy: vi.fn(async () => ({ applied: false })),
     settingsStore: { save: noop() }, refreshTrayState: noop(), captureSnapshot: done()
   }
-  const run = compile<((reason?: string) => Promise<any>) & { state(): { session: object | null; stopping: boolean } }>(`
+  const run = compile<((reason?: string) => Promise<any>) & { state(): { session: object | null; stopping: boolean }; allowShutdownRetry(): void }>(`
 let shutdownInProgress=false,currentSession=session,stopInProgress=false,adaptiveVerificationGeneration=0,activeAdaptiveContext=null;
 ${body('index.ts', 'closeSession')}
 ${body('index.ts', 'stopProtectionEffects')}
 ${body('index.ts', name)}
-return Object.assign(${name}, {state:()=>({session:currentSession,stopping:stopInProgress})});
+return Object.assign(${name}, {state:()=>({session:currentSession,stopping:stopInProgress}),allowShutdownRetry:()=>{shutdownInProgress=false}});
 `, os)
   return { run, ...os }
 }
@@ -271,6 +271,26 @@ describe('lifecycle cleanup evidence and retries (AT-02-005 / AT-03-007)', () =>
       expect(step).toHaveBeenCalledOnce()
     }
     expect(lane.busy).toBe(false)
+  })
+
+  it.each(['stopProtection', 'performShutdownCleanup'] as const)('retains a Soft session through failed env rollback during %s, then records once on retry (AT-00-005)', async name => {
+    const session = { profile: { mode: 'soft' }, leakDetected: false }, h = mainHarness(name, session)
+    if (name === 'stopProtection') {
+      h.rollbackSoftAutoconfigIfApplied.mockRejectedValueOnce(new Error('env denied'))
+      expect(await h.run()).toMatchObject({ success: false })
+    } else {
+      h.autoconfig.isApplied.mockResolvedValue(true)
+      h.autoconfig.rollback.mockResolvedValueOnce({ env: false }).mockResolvedValueOnce({ env: true })
+      await expect(h.run()).rejects.toThrow('autoconfig')
+    }
+    expect(h.writeSessionEntry).not.toHaveBeenCalled()
+    expect(h.run.state().session).toBe(session)
+    h.run.allowShutdownRetry()
+    await h.run()
+    expect(h.writeSessionEntry).toHaveBeenCalledOnce()
+    expect(h.run.state().session).toBeNull()
+    const rollback = name === 'stopProtection' ? h.rollbackSoftAutoconfigIfApplied : h.autoconfig.rollback
+    expect(rollback.mock.invocationCallOrder.at(-1)).toBeLessThan(h.writeSessionEntry.mock.invocationCallOrder[0])
   })
   it.each(['stopProtection', 'performShutdownCleanup'] as const)('waits to close history and clean up in %s, preserving pre-stop counters (AT-02-009)', async name => {
     const session = { leakDetected: false }, h = mainHarness(name, session)
@@ -1074,7 +1094,7 @@ function softStartupHarness(retained = false) {
       rollback: vi.fn(async (targets: string[]) => Object.fromEntries(targets.map(target => [target, true]))),
       rollbackApplied: vi.fn(async () => { const previous = applied; applied = false; return previous })
     },
-    recordStartFailure: noop(), sendToMainWindow: noop()
+    recordStartFailure: noop(), openSession: noop(), closeSession: noop(), sendToMainWindow: noop()
   }
   // Load the actual cleanup helper as well, rather than the generic stop mock.
   const { rollbackSoftAutoconfigIfApplied: _stub, ...dependencies } = os
