@@ -950,6 +950,8 @@ export interface ConnectionLogEntry {
   provenance?: ConnectionProvenance
   startedAt: number
   endedAt: number | null
+  /** Monotonic elapsed duration; absent only on legacy history records. */
+  durationMs?: number
   profileName: string
   profileId: string
   mode: 'hard' | 'soft' | 'direct'
@@ -962,7 +964,7 @@ export interface ConnectionLogEntry {
 }
 
 /** New writes require provenance; legacy reader records remain compatible. */
-export type ConnectionHistoryEntryInput = Omit<ConnectionLogEntry, 'id' | 'provenance'> & { provenance: ConnectionProvenance }
+export type ConnectionHistoryEntryInput = Omit<ConnectionLogEntry, 'id' | 'provenance' | 'durationMs'> & { provenance: ConnectionProvenance; durationMs: number }
 
 export interface ConnectionHistoryFilters {
   /** Disconnect reasons; an empty list includes all reasons. */

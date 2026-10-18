@@ -17,7 +17,7 @@ import { tunController, getTunRuntimeDir, detectForeignTun, killOwnedTunRuntimeP
 import type { NetworkCleanupReceipt, SingBoxOutboundFault } from './tunController'
 import { ConnectionLifecycle, type ConnectionStartupOwner } from './connectionLifecycle'
 import { currentCorrelationId, currentActionMetadata, withCorrelation } from './actionCorrelation'
-import { eventTimestamp } from './eventClock'
+import { monotonicTimeMs } from './eventClock'
 import { TunnelStateMachine } from './tunnelStateMachine'
 import type { ConnectionStartResult, ConnectionStopResult } from '../shared/operation'
 import { runScheduledConnection } from './scheduledConnection'
@@ -198,6 +198,7 @@ let latestRestartingProgress: string | null = null
 // double-recording when a user-initiated stop also triggers a status-change.
 interface LiveSession {
   startedAt: number
+  startedMonotonicMs: number
   correlationId?: string
   origin: Omit<ConnectionProvenance, 'confidence'>
   profile: { id: string; name: string; mode: 'hard' | 'soft' | 'direct' }
@@ -220,7 +221,8 @@ function captureSessionOrigin(mode: LiveSession['profile']['mode'], opened: bool
 function openSession(profile: LiveSession['profile']): void {
   const correlationId = currentCorrelationId()
   currentSession = {
-    startedAt: eventTimestamp(),
+    startedAt: Date.now(),
+    startedMonotonicMs: monotonicTimeMs(),
     ...(correlationId ? { correlationId } : {}),
     origin: captureSessionOrigin(profile.mode, true),
     profile,
@@ -266,7 +268,8 @@ function writeSessionEntry(s: LiveSession, stats: TrafficStats, outcome: Session
       startedAt: s.startedAt,
       ...(s.correlationId ? { correlationId: s.correlationId } : {}),
       provenance: { ...s.origin, confidence: sessionOutcomeConfidence(outcome.kind) },
-      endedAt: eventTimestamp(),
+      endedAt: Date.now(),
+      durationMs: monotonicTimeMs() - s.startedMonotonicMs,
       profileName: s.profile.name,
       profileId: s.profile.id,
       mode: s.profile.mode,
@@ -353,7 +356,7 @@ function recordStartFailure(
   // A transient 'running' during the failed start may have opened a provisional
   // session via ensureSessionForRunningTunnel — drop it, this attempt failed.
   currentSession = null
-  const now = eventTimestamp()
+  const now = Date.now()
   const correlationId = currentCorrelationId()
   try {
     connectionHistoryService.addEntry({
@@ -361,6 +364,7 @@ function recordStartFailure(
       ...(correlationId ? { correlationId } : {}),
       provenance: { ...captureSessionOrigin(profile.mode, false), confidence: 'observed' },
       endedAt: now,
+      durationMs: 0,
       profileName: profile.name,
       profileId: profile.id,
       mode: profile.mode,
@@ -2036,7 +2040,7 @@ app.whenReady().then(async () => {
   // at which point real toasts come back.
   setInAppFallbackCallback((level, title, body) => {
     try {
-      sendToMainWindow('inapp-notification', { level, title, body, ts: eventTimestamp() })
+      sendToMainWindow('inapp-notification', { level, title, body, ts: Date.now() })
     } catch {
       // Window may be torn down (close-on-quit race). Nothing to recover from.
     }

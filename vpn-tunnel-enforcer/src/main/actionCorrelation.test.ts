@@ -67,9 +67,13 @@ it('keeps concurrent IPC actions correlated through native waits, operation even
     await expect.poll(() => { try { return readFileSync(getAppLogPath(), 'utf8').trim().split('\n').length } catch { return 0 } }).toBe(9)
     const raw = readFileSync(getAppLogPath(), 'utf8')
     const rows = raw.trim().split('\n').map(line => JSON.parse(line))
-    const timestamps = rows.map(row => Date.parse(row.ts))
+    const timestamps = rows.map(row => row.monotonicMs)
     expect(timestamps.every(Number.isFinite)).toBe(true)
     expect(timestamps).toEqual([...timestamps].sort((left, right) => left - right))
+    expect(new Set(rows.map(row => row.clockId)).size).toBe(1)
+    expect(rows[0].clockId).toMatch(/^clock_[0-9a-f]{24}$/)
+    expect(rows[0].ts).toBe('2026-10-19T00:00:00.000Z')
+    expect(rows.at(-1).ts).toBe('2026-10-18T23:00:00.000Z')
     for (const [action, response] of [['a', a], ['b', b]] as const) {
       const actionRows = rows.filter(row => row.scope.endsWith(`-${action}`))
       expect(actionRows).toHaveLength(4)
@@ -82,6 +86,8 @@ it('keeps concurrent IPC actions correlated through native waits, operation even
     const exported = (await getFullLogs()).find(file => file.path === getAppLogPath())!
     expect(exported.exists).toBe(true)
     const exportedRows = exported.content.trim().split('\n').map(line => JSON.parse(line))
+    expect(exportedRows.map(row => row.monotonicMs)).toEqual(timestamps)
+    expect(exportedRows.map(row => row.clockId)).toEqual(rows.map(row => row.clockId))
     expect(exportedRows.map(row => row.correlationId)).toEqual(rows.map(row => row.correlationId))
     expect(exported.content).not.toMatch(/must-not-log|private-test-password|8093a2ec|settings\.json/)
   } finally {

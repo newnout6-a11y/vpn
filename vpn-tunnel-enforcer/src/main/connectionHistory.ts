@@ -22,6 +22,7 @@ export type { ConnectionHistoryFilters, ConnectionHistoryStats as AggregatedStat
 import { SESSION_OUTCOME_KINDS } from '../shared/ipc-types'
 import { isIpcCorrelationId } from '../shared/ipc-result'
 import { isConnectionProvenance } from '../shared/connection-provenance'
+import { connectionDurationMs } from '../shared/connection-history'
 import { logEvent } from './appLogger'
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -51,6 +52,7 @@ const outcomeKinds = new Set<string>(SESSION_OUTCOME_KINDS)
 function validEntry(value: unknown): value is ConnectionLogEntry {
   if (!isRecord(value) || !isText(value.id) || !isText(value.profileId) || !isText(value.profileName)
     || !isNonNegative(value.startedAt) || !(value.endedAt === null || isNonNegative(value.endedAt))
+    || !(value.durationMs === undefined || isNonNegative(value.durationMs))
     || !isText(value.mode) || !['hard', 'soft', 'direct'].includes(value.mode)
     || !isText(value.disconnectReason) || !['user', 'error', 'rotation', 'schedule', 'crash'].includes(value.disconnectReason)
     || !isNonNegative(value.bytesDown) || !isNonNegative(value.bytesUp)
@@ -187,7 +189,7 @@ export function filterEntries(
  * - 'week': entries from the last 7 days
  * - 'month': entries from the last 30 days
  *
- * Total connection time = sum of (endedAt - startedAt) for entries where endedAt is not null.
+ * Total connection time uses captured monotonic durations with a legacy fallback.
  * Total traffic = sum of bytesDown and bytesUp respectively across all entries in the period.
  *
  * "Never came up" attempts (outcome.kind === 'start-failed') are excluded — they
@@ -218,7 +220,7 @@ export function aggregateStats(
 
   for (const entry of filtered) {
     if (entry.endedAt != null) {
-      totalTimeMs += entry.endedAt - entry.startedAt
+      totalTimeMs += connectionDurationMs(entry)
     }
     totalBytesDown += entry.bytesDown
     totalBytesUp += entry.bytesUp
@@ -252,7 +254,7 @@ export function exportCsv(entries: ConnectionLogEntry[]): string {
     'outcomeKind',
     'outcomeHeadline',
     'correlationId',
-    'source', 'owner', 'route', 'confidence'
+    'source', 'owner', 'route', 'confidence', 'durationMs'
   ]
 
   const rows = entries.map((entry) => {
@@ -271,7 +273,8 @@ export function exportCsv(entries: ConnectionLogEntry[]): string {
       escapeCsvField(entry.outcome?.headline ?? ''),
       escapeCsvField(entry.correlationId ?? ''),
       entry.provenance?.source ?? '', entry.provenance?.owner ?? '',
-      entry.provenance?.route ?? '', entry.provenance?.confidence ?? ''
+      entry.provenance?.route ?? '', entry.provenance?.confidence ?? '',
+      entry.durationMs ?? ''
     ].join(',')
   })
 
@@ -309,7 +312,7 @@ function addEntry(entry: ConnectionHistoryEntryInput): ConnectionLogEntry {
     outcome: entry.outcome ?? null,
     id: randomUUID()
   }
-  if (!newEntry.provenance || !validEntry(newEntry)) throw new Error('Invalid connection history entry')
+  if (!newEntry.provenance || newEntry.durationMs === undefined || !validEntry(newEntry)) throw new Error('Invalid connection history entry')
 
   const entries = getEntries()
   entries.push(newEntry)

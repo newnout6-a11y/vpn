@@ -785,19 +785,26 @@ Fixtures исполняют actual main session bodies и production lane для
 
 ## AT-00-005 — порядок времени внутри main (19.10.2026)
 
-Общий eventClock якорит календарное время к process.hrtime.bigint один раз.
-JSONL ts, lifecycle startedAt/deadline, persisted session startedAt/endedAt,
-failed-start history и in-app notifications используют эту шкалу. Ручной
-перевод часов и NTP corrections не переставляют события уже работающего main
-и не делают длительность сессии отрицательной. Миллисекундные метки могут
-совпадать; порядок записи JSONL сохраняет существующая сериализованная очередь.
-Deadline timer остаётся setTimeout; timestamp не используется для ожидания.
+JSONL сохраняет реальное календарное ts и отдельные monotonicMs/clockId.
+Монотонное elapsed время process.hrtime.bigint задаёт порядок внутри main;
+clockId отличает новый origin после перезапуска. Миллисекундные метки могут
+совпадать; очередь JSONL сохраняет порядок записи. Deadline остаётся setTimeout.
 
-Clock unit fixture проверяет backward/forward jumps и точное elapsed время.
-Production IPC/lane/logger пишет настоящий JSONL до/после системной коррекции;
-проверены монотонность, сохранение ID и redaction. Real Conf session fixture
-подтверждает endedAt >= startedAt и следующий failed-start с нулевой длительностью;
-production lifecycle проверяет порядок start/stop. Полный AT ещё не закрыт:
-все реальные Soft/background entrypoints остаются отдельной интеграционной работой.
-Шкала не заявляется общей между процессами/перезапусками. Точные команды и
-результаты — progress.md.
+Session startedAt/endedAt, lifecycle dates и notifications следуют календарным
+часам. Длительность сессии хранится отдельно в durationMs, вычисленном по
+монотонным часам. Stats и UI duration/sort/start-failure classification используют
+общий helper; legacy строки без durationMs получают безопасный fallback.
+Новые записи требуют конечный неотрицательный durationMs; CSV добавляет его
+последним столбцом, JSON сохраняет поле. Malformed durations удерживаются в
+rejected history с history.corrupted.
+
+Qodo 1541885 на первоначальном 20e6802 обнаружил неверную подмену календарного
+времени process-anchored epoch: после коррекции история расходилась с фильтрами
+и day/week/month stats. Замечание подтверждено и подход исправлен до слияния.
+Clock fixture проверяет backward/forward jumps и точное elapsed время.
+Production IPC/lane/logger пишет настоящий JSONL; real Conf session fixture
+проверяет календарные даты, filter/stats и elapsed duration при коррекции часов
+на час назад и 40 дней вперёд. Renderer проверяет реальную строку сессии с
+endedAt < startedAt и durationMs=65000: она остаётся сессией с длительностью 1m 5s.
+Полный AT ещё не закрыт: все реальные Soft/background entrypoints остаются
+отдельной интеграционной работой. Точные команды и результаты — progress.md.

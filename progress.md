@@ -3548,3 +3548,41 @@ CI/review нового SHA проверяются отдельно после pu
   (.tmp/wp0-event-time-electron.log); `node scripts/test-wp1-native.mjs --ipc-only`
   — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-event-time-csp.log). Scope прежний:
   настоящий Electron/contextBridge/CSP и fake OS effects, не packet/OS-matrix L3.
+
+### Qodo #65 — календарное время отдельно от порядка и длительности
+
+- На head 20e6802a1b20975ba5c6ff7159d5e3c04c9e586b Qodo 1541885 completed
+  с finding 0b666add-55b5-4472-b2d1-e0a2dd9546a1: clock changes misdate session
+  history. Замечание верное: process-anchored epoch не следовал исправленным
+  календарным часам, а filter/stats/UI использовали настоящие даты. PR не слит.
+  Предыдущее описание anchored calendar clock выше относится к этому
+  отклонённому варианту, а не к итоговой реализации.
+- До исправления `npm.cmd test -- src/main/actionCorrelation.test.ts src/main/connectionHistoryStorage.test.ts src/main/eventClock.test.ts src/shared/connection-history.test.ts`
+  — **4 failed / 79 passed**, 1 suite failed (отсутствующий helper), 4.31 s,
+  exit 1 (.tmp/wp0-event-time-qodo65-before.log). Production-regressions проверяют
+  calendar dates после backward/forward correction и JSONL ordering metadata.
+- Итог: календарные ts/startedAt/endedAt/deadline/notifications снова читают
+  системное время. JSONL дополнен monotonicMs и непривязанным к секретам clockId,
+  различающим origins после рестарта. Session durationMs вычисляется по hrtime;
+  stats и renderer duration/sort/failure heuristic используют общий helper.
+  Отрицательные legacy durations ограничены нулём, новые записи требуют
+  конечное неотрицательное durationMs. Старые записи читаются, JSON/CSV сохраняют
+  поле; неверные duration удерживаются с history.corrupted.
+- `npm.cmd test -- src/main/actionCorrelation.test.ts src/main/connectionHistoryStorage.test.ts src/main/connectionHistory.test.ts src/main/eventClock.test.ts src/shared/connection-history.test.ts src/renderer/pages/Logs.render.test.tsx src/main/actionCorrelationScope.test.ts src/main/connectionOperations.test.ts`
+  — **157 passed / 8 files**, 5.49 s, exit 0
+  (.tmp/wp0-event-time-qodo65-focused-final.log). Дополнительно после усиления
+  forward correction до 40 дней `npm.cmd test -- src/main/connectionHistoryStorage.test.ts`
+  — **86 passed**, 5.57 s, exit 0 (.tmp/wp0-event-time-qodo65-calendar-final.log).
+  Все day/week/month stats и точный calendar filter проверены на real Conf.
+- `npm.cmd run typecheck` — exit 0, 158 channels / 0 public any
+  (.tmp/wp0-event-time-qodo65-typecheck-final.log). Нормативные docs не менялись.
+- Полный `npm.cmd test` исправленного варианта — **4161 passed / 5 skipped /
+  0 failed**, 264 files passed / 2 skipped, 234.41 s, exit 0
+  (.tmp/wp0-event-time-qodo65-full.log). Успешный CI прежнего head не считается
+  проверкой этого исправления.
+- `npm.cmd run build` — exit 0 (.tmp/wp0-event-time-qodo65-build.log).
+  `node scripts/test-electron-runtime.mjs` — ELECTRON_SMOKE_PASS, exit 0
+  (.tmp/wp0-event-time-qodo65-electron.log); `node scripts/test-wp1-native.mjs --ipc-only`
+  — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-event-time-qodo65-csp.log).
+  Coverage AC 927/927, F 210/210 и `git diff --check` — exit 0. Native scope
+  не расширен до packet/resource/OS-matrix приёмки.

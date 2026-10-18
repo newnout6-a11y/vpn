@@ -6,18 +6,6 @@ import { ConnectionLifecycle } from './connectionLifecycle'
 const a = 'ipc_00000000000040008000000000000001', b = 'ipc_00000000000040008000000000000002'
 afterEach(() => vi.useRealTimers())
 
-it('orders admitted start and stop timestamps across a system clock correction (AT-00-005)', async () => {
-  const lane = new ConnectionLifecycle(() => {})
-  const wall = vi.spyOn(Date, 'now').mockReturnValue(1792368000000)
-  try {
-    await lane.start(async () => ({ success: true }))
-    const startedAt = lane.operation!.startedAt
-    wall.mockReturnValue(1792364400000)
-    await lane.stop(async () => ({ success: true }))
-    expect(lane.operation!.startedAt).toBeGreaterThanOrEqual(startedAt)
-  } finally { wall.mockRestore() }
-})
-
 it('isolates action metadata, restores nested owner and returns a defensive context snapshot (AT-00-005)', async () => {
   await withCorrelation(a, async () => {
     expect(currentActionMetadata()).toEqual({ source: 'tray', owner: 'manual' })
