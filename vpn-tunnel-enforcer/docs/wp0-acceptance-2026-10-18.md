@@ -8,7 +8,7 @@
 18.10 владелец разрешил продолжать WP-0 при открытом PR #54, сохраняя запрет
 его слияния до отдельного решения. Полного Revix для #54 не было из-за квоты.
 Позднее 18.10 владелец разрешил сливать PR после пройденных проверок.
-#54/#55/#56/#57/#58/#59/#60/#61 слиты в main после exact-head CI success и completed Qodo,
+#54/#55/#56/#57/#58/#59/#60/#61/#62 слиты в main после exact-head CI success и completed Qodo,
 без открытых findings; прежний запрет слияния отменён.
 
 ## Полная область и первоначальная инвентаризация
@@ -19,7 +19,7 @@
 | 00-002 | Production TunnelStateMachine интегрирована в main lane/IPC/Soft/tray/UI; 4096 stable tours и 117649 tours семи событий глубиной 6, включая timeout/cancel и native completion, с fake PID/TUN ledger и балансом operation events; sticky faults и generation fencing | Общая durable operation history/counters; все blocked/unknown/background paths; native Windows resources; общий admission фоновых restart |
 | 00-003 | Main connection lane: UUIDv4, owner, deadline запуска, priority admission; ручные Hard/Direct и Soft из tray, scheduled startup вместе с proxy detection; отмена на 10/50/90% управляемого connect fixture | Общий реестр refresh/speed/import/export/rotation; deadline остановки, интеграция всех entrypoints и полная матрица поздних эффектов |
 | 00-004 | Общая классификация transport; 157 каналов × 7 категорий через guard; native contextBridge сохраняет code/category/correlation в en/ru; typed local validation; 4 настоящих config handlers × 7 категорий, canonical domain failures | Миграция legacy domain-result `{success:false,error}` и semantic matrix настоящих feature handlers; transport fixtures не доказывают её |
-| 00-005 | Один action correlation id в guarded IPC response/error, lifecycle connect/stop и JSONL logger; async isolation, native wait/drain, diagnostic read-back с повторной redaction | Подключить durable connection history к контексту; монотонный порядок, source/owner/route/confidence истории и полная матрица событий |
+| 00-005 | Один action correlation id в guarded IPC response/error, lifecycle connect/stop и JSONL logger; async isolation, native wait/drain, diagnostic read-back с повторной redaction; сохранение ID исходного connect в durable session history и JSON/CSV | Монотонный порядок, source/owner/route/confidence истории, все background/Soft paths и полная матрица событий |
 | 00-006 | Локальные миграции; общий version admission для 20 electron-store файлов / 28 constructors; future-version SHA-256 invariance на real Conf backend до defaults/repair и при записи через ранее открытый handle | Централизованный упорядоченный migration registry, fixtures всех исторических преобразований, остальные persisted JSON, полноценный upgrade/downgrade и межпроцессная координация |
 | 00-007 | Seed 0x5eed003: 200 commands/10 async workers с production lane/FSM, typed losers, парные terminal events, финальный disconnect и 0 fake PID/TUN | Натурный PID-реестр Windows и полная матрица фоновых entrypoints |
 | 00-008 | Dashboard component frames с production FSM/lane; revision fence; Soft через owned IPC; visual fixtures light/dark; native production contextBridge snapshots/disposer | Полная матрица всех операций, тем, размеров и entrypoints; browser fixtures не заменяют native resources |
@@ -726,3 +726,32 @@ store в detached callbacks после этого не выдаёт ID. Identity
 последовательными connect/stop/connect. Только большие задержки планировщика
 сжаты, fake timers не используются для проверки AsyncLocalStorage inheritance.
 До исправления — 6 failed / 6 passed; после адресный набор — 74 passed.
+
+## AT-00-005 — ID исходного подключения в истории сессии
+
+LiveSession захватывает текущий main action ID при openSession. Общий writer
+переносит именно его при закрытии, даже под контекстом нового manual stop
+либо без активного контекста. Failed-start writer сохраняет ID своей попытки.
+ConnectionLogEntry получает optional correlationId: прежние записи и untracked
+sessions остаются без ID. Canonical ipc_/op_ UUIDv4 проверяются при read и write;
+недопустимые поля сохраняются в rejected history с history.corrupted.
+Поле переживает real Conf reload и JSON export; в CSV добавлен последний столбец.
+
+Fixtures исполняют настоящие четыре session tracking функции index.ts, production
+guarded IPC/lane и real Conf disk backend с подменёнными OS/Electron discovery
+границами. Новый stop action имеет другой ID, а persisted history — ID start
+response. До исправления адресная регрессия — 9 failed / 37 passed; точные
+итоговые команды и результаты — progress.md. Это адресное L2 доказательство,
+не installed restart/Windows acceptance. Source/owner/route/confidence, monotonic
+ordering и полная матрица background/Soft history paths ещё не завершены.
+
+### Qodo #63 — действие из трея до поиска прокси
+
+Qodo 1541555 на 8f0288a подтвердил путь без контекста: Hard start из трея
+при missing proxy записывал failure раньше lifecycle admission. Теперь граница
+startProtectionFromTray создаёт свежий op_ action ID до proxy detection;
+тот же ID доступен раннему failure/notification и последующему lifecycle.
+Две повторные missing-proxy попытки проверены actual main bodies и real Conf:
+история содержит два разных ID, каждый совпадает с контекстом уведомления.
+До исправления — 1 failed; после адресный набор — 261 passed. Результаты полного
+набора и проверки итогового SHA — progress.md. Остальные границы AT сохранены.

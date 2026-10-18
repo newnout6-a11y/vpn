@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import type { ConnectionLogEntry } from '../shared/ipc-types'
 import { SESSION_OUTCOME_KINDS } from '../shared/ipc-types'
+import ts from 'typescript'
 
 const state = vi.hoisted(() => ({ dir: '', logEvent: vi.fn() }))
 vi.mock('electron', () => ({ ipcMain: { handle: vi.fn() } }))
@@ -30,6 +31,33 @@ const reload = async () => {
 }
 const corruptionEvents = () => state.logEvent.mock.calls.filter(call => call[2] === 'history.corrupted')
 
+async function sessionTracking(service: Awaited<ReturnType<typeof reload>>) {
+  // Execute the actual main session functions, replacing only their boundaries.
+  const source = ts.createSourceFile('index.ts', await readFile(join(process.cwd(), 'src/main/index.ts'), 'utf8'), ts.ScriptTarget.Latest, true)
+  const names = ['openSession', 'writeSessionEntry', 'closeSession', 'recordStartFailure', 'startProtectionFromTray']
+  const functions = source.statements.filter(node => ts.isFunctionDeclaration(node) && [...names, 'startProtectionFromTrayEffects'].includes(node.name?.text ?? ''))
+  expect(names.every(name => functions.some(node => ts.isFunctionDeclaration(node) && node.name?.text === name))).toBe(true)
+  const { currentCorrelationId, withCorrelation } = await import('./actionCorrelation')
+  const { randomUUID } = await import('node:crypto')
+  const { makeOutcome, outcomeKindToDisconnectReason } = await import('./sessionOutcome')
+  const notificationIds: Array<string | undefined> = []
+  const dependencies = { currentCorrelationId, withCorrelation, randomUUID, connectionHistoryService: service, makeOutcome, outcomeKindToDisconnectReason,
+    settingsStore: { get: () => ({ connectionMode: 'localProxy', routingMode: 'hard' }) },
+    resolveProxyForTrayStart: async () => null, notify: () => notificationIds.push(currentCorrelationId()),
+    restoreAndFocusMainWindow: () => {},
+    trafficMonitor: { getCurrentStats: () => ({ sessionDownloadBytes: 10, sessionUploadBytes: 20 }) }, logEvent: state.logEvent }
+  const code = ts.transpileModule(`let currentSession = null;
+${functions.map(node => node.getText(source)).join('\n')}
+return { open: () => openSession({ id: 'profile', name: 'Test', mode: 'hard' }),
+close: () => closeSession(makeOutcome('user-stop')),
+failure: () => recordStartFailure({ id: 'profile', name: 'Test', mode: 'hard' }, 'Start failed'),
+tray: startProtectionFromTray };`,
+    { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText
+  return { ...new Function(...Object.keys(dependencies), code)(...Object.values(dependencies)), notificationIds } as {
+    open(): void; close(): void; failure(): void; tray(): Promise<void>; notificationIds: Array<string | undefined>
+  }
+}
+
 beforeEach(async () => {
   await mkdir(join(process.cwd(), '.tmp'), { recursive: true })
   state.dir = await mkdtemp(join(process.cwd(), '.tmp', 'history-storage-'))
@@ -41,6 +69,67 @@ afterEach(async () => {
 })
 
 describe('connection history persistence (AT-00-010; F-143)', () => {
+  it('correlates repeated missing-proxy tray attempts before lifecycle admission (AT-00-005)', async () => {
+    const service = await reload(), tracking = await sessionTracking(service)
+    await tracking.tray(); await tracking.tray()
+    const entries = (await reload()).getEntries()
+    expect(entries).toHaveLength(2)
+    const ids = entries.map(entry => entry.correlationId)
+    expect(ids.every(id => typeof id === 'string' && /^op_[0-9a-f]{32}$/.test(id))).toBe(true)
+    expect(new Set(ids).size).toBe(2)
+    expect(tracking.notificationIds).toEqual(ids)
+    expect(entries.every(entry => entry.outcome?.kind === 'start-failed')).toBe(true)
+  })
+
+  it('links guarded IPC and production session tracking to reloaded disk history (AT-00-005)', async () => {
+    const service = await reload(), tracking = await sessionTracking(service)
+    const { ipcMain } = await import('electron')
+    const originalHandle = ipcMain.handle
+    const handlers = new Map<string, (...args: any[]) => Promise<any>>()
+    ipcMain.handle = vi.fn((channel, listener) => { handlers.set(channel, listener as never) })
+    try {
+      const { installTrustedIpcBoundary, registerTrustedRenderer } = await import('./ipcSecurity')
+      const { ConnectionLifecycle } = await import('./connectionLifecycle')
+      installTrustedIpcBoundary()
+      const lane = new ConnectionLifecycle(() => {})
+      ipcMain.handle('start-direct-vpn', () => lane.start(async () => { tracking.open(); return { success: true } }))
+      ipcMain.handle('stop-tun', () => lane.stop(async () => { tracking.close(); return { success: true } }))
+      const frame = { url: 'file:///C:/app/index.html' }, sender = { id: 7, mainFrame: frame }
+      registerTrustedRenderer(sender as never, frame.url)
+      const event = { sender, senderFrame: frame }
+      const start = await handlers.get('start-direct-vpn')!(event)
+      const stop = await handlers.get('stop-tun')!(event)
+      expect(start).toMatchObject({ ok: true, result: { success: true } })
+      expect(stop).toMatchObject({ ok: true, result: { success: true } })
+      expect(stop.correlationId).not.toBe(start.correlationId)
+      expect((await reload()).getEntries()).toMatchObject([{ correlationId: start.correlationId }])
+    } finally { ipcMain.handle = originalHandle }
+  })
+
+  it.each(['manual-stop', 'no-context'])('persists the original connect ID after %s (AT-00-005)', async ending => {
+    const service = await reload(), tracking = await sessionTracking(service)
+    const { withCorrelation } = await import('./actionCorrelation')
+    const connectId = 'ipc_00000000000040008000000000000001', stopId = 'ipc_00000000000040008000000000000002'
+    await withCorrelation(connectId, async () => tracking.open())
+    if (ending === 'manual-stop') await withCorrelation(stopId, async () => tracking.close())
+    else tracking.close()
+    expect(service.getEntries()).toMatchObject([{ correlationId: connectId }])
+    const restarted = await reload()
+    expect(restarted.getEntries()).toMatchObject([{ correlationId: connectId }])
+    expect(JSON.parse(restarted.exportJson())).toMatchObject([{ correlationId: connectId }])
+    expect(restarted.exportCsv().split('\n')[1].split(',').at(-1)).toBe(connectId)
+  })
+
+  it('persists a failed start action without inventing an ID for untracked sessions (AT-00-005)', async () => {
+    const service = await reload(), tracking = await sessionTracking(service)
+    const { withCorrelation } = await import('./actionCorrelation')
+    const failedId = 'op_00000000000040008000000000000001'
+    withCorrelation(failedId, () => tracking.failure())
+    tracking.open(); tracking.close()
+    const entries = (await reload()).getEntries()
+    expect(entries[0]).toMatchObject({ correlationId: failedId, outcome: { kind: 'start-failed' } })
+    expect(entries[1]).not.toHaveProperty('correlationId')
+  })
   it.each(SESSION_OUTCOME_KINDS)('roundtrips shared outcome kind %s', async kind => {
     const service = await reload()
     const written = service.addEntry({ ...entry, outcome: { kind, headline: kind } })
@@ -134,6 +223,8 @@ describe('connection history persistence (AT-00-010; F-143)', () => {
   })
 
   it.each([
+    ...['raw-secret', '00000000-0000-4000-8000-000000000001', 'ipc_' + '0'.repeat(32),
+      'ipc_00000000000040008000000000000001\n', null, {}].map(correlationId => ({ correlationId })),
     { mode: ['hard'] }, { disconnectReason: ['user'] }, { bytesUp: '20' }, { endedAt: {} },
     { errorMessage: [] }, { outcome: { kind: 'future-kind', headline: 'test' } },
     { outcome: { kind: 'unknown', headline: 'test', evidence: { egressIp: {} } } },

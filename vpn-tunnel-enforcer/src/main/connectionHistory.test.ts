@@ -236,7 +236,7 @@ describe('exportCsv', () => {
   it('produces correct CSV header', () => {
     const csv = exportCsv([])
     expect(csv).toBe(
-      'id,startedAt,endedAt,profileName,profileId,mode,bytesDown,bytesUp,disconnectReason,errorMessage,outcomeKind,outcomeHeadline'
+      'id,startedAt,endedAt,profileName,profileId,mode,bytesDown,bytesUp,disconnectReason,errorMessage,outcomeKind,outcomeHeadline,correlationId'
     )
   })
 
@@ -245,7 +245,7 @@ describe('exportCsv', () => {
     const lines = csv.split('\n')
     expect(lines).toHaveLength(2)
     expect(lines[1]).toBe(
-      'entry-1,1700000000000,1700003600000,US Server,profile-1,hard,1024000,512000,user,,,'
+      'entry-1,1700000000000,1700003600000,US Server,profile-1,hard,1024000,512000,user,,,,'
     )
   })
 
