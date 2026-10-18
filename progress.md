@@ -3352,3 +3352,37 @@ CI/review нового SHA проверяются отдельно после pu
   из app (AC 927/927, F 210/210) и `git diff --check` — exit 0.
   Native smoke использует настоящий Electron с fake OS effects; это не Windows
   packet/PID oracle, не вся история действий и не полный AT-00-005.
+
+### Qodo #62 — не наследовать завершённое действие фоновыми таймерами
+
+- Опубликован PR #62, head 11b8acc7408d9d03e0bdb1fcaf57b38691b8b918.
+  CI 39160769232 completed/success на этом SHA. Qodo 1541356 completed:
+  083bae3e-3ce0-43c4-a375-178855e609b8 — schedule timer/re-arm сохраняет ID UI edit;
+  a3ee6b73-56d4-44f9-ac18-94044c65207d — background tunnel timers сохраняют ID
+  завершённого connect. Оба подтверждены; PR до устранения не сливался.
+- `npm.cmd test -- src/main/actionCorrelationScope.test.ts src/main/schedulerActionCorrelation.test.ts`
+  до исправления — **6 failed / 6 passed**, 368 ms, exit 1
+  (.tmp/wp0-action-correlation-qodo62-before.log). Настоящие Node timers нужны,
+  потому что fake timers не воспроизводят async_hooks inheritance. Production
+  scheduler исполняет последовательные connect/stop/connect с re-arm; сжаты
+  только его задержки и Date.now, сам scheduler/lane не подменены.
+- Async scope теперь имеет active lease до sync return/throw либо settlement
+  исходного Promise. Detached timers наследуют истёкший lease и не получают
+  correlationId; новая scheduled operation создаёт свежий op_ ID. Внутренний
+  drain scope сохраняет ID после раннего caller cancellation до реального
+  завершения native effect. Исходная identity/rejection Promise сохраняется.
+- `npm.cmd test -- src/main/actionCorrelation.test.ts src/main/actionCorrelationScope.test.ts src/main/schedulerActionCorrelation.test.ts src/main/scheduler.test.ts src/main/connectionCancellation.test.ts src/main/connectionOperationLogging.test.ts`
+  — **74 passed / 6 files**, 1.05 s, exit 0
+  (.tmp/wp0-action-correlation-qodo62-focused.log). `npm.cmd run typecheck` —
+  exit 0, 158 channels / 0 public any (.tmp/wp0-action-correlation-qodo62-typecheck.log).
+  Coverage AC 927/927, F 210/210 и `git diff --check` — exit 0. Полный
+  `npm.cmd test` после исправления — **4103 passed / 5 skipped / 0 failed**,
+  262 files passed / 2 skipped, 198.01 s, exit 0
+  (.tmp/wp0-action-correlation-qodo62-full.log). CI/Qodo исходного SHA
+  не считаются проверкой этого исправления.
+- Повторный `npm.cmd run build` — exit 0
+  (.tmp/wp0-action-correlation-qodo62-build.log). `node scripts/test-electron-runtime.mjs`
+  — ELECTRON_SMOKE_PASS, exit 0 (.tmp/wp0-action-correlation-qodo62-electron.log).
+  `node scripts/test-wp1-native.mjs --ipc-only` — WP1_NATIVE_PASS, exit 0
+  (.tmp/wp0-action-correlation-qodo62-csp.log). Повторные coverage AC 927/927,
+  F 210/210 и `git diff --check` — exit 0. Границы AT-00-005 сохранены.

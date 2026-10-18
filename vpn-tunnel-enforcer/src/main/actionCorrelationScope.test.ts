@@ -63,3 +63,54 @@ it('attributes a separate manual stop to its new action while cancelling the old
   expect(events.filter(event => event.kind === 'disconnect').map(event => event.id)).toEqual([b, b])
   expect(currentCorrelationId()).toBeUndefined()
 })
+
+it.each(['sync', 'resolved', 'rejected'] as const)('expires %s action context before a detached native timer fires (AT-00-005)', async kind => {
+  let observe!: (id: string | undefined) => void
+  const observed = new Promise<string | undefined>(done => { observe = done })
+  const arm = () => { setTimeout(() => observe(currentCorrelationId()), 5) }
+  if (kind === 'sync') withCorrelation(a, arm)
+  else {
+    const result = withCorrelation(a, async () => {
+      arm()
+      await Promise.resolve()
+      expect(currentCorrelationId()).toBe(a)
+      if (kind === 'rejected') throw new Error('Action failed')
+    })
+    if (kind === 'rejected') await expect(result).rejects.toThrow('Action failed')
+    else await result
+  }
+  expect(await observed).toBeUndefined()
+})
+
+it('expires recurring tunnel work after startup completes (AT-00-005)', async () => {
+  let observe!: (id: string | undefined) => void
+  const observed = new Promise<string | undefined>(done => { observe = done })
+  let timer: ReturnType<typeof setInterval> | undefined
+  try {
+    const lane = new ConnectionLifecycle(() => {})
+    await withCorrelation(a, () => lane.start(async () => {
+      timer = setInterval(() => observe(currentCorrelationId()), 5)
+      expect(currentCorrelationId()).toBe(a)
+      return { success: true }
+    }))
+    expect(await observed).toBeUndefined()
+  } finally { clearInterval(timer) }
+})
+
+it('keeps late native drain correlated after caller cancellation and expires its detached work afterwards (AT-00-005)', async () => {
+  let release!: () => void, observe!: (id: string | undefined) => void
+  const gate = new Promise<void>(done => { release = done })
+  const observed = new Promise<string | undefined>(done => { observe = done })
+  const lane = new ConnectionLifecycle(() => {})
+  const started = withCorrelation(a, () => lane.start(async () => {
+    await gate // Native work can ignore AbortSignal while the caller has returned.
+    expect(currentCorrelationId()).toBe(a)
+    setTimeout(() => observe(currentCorrelationId()), 5)
+    return { success: true }
+  }))
+  const stopped = withCorrelation(b, () => lane.stop(async () => ({ success: true })))
+  expect(await started).toMatchObject({ code: 'OPERATION_CANCELLED' })
+  release()
+  await stopped
+  expect(await observed).toBeUndefined()
+})

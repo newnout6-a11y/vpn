@@ -710,3 +710,19 @@ getFullLogs с повторной redaction: ID сохраняется, credenti
 Точные команды и результаты итоговой проверки записываются в progress.md.
 Durable connection history ещё не включена в этот контекст; source/owner/route/
 confidence и monotonic ordering остаются. Это subset, не PASS всего AT-00-005.
+
+### Qodo #62 — время жизни action context
+
+Qodo 1541356 completed на 11b8acc подтвердил два дефекта: timer расписания
+наследовал ID редактирования и повторно использовал его при re-arm; периодические
+tunnel timers сохраняли ID завершённого connect. Контекст теперь содержит lease,
+который истекает по sync return/throw или settlement исходного Promise. Унаследованный
+store в detached callbacks после этого не выдаёт ID. Identity/rejection Promise
+не меняются. Внутренняя native drain task имеет отдельный lease до фактического
+завершения, поэтому caller cancellation не обрывает нужную корреляцию.
+
+Регрессии используют настоящие Node timers: sync/async success/rejection,
+периодическая tunnel работа, late native drain и production scheduler с тремя
+последовательными connect/stop/connect. Только большие задержки планировщика
+сжаты, fake timers не используются для проверки AsyncLocalStorage inheritance.
+До исправления — 6 failed / 6 passed; после адресный набор — 74 passed.
