@@ -1,3 +1,5 @@
+import type { ProxyInfo } from '../shared/diagnostics'
+export type { ProxyInfo } from '../shared/diagnostics'
 import { createConnection } from 'net'
 import { exec as execCb } from 'child_process'
 import { readFile, readdir, stat } from 'fs/promises'
@@ -6,14 +8,6 @@ import { homedir } from 'os'
 import { promisify } from 'util'
 import axios from 'axios'
 import { SocksClient } from 'socks'
-
-export interface ProxyInfo {
-  host: string
-  port: number
-  type: 'socks5' | 'http'
-  verified: boolean
-  publicIpViaProxy: string | null
-}
 
 const TYPICAL_PORTS = [
   // Some local proxy apps expose a loopback proxy on 443. The port is only

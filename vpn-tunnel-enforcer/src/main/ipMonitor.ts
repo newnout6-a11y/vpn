@@ -376,6 +376,6 @@ export const ipMonitor = {
 
 /** Called by main only after the process-wide IPC boundary is installed. */
 export function registerIpMonitorIpcHandlers(): void {
-  ipcMain.handle('ip-monitor:suspend', async () => { ipMonitor.suspend(); return { ok: true } })
-  ipcMain.handle('ip-monitor:resume', async () => { ipMonitor.resume(); return { ok: true } })
+  ipcMain.handle('ip-monitor:suspend', async () => { ipMonitor.suspend(); return { ok: true as const } })
+  ipcMain.handle('ip-monitor:resume', async () => { ipMonitor.resume(); return { ok: true as const } })
 }

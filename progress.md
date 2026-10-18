@@ -2378,3 +2378,74 @@ CI/review нового SHA проверяются отдельно после pu
   244 файлов passed / 2 skipped, 136.14 s, exit 0
   (.tmp/wp0-settings-schema-final-full.log). Итоговый production behavior
   после build/native checks не менялся; требуется exact-head CI/review PR.
+
+## 18.10.2026 — PR #52 слит; типы ответов IPC
+
+- PR https://github.com/newnout6-a11y/vpn/pull/52 слит, merge
+  f3b953f2f8340d1c11589c64045b158e06bf0e22; проверенный head
+  d0a2be9ee9d25bc9e22b643fc2fd53a7b04e59f0. `git diff d0a2be9 vpn/main
+  --exit-code` — 0: merge сохранил проверенное дерево.
+- Exact-head CI 39123146766: Windows 117662700166, Rust 117662700001
+  и сайт 117662700174 — success. Windows: 3809 passed / 4 skipped /
+  0 failed, 245 файлов passed / 1 skipped, 251.14 s. Typecheck/checker
+  157 channels и coverage AC 927/927, F 210/210 — exit 0. Native IPC/CSP
+  markers PASS; WFP aborted:true; Electron native probe 1 passed / 1 skipped.
+  Лог .tmp/wp0-settings-schema-final-ci.log. Локальный full перед PR:
+  3808 passed / 5 skipped / 0 failed; код после него не менялся.
+- Revix 117662716829 — completed/neutral, Low risk. Question 4306835706
+  проверен на неизменённых production guard/schema: `node
+  .tmp/wp0-aggregate-review.cjs` — exit 0. Каждый из двух profiles с
+  10000 outbound values принимается отдельно; общий request 40143 bytes
+  проходит channel schema, но assertSafeIpcPayload(args) отклоняет его
+  общим node budget до listener. Installed boundary: validation, 0 effects.
+  Счётчик один на args целиком; helper outbound действительно имеет свой
+  локальный бюджет. Ответ 4306847958, production patch не нужен.
+- Новая ветка codex/wp0-diagnostic-results от проверенного vpn/main.
+  Следующий участок AT-00-001: legacy any в результатах диагностики,
+  main/shared/renderer type parity и автоматическая проверка результатов.
+  Инвентаризация всех 157 listeners нашла 51 канал с явным any в public
+  result, ещё 4 расхождения literal widening. Это не завершение WP-0:
+  domain failures, FSM/coordinator, cancellation/deadline, migrations,
+  correlation/history/flags/races/UI остаются. WP-2 не начат; цель active.
+
+## 18.10.2026 — WP-0: общий diagnostic result contract и проверка listeners
+
+- Ветка codex/wp0-diagnostic-results. В typecheck/build встроен TypeScript
+  checker фактических awaited returns всех 157 listeners, включая локальные
+  registration wrappers. Ошибка содержит канал и несовместимые типы;
+  unresolved/unchecked signatures не проходят. Вложенный any определяется
+  в unions, массивах, словарях и aliases; он не может скрыть несовместимый
+  actual result за конкретным public type. Legacy public results с any
+  сохраняются явно в inventory: осталось 37 вместо 51.
+- 14 diagnostic/log API methods теперь имеют конкретные результаты:
+  detectHapp; adaptive get/retry/reset; leak/system checks; routing plan;
+  getFullLogs/logRenderer/clearAppLog; URL availability/history; speed/history.
+  Чистые типы перенесены в shared/diagnostics.ts, main сохраняет type-only
+  reexports, renderer store/Maintenance/Availability используют shared.
+  SpeedTestResult переиспользован из существующего shared/ipc-types.ts.
+- Baseline `npm.cmd test -- src/main/ipcResultContract.test.ts` — 1 failed /
+  6 passed, exit 1 (.tmp/wp0-result-contract-before.log): четыре actual
+  results расширяли true до boolean, несовместимого с public true.
+  Добавлен as const; runtime значения и операции не изменены.
+- Более строгая проверка вложенного any обнаружила шесть нарушений error:string:
+  notifications reset/open, group health и три exports в файл. Обычные string
+  messages сохранены; object-valued message теперь преобразуется в строку.
+  Функциональные тесты проверяют все шесть реальных handlers с подменёнными
+  OS/fs boundaries. Остальные domain failure тексты и taxonomy остаются в WP-0.
+- `npm.cmd test -- src/main/ipcResultContract.test.ts src/main/notificationResultContract.test.ts src/main/serverGroupsRefresh.test.ts src/main/serverKeyExportSecurity.test.ts`
+  — 60 passed, 4 файла, 10.71 s, exit 0
+  (.tmp/wp0-diagnostic-results-focused.log).
+- `npm.cmd run build` — exit 0, включая typecheck/checker 157 listeners
+  (.tmp/wp0-diagnostic-results-build.log). `node scripts/test-electron-runtime.mjs`
+  — ELECTRON_SMOKE_PASS, exit 0 (.tmp/wp0-diagnostic-results-native.log),
+  production preload/contextBridge, локальные schemas, категории и en/ru
+  correlation матрица сохранились.
+- Финальный `npm.cmd test` — 3829 passed / 5 skipped / 0 failed,
+  246 файлов passed / 2 skipped, 176.96 s, exit 0
+  (.tmp/wp0-diagnostic-results-full.log). `python -X utf8
+  docs/04-приёмочные-тесты/traceability/check-coverage.py` — AC 927/927,
+  F 210/210, exit 0. `git diff --check` — exit 0.
+- AT-00-001 и весь WP-0 не объявлены завершёнными: 37 legacy results,
+  domain failures, FSM/coordinator, cancellation/deadline, migrations,
+  correlation/history/flags/races/UI остаются. WP-2 не начат; цель active.
+  Из нормативных docs/ ничего не менялось; впереди exact-head CI и Revix.

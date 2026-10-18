@@ -5,4 +5,4 @@ export interface IpcInventory {
   problems: string[]
 }
 export function inspectIpcContract(sources: { main: Record<string, string>; preload: string; shared: string }): IpcInventory
-export function checkIpcContract(root?: string): IpcInventory
+export function checkIpcContract(root?: string): IpcInventory & { mainFiles: string[] }

@@ -1,3 +1,5 @@
+import type { RoutingPlanStatus, RecommendedMode, TunnelInfo, ProxyListenerInfo, RoutingPlanStep, RoutingPlan } from '../shared/diagnostics'
+export type { RoutingPlanStatus, RecommendedMode, TunnelInfo, ProxyListenerInfo, RoutingPlanStep, RoutingPlan } from '../shared/diagnostics'
 import { exec as execCb } from 'child_process'
 import { promisify } from 'util'
 import { happDetector, type ProxyInfo } from './happDetector'
@@ -10,46 +12,6 @@ import { TUN_ADAPTER_ALIAS, TUN_IPV4_PREFIX, getTunAdapterAlias } from './tunAda
 
 const exec = promisify(execCb)
 const MAX_BUFFER = 1024 * 1024 * 4
-
-export type RoutingPlanStatus = 'ready' | 'protected' | 'blocked' | 'broken'
-export type RecommendedMode = 'off' | 'soft' | 'hard' | 'external'
-
-export interface TunnelInfo {
-  name: string
-  description: string
-  address: string
-  isVpnte: boolean
-}
-
-export interface ProxyListenerInfo {
-  host: string
-  port: number
-  process: string
-  pid: number
-}
-
-export interface RoutingPlanStep {
-  label: string
-  before: string
-  after: string
-  status: 'ok' | 'warn' | 'fail' | 'info'
-}
-
-export interface RoutingPlan {
-  ranAt: number
-  status: RoutingPlanStatus
-  recommendedMode: RecommendedMode
-  title: string
-  explanation: string
-  before: string
-  after: string
-  canStartHard: boolean
-  proxy: ProxyInfo | null
-  activeTunnels: TunnelInfo[]
-  proxyListeners: ProxyListenerInfo[]
-  blockers: string[]
-  steps: RoutingPlanStep[]
-}
 
 function encodedPowerShell(script: string) {
   const prelude =

@@ -1,3 +1,4 @@
+import type { PathReport, UrlAvailabilityResult as UrlResult } from '../../shared/diagnostics'
 import { useState, useEffect, useCallback } from 'react'
 import {
   Search,
@@ -35,33 +36,6 @@ import { useAppStore } from '../store'
  * When VPN is OFF only the direct path is measured — the second card
  * shows a hint "Включите защиту, чтобы сравнить".
  */
-
-// ─── Types mirror src/main/urlAvailability.ts (loose to avoid coupling) ──────
-
-interface PathReport {
-  available: boolean
-  totalMs: number | null
-  errorStage: string | null
-  errorMessage: string | null
-  dns: { resolved: boolean; ips: string[]; ms: number | null; poisoned: boolean } | null
-  tcp: { connected: boolean; ms: number | null } | null
-  tls: { handshakeOk: boolean; ms: number | null; cipher: string | null; protocol: string | null } | null
-  http: { status: number | null; ms: number | null; server: string | null } | null
-  asn: { country: string; org: string } | null
-  geoBlocked?: boolean
-  source: 'native' | 'clash-direct-out'
-}
-
-interface UrlResult {
-  id: string
-  url: string
-  testedAt: number
-  tunnelActive: boolean
-  tunnel: PathReport | null
-  direct: PathReport | null
-  verdict: 'works-both' | 'works-only-with-vpn' | 'works-only-without-vpn' | 'blocked-everywhere' | 'unknown'
-  recommendation: string
-}
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 

@@ -1,3 +1,5 @@
+import type { CheckStatus, LeakCheckItem, LeakCheckResult } from '../shared/diagnostics'
+export type { CheckStatus, LeakCheckItem, LeakCheckResult } from '../shared/diagnostics'
 import axios from 'axios'
 import { exec as execCb, execFile as execFileCb } from 'child_process'
 import { readFile } from 'fs/promises'
@@ -18,22 +20,6 @@ function recordForensicLeakCheckEvent(event: string, details: Record<string, unk
       details
     }))
     .catch(() => undefined)
-}
-
-export type CheckStatus = 'ok' | 'warn' | 'fail' | 'info'
-
-export interface LeakCheckItem {
-  id: string
-  label: string
-  status: CheckStatus
-  value: string
-  details?: string
-}
-
-export interface LeakCheckResult {
-  ranAt: number
-  summary: CheckStatus
-  items: LeakCheckItem[]
 }
 
 interface RunLeakCheckOptions {

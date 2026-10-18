@@ -1,7 +1,9 @@
 import type { AppSettings } from './settings'
 import type { PublicIpInfo } from './publicIp'
+import type { ProxyInfo, AdaptiveBypassStatus, LeakCheckResult, SystemDiagnosticResult, RoutingPlan, LogFileSnapshot, UrlAvailabilityResult } from './diagnostics'
 import type {
   ClientDevice,
+  SpeedTestResult,
   ScheduleEntry, ScheduleNextEvent, RotationConfig,
   KillSwitchLevel, KillSwitchException,
   DnsProfile, DnsProfileInput, DomainRule,
@@ -23,7 +25,7 @@ import type {
 /** Request failures reject with IpcRemoteErrorData; narrow unknown catches
  * with isIpcRemoteErrorData rather than relying on Error identity across realms. */
 export interface ElectronAPI {
-  detectHapp: () => Promise<any>
+  detectHapp: () => Promise<ProxyInfo | null>
   getPublicIp: () => Promise<PublicIpInfo>
   recheckPublicIp: (rebaseline?: boolean) => Promise<PublicIpInfo>
   startTun: (proxyAddr: string, proxyType?: 'socks5' | 'http') => Promise<{ success: boolean; error?: string; warning?: string | null; vpnIp?: string | null }>
@@ -38,25 +40,25 @@ export interface ElectronAPI {
   getAutoconfigStatus: () => Promise<any[]>
   getSettings: () => Promise<AppSettings>
   saveSettings: (settings: Partial<AppSettings>) => Promise<AppSettings>
-  adaptiveBypassGetStatus: () => Promise<any>
-  adaptiveBypassRetry: () => Promise<any>
-  adaptiveBypassResetLearning: () => Promise<any>
+  adaptiveBypassGetStatus: () => Promise<AdaptiveBypassStatus>
+  adaptiveBypassRetry: () => Promise<{ started: boolean; status: AdaptiveBypassStatus }>
+  adaptiveBypassResetLearning: () => Promise<{ success: boolean; status: AdaptiveBypassStatus }>
   smartRouteRuleSetsGetState: () => Promise<any>
   smartRouteRuleSetsRefresh: (force?: boolean) => Promise<any>
   inspectVpnInput: (input: string) => Promise<{ count: number; protocols: Record<string, number>; profiles: Array<{ index: number; name: string; protocol: string }>; fetched: boolean; source: string }>
   setLoginItem: (openAtLogin: boolean) => Promise<AppSettings>
-  runLeakCheck: (options?: { proxyAddr?: string; proxyType?: 'socks5' | 'http' }) => Promise<any>
-  runSystemDiagnostics: () => Promise<any>
-  getRoutingPlan: () => Promise<any>
+  runLeakCheck: (options?: { proxyAddr?: string; proxyType?: 'socks5' | 'http' }) => Promise<LeakCheckResult>
+  runSystemDiagnostics: () => Promise<SystemDiagnosticResult>
+  getRoutingPlan: () => Promise<RoutingPlan>
   applyBrowserLeakProtection: () => Promise<any>
   rollbackBrowserLeakProtection: () => Promise<any>
   runAutoPilot: () => Promise<any>
   repairOrphanedDns: () => Promise<any>
   rollbackAdapterLockdown: () => Promise<any>
   killStaleSingbox: () => Promise<{ success: boolean; message: string; skipped?: boolean; blocked?: boolean; candidates?: number; killed?: number; names?: string[]; error?: string }>
-  logRenderer: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => Promise<any>
-  getFullLogs: () => Promise<any>
-  clearAppLog: () => Promise<any>
+  logRenderer: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => Promise<{ success: boolean }>
+  getFullLogs: () => Promise<LogFileSnapshot[]>
+  clearAppLog: () => Promise<{ success: boolean }>
   clearDiagnosticArtifacts: () => Promise<{ success: boolean; message: string; cleared: string[] }>
   rollbackTunNetworkBaseline: () => Promise<any>
   disableFirewallKillSwitch: () => Promise<{ success: boolean; message: string; skipped?: boolean }>
@@ -164,8 +166,8 @@ export interface ElectronAPI {
   serverLiveCheckHistory: (filter?: { profileId?: string; host?: string }) => Promise<LiveServerCheck[]>
   onLiveCheckProgress: (callback: (progress: LiveCheckProgress) => void) => () => void
   onLiveBatchCheckProgress: (callback: (progress: LiveServerBatchCheckProgress) => void) => () => void
-  urlAvailabilityCheck: (url: string) => Promise<any>
-  urlAvailabilityHistory: () => Promise<any[]>
+  urlAvailabilityCheck: (url: string) => Promise<UrlAvailabilityResult>
+  urlAvailabilityHistory: () => Promise<UrlAvailabilityResult[]>
   urlAvailabilityClearHistory: () => Promise<void>
   // Scheduler
   schedulerList: () => Promise<ScheduleEntry[]>
@@ -236,8 +238,8 @@ export interface ElectronAPI {
   onKillSwitchTrafficBlocked: (callback: (data: { reason: string; steps?: string[] }) => void) => () => void
   onI18nLocaleChanged: (callback: (locale: string) => void) => () => void
   // Speed Test
-  speedTestRun: () => Promise<any>
-  speedTestHistory: () => Promise<any[]>
+  speedTestRun: () => Promise<SpeedTestResult>
+  speedTestHistory: () => Promise<SpeedTestResult[]>
   onSpeedTestProgress: (callback: (data: { percent: number; phase: string }) => void) => () => void
   // External Proxy
   externalProxyStatus: (slot?: number) => Promise<ExternalProxyStatus>

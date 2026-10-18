@@ -255,3 +255,30 @@ nullable cachedAt и вложенные cache JSON сохраняют подде
 feature/renderer/migration tests и полный DoD — в progress.md. Оставшиеся
 any ответов других функций и legacy domain failures сохраняются в остатке
 WP-0; отсутствие bounded legacy object() не объявляет весь пакет завершённым.
+
+## AT-00-001 — типы результатов диагностики и проверка listeners
+
+Встроенный в typecheck/build checker теперь использует TypeScript program:
+для каждого из 157 реальных listeners (включая локальные registration wrappers)
+сравнивает awaited return с методом ElectronAPI. Несовместимые вложенные поля,
+nullable branches и any внутри результата при конкретном public type приводят
+к ошибке с именем канала. Неразрешённая сигнатура или непроверенный канал также
+не считаются успехом. Отдельно учитываются legacy public types с any, включая
+вложенные поля, массивы, словари и aliases: их остаётся 37, поэтому полный
+AT-00-001 и WP-0 пока не объявлены PASS.
+
+14 public methods диагностики и логов получили конкретные результаты:
+proxy detection, adaptive status/retry/reset, leak/system checks, routing plan,
+full logs, renderer logging/clear, URL availability/history и speed test/history.
+Чистые типы собраны в shared/diagnostics.ts; main сохраняет type-only reexports,
+renderer использует те же определения вместо независимых копий. SpeedTestResult
+уже находился в shared и переиспользован.
+
+Проверка обнаружила четыре случая расширения true в boolean; as const сохраняет
+реальное значение без изменения runtime. Ещё шесть обработчиков могли вернуть
+объект в error вместо обещанной строки: notifications reset/open, group health
+и три file exports. Преобразование в строку и функциональные негативные тесты
+с нестроковым message фиксируют контракт; обычные строковые сообщения сохранены.
+Это не закрывает оставшуюся задачу canonical domain failures: legacy business
+results и их тексты ещё требуют отдельного аудита. Результаты команд и CI/review
+фиксируются в progress.md; нормативные docs/ не менялись.

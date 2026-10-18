@@ -411,7 +411,7 @@ export function registerKillSwitchIpc(): void {
   handleLogged('kill-switch:set-level', async (_e, level: KillSwitchLevel) => {
     level = requireEnum(level, 'level', ['off', 'standard', 'strict'])
     await granularKillSwitch.setLevel(level)
-    return { success: true, level }
+    return { success: true as const, level }
   })
 
   handleLogged('kill-switch:get-exceptions', async () => {
@@ -430,7 +430,7 @@ export function registerKillSwitchIpc(): void {
   handleLogged('kill-switch:remove-exception', async (_e, id: string) => {
     id = requireString(id, 'id', { maxLength: 200 })
     await granularKillSwitch.removeException(id)
-    return { success: true }
+    return { success: true as const }
   })
 
   handleLogged('kill-switch:browse-app', async () => {

@@ -1,3 +1,5 @@
+import type { LogFileSnapshot } from '../shared/diagnostics'
+export type { LogFileSnapshot } from '../shared/diagnostics'
 import { app, shell } from 'electron'
 import { mkdir, open, readFile, stat, writeFile, appendFile, unlink } from 'fs/promises'
 import { join } from 'path'
@@ -7,15 +9,6 @@ import { redactSensitiveConfig, redactSensitiveText } from './vpnProfiles'
 import { watchEngineLogs } from './engineLogRetention'
 
 export type AppLogLevel = 'debug' | 'info' | 'warn' | 'error'
-
-export interface LogFileSnapshot {
-  name: string
-  path: string
-  exists: boolean
-  size: number
-  truncated: boolean
-  content: string
-}
 
 const MAX_DETAIL_CHARS = 4000
 const MAX_READ_BYTES = 1024 * 1024
