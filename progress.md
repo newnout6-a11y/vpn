@@ -2309,3 +2309,27 @@ CI/review нового SHA проверяются отдельно после pu
   244 файлов passed / 2 skipped, 147.07 s, exit 0
   (.tmp/wp0-object-schema-final-full.log). Production code после этого
   результата до коммита не менялся; впереди exact-head CI и Revix на PR.
+
+## 18.10.2026 — PR #51 слит; оставшийся settings contract
+
+- PR https://github.com/newnout6-a11y/vpn/pull/51 слит, merge
+  bf08d6b912a6f163bf4b878b147550339718f612; проверенный head
+  b33163ae0cbe90119e7ded63dfcc90dcf503ec15. `git diff b33163a vpn/main
+  --exit-code` — 0: merge сохранил проверенное дерево.
+- Exact-head CI run 39121998380: Windows 117659303798, Rust 117659303740
+  и сайт 117659303912 — success. Windows: 3783 passed / 4 skipped /
+  0 failed, 245 файлов passed / 1 skipped, 144.58 s; typecheck/checker
+  157 channels и coverage AC 927/927, F 210/210 — exit 0. Native IPC/CSP
+  step — оба PASS markers, WFP aborted:true; native Electron probe
+  1 passed / 1 skipped. Лог .tmp/wp0-object-schema-final-ci.log.
+- Revix 117659316373 — completed/neutral, Low risk, review 5562673468,
+  один question 4306785961. Read-only AST/runtime parity probe доказал:
+  NotificationPreferences 8/8, RotationConfig 6/6, вход
+  Omit<KillSwitchException,'id'> 3/3, missing/extra keys нет. id создаёт main,
+  он не часть create input. Ответ 4306788444; исходники не менялись.
+- Новая ветка codex/wp0-settings-contract от vpn/main. Следующий участок
+  AT-00-001 — 39 полей AppSettings, последний bounded object() save-settings,
+  и общие public settings types. Нормализация исторического persisted store
+  остаётся прежней; некорректный новый IPC input должен отклоняться до effects.
+  Далее остаются legacy any ответов/domain failures и вся общая матрица WP-0.
+  WP-0 не завершён, WP-2 не начат, цель active. Этот коммит только журнал.
