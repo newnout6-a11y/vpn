@@ -8,21 +8,21 @@
 18.10 владелец разрешил продолжать WP-0 при открытом PR #54, сохраняя запрет
 его слияния до отдельного решения. Полного Revix для #54 не было из-за квоты.
 Позднее 18.10 владелец разрешил сливать PR после пройденных проверок.
-#54/#55/#56 слиты в main после exact-head CI success и completed Qodo,
+#54/#55/#56/#57 слиты в main после exact-head CI success и completed Qodo,
 без открытых findings; прежний запрет слияния отменён.
 
 ## Полная область и первоначальная инвентаризация
 
 | AT | Найденная реализация / доказательства | Остаток до приёмки |
 | --- | --- | --- |
-| 00-001 | AST-проверка 157 main/preload/shared request channels, общий реестр входов и versioned transport envelope; object contracts проверяют поля/массивы, save-settings покрывает все 39 общих полей AppSettings; TypeScript checker проверяет results всех 157 listeners, public results с `any` больше нет; native contextBridge сохраняет JSON профиля и nullable active result | Завершить проверку текущего PR; отдельная semantic matrix ошибок остаётся в 00-004 |
-| 00-002 | `tunController.ts`, lifecycle fault-injection tests | Единая модель и интегрированный координатор; все туры ≤6, недопустимые события, ресурсные инварианты |
+| 00-001 | AST-проверка 158 main/preload/shared request channels, общий реестр входов и versioned transport envelope; object contracts проверяют поля/массивы, save-settings покрывает все 39 общих полей AppSettings; TypeScript checker проверяет results всех 158 listeners, public results с `any` больше нет; native contextBridge сохраняет JSON профиля и nullable active result | Завершить проверку текущего PR; отдельная semantic matrix ошибок остаётся в 00-004 |
+| 00-002 | Production TunnelStateMachine интегрирована в main lane/IPC/Soft/tray/UI; 4096 connect/disconnect/crash/retry tours глубиной 6 с fake PID/TUN ledger; sticky faults и generation fencing | Полный алфавит timeout/cancel и общая operation history/counters; native Windows resources; общий admission фоновых restart |
 | 00-003 | Main connection lane: UUIDv4, owner, deadline запуска, priority admission; ручные Hard/Direct и Soft из tray, scheduled startup вместе с proxy detection; отмена на 10/50/90% управляемого connect fixture | Общий реестр refresh/speed/import/export/rotation; deadline остановки, интеграция всех entrypoints и полная матрица поздних эффектов |
 | 00-004 | Общая классификация transport; 157 каналов × 7 категорий через guard; native contextBridge сохраняет code/category/correlation в en/ru; typed local validation; 4 настоящих config handlers × 7 категорий, canonical domain failures | Миграция legacy domain-result `{success:false,error}` и semantic matrix настоящих feature handlers; transport fixtures не доказывают её |
 | 00-005 | `appLogger.ts`, `connectionHistory.ts`; новый regression passive rejection dedup | Сквозной correlation id, монотонный порядок, source/owner/route/confidence истории и redaction всех полей |
 | 00-006 | Локальные миграции, в том числе `readSettingsWithMigration` | Централизованный упорядоченный реестр, fixtures всех исторических версий, future-version hash invariance |
-| 00-007 | Lifecycle tests отдельных гонок | Seeded 200 команд из 10 потоков, typed losers, итог последней принятой команды и 0 child PID при disconnected |
-| 00-008 | Существующие UI-статусы | Матрица кадров всех операций, progress, запрет преждевременной защиты, соответствие общей модели |
+| 00-007 | Seed 0x5eed003: 200 commands/10 async workers с production lane/FSM, typed losers, парные terminal events, финальный disconnect и 0 fake PID/TUN | Натурный PID-реестр Windows и полная матрица фоновых entrypoints |
+| 00-008 | Dashboard component frames с production FSM/lane; revision fence; Soft через owned IPC; visual fixtures light/dark; native production contextBridge snapshots/disposer | Полная матрица всех операций, тем, размеров и entrypoints; browser fixtures не заменяют native resources |
 | 00-009 | Плановые функции WP-12 не приняты в production | Проверить реестр production flags, отсутствие DOM и отказ включения без laboratory evidence с audit event |
 | 00-010 | История подключений: настоящий Conf backend, 100 записей, повторная загрузка, повреждённый JSON/схема, `history.corrupted`, сохранение валидных записей и последующая запись | Адресная L2-матрица истории подключений добавлена; перенос той же гарантии на общий audit/event history всех операций после его введения |
 
@@ -480,3 +480,109 @@ Scheduler продолжает перебор только при явной н�
 реальные main effect bodies с fake OS, restart и timer пути. Это подмножества
 AT-00-003/005/007 и AT-10-006, а не принятие полной FSM/registry/UI matrix.
 Четыре исходные находки Qodo воспроизведены регрессиями; результаты — progress.md.
+
+
+## Интегрированная FSM — текущий участок WP-0
+
+TunnelSnapshot разделяет стабильный state, transient operation, health, mode,
+processState/PID и proxyStatus. Main lifecycle публикует connected после всех
+owned effects и положительного evidence; raw running этого не доказывает.
+Ошибка/blocked/unknown сохраняются до owned recovery. Отказ evidence и наличие
+процесса без подтверждённого состояния дают unknown с обязательством cleanup.
+Устранение конкурирующего интерфейса снимает только competingTun.
+
+Фоновый native startup публикует begin/finished с монотонной generation;
+запоздалый receipt предыдущего старта не подтверждает новый restart или stop.
+Неожиданный throw подготовки публикует failure receipt и освобождает owner.
+Полный admission всех protected restarts в общей registry ещё не завершён.
+
+Soft Dashboard использует start-soft-protection и единый stop-tun. Startup
+recovery читает строгий env isApplied; rollback проходит через rollbackApplied.
+Retained Soft может быть принят recovery owner только после строгой проверки
+и при отсутствии recovery faults. Наличие env само по себе не очищает unknown.
+IPC-паритет теперь 158 channels / 0 public any.
+
+Renderer получает snapshot одним событием/ответом getTunStatus и отбрасывает
+старые revision. Legacy process events и поздний successful result не включают
+защиту поверх canonical FSM. Dashboard и tray отображают progress/fault;
+competing-interface warning в tray не называется недоступностью сервера.
+
+Tests: 4096 tours покрывают только алфавит connect/disconnect/crash/retry и его
+недопустимые события. Seeded race использует десять асинхронных исполнителей,
+не OS threads. PID/TUN ledger имитирует ОС. Это адресные L2 evidence, не полная
+приёмка AT-00-002/007 и не Windows network isolation. Полная registry/history,
+остальные долгие операции, семантика errors, migrations и flags остаются открыты.
+
+Playwright показал production Dashboard с управляемой FSM в light/dark: pending
+connect, confirmed connected, reconnect и unknown/blocked. Просмотрены PNG;
+контролы start/confirm/cleanup переключали состояние. Временный harness в .tmp
+не меняет сеть. Vite HMR после завершения fixture server выдавал connection
+refused; это не результат production VPN. Полная visual/a11y/responsive matrix
+не заявляется; отсутствующие scripts design-doctrine не заменены фиктивным PASS.
+
+Native Electron smoke использует production preload/contextBridge, реальную
+FSM/lane, fake OS evidence и isolated userData: ранний running остаётся pending,
+owned Soft проходит validation, stop очищает состояние, disposer снимает listener.
+Старые security/CSP assertions сохранены. Точные команды/результаты — progress.md.
+
+
+### Qodo #58 — реальные producers и entrypoints
+
+Начальные model/component fixtures задавали positive PID самостоятельно и не
+доказали совместимость с native status producer. Production startup poll теперь
+получает PID с точным ExecutablePath/единственностью и передаёт его в FSM.
+Новый integration regression исполняет сам poll callback и настоящий lane/model;
+PowerShell predicate отдельно исполняется с подменённым CIM enumeration для
+owned/foreign/prefix collision/ambiguous/unreadable. Настоящий Windows runtime
+этими тестами не запускается. Неудачная main confirmation вызывает cleanup.
+
+Env через legacy autoconfig IPC проходит тот же Soft owner; прямой rollback под
+active native mode отклоняется. App bootstrap использует owned Soft method и
+не очищает unknown. Исполняемые App callbacks
+с настоящим Zustand/FSM/lane проверяют leak guard после connect и во время stop,
+включая stale revision. Tray сохраняет firewall/leak warnings без active process.
+Failed adaptive fallback устанавливает unknown после stop/failure, завершая
+transient reconnect. Это пять проверенных замечаний Qodo, не общая приёмка WP-0.
+
+### Повторный Qodo #58 — обновление выбранного Soft-прокси
+
+Qodo run 1540463 completed на cb4b134: пять прежних findings implemented,
+новый action_required — renderer reload сохранял старый env-прокси после смены
+настроек. Retained Soft теперь повторно применяет выбранный адрес и протокол
+через main connection lane. Исключение admission ограничено connected/soft
+без transition; новый native connect по-прежнему отклоняется. Это обновление
+env с сохранением исходного backup, без stop/restart TUN. Ошибка apply не даёт
+успеха; отмена удерживает native effects до drain и последующей очистки.
+
+Регрессии исполняют App bootstrap, реальные main Soft effects с production
+FSM/lane и fake OS. Тест настоящего env-модуля проверяет все три proxy values
+после смены адреса/протокола и восстановление исходного baseline. Это не
+натурная проверка доставки Windows environment notification приложениям.
+
+### Третий Qodo #58 — компенсация частичного Soft refresh
+
+Qodo run 1540530 completed на 67fc70c: шесть прежних findings implemented,
+новый action_required — частичный env.apply откатывал к pre-Soft baseline.
+Перед refresh теперь строго читаются все текущие user env values. При отказе
+обновления восстанавливается этот отдельный snapshot с read-back каждой записи;
+исходный durable backup и pending marker остаются для eventual stop. Неизвестное
+текущее значение запрещает изменения. Даже первая команда, вернувшая ошибку
+после изменения registry, компенсируется. Неудачный refresh остаётся ошибкой
+FSM (не успешным применением новых настроек); при отказе компенсации cleanup
+обязателен. Достоверность нового endpoint не заявляется.
+
+Исполняемые env regressions проверяют отказ каждой из четырёх записей после
+mutation, отказ snapshot read и повторный отказ компенсации; original baseline
+впоследствии восстанавливается штатным stop. Windows registry/process.env
+подменены; это L1/L2, не натурная приёмка глобального environment broadcast.
+
+### Собственная проверка #58 — startup receipt не доказывает active Soft
+
+Qodo run 1540585 completed на 470d679: все семь прежних findings implemented,
+новых нет. Дополнительная собственная регрессия обнаружила, что boot adoption
+принимала backup receipt за доказательство ранее успешного env.apply. Теперь
+recovery owner разрешает выбранный прокси и выполняет настоящий Soft apply
+перед первым connected. Отсутствующий прокси, ошибка детектора/apply или чтения
+receipt дают unknown. Существующий recovery fault не очищается автоматически.
+Исполняется actual adoption + actual Soft effects + production lane/FSM с fake OS;
+backup остаётся основанием cleanup, а не самостоятельным protection evidence.

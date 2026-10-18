@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { OPERATION_PRIORITY, type ConnectionOperation, type ConnectionOperationRejection, type OperationOwner } from '../shared/operation'
+import type { TunnelStateMachine } from './tunnelStateMachine'
 
 /** Main startup owns baseline effects as well as the controller startup. */
 export interface ConnectionStartupOwner {
@@ -10,7 +11,7 @@ export interface ConnectionStartupOwner {
   wait<T>(effect: Promise<T>): Promise<T>
 }
 
-interface StartOptions { owner?: OperationOwner; timeoutMs?: number }
+interface StartOptions { owner?: OperationOwner; timeoutMs?: number; refreshSoft?: boolean }
 type CleanupResult = { success: boolean; error?: string }
 type Startup = {
   controller: AbortController
@@ -39,7 +40,8 @@ export class ConnectionLifecycle {
   constructor(
     private readonly cancelControllerStartup: () => void,
     private readonly cleanupCancelled?: () => Promise<CleanupResult>,
-    private readonly onOperation: (operation: ConnectionOperation) => void = () => {}
+    private readonly onOperation: (operation: ConnectionOperation) => void = () => {},
+    private readonly stateMachine?: TunnelStateMachine
   ) {}
 
   get starting(): boolean { return this.startup !== null }
@@ -51,6 +53,7 @@ export class ConnectionLifecycle {
 
   private publish(operation: ConnectionOperation): void {
     this.lastOperation = operation
+    this.stateMachine?.operationChanged(operation)
     // An observer is not allowed to strand native ownership or cleanup.
     try { this.onOperation({ ...operation }) } catch { /* telemetry is best effort */ }
   }
@@ -67,6 +70,12 @@ export class ConnectionLifecycle {
       }
       return rejection('conflict', 'Запуск защиты уже выполняется')
     }
+    const snapshot = this.stateMachine?.snapshot
+    // Soft refresh reapplies the selected proxy under the same exclusive lane.
+    // It must never admit a second native core or overwrite an active transition.
+    const softRefresh = options.refreshSoft && snapshot?.state === 'connected'
+      && snapshot.mode === 'soft' && snapshot.transition === null
+    if (this.stateMachine && !this.stateMachine.canStart() && !softRefresh) return rejection('conflict', 'Состояние туннеля не допускает новый запуск')
     const controller = new AbortController()
     let release!: () => void
     const completion = new Promise<void>(done => { release = done })
@@ -122,6 +131,11 @@ export class ConnectionLifecycle {
       const result = await effect(owner)
       await Promise.all(effects)
       assertActive()
+      if (!failed(result) && this.stateMachine && !this.stateMachine.canConfirmStart()) {
+        // A failed confirmation must not abandon a process started by this owner.
+        await this.cleanupCancelled?.()
+        throw new Error('Connection confirmation missing')
+      }
       startup.operation = { ...startup.operation, status: failed(result) ? 'error' : 'success' }
       return result
     } catch (error) {
@@ -158,6 +172,7 @@ export class ConnectionLifecycle {
     const stopped = Promise.resolve().then(async () => {
       if (startup) await startup.completion
       const result = await effect()
+      if (!failed(result) && this.stateMachine && !this.stateMachine.canConfirmStop()) throw new Error('Runtime cleanup confirmation missing')
       if (cancellationErrors.length) throw cancellationErrors[0]
       this.stopOperation = { ...operation, status: failed(result) ? 'error' : 'success' }
       return result

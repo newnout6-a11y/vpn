@@ -12,9 +12,10 @@ import { isIP } from 'net'
 import { getPrivilegedRuntimeDir } from './runtimePaths'
 import { directoryExists, verifyDirectoryHardened } from './runtimeDirSecurity'
 import { happDetector } from './happDetector'
-import { tunController, getTunRuntimeDir, detectForeignTun, killOwnedTunRuntimeProcesses, isOwnedTunRuntimeRunning, readRecentSingBoxOutboundFault, areTunRoutesActive, getLastSingBoxExit, onProtectedRestart } from './tunController'
+import { tunController, getTunRuntimeDir, detectForeignTun, killOwnedTunRuntimeProcesses, isOwnedTunRuntimeRunning, readRecentSingBoxOutboundFault, areTunRoutesActive, getLastSingBoxExit, onProtectedRestart, onNativeStartup } from './tunController'
 import type { NetworkCleanupReceipt, SingBoxOutboundFault } from './tunController'
 import { ConnectionLifecycle, type ConnectionStartupOwner } from './connectionLifecycle'
+import { TunnelStateMachine } from './tunnelStateMachine'
 import type { ConnectionStartResult, ConnectionStopResult } from '../shared/operation'
 import { runScheduledConnection } from './scheduledConnection'
 import { makeOutcome, outcomeKindToDisconnectReason, isNodeSwitchRestartReason } from './sessionOutcome'
@@ -25,7 +26,7 @@ import { ipMonitor, registerIpMonitorIpcHandlers } from './ipMonitor'
 import { withProtectedIpTransition } from './protectedIpTransition'
 import { collectAdaptiveSamples, verifyAdaptiveFallback } from './adaptiveVerification'
 import { autoconfig } from './autoconfig'
-import { createTray, updateTrayState, type TrayStatus } from './tray'
+import { createTray, updateTrayState, trayStatusForTunnel, type TrayStatus } from './tray'
 import { settingsStore, type AppSettings } from './settings'
 import { readSecureStartupSettings, startupFailureDetail, handleSecureStartupBeforeQuit } from './secureStartup'
 import { runLeakCheck } from './leakDiagnostics'
@@ -481,8 +482,13 @@ async function restartAdaptiveWithFreshIp(
     if (!healthy) {
       // Keep the previous selection and firewall/adapter protection. The failed
       // provisional runtime must not remain displayed as a connected server.
-      await tunController.stop({ preserveNetworkProtection: true })
-      if (isOwner()) ipMonitor.clearVpnIp()
+      try { await tunController.stop({ preserveNetworkProtection: true }) }
+      finally {
+        if (isOwner()) {
+          tunnelState.fault('unknown')
+          ipMonitor.clearVpnIp()
+        }
+      }
       return { success: false, error: 'Соседний сервер не прошёл проверку выхода в интернет через туннель' }
     }
     return restarted
@@ -977,6 +983,7 @@ async function recoverStaleBaseline(): Promise<void> {
     await rollbackTunNetworkBaselineOrThrow('crash recovery on startup')
   } catch (err: any) {
     logEvent('warn', 'app', 'crash-recovery baseline restore unconfirmed', err)
+    tunnelState.fault('unknown')
     // Recovery runs before createWindow: renderer IPC would silently drop this warning.
     // Do not delay the remaining recovery steps while waiting for dismissal.
     void dialog.showMessageBox({ type: 'warning', title: rollbackStarted ? 'Восстановление сети не завершено' : 'Восстановление сети не проверено',
@@ -1011,6 +1018,7 @@ function refreshTrayState(patch: {
   }
 
   if (!tray) return
+  latestTrayStatus = trayStatusForTunnel(tunnelState.snapshot, latestTrayStatus === 'leak', latestKillSwitchActive)
   updateTrayState(tray, {
     status: latestTrayStatus,
     publicIp: latestPublicIp,
@@ -1080,7 +1088,23 @@ async function resolveProxyForTrayStart(): Promise<{ proxyAddr: string; proxyTyp
  * it first so the two routing modes cannot overlap.
  */
 async function startSoftProtection(proxyAddr: string, proxyType?: 'socks5' | 'http'): Promise<ConnectionStartResult> {
-  return connectionLifecycle.start(owner => startSoftProtectionEffects(owner, proxyAddr, proxyType))
+  return connectionLifecycle.start(owner => startSoftProtectionEffects(owner, proxyAddr, proxyType), { refreshSoft: true })
+}
+
+async function applyOwnedAutoconfig(targets: string[], proxyAddr: string, proxyType?: 'socks5' | 'http'): Promise<Record<string, boolean>> {
+  const results = await autoconfig.apply(targets.filter(target => target !== 'env'), proxyAddr, proxyType ?? settingsStore.get().proxyType)
+  if (targets.includes('env')) results.env = (await startSoftProtection(proxyAddr, proxyType)).success
+  return results
+}
+
+async function rollbackOwnedAutoconfig(targets: string[]): Promise<Record<string, boolean>> {
+  const results = await autoconfig.rollback(targets.filter(target => target !== 'env'))
+  if (targets.includes('env')) {
+    // Restoring Soft env is a protection stop. Never silently remove or alter
+    // env underneath an active native connection through this legacy API.
+    results.env = tunnelState.snapshot.mode === 'tun' ? false : (await stopProtection()).success
+  }
+  return results
 }
 
 async function startSoftProtectionEffects(owner: ConnectionStartupOwner, proxyAddr: string, proxyType?: 'socks5' | 'http'): Promise<ConnectionStartResult> {
@@ -1098,13 +1122,16 @@ async function startSoftProtectionEffects(owner: ConnectionStartupOwner, proxyAd
   }
 
   refreshTrayState({ status: 'protected', proxyAddr })
+  softProtectionApplied = true
   sendToMainWindow('soft-status-changed', true)
   return { success: true, vpnIp: null }
 }
 
 async function rollbackSoftAutoconfigIfApplied(reason: string): Promise<void> {
   try {
-    if (await autoconfig.rollbackApplied('env')) {
+    const rolledBack = await autoconfig.rollbackApplied('env')
+    softProtectionApplied = false
+    if (rolledBack) {
       logEvent('info', 'app', `rolled back env autoconfig before ${reason}`)
       sendToMainWindow('soft-status-changed', false)
     }
@@ -1114,13 +1141,26 @@ async function rollbackSoftAutoconfigIfApplied(reason: string): Promise<void> {
   }
 }
 
+let softProtectionApplied = false
+const tunnelState = new TunnelStateMachine(() => ({ ...tunController.getStatus(), softApplied: softProtectionApplied }), snapshot => {
+  sendToMainWindow('tunnel-state-changed', snapshot)
+  granularKillSwitch.setVpnConnected(snapshot.state === 'connected' && snapshot.transition === null && snapshot.mode === 'tun')
+  refreshTrayState()
+})
+// Register before any tray, schedule or auto-start action can begin.
+tunController.onStatusChange(status => { tunnelState.runtimeChanged(status) })
+onNativeStartup(observation => {
+  if (observation.phase === 'begin') tunnelState.nativeStartBegan(observation.generation)
+  else tunnelState.nativeStartFinished(observation)
+})
+
 const connectionLifecycle = new ConnectionLifecycle(() => {
   adaptiveVerificationGeneration += 1
   tunController.cancelTransition()
 }, () => stopProtectionEffects(), operation => {
   if (operation.status === 'running' && operation.owner !== 'schedule') schedulerService.cancelPendingConnect()
   logEvent(operation.status === 'running' ? 'debug' : 'info', 'lifecycle', 'connection operation', operation)
-})
+}, tunnelState)
 
 async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http'): Promise<ConnectionStartResult> {
   return connectionLifecycle.start(owner => startProtectionEffects(owner, proxyAddr, proxyType))
@@ -1764,6 +1804,7 @@ async function performCrashRecovery(): Promise<void> {
   try {
     if (await timePhase('recovery.runtime', () => isOwnedTunRuntimeRunning(true))) {
       logEvent('info', 'app', 'owned runtime is still running — preserving startup network state')
+      tunnelState.fault('unknown')
       return
     }
     await timePhase('recovery.baseline', () => recoverStaleBaseline())
@@ -1778,6 +1819,7 @@ async function performCrashRecovery(): Promise<void> {
           if (!rollback.rolledBack && !rollback.skipped) throw new Error(rollback.warnings?.join(' | ') || 'Adapter rollback incomplete; snapshot retained')
         } catch (err) {
           logEvent('warn', 'phys-lockdown', 'startup rollback failed', err)
+          tunnelState.fault('unknown')
           void dialog.showMessageBox({ type: 'warning', title: 'Восстановление адаптеров не завершено',
             message: 'Часть настроек адаптеров не восстановлена. Проверьте диагностику и повторите восстановление сети.',
             detail: String(err), buttons: ['ОК'] }).catch(dialogErr => logEvent('warn', 'app', 'adapter recovery warning dialog failed', dialogErr))
@@ -1786,21 +1828,24 @@ async function performCrashRecovery(): Promise<void> {
     }
 
     await timePhase('recovery.orphan-dns', () => repairOrphanedPhysicalAdapterDns('startup orphaned DNS repair'))
-      .catch(err => logEvent('warn', 'phys-lockdown', 'startup orphaned DNS repair failed', err))
+      .catch(err => {
+        tunnelState.fault('unknown')
+        logEvent('warn', 'phys-lockdown', 'startup orphaned DNS repair failed', err)
+      })
 
     try {
-      const status = await timePhase('recovery.autoconfig', () => autoconfig.getStatus())
-      const envApplied = status.find(t => t.id === 'env')?.applied
+      const envApplied = await timePhase('recovery.autoconfig', () => autoconfig.isApplied('env'))
       if (envApplied) {
         if (settingsStore.get().routingMode === 'soft' && settingsStore.get().connectionMode !== 'directVpn') {
           logEvent('info', 'app', 'preserving env autoconfig during Soft-mode crash recovery')
         } else {
           logEvent('info', 'app', 'rolling back env autoconfig (setx HTTP_PROXY) on crash recovery')
-          await autoconfig.rollback(['env'])
+          await rollbackSoftAutoconfigIfApplied('startup recovery')
         }
       }
     } catch (err) {
       logEvent('warn', 'app', 'env autoconfig rollback during crash recovery failed', err)
+      tunnelState.fault('unknown')
     }
 
     try {
@@ -1811,10 +1856,31 @@ async function performCrashRecovery(): Promise<void> {
     } catch { /* non-critical */ }
   } catch (err: any) {
     logEvent('warn', 'app', 'startup network recovery unconfirmed', err)
+    tunnelState.fault('unknown')
     void dialog.showMessageBox({ type: 'warning', title: 'Восстановление сети не подтверждено',
       message: 'Не удалось подтвердить завершение сетевого восстановления. Проверьте диагностику перед повторным подключением.',
       detail: err?.message || String(err), buttons: ['ОК'] })
       .catch(dialogErr => logEvent('warn', 'app', 'crash-recovery warning dialog failed', dialogErr))
+  }
+}
+
+async function adoptRetainedSoftProtection(): Promise<void> {
+  const settings = settingsStore.get()
+  if (settings.routingMode !== 'soft' || settings.connectionMode === 'directVpn') return
+  try {
+    if (await autoconfig.isApplied('env') && tunnelState.snapshot.state === 'disconnected') {
+      const result = await connectionLifecycle.start(async owner => {
+        // A backup proves a cleanup obligation, not that all proxy writes
+        // succeeded before the previous process exited. Reconcile under owner.
+        const proxy = await owner.wait(resolveProxyForTrayStart())
+        if (!proxy) return { success: false, error: 'Soft proxy unavailable' }
+        return startSoftProtectionEffects(owner, proxy.proxyAddr, proxy.proxyType)
+      }, { owner: 'recovery' })
+      if (!result.success) throw new Error('Retained Soft protection reconciliation failed')
+    }
+  } catch (error) {
+    tunnelState.fault('unknown')
+    logEvent('warn', 'app', 'retained Soft protection could not be confirmed', error)
   }
 }
 
@@ -1908,6 +1974,10 @@ app.whenReady().then(async () => {
   await performCrashRecovery().catch(err =>
     logEvent('warn', 'app', 'crash recovery failed', err)
   )
+
+  // A retained Soft setup is adopted only after strict env trust inspection and
+  // clean recovery; mere absence of a child process never proves protection.
+  await adoptRetainedSoftProtection()
 
   // Recovery gets priority. Warm the actual helper without caching network state.
   void helperStartup.then(() => warmElevatedPsHelper(() =>
@@ -2060,6 +2130,10 @@ app.whenReady().then(async () => {
     return startDirectVpnProtection()
   })
 
+  handleLogged('start-soft-protection', async (_e, proxyAddr: string, proxyType?: 'socks5' | 'http') => {
+    return startSoftProtection(proxyAddr, proxyType)
+  })
+
   handleLogged('stop-tun', async () => {
     return stopProtection()
   })
@@ -2081,7 +2155,7 @@ app.whenReady().then(async () => {
   })
 
   handleLogged('get-tun-status', async () => {
-    return tunController.getStatus()
+    return { ...tunController.getStatus(), lifecycle: tunnelState.snapshot }
   })
 
   handleLogged('get-traffic-stats', async () => {
@@ -2096,11 +2170,11 @@ app.whenReady().then(async () => {
   })
 
   handleLogged('apply-autoconfig', async (_e, targets: string[], proxyAddr: string, proxyType?: 'socks5' | 'http') => {
-    return autoconfig.apply(targets, proxyAddr, proxyType ?? settingsStore.get().proxyType)
+    return applyOwnedAutoconfig(targets, proxyAddr, proxyType)
   })
 
   handleLogged('rollback-autoconfig', async (_e, targets: string[]) => {
-    return autoconfig.rollback(targets)
+    return rollbackOwnedAutoconfig(targets)
   })
 
   handleLogged('get-autoconfig-status', async () => {
@@ -2684,7 +2758,6 @@ app.whenReady().then(async () => {
 
   tunController.onStatusChange((status: string) => {
     sendToMainWindow('tun-status-changed', status)
-    granularKillSwitch.setVpnConnected(status === 'running')
     const isRestarting = status.startsWith('restarting:')
     const isTerminal = status === 'stopped' || status === 'killswitch-active'
 

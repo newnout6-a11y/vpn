@@ -10,6 +10,9 @@ import { OWNED_RUNTIME_STATUS_QUERY_SCRIPT } from './recoveryPsProtocol'
 import ts from 'typescript'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ConnectionLifecycle } from './connectionLifecycle'
+import { TunnelStateMachine } from './tunnelStateMachine'
+
+const recoveryModel = () => new TunnelStateMachine(() => ({ running: false, pid: null, softApplied: false }))
 
 function body(file: string, name: string): string {
   const source = ts.createSourceFile(file, readFileSync(join(process.cwd(), 'src/main', file), 'utf8'), ts.ScriptTarget.Latest, true)
@@ -170,12 +173,12 @@ return {exit:onExit,settled:()=>Promise.all(startupCleanupTasks),pollCompensatin
 }
 
 function startupAdmissionHarness(stopCompletion: Promise<unknown> | null = null) {
-  const os = {stopCompletion,clearRestartTimers:vi.fn(() => {throw new Error('preparation failed')})}
-  return compile<{start: () => Promise<any>; state: () => {starting:boolean;completion:Promise<void>|null}}>(`
+  const os = {stopCompletion,notifyNativeStartup:vi.fn(),clearRestartTimers:vi.fn(() => {throw new Error('preparation failed')})}
+  return compile<{start: () => Promise<any>; state: () => {starting:boolean;completion:Promise<void>|null}; receipts: ReturnType<typeof vi.fn>}>(`
 let currentStatus={running:false},startInProgress=false,stopInProgress=false,transitionCancelRequested=false;
-let activeStartCompletion=null,activeStopCompletion=stopCompletion,activeStartAbortController=null,stopRequested=false,userInitiatedStop=false;
+let activeStartCompletion=null,activeStopCompletion=stopCompletion,activeStartAbortController=null,stopRequested=false,userInitiatedStop=false,nativeStartupGeneration=0;
 const controller={${body('tunController.ts','start')}};
-return {start:()=>controller.start('127.0.0.1:1080'),state:()=>({starting:startInProgress,completion:activeStartCompletion})};
+return {start:()=>controller.start('127.0.0.1:1080'),state:()=>({starting:startInProgress,completion:activeStartCompletion}),receipts:notifyNativeStartup};
 `,os)
 }
 
@@ -454,6 +457,9 @@ return ${body('index.ts', 'tunController.onStatusChange')};`, os)
     const h = startupAdmissionHarness()
     await expect(h.start()).rejects.toThrow('preparation failed')
     expect(h.state()).toEqual({starting:false,completion:null})
+    expect(h.receipts.mock.calls.map(([receipt]) => receipt)).toEqual([
+      { phase: 'begin', generation: 1 }, { phase: 'finished', generation: 1, success: false }
+    ])
     await expect(h.start()).rejects.toThrow('preparation failed')
   })
   it('retains startup exit compensation until a pending poll and adapter rollback finish', async () => {
@@ -888,21 +894,53 @@ describe('Xray startup phase measurements (AT-02-002 / AT-02-004)', () => {
 })
 
 describe('baseline recovery callers (AT-03-007)', () => {
+  it.each(['read denied', 'rollback denied', 'clean', 'retained Soft'] as const)('uses strict env evidence at startup: %s (AT-00-002/008)', async outcome => {
+    const deps = { tunnelState: recoveryModel(), process: { platform: 'win32' },
+      isOwnedTunRuntimeRunning: vi.fn(async () => false), recoverStaleBaseline: done(), recoverStaleKillSwitch: done(),
+      timePhase: async (_name: string, work: () => Promise<unknown>) => work(),
+      isPhysicalAdapterLockdownApplied: async () => false, repairOrphanedPhysicalAdapterDns: done(),
+      settingsStore: { get: () => ({ routingMode: outcome === 'retained Soft' ? 'soft' : 'hard' }) },
+      autoconfig: { isApplied: vi.fn(async () => { if (outcome === 'read denied') throw new Error('env unreadable'); return outcome !== 'clean' }) },
+      rollbackSoftAutoconfigIfApplied: vi.fn(async () => { if (outcome === 'rollback denied') throw new Error('env retained') }),
+      logEvent: noop(), dialog: { showMessageBox: vi.fn(async () => ({})) } }
+    await compile<() => Promise<void>>(`${body('index.ts', 'performCrashRecovery')}\nreturn performCrashRecovery;`, deps)()
+    expect(deps.autoconfig.isApplied).toHaveBeenCalledExactlyOnceWith('env')
+    expect(deps.rollbackSoftAutoconfigIfApplied).toHaveBeenCalledTimes(outcome === 'rollback denied' ? 1 : 0)
+    expect(deps.tunnelState.snapshot.state).toBe(outcome.endsWith('denied') ? 'unknown' : 'disconnected')
+  })
+
+  it.each(['trusted', 'untrusted', 'recovery failed', 'absent', 'apply failed', 'missing proxy', 'resolver rejected'] as const)('adopts retained Soft only after real owned reconciliation: %s (AT-00-002/008)', async outcome => {
+    const h = softStartupHarness(true)
+    if (outcome === 'untrusted') h.autoconfig.isApplied.mockRejectedValueOnce(new Error('receipt unreadable'))
+    if (outcome === 'recovery failed') h.tunnelState.fault('unknown')
+    if (outcome === 'absent') h.autoconfig.isApplied.mockResolvedValueOnce(false)
+    if (outcome === 'apply failed') h.autoconfig.apply.mockResolvedValueOnce({ env: false })
+    if (outcome === 'missing proxy') h.resolveProxyForTrayStart.mockResolvedValueOnce(null)
+    if (outcome === 'resolver rejected') h.resolveProxyForTrayStart.mockRejectedValueOnce(new Error('detector unavailable'))
+    await h.adopt()
+    expect(h.tunnelState.snapshot).toMatchObject(outcome === 'trusted'
+      ? { state: 'connected', mode: 'soft', pid: null, operation: { owner: 'recovery', status: 'success' } }
+      : { state: outcome === 'absent' ? 'disconnected' : 'unknown', mode: null })
+    expect(h.protected()).toBe(outcome === 'trusted')
+    expect(h.autoconfig.apply).toHaveBeenCalledTimes(['trusted', 'apply failed'].includes(outcome) ? 1 : 0)
+    if (outcome === 'trusted') expect(h.autoconfig.apply).toHaveBeenCalledWith(['env'], '127.0.0.1:8080', 'http')
+  })
   it.each(['pending', 'rejected'] as const)('surfaces partial adapter recovery and continues when its warning is %s (AT-03-003c)', async outcome => {
     let dismiss!: (value: {}) => void
     const notification = new Promise<{}>(resolve => { dismiss = resolve })
-    const deps = { process: { platform: 'win32' }, isOwnedTunRuntimeRunning: vi.fn(async () => false),
+    const deps = { tunnelState: recoveryModel(), process: { platform: 'win32' }, isOwnedTunRuntimeRunning: vi.fn(async () => false),
       timePhase: async (_name: string, work: () => Promise<unknown>) => work(), recoverStaleBaseline: done(), recoverStaleKillSwitch: done(),
       isPhysicalAdapterLockdownApplied: vi.fn(async () => true),
       rollbackPhysicalAdapterLockdownIfApplied: vi.fn(async () => ({ rolledBack: false, warnings: ['adapter entry 0: invalid snapshot; skipped'] })),
-      repairOrphanedPhysicalAdapterDns: done(), autoconfig: { getStatus: vi.fn(async () => []) }, logEvent: noop(),
+      repairOrphanedPhysicalAdapterDns: done(), autoconfig: { isApplied: vi.fn(async () => false) }, logEvent: noop(),
       dialog: { showMessageBox: vi.fn(() => outcome === 'pending' ? notification : Promise.reject(new Error('dialog unavailable'))) } }
     const recover = compile<() => Promise<void>>(`${body('index.ts', 'performCrashRecovery')}\nreturn performCrashRecovery;`, deps)
     try {
       await recover()
       expect(deps.isPhysicalAdapterLockdownApplied).toHaveBeenCalledWith(true)
       expect(deps.repairOrphanedPhysicalAdapterDns).toHaveBeenCalledOnce()
-      expect(deps.autoconfig.getStatus).toHaveBeenCalledOnce()
+      expect(deps.tunnelState.snapshot.state).toBe('unknown')
+      expect(deps.autoconfig.isApplied).toHaveBeenCalledOnce()
       expect(deps.dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({
         title: 'Восстановление адаптеров не завершено', detail: expect.stringContaining('adapter entry 0: invalid snapshot; skipped')
       }))
@@ -939,23 +977,24 @@ ${OWNED_RUNTIME_STATUS_QUERY_SCRIPT}`
           process: { platform: 'win32' }, readManifestForRecovery: async () => ({ manifest: { strictMode: false } }),
           strictRecoveryRequired: async () => false, disableKillSwitchUnlocked: disable, logEvent
         })
-      const deps = { process: { platform: 'win32' }, isOwnedTunRuntimeRunning, recoverStaleKillSwitch, logEvent,
+      const deps = { tunnelState: recoveryModel(), process: { platform: 'win32' }, isOwnedTunRuntimeRunning, recoverStaleKillSwitch, logEvent,
         timePhase: async (_name: string, work: () => Promise<unknown>) => work(), recoverStaleBaseline: done(),
         isPhysicalAdapterLockdownApplied: async () => true, rollbackPhysicalAdapterLockdownIfApplied: vi.fn(async () => ({ rolledBack: true })), repairOrphanedPhysicalAdapterDns: done(),
-        autoconfig: { getStatus: async () => [{ id: 'env', applied: true }], rollback: done() },
+        autoconfig: { isApplied: async () => true }, rollbackSoftAutoconfigIfApplied: done(),
         settingsStore: { get: () => ({ routingMode: 'hard', connectionMode: 'directVpn' }) }, dialog: { showMessageBox: vi.fn(async () => ({})) } }
       const recover = compile<() => Promise<void>>(`${body('index.ts', 'performCrashRecovery')}\nreturn performCrashRecovery;`, deps)
       await recover()
-      for (const cleanup of [disable, deps.rollbackPhysicalAdapterLockdownIfApplied, deps.repairOrphanedPhysicalAdapterDns, deps.autoconfig.rollback]) {
+      for (const cleanup of [disable, deps.rollbackPhysicalAdapterLockdownIfApplied, deps.repairOrphanedPhysicalAdapterDns, deps.rollbackSoftAutoconfigIfApplied]) {
         expect(cleanup).toHaveBeenCalledTimes(outcome === 'absent' || outcome === 'unknown at adapter' && cleanup === disable ? 1 : 0)
       }
+      expect(deps.tunnelState.snapshot.state).toBe(outcome === 'absent' ? 'disconnected' : 'unknown')
       expect(deps.dialog.showMessageBox).toHaveBeenCalledTimes(['mixed', 'unknown', 'unknown at firewall', 'unknown at adapter'].includes(outcome) ? 1 : 0)
     })
   it.each(['pending', 'rejected'])('continues startup recovery when the warning dialog is %s (AT-03-003/007)', async outcome => {
     let dismiss!: (value: {}) => void
     const notification = new Promise<{}>(resolve => { dismiss = resolve })
     const dialogError = new Error('native warning unavailable')
-    const deps = { process: { platform: 'win32' }, isBaselineApplied: vi.fn(async () => true),
+    const deps = { tunnelState: recoveryModel(), process: { platform: 'win32' }, isBaselineApplied: vi.fn(async () => true),
       isOwnedTunRuntimeRunning: vi.fn(async () => false),
       rollbackTunNetworkBaselineOrThrow: vi.fn(async () => { throw new Error('partial baseline rollback') }),
       dialog: { showMessageBox: vi.fn(() => outcome === 'pending' ? notification : Promise.reject(dialogError)) }, logEvent: noop() }
@@ -966,13 +1005,14 @@ ${OWNED_RUNTIME_STATUS_QUERY_SCRIPT}`
     try {
       await vi.waitFor(() => expect(status).toBe('completed'), { timeout: 500 })
       expect(nextRecovery).toHaveBeenCalledOnce()
+      expect(deps.tunnelState.snapshot.state).toBe('unknown')
       expect(deps.dialog.showMessageBox).toHaveBeenCalledOnce()
       if (outcome === 'rejected') expect(deps.logEvent).toHaveBeenCalledWith('warn', 'app', 'crash-recovery warning dialog failed', dialogError)
     } finally { dismiss({}); await recovery }
   })
   it.each(['failed', 'restored', 'live runtime', 'unknown runtime', 'untrusted baseline', 'no baseline'])('startup recovery surfaces %s before a renderer exists', async outcome => {
     const recoveryError = new Error('environment/HTTP_PROXY: access denied. Повторите восстановление сети.')
-    const deps = { process: { platform: 'win32' }, isBaselineApplied: vi.fn(async () => {
+    const deps = { tunnelState: recoveryModel(), process: { platform: 'win32' }, isBaselineApplied: vi.fn(async () => {
         if (outcome === 'untrusted baseline') throw new Error('untrusted storage')
         return outcome !== 'no baseline'
       }),
@@ -982,6 +1022,7 @@ ${OWNED_RUNTIME_STATUS_QUERY_SCRIPT}`
     const recover = compile<() => Promise<void>>(`${body('index.ts', 'recoverStaleBaseline')}\nreturn recoverStaleBaseline;`, deps)
     await recover()
     expect(deps.isBaselineApplied).toHaveBeenCalledWith(true)
+    expect(deps.tunnelState.snapshot.state).toBe(['failed', 'unknown runtime', 'untrusted baseline'].includes(outcome) ? 'unknown' : 'disconnected')
     expect(deps.rollbackTunNetworkBaselineOrThrow).toHaveBeenCalledTimes(['failed', 'restored'].includes(outcome) ? 1 : 0)
     expect(deps.isOwnedTunRuntimeRunning).toHaveBeenCalledTimes(['untrusted baseline', 'no baseline'].includes(outcome) ? 0 : 1)
     if (['failed', 'restored'].includes(outcome)) {
@@ -1016,33 +1057,100 @@ return onExit;`, deps)
   })
 })
 
-function softStartupHarness() {
-  let applied = false
+function softStartupHarness(retained = false) {
+  let applied = retained
+  let readProtection = () => false
+  const tunnelState = new TunnelStateMachine(() => ({ running: false, pid: null, softApplied: readProtection() }))
   const os = {
     ...mainHarness('stopProtection'),
-    settingsStore: { get: () => ({ proxyType: 'http' }) },
+    tunnelState,
+    connectionLifecycle: new ConnectionLifecycle(() => {}, undefined, undefined, tunnelState),
+    settingsStore: { get: () => ({ proxyType: 'http', routingMode: 'soft', connectionMode: 'localProxy' }) },
+    resolveProxyForTrayStart: vi.fn(async (): Promise<{ proxyAddr: string; proxyType: 'http' } | null> => ({ proxyAddr: '127.0.0.1:8080', proxyType: 'http' })),
     tunController: { getStatus: () => ({ running: false }), stop: vi.fn(async () => ({ success: true })) },
     autoconfig: {
-      apply: vi.fn(async () => { applied = true; return { env: true } }),
+      isApplied: vi.fn(async () => applied),
+      apply: vi.fn(async (targets: string[]) => { if (targets.includes('env')) applied = true; return Object.fromEntries(targets.map(target => [target, true])) }),
+      rollback: vi.fn(async (targets: string[]) => Object.fromEntries(targets.map(target => [target, true]))),
       rollbackApplied: vi.fn(async () => { const previous = applied; applied = false; return previous })
     },
     recordStartFailure: noop(), sendToMainWindow: noop()
   }
   // Load the actual cleanup helper as well, rather than the generic stop mock.
   const { rollbackSoftAutoconfigIfApplied: _stub, ...dependencies } = os
-  const control = compile<{ start: () => Promise<any>; stop: () => Promise<any> }>(`
-let adaptiveVerificationGeneration=0,activeAdaptiveContext=null,currentSession=null,stopInProgress=false;
+  const control = compile<{ start: (proxyAddr?: string, proxyType?: 'http' | 'socks5') => Promise<any>; stop: () => Promise<any>; protected: () => boolean; adopt: () => Promise<void>;
+    apply: (targets: string[]) => Promise<Record<string, boolean>>; rollback: (targets: string[]) => Promise<Record<string, boolean>> }>(`
+let adaptiveVerificationGeneration=0,activeAdaptiveContext=null,currentSession=null,stopInProgress=false,softProtectionApplied=false;
 ${body('index.ts', 'rollbackSoftAutoconfigIfApplied')}
 ${body('index.ts', 'startSoftProtectionEffects')}
 ${body('index.ts', 'startSoftProtection')}
 ${body('index.ts', 'stopProtectionEffects')}
 ${body('index.ts', 'stopProtection')}
-return {start:()=>startSoftProtection('127.0.0.1:8080','http'),stop:stopProtection};
+${body('index.ts', 'applyOwnedAutoconfig')}
+${body('index.ts', 'rollbackOwnedAutoconfig')}
+${body('index.ts', 'adoptRetainedSoftProtection')}
+return {start:(addr='127.0.0.1:8080',type='http')=>startSoftProtection(addr,type),stop:stopProtection,protected:()=>softProtectionApplied,adopt:adoptRetainedSoftProtection,
+apply:targets=>applyOwnedAutoconfig(targets,'127.0.0.1:8080','http'),rollback:rollbackOwnedAutoconfig};
 `, dependencies)
+  readProtection = control.protected
   return { ...dependencies, ...control }
 }
 
 describe('owned Soft startup (AT-00-003/007 subset)', () => {
+  it('reconciles changed address and protocol while Soft remains connected', async () => {
+    const h = softStartupHarness()
+    expect(await h.start()).toMatchObject({ success: true })
+    expect(await h.start('127.0.0.1:10808', 'socks5')).toMatchObject({ success: true })
+    expect(h.autoconfig.apply).toHaveBeenLastCalledWith(['env'], '127.0.0.1:10808', 'socks5')
+    expect(h.tunnelState.snapshot).toMatchObject({ state: 'connected', mode: 'soft', transition: null })
+    expect(h.tunController.stop).not.toHaveBeenCalled()
+    expect(h.autoconfig.rollbackApplied).not.toHaveBeenCalled()
+  })
+  it('does not publish success for a failed Soft refresh', async () => {
+    const h = softStartupHarness()
+    await h.start()
+    h.autoconfig.apply.mockResolvedValueOnce({ env: false })
+    expect(await h.start('127.0.0.1:10808', 'socks5')).toMatchObject({ success: false })
+    expect(h.tunnelState.snapshot).toMatchObject({ state: 'error', transition: null, cleanupRequired: true })
+  })
+  it('keeps a cancelled Soft refresh owned until drain, then cleans it without publishing success', async () => {
+    const h = softStartupHarness()
+    await h.start()
+    vi.clearAllMocks()
+    let release!: (value: { env: boolean }) => void
+    h.autoconfig.apply.mockImplementationOnce(() => new Promise(done => { release = done }))
+    const refresh = h.start('127.0.0.1:10808', 'socks5')
+    expect(h.tunnelState.snapshot).toMatchObject({ transition: 'connecting' })
+    const duplicate = await h.start()
+    expect(duplicate).toMatchObject({ success: false, category: 'conflict' })
+    const stopped = h.stop()
+    expect(h.autoconfig.rollbackApplied).not.toHaveBeenCalled()
+    release({ env: true })
+    expect(await refresh).toMatchObject({ success: false, category: 'cancelled' })
+    expect(await stopped).toMatchObject({ success: true })
+    expect(h.tunnelState.snapshot).toMatchObject({ state: 'disconnected', transition: null })
+    expect(h.sendToMainWindow).not.toHaveBeenCalledWith('soft-status-changed', true)
+  })
+  it('does not refresh Soft over a native tunnel', async () => {
+    const h = softStartupHarness()
+    vi.spyOn(h.tunnelState, 'snapshot', 'get').mockReturnValue({ ...h.tunnelState.snapshot, state: 'connected', mode: 'tun' })
+    vi.spyOn(h.tunnelState, 'canStart').mockReturnValue(false)
+    expect(await h.start('127.0.0.1:10808', 'socks5')).toMatchObject({ success: false, category: 'conflict' })
+    expect(h.autoconfig.apply).not.toHaveBeenCalled()
+  })
+  it('routes legacy env apply and rollback through real main effects and the canonical FSM', async () => {
+    const h = softStartupHarness()
+    expect(await h.apply(['git', 'env'])).toEqual({ git: true, env: true })
+    expect(h.tunnelState.snapshot).toMatchObject({ state: 'connected', mode: 'soft' })
+    expect(h.autoconfig.apply.mock.calls.map(([targets]) => targets)).toEqual([['git'], ['env']])
+    expect(await h.apply(['env'])).toEqual({ env: true })
+    expect(h.tunnelState.snapshot.state).toBe('connected')
+    h.autoconfig.rollbackApplied.mockRejectedValueOnce(new Error('env denied'))
+    expect(await h.rollback(['env'])).toEqual({ env: false })
+    expect(h.tunnelState.snapshot).toMatchObject({ state: 'error', cleanupRequired: true })
+    expect(await h.rollback(['env', 'git'])).toEqual({ git: true, env: true })
+    expect(h.tunnelState.snapshot).toMatchObject({ state: 'disconnected', mode: null })
+  })
   it('waits for cancelled env apply, then rolls it back without publishing protection', async () => {
     const h = softStartupHarness()
     let release!: (result: { env: boolean }) => void

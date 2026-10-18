@@ -2940,3 +2940,199 @@ CI/review нового SHA проверяются отдельно после pu
   (.tmp/wp0-qodo57-electron.log); `node scripts/test-wp1-native.mjs --ipc-only`
   — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-qodo57-csp.log). Native IPC/CSP subsets
   не заменяют полную FSM, ресурсную и сетевую приёмку WP-0/WP-2.
+
+
+### PR #57 слит; WP-0 — интегрированная FSM и проекция состояния
+
+- REST повторно подтвердил merge #57: eaa6db230f0a4245699795edd4c0c92aa6aa393f;
+  head b659f83b42f971271f72a0abc211aac2cd7f3e67. CI run 39146042045 success;
+  Qodo run 1540108 completed на этом head, четыре findings implemented.
+  Открытых PR после слияния не осталось. Новая ветка codex/wp0-tunnel-fsm
+  основана на vpn/main с этим merge; старые untracked артефакты не включаются.
+- Добавлена используемая production TunnelStateMachine: стабильный state отдельно
+  от transition, processState/PID, proxyStatus, health и mode. ConnectionLifecycle
+  подтверждает start/stop по evidence; повторный Connect отклоняется до эффектов.
+  Raw running и исчезновение competing adapter не очищают fault и не подтверждают
+  connected. Ошибка recovery до createWindow видна как unknown в первом snapshot.
+- Startup receipts native controller имеют generation fence, включая failure при
+  неожиданном throw. Старый receipt после stop или во время нового restart
+  отвергается без мутации. Это ещё не общая registry фоновых restart.
+- Soft UI использует owned start-soft-protection и единый stop-tun. Boot recovery
+  использует strict env evidence/rollback, retained Soft принимает recovery owner
+  только при чистом восстановлении. Main snapshot обновляет tray и UI атомарно;
+  renderer отбрасывает старые revision и не доверяет legacy success setters.
+- Regression harness исполняет настоящие recovery/startup effect bodies с real
+  model или observed receipt. Новые зависимости объявлены явно, Soft flag локален;
+  старые call-order/resource assertions сохранены. Первый текущий focused run:
+  20 failed / 185 passed, exit 1 (.tmp/wp0-fsm-focused-current.log): harness не
+  предоставлял tunnelState/native generation и inline boot adoption deps.
+  После обновления harness — 205 passed; новые boot/generation/tray/tour/race
+  regressions — 217 passed / 5 files, 24.10 s, exit 0
+  (.tmp/wp0-fsm-focused-final.log).
+- Generated tests: 4096 tours connect/disconnect/crash/retry глубиной 6, fake
+  PID/TUN ledger; 200 commands / 10 async workers, seed 0x5eed003, typed losers,
+  operation start/terminal pairing и нулевые fake resources после final stop.
+  Полный алфавит timeout/cancel, общая durable history и Windows PID/L3 не приняты.
+- Первый полный `npm.cmd test`: 3987 passed / 5 skipped / 0 failed,
+  252 files passed / 2 skipped, 183.37 s, exit 0 (.tmp/wp0-fsm-full.log).
+  `npm.cmd run typecheck`: 158 channels / 0 public any, exit 0
+  (.tmp/wp0-fsm-typecheck.log). Coverage AC 927/927, F 210/210, exit 0 —
+  трассировка, не исполнение AT. `git diff --check` — exit 0.
+- `npm.cmd run build` — exit 0 (.tmp/wp0-fsm-build.log).
+  `node scripts/test-electron-runtime.mjs` — ELECTRON_SMOKE_PASS, exit 0
+  (.tmp/wp0-fsm-electron.log), включая real FSM/lane через production preload,
+  ранний pending running, Soft validation/stop, snapshot event и disposer (fake OS).
+  `node scripts/test-wp1-native.mjs --ipc-only` — WP1_NATIVE_PASS, exit 0
+  (.tmp/wp0-fsm-csp.log). Нативная сетевая FSM-приёмка этим не подменяется.
+- Playwright CLI: production Dashboard + управляемая FSM в .tmp/wp0-fsm-ui;
+  light connecting/connected и dark unknown/blocked/reconnect PNG просмотрены.
+  Start/confirm/cleanup меняют состояние, pending не показывает активную защиту.
+  HMR connection refused после остановки fixture server не считается VPN failure;
+  визуальная/a11y/responsive приёмка всей матрицы не заявляется.
+- Финальная проверка выявила дополнительный invariant: disconnected с живым
+  процессом и connected с потерянным evidence дают unknown; временный отказ
+  getter во время startup остаётся sticky после восстановления getter. Добавлены
+  регрессии; окончательные проверки после этой правки записываются ниже.
+- Окончательный `npm.cmd test` после evidence regressions: **3989 passed /
+  5 skipped / 0 failed**, 252 files passed / 2 skipped, 156.43 s, exit 0
+  (.tmp/wp0-fsm-verified-full.log). Expected RootErrorBoundary stderr сохранён;
+  unhandled errors отсутствуют. Повторный `npm.cmd run typecheck` — exit 0,
+  158 channels / 0 public any (.tmp/wp0-fsm-typecheck.log). Coverage и diff check
+  повторно exit 0. WP-0 и общий goal остаются в работе.
+- Повторные build/Electron/native IPC-CSP на окончательном коде — exit 0: .tmp/wp0-fsm-final-build.log, .tmp/wp0-fsm-final-electron.log, .tmp/wp0-fsm-final-csp.log.
+
+
+### PR #58 — первый Qodo: пять подтверждённых интеграционных дефектов
+
+- Head 27043513fd54e5463e287bcb28fdc96397c9ae4b опубликован в #58.
+  CI run 39149486195 success на этом SHA. Qodo run 1540362 completed:
+  три action_required и два remediation_recommended. Слияние не выполнялось.
+- Критический gap fake evidence: успешный native poll оставлял pid:null.
+  PID теперь читается из Win32_Process с точным сравнением ExecutablePath
+  и требованием одного процесса; чужой путь, prefix collision, несколько
+  процессов и непрочитанный путь отклоняются. Production poll передаёт этот
+  PID в status, затем real FSM/lane подтверждает connected. Отмена/exit/PID
+  query failure не публикуют running, failure выполняет прежнюю компенсацию.
+  Если main confirmation всё же не получено, lane вызывает cleanup вместо
+  оставления startup runtime без владельца. Общий PID Supervisor — ещё WP-2.
+- Старые apply-autoconfig/rollback-autoconfig отделяют env от прочих targets:
+  env проходит owned Soft start/stop, возвращая false при конфликте/отказе.
+  Прямой rollback env под активным native connection отклоняется; повторный
+  apply не изменяет уже подключённую защиту. Renderer bootstrap использует
+  owned API, не меняет env за спиной FSM и не очищает unknown; сохранённый
+  подтверждённый Soft не запускает повторно.
+- App после setTunnelSnapshot читает новый Zustand state. Реальные callbacks
+  прогоняются вместе с real store/model/lane: IP/leak принимаются после connect,
+  подавляются во время stop, старые revision не меняют guard. Это закрывает
+  gap между component frames и настоящим App listener wiring.
+- Tray сохраняет confirmed firewall lock и leak warning при disconnected.
+  Failed adaptive fallback после preserveNetworkProtection stop устанавливает
+  unknown без бесконечного reconnecting; throw stop также завершает transition.
+  Полная acceptance матрица всех фоновых owner callbacks остаётся открытой.
+- Первый focused после правок: 205 passed / 5 files, 23.21 s, exit 0
+  (.tmp/wp0-qodo58-focused.log). Затем добавлены исполняемые PowerShell predicate
+  fixtures для PID, main confirmation compensation и stop-throw regression.
+  `npm.cmd run typecheck` — exit 0, 158 channels / 0 public any
+  (.tmp/wp0-qodo58-typecheck.log). Финальные результаты записываются ниже.
+- Финальный focused `npm.cmd test -- src/main/tunControllerStartup.test.ts src/main/adaptiveFallbackTransition.test.ts src/main/lifecycleCleanup.test.ts src/main/trayState.test.ts src/main/tunnelStateMachine.test.ts src/renderer/App.lifecycle.test.ts`:
+  229 passed / 6 files, 26.27 s, exit 0 (.tmp/wp0-qodo58-focused-final.log).
+- Первый полный после Qodo fixes: 1 failed / 4005 passed / 5 skipped,
+  178.11 s, exit 1 (.tmp/wp0-qodo58-full.log). Единственный отказ — старый
+  source assertion auditFixesRegression требовал удалённый прямой env apply.
+  Заменён на owned Soft startup и запрет raw env apply; реальные App bootstrap
+  и env owner paths уже покрыты исполняемыми регрессиями, не только source check.
+  Повторный полный suite запущен на окончательном runtime/test коде.
+- Окончательный `npm.cmd test` на замороженных runtime/tests: **4006 passed /
+  5 skipped / 0 failed**, 253 files passed / 2 skipped, 176.60 s, exit 0
+  (.tmp/wp0-qodo58-verified-full.log). Typecheck 158/0 any, coverage AC 927/927,
+  F 210/210 и diff check — повторно exit 0. Traceability не подменяет AT.
+- После пяти Qodo fixes: npm.cmd run build, node scripts/test-electron-runtime.mjs и node scripts/test-wp1-native.mjs --ipc-only — exit 0 (.tmp/wp0-qodo58-build.log, .tmp/wp0-qodo58-electron.log, .tmp/wp0-qodo58-csp.log).
+
+### PR #58 — повторный Qodo: согласование Soft-прокси после renderer reload
+
+- Владелец разрешил сливать прошедшие проверки PR; прежний запрет отменён.
+  На cb4b134 CI run 39150959411 success (все три jobs). Qodo run 1540463
+  completed на том же SHA: пять прежних findings implemented, новый
+  action_required 86fe43a3-e9fb-43a9-8f9e-cd482b8879b4. Слияние отложено до
+  исправления: retained Soft сохранял старый env после смены proxy settings.
+- App bootstrap теперь передаёт выбранные адрес/протокол owned Soft API и для
+  retained connected/soft. Lane разрешает такой refresh только без transition,
+  сохраняя exclusivity/cancellation/deadline. Обычный повторный connect и refresh
+  поверх native connection отклоняются без эффектов. Env apply сохраняет original
+  backup; stop/restart TUN не требуется. Ошибка refresh не публикует успех.
+- До runtime fix `npm.cmd test -- src/main/lifecycleCleanup.test.ts src/renderer/App.lifecycle.test.ts`:
+  7 failed / 166 passed, 26.35 s, exit 1 (.tmp/wp0-qodo58-soft-before.log).
+  После: `npm.cmd test -- src/main/lifecycleCleanup.test.ts src/main/tunnelStateMachine.test.ts src/renderer/App.lifecycle.test.ts`:
+  193 passed / 3 files, 26.52 s, exit 0 (.tmp/wp0-qodo58-soft-after.log).
+  Дополнительно env regression сверяет все proxy values после refresh и rollback
+  к original values; actual PowerShell/Windows environment delivery не заявляется.
+- `npm.cmd run typecheck` — exit 0, 158 channels / 0 public any
+  (.tmp/wp0-qodo58-soft-typecheck.log). Coverage: AC 927/927, F 210/210, exit 0;
+  `git diff --check` — exit 0. Полный suite и native smoke фиксируются ниже.
+- Окончательный `npm.cmd test`: **4014 passed / 5 skipped / 0 failed**,
+  253 files passed / 2 skipped, 178.11 s, exit 0
+  (.tmp/wp0-qodo58-soft-full.log). Expected stderr RootErrorBoundary не означает
+  отказ suite; unhandled errors отсутствуют. После suite `npm.cmd run build` —
+  exit 0 (.tmp/wp0-qodo58-soft-build.log); `node scripts/test-electron-runtime.mjs`
+  — ELECTRON_SMOKE_PASS, exit 0 (.tmp/wp0-qodo58-soft-electron.log);
+  `node scripts/test-wp1-native.mjs --ipc-only` — WP1_NATIVE_PASS, exit 0
+  (.tmp/wp0-qodo58-soft-csp.log). Это локальные subsets с fake OS, не L3 PASS.
+
+### PR #58 — третий Qodo: компенсация обновления действующей Soft-защиты
+
+- Head 67fc70c: CI run 39151813076 success. Qodo run 1540530 completed на том
+  же SHA: шесть прежних findings implemented; новый action_required
+  8dff805e-714f-4aa6-a8e2-38c784fb9067. Частичный отказ env refresh выполнял
+  eventual-stop rollback к pre-Soft baseline, снимая прежний рабочий прокси.
+  Слияние не выполнялось; ручных запросов/изменений finding status нет.
+- Refresh сначала строго читает текущие env values в отдельный snapshot.
+  Неизвестное значение запрещает mutation. При apply failure snapshot независимо
+  восстанавливается по четырём ключам с read-back, даже если первая команда
+  вернула ошибку после записи. Durable original backup и pending marker остаются
+  для штатного stop. При ошибке компенсации новые настройки не объявляются
+  применёнными, lane остаётся в error с cleanupRequired. Значения не логируются.
+- До fix `npm.cmd test -- src/main/autoconfig/env.test.ts`: 6 failed / 88 passed,
+  376 ms, exit 1 (.tmp/wp0-qodo58-compensation-before.log). После
+  `npm.cmd test -- src/main/autoconfig/env.test.ts src/main/autoconfig/index.test.ts src/main/lifecycleCleanup.test.ts`:
+  274 passed / 3 files, 26.15 s, exit 0 (.tmp/wp0-qodo58-compensation-after.log).
+  Проверены четыре failed-after-write точки, отказ snapshot read, отказ
+  compensation и последующий baseline rollback; OS boundaries подменены.
+- `npm.cmd run typecheck`: exit 0, 158 channels / 0 public any
+  (.tmp/wp0-qodo58-compensation-typecheck.log). Coverage AC 927/927, F 210/210,
+  diff check — exit 0. Финальные suite/build/native результаты записываются ниже.
+- Финальный `npm.cmd test`: **4020 passed / 5 skipped / 0 failed**,
+  253 files passed / 2 skipped, 185.51 s, exit 0
+  (.tmp/wp0-qodo58-compensation-full.log). `npm.cmd run build` — exit 0
+  (.tmp/wp0-qodo58-compensation-build.log). `node scripts/test-electron-runtime.mjs`
+  — ELECTRON_SMOKE_PASS, exit 0 (.tmp/wp0-qodo58-compensation-electron.log);
+  `node scripts/test-wp1-native.mjs --ipc-only` — WP1_NATIVE_PASS, exit 0
+  (.tmp/wp0-qodo58-compensation-csp.log). Traceability/smoke не подменяют L3.
+
+### PR #58 — собственная проверка boot adoption Soft
+
+- Qodo run 1540585 completed на 470d679: все семь прежних findings implemented,
+  новых нет. Собственная проверка обнаружила дополнительный дефект текущего PR:
+  startup adoption приравнивала наличие env-backup к успешному прежнему apply.
+  Сохранившийся после failed/partial apply receipt давал ложный connected.
+- Recovery owner теперь разрешает выбранный proxy и выполняет actual Soft effects
+  перед connected. Missing proxy, detector/apply/read failure дают unknown;
+  существующий recovery fault не очищается. Backup доказывает cleanup obligation,
+  а не активность env. Регрессии исполняют actual adoption + actual Soft effects
+  с production lane/FSM и fake OS; исходные trusted/untrusted/absent/fault cases
+  сохранены и дополнены apply/resolver failure.
+- До fix `npm.cmd test -- src/main/lifecycleCleanup.test.ts -t 'adopts retained Soft only'`:
+  4 failed / 3 passed / 163 skipped, 2.92 s, exit 1
+  (.tmp/wp0-qodo58-adoption-before.log). После
+  `npm.cmd test -- src/main/lifecycleCleanup.test.ts src/main/autoconfig/env.test.ts src/main/autoconfig/index.test.ts src/renderer/App.lifecycle.test.ts`:
+  284 passed / 4 files, 29.71 s, exit 0 (.tmp/wp0-qodo58-adoption-after.log).
+- `npm.cmd run typecheck` — exit 0, 158 channels / 0 public any
+  (.tmp/wp0-qodo58-adoption-typecheck.log). Coverage AC 927/927, F 210/210 и
+  diff check — exit 0; дальнейшие окончательные проверки — ниже.
+- На 470d679 CI run 39152571062 success; слияние не выполнялось из-за
+  дополнительно найденного boot adoption defect. Финальный `npm.cmd test`
+  после исправления: **4023 passed / 5 skipped / 0 failed**, 253 files passed /
+  2 skipped, 208.83 s, exit 0 (.tmp/wp0-qodo58-adoption-full.log).
+  `npm.cmd run build` — exit 0 (.tmp/wp0-qodo58-adoption-build.log);
+  `node scripts/test-electron-runtime.mjs` — ELECTRON_SMOKE_PASS, exit 0
+  (.tmp/wp0-qodo58-adoption-electron.log); `node scripts/test-wp1-native.mjs --ipc-only`
+  — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-qodo58-adoption-csp.log).

@@ -57,6 +57,16 @@ const scheduleIdle = (fn: () => void) => {
   }
 }
 
+async function restoreSoftStartup(proxy: { host: string; port: number; type: 'socks5' | 'http' }): Promise<void> {
+  const { lifecycle } = await window.electronAPI.getTunStatus()
+  const retainedSoft = lifecycle.state === 'connected' && lifecycle.mode === 'soft'
+  if ((!retainedSoft && lifecycle.state !== 'disconnected') || lifecycle.transition) throw new Error('Сначала восстановите состояние защиты')
+  // Reconcile the selected endpoint even after renderer reload: retained Soft
+  // can still carry the previous settings. Main owns admission and env backup.
+  const result = await window.electronAPI.startSoftProtection(`${proxy.host}:${proxy.port}`, proxy.type)
+  if (!result.success) throw new Error(result.error || 'Soft startup failed')
+}
+
 export default function App() {
   const [page, setPage] = useState<Page>('dashboard')
   const [visitedPages, setVisitedPages] = useState<Set<Page>>(() => new Set(['dashboard']))
@@ -126,9 +136,22 @@ export default function App() {
       }
     })
 
+    const unsubState = window.electronAPI.onTunnelStateChanged?.((snapshot) => {
+      tunEventSeqRef.current += 1
+      const store = useAppStore.getState()
+      store.setTunnelSnapshot(snapshot)
+      stoppingNowRef.current = Boolean(useAppStore.getState().tunnelSnapshot?.transition)
+      void store.refreshFirewallKillSwitchStatus()
+    })
+
     const unsubTun = window.electronAPI.onTunStatusChanged((status) => {
       tunEventSeqRef.current += 1
       const store = useAppStore.getState()
+      // Canonical snapshots own protection and progress; legacy events remain diagnostic.
+      if (store.tunnelSnapshot) {
+        addLog('info', `Статус процесса TUN: ${status}`)
+        return
+      }
       // 'proxy-down' keeps the TUN up while upstream is unreachable.
       // 'killswitch-active' is a cleanup obligation after runtime failure;
       // only the separate fresh status read can verify firewall configuration.
@@ -243,6 +266,7 @@ export default function App() {
 
     const unsubSoft = window.electronAPI.onSoftStatusChanged?.((connected) => {
       const store = useAppStore.getState()
+      if (store.tunnelSnapshot) return
       store.setMode(connected ? 'soft' : 'off')
       store.setTunRunning(false)
       if (!connected) store.setVpnIp(null)
@@ -332,6 +356,7 @@ export default function App() {
     return () => {
       unsubIp()
       unsubTun()
+      unsubState?.()
       unsubSoft?.()
       unsubTraffic()
       unsubLeak()
@@ -369,12 +394,7 @@ export default function App() {
         store.setProxy(manualProxy)
         addLog('info', `Используется ручной прокси: ${manualProxy.host}:${manualProxy.port} (${manualProxy.type})`)
         if (settings.routingMode === 'soft') {
-          softStartupPromise = window.electronAPI.applyAutoconfig(['env'], `${manualProxy.host}:${manualProxy.port}`, manualProxy.type)
-            .then(results => {
-              const liveStore = useAppStore.getState()
-              liveStore.setMode(results?.env ? 'soft' : 'off')
-              liveStore.setTunRunning(false)
-            })
+          softStartupPromise = restoreSoftStartup(manualProxy)
             .catch((err: any) => addLog('warn', `Не удалось восстановить Soft-режим: ${err.message}`))
         }
       } else {
@@ -386,11 +406,7 @@ export default function App() {
                 return
               }
               useAppStore.getState().setProxy(proxy)
-              return window.electronAPI.applyAutoconfig(['env'], `${proxy.host}:${proxy.port}`, proxy.type).then(results => {
-                const liveStore = useAppStore.getState()
-                liveStore.setMode(results?.env ? 'soft' : 'off')
-                liveStore.setTunRunning(false)
-              })
+              return restoreSoftStartup(proxy)
             })
             .catch((err: any) => addLog('error', `Ошибка восстановления Soft-режима: ${err.message}`))
         }
@@ -487,11 +503,12 @@ export default function App() {
       if (tunStatusRes.status === 'fulfilled') {
         const tunStatus = tunStatusRes.value
         const liveStore = useAppStore.getState()
+        if (tunStatus.lifecycle) liveStore.setTunnelSnapshot(tunStatus.lifecycle)
         const staleInitialStatus =
           tunEventSeqRef.current !== initTunEventSeq ||
           Boolean(liveStore.connectionBusy) ||
           (liveStore.tunRunning && !tunStatus.running)
-        if (!staleInitialStatus) {
+        if (!staleInitialStatus && !liveStore.tunnelSnapshot) {
           liveStore.setTunRunning(tunStatus.running)
           liveStore.setTunStartedAt(tunStatus.startedAt ?? null)
           if (tunStatus.running) liveStore.setMode('hard')
@@ -521,7 +538,7 @@ export default function App() {
             }
           }))
         }
-        if (settings.routingMode === 'soft' && settings.connectionMode !== 'directVpn') {
+        if (!useAppStore.getState().tunnelSnapshot && settings.routingMode === 'soft' && settings.connectionMode !== 'directVpn') {
           const envApplied = targets.some((target: any) => target.id === 'env' && target.applied)
           store.setMode(envApplied ? 'soft' : 'off')
           store.setTunRunning(false)

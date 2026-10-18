@@ -111,7 +111,9 @@ describe('Audit Fixes Regression: Soft routing lifecycle', () => {
   it('keeps Soft mode out of Hard AutoPilot and restores env autoconfig on startup', () => {
     expect(appSource).toContain("settings.autoPilotEnabled && settings.routingMode !== 'soft'")
     expect(appSource).toContain("settings.routingMode === 'soft' && settings.connectionMode !== 'directVpn'")
-    expect(appSource).toContain("window.electronAPI.applyAutoconfig(['env']")
+    expect(appSource).toContain('window.electronAPI.startSoftProtection(')
+    expect(appSource).toContain('restoreSoftStartup(manualProxy)')
+    expect(appSource).not.toContain("window.electronAPI.applyAutoconfig(['env']")
   })
 
   it('uses a dedicated Soft start path for tray and schedules', () => {

@@ -85,6 +85,7 @@ export const IPC_REQUESTS = {
   'recheck-public-ip': request('recheckPublicIp', [boolean]),
   'start-tun': request('startTun', [string, optional(oneOf(['socks5', 'http']))]),
   'start-direct-vpn': request('startDirectVpn', []),
+  'start-soft-protection': request('startSoftProtection', [string, optional(oneOf(['socks5', 'http']))]),
   'stop-tun': request('stopTun', []),
   'cancel-tun': request('cancelTun', []),
   'cancel-transition': request('cancelTransition', []),

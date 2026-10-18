@@ -1,5 +1,6 @@
 import type { AppSettings } from './settings'
 import type { ConnectionStartResult, ConnectionStopResult } from './operation'
+import type { TunnelSnapshot } from './tunnel-state'
 import type { PublicIpInfo } from './publicIp'
 import type { ProxyInfo, AdaptiveBypassStatus, LeakCheckResult, SystemDiagnosticResult, RoutingPlan, LogFileSnapshot, UrlAvailabilityResult, ServerProbeResult } from './diagnostics'
 import type { AutoconfigTarget, SmartRouteRuleSetState, BrowserHardeningResult, AutoPilotResult, SystemNetworkResult, FirewallKillSwitchResult, FirewallRepairHealth, LocationPrivacyStatus } from './network'
@@ -34,10 +35,11 @@ export interface ElectronAPI {
   recheckPublicIp: (rebaseline?: boolean) => Promise<PublicIpInfo>
   startTun: (proxyAddr: string, proxyType?: 'socks5' | 'http') => Promise<ConnectionStartResult>
   startDirectVpn: () => Promise<ConnectionStartResult>
+  startSoftProtection: (proxyAddr: string, proxyType?: 'socks5' | 'http') => Promise<ConnectionStartResult>
   stopTun: () => Promise<ConnectionStopResult>
   cancelTun: () => Promise<ConnectionStopResult>
   cancelTransition: () => Promise<{ requested: boolean }>
-  getTunStatus: () => Promise<{ running: boolean; proxyAddr: string | null; proxyType: 'socks5' | 'http' | null; pid: number | null; warning?: string | null; startedAt?: number | null; restartAttempt?: number }>
+  getTunStatus: () => Promise<{ running: boolean; proxyAddr: string | null; proxyType: 'socks5' | 'http' | null; pid: number | null; warning?: string | null; startedAt?: number | null; restartAttempt?: number; lifecycle: TunnelSnapshot }>
   getTrafficStats: () => Promise<TrafficStats>
   applyAutoconfig: (targets: string[], proxyAddr: string, proxyType?: 'socks5' | 'http') => Promise<Record<string, boolean>>
   rollbackAutoconfig: (targets: string[]) => Promise<Record<string, boolean>>
@@ -253,6 +255,7 @@ export interface ElectronAPI {
   // Event listeners
   onIpChanged: (callback: (data: PublicIpInfo) => void) => () => void
   onTunStatusChanged: (callback: (status: string) => void) => () => void
+  onTunnelStateChanged: (callback: (snapshot: TunnelSnapshot) => void) => () => void
   onSoftStatusChanged?: (callback: (connected: boolean) => void) => () => void
   onTrafficStats: (callback: (stats: TrafficStats) => void) => () => void
   onLeakDetected: (callback: (result: LeakSelfTestResult) => void) => () => void

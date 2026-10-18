@@ -6,6 +6,7 @@ export type { AppSettings } from '../shared/settings'
 import type { PublicIpVerdict } from '../shared/publicIp'
 import type { FirewallKillSwitchStatus } from '../shared/ipc-types'
 import { create } from 'zustand'
+import type { TunnelSnapshot } from '../shared/tunnel-state'
 
 /**
  * State Management Architecture Decision (Task 21.3)
@@ -119,6 +120,8 @@ const emptyTrafficStats: TrafficStats = {
 }
 
 interface AppState {
+  tunnelSnapshot: TunnelSnapshot | null
+  setTunnelSnapshot: (snapshot: TunnelSnapshot) => void
   mode: Mode
   publicIp: string | null
   isLeak: boolean
@@ -261,6 +264,22 @@ export const useAppStore = create<AppState>((set) => ({
   vpnIp: null,
   proxy: null,
   detecting: false,
+  tunnelSnapshot: null,
+  setTunnelSnapshot: (snapshot) => set(state => {
+    if (snapshot.version !== 1 || !Number.isSafeInteger(snapshot.revision) || snapshot.revision < 0 ||
+      (state.tunnelSnapshot && snapshot.revision <= state.tunnelSnapshot.revision)) return {}
+    const confirmed = snapshot.state === 'connected' && snapshot.transition === null
+    return { tunnelSnapshot: { ...snapshot, operation: snapshot.operation ? { ...snapshot.operation } : null },
+      tunRunning: confirmed && snapshot.mode === 'tun',
+      tunStartedAt: confirmed && snapshot.mode === 'tun' ? snapshot.startedAt : null,
+      mode: confirmed ? snapshot.mode === 'soft' ? 'soft' : 'hard' : snapshot.transition ? state.mode : 'off',
+      connectionBusy: state.connectionCancelling ? 'disconnecting' : snapshot.transition === 'disconnecting'
+        ? 'disconnecting' : snapshot.transition ? 'connecting' : null,
+      proxyDown: snapshot.proxyStatus === 'proxy-down', competingTun: snapshot.competingTun,
+      ...(snapshot.transition === null ? { restartingProgress: null } : {}),
+      ...(snapshot.state !== 'connected' && snapshot.transition === null ? { vpnIp: null, tunStartedAt: null } : {})
+    }
+  }),
   tunRunning: false,
   tunStartedAt: null,
   restartingProgress: null,
@@ -331,7 +350,7 @@ export const useAppStore = create<AppState>((set) => ({
     proxyEngine: 'auto'
   },
 
-  setMode: (mode) => set({ mode }),
+  setMode: (mode) => set(state => ({ mode: state.tunnelSnapshot ? state.mode : mode })),
   setPublicIp: (ip, isLeak, verdict) => set((state) => ({
     publicIp: ip,
     isLeak,
@@ -342,9 +361,9 @@ export const useAppStore = create<AppState>((set) => ({
   setProxy: (proxy) => set({ proxy }),
   setDetecting: (d) => set({ detecting: d }),
   setTunRunning: (r) => set((state) => ({
-    tunRunning: r,
+    tunRunning: state.tunnelSnapshot ? state.tunRunning : r,
     // Reset the restart progress as soon as the run becomes healthy again.
-    restartingProgress: r ? null : state.restartingProgress
+    restartingProgress: !state.tunnelSnapshot && r ? null : state.restartingProgress
   })),
   setTunStartedAt: (ts) => set({ tunStartedAt: ts }),
   setRestarting: (progress) => set((state) => ({
@@ -353,6 +372,7 @@ export const useAppStore = create<AppState>((set) => ({
   })),
   setConnectionBusy: (busy) => set((state) => ({
     connectionBusy: state.connectionCancelling ? 'disconnecting'
+      : state.tunnelSnapshot?.transition ? state.tunnelSnapshot.transition === 'disconnecting' ? 'disconnecting' : 'connecting'
       : busy === null && state.restartingProgress ? (state.connectionBusy ?? 'connecting') : busy
   })),
   setConnectionCancelling: (cancelling) => set((state) => ({
@@ -390,7 +410,7 @@ export const useAppStore = create<AppState>((set) => ({
     set({ firewallKillSwitchStatus: unknownFirewallStatus('checking') })
   },
   setCompetingTun: (name) => set({ competingTun: name }),
-  setProxyDown: (v) => set({ proxyDown: v }),
+  setProxyDown: (v) => set(state => ({ proxyDown: state.tunnelSnapshot ? state.proxyDown : v })),
   setAutoconfigTargets: (targets) => set({ autoconfigTargets: targets }),
   setLeakChecks: (checks) => set({
     leakChecks: checks,
@@ -482,6 +502,7 @@ export const useAppStore = create<AppState>((set) => ({
 export function applyTerminalTunStatus(status: string): void {
   if (status !== 'stopped' && status !== 'killswitch-active') return
   const store = useAppStore.getState()
+  if (store.tunnelSnapshot) return
   store.setTunRunning(false)
   store.setTunStartedAt(null)
   store.resetConnectionState()

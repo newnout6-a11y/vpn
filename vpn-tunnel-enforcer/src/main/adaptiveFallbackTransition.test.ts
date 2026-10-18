@@ -4,12 +4,15 @@ import { readFileSync } from 'node:fs'
 import ts from 'typescript'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { verifyAdaptiveFallback } from './adaptiveVerification'
+import { TunnelStateMachine } from './tunnelStateMachine'
 
 function harness() {
   let current = true
   const signal = new AbortController()
   const status = { running: true, startedAt: 1 }
+  const tunnelState = new TunnelStateMachine(() => ({ ...status, pid: status.running ? 731 : null, softApplied: false }))
   const deps = {
+    tunnelState,
     withProtectedIpTransition: vi.fn(async (options: any) => {
       const result = await options.restart()
       if (result.success && options.isCurrent()) options.onVerified()
@@ -20,7 +23,7 @@ function harness() {
       getStatus: () => status,
       areTunRoutesActive: vi.fn(async () => true),
       restartForAdaptiveChange: vi.fn(async () => ({ success: true })),
-      stop: vi.fn(async () => { status.running = false; return { success: true } })
+      stop: vi.fn(async () => { status.running = false; tunnelState.runtimeChanged('adapting'); return { success: true } })
     },
     tunnelHttpProbe: vi.fn(async (): Promise<number | null> => 10),
     serverPicker: { selectProfile: vi.fn() },
@@ -68,6 +71,8 @@ describe('fallback health before commit', () => {
     expect(h.serverPicker.selectProfile).not.toHaveBeenCalled()
     expect(h.sendToMainWindow).not.toHaveBeenCalled()
     expect(h.tunController.stop).toHaveBeenCalledExactlyOnceWith({ preserveNetworkProtection: true })
+    expect(h.tunnelState.snapshot).toMatchObject({ state: 'unknown', transition: null, cleanupRequired: true })
+    expect(h.tunnelState.canStart()).toBe(true)
     expect(h.ipMonitor.clearVpnIp).toHaveBeenCalledOnce()
   })
   it('does not publish without fresh route/IP evidence even if local runtime started', async () => {
@@ -77,6 +82,16 @@ describe('fallback health before commit', () => {
     expect(h.tunnelHttpProbe).not.toHaveBeenCalled()
     expect(h.serverPicker.selectProfile).not.toHaveBeenCalled()
     expect(h.tunController.stop).toHaveBeenCalledExactlyOnceWith({ preserveNetworkProtection: true })
+  })
+  it('ends reconnecting even if stopping the rejected fallback throws', async () => {
+    const h = harness()
+    h.withProtectedIpTransition.mockImplementation(async options => options.restart())
+    h.tunController.stop.mockImplementationOnce(async () => {
+      h.tunnelState.runtimeChanged('adapting')
+      throw new Error('native stop denied')
+    })
+    await expect(h.run()).rejects.toThrow('native stop denied')
+    expect(h.tunnelState.snapshot).toMatchObject({ state: 'unknown', transition: null, cleanupRequired: true })
   })
   it('does not verify or publish a failed native restart', async () => {
     const h = harness()

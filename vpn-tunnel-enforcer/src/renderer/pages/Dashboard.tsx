@@ -99,6 +99,7 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
 
   // Store state
   const tunRunning = useAppStore(s => s.tunRunning)
+  const tunnelSnapshot = useAppStore(s => s.tunnelSnapshot)
   const proxyDown = useAppStore(s => s.proxyDown)
   const tunStartedAt = useAppStore(s => s.tunStartedAt)
   const proxy = useAppStore(s => s.proxy)
@@ -217,7 +218,9 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
   const uiMode = useAppStore(s => s.mode)
   const isSoftConnected =
     uiMode === 'soft' && settings.connectionMode !== 'directVpn'
-  const isConnected = tunRunning || isSoftConnected
+  const isConnected = tunnelSnapshot
+    ? tunnelSnapshot.state === 'connected' && tunnelSnapshot.transition === null : tunRunning || isSoftConnected
+  const hasConnectionResources = tunnelSnapshot ? tunnelSnapshot.cleanupRequired : isConnected
 
   const proxyAddr = settings.connectionMode === 'directVpn'
     ? ''
@@ -297,15 +300,15 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
         const saved = await window.electronAPI.saveSettings(settings)
         if (transitionSeq !== connectionTransitionSeq.current) return
         setSettings(saved)
-        const results = await window.electronAPI.applyAutoconfig(['env'], proxyAddr, proxyType)
+        const result = await window.electronAPI.startSoftProtection(proxyAddr, proxyType)
         if (transitionSeq !== connectionTransitionSeq.current) return
-        if (results?.env) {
+        if (result.success) {
           setMode('soft')
           setTunRunning(false)
           setVpnIp(null)
           addLog('info', 'Soft-режим включён: приложения настроены на VPN-прокси (env autoconfig).')
         } else {
-          const errorMsg = 'Не удалось применить env autoconfig'
+          const errorMsg = result.error || 'Не удалось применить env autoconfig'
           showToast('error', t('dashboard.connectionError'), errorMsg)
           addLog('error', `Не удалось включить Soft-режим: ${errorMsg}`)
         }
@@ -371,11 +374,7 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
     }, 30000)
 
     try {
-      // Soft mode never started a TUN — stopTun would be a no-op success, but
-      // the env-proxy autoconfig it applied must be rolled back explicitly.
-      if (settings.routingMode === 'soft' && settings.connectionMode !== 'directVpn') {
-        await window.electronAPI.rollbackAutoconfig(['env']).catch(() => undefined)
-      }
+      // The main connection owner also drains/rolls back Soft env changes.
       const result = await window.electronAPI.stopTun()
       if (transitionSeq !== connectionTransitionSeq.current) return
       if (result.success) {
@@ -577,6 +576,9 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
     if (disconnecting) return t('dashboard.disconnecting', 'Отключение...')
     if (isServerSwitching) return `Переключение сервера${serverSwitchingName ? `: ${serverSwitchingName}` : '...'}`
     if (restartingProgress) return `Перезапуск ${restartingProgress}`
+    if (tunnelSnapshot?.state === 'blocked') return t('dashboard.tunnelBlocked')
+    if (tunnelSnapshot?.state === 'unknown') return t('dashboard.tunnelUnknown')
+    if (tunnelSnapshot?.state === 'error') return t('dashboard.tunnelError')
     if (isConnected && isProxyActuallyDown) return 'Сервер не отвечает — трафик заблокирован'
     if (isConnected) return t('dashboard.connected')
     return t('dashboard.disconnected')
@@ -585,6 +587,7 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
   const statusColor = (() => {
     if (cancelling) return 'text-[var(--color-text)]'
     if (connecting || disconnecting || restartingProgress || isServerSwitching) return 'text-[var(--color-warning)]'
+    if (tunnelSnapshot && ['error', 'blocked', 'unknown'].includes(tunnelSnapshot.state)) return 'text-[var(--color-warning)]'
     if (isConnected && isProxyActuallyDown) return 'text-[var(--color-warning)]'
     if (isConnected) return 'text-[var(--color-success)]'
     return 'text-[var(--color-text-secondary)]'
@@ -722,14 +725,14 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
         {/* Large circular power button with glow */}
         <motion.button
           onClick={() => {
-            if (isConnected && !confirmDisconnect && !isBusy) {
+            if (hasConnectionResources && !confirmDisconnect && !isBusy) {
               setConfirmDisconnect(true)
               // Auto-cancel confirmation after 3s
               setTimeout(() => setConfirmDisconnect(false), 3000)
               return
             }
             setConfirmDisconnect(false)
-            handleToggleChange(!isConnected)
+            handleToggleChange(!hasConnectionResources)
           }}
           disabled={circleBusy}
           whileHover={!circleBusy ? { scale: 1.03 } : {}}

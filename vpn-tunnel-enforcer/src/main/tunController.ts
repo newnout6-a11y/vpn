@@ -304,6 +304,17 @@ export function getLastSingBoxExit(): SingBoxExitInfo | null {
 // adaptive transition / config hot-reload) with the caller's `reason` string,
 // so index.ts can roll the connection-history session when the node changes.
 let protectedRestartCallback: ((reason: string) => void) | null = null
+type NativeStartupObservation = { phase: 'begin'; generation: number } | { phase: 'finished'; generation: number; success: boolean }
+let nativeStartupGeneration = 0
+let nativeStartupCallback: ((observation: NativeStartupObservation) => void) | null = null
+
+export function onNativeStartup(callback: (observation: NativeStartupObservation) => void): void {
+  nativeStartupCallback = callback
+}
+
+function notifyNativeStartup(observation: NativeStartupObservation): void {
+  try { nativeStartupCallback?.(observation) } catch { /* an observer cannot strand startup/cleanup */ }
+}
 
 export function onProtectedRestart(cb: (reason: string) => void): void {
   protectedRestartCallback = cb
@@ -1314,6 +1325,20 @@ async function isSingboxRunning(): Promise<boolean> {
   } catch {
     return false
   }
+}
+
+async function readOwnedSingboxPid(executable: string): Promise<number> {
+  const stdout = await runPowerShell(`
+$ErrorActionPreference = 'Stop'
+$rows = @(Get-CimInstance Win32_Process -Filter "Name = 'vpnte-sing-box.exe'" -ErrorAction Stop)
+if (@($rows | Where-Object { [string]::IsNullOrWhiteSpace($_.ExecutablePath) }).Count) { throw 'Runtime path unavailable' }
+$owned = @($rows | Where-Object { [string]::Equals($_.ExecutablePath, ${psSingleQuote(executable)}, [StringComparison]::OrdinalIgnoreCase) })
+if ($owned.Count -ne 1) { throw 'Exactly one owned sing-box process required' }
+[string]$owned[0].ProcessId
+`, 5000)
+  const pid = Number(String(stdout).trim())
+  if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error('Owned sing-box PID unavailable')
+  return pid
 }
 
 function psSingleQuote(value: string): string {
@@ -2409,6 +2434,14 @@ export const tunController = {
     let releaseStart!: () => void
     const startCompletion = new Promise<void>(done => { releaseStart = done })
     activeStartCompletion = startCompletion
+    const nativeGeneration = ++nativeStartupGeneration
+    notifyNativeStartup({ phase: 'begin', generation: nativeGeneration })
+    let startupReceiptSent = false
+    const publishStartupReceipt = (success: boolean) => {
+      if (startupReceiptSent) return
+      startupReceiptSent = true
+      notifyNativeStartup({ phase: 'finished', generation: nativeGeneration, success })
+    }
     let startupPollCompletion: Promise<void> | null = null
     const startupCleanupTasks: Promise<void>[] = []
     try {
@@ -2418,6 +2451,7 @@ export const tunController = {
       // Consume a cancellation that arrived while this start was unwinding;
       // otherwise the next deliberate connect would be cancelled too.
       if (transitionCancelRequested) transitionCancelRequested = false
+      publishStartupReceipt(result.success)
       return result
     }
 
@@ -2936,6 +2970,7 @@ export const tunController = {
         resolved = true
         startInProgress = false
         if (activeStartAbortController === startAbortController) activeStartAbortController = null
+        publishStartupReceipt(result.success)
         resolve(result)
       }
 
@@ -3585,6 +3620,9 @@ export const tunController = {
             }
 
             const combinedWarning = [warning, killSwitchWarning].filter(Boolean).join(' | ') || null
+            const runtimePid = await timeAsync('runtime-pid', () => readOwnedSingboxPid(runtime.singbox))
+            if (resolved) return
+            if (stopRequested) throw new Error('Startup cancelled during PID confirmation')
             currentStatus = {
               running: true,
               mode,
@@ -3592,7 +3630,7 @@ export const tunController = {
               proxyType,
               vpnProfileName: vpnProfile?.name ?? null,
               vpnProtocol: vpnProfile?.protocol ?? null,
-              pid: null,
+              pid: runtimePid,
               warning: combinedWarning,
               proxyReachable: true,
               startedAt: Date.now(),
@@ -3789,6 +3827,7 @@ export const tunController = {
       // A timeout that merely stops waiting cannot cancel a native mutation.
       if (startupPollCompletion) await startupPollCompletion
       await Promise.allSettled(startupCleanupTasks)
+      publishStartupReceipt(false)
       if (activeStartCompletion === startCompletion) activeStartCompletion = null
       if (activeStartAbortController === startAbortController) activeStartAbortController = null
       startInProgress = false
