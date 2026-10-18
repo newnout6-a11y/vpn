@@ -8,7 +8,7 @@
 18.10 владелец разрешил продолжать WP-0 при открытом PR #54, сохраняя запрет
 его слияния до отдельного решения. Полного Revix для #54 не было из-за квоты.
 Позднее 18.10 владелец разрешил сливать PR после пройденных проверок.
-#54/#55/#56/#57/#58/#59 слиты в main после exact-head CI success и completed Qodo,
+#54/#55/#56/#57/#58/#59/#60 слиты в main после exact-head CI success и completed Qodo,
 без открытых findings; прежний запрет слияния отменён.
 
 ## Полная область и первоначальная инвентаризация
@@ -16,7 +16,7 @@
 | AT | Найденная реализация / доказательства | Остаток до приёмки |
 | --- | --- | --- |
 | 00-001 | AST-проверка 158 main/preload/shared request channels, общий реестр входов и versioned transport envelope; object contracts проверяют поля/массивы, save-settings покрывает все 39 общих полей AppSettings; TypeScript checker проверяет results всех 158 listeners, public results с `any` больше нет; native contextBridge сохраняет JSON профиля и nullable active result | Завершить проверку текущего PR; отдельная semantic matrix ошибок остаётся в 00-004 |
-| 00-002 | Production TunnelStateMachine интегрирована в main lane/IPC/Soft/tray/UI; 4096 connect/disconnect/crash/retry tours глубиной 6 с fake PID/TUN ledger; sticky faults и generation fencing | Полный алфавит timeout/cancel и общая operation history/counters; native Windows resources; общий admission фоновых restart |
+| 00-002 | Production TunnelStateMachine интегрирована в main lane/IPC/Soft/tray/UI; 4096 stable tours и 117649 tours семи событий глубиной 6, включая timeout/cancel и native completion, с fake PID/TUN ledger и балансом operation events; sticky faults и generation fencing | Общая durable operation history/counters; все blocked/unknown/background paths; native Windows resources; общий admission фоновых restart |
 | 00-003 | Main connection lane: UUIDv4, owner, deadline запуска, priority admission; ручные Hard/Direct и Soft из tray, scheduled startup вместе с proxy detection; отмена на 10/50/90% управляемого connect fixture | Общий реестр refresh/speed/import/export/rotation; deadline остановки, интеграция всех entrypoints и полная матрица поздних эффектов |
 | 00-004 | Общая классификация transport; 157 каналов × 7 категорий через guard; native contextBridge сохраняет code/category/correlation в en/ru; typed local validation; 4 настоящих config handlers × 7 категорий, canonical domain failures | Миграция legacy domain-result `{success:false,error}` и semantic matrix настоящих feature handlers; transport fixtures не доказывают её |
 | 00-005 | `appLogger.ts`, `connectionHistory.ts`; новый regression passive rejection dedup | Сквозной correlation id, монотонный порядок, source/owner/route/confidence истории и redaction всех полей |
@@ -654,3 +654,36 @@ preload/contextBridge: ответ до 900 ms при закрытом gate, conf
 Общий registry refresh/speed/import/export/rotation, deadline stop, полный
 алфавит модели и Windows resources остаются в работе. F-021 опровергнута и
 не объявляется исправленной. Точные результаты — progress.md.
+
+## AT-00-002 — алфавит timeout/cancel и незавершённый native startup
+
+connectionModelTours исполняет все 7^6 = 117649 последовательностей с seed
+0x5eed002 и фиксированным порядком connect/complete/disconnect/crash/timeout/
+cancel/retry. Complete — отдельное завершение fake native gate, поэтому cancel,
+timeout, crash и disconnect встречаются как до подтверждения connect, так и
+после него. Используются production ConnectionLifecycle и TunnelStateMachine;
+oracle состояния и fake PID/TUN ведётся отдельно от snapshot.
+
+После каждого шага проверяются state/transition/processState, отсутствие второго
+core и TUN без PID, busy lease и баланс running/terminal operation events по ID.
+Недопустимые terminal events и повторные connect/retry дают typed conflict без
+изменения snapshot. Deadline вызывается настоящим production timer callback под
+fake clock; caller отвечает до release gate, cleanup ждёт drain. Crash до complete
+запрещает connected даже после позднего success. Каждый тур завершается cleanup
+с нулевыми fake ресурсами. Префиксы включают все длины до шести; прежние 4096
+stable tours и seeded 200-command race сохранены.
+
+Это L2 с fake OS и in-memory event ledger, не durable audit history, не полный
+обход всех blocked/unknown/background entrypoints и не Windows resource oracle.
+Весь AT-00-002 целиком пока не объявляется PASS. F-021 остаётся опровергнутой.
+
+### Qodo #61 — отсутствие обоих событий остановки
+
+Qodo run 1541078 на b979009 подтвердил пробел oracle: если для stop не поступили
+ни running, ни terminal, проверка только существующих ID могла это не заметить.
+Теперь число принятых connect/disconnect считается независимо от observer по
+командам модели и сверяется с уникальными ID каждого вида после каждого шага
+и финальной cleanup. Для timeout auto-stop и explicit join ожидается одна
+операция disconnect. Два mutation fixtures запускают настоящие start/stop,
+удаляя оба события connect либо disconnect: oracle обязан отклонить такой ledger.
+До исправления обе регрессии падали (Missing expected exception).
