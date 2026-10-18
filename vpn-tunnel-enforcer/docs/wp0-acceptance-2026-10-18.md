@@ -17,7 +17,7 @@
 | --- | --- | --- |
 | 00-001 | AST-проверка 160 main/preload/shared request channels, общий реестр входов и versioned transport envelope; object contracts проверяют поля/массивы, save-settings покрывает все 39 общих полей AppSettings; TypeScript checker проверяет results всех 160 listeners, public results с `any` больше нет; native contextBridge сохраняет JSON профиля и nullable active result, feature list/cancel | Завершить проверку текущего PR; отдельная semantic matrix ошибок остаётся в 00-004 |
 | 00-002 | Production TunnelStateMachine интегрирована в main lane/IPC/Soft/tray/UI; 4096 stable tours и 117649 tours семи событий глубиной 6, включая timeout/cancel и native completion, с fake PID/TUN ledger и балансом operation events; sticky faults и generation fencing | Общая durable operation history/counters; все blocked/unknown/background paths; native Windows resources; общий admission фоновых restart |
-| 00-003 | Main connection lane: UUIDv4, owner, deadline запуска, priority admission; ручные Hard/Direct и Soft из tray, scheduled startup вместе с proxy detection; общий feature registry с prompt cancellation/deadline и physical drain, speed test и refresh подписок, включая curl/DoH и commit queue | Интеграция import/export/rotation и UI cancel/unmount; deadline остановки, все entrypoints и полная матрица поздних эффектов |
+| 00-003 | Main connection lane: UUIDv4, owner, deadline запуска, priority admission; ручные Hard/Direct и Soft из tray, scheduled startup вместе с proxy detection; общий feature registry с prompt cancellation/deadline и physical drain, speed test, refresh подписок и импорт профилей, включая curl/DoH и commit queue | Завершить PR импорта профилей; config import/export/rotation и UI cancel/unmount; deadline остановки, все entrypoints и полная матрица поздних эффектов |
 | 00-004 | Общая классификация transport; 157 каналов × 7 категорий через guard; native contextBridge сохраняет code/category/correlation в en/ru; typed local validation; 4 настоящих config handlers × 7 категорий, canonical domain failures | Миграция legacy domain-result `{success:false,error}` и semantic matrix настоящих feature handlers; transport fixtures не доказывают её |
 | 00-005 | Один action correlation id в guarded IPC response/error, lifecycle connect/stop и JSONL logger; async isolation, native wait/drain, diagnostic read-back с повторной redaction; ID исходного connect и source/owner/route/confidence в session history/JSON/CSV; JSONL clockId/monotonicMs отдельно от календарных дат и durationMs; реальные owned/legacy/tray/recovery Soft sessions | Все native/background entrypoints и полная матрица событий/истории автоматизаций, live-check и recovery |
 | 00-006 | Локальные миграции; общий version admission для 20 electron-store файлов / 28 constructors; future-version SHA-256 invariance на real Conf backend до defaults/repair и при записи через ранее открытый handle | Централизованный упорядоченный migration registry, fixtures всех исторических преобразований, остальные persisted JSON, полноценный upgrade/downgrade и межпроцессная координация |
@@ -914,3 +914,33 @@ Production refresh дополнительно проверен с настоящ
 две concurrent группы имеют различные operationKey и собственный IPC correlation,
 одна cancelled, вторая success; diagnostic read-back сохраняет эти связи после
 повторного redaction. Raw UUID и контрольный пароль отсутствуют в обоих выводах.
+
+## Импорт профилей: lifetime запроса и сохранение в очереди (19.10.2026)
+
+Новые подписки, одиночные URI и append в выбранную группу используют общий
+registry: UUIDv4, исходный correlation, deadline 120 s, prompt cancellation,
+physical drain. Ключ ресурса — SHA-256 канонического input/device/target;
+чувствительный input не включён в metadata реестра. Совпадающий незавершённый
+импорт даёт typed conflict, независимые импорты получают отдельные lifetime.
+Re-paste существующей подписки делегируется единственному refresh owner;
+возвращаются только новые профили его группы, без чужого concurrent import.
+
+Signal проходит в настоящий resolver/curl. Группа создаётся внутри общей
+очереди одновременно с append профилей: отменённый ожидающий запрос не создаёт
+пустую группу. Lease проверяется до commit и success log. Append повторно
+проверяет existence/source целевой группы; удалённый или заменённый источник
+не получает поздних профилей. Разные device imports одного нового URL повторно
+ищут группу в очереди и используют одну запись. При ошибке записи восстанавливаются
+предыдущие профили, active selection и список групп; ошибка самого восстановления
+явно сообщает internal failure без успешного результата.
+
+Controlled fixture выполняет production picker/refresh/registry/guard: abort
+на сетевой границе и в очереди для subscription/URI/target, deadline, shutdown,
+удаление/замена target, конкурирующие commits/device variants/re-paste, ошибки
+profiles/active/groups и неуспешный rollback. Отдельный loopback fixture использует
+настоящий curl, Conf disk backend и logger/redactor: отмена завершает процесс/сокет,
+поздний HTTP не меняет файл; concurrent imports сохраняют собственные IPC correlation
+и operationKey в JSONL и diagnostic read-back. Успешный URI/import перечитывается
+новым Conf handle. Electron/DPAPI boundary заменён, новое доказательство encryption
+не заявляется. UI и config browse/import/apply ещё не интегрированы; AT-00-003
+и весь WP-0 остаются открытыми. Проверки и PR gate — progress.md.

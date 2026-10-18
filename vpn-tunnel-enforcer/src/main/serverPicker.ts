@@ -20,7 +20,7 @@ import { performance } from 'perf_hooks'
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import axios from 'axios'
-import { randomUUID } from 'crypto'
+import { createHash, randomUUID } from 'crypto'
 import { logEvent } from './appLogger'
 import { nativePhysicalIpv4Sources } from './native/nativeNetworkReads'
 import { withProtectedIpTransition } from './protectedIpTransition'
@@ -57,6 +57,9 @@ import { reliableSocksTcpPing } from './socksPing'
 import { networkFailureCode } from './networkFailureDiagnostics'
 import { serverPickerStore as store } from './sharedStores'
 import { withProfileStoreWriteLock } from './profileStoreQueue'
+import { operations } from './operations'
+import type { OperationLease } from './operationRegistry'
+import { IpcFault } from '../shared/ipc-result'
 
 export const RESOLVED_IP_TTL_MS = 5 * 60_000
 const DNS_RESOLUTION_TIMEOUT_MS = 2500
@@ -83,6 +86,8 @@ function geoLookupDisabled(): boolean {
 
 interface AddProfilesOptions {
   clientDevice?: ClientDevice
+  /** Main-only lifetime; renderer options are sanitized separately. */
+  signal?: AbortSignal
 }
 
 const CLIENT_DEVICES = ['pc', 'android', 'ios', 'mac'] as const
@@ -2194,8 +2199,6 @@ export function getActiveProfile(): ServerProfile | null {
   return found ?? profiles[0]
 }
 
-const addFromInputLocks = new Map<string, Promise<ServerProfile[]>>()
-
 /**
  * Removes a profile by ID.
  */
@@ -2316,31 +2319,55 @@ export function deriveSubscriptionGroupName(input: string, webPageUrl?: string, 
  */
 async function appendProfilesToGroup(
   vpnProfiles: VpnProfile[],
-  groupId: string,
+  selectGroup: () => string,
   sourceUriPerProfile: (vp: VpnProfile, index: number) => string | undefined,
-  options: AddProfilesOptions = {}
-): Promise<ServerProfile[]> {
-  return withProfileStoreWriteLock(() => {
+  options: AddProfilesOptions,
+  lease: OperationLease
+): Promise<{ profiles: ServerProfile[]; groupId: string }> {
+  return lease.wait(withProfileStoreWriteLock(() => {
+    lease.assertActive()
     const existingProfiles = getProfiles()
-    const newProfiles: ServerProfile[] = []
+    const previousActiveId = getActiveProfileId(), previousGroups = serverGroups.getGroups()
+    let profilesWritten = false, activeWritten = false
+    try {
+      // Group creation belongs to the same synchronous commit as its profiles.
+      const groupId = selectGroup()
+      if (!serverGroups.getGroup(groupId)) throw new IpcFault('conflict')
+      const newProfiles: ServerProfile[] = []
 
-    vpnProfiles.forEach((vpnProfile, index) => {
-      const sourceUri = sourceUriPerProfile(vpnProfile, index)
-      const candidate = vpnProfileToServerProfile(vpnProfile, groupId, sourceUri, options)
-      const isDuplicate =
-        existingProfiles.some(p => isSameServerProfile(p, candidate)) ||
-        newProfiles.some(p => isSameServerProfile(p, candidate))
-      if (!isDuplicate) newProfiles.push(candidate)
-    })
+      vpnProfiles.forEach((vpnProfile, index) => {
+        const sourceUri = sourceUriPerProfile(vpnProfile, index)
+        const candidate = vpnProfileToServerProfile(vpnProfile, groupId, sourceUri, options)
+        const isDuplicate =
+          existingProfiles.some(p => isSameServerProfile(p, candidate)) ||
+          newProfiles.some(p => isSameServerProfile(p, candidate))
+        if (!isDuplicate) newProfiles.push(candidate)
+      })
 
-    if (newProfiles.length > 0) {
-      saveProfiles([...existingProfiles, ...newProfiles])
-      if (!getActiveProfileId()) {
-        store.set('activeProfileId', newProfiles[0].id)
+      if (newProfiles.length > 0) {
+        profilesWritten = true
+        saveProfiles([...existingProfiles, ...newProfiles])
+        if (!getActiveProfileId()) {
+          activeWritten = true
+          store.set('activeProfileId', newProfiles[0].id)
+        }
       }
+      return { profiles: newProfiles, groupId }
+    } catch (error) {
+      let rollbackFailed = false
+      const restore = (effect: () => void) => { try { effect() } catch { rollbackFailed = true } }
+      if (profilesWritten) restore(() => saveProfiles(existingProfiles))
+      if (activeWritten) restore(() => store.set('activeProfileId', previousActiveId))
+      restore(() => {
+        if (JSON.stringify(serverGroups.getGroups()) !== JSON.stringify(previousGroups)) serverGroups.saveGroups(previousGroups)
+      })
+      if (rollbackFailed) {
+        logEvent('error', 'server-picker', 'profile import rollback failed', { category: 'internal' })
+        throw new IpcFault('internal')
+      }
+      throw error
     }
-    return newProfiles
-  })
+  }))
 }
 
 /**
@@ -2359,23 +2386,33 @@ async function appendProfilesToGroup(
  *   `sourceUri` for lossless re-export.
  */
 export async function addFromInput(input: string, options: AddProfilesOptions = {}): Promise<ServerProfile[]> {
+  if (options.signal?.aborted) throw new IpcFault('cancelled')
   const trimmed = input.trim()
   const canonical = canonicalizeSubscriptionUrl(trimmed)
-  const clientDevice = normalizeClientDevice(options.clientDevice)
-  const lockKey = `${canonical}\u0000${clientDevice}`
-  const inFlight = addFromInputLocks.get(lockKey)
-  if (inFlight) return inFlight
-
-  const promise = addFromInputUnlocked(trimmed, canonical, options).finally(() => {
-    if (addFromInputLocks.get(lockKey) === promise) {
-      addFromInputLocks.delete(lockKey)
-    }
+  // Re-pasting an existing subscription IS a refresh. Keep one physical owner
+  // instead of nesting a promptly rejected child operation inside an import.
+  const existing = /^https?:\/\//i.test(canonical) ? findGroupBySourceUrl(canonical) : null
+  if (existing) {
+    const beforeIds = new Set(getProfiles().map(profile => profile.id))
+    const result = await refreshSubscriptionGroup(existing.id, { clientDevice: options.clientDevice, signal: options.signal })
+    if (options.signal?.aborted) throw new IpcFault('cancelled')
+    if (!result.ok) throw new Error(result.error)
+    const newlyAdded = getProfiles().filter(profile => profile.groupId === existing.id && !beforeIds.has(profile.id))
+    logEvent('info', 'server-picker', 'profiles refreshed via re-paste', { groupId: existing.id, added: result.addedCount, updated: result.updatedCount })
+    return newlyAdded
+  }
+  return operations.run('import', lease => addFromInputUnlocked(trimmed, canonical, options, lease), {
+    resource: profileImportResource(canonical, options), signal: options.signal
   })
-  addFromInputLocks.set(lockKey, promise)
-  return promise
 }
 
-async function addFromInputUnlocked(trimmed: string, canonical: string, options: AddProfilesOptions = {}): Promise<ServerProfile[]> {
+/** An opaque resource key; input may contain provider credentials. */
+function profileImportResource(input: string, options: AddProfilesOptions, groupId = ''): string {
+  return 'profile-import:' + createHash('sha256').update(JSON.stringify([input, normalizeClientDevice(options.clientDevice), groupId])).digest('hex')
+}
+
+async function addFromInputUnlocked(trimmed: string, canonical: string, options: AddProfilesOptions, lease: OperationLease): Promise<ServerProfile[]> {
+  lease.assertActive()
   const clientDevice = normalizeClientDevice(options.clientDevice)
   if (!trimmed) {
     throw new Error('Введите ссылку подписки или VPN-ссылку')
@@ -2391,27 +2428,6 @@ async function addFromInputUnlocked(trimmed: string, canonical: string, options:
   const isSubscriptionUrl = /^https?:\/\//i.test(canonical)
 
   if (isSubscriptionUrl) {
-    // If the user re-pasted a subscription they've already imported, we
-    // funnel the request through the same merge logic the refresh button
-    // uses. No duplicate group, no surprise data loss. Lookup is canonical
-    // so happ:// and https:// forms of the same URL collide correctly.
-    const existing = findGroupBySourceUrl(canonical)
-    if (existing) {
-      const beforeIds = new Set(getProfiles().map(p => p.id))
-      const result = await refreshSubscriptionGroup(existing.id, { clientDevice })
-      if (!result.ok) {
-        throw new Error(result.error)
-      }
-      const after = getProfiles()
-      const newlyAdded = after.filter(p => !beforeIds.has(p.id))
-      logEvent('info', 'server-picker', 'profiles refreshed via re-paste', {
-        groupId: existing.id,
-        added: result.addedCount,
-        updated: result.updatedCount
-      })
-      return newlyAdded
-    }
-
     // First-time subscription import — fetch + create the group + persist.
     let proxyAddr: string | undefined
     let proxyType: 'socks5' | 'http' | undefined
@@ -2428,7 +2444,7 @@ async function addFromInputUnlocked(trimmed: string, canonical: string, options:
     // We hand the resolver the original (possibly happ://) input because
     // `resolveVpnProfiles` already knows how to unwrap it; reusing that
     // single code path avoids drift between two unwrap implementations.
-    const resolved = await resolveVpnProfiles(trimmed, { proxyAddr, proxyType, clientDevice, bootstrapRouteMode })
+    const resolved = await lease.wait(resolveVpnProfiles(trimmed, { proxyAddr, proxyType, clientDevice, bootstrapRouteMode, signal: lease.signal }))
     if (!resolved.profiles.length) {
       throw new Error('Не найдено поддерживаемых профилей в указанном источнике')
     }
@@ -2442,37 +2458,35 @@ async function addFromInputUnlocked(trimmed: string, canonical: string, options:
     const importExpiresAt = userInfo?.expiresAt
     const importTrialExpired =
       typeof importExpiresAt === 'number' && Number.isFinite(importExpiresAt) && importExpiresAt > 0 && importExpiresAt < now
-    const group = serverGroups.createGroup({
-      // `sourceUrl` is stored in canonical (https://) form so future
-      // `findGroupBySourceUrl` lookups match cleanly with both forms.
-      name: deriveSubscriptionGroupName(canonical, userInfo?.webPageUrl, userInfo?.profileTitle),
-      source: 'subscription',
-      sourceUrl: canonical,
-      importedAt: now,
-      lastFetchedAt: now,
-      lastFetchAttemptAt: now,
-      lastFetchError: null,
-      status: importTrialExpired ? 'expired' : 'active',
-      lastRefreshProfilesCount: resolved.profiles.length,
-      trafficUploadBytes: userInfo?.trafficUploadBytes ?? undefined,
-      trafficDownloadBytes: userInfo?.trafficDownloadBytes ?? undefined,
-      trafficUsedBytes: userInfo?.trafficUsedBytes ?? undefined,
-      trafficTotalBytes: userInfo?.trafficTotalBytes ?? undefined,
-      expiresAt: userInfo?.expiresAt ?? undefined,
-      refreshIntervalSeconds: userInfo?.refreshIntervalSeconds ?? undefined,
-      webPageUrl: userInfo?.webPageUrl ?? undefined,
-      profileTitle: userInfo?.profileTitle ?? undefined
-    })
-
-    const newProfiles = await appendProfilesToGroup(
+    const { profiles: newProfiles, groupId } = await appendProfilesToGroup(
       resolved.profiles,
-      group.id,
+      () => (findGroupBySourceUrl(canonical) ?? serverGroups.createGroup({
+        // Canonical source keeps happ:// and https:// lookups equivalent.
+        name: deriveSubscriptionGroupName(canonical, userInfo?.webPageUrl, userInfo?.profileTitle),
+        source: 'subscription',
+        sourceUrl: canonical,
+        importedAt: now,
+        lastFetchedAt: now,
+        lastFetchAttemptAt: now,
+        lastFetchError: null,
+        status: importTrialExpired ? 'expired' : 'active',
+        lastRefreshProfilesCount: resolved.profiles.length,
+        trafficUploadBytes: userInfo?.trafficUploadBytes ?? undefined,
+        trafficDownloadBytes: userInfo?.trafficDownloadBytes ?? undefined,
+        trafficUsedBytes: userInfo?.trafficUsedBytes ?? undefined,
+        trafficTotalBytes: userInfo?.trafficTotalBytes ?? undefined,
+        expiresAt: userInfo?.expiresAt ?? undefined,
+        refreshIntervalSeconds: userInfo?.refreshIntervalSeconds ?? undefined,
+        webPageUrl: userInfo?.webPageUrl ?? undefined,
+        profileTitle: userInfo?.profileTitle ?? undefined
+      })).id,
       (vp) => vp.sourceUri ?? canonical,
-      { clientDevice }
+      { clientDevice }, lease
     )
 
+    lease.assertActive()
     logEvent('info', 'server-picker', 'profiles added from subscription', {
-      groupId: group.id,
+      groupId,
       count: newProfiles.length
     })
     return newProfiles
@@ -2480,24 +2494,24 @@ async function addFromInputUnlocked(trimmed: string, canonical: string, options:
 
   // Single VPN URI path. We need the parsed profile AND the original line
   // so we can store it as sourceUri.
-  const resolved = await resolveVpnProfiles(trimmed, { clientDevice })
+  const resolved = await lease.wait(resolveVpnProfiles(trimmed, { clientDevice, signal: lease.signal }))
   if (!resolved.profiles.length) {
     throw new Error('Не найдено поддерживаемых профилей в указанном источнике')
   }
 
-  const groupId = ensureManualKeysGroup()
   // Pasting one key returns one profile, but a multi-line paste of single
   // URIs is technically valid too — we keep the lossless URI for the
   // first profile only, since we can't reliably split a multi-line paste
   // back into per-profile lines from here. Single-key (the dominant case)
   // gets the source URI; bulk paste falls back to undefined.
-  const newProfiles = await appendProfilesToGroup(
+  const { profiles: newProfiles, groupId } = await appendProfilesToGroup(
     resolved.profiles,
-    groupId,
+    ensureManualKeysGroup,
     (_vp, index) => (resolved.profiles.length === 1 && index === 0 ? trimmed : undefined),
-    { clientDevice }
+    { clientDevice }, lease
   )
 
+  lease.assertActive()
   logEvent('info', 'server-picker', 'profile added from URI', {
     groupId,
     count: newProfiles.length
@@ -2514,12 +2528,19 @@ async function addFromInputUnlocked(trimmed: string, canonical: string, options:
  * URIs append one profile with `sourceUri = trimmed`.
  */
 export async function addFromInputToGroup(input: string, groupId: string, options: AddProfilesOptions = {}): Promise<ServerProfile[]> {
+  return operations.run('import', lease => addFromInputToGroupUnlocked(input, groupId, options, lease), {
+    resource: profileImportResource(canonicalizeSubscriptionUrl(input.trim()), options, groupId), signal: options.signal
+  })
+}
+
+async function addFromInputToGroupUnlocked(input: string, groupId: string, options: AddProfilesOptions, lease: OperationLease): Promise<ServerProfile[]> {
+  lease.assertActive()
   const trimmed = input.trim()
   const clientDevice = normalizeClientDevice(options.clientDevice)
   if (!trimmed) throw new Error('Введите ссылку подписки или VPN-ссылку')
 
   const target = serverGroups.getGroup(groupId)
-  if (!target) throw new Error('Группа не найдена')
+  if (!target) throw new IpcFault('conflict')
 
   let proxyAddr: string | undefined
   let proxyType: 'socks5' | 'http' | undefined
@@ -2533,20 +2554,25 @@ export async function addFromInputToGroup(input: string, groupId: string, option
     /* fall through */
   }
 
-  const resolved = await resolveVpnProfiles(trimmed, { proxyAddr, proxyType, clientDevice, bootstrapRouteMode })
+  const resolved = await lease.wait(resolveVpnProfiles(trimmed, { proxyAddr, proxyType, clientDevice, bootstrapRouteMode, signal: lease.signal }))
   if (!resolved.profiles.length) {
     throw new Error('Не найдено поддерживаемых профилей в указанном источнике')
   }
 
   const isSubscriptionUrl = /^https?:\/\//i.test(trimmed)
-  const newProfiles = await appendProfilesToGroup(
+  const { profiles: newProfiles } = await appendProfilesToGroup(
     resolved.profiles,
-    groupId,
+    () => {
+      const current = serverGroups.getGroup(groupId)
+      if (!current || current.source !== target.source || current.sourceUrl !== target.sourceUrl) throw new IpcFault('conflict')
+      return groupId
+    },
     (_vp, index) =>
       !isSubscriptionUrl && resolved.profiles.length === 1 && index === 0 ? trimmed : undefined,
-    { clientDevice }
+    { clientDevice }, lease
   )
 
+  lease.assertActive()
   logEvent('info', 'server-picker', 'profiles appended to existing group', {
     groupId,
     count: newProfiles.length,

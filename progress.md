@@ -4003,3 +4003,66 @@ CI/review нового SHA проверяются отдельно после pu
   ed197ce; последние проверки: typecheck exit 0, полный npm test 4285 passed /
   5 skipped, build/native PASS, traceability AC 927/927 / F 210/210. Полная
   WP-0 и следующая WP-2 остаются активной целью, завершение не заявлено.
+
+### WP-0 — cancellable profile import и commit внутри общей очереди
+
+- Новый subscription/URI и append в выбранную группу теперь под production
+  operation registry: original action correlation, UUIDv4, deadline 120 s,
+  typed cancellation/conflict и physical drain. Resolver получает signal;
+  повтор идентичного незавершённого импорта не присоединяется к чужому lifetime.
+  Resource — SHA-256 canonical input/device/target, без raw input в metadata.
+- Создание группы перенесено в общий с refresh сериализованный commit.
+  Ожидающий отменённый запрос не создаёт группу и не пишет профили. Повторный
+  lookup внутри очереди сохраняет одну группу для concurrent device variants.
+  Explicit target проверяется заново по existence/source/sourceUrl. Неуспешный
+  commit пытается восстановить profiles/active/groups; ошибка восстановления
+  явно логируется bounded internal failure, успешный результат не возвращается.
+- Re-paste существующей подписки остаётся одной refresh operation, чтобы
+  вложенный prompt caller cancellation не освобождал внешний physical lease.
+  Возвращаются только новые профили этой группы, без чужих concurrent additions.
+- Baseline `npm.cmd test -- src/main/profileImportOperations.test.ts`
+  — **8 failed**, 21.08 s, exit 1 (.tmp/wp0-import-before.log), включая
+  unhandled assertion после заведомо неотменяемого прежнего resolver.
+  Исходный concurrent fixture возвращал одинаковый сервер для разных input;
+  его законная дедупликация не production regression. Fixture исправлен на
+  разные hosts; негативный результат этим дефектом не обосновывается.
+- Controlled regression расширен до **18 passed**, 1.11 s, exit 0:
+  `npm.cmd test -- src/main/profileImportOperations.test.ts`
+  (.tmp/wp0-import-focused-expanded.log). Cancel resolution/queue для
+  subscription/URI/target, shutdown/drain, deadline, deletion/source replacement,
+  write failures/rollback failure, parallel commits/devices и re-paste isolation.
+- `npm.cmd test -- src/main/profileImportOperations.test.ts src/main/subscriptionOperations.test.ts`
+  — **25 passed / 2 files**, 2.12 s, exit 0 (.tmp/wp0-import-focused-native.log).
+  Loopback исполняет actual picker/refresh/registry/guard, настоящий curl и Conf:
+  после cancel child/socket завершены, поздний HTTP не пишет файл, successful
+  import/URI сохраняются после нового Conf handle. Реальные logger/redactor/JSONL
+  и diagnostic read-back сохраняют разные operationKey/original IPC correlation
+  двух concurrent imports, raw UUID и контрольные credentials скрыты.
+- Адресный запуск с serverGroupsRefresh — **62 passed / 3 files**, 2.23 s,
+  exit 0 (.tmp/wp0-import-regression.log). В фильтре также были три отсутствующих
+  старых filename; Vitest их не запускал. Число 62 относится только к трём реально
+  выполненным файлам; полный набор проверяется отдельно.
+- `npm.cmd run typecheck` — exit 0, 160 channels / 0 public any
+  (.tmp/wp0-import-typecheck.log); traceability — AC 927/927 / F 210/210,
+  exit 0. `npm.cmd run build` — exit 0 (.tmp/wp0-import-build.log).
+  `node scripts/test-electron-runtime.mjs` — ELECTRON_SMOKE_PASS, exit 0
+  (.tmp/wp0-import-electron.log); `node scripts/test-wp1-native.mjs --ipc-only`
+  — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-import-csp.log). Smoke проверяет общие
+  production IPC/preload/CSP subsets; импорт отдельно покрыт actual curl/guard/
+  Conf fixture. Electron/DPAPI storage boundary этого fixture заменён.
+- Остаток WP-0 сохранён: config browse/import/apply, export, rotation, UI cancel/
+  unmount, stop deadline, background native admission, durable audit, migrations,
+  semantic error matrix и остальные AT. Полная WP-0 не объявляется PASS.
+- Первый полный `npm.cmd test` — **1 failed / 4305 passed / 5 skipped**,
+  203.70 s, exit 1 (.tmp/wp0-import-full.log): прежний actual PowerShell case
+  adaptiveNetworkIdentity превысил стандартные 5000 ms (10549 ms) при параллельном
+  build/native. Причинность нагрузки не доказана. Без изменения кода/таймаута
+  `npm.cmd test -- src/main/adaptiveNetworkIdentity.test.ts` — **25 passed**,
+  3.21 s, exit 0 (.tmp/wp0-import-adaptive-recheck.log). Полный набор повторяется
+  отдельно от build/native; первый failure не заменяется адресным PASS.
+- Повторный полный `npm.cmd test` без параллельного build/native — **4306 passed /
+  5 skipped / 0 failed**, 268 files passed / 2 skipped, **189.30 s**, exit 0
+  (.tmp/wp0-import-full-final.log). Production/test code и timeout не менялись.
+  Stderr RootErrorBoundary — ожидаемый fixture crash; unhandled failures нет.
+  Перед commit `git diff --check` — exit 0. После push требуется completed
+  Qodo и CI на итоговом SHA; следующий участок до этого не начинается.
