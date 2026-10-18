@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { EventEmitter } from 'events'
+import { EventEmitter, getEventListeners } from 'events'
 import { PassThrough } from 'stream'
 
 const execFileMock = vi.hoisted(() => {
@@ -94,6 +94,86 @@ describe('vpnProfiles regressions', () => {
     expect(spawnMock).toHaveBeenCalledTimes(1)
     const argv = JSON.stringify(spawnMock.mock.calls[0]?.[1] ?? [])
     expect(argv).not.toMatch(/x-hwid|Happ\/3\.22\.1/)
+  })
+
+  it('cancels curl without releasing its physical work before close or retrying (AT-00-003)', async () => {
+    const { resolveVpnProfiles } = await import('./vpnProfiles')
+    const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), kill: vi.fn(() => true) })
+    spawnMock.mockReturnValue(child)
+    const controller = new AbortController()
+    const run = resolveVpnProfiles('https://sub.example.test/list', { signal: controller.signal })
+    const rejected = expect(run).rejects.toMatchObject({ category: 'cancelled' })
+    controller.abort()
+    await vi.waitFor(() => expect(child.kill).toHaveBeenCalled())
+    let settled = false
+    void run.then(() => { settled = true }, () => { settled = true })
+    await Promise.resolve()
+    expect(settled).toBe(false)
+    child.stdout.end(curlStdout('HTTP/1.1 200 OK', 'vless://00000000-0000-4000-8000-000000000000@late.example.com:443#Late'))
+    child.emit('close', 0)
+    await rejected
+    expect(spawnMock).toHaveBeenCalledTimes(1)
+    expect(execFileMock[Symbol.for('nodejs.util.promisify.custom')]).not.toHaveBeenCalled()
+    expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0)
+  })
+
+  it('cancels the DoH fallback and waits for its actual child close (AT-00-003)', async () => {
+    const { resolveVpnProfiles } = await import('./vpnProfiles')
+    let dohChild: any
+    const children: any[] = []
+    spawnMock.mockImplementation((_exe, args) => {
+      const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), kill: vi.fn(() => true) })
+      children.push(child)
+      if (args.includes('cloudflare-dns.com:443:1.1.1.1')) dohChild = child
+      else queueMicrotask(() => { child.stdout.end(curlStdout('HTTP/1.1 200 OK')); child.emit('close', 0) })
+      return child
+    })
+    const controller = new AbortController()
+    const run = resolveVpnProfiles('https://sub.example.test/list', { signal: controller.signal })
+    const rejected = expect(run).rejects.toMatchObject({ category: 'cancelled' })
+    await vi.waitFor(() => expect(dohChild).toBeDefined())
+    const count = children.length
+    controller.abort()
+    expect(dohChild.kill).toHaveBeenCalledOnce()
+    let settled = false
+    void run.then(() => { settled = true }, () => { settled = true })
+    await Promise.resolve()
+    expect(settled).toBe(false)
+    dohChild.emit('close', null)
+    await rejected
+    expect(children).toHaveLength(count)
+    expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0)
+  })
+
+  it('isolates cancellation from independent callers for the same URL (AT-00-003)', async () => {
+    const { resolveVpnProfiles } = await import('./vpnProfiles')
+    const children: any[] = []
+    spawnMock.mockImplementation(() => {
+      const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), kill: vi.fn(() => true) })
+      children.push(child)
+      return child
+    })
+    const controller = new AbortController()
+    const cancelled = resolveVpnProfiles('https://sub.example.test/list', { signal: controller.signal })
+    const rejected = expect(cancelled).rejects.toMatchObject({ category: 'cancelled' })
+    const independent = resolveVpnProfiles('https://sub.example.test/list')
+    expect(children).toHaveLength(2)
+    controller.abort()
+    children[0].emit('close', null)
+    await rejected
+    const body = 'vless://00000000-0000-4000-8000-000000000000@independent.example.com:443#Independent'
+    children[1].stdout.end(curlStdout('HTTP/1.1 200 OK', body))
+    children[1].emit('close', 0)
+    expect((await independent).profiles[0].outbound.server).toBe('independent.example.com')
+    expect(children[1].kill).not.toHaveBeenCalled()
+  })
+
+  it('does not spawn for an already cancelled resolution (AT-00-003)', async () => {
+    const { resolveVpnProfiles } = await import('./vpnProfiles')
+    const controller = new AbortController()
+    controller.abort()
+    await expect(resolveVpnProfiles('https://sub.example.test/list', { signal: controller.signal })).rejects.toMatchObject({ category: 'cancelled' })
+    expect(spawnMock).not.toHaveBeenCalled()
   })
 
   it('parses spx / spider_x for Reality and passes to xray config generator', async () => {

@@ -38,6 +38,11 @@ import { settingsStore } from './settings'
 import { serverPickerStore, serverGroupsStore, type ServerPickerStoreShape } from './sharedStores'
 import type { ClientDevice, ServerGroup, ServerProfile } from '../shared/ipc-types'
 import { inferCountryMetadata } from '../shared/countries'
+import { operations } from './operations'
+import type { OperationLease } from './operationRegistry'
+import type { OperationOwner } from '../shared/operation'
+import { IpcFault } from '../shared/ipc-result'
+import { withProfileStoreWriteLock } from './profileStoreQueue'
 
 // ─── Persistent Store ────────────────────────────────────────────────────────
 
@@ -45,6 +50,8 @@ type ServerGroupsStore = typeof serverGroupsStore extends Store<infer T> ? T : n
 
 interface RefreshGroupOptions {
   clientDevice?: ClientDevice
+  signal?: AbortSignal
+  owner?: OperationOwner
 }
 
 const store = serverGroupsStore
@@ -63,10 +70,10 @@ export const MIN_MANUAL_SERVER_GROUP_REFRESH_INTERVAL_MS = 60 * 1000
 const SERVER_GROUP_REFRESH_SWEEP_INTERVAL_MS = 60 * 1000
 const SERVER_GROUP_INITIAL_REFRESH_DELAY_MS = 10 * 1000
 
-const refreshGroupLocks = new Map<string, Promise<RefreshGroupResult>>()
 let autoRefreshTimer: ReturnType<typeof setInterval> | null = null
 let initialAutoRefreshTimer: ReturnType<typeof setTimeout> | null = null
 let autoRefreshSweepRunning = false
+let autoRefreshController: AbortController | null = null
 
 // ─── CRUD ───────────────────────────────────────────────────────────────────
 
@@ -367,24 +374,26 @@ export function refreshGroup(
   groupId: string,
   options: RefreshGroupOptions = {}
 ): Promise<RefreshGroupResult> {
-  const existing = refreshGroupLocks.get(groupId)
-  if (existing) return existing
-
-  const refresh = refreshGroupUnlocked(groupId, options).finally(() => {
-    if (refreshGroupLocks.get(groupId) === refresh) refreshGroupLocks.delete(groupId)
+  return operations.run('refresh', lease => refreshGroupUnlocked(groupId, options, lease), {
+    resource: `refresh:${groupId}`, owner: options.owner, signal: options.signal
   })
-  refreshGroupLocks.set(groupId, refresh)
-  return refresh
 }
 
 async function refreshGroupUnlocked(
   groupId: string,
-  options: RefreshGroupOptions = {}
+  options: RefreshGroupOptions,
+  lease: OperationLease
 ): Promise<RefreshGroupResult> {
+  lease.assertActive()
   const group = getGroup(groupId)
   if (!group) return { ok: false, error: 'Группа не найдена' }
   if (group.source !== 'subscription' || !group.sourceUrl) {
     return { ok: false, error: 'Группа без подписки — обновлять нечего' }
+  }
+  const assertCurrentGroup = () => {
+    lease.assertActive()
+    const current = getGroup(groupId)
+    if (!current || current.source !== group.source || current.sourceUrl !== group.sourceUrl) throw new IpcFault('conflict')
   }
 
   const now = Date.now()
@@ -403,11 +412,9 @@ async function refreshGroupUnlocked(
     /* fall through with no proxy override */
   }
 
-  const existing = getPickerProfiles()
-  const inGroupExisting = existing.filter(p => p.groupId === groupId)
-  const outOfGroup = existing.filter(p => p.groupId !== groupId)
+  const initialProfiles = getPickerProfiles().filter(p => p.groupId === groupId)
   const existingDevices = Array.from(new Set(
-    inGroupExisting.map(p => normalizeClientDevice(p.clientDevice))
+    initialProfiles.map(p => normalizeClientDevice(p.clientDevice))
   ))
   const refreshDevices = options.clientDevice
     ? [normalizeClientDevice(options.clientDevice)]
@@ -419,7 +426,8 @@ async function refreshGroupUnlocked(
   let primaryDevice = refreshDevices[0]
   try {
     for (const device of refreshDevices) {
-      const resolvedForDevice = await resolveVpnProfiles(group.sourceUrl, { proxyAddr, proxyType, clientDevice: device, bootstrapRouteMode })
+      lease.assertActive()
+      const resolvedForDevice = await lease.wait(resolveVpnProfiles(group.sourceUrl, { proxyAddr, proxyType, clientDevice: device, bootstrapRouteMode, signal: lease.signal }))
       resolvedByDevice.set(device, resolvedForDevice)
       const currentPrimary = resolvedByDevice.get(primaryDevice)
       if ((!currentPrimary || !currentPrimary.profiles.length) && resolvedForDevice.profiles.length) {
@@ -427,6 +435,7 @@ async function refreshGroupUnlocked(
       }
     }
   } catch (err: any) {
+    assertCurrentGroup()
     const message = err?.message || String(err)
     // Network errors (DNS, TCP, TLS) usually indicate the user is offline
     // rather than the panel being gone. We still mark expired because the
@@ -442,6 +451,24 @@ async function refreshGroupUnlocked(
     return { ok: false, error: message }
   }
 
+  return lease.wait(withProfileStoreWriteLock(() => {
+    assertCurrentGroup()
+    return commitGroupRefresh(groupId, options, resolvedByDevice, primaryDevice, now)
+  }))
+}
+
+/** Synchronous commit under the shared profile queue, using a fresh snapshot. */
+function commitGroupRefresh(
+  groupId: string,
+  options: RefreshGroupOptions,
+  resolvedByDevice: Map<ClientDevice, Awaited<ReturnType<typeof resolveVpnProfiles>>>,
+  primaryDevice: ClientDevice,
+  now: number
+): RefreshGroupResult {
+  // Fetches may overlap imports/other groups; commit against today's snapshot.
+  const existing = getPickerProfiles()
+  const inGroupExisting = existing.filter(p => p.groupId === groupId)
+  const outOfGroup = existing.filter(p => p.groupId !== groupId)
   const primaryResolved = resolvedByDevice.get(primaryDevice) ?? Array.from(resolvedByDevice.values())[0]
   if (!primaryResolved) {
     return { ok: false, error: 'No subscription response' }
@@ -705,13 +732,14 @@ export function isServerGroupRefreshDue(group: ServerGroup, now = Date.now()): b
   return now - lastAttemptAt >= serverGroupRefreshIntervalMs(group)
 }
 
-export async function refreshDueServerGroups(now = Date.now()): Promise<{ refreshed: number; failed: number }> {
+export async function refreshDueServerGroups(now = Date.now(), signal?: AbortSignal): Promise<{ refreshed: number; failed: number }> {
   const dueGroups = getGroups().filter(group => isServerGroupRefreshDue(group, now))
   let refreshed = 0
   let failed = 0
   for (const group of dueGroups) {
+    if (signal?.aborted) break
     try {
-      const result = await refreshGroup(group.id)
+      const result = await refreshGroup(group.id, { owner: 'schedule', signal })
       if (result.ok) refreshed++
       else failed++
     } catch (error) {
@@ -725,12 +753,15 @@ export async function refreshDueServerGroups(now = Date.now()): Promise<{ refres
 async function runAutomaticRefreshSweep(): Promise<void> {
   if (autoRefreshSweepRunning) return
   autoRefreshSweepRunning = true
+  const controller = new AbortController()
+  autoRefreshController = controller
   try {
-    const result = await refreshDueServerGroups()
+    const result = await refreshDueServerGroups(Date.now(), controller.signal)
     if (result.refreshed || result.failed) {
       logEvent('info', 'server-groups', 'automatic refresh sweep finished', result)
     }
   } finally {
+    if (autoRefreshController === controller) autoRefreshController = null
     autoRefreshSweepRunning = false
   }
 }
@@ -747,6 +778,7 @@ export function startServerGroupAutoRefresh(): void {
 }
 
 export function stopServerGroupAutoRefresh(): void {
+  autoRefreshController?.abort()
   if (initialAutoRefreshTimer) clearTimeout(initialAutoRefreshTimer)
   if (autoRefreshTimer) clearInterval(autoRefreshTimer)
   initialAutoRefreshTimer = null

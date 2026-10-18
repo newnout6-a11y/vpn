@@ -9,7 +9,7 @@
  * duplicate, regardless of whether the stored profile has a sourceUri.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { ipcMain } from 'electron'
 const healthMock = vi.hoisted(() => vi.fn())
 vi.mock('./keyHealthChecker', () => ({ checkGroupHealth: healthMock }))
@@ -91,6 +91,27 @@ import {
 } from './serverGroups'
 import { serverPickerStore } from './sharedStores'
 import type { VpnProfile } from './vpnProfiles'
+import { operations } from './operations'
+import { logEvent } from './appLogger'
+import { withProfileStoreWriteLock } from './profileStoreQueue'
+
+const pendingRefreshes = new Set<() => void>()
+function heldRefresh() {
+  let resolve!: (value: any) => void
+  const release = () => resolve({ profiles: [makeVpnProfile('late.example.com', 443)], source: 'subscription', fetched: true })
+  const promise = new Promise<any>(done => { resolve = done })
+  pendingRefreshes.add(release)
+  return { promise, release }
+}
+
+afterEach(async () => {
+  const draining = operations.close()
+  for (const release of pendingRefreshes) release()
+  pendingRefreshes.clear()
+  await draining
+  operations.resumeAdmission()
+  vi.useRealTimers()
+})
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -121,6 +142,163 @@ beforeEach(() => {
   resetStores()
   resolveVpnProfilesMock.mockReset()
   healthMock.mockReset()
+})
+
+describe('owned subscription refresh (AT-00-003/005/007; F-063/F-070)', () => {
+  function seed() {
+    const group = serverGroups.createGroup({ name: 'Subscription', source: 'subscription', sourceUrl: 'https://sub.example.test/list', importedAt: 1, status: 'active' })
+    const profile = { id: 'saved', name: 'Saved', groupId: group.id, server: 'saved.example.com', protocol: 'vless', port: 443, enabled: true }
+    storeData.current['server-picker'].profiles = [profile, { ...profile, id: 'android', clientDevice: 'android' }]
+    return group
+  }
+
+  it.each([0, 1])('cancels at device boundary %i without late profile, metadata or success writes', async boundary => {
+    const group = seed(), gate = heldRefresh(), controller = new AbortController()
+    resolveVpnProfilesMock.mockImplementation((_url, options) => {
+      expect(options.signal).toBeInstanceOf(AbortSignal)
+      return resolveVpnProfilesMock.mock.calls.length === boundary + 1 ? gate.promise : Promise.resolve({ profiles: [makeVpnProfile('fresh.example.com', 443)], source: 'subscription', fetched: true })
+    })
+    const before = JSON.stringify(storeData.current)
+    const run = refreshGroup(group.id, { signal: controller.signal })
+    const rejected = expect(run).rejects.toMatchObject({ category: 'cancelled' })
+    await vi.waitFor(() => expect(resolveVpnProfilesMock).toHaveBeenCalledTimes(boundary + 1))
+    const signal = resolveVpnProfilesMock.mock.calls[boundary][1].signal
+    const start = performance.now()
+    controller.abort()
+    await rejected
+    expect(performance.now() - start).toBeLessThan(900)
+    expect(signal.aborted).toBe(true)
+    await expect(refreshGroup(group.id)).rejects.toMatchObject({ category: 'conflict' })
+    gate.release()
+    await vi.waitFor(() => expect(operations.isBusy(`refresh:${group.id}`)).toBe(false))
+    expect(JSON.stringify(storeData.current)).toBe(before)
+    expect(resolveVpnProfilesMock).toHaveBeenCalledTimes(boundary + 1)
+  })
+
+  it('times out promptly but keeps physical admission until the raw request settles', async () => {
+    const group = seed(), gate = heldRefresh()
+    resolveVpnProfilesMock.mockReturnValue(gate.promise)
+    vi.useFakeTimers()
+    const run = refreshGroup(group.id)
+    const rejected = expect(run).rejects.toMatchObject({ category: 'timeout' })
+    await vi.advanceTimersByTimeAsync(120_000)
+    await rejected
+    expect(operations.isBusy(`refresh:${group.id}`)).toBe(true)
+    gate.release()
+    await vi.waitFor(() => expect(operations.isBusy(`refresh:${group.id}`)).toBe(false))
+    expect(pickerProfiles().map(p => p.id)).toEqual(['saved', 'android'])
+    expect(serverGroups.getGroup(group.id)?.lastFetchedAt).toBeUndefined()
+  })
+
+  it('lets manual refresh replace an automatic one only after its physical drain', async () => {
+    const group = seed(), gate = heldRefresh()
+    resolveVpnProfilesMock.mockReturnValueOnce(gate.promise).mockResolvedValue({ profiles: [makeVpnProfile('manual.example.com', 443)], source: 'subscription', fetched: true })
+    const automatic = refreshDueServerGroups()
+    await vi.waitFor(() => expect(resolveVpnProfilesMock).toHaveBeenCalledTimes(1))
+    const automaticOp = operations.list().find(op => op.status === 'running')!
+    expect(automaticOp.owner).toBe('schedule')
+    const manual = refreshGroup(group.id)
+    await vi.waitFor(() => expect(operations.list().find(op => op.operationId === automaticOp.operationId)?.status).toBe('cancelled'))
+    expect(resolveVpnProfilesMock).toHaveBeenCalledTimes(1)
+    gate.release()
+    expect(await manual).toMatchObject({ ok: true })
+    expect(await automatic).toEqual({ refreshed: 0, failed: 1 })
+    expect(pickerProfiles().some(p => p.server === 'late.example.com')).toBe(false)
+    expect(pickerProfiles().some(p => p.server === 'manual.example.com')).toBe(true)
+  })
+
+  it('drains shutdown without allowing a late request to persist', async () => {
+    const group = seed(), gate = heldRefresh()
+    resolveVpnProfilesMock.mockReturnValue(gate.promise)
+    const run = refreshGroup(group.id), before = JSON.stringify(storeData.current)
+    const rejected = expect(run).rejects.toMatchObject({ category: 'cancelled' })
+    let drained = false
+    const closing = operations.close().then(() => { drained = true })
+    await rejected
+    expect(drained).toBe(false)
+    gate.release()
+    await closing
+    expect(JSON.stringify(storeData.current)).toBe(before)
+  })
+
+  it('stops an active scheduled sweep and does not start the next group', async () => {
+    const first = seed(), gate = heldRefresh()
+    const { id: _id, ...input } = first
+    serverGroups.createGroup({ ...input, sourceUrl: 'https://sub.example.test/second' })
+    resolveVpnProfilesMock.mockReturnValue(gate.promise)
+    const before = JSON.stringify(storeData.current)
+    vi.useFakeTimers()
+    serverGroups.startAutoRefresh()
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(resolveVpnProfilesMock).toHaveBeenCalledTimes(1)
+    serverGroups.stopAutoRefresh()
+    expect(resolveVpnProfilesMock.mock.calls[0][1].signal.aborted).toBe(true)
+    gate.release()
+    await vi.waitFor(() => expect(operations.isBusy(`refresh:${first.id}`)).toBe(false))
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(resolveVpnProfilesMock).toHaveBeenCalledTimes(1)
+    expect(JSON.stringify(storeData.current)).toBe(before)
+  })
+
+  it('preserves profiles and user edits made while another group fetch is pending', async () => {
+    const group = seed(), gate = heldRefresh()
+    resolveVpnProfilesMock.mockReturnValueOnce(gate.promise).mockResolvedValue({ profiles: [makeVpnProfile('saved.example.com', 443, 'Saved')], source: 'subscription', fetched: true })
+    const run = refreshGroup(group.id)
+    storeData.current['server-picker'].profiles[0].name = 'User rename'
+    storeData.current['server-picker'].profiles.push({ id: 'imported', groupId: 'another', name: 'Imported', protocol: 'vless', server: 'other.example.com', port: 443 })
+    gate.release()
+    await run
+    expect(pickerProfiles().find(p => p.id === 'imported')?.name).toBe('Imported')
+    expect(pickerProfiles().find(p => p.id === 'saved')?.name).toBe('User rename')
+  })
+
+  it('does not resurrect profiles if their subscription is deleted during fetch', async () => {
+    const group = seed(), gate = heldRefresh()
+    resolveVpnProfilesMock.mockReturnValue(gate.promise)
+    const run = refreshGroup(group.id)
+    const rejected = expect(run).rejects.toMatchObject({ category: 'conflict' })
+    serverGroups.deleteGroup(group.id)
+    serverPickerStore.set('profiles', [])
+    gate.release()
+    await rejected
+    expect(pickerProfiles()).toEqual([])
+  })
+
+  it('cancels while queued for the shared import commit without publishing later', async () => {
+    const group = seed(), gate = heldRefresh(), controller = new AbortController()
+    const blockingImport = withProfileStoreWriteLock(() => gate.promise)
+    resolveVpnProfilesMock.mockResolvedValue({ profiles: [makeVpnProfile('queued.example.com', 443)], source: 'subscription', fetched: true })
+    const before = JSON.stringify(storeData.current)
+    const run = refreshGroup(group.id, { signal: controller.signal })
+    const rejected = expect(run).rejects.toMatchObject({ category: 'cancelled' })
+    await vi.waitFor(() => expect(resolveVpnProfilesMock).toHaveBeenCalledTimes(2))
+    controller.abort()
+    await rejected
+    expect(operations.isBusy(`refresh:${group.id}`)).toBe(true)
+    gate.release()
+    await blockingImport
+    await vi.waitFor(() => expect(operations.isBusy(`refresh:${group.id}`)).toBe(false))
+    expect(JSON.stringify(storeData.current)).toBe(before)
+  })
+
+  it('records distinct terminal outcomes for parallel group refreshes', async () => {
+    const group = seed()
+    const { id: _id, ...secondInput } = group
+    const second = serverGroups.createGroup({ ...secondInput, sourceUrl: 'https://sub.example.test/other' })
+    const gate = heldRefresh(), controller = new AbortController()
+    resolveVpnProfilesMock.mockImplementation(url => url.endsWith('/list') ? gate.promise : Promise.resolve({ profiles: [makeVpnProfile('other.example.com', 443)], source: 'subscription', fetched: true }))
+    vi.mocked(logEvent).mockClear()
+    const first = refreshGroup(group.id, { signal: controller.signal })
+    const rejected = expect(first).rejects.toMatchObject({ category: 'cancelled' })
+    expect(await refreshGroup(second.id)).toMatchObject({ ok: true })
+    controller.abort()
+    await rejected
+    gate.release()
+    await vi.waitFor(() => expect(operations.isBusy(`refresh:${group.id}`)).toBe(false))
+    const events = vi.mocked(logEvent).mock.calls.filter(call => call[2] === 'feature operation').map(call => call[3] as any)
+    expect(new Set(events.map(op => op.operationId)).size).toBe(2)
+    expect(events.filter(op => op.status !== 'running').map(op => op.status).sort()).toEqual(['cancelled', 'success'])
+  })
 })
 
 describe('group health result contract (AT-00-001; F-138)', () => {
@@ -346,7 +524,7 @@ describe('refreshGroup dedup-merge', () => {
       }
     ]
 
-    resolveVpnProfilesMock.mockImplementation((_url: string, options: { clientDevice?: 'pc' | 'android' }) => ({
+    resolveVpnProfilesMock.mockImplementation(async (_url: string, options: { clientDevice?: 'pc' | 'android' }) => ({
       profiles: [
         { ...makeVpnProfile('de.example.com', 443, 'DE'), outbound: { ...makeVpnProfile('de.example.com', 443, 'DE').outbound, uuid: `${options.clientDevice}-de` } },
         { ...makeVpnProfile('nl.example.com', 443, 'NL'), outbound: { ...makeVpnProfile('nl.example.com', 443, 'NL').outbound, uuid: `${options.clientDevice}-nl` } }
@@ -402,7 +580,7 @@ describe('refreshGroup dedup-merge', () => {
       }
     ]
 
-    resolveVpnProfilesMock.mockImplementation((_url: string, options: { clientDevice?: 'pc' | 'android' }) => ({
+    resolveVpnProfilesMock.mockImplementation(async (_url: string, options: { clientDevice?: 'pc' | 'android' }) => ({
       profiles: [
         {
           ...makeVpnProfile('shared.example.com', 443, 'Shared'),
@@ -457,7 +635,7 @@ describe('refreshGroup dedup-merge', () => {
       }
     ]
 
-    resolveVpnProfilesMock.mockImplementation((_url: string, options: { clientDevice?: 'pc' | 'android' }) => ({
+    resolveVpnProfilesMock.mockImplementation(async (_url: string, options: { clientDevice?: 'pc' | 'android' }) => ({
       profiles: options.clientDevice === 'android'
         ? [
             { ...makeVpnProfile('de.example.com', 443, 'DE'), outbound: { ...makeVpnProfile('de.example.com', 443, 'DE').outbound, uuid: 'android-de' } },
