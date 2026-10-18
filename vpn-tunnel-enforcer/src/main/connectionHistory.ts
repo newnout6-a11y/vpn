@@ -16,8 +16,10 @@
 
 import { ipcMain } from 'electron'
 import Store from 'electron-store'
-import { randomUUID } from 'crypto'
+import { createHash, randomUUID } from 'crypto'
 import type { ConnectionLogEntry } from '../shared/ipc-types'
+import { SESSION_OUTCOME_KINDS } from '../shared/ipc-types'
+import { logEvent } from './appLogger'
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -53,10 +55,82 @@ export interface AggregatedStats {
 
 interface ConnectionHistoryStoreSchema {
   connectionHistory: ConnectionLogEntry[]
+  /** Preserved for a newer reader or manual recovery; never rendered as valid entries. */
+  rejectedConnectionHistory?: unknown[]
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === 'object' && !Array.isArray(value)
+const isText = (value: unknown): value is string => typeof value === 'string'
+const isNumber = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value)
+const isNonNegative = (value: unknown): value is number => isNumber(value) && value >= 0
+const optional = (value: unknown, check: (value: unknown) => boolean) => value == null || check(value)
+const outcomeKinds = new Set<string>(SESSION_OUTCOME_KINDS)
+
+function validEntry(value: unknown): value is ConnectionLogEntry {
+  if (!isRecord(value) || !isText(value.id) || !isText(value.profileId) || !isText(value.profileName)
+    || !isNonNegative(value.startedAt) || !(value.endedAt === null || isNonNegative(value.endedAt))
+    || !isText(value.mode) || !['hard', 'soft', 'direct'].includes(value.mode)
+    || !isText(value.disconnectReason) || !['user', 'error', 'rotation', 'schedule', 'crash'].includes(value.disconnectReason)
+    || !isNonNegative(value.bytesDown) || !isNonNegative(value.bytesUp)
+    || !optional(value.errorMessage, isText)) return false
+  if (value.outcome == null) return true // Records before v1.1.18 have no outcome.
+  const outcome = value.outcome
+  if (!isRecord(outcome) || !isText(outcome.kind) || !outcomeKinds.has(outcome.kind) || !isText(outcome.headline)) return false
+  if (outcome.evidence === undefined) return true
+  const evidence = outcome.evidence
+  if (!isRecord(evidence)) return false
+  return ['singboxStderrTail', 'networkTransition', 'egressCountry', 'egressIp', 'hint']
+    .every(key => optional(evidence[key], isText))
+    && optional(evidence.singboxExitCode, isNumber)
+    && ['adaptiveAttempts', 'autoRestartAttempts'].every(key => optional(evidence[key], isNonNegative))
+    && ['killSwitchEngaged', 'leakDetectedDuringSession'].every(key => optional(evidence[key], v => typeof v === 'boolean'))
+    && optional(evidence.outboundFault, v => isText(v) && ['reality-key-mismatch', 'tls-handshake-failed', 'upstream-unreachable'].includes(v))
+    && optional(evidence.adaptiveMode, v => isText(v) && ['baseline', 'tls-compatibility', 'mtu-compatibility', 'external-managed'].includes(v))
+    && optional(evidence.proxyEngine, v => v === 'sing-box' || v === 'xray')
+}
+
+let corruptFingerprint: string | undefined
+function corrupted(raw: string, reason: 'invalid-json' | 'invalid-schema', rejectedEntries?: number): void {
+  const fingerprint = createHash('sha256').update(raw).digest('hex')
+  if (fingerprint !== corruptFingerprint) {
+    logEvent('error', 'connection-history', 'history.corrupted', {
+      reason, ...(rejectedEntries === undefined ? {} : { rejectedEntries })
+    })
+  }
+  corruptFingerprint = fingerprint
+}
+
+function deserializeHistory(raw: string): ConnectionHistoryStoreSchema {
+  let parsed: unknown
+  try { parsed = JSON.parse(raw) }
+  catch { corrupted(raw, 'invalid-json'); return { connectionHistory: [] } }
+  if (!isRecord(parsed) || !Array.isArray(parsed.connectionHistory)) {
+    corrupted(raw, 'invalid-schema')
+    return { connectionHistory: [] }
+  }
+  const entries: ConnectionLogEntry[] = []
+  const rejected: unknown[] = []
+  for (const entry of parsed.connectionHistory) {
+    if (validEntry(entry)) entries.push(entry)
+    else rejected.push(entry)
+  }
+  if (rejected.length) corrupted(raw, 'invalid-schema', rejected.length)
+  else corruptFingerprint = undefined
+  // Conf atomically saves this repaired view on the next write; never log raw
+  // corrupt data, which can include credentials or personal profile names.
+  return {
+    ...parsed, connectionHistory: entries,
+    rejectedConnectionHistory: [
+      ...(Array.isArray(parsed.rejectedConnectionHistory) ? parsed.rejectedConnectionHistory : []),
+      ...rejected
+    ]
+  }
 }
 
 const historyStore = new Store<ConnectionHistoryStoreSchema>({
   name: 'connection-history',
+  deserialize: deserializeHistory,
   defaults: {
     connectionHistory: []
   }
@@ -245,6 +319,7 @@ function addEntry(entry: Omit<ConnectionLogEntry, 'id'>): ConnectionLogEntry {
     outcome: entry.outcome ?? null,
     id: randomUUID()
   }
+  if (!validEntry(newEntry)) throw new Error('Invalid connection history entry')
 
   const entries = getEntries()
   entries.push(newEntry)
@@ -255,11 +330,13 @@ function addEntry(entry: Omit<ConnectionLogEntry, 'id'>): ConnectionLogEntry {
   }
 
   historyStore.set('connectionHistory', entries)
+  corruptFingerprint = undefined
   return newEntry
 }
 
 function clearHistory(): void {
-  historyStore.set('connectionHistory', [])
+  historyStore.set({ connectionHistory: [], rejectedConnectionHistory: [] })
+  corruptFingerprint = undefined
 }
 
 // ─── Public API ──────────────────────────────────────────────────────────────

@@ -1809,6 +1809,25 @@ CI/review нового SHA проверяются отдельно после pu
   Authenticode NotSigned. Установка не выполнялась. Логи
   `.tmp/pr46-empty-adapters-dist.log`, `.tmp/pr46-empty-adapters-artifacts.json`.
 
+## 18.10.2026 — P2 PR #46 закрыт, возврат к WP-0
+
+- Follow-up PR #47 (https://github.com/newnout6-a11y/vpn/pull/47) слит
+  17.10.2026 22:41:12 UTC (18.10 01:41:12 Москва), merge
+  `d6b940121eaed719ad0c547df194fa72abd2ffab`.
+- Проверенный code head `af6c7aa2f62ac13884431668825d8f40f0ae8d83`:
+  Windows check 117522257407 — success, 3293 passed / 4 skipped,
+  216.62 s; coverage AC 927/927, F 210/210; BFE priority verified,
+  transaction aborted=true; Electron reads 1 passed / 1 skipped.
+  Rust check 117522257150 — success. CI run 39075692494.
+  Лог `.tmp/pr46-empty-adapters-ci.log`.
+- Revix check 117522270974 на том же head — success, Ready to merge,
+  0 annotations; actionable review comments отсутствуют. CodeRabbit не ожидался.
+- Комментарий 4304712554 закрыт кодом и негативными/положительными
+  регрессиями. L3 сохраняет статус «Пропущено владельцем».
+- main и codex/wp0-contracts fast-forward до merge; отложенные WP-0
+  изменения восстановлены без конфликтов. Продолжается вся матрица
+  AT-00-001…010, затем WP-2. Цель остаётся активной.
+
 ## 18.10.2026 — замечания PR #45: единые DST-границы расписаний
 
 - По запросу владельца проверен комментарий
@@ -1889,3 +1908,97 @@ CI/review нового SHA проверяются отдельно после pu
   2 skipped, 164.13 s, exit 0; лог `.tmp/pr44-review-full.log`.
   После уточнения AT-метки повторно `npm.cmd test -- src/main/indeterminateIpAutoVerify.test.ts`
   — 20 passed, exit 0. CI/review нового head PR #44 учитываются отдельно.
+
+## 18.10.2026 — открытые PR закрыты, WP-0 возобновлён
+
+- PR #44 слит с разрешения владельца после принятия проверки агента без
+  нового Revix: merge `f0aef8f726852e5d8e292903bc670f06c4102319`.
+  Head `6f535ad0012256779cb2f0b7177d097d12b80ff8`: Windows, Rust, website
+  CI success. Windows — 3328 passed / 4 skipped, typecheck и coverage зелёные.
+  REST-проверка после слияния: открытых PR 0; #43/#45 также merged.
+- Ветка codex/wp0-contracts обновлена fast-forward до main f0aef8f.
+  Stash WP-0 применён; конфликт только в progress.md разрешён сохранением
+  обеих записей. Stash пока оставлен как резервная копия. Чужие untracked
+  .claude/.wrangler/.playwright-cli/output не затрагивались.
+- WP-3 завершён с L3 «Пропущено владельцем» (SKIPPED_BY_OWNER, §10.12),
+  не PASS. WP-0 в работе: полная матрица в docs/wp0-acceptance-2026-10-18.md
+  внутри приложения; ранее исправленный passive rejection dedup перепроверяется
+  на актуальном main, затем продолжается AT-00-001…010.
+
+- Перепроверка восстановленного passive rejection dedup на main f0aef8f:
+  `npm.cmd test -- src/main/firewallTransactions.test.ts` — 97 passed /
+  1 skipped, 6.25 s, exit 0; `npm.cmd run typecheck` — exit 0.
+  `npm.cmd test` — 3329 passed / 5 skipped / 0 failed, 237 файлов passed /
+  2 skipped, 161.72 s, exit 0, `.tmp/wp0-resumed-full.log`.
+  Coverage — AC 927/927, F 210/210, exit 0; оба diff --check — exit 0.
+  Это проверка первого адресного исправления WP-0, не приёмка всего пакета.
+
+## 18.10.2026 — WP-0: устойчивость истории подключений (AT-00-010; F-143)
+
+- Подтверждены два пробела: обрезанный JSON выбрасывал SyntaxError при
+  загрузке модуля; Array.isArray принимал повреждённые записи и позволял
+  молчаливо терять историю при неверной корневой схеме. Первичный файловый
+  regression: 8 failed / 2 passed, 1.04 s, exit 1;
+  `.tmp/wp0-history-before.log`.
+- Десериализация проверяет корневую схему, обязательные и используемые
+  optional/outcome/evidence поля. Валидные записи смешанного массива
+  сохраняются, невалидные отсеиваются с количеством; повреждение JSON
+  сообщает `history.corrupted`. Raw содержимое и ошибки парсера не логируются.
+  Повреждённый файл до следующей записи сохраняется; новые записи работают,
+  Conf выполняет существующий атомарный write. Ошибки I/O не подавляются.
+- Дедуп по SHA-256 относится только к повторным чтениям одного повреждения;
+  после изменения содержимого или успешной записи/очистки новое повреждение
+  снова логируется. Некорректный addEntry отклоняется до изменения файла.
+- Стенд использует настоящий Conf и временные файлы внутри .tmp,
+  перезагружает сервис после 100 записей. Оболочка Electron userData/version
+  подставлена; это L2, не проверка полного перезапуска Electron/Windows.
+  Матрица covers legacy records, truncation/tail, schema corruption,
+  typed fields, structured evidence, runtime damage и filesystem failure.
+- Первый адресный прогон после правки: 41 passed / 1 failed: после успешной
+  записи fingerprint не сбрасывался до следующего чтения. Исправлено сбросом
+  только после успешного set/clear; добавлены регрессии. Расширенный прогон
+  connectionHistoryStorage/connectionHistory/auditFixesRegression — 73 passed.
+  Typecheck обнаружил несовпадение возвращаемого типа deserialize; исправлено
+  явной ConnectionHistoryStoreSchema с безопасным пустым представлением.
+  Финальные проверки и PR учитываются ниже. WP-0 остаётся в работе.
+
+- Финальный `npm.cmd run typecheck` — exit 0.
+  `npm.cmd test -- src/main/connectionHistoryStorage.test.ts src/main/connectionHistory.test.ts src/main/auditFixesRegression.test.ts`
+  — 73 passed, 3 файла, 1.23 s, exit 0.
+  `npm.cmd test` — 3350 passed / 5 skipped / 0 failed, 238 файлов passed /
+  2 skipped, 161.76 s, exit 0; `.tmp/wp0-history-full.log`.
+  `npm.cmd run build` (включая typecheck) — exit 0;
+  `.tmp/wp0-history-build.log`. Coverage — AC 927/927, F 210/210, exit 0;
+  `git diff --check` и staged diff check — exit 0.
+
+## 18.10.2026 — WP-0 PR #48: проверка Revix Low risk
+
+- PR https://github.com/newnout6-a11y/vpn/pull/48 создан на head
+  `2a672792868053b52f76155db6bce742da2aa9c5`, оба адресных исправления
+  закоммичены и запушены. Revix check 117639398277 — completed/neutral,
+  Low risk: suggestion 4306503597 и question 4306503603.
+- Question об исключении addEntry проверен по настоящим call sites:
+  index.ts writeSessionEntry оборачивает addEntry в try/catch и логирует
+  предупреждение; recordStartFailure тоже catches. Ошибка истории не выходит
+  из этих границ и не обрывает teardown. Код остановки менять не требуется.
+- Suggestion подтверждён: unknown outcome из нового приложения нельзя
+  уничтожать при следующей записи старым reader. Теперь отбракованные
+  элементы сохраняются в rejectedConnectionHistory внутри того же store;
+  не возвращаются как валидные записи и не попадают в log payload.
+  Повторные записи не дублируют их; явная пользовательская очистка удаляет
+  и обычную, и отбракованную историю. Добавлены файловые регрессии.
+- Runtime SESSION_OUTCOME_KINDS стал общим источником union-типа и проверки
+  истории; дублирующий ручной список удалён. Каждое значение общего списка
+  проходит write/reload regression. Полные проверки нового head — ниже.
+
+- Финальные проверки доработки Revix: `npm.cmd run typecheck` — exit 0;
+  `npm.cmd test -- src/main/connectionHistoryStorage.test.ts src/main/connectionHistory.test.ts src/main/sessionOutcome.test.ts src/main/auditFixesRegression.test.ts`
+  — 104 passed, 4 файла, 1.27 s, exit 0. Полный `npm.cmd test` —
+  3366 passed / 5 skipped / 0 failed, 238 файлов passed / 2 skipped,
+  154.57 s, exit 0; `.tmp/wp0-review-full.log`. `npm.cmd run build`
+  (включая typecheck) — exit 0, `.tmp/wp0-review-build.log`.
+  Coverage — AC 927/927, F 210/210, exit 0; diff checks — exit 0.
+- Исходный PR head 2a67279 завершил все три CI success (run 39115166050).
+  После доработки требуется новый head CI/review; результаты не переносятся.
+  Далее в том же WP-0 — разрешение wrapper-регистраций IPC и AT-00-001,
+  затем остальные незавершённые строки матрицы. WP-2 не начат.
