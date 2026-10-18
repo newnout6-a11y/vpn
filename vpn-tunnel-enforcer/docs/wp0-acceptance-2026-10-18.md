@@ -558,3 +558,20 @@ env с сохранением исходного backup, без stop/restart TUN
 FSM/lane и fake OS. Тест настоящего env-модуля проверяет все три proxy values
 после смены адреса/протокола и восстановление исходного baseline. Это не
 натурная проверка доставки Windows environment notification приложениям.
+
+### Третий Qodo #58 — компенсация частичного Soft refresh
+
+Qodo run 1540530 completed на 67fc70c: шесть прежних findings implemented,
+новый action_required — частичный env.apply откатывал к pre-Soft baseline.
+Перед refresh теперь строго читаются все текущие user env values. При отказе
+обновления восстанавливается этот отдельный snapshot с read-back каждой записи;
+исходный durable backup и pending marker остаются для eventual stop. Неизвестное
+текущее значение запрещает изменения. Даже первая команда, вернувшая ошибку
+после изменения registry, компенсируется. Неудачный refresh остаётся ошибкой
+FSM (не успешным применением новых настроек); при отказе компенсации cleanup
+обязателен. Достоверность нового endpoint не заявляется.
+
+Исполняемые env regressions проверяют отказ каждой из четырёх записей после
+mutation, отказ snapshot read и повторный отказ компенсации; original baseline
+впоследствии восстанавливается штатным stop. Windows registry/process.env
+подменены; это L1/L2, не натурная приёмка глобального environment broadcast.

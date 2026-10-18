@@ -109,18 +109,45 @@ async function deleteUserEnvValue(name: string): Promise<void> {
   }
 }
 
-async function saveBackupIfMissing(): Promise<void> {
-  if (await env.isApplied()) return
-  await mkdir(join(homedir(), '.vpnte'), { recursive: true })
-  const backup: EnvProxyBackup = {
+async function readUserEnvironment(): Promise<EnvProxyBackup> {
+  return {
     createdAt: Date.now(),
     httpProxy: await getUserEnvValue('HTTP_PROXY'),
     httpsProxy: await getUserEnvValue('HTTPS_PROXY'),
     allProxy: await getUserEnvValue('ALL_PROXY'),
     noProxy: await getUserEnvValue('NO_PROXY')
   }
+}
+
+/** Existing Soft needs a separate compensation snapshot; its durable backup
+ * still belongs to the eventual protection stop, never to a proxy refresh. */
+async function saveBackupIfMissing(): Promise<EnvProxyBackup | null> {
+  if (await env.isApplied()) return readUserEnvironment()
+  await mkdir(join(homedir(), '.vpnte'), { recursive: true })
+  const backup = await readUserEnvironment()
   await writeFile(backupPath(), JSON.stringify(backup, null, 2), 'utf8')
   await retainCleanupPending()
+  return null
+}
+
+async function restoreEnvironment(backup: EnvProxyBackup): Promise<boolean> {
+  let hasErrors = false
+  const restoreOrDelete = async (name: string, value: string | null) => {
+    try {
+      if (await getUserEnvValue(name) !== value) {
+        if (value !== null) await setUserEnvValue(name, value)
+        else await deleteUserEnvValue(name)
+        if (await getUserEnvValue(name) !== value) throw new Error(`Unable to verify environment restoration for ${name}`)
+      }
+      if (value !== null) process.env[name] = value
+      else delete process.env[name]
+    } catch { hasErrors = true }
+  }
+  await restoreOrDelete('HTTP_PROXY', backup.httpProxy)
+  await restoreOrDelete('HTTPS_PROXY', backup.httpsProxy)
+  await restoreOrDelete('ALL_PROXY', backup.allProxy)
+  await restoreOrDelete('NO_PROXY', backup.noProxy)
+  return !hasErrors
 }
 
 export const env = {
@@ -132,8 +159,9 @@ export const env = {
 
   async apply(proxyAddr: string, proxyType: 'socks5' | 'http' = 'socks5'): Promise<boolean> {
     const url = proxyUrl(proxyAddr, proxyType)
+    let previousSoft: EnvProxyBackup | null
     try {
-      await saveBackupIfMissing()
+      previousSoft = await saveBackupIfMissing()
     } catch {
       // Failed to prepare backup before modifying system environment.
       // Abort immediately without rollback to avoid deleting user variables.
@@ -159,7 +187,12 @@ export const env = {
       await broadcastEnvironmentChanged()
       return true
     } catch {
-      if (appliedKeys.length > 0) {
+      if (previousSoft) {
+        // Even a failed first command may have mutated the registry. Restore
+        // all four previous Soft values and retain the original stop receipt.
+        await restoreEnvironment(previousSoft)
+        await broadcastEnvironmentChanged()
+      } else if (appliedKeys.length > 0) {
         await this.rollback().catch(() => undefined)
       }
       return false
@@ -177,36 +210,7 @@ export const env = {
         return false
       }
 
-      let hasErrors = false
-
-      const restoreOrDelete = async (name: string, value: string | null) => {
-        try {
-          if (await getUserEnvValue(name) !== value) {
-            if (value !== null) {
-              await setUserEnvValue(name, value)
-            } else {
-              await deleteUserEnvValue(name)
-            }
-            if (await getUserEnvValue(name) !== value) {
-              throw new Error(`Unable to verify environment restoration for ${name}`)
-            }
-          }
-          if (value !== null) {
-            process.env[name] = value
-          } else {
-            delete process.env[name]
-          }
-        } catch {
-          hasErrors = true
-        }
-      }
-
-      await restoreOrDelete('HTTP_PROXY', backup.httpProxy)
-      await restoreOrDelete('HTTPS_PROXY', backup.httpsProxy)
-      await restoreOrDelete('ALL_PROXY', backup.allProxy)
-      await restoreOrDelete('NO_PROXY', backup.noProxy)
-
-      if (hasErrors) {
+      if (!await restoreEnvironment(backup)) {
         // Preserve backup file if restore operations failed, so rollback can be retried
         return false
       }

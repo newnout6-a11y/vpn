@@ -156,7 +156,7 @@ describe('env autoconfig backup and verified rollback', () => {
     expect(await env.apply('127.0.0.1:10809', 'http')).toBe(true)
     expect(mockFs[backupFile]).toBe(receipt)
     expect(vi.mocked(writeFile).mock.calls.filter(([path]) => path === backupFile)).toHaveLength(1)
-    expect(queriedKeys()).toEqual([])
+    expect(queriedKeys()).toEqual([...proxyKeys])
     expect(mockRegistry.HTTP_PROXY).toBe('http://127.0.0.1:10809')
     for (const key of ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY'] as const) {
       expect(mockRegistry[key]).toBe('http://127.0.0.1:10809')
@@ -413,6 +413,60 @@ describe('env autoconfig backup and verified rollback', () => {
     for (const key of proxyKeys) expect(process.env[key]).toBe(originalValues[key])
     expect(mockFs[backupFile]).toBeUndefined()
     expect(await env.isApplied()).toBe(false)
+  })
+
+  it.each(proxyKeys)('retains the previous Soft endpoint when refreshing %s fails after mutation (AT-00-003)', async key => {
+    seedRegistry(originalValues)
+    expect(await env.apply('127.0.0.1:10808')).toBe(true)
+    const receipt = mockFs[backupFile]
+    let failed = false
+    mockExecFile.mockImplementation((cmd: string, args: string[]) => {
+      const result = registryCommand(cmd, args)
+      if (!failed && cmd === 'setx' && args[0] === key) {
+        failed = true
+        return new Error('refresh write failed after mutation')
+      }
+      return result
+    })
+    expect(await env.apply('127.0.0.1:10809', 'http')).toBe(false)
+    expect(failed).toBe(true)
+    expect(mockRegistry).toEqual(vpnValues)
+    for (const name of proxyKeys) expect(process.env[name]).toBe(vpnValues[name])
+    expect(mockFs[backupFile]).toBe(receipt)
+    expect(mockFs[pendingFile]).toBeDefined()
+    expect(await env.isApplied()).toBe(true)
+    expect(await env.rollback()).toBe(true)
+    expect(mockRegistry).toEqual(originalValues)
+  })
+
+  it('refuses refresh before mutation if its current endpoint cannot be read', async () => {
+    seedRegistry(originalValues)
+    await env.apply('127.0.0.1:10808')
+    const receipt = mockFs[backupFile]
+    mockExecFile.mockClear()
+    mockExecFile.mockImplementation((cmd: string, args: string[]) => cmd === 'reg' && args[0] === 'query' && args[3] === 'HTTPS_PROXY'
+      ? new Error('read denied') : registryCommand(cmd, args))
+    expect(await env.apply('127.0.0.1:10809', 'http')).toBe(false)
+    expect(mutations()).toEqual([])
+    expect(mockRegistry).toEqual(vpnValues)
+    expect(mockFs[backupFile]).toBe(receipt)
+  })
+
+  it('retains the original cleanup obligation if refresh compensation is also denied', async () => {
+    seedRegistry(originalValues)
+    await env.apply('127.0.0.1:10808')
+    const receipt = mockFs[backupFile]
+    mockExecFile.mockImplementation((cmd: string, args: string[]) => {
+      if (cmd === 'setx' && (args[0] === 'HTTPS_PROXY' || args[1] === vpnValues.HTTP_PROXY)) return new Error('write denied')
+      return registryCommand(cmd, args)
+    })
+    expect(await env.apply('127.0.0.1:10809', 'http')).toBe(false)
+    expect(mockFs[backupFile]).toBe(receipt)
+    expect(mockFs[pendingFile]).toBeDefined()
+    expect(await env.isApplied()).toBe(true)
+    mockExecFile.mockImplementation(registryCommand)
+    expect(await env.rollback()).toBe(true)
+    expect(mockRegistry).toEqual(originalValues)
   })
 
   describe.each(['set', 'delete'] as const)('verified %s rollback', (operation) => {

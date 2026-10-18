@@ -3077,3 +3077,33 @@ CI/review нового SHA проверяются отдельно после pu
   — ELECTRON_SMOKE_PASS, exit 0 (.tmp/wp0-qodo58-soft-electron.log);
   `node scripts/test-wp1-native.mjs --ipc-only` — WP1_NATIVE_PASS, exit 0
   (.tmp/wp0-qodo58-soft-csp.log). Это локальные subsets с fake OS, не L3 PASS.
+
+### PR #58 — третий Qodo: компенсация обновления действующей Soft-защиты
+
+- Head 67fc70c: CI run 39151813076 success. Qodo run 1540530 completed на том
+  же SHA: шесть прежних findings implemented; новый action_required
+  8dff805e-714f-4aa6-a8e2-38c784fb9067. Частичный отказ env refresh выполнял
+  eventual-stop rollback к pre-Soft baseline, снимая прежний рабочий прокси.
+  Слияние не выполнялось; ручных запросов/изменений finding status нет.
+- Refresh сначала строго читает текущие env values в отдельный snapshot.
+  Неизвестное значение запрещает mutation. При apply failure snapshot независимо
+  восстанавливается по четырём ключам с read-back, даже если первая команда
+  вернула ошибку после записи. Durable original backup и pending marker остаются
+  для штатного stop. При ошибке компенсации новые настройки не объявляются
+  применёнными, lane остаётся в error с cleanupRequired. Значения не логируются.
+- До fix `npm.cmd test -- src/main/autoconfig/env.test.ts`: 6 failed / 88 passed,
+  376 ms, exit 1 (.tmp/wp0-qodo58-compensation-before.log). После
+  `npm.cmd test -- src/main/autoconfig/env.test.ts src/main/autoconfig/index.test.ts src/main/lifecycleCleanup.test.ts`:
+  274 passed / 3 files, 26.15 s, exit 0 (.tmp/wp0-qodo58-compensation-after.log).
+  Проверены четыре failed-after-write точки, отказ snapshot read, отказ
+  compensation и последующий baseline rollback; OS boundaries подменены.
+- `npm.cmd run typecheck`: exit 0, 158 channels / 0 public any
+  (.tmp/wp0-qodo58-compensation-typecheck.log). Coverage AC 927/927, F 210/210,
+  diff check — exit 0. Финальные suite/build/native результаты записываются ниже.
+- Финальный `npm.cmd test`: **4020 passed / 5 skipped / 0 failed**,
+  253 files passed / 2 skipped, 185.51 s, exit 0
+  (.tmp/wp0-qodo58-compensation-full.log). `npm.cmd run build` — exit 0
+  (.tmp/wp0-qodo58-compensation-build.log). `node scripts/test-electron-runtime.mjs`
+  — ELECTRON_SMOKE_PASS, exit 0 (.tmp/wp0-qodo58-compensation-electron.log);
+  `node scripts/test-wp1-native.mjs --ipc-only` — WP1_NATIVE_PASS, exit 0
+  (.tmp/wp0-qodo58-compensation-csp.log). Traceability/smoke не подменяют L3.
