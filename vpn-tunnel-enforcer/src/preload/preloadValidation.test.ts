@@ -133,6 +133,35 @@ describe('preload IPC argument validation', () => {
     expect(invokeMock).not.toHaveBeenCalled()
   })
 
+  it.each([
+    { autoStart: 'false' }, { strictAdapterLockdown: 'false' }, { proxyEngine: 'mihomo' },
+    { directVpnCachedProfiles: [{ name: 'Profile', protocol: 'vless', outbound: { tls: { enabled: () => true } } }] },
+    { directVpnCachedProfiles: [{ name: 'Profile', protocol: 'vless', outbound: { server: new Date(0) } }] },
+    { directVpnCachedProfiles: [{ name: 'Profile', protocol: 'vless', outbound: { port: NaN } }] },
+  ])('rejects malformed settings fields before any IPC effects', async settings => {
+    const api = await loadApi()
+    await expectLocalValidation(() => api.saveSettings(settings))
+    expect(invokeMock).not.toHaveBeenCalled()
+  })
+
+  it('keeps typed settings patches unchanged before feature normalization', async () => {
+    const api = await loadApi()
+    const patch = { autoStart: false, checkInterval: -5, directVpnCachedAt: null,
+      directVpnCachedProfiles: [{ name: 'Profile', protocol: 'vless', outbound: { server: 'example.test', tls: { enabled: true } } }] }
+    await api.saveSettings(patch)
+    expect(invokeMock).toHaveBeenCalledExactlyOnceWith('save-settings', patch)
+  })
+
+  it('bounds nested outbound JSON before any IPC effects', async () => {
+    const api = await loadApi()
+    let deep: Record<string, unknown> = {}
+    for (let index = 0; index < 14; index++) deep = { child: deep }
+    for (const outbound of [deep, { values: Array.from({ length: 20_000 }, () => 0) }]) {
+      await expectLocalValidation(() => api.saveSettings({ directVpnCachedProfiles: [{ name: 'Profile', protocol: 'vless', outbound }] }))
+    }
+    expect(invokeMock).not.toHaveBeenCalled()
+  })
+
   // AT-00-001/004: the public bridge uses the same nested schemas as main.
   it.each([
     ['schedulerUpdate', ['id', { days: [7] }]],

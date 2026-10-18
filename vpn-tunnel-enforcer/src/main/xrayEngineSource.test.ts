@@ -9,6 +9,7 @@ describe('xrayEngine architectural invariants', () => {
   const electronBuilderSrc = readFileSync(join(root, 'electron-builder.yml'), 'utf8')
   const installerSrc = readFileSync(join(root, 'build/installer.nsh'), 'utf8')
   const settingsSrc = readFileSync(join(root, 'src/main/settings.ts'), 'utf8')
+  const settingsTypeSrc = readFileSync(join(root, 'src/shared/settings.ts'), 'utf8')
 
   it('runs preflight test before launching Xray runtime', () => {
     const preflightSrc = readFileSync(join(root, 'src/main/xrayPreflight.ts'), 'utf8')
@@ -50,8 +51,8 @@ describe('xrayEngine architectural invariants', () => {
     expect(installerSrc).not.toContain('taskkill')
   })
 
-  it('settings.ts includes proxyEngine in AppSettings and defaults', () => {
-    expect(settingsSrc).toContain("proxyEngine: 'auto' | 'sing-box' | 'xray'")
+  it('shared AppSettings and runtime defaults include proxyEngine', () => {
+    expect(settingsTypeSrc).toContain("proxyEngine: 'auto' | 'sing-box' | 'xray'")
     expect(settingsSrc).toContain("proxyEngine: 'auto'")
   })
 })
