@@ -13,7 +13,7 @@
 
 import { ipcMain, type IpcMainInvokeEvent } from 'electron'
 import { isIP } from 'net'
-import Store from 'electron-store'
+import Store from './versionedStore'
 import { logEvent } from './appLogger'
 import { compactForIpcLog } from './ipcLogging'
 import { optionalString, requireEnum, requirePlainObject, requireString } from './ipcValidation'

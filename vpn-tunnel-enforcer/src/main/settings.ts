@@ -1,7 +1,7 @@
 import type { AppSettings } from '../shared/settings'
 export type { AppSettings } from '../shared/settings'
 import { app, dialog } from 'electron'
-import Store from 'electron-store'
+import Store from './versionedStore'
 import { join } from 'path'
 import { execElevated } from './admin'
 import { domainEnrichmentService } from './domainEnrichment'

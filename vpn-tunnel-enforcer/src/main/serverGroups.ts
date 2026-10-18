@@ -25,7 +25,7 @@ export type { RefreshGroupResult } from '../shared/ipc-types'
 import { ipcMain, type IpcMainInvokeEvent } from 'electron'
 import { randomUUID } from 'crypto'
 import { compactForIpcLog } from './ipcLogging'
-import Store from 'electron-store'
+import Store from './versionedStore'
 import { logEvent } from './appLogger'
 import {
   applyClientDeviceToOutbound,

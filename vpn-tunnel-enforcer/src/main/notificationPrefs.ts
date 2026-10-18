@@ -14,7 +14,7 @@
  */
 
 import { ipcMain, shell } from 'electron'
-import Store from 'electron-store'
+import Store from './versionedStore'
 import { getWindowsNotificationState, resetWindowsNotificationBlock, setNotificationPrefsProvider } from './notifications'
 import type { NotificationPreferences } from '../shared/ipc-types'
 import { requirePlainObject } from './ipcValidation'

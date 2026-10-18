@@ -16,7 +16,7 @@
  */
 
 import { ipcMain, dialog, type WebContents } from 'electron'
-import Store from 'electron-store'
+import Store from './versionedStore'
 import { randomUUID } from 'crypto'
 import { readFileSync, readSync, openSync, closeSync, fstatSync } from 'fs'
 import { logEvent } from './appLogger'

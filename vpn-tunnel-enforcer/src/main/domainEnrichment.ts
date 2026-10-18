@@ -1,7 +1,7 @@
 import type { DomainEnrichment } from '../shared/traffic'
 export type { DomainEnrichment } from '../shared/traffic'
 import { BrowserWindow } from 'electron'
-import Store from 'electron-store'
+import Store from './versionedStore'
 import { randomUUID } from 'node:crypto'
 import { lookup } from 'node:dns/promises'
 import { EventEmitter } from 'node:events'

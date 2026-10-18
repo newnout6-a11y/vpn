@@ -8,7 +8,7 @@
  */
 
 import { app, ipcMain, BrowserWindow } from 'electron'
-import Store from 'electron-store'
+import Store from './versionedStore'
 import type { Locale } from '../shared/ipc-types'
 
 // ─── Constants ───────────────────────────────────────────────────────────────

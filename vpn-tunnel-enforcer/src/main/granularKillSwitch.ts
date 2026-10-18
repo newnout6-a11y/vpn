@@ -14,7 +14,7 @@ import { persistRecoveryPolicy } from './recoveryManifest'
  */
 
 import { ipcMain, BrowserWindow, dialog, type IpcMainInvokeEvent } from 'electron'
-import Store from 'electron-store'
+import Store from './versionedStore'
 import { randomUUID } from 'crypto'
 import {
   enableKillSwitch,
