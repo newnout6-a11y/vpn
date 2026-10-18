@@ -304,6 +304,17 @@ export function getLastSingBoxExit(): SingBoxExitInfo | null {
 // adaptive transition / config hot-reload) with the caller's `reason` string,
 // so index.ts can roll the connection-history session when the node changes.
 let protectedRestartCallback: ((reason: string) => void) | null = null
+type NativeStartupObservation = { phase: 'begin'; generation: number } | { phase: 'finished'; generation: number; success: boolean }
+let nativeStartupGeneration = 0
+let nativeStartupCallback: ((observation: NativeStartupObservation) => void) | null = null
+
+export function onNativeStartup(callback: (observation: NativeStartupObservation) => void): void {
+  nativeStartupCallback = callback
+}
+
+function notifyNativeStartup(observation: NativeStartupObservation): void {
+  try { nativeStartupCallback?.(observation) } catch { /* an observer cannot strand startup/cleanup */ }
+}
 
 export function onProtectedRestart(cb: (reason: string) => void): void {
   protectedRestartCallback = cb
@@ -2409,6 +2420,14 @@ export const tunController = {
     let releaseStart!: () => void
     const startCompletion = new Promise<void>(done => { releaseStart = done })
     activeStartCompletion = startCompletion
+    const nativeGeneration = ++nativeStartupGeneration
+    notifyNativeStartup({ phase: 'begin', generation: nativeGeneration })
+    let startupReceiptSent = false
+    const publishStartupReceipt = (success: boolean) => {
+      if (startupReceiptSent) return
+      startupReceiptSent = true
+      notifyNativeStartup({ phase: 'finished', generation: nativeGeneration, success })
+    }
     let startupPollCompletion: Promise<void> | null = null
     const startupCleanupTasks: Promise<void>[] = []
     try {
@@ -2418,6 +2437,7 @@ export const tunController = {
       // Consume a cancellation that arrived while this start was unwinding;
       // otherwise the next deliberate connect would be cancelled too.
       if (transitionCancelRequested) transitionCancelRequested = false
+      publishStartupReceipt(result.success)
       return result
     }
 
@@ -2936,6 +2956,7 @@ export const tunController = {
         resolved = true
         startInProgress = false
         if (activeStartAbortController === startAbortController) activeStartAbortController = null
+        publishStartupReceipt(result.success)
         resolve(result)
       }
 
@@ -3789,6 +3810,7 @@ export const tunController = {
       // A timeout that merely stops waiting cannot cancel a native mutation.
       if (startupPollCompletion) await startupPollCompletion
       await Promise.allSettled(startupCleanupTasks)
+      publishStartupReceipt(false)
       if (activeStartCompletion === startCompletion) activeStartCompletion = null
       if (activeStartAbortController === startAbortController) activeStartAbortController = null
       startInProgress = false

@@ -127,7 +127,7 @@ describe('app preparation order', () => {
     const begin = appSource.indexOf('const helperStartup = startElevatedPsHelper()')
     const end = appSource.indexOf('createWindow()', begin)
     if (begin < 0 || end < 0) throw new Error('Production helper/recovery preparation stage not found')
-    const deps = { startElevatedPsHelper: vi.fn(async () => {}), performCrashRecovery: vi.fn(async () => {}),
+    const deps = { startElevatedPsHelper: vi.fn(async () => {}), performCrashRecovery: vi.fn(async () => {}), adoptRetainedSoftProtection: vi.fn(async () => {}),
       warmElevatedPsHelper: vi.fn(async () => {}), warmRecoveryPsWorker: vi.fn(), logEvent: vi.fn(),
       connectionLifecycle: { busy: Boolean(guards.busy) }, tunController: { getStatus: () => ({ running: Boolean(guards.running) }) },
       isQuitting: Boolean(guards.isQuitting), shutdownInProgress: Boolean(guards.shutdownInProgress) }
@@ -145,6 +145,8 @@ describe('app preparation order', () => {
     await starting
     await Promise.resolve()
     expect(h.warmElevatedPsHelper).toHaveBeenCalledOnce()
+    expect(h.performCrashRecovery.mock.invocationCallOrder[0]).toBeLessThan(h.adoptRetainedSoftProtection.mock.invocationCallOrder[0])
+    expect(h.adoptRetainedSoftProtection.mock.invocationCallOrder[0]).toBeLessThan(h.warmElevatedPsHelper.mock.invocationCallOrder[0])
   })
   it('keeps window preparation independent of unfinished helper warm-up', async () => {
     const h = appStage()

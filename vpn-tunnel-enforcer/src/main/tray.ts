@@ -1,8 +1,17 @@
 import { Tray, Menu, nativeImage, BrowserWindow, app, type MenuItemConstructorOptions, type NativeImage } from 'electron'
 import { existsSync } from 'fs'
 import { join } from 'path'
+import type { TunnelSnapshot } from '../shared/tunnel-state'
 
-export type TrayStatus = 'protected' | 'leak' | 'off' | 'starting' | 'proxy-down' | 'killswitch' | 'restarting'
+export type TrayStatus = 'protected' | 'leak' | 'off' | 'starting' | 'proxy-down' | 'killswitch' | 'restarting' | 'stopping' | 'error' | 'unknown'
+
+export function trayStatusForTunnel(snapshot: TunnelSnapshot, leak: boolean): TrayStatus {
+  if (snapshot.transition) return ({ connecting: 'starting', disconnecting: 'stopping', reconnecting: 'restarting' } as const)[snapshot.transition]
+  if (snapshot.state === 'blocked') return 'killswitch'
+  if (snapshot.state === 'error' || snapshot.state === 'unknown') return snapshot.state
+  if (snapshot.state === 'connected') return leak ? 'leak' : snapshot.proxyStatus === 'proxy-down' ? 'proxy-down' : snapshot.health === 'degraded' ? 'unknown' : 'protected'
+  return 'off'
+}
 
 export interface TrayState {
   status: TrayStatus
@@ -42,7 +51,7 @@ function createFallbackTrayIcon(status: TrayStatus): NativeImage {
   const color =
     status === 'protected' ? '#22c55e' :
       status === 'leak' || status === 'killswitch' ? '#ef4444' :
-        status === 'starting' || status === 'proxy-down' || status === 'restarting' ? '#f59e0b' :
+        status === 'starting' || status === 'proxy-down' || status === 'restarting' || status === 'stopping' || status === 'unknown' || status === 'error' ? '#f59e0b' :
           '#888888'
   const size = 16
   const canvas = `data:image/svg+xml,${encodeURIComponent(`
@@ -81,6 +90,9 @@ function statusLabel(status: TrayStatus): string {
   if (status === 'protected') return 'Защищено'
   if (status === 'leak') return 'УТЕЧКА IP'
   if (status === 'starting') return 'Запуск защиты'
+  if (status === 'stopping') return 'Отключение защиты'
+  if (status === 'error') return 'Ошибка защиты — повторите восстановление'
+  if (status === 'unknown') return 'Состояние защиты не подтверждено'
   if (status === 'proxy-down') return 'VPN-сервер недоступен'
   if (status === 'killswitch') return 'Kill-switch: требуется проверка'
   if (status === 'restarting') return `Перезапуск ${trayState.restartingProgress ?? ''}`.trim()
@@ -143,9 +155,9 @@ function buildMenu(): Menu {
     trayState.status === 'proxy-down' ||
     trayState.status === 'protected' ||
     trayState.status === 'leak' ||
-    trayState.status === 'killswitch'
-  const canStart = !isActive && trayState.status !== 'starting' && trayState.status !== 'restarting'
-  const canStop = isActive || trayState.status === 'restarting'
+    trayState.status === 'killswitch' || trayState.status === 'error' || trayState.status === 'unknown'
+  const canStart = !isActive && trayState.status !== 'starting' && trayState.status !== 'restarting' && trayState.status !== 'stopping'
+  const canStop = trayState.status !== 'stopping' && (isActive || trayState.status === 'restarting' || trayState.status === 'starting')
   const template: MenuItemConstructorOptions[] = [
     { label: `Статус: ${statusLabel(trayState.status)}`, enabled: false },
     { label: trayState.publicIp ? `IP: ${trayState.publicIp}` : 'IP: неизвестен', enabled: false },

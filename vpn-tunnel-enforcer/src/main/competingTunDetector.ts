@@ -21,7 +21,7 @@
  *     the renderer can show a banner without polling on its own.
  *
  * On the reverse transition (foreign tunnel disappears while ours is still
- * up) we log info and emit a `running` status event so the banner clears.
+ * up) we emit only `competing-tun-cleared`; the coordinator keeps the real health/state.
  *
  * We deliberately do NOT auto-stop our tunnel on detection. Tearing the user's
  * TUN out from under them while they actively troubleshoot would be more
@@ -58,7 +58,7 @@ function check(): void {
     // Clear the banner. We let the caller re-emit whatever the actual TUN
     // status is on the next status callback (we don't want to fight with
     // proxy-down / killswitch-active / running).
-    emitStatus?.('running')
+    emitStatus?.('competing-tun-cleared')
   } else if (foreign && lastForeign && foreign !== lastForeign) {
     // Same situation, different foreign adapter — log it but keep banner up.
     logEvent('warn', 'competing-tun', 'foreign VPN/TUN changed identity', {

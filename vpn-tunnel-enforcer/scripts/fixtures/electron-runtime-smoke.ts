@@ -9,12 +9,19 @@ import { installTrustedIpcBoundary, registerTrustedRenderer } from '../../src/ma
 import { encryptSecret, decryptSecret } from '../../src/main/secretStorage'
 import { IPC_ERRORS, IpcFault, ipcError, isIpcRemoteErrorData, type IpcErrorCategory, type IpcErrorLocale } from '../../src/shared/ipc-result'
 import type { ServerProfile } from '../../src/shared/ipc-types'
+import { ConnectionLifecycle } from '../../src/main/connectionLifecycle'
+import { TunnelStateMachine } from '../../src/main/tunnelStateMachine'
 
 const work = process.env.VPNTE_SMOKE_DIR!
 app.setPath('userData', join(work, 'userData'))
 app.setPath('sessionData', join(work, 'sessionData'))
 const windows: BrowserWindow[] = []
 const checks: string[] = []
+const tunnelEvidence = { running: false, pid: null as number | null, softApplied: false }
+const tunnel = new TunnelStateMachine(() => tunnelEvidence, snapshot => {
+  for (const w of windows) if (!w.isDestroyed()) w.webContents.send('tunnel-state-changed', snapshot)
+})
+const lane = new ConnectionLifecycle(() => {}, undefined, undefined, tunnel)
 const server = createServer((_req, res) => {
   res.setHeader('Content-Type', 'text/html')
   res.setHeader('Content-Security-Policy', "default-src 'none'")
@@ -38,7 +45,7 @@ async function bridge(w: BrowserWindow): Promise<void> {
   assert.deepEqual(await w.webContents.executeJavaScript(`(async () => ({
     require: typeof require, process: typeof process,
     status: await window.electronAPI.getTunStatus()
-  }))()`), { require: 'undefined', process: 'undefined', status: { running: false, smoke: true } })
+  }))()`), { require: 'undefined', process: 'undefined', status: { running: false, smoke: true, lifecycle: tunnel.snapshot } })
 }
 
 app.whenReady().then(async () => {
@@ -56,7 +63,25 @@ app.whenReady().then(async () => {
   checks.push('native safeStorage encrypted persistence and decryption')
 
   installTrustedIpcBoundary()
-  ipcMain.handle('get-tun-status', () => ({ running: false, smoke: true }))
+  ipcMain.handle('get-tun-status', () => ({ running: tunnelEvidence.running, smoke: true, lifecycle: tunnel.snapshot }))
+  let startBegan!: () => void, finishStartup!: () => void
+  const began = new Promise<void>(resolve => { startBegan = resolve })
+  const startupGate = new Promise<void>(resolve => { finishStartup = resolve })
+  ipcMain.handle('start-direct-vpn', () => lane.start(async owner => {
+    tunnelEvidence.running = true; tunnelEvidence.pid = 123
+    tunnel.runtimeChanged('running'); startBegan()
+    await owner.wait(startupGate)
+    return { success: true }
+  }))
+  let softCalls = 0
+  ipcMain.handle('start-soft-protection', () => lane.start(async () => {
+    softCalls++; tunnelEvidence.softApplied = true
+    return { success: true }
+  }))
+  ipcMain.handle('stop-tun', () => lane.stop(async () => {
+    tunnelEvidence.running = false; tunnelEvidence.pid = null; tunnelEvidence.softApplied = false
+    return { success: true }
+  }))
   const profile: ServerProfile = {
     id: 'json-profile', name: 'JSON profile', protocol: 'vless', server: 'vpn.example.test', port: 443, status: 'unknown',
     outbound: { type: 'vless', server: 'vpn.example.test', server_port: 443,
@@ -140,6 +165,32 @@ app.whenReady().then(async () => {
   activeProfile = null
   assert.deepEqual(await trusted.webContents.executeJavaScript(`window.electronAPI.serversGetActive()`), { profile: null, activeId: null })
   checks.push('profile result JSON and nullable active profile survive production contextBridge unchanged (AT-00-001)')
+
+  await trusted.webContents.executeJavaScript(`
+    window.smokeFrames = [];
+    window.smokeDispose = window.electronAPI.onTunnelStateChanged(s => window.smokeFrames.push(s));
+    window.smokeStart = window.electronAPI.startDirectVpn(); 'started'
+  `)
+  await began
+  const pending = await trusted.webContents.executeJavaScript(`window.electronAPI.getTunStatus()`)
+  assert.equal(pending.lifecycle.state, 'disconnected')
+  assert.equal(pending.lifecycle.transition, 'connecting')
+  assert.equal(pending.lifecycle.processState, 'running')
+  finishStartup()
+  assert.equal((await trusted.webContents.executeJavaScript(`window.smokeStart`)).success, true)
+  assert.equal((await trusted.webContents.executeJavaScript(`window.electronAPI.getTunStatus()`)).lifecycle.state, 'connected')
+  assert.equal((await trusted.webContents.executeJavaScript(`window.electronAPI.stopTun()`)).success, true)
+  const malformedSoft = await trusted.webContents.executeJavaScript(`window.electronAPI.startSoftProtection(42, 'http').catch(e => e)`)
+  assert.equal(malformedSoft.category, 'validation'); assert.equal(softCalls, 0)
+  assert.equal((await trusted.webContents.executeJavaScript(`window.electronAPI.startSoftProtection('127.0.0.1:8080', 'http')`)).success, true)
+  assert.equal(tunnel.snapshot.mode, 'soft'); assert.equal(tunnel.snapshot.pid, null)
+  const received = await trusted.webContents.executeJavaScript(`window.smokeFrames`)
+  assert.ok(received.some((s: { state: string; transition: string }) => s.state === 'disconnected' && s.transition === 'connecting'))
+  assert.ok(received.some((s: { mode: string }) => s.mode === 'soft'))
+  await trusted.webContents.executeJavaScript(`window.smokeDispose(); window.smokeFrames = []`)
+  await trusted.webContents.executeJavaScript(`window.electronAPI.stopTun()`)
+  assert.deepEqual(await trusted.webContents.executeJavaScript(`window.smokeFrames`), [])
+  checks.push('real FSM/lane snapshots, pending native startup, owned Soft validation/stop and listener disposal through production contextBridge (AT-00-001/002/008; fake OS)')
 
   const foreign = window()
   await foreign.loadURL(file)

@@ -19,6 +19,8 @@ vi.mock('../components/CountryFlagIcon', () => ({ CountryFlagIcon: () => null })
 
 import { Dashboard } from './Dashboard'
 import { applyTerminalTunStatus, useAppStore } from '../store'
+import { TunnelStateMachine } from '../../main/tunnelStateMachine'
+import { ConnectionLifecycle } from '../../main/connectionLifecycle'
 
 const defaults = useAppStore.getState().settings
 function deferred<T>() {
@@ -29,7 +31,7 @@ function deferred<T>() {
 }
 
 beforeEach(() => {
-  useAppStore.setState({ settings: { ...defaults, connectionMode: 'directVpn' },
+  useAppStore.setState({ tunnelSnapshot: null, settings: { ...defaults, connectionMode: 'directVpn' },
     connectionBusy: 'connecting', connectionCancelling: false, mode: 'off', tunRunning: false,
     vpnIp: null, publicIp: null, restartingProgress: null, serverSwitchingName: null,
     firewallKillSwitchStatus: { state: 'inactive', cleanupRequired: false, reason: 'no-owned-protection' }, logs: [], competingTun: null })
@@ -39,10 +41,71 @@ beforeEach(() => {
     serversGetActive: vi.fn().mockResolvedValue({ profile: { name: 'fixture' } }),
     saveSettings: vi.fn().mockImplementation(async settings => settings),
     startDirectVpn: vi.fn().mockResolvedValue({ success: true }),
+    startSoftProtection: vi.fn().mockResolvedValue({ success: true }),
     logRenderer: vi.fn().mockResolvedValue({ success: true })
   }
 })
 afterEach(() => { cleanup() })
+
+describe('canonical FSM frames (AT-00-008)', () => {
+  it('renders progress until main confirms the connection, and ignores stale native/result setters', async () => {
+    const evidence = { running: false, pid: null as number | null, softApplied: false }
+    const model = new TunnelStateMachine(() => evidence, snapshot => useAppStore.getState().setTunnelSnapshot(snapshot))
+    const lane = new ConnectionLifecycle(vi.fn(), undefined, undefined, model)
+    const gate = deferred<void>()
+    useAppStore.setState({ connectionBusy: null })
+    useAppStore.getState().setTunnelSnapshot(model.snapshot)
+    render(<Dashboard />)
+    expect(screen.getByRole('button', { name: ru.dashboard.disconnected })).toBeEnabled()
+    let start!: Promise<unknown>
+    await act(async () => {
+      start = lane.start(async owner => {
+        evidence.running = true; evidence.pid = 123
+        model.runtimeChanged('running')
+        await owner.wait(gate.promise)
+        return { success: true }
+      })
+    })
+    expect(screen.queryByRole('button', { name: ru.dashboard.connected })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: ru.dashboard.connecting })).toBeDisabled()
+    await act(async () => {
+      useAppStore.getState().setConnectionBusy(null)
+      useAppStore.getState().setTunRunning(true)
+    })
+    expect(screen.getByRole('button', { name: ru.dashboard.connecting })).toBeDisabled()
+    await act(async () => { gate.resolve(); await start })
+    expect(screen.getByRole('button', { name: ru.dashboard.connected })).toBeEnabled()
+    const staleConnected = model.snapshot
+    for (const [state, label] of [['error', ru.dashboard.tunnelError], ['blocked', ru.dashboard.tunnelBlocked], ['unknown', ru.dashboard.tunnelUnknown]] as const) {
+      await act(async () => { model.fault(state); model.runtimeChanged('running') })
+      await act(async () => {
+        useAppStore.getState().setTunnelSnapshot(staleConnected)
+        useAppStore.getState().setTunRunning(true)
+        useAppStore.getState().setMode('hard')
+      })
+      expect(screen.getByRole('button', { name: label })).toBeEnabled()
+      expect(screen.queryByRole('button', { name: ru.dashboard.connected })).not.toBeInTheDocument()
+      expect(useAppStore.getState().mode).toBe('off')
+    }
+  })
+
+  it('uses the owned Soft channel and a single main stop; env failures remain failures', async () => {
+    const proxy = '127.0.0.1:8080'
+    useAppStore.setState({ connectionBusy: null, settings: { ...defaults, connectionMode: 'localProxy', routingMode: 'soft', proxyOverride: proxy } })
+    Object.assign(window.electronAPI, { applyAutoconfig: vi.fn(), rollbackAutoconfig: vi.fn(),
+      stopTun: vi.fn().mockResolvedValue({ success: false, error: 'env recovery unconfirmed' }) })
+    render(<Dashboard />)
+    fireEvent.click(screen.getByRole('button', { name: ru.dashboard.disconnected }))
+    await waitFor(() => expect(window.electronAPI.startSoftProtection).toHaveBeenCalledWith(proxy, defaults.proxyType))
+    expect(window.electronAPI.applyAutoconfig).not.toHaveBeenCalled()
+    await waitFor(() => expect(screen.getByRole('button', { name: ru.dashboard.connected })).toBeEnabled())
+    fireEvent.click(screen.getByRole('button', { name: ru.dashboard.connected }))
+    fireEvent.click(screen.getByRole('button', { name: 'Да, отключить' }))
+    expect(await screen.findByText('env recovery unconfirmed')).toBeVisible()
+    expect(window.electronAPI.rollbackAutoconfig).not.toHaveBeenCalled()
+    expect(window.electronAPI.stopTun).toHaveBeenCalledOnce()
+  })
+})
 
 describe('Dashboard cancellation', () => {
   it('shows failed rollback steps and the retry recommendation instead of success (AT-03-007)', async () => {

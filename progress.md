@@ -2940,3 +2940,63 @@ CI/review нового SHA проверяются отдельно после pu
   (.tmp/wp0-qodo57-electron.log); `node scripts/test-wp1-native.mjs --ipc-only`
   — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-qodo57-csp.log). Native IPC/CSP subsets
   не заменяют полную FSM, ресурсную и сетевую приёмку WP-0/WP-2.
+
+
+### PR #57 слит; WP-0 — интегрированная FSM и проекция состояния
+
+- REST повторно подтвердил merge #57: eaa6db230f0a4245699795edd4c0c92aa6aa393f;
+  head b659f83b42f971271f72a0abc211aac2cd7f3e67. CI run 39146042045 success;
+  Qodo run 1540108 completed на этом head, четыре findings implemented.
+  Открытых PR после слияния не осталось. Новая ветка codex/wp0-tunnel-fsm
+  основана на vpn/main с этим merge; старые untracked артефакты не включаются.
+- Добавлена используемая production TunnelStateMachine: стабильный state отдельно
+  от transition, processState/PID, proxyStatus, health и mode. ConnectionLifecycle
+  подтверждает start/stop по evidence; повторный Connect отклоняется до эффектов.
+  Raw running и исчезновение competing adapter не очищают fault и не подтверждают
+  connected. Ошибка recovery до createWindow видна как unknown в первом snapshot.
+- Startup receipts native controller имеют generation fence, включая failure при
+  неожиданном throw. Старый receipt после stop или во время нового restart
+  отвергается без мутации. Это ещё не общая registry фоновых restart.
+- Soft UI использует owned start-soft-protection и единый stop-tun. Boot recovery
+  использует strict env evidence/rollback, retained Soft принимает recovery owner
+  только при чистом восстановлении. Main snapshot обновляет tray и UI атомарно;
+  renderer отбрасывает старые revision и не доверяет legacy success setters.
+- Regression harness исполняет настоящие recovery/startup effect bodies с real
+  model или observed receipt. Новые зависимости объявлены явно, Soft flag локален;
+  старые call-order/resource assertions сохранены. Первый текущий focused run:
+  20 failed / 185 passed, exit 1 (.tmp/wp0-fsm-focused-current.log): harness не
+  предоставлял tunnelState/native generation и inline boot adoption deps.
+  После обновления harness — 205 passed; новые boot/generation/tray/tour/race
+  regressions — 217 passed / 5 files, 24.10 s, exit 0
+  (.tmp/wp0-fsm-focused-final.log).
+- Generated tests: 4096 tours connect/disconnect/crash/retry глубиной 6, fake
+  PID/TUN ledger; 200 commands / 10 async workers, seed 0x5eed003, typed losers,
+  operation start/terminal pairing и нулевые fake resources после final stop.
+  Полный алфавит timeout/cancel, общая durable history и Windows PID/L3 не приняты.
+- Первый полный `npm.cmd test`: 3987 passed / 5 skipped / 0 failed,
+  252 files passed / 2 skipped, 183.37 s, exit 0 (.tmp/wp0-fsm-full.log).
+  `npm.cmd run typecheck`: 158 channels / 0 public any, exit 0
+  (.tmp/wp0-fsm-typecheck.log). Coverage AC 927/927, F 210/210, exit 0 —
+  трассировка, не исполнение AT. `git diff --check` — exit 0.
+- `npm.cmd run build` — exit 0 (.tmp/wp0-fsm-build.log).
+  `node scripts/test-electron-runtime.mjs` — ELECTRON_SMOKE_PASS, exit 0
+  (.tmp/wp0-fsm-electron.log), включая real FSM/lane через production preload,
+  ранний pending running, Soft validation/stop, snapshot event и disposer (fake OS).
+  `node scripts/test-wp1-native.mjs --ipc-only` — WP1_NATIVE_PASS, exit 0
+  (.tmp/wp0-fsm-csp.log). Нативная сетевая FSM-приёмка этим не подменяется.
+- Playwright CLI: production Dashboard + управляемая FSM в .tmp/wp0-fsm-ui;
+  light connecting/connected и dark unknown/blocked/reconnect PNG просмотрены.
+  Start/confirm/cleanup меняют состояние, pending не показывает активную защиту.
+  HMR connection refused после остановки fixture server не считается VPN failure;
+  визуальная/a11y/responsive приёмка всей матрицы не заявляется.
+- Финальная проверка выявила дополнительный invariant: disconnected с живым
+  процессом и connected с потерянным evidence дают unknown; временный отказ
+  getter во время startup остаётся sticky после восстановления getter. Добавлены
+  регрессии; окончательные проверки после этой правки записываются ниже.
+- Окончательный `npm.cmd test` после evidence regressions: **3989 passed /
+  5 skipped / 0 failed**, 252 files passed / 2 skipped, 156.43 s, exit 0
+  (.tmp/wp0-fsm-verified-full.log). Expected RootErrorBoundary stderr сохранён;
+  unhandled errors отсутствуют. Повторный `npm.cmd run typecheck` — exit 0,
+  158 channels / 0 public any (.tmp/wp0-fsm-typecheck.log). Coverage и diff check
+  повторно exit 0. WP-0 и общий goal остаются в работе.
+- Повторные build/Electron/native IPC-CSP на окончательном коде — exit 0: .tmp/wp0-fsm-final-build.log, .tmp/wp0-fsm-final-electron.log, .tmp/wp0-fsm-final-csp.log.

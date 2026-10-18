@@ -1,4 +1,5 @@
 import type { PublicIpInfo } from '../shared/publicIp'
+import type { TunnelSnapshot } from '../shared/tunnel-state'
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC_REQUESTS, assertIpcRequest, type IpcChannel, type IpcRequest, type IpcResponse } from '../shared/ipc-contract'
 import { unwrapIpcResult, IpcRemoteError, IpcValidationError, ipcError, serializeIpcError, type IpcErrorLocale } from '../shared/ipc-result'
@@ -171,6 +172,8 @@ contextBridge.exposeInMainWorld('electronAPI', withIpcFailures({
   startTun: (proxyAddr: string, proxyType?: 'socks5' | 'http') =>
     invoke('start-tun', assertString(proxyAddr, 'proxyAddr'), proxyType === undefined ? undefined : assertEnum(proxyType, ['socks5', 'http'] as const, 'proxyType')),
   startDirectVpn: () => invoke('start-direct-vpn'),
+  startSoftProtection: (proxyAddr: string, proxyType?: 'socks5' | 'http') =>
+    invoke('start-soft-protection', assertString(proxyAddr, 'proxyAddr'), proxyType === undefined ? undefined : assertEnum(proxyType, ['socks5', 'http'] as const, 'proxyType')),
   stopTun: () => invoke('stop-tun'),
   cancelTun: () => invoke('cancel-tun'),
   cancelTransition: () => invoke('cancel-transition'),
@@ -435,6 +438,11 @@ contextBridge.exposeInMainWorld('electronAPI', withIpcFailures({
     const handler = (_event: any, status: string) => callback(status)
     ipcRenderer.on('tun-status-changed', handler)
     return () => ipcRenderer.removeListener('tun-status-changed', handler)
+  },
+  onTunnelStateChanged: (callback: (snapshot: TunnelSnapshot) => void) => {
+    const handler = (_event: unknown, snapshot: TunnelSnapshot) => callback(snapshot)
+    ipcRenderer.on('tunnel-state-changed', handler)
+    return () => ipcRenderer.removeListener('tunnel-state-changed', handler)
   },
   onSoftStatusChanged: (callback: (connected: boolean) => void) => {
     const handler = (_event: any, connected: boolean) => callback(Boolean(connected))

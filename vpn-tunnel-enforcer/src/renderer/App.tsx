@@ -126,9 +126,22 @@ export default function App() {
       }
     })
 
+    const unsubState = window.electronAPI.onTunnelStateChanged?.((snapshot) => {
+      tunEventSeqRef.current += 1
+      const store = useAppStore.getState()
+      store.setTunnelSnapshot(snapshot)
+      stoppingNowRef.current = Boolean(store.tunnelSnapshot?.transition)
+      void store.refreshFirewallKillSwitchStatus()
+    })
+
     const unsubTun = window.electronAPI.onTunStatusChanged((status) => {
       tunEventSeqRef.current += 1
       const store = useAppStore.getState()
+      // Canonical snapshots own protection and progress; legacy events remain diagnostic.
+      if (store.tunnelSnapshot) {
+        addLog('info', `Статус процесса TUN: ${status}`)
+        return
+      }
       // 'proxy-down' keeps the TUN up while upstream is unreachable.
       // 'killswitch-active' is a cleanup obligation after runtime failure;
       // only the separate fresh status read can verify firewall configuration.
@@ -243,6 +256,7 @@ export default function App() {
 
     const unsubSoft = window.electronAPI.onSoftStatusChanged?.((connected) => {
       const store = useAppStore.getState()
+      if (store.tunnelSnapshot) return
       store.setMode(connected ? 'soft' : 'off')
       store.setTunRunning(false)
       if (!connected) store.setVpnIp(null)
@@ -332,6 +346,7 @@ export default function App() {
     return () => {
       unsubIp()
       unsubTun()
+      unsubState?.()
       unsubSoft?.()
       unsubTraffic()
       unsubLeak()
@@ -487,11 +502,12 @@ export default function App() {
       if (tunStatusRes.status === 'fulfilled') {
         const tunStatus = tunStatusRes.value
         const liveStore = useAppStore.getState()
+        if (tunStatus.lifecycle) liveStore.setTunnelSnapshot(tunStatus.lifecycle)
         const staleInitialStatus =
           tunEventSeqRef.current !== initTunEventSeq ||
           Boolean(liveStore.connectionBusy) ||
           (liveStore.tunRunning && !tunStatus.running)
-        if (!staleInitialStatus) {
+        if (!staleInitialStatus && !liveStore.tunnelSnapshot) {
           liveStore.setTunRunning(tunStatus.running)
           liveStore.setTunStartedAt(tunStatus.startedAt ?? null)
           if (tunStatus.running) liveStore.setMode('hard')
@@ -521,7 +537,7 @@ export default function App() {
             }
           }))
         }
-        if (settings.routingMode === 'soft' && settings.connectionMode !== 'directVpn') {
+        if (!useAppStore.getState().tunnelSnapshot && settings.routingMode === 'soft' && settings.connectionMode !== 'directVpn') {
           const envApplied = targets.some((target: any) => target.id === 'env' && target.applied)
           store.setMode(envApplied ? 'soft' : 'off')
           store.setTunRunning(false)
