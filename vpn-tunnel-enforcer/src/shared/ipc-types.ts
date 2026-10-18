@@ -1,3 +1,5 @@
+import type { IpcJsonValue } from './json'
+
 /**
  * Shared IPC type definitions for VPN Tunnel Enforcer v2.
  *
@@ -75,7 +77,7 @@ export interface ServerProfile {
    * persisted profiles created before the field was introduced — the picker
    * will refuse to start a tunnel for any profile missing this object.
    */
-  outbound?: Record<string, any>
+  outbound?: Record<string, IpcJsonValue>
   /**
    * FK to {@link ServerGroup}. Undefined for legacy rows; the startup
    * migration assigns every dangling profile to an "Импортированные" group

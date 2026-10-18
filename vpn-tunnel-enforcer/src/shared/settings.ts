@@ -1,5 +1,5 @@
-/** JSON-shaped IPC values; optional members may be undefined before persistence. */
-export type IpcJsonValue = null | undefined | boolean | number | string | IpcJsonValue[] | { [key: string]: IpcJsonValue }
+import type { IpcJsonValue } from './json'
+export type { IpcJsonValue } from './json'
 
 export interface AppSettings {
   connectionMode: 'localProxy' | 'directVpn'

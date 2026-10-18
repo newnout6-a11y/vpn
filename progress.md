@@ -2516,3 +2516,83 @@ CI/review нового SHA проверяются отдельно после pu
   9 profile results, domain failures, FSM/coordinator/cancellation/deadline,
   migrations/correlation/history/flags/races/UI остаются в WP-0; WP-2 не начат.
   Нормативные docs/ не менялись; цель active.
+
+## 18.10.2026 — PR #54: CI зелёный, решение о ревью ожидается
+
+- Код закоммичен и запушен: 9ce9298681359096fb202f067eae1a382dac98f6,
+  PR https://github.com/newnout6-a11y/vpn/pull/54. Других открытых PR нет.
+- Exact-head CI 39126137175 — success: Windows 117671557953,
+  Rust 117671557887, сайт 117671557734. Windows: 3830 passed / 4 skipped /
+  0 failed, 247 файлов passed / 1 skipped, 222.50 s. Coverage AC 927/927,
+  F 210/210; native production IPC/contextBridge и CSP PASS; WFP aborted:true;
+  native Electron probe 1 passed / 1 skipped (.tmp/wp0-service-results-ci.log).
+- Повторная read-only проверка уже закоммиченного parent/head:
+  `node .tmp/wp0-service-committed-parity.cjs` — exit 0, runtime tokens
+  22 production modules идентичны; два shared modules — empty exports only.
+  Собственная проверка полного diff не выявила actionable замечаний.
+- Revix review 5562932738: дневная квота исчерпана, полного ревью не было;
+  сброс 19.10 в 00:00 UTC. Это не approval. Владельцу задан вопрос,
+  принять ли собственную проверку для #54 либо ждать Revix. До ответа PR
+  не слит, следующий участок не начат. Journal entry пока не коммитится,
+  чтобы не менять проверенный PR head до решения владельца. Цель active.
+- Третья последовательная проверка того же препятствия (18.10, 12:18 UTC):
+  head не изменён, все CI success, PR открыт; нового полного ревью и ответа
+  владельца нет. Дальнейшая работа ограничена требованием approval до перехода.
+  Цель переводится в blocked до принятия собственной проверки либо появления
+  полного ревью; WP-0 и WP-2 не объявлены завершёнными.
+
+## 18.10.2026 — решение владельца: #54 не сливать, WP-0 продолжать
+
+- Владелец ответил: «не сливаем пока что. но идёим дальше». PR #54 остаётся
+  открыт на проверенном 9ce9298; отсутствие полного Revix не переименовано
+  в approval. Разрешено продолжать WP-0 до слияния #54.
+- Новая ветка codex/wp0-profile-results поверх #54; следующий PR будет иметь
+  base codex/wp0-service-results, чтобы показывать только новый участок.
+  Остаток: 9 profile result contracts, затем остальная полная матрица WP-0.
+  До правок выполнен read-only compiler probe замены outbound any на общий
+  JSON-shaped transport type; результаты и выбранная реализация ниже.
+
+## 18.10.2026 — WP-0: profile result contracts и JSON field narrowing
+
+- Все 9 оставшихся profile methods используют ServerProfile вместо any;
+  outbound — общий рекурсивный IpcJsonValue с поддержкой protocol extensions.
+  Type alias перенесён из settings в shared/json.ts с совместимым reexport.
+  Contract test требует пустой legacy inventory всех 157 listeners.
+- Read-only `node .tmp/wp0-profile-type-probe.cjs` обнаружил 26 compiler
+  diagnostics при простой замене outbound any. Они устранены narrowing
+  реальных полей TLS/Reality/ECH/uTLS/ALPN, transport/SNI/fingerprint и
+  JSON-клона endpoint, без any-casts для подавления новых diagnostics.
+  Внутренние старые any других подсистем не объявлены устранёнными.
+- Конкретная регрессия: reality:[] считался camouflage и давал
+  tlsLeaksSni:false. Теперь массив не считается объектом Reality и сохраняется
+  tlsLeaksSni:true. `node .tmp/wp0-profile-reality-regression.cjs` — exit 0:
+  настоящие parent/current функции извлечены без I/O, baseline false -> true;
+  три корректных случая Reality/disabled/absent идентичны. Это не packet oracle.
+- До исправления `npm.cmd test -- src/main/ipcResultContract.test.ts -t 'checks all production listeners'`
+  — 1 failed / 9 skipped, exit 1 (.tmp/wp0-profile-results-before.log):
+  оставшиеся 9 channels ещё были legacy any.
+- `npm.cmd test -- src/main/ipcResultContract.test.ts src/main/keyHealthChecker.test.ts src/main/liveServerProbe.handshake.test.ts src/main/serverPickerGeoLifecycle.test.ts src/renderer/pages/Servers.test.ts src/renderer/components/ServerDetailModalSource.test.ts src/main/systemDiagnostics.test.ts`
+  — 107 passed, 7 файлов, 10.09 s, exit 0 (.tmp/wp0-profile-results-focused.log).
+  Проверяются реальные picker handlers, корректные/повреждённые protocol поля,
+  UI badges и handshake evidence; существующие проверки не удалены.
+- Финальный `npm.cmd run typecheck` — exit 0, 157 listeners / 0 public any
+  (.tmp/wp0-profile-results-final-typecheck.log). `npm.cmd run build` — exit 0
+  (.tmp/wp0-profile-results-build.log). `node scripts/test-electron-runtime.mjs`
+  — ELECTRON_SMOKE_PASS, exit 0 (.tmp/wp0-profile-results-native.log), включая
+  production contextBridge roundtrip nested JSON profile и null active result.
+  Service handlers в native smoke — fixtures, реальный picker проверен отдельно.
+- `python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py` —
+  AC 927/927, F 210/210, exit 0; `git diff --check` — exit 0.
+  Полный suite выполняется. PR #54 остаётся открыт, решение владельца соблюдено.
+- Первый полный `npm.cmd test` — 3846 passed / 2 failed / 5 skipped,
+  167.46 s, exit 1 (.tmp/wp0-profile-results-full.log). Оба отказа — 5000 ms
+  timeout неизменённых native PowerShell fixtures runtimeDirSecurity и
+  adaptiveNetworkIdentity. `npm.cmd test -- src/main/runtimeDirSecurity.test.ts src/main/adaptiveNetworkIdentity.test.ts`
+  сразу повторён отдельно: 128 passed, 4.43 s, exit 0
+  (.tmp/wp0-profile-results-powershell-recheck.log). Timeout не увеличен,
+  assertions/production code этих подсистем не менялись; полный suite повторяется.
+- Повторный полный `npm.cmd test` — 3848 passed / 5 skipped / 0 failed,
+  246 файлов passed / 2 skipped, 173.69 s, exit 0
+  (.tmp/wp0-profile-results-final-full.log). После проверок runtime-код не менялся.
+  Для stacked PR CI запускается workflow_dispatch на точном head: workflow
+  автоматически принимает только pull_request в main, base #54 пока не слит.

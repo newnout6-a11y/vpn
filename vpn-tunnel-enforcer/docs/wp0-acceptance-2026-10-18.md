@@ -4,12 +4,14 @@
 и решения владельца §10, AT-00-001…010. WP-3 завершён в PR #46;
 его L3 `SKIPPED_BY_OWNER` не распространяется на WP-0.
 CodeRabbit исключён из ожидания владельцем; CI и действующий review обязательны.
+18.10 владелец разрешил продолжать WP-0 при открытом PR #54, сохраняя запрет
+его слияния до отдельного решения. Полного Revix для #54 не было из-за квоты.
 
 ## Полная область и первоначальная инвентаризация
 
 | AT | Найденная реализация / доказательства | Остаток до приёмки |
 | --- | --- | --- |
-| 00-001 | AST-проверка 157 main/preload/shared request channels, общий реестр входов и versioned transport envelope; object contracts проверяют поля/массивы, save-settings покрывает все 39 общих полей AppSettings; TypeScript checker проверяет results всех 157 listeners | 9 profile results ещё содержат `any`; полный PASS пока не заявлен |
+| 00-001 | AST-проверка 157 main/preload/shared request channels, общий реестр входов и versioned transport envelope; object contracts проверяют поля/массивы, save-settings покрывает все 39 общих полей AppSettings; TypeScript checker проверяет results всех 157 listeners, public results с `any` больше нет; native contextBridge сохраняет JSON профиля и nullable active result | Завершить проверку текущего PR; отдельная semantic matrix ошибок остаётся в 00-004 |
 | 00-002 | `tunController.ts`, lifecycle fault-injection tests | Единая модель и интегрированный координатор; все туры ≤6, недопустимые события, ресурсные инварианты |
 | 00-003 | Локальная отмена в отдельных подсистемах | Реестр connect/refresh/speed/import/export/rotation; отмена на 10/50/90%, deadline, запрет поздних эффектов |
 | 00-004 | Общая классификация transport; 157 каналов × 7 категорий через guard; native contextBridge сохраняет code/category/correlation в en/ru; typed local validation | Миграция legacy domain-result `{success:false,error}` и semantic matrix настоящих feature handlers; transport fixtures не доказывают её |
@@ -309,3 +311,34 @@ modules испускают только пустой export. Это подтве
 Canonical domain failures, интегрированный FSM, cancellation/deadline,
 correlation/history, migrations, flags и race/UI матрицы остаются в WP-0.
 Команды, фактические результаты полного прогона и CI/review — в progress.md.
+
+## AT-00-001 — оставшиеся profile results
+
+На ветке codex/wp0-profile-results поверх открытого #54 все 9 оставшихся
+methods используют ServerProfile: list/get-active/ping-all/resolve-ips,
+verify-active-country/verify-country, add/add-to-group и set-client-device.
+Nullable active profile и discriminated country results сохранены.
+ServerProfile.outbound использует общий рекурсивный IpcJsonValue вместо any;
+тип допускает JSON-расширения протоколов и не является заменой protocol validator.
+Определение JSON переехало из settings.ts в shared/json.ts с совместимым reexport.
+
+Доступ к вложенным TLS/Reality/ECH/uTLS/ALPN полям уточняет контейнер и тип
+значения. asJsonObject проверяет только внешний контейнер; функция не обещает
+полную валидацию его полей. Массив reality:[] не считается camouflage:
+describeProbeTarget сохраняет tlsLeaksSni:true и не разрешает прямую TLS-пробу
+как для Reality. Реальные прежние pickServerName/describeProbeTarget извлечены
+из parent и текущего файла без I/O: baseline false, исправленный true; три
+корректных случая Reality/disabled/absent совпадают. Это локальная регрессия,
+а не packet oracle или лабораторная приёмка сетевой изоляции.
+
+Functional tests сохраняют корректные badges и handshake evidence, не считают
+array TLS/Reality/OBFS валидными объектами и не возвращают numeric/object-valued
+transport или ALPN. Настоящие picker handlers сохраняют вложенные JSON extensions
+в list/get-active. Native production preload/contextBridge отдельно проверяет
+неизменённый JSON ответа и null у active profile; service I/O в этом smoke
+заменён fixture handlers. Эти доказательства не смешиваются.
+
+Typecheck проверяет 157 listeners и 0 legacy any. Contract regression требует
+пустой legacy inventory, поэтому возврат публичного any обнаруживается. Полный
+набор тестов, CI и review записываются в progress.md; оставшиеся 9 AT WP-0,
+canonical domain failures и весь WP-2 не объявлены завершёнными.

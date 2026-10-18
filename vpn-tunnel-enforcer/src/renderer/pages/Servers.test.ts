@@ -1,7 +1,34 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { displayedServerPing, hasSuccessfulRowPing } from './Servers'
+import { displayedServerPing, hasSuccessfulRowPing, profileStealthBadge } from './Servers'
+import type { ServerProfile } from '../../shared/ipc-types'
+
+describe('profile JSON transport fields (AT-00-001)', () => {
+  const badge = (outbound: ServerProfile['outbound'], protocol = 'vless') => profileStealthBadge({
+    id: 'json', name: 'JSON', server: 'vpn.example.test', port: 443, status: 'unknown', protocol, outbound
+  })?.label
+
+  it.each([
+    [{ tls: { enabled: true, ech: { config: ['config'] } } }, 'ECH'],
+    [{ tls: { enabled: true, reality: { enabled: true } } }, 'Reality'],
+    [{ tls: { enabled: true, utls: { enabled: true, fingerprint: 'chrome' } } }, 'uTLS'],
+    [{ tls: { enabled: true } }, 'TLS'],
+    [{ tls: { enabled: false } }, 'Plain'],
+    [{ tls: { reality: [], utls: [], ech: [] } }, 'TLS'],
+    [{ tls: [] }, 'Plain'],
+    [{ tls: 'invalid' }, 'Plain']
+  ] satisfies Array<[ServerProfile['outbound'], string]>)('preserves configured badges and ignores malformed containers: %j', (outbound, label) => {
+    expect(badge(outbound)).toBe(label)
+  })
+
+  it('keeps protocol fallback and does not claim OBFS for an array', () => {
+    expect(badge({ type: 'naive' }, '')).toBe('Naive')
+    expect(badge({ type: { invalid: true } }, '')).toBeUndefined()
+    expect(badge({ obfs: { type: 'salamander', password: 'fixture' } }, 'hysteria2')).toBe('OBFS')
+    expect(badge({ obfs: [] }, 'hysteria2')).toBeUndefined()
+  })
+})
 
 const source = readFileSync(join(process.cwd(), 'src/renderer/pages/Servers.tsx'), 'utf8')
 

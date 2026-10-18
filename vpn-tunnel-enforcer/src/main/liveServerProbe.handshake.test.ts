@@ -95,6 +95,7 @@ describe('probeTunnelHandshakeAndEgress handshake classification', () => {
     const result = await probeTunnelHandshakeAndEgress(activeProfile, '203.0.113.42', undefined, true)
 
     expect(result.handshake.status).toBe('ok')
+    expect(result.handshake.evidence).toMatchObject({ transport: 'vless', alpn: 'h2' })
     expect(result.handshake.evidence?.inboundPort).toBe(10809)
     expect(result.egress.reflectors).toEqual(expect.arrayContaining([
       expect.objectContaining({
@@ -124,6 +125,17 @@ describe('probeTunnelHandshakeAndEgress handshake classification', () => {
       'static.twitchcdn.net',
       'speed.cloudflare.com'
     ]))
+  })
+
+  it.each([
+    { type: 42, tls: [] },
+    { type: { unexpected: true }, tls: { alpn: { 0: 'h2' } } },
+    { type: false, tls: { alpn: [42] } }
+  ] satisfies Array<NonNullable<ServerProfile['outbound']>>)('keeps handshake evidence typed for malformed JSON fields: %j (AT-00-001)', async outbound => {
+    const result = await probeTunnelHandshakeAndEgress({ ...activeProfile, outbound })
+    expect(result.handshake.status).toBe('ok')
+    expect(result.handshake.evidence?.transport).toBe('vless')
+    expect(result.handshake.evidence?.alpn).toBeUndefined()
   })
 
   it('uses later reflectors to verify the tunnel when Cloudflare SOCKS CONNECT fails', async () => {

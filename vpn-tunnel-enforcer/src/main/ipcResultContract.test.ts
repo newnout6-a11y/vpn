@@ -33,8 +33,11 @@ describe('listener result parity (AT-00-001; F-138)', () => {
       'network:repair-orphaned-dns', 'network:rollback-adapter-lockdown',
       'get-traffic-forensics-status', 'restart-traffic-forensics', 'traffic-history:list', 'server:probe',
       'split-tunnel:get-apps', 'split-tunnel:refresh-apps', 'split-tunnel:get-config', 'split-tunnel:add-app', 'split-tunnel:add-process',
-      'groups:list', 'groups:get', 'groups:rename', 'groups:refresh', 'groups:set-refresh-policy']
+      'groups:list', 'groups:get', 'groups:rename', 'groups:refresh', 'groups:set-refresh-policy',
+      'servers:list', 'servers:get-active', 'servers:ping-all', 'servers:resolve-ips',
+      'servers:verify-active-country', 'servers:verify-country', 'servers:add', 'servers:add-to-group', 'servers:set-client-device']
     for (const channel of typed) expect(result.legacy, channel).not.toContain(channel)
+    expect(result.legacy).toEqual([])
   }, 30_000)
   it('accepts asynchronous results through a local registration wrapper', () => {
     const registration = "function handle(channel: string, listener: () => unknown) { ipcMain.handle(channel, listener) }; handle('one', LISTENER)"

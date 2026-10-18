@@ -1,3 +1,4 @@
+import { asJsonObject } from '../shared/json'
 /**
  * Key Health Checker — probes individual VPN keys to tell which ones are
  * still alive after a subscription's free trial expires.
@@ -172,15 +173,15 @@ interface ProbeTarget {
   tlsLeaksSni: boolean
 }
 
-function pickServerName(outbound: Record<string, any>, fallback: string): string {
+function pickServerName(outbound: NonNullable<ServerProfile['outbound']>, fallback: string): string {
   // sing-box layout we generate: outbound.tls.server_name (real or front
   // SNI). Reality configs round-tripped from xray may also carry
   // outbound.tls.reality.server_name. Bare server is the last resort.
-  const tls = outbound.tls && typeof outbound.tls === 'object' ? outbound.tls : null
+  const tls = asJsonObject(outbound.tls)
   if (tls) {
     const direct = typeof tls.server_name === 'string' && tls.server_name.trim()
-    if (direct) return tls.server_name.trim()
-    const reality = tls.reality && typeof tls.reality === 'object' ? tls.reality : null
+    if (direct) return direct
+    const reality = asJsonObject(tls.reality)
     if (reality && typeof reality.server_name === 'string' && reality.server_name.trim()) {
       return reality.server_name.trim()
     }
@@ -204,12 +205,13 @@ export function describeProbeTarget(profile: ServerProfile): ProbeTarget | null 
   // Plain shadowsocks (and rarely plain hysteria2) carry no TLS. Settle for
   // a TCP-only probe — connect success is the best we can extract without
   // sending protocol-specific bytes.
-  const tls = outbound && outbound.tls && typeof outbound.tls === 'object' ? outbound.tls : null
+  const tls = asJsonObject(outbound?.tls)
   const needsTls = tls ? tls.enabled !== false : false
   // Reality outbounds present a camouflage SNI — safe to leak. Plain TLS
   // would leak the provider's real front, so we must NOT do a TLS handshake
   // for those over a direct (untunnelled) path.
-  const isReality = Boolean(tls && tls.reality && typeof tls.reality === 'object' && tls.reality.enabled !== false)
+  const reality = asJsonObject(tls?.reality)
+  const isReality = Boolean(reality && reality.enabled !== false)
   const tlsLeaksSni = needsTls && !isReality
 
   return { host, port, serverName, needsTls, tlsLeaksSni }

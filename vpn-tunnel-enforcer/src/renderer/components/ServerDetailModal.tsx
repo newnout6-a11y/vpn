@@ -1,4 +1,5 @@
 import type { ServerProbeResult } from '../../shared/diagnostics'
+import { asJsonObject } from '../../shared/json'
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { motion } from 'framer-motion'
@@ -40,9 +41,7 @@ interface IpInfo {
  * Either a full ServerProfile from the proxy list, or a cached Direct VPN
  * profile (which is an outbound config without server/port at this level).
  */
-type AnyProfile =
-  | ServerProfile
-  | { name: string; protocol: string; server?: string; port?: number; country?: string }
+type AnyProfile = Pick<ServerProfile, 'name' | 'protocol'> & Partial<ServerProfile>
 
 interface ServerDetailModalProps {
   open: boolean
@@ -173,8 +172,8 @@ export function ServerDetailModal({ open, profile, onClose, onProfileUpdated }: 
       }
     }
 
-    const host = (profile as any).server
-    const port = normalizeServerPort((profile as any)?.port ?? (profile as any)?.outbound?.server_port) ?? undefined
+    const host = profile.server
+    const port = normalizeServerPort(profile.port ?? profile.outbound?.server_port) ?? undefined
     if (!host) {
       setLoading(false)
       setProbing(false)
@@ -273,14 +272,15 @@ export function ServerDetailModal({ open, profile, onClose, onProfileUpdated }: 
 
   if (!profile) return null
 
-  const host = (profile as any).server as string | undefined
-  const port = normalizeServerPort((profile as any)?.port ?? (profile as any)?.outbound?.server_port) ?? undefined
-  const ping = (profile as any).ping as number | null | undefined
-  const profileId = (profile as ServerProfile | null)?.id
-  const clientDevice = normalizeClientDevice((profile as ServerProfile | null)?.clientDevice)
+  const host = profile.server
+  const port = normalizeServerPort(profile.port ?? profile.outbound?.server_port) ?? undefined
+  const ping = profile.ping
+  const profileId = profile.id
+  const clientDevice = normalizeClientDevice(profile.clientDevice)
+  const outboundFingerprint = asJsonObject(asJsonObject(profile.outbound?.tls)?.utls)?.fingerprint
   const clientFingerprint =
-    (profile as ServerProfile | null)?.clientFingerprint ||
-    ((profile as ServerProfile | null)?.outbound as any)?.tls?.utls?.fingerprint ||
+    profile.clientFingerprint ||
+    (typeof outboundFingerprint === 'string' && outboundFingerprint) ||
     (clientDevice === 'android' ? 'android' : clientDevice === 'ios' ? 'ios' : clientDevice === 'mac' ? 'safari' : 'chrome')
   // Name-based country recognition is used as the universal fallback. ASN
   // lookups are rate-limited (free ipapi.co tier) and reverse DNS rarely

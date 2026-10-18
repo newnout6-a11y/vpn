@@ -8,6 +8,7 @@ import { once } from 'node:events'
 import { installTrustedIpcBoundary, registerTrustedRenderer } from '../../src/main/ipcSecurity'
 import { encryptSecret, decryptSecret } from '../../src/main/secretStorage'
 import { IPC_ERRORS, IpcFault, ipcError, isIpcRemoteErrorData, type IpcErrorCategory, type IpcErrorLocale } from '../../src/shared/ipc-result'
+import type { ServerProfile } from '../../src/shared/ipc-types'
 
 const work = process.env.VPNTE_SMOKE_DIR!
 app.setPath('userData', join(work, 'userData'))
@@ -56,6 +57,15 @@ app.whenReady().then(async () => {
 
   installTrustedIpcBoundary()
   ipcMain.handle('get-tun-status', () => ({ running: false, smoke: true }))
+  const profile: ServerProfile = {
+    id: 'json-profile', name: 'JSON profile', protocol: 'vless', server: 'vpn.example.test', port: 443, status: 'unknown',
+    outbound: { type: 'vless', server: 'vpn.example.test', server_port: 443,
+      tls: { enabled: true, utls: { fingerprint: 'chrome' }, alpn: ['h2'] },
+      protocol_extension: { values: [null, true, 0, 'fixture', { nested: ['value'] }] } }
+  }
+  let activeProfile: ServerProfile | null = profile
+  ipcMain.handle('servers:list', () => [profile])
+  ipcMain.handle('servers:get-active', () => ({ profile: activeProfile, activeId: activeProfile?.id ?? null }))
   let settingsCalls = 0
   ipcMain.handle('save-settings', () => { settingsCalls++; return { ok: true } })
   ipcMain.handle('i18n:get-locale', () => 'en')
@@ -125,6 +135,11 @@ app.whenReady().then(async () => {
   await trusted.webContents.executeJavaScript(`window.electronAPI.saveSettings({ autoStart: false })`)
   assert.equal(settingsCalls, 1)
   checks.push('typed settings reject a string flag before effects and accept a boolean partial update')
+  assert.deepEqual(await trusted.webContents.executeJavaScript(`window.electronAPI.serversList()`), [profile])
+  assert.deepEqual(await trusted.webContents.executeJavaScript(`window.electronAPI.serversGetActive()`), { profile, activeId: profile.id })
+  activeProfile = null
+  assert.deepEqual(await trusted.webContents.executeJavaScript(`window.electronAPI.serversGetActive()`), { profile: null, activeId: null })
+  checks.push('profile result JSON and nullable active profile survive production contextBridge unchanged (AT-00-001)')
 
   const foreign = window()
   await foreign.loadURL(file)

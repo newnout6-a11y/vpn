@@ -4,7 +4,7 @@ import type { ProxyInfo, AdaptiveBypassStatus, LeakCheckResult, SystemDiagnostic
 import type { AutoconfigTarget, SmartRouteRuleSetState, BrowserHardeningResult, AutoPilotResult, SystemNetworkResult, FirewallKillSwitchResult, FirewallRepairHealth, LocationPrivacyStatus } from './network'
 import type { TrafficHistoryEntry, TrafficForensicsStatus } from './traffic'
 import type {
-  ClientDevice,
+  ClientDevice, ServerProfile,
   SplitTunnelApp, SplitTunnelConfig, ServerGroup, RefreshGroupResult,
   SpeedTestResult,
   ScheduleEntry, ScheduleNextEvent, RotationConfig,
@@ -104,24 +104,24 @@ export interface ElectronAPI {
   splitTunnelAddProcess: (name: string) => Promise<SplitTunnelApp>
   splitTunnelRemoveApp: (appId: string) => Promise<void>
   // Server Picker
-  serversList: () => Promise<any[]>
+  serversList: () => Promise<ServerProfile[]>
   serversSelect: (id: string) => Promise<void | { cancelled: true }>
   serversCancelSwitch: () => Promise<{ cancelled: boolean }>
-  serversGetActive: () => Promise<{ profile: any | null; activeId: string | null }>
-  serversPingAll: () => Promise<any[]>
-  serversResolveIps: () => Promise<any[]>
+  serversGetActive: () => Promise<{ profile: ServerProfile | null; activeId: string | null }>
+  serversPingAll: () => Promise<ServerProfile[]>
+  serversResolveIps: () => Promise<ServerProfile[]>
   serversPingOne: (host: string, port: number) => Promise<number | null>
   serversVerifyActiveCountry: (ip: string) => Promise<
-    | { ok: true; country: string; profile: any }
+    | { ok: true; country: string; profile: ServerProfile }
     | { ok: false; reason: string; country?: string }
   >
   serversVerifyCountry: (id: string) => Promise<
-    | { ok: true; country: string; profile: any }
+    | { ok: true; country: string; profile: ServerProfile }
     | { ok: false; reason: string; country?: string }
   >
-  serversAdd: (input: string, options?: { clientDevice?: ClientDevice }) => Promise<any[]>
-  serversAddToGroup: (input: string, groupId: string | null, options?: { clientDevice?: ClientDevice }) => Promise<any[]>
-  serversSetClientDevice: (id: string, clientDevice: ClientDevice) => Promise<any>
+  serversAdd: (input: string, options?: { clientDevice?: ClientDevice }) => Promise<ServerProfile[]>
+  serversAddToGroup: (input: string, groupId: string | null, options?: { clientDevice?: ClientDevice }) => Promise<ServerProfile[]>
+  serversSetClientDevice: (id: string, clientDevice: ClientDevice) => Promise<ServerProfile>
   serversRemove: (id: string) => Promise<void>
   serversCopyKey: (id: string) => Promise<
     | { ok: true; clearAfterMs: number }

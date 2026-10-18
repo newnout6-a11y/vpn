@@ -1,3 +1,4 @@
+import { asJsonObject } from '../../shared/json'
 import { useState, useEffect, useCallback, useMemo, useRef, type KeyboardEvent } from 'react'
 import { useTranslation } from 'react-i18next'
 import { motion } from 'framer-motion'
@@ -112,27 +113,29 @@ function formatHappType(profile: ServerProfile): string {
   return hasJson ? `${proto} | JSON` : proto
 }
 
-function profileStealthBadge(profile: ServerProfile): { label: string; title: string; variant: BadgeVariant } | null {
+export function profileStealthBadge(profile: ServerProfile): { label: string; title: string; variant: BadgeVariant } | null {
   const outbound = profile.outbound && typeof profile.outbound === 'object' ? profile.outbound : null
-  const protocol = (profile.protocol || outbound?.type || '').toLowerCase()
-  const tls = outbound?.tls && typeof outbound.tls === 'object' && outbound.tls.enabled !== false
-    ? outbound.tls
-    : null
-  const ech = tls?.ech && typeof tls.ech === 'object' && tls.ech.enabled !== false ? tls.ech : null
+  const protocol = (profile.protocol || (typeof outbound?.type === 'string' ? outbound.type : '')).toLowerCase()
+  const configuredTls = asJsonObject(outbound?.tls)
+  const tls = configuredTls?.enabled !== false ? configuredTls : undefined
+  const configuredEch = asJsonObject(tls?.ech)
+  const ech = configuredEch?.enabled !== false ? configuredEch : undefined
+  const reality = asJsonObject(tls?.reality)
+  const utls = asJsonObject(tls?.utls)
 
   if (ech && (Array.isArray(ech.config) || ech.config_path || ech.query_server_name)) {
     return { label: 'ECH', title: 'Encrypted ClientHello configured', variant: 'info' }
   }
-  if (tls?.reality && typeof tls.reality === 'object' && tls.reality.enabled !== false) {
+  if (reality && reality.enabled !== false) {
     return { label: 'Reality', title: 'Reality TLS camouflage', variant: 'info' }
   }
   if (protocol === 'naive') {
     return { label: 'Naive', title: 'NaiveProxy-style TLS profile', variant: 'neutral' }
   }
-  if (protocol === 'hysteria2' && outbound?.obfs && typeof outbound.obfs === 'object') {
+  if (protocol === 'hysteria2' && asJsonObject(outbound?.obfs)) {
     return { label: 'OBFS', title: 'Hysteria2 obfuscation configured', variant: 'info' }
   }
-  if (tls?.utls && typeof tls.utls === 'object' && tls.utls.enabled !== false) {
+  if (utls && utls.enabled !== false) {
     return { label: 'uTLS', title: 'Browser-like TLS fingerprint', variant: 'neutral' }
   }
   if (tls) {
