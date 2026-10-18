@@ -1,4 +1,4 @@
-import Store from 'electron-store'
+import Store from './versionedStore'
 import { logEvent } from './appLogger'
 import type { ServerProfile, ServerGroup, KillSwitchLevel, KillSwitchException } from '../shared/ipc-types'
 import {

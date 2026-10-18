@@ -18,7 +18,7 @@
  * history survives a disconnect (the sing-box log is wiped/rotated on stop).
  */
 
-import Store from 'electron-store'
+import Store from './versionedStore'
 import axios from 'axios'
 import { isIP } from 'node:net'
 import { logEvent } from './appLogger'

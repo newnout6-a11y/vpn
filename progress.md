@@ -3136,3 +3136,72 @@ CI/review нового SHA проверяются отдельно после pu
   `node scripts/test-electron-runtime.mjs` — ELECTRON_SMOKE_PASS, exit 0
   (.tmp/wp0-qodo58-adoption-electron.log); `node scripts/test-wp1-native.mjs --ipc-only`
   — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-qodo58-adoption-csp.log).
+
+### PR #58 слит; следующий участок WP-0 — admission версий хранилищ
+
+- #58 head 552a488afa4b70a251fe50e42eff1d4ee588f27a: CI run 39153223180
+  success (Windows, Rust и сайт). Qodo run 1540629 completed на том же SHA,
+  открытых findings нет, все семь прежних implemented. REST merge с expected sha
+  подтверждён повторным GET: merged=true, merge commit
+  4954c84d3f0c25651031d1eb06422b7752983329. Fetch vpn/main и сравнение tree
+  подтвердили базу; создана codex/wp0-store-version-guards. Ранее существовавшие
+  untracked .claude/.wrangler/.playwright-cli/output не включаются.
+- AT-00-006/F-074: central supported-version inventory для 20 electron-store файлов
+  и guard до constructor defaults/custom deserializer. Settings/server-picker
+  поддерживают 2; остальные остаются unversioned (0), без фиктивной миграции.
+  28 production constructors используют тот же adapter, AST contract запрещает
+  незарегистрированное имя/обход. Custom history recovery сохранён для известных
+  форматов. Future/invalid versions дают стабильные коды и безопасные сообщения.
+- Guard перед serializer защищает также set/store replacement/clear/delete/reset
+  через старый handle после появления будущей версии. SHA-256 сравнивается на
+  real Conf backend. Actual imports settings/sharedStores/history проверяют
+  отказ до defaults, repairing deserializer и secret migration effects.
+- До подключения adapter `npm.cmd test -- src/main/storeSchemaStorage.test.ts`:
+  3 failed / 38 passed, 969 ms, exit 1 (.tmp/wp0-store-schema-before.log).
+  Три actual production imports принимали future schema вместо отказа.
+  Первый focused после integration: 112 passed / 5 files, 3.31 s, exit 0
+  (.tmp/wp0-store-schema-after.log). После дополнительных actual group/granular
+  entrypoints и clearInvalidConfig regression: 115 passed / 5 files, 2.79 s,
+  exit 0 (.tmp/wp0-store-schema-focused-final.log).
+- Ordered migrations, historical payload transformation fixtures, backup/checksum/
+  dry-run/rollback для остальных persisted JSON и cross-version acceptance
+  не объявлены выполненными. Interprocess write lock не вводился; race внешней
+  записи между guard read и atomic rename не доказана. F-074 и весь AT-00-006
+  остаются частичными. Финальные DoD/build/native результаты записываются ниже.
+- Финальный `npm.cmd test`: **4068 passed / 5 skipped / 0 failed**,
+  255 files passed / 2 skipped, 210.11 s, exit 0 (.tmp/wp0-store-schema-full.log).
+  `npm.cmd run typecheck` — exit 0, 158 channels / 0 public any
+  (.tmp/wp0-store-schema-typecheck-final.log). Coverage AC 927/927, F 210/210,
+  `git diff --check` — exit 0. Нормативные docs не изменялись.
+- После full suite `npm.cmd run build` — exit 0 (.tmp/wp0-store-schema-build.log);
+  `node scripts/test-electron-runtime.mjs` — ELECTRON_SMOKE_PASS, exit 0
+  (.tmp/wp0-store-schema-electron.log); `node scripts/test-wp1-native.mjs --ipc-only`
+  — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-store-schema-csp.log). Это не полный
+  installed upgrade/downgrade и не L3. CI/Qodo проверяются после публикации.
+
+### Qodo #59 — отказ несовместимого store при static import
+
+- CI run 39154442970 на 1d9f844 — success. Qodo run 1540747 completed на том же
+  SHA: finding e819a34b-d5ef-4ca7-9f80-e11b3a47bdc4, «Users get no storage refusal
+  message». Подтверждено: constructor исполняется до установки main startup/crash
+  boundary. Добавлен ранний native error box только для StoreSchemaError до ready,
+  sanitized code в stderr и app.exit(1) без main network teardown. Запись app.log
+  не заявляется. После ready ошибка остаётся у существующей IPC/startup boundary.
+- Unit tests проверяют все три кода, отсутствие недоверенных message/path/secret
+  и exit при отказе dialog. Native test использует настоящий pinned Electron,
+  production Store adapter, real electron-store/Conf и isolated userData;
+  перехватывается только popup. До ready — message перед настоящим exit 1;
+  после ready — typed error до caller catch, без early dialog. Future file hash
+  неизменен. Созданные fixture directories удаляются самим тестом.
+- `npm.cmd test -- src/main/storeSchemaStorage.test.ts src/main/storeSchemaStartup.test.ts src/main/storeSchemaElectron.test.ts src/main/storeSchemaInventory.test.ts`
+  — 52 passed / 4 files, 1.97 s, exit 0 (.tmp/wp0-store-schema-startup-focused.log).
+  `npm.cmd run typecheck` — exit 0, 158 channels / 0 public any
+  (.tmp/wp0-store-schema-startup-typecheck.log). Traceability checker — exit 0,
+  AC 927/927, F 210/210 (трассировка, не исполнение AT).
+- Финальный `npm.cmd test` — **4075 passed / 5 skipped / 0 failed**, 257 files
+  passed / 2 skipped, 213.13 s, exit 0 (.tmp/wp0-store-schema-startup-full.log).
+  После него `npm.cmd run build` — exit 0 (.tmp/wp0-store-schema-startup-build.log);
+  `node scripts/test-electron-runtime.mjs` — ELECTRON_SMOKE_PASS, exit 0
+  (.tmp/wp0-store-schema-startup-electron.log); `node scripts/test-wp1-native.mjs --ipc-only`
+  — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-store-schema-startup-csp.log). `git diff --check`
+  — exit 0. Это не installed upgrade/downgrade и не полная приёмка AT-00-006.

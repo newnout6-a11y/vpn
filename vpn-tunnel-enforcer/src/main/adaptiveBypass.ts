@@ -3,7 +3,7 @@ export type { AdaptiveBypassMode, AdaptiveBypassPhase, AdaptiveCapabilities, Ada
 import { createHmac, randomBytes } from 'crypto'
 import { networkInterfaces } from 'os'
 import { safeStorage } from 'electron'
-import Store from 'electron-store'
+import Store from './versionedStore'
 import { logEvent } from './appLogger'
 import { decryptSecret, encryptSecret, SECRET_REF_KIND } from './secretStorage'
 import { ALL_KNOWN_ALIASES, getTunAdapterAlias, isOwnTunAddress } from './tunAdapter'

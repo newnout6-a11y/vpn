@@ -15,7 +15,7 @@
  */
 
 import { ipcMain } from 'electron'
-import Store from 'electron-store'
+import Store from './versionedStore'
 import { createHash, randomUUID } from 'crypto'
 import type { ConnectionLogEntry, ConnectionHistoryFilters, ConnectionHistoryStats as AggregatedStats } from '../shared/ipc-types'
 export type { ConnectionHistoryFilters, ConnectionHistoryStats as AggregatedStats } from '../shared/ipc-types'

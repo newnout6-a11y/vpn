@@ -21,7 +21,7 @@
 
 import { ipcMain, dialog, type IpcMainInvokeEvent, type WebContents } from 'electron'
 import { readFileSync, readSync, writeFileSync, openSync, closeSync, fstatSync } from 'fs'
-import Store from 'electron-store'
+import Store from './versionedStore'
 import { logEvent } from './appLogger'
 import { compactForIpcLog } from './ipcLogging'
 import { withSecretExportConsent } from './secretExportConsent'

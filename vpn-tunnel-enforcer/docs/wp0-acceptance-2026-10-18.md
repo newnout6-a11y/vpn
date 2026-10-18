@@ -8,7 +8,7 @@
 18.10 владелец разрешил продолжать WP-0 при открытом PR #54, сохраняя запрет
 его слияния до отдельного решения. Полного Revix для #54 не было из-за квоты.
 Позднее 18.10 владелец разрешил сливать PR после пройденных проверок.
-#54/#55/#56/#57 слиты в main после exact-head CI success и completed Qodo,
+#54/#55/#56/#57/#58 слиты в main после exact-head CI success и completed Qodo,
 без открытых findings; прежний запрет слияния отменён.
 
 ## Полная область и первоначальная инвентаризация
@@ -20,7 +20,7 @@
 | 00-003 | Main connection lane: UUIDv4, owner, deadline запуска, priority admission; ручные Hard/Direct и Soft из tray, scheduled startup вместе с proxy detection; отмена на 10/50/90% управляемого connect fixture | Общий реестр refresh/speed/import/export/rotation; deadline остановки, интеграция всех entrypoints и полная матрица поздних эффектов |
 | 00-004 | Общая классификация transport; 157 каналов × 7 категорий через guard; native contextBridge сохраняет code/category/correlation в en/ru; typed local validation; 4 настоящих config handlers × 7 категорий, canonical domain failures | Миграция legacy domain-result `{success:false,error}` и semantic matrix настоящих feature handlers; transport fixtures не доказывают её |
 | 00-005 | `appLogger.ts`, `connectionHistory.ts`; новый regression passive rejection dedup | Сквозной correlation id, монотонный порядок, source/owner/route/confidence истории и redaction всех полей |
-| 00-006 | Локальные миграции, в том числе `readSettingsWithMigration` | Централизованный упорядоченный реестр, fixtures всех исторических версий, future-version hash invariance |
+| 00-006 | Локальные миграции; общий version admission для 20 electron-store файлов / 28 constructors; future-version SHA-256 invariance на real Conf backend до defaults/repair и при записи через ранее открытый handle | Централизованный упорядоченный migration registry, fixtures всех исторических преобразований, остальные persisted JSON, полноценный upgrade/downgrade и межпроцессная координация |
 | 00-007 | Seed 0x5eed003: 200 commands/10 async workers с production lane/FSM, typed losers, парные terminal events, финальный disconnect и 0 fake PID/TUN | Натурный PID-реестр Windows и полная матрица фоновых entrypoints |
 | 00-008 | Dashboard component frames с production FSM/lane; revision fence; Soft через owned IPC; visual fixtures light/dark; native production contextBridge snapshots/disposer | Полная матрица всех операций, тем, размеров и entrypoints; browser fixtures не заменяют native resources |
 | 00-009 | Плановые функции WP-12 не приняты в production | Проверить реестр production flags, отсутствие DOM и отказ включения без laboratory evidence с audit event |
@@ -586,3 +586,45 @@ recovery owner разрешает выбранный прокси и выпол�
 receipt дают unknown. Существующий recovery fault не очищается автоматически.
 Исполняется actual adoption + actual Soft effects + production lane/FSM с fake OS;
 backup остаётся основанием cleanup, а не самостоятельным protection evidence.
+
+## Версии electron-store — AT-00-006, часть F-074
+
+storeSchema содержит inventory поддерживаемых версий: settings/server-picker — 2,
+остальные 18 файлов пока имеют существующий unversioned format (0). VersionedStore
+исполняет guard до Conf defaults merge и до custom repairing deserializer.
+Неизвестный будущий номер и неверный тип версии дают стабильный StoreSchemaError
+без raw JSON/пути; IPC сохраняет категорию conflict/validation. Имя нового store
+должно быть зарегистрировано. AST contract проверяет все production constructors
+и запрещает runtime-обход адаптера, включая дублирующие configManager entrypoints.
+
+Serialize guard повторно читает текущий файл, защищая set/whole-store replacement/
+clear/delete/reset после обнаруживаемой подмены на более новую версию. Real Conf
+fixtures сверяют SHA-256 всех 20 future-version файлов, custom deserializer и
+serializer не вызываются до отказа. Отдельно исполняются imports настоящих settings,
+server-picker/server-groups/granular-kill-switch и connection-history: ни defaults,
+ни repairing history reader, ни secret migration не опережают guard.
+
+Metadata versions absent/0/1/2 в settings сохраняются вместе с неизвестными полями;
+это совместимость admission, а не миграция исторических payload. Existing history
+corruption и secret-store regressions также выполняются. Реестр ordered
+migrations, backup/checksum/dry-run/rollback для всех persisted JSON и полный
+cross-version upgrade/downgrade остаются открыты. Межпроцессный lock этим адаптером
+не вводится: гонка внешней записи между проверкой и atomic rename отдельно не
+доказана. Точные команды и фактические результаты — progress.md.
+
+### Qodo #59 — понятный отказ до app.ready
+
+Qodo run 1540747 completed на 1d9f844: constructor settings выполняется во время
+static import, раньше main startup/crash boundary. Замечание подтверждено:
+StoreSchemaError теперь до app.ready показывает нативное сообщение с причиной
+отказа и рекомендацией, пишет только стабильный code в stderr и завершает
+процесс с exit 1. app.log этим ранним путём не заявляется. Main network teardown
+не запускается; runtime errors после ready остаются у существующей boundary.
+
+Unit fixtures проверяют три кода, отсутствие raw path/JSON/secret в UI/stderr
+и exit даже при отказе native dialog. Отдельный тест запускает настоящий pinned
+Electron с production Store adapter и isolated userData: до ready сообщение
+предшествует реальному exit 1, после ready typed error попадает в caller catch
+без раннего dialog/exit. SHA-256 future-version файла неизменен в обоих случаях.
+Перехвачен только native dialog, чтобы fixture не показывала popup на рабочем
+столе. Это адресный startup subset, не installed upgrade/downgrade acceptance.

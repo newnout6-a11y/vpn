@@ -10,7 +10,7 @@
  */
 
 import { ipcMain, nativeTheme, BrowserWindow } from 'electron'
-import Store from 'electron-store'
+import Store from './versionedStore'
 import type { ThemeConfig } from '../shared/ipc-types'
 
 // ─── Built-in Themes ─────────────────────────────────────────────────────────
