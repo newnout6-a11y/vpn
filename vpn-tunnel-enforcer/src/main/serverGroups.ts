@@ -891,7 +891,7 @@ export function registerServerGroupsHandlers(): void {
       return await checkGroupHealth(id)
     } catch (err: any) {
       logEvent('warn', 'server-groups', 'check-health failed', err)
-      return { ok: false as const, error: err?.message || 'health checker недоступен' }
+      return { ok: false as const, error: String(err?.message || 'health checker недоступен') }
     }
   })
 }

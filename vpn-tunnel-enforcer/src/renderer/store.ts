@@ -1,3 +1,5 @@
+import type { ProxyInfo, LeakCheckItem, LeakCheckResult } from '../shared/diagnostics'
+export type { ProxyInfo, LeakCheckItem, LeakCheckResult } from '../shared/diagnostics'
 import type { AppSettings } from '../shared/settings'
 export type { AppSettings } from '../shared/settings'
 import type { PublicIpVerdict } from '../shared/publicIp'
@@ -36,14 +38,6 @@ import { create } from 'zustand'
 
 export type Mode = 'off' | 'soft' | 'hard' | 'external'
 
-export interface ProxyInfo {
-  host: string
-  port: number
-  type: 'socks5' | 'http'
-  verified: boolean
-  publicIpViaProxy: string | null
-}
-
 export interface AutoconfigTarget {
   id: string
   name: string
@@ -68,20 +62,6 @@ function persistRendererLog(level: LogEntry['level'], message: string) {
   } catch {
     // Logging must never break UI state updates.
   }
-}
-
-export interface LeakCheckItem {
-  id: string
-  label: string
-  status: 'ok' | 'warn' | 'fail' | 'info'
-  value: string
-  details?: string
-}
-
-export interface LeakCheckResult {
-  ranAt: number
-  summary: 'ok' | 'warn' | 'fail' | 'info'
-  items: LeakCheckItem[]
 }
 
 export interface RoutingHealth {

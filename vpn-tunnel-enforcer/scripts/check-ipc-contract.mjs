@@ -2,6 +2,7 @@ import ts from 'typescript'
 import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { checkIpcResults } from './check-ipc-results.mjs'
 
 const parse = (name, source) => ts.createSourceFile(name, source, ts.ScriptTarget.Latest, true)
 const walk = (node, visit) => { visit(node); ts.forEachChild(node, child => walk(child, visit)) }
@@ -78,10 +79,12 @@ export function checkIpcContract(root = process.cwd()) {
     }
   }
   collect(join(root, 'src/main'))
-  return inspectIpcContract({ main, preload: readFileSync(join(root, 'src/preload/index.ts'), 'utf8'), shared: readFileSync(join(root, 'src/shared/ipc-contract.ts'), 'utf8') })
+  return { ...inspectIpcContract({ main, preload: readFileSync(join(root, 'src/preload/index.ts'), 'utf8'), shared: readFileSync(join(root, 'src/shared/ipc-contract.ts'), 'utf8') }), mainFiles: Object.keys(main) }
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const result = checkIpcContract()
+  const responses = checkIpcResults(process.cwd(), result)
+  result.problems.push(...responses.problems)
   if (result.problems.length) { console.error(result.problems.join('\n')); process.exitCode = 1 }
-  else console.log(`IPC contract: ${result.registered.length} main/preload/shared request channels`)
+  else console.log(`IPC contract: ${result.registered.length} main/preload/shared request channels; ${responses.checked.length} listener result types checked (${responses.legacy.length} public results still contain any)`)
 }

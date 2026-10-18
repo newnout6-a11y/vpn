@@ -2809,7 +2809,7 @@ export function registerServerPickerHandlers(): void {
         path: choice.filePath,
         error: err?.message || String(err)
       })
-      return { ok: false as const, reason: 'write-failed', error: err?.message || String(err) }
+      return { ok: false as const, reason: 'write-failed', error: String(err?.message || err) }
     }
     })
   })
@@ -2892,7 +2892,7 @@ export function registerServerPickerHandlers(): void {
         path: choice.filePath,
         error: err?.message || String(err)
       })
-      return { ok: false as const, reason: 'write-failed', error: err?.message || String(err) }
+      return { ok: false as const, reason: 'write-failed', error: String(err?.message || err) }
     }
     })
   })
@@ -2954,7 +2954,7 @@ export function registerServerPickerHandlers(): void {
         path: choice.filePath,
         error: err?.message || String(err)
       })
-      return { ok: false as const, reason: 'write-failed', error: err?.message || String(err) }
+      return { ok: false as const, reason: 'write-failed', error: String(err?.message || err) }
     }
     })
   })

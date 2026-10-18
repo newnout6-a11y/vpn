@@ -1,3 +1,5 @@
+import type { PathReport, UrlAvailabilityResult } from '../shared/diagnostics'
+export type { PathReport, UrlAvailabilityResult } from '../shared/diagnostics'
 /**
  * URL Availability — paste a link, find out whether it's reachable from
  * inside the user's network and whether VPN actually helps.
@@ -42,56 +44,6 @@ import {
   type PageSignal,
   type GeoBlockVerdict
 } from './geoBlockDetect'
-
-// ─── Types ───────────────────────────────────────────────────────────────────
-
-export interface PathReport {
-  /** True if the URL was reachable along this path. */
-  available: boolean
-  /** End-to-end wall-clock ms (DNS + TCP + TLS + HTTP). null if unreachable. */
-  totalMs: number | null
-  /** Why it failed, if it did. Human-readable for the UI. */
-  errorStage: 'dns' | 'tcp' | 'tls' | 'http' | 'api' | null
-  errorMessage: string | null
-  /** Full per-stage breakdown. Only populated for the native path. */
-  dns: {
-    resolved: boolean
-    ips: string[]
-    ms: number | null
-    /** True if the resolver returned 0.0.0.0 / a known RKN landing IP. */
-    poisoned: boolean
-  } | null
-  tcp: { connected: boolean; ms: number | null } | null
-  tls: { handshakeOk: boolean; ms: number | null; cipher: string | null; protocol: string | null } | null
-  http: { status: number | null; ms: number | null; server: string | null } | null
-  /** ASN/geo of the resolved IP, best-effort. */
-  asn: { country: string; org: string } | null
-  /** Set to true if the website returned 200 OK but the HTML body contains GeoBlock markers (e.g. Gemini). */
-  geoBlocked?: boolean
-  /** How the measurement was taken — useful for telling apart full probe
-   *  results from "clash API delay only" approximations. */
-  source: 'native' | 'clash-direct-out'
-}
-
-export interface UrlAvailabilityResult {
-  id: string
-  url: string
-  testedAt: number
-  tunnelActive: boolean
-  /** Full report through the tunnel (when VPN is on). null otherwise. */
-  tunnel: PathReport | null
-  /** Report without the tunnel — native when VPN off, clash-direct when on. */
-  direct: PathReport | null
-  /** High-level conclusion. */
-  verdict:
-    | 'works-both'
-    | 'works-only-with-vpn'
-    | 'works-only-without-vpn'
-    | 'blocked-everywhere'
-    | 'unknown'
-  /** Human-readable next step for the user. */
-  recommendation: string
-}
 
 interface UrlAvailabilityOptions {
   disableGeoLookup?: boolean

@@ -11,6 +11,8 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { ipcMain } from 'electron'
+const healthMock = vi.hoisted(() => vi.fn())
+vi.mock('./keyHealthChecker', () => ({ checkGroupHealth: healthMock }))
 
 // ─── Stateful electron-store mock, keyed by store name ──────────────────────
 // vi.hoisted so the data object exists before the hoisted vi.mock factory runs.
@@ -118,6 +120,17 @@ function pickerProfiles() {
 beforeEach(() => {
   resetStores()
   resolveVpnProfilesMock.mockReset()
+  healthMock.mockReset()
+})
+
+describe('group health result contract (AT-00-001; F-138)', () => {
+  it.each([[new Error('expected message'), 'expected message'], [{ message: { malformed: true } }, '[object Object]']])(
+    'keeps the error field a string for every thrown message', async (error, message) => {
+      healthMock.mockRejectedValue(error)
+      registerServerGroupsHandlers()
+      const handler = vi.mocked(ipcMain.handle).mock.calls.find(([channel]) => channel === 'groups:check-health')![1]
+      expect(await handler({} as never, 'id')).toEqual({ ok: false, error: message })
+    })
 })
 
 describe('refreshGroup dedup-merge', () => {

@@ -1,25 +1,10 @@
+import type { CheckStatus as HealthStatus, SystemDiagnosticItem as DiagnosticItem, SystemDiagnosticResult } from '../../shared/diagnostics'
 import { useMemo } from 'react'
 import { Activity, CheckCircle2, Download, Loader2, ShieldCheck, TriangleAlert, Wrench } from 'lucide-react'
 import { useAppStore } from '../store'
 import { MacCard, MacButton } from '../design-system'
 
 type MaintenanceAction = 'health-check' | 'auto-repair' | 'protection-test' | 'export-zip' | 'nuclear-reset'
-type HealthStatus = 'ok' | 'warn' | 'fail' | 'info'
-
-interface DiagnosticItem {
-  id: string
-  label: string
-  status: HealthStatus
-  value: string
-  details?: string
-  category: string
-}
-
-interface SystemDiagnosticResult {
-  ranAt: number
-  summary: HealthStatus
-  items: DiagnosticItem[]
-}
 
 interface FirewallRepairHealth {
   protectedTunnelActive?: boolean

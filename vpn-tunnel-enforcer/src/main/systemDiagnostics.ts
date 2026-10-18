@@ -1,3 +1,5 @@
+import type { SystemDiagnosticItem, SystemDiagnosticResult } from '../shared/diagnostics'
+export type { SystemDiagnosticItem, SystemDiagnosticResult } from '../shared/diagnostics'
 import { exec as execCb, execFile as execFileCb } from 'child_process'
 import { readFile, stat } from 'fs/promises'
 import { join } from 'path'
@@ -22,21 +24,6 @@ import type { ServerProfile } from '../shared/ipc-types'
 const exec = promisify(execCb)
 const execFile = promisify(execFileCb)
 const MAX_BUFFER = 1024 * 1024 * 6
-
-export interface SystemDiagnosticItem {
-  id: string
-  category: string
-  label: string
-  status: CheckStatus
-  value: string
-  details?: string
-}
-
-export interface SystemDiagnosticResult {
-  ranAt: number
-  summary: CheckStatus
-  items: SystemDiagnosticItem[]
-}
 
 function encodedPowerShell(script: string) {
   const prelude =

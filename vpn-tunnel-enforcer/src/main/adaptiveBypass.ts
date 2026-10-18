@@ -1,3 +1,5 @@
+import type { AdaptiveBypassMode, AdaptiveBypassPhase, AdaptiveCapabilities, AdaptiveBypassStatus } from '../shared/diagnostics'
+export type { AdaptiveBypassMode, AdaptiveBypassPhase, AdaptiveCapabilities, AdaptiveBypassStatus } from '../shared/diagnostics'
 import { createHmac, randomBytes } from 'crypto'
 import { networkInterfaces } from 'os'
 import { safeStorage } from 'electron'
@@ -7,36 +9,6 @@ import { decryptSecret, encryptSecret, SECRET_REF_KIND } from './secretStorage'
 import { ALL_KNOWN_ALIASES, getTunAdapterAlias, isOwnTunAddress } from './tunAdapter'
 import { isIP } from 'net'
 import { readAdaptiveNetworkIdentity, type AdaptiveNetworkIdentity } from './adaptiveNetworkIdentity'
-
-export type AdaptiveBypassMode =
-  | 'baseline'
-  | 'tls-compatibility'
-  | 'mtu-compatibility'
-  | 'external-managed'
-
-export type AdaptiveBypassPhase =
-  | 'idle'
-  | 'connecting'
-  | 'verifying'
-  | 'adapting'
-  | 'connected'
-  | 'failed'
-
-export interface AdaptiveCapabilities {
-  canUseTlsCompatibility: boolean
-  canUseMtuCompatibility: boolean
-  externallyManaged: boolean
-  reason: string | null
-}
-
-export interface AdaptiveBypassStatus {
-  phase: AdaptiveBypassPhase
-  mode: AdaptiveBypassMode
-  attempts: number
-  message: string
-  updatedAt: number
-  reason: string | null
-}
 
 interface AdaptiveLearningRecord {
   mode: Extract<AdaptiveBypassMode, 'tls-compatibility' | 'mtu-compatibility'>

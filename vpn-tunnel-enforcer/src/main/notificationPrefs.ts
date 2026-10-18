@@ -146,7 +146,7 @@ export function registerNotificationPrefsIpcHandlers(): void {
       const result = await resetWindowsNotificationBlock()
       return { ok: true as const, cleared: result.cleared, errors: result.errors }
     } catch (err: any) {
-      return { ok: false as const, error: err?.message || String(err) }
+      return { ok: false as const, error: String(err?.message || err) }
     }
   })
 
@@ -159,7 +159,7 @@ export function registerNotificationPrefsIpcHandlers(): void {
       await shell.openExternal('ms-settings:notifications')
       return { ok: true as const }
     } catch (err: any) {
-      return { ok: false as const, error: err?.message || String(err) }
+      return { ok: false as const, error: String(err?.message || err) }
     }
   })
 }

@@ -6,6 +6,7 @@ import { join } from 'path'
 const state = vi.hoisted(() => ({
   nativePrompt: vi.fn(), saveDialog: vi.fn(), uri: vi.fn(), proxyLine: vi.fn(),
   clipboardText: '', clipboardWrite: vi.fn(),
+  writeFailure: undefined as unknown,
   storeData: new Map<string, any>(),
   ipcHandlers: new Map<string, (...args: any[]) => any>(),
   profiles: [] as any[],
@@ -22,6 +23,12 @@ const state = vi.hoisted(() => ({
     recheck: vi.fn(async () => ({ ip: '198.51.100.2' }))
   }
 }))
+
+vi.mock('fs/promises', async importOriginal => {
+  const actual = await importOriginal<typeof import('fs/promises')>()
+  return { ...actual, writeFile: (...args: Parameters<typeof actual.writeFile>) => state.writeFailure
+    ? Promise.reject(state.writeFailure) : actual.writeFile(...args) }
+})
 
 vi.mock('electron', () => ({
   app: { getPath: () => '/tmp/vpnte-test', getAppPath: () => '/tmp/vpnte-test' },
@@ -103,6 +110,7 @@ function invoke(channel: string) { return state.ipcHandlers.get(channel)!({ send
 
 beforeEach(async () => {
   vi.resetModules(); vi.clearAllMocks(); state.storeData.clear(); state.ipcHandlers.clear(); destroyed = false
+  state.writeFailure = undefined
   exportDirectory = mkdtempSync(join(tmpdir(), 'vpnte-export-consent-'))
   exportPath = join(exportDirectory, 'keys.txt')
   state.storeData.set('profiles', [{ id: 'a', name: 'Profile', protocol: 'vless', outbound: { type: 'vless', server: 'server.test', server_port: 443, uuid: 'FAKE-PRIVATE-KEY' } }])
@@ -120,6 +128,12 @@ afterEach(async () => {
 })
 
 describe('main-owned export approval (AT-01-008)', () => {
+  it.each(channels.filter(channel => channel.endsWith('-file')))('returns a string when a write exception has a non-string message (AT-00-001): %s', async channel => {
+    state.nativePrompt.mockResolvedValue({ response: 1 })
+    state.writeFailure = { message: { malformed: true } }
+    expect(await invoke(channel)).toMatchObject({ ok: false, reason: 'write-failed', error: '[object Object]' })
+    expect(existsSync(exportPath)).toBe(false)
+  })
   it('saves native JSON with a JSON file suggestion and preserves main-owned clipboard handling', async () => {
     const secretJson = JSON.stringify({ remarks: 'Native', outbounds: [{ protocol: 'vless', settings: { id: 'FAKE-PRIVATE-KEY' } }], routing: { balancers: [{ tag: 'bridge' }] } })
     state.uri.mockReturnValue(secretJson)
