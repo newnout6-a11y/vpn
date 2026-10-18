@@ -2212,3 +2212,29 @@ CI/review нового SHA проверяются отдельно после pu
   Глубокие legacy schemas/any, domain-result failures, общий coordinator/FSM,
   registry отмены/deadline, migrations, correlation/history и race/UI/flags
   остаются в матрице. Native smoke не заменяет полную L3-приёмку.
+
+### PR #50 — проверка замечаний и доработка
+
+- Первый head 1ee6ad8bfc4ad6c6edeee355890a0980c8a5246b: CI run
+  39120313653, Windows 117654409737, Rust 117654409586 и сайт
+  117654409800 — success. Windows: 3725 passed / 4 skipped / 0 failed,
+  245 файлов passed / 1 skipped, 227.82 s; coverage AC 927/927 и
+  F 210/210. Новый native IPC/CSP шаг — success (оба PASS markers),
+  WFP aborted:true, native Electron probe 1 passed / 1 skipped.
+  .tmp/wp0-renderer-initial-ci.log. Это результаты первого head.
+- Revix 117654423546 — completed/neutral, Low risk, review 5562593204.
+  Suggestion 4306715099 обоснован: всякий TypeError/RangeError ошибочно
+  обозначался validation. Все явные preload validators теперь бросают
+  IpcValidationError; serializer больше не переименовывает случайные
+  TypeError/RangeError. Новые тесты проверяют internal для случайного
+  синхронного сбоя и validation для несерилизуемого входа без IPC effects.
+- Nitpick 4306715102 не применим: node:assert/strict уже делает assert.equal
+  строгим; ответ 4306721060 со ссылкой на существующий import.
+- Финальная доработка: целевые 6 файлов — 382 passed, 3.53 s, exit 0;
+  `npm.cmd run build` — exit 0 (.tmp/wp0-renderer-review-build.log),
+  `node scripts/test-electron-runtime.mjs` — exit 0
+  (.tmp/wp0-renderer-review-native.log). `npm.cmd test` — 3729 passed /
+  5 skipped / 0 failed, 244 файлов passed / 2 skipped, 174.91 s, exit 0
+  (.tmp/wp0-renderer-review-full.log). Coverage — AC 927/927, F 210/210,
+  exit 0; `git diff --check` — exit 0. Свежий exact-head CI/review после
+  push ещё обязателен до merge; WP-0 остаётся в работе.

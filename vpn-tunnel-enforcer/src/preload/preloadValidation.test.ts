@@ -83,6 +83,19 @@ describe('preload IPC argument validation', () => {
     }
   })
 
+  it.each([new TypeError('raw-secret'), new RangeError('raw-secret')])('keeps unexpected synchronous preload failures internal', async error => {
+    const api = await loadApi()
+    invokeMock.mockImplementationOnce(() => { throw error })
+    await expect(api.getTunStatus()).rejects.toMatchObject({ category: 'internal', code: 'IPC_INTERNAL_ERROR', message: 'Operation failed' })
+  })
+
+  it('rejects unserializable input as validation without IPC effects', async () => {
+    const api = await loadApi(), circular: Record<string, unknown> = {}
+    circular.self = circular
+    await expectLocalValidation(() => api.saveSettings(circular))
+    expect(invokeMock).not.toHaveBeenCalled()
+  })
+
   it.each(['en', 'ru'])('uses persisted %s for canonical errors without trusting main error text', async locale => {
     const api = await loadApi()
     invokeMock.mockResolvedValueOnce({ version: 1, correlationId: '00000000-0000-4000-8000-000000000000', ok: true, result: locale })

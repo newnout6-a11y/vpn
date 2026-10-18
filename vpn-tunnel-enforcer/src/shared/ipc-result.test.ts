@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { IPC_ERRORS, IpcFault, IpcRemoteError, ipcError, isIpcRemoteErrorData, serializeIpcError, type IpcErrorCategory } from './ipc-result'
+import { IPC_ERRORS, IpcFault, IpcValidationError, IpcRemoteError, ipcError, isIpcRemoteErrorData, serializeIpcError, type IpcErrorCategory } from './ipc-result'
 
 const correlationId = '00000000-0000-4000-8000-000000000000'
 describe('cloneable IPC failure data (AT-00-004; F-074)', () => {
@@ -15,9 +15,10 @@ describe('cloneable IPC failure data (AT-00-004; F-074)', () => {
     }
   })
   it('classifies local validators without inventing a main-process correlation', () => {
-    for (const error of [new TypeError('raw-secret'), new RangeError('raw-secret')]) {
-      expect(serializeIpcError(error, 'en')).toEqual({ name: 'IpcRemoteError', ...ipcError('validation', 'en') })
-    }
+    expect(serializeIpcError(new IpcValidationError('raw-secret'), 'en')).toEqual({ name: 'IpcRemoteError', ...ipcError('validation', 'en') })
+  })
+  it.each([new TypeError('raw-secret'), new RangeError('raw-secret')])('keeps unexpected preload errors internal', error => {
+    expect(serializeIpcError(error, 'en')).toEqual({ name: 'IpcRemoteError', ...ipcError('internal', 'en') })
   })
   it('contains malformed typed faults and throwing getters', () => {
     const invalid = Object.defineProperty(new IpcFault('network'), 'category', { value: 'not-a-category' })

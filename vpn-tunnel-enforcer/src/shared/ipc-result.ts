@@ -71,8 +71,7 @@ export function serializeIpcError(error: unknown, locale: IpcErrorLocale): IpcRe
     if (error instanceof IpcRemoteError) {
       if (Object.hasOwn(IPC_ERRORS, error.category)) category = error.category
       if (typeof error.correlationId === 'string' && UUID_V4.test(error.correlationId)) correlationId = error.correlationId
-    } else if (error instanceof TypeError || error instanceof RangeError) category = 'validation'
-    else category = classifyIpcError(error)
+    } else category = classifyIpcError(error)
   } catch { category = 'internal' }
   return { name: 'IpcRemoteError', ...ipcError(category, locale), ...(correlationId ? { correlationId } : {}) }
 }

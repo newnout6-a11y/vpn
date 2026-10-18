@@ -118,6 +118,13 @@ cause или произвольный текст exception не копируют
 не вызывается и correlationId не выдумывается. Сквозная domain correlation
 AT-00-005 ещё не реализована.
 
+Revix PR #50 suggestion 4306715099 учтён: локальные валидаторы явно бросают
+`IpcValidationError`; неожиданные `TypeError`/`RangeError` внутри preload
+остаются `internal`. Ошибка сериализации входного объекта классифицируется
+валидатором до IPC. Регрессии различают ошибку параметров и внутренний сбой.
+Nitpick 4306715102 о loose assert не применим: native fixture уже импортирует
+`node:assert/strict`, поэтому `assert.equal` выполняет строгое сравнение.
+
 | category | Стабильный code | Условие transport |
 | --- | --- | --- |
 | validation | IPC_VALIDATION_ERROR | Отказ схемы/лимитов либо typed validation fault |
