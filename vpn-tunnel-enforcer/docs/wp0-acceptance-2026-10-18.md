@@ -676,3 +676,14 @@ stable tours и seeded 200-command race сохранены.
 Это L2 с fake OS и in-memory event ledger, не durable audit history, не полный
 обход всех blocked/unknown/background entrypoints и не Windows resource oracle.
 Весь AT-00-002 целиком пока не объявляется PASS. F-021 остаётся опровергнутой.
+
+### Qodo #61 — отсутствие обоих событий остановки
+
+Qodo run 1541078 на b979009 подтвердил пробел oracle: если для stop не поступили
+ни running, ни terminal, проверка только существующих ID могла это не заметить.
+Теперь число принятых connect/disconnect считается независимо от observer по
+командам модели и сверяется с уникальными ID каждого вида после каждого шага
+и финальной cleanup. Для timeout auto-stop и explicit join ожидается одна
+операция disconnect. Два mutation fixtures запускают настоящие start/stop,
+удаляя оба события connect либо disconnect: oracle обязан отклонить такой ledger.
+До исправления обе регрессии падали (Missing expected exception).

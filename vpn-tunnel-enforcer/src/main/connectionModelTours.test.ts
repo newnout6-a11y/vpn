@@ -7,6 +7,36 @@ import type { ConnectionOperation } from '../shared/operation'
 
 afterEach(() => vi.useRealTimers())
 
+function assertLedger(events: ConnectionOperation[], expected: Record<'connect' | 'disconnect', number>, pending: number, label = '') {
+  const byId = new Map<string, ConnectionOperation[]>()
+  for (const operation of events) {
+    const history = byId.get(operation.operationId) ?? []
+    history.push(operation); byId.set(operation.operationId, history)
+  }
+  let running = 0
+  const recorded = { connect: 0, disconnect: 0 }
+  for (const history of byId.values()) {
+    assert.equal(history[0].status, 'running', label)
+    recorded[history[0].kind]++
+    assert.ok(history.length <= 2, label)
+    if (history.length === 1) running++
+    else assert.notEqual(history[1].status, 'running', label)
+  }
+  // Expected admissions come from model commands, never from observer output.
+  assert.deepEqual(recorded, expected, label)
+  assert.equal(running, pending, label)
+}
+
+it.each(['connect', 'disconnect'] as const)('rejects an audit trail missing the entire %s operation', async missing => {
+  const events: ConnectionOperation[] = []
+  const lane = new ConnectionLifecycle(() => {}, undefined, operation => {
+    if (operation.kind !== missing) events.push(operation)
+  })
+  await lane.start(async () => ({ success: true }))
+  await lane.stop(async () => ({ success: true }))
+  assert.throws(() => assertLedger(events, { connect: 1, disconnect: 1 }, 0))
+})
+
 it('walks every connect/complete/disconnect/crash/timeout/cancel/retry tour through depth six (AT-00-002)', async () => {
   vi.useFakeTimers()
   const alphabet = ['connect', 'complete', 'disconnect', 'crash', 'timeout', 'cancel', 'retry'] as const
@@ -14,6 +44,7 @@ it('walks every connect/complete/disconnect/crash/timeout/cancel/retry tour thro
   for (let tour = 0; tour < total; tour++) {
     const os = { running: false, pid: null as number | null, tun: false, softApplied: false }
     const events: ConnectionOperation[] = []
+    const admitted = { connect: 0, disconnect: 0 }
     const model = new TunnelStateMachine(() => os)
     const cleanup = async () => { os.running = false; os.pid = null; os.tun = false; return { success: true } }
     const lane = new ConnectionLifecycle(() => {}, cleanup, operation => events.push(operation), model)
@@ -36,6 +67,7 @@ it('walks every connect/complete/disconnect/crash/timeout/cancel/retry tour thro
           assert.equal('code' in result && result.code, 'OPERATION_CONFLICT', label)
           assert.deepEqual(model.snapshot, before, label)
         } else {
+          admitted.connect++
           let release!: () => void
           const gate = new Promise<void>(resolve => { release = resolve })
           const result = lane.start(async owner => {
@@ -71,6 +103,7 @@ it('walks every connect/complete/disconnect/crash/timeout/cancel/retry tour thro
           assert.deepEqual(model.snapshot, before, label)
         }
       } else if (event === 'disconnect' || pending) {
+        admitted.disconnect++
         let stopping: Promise<unknown>
         if (event === 'timeout') {
           vi.advanceTimersByTime(100)
@@ -103,24 +136,13 @@ it('walks every connect/complete/disconnect/crash/timeout/cancel/retry tour thro
       if (!pending && expected === 'disconnected') assert.equal(os.pid, null, label)
       if (expected === 'connected') assert.equal(os.running, true, label)
 
-      const byId = new Map<string, ConnectionOperation[]>()
-      for (const operation of events) {
-        const history = byId.get(operation.operationId) ?? []
-        history.push(operation); byId.set(operation.operationId, history)
-      }
-      let running = 0
-      for (const history of byId.values()) {
-        assert.equal(history[0].status, 'running', label)
-        assert.ok(history.length <= 2, label)
-        if (history.length === 1) running++
-        else assert.notEqual(history[1].status, 'running', label)
-      }
-      assert.equal(running, pending ? 1 : 0, label)
+      assertLedger(events, admitted, pending ? 1 : 0, label)
       const beforeInvalid = model.snapshot
       assert.deepEqual(model.runtimeChanged('invalid-event'), { success: false, code: 'FSM_INVALID_TRANSITION', category: 'conflict' }, label)
       assert.equal(invalidTerminal().success, false, label)
       assert.deepEqual(model.snapshot, beforeInvalid, label)
     }
+    admitted.disconnect++
     const stopped = lane.stop(cleanup)
     pending?.release()
     if (pending) await pending.result
@@ -128,6 +150,7 @@ it('walks every connect/complete/disconnect/crash/timeout/cancel/retry tour thro
     assert.equal(os.pid, null, label)
     assert.equal(os.tun, false, label)
     assert.equal(lane.busy, false, label)
+    assertLedger(events, admitted, 0, label)
   }
   expect(vi.getTimerCount()).toBe(0)
 }, 120_000)

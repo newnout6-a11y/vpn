@@ -3276,3 +3276,27 @@ CI/review нового SHA проверяются отдельно после pu
   F 210/210 и `git diff --check` — exit 0. В этом участке только тест и журнал/
   матрица; локальные build/native smoke повторно не запускались, production
   идентичен принятому #60. CI/Qodo нового PR проверяются после публикации.
+
+### Qodo #61 — независимый счётчик принятых операций
+
+- Qodo run 1541078 completed на b979009: finding
+  17d13129-2a60-45e1-8d17-15800bacc220 «Missing stop events pass every tour».
+  Подтверждено: баланс только имеющихся ID не замечал полностью отсутствующую
+  пару running/terminal stop. Oracle теперь независимо считает admitted connect/
+  disconnect по командам модели и сверяет число уникальных ID каждого вида
+  после каждого шага и финальной cleanup. Timeout auto-stop + explicit join
+  должны записать ровно одну disconnect operation.
+- Mutation fixtures исполняют настоящий lane start/stop и удаляют сразу оба
+  события connect либо disconnect. `npm.cmd test -- src/main/connectionModelTours.test.ts -t 'rejects an audit'`
+  до исправления — **2 failed / 1 skipped**, 235 ms, exit 1
+  (.tmp/wp0-model-qodo61-before.log): оба случая Missing expected exception.
+- После исправления `npm.cmd test -- src/main/connectionModelTours.test.ts` —
+  **3 passed** (117649 tours + 2 mutation fixtures), 18.22 s, exit 0
+  (.tmp/wp0-model-qodo61-focused.log). `npm.cmd run typecheck` — exit 0,
+  158 channels / 0 public any (.tmp/wp0-model-qodo61-typecheck.log). Coverage
+  AC 927/927, F 210/210 — exit 0. CI 39158140795 исходного b979009 completed/
+  success, включая WFP; после исправления нужны новый CI и completed Qodo.
+- Полный `npm.cmd test` после исправления — **4084 passed / 5 skipped / 0 failed**,
+  259 files passed / 2 skipped, 191.21 s, exit 0 (.tmp/wp0-model-qodo61-full.log).
+  `git diff --check` — exit 0. Production-код не менялся; локальные build/native
+  smoke повторно не запускались. Это исправление model oracle, не WFP runtime.
