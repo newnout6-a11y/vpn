@@ -744,3 +744,14 @@ response. До исправления адресная регрессия — 9 
 итоговые команды и результаты — progress.md. Это адресное L2 доказательство,
 не installed restart/Windows acceptance. Source/owner/route/confidence, monotonic
 ordering и полная матрица background/Soft history paths ещё не завершены.
+
+### Qodo #63 — действие из трея до поиска прокси
+
+Qodo 1541555 на 8f0288a подтвердил путь без контекста: Hard start из трея
+при missing proxy записывал failure раньше lifecycle admission. Теперь граница
+startProtectionFromTray создаёт свежий op_ action ID до proxy detection;
+тот же ID доступен раннему failure/notification и последующему lifecycle.
+Две повторные missing-proxy попытки проверены actual main bodies и real Conf:
+история содержит два разных ID, каждый совпадает с контекстом уведомления.
+До исправления — 1 failed; после адресный набор — 261 passed. Результаты полного
+набора и проверки итогового SHA — progress.md. Остальные границы AT сохранены.

@@ -3431,3 +3431,35 @@ CI/review нового SHA проверяются отдельно после pu
   — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-session-correlation-csp.log). Повторные
   coverage AC 927/927, F 210/210 и `git diff --check` — exit 0. Native smoke
   сохраняет прежний fake OS scope; новый session/disk proof — адресный L2 fixture.
+
+### Qodo #63 — ранний tray failure до lifecycle admission
+
+- PR #63 head 8f0288a9f915e85ed7952c2602a0cbbdba9754e6: CI 39163040617
+  completed/success, все jobs зелёные. Qodo 1541555 completed с finding
+  c72517fc-c254-4004-9986-55faec2f055c: missing-proxy Hard start из трея вызывает
+  recordStartFailure до lifecycle и не имеет action ID. Замечание подтверждено,
+  до исправления PR не сливался.
+- `npm.cmd test -- src/main/connectionHistoryStorage.test.ts -t 'missing-proxy tray'`
+  до исправления — **1 failed / 47 skipped**, 1.11 s, exit 1
+  (.tmp/wp0-session-correlation-qodo63-before.log). Actual tray/session bodies
+  пишут две попытки через real Conf, но correlationId отсутствовал.
+- Контекст создаётся на входе startProtectionFromTray до async proxy detection
+  и раннего отказа. Existing body перенесён в effects-функцию без изменения
+  routing/notifications; lifecycle использует тот же ID при последующем admission.
+  Каждая новая попытка получает свежий op_ UUIDv4, scope истекает после action.
+- `npm.cmd test -- src/main/connectionHistoryStorage.test.ts src/main/connectionHistory.test.ts src/main/lifecycleCleanup.test.ts src/main/actionCorrelationScope.test.ts`
+  — **261 passed / 4 files**, 33.03 s, exit 0
+  (.tmp/wp0-session-correlation-qodo63-focused.log). `npm.cmd run typecheck` —
+  exit 0, 158 channels / 0 public any (.tmp/wp0-session-correlation-qodo63-typecheck.log).
+  Coverage AC 927/927, F 210/210 и `git diff --check` — exit 0. Полный
+  `npm.cmd test` после исправления — **4114 passed / 5 skipped / 0 failed**,
+  262 files passed / 2 skipped, 223.82 s, exit 0
+  (.tmp/wp0-session-correlation-qodo63-full.log). Успешный CI исходного SHA
+  не считается проверкой исправления.
+- Повторный `npm.cmd run build` — exit 0
+  (.tmp/wp0-session-correlation-qodo63-build.log). Повторные coverage AC 927/927,
+  F 210/210 и `git diff --check` — exit 0.
+- `node scripts/test-electron-runtime.mjs` — ELECTRON_SMOKE_PASS, exit 0
+  (.tmp/wp0-session-correlation-qodo63-electron.log).
+  `node scripts/test-wp1-native.mjs --ipc-only` — WP1_NATIVE_PASS, exit 0
+  (.tmp/wp0-session-correlation-qodo63-csp.log). Native/fake OS границы сохранены.

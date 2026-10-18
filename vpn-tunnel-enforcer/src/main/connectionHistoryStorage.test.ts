@@ -34,21 +34,27 @@ const corruptionEvents = () => state.logEvent.mock.calls.filter(call => call[2] 
 async function sessionTracking(service: Awaited<ReturnType<typeof reload>>) {
   // Execute the actual main session functions, replacing only their boundaries.
   const source = ts.createSourceFile('index.ts', await readFile(join(process.cwd(), 'src/main/index.ts'), 'utf8'), ts.ScriptTarget.Latest, true)
-  const names = ['openSession', 'writeSessionEntry', 'closeSession', 'recordStartFailure']
-  const functions = source.statements.filter(node => ts.isFunctionDeclaration(node) && names.includes(node.name?.text ?? ''))
-  expect(functions).toHaveLength(names.length)
-  const { currentCorrelationId } = await import('./actionCorrelation')
+  const names = ['openSession', 'writeSessionEntry', 'closeSession', 'recordStartFailure', 'startProtectionFromTray']
+  const functions = source.statements.filter(node => ts.isFunctionDeclaration(node) && [...names, 'startProtectionFromTrayEffects'].includes(node.name?.text ?? ''))
+  expect(names.every(name => functions.some(node => ts.isFunctionDeclaration(node) && node.name?.text === name))).toBe(true)
+  const { currentCorrelationId, withCorrelation } = await import('./actionCorrelation')
+  const { randomUUID } = await import('node:crypto')
   const { makeOutcome, outcomeKindToDisconnectReason } = await import('./sessionOutcome')
-  const dependencies = { currentCorrelationId, connectionHistoryService: service, makeOutcome, outcomeKindToDisconnectReason,
+  const notificationIds: Array<string | undefined> = []
+  const dependencies = { currentCorrelationId, withCorrelation, randomUUID, connectionHistoryService: service, makeOutcome, outcomeKindToDisconnectReason,
+    settingsStore: { get: () => ({ connectionMode: 'localProxy', routingMode: 'hard' }) },
+    resolveProxyForTrayStart: async () => null, notify: () => notificationIds.push(currentCorrelationId()),
+    restoreAndFocusMainWindow: () => {},
     trafficMonitor: { getCurrentStats: () => ({ sessionDownloadBytes: 10, sessionUploadBytes: 20 }) }, logEvent: state.logEvent }
   const code = ts.transpileModule(`let currentSession = null;
 ${functions.map(node => node.getText(source)).join('\n')}
 return { open: () => openSession({ id: 'profile', name: 'Test', mode: 'hard' }),
 close: () => closeSession(makeOutcome('user-stop')),
-failure: () => recordStartFailure({ id: 'profile', name: 'Test', mode: 'hard' }, 'Start failed') };`,
+failure: () => recordStartFailure({ id: 'profile', name: 'Test', mode: 'hard' }, 'Start failed'),
+tray: startProtectionFromTray };`,
     { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText
-  return new Function(...Object.keys(dependencies), code)(...Object.values(dependencies)) as {
-    open(): void; close(): void; failure(): void
+  return { ...new Function(...Object.keys(dependencies), code)(...Object.values(dependencies)), notificationIds } as {
+    open(): void; close(): void; failure(): void; tray(): Promise<void>; notificationIds: Array<string | undefined>
   }
 }
 
@@ -63,6 +69,18 @@ afterEach(async () => {
 })
 
 describe('connection history persistence (AT-00-010; F-143)', () => {
+  it('correlates repeated missing-proxy tray attempts before lifecycle admission (AT-00-005)', async () => {
+    const service = await reload(), tracking = await sessionTracking(service)
+    await tracking.tray(); await tracking.tray()
+    const entries = (await reload()).getEntries()
+    expect(entries).toHaveLength(2)
+    const ids = entries.map(entry => entry.correlationId)
+    expect(ids.every(id => typeof id === 'string' && /^op_[0-9a-f]{32}$/.test(id))).toBe(true)
+    expect(new Set(ids).size).toBe(2)
+    expect(tracking.notificationIds).toEqual(ids)
+    expect(entries.every(entry => entry.outcome?.kind === 'start-failed')).toBe(true)
+  })
+
   it('links guarded IPC and production session tracking to reloaded disk history (AT-00-005)', async () => {
     const service = await reload(), tracking = await sessionTracking(service)
     const { ipcMain } = await import('electron')
