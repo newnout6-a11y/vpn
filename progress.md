@@ -2696,3 +2696,48 @@ CI/review нового SHA проверяются отдельно после pu
   246 файлов passed / 2 skipped, 162.18 s, exit 0 (.tmp/wp0-qodo55-full.log).
   Runtime sources после проверки не менялись. Повторное ревью запрашивается
   у Qodo на новом commit; отсутствие ревью не переименовано в approval.
+
+## 18.10.2026 — Qodo #56: DNS и ограниченная диагностика ошибок
+
+- PR #55 на `580d18852f87a7350ae87dec1726dcb6db2ee2f8` прошёл
+  [CI 39139062588](https://github.com/newnout6-a11y/vpn/actions/runs/39139062588):
+  Windows job 117709516806 — 3861 passed / 4 skipped, 247 файлов passed /
+  1 skipped, 225.17 s. Typecheck, трассировка, Electron IPC/CSP, WFP native,
+  native reads, Rust и сайт success. Новый вывод Qodo пока не подтверждён;
+  пустой обновлённый comment 6251403696 не считается approval.
+- PR #56 перебазирован на исправленный #55. Прежний
+  [CI 39138333330](https://github.com/newnout6-a11y/vpn/actions/runs/39138333330)
+  на `ff1a0433ca86c8a69f36a5405b82ec9b35d61acb` success: Windows
+  3876 passed / 4 skipped, 248 файлов passed / 1 skipped, 223.36 s;
+  он не проверяет последующие изменения.
+- Проверены все четыре замечания [Qodo #56](https://github.com/newnout6-a11y/vpn/pull/56#issuecomment-6251403107).
+  Успешный DNS import теперь сохраняет system DNS (null); explicit imported null
+  переключает с прежнего custom resolver на системный, omitted selection
+  сохраняет прежний выбор. Откат по-прежнему восстанавливает точный snapshot.
+- Cancelled export остаётся canonical cancelled на IPC, но feature handler,
+  logging wrapper и общий boundary пишут debug вместо error. Остальные
+  категории сохраняют error. Логи ошибок config содержат category и allowlisted
+  I/O code (например EACCES/ENOSPC/EIO), без произвольных code/message/stack.
+  Причины отказа импорта представлены стабильными validationCode, включая
+  invalid-json, missing-version, incompatible-version и section-type:<section>;
+  сырые значения файла не отражаются в них.
+- Новые регрессии до исправления: `npm.cmd test -- src/main/configIpcErrors.test.ts`
+  — 14 failed / 19 passed, 515 ms, exit 1 (.tmp/wp0-qodo56-before.log).
+  После исправления семь затронутых test files — 131 passed, 9.40 s, exit 0
+  (.tmp/wp0-qodo56-focused.log). Затем добавлена проверка arbitrary exception code,
+  которая входит в полный suite. `npm.cmd run typecheck` — exit 0,
+  157 channels / 0 public any (.tmp/wp0-qodo56-typecheck.log).
+- Решение владельца: после #55 ручные запросы Qodo больше не отправлять.
+  Существующий запрос #56 не повторяется; читается автоматическое ревью.
+  #54 и зависимые PR не сливаются. AT-00-004 целиком, WP-0 и WP-2 не закрыты.
+- Точная focused-команда: `npm.cmd test -- src/main/configIpcErrors.test.ts src/main/configManager.test.ts src/main/configImportSecurity.test.ts src/main/configExportSecurity.test.ts src/main/ipcSecurity.test.ts src/main/ipcResultContract.test.ts src/renderer/components/ImportExportSettings.test.tsx`.
+- Полный `npm.cmd test` на перебазированной ветке с исправлениями #55/#56:
+  3902 passed / 5 skipped / 0 failed, 247 файлов passed / 2 skipped,
+  162.16 s, exit 0 (.tmp/wp0-qodo56-full.log).
+  `python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py` —
+  AC 927/927, F 210/210, exit 0; `git diff --check` — exit 0.
+- `npm.cmd run build` — exit 0 (.tmp/wp0-qodo56-build.log);
+  `node scripts/test-electron-runtime.mjs` — ELECTRON_SMOKE_PASS, exit 0
+  (.tmp/wp0-qodo56-native.log). Production contextBridge сохраняет все семь
+  canonical категорий, коды и correlationId на en/ru; config I/O проверяется
+  отдельно реальными handlers в local fault matrix, а не этим native fixture.

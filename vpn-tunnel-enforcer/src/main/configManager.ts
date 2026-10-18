@@ -61,6 +61,9 @@ export const ALL_SECTIONS = [
 ] as const
 
 export type ConfigSection = (typeof ALL_SECTIONS)[number]
+type ImportValidationCode = 'not-object' | 'missing-version' | 'incompatible-version'
+  | 'no-sections' | 'profile-entry' | 'invalid-json' | 'invalid-config' | 'selected-sections'
+  | `section-type:${ConfigSection}`
 
 // ─── Export Data Shape ───────────────────────────────────────────────────────
 
@@ -191,23 +194,25 @@ export function validateImportData(data: unknown): {
   valid: boolean
   sections: ConfigSection[]
   error?: string
+  reasonCode?: ImportValidationCode
 } {
   if (!data || typeof data !== 'object' || Array.isArray(data)) {
-    return { valid: false, sections: [], error: 'Invalid format: expected a JSON object' }
+    return { valid: false, sections: [], reasonCode: 'not-object', error: 'Invalid format: expected a JSON object' }
   }
 
   const obj = data as Record<string, unknown>
 
   // Version check
   if (!('version' in obj)) {
-    return { valid: false, sections: [], error: 'Missing required field: version' }
+    return { valid: false, sections: [], reasonCode: 'missing-version', error: 'Missing required field: version' }
   }
 
   if (obj.version !== CONFIG_VERSION) {
     return {
       valid: false,
       sections: [],
-      error: `Incompatible version: expected "${CONFIG_VERSION}", got "${String(obj.version)}"`
+      reasonCode: 'incompatible-version',
+      error: `Incompatible version: expected "${CONFIG_VERSION}"`
     }
   }
 
@@ -230,6 +235,7 @@ export function validateImportData(data: unknown): {
         return {
           valid: false,
           sections: [],
+          reasonCode: `section-type:${section}`,
           error: `Invalid type for section "${section}": expected array`
         }
       }
@@ -238,7 +244,7 @@ export function validateImportData(data: unknown): {
   }
 
   if (Array.isArray(obj.profiles) && !obj.profiles.every(isImportedProfile)) {
-    return { valid: false, sections: [], error: 'Invalid profile entry' }
+    return { valid: false, sections: [], reasonCode: 'profile-entry', error: 'Invalid profile entry' }
   }
 
   // Object sections
@@ -247,6 +253,7 @@ export function validateImportData(data: unknown): {
       return {
         valid: false,
         sections: [],
+        reasonCode: 'section-type:rotation',
         error: 'Invalid type for section "rotation": expected object'
       }
     }
@@ -258,6 +265,7 @@ export function validateImportData(data: unknown): {
       return {
         valid: false,
         sections: [],
+        reasonCode: 'section-type:killSwitch',
         error: 'Invalid type for section "killSwitch": expected object'
       }
     }
@@ -269,6 +277,7 @@ export function validateImportData(data: unknown): {
       return {
         valid: false,
         sections: [],
+        reasonCode: 'section-type:notifications',
         error: 'Invalid type for section "notifications": expected object'
       }
     }
@@ -279,6 +288,7 @@ export function validateImportData(data: unknown): {
     return {
       valid: false,
       sections: [],
+      reasonCode: 'no-sections',
       error: 'No recognized configuration sections found in the file'
     }
   }
@@ -411,12 +421,12 @@ export function applySelectiveImport(
         break
       case 'dns':
         result.dns = mergeArraySection(existing.dns, incoming.dns, conflictResolution)
-        // Carry the imported active-profile selection, but only if the
-        // incoming file names a profile that actually survived the merge —
-        // otherwise keep whatever was already selected.
+        // Null explicitly selects system DNS. Named profiles must survive
+        // the merge; an omitted selection keeps the current choice.
         if (
-          incoming.activeDnsProfileId &&
-          result.dns.some((d) => d.id === incoming.activeDnsProfileId)
+          incoming.activeDnsProfileId === null || (
+            incoming.activeDnsProfileId && result.dns.some((d) => d.id === incoming.activeDnsProfileId)
+          )
         ) {
           result.activeDnsProfileId = incoming.activeDnsProfileId
         }
@@ -556,9 +566,9 @@ function writeConfigToStores(config: ConfigExportData, sections: ConfigSection[]
         dnsStore.set('customProfiles', custom)
         // Restore the active-profile selection when the import names one that
         // exists among the profiles we just wrote (custom or builtin).
-        // Rollback must preserve the exact snapshot, including null (system DNS).
+        // Null selects system DNS; rollback preserves the exact snapshot.
         if (
-          restoring || (
+          restoring || config.activeDnsProfileId === null || (
             config.activeDnsProfileId && config.dns.some((d) => d.id === config.activeDnsProfileId)
           )
         ) {
@@ -618,7 +628,7 @@ async function exportConfig(sender: WebContents, mode: 'redacted' | 'secrets' = 
     logEvent('info', 'config-manager', 'config exported', { path: result.filePath, mode })
     return { success: true, path: result.filePath }
   } catch (err) {
-    logEvent('error', 'config-manager', 'export failed', { reason: classifyIpcError(err) })
+    logConfigFailure('export failed', err)
     throw err
   }
 }
@@ -630,7 +640,25 @@ async function exportConfig(sender: WebContents, mode: 'redacted' | 'secrets' = 
  */
 function parseImportJson(raw: string): unknown {
   try { return JSON.parse(raw) }
-  catch { throw new IpcFault('validation') }
+  catch { return rejectImport('invalid-json') }
+}
+
+function rejectImport(validationCode: ImportValidationCode): never {
+  logEvent('warn', 'config-manager', 'import rejected', { reason: 'validation', validationCode })
+  throw new IpcFault('validation')
+}
+
+const CONFIG_IO_CODES = new Set(['EACCES', 'EPERM', 'ENOENT', 'EISDIR', 'ENOTDIR', 'ENOSPC', 'EROFS',
+  'EIO', 'EMFILE', 'ENFILE', 'EBADF', 'EINVAL', 'EEXIST', 'EBUSY', 'EFBIG', 'ENAMETOOLONG',
+  'ETIMEDOUT', 'ECONNRESET', 'ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'ENETUNREACH', 'EHOSTUNREACH'])
+function logConfigFailure(message: string, error: unknown, source = 'config-manager'): void {
+  const reason = classifyIpcError(error)
+  let ioCode: string | undefined
+  try {
+    const code = error && typeof error === 'object' ? Object.getOwnPropertyDescriptor(error, 'code')?.value : undefined
+    if (typeof code === 'string' && CONFIG_IO_CODES.has(code)) ioCode = code
+  } catch { /* Unreadable exceptions still retain their bounded category. */ }
+  logEvent(reason === 'cancelled' ? 'debug' : 'error', source, message, { reason, ...(ioCode ? { ioCode } : {}) })
 }
 
 function importValidate(filePath: string, approvedRaw?: string): {
@@ -644,7 +672,7 @@ function importValidate(filePath: string, approvedRaw?: string): {
 
     const validation = validateImportData(parsed)
     if (!validation.valid) {
-      throw new IpcFault('validation')
+      rejectImport(validation.reasonCode ?? 'invalid-config')
     }
 
     // Detect conflicts with current config
@@ -667,7 +695,7 @@ function importValidate(filePath: string, approvedRaw?: string): {
       conflicts: relevantConflicts
     }
   } catch (err) {
-    logEvent('error', 'config-manager', 'import validation failed', { reason: classifyIpcError(err) })
+    logConfigFailure('import validation failed', err)
     throw err
   }
 }
@@ -690,7 +718,7 @@ function importApply(
     // Re-validate
     const validation = validateImportData(parsed)
     if (!validation.valid) {
-      throw new IpcFault('validation')
+      rejectImport(validation.reasonCode ?? 'invalid-config')
     }
 
     // Filter to only valid sections
@@ -700,7 +728,7 @@ function importApply(
 
     if (validSections.length === 0 || validSections.length !== sections.length
       || validSections.some(section => !validation.sections.includes(section))) {
-      throw new IpcFault('validation')
+      rejectImport('selected-sections')
     }
 
     const existing = collectCurrentConfig()
@@ -712,7 +740,7 @@ function importApply(
       writeConfigToStores(merged, validSections)
     } catch (writeError) {
       try { writeConfigToStores(existing, validSections, true) } catch (rollbackError) {
-        logEvent('error', 'config-manager', 'config import rollback failed', { reason: classifyIpcError(rollbackError) })
+        logConfigFailure('config import rollback failed', rollbackError)
       }
       throw writeError
     }
@@ -751,7 +779,7 @@ function importApply(
 
     return { success: true }
   } catch (err) {
-    logEvent('error', 'config-manager', 'import apply failed', { reason: classifyIpcError(err) })
+    logConfigFailure('import apply failed', err)
     throw err
   }
 }
@@ -779,7 +807,7 @@ function handleLogged<T>(
       logEvent('debug', 'ipc', `${channel} finished`, { ms: Date.now() - started })
       return result
     } catch (err) {
-      logEvent('error', 'ipc', `${channel} failed`, { reason: classifyIpcError(err) })
+      logConfigFailure(`${channel} failed`, err, 'ipc')
       throw err
     }
   })

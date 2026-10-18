@@ -161,7 +161,9 @@ export function installTrustedIpcBoundary(): void {
         return { version: IPC_VERSION, correlationId, ok: true, result: await listener(event, ...args) }
       } catch (error) {
         const category = classifyIpcError(error)
-        logEvent('error', 'ipc-security', 'IPC request failed', { channel, correlationId: auditCorrelationId, status: 'error', reason: category })
+        logEvent(category === 'cancelled' ? 'debug' : 'error', 'ipc-security', 'IPC request failed', {
+          channel, correlationId: auditCorrelationId, status: category === 'cancelled' ? 'cancelled' : 'error', reason: category
+        })
         return { version: IPC_VERSION, correlationId, ok: false, error: ipcError(category) }
       }
     })

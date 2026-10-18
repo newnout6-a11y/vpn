@@ -140,4 +140,49 @@ describe('config domain error envelopes (AT-00-004)', () => {
     expect(state.stores).toEqual(before)
     expectFailure(await invoke('config:import', state.selection), 'permission')
   })
+  it.each([undefined, null])('keeps system DNS after a successful DNS import with active selection %j', async activeDnsProfileId => {
+    state.stores.get('dns-profiles')!.activeProfileId = null
+    const incoming = { version: '2.0', dns: collectCurrentConfig().dns, activeDnsProfileId }
+    writeFileSync(state.selection, JSON.stringify(incoming))
+    await invoke('config:browse-import')
+    expect(await invoke('config:import-apply', state.selection, ['dns'], 'replace')).toMatchObject({ ok: true })
+    expect(collectCurrentConfig().activeDnsProfileId).toBeNull()
+  })
+  it('restores an explicitly imported system DNS choice over an existing custom selection', async () => {
+    const dns = collectCurrentConfig().dns
+    state.stores.get('dns-profiles')!.activeProfileId = dns[0].id
+    writeFileSync(state.selection, JSON.stringify({ version: '2.0', dns, activeDnsProfileId: null }))
+    await invoke('config:browse-import')
+    expect(await invoke('config:import-apply', state.selection, ['dns'], 'replace')).toMatchObject({ ok: true })
+    expect(collectCurrentConfig().activeDnsProfileId).toBeNull()
+  })
+  it('keeps cancelled saves out of error-level logs at every layer', async () => {
+    state.destination = ''
+    expectFailure(await invoke('config:export', 'redacted'), 'cancelled')
+    expect(vi.mocked(logEvent).mock.calls.filter(([level]) => level === 'error')).toEqual([])
+  })
+  it.each(['EACCES', 'ENOSPC', 'EIO'])('retains bounded store diagnostics %s without exception text', async code => {
+    await invoke('config:browse-import')
+    state.failStore = true; state.fault = Object.assign(new Error(raw), { code })
+    await invoke('config:import', state.selection)
+    expect(logEvent).toHaveBeenCalledWith('error', 'config-manager', 'import validation failed', { reason: code === 'EACCES' ? 'permission' : 'internal', ioCode: code })
+    expect(JSON.stringify(vi.mocked(logEvent).mock.calls)).not.toContain('FAKE-SECRET')
+  })
+  it('omits arbitrary exception codes from diagnostic metadata', async () => {
+    await invoke('config:browse-import')
+    state.failStore = true; state.fault = Object.assign(new Error(raw), { code: 'FAKE-SECRET-CODE' })
+    expectFailure(await invoke('config:import', state.selection), 'internal')
+    expect(logEvent).toHaveBeenCalledWith('error', 'config-manager', 'import validation failed', { reason: 'internal' })
+    expect(JSON.stringify(vi.mocked(logEvent).mock.calls)).not.toContain('FAKE-SECRET')
+  })
+  it.each([
+    ['null', 'not-object'], ['{}', 'missing-version'], ['{"version":"FAKE-SECRET"}', 'incompatible-version'],
+    ['{"version":"2.0"}', 'no-sections'], ['{"version":"2.0","dns":{}}', 'section-type:dns'],
+    ['{"version":"2.0","profiles":[null]}', 'profile-entry'], ['{broken', 'invalid-json']
+  ])('records a stable validation reason for %s without file contents', async (content, validationCode) => {
+    writeFileSync(state.selection, content); await invoke('config:browse-import')
+    expectFailure(await invoke('config:import', state.selection), 'validation')
+    expect(logEvent).toHaveBeenCalledWith('warn', 'config-manager', 'import rejected', { reason: 'validation', validationCode })
+    expect(JSON.stringify(vi.mocked(logEvent).mock.calls)).not.toContain('FAKE-SECRET')
+  })
 })

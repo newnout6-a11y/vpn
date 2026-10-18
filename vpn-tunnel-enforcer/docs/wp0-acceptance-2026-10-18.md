@@ -391,3 +391,20 @@ strings, numeric port, status и типы известных optional metadata. 
 outbound поддерживается для backward compatibility; вложенные JSON extensions
 сохраняются. Это validation входного config, а не полная protocol semantics
 или отдельная приёмка уже повреждённых исторических stores. Результаты в progress.md.
+
+### Qodo #56 — успешный DNS import и диагностика отказов
+
+Успешный DNS import сохраняет null (system DNS), включая импорт без active id
+при прежнем null. Явный imported null заменяет прежний custom выбор; отсутствие
+поля сохраняет прежний выбор. Это проверяется настоящими selected-file handlers
+с production IPC boundary; store и Electron/dialog остаются test doubles.
+
+Cancelled export сохраняет canonical rejection без error-level записей feature,
+wrapper и boundary. Для остальных отказов в config logs сохраняются ограниченные
+I/O codes из allowlist. Произвольный error.code и raw message/stack не попадают
+в журналы. Отказы JSON/schema/section selection получают стабильный validationCode,
+который позволяет различить безопасные причины без содержимого файла.
+
+Замечания Qodo подтверждены регрессиями до исправления. Эти тесты не заменяют
+матрицу остальных privileged features, интегрированный lifecycle или L3.
+Фактические результаты локальных проверок и CI фиксируются в progress.md.
