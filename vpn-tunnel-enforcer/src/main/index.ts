@@ -15,6 +15,7 @@ import { happDetector } from './happDetector'
 import { tunController, getTunRuntimeDir, detectForeignTun, killOwnedTunRuntimeProcesses, isOwnedTunRuntimeRunning, readRecentSingBoxOutboundFault, areTunRoutesActive, getLastSingBoxExit, onProtectedRestart, onNativeStartup } from './tunController'
 import type { NetworkCleanupReceipt, SingBoxOutboundFault } from './tunController'
 import { ConnectionLifecycle, type ConnectionStartupOwner } from './connectionLifecycle'
+import { currentCorrelationId } from './actionCorrelation'
 import { TunnelStateMachine } from './tunnelStateMachine'
 import type { ConnectionStartResult, ConnectionStopResult } from '../shared/operation'
 import { runScheduledConnection } from './scheduledConnection'
@@ -194,6 +195,7 @@ let latestRestartingProgress: string | null = null
 // double-recording when a user-initiated stop also triggers a status-change.
 interface LiveSession {
   startedAt: number
+  correlationId?: string
   profile: { id: string; name: string; mode: 'hard' | 'soft' | 'direct' }
   leakDetected: boolean
   lastNetworkTransition: string | null
@@ -207,8 +209,10 @@ let lastNetworkChangeAt = 0
 let lastResumeAt = 0
 
 function openSession(profile: LiveSession['profile']): void {
+  const correlationId = currentCorrelationId()
   currentSession = {
     startedAt: Date.now(),
+    ...(correlationId ? { correlationId } : {}),
     profile,
     leakDetected: false,
     lastNetworkTransition: null
@@ -250,6 +254,7 @@ function writeSessionEntry(s: LiveSession, stats: TrafficStats, outcome: Session
   try {
     connectionHistoryService.addEntry({
       startedAt: s.startedAt,
+      ...(s.correlationId ? { correlationId: s.correlationId } : {}),
       endedAt: Date.now(),
       profileName: s.profile.name,
       profileId: s.profile.id,
@@ -338,9 +343,11 @@ function recordStartFailure(
   // session via ensureSessionForRunningTunnel — drop it, this attempt failed.
   currentSession = null
   const now = Date.now()
+  const correlationId = currentCorrelationId()
   try {
     connectionHistoryService.addEntry({
       startedAt: now,
+      ...(correlationId ? { correlationId } : {}),
       endedAt: now,
       profileName: profile.name,
       profileId: profile.id,

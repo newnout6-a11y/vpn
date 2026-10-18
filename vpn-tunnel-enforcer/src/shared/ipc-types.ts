@@ -943,6 +943,8 @@ export interface SessionOutcome {
 /** Connection history log entry */
 export interface ConnectionLogEntry {
   id: string
+  /** Original connect action; absent on legacy or untracked sessions. */
+  correlationId?: string
   startedAt: number
   endedAt: number | null
   profileName: string

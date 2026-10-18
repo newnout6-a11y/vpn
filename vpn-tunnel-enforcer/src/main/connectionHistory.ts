@@ -20,6 +20,7 @@ import { createHash, randomUUID } from 'crypto'
 import type { ConnectionLogEntry, ConnectionHistoryFilters, ConnectionHistoryStats as AggregatedStats } from '../shared/ipc-types'
 export type { ConnectionHistoryFilters, ConnectionHistoryStats as AggregatedStats } from '../shared/ipc-types'
 import { SESSION_OUTCOME_KINDS } from '../shared/ipc-types'
+import { isIpcCorrelationId } from '../shared/ipc-result'
 import { logEvent } from './appLogger'
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -52,6 +53,7 @@ function validEntry(value: unknown): value is ConnectionLogEntry {
     || !isText(value.mode) || !['hard', 'soft', 'direct'].includes(value.mode)
     || !isText(value.disconnectReason) || !['user', 'error', 'rotation', 'schedule', 'crash'].includes(value.disconnectReason)
     || !isNonNegative(value.bytesDown) || !isNonNegative(value.bytesUp)
+    || !(value.correlationId === undefined || (isIpcCorrelationId(value.correlationId) && /^(ipc|op)_/.test(value.correlationId)))
     || !optional(value.errorMessage, isText)) return false
   if (value.outcome == null) return true // Records before v1.1.18 have no outcome.
   const outcome = value.outcome
@@ -244,7 +246,8 @@ export function exportCsv(entries: ConnectionLogEntry[]): string {
     'disconnectReason',
     'errorMessage',
     'outcomeKind',
-    'outcomeHeadline'
+    'outcomeHeadline',
+    'correlationId'
   ]
 
   const rows = entries.map((entry) => {
@@ -260,7 +263,8 @@ export function exportCsv(entries: ConnectionLogEntry[]): string {
       entry.disconnectReason,
       escapeCsvField(entry.errorMessage ?? ''),
       escapeCsvField(entry.outcome?.kind ?? ''),
-      escapeCsvField(entry.outcome?.headline ?? '')
+      escapeCsvField(entry.outcome?.headline ?? ''),
+      escapeCsvField(entry.correlationId ?? '')
     ].join(',')
   })
 
