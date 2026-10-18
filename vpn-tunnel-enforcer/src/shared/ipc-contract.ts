@@ -2,13 +2,15 @@ import type { ElectronAPI } from './electron-api'
 import { IpcValidationError } from './ipc-result'
 
 export interface IpcArgumentSchema {
-  type: 'string' | 'boolean' | 'number' | 'integer' | 'enum' | 'strings' | 'object'
+  type: 'string' | 'boolean' | 'number' | 'integer' | 'enum' | 'strings' | 'array' | 'object'
   optional?: boolean
   nullable?: boolean
   min?: number
   max?: number
   values?: readonly string[]
   fields?: Record<string, IpcArgumentSchema>
+  items?: IpcArgumentSchema
+  closed?: boolean
 }
 type RequestMethod = { [M in keyof ElectronAPI]-?: ElectronAPI[M] extends (...args: never[]) => Promise<unknown> ? M : never }[keyof ElectronAPI]
 const request = <M extends RequestMethod>(method: M, args: readonly IpcArgumentSchema[]) => ({ method, args })
@@ -16,19 +18,44 @@ const text = (max = 4096): IpcArgumentSchema => ({ type: 'string', max })
 const string = text()
 const boolean: IpcArgumentSchema = { type: 'boolean' }
 const integer: IpcArgumentSchema = { type: 'integer' }
+const number: IpcArgumentSchema = { type: 'number' }
 const port: IpcArgumentSchema = { type: 'integer', min: 1, max: 65535 }
 const slot: IpcArgumentSchema = { type: 'integer', min: 1, max: 65535 - 17990 + 1 }
 const oneOf = (values: readonly string[]): IpcArgumentSchema => ({ type: 'enum', values })
 const optional = (schema: IpcArgumentSchema): IpcArgumentSchema => ({ ...schema, optional: true })
 const nullable = (schema: IpcArgumentSchema): IpcArgumentSchema => ({ ...schema, nullable: true })
 const strings = (max = 500): IpcArgumentSchema => ({ type: 'strings', max })
-const object = (fields?: Record<string, IpcArgumentSchema>): IpcArgumentSchema => ({ type: 'object', max: 256 * 1024, fields })
+const object = (fields?: Record<string, IpcArgumentSchema>, closed = false): IpcArgumentSchema => ({ type: 'object', max: 256 * 1024, fields, closed })
+const record = (fields: Record<string, IpcArgumentSchema>) => object(fields, true)
+const partial = (schema: IpcArgumentSchema) => record(Object.fromEntries(Object.entries(schema.fields!).map(([key, field]) => [key, optional(field)])))
+const array = (items: IpcArgumentSchema, max = 500): IpcArgumentSchema => ({ type: 'array', items, max })
 const clientDevice = oneOf(['pc', 'android', 'ios', 'mac'])
 const deviceOptions = object({ clientDevice: optional(clientDevice) })
 const leakOptions = object({ proxyAddr: optional(string), proxyType: optional(oneOf(['socks5', 'http'])) })
 const externalOptions = object({ slot: optional(slot), country: optional(string), profileId: optional(string), port: optional(port) })
 const liveOptions = object({ requestId: optional(string), profileId: optional(string), host: optional(string), port: optional(port), mode: optional(oneOf(['basic', 'extended'])) })
 const batchOptions = object({ requestId: optional(string), profileIds: { type: 'strings', min: 1, max: 12 }, mode: optional(oneOf(['basic', 'extended'])) })
+const schedule = record({ name: string, enabled: boolean, days: array({ type: 'integer', min: 0, max: 6 }),
+  startTime: text(5), endTime: text(5), profileId: string, mode: oneOf(['hard', 'soft', 'direct']) })
+const schedulePatch = partial(record({ ...schedule.fields, id: string }))
+const rotationPatch = partial(record({ enabled: boolean, intervalMinutes: number, order: oneOf(['sequential', 'random']),
+  profileIds: array(text(200), 1000), currentIndex: { type: 'integer', min: 0 }, nextRotationAt: nullable({ type: 'number', min: 0 }) }))
+const dnsType = oneOf(['plain', 'doh', 'dot'])
+const dnsProfile = record({ name: text(120), primary: text(2048), secondary: optional(nullable(text(2048))), type: dnsType,
+  primaryType: optional(dnsType), secondaryType: optional(dnsType), isSelected: optional(boolean) })
+const dnsPatch = partial(record({ ...dnsProfile.fields, id: string, isBuiltin: boolean }))
+// The feature normalizes URL inputs before applying the 253-character hostname limit.
+const domainRule = record({ pattern: string, action: oneOf(['vpn', 'direct', 'block']), priority: number })
+const domainPatch = partial(record({ ...domainRule.fields, id: string, hitCount: number }))
+const notificationPatch = partial(record({ vpnConnect: boolean, vpnDisconnect: boolean, leakDetected: boolean, profileRotation: boolean,
+  scheduleTriggered: boolean, connectionError: boolean, method: oneOf(['system', 'inapp', 'both']), sound: boolean }))
+// Seven original palette fields remain sufficient for legacy custom themes.
+const theme = record({ name: string, mode: oneOf(['light', 'dark', 'system']), colors: record({
+  background: text(7), sidebar: text(7), cardBackground: text(7), accent: text(7), text: text(7), textSecondary: text(7), border: text(7),
+  cardElevated: optional(text(7)), textMuted: optional(text(7)), borderStrong: optional(text(7)),
+  success: optional(text(7)), warning: optional(text(7)), danger: optional(text(7)) }) })
+const historyFilter = partial(record({ levels: array(oneOf(['user', 'error', 'rotation', 'schedule', 'crash'])),
+  dateFrom: number, dateTo: number, text: string }))
 
 /** Request channels only; object() without fields is a bounded legacy object,
  * not a deep semantic schema. Feature validators remain authoritative there.
@@ -123,40 +150,40 @@ export const IPC_REQUESTS = {
   'server:live-check': request('serverLiveCheck', [liveOptions]),
   'server:live-check-batch': request('serverLiveCheckBatch', [batchOptions]),
   'server:live-check-cancel': request('serverLiveCheckCancel', [optional(string)]),
-  'server:live-check-history': request('serverLiveCheckHistory', [optional(object())]),
+  'server:live-check-history': request('serverLiveCheckHistory', [optional(record({ profileId: optional(string), host: optional(string) }))]),
   'url-availability:check': request('urlAvailabilityCheck', [text(256 * 1024)]),
   'url-availability:history': request('urlAvailabilityHistory', []),
   'url-availability:clear-history': request('urlAvailabilityClearHistory', []),
   'scheduler:list': request('schedulerList', []),
-  'scheduler:create': request('schedulerCreate', [object()]),
-  'scheduler:update': request('schedulerUpdate', [string, object()]),
+  'scheduler:create': request('schedulerCreate', [schedule]),
+  'scheduler:update': request('schedulerUpdate', [string, schedulePatch]),
   'scheduler:delete': request('schedulerDelete', [string]),
   'scheduler:next-event': request('schedulerNextEvent', []),
   'kill-switch:get-level': request('killSwitchGetLevel', []),
   'kill-switch:set-level': request('killSwitchSetLevel', [oneOf(['off', 'standard', 'strict'])]),
   'kill-switch:get-exceptions': request('killSwitchGetExceptions', []),
-  'kill-switch:add-exception': request('killSwitchAddException', [object()]),
+  'kill-switch:add-exception': request('killSwitchAddException', [record({ type: oneOf(['app', 'ip']), value: text(2048), label: text(200) })]),
   'kill-switch:remove-exception': request('killSwitchRemoveException', [string]),
   'kill-switch:browse-app': request('killSwitchBrowseApp', []),
   'rotation:get-config': request('rotationGetConfig', []),
-  'rotation:set-config': request('rotationSetConfig', [object()]),
+  'rotation:set-config': request('rotationSetConfig', [rotationPatch]),
   'rotation:rotate-now': request('rotationRotateNow', []),
   'dns:list': request('dnsList', []),
   'dns:get-active': request('dnsGetActive', []),
-  'dns:create': request('dnsCreate', [object()]),
-  'dns:update': request('dnsUpdate', [string, object()]),
+  'dns:create': request('dnsCreate', [dnsProfile]),
+  'dns:update': request('dnsUpdate', [string, dnsPatch]),
   'dns:delete': request('dnsDelete', [string]),
   'dns:select': request('dnsSelect', [string]),
   'dns:validate': request('dnsValidate', [string]),
   'domain-routing:list': request('domainRoutingList', []),
-  'domain-routing:add': request('domainRoutingAdd', [object()]),
-  'domain-routing:update': request('domainRoutingUpdate', [string, object()]),
+  'domain-routing:add': request('domainRoutingAdd', [domainRule]),
+  'domain-routing:update': request('domainRoutingUpdate', [string, domainPatch]),
   'domain-routing:delete': request('domainRoutingDelete', [string]),
   'domain-routing:reorder': request('domainRoutingReorder', [strings()]),
   'domain-routing:import': request('domainRoutingImport', [string]),
   'domain-routing:browse-file': request('domainRoutingBrowseFile', []),
   'connection-history:list': request('connectionHistoryList', []),
-  'connection-history:filter': request('connectionHistoryFilter', [object()]),
+  'connection-history:filter': request('connectionHistoryFilter', [historyFilter]),
   'connection-history:stats': request('connectionHistoryStats', [oneOf(['day', 'week', 'month'])]),
   'connection-history:export-csv': request('connectionHistoryExportCsv', []),
   'connection-history:export-json': request('connectionHistoryExportJson', []),
@@ -168,7 +195,7 @@ export const IPC_REQUESTS = {
   'config:import': request('configImport', [string]),
   'config:import-apply': request('configImportApply', [string, strings(), oneOf(['replace', 'merge'])]),
   'notifications:get-prefs': request('notificationsGetPrefs', []),
-  'notifications:set-prefs': request('notificationsSetPrefs', [object()]),
+  'notifications:set-prefs': request('notificationsSetPrefs', [notificationPatch]),
   'notifications:check-os-state': request('checkOsNotificationState', []),
   'notifications:reset-os-block': request('notificationsResetOsBlock', []),
   'notifications:open-windows-settings': request('notificationsOpenWindowsSettings', []),
@@ -180,7 +207,7 @@ export const IPC_REQUESTS = {
   'theme:list': request('themeList', []),
   'theme:get-active': request('themeGetActive', []),
   'theme:set-active': request('themeSetActive', [string]),
-  'theme:create': request('themeCreate', [object()]),
+  'theme:create': request('themeCreate', [theme]),
   'theme:delete': request('themeDelete', [string]),
   'speed-test:run': request('speedTestRun', []),
   'speed-test:history': request('speedTestHistory', []),
@@ -209,12 +236,15 @@ export function matchesIpcArgument(schema: IpcArgumentSchema, value: unknown): b
     case 'number': case 'integer': return typeof value === 'number' && Number.isFinite(value)
       && (schema.type !== 'integer' || Number.isInteger(value)) && value >= (schema.min ?? -Infinity) && value <= (schema.max ?? Infinity)
     case 'strings': return Array.isArray(value) && value.length >= (schema.min ?? 0) && value.length <= (schema.max ?? 500)
-      && value.every(v => typeof v === 'string' && v.length <= 4096)
+      && Array.from(value).every(v => typeof v === 'string' && v.length <= 4096)
+    case 'array': return Array.isArray(value) && value.length >= (schema.min ?? 0) && value.length <= (schema.max ?? 500)
+      && !!schema.items && Array.from(value).every(v => matchesIpcArgument(schema.items!, v))
     case 'object': {
       if (!value || typeof value !== 'object' || Array.isArray(value)
         || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) return false
       try {
         return JSON.stringify(value).length <= (schema.max ?? 256 * 1024)
+          && (!schema.closed || Object.keys(value).every(key => Object.hasOwn(schema.fields ?? {}, key)))
           && Object.entries(schema.fields ?? {}).every(([key, field]) => matchesIpcArgument(field, (value as Record<string, unknown>)[key]))
       } catch { return false }
     }

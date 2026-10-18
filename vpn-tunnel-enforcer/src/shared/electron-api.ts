@@ -1,6 +1,11 @@
 import type { PublicIpInfo } from './publicIp'
 import type {
   ClientDevice,
+  ScheduleEntry, ScheduleNextEvent, RotationConfig,
+  KillSwitchLevel, KillSwitchException,
+  DnsProfile, DnsProfileInput, DomainRule,
+  ConnectionLogEntry, ConnectionHistoryFilters, ConnectionHistoryStats,
+  NotificationPreferences, ThemeConfig, ThemeInput,
   FirewallKillSwitchStatus,
   ExternalProxyBatchStartResult,
   ExternalProxyStartOptions,
@@ -162,42 +167,42 @@ export interface ElectronAPI {
   urlAvailabilityHistory: () => Promise<any[]>
   urlAvailabilityClearHistory: () => Promise<void>
   // Scheduler
-  schedulerList: () => Promise<any[]>
-  schedulerCreate: (entry: any) => Promise<any>
-  schedulerUpdate: (id: string, patch: any) => Promise<any>
+  schedulerList: () => Promise<ScheduleEntry[]>
+  schedulerCreate: (entry: Omit<ScheduleEntry, 'id'>) => Promise<ScheduleEntry>
+  schedulerUpdate: (id: string, patch: Partial<ScheduleEntry>) => Promise<ScheduleEntry>
   schedulerDelete: (id: string) => Promise<void>
-  schedulerNextEvent: () => Promise<any>
+  schedulerNextEvent: () => Promise<ScheduleNextEvent | null>
   // Profile Rotation
-  rotationGetConfig: () => Promise<any>
-  rotationSetConfig: (config: any) => Promise<any>
+  rotationGetConfig: () => Promise<RotationConfig>
+  rotationSetConfig: (config: Partial<RotationConfig>) => Promise<RotationConfig>
   rotationRotateNow: () => Promise<{ success: boolean; newProfile: string }>
   // Kill-Switch
-  killSwitchGetLevel: () => Promise<any>
-  killSwitchSetLevel: (level: 'off' | 'standard' | 'strict') => Promise<any>
-  killSwitchGetExceptions: () => Promise<any[]>
-  killSwitchAddException: (exception: { type: 'app' | 'ip'; value: string; label: string }) => Promise<any>
-  killSwitchRemoveException: (id: string) => Promise<any>
+  killSwitchGetLevel: () => Promise<KillSwitchLevel>
+  killSwitchSetLevel: (level: KillSwitchLevel) => Promise<{ success: true; level: KillSwitchLevel }>
+  killSwitchGetExceptions: () => Promise<KillSwitchException[]>
+  killSwitchAddException: (exception: Omit<KillSwitchException, 'id'>) => Promise<KillSwitchException>
+  killSwitchRemoveException: (id: string) => Promise<{ success: true }>
   killSwitchBrowseApp: () => Promise<{ path: string; name: string } | null>
   // DNS Profiles
-  dnsList: () => Promise<any[]>
+  dnsList: () => Promise<DnsProfile[]>
   dnsGetActive: () => Promise<string | null>
-  dnsCreate: (profile: { name: string; primary: string; secondary: string; type: 'plain' | 'doh' | 'dot'; primaryType?: 'plain' | 'doh' | 'dot'; secondaryType?: 'plain' | 'doh' | 'dot' }) => Promise<any>
-  dnsUpdate: (id: string, patch: any) => Promise<any>
+  dnsCreate: (profile: DnsProfileInput) => Promise<DnsProfile>
+  dnsUpdate: (id: string, patch: Partial<DnsProfile>) => Promise<DnsProfile>
   dnsDelete: (id: string) => Promise<void>
   dnsSelect: (id: string) => Promise<void>
   dnsValidate: (address: string) => Promise<{ valid: boolean; type: 'plain' | 'doh' | 'dot'; error?: string }>
   // Domain Routing
-  domainRoutingList: () => Promise<any[]>
-  domainRoutingAdd: (rule: { pattern: string; action: 'vpn' | 'direct' | 'block'; priority: number }) => Promise<any>
-  domainRoutingUpdate: (id: string, patch: any) => Promise<any>
+  domainRoutingList: () => Promise<DomainRule[]>
+  domainRoutingAdd: (rule: Omit<DomainRule, 'id' | 'hitCount'>) => Promise<DomainRule>
+  domainRoutingUpdate: (id: string, patch: Partial<DomainRule>) => Promise<DomainRule>
   domainRoutingDelete: (id: string) => Promise<void>
-  domainRoutingReorder: (ids: string[]) => Promise<any[]>
-  domainRoutingImport: (filePath: string) => Promise<any[]>
+  domainRoutingReorder: (ids: string[]) => Promise<DomainRule[]>
+  domainRoutingImport: (filePath: string) => Promise<DomainRule[]>
   domainRoutingBrowseFile: () => Promise<string | null>
   // Connection History
-  connectionHistoryList: () => Promise<any[]>
-  connectionHistoryFilter: (filters: any) => Promise<any[]>
-  connectionHistoryStats: (period: 'day' | 'week' | 'month') => Promise<any>
+  connectionHistoryList: () => Promise<ConnectionLogEntry[]>
+  connectionHistoryFilter: (filters: ConnectionHistoryFilters) => Promise<ConnectionLogEntry[]>
+  connectionHistoryStats: (period: 'day' | 'week' | 'month') => Promise<ConnectionHistoryStats>
   connectionHistoryExportCsv: () => Promise<string>
   connectionHistoryExportJson: () => Promise<string>
   connectionHistoryClear: () => Promise<{ success: boolean }>
@@ -206,8 +211,8 @@ export interface ElectronAPI {
   trafficHistoryClear: () => Promise<{ success: boolean }>
   onTrafficHistoryUpdated: (callback: () => void) => () => void
   // Notification Preferences
-  notificationsGetPrefs: () => Promise<any>
-  notificationsSetPrefs: (prefs: any) => Promise<any>
+  notificationsGetPrefs: () => Promise<NotificationPreferences>
+  notificationsSetPrefs: (prefs: Partial<NotificationPreferences>) => Promise<NotificationPreferences>
   checkOsNotificationState: () => Promise<{ osNotificationsEnabled: boolean; appUserModelId: string | null }>
   notificationsResetOsBlock: () => Promise<{ ok: true; cleared: string[]; errors: string[] } | { ok: false; error: string }>
   notificationsOpenWindowsSettings: () => Promise<{ ok: true } | { ok: false; error: string }>
@@ -220,12 +225,12 @@ export interface ElectronAPI {
   i18nSetLocale: (locale: string) => Promise<void>
   i18nGetSystemLocale: () => Promise<string>
   // Theme
-  themeList: () => Promise<any[]>
-  themeGetActive: () => Promise<any>
+  themeList: () => Promise<ThemeConfig[]>
+  themeGetActive: () => Promise<ThemeConfig>
   themeSetActive: (id: string) => Promise<void>
-  themeCreate: (theme: any) => Promise<any>
+  themeCreate: (theme: ThemeInput) => Promise<ThemeInput & Pick<ThemeConfig, 'id' | 'isCustom'>>
   themeDelete: (id: string) => Promise<void>
-  onThemeChanged: (callback: (theme: any) => void) => () => void
+  onThemeChanged: (callback: (theme: ThemeConfig) => void) => () => void
   onServerActiveChanged: (callback: (data: { profileId: string; profileName: string; nextProfileId?: string }) => void) => () => void
   onKillSwitchTrafficBlocked: (callback: (data: { reason: string; steps?: string[] }) => void) => () => void
   onI18nLocaleChanged: (callback: (locale: string) => void) => () => void

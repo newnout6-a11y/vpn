@@ -133,6 +133,33 @@ describe('preload IPC argument validation', () => {
     expect(invokeMock).not.toHaveBeenCalled()
   })
 
+  // AT-00-001/004: the public bridge uses the same nested schemas as main.
+  it.each([
+    ['schedulerUpdate', ['id', { days: [7] }]],
+    ['rotationSetConfig', [{ currentIndex: 0.5 }]],
+    ['dnsUpdate', ['id', { type: 'udp' }]],
+    ['notificationsSetPrefs', [{ sound: 'yes' }]],
+    ['themeCreate', [{ name: 'Theme', mode: 'dark', colors: {} }]],
+    ['serverLiveCheckHistory', [{ host: ['example.test'] }]],
+    ['rollbackAutoconfig', [new Array(1)]],
+  ])('rejects invalid nested %s arguments without IPC effects', async (method, args) => {
+    const api = await loadApi()
+    await expectLocalValidation(() => api[method as string](...args as unknown[]))
+    expect(invokeMock).not.toHaveBeenCalled()
+  })
+
+  it('preserves empty patches and optional DNS defaults in public calls', async () => {
+    const api = await loadApi()
+    await api.schedulerUpdate('id', {})
+    await api.rotationSetConfig({ intervalMinutes: 5000, nextRotationAt: null })
+    await api.dnsCreate({ name: 'DNS', primary: '1.1.1.1', type: 'plain' })
+    expect(invokeMock.mock.calls).toEqual([
+      ['scheduler:update', 'id', {}],
+      ['rotation:set-config', { intervalMinutes: 5000, nextRotationAt: null }],
+      ['dns:create', { name: 'DNS', primary: '1.1.1.1', type: 'plain' }],
+    ])
+  })
+
   it('rejects invalid enum and port arguments', async () => {
     const api = await loadApi()
 

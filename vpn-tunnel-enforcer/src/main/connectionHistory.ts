@@ -17,7 +17,8 @@
 import { ipcMain } from 'electron'
 import Store from 'electron-store'
 import { createHash, randomUUID } from 'crypto'
-import type { ConnectionLogEntry } from '../shared/ipc-types'
+import type { ConnectionLogEntry, ConnectionHistoryFilters, ConnectionHistoryStats as AggregatedStats } from '../shared/ipc-types'
+export type { ConnectionHistoryFilters, ConnectionHistoryStats as AggregatedStats } from '../shared/ipc-types'
 import { SESSION_OUTCOME_KINDS } from '../shared/ipc-types'
 import { logEvent } from './appLogger'
 
@@ -27,29 +28,7 @@ const MAX_ENTRIES = 1000
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
-export interface ConnectionHistoryFilters {
-  /** Filter by disconnect reason (acts as "level") */
-  levels?: Array<ConnectionLogEntry['disconnectReason']>
-  /** Filter entries started at or after this timestamp */
-  dateFrom?: number
-  /** Filter entries started at or before this timestamp */
-  dateTo?: number
-  /** Filter entries whose profileName, mode, or disconnectReason contain this substring (case-insensitive) */
-  text?: string
-}
-
 export type AggregationPeriod = 'day' | 'week' | 'month'
-
-export interface AggregatedStats {
-  /** Total connection time in milliseconds (sum of endedAt - startedAt for completed entries) */
-  totalTimeMs: number
-  /** Total bytes downloaded */
-  totalBytesDown: number
-  /** Total bytes uploaded */
-  totalBytesUp: number
-  /** Number of entries included in the aggregation */
-  entryCount: number
-}
 
 // ─── Store ───────────────────────────────────────────────────────────────────
 

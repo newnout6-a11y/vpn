@@ -2266,3 +2266,46 @@ CI/review нового SHA проверяются отдельно после pu
   coordinator/FSM, cancellation/deadline, migration registry, correlation,
   event history и flags/races/UI не объявлены выполненными. WP-2 ещё
   не начат. Нормативные docs/ не менялись; цель остаётся active.
+
+## 18.10.2026 — WP-0: вложенные IPC-схемы и публичные типы
+
+- Ветка codex/wp0-ipc-object-schemas. 12 bounded object() входов заменены
+  схемами полей, вложенных объектов и массивов: scheduler create/update,
+  rotation config, kill-switch exception, DNS create/update, domain add/update,
+  connection-history filter, notifications patch, theme create, live history.
+  Новые object contracts отклоняют неизвестные ключи. Sparse arrays не могут
+  пропускать проверку элементов. Существующий 157-channel registry сохранён.
+- Baseline: `npm.cmd test -- src/main/ipcContractAcceptance.test.ts -t 'rejects invalid nested'`
+  — 21 failed / 321 skipped, exit 1 (.tmp/wp0-object-schema-before.log):
+  malformed nested fields доходили до listener. Теперь schema validation
+  отклоняет их до эффектов; дополнительные случаи проверяют sparse arrays,
+  неизвестные поля, границы размера и пустые обязательные объекты.
+- Поддержанные пустые patches, исходные семь цветов темы, optional/null DNS
+  secondary, days 0/6, 1000 rotation profileIds и interval clamp не потеряны.
+  Доменные URL проходят исходную normalization до лимита hostname; отдельный
+  positive regression использует URL с path длиннее 253 символов.
+- У затронутых API устранены any входов/результатов; общие NextEvent,
+  ConnectionHistoryFilters и stats перенесены из main в shared с прежними
+  type-only reexports. Logs строит типизированный фильтр. Runtime algorithms
+  scheduler/history не переписаны; семантическая валидация остаётся в features.
+- Первая версия: `npm.cmd test` — 3781 passed / 5 skipped / 0 failed,
+  244 файлов passed / 2 skipped, 141.57 s, exit 0 (.tmp/wp0-object-schema-full.log).
+  После уточнения compatibility для URL повторён полный прогон итогового кода.
+- Финальные `npm.cmd run build` (typecheck и 157-channel checker) — exit 0,
+  .tmp/wp0-object-schema-final-build.log. `node scripts/test-electron-runtime.mjs`
+  — exit 0 (.tmp/wp0-object-schema-final-native.log), production guard/preload/
+  contextBridge: invalid nested days=[7] не вызывает handler, valid partial
+  update выполняется; прежняя typed-error/origin/sandbox матрица сохранена.
+- `npm.cmd test -- src/main/ipcContractAcceptance.test.ts src/preload/preloadValidation.test.ts src/main/ipcChannelContract.test.ts src/main/scheduler.test.ts src/main/profileRotation.test.ts src/main/connectionHistory.test.ts src/main/connectionHistoryStorage.test.ts src/main/notificationPrefs.test.ts src/main/dnsProfiles.test.ts src/main/dnsProfilesSelection.test.ts src/main/domainRouting.test.ts src/main/themePalette.test.ts src/renderer/pages/Logs.render.test.tsx`
+  — 614 passed, 13 файлов, 3.25 s, exit 0
+  (.tmp/wp0-object-schema-final-focused.log).
+- Coverage: `python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py`
+  — AC 927/927, F 210/210, exit 0. `git diff --check` — exit 0.
+- save-settings остаётся единственным bounded object() без fields. Его schema,
+  оставшиеся any ответов, domain failures, coordinator/FSM, cancellation/deadline,
+  migrations/correlation/history/flags/races/UI входят в прежний остаток WP-0.
+  AT-00-001 и весь WP-0 пока не объявлены PASS; нормативные docs/ не менялись.
+- Финальный `npm.cmd test` — 3782 passed / 5 skipped / 0 failed,
+  244 файлов passed / 2 skipped, 147.07 s, exit 0
+  (.tmp/wp0-object-schema-final-full.log). Production code после этого
+  результата до коммита не менялся; впереди exact-head CI и Revix на PR.

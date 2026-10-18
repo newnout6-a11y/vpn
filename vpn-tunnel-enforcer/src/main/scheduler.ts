@@ -17,15 +17,10 @@
 import { ipcMain } from 'electron'
 import Store from 'electron-store'
 import { randomUUID } from 'crypto'
-import type { ScheduleEntry } from '../shared/ipc-types'
+import type { ScheduleEntry, ScheduleNextEvent as NextEvent } from '../shared/ipc-types'
+export type { ScheduleNextEvent as NextEvent } from '../shared/ipc-types'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
-
-export interface NextEvent {
-  type: 'start' | 'stop'
-  at: number
-  schedule: ScheduleEntry
-}
 
 // ─── Store ───────────────────────────────────────────────────────────────────
 

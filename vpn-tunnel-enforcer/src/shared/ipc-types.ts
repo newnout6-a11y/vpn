@@ -782,6 +782,12 @@ export interface ScheduleEntry {
   mode: 'hard' | 'soft' | 'direct'
 }
 
+export interface ScheduleNextEvent {
+  type: 'start' | 'stop'
+  at: number
+  schedule: ScheduleEntry
+}
+
 /** DNS profile entry */
 export interface DnsProfile {
   id: string
@@ -794,6 +800,8 @@ export interface DnsProfile {
   isBuiltin: boolean
   isSelected?: boolean
 }
+
+export type DnsProfileInput = Omit<DnsProfile, 'id' | 'isBuiltin' | 'secondary'> & { secondary?: string | null }
 
 /** Domain routing action */
 export type DomainAction = 'vpn' | 'direct' | 'block'
@@ -861,6 +869,12 @@ export interface ThemeConfig {
     warning: string
     danger: string
   }
+}
+
+/** Original seven colors are supported; newer palette slots use defaults on read. */
+export type ThemeInput = Pick<ThemeConfig, 'name' | 'mode'> & {
+  colors: Pick<ThemeConfig['colors'], 'background' | 'sidebar' | 'cardBackground' | 'accent' | 'text' | 'textSecondary' | 'border'>
+    & Partial<ThemeConfig['colors']>
 }
 
 /** Dashboard widget layout entry */
@@ -938,6 +952,23 @@ export interface ConnectionLogEntry {
   errorMessage?: string | null
   /** Structured cause + evidence. Absent on entries written before v1.1.18. */
   outcome?: SessionOutcome | null
+}
+
+export interface ConnectionHistoryFilters {
+  /** Disconnect reasons; an empty list includes all reasons. */
+  levels?: Array<ConnectionLogEntry['disconnectReason']>
+  /** Inclusive start time bounds, in milliseconds since epoch. */
+  dateFrom?: number
+  dateTo?: number
+  text?: string
+}
+
+export interface ConnectionHistoryStats {
+  /** Sum of completed session durations in milliseconds. */
+  totalTimeMs: number
+  totalBytesDown: number
+  totalBytesUp: number
+  entryCount: number
 }
 
 /** Locale type */
