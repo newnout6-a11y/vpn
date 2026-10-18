@@ -1932,3 +1932,41 @@ CI/review нового SHA проверяются отдельно после pu
   2 skipped, 161.72 s, exit 0, `.tmp/wp0-resumed-full.log`.
   Coverage — AC 927/927, F 210/210, exit 0; оба diff --check — exit 0.
   Это проверка первого адресного исправления WP-0, не приёмка всего пакета.
+
+## 18.10.2026 — WP-0: устойчивость истории подключений (AT-00-010; F-143)
+
+- Подтверждены два пробела: обрезанный JSON выбрасывал SyntaxError при
+  загрузке модуля; Array.isArray принимал повреждённые записи и позволял
+  молчаливо терять историю при неверной корневой схеме. Первичный файловый
+  regression: 8 failed / 2 passed, 1.04 s, exit 1;
+  `.tmp/wp0-history-before.log`.
+- Десериализация проверяет корневую схему, обязательные и используемые
+  optional/outcome/evidence поля. Валидные записи смешанного массива
+  сохраняются, невалидные отсеиваются с количеством; повреждение JSON
+  сообщает `history.corrupted`. Raw содержимое и ошибки парсера не логируются.
+  Повреждённый файл до следующей записи сохраняется; новые записи работают,
+  Conf выполняет существующий атомарный write. Ошибки I/O не подавляются.
+- Дедуп по SHA-256 относится только к повторным чтениям одного повреждения;
+  после изменения содержимого или успешной записи/очистки новое повреждение
+  снова логируется. Некорректный addEntry отклоняется до изменения файла.
+- Стенд использует настоящий Conf и временные файлы внутри .tmp,
+  перезагружает сервис после 100 записей. Оболочка Electron userData/version
+  подставлена; это L2, не проверка полного перезапуска Electron/Windows.
+  Матрица covers legacy records, truncation/tail, schema corruption,
+  typed fields, structured evidence, runtime damage и filesystem failure.
+- Первый адресный прогон после правки: 41 passed / 1 failed: после успешной
+  записи fingerprint не сбрасывался до следующего чтения. Исправлено сбросом
+  только после успешного set/clear; добавлены регрессии. Расширенный прогон
+  connectionHistoryStorage/connectionHistory/auditFixesRegression — 73 passed.
+  Typecheck обнаружил несовпадение возвращаемого типа deserialize; исправлено
+  явной ConnectionHistoryStoreSchema с безопасным пустым представлением.
+  Финальные проверки и PR учитываются ниже. WP-0 остаётся в работе.
+
+- Финальный `npm.cmd run typecheck` — exit 0.
+  `npm.cmd test -- src/main/connectionHistoryStorage.test.ts src/main/connectionHistory.test.ts src/main/auditFixesRegression.test.ts`
+  — 73 passed, 3 файла, 1.23 s, exit 0.
+  `npm.cmd test` — 3350 passed / 5 skipped / 0 failed, 238 файлов passed /
+  2 skipped, 161.76 s, exit 0; `.tmp/wp0-history-full.log`.
+  `npm.cmd run build` (включая typecheck) — exit 0;
+  `.tmp/wp0-history-build.log`. Coverage — AC 927/927, F 210/210, exit 0;
+  `git diff --check` и staged diff check — exit 0.
