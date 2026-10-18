@@ -18,6 +18,7 @@ import type { NetworkCleanupReceipt, SingBoxOutboundFault } from './tunControlle
 import { ConnectionLifecycle, type ConnectionStartupOwner } from './connectionLifecycle'
 import { currentCorrelationId, currentActionMetadata, withCorrelation } from './actionCorrelation'
 import { monotonicTimeMs } from './eventClock'
+import { operations, registerOperationHandlers } from './operations'
 import { TunnelStateMachine } from './tunnelStateMachine'
 import type { ConnectionStartResult, ConnectionStopResult } from '../shared/operation'
 import { runScheduledConnection } from './scheduledConnection'
@@ -2709,6 +2710,7 @@ app.whenReady().then(async () => {
   registerLiveServerProbeIpcHandlers()
   registerUrlAvailabilityHandlers()
   registerSpeedTestHandlers()
+  registerOperationHandlers()
   registerKillSwitchIpc()
   registerRotationHandlers()
   registerSchedulerIpcHandlers()
@@ -2878,10 +2880,12 @@ async function performShutdownCleanup(reason: string): Promise<void> {
   shutdownInProgress = true
   const failedSteps: string[] = []
   adaptiveVerificationGeneration += 1
+  const featureDrain = operations.close()
   await connectionLifecycle.close().catch(err => {
     failedSteps.push('connection-lifecycle')
     logEvent('warn', 'app', 'pending main lifecycle during shutdown failed', err)
   })
+  await featureDrain
   await clearOwnedSecretClipboard().catch(err => {
     failedSteps.push('clipboard')
     logEvent('warn', 'app', 'clipboard cleanup during shutdown failed', err)

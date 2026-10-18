@@ -230,6 +230,8 @@ export const IPC_REQUESTS = {
   'theme:create': request('themeCreate', [theme]),
   'theme:delete': request('themeDelete', [string]),
   'speed-test:run': request('speedTestRun', []),
+  'operations:list': request('operationsList', []),
+  'operations:cancel': request('operationsCancel', [text(36)]),
   'speed-test:history': request('speedTestHistory', []),
   'external-proxy:status': request('externalProxyStatus', [optional(slot)]),
   'external-proxy:start': request('externalProxyStart', [optional(externalOptions)]),

@@ -411,9 +411,11 @@ contextBridge.exposeInMainWorld('electronAPI', withIpcFailures({
   },
   // Speed Test
   speedTestRun: () => invoke('speed-test:run'),
+  operationsList: () => invoke('operations:list'),
+  operationsCancel: (operationId: string) => invoke('operations:cancel', operationId),
   speedTestHistory: () => invoke('speed-test:history'),
-  onSpeedTestProgress: (callback: (data: { percent: number; phase: string }) => void) => {
-    const handler = (_event: any, data: { percent: number; phase: string }) => callback(data)
+  onSpeedTestProgress: (callback: (data: { percent: number; phase: string; operationId?: string }) => void) => {
+    const handler = (_event: any, data: { percent: number; phase: string; operationId?: string }) => callback(data)
     ipcRenderer.on('speed-test:progress', handler)
     return () => ipcRenderer.removeListener('speed-test:progress', handler)
   },

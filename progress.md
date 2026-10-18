@@ -3716,3 +3716,84 @@ CI/review нового SHA проверяются отдельно после pu
 - Слит с проверкой ожидаемого head; REST GET merged=true, state=closed,
   merge 3f6f7f464ec20ce7544a767c24a238d1bf809937.
   Soft history доставлена в main; WP-0 целиком не завершён.
+
+## WP-0 — общий feature registry и первая интеграция speed test (19.10.2026)
+
+- AT-00-001/003/005/007: добавлен OperationRegistry с main UUIDv4,
+  original correlation/source/owner, deadline, priority admission и ограниченным
+  списком метаданных (1000). Cancel/timeout возвращает типизированный отказ
+  caller немедленно; lease остаётся busy до фактического settlement всех
+  захваченных эффектов. Higher-priority replacement дожидается drain, но само
+  ожидание реагирует на abort/deadline/shutdown и входит в монотонный бюджет.
+- Настоящий speed runner передаёт signal в axios latency/download/upload/egress,
+  уничтожает streams, запрещает поздние fallback/progress/history. При shutdown
+  connection lane и feature registry отменяются вместе; native cleanup ждёт оба.
+  `operations:list/cancel` зарегистрированы через общий guard/preload/shared.
+  Новая public API сохраняет существующий результат speedTestRun.
+- Начальный integration harness вызывал несуществующий installer guard:
+  `npm.cmd test -- src/main/operationRegistry.test.ts src/main/speedTestOperations.test.ts src/main/speedTest.test.ts src/main/lifecycleCleanup.test.ts`
+  — **11 failed / 206 passed**, 20.72 s, exit 1
+  (.tmp/wp0-operations-integrated.log в первом запуске, позднее перезаписан
+  успешным повтором). Исправлен harness, cleanup снимает удержанные gates
+  даже при failed assertion. Повтор — **217 passed**, 21.06 s, exit 0.
+- Новые реальные регрессии до исправлений:
+  `npm.cmd test -- src/main/operationRegistry.test.ts src/main/speedTestOperations.test.ts src/main/lifecycleCleanup.test.ts`
+  — **4 failed / 216 passed**, 21.31 s, exit 1
+  (.tmp/wp0-operations-races-before.log). Waiting replacement не отвечал на
+  cancel/timeout/shutdown; отмена при complete frame ещё сохраняла результат.
+  Исправлены cancellable admission и guard перед saveResult.
+- `npm.cmd test -- src/main/speedTestOperations.test.ts` — **1 failed / 13 passed**,
+  2.33 s, exit 1 (.tmp/wp0-operations-headers-before.log): отмена между headers
+  и установкой consumer оставляла Readable открытым. Stream теперь принадлежит
+  abort handler уже при получении headers; поздние headers уничтожаются тоже.
+- Итоговый адресный набор:
+  `npm.cmd test -- src/main/speedTestOperations.test.ts src/main/operationRegistry.test.ts src/main/speedTest.test.ts src/main/lifecycleCleanup.test.ts`
+  — **225 passed / 4 files**, 25.07 s, exit 0
+  (.tmp/wp0-operations-focused-final.log). Настоящие speed service / registry /
+  IPC guard / Conf backend; OS/VPN и внешняя сеть заменены. Отдельный тест
+  запускает реальный loopback HTTP server/axios и подтверждает закрытие сокета
+  после abort. Generic 5 kinds × 10/50/90 не считается интеграцией остальных
+  production features. Speed integration проверяет пороги 10/50/90/100 и complete.
+- `npm.cmd run typecheck` — exit 0, **160 channels / 0 public any**
+  (.tmp/wp0-operations-typecheck.log); `npm.cmd run build` — exit 0
+  (.tmp/wp0-operations-build.log). Финальный build/full после headers fix ниже.
+- `node scripts/test-electron-runtime.mjs` — **ELECTRON_SMOKE_PASS**, exit 0
+  (.tmp/wp0-operations-electron.log). Production operations handlers и preload,
+  настоящий contextBridge: UUID cancel, исходный correlation, typed отказ
+  ≤900 ms при ещё удержанном lease, invalid UUID и чужой WebContents.
+  Сеть управляемая; actual speed HTTP покрыт отдельным L2 тестом выше.
+  `node scripts/test-wp1-native.mjs --ipc-only` — **WP1_NATIVE_PASS**, exit 0
+  (.tmp/wp0-operations-csp.log), IPC/CSP subset без изменения ОС.
+- Traceability `python docs/04-приёмочные-тесты/traceability/check-coverage.py` —
+  AC 927/927, F 210/210, exit 0; `git diff --check` — exit 0.
+  F-021 опровергнута и не исправляется. Нормативные docs не менялись.
+- AT-00-003 ещё не PASS: refresh/import/export/rotation entrypoints,
+  UI cancel/unmount, stop deadline, durable operation history и остальные
+  пункты матрицы остаются открытыми. WP-0 и WP-2 не объявляются завершёнными.
+- Промежуточные полные `npm.cmd test`: **4259 passed / 5 skipped / 0 failed**,
+  266 files passed / 2 skipped, 193.37 s (.tmp/wp0-operations-full.log) и
+  189.00 s (.tmp/wp0-operations-full-final.log), оба exit 0. Последующее
+  усиление IP guard ниже требует собственного полного прогона.
+- Проверка production getCurrentIp выявила ещё один late effect: без canPublish
+  отменённая egress verification могла обновить shared IP state/health/recovery.
+  `npm.cmd test -- src/main/speedTestOperations.test.ts` — **1 failed / 14 passed**,
+  2.33 s, exit 1 (.tmp/wp0-operations-ip-before.log). Speed теперь передаёт
+  predicate `!lease.signal.aborted` в production IP monitor, который проверяет
+  его перед publication. Raw verification остаётся под physical drain.
+- `npm.cmd test -- src/main/speedTestOperations.test.ts src/main/operationRegistry.test.ts src/main/speedTest.test.ts src/main/lifecycleCleanup.test.ts src/main/ipMonitor.test.ts`
+  — **237 passed / 5 files**, 23.50 s, exit 0
+  (.tmp/wp0-operations-focused-final.log; предыдущий 225-test output заменён).
+- `npm.cmd test -- src/main/ipMonitorSession.test.ts src/main/ipMonitorWaves.test.ts`
+  — **19 passed / 2 files**, 529 ms, exit 0 (.tmp/wp0-operations-monitor-final.log).
+  Эти production monitor fixtures проверяют запрет late state/health/recovery
+  publication при отозванном canPublish и изоляцию поколений проверок.
+- Итоговый полный `npm.cmd test` после IP guard — **4260 passed / 5 skipped /
+  0 failed**, 266 files passed / 2 skipped, 186.80 s, exit 0
+  (.tmp/wp0-operations-full-guard-final.log).
+  `npm.cmd run build` — exit 0 (.tmp/wp0-operations-build-final.log), включая
+  typecheck: 160 channels / 0 public any. Финальный
+  `node scripts/test-electron-runtime.mjs` — ELECTRON_SMOKE_PASS, exit 0
+  (.tmp/wp0-operations-electron-final.log); IPC/CSP subset
+  `node scripts/test-wp1-native.mjs --ipc-only` — WP1_NATIVE_PASS, exit 0
+  (.tmp/wp0-operations-csp-final.log). Scope остаётся указанным выше.
+  Traceability AC 927/927 / F 210/210 и `git diff --cached --check` — exit 0.
