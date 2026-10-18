@@ -408,3 +408,19 @@ I/O codes из allowlist. Произвольный error.code и raw message/sta
 Замечания Qodo подтверждены регрессиями до исправления. Эти тесты не заменяют
 матрицу остальных privileged features, интегрированный lifecycle или L3.
 Фактические результаты локальных проверок и CI фиксируются в progress.md.
+
+### Второй проход Qodo #56 — форма rotation и файловые отказы
+
+Структурированный Qodo API подтвердил implemented для четырёх прежних находок
+на 132c3e5 и сообщил два новых замечания. При импорте rotation проверяются все
+обязательные поля RotationConfig, включая profileIds, числовые поля, enabled и
+order. Неполный объект отклоняется до persistence; сохранность прежних stores
+и работоспособность следующего корректного импорта проверяются настоящими
+feature handlers. Это не миграция уже повреждённых historical stores и не
+полная nested schema validation остальных разделов.
+
+File-size, non-regular и changed-during-read отказы теперь имеют ограниченные
+диагностические коды; категории validation/conflict сохранены. Тесты также
+проверяют отсутствие capability и listener после отказа. Итоги Qodo читаются
+через get-pr-review-findings, включая status и commit_sha, вместо интерпретации
+пустого GitHub summary. Статусы findings вручную не менялись.

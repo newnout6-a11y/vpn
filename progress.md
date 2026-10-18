@@ -2741,3 +2741,47 @@ CI/review нового SHA проверяются отдельно после pu
   (.tmp/wp0-qodo56-native.log). Production contextBridge сохраняет все семь
   canonical категорий, коды и correlationId на en/ru; config I/O проверяется
   отдельно реальными handlers в local fault matrix, а не этим native fixture.
+
+## 18.10.2026 — Qodo API: точное состояние ревью и второй проход #56
+
+- По предоставленному владельцем доступу проверен официальный MCP endpoint
+  `https://sdk.qodo.ai/v1/tools/mcp/`. Ключ не записан в проект, Git или отчёт.
+  `litegit-search-repos` подтвердил доступ к newnout6-a11y/vpn;
+  `get-pr-review-findings` прочитал структурированные результаты трёх PR.
+- #54: completed, run 1539400, commit 9ce9298, findings 0.
+  #55: completed, run 1539479, commit 580d188; единственная находка
+  ce603cfd имеет attribution_status `implemented`. Это подтверждение Qodo API,
+  а не вывод из пустого GitHub summary или ручное снятие блокировки.
+- #56: completed, run 1539547, commit 132c3e5. Все четыре прежние находки
+  получили `implemented`. Новые: 382ce5a8 (action_required) — rotation:{}
+  записывается и ломает следующий import; 81f01bf3 (informational) — file-size,
+  non-regular и tamper rejections не имеют диагностического кода.
+  Ручные запросы review и ручное изменение статусов findings не выполнялись.
+- Новые tests до исправления: `npm.cmd test -- src/main/configIpcErrors.test.ts src/main/configManager.test.ts`
+  — 13 failed / 74 passed, 850 ms, exit 1 (.tmp/wp0-qodo56-round2-before.log).
+  validateImportData теперь проверяет полную форму RotationConfig до записи;
+  обработчики отклоняют rotation:{} и сохраняют прежние stores. Следующий
+  корректный import другого раздела работает. Уже повреждённые historical
+  stores этим исправлением не мигрируются.
+- readSelectedConfig пишет warn с file-too-large / file-not-regular /
+  file-changed; последняя причина сохраняет canonical conflict, первые две —
+  validation. При отказе capability не выдаётся, listener не остаётся.
+  Regression использует реальный большой файл; fstat для non-regular/tamper
+  управляется test double, остальные filesystem операции настоящие.
+- `npm.cmd test -- src/main/configIpcErrors.test.ts src/main/configManager.test.ts src/main/configImportSecurity.test.ts`
+  — 99 passed / 3 files, 1.10 s, exit 0 (.tmp/wp0-qodo56-round2-focused.log).
+  `npm.cmd run typecheck` — exit 0, 157 channels / 0 public any
+  (.tmp/wp0-qodo56-round2-typecheck.log). Coverage — AC 927/927, F 210/210;
+  diff check exit 0. Полный suite выполняется.
+- [CI 39139840826](https://github.com/newnout6-a11y/vpn/actions/runs/39139840826)
+  на 132c3e5: failure в отдельном native CSP fixture (assert script-src).
+  Windows unit: 3903 passed / 4 skipped, 248 файлов passed / 1 skipped,
+  201.29 s; typecheck, coverage, build и Electron smoke прошли, Rust и сайт success.
+  В CSP fixture ожидание отчётов ограничено фиксированными 500 ms.
+  Локальный `node scripts/test-wp1-native.mjs --ipc-only` без правок fixture —
+  WP1_NATIVE_PASS, exit 0 (.tmp/wp0-qodo56-csp-recheck.log).
+  Причина различия CI/local не объявлена доказанной; новый CI проверит повторно.
+- Полный `npm.cmd test` второго прохода — 3915 passed / 5 skipped / 0 failed,
+  247 файлов passed / 2 skipped, 201.99 s, exit 0
+  (.tmp/wp0-qodo56-round2-full.log). Новая проверка RotationConfig и три
+  файловых диагностических отказа входят в этот прогон.

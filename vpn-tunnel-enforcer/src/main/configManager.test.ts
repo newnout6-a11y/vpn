@@ -90,6 +90,14 @@ function makeDns(id: string, isBuiltin = false) {
 // ─── validateImportData ──────────────────────────────────────────────────────
 
 describe('validateImportData', () => {
+  it.each([{}, { ...makeEmptyConfig().rotation, enabled: 'false' },
+    { ...makeEmptyConfig().rotation, profileIds: null }, { ...makeEmptyConfig().rotation, profileIds: [1] },
+    { ...makeEmptyConfig().rotation, order: 'other' }, { ...makeEmptyConfig().rotation, intervalMinutes: '30' },
+    { ...makeEmptyConfig().rotation, currentIndex: -1 }, { ...makeEmptyConfig().rotation, currentIndex: 0.5 },
+    { ...makeEmptyConfig().rotation, nextRotationAt: 'tomorrow' }
+  ])('rejects incomplete or malformed rotation before persistence (AT-00-004): %j', rotation => {
+    expect(validateImportData({ version: CONFIG_VERSION, rotation })).toMatchObject({ valid: false, reasonCode: 'rotation-fields' })
+  })
   it.each([null, {}, { ...makeProfile('p'), id: 1 }, { ...makeProfile('p'), port: 0 },
     { ...makeProfile('p'), status: 'connected' }, { ...makeProfile('p'), status: ['online'] },
     { ...makeProfile('p'), status: { toString: 'online' } }, { ...makeProfile('p'), outbound: [] },

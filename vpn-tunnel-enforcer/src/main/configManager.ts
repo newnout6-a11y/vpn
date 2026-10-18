@@ -62,7 +62,8 @@ export const ALL_SECTIONS = [
 
 export type ConfigSection = (typeof ALL_SECTIONS)[number]
 type ImportValidationCode = 'not-object' | 'missing-version' | 'incompatible-version'
-  | 'no-sections' | 'profile-entry' | 'invalid-json' | 'invalid-config' | 'selected-sections'
+  | 'no-sections' | 'profile-entry' | 'rotation-fields' | 'invalid-json' | 'invalid-config' | 'selected-sections'
+  | 'file-too-large' | 'file-not-regular' | 'file-changed'
   | `section-type:${ConfigSection}`
 
 // ─── Export Data Shape ───────────────────────────────────────────────────────
@@ -256,6 +257,16 @@ export function validateImportData(data: unknown): {
         reasonCode: 'section-type:rotation',
         error: 'Invalid type for section "rotation": expected object'
       }
+    }
+    const rotation = obj.rotation as Record<string, unknown>
+    if (typeof rotation.enabled !== 'boolean'
+      || typeof rotation.intervalMinutes !== 'number' || !Number.isFinite(rotation.intervalMinutes)
+      || !['sequential', 'random'].includes(rotation.order as string)
+      || !Array.isArray(rotation.profileIds) || !rotation.profileIds.every(id => typeof id === 'string')
+      || !Number.isInteger(rotation.currentIndex) || (rotation.currentIndex as number) < 0
+      || !(rotation.nextRotationAt === null || (typeof rotation.nextRotationAt === 'number'
+        && Number.isFinite(rotation.nextRotationAt) && rotation.nextRotationAt >= 0))) {
+      return { valid: false, sections: [], reasonCode: 'rotation-fields', error: 'Invalid rotation fields' }
     }
     foundSections.push('rotation')
   }
@@ -643,9 +654,9 @@ function parseImportJson(raw: string): unknown {
   catch { return rejectImport('invalid-json') }
 }
 
-function rejectImport(validationCode: ImportValidationCode): never {
-  logEvent('warn', 'config-manager', 'import rejected', { reason: 'validation', validationCode })
-  throw new IpcFault('validation')
+function rejectImport(validationCode: ImportValidationCode, reason: 'validation' | 'conflict' = 'validation'): never {
+  logEvent('warn', 'config-manager', 'import rejected', { reason, validationCode })
+  throw new IpcFault(reason)
 }
 
 const CONFIG_IO_CODES = new Set(['EACCES', 'EPERM', 'ENOENT', 'EISDIR', 'ENOTDIR', 'ENOSPC', 'EROFS',
@@ -834,9 +845,8 @@ function readSelectedConfig(path: string): string {
   const fd = openSync(path, 'r')
   try {
     const before = fstatSync(fd)
-    if (!before.isFile() || before.size > MAX_CONFIG_IMPORT_BYTES) {
-      throw new IpcFault('validation')
-    }
+    if (!before.isFile()) rejectImport('file-not-regular')
+    if (before.size > MAX_CONFIG_IMPORT_BYTES) rejectImport('file-too-large')
     // Do not use an unbounded readFileSync: the file can grow after fstat.
     const buffer = Buffer.alloc(before.size + 1)
     let length = 0
@@ -847,7 +857,7 @@ function readSelectedConfig(path: string): string {
     }
     const after = fstatSync(fd)
     if (length !== before.size || after.size !== before.size || after.mtimeMs !== before.mtimeMs) {
-      throw new IpcFault('conflict')
+      rejectImport('file-changed', 'conflict')
     }
     return buffer.subarray(0, length).toString('utf8')
   } finally { closeSync(fd) }

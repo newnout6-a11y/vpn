@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events'
 import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fstatSync } from 'fs'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { IPC_VERSION, IpcFault, ipcError, type IpcErrorCategory } from '../shared/ipc-result'
 
@@ -25,6 +26,10 @@ vi.mock('electron', () => ({
     })
   }
 }))
+vi.mock('fs', async importOriginal => {
+  const actual = await importOriginal<typeof import('fs')>()
+  return { ...actual, fstatSync: vi.fn(actual.fstatSync) }
+})
 vi.mock('electron-store', () => ({ default: class {
   name: string
   constructor(options: { name: string; defaults: Record<string, unknown> }) {
@@ -81,6 +86,36 @@ beforeEach(() => {
 afterEach(() => { sender.emit('destroyed'); state.failStore = false; rmSync(directory, { recursive: true, force: true }) })
 
 describe('config domain error envelopes (AT-00-004)', () => {
+  it('rejects malformed rotation without breaking a subsequent valid import', async () => {
+    state.stores.get('profile-rotation')!.rotation = { ...collectCurrentConfig().rotation, enabled: true, profileIds: ['kept'] }
+    const before = structuredClone(state.stores)
+    writeFileSync(state.selection, JSON.stringify({ version: '2.0', rotation: {} }))
+    await invoke('config:browse-import')
+    expectFailure(await invoke('config:import', state.selection), 'validation')
+    expectFailure(await invoke('config:import-apply', state.selection, ['rotation'], 'replace'), 'validation')
+    expect(state.stores).toEqual(before)
+    writeFileSync(state.selection, JSON.stringify({ version: '2.0', notifications: collectCurrentConfig().notifications }))
+    await invoke('config:browse-import')
+    expect(await invoke('config:import', state.selection)).toMatchObject({ ok: true })
+    expect(await invoke('config:import-apply', state.selection, ['notifications'], 'replace')).toMatchObject({ ok: true })
+    expect(state.stores.get('profile-rotation')!.rotation).toEqual(before.get('profile-rotation')!.rotation)
+  })
+  it.each(['file-too-large', 'file-not-regular', 'file-changed'])('records a bounded reason for %s without granting authority', async validationCode => {
+    const actual = await vi.importActual<typeof import('fs')>('fs')
+    if (validationCode === 'file-too-large') writeFileSync(state.selection, 'x'.repeat(16 * 1024 * 1024 + 1))
+    if (validationCode === 'file-not-regular') {
+      vi.mocked(fstatSync).mockImplementationOnce(fd => Object.assign(actual.fstatSync(fd), { isFile: () => false }))
+    }
+    if (validationCode === 'file-changed') {
+      vi.mocked(fstatSync).mockImplementationOnce(fd => actual.fstatSync(fd))
+        .mockImplementationOnce(fd => Object.assign(actual.fstatSync(fd), { mtimeMs: 0 }))
+    }
+    const reason = validationCode === 'file-changed' ? 'conflict' : 'validation'
+    expectFailure(await invoke('config:browse-import'), reason)
+    expect(logEvent).toHaveBeenCalledWith('warn', 'config-manager', 'import rejected', { reason, validationCode })
+    expectFailure(await invoke('config:import', state.selection), 'permission')
+    expect(sender.listenerCount('destroyed')).toBe(0)
+  })
   it.each(failures)('maps %s at each real feature handler without exception text', async (category, create) => {
     // Capture native-dialog selection before injecting a store fault.
     expect((await invoke('config:browse-import')).ok).toBe(true)
