@@ -1,4 +1,5 @@
 import { isIP } from 'net'
+import { ipcMain } from 'electron'
 import http from 'http'
 import https from 'https'
 import axios from 'axios'
@@ -373,40 +374,8 @@ export const ipMonitor = {
   }
 }
 
-// ─── IPC self-registration ────────────────────────────────────────────────
-// The renderer needs to flip suspend/resume the moment the TUN status
-// transitions to 'stopping' (before rollback) and back when status returns
-// to 'running' / 'stopped'. We can't add bridge methods to preload from
-// here (file ownership), so we expose the bare ipcMain channels and rely
-// on the renderer calling them through whatever bridge the orchestrator
-// wires up later. The renderer also has a defense-in-depth `stoppingNow`
-// flag that drops leak events client-side, so even without an IPC bridge
-// the false-positive disappears.
-function registerIpMonitorIpcHandlers() {
-  // Avoid double-registration if this module is imported twice in tests.
-  // ipcMain.handle throws on duplicate channel names.
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const { ipcMain } = require('electron') as typeof import('electron')
-    if (!ipcMain) return
-    ipcMain.handle('ip-monitor:suspend', async () => {
-      ipMonitor.suspend()
-      return { ok: true }
-    })
-    ipcMain.handle('ip-monitor:resume', async () => {
-      ipMonitor.resume()
-      return { ok: true }
-    })
-  } catch (err) {
-    logEvent('debug', 'ip-monitor', 'IPC self-registration skipped', {
-      error: (err as Error)?.message
-    })
-  }
-}
-
-// Self-register on import when running inside the Electron main process.
-// `process.type === 'browser'` is Electron's marker for the main process;
-// renderer processes report 'renderer' and unit tests have no `process.type`.
-if (typeof process !== 'undefined' && (process as any).type === 'browser') {
-  registerIpMonitorIpcHandlers()
+/** Called by main only after the process-wide IPC boundary is installed. */
+export function registerIpMonitorIpcHandlers(): void {
+  ipcMain.handle('ip-monitor:suspend', async () => { ipMonitor.suspend(); return { ok: true } })
+  ipcMain.handle('ip-monitor:resume', async () => { ipMonitor.resume(); return { ok: true } })
 }

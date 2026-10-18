@@ -174,7 +174,7 @@ describe('App source regressions', () => {
     expect(card).toContain('window.electronAPI.externalProxyStopAll()')
     expect(card).toContain('Остановить все внешние прокси')
     expect(card).toContain('processRunningCount === 0')
-    expect(preload).toContain("externalProxyStopAll: () => ipcRenderer.invoke('external-proxy:stop-all')")
+    expect(preload).toContain("externalProxyStopAll: () => invoke('external-proxy:stop-all')")
   })
 
   it('does not block the Servers page first paint on group metadata', () => {
@@ -194,7 +194,7 @@ describe('App source regressions', () => {
     expect(servers).toContain('handleExportProxyList')
     expect(servers).toContain('serversExportAllProxiesToFile')
     expect(servers).toContain("t('servers.exportProxyList', 'Proxy list')")
-    expect(preload).toContain("serversExportAllProxiesToFile: () => ipcRenderer.invoke('servers:export-all-proxies-file')")
+    expect(preload).toContain("serversExportAllProxiesToFile: () => invoke('servers:export-all-proxies-file')")
   })
 
   it('keeps server add selects above the server list and shows key-loading feedback', () => {

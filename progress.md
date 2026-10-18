@@ -2037,3 +2037,57 @@ CI/review нового SHA проверяются отдельно после pu
   Следующий шаг — точный request/event registry, schemas, typed envelope
   и контрактный тест вместо string presence. Это не приёмка AT-00-001.
   WP-0 остаётся в работе, WP-2 не начат; цель не завершена.
+
+## 18.10.2026 — WP-0: общий IPC transport и паритет 157 каналов
+
+- Ветка codex/wp0-ipc-contracts. Добавлен общий request registry с методом
+  API и runtime-схемой каждого из 157 каналов; прежний ElectronAPI вынесен
+  в shared с совместимыми type exports preload. Старые частичные *Channels
+  и единственный неэкспонированный alias diagnostics:run-leak-check удалены.
+  AST checker разрешает девять wrappers реальных main registrations,
+  сравнивает main/preload/shared, именует drift/duplicates/method mismatch,
+  отклоняет динамические неопределённые каналы и raw bridge invoke в обход
+  decoder. Checker обязателен в typecheck/build.
+- Исправлен обход guard: ipMonitor раньше регистрировал suspend/resume
+  при импорте, до installTrustedIpcBoundary в app.whenReady. Теперь main
+  вызывает registrar явно после guard; regression проверяет отсутствие
+  import-time handlers при process.type=browser и zero effects чужому frame.
+- Guard проверяет sender, общие лимиты и channel schema перед listener;
+  возвращает version=1 ok/result/error с UUIDv4. Исключения классифицируются
+  в validation/permission/network/conflict/internal/cancelled/timeout с
+  константными code/message; raw exception не передаётся renderer. Getter
+  code/name, который сам бросает исключение, тоже закрыт safe envelope.
+  Preload снимает envelope, сохраняет прежние domain results/undefined,
+  sanitizes повреждённый response и Electron transport reject.
+- 157 channels проверены через production guard с контролируемыми listeners:
+  valid args, неправильный тип каждого аргумента, extra args, чужой frame,
+  все 7 категорий исключений, audit correlation и отсутствие secret/path.
+  Это не semantic matrix 157 реальных feature handlers. Plain-object
+  legacy inputs пока не все имеют глубокие field schemas; any публичного
+  API и domain-result error payloads остаются дальнейшей работой WP-0.
+  contextBridge не гарантирует перенос custom Error properties: в main
+  world подтверждено canonical message, code/category проверены в preload
+  realm. Типизированные ошибки в main world ещё требуют bridge adapter.
+  AT-00-001/004 и весь WP-0 целиком PASS не объявлены.
+- `npm.cmd run typecheck` — exit 0, checker 157 channels. Адресный прогон
+  `npm.cmd test -- src/main/ipMonitorIpc.test.ts src/main/ipcContractAcceptance.test.ts src/main/ipcChannelContract.test.ts src/preload/preloadValidation.test.ts src/renderer/AppSource.test.ts`
+  — 378 passed, 5 файлов, 4.12 s. После добавления отрицательных типов:
+  `npm.cmd test -- src/main/ipcContractAcceptance.test.ts src/main/windowCrashRecovery.test.ts`
+  — 328 passed, 2 файла, 0.70 s. Полный `npm.cmd test` — 3698 passed /
+  5 skipped / 0 failed, 240 файлов passed / 2 skipped, 199.07 s, exit 0;
+  `.tmp/wp0-ipc-full-final.log`. Первый полный прогон нашёл три устаревших
+  source assertions (перенос interface и helper invoke); они исправлены.
+- `npm.cmd run build` — exit 0, `.tmp/wp0-ipc-build.log`.
+  `node scripts/test-electron-runtime.mjs` — exit 0: Electron 44.4.3,
+  safeStorage, production preload/contextBridge/reload, loopback dev,
+  payload/unknown sender/navigated origin rejection. Лог
+  `.tmp/wp0-ipc-electron.log`. `node scripts/test-wp1-native.mjs --ipc-only`
+  — exit 0, настоящий hostile subframe zero effects, production CSP;
+  `.tmp/wp0-ipc-native.log`. В native fixture koffi сохранён external:
+  esbuild не должен встраивать .node binary. IPC-only не выполняет ACL,
+  ZIP или clipboard и не подменяет полную L3/OS matrix.
+- `python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py`
+  — AC 927/927, F 210/210, exit 0; `git diff --check` — exit 0.
+  Норматив docs/ не менялся. После коммита — PR, exact-head CI и Revix;
+  CodeRabbit исключён владельцем. Остаток пакета и границы доказательств
+  обновлены в vpn-tunnel-enforcer/docs/wp0-acceptance-2026-10-18.md.

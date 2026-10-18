@@ -26,7 +26,31 @@ async function loadApi() {
 describe('preload IPC argument validation', () => {
   beforeEach(() => {
     invokeMock.mockReset()
-    invokeMock.mockResolvedValue(undefined)
+    invokeMock.mockResolvedValue({ version: 1, correlationId: '00000000-0000-4000-8000-000000000000', ok: true, result: undefined })
+  })
+
+  // AT-00-001/004: transport envelopes must not change public domain results.
+  it.each([undefined, { running: false }, { ok: false, error: 'domain result' }])('decodes successful transport result %j', async result => {
+    const api = await loadApi()
+    invokeMock.mockResolvedValue({ version: 1, correlationId: '00000000-0000-4000-8000-000000000000', ok: true, result })
+    await expect(api.getTunStatus()).resolves.toEqual(result)
+  })
+
+  it('returns a canonical remote error with correlation and no exception text', async () => {
+    const api = await loadApi()
+    invokeMock.mockResolvedValue({ version: 1, correlationId: '00000000-0000-4000-8000-000000000000', ok: false,
+      error: { category: 'permission', code: 'unknown', message: 'raw-secret at C:\\private\\file' } })
+    await expect(api.getTunStatus()).rejects.toMatchObject({ name: 'IpcRemoteError', category: 'permission',
+      code: 'IPC_PERMISSION_DENIED', message: 'Недостаточно прав для операции', correlationId: '00000000-0000-4000-8000-000000000000' })
+  })
+
+  it('sanitizes malformed responses and rejected Electron transports', async () => {
+    const api = await loadApi()
+    invokeMock.mockResolvedValueOnce({ raw: 'raw-secret at C:\\private\\file' })
+    invokeMock.mockRejectedValueOnce(new Error('raw-secret at C:\\private\\file'))
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await expect(api.getTunStatus()).rejects.toMatchObject({ category: 'internal', code: 'IPC_INTERNAL_ERROR', message: 'Не удалось выполнить операцию' })
+    }
   })
 
   it('rejects oversized VPN inspection input before ipcRenderer.invoke', async () => {

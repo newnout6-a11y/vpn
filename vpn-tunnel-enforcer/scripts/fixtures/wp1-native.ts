@@ -59,10 +59,12 @@ app.whenReady().then(async () => {
   assert.equal(violations.inline, false); assert.equal(violations.evaluated, false)
   for (const directive of ['script-src-elem', 'script-src', 'style-src-elem', 'img-src']) assert.ok(violations.reports.includes(directive), directive)
   checks.push('AT-01-006 actual production meta CSP blocks inline/eval/remote script/style/image; inline style is the documented exception')
+  const success = await w.webContents.executeJavaScript(`window.electronAPI.getTunStatus()`)
+  assert.deepEqual(success, { running: false })
   const bad = await w.webContents.executeJavaScript(`window.electronAPI.saveSettings({ bad: NaN }).then(() => 'accepted', e => e.message)`)
-  assert.match(bad, /Invalid IPC payload/); assert.equal(effects, 0)
+  assert.equal(bad, 'Некорректные параметры операции'); assert.equal(effects, 0)
   const foreign = window(); await foreign.loadURL(file)
-  assert.match(await foreign.webContents.executeJavaScript(`window.electronAPI.saveSettings({}).then(() => 'accepted', e => e.message)`), /unregistered/)
+  assert.equal(await foreign.webContents.executeJavaScript(`window.electronAPI.saveSettings({}).then(() => 'accepted', e => e.message)`), 'Недостаточно прав для операции')
   checks.push('AT-01-003 native unknown WebContents has zero handler effects')
 
   // Deliberately expose ipcRenderer in subframes only in this adversarial
@@ -73,7 +75,7 @@ app.whenReady().then(async () => {
     registerTrustedRenderer(hostile.webContents, hostileFile); await hostile.loadURL(hostileFile)
   await hostile.webContents.executeJavaScript(`const frame=document.createElement('iframe');frame.src='./child.html';document.body.append(frame)`)
   const result = await Promise.race([subframeResult, new Promise<string>(resolve => setTimeout(() => resolve('timeout'), 5000))])
-  assert.match(result, /subframes/); assert.equal(effects, 0)
+  assert.equal(result, 'permission'); assert.equal(effects, 0)
   checks.push('AT-01-003 real hostile subframe rejected before effects')
 
   for (const win of [w, foreign]) {
@@ -81,6 +83,10 @@ app.whenReady().then(async () => {
     assert.equal(prefs.sandbox, true); assert.equal(prefs.contextIsolation, true); assert.equal(prefs.nodeIntegration, false)
   }
   checks.push('AT-01-007 native production preferences; dev parity covered by test:electron')
+  if (process.env.VPNTE_WP1_IPC_ONLY === '1') {
+    console.log('WP1_NATIVE_PASS', JSON.stringify({ electron: process.versions.electron, scope: 'IPC/CSP local subsets only', checks, skipped }))
+    return 0
+  }
   const weak = join(work, 'weak-runtime'); mkdirSync(weak)
   const acl = await verifyDirectoryHardened(weak)
   const nativeOwner = ps(`(Get-Acl -LiteralPath '${weak.replace(/'/g, "''")}').GetOwner([System.Security.Principal.SecurityIdentifier]).Value`).trim()

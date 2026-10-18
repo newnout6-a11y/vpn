@@ -1,7 +1,5 @@
-export class IpcValidationError extends Error {
-  readonly code = 'IPC_VALIDATION_ERROR'
-  constructor(message: string) { super(message); this.name = 'IpcValidationError' }
-}
+import { IpcValidationError } from '../shared/ipc-result'
+export { IpcValidationError } from '../shared/ipc-result'
 
 export function requireString(value: unknown, field: string, options: { allowEmpty?: boolean; maxLength?: number } = {}): string {
   if (typeof value !== 'string') throw new IpcValidationError(`Invalid IPC payload: ${field} must be a string`)

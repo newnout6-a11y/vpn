@@ -71,7 +71,7 @@ app.whenReady().then(async () => {
   const badPayload = await trusted.webContents.executeJavaScript(`
     window.electronAPI.saveSettings({ value: NaN }).then(() => 'accepted', e => e.message)
   `)
-  assert.match(badPayload, /Invalid IPC payload/)
+  assert.equal(badPayload, 'Некорректные параметры операции')
   assert.equal(settingsCalls, 0)
   checks.push('invalid IPC rejected before handler')
 
@@ -80,13 +80,13 @@ app.whenReady().then(async () => {
   const foreignResult = await foreign.webContents.executeJavaScript(`
     window.electronAPI.getTunStatus().then(() => 'accepted', e => e.message)
   `)
-  assert.match(foreignResult, /unregistered renderer/)
+  assert.equal(foreignResult, 'Недостаточно прав для операции')
   checks.push('unregistered WebContents rejected')
   await trusted.loadFile(join(work, 'other.html'))
   const navigatedResult = await trusted.webContents.executeJavaScript(`
     window.electronAPI.getTunStatus().then(() => 'accepted', e => e.message)
   `)
-  assert.match(navigatedResult, /untrusted renderer origin/)
+  assert.equal(navigatedResult, 'Недостаточно прав для операции')
   checks.push('navigated file origin rejected')
 
   server.listen(0, '127.0.0.1')

@@ -20,9 +20,9 @@ const stdout = await runWithCleanup(async () => {
   writeFileSync(join(work, 'hostile.html'), `<!doctype html>${meta.replace('frame-src https://www.openstreetmap.org', "frame-src 'self'")}<title>Hostile IPC fixture</title>`)
   writeFileSync(join(work, 'child.html'), '<!doctype html><title>Hostile subframe</title>')
   writeFileSync(join(work, 'eval.js'), `eval('window.EVAL_RAN=true')`)
-  writeFileSync(join(work, 'hostile-preload.cjs'), `const { ipcRenderer } = require('electron'); if (!process.isMainFrame) ipcRenderer.invoke('save-settings', {}).then(() => 'accepted', error => error.message).then(result => ipcRenderer.send('wp1:subframe-result', result));`)
+  writeFileSync(join(work, 'hostile-preload.cjs'), `const { ipcRenderer } = require('electron'); if (!process.isMainFrame) ipcRenderer.invoke('save-settings', {}).then(response => response.ok === false ? response.error.category : 'accepted', () => 'transport-error').then(result => ipcRenderer.send('wp1:subframe-result', result));`)
   await build({ entryPoints: [join(root, 'scripts/fixtures/wp1-native.ts')], outfile: join(work, 'main.cjs'),
-    bundle: true, platform: 'node', format: 'cjs', external: ['electron'], plugins: [{
+    bundle: true, platform: 'node', format: 'cjs', external: ['electron', 'koffi'], plugins: [{
       name: 'isolated-diagnostics-boundaries', setup(build) {
         // This host is not elevated. Use declared L2 system boundaries for the
         // ZIP pipeline; retain real redaction, filesystem and Compress-Archive.
@@ -41,7 +41,8 @@ const stdout = await runWithCleanup(async () => {
       }
     }] })
   const env = { ...process.env, VPNTE_WP1_WORK: work, VPNTE_WP1_PRELOAD: join(root, 'out/preload/index.js'),
-    VPNTE_WP1_CLIPBOARD: process.argv.includes('--clipboard') ? '1' : '0' }
+    VPNTE_WP1_CLIPBOARD: process.argv.includes('--clipboard') ? '1' : '0',
+    VPNTE_WP1_IPC_ONLY: process.argv.includes('--ipc-only') ? '1' : '0' }
   delete env.NODE_ENV; delete env.ELECTRON_RUN_AS_NODE
   const result = spawnSync(require('electron'), [join(work, 'main.cjs')], { cwd: root, env,
     encoding: 'utf8', windowsHide: true, timeout: 180_000, maxBuffer: 4 * 1024 * 1024 })
