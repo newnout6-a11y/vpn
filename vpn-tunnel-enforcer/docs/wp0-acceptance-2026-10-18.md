@@ -611,3 +611,20 @@ migrations, backup/checksum/dry-run/rollback для всех persisted JSON и �
 cross-version upgrade/downgrade остаются открыты. Межпроцессный lock этим адаптером
 не вводится: гонка внешней записи между проверкой и atomic rename отдельно не
 доказана. Точные команды и фактические результаты — progress.md.
+
+### Qodo #59 — понятный отказ до app.ready
+
+Qodo run 1540747 completed на 1d9f844: constructor settings выполняется во время
+static import, раньше main startup/crash boundary. Замечание подтверждено:
+StoreSchemaError теперь до app.ready показывает нативное сообщение с причиной
+отказа и рекомендацией, пишет только стабильный code в stderr и завершает
+процесс с exit 1. app.log этим ранним путём не заявляется. Main network teardown
+не запускается; runtime errors после ready остаются у существующей boundary.
+
+Unit fixtures проверяют три кода, отсутствие raw path/JSON/secret в UI/stderr
+и exit даже при отказе native dialog. Отдельный тест запускает настоящий pinned
+Electron с production Store adapter и isolated userData: до ready сообщение
+предшествует реальному exit 1, после ready typed error попадает в caller catch
+без раннего dialog/exit. SHA-256 future-version файла неизменен в обоих случаях.
+Перехвачен только native dialog, чтобы fixture не показывала popup на рабочем
+столе. Это адресный startup subset, не installed upgrade/downgrade acceptance.

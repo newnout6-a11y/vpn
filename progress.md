@@ -3178,3 +3178,30 @@ CI/review нового SHA проверяются отдельно после pu
   (.tmp/wp0-store-schema-electron.log); `node scripts/test-wp1-native.mjs --ipc-only`
   — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-store-schema-csp.log). Это не полный
   installed upgrade/downgrade и не L3. CI/Qodo проверяются после публикации.
+
+### Qodo #59 — отказ несовместимого store при static import
+
+- CI run 39154442970 на 1d9f844 — success. Qodo run 1540747 completed на том же
+  SHA: finding e819a34b-d5ef-4ca7-9f80-e11b3a47bdc4, «Users get no storage refusal
+  message». Подтверждено: constructor исполняется до установки main startup/crash
+  boundary. Добавлен ранний native error box только для StoreSchemaError до ready,
+  sanitized code в stderr и app.exit(1) без main network teardown. Запись app.log
+  не заявляется. После ready ошибка остаётся у существующей IPC/startup boundary.
+- Unit tests проверяют все три кода, отсутствие недоверенных message/path/secret
+  и exit при отказе dialog. Native test использует настоящий pinned Electron,
+  production Store adapter, real electron-store/Conf и isolated userData;
+  перехватывается только popup. До ready — message перед настоящим exit 1;
+  после ready — typed error до caller catch, без early dialog. Future file hash
+  неизменен. Созданные fixture directories удаляются самим тестом.
+- `npm.cmd test -- src/main/storeSchemaStorage.test.ts src/main/storeSchemaStartup.test.ts src/main/storeSchemaElectron.test.ts src/main/storeSchemaInventory.test.ts`
+  — 52 passed / 4 files, 1.97 s, exit 0 (.tmp/wp0-store-schema-startup-focused.log).
+  `npm.cmd run typecheck` — exit 0, 158 channels / 0 public any
+  (.tmp/wp0-store-schema-startup-typecheck.log). Traceability checker — exit 0,
+  AC 927/927, F 210/210 (трассировка, не исполнение AT).
+- Финальный `npm.cmd test` — **4075 passed / 5 skipped / 0 failed**, 257 files
+  passed / 2 skipped, 213.13 s, exit 0 (.tmp/wp0-store-schema-startup-full.log).
+  После него `npm.cmd run build` — exit 0 (.tmp/wp0-store-schema-startup-build.log);
+  `node scripts/test-electron-runtime.mjs` — ELECTRON_SMOKE_PASS, exit 0
+  (.tmp/wp0-store-schema-startup-electron.log); `node scripts/test-wp1-native.mjs --ipc-only`
+  — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-store-schema-startup-csp.log). `git diff --check`
+  — exit 0. Это не installed upgrade/downgrade и не полная приёмка AT-00-006.
