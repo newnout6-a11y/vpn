@@ -145,6 +145,31 @@ beforeEach(() => {
 })
 afterEach(() => { Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true }) })
 describe('firewall transaction fault injection (AT-03-003/004/007; F-030, F-186)', () => {
+  it.each(['content', 'trust'] as const)('deduplicates passive %s rejection logs until evidence changes (AT-00-005/AT-03-012)', async kind => {
+    await getFirewallKillSwitchStatus()
+    state.scripts = []; vi.mocked(logEvent).mockClear()
+    const failure = (changed = false) => kind === 'content'
+      ? new RecoveryManifestReadError('invalid-content', 'corrupt JSON', (changed ? 'b' : 'a').repeat(64))
+      : new Error(changed ? 'untrusted file owner' : 'untrusted ACL')
+    state.readError = failure()
+    const rejections = () => vi.mocked(logEvent).mock.calls.filter(call => call[2] === 'CRITICAL_SECURITY_EVENT: recovery manifest rejected')
+    for (let i = 0; i < 3; i++) expect(await getFirewallKillSwitchStatus()).toMatchObject({ state: 'unknown', reason: 'untrusted-manifest' })
+    expect(rejections()).toHaveLength(1)
+    state.readError = failure(true)
+    expect(await getFirewallKillSwitchStatus()).toMatchObject({ state: 'unknown' })
+    expect(rejections()).toHaveLength(2)
+    // Explicit operations must still report a rejected read, even after passive polls.
+    await expect(isKillSwitchActive()).rejects.toThrow()
+    expect(rejections()).toHaveLength(3)
+    expect(state.scripts).toEqual([])
+    expect(state.quarantines).toEqual([])
+    expect(state.writes).toEqual([])
+    state.readError = null
+    await getFirewallKillSwitchStatus()
+    state.readError = failure(true)
+    expect(await getFirewallKillSwitchStatus()).toMatchObject({ state: 'unknown' })
+    expect(rejections()).toHaveLength(4)
+  })
   it('warns about partial strict recovery without removing protection (AT-03-003c)', async () => {
     await enableKillSwitch(options)
     state.manifest.strictMode = true

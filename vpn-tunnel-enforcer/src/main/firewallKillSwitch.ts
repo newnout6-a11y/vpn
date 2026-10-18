@@ -119,10 +119,21 @@ export function validateFirewallManifest(value: unknown, rejected?: string[]): F
 }
 export function getKillSwitchManifestPath(): string { return recoveryManifestPath('firewall.json') }
 function backupDir(): string { return getRecoveryManifestDir() }
-async function readManifest(rejected?: string[]): Promise<FirewallManifest | null> {
-  try { return await readRecoveryManifest('firewall.json', value => validateFirewallManifest(value, rejected)) }
+let passiveManifestRejection: string | undefined
+async function readManifest(rejected?: string[], passive = false): Promise<FirewallManifest | null> {
+  try {
+    const manifest = await readRecoveryManifest('firewall.json', value => validateFirewallManifest(value, rejected))
+    passiveManifestRejection = undefined
+    return manifest
+  }
   catch (error) {
-    logEvent('error', 'firewall-killswitch', 'CRITICAL_SECURITY_EVENT: recovery manifest rejected', { error: String(error) })
+    // Polling preserves unknown without flooding the audit log; new evidence
+    // and explicit operations must still produce their own rejection event.
+    const fingerprint = JSON.stringify([String(error), error instanceof RecoveryManifestReadError ? [error.reason, error.contentHash] : null])
+    if (!passive || fingerprint !== passiveManifestRejection) {
+      logEvent('error', 'firewall-killswitch', 'CRITICAL_SECURITY_EVENT: recovery manifest rejected', { error: String(error) })
+    }
+    if (passive) passiveManifestRejection = fingerprint
     throw error
   }
 }
@@ -359,7 +370,7 @@ export function getFirewallKillSwitchStatus(): Promise<FirewallKillSwitchStatus>
     const unknown = (reason: FirewallKillSwitchStatus['reason']): FirewallKillSwitchStatus => ({ state: 'unknown', cleanupRequired: true, reason })
     if (process.platform !== 'win32' || !isElevatedPsHelperRunning()) return unknown('unavailable')
     let manifest: FirewallManifest | null
-    try { manifest = await readManifest() }
+    try { manifest = await readManifest(undefined, true) }
     catch { return unknown('untrusted-manifest') }
     // Bypass ps(): passive reads must never fall back to UAC or restart a helper.
     const run = async (script: string, policy: 'firewall-killswitch' | 'wfp-ipv6') => {
