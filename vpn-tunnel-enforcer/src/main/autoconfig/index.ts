@@ -74,6 +74,15 @@ export const autoconfig = {
     return targets[targetId].isApplied()
   },
 
+  /** Lifecycle cleanup must distinguish an absent target from failed inspection
+   * or a rollback that left its durable recovery evidence pending. */
+  async rollbackApplied(targetId: string): Promise<boolean> {
+    if (!await this.isApplied(targetId)) return false
+    const result = await this.rollback([targetId])
+    if (result[targetId] !== true) throw new Error('Autoconfig rollback unconfirmed')
+    return true
+  },
+
   async getStatus(): Promise<AutoconfigTarget[]> {
     const result: AutoconfigTarget[] = []
     for (const [id, target] of Object.entries(targets)) {

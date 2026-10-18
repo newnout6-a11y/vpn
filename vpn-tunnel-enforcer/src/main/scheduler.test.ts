@@ -5,6 +5,8 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest'
 import { isScheduleActive, computeNextEvent, parseTimeToMinutes, schedulerService } from './scheduler'
 import type { ScheduleEntry } from '../shared/ipc-types'
+import { ConnectionLifecycle } from './connectionLifecycle'
+import { runScheduledConnection } from './scheduledConnection'
 
 vi.mock('electron', () => ({ ipcMain: { handle: vi.fn() } }))
 vi.mock('electron-store', () => ({
@@ -14,6 +16,89 @@ vi.mock('electron-store', () => ({
     set(_key: string, schedules: ScheduleEntry[]) { this.schedules = schedules }
   }
 }))
+
+describe('unavailable scheduled profiles — AT-00-007 / AT-10-006', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(2024, 0, 10, 9, 30))
+    schedulerService.stop()
+    for (const schedule of schedulerService.getSchedules()) schedulerService.deleteSchedule(schedule.id)
+    schedulerService.createSchedule(makeSchedule({ profileId: 'missing', mode: 'direct' }))
+    schedulerService.createSchedule(makeSchedule({ profileId: 'available', mode: 'direct' }))
+  })
+  afterEach(() => { schedulerService.stop(); vi.useRealTimers() })
+
+  it.each(['restart', 'timer'] as const)('tries the next active profile at %s through the real admission lane', async trigger => {
+    if (trigger === 'timer') vi.setSystemTime(new Date(2024, 0, 10, 8, 59))
+    const lane = new ConnectionLifecycle(vi.fn()), selected: string[] = [], start = vi.fn(async () => ({ success: true }))
+    schedulerService.init({
+      onDisconnect: vi.fn(),
+      onConnect: async schedule => {
+        const result = await runScheduledConnection(lane, schedule, {
+          resolveProxy: vi.fn(), selectProfile: id => { selected.push(id); return id === 'available' },
+          startDirect: start, startProxy: start
+        })
+        if ('code' in result && result.code === 'SCHEDULE_PROFILE_UNAVAILABLE') return 'profile-unavailable' as const
+      }
+    })
+    await vi.advanceTimersByTimeAsync(trigger === 'timer' ? 60_000 : 0)
+    expect(selected).toEqual(['missing', 'available'])
+    expect(start).toHaveBeenCalledOnce()
+  })
+
+  it('tries every unavailable profile once and then stops', async () => {
+    const onConnect = vi.fn(async () => 'profile-unavailable' as const)
+    schedulerService.init({ onConnect, onDisconnect: vi.fn() })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(onConnect).toHaveBeenCalledTimes(2)
+  })
+
+  it.each(['void', 'throw'])('does not fall back after callback %s', async outcome => {
+    const onConnect = vi.fn(async () => { if (outcome === 'throw') throw new Error('failed') })
+    schedulerService.init({ onConnect, onDisconnect: vi.fn() })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(onConnect).toHaveBeenCalledOnce()
+  })
+
+  it.each(['cancelled', 'conflict', 'network-error', 'success'] as const)('does not try another profile after real lane %s', async outcome => {
+    let release!: () => void
+    const gate = new Promise<void>(done => { release = done })
+    const lane = new ConnectionLifecycle(vi.fn())
+    const manual = outcome === 'conflict'
+      ? lane.start(async owner => { await owner.wait(gate); return { success: true } }) : null
+    const selected = vi.fn(() => true), start = vi.fn(async owner => {
+      if (outcome === 'cancelled') await owner.wait(gate)
+      return { success: outcome !== 'network-error', error: outcome === 'network-error' ? 'unreachable' : undefined }
+    })
+    const onConnect = vi.fn(async (schedule: ScheduleEntry) => {
+      const result = await runScheduledConnection(lane, schedule, {
+        resolveProxy: vi.fn(), selectProfile: selected, startDirect: start, startProxy: start
+      })
+      if ('code' in result && result.code === 'SCHEDULE_PROFILE_UNAVAILABLE') return 'profile-unavailable' as const
+    })
+    schedulerService.init({ onConnect, onDisconnect: vi.fn() })
+    const stopped = outcome === 'cancelled' ? lane.stop(async () => ({ success: true })) : null
+    release()
+    await Promise.all([manual, stopped])
+    await vi.advanceTimersByTimeAsync(0)
+    expect(onConnect).toHaveBeenCalledOnce()
+    expect(selected).toHaveBeenCalledTimes(outcome === 'conflict' ? 0 : 1)
+  })
+
+  it.each(['stop', 'reinit', 'edit', 'expire', 'manual'] as const)('fences a pending fallback after %s', async action => {
+    let release!: (result: 'profile-unavailable') => void
+    const onConnect = vi.fn(() => new Promise<'profile-unavailable'>(done => { release = done }))
+    schedulerService.init({ onConnect, onDisconnect: vi.fn() })
+    if (action === 'stop') schedulerService.stop()
+    if (action === 'reinit') schedulerService.init({ onConnect: vi.fn(), onDisconnect: vi.fn() })
+    if (action === 'edit') schedulerService.updateSchedule(schedulerService.getSchedules()[1].id, { enabled: false })
+    if (action === 'expire') vi.setSystemTime(new Date(2024, 0, 10, 17))
+    if (action === 'manual') schedulerService.cancelPendingConnect()
+    release('profile-unavailable')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(onConnect).toHaveBeenCalledOnce()
+  })
+})
 
 // ─── Helper ──────────────────────────────────────────────────────────────────
 

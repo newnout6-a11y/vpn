@@ -137,12 +137,13 @@ function mainHarness(name: 'performShutdownCleanup' | 'stopProtection', session:
     stopTrafficForensicsSession: vi.fn(async (): Promise<any> => ({ running: false, cleanupPending: false })),
     ipMonitor: { clearVpnIp: noop() }, trafficMonitor: { stop: noop(), getCurrentStats: vi.fn(() => ({ downloadBytes: 123 })) },
     session, sessionEgressEvidence: () => ({ egressIp: '203.0.113.1' }), makeOutcome: (kind: string, evidence: object) => ({ kind, evidence }), writeSessionEntry: noop(),
-    getLocationPrivacyStatus: vi.fn(async () => ({ applied: false })), rollbackLocationPrivacy: done(),
+    getLocationPrivacyStatus: vi.fn(async () => ({ applied: false })), rollbackLocationPrivacy: vi.fn(async () => ({ applied: false })),
     settingsStore: { save: noop() }, refreshTrayState: noop(), captureSnapshot: done()
   }
   const run = compile<((reason?: string) => Promise<any>) & { state(): { session: object | null; stopping: boolean } }>(`
 let shutdownInProgress=false,currentSession=session,stopInProgress=false,adaptiveVerificationGeneration=0,activeAdaptiveContext=null;
 ${body('index.ts', 'closeSession')}
+${body('index.ts', 'stopProtectionEffects')}
 ${body('index.ts', name)}
 return Object.assign(${name}, {state:()=>({session:currentSession,stopping:stopInProgress})});
 `, os)
@@ -243,6 +244,30 @@ describe('lifecycle cleanup evidence and retries (AT-02-005 / AT-03-007)', () =>
     expect(await h.run()).toMatchObject({ success: true })
     expect(h.writeSessionEntry).toHaveBeenCalledOnce()
     expect(h.run.state()).toEqual({ session: null, stopping: false })
+  })
+  it('completes stop cleanup and closes the stopped session when env recovery fails, without admitting replacement (AT-00-007)', async () => {
+    const h = mainHarness('stopProtection', { leakDetected: false })
+    h.rollbackSoftAutoconfigIfApplied.mockRejectedValueOnce(new Error('unconfirmed env'))
+    h.tunController.stop.mockResolvedValueOnce({ success: false, runtimeStopped: true, error: 'native cleanup incomplete' })
+    h.getLocationPrivacyStatus.mockResolvedValueOnce({ applied: true })
+    h.rollbackLocationPrivacy.mockResolvedValueOnce({ applied: false })
+    let release!: () => void
+    const gate = new Promise<void>(done => { release = done })
+    const lane = new ConnectionLifecycle(vi.fn(), () => h.run()), replacement = vi.fn(async () => ({ success: true }))
+    const old = lane.start(async owner => { await owner.wait(gate); return { success: true } }, { owner: 'schedule' })
+    const next = lane.start(replacement)
+    release()
+    expect(await old).toMatchObject({ success: false, category: 'cancelled' })
+    expect(await next).toMatchObject({ success: false, category: 'conflict' })
+    expect(replacement).not.toHaveBeenCalled()
+    expect(h.run.state()).toEqual({ session: null, stopping: false })
+    expect(h.writeSessionEntry).toHaveBeenCalledOnce()
+    for (const step of [h.stopPeriodicSnapshots, h.stopPeriodicLeakTest, h.stopNetworkChangeWatcher,
+      h.externalProxy.stopAll, h.stopTrafficForensicsSession, h.ipMonitor.clearVpnIp, h.trafficMonitor.stop,
+      h.repairOrphanedPhysicalAdapterDns, h.getLocationPrivacyStatus, h.rollbackLocationPrivacy, h.refreshTrayState]) {
+      expect(step).toHaveBeenCalledOnce()
+    }
+    expect(lane.busy).toBe(false)
   })
   it.each(['stopProtection', 'performShutdownCleanup'] as const)('waits to close history and clean up in %s, preserving pre-stop counters (AT-02-009)', async name => {
     const session = { leakDetected: false }, h = mainHarness(name, session)
@@ -991,6 +1016,63 @@ return onExit;`, deps)
   })
 })
 
+function softStartupHarness() {
+  let applied = false
+  const os = {
+    ...mainHarness('stopProtection'),
+    settingsStore: { get: () => ({ proxyType: 'http' }) },
+    tunController: { getStatus: () => ({ running: false }), stop: vi.fn(async () => ({ success: true })) },
+    autoconfig: {
+      apply: vi.fn(async () => { applied = true; return { env: true } }),
+      rollbackApplied: vi.fn(async () => { const previous = applied; applied = false; return previous })
+    },
+    recordStartFailure: noop(), sendToMainWindow: noop()
+  }
+  // Load the actual cleanup helper as well, rather than the generic stop mock.
+  const { rollbackSoftAutoconfigIfApplied: _stub, ...dependencies } = os
+  const control = compile<{ start: () => Promise<any>; stop: () => Promise<any> }>(`
+let adaptiveVerificationGeneration=0,activeAdaptiveContext=null,currentSession=null,stopInProgress=false;
+${body('index.ts', 'rollbackSoftAutoconfigIfApplied')}
+${body('index.ts', 'startSoftProtectionEffects')}
+${body('index.ts', 'startSoftProtection')}
+${body('index.ts', 'stopProtectionEffects')}
+${body('index.ts', 'stopProtection')}
+return {start:()=>startSoftProtection('127.0.0.1:8080','http'),stop:stopProtection};
+`, dependencies)
+  return { ...dependencies, ...control }
+}
+
+describe('owned Soft startup (AT-00-003/007 subset)', () => {
+  it('waits for cancelled env apply, then rolls it back without publishing protection', async () => {
+    const h = softStartupHarness()
+    let release!: (result: { env: boolean }) => void
+    h.autoconfig.apply.mockImplementationOnce(() => new Promise(done => { release = done }))
+    const started = h.start(), stopped = h.stop()
+    expect(h.autoconfig.rollbackApplied).not.toHaveBeenCalled()
+    release({ env: true })
+    expect(await started).toMatchObject({ success: false, category: 'cancelled' })
+    expect(await stopped).toMatchObject({ success: true })
+    expect(h.autoconfig.rollbackApplied).toHaveBeenCalledExactlyOnceWith('env')
+    expect(h.sendToMainWindow).not.toHaveBeenCalledWith('soft-status-changed', true)
+    expect(h.refreshTrayState).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'protected' }))
+  })
+  it('finishes independent cleanup and permits retry after actual main env cleanup rejects', async () => {
+    const h = softStartupHarness()
+    expect(await h.start()).toMatchObject({ success: true })
+    vi.clearAllMocks()
+    h.autoconfig.rollbackApplied.mockRejectedValueOnce(new Error('rollback unconfirmed'))
+    expect(await h.stop()).toMatchObject({ success: false, error: expect.stringContaining('env autoconfig') })
+    expect(h.sendToMainWindow).not.toHaveBeenCalledWith('soft-status-changed', false)
+    for (const step of [h.stopPeriodicSnapshots, h.stopPeriodicLeakTest, h.stopNetworkChangeWatcher,
+      h.stopTrafficForensicsSession, h.externalProxy.stopAll, h.ipMonitor.clearVpnIp, h.trafficMonitor.stop,
+      h.repairOrphanedPhysicalAdapterDns, h.getLocationPrivacyStatus, h.refreshTrayState, h.captureSnapshot]) {
+      expect(step).toHaveBeenCalledOnce()
+    }
+    expect(await h.stop()).toMatchObject({ success: true })
+    expect(h.sendToMainWindow).toHaveBeenCalledWith('soft-status-changed', false)
+  })
+})
+
 function ipStartupHarness(mode: 'direct' | 'proxy') {
   let running = false
   const settings = { autoNetworkBaseline: false, directVpnInput: '' }
@@ -1021,6 +1103,8 @@ function ipStartupHarness(mode: 'direct' | 'proxy') {
 let adaptiveVerificationGeneration=0,activeAdaptiveContext=null,latestPublicIp=null,currentSession=null,stopInProgress=false,shutdownInProgress=false;
 const KILL_SWITCH_RULE_PREFIX='VPNTE-killswitch';
 ${body('index.ts', name)}
+${body('index.ts', `${name}Effects`)}
+${body('index.ts','stopProtectionEffects')}
 ${body('index.ts','stopProtection')}
 ${body('index.ts','performShutdownCleanup')}
 return {start: () => ${name}(${mode === 'proxy' ? "'127.0.0.1:1080','socks5'" : ''}),stop:stopProtection,shutdown:()=>performShutdownCleanup('test'), cancel: () => {adaptiveVerificationGeneration++}};
@@ -1029,6 +1113,13 @@ return {start: () => ${name}(${mode === 'proxy' ? "'127.0.0.1:1080','socks5'" : 
 }
 describe.each(['direct', 'proxy'] as const)('background IP startup: %s (AT-00-003 / AT-02-002)', mode => {
   afterEach(() => { vi.clearAllTimers(); vi.useRealTimers() })
+  it('does not start native effects when pre-start env recovery fails (AT-00-007)', async () => {
+    const h = ipStartupHarness(mode)
+    h.rollbackSoftAutoconfigIfApplied.mockRejectedValueOnce(new Error('env recovery unconfirmed'))
+    await expect(h.start()).rejects.toThrow('env recovery unconfirmed')
+    expect(h.tunController.start).not.toHaveBeenCalled()
+    expect(h.openSession).not.toHaveBeenCalled()
+  })
   it('keeps both start and baseline recovery failures in the IPC result (AT-03-007)', async () => {
     const h = ipStartupHarness(mode)
     h.tunController.start.mockResolvedValueOnce({ success: false, error: 'native launch failed' })
@@ -1072,7 +1163,7 @@ describe.each(['direct', 'proxy'] as const)('background IP startup: %s (AT-00-00
     await Promise.resolve()
     expect(h.tunController.stop).not.toHaveBeenCalled()
     release(phase==='preflight' ? {success:true,tunnels:[],listeners:[]} : phase==='native' ? {success:true} : null)
-    expect(await started).toEqual({success:false,error:'Запуск отменён'})
+    expect(await started).toMatchObject({success:false,error:'Запуск отменён',category:'cancelled',code:'OPERATION_CANCELLED'})
     await stopped
     if (phase==='preflight') expect(h.tunController.start).not.toHaveBeenCalled()
     expect(h.recordStartFailure).not.toHaveBeenCalled()
@@ -1108,7 +1199,7 @@ describe.each(['direct', 'proxy'] as const)('background IP startup: %s (AT-00-00
     expect(h.tunController.stop).not.toHaveBeenCalled()
     expect(h.openSession).not.toHaveBeenCalled()
     release({success:true})
-    expect(await started).toEqual({success:false,error:'Запуск отменён'})
+    expect(await started).toMatchObject({success:false,error:'Запуск отменён',category:'cancelled',code:'OPERATION_CANCELLED'})
     expect((await stopped).success).toBe(true)
     expect(h.scheduleAdaptiveVerification).not.toHaveBeenCalled()
     expect(h.openSession).not.toHaveBeenCalled()

@@ -7,6 +7,9 @@
 из ожидания; окончание trial Greptile не блокирует работу. CI и review обязательны.
 18.10 владелец разрешил продолжать WP-0 при открытом PR #54, сохраняя запрет
 его слияния до отдельного решения. Полного Revix для #54 не было из-за квоты.
+Позднее 18.10 владелец разрешил сливать PR после пройденных проверок.
+#54/#55/#56 слиты в main после exact-head CI success и completed Qodo,
+без открытых findings; прежний запрет слияния отменён.
 
 ## Полная область и первоначальная инвентаризация
 
@@ -14,7 +17,7 @@
 | --- | --- | --- |
 | 00-001 | AST-проверка 157 main/preload/shared request channels, общий реестр входов и versioned transport envelope; object contracts проверяют поля/массивы, save-settings покрывает все 39 общих полей AppSettings; TypeScript checker проверяет results всех 157 listeners, public results с `any` больше нет; native contextBridge сохраняет JSON профиля и nullable active result | Завершить проверку текущего PR; отдельная semantic matrix ошибок остаётся в 00-004 |
 | 00-002 | `tunController.ts`, lifecycle fault-injection tests | Единая модель и интегрированный координатор; все туры ≤6, недопустимые события, ресурсные инварианты |
-| 00-003 | Локальная отмена в отдельных подсистемах | Реестр connect/refresh/speed/import/export/rotation; отмена на 10/50/90%, deadline, запрет поздних эффектов |
+| 00-003 | Main connection lane: UUIDv4, owner, deadline запуска, priority admission; ручные Hard/Direct и Soft из tray, scheduled startup вместе с proxy detection; отмена на 10/50/90% управляемого connect fixture | Общий реестр refresh/speed/import/export/rotation; deadline остановки, интеграция всех entrypoints и полная матрица поздних эффектов |
 | 00-004 | Общая классификация transport; 157 каналов × 7 категорий через guard; native contextBridge сохраняет code/category/correlation в en/ru; typed local validation; 4 настоящих config handlers × 7 категорий, canonical domain failures | Миграция legacy domain-result `{success:false,error}` и semantic matrix настоящих feature handlers; transport fixtures не доказывают её |
 | 00-005 | `appLogger.ts`, `connectionHistory.ts`; новый regression passive rejection dedup | Сквозной correlation id, монотонный порядок, source/owner/route/confidence истории и redaction всех полей |
 | 00-006 | Локальные миграции, в том числе `readSettingsWithMigration` | Централизованный упорядоченный реестр, fixtures всех исторических версий, future-version hash invariance |
@@ -25,6 +28,41 @@
 
 Это перечень обнаруженного, а не PASS десяти AT. Ни один новый
 неиспользуемый модуль сам по себе не закрывает критерий интеграции.
+
+## Main connection lane — приоритеты, deadline и позднее расписание
+
+`ConnectionLifecycle` расширяет существующее владение нативными эффектами:
+операция запуска имеет UUIDv4, owner, timestamp, deadline (по умолчанию 120 s)
+и конечный status. Приоритеты из тома 3 §1.2 проверены попарно. Более высокий
+приоритет прерывает фоновый startup, дожидается фактических native effects
+и штатной очистки, затем допускает новый startup. Отказ очистки запрещает
+автоматический replacement. Конфликт, отмена и deadline имеют стабильные
+OPERATION_CONFLICT / OPERATION_CANCELLED / OPERATION_TIMEOUT и категории.
+
+Ручные Hard/Direct и Soft из tray используют этот lane. Scheduled startup
+получает owner=schedule **до** поиска прокси и выбора профиля; позднее завершение
+детектора после ручной остановки не запускает VPN и не меняет выбранный профиль.
+Удалённый scheduled profile теперь даёт отказ вместо подключения произвольного
+текущего профиля. Уведомления об успешном scheduled connect/stop выдаются после
+успеха операции. Эффекты старта/остановки вынесены из admission wrappers без
+переписывания нативного rollback pipeline.
+
+Перед сменой режима и после stop env проверяется через строгий `isApplied`,
+а не UI `getStatus`, который подавляет ошибки чтения. Если rollback возвращает
+false, следующий startup и уведомление об успешной очистке запрещены. Проверка
+использует настоящий autoconfig dispatcher с подменёнными OS targets.
+
+Deadline и manual cancellation немедленно устанавливают конечный status и abort
+signal, но caller Promise и busy lease намеренно сохраняются до завершения
+неотменяемого native I/O. Это **не** доказательство предела ≤1 s для полного
+возврата каждой операции. Deadline запуска инициирует штатный stop после drain.
+История connections пока не коррелирована со всеми этими operationId; observer
+пишет только ограниченные метаданные, не профиль/адрес/AbortSignal.
+
+Остаток: единая FSM, protected restarts/rotation/AutoPilot/adaptive, прямые
+autoconfig IPC entrypoints, deadline остановки, все прочие долгие операции,
+сквозная корреляция и полные model/race/UI AT. AT-00-002/003/005/007/008 целиком
+не объявляются PASS. Команды и результаты этого участка записываются в progress.md.
 
 ## Первый адресный regression
 
@@ -424,3 +462,21 @@ File-size, non-regular и changed-during-read отказы теперь имею
 проверяют отсутствие capability и listener после отказа. Итоги Qodo читаются
 через get-pr-review-findings, включая status и commit_sha, вместо интерпретации
 пустого GitHub summary. Статусы findings вручную не менялись.
+
+### Qodo #57 — ownership: очистка, расписания и корреляция
+
+Операции сохраняют нормативный UUIDv4 и получают производный безопасный
+correlationId для логов: реальный файловый logger/redactor сохраняет корреляцию
+начала/завершения и маскирует секреты. Полная корреляция IPC/history ещё впереди.
+
+Stop после доказанного выхода runtime завершает независимую очистку даже при
+ошибке env recovery, возвращает failure и запрещает replacement; retry остаётся
+возможен. Приоритетный startup по-прежнему требует подтверждённой очистки.
+Повторные stops присоединяются к одной очистке независимо от приоритета.
+
+Scheduler продолжает перебор только при явной недоступности профиля и только
+в активном окне. Ручное действие, stop/reinit, изменение/импорт расписания
+инвалидируют pending продолжение. Проверки исполняют production helper/lane,
+реальные main effect bodies с fake OS, restart и timer пути. Это подмножества
+AT-00-003/005/007 и AT-10-006, а не принятие полной FSM/registry/UI matrix.
+Четыре исходные находки Qodo воспроизведены регрессиями; результаты — progress.md.

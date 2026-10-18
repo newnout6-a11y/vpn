@@ -76,7 +76,7 @@ describe('main connection lifecycle ownership',()=>{
     await Promise.resolve()
     expect(cleanup).not.toHaveBeenCalled()
     baseline.resolve()
-    expect(await started).toEqual({success:false,error:'Запуск отменён'})
+    expect(await started).toMatchObject({success:false,error:'Запуск отменён',category:'cancelled',code:'OPERATION_CANCELLED'})
     expect(await stopped).toEqual({success:true})
     expect(publish).not.toHaveBeenCalled()
   })

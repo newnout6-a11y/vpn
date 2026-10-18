@@ -27,6 +27,7 @@ vi.mock('./env', () => ({ env: targets.env }))
 vi.mock('./git', () => ({ git: targets.git }))
 
 import { autoconfig } from './index'
+import { ConnectionLifecycle } from '../connectionLifecycle'
 
 describe('autoconfig strict status', () => {
   beforeEach(() => {
@@ -91,5 +92,33 @@ describe('autoconfig strict status', () => {
     })
     expect(status.find(({ id }) => id === 'git')?.applied).toBe(true)
     for (const target of Object.values(targets)) expect(target.isApplied).toHaveBeenCalledExactlyOnceWith()
+  })
+
+  it.each(['status', 'rollback'] as const)('blocks replacement if env %s cannot be confirmed (AT-00-007)', async failure => {
+    if (failure === 'status') targets.env.isApplied.mockRejectedValue(new Error('status unavailable'))
+    else {
+      targets.env.isApplied.mockResolvedValue(true)
+      targets.env.rollback.mockResolvedValue(false)
+    }
+    let settle!: () => void
+    const native = new Promise<void>(done => { settle = done })
+    const lane = new ConnectionLifecycle(vi.fn(), async () => { await autoconfig.rollbackApplied('env'); return { success: true } })
+    const scheduled = lane.start(async owner => { await owner.wait(native); return { success: true } }, { owner: 'schedule' })
+    const replacement = vi.fn()
+    const manual = lane.start(replacement).catch(error => error)
+    settle()
+    await scheduled
+    expect(await manual).toBeInstanceOf(Error)
+    expect(replacement).not.toHaveBeenCalled()
+  })
+
+  it('only rolls back an applied env target and requires its successful receipt (AT-00-003)', async () => {
+    expect(await autoconfig.rollbackApplied('env')).toBe(false)
+    expect(targets.env.rollback).not.toHaveBeenCalled()
+    targets.env.isApplied.mockResolvedValue(true)
+    targets.env.rollback.mockResolvedValue(true)
+    expect(await autoconfig.rollbackApplied('env')).toBe(true)
+    expect(targets.env.rollback).toHaveBeenCalledOnce()
+    expect(targets.git.rollback).not.toHaveBeenCalled()
   })
 })

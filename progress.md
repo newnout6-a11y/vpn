@@ -2802,3 +2802,141 @@ CI/review нового SHA проверяются отдельно после pu
   Это локальные IPC/CSP subsets, а не полный WP-1 L3. Typecheck и build также
   выполнены после изменения fixture. Повтор полного unit suite не нужен:
   fixture запускается отдельно, runtime sources после 3915-pass suite не менялись.
+
+## 18.10.2026 — WP-0: владение main startup, приоритеты и поздние расписания
+
+- Перед следующим участком Qodo API повторно подтвердил exact-head completed:
+  #54 9ce9298, run 1539400, 0 findings; #55 580d188, run 1539479,
+  единственная finding implemented; #56 6b3c809, run 1539641, все 6 implemented.
+  REST подтвердил success CI 39126137175 / 39139062588 / 39140898511.
+  Ручных запросов Qodo и изменений finding statuses не было; запрет слияния
+  #54 и зависимых PR сохраняется. Новая ветка codex/wp0-operation-ownership
+  основана на #56.
+- ConnectionLifecycle расширяет production admission lane: UUIDv4, owner,
+  timestamp, deadline запуска 120 s по умолчанию, serializable operation
+  snapshots и ограниченные audit metadata. Приоритеты recovery > manual >
+  schedule > rotation > autopilot > adaptive retry проверены всеми 36 парами.
+  Higher-priority start отменяет background startup, ждёт реального native
+  settlement и штатной очистки, затем запускает replacement; cleanup failure
+  запрещает replacement. Lower-priority stop не отменяет recovery startup.
+- Конфликты, отмена и timeout имеют OPERATION_CONFLICT / OPERATION_CANCELLED /
+  OPERATION_TIMEOUT и категории в shared result types. Manual cancel не
+  превращается позднее в timeout. Signal и terminal metadata меняются сразу;
+  caller Promise/busy lease сохраняются до фактического native drain. Это
+  намеренно не объявляется полной приёмкой ≤1 s AT-00-003.
+- Ручные Hard/Direct, Soft из tray и scheduler используют тот же lane.
+  Scheduled admission предшествует async proxy detection и profile selection:
+  поздний detector после manual stop не меняет профиль и не запускает VPN.
+  Удалённый scheduled profile даёт отказ вместо выбора случайного текущего.
+  Уведомления scheduler выдаются после success. Startup/stop effects извлечены
+  из wrappers с сохранением существующего native cleanup pipeline.
+- Для безопасного replacement исправлено наследованное подавление ошибок env:
+  main использует autoconfig.rollbackApplied со строгим isApplied и проверкой
+  boolean receipt. Ошибка чтения и false rollback не допускают новый startup.
+  Проверяется настоящий autoconfig dispatcher с подменой OS target methods.
+- Новые connection regressions до реализации: `npm.cmd test -- src/main/connectionOperations.test.ts`
+  — 5 failed / 1 passed, Vitest exit 1 (.tmp/wp0-operations-before.log).
+  Env helper regression до реализации: `npm.cmd test -- src/main/autoconfig/index.test.ts`
+  — 1 failed / 12 passed, exit 1 (.tmp/wp0-operations-soft-before.log).
+- `npm.cmd test -- src/main/autoconfig/index.test.ts src/main/connectionOperations.test.ts src/main/connectionLifecycle.test.ts src/main/scheduledConnection.test.ts src/main/scheduler.test.ts src/main/mainIpcRegression.test.ts src/main/traySource.test.ts src/main/profileTransitionWiring.test.ts`
+  — 106 passed / 8 files, 1.03 s, exit 0 (.tmp/wp0-operations-focused.log).
+  Fixtures отмены проходят реальные десять async шагов с gate на 10/50/90%;
+  late publish отсутствует, cleanup ждёт native settlement. Это connect subset,
+  не вся матрица registry/FS/OS AT-00-003.
+- Общая FSM, остальные операции, protected restarts/rotation/AutoPilot/adaptive,
+  прямые autoconfig IPC, deadline stop, сквозная история/correlation, seeded
+  race 200/10 и UI frame matrix остаются открытыми. WP-0 и WP-2 не завершены.
+- Первый полный `npm.cmd test`: 36 failed / 3901 passed / 5 skipped,
+  13 unhandled errors, 217.00 s, exit 1 (.tmp/wp0-operations-full.log).
+  34 отказы lifecycleCleanup были из-за AST harness, загружавшего новые wrappers
+  без выделенных production effect bodies. Добавлена загрузка самих bodies,
+  проверки ресурсов/истории не ослаблены; два сравнения cancellation проверяют
+  также новые category/code. Обновлён старый source assertion scheduler wiring.
+  Отдельный splitTunnelDiscovery timeout 5 s при повторе не воспроизвёлся.
+- `npm.cmd test -- src/main/lifecycleCleanup.test.ts src/main/splitTunnelDiscovery.test.ts`
+  — 158 passed / 2 files, 22.74 s, exit 0 (.tmp/wp0-operations-lifecycle.log).
+  Финальный полный suite запущен отдельно после исправления harness.
+- `npm.cmd run typecheck` — exit 0, 157 channels / 0 public any
+  (.tmp/wp0-operations-typecheck.log); coverage — AC 927/927, F 210/210,
+  exit 0. Это трассировка, не исполнение всех AT. `git diff --check` — exit 0.
+- Второй полный `npm.cmd test`: 3937 passed / 5 skipped / 0 failed,
+  249 файлов passed / 2 skipped, 200.10 s, exit 0
+  (.tmp/wp0-operations-final-full.log). Во время этого прогона дополнена проверка
+  реального результата выбора scheduled profile (selectProfile сам по себе
+  возвращает void при отказе) и добавлены две исполняемые Soft-регрессии main.
+  Поэтому перед коммитом будет отдельный полный прогон замороженного кода.
+- `npm.cmd test -- src/main/scheduledConnection.test.ts src/main/auditFixesRegression.test.ts`
+  — 27 passed / 2 files, 722 ms, exit 0 (.tmp/wp0-operations-scheduler-final.log).
+  `npm.cmd test -- src/main/lifecycleCleanup.test.ts` — 151 passed, 24.33 s,
+  exit 0 (.tmp/wp0-operations-lifecycle-final.log). Новые Soft fixtures исполняют
+  production main wrappers/effects и настоящий helper env rollback с fake OS;
+  отменённый apply не публикует защиту, stop ждёт apply и проверяет rollback.
+- Окончательный `npm.cmd test` на замороженном runtime/test коде:
+  **3939 passed / 5 skipped / 0 failed**, 249 файлов passed / 2 skipped,
+  201.04 s, exit 0 (.tmp/wp0-operations-verified-full.log).
+  Повторный финальный `npm.cmd run typecheck` — exit 0, 157 channels,
+  0 public any (.tmp/wp0-operations-typecheck.log).
+
+### Разрешение владельца: прошедшие проверку PR можно сливать
+
+- Владелец уточнил: «те что прошли проверку можно мержить». Это отменяет
+  прежний запрет слияния #54 и зависимых PR. Перед слиянием повторно прочитаны
+  completed Qodo exact-head states всех трёх PR и success check-runs Windows,
+  Rust и сайта. CodeRabbit/Greptile/Revix не подменяют Qodo approval gate.
+- #54 слит merge commit 064bee91f1d7817fa18cd8af6ab77798a544d90c.
+  #55 переведён на main и слит 6f7e6d4bfcd728b05bac7eb5a187bfcda03304aa.
+  #56 переведён на main и слит 8e4dd209e8a165d014f13e8925ec1ef6e6bd4f54.
+  Использован merge commit для сохранения ancestry зависимых веток;
+  исходные проверенные head SHA не изменялись. REST подтвердил merged=true.
+  Новый WP-0 PR будет направлен в main и также допускает слияние только после
+  CI/review gate. Ручных запросов Qodo для #56+ не отправляется.
+- `npm.cmd run build` — exit 0 (.tmp/wp0-operations-build.log).
+  `node scripts/test-electron-runtime.mjs` — ELECTRON_SMOKE_PASS, exit 0
+  (.tmp/wp0-operations-native.log); `node scripts/test-wp1-native.mjs --ipc-only`
+  — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-operations-csp.log). Эти IPC/CSP subsets
+  не подменяют натурную FSM/ресурсную/сетевую приёмку WP-0/WP-2.
+- `git diff HEAD vpn/main` после fetch пуст: слияние #54–56 сохранило ancestry
+  и не изменило tree относительно исходной базы текущей ветки. Новый PR имеет
+  только изменения текущего участка. Существующие untracked .claude/,
+  .wrangler/, .playwright-cli/ и output/ не изменены и в коммит не включаются.
+
+### PR #57 — первый проход Qodo: четыре подтверждённых замечания
+
+- Исходный head 58af276: CI run 39144654589 completed/success. Qodo run
+  1539935 completed на том же SHA; две action_required и две
+  remediation_recommended находки. До исправления слияние не выполнялось.
+- UUIDv4 operationId сохранён согласно тому 3 §1.2. Добавлен стабильный
+  correlationId `op_<UUID без дефисов>`: начало/завершение различимы после
+  credential redaction. Новый тест использует настоящие appLogger, redactor
+  и файловый JSONL backend; credential UUID и password остаются скрытыми.
+  Полная IPC/history корреляция AT-00-005 остаётся открытой.
+- Ошибка env rollback при stop сохраняет failure result, но не прерывает
+  независимую очистку после доказанного завершения runtime: history, watchers,
+  snapshots, proxies, traffic, DNS repair и location privacy. Retry stop может
+  завершить env recovery; pre-start проверка остаётся строгой. Production-body
+  регрессии подтверждают очистку и запрет автоматического replacement.
+- Scheduler пробует следующее активное расписание только после явного
+  SCHEDULE_PROFILE_UNAVAILABLE. Restart/timer проверены с настоящими helper и
+  admission lane. Cancel/conflict/network failure/success не вызывают fallback.
+  Generation fence отменяет pending продолжение после ручного действия,
+  stop/reinit, редактирования/импорта; время окна перепроверяется.
+- Повторный Stop присоединяется к уже выполняющейся очистке recovery/manual
+  без второго cleanup, в том числе при меньшем приоритете. Приоритет активного
+  recovery startup по-прежнему защищён от менее приоритетного stop.
+- До реализации: `npx.cmd vitest run src/main/connectionOperations.test.ts src/main/lifecycleCleanup.test.ts src/main/connectionOperationLogging.test.ts src/main/scheduler.test.ts src/main/scheduledConnection.test.ts`
+  — 9 failed / 218 passed, 27.04 s, exit 1 (.tmp/wp0-qodo57-before.log).
+- После исправления: `npx.cmd vitest run src/main/connectionOperations.test.ts src/main/lifecycleCleanup.test.ts src/main/connectionOperationLogging.test.ts src/main/scheduler.test.ts src/main/scheduledConnection.test.ts src/main/auditFixesRegression.test.ts`
+  — 250 passed / 6 files, 25.58 s, exit 0 (.tmp/wp0-qodo57-final-focused.log).
+- `npm.cmd run typecheck` — 157 channels / 0 public any, exit 0
+  (.tmp/wp0-qodo57-typecheck.log). `python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py`
+  — AC 927/927, F 210/210, exit 0 (трассировка, не исполнение AT).
+  `git diff --check` — exit 0. Полный suite и runtime smoke записываются ниже.
+- `npm.cmd test` на замороженных runtime/tests — 3959 passed / 5 skipped /
+  0 failed, 250 файлов passed / 2 skipped, 203.85 s, exit 0
+  (.tmp/wp0-qodo57-full.log). Ожидаемый stderr RootErrorBoundary fixture
+  не является отказом suite; unhandled errors отсутствуют.
+- `npm.cmd run build` — exit 0 (.tmp/wp0-qodo57-build.log).
+  `node scripts/test-electron-runtime.mjs` — ELECTRON_SMOKE_PASS, exit 0
+  (.tmp/wp0-qodo57-electron.log); `node scripts/test-wp1-native.mjs --ipc-only`
+  — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-qodo57-csp.log). Native IPC/CSP subsets
+  не заменяют полную FSM, ресурсную и сетевую приёмку WP-0/WP-2.

@@ -14,7 +14,9 @@ import { directoryExists, verifyDirectoryHardened } from './runtimeDirSecurity'
 import { happDetector } from './happDetector'
 import { tunController, getTunRuntimeDir, detectForeignTun, killOwnedTunRuntimeProcesses, isOwnedTunRuntimeRunning, readRecentSingBoxOutboundFault, areTunRoutesActive, getLastSingBoxExit, onProtectedRestart } from './tunController'
 import type { NetworkCleanupReceipt, SingBoxOutboundFault } from './tunController'
-import { ConnectionLifecycle } from './connectionLifecycle'
+import { ConnectionLifecycle, type ConnectionStartupOwner } from './connectionLifecycle'
+import type { ConnectionStartResult, ConnectionStopResult } from '../shared/operation'
+import { runScheduledConnection } from './scheduledConnection'
 import { makeOutcome, outcomeKindToDisconnectReason, isNodeSwitchRestartReason } from './sessionOutcome'
 import type { SessionOutcome, SessionOutcomeEvidence, SessionOutcomeKind } from '../shared/ipc-types'
 import { readRecentXrayOutboundFault, getXrayStatus, stopXray } from './xrayEngine'
@@ -1077,14 +1079,18 @@ async function resolveProxyForTrayStart(): Promise<{ proxyAddr: string; proxyTyp
  * only the env autoconfig target; if a Hard tunnel is currently running, stop
  * it first so the two routing modes cannot overlap.
  */
-async function startSoftProtection(proxyAddr: string, proxyType?: 'socks5' | 'http'): Promise<{ success: boolean; error?: string; warning?: string | null; vpnIp?: string | null }> {
+async function startSoftProtection(proxyAddr: string, proxyType?: 'socks5' | 'http'): Promise<ConnectionStartResult> {
+  return connectionLifecycle.start(owner => startSoftProtectionEffects(owner, proxyAddr, proxyType))
+}
+
+async function startSoftProtectionEffects(owner: ConnectionStartupOwner, proxyAddr: string, proxyType?: 'socks5' | 'http'): Promise<ConnectionStartResult> {
   if (tunController.getStatus().running) {
-    const stopped = await stopProtection()
+    const stopped = await owner.wait(stopProtectionEffects())
     if (!stopped.success) return stopped
   }
 
   const normalizedProxyType = proxyType ?? settingsStore.get().proxyType
-  const results = await autoconfig.apply(['env'], proxyAddr, normalizedProxyType)
+  const results = await owner.wait(autoconfig.apply(['env'], proxyAddr, normalizedProxyType))
   if (!results.env) {
     const error = 'Не удалось применить env autoconfig'
     recordStartFailure({ id: 'local-proxy-soft', name: `Soft proxy ${proxyAddr}`, mode: 'soft' }, error)
@@ -1098,24 +1104,29 @@ async function startSoftProtection(proxyAddr: string, proxyType?: 'socks5' | 'ht
 
 async function rollbackSoftAutoconfigIfApplied(reason: string): Promise<void> {
   try {
-    const status = await autoconfig.getStatus()
-    if (status.some(target => target.id === 'env' && target.applied)) {
-      logEvent('info', 'app', `rolling back env autoconfig before ${reason}`)
-      await autoconfig.rollback(['env'])
+    if (await autoconfig.rollbackApplied('env')) {
+      logEvent('info', 'app', `rolled back env autoconfig before ${reason}`)
       sendToMainWindow('soft-status-changed', false)
     }
   } catch (err) {
     logEvent('warn', 'app', `env autoconfig rollback before ${reason} failed`, err)
+    throw err
   }
 }
 
 const connectionLifecycle = new ConnectionLifecycle(() => {
   adaptiveVerificationGeneration += 1
   tunController.cancelTransition()
+}, () => stopProtectionEffects(), operation => {
+  if (operation.status === 'running' && operation.owner !== 'schedule') schedulerService.cancelPendingConnect()
+  logEvent(operation.status === 'running' ? 'debug' : 'info', 'lifecycle', 'connection operation', operation)
 })
 
-async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http'): Promise<{ success: boolean; error?: string; warning?: string | null; vpnIp?: string | null }> {
-  return connectionLifecycle.start(async owner => {
+async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http'): Promise<ConnectionStartResult> {
+  return connectionLifecycle.start(owner => startProtectionEffects(owner, proxyAddr, proxyType))
+}
+
+async function startProtectionEffects(owner: ConnectionStartupOwner, proxyAddr: string, proxyType?: 'socks5' | 'http'): Promise<ConnectionStartResult> {
   await owner.wait(rollbackSoftAutoconfigIfApplied('hard protection start'))
   suppressLeakSelfTestsFor(20_000, 'local-proxy-start')
   // Snapshot BEFORE we change anything. This is the baseline state that
@@ -1333,11 +1344,13 @@ async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http')
     warning: [baselineWarning, result.warning].filter(Boolean).join(' | ') || null,
     vpnIp: null
   }
-  })
 }
 
-async function startDirectVpnProtection(): Promise<{ success: boolean; error?: string; warning?: string | null; vpnIp?: string | null }> {
-  return connectionLifecycle.start(async owner => {
+async function startDirectVpnProtection(): Promise<ConnectionStartResult> {
+  return connectionLifecycle.start(owner => startDirectVpnProtectionEffects(owner))
+}
+
+async function startDirectVpnProtectionEffects(owner: ConnectionStartupOwner): Promise<ConnectionStartResult> {
   await owner.wait(rollbackSoftAutoconfigIfApplied('direct VPN start'))
   suppressLeakSelfTestsFor(20_000, 'direct-vpn-start')
   captureSnapshot('tun-pre-start').catch(() => undefined)
@@ -1596,13 +1609,19 @@ async function startDirectVpnProtection(): Promise<{ success: boolean; error?: s
     warning: [baselineWarning, result.warning].filter(Boolean).join(' | ') || null,
     vpnIp: null
   }
-  })
 }
 
 async function stopProtection(
   stopKind: Extract<SessionOutcomeKind, 'user-stop' | 'app-quit' | 'schedule'> = 'user-stop'
-): Promise<{ success: boolean; error?: string; warning?: string }> {
-  return connectionLifecycle.stop(async () => {
+): Promise<ConnectionStopResult> {
+  return connectionLifecycle.stop(() => stopProtectionEffects(stopKind), {
+    owner: stopKind === 'schedule' ? 'schedule' : stopKind === 'app-quit' ? 'recovery' : 'manual'
+  })
+}
+
+async function stopProtectionEffects(
+  stopKind: Extract<SessionOutcomeKind, 'user-stop' | 'app-quit' | 'schedule'> = 'user-stop'
+): Promise<ConnectionStopResult> {
   adaptiveVerificationGeneration += 1
   // Capture counters before status listeners reset them; close history only after exit.
   const endingStats = currentSession ? trafficMonitor.getCurrentStats() : undefined
@@ -1615,7 +1634,9 @@ async function stopProtection(
   const { networkCleanup: _cleanup, runtimeStopped: _runtimeStopped, ...outcome } = result
   if (!result.success && result.runtimeStopped !== true) return outcome
   if (endingOutcome) closeSession(endingOutcome, endingStats)
-  await rollbackSoftAutoconfigIfApplied('protection stop')
+  let envRollbackFailed = false
+  try { await rollbackSoftAutoconfigIfApplied('protection stop') }
+  catch { envRollbackFailed = true } // Keep independent cleanup running; the helper already logged the failure.
   activeAdaptiveContext = null
 
   stopPeriodicSnapshots()
@@ -1663,8 +1684,11 @@ async function stopProtection(
 
   refreshTrayState({ status: 'off', restartingProgress: null })
   captureSnapshot('tun-post-stop').catch(() => undefined)
+  if (envRollbackFailed) return {
+    ...outcome, success: false,
+    error: [outcome.error, 'Не удалось восстановить env autoconfig. Повторите восстановление сети.'].filter(Boolean).join(' | ')
+  }
   return outcome
-  })
 }
 
 async function startProtectionFromTray(): Promise<void> {
@@ -2585,35 +2609,28 @@ app.whenReady().then(async () => {
   schedulerService.init({
     onConnect: (schedule) => {
       logEvent('info', 'scheduler', `schedule "${schedule.name}" triggered connect`, { profileId: schedule.profileId, mode: schedule.mode })
-      notify('info', 'Расписание', `VPN включён по расписанию: ${schedule.name}`, 'scheduleTriggered').catch(() => undefined)
-      if (schedule.profileId) {
-        try { serverPicker.selectProfile(schedule.profileId) } catch { /* profile may have been removed */ }
-      }
-      if (schedule.mode === 'direct') {
-        startDirectVpnProtection().catch(err =>
-          logEvent('error', 'scheduler', 'scheduled direct VPN start failed', err)
-        )
-      } else {
-        resolveProxyForTrayStart().then(resolved => {
-          if (!resolved) {
-            logEvent('warn', 'scheduler', 'scheduled connect failed: no proxy found')
-            return
-          }
-          const start = schedule.mode === 'soft' ? startSoftProtection : startProtection
-          start(resolved.proxyAddr, resolved.proxyType).catch(err =>
-            logEvent('error', 'scheduler', 'scheduled start failed', err)
-          )
-        }).catch(err =>
-          logEvent('error', 'scheduler', 'scheduled proxy resolve failed', err)
-        )
-      }
+      return runScheduledConnection(connectionLifecycle, schedule, {
+        resolveProxy: resolveProxyForTrayStart,
+        selectProfile: id => {
+          serverPicker.selectProfile(id)
+          return serverPicker.getActiveProfile()?.id === id
+        },
+        startDirect: startDirectVpnProtectionEffects,
+        startProxy: (owner, proxy, mode) => mode === 'soft'
+          ? startSoftProtectionEffects(owner, proxy.proxyAddr, proxy.proxyType)
+          : startProtectionEffects(owner, proxy.proxyAddr, proxy.proxyType)
+      }).then(result => {
+        if (result.success) void notify('info', 'Расписание', `VPN включён по расписанию: ${schedule.name}`, 'scheduleTriggered').catch(() => undefined)
+        else logEvent('warn', 'scheduler', 'scheduled connection did not complete', { operation: connectionLifecycle.operation })
+        if ('code' in result && result.code === 'SCHEDULE_PROFILE_UNAVAILABLE') return 'profile-unavailable' as const
+      }).catch(err => logEvent('error', 'scheduler', 'scheduled connection failed', err))
     },
     onDisconnect: (schedule) => {
       logEvent('info', 'scheduler', `schedule "${schedule.name}" triggered disconnect`)
-      notify('info', 'Расписание', `VPN выключен по расписанию: ${schedule.name}`, 'scheduleTriggered').catch(() => undefined)
-      stopProtection('schedule').catch(err =>
-        logEvent('error', 'scheduler', 'scheduled stop failed', err)
-      )
+      void stopProtection('schedule').then(result => {
+        if (result.success) void notify('info', 'Расписание', `VPN выключен по расписанию: ${schedule.name}`, 'scheduleTriggered').catch(() => undefined)
+        else logEvent('warn', 'scheduler', 'scheduled stop did not complete', { operation: connectionLifecycle.operation })
+      }).catch(err => logEvent('error', 'scheduler', 'scheduled stop failed', err))
     }
   })
 
