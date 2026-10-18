@@ -1,4 +1,5 @@
 import type { AppSettings } from './settings'
+import type { ConnectionStartResult, ConnectionStopResult } from './operation'
 import type { PublicIpInfo } from './publicIp'
 import type { ProxyInfo, AdaptiveBypassStatus, LeakCheckResult, SystemDiagnosticResult, RoutingPlan, LogFileSnapshot, UrlAvailabilityResult, ServerProbeResult } from './diagnostics'
 import type { AutoconfigTarget, SmartRouteRuleSetState, BrowserHardeningResult, AutoPilotResult, SystemNetworkResult, FirewallKillSwitchResult, FirewallRepairHealth, LocationPrivacyStatus } from './network'
@@ -31,10 +32,10 @@ export interface ElectronAPI {
   detectHapp: () => Promise<ProxyInfo | null>
   getPublicIp: () => Promise<PublicIpInfo>
   recheckPublicIp: (rebaseline?: boolean) => Promise<PublicIpInfo>
-  startTun: (proxyAddr: string, proxyType?: 'socks5' | 'http') => Promise<{ success: boolean; error?: string; warning?: string | null; vpnIp?: string | null }>
-  startDirectVpn: () => Promise<{ success: boolean; error?: string; warning?: string | null; vpnIp?: string | null }>
-  stopTun: () => Promise<{ success: boolean; error?: string; warning?: string }>
-  cancelTun: () => Promise<{ success: boolean; error?: string; warning?: string }>
+  startTun: (proxyAddr: string, proxyType?: 'socks5' | 'http') => Promise<ConnectionStartResult>
+  startDirectVpn: () => Promise<ConnectionStartResult>
+  stopTun: () => Promise<ConnectionStopResult>
+  cancelTun: () => Promise<ConnectionStopResult>
   cancelTransition: () => Promise<{ requested: boolean }>
   getTunStatus: () => Promise<{ running: boolean; proxyAddr: string | null; proxyType: 'socks5' | 'http' | null; pid: number | null; warning?: string | null; startedAt?: number | null; restartAttempt?: number }>
   getTrafficStats: () => Promise<TrafficStats>

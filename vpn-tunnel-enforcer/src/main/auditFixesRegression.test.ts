@@ -116,7 +116,9 @@ describe('Audit Fixes Regression: Soft routing lifecycle', () => {
 
   it('uses a dedicated Soft start path for tray and schedules', () => {
     expect(indexSource).toContain('async function startSoftProtection(')
-    expect(indexSource).toContain("schedule.mode === 'soft' ? startSoftProtection : startProtection")
+    expect(indexSource).toContain('runScheduledConnection(connectionLifecycle, schedule, {')
+    expect(indexSource).toContain("startProxy: (owner, proxy, mode) => mode === 'soft'")
+    expect(indexSource).toContain('startSoftProtectionEffects(owner, proxy.proxyAddr, proxy.proxyType)')
     expect(indexSource).toContain("sendToMainWindow('soft-status-changed', true)")
   })
 
