@@ -97,3 +97,55 @@ it('keeps concurrent IPC actions correlated through native waits, operation even
     rmSync(state.directory, { recursive: true, force: true })
   }
 })
+
+it('distinguishes concurrent operation keys within one action through disk and diagnostic redaction (AT-00-005)', async () => {
+  vi.resetModules()
+  const root = resolve('.tmp')
+  mkdirSync(root, { recursive: true })
+  state.directory = mkdtempSync(join(root, 'operation-correlation-'))
+  for (const method of ['log', 'warn', 'error'] as const) vi.spyOn(console, method).mockImplementation(() => {})
+  const { operations } = await import('./operations')
+  const releases: Array<() => void> = []
+  const gates = Array.from({ length: 2 }, () => new Promise<void>(resolve => { releases.push(resolve) }))
+  try {
+    const { getAppLogPath, getFullLogs, logEvent } = await import('./appLogger')
+    const { withCorrelation } = await import('./actionCorrelation')
+    const correlationId = 'ipc_3d49f22af56f4eb795812df333b9aa55'
+    const [cancelled, successful] = withCorrelation(correlationId, () => [
+      operations.run('speed-test', async lease => lease.wait(gates[0])).catch(error => error),
+      operations.run('export', async lease => { await lease.wait(gates[1]); return 'saved' })
+    ])
+    const records = operations.list()
+    expect(records).toHaveLength(2)
+    expect(new Set(records.map(record => record.operationId)).size).toBe(2)
+    expect(operations.cancel(records[0].operationId)).toBe(true)
+    expect(await cancelled).toMatchObject({ category: 'cancelled' })
+    releases[1]()
+    expect(await successful).toBe('saved')
+    releases[0]()
+    await operations.close()
+    logEvent('info', 'fixture', 'secret masking remains active', { credential: '8093a2ec-f028-4e3c-96a7-b301efaf23dd' })
+    await expect.poll(() => { try { return readFileSync(getAppLogPath(), 'utf8').trim().split('\n').length } catch { return 0 } }).toBe(5)
+    const raw = readFileSync(getAppLogPath(), 'utf8')
+    const events = raw.trim().split('\n').map(line => JSON.parse(line)).filter(row => row.message === 'feature operation')
+    const keys = records.map(record => 'op_' + record.operationId.replaceAll('-', ''))
+    expect(new Set(events.map(row => row.details.operationKey))).toEqual(new Set(keys))
+    for (const [index, key] of keys.entries()) {
+      const group = events.filter(row => row.details.operationKey === key)
+      expect(group.map(row => row.details.status)).toEqual(['running', index === 0 ? 'cancelled' : 'success'])
+      expect(group.every(row => row.correlationId === correlationId && row.details.correlationId === correlationId)).toBe(true)
+      expect(raw).not.toContain(records[index].operationId)
+    }
+    expect(raw).not.toContain('8093a2ec')
+    const exported = (await getFullLogs()).find(file => file.path === getAppLogPath())!
+    const readBack = exported.content.trim().split('\n').map(line => JSON.parse(line)).filter(row => row.message === 'feature operation')
+    expect(readBack).toEqual(events)
+    expect(exported.content).not.toContain('8093a2ec')
+  } finally {
+    for (const release of releases) release()
+    await operations.close()
+    vi.restoreAllMocks()
+    if (dirname(state.directory) !== root) throw new Error('Unsafe owned operation fixture cleanup')
+    rmSync(state.directory, { recursive: true, force: true })
+  }
+})

@@ -1,5 +1,5 @@
 import type { AppSettings } from './settings'
-import type { ConnectionStartResult, ConnectionStopResult } from './operation'
+import type { ConnectionStartResult, ConnectionStopResult, ManagedOperation } from './operation'
 import type { TunnelSnapshot } from './tunnel-state'
 import type { PublicIpInfo } from './publicIp'
 import type { ProxyInfo, AdaptiveBypassStatus, LeakCheckResult, SystemDiagnosticResult, RoutingPlan, LogFileSnapshot, UrlAvailabilityResult, ServerProbeResult } from './diagnostics'
@@ -242,8 +242,10 @@ export interface ElectronAPI {
   onI18nLocaleChanged: (callback: (locale: string) => void) => () => void
   // Speed Test
   speedTestRun: () => Promise<SpeedTestResult>
+  operationsList: () => Promise<ManagedOperation[]>
+  operationsCancel: (operationId: string) => Promise<boolean>
   speedTestHistory: () => Promise<SpeedTestResult[]>
-  onSpeedTestProgress: (callback: (data: { percent: number; phase: string }) => void) => () => void
+  onSpeedTestProgress: (callback: (data: { percent: number; phase: string; operationId?: string }) => void) => () => void
   // External Proxy
   externalProxyStatus: (slot?: number) => Promise<ExternalProxyStatus>
   externalProxyStart: (options?: ExternalProxyStartOptions) => Promise<ExternalProxyStatus>

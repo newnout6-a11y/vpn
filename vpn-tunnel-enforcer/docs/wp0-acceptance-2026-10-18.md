@@ -8,16 +8,16 @@
 18.10 владелец разрешил продолжать WP-0 при открытом PR #54, сохраняя запрет
 его слияния до отдельного решения. Полного Revix для #54 не было из-за квоты.
 Позднее 18.10 владелец разрешил сливать PR после пройденных проверок.
-#54/#55/#56/#57/#58/#59/#60/#61/#62/#63/#64/#65 слиты в main после exact-head CI success и completed Qodo,
+#54/#55/#56/#57/#58/#59/#60/#61/#62/#63/#64/#65/#66 слиты в main после exact-head CI success и completed Qodo,
 без открытых findings; прежний запрет слияния отменён.
 
 ## Полная область и первоначальная инвентаризация
 
 | AT | Найденная реализация / доказательства | Остаток до приёмки |
 | --- | --- | --- |
-| 00-001 | AST-проверка 158 main/preload/shared request channels, общий реестр входов и versioned transport envelope; object contracts проверяют поля/массивы, save-settings покрывает все 39 общих полей AppSettings; TypeScript checker проверяет results всех 158 listeners, public results с `any` больше нет; native contextBridge сохраняет JSON профиля и nullable active result | Завершить проверку текущего PR; отдельная semantic matrix ошибок остаётся в 00-004 |
+| 00-001 | AST-проверка 160 main/preload/shared request channels, общий реестр входов и versioned transport envelope; object contracts проверяют поля/массивы, save-settings покрывает все 39 общих полей AppSettings; TypeScript checker проверяет results всех 160 listeners, public results с `any` больше нет; native contextBridge сохраняет JSON профиля и nullable active result, feature list/cancel | Завершить проверку текущего PR; отдельная semantic matrix ошибок остаётся в 00-004 |
 | 00-002 | Production TunnelStateMachine интегрирована в main lane/IPC/Soft/tray/UI; 4096 stable tours и 117649 tours семи событий глубиной 6, включая timeout/cancel и native completion, с fake PID/TUN ledger и балансом operation events; sticky faults и generation fencing | Общая durable operation history/counters; все blocked/unknown/background paths; native Windows resources; общий admission фоновых restart |
-| 00-003 | Main connection lane: UUIDv4, owner, deadline запуска, priority admission; ручные Hard/Direct и Soft из tray, scheduled startup вместе с proxy detection; отмена на 10/50/90% управляемого connect fixture | Общий реестр refresh/speed/import/export/rotation; deadline остановки, интеграция всех entrypoints и полная матрица поздних эффектов |
+| 00-003 | Main connection lane: UUIDv4, owner, deadline запуска, priority admission; ручные Hard/Direct и Soft из tray, scheduled startup вместе с proxy detection; общий feature registry с prompt cancellation/deadline и physical drain, первая интеграция speed test | Интеграция refresh/import/export/rotation и UI cancel/unmount; deadline остановки, все entrypoints и полная матрица поздних эффектов |
 | 00-004 | Общая классификация transport; 157 каналов × 7 категорий через guard; native contextBridge сохраняет code/category/correlation в en/ru; typed local validation; 4 настоящих config handlers × 7 категорий, canonical domain failures | Миграция legacy domain-result `{success:false,error}` и semantic matrix настоящих feature handlers; transport fixtures не доказывают её |
 | 00-005 | Один action correlation id в guarded IPC response/error, lifecycle connect/stop и JSONL logger; async isolation, native wait/drain, diagnostic read-back с повторной redaction; ID исходного connect и source/owner/route/confidence в session history/JSON/CSV; JSONL clockId/monotonicMs отдельно от календарных дат и durationMs; реальные owned/legacy/tray/recovery Soft sessions | Все native/background entrypoints и полная матрица событий/истории автоматизаций, live-check и recovery |
 | 00-006 | Локальные миграции; общий version admission для 20 electron-store файлов / 28 constructors; future-version SHA-256 invariance на real Conf backend до defaults/repair и при записи через ранее открытый handle | Централизованный упорядоченный migration registry, fixtures всех исторических преобразований, остальные persisted JSON, полноценный upgrade/downgrade и межпроцессная координация |
@@ -837,3 +837,42 @@ L2 fixtures исполняют actual main functions/callbacks, production lane/
 Conf backend для owned/legacy/tray/recovery путей, заменяя OS effects. Full native
 Windows env/packet matrix этим не заявляется. Остатки общего operation registry,
 фоновых native restarts и остальных AT сохранены. Команды/результаты — progress.md.
+
+## AT-00-003 — общий реестр и отмена speed test (19.10.2026)
+
+`OperationRegistry` назначает main UUIDv4, original correlation/source/owner,
+deadline и terminal status; ресурс удерживается до фактического завершения
+захваченных эффектов. Abort/deadline возвращают caller типизированную ошибку
+немедленно, не освобождая ресурс раньше времени. Higher-priority replacement
+дожидается drain; его ожидание тоже отменяемо, входит в deadline и прекращается
+при shutdown. Монотонный бюджет не меняется при коррекции календарных часов.
+
+Speed test использует registry вместо отдельного busy-флага. Signal проходит
+через latency/download/upload/egress lookup; отмена запрещает fallback,
+следующий progress и запись результата. Уничтожаются upload streams и download
+streams, включая поздние headers и отмену между headers и началом чтения.
+IP monitor получает canPublish по signal, запрещая late shared IP/health/recovery
+publication после отмены; его raw verification тоже удерживает lease до drain.
+Shutdown одновременно отменяет connection lane и feature registry и ждёт оба
+drain перед native cleanup. `operations:list/cancel` проходят общий IPC guard;
+прогресс содержит operationId, stale ID не отменяет следующий запуск.
+
+L2 исполняет настоящий speed runner, guard и Conf backend с управляемыми
+сетевыми границами: отмена при порогах 10/50/90/100%, таймаут, поздние ответы,
+ошибки UUID и история. Отдельный тест использует настоящий axios и локальный HTTP
+server: abort закрывает сокет. Native Electron smoke проверяет production
+handlers/preload/contextBridge, typed cancellation с исходным correlation,
+удержание ресурса и отказ чужому WebContents; сеть в нём управляемая.
+
+Это частичная реализация AT-00-003. Остальные feature entrypoints, UI cancel /
+unmount, durable audit history и ресурсная Windows-матрица остаются открытыми.
+Общий registry хранит только ограниченный in-memory список (1000), не заменяет
+устойчивую историю AT-00-010. Полные результаты и PR gate — progress.md.
+
+Qodo #67 выявил четыре дополнительных границы. Feature JSONL получает
+обратимый operationKey при сохранении маскирования raw UUID. Refused quit
+возобновляет feature admission только после drain, с generation fence для старых
+ожидающих запусков. Неудачный download round отменяет соседей и дожидается их
+до fallback; canPublish IP-monitor дополнен реальным abort provider wave.
+Coalescing разрешён лишь для одинаковых owner и signal. Actual JSONL/diagnostic
+read-back, before-quit callback и network-boundary fixtures проверяют эти пути.

@@ -12,6 +12,7 @@ import type { ServerProfile } from '../../src/shared/ipc-types'
 import { ConnectionLifecycle } from '../../src/main/connectionLifecycle'
 import { TunnelStateMachine } from '../../src/main/tunnelStateMachine'
 import { currentCorrelationId, currentActionMetadata } from '../../src/main/actionCorrelation'
+import { operations, registerOperationHandlers } from '../../src/main/operations'
 
 const work = process.env.VPNTE_SMOKE_DIR!
 app.setPath('userData', join(work, 'userData'))
@@ -64,6 +65,15 @@ app.whenReady().then(async () => {
   checks.push('native safeStorage encrypted persistence and decryption')
 
   installTrustedIpcBoundary()
+  registerOperationHandlers()
+  let featureBegan!: () => void, releaseFeature!: () => void
+  const featureStarted = new Promise<void>(resolve => { featureBegan = resolve })
+  const featureGate = new Promise<void>(resolve => { releaseFeature = resolve })
+  ipcMain.handle('speed-test:run', () => operations.run('speed-test', async lease => {
+    featureBegan()
+    await lease.wait(featureGate) // Controlled network boundary, no external requests.
+    throw new Error('Cancelled feature continued')
+  }))
   ipcMain.handle('get-tun-status', () => ({ running: tunnelEvidence.running, smoke: true, lifecycle: tunnel.snapshot }))
   let startBegan!: () => void, finishStartup!: () => void
   const began = new Promise<void>(resolve => { startBegan = resolve })
@@ -120,6 +130,34 @@ app.whenReady().then(async () => {
   await reloaded
   await bridge(trusted)
   checks.push('contextBridge survives reload')
+  await trusted.webContents.executeJavaScript(`
+    window.featureOutcome = window.electronAPI.speedTestRun().catch(e => e); 'started'
+  `)
+  await featureStarted
+  const featureRecords = await trusted.webContents.executeJavaScript(`window.electronAPI.operationsList()`)
+  assert.equal(featureRecords.length, 1)
+  const feature = featureRecords[0]
+  assert.equal(feature.status, 'running'); assert.equal(feature.kind, 'speed-test')
+  assert.equal(feature.source, 'ipc'); assert.equal(feature.owner, 'manual')
+  assert.match(feature.operationId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+  const invalidCancel = await trusted.webContents.executeJavaScript(`window.electronAPI.operationsCancel('not-a-uuid').catch(e => e)`)
+  assert.equal(invalidCancel.category, 'validation')
+  assert.equal(operations.list()[0].status, 'running')
+  assert.equal(await trusted.webContents.executeJavaScript(`window.electronAPI.operationsCancel('${feature.operationId}')`), true)
+  const featureCancelled = await trusted.webContents.executeJavaScript(`(async () => {
+    let timer;
+    try { return await Promise.race([window.featureOutcome, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('Feature cancellation exceeded 900 ms')), 900);
+    })]); } finally { clearTimeout(timer); }
+  })()`)
+  assert.ok(isIpcRemoteErrorData(featureCancelled))
+  assert.equal(featureCancelled.category, 'cancelled')
+  assert.equal(featureCancelled.correlationId, feature.correlationId)
+  assert.equal(operations.isBusy('speed-test'), true)
+  releaseFeature()
+  await operations.close()
+  assert.equal(operations.isBusy('speed-test'), false)
+  checks.push('feature list and UUID cancellation through real production handlers/preload/contextBridge; prompt typed result preserves original correlation while physical lease drains (AT-00-001/003; controlled network)')
   const locale: IpcErrorLocale = await trusted.webContents.executeJavaScript(`navigator.language.startsWith('ru') ? 'ru' : 'en'`)
   const badPayload = await trusted.webContents.executeJavaScript(`
     window.electronAPI.saveSettings({ checkInterval: NaN }).then(() => ({ message: 'accepted' }), e => ({ message: e.message, stack: e.stack, code: e.code, category: e.category, correlationId: e.correlationId }))
@@ -233,6 +271,8 @@ app.whenReady().then(async () => {
     window.electronAPI.getTunStatus().then(() => 'accepted', e => e.message)
   `)
   assert.equal(foreignResult, ipcError('permission', locale).message)
+  const foreignOperations = await foreign.webContents.executeJavaScript(`window.electronAPI.operationsList().catch(e => e)`)
+  assert.equal(foreignOperations.category, 'permission')
   checks.push('unregistered WebContents rejected')
   await trusted.loadFile(join(work, 'other.html'))
   const navigatedResult = await trusted.webContents.executeJavaScript(`

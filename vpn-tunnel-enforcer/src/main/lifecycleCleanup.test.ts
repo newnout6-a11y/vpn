@@ -11,6 +11,7 @@ import ts from 'typescript'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ConnectionLifecycle } from './connectionLifecycle'
 import { TunnelStateMachine } from './tunnelStateMachine'
+import { OperationRegistry } from './operationRegistry'
 
 const recoveryModel = () => new TunnelStateMachine(() => ({ running: false, pid: null, softApplied: false }))
 
@@ -126,6 +127,7 @@ return Object.assign(controller.stop.bind(controller), { setRunning: (running) =
 function mainHarness(name: 'performShutdownCleanup' | 'stopProtection', session: object | null = null) {
   const os = {
     connectionLifecycle: new ConnectionLifecycle(() => {}),
+    operations: { close: done() },
     tunController: { stop: vi.fn(async (): Promise<any> => ({ success: true, networkCleanup: { baseline: true, firewall: true, adapters: true } })) },
     clearOwnedSecretClipboard: done(), stopXray: done(),
     isOwnedTunRuntimeRunning: vi.fn(async () => false),
@@ -399,6 +401,41 @@ return ${body('index.ts', 'tunController.onStatusChange')};`, os)
       expect(h.stopElevatedPsHelper).not.toHaveBeenCalled()
     } finally { release(); await shutdown }
     expect(h.stopTrafficForensicsSession.mock.invocationCallOrder[0]).toBeLessThan(h.stopRecoveryPsWorker.mock.invocationCallOrder[0])
+  })
+  it('aborts connection and feature work together, then drains both before native cleanup (AT-00-003)', async () => {
+    const h = mainHarness('performShutdownCleanup'), registry = new OperationRegistry(), late = vi.fn()
+    let releaseFeature!: () => void, releaseConnection!: () => void, signal!: AbortSignal
+    const featureGate = new Promise<void>(resolve => { releaseFeature = resolve })
+    const connectionGate = new Promise<void>(resolve => { releaseConnection = resolve })
+    h.operations.close.mockImplementation(() => registry.close())
+    const feature = registry.run('speed-test', async lease => {
+      signal = lease.signal
+      await lease.wait(featureGate)
+      late()
+    }).catch(error => error)
+    const connection = h.connectionLifecycle.start(async owner => {
+      await owner.wait(connectionGate)
+      owner.assertActive()
+      late()
+      return { success: true }
+    }).catch(error => error)
+    const shutdown = h.run('test')
+    try {
+      expect(signal.aborted).toBe(true)
+      expect(await feature).toMatchObject({ category: 'cancelled' })
+      expect(await connection).toMatchObject({ category: 'cancelled' })
+      expect(h.tunController.stop).not.toHaveBeenCalled()
+      releaseConnection()
+      await vi.waitFor(() => expect(h.connectionLifecycle.starting).toBe(false))
+      expect(h.tunController.stop).not.toHaveBeenCalled()
+    } finally {
+      releaseConnection(); releaseFeature()
+      await shutdown
+    }
+    expect(late).not.toHaveBeenCalled()
+    expect(h.tunController.stop).toHaveBeenCalledOnce()
+    expect(h.stopRecoveryPsWorker).toHaveBeenCalledOnce()
+    await expect(registry.run('speed-test', async () => true)).rejects.toMatchObject({ category: 'conflict' })
   })
   it.each(['reject', 'running', 'pending'])('refuses shutdown for an unconfirmed capture: %s (AT-08-005 / AT-11-002)', async outcome => {
     const h = mainHarness('performShutdownCleanup')

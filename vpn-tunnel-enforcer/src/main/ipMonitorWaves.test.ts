@@ -18,6 +18,25 @@ beforeEach(async () => {
 })
 afterEach(() => { module.ipMonitor.clearVpnIp(); vi.clearAllTimers(); vi.useRealTimers() })
 describe('IP provider wave budget', () => {
+  it('aborts every provider on caller cancellation without cancelling another owner (AT-00-003)', async () => {
+    const controller = new AbortController(), another = held(), signals: AbortSignal[] = []
+    vi.mocked(axios.get).mockImplementation((_url, options) => {
+      const signal = options!.signal as AbortSignal
+      signals.push(signal)
+      if (signals.length > 4) return another.promise
+      return new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(new Error('cancelled provider'))))
+    })
+    const first = module.ipMonitor.getCurrentIp(() => true, controller.signal)
+    const second = module.fetchPublicIp(() => true)
+    controller.abort()
+    try {
+      expect(signals.slice(0, 4).every(signal => signal.aborted)).toBe(true)
+      expect(signals.slice(4).every(signal => !signal.aborted)).toBe(true)
+    } finally { another.resolve(response()) }
+    expect((await first).ip).toBeNull()
+    expect(await second).toBe('198.51.100.1')
+    expect(module.ipMonitor.getLastSuccessAt()).toBeGreaterThan(0)
+  })
   it.each([false, true])('coalesces 50 concurrent reads for the same owner; scoped=%s', async scoped => {
     const pending = held(), guard = scoped ? () => true : undefined
     vi.mocked(axios.get).mockReturnValue(pending.promise)
@@ -27,6 +46,25 @@ describe('IP provider wave budget', () => {
     expect(await Promise.all(reads)).toEqual(Array(50).fill('198.51.100.1'))
     await module.fetchPublicIp(guard)
     expect(axios.get).toHaveBeenCalledTimes(8) // no cached result on the next wave
+  })
+  it('coalesces only equal owners and signals, preserving independent cancellation (AT-00-003)', async () => {
+    const old = held(), fresh = held(), first = new AbortController(), second = new AbortController(), guard = () => true
+    vi.mocked(axios.get).mockImplementation(() => vi.mocked(axios.get).mock.calls.length <= 4 ? old.promise : fresh.promise)
+    const reads = Array.from({ length: 50 }, () => module.fetchPublicIp(guard, first.signal))
+    expect(axios.get).toHaveBeenCalledTimes(4)
+    const another = module.fetchPublicIp(guard, second.signal)
+    expect(axios.get).toHaveBeenCalledTimes(8)
+    const signals = vi.mocked(axios.get).mock.calls.map(call => call[1]?.signal)
+    first.abort()
+    expect(signals.slice(0, 4).every(signal => signal?.aborted)).toBe(true)
+    expect(signals.slice(4).every(signal => !signal?.aborted)).toBe(true)
+    old.resolve(response())
+    fresh.resolve(response('198.51.100.2'))
+    expect(await Promise.all(reads)).toEqual(Array(50).fill(null))
+    expect(await another).toBe('198.51.100.2')
+    vi.mocked(axios.get).mockClear()
+    expect(await module.fetchPublicIp(guard, first.signal)).toBeNull()
+    expect(axios.get).not.toHaveBeenCalled()
   })
   it('aborts outstanding providers after the first valid response', async () => {
     const first = held(), aborted = vi.fn()

@@ -3707,3 +3707,171 @@ CI/review нового SHA проверяются отдельно после pu
   `node scripts/test-electron-runtime.mjs` — ELECTRON_SMOKE_PASS, exit 0
   (.tmp/wp0-soft-qodo66-retained-electron.log); `node scripts/test-wp1-native.mjs --ipc-only`
   — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-soft-qodo66-retained-csp.log).
+
+### PR #66 — повторные ревью и слияние
+
+- Итоговый head d2728b0176c4fbf48e4704fa09ef14eccfee0b31:
+  Qodo 1542260 completed; все четыре прежних findings implemented, новых нет.
+  CI 39170872277 completed/success, все три jobs зелёные на этом SHA.
+- Слит с проверкой ожидаемого head; REST GET merged=true, state=closed,
+  merge 3f6f7f464ec20ce7544a767c24a238d1bf809937.
+  Soft history доставлена в main; WP-0 целиком не завершён.
+
+## WP-0 — общий feature registry и первая интеграция speed test (19.10.2026)
+
+- AT-00-001/003/005/007: добавлен OperationRegistry с main UUIDv4,
+  original correlation/source/owner, deadline, priority admission и ограниченным
+  списком метаданных (1000). Cancel/timeout возвращает типизированный отказ
+  caller немедленно; lease остаётся busy до фактического settlement всех
+  захваченных эффектов. Higher-priority replacement дожидается drain, но само
+  ожидание реагирует на abort/deadline/shutdown и входит в монотонный бюджет.
+- Настоящий speed runner передаёт signal в axios latency/download/upload/egress,
+  уничтожает streams, запрещает поздние fallback/progress/history. При shutdown
+  connection lane и feature registry отменяются вместе; native cleanup ждёт оба.
+  `operations:list/cancel` зарегистрированы через общий guard/preload/shared.
+  Новая public API сохраняет существующий результат speedTestRun.
+- Начальный integration harness вызывал несуществующий installer guard:
+  `npm.cmd test -- src/main/operationRegistry.test.ts src/main/speedTestOperations.test.ts src/main/speedTest.test.ts src/main/lifecycleCleanup.test.ts`
+  — **11 failed / 206 passed**, 20.72 s, exit 1
+  (.tmp/wp0-operations-integrated.log в первом запуске, позднее перезаписан
+  успешным повтором). Исправлен harness, cleanup снимает удержанные gates
+  даже при failed assertion. Повтор — **217 passed**, 21.06 s, exit 0.
+- Новые реальные регрессии до исправлений:
+  `npm.cmd test -- src/main/operationRegistry.test.ts src/main/speedTestOperations.test.ts src/main/lifecycleCleanup.test.ts`
+  — **4 failed / 216 passed**, 21.31 s, exit 1
+  (.tmp/wp0-operations-races-before.log). Waiting replacement не отвечал на
+  cancel/timeout/shutdown; отмена при complete frame ещё сохраняла результат.
+  Исправлены cancellable admission и guard перед saveResult.
+- `npm.cmd test -- src/main/speedTestOperations.test.ts` — **1 failed / 13 passed**,
+  2.33 s, exit 1 (.tmp/wp0-operations-headers-before.log): отмена между headers
+  и установкой consumer оставляла Readable открытым. Stream теперь принадлежит
+  abort handler уже при получении headers; поздние headers уничтожаются тоже.
+- Итоговый адресный набор:
+  `npm.cmd test -- src/main/speedTestOperations.test.ts src/main/operationRegistry.test.ts src/main/speedTest.test.ts src/main/lifecycleCleanup.test.ts`
+  — **225 passed / 4 files**, 25.07 s, exit 0
+  (.tmp/wp0-operations-focused-final.log). Настоящие speed service / registry /
+  IPC guard / Conf backend; OS/VPN и внешняя сеть заменены. Отдельный тест
+  запускает реальный loopback HTTP server/axios и подтверждает закрытие сокета
+  после abort. Generic 5 kinds × 10/50/90 не считается интеграцией остальных
+  production features. Speed integration проверяет пороги 10/50/90/100 и complete.
+- `npm.cmd run typecheck` — exit 0, **160 channels / 0 public any**
+  (.tmp/wp0-operations-typecheck.log); `npm.cmd run build` — exit 0
+  (.tmp/wp0-operations-build.log). Финальный build/full после headers fix ниже.
+- `node scripts/test-electron-runtime.mjs` — **ELECTRON_SMOKE_PASS**, exit 0
+  (.tmp/wp0-operations-electron.log). Production operations handlers и preload,
+  настоящий contextBridge: UUID cancel, исходный correlation, typed отказ
+  ≤900 ms при ещё удержанном lease, invalid UUID и чужой WebContents.
+  Сеть управляемая; actual speed HTTP покрыт отдельным L2 тестом выше.
+  `node scripts/test-wp1-native.mjs --ipc-only` — **WP1_NATIVE_PASS**, exit 0
+  (.tmp/wp0-operations-csp.log), IPC/CSP subset без изменения ОС.
+- Traceability `python docs/04-приёмочные-тесты/traceability/check-coverage.py` —
+  AC 927/927, F 210/210, exit 0; `git diff --check` — exit 0.
+  F-021 опровергнута и не исправляется. Нормативные docs не менялись.
+- AT-00-003 ещё не PASS: refresh/import/export/rotation entrypoints,
+  UI cancel/unmount, stop deadline, durable operation history и остальные
+  пункты матрицы остаются открытыми. WP-0 и WP-2 не объявляются завершёнными.
+- Промежуточные полные `npm.cmd test`: **4259 passed / 5 skipped / 0 failed**,
+  266 files passed / 2 skipped, 193.37 s (.tmp/wp0-operations-full.log) и
+  189.00 s (.tmp/wp0-operations-full-final.log), оба exit 0. Последующее
+  усиление IP guard ниже требует собственного полного прогона.
+- Проверка production getCurrentIp выявила ещё один late effect: без canPublish
+  отменённая egress verification могла обновить shared IP state/health/recovery.
+  `npm.cmd test -- src/main/speedTestOperations.test.ts` — **1 failed / 14 passed**,
+  2.33 s, exit 1 (.tmp/wp0-operations-ip-before.log). Speed теперь передаёт
+  predicate `!lease.signal.aborted` в production IP monitor, который проверяет
+  его перед publication. Raw verification остаётся под physical drain.
+- `npm.cmd test -- src/main/speedTestOperations.test.ts src/main/operationRegistry.test.ts src/main/speedTest.test.ts src/main/lifecycleCleanup.test.ts src/main/ipMonitor.test.ts`
+  — **237 passed / 5 files**, 23.50 s, exit 0
+  (.tmp/wp0-operations-focused-final.log; предыдущий 225-test output заменён).
+- `npm.cmd test -- src/main/ipMonitorSession.test.ts src/main/ipMonitorWaves.test.ts`
+  — **19 passed / 2 files**, 529 ms, exit 0 (.tmp/wp0-operations-monitor-final.log).
+  Эти production monitor fixtures проверяют запрет late state/health/recovery
+  publication при отозванном canPublish и изоляцию поколений проверок.
+- Итоговый полный `npm.cmd test` после IP guard — **4260 passed / 5 skipped /
+  0 failed**, 266 files passed / 2 skipped, 186.80 s, exit 0
+  (.tmp/wp0-operations-full-guard-final.log).
+  `npm.cmd run build` — exit 0 (.tmp/wp0-operations-build-final.log), включая
+  typecheck: 160 channels / 0 public any. Финальный
+  `node scripts/test-electron-runtime.mjs` — ELECTRON_SMOKE_PASS, exit 0
+  (.tmp/wp0-operations-electron-final.log); IPC/CSP subset
+  `node scripts/test-wp1-native.mjs --ipc-only` — WP1_NATIVE_PASS, exit 0
+  (.tmp/wp0-operations-csp-final.log). Scope остаётся указанным выше.
+  Traceability AC 927/927 / F 210/210 и `git diff --cached --check` — exit 0.
+
+### PR #67 — Qodo: log identity, refused quit и отмена соседних запросов
+
+- Initial head 8e503601d3402ac72184a91615bb38db7816df67: Qodo **1542435
+  completed**, четыре findings. Initial CI **39173310237 success** относится
+  только к этому head и не считается проверкой последующих исправлений.
+- f0d9cce7-d61f-45ad-b07e-cb70c133f1f4 (action_required) подтверждён: raw UUID
+  правильно маскируется redactor, но log терял отдельную identity операции.
+  Feature events теперь дополнены обратимым `operationKey=op_<32 hex>`;
+  public operationId остаётся main UUIDv4. Политика маскирования не ослаблена.
+  Regression исполняет actual registry/observer/logger/redactor, читает JSONL
+  с диска и повторно санитизированный diagnostic read-back.
+- 5efb7774-4dbb-471a-857e-a2d7ab18c6fe (recommended) подтверждён: failed quit
+  возвращал окно, оставляя feature admission закрытым. Actual before-quit
+  catch возобновляет его после drain. Resume отказывает при active effects;
+  generation fence запрещает оживлять прежние ожидающие replacements.
+  Следующий успешный quit снова закрывает registry. Connection admission и
+  неподтверждённое состояние сетевой очистки этим не объявляются успешными.
+- d4c81694-b8e2-4ad2-8732-78e0860fedab (recommended) подтверждён: download
+  fallback оставлял соседние requests живыми и сохранял их progress. Каждый
+  round теперь имеет linked AbortSignal; при ошибке отменяет/уничтожает соседей
+  и ждёт их фактического завершения перед следующим target. Если boundary
+  игнорирует abort, overall deadline всё равно возвращает caller отказ,
+  а physical lease удерживается. Late headers старого round уничтожаются.
+- de990930-ad60-4611-b124-4c60f379130a (recommended) подтверждён: canPublish
+  подавлял IP state, но не отменял HTTP providers. getCurrentIp/fetchPublicIp
+  получают signal и связывают его с wave controller. Coalescing учитывает
+  одновременно owner и signal; отмена не затрагивает независимого владельца.
+- Regression до fix:
+  `npm.cmd test -- src/main/speedTestOperations.test.ts src/main/ipMonitorWaves.test.ts src/main/installerShutdown.test.ts src/main/actionCorrelation.test.ts`
+  — **5 failed / 30 passed**, 2.88 s, exit 1 (.tmp/wp0-operations-qodo67-before.log).
+  Download fixture затем исправлен: fallback должен возвращать Promise,
+  как axios. Отдельный `npm.cmd test -- src/main/speedTestOperations.test.ts -t 'aborts and drains a failed download'`
+  — **1 failed / 15 skipped**, 1.83 s, exit 1
+  (.tmp/wp0-operations-qodo67-download-before.log), теперь по настоящему
+  отсутствию abort у оставшегося stream, а не из-за неверной границы mock.
+- После fixes `npm.cmd test -- src/main/speedTestOperations.test.ts src/main/ipMonitorWaves.test.ts src/main/installerShutdown.test.ts src/main/actionCorrelation.test.ts src/main/ipMonitorSession.test.ts src/main/ipMonitor.test.ts src/main/operationRegistry.test.ts src/main/lifecycleCleanup.test.ts`
+  — **264 passed / 8 files**, 25.54 s, exit 0 (.tmp/wp0-operations-qodo67-focused.log).
+  Дополнительные independent-signal coalescing и resume-generation cases
+  добавлены затем и включены в следующий полный прогон.
+- `npm.cmd run typecheck` — exit 0, 160 channels / 0 public any
+  (.tmp/wp0-operations-qodo67-typecheck.log); traceability AC 927/927,
+  F 210/210 и `git diff --check` — exit 0. Новый CI/Qodo gate ещё требуется.
+- Полный `npm.cmd test` исправленного варианта — **4266 passed / 5 skipped /
+  0 failed**, 266 files passed / 2 skipped, 189.04 s, exit 0
+  (.tmp/wp0-operations-qodo67-full.log). Дополнительные generation/signal cases
+  включены в этот прогон.
+- `npm.cmd run build` — exit 0 (.tmp/wp0-operations-qodo67-build.log).
+  `node scripts/test-electron-runtime.mjs` — ELECTRON_SMOKE_PASS, exit 0
+  (.tmp/wp0-operations-qodo67-electron.log); `node scripts/test-wp1-native.mjs --ipc-only`
+  — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-operations-qodo67-csp.log).
+  Traceability AC 927/927 / F 210/210 и `git diff --check` — exit 0.
+
+### Qodo #67 — различимость двух операций в одном действии
+
+- На head aaa3d99dd209bfe81b9ad26d165bbf56a351dc96 Qodo **1542488 completed**:
+  все четыре прежних findings **implemented**, новый
+  e11af426-7a76-4668-9cb1-4b26fe93c20a (action_required) требует проверки
+  разных операций через redaction. Это пробел в coverage, не воспроизведённый
+  дефект production сериализации. PR пока не слит.
+- Actual registry/observer/logger test усилен: две concurrent операции имеют
+  общий исходный correlation, разные operationId и обратимые operationKey.
+  Одна отменяется, другая завершается успешно. Каждому key соответствуют ровно
+  running + его terminal event; disk JSONL и diagnostic read-back совпадают,
+  raw UUID и credential по-прежнему скрыты. Production-код не менялся.
+- `npm.cmd test -- src/main/actionCorrelation.test.ts` — **2 passed**,
+  1.02 s, exit 0 (.tmp/wp0-operations-qodo67-distinct.log).
+- `npm.cmd run typecheck` — exit 0, 160 channels / 0 public any
+  (.tmp/wp0-operations-qodo67-distinct-typecheck.log). Traceability
+  `python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py` —
+  AC 927/927 / F 210/210, exit 0; `git diff --check` — exit 0.
+- Полный `npm.cmd test` после усиления — **4266 passed / 5 skipped / 0 failed**,
+  266 files passed / 2 skipped, 192.05 s, exit 0
+  (.tmp/wp0-operations-qodo67-distinct-full.log). Build/native не повторялись
+  локально: изменены только test и журнал, production тот же, что прошёл
+  build/Electron/IPC/CSP в предыдущем коммите. Новый remote CI проверит final SHA.
+- CI **39174041625 success** на aaa3d99dd209bfe81b9ad26d165bbf56a351dc96;
+  три jobs зелёные. Новый commit с усиленным test требует нового CI/Qodo gate.

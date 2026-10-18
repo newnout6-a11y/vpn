@@ -24,3 +24,15 @@ export interface ConnectionOperationRejection {
 }
 export type ConnectionStartResult = { success: boolean; error?: string; warning?: string | null; vpnIp?: string | null } | ConnectionOperationRejection
 export type ConnectionStopResult = { success: boolean; error?: string; warning?: string } | ConnectionOperationRejection
+
+/** Shared metadata for the other long-running feature operations. */
+export const OPERATION_DEADLINES = Object.freeze({
+  refresh: 120_000, 'speed-test': 600_000, import: 120_000, export: 120_000, rotation: 120_000
+})
+export type ManagedOperationKind = keyof typeof OPERATION_DEADLINES
+export interface ManagedOperation extends Omit<ConnectionOperation, 'kind' | 'deadline' | 'category'> {
+  readonly kind: ManagedOperationKind
+  readonly deadline: number
+  readonly source: import('./connection-provenance').ConnectionProvenance['source']
+  readonly category?: import('./ipc-result').IpcErrorCategory
+}
