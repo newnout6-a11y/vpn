@@ -7,6 +7,7 @@ import ts from 'typescript'
 import { describe, expect, it, vi } from 'vitest'
 import { shutdown as shutdownEn } from '../renderer/i18n/locales/en.json'
 import { shutdown as shutdownRu } from '../renderer/i18n/locales/ru.json'
+import { OperationRegistry } from './operationRegistry'
 
 const root = join(__dirname, '../..')
 const source = readFileSync(join(root, 'src/main/index.ts'), 'utf8')
@@ -28,6 +29,7 @@ function handler(event: string, installerRequested = false) {
   const dependencies = {
     app: { exit: vi.fn(), quit: vi.fn(), whenReady: vi.fn(async () => {}) },
     performShutdownCleanup: vi.fn(async () => {}), handleSecureStartupBeforeQuit: vi.fn(() => false),
+    operations: new OperationRegistry(),
     restoreAndFocusMainWindow: vi.fn(), logEvent: vi.fn(),
     dialog: { showMessageBox: vi.fn(async () => ({})) }, i18nBackend: { getLocale: () => 'ru' }, shutdownEn, shutdownRu
   }
@@ -93,5 +95,19 @@ describe('installer shutdown contract', () => {
     expect(h.state()).toEqual({ isQuitting: false, shutdownInProgress: false, installerShutdownRequested: false })
     await h.run({ preventDefault: vi.fn() })
     expect(h.app.exit).toHaveBeenCalledExactlyOnceWith(0)
+  })
+  it('restores drained feature admission when quit fails, and closes it again on retry (AT-00-003)', async () => {
+    const h = handler('before-quit')
+    h.performShutdownCleanup.mockImplementationOnce(async () => {
+      await h.operations.close()
+      throw new Error('runtime exit unconfirmed')
+    })
+    await h.run({ preventDefault: vi.fn() })
+    expect(h.app.exit).not.toHaveBeenCalled()
+    expect(await h.operations.run('speed-test', async () => 'usable')).toBe('usable')
+    h.performShutdownCleanup.mockImplementationOnce(() => h.operations.close())
+    await h.run({ preventDefault: vi.fn() })
+    expect(h.app.exit).toHaveBeenCalledExactlyOnceWith(0)
+    await expect(h.operations.run('speed-test', async () => true)).rejects.toMatchObject({ category: 'conflict' })
   })
 })

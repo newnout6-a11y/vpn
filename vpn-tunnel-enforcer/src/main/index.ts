@@ -3034,6 +3034,7 @@ app.on('before-quit', async (event) => {
     app.exit(installerShutdownRequested ? 73 : 0)
   } catch (err) {
     shutdownInProgress = false
+    operations.resumeAdmission()
     isQuitting = false
     installerShutdownRequested = false
     logEvent('error', 'app', 'shutdown refused: cleanup remains unconfirmed', err)

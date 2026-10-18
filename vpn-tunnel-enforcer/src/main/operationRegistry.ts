@@ -23,8 +23,9 @@ interface Entry {
 export class OperationRegistry {
   private readonly active = new Map<string, Entry>()
   private readonly history = new Map<string, ManagedOperation>()
-  private readonly closing = new AbortController()
+  private closing = new AbortController()
   private closed = false
+  private generation = 0
   constructor(private readonly observe: (operation: ManagedOperation) => void = () => {}) {}
 
   list(): ManagedOperation[] { return [...this.history.values()].map(operation => ({ ...operation })) }
@@ -37,10 +38,20 @@ export class OperationRegistry {
   }
   async close(): Promise<void> {
     this.closed = true
+    this.generation += 1
     this.closing.abort()
     const entries = [...this.active.values()]
     for (const entry of entries) entry.cancel('cancelled')
     await Promise.all(entries.map(entry => entry.drained))
+  }
+
+  /** Only a refused quit may resume feature work, after all old effects drain. */
+  resumeAdmission(): boolean {
+    if (!this.closed) return true
+    if (this.active.size) return false
+    this.closing = new AbortController()
+    this.closed = false
+    return true
   }
 
   async run<T>(kind: ManagedOperationKind, effect: (lease: OperationLease) => Promise<T>, options: RunOptions = {}): Promise<T> {
@@ -49,13 +60,14 @@ export class OperationRegistry {
       || !Object.hasOwn(OPERATION_PRIORITY, owner)) throw new IpcFault('validation')
     if (options.signal?.aborted) throw new IpcFault('cancelled')
     if (this.closed) throw new IpcFault('conflict')
-    const startedAt = Date.now(), expiresAt = performance.now() + timeoutMs
+    const startedAt = Date.now(), expiresAt = performance.now() + timeoutMs, generation = this.generation
     const resource = options.resource ?? kind
     while (this.active.has(resource)) {
       const previous = this.active.get(resource)!
       if (previous.operation.status !== 'running' || OPERATION_PRIORITY[owner] <= OPERATION_PRIORITY[previous.operation.owner]) throw new IpcFault('conflict')
       previous.cancel('cancelled')
       await this.waitForDrain(previous.drained, expiresAt - performance.now(), options.signal)
+      if (generation !== this.generation) throw new IpcFault('conflict')
     }
     if (options.signal?.aborted) throw new IpcFault('cancelled')
     if (this.closed) throw new IpcFault('conflict')

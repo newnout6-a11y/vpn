@@ -97,3 +97,43 @@ it('keeps concurrent IPC actions correlated through native waits, operation even
     rmSync(state.directory, { recursive: true, force: true })
   }
 })
+
+it('retains a reversible feature operation key through disk and diagnostic redaction (AT-00-005)', async () => {
+  vi.resetModules()
+  const root = resolve('.tmp')
+  mkdirSync(root, { recursive: true })
+  state.directory = mkdtempSync(join(root, 'operation-correlation-'))
+  for (const method of ['log', 'warn', 'error'] as const) vi.spyOn(console, method).mockImplementation(() => {})
+  const { operations } = await import('./operations')
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  try {
+    const { getAppLogPath, getFullLogs, logEvent } = await import('./appLogger')
+    const task = operations.run('speed-test', async lease => lease.wait(gate)).catch(error => error)
+    const operation = operations.list()[0]
+    operations.cancel(operation.operationId)
+    expect(await task).toMatchObject({ category: 'cancelled' })
+    release()
+    await operations.close()
+    logEvent('info', 'fixture', 'secret masking remains active', { credential: '8093a2ec-f028-4e3c-96a7-b301efaf23dd' })
+    await expect.poll(() => { try { return readFileSync(getAppLogPath(), 'utf8').trim().split('\n').length } catch { return 0 } }).toBe(3)
+    const raw = readFileSync(getAppLogPath(), 'utf8')
+    const events = raw.trim().split('\n').map(line => JSON.parse(line)).filter(row => row.message === 'feature operation')
+    const expectedKey = 'op_' + operation.operationId.replaceAll('-', '')
+    expect(events.map(row => row.details.operationKey)).toEqual([expectedKey, expectedKey])
+    expect(events.map(row => row.details.status)).toEqual(['running', 'cancelled'])
+    expect(events.every(row => row.correlationId === operation.correlationId)).toBe(true)
+    expect(raw).not.toContain(operation.operationId)
+    expect(raw).not.toContain('8093a2ec')
+    const exported = (await getFullLogs()).find(file => file.path === getAppLogPath())!
+    const readBack = exported.content.trim().split('\n').map(line => JSON.parse(line)).filter(row => row.message === 'feature operation')
+    expect(readBack.map(row => row.details.operationKey)).toEqual([expectedKey, expectedKey])
+    expect(exported.content).not.toContain('8093a2ec')
+  } finally {
+    release()
+    await operations.close()
+    vi.restoreAllMocks()
+    if (dirname(state.directory) !== root) throw new Error('Unsafe owned operation fixture cleanup')
+    rmSync(state.directory, { recursive: true, force: true })
+  }
+})

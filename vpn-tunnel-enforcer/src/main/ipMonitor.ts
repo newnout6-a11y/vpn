@@ -26,7 +26,13 @@ let ipCallbacks: ((ip: string, isLeak: boolean, evidence: PublicIpEvidence) => v
 let checkInterval = 30000 // 30 seconds
 let lastSuccessAt = 0
 let readGeneration = 0
-const publicIpReads = new Map<(() => boolean) | undefined, { promise: Promise<string | null>; controller: AbortController }>()
+interface PublicIpRead {
+  owner?: () => boolean
+  signal?: AbortSignal
+  promise: Promise<string | null>
+  controller: AbortController
+}
+const publicIpReads = new Set<PublicIpRead>()
 const providerBackoff = new Map<string, number>()
 
 function cancelPublicIpReads(): void {
@@ -124,12 +130,15 @@ export async function fetchPublicIpFrom(url: string, canPublish?: () => boolean,
   }
 }
 
-export async function fetchPublicIp(canPublish?: () => boolean): Promise<string | null> {
-  if (canPublish && !canPublish()) return null
-  const existing = publicIpReads.get(canPublish)
+export async function fetchPublicIp(canPublish?: () => boolean, signal?: AbortSignal): Promise<string | null> {
+  if (signal?.aborted || (canPublish && !canPublish())) return null
+  const existing = [...publicIpReads].find(read => read.owner === canPublish && read.signal === signal)
   if (existing) return existing.promise
   const controller = new AbortController(), generation = readGeneration
+  const onAbort = () => controller.abort()
+  signal?.addEventListener('abort', onAbort, { once: true })
   const isCurrent = () => generation === readGeneration && !controller.signal.aborted && (!canPublish || canPublish())
+  let read!: PublicIpRead
   const promise = (async () => {
     try {
       const ip = await Promise.any(IP_CHECK_URLS.map(url => fetchPublicIpFrom(url, isCurrent, controller.signal)))
@@ -139,9 +148,11 @@ export async function fetchPublicIp(canPublish?: () => boolean): Promise<string 
       return null
     } finally { controller.abort() }
   })().finally(() => {
-    if (publicIpReads.get(canPublish)?.controller === controller) publicIpReads.delete(canPublish)
+    signal?.removeEventListener('abort', onAbort)
+    publicIpReads.delete(read)
   })
-  publicIpReads.set(canPublish, { promise, controller })
+  read = { owner: canPublish, signal, promise, controller }
+  publicIpReads.add(read)
   return promise
 }
 
@@ -197,17 +208,17 @@ export const ipMonitor = {
     verdict = 'not-checked'
     if (currentIp) notifyCallbacks(currentIp, false)
   },
-  async getCurrentIp(canPublish?: () => boolean): Promise<{ ip: string | null; isLeak: boolean; vpnIp: string | null }> {
-    if (canPublish && !canPublish()) return { ip: currentIp, isLeak, vpnIp }
+  async getCurrentIp(canPublish?: () => boolean, signal?: AbortSignal): Promise<{ ip: string | null; isLeak: boolean; vpnIp: string | null }> {
+    if (signal?.aborted || (canPublish && !canPublish())) return { ip: currentIp, isLeak, vpnIp }
     if (suppressed) {
       // Return last-known state without touching it. Never report leak while
       // suspended — see the suspended-state comment block above.
       return { ip: currentIp, isLeak: false, vpnIp }
     }
     const generation = readGeneration
-    const ip = await fetchPublicIp(canPublish)
+    const ip = await fetchPublicIp(canPublish, signal)
     if (generation !== readGeneration) return { ip: currentIp, isLeak, vpnIp }
-    if (canPublish && !canPublish()) return { ip: currentIp, isLeak, vpnIp }
+    if (signal?.aborted || (canPublish && !canPublish())) return { ip: currentIp, isLeak, vpnIp }
     if (suppressed) {
       // We may have been suspended while the HTTP request was in flight.
       return { ip: currentIp, isLeak: false, vpnIp }

@@ -139,6 +139,23 @@ describe('long operation registry', () => {
     expect(vi.getTimerCount()).toBe(0)
   })
 
+  it('resumes only drained work after refused quit and never revives an old queued replacement', async () => {
+    const registry = new OperationRegistry(), gate = held<void>(), replacement = vi.fn(async () => true)
+    const first = registry.run('refresh', async lease => lease.wait(gate.promise), { owner: 'schedule' }).catch(error => error)
+    const waiting = registry.run('refresh', replacement).catch(error => error)
+    const closing = registry.close()
+    expect(registry.resumeAdmission()).toBe(false)
+    gate.resolve()
+    await closing
+    expect(registry.resumeAdmission()).toBe(true)
+    expect(await first).toMatchObject({ category: 'cancelled' })
+    expect(await waiting).toMatchObject({ category: 'conflict' })
+    expect(replacement).not.toHaveBeenCalled()
+    expect(await registry.run('refresh', async () => 'fresh')).toBe('fresh')
+    await registry.close()
+    await expect(registry.run('refresh', async () => true)).rejects.toMatchObject({ category: 'conflict' })
+  })
+
   it('cancels only the requested live operation and consumes late native rejection', async () => {
     const registry = new OperationRegistry(), gate = held<void>()
     const task = registry.run('import', async lease => { await lease.wait(gate.promise) }).catch(error => error)

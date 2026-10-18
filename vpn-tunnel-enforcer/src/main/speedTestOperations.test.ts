@@ -187,10 +187,39 @@ describe('owned speed test effects', () => {
       controller.abort()
       expect(await task).toMatchObject({ category: 'cancelled' })
       expect(canPublish()).toBe(false)
+      expect(state.currentIp.mock.calls[0][1]).toBeInstanceOf(AbortSignal)
+      expect(state.currentIp.mock.calls[0][1].aborted).toBe(true)
       expect(speed.isRunning()).toBe(true)
     } finally { controller.abort(); gate.resolve({ ip: '198.51.100.1' }) }
     await vi.waitFor(() => expect(speed.isRunning()).toBe(false))
     expect(await persistedHistory()).toEqual([])
+  })
+
+  it('aborts and drains a failed download round before retry, without stale progress', async () => {
+    const slow = held<any>(), failed = held<any>(), oldStream = new Readable({ read() {} })
+    let downloadCalls = 0, firstSignal!: AbortSignal
+    const normal = state.get.getMockImplementation()!
+    state.get.mockImplementation((url, options) => {
+      if (options.responseType !== 'stream') return normal(url, options)
+      if (++downloadCalls === 1) { firstSignal = options.signal; return slow.promise }
+      if (downloadCalls === 2) return failed.promise.then(() => { throw new Error('failed first target') })
+      return Promise.resolve(response())
+    })
+    const task = speed.run().catch(error => error)
+    await vi.waitFor(() => expect(downloadCalls).toBe(2))
+    failed.resolve({})
+    try {
+      await vi.waitFor(() => expect(firstSignal.aborted).toBe(true))
+      expect(downloadCalls).toBe(2)
+    } finally { slow.resolve({ data: oldStream }) }
+    const result = await task
+    expect(result.serverName).toBe('OVH')
+    expect(oldStream.destroyed).toBe(true)
+    expect(operationEvents().map(operation => operation.status)).toEqual(['running', 'success'])
+    const before = state.send.mock.calls.length
+    oldStream.push(Buffer.alloc(64))
+    expect(state.send).toHaveBeenCalledTimes(before)
+    expect(await persistedHistory()).toMatchObject([result])
   })
 
   it('exposes cancellation by UUID through the real guarded handlers, without allowing a stale ID to cancel replacement work', async () => {

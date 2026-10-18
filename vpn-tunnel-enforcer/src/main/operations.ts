@@ -4,7 +4,9 @@ import { ipcMain } from 'electron'
 import { requireString, IpcValidationError } from './ipcValidation'
 
 export const operations = new OperationRegistry(operation => {
-  logEvent(operation.status === 'running' ? 'debug' : 'info', 'lifecycle', 'feature operation', operation)
+  logEvent(operation.status === 'running' ? 'debug' : 'info', 'lifecycle', 'feature operation', {
+    ...operation, operationKey: 'op_' + operation.operationId.replaceAll('-', '')
+  })
 })
 
 export function registerOperationHandlers(): void {

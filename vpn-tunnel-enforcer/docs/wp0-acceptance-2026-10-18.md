@@ -868,3 +868,11 @@ handlers/preload/contextBridge, typed cancellation с исходным correlati
 unmount, durable audit history и ресурсная Windows-матрица остаются открытыми.
 Общий registry хранит только ограниченный in-memory список (1000), не заменяет
 устойчивую историю AT-00-010. Полные результаты и PR gate — progress.md.
+
+Qodo #67 выявил четыре дополнительных границы. Feature JSONL получает
+обратимый operationKey при сохранении маскирования raw UUID. Refused quit
+возобновляет feature admission только после drain, с generation fence для старых
+ожидающих запусков. Неудачный download round отменяет соседей и дожидается их
+до fallback; canPublish IP-monitor дополнен реальным abort provider wave.
+Coalescing разрешён лишь для одинаковых owner и signal. Actual JSONL/diagnostic
+read-back, before-quit callback и network-boundary fixtures проверяют эти пути.

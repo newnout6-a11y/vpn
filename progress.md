@@ -3797,3 +3797,55 @@ CI/review нового SHA проверяются отдельно после pu
   `node scripts/test-wp1-native.mjs --ipc-only` — WP1_NATIVE_PASS, exit 0
   (.tmp/wp0-operations-csp-final.log). Scope остаётся указанным выше.
   Traceability AC 927/927 / F 210/210 и `git diff --cached --check` — exit 0.
+
+### PR #67 — Qodo: log identity, refused quit и отмена соседних запросов
+
+- Initial head 8e503601d3402ac72184a91615bb38db7816df67: Qodo **1542435
+  completed**, четыре findings. Initial CI **39173310237 success** относится
+  только к этому head и не считается проверкой последующих исправлений.
+- f0d9cce7-d61f-45ad-b07e-cb70c133f1f4 (action_required) подтверждён: raw UUID
+  правильно маскируется redactor, но log терял отдельную identity операции.
+  Feature events теперь дополнены обратимым `operationKey=op_<32 hex>`;
+  public operationId остаётся main UUIDv4. Политика маскирования не ослаблена.
+  Regression исполняет actual registry/observer/logger/redactor, читает JSONL
+  с диска и повторно санитизированный diagnostic read-back.
+- 5efb7774-4dbb-471a-857e-a2d7ab18c6fe (recommended) подтверждён: failed quit
+  возвращал окно, оставляя feature admission закрытым. Actual before-quit
+  catch возобновляет его после drain. Resume отказывает при active effects;
+  generation fence запрещает оживлять прежние ожидающие replacements.
+  Следующий успешный quit снова закрывает registry. Connection admission и
+  неподтверждённое состояние сетевой очистки этим не объявляются успешными.
+- d4c81694-b8e2-4ad2-8732-78e0860fedab (recommended) подтверждён: download
+  fallback оставлял соседние requests живыми и сохранял их progress. Каждый
+  round теперь имеет linked AbortSignal; при ошибке отменяет/уничтожает соседей
+  и ждёт их фактического завершения перед следующим target. Если boundary
+  игнорирует abort, overall deadline всё равно возвращает caller отказ,
+  а physical lease удерживается. Late headers старого round уничтожаются.
+- de990930-ad60-4611-b124-4c60f379130a (recommended) подтверждён: canPublish
+  подавлял IP state, но не отменял HTTP providers. getCurrentIp/fetchPublicIp
+  получают signal и связывают его с wave controller. Coalescing учитывает
+  одновременно owner и signal; отмена не затрагивает независимого владельца.
+- Regression до fix:
+  `npm.cmd test -- src/main/speedTestOperations.test.ts src/main/ipMonitorWaves.test.ts src/main/installerShutdown.test.ts src/main/actionCorrelation.test.ts`
+  — **5 failed / 30 passed**, 2.88 s, exit 1 (.tmp/wp0-operations-qodo67-before.log).
+  Download fixture затем исправлен: fallback должен возвращать Promise,
+  как axios. Отдельный `npm.cmd test -- src/main/speedTestOperations.test.ts -t 'aborts and drains a failed download'`
+  — **1 failed / 15 skipped**, 1.83 s, exit 1
+  (.tmp/wp0-operations-qodo67-download-before.log), теперь по настоящему
+  отсутствию abort у оставшегося stream, а не из-за неверной границы mock.
+- После fixes `npm.cmd test -- src/main/speedTestOperations.test.ts src/main/ipMonitorWaves.test.ts src/main/installerShutdown.test.ts src/main/actionCorrelation.test.ts src/main/ipMonitorSession.test.ts src/main/ipMonitor.test.ts src/main/operationRegistry.test.ts src/main/lifecycleCleanup.test.ts`
+  — **264 passed / 8 files**, 25.54 s, exit 0 (.tmp/wp0-operations-qodo67-focused.log).
+  Дополнительные independent-signal coalescing и resume-generation cases
+  добавлены затем и включены в следующий полный прогон.
+- `npm.cmd run typecheck` — exit 0, 160 channels / 0 public any
+  (.tmp/wp0-operations-qodo67-typecheck.log); traceability AC 927/927,
+  F 210/210 и `git diff --check` — exit 0. Новый CI/Qodo gate ещё требуется.
+- Полный `npm.cmd test` исправленного варианта — **4266 passed / 5 skipped /
+  0 failed**, 266 files passed / 2 skipped, 189.04 s, exit 0
+  (.tmp/wp0-operations-qodo67-full.log). Дополнительные generation/signal cases
+  включены в этот прогон.
+- `npm.cmd run build` — exit 0 (.tmp/wp0-operations-qodo67-build.log).
+  `node scripts/test-electron-runtime.mjs` — ELECTRON_SMOKE_PASS, exit 0
+  (.tmp/wp0-operations-qodo67-electron.log); `node scripts/test-wp1-native.mjs --ipc-only`
+  — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-operations-qodo67-csp.log).
+  Traceability AC 927/927 / F 210/210 и `git diff --check` — exit 0.

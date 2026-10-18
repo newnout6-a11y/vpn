@@ -171,20 +171,21 @@ async function measureLatency(lease: OperationLease): Promise<number> {
  * Checks VPN status before starting.
  * Returns a SpeedTestResult.
  */
-async function readResponseStream(lease: OperationLease, stream: Readable, onChunk: (bytes: number) => void): Promise<number> {
+async function readResponseStream(lease: OperationLease, stream: Readable, onChunk: (bytes: number) => void, signal: AbortSignal): Promise<number> {
   const onAbort = () => { stream.destroy(new IpcFault('cancelled')) }
-  lease.signal.addEventListener('abort', onAbort, { once: true })
-  if (lease.signal.aborted) onAbort()
+  signal.addEventListener('abort', onAbort, { once: true })
+  if (signal.aborted) onAbort()
   return lease.wait((async () => {
     let bytes = 0
     try {
       for await (const chunk of stream) {
         lease.assertActive()
+        if (signal.aborted) throw new IpcFault('cancelled')
         bytes += chunk.length
         onChunk(chunk.length)
       }
       return bytes
-    } finally { lease.signal.removeEventListener('abort', onAbort) }
+    } finally { signal.removeEventListener('abort', onAbort) }
   })())
 }
 
@@ -200,14 +201,14 @@ function downloadUrl(target: typeof DOWNLOAD_URLS[number], bytes: number, runId:
   return `${target.url}${separator}cb=${encodeURIComponent(runId)}${streamIndex}`
 }
 
-async function downloadOne(lease: OperationLease, url: string, onChunk: (bytes: number) => void): Promise<number> {
+async function downloadOne(lease: OperationLease, url: string, onChunk: (bytes: number) => void, signal: AbortSignal): Promise<number> {
   lease.assertActive()
   let stream: Readable | undefined
   const onAbort = () => { stream?.destroy() }
-  lease.signal.addEventListener('abort', onAbort, { once: true })
+  signal.addEventListener('abort', onAbort, { once: true })
   try {
     const response = await lease.wait(axios.get(url, {
-      signal: lease.signal,
+      signal,
       responseType: 'stream',
       timeout: 180000,
       headers: { 'Cache-Control': 'no-cache' },
@@ -216,16 +217,16 @@ async function downloadOne(lease: OperationLease, url: string, onChunk: (bytes: 
       validateStatus: (status) => status >= 200 && status < 300
     }).then(response => {
       stream = response.data as Readable
-      if (lease.signal.aborted) {
+      if (signal.aborted) {
         onAbort()
         throw new IpcFault('cancelled')
       }
       return response
     }))
-    return await readResponseStream(lease, response.data as Readable, onChunk)
+    return await readResponseStream(lease, response.data as Readable, onChunk, signal)
   } finally {
-    lease.signal.removeEventListener('abort', onAbort)
-    if (lease.signal.aborted) onAbort()
+    signal.removeEventListener('abort', onAbort)
+    if (signal.aborted) onAbort()
   }
 }
 
@@ -234,15 +235,22 @@ async function measureDownloadRound(lease: OperationLease, target: typeof DOWNLO
   const expectedBytes = bytesPerStream * streams
   let receivedBytes = 0
   let startedAt = 0
+  const round = new AbortController(), signal = AbortSignal.any([lease.signal, round.signal])
 
-  await Promise.all(Array.from({ length: streams }, (_, index) => {
+  const downloads = Array.from({ length: streams }, (_, index) => {
     const url = downloadUrl(target, bytesPerStream, runId, index)
     return downloadOne(lease, url, (bytes) => {
       if (startedAt === 0) startedAt = Date.now()
       receivedBytes += bytes
       sendProgress(lease, progressPercent('download', receivedBytes, expectedBytes), 'download')
-    })
-  }))
+    }, signal)
+  })
+  try { await Promise.all(downloads) }
+  catch (error) {
+    round.abort()
+    await lease.wait(Promise.allSettled(downloads))
+    throw error
+  } finally { round.abort() }
 
   return mbpsFromBytes(receivedBytes, startedAt || Date.now())
 }
@@ -392,7 +400,7 @@ async function performSpeedTest(lease: OperationLease): Promise<SpeedTestResult>
       const testIp = ipResp.data?.ip
       if (testIp) {
         const { ipMonitor } = await lease.wait(import('./ipMonitor'))
-        const currentIp = await lease.wait(ipMonitor.getCurrentIp(() => !lease.signal.aborted))
+        const currentIp = await lease.wait(ipMonitor.getCurrentIp(() => !lease.signal.aborted, lease.signal))
         if (currentIp.ip && testIp !== currentIp.ip) {
           egressMismatch = true
           logEvent('warn', 'speed-test', 'egress IP mismatch: speed test may not have used the active VPN tunnel')
