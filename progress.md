@@ -3984,3 +3984,22 @@ CI/review нового SHA проверяются отдельно после pu
   (.tmp/wp0-refresh-qodo68-electron.log); `node scripts/test-wp1-native.mjs --ipc-only`
   — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-refresh-qodo68-csp.log). После push нужен
   новый completed Qodo и CI на окончательном SHA; initial CI их не заменяет.
+
+### PR #68 — повторная проверка и слияние
+
+- Qodo **1542683 completed** на **ed197ceaaeb26fbbd873368f2583e48a372b0e65**:
+  action_required и оба remediation_recommended — implemented. Осталось
+  только informational о типизированном conflict второго manual caller;
+  политика и граница UI описаны выше. Новых существенных findings нет.
+  Attribution проверен через API, вручную не менялся; ручного review request нет.
+- CI **39176689898 success** на том же SHA: ETW Rust, сайт и приложение
+  Windows (5m32s) зелёные, включая полный unit, traceability, production
+  IPC/CSP, WFP ABI/rollback и Electron reads. Watcher завершился exit 0.
+- PR #68 слит с ожидаемым SHA; отдельный REST GET подтвердил merged=true,
+  state=closed, merge **3afb09d43e88219fa4adbc23561cc780ac8cd523**.
+  Открытых PR после слияния не осталось. Следующий участок — импорт профилей,
+  ветка codex/wp0-profile-import от обновлённого main; код ещё не менялся.
+- Эта запись меняет только журнал/матрицу. Production совпадает с проверенным
+  ed197ce; последние проверки: typecheck exit 0, полный npm test 4285 passed /
+  5 skipped, build/native PASS, traceability AC 927/927 / F 210/210. Полная
+  WP-0 и следующая WP-2 остаются активной целью, завершение не заявлено.
