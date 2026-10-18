@@ -15,7 +15,8 @@ const targets = vi.hoisted(() => {
       ...target('Environment Variables'),
       scope: 'user-global' as const,
       warning: 'Environment backup warning',
-      backupPath: vi.fn(() => 'mock-env-backup.json')
+      backupPath: vi.fn(() => 'mock-env-backup.json'),
+      matchesProxy: vi.fn()
     },
     git: target('Git')
   }
@@ -33,6 +34,18 @@ describe('autoconfig strict status', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     for (const target of Object.values(targets)) target.isApplied.mockResolvedValue(false)
+  })
+
+  it.each([true, false, 'error'] as const)('uses actual env endpoint evidence without suppressing read failure: %s (AT-00-005)', async result => {
+    if (result === 'error') {
+      targets.env.matchesProxy.mockRejectedValueOnce(new Error('registry denied'))
+      await expect(autoconfig.isEnvProxyConfigured('127.0.0.1:10808', 'http')).rejects.toThrow('registry denied')
+    } else {
+      targets.env.matchesProxy.mockResolvedValueOnce(result)
+      expect(await autoconfig.isEnvProxyConfigured('127.0.0.1:10808', 'http')).toBe(result)
+    }
+    expect(targets.env.matchesProxy).toHaveBeenCalledWith('127.0.0.1:10808', 'http')
+    expect(targets.env.isApplied).not.toHaveBeenCalled()
   })
 
   it.each([true, false])('returns the env target result unchanged: %s', async (applied) => {

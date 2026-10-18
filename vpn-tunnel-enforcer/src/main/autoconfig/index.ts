@@ -22,6 +22,10 @@ const targets: Record<string, {
 }
 
 export const autoconfig = {
+  isEnvProxyConfigured(proxyAddr: string, proxyType: 'socks5' | 'http'): Promise<boolean> {
+    return env.matchesProxy(proxyAddr, proxyType)
+  },
+
   async apply(
     targetIds: string[],
     proxyAddr: string,

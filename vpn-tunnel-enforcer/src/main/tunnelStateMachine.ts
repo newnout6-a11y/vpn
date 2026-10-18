@@ -14,6 +14,7 @@ export class TunnelStateMachine {
   private reconnectEligible = false
   private nativeGeneration = 0
   private expectedNativeGeneration: number | null = null
+  private retainedSoftOperation: string | null = null
 
   constructor(private readonly readEvidence: () => TunnelEvidence, private readonly onChange: (snapshot: TunnelSnapshot) => void = () => {}) {}
 
@@ -31,6 +32,10 @@ export class TunnelStateMachine {
   canConfirmStop(): boolean {
     const e = this.evidence()
     return e !== null && !e.running && e.pid === null && !e.softApplied
+  }
+  private canRetainSoft(): boolean {
+    const e = this.evidence()
+    return e !== null && !this.faultDuringOperation && e.softApplied && !e.running && e.pid === null
   }
   private commit(patch: Partial<TunnelSnapshot>): { success: true } {
     const e = this.evidence()
@@ -54,6 +59,7 @@ export class TunnelStateMachine {
   operationChanged(operation: ConnectionOperation) {
     if (operation.status === 'running') {
       if (this.current.operation?.status === 'running' && operation.kind !== 'disconnect') return invalid()
+      this.retainedSoftOperation = null
       this.faultDuringOperation = false
       this.reconnectEligible = false
       this.expectedNativeGeneration = null
@@ -64,7 +70,9 @@ export class TunnelStateMachine {
     if (operation.status === 'success') state = operation.kind === 'connect'
       ? this.canConfirmStart() ? 'connected' : 'unknown'
       : this.canConfirmStop() ? 'disconnected' : 'unknown'
+    else if (operation.status === 'error' && !operation.category && this.retainedSoftOperation === operation.operationId && this.canRetainSoft()) state = 'connected'
     else if (state !== 'blocked' && state !== 'unknown') state = 'error'
+    this.retainedSoftOperation = null
     const e = this.evidence()
     return this.commit({ operation: { ...operation }, transition: null, state,
       mode: state === 'connected' ? e?.running ? 'tun' : 'soft' : null, cleanupRequired: state !== 'disconnected',
@@ -72,10 +80,21 @@ export class TunnelStateMachine {
   }
 
   fault(state: Extract<TunnelState, 'error' | 'blocked' | 'unknown'>) {
+    this.retainedSoftOperation = null
     this.faultDuringOperation = true
     this.reconnectEligible = false
     this.expectedNativeGeneration = null
     return this.commit({ state, mode: null, cleanupRequired: true, ...(this.current.operation?.status === 'running' ? {} : { transition: null }) })
+  }
+
+  /** Main has read back the original env endpoint after a failed refresh.
+   * Keep the failed action separate from the still-confirmed Soft protection. */
+  confirmRetainedSoft(operationId: string) {
+    if (this.current.operation?.operationId !== operationId || this.current.operation.status !== 'running'
+      || this.current.operation.kind !== 'connect' || this.current.state !== 'connected' || this.current.mode !== 'soft'
+      || this.current.transition !== 'connecting' || !this.canRetainSoft()) return invalid()
+    this.retainedSoftOperation = operationId
+    return { success: true } as const
   }
 
   runtimeChanged(status: string) {

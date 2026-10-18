@@ -20,6 +20,25 @@ function compile(name:string,deps:Record<string,unknown>) {
 }
 beforeEach(()=>useAppStore.setState({tunnelSnapshot:null,connectionBusy:null,connectionCancelling:false,serverSwitchingName:null,publicIp:null,isLeak:false}))
 describe('canonical App event handling',()=>{
+  it('keeps renderer Soft mode after a failed refresh with confirmed prior endpoint (AT-00-008)',async()=>{
+    const stoppingNowRef={current:false},tunEventSeqRef={current:0}
+    const deps={useAppStore,stoppingNowRef,tunEventSeqRef,addLog:vi.fn(),verifyActiveServerCountry:vi.fn(async()=>{})}
+    const onSnapshot=compile('onTunnelStateChanged',deps)
+    const refresh=vi.spyOn(useAppStore.getState(),'refreshFirewallKillSwitchStatus').mockResolvedValue(undefined)
+    try {
+      const os={running:false,pid:null,softApplied:false}
+      const model=new TunnelStateMachine(()=>os,onSnapshot),lane=new ConnectionLifecycle(()=>{},undefined,undefined,model)
+      await lane.start(async()=>{os.softApplied=true;return {success:true}})
+      expect(useAppStore.getState().mode).toBe('soft')
+      const result=await lane.start(async owner=>{
+        expect(model.confirmRetainedSoft(owner.operation.operationId).success).toBe(true)
+        return {success:false,error:'refresh failed'}
+      },{refreshSoft:true})
+      expect(result).toMatchObject({success:false})
+      expect(useAppStore.getState()).toMatchObject({mode:'soft',connectionBusy:null,tunRunning:false,
+        tunnelSnapshot:{state:'connected',transition:null,operation:{status:'error'}}})
+    } finally {refresh.mockRestore()}
+  })
   it('accepts leak events after connect, suppresses them during stop, and rejects stale snapshot side effects',async()=>{
     const stoppingNowRef={current:false},tunEventSeqRef={current:0}
     const deps={useAppStore,stoppingNowRef,tunEventSeqRef,addLog:vi.fn(),verifyActiveServerCountry:vi.fn(async()=>{})}

@@ -3586,3 +3586,124 @@ CI/review нового SHA проверяются отдельно после pu
   — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-event-time-qodo65-csp.log).
   Coverage AC 927/927, F 210/210 и `git diff --check` — exit 0. Native scope
   не расширен до packet/resource/OS-matrix приёмки.
+
+### PR #65 — повторное ревью и слияние
+
+- Итоговый head 8f19b2e8b3549752df6e9607345df9bd617e2ffa: Qodo 1541967
+  completed, прежний finding implemented, новых нет. CI 39167728768
+  completed/success, все три jobs зелёные на этом SHA.
+- Слит после повторных проверок; REST GET merged=true,
+  merge d8e096552042a15b1ff8c5b54d35a2616c986b45.
+
+## WP-0 — фактическая история Soft sessions (19.10.2026)
+
+- AT-00-005 / F-143: успешный startSoftProtectionEffects открывает LiveSession
+  после завершения env apply. Identical refresh сохраняет origin/ID, смена
+  address/type закрывает прежнюю сессию как server-switch и открывает новую.
+  Failed refresh пишет свою попытку, сохраняя предыдущую live-сессию.
+- История проходит реальные owned/legacy env/tray/recovery entrypoints;
+  source/owner берутся из их admission. Missing-proxy Soft tray отказ теперь
+  тоже записывается до admission, с собственным tray action ID.
+- Native stop/node-switch callbacks не закрывают Soft session. Soft stop и
+  shutdown закрывают её только после успешного env rollback/доказанного отсутствия
+  obligation; отказ оставляет её для retry. Переключение на native закрывает
+  Soft после подтверждённого rollback. Hard/Direct правила native exit не ослаблены.
+- Native trafficMonitor не измеряет env-only трафик; для Soft счётчики записываются
+  нулевыми, без приписывания оставшихся native bytes. Это не доказательство
+  отсутствия трафика или packet-level защиты. Duration и provenance сохранены.
+- До production-исправления `npm.cmd test -- src/main/connectionHistoryStorage.test.ts`
+  — **8 failed / 86 passed**, 3.59 s, exit 1 (.tmp/wp0-soft-history-before.log).
+  Это регрессии отсутствия Soft session history и её происхождения.
+- `npm.cmd test -- src/main/connectionHistoryStorage.test.ts src/main/lifecycleCleanup.test.ts src/main/connectionOperations.test.ts src/main/actionCorrelationScope.test.ts`
+  — **299 passed / 4 files**, 23.01 s, exit 0
+  (.tmp/wp0-soft-history-focused-final.log). Actual main bodies, production lane/FSM,
+  callbacks, real Conf reload; OS/env operations заменены. Проверены refresh,
+  protocol/address switch, failed apply, cancellation + late completion, rollback
+  retry и shutdown ordering. Это не installed/native env acceptance.
+- `npm.cmd run typecheck` — exit 0, 158 channels / 0 public any
+  (.tmp/wp0-soft-history-typecheck.log). Общие background/native owners, общий
+  registry операций и прочие остатки WP-0 не объявляются завершёнными.
+- Полный `npm.cmd test` — **4175 passed / 5 skipped / 0 failed**,
+  264 files passed / 2 skipped, 158.36 s, exit 0
+  (.tmp/wp0-soft-history-full.log). `npm.cmd run build` — exit 0
+  (.tmp/wp0-soft-history-build.log).
+- `node scripts/test-electron-runtime.mjs` — ELECTRON_SMOKE_PASS, exit 0
+  (.tmp/wp0-soft-history-electron.log); `node scripts/test-wp1-native.mjs --ipc-only`
+  — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-soft-history-csp.log).
+  `python docs/04-приёмочные-тесты/traceability/check-coverage.py` —
+  AC 927/927, F 210/210, exit 0; `git diff --check` — exit 0.
+  Native smoke ограничен Electron/IPC/CSP, OS/env эффекты в Soft fixtures
+  заменены: полная Windows env/packet приёмка этим не заявляется.
+
+### Qodo #66 — проверка прежнего endpoint после failed refresh
+
+- Head bcd82472d9d1cd76e6505ade029782392103bbc1: Qodo 1542087 completed.
+  Finding 1077a56c-5066-45cc-82e0-9bfbc7112659 action_required подтверждён:
+  failed refresh мог частично изменить env, а compensation тоже мог отказать.
+  Одного durable backup недостаточно, чтобы продолжать прежнюю сессию.
+- Main теперь читает все четыре registry/process env значения через actual
+  env.matchesProxy и autoconfig dispatcher. Старый endpoint сохраняет history
+  только при подтверждении. Ошибка чтения/несовпадение закрывает её с unknown /
+  confidence=indeterminate, переводит FSM в unknown, сохраняя rollback receipt.
+  Evidence read участвует в owner.wait; отмена не пишет поздних событий.
+- Finding 13f591ff-c9a1-4c6c-a928-1210c73885ef remediation_recommended:
+  missing-proxy tray отказ использует тот же type-specific Soft profile ID.
+  Informational 153e616b-6aa4-41a5-a908-f36f527e228c также учтён: перед
+  Hard/Direct startup итог Soft не объявляется server-switch с продолжением
+  сессии. Запись явно говорит об отключении перед запуском другого режима,
+  достоверность следующего запуска не заявляется.
+- До production fix `npm.cmd test -- src/main/connectionHistoryStorage.test.ts src/main/autoconfig/env.test.ts`
+  — **18 failed / 184 passed**, 3.81 s, exit 1
+  (.tmp/wp0-soft-qodo66-before.log): новые read-back контракты и регрессии.
+- `npm.cmd test -- src/main/connectionHistoryStorage.test.ts src/main/lifecycleCleanup.test.ts src/main/autoconfig/env.test.ts src/main/autoconfig/index.test.ts`
+  — **396 passed / 4 files**, 22.35 s, exit 0
+  (.tmp/wp0-soft-qodo66-focused-evidence.log). Проверены partial mutation с
+  compensation failure, каждый registry/process key, read denial, cancellation
+  во время read-back и настоящая запись/reload истории. OS commands заменены.
+- `npm.cmd run typecheck` — exit 0, 158 channels / 0 public any
+  (.tmp/wp0-soft-qodo66-typecheck-final.log); coverage AC 927/927, F 210/210
+  и `git diff --check` — exit 0.
+- Первый полный `npm.cmd test` — **1 failed / 4193 passed / 5 skipped**,
+  164.76 s, exit 1 (.tmp/wp0-soft-qodo66-full.log). Единственный отказ:
+  неизменённый native PowerShell gateway-only fixture adaptiveNetworkIdentity
+  превысил Vitest timeout 5 s (10.482 s). Адресный повтор
+  `npm.cmd test -- src/main/adaptiveNetworkIdentity.test.ts` — **25 passed**,
+  2.48 s, exit 0 (.tmp/wp0-soft-qodo66-native-recheck.log).
+  Тест не отключён, лимит не ослаблен; запускается повтор полного набора.
+- Повтор полного `npm.cmd test` — **4194 passed / 5 skipped / 0 failed**,
+  264 files passed / 2 skipped, 157.51 s, exit 0
+  (.tmp/wp0-soft-qodo66-full-recheck.log).
+- `npm.cmd run build` — exit 0 (.tmp/wp0-soft-qodo66-build.log);
+  `node scripts/test-electron-runtime.mjs` — ELECTRON_SMOKE_PASS, exit 0
+  (.tmp/wp0-soft-qodo66-electron.log); `node scripts/test-wp1-native.mjs --ipc-only`
+  — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-soft-qodo66-csp.log).
+  Проверки прежнего head не используются как evidence исправленного коммита.
+
+### Qodo #66 — неуспех refresh отдельно от состояния прежней защиты
+
+- Qodo 1542154 completed на ffdf0816381ca7a576321ccb2f92fe006b6e494d:
+  три прежних findings implemented; новый c6d41002-0c06-4eaf-a886-778c2f1ce12c
+  action_required подтверждён. При доказанном старом endpoint history оставалась,
+  но failed operation переводила FSM в error и настоящий renderer ставил mode=off.
+- FSM принимает отдельное подтверждение сохранённого Soft endpoint только
+  для текущей connecting operation поверх прежнего connected/soft. Failed
+  refresh остаётся operation.status=error / result.success=false; состояние
+  защиты остаётся connected/soft. Подтверждение не переносится на следующую
+  операцию и не переживает fault, cancel, stale ID, потерю env или native PID.
+  Internal exception после read-back не маскируется сохранённой защитой.
+- Regression до fix `npm.cmd test -- src/main/connectionHistoryStorage.test.ts`
+  — **1 failed / 101 passed**, 3.87 s, exit 1
+  (.tmp/wp0-soft-qodo66-retained-before.log): фактический snapshot был error/null.
+- `npm.cmd test -- src/main/connectionHistoryStorage.test.ts src/main/tunnelStateMachine.test.ts src/renderer/App.lifecycle.test.ts src/main/lifecycleCleanup.test.ts src/main/connectionOperations.test.ts src/main/actionCorrelationScope.test.ts`
+  — **340 passed / 6 files**, 24.96 s, exit 0
+  (.tmp/wp0-soft-qodo66-retained-focused-final.log). Actual main + Conf history,
+  production FSM/lane и настоящий App callback с Zustand. OS effects заменены.
+- `npm.cmd run typecheck` — exit 0, 158 channels / 0 public any
+  (.tmp/wp0-soft-qodo66-retained-typecheck.log); `git diff --check` — exit 0.
+- Полный `npm.cmd test` — **4205 passed / 5 skipped / 0 failed**,
+  264 files passed / 2 skipped, 155.70 s, exit 0
+  (.tmp/wp0-soft-qodo66-retained-full.log). Coverage AC 927/927, F 210/210 — exit 0.
+- `npm.cmd run build` — exit 0 (.tmp/wp0-soft-qodo66-retained-build.log);
+  `node scripts/test-electron-runtime.mjs` — ELECTRON_SMOKE_PASS, exit 0
+  (.tmp/wp0-soft-qodo66-retained-electron.log); `node scripts/test-wp1-native.mjs --ipc-only`
+  — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-soft-qodo66-retained-csp.log).
