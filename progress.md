@@ -2140,3 +2140,40 @@ CI/review нового SHA проверяются отдельно после pu
   итог: `npm.cmd test` — 3702 passed / 5 skipped / 0 failed, 241 файлов
   passed / 2 skipped, 187.16 s, exit 0; `.tmp/wp0-ipc-review-full-final.log`.
   Повторный `npm.cmd run typecheck` — exit 0, 157 channels.
+
+## 18.10.2026 — PR #49 слит; WP-0 остаётся в работе
+
+- PR https://github.com/newnout6-a11y/vpn/pull/49 слит: merge
+  7324593c1d7534565279033a1572bc02147ff0df, проверенный head
+  7c9c8a16d4166a38b0597e21450e0d9182067aa7. `git diff 7c9c8a1 vpn/main
+  --exit-code` — 0, merge не изменил проверенное дерево.
+- Fresh exact-head CI run 39118780451 — все три success. Windows
+  117649915612: 3703 passed / 4 skipped / 0 failed, 242 файлов passed /
+  1 skipped, 240.88 s; typecheck/157 channels и coverage AC 927/927,
+  F 210/210 — exit 0; WFP aborted:true; native Electron 1 passed /
+  1 skipped. Rust 117649915618 и сайт 117649915518 — success.
+  Полный Windows лог `.tmp/wp0-ipc-final-ci.log` в приложении.
+- Fresh Revix 117649920118 — completed/neutral; review 5562529233
+  на том же head. Единственный новый комментарий 4306653327 — nitpick
+  об Array.findLast в тесте. Сохранена copied/reversed mock.calls:
+  findLast недоступен в текущем TS lib (фактически получен TS2550), менять
+  lib приложения ради теста не нужно. Ответ 4306656358. Это не Low-risk
+  badge: автоматический summary пишет needs-changes при одном nitpick;
+  фактический новый feedback только незначительный, что допускает владелец.
+  Подтверждённый issue 4306608229 исправлен реальным log test;
+  question 4306608232 закрыт en/ru и native oracle; suggestion 4306608234
+  учтён точной формулировкой оставшихся bounded object schemas.
+- Продолжение — codex/wp0-renderer-errors от нового vpn/main. Следующий
+  участок AT-00-001/004: типизированные ошибки в main world, глубокие
+  legacy schemas/any и domain-result failures. Локальный изолированный
+  native probe `.tmp/ipc-rejection-probe.mjs` уже подтвердил, что Promise
+  rejection plain object сохраняет message/code/category/correlationId
+  через contextBridge (isError=false), в отличие от custom Error props.
+  Это исследование варианта, не реализованный adapter: при миграции
+  надо сохранить существующую семантику renderer catch/instanceof Error.
+  FSM/coordinator, registry отмены/deadline, audit correlation, migrations,
+  races/UI/flags и общая operation history остаются по матрице acceptance.
+  WP-0 не завершён, WP-2 не начат; цель остаётся active.
+- Этот коммит дописывает журнал, production code после полного DoD и
+  exact-head CI не менялся. Нормативные docs/ не редактировались;
+  сохранены прежние .claude/, .wrangler/, .playwright-cli/ и output/.
