@@ -137,6 +137,9 @@ export function installTrustedIpcBoundary(): void {
     if (!isIpcChannel(channel)) throw new IpcValidationError(`Unregistered IPC channel: ${channel}`)
     return originalHandle(channel, async (event, ...args): Promise<IpcResult<unknown>> => {
       const correlationId = randomUUID()
+      // A bare UUID is a credential-shaped value to the logger redactor.
+      // This reversible opaque form preserves all 128 bits without weakening it.
+      const auditCorrelationId = `ipc_${correlationId.replaceAll('-', '')}`
       let trusted = false
       try {
         assertTrustedIpcSender(event)
@@ -147,7 +150,7 @@ export function installTrustedIpcBoundary(): void {
         // Never log rejected payloads, frame URLs, or exception text supplied
         // by the caller: the source can include credentials and huge strings.
         logEvent('warn', 'ipc-security', 'IPC request rejected', {
-          channel, correlationId, status: 'error',
+          channel, correlationId: auditCorrelationId, status: 'error',
           senderId: event.sender?.id ?? null,
           mainFrame: Boolean(event.senderFrame && event.senderFrame === event.sender?.mainFrame),
           reason: error instanceof IpcValidationError ? 'invalid-payload' : 'untrusted-sender'
@@ -158,7 +161,7 @@ export function installTrustedIpcBoundary(): void {
         return { version: IPC_VERSION, correlationId, ok: true, result: await listener(event, ...args) }
       } catch (error) {
         const category = classifyIpcError(error)
-        logEvent('error', 'ipc-security', 'IPC request failed', { channel, correlationId, status: 'error', reason: category })
+        logEvent('error', 'ipc-security', 'IPC request failed', { channel, correlationId: auditCorrelationId, status: 'error', reason: category })
         return { version: IPC_VERSION, correlationId, ok: false, error: ipcError(category) }
       }
     })

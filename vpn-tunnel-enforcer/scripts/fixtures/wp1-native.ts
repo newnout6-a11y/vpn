@@ -12,6 +12,7 @@ import { installTrustedIpcBoundary, registerTrustedRenderer } from '../../src/ma
 import { copySecretToClipboard } from '../../src/main/secretClipboard'
 import { verifyDirectoryHardened } from '../../src/main/runtimeDirSecurity'
 import { logEvent, getFullLogs } from '../../src/main/appLogger'
+import { ipcError, type IpcErrorLocale } from '../../src/shared/ipc-result'
 
 const work = process.env.VPNTE_WP1_WORK!
 app.setPath('userData', join(work, 'userData')); app.setPath('sessionData', join(work, 'sessionData'))
@@ -46,6 +47,7 @@ app.whenReady().then(async () => {
   ipcMain.handle('get-tun-status', () => ({ running: false }))
   const file = pathToFileURL(join(work, 'renderer.html')).href
   const w = window(); registerTrustedRenderer(w.webContents, file); await w.loadURL(file)
+  const locale: IpcErrorLocale = await w.webContents.executeJavaScript(`navigator.language.startsWith('ru') ? 'ru' : 'en'`)
   const violations = await w.webContents.executeJavaScript(`(async () => {
     const reports = []; window.addEventListener('securitypolicyviolation', e => reports.push(e.violatedDirective));
     const inline = document.createElement('script'); inline.textContent = 'window.INLINE_RAN=true'; document.body.append(inline);
@@ -62,9 +64,9 @@ app.whenReady().then(async () => {
   const success = await w.webContents.executeJavaScript(`window.electronAPI.getTunStatus()`)
   assert.deepEqual(success, { running: false })
   const bad = await w.webContents.executeJavaScript(`window.electronAPI.saveSettings({ bad: NaN }).then(() => 'accepted', e => e.message)`)
-  assert.equal(bad, 'Некорректные параметры операции'); assert.equal(effects, 0)
+  assert.equal(bad, ipcError('validation', locale).message); assert.equal(effects, 0)
   const foreign = window(); await foreign.loadURL(file)
-  assert.equal(await foreign.webContents.executeJavaScript(`window.electronAPI.saveSettings({}).then(() => 'accepted', e => e.message)`), 'Недостаточно прав для операции')
+  assert.equal(await foreign.webContents.executeJavaScript(`window.electronAPI.saveSettings({}).then(() => 'accepted', e => e.message)`), ipcError('permission', locale).message)
   checks.push('AT-01-003 native unknown WebContents has zero handler effects')
 
   // Deliberately expose ipcRenderer in subframes only in this adversarial

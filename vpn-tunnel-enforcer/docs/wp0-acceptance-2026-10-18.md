@@ -124,7 +124,20 @@ Preload снимает transport envelope; существующие domain resul
 
 Сообщения заданы константами в `ipc-result.ts`; произвольный текст исключения
 не сериализуется. Даже бросающий getter code/name остаётся внутри safe envelope.
-Correlation id ошибки совпадает с bounded guard audit metadata.
+Bounded guard audit metadata использует обратимое `ipc_` + UUID без дефисов:
+все 128 бит сохранены и однозначно соответствуют envelope correlationId.
+Голый UUID redactor справедливо скрывает как потенциальный credential;
+политика редактирования секретов не ослаблена. `ipcAuditLog.test.ts` проверяет
+настоящую guard, настоящий logger/redactor и файл app.log, включая positive
+control скрытия голого UUID. Это закрывает Revix issue 4306608229.
+
+Canonical сообщения имеют en/ru варианты. Preload выбирает исходный язык
+из navigator так же, как renderer i18n, затем учитывает persisted get-locale,
+успешный set-locale и межоконное событие locale-changed. Текст main exception
+при этом по-прежнему не используется. Unit и native smoke подтверждают
+English/Russian без зависимости от языка Windows. Это ответ на 4306608232.
+Suggestion 4306608234 учтён сужением документации и комментария реестра:
+bounded legacy object не объявлен полной field schema; остаток явный.
 
 `ipcContractAcceptance.test.ts` проводит все 157 channels через production guard:
 допустимые wire args, неверный тип каждого аргумента, лишний аргумент, чужой

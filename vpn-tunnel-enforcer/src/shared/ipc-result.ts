@@ -9,9 +9,15 @@ export const IPC_ERRORS = {
   cancelled: { code: 'IPC_CANCELLED', message: 'Операция отменена' },
   timeout: { code: 'IPC_TIMEOUT', message: 'Истекло время выполнения операции' }
 } as const
+const IPC_ERROR_MESSAGES_EN: Record<keyof typeof IPC_ERRORS, string> = {
+  validation: 'Invalid operation parameters', permission: 'Permission denied',
+  network: 'Network operation failed', conflict: 'Operation unavailable in the current state',
+  internal: 'Operation failed', cancelled: 'Operation cancelled', timeout: 'Operation timed out'
+}
+export type IpcErrorLocale = 'en' | 'ru'
 export type IpcErrorCategory = keyof typeof IPC_ERRORS
 export type IpcError = { [C in IpcErrorCategory]: {
-  category: C; code: typeof IPC_ERRORS[C]['code']; message: typeof IPC_ERRORS[C]['message']
+  category: C; code: typeof IPC_ERRORS[C]['code']; message: string
 } }[IpcErrorCategory]
 export type IpcResult<T> = { version: typeof IPC_VERSION; correlationId: string } & (
   | { ok: true; result: T }
@@ -25,8 +31,8 @@ export class IpcValidationError extends IpcFault {
   readonly code = 'IPC_VALIDATION_ERROR'
   constructor(message: string) { super('validation'); this.message = message; this.name = 'IpcValidationError' }
 }
-export function ipcError(category: IpcErrorCategory): IpcError {
-  return { category, ...IPC_ERRORS[category] } as IpcError
+export function ipcError(category: IpcErrorCategory, locale: IpcErrorLocale = 'ru'): IpcError {
+  return { category, ...IPC_ERRORS[category], message: locale === 'en' ? IPC_ERROR_MESSAGES_EN[category] : IPC_ERRORS[category].message } as IpcError
 }
 
 /** Stable categories at the privileged boundary; never serialize arbitrary errors. */
@@ -52,7 +58,7 @@ export class IpcRemoteError extends Error {
   }
 }
 
-export function unwrapIpcResult<T>(value: unknown): T {
+export function unwrapIpcResult<T>(value: unknown, locale: IpcErrorLocale = 'ru'): T {
   if (value && typeof value === 'object' && 'version' in value && value.version === IPC_VERSION
     && 'correlationId' in value && typeof value.correlationId === 'string'
     && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value.correlationId)
@@ -61,10 +67,10 @@ export function unwrapIpcResult<T>(value: unknown): T {
     if (value.ok === false && 'error' in value && value.error && typeof value.error === 'object'
       && 'category' in value.error && typeof value.error.category === 'string'
       && Object.hasOwn(IPC_ERRORS, value.error.category)) {
-      const canonical = ipcError(value.error.category as IpcErrorCategory)
+      const canonical = ipcError(value.error.category as IpcErrorCategory, locale)
       // Use the canonical message even if a corrupted response supplies text.
       throw new IpcRemoteError(canonical, value.correlationId)
     }
   }
-  throw new IpcRemoteError(ipcError('internal'))
+  throw new IpcRemoteError(ipcError('internal', locale))
 }

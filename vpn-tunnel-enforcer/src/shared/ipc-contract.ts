@@ -30,7 +30,9 @@ const externalOptions = object({ slot: optional(slot), country: optional(string)
 const liveOptions = object({ requestId: optional(string), profileId: optional(string), host: optional(string), port: optional(port), mode: optional(oneOf(['basic', 'extended'])) })
 const batchOptions = object({ requestId: optional(string), profileIds: { type: 'strings', min: 1, max: 12 }, mode: optional(oneOf(['basic', 'extended'])) })
 
-/** Request channels only. Notifications retain their separate event API. */
+/** Request channels only; object() without fields is a bounded legacy object,
+ * not a deep semantic schema. Feature validators remain authoritative there.
+ * Notifications retain their separate event API. */
 export const IPC_REQUESTS = {
   'detect-happ': request('detectHapp', []),
   'get-public-ip': request('getPublicIp', []),

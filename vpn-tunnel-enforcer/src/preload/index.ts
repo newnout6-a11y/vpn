@@ -1,7 +1,7 @@
 import type { PublicIpInfo } from '../shared/publicIp'
 import { contextBridge, ipcRenderer } from 'electron'
 import { assertIpcRequest, type IpcChannel, type IpcRequest, type IpcResponse } from '../shared/ipc-contract'
-import { unwrapIpcResult, IpcRemoteError, ipcError } from '../shared/ipc-result'
+import { unwrapIpcResult, IpcRemoteError, ipcError, type IpcErrorLocale } from '../shared/ipc-result'
 import type {
   ClientDevice,
   ExternalProxyStartOptions,
@@ -142,11 +142,14 @@ function assertLiveCheckOptions(value: unknown): LiveServerCheckOptions {
   }
 }
 
+let ipcLocale: IpcErrorLocale = typeof navigator !== 'undefined' && navigator.language?.startsWith('ru') ? 'ru' : 'en'
+function rememberIpcLocale(locale: unknown): void { if (locale === 'en' || locale === 'ru') ipcLocale = locale }
+
 function invoke<C extends IpcChannel>(channel: C, ...args: IpcRequest<C>): Promise<IpcResponse<C>> {
   assertIpcRequest(channel, args)
   return ipcRenderer.invoke(channel, ...args).then(
-    response => unwrapIpcResult<IpcResponse<C>>(response),
-    () => { throw new IpcRemoteError(ipcError('internal')) }
+    response => unwrapIpcResult<IpcResponse<C>>(response, ipcLocale),
+    () => { throw new IpcRemoteError(ipcError('internal', ipcLocale)) }
   )
 }
 
@@ -363,8 +366,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   ipMonitorSuspend: () => invoke('ip-monitor:suspend'),
   ipMonitorResume: () => invoke('ip-monitor:resume'),
   // i18n
-  i18nGetLocale: () => invoke('i18n:get-locale'),
-  i18nSetLocale: (locale: string) => invoke('i18n:set-locale', assertString(locale, 'locale')),
+  i18nGetLocale: () => invoke('i18n:get-locale').then(locale => { rememberIpcLocale(locale); return locale }),
+  i18nSetLocale: (locale: string) => invoke('i18n:set-locale', assertString(locale, 'locale')).then(result => { rememberIpcLocale(locale); return result }),
   i18nGetSystemLocale: () => invoke('i18n:get-system-locale'),
   // Theme
   themeList: () => invoke('theme:list'),
@@ -388,7 +391,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => ipcRenderer.removeListener('kill-switch:traffic-blocked', handler)
   },
   onI18nLocaleChanged: (callback: (locale: string) => void) => {
-    const handler = (_event: any, locale: string) => callback(locale)
+    const handler = (_event: any, locale: string) => { rememberIpcLocale(locale); callback(locale) }
     ipcRenderer.on('i18n:locale-changed', handler)
     return () => ipcRenderer.removeListener('i18n:locale-changed', handler)
   },

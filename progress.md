@@ -2098,3 +2098,45 @@ CI/review нового SHA проверяются отдельно после pu
   file:// или абсолютного Windows path. Повторный
   `node scripts/test-electron-runtime.mjs` — exit 0; production код после
   полного unit-прогона не менялся (только type imports/comment и native oracle).
+
+## 18.10.2026 — PR #49: доработка Revix
+
+- Начальный head 45dc8c4 завершил все три CI success, run 39117643651:
+  Windows 117646629483 — 3699 passed / 4 skipped; traceability 927/927 AC,
+  210/210 F; WFP transaction aborted:true; native Electron 1 passed /
+  1 skipped. Rust 117646629770 и сайт 117646629939 — success. Полный
+  Windows лог `.tmp/wp0-ipc-initial-ci.log`. Эти результаты относятся
+  к начальному head, а не автоматически к последующим исправлениям.
+- Revix 117646578791, review 5562483215: issue 4306608229 подтверждён.
+  Logger редактирует голый UUID. Audit correlation теперь равен ipc_ +
+  response UUID без дефисов: обратимое соответствие всех 128 бит.
+  Redactor не ослаблен. Новый ipcAuditLog.test.ts использует production
+  guard, logger, redactor и настоящий файл app.log; отдельно доказывает,
+  что голый UUID по-прежнему скрывается, а opaque correlation сохраняется
+  для отказа валидации и исключения listener, без секретов/путей.
+- Question 4306608232: прежний renderer не переводил canonical сообщения.
+  Добавлены en/ru сообщения непосредственно в decoder. Язык совпадает с
+  начальным navigator renderer i18n, затем обновляется persisted get-locale,
+  успешным set-locale и межоконным событием. Произвольный текст main error
+  всё равно отбрасывается. Unit проверяет оба языка и event/set изменение;
+  настоящий Electron smoke — смену en/ru и ошибку через contextBridge.
+- Suggestion 4306608234: утверждение о глубокой semantic schema сужено
+  в комментарии реестра и acceptance report. object() без fields обозначает
+  bounded legacy object, не полный контракт бизнес-полей; остаток WP-0
+  не скрыт и полный AT-00-001/004 не объявлен PASS.
+- `npm.cmd test -- src/main/ipcAuditLog.test.ts src/main/ipcContractAcceptance.test.ts src/preload/preloadValidation.test.ts src/main/ipcChannelContract.test.ts`
+  — 356 passed, 4 файла, 1.44 s, exit 0. `npm.cmd run build` (включает
+  typecheck/157-channel check) — exit 0, `.tmp/wp0-ipc-review-build.log`.
+  `node scripts/test-electron-runtime.mjs` и
+  `node scripts/test-wp1-native.mjs --ipc-only` — exit 0; после усиления
+  native locale assertions первый smoke повторён, exit 0.
+  Coverage — AC 927/927, F 210/210, exit 0; diff checks — exit 0.
+- Первый полный прогон доработки: 3701 passed / 1 failed / 5 skipped,
+  207.02 s. Единственный отказ — 5 s timeout существующего read-only
+  PowerShell parser fixture runtimeDirSecurity.test.ts (5806 ms), без
+  изменения этих production scripts. Отдельный повтор
+  `npm.cmd test -- src/main/runtimeDirSecurity.test.ts` — 103 passed,
+  5.55 s, exit 0. Полный прогон повторён без параллельных native/build;
+  итог: `npm.cmd test` — 3702 passed / 5 skipped / 0 failed, 241 файлов
+  passed / 2 skipped, 187.16 s, exit 0; `.tmp/wp0-ipc-review-full-final.log`.
+  Повторный `npm.cmd run typecheck` — exit 0, 157 channels.

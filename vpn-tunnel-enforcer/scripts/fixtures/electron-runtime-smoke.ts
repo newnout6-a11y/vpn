@@ -7,6 +7,7 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { once } from 'node:events'
 import { installTrustedIpcBoundary, registerTrustedRenderer } from '../../src/main/ipcSecurity'
 import { encryptSecret, decryptSecret } from '../../src/main/secretStorage'
+import { ipcError, type IpcErrorLocale } from '../../src/shared/ipc-result'
 
 const work = process.env.VPNTE_SMOKE_DIR!
 app.setPath('userData', join(work, 'userData'))
@@ -57,6 +58,8 @@ app.whenReady().then(async () => {
   ipcMain.handle('get-tun-status', () => ({ running: false, smoke: true }))
   let settingsCalls = 0
   ipcMain.handle('save-settings', () => { settingsCalls++; return { ok: true } })
+  ipcMain.handle('i18n:get-locale', () => 'en')
+  ipcMain.handle('i18n:set-locale', () => undefined)
   const file = pathToFileURL(join(work, 'renderer.html')).href
   const trusted = window()
   registerTrustedRenderer(trusted.webContents, file)
@@ -68,26 +71,34 @@ app.whenReady().then(async () => {
   await reloaded
   await bridge(trusted)
   checks.push('contextBridge survives reload')
+  const locale: IpcErrorLocale = await trusted.webContents.executeJavaScript(`navigator.language.startsWith('ru') ? 'ru' : 'en'`)
   const badPayload = await trusted.webContents.executeJavaScript(`
     window.electronAPI.saveSettings({ value: NaN }).then(() => ({ message: 'accepted' }), e => ({ message: e.message, stack: e.stack }))
   `)
-  assert.equal(badPayload.message, 'Некорректные параметры операции')
+  assert.equal(badPayload.message, ipcError('validation', locale).message)
   assert.doesNotMatch(badPayload.stack ?? '', /\bat |[A-Z]:[\\/]|file:\/\//i)
   assert.equal(settingsCalls, 0)
   checks.push('invalid IPC rejected before handler')
+  await trusted.webContents.executeJavaScript(`window.electronAPI.i18nGetLocale()`)
+  for (const selected of ['en', 'ru'] as const) {
+    const message = await trusted.webContents.executeJavaScript(`window.electronAPI.i18nSetLocale('${selected}').then(() => window.electronAPI.saveSettings({ value: NaN })).catch(e => e.message)`)
+    assert.equal(message, ipcError('validation', selected).message)
+  }
+  assert.equal(settingsCalls, 0)
+  checks.push('canonical IPC errors follow persisted/selected English and Russian locale')
 
   const foreign = window()
   await foreign.loadURL(file)
   const foreignResult = await foreign.webContents.executeJavaScript(`
     window.electronAPI.getTunStatus().then(() => 'accepted', e => e.message)
   `)
-  assert.equal(foreignResult, 'Недостаточно прав для операции')
+  assert.equal(foreignResult, ipcError('permission', locale).message)
   checks.push('unregistered WebContents rejected')
   await trusted.loadFile(join(work, 'other.html'))
   const navigatedResult = await trusted.webContents.executeJavaScript(`
     window.electronAPI.getTunStatus().then(() => 'accepted', e => e.message)
   `)
-  assert.equal(navigatedResult, 'Недостаточно прав для операции')
+  assert.equal(navigatedResult, ipcError('permission', locale).message)
   checks.push('navigated file origin rejected')
 
   server.listen(0, '127.0.0.1')
