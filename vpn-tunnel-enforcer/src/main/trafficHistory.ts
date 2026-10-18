@@ -1,3 +1,5 @@
+import type { TrafficHistoryEntry, TrafficHistorySession } from '../shared/traffic'
+export type { TrafficHistoryEntry, TrafficHistorySession } from '../shared/traffic'
 /**
  * Traffic History Service — parses sing-box logs to extract a list of
  * domains the user accessed while VPN was active.
@@ -22,27 +24,6 @@ import {
   getRecordedTrafficDomains,
   shouldRecordHost
 } from './trafficConnections'
-
-export interface TrafficHistoryEntry {
-  domain: string
-  firstSeen: number
-  lastSeen: number
-  count: number
-  // The user's public IP at the time of the session (best-effort)
-  vpnIp: string | null
-  // Bytes attributed to this domain by the Clash-API connection sampler.
-  // Absent for entries recovered only from the sing-box log.
-  bytesUp?: number
-  bytesDown?: number
-  enrichment?: DomainEnrichment
-}
-
-export interface TrafficHistorySession {
-  startedAt: number
-  endedAt: number | null
-  vpnIp: string | null
-  domains: TrafficHistoryEntry[]
-}
 
 type ParsedTrafficHistoryEntry = Omit<TrafficHistoryEntry, 'vpnIp' | 'enrichment'>
 

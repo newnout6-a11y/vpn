@@ -231,7 +231,8 @@ describe('App source regressions', () => {
   it('labels active firewall block-default as protection, not stale stuck state', () => {
     const maintenance = maintenanceSource()
 
-    expect(maintenance).toContain('protectedTunnelActive?: boolean')
+    expect(maintenance).toContain("import type { FirewallRepairHealth } from '../../shared/network'")
+    expect(readFileSync(join(process.cwd(), 'src', 'shared', 'network.ts'), 'utf8')).toContain('protectedTunnelActive?: boolean')
     expect(maintenance).toContain('firewallBlockDefaultLabel')
     expect(maintenance).toContain("'активная защита'")
     expect(maintenance).toContain('block default: {firewallBlockDefaultLabel(firewallHealth)}')

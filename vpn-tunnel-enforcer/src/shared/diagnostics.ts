@@ -1,3 +1,4 @@
+import type { AsnInfo } from './ipc-types'
 /** Shared data returned by diagnostic IPC handlers. No main-process dependencies. */
 
 export interface ProxyInfo {
@@ -165,4 +166,41 @@ export interface UrlAvailabilityResult {
     | 'unknown'
   /** Human-readable next step for the user. */
   recommendation: string
+}
+
+export interface ServerProbeResult {
+  host: string
+  resolvedIps: string[]
+  reverseDns: string | null
+  asn: AsnInfo | null
+  latency: LatencyStats | null
+  openPorts: PortScanResult[]
+  tlsCert: TlsCertInfo | null
+  httpBanner: string | null
+}
+
+export interface LatencyStats {
+  min: number
+  avg: number
+  max: number
+  jitter: number   // stddev
+  loss: number     // 0..1 (packets lost / total)
+  samples: number[]
+}
+
+export interface PortScanResult {
+  port: number
+  open: boolean
+  service?: string  // best guess (ssh, http, https, etc.)
+}
+
+export interface TlsCertInfo {
+  subject: string
+  issuer: string
+  validFrom: string
+  validTo: string
+  fingerprint: string
+  sans: string[]
+  protocol: string  // TLSv1.2, TLSv1.3
+  cipher: string
 }

@@ -1,15 +1,12 @@
+import type { TrafficForensicsSidecarStatus } from '../shared/traffic'
+import type { TrafficForensicsArtifactFile } from '../shared/traffic'
+export type { TrafficForensicsArtifactFile } from '../shared/traffic'
 import { existsSync } from 'fs'
 import * as fsp from 'fs/promises'
 import { join } from 'path'
 import { getPrivilegedRuntimeDir } from './runtimePaths'
 
 export type TrafficForensicsSummaryEngine = 'pktmon' | 'netsh'
-
-export interface TrafficForensicsArtifactFile {
-  name: string
-  size: number
-  mtimeMs: number
-}
 
 export interface TrafficForensicsSummaryManifest {
   schemaVersion: number
@@ -38,16 +35,7 @@ export interface TrafficForensicsSummaryManifest {
   summaryPath: string | null
   summaryGeneratedAt: number | null
   parserErrors: string[]
-  sidecar: {
-    available: boolean
-    running: boolean
-    executablePath: string | null
-    eventsPath: string | null
-    startedAt: number | null
-    stoppedAt: number | null
-    pid: number | null
-    lastError: string | null
-  }
+  sidecar: TrafficForensicsSidecarStatus
 }
 
 type SummaryVerdictKey =

@@ -1,3 +1,4 @@
+import type { SmartRouteRuleSetState } from '../../shared/network'
 import { useAppStore, type AppSettings } from '../store'
 import { AnimatePresence, motion } from 'framer-motion'
 import { Bell, Eye, EyeOff, FileArchive, FolderOpen, Globe2, Languages, Loader2, MapPin, Network, Palette, RefreshCw, Save, Settings2, ShieldAlert, ShieldCheck, Wand2 } from 'lucide-react'
@@ -165,13 +166,6 @@ function ToggleRow({ title, description, checked, onChange, icon }: ToggleRowPro
 }
 
 /* ─── Language Selector Section ─────────────────────────────────────────────── */
-
-interface SmartRouteRuleSetState {
-  managedComplete: boolean
-  lastRefreshFinishedAt: number | null
-  lastRefreshOk: boolean | null
-  lastRefreshError: string | null
-}
 
 function formatRuleSetTime(value: number | null | undefined): string {
   if (!value) return 'никогда'
@@ -404,7 +398,6 @@ export function Settings() {
       setExporting(false)
     }
   }
-
 
   // Centred rather than left-hugging. The cap stays — settings are text-heavy and
   // long help paragraphs get unreadable past ~70ch — but left-aligning it in a

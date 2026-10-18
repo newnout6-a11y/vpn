@@ -1,3 +1,5 @@
+import type { TrafficForensicsEngine, TrafficForensicsStatus } from '../shared/traffic'
+export type { TrafficForensicsEngine, TrafficForensicsStatus } from '../shared/traffic'
 import { app } from 'electron'
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process'
 import { existsSync } from 'fs'
@@ -22,55 +24,6 @@ import {
   type TrafficForensicsArtifactFile,
   type TrafficForensicsSummaryManifest
 } from './trafficForensicsSummary'
-
-export type TrafficForensicsEngine = 'pktmon' | 'netsh'
-
-export interface TrafficForensicsStatus {
-  enabled: boolean
-  running: boolean
-  cleanupPending?: boolean
-  engine: TrafficForensicsEngine | null
-  sessionId: string | null
-  sessionDir: string | null
-  mode: 'localProxy' | 'directVpn' | null
-  target: string | null
-  startedAt: number | null
-  stoppedAt: number | null
-  maxSizeMb: number
-  retainSessions: number
-  stopReason: string | null
-  lastError: string | null
-  schemaVersion: number | null
-  summaryPath: string | null
-  summaryGeneratedAt: number | null
-  summary: {
-    verdicts?: Record<string, boolean>
-    counts?: Record<string, number>
-    parserErrors?: string[]
-  } | null
-  sidecar: SessionManifest['sidecar'] | null
-  artifactFiles: TrafficForensicsArtifactFile[]
-  health: {
-    artifactCount: number
-    etlBytes: number
-    liveEtlBytes: number
-    eventsBytes: number
-    liveSnapshotAt: number | null
-    sidecarEvents: number
-    sidecarDataEvents: number
-    sidecarOnlyLifecycle: boolean
-    sidecarWarmingUp: boolean
-    pktmonStatusBytes: number
-    pktmonLiveCountersBytes: number
-    sidecarEngine: string | null
-    sidecarCategoryCounts: Record<string, number>
-    sidecarWfpBlocks: number
-    sidecarTopDomains: Array<{ name: string; count: number }>
-    sidecarTopRemotes: Array<{ address: string; count: number }>
-    sidecarLastEventAt: number | null
-    warnings: string[]
-  }
-}
 
 type SessionManifest = TrafficForensicsSummaryManifest
 

@@ -1,3 +1,7 @@
+import type { ServerProbeResult, LatencyStats, PortScanResult, TlsCertInfo } from '../shared/diagnostics'
+export type { ServerProbeResult, LatencyStats, PortScanResult, TlsCertInfo } from '../shared/diagnostics'
+import type { AsnInfo } from '../shared/ipc-types'
+export type { AsnInfo } from '../shared/ipc-types'
 import { ipcMain } from 'electron'
 import { promises as dns } from 'dns'
 import { Socket, isIP } from 'net'
@@ -6,50 +10,6 @@ import { logEvent } from './appLogger'
 import { tunController } from './tunController'
 import { settingsStore } from './settings'
 import { normalizeServerPort } from '../shared/portValidation'
-
-export interface ServerProbeResult {
-  host: string
-  resolvedIps: string[]
-  reverseDns: string | null
-  asn: AsnInfo | null
-  latency: LatencyStats | null
-  openPorts: PortScanResult[]
-  tlsCert: TlsCertInfo | null
-  httpBanner: string | null
-}
-
-export interface AsnInfo {
-  asn: string
-  org: string
-  network: string
-  country: string
-}
-
-export interface LatencyStats {
-  min: number
-  avg: number
-  max: number
-  jitter: number   // stddev
-  loss: number     // 0..1 (packets lost / total)
-  samples: number[]
-}
-
-export interface PortScanResult {
-  port: number
-  open: boolean
-  service?: string  // best guess (ssh, http, https, etc.)
-}
-
-export interface TlsCertInfo {
-  subject: string
-  issuer: string
-  validFrom: string
-  validTo: string
-  fingerprint: string
-  sans: string[]
-  protocol: string  // TLSv1.2, TLSv1.3
-  cipher: string
-}
 
 export interface ProbeServerOptions {
   disableGeoLookup?: boolean

@@ -510,7 +510,7 @@ export default function App() {
         if (targets.length > 0) {
           const current = store.autoconfigTargets
           store.setAutoconfigTargets(current.map(t => {
-            const found = targets.find((x: any) => x.id === t.id)
+            const found = targets.find((x) => x.id === t.id)
             return {
               ...t,
               applied: found?.applied ?? false,

@@ -1,25 +1,10 @@
+import type { TrafficHistoryEntry as TrafficEntry } from '../../shared/traffic'
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Globe, Search, Trash2, RefreshCw, Loader2, ExternalLink } from 'lucide-react'
 import { MacCard, MacInput, MacButton, MacBadge } from '../design-system'
 import { PageTip } from '../components/PageTip'
 import { useAppStore } from '../store'
-
-interface TrafficEntry {
-  domain: string
-  firstSeen: number
-  lastSeen: number
-  count: number
-  vpnIp: string | null
-  bytesUp?: number
-  bytesDown?: number
-  enrichment?: {
-    status: 'pending' | 'ready' | 'unavailable'
-    siteName: string | null
-    title: string | null
-    description: string | null
-  }
-}
 
 const TRAFFIC_HISTORY_POLL_INTERVAL_MS = 15_000
 const MAX_RENDERED_ENTRIES = 300

@@ -1,3 +1,5 @@
+import type { BrowserHardeningResult } from '../shared/network'
+export type { BrowserHardeningResult } from '../shared/network'
 import { execFile as execFileCb } from 'child_process'
 import { existsSync } from 'fs'
 import { copyFile, mkdir, readFile, readdir, unlink, writeFile } from 'fs/promises'
@@ -7,14 +9,6 @@ import { promisify } from 'util'
 import { logEvent } from './appLogger'
 
 const execFile = promisify(execFileCb)
-
-export interface BrowserHardeningResult {
-  success: boolean
-  changed: boolean
-  restartRequired: boolean
-  message: string
-  details: string[]
-}
 
 interface ChromiumTarget {
   name: string

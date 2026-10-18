@@ -1,3 +1,4 @@
+import type { ServerProbeResult } from '../../shared/diagnostics'
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { motion } from 'framer-motion'
@@ -33,49 +34,6 @@ interface IpInfo {
   org?: string
   loc?: string  // "lat,lon"
   timezone?: string
-}
-
-// Mirrors ServerProbeResult from src/main/serverProbe.ts. Kept loose-typed
-// (any-bridged through preload) so that updating the main-process shape
-// doesn't break the type chain — we just defensively check fields.
-interface AsnInfo {
-  asn: string
-  org: string
-  network: string
-  country: string
-}
-interface LatencyStats {
-  min: number
-  avg: number
-  max: number
-  jitter: number
-  loss: number
-  samples: number[]
-}
-interface PortScanResult {
-  port: number
-  open: boolean
-  service?: string
-}
-interface TlsCertInfo {
-  subject: string
-  issuer: string
-  validFrom: string
-  validTo: string
-  fingerprint: string
-  sans: string[]
-  protocol: string
-  cipher: string
-}
-interface ServerProbeResult {
-  host: string
-  resolvedIps: string[]
-  reverseDns: string | null
-  asn: AsnInfo | null
-  latency: LatencyStats | null
-  openPorts: PortScanResult[]
-  tlsCert: TlsCertInfo | null
-  httpBanner: string | null
 }
 
 /**

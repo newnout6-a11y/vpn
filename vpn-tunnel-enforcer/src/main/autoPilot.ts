@@ -1,3 +1,5 @@
+import type { AutoPilotStep, AutoPilotResult } from '../shared/network'
+export type { AutoPilotStep, AutoPilotResult } from '../shared/network'
 import axios from 'axios'
 import { SocksClient } from 'socks'
 import { getRoutingPlan, type RoutingPlan, type ProxyListenerInfo } from './connectionPlanner'
@@ -6,24 +8,6 @@ import { settingsStore } from './settings'
 import { applyTunNetworkBaseline, rollbackTunNetworkBaselineOrThrow } from './systemNetwork'
 import { probeTcp, tunController } from './tunController'
 import { TUN_ADAPTER_ALIAS } from './tunAdapter'
-
-export interface AutoPilotStep {
-  label: string
-  before: string
-  after: string
-  status: 'ok' | 'warn' | 'fail' | 'info'
-}
-
-export interface AutoPilotResult {
-  ranAt: number
-  summary: 'ok' | 'warn' | 'fail'
-  mode: 'off' | 'external' | 'hard' | 'soft'
-  title: string
-  message: string
-  changed: boolean
-  steps: AutoPilotStep[]
-  plan: RoutingPlan
-}
 
 interface VerifiedProxy {
   host: string

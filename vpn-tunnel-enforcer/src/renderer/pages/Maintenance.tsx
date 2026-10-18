@@ -1,3 +1,4 @@
+import type { FirewallRepairHealth } from '../../shared/network'
 import type { CheckStatus as HealthStatus, SystemDiagnosticItem as DiagnosticItem, SystemDiagnosticResult } from '../../shared/diagnostics'
 import { useMemo } from 'react'
 import { Activity, CheckCircle2, Download, Loader2, ShieldCheck, TriangleAlert, Wrench } from 'lucide-react'
@@ -5,18 +6,6 @@ import { useAppStore } from '../store'
 import { MacCard, MacButton } from '../design-system'
 
 type MaintenanceAction = 'health-check' | 'auto-repair' | 'protection-test' | 'export-zip' | 'nuclear-reset'
-
-interface FirewallRepairHealth {
-  protectedTunnelActive?: boolean
-  manifestPresent: boolean
-  ourRuleCount: number
-  stuckBlockDefault: boolean
-  services: Array<{ name: string; status: string }>
-  profiles: Array<{ name: string; enabled: string; defaultInbound: string; defaultOutbound: string }>
-  summary: 'ok' | 'warn' | 'fail'
-  message: string
-  recommendedActions: string[]
-}
 
 interface RepairStep {
   id: string

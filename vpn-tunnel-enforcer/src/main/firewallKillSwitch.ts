@@ -1,3 +1,5 @@
+import type { FirewallKillSwitchResult, FirewallRepairHealth } from '../shared/network'
+export type { FirewallKillSwitchResult, FirewallRepairHealth } from '../shared/network'
 import { app, BrowserWindow, dialog } from 'electron'
 import { mkdir, readFile, writeFile, unlink, stat, rename, access, realpath } from 'fs/promises'
 import { join, isAbsolute, win32 } from 'path'
@@ -49,18 +51,6 @@ const LAN_BYPASS_CIDRS = [
 
 // Loopback bypass CIDRs: covers BOTH IPv4 and IPv6 loopback addresses.
 export const LOOPBACK_BYPASS_CIDRS = ['127.0.0.0/8', '::1/128']
-
-export interface FirewallKillSwitchResult {
-  success: boolean
-  message: string
-  details?: string
-  // True iff the call was a no-op because there was nothing to do (kill-switch
-  // already inactive). The renderer uses this to suppress the noisy
-  // "Kill-switch снят вручную" warn log that fired every stop because main
-  // had already auto-disabled before the user-driven IPC arrived.
-  skipped?: boolean
-  state?: 'unknown'
-}
 
 export interface SavedProfile {
   name: 'Domain' | 'Private' | 'Public'
@@ -1210,19 +1200,6 @@ async function recoverStaleKillSwitchUnlocked(isSingboxRunning: () => Promise<bo
       logEvent('error', 'firewall-killswitch', 'failed to restore DefaultOutboundAction after stuck Block', err)
     }
   }
-}
-
-export interface FirewallRepairHealth {
-  platform: 'win32' | 'other'
-  protectedTunnelActive?: boolean
-  manifestPresent: boolean
-  ourRuleCount: number
-  stuckBlockDefault: boolean
-  services: Array<{ name: string; status: string }>
-  profiles: Array<{ name: string; enabled: string; defaultInbound: string; defaultOutbound: string }>
-  summary: 'ok' | 'warn' | 'fail'
-  message: string
-  recommendedActions: string[]
 }
 
 export async function getFirewallRepairHealth(

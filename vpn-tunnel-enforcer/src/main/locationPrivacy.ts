@@ -1,3 +1,5 @@
+import type { LocationPrivacyStatus } from '../shared/network'
+export type { LocationPrivacyStatus } from '../shared/network'
 import { app } from 'electron'
 import { execFile as execFileCb } from 'child_process'
 import { mkdir, readFile, writeFile, unlink } from 'fs/promises'
@@ -16,13 +18,6 @@ export interface BackupManifest {
   hklmBackup: string | null
   hklmKeyExisted: boolean
   createdAt: number
-}
-
-export interface LocationPrivacyStatus {
-  userDenied: boolean
-  policyDisabled: boolean
-  applied: boolean
-  details: string[]
 }
 
 function backupDir() {

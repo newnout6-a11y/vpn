@@ -1,3 +1,5 @@
+import type { DomainEnrichment } from '../shared/traffic'
+export type { DomainEnrichment } from '../shared/traffic'
 import { BrowserWindow } from 'electron'
 import Store from 'electron-store'
 import { randomUUID } from 'node:crypto'
@@ -13,17 +15,6 @@ const MAX_CONCURRENT_REQUESTS = 2
 // Keep background lookups bounded, but refill the queue after every result.
 const MAX_PENDING_JOBS = 8
 const REQUEST_TIMEOUT_MS = 8000
-
-export interface DomainEnrichment {
-  status: 'pending' | 'ready' | 'unavailable'
-  source: 'website'
-  siteName: string | null
-  title: string | null
-  description: string | null
-  canonicalUrl: string | null
-  faviconUrl: string | null
-  fetchedAt: number
-}
 
 interface DomainEnrichmentStore {
   entries: Record<string, DomainEnrichment>
