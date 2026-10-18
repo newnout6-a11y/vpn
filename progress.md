@@ -3849,3 +3849,29 @@ CI/review нового SHA проверяются отдельно после pu
   (.tmp/wp0-operations-qodo67-electron.log); `node scripts/test-wp1-native.mjs --ipc-only`
   — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-operations-qodo67-csp.log).
   Traceability AC 927/927 / F 210/210 и `git diff --check` — exit 0.
+
+### Qodo #67 — различимость двух операций в одном действии
+
+- На head aaa3d99dd209bfe81b9ad26d165bbf56a351dc96 Qodo **1542488 completed**:
+  все четыре прежних findings **implemented**, новый
+  e11af426-7a76-4668-9cb1-4b26fe93c20a (action_required) требует проверки
+  разных операций через redaction. Это пробел в coverage, не воспроизведённый
+  дефект production сериализации. PR пока не слит.
+- Actual registry/observer/logger test усилен: две concurrent операции имеют
+  общий исходный correlation, разные operationId и обратимые operationKey.
+  Одна отменяется, другая завершается успешно. Каждому key соответствуют ровно
+  running + его terminal event; disk JSONL и diagnostic read-back совпадают,
+  raw UUID и credential по-прежнему скрыты. Production-код не менялся.
+- `npm.cmd test -- src/main/actionCorrelation.test.ts` — **2 passed**,
+  1.02 s, exit 0 (.tmp/wp0-operations-qodo67-distinct.log).
+- `npm.cmd run typecheck` — exit 0, 160 channels / 0 public any
+  (.tmp/wp0-operations-qodo67-distinct-typecheck.log). Traceability
+  `python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py` —
+  AC 927/927 / F 210/210, exit 0; `git diff --check` — exit 0.
+- Полный `npm.cmd test` после усиления — **4266 passed / 5 skipped / 0 failed**,
+  266 files passed / 2 skipped, 192.05 s, exit 0
+  (.tmp/wp0-operations-qodo67-distinct-full.log). Build/native не повторялись
+  локально: изменены только test и журнал, production тот же, что прошёл
+  build/Electron/IPC/CSP в предыдущем коммите. Новый remote CI проверит final SHA.
+- CI **39174041625 success** на aaa3d99dd209bfe81b9ad26d165bbf56a351dc96;
+  три jobs зелёные. Новый commit с усиленным test требует нового CI/Qodo gate.
