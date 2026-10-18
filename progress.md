@@ -2785,3 +2785,20 @@ CI/review нового SHA проверяются отдельно после pu
   247 файлов passed / 2 skipped, 201.99 s, exit 0
   (.tmp/wp0-qodo56-round2-full.log). Новая проверка RotationConfig и три
   файловых диагностических отказа входят в этот прогон.
+- Финальный `npm.cmd run typecheck` — exit 0, 157 channels / 0 public any
+  (.tmp/wp0-qodo56-round2-final-typecheck.log); `npm.cmd run build` — exit 0
+  (.tmp/wp0-qodo56-round2-build.log); `node scripts/test-electron-runtime.mjs`
+  — ELECTRON_SMOKE_PASS, exit 0 (.tmp/wp0-qodo56-round2-native.log).
+
+### Нативный CSP fixture — ожидание обязательных отчётов
+
+- Вместо фиксированной паузы 500 ms fixture ждёт появления всех четырёх
+  обязательных CSP directives, с пределом 5 s. Assertions не ослаблены:
+  inline/eval не должны исполниться, каждый требуемый отчёт обязан появиться.
+  Это синхронизация асинхронного oracle; production CSP не меняется.
+- `node scripts/test-wp1-native.mjs --ipc-only` после изменения fixture —
+  WP1_NATIVE_PASS, exit 0 (.tmp/wp0-qodo56-round2-csp.log). Проверены настоящий
+  production meta CSP, hostile subframe, unknown WebContents и preferences.
+  Это локальные IPC/CSP subsets, а не полный WP-1 L3. Typecheck и build также
+  выполнены после изменения fixture. Повтор полного unit suite не нужен:
+  fixture запускается отдельно, runtime sources после 3915-pass suite не менялись.
