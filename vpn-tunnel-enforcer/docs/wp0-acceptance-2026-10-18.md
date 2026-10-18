@@ -8,7 +8,7 @@
 18.10 владелец разрешил продолжать WP-0 при открытом PR #54, сохраняя запрет
 его слияния до отдельного решения. Полного Revix для #54 не было из-за квоты.
 Позднее 18.10 владелец разрешил сливать PR после пройденных проверок.
-#54/#55/#56/#57/#58 слиты в main после exact-head CI success и completed Qodo,
+#54/#55/#56/#57/#58/#59 слиты в main после exact-head CI success и completed Qodo,
 без открытых findings; прежний запрет слияния отменён.
 
 ## Полная область и первоначальная инвентаризация
@@ -53,9 +53,11 @@ false, следующий startup и уведомление об успешно�
 использует настоящий autoconfig dispatcher с подменёнными OS targets.
 
 Deadline и manual cancellation немедленно устанавливают конечный status и abort
-signal, но caller Promise и busy lease намеренно сохраняются до завершения
-неотменяемого native I/O. Это **не** доказательство предела ≤1 s для полного
-возврата каждой операции. Deadline запуска инициирует штатный stop после drain.
+signal. После #59 caller Promise запуска возвращается отдельно от native drain:
+отмена/timeout больше не ждут неотменяемый I/O. Busy lease, shutdown и stop
+по-прежнему ждут фактическое завершение эффектов, затем очистку. Это адресное
+доказательство для connection startup, **не** предел ≤1 s для всех долгих операций.
+Deadline запуска инициирует штатный stop после drain.
 История connections пока не коррелирована со всеми этими operationId; observer
 пишет только ограниченные метаданные, не профиль/адрес/AbortSignal.
 
@@ -628,3 +630,27 @@ Electron с production Store adapter и isolated userData: до ready сообщ
 без раннего dialog/exit. SHA-256 future-version файла неизменен в обоих случаях.
 Перехвачен только native dialog, чтобы fixture не показывала popup на рабочем
 столе. Это адресный startup subset, не installed upgrade/downgrade acceptance.
+
+## AT-00-003 — быстрый ответ отменённого запуска, отдельный native drain
+
+ConnectionLifecycle возвращает typed cancellation/timeout вызывающему коду,
+сохраняя внутреннюю задачу и admission lease до завершения startup/retained
+effects. stop/close ждут внутреннее completion, а новый start получает conflict.
+Позднее отклонение нативного Promise наблюдается; terminal event не дублируется.
+Если ошибка была известна до отмены, её исходная причина сохраняется. Отмена
+из синхронного admission observer не допускает первый effect.
+
+Fixtures на 10/50/90% оставляют native gate закрытым после ответа; fake clock
+подтверждает settlement за 1 ms, удержание lease до drain и последующей cleanup,
+отсутствие late publish и возможность retry. Отдельно проверены deadline с raw
+Promise (без owner.wait), поздний reject и close с retained native effect.
+Actual main Hard/Direct callbacks проходят preflight/native/fault boundaries:
+ответ проверяется до release gate с timeout 900 ms, поздняя история/успешный
+статус не публикуются, stop effect ждёт gate. Нативные OS effects подменены.
+Native smoke дополнительно проверяет тот же порядок через настоящий production
+preload/contextBridge: ответ до 900 ms при закрытом gate, conflict нового start,
+затем drain/stop без кадра connected. Это Electron integration с fake OS.
+
+Общий registry refresh/speed/import/export/rotation, deadline stop, полный
+алфавит модели и Windows resources остаются в работе. F-021 опровергнута и
+не объявляется исправленной. Точные результаты — progress.md.

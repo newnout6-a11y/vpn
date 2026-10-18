@@ -1258,17 +1258,18 @@ describe.each(['direct', 'proxy'] as const)('background IP startup: %s (AT-00-00
     expect(h.ipMonitor.recheck).not.toHaveBeenCalled()
     expect(h.areTunRoutesActive).toHaveBeenCalledTimes(5)
   })
-  it.each(['preflight','native','fault'] as const)('fences cancellation while a main %s boundary is pending', async phase => {
+  it.each(['preflight','native','fault'] as const)('returns cancellation before a main %s boundary drains and fences late effects (AT-00-003)', async phase => {
     const h=ipStartupHarness(mode)
     let release!: (result:any)=>void
     const boundary=phase==='preflight' ? (mode==='direct' ? h.clearStaleKillSwitchBeforeStart : h.combinedPreStartProbe)
       : phase==='native' ? h.tunController.start : h.readRecentSingBoxOutboundFault
     if (phase==='fault') h.tunController.start.mockResolvedValue({success:false,error:'native failure'})
     boundary.mockReturnValue(new Promise<any>(done=>{release=done}))
-    const started=h.start()
+    const finished=vi.fn()
+    const started=h.start().then(result=>{finished(result);return result})
     await vi.waitFor(()=>expect(boundary).toHaveBeenCalledOnce())
     const stopped=h.stop()
-    await Promise.resolve()
+    await vi.waitFor(()=>expect(finished).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({code:'OPERATION_CANCELLED'})),{timeout:900,interval:5})
     expect(h.tunController.stop).not.toHaveBeenCalled()
     release(phase==='preflight' ? {success:true,tunnels:[],listeners:[]} : phase==='native' ? {success:true} : null)
     expect(await started).toMatchObject({success:false,error:'Запуск отменён',category:'cancelled',code:'OPERATION_CANCELLED'})

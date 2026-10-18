@@ -17,7 +17,7 @@ describe('main connection lifecycle ownership',()=>{
     const stopped=lane.stop(()=>cleanup.promise)
     startup.resolve()
     expect(await started).toMatchObject({success:false})
-    expect(lane.starting).toBe(false)
+    await vi.waitFor(()=>expect(lane.starting).toBe(false))
     expect(lane.busy).toBe(true)
     cleanup.resolve()
     await stopped
