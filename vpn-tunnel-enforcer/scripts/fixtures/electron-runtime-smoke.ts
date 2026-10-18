@@ -66,7 +66,7 @@ app.whenReady().then(async () => {
   ipcMain.handle('get-tun-status', () => ({ running: tunnelEvidence.running, smoke: true, lifecycle: tunnel.snapshot }))
   let startBegan!: () => void, finishStartup!: () => void
   const began = new Promise<void>(resolve => { startBegan = resolve })
-  const startupGate = new Promise<void>(resolve => { finishStartup = resolve })
+  let startupGate = new Promise<void>(resolve => { finishStartup = resolve })
   ipcMain.handle('start-direct-vpn', () => lane.start(async owner => {
     tunnelEvidence.running = true; tunnelEvidence.pid = 123
     tunnel.runtimeChanged('running'); startBegan()
@@ -180,6 +180,29 @@ app.whenReady().then(async () => {
   assert.equal((await trusted.webContents.executeJavaScript(`window.smokeStart`)).success, true)
   assert.equal((await trusted.webContents.executeJavaScript(`window.electronAPI.getTunStatus()`)).lifecycle.state, 'connected')
   assert.equal((await trusted.webContents.executeJavaScript(`window.electronAPI.stopTun()`)).success, true)
+  const cancellingBegan = new Promise<void>(resolve => { startBegan = resolve })
+  startupGate = new Promise<void>(resolve => { finishStartup = resolve })
+  await trusted.webContents.executeJavaScript(`
+    window.smokeFrames = [];
+    window.smokeCancelledStart = window.electronAPI.startDirectVpn(); 'started'
+  `)
+  await cancellingBegan
+  await trusted.webContents.executeJavaScript(`window.smokeCancelledStop = window.electronAPI.stopTun(); 'stopping'`)
+  const cancelledStart = await trusted.webContents.executeJavaScript(`(async () => {
+    let timer;
+    try { return await Promise.race([window.smokeCancelledStart, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('Cancellation did not cross contextBridge within 900 ms')), 900);
+    })]); } finally { clearTimeout(timer); }
+  })()`)
+  assert.equal(cancelledStart.code, 'OPERATION_CANCELLED')
+  assert.equal(lane.busy, true); assert.equal(lane.starting, true)
+  assert.equal(tunnelEvidence.running, true)
+  assert.equal((await trusted.webContents.executeJavaScript(`window.electronAPI.startDirectVpn()`)).code, 'OPERATION_CONFLICT')
+  finishStartup()
+  assert.equal((await trusted.webContents.executeJavaScript(`window.smokeCancelledStop`)).success, true)
+  assert.equal(lane.busy, false)
+  assert.ok(!(await trusted.webContents.executeJavaScript(`window.smokeFrames`)).some((s: { state: string }) => s.state === 'connected'))
+  checks.push('cancelled startup returns through native contextBridge within 900 ms while native lease/admission remain held until drain and stop (AT-00-003/007; fake OS)')
   const malformedSoft = await trusted.webContents.executeJavaScript(`window.electronAPI.startSoftProtection(42, 'http').catch(e => e)`)
   assert.equal(malformedSoft.category, 'validation'); assert.equal(softCalls, 0)
   assert.equal((await trusted.webContents.executeJavaScript(`window.electronAPI.startSoftProtection('127.0.0.1:8080', 'http')`)).success, true)

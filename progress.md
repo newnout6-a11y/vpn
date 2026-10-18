@@ -3205,3 +3205,42 @@ CI/review нового SHA проверяются отдельно после pu
   (.tmp/wp0-store-schema-startup-electron.log); `node scripts/test-wp1-native.mjs --ipc-only`
   — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-store-schema-startup-csp.log). `git diff --check`
   — exit 0. Это не installed upgrade/downgrade и не полная приёмка AT-00-006.
+
+### PR #59 слит; AT-00-003 — caller cancellation отдельно от native drain
+
+- #59 head 7cef991be4e6e774f76ed2b4f70a336828050f5a: CI run 39155420961
+  completed/success (все три jobs). Qodo run 1540820 completed на том же SHA,
+  новых findings нет, прежний e819a34b implemented. REST merge с expected sha
+  подтверждён повторным GET: merged=true, merge commit
+  12bfe8be1c6889e9769dcbfc4c8578d95caccec9. Fetch vpn/main подтвердил базу;
+  следующий участок в codex/wp0-prompt-start-cancellation.
+- Новый regression `npm.cmd test -- src/main/connectionCancellation.test.ts`
+  до исправления — **5 failed**, 360 ms, exit 1 (.tmp/wp0-prompt-cancel-before.log):
+  caller ждал native gate на 10/50/90%, deadline и shutdown. Теперь caller races
+  abort с отдельной внутренней задачей; busy lease и stop/close ждут actual drain
+  и cleanup. Исходная уже известная ошибка сохраняется, поздний reject наблюдается,
+  terminal connect event не повторяется. Synchronous admission cancellation
+  запрещает первый effect. Это startup subset; полный AT-00-003 ещё не принят.
+- Первый focused после разделения caller/drain — 215 passed / 2 failed:
+  старый тест ожидал немедленного освобождения startup после caller cancellation;
+  второй потребовал сохранить исходную startup failure до отмены. Ошибка сохранена
+  в production, тест ownership теперь явно ждёт drain. Следующий focused —
+  218 passed / 6 files, 33.32 s, exit 0. Затем добавлен synchronous admission case
+  и усилены actual main Hard/Direct preflight/native/fault assertions: typed ответ
+  должен прийти до release gate (timeout 900 ms), cleanup и late history ждут gate.
+- Финальный focused тех же шести файлов — **219 passed**, 33.86 s, exit 0
+  (.tmp/wp0-prompt-cancel-focused-final.log). `npm.cmd run typecheck` — exit 0,
+  158 channels / 0 public any (.tmp/wp0-prompt-cancel-typecheck.log). Coverage
+  AC 927/927, F 210/210 — exit 0 (трассировка, не исполнение AT).
+  Native fixture расширена: actual production preload/contextBridge должен
+  вернуть typed cancellation до 900 ms при закрытом native gate; admission
+  остаётся закрытым до release и stop, ложного connected нет.
+- Полный `npm.cmd test` — **4081 passed / 5 skipped / 0 failed**, 258 files
+  passed / 2 skipped, 218.62 s, exit 0 (.tmp/wp0-prompt-cancel-full.log).
+  `npm.cmd run build` — exit 0 (.tmp/wp0-prompt-cancel-build.log).
+  `node scripts/test-electron-runtime.mjs` — ELECTRON_SMOKE_PASS, exit 0
+  (.tmp/wp0-prompt-cancel-electron.log), включая новый native bridge cancellation
+  subset. `node scripts/test-wp1-native.mjs --ipc-only` — WP1_NATIVE_PASS, exit 0
+  (.tmp/wp0-prompt-cancel-csp.log). Повторные coverage и `git diff --check` — exit 0.
+  Нативный smoke использует настоящий Electron, но fake OS effects; это не
+  Windows PID/packet oracle и не полный AT-00-003. F-021 остаётся опровергнутой.

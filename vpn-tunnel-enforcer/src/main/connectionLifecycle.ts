@@ -87,6 +87,10 @@ export class ConnectionLifecycle {
     } }
     this.startup = startup
     this.publish(startup.operation)
+    const cancellationResult = () => {
+      const category = startup.abortCategory ?? 'cancelled'
+      return rejection(category, category === 'timeout' ? 'Истекло время запуска защиты' : 'Запуск отменён', startup.operation.operationId)
+    }
     const timer = setTimeout(() => {
       startup.abortCategory = 'timeout'
       startup.operation = { ...startup.operation, status: 'error', category: 'timeout' }
@@ -99,7 +103,18 @@ export class ConnectionLifecycle {
       else { try { this.cancelControllerStartup() } catch { /* startup still drains */ } }
     }, timeoutMs)
     timer.unref?.()
-    controller.signal.addEventListener('abort', () => clearTimeout(timer), { once: true })
+    let onAbort!: () => void
+    let failure: { error: unknown } | undefined
+    const cancelled = new Promise<ConnectionOperationRejection>((resolve, reject) => {
+      onAbort = () => {
+        clearTimeout(timer)
+        // A known failure awaiting native drain must keep its original cause.
+        if (failure) reject(failure.error)
+        else resolve(cancellationResult())
+      }
+      controller.signal.addEventListener('abort', onAbort, { once: true })
+      if (controller.signal.aborted) onAbort()
+    })
     const effects: Promise<unknown>[] = []
     const assertActive = () => {
       if (controller.signal.aborted || this.startup !== startup) throw new Error('Запуск отменён')
@@ -127,32 +142,40 @@ export class ConnectionLifecycle {
         } finally { controller.signal.removeEventListener('abort', onAbort) }
       }
     }
-    try {
-      const result = await effect(owner)
-      await Promise.all(effects)
-      assertActive()
-      if (!failed(result) && this.stateMachine && !this.stateMachine.canConfirmStart()) {
-        // A failed confirmation must not abandon a process started by this owner.
-        await this.cleanupCancelled?.()
-        throw new Error('Connection confirmation missing')
+    // The caller may leave on abort; this task alone releases the native lease.
+    // Promise.race also observes late rejection after the caller has returned.
+    const drained = (async () => {
+      try {
+        assertActive()
+        const result = await effect(owner)
+        await Promise.all(effects)
+        assertActive()
+        if (!failed(result) && this.stateMachine && !this.stateMachine.canConfirmStart()) {
+          // A failed confirmation must not abandon a process started by this owner.
+          await this.cleanupCancelled?.()
+          throw new Error('Connection confirmation missing')
+        }
+        startup.operation = { ...startup.operation, status: failed(result) ? 'error' : 'success' }
+        return result
+      } catch (error) {
+        if (controller.signal.aborted) {
+          const category = startup.abortCategory ?? 'cancelled'
+          startup.operation = { ...startup.operation, status: category === 'timeout' ? 'error' : 'cancelled', category }
+          return cancellationResult()
+        }
+        failure = { error }
+        startup.operation = { ...startup.operation, status: 'error', category: 'internal' }
+        throw error
+      } finally {
+        await Promise.all(effects)
+        clearTimeout(timer)
+        if (!startup.terminalPublished) this.publish(startup.operation)
+        if (this.startup === startup) this.startup = null
+        release()
       }
-      startup.operation = { ...startup.operation, status: failed(result) ? 'error' : 'success' }
-      return result
-    } catch (error) {
-      if (controller.signal.aborted) {
-        const category = startup.abortCategory ?? 'cancelled'
-        startup.operation = { ...startup.operation, status: category === 'timeout' ? 'error' : 'cancelled', category }
-        return rejection(category, category === 'timeout' ? 'Истекло время запуска защиты' : 'Запуск отменён', startup.operation.operationId)
-      }
-      startup.operation = { ...startup.operation, status: 'error', category: 'internal' }
-      throw error
-    } finally {
-      await Promise.all(effects)
-      clearTimeout(timer)
-      if (!startup.terminalPublished) this.publish(startup.operation)
-      if (this.startup === startup) this.startup = null
-      release()
-    }
+    })()
+    try { return await Promise.race([drained, cancelled]) }
+    finally { controller.signal.removeEventListener('abort', onAbort) }
   }
 
   stop<T>(effect: () => Promise<T>, options: { owner?: OperationOwner } = {}): Promise<T | ConnectionOperationRejection> {
