@@ -2899,3 +2899,44 @@ CI/review нового SHA проверяются отдельно после pu
   и не изменило tree относительно исходной базы текущей ветки. Новый PR имеет
   только изменения текущего участка. Существующие untracked .claude/,
   .wrangler/, .playwright-cli/ и output/ не изменены и в коммит не включаются.
+
+### PR #57 — первый проход Qodo: четыре подтверждённых замечания
+
+- Исходный head 58af276: CI run 39144654589 completed/success. Qodo run
+  1539935 completed на том же SHA; две action_required и две
+  remediation_recommended находки. До исправления слияние не выполнялось.
+- UUIDv4 operationId сохранён согласно тому 3 §1.2. Добавлен стабильный
+  correlationId `op_<UUID без дефисов>`: начало/завершение различимы после
+  credential redaction. Новый тест использует настоящие appLogger, redactor
+  и файловый JSONL backend; credential UUID и password остаются скрытыми.
+  Полная IPC/history корреляция AT-00-005 остаётся открытой.
+- Ошибка env rollback при stop сохраняет failure result, но не прерывает
+  независимую очистку после доказанного завершения runtime: history, watchers,
+  snapshots, proxies, traffic, DNS repair и location privacy. Retry stop может
+  завершить env recovery; pre-start проверка остаётся строгой. Production-body
+  регрессии подтверждают очистку и запрет автоматического replacement.
+- Scheduler пробует следующее активное расписание только после явного
+  SCHEDULE_PROFILE_UNAVAILABLE. Restart/timer проверены с настоящими helper и
+  admission lane. Cancel/conflict/network failure/success не вызывают fallback.
+  Generation fence отменяет pending продолжение после ручного действия,
+  stop/reinit, редактирования/импорта; время окна перепроверяется.
+- Повторный Stop присоединяется к уже выполняющейся очистке recovery/manual
+  без второго cleanup, в том числе при меньшем приоритете. Приоритет активного
+  recovery startup по-прежнему защищён от менее приоритетного stop.
+- До реализации: `npx.cmd vitest run src/main/connectionOperations.test.ts src/main/lifecycleCleanup.test.ts src/main/connectionOperationLogging.test.ts src/main/scheduler.test.ts src/main/scheduledConnection.test.ts`
+  — 9 failed / 218 passed, 27.04 s, exit 1 (.tmp/wp0-qodo57-before.log).
+- После исправления: `npx.cmd vitest run src/main/connectionOperations.test.ts src/main/lifecycleCleanup.test.ts src/main/connectionOperationLogging.test.ts src/main/scheduler.test.ts src/main/scheduledConnection.test.ts src/main/auditFixesRegression.test.ts`
+  — 250 passed / 6 files, 25.58 s, exit 0 (.tmp/wp0-qodo57-final-focused.log).
+- `npm.cmd run typecheck` — 157 channels / 0 public any, exit 0
+  (.tmp/wp0-qodo57-typecheck.log). `python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py`
+  — AC 927/927, F 210/210, exit 0 (трассировка, не исполнение AT).
+  `git diff --check` — exit 0. Полный suite и runtime smoke записываются ниже.
+- `npm.cmd test` на замороженных runtime/tests — 3959 passed / 5 skipped /
+  0 failed, 250 файлов passed / 2 skipped, 203.85 s, exit 0
+  (.tmp/wp0-qodo57-full.log). Ожидаемый stderr RootErrorBoundary fixture
+  не является отказом suite; unhandled errors отсутствуют.
+- `npm.cmd run build` — exit 0 (.tmp/wp0-qodo57-build.log).
+  `node scripts/test-electron-runtime.mjs` — ELECTRON_SMOKE_PASS, exit 0
+  (.tmp/wp0-qodo57-electron.log); `node scripts/test-wp1-native.mjs --ipc-only`
+  — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-qodo57-csp.log). Native IPC/CSP subsets
+  не заменяют полную FSM, ресурсную и сетевую приёмку WP-0/WP-2.

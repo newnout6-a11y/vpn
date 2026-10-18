@@ -50,7 +50,7 @@ describe('scheduled connection admission', () => {
   it('fails closed if the scheduled profile was deleted; it does not start an unrelated profile', async () => {
     const lane = new ConnectionLifecycle(vi.fn())
     const actions = { resolveProxy: vi.fn(), selectProfile: vi.fn(() => false), startDirect: vi.fn(), startProxy: vi.fn() }
-    expect(await runScheduledConnection(lane, { mode: 'direct', profileId: 'missing' }, actions)).toMatchObject({ success: false, error: 'Профиль расписания недоступен' })
+    expect(await runScheduledConnection(lane, { mode: 'direct', profileId: 'missing' }, actions)).toMatchObject({ success: false, code: 'SCHEDULE_PROFILE_UNAVAILABLE', error: 'Профиль расписания недоступен' })
     expect(actions.startDirect).not.toHaveBeenCalled()
     expect(lane.operation).toMatchObject({ owner: 'schedule', status: 'error' })
   })

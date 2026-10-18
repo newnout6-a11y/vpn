@@ -12,6 +12,17 @@ function held<T>() {
 afterEach(() => vi.useRealTimers())
 
 describe('connection operation ownership', () => {
+  it.each(['manual', 'schedule'] as const)('joins an in-flight recovery stop for %s without duplicate cleanup (AT-00-007)', async owner => {
+    const gate = held<{ success: boolean }>(), cleanup = vi.fn(() => gate.promise)
+    const lane = new ConnectionLifecycle(vi.fn())
+    const recovery = lane.stop(cleanup, { owner: 'recovery' })
+    const joined = lane.stop(cleanup, { owner })
+    expect(joined).toBe(recovery)
+    gate.resolve({ success: true })
+    expect(await joined).toEqual({ success: true })
+    expect(cleanup).toHaveBeenCalledOnce()
+  })
+
   it('assigns UUIDv4, owner and deadline without exposing the AbortSignal in snapshots (AT-00-003)', async () => {
     const lane = new ConnectionLifecycle(vi.fn())
     await lane.start(async owner => {

@@ -1,0 +1,42 @@
+// AT-00-005: real logger, credential redactor and on-disk JSONL backend.
+import { afterEach, expect, it, vi } from 'vitest'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { resolve, join } from 'node:path'
+import { ConnectionLifecycle } from './connectionLifecycle'
+
+const fixture = vi.hoisted(() => ({ directory: '' }))
+vi.mock('electron', () => ({ app: { getPath: () => fixture.directory }, shell: { openPath: vi.fn() } }))
+
+afterEach(() => {
+  vi.restoreAllMocks()
+  if (fixture.directory) rmSync(fixture.directory, { recursive: true, force: true })
+})
+
+it('keeps operation events distinguishable after real secret redaction (AT-00-005)', async () => {
+  mkdirSync(resolve('.tmp'), { recursive: true })
+  fixture.directory = mkdtempSync(join(resolve('.tmp'), 'operation-logs-'))
+  vi.spyOn(console, 'log').mockImplementation(() => {})
+  const { logEvent, getAppLogPath } = await import('./appLogger')
+  const credential = '8093a2ec-f028-4e3c-96a7-b301efaf23dd'
+  const lane = new ConnectionLifecycle(() => {}, undefined, operation =>
+    logEvent('info', 'lifecycle', 'connection operation', { ...operation, credential, password: 'private-test-password' }))
+  await lane.start(async () => ({ success: true }))
+  const first = lane.operation!
+  await lane.stop(async () => ({ success: true }))
+  const second = lane.operation!
+  let raw = ''
+  await vi.waitFor(() => {
+    raw = readFileSync(getAppLogPath(), 'utf8')
+    expect(raw.trim().split('\n')).toHaveLength(4)
+  })
+  const events = raw.trim().split('\n').map(line => JSON.parse(line).details)
+  expect(events.map(event => event.correlationId)).toEqual([
+    'op_' + first.operationId.replaceAll('-', ''), 'op_' + first.operationId.replaceAll('-', ''),
+    'op_' + second.operationId.replaceAll('-', ''), 'op_' + second.operationId.replaceAll('-', '')
+  ])
+  expect(first.operationId).not.toBe(second.operationId)
+  expect(raw).not.toContain(first.operationId)
+  expect(raw).not.toContain(credential)
+  expect(raw).not.toContain('private-test-password')
+  expect(raw).toContain('<redacted-uuid>')
+})

@@ -71,8 +71,9 @@ export class ConnectionLifecycle {
     let release!: () => void
     const completion = new Promise<void>(done => { release = done })
     const startedAt = Date.now()
+    const operationId = randomUUID()
     const startup: Startup = { controller, completion, operation: {
-      version: 1, operationId: randomUUID(), kind: 'connect', owner: operationOwner,
+      version: 1, operationId, correlationId: 'op_' + operationId.replaceAll('-', ''), kind: 'connect', owner: operationOwner,
       startedAt, deadline: startedAt + timeoutMs, status: 'running'
     } }
     this.startup = startup
@@ -141,16 +142,17 @@ export class ConnectionLifecycle {
   }
 
   stop<T>(effect: () => Promise<T>, options: { owner?: OperationOwner } = {}): Promise<T | ConnectionOperationRejection> {
+    if (this.stopping) return this.stopping as Promise<T>
     const owner = options.owner ?? 'manual'
-    const active = this.stopOperation ?? this.startup?.operation
+    const active = this.startup?.operation
     if (active && OPERATION_PRIORITY[owner] < OPERATION_PRIORITY[active.owner]) {
       return Promise.resolve(rejection('conflict', 'Операция более высокого приоритета ещё выполняется'))
     }
-    if (this.stopping) return this.stopping as Promise<T>
     const startup = this.startup
     const cancellationErrors: unknown[] = []
+    const operationId = randomUUID()
     const operation: ConnectionOperation = {
-      version: 1, operationId: randomUUID(), owner, kind: 'disconnect',
+      version: 1, operationId, correlationId: 'op_' + operationId.replaceAll('-', ''), owner, kind: 'disconnect',
       startedAt: Date.now(), deadline: null, status: 'running'
     }
     const stopped = Promise.resolve().then(async () => {

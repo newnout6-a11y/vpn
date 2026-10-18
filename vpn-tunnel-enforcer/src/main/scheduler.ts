@@ -121,8 +121,27 @@ export function computeNextEvent(schedules: ScheduleEntry[], now: number): NextE
 // ─── Timer Management ────────────────────────────────────────────────────────
 
 let currentTimer: ReturnType<typeof setTimeout> | null = null
-let vpnConnectCallback: ((schedule: ScheduleEntry) => void) | null = null
+type ConnectOutcome = void | 'profile-unavailable'
+type ConnectCallback = (schedule: ScheduleEntry) => ConnectOutcome | Promise<ConnectOutcome>
+let vpnConnectCallback: ConnectCallback | null = null
 let vpnDisconnectCallback: ((schedule: ScheduleEntry) => void) | null = null
+let connectGeneration = 0
+
+/** Retry only an unavailable profile, never cancellation, conflict or network failure.
+ * Manual operations, edits and shutdown invalidate a pending continuation. */
+async function connectActiveSchedules(preferred?: ScheduleEntry): Promise<void> {
+  const callback = vpnConnectCallback, generation = ++connectGeneration
+  if (!callback) return
+  const schedules = [...getSchedules()]
+  if (preferred) schedules.sort((a, b) => Number(b.id === preferred.id) - Number(a.id === preferred.id))
+  for (const schedule of schedules) {
+    if (generation !== connectGeneration || callback !== vpnConnectCallback) return
+    if (!isScheduleActive(schedule, Date.now())) continue
+    try {
+      if (await callback(schedule) !== 'profile-unavailable') return
+    } catch { return } // The connection callback reports its own error; do not retry unrelated failures.
+  }
+}
 
 function clearSchedulerTimer(): void {
   if (currentTimer !== null) {
@@ -154,8 +173,9 @@ function scheduleNextTimer(): void {
     }
 
     if (next.type === 'start' && vpnConnectCallback) {
-      vpnConnectCallback(next.schedule)
+      void connectActiveSchedules(next.schedule)
     } else if (next.type === 'stop' && vpnDisconnectCallback) {
+      connectGeneration++
       vpnDisconnectCallback(next.schedule)
     }
 
@@ -181,6 +201,7 @@ function createSchedule(entry: Omit<ScheduleEntry, 'id'>): ScheduleEntry {
   const schedules = getSchedules()
   schedules.push(newEntry)
   schedulerStore.set('schedules', schedules)
+  connectGeneration++
   scheduleNextTimer()
   return newEntry
 }
@@ -196,6 +217,7 @@ function updateSchedule(id: string, patch: Partial<ScheduleEntry>): ScheduleEntr
   validateSchedule(updated)
   schedules[index] = updated
   schedulerStore.set('schedules', schedules)
+  connectGeneration++
   scheduleNextTimer()
   return updated
 }
@@ -212,6 +234,7 @@ function deleteSchedule(id: string): void {
   const schedules = getSchedules()
   const filtered = schedules.filter((s) => s.id !== id)
   schedulerStore.set('schedules', filtered)
+  connectGeneration++
   scheduleNextTimer()
 }
 
@@ -227,17 +250,7 @@ function getNextEvent(): NextEvent | null {
  * If so, calls the VPN connect callback immediately.
  */
 function handleAppRestart(): void {
-  const schedules = getSchedules()
-  const now = Date.now()
-
-  for (const schedule of schedules) {
-    if (isScheduleActive(schedule, now)) {
-      if (vpnConnectCallback) {
-        vpnConnectCallback(schedule)
-      }
-      break // Only connect once for the first active schedule
-    }
-  }
+  void connectActiveSchedules()
 }
 
 // ─── Public API ──────────────────────────────────────────────────────────────
@@ -248,7 +261,7 @@ export const schedulerService = {
    * Sets up callbacks for VPN connect/disconnect and handles app restart.
    */
   init(options: {
-    onConnect: (schedule: ScheduleEntry) => void
+    onConnect: ConnectCallback
     onDisconnect: (schedule: ScheduleEntry) => void
   }): void {
     vpnConnectCallback = options.onConnect
@@ -259,6 +272,7 @@ export const schedulerService = {
 
   /** Stop the scheduler (clear timers). */
   stop(): void {
+    connectGeneration++
     clearSchedulerTimer()
     vpnConnectCallback = null
     vpnDisconnectCallback = null
@@ -270,8 +284,11 @@ export const schedulerService = {
    * the imported schedules without an app restart.
    */
   reschedule(): void {
+    connectGeneration++
     scheduleNextTimer()
   },
+
+  cancelPendingConnect(): void { connectGeneration++ },
 
   getSchedules,
   createSchedule,

@@ -1118,6 +1118,7 @@ const connectionLifecycle = new ConnectionLifecycle(() => {
   adaptiveVerificationGeneration += 1
   tunController.cancelTransition()
 }, () => stopProtectionEffects(), operation => {
+  if (operation.status === 'running' && operation.owner !== 'schedule') schedulerService.cancelPendingConnect()
   logEvent(operation.status === 'running' ? 'debug' : 'info', 'lifecycle', 'connection operation', operation)
 })
 
@@ -1633,7 +1634,9 @@ async function stopProtectionEffects(
   const { networkCleanup: _cleanup, runtimeStopped: _runtimeStopped, ...outcome } = result
   if (!result.success && result.runtimeStopped !== true) return outcome
   if (endingOutcome) closeSession(endingOutcome, endingStats)
-  await rollbackSoftAutoconfigIfApplied('protection stop')
+  let envRollbackFailed = false
+  try { await rollbackSoftAutoconfigIfApplied('protection stop') }
+  catch { envRollbackFailed = true } // Keep independent cleanup running; the helper already logged the failure.
   activeAdaptiveContext = null
 
   stopPeriodicSnapshots()
@@ -1681,6 +1684,10 @@ async function stopProtectionEffects(
 
   refreshTrayState({ status: 'off', restartingProgress: null })
   captureSnapshot('tun-post-stop').catch(() => undefined)
+  if (envRollbackFailed) return {
+    ...outcome, success: false,
+    error: [outcome.error, 'Не удалось восстановить env autoconfig. Повторите восстановление сети.'].filter(Boolean).join(' | ')
+  }
   return outcome
 }
 
@@ -2602,7 +2609,7 @@ app.whenReady().then(async () => {
   schedulerService.init({
     onConnect: (schedule) => {
       logEvent('info', 'scheduler', `schedule "${schedule.name}" triggered connect`, { profileId: schedule.profileId, mode: schedule.mode })
-      void runScheduledConnection(connectionLifecycle, schedule, {
+      return runScheduledConnection(connectionLifecycle, schedule, {
         resolveProxy: resolveProxyForTrayStart,
         selectProfile: id => {
           serverPicker.selectProfile(id)
@@ -2615,6 +2622,7 @@ app.whenReady().then(async () => {
       }).then(result => {
         if (result.success) void notify('info', 'Расписание', `VPN включён по расписанию: ${schedule.name}`, 'scheduleTriggered').catch(() => undefined)
         else logEvent('warn', 'scheduler', 'scheduled connection did not complete', { operation: connectionLifecycle.operation })
+        if ('code' in result && result.code === 'SCHEDULE_PROFILE_UNAVAILABLE') return 'profile-unavailable' as const
       }).catch(err => logEvent('error', 'scheduler', 'scheduled connection failed', err))
     },
     onDisconnect: (schedule) => {
