@@ -2449,3 +2449,26 @@ CI/review нового SHA проверяются отдельно после pu
   domain failures, FSM/coordinator, cancellation/deadline, migrations,
   correlation/history/flags/races/UI остаются. WP-2 не начат; цель active.
   Из нормативных docs/ ничего не менялось; впереди exact-head CI и Revix.
+
+## 18.10.2026 — PR #53 слит; оставшиеся service result contracts
+
+- PR https://github.com/newnout6-a11y/vpn/pull/53 слит, merge
+  1874794bbc35e390f6a1fa16646b51b760045deb; проверенный head
+  74a10e31c46db6cd90ff69f348893755856d2acc. `git diff 74a10e3 vpn/main
+  --exit-code` — 0: merge сохранил проверенное дерево.
+- Exact-head CI 39124566441: Windows 117666871494, Rust 117666871754,
+  сайт 117666871700 — success. Windows: 3830 passed / 4 skipped /
+  0 failed, 247 файлов passed / 1 skipped, 225.77 s. Checker всех
+  157 listeners и coverage AC 927/927, F 210/210 — exit 0. Production
+  IPC/contextBridge и CSP markers PASS, WFP aborted:true, native Electron
+  probe 1 passed / 1 skipped (.tmp/wp0-diagnostic-results-final-ci.log).
+- Revix 117666885660 — success, Ready to merge, замечаний нет. Локальный
+  финальный `npm.cmd run typecheck` — exit 0
+  (.tmp/wp0-diagnostic-results-final-typecheck.log); full 3829 passed /
+  5 skipped, 176.96 s, exit 0. Источники после этих проверок не менялись.
+- Новая ветка codex/wp0-service-results от проверенного vpn/main.
+  Следующий участок AT-00-001: 23 результата существующих сервисов
+  (network maintenance, forensics/traffic history, autoconfig, probe,
+  rule-sets/AutoPilot и split tunneling), преимущественно готовые pure types.
+  Остальные profile/group results, domain failures и вся остальная матрица
+  WP-0 остаются в работе. WP-2 не начат, цель active.
