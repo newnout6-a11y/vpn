@@ -31,6 +31,7 @@ import {
 import { MacCard, MacInput, MacButton, MacSelect } from '../design-system'
 import { PageTip } from '../components/PageTip'
 import type { ConnectionLogEntry, ConnectionHistoryFilters, SessionOutcome, SessionOutcomeKind } from '../../shared/ipc-types'
+import { connectionDurationMs } from '../../shared/connection-history'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -130,7 +131,7 @@ function legacyKind(reason: DisconnectReason): SessionOutcomeKind {
 }
 
 function isStartFailure(entry: ConnectionLogEntry): boolean {
-  return entry.outcome?.kind === 'start-failed' || (entry.endedAt != null && entry.endedAt - entry.startedAt < 1000 && entry.bytesDown === 0 && entry.bytesUp === 0 && (entry.disconnectReason === 'error'))
+  return entry.outcome?.kind === 'start-failed' || (entry.endedAt != null && connectionDurationMs(entry) < 1000 && entry.bytesDown === 0 && entry.bytesUp === 0 && (entry.disconnectReason === 'error'))
 }
 
 function buildDiagnosticsText(entry: ConnectionLogEntry): string {
@@ -265,8 +266,8 @@ export function Logs() {
           cmp = a.mode.localeCompare(b.mode)
           break
         case 'duration': {
-          const durA = a.endedAt != null ? a.endedAt - a.startedAt : 0
-          const durB = b.endedAt != null ? b.endedAt - b.startedAt : 0
+          const durA = connectionDurationMs(a)
+          const durB = connectionDurationMs(b)
           cmp = durA - durB
           break
         }
@@ -688,7 +689,7 @@ export function Logs() {
                             )}
                           </td>
                           <td className="px-4 py-2.5 text-[var(--color-text-secondary)] truncate">
-                            {entry.endedAt != null ? formatDuration(entry.endedAt - entry.startedAt) : '—'}
+                            {entry.endedAt != null ? formatDuration(connectionDurationMs(entry)) : '—'}
                           </td>
                           <td className="px-4 py-2.5 text-[var(--color-text-secondary)] text-xs leading-tight tabular-nums">
                             <span className="block">↓ {formatBytes(entry.bytesDown)}</span>

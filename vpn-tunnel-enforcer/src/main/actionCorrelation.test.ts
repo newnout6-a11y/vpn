@@ -14,6 +14,7 @@ it('keeps concurrent IPC actions correlated through native waits, operation even
   mkdirSync(root, { recursive: true })
   state.directory = mkdtempSync(join(root, 'action-correlation-'))
   for (const method of ['log', 'warn', 'error'] as const) vi.spyOn(console, method).mockImplementation(() => {})
+  vi.setSystemTime(new Date('2026-10-19T00:00:00Z'))
   try {
     const { ipcMain } = await import('electron')
     const { installTrustedIpcBoundary, registerTrustedRenderer } = await import('./ipcSecurity')
@@ -45,6 +46,8 @@ it('keeps concurrent IPC actions correlated through native waits, operation even
     const invoke = state.handlers.get('start-direct-vpn')!
     const first = invoke(event), second = invoke(event)
     expect(release).toHaveLength(2)
+    // A Windows/NTP clock correction must not reorder this action's events.
+    vi.setSystemTime(new Date('2026-10-18T23:00:00Z'))
     release[1]()
     const b = await second as { correlationId: string }
     release[0]()
@@ -64,6 +67,13 @@ it('keeps concurrent IPC actions correlated through native waits, operation even
     await expect.poll(() => { try { return readFileSync(getAppLogPath(), 'utf8').trim().split('\n').length } catch { return 0 } }).toBe(9)
     const raw = readFileSync(getAppLogPath(), 'utf8')
     const rows = raw.trim().split('\n').map(line => JSON.parse(line))
+    const timestamps = rows.map(row => row.monotonicMs)
+    expect(timestamps.every(Number.isFinite)).toBe(true)
+    expect(timestamps).toEqual([...timestamps].sort((left, right) => left - right))
+    expect(new Set(rows.map(row => row.clockId)).size).toBe(1)
+    expect(rows[0].clockId).toMatch(/^clock_[0-9a-f]{24}$/)
+    expect(rows[0].ts).toBe('2026-10-19T00:00:00.000Z')
+    expect(rows.at(-1).ts).toBe('2026-10-18T23:00:00.000Z')
     for (const [action, response] of [['a', a], ['b', b]] as const) {
       const actionRows = rows.filter(row => row.scope.endsWith(`-${action}`))
       expect(actionRows).toHaveLength(4)
@@ -76,9 +86,12 @@ it('keeps concurrent IPC actions correlated through native waits, operation even
     const exported = (await getFullLogs()).find(file => file.path === getAppLogPath())!
     expect(exported.exists).toBe(true)
     const exportedRows = exported.content.trim().split('\n').map(line => JSON.parse(line))
+    expect(exportedRows.map(row => row.monotonicMs)).toEqual(timestamps)
+    expect(exportedRows.map(row => row.clockId)).toEqual(rows.map(row => row.clockId))
     expect(exportedRows.map(row => row.correlationId)).toEqual(rows.map(row => row.correlationId))
     expect(exported.content).not.toMatch(/must-not-log|private-test-password|8093a2ec|settings\.json/)
   } finally {
+    vi.useRealTimers()
     vi.restoreAllMocks()
     if (dirname(state.directory) !== root) throw new Error('Unsafe owned correlation fixture cleanup')
     rmSync(state.directory, { recursive: true, force: true })

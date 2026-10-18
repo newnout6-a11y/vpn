@@ -3508,3 +3508,81 @@ CI/review нового SHA проверяются отдельно после pu
   `node scripts/test-wp1-native.mjs --ipc-only` — WP1_NATIVE_PASS, exit 0
   (.tmp/wp0-session-provenance-csp.log). Это native IPC/CSP с fake OS effects,
   не Windows packet/resource acceptance.
+
+### PR #64 — проверка и слияние
+
+- Head 654b922dbc06eabba84ce3b35814d06c73331339: Qodo 1541785 completed,
+  findings 0. CI 39165512419 completed/success, все три jobs зелёные на этом SHA.
+- Слит после проверок по разрешению владельца; REST GET merged=true,
+  merge 964f8020f429455557f32c08ad3a287d2cdfedb5.
+
+## WP-0 — монотонное время событий (19.10.2026)
+
+- AT-00-005 / F-143: JSONL, временные метки lifecycle admission, начало/конец
+  сессий, failed-start history и in-app notification используют общий main clock.
+  Календарное время якорится к process.hrtime.bigint при загрузке модуля;
+  последующие Windows/NTP/manual corrections не меняют порядок событий.
+  Разрешение — миллисекунда, одинаковые timestamp допустимы. Это одна временная
+  шкала текущего main-процесса, не синхронизация разных процессов/перезапусков.
+- Таймеры deadline не заменены календарным сравнением. Heuristic evidence,
+  TTL и внешние file timestamps по-прежнему используют свою исходную шкалу.
+- До исправления `npm.cmd test -- src/main/actionCorrelation.test.ts src/main/connectionHistoryStorage.test.ts src/main/eventClock.test.ts`
+  — **3 failed / 79 passed**, 4.06 s, exit 1
+  (.tmp/wp0-event-time-before.log): две production-регрессии и отсутствующий
+  новый clock module. System clock rollback переставлял JSONL events и давал
+  session endedAt < startedAt.
+- `npm.cmd test -- src/main/actionCorrelation.test.ts src/main/connectionHistoryStorage.test.ts src/main/eventClock.test.ts src/main/connectionOperations.test.ts src/main/actionCorrelationScope.test.ts src/main/appLoggerRedaction.test.ts src/main/appLoggerRotation.test.ts src/main/lifecycleCleanup.test.ts`
+  — **289 passed / 8 files**, 36.47 s, exit 0
+  (.tmp/wp0-event-time-focused-final.log). Проверены rollback/forward jump часов,
+  real on-disk JSONL через production IPC/lane, порядок persisted session/failure
+  и lifecycle start/stop; ID и redaction сохраняются.
+- `npm.cmd run typecheck` — exit 0, 158 channels / 0 public any
+  (.tmp/wp0-event-time-typecheck.log). Полный AT-00-005 пока не объявляется PASS:
+  полные Soft/background paths и матрица их событий ещё остаются.
+- Полный `npm.cmd test` — **4152 passed / 5 skipped / 0 failed**,
+  263 files passed / 2 skipped, 229.37 s, exit 0
+  (.tmp/wp0-event-time-full.log). Coverage `python docs/04-приёмочные-тесты/traceability/check-coverage.py`
+  — AC 927/927, F 210/210, exit 0; `git diff --check` — exit 0.
+- `npm.cmd run build` — exit 0 (.tmp/wp0-event-time-build.log).
+  `node scripts/test-electron-runtime.mjs` — ELECTRON_SMOKE_PASS, exit 0
+  (.tmp/wp0-event-time-electron.log); `node scripts/test-wp1-native.mjs --ipc-only`
+  — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-event-time-csp.log). Scope прежний:
+  настоящий Electron/contextBridge/CSP и fake OS effects, не packet/OS-matrix L3.
+
+### Qodo #65 — календарное время отдельно от порядка и длительности
+
+- На head 20e6802a1b20975ba5c6ff7159d5e3c04c9e586b Qodo 1541885 completed
+  с finding 0b666add-55b5-4472-b2d1-e0a2dd9546a1: clock changes misdate session
+  history. Замечание верное: process-anchored epoch не следовал исправленным
+  календарным часам, а filter/stats/UI использовали настоящие даты. PR не слит.
+  Предыдущее описание anchored calendar clock выше относится к этому
+  отклонённому варианту, а не к итоговой реализации.
+- До исправления `npm.cmd test -- src/main/actionCorrelation.test.ts src/main/connectionHistoryStorage.test.ts src/main/eventClock.test.ts src/shared/connection-history.test.ts`
+  — **4 failed / 79 passed**, 1 suite failed (отсутствующий helper), 4.31 s,
+  exit 1 (.tmp/wp0-event-time-qodo65-before.log). Production-regressions проверяют
+  calendar dates после backward/forward correction и JSONL ordering metadata.
+- Итог: календарные ts/startedAt/endedAt/deadline/notifications снова читают
+  системное время. JSONL дополнен monotonicMs и непривязанным к секретам clockId,
+  различающим origins после рестарта. Session durationMs вычисляется по hrtime;
+  stats и renderer duration/sort/failure heuristic используют общий helper.
+  Отрицательные legacy durations ограничены нулём, новые записи требуют
+  конечное неотрицательное durationMs. Старые записи читаются, JSON/CSV сохраняют
+  поле; неверные duration удерживаются с history.corrupted.
+- `npm.cmd test -- src/main/actionCorrelation.test.ts src/main/connectionHistoryStorage.test.ts src/main/connectionHistory.test.ts src/main/eventClock.test.ts src/shared/connection-history.test.ts src/renderer/pages/Logs.render.test.tsx src/main/actionCorrelationScope.test.ts src/main/connectionOperations.test.ts`
+  — **157 passed / 8 files**, 5.49 s, exit 0
+  (.tmp/wp0-event-time-qodo65-focused-final.log). Дополнительно после усиления
+  forward correction до 40 дней `npm.cmd test -- src/main/connectionHistoryStorage.test.ts`
+  — **86 passed**, 5.57 s, exit 0 (.tmp/wp0-event-time-qodo65-calendar-final.log).
+  Все day/week/month stats и точный calendar filter проверены на real Conf.
+- `npm.cmd run typecheck` — exit 0, 158 channels / 0 public any
+  (.tmp/wp0-event-time-qodo65-typecheck-final.log). Нормативные docs не менялись.
+- Полный `npm.cmd test` исправленного варианта — **4161 passed / 5 skipped /
+  0 failed**, 264 files passed / 2 skipped, 234.41 s, exit 0
+  (.tmp/wp0-event-time-qodo65-full.log). Успешный CI прежнего head не считается
+  проверкой этого исправления.
+- `npm.cmd run build` — exit 0 (.tmp/wp0-event-time-qodo65-build.log).
+  `node scripts/test-electron-runtime.mjs` — ELECTRON_SMOKE_PASS, exit 0
+  (.tmp/wp0-event-time-qodo65-electron.log); `node scripts/test-wp1-native.mjs --ipc-only`
+  — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-event-time-qodo65-csp.log).
+  Coverage AC 927/927, F 210/210 и `git diff --check` — exit 0. Native scope
+  не расширен до packet/resource/OS-matrix приёмки.

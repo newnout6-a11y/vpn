@@ -17,6 +17,7 @@ import { tunController, getTunRuntimeDir, detectForeignTun, killOwnedTunRuntimeP
 import type { NetworkCleanupReceipt, SingBoxOutboundFault } from './tunController'
 import { ConnectionLifecycle, type ConnectionStartupOwner } from './connectionLifecycle'
 import { currentCorrelationId, currentActionMetadata, withCorrelation } from './actionCorrelation'
+import { monotonicTimeMs } from './eventClock'
 import { TunnelStateMachine } from './tunnelStateMachine'
 import type { ConnectionStartResult, ConnectionStopResult } from '../shared/operation'
 import { runScheduledConnection } from './scheduledConnection'
@@ -197,6 +198,7 @@ let latestRestartingProgress: string | null = null
 // double-recording when a user-initiated stop also triggers a status-change.
 interface LiveSession {
   startedAt: number
+  startedMonotonicMs: number
   correlationId?: string
   origin: Omit<ConnectionProvenance, 'confidence'>
   profile: { id: string; name: string; mode: 'hard' | 'soft' | 'direct' }
@@ -220,6 +222,7 @@ function openSession(profile: LiveSession['profile']): void {
   const correlationId = currentCorrelationId()
   currentSession = {
     startedAt: Date.now(),
+    startedMonotonicMs: monotonicTimeMs(),
     ...(correlationId ? { correlationId } : {}),
     origin: captureSessionOrigin(profile.mode, true),
     profile,
@@ -266,6 +269,7 @@ function writeSessionEntry(s: LiveSession, stats: TrafficStats, outcome: Session
       ...(s.correlationId ? { correlationId: s.correlationId } : {}),
       provenance: { ...s.origin, confidence: sessionOutcomeConfidence(outcome.kind) },
       endedAt: Date.now(),
+      durationMs: monotonicTimeMs() - s.startedMonotonicMs,
       profileName: s.profile.name,
       profileId: s.profile.id,
       mode: s.profile.mode,
@@ -360,6 +364,7 @@ function recordStartFailure(
       ...(correlationId ? { correlationId } : {}),
       provenance: { ...captureSessionOrigin(profile.mode, false), confidence: 'observed' },
       endedAt: now,
+      durationMs: 0,
       profileName: profile.name,
       profileId: profile.id,
       mode: profile.mode,

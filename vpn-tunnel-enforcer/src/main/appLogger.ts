@@ -8,6 +8,7 @@ import { directoryExists, verifyDirectoryHardened } from './runtimeDirSecurity'
 import { redactSensitiveConfig, redactSensitiveText } from './vpnProfiles'
 import { watchEngineLogs } from './engineLogRetention'
 import { currentCorrelationId } from './actionCorrelation'
+import { eventClockId, monotonicTimeMs } from './eventClock'
 
 export type AppLogLevel = 'debug' | 'info' | 'warn' | 'error'
 
@@ -189,6 +190,8 @@ function formatLine(level: AppLogLevel, scope: string, message: string, details?
   const correlationId = currentCorrelationId()
   return JSON.stringify({
     ts: new Date().toISOString(),
+    monotonicMs: monotonicTimeMs(),
+    clockId: eventClockId,
     level,
     scope,
     message: normalizedMessage,

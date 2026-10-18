@@ -162,6 +162,11 @@ describe('aggregateStats', () => {
   // Use a fixed "now" that is within range of our test entries
   const now = 1700040000000
 
+  it('uses monotonic session duration when calendar end predates start (AT-00-005)', () => {
+    const corrected = { ...baseEntry, endedAt: baseEntry.startedAt - 3600000, durationMs: 65000 }
+    expect(aggregateStats([corrected], 'day', now).totalTimeMs).toBe(65000)
+  })
+
   it('computes total time for completed entries within period', () => {
     const result = aggregateStats(entries, 'day', now)
     // All entries are within 24h of "now"
@@ -236,7 +241,7 @@ describe('exportCsv', () => {
   it('produces correct CSV header', () => {
     const csv = exportCsv([])
     expect(csv).toBe(
-      'id,startedAt,endedAt,profileName,profileId,mode,bytesDown,bytesUp,disconnectReason,errorMessage,outcomeKind,outcomeHeadline,correlationId,source,owner,route,confidence'
+      'id,startedAt,endedAt,profileName,profileId,mode,bytesDown,bytesUp,disconnectReason,errorMessage,outcomeKind,outcomeHeadline,correlationId,source,owner,route,confidence,durationMs'
     )
   })
 
@@ -245,7 +250,7 @@ describe('exportCsv', () => {
     const lines = csv.split('\n')
     expect(lines).toHaveLength(2)
     expect(lines[1]).toBe(
-      'entry-1,1700000000000,1700003600000,US Server,profile-1,hard,1024000,512000,user,,,,,,,,'
+      'entry-1,1700000000000,1700003600000,US Server,profile-1,hard,1024000,512000,user,,,,,,,,,'
     )
   })
 

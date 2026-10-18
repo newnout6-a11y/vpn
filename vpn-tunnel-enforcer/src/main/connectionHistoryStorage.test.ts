@@ -22,7 +22,7 @@ vi.mock('electron-store', async () => {
 })
 
 const entry: ConnectionHistoryEntryInput = {
-  startedAt: 1700000000000, endedAt: 1700000001000,
+  startedAt: 1700000000000, endedAt: 1700000001000, durationMs: 1000,
   profileId: 'profile-1', profileName: 'Test', mode: 'hard',
   bytesDown: 10, bytesUp: 20, disconnectReason: 'user',
   provenance: { source: 'unknown', owner: 'unknown', route: 'unconfirmed', confidence: 'indeterminate' }
@@ -42,9 +42,10 @@ async function sessionTracking(service: Awaited<ReturnType<typeof reload>>) {
   expect(names.every(name => functions.some(node => ts.isFunctionDeclaration(node) && node.name?.text === name))).toBe(true)
   const { currentCorrelationId, currentActionMetadata, withCorrelation } = await import('./actionCorrelation')
   const { randomUUID } = await import('node:crypto')
+  const { monotonicTimeMs } = await import('./eventClock')
   const { makeOutcome, outcomeKindToDisconnectReason, sessionOutcomeConfidence } = await import('./sessionOutcome')
   const notificationIds: Array<string | undefined> = []
-  const dependencies = { currentCorrelationId, currentActionMetadata, withCorrelation, randomUUID, connectionHistoryService: service, makeOutcome, outcomeKindToDisconnectReason, sessionOutcomeConfidence,
+  const dependencies = { currentCorrelationId, currentActionMetadata, withCorrelation, randomUUID, monotonicTimeMs, connectionHistoryService: service, makeOutcome, outcomeKindToDisconnectReason, sessionOutcomeConfidence,
     settingsStore: { get: () => ({ connectionMode: 'localProxy', routingMode: 'hard' }) },
     resolveProxyForTrayStart: async () => null, notify: () => notificationIds.push(currentCorrelationId()),
     restoreAndFocusMainWindow: () => {},
@@ -72,6 +73,27 @@ afterEach(async () => {
 })
 
 describe('connection history persistence (AT-00-010; F-143)', () => {
+  it.each([-3_600_000, 40 * 86_400_000])('keeps calendar filters and monotonic duration after a %i ms correction (AT-00-005)', async correction => {
+    const service = await reload(), tracking = await sessionTracking(service)
+    const epoch = 1792368000000, corrected = epoch + correction
+    const wallClock = vi.spyOn(Date, 'now').mockReturnValue(epoch)
+    try {
+      tracking.open()
+      await new Promise(resolve => setTimeout(resolve, 15))
+      wallClock.mockReturnValue(corrected)
+      tracking.close()
+      tracking.open(); tracking.close()
+      tracking.failure()
+      const reloaded = await reload(), [saved, fresh, failed] = reloaded.getEntries()
+      expect(saved).toMatchObject({ startedAt: epoch, endedAt: corrected })
+      expect(saved.durationMs).toBeGreaterThanOrEqual(10)
+      expect(saved.durationMs).toBeLessThan(10_000)
+      expect(fresh).toMatchObject({ startedAt: corrected, endedAt: corrected })
+      expect(failed).toMatchObject({ startedAt: corrected, endedAt: corrected, durationMs: 0 })
+      expect(reloaded.filter({ dateFrom: corrected, dateTo: corrected }).map(entry => entry.id)).toEqual([fresh.id, failed.id])
+      if (correction > 0) for (const period of ['day', 'week', 'month'] as const) expect(reloaded.stats(period).entryCount).toBe(1)
+    } finally { wallClock.mockRestore() }
+  })
   it.each(['ipc', 'tray', 'lifecycle'] as const)('retains %s provenance and every admitted owner after a different stop action (AT-00-005)', async source => {
     const service = await reload(), tracking = await sessionTracking(service)
     const { withCorrelation } = await import('./actionCorrelation')
@@ -113,6 +135,16 @@ describe('connection history persistence (AT-00-010; F-143)', () => {
     expect(() => service.addEntry(legacy as ConnectionHistoryEntryInput)).toThrow('Invalid connection history entry')
     await writeFile(file(), JSON.stringify({ connectionHistory: [{ ...legacy, id: 'legacy' }] }))
     expect((await reload()).getEntries()).toEqual([{ ...legacy, id: 'legacy' }])
+  })
+
+  it('requires elapsed duration on new writes and exports it unchanged (AT-00-005)', async () => {
+    const service = await reload()
+    const { durationMs: _duration, ...legacy } = entry
+    expect(() => service.addEntry(legacy as ConnectionHistoryEntryInput)).toThrow('Invalid connection history entry')
+    service.addEntry(entry)
+    expect(JSON.parse(service.exportJson())[0].durationMs).toBe(entry.durationMs)
+    const csv = service.exportCsv().split('\n').map(row => row.split(','))
+    expect(Number(csv[1][csv[0].indexOf('durationMs')])).toBe(entry.durationMs)
   })
 
   it('correlates repeated missing-proxy tray attempts before lifecycle admission (AT-00-005)', async () => {
@@ -193,6 +225,7 @@ describe('connection history persistence (AT-00-010; F-143)', () => {
     delete legacy.outcome
     delete legacy.errorMessage
     delete legacy.provenance
+    delete legacy.durationMs
     written[0] = legacy
     await writeFile(file(), JSON.stringify({ connectionHistory: written }))
     const restarted = await reload()
@@ -272,6 +305,7 @@ describe('connection history persistence (AT-00-010; F-143)', () => {
   })
 
   it.each([
+    ...[-1, 'raw-secret', null, Number.POSITIVE_INFINITY].map(durationMs => ({ durationMs })),
     ...[null, {}, { source: 'ipc', owner: 'manual', route: 'tun' },
       ...['source', 'owner', 'route', 'confidence'].map(key => ({ source: 'ipc', owner: 'manual', route: 'tun', confidence: 'observed', [key]: 'raw-secret' })),
       { source: 'ipc', owner: 'manual', route: 'soft-env', confidence: 'observed' },

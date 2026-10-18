@@ -62,6 +62,15 @@ afterEach(() => {
 })
 
 describe('<Logs/> connection history outcomes', () => {
+  it('shows elapsed duration and retains a real session after a backward clock correction (AT-00-005)', async () => {
+    const corrected: ConnectionLogEntry = { ...ENTRIES[0], startedAt: now, endedAt: now - 3600000,
+      durationMs: 65000, bytesDown: 0, bytesUp: 0, disconnectReason: 'error',
+      outcome: { kind: 'unknown', headline: 'Unknown' } }
+    vi.mocked(window.electronAPI.connectionHistoryList).mockResolvedValue([corrected])
+    render(<Logs />)
+    const row = (await screen.findByText('netherlandsvless1')).closest('tr')!
+    expect(within(row).getByText('1m 5s')).toBeInTheDocument()
+  })
   it('splits real sessions from start failures', async () => {
     render(<Logs />)
     await screen.findByText('netherlandsvless1')

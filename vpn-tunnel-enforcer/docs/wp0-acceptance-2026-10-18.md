@@ -8,7 +8,7 @@
 18.10 владелец разрешил продолжать WP-0 при открытом PR #54, сохраняя запрет
 его слияния до отдельного решения. Полного Revix для #54 не было из-за квоты.
 Позднее 18.10 владелец разрешил сливать PR после пройденных проверок.
-#54/#55/#56/#57/#58/#59/#60/#61/#62/#63 слиты в main после exact-head CI success и completed Qodo,
+#54/#55/#56/#57/#58/#59/#60/#61/#62/#63/#64 слиты в main после exact-head CI success и completed Qodo,
 без открытых findings; прежний запрет слияния отменён.
 
 ## Полная область и первоначальная инвентаризация
@@ -19,7 +19,7 @@
 | 00-002 | Production TunnelStateMachine интегрирована в main lane/IPC/Soft/tray/UI; 4096 stable tours и 117649 tours семи событий глубиной 6, включая timeout/cancel и native completion, с fake PID/TUN ledger и балансом operation events; sticky faults и generation fencing | Общая durable operation history/counters; все blocked/unknown/background paths; native Windows resources; общий admission фоновых restart |
 | 00-003 | Main connection lane: UUIDv4, owner, deadline запуска, priority admission; ручные Hard/Direct и Soft из tray, scheduled startup вместе с proxy detection; отмена на 10/50/90% управляемого connect fixture | Общий реестр refresh/speed/import/export/rotation; deadline остановки, интеграция всех entrypoints и полная матрица поздних эффектов |
 | 00-004 | Общая классификация transport; 157 каналов × 7 категорий через guard; native contextBridge сохраняет code/category/correlation в en/ru; typed local validation; 4 настоящих config handlers × 7 категорий, canonical domain failures | Миграция legacy domain-result `{success:false,error}` и semantic matrix настоящих feature handlers; transport fixtures не доказывают её |
-| 00-005 | Один action correlation id в guarded IPC response/error, lifecycle connect/stop и JSONL logger; async isolation, native wait/drain, diagnostic read-back с повторной redaction; сохранение ID исходного connect и source/owner/route/confidence в durable session history и JSON/CSV | Монотонный порядок, все background/Soft paths и полная матрица событий |
+| 00-005 | Один action correlation id в guarded IPC response/error, lifecycle connect/stop и JSONL logger; async isolation, native wait/drain, diagnostic read-back с повторной redaction; сохранение ID исходного connect и source/owner/route/confidence в durable session history и JSON/CSV; общие монотонные временные метки main | Все background/Soft paths и полная матрица событий |
 | 00-006 | Локальные миграции; общий version admission для 20 electron-store файлов / 28 constructors; future-version SHA-256 invariance на real Conf backend до defaults/repair и при записи через ранее открытый handle | Централизованный упорядоченный migration registry, fixtures всех исторических преобразований, остальные persisted JSON, полноценный upgrade/downgrade и межпроцессная координация |
 | 00-007 | Seed 0x5eed003: 200 commands/10 async workers с production lane/FSM, typed losers, парные terminal events, финальный disconnect и 0 fake PID/TUN | Натурный PID-реестр Windows и полная матрица фоновых entrypoints |
 | 00-008 | Dashboard component frames с production FSM/lane; revision fence; Soft через owned IPC; visual fixtures light/dark; native production contextBridge snapshots/disposer | Полная матрица всех операций, тем, размеров и entrypoints; browser fixtures не заменяют native resources |
@@ -782,3 +782,29 @@ Fixtures исполняют actual main session bodies и production lane для
 До production-исправления — 29 failed / 47 passed; адресный итог — 311 passed
 в шести файлах. Команды и общие результаты — progress.md. Это L2 subset,
 не PASS всего AT-00-005: монотонный порядок и полные фоновые пути остаются.
+
+## AT-00-005 — порядок времени внутри main (19.10.2026)
+
+JSONL сохраняет реальное календарное ts и отдельные monotonicMs/clockId.
+Монотонное elapsed время process.hrtime.bigint задаёт порядок внутри main;
+clockId отличает новый origin после перезапуска. Миллисекундные метки могут
+совпадать; очередь JSONL сохраняет порядок записи. Deadline остаётся setTimeout.
+
+Session startedAt/endedAt, lifecycle dates и notifications следуют календарным
+часам. Длительность сессии хранится отдельно в durationMs, вычисленном по
+монотонным часам. Stats и UI duration/sort/start-failure classification используют
+общий helper; legacy строки без durationMs получают безопасный fallback.
+Новые записи требуют конечный неотрицательный durationMs; CSV добавляет его
+последним столбцом, JSON сохраняет поле. Malformed durations удерживаются в
+rejected history с history.corrupted.
+
+Qodo 1541885 на первоначальном 20e6802 обнаружил неверную подмену календарного
+времени process-anchored epoch: после коррекции история расходилась с фильтрами
+и day/week/month stats. Замечание подтверждено и подход исправлен до слияния.
+Clock fixture проверяет backward/forward jumps и точное elapsed время.
+Production IPC/lane/logger пишет настоящий JSONL; real Conf session fixture
+проверяет календарные даты, filter/stats и elapsed duration при коррекции часов
+на час назад и 40 дней вперёд. Renderer проверяет реальную строку сессии с
+endedAt < startedAt и durationMs=65000: она остаётся сессией с длительностью 1m 5s.
+Полный AT ещё не закрыт: все реальные Soft/background entrypoints остаются
+отдельной интеграционной работой. Точные команды и результаты — progress.md.
