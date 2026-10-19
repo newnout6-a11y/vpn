@@ -5834,3 +5834,161 @@ CI/review нового SHA проверяются отдельно после pu
   **287.12 s**, exit 0 (.tmp/wp0-detail-export-full-final.log).
   Native recovery/DNS suites и budgets не менялись. Нормативные docs/
   не редактировались; следующий участок требует completed Qodo/CI final SHA.
+
+### 19.10.2026 — WP-0: diagnostics ZIP lifetime (ветка codex/wp0-diagnostics-export-lifetime)
+
+- Предыдущий PR #82 слит: final head 64e089e257511b4f936d60aa8c4e5b6189b66a4a,
+  Qodo 1554278 completed без findings, CI 39297189492 success; merge/main
+  1549a641ed492eaae5d7c990e24a9a689e46d0f9. REST merged=true и tree equality
+  reviewed head→main проверены. Revix full review отсутствует по квоте.
+- AT-00-003/004/005/008, F-021/F-074/F-143: export-diagnostics теперь имеет
+  requester+UUIDv4 cancellation, main operation UUID/correlation, work deadline
+  120000ms и physical drain. Свежий manual snapshot находится внутри admission:
+  отменённый queued/collecting snapshot не публикуется; временная запись перед
+  синхронным rename. Native picker исключается из work clock, отменяется bounded.
+- Архив собирается в отдельном work/bundle, Compress-Archive пишет ZIP вне bundle.
+  Готовые binary bytes передаются AsyncIterable в existing identity/ACL-checked
+  staging и terminal rename; выбранный файл не изменяется до commit. Ошибки
+  возвращаются typed IpcFault без сырых PowerShell/path payloads. Cleanup awaited;
+  warning cleanup-failed виден в результате/UI. Состав и финальная redaction
+  сохранены по решению владельца ТЗ-06 §10.6. Вложенная forensics queue/summary
+  проверяет active owner между async этапами; normal capture callers совместимы.
+- Общий useDiagnosticsExport используется DiagnosticsCard и Settings: unmount
+  отзывает свой token; late replies не меняют UI/logs/toasts и не сбрасывают новый
+  busy owner. Typed cancel тихий; normal success/error и cleanup warning видны.
+- До fix: npm.cmd test -- src/main/diagnosticsExportOperations.test.ts — 1 failed,
+  493ms, exit1 (.tmp/wp0-diagnostics-export-before.log): operation отсутствовала.
+  При расширении harness исправлены mock promisify(execFile) stdout/stderr и
+  учёт завершения уже запущенной controlled compression; production guards не
+  ослаблялись. Main exporter regressions: 11 passed, 0.984s, exit0
+  (.tmp/wp0-diagnostics-main.log). Actual snapshot module: 3 passed, 0.438s,
+  exit0 (.tmp/wp0-diagnostics-snapshot.log). Actual React обоих entrypoints —
+  8 cases в окончательном full run (первые 6 прошли адресно).
+- npm.cmd test -- src/main/diagnosticsExportOperations.test.ts
+  src/main/systemSnapshotLifetime.test.ts src/main/systemSnapshot.test.ts
+  src/main/trafficForensics.test.ts src/main/diagnosticsPreflight.test.ts
+  src/renderer/components/DiagnosticsExport.requestLifetime.test.tsx
+  src/renderer/components/DiagnosticsCard.test.tsx
+  src/renderer/pages/Settings.render.test.tsx — 103 passed, 11.22s, exit0
+  (.tmp/wp0-diagnostics-targeted.log); затем добавлены 2 typed-error UI cases.
+- npm.cmd run build — exit0 (.tmp/wp0-diagnostics-build.log), typecheck 165
+  channels/0 public any. node scripts/test-electron-runtime.mjs — 6 PASS
+  fixtures, exit0 (.tmp/wp0-diagnostics-electron.log). Новый native ZIP fixture
+  выполняет production handler/preload/registry и реальные Compress-Archive,
+  binary stream, ACL checks, replacement и ZIP read-back. Collection управляемая;
+  VPN/network/clipboard не меняются. Первый native run корректно отказал workspace
+  namespace с DELETE_CHILD у sandbox accounts; final использует существующий
+  privateExportDirectory fixture. Проверки ACL не ослаблялись.
+- python docs/04-приёмочные-тесты/traceability/check-coverage.py — AC927/927,
+  F210/210, exit0. Полный npm.cmd test и final remote gates выполняются.
+
+- Первый полный npm.cmd test — 4731 passed /5 skipped /0 failed, 287 files
+  passed/2 skipped, 374.83s, exit0 (.tmp/wp0-diagnostics-full.log). Во время
+  прогона review обнаружил поздний success log вложенного runSystemDiagnostics;
+  добавлены optional owner assertion и2 executable collector regressions.
+  Этот первый run не называется final-head доказательством новой правки.
+- npm.cmd test -- src/main/systemDiagnosticsLifetime.test.ts
+  src/main/diagnosticsExportOperations.test.ts src/preload/preloadValidation.test.ts
+  —67 passed,1.24s,exit0 (.tmp/wp0-diagnostics-nested.log). Preload legacy zero
+  args/token и object refusal проверяются исполняемым bridge. Actual summary:
+  npm.cmd test -- src/main/trafficForensicsSummaryLifetime.test.ts —2 passed,
+  0.514s,exit0 (.tmp/wp0-diagnostics-summary.log): cancelled read не публикует
+  normalized files/summary, normal generation сохранена.
+- Final npm.cmd run build —exit0 (.tmp/wp0-diagnostics-build-final.log);
+  node scripts/test-electron-runtime.mjs —6 PASS,exit0
+  (.tmp/wp0-diagnostics-electron-final.log); node scripts/test-wp1-native.mjs
+  --ipc-only —WP1_NATIVE_PASS,exit0 (.tmp/wp0-diagnostics-ipc-final.log).
+  Final full run начат после этих изменений на неизменяемом code/test tree.
+
+- Окончательный full attempt: npm.cmd test —4734 passed /5 skipped /1 failed,
+  288 files passed/2 skipped,384.42s,exit1
+  (.tmp/wp0-diagnostics-full-final.log). Единственный failure — прежний
+  serverKeyOperations: retains bounded cause servers:export-key-file / ENOENT,
+  default5000ms timeout. Diagnostics suites зелёные. Выполняется отдельный
+  recheck всего файла; затем повтор default full без ослабления deadlines.
+- Повторный npm.cmd run typecheck —exit0,165 channels/0 public any
+  (.tmp/wp0-diagnostics-typecheck-final.log); coverage AC927/927,F210/210
+  и git diff --check —exit0.
+- npm.cmd test -- src/main/serverKeyOperations.test.ts —57/57 passed,52.29s,
+  exit0 (.tmp/wp0-diagnostics-key-recheck.log), исходный code/test/budgets
+  сохранены. Повторный полный npm.cmd test начат на том же tree.
+- Финальный default npm.cmd test повтор —4735 passed /5 skipped /0 failed,
+  289 files passed/2 skipped,323.76s,exit0
+  (.tmp/wp0-diagnostics-full-recheck.log). Code/test tree и budgets не менялись.
+  Предыдущий timeout сохранён выше. Публикация PR и exact-head Qodo/CI pending.
+
+### PR #83 — Qodo1554946 и третий UI entrypoint
+
+- Исходный head b870f009d0e340af9926ac583790ecf0e04398c8, Qodo1554946
+  completed с6 findings. Revix free-quota-reached до20.10 00:00UTC,
+  full review отсутствует. CI39304583600 — только исходный head.
+- Найден третий ZIP entrypoint Maintenance. До fix4 новых actual-React cases
+  failed, прежние8 passed (.tmp/wp0-diagnostics-maintenance-before.log).
+  Maintenance теперь использует общий owned hook.20/20 passed; затем
+  исправлено поле тестового toast message→description (не production).
+- Подтверждён mixed-generation defect: export summary читает live evidence,
+  но normalized artifacts/summary/session manifest пишет только в export
+  staging с общим redactor. Неполный forensic subtree удаляется до упаковки.
+  Три real-filesystem cases удерживают timeline/flows/summary write и отменяют
+  owner: retained generation byte-identical. Старый sidecar race test ожидал
+  удалённый stage writeManifest hook; теперь удерживает actual summary I/O
+  и проверяет тот же queued sidecar-exit persistence.
+- Подтверждён cleanup defect: optional callback writer сообщает об остатке
+  adjacent temp; после cancellation/failure существующее inapp-notification
+  предупреждает без путей. Успех сохраняет warning в result. Main notification
+  coalesced per export. Actual cancelled-write+failed-cleanup case добавлен.
+- Общий120s budget слишком тесен для последовательных native этапов.
+  Export-specific deadline600000ms: test доказывает running после120s и timeout
+  после600s. Native process budgets, save picker waitForUser, prompt cancel
+  и physical drain сохранены.
+- Восстановлен diagnostics zip written audit после terminal success без пути;
+  manual picker dismissal снова пишет info. Typed cancellation/stale тихие.
+- USB/network finding: intentional ACL/identity/reparse/namespace safety existing
+  atomic writer не ослабляется. Неподтверждённые destinations получают typed
+  permission; private destination выполняется native fixture.
+- Первый review targeted83 passed/4 failed,8.85s,exit1
+  (.tmp/wp0-diagnostics-review-targeted.log):3 новых write gates были перекрыты
+  test read gate; старый sidecar hook ожидал удалённый writeManifest. Harness
+  исправлен без ослабления production guards. Повтор5 suites87/87 passed,
+  3.89s,exit0 (.tmp/wp0-diagnostics-review-targeted2.log). Затем усилены
+  retained summary/manifest byte-invariance и staged session manifest.
+- Review final npm.cmd run build —exit0 (.tmp/wp0-diagnostics-review-build.log);
+  node scripts/test-electron-runtime.mjs —6 PASS,exit0
+  (.tmp/wp0-diagnostics-review-electron.log); node scripts/test-wp1-native.mjs
+  --ipc-only —WP1_NATIVE_PASS,exit0 (.tmp/wp0-diagnostics-review-ipc.log).
+  Coverage AC927/927,F210/210 и diff check —exit0. Final full начат на
+  неизменяемом code/test tree (.tmp/wp0-diagnostics-review-full.log).
+- Финальный review npm.cmd test —4746 passed /5 skipped /0 failed,
+  289 files passed/2 skipped,323.00s,exit0
+  (.tmp/wp0-diagnostics-review-full.log). Production/test tree с запуска
+  не менялся. CI39304583600 на прежнем b870f009 completed/success;
+  для нового commit требуются новые Qodo/CI.
+
+- Qodo1555116 completed на c4b967e3164a0fe8d7203335c43c4bde039b34ad:
+  пять findings автоматически implemented, новых нет. Namespace finding
+  остался pending. Inline comment4317511787 предлагает безопасную альтернативу:
+  сохранить strict path, но показать ясную подсказку выбрать local private
+  folder и проверить namespace refusal. Эта альтернатива реализована в hook
+  всех3 экранов, без ослабления ACL. Новый actual exporter regression
+  воспроизводит Assert-ExportNamespace refusal, typed permission, unchanged
+  destination, отсутствие staging и success log. UI сохраняет bounded error
+  и добавляет конкретную инструкцию про «Документы»/ACL/network.
+- При переносе summary в staged copy сохранено pure merging
+  preserveObservedSidecarStop: sidecar exit во время summary отражается и в
+  staged session manifest. Старый race test теперь проверяет также exported
+  sidecar.running=false, не только retained/runtime state.
+- npm.cmd test -- src/main/diagnosticsExportOperations.test.ts
+  src/main/trafficForensics.test.ts
+  src/renderer/components/DiagnosticsExport.requestLifetime.test.tsx
+  —75/75 passed,3.18s,exit0 (.tmp/wp0-diagnostics-namespace-targeted.log).
+- Namespace follow-up npm.cmd run build —exit0
+  (.tmp/wp0-diagnostics-namespace-build.log);6 Electron fixtures —PASS,exit0
+  (.tmp/wp0-diagnostics-namespace-electron.log); coverage AC927/927,F210/210
+  и git diff --check —exit0. Final full начат на неизменном code/test tree
+  (.tmp/wp0-diagnostics-namespace-full.log). IPC/CSP повтор не требуется:
+  после прежнего PASS доверенная граница/preload/CSP не менялись.
+- Namespace final npm.cmd test —4747 passed /5 skipped /0 failed,
+  289 files passed/2 skipped,317.26s,exit0
+  (.tmp/wp0-diagnostics-namespace-full.log). Code/test tree не менялся.
+  CI39306933512 на прежнем c4b967e completed/success; новому commit нужны
+  собственные Qodo/CI.

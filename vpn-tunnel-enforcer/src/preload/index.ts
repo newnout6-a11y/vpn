@@ -219,7 +219,7 @@ contextBridge.exposeInMainWorld('electronAPI', withIpcFailures({
   rollbackLocationPrivacy: () => invoke('rollback-location-privacy'),
   openTunLogFolder: () => invoke('open-tun-log-folder'),
   openLogFolder: () => invoke('open-log-folder'),
-  exportDiagnostics: () => invoke('export-diagnostics'),
+  exportDiagnostics: (requestId?: string) => invoke('export-diagnostics', ...(requestId === undefined ? [] : [requestId])),
   runLeakSelfTest: () => invoke('run-leak-self-test'),
   runRoutingSelfTest: () => invoke('run-routing-self-test'),
   openSnapshotsFolder: () => invoke('open-snapshots-folder'),

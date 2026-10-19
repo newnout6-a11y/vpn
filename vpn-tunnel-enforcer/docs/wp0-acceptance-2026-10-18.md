@@ -1487,3 +1487,47 @@ Final полный npm.cmd test — **4706 passed /5 skipped /0 failed**,
 physicalAdapterDnsScript; отдельно 30/30 и 4/4 passed, затем полный default
 повтор без изменения их кода/budgets. Все команды/неудачные результаты в
 progress.md. Следующий участок требует Qodo/CI этого опубликованного head.
+
+## Диагностический ZIP: lifetime экспорта (19.10.2026)
+
+Предыдущий modal участок принят в #82: final head64e089e, Qodo1554278
+completed без findings, CI39297189492 success, merge/main1549a64.
+
+AT-00-003/004/005/008: snapshot → native picker → staging → compression →
+потоковая atomic file replacement имеют одного main owner, work deadline,
+request token и physical drain. Queued/cancelled snapshot не публикуется.
+Сборка ZIP не пишет в выбранный destination до terminal commit. Состав
+архива и redaction сохранены. Очистка awaited, cleanup-failed отражается
+в результате и UI. Main faults typed; renderer не получает сырые exception.
+
+DiagnosticsCard/Settings используют общий owned workflow: unmount отзывает
+token, stale replies не сбрасывают новый busy state и не создают UI/log/toast
+effects. Вложенные forensics queue/summary прекращают следующие этапы при
+отмене и удерживают raw эффекты до settlement.
+
+До fix 1 failing regression. Адресный набор8 suites —103 passed/11.22s;
+после него добавлены2 UI cases для typed errors. Native Electron44.4.3:
+6 PASS fixtures, включая actual ZIP/ACL/stream/read-back и cancel<900ms.
+Build/typecheck/traceability — exit0. Финальный полный npm.cmd test:4735 passed /5 skipped /0 failed,323.76s,exit0. Предыдущий full имел один
+5000ms timeout в прежнем serverKeyOperations; отдельно57/57 passed, затем
+полный default повтор без изменения кода/budgets. Remote gates pending.
+Это адресная часть WP-0, не приёмка всего WP-0/WP-8 или OS/L3 matrix.
+
+PR #83 review follow-up: Qodo1554946 completed с6 findings на b870f009.
+Подтверждённые mixed-summary и cleanup-warning исправлены; export-owned
+summary writes только в bundle, retained session byte-invariance проверяется.
+Общий ZIP work budget600s, terminal success audit и manual picker cancellation
+log восстановлены. Namespace ACL safety сохраняется. Третий entrypoint
+Maintenance использует общий owned hook. Final build/typecheck,6 native
+Electron fixtures и IPC/CSP passed; final full/новый head review pending.
+
+Review final full:4746 passed /5 skipped /0 failed,323.00s,exit0.
+Build/typecheck,6 Electron fixtures,IPC/CSP,coverage/diff —exit0.
+Remote approval требуется на новом опубликованном SHA.
+
+Qodo1555116 отметил5 findings implemented. Для оставшегося namespace finding
+реализована предложенная Qodo безопасная альтернатива: typed permission
+показывает инструкцию выбрать local private folder; ACL не ослаблены. Actual
+namespace refusal и все3 UI проверены. Final full4747 passed /5 skipped,
+317.26s,exit0;build/typecheck и6 Electron fixtures —exit0. Новый head
+требует своего completed Qodo и CI success.

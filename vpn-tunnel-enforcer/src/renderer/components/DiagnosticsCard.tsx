@@ -1,3 +1,4 @@
+import { useDiagnosticsExport } from '../hooks/useDiagnosticsExport'
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useAppStore, type LeakSelfTestResultClient } from '../store'
@@ -25,10 +26,9 @@ export function DiagnosticsCard() {
   const addLog = useAppStore((s) => s.addLog)
 
   const [testing, setTesting] = useState(false)
-  const exporting = useAppStore((s) => s.exportingDiagnostics)
-  const setExporting = useAppStore((s) => s.setExportingDiagnostics)
   const [restartingForensics, setRestartingForensics] = useState(false)
   const [exportPath, setExportPath] = useState<string | null>(null)
+  const { exporting, exportDiagnostics: handleExport } = useDiagnosticsExport(setExportPath)
   const [forensicsStatus, setForensicsStatus] = useState<any>(null)
 
   const checkForensicsStatus = async () => {
@@ -103,26 +103,6 @@ export function DiagnosticsCard() {
     } finally {
       setRestartingForensics(false)
       await checkForensicsStatus()
-    }
-  }
-
-  const handleExport = async () => {
-    setExporting(true)
-    addLog('info', 'Собираю диагностический архив (снимки, логи, настройки)…')
-    try {
-      const result = await window.electronAPI.exportDiagnostics()
-      if (result.cancelled) {
-        addLog('warn', 'Экспорт отменён пользователем.')
-      } else if (result.success && result.path) {
-        setExportPath(result.path)
-        addLog('info', `Архив создан: ${result.path}`)
-      } else {
-        addLog('error', `Не удалось создать архив: ${result.error ?? 'неизвестная ошибка'}`)
-      }
-    } catch (err: any) {
-      addLog('error', `Ошибка при экспорте: ${err.message ?? err}`)
-    } finally {
-      setExporting(false)
     }
   }
 

@@ -842,7 +842,8 @@ async function getTrafficForensicsItems(): Promise<SystemDiagnosticItem[]> {
   ]
 }
 
-export async function runSystemDiagnostics(): Promise<SystemDiagnosticResult> {
+export async function runSystemDiagnostics(assertActive: () => void = () => {}): Promise<SystemDiagnosticResult> {
+  assertActive()
   logEvent('info', 'diagnostics', 'full system diagnostics started')
 
   const itemGroups = await Promise.all([
@@ -865,6 +866,7 @@ export async function runSystemDiagnostics(): Promise<SystemDiagnosticResult> {
     getRoutingItems()
   ])
 
+  assertActive()
   const items = itemGroups.flat()
   const task = getBootRecoveryRegistrationStatus()
   items.push(item('boot-recovery-task', 'System', 'Boot Recovery task',
@@ -872,10 +874,12 @@ export async function runSystemDiagnostics(): Promise<SystemDiagnosticResult> {
   if (process.platform === 'win32') {
     try {
       const recovery = await readBootRecoveryReport()
+      assertActive()
       items.push(item('boot-recovery-result', 'System', 'Last Boot Recovery',
         recovery?.status === 'restored' ? 'ok' : 'warn', recovery?.status ?? 'not-checked',
         recovery ? recovery.messages.map(m => m.message).join('\n') : 'No trusted recovery report is available'))
     } catch {
+      assertActive()
       items.push(item('boot-recovery-result', 'System', 'Last Boot Recovery', 'fail', 'unknown', 'Trusted recovery report could not be verified'))
     }
   }
@@ -884,6 +888,7 @@ export async function runSystemDiagnostics(): Promise<SystemDiagnosticResult> {
     summary: combineStatus(items),
     items
   }
+  assertActive()
   logEvent('info', 'diagnostics', 'full system diagnostics finished', {
     summary: result.summary,
     items: result.items.length

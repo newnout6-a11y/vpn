@@ -71,7 +71,7 @@ import { getSmartRouteRuleSetState, maybeRefreshSmartRouteRuleSets, refreshSmart
 import { runAutoPilot } from './autoPilot'
 import { notify, setInAppFallbackCallback } from './notifications'
 import { removeHijackingDevShortcut } from './taskbarIdentity'
-import { exportDiagnosticsZip } from './diagnosticsExport'
+import { registerDiagnosticsExportHandler } from './diagnosticsExport'
 import { captureSnapshot, getSnapshotsDir, startPeriodicSnapshots, stopPeriodicSnapshots } from './systemSnapshot'
 import { runLeakSelfTest, startPeriodicLeakTest, stopPeriodicLeakTest, setLeakDetectedCallback, setLeakSelfTestCompletedCallback, setNetworkChangeCallback, startNetworkChangeWatcher, stopNetworkChangeWatcher, suppressLeakSelfTestsFor } from './leakSelfTest'
 import { getTrafficForensicsStatus, restartTrafficForensicsSession, startTrafficForensicsSession, stopTrafficForensicsSession } from './trafficForensics'
@@ -2579,12 +2579,7 @@ app.whenReady().then(async () => {
     return openLogFolder()
   })
 
-  handleLogged('export-diagnostics', async () => {
-    // User-driven export. Take a fresh snapshot first so it's the most
-    // recent thing in the ZIP — then call the existing exporter.
-    await captureSnapshot('manual').catch(() => undefined)
-    return exportDiagnosticsZip()
-  })
+  registerDiagnosticsExportHandler()
 
   handleLogged('run-leak-self-test', async () => {
     const result = await runLeakSelfTest()

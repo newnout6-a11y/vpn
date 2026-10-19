@@ -36,7 +36,7 @@ export async function readSelectedConfig(path: string, lease: OperationLease, re
 
 /** The chosen destination changes only at a synchronous, terminal rename.
  * On cancellation, wait for raw staging/close before removing our own temp file. */
-export async function writeConfigExport<T>(path: string, content: string, lease: OperationLease, result: SynchronousCommitResult<T>, mode: 'redacted' | 'secrets'): Promise<T> {
+export async function writeConfigExport<T>(path: string, content: string | AsyncIterable<Uint8Array>, lease: OperationLease, result: SynchronousCommitResult<T>, mode: 'redacted' | 'secrets', onCleanupFailure?: () => void): Promise<T> {
   const temporary = join(dirname(path), `.vpnte-export-${randomUUID()}.tmp`)
   let created = false
   let identity: { dev: bigint; ino: bigint } | undefined
@@ -93,6 +93,7 @@ export async function writeConfigExport<T>(path: string, content: string, lease:
         operationKey: 'op_' + lease.operation.operationId.replaceAll('-', ''),
         cleanupFailed: true, reason: classifyIpcError(error)
       }) } catch { /* Diagnostics must not replace the original failure/cancellation. */ }
+      try { onCleanupFailure?.() } catch { /* Preserve the primary result. */ }
     }
   }
 }

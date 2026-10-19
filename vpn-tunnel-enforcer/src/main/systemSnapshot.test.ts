@@ -46,7 +46,7 @@ describe('system snapshot scheduling', () => {
     expect(source).toContain('export const PERIODIC_SNAPSHOT_INTERVAL_MS = 5 * 60_000')
     expect(source).toContain('Math.max(PERIODIC_SNAPSHOT_INTERVAL_MS, Math.floor(intervalMs))')
     expect(source).toContain("if (reason === 'periodic' && pendingSnapshotCaptures > 0)")
-    expect(source).toContain('const capture = snapshotCaptureQueue.then(() => captureSnapshotNow(reason))')
+    expect(source).toContain('const capture = snapshotCaptureQueue.then(() => lifetime ? captureSnapshotNow(reason, lifetime) : captureSnapshotNow(reason))')
     expect(source).toContain("'skipped periodic snapshot while capture is in progress'")
   })
   it('serializes explicit captures and skips periodic work while native collection is pending', async () => {

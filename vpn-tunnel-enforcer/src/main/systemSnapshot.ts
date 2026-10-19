@@ -20,8 +20,10 @@
  * and any failure is recorded as `{ error: ... }` for that section.
  */
 import { app } from 'electron'
-import { mkdir, readdir, stat, unlink, writeFile } from 'fs/promises'
-import { existsSync } from 'fs'
+import { mkdir, open, readdir, stat, unlink, writeFile } from 'fs/promises'
+import { existsSync, renameSync } from 'fs'
+import { randomUUID } from 'node:crypto'
+import { IpcFault } from '../shared/ipc-result'
 import { networkInterfaces, hostname, release, type as osType, totalmem, freemem } from 'os'
 import { join } from 'path'
 import { exec as execCb, execFile as execFileCb } from 'child_process'
@@ -360,7 +362,14 @@ async function capturePlatformDumps(): Promise<Partial<SystemSnapshot>> {
  * Take one snapshot. Always succeeds (errors are recorded as fields).
  * Returns the absolute path of the file written, or null if writing failed.
  */
-async function captureSnapshotNow(reason: SnapshotReason): Promise<string | null> {
+interface SnapshotLifetime { signal?: AbortSignal; assertActive?: () => void }
+function assertSnapshotActive(lifetime?: SnapshotLifetime): void {
+  if (lifetime?.signal?.aborted) throw new IpcFault('cancelled')
+  lifetime?.assertActive?.()
+}
+
+async function captureSnapshotNow(reason: SnapshotReason, lifetime?: SnapshotLifetime): Promise<string | null> {
+  assertSnapshotActive(lifetime)
   const ts = new Date().toISOString().replace(/[:.]/g, '-')
   const fileName = `snapshot-${ts}-${reason}.json`
 
@@ -375,6 +384,7 @@ async function captureSnapshotNow(reason: SnapshotReason): Promise<string | null
     tryReadJsonFile(join(userData, 'latest-physical-adapter-lockdown.json'))
   ])
 
+  assertSnapshotActive(lifetime)
   const snap: SystemSnapshot = {
     reason,
     ts: new Date().toISOString(),
@@ -398,12 +408,27 @@ async function captureSnapshotNow(reason: SnapshotReason): Promise<string | null
 
   try {
     const dir = await ensureSnapshotsDir()
+    assertSnapshotActive(lifetime)
     const path = join(dir, fileName)
-    await writeFile(path, JSON.stringify(snap, null, 2), 'utf-8')
-    await pruneOldSnapshots()
+    if (lifetime) {
+      const temporary = join(dir, '.snapshot-' + randomUUID() + '.tmp')
+      const file = await open(temporary, 'wx', 0o600)
+      try {
+        try {
+          assertSnapshotActive(lifetime)
+          await file.writeFile(JSON.stringify(snap, null, 2), { encoding: 'utf8', signal: lifetime.signal })
+        } finally { await file.close() }
+        assertSnapshotActive(lifetime)
+        renameSync(temporary, path)
+      } finally { await unlink(temporary).catch(error => { if (error.code !== 'ENOENT') throw error }) }
+    } else await writeFile(path, JSON.stringify(snap, null, 2), 'utf-8')
+    assertSnapshotActive(lifetime)
+    await pruneOldSnapshots(lifetime)
+    assertSnapshotActive(lifetime)
     logEvent('debug', 'snapshot', 'wrote snapshot', { reason, path })
     return path
   } catch (err) {
+    assertSnapshotActive(lifetime)
     logEvent('warn', 'snapshot', 'failed to write snapshot', { reason, err: (err as Error).message })
     return null
   }
@@ -415,12 +440,13 @@ async function captureSnapshotNow(reason: SnapshotReason): Promise<string | null
  * because periodic snapshots are retained for diagnostics and would otherwise
  * eat disk over a long-running session.
  */
-async function pruneOldSnapshots(): Promise<void> {
+async function pruneOldSnapshots(lifetime?: SnapshotLifetime): Promise<void> {
   try {
     const dir = snapshotsDir()
     if (!existsSync(dir)) return
     const names = await readdir(dir)
     if (names.length <= MAX_SNAPSHOTS_RETAINED) return
+    assertSnapshotActive(lifetime)
     const withMtimes = await Promise.all(
       names.map(async (n) => {
         try {
@@ -431,6 +457,7 @@ async function pruneOldSnapshots(): Promise<void> {
         }
       })
     )
+    assertSnapshotActive(lifetime)
     withMtimes.sort((a, b) => b.mtime - a.mtime)
     const stale = withMtimes.slice(MAX_SNAPSHOTS_RETAINED)
     await Promise.all(
@@ -439,6 +466,7 @@ async function pruneOldSnapshots(): Promise<void> {
       )
     )
   } catch (err) {
+    assertSnapshotActive(lifetime)
     logEvent('debug', 'snapshot', 'prune failed', { err: (err as Error).message })
   }
 }
@@ -452,14 +480,14 @@ let pendingSnapshotCaptures = 0
  * PowerShell collection already in progress. Periodic ticks are best-effort:
  * they are skipped while any capture is queued instead of building a backlog.
  */
-export function captureSnapshot(reason: SnapshotReason): Promise<string | null> {
+export function captureSnapshot(reason: SnapshotReason, lifetime?: SnapshotLifetime): Promise<string | null> {
   if (reason === 'periodic' && pendingSnapshotCaptures > 0) {
     logEvent('debug', 'snapshot', 'skipped periodic snapshot while capture is in progress')
     return Promise.resolve(null)
   }
 
   pendingSnapshotCaptures += 1
-  const capture = snapshotCaptureQueue.then(() => captureSnapshotNow(reason))
+  const capture = snapshotCaptureQueue.then(() => lifetime ? captureSnapshotNow(reason, lifetime) : captureSnapshotNow(reason))
   snapshotCaptureQueue = capture.then(
     () => undefined,
     () => undefined

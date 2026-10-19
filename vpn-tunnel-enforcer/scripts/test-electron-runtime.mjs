@@ -27,6 +27,24 @@ try {
   await build({ entryPoints: [join(root, 'scripts/fixtures/config-request-native.ts')],
     outfile: join(work, 'config-request.cjs'), bundle: true, platform: 'node',
     format: 'cjs', external: ['electron', 'koffi'] })
+  await build({ entryPoints: [join(root, 'scripts/fixtures/diagnostics-request-native.ts')],
+    outfile: join(work, 'diagnostics-request.cjs'), bundle: true, platform: 'node', format: 'cjs', external: ['electron', 'koffi'],
+    plugins: [{ name: 'controlled-diagnostic-collection', setup(builder) {
+      const boundaries = {
+        './systemSnapshot': 'export const captureSnapshot=(...args)=>globalThis.vpnteDiagnosticSnapshot(...args)',
+        './systemDiagnostics': 'export const runSystemDiagnostics=async()=>({fixture:true})',
+        './trafficForensics': 'export const stageTrafficForensicsArtifacts=async()=>false',
+        './tunController': 'export const getTunRuntimeDir=()=>"missing-native-diagnostics-runtime"',
+        './systemNetwork': 'export const validateNetworkBackupManifest=value=>value',
+        './firewallKillSwitch': 'export const validateFirewallManifest=value=>value',
+        './physicalAdapterLockdown': 'export const validateLockdownManifest=value=>value',
+        './recoveryManifest': 'export const readRecoveryManifest=async()=>null;export const validateBootRecoveryReport=value=>value'
+      }
+      builder.onResolve({ filter: /^\.\// }, args => args.importer.endsWith('diagnosticsExport.ts') && boundaries[args.path]
+        ? { path: args.path, namespace: 'diagnostics-native' } : undefined)
+      builder.onLoad({ filter: /.*/, namespace: 'diagnostics-native' }, ({ path }) => ({ loader: 'js', contents: boundaries[path] }))
+    } }]
+  })
   await build({ entryPoints: [join(root, 'scripts/fixtures/server-request-native.ts')],
     outfile: join(work, 'server-request.cjs'), bundle: true, platform: 'node', format: 'cjs', external: ['electron', 'koffi'],
     plugins: [{ name: 'controlled-profile-boundaries', setup(builder) {
@@ -60,7 +78,7 @@ try {
   env.VPNTE_SMOKE_DIR = work
   env.VPNTE_SMOKE_PRELOAD = join(root, 'out/preload/index.js')
   env.VPNTE_SMOKE_VERSION = require('../package.json').devDependencies.electron
-  for (const [fixture, marker] of [['main.cjs', 'ELECTRON_SMOKE_PASS'], ['speed-ui.cjs', 'SPEED_UI_NATIVE_PASS'], ['requester.cjs', 'REQUEST_DOCUMENT_NATIVE_PASS'], ['config-request.cjs', 'CONFIG_REQUEST_NATIVE_PASS'], ['server-request.cjs', 'SERVER_REQUEST_NATIVE_PASS']]) {
+  for (const [fixture, marker] of [['main.cjs', 'ELECTRON_SMOKE_PASS'], ['speed-ui.cjs', 'SPEED_UI_NATIVE_PASS'], ['requester.cjs', 'REQUEST_DOCUMENT_NATIVE_PASS'], ['config-request.cjs', 'CONFIG_REQUEST_NATIVE_PASS'], ['server-request.cjs', 'SERVER_REQUEST_NATIVE_PASS'], ['diagnostics-request.cjs', 'DIAGNOSTICS_REQUEST_NATIVE_PASS']]) {
     const result = spawnSync(require('electron'), [join(work, fixture)], {
       cwd: root, env, encoding: 'utf8', windowsHide: true, timeout: 60_000
     })
