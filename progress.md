@@ -4279,3 +4279,27 @@ CI/review нового SHA проверяются отдельно после pu
   (.tmp/wp0-config-qodo70-path-csp.log). Scope smoke прежний; path/ACL проверены
   отдельно реальными Windows files. `git diff --check` — exit 0. До следующего
   участка снова требуются completed Qodo и CI на последнем head.
+
+
+### PR #70 — окончательное ревью
+
+- Qodo **1543096 completed** на **ceaa20b693f4a5519a8acc5b89e75a59ff5f5a03**:
+  все четыре прежних findings implemented, новых нет. Attribution прочитан
+  через API и вручную не менялся; review request вручную не отправлялся.
+- CI **39183295438** выполняется на том же SHA; сайт и Rust success,
+  Windows unit ещё in_progress. До terminal CI success слияние не выполняется.
+
+- Окончательный CI **39183295438 success** на ceaa20b: Windows unit,
+  traceability, production IPC/CSP, WFP ABI/rollback и native reads,
+  Rust и сайт зелёные. Watcher завершился exit 0.
+- Перед merge отдельные REST GET подтвердили head=ceaa20b, mergeable=true /
+  clean и CI success; Qodo API повторно подтвердил completed, 4 implemented,
+  openFindings=[] на том же SHA. Слияние выполнено с expected head.
+- Отдельный REST GET после merge подтвердил merged=true/state=closed,
+  merge **2e61411dfd1b8443099fa223b950acd2e973a28f**.
+- Следующая ветка — codex/wp0-key-export от обновлённого main. Эта запись
+  меняет только журнал/матрицу; production tree совпадает с проверенным
+  ceaa20b. Последние фактические проверки: полный npm test 4346 passed /
+  5 skipped, typecheck/build/native PASS, traceability AC 927/927 / F 210/210.
+  Экспорт VPN keys, rotation, UI cancel/unmount и прочий остаток WP-0 сохраняются.
+  Полная WP-0 и следующая WP-2 остаются активной целью.
