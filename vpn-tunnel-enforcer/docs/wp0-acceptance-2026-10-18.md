@@ -1674,3 +1674,20 @@ adaptiveNetworkIdentity native fixture (8.3s); isolated25/25 passed,outer budget
 согласован с30s process bound без изменения assertions. Targeted9 suites209/209,
 5.49s;final typecheck,build/7 native fixtures,coverage/diff —exit0.
 Новые remote gates pending; весь WP-0 остаётся в работе.
+
+#87 initial Qodo1557229 completed нашёл1 informational: перенос handler потерял
+per-call started/timed finished/failed IPC trail. Регрессия до fix1 failed/17 skipped;
+trail восстановлен без request token/IP payload. Targeted9 suites210/210 passed,
+5.40s;build/typecheck,7 native fixtures,coverage/diff —exit0. Новый full/remote
+gates требуются на review-fix SHA; initial review не заменяет их.
+
+Review full до CI fixture fixes:4916 passed/5 skipped,312.08s. Initial remote
+CI39331654687 failed: два native outer5s timeouts и actual-file sync polling1s.
+Isolated3 suites137 passed/1 skipped,58.21s. Native outer budgets20s/15s
+согласованы с helpers; actual-file boundary ждёт readiness Promise,outer15s.
+Safety/data assertions сохранены. Новый final full и remote gates pending.
+
+Final после последних test-only изменений:4916 passed/5 skipped/0 failed,
+297 files passed/2 skipped,309.54s,exit0. Targeted12 suites347 passed/1 skipped,
+56.21s. Typecheck165 channels/0 public any,build/7 native fixtures,coverage/diff
+—exit0. Qodo/CI требуются на новом SHA. Весь WP-0 остаётся в работе.

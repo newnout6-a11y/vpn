@@ -169,4 +169,15 @@ describe('routing requester handler', () => {
     release(); expect((await second).verdict).toBe('ok')
     expect(secondOwner.eventNames()).toEqual([])
   })
+  it('preserves the per-call IPC trail for successful and rejected requests', async () => {
+    state.tunnel = false
+    await invoke(sender())
+    await expect(invoke(sender(), 'bad')).rejects.toMatchObject({ category: 'validation' })
+    const trail = vi.mocked(logEvent).mock.calls.filter(call => call[1] === 'ipc')
+    expect(trail.map(call => call[2])).toEqual(['run-routing-self-test started', 'run-routing-self-test finished',
+      'run-routing-self-test started', 'run-routing-self-test failed'])
+    expect(trail[1][3]).toMatchObject({ ms: expect.any(Number) })
+    expect(trail[3][3]).toMatchObject({ category: 'validation' })
+    expect(JSON.stringify(trail)).not.toContain('bad')
+  })
 })

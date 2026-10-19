@@ -335,6 +335,18 @@ export async function ruEgressIp(signal?: AbortSignal): Promise<string | null> {
 }
 
 export function registerRoutingSelfTestHandlers(): void {
-  ipcMain.handle('run-routing-self-test', (event, requestId?: string) =>
-    runRequesterOperation(event.sender, requestId, (signal, onOperation) => runRoutingSelfTest({ signal, onOperation })))
+  ipcMain.handle('run-routing-self-test', async (event, requestId?: string) => {
+    const started = Date.now()
+    // Keep the former handleLogged trail without logging request tokens or IPs.
+    logEvent('debug', 'ipc', 'run-routing-self-test started')
+    try {
+      const result = await runRequesterOperation(event.sender, requestId,
+        (signal, onOperation) => runRoutingSelfTest({ signal, onOperation }))
+      logEvent('debug', 'ipc', 'run-routing-self-test finished', { ms: Date.now() - started })
+      return result
+    } catch (error) {
+      logEvent('error', 'ipc', 'run-routing-self-test failed', error)
+      throw error
+    }
+  })
 }
