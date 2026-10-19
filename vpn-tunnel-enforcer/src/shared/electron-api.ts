@@ -164,7 +164,7 @@ export interface ElectronAPI {
     | { ok: true; results: Array<{ profileId: string; online: boolean; latencyMs: number | null; reason?: string }> }
     | { ok: false; error: string }
   >
-  serverProbe: (host: string, knownPort?: number) => Promise<ServerProbeResult | null>
+  serverProbe: (host: string, knownPort?: number, requestId?: string) => Promise<ServerProbeResult | null>
   serverLiveCheck: (options: LiveServerCheckOptions) => Promise<LiveServerCheck>
   serverLiveCheckBatch: (options: LiveServerBatchCheckOptions) => Promise<LiveServerBatchCheckResult>
   serverLiveCheckCancel: (requestId?: string) => Promise<{ cancelled: boolean; reason?: string }>

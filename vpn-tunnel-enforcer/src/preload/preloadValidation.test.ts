@@ -44,6 +44,7 @@ describe('preload IPC argument validation', () => {
 
   // AT-00-001: trailing cancellation tokens preserve every legacy call shape.
   it.each([
+    ['serverProbe', 'server:probe', ['vpn.example.test', 8443]],
     ['runRoutingSelfTest', 'run-routing-self-test', []],
     ['urlAvailabilityCheck', 'url-availability:check', ['https://example.test/']],
     ['groupsCheckHealth', 'groups:check-health', ['a']],

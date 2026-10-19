@@ -70,8 +70,8 @@ function normalizeClientDevice(value: unknown): ClientDevice {
  *   1. Best-effort online geo lookup for country / city / provider / map
  *      preview, skipped entirely when the geo-privacy setting is enabled.
  *   2. window.electronAPI.serverProbe — main-process active probing of the
- *      host: DNS resolution, reverse DNS, ASN, TCP latency, common-port
- *      scan, TLS cert inspection, HTTP banner. Anything that can't be
+ *      host: DNS resolution, reverse DNS, ASN and TCP reachability.
+ *      TLS and HTTP banner probes remain disabled. Anything that can't be
  *      reached is just hidden — we never show error spinners forever.
  */
 export function ServerDetailModal({ open, profile, onClose, onProfileUpdated }: ServerDetailModalProps) {
@@ -153,121 +153,88 @@ export function ServerDetailModal({ open, profile, onClose, onProfileUpdated }: 
 
   useEffect(() => {
     if (!open || !profile) return
-    setIpInfo(null)
-    setProbe(null)
-    setProbeError(false)
-    setGroup(null)
-
-    // Best-effort group lookup via the new IPC. Tolerates missing channel
-    // (Agent A may not have merged) and missing/null result.
-    const groupId = (profile as ServerProfile & { groupId?: string }).groupId
-    if (groupId) {
-      const api = window.electronAPI as unknown as {
-        groupsGet?: (id: string) => Promise<ServerGroup | null>
-      }
-      if (typeof api.groupsGet === 'function') {
-        api.groupsGet(groupId)
-          .then((g) => { if (g) setGroup(g) })
-          .catch(() => {})
+    let cancelled = false, probeFinished = false
+    let requestId: string | undefined, probeTimeout: number | undefined, geoTimeout: number | undefined
+    const geo = new AbortController()
+    const geoActive = () => !cancelled && !geo.signal.aborted
+    const cancelProbe = () => {
+      if (requestId && !probeFinished) {
+        probeFinished = true
+        void window.electronAPI.operationsCancelRequest(requestId).catch(() => {})
       }
     }
-
+    const dispose = () => {
+      cancelled = true; geo.abort(); cancelProbe()
+      window.clearTimeout(probeTimeout); window.clearTimeout(geoTimeout)
+    }
+    setIpInfo(null); setProbe(null); setProbeError(false); setGroup(null)
+    const groupId = (profile as ServerProfile & { groupId?: string }).groupId
+    if (groupId && typeof window.electronAPI.groupsGet === 'function') {
+      void window.electronAPI.groupsGet(groupId)
+        .then(g => { if (!cancelled && g) setGroup(g) }).catch(() => {})
+    }
     const host = profile.server
     const port = normalizeServerPort(profile.port ?? profile.outbound?.server_port) ?? undefined
-    if (!host) {
-      setLoading(false)
-      setProbing(false)
-      return
-    }
-
-    setLoading(!disableGeoLookup)
-    setProbing(true)
-    let cancelled = false
+    if (!host) { setLoading(false); setProbing(false); return dispose }
+    setLoading(!disableGeoLookup); setProbing(true)
 
     if (!disableGeoLookup) {
-      // Geo info (best effort). Skipped when the privacy setting is ON so
-      // opening server details cannot send the VPN/server IP to ipapi.co.
-      fetch(`https://ipapi.co/${host}/json/`, { method: 'GET' })
-        .then(async r => {
-          if (r.ok) {
-            const data = await r.json().catch(() => null)
-            if (data && !data.error) return data
+      geoTimeout = window.setTimeout(() => {
+        geo.abort()
+        if (!cancelled) setLoading(false)
+      }, PROBE_UI_TIMEOUT_MS)
+      void (async () => {
+        let data: any = null
+        try {
+          const response = await fetch(`https://ipapi.co/${host}/json/`, { method: 'GET', signal: geo.signal })
+          if (!geoActive()) return
+          if (response.ok) data = await response.json().catch(() => null)
+          if (!geoActive()) return
+          if (!data || data.error) {
+            const fallback = await fetch(`https://ipwho.is/${encodeURIComponent(host)}`, { signal: geo.signal })
+            if (!geoActive()) return
+            const alt = fallback.ok ? await fallback.json().catch(() => null) : null
+            if (!geoActive()) return
+            data = alt && alt.success !== false ? {
+              ip: alt.ip || host, country_name: alt.country, city: alt.city, region: alt.region,
+              org: alt.connection?.isp || alt.connection?.org, latitude: alt.latitude,
+              longitude: alt.longitude, timezone: alt.timezone?.id
+            } : null
           }
-          // Fallback to ipwho.is if ipapi.co rate limits (429) or errors
-          const alt = await fetch(`https://ipwho.is/${encodeURIComponent(host)}`)
-            .then(res => (res.ok ? res.json() : null))
-            .catch(() => null)
-          if (alt && alt.success !== false) {
-            return {
-              ip: alt.ip || host,
-              country_name: alt.country,
-              city: alt.city,
-              region: alt.region,
-              org: alt.connection?.isp || alt.connection?.org,
-              latitude: alt.latitude,
-              longitude: alt.longitude,
-              timezone: alt.timezone?.id
-            }
-          }
-          return null
-        })
-        .then(data => {
-          if (cancelled) return
-          if (data && !data.error) {
-            setIpInfo({
-              ip: data.ip || host,
-              country: data.country_name,
-              city: data.city,
-              region: data.region,
-              org: data.org,
-              loc:
-                data.latitude && data.longitude
-                  ? `${data.latitude},${data.longitude}`
-                  : undefined,
-              timezone: data.timezone
-            })
-          }
-        })
-        .catch(() => {})
-        .finally(() => {
+          if (geoActive() && data && !data.error) setIpInfo({
+            ip: data.ip || host, country: data.country_name, city: data.city,
+            region: data.region, org: data.org,
+            loc: data.latitude && data.longitude ? `${data.latitude},${data.longitude}` : undefined,
+            timezone: data.timezone
+          })
+        } catch { /* geo is best effort; cancellation never starts fallback */ }
+        finally {
+          window.clearTimeout(geoTimeout)
           if (!cancelled) setLoading(false)
-        })
-    } else {
-      setLoading(false)
+        }
+      })()
     }
 
-    // Active probe via main process (DNS/latency/ports/TLS). The main side
-    // also has a deadline, but the UI must never keep a spinner forever if an
-    // IPC call is lost while the app is shutting down or being restarted.
-    let probeFinished = false
-    const probeTimeout = window.setTimeout(() => {
+    requestId = crypto.randomUUID()
+    probeTimeout = window.setTimeout(() => {
       if (cancelled || probeFinished) return
-      probeFinished = true
-      setProbeError(true)
-      setProbing(false)
+      cancelProbe(); setProbeError(true); setProbing(false)
     }, PROBE_UI_TIMEOUT_MS)
-
-    window.electronAPI.serverProbe(host, port)
+    void window.electronAPI.serverProbe(host, port, requestId)
       .then((result: ServerProbeResult | null) => {
         if (cancelled || probeFinished) return
-        probeFinished = true
-        window.clearTimeout(probeTimeout)
+        probeFinished = true; window.clearTimeout(probeTimeout)
         if (result) setProbe(result)
         else setProbeError(true)
         setProbing(false)
       })
-      .catch(() => {
+      .catch(error => {
         if (cancelled || probeFinished) return
-        probeFinished = true
-        window.clearTimeout(probeTimeout)
-        setProbeError(true)
+        probeFinished = true; window.clearTimeout(probeTimeout)
+        if (!isIpcRemoteErrorData(error) || error.category !== 'cancelled') setProbeError(true)
         setProbing(false)
       })
-
-    return () => {
-      cancelled = true
-      window.clearTimeout(probeTimeout)
-    }
+    return dispose
   }, [open, profile, disableGeoLookup])
 
   if (!profile) return null

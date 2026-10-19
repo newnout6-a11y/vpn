@@ -263,7 +263,7 @@ contextBridge.exposeInMainWorld('electronAPI', withIpcFailures({
   groupsSetRefreshPolicy: (id: string, intervalMinutes: number | null) =>
     invoke('groups:set-refresh-policy', assertString(id, 'id'), intervalMinutes === null ? null : assertInteger(intervalMinutes, 'intervalMinutes')),
   groupsCheckHealth: (id: string, requestId?: string) => invoke('groups:check-health', assertString(id, 'id'), ...(requestId === undefined ? [] : [assertString(requestId, 'requestId')])),
-  serverProbe: (host: string, knownPort?: number) => invoke('server:probe', assertString(host, 'host'), assertPort(knownPort, 'knownPort')),
+  serverProbe: (host: string, knownPort?: number, requestId?: string) => invoke('server:probe', assertString(host, 'host'), assertPort(knownPort, 'knownPort'), ...(requestId === undefined ? [] : [assertString(requestId, 'requestId')])),
   serverLiveCheck: (options: LiveServerCheckOptions) =>
     invoke('server:live-check', assertLiveCheckOptions(options)),
   serverLiveCheckBatch: (options: LiveServerBatchCheckOptions) => {

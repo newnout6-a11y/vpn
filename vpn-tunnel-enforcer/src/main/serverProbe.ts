@@ -3,8 +3,13 @@ export type { ServerProbeResult, LatencyStats, PortScanResult, TlsCertInfo } fro
 import type { AsnInfo } from '../shared/ipc-types'
 export type { AsnInfo } from '../shared/ipc-types'
 import { ipcMain } from 'electron'
+import { randomUUID } from 'node:crypto'
+import { operations } from './operations'
+import type { OperationLease } from './operationRegistry'
+import { runRequesterOperation } from './requesterOperation'
+import { IpcFault } from '../shared/ipc-result'
 import { promises as dns } from 'dns'
-import { Socket, isIP } from 'net'
+import { BlockList, Socket, isIP } from 'net'
 import axios from 'axios'
 import { logEvent } from './appLogger'
 import { tunController } from './tunController'
@@ -13,6 +18,8 @@ import { normalizeServerPort } from '../shared/portValidation'
 
 export interface ProbeServerOptions {
   disableGeoLookup?: boolean
+  signal?: AbortSignal
+  onOperation?: (lease: OperationLease) => void
 }
 
 const COMMON_PORTS = [22, 80, 443, 8080, 8443, 3128, 1080, 8388, 4433, 8081, 8888, 53, 21, 25, 110, 143, 587, 993, 995]
@@ -23,78 +30,91 @@ const SERVICE_HINTS: Record<number, string> = {
   993: 'IMAPS', 995: 'POP3S'
 }
 const DNS_LOOKUP_TIMEOUT_MS = 2500
-const PROBE_RESULT_TIMEOUT_MS = 9000
 
-function settleWithin<T>(operation: Promise<T>, fallback: T, timeoutMs: number): Promise<T> {
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => resolve(fallback), timeoutMs)
-    void operation
-      .then((result) => {
-        clearTimeout(timer)
-        resolve(result)
-      })
-      .catch(() => {
-        clearTimeout(timer)
-        resolve(fallback)
-      })
-  })
+function assertProbeActive(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new IpcFault('cancelled')
 }
 
-// Probe a single TCP port with short timeout
-function probePort(host: string, port: number, timeoutMs = 1500): Promise<boolean> {
+// Each raw DNS query owns a bounded resolver until its actual settlement.
+async function dnsQuery(run: (resolver: InstanceType<typeof dns.Resolver>) => Promise<string[]>, signal?: AbortSignal): Promise<string[]> {
+  assertProbeActive(signal)
+  const resolver = new dns.Resolver({ timeout: DNS_LOOKUP_TIMEOUT_MS, tries: 1 })
+  const abort = () => resolver.cancel()
+  let expired = false
+  const timer = setTimeout(() => { expired = true; abort() }, DNS_LOOKUP_TIMEOUT_MS)
+  signal?.addEventListener('abort', abort, { once: true })
+  try {
+    assertProbeActive(signal)
+    const result = await run(resolver).catch(() => [] as string[])
+    assertProbeActive(signal)
+    return expired ? [] : result
+  } finally { clearTimeout(timer); signal?.removeEventListener('abort', abort) }
+}
+
+// Destruction starts cleanup; only close releases the raw socket promise.
+function probePort(host: string, port: number, timeoutMs = 1500, signal?: AbortSignal): Promise<{ open: boolean; ms: number | null }> {
+  assertProbeActive(signal)
   const safePort = normalizeServerPort(port)
-  if (!safePort) return Promise.resolve(false)
-  return new Promise((resolve) => {
-    const socket = new Socket()
-    let resolved = false
-    const finish = (result: boolean) => {
-      if (resolved) return
-      resolved = true
-      socket.destroy()
-      resolve(result)
+  if (!safePort) return Promise.resolve({ open: false, ms: null })
+  return new Promise(resolve => {
+    const socket = new Socket(), startedAt = Date.now()
+    let finished = false, result: { open: boolean; ms: number | null } = { open: false, ms: null }
+    const finish = (value: boolean) => {
+      if (finished) return
+      finished = true; result = { open: value, ms: value ? Date.now() - startedAt : null }; socket.destroy()
     }
-    socket.setTimeout(timeoutMs)
+    const abort = () => finish(false)
+    socket.once('close', () => {
+      signal?.removeEventListener('abort', abort)
+      socket.removeAllListeners()
+      resolve(result)
+    })
+    socket.once('error', () => finish(false))
     socket.once('connect', () => finish(true))
     socket.once('timeout', () => finish(false))
-    socket.once('error', () => finish(false))
-    socket.connect(safePort, host)
+    signal?.addEventListener('abort', abort, { once: true })
+    if (signal?.aborted) abort()
+    else {
+      try { socket.setTimeout(timeoutMs); socket.connect(safePort, host) }
+      catch { finish(false) }
+    }
   })
 }
 
-// Measure latency via TCP connect timing (port 443 default — usually open)
-async function measureLatency(host: string, port = 443, samples = 5): Promise<LatencyStats> {
+// Measure only the validated address, never a second hostname resolution.
+async function measureLatency(host: string, port = 443, samples = 5, signal?: AbortSignal): Promise<LatencyStats> {
   const safePort = normalizeServerPort(port, 443)!
   const results: number[] = []
   let lost = 0
   const deadline = Date.now() + 7000
   for (let i = 0; i < samples; i++) {
+    assertProbeActive(signal)
     const remaining = deadline - Date.now()
-    if (remaining <= 0) {
-      lost += samples - i
-      break
-    }
-    const start = Date.now()
-    const ok = await probePort(host, safePort, Math.min(3000, Math.max(500, remaining)))
-    if (ok) results.push(Date.now() - start)
+    if (remaining <= 0) { lost += samples - i; break }
+    const sample = await probePort(host, safePort, Math.min(3000, Math.max(500, remaining)), signal)
+    assertProbeActive(signal)
+    if (sample.open) results.push(sample.ms!)
     else lost++
-    // small delay between probes
     if (i < samples - 1 && Date.now() + 80 < deadline) {
-      await new Promise(r => setTimeout(r, 80))
+      await new Promise<void>(resolve => {
+        const done = () => { clearTimeout(timer); signal?.removeEventListener('abort', done); resolve() }
+        const timer = setTimeout(done, 80)
+        signal?.addEventListener('abort', done, { once: true })
+        if (signal?.aborted) done()
+      })
     }
   }
-  if (results.length === 0) {
-    return { min: 0, avg: 0, max: 0, jitter: 0, loss: 1, samples: [] }
-  }
-  const min = Math.min(...results)
-  const max = Math.max(...results)
+  assertProbeActive(signal)
+  if (!results.length) return { min: 0, avg: 0, max: 0, jitter: 0, loss: 1, samples: [] }
+  const min = Math.min(...results), max = Math.max(...results)
   const avg = results.reduce((a, b) => a + b, 0) / results.length
   const variance = results.reduce((sum, x) => sum + (x - avg) ** 2, 0) / results.length
-  const jitter = Math.sqrt(variance)
-  return { min, avg: Math.round(avg), max, jitter: Math.round(jitter), loss: lost / samples, samples: results }
+  return { min, avg: Math.round(avg), max, jitter: Math.round(Math.sqrt(variance)), loss: lost / samples, samples: results }
 }
 
 // Resolve hostname to IPs (both v4 and v6)
-export async function resolveHost(rawHost: string): Promise<string[]> {
+export async function resolveHost(rawHost: string, signal?: AbortSignal): Promise<string[]> {
+  assertProbeActive(signal)
   let host = rawHost.trim()
   if (host.startsWith('[') && host.includes(']')) {
     host = host.slice(1, host.indexOf(']'))
@@ -106,24 +126,27 @@ export async function resolveHost(rawHost: string): Promise<string[]> {
   if (isIP(host) !== 0) {
     return [host]
   }
-  const [v4, v6] = await Promise.all([
-    settleWithin(dns.resolve4(host), [] as string[], DNS_LOOKUP_TIMEOUT_MS),
-    settleWithin(dns.resolve6(host), [] as string[], DNS_LOOKUP_TIMEOUT_MS)
+  const results = await Promise.allSettled([
+    dnsQuery(resolver => resolver.resolve4(host), signal),
+    dnsQuery(resolver => resolver.resolve6(host), signal)
   ])
-  return [...v4, ...v6]
+  assertProbeActive(signal)
+  return results.flatMap(result => result.status === 'fulfilled' ? result.value : [])
 }
 
 
 // Reverse DNS lookup
-async function reverseDnsLookup(ip: string): Promise<string | null> {
-  const names = await settleWithin(dns.reverse(ip), [] as string[], DNS_LOOKUP_TIMEOUT_MS)
+async function reverseDnsLookup(ip: string, signal?: AbortSignal): Promise<string | null> {
+  const names = await dnsQuery(resolver => resolver.reverse(ip), signal)
   return names.length > 0 ? names[0] : null
 }
 
 // Get ASN info from ipapi.co with ipwho.is fallback
-async function getAsnInfo(ip: string): Promise<AsnInfo | null> {
+async function getAsnInfo(ip: string, signal?: AbortSignal): Promise<AsnInfo | null> {
+  assertProbeActive(signal)
   try {
-    const resp = await axios.get(`https://ipapi.co/${ip}/json/`, { timeout: 6000 })
+    const resp = await axios.get(`https://ipapi.co/${ip}/json/`, { timeout: 6000, signal })
+    assertProbeActive(signal)
     if (resp.data && !resp.data.error) {
       return {
         asn: resp.data.asn || 'unknown',
@@ -132,9 +155,10 @@ async function getAsnInfo(ip: string): Promise<AsnInfo | null> {
         country: resp.data.country_name || resp.data.country || ''
       }
     }
-  } catch {}
+  } catch { assertProbeActive(signal) }
   try {
-    const fb = await axios.get(`https://ipwho.is/${encodeURIComponent(ip)}`, { timeout: 6000 })
+    const fb = await axios.get(`https://ipwho.is/${encodeURIComponent(ip)}`, { timeout: 6000, signal })
+    assertProbeActive(signal)
     if (fb.data && fb.data.success !== false) {
       const d = fb.data
       const rawAsn = d.connection?.asn
@@ -147,7 +171,7 @@ async function getAsnInfo(ip: string): Promise<AsnInfo | null> {
         country: d.country || ''
       }
     }
-  } catch {}
+  } catch { assertProbeActive(signal) }
   return null
 }
 
@@ -159,9 +183,9 @@ async function getAsnInfo(ip: string): Promise<AsnInfo | null> {
 // pattern itself triggers throttling. We only check that the actual VPN
 // port is reachable; everything else is unused diagnostic noise that hurt
 // users far more than it helped them.
-async function scanPorts(host: string, knownPort?: number): Promise<PortScanResult[]> {
+async function scanPorts(host: string, knownPort?: number, signal?: AbortSignal): Promise<PortScanResult[]> {
   const port = normalizeServerPort(knownPort, 443)!
-  const open = await probePort(host, port, 1000)
+  const { open } = await probePort(host, port, 1000, signal)
   if (!open) return []
   return [{ port, open, service: SERVICE_HINTS[port] }]
 }
@@ -202,28 +226,38 @@ async function getHttpBanner(_host: string, _port = 80): Promise<string | null> 
 
 // Main probe entry point
 export async function probeServer(host: string, knownPort?: number, options: ProbeServerOptions = {}): Promise<ServerProbeResult> {
+  return operations.run('server-probe', lease => {
+    options.onOperation?.(lease)
+    return probeServerOwned(host, knownPort, options, lease)
+  }, { signal: options.signal, resource: `server-probe:${randomUUID()}` })
+}
+
+async function probeServerOwned(host: string, knownPort: number | undefined, options: ProbeServerOptions, lease: OperationLease): Promise<ServerProbeResult> {
+  lease.assertActive()
   const disableGeoLookup = options.disableGeoLookup === true
   const safePort = normalizeServerPort(knownPort, 443)!
   logEvent('info', 'server-probe', `probing ${host}`, { knownPort: safePort, disableGeoLookup })
 
-  const resolvedIps = await resolveHost(host)
-  if (resolvedIps.some((ip) => isPrivateProbeAddress(ip))) throw new Error('Refusing to probe private or loopback address')
-  const primaryIp = resolvedIps[0] || host
+  const resolvedIps = await lease.wait(resolveHost(host, lease.signal))
+  lease.assertActive()
+  if (!resolvedIps.length || resolvedIps.some(ip => !isIP(ip))) throw new IpcFault('network')
+  if (resolvedIps.some(ip => isPrivateProbeAddress(ip))) throw new IpcFault('permission')
+  const primaryIp = resolvedIps[0]
   const tunRunning = tunController.getStatus().running
 
   // When TUN is active, TCP probes go through the tunnel — latency would be
   // tunnel RTT, not direct RTT. Skip latency measurement to avoid misleading
   // values (the active server self-loops, others show tunnel RTT as "direct").
   const [reverseDns, asn, latency, openPorts, tlsCert, httpBanner] = await Promise.all([
-    reverseDnsLookup(primaryIp),
-    disableGeoLookup ? Promise.resolve(null) : getAsnInfo(primaryIp),
-    tunRunning ? Promise.resolve(null as LatencyStats | null) : measureLatency(host, safePort),
-    scanPorts(host, safePort),
+    lease.wait(reverseDnsLookup(primaryIp, lease.signal)),
+    disableGeoLookup ? Promise.resolve(null) : lease.wait(getAsnInfo(primaryIp, lease.signal)),
+    tunRunning ? Promise.resolve(null as LatencyStats | null) : lease.wait(measureLatency(primaryIp, safePort, 5, lease.signal)),
+    lease.wait(scanPorts(primaryIp, safePort, lease.signal)),
     getTlsCert(host, [443, 8443, 4433].includes(safePort) ? safePort : 443),
     getHttpBanner(host, 80)
   ])
 
-  return {
+  return lease.commit(() => ({
     host,
     resolvedIps,
     reverseDns,
@@ -232,32 +266,35 @@ export async function probeServer(host: string, knownPort?: number, options: Pro
     openPorts,
     tlsCert,
     httpBanner
-  }
+  }))
 }
 
+const privateProbeAddresses = new BlockList()
+for (const [address, prefix] of [['0.0.0.0', 8], ['127.0.0.0', 8], ['10.0.0.0', 8],
+  ['192.168.0.0', 16], ['172.16.0.0', 12], ['169.254.0.0', 16]] as const) {
+  privateProbeAddresses.addSubnet(address, prefix, 'ipv4')
+}
+privateProbeAddresses.addAddress('::', 'ipv6')
+privateProbeAddresses.addAddress('::1', 'ipv6')
+privateProbeAddresses.addSubnet('fc00::', 7, 'ipv6')
+privateProbeAddresses.addSubnet('fe80::', 10, 'ipv6')
 function isPrivateProbeAddress(ip: string): boolean {
-  const value = ip.toLowerCase()
-  if (value === '::' || value === '::1' || value.startsWith('127.') || value.startsWith('10.') || value.startsWith('192.168.') || value.startsWith('169.254.') || value.startsWith('fc') || value.startsWith('fd') || value.startsWith('fe80:')) return true
-  const parts = value.split('.').map(Number)
-  return parts.length === 4 && parts.every((part) => Number.isInteger(part) && part >= 0 && part <= 255) && (parts[0] === 0 || parts[0] === 127 || parts[0] === 10 || (parts[0] === 192 && parts[1] === 168) || (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) || (parts[0] === 169 && parts[1] === 254))
+  // Node also matches IPv4-mapped IPv6 against IPv4 subnets.
+  const family = isIP(ip)
+  return family !== 0 && privateProbeAddresses.check(ip, family === 6 ? 'ipv6' : 'ipv4')
 }
 
 export function registerServerProbeIpcHandlers(): void {
-  ipcMain.handle('server:probe', async (_event, host: string, knownPort?: number) => {
-    if (typeof host !== 'string' || !host.trim()) {
-      return null
-    }
-    const normalizedHost = host.trim().replace(/^\[|\]$/g, '').toLowerCase()
-    if (normalizedHost === 'localhost' || normalizedHost.endsWith('.localhost') || normalizedHost === '0.0.0.0' || normalizedHost === '::' || normalizedHost.startsWith('127.') || normalizedHost.startsWith('10.') || normalizedHost.startsWith('192.168.') || normalizedHost.startsWith('169.254.')) {
-      throw new Error('Refusing to probe private or loopback host')
-    }
-    const safePort = normalizeServerPort(knownPort) ?? undefined
-    return settleWithin(
-      probeServer(normalizedHost, safePort, {
-        disableGeoLookup: settingsStore.get().disableGeoLookup === true
-      }),
-      null as ServerProbeResult | null,
-      PROBE_RESULT_TIMEOUT_MS
-    )
-  })
+  ipcMain.handle('server:probe', (event, host: string, knownPort?: number, requestId?: string) =>
+    runRequesterOperation(event.sender, requestId, async (signal, onOperation) => {
+      if (typeof host !== 'string' || !host.trim()) return null
+      const normalizedHost = host.trim().replace(/^\[|\]$/g, '').toLowerCase()
+      if (normalizedHost === 'localhost' || normalizedHost.endsWith('.localhost') || (isIP(normalizedHost) !== 0 && isPrivateProbeAddress(normalizedHost))) {
+        throw new IpcFault('permission')
+      }
+      const safePort = normalizeServerPort(knownPort) ?? undefined
+      return probeServer(normalizedHost, safePort, {
+        disableGeoLookup: settingsStore.get().disableGeoLookup === true, signal, onOperation
+      })
+    }))
 }

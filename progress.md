@@ -6427,3 +6427,96 @@ CI/review нового SHA проверяются отдельно после pu
   npm.cmd run typecheck —165 channels/0 public any,exit0. Build/7 native fixtures
   выше остаются применимы: после них менялись только test fixtures и журнал.
   Coverage AC927/927,F210/210 и git diff --check —exit0. Новый SHA ожидает Qodo/CI.
+
+### PR #87 принят; следующий участок — server probe
+
+- Final head8a06034f7bbcd0d2495996e333efb9ffe09ac6ca: Qodo1557391 completed,
+  finding1/1 implemented,новых нет; attribution вручную не менялась.
+  CI39333883253 success (Windows/Rust/site). Revix полного review не дал
+  из-за подтверждённого cooldown до20.10 03:00 МСК; это не approval.
+  Squash merge/main4ff734f248cecd479c7c7b7814ca53b9488a394e; reviewed/main
+  tree совпал:aab47b45416f423c8a1e7107481e502193350180.
+- Следующий согласованный WP-0 участок: server:probe/ServerDetailModal.
+  Найдено: outer9s timeout завершает только ожидание; global DNS/raw TCP и
+  ASN fallback продолжают работу. TCP повторно резолвит host после проверки
+  resolved IP. UI не отзывает main работу; geo fallback/group reply не полностью
+  ограждены после закрытия. Исправление: общий owner/deadline/request token,
+  private bounded DNS,retained actual socket close,guarded HTTP/fallback/UI.
+  TCP использует проверенный resolved IP; без IP —typed network refusal.
+  TLS/banner остаются отключены; новые WP-7 probes не добавляются.
+
+### Server probe: общий lifetime и отмена модального окна (20.10.2026)
+
+- AT-00-001/003/004/005/008,F-021/F-074/F-138/F-143. Production probe теперь
+  server-probe operation,manual owner,UUID/correlation,deadline9s,unique resource.
+  Handler принимает optional requester token,документ/reload/crash/cancel и
+  shutdown отзывают работу; legacy вызовы остаются доступны.
+- Private Resolver(timeout2500ms,tries1) на каждый raw DNS query. Explicit stage
+  limit вызывает cancel,поздние addresses не принимаются. Обе DNS families
+  удерживаются до actual settlement,включая partial settlement после cancel.
+  TCP удерживается до actual close на success/error/timeout/cancel/sync throw.
+  Все concurrent boundaries retained отдельно; HTTP получает signal,late ASN
+  fallback и следующие latency samples ограждены. Result —terminal commit.
+- TCP использует проверенный resolved IP,без скрытой повторной DNS resolution.
+  Empty DNS —typed network; private answer —permission. Отдельная регрессия
+  воспроизвела обход старого prefix filter через IPv4-mapped IPv6. Native net
+  BlockList сохраняет прежние private ranges и корректно покрывает mapped IP,
+  IPv6 link-local /10 и разные написания loopback. TLS/banner не включаются.
+- Modal cleanup отменяет pending main token и geo fetch; UI deadline10s отзывает
+  main/geo work,typed cancellation quiet. Поздние primary/body/fallback/group
+  replies не меняют новое окно и не запускают fallback после cleanup.
+- Beforefix main: npm.cmd test -- src/main/serverProbeOperation.test.ts —18 failed/
+  1 passed,5.40s (.tmp/wp0-server-probe-before.log). UI first:8 failed/2 passed,
+  1.91s (.tmp/wp0-server-probe-ui-before.log); quiet-cancel test сначала смотрел
+  неверный translation key и не засчитан как production evidence. Key исправлен.
+  Первая реализация имела transform error (не применившийся CRLF replacement),
+  исправлен до исполнения tests. Main2:19/19 passed,0.469s.
+- Partial DNS regression на нашей первой реализации:1 failed/19 skipped,0.449s
+  (.tmp/wp0-server-probe-dns-before.log); Promise.allSettled удерживает вторую
+  family. Private mapped regression:1 failed/20 skipped,0.399s
+  (.tmp/wp0-server-probe-private-before.log); после BlockList passes.
+- Targeted3:127 passed/1 failed,3.83s —export-only fixture не дожидался settled
+  повторного probe перед проверкой числа cancellations. Добавлено act settlement;
+  исходные2 export assertions сохранены. Старый source-string timeout test
+  заменён behavioral DNS stage-limit и operation deadline regressions.
+- Final targeted: npm.cmd test -- src/main/serverProbeOperation.test.ts
+  src/main/serverProbe.test.ts src/renderer/components/ServerDetailModal.probeLifetime.test.tsx
+  src/renderer/components/ServerDetailModal.requestLifetime.test.tsx
+  src/preload/preloadValidation.test.ts src/main/mainIpcRegression.test.ts
+  src/main/requesterOperation.test.ts src/main/operationRegistry.test.ts
+  —210/210 passed,8 suites,4.45s,exit0 (.tmp/wp0-server-probe-targeted-final.log).
+  Initial typecheck165 channels/0 public any —exit0. Coverage AC927/927,F210/210
+  и diff check —exit0. Final full/build выполняются; tree после старта full заморожен.
+
+- npm.cmd run build (включая typecheck165 channels/0 public any) —exit0
+  (.tmp/wp0-server-probe-build.log). node scripts/test-electron-runtime.mjs
+  —7 native fixtures PASS,exit0 (.tmp/wp0-server-probe-electron.log). Новые
+  server probe boundaries проверены controlled OS fixtures,не натурным VPN.
+
+- Full1: npm.cmd test -- --maxWorkers=1 —4951 passed/5 skipped/1 failed,
+  314.31s,exit1 (.tmp/wp0-server-probe-full.log). Единственный failure —старый
+  ServerDetailModalSource test требовал точную строку const probeTimeout.
+  Он заменён уже проходящим behavioral lost-IPC deadline/cancel/late-result
+  test в ServerDetailModal.probeLifetime.test.tsx; отдельный z-order test сохранён.
+  Production не менялся. Адресный повтор двух UI suites —12/12 passed,exit0
+  (.tmp/wp0-server-probe-source-replacement.log). Final full2 запущен после
+  последнего test-only изменения; build/7 native fixtures остаются применимы.
+
+- Full2 после замены source assertion:4951 passed/5 skipped/0 failed,
+  298 files passed/2 skipped,312.58s,exit0 (.tmp/wp0-server-probe-full-final.log).
+- Собственная проверка RTT выявила новую пограничную регрессию: wait-close
+  включал drain задержку в latency. Новый held-close250ms test до fix:1 failed/
+  21 skipped,0.445s (.tmp/wp0-server-probe-rtt-before.log): samples[250,0,0,0,0].
+  Теперь TCP measurement фиксируется на connect,raw promise по-прежнему ждёт
+  actual close. Final targeted9 suites:212/212 passed,4.52s,exit0
+  (.tmp/wp0-server-probe-targeted-rtt.log); команда выше плюс
+  src/renderer/components/ServerDetailModalSource.test.ts. Новые final full3/build
+  выполняются после RTT fix; прежний full2 не выдаётся за проверку нового tree.
+
+- Final full3 после RTT fix: npm.cmd test -- --maxWorkers=1 —4952 passed/
+  5 skipped/0 failed,298 files passed/2 skipped,303.79s,exit0
+  (.tmp/wp0-server-probe-full-rtt.log). Production/test tree с начала прогона
+  не менялся. npm.cmd run build/typecheck165 channels/0 public any —exit0
+  (.tmp/wp0-server-probe-build-final.log). Повторный node scripts/test-electron-runtime.mjs
+  —7 PASS,exit0 (.tmp/wp0-server-probe-electron-final.log). Coverage AC927/927,
+  F210/210 и git diff --check —exit0. Новые exact-head Qodo/CI pending.

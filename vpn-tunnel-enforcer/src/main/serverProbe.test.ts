@@ -13,7 +13,13 @@ vi.mock('dns', async (importOriginal) => {
     ...actual.promises,
     resolve4: mockResolve4,
     resolve6: mockResolve6,
-    reverse: mockReverse
+    reverse: mockReverse,
+    Resolver: class {
+      resolve4 = mockResolve4
+      resolve6 = mockResolve6
+      reverse = mockReverse
+      cancel = vi.fn()
+    }
   }
   return {
     ...actual,
