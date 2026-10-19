@@ -23,6 +23,7 @@ export type { RefreshGroupResult } from '../shared/ipc-types'
  */
 
 import { ipcMain, type IpcMainInvokeEvent } from 'electron'
+import { requestDocumentLifetime } from './requestDocumentLifetime'
 import { randomUUID } from 'crypto'
 import { compactForIpcLog } from './ipcLogging'
 import Store from './versionedStore'
@@ -904,8 +905,10 @@ export function registerServerGroupsHandlers(): void {
     return { ok }
   })
 
-  handleLogged('groups:refresh', async (_event, id: string) => {
-    return await refreshGroup(id)
+  handleLogged('groups:refresh', async (event, id: string) => {
+    const lifetime = requestDocumentLifetime(event.sender)
+    try { return await refreshGroup(id, { signal: lifetime.signal }) }
+    finally { lifetime.dispose() }
   })
 
   handleLogged('groups:set-refresh-policy', async (_event, id: string, intervalMinutes: number | null) => {

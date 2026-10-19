@@ -34,6 +34,7 @@ import { operations } from './operations'
 import type { OperationLease } from './operationRegistry'
 import { withProfileStoreWriteLock } from './profileStoreQueue'
 import { readSelectedConfig, writeConfigExport } from './configOperationIo'
+import { requestDocumentLifetime } from './requestDocumentLifetime'
 import type {
   SplitTunnelApp,
   ServerProfile,
@@ -74,12 +75,9 @@ interface ConfigOperationOptions {
 
 /** Main-only lifetime; renderer arguments cannot supply these options. */
 async function runConfigOperation<T>(kind: 'import' | 'export', resource: string, effect: (lease: OperationLease) => Promise<T>, options: ConfigOperationOptions = {}): Promise<T> {
-  if (options.sender?.isDestroyed?.()) throw new IpcFault('cancelled')
-  const lifetime = new AbortController(), destroyed = () => lifetime.abort()
-  options.sender?.once?.('destroyed', destroyed)
-  const signal = options.signal ? AbortSignal.any([options.signal, lifetime.signal]) : lifetime.signal
-  try { return await operations.run(kind, effect, { resource, signal }) }
-  finally { options.sender?.removeListener?.('destroyed', destroyed) }
+  const lifetime = requestDocumentLifetime(options.sender, options.signal)
+  try { return await operations.run(kind, effect, { resource, signal: lifetime.signal }) }
+  finally { lifetime.dispose() }
 }
 
 const yieldConfigOperation = (lease: OperationLease) => lease.wait(new Promise<void>(done => setImmediate(done)))
@@ -935,15 +933,17 @@ export function registerConfigManagerIpcHandlers(): void {
         lease.assertActive()
         return lease.commit(() => {
           let timer: ReturnType<typeof setTimeout>
+          const lifetime = requestDocumentLifetime(event.sender)
           const approved: ApprovedConfigImport = { path, raw, claimed: false, expiresAt: Date.now() + 60_000, release: () => {
             clearTimeout(timer)
-            event.sender.removeListener?.('destroyed', approved.release)
+            lifetime.signal.removeEventListener('abort', approved.release)
+            lifetime.dispose()
             if (approvedConfigImports.get(event.sender) === approved) approvedConfigImports.delete(event.sender)
             approved.raw = ''
           } }
           timer = setTimeout(approved.release, 60_000); timer.unref?.()
           approvedConfigImports.set(event.sender, approved)
-          event.sender.once?.('destroyed', approved.release)
+          lifetime.signal.addEventListener('abort', approved.release, { once: true })
           return path
         })
       } finally { if (configImportDialogs.get(event.sender) === request) configImportDialogs.delete(event.sender) }

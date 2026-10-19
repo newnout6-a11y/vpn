@@ -24,6 +24,7 @@ import { IpcFault } from '../shared/ipc-result'
 import { operations } from './operations'
 import type { OperationLease } from './operationRegistry'
 import { requireString, IpcValidationError } from './ipcValidation'
+import { requestDocumentLifetime } from './requestDocumentLifetime'
 
 // ─── Persistent Store ────────────────────────────────────────────────────────
 
@@ -510,22 +511,14 @@ export function registerSpeedTestHandlers(): void {
   handleLogged('speed-test:run', async (event, requestId?: string) => {
     const id = requestId === undefined ? undefined : uiRequestId(requestId)
     if (id && uiRequests.has(id)) throw new IpcFault('conflict')
-    const controller = new AbortController(), destroyed = () => controller.abort()
-    const navigating = (details: { isMainFrame: boolean; isSameDocument: boolean }) => {
-      if (details.isMainFrame && !details.isSameDocument) controller.abort()
-    }
+    const controller = new AbortController()
     const request = id ? { requestId: id, sender: event.sender, controller } : undefined
-    if (event.sender?.isDestroyed?.()) throw new IpcFault('cancelled')
-    event.sender?.once?.('destroyed', destroyed)
-    event.sender?.once?.('render-process-gone', destroyed)
-    event.sender?.on?.('did-start-navigation', navigating)
+    const lifetime = requestDocumentLifetime(event.sender, controller.signal)
     if (id && request) uiRequests.set(id, request)
-    try { return await runSpeedTest({ signal: controller.signal }, request) }
+    try { return await runSpeedTest({ signal: lifetime.signal }, request) }
     finally {
       if (id) uiRequests.delete(id)
-      event.sender?.removeListener?.('destroyed', destroyed)
-      event.sender?.removeListener?.('render-process-gone', destroyed)
-      event.sender?.removeListener?.('did-start-navigation', navigating)
+      lifetime.dispose()
     }
   })
 

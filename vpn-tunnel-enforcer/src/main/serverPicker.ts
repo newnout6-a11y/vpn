@@ -61,6 +61,7 @@ import { operations } from './operations'
 import type { OperationLease } from './operationRegistry'
 import { classifyIpcError, IpcFault } from '../shared/ipc-result'
 import { ioFailureDetails } from './ioFailureDiagnostics'
+import { requestDocumentLifetime } from './requestDocumentLifetime'
 
 export const RESOLVED_IP_TTL_MS = 5 * 60_000
 const DNS_RESOLUTION_TIMEOUT_MS = 2500
@@ -2631,9 +2632,7 @@ function handleLogged<T>(
 
 /** Native user waits remain cancellable, with the resource held until drain. */
 async function runKeyExport<T>(sender: IpcMainInvokeEvent['sender'], destination: 'renderer' | 'clipboard' | 'file', effect: (lease: OperationLease) => Promise<T>): Promise<T | CancelledSecretExport> {
-  if (sender.isDestroyed()) throw new IpcFault('cancelled')
-  const lifetime = new AbortController(), destroyed = () => lifetime.abort()
-  sender.once?.('destroyed', destroyed)
+  const lifetime = requestDocumentLifetime(sender)
   try {
     return await operations.run('export', async lease => {
       const consent = await lease.waitForUser(withSecretExportConsent(sender, destination, () => true as const))
@@ -2648,7 +2647,7 @@ async function runKeyExport<T>(sender: IpcMainInvokeEvent['sender'], destination
     } catch { /* Diagnostics cannot replace the bounded caller failure. */ }
     throw new IpcFault(details.reason)
   }
-  finally { sender.removeListener?.('destroyed', destroyed) }
+  finally { lifetime.dispose() }
 }
 
 function sanitizeAddProfilesOptions(value: unknown): AddProfilesOptions | undefined {
@@ -2752,20 +2751,26 @@ export function registerServerPickerHandlers(): void {
     return { ok: true as const, country: profile.country ?? '', profile }
   })
 
-  handleLogged('servers:add', async (_event, input: string, options?: AddProfilesOptions) => {
+  handleLogged('servers:add', async (event, input: string, options?: AddProfilesOptions) => {
     input = requireString(input, 'input', { maxLength: 200000 })
-    return await addFromInput(input, sanitizeAddProfilesOptions(options))
+    const cleanOptions = sanitizeAddProfilesOptions(options)
+    const lifetime = requestDocumentLifetime(event.sender)
+    try { return await addFromInput(input, { ...cleanOptions, signal: lifetime.signal }) }
+    finally { lifetime.dispose() }
   })
 
   // Append profiles to a specific group. When `groupId` is null, fall back
   // to the same defaults as `servers:add`: subscription URLs create their
   // own group; single URIs land in "Ручные ключи".
-  handleLogged('servers:add-to-group', async (_event, input: string, groupId: string | null, options?: AddProfilesOptions) => {
+  handleLogged('servers:add-to-group', async (event, input: string, groupId: string | null, options?: AddProfilesOptions) => {
     input = requireString(input, 'input', { maxLength: 200000 })
     const cleanGroupId = optionalString(groupId, 'groupId', { allowEmpty: true, maxLength: 200 })
     const cleanOptions = sanitizeAddProfilesOptions(options)
-    if (cleanGroupId) return await addFromInputToGroup(input, cleanGroupId, cleanOptions)
-    return await addFromInput(input, cleanOptions)
+    const lifetime = requestDocumentLifetime(event.sender)
+    try {
+      const options = { ...cleanOptions, signal: lifetime.signal }
+      return cleanGroupId ? await addFromInputToGroup(input, cleanGroupId, options) : await addFromInput(input, options)
+    } finally { lifetime.dispose() }
   })
 
   handleLogged('servers:set-client-device', async (_event, id: string, clientDevice: ClientDevice) => {

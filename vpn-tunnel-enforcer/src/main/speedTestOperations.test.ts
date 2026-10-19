@@ -122,13 +122,13 @@ describe('owned speed test effects', () => {
     sender.emit('did-start-navigation', { isMainFrame: false, isSameDocument: false })
     sender.emit('did-start-navigation', { isMainFrame: true, isSameDocument: true })
     expect(registry.list().at(-1)?.status).toBe('running')
-    if (cause === 'navigation') sender.emit('did-start-navigation', { isMainFrame: true, isSameDocument: false })
+    if (cause === 'navigation') sender.emit('did-navigate')
     else sender.emit('render-process-gone', {}, { reason: 'crashed' })
     try {
       await vi.waitFor(() => expect(registry.list().at(-1)?.status).toBe('cancelled'))
       expect(await run).toMatchObject({ ok: false, error: { category: 'cancelled' } })
       expect(speed.isRunning()).toBe(true)
-      for (const event of ['destroyed', 'did-start-navigation', 'render-process-gone']) expect(sender.listenerCount(event)).toBe(0)
+      for (const event of ['destroyed', 'did-navigate', 'render-process-gone']) expect(sender.listenerCount(event)).toBe(0)
     } finally { gate.resolve({ data: {} }) }
     await vi.waitFor(() => expect(speed.isRunning()).toBe(false))
     expect(await persistedHistory()).toEqual([])

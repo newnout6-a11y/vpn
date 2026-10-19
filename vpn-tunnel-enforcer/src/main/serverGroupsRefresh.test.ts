@@ -11,6 +11,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { ipcMain } from 'electron'
+import { EventEmitter } from 'node:events'
 const healthMock = vi.hoisted(() => vi.fn())
 vi.mock('./keyHealthChecker', () => ({ checkGroupHealth: healthMock }))
 
@@ -152,6 +153,24 @@ describe('owned subscription refresh (AT-00-003/005/007; F-063/F-070)', () => {
     storeData.current['server-picker'].profiles = [profile, { ...profile, id: 'android', clientDevice: 'android' }]
     return group
   }
+
+  it.each(['destroyed', 'render-process-gone', 'did-navigate'])('cancels manual refresh on requester %s', async event => {
+    const group = seed(), gate = heldRefresh()
+    const sender = Object.assign(new EventEmitter(), { isDestroyed: () => false })
+    resolveVpnProfilesMock.mockReturnValue(gate.promise)
+    registerServerGroupsHandlers()
+    const handler = vi.mocked(ipcMain.handle).mock.calls.find(([channel]) => channel === 'groups:refresh')![1]
+    const run = handler({ sender } as never, group.id)
+    void run.catch(() => {})
+    await vi.waitFor(() => expect(resolveVpnProfilesMock).toHaveBeenCalledOnce())
+    const before = JSON.stringify(storeData.current), operation = operations.list().find(op => op.status === 'running')!
+    sender.emit(event, { isMainFrame: true, isSameDocument: false })
+    expect(operations.list().find(op => op.operationId === operation.operationId)?.status).toBe('cancelled')
+    await expect(run).rejects.toMatchObject({ category: 'cancelled' })
+    gate.release(); await operations.close()
+    expect(JSON.stringify(storeData.current)).toBe(before)
+    expect(sender.eventNames()).toEqual([])
+  })
 
   it.each([0, 1])('cancels at device boundary %i without late profile, metadata or success writes', async boundary => {
     const group = seed(), gate = heldRefresh(), controller = new AbortController()
