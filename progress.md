@@ -4694,3 +4694,62 @@ CI/review нового SHA проверяются отдельно после pu
   stop deadline/background admission, durable audit, migration/semantic/flags
   и полная state/resource/UI приёмка остаются в WP-0. Общая цель WP-0,
   затем WP-2 сохраняется active; пакет целиком не принят.
+
+### WP-0 — deadline остановки и обязательный physical drain
+
+- Инвентаризация stop подтвердила deadline=null и общий Promise caller/OS I/O.
+  ConnectionLifecycle.stop теперь получает UUID, owner, deadline (120 s по
+  умолчанию), отдельный AbortSignal и bounded caller result. Внешняя отмена
+  даёт OPERATION_CANCELLED; истечение deadline — OPERATION_TIMEOUT. Время
+  ожидания старого startup входит в этот deadline.
+- Отмена запроса не отменяет обязанность rollback. Stopping lane и coalesced
+  result удерживаются до фактического завершения startup/cleanup; повторный
+  stop не создаёт второй teardown, startup не проходит busy admission.
+  Shutdown ждёт physical Promise и видит late cleanup failure. Rotation
+  registry тоже ждёт physical stopping, а не bounded stop result.
+- Terminal event публикуется один раз: поздний success/error cleanup не
+  переписывает timeout/cancel и не выдаёт второй terminal. После timeout FSM
+  не объявляет disconnected по одному истекшему таймеру; настоящий cleanup
+  и закрытие физической connection session по-прежнему обязательны. Этот
+  участок не объявляет отменёнными уже выданные OS I/O или всю UI lifetime matrix.
+- До реализации npm.cmd test -- src/main/connectionStopDeadline.test.ts —
+  11 failed, 10.46 s, exit 1 (.tmp/wp0-stop-deadline-before.log). Две unhandled
+  ошибки baseline происходили от отсутствующего нового stop owner argument;
+  это не отдельное доказательство production crash. Первое расширение дало
+  54 passed / 4 failed: экспериментальная смена приоритета lane.operation
+  скрывала metadata cancelled startup/rotation. Getter возвращён к прежней
+  семантике без ослабления assertions (.tmp/wp0-stop-deadline-first.log).
+- npm.cmd test -- src/main/connectionStopDeadline.test.ts src/main/connectionLifecycle.test.ts src/main/connectionOperations.test.ts src/main/connectionCancellation.test.ts src/main/rotationLifecycle.test.ts src/main/rotationOperations.test.ts src/main/connectionModelTours.test.ts src/main/connectionOperationLogging.test.ts
+  — 90 passed / 8 files, 13.72 s, exit 0
+  (.tmp/wp0-stop-deadline-regression.log). Расширенный набор с
+  src/main/lifecycleCleanup.test.ts src/main/tunnelStateMachine.test.ts
+  — 295 passed / 10 files, 36.93 s, exit 0
+  (.tmp/wp0-stop-deadline-regression-final.log).
+- npm.cmd run build — exit 0, включая typecheck 160 channels / 0 public any
+  (.tmp/wp0-stop-deadline-build.log). Traceability AC 927/927 / F 210/210,
+  git diff --check — exit 0. node scripts/test-electron-runtime.mjs —
+  ELECTRON_SMOKE_PASS, exit 0 (.tmp/wp0-stop-deadline-electron.log), включая
+  новый настоящий contextBridge stop deadline: bounded typed result с исходными
+  UUID/correlation, busy admission до fake OS drain и неизменный terminal timeout.
+  node scripts/test-wp1-native.mjs --ipc-only — WP1_NATIVE_PASS, exit 0
+  (.tmp/wp0-stop-deadline-csp.log). Это native IPC/runtime subsets с fake OS,
+  не новый натурный Windows rollback/TUN oracle. Полный npm test выполняется;
+  commit/push и exact-head Qodo/CI ещё не выполнены.
+- Первый полный npm.cmd test — 4459 passed / 2 failed / 5 skipped,
+  1170.41 s, exit 1 (.tmp/wp0-stop-deadline-full.log). Два real-time timeout:
+  physicalAdapterLifecycle case и rotationOperations beforeEach, оба заняли
+  около 897 s. В тот же период tool observation вернулась через 910 s вместо
+  запрошенных 40 s. Причина общей задержки не установлена; системный sleep
+  не подтверждён. Процесс был проверен живым и не перезапускался до terminal.
+  После exit 1 npm.cmd test -- src/main/rotationOperations.test.ts src/main/physicalAdapterLifecycle.test.ts
+  — 79 passed / 2 files, 3.73 s, exit 0
+  (.tmp/wp0-stop-deadline-full-followup.log). Production/tests/timeouts не
+  менялись и не исключались. Отдельный полный повтор запущен на том же tree;
+  первый не считается PASS.
+- Окончательный повтор npm.cmd test на неизменном code/test tree —
+  **4461 passed / 5 skipped / 0 failed**, 276 files passed / 2 skipped,
+  **177.68 s**, exit 0 (.tmp/wp0-stop-deadline-full-verified.log).
+  Новые owner/deadline/cancel/rotation-drain cases и весь existing набор прошли;
+  timeout-политика не ослаблялась. Build/typecheck/traceability/native результаты
+  выше относятся к этому состоянию. Следующий шаг — commit/push/PR и
+  completed Qodo с CI success на окончательном SHA. WP-0/WP-2 goal active.

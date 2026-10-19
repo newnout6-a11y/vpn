@@ -1128,3 +1128,28 @@ Production rotation regression проверяет оба исхода native fai
 Реальная замена конфигурации по-прежнему отменяет работу со старыми значениями.
 L2 regression проверяет signal, прежний nextRotationAt и успешное завершение
 удержанного native restart без ordinary cleanup для четырёх no-op patch.
+
+## Stop deadline — bounded caller и обязательная очистка
+
+ConnectionLifecycle.stop получает deadline 120 s по умолчанию и отдельный
+AbortSignal; ожидание startup drain входит в срок. Timeout/cancel возвращают
+конечный typed отказ без ожидания неотменяемого OS I/O. Уже принятый rollback
+продолжается до физического завершения под занятым native lane. Повторные
+stop callers присоединяются к прежнему result; shutdown и rotation registry
+по-прежнему ждут physical Promise, включая его поздний отказ.
+
+Terminal event один: поздняя очистка не превращает timeout в success. После
+таймера нельзя объявлять ресурсы освобождёнными; фактическая очистка сети и
+закрытие завершившейся connection session при этом не запрещаются. Signal
+не является основанием бросить обязательный rollback. Controller остаётся
+в main и не сериализуется в IPC metadata.
+
+L2 cases: deadline во время cleanup и startup drain; prompt external cancel;
+pre-aborted signal без admission; invalid timeout; coalescing после timeout;
+shutdown с поздним success/failure; rotation registry lease после stop deadline;
+исходные correlation/UUID и единственный terminal. Настоящий Electron с
+production preload/contextBridge дополнительно проверяет timeout stop за 900 ms,
+original metadata, запрет нового старта до drain и отсутствие позднего success.
+OS boundaries управляемые; полная native Windows resource matrix, UI lifetime,
+background admission, durable audit, migrations/semantic errors/flags остаются
+открытыми. Финальные full/review/CI результаты фиксируются в progress.md.

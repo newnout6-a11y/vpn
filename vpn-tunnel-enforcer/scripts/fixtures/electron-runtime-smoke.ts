@@ -93,10 +93,12 @@ app.whenReady().then(async () => {
     softCalls++; tunnelEvidence.softApplied = true
     return { success: true }
   }))
+  let stopGate: Promise<void> | null = null, stopTimeoutMs = 120_000
   ipcMain.handle('stop-tun', () => lane.stop(async () => {
+    if (stopGate) await stopGate
     tunnelEvidence.running = false; tunnelEvidence.pid = null; tunnelEvidence.softApplied = false
     return { success: true }
-  }))
+  }, { timeoutMs: stopTimeoutMs }))
   const profile: ServerProfile = {
     id: 'json-profile', name: 'JSON profile', protocol: 'vless', server: 'vpn.example.test', port: 443, status: 'unknown',
     outbound: { type: 'vless', server: 'vpn.example.test', server_port: 443,
@@ -253,6 +255,28 @@ app.whenReady().then(async () => {
   assert.equal(lane.busy, false)
   assert.ok(!(await trusted.webContents.executeJavaScript(`window.smokeFrames`)).some((s: { state: string }) => s.state === 'connected'))
   checks.push('cancelled startup returns through native contextBridge within 900 ms while native lease/admission remain held until drain and stop (AT-00-003/007; fake OS)')
+  assert.equal((await trusted.webContents.executeJavaScript(`window.electronAPI.startDirectVpn()`)).success, true)
+  let finishStop!: () => void
+  stopGate = new Promise<void>(resolve => { finishStop = resolve }); stopTimeoutMs = 50
+  const timedOutStop = await trusted.webContents.executeJavaScript(`(async () => {
+    let timer;
+    try { return await Promise.race([window.electronAPI.stopTun(), new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('Stop deadline did not cross contextBridge within 900 ms')), 900);
+    })]); } finally { clearTimeout(timer); }
+  })()`)
+  assert.equal(timedOutStop.code, 'OPERATION_TIMEOUT'); assert.equal(timedOutStop.category, 'timeout')
+  const stopOperation = tunnel.snapshot.operation!
+  assert.equal(timedOutStop.operationId, stopOperation.operationId)
+  assert.match(stopOperation.correlationId, /^ipc_[0-9a-f]{32}$/)
+  assert.equal(tunnel.snapshot.state, 'error'); assert.equal(stopOperation.status, 'error')
+  assert.equal(lane.busy, true); assert.equal(tunnelEvidence.running, true)
+  assert.equal((await trusted.webContents.executeJavaScript(`window.electronAPI.startDirectVpn()`)).code, 'OPERATION_CONFLICT')
+  finishStop(); await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(lane.busy, false); assert.equal(tunnelEvidence.running, false)
+  assert.deepEqual(tunnel.snapshot.operation, stopOperation)
+  stopGate = null; stopTimeoutMs = 120_000
+  assert.equal((await trusted.webContents.executeJavaScript(`window.electronAPI.stopTun()`)).success, true)
+  checks.push('stop deadline crosses production contextBridge within 900 ms with original UUID/correlation; physical cleanup retains admission and cannot rewrite terminal timeout (AT-00-003/005/007; fake OS)')
   const malformedSoft = await trusted.webContents.executeJavaScript(`window.electronAPI.startSoftProtection(42, 'http').catch(e => e)`)
   assert.equal(malformedSoft.category, 'validation'); assert.equal(softCalls, 0)
   assert.equal((await trusted.webContents.executeJavaScript(`window.electronAPI.startSoftProtection('127.0.0.1:8080', 'http')`)).success, true)
