@@ -19,6 +19,7 @@ import { ConnectionLifecycle, type ConnectionStartupOwner } from './connectionLi
 import { currentCorrelationId, currentActionMetadata, withCorrelation } from './actionCorrelation'
 import { monotonicTimeMs } from './eventClock'
 import { operations, registerOperationHandlers } from './operations'
+import { registerPlannedFeatureHandlers } from './plannedFeatures'
 import { TunnelStateMachine } from './tunnelStateMachine'
 import { operationLogDetails, type ConnectionStartResult, type ConnectionStopResult } from '../shared/operation'
 import { runScheduledConnection } from './scheduledConnection'
@@ -2712,6 +2713,7 @@ app.whenReady().then(async () => {
   registerUrlAvailabilityHandlers()
   registerSpeedTestHandlers()
   registerOperationHandlers()
+  registerPlannedFeatureHandlers()
   registerKillSwitchIpc()
   registerRotationHandlers()
   registerSchedulerIpcHandlers()

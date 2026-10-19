@@ -13,6 +13,10 @@ import { ConnectionLifecycle } from '../../src/main/connectionLifecycle'
 import { TunnelStateMachine } from '../../src/main/tunnelStateMachine'
 import { currentCorrelationId, currentActionMetadata } from '../../src/main/actionCorrelation'
 import { operations, registerOperationHandlers } from '../../src/main/operations'
+import { registerPlannedFeatureHandlers } from '../../src/main/plannedFeatures'
+import { plannedFeatureStatus } from '../../src/shared/planned-features'
+import { getAppLogPath } from '../../src/main/appLogger'
+import { setTimeout as delay } from 'node:timers/promises'
 
 const work = process.env.VPNTE_SMOKE_DIR!
 app.setPath('userData', join(work, 'userData'))
@@ -66,6 +70,7 @@ app.whenReady().then(async () => {
 
   installTrustedIpcBoundary()
   registerOperationHandlers()
+  registerPlannedFeatureHandlers()
   let featureBegan!: () => void, releaseFeature!: () => void
   const featureStarted = new Promise<void>(resolve => { featureBegan = resolve })
   const featureGate = new Promise<void>(resolve => { releaseFeature = resolve })
@@ -132,6 +137,35 @@ app.whenReady().then(async () => {
   await reloaded
   await bridge(trusted)
   checks.push('contextBridge survives reload')
+
+  const planned = await trusted.webContents.executeJavaScript('window.electronAPI.plannedFeaturesStatus()')
+  assert.deepEqual(planned, plannedFeatureStatus())
+  const deniedIds = new Map<string, string>()
+  for (const feature of planned) {
+    const denied = await trusted.webContents.executeJavaScript(`window.electronAPI.plannedFeatureActivate('${feature.id}').catch(e=>e)`)
+    assert.ok(isIpcRemoteErrorData(denied))
+    assert.equal(denied.category, 'permission')
+    assert.ok(denied.correlationId)
+    deniedIds.set(feature.id, denied.correlationId)
+  }
+  const admissionAudit = () => {
+    let raw: string
+    try { raw = readFileSync(getAppLogPath(), 'utf8') }
+    catch (error: any) { if (error.code === 'ENOENT') return []; throw error }
+    // The logger appends asynchronously; only parse complete records during polling.
+    return raw.slice(0, raw.lastIndexOf('\n') + 1).split('\n').filter(Boolean).map(line => JSON.parse(line))
+      .filter(event => event.message === 'feature.activation-denied')
+  }
+  for (let attempt = 0; admissionAudit().length < planned.length && attempt < 500; attempt++) await delay(10)
+  const deniedEvents = admissionAudit()
+  assert.equal(deniedEvents.length, planned.length)
+  for (const event of deniedEvents) {
+    assert.equal(event.details.reason, 'laboratory-evidence-missing')
+    assert.equal(event.correlationId, deniedIds.get(event.details.featureId))
+    assert.ok(event.details.requiredTests.includes('AT-12-002'))
+  }
+  assert.deepEqual(await trusted.webContents.executeJavaScript('window.electronAPI.plannedFeaturesStatus()'), planned)
+  checks.push('WP-12 flags stay disabled; production IPC refuses admission without lab evidence and persists correlated denial audit (AT-00-009/AT-12-002)')
   await trusted.webContents.executeJavaScript(`
     window.featureOutcome = window.electronAPI.speedTestRun().catch(e => e); 'started'
   `)
@@ -297,6 +331,9 @@ app.whenReady().then(async () => {
   assert.equal(foreignResult, ipcError('permission', locale).message)
   const foreignOperations = await foreign.webContents.executeJavaScript(`window.electronAPI.operationsList().catch(e => e)`)
   assert.equal(foreignOperations.category, 'permission')
+  const foreignAdmission = await foreign.webContents.executeJavaScript(`window.electronAPI.plannedFeatureActivate('mihomo').catch(e=>e)`)
+  assert.equal(foreignAdmission.category, 'permission')
+  assert.equal(admissionAudit().length, planned.length)
   checks.push('unregistered WebContents rejected')
   await trusted.loadFile(join(work, 'other.html'))
   const navigatedResult = await trusted.webContents.executeJavaScript(`

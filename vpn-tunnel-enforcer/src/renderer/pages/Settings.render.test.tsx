@@ -48,6 +48,15 @@ const switchInRow = (labelRe: RegExp) => {
 }
 
 describe('<Settings/> save bar', () => {
+  it.each([false, true])('has no WP-12 controls with advancedMode=%s (AT-00-009)', async advancedMode => {
+    useAppStore.setState({ settings: { ...DEFAULTS, advancedMode,
+      plannedFeatures: { mihomo: true, amneziawg: true, 'process-monitor': true, 'browser-boxes': true }
+    } as typeof DEFAULTS })
+    const { container } = render(<Settings />)
+    await screen.findByText('settings.title')
+    expect(container.textContent).not.toMatch(/mihomo|amneziawg|browser.boxes|изоляция аккаунтов|процессный монитор/i)
+  })
+
   it('is hidden on first render', async () => {
     render(<Settings />)
     await screen.findByText('settings.title')

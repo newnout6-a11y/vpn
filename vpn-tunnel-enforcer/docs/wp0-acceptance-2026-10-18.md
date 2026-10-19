@@ -18,12 +18,15 @@ Needs changes: владелец отдельно указал это 19.10. Foll
 `2728df1` получил CI success, completed Qodo 1544399 без открытых findings
 и Revix 117906370434 completed/neutral с suggestion и nitpick. Замечания #70
 закрыты отдельными исправлениями и проверками, а не прежним merge или Qodo.
+#75 также слит (`07a77cb`): final head `1e57482` получил CI 39209022143 success
+и completed Qodo 1544667 без открытых findings. Revix сообщил об исчерпанной
+квоте до 20.10 00:00 UTC; полного ревью #75 нет, это не approval.
 
 ## Полная область и первоначальная инвентаризация
 
 | AT | Найденная реализация / доказательства | Остаток до приёмки |
 | --- | --- | --- |
-| 00-001 | AST-проверка 161 main/preload/shared request channels, общий реестр входов и versioned transport envelope; object contracts проверяют поля/массивы, save-settings покрывает все 39 общих полей AppSettings; TypeScript checker проверяет results всех 161 listeners, public results с `any` больше нет; native contextBridge сохраняет JSON профиля и nullable active result, feature list/cancel, speed-test request cancel | Завершить проверку текущего PR; отдельная semantic matrix ошибок остаётся в 00-004 |
+| 00-001 | AST-проверка 163 main/preload/shared request channels, общий реестр входов и versioned transport envelope; object contracts проверяют поля/массивы, save-settings покрывает все 39 общих полей AppSettings; TypeScript checker проверяет results всех 163 listeners, public results с `any` больше нет; native contextBridge сохраняет JSON профиля и nullable active result, feature list/cancel, speed-test request cancel, planned-feature admission | Завершить проверку текущего PR; отдельная semantic matrix ошибок остаётся в 00-004 |
 | 00-002 | Production TunnelStateMachine интегрирована в main lane/IPC/Soft/tray/UI; 4096 stable tours и 117649 tours семи событий глубиной 6, включая timeout/cancel и native completion, с fake PID/TUN ledger и балансом operation events; sticky faults и generation fencing | Общая durable operation history/counters; все blocked/unknown/background paths; native Windows resources; общий admission фоновых restart |
 | 00-003 | Main connection lane: UUIDv4, owner, deadline запуска, priority admission; ручные Hard/Direct и Soft из tray, scheduled startup вместе с proxy detection; общий feature registry с prompt cancellation/deadline и physical drain, speed test, refresh подписок и импорт профилей, включая curl/DoH и commit queue; config browse/validate/apply/export, async file I/O и terminal commit приняты в PR #70; key renderer/clipboard/file exports в PR #71; rotation IPC/timer с native drain и retained evidence в PR #72 | UI cancel/unmount; deadline остановки, все entrypoints и полная матрица поздних эффектов |
 | 00-004 | Общая классификация transport; 157 каналов × 7 категорий через guard; native contextBridge сохраняет code/category/correlation в en/ru; typed local validation; 4 настоящих config handlers × 7 категорий, canonical domain failures | Миграция legacy domain-result `{success:false,error}` и semantic matrix настоящих feature handlers; transport fixtures не доказывают её |
@@ -31,7 +34,7 @@ Needs changes: владелец отдельно указал это 19.10. Foll
 | 00-006 | Локальные миграции; общий version admission для 20 electron-store файлов / 28 constructors; future-version SHA-256 invariance на real Conf backend до defaults/repair и при записи через ранее открытый handle | Централизованный упорядоченный migration registry, fixtures всех исторических преобразований, остальные persisted JSON, полноценный upgrade/downgrade и межпроцессная координация |
 | 00-007 | Seed 0x5eed003: 200 commands/10 async workers с production lane/FSM, typed losers, парные terminal events, финальный disconnect и 0 fake PID/TUN | Натурный PID-реестр Windows и полная матрица фоновых entrypoints |
 | 00-008 | Dashboard component frames с production FSM/lane; revision fence; Soft через owned IPC; visual fixtures light/dark; native production contextBridge snapshots/disposer | Полная матрица всех операций, тем, размеров и entrypoints; browser fixtures не заменяют native resources |
-| 00-009 | Плановые функции WP-12 не приняты в production | Проверить реестр production flags, отсутствие DOM и отказ включения без laboratory evidence с audit event |
+| 00-009 | Release registry четырёх функций off/null; production main/preload status/activation gate; schema reject fake evidence; production Sidebar/Settings DOM без planned controls в обычном/advanced режиме с forged flags; настоящий Electron проверяет четыре refusal и persisted JSONL audit/correlation | Финальные full/Qodo/CI текущего PR; реализация и собственная лабораторная приёмка WP-12 остаются отдельным пакетом |
 | 00-010 | История подключений: настоящий Conf backend, 100 записей, повторная загрузка, повреждённый JSON/схема, `history.corrupted`, сохранение валидных записей и последующая запись | Адресная L2-матрица истории подключений добавлена; перенос той же гарантии на общий audit/event history всех операций после его введения |
 
 Это перечень обнаруженного, а не PASS десяти AT. Ни один новый
@@ -1268,3 +1271,24 @@ drain, foreign/stale cancellation, destroyed requester и настоящий rel
 280/320/414 px длинные server/profile не выходят за экран. Это адресный вклад в
 AT-00-003/008, не полная приёмка всех UI/native/background entrypoints. Команды,
 результаты и границы доступных design gates записываются в progress.md.
+
+## Плановые функции — release admission
+
+WP-12 функции mihomo, AmneziaWG, процессный монитор и browser boxes в текущем
+релизе имеют enabled=false и laboratoryAdmission=null. Реестр shared используется
+actual main handlers и production preload, а не существует только в тесте.
+Допуск является решением релиза с лабораторными критериями, не пользовательским
+boolean setting. Приём caller evidence не предусмотрен; добавление реализации
+и положительного admission возможно только в согласованном WP-12 после прежних
+пакетов. Functional IPC/страницы WP-12 сейчас отсутствуют.
+
+planned-features:status возвращает отдельный snapshot с requiredTests;
+его редактирование caller'ом не меняет runtime policy. planned-features:activate
+отвергает известную функцию typed permission и пишет feature.activation-denied
+с laboratory-evidence-missing, перечнем критериев и исходной IPC correlation.
+Неизвестный ID и лишние аргументы (включая fake evidence) отвергаются схемой.
+Настоящий Electron проверяет все четыре отказа, JSONL read-back, неизменность
+реестра и foreign WebContents; UI tests проверяют production Sidebar/Settings
+при обычном и advanced режиме, включая forged saved flags. Это адресное
+доказательство AT-00-009/AT-12-002, не запуск planned VPN/monitor/boxes функций.
+Команды, полные результаты и remote gate — в progress.md.

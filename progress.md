@@ -5258,3 +5258,59 @@ CI/review нового SHA проверяются отдельно после pu
   161 channels / 0 public any (.tmp/wp0-speed-ui-reload-typecheck.log).
   git diff --check — exit 0. Все validation processes terminal; новый commit
   включает только подтверждённый Qodo fix, regressions/native fixture и журнал.
+
+### WP-0 — #75 принят; допуск плановых функций WP-12
+
+- PR #75 слит: final reviewed head 1e57482c2730f7fc2dfc543a731447618a3aa6d2,
+  merge/main 07a77cb18ada642b9de28705ab862211f5eec0cc. REST GET подтвердил
+  merged=true; fetch/ff main совпал с проверенным head без tree diff.
+  Qodo 1544667 completed, открытых findings нет, прежний medium закрыт кодом
+  и regressions (attribution вручную не менялась). CI 39209022143 completed/
+  success на том же SHA, watcher exit 0 (.tmp/wp0-speed-ui-reload-ci-watch.log):
+  Windows unit/traceability, production IPC/CSP, WFP ABI/rollback и Electron
+  native reads, сайт и Rust sidecar. Revix free-quota-reached сохраняется до
+  20.10 00:00 UTC; полного ревью #75 нет, это не approval. Учитываем Revix
+  при доступной квоте по решению владельца. Goal WP-0 → WP-2 active.
+- Новый участок на codex/wp0-planned-feature-gates от main 07a77cb:
+  AT-00-009/AT-12-002. Норматив: ТЗ-06 WP-0 и §10.8, набор WP-12.
+  Код четырёх WP-12 функций не вводится. Добавлен runtime release registry
+  mihomo/amneziawg/process-monitor/browser-boxes: enabled=false,
+  laboratoryAdmission=null, перечень необходимых AT. Admission не читается
+  из пользовательских settings/env; в текущем релизе лабораторных допусков нет.
+  Выданный snapshot — отдельная копия, его изменение не меняет policy.
+- В настоящем main startup зарегистрированы planned-features:status/activate,
+  production preload и shared contracts имеют точный паритет. Активация любой
+  из четырёх функций даёт typed permission и feature.activation-denied с
+  reason=laboratory-evidence-missing, requiredTests и исходной IPC correlation.
+  Functional WP-12 IPC endpoints отсутствуют. Неизвестный ID и переданное
+  caller'ом fake evidence отклоняются input schema до handler effects.
+- Первый адресный запуск: 9 passed / 2 failed, 1.83 s, exit 1
+  (.tmp/wp0-planned-targeted.log): ошибка в parametrized test table, Vitest
+  разворачивал массив аргументов в callback. Исправлена сама таблица; policy
+  не ослаблялась. Адресный набор с production Sidebar, Settings и preload
+  validators — 65 passed, 2.58 s, exit 0
+  (.tmp/wp0-planned-targeted-final2.log). Sidebar обычного/advanced режима
+  и Settings не показывают WP-12 controls даже с подложенными true flags.
+- npm.cmd run typecheck — exit 0, 163 channels / 0 public any
+  (.tmp/wp0-planned-typecheck.log); npm.cmd run build — exit 0
+  (.tmp/wp0-planned-build.log). Traceability — AC 927/927, F 210/210, exit 0.
+  node scripts/test-electron-runtime.mjs — ELECTRON_SMOKE_PASS и
+  SPEED_UI_NATIVE_PASS, exit 0 (.tmp/wp0-planned-electron.log). Новый native
+  subset вызывает actual policy через production preload/contextBridge:
+  четыре typed refusals, четыре настоящих JSONL denial events с исходными
+  correlation ID, неизменность off/null registry и отказ foreign WebContents
+  до admission handler. node scripts/test-wp1-native.mjs --ipc-only —
+  WP1_NATIVE_PASS, exit 0 (.tmp/wp0-planned-csp.log). git diff --check — exit 0.
+  Полный npm.cmd test запущен; production/unit sources после старта не меняются.
+  Native fixture read-back дополнительно читает только complete JSONL lines
+  при polling, чтобы не разбирать ещё дописываемый хвост; native rerun нужен.
+  Это gate отсутствующих planned features, не реализация или приёмка WP-12.
+- Native rerun после уточнения polling — ELECTRON_SMOKE_PASS и
+  SPEED_UI_NATIVE_PASS, exit 0 (.tmp/wp0-planned-electron-final.log).
+- Финальный npm.cmd test — **4549 passed / 5 skipped / 0 failed**,
+  279 files passed / 2 skipped, **310.26 s**, exit 0 (.tmp/wp0-planned-full.log).
+  Production/unit sources во время прогона не менялись. Built out/main/index.js
+  содержит обе регистрации и вызов registerPlannedFeatureHandlers в startup;
+  out/preload/index.js — оба invoke метода и schemas. git diff --check — exit 0.
+  Все validation processes terminal. После commit/push нужны automatic Qodo и
+  CI окончательного head; Revix учитывается при наличии квоты.
