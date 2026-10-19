@@ -9,6 +9,7 @@ const state = vi.hoisted(() => ({
   nativePrompt: vi.fn(), saveDialog: vi.fn(), uri: vi.fn(), proxyLine: vi.fn(),
   clipboardText: '', clipboardWrite: vi.fn(),
   writeFailure: undefined as unknown,
+  onOpened: undefined as ((path: string) => Promise<void>) | undefined,
   storeData: new Map<string, any>(),
   ipcHandlers: new Map<string, (...args: any[]) => any>(),
   profiles: [] as any[],
@@ -30,6 +31,7 @@ vi.mock('fs/promises', async importOriginal => {
   const actual = await importOriginal<typeof import('fs/promises')>()
   return { ...actual, open: async (...args: Parameters<typeof actual.open>) => {
     const file = await actual.open(...args), write = file.writeFile.bind(file)
+    try { await state.onOpened?.(String(args[0])) } catch (error) { await file.close(); throw error }
     file.writeFile = (...writeArgs) => state.writeFailure ? Promise.reject(state.writeFailure) : write(...writeArgs)
     return file
   } }
@@ -116,6 +118,7 @@ function invoke(channel: string) { return state.ipcHandlers.get(channel)!({ send
 beforeEach(async () => {
   vi.resetModules(); vi.clearAllMocks(); state.storeData.clear(); state.ipcHandlers.clear(); destroyed = false
   state.writeFailure = undefined
+  state.onOpened = undefined
   exportDirectory = mkdtempSync(join(tmpdir(), 'vpnte-export-consent-'))
   exportPath = join(exportDirectory, 'keys.txt')
   state.storeData.set('profiles', [{ id: 'a', name: 'Profile', protocol: 'vless', outbound: { type: 'vless', server: 'server.test', server_port: 443, uuid: 'FAKE-PRIVATE-KEY' } }])
@@ -140,9 +143,19 @@ describe('main-owned export approval (AT-01-008)', () => {
       Buffer.from(`$ErrorActionPreference='Stop';$path=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encodedPath}'));` + script, 'utf16le').toString('base64')], { windowsHide: true, timeout: 15_000 })).stdout.trim()
     writeFileSync(exportPath, 'old')
     await powershell(`$acl=[IO.File]::GetAccessControl($path);$acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier('S-1-5-19')),'Read','Allow')));[IO.File]::SetAccessControl($path,$acl)`)
+    await powershell(`$parent=[IO.Path]::GetDirectoryName($path);$acl=[IO.Directory]::GetAccessControl($parent);$acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier('S-1-5-19')),'Read','ContainerInherit,ObjectInherit','None','Allow')));[IO.Directory]::SetAccessControl($parent,$acl)`)
+    const opened = vi.fn()
+    state.onOpened = async path => {
+      opened()
+      const stagedPath = Buffer.from(path, 'utf8').toString('base64')
+      const staged = JSON.parse(await powershell(`$path=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${stagedPath}'));$acl=[IO.File]::GetAccessControl($path);[ordered]@{protected=$acl.AreAccessRulesProtected;user=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value;rules=@($acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])|ForEach-Object {$_.IdentityReference.Value})}|ConvertTo-Json -Compress`))
+      expect(staged.protected).toBe(true)
+      expect(staged.rules.sort()).toEqual([...new Set([staged.user, 'S-1-5-18'])].sort())
+    }
     state.nativePrompt.mockResolvedValue({ response: 1 })
     expect((await invoke(channel)).ok).toBe(true)
     expect(readFileSync(exportPath, 'utf8')).toContain('FAKE-PRIVATE-KEY')
+    expect(opened).toHaveBeenCalledTimes(1)
     const acl = JSON.parse(await powershell(`$acl=[IO.File]::GetAccessControl($path);[ordered]@{protected=$acl.AreAccessRulesProtected;user=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value;rules=@($acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])|ForEach-Object {$_.IdentityReference.Value})}|ConvertTo-Json -Compress`))
     expect(acl.protected).toBe(true)
     expect(acl.rules.sort()).toEqual([...new Set([acl.user, 'S-1-5-18'])].sort())

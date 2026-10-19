@@ -3,7 +3,7 @@ import { renameSync } from 'fs'
 import { randomUUID } from 'crypto'
 import { dirname, join } from 'path'
 import type { OperationLease, SynchronousCommitResult } from './operationRegistry'
-import { prepareConfigExport } from './configExportSecurity'
+import { createPrivateConfigExport, prepareConfigExport } from './configExportSecurity'
 import { logEvent } from './appLogger'
 import { classifyIpcError } from '../shared/ipc-result'
 
@@ -41,7 +41,11 @@ export async function writeConfigExport<T>(path: string, content: string, lease:
   let created = false
   let verifyDestination!: () => void
   const staging = (async () => {
-    const file = await open(temporary, 'wx', 0o600)
+    if (process.platform === 'win32' && mode === 'secrets') {
+      await createPrivateConfigExport(temporary)
+      created = true
+    }
+    const file = await open(temporary, created ? 'r+' : 'wx', 0o600)
     created = true
     try {
       lease.assertActive()

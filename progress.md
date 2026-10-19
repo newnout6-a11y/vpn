@@ -5007,3 +5007,40 @@ CI/review нового SHA проверяются отдельно после pu
   не менялся. Все адресные/full/typecheck/build/traceability/runtime процессы
   завершены; git diff --check — exit 0. Исправления готовы к commit/push,
   новый final-head CI и automatic reviews ещё не объявлены пройденными.
+
+### WP-0 — Qodo #74: атомарное создание secret staging
+
+- eb7aed617712bff56b2075e89e0a5a565eb5eaf8 запушен. Qodo 1544121 completed
+  на этом SHA автоматически пометил оба прежних findings implemented.
+  Revix check-run 117892946691 completed/success на том же SHA, Ready to merge;
+  attribution трёх замечаний выполнена ботом. Но Qodo нашёл новый high finding
+  4559f832-f0fd-4f30-bdd6-1a33ee561826 / 4310391901: Windows staging сначала
+  появлялся с inherited DACL; чужой заранее открытый handle переживал последующее
+  закрытие ACL и мог читать будущий plaintext. Merge не выполнялся.
+- Before: npm.cmd test -- src/main/serverKeyExportSecurity.test.ts -t 'broadly readable destination'
+  — 3 failed / 18 skipped, 6.98 s, exit 1
+  (.tmp/wp0-config-atomic-acl-before.log). Actual parent directory получил
+  наследуемый reader SID S-1-5-19. Проверка на границе Node open до prepare/write
+  выявляет открытый staging во всех трёх production key handlers.
+- Secret Windows file теперь создаётся через FileStream CreateNew overload
+  с protected current-user/SYSTEM FileSecurity в самой операции создания,
+  FileShare.None до закрытия initial handle. Node затем открывает уже private
+  файл; прежние ACL verification, destination identity и terminal rename остаются.
+  Общий PowerShell executor и private ACL descriptor переиспользуются.
+  POSIX wx/0600 и redacted policy не менялись. Новый collision case доказывает,
+  что CreateNew не обрезает и не удаляет существующий файл.
+- Адресный набор actual key handlers / Windows ACL / config operations / key
+  operations — 91 passed, 28.43 s, exit 0
+  (.tmp/wp0-config-atomic-acl-regression.log), до добавления collision case.
+  npm.cmd run build с typecheck — exit 0 (.tmp/wp0-config-atomic-acl-build.log).
+  Traceability — AC 927/927, F 210/210, exit 0. Финальный полный Vitest запущен
+  с collision case, code/test tree зафиксирован. Startup sweep не добавлен.
+- Финальный npm.cmd test — **4501 passed / 5 skipped / 0 failed**,
+  276 files passed / 2 skipped, **223.63 s**, exit 0
+  (.tmp/wp0-config-atomic-acl-full.log), включая новый collision case.
+  node scripts/test-electron-runtime.mjs — ELECTRON_SMOKE_PASS;
+  node scripts/test-wp1-native.mjs --ipc-only — WP1_NATIVE_PASS; оба exit 0
+  (.tmp/wp0-config-atomic-acl-electron.log, .tmp/wp0-config-atomic-acl-csp.log).
+  git diff --check — exit 0. CI 39200719744 на предыдущем eb7aed6 завершён
+  success, watcher exit 0, полный лог .tmp/wp0-config-qodo74-ci-eb7aed6.log.
+  Этот CI не переносится на новый atomic-create tree: после push ждём новый.

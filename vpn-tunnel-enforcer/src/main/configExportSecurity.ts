@@ -12,6 +12,34 @@ function sameFile(a: BigIntStats | undefined, b: BigIntStats | undefined): boole
   return !a || !b ? a === b : (['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs'] as const).every(key => a[key] === b[key])
 }
 
+const privateAclScript = `$acl=New-Object Security.AccessControl.FileSecurity
+$acl.SetAccessRuleProtection($true,$false)
+$user=[Security.Principal.WindowsIdentity]::GetCurrent().User
+$acl.SetOwner($user)
+$acl.SetGroup($user)
+foreach($sid in @($user.Value,'S-1-5-18')) {
+  $id=New-Object Security.Principal.SecurityIdentifier($sid)
+  $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($id,'FullControl','Allow')))
+}`
+
+async function runSecurityScript(script: string): Promise<void> {
+  const executable = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+  try {
+    const { stdout } = await promisify(execFile)(executable, ['-NoProfile', '-NonInteractive', '-EncodedCommand',
+      Buffer.from("$ErrorActionPreference='Stop';\n" + script, 'utf16le').toString('base64')], { windowsHide: true, timeout: 15_000, maxBuffer: 16_384 })
+    if (stdout.trim() !== 'CONFIG_EXPORT_ACL_VERIFIED') throw new IpcFault('permission')
+  } catch { throw new IpcFault('permission') }
+}
+
+/** Windows access checks happen when a reader opens a handle. Install the DACL
+ * in CreateNew itself: changing permissions on an existing empty file is too late. */
+export async function createPrivateConfigExport(temporary: string): Promise<void> {
+  await runSecurityScript(`${privateAclScript}
+$stream=[IO.FileStream]::new(${pathData(temporary)},[IO.FileMode]::CreateNew,[Security.AccessControl.FileSystemRights]::Write,[IO.FileShare]::None,4096,[IO.FileOptions]::None,$acl)
+$stream.Dispose()
+'CONFIG_EXPORT_ACL_VERIFIED'`)
+}
+
 /** Protect staging before plaintext. Secret exports always use private access;
  * redacted replacements preserve the chosen file's owner/group/DACL. */
 export async function prepareConfigExport(temporary: string, destination: string, mode: 'redacted' | 'secrets'): Promise<() => void> {
@@ -23,15 +51,7 @@ export async function prepareConfigExport(temporary: string, destination: string
     const script = `$ErrorActionPreference='Stop';
 $temporary=${pathData(temporary)}
 $sections=[Security.AccessControl.AccessControlSections]'Access,Owner,Group'
-${before && mode !== 'secrets' ? `$acl=[IO.File]::GetAccessControl(${pathData(destination)},$sections)` : `$acl=New-Object Security.AccessControl.FileSecurity
-$acl.SetAccessRuleProtection($true,$false)
-$user=[Security.Principal.WindowsIdentity]::GetCurrent().User
-$acl.SetOwner($user)
-$acl.SetGroup($user)
-foreach($sid in @($user.Value,'S-1-5-18')) {
-  $id=New-Object Security.Principal.SecurityIdentifier($sid)
-  $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($id,'FullControl','Allow')))
-}`}
+${before && mode !== 'secrets' ? `$acl=[IO.File]::GetAccessControl(${pathData(destination)},$sections)` : privateAclScript}
 $expected=$acl.GetSecurityDescriptorSddlForm($sections)
 $copy=New-Object Security.AccessControl.FileSecurity
 $copy.SetSecurityDescriptorSddlForm($expected,$sections)
@@ -45,12 +65,7 @@ function Normalize-Acl($sddl) {
 }
 if((Normalize-Acl $actual) -cne (Normalize-Acl $expected)) {throw 'ConfigExportAclMismatch'}
 'CONFIG_EXPORT_ACL_VERIFIED'`
-    const executable = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
-    try {
-      const { stdout } = await promisify(execFile)(executable, ['-NoProfile', '-NonInteractive', '-EncodedCommand',
-        Buffer.from(script, 'utf16le').toString('base64')], { windowsHide: true, timeout: 15_000, maxBuffer: 16_384 })
-      if (stdout.trim() !== 'CONFIG_EXPORT_ACL_VERIFIED') throw new IpcFault('permission')
-    } catch { throw new IpcFault('permission') }
+    await runSecurityScript(script)
   } else if (mode === 'secrets') {
     if (before && process.getuid?.() !== Number(before.uid)) throw new IpcFault('permission')
     await chmod(temporary, 0o600)

@@ -1202,3 +1202,10 @@ POSIX secrets не заменяет чужой destination. Bound async с из�
 отвергается до вызова; при malformed untyped thenable timeout/cancel не заменяет
 validation terminal во время обязательного drain. Это исключительный invalid-code
 путь; prompt cancellation корректных операций сохраняется. Проверки — в журнале.
+
+Повторный Qodo #74 выявил окно inherited ACL при создании пустого Windows
+staging. Secrets теперь получает private FileSecurity атомарно в FileStream
+CreateNew, до возможности открыть файл другим reader. Node открывает уже
+private staging; последующие проверки и terminal replacement сохраняются.
+Actual handler tests проверяют ACL на границе Node open при broad parent DACL;
+collision test подтверждает неизменность существующего файла.

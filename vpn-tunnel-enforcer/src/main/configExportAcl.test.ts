@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { OperationRegistry } from './operationRegistry'
 import { writeConfigExport } from './configOperationIo'
-import { prepareConfigExport } from './configExportSecurity'
+import { createPrivateConfigExport, prepareConfigExport } from './configExportSecurity'
 
 const quote = (value: string) => "[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + Buffer.from(value, 'utf8').toString('base64') + "'))"
 async function powershell(script: string) {
@@ -25,6 +25,12 @@ beforeEach(async () => {
 afterEach(async () => { if (directory) await rm(directory, { recursive: true, force: true }) })
 
 describe.skipIf(process.platform !== 'win32')('Windows configuration export ACL', () => {
+  it('atomically creates private staging without truncating or deleting an existing path', async () => {
+    const path = join(directory, 'collision.tmp')
+    await writeFile(path, 'original')
+    await expect(createPrivateConfigExport(path)).rejects.toMatchObject({ category: 'permission' })
+    expect(await readFile(path, 'utf8')).toBe('original')
+  })
   it.each(['\u2018', '\u2019', '\u201a', '\u201b'])('treats a typographic apostrophe %s in the chosen path as data', async apostrophe => {
     const path = join(directory, `Jane${apostrophe}s Documents.json`)
     expect(await registry.run('export', lease => writeConfigExport(path, 'first', lease, true, 'redacted'))).toBe(true)
