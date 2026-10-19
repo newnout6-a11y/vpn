@@ -134,6 +134,39 @@ describe('bounded stop with physical drain', () => {
     expect(observed.mock.calls.map(([operation]) => operation.status)).toEqual(['running', 'error'])
   })
 
+  it.each([
+    { failure: 'result', timing: 'waiting' }, { failure: 'result', timing: 'settled' },
+    { failure: 'throw', timing: 'waiting' }, { failure: 'throw', timing: 'settled' }
+  ])('retains physical $failure failure for shutdown when drain is $timing', async ({ failure, timing }) => {
+    const cleanup = held(), observed = vi.fn(), lane = new ConnectionLifecycle(vi.fn(), undefined, observed)
+    const stopping = lane.stop(async () => {
+      await cleanup.promise
+      if (failure === 'throw') throw new Error('physical rollback failed')
+      return { success: false, error: 'physical rollback failed' }
+    }, { timeoutMs: 50 })
+    await vi.advanceTimersByTimeAsync(50)
+    expect(await stopping).toMatchObject({ category: 'timeout' })
+    let closing: Promise<unknown> | undefined
+    if (timing === 'waiting') closing = lane.close().then(() => 'unexpected success', error => error)
+    cleanup.resolve(); await vi.advanceTimersByTimeAsync(0)
+    closing ??= lane.close().then(() => 'unexpected success', error => error)
+    expect(await closing).toBeInstanceOf(Error)
+    expect(observed.mock.calls.map(([operation]) => operation.status)).toEqual(['running', 'error'])
+  })
+
+  it('clears a retained physical failure only after a successful cleanup retry', async () => {
+    const cleanup = held(), lane = new ConnectionLifecycle(vi.fn())
+    const stopping = lane.stop(async () => { await cleanup.promise; return { success: false } }, { timeoutMs: 50 })
+    await vi.advanceTimersByTimeAsync(50)
+    expect(await stopping).toMatchObject({ category: 'timeout' })
+    cleanup.resolve(); await vi.advanceTimersByTimeAsync(0)
+    await expect(lane.close()).rejects.toThrow('Runtime cleanup confirmation missing')
+    expect(await lane.stop(async () => ({ success: false }))).toEqual({ success: false })
+    await expect(lane.close()).rejects.toThrow('Runtime cleanup confirmation missing')
+    expect(await lane.stop(async () => ({ success: true }))).toEqual({ success: true })
+    await expect(lane.close()).resolves.toBeUndefined()
+  })
+
   it('retains a cancelled rotation registry lease through physical cleanup after the stop deadline', async () => {
     const native = held(), cleanup = held(), registry = new OperationRegistry(), closed = vi.fn()
     const lane = new ConnectionLifecycle(vi.fn(), async () => { await cleanup.promise; return { success: true } })

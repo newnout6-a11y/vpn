@@ -20,7 +20,7 @@ import { currentCorrelationId, currentActionMetadata, withCorrelation } from './
 import { monotonicTimeMs } from './eventClock'
 import { operations, registerOperationHandlers } from './operations'
 import { TunnelStateMachine } from './tunnelStateMachine'
-import type { ConnectionStartResult, ConnectionStopResult } from '../shared/operation'
+import { operationLogDetails, type ConnectionStartResult, type ConnectionStopResult } from '../shared/operation'
 import { runScheduledConnection } from './scheduledConnection'
 import { makeOutcome, outcomeKindToDisconnectReason, isNodeSwitchRestartReason, sessionOutcomeConfidence } from './sessionOutcome'
 import type { ConnectionProvenance } from '../shared/connection-provenance'
@@ -1205,7 +1205,7 @@ const connectionLifecycle = new ConnectionLifecycle(() => {
   tunController.cancelTransition()
 }, () => stopProtectionEffects(), operation => {
   if (operation.status === 'running' && operation.owner !== 'schedule') schedulerService.cancelPendingConnect()
-  logEvent(operation.status === 'running' ? 'debug' : 'info', 'lifecycle', 'connection operation', operation)
+  logEvent(operation.status === 'running' ? 'debug' : 'info', 'lifecycle', 'connection operation', operationLogDetails(operation))
 }, tunnelState)
 profileRotation.setLifecycle(connectionLifecycle)
 

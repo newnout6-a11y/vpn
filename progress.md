@@ -4753,3 +4753,48 @@ CI/review нового SHA проверяются отдельно после pu
   timeout-политика не ослаблялась. Build/typecheck/traceability/native результаты
   выше относятся к этому состоянию. Следующий шаг — commit/push/PR и
   completed Qodo с CI success на окончательном SHA. WP-0/WP-2 goal active.
+
+### PR #73 — Qodo: ID журнала и сохранение physical cleanup failure
+
+- Commit f18c4f0edb4a7e8f45e1796c567703a7a8316f50 запушен; PR #73 открыт
+  и прикреплён. Qodo 1543768 completed на этом SHA: ef93d214 action_required
+  (raw UUID маскируется в connection log) и 0a04cc36 remediation_recommended
+  (close теряет false result и уже завершившуюся cleanup rejection). Оба
+  подтверждены; attribution не менялся, ручной запрос ревью не выполнялся.
+- До исправления result retention: npm.cmd test -- src/main/connectionStopDeadline.test.ts -t 'retains physical|clears a retained'
+  — 3 failed / 2 passed / 13 skipped, 0.264 s, exit 1
+  (.tmp/wp0-stop-qodo73-outcome-before.log). После deadline проверяются false
+  и throw при close во время drain и после его завершения. Независимый
+  cleanupFailure сохраняет оба исхода; close видит их в обоих timing. Только
+  успешный cleanup retry снимает failure; повторный false его не стирает.
+  Terminal operation при этом не публикуется повторно.
+- До log fix npm.cmd test -- src/main/connectionOperationLogging.test.ts —
+  1 failed, 0.479 s, exit 1 (.tmp/wp0-stop-qodo73-log-before.log): actual JSONL
+  двух stop операций содержал четыре одинаковые redacted UUID маски.
+  Общий operationLogDetails применяется feature observer и настоящим main
+  connection observer: оба log ID содержат обратимый op_ ключ со всеми 128 битами.
+  UUIDv4 в owner/FSM/IPC receipt сохраняется согласно тому 3 §1.2; redactor
+  credential UUID не ослаблялся. Проверен actual JSONL и diagnostic read-back.
+- Промежуточные адресные 231 passed / 1 failed: старое assertion ожидало
+  redacted-uuid лишь от теперь исправленного operationId. Добавлен UUID в
+  непривилегированное opaqueNote поле, чтобы отдельно доказать сохранение
+  credential-shaped redaction (.tmp/wp0-stop-qodo73-regression.log).
+  Revix RangeError suggestion применён к timeout range validation start/stop.
+- Окончательный адресный набор stop/logging/correlation/rotation/lifecycle/
+  main cleanup/model tours — 235 passed / 7 files, 25.73 s, exit 0
+  (.tmp/wp0-stop-qodo73-regression-final.log). npm.cmd run build — exit 0,
+  включая typecheck 160 channels / 0 public any (.tmp/wp0-stop-qodo73-build.log).
+  Traceability AC 927/927 / F 210/210 и git diff --check — exit 0.
+  На пересобранном out node scripts/test-electron-runtime.mjs —
+  ELECTRON_SMOKE_PASS; node scripts/test-wp1-native.mjs --ipc-only —
+  WP1_NATIVE_PASS, оба exit 0 (.tmp/wp0-stop-qodo73-electron.log,
+  .tmp/wp0-stop-qodo73-csp.log). Новый full выполняется; нужны commit/push
+  и exact-head Qodo/CI, initial CI 39195107993 относится к прежнему head.
+- Initial CI 39195107993 completed/success на f18c4f0, watcher exit 0:
+  Windows unit/traceability/production IPC/CSP/WFP/native reads, Rust и сайт.
+  Это не gate незапушенных Qodo fixes; после их commit нужен новый exact-head run.
+- Окончательный npm.cmd test для Qodo fixes — **4466 passed / 5 skipped /
+  0 failed**, 276 files passed / 2 skipped, **177.55 s**, exit 0
+  (.tmp/wp0-stop-qodo73-full.log). Во время full code/test tree не менялся.
+  Все перечисленные проверки относятся к этому состоянию; следующий шаг —
+  atomic commit/push и новое автоматическое ревью/CI. WP-0/WP-2 goal active.

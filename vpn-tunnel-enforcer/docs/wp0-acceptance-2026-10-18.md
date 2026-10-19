@@ -1153,3 +1153,10 @@ original metadata, запрет нового старта до drain и отсу
 OS boundaries управляемые; полная native Windows resource matrix, UI lifetime,
 background admission, durable audit, migrations/semantic errors/flags остаются
 открытыми. Финальные full/review/CI результаты фиксируются в progress.md.
+
+Qodo #73 уточнил две границы. Physical cleanup failure сохраняется отдельно
+от bounded terminal: close наблюдает false result и throw даже после окончания
+drain; failure снимается лишь успешным cleanup retry. Connection и feature log
+используют общий operationLogDetails с обратимыми op_ ID, в то время как
+owner/FSM/IPC сохраняют нормативный UUIDv4. Реальный JSONL двух stop операций
+и diagnostic read-back различают их ID, сохраняя маскирование credential UUID.

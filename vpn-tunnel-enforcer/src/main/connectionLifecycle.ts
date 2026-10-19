@@ -51,6 +51,7 @@ export class ConnectionLifecycle {
   private stopResult: Promise<unknown> | null = null
   private stopOperation: ConnectionOperation | null = null
   private lastOperation: ConnectionOperation | null = null
+  private cleanupFailure: { error: unknown } | null = null
   private closed = false
 
   constructor(
@@ -173,7 +174,7 @@ export class ConnectionLifecycle {
 
   async start<T>(effect: (owner: ConnectionStartupOwner) => Promise<T>, options: StartOptions = {}): Promise<T | ConnectionOperationRejection> {
     const timeoutMs = options.timeoutMs ?? 120_000, operationOwner = options.owner ?? 'manual'
-    if (!Number.isInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2 ** 31 - 1) throw new Error('Invalid operation timeout')
+    if (!Number.isInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2 ** 31 - 1) throw new RangeError('Invalid operation timeout')
     if (this.closed || this.stopping) return rejection('conflict', 'Остановка защиты ещё выполняется — подождите')
     if (this.startup) {
       if (this.startup.operation.status !== 'running') return rejection('conflict', 'Отменённая операция ещё завершается')
@@ -295,7 +296,7 @@ export class ConnectionLifecycle {
 
   stop<T>(effect: (owner: ConnectionStopOwner) => Promise<T>, options: { owner?: OperationOwner; timeoutMs?: number; signal?: AbortSignal } = {}): Promise<T | ConnectionOperationRejection> {
     const timeoutMs = options.timeoutMs ?? 120_000
-    if (!Number.isInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2 ** 31 - 1) throw new Error('Invalid operation timeout')
+    if (!Number.isInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2 ** 31 - 1) throw new RangeError('Invalid operation timeout')
     if (this.stopResult) return this.stopResult as Promise<T | ConnectionOperationRejection>
     if (options.signal?.aborted) return Promise.resolve(rejection('cancelled', 'Остановка отменена'))
     const owner = options.owner ?? 'manual'
@@ -342,9 +343,11 @@ export class ConnectionLifecycle {
       if (!failed(result) && this.stateMachine && !this.stateMachine.canConfirmStop()) throw new Error('Runtime cleanup confirmation missing')
       if (cancellationErrors.length) throw cancellationErrors[0]
       status = failed(result) ? 'error' : 'success'
+      this.cleanupFailure = failed(result) ? { error: new Error('Runtime cleanup confirmation missing') } : null
       return result
     }).catch(error => {
       status = 'error'; category = 'internal'
+      this.cleanupFailure = { error }
       throw error
     }).finally(() => {
       if (this.stopping === stopped) {
@@ -390,6 +393,7 @@ export class ConnectionLifecycle {
     catch (error) { cancellationErrors.push(error) }
     if (this.startup) await this.startup.completion
     if (this.stopping) await this.stopping
+    if (this.cleanupFailure) throw this.cleanupFailure.error
     if (cancellationErrors.length) throw cancellationErrors[0]
   }
 }
