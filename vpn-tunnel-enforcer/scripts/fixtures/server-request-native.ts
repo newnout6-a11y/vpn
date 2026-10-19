@@ -1,5 +1,6 @@
 // AT-00-001/003/008: production refresh/import/registry/preload/stores; held resolver.
-import { app, BrowserWindow } from 'electron'
+import { app, BrowserWindow, dialog } from 'electron'
+import { existsSync } from 'node:fs'
 import assert from 'node:assert/strict'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -60,10 +61,38 @@ app.whenReady().then(async () => {
   ;(globalThis as any).vpnteProfileBoundary = async () => response
   assert.ok((await owner.executeJavaScript(`window.electronAPI.serversAdd('https://sub.example.test/success',{clientDevice:'pc'},'${id}')`)).length > 0)
   assert.equal(await owner.executeJavaScript(`window.electronAPI.operationsCancelRequest('${id}')`), false)
+  // No real clipboard mutation or file picker: cancel before the controlled
+  // consent resolves. The handlers, preload, registry and DPAPI stores are real.
+  let saveCalls = 0
+  dialog.showSaveDialog = (async () => { saveCalls++; return { canceled: false, filePath: join(work, 'must-not-export.txt') } }) as typeof dialog.showSaveDialog
+  const profileId = serverPicker.getProfiles()[0].id
+  for (const method of ['serversExportKey', 'serversCopyKey', 'serversExportKeyToFile', 'serversExportAllKeysToFile', 'serversExportAllProxiesToFile']) {
+    let consent!: () => void
+    dialog.showMessageBox = (() => new Promise(done => { consent = () => done({ response: 1, checkboxChecked: false }) })) as typeof dialog.showMessageBox
+    const args = method.includes('All') ? `'${id}'` : `${JSON.stringify(profileId)},'${id}'`
+    await owner.executeJavaScript(`window.keyResult=window.electronAPI.${method}(${args}).catch(e=>e); 'started'`)
+    for (let attempt = 0; !consent && attempt < 200; attempt++) await delay(5)
+    assert.equal(typeof consent, 'function')
+    const operation = operations.list().at(-1)!
+    assert.notEqual(operation.operationId, id)
+    assert.equal(await foreign.executeJavaScript(`window.electronAPI.operationsCancelRequest('${id}')`), false)
+    const result = await owner.executeJavaScript(`(async()=>{const start=performance.now();const cancelled=await window.electronAPI.operationsCancelRequest('${id}');return {cancelled,result:await window.keyResult,elapsed:performance.now()-start}})()`)
+    assert.equal(result.cancelled, true); assert.equal(result.result.category, 'cancelled')
+    assert.equal(result.result.correlationId, operation.correlationId); assert.ok(result.elapsed < 900)
+    assert.equal(operations.isBusy('keys:' + (method === 'serversExportKey' ? 'renderer' : method === 'serversCopyKey' ? 'clipboard' : 'file')), true)
+    assert.equal(await owner.executeJavaScript(`window.electronAPI.operationsCancelRequest('${id}')`), false)
+    consent(); await operations.close(); operations.resumeAdmission()
+    assert.equal(saveCalls, 0); assert.equal(existsSync(join(work, 'must-not-export.txt')), false)
+    assert.deepEqual(['destroyed', 'render-process-gone', 'did-navigate'].map(event => owner.listenerCount(event)), baseline)
+  }
+  dialog.showMessageBox = (async () => ({ response: 1, checkboxChecked: false })) as typeof dialog.showMessageBox
+  assert.equal((await owner.executeJavaScript(`window.electronAPI.serversExportKey(${JSON.stringify(profileId)},'${id}')`)).ok, true)
+  assert.equal(await owner.executeJavaScript(`window.electronAPI.operationsCancelRequest('${id}')`), false)
   await operations.close()
   console.log('SERVER_REQUEST_NATIVE_PASS', JSON.stringify({ electron: process.versions.electron,
     checks: ['actual refresh/import/target/repaste handlers and preload; owned cancellation <900ms with original correlation',
-      'foreign/stale token refusal; retained physical drain, no late store writes and listener cleanup', 'fresh import succeeds after cancellation'] }))
+      'foreign/stale token refusal; retained physical drain, no late store writes and listener cleanup', 'fresh import succeeds after cancellation',
+      'five key export entrypoints cancel before secret consent; no save picker/file; fresh secret export succeeds'] }))
 }).then(() => { clearTimeout(watchdog); app.exit(0) }).catch(error => {
   console.error('SERVER_REQUEST_NATIVE_FAIL', error)
   for (const view of windows) if (!view.isDestroyed()) view.destroy()

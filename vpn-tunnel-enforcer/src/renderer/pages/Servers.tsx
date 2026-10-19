@@ -722,89 +722,35 @@ export function Servers() {
     }
   }
 
-  const handleExport = async (id: string) => {
-    try {
-      const result = await window.electronAPI.serversCopyKey(id)
-      if (!result.ok) {
-        if ('cancelled' in result) return
-        setExportFlash((prev) => ({ ...prev, [id]: 'failed' }))
-        window.setTimeout(
-          () =>
-            setExportFlash((prev) => {
-              const next = { ...prev }
-              delete next[id]
-              return next
-            }),
-          2200
-        )
-        return
-      }
-      setExportFlash((prev) => ({ ...prev, [id]: 'copied' }))
-      window.setTimeout(
-        () =>
-          setExportFlash((prev) => {
-            const next = { ...prev }
-            delete next[id]
-            return next
-          }),
-        2200
-      )
-    } catch {
-      setExportFlash((prev) => ({ ...prev, [id]: 'failed' }))
-      window.setTimeout(
-        () =>
-          setExportFlash((prev) => {
-            const next = { ...prev }
-            delete next[id]
-            return next
-          }),
-        2200
-      )
-    }
+  const flashExport = (id: string, status: 'copied' | 'saved' | 'failed') => {
+    setExportFlash(prev => ({ ...prev, [id]: status }))
+    const timer = window.setTimeout(() => {
+      toastTimers.current.delete(timer)
+      if (mounted.current) setExportFlash(prev => {
+        const next = { ...prev }
+        delete next[id]
+        return next
+      })
+    }, status === 'saved' ? 2500 : 2200)
+    toastTimers.current.add(timer)
   }
 
-  const handleExportToFile = async (id: string) => {
+  const exportOne = async (id: string, file: boolean) => {
+    const requestId = beginRequest()
     try {
-      const result = await window.electronAPI.serversExportKeyToFile(id)
-      if (result.ok) {
-        setExportFlash((prev) => ({ ...prev, [id]: 'saved' }))
-        window.setTimeout(
-          () =>
-            setExportFlash((prev) => {
-              const next = { ...prev }
-              delete next[id]
-              return next
-            }),
-          2500
-        )
-        return
-      }
-      if ((result as any).cancelled) return
-      setExportFlash((prev) => ({ ...prev, [id]: 'failed' }))
-      window.setTimeout(
-        () =>
-          setExportFlash((prev) => {
-            const next = { ...prev }
-            delete next[id]
-            return next
-          }),
-        2200
-      )
-    } catch {
-      setExportFlash((prev) => ({ ...prev, [id]: 'failed' }))
-      window.setTimeout(
-        () =>
-          setExportFlash((prev) => {
-            const next = { ...prev }
-            delete next[id]
-            return next
-          }),
-        2200
-      )
-    }
+      const result = file ? await window.electronAPI.serversExportKeyToFile(id, requestId)
+        : await window.electronAPI.serversCopyKey(id, requestId)
+      if (!current(requestId) || (!result.ok && 'cancelled' in result)) return
+      flashExport(id, result.ok ? file ? 'saved' : 'copied' : 'failed')
+    } catch (error) {
+      if (current(requestId) && (!isIpcRemoteErrorData(error) || error.category !== 'cancelled')) flashExport(id, 'failed')
+    } finally { requests.current.delete(requestId) }
   }
+  const handleExport = (id: string) => exportOne(id, false)
+  const handleExportToFile = (id: string) => exportOne(id, true)
 
   const handleExportAll = async () => {
+    const requestId = beginRequest()
     setExportingAll(true)
     setBulkNotice({
       tone: 'info',
@@ -812,7 +758,8 @@ export function Servers() {
       message: t('servers.exportKeysWorking', 'Готовим файл с ключами...')
     })
     try {
-      const result = await window.electronAPI.serversExportAllKeysToFile()
+      const result = await window.electronAPI.serversExportAllKeysToFile(requestId)
+      if (!current(requestId)) return
       if (result.ok) {
         setBulkNotice({
           tone: 'success',
@@ -840,6 +787,8 @@ export function Servers() {
       })
       addLog('error', `Не удалось сохранить ключи: ${reason}`)
     } catch (err: any) {
+      if (!current(requestId)) return
+      if (isIpcRemoteErrorData(err) && err.category === 'cancelled') { setBulkNotice(null); return }
       setBulkNotice({
         tone: 'error',
         title: t('servers.exportAllKeys'),
@@ -847,11 +796,13 @@ export function Servers() {
       })
       addLog('error', `Не удалось сохранить ключи: ${err?.message ?? err}`)
     } finally {
-      setExportingAll(false)
+      if (current(requestId)) setExportingAll(false)
+      requests.current.delete(requestId)
     }
   }
 
   const handleExportProxyList = async () => {
+    const requestId = beginRequest()
     setExportingProxies(true)
     setBulkNotice({
       tone: 'info',
@@ -860,7 +811,7 @@ export function Servers() {
     })
     try {
       const api = window.electronAPI as typeof window.electronAPI & {
-        serversExportAllProxiesToFile?: () => Promise<
+        serversExportAllProxiesToFile?: (requestId?: string) => Promise<
           | { ok: true; path: string; total: number; exported: number; skipped: number }
           | { ok: false; cancelled: true }
           | { ok: false; reason: string; error?: string; total?: number; skipped?: number }
@@ -875,7 +826,8 @@ export function Servers() {
         addLog('error', 'Proxy-list export is not available in this build')
         return
       }
-      const result = await api.serversExportAllProxiesToFile()
+      const result = await api.serversExportAllProxiesToFile(requestId)
+      if (!current(requestId)) return
       if (result.ok) {
         setBulkNotice({
           tone: 'success',
@@ -910,6 +862,8 @@ export function Servers() {
           (typeof skipped === 'number' ? ` (skipped: ${skipped})` : '')
       )
     } catch (err: any) {
+      if (!current(requestId)) return
+      if (isIpcRemoteErrorData(err) && err.category === 'cancelled') { setBulkNotice(null); return }
       setBulkNotice({
         tone: 'error',
         title: t('servers.exportProxyList', 'Proxy list'),
@@ -917,7 +871,8 @@ export function Servers() {
       })
       addLog('error', `Proxy-list export failed: ${err?.message ?? err}`)
     } finally {
-      setExportingProxies(false)
+      if (current(requestId)) setExportingProxies(false)
+      requests.current.delete(requestId)
     }
   }
 

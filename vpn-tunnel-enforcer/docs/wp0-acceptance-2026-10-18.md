@@ -119,7 +119,7 @@ Native IPC/CSP и traceability/diff check — exit 0. Final npm.cmd test —
 **4660 passed /5 skipped /0 failed**, 335.97 s. Предыдущий full имел три
 5000 ms timeout в прежнем adaptiveNetworkIdentity native suite; отдельно
 он прошёл 25/25, полный повтор прошёл без изменения его кода/budgets.
-История сохранена в progress.md. PR/Qodo/CI нового участка ожидаются.
+История сохранена в progress.md. Участок принят в #80: Qodo 1553608 completed, CI 39290006611 success, merge/main e0b45b7.
 
 ## Main connection lane — приоритеты, deadline и позднее расписание
 
@@ -1429,3 +1429,35 @@ prompt result <900 ms, retained drain, отсутствие commit и допус
 same-document navigation. Физический I/O в fixture управляемый; это не VPN/L3 test.
 SPA unmount без native navigation остаётся отдельной задачей page request/cancel.
 Команды, результаты полного набора и remote gate — progress.md.
+
+## Servers: requester lifetime экспорта ключей (19.10.2026)
+
+Предыдущий import/refresh участок принят в #80: final head 5a9285e,
+Qodo 1553608 completed без findings, CI 39290006611 success;
+merge/main e0b45b7 совпал по tree с reviewed head. Revix full review
+недоступен из-за квоты; его отсутствие не approval.
+
+Пять key export main entrypoints принимают optional requester token через
+существующий helper. Отмена ограничена sender+token, operation UUID/correlation
+и terminal commit принадлежат registry. Четыре workflows страницы Servers
+создают token до invoke; SPA unmount отменяет owned requests и очищает flash
+timers. Late success/error не вызывают UI/log effects. Native main-only consent,
+clipboard ownership и private file handling сохранены.
+
+До fix main 5 failed и UI 4 failed. L2 включает retained consent/save selection,
+file open/write/sync и clipboard write, foreign/stale/duplicate/malformed token,
+reentrant terminal commit, current success/quiet cancellation и flash cleanup.
+Настоящий Electron 44.4.3 с production preload/handlers/stores проверил все пять
+entrypoints на controlled consent: cancel <900ms, original correlation, retained
+drain, no late save/file и fresh successful export. Clipboard OS не изменяется.
+Build, пять Electron fixtures, IPC/CSP — exit 0. Полный run выполняется;
+этот участок не объявляет все AT-00-003/008 завершёнными.
+
+Final npm.cmd test — **4691 passed /5 skipped /0 failed**, 273.53 s, exit 0.
+Первый полный run имел два failure: literal old preload source assertion и
+5000ms harness timeout native file preparation. Передачу token/legacy args
+проверяют пять executable preload regressions; harness budget long-consent
+cases 15000ms, production deadlines/cancel assertions сохранены. Полная
+история failures и команды записаны в progress.md. Typecheck — exit 0,
+165 channels/0 public any; traceability AC 927/927, F 210/210 и diff check —
+exit 0. PR требует собственного completed Qodo/CI до следующего участка.

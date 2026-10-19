@@ -42,6 +42,23 @@ describe('preload IPC argument validation', () => {
   })
   afterEach(() => vi.unstubAllGlobals())
 
+  // AT-00-001: trailing cancellation tokens preserve every legacy call shape.
+  it.each([
+    ['serversCopyKey', 'servers:copy-key', ['a']], ['serversExportKey', 'servers:export-key', ['a']],
+    ['serversExportKeyToFile', 'servers:export-key-file', ['a']],
+    ['serversExportAllKeysToFile', 'servers:export-all-keys-file', []],
+    ['serversExportAllProxiesToFile', 'servers:export-all-proxies-file', []]
+  ])('forwards the optional requester token for %s', async (method, channel, args) => {
+    const api = await loadApi(), token = '11111111-1111-4111-8111-111111111111'
+    await api[method](...args)
+    expect(invokeMock).toHaveBeenLastCalledWith(channel, ...args)
+    await api[method](...args, token)
+    expect(invokeMock).toHaveBeenLastCalledWith(channel, ...args, token)
+    invokeMock.mockClear()
+    await expectLocalValidation(() => api[method](...args, { forged: true }))
+    expect(invokeMock).not.toHaveBeenCalled()
+  })
+
   // AT-00-001/004: transport envelopes must not change public domain results.
   it.each([undefined, { running: false }, { ok: false, error: 'domain result' }])('decodes successful transport result %j', async result => {
     const api = await loadApi()

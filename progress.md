@@ -5715,3 +5715,70 @@ CI/review нового SHA проверяются отдельно после pu
   adaptiveNetworkIdentity не менялись. Build/typecheck, 157 targeted tests,
   пять Electron fixtures, IPC/CSP, coverage/diff — exit 0, как записано выше.
   Следующий PR требует completed Qodo и CI на final SHA до продолжения.
+
+- PR #80 слит после exact-head gates: final head 5a9285e5255cc9e250bb805004de7cc57c77af7f,
+  Qodo 1553608 completed без findings; CI 39290006611 completed/success
+  (Windows/Rust/site, все native steps). Revix #80 сообщил free-quota-reached
+  до 20.10 00:00 UTC, full review нет, это не approval. REST merged=true;
+  merge/main e0b45b74a9c18ac4989e55ea90a4d4bc6eded4f5. Fetch/ff и tree diff
+  reviewed head→main — exit 0. Manual review не запрашивали.
+- Ветка codex/wp0-key-request-lifetime от e0b45b7: AT-00-001/003/008,
+  SPA unmount экспорта ключей на Servers. Пять main entrypoints используют
+  runRequesterOperation: optional UUID token, sender scope, legacy argument
+  count, прежние registry UUID/correlation/commit/deadline/physical drain.
+  Native consent остаётся main-only. Четыре UI export workflows создают token
+  до invoke, отменяются при unmount, подавляют late success/error/log/timer.
+  Flash timers используют существующую страницу cleanup, дублирование убрано.
+- До fix: npm.cmd test -- src/main/serverKeyOperations.test.ts -t
+  'by requester token' — 5 failed /47 skipped, 7.63 s
+  (.tmp/wp0-key-request-before.log). npm.cmd test --
+  src/renderer/pages/Servers.requestLifetime.test.tsx -t 'late export effects'
+  — 4 failed /4 skipped, 3.84 s, exit 1 (.tmp/wp0-key-request-ui-before.log).
+- Первый адресный run после fix (serverKeyOperations, Servers.requestLifetime,
+  preloadValidation, ipcChannelContract) — 115 passed, 40.70 s, exit 0
+  (.tmp/wp0-key-request-targeted.log). Расширенный run с serverKeyExportSecurity
+  и Servers.test — 169 passed /10 failed, 43.98 s, exit 1
+  (.tmp/wp0-key-request-boundaries.log): старый direct-handler helper передавал
+  лишний 'a' в оба bulk-export, теперь это slot requestId. Helper приведён
+  к реальному legacy arity (0 аргументов bulk, id для single). Security
+  assertions и production validation не ослаблены.
+- npm.cmd run build — exit 0 (.tmp/wp0-key-request-build.log).
+  node scripts/test-electron-runtime.mjs — пять PASS, exit 0
+  (.tmp/wp0-key-request-electron.log). SERVER_REQUEST_NATIVE_PASS расширен
+  actual handlers/registry/preload/stores пятью key exports: controlled consent,
+  cancel <900ms с original correlation и отдельным main UUID, foreign/stale
+  refusal, retained physical drain, нет save dialog/file после late consent,
+  listener cleanup и успешный новый renderer export. Настоящий clipboard не
+  изменяется; его controlled late write/ownership проверены L2, не L3.
+  node scripts/test-wp1-native.mjs --ipc-only — WP1_NATIVE_PASS, exit 0
+  (.tmp/wp0-key-request-csp.log). Full/typecheck final ещё выполняются.
+
+- Исправленный расширенный адресный run: npm.cmd test --
+  src/main/serverKeyOperations.test.ts src/renderer/pages/Servers.requestLifetime.test.tsx
+  src/preload/preloadValidation.test.ts src/main/ipcChannelContract.test.ts
+  src/main/serverKeyExportSecurity.test.ts src/renderer/pages/Servers.test.ts —
+  179 passed, 47.56 s, exit 0 (.tmp/wp0-key-request-boundaries-final.log).
+  Позже усилены три reentrant commit tests: token cancel также false.
+  Повторный npm.cmd run typecheck — exit 0, 165 channels/0 public any
+  (.tmp/wp0-key-request-typecheck-final.log). Coverage AC 927/927, F 210/210
+  и git diff --check — exit 0.
+- Первый полный npm.cmd test — 4689 passed /5 skipped /2 failed,
+  325.32 s, exit 1 (.tmp/wp0-key-request-full.log). AppSource содержал
+  буквальный source assertion прежней preload signature; теперь actual
+  legacy/token forwarding проверяется пятью исполняемыми preload tests,
+  source assertion убран. npm.cmd test -- src/renderer/AppSource.test.ts —
+  25 passed, 0.858 s, exit 0 (.tmp/wp0-key-request-source-regression.log).
+  Второй failure: прежний long-consent bulk proxy case 8893 ms превысил
+  default test budget 5000 ms на native private-file preparation. Для пяти
+  вариантов этого parameterized test harness budget 15000 ms, как у
+  соседних native file tests. Simulated 600000 ms consent, production
+  work deadline и <900ms cancellation assertions не менялись. Оба test
+  fixes внесены во время первого run после загрузки соответствующих suites;
+  финальный полный run выполняется на неизменяемом production/unit tree.
+
+- Final повторный npm.cmd test — **4691 passed /5 skipped /0 failed**,
+  283 files passed /2 skipped, **273.53 s**, exit 0
+  (.tmp/wp0-key-request-full-final.log). Production/unit tree не менялся
+  во время этого прогона. Build, пять Electron fixtures, native IPC/CSP
+  и адресные проверки — exit 0, как выше. До следующего участка обязательны
+  completed Qodo и CI success на final опубликованном SHA.

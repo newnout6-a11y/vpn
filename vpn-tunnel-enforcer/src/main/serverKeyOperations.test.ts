@@ -166,6 +166,50 @@ afterEach(async () => {
 })
 
 describe('VPN key operation lifetime', () => {
+  // AT-00-001/003: a SPA page knows its token before the native consent opens.
+  it.each(channels)('cancels %s by requester token without disclosure or late effects', async channel => {
+    const token = '11111111-1111-4111-8111-111111111111'
+    const gate = held({ response: 1 }); state.nativePrompt.mockReturnValueOnce(gate.promise)
+    const run = invoke(channel, ...(channel.startsWith('servers:export-all-') ? [] : ['a']), token)
+    await vi.waitFor(() => expect(state.nativePrompt).toHaveBeenCalledOnce())
+    const operation = running(), foreign = new Sender(), cancel = state.ipcHandlers.get('operations:cancel-request')!
+    expect(operation.operationId).not.toBe(token)
+    expect(await cancel({ sender: foreign }, token)).toMatchObject({ ok: true, result: false })
+    expect(await cancel({ sender }, token)).toMatchObject({ ok: true, result: true })
+    expect(await run).toMatchObject({ ok: false, correlationId: operation.correlationId, error: { category: 'cancelled' } })
+    expect(await cancel({ sender }, token)).toMatchObject({ ok: true, result: false })
+    expect(registry.isBusy('keys:' + (channel.endsWith('-file') ? 'file' : channel.includes('copy') ? 'clipboard' : 'renderer'))).toBe(true)
+    gate.release(); await registry.close()
+    expect(state.saveDialog).not.toHaveBeenCalled(); expect(state.clipboardWrite).not.toHaveBeenCalled()
+    expect(readFileSync(destination, 'utf8')).toBe('previous export')
+    expect(sender.eventNames()).toEqual([])
+  })
+
+  it('rejects malformed and duplicate tokens without disturbing the active consent', async () => {
+    expect(await invoke('servers:copy-key', 'a', 'invalid')).toMatchObject({ ok: false, error: { category: 'validation' } })
+    expect(state.nativePrompt).not.toHaveBeenCalled()
+    const token = '11111111-1111-4111-8111-111111111111', gate = held({ response: 1 })
+    state.nativePrompt.mockReturnValueOnce(gate.promise)
+    const run = invoke('servers:copy-key', 'a', token)
+    await vi.waitFor(() => expect(state.nativePrompt).toHaveBeenCalledOnce())
+    expect(await invoke('servers:export-key', 'a', token)).toMatchObject({ ok: false, error: { category: 'conflict' } })
+    expect(running().status).toBe('running')
+    expect(await invoke('operations:cancel-request', token)).toMatchObject({ ok: true, result: true })
+    expect(await run).toMatchObject({ ok: false, error: { category: 'cancelled' } })
+    gate.release()
+  })
+
+  it.each(files)('cancels %s by requester token during save selection', async channel => {
+    const token = '11111111-1111-4111-8111-111111111111'
+    const gate = held({ canceled: false, filePath: destination }); state.saveDialog.mockReturnValueOnce(gate.promise)
+    const run = invoke(channel, ...(channel.startsWith('servers:export-all-') ? [] : ['a']), token)
+    await vi.waitFor(() => expect(state.saveDialog).toHaveBeenCalledOnce())
+    expect(await invoke('operations:cancel-request', token)).toMatchObject({ ok: true, result: true })
+    expect(await run).toMatchObject({ ok: false, error: { category: 'cancelled' } })
+    gate.release(); await registry.close()
+    expect(readFileSync(destination, 'utf8')).toBe('previous export'); expect(temporaries()).toEqual([])
+  })
+
   it.each(channels.flatMap(channel => ['render-process-gone', 'did-navigate'].map(event => ({ channel, event }))))
   ('cancels $channel on requester $event before secret consent completes', async ({ channel, event }) => {
     const gate = held({ response: 1 }); state.nativePrompt.mockReturnValueOnce(gate.promise)
@@ -209,10 +253,11 @@ describe('VPN key operation lifetime', () => {
   })
   it.each(['open', 'write', 'sync'])('retains destination and physical lease until cancelled %s drains', async step => {
     const gate = held(undefined); state.hold = step; state.gate = gate.promise
-    const run = invoke('servers:export-key-file', 'a')
+    const token = '11111111-1111-4111-8111-111111111111'
+    const run = invoke('servers:export-key-file', 'a', token)
     // Real Windows creation/handle-identity preparation precedes this boundary.
     await vi.waitFor(() => expect(state.reached).toBe(1), { timeout: 5000 })
-    registry.cancel(running().operationId)
+    expect(await invoke('operations:cancel-request', token)).toMatchObject({ ok: true, result: true })
     expect(await run).toMatchObject({ ok: false, error: { category: 'cancelled' } })
     expect(await invoke('servers:export-all-proxies-file')).toMatchObject({ ok: false, error: { category: 'conflict' } })
     expect(readFileSync(destination, 'utf8')).toBe('previous export')
@@ -261,13 +306,30 @@ describe('VPN key operation lifetime', () => {
     expect(state.clipboardText).toBe('')
     expect(registry.list()[0]).toMatchObject({ status: 'cancelled' })
   })
+  it('request cancellation drains a held clipboard write and clears only the owned secret', async () => {
+    const token = '11111111-1111-4111-8111-111111111111'
+    const gate = held(undefined); state.clipboardWrite.mockReturnValueOnce(gate.promise)
+    const run = invoke('servers:copy-key', 'a', token)
+    await vi.waitFor(() => expect(state.clipboardWrite).toHaveBeenCalledOnce())
+    expect(await invoke('operations:cancel-request', token)).toMatchObject({ ok: true, result: true })
+    expect(await run).toMatchObject({ ok: false, error: { category: 'cancelled' } })
+    expect(registry.isBusy('keys:clipboard')).toBe(true)
+    gate.release(); await registry.close()
+    expect(state.clipboardText).toBe('')
+  })
   it.each(files)('keeps terminal file success after reentrant cancellation: %s', async channel => {
-    state.afterRename = () => { expect(registry.cancel(running().operationId)).toBe(false) }
-    const result = await invokeExport(channel)
+    const token = '11111111-1111-4111-8111-111111111111'
+    const { cancelRequesterOperation } = await import('./requesterOperation')
+    state.afterRename = () => {
+      expect(registry.cancel(running().operationId)).toBe(false)
+      expect(cancelRequesterOperation(sender as never, token)).toBe(false)
+    }
+    const result = await invoke(channel, ...(channel.startsWith('servers:export-all-') ? [] : ['a']), token)
     expect(result).toMatchObject({ ok: true, result: { ok: true, path: destination } })
     expect(readFileSync(destination, 'utf8')).toContain(secret)
     expect(registry.list()[0]).toMatchObject({ status: 'success' })
     expect(JSON.stringify(result)).not.toContain(secret)
+    expect(await invoke('operations:cancel-request', token)).toMatchObject({ ok: true, result: false })
   })
   it.each(channels)('allows a long consent decision without spending work budget: %s', async channel => {
     const gate = held({ response: 1 }); state.nativePrompt.mockReturnValueOnce(gate.promise)
@@ -278,7 +340,7 @@ describe('VPN key operation lifetime', () => {
     vi.useRealTimers(); gate.release()
     expect(await run).toMatchObject({ ok: true, result: { ok: true } })
     expect(sender.listenerCount('destroyed')).toBe(0)
-  })
+  }, 15_000) // Native private-file preparation follows the simulated user wait.
   it('still times out actual native clipboard work and drains before cleanup', async () => {
     const gate = held(undefined); state.clipboardWrite.mockReturnValueOnce(gate.promise)
     vi.useFakeTimers()
