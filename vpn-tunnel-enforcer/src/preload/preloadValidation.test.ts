@@ -236,6 +236,19 @@ describe('preload IPC argument validation', () => {
     expect(invokeMock).toHaveBeenCalledExactlyOnceWith('config:export', 'redacted')
   })
 
+  // AT-00-001/003: execute the production bridge, preserving legacy arity.
+  it('forwards the optional diagnostic requester token and preserves zero arguments', async () => {
+    const api = await loadApi()
+    await api.exportDiagnostics()
+    await api.exportDiagnostics('11111111-1111-4111-8111-111111111111')
+    expect(invokeMock.mock.calls).toEqual([
+      ['export-diagnostics'], ['export-diagnostics', '11111111-1111-4111-8111-111111111111']
+    ])
+    invokeMock.mockClear()
+    await expectLocalValidation(() => api.exportDiagnostics({ signal: 'forged' }))
+    expect(invokeMock).not.toHaveBeenCalled()
+  })
+
   it('passes validated arguments through to ipcRenderer.invoke', async () => {
     const api = await loadApi()
 

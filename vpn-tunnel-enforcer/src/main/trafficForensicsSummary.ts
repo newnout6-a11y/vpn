@@ -805,7 +805,8 @@ export async function listTrafficForensicsArtifacts(sessionDir: string | null): 
   return files.sort((a, b) => a.name.localeCompare(b.name))
 }
 
-export async function generateTrafficForensicsSummary(manifest: TrafficForensicsSummaryManifest): Promise<TrafficForensicsSummaryManifest> {
+export async function generateTrafficForensicsSummary(manifest: TrafficForensicsSummaryManifest, assertActive: () => void = () => {}): Promise<TrafficForensicsSummaryManifest> {
+  assertActive()
   if (!manifest.sessionDir || !existsSync(manifest.sessionDir)) return manifest
 
   const generatedAt = Date.now()
@@ -866,12 +867,12 @@ export async function generateTrafficForensicsSummary(manifest: TrafficForensics
     })
   }
 
-  const files = await listTrafficForensicsArtifacts(manifest.sessionDir)
-  const tunnelAliases = await readRuntimeTunnelAliases()
+  const files = await checkedForensics(listTrafficForensicsArtifacts(manifest.sessionDir), assertActive)
+  const tunnelAliases = await checkedForensics(readRuntimeTunnelAliases(), assertActive)
   for (const file of files) {
     if (file.name.includes('adapters') && file.name.endsWith('.txt')) {
       try {
-        const text = await readTextIfExists(join(manifest.sessionDir, file.name))
+        const text = await checkedForensics(readTextIfExists(join(manifest.sessionDir, file.name)), assertActive)
         if (text) {
           const rows = parseJsonArray(text)
           for (const row of rows) {
@@ -886,6 +887,7 @@ export async function generateTrafficForensicsSummary(manifest: TrafficForensics
           }
         }
       } catch {
+        assertActive()
         // ignore
       }
     }
@@ -910,7 +912,7 @@ export async function generateTrafficForensicsSummary(manifest: TrafficForensics
       }
     })
 
-    const text = await readTextIfExists(join(manifest.sessionDir, artifact.name))
+    const text = await checkedForensics(readTextIfExists(join(manifest.sessionDir, artifact.name)), assertActive)
     if (!text) continue
 
     const sidecarEvents = extractSidecarEvents(artifact.name, text)
@@ -1164,7 +1166,7 @@ export async function generateTrafficForensicsSummary(manifest: TrafficForensics
   const dnsIndex = buildDnsIndex(dnsRecords)
   for (const artifact of files) {
     if (!/nettcp|netudp/i.test(artifact.name)) continue
-    const text = await readTextIfExists(join(manifest.sessionDir, artifact.name))
+    const text = await checkedForensics(readTextIfExists(join(manifest.sessionDir, artifact.name)), assertActive)
     if (!text) continue
     flowRecords = [
       ...flowRecords,
@@ -1213,17 +1215,17 @@ export async function generateTrafficForensicsSummary(manifest: TrafficForensics
   timeline.sort((a, b) => a.timestamp - b.timestamp)
   appEvents.sort((a, b) => a.timestamp - b.timestamp)
 
-  await writeNdjson(join(manifest.sessionDir, 'timeline.ndjson'), timeline)
-  await writeNdjson(join(manifest.sessionDir, 'dns.ndjson'), dnsRecords)
-  await writeNdjson(join(manifest.sessionDir, 'drops.ndjson'), dropRecords)
-  await writeNdjson(join(manifest.sessionDir, 'tcp-health.ndjson'), tcpHealthRecords)
-  await writeNdjson(join(manifest.sessionDir, 'packet-metrics.ndjson'), packetMetricRecords)
-  await writeNdjson(join(manifest.sessionDir, 'flows.ndjson'), flowRecords)
-  await writeNdjson(join(manifest.sessionDir, 'app-events.ndjson'), appEvents)
-  await writeJson(join(manifest.sessionDir, 'route-snapshots.json'), routeSnapshots)
+  await checkedForensics(writeNdjson(join(manifest.sessionDir, 'timeline.ndjson'), timeline), assertActive)
+  await checkedForensics(writeNdjson(join(manifest.sessionDir, 'dns.ndjson'), dnsRecords), assertActive)
+  await checkedForensics(writeNdjson(join(manifest.sessionDir, 'drops.ndjson'), dropRecords), assertActive)
+  await checkedForensics(writeNdjson(join(manifest.sessionDir, 'tcp-health.ndjson'), tcpHealthRecords), assertActive)
+  await checkedForensics(writeNdjson(join(manifest.sessionDir, 'packet-metrics.ndjson'), packetMetricRecords), assertActive)
+  await checkedForensics(writeNdjson(join(manifest.sessionDir, 'flows.ndjson'), flowRecords), assertActive)
+  await checkedForensics(writeNdjson(join(manifest.sessionDir, 'app-events.ndjson'), appEvents), assertActive)
+  await checkedForensics(writeJson(join(manifest.sessionDir, 'route-snapshots.json'), routeSnapshots), assertActive)
 
   const summaryPath = join(manifest.sessionDir, 'summary.json')
-  await writeJson(summaryPath, {
+  await checkedForensics(writeJson(summaryPath, {
     schemaVersion: SUMMARY_SCHEMA_VERSION,
     generatedAt,
     sessionId: manifest.sessionId,
@@ -1245,7 +1247,7 @@ export async function generateTrafficForensicsSummary(manifest: TrafficForensics
       parserErrors: parserErrors.length
     },
     parserErrors
-  })
+  }), assertActive)
 
   return {
     ...manifest,
@@ -1254,4 +1256,10 @@ export async function generateTrafficForensicsSummary(manifest: TrafficForensics
     summaryGeneratedAt: generatedAt,
     parserErrors
   }
+}
+
+async function checkedForensics<T>(task: Promise<T>, assertActive: () => void): Promise<T> {
+  const result = await task
+  assertActive()
+  return result
 }

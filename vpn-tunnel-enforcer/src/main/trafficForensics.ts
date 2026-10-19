@@ -261,12 +261,13 @@ function normalizeManifest(manifest: SessionManifest): SessionManifest {
   }
 }
 
-async function ensureLayout(): Promise<void> {
+async function ensureLayout(assertActive: () => void = () => {}): Promise<void> {
+  assertActive()
   // These sessions contain elevated scripts. Create their ProgramData root
   // only after proving the entire namespace; a protected leaf in AppData could
   // still be replaced through its user-writable parent. Session directories
   // inherit the verified admin-only DACL.
-  const acl = await ensureElevatedRuntimeDirHardened(getRootDir(), 'traffic-forensics')
+  const acl = await checkedForensics(ensureElevatedRuntimeDirHardened(getRootDir(), 'traffic-forensics'), assertActive)
   if (!acl.hardened) {
     logEvent('warn', 'traffic-forensics', 'forensics directory is not admin-only — elevated script could be tampered with', {
       dir: getRootDir(),
@@ -275,18 +276,21 @@ async function ensureLayout(): Promise<void> {
     })
     throw new Error('RuntimeSecurityAclError: forensics runtime is untrusted')
   }
-  await mkdir(getSessionsDir(), { recursive: true })
+  await checkedForensics(mkdir(getSessionsDir(), { recursive: true }), assertActive)
 }
 
-async function writeJson(path: string, value: unknown): Promise<void> {
+async function writeJson(path: string, value: unknown, assertActive: () => void = () => {}): Promise<void> {
+  assertActive()
   try {
-    await writeFile(path, JSON.stringify(value, null, 2), 'utf-8')
+    await checkedForensics(writeFile(path, JSON.stringify(value, null, 2), 'utf-8'), assertActive)
   } catch (err: any) {
+    assertActive()
     if (err?.code === 'ENOENT') {
       try {
-        await mkdir(dirname(path), { recursive: true })
-        await writeFile(path, JSON.stringify(value, null, 2), 'utf-8')
+        await checkedForensics(mkdir(dirname(path), { recursive: true }), assertActive)
+        await checkedForensics(writeFile(path, JSON.stringify(value, null, 2), 'utf-8'), assertActive)
       } catch (innerErr) {
+        assertActive()
         logEvent('warn', 'traffic-forensics', 'failed to write json even after mkdir', { path, error: String(innerErr) })
         throw innerErr
       }
@@ -316,13 +320,14 @@ async function readSummaryForStatus(path: string | null | undefined): Promise<Tr
   }
 }
 
-async function writeManifest(manifest: SessionManifest): Promise<void> {
+async function writeManifest(manifest: SessionManifest, assertActive: () => void = () => {}): Promise<void> {
+  assertActive()
   const normalized = normalizeManifest(manifest)
-  await ensureLayout()
+  await checkedForensics(ensureLayout(assertActive), assertActive)
   if (normalized.sessionDir) {
-    await writeJson(join(normalized.sessionDir, 'session-manifest.json'), normalized)
+    await checkedForensics(writeJson(join(normalized.sessionDir, 'session-manifest.json'), normalized, assertActive), assertActive)
   }
-  await writeJson(getLatestManifestPath(), normalized)
+  await checkedForensics(writeJson(getLatestManifestPath(), normalized, assertActive), assertActive)
   runtimeState = normalized
 }
 
@@ -368,9 +373,10 @@ async function readLatestManifest(): Promise<SessionManifest | null> {
   return normalizeManifest(manifest)
 }
 
-async function assertForensicsExecutionTrusted(manifest: SessionManifest): Promise<void> {
+async function assertForensicsExecutionTrusted(manifest: SessionManifest, assertActive: () => void = () => {}): Promise<void> {
+  assertActive()
   assertSessionPaths(manifest)
-  const acl = await verifyDirectoryHardened(getRootDir())
+  const acl = await checkedForensics(verifyDirectoryHardened(getRootDir()), assertActive)
   if (!acl.hardened) throw new Error('RuntimeSecurityAclError: forensics execution boundary is untrusted')
 }
 
@@ -754,10 +760,11 @@ function stopSidecar(manifest: SessionManifest, reason: string): SessionManifest
   }
 }
 
-async function pruneOldSessions(keep: number, currentSessionId?: string | null): Promise<void> {
+async function pruneOldSessions(keep: number, currentSessionId?: string | null, assertActive: () => void = () => {}): Promise<void> {
+  assertActive()
   try {
-    await ensureLayout()
-    const entries = await readdir(getSessionsDir(), { withFileTypes: true })
+    await checkedForensics(ensureLayout(assertActive), assertActive)
+    const entries = await checkedForensics(readdir(getSessionsDir(), { withFileTypes: true }), assertActive)
     const dirs = entries
       .filter((entry) => entry.isDirectory())
       .map((entry) => entry.name)
@@ -767,8 +774,9 @@ async function pruneOldSessions(keep: number, currentSessionId?: string | null):
     for (const name of removable) {
       const dirPath = join(getSessionsDir(), name)
       try {
-        await rm(dirPath, { recursive: true, force: true })
+        await checkedForensics(rm(dirPath, { recursive: true, force: true }), assertActive)
       } catch (err: any) {
+        assertActive()
         logEvent('warn', 'traffic-forensics', 'failed to prune old traffic-forensics session', {
           sessionId: name,
           path: dirPath,
@@ -777,6 +785,7 @@ async function pruneOldSessions(keep: number, currentSessionId?: string | null):
       }
     }
   } catch (err: any) {
+    assertActive()
     logEvent('warn', 'traffic-forensics', 'failed to list or prune sessions', {
       error: err?.message || String(err)
     })
@@ -904,12 +913,13 @@ function buildNetshLiveSnapshotScript(sessionDir: string, etlPath: string): stri
   ])
 }
 
-async function refreshTrafficForensicsArtifacts(): Promise<void> {
-  const manifest = await readLatestManifest()
+async function refreshTrafficForensicsArtifacts(assertActive: () => void = () => {}): Promise<void> {
+  assertActive()
+  const manifest = await checkedForensics(readLatestManifest(), assertActive)
   if (!manifest?.running || !manifest.engine || !manifest.sessionDir || !manifest.etlPath) return
 
   try {
-    await assertForensicsExecutionTrusted(manifest)
+    await checkedForensics(assertForensicsExecutionTrusted(manifest, assertActive), assertActive)
     const scriptPath = join(manifest.sessionDir, 'live-snapshot.ps1')
     let scriptBody = ''
     if (manifest.engine === 'pktmon') {
@@ -917,16 +927,17 @@ async function refreshTrafficForensicsArtifacts(): Promise<void> {
     } else {
       scriptBody = buildNetshLiveSnapshotScript(manifest.sessionDir, manifest.etlPath)
     }
-    await writeFile(scriptPath, Buffer.from('\uFEFF' + scriptBody, 'utf8'))
-    await execElevated(`powershell -NoProfile -ExecutionPolicy Bypass -File ${cmdQuoted(scriptPath)}`, {
+    await checkedForensics(writeFile(scriptPath, Buffer.from('\uFEFF' + scriptBody, 'utf8')), assertActive)
+    await checkedForensics(execElevated(`powershell -NoProfile -ExecutionPolicy Bypass -File ${cmdQuoted(scriptPath)}`, {
       timeout: 90000,
       maxBuffer: 1024 * 1024 * 16
-    })
+    }), assertActive)
     logEvent('info', 'traffic-forensics', 'refreshed live traffic artifacts', {
       sessionId: manifest.sessionId,
       engine: manifest.engine
     })
   } catch (err: any) {
+    assertActive()
     logEvent('warn', 'traffic-forensics', 'failed to refresh live traffic artifacts', {
       sessionId: manifest.sessionId,
       engine: manifest.engine,
@@ -1282,67 +1293,71 @@ function redactArtifactBody(name: string, body: string, redactor: ForensicsRedac
   return redactor.redactText(body)
 }
 
-async function copyDirRedacted(src: string, dest: string, redactor: ForensicsRedactor): Promise<void> {
-  await mkdir(dest, { recursive: true })
-  const entries = await readdir(src, { withFileTypes: true })
+async function copyDirRedacted(src: string, dest: string, redactor: ForensicsRedactor, assertActive: () => void = () => {}): Promise<void> {
+  assertActive()
+  await checkedForensics(mkdir(dest, { recursive: true }), assertActive)
+  const entries = await checkedForensics(readdir(src, { withFileTypes: true }), assertActive)
   for (const entry of entries) {
     const srcPath = join(src, entry.name)
     const destPath = join(dest, entry.name)
     if (entry.isDirectory()) {
-      await copyDirRedacted(srcPath, destPath, redactor).catch((err: any) => {
+      await checkedForensics(copyDirRedacted(srcPath, destPath, redactor, assertActive).catch((err: any) => {
+        assertActive()
         logEvent('warn', 'traffic-forensics', `failed to stage directory: ${entry.name}`, {
           error: err?.message || String(err)
         })
-      })
+      }), assertActive)
       continue
     }
     if (NEVER_EXPORT.test(entry.name)) continue
     try {
-      const body = await readFile(srcPath, 'utf-8')
-      await writeFile(destPath, redactArtifactBody(entry.name, body, redactor), 'utf-8')
+      const body = await checkedForensics(readFile(srcPath, 'utf-8'), assertActive)
+      await checkedForensics(writeFile(destPath, redactArtifactBody(entry.name, body, redactor), 'utf-8'), assertActive)
     } catch (err: any) {
+      assertActive()
       // A file we cannot read as text is a file we cannot redact. Never fall
       // back to copying it — that is exactly the bug this replaces. Leave a
       // marker so support knows something was present and why it is absent.
       logEvent('warn', 'traffic-forensics', `failed to stage file, excluded from export: ${entry.name}`, {
         error: err?.message || String(err)
       })
-      await writeFile(
+      await checkedForensics(writeFile(
         `${destPath}.excluded.txt`,
         `Артефакт ${entry.name} не включён в архив: не удалось прочитать и отредактировать как текст.\n` +
         `Причина: ${err?.message || String(err)}\n`,
         'utf-8'
-      ).catch(() => undefined)
+      ).catch(() => undefined), assertActive)
     }
   }
 }
 
-export function stageTrafficForensicsArtifacts(stageDir: string): Promise<boolean> {
-  return serializeCapture(() => stageArtifacts(stageDir))
+export function stageTrafficForensicsArtifacts(stageDir: string, assertActive: () => void = () => {}): Promise<boolean> {
+  return serializeCapture(() => stageArtifacts(stageDir, assertActive))
 }
 
-async function stageArtifacts(stageDir: string): Promise<boolean> {
+async function stageArtifacts(stageDir: string, assertActive: () => void = () => {}): Promise<boolean> {
+  assertActive()
   const rootDir = getRootDir()
   if (!existsSync(rootDir)) return false
   const settings = getSettings()
-  await refreshTrafficForensicsArtifacts()
-  const manifest = await readLatestManifest()
-  await pruneOldSessions(settings.retainSessions, manifest?.sessionId)
+  await checkedForensics(refreshTrafficForensicsArtifacts(assertActive), assertActive)
+  const manifest = await checkedForensics(readLatestManifest(), assertActive)
+  await checkedForensics(pruneOldSessions(settings.retainSessions, manifest?.sessionId, assertActive), assertActive)
   if (!settings.enabled && !manifest?.running) {
     return false
   }
   if (manifest?.sessionDir) {
-    const next = await generateTrafficForensicsSummary(manifest).catch((err: any) => ({
+    const next = await checkedForensics(generateTrafficForensicsSummary(manifest, assertActive).catch((err: any) => ({
       ...manifest,
       parserErrors: [
         ...(manifest.parserErrors ?? []),
         `summary generation failed during stage: ${err?.message || String(err)}`
       ]
-    }))
-    await writeManifest(next)
+    })), assertActive)
+    await checkedForensics(writeManifest(next, assertActive), assertActive)
   }
   const exportRoot = join(stageDir, 'traffic-forensics')
-  await mkdir(exportRoot, { recursive: true })
+  await checkedForensics(mkdir(exportRoot, { recursive: true }), assertActive)
 
   // ONE redactor for the whole export: token assignment must be stable across
   // files or the cross-artifact correlation that makes forensics useful (this
@@ -1352,13 +1367,14 @@ async function stageArtifacts(stageDir: string): Promise<boolean> {
   const latestManifest = getLatestManifestPath()
   if (existsSync(latestManifest)) {
     try {
-      const body = await readFile(latestManifest, 'utf-8')
-      await writeFile(
+      const body = await checkedForensics(readFile(latestManifest, 'utf-8'), assertActive)
+      await checkedForensics(writeFile(
         join(exportRoot, 'latest-session.json'),
         redactJsonDocument(body, redactor),
         'utf-8'
-      )
+      ), assertActive)
     } catch (err: any) {
+      assertActive()
       logEvent('warn', 'traffic-forensics', 'failed to stage latest-session.json', {
         error: err?.message || String(err)
       })
@@ -1366,18 +1382,19 @@ async function stageArtifacts(stageDir: string): Promise<boolean> {
   }
   if (manifest?.sessionDir && existsSync(manifest.sessionDir)) {
     const sessionName = manifest.sessionId || basename(manifest.sessionDir)
-    await copyDirRedacted(manifest.sessionDir, join(exportRoot, 'sessions', sessionName), redactor).catch((err: any) => {
+    await checkedForensics(copyDirRedacted(manifest.sessionDir, join(exportRoot, 'sessions', sessionName), redactor, assertActive).catch((err: any) => {
+      assertActive()
       logEvent('warn', 'traffic-forensics', 'failed to stage current traffic forensics session', {
         sessionId: manifest.sessionId,
         error: err?.message || String(err)
       })
-    })
+    }), assertActive)
   }
 
   // Tell the reader what was done, in the bundle itself. Without this the
   // pseudonym tokens look like corruption rather than a deliberate policy.
   const counts = redactor.stats()
-  await writeFile(
+  await checkedForensics(writeFile(
     join(exportRoot, 'REDACTION.txt'),
     `Артефакты traffic-forensics псевдонимизированы.\n\n` +
     `Каждый уникальный адрес заменён на устойчивый токен, одинаковый во всех файлах архива:\n` +
@@ -1401,11 +1418,17 @@ async function stageArtifacts(stageDir: string): Promise<boolean> {
     `Заменено уникальных значений: IPv4=${counts.ipv4}, IPv6=${counts.ipv6}, ` +
     `MAC=${counts.mac}, доменов=${counts.hosts}\n`,
     'utf-8'
-  ).catch(() => undefined)
+  ).catch(() => undefined), assertActive)
 
   logEvent('info', 'traffic-forensics', 'staged pseudonymized forensics artifacts', {
     sessionId: manifest?.sessionId ?? null,
     replaced: counts
   })
   return true
+}
+
+async function checkedForensics<T>(task: Promise<T>, assertActive: () => void): Promise<T> {
+  const result = await task
+  assertActive()
+  return result
 }

@@ -76,6 +76,8 @@ vi.mock('./trafficForensicsSummary', async importOriginal => {
   return { ...actual, generateTrafficForensicsSummary: vi.fn(actual.generateTrafficForensicsSummary) }
 })
 import { generateTrafficForensicsSummary } from './trafficForensicsSummary'
+import { logEvent } from './appLogger'
+import { IpcFault } from '../shared/ipc-result'
 import { ensureElevatedRuntimeDirHardened, verifyDirectoryHardened } from './runtimeDirSecurity'
 
 import {
@@ -111,6 +113,50 @@ async function resetForensicsState(): Promise<void> {
 }
 
 describe('trafficForensics', () => {
+  // AT-00-003: the production staging queue and native refresh must obey the ZIP owner.
+  it('rejects an aborted queued export without refreshing or staging it', async () => {
+    await resetForensicsState()
+    execElevatedMock.mockResolvedValue({ stdout: STOP_ACK, stderr: '' })
+    await startTrafficForensicsSession({ mode: 'directVpn', target: 'fixture' })
+    execElevatedMock.mockClear()
+    let release!: () => void
+    execElevatedMock.mockImplementationOnce(() => new Promise(done => { release = () => done({ stdout: '', stderr: '' }) }))
+    const first = stageTrafficForensicsArtifacts(fixturePaths.stage)
+    const aborted = new AbortController()
+    const second = stageTrafficForensicsArtifacts(join(fixturePaths.stage, 'must-not-exist'), () => { if (aborted.signal.aborted) throw new IpcFault('cancelled') })
+    void second.catch(() => {})
+    try {
+      await vi.waitFor(() => expect(execElevatedMock).toHaveBeenCalledOnce())
+      aborted.abort(); release()
+      await first
+      await expect(second).rejects.toMatchObject({ category: 'cancelled' })
+      expect(execElevatedMock).toHaveBeenCalledOnce()
+      expect(existsSync(join(fixturePaths.stage, 'must-not-exist'))).toBe(false)
+    } finally { release?.(); await Promise.allSettled([first, second]) }
+  })
+
+  it('drains a cancelled live refresh without later summary/manifest writes or success logs', async () => {
+    await resetForensicsState()
+    execElevatedMock.mockResolvedValue({ stdout: STOP_ACK, stderr: '' })
+    const started = await startTrafficForensicsSession({ mode: 'directVpn', target: 'fixture' })
+    const manifest = readFileSync(join(started.sessionDir!, 'session-manifest.json'), 'utf8')
+    execElevatedMock.mockClear(); vi.mocked(logEvent).mockClear(); vi.mocked(generateTrafficForensicsSummary).mockClear()
+    let release!: () => void
+    execElevatedMock.mockImplementationOnce(() => new Promise(done => { release = () => done({ stdout: '', stderr: '' }) }))
+    const controller = new AbortController()
+    const staged = stageTrafficForensicsArtifacts(fixturePaths.stage, () => { if (controller.signal.aborted) throw new IpcFault('cancelled') })
+    void staged.catch(() => {})
+    try {
+      await vi.waitFor(() => expect(execElevatedMock).toHaveBeenCalledOnce())
+      controller.abort(); release()
+      await expect(staged).rejects.toMatchObject({ category: 'cancelled' })
+      expect(readFileSync(join(started.sessionDir!, 'session-manifest.json'), 'utf8')).toBe(manifest)
+      expect(generateTrafficForensicsSummary).not.toHaveBeenCalled()
+      expect(logEvent).not.toHaveBeenCalled()
+      expect(existsSync(fixturePaths.stage)).toBe(false)
+    } finally { release?.(); await Promise.allSettled([staged]) }
+  })
+
   afterEach(async () => {
     execElevatedMock.mockResolvedValue({ stdout: STOP_ACK, stderr: '' })
     vi.mocked(ensureElevatedRuntimeDirHardened).mockResolvedValue({ hardened: true, message: 'stubbed' })

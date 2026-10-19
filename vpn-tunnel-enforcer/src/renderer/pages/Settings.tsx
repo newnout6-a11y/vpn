@@ -1,3 +1,4 @@
+import { useDiagnosticsExport } from '../hooks/useDiagnosticsExport'
 import type { SmartRouteRuleSetState } from '../../shared/network'
 import { useAppStore, type AppSettings } from '../store'
 import { AnimatePresence, motion } from 'framer-motion'
@@ -278,7 +279,7 @@ export function Settings() {
   const setSettings = useAppStore(s => s.setSettings)
   const setProxy = useAppStore(s => s.setProxy)
   const addLog = useAppStore(s => s.addLog)
-  const [exporting, setExporting] = useState(false)
+  const { exporting, exportDiagnostics: handleExportDiagnostics } = useDiagnosticsExport()
   const [openingLogs, setOpeningLogs] = useState(false)
 
   // Explicit save: edits stay in a local draft until the user hits "Сохранить".
@@ -378,24 +379,6 @@ export function Settings() {
       addLog('error', `Не удалось открыть папку логов: ${err.message}`)
     } finally {
       setOpeningLogs(false)
-    }
-  }
-
-  const handleExportDiagnostics = async () => {
-    setExporting(true)
-    try {
-      const result = await window.electronAPI.exportDiagnostics()
-      if (result.cancelled) {
-        addLog('info', 'Экспорт диагностики отменён.')
-      } else if (result.success && result.path) {
-        addLog('info', `Диагностика сохранена: ${result.path}`)
-      } else {
-        addLog('error', `Не удалось собрать диагностику: ${result.error || 'неизвестная ошибка'}`)
-      }
-    } catch (err: any) {
-      addLog('error', `Ошибка экспорта диагностики: ${err.message}`)
-    } finally {
-      setExporting(false)
     }
   }
 

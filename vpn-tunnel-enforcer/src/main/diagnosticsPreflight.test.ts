@@ -166,11 +166,11 @@ describe('Diagnostics Preflight', () => {
       const exportTsPath = join(process.cwd(), 'src', 'main', 'diagnosticsExport.ts')
       const sourceCode = readFileSync(exportTsPath, 'utf-8')
       
-      const stageForensicsIndex = sourceCode.indexOf('stageTrafficForensicsArtifacts(stage)')
+      const stageForensicsIndex = sourceCode.indexOf('stageTrafficForensicsArtifacts(stage, () => lease.assertActive())')
       expect(stageForensicsIndex).toBeGreaterThan(-1)
       
       // Look for the code that refreshes logs *after* staging forensics
-      const refreshLogsIndex = sourceCode.indexOf('const refreshedLogs = await getFullLogs()')
+      const refreshLogsIndex = sourceCode.indexOf('const refreshedLogs = await boundary(getFullLogs())')
       expect(refreshLogsIndex).toBeGreaterThan(stageForensicsIndex)
       
       const rewriteAppLogIndex = sourceCode.indexOf('writeFile(join(stage, \'app-log.json\')', refreshLogsIndex)

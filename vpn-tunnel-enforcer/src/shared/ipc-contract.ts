@@ -129,7 +129,7 @@ export const IPC_REQUESTS = {
   'rollback-location-privacy': request('rollbackLocationPrivacy', []),
   'open-tun-log-folder': request('openTunLogFolder', []),
   'open-log-folder': request('openLogFolder', []),
-  'export-diagnostics': request('exportDiagnostics', []),
+  'export-diagnostics': request('exportDiagnostics', [optional(text(36))]),
   'run-leak-self-test': request('runLeakSelfTest', []),
   'run-routing-self-test': request('runRoutingSelfTest', []),
   'open-snapshots-folder': request('openSnapshotsFolder', []),

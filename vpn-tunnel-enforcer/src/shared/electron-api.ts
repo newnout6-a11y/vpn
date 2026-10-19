@@ -79,7 +79,7 @@ export interface ElectronAPI {
   rollbackLocationPrivacy: () => Promise<LocationPrivacyStatus>
   openTunLogFolder: () => Promise<string>
   openLogFolder: () => Promise<string>
-  exportDiagnostics: () => Promise<{ success: boolean; path?: string; error?: string; cancelled?: boolean }>
+  exportDiagnostics: (requestId?: string) => Promise<{ success: boolean; path?: string; error?: string; cancelled?: boolean; warning?: 'cleanup-failed' }>
   runLeakSelfTest: () => Promise<LeakSelfTestResult>
   runRoutingSelfTest: () => Promise<{
     ranAt: number
