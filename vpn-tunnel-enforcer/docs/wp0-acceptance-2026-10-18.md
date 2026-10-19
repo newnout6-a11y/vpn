@@ -1734,3 +1734,27 @@ Final full:4962 passed/5 skipped/0 failed,299 files passed/2 skipped,308.02s,
 exit0. Build/typecheck165 channels/0 public any,coverage/diff —exit0.
 Новые native PowerShell cases прошли;7-fixture Electron runner не повторялся
 при неизменных IPC/preload/bridge. Exact-head Qodo/CI pending.
+
+#89 принят: final head8e32fdf,Qodo1557804 completed без findings,
+CI39339629394 success. Merge/main5268e74; reviewed/main tree совпал.
+Revix по квоте полного review не выполнил; это не approval.
+
+## Live-check: DNS/TCP/TLS/traceroute physical drain (20.10.2026)
+
+AT-00-003/007: DNS держит private bounded resolver до raw settlement и не
+принимает late answers после cancel/timeout; TCP/TLS держат socket до actual
+close,RTT/handshake duration не включают drain. Terminal TLS failure защищён
+от late ready. Traceroute ждёт child close и сохраняет partial hops/first error,
+не называет kill завершением команды; output ограничен64KiB.
+До fix17 failed/1 passed. Final targeted6 suites101/101 passed,5.47s,exit0,
+включая4 настоящих loopback cases (TCP connect/cancel,TLS cancel,UDP DNS).
+Все промежуточные failures и ошибка форматирующего edit записаны в progress.md;
+source восстановлен и typecheck165 channels/0 public any,coverage/diff прошли.
+Full/build и exact-head Qodo/CI pending. HTTP/media/SOCKS,общий live operation
+lifetime/progress/history и renderer ещё не приняты; весь WP-0 в работе.
+
+Final full:4987 passed/5 skipped/0 failed,300 files passed/2 skipped,312.04s,exit0.
+Production/test tree не менялся во время прогона. Build/typecheck165 channels/
+0 public any,coverage AC927/927,F210/210,diff check —exit0. Native evidence —4
+loopback resource cases;7-fixture Electron runner не повторялся при неизменных
+IPC/preload/bridge. Новые exact-head Qodo/CI pending; весь WP-0 в работе.

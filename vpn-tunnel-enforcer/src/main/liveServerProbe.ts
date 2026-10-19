@@ -154,23 +154,20 @@ export function normalizeHostAndPort(
 
 // Each query owns its resolver: timeout/cancellation never cancels another check.
 async function dnsQuery<T>(run: (resolver: InstanceType<typeof dnsPromises.Resolver>) => Promise<T>, timeout: number, signal?: AbortSignal): Promise<T> {
-  const resolver = new dnsPromises.Resolver()
-  return new Promise((resolve, reject) => {
-    let finished = false
-    const finish = (error?: Error, result?: T) => {
-      if (finished) return
-      finished = true
-      clearTimeout(timer)
-      signal?.removeEventListener('abort', abort)
-      if (error) { resolver.cancel(); reject(error) } else resolve(result as T)
-    }
-    const abort = () => finish(new Error('Cancelled'))
-    const timer = setTimeout(() => finish(new Error('DNS query timeout')), timeout)
-    signal?.addEventListener('abort', abort, { once: true })
-    if (signal?.aborted) { abort(); return }
-    try { run(resolver).then(value => finish(undefined, value), error => finish(error)) }
-    catch (error: any) { finish(error) }
-  })
+  if (signal?.aborted) throw new Error('Cancelled')
+  const resolver = new dnsPromises.Resolver({ timeout, tries: 1 })
+  let failure: Error | undefined
+  const stop = (error: Error) => { if (!failure) { failure = error; resolver.cancel() } }
+  const abort = () => stop(new Error('Cancelled'))
+  const timer = setTimeout(() => stop(new Error('DNS query timeout')), timeout)
+  signal?.addEventListener('abort', abort, { once: true })
+  try {
+    if (signal?.aborted) throw new Error('Cancelled')
+    const value = await run(resolver)
+    if (failure) throw failure
+    return value
+  } catch (error) { throw failure || error }
+  finally { clearTimeout(timer); signal?.removeEventListener('abort', abort) }
 }
 
 export function isPublicFqdn(host: string): boolean {
@@ -660,13 +657,23 @@ export async function probeTls(
 
   return new Promise<LiveTlsCertInfo>((resolve) => {
     let finished = false
-    const finish = (result: LiveTlsCertInfo) => {
-      if (finished) return
+    let socket: tls.TLSSocket | null = null
+    let result: LiveTlsCertInfo | undefined
+    const close = () => {
       finished = true
       clearTimeout(timer)
       signal?.removeEventListener('abort', abortHandler)
-      socket?.destroy()
-      resolve(result)
+      socket?.removeAllListeners()
+      resolve(result || { status: 'error', durationMs: Date.now() - started, error: 'TLS connection closed before handshake' })
+    }
+    const finish = (value: LiveTlsCertInfo) => {
+      if (finished) return
+      finished = true
+      result = value
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', abortHandler)
+      if (socket) socket.destroy()
+      else close()
     }
 
     const abortHandler = () => {
@@ -689,8 +696,6 @@ export async function probeTls(
       })
     }, LIVE_PROBE_THRESHOLDS.TLS_HANDSHAKE_TIMEOUT_MS)
 
-    let socket: tls.TLSSocket | null = null
-
     try {
       // RFC 6066: servername must only be sent for DNS hostnames, not IP addresses
       const servername = sniHostname
@@ -707,6 +712,7 @@ export async function probeTls(
           timeout: LIVE_PROBE_THRESHOLDS.TLS_HANDSHAKE_TIMEOUT_MS
         },
         () => {
+          if (finished) return
           clearTimeout(timer)
           try {
             const cert = socket?.getPeerCertificate(true)
@@ -804,6 +810,7 @@ export async function probeTls(
         }
       )
 
+      socket.once('close', close)
       socket.on('error', (err: any) => {
         clearTimeout(timer)
         finish({
@@ -821,6 +828,7 @@ export async function probeTls(
           error: 'TLS socket timeout'
         })
       })
+      if (signal?.aborted) abortHandler()
     } catch (err: any) {
       clearTimeout(timer)
       finish({
@@ -933,24 +941,35 @@ function probeTcpSingle(
 
     const start = Date.now()
     const socket = new net.Socket()
-    let resolved = false
+    let result: { ok: boolean; durationMs: number; error?: string } | undefined
 
     const finish = (ok: boolean, err?: string) => {
-      if (resolved) return
-      resolved = true
+      if (result) return
+      result = { ok, durationMs: Date.now() - start, error: err }
       signal?.removeEventListener('abort', abortHandler)
       socket.destroy()
-      resolve({ ok, durationMs: Date.now() - start, error: err })
     }
 
     const abortHandler = () => finish(false, 'Cancelled')
+    const connect = () => finish(true)
+    const timeout = () => finish(false, 'ETIMEDOUT')
+    const error = (err: NodeJS.ErrnoException) => finish(false, err.code || err.message || 'Error')
+    const close = () => {
+      signal?.removeEventListener('abort', abortHandler)
+      socket.removeListener('connect', connect); socket.removeListener('timeout', timeout)
+      socket.removeListener('error', error); socket.removeListener('close', close)
+      resolve(result || { ok: false, durationMs: Date.now() - start, error: 'Connection closed before connect' })
+    }
+    socket.once('close', close)
+    socket.once('connect', connect)
+    socket.once('timeout', timeout)
+    socket.on('error', error)
     signal?.addEventListener('abort', abortHandler, { once: true })
-
-    socket.setTimeout(timeoutMs)
-    socket.once('connect', () => finish(true))
-    socket.once('timeout', () => finish(false, 'ETIMEDOUT'))
-    socket.once('error', (e: any) => finish(false, e?.code || e?.message || 'Error'))
-    socket.connect(port, host)
+    if (signal?.aborted) abortHandler()
+    else {
+      try { socket.setTimeout(timeoutMs); socket.connect(port, host) }
+      catch (err) { finish(false, err instanceof Error ? err.message : 'TCP initialization error') }
+    }
   })
 }
 
@@ -1122,6 +1141,7 @@ export async function probeRoute(targetIp: string, signal?: AbortSignal): Promis
     let finished = false
     let child: ReturnType<typeof spawn> | undefined
     let timer: ReturnType<typeof setTimeout> | undefined
+    let outcome: { status: RouteDiagnostics['status']; error?: string } | undefined
     const canonical = (ip: string) => net.isIP(ip) === 6 ? new Address6(ip).canonicalForm() : ip
     const finish = (status: RouteDiagnostics['status'], error?: string, commandFinished = false) => {
       if (finished) return
@@ -1159,27 +1179,37 @@ export async function probeRoute(targetIp: string, signal?: AbortSignal): Promis
         const ip = token.replace(/^\[|\]$/g, '')
         return net.isIP(ip) !== 0 && canonical(ip) === canonical(targetIp)
       }))
-      if (!commandFinished) { try { child?.kill() } catch {} }
       resolve({ status, error, durationMs: Date.now() - started, hops: lines.length || undefined,
         hopDetails: lines, reachedTarget, commandFinished, partial: !reachedTarget,
         routeMethod: 'tracert', mtuStatus: 'unavailable' })
     }
-    const abort = () => finish('skipped', 'Cancelled')
+    const stop = (status: RouteDiagnostics['status'], error: string) => {
+      if (finished || outcome) return
+      outcome = { status, error }
+      clearTimeout(timer); signal?.removeEventListener('abort', abort)
+      if (child) { try { child.kill() } catch { /* close owns child/pipe drain */ } }
+      else finish(status, error)
+    }
+    const abort = () => stop('skipped', 'Cancelled')
+    const error = (err: Error) => stop('error', err.message)
+    const data = (value: Buffer) => {
+      const buf = Buffer.isBuffer(value) ? value : Buffer.from(value)
+      if (totalBytes < 65536) { const remaining = buf.subarray(0, 65536 - totalBytes); chunks.push(remaining); totalBytes += remaining.length }
+    }
+    const close = (code: number | null) => {
+      child?.stdout?.removeListener('data', data)
+      child?.removeListener('error', error); child?.removeListener('close', close)
+      finish(outcome?.status || (code === 0 ? 'ok' : 'error'), outcome?.error || (code === 0 ? undefined : 'Traceroute execution error'), !outcome)
+    }
     try {
       child = spawn('tracert', ['-d', '-h', '8', '-w', '400', targetIp], { windowsHide: true })
-      child.stdout?.on('data', data => {
-        const buf = Buffer.isBuffer(data) ? data : Buffer.from(data)
-        if (totalBytes < 65536) {
-          chunks.push(buf)
-          totalBytes += buf.length
-        }
-      })
-      child.on('close', code => finish(code === 0 ? 'ok' : 'error', code === 0 ? undefined : 'Traceroute execution error', true))
-      child.on('error', err => finish('error', err.message))
-      timer = setTimeout(() => finish('unavailable', 'Traceroute timed out'), LIVE_PROBE_THRESHOLDS.TRACEROUTE_TIMEOUT_MS)
+      child.stdout?.on('data', data)
+      child.once('close', close)
+      child.on('error', error)
+      timer = setTimeout(() => stop('unavailable', 'Traceroute timed out'), LIVE_PROBE_THRESHOLDS.TRACEROUTE_TIMEOUT_MS)
       signal?.addEventListener('abort', abort, { once: true })
       if (signal?.aborted) abort()
-    } catch (err: any) { finish('error', err.message) }
+    } catch (err: any) { stop('error', err.message) }
   })
 }
 
