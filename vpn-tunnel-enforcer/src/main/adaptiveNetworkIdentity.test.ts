@@ -147,5 +147,5 @@ function Get-CimInstance {
 ${dispatch}`
     const stdout = runNative(harness)
     expect(JSON.parse(stdout.trim())).toEqual([{ alias: 'Wi-Fi', guid: 'fixture-guid', profiles: ['Домашняя сеть|nla-fixture'], gateways: ['192.168.1.1', 'fe80::1'] }])
-  })
+  }, 35_000) // Native helper has a 30s process bound; include cold-start overhead.
 })
