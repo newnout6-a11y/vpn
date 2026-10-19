@@ -42,6 +42,9 @@ vi.mock('electron-store', () => ({
     set(key: 'profiles' | 'activeProfileId', value: any) {
       ;(mockStoreData as any)[key] = value
     }
+    get store() { return mockStoreData }
+    set store(value: typeof mockStoreData) { mockStoreData = value }
+    get path() { return '/missing-vpnte-ping-test/server-picker.json' }
   }
 }))
 vi.mock('axios', () => ({

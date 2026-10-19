@@ -38,9 +38,15 @@ vi.mock('electron-store', () => ({
       this.defaults = options.defaults ?? {}
     }
 
-    get(key: string) {
-      return state.storeData.has(key) ? state.storeData.get(key) : this.defaults[key]
+    get(key: string, fallback?: unknown) {
+      return state.storeData.has(key) ? state.storeData.get(key) : this.defaults[key] ?? fallback
     }
+    get store() { return Object.fromEntries(state.storeData) }
+    set store(value: Record<string, unknown>) {
+      state.storeData.clear()
+      for (const [key, item] of Object.entries(value)) state.storeData.set(key, item)
+    }
+    get path() { return '/missing-vpnte-picker-switch-test/server-picker.json' }
 
     set(key: string, value: any) {
       state.storeData.set(key, value)
@@ -145,7 +151,7 @@ describe('server profile switching', () => {
     setProfileSwitchHooks({ begin, end })
     const pending = selectProfileHandler({}, 'a')
     expect(begin).toHaveBeenCalledOnce()
-    expect(state.storeData.get('activeProfileId')).toBeUndefined()
+    expect(state.storeData.get('activeProfileId')).toBeNull()
     expect(state.restartProtected).not.toHaveBeenCalled()
     gate.resolve()
     await pending
@@ -273,7 +279,7 @@ describe('server profile switching', () => {
     await cancelSwitchHandler({})
     gate.resolve()
     await expect(pending).resolves.toEqual({ cancelled: true })
-    expect(state.storeData.get('activeProfileId')).toBeUndefined()
+    expect(state.storeData.get('activeProfileId')).toBeNull()
     expect(state.restartProtected).not.toHaveBeenCalled()
     expect(end).toHaveBeenCalledOnce()
   })

@@ -7,8 +7,8 @@ import { execElevated } from './admin'
 import { domainEnrichmentService } from './domainEnrichment'
 import { readBootRecoveryReport } from './recoveryManifest'
 import { logEvent } from './appLogger'
+import { assertMigrationReadBack, migrateSecretStore } from './storeMigrations'
 import {
-  protectLegacySecretBackup,
   decryptJsonSecret,
   decryptSecret,
   encryptJsonSecret,
@@ -77,8 +77,9 @@ type PersistedAppSettings = Omit<
 }
 
 const store = new Store<{ settings: PersistedAppSettings | AppSettings; schemaVersion: number; migration?: unknown }>({
-  name: 'settings',
-  defaults: { settings: defaults, schemaVersion: 2 }
+  // Supply read defaults below: Conf constructor defaults would rewrite an
+  // unversioned legacy file before its migration backup can be made.
+  name: 'settings'
 })
 
 function hasPlaintextSettingsSecrets(value: PersistedAppSettings | AppSettings): boolean {
@@ -108,39 +109,30 @@ function encodeSettings(value: AppSettings): PersistedAppSettings {
   return {
     ...value,
     proxyOverride: /@/.test(value.proxyOverride) ? encryptSecret(value.proxyOverride) : value.proxyOverride,
-    directVpnInput: value.directVpnInput ? encryptSecret(value.directVpnInput) : '',
-    directVpnCachedInput: value.directVpnCachedInput ? encryptSecret(value.directVpnCachedInput) : '',
-    directVpnCachedSource: value.directVpnCachedSource ? encryptSecret(value.directVpnCachedSource) : '',
-    directVpnCachedProfiles: value.directVpnCachedProfiles.length > 0
+    directVpnInput: value.directVpnInput ? encryptSecret(value.directVpnInput) : value.directVpnInput,
+    directVpnCachedInput: value.directVpnCachedInput ? encryptSecret(value.directVpnCachedInput) : value.directVpnCachedInput,
+    directVpnCachedSource: value.directVpnCachedSource ? encryptSecret(value.directVpnCachedSource) : value.directVpnCachedSource,
+    directVpnCachedProfiles: value.directVpnCachedProfiles?.length > 0
       ? encryptJsonSecret(value.directVpnCachedProfiles)
-      : []
+      : value.directVpnCachedProfiles
   }
 }
 
 function readSettingsWithMigration(): AppSettings {
-  protectLegacySecretBackup(`${store.path}.pre-safe-storage-v1.bak`, undefined, 'settings')
-  const persisted = store.get('settings')
-  const decoded = decodePersistedSettings(persisted)
-  if (!hasPlaintextSettingsSecrets(persisted)) return decoded
-  if (!isSecretEncryptionAvailable()) {
-    throw new Error('Settings migration requires Windows secure storage; plaintext data was left unchanged')
-  }
-
-  protectLegacySecretBackup(`${store.path}.pre-safe-storage-v1.bak`, store.path, 'settings')
-  logEvent('info', 'secret-migration', 'settings migration started', { step: 'encrypt' })
-  try {
-    const encoded = encodeSettings(decoded)
-    decodePersistedSettings(encoded) // Read-back before the atomic commit.
-    store.store = {
-      settings: encoded, schemaVersion: 2,
-      migration: { id: 'safe-storage-v1', completedAt: Date.now() }
+  migrateSecretStore('settings', {
+    path: store.path,
+    read: () => ({ ...store.store, settings: store.get('settings', defaults), schemaVersion: store.get('schemaVersion') ?? 0 }),
+    write: value => { store.store = value },
+    hasPlaintext: value => hasPlaintextSettingsSecrets(value.settings),
+    prepare(value) {
+      const decoded = decodePersistedSettings(value.settings)
+      if (!hasPlaintextSettingsSecrets(value.settings)) return value
+      const encoded = encodeSettings(decoded)
+      assertMigrationReadBack(decoded, decodePersistedSettings(encoded))
+      return { ...value, settings: encoded }
     }
-    logEvent('info', 'secret-migration', 'settings migration completed', { step: 'commit', status: 'success' })
-  } catch (error) {
-    logEvent('error', 'secret-migration', 'settings migration failed; original data retained', { step: 'encrypt-or-commit', status: 'error' })
-    throw error
-  }
-  return decoded
+  })
+  return decodePersistedSettings(store.get('settings', defaults))
 }
 
 function persistSettings(value: AppSettings): void {

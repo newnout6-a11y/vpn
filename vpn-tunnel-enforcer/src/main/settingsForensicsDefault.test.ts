@@ -37,9 +37,12 @@ vi.mock('electron-store', () => ({
     constructor(opts: { defaults?: Record<string, any> }) {
       this.defaults = opts.defaults ?? {}
     }
-    get(key: string) {
-      return storeState.data[key] ?? this.defaults[key]
+    get(key: string, fallback?: unknown) {
+      return storeState.data[key] ?? this.defaults[key] ?? fallback
     }
+    get store() { return storeState.data }
+    set store(value: Record<string, any>) { storeState.data = value }
+    get path() { return '/missing-vpnte-settings-test/settings.json' }
     set(key: string, value: any) {
       storeState.data[key] = value
     }

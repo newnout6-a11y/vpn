@@ -24,9 +24,12 @@ vi.mock('electron-store', () => ({
     constructor(opts: { defaults?: Record<string, any> }) {
       this.defaults = opts.defaults ?? {}
     }
-    get(key: string) {
-      return storeState.data[key] ?? this.defaults[key]
+    get(key: string, fallback?: unknown) {
+      return storeState.data[key] ?? this.defaults[key] ?? fallback
     }
+    get store() { return storeState.data }
+    set store(value: Record<string, any>) { storeState.data = value }
+    get path() { return '/missing-vpnte-settings-test/settings.json' }
     set(key: string, value: any) {
       storeState.data[key] = value
     }
@@ -147,6 +150,7 @@ describe('settings login item side effects', () => {
 
   it('setLoginItemChecked puts the task back when saving fails afterwards', async () => {
     const { settingsStore } = await import('./settings')
+    settingsStore.get() // Complete startup migration before injecting the later settings save failure.
     failFirstSettingsWrite()
     await expect(settingsStore.setLoginItemChecked(true)).rejects.toThrow('Disk full')
     const commands = execElevatedMock.mock.calls.map(([command]) => String(command))
@@ -158,6 +162,7 @@ describe('settings login item side effects', () => {
 
   it('reports an unknown state, with both causes reachable, when the restore after a failed save is not confirmed', async () => {
     const { settingsStore } = await import('./settings')
+    settingsStore.get()
     failFirstSettingsWrite()
     execElevatedMock.mockImplementation(statefulElevated((command) => (command.includes('/Delete') ? Promise.reject(new Error('delete refused')) : undefined)))
     const error: any = await settingsStore.setLoginItemChecked(true).catch((e) => e)

@@ -10,6 +10,7 @@ vi.mock('electron-store', () => ({ default: class {
   set(key: string, value: unknown) { state.write(this.name, key, value); state.data.get(this.name)![key] = structuredClone(value) }
   get path() { return `/tmp/unused-import-fixture/${this.name}.json` }
   get store() { return state.data.get(this.name) }
+  set store(value: Record<string, any> | undefined) { state.write(this.name, 'store', value); state.data.set(this.name, structuredClone(value ?? {})) }
 } }))
 vi.mock('./appLogger', () => ({ logEvent: state.log }))
 vi.mock('./settings', () => ({ settingsStore: { get: () => ({ disableGeoLookup: true, bootstrapRouteMode: 'direct' }) } }))
@@ -51,6 +52,10 @@ beforeEach(async () => {
   registry = operations.operations
   operations.registerOperationHandlers()
   picker.registerServerPickerHandlers()
+  // Main startup preflights persisted stores before accepting feature actions.
+  picker.serverPicker.getProfiles()
+  groups.getGroups()
+  state.write.mockClear()
 })
 afterEach(async () => {
   const closing = registry?.close()

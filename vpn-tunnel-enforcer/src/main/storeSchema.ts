@@ -1,7 +1,7 @@
 import { IpcFault } from '../shared/ipc-result'
 
 /** 0 denotes the existing unversioned format. This inventory does not perform
- * migrations: each format change must register its ordered migration first. */
+ * migrations: format changes register their steps in storeMigrations.ts. */
 export const STORE_SCHEMA_VERSIONS = Object.freeze({
   'adaptive-bypass': 0,
   'connection-history': 0,
@@ -14,7 +14,7 @@ export const STORE_SCHEMA_VERSIONS = Object.freeze({
   'notification-prefs': 0,
   'profile-rotation': 0,
   scheduler: 0,
-  'server-groups': 0,
+  'server-groups': 1,
   'server-picker': 2,
   settings: 2,
   'smart-route-rule-sets': 0,

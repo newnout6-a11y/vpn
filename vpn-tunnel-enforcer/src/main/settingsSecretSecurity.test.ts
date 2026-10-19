@@ -21,6 +21,7 @@ vi.mock('electron', () => ({ app: { isPackaged: true }, safeStorage: {
 vi.mock('electron-store', () => ({ default: class {
   get(key: string) { return state.data[key] }
   get path() { return join(state.directory, 'settings.json') }
+  get store() { return state.data }
   set store(value: Record<string, any>) {
     writeFileSync(this.path, JSON.stringify(value)); state.data = value
   }

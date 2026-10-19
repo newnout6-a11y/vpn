@@ -33,6 +33,9 @@ vi.mock('electron-store', () => ({
     set(key: 'profiles' | 'activeProfileId', value: any) {
       ;(pickerData as any)[key] = value
     }
+    get store() { return pickerData }
+    set store(value: typeof pickerData) { pickerData = value }
+    get path() { return '/missing-vpnte-consolidate-test/server-picker.json' }
   }
 }))
 vi.mock('axios', () => ({ default: { get: vi.fn() } }))

@@ -126,8 +126,8 @@ describe('shared-store backup audit and rollback (AT-01-001/010)', () => {
     const path = join(state.directory, `${name}.json`); const backup = path + '.pre-safe-storage-v1.bak'
     const before = readFileSync(path)
     if (mode === 'existing') writeFileSync(backup, before)
-    // Groups prepare one encrypted entry before creating a new backup.
-    state.failOnEncryptCall = fault === 'encrypt' ? (name === 'server-groups' && mode === 'create' ? 2 : 1) : 0
+    // The shared runner now protects the backup before preparing every store.
+    state.failOnEncryptCall = fault === 'encrypt' ? 1 : 0
     state.failDecrypt = fault === 'decrypt'
     const { serverPickerStore, serverGroupsStore } = await import('./sharedStores')
     const read = () => name === 'server-picker' ? serverPickerStore.get('profiles') : serverGroupsStore.get('groups')
