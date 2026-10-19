@@ -1245,7 +1245,9 @@ Indeterminate creation по-прежнему предупреждает о во�
 этого запроса и при unmount отменяет его, даже если первый progress ещё не пришёл.
 Main сохраняет собственный operationId/correlation: requestId не подменяет audit ID.
 Новый speed-test:cancel привязан к requesting WebContents; чужой/stale запрос
-возвращает false. Destroyed WebContents прерывает принадлежащий ему тест.
+возвращает false. Destroyed WebContents, render-process-gone и полная навигация
+main frame прерывают принадлежащий странице тест; same-document/subframe
+navigation не прерывают. Все lifetime listeners снимаются при bounded terminal.
 После bounded cancel/deadline native lease продолжает drain, поздняя история
 не коммитится. Legacy speedTestRun() без аргументов сохранён.
 
@@ -1259,7 +1261,8 @@ L2 использует production page/handlers/registry с управляем�
 Native Electron smoke использует настоящий production preload/contextBridge и
 WebContents; подменены только HTTP transport и VPN readiness. Проверены immediate
 run+cancel без progress/list, native UUID/correlation, cancel <900 ms, retained
-drain, foreign/stale cancellation и destroyed requester без записи истории.
+drain, foreign/stale cancellation, destroyed requester и настоящий reload без
+уничтожения WebContents/записи истории.
 Внешний трафик/VPN при этом не запускаются. Browser fixture проверяет actual page
 в light/dark, keyboard cancel, navigate/remount и завершение; на viewport
 280/320/414 px длинные server/profile не выходят за экран. Это адресный вклад в

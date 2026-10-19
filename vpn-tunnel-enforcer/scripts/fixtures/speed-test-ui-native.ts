@@ -60,6 +60,20 @@ app.whenReady().then(async () => {
   assert.ok(frames.length > 0)
   assert.ok(frames.every((frame: any) => frame.requestId === request && frame.operationId === first.operationId))
 
+  const reloader = await renderer(), reloadRequest = '33333333-3333-4333-8333-333333333333'
+  await reloader.webContents.executeJavaScript(`window.speedOutcome=window.electronAPI.speedTestRun('${reloadRequest}').catch(e=>e);'started'`)
+  const reloadOperation = operations.list().at(-1)!
+  assert.equal(reloadOperation.status, 'running')
+  await new Promise<void>(resolve => { reloader.webContents.once('did-finish-load', () => resolve()); reloader.webContents.reload() })
+  const reloadStatus = () => operations.list().find(item => item.operationId === reloadOperation.operationId)?.status
+  for (let attempt = 0; reloadStatus() === 'running' && attempt < 200; attempt++) await delay(5)
+  assert.equal(reloader.webContents.isDestroyed(), false)
+  assert.equal(reloadStatus(), 'cancelled')
+  assert.equal(operations.isBusy('speed-test'), true)
+  assert.equal(await reloader.webContents.executeJavaScript(`window.electronAPI.speedTestCancel('${reloadRequest}')`), false)
+  await drained()
+  assert.deepEqual(speedTest.getHistory(), [])
+
   const secondRequest = '22222222-2222-4222-8222-222222222222'
   await window.webContents.executeJavaScript(`window.speedOutcome=window.electronAPI.speedTestRun('${secondRequest}').catch(e=>e);'started'`)
   assert.equal(await foreign.webContents.executeJavaScript(`window.electronAPI.speedTestCancel('${secondRequest}')`), false)
@@ -73,7 +87,8 @@ app.whenReady().then(async () => {
   await operations.close()
   console.log('SPEED_UI_NATIVE_PASS', JSON.stringify({ electron: process.versions.electron,
     checks: ['immediate request cancellation before progress receipt; native UUID/correlation and retained drain',
-      'stale and foreign WebContents cancellation refused', 'destroyed requesting WebContents aborts without history commit'] }))
+      'stale and foreign WebContents cancellation refused', 'renderer reload cancels without WebContents destruction or history commit',
+      'destroyed requesting WebContents aborts without history commit'] }))
 }).catch(error => { console.error('SPEED_UI_NATIVE_FAIL', error); process.exitCode = 1 }).finally(() => {
   for (const window of windows) if (!window.isDestroyed()) window.destroy()
   app.quit()

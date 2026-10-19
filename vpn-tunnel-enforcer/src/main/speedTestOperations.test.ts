@@ -113,6 +113,27 @@ describe('owned speed test effects', () => {
     expect(registry.list()).toEqual([])
   })
 
+  it.each(['navigation', 'crash'])('aborts an orphaned request after renderer %s and removes lifetime listeners (AT-00-003)', async cause => {
+    const gate = held<{ data: object }>(), sender = new EventEmitter()
+    const requestId = '55555555-5555-4555-8555-555555555555'
+    state.get.mockImplementationOnce(() => gate.promise)
+    const run = state.handlers.get('speed-test:run')!({ sender }, requestId)
+    // Neither subframes nor same-document navigation abandon the owning page.
+    sender.emit('did-start-navigation', { isMainFrame: false, isSameDocument: false })
+    sender.emit('did-start-navigation', { isMainFrame: true, isSameDocument: true })
+    expect(registry.list().at(-1)?.status).toBe('running')
+    if (cause === 'navigation') sender.emit('did-start-navigation', { isMainFrame: true, isSameDocument: false })
+    else sender.emit('render-process-gone', {}, { reason: 'crashed' })
+    try {
+      await vi.waitFor(() => expect(registry.list().at(-1)?.status).toBe('cancelled'))
+      expect(await run).toMatchObject({ ok: false, error: { category: 'cancelled' } })
+      expect(speed.isRunning()).toBe(true)
+      for (const event of ['destroyed', 'did-start-navigation', 'render-process-gone']) expect(sender.listenerCount(event)).toBe(0)
+    } finally { gate.resolve({ data: {} }) }
+    await vi.waitFor(() => expect(speed.isRunning()).toBe(false))
+    expect(await persistedHistory()).toEqual([])
+  })
+
   it('rejects duplicate request admission without losing ownership, and refuses a stale cancel (AT-00-003/007)', async () => {
     const firstGate = held<{ data: object }>(), secondGate = held<{ data: object }>(), sender = new EventEmitter()
     const firstId = '33333333-3333-4333-8333-333333333333', secondId = '44444444-4444-4444-8444-444444444444'

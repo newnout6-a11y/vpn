@@ -511,14 +511,21 @@ export function registerSpeedTestHandlers(): void {
     const id = requestId === undefined ? undefined : uiRequestId(requestId)
     if (id && uiRequests.has(id)) throw new IpcFault('conflict')
     const controller = new AbortController(), destroyed = () => controller.abort()
+    const navigating = (details: { isMainFrame: boolean; isSameDocument: boolean }) => {
+      if (details.isMainFrame && !details.isSameDocument) controller.abort()
+    }
     const request = id ? { requestId: id, sender: event.sender, controller } : undefined
     if (event.sender?.isDestroyed?.()) throw new IpcFault('cancelled')
     event.sender?.once?.('destroyed', destroyed)
+    event.sender?.once?.('render-process-gone', destroyed)
+    event.sender?.on?.('did-start-navigation', navigating)
     if (id && request) uiRequests.set(id, request)
     try { return await runSpeedTest({ signal: controller.signal }, request) }
     finally {
       if (id) uiRequests.delete(id)
       event.sender?.removeListener?.('destroyed', destroyed)
+      event.sender?.removeListener?.('render-process-gone', destroyed)
+      event.sender?.removeListener?.('did-start-navigation', navigating)
     }
   })
 

@@ -5221,3 +5221,40 @@ CI/review нового SHA проверяются отдельно после pu
   завершился EBUSY на Cookies созданного native smoke; это произошло после
   render/geometry assertions, production build и native smokes завершились exit 0.
   Browser viewport сброшен, свой tab закрыт; server больше не работает.
+
+### WP-0 — Qodo #75: renderer reload/crash
+
+- PR #75 открыт на ced3ae6fb55b4a395a55435bc311f46987eac2b0. Qodo 1544593
+  completed с medium 804519c2-da30-4e49-9f2a-aec4eee27739 / 4310801749:
+  reload, full navigation или renderer crash не вызывают React cleanup и не
+  уничтожают WebContents, поэтому тест мог остаться без страницы-владельца.
+  Замечание подтверждено: две новые unit-регрессии до исправления — 2 failed /
+  22 skipped, 2.71 s, exit 1 (.tmp/wp0-speed-ui-reload-before.log).
+- Main теперь aborts render-process-gone и did-start-navigation только для
+  main frame и !isSameDocument, используя Electron 44 details object (deprecated
+  positional arguments не используются). Same-document и subframe навигация
+  не прерывают тест. Все три lifetime listeners снимаются в finally.
+  Адресный npm.cmd test -- src/main/speedTestOperations.test.ts
+  src/renderer/pages/SpeedTest.lifecycle.test.tsx — 29 passed, 3.34 s, exit 0
+  (.tmp/wp0-speed-ui-reload-targeted.log), включая listener cleanup и late history.
+- Actual Electron smoke дополнен настоящим reload: WebContents остаётся жив,
+  операция cancelled, busy lease сохраняется до drain, stale cancel false,
+  history пуста. node scripts/test-electron-runtime.mjs — ELECTRON_SMOKE_PASS /
+  SPEED_UI_NATIVE_PASS, exit 0 (.tmp/wp0-speed-ui-reload-electron.log).
+  node scripts/test-wp1-native.mjs --ipc-only — WP1_NATIVE_PASS, exit 0
+  (.tmp/wp0-speed-ui-reload-csp.log). npm.cmd run build — exit 0
+  (.tmp/wp0-speed-ui-reload-build.log); traceability AC 927/927, F 210/210, exit 0.
+  Полный новый npm.cmd test запущен; production и unit sources после его старта
+  не менялись (уточнён read-back snapshot только в native fixture).
+- CI 39207992467 на прежнем ced3ae6 завершён success, watcher exit 0
+  (.tmp/wp0-speed-ui-ci-watch.log). Это не CI нового исправления. Revix review
+  5567522570 на ced3ae6 сообщил free-quota-reached: полного ревью нет,
+  возобновление 20.10 в 00:00 UTC / 03:00 МСК. Это не approval; действует
+  указание владельца учитывать Revix пока есть квота. Qodo остаётся главным;
+  attribution findings не изменялась. Для нового head нужны automatic Qodo и CI.
+- Повторный npm.cmd test — **4532 passed / 5 skipped / 0 failed**,
+  277 files passed / 2 skipped, **323.86 s**, exit 0
+  (.tmp/wp0-speed-ui-reload-full.log). npm.cmd run typecheck — exit 0,
+  161 channels / 0 public any (.tmp/wp0-speed-ui-reload-typecheck.log).
+  git diff --check — exit 0. Все validation processes terminal; новый commit
+  включает только подтверждённый Qodo fix, regressions/native fixture и журнал.
