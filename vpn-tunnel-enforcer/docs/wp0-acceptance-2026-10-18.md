@@ -1758,3 +1758,26 @@ Production/test tree не менялся во время прогона. Build/t
 0 public any,coverage AC927/927,F210/210,diff check —exit0. Native evidence —4
 loopback resource cases;7-fixture Electron runner не повторялся при неизменных
 IPC/preload/bridge. Новые exact-head Qodo/CI pending; весь WP-0 в работе.
+
+#90 принят: final head991f079,Qodo1557968 completed без findings,
+CI39341834240 success. Merge/maincf8adf1; reviewed/main tree совпал.
+Revix полного review по квоте не выполнил;отсутствие review не approval.
+
+## Live-check: HTTP attempt/resource drain (20.10.2026)
+
+AT-00-003: каждый request/response/socket удерживается до actual close;
+agent:false,redirect/HEAD->GET после полного drain,cancel/deadline fencing,
+8KiB cap и измерение до final drain. Premature close конечен;late reset имеет
+listener до close и не заменяет terminal result. До fix10 failed/1 passed;
+отдельная late-reset regression тоже failed до fix. Final targeted7 suites
+115/115 passed,5.90s,exit0,включая2 native loopback HTTP cases. Все
+промежуточные результаты и fixture correction записаны в progress.md.
+Typecheck165 channels/0 public any,coverage/diff exit0. Новый full/build и
+exact-head Qodo/CI pending;media/SOCKS/throughput,isolated child cleanup и
+общий live lifetime/history/UI ещё открыты. Весь WP-0 остаётся в работе.
+
+Final HTTP full:5001 passed/5 skipped/0 failed,301 files passed/2 skipped,
+325.81s,exit0. Production/test tree во время full не менялся. Build/typecheck
+165 channels/0 public any,coverage AC927/927,F210/210,diff check —exit0.
+Native evidence —2 loopback HTTP checks;7-fixture Electron runner при
+неизменных IPC/preload/bridge не повторялся. Exact-head Qodo/CI pending.
