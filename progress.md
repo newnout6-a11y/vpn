@@ -6613,3 +6613,44 @@ CI/review нового SHA проверяются отдельно после pu
   Coverage AC927/927,F210/210,diff check —exit0. IPC/preload/bridge не менялись,
  7-fixture Electron runner не повторялся; native evidence текущего участка —
   четыре loopback resource cases. Exact-head Qodo/CI требуются после публикации.
+
+### PR #90 принят; live-check HTTP resource drain (20.10.2026)
+
+- #90 final head991f0797624199477f83adaf6d89476ae725ac10: Qodo1557968 completed
+  без findings (.tmp/qodo90-final.json),CI39341834240 success (Windows/Rust/site).
+  Revix free-quota-reached до20.10 03:00 МСК;полного review нет,это не approval.
+  Merge/maincf8adf101bc009deed91f757c19d682cbdc3fcaf; reviewed/main tree совпал:
+  6a9459e3a04b485517652d1666b674d1492ed223.
+- AT-00-003: HTTP live-check теперь удерживает каждый ClientRequest,response
+  и отдельный socket до actual close. agent:false исключает shared pooled socket.
+  Redirect и HEAD->GET ждут полного drain предыдущей попытки;cancel/deadline
+  во время ожидания не запускают следующую. Общий deadline и8KiB cap сохранены.
+  Duration фиксируется до final drain;premature close получает error.
+- До fix новая httpDrain suite:10 failed/1 passed,6.37s,exit1
+  (.tmp/wp0-live-http-before.log),включая timeout прежнего premature-close promise.
+  После fix11/11 passed,1.35s. Добавлены duration/already-aborted и2 actual
+  loopback HTTP cases: normal HEAD405->GET и cancellation активного GET body.
+  Первый native cancel fixture ошибочно отменял HEAD после headers,когда HEAD
+  уже нормативно завершён:114 passed/1 failed,5.88s
+  (.tmp/wp0-live-http-targeted-final.log). Исправлен стенд HEAD405->pending GET;
+  production не изменён:115/115 passed,5.81s (.tmp/wp0-live-http-targeted2.log).
+- Дополнительная собственная regression:late response error после cancel был
+  unhandled —1 failed/13 skipped,1.44s,exit1 (.tmp/wp0-live-http-late-error-before.log).
+  Response/socket error listeners ставятся до cleanup guard и остаются до close;
+  поздний reset не заменяет terminal outcome. Final targeted7 suites:115/115
+  passed,5.90s,exit0 (.tmp/wp0-live-http-targeted3.log),команда из предыдущего
+  участка плюс src/main/liveServerProbe.httpDrain.test.ts.
+- npm.cmd run typecheck —165 channels/0 public any,exit0
+  (.tmp/wp0-live-http-typecheck.log);после late-error fix запущен новый build
+  с typecheck и full. Coverage AC927/927,F210/210,diff check —exit0.
+  Media/SOCKS/throughput и isolated handshake child cleanup,общий live owner/
+  deadline/progress/history/renderer lifetime ещё в работе. Нормативные docs/
+  не менялись; весь WP-0 этим участком не завершается.
+
+- Final HTTP full: npm.cmd test -- --maxWorkers=1 —5001 passed/5 skipped/0 failed,
+  301 files passed/2 skipped,325.81s,exit0 (.tmp/wp0-live-http-full.log).
+  Production/test tree с начала full не менялся. npm.cmd run build,включая
+  typecheck165 channels/0 public any —exit0 (.tmp/wp0-live-http-build.log).
+  Coverage AC927/927,F210/210,diff check —exit0. IPC/preload/bridge не менялись;
+ 7-fixture Electron runner не повторялся. Native evidence текущего участка —
+  две actual loopback HTTP checks. Новые exact-head Qodo/CI pending.

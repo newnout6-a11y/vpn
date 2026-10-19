@@ -855,16 +855,39 @@ export async function probeHttp(
   return new Promise(resolve => {
     let finished = false
     let req: http.ClientRequest | undefined
-    let response: http.IncomingMessage | undefined
+    type Resource = http.ClientRequest | http.IncomingMessage | net.Socket
+    const pending = new Map<Resource, Array<() => void>>()
+    const drainWaiters = new Set<() => void>()
+    let finalResult: HttpProbeResult | undefined
+    const publish = () => {
+      if (pending.size) return
+      if (finalResult) resolve(finalResult)
+      for (const done of drainWaiters) done()
+      drainWaiters.clear()
+    }
+    const track = (resource: Resource) => {
+      if (pending.has(resource) || resource.closed) return
+      pending.set(resource, [])
+      resource.once('close', () => {
+        for (const dispose of pending.get(resource) || []) dispose()
+        pending.delete(resource)
+        publish()
+      })
+    }
+    const listen = (resource: Resource, event: string, callback: (...args: any[]) => void) => {
+      resource.on(event, callback)
+      pending.get(resource)?.push(() => resource.removeListener(event, callback))
+    }
+    const destroyPending = () => { for (const resource of [...pending.keys()]) resource.destroy() }
     const finish = (result: Partial<HttpProbeResult>) => {
       if (finished) return
       finished = true
       clearTimeout(timer)
       signal?.removeEventListener('abort', abort)
-      req?.destroy()
-      response?.destroy()
-      resolve({ status: 'error', durationMs: Date.now() - started, targetPort: port,
-        isTls, confidence: 'low', ...result })
+      finalResult = { status: 'error', durationMs: Date.now() - started, targetPort: port,
+        isTls, confidence: 'low', ...result }
+      destroyPending()
+      publish()
     }
     const abort = () => finish({ status: 'skipped', error: 'Cancelled' })
     const timer = setTimeout(() => finish({ error: 'HTTP overall deadline exceeded' }), LIVE_PROBE_THRESHOLDS.HTTP_PROBE_TIMEOUT_MS)
@@ -875,22 +898,22 @@ export async function probeHttp(
       const tlsName = sniHostname || authority
       try {
         const current = (isTls ? https : http).request({
-          host: connectIp, port, path: url.pathname + url.search, method,
+          host: connectIp, port, path: url.pathname + url.search, method, agent: false,
           servername: net.isIP(tlsName) === 0 ? tlsName : undefined,
           rejectUnauthorized: false,
           headers: { Host: origin.host, 'User-Agent': 'VPNTE-Diagnostics/1.0', Accept: '*/*' }
         }, res => {
+          track(res)
+          listen(res, 'error', (err: Error) => { if (!finished && req === current) finish({ error: err.message }) })
           if (finished || req !== current) { res.destroy(); return }
-          response = res
           const statusCode = res.statusCode || 0
           let location: URL | undefined
           try { if (res.headers.location) location = new URL(res.headers.location, url) } catch {}
           const follow = (nextMethod: 'HEAD' | 'GET', next: URL, count: number) => {
             req = undefined
-            response = undefined
-            res.destroy()
-            current.destroy()
-            execute(nextMethod, next, count)
+            destroyPending()
+            const drained = new Promise<void>(done => { if (pending.size) drainWaiters.add(done); else done() })
+            void drained.then(() => execute(nextMethod, next, count))
           }
           if ([301, 302, 303, 307, 308].includes(statusCode) && location &&
               location.origin === origin.origin && !location.username && !location.password &&
@@ -907,17 +930,26 @@ export async function probeHttp(
             serverHeader: header('server'), viaHeader: header('via'), contentType: header('content-type'),
             locationHeader: location ? `${location.protocol}//${location.host}${location.pathname}` : undefined,
             bodySize: bytes })
-          res.on('data', (chunk: Buffer) => {
+          listen(res, 'data', (chunk: Buffer) => {
+            if (finished) return
             bytes = Math.min(bytes + chunk.length, LIVE_PROBE_THRESHOLDS.MAX_HTTP_BODY_BYTES)
             if (bytes >= LIVE_PROBE_THRESHOLDS.MAX_HTTP_BODY_BYTES) complete()
           })
-          res.on('end', complete)
-          res.on('error', err => finish({ error: err.message }))
-          res.on('aborted', () => finish({ error: 'HTTP response interrupted' }))
+          listen(res, 'end', complete)
+          listen(res, 'aborted', () => finish({ error: 'HTTP response interrupted' }))
+          listen(res, 'close', () => { if (!finished) finish({ error: 'HTTP response closed before completion' }) })
         })
         req = current
-        current.on('error', err => { if (req === current) finish({ error: err.message }) })
-        current.end()
+        track(current)
+        listen(current, 'socket', (socket: net.Socket) => {
+          track(socket)
+          listen(socket, 'error', (err: Error) => { if (!finished && req === current) finish({ error: err.message }) })
+          if (finished || req !== current) socket.destroy()
+        })
+        listen(current, 'error', (err: Error) => { if (req === current) finish({ error: err.message }) })
+        listen(current, 'close', () => { if (req === current && !finished) finish({ error: 'HTTP request closed before completion' }) })
+        if (finished) destroyPending()
+        else current.end()
       } catch (err: any) { finish({ error: err.message }) }
     }
     execute('HEAD', origin, 0)
