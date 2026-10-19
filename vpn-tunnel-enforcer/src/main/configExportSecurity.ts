@@ -22,19 +22,55 @@ foreach($sid in @($user.Value,'S-1-5-18')) {
   $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($id,'FullControl','Allow')))
 }`
 
-async function runSecurityScript(script: string): Promise<string> {
+// Path-based replacement is allowed only in a namespace other principals cannot
+// replace. Read-only sharing is fine; do not rewrite the selected directory ACL.
+const namespaceScript = `function Assert-ExportNamespace($file) {
+  if([IO.Path]::GetPathRoot($file) -notmatch '^[A-Za-z]:\\\\$') {throw 'ConfigExportNamespaceUntrusted'}
+  if(([IO.DriveInfo]::new([IO.Path]::GetPathRoot($file))).DriveType -eq [IO.DriveType]::Network) {throw 'ConfigExportNamespaceUntrusted'}
+  $trusted=@([Security.Principal.WindowsIdentity]::GetCurrent().User.Value,'S-1-5-18','S-1-5-32-544')
+  try {$trusted+=([Security.Principal.NTAccount]'NT SERVICE\\TrustedInstaller').Translate([Security.Principal.SecurityIdentifier]).Value} catch {}
+  $directory=New-Object IO.DirectoryInfo([IO.Path]::GetDirectoryName($file))
+  $rights=[Security.AccessControl.FileSystemRights]'Delete,DeleteSubdirectoriesAndFiles,ChangePermissions,TakeOwnership,WriteAttributes,WriteExtendedAttributes'
+  while($null -ne $directory) {
+    if(($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {throw 'ConfigExportNamespaceUntrusted'}
+    $security=[IO.Directory]::GetAccessControl($directory.FullName)
+    $owner=$security.GetOwner([Security.Principal.SecurityIdentifier]).Value
+    if($trusted -notcontains $owner) {throw 'ConfigExportNamespaceUntrusted'}
+    $raw=New-Object Security.AccessControl.RawSecurityDescriptor($security.GetSecurityDescriptorSddlForm('All'))
+    if($null -eq $raw.DiscretionaryAcl) {throw 'ConfigExportNamespaceUntrusted'}
+    foreach($rule in $security.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])) {
+      if($rule.AccessControlType -eq 'Allow' -and ($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -eq 0 -and
+        $trusted -notcontains $rule.IdentityReference.Value -and
+        (($rule.FileSystemRights -band $rights) -ne 0 -or ([int64]$rule.FileSystemRights -band 0x50000000) -ne 0)) {throw 'ConfigExportNamespaceUntrusted'}
+    }
+    $directory=$directory.Parent
+  }
+}`
+
+export class ConfigExportCreationFault extends IpcFault {
+  constructor(readonly indeterminate: boolean) { super('permission') }
+}
+
+async function runSecurityScript(script: string, creating = false): Promise<string> {
   const executable = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
   try {
     const { stdout } = await promisify(execFile)(executable, ['-NoProfile', '-NonInteractive', '-EncodedCommand',
       Buffer.from("$ErrorActionPreference='Stop';\n" + script, 'utf16le').toString('base64')], { windowsHide: true, timeout: 15_000, maxBuffer: 16_384 })
     return stdout.trim()
-  } catch { throw new IpcFault('permission') }
+  } catch (error) {
+    if (creating) throw new ConfigExportCreationFault(!/^CONFIG_EXPORT_NOT_CREATED\r?$/m.test(String((error as { stdout?: unknown }).stdout ?? '')))
+    throw new IpcFault('permission')
+  }
 }
 
 /** Windows access checks happen when a reader opens a handle. Install the DACL
  * in CreateNew itself: changing permissions on an existing empty file is too late. */
 export async function createPrivateConfigExport(temporary: string): Promise<{ dev: bigint; ino: bigint }> {
-  const output = await runSecurityScript(`Add-Type -TypeDefinition @'
+  const output = await runSecurityScript(`$creationStarted=$false
+try {
+${namespaceScript}
+Assert-ExportNamespace (${pathData(temporary)})
+Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
@@ -48,18 +84,23 @@ public static class VpnteExportIdentity {
 }
 '@
 ${privateAclScript}
+$creationStarted=$true
 $stream=[IO.FileStream]::new(${pathData(temporary)},[IO.FileMode]::CreateNew,[Security.AccessControl.FileSystemRights]::Write,[IO.FileShare]::None,4096,[IO.FileOptions]::None,$acl)
 try {
   $info=New-Object VpnteExportIdentity+Info
   if(-not [VpnteExportIdentity]::GetFileInformationByHandle($stream.SafeFileHandle,[ref]$info)) {throw 'ConfigExportIdentityFailed'}
   @{dev=$info.Volume.ToString();ino=([uint64]$info.IndexHigh*4294967296+[uint64]$info.IndexLow).ToString()}|ConvertTo-Json -Compress
-} finally {$stream.Dispose()}`)
+} finally {$stream.Dispose()}
+} catch {
+  if(-not $creationStarted -or ($_.Exception.GetBaseException().HResult -band 0xFFFF) -in @(80,183)) {'CONFIG_EXPORT_NOT_CREATED'}
+  throw
+}`, true)
   try {
     const identity = JSON.parse(output)
     if (typeof identity?.dev !== 'string' || typeof identity.ino !== 'string'
       || !/^\d+$/.test(identity.dev) || !/^[1-9]\d*$/.test(identity.ino)) throw new Error()
     return { dev: BigInt(identity.dev), ino: BigInt(identity.ino) }
-  } catch { throw new IpcFault('permission') }
+  } catch { throw new ConfigExportCreationFault(true) }
 }
 
 /** Protect staging before plaintext. Secret exports always use private access;
@@ -70,8 +111,9 @@ export async function prepareConfigExport(temporary: string, destination: string
   if (before && !before.isFile()) throw new IpcFault('validation')
   if (process.platform === 'win32') {
     // .NET ACL APIs avoid PowerShell module-path/autoload drift; no elevation or FFI in main.
-    const script = `$ErrorActionPreference='Stop';
+    const script = `${namespaceScript}
 $temporary=${pathData(temporary)}
+Assert-ExportNamespace $temporary
 $sections=[Security.AccessControl.AccessControlSections]'Access,Owner,Group'
 ${before && mode !== 'secrets' ? `$acl=[IO.File]::GetAccessControl(${pathData(destination)},$sections)` : privateAclScript}
 $expected=$acl.GetSecurityDescriptorSddlForm($sections)

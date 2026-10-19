@@ -1,7 +1,7 @@
 // AT-00-004, F-074: real config handlers and production IPC boundary; file/store/dialog faults.
 import { EventEmitter } from 'node:events'
-import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { rmSync, writeFileSync, existsSync } from 'node:fs'
+import { privateExportDirectory } from './testFixtures/privateExportDirectory'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { IPC_VERSION, IpcFault, ipcError, type IpcErrorCategory } from '../shared/ipc-result'
@@ -78,7 +78,7 @@ function expectFailure(response: any, category: IpcErrorCategory) {
   expect(JSON.stringify(errors)).not.toContain('FAKE-SECRET')
 }
 beforeEach(() => {
-  directory = mkdtempSync(join(tmpdir(), 'vpnte-config-errors-'))
+  directory = privateExportDirectory('.vpnte-config-errors-')
   sender = new Sender(); state.fault = undefined; state.failDialog = false; state.failStore = false; state.failSetKey = ''
   state.stat.mockReset().mockImplementation(stats => stats)
   state.stores.get('notification-prefs')!.notificationPrefs = { ...collectCurrentConfig().notifications, sound: true }

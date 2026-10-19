@@ -1217,3 +1217,22 @@ snapshot; cleanup не удаляет substitute с другим ID. Два на
 regressions покрывают оба handoff/commit окна, включая заранее открытый reader.
 Если helper не подтвердил ID после CreateNew, возможный пустой private residue
 не удаляется наугад: пишется явный cleanupFailed warning. Проверки — в progress.md.
+
+Qodo 1544270 на 6c691f1 обнаружил оставшееся окно между последним lstat и
+path-based rename. Windows export теперь допускается только на локальном диске
+в namespace с доверенным владельцем и ACL всех родительских каталогов до корня.
+Другие principals не могут иметь DELETE/DELETE_CHILD, WRITE_DAC/WRITE_OWNER,
+изменение атрибутов или generic write/all. Null DACL, UNC и reparse-каталоги
+отвергаются permission до plaintext. Read-only sharing разрешён. Доверенная
+граница — текущий пользователь, SYSTEM, Administrators и TrustedInstaller;
+защита от malicious code под тем же пользователем не заявляется. ACL выбранных
+каталогов приложение не меняет. Это ограничение экспорта в shared writable
+namespace, а не обещание атомарного handle-based rename.
+
+Native regression fixtures создаются отдельно под user profile, с private DACL
+только нового временного каталога, и удаляются после теста. Workspace/OS Temp
+в локальной среде дают sandbox principals права изменения entries и не подходят
+для положительного оракула; отрицательные случаи явно добавляют такие права.
+Revix minors: перед commit проверяется identity без соседних избыточных snapshots;
+подтверждённый отказ до создания и CreateNew collision не помечаются cleanupFailed.
+Indeterminate creation по-прежнему предупреждает о возможном пустом private residue.

@@ -3,7 +3,7 @@ import { lstatSync, renameSync, type BigIntStats } from 'fs'
 import { randomUUID } from 'crypto'
 import { dirname, join } from 'path'
 import type { OperationLease, SynchronousCommitResult } from './operationRegistry'
-import { createPrivateConfigExport, prepareConfigExport } from './configExportSecurity'
+import { ConfigExportCreationFault, createPrivateConfigExport, prepareConfigExport } from './configExportSecurity'
 import { logEvent } from './appLogger'
 import { classifyIpcError, IpcFault } from '../shared/ipc-result'
 
@@ -50,7 +50,7 @@ export async function writeConfigExport<T>(path: string, content: string, lease:
       catch (error) {
         // A timeout after CreateNew can leave an empty private file. Without
         // confirmed identity, never delete an unrelated colliding/replaced path.
-        try { logEvent('warn', 'config-manager', 'config export staging creation not confirmed', {
+        if (!(error instanceof ConfigExportCreationFault) || error.indeterminate) try { logEvent('warn', 'config-manager', 'config export staging creation not confirmed', {
           operationKey: 'op_' + lease.operation.operationId.replaceAll('-', ''), cleanupFailed: true, reason: classifyIpcError(error)
         }) } catch { /* Preserve the original bounded failure. */ }
         throw error
@@ -73,12 +73,9 @@ export async function writeConfigExport<T>(path: string, content: string, lease:
   })()
   try {
     await lease.wait(staging)
-    const staged = lstatSync(temporary, { bigint: true })
-    verifyIdentity(staged)
     return lease.commit(() => {
       const current = lstatSync(temporary, { bigint: true })
       verifyIdentity(current)
-      if ((['size', 'mtimeNs', 'ctimeNs'] as const).some(key => current[key] !== staged[key])) throw new IpcFault('conflict')
       verifyDestination()
       renameSync(temporary, path)
       created = false

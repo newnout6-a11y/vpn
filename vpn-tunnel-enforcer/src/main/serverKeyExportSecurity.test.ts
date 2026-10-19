@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs'
+import { closeSync, existsSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { tmpdir } from 'os'
+import { privateExportDirectory } from './testFixtures/privateExportDirectory'
 import { join } from 'path'
 
 const state = vi.hoisted(() => ({
@@ -122,7 +122,7 @@ beforeEach(async () => {
   state.writeFailure = undefined
   state.onOpened = undefined
   state.beforeOpen = undefined
-  exportDirectory = mkdtempSync(join(tmpdir(), 'vpnte-export-consent-'))
+  exportDirectory = privateExportDirectory('.vpnte-export-consent-')
   exportPath = join(exportDirectory, 'keys.txt')
   state.storeData.set('profiles', [{ id: 'a', name: 'Profile', protocol: 'vless', outbound: { type: 'vless', server: 'server.test', server_port: 443, uuid: 'FAKE-PRIVATE-KEY' } }])
   state.nativePrompt.mockReset().mockResolvedValue({ response: 0 })

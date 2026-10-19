@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync, readdirSync, writeFileSync } from 'node:fs'
-import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
+import { readFile, rm } from 'node:fs/promises'
+import { privateExportDirectory } from './testFixtures/privateExportDirectory'
 import { EventEmitter } from 'events'
 import { join } from 'path'
 
@@ -133,8 +134,7 @@ async function logRows() {
 beforeEach(async () => {
   vi.resetModules(); vi.clearAllMocks()
   state.hold = ''; state.reached = 0; state.writeFailure = undefined; state.handles = []; state.afterRename = undefined
-  await mkdir('.tmp', { recursive: true })
-  state.dir = await mkdtemp(join(process.cwd(), '.tmp', 'key-operations-'))
+  state.dir = privateExportDirectory('.vpnte-key-operations-')
   sender = new Sender(); destination = join(state.dir, 'destination.txt')
   writeFileSync(destination, 'previous export')
   state.clipboardText = ''; state.clipboardWrite.mockReset().mockResolvedValue(undefined)

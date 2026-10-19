@@ -94,7 +94,9 @@ describe('subscription network ownership', () => {
     const input = base + '/import-held'
     const run = target ? picker.addFromInputToGroup(input, target.id) : picker.addFromInput(input)
     const rejected = expect(run).rejects.toMatchObject({ category: 'cancelled' })
-    await vi.waitFor(() => expect(replies.has('/import-held')).toBe(true))
+    // Network/process startup under concurrent Windows CI load is preparation;
+    // the cancellation budget starts only after the held request is admitted.
+    await vi.waitFor(() => expect(replies.has('/import-held')).toBe(true), { timeout: 5_000 })
     const operation = registry.list().find(op => op.status === 'running')!
     expect(operation.kind).toBe('import')
     const start = performance.now()
@@ -109,7 +111,7 @@ describe('subscription network ownership', () => {
     expect(await disk('server-picker')).toEqual(beforeProfiles)
     expect(await disk('server-groups')).toEqual(beforeGroups)
     expect(state.log.mock.calls.some(call => /added from|appended to/.test(call[2]))).toBe(false)
-  })
+  }, 15_000)
 
   it('retains actual concurrent import identities through IPC, JSONL, diagnostics and disk reload', async () => {
     const picker = await import('./serverPicker')

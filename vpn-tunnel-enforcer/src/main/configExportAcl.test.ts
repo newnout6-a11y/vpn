@@ -3,13 +3,14 @@ import { execFile, spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { build } from 'esbuild'
 import { promisify } from 'node:util'
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { readdirSync, renameSync, writeFileSync } from 'node:fs'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { OperationRegistry } from './operationRegistry'
 import { writeConfigExport } from './configOperationIo'
 import { createPrivateConfigExport, prepareConfigExport } from './configExportSecurity'
+import { privateExportDirectory } from './testFixtures/privateExportDirectory'
 
 const quote = (value: string) => "[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + Buffer.from(value, 'utf8').toString('base64') + "'))"
 async function powershell(script: string) {
@@ -20,12 +21,33 @@ async function powershell(script: string) {
 let directory: string
 const registry = new OperationRegistry()
 beforeEach(async () => {
-  await mkdir('.tmp', { recursive: true })
-  directory = await mkdtemp(join(process.cwd(), '.tmp', "config-acl-'-"))
+  directory = privateExportDirectory(".vpnte-config-acl-'-")
 })
 afterEach(async () => { if (directory) await rm(directory, { recursive: true, force: true }) })
 
 describe.skipIf(process.platform !== 'win32')('Windows configuration export ACL', () => {
+  it.each(['Delete', 'DeleteSubdirectoriesAndFiles', 'ChangePermissions', 'TakeOwnership', 'WriteAttributes', 'WriteExtendedAttributes']
+    .flatMap(right => ['parent', 'ancestor'].map(scope => ({ right, scope }))))('refuses untrusted $right in its $scope', async ({ right, scope }) => {
+    const child = join(directory, 'child')
+    await mkdir(child)
+    const path = join(scope === 'parent' ? directory : child, 'unsafe.json')
+    await writeFile(path, 'old destination')
+    await powershell(`$path=${quote(directory)};$acl=[IO.Directory]::GetAccessControl($path);$acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier('S-1-5-19')),'${right}','Allow')));[IO.Directory]::SetAccessControl($path,$acl)`)
+    await expect(registry.run('export', lease => writeConfigExport(path, 'private content', lease, true, 'secrets'))).rejects.toMatchObject({ category: 'permission' })
+    expect(await readFile(path, 'utf8')).toBe('old destination')
+    expect((await readdir(scope === 'parent' ? directory : child)).filter(file => file.startsWith('.vpnte-export-'))).toEqual([])
+  }, 15_000)
+  it.each(['secrets', 'redacted'] as const)('refuses a reparse directory for %s exports', async mode => {
+    const target = join(directory, 'target'), junction = join(directory, 'junction')
+    await mkdir(target)
+    await symlink(target, junction, 'junction')
+    const path = join(junction, 'destination.json')
+    await writeFile(path, 'old destination')
+    await expect(registry.run('export', lease => writeConfigExport(path, 'private content', lease, true, mode)))
+      .rejects.toMatchObject({ category: 'permission' })
+    expect(await readFile(path, 'utf8')).toBe('old destination')
+    expect(await readdir(target)).toEqual(['destination.json'])
+  })
   it('rejects replacement of staging before terminal rename and preserves the substitute during cleanup', async () => {
     const path = join(directory, 'destination.json')
     await writeFile(path, 'old destination')
@@ -45,7 +67,7 @@ describe.skipIf(process.platform !== 'win32')('Windows configuration export ACL'
   it('atomically creates private staging without truncating or deleting an existing path', async () => {
     const path = join(directory, 'collision.tmp')
     await writeFile(path, 'original')
-    await expect(createPrivateConfigExport(path)).rejects.toMatchObject({ category: 'permission' })
+    await expect(createPrivateConfigExport(path)).rejects.toMatchObject({ category: 'permission', indeterminate: false })
     expect(await readFile(path, 'utf8')).toBe('original')
   })
   it.each(['\u2018', '\u2019', '\u201a', '\u201b'])('treats a typographic apostrophe %s in the chosen path as data', async apostrophe => {

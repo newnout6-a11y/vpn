@@ -2,7 +2,8 @@
 // native dialogs and the Electron/DPAPI store boundary are replaced.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { EventEmitter } from 'events'
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { privateExportDirectory } from './testFixtures/privateExportDirectory'
 import { join } from 'path'
 
 const state = vi.hoisted(() => ({
@@ -90,8 +91,7 @@ async function logRows() {
 beforeEach(async () => {
   vi.resetModules(); vi.clearAllMocks()
   state.hold = ''; state.reached = 0; state.writeFault = false; state.renameFault = false; state.removeFault = false; state.handles = []; state.afterRename = undefined
-  await mkdir('.tmp', { recursive: true })
-  state.dir = await mkdtemp(join(process.cwd(), '.tmp', 'config-operations-'))
+  state.dir = privateExportDirectory('.vpnte-config-operations-')
   sender = new Sender()
   state.log = vi.spyOn(await import('./appLogger'), 'logEvent')
   for (const method of ['log', 'warn', 'error'] as const) vi.spyOn(console, method).mockImplementation(() => {})

@@ -5099,3 +5099,60 @@ CI/review нового SHA проверяются отдельно после pu
   (.tmp/wp0-config-identity-typecheck-final.log). git diff --check — exit 0.
   Все локальные процессы terminal; новый commit/push проходит повторный
   exact-head review/CI gate. WP-0 и WP-2 goal остаётся active.
+
+### WP-0 — Qodo #74: запрет небезопасного export namespace
+
+- На 6c691f1 Qodo 1544270 completed: прежние findings implemented, новый high
+  bc51a4ea-9a1b-4466-84f3-c84bc2431f92 / 4310516238 — shared directory entry
+  можно подменить после финального lstat до renameSync. Revix 117900191974
+  completed/neutral: minor 4310523114 (избыточные соседние snapshots),
+  4310523120 (неточное cleanupFailed при подтверждённом отказе создания).
+- Автоматическая проверка разрешений отклонила пробный native handle rename
+  с причиной blocked by policy, без подробностей; вызов не исполнялся и не
+  повторялся другим способом. Выбран fail-closed fallback: на Windows проверять
+  owner/ACL/reparse каждого каталога до корня. UNC/null DACL/untrusted owner или
+  чужие права удаления, изменения ACL/owner/атрибутов и generic write/all
+  отвергаются permission. Приложение не меняет пользовательские directory ACL.
+  Trusted boundary: current user/SYSTEM/Administrators/TrustedInstaller.
+  Произвольный malicious same-user process за эту границу не включается.
+- Before новых parent/ancestor regressions: 2 failed / 11 skipped, 4.83 s,
+  exit 1 (.tmp/wp0-config-namespace-before.log). Первый guard прогон: 22 failed /
+  13 passed, 8.63 s (.tmp/wp0-config-namespace-regression.log): настоящие .tmp и
+  OS Temp имеют sandbox principals с MODIFY/DELETE_CHILD. Их не внесли в trust.
+  Положительные native fixtures перенесены в новые private каталоги user profile;
+  меняется ACL только каждого созданного fixture, cleanup удаляет только его.
+- При переносе обнаружен PowerShell argument-mode дефект нового вызова guard:
+  method expression pathData должен быть заключён в скобки. Redacted variable
+  path работал, secrets ошибочно отвергался. Промежуточный прогон: 15 failed /
+  20 passed, 34.83 s (.tmp/wp0-config-namespace-regression2.log). После исправления
+  два native набора: 35 passed / 0 failed, 31.71 s, exit 0
+  (.tmp/wp0-config-namespace-regression3.log), до последующих уточнений minors.
+- Revix minors исправлены: один identity-only check внутри commit; creation
+  fault различает подтверждённое отсутствие создания/коллизию и indeterminate
+  outcome. Только второй оставляет cleanupFailed warning, не удаляя unknown entry.
+- CI 39203144730 на 6c691f1 завершён failure: два subscription import tests не
+  дождались loopback request за стандартный 1 s на Windows runner. Подготовка
+  теперь ждёт до 5 s, test budget 15 s; cancellation после admission по-прежнему
+  <900 ms. Полный failed CI лог: .tmp/wp0-config-identity-ci-failure.log.
+  Локальный npm.cmd run typecheck — exit 0, 160 channels/0 public any
+  (.tmp/wp0-config-namespace-typecheck.log). Расширенный адресный набор запущен.
+- Расширенный адресный набор: npm.cmd test -- src/main/configExportAcl.test.ts
+  src/main/serverKeyExportSecurity.test.ts src/main/configOperations.test.ts
+  src/main/serverKeyOperations.test.ts src/main/configExportSecurity.test.ts
+  src/main/configIpcErrors.test.ts src/main/subscriptionOperations.test.ts —
+  **159 passed / 0 failed**, 103.92 s, exit 0
+  (.tmp/wp0-config-namespace-targeted.log). Затем negative matrix расширена
+  до шести directory rights × parent/ancestor и двух reparse cases (secrets/redacted).
+  Mapped network drives также отвергаются: буква диска сама по себе не доказывает
+  local namespace. Финальный полный прогон включает эти уточнения.
+- Финальный npm.cmd test — **4517 passed / 5 skipped / 0 failed**,
+  276 files passed / 2 skipped, **315.01 s**, exit 0
+  (.tmp/wp0-config-namespace-full.log). Code/test tree во время прогона не менялся.
+  npm.cmd run typecheck — exit 0, 160 channels/0 public any
+  (.tmp/wp0-config-namespace-typecheck-final.log); npm.cmd run build — exit 0
+  (.tmp/wp0-config-namespace-build-final.log). python -X utf8
+  docs/04-приёмочные-тесты/traceability/check-coverage.py — AC 927/927,
+  F 210/210, exit 0. node scripts/test-electron-runtime.mjs — ELECTRON_SMOKE_PASS;
+  node scripts/test-wp1-native.mjs --ipc-only — WP1_NATIVE_PASS; оба exit 0
+  (.tmp/wp0-config-namespace-electron.log, .tmp/wp0-config-namespace-csp.log).
+  git diff --check — exit 0. После commit/push обязательны новые CI/Qodo/Revix.
