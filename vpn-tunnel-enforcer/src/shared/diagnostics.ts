@@ -149,6 +149,9 @@ export interface PathReport {
 }
 
 export interface UrlAvailabilityResult {
+  /** Absent on legacy history rows. */
+  correlationId?: string
+  provenance?: import('./connection-provenance').ConnectionProvenance
   id: string
   url: string
   testedAt: number

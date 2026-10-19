@@ -38,6 +38,10 @@ import { logEvent } from './appLogger'
 import { tunController, getDirectProxyPort } from './tunController'
 import { getClashApiInfo } from './tunController'
 import { settingsStore } from './settings'
+import { IpcFault, classifyIpcError, ipcError } from '../shared/ipc-result'
+import { operations } from './operations'
+import type { OperationLease } from './operationRegistry'
+import { runRequesterOperation } from './requesterOperation'
 import {
   scoreSinglePage,
   compareRenders,
@@ -47,7 +51,15 @@ import {
 
 interface UrlAvailabilityOptions {
   disableGeoLookup?: boolean
+  signal?: AbortSignal
+  onOperation?: (lease: OperationLease) => void
 }
+
+function assertProbeActive(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new IpcFault('cancelled')
+}
+
+function probeError(error: unknown): string { return ipcError(classifyIpcError(error)).message }
 
 // ─── Store: history of recent checks ─────────────────────────────────────────
 
@@ -126,7 +138,8 @@ function isPoisonedIp(ip: string): boolean {
 
 // ─── Per-stage native probes (run from Node, captured by TUN if active) ───────
 
-async function probeDns(host: string): Promise<PathReport['dns']> {
+async function probeDns(host: string, signal?: AbortSignal): Promise<PathReport['dns']> {
+  assertProbeActive(signal)
   // Already an IP literal — skip resolution entirely.
   if (/^\d+\.\d+\.\d+\.\d+$/.test(host) || host.includes(':')) {
     return { resolved: true, ips: [host], ms: 0, poisoned: false }
@@ -134,7 +147,9 @@ async function probeDns(host: string): Promise<PathReport['dns']> {
   const start = Date.now()
   try {
     const v4 = await dns.resolve4(host).catch(() => [] as string[])
+    assertProbeActive(signal)
     const v6 = await dns.resolve6(host).catch(() => [] as string[])
+    assertProbeActive(signal)
     const ips = [...v4, ...v6]
     if (!ips.length) {
       return { resolved: false, ips: [], ms: Date.now() - start, poisoned: false }
@@ -142,93 +157,108 @@ async function probeDns(host: string): Promise<PathReport['dns']> {
     const poisoned = ips.some(isPoisonedIp)
     return { resolved: true, ips, ms: Date.now() - start, poisoned }
   } catch {
+    assertProbeActive(signal)
     return { resolved: false, ips: [], ms: Date.now() - start, poisoned: false }
   }
 }
 
-function probeTcp(host: string, port: number): Promise<{ connected: boolean; ms: number | null; error?: string }> {
-  return new Promise((resolve) => {
-    const socket = new Socket()
-    const start = Date.now()
-    let done = false
-    const finish = (value: { connected: boolean; ms: number | null; error?: string }) => {
-      if (done) return
-      done = true
-      socket.removeAllListeners()
-      socket.destroy()
-      resolve(value)
-    }
+/** The raw probe owns its socket until close, even after the caller is cancelled. */
+async function socketProbe<T>(socket: Socket, signal: AbortSignal | undefined, cancelled: T, setup: (finish: (value: T) => void) => void): Promise<T> {
+  const closed = socket.closed ? Promise.resolve() : new Promise<void>(resolve => { socket.once('close', () => resolve()) })
+  let abort!: () => void
+  try {
+    const result = await new Promise<T>((resolve, reject) => {
+      let done = false
+      const finish = (value: T) => {
+        if (done) return
+        done = true
+        socket.destroy()
+        resolve(value)
+      }
+      abort = () => finish(cancelled)
+      signal?.addEventListener('abort', abort, { once: true })
+      if (signal?.aborted) abort()
+      else { try { setup(finish) } catch (error) { reject(error) } }
+    })
+    assertProbeActive(signal)
+    return result
+  } finally {
+    signal?.removeEventListener('abort', abort)
+    if (!socket.destroyed) socket.destroy()
+    await closed
+    socket.removeAllListeners()
+  }
+}
+
+function probeTcp(host: string, port: number, signal?: AbortSignal): Promise<{ connected: boolean; ms: number | null; error?: string }> {
+  assertProbeActive(signal)
+  const socket = new Socket(), start = Date.now()
+  return socketProbe<Awaited<ReturnType<typeof probeTcp>>>(socket, signal, { connected: false, ms: null, error: 'cancelled' }, finish => {
     socket.setTimeout(PROBE_TIMEOUT_MS)
     socket.once('connect', () => finish({ connected: true, ms: Date.now() - start }))
     socket.once('timeout', () => finish({ connected: false, ms: null, error: 'timeout' }))
-    socket.once('error', (err: Error) => finish({ connected: false, ms: null, error: err.message }))
+    socket.once('error', (err: Error) => finish({ connected: false, ms: null, error: probeError(err) }))
     socket.connect(port, host)
   })
 }
 
 function probeTls(
   host: string,
-  port: number
+  port: number,
+  signal?: AbortSignal
 ): Promise<{ handshakeOk: boolean; ms: number | null; cipher: string | null; protocol: string | null; error?: string }> {
-  return new Promise((resolve) => {
-    const start = Date.now()
-    let done = false
-    let socket: TLSSocket
-    const finish = (value: { handshakeOk: boolean; ms: number | null; cipher: string | null; protocol: string | null; error?: string }) => {
-      if (done) return
-      done = true
-      try { socket?.removeAllListeners(); socket?.destroy() } catch {}
-      resolve(value)
-    }
-    try {
-      socket = tlsConnect({
-        host,
-        port,
-        servername: host,
-        // Treat a self-signed / mismatched cert as "TLS handshake worked"
-        // — the site is reachable, even if the cert is funky. We surface
-        // the cipher/protocol either way.
-        rejectUnauthorized: false,
-        timeout: PROBE_TIMEOUT_MS
-      })
-      socket.once('secureConnect', () => {
-        const cipher = socket.getCipher()?.name ?? null
-        const protocol = socket.getProtocol() ?? null
-        finish({ handshakeOk: true, ms: Date.now() - start, cipher, protocol })
-      })
-      socket.once('timeout', () => finish({ handshakeOk: false, ms: null, cipher: null, protocol: null, error: 'timeout' }))
-      socket.once('error', (err: Error) => finish({ handshakeOk: false, ms: null, cipher: null, protocol: null, error: err.message }))
-    } catch (err: any) {
-      finish({ handshakeOk: false, ms: null, cipher: null, protocol: null, error: err?.message || String(err) })
-    }
+  assertProbeActive(signal)
+  const start = Date.now()
+  const socket: TLSSocket = tlsConnect({
+    host,
+    port,
+    servername: host,
+    // A self-signed/mismatched certificate still proves TLS reachability.
+    rejectUnauthorized: false,
+    timeout: PROBE_TIMEOUT_MS
+  })
+  return socketProbe<Awaited<ReturnType<typeof probeTls>>>(socket, signal, { handshakeOk: false, ms: null, cipher: null, protocol: null, error: 'cancelled' }, finish => {
+    socket.once('secureConnect', () => {
+      const cipher = socket.getCipher()?.name ?? null
+      const protocol = socket.getProtocol() ?? null
+      finish({ handshakeOk: true, ms: Date.now() - start, cipher, protocol })
+    })
+    socket.once('timeout', () => finish({ handshakeOk: false, ms: null, cipher: null, protocol: null, error: 'timeout' }))
+    socket.once('error', (err: Error) => finish({ handshakeOk: false, ms: null, cipher: null, protocol: null, error: probeError(err) }))
   })
 }
 
 async function probeHttp(
-  parsed: ParsedUrl
+  parsed: ParsedUrl,
+  signal?: AbortSignal
 ): Promise<{ status: number | null; ms: number | null; server: string | null; error?: string }> {
   const start = Date.now()
+  assertProbeActive(signal)
   try {
     // HEAD first because we don't care about the body — but a lot of
     // CDNs return 405 on HEAD, in which case we fall back to a tiny
     // ranged GET.
     let resp = await axios.head(parsed.raw, {
+      signal,
       timeout: PROBE_TIMEOUT_MS,
       validateStatus: () => true,
       maxRedirects: 3
     }).catch(err => ({ err }) as any)
+    assertProbeActive(signal)
 
     if (resp.err || resp.status === 405 || resp.status === 501) {
       resp = await axios.get(parsed.raw, {
+        signal,
         timeout: PROBE_TIMEOUT_MS,
         validateStatus: () => true,
         maxRedirects: 3,
         headers: { Range: 'bytes=0-0' }
       }).catch(err => ({ err }) as any)
+      assertProbeActive(signal)
     }
 
     if (resp.err) {
-      return { status: null, ms: null, server: null, error: resp.err?.message || String(resp.err) }
+      return { status: null, ms: null, server: null, error: probeError(resp.err) }
     }
     return {
       status: resp.status,
@@ -236,15 +266,18 @@ async function probeHttp(
       server: resp.headers?.server ?? null
     }
   } catch (err: any) {
-    return { status: null, ms: null, server: null, error: err?.message || String(err) }
+    assertProbeActive(signal)
+    return { status: null, ms: null, server: null, error: probeError(err) }
   }
 }
 
 async function fetchAsn(ip: string, options: UrlAvailabilityOptions = {}): Promise<PathReport['asn']> {
+  assertProbeActive(options.signal)
   if (!ip || isPoisonedIp(ip)) return null
   if (options.disableGeoLookup === true) return null
   try {
-    const resp = await axios.get(`https://ipapi.co/${ip}/json/`, { timeout: 5000 })
+    const resp = await axios.get(`https://ipapi.co/${ip}/json/`, { timeout: 5000, signal: options.signal })
+    assertProbeActive(options.signal)
     if (resp.data && !resp.data.error) {
       return {
         country: (resp.data.country_name || resp.data.country || '').toString().trim() || 'неизвестно',
@@ -252,6 +285,7 @@ async function fetchAsn(ip: string, options: UrlAvailabilityOptions = {}): Promi
       }
     }
   } catch {
+    assertProbeActive(options.signal)
     // ipapi rate limits — silent fallback.
   }
   return null
@@ -262,7 +296,8 @@ async function fetchAsn(ip: string, options: UrlAvailabilityOptions = {}): Promi
 
 async function probeNative(parsed: ParsedUrl, options: UrlAvailabilityOptions = {}): Promise<PathReport> {
   const totalStart = Date.now()
-  const dnsRes = await probeDns(parsed.host)
+  const dnsRes = await probeDns(parsed.host, options.signal)
+  assertProbeActive(options.signal)
   if (!dnsRes || !dnsRes.resolved || dnsRes.poisoned) {
     return {
       available: false,
@@ -282,8 +317,10 @@ async function probeNative(parsed: ParsedUrl, options: UrlAvailabilityOptions = 
 
   const firstIp = dnsRes.ips[0]
   const asn = await fetchAsn(firstIp, options).catch(() => null)
+  assertProbeActive(options.signal)
 
-  const tcpRes = await probeTcp(parsed.host, parsed.port)
+  const tcpRes = await probeTcp(parsed.host, parsed.port, options.signal)
+  assertProbeActive(options.signal)
   if (!tcpRes.connected) {
     return {
       available: false,
@@ -301,7 +338,8 @@ async function probeNative(parsed: ParsedUrl, options: UrlAvailabilityOptions = 
 
   let tlsRes: PathReport['tls'] = null
   if (parsed.scheme === 'https') {
-    const tls = await probeTls(parsed.host, parsed.port)
+    const tls = await probeTls(parsed.host, parsed.port, options.signal)
+    assertProbeActive(options.signal)
     tlsRes = {
       handshakeOk: tls.handshakeOk,
       ms: tls.ms,
@@ -324,7 +362,8 @@ async function probeNative(parsed: ParsedUrl, options: UrlAvailabilityOptions = 
     }
   }
 
-  const httpRes = await probeHttp(parsed)
+  const httpRes = await probeHttp(parsed, options.signal)
+  assertProbeActive(options.signal)
   // HTTP-level availability. Note: a 200 does NOT mean "usable here" — geo
   // blocks return healthy 200s with an "unavailable in your country" body.
   // That determination is made later via the rendered-page signal (single or
@@ -372,7 +411,8 @@ async function probeNative(parsed: ParsedUrl, options: UrlAvailabilityOptions = 
  * or an error JSON. We can't get the per-stage breakdown this way, but
  * we get the "would this work without the VPN" answer.
  */
-async function probeViaClashApi(parsed: ParsedUrl): Promise<PathReport> {
+async function probeViaClashApi(parsed: ParsedUrl, signal?: AbortSignal): Promise<PathReport> {
+  assertProbeActive(signal)
   const info = getClashApiInfo()
   if (!info) {
     return {
@@ -398,12 +438,14 @@ async function probeViaClashApi(parsed: ParsedUrl): Promise<PathReport> {
     const resp = await axios.get(
       `http://127.0.0.1:${info.port}/proxies/direct-out/delay`,
       {
+        signal,
         params: { url: parsed.raw, timeout: PROBE_TIMEOUT_MS },
         headers: { Authorization: `Bearer ${info.secret}` },
         timeout: PROBE_TIMEOUT_MS + 1000,
         validateStatus: () => true
       }
     )
+    assertProbeActive(signal)
     if (resp.status >= 200 && resp.status < 300 && typeof resp.data?.delay === 'number') {
       // Transport reached the origin via direct-out. Geo-block determination
       // is done at the orchestration level using rendered-page signals, so we
@@ -427,9 +469,7 @@ async function probeViaClashApi(parsed: ParsedUrl): Promise<PathReport> {
       available: false,
       totalMs: Date.now() - start,
       errorStage: 'http',
-      errorMessage: resp.data?.message
-        ? `direct-out не достал URL: ${resp.data.message}`
-        : `direct-out вернул ${resp.status}`,
+      errorMessage: `direct-out вернул ${resp.status}`,
       dns: null,
       tcp: null,
       tls: null,
@@ -438,11 +478,12 @@ async function probeViaClashApi(parsed: ParsedUrl): Promise<PathReport> {
       source: 'clash-direct-out'
     }
   } catch (err: any) {
+    assertProbeActive(signal)
     return {
       available: false,
       totalMs: null,
       errorStage: 'api',
-      errorMessage: `clash API ошибка: ${err?.message || String(err)}`,
+      errorMessage: `clash API ошибка: ${probeError(err)}`,
       dns: null,
       tcp: null,
       tls: null,
@@ -548,8 +589,10 @@ async function applyGeoBlock(
   parsed: ParsedUrl,
   tunnel: PathReport | null,
   direct: PathReport | null,
-  tunRunning: boolean
+  tunRunning: boolean,
+  lease: OperationLease
 ): Promise<void> {
+  lease.assertActive()
   // Only bother when at least one side reached the origin (transport OK) —
   // there's nothing to "render" through a dead path.
   const directReachable = !!direct && (direct.available || direct.http?.status != null)
@@ -559,11 +602,12 @@ async function applyGeoBlock(
     // Render foreign (TUN) and local (direct-out SOCKS) in parallel.
     const dpPort = getDirectProxyPort()
     const [foreignSig, localSig] = await Promise.all([
-      tunnelReachable ? probePageSignal(parsed.raw, undefined) : Promise.resolve(null),
+      tunnelReachable ? lease.retain(probePageSignal(parsed.raw, undefined, lease.signal)) : Promise.resolve(null),
       directReachable && dpPort
-        ? probePageSignal(parsed.raw, `socks5://127.0.0.1:${dpPort}`)
+        ? lease.retain(probePageSignal(parsed.raw, `socks5://127.0.0.1:${dpPort}`, lease.signal))
         : Promise.resolve(null)
     ])
+    lease.assertActive()
 
     // Differential: if we have both renders, this is the strong signal for the
     // LOCAL (direct) side — "works abroad, blocked at home".
@@ -611,7 +655,8 @@ async function applyGeoBlock(
 
   // Tunnel OFF — only the local (direct) render exists; single-page scoring.
   if (directReachable && direct) {
-    const sig = await probePageSignal(parsed.raw, 'direct://')
+    const sig = await probePageSignal(parsed.raw, 'direct://', lease.signal)
+    lease.assertActive()
     if (sig) {
       const v = scoreSinglePage(sig)
       if (v.blocked) {
@@ -632,9 +677,17 @@ function geoBlockMessage(v: GeoBlockVerdict): string {
 // ─── Public entry point ──────────────────────────────────────────────────────
 
 export async function checkUrl(input: string, options: UrlAvailabilityOptions = {}): Promise<UrlAvailabilityResult> {
+  return operations.run('availability-check', lease => {
+    options.onOperation?.(lease)
+    return checkUrlOwned(input, { ...options, signal: lease.signal }, lease)
+  }, { signal: options.signal })
+}
+
+async function checkUrlOwned(input: string, options: UrlAvailabilityOptions, lease: OperationLease): Promise<UrlAvailabilityResult> {
+  lease.assertActive()
   const parsed = parseUrlForProbe(input)
   if (!parsed) {
-    throw new Error('Не удалось разобрать ссылку. Введите URL вида example.com или https://example.com/path.')
+    throw new IpcFault('validation')
   }
 
   const tunRunning = tunController.getStatus().running
@@ -653,14 +706,15 @@ export async function checkUrl(input: string, options: UrlAvailabilityOptions = 
   let direct: PathReport | null = null
   if (tunRunning) {
     const [t, d] = await Promise.all([
-      probeNative(parsed, options),
-      probeViaClashApi(parsed)
+      lease.retain(probeNative(parsed, options)),
+      lease.retain(probeViaClashApi(parsed, lease.signal))
     ])
     tunnel = t
     direct = d
   } else {
     direct = await probeNative(parsed, options)
   }
+  lease.assertActive()
 
   // ─── Geo-block determination via rendered-page signals ──────────────────
   // A transport-level "available" (200/connect) does NOT mean usable here: the
@@ -672,10 +726,11 @@ export async function checkUrl(input: string, options: UrlAvailabilityOptions = 
   //     scoring (weaker, but the only option without a foreign reference).
   // Only HTTPS/HTTP pages that reached the origin are worth rendering.
   try {
-    await applyGeoBlock(parsed, tunnel, direct, tunRunning)
+    await applyGeoBlock(parsed, tunnel, direct, tunRunning, lease)
   } catch (err) {
+    lease.assertActive()
     logEvent('debug', 'url-availability', 'geo-block detection skipped', {
-      error: (err as Error)?.message
+      error: probeError(err)
     })
   }
 
@@ -688,23 +743,27 @@ export async function checkUrl(input: string, options: UrlAvailabilityOptions = 
     tunnel,
     direct,
     verdict,
-    recommendation
+    recommendation,
+    correlationId: lease.operation.correlationId,
+    provenance: { source: lease.operation.source, owner: lease.operation.owner,
+      route: tunRunning ? 'tun' : 'unconfirmed', confidence: 'observed' }
   }
 
-  // Append to history (LRU, MAX_HISTORY entries).
-  const history = store.get('history') as UrlAvailabilityResult[]
-  history.unshift(result)
-  if (history.length > MAX_HISTORY) history.length = MAX_HISTORY
-  store.set('history', history)
+  return lease.commit(() => {
+    // Append to history (LRU, MAX_HISTORY entries).
+    const history = [result, ...(store.get('history') as UrlAvailabilityResult[])]
+    if (history.length > MAX_HISTORY) history.length = MAX_HISTORY
+    store.set('history', history)
 
-  logEvent('info', 'url-availability', 'check finished', {
-    host: parsed.host,
-    verdict,
-    tunnelOk: tunnel?.available ?? null,
-    directOk: direct?.available ?? null
+    logEvent('info', 'url-availability', 'check finished', {
+      host: parsed.host,
+      verdict,
+      tunnelOk: tunnel?.available ?? null,
+      directOk: direct?.available ?? null
+    })
+
+    return result
   })
-
-  return result
 }
 
 export function getHistory(): UrlAvailabilityResult[] {
@@ -718,10 +777,10 @@ export function clearHistory(): void {
 // ─── IPC ─────────────────────────────────────────────────────────────────────
 
 export function registerUrlAvailabilityHandlers(): void {
-  ipcMain.handle('url-availability:check', async (_event, url: string) => {
-    return checkUrl(url, {
-      disableGeoLookup: settingsStore.get().disableGeoLookup === true
-    })
+  ipcMain.handle('url-availability:check', async (event, url: string, requestId?: string) => {
+    return runRequesterOperation(event.sender, requestId, (signal, onOperation) => checkUrl(url, {
+      disableGeoLookup: settingsStore.get().disableGeoLookup === true, signal, onOperation
+    }))
   })
   ipcMain.handle('url-availability:history', async () => {
     return getHistory()
@@ -741,8 +800,11 @@ export function registerUrlAvailabilityHandlers(): void {
  * Returns null when the page couldn't be rendered at all (load failure /
  * timeout) — the caller treats that as "no signal" rather than "not blocked".
  */
-export async function probePageSignal(url: string, proxyRules?: string): Promise<PageSignal | null> {
-  return new Promise((resolve) => {
+export async function probePageSignal(url: string, proxyRules?: string, signal?: AbortSignal): Promise<PageSignal | null> {
+  assertProbeActive(signal)
+  const pending: Promise<unknown>[] = []
+  let setupFailed = false, setupError: unknown
+  const result = await new Promise<PageSignal | null>((resolve) => {
     let mainStatus: number | null = null
     const win = new BrowserWindow({
       show: false,
@@ -756,29 +818,37 @@ export async function probePageSignal(url: string, proxyRules?: string): Promise
       }
     })
 
-    win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
-
     let settled = false
+    const delays = new Map<ReturnType<typeof setTimeout>, () => void>()
+    const pause = (ms: number) => new Promise<void>(done => {
+      const timer = setTimeout(() => { delays.delete(timer); done() }, ms)
+      delays.set(timer, done)
+    })
+    pending.push(win.isDestroyed() ? Promise.resolve() : new Promise<void>(done => { win.once('closed', () => done()) }))
+    const abort = () => finish(null)
     const finish = (sig: PageSignal | null) => {
       if (settled) return
       settled = true
       clearTimeout(timeoutId)
+      signal?.removeEventListener('abort', abort)
+      for (const [timer, done] of delays) { clearTimeout(timer); done() }
+      delays.clear()
       try { if (!win.isDestroyed()) win.destroy() } catch { /* ignore */ }
       resolve(sig)
     }
 
     const timeoutId = setTimeout(() => finish(null), 12000)
-
-    const proxyReady = win.webContents.session
-      .setProxy({ proxyRules: proxyRules || 'direct://' })
-      .catch(() => undefined)
+    signal?.addEventListener('abort', abort, { once: true })
+    if (signal?.aborted) { abort(); return }
+    try { win.webContents.setWindowOpenHandler(() => ({ action: 'deny' })) }
+    catch (error) { setupFailed = true; setupError = error; finish(null); return }
 
     // Capture the main-frame HTTP status. did-navigate fires with the response
     // code for the top-level document.
     win.webContents.on(
       'did-navigate',
       (_e, _url, httpResponseCode) => {
-        if (typeof httpResponseCode === 'number' && httpResponseCode > 0) {
+        if (!settled && typeof httpResponseCode === 'number' && httpResponseCode > 0) {
           mainStatus = httpResponseCode
         }
       }
@@ -786,8 +856,8 @@ export async function probePageSignal(url: string, proxyRules?: string): Promise
 
     const extract = async () => {
       // Let SPAs settle a touch before sampling.
-      await new Promise((r) => setTimeout(r, 1500))
-      if (win.isDestroyed()) return finish(null)
+      await pause(1500)
+      if (settled || win.isDestroyed()) return finish(null)
       try {
         const data = await win.webContents.executeJavaScript(
           `(() => {
@@ -800,6 +870,7 @@ export async function probePageSignal(url: string, proxyRules?: string): Promise
              };
            })()`
         )
+        if (settled) return
         finish({
           requestedUrl: url,
           finalUrl: typeof data?.finalUrl === 'string' ? data.finalUrl : null,
@@ -813,21 +884,32 @@ export async function probePageSignal(url: string, proxyRules?: string): Promise
       }
     }
 
-    win.webContents.on('did-finish-load', () => { void extract() })
+    win.webContents.on('did-finish-load', () => { if (!settled) pending.push(extract()) })
     // did-fail-load fires for the main frame on hard failures; for a geo-block
     // that still renders an HTML page did-finish-load fires instead. If the
     // main frame genuinely failed we still try to sample (some block pages
     // report a failure code but render content).
     win.webContents.on('did-fail-load', (_e, errorCode, _desc, _validatedUrl, isMainFrame) => {
-      if (isMainFrame && errorCode !== -3 /* ABORTED is benign */) {
+      if (!settled && isMainFrame && errorCode !== -3 /* ABORTED is benign */) {
         // Give the renderer a beat in case a body was still painted.
-        setTimeout(() => { if (!settled) void extract() }, 500)
+        pending.push(pause(500).then(() => { if (!settled) return extract() }))
       }
     })
 
-    proxyReady
-      .then(() => win.loadURL(url))
-      .catch(() => { /* finish via timeout/fail-load */ })
+    pending.push(Promise.resolve().then(async () => {
+      if (settled) return
+      await win.webContents.session.setProxy({ proxyRules: proxyRules || 'direct://' })
+      if (!settled) await win.loadURL(url)
+    }).catch(() => finish(null)))
   })
+  // Destroying the window does not settle pending setProxy/load/script calls.
+  // Keep their ownership until every raw effect and the window itself drain.
+  for (let index = 0; index < pending.length;) {
+    const batch = pending.slice(index); index = pending.length
+    await Promise.allSettled(batch)
+  }
+  assertProbeActive(signal)
+  if (setupFailed) throw setupError
+  return result
 }
 

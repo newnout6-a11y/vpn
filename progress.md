@@ -6229,3 +6229,55 @@ CI/review нового SHA проверяются отдельно после pu
   Build/typecheck,6 native fixtures,coverage/diff —exit0. Новый head требует
   automatic completed Qodo и CI success; initial CI39322197254 success
   относится к22e1348 и не заменяет новый gate.
+
+## 20.10.2026 — WP-0: URL availability requester lifetime
+
+- #85 принят: final head97c30599d34f80dd0635042b50c0f6cafbe9ac7b,
+  Qodo1556605 completed,4/4 implemented без новых findings; CI39323879365
+  success. REST merged=true, main23eca2605d35207db9adebaa2495548ee312a926.
+  Reviewed/main tree совпал:e3db73c371992ea068c55616837280e4f2d652f8.
+  Revix full review по квоте отсутствует до20.10 03:00 МСК, не approval.
+- Следующий подтверждённый остаток AT-00-003/004/005/008: URL availability
+  не имел общего owner/deadline/document token; DNS/HTTP/offscreen callbacks
+  могли продолжить pipeline и записать history после ухода со страницы.
+  Ветка codex/wp0-url-availability-lifetime создана после gate/merge #85.
+- До fix npm.cmd test -- src/main/urlAvailabilityOperation.test.ts:
+  22 failed/22,15.37s,exit1 (.tmp/wp0-url-ownership-before.log).
+  npm.cmd test -- src/renderer/pages/Availability.requestLifetime.test.tsx:
+  4 failed/1 passed,1.91s,exit1 (.tmp/wp0-url-ui-before.log).
+- checkUrl использует общий registry kind availability-check, work deadline60s,
+  UUID/correlation/owner и requester document lifetime. Optional token сохранён
+  в main/preload/shared с legacy arity. DNS/ASN/TCP/TLS/HEAD/fallback GET/Clash
+  и page setProxy/load/script проверяют отмену; реальные sockets/windows/raw
+  commands удерживают ресурс до close/settlement. Запись истории — synchronous
+  terminal commit с correlation/provenance; прежние строки сохраняются.
+- UI token создаётся до invoke, unmount отменяет запрос. Late success/error
+  не обновляют UI/log/history; typed cancellation тихая. Чтения history
+  имеют revision fence, чтобы старый read не возвращал очищенную историю.
+  Routing self-test остаётся отдельным entrypoint; его main lifetime этим
+  участком не объявляется принятым. URL network semantics относятся к WP-7.
+- Targeted main2 suites28/28 passed,0.399s; targeted5 suites150/150,2.08s.
+  Первый typecheck exit2: generic inference socket result, несуществующий
+  preload helper и лишний exact у role query; исправлены, typecheck2 exit0,
+  165 channels/0 public any. Расширенный targeted3:162 passed/1 failed,
+  2.01s — test ожидал lifecycle вместо ipc для ipc_ correlation. Исправлено
+  ожидание; targeted4:163/163 passed,2.11s. Build1 exit0.
+- Self-review воспроизвёл утечку offscreen window при синхронном setup throw:
+  npm.cmd test -- src/main/urlAvailabilityOperation.test.ts -t 'synchronous setup'
+  —1 failed/25 skipped,0.301s,exit1 (.tmp/wp0-url-window-before.log).
+  Full1 намеренно остановлен до результата (session77333, проверенный
+  Vitest PID33348 и его workers38076/29412); PASS не засчитывается.
+  Setup failure теперь уничтожает окно, очищает timers и ждёт close.
+- Targeted5: npm.cmd test -- src/main/urlAvailabilityOperation.test.ts
+  src/main/urlAvailabilityVerdict.test.ts src/renderer/pages/Availability.requestLifetime.test.tsx
+  src/preload/preloadValidation.test.ts src/main/operationRegistry.test.ts
+  src/main/requesterOperation.test.ts —164/164 passed,6 suites,2.24s,exit0
+  (.tmp/wp0-url-targeted5.log). Build2/typecheck exit0 (.tmp/wp0-url-build2.log).
+  Coverage AC927/927,F210/210 и diff check exit0. Final full2/native pending.
+- Final npm.cmd test -- --maxWorkers=1 —4871 passed/5 skipped/0 failed,
+  295 files passed/2 skipped,291.14s,exit0 (.tmp/wp0-url-full2.log).
+  Production/test tree не менялся с начала final run. Build2/typecheck,
+  node scripts/test-electron-runtime.mjs (6 PASS, .tmp/wp0-url-electron.log),
+  coverage и diff check —exit0. URL-specific probes проверены на controlled
+  OS boundaries; шесть native fixtures проверяют общую границу/прежние workflows.
+  Собственный completed Qodo/CI на опубликованном SHA обязателен до продолжения.

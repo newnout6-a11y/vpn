@@ -1613,3 +1613,25 @@ receipts сохраняемым при UUID-redaction operationKey, допуск
 Review final full npm.cmd test -- --maxWorkers=1:4835 passed/5 skipped/0 failed,
 271.89s,exit0. Build/typecheck,6 native fixtures,coverage/diff —exit0.
 Initial CI39322197254 success относится к22e1348; fixes требуют новых gates.
+
+## URL availability: requester lifetime (20.10.2026)
+
+#85 принят: final head97c3059,Qodo1556605 completed4/4 implemented,
+CI39323879365 success,merge/main23eca26; tree совпал с reviewed head.
+
+AT-00-003/004/005/008: URL check имеет общий owner/UUID/correlation/deadline60s,
+document lifetime и optional requester token. Отмена прекращает caller promptly;
+raw DNS/HTTP/socket/window commands остаются owned до settlement/close.
+Late callbacks не продолжают pipeline и не записывают history. History commit
+terminal, новые строки имеют correlation/provenance, legacy rows сохранены.
+UI unmount отменяет запрос и ограждает поздние UI/log/history effects.
+
+До fix22 main failures и4 UI failures. Адресные6 suites164/164 passed,
+2.24s;build/typecheck165 channels/0 public any —exit0. Полная история
+промежуточных failures/остановленного full в progress.md; final full/native
+и remote gates требуются отдельно. Реальные сети/геоблокировки WP-7,
+routing self-test и остальные live/background producers остаются открытыми.
+
+Final full npm.cmd test -- --maxWorkers=1:4871 passed/5 skipped/0 failed,
+291.14s,exit0. Build/typecheck,6 native regression fixtures,coverage/diff —exit0.
+URL workers проверены на controlled OS boundaries; remote gates pending.

@@ -171,7 +171,7 @@ export interface ElectronAPI {
   serverLiveCheckHistory: (filter?: { profileId?: string; host?: string }) => Promise<LiveServerCheck[]>
   onLiveCheckProgress: (callback: (progress: LiveCheckProgress) => void) => () => void
   onLiveBatchCheckProgress: (callback: (progress: LiveServerBatchCheckProgress) => void) => () => void
-  urlAvailabilityCheck: (url: string) => Promise<UrlAvailabilityResult>
+  urlAvailabilityCheck: (url: string, requestId?: string) => Promise<UrlAvailabilityResult>
   urlAvailabilityHistory: () => Promise<UrlAvailabilityResult[]>
   urlAvailabilityClearHistory: () => Promise<void>
   // Scheduler

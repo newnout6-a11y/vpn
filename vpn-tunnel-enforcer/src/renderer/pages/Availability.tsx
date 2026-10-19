@@ -1,5 +1,6 @@
 import type { PathReport, UrlAvailabilityResult as UrlResult } from '../../shared/diagnostics'
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
+import { isIpcRemoteErrorData } from '../../shared/ipc-result'
 import {
   Search,
   CheckCircle2,
@@ -203,6 +204,17 @@ export function Availability() {
   const [error, setError] = useState('')
   const [latest, setLatest] = useState<UrlResult | null>(null)
   const [history, setHistory] = useState<UrlResult[]>([])
+  const scope = useRef<{ active: boolean; request?: string }>({ active: true })
+  const historyRead = useRef(0)
+
+  useEffect(() => {
+    const lifetime = { active: true, request: undefined as string | undefined }
+    scope.current = lifetime
+    return () => {
+      lifetime.active = false
+      if (lifetime.request) void window.electronAPI.operationsCancelRequest(lifetime.request).catch(() => {})
+    }
+  }, [])
 
   // Routing self-test state.
   const [routingTesting, setRoutingTesting] = useState(false)
@@ -216,10 +228,13 @@ export function Availability() {
   } | null>(null)
 
   const loadHistory = useCallback(async () => {
+    const lifetime = scope.current, revision = ++historyRead.current
     try {
       const list = await window.electronAPI.urlAvailabilityHistory()
+      if (!lifetime.active || scope.current !== lifetime || revision !== historyRead.current) return
       setHistory(list || [])
     } catch (err) {
+      if (!lifetime.active || scope.current !== lifetime || revision !== historyRead.current) return
       console.error('failed to load url-availability history', err)
     }
   }, [])
@@ -229,29 +244,40 @@ export function Availability() {
   }, [loadHistory])
 
   const handleCheck = async () => {
+    const lifetime = scope.current
+    if (!lifetime.active || lifetime.request) return
     setError('')
     if (!input.trim()) {
       setError('Введите ссылку, например youtube.com или https://www.instagram.com')
       return
     }
     setChecking(true)
+    const requestId = crypto.randomUUID()
+    lifetime.request = requestId
     try {
-      const result: UrlResult = await window.electronAPI.urlAvailabilityCheck(input.trim())
+      const result: UrlResult = await window.electronAPI.urlAvailabilityCheck(input.trim(), requestId)
+      if (!lifetime.active || scope.current !== lifetime) return
       setLatest(result)
       addLog('info', `Проверка ${result.url}: ${verdictTone(result.verdict).label}`)
       loadHistory()
     } catch (err: any) {
+      if (!lifetime.active || scope.current !== lifetime || (isIpcRemoteErrorData(err) && err.category === 'cancelled')) return
       setError(err?.message ?? String(err))
     } finally {
-      setChecking(false)
+      if (lifetime.request === requestId) lifetime.request = undefined
+      if (lifetime.active && scope.current === lifetime) setChecking(false)
     }
   }
 
   const handleClearHistory = async () => {
+    const lifetime = scope.current
+    historyRead.current++
     try {
       await window.electronAPI.urlAvailabilityClearHistory()
+      if (!lifetime.active || scope.current !== lifetime) return
       setHistory([])
     } catch (err) {
+      if (!lifetime.active || scope.current !== lifetime) return
       console.error('failed to clear history', err)
     }
   }
