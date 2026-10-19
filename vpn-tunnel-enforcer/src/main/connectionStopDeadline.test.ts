@@ -27,7 +27,7 @@ describe('bounded stop with physical drain', () => {
     expect(await withCorrelation(key, () => lane.stop(async owner => {
       expect(owner.signal).toBeInstanceOf(AbortSignal)
       expect(owner.operation.deadline! - owner.operation.startedAt).toBe(120_000)
-      expect(owner.operation.operationId).toMatch(/^[0-9a-f-]{36}$/)
+      expect(owner.operation.operationId).toMatch(/^op_[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}$/i)
       expect(owner.operation).not.toHaveProperty('signal')
       expect(currentCorrelationId()).toBe(key)
       return { success: true }
@@ -165,6 +165,52 @@ describe('bounded stop with physical drain', () => {
     await expect(lane.close()).rejects.toThrow('Runtime cleanup confirmation missing')
     expect(await lane.stop(async () => ({ success: true }))).toEqual({ success: true })
     await expect(lane.close()).resolves.toBeUndefined()
+  })
+
+  it('does not carry an observed old stop failure across a successful reconnect', async () => {
+    const evidence = { running: false, pid: null as number | null, softApplied: false }
+    const lane = new ConnectionLifecycle(vi.fn(), undefined, undefined, new TunnelStateMachine(() => evidence))
+    expect(await lane.stop(async () => ({ success: false }))).toEqual({ success: false })
+    expect(await lane.start(async () => {
+      evidence.running = true; evidence.pid = 10
+      return { success: true }
+    })).toEqual({ success: true })
+    await expect(lane.close()).resolves.toBeUndefined()
+  })
+
+  it.each(['result', 'throw', 'unconfirmed'])('retains an old stop failure after a failed reconnect: %s', async failure => {
+    const fsm = failure === 'unconfirmed'
+      ? new TunnelStateMachine(() => ({ running: false, pid: null, softApplied: false })) : undefined
+    const lane = new ConnectionLifecycle(vi.fn(), undefined, undefined, fsm)
+    await lane.stop(async () => ({ success: false }))
+    const start = lane.start(async () => {
+      if (failure === 'throw') throw new Error('start failed')
+      return { success: failure === 'unconfirmed' }
+    })
+    if (failure === 'result') expect(await start).toEqual({ success: false })
+    else await expect(start).rejects.toThrow()
+    await expect(lane.close()).rejects.toThrow('Runtime cleanup confirmation missing')
+  })
+
+  it('requires a closed and drained lane with fresh stopped evidence before confirming shutdown', async () => {
+    const evidence = { running: false, pid: null as number | null, softApplied: false }
+    const observed = vi.fn(), lane = new ConnectionLifecycle(vi.fn(), undefined, observed, new TunnelStateMachine(() => evidence))
+    await lane.stop(async () => ({ success: false }))
+    expect(() => lane.confirmShutdownCleanup()).toThrow('Runtime cleanup confirmation missing')
+    await expect(lane.close()).rejects.toThrow()
+    evidence.running = true; evidence.pid = 10
+    expect(() => lane.confirmShutdownCleanup()).toThrow('Runtime cleanup confirmation missing')
+    evidence.running = false; evidence.pid = null; evidence.softApplied = true
+    expect(() => lane.confirmShutdownCleanup()).toThrow('Runtime cleanup confirmation missing')
+    const cleanup = held()
+    const stopping = lane.stop(async () => { await cleanup.promise; return { success: false } })
+    const closing = lane.close().catch(error => error)
+    evidence.softApplied = false
+    expect(() => lane.confirmShutdownCleanup()).toThrow('Runtime cleanup confirmation missing')
+    cleanup.resolve(); await stopping; await closing
+    lane.confirmShutdownCleanup()
+    await expect(lane.close()).resolves.toBeUndefined()
+    expect(observed.mock.calls.map(([operation]) => operation.status)).toEqual(['running', 'error', 'running', 'error'])
   })
 
   it('retains a cancelled rotation registry lease through physical cleanup after the stop deadline', async () => {

@@ -32,18 +32,16 @@ it('keeps operation events distinguishable after real secret redaction (AT-00-00
   })
   const events = raw.trim().split('\n').map(line => JSON.parse(line).details)
   expect(events.map(event => event.operationId)).toEqual([
-    'op_' + first.operationId.replaceAll('-', ''), 'op_' + first.operationId.replaceAll('-', ''),
-    'op_' + second.operationId.replaceAll('-', ''), 'op_' + second.operationId.replaceAll('-', '')
+    first.operationId, first.operationId, second.operationId, second.operationId
   ])
   expect(events.map(event => event.correlationId)).toEqual([
-    'op_' + first.operationId.replaceAll('-', ''), 'op_' + first.operationId.replaceAll('-', ''),
-    'op_' + second.operationId.replaceAll('-', ''), 'op_' + second.operationId.replaceAll('-', '')
+    first.operationId, first.operationId, second.operationId, second.operationId
   ])
   expect(first.operationId).not.toBe(second.operationId)
   expect(events.every(event => event.operationKey === event.operationId)).toBe(true)
   const readBack = (await (await import('./appLogger')).getFullLogs()).find(file => file.path === getAppLogPath())!
   expect(readBack.content.trim().split('\n').map(line => JSON.parse(line).details)).toEqual(events)
-  expect(raw).not.toContain(first.operationId)
+  expect(raw).toContain(first.operationId)
   expect(raw).not.toContain(credential)
   expect(raw).not.toContain('private-test-password')
   expect(raw).toContain('<redacted-uuid>')

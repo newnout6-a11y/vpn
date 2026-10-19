@@ -272,6 +272,7 @@ export class ConnectionLifecycle {
           throw new Error('Connection confirmation missing')
         }
         startup.operation = { ...startup.operation, status: failed(result) ? 'error' : 'success' }
+        if (!failed(result)) this.cleanupFailure = null
         return result
       } catch (error) {
         if (controller.signal.aborted) {
@@ -306,11 +307,11 @@ export class ConnectionLifecycle {
     }
     const startup = this.startup
     const cancellationErrors: unknown[] = []
-    const operationId = randomUUID()
+    const operationId = 'op_' + randomUUID().replaceAll('-', '')
     const startedAt = Date.now()
     const metadata: ActionMetadata = { source: currentActionMetadata()?.source ?? 'lifecycle', owner }
     const operation: ConnectionOperation = {
-      version: 1, operationId, correlationId: currentCorrelationId() ?? 'op_' + operationId.replaceAll('-', ''), owner, kind: 'disconnect',
+      version: 1, operationId, correlationId: currentCorrelationId() ?? operationId, owner, kind: 'disconnect',
       startedAt, deadline: startedAt + timeoutMs, status: 'running'
     }
     const controller = new AbortController()
@@ -377,6 +378,15 @@ export class ConnectionLifecycle {
     try { this.cancelControllerStartup() }
     catch (error) { cancellationErrors.push(error) }
     return result
+  }
+
+  /** Called only after shutdown's independent native/network backstops succeed.
+   * Reconcile an earlier stop failure without publishing a second terminal. */
+  confirmShutdownCleanup(): void {
+    if (!this.closed || this.startup || this.stopping || this.stateMachine && !this.stateMachine.canConfirmStop()) {
+      throw new Error('Runtime cleanup confirmation missing')
+    }
+    this.cleanupFailure = null
   }
 
   async close(): Promise<void> {

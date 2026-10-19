@@ -1154,9 +1154,20 @@ OS boundaries управляемые; полная native Windows resource matri
 background admission, durable audit, migrations/semantic errors/flags остаются
 открытыми. Финальные full/review/CI результаты фиксируются в progress.md.
 
-Qodo #73 уточнил две границы. Physical cleanup failure сохраняется отдельно
-от bounded terminal: close наблюдает false result и throw даже после окончания
-drain; failure снимается лишь успешным cleanup retry. Connection и feature log
-используют общий operationLogDetails с обратимыми op_ ID, в то время как
-owner/FSM/IPC сохраняют нормативный UUIDv4. Реальный JSONL двух stop операций
-и diagnostic read-back различают их ID, сохраняя маскирование credential UUID.
+Qodo #73 уточнил границы cleanup failure и представления stop ID. Physical
+failure сохраняется отдельно от bounded terminal: close наблюдает false result
+и throw даже после окончания drain. Успешный подтверждённый reconnect или cleanup
+retry снимает прежний failure. Независимый shutdown pipeline может снять его
+только после успешных native/network/env/capture backstops, при закрытом,
+полностью drained lane и свежем stopped evidence FSM. Старый failure остаётся
+в журнале; неуспешное восстановление запрещает выход.
+
+Stop operationId теперь до публикации в owner/FSM/IPC представлен как
+op_<32 hex>: все 128 бит сгенерированного UUIDv4, включая version/variant,
+сохраняются; префикс и отсутствие дефисов исключают маскирование ID как секрета.
+Fallback correlationId равен этому ID. Это уточняет прежние записи о raw UUID
+в stop receipt: они относятся к более ранним коммитам PR #73. Managed feature
+и operations:cancel сохраняют прежние UUIDv4; credential redactor не ослаблен.
+operationLogDetails идемпотентен для canonical op_ ID. Реальный JSONL двух stop
+операций и diagnostic read-back сохраняют исходные receipt ID и различают их,
+маскируя credential и посторонний UUID. Финальные проверки — в progress.md.

@@ -4798,3 +4798,61 @@ CI/review нового SHA проверяются отдельно после pu
   (.tmp/wp0-stop-qodo73-full.log). Во время full code/test tree не менялся.
   Все перечисленные проверки относятся к этому состоянию; следующий шаг —
   atomic commit/push и новое автоматическое ревью/CI. WP-0/WP-2 goal active.
+
+### PR #73 — повторный Qodo: восстановление после старого failure и stop receipt ID
+
+- Exact-head CI 39195863329 completed/success на 83613ba59b25c6e2a95be87fdcef29a14d37172f.
+  Qodo 1543813 completed на том же SHA: 0a04cc36 implemented, но ef93d214
+  остался action_required/pending (ID исправлен только в log projection),
+  новый 6d7d0e92 action_required/pending подтвердил вечный отказ выхода после
+  старого failed stop. Gate не пройден; следующий участок не начат.
+- До исправления stale failure: npm.cmd test -- src/main/connectionStopDeadline.test.ts src/main/lifecycleCleanup.test.ts -t 'observed old|permits exit after shutdown'
+  — 2 failed / 194 skipped, 0.793 s, exit 1
+  (.tmp/wp0-stop-qodo73-stale-before.log). Shutdown отказывал с
+  ShutdownCleanupUnconfirmed: connection-lifecycle даже после успешной очистки.
+- Успешный подтверждённый reconnect сбрасывает старый cleanupFailure; failed,
+  thrown и unconfirmed start его сохраняют. Shutdown логирует прежний отказ,
+  выполняет независимые штатные backstops и только после их успеха вызывает
+  confirmShutdownCleanup: closed, no startup/stopping и fresh canConfirmStop.
+  Неуспех runtime/network/env/capture сохраняет failure и запрещает выход;
+  второй terminal event не публикуется.
+- Stop UUIDv4 представлен op_<32 hex> до публикации/возврата, со всеми 128 битами
+  и version/variant. Fallback correlation равен ID; operationLogDetails не
+  удваивает префикс. Это заменяет прежнее утверждение о raw UUID в stop receipt.
+  Managed IDs/cancel API и redactor не менялись. Actual JSONL и diagnostic
+  read-back двух stop операций сохраняют receipt ID, маскируя credential UUID.
+- Промежуточный адресный набор stop/logging/correlation/rotation/lifecycle/
+  cleanup/model tours — 245 passed / 7 files, 18.44 s, exit 0
+  (.tmp/wp0-stop-qodo73-recovery-regression.log). Затем positive reconnect
+  case усилен настоящим FSM/evidence. Build с typecheck — exit 0
+  (.tmp/wp0-stop-qodo73-recovery-build.log); traceability AC 927/927 / F 210/210
+  и git diff --check — exit 0. Новый full выполняется. Дополнительно проверяется
+  actual Soft shutdown: после env rollback внутренний soft evidence должен
+  подтверждать остановку. Финальные проверки и commit ещё не заявляются.
+- Промежуточный full до Soft уточнения: npm.cmd test — 4476 passed /
+  5 skipped / 0 failed, 276 files passed / 2 skipped, 188.71 s, exit 0
+  (.tmp/wp0-stop-qodo73-recovery-full.log). Процесс дожидались до terminal;
+  источники/тесты во время прогона не менялись.
+- Actual Soft startup + shutdown с настоящими lane/FSM воспроизвёл stale
+  softProtectionApplied после успешного env rollback. До исправления
+  npm.cmd test -- src/main/lifecycleCleanup.test.ts -t 'Soft evidence' —
+  1 failed / 2 passed / 181 skipped, 1.75 s, exit 1
+  (.tmp/wp0-stop-qodo73-soft-before.log). Shutdown сбрасывает Soft evidence
+  только после подтверждённого env cleanup. При false/throw прежний признак
+  сохраняется вместе с failure. OS boundaries в этих cases подменены.
+- Окончательный адресный набор той же команды семи файлов — 248 passed,
+  36.07 s, exit 0 (.tmp/wp0-stop-qodo73-recovery-regression-final.log).
+  npm.cmd run build с typecheck 160 channels / 0 public any — exit 0
+  (.tmp/wp0-stop-qodo73-recovery-build-final.log). Повторные traceability
+  AC 927/927 / F 210/210 и git diff --check — exit 0. Финальный full,
+  Electron/IPC/CSP smoke выполняются; новые commit/review ещё не заявляются.
+- Окончательный npm.cmd test — **4479 passed / 5 skipped / 0 failed**,
+  276 files passed / 2 skipped, **211.14 s**, exit 0
+  (.tmp/wp0-stop-qodo73-recovery-full-final.log). Code/test tree не менялся
+  во время full. node scripts/test-electron-runtime.mjs — ELECTRON_SMOKE_PASS,
+  exit 0 (.tmp/wp0-stop-qodo73-recovery-electron.log), включая bounded stop
+  через production contextBridge. node scripts/test-wp1-native.mjs --ipc-only
+  — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-stop-qodo73-recovery-csp.log).
+  Scope остаётся IPC/runtime с fake OS, не новая Windows TUN/rollback приёмка.
+  Локальный gate пройден; следующий шаг — commit/push и automatic Qodo/CI
+  на новом SHA. Общая цель WP-0, затем WP-2 остаётся active.
