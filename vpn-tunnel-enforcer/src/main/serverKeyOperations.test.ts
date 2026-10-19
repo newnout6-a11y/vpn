@@ -294,7 +294,7 @@ describe('VPN key operation lifetime', () => {
     expect(success).toMatchObject({ correlationId: result.correlationId, details: { total: 2, exported: 1, skipped: 1 } })
     expect(Object.keys(success.details).sort()).toEqual(['exported', 'skipped', 'total'])
     expect(raw).not.toContain(secret)
-  })
+  }, 15_000) // Includes real Windows ACL/file preparation, like the native consent fixtures.
   it('shutdown cancels held native clipboard write, then removes only the drained secret', async () => {
     const gate = held(undefined); state.clipboardWrite.mockReturnValueOnce(gate.promise)
     const run = invoke('servers:copy-key', 'a')

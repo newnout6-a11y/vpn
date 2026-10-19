@@ -34,6 +34,10 @@ import { getNativeXrayProfile } from './nativeXrayProfile'
 import { resolveXrayEndpoint } from './xrayDns'
 import { getBundledResource, getDirectProxyPort, pickFreeLocalPort, sanitizeProxyOutbound, tunController } from './tunController'
 import type { ServerProfile } from '../shared/ipc-types'
+import { IpcFault } from '../shared/ipc-result'
+import { operations } from './operations'
+import type { OperationLease } from './operationRegistry'
+import { withProfileStoreWriteLock } from './profileStoreQueue'
 
 const KEY_PROBE_TIMEOUT_MS = 8000
 const KEY_PROBE_DESTINATIONS = [
@@ -44,6 +48,17 @@ const KEY_PROBE_DESTINATIONS = [
 const HEALTH_CHECK_CONCURRENCY = 5
 const KEY_PROBE_DIR_PREFIX = 'vpnte-key-probe-'
 const KEY_PROBE_PID_FILE = 'sing-box.pid'
+// Only reap leftovers from the previous process once. Reaping per profile
+// could kill a sibling probe that is still owned by this process.
+let startupCleanup: Promise<void> | undefined
+
+function assertProbeActive(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new IpcFault('cancelled')
+}
+
+function retainSocketClose(socket: Socket, retain?: (task: Promise<unknown>) => void): void {
+  if (retain && !socket.closed) retain(new Promise<void>(resolve => { socket.once('close', () => resolve()) }))
+}
 
 export interface KeyHealthResult {
   profileId: string
@@ -229,9 +244,10 @@ function shouldProbeViaTunnel(): { host: string; port: number } | null {
   }
 }
 
-export async function openTcpDirect(host: string, port: number, timeoutMs: number): Promise<Socket> {
+export async function openTcpDirect(host: string, port: number, timeoutMs: number, retain?: (task: Promise<unknown>) => void): Promise<Socket> {
   return new Promise<Socket>((resolve, reject) => {
     const socket = new Socket()
+    retainSocketClose(socket, retain)
     let settled = false
     const finish = (err: Error | null) => {
       if (settled) return
@@ -256,7 +272,8 @@ export async function openTcpViaSocks(
   host: string,
   port: number,
   timeoutMs: number,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  retain?: (task: Promise<unknown>) => void
 ): Promise<Socket> {
   if (signal?.aborted) {
     throw new Error('Cancelled')
@@ -291,13 +308,14 @@ export async function openTcpViaSocks(
       reject(new Error('timeout'))
     }, timeoutMs)
 
-    SocksClient.createConnection({
+    const connection = SocksClient.createConnection({
       proxy: { host: socks.host, port: socks.port, type: 5 },
       command: 'connect',
       destination: { host, port },
       timeout: timeoutMs
     })
       .then(({ socket }) => {
+        retainSocketClose(socket as Socket, retain)
         if (settled || signal?.aborted) {
           try { (socket as Socket).destroy() } catch { /* ignore */ }
           if (!settled) {
@@ -317,36 +335,56 @@ export async function openTcpViaSocks(
         cleanup()
         reject(err)
       })
+    // The bounded wrapper may reject before SocksClient finishes its dial.
+    retain?.(connection)
   })
 }
 
 export async function verifyHttpsThroughSocket(
   socket: Socket,
   destination: (typeof KEY_PROBE_DESTINATIONS)[number] | { host: string; port: number; serverName: string; path: string; rejectUnauthorized?: boolean },
-  timeoutMs: number
+  timeoutMs: number,
+  signal?: AbortSignal,
+  retain?: (task: Promise<unknown>) => void
 ): Promise<{ egressIp?: string; country?: string }> {
+  if (signal?.aborted) {
+    socket.destroy()
+    throw new IpcFault('cancelled')
+  }
   return new Promise<{ egressIp?: string; country?: string }>((resolve, reject) => {
     let settled = false
     let response = ''
     let bodyTimer: NodeJS.Timeout | null = null
-    const tls = tlsConnect({
-      socket,
-      servername: destination.serverName,
-      rejectUnauthorized: (destination as any).rejectUnauthorized !== undefined ? (destination as any).rejectUnauthorized : true
-    })
+    let tls: ReturnType<typeof tlsConnect>
+    try {
+      tls = tlsConnect({
+        socket,
+        servername: destination.serverName,
+        rejectUnauthorized: (destination as any).rejectUnauthorized !== undefined ? (destination as any).rejectUnauthorized : true
+      })
+    } catch {
+      socket.destroy()
+      throw new IpcFault('internal')
+    }
+    retainSocketClose(tls, retain)
     const timer = setTimeout(() => finish(new Error('timeout')), timeoutMs)
     const finish = (error: Error | null, trace?: { egressIp?: string; country?: string }) => {
       if (settled) return
       settled = true
       clearTimeout(timer)
       if (bodyTimer) clearTimeout(bodyTimer)
+      signal?.removeEventListener('abort', onAbort)
       try { tls.destroy() } catch { /* ignore */ }
       try { socket.destroy() } catch { /* ignore */ }
       if (error) reject(error)
       else resolve(trace || {})
     }
+    const onAbort = () => finish(new IpcFault('cancelled'))
+    signal?.addEventListener('abort', onAbort, { once: true })
+    if (signal?.aborted) onAbort()
 
     tls.once('secureConnect', () => {
+      if (settled) return
       tls.write(
         `GET ${destination.path} HTTP/1.1\r\n` +
         `Host: ${destination.serverName}\r\n` +
@@ -354,6 +392,7 @@ export async function verifyHttpsThroughSocket(
       )
     })
     tls.on('data', chunk => {
+      if (settled) return
       response += chunk.toString('utf8')
       const statusMatch = response.match(/^HTTP\/1\.[01] (\d{3})\b/)
       if (statusMatch) {
@@ -494,7 +533,7 @@ export function classifyOutboundProbeFailure(protocol: string, logText: string, 
   return 'handshake-failed'
 }
 
-export async function waitForLocalSocks(port: number, timeoutMs: number, signal?: AbortSignal): Promise<void> {
+export async function waitForLocalSocks(port: number, timeoutMs: number, signal?: AbortSignal, retain?: (task: Promise<unknown>) => void): Promise<void> {
   if (signal?.aborted) {
     throw new Error('Cancelled')
   }
@@ -505,7 +544,7 @@ export async function waitForLocalSocks(port: number, timeoutMs: number, signal?
       throw new Error('Cancelled')
     }
     try {
-      const socket = await openTcpDirect('127.0.0.1', port, 300)
+      const socket = await openTcpDirect('127.0.0.1', port, 300, retain)
       try { socket.destroy() } catch { /* ignore */ }
       return
     } catch (err) {
@@ -579,27 +618,43 @@ export function buildKeyProbeConfig(
   }
 }
 
-async function checkOutboundHealth(profile: ServerProfile): Promise<KeyHealthResult> {
+async function checkOutboundHealth(profile: ServerProfile, signal?: AbortSignal): Promise<KeyHealthResult> {
+  assertProbeActive(signal)
   if (!profile.outbound || typeof profile.outbound !== 'object') {
     return { profileId: profile.id, online: false, latencyMs: null, reason: 'no-outbound' }
   }
 
   const startedAt = Date.now()
-  await cleanupManagedChildPidDirs(tmpdir(), KEY_PROBE_DIR_PREFIX, KEY_PROBE_PID_FILE, 'key-health-probe', (message, details) => {
-    logEvent('warn', 'key-health', message, details)
-  })
+  await (startupCleanup ??= cleanupManagedChildPidDirs(tmpdir(), KEY_PROBE_DIR_PREFIX, KEY_PROBE_PID_FILE, 'key-health-probe', (message, details) => {
+    if (!signal?.aborted) logEvent('warn', 'key-health', message, details)
+  }))
+  assertProbeActive(signal)
   const workDir = await mkdtemp(join(tmpdir(), KEY_PROBE_DIR_PREFIX))
   const logPath = join(workDir, 'sing-box.log')
   const pidPath = join(workDir, KEY_PROBE_PID_FILE)
   let child: ReturnType<typeof spawn> | null = null
   let childOutput = ''
+  let setupComplete = false
+  let childError: Error | undefined
+  let childClosed: Promise<void> | undefined
+  const drains: Promise<unknown>[] = []
+  const probes = new AbortController()
+  const probeSignal = signal ? AbortSignal.any([signal, probes.signal]) : probes.signal
+  const stopChild = () => {
+    if (child && !child.killed) {
+      try { child.kill() } catch { /* retain ownership until actual close */ }
+    }
+  }
 
   try {
+    assertProbeActive(signal)
     const inboundPort = await pickFreeLocalPort()
+    assertProbeActive(signal)
     const directProxy = shouldProbeViaTunnel()
     const physicalAdapter = directProxy
       ? null
       : (await getPhysicalAdapterDnsSources().catch(() => []))[0] ?? null
+    assertProbeActive(signal)
 
     const proxyEngineSetting = settingsStore.get().proxyEngine ?? 'auto'
     const engine = resolveProxyEngine(profile.outbound, proxyEngineSetting)
@@ -619,38 +674,53 @@ async function checkOutboundHealth(profile: ServerProfile): Promise<KeyHealthRes
         })
 
     if (isXray && getNativeXrayProfile(profile.outbound)) {
-      await resolveXrayConfigEndpoints(config, host => resolveXrayEndpoint(host, AbortSignal.timeout(4000)))
+      await resolveXrayConfigEndpoints(config, host => resolveXrayEndpoint(host, AbortSignal.any([probeSignal, AbortSignal.timeout(4000)])))
+      assertProbeActive(signal)
     }
     await writeFile(probeConfigPath, JSON.stringify(config, null, 2), 'utf8')
+    assertProbeActive(signal)
     child = spawn(probeExe, ['run', '-c', probeConfigPath], {
       cwd: workDir,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe']
     })
+    childClosed = new Promise<void>(resolve => { child!.once('close', () => resolve()) })
+    // Listen immediately: spawn failure can precede asynchronous pidfile I/O.
+    child.on('error', err => {
+      childError = err
+      if (!signal?.aborted) childOutput += `\n${err.message}`
+    })
+    child.stdout?.on('data', chunk => { if (!signal?.aborted) childOutput += chunk.toString() })
+    child.stderr?.on('data', chunk => { if (!signal?.aborted) childOutput += chunk.toString() })
+    signal?.addEventListener('abort', stopChild, { once: true })
+    if (signal?.aborted) stopChild()
     await writeManagedChildPidFile(pidPath, {
       owner: 'key-health-probe',
       pid: child.pid ?? 0,
       exePath: probeExe,
       configPath: probeConfigPath,
       createdAt: Date.now()
-    }).catch((err) => {
-      logEvent('warn', 'key-health', 'failed to write key probe pidfile', err)
     })
-    child.stdout?.on('data', chunk => { childOutput += chunk.toString() })
-    child.stderr?.on('data', chunk => { childOutput += chunk.toString() })
-    child.on('error', err => { childOutput += `\n${err.message}` })
+    assertProbeActive(signal)
+    if (childError) throw childError
+    setupComplete = true
 
-    await waitForLocalSocks(inboundPort, 2500)
+    const retain = (task: Promise<unknown>) => { drains.push(task) }
+    await waitForLocalSocks(inboundPort, 2500, probeSignal, retain)
+    assertProbeActive(signal)
     const probeOutcome = await Promise.any(KEY_PROBE_DESTINATIONS.map(async candidate => {
       const socket = await openTcpViaSocks(
         { host: '127.0.0.1', port: inboundPort },
         candidate.host,
         candidate.port,
-        KEY_PROBE_TIMEOUT_MS
+        KEY_PROBE_TIMEOUT_MS,
+        probeSignal,
+        retain
       )
-      const trace = await verifyHttpsThroughSocket(socket, candidate, KEY_PROBE_TIMEOUT_MS)
+      const trace = await verifyHttpsThroughSocket(socket, candidate, KEY_PROBE_TIMEOUT_MS, probeSignal, retain)
       return { candidate, trace }
     }))
+    assertProbeActive(signal)
 
     const latencyMs = Date.now() - startedAt
     logEvent('debug', 'key-health', 'outbound probe ok', {
@@ -670,7 +740,14 @@ async function checkOutboundHealth(profile: ServerProfile): Promise<KeyHealthRes
       country: probeOutcome.trace?.country
     }
   } catch (err: any) {
+    assertProbeActive(signal)
+    const localFailure = err instanceof AggregateError ? err.errors.find(error => error instanceof IpcFault) : err
+    // Failure to prepare/launch/record the local probe is not evidence that
+    // the remote key is offline. Preserve the original typed OS category.
+    if (!setupComplete || childError) throw childError ?? err
+    if (localFailure instanceof IpcFault) throw localFailure
     const logText = await readProbeLog(logPath)
+    assertProbeActive(signal)
     const aggregateErrors = err instanceof AggregateError
       ? err.errors.map(error => error instanceof Error ? error.message : String(error)).join(' | ')
       : ''
@@ -684,20 +761,28 @@ async function checkOutboundHealth(profile: ServerProfile): Promise<KeyHealthRes
     })
     return { profileId: profile.id, online: false, latencyMs: null, reason }
   } finally {
-    if (child && !child.killed) {
-      try { child.kill() } catch { /* ignore */ }
+    probes.abort() // Dispose losing Promise.any candidates too.
+    stopChild()
+    // A late SocksClient result may add its socket-close effect while draining.
+    for (let index = 0; index < drains.length;) {
+      const batch = drains.slice(index)
+      index = drains.length
+      await Promise.allSettled(batch)
     }
+    await childClosed
+    signal?.removeEventListener('abort', stopChild)
     await removeManagedChildPidFile(pidPath, child?.pid)
     await rm(workDir, { recursive: true, force: true }).catch(() => undefined)
   }
 }
 
-/** Probe a single ServerProfile's outbound. Always resolves; never throws. */
-export async function checkProfileHealth(profile: ServerProfile): Promise<KeyHealthResult> {
+/** Probe a single outbound; cancellation is a typed failure, not an offline key. */
+export async function checkProfileHealth(profile: ServerProfile, signal?: AbortSignal): Promise<KeyHealthResult> {
+  assertProbeActive(signal)
   if (!profile.outbound || typeof profile.outbound !== 'object') {
     return { profileId: profile.id, online: false, latencyMs: null, reason: 'no-outbound' }
   }
-  return checkOutboundHealth(profile)
+  return checkOutboundHealth(profile, signal)
 }
 
 function getPickerStore() {
@@ -708,17 +793,30 @@ function getGroupsStore() {
   return serverGroupsStore
 }
 
-/** Probe every profile in a group, max 5 in flight. */
-export async function checkGroupHealth(groupId: string): Promise<{ ok: true; results: KeyHealthResult[] } | { ok: false; error: string }> {
+interface GroupHealthOptions {
+  signal?: AbortSignal
+  onOperation?: (lease: OperationLease) => void
+}
+
+/** Probe every profile in a group, max 5 in flight, retaining all native work. */
+export function checkGroupHealth(groupId: string, options: GroupHealthOptions = {}): Promise<{ ok: true; results: KeyHealthResult[] }> {
+  return operations.run('health-check', async lease => {
+    options.onOperation?.(lease)
+    return checkGroupHealthOwned(groupId, lease)
+  }, { signal: options.signal, resource: 'key-health' })
+}
+
+async function checkGroupHealthOwned(groupId: string, lease: OperationLease): Promise<{ ok: true; results: KeyHealthResult[] }> {
+  lease.assertActive()
   let group: any = null
   try {
     const groupsRaw = getGroupsStore().get('groups', []) as Array<{ id: string }>
     group = Array.isArray(groupsRaw) ? groupsRaw.find(g => g && g.id === groupId) : null
   } catch (err) {
     logEvent('warn', 'key-health', 'failed to read server-groups store', err)
-    return { ok: false, error: 'Не удалось прочитать список групп' }
+    throw err
   }
-  if (!group) return { ok: false, error: 'Группа не найдена или пуста' }
+  if (!group) throw new IpcFault('validation')
 
   let profiles: ServerProfile[] = []
   try {
@@ -728,28 +826,43 @@ export async function checkGroupHealth(groupId: string): Promise<{ ok: true; res
       : []
   } catch (err) {
     logEvent('warn', 'key-health', 'failed to read server-picker store', err)
-    return { ok: false, error: 'Не удалось прочитать список ключей' }
+    throw err
   }
-  if (!profiles.length) return { ok: false, error: 'Группа не найдена или пуста' }
+  if (!profiles.length) throw new IpcFault('validation')
+  const identities = new Map(profiles.map(profile => [profile.id, JSON.stringify(profile.outbound)]))
 
   const results: KeyHealthResult[] = new Array(profiles.length)
   let cursor = 0
   const worker = async () => {
     while (true) {
+      lease.assertActive()
       const idx = cursor++
       if (idx >= profiles.length) return
-      results[idx] = await checkProfileHealth(profiles[idx])
+      const result = await checkProfileHealth(profiles[idx], lease.signal)
+      lease.assertActive()
+      results[idx] = result
     }
   }
-  const workers = Array.from({ length: Math.min(HEALTH_CHECK_CONCURRENCY, profiles.length) }, () => worker())
+  const workers = Array.from({ length: Math.min(HEALTH_CHECK_CONCURRENCY, profiles.length) }, () => lease.retain(worker()))
   await Promise.all(workers)
+  lease.assertActive()
 
-  // Persist only the reachability verdict. Health-probe latency is not a
-  // geographical ping, so it must not overwrite ServerProfile.ping.
-  const checkedAt = Date.now()
-  const resultByProfileId = new Map(results.map(result => [result.profileId, result]))
-  const allProfiles = getPickerStore().get('profiles', []) as ServerProfile[]
-  if (Array.isArray(allProfiles)) {
+  // Await the raw queue: run() bounds the caller while this work keeps its lease.
+  // Tracking the queue as a pending effect would prevent its terminal commit.
+  return withProfileStoreWriteLock(() => lease.commit(() => {
+    if (!(getGroupsStore().get('groups', []) as Array<{ id: string }>).some(item => item.id === groupId)) throw new IpcFault('conflict')
+    // Re-read under the import/refresh queue. A replaced/removed credential
+    // cannot inherit a verdict or renderer result from the previous snapshot.
+    const allProfiles = getPickerStore().get('profiles', []) as ServerProfile[]
+    const currentById = new Map(allProfiles.map(profile => [profile.id, profile]))
+    for (const [id, outbound] of identities) {
+      const current = currentById.get(id)
+      if (!current || current.groupId !== groupId || current.removedFromSubscriptionAt || JSON.stringify(current.outbound) !== outbound) throw new IpcFault('conflict')
+    }
+
+    // Probe latency is not geographical ping; keep ServerProfile.ping intact.
+    const checkedAt = Date.now()
+    const resultByProfileId = new Map(results.map(result => [result.profileId, result]))
     getPickerStore().set('profiles', allProfiles.map(profile => {
       const result = resultByProfileId.get(profile.id)
       if (!result) return profile
@@ -769,10 +882,10 @@ export async function checkGroupHealth(groupId: string): Promise<{ ok: true; res
         country
       }
     }))
-  }
 
-  logEvent('debug', 'key-health', 'group probe finished', {
-    groupId, total: profiles.length, online: results.filter(r => r.online).length
-  })
-  return { ok: true, results }
+    logEvent('debug', 'key-health', 'group probe finished', {
+      groupId, total: profiles.length, online: results.filter(r => r.online).length
+    })
+    return { ok: true as const, results }
+  }))
 }

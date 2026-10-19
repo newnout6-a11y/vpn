@@ -160,7 +160,7 @@ export interface ElectronAPI {
   groupsDelete: (id: string, deleteServers: boolean) => Promise<{ ok: boolean }>
   groupsRefresh: (id: string, requestId?: string) => Promise<RefreshGroupResult>
   groupsSetRefreshPolicy: (id: string, intervalMinutes: number | null) => Promise<ServerGroup>
-  groupsCheckHealth: (id: string) => Promise<
+  groupsCheckHealth: (id: string, requestId?: string) => Promise<
     | { ok: true; results: Array<{ profileId: string; online: boolean; latencyMs: number | null; reason?: string }> }
     | { ok: false; error: string }
   >

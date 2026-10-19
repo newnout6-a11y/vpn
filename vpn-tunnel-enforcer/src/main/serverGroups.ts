@@ -931,23 +931,12 @@ export function registerServerGroupsHandlers(): void {
   // so the bundler includes the module — earlier dynamic require() got
   // tree-shaken out by electron-vite and exploded in production with
   // "Cannot find module".
-  //
-  // checkGroupHealth ALREADY returns a discriminated union
-  // ({ ok: true, results } | { ok: false, error }), so we forward it
-  // verbatim. The renderer expects exactly that shape; double-wrapping
-  // it makes `result.results` undefined on the renderer side and crashes
-  // the React tree (black window).
-  handleLogged('groups:check-health', async (_event, id: string) => {
-    try {
+  // Keep the successful result shape; failures use the canonical IPC envelope.
+  handleLogged('groups:check-health', async (event, id: string, requestId?: unknown) => {
+    return runRequesterOperation(event.sender, requestId, async (signal, onOperation) => {
       const { checkGroupHealth } = await import('./keyHealthChecker')
-      if (typeof checkGroupHealth !== 'function') {
-        return { ok: false as const, error: 'health checker недоступен' }
-      }
-      return await checkGroupHealth(id)
-    } catch (err: any) {
-      logEvent('warn', 'server-groups', 'check-health failed', err)
-      return { ok: false as const, error: String(err?.message || 'health checker недоступен') }
-    }
+      return checkGroupHealth(id, { signal, onOperation })
+    })
   })
 }
 

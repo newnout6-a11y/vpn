@@ -26,7 +26,8 @@ beforeEach(() => {
     ...Object.fromEntries(['serversCopyKey', 'serversExportKeyToFile', 'serversExportAllKeysToFile', 'serversExportAllProxiesToFile']
       .map(name => [name, vi.fn(() => new Promise((done, fail) => { release = done; reject = fail }))])),
     serversAdd: vi.fn(() => new Promise(done => { release = done })),
-    groupsRefresh: vi.fn(() => new Promise(done => { release = done }))
+    groupsRefresh: vi.fn(() => new Promise(done => { release = done })),
+    groupsCheckHealth: vi.fn(() => new Promise((done, fail) => { release = done; reject = fail }))
   }
   Object.assign(window, { electronAPI: api })
   vi.mocked(emitServerChanged).mockClear()
@@ -38,6 +39,33 @@ const exports = [
     ['serversExportAllKeysToFile', 'servers.exportAllKeys', false], ['serversExportAllProxiesToFile', 'servers.exportProxyList', false]
 ] as const
 describe('Servers requester lifetime', () => {
+  it.each(['success', 'error'])('cancels group health on unmount and suppresses late %s', async outcome => {
+    const view = render(<Servers />)
+    fireEvent.click(await screen.findByRole('button', { name: 'servers.groups.checkHealth' }))
+    expect(api.groupsCheckHealth).toHaveBeenCalledOnce()
+    view.unmount()
+    expect(api.operationsCancelRequest).toHaveBeenCalledExactlyOnceWith(expect.stringMatching(/^[0-9a-f-]{36}$/))
+    expect(api.groupsCheckHealth.mock.calls[0].at(-1)).toBe(api.operationsCancelRequest.mock.calls[0][0])
+    const reads = api.serversList.mock.calls.length
+    await act(async () => {
+      if (outcome === 'error') reject({ name: 'IpcRemoteError', ...ipcError('internal') })
+      else release({ ok: true, results: [{ profileId: profile.id, online: true, latencyMs: 10 }] })
+    })
+    expect(api.serversList).toHaveBeenCalledTimes(reads)
+    expect(emitServerChanged).not.toHaveBeenCalled()
+    expect(useAppStore.getState().globalToasts).toEqual([])
+  })
+
+  it('keeps group health cancellation quiet and forgets its token', async () => {
+    api.groupsCheckHealth.mockRejectedValue({ name: 'IpcRemoteError', ...ipcError('cancelled') })
+    const view = render(<Servers />)
+    fireEvent.click(await screen.findByRole('button', { name: 'servers.groups.checkHealth' }))
+    await waitFor(() => expect((screen.getByRole('button', { name: 'servers.groups.checkHealth' }) as HTMLButtonElement).disabled).toBe(false))
+    expect(screen.queryByText(ipcError('cancelled').message)).toBeNull()
+    view.unmount()
+    expect(api.operationsCancelRequest).not.toHaveBeenCalled()
+  })
+
   it.each(exports.flatMap(([method, label, row]) => ['success', 'error'].map(outcome => ({ method, label, row, outcome }))))
   ('cancels $method on unmount and suppresses late export $outcome effects', async ({ method, label, row, outcome }) => {
     const view = render(<Servers />)
