@@ -1,6 +1,7 @@
 import type { ServerProbeResult } from '../../shared/diagnostics'
 import { asJsonObject } from '../../shared/json'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { isIpcRemoteErrorData } from '../../shared/ipc-result'
 import { useTranslation } from 'react-i18next'
 import { motion } from 'framer-motion'
 import {
@@ -86,9 +87,24 @@ export function ServerDetailModal({ open, profile, onClose, onProfileUpdated }: 
   const [deviceSaving, setDeviceSaving] = useState(false)
   const [deviceError, setDeviceError] = useState(false)
 
-  // Reset the export status pill whenever the user opens a different server.
+  const exportScope = useRef<{ requests: Set<string>; timers: Set<number>; active: boolean } | null>(null)
   useEffect(() => {
+    if (!open || !profile?.id) return
+    const scope = { requests: new Set<string>(), timers: new Set<number>(), active: true }
+    exportScope.current = scope
     setExportState('idle')
+    return () => {
+      scope.active = false
+      for (const token of scope.requests) void window.electronAPI.operationsCancelRequest(token).catch(() => {})
+      scope.requests.clear()
+      for (const timer of scope.timers) window.clearTimeout(timer)
+      scope.timers.clear()
+      if (exportScope.current === scope) exportScope.current = null
+    }
+  }, [open, profile?.id])
+
+  // Reset device controls whenever the displayed profile changes.
+  useEffect(() => {
     setDeviceError(false)
     setDeviceSaving(false)
   }, [profile])
@@ -109,47 +125,31 @@ export function ServerDetailModal({ open, profile, onClose, onProfileUpdated }: 
     }
   }
 
-  const handleCopyKey = async () => {
-    const id = (profile as ServerProfile | null)?.id
-    if (!id) return
-    try {
-      const result = await window.electronAPI.serversCopyKey(id)
-      if (!result.ok) {
-        if ('cancelled' in result) return
-        setExportState('failed')
-        setTimeout(() => setExportState('idle'), 2200)
-        return
-      }
-      setExportState('copied')
-      setTimeout(() => setExportState('idle'), 2200)
-    } catch {
-      setExportState('failed')
-      setTimeout(() => setExportState('idle'), 2200)
+  const exportKey = async (file: boolean) => {
+    const id = profile?.id, scope = exportScope.current
+    if (!id || !scope?.active) return
+    const token = crypto.randomUUID()
+    scope.requests.add(token)
+    const current = () => scope.active && exportScope.current === scope && scope.requests.has(token)
+    const flash = (state: 'copied' | 'saved' | 'failed') => {
+      setExportState(state)
+      const timer = window.setTimeout(() => {
+        scope.timers.delete(timer)
+        if (scope.active && exportScope.current === scope) setExportState('idle')
+      }, state === 'saved' ? 2500 : 2200)
+      scope.timers.add(timer)
     }
-  }
-
-  const handleSaveKeyToFile = async () => {
-    const id = (profile as ServerProfile | null)?.id
-    if (!id) return
     try {
-      const result = await window.electronAPI.serversExportKeyToFile(id)
-      if (result.ok) {
-        setExportState('saved')
-        setTimeout(() => setExportState('idle'), 2500)
-        return
-      }
-      // User clicked Cancel in the OS dialog — silently revert state, no error pill.
-      if ((result as any).cancelled) {
-        setExportState('idle')
-        return
-      }
-      setExportState('failed')
-      setTimeout(() => setExportState('idle'), 2200)
-    } catch {
-      setExportState('failed')
-      setTimeout(() => setExportState('idle'), 2200)
-    }
+      const result = file ? await window.electronAPI.serversExportKeyToFile(id, token)
+        : await window.electronAPI.serversCopyKey(id, token)
+      if (!current() || (!result.ok && 'cancelled' in result)) return
+      flash(result.ok ? file ? 'saved' : 'copied' : 'failed')
+    } catch (error) {
+      if (current() && (!isIpcRemoteErrorData(error) || error.category !== 'cancelled')) flash('failed')
+    } finally { scope.requests.delete(token) }
   }
+  const handleCopyKey = () => exportKey(false)
+  const handleSaveKeyToFile = () => exportKey(true)
 
   useEffect(() => {
     if (!open || !profile) return
