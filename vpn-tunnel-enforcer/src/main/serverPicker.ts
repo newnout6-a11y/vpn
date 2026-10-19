@@ -2877,7 +2877,7 @@ export function registerServerPickerHandlers(): void {
 
     // Persist only at terminal commit, retaining the old destination on failure.
     return writeConfigExport(choice.filePath, exported.content + '\n', lease,
-      { ok: true as const, path: choice.filePath, name: profile.name, protocol: profile.protocol })
+      { ok: true as const, path: choice.filePath, name: profile.name, protocol: profile.protocol }, 'secrets')
     })
   })
 
@@ -2942,7 +2942,7 @@ export function registerServerPickerHandlers(): void {
       : header + lines.join('\n')
     const result = await writeConfigExport(choice.filePath, content + '\n', lease, {
       ok: true as const, path: choice.filePath, total: profiles.length, exported: lines.length, skipped
-    })
+    }, 'secrets')
     logEvent('info', 'server-picker', 'export-all-keys-file', { total: profiles.length, exported: lines.length, skipped })
     return result
     })
@@ -2988,7 +2988,7 @@ export function registerServerPickerHandlers(): void {
 
     const result = await writeConfigExport(choice.filePath, lines.join('\n') + '\n', lease, {
       ok: true as const, path: choice.filePath, total: profiles.length, exported: lines.length, skipped
-    })
+    }, 'secrets')
     logEvent('info', 'server-picker', 'export-all-proxies-file', { total: profiles.length, exported: lines.length, skipped })
     return result
     })

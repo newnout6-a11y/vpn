@@ -1,6 +1,6 @@
 // AT-01-008/011; F-144; AC-SET-CFG-001…003, AC-SRV-EXP-001…003.
-import { mkdtempSync, readFileSync, existsSync, rmSync } from 'fs'
-import { tmpdir } from 'os'
+import { readFileSync, existsSync, rmSync } from 'fs'
+import { privateExportDirectory } from './testFixtures/privateExportDirectory'
 import { join } from 'path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const state = vi.hoisted(() => ({ handlers: new Map<string, Function>(),
@@ -22,7 +22,7 @@ let directory: string, destination: string
 let sender: { isDestroyed: () => boolean }
 const invoke = (...args: unknown[]) => state.handlers.get('config:export')!({ sender }, ...args)
 beforeEach(() => {
-  directory = mkdtempSync(join(tmpdir(), 'vpnte-export-')); destination = join(directory, 'config.json')
+  directory = privateExportDirectory('.vpnte-export-'); destination = join(directory, 'config.json')
   sender = { isDestroyed: () => false }
   state.profiles = [{ id: 'p1', name: 'Profile', protocol: 'vless', server: 'vpn.test', port: 443,
     outbound: { type: 'vless', uuid: 'FAKE-UUID', password: 'FAKE-PASS', tls: { reality: { public_key: 'FAKE-PBK', short_id: 'FAKE-SID' } },

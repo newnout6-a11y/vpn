@@ -113,20 +113,81 @@ describe('long operation registry', () => {
     await registry.close()
   })
 
-  it('rejects an asynchronous commit callback without publishing success or releasing its pending work', async () => {
-    const registry = new OperationRegistry(), gate = held<void>(), persist = vi.fn()
-    const task = registry.run('export', async lease => lease.commit(async () => {
-      await gate.promise
-      lease.assertActive()
-      persist()
-    })).catch(error => error)
-    await Promise.resolve()
-    expect(registry.list()).toMatchObject([{ status: 'error', category: 'validation' }])
-    expect(registry.isBusy('export')).toBe(true)
-    gate.resolve()
-    expect(await task).toMatchObject({ category: 'validation' })
+  it.each(['async', 'bound', 'bound-tagged'])('rejects a %s commit callback before starting any effects', async form => {
+    const registry = new OperationRegistry(), gate = held<void>(), entered = vi.fn(), persist = vi.fn()
+    const callback = async () => { entered(); await gate.promise; persist() }
+    const candidate = form === 'async' ? callback : callback.bind(null)
+    if (form === 'bound-tagged') Object.defineProperty(candidate, Symbol.toStringTag, { value: 'Function' })
+    const task = registry.run('export', async lease => {
+      // @ts-expect-error Promise-returning callbacks are forbidden; exercise the runtime guard too.
+      return lease.commit(candidate)
+    }).catch(error => error)
+    try {
+      await Promise.resolve()
+      expect(entered).not.toHaveBeenCalled()
+      expect(await task).toMatchObject({ category: 'validation' })
+      expect(registry.list()).toMatchObject([{ status: 'error', category: 'validation' }])
+      expect(registry.isBusy('export')).toBe(false)
+    } finally { gate.resolve(); await task; await registry.close() }
     expect(persist).not.toHaveBeenCalled()
+  })
+
+  it('types terminal commits as synchronous while preserving nullable/primitive results', async () => {
+    const registry = new OperationRegistry()
+    await registry.run('export', async lease => {
+      if (false) {
+        // @ts-expect-error A regular function returning a Promise is forbidden too.
+        lease.commit(() => Promise.resolve('late'))
+        // @ts-expect-error Thenables are asynchronous even without Promise's other methods.
+        lease.commit(() => ({ then: (resolve: (value: boolean) => void) => resolve(true) }))
+      }
+      return lease.commit(() => null)
+    })
+    expect(await registry.run('export', async lease => lease.commit(() => undefined))).toBeUndefined()
+    expect(await registry.run('export', async lease => lease.commit(() => 42))).toBe(42)
     await registry.close()
+  })
+
+  it('drains an untyped synchronous callback returning a thenable before publishing its validation error', async () => {
+    const order: string[] = [], gate = held<void>()
+    const registry = new OperationRegistry(operation => { order.push(operation.status) })
+    let signal!: AbortSignal
+    const task = registry.run('export', async lease => {
+      signal = lease.signal
+      // Simulate JavaScript bypassing the typed contract; retain its already-started work.
+      return Reflect.apply(lease.commit, lease, [() => gate.promise.then(() => { order.push('effect') })])
+    }).catch(error => error)
+    try {
+      await Promise.resolve()
+      expect(signal.aborted).toBe(true)
+      expect(registry.list()).toMatchObject([{ status: 'running' }])
+      expect(registry.isBusy('export')).toBe(true)
+    } finally { gate.resolve(); await task; await registry.close() }
+    expect(await task).toMatchObject({ category: 'validation' })
+    expect(order).toEqual(['running', 'effect', 'error'])
+  })
+
+  it.each(['deadline', 'external', 'manual', 'shutdown'])('preserves invalid-commit validation while %s occurs during drain', async trigger => {
+    vi.useFakeTimers()
+    const gate = held<void>(), controller = new AbortController(), terminal = vi.fn()
+    const registry = new OperationRegistry(), task = registry.run('export', async lease =>
+      Reflect.apply(lease.commit, lease, [() => gate.promise]), { timeoutMs: 100, signal: controller.signal }).catch(error => error)
+    void task.then(terminal)
+    let closing: Promise<void> | undefined
+    try {
+      await Promise.resolve()
+      const id = registry.list()[0].operationId
+      if (trigger === 'deadline') await vi.advanceTimersByTimeAsync(101)
+      if (trigger === 'external') controller.abort()
+      if (trigger === 'manual') expect(registry.cancel(id)).toBe(false)
+      if (trigger === 'shutdown') closing = registry.close()
+      await Promise.resolve()
+      expect(registry.list()[0].status).toBe('running')
+      expect(registry.isBusy('export')).toBe(true)
+      expect(terminal).not.toHaveBeenCalled()
+    } finally { gate.resolve(); await task; await (closing ?? registry.close()) }
+    expect(await task).toMatchObject({ category: 'validation' })
+    expect(registry.list()).toMatchObject([{ status: 'error', category: 'validation' }])
   })
 
   it.each(kinds.flatMap(kind => [10, 50, 90].map(progress => ({ kind, progress }))))('cancels $kind at $progress percent without late publication or releasing its lease', async ({ kind, progress }) => {

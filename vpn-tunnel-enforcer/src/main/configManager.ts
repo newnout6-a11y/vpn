@@ -663,7 +663,7 @@ async function exportConfigUnlocked(sender: WebContents, mode: 'redacted' | 'sec
     lease.assertActive()
     const json = JSON.stringify(mode === 'secrets' ? config : redactConfigExport(config), null, 2)
     await yieldConfigOperation(lease)
-    const exported = await writeConfigExport(result.filePath, json, lease, { success: true as const, path: result.filePath })
+    const exported = await writeConfigExport(result.filePath, json, lease, { success: true as const, path: result.filePath }, mode)
 
     logEvent('info', 'config-manager', 'config exported', { path: result.filePath, mode })
     return exported

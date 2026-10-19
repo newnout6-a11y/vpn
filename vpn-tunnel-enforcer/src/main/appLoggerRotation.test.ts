@@ -121,14 +121,13 @@ describe('appLogger rotation', () => {
       // this subsequent write must immediately re-attempt rotation and succeed.
       logEvent('info', 'test', 'retry line', { blob: 'small' })
 
-      for (let i = 0; i < 250 && (!existsSync(prevLog) || statSync(appLog).size >= 5 * 1024 * 1024); i++) {
-        await flush()
-      }
-
-      // Rotation has now succeeded: prevLog is a file (not dir) and appLog rolled
-      expect(existsSync(prevLog)).toBe(true)
-      expect(statSync(prevLog).isFile()).toBe(true)
-      expect(statSync(appLog).size).toBeLessThan(5 * 1024 * 1024)
+      // Rename and recreation are separate async steps; ENOENT during that gap
+      // is expected. Retry the complete final-state oracle instead of statting
+      // app.log as soon as the previous generation appears.
+      await vi.waitFor(() => {
+        expect(statSync(prevLog).isFile()).toBe(true)
+        expect(statSync(appLog).size).toBeLessThan(5 * 1024 * 1024)
+      }, { timeout: 12_500, interval: 50 })
     } finally {
       logSpy.mockRestore()
     }

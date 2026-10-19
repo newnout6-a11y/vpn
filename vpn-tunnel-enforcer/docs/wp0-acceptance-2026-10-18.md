@@ -3,13 +3,19 @@
 Статус: **в работе**. Основание: том 3 §1.1–1.2, ТЗ-06 WP-0
 и решения владельца §10, AT-00-001…010. WP-3 завершён в PR #46;
 его L3 `SKIPPED_BY_OWNER` не распространяется на WP-0.
-Главный ревьюер — Qodo по решению владельца от 18.10. CodeRabbit исключён
-из ожидания; окончание trial Greptile не блокирует работу. CI и review обязательны.
+Qodo и Revix работают совместно по уточнению владельца 19.10: пока у Revix
+есть квота, учитывать оба ревью на окончательном SHA. Qodo ранее назначен
+главным; завершённый Qodo не заменяет разбор Needs changes от Revix.
+CodeRabbit исключён из ожидания; окончание trial Greptile не блокирует работу.
+CI и review обязательны.
 18.10 владелец разрешил продолжать WP-0 при открытом PR #54, сохраняя запрет
 его слияния до отдельного решения. Полного Revix для #54 не было из-за квоты.
 Позднее 18.10 владелец разрешил сливать PR после пройденных проверок.
-#54/#55/#56/#57/#58/#59/#60/#61/#62/#63/#64/#65/#66/#67/#68/#69/#70/#71/#72 слиты в main после exact-head CI success и completed Qodo,
-без открытых findings; прежний запрет слияния отменён.
+#54/#55/#56/#57/#58/#59/#60/#61/#62/#63/#64/#65/#66/#67/#68/#69/#70/#71/#72/#73 слиты в main после exact-head CI success и completed Qodo,
+без открытых Qodo findings; прежний запрет слияния отменён. Revix #70 сохранил
+Needs changes: владелец отдельно указал это 19.10, выполняется follow-up
+проверка commit callbacks и политики секретного staging/экспорта. Эти замечания
+не считаются закрытыми по одному прежнему merge или Qodo.
 
 ## Полная область и первоначальная инвентаризация
 
@@ -1171,3 +1177,62 @@ Fallback correlationId равен этому ID. Это уточняет пре�
 operationLogDetails идемпотентен для canonical op_ ID. Реальный JSONL двух stop
 операций и diagnostic read-back сохраняют исходные receipt ID и различают их,
 маскируя credential и посторонний UUID. Финальные проверки — в progress.md.
+
+## Follow-up Revix #70 — synchronous commit и secret export
+
+Needs changes уже слитого #70 проверяется отдельным follow-up. commit теперь
+отвергает Promise/thenable callback на уровне TypeScript, native/bound async
+callback до выполнения; malformed untyped JS thenable сохраняет physical drain
+до validation terminal. Cancel test на native dialog использует fake timers,
+сохраняя отказ поздних эффектов и ожидание drain.
+
+Secrets mode проходит от config:export до файлового writer и ACL helper:
+перед plaintext назначается protected user/SYSTEM DACL, включая replacement
+существующего широкодоступного файла. Redacted export сохраняет прежнюю
+destination policy. POSIX branch секретов требует текущего owner/mode 0600.
+Реальный killed writer fixture доказывает private DACL crash residue и
+неизменность прежнего destination. Plaintext staging после аварии может остаться;
+автоматическая очистка произвольных выбранных каталогов не заявляется.
+Финальные проверки и оба reviewer verdict записываются в progress.md.
+
+PR #74 расширил эту гарантию на все три key/proxy file handlers: mode у writer
+и ACL helper обязателен, malformed/omitted mode отвергается. Реальные Windows
+handler regressions проверяют закрытые права после замены широкодоступного файла.
+POSIX secrets не заменяет чужой destination. Bound async с изменённым toStringTag
+отвергается до вызова; при malformed untyped thenable timeout/cancel не заменяет
+validation terminal во время обязательного drain. Это исключительный invalid-code
+путь; prompt cancellation корректных операций сохраняется. Проверки — в журнале.
+
+Повторный Qodo #74 выявил окно inherited ACL при создании пустого Windows
+staging. Secrets теперь получает private FileSecurity атомарно в FileStream
+CreateNew, до возможности открыть файл другим reader. Node открывает уже
+private staging; последующие проверки и terminal replacement сохраняются.
+Actual handler tests проверяют ACL на границе Node open при broad parent DACL;
+collision test подтверждает неизменность существующего файла.
+
+Protected creation handle передаёт volume/file ID; opened handle Node до записи
+обязан иметь тот же ID. Shared-directory substitution до открытия отвергается
+без записи plaintext в подмену. Перед commit повторно проверяются staging ID и
+snapshot; cleanup не удаляет substitute с другим ID. Два настоящих filesystem
+regressions покрывают оба handoff/commit окна, включая заранее открытый reader.
+Если helper не подтвердил ID после CreateNew, возможный пустой private residue
+не удаляется наугад: пишется явный cleanupFailed warning. Проверки — в progress.md.
+
+Qodo 1544270 на 6c691f1 обнаружил оставшееся окно между последним lstat и
+path-based rename. Windows export теперь допускается только на локальном диске
+в namespace с доверенным владельцем и ACL всех родительских каталогов до корня.
+Другие principals не могут иметь DELETE/DELETE_CHILD, WRITE_DAC/WRITE_OWNER,
+изменение атрибутов или generic write/all. Null DACL, UNC и reparse-каталоги
+отвергаются permission до plaintext. Read-only sharing разрешён. Доверенная
+граница — текущий пользователь, SYSTEM, Administrators и TrustedInstaller;
+защита от malicious code под тем же пользователем не заявляется. ACL выбранных
+каталогов приложение не меняет. Это ограничение экспорта в shared writable
+namespace, а не обещание атомарного handle-based rename.
+
+Native regression fixtures создаются отдельно под user profile, с private DACL
+только нового временного каталога, и удаляются после теста. Workspace/OS Temp
+в локальной среде дают sandbox principals права изменения entries и не подходят
+для положительного оракула; отрицательные случаи явно добавляют такие права.
+Revix minors: перед commit проверяется identity без соседних избыточных snapshots;
+подтверждённый отказ до создания и CreateNew collision не помечаются cleanupFailed.
+Indeterminate creation по-прежнему предупреждает о возможном пустом private residue.

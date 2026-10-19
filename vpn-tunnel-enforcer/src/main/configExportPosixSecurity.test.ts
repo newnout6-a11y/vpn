@@ -1,7 +1,7 @@
 // AT-00-003 / AT-01-008: POSIX policy branch, filesystem/identity boundary controlled.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-const state = vi.hoisted(() => ({ uid: 1000n, gid: 10n, mode: 0o600n, denied: false, ignoreGroup: false, changeGroup: vi.fn(), changeMode: vi.fn() }))
-const destination = () => ({ dev: 1n, ino: 2n, size: 3n, mtimeNs: 4n, ctimeNs: 5n, uid: 1000n, gid: 20n, mode: 0o640n, isFile: () => true })
+const state = vi.hoisted(() => ({ destinationUid: 1000n, uid: 1000n, gid: 10n, mode: 0o600n, denied: false, ignoreGroup: false, changeGroup: vi.fn(), changeMode: vi.fn() }))
+const destination = () => ({ dev: 1n, ino: 2n, size: 3n, mtimeNs: 4n, ctimeNs: 5n, uid: state.destinationUid, gid: 20n, mode: 0o640n, isFile: () => true })
 vi.mock('fs/promises', () => ({
   lstat: vi.fn(async (path: string) => path === 'destination' ? destination() : { uid: state.uid, gid: state.gid, mode: state.mode }),
   chown: async (_path: string, uid: number, gid: number) => {
@@ -16,7 +16,7 @@ import { prepareConfigExport } from './configExportSecurity'
 const platform = Object.getOwnPropertyDescriptor(process, 'platform')!
 const getuid = Object.getOwnPropertyDescriptor(process, 'getuid')
 beforeEach(() => {
-  state.uid = 1000n; state.gid = 10n; state.mode = 0o600n; state.denied = false; state.ignoreGroup = false
+  state.destinationUid = 1000n; state.uid = 1000n; state.gid = 10n; state.mode = 0o600n; state.denied = false; state.ignoreGroup = false
   vi.clearAllMocks()
   Object.defineProperty(process, 'platform', { value: 'linux', configurable: true })
   Object.defineProperty(process, 'getuid', { value: () => 1000, configurable: true })
@@ -27,8 +27,34 @@ afterEach(() => {
   else Reflect.deleteProperty(process, 'getuid')
 })
 describe('POSIX export destination policy', () => {
+  it.each([undefined, null, 'full'])('rejects an omitted or malformed export policy from untyped callers: %s', async mode => {
+    await expect(Reflect.apply(prepareConfigExport, undefined, ['empty-staging', 'destination', mode])).rejects.toMatchObject({ category: 'validation' })
+    expect(state.changeMode).not.toHaveBeenCalled()
+    expect(state.changeGroup).not.toHaveBeenCalled()
+  })
+  it.each(['secrets', 'redacted'] as const)('refuses to replace a %s destination owned by another user', async mode => {
+    state.destinationUid = 2000n
+    await expect(prepareConfigExport('empty-staging', 'destination', mode)).rejects.toMatchObject({ category: 'permission' })
+    expect(state.changeMode).not.toHaveBeenCalled()
+    expect(state.changeGroup).not.toHaveBeenCalled()
+  })
+  it('keeps secret staging private instead of copying the destination group and mode', async () => {
+    const verify = await prepareConfigExport('empty-staging', 'destination', 'secrets')
+    expect(state.changeGroup).not.toHaveBeenCalled()
+    expect(state.uid).toBe(1000n); expect(state.gid).toBe(10n); expect(state.mode).toBe(0o600n)
+    expect(verify).not.toThrow()
+  })
+  it('rejects secret staging owned by another user', async () => {
+    state.uid = 2000n
+    await expect(prepareConfigExport('empty-staging', 'destination', 'secrets')).rejects.toMatchObject({ category: 'permission' })
+  })
+  it('rejects a secret staging mode that was not applied', async () => {
+    state.mode = 0o644n
+    state.changeMode.mockImplementationOnce(() => { throw Object.assign(new Error('denied'), { code: 'EPERM' }) })
+    await expect(prepareConfigExport('empty-staging', 'destination', 'secrets')).rejects.toMatchObject({ code: 'EPERM' })
+  })
   it('copies and verifies the existing group before admitting plaintext', async () => {
-    const verify = await prepareConfigExport('empty-staging', 'destination')
+    const verify = await prepareConfigExport('empty-staging', 'destination', 'redacted')
     expect(state.changeGroup).toHaveBeenCalledWith(1000, 20)
     expect(state.gid).toBe(20n); expect(state.mode).toBe(0o640n)
     expect(state.changeGroup.mock.invocationCallOrder[0]).toBeLessThan(state.changeMode.mock.invocationCallOrder[0])
@@ -36,11 +62,11 @@ describe('POSIX export destination policy', () => {
   })
   it('rejects replacement when the original group cannot be preserved', async () => {
     state.denied = true
-    await expect(prepareConfigExport('empty-staging', 'destination')).rejects.toMatchObject({ code: 'EPERM' })
+    await expect(prepareConfigExport('empty-staging', 'destination', 'redacted')).rejects.toMatchObject({ code: 'EPERM' })
     expect(state.mode).toBe(0o600n)
   })
   it('rejects a silent group mismatch after chown', async () => {
     state.ignoreGroup = true
-    await expect(prepareConfigExport('empty-staging', 'destination')).rejects.toMatchObject({ category: 'permission' })
+    await expect(prepareConfigExport('empty-staging', 'destination', 'redacted')).rejects.toMatchObject({ category: 'permission' })
   })
 })

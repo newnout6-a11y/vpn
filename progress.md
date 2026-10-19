@@ -4856,3 +4856,303 @@ CI/review нового SHA проверяются отдельно после pu
   Scope остаётся IPC/runtime с fake OS, не новая Windows TUN/rollback приёмка.
   Локальный gate пройден; следующий шаг — commit/push и automatic Qodo/CI
   на новом SHA. Общая цель WP-0, затем WP-2 остаётся active.
+
+### PR #73 — окончательная приёмка и merge; восстановлена совместная проверка Revix/Qodo
+
+- Commit d05716fd187c12ff0a3abbdb206f3e006ecc93fd запушен в #73.
+  Automatic Qodo 1543882 completed на этом SHA: ef93d214, 0a04cc36,
+  6d7d0e92 implemented, новых findings нет. Snapshot API сохранён в
+  .tmp/qodo73-d05716f-final.json. Ручных review requests и attribution не было.
+- Revix review 5566743333 на d05716f completed, итог Low risk в актуальном
+  PR summary. Вопрос 4310209574 разобран: successful reconnect снимает старую
+  ошибку, но не утверждает завершение старого rollback; новая активная сессия
+  сохраняет обязанность штатной очистки. Exit всегда требует свежих независимых
+  runtime/network/env/capture backstops. Вопрос 4310101300: поздний physical
+  success не переписывает terminal timeout; fresh successful stop подтверждает
+  disconnected. Suggestion 4310135544 о сохранении исходного error text остаётся
+  minor diagnostic improvement, не доказательство небезопасного выхода.
+- Первый CI 39197147181 на d05716f завершился failure: 4478 passed /
+  2 failed / 4 skipped, 285.78 s. Существующие firewallStatus missing-rule-id
+  и splitTunnelDiscovery sibling-products превысили 5000 ms. Полный log:
+  .tmp/wp0-stop-qodo73-recovery-ci-failed.log. Причина задержки не установлена.
+  После terminal npm.cmd test -- src/main/firewallStatus.test.ts src/main/splitTunnelDiscovery.test.ts
+  — 75 passed, 9.46 s, exit 0 (.tmp/wp0-stop-qodo73-ci-followup.log).
+- Повторён только failed Windows job на неизменном d05716f, без изменения
+  кода/assertions/timeouts. CI 39197147181 attempt 2 completed/success,
+  watcher exit 0: 4480 passed / 4 skipped, 221.60 s, traceability, production
+  Electron/IPC/CSP, WFP и native reads PASS. Rust/сайт success.
+  .tmp/wp0-stop-qodo73-ci-attempt2-full.log. Первый failure не превращён в PASS.
+- Владелец уточнил 19.10: Revix снова имеет квоту и работает в связке с Qodo.
+  Теперь оба review учитываются на final SHA; CodeRabbit остаётся исключён.
+  Перед merge #73 отдельно проверены exact head, mergeable=true/clean,
+  завершённый Qodo без открытых findings, Revix Low risk и CI success.
+  REST merge с expected SHA, затем отдельный GET подтвердил merged=true,
+  state=closed, merged_at=2026-10-19T04:11:41Z,
+  merge 8977657ee5255849297d16d0b0935bc39461acc6.
+- Main fast-forward до merge. git diff --exit-code d05716f HEAD -- . — exit 0,
+  tree совпадает с проверенным head. Создана codex/wp0-config-review-followup.
+  Владелец отдельно указал Revix Needs changes у уже слитого #70. Прочитаны
+  все четыре комментария: async commit callback, staging после crash,
+  наследование широкого destination DACL для secrets и wall-clock cancel test.
+  Они проверяются по текущему main; прежний merge/Qodo не закрывает их.
+  Следующий участок WP-0 — адресный follow-up #70, затем общий остаток пакета.
+
+### WP-0 — follow-up Revix #70: synchronous commit и закрытый secret export
+
+- Revix #70 4309508917 подтверждён частично: прежний registry удерживал
+  physical lease и ждал thenable в finally, но запускал async callback до
+  обнаружения нарушения. Native/bound async callback мог начать эффекты до
+  validation error. До исправления npm.cmd test -- src/main/operationRegistry.test.ts src/main/configExportAcl.test.ts -t 'before starting any effects|restricts secret staging'
+  — 3 failed / 52 skipped, 1.32 s, exit 1
+  (.tmp/wp0-config-review-before.log): два async cases и реальная Windows ACL.
+- commit принимает SynchronousCommitResult: Promise/thenable-returning callback
+  отвергается tsc (регрессии @ts-expect-error проверяются typecheck), nullable
+  и primitive results сохраняются. Native и bound async функции отвергаются
+  до вызова. Для untyped JS, вернувшего thenable из обычной функции, остаётся
+  fail-closed drain: validation terminal публикуется после фактического
+  завершения уже начатой работы. Простое удаление runtime thenable guard, как
+  в рекомендации Revix, разрешило бы такому JS опубликовать ложный success.
+  Дополнительный before-case — 1 failed / 47 skipped, 0.400 s, exit 1
+  (.tmp/wp0-config-review-thenable-before.log), затем исправлен порядок error/drain.
+- Revix 4309538135 подтверждён: secrets mode наследовал широкий DACL старого
+  destination. Режим передаётся из production config:export в writer/ACL helper.
+  Secret staging до plaintext и итоговый файл получают protected user/SYSTEM
+  DACL; POSIX branch требует текущего owner и mode 0600. Redacted export
+  сохраняет прежнюю owner/group/DACL политику. Changed destination по-прежнему
+  запрещает replacement. Native Windows и controlled POSIX tests это проверяют.
+- Вопрос 4309452228 о crash: actual production writer выполняется в отдельном
+  Node-процессе с настоящим registry/I/O/ACL. После write/fsync/close до commit
+  parent принудительно завершает свой child и ждёт exit. Старый destination
+  остаётся неизменным; plaintext staging может остаться, но доступен только
+  текущему user/SYSTEM. Проверка читает реальный DACL. Подменён только logger.
+  Generic startup sweep чужих выбранных каталогов не вводился; отсутствие
+  crash residue не заявляется. Восстановление конфиденциальности не выдаётся
+  за автоматическую очистку после аварии.
+- Suggestion 4309452225 учтён: prompt dialog cancel проверяется fake timers,
+  cancelled envelope приходит при advanceTimersByTimeAsync(0) до release
+  native dialog; drain/admission assertions сохранены. Native Electron smoke
+  по-прежнему проверяет реальный bounded IPC result в пределах 900 ms.
+- Промежуточный адресный набор registry/config/ACL/POSIX/errors/rotation:
+  168 passed, 12.61 s (.tmp/wp0-config-review-regression.log); после расширения
+  untyped thenable case — 169 passed / 7 files, 14.94 s, exit 0
+  (.tmp/wp0-config-review-regression-final.log). Typecheck обнаружил недопустимый
+  windowsHide в ForkOptions; fixture переведён на hidden spawn Node с IPC.
+  npm.cmd run build, включая typecheck 160 channels / 0 public any — exit 0
+  (.tmp/wp0-config-review-build.log). Traceability AC 927/927 / F 210/210,
+  git diff --check — exit 0. Финальный full и runtime smokes выполняются.
+- Окончательный npm.cmd test — **4487 passed / 5 skipped / 0 failed**,
+  276 files passed / 2 skipped, **213.21 s**, exit 0
+  (.tmp/wp0-config-review-full.log). Во время прогона code/test tree не менялся.
+  Проверяется финальный hidden spawn crash fixture. node scripts/test-electron-runtime.mjs
+  — ELECTRON_SMOKE_PASS (.tmp/wp0-config-review-electron.log),
+  node scripts/test-wp1-native.mjs --ipc-only — WP1_NATIVE_PASS
+  (.tmp/wp0-config-review-csp.log), оба exit 0. Build/typecheck/traceability
+  результаты выше относятся к этому tree; следующий шаг — commit/push/PR
+  и завершённые automatic Revix + Qodo с exact-head CI.
+- Дополнительно REST-инвентаризация последних закрытых PR #54–73 по текущему
+  automated Revix badge: Needs changes только у #70. Его badge не переписывается
+  вручную; исправления и новый verdict фиксируются follow-up PR. Это проверка
+  текущей отметки, не повторный code review всех этих PR. WP-0/WP-2 goal active.
+
+### WP-0 — PR #74: проверка Qodo и Revix, обязательная secret policy
+
+- Создан PR #74 (codex/wp0-config-review-followup), первый head
+  4034c3a8c9f4a13424ee6ae63bb61fe743bf4f50. Автоматический Qodo 1544037
+  завершён на этом SHA; review 5566925736. Revix review 5566928799 на том же
+  SHA, automated verdict Low risk. Существенный Qodo finding не проигнорирован.
+- Qodo 270339fa-407b-42dd-bce8-255a82a47da2 / 4310332836 подтвердил:
+  три credential-bearing key/proxy file handlers оставили redacted default,
+  сохраняя широкие права существующего destination. Все три теперь передают
+  secrets. По Revix 4310334594 mode обязателен и у writer, и у ACL helper;
+  untyped отсутствующий/невалидный mode также отвергается до plaintext.
+  Actual handler tests создают файл с дополнительным reader SID S-1-5-19,
+  экспортируют single key/all keys/proxies и читают настоящий Windows DACL.
+- Qodo 0488a161-cdc6-4dcb-ad5c-ab33a5802744 / 4310332842 подтвердил:
+  timeout/cancel во время invalid-commit drain мог опубликовать другой terminal.
+  После обнаружения malformed thenable validation имеет приоритет; controller
+  уже aborted, physical lease сохраняется до drain, error публикуется один раз.
+  Это только защитный путь некорректного untyped commit; обычные cancellation
+  и deadline остаются prompt. Проверены deadline, external/manual cancel, close.
+- Revix 4310334601: bound async с изменённым Symbol.toStringTag обходил guard.
+  Вместо строкового tag используется AsyncFunction instanceof вместе с V8
+  types.isAsyncFunction. Новый case доказывает отказ до entered/persist.
+  Revix 4310334607: secrets POSIX replacement также требует того же владельца
+  destination, что redacted; чужой owner отвергается до chmod/chown.
+- Before: npm.cmd test -- src/main/operationRegistry.test.ts src/main/serverKeyExportSecurity.test.ts src/main/configExportPosixSecurity.test.ts -t 'bound-tagged|invalid-commit validation|broadly readable destination|destination owned by another'
+  — 9 failed / 1 passed / 72 skipped, 3.28 s, exit 1
+  (.tmp/wp0-config-qodo74-before.log). После исправления четырёхфайловый набор
+  registry/key handlers/POSIX/Windows ACL — 91 passed, 9.83 s, exit 0
+  (.tmp/wp0-config-qodo74-regression.log); затем добавлены три invalid-mode cases.
+- npm.cmd run build (включает typecheck, 160 channels / 0 public any) — exit 0
+  (.tmp/wp0-config-qodo74-build.log). Traceability: AC 927/927, F 210/210, exit 0.
+  node scripts/test-electron-runtime.mjs — ELECTRON_SMOKE_PASS;
+  node scripts/test-wp1-native.mjs --ipc-only — WP1_NATIVE_PASS; оба exit 0
+  (.tmp/wp0-config-qodo74-electron.log, .tmp/wp0-config-qodo74-csp.log).
+  Полный Vitest выполняется на финальном code/test tree; автоматические ревью
+  и CI потребуются снова после push. Startup sweep crash residue не добавлен.
+- Первый полный npm.cmd test после исправлений: 4499 passed / 1 failed /
+  5 skipped, 218.33 s, exit 1 (.tmp/wp0-config-qodo74-full.log).
+  appLoggerRotation.test.ts читал stat(app.log), когда app.prev.log уже появился,
+  но новый app.log ещё не создан. Тест заменён ожиданием полного конечного
+  оракула через vi.waitFor: prev — файл, live log меньше cap; временный ENOENT
+  между rename/recreate повторяется, итоговые требования не ослаблены.
+  Production logger не изменён. Адресный семифайловый набор, включая этот тест,
+  registry, оба key handlers набора, config/POSIX/native ACL: 159 passed,
+  21.53 s, exit 0 (.tmp/wp0-config-qodo74-regression-final.log).
+  Финальный npm.cmd run typecheck — exit 0
+  (.tmp/wp0-config-qodo74-typecheck-final.log). Повторный полный прогон запущен.
+- Повторный npm.cmd test завершён: **4500 passed / 5 skipped / 0 failed**,
+  276 files passed / 2 skipped, **211.32 s**, exit 0
+  (.tmp/wp0-config-qodo74-full-final.log). Code/test tree во время прогона
+  не менялся. Все адресные/full/typecheck/build/traceability/runtime процессы
+  завершены; git diff --check — exit 0. Исправления готовы к commit/push,
+  новый final-head CI и automatic reviews ещё не объявлены пройденными.
+
+### WP-0 — Qodo #74: атомарное создание secret staging
+
+- eb7aed617712bff56b2075e89e0a5a565eb5eaf8 запушен. Qodo 1544121 completed
+  на этом SHA автоматически пометил оба прежних findings implemented.
+  Revix check-run 117892946691 completed/success на том же SHA, Ready to merge;
+  attribution трёх замечаний выполнена ботом. Но Qodo нашёл новый high finding
+  4559f832-f0fd-4f30-bdd6-1a33ee561826 / 4310391901: Windows staging сначала
+  появлялся с inherited DACL; чужой заранее открытый handle переживал последующее
+  закрытие ACL и мог читать будущий plaintext. Merge не выполнялся.
+- Before: npm.cmd test -- src/main/serverKeyExportSecurity.test.ts -t 'broadly readable destination'
+  — 3 failed / 18 skipped, 6.98 s, exit 1
+  (.tmp/wp0-config-atomic-acl-before.log). Actual parent directory получил
+  наследуемый reader SID S-1-5-19. Проверка на границе Node open до prepare/write
+  выявляет открытый staging во всех трёх production key handlers.
+- Secret Windows file теперь создаётся через FileStream CreateNew overload
+  с protected current-user/SYSTEM FileSecurity в самой операции создания,
+  FileShare.None до закрытия initial handle. Node затем открывает уже private
+  файл; прежние ACL verification, destination identity и terminal rename остаются.
+  Общий PowerShell executor и private ACL descriptor переиспользуются.
+  POSIX wx/0600 и redacted policy не менялись. Новый collision case доказывает,
+  что CreateNew не обрезает и не удаляет существующий файл.
+- Адресный набор actual key handlers / Windows ACL / config operations / key
+  operations — 91 passed, 28.43 s, exit 0
+  (.tmp/wp0-config-atomic-acl-regression.log), до добавления collision case.
+  npm.cmd run build с typecheck — exit 0 (.tmp/wp0-config-atomic-acl-build.log).
+  Traceability — AC 927/927, F 210/210, exit 0. Финальный полный Vitest запущен
+  с collision case, code/test tree зафиксирован. Startup sweep не добавлен.
+- Финальный npm.cmd test — **4501 passed / 5 skipped / 0 failed**,
+  276 files passed / 2 skipped, **223.63 s**, exit 0
+  (.tmp/wp0-config-atomic-acl-full.log), включая новый collision case.
+  node scripts/test-electron-runtime.mjs — ELECTRON_SMOKE_PASS;
+  node scripts/test-wp1-native.mjs --ipc-only — WP1_NATIVE_PASS; оба exit 0
+  (.tmp/wp0-config-atomic-acl-electron.log, .tmp/wp0-config-atomic-acl-csp.log).
+  git diff --check — exit 0. CI 39200719744 на предыдущем eb7aed6 завершён
+  success, watcher exit 0, полный лог .tmp/wp0-config-qodo74-ci-eb7aed6.log.
+  Этот CI не переносится на новый atomic-create tree: после push ждём новый.
+
+### WP-0 — Qodo #74: идентичность protected staging при handoff
+
+- c3b07b96b66cc3da4e48bcdd61fcfa0d394fb2f8 запушен. Qodo 1544165 completed
+  на этом SHA, atomic-DACL finding implemented; новый high
+  d3f24732-d171-40ed-856b-25b576e8371b / 4310433646 подтвердил handoff race:
+  shared-directory entry можно заменить между private CreateNew и Node r+.
+  До исправления реальный retained-reader substitution case возвращал success.
+  npm.cmd test -- src/main/serverKeyExportSecurity.test.ts -t 'substituted staging file'
+  — 1 failed / 21 skipped, 1.70 s, exit 1 (.tmp/wp0-config-identity-before.log).
+- Creation helper получает volume serial/file ID непосредственно с защищённого
+  FileStream SafeFileHandle через GetFileInformationByHandle. Native struct
+  использует точные uint64 расчёты; одноразовый локальный probe подтвердил
+  совпадение с Node BigIntStats dev/ino. Node до prepare/write сравнивает ID
+  своего opened handle с ID creation handle. Ноль/невалидный ID отвергается.
+  Перед terminal rename снова проверяются identity и staging snapshot.
+  Cleanup проверяет ID и не удаляет подменённый чужой entry.
+- Revix 4310434879: timeout после CreateNew до подтверждения ID может оставить
+  пустой private staging. Без доказательства владения неизвестный entry не
+  удаляется; добавлен bounded warning 'config export staging creation not confirmed'
+  с cleanupFailed/reason/operationKey. Plaintext пишется только после подтверждения
+  ID. Это честная граница, не обещание отсутствия temp residue. Revix 4310434884
+  (nitpick о .itest) не меняет поведение: existing native/crash security cases
+  оставлены в обязательном default CI, чтобы не исключать их из полного прогона.
+- Первый адресный прогон после нового native preparation: 89 passed / 4 failed,
+  44.45 s, exit 1 (.tmp/wp0-config-identity-regression.log). Все четыре — ожидание
+  входа в controlled boundary за прежние 1000 ms, когда реальная компиляция
+  native metadata helper ещё не закончилась. Подготовительное ожидание этих
+  cases стало 5000 ms, test budget 15 s; cancellation/deadline/assertions после
+  admission не ослаблялись. Финальный четырёхфайловый набор — 93 passed,
+  46.64 s, exit 0 (.tmp/wp0-config-identity-regression-final.log).
+  Дополнительный pre-commit substitution test — 1 passed / 10 skipped, 2.18 s,
+  exit 0 (.tmp/wp0-config-identity-commit.log), проверяет old destination и то,
+  что cleanup сохраняет substitute. Финальный build/full запущены с этим case.
+- CI 39201559580 предыдущего c3b07b9 завершён success, watcher exit 0
+  (.tmp/wp0-config-atomic-acl-ci-c3b07b9.log). Revix check 117895430457
+  completed/neutral с вопросом и nitpick. Qodo high исключил merge независимо
+  от прежних зелёных проверок. После нового push оба ревью и CI нужны заново.
+- npm.cmd run build (с typecheck), traceability AC 927/927 / F 210/210,
+  node scripts/test-electron-runtime.mjs (ELECTRON_SMOKE_PASS) и
+  node scripts/test-wp1-native.mjs --ipc-only (WP1_NATIVE_PASS) — exit 0
+  (.tmp/wp0-config-identity-build.log, .tmp/wp0-config-identity-electron.log,
+  .tmp/wp0-config-identity-csp.log). Первый полный прогон — 4502 passed /
+  1 failed / 5 skipped, 235.55 s, exit 1 (.tmp/wp0-config-identity-full.log).
+  configIpcErrors.test mock file.stat терял переданный bigint:true и подменял
+  BigIntStats на numeric Stats. Mock теперь передаёт options настоящему fd.stat;
+  production identity check не ослаблен. Адресный configIpcErrors — 38 passed,
+  1.02 s, exit 0 (.tmp/wp0-config-identity-errors.log). Повторный full запущен.
+- Повторный npm.cmd test — **4503 passed / 5 skipped / 0 failed**,
+  276 files passed / 2 skipped, **232.83 s**, exit 0
+  (.tmp/wp0-config-identity-full-final.log). Code/test tree во время прогона
+  не менялся. Финальный npm.cmd run typecheck — exit 0
+  (.tmp/wp0-config-identity-typecheck-final.log). git diff --check — exit 0.
+  Все локальные процессы terminal; новый commit/push проходит повторный
+  exact-head review/CI gate. WP-0 и WP-2 goal остаётся active.
+
+### WP-0 — Qodo #74: запрет небезопасного export namespace
+
+- На 6c691f1 Qodo 1544270 completed: прежние findings implemented, новый high
+  bc51a4ea-9a1b-4466-84f3-c84bc2431f92 / 4310516238 — shared directory entry
+  можно подменить после финального lstat до renameSync. Revix 117900191974
+  completed/neutral: minor 4310523114 (избыточные соседние snapshots),
+  4310523120 (неточное cleanupFailed при подтверждённом отказе создания).
+- Автоматическая проверка разрешений отклонила пробный native handle rename
+  с причиной blocked by policy, без подробностей; вызов не исполнялся и не
+  повторялся другим способом. Выбран fail-closed fallback: на Windows проверять
+  owner/ACL/reparse каждого каталога до корня. UNC/null DACL/untrusted owner или
+  чужие права удаления, изменения ACL/owner/атрибутов и generic write/all
+  отвергаются permission. Приложение не меняет пользовательские directory ACL.
+  Trusted boundary: current user/SYSTEM/Administrators/TrustedInstaller.
+  Произвольный malicious same-user process за эту границу не включается.
+- Before новых parent/ancestor regressions: 2 failed / 11 skipped, 4.83 s,
+  exit 1 (.tmp/wp0-config-namespace-before.log). Первый guard прогон: 22 failed /
+  13 passed, 8.63 s (.tmp/wp0-config-namespace-regression.log): настоящие .tmp и
+  OS Temp имеют sandbox principals с MODIFY/DELETE_CHILD. Их не внесли в trust.
+  Положительные native fixtures перенесены в новые private каталоги user profile;
+  меняется ACL только каждого созданного fixture, cleanup удаляет только его.
+- При переносе обнаружен PowerShell argument-mode дефект нового вызова guard:
+  method expression pathData должен быть заключён в скобки. Redacted variable
+  path работал, secrets ошибочно отвергался. Промежуточный прогон: 15 failed /
+  20 passed, 34.83 s (.tmp/wp0-config-namespace-regression2.log). После исправления
+  два native набора: 35 passed / 0 failed, 31.71 s, exit 0
+  (.tmp/wp0-config-namespace-regression3.log), до последующих уточнений minors.
+- Revix minors исправлены: один identity-only check внутри commit; creation
+  fault различает подтверждённое отсутствие создания/коллизию и indeterminate
+  outcome. Только второй оставляет cleanupFailed warning, не удаляя unknown entry.
+- CI 39203144730 на 6c691f1 завершён failure: два subscription import tests не
+  дождались loopback request за стандартный 1 s на Windows runner. Подготовка
+  теперь ждёт до 5 s, test budget 15 s; cancellation после admission по-прежнему
+  <900 ms. Полный failed CI лог: .tmp/wp0-config-identity-ci-failure.log.
+  Локальный npm.cmd run typecheck — exit 0, 160 channels/0 public any
+  (.tmp/wp0-config-namespace-typecheck.log). Расширенный адресный набор запущен.
+- Расширенный адресный набор: npm.cmd test -- src/main/configExportAcl.test.ts
+  src/main/serverKeyExportSecurity.test.ts src/main/configOperations.test.ts
+  src/main/serverKeyOperations.test.ts src/main/configExportSecurity.test.ts
+  src/main/configIpcErrors.test.ts src/main/subscriptionOperations.test.ts —
+  **159 passed / 0 failed**, 103.92 s, exit 0
+  (.tmp/wp0-config-namespace-targeted.log). Затем negative matrix расширена
+  до шести directory rights × parent/ancestor и двух reparse cases (secrets/redacted).
+  Mapped network drives также отвергаются: буква диска сама по себе не доказывает
+  local namespace. Финальный полный прогон включает эти уточнения.
+- Финальный npm.cmd test — **4517 passed / 5 skipped / 0 failed**,
+  276 files passed / 2 skipped, **315.01 s**, exit 0
+  (.tmp/wp0-config-namespace-full.log). Code/test tree во время прогона не менялся.
+  npm.cmd run typecheck — exit 0, 160 channels/0 public any
+  (.tmp/wp0-config-namespace-typecheck-final.log); npm.cmd run build — exit 0
+  (.tmp/wp0-config-namespace-build-final.log). python -X utf8
+  docs/04-приёмочные-тесты/traceability/check-coverage.py — AC 927/927,
+  F 210/210, exit 0. node scripts/test-electron-runtime.mjs — ELECTRON_SMOKE_PASS;
+  node scripts/test-wp1-native.mjs --ipc-only — WP1_NATIVE_PASS; оба exit 0
+  (.tmp/wp0-config-namespace-electron.log, .tmp/wp0-config-namespace-csp.log).
+  git diff --check — exit 0. После commit/push обязательны новые CI/Qodo/Revix.
