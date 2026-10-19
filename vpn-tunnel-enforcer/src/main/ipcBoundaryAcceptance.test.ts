@@ -71,9 +71,10 @@ describe('guarded handler acceptance', () => {
       for (let iteration = 0; iteration < budget; iteration++) {
         const started = performance.now()
         const response = await handler(event, { [`field_${iteration}`]: bad[iteration % bad.length], sequence: iteration })
+        // Measure dispatch/rejection, excluding Vitest matcher work below.
+        const bucket = Math.min(51, Math.ceil(performance.now() - started))
         expect(response).toMatchObject({ ok: false, error: { category: 'validation' } })
         rejected++
-        const bucket = Math.min(51, Math.ceil(performance.now() - started))
         histogram[bucket]++; channelHistogram[bucket]++; timedCases++
         vi.mocked(logEvent).mockClear()
       }

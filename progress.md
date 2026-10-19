@@ -3984,3 +3984,135 @@ CI/review нового SHA проверяются отдельно после pu
   (.tmp/wp0-refresh-qodo68-electron.log); `node scripts/test-wp1-native.mjs --ipc-only`
   — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-refresh-qodo68-csp.log). После push нужен
   новый completed Qodo и CI на окончательном SHA; initial CI их не заменяет.
+
+### PR #68 — повторная проверка и слияние
+
+- Qodo **1542683 completed** на **ed197ceaaeb26fbbd873368f2583e48a372b0e65**:
+  action_required и оба remediation_recommended — implemented. Осталось
+  только informational о типизированном conflict второго manual caller;
+  политика и граница UI описаны выше. Новых существенных findings нет.
+  Attribution проверен через API, вручную не менялся; ручного review request нет.
+- CI **39176689898 success** на том же SHA: ETW Rust, сайт и приложение
+  Windows (5m32s) зелёные, включая полный unit, traceability, production
+  IPC/CSP, WFP ABI/rollback и Electron reads. Watcher завершился exit 0.
+- PR #68 слит с ожидаемым SHA; отдельный REST GET подтвердил merged=true,
+  state=closed, merge **3afb09d43e88219fa4adbc23561cc780ac8cd523**.
+  Открытых PR после слияния не осталось. Следующий участок — импорт профилей,
+  ветка codex/wp0-profile-import от обновлённого main; код ещё не менялся.
+- Эта запись меняет только журнал/матрицу. Production совпадает с проверенным
+  ed197ce; последние проверки: typecheck exit 0, полный npm test 4285 passed /
+  5 skipped, build/native PASS, traceability AC 927/927 / F 210/210. Полная
+  WP-0 и следующая WP-2 остаются активной целью, завершение не заявлено.
+
+### WP-0 — cancellable profile import и commit внутри общей очереди
+
+- Новый subscription/URI и append в выбранную группу теперь под production
+  operation registry: original action correlation, UUIDv4, deadline 120 s,
+  typed cancellation/conflict и physical drain. Resolver получает signal;
+  повтор идентичного незавершённого импорта не присоединяется к чужому lifetime.
+  Resource — SHA-256 canonical input/device/target, без raw input в metadata.
+- Создание группы перенесено в общий с refresh сериализованный commit.
+  Ожидающий отменённый запрос не создаёт группу и не пишет профили. Повторный
+  lookup внутри очереди сохраняет одну группу для concurrent device variants.
+  Explicit target проверяется заново по existence/source/sourceUrl. Неуспешный
+  commit пытается восстановить profiles/active/groups; ошибка восстановления
+  явно логируется bounded internal failure, успешный результат не возвращается.
+- Re-paste существующей подписки остаётся одной refresh operation, чтобы
+  вложенный prompt caller cancellation не освобождал внешний physical lease.
+  Возвращаются только новые профили этой группы, без чужих concurrent additions.
+- Baseline `npm.cmd test -- src/main/profileImportOperations.test.ts`
+  — **8 failed**, 21.08 s, exit 1 (.tmp/wp0-import-before.log), включая
+  unhandled assertion после заведомо неотменяемого прежнего resolver.
+  Исходный concurrent fixture возвращал одинаковый сервер для разных input;
+  его законная дедупликация не production regression. Fixture исправлен на
+  разные hosts; негативный результат этим дефектом не обосновывается.
+- Controlled regression расширен до **18 passed**, 1.11 s, exit 0:
+  `npm.cmd test -- src/main/profileImportOperations.test.ts`
+  (.tmp/wp0-import-focused-expanded.log). Cancel resolution/queue для
+  subscription/URI/target, shutdown/drain, deadline, deletion/source replacement,
+  write failures/rollback failure, parallel commits/devices и re-paste isolation.
+- `npm.cmd test -- src/main/profileImportOperations.test.ts src/main/subscriptionOperations.test.ts`
+  — **25 passed / 2 files**, 2.12 s, exit 0 (.tmp/wp0-import-focused-native.log).
+  Loopback исполняет actual picker/refresh/registry/guard, настоящий curl и Conf:
+  после cancel child/socket завершены, поздний HTTP не пишет файл, successful
+  import/URI сохраняются после нового Conf handle. Реальные logger/redactor/JSONL
+  и diagnostic read-back сохраняют разные operationKey/original IPC correlation
+  двух concurrent imports, raw UUID и контрольные credentials скрыты.
+- Адресный запуск с serverGroupsRefresh — **62 passed / 3 files**, 2.23 s,
+  exit 0 (.tmp/wp0-import-regression.log). В фильтре также были три отсутствующих
+  старых filename; Vitest их не запускал. Число 62 относится только к трём реально
+  выполненным файлам; полный набор проверяется отдельно.
+- `npm.cmd run typecheck` — exit 0, 160 channels / 0 public any
+  (.tmp/wp0-import-typecheck.log); traceability — AC 927/927 / F 210/210,
+  exit 0. `npm.cmd run build` — exit 0 (.tmp/wp0-import-build.log).
+  `node scripts/test-electron-runtime.mjs` — ELECTRON_SMOKE_PASS, exit 0
+  (.tmp/wp0-import-electron.log); `node scripts/test-wp1-native.mjs --ipc-only`
+  — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-import-csp.log). Smoke проверяет общие
+  production IPC/preload/CSP subsets; импорт отдельно покрыт actual curl/guard/
+  Conf fixture. Electron/DPAPI storage boundary этого fixture заменён.
+- Остаток WP-0 сохранён: config browse/import/apply, export, rotation, UI cancel/
+  unmount, stop deadline, background native admission, durable audit, migrations,
+  semantic error matrix и остальные AT. Полная WP-0 не объявляется PASS.
+- Первый полный `npm.cmd test` — **1 failed / 4305 passed / 5 skipped**,
+  203.70 s, exit 1 (.tmp/wp0-import-full.log): прежний actual PowerShell case
+  adaptiveNetworkIdentity превысил стандартные 5000 ms (10549 ms) при параллельном
+  build/native. Причинность нагрузки не доказана. Без изменения кода/таймаута
+  `npm.cmd test -- src/main/adaptiveNetworkIdentity.test.ts` — **25 passed**,
+  3.21 s, exit 0 (.tmp/wp0-import-adaptive-recheck.log). Полный набор повторяется
+  отдельно от build/native; первый failure не заменяется адресным PASS.
+- Повторный полный `npm.cmd test` без параллельного build/native — **4306 passed /
+  5 skipped / 0 failed**, 268 files passed / 2 skipped, **189.30 s**, exit 0
+  (.tmp/wp0-import-full-final.log). Production/test code и timeout не менялись.
+  Stderr RootErrorBoundary — ожидаемый fixture crash; unhandled failures нет.
+  Перед commit `git diff --check` — exit 0. После push требуется completed
+  Qodo и CI на итоговом SHA; следующий участок до этого не начинается.
+
+### PR #69 — Qodo: terminal refresh result и диагностика отказа rollback
+
+- PR #69 создан на **350badcd97df253d5d1346088bb09659824dc2bd**.
+  Qodo **1542763 completed** на этом SHA: одно remediation_recommended
+  и одно informational; attribution через API, вручную не менялся.
+- 6782f1e2-3b11-44bb-b9c5-279481f97654 подтверждён: addFromInput проверял
+  внешний signal после успешного refresh и мог вернуть cancelled при уже
+  сохранённых profiles/group metadata. Теперь terminal result решает только
+  refresh owner. Новый regression abort-ит signal синхронно при публикации
+  refresh success и проверяет успешный ответ и сохранённые данные.
+- До fix `npm.cmd test -- src/main/profileImportOperations.test.ts -t 'terminal publication'`
+  — **1 failed / 18 skipped**, 1.03 s, exit 1 (.tmp/wp0-import-qodo69-before.log).
+- 867ccbff-b27d-49ae-9586-df2557e72717 (informational) также учтён: при
+  отказе rollback лог содержит commitStep и causeCategory исходной ошибки,
+  сохраняя bounded taxonomy без raw exception/secret/path. Fixture отличает
+  исходный EACCES на active selection от последующей ошибки восстановления
+  profiles, проверяет category=internal и отсутствие контрольного private path.
+- `npm.cmd test -- src/main/profileImportOperations.test.ts src/main/subscriptionOperations.test.ts src/main/serverGroupsRefresh.test.ts`
+  — **63 passed / 3 files**, 2.11 s, exit 0 (.tmp/wp0-import-qodo69-focused.log).
+  `npm.cmd run typecheck` — exit 0, 160 channels / 0 public any
+  (.tmp/wp0-import-qodo69-typecheck.log). Traceability AC 927/927 / F 210/210
+  и `git diff --check` — exit 0. Полный набор запущен после завершения typecheck;
+  build/native и новый exact-head review/CI требуются по итоговому SHA.
+- Полный `npm.cmd test` после Qodo fixes — **4307 passed / 5 skipped /
+  0 failed**, 268 files passed / 2 skipped, **194.60 s**, exit 0
+  (.tmp/wp0-import-qodo69-full.log). Это результат до следующей поправки
+  инструмента замера IPC; production fix на нём проверен.
+- Initial CI **39178308104 failure** на 350badc: Windows unit — один failure
+  ipcBoundaryAcceptance, config:import channel p99 попал в saturated bucket 51
+  (>50 ms); **4306 passed / 4 skipped / 1 failed**, 273.80 s. Новые import
+  fixtures прошли. Лог .tmp/wp0-import-ci69-failure.log; Rust/сайт success,
+  последующие Windows acceptance steps из-за unit failure не выполнялись.
+- Проверка исходника выявила, что histogram включал Vitest toMatchObject в
+  длительность handler. Время теперь снимается сразу после await handler,
+  до assertion. Лимит 50 ms, бюджеты mutation, все category/zero-effects
+  проверки и подсчёт каждого observation сохранены. Это корректировка границы
+  измерения, не доказательство причины конкретного CI outlier. Новый CI обязателен.
+- `npm.cmd test -- src/main/ipcBoundaryAcceptance.test.ts src/main/profileImportOperations.test.ts src/main/subscriptionOperations.test.ts src/main/serverGroupsRefresh.test.ts`
+  — **65 passed / 4 files**, 2.84 s, exit 0
+  (.tmp/wp0-import-qodo69-focused-final.log). Полный финальный набор и build/
+  native выполняются на этой версии последовательно, результаты ниже по факту.
+- Окончательный `npm.cmd test` — **4307 passed / 5 skipped / 0 failed**,
+  268 files passed / 2 skipped, **191.80 s**, exit 0
+  (.tmp/wp0-import-qodo69-full-final.log). `npm.cmd run build` — exit 0,
+  включая typecheck 160 channels / 0 public any (.tmp/wp0-import-qodo69-build.log).
+  `node scripts/test-electron-runtime.mjs` — ELECTRON_SMOKE_PASS, exit 0
+  (.tmp/wp0-import-qodo69-electron.log); `node scripts/test-wp1-native.mjs --ipc-only`
+  — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-import-qodo69-csp.log). Scope этих smoke
+  прежний, новый import дополнительно проверен actual curl/guard/Conf fixture.

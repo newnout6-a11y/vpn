@@ -1,4 +1,4 @@
-// AT-00-003/005/007: actual refresh/registry/curl, loopback HTTP and Conf disk.
+// AT-00-003/005/007: actual refresh/import/registry/curl, loopback HTTP and Conf disk.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createServer, type Server, type ServerResponse } from 'node:http'
 import type { Socket } from 'node:net'
@@ -9,6 +9,9 @@ import { join } from 'node:path'
 const state = vi.hoisted(() => ({ dir: '', picker: undefined as any, groups: undefined as any, children: [] as ChildProcess[], log: vi.fn(), handle: vi.fn(), handlers: new Map<string, (...args: any[]) => any>() }))
 vi.mock('electron', () => ({ ipcMain: { handle: state.handle }, app: { isPackaged: false, getPath: () => state.dir }, shell: {} }))
 vi.mock('./settings', () => ({ settingsStore: { get: () => ({ bootstrapRouteMode: 'direct' }) } }))
+vi.mock('./tunController', () => ({ getDirectProxyPort: () => 1080, tunController: { getStatus: () => ({ running: false }), setWatchdogProbeConfirmationChecker: vi.fn() } }))
+vi.mock('./adaptiveBypass', () => ({ beginAdaptiveConnection: vi.fn(), readAdaptiveNetworkFingerprint: vi.fn() }))
+vi.mock('./ipMonitor', () => ({ ipMonitor: {} }))
 vi.mock('child_process', async () => {
   const actual = await vi.importActual<typeof import('child_process')>('child_process')
   return { ...actual, spawn: (...args: Parameters<typeof actual.spawn>) => {
@@ -84,6 +87,76 @@ function group(path: string) {
 }
 
 describe('subscription network ownership', () => {
+  it.each(['new', 'target'])('cancels an actual %s profile import and leaves no late disk commit or live curl', async kind => {
+    const picker = await import('./serverPicker')
+    const target = kind === 'target' ? service.createGroup({ name: 'Target', source: 'manual', importedAt: 1, status: 'unknown' }) : null
+    const beforeProfiles = await disk('server-picker'), beforeGroups = await disk('server-groups')
+    const input = base + '/import-held'
+    const run = target ? picker.addFromInputToGroup(input, target.id) : picker.addFromInput(input)
+    const rejected = expect(run).rejects.toMatchObject({ category: 'cancelled' })
+    await vi.waitFor(() => expect(replies.has('/import-held')).toBe(true))
+    const operation = registry.list().find(op => op.status === 'running')!
+    expect(operation.kind).toBe('import')
+    const start = performance.now()
+    registry.cancel(operation.operationId)
+    await rejected
+    expect(performance.now() - start).toBeLessThan(900)
+    await registry.close()
+    await vi.waitFor(() => expect(sockets.size).toBe(0))
+    expect(state.children).toHaveLength(1)
+    expect(state.children[0].exitCode !== null || state.children[0].signalCode !== null).toBe(true)
+    replies.get('/import-held')!.end(body)
+    expect(await disk('server-picker')).toEqual(beforeProfiles)
+    expect(await disk('server-groups')).toEqual(beforeGroups)
+    expect(state.log.mock.calls.some(call => /added from|appended to/.test(call[2]))).toBe(false)
+  })
+
+  it('retains actual concurrent import identities through IPC, JSONL, diagnostics and disk reload', async () => {
+    const picker = await import('./serverPicker')
+    picker.registerServerPickerHandlers()
+    const one = state.handlers.get('servers:add')!({}, base + '/import-cancelled')
+    const two = state.handlers.get('servers:add')!({}, base + '/import-successful')
+    await vi.waitFor(() => expect(replies.size).toBe(2))
+    const records = registry.list()
+    expect(records).toHaveLength(2)
+    expect(records.every(op => op.kind === 'import' && op.owner === 'manual' && op.source === 'ipc')).toBe(true)
+    registry.cancel(records[0].operationId)
+    expect(await one).toMatchObject({ ok: false, correlationId: records[0].correlationId, error: { code: 'IPC_CANCELLED', category: 'cancelled' } })
+    replies.get('/import-successful')!.end(body)
+    const result = await two
+    expect(result).toMatchObject({ ok: true, correlationId: records[1].correlationId })
+    expect(result.result).toHaveLength(1)
+    const uri = body.replace('fixture.example.com', 'uri.example.com')
+    const manual = await picker.addFromInput(uri)
+    expect(manual).toHaveLength(1)
+    await registry.close()
+    const saved = await disk('server-picker') as { profiles: Array<{ id: string; groupId: string }>; activeProfileId: string }
+    const savedGroups = await disk('server-groups') as { groups: Array<{ id: string; sourceUrl?: string }> }
+    expect(saved.profiles.map(profile => profile.id).sort()).toEqual([result.result[0].id, manual[0].id].sort())
+    expect(saved.activeProfileId).toBe(result.result[0].id)
+    expect(savedGroups.groups).toHaveLength(2)
+    expect(savedGroups.groups.some(group => group.sourceUrl === base + '/import-cancelled')).toBe(false)
+    expect(savedGroups.groups.some(group => group.sourceUrl === base + '/import-successful' && group.id === result.result[0].groupId)).toBe(true)
+    const { getAppLogPath, getFullLogs } = await import('./appLogger')
+    let raw = ''
+    await expect.poll(async () => {
+      raw = await readFile(getAppLogPath(), 'utf8')
+      return raw.trim().split('\n').length
+    }).toBe(state.log.mock.calls.length)
+    const events = raw.trim().split('\n').map(line => JSON.parse(line)).filter(row => row.message === 'feature operation')
+    expect(new Set(events.map(row => row.details.operationKey)).size).toBe(3)
+    for (const [index, record] of records.entries()) {
+      const operationEvents = events.filter(row => row.details.operationKey === 'op_' + record.operationId.replaceAll('-', ''))
+      expect(operationEvents.map(row => row.details.status)).toEqual(['running', index === 0 ? 'cancelled' : 'success'])
+      expect(operationEvents.every(row => row.correlationId === record.correlationId && row.details.correlationId === record.correlationId)).toBe(true)
+      expect(raw).not.toContain(record.operationId)
+    }
+    expect(raw).not.toContain('00000000-0000-4000-8000-000000000000')
+    const diagnostic = (await getFullLogs()).find(file => file.path === getAppLogPath())!
+    expect(diagnostic.exists).toBe(true)
+    expect(diagnostic.content.trim().split('\n').map(line => JSON.parse(line)).filter(row => row.message === 'feature operation')).toEqual(events)
+  })
+
   it('returns typed cancellation through the actual IPC guard with one action correlation', async () => {
     const subscription = group('/ipc')
     const run = state.handlers.get('groups:refresh')!({}, subscription.id)
