@@ -92,7 +92,7 @@ import { registerLiveServerProbeIpcHandlers } from './liveServerProbe'
 import { registerUrlAvailabilityHandlers } from './urlAvailability'
 import { registerSpeedTestHandlers } from './speedTest'
 import { registerKillSwitchIpc, granularKillSwitch } from './granularKillSwitch'
-import { registerRotationHandlers, initProfileRotation } from './profileRotation'
+import { registerRotationHandlers, initProfileRotation, profileRotation } from './profileRotation'
 import { registerSchedulerIpcHandlers, schedulerService } from './scheduler'
 import { registerConnectionHistoryIpcHandlers, connectionHistoryService } from './connectionHistory'
 import { registerTrafficHistoryIpcHandlers, stopBackgroundTrafficHistory } from './trafficHistory'
@@ -1207,6 +1207,7 @@ const connectionLifecycle = new ConnectionLifecycle(() => {
   if (operation.status === 'running' && operation.owner !== 'schedule') schedulerService.cancelPendingConnect()
   logEvent(operation.status === 'running' ? 'debug' : 'info', 'lifecycle', 'connection operation', operation)
 }, tunnelState)
+profileRotation.setLifecycle(connectionLifecycle)
 
 async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http'): Promise<ConnectionStartResult> {
   return connectionLifecycle.start(owner => startProtectionEffects(owner, proxyAddr, proxyType))
@@ -2880,6 +2881,7 @@ async function performShutdownCleanup(reason: string): Promise<void> {
   shutdownInProgress = true
   const failedSteps: string[] = []
   adaptiveVerificationGeneration += 1
+  profileRotation.stopTimer()
   const featureDrain = operations.close()
   await connectionLifecycle.close().catch(err => {
     failedSteps.push('connection-lifecycle')

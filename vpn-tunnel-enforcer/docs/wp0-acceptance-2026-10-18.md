@@ -8,7 +8,7 @@
 18.10 владелец разрешил продолжать WP-0 при открытом PR #54, сохраняя запрет
 его слияния до отдельного решения. Полного Revix для #54 не было из-за квоты.
 Позднее 18.10 владелец разрешил сливать PR после пройденных проверок.
-#54/#55/#56/#57/#58/#59/#60/#61/#62/#63/#64/#65/#66/#67/#68/#69/#70 слиты в main после exact-head CI success и completed Qodo,
+#54/#55/#56/#57/#58/#59/#60/#61/#62/#63/#64/#65/#66/#67/#68/#69/#70/#71 слиты в main после exact-head CI success и completed Qodo,
 без открытых findings; прежний запрет слияния отменён.
 
 ## Полная область и первоначальная инвентаризация
@@ -17,7 +17,7 @@
 | --- | --- | --- |
 | 00-001 | AST-проверка 160 main/preload/shared request channels, общий реестр входов и versioned transport envelope; object contracts проверяют поля/массивы, save-settings покрывает все 39 общих полей AppSettings; TypeScript checker проверяет results всех 160 listeners, public results с `any` больше нет; native contextBridge сохраняет JSON профиля и nullable active result, feature list/cancel | Завершить проверку текущего PR; отдельная semantic matrix ошибок остаётся в 00-004 |
 | 00-002 | Production TunnelStateMachine интегрирована в main lane/IPC/Soft/tray/UI; 4096 stable tours и 117649 tours семи событий глубиной 6, включая timeout/cancel и native completion, с fake PID/TUN ledger и балансом operation events; sticky faults и generation fencing | Общая durable operation history/counters; все blocked/unknown/background paths; native Windows resources; общий admission фоновых restart |
-| 00-003 | Main connection lane: UUIDv4, owner, deadline запуска, priority admission; ручные Hard/Direct и Soft из tray, scheduled startup вместе с proxy detection; общий feature registry с prompt cancellation/deadline и physical drain, speed test, refresh подписок и импорт профилей, включая curl/DoH и commit queue; config browse/validate/apply/export, async file I/O и terminal commit приняты в PR #70 | Экспорт ключей/rotation и UI cancel/unmount; deadline остановки, все entrypoints и полная матрица поздних эффектов |
+| 00-003 | Main connection lane: UUIDv4, owner, deadline запуска, priority admission; ручные Hard/Direct и Soft из tray, scheduled startup вместе с proxy detection; общий feature registry с prompt cancellation/deadline и physical drain, speed test, refresh подписок и импорт профилей, включая curl/DoH и commit queue; config browse/validate/apply/export, async file I/O и terminal commit приняты в PR #70; key renderer/clipboard/file exports в PR #71 | Ротация и UI cancel/unmount; deadline остановки, все entrypoints и полная матрица поздних эффектов |
 | 00-004 | Общая классификация transport; 157 каналов × 7 категорий через guard; native contextBridge сохраняет code/category/correlation в en/ru; typed local validation; 4 настоящих config handlers × 7 категорий, canonical domain failures | Миграция legacy domain-result `{success:false,error}` и semantic matrix настоящих feature handlers; transport fixtures не доказывают её |
 | 00-005 | Один action correlation id в guarded IPC response/error, lifecycle connect/stop и JSONL logger; async isolation, native wait/drain, diagnostic read-back с повторной redaction; ID исходного connect и source/owner/route/confidence в session history/JSON/CSV; JSONL clockId/monotonicMs отдельно от календарных дат и durationMs; реальные owned/legacy/tray/recovery Soft sessions | Все native/background entrypoints и полная матрица событий/истории автоматизаций, live-check и recovery |
 | 00-006 | Локальные миграции; общий version admission для 20 electron-store файлов / 28 constructors; future-version SHA-256 invariance на real Conf backend до defaults/repair и при записи через ранее открытый handle | Централизованный упорядоченный migration registry, fixtures всех исторических преобразований, остальные persisted JSON, полноценный upgrade/downgrade и межпроцессная координация |
@@ -1057,3 +1057,74 @@ POSIX branch сохраняет uid/gid/mode до plaintext и проверяе�
 Все 14 новых cases падали до исправления, адресный набор 167 passed после.
 Initial CI 39185510421 success относится к cdb1229; новый head требует
 повторных full tests, completed Qodo и CI success. Attribution не менялся вручную.
+
+
+PR #71 слит после Qodo 1543309 completed (3 implemented, новых нет) и
+CI 39186437502 success на c8be3ba. Отдельный REST GET подтвердил merge
+273a93d / merged=true / state=closed. Полный локальный набор: 4393 passed /
+5 skipped; typecheck/build/native PASS, адресно 167 passed. Git tree merge
+совпадает с проверенным head. Следующий участок — ротация; это завершает
+текущий key export участок, сохраняя общий остаток AT и всего WP-0.
+
+
+## Ротация: один owner подготовки, native swap и физического завершения (19.10.2026)
+
+Rotation IPC/timer используют общий registry и connection lane с одной identity:
+UUIDv4, original correlation, owner rotation, work deadline 120 s. Admission
+предшествует availability/fingerprint, поэтому manual/schedule вытесняют также
+подготовку ротации. Rotation может вытеснить только меньший priority startup,
+ожидая его actual drain/cleanup; равный/больший priority даёт typed conflict.
+
+Cancel/deadline/destroy/config replacement/reload/stopTimer/shutdown запрещают
+поздние select/broadcast/notification/config writes. Caller cancellation prompt,
+но lane/resource держатся до actual native effects. При отмене до beginRestart
+FSM сохраняет прежнюю защиту только после проверки неизменных runtime evidence
+и отсутствия fault. После начала swap нужна подтверждённая ordinary cleanup;
+новый startup не обходит эту границу. Native restart signal переживает reset
+старого transition flag; late success после abort заканчивается teardown.
+Финальное scheduling и успешный result выполняются одним registry commit.
+
+Endpoint probe с managed signal ждёт обе physical TCP/ICMP ветви. После abort
+следующая interface/fallback/DNS continuation не запускает новую сетевую попытку.
+Уже выданные OS probes завершаются под физическим lease; их моментальная отмена
+не заявляется. Shared lookup физических адаптеров не отменяется другим caller.
+
+L2 fixture выполняет actual rotation/registry/lane/FSM/IPC guard с реальными
+Conf и logger/redactor/JSONL. Проверяются три управляемые границы, bounded cancel,
+deadline, sender destruction, configuration reload, timer, manual/schedule
+replacement, unchanged file bytes, terminal correlation и сохранение состояния
+preflight. Native restart/probes/fingerprint/notification заменены; отдельный
+extracted-body fixture выполняет production restart/probe функции с управляемыми
+OS/DNS boundaries. Это не новая native Windows/TUN приёмка. Финальные проверки
+и review gate фиксируются в progress.md.
+
+Существующий Health-Before-Commit/возврат старого сервера после failed rotation
+(WP-10 F-124, том 3 §2.2) этим lifetime участком не реализован и не объявляется
+PASS: selection/первичное уведомление по-прежнему предшествуют проверке нового
+сервера. UI cancel/unmount, прочие background/native entrypoints, durable audit,
+migration/semantic matrices и полная ресурсная приёмка сохраняются в WP-0.
+
+Qodo #72 подтвердил четыре дополнительные границы: timer независимо
+восстанавливает следующий tick после отмены/timeout/conflict, но generation
+запрещает retry после stop/disable/config replacement/shutdown. Для живого
+туннеля выбор и announce кандидата перенесены после отменяемой подготовки;
+при idle входят в terminal commit. Исключение preflight сохраняет прежний
+confirmed state только после повторного сравнения original runtime evidence
+после drain. Log operationId использует обратимый op_ key без маски UUID;
+IPC DTO и cancel API по-прежнему используют исходный UUIDv4. Actual JSONL и
+diagnostic read-back проверяют оба одинаковых ID поля и correlation. Это
+не отменяет перечисленные остатки WP-0/WP-10; финальные checks/review — progress.md.
+
+Повторный Qodo потребовал сохранить явное предупреждение после failed native
+restart: connectionError сообщает, что защита после перезапуска не подтверждена
+и трафик может идти по обычному маршруту. Preflight failure, не трогавший native
+туннель, сохраняет отдельный нейтральный текст. Ни успешная ordinary teardown,
+ни отключённый firewall не предполагаются только по факту ошибки restart.
+Production rotation regression проверяет оба исхода native failure — result
+и exception — и отсутствие предупреждения о снятой защите при preflight error.
+
+Сохранение эквивалентного config patch (включая новый массив прежних profileIds)
+не отменяет admitted rotation, не переписывает файл и не сбрасывает countdown.
+Реальная замена конфигурации по-прежнему отменяет работу со старыми значениями.
+L2 regression проверяет signal, прежний nextRotationAt и успешное завершение
+удержанного native restart без ordinary cleanup для четырёх no-op patch.

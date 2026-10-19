@@ -15,6 +15,9 @@ export class TunnelStateMachine {
   private nativeGeneration = 0
   private expectedNativeGeneration: number | null = null
   private retainedSoftOperation: string | null = null
+  private rotationMode: 'tun' | 'soft' | null = null
+  private rotationEvidence: TunnelEvidence | null = null
+  private retainedRotationOperation: string | null = null
 
   constructor(private readonly readEvidence: () => TunnelEvidence, private readonly onChange: (snapshot: TunnelSnapshot) => void = () => {}) {}
 
@@ -32,6 +35,26 @@ export class TunnelStateMachine {
   canConfirmStop(): boolean {
     const e = this.evidence()
     return e !== null && !e.running && e.pid === null && !e.softApplied
+  }
+  canRotate(): boolean {
+    return this.current.transition === null && (this.current.state === 'connected' || this.current.state === 'disconnected')
+  }
+  canConfirmRotation(): boolean {
+    const e = this.evidence()
+    return this.rotationMode === null ? !this.faultDuringOperation && this.canConfirmStop()
+      : this.canConfirmStart() && (this.rotationMode === 'tun' ? e?.running === true : e?.softApplied === true)
+  }
+  confirmRetainedRotation(operationId: string) {
+    if (this.current.operation?.operationId !== operationId || this.current.operation.status !== 'running'
+      || this.current.operation.kind !== 'rotation' || !this.canRetainRotation()) return invalid()
+    this.retainedRotationOperation = operationId
+    return { success: true } as const
+  }
+  private canRetainRotation(): boolean {
+    const e = this.evidence(), previous = this.rotationEvidence
+    return !this.faultDuringOperation && !!e && !!previous && e.running === previous.running
+      && e.pid === previous.pid && e.softApplied === previous.softApplied && e.startedAt === previous.startedAt
+      && this.canConfirmRotation()
   }
   private canRetainSoft(): boolean {
     const e = this.evidence()
@@ -59,20 +82,30 @@ export class TunnelStateMachine {
   operationChanged(operation: ConnectionOperation) {
     if (operation.status === 'running') {
       if (this.current.operation?.status === 'running' && operation.kind !== 'disconnect') return invalid()
+      if (operation.kind === 'rotation' && !this.canRotate()) return invalid()
+      this.rotationMode = operation.kind === 'rotation' ? this.current.mode : null
+      this.rotationEvidence = operation.kind === 'rotation' ? this.evidence() : null
+      if (this.rotationEvidence) this.rotationEvidence = { ...this.rotationEvidence }
+      this.retainedRotationOperation = null
       this.retainedSoftOperation = null
       this.faultDuringOperation = false
       this.reconnectEligible = false
       this.expectedNativeGeneration = null
-      return this.commit({ operation: { ...operation }, cleanupRequired: true, transition: operation.kind === 'connect' ? 'connecting' : 'disconnecting' })
+      return this.commit({ operation: { ...operation }, cleanupRequired: true,
+        transition: operation.kind === 'rotation' ? 'reconnecting' : operation.kind === 'connect' ? 'connecting' : 'disconnecting' })
     }
     if (this.current.operation?.operationId !== operation.operationId || this.current.operation.status !== 'running') return invalid()
     let state: TunnelState = this.current.state
-    if (operation.status === 'success') state = operation.kind === 'connect'
+    if (operation.status === 'success') state = operation.kind === 'rotation'
+      ? this.canConfirmRotation() ? this.rotationMode === null ? 'disconnected' : 'connected' : 'unknown'
+      : operation.kind === 'connect'
       ? this.canConfirmStart() ? 'connected' : 'unknown'
       : this.canConfirmStop() ? 'disconnected' : 'unknown'
+    else if (operation.kind === 'rotation' && this.retainedRotationOperation === operation.operationId && this.canRetainRotation()) state = this.rotationMode === null ? 'disconnected' : 'connected'
     else if (operation.status === 'error' && !operation.category && this.retainedSoftOperation === operation.operationId && this.canRetainSoft()) state = 'connected'
     else if (state !== 'blocked' && state !== 'unknown') state = 'error'
     this.retainedSoftOperation = null
+    this.retainedRotationOperation = null
     const e = this.evidence()
     return this.commit({ operation: { ...operation }, transition: null, state,
       mode: state === 'connected' ? e?.running ? 'tun' : 'soft' : null, cleanupRequired: state !== 'disconnected',

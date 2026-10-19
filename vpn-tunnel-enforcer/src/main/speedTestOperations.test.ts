@@ -255,8 +255,11 @@ describe('owned speed test effects', () => {
     const events = operationEvents()
     expect(events.map(operation => operation.status)).toEqual(['running', 'success'])
     expect(events.every(operation => operation.correlationId === result.correlationId)).toBe(true)
+    const operation = registry.list().at(-1)!
     const progressIds = new Set(state.send.mock.calls.map(call => call[1].operationId))
-    expect([...progressIds]).toEqual([events[0].operationId])
+    expect([...progressIds]).toEqual([operation.operationId])
+    const diagnosticId = 'op_' + operation.operationId.replaceAll('-', '')
+    expect(events.every(event => event.operationId === diagnosticId && event.operationKey === diagnosticId)).toBe(true)
   })
 
   it('rejects VPN-off as a typed conflict without issuing network requests', async () => {

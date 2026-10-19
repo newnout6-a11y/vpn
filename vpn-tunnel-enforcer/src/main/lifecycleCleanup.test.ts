@@ -43,16 +43,44 @@ function protectedRestartHarness() {
     stop: vi.fn(async (): Promise<any> => ({ success: true })),
     start: vi.fn(async (): Promise<any> => ({ success: true }))
   }
-  const control = compile<{ restart: () => Promise<any>; cancel: () => void }>(`
+  const control = compile<{ restart: (signal?: AbortSignal) => Promise<any>; cancel: () => void; resetCancel: () => void }>(`
 let transitionCancelRequested=false,currentStatus={running:false},lastStartOptions=null;
 const protectedRestartCallback=null;
 const controller={stop,start,${body('tunController.ts','restartProtected')}};
-return {restart:()=>controller.restartProtected('fixture',{mode:'directVpn'}),cancel:()=>{transitionCancelRequested=true}};
+return {restart:(signal)=>controller.restartProtected('fixture',{mode:'directVpn'},{signal}),cancel:()=>{transitionCancelRequested=true},resetCancel:()=>{transitionCancelRequested=false}};
 `, os)
   return { ...os, ...control }
 }
 
 describe('protected restart readiness (AT-02-002/004/005 / AT-00-003)', () => {
+  it('does not touch the live runtime for an already aborted rotation signal', async () => {
+    const h = protectedRestartHarness(), abort = new AbortController()
+    abort.abort()
+    expect(await h.restart(abort.signal)).toMatchObject({ success: false, error: 'Перезапуск отменён' })
+    expect(h.stop).not.toHaveBeenCalled(); expect(h.start).not.toHaveBeenCalled()
+  })
+  it('retains cancellation after the preserved stop resets the legacy transition flag', async () => {
+    const h = protectedRestartHarness(), abort = new AbortController()
+    let release!: (value: unknown) => void
+    h.stop.mockImplementationOnce(() => new Promise(done => { release = done }))
+    const pending = h.restart(abort.signal)
+    abort.abort(); h.resetCancel(); release({ success: true })
+    expect(await pending).toMatchObject({ success: false, error: 'Перезапуск отменён' })
+    expect(h.waitForTunRelease).not.toHaveBeenCalled(); expect(h.start).not.toHaveBeenCalled()
+    expect(h.stop).toHaveBeenCalledTimes(2)
+  })
+  it('checks the rotation signal during interface release and cleans a late native success', async () => {
+    const h = protectedRestartHarness(), abort = new AbortController()
+    let release!: (value: unknown) => void
+    h.start.mockImplementationOnce(() => new Promise(done => { release = done }))
+    const pending = h.restart(abort.signal)
+    await vi.waitFor(() => expect(h.start).toHaveBeenCalledOnce())
+    abort.abort(); h.resetCancel()
+    expect(h.waitForTunRelease.mock.calls[0][0]()).toBe(true)
+    release({ success: true })
+    expect(await pending).toMatchObject({ success: false, error: 'Перезапуск отменён' })
+    expect(h.stop).toHaveBeenCalledTimes(2)
+  })
   it('waits for successful stop and interface release before launching', async () => {
     const h = protectedRestartHarness()
     let release!: (outcome: string) => void
@@ -127,7 +155,7 @@ return Object.assign(controller.stop.bind(controller), { setRunning: (running) =
 function mainHarness(name: 'performShutdownCleanup' | 'stopProtection', session: object | null = null) {
   const os = {
     connectionLifecycle: new ConnectionLifecycle(() => {}),
-    operations: { close: done() },
+    operations: { close: done() }, profileRotation: { stopTimer: noop() },
     tunController: { stop: vi.fn(async (): Promise<any> => ({ success: true, networkCleanup: { baseline: true, firewall: true, adapters: true } })) },
     clearOwnedSecretClipboard: done(), stopXray: done(),
     isOwnedTunRuntimeRunning: vi.fn(async () => false),

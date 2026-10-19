@@ -4122,8 +4122,10 @@ export const tunController = {
   async restartProtected(
     reason: string,
     nextOptions: StartOptions,
-    options: { releaseTimeoutMs?: number } = {}
+    options: { releaseTimeoutMs?: number; signal?: AbortSignal } = {}
   ): Promise<{ success: boolean; error?: string; warning?: string | null }> {
+    if (options.signal?.aborted) return { success: false, error: 'Перезапуск отменён' }
+    const isCancelled = () => options.signal?.aborted === true || transitionCancelRequested
     const releaseTimeoutMs = options.releaseTimeoutMs ?? 5000
     logEvent('info', 'tun', 'protected tunnel restart', {
       reason,
@@ -4147,11 +4149,11 @@ export const tunController = {
     }
 
     const releaseStarted = performance.now()
-    const release = await waitForTunRelease(() => transitionCancelRequested, releaseTimeoutMs)
+    const release = isCancelled() ? 'cancelled' : await waitForTunRelease(isCancelled, releaseTimeoutMs)
     logEvent('info', 'tun', 'protected restart interface release', {
       outcome: release, durationMs: Math.round(performance.now() - releaseStarted)
     })
-    if (transitionCancelRequested || release === 'cancelled') {
+    if (isCancelled() || release === 'cancelled') {
       transitionCancelRequested = false
       try {
         await this.stop()
@@ -4181,7 +4183,7 @@ export const tunController = {
     } catch (err) {
       started = { success: false, error: (err as Error)?.message || String(err) }
     }
-    if (started.success) {
+    if (started.success && !options.signal?.aborted) {
       return {
         success: true,
         warning: [stopped.warning, started.warning].filter(Boolean).join(' | ') || null
@@ -4195,7 +4197,7 @@ export const tunController = {
     await this.stop().catch(err =>
       logEvent('warn', 'tun', 'terminal cleanup after failed protected restart failed', err)
     )
-    return { success: false, error: started.error, warning: started.warning ?? null }
+    return { success: false, error: options.signal?.aborted ? 'Перезапуск отменён' : started.error, warning: started.warning ?? null }
   },
 
   /**

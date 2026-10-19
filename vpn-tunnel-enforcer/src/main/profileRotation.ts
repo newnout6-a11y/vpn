@@ -12,7 +12,7 @@
  * Exports pure functions `clampInterval` and `getNextAvailableProfile` for testing.
  */
 
-import { ipcMain, type IpcMainInvokeEvent } from 'electron'
+import { ipcMain, BrowserWindow, type IpcMainInvokeEvent } from 'electron'
 import Store from './versionedStore'
 import { logEvent } from './appLogger'
 import { compactForIpcLog } from './ipcLogging'
@@ -22,6 +22,11 @@ import { serverPicker, smartOfflinePing } from './serverPicker'
 import { settingsStore } from './settings'
 import { beginAdaptiveConnection, readAdaptiveNetworkFingerprint } from './adaptiveBypass'
 import type { RotationConfig } from '../shared/ipc-types'
+import { IpcFault, classifyIpcError } from '../shared/ipc-result'
+import { operations } from './operations'
+import type { ConnectionLifecycle, RotationOwner } from './connectionLifecycle'
+import { withCorrelation } from './actionCorrelation'
+import { randomUUID } from 'node:crypto'
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -116,7 +121,9 @@ const store = new Store<RotationStore>({
 // ─── Timer State ─────────────────────────────────────────────────────────────
 
 let rotationTimer: ReturnType<typeof setTimeout> | null = null
-let rotationInProgress = false
+let timerGeneration = 0
+let connectionLane: ConnectionLifecycle | null = null
+const activeRotations = new Set<string>()
 
 // ─── Config Access ───────────────────────────────────────────────────────────
 
@@ -155,18 +162,20 @@ function clampCurrentIndex(config: RotationConfig): RotationConfig {
 /**
  * Builds an availability map for the given profile IDs by pinging each server.
  */
-async function buildAvailabilityMap(profileIds: string[]): Promise<Record<string, boolean>> {
+async function buildAvailabilityMap(profileIds: string[], owner: RotationOwner): Promise<Record<string, boolean>> {
   const profiles = serverPicker.getProfiles()
   const map: Record<string, boolean> = {}
   let tunnelRunning = false
   try {
-    const { tunController } = await import('./tunController')
+    const { tunController } = await owner.wait(import('./tunController'))
     tunnelRunning = tunController.getStatus().running === true
   } catch {
+    owner.assertActive()
     tunnelRunning = false
   }
 
   for (const id of profileIds) {
+    owner.assertActive()
     const profile = profiles.find((p) => p.id === id)
     if (!profile) {
       map[id] = false
@@ -195,7 +204,7 @@ async function buildAvailabilityMap(profileIds: string[]): Promise<Record<string
       continue
     }
 
-    const latency = await smartOfflinePing(profile.server, profile.port)
+    const latency = await owner.wait(smartOfflinePing(profile.server, profile.port, owner.signal))
     map[id] = latency !== null
   }
 
@@ -207,20 +216,24 @@ async function buildAvailabilityMap(profileIds: string[]): Promise<Record<string
 /**
  * Performs the actual rotation: finds the next available profile and switches to it.
  */
-async function performRotation(): Promise<{ success: boolean; newProfile: string }> {
-  if (rotationInProgress) {
-    logEvent('warn', 'profile-rotation', 'rotation already in progress')
-    return { success: false, newProfile: '' }
-  }
-  rotationInProgress = true
+async function performRotation(sender?: IpcMainInvokeEvent['sender']): Promise<{ success: boolean; newProfile: string }> {
+  if (!connectionLane) throw new IpcFault('conflict')
+  if (sender?.isDestroyed()) throw new IpcFault('cancelled')
+  const lifetime = new AbortController(), destroyed = () => lifetime.abort()
+  sender?.once('destroyed', destroyed)
   try {
-    return await performRotationOnce()
+    return await operations.run('rotation', async lease => {
+      activeRotations.add(lease.operation.operationId)
+      try { return await connectionLane!.rotate(lease, performRotationOnce) }
+      finally { activeRotations.delete(lease.operation.operationId) }
+    }, { owner: 'rotation', signal: lifetime.signal })
   } finally {
-    rotationInProgress = false
+    sender?.removeListener('destroyed', destroyed)
   }
 }
 
-async function performRotationOnce(): Promise<{ success: boolean; newProfile: string }> {
+async function performRotationOnce(owner: RotationOwner): Promise<{ success: boolean; newProfile: string }> {
+  owner.assertActive()
   const config = getConfig()
 
   if (config.profileIds.length === 0) {
@@ -228,7 +241,8 @@ async function performRotationOnce(): Promise<{ success: boolean; newProfile: st
     return { success: false, newProfile: '' }
   }
 
-  const availabilityMap = await buildAvailabilityMap(config.profileIds)
+  const availabilityMap = await buildAvailabilityMap(config.profileIds, owner)
+  owner.assertActive()
   const nextProfileId = getNextAvailableProfile(config, availabilityMap)
 
   if (!nextProfileId) {
@@ -247,21 +261,22 @@ async function performRotationOnce(): Promise<{ success: boolean; newProfile: st
   // Switch the active profile using serverPicker
   const rotatedProfile = serverPicker.getProfiles().find(p => p.id === nextProfileId)
   const profileName = rotatedProfile?.name || nextProfileId
-  serverPicker.selectProfile(nextProfileId)
-
-  logEvent('info', 'profile-rotation', 'rotated to new profile', {
-    profileId: nextProfileId,
-    index: updatedConfig.currentIndex
-  })
-  notify('info', 'Ротация', `Переключение на профиль ${profileName}`, 'profileRotation').catch(() => undefined)
-
-  // Notify renderer so the Dashboard updates the active profile display
-  try {
-    const { BrowserWindow } = await import('electron')
-    BrowserWindow.getAllWindows().forEach(win => {
-      try { win.webContents.send('server-active-changed', { profileId: nextProfileId, profileName }) } catch {}
+  let selectedLive = false
+  const selectAndAnnounce = () => {
+    owner.assertActive()
+    serverPicker.selectProfile(nextProfileId)
+    owner.assertActive()
+    logEvent('info', 'profile-rotation', 'rotated to new profile', {
+      profileId: nextProfileId, index: updatedConfig.currentIndex
     })
-  } catch { /* non-critical */ }
+    notify('info', 'Ротация', `Переключение на профиль ${profileName}`, 'profileRotation').catch(() => undefined)
+    try {
+      BrowserWindow.getAllWindows().forEach(win => {
+        owner.assertActive()
+        try { win.webContents.send('server-active-changed', { profileId: nextProfileId, profileName }) } catch {}
+      })
+    } catch { owner.assertActive() /* a missing window is non-critical */ }
+  }
 
   // If the tunnel is currently UP, selecting a new profile is not enough —
   // sing-box keeps using the old server until it restarts, so the egress IP
@@ -270,8 +285,9 @@ async function performRotationOnce(): Promise<{ success: boolean; newProfile: st
   // next manual connect. Lazy import avoids any load-order coupling with
   // tunController.
   let reconnectError: string | null = null
+  let restartAttempted = false
   try {
-    const { tunController } = await import('./tunController')
+    const { tunController } = await owner.wait(import('./tunController'))
     if (tunController.getStatus().running) {
       const profile = serverPicker.getProfiles().find((p) => p.id === nextProfileId)
       const outbound = profile && (profile as any).outbound
@@ -284,7 +300,8 @@ async function performRotationOnce(): Promise<{ success: boolean; newProfile: st
           clientDevice: profile!.clientDevice,
           clientFingerprint: profile!.clientFingerprint
         }
-        const networkIdentity = settings.adaptiveBypassEnabled ? await readAdaptiveNetworkFingerprint() : null
+        const networkIdentity = settings.adaptiveBypassEnabled ? await owner.wait(readAdaptiveNetworkFingerprint()) : null
+        owner.assertActive()
         if (!tunController.getStatus().running) throw new Error('Ротация не перезапускает остановленный туннель')
         const adaptive = beginAdaptiveConnection({
           enabled: settings.adaptiveBypassEnabled,
@@ -303,7 +320,13 @@ async function performRotationOnce(): Promise<{ success: boolean; newProfile: st
         // then left the user with no tunnel, no kill-switch and no indication
         // anything had gone wrong — a silent leak that persisted until the next
         // rotation tick.
-        const restarted = await tunController.restartProtected(
+        // No await between selection and beginRestart: cancellable preparation
+        // must leave the old selection and its confirmed live tunnel together.
+        selectAndAnnounce()
+        selectedLive = true
+        owner.beginRestart()
+        restartAttempted = true
+        const restarted = await owner.wait(tunController.restartProtected(
           `profile rotation to ${profileName}`,
           {
             mode: 'directVpn',
@@ -315,8 +338,9 @@ async function performRotationOnce(): Promise<{ success: boolean; newProfile: st
             stealthMode: settings.stealthMode === true,
             adaptiveMode: adaptive.mode,
             proxyEngine: tunController.getLastStartOptions?.()?.proxyEngine ?? settings.proxyEngine
-          }
-        )
+          },
+          { signal: owner.signal }
+        ))
         if (!restarted.success) {
           reconnectError = restarted.error || 'Не удалось поднять туннель на новом профиле'
         }
@@ -328,19 +352,21 @@ async function performRotationOnce(): Promise<{ success: boolean; newProfile: st
       }
     }
   } catch (err) {
-    reconnectError = (err as Error)?.message || String(err)
-    logEvent('warn', 'profile-rotation', 'rotate-reconnect path threw', err)
+    owner.assertActive()
+    reconnectError = 'Не удалось перезапустить туннель'
+    logEvent('warn', 'profile-rotation', 'rotate-reconnect path threw', { category: classifyIpcError(err) })
   }
 
   // Schedule next rotation regardless — a failed rotation should still be
   // retried on the next tick rather than silently disabling the feature.
-  scheduleNextRotation(updatedConfig)
+  owner.assertActive()
 
   if (reconnectError) {
-    // Loud, because the user's traffic is no longer tunnelled. restartProtected
-    // has already rolled the protection back, so connectivity is restored — but
-    // it is *unprotected* connectivity, and only the user can decide what to do.
-    logEvent('error', 'profile-rotation', 'rotation left the tunnel down', {
+    scheduleNextRotation(updatedConfig)
+    // A failed native restart may have restored ordinary connectivity. Warn
+    // explicitly without claiming that teardown or retained protection is proven.
+    // A preflight failure did not touch the old tunnel and needs a different message.
+    logEvent('error', 'profile-rotation', 'rotation did not complete', {
       profileId: nextProfileId,
       profileName,
       error: reconnectError
@@ -348,18 +374,31 @@ async function performRotationOnce(): Promise<{ success: boolean; newProfile: st
     notify(
       'error',
       'Ротация не удалась',
-      `Не удалось подключиться к профилю ${profileName}: ${reconnectError}. Защита выключена — трафик идёт по обычному маршруту.`,
+      `Не удалось подключиться к профилю ${profileName}: ${reconnectError}. ${restartAttempted
+        ? 'Защита после перезапуска не подтверждена — трафик может идти по обычному маршруту.'
+        : 'Проверьте состояние защиты.'}`,
       'connectionError'
     ).catch(() => undefined)
     return { success: false, newProfile: nextProfileId }
   }
 
-  return { success: true, newProfile: nextProfileId }
+  return owner.complete(() => {
+    // Idle selection has no native restart; commit it with the final result.
+    if (!selectedLive) selectAndAnnounce()
+    scheduleNextRotation(updatedConfig)
+    return { success: true, newProfile: nextProfileId }
+  })
 }
 
 // ─── Timer Management ────────────────────────────────────────────────────────
 
 function stopTimer(): void {
+  clearTimer()
+  for (const id of activeRotations) operations.cancel(id)
+}
+
+function clearTimer(): void {
+  timerGeneration++
   if (rotationTimer !== null) {
     clearTimeout(rotationTimer)
     rotationTimer = null
@@ -367,7 +406,7 @@ function stopTimer(): void {
 }
 
 function scheduleNextRotation(config: RotationConfig): void {
-  stopTimer()
+  clearTimer()
 
   if (!config.enabled || config.profileIds.length === 0) {
     const updatedConfig = { ...config, nextRotationAt: null }
@@ -381,10 +420,23 @@ function scheduleNextRotation(config: RotationConfig): void {
   const updatedConfig = { ...config, nextRotationAt }
   saveConfig(updatedConfig)
 
+  const scheduledGeneration = timerGeneration
   rotationTimer = setTimeout(() => {
-    void performRotation().catch((err) => {
-      logEvent('error', 'profile-rotation', 'scheduled rotation failed', err)
-    })
+    rotationTimer = null
+    void withCorrelation('op_' + randomUUID().replaceAll('-', ''), async () => {
+      try { await performRotation() }
+      catch (err) { logEvent('warn', 'profile-rotation', 'scheduled rotation did not complete', { category: classifyIpcError(err) }) }
+      finally {
+        // The timer owns retries independently from the cancelled operation.
+        // Config replacement, stop/shutdown or a successful next tick invalidate it.
+        if (timerGeneration === scheduledGeneration) {
+          withCorrelation('op_' + randomUUID().replaceAll('-', ''), () => {
+            try { scheduleNextRotation(getConfig()) }
+            catch (err) { logEvent('error', 'profile-rotation', 'rotation timer rearm failed', { category: classifyIpcError(err) }) }
+          }, { source: 'lifecycle', owner: 'rotation' })
+        }
+      }
+    }, { source: 'lifecycle', owner: 'rotation' })
   }, intervalMs)
 
   logEvent('debug', 'profile-rotation', 'next rotation scheduled', {
@@ -482,20 +534,21 @@ export function registerRotationHandlers(): void {
     }
     updated = clampCurrentIndex(updated)
 
+    if (updated.enabled === current.enabled && updated.intervalMinutes === current.intervalMinutes
+      && updated.order === current.order && updated.currentIndex === current.currentIndex
+      && updated.nextRotationAt === current.nextRotationAt
+      && updated.profileIds.length === current.profileIds.length
+      && updated.profileIds.every((id, index) => id === current.profileIds[index])) return current
+
+    // A real config replacement invalidates work prepared from the old values.
+    // Saving the same values must not interrupt an in-flight native restart.
+    stopTimer()
     saveConfig(updated)
 
-    // Restart timer if enabled state or interval changed
-    if (
-      partial.enabled !== undefined ||
-      partial.intervalMinutes !== undefined ||
-      partial.profileIds !== undefined
-    ) {
-      if (updated.enabled) {
-        scheduleNextRotation(updated)
-      } else {
-        stopTimer()
-        saveConfig({ ...updated, nextRotationAt: null })
-      }
+    if (updated.enabled) {
+      scheduleNextRotation(updated)
+    } else {
+      saveConfig({ ...updated, nextRotationAt: null })
     }
 
     logEvent('info', 'profile-rotation', 'config updated', {
@@ -508,8 +561,8 @@ export function registerRotationHandlers(): void {
     return getConfig()
   })
 
-  handleLogged('rotation:rotate-now', async () => {
-    return await performRotation()
+  handleLogged('rotation:rotate-now', async event => {
+    return await performRotation(event.sender)
   })
 }
 
@@ -520,6 +573,7 @@ export function registerRotationHandlers(): void {
  * Starts the timer if rotation is enabled.
  */
 export function initProfileRotation(): void {
+  stopTimer() // Includes reload after a configuration import replaces the persisted section.
   startRotation()
   logEvent('info', 'profile-rotation', 'service initialized', {
     enabled: getConfig().enabled
@@ -529,6 +583,7 @@ export function initProfileRotation(): void {
 // ─── Exports ─────────────────────────────────────────────────────────────────
 
 export const profileRotation = {
+  setLifecycle: (lane: ConnectionLifecycle) => { connectionLane = lane },
   getConfig,
   initProfileRotation,
   registerHandlers: registerRotationHandlers,

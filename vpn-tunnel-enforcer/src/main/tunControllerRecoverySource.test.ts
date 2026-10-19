@@ -151,7 +151,7 @@ describe('tunController recovery cancellation guards', () => {
     // must run the ordinary full teardown before returning.
     const failureReturns = body.match(/return \{ success: false/g) ?? []
     const teardowns = body.match(/await this\.stop\(\)\.catch/g) ?? []
-    expect(failureReturns.length).toBe(3)
+    expect(failureReturns.length).toBe(4) // Includes the new no-effects return for an already-aborted signal.
     expect(teardowns.length).toBe(2)
     expect(body).toContain("if (release !== 'released')")
     expect(body).toContain("notifyStatus('error')")

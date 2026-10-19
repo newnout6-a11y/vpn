@@ -17,7 +17,9 @@ function assertLedger(events: ConnectionOperation[], expected: Record<'connect' 
   const recorded = { connect: 0, disconnect: 0 }
   for (const history of byId.values()) {
     assert.equal(history[0].status, 'running', label)
-    recorded[history[0].kind]++
+    const kind = history[0].kind
+    assert.ok(kind === 'connect' || kind === 'disconnect', 'rotation has its own managed registry ledger')
+    recorded[kind]++
     assert.ok(history.length <= 2, label)
     if (history.length === 1) running++
     else assert.notEqual(history[1].status, 'running', label)
