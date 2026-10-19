@@ -7,10 +7,13 @@ import { getPrivilegedRuntimeDir } from './runtimePaths'
 import { directoryExists, verifyDirectoryHardened } from './runtimeDirSecurity'
 import { redactSensitiveConfig, redactSensitiveText } from './vpnProfiles'
 import { watchEngineLogs } from './engineLogRetention'
-import { currentCorrelationId } from './actionCorrelation'
+import { currentActionMetadata, currentCorrelationId } from './actionCorrelation'
 import { eventClockId, monotonicTimeMs } from './eventClock'
+import { inspectAuditLog } from './auditLogIntegrity'
+import type { AppEvent, AppLogLevel } from '../shared/app-event'
+import { isAppEvent } from '../shared/app-event'
 
-export type AppLogLevel = 'debug' | 'info' | 'warn' | 'error'
+export type { AppLogLevel } from '../shared/app-event'
 
 const MAX_DETAIL_CHARS = 4000
 const MAX_READ_BYTES = 1024 * 1024
@@ -50,6 +53,9 @@ export function repairMojibake(value: string): string {
 // and start a fresh file. We keep exactly one previous generation — enough for
 // support to see what happened before the roll, bounded at 2x the cap total.
 const MAX_LOG_BYTES = 5 * 1024 * 1024
+// Startup reports must not evict evidence earlier than ordinary events would.
+// The allowance is bounded even if a partially failed scan/write is retried.
+const MAX_INTEGRITY_MARKER_BYTES = 4096
 
 // 2 x 5 MiB app generations + 2 x 10 MiB for each engine = 50 MiB.
 let engineLogWatcher: ReturnType<typeof watchEngineLogs> | null = null
@@ -73,6 +79,8 @@ let queue = Promise.resolve()
 // line. We stat lazily (first write after startup) to seed it, then track
 // growth from the byte length we append.
 let currentLogBytes = -1
+let integrityChecked = false
+let integrityMarkerBytes = 0
 
 export function getLogDir(): string {
   return join(app.getPath('userData'), 'logs')
@@ -110,13 +118,14 @@ async function rotateIfNeeded(incomingBytes: number): Promise<void> {
         currentLogBytes = 0
       }
     }
-    if (currentLogBytes + incomingBytes <= MAX_LOG_BYTES) return
+    if (currentLogBytes + incomingBytes <= MAX_LOG_BYTES + integrityMarkerBytes) return
     // Roll: app.log → app.prev.log (overwrite the older generation).
     const { rename, unlink, stat: fsStat } = await import('fs/promises')
     await unlink(getAppLogPrevPath()).catch(() => undefined)
     try {
       await rename(getAppLogPath(), getAppLogPrevPath())
       currentLogBytes = 0
+      integrityMarkerBytes = 0
     } catch {
       // If rename failed (e.g. file locked), do NOT reset counter to 0. Re-stat from disk.
       try {
@@ -185,47 +194,80 @@ function normalizeDetail(value: unknown): unknown {
   }
 }
 
-function formatLine(level: AppLogLevel, scope: string, message: string, details?: unknown): string {
-  const normalizedMessage = redactTopologyText(redactSensitiveText(repairMojibake(message)))
-  const correlationId = currentCorrelationId()
+type PendingEvent = Omit<AppEvent, 'version' | 'ts' | 'monotonicMs' | 'clockId'> & { ts?: string }
+
+function formatLine(event: PendingEvent): string {
   return JSON.stringify({
+    version: 1,
     ts: new Date().toISOString(),
     monotonicMs: monotonicTimeMs(),
     clockId: eventClockId,
-    level,
-    scope,
-    message: normalizedMessage,
-    details,
-    ...(correlationId ? { correlationId } : {})
-  }) + '\n'
+    ...event
+  } satisfies AppEvent) + '\n'
+}
+
+async function appendLine(line: string, integrityMarker = false): Promise<void> {
+  const lineBytes = Buffer.byteLength(line, 'utf8')
+  if (integrityMarker) integrityMarkerBytes = Math.min(MAX_INTEGRITY_MARKER_BYTES, integrityMarkerBytes + lineBytes)
+  await rotateIfNeeded(lineBytes)
+  try {
+    await appendFile(getAppLogPath(), line, 'utf8')
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
+    logDirEnsured = false
+    await ensureLogDir()
+    await appendFile(getAppLogPath(), line, 'utf8')
+  }
+  if (currentLogBytes >= 0) currentLogBytes += lineBytes
+}
+
+async function checkHistory(): Promise<void> {
+  if (integrityChecked) return
+  // No recursive logEvent calls: markers precede the admitted event in this queue.
+  const generations = ['current', 'previous'] as const
+  const snapshots = await Promise.all(generations.map(generation =>
+    inspectAuditLog(generation === 'current' ? getAppLogPath() : getAppLogPrevPath()).catch(() => undefined)))
+  for (const [index, generation] of generations.entries()) {
+    const result = snapshots[index]
+    if (generation === 'current' && result?.needsSeparator) {
+      await appendFile(getAppLogPath(), '\n', 'utf8')
+      if (currentLogBytes >= 0) currentLogBytes++
+    }
+    const messages: string[] = []
+    if (result?.invalidRows) messages.push('history.corrupted')
+    if (!result?.complete) messages.push('history.unavailable')
+    for (const message of messages) {
+      const details = { generation, ...(result ? { invalidRows: result.invalidRows, complete: result.complete } : { complete: false }) }
+      console.error(`[logs] ${message}`, details)
+      await appendLine(formatLine({ level: 'error', scope: 'logs', message, details,
+        source: 'lifecycle', owner: 'unknown', route: 'unconfirmed', confidence: 'indeterminate' }), true)
+    }
+  }
+  integrityChecked = true
+}
+
+/** Drain admitted writes; does not claim fsync or persistence after an I/O fault. */
+export async function flushAppLog(): Promise<void> {
+  await queue
 }
 
 export function logEvent(level: AppLogLevel, scope: string, message: string, details?: unknown): void {
   const normalizedDetails = details === undefined ? undefined : normalizeDetail(details)
-  const normalizedMessage = redactTopologyText(redactSensitiveText(repairMojibake(message)))
-  const line = formatLine(level, scope, normalizedMessage, normalizedDetails)
-  const lineBytes = Buffer.byteLength(line, 'utf8')
+  const normalizedMessage = redactTopologyText(redactSensitiveText(repairMojibake(message))).slice(0, MAX_DETAIL_CHARS)
+  const correlationId = currentCorrelationId()
+  const metadata = currentActionMetadata()
+  const event: PendingEvent = { ts: new Date().toISOString(), level, scope: redactTopologyText(redactSensitiveText(scope)).slice(0, MAX_DETAIL_CHARS), message: normalizedMessage, details: normalizedDetails,
+    source: metadata?.source ?? 'unknown', owner: metadata?.owner ?? 'unknown', route: 'unconfirmed', confidence: 'indeterminate',
+    ...(correlationId ? { correlationId } : {}) }
   queue = queue
     .then(async () => {
       await ensureLogDir()
-      await rotateIfNeeded(lineBytes)
-      try {
-        await appendFile(getAppLogPath(), line, 'utf8')
-      } catch (err: any) {
-        if (err?.code === 'ENOENT') {
-          logDirEnsured = false
-          await ensureLogDir()
-          await appendFile(getAppLogPath(), line, 'utf8')
-        } else {
-          throw err
-        }
-      }
-      // Track growth so we only stat() the file once per process.
-      if (currentLogBytes >= 0) currentLogBytes += lineBytes
+      await checkHistory()
+      await appendLine(formatLine(event))
     })
-    .catch(() => undefined)
+    .catch(() => { console.error('[logs] history.write-failed') })
 
-  const consoleLine = `[${scope}] ${normalizedMessage}`
+  const consoleLine = `[${event.scope}] ${normalizedMessage}`
   if (level === 'error') console.error(consoleLine, normalizedDetails ?? '')
   else if (level === 'warn') console.warn(consoleLine, normalizedDetails ?? '')
   else console.log(consoleLine, normalizedDetails ?? '')
@@ -306,7 +348,13 @@ function redactSnapshot(snapshot: LogFileSnapshot): LogFileSnapshot {
       .map(line => {
         if (!line.trim()) return line
         try {
-          return JSON.stringify(redactTopologyValue(JSON.parse(line)))
+          const row = JSON.parse(line)
+          const redacted = redactTopologyValue(row)
+          // Only the validated root mechanism enum is safe; nested routes still redact.
+          if (isAppEvent(row) && row.version === 1 && redacted && typeof redacted === 'object') {
+            (redacted as Record<string, unknown>).route = row.route
+          }
+          return JSON.stringify(redacted)
         } catch {
           return redactTopologyText(line)
         }
@@ -358,6 +406,7 @@ export async function clearAppLog(): Promise<void> {
         ] : [])
       ])
       currentLogBytes = 0
+      integrityMarkerBytes = 0
     } finally {
       if (watcher) startEngineLogRetention()
     }
