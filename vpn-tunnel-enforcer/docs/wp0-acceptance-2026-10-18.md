@@ -21,6 +21,9 @@ Needs changes: владелец отдельно указал это 19.10. Foll
 #75 также слит (`07a77cb`): final head `1e57482` получил CI 39209022143 success
 и completed Qodo 1544667 без открытых findings. Revix сообщил об исчерпанной
 квоте до 20.10 00:00 UTC; полного ревью #75 нет, это не approval.
+#76 слит (`fa1bd9f`): final head `e232e8f`, Qodo 1544820 completed без
+открытых findings, CI 39211150906 success. Revix сообщил free-quota-reached;
+полного ревью #76 нет. Его отсутствие при квоте не называется approval.
 
 ## Полная область и первоначальная инвентаризация
 
@@ -31,10 +34,10 @@ Needs changes: владелец отдельно указал это 19.10. Foll
 | 00-003 | Main connection lane: UUIDv4, owner, deadline запуска, priority admission; ручные Hard/Direct и Soft из tray, scheduled startup вместе с proxy detection; общий feature registry с prompt cancellation/deadline и physical drain, speed test, refresh подписок и импорт профилей, включая curl/DoH и commit queue; config browse/validate/apply/export, async file I/O и terminal commit приняты в PR #70; key renderer/clipboard/file exports в PR #71; rotation IPC/timer с native drain и retained evidence в PR #72 | UI cancel/unmount; deadline остановки, все entrypoints и полная матрица поздних эффектов |
 | 00-004 | Общая классификация transport; 157 каналов × 7 категорий через guard; native contextBridge сохраняет code/category/correlation в en/ru; typed local validation; 4 настоящих config handlers × 7 категорий, canonical domain failures | Миграция legacy domain-result `{success:false,error}` и semantic matrix настоящих feature handlers; transport fixtures не доказывают её |
 | 00-005 | Один action correlation id в guarded IPC response/error, lifecycle connect/stop и JSONL logger; async isolation, native wait/drain, diagnostic read-back с повторной redaction; ID исходного connect и source/owner/route/confidence в session history/JSON/CSV; JSONL clockId/monotonicMs отдельно от календарных дат и durationMs; реальные owned/legacy/tray/recovery Soft sessions | Все native/background entrypoints и полная матрица событий/истории автоматизаций, live-check и recovery |
-| 00-006 | Локальные миграции; общий version admission для 20 electron-store файлов / 28 constructors; future-version SHA-256 invariance на real Conf backend до defaults/repair и при записи через ранее открытый handle | Централизованный упорядоченный migration registry, fixtures всех исторических преобразований, остальные persisted JSON, полноценный upgrade/downgrade и межпроцессная координация |
+| 00-006 | Общий version admission для 20 electron-store файлов / 28 constructors; future-version SHA-256 invariance до defaults/repair и при записи через открытый handle; центральный registry safeStorage трёх stores, real Conf historical fixtures, exact encrypted backups, checksums/history, actual Electron DPAPI/restart/JSONL | Review/CI текущего участка; startup миграции/классификация между stores, остальные persisted JSON, полноценный upgrade/downgrade и межпроцессная координация |
 | 00-007 | Seed 0x5eed003: 200 commands/10 async workers с production lane/FSM, typed losers, парные terminal events, финальный disconnect и 0 fake PID/TUN | Натурный PID-реестр Windows и полная матрица фоновых entrypoints |
 | 00-008 | Dashboard component frames с production FSM/lane; revision fence; Soft через owned IPC; visual fixtures light/dark; native production contextBridge snapshots/disposer | Полная матрица всех операций, тем, размеров и entrypoints; browser fixtures не заменяют native resources |
-| 00-009 | Release registry четырёх функций off/null; production main/preload status/activation gate; schema reject fake evidence; production Sidebar/Settings DOM без planned controls в обычном/advanced режиме с forged flags; настоящий Electron проверяет четыре refusal и persisted JSONL audit/correlation | Финальные full/Qodo/CI текущего PR; реализация и собственная лабораторная приёмка WP-12 остаются отдельным пакетом |
+| 00-009 | Release registry четырёх функций off/null; production main/preload status/activation gate; schema reject fake evidence; production Sidebar/Settings DOM без planned controls в обычном/advanced режиме с forged flags; настоящий Electron проверяет четыре refusal и persisted JSONL audit/correlation; #76 принят после full/Qodo/CI | Адресная приёмка release admission завершена; реализация и собственная лабораторная приёмка WP-12 остаются отдельным пакетом |
 | 00-010 | История подключений: настоящий Conf backend, 100 записей, повторная загрузка, повреждённый JSON/схема, `history.corrupted`, сохранение валидных записей и последующая запись | Адресная L2-матрица истории подключений добавлена; перенос той же гарантии на общий audit/event history всех операций после его введения |
 
 Это перечень обнаруженного, а не PASS десяти AT. Ни один новый
@@ -1292,3 +1295,32 @@ planned-features:status возвращает отдельный snapshot с requ
 при обычном и advanced режиме, включая forged saved flags. Это адресное
 доказательство AT-00-009/AT-12-002, не запуск planned VPN/monitor/boxes функций.
 Команды, полные результаты и remote gate — в progress.md.
+
+## Реестр secret-store migrations — PR #77
+
+Actual facades settings/server-picker/server-groups используют общий dry-run и
+синхронный runner: detached preparation, encrypted backup точных исходных bytes,
+input/output/backup SHA-256, migrationHistory, atomic Conf replacement и read-back.
+Success записывается после read-back. Ошибки подготовки сохраняют исходный файл;
+ошибки commit/read-back не выдают неподтверждённый успех. Старый backup и backup
+другого исходника сохраняются отдельно. Constructor defaults больше не изменяют
+исходный файл до snapshot, неизвестные поля сохраняются.
+
+После замечаний Qodo 1545089 миграция выполняется только при plaintext: реальные
+settings/picker 0/1 → 2, current plaintext 2 → 2 repair; groups 0 → 0, поскольку
+выпущенный schema-0 reader уже понимает SecretRef. Уже encrypted/empty/public
+legacy stores сохраняют совместимую версию, fresh reads не создают файл или
+фиктивную migrationHistory. Пустые groups без backup читаются без DPAPI.
+Проверка/защита существующего backup по-прежнему обязательна.
+
+Размер исходника и authenticated plaintext ограничен 16 MiB; encrypted envelope
+имеет отдельный предел 32 MiB с проверкой до записи. Base64/DPAPI expansion больше
+не ломает restart допустимого исходника. Real Conf regressions включают backup
+больше 16 MiB с повторным import/read, три отказа size bounds, fresh stores всех
+трёх видов, пустые groups без DPAPI и совместимость с прежним group admission.
+
+Это часть AT-00-006 / AT-01-001/010 / F-074. Остальные 17 electron-store форматов
+остаются 0; startup классификация/переносы, другие persisted JSON, полноценный
+upgrade/downgrade и межпроцессный CAS остаются открыты. Pre-commit comparison
+не является OS-level CAS; native same-version smoke не заменяет OS/VM matrix.
+Точные команды, результаты и remote gate записываются в progress.md.

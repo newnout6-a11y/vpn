@@ -5314,3 +5314,141 @@ CI/review нового SHA проверяются отдельно после pu
   out/preload/index.js — оба invoke метода и schemas. git diff --check — exit 0.
   Все validation processes terminal. После commit/push нужны automatic Qodo и
   CI окончательного head; Revix учитывается при наличии квоты.
+
+### WP-0 — #76 принят; реестр миграций секретных хранилищ
+
+- PR #76 слит: final head e232e8fb1da367e764e2b7b017ad4e3c7d3f84f3,
+  merge/main fa1bd9fa7f0fc452a6a63cea20d2096f2a208ff7. REST GET подтвердил
+  merged=true; fetch/ff main и tree diff с reviewed head — без расхождений.
+  CI 39211150906 completed/success: Windows, Rust и сайт success на том же SHA;
+  watcher exit 0 (.tmp/wp0-planned-ci-watch.log). Qodo 1544820 completed,
+  открытых findings нет. Revix review 5567746509 сообщил free-quota-reached
+  до 20.10 00:00 UTC / 03:00 МСК: полного ревью нет, это не approval.
+  Замечания Revix #70 уже закрыты follow-up #74, а не игнорируются из-за Qodo.
+- Ветка codex/wp0-store-migrations от fa1bd9f; область — AT-00-006 и
+  AT-01-001/010, F-074, ТЗ-06 §5/§10. Registry интегрирован в actual settings,
+  server-picker и server-groups; существующие lazy security facades сохранены.
+  Реальные legacy версии 0/1 settings/picker идут прямо в 2; фиктивный этап
+  0→1 не придуман. Groups 0→1. Уже current plaintext получает отдельный
+  safe-storage-v1-repair. Остальные 17 stores пока сохраняют формат 0;
+  startup классификация/перенос между хранилищами этим участком не закрыты.
+- planStoreMigrations даёт dry-run без эффектов. Main-only synchronous runner
+  защищает legacy backup, готовит detached candidate и проверяет расшифрованный
+  результат, фиксирует ID/from/to/inputChecksum/outputChecksum/backupChecksum,
+  backupSuffix и timestamp в migrationHistory. Затем один atomic Conf replacement
+  и read-back; success audit только после него. Ошибка подготовки оставляет
+  исходный файл; сбой commit/read-back имеет явный error/stage без обещания
+  сохранности, не подтверждённого чтением. Повторный/reentrant запуск отвергнут.
+  Проверка актуальности перед commit не является межпроцессным CAS.
+- Constructor defaults для трёх stores удалены; read defaults не переписывают
+  legacy file до backup. Сохранены неизвестные поля и partial settings.
+  Если прежняя .pre-safe-storage-v1.bak относится к другому входу, она остаётся,
+  новый snapshot защищается отдельно под SHA-256 текущих исходных bytes и его
+  decrypt/read-back сверяется. Полный input snapshot checksum и исходные bytes
+  checksum различаются явно; новый result checksum исключает текущую запись
+  migrationHistory, чтобы не делать самоссылочную контрольную сумму.
+- Новый real Conf набор — 28 fixtures/boundaries: исторические версии, current
+  plaintext repair, exact original backup, metadata, повторный import/restart,
+  ошибка подготовки и retry, недоступный DPAPI, future refusal, stale backup,
+  partial settings, dry-run, reentrancy, intervening change, commit/read-back fault.
+  Адресный npm.cmd test -- src/main/storeMigrations.test.ts
+  src/main/sharedStoresSecurity.test.ts src/main/settingsSecretSecurity.test.ts
+  src/main/settingsForensicsDefault.test.ts src/main/settingsLoginItem.test.ts —
+  67 passed, 1.37 s, exit 0 (.tmp/wp0-migrations-targeted-final.log).
+- Старые упрощённые Store mocks расширены whole-store get/set и fallback get.
+  Autostart fault injection выполняется после initial migration: проверяется
+  прежняя граница записи после изменения ОС. Import fixture проходит startup
+  preflight до action snapshots. Первая правка fixture вызвала неэкспортированный
+  picker.getProfiles; исправлено на picker.serverPicker.getProfiles. Switch
+  assertions теперь проверяют настоящий persisted null вместо отсутствующего
+  поля mock. Адресный import/switch — 32 passed, 1.67 s, exit 0
+  (.tmp/wp0-migrations-consumer-fast2.log); key export consumer — 22 passed
+  в mixed run, оставшиеся 21 failures этого старого run относятся к исправленным
+  import/switch fixtures (.tmp/wp0-migrations-consumer-tests.log).
+- Первый npm.cmd test остановлен exit 1 после обнаружения старых mocks;
+  во время него менялся tree, финальной проверкой он не является
+  (.tmp/wp0-migrations-full.log). В нём также был fail неизменённого ACL case;
+  адресный npm.cmd test -- src/main/configExportAcl.test.ts -t
+  'restricts secret staging and the final export' — 1 passed/24 skipped,
+  4.39 s, exit 0 (.tmp/wp0-migrations-acl-recheck.log). Новый full запущен
+  отдельно на окончательном production/unit tree.
+- node scripts/test-wp1-migration.mjs --same-version — exit 0, пять фаз
+  seed44/fail44/migrate44/unavailable44/restart44 на Electron 44.4.3 с настоящим
+  safeStorage/Conf (.tmp/wp0-migrations-native-final.log). MigrationHistory,
+  исходные SHA-256 из seed, отсутствие дублей после restart и exact backup
+  проверены для всех трёх stores; actual JSONL содержит error подготовки и
+  три committed success с открытым migrationStep. Поле id было бы замаскировано
+  credential redactor: используется отдельное безопасное имя migrationStep.
+  Electron 42→44 и VM matrix этим локальным subset не проверялись.
+- npm.cmd run build — exit 0 (.tmp/wp0-migrations-build-final.log);
+  node scripts/test-electron-runtime.mjs — ELECTRON_SMOKE_PASS и
+  SPEED_UI_NATIVE_PASS, exit 0 (.tmp/wp0-migrations-electron.log);
+  node scripts/test-wp1-native.mjs --ipc-only — WP1_NATIVE_PASS, exit 0
+  (.tmp/wp0-migrations-csp.log). Traceability — AC 927/927, F 210/210, exit 0.
+  Финальные full/typecheck и затем automatic Qodo/CI ещё ожидаются.
+- Повторный full (.tmp/wp0-migrations-full-final.log) остановлен exit 1:
+  выявлены дополнительные неэквивалентные Store mocks в geo/ping/consolidate;
+  добавлены whole-store accessors. npm.cmd test --
+  src/main/serverPickerGeoLifecycle.test.ts src/main/serverPickerPingPoisoning.test.ts
+  src/main/serverPickerConsolidate.test.ts src/main/serverPickerProbe.test.ts
+  src/main/serverPickerTunnelProbe.test.ts src/main/serverPickerNativeFallback.test.ts
+  src/main/serverPickerGeoTransport.test.ts src/main/serverGroupsRefresh.test.ts —
+  125 passed, 3.01 s, exit 0 (.tmp/wp0-migrations-picker-consumers.log).
+  В том full три неизменённых Windows identity cases заняли 10.5–10.7 s и упали;
+  npm.cmd test -- src/main/adaptiveNetworkIdentity.test.ts — 25 passed,
+  3.62 s, exit 0 (.tmp/wp0-migrations-adaptive-recheck.log). Причина различия
+  времени этим сравнением не доказана. Финальный полный набор запущен как
+  npm.cmd test -- --maxWorkers=1: assertions, deadlines и состав не ослаблены;
+  default двух-worker CI всё равно обязателен. Production sources не менялись;
+  после исправления этих mocks unit tree также зафиксирован на время прогона.
+- Финальный npm.cmd test -- --maxWorkers=1 — **4577 passed / 5 skipped /
+  0 failed**, 280 files passed / 2 skipped, **311.76 s**, exit 0
+  (.tmp/wp0-migrations-full-serial.log). Production/unit tree во время прогона
+  не менялся. npm.cmd run typecheck — exit 0, 163 channels / 0 public any
+  (.tmp/wp0-migrations-typecheck-serial.log). Все validation processes terminal;
+  git diff --check — exit 0. Следующий gate — automatic Qodo и default CI
+  окончательного SHA. AT-00-006 в целом остаётся частичным.
+- PR #77: CI 39214950099 старого head 2ef0332 completed/success, watcher
+  exit 0 (.tmp/wp0-migrations-ci-watch.log); Windows, Rust и сайт success.
+  Qodo 1545089 completed выявил четыре подтверждённых замечания:
+  5590b12a (backup expansion/restart), 6dba281a (empty groups/DPAPI),
+  a98d9466 (ненужный groups schema bump/downgrade), d058c2ac (fake fresh migration).
+  Revix review 5568127046 — free-quota-reached, полного ревью нет.
+- До production fix новые regressions воспроизвели все четыре причины:
+  npm.cmd test -- src/main/storeMigrations.test.ts -t
+  'exceeds 16 MiB|empty legacy groups|fake legacy migration|previous schema-0'
+  — 6 failed / 28 skipped, 1.11 s, exit 1
+  (.tmp/wp0-migrations-qodo-before.log). После исправления source/decrypted
+  plaintext остаются <=16 MiB, encoded backup <=32 MiB с проверкой до write.
+  Groups сохраняет формат 0: его released reader уже поддерживает SecretRef.
+  Runner не создаёт миграцию без plaintext; raw snapshot не подставляет defaults
+  или version 0. Fresh read не создаёт файл/history; пустые legacy groups
+  без backup не требуют DPAPI. Существующий backup продолжает проверяться.
+- Первый targeted после fixes — 103 passed / 4 failed, 3.04 s, exit 1
+  (.tmp/wp0-migrations-qodo-targeted.log). Уточнены корректные ожидания typed
+  source validation и честного backup-skipped audit; rollback import fixture
+  явно начинает с existing canonical empty stores, вместо прежнего побочного
+  создания defaults при startup. Exact snapshot rollback assertions сохранены.
+  Switch проверяет логическое отсутствие выбора, не требует записанного null.
+  npm.cmd test -- src/main/storeMigrations.test.ts
+  src/main/sharedStoresSecurity.test.ts src/main/settingsSecretSecurity.test.ts
+  src/main/settingsLoginItem.test.ts src/main/settingsForensicsDefault.test.ts
+  src/main/serverPickerSwitch.test.ts src/main/profileImportOperations.test.ts
+  — 107 passed, 3.21 s, exit 0 (.tmp/wp0-migrations-qodo-targeted2.log).
+  В real Conf suite теперь 36 cases; full/build/native и review нового SHA
+  ещё ожидаются. npm.cmd run typecheck после production fixes — exit 0,
+  163 channels / 0 public any (.tmp/wp0-migrations-qodo-typecheck.log).
+- После Qodo fixes окончательный production/unit tree: npm.cmd test --
+  --maxWorkers=1 — **4585 passed / 5 skipped / 0 failed**, 280 files passed /
+  2 skipped, **308.77 s**, exit 0 (.tmp/wp0-migrations-qodo-full.log).
+  npm.cmd run build — exit 0, включая typecheck 163 channels / 0 public any
+  (.tmp/wp0-migrations-qodo-build.log). node scripts/test-wp1-migration.mjs
+  --same-version — все пять фаз PASS, actual DPAPI/Conf/restart, exit 0
+  (.tmp/wp0-migrations-qodo-native.log). node scripts/test-electron-runtime.mjs
+  — ELECTRON_SMOKE_PASS / SPEED_UI_NATIVE_PASS, exit 0
+  (.tmp/wp0-migrations-qodo-electron.log); node scripts/test-wp1-native.mjs
+  --ipc-only — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-migrations-qodo-csp.log).
+  python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py —
+  AC 927/927, F 210/210, exit 0; git diff --check — exit 0.
+  Local native subset остаётся same-version, не Electron 42→44/VM matrix.
+  Следующий gate — automatic Qodo и default CI нового exact head #77.

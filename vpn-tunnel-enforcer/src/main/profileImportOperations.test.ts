@@ -10,6 +10,7 @@ vi.mock('electron-store', () => ({ default: class {
   set(key: string, value: unknown) { state.write(this.name, key, value); state.data.get(this.name)![key] = structuredClone(value) }
   get path() { return `/tmp/unused-import-fixture/${this.name}.json` }
   get store() { return state.data.get(this.name) }
+  set store(value: Record<string, any> | undefined) { state.write(this.name, 'store', value); state.data.set(this.name, structuredClone(value ?? {})) }
 } }))
 vi.mock('./appLogger', () => ({ logEvent: state.log }))
 vi.mock('./settings', () => ({ settingsStore: { get: () => ({ disableGeoLookup: true, bootstrapRouteMode: 'direct' }) } }))
@@ -37,6 +38,10 @@ beforeEach(async () => {
   vi.clearAllMocks()
   state.log.mockReset()
   state.data.clear()
+  // These rollback cases start with existing canonical empty stores. A fresh
+  // read deliberately no longer persists defaults as a fake legacy migration.
+  state.data.set('server-picker', { profiles: [], schemaVersion: 2, activeProfileId: null })
+  state.data.set('server-groups', { groups: [] })
   state.write.mockReset()
   state.handlers.clear()
   state.resolve.mockReset().mockResolvedValue(response())
@@ -51,6 +56,10 @@ beforeEach(async () => {
   registry = operations.operations
   operations.registerOperationHandlers()
   picker.registerServerPickerHandlers()
+  // Main startup preflights persisted stores before accepting feature actions.
+  picker.serverPicker.getProfiles()
+  groups.getGroups()
+  state.write.mockClear()
 })
 afterEach(async () => {
   const closing = registry?.close()

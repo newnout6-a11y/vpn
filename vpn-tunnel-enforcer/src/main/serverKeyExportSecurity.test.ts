@@ -63,9 +63,15 @@ vi.mock('electron-store', () => ({
       this.defaults = options.defaults ?? {}
     }
 
-    get(key: string) {
-      return state.storeData.has(key) ? state.storeData.get(key) : this.defaults[key]
+    get(key: string, fallback?: unknown) {
+      return state.storeData.has(key) ? state.storeData.get(key) : this.defaults[key] ?? fallback
     }
+    get store() { return Object.fromEntries(state.storeData) }
+    set store(value: Record<string, unknown>) {
+      state.storeData.clear()
+      for (const [key, item] of Object.entries(value)) state.storeData.set(key, item)
+    }
+    get path() { return '/missing-vpnte-key-export-test/server-picker.json' }
 
     set(key: string, value: any) {
       state.storeData.set(key, value)

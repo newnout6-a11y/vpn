@@ -13,8 +13,14 @@ vi.mock('electron', () => ({
   ipcMain: { handle: (channel: string, handler: (...args: any[]) => any) => state.handlers.set(channel, handler) }
 }))
 vi.mock('electron-store', () => ({ default: class {
-  get(key: string) { return state.data.get(key) }
+  get(key: string, fallback?: unknown) { return state.data.has(key) ? state.data.get(key) : fallback }
   set(key: string, value: unknown) { state.data.set(key, value) }
+  get store() { return Object.fromEntries(state.data) }
+  set store(value: Record<string, unknown>) {
+    state.data.clear()
+    for (const [key, item] of Object.entries(value)) state.data.set(key, item)
+  }
+  get path() { return '/missing-vpnte-geo-test/server-picker.json' }
 } }))
 vi.mock('child_process', async importOriginal => {
   const actual = await importOriginal<typeof import('child_process')>()

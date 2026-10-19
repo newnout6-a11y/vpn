@@ -5,6 +5,10 @@ import { logEvent } from './appLogger'
 
 export const SECRET_REF_KIND = 'vpnte-safe-storage-v1' as const
 const DPAPI_PREFIX = 'enc:dpapi:v1:'
+const MAX_SOURCE_BYTES = 16 * 1024 * 1024
+// Base64/envelope/DPAPI expansion must not make a valid source unreadable on
+// restart. The authenticated plaintext retains the original source bound.
+const MAX_ENCRYPTED_BACKUP_BYTES = 32 * 1024 * 1024
 // Cache only authenticated encrypted bytes, never plaintext or file timestamps.
 // Every access still checks the artifact and reads its current contents.
 const verifiedBackupDigests = new Map<string, string>()
@@ -104,7 +108,7 @@ function protectSecretBackup(backupPath: string, sourcePath?: string): 'created'
     return 'skipped'
   }
   const info = lstatSync(input)
-  if (!info.isFile() || info.isSymbolicLink() || info.size > 16 * 1024 * 1024) throw new Error('Invalid secret migration backup artifact')
+  if (!info.isFile() || info.isSymbolicLink() || info.size > (exists ? MAX_ENCRYPTED_BACKUP_BYTES : MAX_SOURCE_BYTES)) throw new Error('Invalid secret migration backup artifact')
   const bytes = readFileSync(input)
   const digest = createHash('sha256').update(bytes).digest('hex')
   if (exists && isSecretEncryptionAvailable() && verifiedBackupDigests.get(backupPath) === digest) return 'unchanged'
@@ -115,18 +119,22 @@ function protectSecretBackup(backupPath: string, sourcePath?: string): 'created'
     try { parsed = JSON.parse(raw) } catch { /* Legacy stores can contain malformed JSON; encrypt the original bytes. */ }
     if (parsed?.__vpnteEncryptedBackup === 1) {
       if (!isSecretRef(parsed.contents)) throw new Error('Invalid encrypted migration backup')
-      decryptSecret(parsed.contents) // Authenticate/read-back before calling it protected.
+      const restored = decryptSecret(parsed.contents)
+      if (Buffer.byteLength(restored, 'utf8') > MAX_SOURCE_BYTES) throw new Error('Invalid secret migration backup artifact')
       if (verifiedBackupDigests.size >= 8) verifiedBackupDigests.delete(verifiedBackupDigests.keys().next().value!)
       verifiedBackupDigests.set(backupPath, digest)
       return 'verified'
     }
   }
+  if (bytes.length > MAX_SOURCE_BYTES) throw new Error('Invalid secret migration backup artifact')
   const contents = encryptSecret(raw)
   if (decryptSecret(contents) !== raw) throw new Error('Encrypted migration backup read-back failed')
+  const encoded = JSON.stringify({ __vpnteEncryptedBackup: 1, contents })
+  if (Buffer.byteLength(encoded, 'utf8') > MAX_ENCRYPTED_BACKUP_BYTES) throw new Error('Invalid secret migration backup artifact')
   const temporary = `${backupPath}.tmp-${randomUUID()}`
   try {
     const fd = openSync(temporary, 'wx', 0o600)
-    try { writeFileSync(fd, JSON.stringify({ __vpnteEncryptedBackup: 1, contents }), 'utf8'); fsyncSync(fd) }
+    try { writeFileSync(fd, encoded, 'utf8'); fsyncSync(fd) }
     finally { closeSync(fd) }
     renameSync(temporary, backupPath)
   } finally {

@@ -1,8 +1,7 @@
 import Store from './versionedStore'
-import { logEvent } from './appLogger'
+import { assertMigrationReadBack, migrateSecretStore } from './storeMigrations'
 import type { ServerProfile, ServerGroup, KillSwitchLevel, KillSwitchException } from '../shared/ipc-types'
 import {
-  protectLegacySecretBackup,
   decryptJsonSecret,
   decryptSecret,
   encryptJsonSecret,
@@ -26,11 +25,7 @@ interface PersistedServerPickerStoreShape {
   schemaVersion: number
   profiles: PersistedServerProfile[]
   activeProfileId: string | null
-  migration?: {
-    id: 'safe-storage-v1'
-    completedAt: number
-    migratedProfiles: number
-  }
+  migration?: Record<string, unknown>
 }
 
 export interface ServerGroupsStoreShape {
@@ -43,8 +38,7 @@ export interface GranularKillSwitchStoreShape {
 }
 
 const persistedServerPickerStore = new Store<PersistedServerPickerStoreShape>({
-  name: 'server-picker',
-  defaults: { schemaVersion: 2, profiles: [], activeProfileId: null }
+  name: 'server-picker'
 })
 
 function profileContainsPlaintextSecret(profile: PersistedServerProfile): boolean {
@@ -77,38 +71,20 @@ function decryptProfile(profile: PersistedServerProfile): ServerProfile {
 }
 
 function migrateProfilesIfNeeded(): void {
-  protectLegacySecretBackup(`${persistedServerPickerStore.path}.pre-safe-storage-v1.bak`, undefined, 'server-picker')
-  const profiles = persistedServerPickerStore.get('profiles', [])
-  const plaintextProfiles = profiles.filter(profileContainsPlaintextSecret)
-  if (plaintextProfiles.length === 0) return
-  if (!isSecretEncryptionAvailable()) {
-    logEvent('error', 'secret-migration', 'profile migration blocked', { step: 'availability', status: 'error' })
-    throw new Error('VPN profile migration requires Windows secure storage; plaintext data was left unchanged')
-  }
-
-  protectLegacySecretBackup(`${persistedServerPickerStore.path}.pre-safe-storage-v1.bak`, persistedServerPickerStore.path, 'server-picker')
-
-  const activeProfileId = persistedServerPickerStore.get('activeProfileId', null)
-  logEvent('info', 'secret-migration', 'profile migration started', { step: 'encrypt', count: profiles.length })
-  try {
-    const encrypted = profiles.map(profile => encryptProfile(decryptProfile(profile)))
-    // Verify decryptability before the one atomic electron-store replacement.
-    encrypted.forEach(decryptProfile)
-    persistedServerPickerStore.store = {
-      schemaVersion: 2,
-      profiles: encrypted,
-      activeProfileId,
-      migration: {
-        id: 'safe-storage-v1',
-        completedAt: Date.now(),
-        migratedProfiles: plaintextProfiles.length
-      }
+  migrateSecretStore('server-picker', {
+    path: persistedServerPickerStore.path,
+    read: () => ({ ...persistedServerPickerStore.store }),
+    write: value => { persistedServerPickerStore.store = value },
+    hasPlaintext: value => (value.profiles ?? []).some(profileContainsPlaintextSecret),
+    prepare(value) {
+      const decoded = value.profiles.map(decryptProfile)
+      const encrypted = decoded.map(encryptProfile)
+      assertMigrationReadBack(decoded, encrypted.map(decryptProfile))
+      return { ...value, profiles: encrypted, migration: {
+        migratedProfiles: value.profiles.filter(profileContainsPlaintextSecret).length
+      } }
     }
-    logEvent('info', 'secret-migration', 'profile migration completed', { step: 'commit', status: 'success', count: plaintextProfiles.length })
-  } catch (error) {
-    logEvent('error', 'secret-migration', 'profile migration failed; original data retained', { step: 'encrypt-or-commit', status: 'error' })
-    throw error
-  }
+  })
 }
 
 /**
@@ -147,22 +123,28 @@ export const serverPickerStore = {
   }
 }
 
-const persistedServerGroupsStore = new Store<{ groups: Array<ServerGroup | SecretRef> }>({
-  name: 'server-groups', defaults: { groups: [] }
+const persistedServerGroupsStore = new Store<{ groups: Array<ServerGroup | SecretRef>; schemaVersion?: number }>({
+  name: 'server-groups'
 })
 export const serverGroupsStore = {
   get(_key: 'groups', fallback: ServerGroup[] = []): ServerGroup[] {
-    protectLegacySecretBackup(`${persistedServerGroupsStore.path}.pre-safe-storage-v1.bak`, undefined, 'server-groups')
-    const persisted = persistedServerGroupsStore.get('groups', fallback)
-    if (!Array.isArray(persisted)) throw new Error('Invalid server group store')
-    const groups = persisted.map(group => isSecretRef(group) ? decryptJsonSecret<ServerGroup>(group) : group)
-    if (persisted.some(group => !isSecretRef(group))) {
-      // Prepare the entire encrypted replacement before committing any field.
-      const encrypted = groups.map(encryptJsonSecret)
-      protectLegacySecretBackup(`${persistedServerGroupsStore.path}.pre-safe-storage-v1.bak`, persistedServerGroupsStore.path, 'server-groups')
-      persistedServerGroupsStore.set('groups', encrypted)
-    }
-    return groups
+    migrateSecretStore('server-groups', {
+      path: persistedServerGroupsStore.path,
+      read: () => ({ ...persistedServerGroupsStore.store }),
+      write: value => { persistedServerGroupsStore.store = value },
+      hasPlaintext(value) {
+        if (value.groups === undefined) return false
+        if (!Array.isArray(value.groups)) throw new Error('Invalid server group store')
+        return value.groups.some(group => !isSecretRef(group))
+      },
+      prepare(value) {
+        const groups = value.groups.map(group => isSecretRef(group) ? decryptJsonSecret<ServerGroup>(group) : group)
+        const encrypted = groups.map(encryptJsonSecret)
+        assertMigrationReadBack(groups, encrypted.map(group => decryptJsonSecret<ServerGroup>(group)))
+        return { ...value, groups: encrypted }
+      }
+    })
+    return persistedServerGroupsStore.get('groups', fallback).map(group => isSecretRef(group) ? decryptJsonSecret<ServerGroup>(group) : group)
   },
   set(_key: 'groups', groups: ServerGroup[]): void {
     if (!Array.isArray(groups)) throw new Error('Invalid server group array')
