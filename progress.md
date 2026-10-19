@@ -4116,3 +4116,19 @@ CI/review нового SHA проверяются отдельно после pu
   (.tmp/wp0-import-qodo69-electron.log); `node scripts/test-wp1-native.mjs --ipc-only`
   — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-import-qodo69-csp.log). Scope этих smoke
   прежний, новый import дополнительно проверен actual curl/guard/Conf fixture.
+
+### PR #69 — итоговая проверка и слияние
+
+- Qodo **1542807 completed** на **a5cf69eade2e28f39555f7ecbd5ee5d1bb98a83b**:
+  оба прежних findings implemented, новых нет. Attribution прочитан через API,
+  вручную не менялся; ручного запроса review не было.
+- CI **39179194108 success** на том же SHA: Windows, Rust и сайт зелёные.
+  Windows выполнил typecheck/unit/traceability, production IPC/CSP, WFP ABI/
+  rollback и native reads. Watcher завершён exit 0; initial failed run не скрыт.
+- Слияние выполнено с expected head SHA; отдельный REST GET подтвердил
+  merged=true, state=closed, merge **639ade16393e1b121bdca66aff49e8f2e27f10f4**.
+- Следующая ветка — codex/wp0-config-operations от обновлённого main.
+  Эта запись меняет только журнал/матрицу; production tree совпадает с
+  проверенным a5cf69e. Последние проверки: npm test 4307 passed / 5 skipped,
+  typecheck/build/native PASS, traceability AC 927/927 / F 210/210. WP-0
+  целиком и следующая WP-2 остаются незавершёнными.
