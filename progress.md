@@ -6567,3 +6567,49 @@ CI/review нового SHA проверяются отдельно после pu
   Coverage AC927/927,F210/210,diff check —exit0. Новые native tests —actual
   PowerShell; полный7-fixture Electron runner не повторялся: IPC/preload/bridge
   не менялись. Новые exact-head Qodo/CI pending.
+
+### PR #89 принят; live-check DNS/TCP/TLS/traceroute drain (20.10.2026)
+
+- #89 final head8e32fdf0936cc95309b51478c85aed51392812a5: Qodo1557804 completed
+  без findings (.tmp/qodo89-final.json),CI39339629394 success (Windows/Rust/site).
+  Revix free-quota-reached до20.10 03:00 МСК; полного review нет,это не approval.
+  Merge/main5268e7433fe6b12a472a11d891e520b2a11fec2f; reviewed/main tree
+  совпал:05ec0c4627e75836988800be9a8c472df930dd48.
+- AT-00-003/007,F-021: private bounded DNS resolver ждёт raw settlement после
+  cancel/timeout,поздние адреса отбрасываются. TCP/TLS ждут actual close;
+  результат и RTT фиксируются до drain. Поздний TLS ready не заменяет terminal
+  failure; spontaneous close и synchronous connect/init errors конечны.
+  Traceroute сохраняет partial hops,но kill/error/timeout не выдаёт за command
+  completion: promise завершается на actual child close. stdout bounded64KiB.
+- Новая networkDrain suite: первый запуск остановлен из-за зависания cleanup
+  самого стенда после failed RTT assertion; verdict не получен
+  (.tmp/wp0-live-network-before.log). Cleanup дренирует pending fake sockets.
+  Повтор до production fix:17 failed/1 passed,1.23s,Vitest exit1
+  (.tmp/wp0-live-network-before-final.log). После fix18/18 passed,1.28s.
+- Первые6 suites94/94 passed,5.37s; typecheck165 channels/0 public any exit0.
+  Добавлены overall TLS timer/sync failure,normal traceroute и4 native loopback
+  cases: actual TCP connect/cancel,TLS cancel без handshake,DNS cancellation
+  через собственный UDP resolver. Network native suite25/25 passed,1.40s.
+- Форматирующий script ошибочно усёк source; IPC checker поймал4 missing
+  live-check channels,exit1 (.tmp/wp0-live-network-typecheck-final.log).
+  Source восстановлен из проверенного HEAD,целевые fixes повторно применены
+  без script-formatting. Test fake TLS lifecycle и pending DNS приведены к
+  actual close/settlement,прежние assertions сохранены.
+- Final targeted: npm.cmd test -- src/main/liveServerProbe.networkDrain.test.ts
+  src/main/liveServerProbe.resourceDrain.test.ts src/main/liveServerProbe.test.ts
+  src/main/liveServerProbe.extended.test.ts src/main/liveServerProbe.handshake.test.ts
+  src/main/liveServerAuditRegression.test.ts —101/101 passed,6 suites,5.47s,exit0
+  (.tmp/wp0-live-network-targeted-final.log). npm.cmd run typecheck —165 channels/
+  0 public any,exit0 (.tmp/wp0-live-network-typecheck-recovered.log).
+  python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py —AC927/927,
+  F210/210,exit0; git diff --check exit0. Final full/build выполняются.
+  HTTP/media/SOCKS helpers,общий live operation lifetime/progress/history/UI
+  остаются открытыми следующими частями WP-0. Нормативные docs/ не менялись.
+
+- Final full: npm.cmd test -- --maxWorkers=1 —4987 passed/5 skipped/0 failed,
+  300 files passed/2 skipped,312.04s,exit0 (.tmp/wp0-live-network-full.log).
+  Production/test tree с начала full не менялся. npm.cmd run build,включая
+  typecheck165 channels/0 public any —exit0 (.tmp/wp0-live-network-build.log).
+  Coverage AC927/927,F210/210,diff check —exit0. IPC/preload/bridge не менялись,
+ 7-fixture Electron runner не повторялся; native evidence текущего участка —
+  четыре loopback resource cases. Exact-head Qodo/CI требуются после публикации.

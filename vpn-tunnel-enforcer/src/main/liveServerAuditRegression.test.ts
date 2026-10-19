@@ -50,9 +50,9 @@ vi.mock('dns', () => {
 vi.mock('tls', async (importOriginal) => {
   const actual = await importOriginal<typeof import('tls')>()
   const { EventEmitter } = await import('node:events')
-  const connect = (_opts: unknown, callback: Function) => {
+  const connect = (_options: unknown, ready: () => void) => {
     const socket = Object.assign(new EventEmitter(), {
-      destroy: vi.fn(),
+      destroy: vi.fn(() => { queueMicrotask(() => socket.emit('close')); return socket }),
       getPeerCertificate: () => ({
         subject: { CN: 'unrelated.example' },
         subjectaltname: 'DNS:unrelated.example'
@@ -63,7 +63,8 @@ vi.mock('tls', async (importOriginal) => {
       authorizationError: 'DEPTH_ZERO_SELF_SIGNED_CERT',
       alpnProtocol: 'h2'
     })
-    queueMicrotask(() => callback())
+    socket.once('secureConnect', ready)
+    queueMicrotask(() => socket.emit('secureConnect'))
     return socket
   }
   return {
@@ -227,7 +228,8 @@ describe('Second review: residual defects, observed behavior', () => {
 
 it('isolates cancellation by sender and rejects duplicate IDs', async () => {
   registerLiveServerProbeIpcHandlers()
-  mocks.resolve4.mockImplementation(() => new Promise(() => {}))
+  let release!: (value: unknown[]) => void
+  mocks.resolve4.mockImplementation(() => new Promise(resolve => { release = resolve }))
   const owner = Object.assign(new EventEmitter(), { id: 71 })
   const other = Object.assign(new EventEmitter(), { id: 72 })
   const run = mocks.handlers.get('server:live-check')!
@@ -237,6 +239,7 @@ it('isolates cancellation by sender and rejects duplicate IDs', async () => {
   await expect(run({ sender: owner }, options)).rejects.toThrow('Duplicate')
   expect((await cancel({ sender: other }, 'same-id')).cancelled).toBe(false)
   expect((await cancel({ sender: owner }, 'same-id')).cancelled).toBe(true)
+  release([]) // Native cancellation initiates cleanup; the raw query must also settle.
   expect((await pending).cancelled).toBe(true)
   expect(mocks.cancelDns).toHaveBeenCalled()
   expect(owner.listenerCount('destroyed')).toBe(0)
