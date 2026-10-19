@@ -4414,3 +4414,25 @@ CI/review нового SHA проверяются отдельно после pu
 - Попытка убрать собственный orphan fixture .tmp/key-operations-ADQ7rk
   отклонена автоматической проверкой инструмента: blocked by policy. Повторных
   попыток/обхода нет, папка оставлена ignored; проверкам и изменениям не мешает.
+
+
+### PR #71 — окончательный gate и слияние
+
+- Qodo 1543309 completed на c8be3bacc79dfbb4b4a2012cc8742a88dd854732:
+  все три прежних findings implemented, новых нет. Перед merge API повторно
+  подтвердил completed / openFindings=[] на этом же SHA. Ручного request или
+  изменения attribution не было.
+- CI 39186437502 success на c8be3ba: Windows unit/traceability/production
+  IPC/CSP/WFP/native reads, Rust и сайт зелёные. Watcher terminal exit 0.
+  Перед merge REST GET подтвердил expected head, mergeable=true / clean и
+  completed/success exact-head CI. Merge выполнен с expected SHA.
+- Отдельный REST GET подтвердил merged=true, state=closed, merged_at
+  2026-10-19T01:47:25Z, merge 273a93df3f7fe4fb9cc8bf0195d52ccdf251e2a1.
+- Следующая ветка codex/wp0-rotation-operations создана от обновлённого
+  vpn/main. git diff --exit-code c8be3ba HEAD -- . — exit 0: tree merge
+  совпадает с окончательно проверенным head. Эта запись и матрица меняют
+  только документацию; code checks не переобъявляются заново запущенными.
+  Последние фактические: полный npm test 4393 passed / 5 skipped, typecheck,
+  build/native PASS, traceability AC 927/927 / F 210/210. Ротация, UI lifetime,
+  durable audit, migration/error/native matrices и прочий WP-0 ещё не завершены.
+  Общая цель WP-0 затем WP-2 остаётся active.
