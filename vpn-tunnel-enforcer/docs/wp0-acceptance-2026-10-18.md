@@ -1716,3 +1716,21 @@ Final full3 после RTT fix:4952 passed/5 skipped/0 failed,298 files passed/
 2 skipped,303.79s,exit0. Final build/typecheck165 channels/0 public any,
 7 native fixtures,coverage/diff —exit0. Новый exact-head Qodo/CI pending;
 весь WP-0 остаётся в работе.
+
+#88 принят: final head2c52db0,Qodo1557666 completed без findings,
+CI39337723907 success. Merge/mainca15040; tree совпал с reviewed head.
+Следующий участок —physical queue/process foundations live-check; весь WP-0 в работе.
+
+## Live-check: physical queue/process foundations (20.10.2026)
+
+AT-00-003/007: cancelled/expired queue slot удерживает порядок за previous
+handshake worker; execPs ждёт actual child close на cancel/timeout/error.
+До fix6 failed/2 passed. После fix адресные5 suites76/76 passed,5.16s,
+включая2 native PowerShell cancellation/timeout cases с actual close.
+Coverage/diff —exit0; final full/build и exact-head Qodo/CI pending.
+Общий lifetime/progress/history/raw DNS/TCP/TLS/HTTP live-check ещё в работе.
+
+Final full:4962 passed/5 skipped/0 failed,299 files passed/2 skipped,308.02s,
+exit0. Build/typecheck165 channels/0 public any,coverage/diff —exit0.
+Новые native PowerShell cases прошли;7-fixture Electron runner не повторялся
+при неизменных IPC/preload/bridge. Exact-head Qodo/CI pending.
