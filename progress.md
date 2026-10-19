@@ -6520,3 +6520,50 @@ CI/review нового SHA проверяются отдельно после pu
   (.tmp/wp0-server-probe-build-final.log). Повторный node scripts/test-electron-runtime.mjs
   —7 PASS,exit0 (.tmp/wp0-server-probe-electron-final.log). Coverage AC927/927,
   F210/210 и git diff --check —exit0. Новые exact-head Qodo/CI pending.
+
+### PR #88 принят; следующий участок — live-check resource drain
+
+- Final head2c52db0887dfd487ede574acbf3148dfaa18e171: Qodo1557666 completed
+  без findings; CI39337723907 success (Windows/Rust/site). Revix подтвердил
+  cooldown до20.10 03:00 МСК,полного review нет; это не approval.
+  Merge/mainca15040d06f4b33db03ca6c4a50bf4488f8dc7fb; reviewed/main tree
+  совпал:3371348304675e3839960115af9e6d738c2180e9.
+- Следующий WP-0 участок: physical resource foundations liveServerProbe.
+  Найдено: withHandshakeWorkerLock освобождает cancelled/expired queued slot
+  раньше previous worker,пропуская следующего worker параллельно предыдущему.
+  execPs завершает raw promise на kill/error/timeout до actual child close.
+  Исправляем эти две границы с regressions; общий owner/deadline/history/UI
+  live-check,raw DNS/TCP/TLS/HTTP остаются следующими частями,не принимаются тут.
+
+### Live-check: queue slot и raw PowerShell close (20.10.2026)
+
+- AT-00-003/007,F-021: cancelled/expired queued handshake request больше не
+  освобождает chain раньше previous worker. Дополнительный signal guard перед
+  fn ограждает race admission/cancel; admitted worker по-прежнему держит slot
+  до собственного settlement.
+- execPs на cancel/timeout/error инициирует kill,но raw promise ждёт actual
+  child close и pipe drain. Timer/AbortSignal/data/error/close listeners сняты
+  на terminal close. После failure новые output chunks не накапливаются; normal
+  UTF-8 output и прежняя интерпретация exit code сохранены. Завершённый процесс
+  не получает повторный kill. Already-aborted request не spawn-ится; sync spawn
+  exception завершается без ожидания несуществующего close.
+- Beforefix: npm.cmd test -- src/main/liveServerProbe.resourceDrain.test.ts
+  —6 failed/2 passed,1.42s,exit1 (.tmp/wp0-live-drain-before.log).
+- После fix5 suites74/74 passed,4.89s. Добавлены2 Windows native cases на
+  настоящем PowerShell Start-Sleep (только собственный дочерний процесс): signal
+  cancel100ms и timeout400ms возвращают ошибку после native close.
+  Final targeted: npm.cmd test -- src/main/liveServerProbe.resourceDrain.test.ts
+  src/main/liveServerProbe.test.ts src/main/liveServerProbe.extended.test.ts
+  src/main/liveServerProbe.handshake.test.ts src/main/liveServerAuditRegression.test.ts
+  —76/76 passed,5 suites,5.16s,exit0 (.tmp/wp0-live-drain-targeted-final.log).
+- Coverage AC927/927,F210/210,diff check —exit0. Final full/build выполняются.
+  Общий operation registry live-check,progress/history fencing,raw DNS/TCP/TLS/
+  HTTP и batch/modal lifetime этим небольшим участком ещё не приняты.
+
+- Final full: npm.cmd test -- --maxWorkers=1 —4962 passed/5 skipped/0 failed,
+  299 files passed/2 skipped,308.02s,exit0 (.tmp/wp0-live-drain-full.log).
+  Production/test tree с начала full не менялся. npm.cmd run build,включая
+  typecheck165 channels/0 public any —exit0 (.tmp/wp0-live-drain-build.log).
+  Coverage AC927/927,F210/210,diff check —exit0. Новые native tests —actual
+  PowerShell; полный7-fixture Electron runner не повторялся: IPC/preload/bridge
+  не менялись. Новые exact-head Qodo/CI pending.

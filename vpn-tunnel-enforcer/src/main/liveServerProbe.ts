@@ -1725,57 +1725,37 @@ export function execPs(
   signal?: AbortSignal
 ): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    let finished = false
-    let child: any = null
-    const timer = setTimeout(() => {
-      finish(new Error('PowerShell command timeout'))
-    }, timeoutMs)
-
-    const abortHandler = () => {
-      finish(new Error('Cancelled'))
+    let child: ReturnType<typeof spawn> | undefined, settled = false, failure: Error | undefined
+    const stdoutChunks: Buffer[] = [], stderrChunks: Buffer[] = []
+    const stdout = (data: Buffer) => { if (!failure) stdoutChunks.push(Buffer.from(data)) }
+    const stderr = (data: Buffer) => { if (!failure) stderrChunks.push(Buffer.from(data)) }
+    const finish = () => {
+      if (settled) return
+      settled = true; clearTimeout(timer); signal?.removeEventListener('abort', abort)
+      child?.removeListener('error', stop); child?.removeListener('close', finish)
+      child?.stdout?.removeListener('data', stdout); child?.stderr?.removeListener('data', stderr)
+      if (failure) reject(failure)
+      else resolve({ stdout: Buffer.concat(stdoutChunks).toString('utf8'), stderr: Buffer.concat(stderrChunks).toString('utf8') })
     }
-
-    const finish = (err?: Error, res?: { stdout: string; stderr: string }) => {
-      if (finished) return
-      finished = true
-      clearTimeout(timer)
-      signal?.removeEventListener('abort', abortHandler)
-      if (child) {
-        try { child.kill() } catch {}
-      }
-      if (err) reject(err)
-      else resolve(res || { stdout: '', stderr: '' })
+    const stop = (error: Error) => {
+      if (settled || failure) return
+      failure = error; clearTimeout(timer); signal?.removeEventListener('abort', abort)
+      if (child) { try { child.kill() } catch { /* close still owns process/pipe drain */ } }
+      else finish()
     }
-
-    if (signal) {
-      if (signal.aborted) {
-        finish(new Error('Cancelled'))
-        return
-      }
-      signal.addEventListener('abort', abortHandler, { once: true })
-    }
-
+    const abort = () => stop(new Error('Cancelled'))
+    const timer = setTimeout(() => stop(new Error('PowerShell command timeout')), timeoutMs)
+    if (signal?.aborted) { abort(); return }
+    signal?.addEventListener('abort', abort, { once: true })
     try {
       const utf8OutputBootstrap = '$utf8 = [System.Text.UTF8Encoding]::new($false); [Console]::OutputEncoding = $utf8; $OutputEncoding = $utf8;'
       const encoded = Buffer.from(`${utf8OutputBootstrap}\n${script}`, 'utf16le').toString('base64')
       child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded], {
-        windowsHide: true,
-        stdio: ['ignore', 'pipe', 'pipe']
+        windowsHide: true, stdio: ['ignore', 'pipe', 'pipe']
       })
-      const stdoutChunks: Buffer[] = []
-      const stderrChunks: Buffer[] = []
-      child.stdout?.on('data', (d: Buffer) => { stdoutChunks.push(Buffer.from(d)) })
-      child.stderr?.on('data', (d: Buffer) => { stderrChunks.push(Buffer.from(d)) })
-      child.on('error', (err: any) => finish(err))
-      child.on('close', () => {
-        finish(undefined, {
-          stdout: Buffer.concat(stdoutChunks).toString('utf8'),
-          stderr: Buffer.concat(stderrChunks).toString('utf8')
-        })
-      })
-    } catch (err: any) {
-      finish(err)
-    }
+      child.stdout?.on('data', stdout); child.stderr?.on('data', stderr)
+      child.on('error', stop); child.once('close', finish)
+    } catch (error) { stop(error instanceof Error ? error : new Error('PowerShell spawn failed')) }
   })
 }
 
@@ -1798,6 +1778,7 @@ export async function withHandshakeWorkerLock<T>(
     release = resolve
   })
   activeHandshakeWorkerLock = currentLock
+  let acquired = false
 
   try {
     await new Promise<void>((resolve, reject) => {
@@ -1847,9 +1828,12 @@ export async function withHandshakeWorkerLock<T>(
       )
     })
 
+    if (signal?.aborted) throw new Error('Cancelled')
+    acquired = true
     return await fn()
   } finally {
-    release()
+    if (acquired) release()
+    else void previousLock.then(release, release)
   }
 }
 
