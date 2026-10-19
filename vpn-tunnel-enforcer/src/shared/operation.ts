@@ -25,6 +25,13 @@ export interface ConnectionOperationRejection {
 export type ConnectionStartResult = { success: boolean; error?: string; warning?: string | null; vpnIp?: string | null } | ConnectionOperationRejection
 export type ConnectionStopResult = { success: boolean; error?: string; warning?: string } | ConnectionOperationRejection
 
+/** Logs use a reversible non-secret key; managed cancellation retains UUIDv4. */
+export function operationLogDetails<T extends { readonly operationId: string }>(operation: T): Omit<T, 'operationId'> & { operationId: string; operationKey: string } {
+  const operationKey = /^op_[0-9a-f]{32}$/i.test(operation.operationId)
+    ? operation.operationId : 'op_' + operation.operationId.replaceAll('-', '')
+  return { ...operation, operationId: operationKey, operationKey }
+}
+
 /** Shared metadata for the other long-running feature operations. */
 export const OPERATION_DEADLINES = Object.freeze({
   refresh: 120_000, 'speed-test': 600_000, import: 120_000, export: 120_000, rotation: 120_000

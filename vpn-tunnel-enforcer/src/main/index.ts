@@ -20,7 +20,7 @@ import { currentCorrelationId, currentActionMetadata, withCorrelation } from './
 import { monotonicTimeMs } from './eventClock'
 import { operations, registerOperationHandlers } from './operations'
 import { TunnelStateMachine } from './tunnelStateMachine'
-import type { ConnectionStartResult, ConnectionStopResult } from '../shared/operation'
+import { operationLogDetails, type ConnectionStartResult, type ConnectionStopResult } from '../shared/operation'
 import { runScheduledConnection } from './scheduledConnection'
 import { makeOutcome, outcomeKindToDisconnectReason, isNodeSwitchRestartReason, sessionOutcomeConfidence } from './sessionOutcome'
 import type { ConnectionProvenance } from '../shared/connection-provenance'
@@ -1205,7 +1205,7 @@ const connectionLifecycle = new ConnectionLifecycle(() => {
   tunController.cancelTransition()
 }, () => stopProtectionEffects(), operation => {
   if (operation.status === 'running' && operation.owner !== 'schedule') schedulerService.cancelPendingConnect()
-  logEvent(operation.status === 'running' ? 'debug' : 'info', 'lifecycle', 'connection operation', operation)
+  logEvent(operation.status === 'running' ? 'debug' : 'info', 'lifecycle', 'connection operation', operationLogDetails(operation))
 }, tunnelState)
 profileRotation.setLifecycle(connectionLifecycle)
 
@@ -2884,7 +2884,8 @@ async function performShutdownCleanup(reason: string): Promise<void> {
   profileRotation.stopTimer()
   const featureDrain = operations.close()
   await connectionLifecycle.close().catch(err => {
-    failedSteps.push('connection-lifecycle')
+    // Native/network backstops below must prove recovery before this old
+    // failure can be cleared. A failed backstop still refuses app exit.
     logEvent('warn', 'app', 'pending main lifecycle during shutdown failed', err)
   })
   await featureDrain
@@ -2994,6 +2995,7 @@ async function performShutdownCleanup(reason: string): Promise<void> {
       const restored = await autoconfig.rollback(['env'])
       if (restored.env !== true) throw new Error('environment proxy rollback unconfirmed')
     }
+    softProtectionApplied = false
     if (endingOutcome && endingSoftSession) closeSession(endingOutcome, endingStats)
   } catch (err) {
     failedSteps.push('autoconfig')
@@ -3012,6 +3014,7 @@ async function performShutdownCleanup(reason: string): Promise<void> {
   stopBackgroundTrafficHistory()
   stopTrafficConnectionSampler()
   if (failedSteps.length) throw new Error(`ShutdownCleanupUnconfirmed: ${failedSteps.join(', ')}`)
+  connectionLifecycle.confirmShutdownCleanup()
 
   // Keep helpers available for retry if capture/network cleanup was unconfirmed.
   await stopRecoveryPsWorker()

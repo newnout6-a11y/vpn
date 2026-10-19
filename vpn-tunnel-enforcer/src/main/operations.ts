@@ -3,14 +3,10 @@ import { logEvent } from './appLogger'
 import { ipcMain } from 'electron'
 import { requireString, IpcValidationError } from './ipcValidation'
 import { withCorrelation } from './actionCorrelation'
+import { operationLogDetails } from '../shared/operation'
 
 export const operations = new OperationRegistry(operation => {
-  // Keep every UUID bit without emitting a credential-shaped value into logs.
-  // IPC/list/cancel still use the original UUID; diagnostics use its reversible key.
-  const operationKey = 'op_' + operation.operationId.replaceAll('-', '')
-  logEvent(operation.status === 'running' ? 'debug' : 'info', 'lifecycle', 'feature operation', {
-    ...operation, operationId: operationKey, operationKey
-  })
+  logEvent(operation.status === 'running' ? 'debug' : 'info', 'lifecycle', 'feature operation', operationLogDetails(operation))
 }, (operation, category) => {
   withCorrelation(operation.correlationId, () => logEvent('error', 'lifecycle', 'feature post-commit failure', {
     operationKey: 'op_' + operation.operationId.replaceAll('-', ''), category

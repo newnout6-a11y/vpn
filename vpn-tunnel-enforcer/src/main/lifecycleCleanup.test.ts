@@ -174,7 +174,7 @@ function mainHarness(name: 'performShutdownCleanup' | 'stopProtection', session:
     settingsStore: { save: noop() }, refreshTrayState: noop(), captureSnapshot: done()
   }
   const run = compile<((reason?: string) => Promise<any>) & { state(): { session: object | null; stopping: boolean }; allowShutdownRetry(): void }>(`
-let shutdownInProgress=false,currentSession=session,stopInProgress=false,adaptiveVerificationGeneration=0,activeAdaptiveContext=null;
+let shutdownInProgress=false,currentSession=session,stopInProgress=false,adaptiveVerificationGeneration=0,activeAdaptiveContext=null,softProtectionApplied=false;
 ${body('index.ts', 'closeSession')}
 ${body('index.ts', 'stopProtectionEffects')}
 ${body('index.ts', name)}
@@ -182,6 +182,31 @@ return Object.assign(${name}, {state:()=>({session:currentSession,stopping:stopI
 `, os)
   return { run, ...os }
 }
+
+it('permits exit after shutdown proves cleanup despite an earlier disconnect failure (AT-00-003/007)', async () => {
+  const h = mainHarness('performShutdownCleanup')
+  await h.connectionLifecycle.stop(async () => ({ success: false, error: 'earlier disconnect failed' }))
+  await expect(h.run('test')).resolves.toBeUndefined()
+  await expect(h.connectionLifecycle.close()).resolves.toBeUndefined()
+  expect(h.logEvent).toHaveBeenCalledWith('warn', 'app', 'pending main lifecycle during shutdown failed', expect.any(Error))
+  expect(h.killOwnedTunRuntimeProcesses).toHaveBeenCalledOnce()
+  expect(h.isOwnedTunRuntimeRunning).toHaveBeenCalledWith(true)
+})
+
+it.each(['runtime', 'network', 'env', 'capture'])('keeps the earlier failure when shutdown cannot prove %s cleanup (AT-00-003/007)', async step => {
+  const h = mainHarness('performShutdownCleanup')
+  await h.connectionLifecycle.stop(async () => ({ success: false }))
+  if (step === 'runtime') h.isOwnedTunRuntimeRunning.mockResolvedValue(true)
+  if (step === 'network') {
+    h.tunController.stop.mockResolvedValue({ success: true })
+    h.rollbackTunNetworkBaselineIfApplied.mockResolvedValue({ success: false })
+  }
+  if (step === 'env') h.autoconfig.isApplied.mockRejectedValue(new Error('read failed'))
+  if (step === 'capture') h.stopTrafficForensicsSession.mockResolvedValue({ running: false, cleanupPending: true })
+  await expect(h.run('test')).rejects.toThrow('ShutdownCleanupUnconfirmed')
+  await expect(h.connectionLifecycle.close()).rejects.toThrow('Runtime cleanup confirmation missing')
+  expect(h.stopRecoveryPsWorker).not.toHaveBeenCalled()
+})
 
 function startupExitHarness(pollCompletion: Promise<void> | null = null) {
   const os = {
@@ -1156,16 +1181,19 @@ function softStartupHarness(retained = false) {
     autoconfig: {
       isApplied: vi.fn(async () => applied),
       apply: vi.fn(async (targets: string[]) => { if (targets.includes('env')) applied = true; return Object.fromEntries(targets.map(target => [target, true])) }),
-      rollback: vi.fn(async (targets: string[]) => Object.fromEntries(targets.map(target => [target, true]))),
+      rollback: vi.fn(async (targets: string[]) => {
+        if (targets.includes('env')) applied = false
+        return Object.fromEntries(targets.map(target => [target, true]))
+      }),
       rollbackApplied: vi.fn(async () => { const previous = applied; applied = false; return previous })
     },
     recordStartFailure: noop(), openSession: noop(), closeSession: noop(), sendToMainWindow: noop()
   }
   // Load the actual cleanup helper as well, rather than the generic stop mock.
   const { rollbackSoftAutoconfigIfApplied: _stub, ...dependencies } = os
-  const control = compile<{ start: (proxyAddr?: string, proxyType?: 'http' | 'socks5') => Promise<any>; stop: () => Promise<any>; protected: () => boolean; adopt: () => Promise<void>;
+  const control = compile<{ start: (proxyAddr?: string, proxyType?: 'http' | 'socks5') => Promise<any>; stop: () => Promise<any>; protected: () => boolean; adopt: () => Promise<void>; shutdown: () => Promise<void>;
     apply: (targets: string[]) => Promise<Record<string, boolean>>; rollback: (targets: string[]) => Promise<Record<string, boolean>> }>(`
-let adaptiveVerificationGeneration=0,activeAdaptiveContext=null,currentSession=null,stopInProgress=false,softProtectionApplied=false;
+let adaptiveVerificationGeneration=0,activeAdaptiveContext=null,currentSession=null,stopInProgress=false,softProtectionApplied=false,shutdownInProgress=false;
 ${body('index.ts', 'rollbackSoftAutoconfigIfApplied')}
 ${body('index.ts', 'startSoftProtectionEffects')}
 ${body('index.ts', 'startSoftProtection')}
@@ -1174,14 +1202,36 @@ ${body('index.ts', 'stopProtection')}
 ${body('index.ts', 'applyOwnedAutoconfig')}
 ${body('index.ts', 'rollbackOwnedAutoconfig')}
 ${body('index.ts', 'adoptRetainedSoftProtection')}
+${body('index.ts', 'performShutdownCleanup')}
 return {start:(addr='127.0.0.1:8080',type='http')=>startSoftProtection(addr,type),stop:stopProtection,protected:()=>softProtectionApplied,adopt:adoptRetainedSoftProtection,
-apply:targets=>applyOwnedAutoconfig(targets,'127.0.0.1:8080','http'),rollback:rollbackOwnedAutoconfig};
+apply:targets=>applyOwnedAutoconfig(targets,'127.0.0.1:8080','http'),rollback:rollbackOwnedAutoconfig,shutdown:()=>performShutdownCleanup('test')};
 `, dependencies)
   readProtection = control.protected
   return { ...dependencies, ...control }
 }
 
 describe('owned Soft startup (AT-00-003/007 subset)', () => {
+  it('clears Soft evidence after shutdown confirms env rollback (AT-00-003)', async () => {
+    const h = softStartupHarness()
+    expect(await h.start()).toMatchObject({ success: true })
+    expect(h.protected()).toBe(true)
+    await h.connectionLifecycle.stop(async () => ({ success: false }))
+    await expect(h.shutdown()).resolves.toBeUndefined()
+    expect(h.protected()).toBe(false)
+    expect(h.autoconfig.rollback).toHaveBeenCalledExactlyOnceWith(['env'])
+    await expect(h.connectionLifecycle.close()).resolves.toBeUndefined()
+  })
+  it.each(['false', 'throw'])('retains Soft evidence if shutdown env rollback is %s (AT-00-003)', async failure => {
+    const h = softStartupHarness()
+    await h.start()
+    await h.connectionLifecycle.stop(async () => ({ success: false }))
+    if (failure === 'false') h.autoconfig.rollback.mockResolvedValueOnce({ env: false })
+    else h.autoconfig.rollback.mockRejectedValueOnce(new Error('rollback failed'))
+    await expect(h.shutdown()).rejects.toThrow('ShutdownCleanupUnconfirmed: autoconfig')
+    expect(h.protected()).toBe(true)
+    await expect(h.connectionLifecycle.close()).rejects.toThrow('Runtime cleanup confirmation missing')
+    expect(h.stopRecoveryPsWorker).not.toHaveBeenCalled()
+  })
   it('reconciles changed address and protocol while Soft remains connected', async () => {
     const h = softStartupHarness()
     expect(await h.start()).toMatchObject({ success: true })
@@ -1293,7 +1343,7 @@ function ipStartupHarness(mode: 'direct' | 'proxy') {
   os.connectionLifecycle = new ConnectionLifecycle(() => { running=false })
   const name = mode === 'direct' ? 'startDirectVpnProtection' : 'startProtection'
   const control = compile<{ start: () => Promise<any>; cancel: () => void; stop: () => Promise<any>; shutdown: () => Promise<void> }>(`
-let adaptiveVerificationGeneration=0,activeAdaptiveContext=null,latestPublicIp=null,currentSession=null,stopInProgress=false,shutdownInProgress=false;
+let adaptiveVerificationGeneration=0,activeAdaptiveContext=null,latestPublicIp=null,currentSession=null,stopInProgress=false,shutdownInProgress=false,softProtectionApplied=false;
 const KILL_SWITCH_RULE_PREFIX='VPNTE-killswitch';
 ${body('index.ts', name)}
 ${body('index.ts', `${name}Effects`)}

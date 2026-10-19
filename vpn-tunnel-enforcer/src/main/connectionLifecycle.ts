@@ -18,6 +18,11 @@ export interface RotationOwner extends ConnectionStartupOwner {
   /** Final synchronous selection/scheduling and the successful result are one commit. */
   complete<T extends { success: true }>(effect: () => T): T
 }
+export interface ConnectionStopOwner {
+  /** Cancellation ends the request, but mandatory rollback must still drain. */
+  readonly signal: AbortSignal
+  readonly operation: ConnectionOperation
+}
 
 interface StartOptions { owner?: OperationOwner; timeoutMs?: number; refreshSoft?: boolean }
 type CleanupResult = { success: boolean; error?: string }
@@ -43,8 +48,10 @@ function failed(result: unknown): boolean {
 export class ConnectionLifecycle {
   private startup: Startup | null = null
   private stopping: Promise<unknown> | null = null
+  private stopResult: Promise<unknown> | null = null
   private stopOperation: ConnectionOperation | null = null
   private lastOperation: ConnectionOperation | null = null
+  private cleanupFailure: { error: unknown } | null = null
   private closed = false
 
   constructor(
@@ -126,7 +133,11 @@ export class ConnectionLifecycle {
         startup.terminalPublished = true
       }
       if (retained) startup.controller.abort()
-      else if (this.cleanupCancelled) cleanup = this.stop(this.cleanupCancelled, { owner: 'recovery' })
+      else if (this.cleanupCancelled) {
+        // The registry owns physical cleanup, not its bounded caller result.
+        void this.stop(this.cleanupCancelled, { owner: 'recovery' }).catch(() => undefined)
+        cleanup = this.stopping ?? undefined
+      }
       else { startup.controller.abort(); try { this.cancelControllerStartup() } catch { /* physical I/O still drains */ } }
       void cleanup?.catch(() => undefined)
     }, metadata)
@@ -163,7 +174,7 @@ export class ConnectionLifecycle {
 
   async start<T>(effect: (owner: ConnectionStartupOwner) => Promise<T>, options: StartOptions = {}): Promise<T | ConnectionOperationRejection> {
     const timeoutMs = options.timeoutMs ?? 120_000, operationOwner = options.owner ?? 'manual'
-    if (!Number.isInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2 ** 31 - 1) throw new Error('Invalid operation timeout')
+    if (!Number.isInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2 ** 31 - 1) throw new RangeError('Invalid operation timeout')
     if (this.closed || this.stopping) return rejection('conflict', 'Остановка защиты ещё выполняется — подождите')
     if (this.startup) {
       if (this.startup.operation.status !== 'running') return rejection('conflict', 'Отменённая операция ещё завершается')
@@ -261,6 +272,7 @@ export class ConnectionLifecycle {
           throw new Error('Connection confirmation missing')
         }
         startup.operation = { ...startup.operation, status: failed(result) ? 'error' : 'success' }
+        if (!failed(result)) this.cleanupFailure = null
         return result
       } catch (error) {
         if (controller.signal.aborted) {
@@ -283,8 +295,11 @@ export class ConnectionLifecycle {
     finally { controller.signal.removeEventListener('abort', onAbort) }
   }
 
-  stop<T>(effect: () => Promise<T>, options: { owner?: OperationOwner } = {}): Promise<T | ConnectionOperationRejection> {
-    if (this.stopping) return this.stopping as Promise<T>
+  stop<T>(effect: (owner: ConnectionStopOwner) => Promise<T>, options: { owner?: OperationOwner; timeoutMs?: number; signal?: AbortSignal } = {}): Promise<T | ConnectionOperationRejection> {
+    const timeoutMs = options.timeoutMs ?? 120_000
+    if (!Number.isInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2 ** 31 - 1) throw new RangeError('Invalid operation timeout')
+    if (this.stopResult) return this.stopResult as Promise<T | ConnectionOperationRejection>
+    if (options.signal?.aborted) return Promise.resolve(rejection('cancelled', 'Остановка отменена'))
     const owner = options.owner ?? 'manual'
     const active = this.startup?.operation
     if (active && OPERATION_PRIORITY[owner] < OPERATION_PRIORITY[active.owner]) {
@@ -292,33 +307,67 @@ export class ConnectionLifecycle {
     }
     const startup = this.startup
     const cancellationErrors: unknown[] = []
-    const operationId = randomUUID()
+    const operationId = 'op_' + randomUUID().replaceAll('-', '')
+    const startedAt = Date.now()
     const metadata: ActionMetadata = { source: currentActionMetadata()?.source ?? 'lifecycle', owner }
     const operation: ConnectionOperation = {
-      version: 1, operationId, correlationId: currentCorrelationId() ?? 'op_' + operationId.replaceAll('-', ''), owner, kind: 'disconnect',
-      startedAt: Date.now(), deadline: null, status: 'running'
+      version: 1, operationId, correlationId: currentCorrelationId() ?? operationId, owner, kind: 'disconnect',
+      startedAt, deadline: startedAt + timeoutMs, status: 'running'
     }
+    const controller = new AbortController()
+    let terminalPublished = false, status: ConnectionOperation['status'] = 'error'
+    let category: ConnectionOperation['category'], currentOperation = operation
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let resolveInterrupted!: (result: ConnectionOperationRejection) => void
+    const interrupted = new Promise<ConnectionOperationRejection>(resolve => { resolveInterrupted = resolve })
+    const finish = (finalStatus: ConnectionOperation['status'], finalCategory?: ConnectionOperation['category']) => {
+      if (terminalPublished) return
+      terminalPublished = true
+      clearTimeout(timer)
+      options.signal?.removeEventListener('abort', onAbort)
+      currentOperation = { ...operation, status: finalStatus, ...(finalCategory ? { category: finalCategory } : {}) }
+      this.stopOperation = currentOperation
+      this.publish(currentOperation, metadata)
+    }
+    const interrupt = (reason: 'cancelled' | 'timeout') => withCorrelation(operation.correlationId, () => {
+      if (terminalPublished) return
+      finish(reason === 'timeout' ? 'error' : 'cancelled', reason)
+      controller.abort()
+      resolveInterrupted(rejection(reason, reason === 'timeout' ? 'Истекло время остановки защиты' : 'Остановка отменена', operationId))
+    }, metadata)
+    const onAbort = () => interrupt('cancelled')
+    const stopOwner: ConnectionStopOwner = { signal: controller.signal, get operation() { return { ...currentOperation } } }
     const stopped = Promise.resolve().then(async () => {
       if (startup) await startup.completion
-      const result = await withCorrelation(operation.correlationId, effect, metadata)
+      // Rollback remains mandatory even if its caller timed out while startup drained.
+      const result = await withCorrelation(operation.correlationId, () => effect(stopOwner), metadata)
       if (!failed(result) && this.stateMachine && !this.stateMachine.canConfirmStop()) throw new Error('Runtime cleanup confirmation missing')
       if (cancellationErrors.length) throw cancellationErrors[0]
-      this.stopOperation = { ...operation, status: failed(result) ? 'error' : 'success' }
+      status = failed(result) ? 'error' : 'success'
+      this.cleanupFailure = failed(result) ? { error: new Error('Runtime cleanup confirmation missing') } : null
       return result
     }).catch(error => {
-      this.stopOperation = { ...operation, status: 'error', category: 'internal' }
+      status = 'error'; category = 'internal'
+      this.cleanupFailure = { error }
       throw error
     }).finally(() => {
       if (this.stopping === stopped) {
-        this.publish(this.stopOperation!, metadata)
+        finish(status, category)
         this.stopOperation = null
         this.stopping = null
+        this.stopResult = null
       }
     })
     // Reserve admission before signalling the controller or waiting for I/O.
     this.stopping = stopped
+    const result = Promise.race([stopped, interrupted])
+    this.stopResult = result
     this.stopOperation = operation
+    timer = setTimeout(() => interrupt('timeout'), timeoutMs)
+    timer.unref?.()
+    options.signal?.addEventListener('abort', onAbort, { once: true })
     this.publish(operation, metadata)
+    if (options.signal?.aborted) onAbort()
     if (startup && startup.operation.status === 'running' && !startup.abortCategory) {
       startup.abortCategory = 'cancelled'
       startup.operation = { ...startup.operation, status: 'cancelled', category: 'cancelled' }
@@ -328,7 +377,16 @@ export class ConnectionLifecycle {
     startup?.controller.abort()
     try { this.cancelControllerStartup() }
     catch (error) { cancellationErrors.push(error) }
-    return stopped
+    return result
+  }
+
+  /** Called only after shutdown's independent native/network backstops succeed.
+   * Reconcile an earlier stop failure without publishing a second terminal. */
+  confirmShutdownCleanup(): void {
+    if (!this.closed || this.startup || this.stopping || this.stateMachine && !this.stateMachine.canConfirmStop()) {
+      throw new Error('Runtime cleanup confirmation missing')
+    }
+    this.cleanupFailure = null
   }
 
   async close(): Promise<void> {
@@ -345,6 +403,7 @@ export class ConnectionLifecycle {
     catch (error) { cancellationErrors.push(error) }
     if (this.startup) await this.startup.completion
     if (this.stopping) await this.stopping
+    if (this.cleanupFailure) throw this.cleanupFailure.error
     if (cancellationErrors.length) throw cancellationErrors[0]
   }
 }

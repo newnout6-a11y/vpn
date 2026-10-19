@@ -8,7 +8,7 @@
 18.10 владелец разрешил продолжать WP-0 при открытом PR #54, сохраняя запрет
 его слияния до отдельного решения. Полного Revix для #54 не было из-за квоты.
 Позднее 18.10 владелец разрешил сливать PR после пройденных проверок.
-#54/#55/#56/#57/#58/#59/#60/#61/#62/#63/#64/#65/#66/#67/#68/#69/#70/#71 слиты в main после exact-head CI success и completed Qodo,
+#54/#55/#56/#57/#58/#59/#60/#61/#62/#63/#64/#65/#66/#67/#68/#69/#70/#71/#72 слиты в main после exact-head CI success и completed Qodo,
 без открытых findings; прежний запрет слияния отменён.
 
 ## Полная область и первоначальная инвентаризация
@@ -17,7 +17,7 @@
 | --- | --- | --- |
 | 00-001 | AST-проверка 160 main/preload/shared request channels, общий реестр входов и versioned transport envelope; object contracts проверяют поля/массивы, save-settings покрывает все 39 общих полей AppSettings; TypeScript checker проверяет results всех 160 listeners, public results с `any` больше нет; native contextBridge сохраняет JSON профиля и nullable active result, feature list/cancel | Завершить проверку текущего PR; отдельная semantic matrix ошибок остаётся в 00-004 |
 | 00-002 | Production TunnelStateMachine интегрирована в main lane/IPC/Soft/tray/UI; 4096 stable tours и 117649 tours семи событий глубиной 6, включая timeout/cancel и native completion, с fake PID/TUN ledger и балансом operation events; sticky faults и generation fencing | Общая durable operation history/counters; все blocked/unknown/background paths; native Windows resources; общий admission фоновых restart |
-| 00-003 | Main connection lane: UUIDv4, owner, deadline запуска, priority admission; ручные Hard/Direct и Soft из tray, scheduled startup вместе с proxy detection; общий feature registry с prompt cancellation/deadline и physical drain, speed test, refresh подписок и импорт профилей, включая curl/DoH и commit queue; config browse/validate/apply/export, async file I/O и terminal commit приняты в PR #70; key renderer/clipboard/file exports в PR #71 | Ротация и UI cancel/unmount; deadline остановки, все entrypoints и полная матрица поздних эффектов |
+| 00-003 | Main connection lane: UUIDv4, owner, deadline запуска, priority admission; ручные Hard/Direct и Soft из tray, scheduled startup вместе с proxy detection; общий feature registry с prompt cancellation/deadline и physical drain, speed test, refresh подписок и импорт профилей, включая curl/DoH и commit queue; config browse/validate/apply/export, async file I/O и terminal commit приняты в PR #70; key renderer/clipboard/file exports в PR #71; rotation IPC/timer с native drain и retained evidence в PR #72 | UI cancel/unmount; deadline остановки, все entrypoints и полная матрица поздних эффектов |
 | 00-004 | Общая классификация transport; 157 каналов × 7 категорий через guard; native contextBridge сохраняет code/category/correlation в en/ru; typed local validation; 4 настоящих config handlers × 7 категорий, canonical domain failures | Миграция legacy domain-result `{success:false,error}` и semantic matrix настоящих feature handlers; transport fixtures не доказывают её |
 | 00-005 | Один action correlation id в guarded IPC response/error, lifecycle connect/stop и JSONL logger; async isolation, native wait/drain, diagnostic read-back с повторной redaction; ID исходного connect и source/owner/route/confidence в session history/JSON/CSV; JSONL clockId/monotonicMs отдельно от календарных дат и durationMs; реальные owned/legacy/tray/recovery Soft sessions | Все native/background entrypoints и полная матрица событий/истории автоматизаций, live-check и recovery |
 | 00-006 | Локальные миграции; общий version admission для 20 electron-store файлов / 28 constructors; future-version SHA-256 invariance на real Conf backend до defaults/repair и при записи через ранее открытый handle | Централизованный упорядоченный migration registry, fixtures всех исторических преобразований, остальные persisted JSON, полноценный upgrade/downgrade и межпроцессная координация |
@@ -1128,3 +1128,46 @@ Production rotation regression проверяет оба исхода native fai
 Реальная замена конфигурации по-прежнему отменяет работу со старыми значениями.
 L2 regression проверяет signal, прежний nextRotationAt и успешное завершение
 удержанного native restart без ordinary cleanup для четырёх no-op patch.
+
+## Stop deadline — bounded caller и обязательная очистка
+
+ConnectionLifecycle.stop получает deadline 120 s по умолчанию и отдельный
+AbortSignal; ожидание startup drain входит в срок. Timeout/cancel возвращают
+конечный typed отказ без ожидания неотменяемого OS I/O. Уже принятый rollback
+продолжается до физического завершения под занятым native lane. Повторные
+stop callers присоединяются к прежнему result; shutdown и rotation registry
+по-прежнему ждут physical Promise, включая его поздний отказ.
+
+Terminal event один: поздняя очистка не превращает timeout в success. После
+таймера нельзя объявлять ресурсы освобождёнными; фактическая очистка сети и
+закрытие завершившейся connection session при этом не запрещаются. Signal
+не является основанием бросить обязательный rollback. Controller остаётся
+в main и не сериализуется в IPC metadata.
+
+L2 cases: deadline во время cleanup и startup drain; prompt external cancel;
+pre-aborted signal без admission; invalid timeout; coalescing после timeout;
+shutdown с поздним success/failure; rotation registry lease после stop deadline;
+исходные correlation/UUID и единственный terminal. Настоящий Electron с
+production preload/contextBridge дополнительно проверяет timeout stop за 900 ms,
+original metadata, запрет нового старта до drain и отсутствие позднего success.
+OS boundaries управляемые; полная native Windows resource matrix, UI lifetime,
+background admission, durable audit, migrations/semantic errors/flags остаются
+открытыми. Финальные full/review/CI результаты фиксируются в progress.md.
+
+Qodo #73 уточнил границы cleanup failure и представления stop ID. Physical
+failure сохраняется отдельно от bounded terminal: close наблюдает false result
+и throw даже после окончания drain. Успешный подтверждённый reconnect или cleanup
+retry снимает прежний failure. Независимый shutdown pipeline может снять его
+только после успешных native/network/env/capture backstops, при закрытом,
+полностью drained lane и свежем stopped evidence FSM. Старый failure остаётся
+в журнале; неуспешное восстановление запрещает выход.
+
+Stop operationId теперь до публикации в owner/FSM/IPC представлен как
+op_<32 hex>: все 128 бит сгенерированного UUIDv4, включая version/variant,
+сохраняются; префикс и отсутствие дефисов исключают маскирование ID как секрета.
+Fallback correlationId равен этому ID. Это уточняет прежние записи о raw UUID
+в stop receipt: они относятся к более ранним коммитам PR #73. Managed feature
+и operations:cancel сохраняют прежние UUIDv4; credential redactor не ослаблен.
+operationLogDetails идемпотентен для canonical op_ ID. Реальный JSONL двух stop
+операций и diagnostic read-back сохраняют исходные receipt ID и различают их,
+маскируя credential и посторонний UUID. Финальные проверки — в progress.md.
