@@ -5,7 +5,7 @@ import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 const state = vi.hoisted(() => ({ dir: '', prompt: vi.fn(), snapshot: vi.fn(), diagnostics: vi.fn(), compress: vi.fn(), log: vi.fn(),
-  cleanupFails: false, work: '', writes: [] as string[], writeGate: null as null | Promise<unknown>, fileGate: null as null | Promise<unknown> }))
+  cleanupFails: false, temporaryCleanupFails: false, work: '', writes: [] as string[], writeGate: null as null | Promise<unknown>, fileGate: null as null | Promise<unknown> }))
 vi.mock('fs/promises', async importOriginal => {
   const real = await importOriginal<typeof import('node:fs/promises')>()
   return { ...real,
@@ -24,6 +24,7 @@ vi.mock('fs/promises', async importOriginal => {
       return file
     },
     rm: async (...args: Parameters<typeof real.rm>) => {
+      if (state.temporaryCleanupFails && String(args[0]).includes('.vpnte-export-')) throw Object.assign(new Error('private residue'), { code: 'EACCES' })
       if (state.cleanupFails && String(args[0]) === state.work) throw Object.assign(new Error('private cleanup detail'), { code: 'EACCES' })
       return real.rm(...args)
     }
@@ -51,7 +52,7 @@ import { exportDiagnosticsZip } from './diagnosticsExport'
 import { operations } from './operations'
 import { cancelRequesterOperation } from './requesterOperation'
 const token = '11111111-1111-4111-8111-111111111111'
-class Sender extends EventEmitter { isDestroyed() { return false } }
+class Sender extends EventEmitter { send = vi.fn(); isDestroyed() { return false } }
 let sender: Sender, target: string
 const releases: Array<() => void> = []
 function held<T>(value: T) {
@@ -63,7 +64,7 @@ function held<T>(value: T) {
 const run = () => exportDiagnosticsZip(sender as never, token)
 beforeEach(async () => {
   vi.clearAllMocks(); operations.resumeAdmission()
-  state.cleanupFails = false; state.work = ''; state.writeGate = null; state.fileGate = null; state.writes = []
+  state.cleanupFails = false; state.temporaryCleanupFails = false; state.work = ''; state.writeGate = null; state.fileGate = null; state.writes = []
   state.dir = await mkdtemp(join(process.cwd(), '.tmp', 'diagnostics-owned-'))
   target = join(state.dir, 'destination.zip'); await writeFile(target, 'old archive')
   sender = new Sender()
@@ -80,7 +81,7 @@ beforeEach(async () => {
 afterEach(async () => {
   for (const release of releases.splice(0)) release()
   await operations.close(); vi.useRealTimers()
-  state.cleanupFails = false
+  state.cleanupFails = false; state.temporaryCleanupFails = false
   if (state.work) await rm(state.work, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 })
   await rm(state.dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 })
 })
@@ -93,6 +94,7 @@ describe('diagnostic ZIP lifetime', () => {
     expect(await readdir(state.dir)).toEqual(['destination.zip'])
     expect(await readdir(state.work).catch(() => null)).toBeNull()
     expect(sender.eventNames()).toEqual([])
+    expect(state.log).toHaveBeenCalledWith('info', 'diag-export', 'diagnostics zip written', { destination: 'selected-file' })
     expect(state.snapshot).toHaveBeenCalledWith('manual', expect.objectContaining({ signal: expect.any(AbortSignal), assertActive: expect.any(Function) }))
   })
 
@@ -134,6 +136,8 @@ describe('diagnostic ZIP lifetime', () => {
     const result = run(); void result.catch(() => {})
     await vi.waitFor(() => expect(state.diagnostics).toHaveBeenCalledOnce())
     await vi.advanceTimersByTimeAsync(120_001)
+    expect(operations.list().at(-1)?.status).toBe('running')
+    await vi.advanceTimersByTimeAsync(480_000)
     await expect(result).rejects.toMatchObject({ category: 'timeout' })
     expect(operations.isBusy('diagnostics:export')).toBe(true)
     gate.release(); await operations.close()
@@ -146,6 +150,18 @@ describe('diagnostic ZIP lifetime', () => {
     expect(await run()).toEqual({ success: true, path: target, warning: 'cleanup-failed' })
     expect(state.log).toHaveBeenCalledWith('warn', 'diag-export', 'diagnostics cleanup failed', { reason: 'permission', ioCode: 'EACCES' })
     expect(await readFile(target)).toEqual(Buffer.from([80, 75, 0, 255, 1]))
+  })
+
+  it('notifies once when cancelled destination staging cannot be deleted', async () => {
+    const gate = held(undefined); state.fileGate = gate.promise; state.temporaryCleanupFails = true
+    const result = run(); void result.catch(() => {})
+    await vi.waitFor(async () => expect((await readdir(state.dir)).some(name => name.startsWith('.vpnte-export-'))).toBe(true))
+    expect(cancelRequesterOperation(sender as never, token)).toBe(true)
+    await expect(result).rejects.toMatchObject({ category: 'cancelled' })
+    gate.release(); await operations.close()
+    expect(sender.send).toHaveBeenCalledExactlyOnceWith('inapp-notification', expect.objectContaining({ level: 'warn', title: 'Очистка диагностики не завершена' }))
+    expect(await readFile(target, 'utf8')).toBe('old archive')
+    expect((await readdir(state.dir)).some(name => name.startsWith('.vpnte-export-'))).toBe(true)
   })
 
   it('returns only a bounded typed fault after a compression failure', async () => {

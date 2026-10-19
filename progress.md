@@ -5916,3 +5916,50 @@ CI/review нового SHA проверяются отдельно после pu
   289 files passed/2 skipped,323.76s,exit0
   (.tmp/wp0-diagnostics-full-recheck.log). Code/test tree и budgets не менялись.
   Предыдущий timeout сохранён выше. Публикация PR и exact-head Qodo/CI pending.
+
+### PR #83 — Qodo1554946 и третий UI entrypoint
+
+- Исходный head b870f009d0e340af9926ac583790ecf0e04398c8, Qodo1554946
+  completed с6 findings. Revix free-quota-reached до20.10 00:00UTC,
+  full review отсутствует. CI39304583600 — только исходный head.
+- Найден третий ZIP entrypoint Maintenance. До fix4 новых actual-React cases
+  failed, прежние8 passed (.tmp/wp0-diagnostics-maintenance-before.log).
+  Maintenance теперь использует общий owned hook.20/20 passed; затем
+  исправлено поле тестового toast message→description (не production).
+- Подтверждён mixed-generation defect: export summary читает live evidence,
+  но normalized artifacts/summary/session manifest пишет только в export
+  staging с общим redactor. Неполный forensic subtree удаляется до упаковки.
+  Три real-filesystem cases удерживают timeline/flows/summary write и отменяют
+  owner: retained generation byte-identical. Старый sidecar race test ожидал
+  удалённый stage writeManifest hook; теперь удерживает actual summary I/O
+  и проверяет тот же queued sidecar-exit persistence.
+- Подтверждён cleanup defect: optional callback writer сообщает об остатке
+  adjacent temp; после cancellation/failure существующее inapp-notification
+  предупреждает без путей. Успех сохраняет warning в result. Main notification
+  coalesced per export. Actual cancelled-write+failed-cleanup case добавлен.
+- Общий120s budget слишком тесен для последовательных native этапов.
+  Export-specific deadline600000ms: test доказывает running после120s и timeout
+  после600s. Native process budgets, save picker waitForUser, prompt cancel
+  и physical drain сохранены.
+- Восстановлен diagnostics zip written audit после terminal success без пути;
+  manual picker dismissal снова пишет info. Typed cancellation/stale тихие.
+- USB/network finding: intentional ACL/identity/reparse/namespace safety existing
+  atomic writer не ослабляется. Неподтверждённые destinations получают typed
+  permission; private destination выполняется native fixture.
+- Первый review targeted83 passed/4 failed,8.85s,exit1
+  (.tmp/wp0-diagnostics-review-targeted.log):3 новых write gates были перекрыты
+  test read gate; старый sidecar hook ожидал удалённый writeManifest. Harness
+  исправлен без ослабления production guards. Повтор5 suites87/87 passed,
+  3.89s,exit0 (.tmp/wp0-diagnostics-review-targeted2.log). Затем усилены
+  retained summary/manifest byte-invariance и staged session manifest.
+- Review final npm.cmd run build —exit0 (.tmp/wp0-diagnostics-review-build.log);
+  node scripts/test-electron-runtime.mjs —6 PASS,exit0
+  (.tmp/wp0-diagnostics-review-electron.log); node scripts/test-wp1-native.mjs
+  --ipc-only —WP1_NATIVE_PASS,exit0 (.tmp/wp0-diagnostics-review-ipc.log).
+  Coverage AC927/927,F210/210 и diff check —exit0. Final full начат на
+  неизменяемом code/test tree (.tmp/wp0-diagnostics-review-full.log).
+- Финальный review npm.cmd test —4746 passed /5 skipped /0 failed,
+  289 files passed/2 skipped,323.00s,exit0
+  (.tmp/wp0-diagnostics-review-full.log). Production/test tree с запуска
+  не менялся. CI39304583600 на прежнем b870f009 completed/success;
+  для нового commit требуются новые Qodo/CI.

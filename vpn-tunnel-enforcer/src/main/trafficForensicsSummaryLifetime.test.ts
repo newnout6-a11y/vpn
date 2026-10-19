@@ -1,14 +1,18 @@
 // AT-00-003: actual summary generation must not publish after a late read.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { IpcFault } from '../shared/ipc-result'
-const state = vi.hoisted(() => ({ dir: '', reading: false, gate: null as Promise<void> | null }))
+const state = vi.hoisted(() => ({ dir: '', reading: false, writing: false, holdWrite: '', gate: null as Promise<void> | null }))
 vi.mock('./runtimePaths', () => ({ getPrivilegedRuntimeDir: () => join(state.dir, 'missing-runtime') }))
 vi.mock('fs/promises', async importOriginal => {
   const real = await importOriginal<typeof import('node:fs/promises')>()
-  return { ...real, readFile: async (...args: Parameters<typeof real.readFile>) => {
-    if (String(args[0]).endsWith('events.ndjson')) { state.reading = true; if (state.gate) await state.gate }
+  return { ...real, writeFile: async (...args: Parameters<typeof real.writeFile>) => {
+    const value = await real.writeFile(...args)
+    if (state.holdWrite && String(args[0]).endsWith(state.holdWrite)) { state.writing = true; await state.gate }
+    return value
+  }, readFile: async (...args: Parameters<typeof real.readFile>) => {
+    if (String(args[0]).endsWith('events.ndjson')) { state.reading = true; if (state.gate && !state.holdWrite) await state.gate }
     return real.readFile(...args)
   } }
 })
@@ -18,7 +22,7 @@ const manifest = () => ({ sessionDir: state.dir, sessionId: 'fixture', mode: 'di
   startedAt: 1, parserErrors: [], normalizedArtifacts: [] }) as unknown as TrafficForensicsSummaryManifest
 beforeEach(async () => {
   state.dir = await mkdtemp(join(process.cwd(), '.tmp', 'summary-owned-'))
-  state.reading = false; state.gate = null; release = undefined; pending = undefined
+  state.reading = false; state.writing = false; state.holdWrite = ''; state.gate = null; release = undefined; pending = undefined
   await writeFile(join(state.dir, 'events.ndjson'), '{"timestamp":1,"event":"fixture"}\n')
 })
 afterEach(async () => {
@@ -35,6 +39,20 @@ describe('forensic summary lifetime', () => {
     controller.abort(); release!()
     await expect(pending).rejects.toMatchObject({ category: 'cancelled' })
     expect(await readdir(state.dir)).toEqual(['events.ndjson'])
+  })
+  it.each(['timeline.ndjson', 'flows.ndjson', 'summary.json'])('keeps live generations unchanged when cancelled during staged %s', async name => {
+    await writeFile(join(state.dir, 'summary.json'), 'retained summary')
+    await writeFile(join(state.dir, 'flows.ndjson'), 'retained flows')
+    const output = join(state.dir, 'export'); await mkdir(output)
+    state.holdWrite = name; state.gate = new Promise<void>(done => { release = done })
+    const controller = new AbortController()
+    pending = generateTrafficForensicsSummary(manifest(), () => { if (controller.signal.aborted) throw new IpcFault('cancelled') }, output)
+    void pending.catch(() => {})
+    await vi.waitFor(() => expect(state.writing).toBe(true))
+    controller.abort(); release!()
+    await expect(pending).rejects.toMatchObject({ category: 'cancelled' })
+    expect(await readFile(join(state.dir, 'summary.json'), 'utf8')).toBe('retained summary')
+    expect(await readFile(join(state.dir, 'flows.ndjson'), 'utf8')).toBe('retained flows')
   })
   it('preserves normal summary/normalized artifact generation', async () => {
     pending = generateTrafficForensicsSummary(manifest())

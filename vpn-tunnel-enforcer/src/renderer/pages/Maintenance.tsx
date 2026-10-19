@@ -1,3 +1,4 @@
+import { useDiagnosticsExport } from '../hooks/useDiagnosticsExport'
 import type { FirewallRepairHealth } from '../../shared/network'
 import type { CheckStatus as HealthStatus, SystemDiagnosticItem as DiagnosticItem, SystemDiagnosticResult } from '../../shared/diagnostics'
 import { useMemo } from 'react'
@@ -108,7 +109,16 @@ export function Maintenance() {
   const addLog = useAppStore(s => s.addLog)
   const lastResult = useAppStore(s => s.maintenanceLastResult)
   const setLastResult = useAppStore(s => s.setMaintenanceLastResult)
-  const runningAction = useAppStore(s => s.maintenanceRunningAction) as MaintenanceAction | null
+  const storedRunningAction = useAppStore(s => s.maintenanceRunningAction) as MaintenanceAction | null
+  const { exporting, exportDiagnostics: exportZip } = useDiagnosticsExport(path => {
+    const message = `Диагностика сохранена: ${path}`
+    setLastResult(message)
+    useAppStore.getState().addGlobalToast('success', 'Диагностика', message)
+  }, message => {
+    setLastResult(message)
+    useAppStore.getState().addGlobalToast('error', 'Диагностика', message)
+  })
+  const runningAction = storedRunningAction ?? (exporting ? 'export-zip' : null)
   const setRunningAction = useAppStore(s => s.setMaintenanceRunningAction)
   const systemDiagnostics = useAppStore(s => s.maintenanceSystemDiagnostics) as SystemDiagnosticResult | null
   const setSystemDiagnostics = useAppStore(s => s.setMaintenanceSystemDiagnostics)
@@ -238,27 +248,6 @@ export function Maintenance() {
       setLastResult(message)
       addLog('error', message)
       useAppStore.getState().addGlobalToast('error', 'Проверка защиты', message)
-    } finally {
-      setRunningAction(null)
-    }
-  }
-
-  const exportZip = async () => {
-    setRunningAction('export-zip')
-    addLog('info', 'Починка: экспорт диагностики в ZIP')
-    try {
-      const result = await window.electronAPI.exportDiagnostics()
-      if (result?.success && result.path) {
-        const message = `Диагностика сохранена: ${result.path}`
-        setLastResult(message)
-        useAppStore.getState().addGlobalToast('success', 'Диагностика', message)
-      } else if (!result?.cancelled) {
-        throw new Error(result?.error || 'Экспорт не выполнен')
-      }
-    } catch (err: any) {
-      const message = err?.message || String(err)
-      setLastResult(message)
-      useAppStore.getState().addGlobalToast('error', 'Диагностика', message)
     } finally {
       setRunningAction(null)
     }

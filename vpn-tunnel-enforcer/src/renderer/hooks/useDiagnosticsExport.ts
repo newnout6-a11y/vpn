@@ -2,9 +2,9 @@ import { useEffect, useRef } from 'react'
 import { isIpcRemoteErrorData } from '../../shared/ipc-result'
 import { useAppStore } from '../store'
 
-// Both entrypoints share one busy owner. An old reply cannot clear a new export.
+// All entrypoints share one busy owner. An old reply cannot clear a new export.
 let busyOwner: string | null = null
-export function useDiagnosticsExport(onExported?: (path: string) => void) {
+export function useDiagnosticsExport(onExported?: (path: string) => void, onError?: (message: string) => void) {
   const exporting = useAppStore(s => s.exportingDiagnostics)
   const setExporting = useAppStore(s => s.setExportingDiagnostics)
   const addLog = useAppStore(s => s.addLog)
@@ -30,11 +30,15 @@ export function useDiagnosticsExport(onExported?: (path: string) => void) {
     addLog('info', 'Собираю диагностический архив (снимки, логи, настройки)…')
     try {
       const result = await window.electronAPI.exportDiagnostics(token)
-      if (!owns() || result.cancelled) return
+      if (!owns()) return
+      if (result.cancelled) { addLog('info', 'Экспорт диагностики отменён пользователем.'); return }
       if (result.success && result.path) {
         onExported?.(result.path)
         addLog('info', `Архив создан: ${result.path}`)
-      } else addLog('error', `Не удалось создать архив: ${result.error ?? 'неизвестная ошибка'}`)
+      } else {
+        const message = `Не удалось создать архив: ${result.error ?? 'неизвестная ошибка'}`
+        addLog('error', message); onError?.(message)
+      }
       if (result.warning === 'cleanup-failed') {
         const message = 'Не удалось удалить временные файлы диагностики.'
         addLog('warn', message)
@@ -42,7 +46,8 @@ export function useDiagnosticsExport(onExported?: (path: string) => void) {
       }
     } catch (error) {
       if (owns() && !(isIpcRemoteErrorData(error) && error.category === 'cancelled')) {
-        addLog('error', `Ошибка при экспорте: ${error instanceof Error || isIpcRemoteErrorData(error) ? error.message : String(error)}`)
+        const message = `Ошибка при экспорте: ${error instanceof Error || isIpcRemoteErrorData(error) ? error.message : String(error)}`
+        addLog('error', message); onError?.(message)
       }
     } finally {
       if (owns()) { busyOwner = null; setExporting(false) }

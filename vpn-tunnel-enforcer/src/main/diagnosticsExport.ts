@@ -158,13 +158,21 @@ function snapshotTimeFromName(name: string): number | null {
 
 export async function exportDiagnosticsZip(sender: WebContents, requestId?: unknown): Promise<ExportResult> {
   try {
-    return await runRequesterOperation(sender, requestId, (signal, admitted) => operations.run('export', async lease => {
+    let cleanupWarned = false
+    const cleanupWarning = () => {
+      if (cleanupWarned) return
+      cleanupWarned = true
+      try { if (!sender.isDestroyed()) sender.send('inapp-notification', { level: 'warn', title: 'Очистка диагностики не завершена', body: 'Временные файлы диагностического архива могли остаться на диске.', ts: Date.now() }) } catch { /* The requester may already be gone. */ }
+    }
+    const result = await runRequesterOperation(sender, requestId, (signal, admitted) => operations.run('export', async lease => {
       admitted(lease)
       // The snapshot belongs to this operation, including the shared collection queue.
       try { await lease.wait(captureSnapshot('manual', { signal: lease.signal, assertActive: () => lease.assertActive() })) }
       catch { lease.assertActive() }
-      return buildDiagnosticsZip(lease)
-    }, { signal, resource: 'diagnostics:export' }))
+      return buildDiagnosticsZip(lease, cleanupWarning)
+    }, { signal, resource: 'diagnostics:export', timeoutMs: 600_000 }))
+    if (result.success) logEvent('info', 'diag-export', 'diagnostics zip written', { destination: 'selected-file' })
+    return result
   } catch (error) {
     const details = ioFailureDetails(error)
     if (!(error instanceof IpcFault)) logEvent('error', 'diag-export', 'failed to build diagnostics zip', details)
@@ -176,7 +184,7 @@ export function registerDiagnosticsExportHandler(): void {
   ipcMain.handle('export-diagnostics', (event, requestId?: unknown) => exportDiagnosticsZip(event.sender, requestId))
 }
 
-async function buildDiagnosticsZip(lease: OperationLease): Promise<ExportResult> {
+async function buildDiagnosticsZip(lease: OperationLease, cleanupWarning: () => void): Promise<ExportResult> {
   // Await raw settlement before cleanup; the registry separately bounds callers.
   const boundary = async <T>(task: Promise<T>): Promise<T> => {
     const value = await lease.retain(task)
@@ -199,6 +207,10 @@ async function buildDiagnosticsZip(lease: OperationLease): Promise<ExportResult>
   let stage: string | null = null
   let work: string | null = null
   const result: ExportResult = { success: true, path: targetZip }
+  const warnCleanup = () => {
+    result.warning = 'cleanup-failed'
+    if (lease.operation.status !== 'success') cleanupWarning()
+  }
   try {
     work = await mkdtemp(join(tmpdir(), 'vpnte-diag-'))
     lease.assertActive()
@@ -315,6 +327,7 @@ async function buildDiagnosticsZip(lease: OperationLease): Promise<ExportResult>
       forensicsStaged = await boundary(stageTrafficForensicsArtifacts(stage, () => lease.assertActive()))
     } catch (err) {
       lease.assertActive()
+      await boundary(rm(join(stage, 'traffic-forensics'), { recursive: true, force: true }))
       logEvent('warn', 'diag-export', 'failed to stage traffic forensics artifacts', { err: (err as Error)?.message })
     }
 
@@ -424,11 +437,11 @@ Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $target -Force
       try { for await (const chunk of stream) yield chunk as Buffer }
       finally { stream.destroy(); await finished(stream).catch(() => {}) }
     }
-    return await writeConfigExport(targetZip, bytes(), lease, result, 'redacted')
+    return await writeConfigExport(targetZip, bytes(), lease, result, 'redacted', warnCleanup)
   } finally {
     if (work) try { await rm(work, { recursive: true, force: true }) }
     catch (error) {
-      result.warning = 'cleanup-failed'
+      warnCleanup()
       logEvent('warn', 'diag-export', 'diagnostics cleanup failed', ioFailureDetails(error))
     }
   }

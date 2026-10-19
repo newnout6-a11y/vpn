@@ -1512,3 +1512,15 @@ Build/typecheck/traceability — exit0. Финальный полный npm.cmd 
 5000ms timeout в прежнем serverKeyOperations; отдельно57/57 passed, затем
 полный default повтор без изменения кода/budgets. Remote gates pending.
 Это адресная часть WP-0, не приёмка всего WP-0/WP-8 или OS/L3 matrix.
+
+PR #83 review follow-up: Qodo1554946 completed с6 findings на b870f009.
+Подтверждённые mixed-summary и cleanup-warning исправлены; export-owned
+summary writes только в bundle, retained session byte-invariance проверяется.
+Общий ZIP work budget600s, terminal success audit и manual picker cancellation
+log восстановлены. Namespace ACL safety сохраняется. Третий entrypoint
+Maintenance использует общий owned hook. Final build/typecheck,6 native
+Electron fixtures и IPC/CSP passed; final full/новый head review pending.
+
+Review final full:4746 passed /5 skipped /0 failed,323.00s,exit0.
+Build/typecheck,6 Electron fixtures,IPC/CSP,coverage/diff —exit0.
+Remote approval требуется на новом опубликованном SHA.

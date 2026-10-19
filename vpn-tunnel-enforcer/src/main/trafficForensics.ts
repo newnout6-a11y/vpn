@@ -1346,16 +1346,6 @@ async function stageArtifacts(stageDir: string, assertActive: () => void = () =>
   if (!settings.enabled && !manifest?.running) {
     return false
   }
-  if (manifest?.sessionDir) {
-    const next = await checkedForensics(generateTrafficForensicsSummary(manifest, assertActive).catch((err: any) => ({
-      ...manifest,
-      parserErrors: [
-        ...(manifest.parserErrors ?? []),
-        `summary generation failed during stage: ${err?.message || String(err)}`
-      ]
-    })), assertActive)
-    await checkedForensics(writeManifest(next, assertActive), assertActive)
-  }
   const exportRoot = join(stageDir, 'traffic-forensics')
   await checkedForensics(mkdir(exportRoot, { recursive: true }), assertActive)
 
@@ -1364,32 +1354,25 @@ async function stageArtifacts(stageDir: string, assertActive: () => void = () =>
   // DNS answer → that flow → that reset) is destroyed.
   const redactor = createForensicsRedactor()
 
-  const latestManifest = getLatestManifestPath()
-  if (existsSync(latestManifest)) {
-    try {
-      const body = await checkedForensics(readFile(latestManifest, 'utf-8'), assertActive)
-      await checkedForensics(writeFile(
-        join(exportRoot, 'latest-session.json'),
-        redactJsonDocument(body, redactor),
-        'utf-8'
-      ), assertActive)
-    } catch (err: any) {
-      assertActive()
-      logEvent('warn', 'traffic-forensics', 'failed to stage latest-session.json', {
-        error: err?.message || String(err)
-      })
-    }
-  }
+  let stagedManifest = manifest
   if (manifest?.sessionDir && existsSync(manifest.sessionDir)) {
     const sessionName = manifest.sessionId || basename(manifest.sessionDir)
-    await checkedForensics(copyDirRedacted(manifest.sessionDir, join(exportRoot, 'sessions', sessionName), redactor, assertActive).catch((err: any) => {
-      assertActive()
-      logEvent('warn', 'traffic-forensics', 'failed to stage current traffic forensics session', {
-        sessionId: manifest.sessionId,
-        error: err?.message || String(err)
-      })
-    }), assertActive)
+    const stagedSession = join(exportRoot, 'sessions', sessionName)
+    await checkedForensics(copyDirRedacted(manifest.sessionDir, stagedSession, redactor, assertActive), assertActive)
+    // Read the live evidence, but publish derived files only into this export.
+    // Cancellation cannot leave a half-new summary in the retained session.
+    stagedManifest = await generateTrafficForensicsSummary(manifest, assertActive, stagedSession)
+    await checkedForensics(writeFile(join(stagedSession, 'session-manifest.json'), redactJsonDocument(JSON.stringify(stagedManifest), redactor), 'utf8'), assertActive)
+    for (const name of [...stagedManifest.normalizedArtifacts, 'summary.json']) {
+      const path = join(stagedSession, name)
+      const body = await checkedForensics(readFile(path, 'utf8'), assertActive)
+      await checkedForensics(writeFile(path, redactArtifactBody(name, body, redactor), 'utf8'), assertActive)
+    }
   }
+  if (stagedManifest) await checkedForensics(writeFile(
+    join(exportRoot, 'latest-session.json'),
+    redactJsonDocument(JSON.stringify(stagedManifest), redactor), 'utf8'
+  ), assertActive)
 
   // Tell the reader what was done, in the bundle itself. Without this the
   // pseudonym tokens look like corruption rather than a deliberate policy.

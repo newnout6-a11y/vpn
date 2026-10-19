@@ -805,7 +805,7 @@ export async function listTrafficForensicsArtifacts(sessionDir: string | null): 
   return files.sort((a, b) => a.name.localeCompare(b.name))
 }
 
-export async function generateTrafficForensicsSummary(manifest: TrafficForensicsSummaryManifest, assertActive: () => void = () => {}): Promise<TrafficForensicsSummaryManifest> {
+export async function generateTrafficForensicsSummary(manifest: TrafficForensicsSummaryManifest, assertActive: () => void = () => {}, outputDir = manifest.sessionDir): Promise<TrafficForensicsSummaryManifest> {
   assertActive()
   if (!manifest.sessionDir || !existsSync(manifest.sessionDir)) return manifest
 
@@ -1215,16 +1215,16 @@ export async function generateTrafficForensicsSummary(manifest: TrafficForensics
   timeline.sort((a, b) => a.timestamp - b.timestamp)
   appEvents.sort((a, b) => a.timestamp - b.timestamp)
 
-  await checkedForensics(writeNdjson(join(manifest.sessionDir, 'timeline.ndjson'), timeline), assertActive)
-  await checkedForensics(writeNdjson(join(manifest.sessionDir, 'dns.ndjson'), dnsRecords), assertActive)
-  await checkedForensics(writeNdjson(join(manifest.sessionDir, 'drops.ndjson'), dropRecords), assertActive)
-  await checkedForensics(writeNdjson(join(manifest.sessionDir, 'tcp-health.ndjson'), tcpHealthRecords), assertActive)
-  await checkedForensics(writeNdjson(join(manifest.sessionDir, 'packet-metrics.ndjson'), packetMetricRecords), assertActive)
-  await checkedForensics(writeNdjson(join(manifest.sessionDir, 'flows.ndjson'), flowRecords), assertActive)
-  await checkedForensics(writeNdjson(join(manifest.sessionDir, 'app-events.ndjson'), appEvents), assertActive)
-  await checkedForensics(writeJson(join(manifest.sessionDir, 'route-snapshots.json'), routeSnapshots), assertActive)
+  await checkedForensics(writeNdjson(join(outputDir!, 'timeline.ndjson'), timeline), assertActive)
+  await checkedForensics(writeNdjson(join(outputDir!, 'dns.ndjson'), dnsRecords), assertActive)
+  await checkedForensics(writeNdjson(join(outputDir!, 'drops.ndjson'), dropRecords), assertActive)
+  await checkedForensics(writeNdjson(join(outputDir!, 'tcp-health.ndjson'), tcpHealthRecords), assertActive)
+  await checkedForensics(writeNdjson(join(outputDir!, 'packet-metrics.ndjson'), packetMetricRecords), assertActive)
+  await checkedForensics(writeNdjson(join(outputDir!, 'flows.ndjson'), flowRecords), assertActive)
+  await checkedForensics(writeNdjson(join(outputDir!, 'app-events.ndjson'), appEvents), assertActive)
+  await checkedForensics(writeJson(join(outputDir!, 'route-snapshots.json'), routeSnapshots), assertActive)
 
-  const summaryPath = join(manifest.sessionDir, 'summary.json')
+  const summaryPath = join(outputDir!, 'summary.json')
   await checkedForensics(writeJson(summaryPath, {
     schemaVersion: SUMMARY_SCHEMA_VERSION,
     generatedAt,

@@ -431,7 +431,7 @@ describe('trafficForensics', () => {
     expect(manifest.sidecar.lastError).toContain('sidecar exited code=9009')
   })
 
-  it('preserves a sidecar exit observed during manifest I/O (AT-08-004, F-198)', async () => {
+  it('preserves a sidecar exit observed during staged summary I/O (AT-08-004, F-198)', async () => {
     execElevatedMock.mockResolvedValue({ stdout: STOP_ACK, stderr: '' })
     mkdirSync(dirname(fixturePaths.sidecar), { recursive: true })
     writeFileSync(fixturePaths.sidecar, '@echo off\r\n')
@@ -443,13 +443,10 @@ describe('trafficForensics', () => {
     let entered!: () => void
     const gate = new Promise<void>(resolve => { release = resolve })
     const writing = new Promise<void>(resolve => { entered = resolve })
-    vi.mocked(generateTrafficForensicsSummary).mockImplementationOnce(async manifest => {
-      vi.mocked(ensureElevatedRuntimeDirHardened).mockImplementationOnce(async () => {
-        entered()
-        await gate
-        return { hardened: true, message: 'stubbed' }
-      })
-      return manifest
+    const actual = await vi.importActual<typeof import('./trafficForensicsSummary')>('./trafficForensicsSummary')
+    vi.mocked(generateTrafficForensicsSummary).mockImplementationOnce(async (...args) => {
+      entered(); await gate
+      return actual.generateTrafficForensicsSummary(...args)
     })
     const staging = stageTrafficForensicsArtifacts(fixturePaths.stage)
     await writing
@@ -1218,7 +1215,11 @@ describe('trafficForensics', () => {
     )
 
     await stopTrafficForensicsSession('user-stop')
+    const retainedSummary = readFileSync(join(started.sessionDir!, 'summary.json'), 'utf8')
+    const retainedManifest = readFileSync(join(started.sessionDir!, 'session-manifest.json'), 'utf8')
     const staged = await stageTrafficForensicsArtifacts(stageDir)
+    expect(readFileSync(join(started.sessionDir!, 'summary.json'), 'utf8')).toBe(retainedSummary)
+    expect(readFileSync(join(started.sessionDir!, 'session-manifest.json'), 'utf8')).toBe(retainedManifest)
     expect(staged).toBe(true)
 
     const stagedSession = join(stageDir, 'traffic-forensics', 'sessions', started.sessionId!)
