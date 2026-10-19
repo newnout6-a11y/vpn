@@ -90,6 +90,7 @@ describe('diagnostics ZIP UI ownership', () => {
     fireEvent.click(screen.getByRole('button', { name: label }))
     await act(async () => { pending[0].reject({ name: 'IpcRemoteError', ...ipcError('permission') }) })
     expect(useAppStore.getState().logs.at(-1)?.message).toContain(ipcError('permission').message)
+    expect(useAppStore.getState().logs.at(-1)?.message).toContain('Выберите локальную личную папку')
     if (_name === 'maintenance') expect(useAppStore.getState().globalToasts.at(-1)).toMatchObject({ variant: 'error', description: expect.stringContaining(ipcError('permission').message) })
     expect(useAppStore.getState().exportingDiagnostics).toBe(false)
   })

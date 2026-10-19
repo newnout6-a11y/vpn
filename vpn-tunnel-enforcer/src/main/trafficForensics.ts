@@ -1361,7 +1361,7 @@ async function stageArtifacts(stageDir: string, assertActive: () => void = () =>
     await checkedForensics(copyDirRedacted(manifest.sessionDir, stagedSession, redactor, assertActive), assertActive)
     // Read the live evidence, but publish derived files only into this export.
     // Cancellation cannot leave a half-new summary in the retained session.
-    stagedManifest = await generateTrafficForensicsSummary(manifest, assertActive, stagedSession)
+    stagedManifest = preserveObservedSidecarStop(await generateTrafficForensicsSummary(manifest, assertActive, stagedSession))
     await checkedForensics(writeFile(join(stagedSession, 'session-manifest.json'), redactJsonDocument(JSON.stringify(stagedManifest), redactor), 'utf8'), assertActive)
     for (const name of [...stagedManifest.normalizedArtifacts, 'summary.json']) {
       const path = join(stagedSession, name)

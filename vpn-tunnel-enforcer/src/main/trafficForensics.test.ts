@@ -458,6 +458,8 @@ describe('trafficForensics', () => {
       expect(saved.running).toBe(true)
     })
     expect((await getTrafficForensicsStatus()).sidecar?.running).toBe(false)
+    const exported = JSON.parse(readFileSync(join(fixturePaths.stage, 'traffic-forensics', 'sessions', started.sessionId!, 'session-manifest.json'), 'utf8'))
+    expect(exported.sidecar.running).toBe(false)
   })
 
   it.each(['exit', 'error'])('ignores a late old-sidecar %s after restart (AT-08-005, F-198)', async event => {

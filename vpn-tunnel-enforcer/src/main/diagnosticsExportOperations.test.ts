@@ -164,6 +164,19 @@ describe('diagnostic ZIP lifetime', () => {
     expect((await readdir(state.dir)).some(name => name.startsWith('.vpnte-export-'))).toBe(true)
   })
 
+  it('refuses an untrusted destination namespace without altering the selected file', async () => {
+    const compress = state.compress.getMockImplementation()!
+    state.compress.mockImplementation((exe, args, options, callback) => {
+      const script = Buffer.from(args.at(-1)!, 'base64').toString('utf16le')
+      if (script.includes('Assert-ExportNamespace')) callback(new Error('ConfigExportNamespaceUntrusted: private path'))
+      else compress(exe, args, options, callback)
+    })
+    await expect(run()).rejects.toMatchObject({ category: 'permission' })
+    expect(await readFile(target, 'utf8')).toBe('old archive')
+    expect(await readdir(state.dir)).toEqual(['destination.zip'])
+    expect(state.log.mock.calls.some(call => call[2] === 'diagnostics zip written')).toBe(false)
+  })
+
   it('returns only a bounded typed fault after a compression failure', async () => {
     state.compress.mockImplementationOnce((_exe, _args, _options, callback) => callback(Object.assign(new Error('C:\\private\\secret raw process output'), { code: 'EACCES' })))
     await expect(run()).rejects.toMatchObject({ category: 'permission', message: 'Недостаточно прав для операции' })

@@ -5963,3 +5963,32 @@ CI/review нового SHA проверяются отдельно после pu
   (.tmp/wp0-diagnostics-review-full.log). Production/test tree с запуска
   не менялся. CI39304583600 на прежнем b870f009 completed/success;
   для нового commit требуются новые Qodo/CI.
+
+- Qodo1555116 completed на c4b967e3164a0fe8d7203335c43c4bde039b34ad:
+  пять findings автоматически implemented, новых нет. Namespace finding
+  остался pending. Inline comment4317511787 предлагает безопасную альтернативу:
+  сохранить strict path, но показать ясную подсказку выбрать local private
+  folder и проверить namespace refusal. Эта альтернатива реализована в hook
+  всех3 экранов, без ослабления ACL. Новый actual exporter regression
+  воспроизводит Assert-ExportNamespace refusal, typed permission, unchanged
+  destination, отсутствие staging и success log. UI сохраняет bounded error
+  и добавляет конкретную инструкцию про «Документы»/ACL/network.
+- При переносе summary в staged copy сохранено pure merging
+  preserveObservedSidecarStop: sidecar exit во время summary отражается и в
+  staged session manifest. Старый race test теперь проверяет также exported
+  sidecar.running=false, не только retained/runtime state.
+- npm.cmd test -- src/main/diagnosticsExportOperations.test.ts
+  src/main/trafficForensics.test.ts
+  src/renderer/components/DiagnosticsExport.requestLifetime.test.tsx
+  —75/75 passed,3.18s,exit0 (.tmp/wp0-diagnostics-namespace-targeted.log).
+- Namespace follow-up npm.cmd run build —exit0
+  (.tmp/wp0-diagnostics-namespace-build.log);6 Electron fixtures —PASS,exit0
+  (.tmp/wp0-diagnostics-namespace-electron.log); coverage AC927/927,F210/210
+  и git diff --check —exit0. Final full начат на неизменном code/test tree
+  (.tmp/wp0-diagnostics-namespace-full.log). IPC/CSP повтор не требуется:
+  после прежнего PASS доверенная граница/preload/CSP не менялись.
+- Namespace final npm.cmd test —4747 passed /5 skipped /0 failed,
+  289 files passed/2 skipped,317.26s,exit0
+  (.tmp/wp0-diagnostics-namespace-full.log). Code/test tree не менялся.
+  CI39306933512 на прежнем c4b967e completed/success; новому commit нужны
+  собственные Qodo/CI.

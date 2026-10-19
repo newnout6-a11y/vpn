@@ -46,7 +46,10 @@ export function useDiagnosticsExport(onExported?: (path: string) => void, onErro
       }
     } catch (error) {
       if (owns() && !(isIpcRemoteErrorData(error) && error.category === 'cancelled')) {
-        const message = `Ошибка при экспорте: ${error instanceof Error || isIpcRemoteErrorData(error) ? error.message : String(error)}`
+        const reason = error instanceof Error || isIpcRemoteErrorData(error) ? error.message : String(error)
+        const hint = isIpcRemoteErrorData(error) && error.category === 'permission'
+          ? ' Выберите локальную личную папку, например «Документы». Общие и сетевые папки, а также носители без ACL могут не поддерживаться.' : ''
+        const message = `Ошибка при экспорте: ${reason}${hint}`
         addLog('error', message); onError?.(message)
       }
     } finally {
