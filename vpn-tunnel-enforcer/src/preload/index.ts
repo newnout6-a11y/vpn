@@ -297,7 +297,7 @@ contextBridge.exposeInMainWorld('electronAPI', withIpcFailures({
   },
   // URL Availability — paste a link, get verdict + diagnostics for both
   // the tunnel path and the direct path (clash-direct-out when VPN is on).
-  urlAvailabilityCheck: (url: string) => invoke('url-availability:check', assertString(url, 'url', MAX_VPN_INPUT_CHARS)),
+  urlAvailabilityCheck: (url: string, requestId?: string) => invoke('url-availability:check', assertString(url, 'url', MAX_VPN_INPUT_CHARS), ...(requestId === undefined ? [] : [assertString(requestId, 'requestId')])),
   urlAvailabilityHistory: () => invoke('url-availability:history'),
   urlAvailabilityClearHistory: () => invoke('url-availability:clear-history'),
   // Scheduler

@@ -44,6 +44,7 @@ describe('preload IPC argument validation', () => {
 
   // AT-00-001: trailing cancellation tokens preserve every legacy call shape.
   it.each([
+    ['urlAvailabilityCheck', 'url-availability:check', ['https://example.test/']],
     ['groupsCheckHealth', 'groups:check-health', ['a']],
     ['serversCopyKey', 'servers:copy-key', ['a']], ['serversExportKey', 'servers:export-key', ['a']],
     ['serversExportKeyToFile', 'servers:export-key-file', ['a']],

@@ -172,7 +172,7 @@ export const IPC_REQUESTS = {
   'server:live-check-batch': request('serverLiveCheckBatch', [batchOptions]),
   'server:live-check-cancel': request('serverLiveCheckCancel', [optional(string)]),
   'server:live-check-history': request('serverLiveCheckHistory', [optional(record({ profileId: optional(string), host: optional(string) }))]),
-  'url-availability:check': request('urlAvailabilityCheck', [text(256 * 1024)]),
+  'url-availability:check': request('urlAvailabilityCheck', [text(256 * 1024), optional(text(36))]),
   'url-availability:history': request('urlAvailabilityHistory', []),
   'url-availability:clear-history': request('urlAvailabilityClearHistory', []),
   'scheduler:list': request('schedulerList', []),
