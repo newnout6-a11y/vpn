@@ -4066,3 +4066,53 @@ CI/review нового SHA проверяются отдельно после pu
   Stderr RootErrorBoundary — ожидаемый fixture crash; unhandled failures нет.
   Перед commit `git diff --check` — exit 0. После push требуется completed
   Qodo и CI на итоговом SHA; следующий участок до этого не начинается.
+
+### PR #69 — Qodo: terminal refresh result и диагностика отказа rollback
+
+- PR #69 создан на **350badcd97df253d5d1346088bb09659824dc2bd**.
+  Qodo **1542763 completed** на этом SHA: одно remediation_recommended
+  и одно informational; attribution через API, вручную не менялся.
+- 6782f1e2-3b11-44bb-b9c5-279481f97654 подтверждён: addFromInput проверял
+  внешний signal после успешного refresh и мог вернуть cancelled при уже
+  сохранённых profiles/group metadata. Теперь terminal result решает только
+  refresh owner. Новый regression abort-ит signal синхронно при публикации
+  refresh success и проверяет успешный ответ и сохранённые данные.
+- До fix `npm.cmd test -- src/main/profileImportOperations.test.ts -t 'terminal publication'`
+  — **1 failed / 18 skipped**, 1.03 s, exit 1 (.tmp/wp0-import-qodo69-before.log).
+- 867ccbff-b27d-49ae-9586-df2557e72717 (informational) также учтён: при
+  отказе rollback лог содержит commitStep и causeCategory исходной ошибки,
+  сохраняя bounded taxonomy без raw exception/secret/path. Fixture отличает
+  исходный EACCES на active selection от последующей ошибки восстановления
+  profiles, проверяет category=internal и отсутствие контрольного private path.
+- `npm.cmd test -- src/main/profileImportOperations.test.ts src/main/subscriptionOperations.test.ts src/main/serverGroupsRefresh.test.ts`
+  — **63 passed / 3 files**, 2.11 s, exit 0 (.tmp/wp0-import-qodo69-focused.log).
+  `npm.cmd run typecheck` — exit 0, 160 channels / 0 public any
+  (.tmp/wp0-import-qodo69-typecheck.log). Traceability AC 927/927 / F 210/210
+  и `git diff --check` — exit 0. Полный набор запущен после завершения typecheck;
+  build/native и новый exact-head review/CI требуются по итоговому SHA.
+- Полный `npm.cmd test` после Qodo fixes — **4307 passed / 5 skipped /
+  0 failed**, 268 files passed / 2 skipped, **194.60 s**, exit 0
+  (.tmp/wp0-import-qodo69-full.log). Это результат до следующей поправки
+  инструмента замера IPC; production fix на нём проверен.
+- Initial CI **39178308104 failure** на 350badc: Windows unit — один failure
+  ipcBoundaryAcceptance, config:import channel p99 попал в saturated bucket 51
+  (>50 ms); **4306 passed / 4 skipped / 1 failed**, 273.80 s. Новые import
+  fixtures прошли. Лог .tmp/wp0-import-ci69-failure.log; Rust/сайт success,
+  последующие Windows acceptance steps из-за unit failure не выполнялись.
+- Проверка исходника выявила, что histogram включал Vitest toMatchObject в
+  длительность handler. Время теперь снимается сразу после await handler,
+  до assertion. Лимит 50 ms, бюджеты mutation, все category/zero-effects
+  проверки и подсчёт каждого observation сохранены. Это корректировка границы
+  измерения, не доказательство причины конкретного CI outlier. Новый CI обязателен.
+- `npm.cmd test -- src/main/ipcBoundaryAcceptance.test.ts src/main/profileImportOperations.test.ts src/main/subscriptionOperations.test.ts src/main/serverGroupsRefresh.test.ts`
+  — **65 passed / 4 files**, 2.84 s, exit 0
+  (.tmp/wp0-import-qodo69-focused-final.log). Полный финальный набор и build/
+  native выполняются на этой версии последовательно, результаты ниже по факту.
+- Окончательный `npm.cmd test` — **4307 passed / 5 skipped / 0 failed**,
+  268 files passed / 2 skipped, **191.80 s**, exit 0
+  (.tmp/wp0-import-qodo69-full-final.log). `npm.cmd run build` — exit 0,
+  включая typecheck 160 channels / 0 public any (.tmp/wp0-import-qodo69-build.log).
+  `node scripts/test-electron-runtime.mjs` — ELECTRON_SMOKE_PASS, exit 0
+  (.tmp/wp0-import-qodo69-electron.log); `node scripts/test-wp1-native.mjs --ipc-only`
+  — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-import-qodo69-csp.log). Scope этих smoke
+  прежний, новый import дополнительно проверен actual curl/guard/Conf fixture.

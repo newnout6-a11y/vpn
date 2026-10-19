@@ -944,3 +944,11 @@ profiles/active/groups и неуспешный rollback. Отдельный loop
 новым Conf handle. Electron/DPAPI boundary заменён, новое доказательство encryption
 не заявляется. UI и config browse/import/apply ещё не интегрированы; AT-00-003
 и весь WP-0 остаются открытыми. Проверки и PR gate — progress.md.
+
+Qodo #69 выявил race в re-paste continuation: проверка внешнего signal после
+успешного refresh могла переименовать уже сохранённый результат в cancelled.
+Решение принимает единственный refresh owner; abort после terminal success
+не заменяет его результат. Regression синхронно отменяет внешний signal при
+публикации refresh success и проверяет сохранённые profiles и успешный ответ.
+При отказе rollback журнал дополнительно сохраняет bounded commitStep и
+категорию исходной ошибки; произвольные message/stack/path не записываются.

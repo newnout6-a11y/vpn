@@ -59,7 +59,7 @@ import { serverPickerStore as store } from './sharedStores'
 import { withProfileStoreWriteLock } from './profileStoreQueue'
 import { operations } from './operations'
 import type { OperationLease } from './operationRegistry'
-import { IpcFault } from '../shared/ipc-result'
+import { classifyIpcError, IpcFault } from '../shared/ipc-result'
 
 export const RESOLVED_IP_TTL_MS = 5 * 60_000
 const DNS_RESOLUTION_TIMEOUT_MS = 2500
@@ -2329,12 +2329,14 @@ async function appendProfilesToGroup(
     const existingProfiles = getProfiles()
     const previousActiveId = getActiveProfileId(), previousGroups = serverGroups.getGroups()
     let profilesWritten = false, activeWritten = false
+    let commitStep: 'group' | 'profiles' | 'active-profile' = 'group'
     try {
       // Group creation belongs to the same synchronous commit as its profiles.
       const groupId = selectGroup()
       if (!serverGroups.getGroup(groupId)) throw new IpcFault('conflict')
       const newProfiles: ServerProfile[] = []
 
+      commitStep = 'profiles'
       vpnProfiles.forEach((vpnProfile, index) => {
         const sourceUri = sourceUriPerProfile(vpnProfile, index)
         const candidate = vpnProfileToServerProfile(vpnProfile, groupId, sourceUri, options)
@@ -2348,6 +2350,7 @@ async function appendProfilesToGroup(
         profilesWritten = true
         saveProfiles([...existingProfiles, ...newProfiles])
         if (!getActiveProfileId()) {
+          commitStep = 'active-profile'
           activeWritten = true
           store.set('activeProfileId', newProfiles[0].id)
         }
@@ -2362,7 +2365,9 @@ async function appendProfilesToGroup(
         if (JSON.stringify(serverGroups.getGroups()) !== JSON.stringify(previousGroups)) serverGroups.saveGroups(previousGroups)
       })
       if (rollbackFailed) {
-        logEvent('error', 'server-picker', 'profile import rollback failed', { category: 'internal' })
+        logEvent('error', 'server-picker', 'profile import rollback failed', {
+          category: 'internal', causeCategory: classifyIpcError(error), commitStep
+        })
         throw new IpcFault('internal')
       }
       throw error
@@ -2395,7 +2400,8 @@ export async function addFromInput(input: string, options: AddProfilesOptions = 
   if (existing) {
     const beforeIds = new Set(getProfiles().map(profile => profile.id))
     const result = await refreshSubscriptionGroup(existing.id, { clientDevice: options.clientDevice, signal: options.signal })
-    if (options.signal?.aborted) throw new IpcFault('cancelled')
+    // The refresh owner decides its terminal result. An abort after its commit
+    // must not relabel a saved refresh as cancelled in this continuation.
     if (!result.ok) throw new Error(result.error)
     const newlyAdded = getProfiles().filter(profile => profile.groupId === existing.id && !beforeIds.has(profile.id))
     logEvent('info', 'server-picker', 'profiles refreshed via re-paste', { groupId: existing.id, added: result.addedCount, updated: result.updatedCount })

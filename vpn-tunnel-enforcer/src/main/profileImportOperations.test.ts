@@ -35,6 +35,7 @@ const snapshot = () => JSON.stringify([...state.data.entries()])
 beforeEach(async () => {
   vi.resetModules()
   vi.clearAllMocks()
+  state.log.mockReset()
   state.data.clear()
   state.write.mockReset()
   state.handlers.clear()
@@ -129,11 +130,13 @@ describe('profile import operation ownership', () => {
   it('reports an internal failure when a partial commit cannot be restored', async () => {
     let written = false
     state.write.mockImplementation((_name: string, key: string) => {
-      if (key === 'activeProfileId' || (key === 'profiles' && written)) throw new Error('fixture disk unavailable')
+      if (key === 'activeProfileId') throw Object.assign(new Error('private-import-path'), { code: 'EACCES' })
+      if (key === 'profiles' && written) throw new Error('fixture disk unavailable')
       if (key === 'profiles') written = true
     })
     await expect(picker.addFromInput('https://sub.example.test/new')).rejects.toMatchObject({ category: 'internal' })
-    expect(state.log).toHaveBeenCalledWith('error', 'server-picker', 'profile import rollback failed', { category: 'internal' })
+    expect(state.log).toHaveBeenCalledWith('error', 'server-picker', 'profile import rollback failed', { category: 'internal', causeCategory: 'permission', commitStep: 'active-profile' })
+    expect(JSON.stringify(state.log.mock.calls)).not.toContain('private-import-path')
     expect(registry.list()).toMatchObject([{ status: 'error', category: 'internal' }])
     expect(state.log.mock.calls.some(call => /added from|appended to/.test(call[2]))).toBe(false)
   })
@@ -192,6 +195,19 @@ describe('profile import operation ownership', () => {
     await registry.close()
     expect(picker.serverPicker.getProfiles()).toEqual([])
     expect(groups.getGroups()).toHaveLength(1)
+  })
+
+  it('keeps a committed re-paste successful when its signal aborts at terminal publication', async () => {
+    const target = groups.createGroup({ name: 'Existing', source: 'subscription', sourceUrl: 'https://sub.example.test/existing', status: 'active', importedAt: 1 })
+    const controller = new AbortController()
+    state.log.mockImplementation((_level, _scope, message, details) => {
+      if (message === 'feature operation' && details.kind === 'refresh' && details.status === 'success') controller.abort()
+    })
+    const imported = await picker.addFromInput(target.sourceUrl!, { signal: controller.signal })
+    expect(controller.signal.aborted).toBe(true)
+    expect(imported).toHaveLength(1)
+    expect(picker.serverPicker.getProfiles()).toEqual(imported)
+    expect(registry.list()).toMatchObject([{ kind: 'refresh', status: 'success' }])
   })
 
   it('keeps independent concurrent imports and serializes their commits', async () => {
