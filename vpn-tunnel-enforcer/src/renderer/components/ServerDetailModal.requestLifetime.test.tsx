@@ -90,6 +90,7 @@ describe('detail export scope', () => {
     await act(async () => {})
     fireEvent.click(screen.getByRole('button', { name: 'serverDetail.copyKey' }))
     view.rerender(<ServerDetailModal {...props} profile={{ ...profile, name: 'Renamed' }} />)
+    await act(async () => {})
     expect(api.operationsCancelRequest).not.toHaveBeenCalled()
     fireEvent.click(screen.getByRole('button', { name: 'serverDetail.saveKey' }))
     view.unmount()

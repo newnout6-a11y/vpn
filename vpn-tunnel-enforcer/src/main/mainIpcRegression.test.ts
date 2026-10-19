@@ -224,7 +224,7 @@ describe('main IPC regressions', () => {
     expect(source).toContain("import { settingsStore } from './settings'")
     expect(source).toContain('export interface ProbeServerOptions')
     expect(source).toContain('const disableGeoLookup = options.disableGeoLookup === true')
-    expect(source).toContain('disableGeoLookup ? Promise.resolve(null) : getAsnInfo(primaryIp)')
+    expect(source).toContain('disableGeoLookup ? Promise.resolve(null) : lease.wait(getAsnInfo(primaryIp, lease.signal))')
     expect(handler).toContain('disableGeoLookup: settingsStore.get().disableGeoLookup === true')
   })
 

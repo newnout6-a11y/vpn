@@ -1691,3 +1691,28 @@ Final после последних test-only изменений:4916 passed/5 s
 297 files passed/2 skipped,309.54s,exit0. Targeted12 suites347 passed/1 skipped,
 56.21s. Typecheck165 channels/0 public any,build/7 native fixtures,coverage/diff
 —exit0. Qodo/CI требуются на новом SHA. Весь WP-0 остаётся в работе.
+
+#87 принят: final head8a06034,Qodo1557391 completed1/1 implemented,
+CI39333883253 success. Merge/main4ff734f; tree совпал с reviewed head.
+Следующий участок —server:probe и modal requester lifetime,AT-00-001/003/004/005/008.
+
+## Server probe/modal requester lifetime (20.10.2026)
+
+AT-00-001/003/004/005/008: production server:probe с owner/UUID/correlation,
+deadline9s,private bounded DNS,actual DNS/socket drain,guarded HTTP/fallback.
+TCP использует проверенный IP; private/mapped answers и empty DNS получают
+typed permission/network. Modal отменяет main/geo по cleanup/deadline10s;
+late replies/fallback/group updates ограждены. TLS/banner остаются выключены.
+Beforefix и все промежуточные failures записаны в progress.md. Final targeted
+8 suites210/210 passed,4.45s;typecheck165 channels/0 public any,coverage/diff
+—exit0. Final full/build/native и exact-head Qodo/CI pending.
+
+Full2:4951 passed/5 skipped/0 failed,312.58s. После него собственная
+регрессия выявила включение close-drain времени в RTT; до fix samples250ms
+вместо0,1 failed/21 skipped. Замер фиксируется на connect,raw socket до close.
+Targeted9 suites212/212 passed,4.52s. Final full3/build/new gates pending.
+
+Final full3 после RTT fix:4952 passed/5 skipped/0 failed,298 files passed/
+2 skipped,303.79s,exit0. Final build/typecheck165 channels/0 public any,
+7 native fixtures,coverage/diff —exit0. Новый exact-head Qodo/CI pending;
+весь WP-0 остаётся в работе.
