@@ -5620,3 +5620,32 @@ CI/review нового SHA проверяются отдельно после pu
   Production cancellation deadlines и assertions не ослаблены; увеличен только
   budget одного реального многопроцессного ACL test, с сохранением обоих
   failed full logs. Требуются CI и completed Qodo на final SHA нового PR.
+- PR #79 создан и attached: initial head 157719359fb0229643b68036a186e5198d1e3212.
+  Qodo 1546103 completed нашёл два замечания. Informational b201315f:
+  finally tokenless вызова мог удалить новый tokened registry того же sender.
+  Regression до fix — 1 failed /42 skipped, 2.29 s, exit 1
+  (.tmp/wp0-config-request-qodo-before.log). Очистка теперь сверяет identity Map.
+  Remediation 3cc4c42f: UI скрывал section/conflict choices после apply error.
+  Regression до fix — 1 failed /16 skipped, 2.59 s, exit 1
+  (.tmp/wp0-config-request-qodo-ui-before.log). Choices остаются для просмотра;
+  main single-use capability по-прежнему потребляется, повторное apply старого
+  token disabled, fresh native selection доступна и получает новый token.
+- После обоих Qodo fixes: npm.cmd test -- src/main/configOperations.test.ts
+  src/main/configImportSecurity.test.ts
+  src/renderer/components/ImportExportSettings.test.tsx — 72 passed,
+  58.44 s, exit 0 (.tmp/wp0-config-request-qodo-targeted.log).
+  npm.cmd run build, включая typecheck 164 channels /0 public any — exit 0
+  (.tmp/wp0-config-request-qodo-build.log). node
+  scripts/test-electron-runtime.mjs — четыре PASS, exit 0
+  (.tmp/wp0-config-request-qodo-electron.log); node
+  scripts/test-wp1-native.mjs --ipc-only — WP1_NATIVE_PASS, exit 0
+  (.tmp/wp0-config-request-qodo-csp.log). Coverage AC 927/927, F 210/210 и
+  diff check — exit 0. Final full после fixes ещё выполняется.
+  Revix #79 /5569066697 free-quota-reached до 20.10 03:00 МСК,
+  полного review нет; это не approval. Нового manual review не запрашивали.
+- Final после Qodo fixes: npm.cmd test — **4641 passed /5 skipped /
+  0 failed**, 281 files passed /2 skipped, **420.88 s**, exit 0
+  (.tmp/wp0-config-request-qodo-full.log). Production/unit tree не менялся
+  во время прогона. Initial CI 39225869946 на 1577193 — success, watcher
+  exit 0 (.tmp/wp0-config-request-ci-watch.log); новый head требует своего
+  completed Qodo и CI, старый результат не переносится на исправления.

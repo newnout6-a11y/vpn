@@ -79,6 +79,17 @@ Windows ACL test. Assertion разделён по новому token contract; b
 отмены/ACL не ослаблены. Все неудачные прогоны сохранены в progress.md.
 Qodo и CI текущего PR ещё ожидаются.
 
+Первое Qodo #79 (1546103, SHA 1577193) выявило overlap legacy/tokened registry
+cleanup и потерю видимых import choices после apply error. Оба замечания
+воспроизведены отдельными failing regressions. Cleanup сверяет identity Map;
+после ошибки choices остаются видимыми, apply consumed token disabled,
+новый native browse доступен и создаёт новый token. Main одноразовое разрешение
+не продлевается. Адресные три suites — 72 passed, 58.44 s; build/typecheck,
+четыре Electron fixtures, native IPC/CSP, traceability и diff check — exit 0.
+Полный `npm.cmd test` после Qodo fixes — **4641 passed /5 skipped /0 failed**,
+281 files passed /2 skipped, 420.88 s, exit 0. Initial CI 39225869946 success;
+он не заменяет CI/Qodo следующего SHA с исправлениями.
+
 ## Main connection lane — приоритеты, deadline и позднее расписание
 
 `ConnectionLifecycle` расширяет существующее владение нативными эффектами:

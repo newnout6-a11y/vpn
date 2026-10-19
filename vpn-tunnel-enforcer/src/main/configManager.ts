@@ -100,7 +100,7 @@ async function runConfigOperation<T>(kind: 'import' | 'export', resource: string
   finally {
     lifetime.dispose()
     if (requestId && requests && requests.get(requestId) === request) requests.delete(requestId)
-    if (sender && requests?.size === 0) configRequests.delete(sender)
+    if (sender && requests?.size === 0 && configRequests.get(sender) === requests) configRequests.delete(sender)
   }
 }
 

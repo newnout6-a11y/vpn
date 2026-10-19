@@ -66,6 +66,27 @@ describe('configuration export actions', () => {
 describe('configuration error and success UI', () => {
   const clickImport = () => fireEvent.click(screen.getByRole('button', { name: 'settings.importSettings' }))
   const validation = { success: true, sections: ['notifications'], conflicts: [] }
+  it('keeps failed import choices visible but requires a fresh native selection before retry', async () => {
+    const configBrowseImport = vi.fn(async (_requestId: string) => 'selected.json')
+    const configImportApply = vi.fn().mockRejectedValueOnce(remote('permission')).mockResolvedValue({ success: true })
+    setApi({ configBrowseImport, configImport: async () => validation, configImportApply })
+    render(<ImportExportSettings />)
+    clickImport()
+    fireEvent.click(await screen.findByRole('button', { name: 'settings.applyImport' }))
+    expect(await screen.findByText(ipcError('permission').message)).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'common.ok' }))
+    expect(screen.getByText('settings.importSections')).toBeTruthy()
+    const consumed = screen.getByRole('button', { name: 'settings.applyImport' }) as HTMLButtonElement
+    expect(consumed.disabled).toBe(true)
+    fireEvent.click(consumed)
+    expect(configImportApply).toHaveBeenCalledTimes(1)
+    clickImport()
+    await waitFor(() => expect(configBrowseImport).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect((screen.getByRole('button', { name: 'settings.applyImport' }) as HTMLButtonElement).disabled).toBe(false))
+    expect(configBrowseImport.mock.calls[1][0]).not.toBe(configBrowseImport.mock.calls[0][0])
+    fireEvent.click(screen.getByRole('button', { name: 'settings.applyImport' }))
+    expect(await screen.findByText('settings.importSuccess')).toBeTruthy()
+  })
   // AT-00-003/008: route unmount across every import workflow boundary.
   it.each(['validate', 'idle', 'apply'] as const)('revokes its %s workflow on unmount without late UI', async stage => {
     let release!: (value: unknown) => void

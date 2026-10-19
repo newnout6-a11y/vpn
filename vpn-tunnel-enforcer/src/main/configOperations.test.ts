@@ -136,6 +136,20 @@ afterEach(async () => {
 
 describe('configuration operation lifetime', () => {
   const requestId = 'd5abf17e-bf69-4f23-9e3c-b69ed0b32089'
+  it('keeps a newer tokened workflow cancellable when an overlapping legacy call finishes', async () => {
+    const browse = held({ canceled: false, filePaths: [selected] })
+    const save = held({ canceled: false, filePath: destination })
+    state.openDialog.mockReturnValue(browse.promise)
+    state.saveDialog.mockReturnValue(save.promise)
+    const legacy = invoke('config:browse-import')
+    const owned = invoke('config:export', 'redacted', requestId)
+    browse.release()
+    expect(await legacy).toMatchObject({ ok: true, result: selected })
+    expect(await invoke('config:cancel', requestId)).toMatchObject({ ok: true, result: true })
+    expect(await owned).toMatchObject({ ok: false, error: { category: 'cancelled' } })
+    save.release(); await registry.close()
+    expect(await readFile(destination, 'utf8')).toBe('previous export')
+  })
   it('rejects duplicate browse without invalidating the original request', async () => {
     const gate = held({ canceled: false, filePaths: [selected] })
     state.openDialog.mockReturnValue(gate.promise)

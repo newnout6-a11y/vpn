@@ -104,7 +104,7 @@ export function ImportExportSettings() {
   }
 
   const handleImport = async () => {
-    if (importing || validation) return
+    if (importing || (validation && current(validation.requestId))) return
     const requestId = beginRequest()
     let retainSelection = false
     setImporting(true)
@@ -156,7 +156,9 @@ export function ImportExportSettings() {
     } catch (err: unknown) {
       if (current(requestId) && (!isIpcRemoteErrorData(err) || err.category !== 'cancelled')) showError(err)
     } finally {
-      if (current(requestId)) { setApplying(false); setValidation(null) }
+      // Main consumes the snapshot even on failure. Keep choices for inspection;
+      // the user can select a fresh file, but cannot retry the consumed token.
+      if (current(requestId)) setApplying(false)
       requests.current.delete(requestId)
     }
   }
@@ -219,7 +221,7 @@ export function ImportExportSettings() {
               variant="secondary"
               onClick={handleImport}
               loading={importing}
-              disabled={importing || !!validation}
+              disabled={importing || (!!validation && current(validation.requestId))}
             >
               <Upload className="w-4 h-4 mr-2" />
               {importSuccess ? (
@@ -308,7 +310,7 @@ export function ImportExportSettings() {
                   variant="primary"
                   onClick={handleApplyImport}
                   loading={applying}
-                  disabled={applying || selectedSections.length === 0}
+                  disabled={applying || selectedSections.length === 0 || !current(validation.requestId)}
                 >
                   {t('settings.applyImport')}
                 </MacButton>
