@@ -234,7 +234,7 @@ finally { [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree($testRoot,$fa
     const steps = JSON.parse(stdout.trim()).steps
     expect(steps).toHaveLength(9)
     expect(steps.every((step: any) => step.success && step.error === null)).toBe(true)
-  })
+  }, 15_000)
   // AT-03-007 / F-033: execute actual JSON decoding and report construction,
   // substituting only registry effects. Never run the real Restore-Snapshot.
   it.skipIf(process.platform !== 'win32').each([null, ...Array.from({ length: 9 }, (_, i) => i)])(

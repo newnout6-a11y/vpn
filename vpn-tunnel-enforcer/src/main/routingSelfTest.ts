@@ -29,6 +29,16 @@ import { SocksClient } from 'socks'
 import { logEvent } from './appLogger'
 import { tunController, getDirectProxyPort } from './tunController'
 import { settingsStore } from './settings'
+import { ipcMain } from 'electron'
+import { randomUUID } from 'node:crypto'
+import { IpcFault } from '../shared/ipc-result'
+import { operations } from './operations'
+import type { OperationLease } from './operationRegistry'
+import { runRequesterOperation } from './requesterOperation'
+
+function assertActive(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new IpcFault('cancelled')
+}
 
 export interface RoutingSelfTestResult {
   ranAt: number
@@ -79,18 +89,22 @@ function extractIpv4(text: string): string | null {
 
 /** Egress IP through the VPN: a normal Node request, captured by the TUN and
  *  dispatched via proxy-out. */
-async function vpnEgressIp(): Promise<string | null> {
+async function vpnEgressIp(signal?: AbortSignal): Promise<string | null> {
   for (const ep of IP_ECHO_HOSTS) {
+    assertActive(signal)
     try {
       const resp = await axios.get(`http://${ep.host}${ep.path}`, {
+        signal,
         timeout: 8000,
         responseType: 'text',
         transformResponse: (d) => d,
         headers: { Connection: 'close' }
       })
+      assertActive(signal)
       const ip = extractIpv4(String(resp.data))
       if (ip) return ip
     } catch {
+      assertActive(signal)
       /* try next */
     }
   }
@@ -99,38 +113,54 @@ async function vpnEgressIp(): Promise<string | null> {
 
 /** Egress IP through direct-out: HTTP GET tunneled over the local SOCKS port
  *  that sing-box hard-routes to direct-out (the physical NIC). */
-async function directEgressIp(socksPort: number, destHost: string, destPath: string): Promise<string | null> {
+async function directEgressIp(socksPort: number, destHost: string, destPath: string, signal?: AbortSignal): Promise<string | null> {
+  assertActive(signal)
   let socket: import('net').Socket | undefined
   try {
     const conn = await SocksClient.createConnection({
       proxy: { host: '127.0.0.1', port: socksPort, type: 5 },
       command: 'connect',
+      timeout: 8000,
       destination: { host: destHost, port: 80 }
     })
     socket = conn.socket
   } catch {
+    assertActive(signal)
     return null
   }
   const sock = socket
   return new Promise<string | null>((resolve) => {
     let buffer = ''
     let done = false
+    let result: string | null = null
     const finish = (ip: string | null) => {
       if (done) return
       done = true
+      result = ip
       try { sock.destroy() } catch { /* ignore */ }
-      resolve(ip)
     }
+    const abort = () => finish(null)
+    sock.once('close', () => {
+      signal?.removeEventListener('abort', abort)
+      const value = done ? result : extractIpv4(buffer.split('\r\n\r\n')[1] || '')
+      done = true
+      resolve(value)
+    })
+    sock.once('error', () => finish(null))
+    sock.once('timeout', () => finish(null))
+    signal?.addEventListener('abort', abort, { once: true })
+    // SOCKS negotiation cannot be interrupted by its API. A late socket is
+    // destroyed without sending a request and remains owned until actual close.
+    if (signal?.aborted) return abort()
     sock.setTimeout(8000)
     sock.on('data', (chunk: Buffer) => {
+      if (done || signal?.aborted) return
       buffer += chunk.toString('utf-8')
       const body = buffer.split('\r\n\r\n')[1]
       if (body && extractIpv4(body)) finish(extractIpv4(body))
     })
-    sock.once('error', () => finish(null))
-    sock.once('timeout', () => finish(null))
-    sock.once('close', () => finish(extractIpv4(buffer.split('\r\n\r\n')[1] || '')))
-    sock.write(`GET ${destPath} HTTP/1.1\r\nHost: ${destHost}\r\nUser-Agent: curl/8\r\nConnection: close\r\n\r\n`)
+    try { sock.write(`GET ${destPath} HTTP/1.1\r\nHost: ${destHost}\r\nUser-Agent: curl/8\r\nConnection: close\r\n\r\n`) }
+    catch { finish(null) }
   })
 }
 
@@ -204,9 +234,17 @@ export function deriveRoutingVerdict(input: {
 
 /**
  * Run the full routing self-test. Safe to call any time; returns a structured
- * result rather than throwing.
+ * result for measured failures; cancellation/deadline use the typed taxonomy.
  */
-export async function runRoutingSelfTest(): Promise<RoutingSelfTestResult> {
+export async function runRoutingSelfTest(options: { signal?: AbortSignal; onOperation?: (lease: OperationLease) => void } = {}): Promise<RoutingSelfTestResult> {
+  return operations.run('routing-check', lease => {
+    options.onOperation?.(lease)
+    return runRoutingSelfTestOwned(lease)
+  }, { signal: options.signal, resource: `routing-check:${randomUUID()}` })
+}
+
+async function runRoutingSelfTestOwned(lease: OperationLease): Promise<RoutingSelfTestResult> {
+  lease.assertActive()
   const tunnelActive = tunController.getStatus().running
   const settings = settingsStore.get()
   const smartEnabled = settings.smartRuSplit === true
@@ -224,7 +262,7 @@ export async function runRoutingSelfTest(): Promise<RoutingSelfTestResult> {
 
   if (!tunnelActive) {
     const v = deriveRoutingVerdict({ tunnelActive, vpnIp: null, directIp: null, smartEnabled, ruHostIp: null })
-    return { ...base, verdict: v.verdict, message: v.message }
+    return lease.commit(() => ({ ...base, verdict: v.verdict, message: v.message }))
   }
 
   const socksPort = getDirectProxyPort()
@@ -232,9 +270,10 @@ export async function runRoutingSelfTest(): Promise<RoutingSelfTestResult> {
   // VPN egress (Node → TUN → proxy-out) and direct egress (SOCKS → direct-out)
   // in parallel.
   const [vpnIp, directIp] = await Promise.all([
-    vpnEgressIp(),
-    socksPort ? directEgressIp(socksPort, 'api.ipify.org', '/') : Promise.resolve(null)
+    lease.wait(vpnEgressIp(lease.signal)),
+    socksPort ? lease.wait(directEgressIp(socksPort, 'api.ipify.org', '/', lease.signal)) : Promise.resolve(null)
   ])
+  lease.assertActive()
 
   // Smart-route check: keep this honest. A real proof needs an RU-domain IP
   // echo reached through the normal TUN path. Reusing the direct SOCKS path
@@ -242,8 +281,9 @@ export async function runRoutingSelfTest(): Promise<RoutingSelfTestResult> {
   // confidence, so we return null when no reliable runtime echo is available.
   let ruHostIp: string | null = null
   if (smartEnabled && !disableGeoLookup) {
-    ruHostIp = await ruEgressIp()
+    ruHostIp = await lease.wait(ruEgressIp(lease.signal))
   }
+  lease.assertActive()
 
   const v = deriveRoutingVerdict({ tunnelActive, vpnIp, directIp, smartEnabled, ruHostIp })
 
@@ -257,33 +297,56 @@ export async function runRoutingSelfTest(): Promise<RoutingSelfTestResult> {
     message: v.message
   }
 
-  logEvent('info', 'routing-self-test', 'completed', {
-    verdict: result.verdict,
-    splitWorks: result.splitWorks,
-    smartEnabled,
-    // Log only the last octet for privacy.
-    vpnIpTail: vpnIp ? vpnIp.split('.').slice(-1)[0] : null,
-    directIpTail: directIp ? directIp.split('.').slice(-1)[0] : null,
-    smartRuEchoSkipped: smartEnabled && disableGeoLookup
-  })
+  return lease.commit(() => {
+    logEvent('info', 'routing-self-test', 'completed', {
+      verdict: result.verdict,
+      splitWorks: result.splitWorks,
+      smartEnabled,
+      // Log only the last octet for privacy.
+      vpnIpTail: vpnIp ? vpnIp.split('.').slice(-1)[0] : null,
+      directIpTail: directIp ? directIp.split('.').slice(-1)[0] : null,
+      smartRuEchoSkipped: smartEnabled && disableGeoLookup
+    })
 
-  return result
+    return result
+  })
 }
 
-export async function ruEgressIp(): Promise<string | null> {
+export async function ruEgressIp(signal?: AbortSignal): Promise<string | null> {
   for (const url of RU_IP_ECHO_URLS) {
+    assertActive(signal)
     try {
       const resp = await axios.get(url, {
+        signal,
         timeout: 8000,
         responseType: 'text',
         transformResponse: (d) => d,
         headers: { Connection: 'close' }
       })
+      assertActive(signal)
       const ip = extractIpv4(String(resp.data))
       if (ip) return ip
     } catch {
+      assertActive(signal)
       /* try next */
     }
   }
   return null
+}
+
+export function registerRoutingSelfTestHandlers(): void {
+  ipcMain.handle('run-routing-self-test', async (event, requestId?: string) => {
+    const started = Date.now()
+    // Keep the former handleLogged trail without logging request tokens or IPs.
+    logEvent('debug', 'ipc', 'run-routing-self-test started')
+    try {
+      const result = await runRequesterOperation(event.sender, requestId,
+        (signal, onOperation) => runRoutingSelfTest({ signal, onOperation }))
+      logEvent('debug', 'ipc', 'run-routing-self-test finished', { ms: Date.now() - started })
+      return result
+    } catch (error) {
+      logEvent('error', 'ipc', 'run-routing-self-test failed', error)
+      throw error
+    }
+  })
 }

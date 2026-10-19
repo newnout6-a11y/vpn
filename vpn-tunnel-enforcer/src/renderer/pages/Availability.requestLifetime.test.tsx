@@ -74,3 +74,51 @@ describe('URL check requester lifetime', () => {
     expect(screen.getByText(/Введите URL вида example\.com или https:\/\/example\.com\/path/)).toBeTruthy()
   })
 })
+
+describe('routing check requester lifetime', () => {
+  function startRouting() {
+    useAppStore.setState({ tunRunning: true })
+    api.runRoutingSelfTest = vi.fn(() => new Promise((done, fail) => { release = done; reject = fail }))
+    const view = render(<Availability />)
+    fireEvent.click(screen.getAllByRole('button', { name: 'Проверить' })[1])
+    return view
+  }
+  it.each(['success', 'error'])('cancels and fences late %s on unmount', async outcome => {
+    const view = startRouting()
+    const token = api.runRoutingSelfTest.mock.calls[0][0]
+    expect(token).toMatch(/^[0-9a-f-]{36}$/)
+    view.unmount()
+    expect(api.operationsCancelRequest).toHaveBeenCalledExactlyOnceWith(token)
+    await act(async () => {
+      if (outcome === 'success') release({ verdict: 'ok', smartRu: {}, message: 'FAKE-late' })
+      else reject({ name: 'IpcRemoteError', ...ipcError('internal') })
+    })
+    expect(useAppStore.getState().logs).toEqual([])
+  })
+  it('keeps cancellation quiet and releases the finished token', async () => {
+    const view = startRouting()
+    await act(async () => { reject({ name: 'IpcRemoteError', ...ipcError('cancelled') }) })
+    expect(useAppStore.getState().logs).toEqual([])
+    view.unmount(); expect(api.operationsCancelRequest).not.toHaveBeenCalled()
+  })
+  it('publishes current routing results and does not cancel finished work', async () => {
+    const view = startRouting()
+    await act(async () => { release({ verdict: 'ok', smartRu: { enabled: false }, message: 'FAKE-current-route' }) })
+    expect(screen.getByText('FAKE-current-route')).toBeTruthy()
+    expect(useAppStore.getState().logs).toHaveLength(1)
+    view.unmount(); expect(api.operationsCancelRequest).not.toHaveBeenCalled()
+  })
+  it('uses separate cancellation tokens for simultaneous URL and routing checks', async () => {
+    const view = startRouting(), routeRelease = release
+    fireEvent.change(screen.getByPlaceholderText('https://youtube.com или просто youtube.com'), { target: { value: 'https://example.test/' } })
+    fireEvent.click(screen.getAllByRole('button', { name: 'Проверить' })[0])
+    const urlRelease = release, routeToken = api.runRoutingSelfTest.mock.calls[0][0], urlToken = api.urlAvailabilityCheck.mock.calls[0][1]
+    expect(routeToken).not.toBe(urlToken)
+    view.unmount()
+    expect(api.operationsCancelRequest).toHaveBeenCalledWith(routeToken)
+    expect(api.operationsCancelRequest).toHaveBeenCalledWith(urlToken)
+    expect(api.operationsCancelRequest).toHaveBeenCalledTimes(2)
+    await act(async () => { routeRelease({ verdict: 'ok' }); urlRelease(result) })
+    expect(useAppStore.getState().logs).toEqual([])
+  })
+})

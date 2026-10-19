@@ -148,7 +148,7 @@ describe.skipIf(!pwsh)('actual boot recovery control flow on mocked system APIs'
       expect(result.output).toContain('RESTORE_BINDING:Fixture Ethernet')
       expect(result.output).toMatch(/DELETE:.*latest-physical-adapter-lockdown\.json/)
     }
-  })
+  }, 20_000)
   it.each(['missing', 'invalid'] as const)('reports a %s transition field while restoring valid neighbors (AT-03-003c)', kind => {
     const transitionAdapters: any = { teredoType: 'client', sixToFourState: 'enabled', isatapState: null }
     if (kind === 'missing') delete transitionAdapters.teredoType

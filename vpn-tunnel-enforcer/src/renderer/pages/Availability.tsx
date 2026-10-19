@@ -204,15 +204,16 @@ export function Availability() {
   const [error, setError] = useState('')
   const [latest, setLatest] = useState<UrlResult | null>(null)
   const [history, setHistory] = useState<UrlResult[]>([])
-  const scope = useRef<{ active: boolean; request?: string }>({ active: true })
+  const scope = useRef<{ active: boolean; request?: string; routingRequest?: string }>({ active: true })
   const historyRead = useRef(0)
 
   useEffect(() => {
-    const lifetime = { active: true, request: undefined as string | undefined }
+    const lifetime = { active: true, request: undefined as string | undefined, routingRequest: undefined as string | undefined }
     scope.current = lifetime
     return () => {
       lifetime.active = false
       if (lifetime.request) void window.electronAPI.operationsCancelRequest(lifetime.request).catch(() => {})
+      if (lifetime.routingRequest) void window.electronAPI.operationsCancelRequest(lifetime.routingRequest).catch(() => {})
     }
   }, [])
 
@@ -285,15 +286,22 @@ export function Availability() {
   }
 
   const handleRoutingTest = async () => {
+    const lifetime = scope.current
+    if (!lifetime.active || lifetime.routingRequest) return
+    const requestId = crypto.randomUUID()
+    lifetime.routingRequest = requestId
     setRoutingTesting(true)
     try {
-      const r = await window.electronAPI.runRoutingSelfTest()
+      const r = await window.electronAPI.runRoutingSelfTest(requestId)
+      if (!lifetime.active || scope.current !== lifetime) return
       setRouting(r)
       addLog('info', `Проверка маршрутизации: ${r.verdict}`)
     } catch (err: any) {
+      if (!lifetime.active || scope.current !== lifetime || (isIpcRemoteErrorData(err) && err.category === 'cancelled')) return
       addLog('error', `Ошибка проверки маршрутизации: ${err?.message ?? err}`)
     } finally {
-      setRoutingTesting(false)
+      if (lifetime.routingRequest === requestId) lifetime.routingRequest = undefined
+      if (lifetime.active && scope.current === lifetime) setRoutingTesting(false)
     }
   }
 

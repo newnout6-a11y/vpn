@@ -20,6 +20,7 @@ import { currentCorrelationId, currentActionMetadata, withCorrelation } from './
 import { monotonicTimeMs } from './eventClock'
 import { operations, registerOperationHandlers } from './operations'
 import { registerPlannedFeatureHandlers } from './plannedFeatures'
+import { registerRoutingSelfTestHandlers } from './routingSelfTest'
 import { TunnelStateMachine } from './tunnelStateMachine'
 import { operationLogDetails, type ConnectionStartResult, type ConnectionStopResult } from '../shared/operation'
 import { runScheduledConnection } from './scheduledConnection'
@@ -2594,10 +2595,7 @@ app.whenReady().then(async () => {
   // Routing self-test: prove the VPN/direct split is real by comparing the
   // egress IP through proxy-out (VPN) vs direct-out, and — when smart RU split
   // is on — that RU hosts egress with the real IP.
-  handleLogged('run-routing-self-test', async () => {
-    const { runRoutingSelfTest } = await import('./routingSelfTest')
-    return runRoutingSelfTest()
-  })
+  registerRoutingSelfTestHandlers()
 
   handleLogged('open-snapshots-folder', async () => {
     const dir = getSnapshotsDir()

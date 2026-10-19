@@ -1,7 +1,8 @@
 import { useDiagnosticsExport } from '../hooks/useDiagnosticsExport'
 import type { FirewallRepairHealth } from '../../shared/network'
 import type { CheckStatus as HealthStatus, SystemDiagnosticItem as DiagnosticItem, SystemDiagnosticResult } from '../../shared/diagnostics'
-import { useMemo } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
+import { isIpcRemoteErrorData } from '../../shared/ipc-result'
 import { Activity, CheckCircle2, Download, Loader2, ShieldCheck, TriangleAlert, Wrench } from 'lucide-react'
 import { useAppStore } from '../store'
 import { MacCard, MacButton } from '../design-system'
@@ -120,6 +121,18 @@ export function Maintenance() {
   })
   const runningAction = storedRunningAction ?? (exporting ? 'export-zip' : null)
   const setRunningAction = useAppStore(s => s.setMaintenanceRunningAction)
+  const protectionScope = useRef<{ active: boolean; request?: string }>({ active: true })
+  useEffect(() => {
+    const lifetime = { active: true, request: undefined as string | undefined }
+    protectionScope.current = lifetime
+    return () => {
+      lifetime.active = false
+      if (lifetime.request) {
+        void window.electronAPI.operationsCancelRequest(lifetime.request).catch(() => {})
+        if (useAppStore.getState().maintenanceRunningAction === 'protection-test') setRunningAction(null)
+      }
+    }
+  }, [setRunningAction])
   const systemDiagnostics = useAppStore(s => s.maintenanceSystemDiagnostics) as SystemDiagnosticResult | null
   const setSystemDiagnostics = useAppStore(s => s.setMaintenanceSystemDiagnostics)
   const firewallHealth = useAppStore(s => s.maintenanceFirewallHealth) as FirewallRepairHealth | null
@@ -219,20 +232,32 @@ export function Maintenance() {
   }
 
   const runProtectionTest = async () => {
+    const lifetime = protectionScope.current
+    if (!lifetime.active || lifetime.request) return
+    const requestId = crypto.randomUUID()
+    lifetime.request = requestId
+    const owns = () => lifetime.active && protectionScope.current === lifetime && lifetime.request === requestId
+    let routingPending = false
     setRunningAction('protection-test')
     addLog('info', 'Починка: проверка leak-switch и маршрутизации')
     try {
       const tun = await window.electronAPI.getTunStatus()
+      if (!owns()) return
       if (!tun.running) {
         const message = 'Проверка защиты доступна только при активном VPN'
         setLastResult(message)
         addLog('warn', message)
         return
       }
+      routingPending = true
+      const routingTask = window.electronAPI.runRoutingSelfTest(requestId).then(
+        result => { routingPending = false; return result },
+        error => { routingPending = false; throw error })
       const [leak, routing] = await Promise.all([
         window.electronAPI.runLeakSelfTest(),
-        window.electronAPI.runRoutingSelfTest()
+        routingTask
       ])
+      if (!owns()) return
       const failed = leak.physicalAdapterReached || leak.publicIpMismatch || leak.dnsLeakDetected === true || routing.verdict === 'leak'
       const inconclusive = !failed && (routing.verdict !== 'ok' || leak.summary.includes('отменён'))
       const message = failed
@@ -244,12 +269,15 @@ export function Maintenance() {
       addLog(failed ? 'error' : inconclusive ? 'warn' : 'info', message)
       useAppStore.getState().addGlobalToast(failed ? 'error' : inconclusive ? 'warning' : 'success', 'Проверка защиты', message)
     } catch (err: any) {
+      if (!owns() || (isIpcRemoteErrorData(err) && err.category === 'cancelled')) return
       const message = err?.message || String(err)
       setLastResult(message)
       addLog('error', message)
       useAppStore.getState().addGlobalToast('error', 'Проверка защиты', message)
     } finally {
-      setRunningAction(null)
+      if (routingPending) void window.electronAPI.operationsCancelRequest(requestId).catch(() => {})
+      if (owns()) setRunningAction(null)
+      if (lifetime.request === requestId) lifetime.request = undefined
     }
   }
 

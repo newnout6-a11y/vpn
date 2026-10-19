@@ -1648,3 +1648,46 @@ Targeted175/175 passed;build/typecheck/coverage —exit0. Final full/new gates p
 Review final full:4882 passed/5 skipped/0 failed,329.74s,exit0;
 295 files passed/2 skipped. Production/test tree не менялся во время прогона.
 Build/typecheck,7 native fixtures,coverage/diff —exit0. Новые remote gates pending.
+
+## Routing self-test: requester lifetime (20.10.2026)
+
+#86 принят: final head150670b,Qodo1556986 completed6/6 implemented,
+CI39328685275 success,merge/main288a998; tree совпал с reviewed head.
+
+AT-00-001/003/004/005/008: production routing self-test входит в общий registry
+с manual owner,UUID/correlation и deadline60s. Main document lifetime и optional
+requester token, legacy zero-token call, sender isolation/duplicate conflict.
+HTTP/raw SOCKS negotiation удерживаются до settlement, socket —до actual close;
+late socket после отмены не отправляет HTTP. Guarded fallback/RU echo/completed
+log, независимые concurrent checks. Availability и protection action Maintenance
+отменяют routing при unmount и не публикуют поздние UI/log/toast effects.
+Companion leak failure отменяет pending routing; сам leak probe и остальные
+maintenance/live/server entrypoints этим участком не приняты.
+
+Targeted8 suites184/184 passed,3.68s;typecheck165 channels/0 public any,
+coverage AC927/927,F210/210,diff check —exit0. Все промежуточные failures
+сохранены в progress.md. Final full/build/native и новые remote gates pending.
+
+Final full2:4915 passed/5 skipped/0 failed,297 files passed/2 skipped,
+312.84s,exit0. Перед ним один full получил outer5000ms timeout в прежнем
+adaptiveNetworkIdentity native fixture (8.3s); isolated25/25 passed,outer budget
+согласован с30s process bound без изменения assertions. Targeted9 suites209/209,
+5.49s;final typecheck,build/7 native fixtures,coverage/diff —exit0.
+Новые remote gates pending; весь WP-0 остаётся в работе.
+
+#87 initial Qodo1557229 completed нашёл1 informational: перенос handler потерял
+per-call started/timed finished/failed IPC trail. Регрессия до fix1 failed/17 skipped;
+trail восстановлен без request token/IP payload. Targeted9 suites210/210 passed,
+5.40s;build/typecheck,7 native fixtures,coverage/diff —exit0. Новый full/remote
+gates требуются на review-fix SHA; initial review не заменяет их.
+
+Review full до CI fixture fixes:4916 passed/5 skipped,312.08s. Initial remote
+CI39331654687 failed: два native outer5s timeouts и actual-file sync polling1s.
+Isolated3 suites137 passed/1 skipped,58.21s. Native outer budgets20s/15s
+согласованы с helpers; actual-file boundary ждёт readiness Promise,outer15s.
+Safety/data assertions сохранены. Новый final full и remote gates pending.
+
+Final после последних test-only изменений:4916 passed/5 skipped/0 failed,
+297 files passed/2 skipped,309.54s,exit0. Targeted12 suites347 passed/1 skipped,
+56.21s. Typecheck165 channels/0 public any,build/7 native fixtures,coverage/diff
+—exit0. Qodo/CI требуются на новом SHA. Весь WP-0 остаётся в работе.
