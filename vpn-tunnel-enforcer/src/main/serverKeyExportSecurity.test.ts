@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { tmpdir } from 'os'
 import { join } from 'path'
 
@@ -132,6 +134,19 @@ afterEach(async () => {
 })
 
 describe('main-owned export approval (AT-01-008)', () => {
+  it.skipIf(process.platform !== 'win32').each(channels.filter(channel => channel.endsWith('-file')))('restricts a broadly readable destination through the actual key handler: %s (AT-00-003)', async channel => {
+    const encodedPath = Buffer.from(exportPath, 'utf8').toString('base64')
+    const powershell = async (script: string) => (await promisify(execFile)('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand',
+      Buffer.from(`$ErrorActionPreference='Stop';$path=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encodedPath}'));` + script, 'utf16le').toString('base64')], { windowsHide: true, timeout: 15_000 })).stdout.trim()
+    writeFileSync(exportPath, 'old')
+    await powershell(`$acl=[IO.File]::GetAccessControl($path);$acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier('S-1-5-19')),'Read','Allow')));[IO.File]::SetAccessControl($path,$acl)`)
+    state.nativePrompt.mockResolvedValue({ response: 1 })
+    expect((await invoke(channel)).ok).toBe(true)
+    expect(readFileSync(exportPath, 'utf8')).toContain('FAKE-PRIVATE-KEY')
+    const acl = JSON.parse(await powershell(`$acl=[IO.File]::GetAccessControl($path);[ordered]@{protected=$acl.AreAccessRulesProtected;user=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value;rules=@($acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])|ForEach-Object {$_.IdentityReference.Value})}|ConvertTo-Json -Compress`))
+    expect(acl.protected).toBe(true)
+    expect(acl.rules.sort()).toEqual([...new Set([acl.user, 'S-1-5-18'])].sort())
+  }, 15_000)
   it.each(channels.filter(channel => channel.endsWith('-file')))('maps a malformed write exception to a bounded error (AT-00-001/004): %s', async channel => {
     state.nativePrompt.mockResolvedValue({ response: 1 })
     state.writeFailure = { message: { malformed: true } }

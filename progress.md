@@ -4953,3 +4953,57 @@ CI/review нового SHA проверяются отдельно после pu
   automated Revix badge: Needs changes только у #70. Его badge не переписывается
   вручную; исправления и новый verdict фиксируются follow-up PR. Это проверка
   текущей отметки, не повторный code review всех этих PR. WP-0/WP-2 goal active.
+
+### WP-0 — PR #74: проверка Qodo и Revix, обязательная secret policy
+
+- Создан PR #74 (codex/wp0-config-review-followup), первый head
+  4034c3a8c9f4a13424ee6ae63bb61fe743bf4f50. Автоматический Qodo 1544037
+  завершён на этом SHA; review 5566925736. Revix review 5566928799 на том же
+  SHA, automated verdict Low risk. Существенный Qodo finding не проигнорирован.
+- Qodo 270339fa-407b-42dd-bce8-255a82a47da2 / 4310332836 подтвердил:
+  три credential-bearing key/proxy file handlers оставили redacted default,
+  сохраняя широкие права существующего destination. Все три теперь передают
+  secrets. По Revix 4310334594 mode обязателен и у writer, и у ACL helper;
+  untyped отсутствующий/невалидный mode также отвергается до plaintext.
+  Actual handler tests создают файл с дополнительным reader SID S-1-5-19,
+  экспортируют single key/all keys/proxies и читают настоящий Windows DACL.
+- Qodo 0488a161-cdc6-4dcb-ad5c-ab33a5802744 / 4310332842 подтвердил:
+  timeout/cancel во время invalid-commit drain мог опубликовать другой terminal.
+  После обнаружения malformed thenable validation имеет приоритет; controller
+  уже aborted, physical lease сохраняется до drain, error публикуется один раз.
+  Это только защитный путь некорректного untyped commit; обычные cancellation
+  и deadline остаются prompt. Проверены deadline, external/manual cancel, close.
+- Revix 4310334601: bound async с изменённым Symbol.toStringTag обходил guard.
+  Вместо строкового tag используется AsyncFunction instanceof вместе с V8
+  types.isAsyncFunction. Новый case доказывает отказ до entered/persist.
+  Revix 4310334607: secrets POSIX replacement также требует того же владельца
+  destination, что redacted; чужой owner отвергается до chmod/chown.
+- Before: npm.cmd test -- src/main/operationRegistry.test.ts src/main/serverKeyExportSecurity.test.ts src/main/configExportPosixSecurity.test.ts -t 'bound-tagged|invalid-commit validation|broadly readable destination|destination owned by another'
+  — 9 failed / 1 passed / 72 skipped, 3.28 s, exit 1
+  (.tmp/wp0-config-qodo74-before.log). После исправления четырёхфайловый набор
+  registry/key handlers/POSIX/Windows ACL — 91 passed, 9.83 s, exit 0
+  (.tmp/wp0-config-qodo74-regression.log); затем добавлены три invalid-mode cases.
+- npm.cmd run build (включает typecheck, 160 channels / 0 public any) — exit 0
+  (.tmp/wp0-config-qodo74-build.log). Traceability: AC 927/927, F 210/210, exit 0.
+  node scripts/test-electron-runtime.mjs — ELECTRON_SMOKE_PASS;
+  node scripts/test-wp1-native.mjs --ipc-only — WP1_NATIVE_PASS; оба exit 0
+  (.tmp/wp0-config-qodo74-electron.log, .tmp/wp0-config-qodo74-csp.log).
+  Полный Vitest выполняется на финальном code/test tree; автоматические ревью
+  и CI потребуются снова после push. Startup sweep crash residue не добавлен.
+- Первый полный npm.cmd test после исправлений: 4499 passed / 1 failed /
+  5 skipped, 218.33 s, exit 1 (.tmp/wp0-config-qodo74-full.log).
+  appLoggerRotation.test.ts читал stat(app.log), когда app.prev.log уже появился,
+  но новый app.log ещё не создан. Тест заменён ожиданием полного конечного
+  оракула через vi.waitFor: prev — файл, live log меньше cap; временный ENOENT
+  между rename/recreate повторяется, итоговые требования не ослаблены.
+  Production logger не изменён. Адресный семифайловый набор, включая этот тест,
+  registry, оба key handlers набора, config/POSIX/native ACL: 159 passed,
+  21.53 s, exit 0 (.tmp/wp0-config-qodo74-regression-final.log).
+  Финальный npm.cmd run typecheck — exit 0
+  (.tmp/wp0-config-qodo74-typecheck-final.log). Повторный полный прогон запущен.
+- Повторный npm.cmd test завершён: **4500 passed / 5 skipped / 0 failed**,
+  276 files passed / 2 skipped, **211.32 s**, exit 0
+  (.tmp/wp0-config-qodo74-full-final.log). Code/test tree во время прогона
+  не менялся. Все адресные/full/typecheck/build/traceability/runtime процессы
+  завершены; git diff --check — exit 0. Исправления готовы к commit/push,
+  новый final-head CI и automatic reviews ещё не объявлены пройденными.

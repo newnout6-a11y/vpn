@@ -36,7 +36,7 @@ export async function readSelectedConfig(path: string, lease: OperationLease, re
 
 /** The chosen destination changes only at a synchronous, terminal rename.
  * On cancellation, wait for raw staging/close before removing our own temp file. */
-export async function writeConfigExport<T>(path: string, content: string, lease: OperationLease, result: SynchronousCommitResult<T>, mode: 'redacted' | 'secrets' = 'redacted'): Promise<T> {
+export async function writeConfigExport<T>(path: string, content: string, lease: OperationLease, result: SynchronousCommitResult<T>, mode: 'redacted' | 'secrets'): Promise<T> {
   const temporary = join(dirname(path), `.vpnte-export-${randomUUID()}.tmp`)
   let created = false
   let verifyDestination!: () => void

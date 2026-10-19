@@ -27,8 +27,8 @@ afterEach(async () => { if (directory) await rm(directory, { recursive: true, fo
 describe.skipIf(process.platform !== 'win32')('Windows configuration export ACL', () => {
   it.each(['\u2018', '\u2019', '\u201a', '\u201b'])('treats a typographic apostrophe %s in the chosen path as data', async apostrophe => {
     const path = join(directory, `Jane${apostrophe}s Documents.json`)
-    expect(await registry.run('export', lease => writeConfigExport(path, 'first', lease, true))).toBe(true)
-    expect(await registry.run('export', lease => writeConfigExport(path, 'second', lease, true))).toBe(true)
+    expect(await registry.run('export', lease => writeConfigExport(path, 'first', lease, true, 'redacted'))).toBe(true)
+    expect(await registry.run('export', lease => writeConfigExport(path, 'second', lease, true, 'redacted'))).toBe(true)
     expect(await readFile(path, 'utf8')).toBe('second')
   })
 
@@ -45,14 +45,14 @@ foreach($sid in @([Security.Principal.WindowsIdentity]::GetCurrent().User.Value,
 $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier('S-1-5-19')),'Read','Allow')))
 [IO.File]::SetAccessControl($path,$acl)
 [IO.File]::GetAccessControl($path).GetSecurityDescriptorSddlForm('All')`)
-    expect(await registry.run('export', lease => writeConfigExport(path, 'secret', lease, true))).toBe(true)
+    expect(await registry.run('export', lease => writeConfigExport(path, 'secret', lease, true, 'redacted'))).toBe(true)
     expect(await readFile(path, 'utf8')).toBe('secret')
     expect(await powershell(`[IO.File]::GetAccessControl(${quote(path)}).GetSecurityDescriptorSddlForm('All')`)).toBe(before)
   })
 
   it('creates a new export with a protected user/SYSTEM DACL before writing plaintext', async () => {
     const path = join(directory, 'new.json')
-    await registry.run('export', lease => writeConfigExport(path, 'secret', lease, true))
+    await registry.run('export', lease => writeConfigExport(path, 'secret', lease, true, 'redacted'))
     const acl = JSON.parse(await powershell(`
 $acl=[IO.File]::GetAccessControl(${quote(path)})
 [ordered]@{protected=$acl.AreAccessRulesProtected;user=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value;rules=@($acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])|ForEach-Object {$_.IdentityReference.Value})}|ConvertTo-Json -Compress`))
@@ -121,7 +121,7 @@ $acl=[IO.File]::GetAccessControl(${quote(residue)})
   it('refuses final replacement when the destination ACL changes after capture', async () => {
     const path = join(directory, 'changed.json'), temporary = join(directory, 'empty.tmp')
     await writeFile(path, 'old'); await writeFile(temporary, '')
-    const verify = await prepareConfigExport(temporary, path)
+    const verify = await prepareConfigExport(temporary, path, 'redacted')
     await powershell(`
 $path=${quote(path)}
 $acl=[IO.File]::GetAccessControl($path)

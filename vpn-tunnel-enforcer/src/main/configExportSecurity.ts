@@ -14,7 +14,8 @@ function sameFile(a: BigIntStats | undefined, b: BigIntStats | undefined): boole
 
 /** Protect staging before plaintext. Secret exports always use private access;
  * redacted replacements preserve the chosen file's owner/group/DACL. */
-export async function prepareConfigExport(temporary: string, destination: string, mode: 'redacted' | 'secrets' = 'redacted'): Promise<() => void> {
+export async function prepareConfigExport(temporary: string, destination: string, mode: 'redacted' | 'secrets'): Promise<() => void> {
+  if (mode !== 'redacted' && mode !== 'secrets') throw new IpcFault('validation')
   const before = await lstat(destination, { bigint: true }).catch(error => { if (!missing(error)) throw error; return undefined })
   if (before && !before.isFile()) throw new IpcFault('validation')
   if (process.platform === 'win32') {
@@ -51,6 +52,7 @@ if((Normalize-Acl $actual) -cne (Normalize-Acl $expected)) {throw 'ConfigExportA
       if (stdout.trim() !== 'CONFIG_EXPORT_ACL_VERIFIED') throw new IpcFault('permission')
     } catch { throw new IpcFault('permission') }
   } else if (mode === 'secrets') {
+    if (before && process.getuid?.() !== Number(before.uid)) throw new IpcFault('permission')
     await chmod(temporary, 0o600)
     const protectedFile = await lstat(temporary, { bigint: true })
     if (protectedFile.uid !== BigInt(process.getuid!()) || (protectedFile.mode & 0o777n) !== 0o600n) throw new IpcFault('permission')

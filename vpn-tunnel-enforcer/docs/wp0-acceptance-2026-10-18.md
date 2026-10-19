@@ -1194,3 +1194,11 @@ destination policy. POSIX branch секретов требует текущег�
 неизменность прежнего destination. Plaintext staging после аварии может остаться;
 автоматическая очистка произвольных выбранных каталогов не заявляется.
 Финальные проверки и оба reviewer verdict записываются в progress.md.
+
+PR #74 расширил эту гарантию на все три key/proxy file handlers: mode у writer
+и ACL helper обязателен, malformed/omitted mode отвергается. Реальные Windows
+handler regressions проверяют закрытые права после замены широкодоступного файла.
+POSIX secrets не заменяет чужой destination. Bound async с изменённым toStringTag
+отвергается до вызова; при malformed untyped thenable timeout/cancel не заменяет
+validation terminal во время обязательного drain. Это исключительный invalid-code
+путь; prompt cancellation корректных операций сохраняется. Проверки — в журнале.

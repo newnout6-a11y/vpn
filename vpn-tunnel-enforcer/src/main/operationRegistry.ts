@@ -5,6 +5,7 @@ import { IpcFault, classifyIpcError, type IpcErrorCategory } from '../shared/ipc
 import { currentActionMetadata, currentCorrelationId, withCorrelation } from './actionCorrelation'
 
 export type SynchronousCommitResult<T> = T & ({ then?: never } | null | undefined)
+const AsyncFunction = (async () => {}).constructor
 export interface OperationLease {
   readonly signal: AbortSignal
   readonly operation: ManagedOperation
@@ -98,7 +99,7 @@ export class OperationRegistry {
       version: 1, operationId, correlationId: currentCorrelationId() ?? 'op_' + operationId.replaceAll('-', ''),
       kind, owner, source: metadata.source, startedAt, deadline: startedAt + timeoutMs, status: 'running'
     }, cancel: category => {
-      if (entry.operation.status !== 'running' || committing) return false
+      if (entry.operation.status !== 'running' || committing || invalidCommit) return false
       abortFault = new IpcFault(category)
       finish(category === 'cancelled' ? 'cancelled' : 'error', category)
       controller.abort()
@@ -161,8 +162,8 @@ export class OperationRegistry {
       commit<R>(effect: () => SynchronousCommitResult<R>): R {
         assertActive()
         if (pendingEffects) throw new IpcFault('conflict')
-        // Bound async functions inherit AsyncFunction's tag but lose V8's flag.
-        if (types.isAsyncFunction(effect) || Object.prototype.toString.call(effect) === '[object AsyncFunction]') throw new IpcFault('validation')
+        // instanceof also rejects bound async functions with an overridden tag.
+        if (types.isAsyncFunction(effect) || effect instanceof AsyncFunction) throw new IpcFault('validation')
         let result: R
         committing = true
         try { result = effect() } finally { committing = false }
