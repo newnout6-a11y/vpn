@@ -135,6 +135,90 @@ afterEach(async () => {
 })
 
 describe('configuration operation lifetime', () => {
+  const requestId = 'd5abf17e-bf69-4f23-9e3c-b69ed0b32089'
+  it('rejects duplicate browse without invalidating the original request', async () => {
+    const gate = held({ canceled: false, filePaths: [selected] })
+    state.openDialog.mockReturnValue(gate.promise)
+    const first = invoke('config:browse-import', requestId)
+    expect(await invoke('config:browse-import', requestId)).toMatchObject({ ok: false, error: { category: 'conflict' } })
+    expect(state.openDialog).toHaveBeenCalledTimes(1)
+    gate.release()
+    expect(await first).toMatchObject({ ok: true, result: selected })
+    expect(await invoke('config:import', selected, requestId)).toMatchObject({ ok: true })
+  })
+
+  it('binds an idle selection to its workflow token and forgets completed exports', async () => {
+    await invoke('config:browse-import', requestId)
+    const other = '3744ec8d-3fa9-42a5-b948-9de88472264e'
+    for (const id of [other, undefined]) {
+      expect(await invoke('config:import', selected, id)).toMatchObject({ ok: false, error: { category: 'permission' } })
+      expect(await invoke('config:import-apply', selected, ['notifications'], 'replace', id)).toMatchObject({ ok: false, error: { category: 'permission' } })
+    }
+    expect(await invoke('config:import', selected, requestId)).toMatchObject({ ok: true })
+    expect(await invoke('config:export', 'redacted', other)).toMatchObject({ ok: true })
+    expect(await invoke('config:cancel', other)).toMatchObject({ ok: true, result: false })
+    expect(await invoke('config:cancel', requestId)).toMatchObject({ ok: true, result: true })
+  })
+
+  it.each(['', 'not-a-uuid', '3744ec8d-3fa9-12a5-b948-9de88472264e', null])('rejects malformed workflow ID %s before effects', async id => {
+    for (const [channel, args] of [
+      ['config:browse-import', [id]], ['config:export', ['redacted', id]],
+      ['config:import', [selected, id]], ['config:import-apply', [selected, ['notifications'], 'replace', id]],
+      ['config:cancel', [id]]
+    ] as const) expect(await invoke(channel, ...args)).toMatchObject({ ok: false, error: { category: 'validation' } })
+    expect(state.openDialog).not.toHaveBeenCalled()
+    expect(state.saveDialog).not.toHaveBeenCalled()
+    expect(registry.list()).toEqual([])
+  })
+  it.each(['import', 'export'])('cancels requester-owned config %s before the native dialog returns', async kind => {
+    const gate = held(kind === 'import' ? { canceled: false, filePaths: [selected] } : { canceled: false, filePath: destination })
+    ;(kind === 'import' ? state.openDialog : state.saveDialog).mockReturnValue(gate.promise)
+    const run = kind === 'import' ? invoke('config:browse-import', requestId) : invoke('config:export', 'redacted', requestId)
+    const operation = registry.list().find(op => op.status === 'running')!
+    expect(operation).toBeDefined()
+    const foreign = new Sender()
+    expect(await state.handlers.get('config:cancel')!({ sender: foreign }, requestId)).toMatchObject({ ok: true, result: false })
+    expect(await invoke('config:cancel', requestId)).toMatchObject({ ok: true, result: true })
+    expect(await run).toMatchObject({ ok: false, correlationId: operation.correlationId, error: { category: 'cancelled' } })
+    expect(await invoke('config:cancel', requestId)).toMatchObject({ ok: true, result: false })
+    gate.release(); await registry.close()
+    expect(await readFile(destination, 'utf8')).toBe('previous export')
+    expect(await invoke('config:import', selected, requestId)).toMatchObject({ ok: false, error: { category: 'permission' } })
+  })
+
+  it('revokes only the matching idle import selection on request cancellation', async () => {
+    expect(await invoke('config:browse-import', requestId)).toMatchObject({ ok: true, result: selected })
+    expect(await invoke('config:cancel', '3744ec8d-3fa9-42a5-b948-9de88472264e')).toMatchObject({ ok: true, result: false })
+    expect(await invoke('config:import', selected, requestId)).toMatchObject({ ok: true })
+    expect(await invoke('config:cancel', requestId)).toMatchObject({ ok: true, result: true })
+    expect(await invoke('config:import', selected, requestId)).toMatchObject({ ok: false, error: { category: 'permission' } })
+    expect(sender.eventNames()).toEqual([])
+  })
+
+  it.each([false, true])('keeps queued import authority after duplicate rejection; request cancellation: %s', async cancel => {
+    await invoke('config:browse-import', requestId)
+    const gate = held(undefined)
+    const queue = await import('./profileStoreQueue')
+    const lock = vi.spyOn(queue, 'withProfileStoreWriteLock')
+    const blocking = queue.withProfileStoreWriteLock(() => gate.promise)
+    const before = await disk('notification-prefs')
+    const run = invoke('config:import-apply', selected, ['notifications'], 'replace', requestId)
+    expect(await invoke('config:import-apply', selected, ['notifications'], 'replace', requestId)).toMatchObject({ ok: false, error: { category: 'conflict' } })
+    expect(await invoke('config:browse-import', requestId)).toMatchObject({ ok: false, error: { category: 'conflict' } })
+    await vi.waitFor(() => expect(lock).toHaveBeenCalledTimes(2))
+    if (cancel) {
+      expect(await invoke('config:cancel', requestId)).toMatchObject({ ok: true, result: true })
+      expect(await run).toMatchObject({ ok: false, error: { category: 'cancelled' } })
+      expect(registry.isBusy('config:apply')).toBe(true)
+    }
+    expect(await disk('notification-prefs')).toEqual(before)
+    gate.release(); await blocking
+    expect(await run).toMatchObject(cancel ? { ok: false, error: { category: 'cancelled' } } : { ok: true })
+    await registry.close()
+    expect(await disk('notification-prefs')).toMatchObject({ notificationPrefs: { sound: cancel } })
+    expect(await invoke('config:cancel', requestId)).toMatchObject({ ok: true, result: false })
+  })
+
   it.each(['import', 'export'].flatMap(kind =>
     ['render-process-gone', 'did-navigate'].map(event => ({ kind, event }))
   ))('cancels config $kind on requester $event', async ({ kind, event }) => {

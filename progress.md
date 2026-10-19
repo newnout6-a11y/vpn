@@ -5542,3 +5542,81 @@ CI/review нового SHA проверяются отдельно после pu
   (.tmp/wp0-requester-qodo-csp.log). Build/typecheck, native blocked-navigation
   regression, traceability и diff check также exit 0, как записано выше.
   Исправление идёт в тот же #78; требуются Qodo/CI нового SHA.
+- PR #78 слит: final head 72cd14cf869a7e0d3eb345d1b0b099fc7294d86d;
+  Qodo 1545611 completed без открытых findings; CI 39220632906 success
+  (Windows/Rust/site, все проверки), watcher exit 0
+  (.tmp/wp0-requester-qodo-ci-watch.log). REST merged=true; merge/main
+  f35c1f8960eb0a5551ea2815553d7cc89eb274e1. Fetch/ff main и tree diff с
+  reviewed head — exit 0. Старый timeout не переименован в PASS; новый run
+  прошёл default CI без изменения test/assertion/production deadlines.
+- Следующая ветка codex/wp0-config-request-lifetime: AT-00-003/008,
+  React ImportExportSettings unmount. Request ID создаётся до invoke;
+  requester-bound cancel останавливает только своё ожидание/physical lease,
+  также отзывает idle выбранный config snapshot. Поздние browse/validation/apply/
+  export callbacks и success timers не должны менять UI или продолжать workflow
+  после unmount. Native document lifetime #78 остаётся отдельной гарантией.
+- Config request lifetime: config:cancel — 164-й typed IPC канал, scoped по
+  WebContents + UUIDv4 renderer workflow. Main operationId остаётся отдельным
+  UUID и сохраняет correlationId. Browse/validate/idle selection/apply используют
+  один token; export — отдельный. Unknown/foreign/stale cancel возвращает false,
+  malformed token отклоняется до dialogs/store effects. Duplicate request
+  отклоняется до замены pending dialog или claimed capability.
+- ImportExportSettings отзывает свои active/idle requests и success timers при
+  unmount; поздние responses не запускают следующий этап и не меняют UI.
+  Исправные текущие операции сохраняют прежний workflow. Optional token не меняет
+  число аргументов legacy preload calls.
+- До реализации пять новых регрессий воспроизведены: npm.cmd test --
+  src/main/configOperations.test.ts src/renderer/components/ImportExportSettings.test.tsx
+  -t 'requester-owned|matching idle|unmount' — 5 failed / 41 skipped, 5.21 s,
+  exit 1 (.tmp/wp0-config-request-before.log). После main implementation:
+  3 passed /31 skipped, 5.83 s; после UI — 46 passed, 56.11 s
+  (.tmp/wp0-config-request-main.log и -targeted.log первоначального прогона).
+  Расширенные тесты обнаружили ошибку самого нового assertion: isBusy проверял
+  kind import вместо resource config:apply (57 passed /1 failed, 65.91 s).
+  Исправлено имя resource и добавлено ожидание фактического входа в write queue.
+  Первый typecheck TS18048 (requests narrowing) и TS2571 в новом assertion
+  исправлены; последний npm.cmd run build, включая typecheck 164 channels /
+  0 public any, — exit 0 (.tmp/wp0-config-request-build.log).
+- node scripts/test-electron-runtime.mjs — четыре PASS, exit 0
+  (.tmp/wp0-config-request-electron.log). Новый CONFIG_REQUEST_NATIVE_PASS
+  использует production config handlers, stores, registry, IPC guard и preload,
+  sandbox/contextIsolation; controlled dialogs и очередь записи. Проверены
+  immediate cancel <900 ms до picker response, исходная correlation, отдельный
+  main UUID, чужой/stale token, token-bound selection, отсутствие export-файла
+  и поздней записи, успешный новый import после отмены. Initial fixture bundle
+  требовал external koffi (.node loader error); runtime external добавлен.
+- node scripts/test-wp1-native.mjs --ipc-only — WP1_NATIVE_PASS, exit 0
+  (.tmp/wp0-config-request-csp.log). python
+  docs/04-приёмочные-тесты/traceability/check-coverage.py — AC 927/927,
+  F 210/210, exit 0; git diff --check — exit 0. Полный Vitest ещё выполняется;
+  PR/CI/Qodo текущего участка пока не приняты.
+- Первый full npm.cmd test -- --maxWorkers=1 — 4638 passed /5 skipped /
+  1 failed, 426.21 s, exit 1
+  (.tmp/wp0-config-request-full-before-contract-update.log). Единственный fail:
+  старый configImportSecurity ожидает permission при передаче raw JSON в новый
+  slot requestId. Contract теперь отклоняет malformed token как validation до
+  pathname authorization. Тест разделён: произвольный путь без token по-прежнему
+  permission; renderer JSON вместо token — validation, stores не меняются.
+  npm.cmd test -- src/main/configImportSecurity.test.ts — 12 passed,
+  0.882 s, exit 0 (.tmp/wp0-config-request-selection.log). Новый full запущен
+  на неизменяемом production/unit tree; ожидается итог.
+- Второй full: 4638 passed /5 skipped /1 failed, 411.14 s, exit 1
+  (.tmp/wp0-config-request-full-before-acl-budget.log). Единственный fail —
+  существующий Windows ACL test 'restricts secret staging and the final export
+  even when the existing file grants other readers': Test timed out in 5000ms,
+  без assertion failure. Отдельный node node_modules/vitest/vitest.mjs --run
+  src/main/configExportAcl.test.ts -t 'restricts secret staging' — 1 passed /
+  24 skipped, 6.11 s всего /5.30 s tests+hooks, exit 0
+  (.tmp/wp0-config-request-acl-repro.log). Этот тест запускает несколько настоящих
+  PowerShell процессов; его harness budget согласован с соседними ACL cases:
+  15000 ms вместо default5000. Assertions, IPC cancellation <900 ms и production
+  operation deadlines не менялись. Финальный npm.cmd test (default workers)
+  запущен после этого изменения; предыдущие failed full не объявляются PASS.
+- Final npm.cmd test (default workers, production/unit tree неизменен весь
+  прогон) — **4639 passed /5 skipped /0 failed**, 281 files passed /2 skipped,
+  **418.05 s**, exit 0 (.tmp/wp0-config-request-full.log). Повторный typecheck
+  — exit 0, 164 main/preload/shared channels, 0 public any. Build, четыре
+  Electron native fixtures, IPC/CSP и traceability прошли, как записано выше.
+  Production cancellation deadlines и assertions не ослаблены; увеличен только
+  budget одного реального многопроцессного ACL test, с сохранением обоих
+  failed full logs. Требуются CI и completed Qodo на final SHA нового PR.

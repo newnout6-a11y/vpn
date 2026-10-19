@@ -69,7 +69,9 @@ describe('configuration native-selection capability', () => {
   })
   it('rejects arbitrary paths and cannot accept a renderer-supplied raw snapshot', async () => {
     const file = selected()
-    await expect(invoke('config:import', sender, file, JSON.stringify(collectCurrentConfig()))).rejects.toMatchObject({ category: 'permission' })
+    await expect(invoke('config:import', sender, file)).rejects.toMatchObject({ category: 'permission' })
+    // The optional workflow token is never accepted as renderer-supplied bytes.
+    await expect(invoke('config:import', sender, file, JSON.stringify(collectCurrentConfig()))).rejects.toMatchObject({ category: 'validation' })
     await expect(invoke('config:import-apply', sender, file, ['notifications'], 'replace')).rejects.toMatchObject({ category: 'permission' })
     expect(collectCurrentConfig().notifications.sound).toBe(true)
   })
