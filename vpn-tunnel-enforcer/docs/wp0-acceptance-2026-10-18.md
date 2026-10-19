@@ -47,10 +47,34 @@ findings, CI 39227466851 success. Оба замечания первого Qodo 
 | 00-007 | Seed 0x5eed003: 200 commands/10 async workers с production lane/FSM, typed losers, парные terminal events, финальный disconnect и 0 fake PID/TUN | Натурный PID-реестр Windows и полная матрица фоновых entrypoints |
 | 00-008 | Dashboard component frames с production FSM/lane; revision fence; Soft через owned IPC; visual fixtures light/dark; native production contextBridge snapshots/disposer | Полная матрица всех операций, тем, размеров и entrypoints; browser fixtures не заменяют native resources |
 | 00-009 | Release registry четырёх функций off/null; production main/preload status/activation gate; schema reject fake evidence; production Sidebar/Settings DOM без planned controls в обычном/advanced режиме с forged flags; настоящий Electron проверяет четыре refusal и persisted JSONL audit/correlation; #76 принят после full/Qodo/CI | Адресная приёмка release admission завершена; реализация и собственная лабораторная приёмка WP-12 остаются отдельным пакетом |
-| 00-010 | История подключений: настоящий Conf backend, 100 записей, повторная загрузка, повреждённый JSON/схема, `history.corrupted`, сохранение валидных записей и последующая запись | Адресная L2-матрица истории подключений добавлена; перенос той же гарантии на общий audit/event history всех операций после его введения |
+| 00-010 | История подключений: настоящий Conf backend, 100 записей, повторная загрузка, повреждённый JSON/схема, `history.corrupted`, сохранение валидных записей и последующая запись; текущий участок переносит проверку на существующие app.log/app.prev.log | Общий audit/event history: final full/build и собственный Qodo/CI текущего участка; это не полная матрица всех producers |
 
 Это перечень обнаруженного, а не PASS десяти AT. Ни один новый
 неиспользуемый модуль сам по себе не закрывает критерий интеграции.
+
+## Общий audit/event history: целостность JSONL (19.10.2026)
+
+AT-00-005/010, F-143: production appLogger сохраняет существующий JSONL store
+и legacy записи; новый shared version1 contract добавляет source/owner/route/
+confidence. Source/owner берутся из действующего action scope до queue;
+неподтверждённые route/confidence остаются unconfirmed/indeterminate.
+Calendar ts фиксируется при событии, monotonicMs — в порядке сериализации.
+
+Перед первым append обе generations сканируются без переписывания старых bytes.
+Memory ограничена64KiB chunk/256KiB row, чтение32MiB на generation; unreadable/
+incomplete scan получает history.unavailable. Invalid JSON/schema/UTF8/oversized
+record получает sanitized history.corrupted с generation/count. Unterminated
+current tail отделяется newline, новые записи снова разбираются. Обычная
+size-based retention сохраняется; это не бессрочное хранение повреждённых файлов.
+Append I/O fault виден как console history.write-failed без exception/path,
+но fsync и восстановление потерянного события после disk failure не заявляются.
+
+До fix9/9 новых cases failed. Адресные8 suites52/52 passed,3.22s:100 legacy
+записей, обе generations, restart, UTF8 across chunks, oversized skipping,
+scan cap, unreadable generation, failure/retry, correlation/clock/redaction.
+Typecheck165 channels/0 public any —exit0. Полный набор/build и remote gates
+записываются в progress.md. Остальные producers/semantic errors/migrations
+остаются открытыми; этот участок не завершает весь WP-0.
 
 ## Config workflow: отмена при unmount (19.10.2026)
 

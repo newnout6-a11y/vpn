@@ -5992,3 +5992,57 @@ CI/review нового SHA проверяются отдельно после pu
   (.tmp/wp0-diagnostics-namespace-full.log). Code/test tree не менялся.
   CI39306933512 на прежнем c4b967e completed/success; новому commit нужны
   собственные Qodo/CI.
+
+### 19.10.2026 — WP-0: целостность общего audit/event history
+
+- PR #83 слит после final head28055df133441a881b2e2710b7b20c8c379ab02a,
+  Qodo1555252 completed:6/6 implemented,0 open; CI39308634092 success.
+  Merge/main4bd9177a52a812be9af3c6727397860b8d6d3aa3. REST merged=true,
+  tree reviewed head=main9f8118f674559c24eff7d30c791dec7ea8a519da.
+  Revix full review отсутствует по квоте; это не approval.
+- Следующий подтверждённый остаток AT-00-005/010,F-143: app.log — общий
+  durable JSONL, но startup не проверяет его целостность; broken tail
+  может склеиться со следующей записью, history.corrupted отсутствует.
+  Connection-history имеет отдельный guard, общий audit/event history — нет.
+- Реализация: bounded startup scan существующих двух log generations,
+  сохранение их исходных bytes, явный sanitized history.corrupted marker
+  и separator перед append к незавершённой строке; новые записи продолжаются.
+  Versioned event schema и captured source/owner с честными unknown/
+  unconfirmed/indeterminate defaults; monotonic serialization order и
+  correlation сохраняются через async append queue. Норматив docs/ не меняется.
+  Сначала actual-filesystem regressions, затем production fix и DoD.
+- До fix: npm.cmd test -- src/main/appLoggerIntegrity.test.ts —9 failed/9,
+  6.31s,exit1 (.tmp/wp0-audit-integrity-before.log).
+- Новый shared app-event contract сохраняет legacy JSONL; version1 содержит
+  captured source/owner и честные route=unconfirmed/confidence=indeterminate.
+  Calendar timestamp/correlation/metadata фиксируются при событии, monotonic
+  clock — при сериализации. Bounded scanner:64KiB chunks,256KiB row,32MiB
+  per generation; incomplete/unreadable scan —history.unavailable, не PASS.
+  Сканируются обе generations до записи маркеров. Bytes не переписываются,
+  незавершённый current tail отделяется newline. Ошибка append видна как
+  sanitized console history.write-failed; это не гарантия fsync/durability.
+- Первый targeted48:44 passed/4 failed,6.58s,exit1
+  (.tmp/wp0-audit-integrity-targeted.log). Исправлены: capture calendar ts
+  до queue; сохранение validated root route enum при diagnostics redaction;
+  regular-file check; test parser пропускает null/array damaged records.
+  Повтор7 suites48/48 passed,2.98s,exit0
+  (.tmp/wp0-audit-integrity-targeted2.log).
+- npm.cmd test -- src/main/appLoggerIntegrity.test.ts
+  src/main/auditLogIntegrity.test.ts src/shared/app-event.test.ts
+  src/main/appLoggerRotation.test.ts src/main/appLoggerCleanup.test.ts
+  src/main/appLoggerError.test.ts src/main/appLoggerRedaction.test.ts
+  src/main/actionCorrelation.test.ts —52/52 passed,8 suites,3.22s,exit0
+  (.tmp/wp0-audit-integrity-targeted3.log). Включены32MiB scan cap, continued
+  oversized row accounting, repeat restart и write-failure recovery.
+- npm.cmd run typecheck —exit0,165 channels/0 public any
+  (.tmp/wp0-audit-integrity-typecheck.log). Full npm.cmd test и build
+  запускаются на неизменном code/test tree; результаты ниже.
+- npm.cmd run build —exit0, включает повтор typecheck165 channels/0 public any
+  (.tmp/wp0-audit-integrity-build.log). node scripts/test-electron-runtime.mjs
+  —6 PASS,exit0 (.tmp/wp0-audit-integrity-electron.log), включая production
+  contextBridge/logging и actual diagnostics ZIP. Coverage AC927/927,F210/210
+  и git diff --check —exit0. Полный npm.cmd test ещё выполняется.
+- Final npm.cmd test —4783 passed/5 skipped/0 failed,292 files passed/2 skipped,
+  315.36s,exit0 (.tmp/wp0-audit-integrity-full.log). Code/test tree не менялся
+  с начала run. Full/build/typecheck/Electron/coverage/diff прошли; следующий
+  участок допускается после собственного completed Qodo и CI на final SHA.
