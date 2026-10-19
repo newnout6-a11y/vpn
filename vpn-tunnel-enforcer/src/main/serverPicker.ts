@@ -62,6 +62,7 @@ import type { OperationLease } from './operationRegistry'
 import { classifyIpcError, IpcFault } from '../shared/ipc-result'
 import { ioFailureDetails } from './ioFailureDiagnostics'
 import { requestDocumentLifetime } from './requestDocumentLifetime'
+import { runRequesterOperation } from './requesterOperation'
 
 export const RESOLVED_IP_TTL_MS = 5 * 60_000
 const DNS_RESOLUTION_TIMEOUT_MS = 2500
@@ -90,6 +91,7 @@ interface AddProfilesOptions {
   clientDevice?: ClientDevice
   /** Main-only lifetime; renderer options are sanitized separately. */
   signal?: AbortSignal
+  onOperation?: (lease: OperationLease) => void
 }
 
 const CLIENT_DEVICES = ['pc', 'android', 'ios', 'mac'] as const
@@ -2420,7 +2422,7 @@ export async function addFromInput(input: string, options: AddProfilesOptions = 
   const existing = /^https?:\/\//i.test(canonical) ? findGroupBySourceUrl(canonical) : null
   if (existing) {
     const beforeIds = new Set(getProfiles().map(profile => profile.id))
-    const result = await refreshSubscriptionGroup(existing.id, { clientDevice: options.clientDevice, signal: options.signal })
+    const result = await refreshSubscriptionGroup(existing.id, { clientDevice: options.clientDevice, signal: options.signal, onOperation: options.onOperation })
     // The refresh owner decides its terminal result. An abort after its commit
     // must not relabel a saved refresh as cancelled in this continuation.
     if (!result.ok) throw new Error(result.error)
@@ -2428,7 +2430,10 @@ export async function addFromInput(input: string, options: AddProfilesOptions = 
     logEvent('info', 'server-picker', 'profiles refreshed via re-paste', { groupId: existing.id, added: result.addedCount, updated: result.updatedCount })
     return newlyAdded
   }
-  return operations.run('import', lease => addFromInputUnlocked(trimmed, canonical, options, lease), {
+  return operations.run('import', lease => {
+    options.onOperation?.(lease)
+    return addFromInputUnlocked(trimmed, canonical, options, lease)
+  }, {
     resource: profileImportResource(canonical, options), signal: options.signal
   })
 }
@@ -2555,7 +2560,10 @@ async function addFromInputUnlocked(trimmed: string, canonical: string, options:
  * URIs append one profile with `sourceUri = trimmed`.
  */
 export async function addFromInputToGroup(input: string, groupId: string, options: AddProfilesOptions = {}): Promise<ServerProfile[]> {
-  return operations.run('import', lease => addFromInputToGroupUnlocked(input, groupId, options, lease), {
+  return operations.run('import', lease => {
+    options.onOperation?.(lease)
+    return addFromInputToGroupUnlocked(input, groupId, options, lease)
+  }, {
     resource: profileImportResource(canonicalizeSubscriptionUrl(input.trim()), options, groupId), signal: options.signal
   })
 }
@@ -2751,26 +2759,23 @@ export function registerServerPickerHandlers(): void {
     return { ok: true as const, country: profile.country ?? '', profile }
   })
 
-  handleLogged('servers:add', async (event, input: string, options?: AddProfilesOptions) => {
+  handleLogged('servers:add', async (event, input: string, options?: AddProfilesOptions, requestId?: unknown) => {
     input = requireString(input, 'input', { maxLength: 200000 })
     const cleanOptions = sanitizeAddProfilesOptions(options)
-    const lifetime = requestDocumentLifetime(event.sender)
-    try { return await addFromInput(input, { ...cleanOptions, signal: lifetime.signal }) }
-    finally { lifetime.dispose() }
+    return runRequesterOperation(event.sender, requestId, (signal, onOperation) => addFromInput(input, { ...cleanOptions, signal, onOperation }))
   })
 
   // Append profiles to a specific group. When `groupId` is null, fall back
   // to the same defaults as `servers:add`: subscription URLs create their
   // own group; single URIs land in "Ручные ключи".
-  handleLogged('servers:add-to-group', async (event, input: string, groupId: string | null, options?: AddProfilesOptions) => {
+  handleLogged('servers:add-to-group', async (event, input: string, groupId: string | null, options?: AddProfilesOptions, requestId?: unknown) => {
     input = requireString(input, 'input', { maxLength: 200000 })
     const cleanGroupId = optionalString(groupId, 'groupId', { allowEmpty: true, maxLength: 200 })
     const cleanOptions = sanitizeAddProfilesOptions(options)
-    const lifetime = requestDocumentLifetime(event.sender)
-    try {
-      const options = { ...cleanOptions, signal: lifetime.signal }
+    return runRequesterOperation(event.sender, requestId, async (signal, onOperation) => {
+      const options = { ...cleanOptions, signal, onOperation }
       return cleanGroupId ? await addFromInputToGroup(input, cleanGroupId, options) : await addFromInput(input, options)
-    } finally { lifetime.dispose() }
+    })
   })
 
   handleLogged('servers:set-client-device', async (_event, id: string, clientDevice: ClientDevice) => {

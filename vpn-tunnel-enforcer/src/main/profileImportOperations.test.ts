@@ -71,6 +71,29 @@ afterEach(async () => {
 })
 
 describe('profile import operation ownership', () => {
+  it.each(['new', 'target', 'repaste'])('cancels requester-owned %s import without a late commit', async mode => {
+    const sender = Object.assign(new EventEmitter(), { isDestroyed: () => false })
+    const foreign = Object.assign(new EventEmitter(), { isDestroyed: () => false })
+    const id = 'd5abf17e-bf69-4f23-9e3c-b69ed0b32089'
+    const input = 'https://sub.example.test/new'
+    const group = mode === 'new' ? undefined : groups.createGroup({ name: 'Target', source: mode === 'target' ? 'manual' : 'subscription',
+      ...(mode === 'repaste' ? { sourceUrl: input } : {}), status: 'active', importedAt: 1 })
+    const gate = held(), before = snapshot()
+    state.resolve.mockReturnValue(gate.promise)
+    const run = mode === 'target'
+      ? state.handlers.get('servers:add-to-group')!({ sender }, input, group!.id, { clientDevice: 'android' }, id)
+      : state.handlers.get('servers:add')!({ sender }, input, { clientDevice: 'android' }, id)
+    await vi.waitFor(() => expect(state.resolve).toHaveBeenCalledOnce())
+    const admitted = snapshot(), operation = registry.list()[0]
+    expect(operation.operationId).not.toBe(id)
+    expect(await state.handlers.get('operations:cancel-request')!({ sender: foreign }, id)).toMatchObject({ ok: true, result: false })
+    expect(await state.handlers.get('operations:cancel-request')!({ sender }, id)).toMatchObject({ ok: true, result: true })
+    expect(await run).toMatchObject({ ok: false, correlationId: operation.correlationId, error: { category: 'cancelled' } })
+    gate.release(); await registry.close()
+    expect(snapshot()).toBe(mode === 'repaste' ? admitted : before)
+    expect(await state.handlers.get('operations:cancel-request')!({ sender }, id)).toMatchObject({ ok: true, result: false })
+    expect(sender.eventNames()).toEqual([])
+  })
   it.each(['servers:add', 'servers:add-to-group'].flatMap(channel =>
     ['destroyed', 'render-process-gone', 'did-navigate'].map(event => ({ channel, event }))
   ))('cancels $channel on requester $event without a late commit', async ({ channel, event }) => {

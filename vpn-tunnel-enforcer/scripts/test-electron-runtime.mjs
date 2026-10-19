@@ -27,6 +27,22 @@ try {
   await build({ entryPoints: [join(root, 'scripts/fixtures/config-request-native.ts')],
     outfile: join(work, 'config-request.cjs'), bundle: true, platform: 'node',
     format: 'cjs', external: ['electron', 'koffi'] })
+  await build({ entryPoints: [join(root, 'scripts/fixtures/server-request-native.ts')],
+    outfile: join(work, 'server-request.cjs'), bundle: true, platform: 'node', format: 'cjs', external: ['electron', 'koffi'],
+    plugins: [{ name: 'controlled-profile-boundaries', setup(builder) {
+      builder.onResolve({ filter: /^\.\/vpnProfiles$/ }, () => ({ path: 'profiles', namespace: 'server-native' }))
+      builder.onResolve({ filter: /^\.\/tunController$/ }, () => ({ path: 'tunnel', namespace: 'server-native' }))
+      builder.onResolve({ filter: /^\.\/adaptiveBypass$/ }, () => ({ path: 'adaptive', namespace: 'server-native' }))
+      builder.onResolve({ filter: /^\.\/ipMonitor$/ }, () => ({ path: 'monitor', namespace: 'server-native' }))
+      builder.onResolve({ filter: /^\.\/keyHealthChecker$/ }, () => ({ path: 'health', namespace: 'server-native' }))
+      builder.onLoad({ filter: /.*/, namespace: 'server-native' }, ({ path }) => ({ loader: 'js', resolveDir: root, contents:
+        path === 'profiles' ? `export * from ${JSON.stringify(join(root, 'src/main/vpnProfiles.ts'))}; export const resolveVpnProfiles=(...args)=>globalThis.vpnteProfileBoundary(...args)`
+          : path === 'tunnel' ? 'const unexpected=()=>{throw new Error("Unexpected runtime access in import fixture")}; export const getDirectProxyPort=()=>1080; export const getTunRuntimeDir=unexpected,getBundledResource=unexpected,pickFreeLocalPort=unexpected,copyResourceIfStale=unexpected; export const tunController={getStatus:()=>({running:false}),setWatchdogProbeConfirmationChecker:()=>{}}'
+            : path === 'adaptive' ? 'export const beginAdaptiveConnection=()=>{}; export const readAdaptiveNetworkFingerprint=()=>{}'
+              : path === 'health' ? 'export const checkGroupHealth=()=>{throw new Error("Unexpected health check in import fixture")}'
+                : 'export const ipMonitor={}' }))
+    } }]
+  })
   await build({
     entryPoints: [join(root, 'scripts/fixtures/speed-test-ui-native.ts')],
     outfile: join(work, 'speed-ui.cjs'), bundle: true, platform: 'node', format: 'cjs', external: ['electron'],
@@ -44,7 +60,7 @@ try {
   env.VPNTE_SMOKE_DIR = work
   env.VPNTE_SMOKE_PRELOAD = join(root, 'out/preload/index.js')
   env.VPNTE_SMOKE_VERSION = require('../package.json').devDependencies.electron
-  for (const [fixture, marker] of [['main.cjs', 'ELECTRON_SMOKE_PASS'], ['speed-ui.cjs', 'SPEED_UI_NATIVE_PASS'], ['requester.cjs', 'REQUEST_DOCUMENT_NATIVE_PASS'], ['config-request.cjs', 'CONFIG_REQUEST_NATIVE_PASS']]) {
+  for (const [fixture, marker] of [['main.cjs', 'ELECTRON_SMOKE_PASS'], ['speed-ui.cjs', 'SPEED_UI_NATIVE_PASS'], ['requester.cjs', 'REQUEST_DOCUMENT_NATIVE_PASS'], ['config-request.cjs', 'CONFIG_REQUEST_NATIVE_PASS'], ['server-request.cjs', 'SERVER_REQUEST_NATIVE_PASS']]) {
     const result = spawnSync(require('electron'), [join(work, fixture)], {
       cwd: root, env, encoding: 'utf8', windowsHide: true, timeout: 60_000
     })

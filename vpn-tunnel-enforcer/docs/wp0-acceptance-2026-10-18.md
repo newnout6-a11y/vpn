@@ -30,6 +30,9 @@ findings, CI 39216740383 success (Windows/Rust/site). Revix full review недо
 #78 слит (`f35c1f8`): final head `72cd14c`, Qodo 1545611 completed без открытых
 findings, CI 39220632906 success (Windows/Rust/site). Старый CI 4ae7ab9 имел
 один test timeout; он сохранён в журнале. Revix full review по квоте отсутствует.
+#79 слит (`d7a4378`): final head `589490b`, Qodo 1546296 completed без открытых
+findings, CI 39227466851 success. Оба замечания первого Qodo воспроизведены и
+исправлены. Revix full review по квоте отсутствует; это не approval.
 
 ## Полная область и первоначальная инвентаризация
 
@@ -77,7 +80,7 @@ exit 0. Финальный `npm.cmd test` — **4639 passed /5 skipped /0 failed
 Windows ACL test. Assertion разделён по новому token contract; budget только
 этого многопроцессного ACL test — 15000 ms. Production deadlines и проверки
 отмены/ACL не ослаблены. Все неудачные прогоны сохранены в progress.md.
-Qodo и CI текущего PR ещё ожидаются.
+Config workflow принят в #79; результаты final SHA приведены ниже.
 
 Первое Qodo #79 (1546103, SHA 1577193) выявило overlap legacy/tokened registry
 cleanup и потерю видимых import choices после apply error. Оба замечания
@@ -89,6 +92,34 @@ cleanup и потерю видимых import choices после apply error. О
 Полный `npm.cmd test` после Qodo fixes — **4641 passed /5 skipped /0 failed**,
 281 files passed /2 skipped, 420.88 s, exit 0. Initial CI 39225869946 success;
 он не заменяет CI/Qodo следующего SHA с исправлениями.
+Final SHA 589490b: Qodo 1546296 completed без открытых findings и CI
+39227466851 success. Merge/main d7a4378 совпал по tree с reviewed head.
+Следующий участок — SPA unmount ручных import/refresh на странице Servers;
+background refresh остаётся отдельным владельцем.
+
+## Servers: requester lifetime ручного import/refresh (следующий участок)
+
+AT-00-001/003/008: optional UUID token добавлен к servers:add/add-to-group и
+groups:refresh; operations:cancel-request ограничен своим sender+token.
+Main operationId/correlation, deadline, commit и physical drain остаются у
+существующего registry. Отмена после terminal commit — false. Duplicate,
+malformed, foreign/stale и legacy overlap проверены отдельно.
+SPA unmount Servers отменяет принадлежащие странице ручные import/refresh,
+блокирует late reads/state/log/nav и удаляет toast timers. Background refresh
+не становится собственностью renderer; export/key workflows остаются отдельно.
+
+До исправления: main token case — 1 failed /40 skipped; UI unmount —
+2 failed /1 passed. После: 7 suites **157 passed**, 4.92 s, exit 0.
+Build/typecheck — exit 0, 165 channels/0 public any. Пять Electron fixtures —
+PASS, включая SERVER_REQUEST_NATIVE_PASS с actual handlers/stores/registry/
+guard/preload, controlled resolver/runtime boundaries. Refresh/import/target/
+repaste cancel <900ms с исходной correlation/main UUID, no late writes,
+foreign/stale refusal, retained drain/listener cleanup, fresh successful import.
+Native IPC/CSP и traceability/diff check — exit 0. Final npm.cmd test —
+**4660 passed /5 skipped /0 failed**, 335.97 s. Предыдущий full имел три
+5000 ms timeout в прежнем adaptiveNetworkIdentity native suite; отдельно
+он прошёл 25/25, полный повтор прошёл без изменения его кода/budgets.
+История сохранена в progress.md. PR/Qodo/CI нового участка ожидаются.
 
 ## Main connection lane — приоритеты, deadline и позднее расписание
 

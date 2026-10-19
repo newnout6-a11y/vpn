@@ -23,7 +23,7 @@ export type { RefreshGroupResult } from '../shared/ipc-types'
  */
 
 import { ipcMain, type IpcMainInvokeEvent } from 'electron'
-import { requestDocumentLifetime } from './requestDocumentLifetime'
+import { runRequesterOperation } from './requesterOperation'
 import { randomUUID } from 'crypto'
 import { compactForIpcLog } from './ipcLogging'
 import Store from './versionedStore'
@@ -53,6 +53,7 @@ interface RefreshGroupOptions {
   clientDevice?: ClientDevice
   signal?: AbortSignal
   owner?: OperationOwner
+  onOperation?: (lease: OperationLease) => void
 }
 
 const store = serverGroupsStore
@@ -376,6 +377,7 @@ export function refreshGroup(
   options: RefreshGroupOptions = {}
 ): Promise<RefreshGroupResult> {
   return operations.run('refresh', async lease => {
+    options.onOperation?.(lease)
     const original = getGroup(groupId)
     const onAbort = () => {
       // This is the deadline transition itself, never a late network callback.
@@ -905,10 +907,8 @@ export function registerServerGroupsHandlers(): void {
     return { ok }
   })
 
-  handleLogged('groups:refresh', async (event, id: string) => {
-    const lifetime = requestDocumentLifetime(event.sender)
-    try { return await refreshGroup(id, { signal: lifetime.signal }) }
-    finally { lifetime.dispose() }
+  handleLogged('groups:refresh', async (event, id: string, requestId?: unknown) => {
+    return runRequesterOperation(event.sender, requestId, (signal, onOperation) => refreshGroup(id, { signal, onOperation }))
   })
 
   handleLogged('groups:set-refresh-policy', async (_event, id: string, intervalMinutes: number | null) => {
