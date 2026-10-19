@@ -1209,3 +1209,11 @@ CreateNew, до возможности открыть файл другим read
 private staging; последующие проверки и terminal replacement сохраняются.
 Actual handler tests проверяют ACL на границе Node open при broad parent DACL;
 collision test подтверждает неизменность существующего файла.
+
+Protected creation handle передаёт volume/file ID; opened handle Node до записи
+обязан иметь тот же ID. Shared-directory substitution до открытия отвергается
+без записи plaintext в подмену. Перед commit повторно проверяются staging ID и
+snapshot; cleanup не удаляет substitute с другим ID. Два настоящих filesystem
+regressions покрывают оба handoff/commit окна, включая заранее открытый reader.
+Если helper не подтвердил ID после CreateNew, возможный пустой private residue
+не удаляется наугад: пишется явный cleanupFailed warning. Проверки — в progress.md.

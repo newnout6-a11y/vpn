@@ -305,7 +305,8 @@ describe('configuration operation lifetime', () => {
     const run = invoke('config:export', 'secrets')
     const operation = registry.list().find(op => op.status === 'running')!
     if (reason === 'cancel') {
-      await vi.waitFor(() => expect(state.reached).toBe(1))
+      // Real Windows creation/handle-identity preparation precedes fsync.
+      await vi.waitFor(() => expect(state.reached).toBe(1), { timeout: 5000 })
       registry.cancel(operation.operationId)
     }
     expect(await run).toMatchObject({ ok: false, correlationId: operation.correlationId, error: { category: reason === 'cancel' ? 'cancelled' : 'permission' } })
@@ -317,7 +318,7 @@ describe('configuration operation lifetime', () => {
       cleanupFailed: true, operationKey: 'op_' + operation.operationId.replaceAll('-', '')
     } })
     expect(JSON.stringify(cleanup)).not.toContain('private-cleanup-path')
-  })
+  }, 15_000)
 
   it('preserves concurrent import/export identities and redaction through actual IPC/JSONL/diagnostics', async () => {
     state.stores.picker.set('profiles', [{ id: 'p1', name: 'Profile', protocol: 'vless', server: 'vpn.test', port: 443, status: 'unknown',

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { tmpdir } from 'os'
@@ -10,6 +10,7 @@ const state = vi.hoisted(() => ({
   clipboardText: '', clipboardWrite: vi.fn(),
   writeFailure: undefined as unknown,
   onOpened: undefined as ((path: string) => Promise<void>) | undefined,
+  beforeOpen: undefined as ((path: string) => void) | undefined,
   storeData: new Map<string, any>(),
   ipcHandlers: new Map<string, (...args: any[]) => any>(),
   profiles: [] as any[],
@@ -30,6 +31,7 @@ const state = vi.hoisted(() => ({
 vi.mock('fs/promises', async importOriginal => {
   const actual = await importOriginal<typeof import('fs/promises')>()
   return { ...actual, open: async (...args: Parameters<typeof actual.open>) => {
+    state.beforeOpen?.(String(args[0]))
     const file = await actual.open(...args), write = file.writeFile.bind(file)
     try { await state.onOpened?.(String(args[0])) } catch (error) { await file.close(); throw error }
     file.writeFile = (...writeArgs) => state.writeFailure ? Promise.reject(state.writeFailure) : write(...writeArgs)
@@ -119,6 +121,7 @@ beforeEach(async () => {
   vi.resetModules(); vi.clearAllMocks(); state.storeData.clear(); state.ipcHandlers.clear(); destroyed = false
   state.writeFailure = undefined
   state.onOpened = undefined
+  state.beforeOpen = undefined
   exportDirectory = mkdtempSync(join(tmpdir(), 'vpnte-export-consent-'))
   exportPath = join(exportDirectory, 'keys.txt')
   state.storeData.set('profiles', [{ id: 'a', name: 'Profile', protocol: 'vless', outbound: { type: 'vless', server: 'server.test', server_port: 443, uuid: 'FAKE-PRIVATE-KEY' } }])
@@ -137,6 +140,23 @@ afterEach(async () => {
 })
 
 describe('main-owned export approval (AT-01-008)', () => {
+  it.skipIf(process.platform !== 'win32')('rejects a substituted staging file before writing any secret through a retained reader', async () => {
+    writeFileSync(exportPath, 'old destination')
+    state.nativePrompt.mockResolvedValue({ response: 1 })
+    let reader: number | undefined, substituted = ''
+    state.beforeOpen = path => {
+      substituted = path
+      renameSync(path, path + '.original')
+      writeFileSync(path, 'attacker content')
+      reader = openSync(path, 'r')
+    }
+    try {
+      await expect(invoke('servers:export-key-file')).rejects.toMatchObject({ category: 'conflict' })
+      expect(readFileSync(reader!, 'utf8')).toBe('attacker content')
+      expect(readFileSync(exportPath, 'utf8')).toBe('old destination')
+      expect(readFileSync(substituted, 'utf8')).toBe('attacker content')
+    } finally { if (reader !== undefined) closeSync(reader) }
+  })
   it.skipIf(process.platform !== 'win32').each(channels.filter(channel => channel.endsWith('-file')))('restricts a broadly readable destination through the actual key handler: %s (AT-00-003)', async channel => {
     const encodedPath = Buffer.from(exportPath, 'utf8').toString('base64')
     const powershell = async (script: string) => (await promisify(execFile)('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand',

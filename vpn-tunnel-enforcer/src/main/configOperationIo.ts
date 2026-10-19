@@ -1,11 +1,11 @@
 import { open, rm } from 'fs/promises'
-import { renameSync } from 'fs'
+import { lstatSync, renameSync, type BigIntStats } from 'fs'
 import { randomUUID } from 'crypto'
 import { dirname, join } from 'path'
 import type { OperationLease, SynchronousCommitResult } from './operationRegistry'
 import { createPrivateConfigExport, prepareConfigExport } from './configExportSecurity'
 import { logEvent } from './appLogger'
-import { classifyIpcError } from '../shared/ipc-result'
+import { classifyIpcError, IpcFault } from '../shared/ipc-result'
 
 const MAX_CONFIG_IMPORT_BYTES = 16 * 1024 * 1024
 type RejectRead = (code: 'file-too-large' | 'file-not-regular' | 'file-changed', reason?: 'validation' | 'conflict') => never
@@ -39,15 +39,30 @@ export async function readSelectedConfig(path: string, lease: OperationLease, re
 export async function writeConfigExport<T>(path: string, content: string, lease: OperationLease, result: SynchronousCommitResult<T>, mode: 'redacted' | 'secrets'): Promise<T> {
   const temporary = join(dirname(path), `.vpnte-export-${randomUUID()}.tmp`)
   let created = false
+  let identity: { dev: bigint; ino: bigint } | undefined
   let verifyDestination!: () => void
+  const verifyIdentity = (current: BigIntStats) => {
+    if (!identity || !current.isFile() || current.dev !== identity.dev || current.ino !== identity.ino) throw new IpcFault('conflict')
+  }
   const staging = (async () => {
     if (process.platform === 'win32' && mode === 'secrets') {
-      await createPrivateConfigExport(temporary)
+      try { identity = await createPrivateConfigExport(temporary) }
+      catch (error) {
+        // A timeout after CreateNew can leave an empty private file. Without
+        // confirmed identity, never delete an unrelated colliding/replaced path.
+        try { logEvent('warn', 'config-manager', 'config export staging creation not confirmed', {
+          operationKey: 'op_' + lease.operation.operationId.replaceAll('-', ''), cleanupFailed: true, reason: classifyIpcError(error)
+        }) } catch { /* Preserve the original bounded failure. */ }
+        throw error
+      }
       created = true
     }
     const file = await open(temporary, created ? 'r+' : 'wx', 0o600)
     created = true
     try {
+      const opened = await file.stat({ bigint: true })
+      if (identity) verifyIdentity(opened)
+      else identity = { dev: opened.dev, ino: opened.ino }
       lease.assertActive()
       verifyDestination = await prepareConfigExport(temporary, path, mode)
       lease.assertActive()
@@ -58,7 +73,12 @@ export async function writeConfigExport<T>(path: string, content: string, lease:
   })()
   try {
     await lease.wait(staging)
+    const staged = lstatSync(temporary, { bigint: true })
+    verifyIdentity(staged)
     return lease.commit(() => {
+      const current = lstatSync(temporary, { bigint: true })
+      verifyIdentity(current)
+      if ((['size', 'mtimeNs', 'ctimeNs'] as const).some(key => current[key] !== staged[key])) throw new IpcFault('conflict')
       verifyDestination()
       renameSync(temporary, path)
       created = false
@@ -66,7 +86,12 @@ export async function writeConfigExport<T>(path: string, content: string, lease:
     })
   } finally {
     await staging.catch(() => {})
-    if (created) try { await rm(temporary, { force: true }) } catch (error) {
+    if (created) try {
+      let current: BigIntStats | undefined
+      try { current = lstatSync(temporary, { bigint: true }) }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+      if (current) { verifyIdentity(current); await rm(temporary, { force: true }) }
+    } catch (error) {
       try { logEvent('error', 'config-manager', 'config export cleanup failed', {
         operationKey: 'op_' + lease.operation.operationId.replaceAll('-', ''),
         cleanupFailed: true, reason: classifyIpcError(error)

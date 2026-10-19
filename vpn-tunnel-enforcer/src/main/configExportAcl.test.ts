@@ -5,6 +5,7 @@ import { build } from 'esbuild'
 import { promisify } from 'node:util'
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { readdirSync, renameSync, writeFileSync } from 'node:fs'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { OperationRegistry } from './operationRegistry'
 import { writeConfigExport } from './configOperationIo'
@@ -25,6 +26,22 @@ beforeEach(async () => {
 afterEach(async () => { if (directory) await rm(directory, { recursive: true, force: true }) })
 
 describe.skipIf(process.platform !== 'win32')('Windows configuration export ACL', () => {
+  it('rejects replacement of staging before terminal rename and preserves the substitute during cleanup', async () => {
+    const path = join(directory, 'destination.json')
+    await writeFile(path, 'old destination')
+    let substitute = ''
+    await expect(registry.run('export', lease => writeConfigExport(path, 'private content', {
+      ...lease,
+      commit(effect) {
+        substitute = join(directory, readdirSync(directory).find(file => file.startsWith('.vpnte-export-'))!)
+        renameSync(substitute, substitute + '.original')
+        writeFileSync(substitute, 'replacement content')
+        return lease.commit(effect)
+      }
+    }, true, 'secrets'))).rejects.toMatchObject({ category: 'conflict' })
+    expect(await readFile(path, 'utf8')).toBe('old destination')
+    expect(await readFile(substitute, 'utf8')).toBe('replacement content')
+  })
   it('atomically creates private staging without truncating or deleting an existing path', async () => {
     const path = join(directory, 'collision.tmp')
     await writeFile(path, 'original')

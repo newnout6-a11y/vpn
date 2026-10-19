@@ -22,22 +22,44 @@ foreach($sid in @($user.Value,'S-1-5-18')) {
   $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($id,'FullControl','Allow')))
 }`
 
-async function runSecurityScript(script: string): Promise<void> {
+async function runSecurityScript(script: string): Promise<string> {
   const executable = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
   try {
     const { stdout } = await promisify(execFile)(executable, ['-NoProfile', '-NonInteractive', '-EncodedCommand',
       Buffer.from("$ErrorActionPreference='Stop';\n" + script, 'utf16le').toString('base64')], { windowsHide: true, timeout: 15_000, maxBuffer: 16_384 })
-    if (stdout.trim() !== 'CONFIG_EXPORT_ACL_VERIFIED') throw new IpcFault('permission')
+    return stdout.trim()
   } catch { throw new IpcFault('permission') }
 }
 
 /** Windows access checks happen when a reader opens a handle. Install the DACL
  * in CreateNew itself: changing permissions on an existing empty file is too late. */
-export async function createPrivateConfigExport(temporary: string): Promise<void> {
-  await runSecurityScript(`${privateAclScript}
+export async function createPrivateConfigExport(temporary: string): Promise<{ dev: bigint; ino: bigint }> {
+  const output = await runSecurityScript(`Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+public static class VpnteExportIdentity {
+ [StructLayout(LayoutKind.Sequential)] public struct Info {
+  public uint Attributes;
+  public System.Runtime.InteropServices.ComTypes.FILETIME Created, Accessed, Written;
+  public uint Volume, SizeHigh, SizeLow, Links, IndexHigh, IndexLow;
+ }
+ [DllImport("kernel32.dll", SetLastError=true)] public static extern bool GetFileInformationByHandle(SafeFileHandle handle, out Info info);
+}
+'@
+${privateAclScript}
 $stream=[IO.FileStream]::new(${pathData(temporary)},[IO.FileMode]::CreateNew,[Security.AccessControl.FileSystemRights]::Write,[IO.FileShare]::None,4096,[IO.FileOptions]::None,$acl)
-$stream.Dispose()
-'CONFIG_EXPORT_ACL_VERIFIED'`)
+try {
+  $info=New-Object VpnteExportIdentity+Info
+  if(-not [VpnteExportIdentity]::GetFileInformationByHandle($stream.SafeFileHandle,[ref]$info)) {throw 'ConfigExportIdentityFailed'}
+  @{dev=$info.Volume.ToString();ino=([uint64]$info.IndexHigh*4294967296+[uint64]$info.IndexLow).ToString()}|ConvertTo-Json -Compress
+} finally {$stream.Dispose()}`)
+  try {
+    const identity = JSON.parse(output)
+    if (typeof identity?.dev !== 'string' || typeof identity.ino !== 'string'
+      || !/^\d+$/.test(identity.dev) || !/^[1-9]\d*$/.test(identity.ino)) throw new Error()
+    return { dev: BigInt(identity.dev), ino: BigInt(identity.ino) }
+  } catch { throw new IpcFault('permission') }
 }
 
 /** Protect staging before plaintext. Secret exports always use private access;
@@ -65,7 +87,7 @@ function Normalize-Acl($sddl) {
 }
 if((Normalize-Acl $actual) -cne (Normalize-Acl $expected)) {throw 'ConfigExportAclMismatch'}
 'CONFIG_EXPORT_ACL_VERIFIED'`
-    await runSecurityScript(script)
+    if (await runSecurityScript(script) !== 'CONFIG_EXPORT_ACL_VERIFIED') throw new IpcFault('permission')
   } else if (mode === 'secrets') {
     if (before && process.getuid?.() !== Number(before.uid)) throw new IpcFault('permission')
     await chmod(temporary, 0o600)

@@ -5044,3 +5044,58 @@ CI/review нового SHA проверяются отдельно после pu
   git diff --check — exit 0. CI 39200719744 на предыдущем eb7aed6 завершён
   success, watcher exit 0, полный лог .tmp/wp0-config-qodo74-ci-eb7aed6.log.
   Этот CI не переносится на новый atomic-create tree: после push ждём новый.
+
+### WP-0 — Qodo #74: идентичность protected staging при handoff
+
+- c3b07b96b66cc3da4e48bcdd61fcfa0d394fb2f8 запушен. Qodo 1544165 completed
+  на этом SHA, atomic-DACL finding implemented; новый high
+  d3f24732-d171-40ed-856b-25b576e8371b / 4310433646 подтвердил handoff race:
+  shared-directory entry можно заменить между private CreateNew и Node r+.
+  До исправления реальный retained-reader substitution case возвращал success.
+  npm.cmd test -- src/main/serverKeyExportSecurity.test.ts -t 'substituted staging file'
+  — 1 failed / 21 skipped, 1.70 s, exit 1 (.tmp/wp0-config-identity-before.log).
+- Creation helper получает volume serial/file ID непосредственно с защищённого
+  FileStream SafeFileHandle через GetFileInformationByHandle. Native struct
+  использует точные uint64 расчёты; одноразовый локальный probe подтвердил
+  совпадение с Node BigIntStats dev/ino. Node до prepare/write сравнивает ID
+  своего opened handle с ID creation handle. Ноль/невалидный ID отвергается.
+  Перед terminal rename снова проверяются identity и staging snapshot.
+  Cleanup проверяет ID и не удаляет подменённый чужой entry.
+- Revix 4310434879: timeout после CreateNew до подтверждения ID может оставить
+  пустой private staging. Без доказательства владения неизвестный entry не
+  удаляется; добавлен bounded warning 'config export staging creation not confirmed'
+  с cleanupFailed/reason/operationKey. Plaintext пишется только после подтверждения
+  ID. Это честная граница, не обещание отсутствия temp residue. Revix 4310434884
+  (nitpick о .itest) не меняет поведение: existing native/crash security cases
+  оставлены в обязательном default CI, чтобы не исключать их из полного прогона.
+- Первый адресный прогон после нового native preparation: 89 passed / 4 failed,
+  44.45 s, exit 1 (.tmp/wp0-config-identity-regression.log). Все четыре — ожидание
+  входа в controlled boundary за прежние 1000 ms, когда реальная компиляция
+  native metadata helper ещё не закончилась. Подготовительное ожидание этих
+  cases стало 5000 ms, test budget 15 s; cancellation/deadline/assertions после
+  admission не ослаблялись. Финальный четырёхфайловый набор — 93 passed,
+  46.64 s, exit 0 (.tmp/wp0-config-identity-regression-final.log).
+  Дополнительный pre-commit substitution test — 1 passed / 10 skipped, 2.18 s,
+  exit 0 (.tmp/wp0-config-identity-commit.log), проверяет old destination и то,
+  что cleanup сохраняет substitute. Финальный build/full запущены с этим case.
+- CI 39201559580 предыдущего c3b07b9 завершён success, watcher exit 0
+  (.tmp/wp0-config-atomic-acl-ci-c3b07b9.log). Revix check 117895430457
+  completed/neutral с вопросом и nitpick. Qodo high исключил merge независимо
+  от прежних зелёных проверок. После нового push оба ревью и CI нужны заново.
+- npm.cmd run build (с typecheck), traceability AC 927/927 / F 210/210,
+  node scripts/test-electron-runtime.mjs (ELECTRON_SMOKE_PASS) и
+  node scripts/test-wp1-native.mjs --ipc-only (WP1_NATIVE_PASS) — exit 0
+  (.tmp/wp0-config-identity-build.log, .tmp/wp0-config-identity-electron.log,
+  .tmp/wp0-config-identity-csp.log). Первый полный прогон — 4502 passed /
+  1 failed / 5 skipped, 235.55 s, exit 1 (.tmp/wp0-config-identity-full.log).
+  configIpcErrors.test mock file.stat терял переданный bigint:true и подменял
+  BigIntStats на numeric Stats. Mock теперь передаёт options настоящему fd.stat;
+  production identity check не ослаблен. Адресный configIpcErrors — 38 passed,
+  1.02 s, exit 0 (.tmp/wp0-config-identity-errors.log). Повторный full запущен.
+- Повторный npm.cmd test — **4503 passed / 5 skipped / 0 failed**,
+  276 files passed / 2 skipped, **232.83 s**, exit 0
+  (.tmp/wp0-config-identity-full-final.log). Code/test tree во время прогона
+  не менялся. Финальный npm.cmd run typecheck — exit 0
+  (.tmp/wp0-config-identity-typecheck-final.log). git diff --check — exit 0.
+  Все локальные процессы terminal; новый commit/push проходит повторный
+  exact-head review/CI gate. WP-0 и WP-2 goal остаётся active.

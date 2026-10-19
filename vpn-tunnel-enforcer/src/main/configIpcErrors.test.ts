@@ -29,7 +29,7 @@ vi.mock('fs/promises', async importOriginal => {
   const actual = await importOriginal<typeof import('fs/promises')>()
   return { ...actual, open: async (...args: Parameters<typeof actual.open>) => {
     const file = await actual.open(...args), stat = file.stat.bind(file)
-    file.stat = vi.fn(async () => state.stat(await stat())) as typeof file.stat
+    file.stat = vi.fn(async (options?: Parameters<typeof stat>[0]) => state.stat(await stat(options))) as typeof file.stat
     return file
   } }
 })

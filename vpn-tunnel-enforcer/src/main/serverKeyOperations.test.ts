@@ -195,7 +195,8 @@ describe('VPN key operation lifetime', () => {
   it.each(['open', 'write', 'sync'])('retains destination and physical lease until cancelled %s drains', async step => {
     const gate = held(undefined); state.hold = step; state.gate = gate.promise
     const run = invoke('servers:export-key-file', 'a')
-    await vi.waitFor(() => expect(state.reached).toBe(1))
+    // Real Windows creation/handle-identity preparation precedes this boundary.
+    await vi.waitFor(() => expect(state.reached).toBe(1), { timeout: 5000 })
     registry.cancel(running().operationId)
     expect(await run).toMatchObject({ ok: false, error: { category: 'cancelled' } })
     expect(await invoke('servers:export-all-proxies-file')).toMatchObject({ ok: false, error: { category: 'conflict' } })
@@ -203,7 +204,7 @@ describe('VPN key operation lifetime', () => {
     gate.release(); await registry.close()
     expect(readFileSync(destination, 'utf8')).toBe('previous export'); expect(temporaries()).toEqual([])
     expect(state.handles.every(file => file.closed)).toBe(true)
-  })
+  }, 15_000)
   it.each(files)('maps native file errors without exposing paths/secrets: %s', async channel => {
     state.writeFailure = Object.assign(new Error('C:\\private\\' + secret + '\n at private stack'), { code: 'EACCES' })
     const result = await invokeExport(channel)
