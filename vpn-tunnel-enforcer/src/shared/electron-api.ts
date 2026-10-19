@@ -124,8 +124,8 @@ export interface ElectronAPI {
     | { ok: true; country: string; profile: ServerProfile }
     | { ok: false; reason: string; country?: string }
   >
-  serversAdd: (input: string, options?: { clientDevice?: ClientDevice }) => Promise<ServerProfile[]>
-  serversAddToGroup: (input: string, groupId: string | null, options?: { clientDevice?: ClientDevice }) => Promise<ServerProfile[]>
+  serversAdd: (input: string, options?: { clientDevice?: ClientDevice }, requestId?: string) => Promise<ServerProfile[]>
+  serversAddToGroup: (input: string, groupId: string | null, options?: { clientDevice?: ClientDevice }, requestId?: string) => Promise<ServerProfile[]>
   serversSetClientDevice: (id: string, clientDevice: ClientDevice) => Promise<ServerProfile>
   serversRemove: (id: string) => Promise<void>
   serversCopyKey: (id: string) => Promise<
@@ -158,7 +158,7 @@ export interface ElectronAPI {
   groupsGet: (id: string) => Promise<ServerGroup | null>
   groupsRename: (id: string, name: string) => Promise<ServerGroup | null>
   groupsDelete: (id: string, deleteServers: boolean) => Promise<{ ok: boolean }>
-  groupsRefresh: (id: string) => Promise<RefreshGroupResult>
+  groupsRefresh: (id: string, requestId?: string) => Promise<RefreshGroupResult>
   groupsSetRefreshPolicy: (id: string, intervalMinutes: number | null) => Promise<ServerGroup>
   groupsCheckHealth: (id: string) => Promise<
     | { ok: true; results: Array<{ profileId: string; online: boolean; latencyMs: number | null; reason?: string }> }
@@ -249,6 +249,7 @@ export interface ElectronAPI {
   plannedFeaturesStatus: () => Promise<PlannedFeatureStatus[]>
   plannedFeatureActivate: (featureId: PlannedFeatureId) => Promise<boolean>
   operationsCancel: (operationId: string) => Promise<boolean>
+  operationsCancelRequest: (requestId: string) => Promise<boolean>
   speedTestHistory: () => Promise<SpeedTestResult[]>
   onSpeedTestProgress: (callback: (data: { percent: number; phase: string; operationId?: string; requestId?: string }) => void) => () => void
   // External Proxy

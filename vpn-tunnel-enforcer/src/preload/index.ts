@@ -244,9 +244,9 @@ contextBridge.exposeInMainWorld('electronAPI', withIpcFailures({
   serversPingOne: (host: string, port: number) => invoke('servers:ping-one', assertString(host, 'host'), assertRequiredPort(port, 'port')),
   serversVerifyActiveCountry: (ip: string) => invoke('servers:verify-active-country', assertString(ip, 'ip')),
   serversVerifyCountry: (id: string) => invoke('servers:verify-country', assertString(id, 'id')),
-  serversAdd: (input: string, options?: { clientDevice?: ClientDevice }) => invoke('servers:add', assertString(input, 'input', MAX_VPN_INPUT_CHARS), assertClientDeviceOptions(options)),
-  serversAddToGroup: (input: string, groupId: string | null, options?: { clientDevice?: ClientDevice }) =>
-    invoke('servers:add-to-group', assertString(input, 'input', MAX_VPN_INPUT_CHARS), assertNullableString(groupId, 'groupId'), assertClientDeviceOptions(options)),
+  serversAdd: (input: string, options?: { clientDevice?: ClientDevice }, requestId?: string) => invoke('servers:add', assertString(input, 'input', MAX_VPN_INPUT_CHARS), assertClientDeviceOptions(options), ...(requestId === undefined ? [] : [assertString(requestId, 'requestId')])),
+  serversAddToGroup: (input: string, groupId: string | null, options?: { clientDevice?: ClientDevice }, requestId?: string) =>
+    invoke('servers:add-to-group', assertString(input, 'input', MAX_VPN_INPUT_CHARS), assertNullableString(groupId, 'groupId'), assertClientDeviceOptions(options), ...(requestId === undefined ? [] : [assertString(requestId, 'requestId')])),
   serversSetClientDevice: (id: string, clientDevice: ClientDevice) => invoke('servers:set-client-device', assertString(id, 'id'), assertClientDevice(clientDevice)),
   serversRemove: (id: string) => invoke('servers:remove', assertString(id, 'id')),
   serversCopyKey: (id: string) => invoke('servers:copy-key', assertString(id, 'id')),
@@ -259,7 +259,7 @@ contextBridge.exposeInMainWorld('electronAPI', withIpcFailures({
   groupsGet: (id: string) => invoke('groups:get', assertString(id, 'id')),
   groupsRename: (id: string, name: string) => invoke('groups:rename', assertString(id, 'id'), assertString(name, 'name')),
   groupsDelete: (id: string, deleteServers: boolean) => invoke('groups:delete', assertString(id, 'id'), assertBoolean(deleteServers, 'deleteServers')),
-  groupsRefresh: (id: string) => invoke('groups:refresh', assertString(id, 'id')),
+  groupsRefresh: (id: string, requestId?: string) => invoke('groups:refresh', assertString(id, 'id'), ...(requestId === undefined ? [] : [assertString(requestId, 'requestId')])),
   groupsSetRefreshPolicy: (id: string, intervalMinutes: number | null) =>
     invoke('groups:set-refresh-policy', assertString(id, 'id'), intervalMinutes === null ? null : assertInteger(intervalMinutes, 'intervalMinutes')),
   groupsCheckHealth: (id: string) => invoke('groups:check-health', assertString(id, 'id')),
@@ -418,6 +418,7 @@ contextBridge.exposeInMainWorld('electronAPI', withIpcFailures({
   plannedFeaturesStatus: () => invoke('planned-features:status'),
   plannedFeatureActivate: (featureId: PlannedFeatureId) => invoke('planned-features:activate', assertEnum(featureId, PLANNED_FEATURE_IDS, 'featureId')),
   operationsCancel: (operationId: string) => invoke('operations:cancel', operationId),
+  operationsCancelRequest: (requestId: string) => invoke('operations:cancel-request', assertString(requestId, 'requestId')),
   speedTestHistory: () => invoke('speed-test:history'),
   onSpeedTestProgress: (callback: (data: { percent: number; phase: string; operationId?: string; requestId?: string }) => void) => {
     const handler = (_event: any, data: { percent: number; phase: string; operationId?: string; requestId?: string }) => callback(data)

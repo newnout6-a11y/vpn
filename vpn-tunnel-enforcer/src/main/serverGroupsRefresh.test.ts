@@ -92,7 +92,7 @@ import {
 } from './serverGroups'
 import { serverPickerStore } from './sharedStores'
 import type { VpnProfile } from './vpnProfiles'
-import { operations } from './operations'
+import { operations, registerOperationHandlers } from './operations'
 import { logEvent } from './appLogger'
 import { withProfileStoreWriteLock } from './profileStoreQueue'
 
@@ -153,6 +153,29 @@ describe('owned subscription refresh (AT-00-003/005/007; F-063/F-070)', () => {
     storeData.current['server-picker'].profiles = [profile, { ...profile, id: 'android', clientDevice: 'android' }]
     return group
   }
+
+  it('cancels a manual refresh by requester token before any result reaches the renderer', async () => {
+    const group = seed(), gate = heldRefresh()
+    const sender = Object.assign(new EventEmitter(), { isDestroyed: () => false })
+    const foreign = Object.assign(new EventEmitter(), { isDestroyed: () => false })
+    const id = 'd5abf17e-bf69-4f23-9e3c-b69ed0b32089'
+    registerOperationHandlers(); registerServerGroupsHandlers()
+    const refresh = vi.mocked(ipcMain.handle).mock.calls.find(([channel]) => channel === 'groups:refresh')![1]
+    const cancel = vi.mocked(ipcMain.handle).mock.calls.find(([channel]) => channel === 'operations:cancel-request')?.[1]
+    expect(cancel).toBeTypeOf('function')
+    resolveVpnProfilesMock.mockReturnValue(gate.promise)
+    const run = refresh({ sender } as never, group.id, id)
+    const rejected = expect(run).rejects.toMatchObject({ category: 'cancelled' })
+    await vi.waitFor(() => expect(resolveVpnProfilesMock).toHaveBeenCalledOnce())
+    const before = JSON.stringify(storeData.current)
+    expect(await cancel!({ sender: foreign } as never, id)).toBe(false)
+    expect(await cancel!({ sender } as never, id)).toBe(true)
+    await rejected
+    gate.release(); await operations.close()
+    expect(JSON.stringify(storeData.current)).toBe(before)
+    expect(await cancel!({ sender } as never, id)).toBe(false)
+    expect(sender.eventNames()).toEqual([])
+  })
 
   it.each(['destroyed', 'render-process-gone', 'did-navigate'])('cancels manual refresh on requester %s', async event => {
     const group = seed(), gate = heldRefresh()

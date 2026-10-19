@@ -44,6 +44,7 @@ import { ForeignVpnBanner } from '../components/ForeignVpnBanner'
 import { emitServerChanged } from '../nav'
 import { useAppStore } from '../store'
 import type { ClientDevice, ServerGroup, ServerProfile } from '../../shared/ipc-types'
+import { isIpcRemoteErrorData } from '../../shared/ipc-result'
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -243,6 +244,25 @@ function writeExpandedIds(ids: Set<string>) {
 
 export function Servers() {
   const { t, i18n } = useTranslation()
+  const mounted = useRef(false)
+  const requests = useRef(new Set<string>())
+  const toastTimers = useRef(new Set<number>())
+  const current = (id: string) => mounted.current && requests.current.has(id)
+  const beginRequest = () => {
+    const id = crypto.randomUUID()
+    requests.current.add(id)
+    return id
+  }
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+      for (const id of requests.current) void window.electronAPI.operationsCancelRequest(id).catch(() => {})
+      requests.current.clear()
+      for (const timer of toastTimers.current) window.clearTimeout(timer)
+      toastTimers.current.clear()
+    }
+  }, [])
   const addLog = useAppStore((s) => s.addLog)
   const tunRunning = useAppStore((s) => s.tunRunning)
   const connectionMode = useAppStore((s) => s.settings.connectionMode)
@@ -292,11 +312,14 @@ export function Servers() {
 
   const showToast = useCallback(
     (variant: ToastData['variant'], title: string, description?: string) => {
+      if (!mounted.current) return
       const id = nextToastId()
       setToasts((prev) => [...prev, { id, variant, title, description }])
-      window.setTimeout(() => {
-        setToasts((prev) => prev.filter((tt) => tt.id !== id))
+      const timer = window.setTimeout(() => {
+        toastTimers.current.delete(timer)
+        if (mounted.current) setToasts((prev) => prev.filter((tt) => tt.id !== id))
       }, 6000)
+      toastTimers.current.add(timer)
     },
     []
   )
@@ -312,6 +335,7 @@ export function Servers() {
         window.electronAPI.serversList(),
         window.electronAPI.serversGetActive()
       ])
+      if (!mounted.current) return
       setProfiles(list)
       setActiveId(active.activeId ?? active.profile?.id ?? null)
       const api = window.electronAPI as unknown as {
@@ -319,7 +343,7 @@ export function Servers() {
       }
       if (resolveIps && typeof api.serversResolveIps === 'function') {
         void api.serversResolveIps()
-          .then((resolved) => setProfiles(resolved))
+          .then((resolved) => { if (mounted.current) setProfiles(resolved) })
           .catch(() => {})
       }
     } catch (err) {
@@ -339,10 +363,12 @@ export function Servers() {
     }
     try {
       const list = await api.groupsList()
+      if (!mounted.current) return
       setGroupsAvailable(true)
       setGroups(Array.isArray(list) ? list : [])
     } catch (err) {
       // If the IPC exists but blows up, fall back rather than wedging the page.
+      if (!mounted.current) return
       console.warn('[Servers] groupsList failed, falling back to flat list:', err)
       setGroupsAvailable(false)
       setGroups([])
@@ -613,7 +639,8 @@ export function Servers() {
 
   const handleAdd = async () => {
     const trimmed = addInput.trim()
-    if (!trimmed) return
+    if (!trimmed || adding) return
+    const requestId = beginRequest()
 
     setAdding(true)
     setAddError('')
@@ -622,25 +649,28 @@ export function Servers() {
         serversAddToGroup?: (
           input: string,
           groupId: string | null,
-          options?: { clientDevice?: ClientDevice }
+          options?: { clientDevice?: ClientDevice }, requestId?: string
         ) => Promise<ServerProfile[]>
       }
       if (addGroupId !== NEW_GROUP_OPTION && groupsAvailable && api.serversAddToGroup) {
-        await api.serversAddToGroup(trimmed, addGroupId, { clientDevice: addClientDevice })
+        await api.serversAddToGroup(trimmed, addGroupId, { clientDevice: addClientDevice }, requestId)
       } else {
-        await window.electronAPI.serversAdd(trimmed, { clientDevice: addClientDevice })
+        await window.electronAPI.serversAdd(trimmed, { clientDevice: addClientDevice }, requestId)
       }
+      if (!current(requestId)) return
       setAddInput('')
       // Reset selection to "create new" so the user's next paste also creates
       // a fresh group unless they pick otherwise. Keeps focus on the input
       // for serial pastes.
       setAddGroupId(NEW_GROUP_OPTION)
       await refreshAll()
+      if (!current(requestId)) return
       emitServerChanged()
     } catch (err: any) {
-      setAddError(err?.message || String(err))
+      if (current(requestId) && (!isIpcRemoteErrorData(err) || err.category !== 'cancelled')) setAddError(err?.message || String(err))
     } finally {
-      setAdding(false)
+      if (current(requestId)) setAdding(false)
+      requests.current.delete(requestId)
     }
   }
 
@@ -961,9 +991,9 @@ export function Servers() {
   // ─── Group refresh / health-check / delete ──────────────────────────────
 
   const handleGroupRefresh = async (group: ServerGroup) => {
-    if (group.id === VIRTUAL_ALL_GROUP_ID) return
+    if (group.id === VIRTUAL_ALL_GROUP_ID || refreshingGroups[group.id]) return
     const api = window.electronAPI as unknown as {
-      groupsRefresh?: (id: string) => Promise<
+      groupsRefresh?: (id: string, requestId?: string) => Promise<
         | { ok: true; group: ServerGroup; addedCount: number; updatedCount: number; removedCount: number }
         | { ok: false; error: string }
       >
@@ -972,12 +1002,15 @@ export function Servers() {
       showToast('warning', t('servers.groups.fallbackHint', 'Группы по подпискам станут доступны после следующего обновления.'))
       return
     }
+    const requestId = beginRequest()
     setRefreshingGroups((prev) => ({ ...prev, [group.id]: true }))
     try {
-      const result = await api.groupsRefresh(group.id)
+      const result = await api.groupsRefresh(group.id, requestId)
+      if (!current(requestId)) return
       if (result.ok) {
         setGroups((prev) => prev.map((g) => (g.id === result.group.id ? result.group : g)))
         await fetchProfiles()
+        if (!current(requestId)) return
         emitServerChanged()
         addLog(
           'info',
@@ -1014,15 +1047,17 @@ export function Servers() {
         await fetchGroups()
       }
     } catch (err: any) {
+      if (!current(requestId) || (isIpcRemoteErrorData(err) && err.category === 'cancelled')) return
       const message = err?.message ?? String(err)
       addLog('error', `${group.name}: ${message}`)
       showToast('error', t('servers.groups.refreshFailed'), message)
     } finally {
-      setRefreshingGroups((prev) => {
+      if (current(requestId)) setRefreshingGroups((prev) => {
         const next = { ...prev }
         delete next[group.id]
         return next
       })
+      requests.current.delete(requestId)
     }
   }
 

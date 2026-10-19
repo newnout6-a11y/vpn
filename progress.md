@@ -5649,3 +5649,69 @@ CI/review нового SHA проверяются отдельно после pu
   во время прогона. Initial CI 39225869946 на 1577193 — success, watcher
   exit 0 (.tmp/wp0-config-request-ci-watch.log); новый head требует своего
   completed Qodo и CI, старый результат не переносится на исправления.
+- PR #79 слит: final head 589490bb12f9d171329005e95c1d0350221fa453,
+  Qodo 1546296 completed без открытых findings; CI 39227466851 completed/success
+  (Windows/Rust/site, включая все native steps), watcher exit 0
+  (.tmp/wp0-config-request-qodo-ci-watch.log). REST merged=true;
+  merge/main d7a43782bfa251669092df74e073051c74aec086. Fetch/ff и tree diff
+  reviewed head→main — exit 0. Revix full review по квоте отсутствует,
+  отсутствие не объявляется approval. Ранее initial CI также success.
+- Следующая ветка codex/wp0-server-request-lifetime от d7a4378: AT-00-003/008,
+  ручные servers:add/add-to-group и groups:refresh при SPA unmount Servers.
+  Main уже связывает их с document lifetime (#78), но SPA unmount не меняет
+  документ. HandleAdd/handleGroupRefresh продолжают UI/store workflow после
+  unmount; requester token должен быть известен до invoke, cancellation scoped
+  по sender и request, поздние effects блокируются lease, shared queue drain
+  сохраняется. Автоматические refresh не принадлежат renderer.
+- Реализован operations:cancel-request (165-й typed IPC канал): optional token
+  добавлен в servers:add/add-to-group и groups:refresh. runRequesterOperation
+  хранит ownership WebContents+UUIDv4, reject duplicate/malformed до effects,
+  отменяет только свою admitted lease; signal покрывает pre-admission. Commit
+  остаётся терминальным: cancel во время wrapper cleanup после commit — false.
+  Main operation UUID/correlation не заменяются renderer token. Legacy calls
+  сохраняют прежние аргументы и document cancellation; cleanup сверяет Map.
+- Servers на unmount отменяет только свои ручные requests, очищает toast timers,
+  блокирует поздние data/UI/log/nav callbacks. Фоновые refresh не захватываются
+  страницей. Нормальный текущий import/refresh и quiet typed cancel сохранены.
+- До main fix: node node_modules/vitest/vitest.mjs --run
+  src/main/serverGroupsRefresh.test.ts -t 'requester token' — 1 failed /
+  40 skipped, 0.697 s, exit 1 (.tmp/wp0-server-request-before.log).
+  До UI fix: npm.cmd test -- src/renderer/pages/Servers.requestLifetime.test.tsx
+  — 2 failed /1 passed, 3.18 s, exit 1 (.tmp/wp0-server-request-ui-before.log).
+- После implementation: npm.cmd test -- src/main/profileImportOperations.test.ts
+  src/main/requesterOperation.test.ts src/main/serverGroupsRefresh.test.ts
+  src/renderer/pages/Servers.requestLifetime.test.tsx src/renderer/pages/Servers.test.ts
+  src/preload/preloadValidation.test.ts src/main/ipcChannelContract.test.ts —
+  **157 passed**, 7 suites, **4.92 s**, exit 0
+  (.tmp/wp0-server-request-boundaries.log). Включены new/target/repaste imports,
+  scoped cancel, physical drain/no late writes, duplicate/malformed/stale,
+  legacy overlap, committed result, unmount and current-success/toast cleanup.
+- npm.cmd run build — exit 0 (.tmp/wp0-server-request-build.log);
+  повторный npm.cmd run typecheck — exit 0, 165 channels /0 public any
+  (.tmp/wp0-server-request-typecheck.log). node scripts/test-electron-runtime.mjs
+  — пять PASS, exit 0 (.tmp/wp0-server-request-electron.log). Новый
+  SERVER_REQUEST_NATIVE_PASS использует actual handlers/stores/registry/guard/
+  preload/contextBridge; controlled resolver и неиспользуемые OS/runtime boundaries.
+  Refresh/import/target/repaste cancel <900ms, original correlation/main UUID,
+  foreign/stale refusal, no late writes, retained drain/listener cleanup и
+  fresh successful import. Fixture bundling сначала потребовал перечислить
+  отсутствующие runtime exports; unexpected runtime accesses бросают ошибку.
+  Это native local fixture, не live VPN/OS приёмка.
+- node scripts/test-wp1-native.mjs --ipc-only — WP1_NATIVE_PASS, exit 0
+  (.tmp/wp0-server-request-csp.log). Traceability AC 927/927, F 210/210 и
+  git diff --check — exit 0. Полный npm.cmd test выполняется; PR ещё не создан.
+- Первый full npm.cmd test — **4657 passed /5 skipped /3 failed**,
+  304.45 s, exit 1 (.tmp/wp0-server-request-full-native-timeouts.log).
+  Все три failure в прежнем adaptiveNetworkIdentity.test.ts: native CIM
+  failure/profile-only/Unicode cases exceeded default 5000 ms (5608/10405/
+  10562 ms), без assertion failure. npm.cmd test --
+  src/main/adaptiveNetworkIdentity.test.ts — **25 passed**, 3.87 s, exit 0
+  (.tmp/wp0-server-request-identity-repro.log). Этот suite и его budgets,
+  assertions и production deadlines не менялись. Причина замедления одним
+  логом не доказана; полный default run повторён на неизменяемом tree.
+- Final повторный npm.cmd test на том же production/unit tree —
+  **4660 passed /5 skipped /0 failed**, 283 files passed /2 skipped,
+  **335.97 s**, exit 0 (.tmp/wp0-server-request-full.log). Budgets/tests
+  adaptiveNetworkIdentity не менялись. Build/typecheck, 157 targeted tests,
+  пять Electron fixtures, IPC/CSP, coverage/diff — exit 0, как записано выше.
+  Следующий PR требует completed Qodo и CI на final SHA до продолжения.
