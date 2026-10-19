@@ -23,6 +23,7 @@ import type { SpeedTestResult } from '../shared/ipc-types'
 import { IpcFault } from '../shared/ipc-result'
 import { operations } from './operations'
 import type { OperationLease } from './operationRegistry'
+import { requireString, IpcValidationError } from './ipcValidation'
 
 // ─── Persistent Store ────────────────────────────────────────────────────────
 
@@ -83,6 +84,18 @@ const MAX_HISTORY = 50
 
 let lastReportedPercent = -1
 let lastReportedPhase = ''
+interface UiRequest {
+  requestId: string
+  sender: IpcMainInvokeEvent['sender']
+  controller: AbortController
+  operationId?: string
+}
+const uiRequests = new Map<string, UiRequest>()
+function uiRequestId(value: unknown): string {
+  const id = requireString(value, 'requestId', { maxLength: 36 })
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) throw new IpcValidationError('Invalid requestId')
+  return id.toLowerCase()
+}
 
 /**
  * Sends progress events to all renderer windows.
@@ -98,7 +111,9 @@ function sendProgress(lease: OperationLease, percent: number, phase: string): vo
   for (const win of BrowserWindow.getAllWindows()) {
     try { lease.assertActive() } catch { return }
     if (!win.isDestroyed()) {
-      win.webContents.send('speed-test:progress', { percent, phase, operationId: lease.operation.operationId })
+      const request = [...uiRequests.values()].find(item => item.operationId === lease.operation.operationId)
+      win.webContents.send('speed-test:progress', { percent, phase, operationId: lease.operation.operationId,
+        ...(request ? { requestId: request.requestId } : {}) })
     }
   }
 }
@@ -361,8 +376,11 @@ async function measureAccurateUpload(lease: OperationLease): Promise<number> {
   return Math.max(probeMbps, sustainedMbps)
 }
 
-async function runSpeedTest(options: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<SpeedTestResult> {
-  return operations.run('speed-test', performSpeedTest, options)
+async function runSpeedTest(options: { signal?: AbortSignal; timeoutMs?: number } = {}, request?: UiRequest): Promise<SpeedTestResult> {
+  return operations.run('speed-test', lease => {
+    if (request) request.operationId = lease.operation.operationId
+    return performSpeedTest(lease)
+  }, options)
 }
 
 async function performSpeedTest(lease: OperationLease): Promise<SpeedTestResult> {
@@ -489,8 +507,26 @@ function handleLogged<T>(
  * Should be called once during app initialization.
  */
 export function registerSpeedTestHandlers(): void {
-  handleLogged('speed-test:run', async () => {
-    return await runSpeedTest()
+  handleLogged('speed-test:run', async (event, requestId?: string) => {
+    const id = requestId === undefined ? undefined : uiRequestId(requestId)
+    if (id && uiRequests.has(id)) throw new IpcFault('conflict')
+    const controller = new AbortController(), destroyed = () => controller.abort()
+    const request = id ? { requestId: id, sender: event.sender, controller } : undefined
+    if (event.sender?.isDestroyed?.()) throw new IpcFault('cancelled')
+    event.sender?.once?.('destroyed', destroyed)
+    if (id && request) uiRequests.set(id, request)
+    try { return await runSpeedTest({ signal: controller.signal }, request) }
+    finally {
+      if (id) uiRequests.delete(id)
+      event.sender?.removeListener?.('destroyed', destroyed)
+    }
+  })
+
+  handleLogged('speed-test:cancel', (event, requestId: string) => {
+    const request = uiRequests.get(uiRequestId(requestId))
+    if (!request || request.sender !== event.sender || request.controller.signal.aborted) return false
+    request.controller.abort()
+    return true
   })
 
   handleLogged('speed-test:history', async () => {

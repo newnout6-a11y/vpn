@@ -410,12 +410,13 @@ contextBridge.exposeInMainWorld('electronAPI', withIpcFailures({
     return () => ipcRenderer.removeListener('i18n:locale-changed', handler)
   },
   // Speed Test
-  speedTestRun: () => invoke('speed-test:run'),
+  speedTestRun: (requestId?: string) => invoke('speed-test:run', assertOptionalString(requestId, 'requestId')),
+  speedTestCancel: (requestId: string) => invoke('speed-test:cancel', assertString(requestId, 'requestId')),
   operationsList: () => invoke('operations:list'),
   operationsCancel: (operationId: string) => invoke('operations:cancel', operationId),
   speedTestHistory: () => invoke('speed-test:history'),
-  onSpeedTestProgress: (callback: (data: { percent: number; phase: string; operationId?: string }) => void) => {
-    const handler = (_event: any, data: { percent: number; phase: string; operationId?: string }) => callback(data)
+  onSpeedTestProgress: (callback: (data: { percent: number; phase: string; operationId?: string; requestId?: string }) => void) => {
+    const handler = (_event: any, data: { percent: number; phase: string; operationId?: string; requestId?: string }) => callback(data)
     ipcRenderer.on('speed-test:progress', handler)
     return () => ipcRenderer.removeListener('speed-test:progress', handler)
   },
