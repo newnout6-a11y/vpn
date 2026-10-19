@@ -17,7 +17,7 @@
 | --- | --- | --- |
 | 00-001 | AST-проверка 160 main/preload/shared request channels, общий реестр входов и versioned transport envelope; object contracts проверяют поля/массивы, save-settings покрывает все 39 общих полей AppSettings; TypeScript checker проверяет results всех 160 listeners, public results с `any` больше нет; native contextBridge сохраняет JSON профиля и nullable active result, feature list/cancel | Завершить проверку текущего PR; отдельная semantic matrix ошибок остаётся в 00-004 |
 | 00-002 | Production TunnelStateMachine интегрирована в main lane/IPC/Soft/tray/UI; 4096 stable tours и 117649 tours семи событий глубиной 6, включая timeout/cancel и native completion, с fake PID/TUN ledger и балансом operation events; sticky faults и generation fencing | Общая durable operation history/counters; все blocked/unknown/background paths; native Windows resources; общий admission фоновых restart |
-| 00-003 | Main connection lane: UUIDv4, owner, deadline запуска, priority admission; ручные Hard/Direct и Soft из tray, scheduled startup вместе с proxy detection; общий feature registry с prompt cancellation/deadline и physical drain, speed test, refresh подписок и импорт профилей, включая curl/DoH и commit queue | Config import/export/rotation и UI cancel/unmount; deadline остановки, все entrypoints и полная матрица поздних эффектов |
+| 00-003 | Main connection lane: UUIDv4, owner, deadline запуска, priority admission; ручные Hard/Direct и Soft из tray, scheduled startup вместе с proxy detection; общий feature registry с prompt cancellation/deadline и physical drain, speed test, refresh подписок и импорт профилей, включая curl/DoH и commit queue; текущий участок config browse/validate/apply/export реализован локально, PR gate ещё впереди | Завершить config PR gate; экспорт ключей/rotation и UI cancel/unmount; deadline остановки, все entrypoints и полная матрица поздних эффектов |
 | 00-004 | Общая классификация transport; 157 каналов × 7 категорий через guard; native contextBridge сохраняет code/category/correlation в en/ru; typed local validation; 4 настоящих config handlers × 7 категорий, canonical domain failures | Миграция legacy domain-result `{success:false,error}` и semantic matrix настоящих feature handlers; transport fixtures не доказывают её |
 | 00-005 | Один action correlation id в guarded IPC response/error, lifecycle connect/stop и JSONL logger; async isolation, native wait/drain, diagnostic read-back с повторной redaction; ID исходного connect и source/owner/route/confidence в session history/JSON/CSV; JSONL clockId/monotonicMs отдельно от календарных дат и durationMs; реальные owned/legacy/tray/recovery Soft sessions | Все native/background entrypoints и полная матрица событий/истории автоматизаций, live-check и recovery |
 | 00-006 | Локальные миграции; общий version admission для 20 electron-store файлов / 28 constructors; future-version SHA-256 invariance на real Conf backend до defaults/repair и при записи через ранее открытый handle | Централизованный упорядоченный migration registry, fixtures всех исторических преобразований, остальные persisted JSON, полноценный upgrade/downgrade и межпроцессная координация |
@@ -957,3 +957,34 @@ PR #69 слит после Qodo 1542807 completed (оба прежних finding
 новых нет) и CI 39179194108 success на a5cf69e. Отдельный REST GET подтвердил
 merge 639ade1. Это закрывает текущий участок profile import, сохраняя перечисленные
 границы общего AT; config import/export и UI остаются открытыми.
+
+
+## Конфигурация: отмена, async file I/O и terminal commit (19.10.2026)
+
+Browse/validate/apply/export используют общий operation registry: UUIDv4,
+исходный IPC correlation, deadline 120 s, prompt cancellation и physical drain.
+Уничтожение renderer отменяет его запрос; завершившийся поздний dialog/read
+не выдаёт capability и не сохраняет настройки. Grant по-прежнему main-only,
+привязан к sender, snapshot выбранных байтов и сроку 60 s; apply забирает его
+однократно при invocation и повторно проверяет authority внутри общей очереди
+profile writes. Expiry/new selection не разрешают старому queued apply запись.
+Merge перечитывает актуальные stores в очереди и сохраняет concurrent profiles.
+
+Чтение выполняется асинхронно через один handle, ограничено 16 MiB + 1,
+проверяет regular file, длину и size/mtime до/после чтения. Экспорт сначала
+пишет собственный wx/0600 temp рядом с назначением, делает fsync/close,
+затем синхронный rename в финальном lease.commit. Cancel сохраняет прежний
+файл и ждёт raw I/O/close перед удалением своего temp. Ошибка write/rename
+возвращается явно; после terminal commit поздний abort не превращает уже
+сохранённый успех в cancelled. Registry запрещает commit при незавершённом
+tracked I/O и диагностирует feature throw после commit без изменения результата.
+
+Controlled fixture выполняет production config/registry/IPC guard и настоящие
+файлы, Conf, logger/redactor/JSONL/diagnostic read-back. Покрыты held dialogs,
+secret consent, open/read/write/fsync, queued cancel/destroy/expiry/replacement/
+shutdown, single-use, concurrent merge, persistence/rollback и rename failures,
+terminal abort и deadline. Electron/DPAPI boundary и native dialogs заменены;
+новая приёмка DPAPI, системных ACL и самого Windows dialog этим не заявляется.
+UI cancel/unmount и прочие операции остаются в общем остатке WP-0. Команды,
+фактические результаты и Qodo/CI gate фиксируются в progress.md; завершение
+всего AT-00-003 или WP-0 не заявлено.

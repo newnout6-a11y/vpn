@@ -3,7 +3,6 @@ import { EventEmitter } from 'node:events'
 import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { fstatSync } from 'fs'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { IPC_VERSION, IpcFault, ipcError, type IpcErrorCategory } from '../shared/ipc-result'
 
@@ -11,7 +10,7 @@ const state = vi.hoisted(() => ({
   handlers: new Map<string, (...args: any[]) => Promise<any>>(),
   selection: '', destination: '', fault: undefined as unknown,
   failDialog: false, failStore: false, failSetKey: '',
-  stores: new Map<string, Record<string, unknown>>()
+  stores: new Map<string, Record<string, unknown>>(), stat: vi.fn((stats: any) => stats)
 }))
 vi.mock('electron', () => ({
   ipcMain: { handle: (channel: string, handler: (...args: any[]) => Promise<any>) => state.handlers.set(channel, handler) },
@@ -26,9 +25,13 @@ vi.mock('electron', () => ({
     })
   }
 }))
-vi.mock('fs', async importOriginal => {
-  const actual = await importOriginal<typeof import('fs')>()
-  return { ...actual, fstatSync: vi.fn(actual.fstatSync) }
+vi.mock('fs/promises', async importOriginal => {
+  const actual = await importOriginal<typeof import('fs/promises')>()
+  return { ...actual, open: async (...args: Parameters<typeof actual.open>) => {
+    const file = await actual.open(...args), stat = file.stat.bind(file)
+    file.stat = vi.fn(async () => state.stat(await stat())) as typeof file.stat
+    return file
+  } }
 })
 vi.mock('electron-store', () => ({ default: class {
   name: string
@@ -77,6 +80,7 @@ function expectFailure(response: any, category: IpcErrorCategory) {
 beforeEach(() => {
   directory = mkdtempSync(join(tmpdir(), 'vpnte-config-errors-'))
   sender = new Sender(); state.fault = undefined; state.failDialog = false; state.failStore = false; state.failSetKey = ''
+  state.stat.mockReset().mockImplementation(stats => stats)
   state.stores.get('notification-prefs')!.notificationPrefs = { ...collectCurrentConfig().notifications, sound: true }
   state.selection = join(directory, 'selected.json'); state.destination = join(directory, 'exported.json')
   writeFileSync(state.selection, JSON.stringify(collectCurrentConfig()))
@@ -101,14 +105,13 @@ describe('config domain error envelopes (AT-00-004)', () => {
     expect(state.stores.get('profile-rotation')!.rotation).toEqual(before.get('profile-rotation')!.rotation)
   })
   it.each(['file-too-large', 'file-not-regular', 'file-changed'])('records a bounded reason for %s without granting authority', async validationCode => {
-    const actual = await vi.importActual<typeof import('fs')>('fs')
     if (validationCode === 'file-too-large') writeFileSync(state.selection, 'x'.repeat(16 * 1024 * 1024 + 1))
     if (validationCode === 'file-not-regular') {
-      vi.mocked(fstatSync).mockImplementationOnce(fd => Object.assign(actual.fstatSync(fd), { isFile: () => false }))
+      state.stat.mockImplementationOnce(stats => Object.assign(stats, { isFile: () => false }))
     }
     if (validationCode === 'file-changed') {
-      vi.mocked(fstatSync).mockImplementationOnce(fd => actual.fstatSync(fd))
-        .mockImplementationOnce(fd => Object.assign(actual.fstatSync(fd), { mtimeMs: 0 }))
+      state.stat.mockImplementationOnce(stats => stats)
+        .mockImplementationOnce(stats => Object.assign(stats, { mtimeMs: 0 }))
     }
     const reason = validationCode === 'file-changed' ? 'conflict' : 'validation'
     expectFailure(await invoke('config:browse-import'), reason)

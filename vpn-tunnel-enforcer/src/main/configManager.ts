@@ -20,7 +20,7 @@
  */
 
 import { ipcMain, dialog, type IpcMainInvokeEvent, type WebContents } from 'electron'
-import { readFileSync, readSync, writeFileSync, openSync, closeSync, fstatSync } from 'fs'
+import { randomUUID } from 'crypto'
 import Store from './versionedStore'
 import { logEvent } from './appLogger'
 import { compactForIpcLog } from './ipcLogging'
@@ -29,6 +29,10 @@ import { redactConfigExport } from './configExportPolicy'
 import { requireEnum, requireString, requireStringArray } from './ipcValidation'
 import { IpcFault, classifyIpcError } from '../shared/ipc-result'
 import { serverPickerStore, serverGroupsStore, granularKillSwitchStore } from './sharedStores'
+import { operations } from './operations'
+import type { OperationLease } from './operationRegistry'
+import { withProfileStoreWriteLock } from './profileStoreQueue'
+import { readSelectedConfig, writeConfigExport } from './configOperationIo'
 import type {
   SplitTunnelApp,
   ServerProfile,
@@ -61,6 +65,24 @@ export const ALL_SECTIONS = [
 ] as const
 
 export type ConfigSection = (typeof ALL_SECTIONS)[number]
+interface ConfigOperationOptions {
+  signal?: AbortSignal
+  sender?: WebContents
+  assertAuthorized?: () => void
+}
+
+/** Main-only lifetime; renderer arguments cannot supply these options. */
+async function runConfigOperation<T>(kind: 'import' | 'export', resource: string, effect: (lease: OperationLease) => Promise<T>, options: ConfigOperationOptions = {}): Promise<T> {
+  if (options.sender?.isDestroyed?.()) throw new IpcFault('cancelled')
+  const lifetime = new AbortController(), destroyed = () => lifetime.abort()
+  options.sender?.once?.('destroyed', destroyed)
+  const signal = options.signal ? AbortSignal.any([options.signal, lifetime.signal]) : lifetime.signal
+  try { return await operations.run(kind, effect, { resource, signal }) }
+  finally { options.sender?.removeListener?.('destroyed', destroyed) }
+}
+
+const yieldConfigOperation = (lease: OperationLease) => lease.wait(new Promise<void>(done => setImmediate(done)))
+
 type ImportValidationCode = 'not-object' | 'missing-version' | 'incompatible-version'
   | 'no-sections' | 'profile-entry' | 'rotation-fields' | 'invalid-json' | 'invalid-config' | 'selected-sections'
   | 'file-too-large' | 'file-not-regular' | 'file-changed'
@@ -614,30 +636,36 @@ function writeConfigToStores(config: ConfigExportData, sections: ConfigSection[]
 /**
  * Exports all settings to a JSON file via save dialog.
  */
-async function exportConfig(sender: WebContents, mode: 'redacted' | 'secrets' = 'redacted'): Promise<{ success: true; path: string }> {
+async function exportConfig(sender: WebContents, mode: 'redacted' | 'secrets' = 'redacted', options: ConfigOperationOptions = {}): Promise<{ success: true; path: string }> {
+  return runConfigOperation('export', 'config:export', lease => exportConfigUnlocked(sender, mode, lease), { ...options, sender })
+}
+
+async function exportConfigUnlocked(sender: WebContents, mode: 'redacted' | 'secrets', lease: OperationLease): Promise<{ success: true; path: string }> {
   try {
     if (mode === 'secrets') {
-      const consent = await withSecretExportConsent(sender, 'file', () => true)
+      const consent = await lease.wait(withSecretExportConsent(sender, 'file', () => true))
       if (consent !== true) throw new IpcFault('cancelled')
     }
     if (sender.isDestroyed()) throw new IpcFault('cancelled')
-    const result = await dialog.showSaveDialog({
+    const result = await lease.wait(dialog.showSaveDialog({
       title: mode === 'secrets' ? 'Экспорт конфигурации с секретами' : 'Экспорт конфигурации без секретов',
       buttonLabel: mode === 'secrets' ? 'Сохранить файл с секретами' : 'Сохранить',
       defaultPath: `vpn-tunnel-enforcer-config-${Date.now()}.json`,
       filters: [{ name: 'JSON Files', extensions: ['json'] }]
-    })
+    }))
 
     if (result.canceled || !result.filePath || sender.isDestroyed()) {
       throw new IpcFault('cancelled')
     }
 
     const config = collectCurrentConfig()
+    lease.assertActive()
     const json = JSON.stringify(mode === 'secrets' ? config : redactConfigExport(config), null, 2)
-    writeFileSync(result.filePath, json, 'utf-8')
+    await yieldConfigOperation(lease)
+    const exported = await writeConfigExport(result.filePath, json, lease, { success: true as const, path: result.filePath })
 
     logEvent('info', 'config-manager', 'config exported', { path: result.filePath, mode })
-    return { success: true, path: result.filePath }
+    return exported
   } catch (err) {
     logConfigFailure('export failed', err)
     throw err
@@ -672,43 +700,47 @@ function logConfigFailure(message: string, error: unknown, source = 'config-mana
   logEvent(reason === 'cancelled' ? 'debug' : 'error', source, message, { reason, ...(ioCode ? { ioCode } : {}) })
 }
 
-function importValidate(filePath: string, approvedRaw?: string): {
+async function importValidate(filePath: string, approvedRaw?: string, options: ConfigOperationOptions = {}): Promise<{
   success: true
   sections: string[]
   conflicts: string[]
-} {
-  try {
-    const raw = approvedRaw ?? readFileSync(filePath, 'utf-8')
-    const parsed = parseImportJson(raw)
+}> {
+  return runConfigOperation('import', 'config:validate', async lease => {
+    try {
+      const raw = approvedRaw ?? await lease.wait(readSelectedConfig(filePath, lease, rejectImport))
+      await yieldConfigOperation(lease)
+      options.assertAuthorized?.()
+      const parsed = parseImportJson(raw)
 
-    const validation = validateImportData(parsed)
-    if (!validation.valid) {
-      rejectImport(validation.reasonCode ?? 'invalid-config')
+      const validation = validateImportData(parsed)
+      if (!validation.valid) {
+        rejectImport(validation.reasonCode ?? 'invalid-config')
+      }
+
+      // Detect conflicts with current config
+      const existing = collectCurrentConfig()
+      const incoming = parsed as ConfigExportData
+      const conflicts = detectConflicts(existing, incoming)
+
+      // Only report conflicts for sections that are actually in the import
+      const relevantConflicts = conflicts.filter((c) => validation.sections.includes(c))
+
+      logEvent('info', 'config-manager', 'import validated', {
+        filePath,
+        sections: validation.sections,
+        conflicts: relevantConflicts
+      })
+
+      return {
+        success: true,
+        sections: validation.sections,
+        conflicts: relevantConflicts
+      }
+    } catch (err) {
+      logConfigFailure('import validation failed', err)
+      throw err
     }
-
-    // Detect conflicts with current config
-    const existing = collectCurrentConfig()
-    const incoming = parsed as ConfigExportData
-    const conflicts = detectConflicts(existing, incoming)
-
-    // Only report conflicts for sections that are actually in the import
-    const relevantConflicts = conflicts.filter((c) => validation.sections.includes(c))
-
-    logEvent('info', 'config-manager', 'import validated', {
-      filePath,
-      sections: validation.sections,
-      conflicts: relevantConflicts
-    })
-
-    return {
-      success: true,
-      sections: validation.sections,
-      conflicts: relevantConflicts
-    }
-  } catch (err) {
-    logConfigFailure('import validation failed', err)
-    throw err
-  }
+  }, options)
 }
 
 // ─── Import (Apply) ─────────────────────────────────────────────────────────
@@ -716,83 +748,96 @@ function importValidate(filePath: string, approvedRaw?: string): {
 /**
  * Applies selected sections from an import file with the specified conflict resolution.
  */
-function importApply(
+async function importApply(
   filePath: string,
   sections: string[],
   conflictResolution: 'replace' | 'merge',
-  approvedRaw?: string
-): { success: true } {
-  try {
-    const raw = approvedRaw ?? readFileSync(filePath, 'utf-8')
-    const parsed = parseImportJson(raw)
-
-    // Re-validate
-    const validation = validateImportData(parsed)
-    if (!validation.valid) {
-      rejectImport(validation.reasonCode ?? 'invalid-config')
-    }
-
-    // Filter to only valid sections
-    const validSections = sections.filter((s) =>
-      ALL_SECTIONS.includes(s as ConfigSection)
-    ) as ConfigSection[]
-
-    if (validSections.length === 0 || validSections.length !== sections.length
-      || validSections.some(section => !validation.sections.includes(section))) {
-      rejectImport('selected-sections')
-    }
-
-    const existing = collectCurrentConfig()
-    const merged = applySelectiveImport(existing, parsed as ConfigExportData, validSections, conflictResolution)
-
-    // Write as a transaction from the caller's perspective: restore the
-    // exact pre-import snapshot if any store rejects a write.
+  approvedRaw?: string,
+  options: ConfigOperationOptions = {}
+): Promise<{ success: true }> {
+  return runConfigOperation('import', 'config:apply', async lease => {
     try {
-      writeConfigToStores(merged, validSections)
-    } catch (writeError) {
-      try { writeConfigToStores(existing, validSections, true) } catch (rollbackError) {
-        logConfigFailure('config import rollback failed', rollbackError)
-      }
-      throw writeError
-    }
+      const raw = approvedRaw ?? await lease.wait(readSelectedConfig(filePath, lease, rejectImport))
+      await yieldConfigOperation(lease)
+      options.assertAuthorized?.()
+      const parsed = parseImportJson(raw)
 
-    // C16: refresh in-memory service state for sections whose live services
-    // cache data loaded at init. Without this, imported schedules/rotation/
-    // kill-switch values sit on disk but the running services keep using
-    // their stale in-memory copies until the next app restart. Best-effort —
-    // a refresh failure must not fail the import. Lazy require to avoid
-    // pulling these heavy modules into configManager's import graph.
-    try {
-      if (validSections.includes('rotation')) {
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
-        const { initProfileRotation } = require('./profileRotation')
-        initProfileRotation()
+      // Re-validate
+      const validation = validateImportData(parsed)
+      if (!validation.valid) {
+        rejectImport(validation.reasonCode ?? 'invalid-config')
       }
-      if (validSections.includes('schedules')) {
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
-        const { schedulerService } = require('./scheduler')
-        schedulerService.reschedule?.()
+
+      // Filter to only valid sections
+      const validSections = sections.filter((s) =>
+        ALL_SECTIONS.includes(s as ConfigSection)
+      ) as ConfigSection[]
+
+      if (validSections.length === 0 || validSections.length !== sections.length
+        || validSections.some(section => !validation.sections.includes(section))) {
+        rejectImport('selected-sections')
       }
-      if (validSections.includes('killSwitch')) {
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
-        const { granularKillSwitch } = require('./granularKillSwitch')
-        granularKillSwitch.reloadFromStore?.()
-      }
+
+      // Keep the whole synchronous commit in the shared profile-write queue.
+      // The enclosing effect awaits this raw queue promise until physical drain.
+      return await withProfileStoreWriteLock(() => {
+        lease.assertActive()
+        options.assertAuthorized?.()
+        return lease.commit(() => {
+          const existing = collectCurrentConfig()
+          const merged = applySelectiveImport(existing, parsed as ConfigExportData, validSections, conflictResolution)
+
+          // Write as a transaction from the caller's perspective: restore the
+          // exact pre-import snapshot if any store rejects a write.
+          try {
+            writeConfigToStores(merged, validSections)
+          } catch (writeError) {
+            try { writeConfigToStores(existing, validSections, true) } catch (rollbackError) {
+              logConfigFailure('config import rollback failed', rollbackError)
+            }
+            throw writeError
+          }
+
+          // C16: refresh in-memory service state for sections whose live services
+          // cache data loaded at init. Without this, imported schedules/rotation/
+          // kill-switch values sit on disk but the running services keep using
+          // their stale in-memory copies until the next app restart. Best-effort —
+          // a refresh failure must not fail the import. Lazy require to avoid
+          // pulling these heavy modules into configManager's import graph.
+          try {
+            if (validSections.includes('rotation')) {
+              // eslint-disable-next-line @typescript-eslint/no-var-requires
+              const { initProfileRotation } = require('./profileRotation')
+              initProfileRotation()
+            }
+            if (validSections.includes('schedules')) {
+              // eslint-disable-next-line @typescript-eslint/no-var-requires
+              const { schedulerService } = require('./scheduler')
+              schedulerService.reschedule?.()
+            }
+            if (validSections.includes('killSwitch')) {
+              // eslint-disable-next-line @typescript-eslint/no-var-requires
+              const { granularKillSwitch } = require('./granularKillSwitch')
+              granularKillSwitch.reloadFromStore?.()
+            }
+          } catch (err) {
+            logEvent('warn', 'config-manager', 'post-import service refresh failed', { reason: classifyIpcError(err) })
+          }
+
+          logEvent('info', 'config-manager', 'import applied', {
+            filePath,
+            sections: validSections,
+            conflictResolution
+          })
+
+          return { success: true as const }
+        })
+      })
     } catch (err) {
-      logEvent('warn', 'config-manager', 'post-import service refresh failed', { reason: classifyIpcError(err) })
+      logConfigFailure('import apply failed', err)
+      throw err
     }
-
-    logEvent('info', 'config-manager', 'import applied', {
-      filePath,
-      sections: validSections,
-      conflictResolution
-    })
-
-    return { success: true }
-  } catch (err) {
-    logConfigFailure('import apply failed', err)
-    throw err
-  }
+  }, options)
 }
 
 // ─── Public API ──────────────────────────────────────────────────────────────
@@ -828,39 +873,17 @@ function handleLogged<T>(
  * Registers all config manager IPC handlers.
  * Should be called once during app initialization.
  */
-interface ApprovedConfigImport { path: string; raw: string; expiresAt: number; release: () => void }
+interface ApprovedConfigImport { path: string; raw: string; claimed: boolean; expiresAt: number; release: () => void }
 const approvedConfigImports = new WeakMap<WebContents, ApprovedConfigImport>()
 const configImportDialogs = new WeakMap<WebContents, object>()
-const MAX_CONFIG_IMPORT_BYTES = 16 * 1024 * 1024
-function requireApprovedConfigImport(sender: WebContents, path: string): ApprovedConfigImport {
+function requireApprovedConfigImport(sender: WebContents, path: string, expected?: ApprovedConfigImport): ApprovedConfigImport {
   const approved = approvedConfigImports.get(sender)
   if (approved && (sender.isDestroyed?.() || Date.now() >= approved.expiresAt)) approved.release()
-  if (!approved || approvedConfigImports.get(sender) !== approved || approved.path !== path) {
+  if (!approved || approvedConfigImports.get(sender) !== approved || approved.path !== path
+    || (expected && expected !== approved) || (approved.claimed && expected !== approved)) {
     throw new IpcFault('permission')
   }
   return approved
-}
-
-function readSelectedConfig(path: string): string {
-  const fd = openSync(path, 'r')
-  try {
-    const before = fstatSync(fd)
-    if (!before.isFile()) rejectImport('file-not-regular')
-    if (before.size > MAX_CONFIG_IMPORT_BYTES) rejectImport('file-too-large')
-    // Do not use an unbounded readFileSync: the file can grow after fstat.
-    const buffer = Buffer.alloc(before.size + 1)
-    let length = 0
-    while (length < buffer.length) {
-      const count = readSync(fd, buffer, length, buffer.length - length, null)
-      if (count === 0) break
-      length += count
-    }
-    const after = fstatSync(fd)
-    if (length !== before.size || after.size !== before.size || after.mtimeMs !== before.mtimeMs) {
-      rejectImport('file-changed', 'conflict')
-    }
-    return buffer.subarray(0, length).toString('utf8')
-  } finally { closeSync(fd) }
 }
 
 export function registerConfigManagerIpcHandlers(): void {
@@ -872,7 +895,10 @@ export function registerConfigManagerIpcHandlers(): void {
   // config:import — validates a file and returns sections/conflicts
   handleLogged('config:import', async (event, filePath: string) => {
     filePath = requireString(filePath, 'filePath', { maxLength: 4096 })
-    return configManager.importValidate(filePath, requireApprovedConfigImport(event.sender, filePath).raw)
+    const approved = requireApprovedConfigImport(event.sender, filePath)
+    return configManager.importValidate(filePath, approved.raw, {
+      sender: event.sender, assertAuthorized: () => { requireApprovedConfigImport(event.sender, filePath, approved) }
+    })
   })
 
   // config:import-apply — applies selected sections from import file
@@ -883,7 +909,10 @@ export function registerConfigManagerIpcHandlers(): void {
       sections = requireStringArray(sections, 'sections', { maxItems: 32, itemMaxLength: 80 })
       conflictResolution = requireEnum(conflictResolution, 'conflictResolution', ['replace', 'merge'])
       const approved = requireApprovedConfigImport(event.sender, filePath)
-      try { return configManager.importApply(filePath, sections, conflictResolution, approved.raw) }
+      approved.claimed = true
+      try { return await configManager.importApply(filePath, sections, conflictResolution, approved.raw, {
+        sender: event.sender, assertAuthorized: () => { requireApprovedConfigImport(event.sender, filePath, approved) }
+      }) }
       finally { approved.release() }
     }
   )
@@ -893,31 +922,38 @@ export function registerConfigManagerIpcHandlers(): void {
     approvedConfigImports.get(event.sender)?.release()
     const request = {}
     configImportDialogs.set(event.sender, request)
-    const result = await dialog.showOpenDialog({
-      properties: ['openFile'],
-      filters: [
-        { name: 'JSON Files', extensions: ['json'] },
-        { name: 'All Files', extensions: ['*'] }
-      ]
-    })
-    // Only the newest dialog may grant a capability, even if an older one
-    // completes later. Cancellation also invalidates the older selection.
-    if (configImportDialogs.get(event.sender) !== request) return null
-    configImportDialogs.delete(event.sender)
-    if (result.canceled || result.filePaths.length === 0) return null
-    if (event.sender.isDestroyed?.()) throw new IpcFault('cancelled')
-    const path = result.filePaths[0]
-    const raw = readSelectedConfig(path)
-    let timer: ReturnType<typeof setTimeout>
-    const approved: ApprovedConfigImport = { path, raw, expiresAt: Date.now() + 60_000, release: () => {
-      clearTimeout(timer)
-      event.sender.removeListener?.('destroyed', approved.release)
-      if (approvedConfigImports.get(event.sender) === approved) approvedConfigImports.delete(event.sender)
-      approved.raw = ''
-    } }
-    timer = setTimeout(approved.release, 60_000); timer.unref?.()
-    approvedConfigImports.set(event.sender, approved)
-    event.sender.once?.('destroyed', approved.release)
-    return path
+    return runConfigOperation('import', 'config:browse:' + randomUUID(), async lease => {
+      try {
+        const result = await lease.wait(dialog.showOpenDialog({
+          properties: ['openFile'],
+          filters: [
+            { name: 'JSON Files', extensions: ['json'] },
+            { name: 'All Files', extensions: ['*'] }
+          ]
+        }))
+        // Only the newest dialog may grant a capability, even if an older one
+        // completes later. Cancellation also invalidates the older selection.
+        if (configImportDialogs.get(event.sender) !== request) return null
+        if (result.canceled || result.filePaths.length === 0) return null
+        if (event.sender.isDestroyed?.()) throw new IpcFault('cancelled')
+        const path = result.filePaths[0]
+        const raw = await lease.wait(readSelectedConfig(path, lease, rejectImport))
+        if (configImportDialogs.get(event.sender) !== request) return null
+        lease.assertActive()
+        return lease.commit(() => {
+          let timer: ReturnType<typeof setTimeout>
+          const approved: ApprovedConfigImport = { path, raw, claimed: false, expiresAt: Date.now() + 60_000, release: () => {
+            clearTimeout(timer)
+            event.sender.removeListener?.('destroyed', approved.release)
+            if (approvedConfigImports.get(event.sender) === approved) approvedConfigImports.delete(event.sender)
+            approved.raw = ''
+          } }
+          timer = setTimeout(approved.release, 60_000); timer.unref?.()
+          approvedConfigImports.set(event.sender, approved)
+          event.sender.once?.('destroyed', approved.release)
+          return path
+        })
+      } finally { if (configImportDialogs.get(event.sender) === request) configImportDialogs.delete(event.sender) }
+    }, { sender: event.sender })
   })
 }

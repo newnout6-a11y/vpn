@@ -2,11 +2,16 @@ import { OperationRegistry } from './operationRegistry'
 import { logEvent } from './appLogger'
 import { ipcMain } from 'electron'
 import { requireString, IpcValidationError } from './ipcValidation'
+import { withCorrelation } from './actionCorrelation'
 
 export const operations = new OperationRegistry(operation => {
   logEvent(operation.status === 'running' ? 'debug' : 'info', 'lifecycle', 'feature operation', {
     ...operation, operationKey: 'op_' + operation.operationId.replaceAll('-', '')
   })
+}, (operation, category) => {
+  withCorrelation(operation.correlationId, () => logEvent('error', 'lifecycle', 'feature post-commit failure', {
+    operationKey: 'op_' + operation.operationId.replaceAll('-', ''), category
+  }), { source: operation.source, owner: operation.owner })
 })
 
 export function registerOperationHandlers(): void {

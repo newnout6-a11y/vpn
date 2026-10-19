@@ -8,13 +8,16 @@ export interface OperationLease {
   readonly operation: ManagedOperation
   assertActive(): void
   wait<T>(task: Promise<T>): Promise<T>
+  /** Final synchronous persistence and its result become terminal together.
+   * All tracked I/O must have settled; no more effects may follow this call. */
+  commit<T>(effect: () => T): T
 }
 interface RunOptions { owner?: OperationOwner; resource?: string; timeoutMs?: number; signal?: AbortSignal }
 interface Entry {
   operation: ManagedOperation
   controller: AbortController
   drained: Promise<void>
-  cancel(category: 'cancelled' | 'timeout'): void
+  cancel(category: 'cancelled' | 'timeout'): boolean
 }
 
 /** Caller cancellation is prompt; physical effects retain their exclusive lease
@@ -26,15 +29,17 @@ export class OperationRegistry {
   private closing = new AbortController()
   private closed = false
   private generation = 0
-  constructor(private readonly observe: (operation: ManagedOperation) => void = () => {}) {}
+  constructor(
+    private readonly observe: (operation: ManagedOperation) => void = () => {},
+    private readonly committedFailure: (operation: ManagedOperation, category: IpcErrorCategory) => void = () => {}
+  ) {}
 
   list(): ManagedOperation[] { return [...this.history.values()].map(operation => ({ ...operation })) }
   isBusy(resource: string): boolean { return this.active.has(resource) }
   cancel(operationId: string): boolean {
     const entry = [...this.active.values()].find(item => item.operation.operationId === operationId)
     if (!entry || entry.operation.status !== 'running') return false
-    entry.cancel('cancelled')
-    return true
+    return entry.cancel('cancelled')
   }
   async close(): Promise<void> {
     this.closed = true
@@ -80,15 +85,17 @@ export class OperationRegistry {
     const aborted = new Promise<never>((_, reject) => { rejectAbort = reject })
     void aborted.catch(() => {})
     const effects: Promise<unknown>[] = []
+    let pendingEffects = 0, committing = false, committed: { result: unknown } | undefined
     const entry: Entry = { controller, drained, operation: {
       version: 1, operationId, correlationId: currentCorrelationId() ?? 'op_' + operationId.replaceAll('-', ''),
       kind, owner, source: metadata.source, startedAt, deadline: startedAt + timeoutMs, status: 'running'
     }, cancel: category => {
-      if (entry.operation.status !== 'running') return
+      if (entry.operation.status !== 'running' || committing) return false
       abortFault = new IpcFault(category)
       finish(category === 'cancelled' ? 'cancelled' : 'error', category)
       controller.abort()
       rejectAbort(abortFault)
+      return true
     } }
     const publish = () => withCorrelation(entry.operation.correlationId, () => {
       this.history.set(operationId, { ...entry.operation })
@@ -109,11 +116,27 @@ export class OperationRegistry {
     }
     const lease: OperationLease = { signal: controller.signal, get operation() { return { ...entry.operation } }, assertActive,
       async wait<R>(task: Promise<R>): Promise<R> {
-        effects.push(task.then(() => undefined, () => undefined))
+        pendingEffects++
+        effects.push(task.then(() => { pendingEffects-- }, () => { pendingEffects-- }))
         assertActive()
         const value = await Promise.race([task, aborted])
         assertActive()
         return value
+      },
+      commit<R>(effect: () => R): R {
+        assertActive()
+        if (pendingEffects) throw new IpcFault('conflict')
+        let result: R
+        committing = true
+        try { result = effect() } finally { committing = false }
+        if (result && (typeof result === 'object' || typeof result === 'function') && typeof (result as { then?: unknown }).then === 'function') {
+          pendingEffects++
+          effects.push(Promise.resolve(result).then(() => { pendingEffects-- }, () => { pendingEffects-- }))
+          throw new IpcFault('validation')
+        }
+        committed = { result }
+        finish('success')
+        return result
       }
     }
     const timer = setTimeout(() => entry.cancel('timeout'), remainingMs)
@@ -127,11 +150,16 @@ export class OperationRegistry {
         assertActive()
         const result = await effect(lease)
         await Promise.all(effects)
+        if (committed) return committed.result as T
         assertActive()
         const failed = result && typeof result === 'object' && (('success' in result && result.success === false) || ('ok' in result && result.ok === false))
         finish(failed ? 'error' : 'success')
         return result
       } catch (error) {
+        if (committed) {
+          try { this.committedFailure({ ...entry.operation }, classifyIpcError(error)) } catch { /* telemetry cannot reverse persistence */ }
+          return committed.result as T
+        }
         finish('error', classifyIpcError(error))
         controller.abort() // Abort sibling network effects on a terminal failure too.
         throw error

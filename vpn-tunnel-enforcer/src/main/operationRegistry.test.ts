@@ -13,6 +13,86 @@ afterEach(() => vi.useRealTimers())
 const kinds = Object.keys(OPERATION_DEADLINES) as ManagedOperationKind[]
 
 describe('long operation registry', () => {
+  it('publishes a synchronous final commit before a late abort can relabel persisted success', async () => {
+    const controller = new AbortController(), persist = vi.fn()
+    const registry = new OperationRegistry(operation => { if (operation.status === 'success') controller.abort() })
+    const result = await registry.run('export', async lease => lease.commit(() => {
+      persist()
+      return { success: true, path: 'selected.json' }
+    }), { signal: controller.signal })
+    expect(result).toEqual({ success: true, path: 'selected.json' })
+    expect(persist).toHaveBeenCalledOnce()
+    expect(controller.signal.aborted).toBe(true)
+    expect(registry.list()).toMatchObject([{ status: 'success' }])
+    expect(registry.cancel(registry.list()[0].operationId)).toBe(false)
+    await registry.close()
+  })
+
+  it('refuses a final commit while tracked I/O is still physically pending', async () => {
+    const registry = new OperationRegistry(), gate = held<void>(), persist = vi.fn()
+    const task = registry.run('export', async lease => {
+      void lease.wait(gate.promise).catch(() => {})
+      return lease.commit(persist)
+    }).catch(error => error)
+    await Promise.resolve()
+    expect(persist).not.toHaveBeenCalled()
+    gate.resolve()
+    expect(await task).toMatchObject({ category: 'conflict' })
+    expect(registry.list()).toMatchObject([{ status: 'error', category: 'conflict' }])
+    await registry.close()
+  })
+
+  it('preserves a failed final commit as an error and does not claim persisted success', async () => {
+    const registry = new OperationRegistry()
+    await expect(registry.run('import', async lease => lease.commit(() => {
+      throw Object.assign(new Error('denied'), { code: 'EACCES' })
+    }))).rejects.toMatchObject({ code: 'EACCES' })
+    expect(registry.list()).toMatchObject([{ status: 'error', category: 'permission' }])
+    await registry.close()
+  })
+
+  it('does not interrupt the synchronous commit from a reentrant cancellation observer', async () => {
+    const controller = new AbortController(), registry = new OperationRegistry(), persist = vi.fn()
+    expect(await registry.run('export', async lease => lease.commit(() => {
+      persist('before')
+      expect(registry.cancel(lease.operation.operationId)).toBe(false)
+      controller.abort()
+      persist('after')
+      return 'saved'
+    }), { signal: controller.signal })).toBe('saved')
+    expect(persist.mock.calls).toEqual([['before'], ['after']])
+    expect(registry.list()).toMatchObject([{ status: 'success' }])
+    await registry.close()
+  })
+
+  it('retains the committed result if feature code mistakenly throws after final publication', async () => {
+    const diagnostics = vi.fn(), registry = new OperationRegistry(undefined, diagnostics)
+    expect(await registry.run('export', async lease => {
+      lease.commit(() => 'persisted')
+      throw new Error('post-commit bug')
+    })).toBe('persisted')
+    expect(registry.list()).toMatchObject([{ status: 'success' }])
+    expect(diagnostics).toHaveBeenCalledWith(expect.objectContaining({ status: 'success' }), 'internal')
+    expect(JSON.stringify(diagnostics.mock.calls)).not.toContain('post-commit bug')
+    await registry.close()
+  })
+
+  it('rejects an asynchronous commit callback without publishing success or releasing its pending work', async () => {
+    const registry = new OperationRegistry(), gate = held<void>(), persist = vi.fn()
+    const task = registry.run('export', async lease => lease.commit(async () => {
+      await gate.promise
+      lease.assertActive()
+      persist()
+    })).catch(error => error)
+    await Promise.resolve()
+    expect(registry.list()).toMatchObject([{ status: 'error', category: 'validation' }])
+    expect(registry.isBusy('export')).toBe(true)
+    gate.resolve()
+    expect(await task).toMatchObject({ category: 'validation' })
+    expect(persist).not.toHaveBeenCalled()
+    await registry.close()
+  })
+
   it.each(kinds.flatMap(kind => [10, 50, 90].map(progress => ({ kind, progress }))))('cancels $kind at $progress percent without late publication or releasing its lease', async ({ kind, progress }) => {
     const events: ManagedOperation[] = [], registry = new OperationRegistry(operation => events.push(operation))
     const gate = held<void>(), entered = held<void>(), controller = new AbortController(), publish = vi.fn()
