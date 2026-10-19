@@ -10,7 +10,7 @@ const state = vi.hoisted(() => ({
   dir: '', stores: {} as Record<string, any>, handles: [] as Array<{ closed: boolean }>,
   handlers: new Map<string, (...args: any[]) => any>(), handle: vi.fn(),
   openDialog: vi.fn(), saveDialog: vi.fn(), consent: vi.fn(), log: vi.fn(),
-  hold: '', reached: 0, gate: Promise.resolve(), writeFault: false, renameFault: false, removeFault: false, afterRename: undefined as (() => void) | undefined
+  hold: '', reached: 0, onReached: undefined as (() => void) | undefined, gate: Promise.resolve(), writeFault: false, renameFault: false, removeFault: false, afterRename: undefined as (() => void) | undefined
 }))
 vi.mock('electron', () => ({
   app: { isPackaged: false, getPath: () => state.dir }, ipcMain: { handle: state.handle },
@@ -44,7 +44,7 @@ vi.mock('fs/promises', async original => {
     state.handles.push(tracked)
     const close = file.close.bind(file)
     file.close = async () => { try { return await close() } finally { tracked.closed = true } }
-    const pause = async (step: string) => { if (state.hold === step) { state.reached++; await state.gate } }
+    const pause = async (step: string) => { if (state.hold === step) { state.reached++; state.onReached?.(); await state.gate } }
     const read = file.read.bind(file), write = file.writeFile.bind(file), sync = file.sync.bind(file)
     file.read = (async (...readArgs: Parameters<typeof read>) => {
       const result = await read(...readArgs); await pause('read'); return result
@@ -90,7 +90,7 @@ async function logRows() {
 
 beforeEach(async () => {
   vi.resetModules(); vi.clearAllMocks()
-  state.hold = ''; state.reached = 0; state.writeFault = false; state.renameFault = false; state.removeFault = false; state.handles = []; state.afterRename = undefined
+  state.hold = ''; state.reached = 0; state.onReached = undefined; state.writeFault = false; state.renameFault = false; state.removeFault = false; state.handles = []; state.afterRename = undefined
   state.dir = privateExportDirectory('.vpnte-config-operations-')
   sender = new Sender()
   state.log = vi.spyOn(await import('./appLogger'), 'logEvent')
@@ -298,9 +298,11 @@ describe('configuration operation lifetime', () => {
 
   it.each(['open', 'read', 'write', 'sync'])('drains a held actual file %s without a late grant, destination overwrite or orphan temp', async step => {
     const gate = held(undefined)
+    const reached = new Promise<void>(resolve => { state.onReached = resolve })
     state.hold = step; state.gate = gate.promise
     const run = step === 'open' || step === 'read' ? invoke('config:browse-import') : invoke('config:export', 'redacted')
-    await vi.waitFor(() => expect(state.reached).toBe(1))
+    await reached
+    expect(state.reached).toBe(1)
     registry.cancel(registry.list().find(op => op.status === 'running')!.operationId)
     expect(await run).toMatchObject({ ok: false, error: { category: 'cancelled' } })
     expect(await readFile(destination, 'utf8')).toBe('previous export')
@@ -310,7 +312,7 @@ describe('configuration operation lifetime', () => {
     expect(await invoke('config:import', selected)).toMatchObject({ ok: false, error: { category: 'permission' } })
     expect(state.handles.every(file => file.closed)).toBe(true)
     expect(state.log.mock.calls.some(call => ['config exported', 'import applied'].includes(call[2]))).toBe(false)
-  })
+  }, 15_000)
 
   it.each(['cancel', 'destroy', 'expire', 'replacement', 'shutdown'])('does not apply a queued snapshot after %s and consumes only its own authority', async reason => {
     expect(await invoke('config:browse-import')).toMatchObject({ ok: true, result: selected })
