@@ -2,7 +2,9 @@
  * Unit tests for profileRotation pure functions.
  */
 
-import { beforeEach, describe, it, expect, vi } from 'vitest'
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest'
+import { ConnectionLifecycle } from './connectionLifecycle'
+import { operations } from './operations'
 import type { RotationConfig } from '../shared/ipc-types'
 
 const storeData = vi.hoisted(() => new Map<string, any>())
@@ -77,6 +79,16 @@ vi.mock('./tunController', () => ({
 }))
 
 import { clampInterval, getNextAvailableProfile, profileRotation } from './profileRotation'
+
+beforeEach(() => {
+  operations.resumeAdmission()
+  profileRotation.setLifecycle(new ConnectionLifecycle(vi.fn(), async () => ({ success: true })))
+})
+afterEach(async () => {
+  profileRotation.stopTimer()
+  await operations.close()
+  vi.useRealTimers()
+})
 
 describe('clampInterval', () => {
   it('returns MIN (5) for values below 5', () => {
@@ -270,7 +282,8 @@ describe('profile rotation IPC', () => {
           protocol: 'vless',
           outbound: { type: 'vless', server: '198.51.100.2', server_port: 443 }
         }
-      })
+      }),
+      { signal: expect.any(AbortSignal) }
     )
     expect(storeData.get('rotation')).toMatchObject({
       currentIndex: 1,
@@ -377,7 +390,8 @@ describe('profile rotation IPC', () => {
       expect.stringContaining('profile rotation'),
       expect.objectContaining({
         vpnProfile: expect.objectContaining({ name: 'Profile C' })
-      })
+      }),
+      { signal: expect.any(AbortSignal) }
     )
   })
 

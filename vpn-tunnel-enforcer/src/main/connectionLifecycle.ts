@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto'
 import { OPERATION_PRIORITY, type ConnectionOperation, type ConnectionOperationRejection, type OperationOwner } from '../shared/operation'
 import type { TunnelStateMachine } from './tunnelStateMachine'
 import { currentCorrelationId, currentActionMetadata, withCorrelation, type ActionMetadata } from './actionCorrelation'
+import type { OperationLease } from './operationRegistry'
+import { IpcFault } from '../shared/ipc-result'
 
 /** Main startup owns baseline effects as well as the controller startup. */
 export interface ConnectionStartupOwner {
@@ -10,6 +12,11 @@ export interface ConnectionStartupOwner {
   assertActive(): void
   retain<T>(effect: Promise<T>): Promise<T>
   wait<T>(effect: Promise<T>): Promise<T>
+}
+export interface RotationOwner extends ConnectionStartupOwner {
+  beginRestart(): void
+  /** Final synchronous selection/scheduling and the successful result are one commit. */
+  complete<T extends { success: true }>(effect: () => T): T
 }
 
 interface StartOptions { owner?: OperationOwner; timeoutMs?: number; refreshSoft?: boolean }
@@ -21,6 +28,7 @@ type Startup = {
   metadata: ActionMetadata
   abortCategory?: 'cancelled' | 'timeout'
   terminalPublished?: boolean
+  managed?: boolean
 }
 
 function rejection(category: ConnectionOperationRejection['category'], error: string, operationId?: string): ConnectionOperationRejection {
@@ -53,13 +61,103 @@ export class ConnectionLifecycle {
     return current ? { ...current } : null
   }
 
-  private publish(operation: ConnectionOperation, metadata: ActionMetadata): void {
+  private publish(operation: ConnectionOperation, metadata: ActionMetadata, managed = false): void {
     withCorrelation(operation.correlationId, () => {
       this.lastOperation = operation
       this.stateMachine?.operationChanged(operation)
       // An observer is not allowed to strand native ownership or cleanup.
-      try { this.onOperation({ ...operation }) } catch { /* telemetry is best effort */ }
+      if (!managed) try { this.onOperation({ ...operation }) } catch { /* telemetry is best effort */ }
     }, metadata)
+  }
+
+  /** Borrow the registry identity, retaining the same native lane as connect/stop.
+   * The outer registry returns promptly on abort; this Promise drains actual I/O. */
+  async rotate<T>(lease: OperationLease, effect: (owner: RotationOwner) => Promise<T>): Promise<T> {
+    lease.assertActive()
+    if (lease.operation.kind !== 'rotation' || lease.operation.owner !== 'rotation') throw new IpcFault('validation')
+    if (this.startup?.operation.status === 'running' && this.cleanupCancelled
+      && OPERATION_PRIORITY[lease.operation.owner] > OPERATION_PRIORITY[this.startup.operation.owner]) {
+      const stopped = await lease.wait(this.stop(this.cleanupCancelled, { owner: lease.operation.owner }))
+      lease.assertActive()
+      if (!stopped.success) throw new IpcFault('conflict')
+    }
+    if (this.busy || this.stateMachine && !this.stateMachine.canRotate()) throw new IpcFault('conflict')
+    let release!: () => void
+    const completion = new Promise<void>(done => { release = done })
+    const metadata: ActionMetadata = { source: lease.operation.source, owner: lease.operation.owner }
+    const startup: Startup = { controller: new AbortController(), completion, metadata, managed: true,
+      operation: { ...lease.operation, kind: 'rotation', category: undefined } }
+    const effects: Promise<unknown>[] = []
+    let nativeTouched = false
+    let completed: { result: unknown } | undefined
+    const retain = <R>(task: Promise<R>): Promise<R> => {
+      effects.push(task.then(() => undefined, () => undefined))
+      return lease.retain(task)
+    }
+    const owner: RotationOwner = {
+      signal: lease.signal, get operation() { return { ...startup.operation } },
+      assertActive: () => lease.assertActive(), retain,
+      wait: task => {
+        effects.push(task.then(() => undefined, () => undefined))
+        return lease.wait(task)
+      },
+      beginRestart: () => { lease.assertActive(); nativeTouched = true },
+      complete: finalize => {
+        lease.assertActive()
+        if (this.stateMachine && !this.stateMachine.canConfirmRotation()) throw new Error('Rotation confirmation missing')
+        return lease.commit(() => {
+          const result = finalize()
+          startup.operation = { ...startup.operation, status: 'success' }
+          completed = { result }
+          this.publish(startup.operation, metadata, true)
+          startup.terminalPublished = true
+          return result
+        })
+      }
+    }
+    const onPreempt = () => { lease.cancel() }
+    let cleanup: Promise<unknown> | undefined
+    const onAbort = () => withCorrelation(lease.operation.correlationId, () => {
+      const retained = !nativeTouched && (!this.stateMachine || this.stateMachine.confirmRetainedRotation(startup.operation.operationId).success)
+      if (!startup.terminalPublished) {
+        startup.abortCategory = lease.operation.category === 'timeout' ? 'timeout' : 'cancelled'
+        startup.operation = { ...startup.operation, status: startup.abortCategory === 'timeout' ? 'error' : 'cancelled', category: startup.abortCategory }
+        this.publish(startup.operation, metadata, true)
+        startup.terminalPublished = true
+      }
+      if (retained) startup.controller.abort()
+      else if (this.cleanupCancelled) cleanup = this.stop(this.cleanupCancelled, { owner: 'recovery' })
+      else { startup.controller.abort(); try { this.cancelControllerStartup() } catch { /* physical I/O still drains */ } }
+      void cleanup?.catch(() => undefined)
+    }, metadata)
+    this.startup = startup
+    startup.controller.signal.addEventListener('abort', onPreempt, { once: true })
+    lease.signal.addEventListener('abort', onAbort, { once: true })
+    this.publish(startup.operation, metadata, true)
+    try {
+      lease.assertActive()
+      const result = await effect(owner)
+      if (completed) return completed.result as T
+      lease.assertActive()
+      if (!failed(result)) throw new Error('Rotation completion missing')
+      if (!nativeTouched) this.stateMachine?.confirmRetainedRotation(startup.operation.operationId)
+      startup.operation = { ...startup.operation, status: 'error' }
+      return result
+    } catch (error) {
+      if (completed) throw error // registry retains its committed result and diagnoses the throw
+      if (!startup.terminalPublished) startup.operation = { ...startup.operation, status: lease.signal.aborted ? 'cancelled' : 'error',
+        category: lease.signal.aborted ? 'cancelled' : 'internal' }
+      throw error
+    } finally {
+      await Promise.all(effects)
+      lease.signal.removeEventListener('abort', onAbort)
+      startup.controller.signal.removeEventListener('abort', onPreempt)
+      if (!startup.terminalPublished) this.publish(startup.operation, metadata, true)
+      if (this.startup === startup) this.startup = null
+      release()
+      // stop waits completion, so release first; registry ownership lasts through cleanup.
+      await cleanup
+    }
   }
 
   async start<T>(effect: (owner: ConnectionStartupOwner) => Promise<T>, options: StartOptions = {}): Promise<T | ConnectionOperationRejection> {
@@ -67,6 +165,7 @@ export class ConnectionLifecycle {
     if (!Number.isInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2 ** 31 - 1) throw new Error('Invalid operation timeout')
     if (this.closed || this.stopping) return rejection('conflict', 'Остановка защиты ещё выполняется — подождите')
     if (this.startup) {
+      if (this.startup.operation.status !== 'running') return rejection('conflict', 'Отменённая операция ещё завершается')
       if (this.cleanupCancelled && OPERATION_PRIORITY[operationOwner] > OPERATION_PRIORITY[this.startup.operation.owner]) {
         const stopped = await this.stop(this.cleanupCancelled, { owner: operationOwner })
         if (!stopped.success) return rejection('conflict', 'Не удалось завершить отменённую операцию')
@@ -219,10 +318,10 @@ export class ConnectionLifecycle {
     this.stopping = stopped
     this.stopOperation = operation
     this.publish(operation, metadata)
-    if (startup && !startup.abortCategory) {
+    if (startup && startup.operation.status === 'running' && !startup.abortCategory) {
       startup.abortCategory = 'cancelled'
       startup.operation = { ...startup.operation, status: 'cancelled', category: 'cancelled' }
-      this.publish(startup.operation, startup.metadata)
+      this.publish(startup.operation, startup.metadata, startup.managed)
       startup.terminalPublished = true
     }
     startup?.controller.abort()
@@ -233,10 +332,10 @@ export class ConnectionLifecycle {
 
   async close(): Promise<void> {
     this.closed = true
-    if (this.startup && !this.startup.abortCategory) {
+    if (this.startup && this.startup.operation.status === 'running' && !this.startup.abortCategory) {
       this.startup.abortCategory = 'cancelled'
       this.startup.operation = { ...this.startup.operation, status: 'cancelled', category: 'cancelled' }
-      this.publish(this.startup.operation, this.startup.metadata)
+      this.publish(this.startup.operation, this.startup.metadata, this.startup.managed)
       this.startup.terminalPublished = true
     }
     this.startup?.controller.abort()

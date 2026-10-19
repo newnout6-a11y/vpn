@@ -1065,3 +1065,41 @@ CI 39186437502 success на c8be3ba. Отдельный REST GET подтвер�
 5 skipped; typecheck/build/native PASS, адресно 167 passed. Git tree merge
 совпадает с проверенным head. Следующий участок — ротация; это завершает
 текущий key export участок, сохраняя общий остаток AT и всего WP-0.
+
+
+## Ротация: один owner подготовки, native swap и физического завершения (19.10.2026)
+
+Rotation IPC/timer используют общий registry и connection lane с одной identity:
+UUIDv4, original correlation, owner rotation, work deadline 120 s. Admission
+предшествует availability/fingerprint, поэтому manual/schedule вытесняют также
+подготовку ротации. Rotation может вытеснить только меньший priority startup,
+ожидая его actual drain/cleanup; равный/больший priority даёт typed conflict.
+
+Cancel/deadline/destroy/config replacement/reload/stopTimer/shutdown запрещают
+поздние select/broadcast/notification/config writes. Caller cancellation prompt,
+но lane/resource держатся до actual native effects. При отмене до beginRestart
+FSM сохраняет прежнюю защиту только после проверки неизменных runtime evidence
+и отсутствия fault. После начала swap нужна подтверждённая ordinary cleanup;
+новый startup не обходит эту границу. Native restart signal переживает reset
+старого transition flag; late success после abort заканчивается teardown.
+Финальное scheduling и успешный result выполняются одним registry commit.
+
+Endpoint probe с managed signal ждёт обе physical TCP/ICMP ветви. После abort
+следующая interface/fallback/DNS continuation не запускает новую сетевую попытку.
+Уже выданные OS probes завершаются под физическим lease; их моментальная отмена
+не заявляется. Shared lookup физических адаптеров не отменяется другим caller.
+
+L2 fixture выполняет actual rotation/registry/lane/FSM/IPC guard с реальными
+Conf и logger/redactor/JSONL. Проверяются три управляемые границы, bounded cancel,
+deadline, sender destruction, configuration reload, timer, manual/schedule
+replacement, unchanged file bytes, terminal correlation и сохранение состояния
+preflight. Native restart/probes/fingerprint/notification заменены; отдельный
+extracted-body fixture выполняет production restart/probe функции с управляемыми
+OS/DNS boundaries. Это не новая native Windows/TUN приёмка. Финальные проверки
+и review gate фиксируются в progress.md.
+
+Существующий Health-Before-Commit/возврат старого сервера после failed rotation
+(WP-10 F-124, том 3 §2.2) этим lifetime участком не реализован и не объявляется
+PASS: selection/первичное уведомление по-прежнему предшествуют проверке нового
+сервера. UI cancel/unmount, прочие background/native entrypoints, durable audit,
+migration/semantic matrices и полная ресурсная приёмка сохраняются в WP-0.

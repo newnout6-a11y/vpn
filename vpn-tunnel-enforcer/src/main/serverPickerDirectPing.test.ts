@@ -8,7 +8,7 @@ describe('serverPicker direct ping regressions', () => {
   it('tries source-bound TCP before any unbound fallback', () => {
     const source = serverPickerSource()
     const smartStart = source.indexOf('export async function smartEndpointPing')
-    const directProbe = source.indexOf('physicalSourceTcpPing(host, port)', smartStart)
+    const directProbe = source.indexOf('physicalSourceTcpPing(host, port, signal)', smartStart)
     const tcpProbe = source.indexOf('let tcp = await reliableTcpPing(host, port)', smartStart)
 
     expect(smartStart).toBeGreaterThanOrEqual(0)

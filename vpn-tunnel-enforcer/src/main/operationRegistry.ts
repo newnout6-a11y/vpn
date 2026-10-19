@@ -7,6 +7,9 @@ export interface OperationLease {
   readonly signal: AbortSignal
   readonly operation: ManagedOperation
   assertActive(): void
+  /** An admitted coordinator may propagate preemption using the same identity. */
+  cancel(): boolean
+  retain<T>(task: Promise<T>): Promise<T>
   wait<T>(task: Promise<T>): Promise<T>
   /** Native consent/picker time is not application work; cancellation still drains it. */
   waitForUser<T>(task: Promise<T>): Promise<T>
@@ -121,10 +124,14 @@ export class OperationRegistry {
       entry.operation = { ...entry.operation, deadline }
       this.history.set(operationId, { ...entry.operation })
     }
-    const lease: OperationLease = { signal: controller.signal, get operation() { return { ...entry.operation } }, assertActive,
+    const retain = <R>(task: Promise<R>): Promise<R> => {
+      pendingEffects++
+      effects.push(task.then(() => { pendingEffects-- }, () => { pendingEffects-- }))
+      return task
+    }
+    const lease: OperationLease = { signal: controller.signal, get operation() { return { ...entry.operation } }, assertActive, cancel: () => entry.cancel('cancelled'), retain,
       async wait<R>(task: Promise<R>): Promise<R> {
-        pendingEffects++
-        effects.push(task.then(() => { pendingEffects-- }, () => { pendingEffects-- }))
+        retain(task)
         assertActive()
         const value = await Promise.race([task, aborted])
         assertActive()

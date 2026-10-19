@@ -9,7 +9,7 @@ export interface ConnectionOperation {
   /** Non-secret action key shared with IPC when present; survives UUID masking. */
   readonly correlationId: string
   readonly owner: OperationOwner
-  readonly kind: 'connect' | 'disconnect'
+  readonly kind: 'connect' | 'disconnect' | 'rotation'
   readonly startedAt: number
   readonly deadline: number | null
   readonly status: 'running' | 'success' | 'cancelled' | 'error'

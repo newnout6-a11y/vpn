@@ -439,16 +439,18 @@ export async function tunnelHttpProbe(skipCache = false, maxRetries = 1, signal?
  * because the SNI it leaks is `yandex.ru` — a domain no operator can
  * afford to block.)
  */
-export async function smartOfflinePing(host: string, port: number): Promise<number | null> {
-  return smartEndpointPing(host, port, false)
+export async function smartOfflinePing(host: string, port: number, signal?: AbortSignal): Promise<number | null> {
+  return smartEndpointPing(host, port, false, null, signal)
 }
 
 export async function smartEndpointPing(
   host: string,
   port: number,
   tunnelRunning: boolean,
-  directProxyPort: number | null = null
+  directProxyPort: number | null = null,
+  signal?: AbortSignal
 ): Promise<number | null> {
+  if (signal?.aborted) return null
   const isLoopback = /^127\./.test(host) || host === '::1' || host === 'localhost'
 
   if (tunnelRunning && directProxyPort != null) {
@@ -459,17 +461,22 @@ export async function smartEndpointPing(
       TCP_PROBE_TIMEOUT_MS,
       TCP_PROBE_ATTEMPTS
     )
+    if (signal?.aborted) return null
     if (direct != null) return direct
   }
 
   // Bind both probes to the physical adapter. TCP proves the actual VPN port;
   // ICMP keeps UDP-only endpoints measurable. Three concurrent TCP attempts
   // let the median ignore one dropped SYN or one cold-route latency spike.
-  const directTcpPromise = physicalSourceTcpPing(host, port)
-  const directIcmpPromise = physicalSourcePing(host)
+  const directTcpPromise = physicalSourceTcpPing(host, port, signal)
+  const directIcmpPromise = physicalSourcePing(host, signal)
+  // Managed callers own both already-issued effects, even when TCP wins first.
+  if (signal) await Promise.allSettled([directTcpPromise, directIcmpPromise])
+  if (signal?.aborted) return null
   const directTcp = await directTcpPromise
   if (isPlausibleRemoteLatency(directTcp, isLoopback)) return directTcp
   const directIcmp = await directIcmpPromise
+  if (signal?.aborted) return null
   if (directIcmp != null) return directIcmp
 
   // An unbound socket is captured by sing-box while TUN is active. Depending
@@ -484,6 +491,7 @@ export async function smartEndpointPing(
   //    the SYN gets no SYN-ACK and this fails — correctly reporting the
   //    server as unreachable. No SNI/TLS on the wire, so it's DPI-safe.
   let tcp = await reliableTcpPing(host, port)
+  if (signal?.aborted) return null
   
   // Anti-fake gate: some mobile and TSPU networks transparently intercept port
   // 443, spoofing the SYN-ACK locally in 1-3ms so they can inspect the SNI.
@@ -496,7 +504,8 @@ export async function smartEndpointPing(
   // 2. Disguised HTTPS to yandex.ru that actually targets our VPN host.
   //    Works on hostile nets that blackhole direct TCP to the VPN port but
   //    let port-443 traffic through because the SNI says yandex.ru.
-  let stealth = await stealthTcpProbe(host, port)
+  let stealth = await stealthTcpProbe(host, port, signal)
+  if (signal?.aborted) return null
   if (stealth != null && stealth <= 3 && !isLoopback) {
     stealth = null
   }
@@ -507,6 +516,7 @@ export async function smartEndpointPing(
   //    a plausible RTT. icmpPing itself rejects implausible sub-ms replies
   //    for non-loopback hosts.
   const icmp = await icmpPing(host, ICMP_PROBE_TIMEOUT_MS)
+  if (signal?.aborted) return null
   if (icmp != null) return icmp
 
   return null
@@ -516,27 +526,33 @@ function isPlausibleRemoteLatency(value: number | null, isLoopback: boolean): va
   return value != null && (isLoopback || value > 3)
 }
 
-async function physicalSourcePing(host: string): Promise<number | null> {
+async function physicalSourcePing(host: string, signal?: AbortSignal): Promise<number | null> {
+  if (signal?.aborted) return null
   if (process.platform !== 'win32') return null
   if (!isProbablyHostOrIp(host)) return null
   if (host.includes(':')) return null
 
   const sources = await getPhysicalIpv4Sources()
   for (const source of sources) {
+    if (signal?.aborted) return null
     const ping = await pingFromSource(source.ipv4, host, ICMP_PROBE_TIMEOUT_MS)
+    if (signal?.aborted) return null
     if (ping != null) return ping
   }
   return null
 }
 
-async function physicalSourceTcpPing(host: string, port: number): Promise<number | null> {
+async function physicalSourceTcpPing(host: string, port: number, signal?: AbortSignal): Promise<number | null> {
+  if (signal?.aborted) return null
   if (process.platform !== 'win32') return null
   if (!isProbablyHostOrIp(host) || host.includes(':')) return null
 
   const sources = await getPhysicalIpv4Sources()
   const isLoopback = /^127\./.test(host) || host === 'localhost'
   for (const source of sources) {
+    if (signal?.aborted) return null
     const latency = await reliableTcpPing(host, port, source.ipv4)
+    if (signal?.aborted) return null
     if (isPlausibleRemoteLatency(latency, isLoopback)) return latency
   }
   return null
@@ -887,7 +903,8 @@ async function reliableTcpPing(host: string, port: number, localAddress?: string
  * the existing ICMP/TCP rungs cover their needs without us having to
  * audit `curl`'s flags on every distro.
  */
-async function stealthTcpProbe(host: string, port: number): Promise<number | null> {
+async function stealthTcpProbe(host: string, port: number, signal?: AbortSignal): Promise<number | null> {
+  if (signal?.aborted) return null
   if (process.platform !== 'win32') return null
 
   // curl's --resolve requires an IP address, not a hostname. If the profile
@@ -898,6 +915,7 @@ async function stealthTcpProbe(host: string, port: number): Promise<number | nul
       const ips = await dns.resolve4(host)
       if (ips.length > 0) resolveIp = ips[0]
     } catch {
+      if (signal?.aborted) return null
       try {
         const lookup = await dns.lookup(host, { family: 4 })
         if (lookup?.address) resolveIp = lookup.address
@@ -905,6 +923,7 @@ async function stealthTcpProbe(host: string, port: number): Promise<number | nul
     }
   }
 
+  if (signal?.aborted) return null
   try {
     const args = [
       '-sS',
