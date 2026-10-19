@@ -4666,3 +4666,31 @@ CI/review нового SHA проверяются отдельно после pu
   CI 39191350545 success на прежнем 33d3dfc, watcher exit 0: Windows
   unit/traceability/production IPC/CSP/WFP/native reads, Rust и сайт.
   Для no-op fix требуется новый commit/push и exact-head Qodo/CI gate.
+
+### PR #72 — приёмка ротации и слияние
+
+- Окончательный head b6c1e73acbb74293c77e014085373869069003ef запушен.
+  Qodo 1543624 completed на этом SHA: пять прежних findings автоматически
+  implemented, новых нет; attribution вручную не изменялся, ревью не запрашивалось.
+  Дополнительная проверка Revix no-op config исправлена с четырьмя регрессиями.
+- CI 39191980960 completed/success на том же SHA, watcher exit 0: Windows
+  typecheck/unit/traceability/production IPC/CSP/WFP/native reads, Rust, сайт.
+  Перед merge отдельно проверены exact head, mergeable=true / clean и свежий
+  completed Qodo без открытых findings. REST merge использовал expected SHA.
+- Отдельный REST GET подтвердил merged=true, state=closed, merged_at
+  2026-10-19T03:00:04Z, merge 84a3bf5e28133dfb93eae3191af4b71a133fb0cf.
+  Локальный main обновлён fast-forward. git diff --exit-code b6c1e73 HEAD -- .
+  дал exit 0: tree merge совпадает с окончательно проверенным head.
+- Следующая ветка codex/wp0-stop-deadline создана от обновлённого vpn/main.
+  Инвентаризация подтвердила остаток: ConnectionLifecycle.stop имеет
+  deadline=null и возвращает physical drain Promise без ограниченного caller
+  result. Следующий участок разделит terminal result и physical cleanup,
+  сохранив busy admission и ожидание shutdown до фактического завершения OS I/O.
+  Это пока план следующего изменения, не реализованное поведение.
+- Эта запись и обновление AT-00-003 меняют только ненормативную документацию.
+  Новые code checks не заявляются: последние фактические npm.cmd test
+  4448 passed / 5 skipped, build с typecheck, traceability AC 927/927 / F 210/210,
+  Electron/IPC/CSP PASS и exact-head CI/review указаны выше. UI lifetime,
+  stop deadline/background admission, durable audit, migration/semantic/flags
+  и полная state/resource/UI приёмка остаются в WP-0. Общая цель WP-0,
+  затем WP-2 сохраняется active; пакет целиком не принят.
