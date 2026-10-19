@@ -5782,3 +5782,55 @@ CI/review нового SHA проверяются отдельно после pu
   во время этого прогона. Build, пять Electron fixtures, native IPC/CSP
   и адресные проверки — exit 0, как выше. До следующего участка обязательны
   completed Qodo и CI success на final опубликованном SHA.
+
+- PR #81 слит: final head 34d4efc8cf427606f1e39a9324bb24e51006011a,
+  Qodo 1553954 completed без findings; CI 39293792384 completed/success
+  (Windows/Rust/site, все Electron/CSP/WFP/native steps), watcher exit 0
+  (.tmp/wp0-key-request-ci-watch.log). REST merged=true; merge/main
+  ab531c4c027259f01c0af01e41692d4c5ab0a1ad. Fetch/ff и tree diff
+  reviewed head→main — exit 0. Revix #81 сообщил free-quota-reached
+  до 20.10 00:00 UTC; полного review нет, это не approval.
+- Следующая ветка codex/wp0-detail-export-lifetime от ab531c4: оставшийся
+  key export UI entrypoint ServerDetailModal, AT-00-003/008. Закрытие modal
+  через open=false, смена profile id, profile=null и unmount отзывают только
+  его requester tokens, подавляют старые replies и очищают flash timers.
+  Одна scope identity на открытый profile id; повторное открытие того же
+  profile создаёт новый scope, metadata rename того же id не отменяет запрос.
+  Main API/consent/commit остаются принятыми в #81. Late error прежнего
+  profile не заменяет успешный результат текущего. Typed cancel тихий.
+- До fix: npm.cmd test --
+  src/renderer/components/ServerDetailModal.requestLifetime.test.tsx —
+  10 failed, 3.42 s, exit 1 (.tmp/wp0-detail-export-before.log).
+  После fix первые два suites — 12 passed, 2.23 s, exit 0
+  (.tmp/wp0-detail-export-targeted.log). Расширенный run:
+  npm.cmd test -- src/renderer/components/ServerDetailModal.requestLifetime.test.tsx
+  src/renderer/components/ServerDetailModalSource.test.ts
+  src/renderer/pages/Servers.requestLifetime.test.tsx
+  src/preload/preloadValidation.test.ts — 88 passed, 4.54 s, exit 0
+  (.tmp/wp0-detail-export-targeted-final.log). После него добавлены два
+  profile=null boundary cases; финальный полный run включает их.
+  Новый тест использует actual modal/design components и controlled IPC,
+  только LiveServerCheckSection исключён как отдельный workflow.
+
+- npm.cmd run build — exit 0 (.tmp/wp0-detail-export-build.log),
+  npm.cmd run typecheck — exit 0, 165 channels/0 public any
+  (.tmp/wp0-detail-export-typecheck.log), coverage AC 927/927, F 210/210
+  и git diff --check — exit 0. Main/preload не менялись; native checks
+  приняты на #81 и будут повторены обязательным CI следующего head.
+- Первый full npm.cmd test — 4704 passed /5 skipped /2 failed,
+  344.19 s, exit 1 (.tmp/wp0-detail-export-full.log). Прежние suites:
+  bootRecoveryExecution trusted-empty-physical snapshot (6187 ms) и
+  physicalAdapterDnsScript ObjectNotFound превысили default timeout5000;
+  assertion failures нет. Эти tests и budgets не менялись.
+  Отдельные повторы: npm.cmd test -- src/main/bootRecoveryExecution.test.ts
+  — 30 passed, 18.30 s, exit 0 (.tmp/wp0-detail-export-boot-repro.log);
+  npm.cmd test -- src/main/physicalAdapterDnsScript.test.ts — 4 passed,
+  0.973 s, exit 0 (.tmp/wp0-detail-export-dns-repro.log).
+  Причина замедления одним прогоном не доказана; полный default run
+  повторён на том же production/unit tree, без других native test runs рядом.
+
+- Final полный повтор npm.cmd test на том же production/unit tree —
+  **4706 passed /5 skipped /0 failed**, 284 files passed /2 skipped,
+  **287.12 s**, exit 0 (.tmp/wp0-detail-export-full-final.log).
+  Native recovery/DNS suites и budgets не менялись. Нормативные docs/
+  не редактировались; следующий участок требует completed Qodo/CI final SHA.

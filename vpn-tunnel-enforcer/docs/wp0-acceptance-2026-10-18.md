@@ -1461,3 +1461,29 @@ cases 15000ms, production deadlines/cancel assertions сохранены. Пол
 история failures и команды записаны в progress.md. Typecheck — exit 0,
 165 channels/0 public any; traceability AC 927/927, F 210/210 и diff check —
 exit 0. PR требует собственного completed Qodo/CI до следующего участка.
+
+
+## ServerDetailModal: lifetime экспорта (19.10.2026)
+
+Экспорт страницы принят в #81: final head 34d4efc, Qodo 1553954 completed
+без findings, CI 39293792384 success; merge/main ab531c4 совпал по tree
+с reviewed head. Revix full review отсутствует из-за квоты, не approval.
+
+Оставшийся modal export использует эти же main channels и tokens. Open/profile
+scope отменяется при закрытии, выборе другого id, profile=null и unmount.
+Повторное открытие того же profile получает новый scope; metadata refresh
+того же id сохраняет активные запросы. Late success/error старого scope
+не создаёт flash/timer и не меняет результат текущего. Завершённые запросы
+забываются, flash timers очищаются, typed cancellation тихая.
+
+До fix — 10 failing tests actual React modal; адресный набор после fix —
+88 passed, 4.54 s. Затем добавлены два profile=null cases; полный run и
+build выполняются. Это адресные AT-00-003/008 UI regressions, не полная
+приёмка всех оставшихся background/diagnostic entrypoints WP-0.
+
+Final полный npm.cmd test — **4706 passed /5 skipped /0 failed**,
+287.12 s, exit 0; build/typecheck и coverage/diff — exit 0. Первый full
+имел два default5000ms timeout в прежних bootRecoveryExecution и
+physicalAdapterDnsScript; отдельно 30/30 и 4/4 passed, затем полный default
+повтор без изменения их кода/budgets. Все команды/неудачные результаты в
+progress.md. Следующий участок требует Qodo/CI этого опубликованного head.
