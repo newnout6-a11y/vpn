@@ -59,7 +59,34 @@ function assertProbeActive(signal?: AbortSignal): void {
   if (signal?.aborted) throw new IpcFault('cancelled')
 }
 
-function probeError(error: unknown): string { return ipcError(classifyIpcError(error)).message }
+/** Diagnostic causes remain precise; arbitrary messages/paths never cross IPC. */
+function probeError(error: unknown): string {
+  const causes = {
+    ECONNRESET: 'соединение сброшено', ECONNREFUSED: 'соединение отклонено',
+    ETIMEDOUT: 'таймаут соединения', ECONNABORTED: 'таймаут HTTP-запроса',
+    ENOTFOUND: 'имя не найдено', EAI_AGAIN: 'временный сбой DNS',
+    ENETUNREACH: 'сеть недоступна', EHOSTUNREACH: 'узел недоступен',
+    EPROTO: 'ошибка протокола TLS', CERT_HAS_EXPIRED: 'сертификат просрочен',
+    ERR_TLS_CERT_ALTNAME_INVALID: 'имя не совпадает с сертификатом',
+    DEPTH_ZERO_SELF_SIGNED_CERT: 'самоподписанный сертификат',
+    UNABLE_TO_VERIFY_LEAF_SIGNATURE: 'не подтверждена цепочка сертификата'
+  } as const
+  const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined
+  if (typeof code === 'string' && Object.hasOwn(causes, code)) return `${code}: ${causes[code as keyof typeof causes]}`
+  // Clash can report the same causes inside its own message. Extract only
+  // allowlisted tokens/patterns, never the message or request URL itself.
+  if (typeof error === 'string') {
+    for (const key of Object.keys(causes) as Array<keyof typeof causes>) {
+      if (new RegExp(`\\b${key}\\b`, 'i').test(error)) return `${key}: ${causes[key]}`
+    }
+    if (/timeout|timed out/i.test(error)) return `ETIMEDOUT: ${causes.ETIMEDOUT}`
+    if (/connection reset/i.test(error)) return `ECONNRESET: ${causes.ECONNRESET}`
+    if (/connection refused/i.test(error)) return `ECONNREFUSED: ${causes.ECONNREFUSED}`
+    if (/tls.*handshake|handshake.*tls/i.test(error)) return `EPROTO: ${causes.EPROTO}`
+    if (/\beof\b/i.test(error)) return 'EOF: удалённая сторона закрыла соединение'
+  }
+  return ipcError(classifyIpcError(error)).message
+}
 
 // ─── Store: history of recent checks ─────────────────────────────────────────
 
@@ -145,10 +172,15 @@ async function probeDns(host: string, signal?: AbortSignal): Promise<PathReport[
     return { resolved: true, ips: [host], ms: 0, poisoned: false }
   }
   const start = Date.now()
+  // A private resolver permits cancellation without affecting other queries.
+  const resolver = new dns.Resolver({ timeout: PROBE_TIMEOUT_MS, tries: 1 })
+  const abort = () => resolver.cancel()
+  signal?.addEventListener('abort', abort, { once: true })
   try {
-    const v4 = await dns.resolve4(host).catch(() => [] as string[])
     assertProbeActive(signal)
-    const v6 = await dns.resolve6(host).catch(() => [] as string[])
+    const v4 = await resolver.resolve4(host).catch(() => [] as string[])
+    assertProbeActive(signal)
+    const v6 = await resolver.resolve6(host).catch(() => [] as string[])
     assertProbeActive(signal)
     const ips = [...v4, ...v6]
     if (!ips.length) {
@@ -159,7 +191,7 @@ async function probeDns(host: string, signal?: AbortSignal): Promise<PathReport[
   } catch {
     assertProbeActive(signal)
     return { resolved: false, ips: [], ms: Date.now() - start, poisoned: false }
-  }
+  } finally { signal?.removeEventListener('abort', abort) }
 }
 
 /** The raw probe owns its socket until close, even after the caller is cancelled. */
@@ -469,7 +501,7 @@ async function probeViaClashApi(parsed: ParsedUrl, signal?: AbortSignal): Promis
       available: false,
       totalMs: Date.now() - start,
       errorStage: 'http',
-      errorMessage: `direct-out вернул ${resp.status}`,
+      errorMessage: `direct-out вернул ${resp.status}: ${probeError(resp.data?.message)}`,
       dns: null,
       tcp: null,
       tls: null,
@@ -680,7 +712,7 @@ export async function checkUrl(input: string, options: UrlAvailabilityOptions = 
   return operations.run('availability-check', lease => {
     options.onOperation?.(lease)
     return checkUrlOwned(input, { ...options, signal: lease.signal }, lease)
-  }, { signal: options.signal })
+  }, { signal: options.signal, resource: `availability-check:${randomUUID()}` })
 }
 
 async function checkUrlOwned(input: string, options: UrlAvailabilityOptions, lease: OperationLease): Promise<UrlAvailabilityResult> {
@@ -729,6 +761,7 @@ async function checkUrlOwned(input: string, options: UrlAvailabilityOptions, lea
     await applyGeoBlock(parsed, tunnel, direct, tunRunning, lease)
   } catch (err) {
     lease.assertActive()
+    if (err instanceof IpcFault) throw err
     logEvent('debug', 'url-availability', 'geo-block detection skipped', {
       error: probeError(err)
     })
@@ -814,7 +847,10 @@ export async function probePageSignal(url: string, proxyRules?: string, signal?:
         contextIsolation: true,
         // Arbitrary, possibly-hostile third-party pages. Sandbox hard.
         sandbox: true,
-        webSecurity: true
+        webSecurity: true,
+        // Each measured exit owns an in-memory session. Its proxy settings
+        // cannot affect the app, another check or the other measured path.
+        partition: `vpnte-url-probe-${randomUUID()}`
       }
     })
 
@@ -824,7 +860,11 @@ export async function probePageSignal(url: string, proxyRules?: string, signal?:
       const timer = setTimeout(() => { delays.delete(timer); done() }, ms)
       delays.set(timer, done)
     })
-    pending.push(win.isDestroyed() ? Promise.resolve() : new Promise<void>(done => { win.once('closed', () => done()) }))
+    const closed = win.isDestroyed() ? Promise.resolve() : new Promise<void>(done => { win.once('closed', () => done()) })
+    pending.push(closed)
+    // Electron executeJavaScript can wait forever for did-stop-loading after
+    // destruction. Actual window close revokes that window's native work.
+    const windowWork = <T>(task: Promise<T>) => Promise.race([task, closed.then(() => undefined)])
     const abort = () => finish(null)
     const finish = (sig: PageSignal | null) => {
       if (settled) return
@@ -859,7 +899,7 @@ export async function probePageSignal(url: string, proxyRules?: string, signal?:
       await pause(1500)
       if (settled || win.isDestroyed()) return finish(null)
       try {
-        const data = await win.webContents.executeJavaScript(
+        const data = await windowWork(win.webContents.executeJavaScript(
           `(() => {
              const text = (document.body && document.body.innerText) || '';
              return {
@@ -869,8 +909,8 @@ export async function probePageSignal(url: string, proxyRules?: string, signal?:
                textSample: text.slice(0, 8000)
              };
            })()`
-        )
-        if (settled) return
+        ))
+        if (settled || win.isDestroyed()) return finish(null)
         finish({
           requestedUrl: url,
           finalUrl: typeof data?.finalUrl === 'string' ? data.finalUrl : null,
@@ -896,14 +936,14 @@ export async function probePageSignal(url: string, proxyRules?: string, signal?:
       }
     })
 
-    pending.push(Promise.resolve().then(async () => {
+    pending.push(windowWork(Promise.resolve().then(async () => {
       if (settled) return
-      await win.webContents.session.setProxy({ proxyRules: proxyRules || 'direct://' })
+      try { await win.webContents.session.setProxy({ proxyRules: proxyRules || 'direct://' }) }
+      catch { setupFailed = true; setupError = new IpcFault('network'); finish(null); return }
       if (!settled) await win.loadURL(url)
-    }).catch(() => finish(null)))
+    }).catch(() => finish(null))))
   })
-  // Destroying the window does not settle pending setProxy/load/script calls.
-  // Keep their ownership until every raw effect and the window itself drain.
+  // Each command either settles or loses its native capability on actual close.
   for (let index = 0; index < pending.length;) {
     const batch = pending.slice(index); index = pending.length
     await Promise.allSettled(batch)

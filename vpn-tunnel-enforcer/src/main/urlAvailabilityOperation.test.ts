@@ -10,7 +10,8 @@ import { logEvent } from './appLogger'
 
 const state = vi.hoisted(() => ({
   boundary: vi.fn(async (_stage: string) => {}), history: [] as any[], writes: vi.fn(),
-  windows: [] as any[], sockets: [] as any[], tunnel: false, headStatus: 200, windowSetupThrows: false
+  windows: [] as any[], sockets: [] as any[], tunnel: false, headStatus: 200, windowSetupThrows: false,
+  resolverCancel: vi.fn(), resolverOptions: [] as unknown[], clashReply: null as null | { status: number; data: unknown }
 }))
 vi.mock('./versionedStore', () => ({ default: class {
   get() { return state.history }
@@ -21,13 +22,21 @@ vi.mock('./settings', () => ({ settingsStore: { get: () => ({}) } }))
 vi.mock('./tunController', () => ({ tunController: { getStatus: () => ({ running: state.tunnel }) },
   getDirectProxyPort: () => 19001, getClashApiInfo: () => ({ port: 19002, secret: 'FAKE-private' }) }))
 vi.mock('dns', () => ({ promises: {
+  Resolver: class {
+    private rejectCancel!: (error: Error) => void
+    private cancelled = new Promise<never>((_resolve, reject) => { this.rejectCancel = reject })
+    constructor(options: unknown) { state.resolverOptions.push(options); void this.cancelled.catch(() => {}) }
+    resolve4() { return Promise.race([state.boundary('dns4').then(() => ['8.8.8.8']), this.cancelled]) }
+    resolve6() { return Promise.race([state.boundary('dns6').then(() => []), this.cancelled]) }
+    cancel() { state.resolverCancel(); this.rejectCancel(Object.assign(new Error('query cancelled'), { code: 'ECANCELLED' })) }
+  },
   resolve4: async () => { await state.boundary('dns4'); return ['8.8.8.8'] },
   resolve6: async () => { await state.boundary('dns6'); return [] }
 } }))
 vi.mock('axios', () => ({ default: {
   head: async () => { await state.boundary('http-head'); return { status: state.headStatus, headers: {} } },
   get: async (url: string) => {
-    if (url.includes('/delay')) { await state.boundary('clash'); return { status: 200, data: { delay: 10 } } }
+    if (url.includes('/delay')) { await state.boundary('clash'); return state.clashReply ?? { status: 200, data: { delay: 10 } } }
     if (url.includes('ipapi.co')) { await state.boundary('asn'); return { data: { org: 'test', country: 'test' } } }
     await state.boundary('http-get'); return { status: 200, headers: {} }
   }
@@ -84,6 +93,8 @@ beforeEach(() => {
   vi.useFakeTimers()
   state.history = []; state.windows = []; state.sockets = []; state.tunnel = false; state.headStatus = 200
   state.windowSetupThrows = false
+  state.resolverCancel.mockClear(); state.resolverOptions = []
+  state.clashReply = null
   state.boundary.mockReset().mockResolvedValue(undefined); state.writes.mockReset(); vi.mocked(logEvent).mockClear()
 })
 afterEach(async () => {
@@ -121,7 +132,7 @@ describe('URL check ownership', () => {
     expect(state.sockets.every(socket => socket.closed)).toBe(true)
   })
 
-  it.each(['dns4', 'tcp-close', 'tls-close', 'proxy', 'script', 'window-close'])
+  it.each(['tcp-close', 'tls-close', 'window-close', 'asn', 'http-head'])
   ('retains physical %s work after prompt cancellation', async stage => {
     const release = hold(stage), controller = new AbortController()
     const task = track(checkUrl('https://example.test/', options(controller.signal)).catch(error => error))
@@ -193,9 +204,77 @@ describe('URL check ownership', () => {
     await vi.advanceTimersByTimeAsync(60_000)
     expect(await task).toMatchObject({ category: 'timeout' })
     expect(operations.list().at(-1)).toMatchObject({ status: 'error', category: 'timeout' })
-    await expect(checkUrl('https://other.test/')).rejects.toMatchObject({ category: 'conflict' })
+    expect(state.resolverCancel).toHaveBeenCalledOnce()
     release(); await operations.close()
     expect(state.writes).not.toHaveBeenCalled()
+  })
+
+  it('physically cancels DNS with a bounded resolver and permits an independent fresh check', async () => {
+    const release = hold('dns4'), controller = new AbortController()
+    const first = track(checkUrl('https://example.test/', options(controller.signal)).catch(error => error))
+    await flush(); controller.abort(); await flush()
+    expect(state.resolverCancel).toHaveBeenCalledOnce()
+    expect(state.resolverOptions[0]).toEqual({ timeout: 8000, tries: 1 })
+    expect(await first).toMatchObject({ category: 'cancelled' })
+    state.boundary.mockResolvedValue(undefined)
+    const fresh = track(checkUrl('https://other.test/'))
+    await flush(); await vi.advanceTimersByTimeAsync(1500); await flush()
+    expect(await fresh).toHaveProperty('verdict', 'works-both')
+    release()
+    expect(state.writes).toHaveBeenCalledOnce()
+  })
+
+  it.each(['proxy', 'script'])('uses actual window close to revoke a stuck %s promise', async stage => {
+    const release = hold(stage), controller = new AbortController()
+    const task = track(checkUrl('https://example.test/', options(controller.signal)).catch(error => error))
+    await flush(); await vi.advanceTimersByTimeAsync(1500); await flush()
+    controller.abort(); await flush()
+    expect(await task).toMatchObject({ category: 'cancelled' })
+    let drained = false
+    const closing = operations.close().then(() => { drained = true }); await flush()
+    expect(drained).toBe(true)
+    release(); await closing
+    expect(state.writes).not.toHaveBeenCalled()
+  })
+
+  it('fails explicitly when page proxy setup fails instead of publishing an unscored positive verdict', async () => {
+    state.boundary.mockImplementation(async stage => { if (stage === 'proxy') throw new Error('FAKE-private proxy config') })
+    await expect(track(checkUrl('https://example.test/'))).rejects.toMatchObject({ category: 'network' })
+    expect(state.writes).not.toHaveBeenCalled()
+    expect(state.windows.every(win => win.isDestroyed())).toBe(true)
+    expect(state.boundary).not.toHaveBeenCalledWith('page-load')
+  })
+
+  it('admits independent simultaneous checks without mixing their history commits', async () => {
+    const release = hold('http-head')
+    const first = track(checkUrl('https://first.test/')), second = track(checkUrl('https://second.test/'))
+    await flush()
+    expect(state.boundary.mock.calls.filter(([stage]) => stage === 'http-head')).toHaveLength(2)
+    release(); await flush(); await vi.advanceTimersByTimeAsync(1500); await flush()
+    expect((await first).url).toBe('https://first.test/')
+    expect((await second).url).toBe('https://second.test/')
+    expect(state.writes).toHaveBeenCalledTimes(2)
+    expect(new Set(state.history.map(row => row.url))).toEqual(new Set(['https://first.test/', 'https://second.test/']))
+  })
+
+  it('extracts an allowlisted Clash cause without exposing the response message', async () => {
+    state.tunnel = true
+    state.clashReply = { status: 500, data: { message: 'dial FAKE-private C:\\secret connection reset by peer' } }
+    const task = track(checkUrl('https://example.test/'))
+    await flush(); await vi.advanceTimersByTimeAsync(1500); await flush()
+    const result = await task
+    expect(result.direct?.errorMessage).toContain('ECONNRESET')
+    expect(JSON.stringify(result)).not.toContain('FAKE-private')
+    expect(JSON.stringify(result)).not.toContain('secret')
+  })
+
+  it.each(['ECONNRESET', 'ECONNREFUSED', 'ECONNABORTED', 'EPROTO', 'CERT_HAS_EXPIRED'])
+  ('preserves safe diagnostic cause %s without exception text', async code => {
+    state.boundary.mockImplementation(async stage => { if (stage.startsWith('http-')) throw Object.assign(new Error('FAKE-private at C:\\secret\\path'), { code }) })
+    const result = await track(checkUrl('https://example.test/'))
+    expect(result.direct?.errorMessage).toContain(code)
+    expect(JSON.stringify(result)).not.toContain('FAKE-private')
+    expect(JSON.stringify(result)).not.toContain('secret')
   })
 
   it.each(['destroyed', 'did-navigate', 'render-process-gone'])('binds the IPC check to document %s', async eventName => {

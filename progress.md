@@ -6281,3 +6281,48 @@ CI/review нового SHA проверяются отдельно после pu
   coverage и diff check —exit0. URL-specific probes проверены на controlled
   OS boundaries; шесть native fixtures проверяют общую границу/прежние workflows.
   Собственный completed Qodo/CI на опубликованном SHA обязателен до продолжения.
+
+### PR #86: native window close, DNS и диагностические причины
+
+- Initial head890e83a,CI39326611571 success. Qodo1556823 completed с6 findings
+  (.tmp/qodo86-initial.json); вручную attribution не менялся.
+- Критический executeJavaScript finding подтверждён настоящим Electron44.4.3:
+  после JS redirect основной frame оставался loading, executeJavaScript
+  ожидал did-stop-loading даже после actual window close. Native probe:
+  URL_EXECUTE_CLOSE_PROBE {loading:true,windowClosed:true,pendingAfterClose:true},
+  exit0 (.tmp/wp0-url-execute-native-before-final.log). Первые launcher attempts
+  завершались0 без marker: fixture автоматически выходил после последнего окна.
+  Они не засчитаны как доказательство; добавлен window-all-closed listener.
+- До review fix: npm.cmd test -- src/main/urlAvailabilityOperation.test.ts
+  src/renderer/pages/Availability.requestLifetime.test.tsx —11 failed/29 passed,
+  2.26s,exit1 (.tmp/wp0-url-review-before.log). Проверены native-close revocation,
+  Resolver cancellation/deadline, proxy setup refusal, safe failure causes и
+  понятная подсказка validation. После fix адресные2 suites40/40 passed.
+- У каждого offscreen окна теперь отдельная in-memory session. После actual
+  close native capability отозвана; зависшие Electron JS/load/proxy promises
+  не удерживают общий shutdown. Late continuations guarded. Raw Node network
+  work по-прежнему owned до settlement/socket close. Private Resolver timeout8s,
+  tries1 и cancel() не влияют на чужие DNS. Разные URL checks независимы;
+  requester duplicates сохраняют typed conflict, history commits не теряются.
+- setProxy failure теперь typed network failure без history commit. Продолжать
+  рендер с неизвестным выходом означало бы ложно подписать измеренный маршрут;
+  предыдущий fallback не используется. Диагностические причины errno/TLS/HTTP
+  и allowlisted Clash reset/refusal/timeout/EOF сохраняются без исходного текста.
+  Validation UI показывает ожидаемые HTTP/HTTPS форматы, сохраняя typed error.
+- Добавлен scripts/fixtures/url-probe-native.ts в штатный Electron runner:
+  настоящие2 окна/redirect/loading/executeJavaScript, разные private sessions,
+  default session не используется, actual close обеих probes —9ms.
+  node scripts/test-electron-runtime.mjs —7 PASS,exit0
+  (.tmp/wp0-url-review-electron.log). Loopback fixture не меняет VPN/OS маршруты.
+- Финальный targeted: npm.cmd test -- src/main/urlAvailabilityOperation.test.ts
+  src/main/urlAvailabilityVerdict.test.ts src/renderer/pages/Availability.requestLifetime.test.tsx
+  src/preload/preloadValidation.test.ts src/main/operationRegistry.test.ts
+  src/main/requesterOperation.test.ts —175/175 passed,6 suites,2.85s,exit0
+  (.tmp/wp0-url-review-targeted-final.log). Build и final typecheck —exit0,
+  165 channels/0 public any; coverage AC927/927,F210/210 и diff check —exit0.
+  Final full после review fixes выполняется; initial CI не заменяет новый gate.
+- Review final full: npm.cmd test -- --maxWorkers=1 —4882 passed/5 skipped/0 failed,
+  295 files passed/2 skipped,329.74s,exit0 (.tmp/wp0-url-review-full.log).
+  Production/test tree с начала этого прогона не менялся. Typecheck/build,
+  7 native fixtures,coverage и diff check —exit0. Следующий участок только
+  после automatic Qodo completed и CI success на опубликованном review SHA.

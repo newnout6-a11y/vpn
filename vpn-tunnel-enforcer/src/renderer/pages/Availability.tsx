@@ -262,7 +262,9 @@ export function Availability() {
       loadHistory()
     } catch (err: any) {
       if (!lifetime.active || scope.current !== lifetime || (isIpcRemoteErrorData(err) && err.category === 'cancelled')) return
-      setError(err?.message ?? String(err))
+      setError(isIpcRemoteErrorData(err) && err.category === 'validation'
+        ? 'Введите URL вида example.com или https://example.com/path (поддерживаются HTTP и HTTPS).'
+        : err?.message ?? String(err))
     } finally {
       if (lifetime.request === requestId) lifetime.request = undefined
       if (lifetime.active && scope.current === lifetime) setChecking(false)

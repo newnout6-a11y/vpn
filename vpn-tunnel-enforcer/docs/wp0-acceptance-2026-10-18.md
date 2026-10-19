@@ -1635,3 +1635,16 @@ routing self-test и остальные live/background producers остаютс
 Final full npm.cmd test -- --maxWorkers=1:4871 passed/5 skipped/0 failed,
 291.14s,exit0. Build/typecheck,6 native regression fixtures,coverage/diff —exit0.
 URL workers проверены на controlled OS boundaries; remote gates pending.
+
+Qodo1556823: executeJavaScript hang после close воспроизведён на настоящем
+Electron44.4.3. Native window-close revocation и отдельные in-memory sessions
+снимают зависание, не смешивая выходы измерений. Новый штатный native fixture
+проверил2 concurrent окна, реальные redirect/loading/pending script и cancel9ms;
+runner7 PASS. DNS использует private bounded Resolver/cancel; независимые checks
+не конфликтуют. Proxy setup refusal даёт typed network, а не неподтверждённый
+положительный verdict. Safe diagnostic причины и validation hint сохранены.
+Targeted175/175 passed;build/typecheck/coverage —exit0. Final full/new gates pending.
+
+Review final full:4882 passed/5 skipped/0 failed,329.74s,exit0;
+295 files passed/2 skipped. Production/test tree не менялся во время прогона.
+Build/typecheck,7 native fixtures,coverage/diff —exit0. Новые remote gates pending.

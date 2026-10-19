@@ -67,4 +67,10 @@ describe('URL check requester lifetime', () => {
     expect(api.urlAvailabilityCheck.mock.calls[0][1]).not.toBe(api.urlAvailabilityCheck.mock.calls[1][1])
     await act(async () => { release(result) })
   })
+
+  it('explains the expected URL format for a typed validation failure', async () => {
+    start()
+    await act(async () => { reject({ name: 'IpcRemoteError', ...ipcError('validation') }) })
+    expect(screen.getByText(/Введите URL вида example\.com или https:\/\/example\.com\/path/)).toBeTruthy()
+  })
 })
