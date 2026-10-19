@@ -39,6 +39,8 @@ export const OPERATION_DEADLINES = Object.freeze({
 })
 export type ManagedOperationKind = keyof typeof OPERATION_DEADLINES
 export interface ManagedOperation extends Omit<ConnectionOperation, 'kind' | 'deadline' | 'category'> {
+  /** Non-secret receipt identity; UUID operationId remains the cancellation handle. */
+  readonly operationKey: string
   readonly kind: ManagedOperationKind
   /** No work clock runs while a native dialog awaits the user's decision. */
   readonly deadline: number | null

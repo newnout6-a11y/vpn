@@ -1600,3 +1600,16 @@ serial run выполняется, результаты/границы дока�
 Финальный полный npm.cmd test -- --maxWorkers=1:4827 passed/5 skipped/0 failed,
 321.42s,exit0. Build/typecheck,6 native fixtures,coverage/diff —exit0.
 Default failures сохранены в progress.md; remote Qodo/CI требуются на head PR.
+
+PR #85 Qodo1556439 completed с4 findings на22e1348. Исправления дополняют
+receipts сохраняемым при UUID-redaction operationKey, допускают разные группы
+с исключением дублей одной группы до physical drain, и переводят HTTP errors
+в canonical message/соответствующий status без локальных путей. Token обязателен
+и404 для missing/empty сохранён. Конкурентные commits не теряют результаты;
+отмена одного group scope не отменяет другой. Targeted8 suites269/269 passed,
+5.26s;build/typecheck и6 native fixtures —exit0. Final full и automatic review
+нового SHA требуются до следующего участка; атрибуция Qodo вручную не менялась.
+
+Review final full npm.cmd test -- --maxWorkers=1:4835 passed/5 skipped/0 failed,
+271.89s,exit0. Build/typecheck,6 native fixtures,coverage/diff —exit0.
+Initial CI39322197254 success относится к22e1348; fixes требуют новых gates.

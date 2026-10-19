@@ -803,7 +803,7 @@ export function checkGroupHealth(groupId: string, options: GroupHealthOptions = 
   return operations.run('health-check', async lease => {
     options.onOperation?.(lease)
     return checkGroupHealthOwned(groupId, lease)
-  }, { signal: options.signal, resource: 'key-health' })
+  }, { signal: options.signal, resource: `key-health:${groupId}` })
 }
 
 async function checkGroupHealthOwned(groupId: string, lease: OperationLease): Promise<{ ok: true; results: KeyHealthResult[] }> {

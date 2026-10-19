@@ -6185,3 +6185,47 @@ CI/review нового SHA проверяются отдельно после pu
   Build/typecheck и6 native Electron fixtures проверили тот же production tree.
   Coverage AC927/927,F210/210 и diff check —exit0. Следующий участок требует
   собственного completed Qodo и CI success на опубликованном final SHA.
+
+### PR #85: замечания Qodo (19.10.2026, поздний вечер)
+
+- Qodo1556439 completed на initial head22e1348 с4 findings. Сохранены
+  .tmp/qodo85-initial.json; attribution вручную не менялся. HTTP route
+  уже требует POST+control token (обратное утверждение в security finding
+  не подтверждается), но raw OS error действительно мог попасть в detail.
+- Регрессии до fix: npm.cmd test -- src/main/groupHealthOperation.test.ts
+  src/main/externalProxy.test.ts —6 failed/58 passed,0.455s, Vitest exit1
+  (.tmp/wp0-group-health-review-before.log). Проверены HTTP409/403 вместо500,
+  доступность другой группы и receipt key. Shell tail завершился0; это
+  не меняет сохранённый Vitest verdict.
+- HTTP consumer теперь переводит категории в соответствующий HTTP status
+  и canonical message без OS exception/path, сохраняет404 missing/empty
+  и обязательный token. Resource key-health:<groupId> допускает разные
+  группы, сохраняя исключение повторов одной группы до physical drain.
+  Сериализованные commits проверены на сохранение обоих результатов;
+  отмена одной группы не отменяет другую.
+- ManagedOperation receipts сохраняют UUIDv4 для cancellation и дополнены
+  operationKey. Production credential redactor проверен на2 receipt:
+  UUID скрыт, keys/correlation различимы, отмена исходным UUID работает.
+- Targeted3 suites121/121 passed,1.75s; расширенный targeted7 suites214/214
+  passed,4.57s (.tmp/wp0-group-health-review-targeted2.log). Указанный
+  src/main/preloadValidation.test.ts отсутствует и Vitest его не включил;
+  поэтому записаны фактические7 suites, а не8.
+- Первый npm.cmd run build завершился2: test mock writeFile имел tuple[]
+  без аргументов. Исправлена только TS-сигнатура mock; runtime поведения
+  не меняет. Повтор build/typecheck —exit0,165 channels/0 public any
+  (.tmp/wp0-group-health-review-build2.log). node scripts/test-electron-runtime.mjs
+  —6 PASS,exit0 (.tmp/wp0-group-health-review-electron.log).
+  Coverage AC927/927,F210/210 —exit0; full serial выполняется.
+- Финальный адресный run с верным src/preload/preloadValidation.test.ts:
+  npm.cmd test -- src/main/groupHealthOperation.test.ts src/main/externalProxy.test.ts
+  src/main/operationRegistry.test.ts src/main/serverGroupsRefresh.test.ts
+  src/main/keyHealthChecker.test.ts src/main/externalProxyHostIntegration.test.ts
+  src/renderer/pages/Servers.requestLifetime.test.tsx src/preload/preloadValidation.test.ts
+  —269/269 passed,8 suites,5.26s,exit0.
+- Полный npm.cmd test -- --maxWorkers=1 —4835 passed/5 skipped/0 failed,
+  293 files passed/2 skipped,271.89s,exit0 (.tmp/wp0-group-health-review-full.log).
+  Во время run исправлена только TS-сигнатура mock writeFile, затем этот
+  suite повторно вошёл в final targeted. Production tree не менялся.
+  Build/typecheck,6 native fixtures,coverage/diff —exit0. Новый head требует
+  automatic completed Qodo и CI success; initial CI39322197254 success
+  относится к22e1348 и не заменяет новый gate.

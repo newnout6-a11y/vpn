@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { OperationRegistry, type OperationLease } from './operationRegistry'
 import { OPERATION_DEADLINES, type ManagedOperation, type ManagedOperationKind } from '../shared/operation'
 import { currentCorrelationId, currentActionMetadata, withCorrelation } from './actionCorrelation'
+import { redactSensitiveConfig } from './vpnProfiles'
 
 function held<T>() {
   let resolve!: (value: T) => void, reject!: (error: Error) => void
@@ -13,6 +14,20 @@ afterEach(() => vi.useRealTimers())
 const kinds = Object.keys(OPERATION_DEADLINES) as ManagedOperationKind[]
 
 describe('long operation registry', () => {
+  it('keeps receipts distinguishable after credential redaction without changing cancellation UUIDs', async () => {
+    const registry = new OperationRegistry(), gate = held<void>()
+    const first = registry.run('health-check', async lease => { await lease.wait(gate.promise) }, { resource: 'first' }).catch(error => error)
+    await registry.run('health-check', async () => {}, { resource: 'second' })
+    const receipts = registry.list()
+    const sanitized = redactSensitiveConfig(receipts) as typeof receipts
+    expect(sanitized.map(receipt => receipt.operationKey)).toEqual(receipts.map(receipt => 'op_' + receipt.operationId.replaceAll('-', '')))
+    expect(new Set(sanitized.map(receipt => receipt.operationKey)).size).toBe(2)
+    expect(sanitized.map(receipt => receipt.correlationId)).toEqual(receipts.map(receipt => receipt.correlationId))
+    expect(JSON.stringify(sanitized)).not.toContain(receipts[0].operationId)
+    expect(registry.cancel(receipts[0].operationId)).toBe(true)
+    expect(await first).toMatchObject({ category: 'cancelled' })
+    gate.resolve(); await registry.close()
+  })
   it('preserves quiet user dismissal while recording a cancelled terminal outcome', async () => {
     const registry = new OperationRegistry()
     expect(await registry.run('export', async () => ({ ok: false, cancelled: true }))).toEqual({ ok: false, cancelled: true })

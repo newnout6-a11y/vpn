@@ -246,7 +246,7 @@ describe('owned group health', () => {
     expect(operations.list().at(-1)).toMatchObject({ status: 'success' })
   })
 
-  it('has a work deadline and rejects overlapping groups until native drain', async () => {
+  it('has a work deadline and rejects the same group until native drain', async () => {
     vi.useFakeTimers()
     const release = hold('adapter')
     const result = checkGroupHealth('g').catch(error => error)
@@ -280,6 +280,35 @@ describe('owned group health', () => {
     expect(state.writes).toHaveBeenCalledOnce()
     expect(state.profiles[0]).toMatchObject({ status: 'online', healthStatus: 'online' })
     expect(operations.list().at(-1)).toMatchObject({ kind: 'health-check', correlationId, owner: 'manual', status: 'success' })
+    const receipt = operations.list().at(-1)!
+    expect(receipt).toHaveProperty('operationKey', 'op_' + receipt.operationId.replaceAll('-', ''))
+  })
+
+  it('allows different groups concurrently while fencing duplicate checks and independent cancellation', async () => {
+    state.groups.push({ id: 'other' })
+    state.profiles.push({ ...state.profiles[0], id: 'other-p', groupId: 'other' })
+    const release = hold('adapter'), controller = new AbortController()
+    const first = checkGroupHealth('g', { signal: controller.signal }).catch(error => error)
+    const second = checkGroupHealth('other').catch(error => error)
+    await flush()
+    expect(state.boundary.mock.calls.filter(([stage]) => stage === 'adapter')).toHaveLength(2)
+    await expect(checkGroupHealth('g')).rejects.toMatchObject({ category: 'conflict' })
+    controller.abort()
+    expect(await first).toMatchObject({ category: 'cancelled' })
+    release()
+    expect(await second).toMatchObject({ ok: true, results: [{ profileId: 'other-p', online: true }] })
+    expect(state.writes).toHaveBeenCalledOnce()
+    expect(state.profiles[0]).not.toHaveProperty('healthStatus')
+    expect(state.profiles[1]).toHaveProperty('healthStatus', 'online')
+  })
+
+  it('serializes concurrent group commits without losing either result', async () => {
+    state.groups.push({ id: 'other' })
+    state.profiles.push({ ...state.profiles[0], id: 'other-p', groupId: 'other' })
+    const results = await Promise.all([checkGroupHealth('g'), checkGroupHealth('other')])
+    expect(results.every(result => result.ok)).toBe(true)
+    expect(state.writes).toHaveBeenCalledTimes(2)
+    expect(state.profiles.every(profile => profile.healthStatus === 'online')).toBe(true)
   })
 
   it('rejects missing/empty groups with typed validation', async () => {
