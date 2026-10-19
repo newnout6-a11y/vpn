@@ -5,7 +5,8 @@ import { join } from 'path'
 import { promisify } from 'util'
 import { IpcFault } from '../shared/ipc-result'
 
-const quote = (value: string) => "'" + value.replaceAll("'", "''") + "'"
+// Paths are opaque data, never PowerShell string literals (including smart quotes).
+const pathData = (value: string) => "[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + Buffer.from(value, 'utf8').toString('base64') + "'))"
 function missing(error: unknown): boolean { return (error as NodeJS.ErrnoException)?.code === 'ENOENT' }
 function sameFile(a: BigIntStats | undefined, b: BigIntStats | undefined): boolean {
   return !a || !b ? a === b : (['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs'] as const).every(key => a[key] === b[key])
@@ -19,9 +20,9 @@ export async function prepareConfigExport(temporary: string, destination: string
   if (process.platform === 'win32') {
     // .NET ACL APIs avoid PowerShell module-path/autoload drift; no elevation or FFI in main.
     const script = `$ErrorActionPreference='Stop';
-$temporary=${quote(temporary)}
+$temporary=${pathData(temporary)}
 $sections=[Security.AccessControl.AccessControlSections]'Access,Owner,Group'
-${before ? `$acl=[IO.File]::GetAccessControl(${quote(destination)},$sections)` : `$acl=New-Object Security.AccessControl.FileSecurity
+${before ? `$acl=[IO.File]::GetAccessControl(${pathData(destination)},$sections)` : `$acl=New-Object Security.AccessControl.FileSecurity
 $acl.SetAccessRuleProtection($true,$false)
 $user=[Security.Principal.WindowsIdentity]::GetCurrent().User
 $acl.SetOwner($user)

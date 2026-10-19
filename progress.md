@@ -4239,3 +4239,43 @@ CI/review нового SHA проверяются отдельно после pu
   ACL нового export отдельно проверены тремя configExportAcl cases.
   `git diff --check` — exit 0. Следующий участок остаётся закрыт до completed
   Qodo и CI success на окончательном SHA.
+
+
+### PR #70 — Qodo: типографские апострофы в выбранном пути
+
+- Повторный Qodo **1543042 completed** на **9d65a141364fc14c988474d45d5b1df6a96da332**:
+  три прежних findings — implemented. Новый fd861793 — action_required:
+  ASCII-only quote helper не учитывал типографские кавычки PowerShell.
+- Подтверждён легитимными именами файлов с U+2018…U+201B:
+  `npm.cmd test -- src/main/configExportAcl.test.ts -t typographic`
+  — **4 failed / 3 skipped**, **3.12 s**, exit 1
+  (.tmp/wp0-config-qodo70-path-before.log). Экспорт возвращал permission.
+  Проверка не выполняет посторонние команды: только обычные имена файлов.
+- Paths теперь передаются в PowerShell только как base64 data expression;
+  произвольные символы пути не попадают в string literal или исполняемый source.
+  Fixture использует такой же безопасный транспорт для своего ACL read-back.
+  Каждый из четырёх native cases создаёт и затем перезаписывает выбранный файл,
+  проверяя точный content; прежние owner/group/DACL tests сохранены.
+- `npm.cmd test -- src/main/configExportAcl.test.ts src/main/configOperations.test.ts src/main/configManager.test.ts src/main/configImportSecurity.test.ts src/main/configExportSecurity.test.ts src/main/configIpcErrors.test.ts src/main/operationRegistry.test.ts`
+  — **192 passed / 7 files**, **8.31 s**, exit 0
+  (.tmp/wp0-config-qodo70-path-regression.log). `npm.cmd run typecheck`
+  — exit 0, 160 channels / 0 public any (.tmp/wp0-config-qodo70-path-typecheck.log).
+  Traceability AC 927/927 / F 210/210 — exit 0. Полный набор запущен отдельно;
+  окончательные build/native и exact-head Qodo/CI требуются после исправления.
+
+- CI **39182525633 success** на 9d65a14: Windows unit/traceability/
+  production IPC/CSP/WFP/native, Rust и сайт зелёные. Watcher завершился exit 0.
+  Этот результат сохраняется как проверка предыдущего head; новый path fix
+  требует отдельного completed Qodo и CI success после push.
+
+- Полный `npm.cmd test` с path fix — **4346 passed / 5 skipped / 0 failed**,
+  **270 files passed / 2 skipped**, **199.67 s**, exit 0
+  (.tmp/wp0-config-qodo70-path-full.log). Build/native выполняются после него.
+
+- `npm.cmd run build` — exit 0, включая повторный typecheck
+  (.tmp/wp0-config-qodo70-path-build.log). `node scripts/test-electron-runtime.mjs`
+  — ELECTRON_SMOKE_PASS, exit 0 (.tmp/wp0-config-qodo70-path-electron.log).
+  `node scripts/test-wp1-native.mjs --ipc-only` — WP1_NATIVE_PASS, exit 0
+  (.tmp/wp0-config-qodo70-path-csp.log). Scope smoke прежний; path/ACL проверены
+  отдельно реальными Windows files. `git diff --check` — exit 0. До следующего
+  участка снова требуются completed Qodo и CI на последнем head.

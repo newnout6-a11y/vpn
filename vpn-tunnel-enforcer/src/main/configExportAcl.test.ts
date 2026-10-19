@@ -8,7 +8,7 @@ import { OperationRegistry } from './operationRegistry'
 import { writeConfigExport } from './configOperationIo'
 import { prepareConfigExport } from './configExportSecurity'
 
-const quote = (value: string) => "'" + value.replaceAll("'", "''") + "'"
+const quote = (value: string) => "[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + Buffer.from(value, 'utf8').toString('base64') + "'))"
 async function powershell(script: string) {
   const { stdout } = await promisify(execFile)('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand',
     Buffer.from("$ErrorActionPreference='Stop';" + script, 'utf16le').toString('base64')], { windowsHide: true, timeout: 15_000 })
@@ -23,6 +23,13 @@ beforeEach(async () => {
 afterEach(async () => { if (directory) await rm(directory, { recursive: true, force: true }) })
 
 describe.skipIf(process.platform !== 'win32')('Windows configuration export ACL', () => {
+  it.each(['\u2018', '\u2019', '\u201a', '\u201b'])('treats a typographic apostrophe %s in the chosen path as data', async apostrophe => {
+    const path = join(directory, `Jane${apostrophe}s Documents.json`)
+    expect(await registry.run('export', lease => writeConfigExport(path, 'first', lease, true))).toBe(true)
+    expect(await registry.run('export', lease => writeConfigExport(path, 'second', lease, true))).toBe(true)
+    expect(await readFile(path, 'utf8')).toBe('second')
+  })
+
   it('preserves an existing explicit owner/group/DACL instead of inheriting parent access', async () => {
     const path = join(directory, 'existing.json')
     await writeFile(path, 'old')
