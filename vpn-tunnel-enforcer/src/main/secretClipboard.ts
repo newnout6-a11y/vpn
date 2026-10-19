@@ -34,9 +34,19 @@ function arm(delay: number): void {
  * Retain only a fingerprint, not another plaintext copy of the VPN key.
  * Clipboard history/cloud synchronization is outside this cleanup's scope.
  */
-export function copySecretToClipboard(secret: string): Promise<{ clearAfterMs: number }> {
+interface ClipboardResult { clearAfterMs: number }
+interface ClipboardLifetime<T> {
+  assertActive(): void
+  complete(result: ClipboardResult): T
+}
+export function copySecretToClipboard(secret: string): Promise<ClipboardResult>
+export function copySecretToClipboard<T>(secret: string, lifetime: ClipboardLifetime<T>): Promise<T>
+export function copySecretToClipboard<T>(secret: string, lifetime?: ClipboardLifetime<T>): Promise<T | ClipboardResult> {
   const fingerprint = digest(secret)
   return serialize(async () => {
+    // Check inside the queue: cancellation while another native call drains
+    // must not issue a replacement write later.
+    lifetime?.assertActive()
     await clipboard.writeText(secret) // If this fails, keep the previous cleanup armed.
     if (timer) clearTimeout(timer)
     owned = { digest: fingerprint, formats: '' }
@@ -45,7 +55,16 @@ export function copySecretToClipboard(secret: string): Promise<{ clearAfterMs: n
       // Never erase unknown clipboard formats if native format discovery fails.
       logEvent('warn', 'secret-clipboard', 'clipboard format ownership could not be verified')
     }
-    return { clearAfterMs: SECRET_CLIPBOARD_TTL_MS }
+    try {
+      lifetime?.assertActive()
+      const result = { clearAfterMs: SECRET_CLIPBOARD_TTL_MS }
+      return lifetime ? lifetime.complete(result) : result
+    } catch (error) {
+      // Native writes cannot be recalled. Drain first, then remove only our
+      // unchanged value; never enqueue cleanup from inside this queue.
+      await clearClipboardNow(undefined, true)
+      throw error
+    }
   })
 }
 
@@ -57,23 +76,29 @@ export function clearOwnedSecretClipboard(): Promise<void> {
 }
 
 function clearClipboard(expectedOwner?: OwnedClipboard | null): Promise<void> {
-  return serialize(async () => {
-    // A timeout may fire during an asynchronous replacement write and queue
-    // behind it. That stale timeout must leave the replacement's TTL intact.
-    if (expectedOwner !== undefined && owned !== expectedOwner) return
-    if (timer) clearTimeout(timer)
-    timer = undefined
-    if (!owned) return
-    try {
-      if (digest(await clipboard.readText()) === owned.digest && await formats() === owned.formats
-        // Recheck after async format discovery: a user may have copied new text.
-        && digest(await clipboard.readText()) === owned.digest) {
-        clipboard.clear()
-      }
-      owned = null
-    } catch {
-      logEvent('warn', 'secret-clipboard', 'secret clipboard cleanup failed; retry scheduled')
-      arm(RETRY_DELAY_MS)
+  return serialize(() => clearClipboardNow(expectedOwner))
+}
+
+async function clearClipboardNow(expectedOwner?: OwnedClipboard | null, cancelled = false): Promise<void> {
+  // A timeout may fire during an asynchronous replacement write and queue
+  // behind it. That stale timeout must leave the replacement's TTL intact.
+  if (expectedOwner !== undefined && owned !== expectedOwner) return
+  if (timer) clearTimeout(timer)
+  timer = undefined
+  if (!owned) return
+  try {
+    if (!owned.formats && cancelled) {
+      logEvent('warn', 'secret-clipboard', 'cancelled clipboard cleanup could not verify ownership', { cleanupFailed: true })
     }
-  })
+    if (digest(await clipboard.readText()) === owned.digest && await formats() === owned.formats
+      // Recheck after async format discovery: a user may have copied new text.
+      && digest(await clipboard.readText()) === owned.digest) {
+      clipboard.clear()
+    }
+    owned = null
+  } catch {
+    arm(RETRY_DELAY_MS)
+    try { logEvent('warn', 'secret-clipboard', 'secret clipboard cleanup failed; retry scheduled', { cleanupFailed: true }) }
+    catch { /* Diagnostics cannot replace the primary cancellation or stop retries. */ }
+  }
 }

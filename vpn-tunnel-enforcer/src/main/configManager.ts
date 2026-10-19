@@ -28,6 +28,7 @@ import { withSecretExportConsent } from './secretExportConsent'
 import { redactConfigExport } from './configExportPolicy'
 import { requireEnum, requireString, requireStringArray } from './ipcValidation'
 import { IpcFault, classifyIpcError } from '../shared/ipc-result'
+import { ioFailureDetails } from './ioFailureDiagnostics'
 import { serverPickerStore, serverGroupsStore, granularKillSwitchStore } from './sharedStores'
 import { operations } from './operations'
 import type { OperationLease } from './operationRegistry'
@@ -687,17 +688,9 @@ function rejectImport(validationCode: ImportValidationCode, reason: 'validation'
   throw new IpcFault(reason)
 }
 
-const CONFIG_IO_CODES = new Set(['EACCES', 'EPERM', 'ENOENT', 'EISDIR', 'ENOTDIR', 'ENOSPC', 'EROFS',
-  'EIO', 'EMFILE', 'ENFILE', 'EBADF', 'EINVAL', 'EEXIST', 'EBUSY', 'EFBIG', 'ENAMETOOLONG',
-  'ETIMEDOUT', 'ECONNRESET', 'ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'ENETUNREACH', 'EHOSTUNREACH'])
 function logConfigFailure(message: string, error: unknown, source = 'config-manager'): void {
-  const reason = classifyIpcError(error)
-  let ioCode: string | undefined
-  try {
-    const code = error && typeof error === 'object' ? Object.getOwnPropertyDescriptor(error, 'code')?.value : undefined
-    if (typeof code === 'string' && CONFIG_IO_CODES.has(code)) ioCode = code
-  } catch { /* Unreadable exceptions still retain their bounded category. */ }
-  logEvent(reason === 'cancelled' ? 'debug' : 'error', source, message, { reason, ...(ioCode ? { ioCode } : {}) })
+  const details = ioFailureDetails(error)
+  logEvent(details.reason === 'cancelled' ? 'debug' : 'error', source, message, details)
 }
 
 async function importValidate(filePath: string, approvedRaw?: string, options: ConfigOperationOptions = {}): Promise<{

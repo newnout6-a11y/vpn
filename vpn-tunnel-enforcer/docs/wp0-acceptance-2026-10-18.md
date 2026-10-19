@@ -8,7 +8,7 @@
 18.10 владелец разрешил продолжать WP-0 при открытом PR #54, сохраняя запрет
 его слияния до отдельного решения. Полного Revix для #54 не было из-за квоты.
 Позднее 18.10 владелец разрешил сливать PR после пройденных проверок.
-#54/#55/#56/#57/#58/#59/#60/#61/#62/#63/#64/#65/#66/#67/#68/#69 слиты в main после exact-head CI success и completed Qodo,
+#54/#55/#56/#57/#58/#59/#60/#61/#62/#63/#64/#65/#66/#67/#68/#69/#70 слиты в main после exact-head CI success и completed Qodo,
 без открытых findings; прежний запрет слияния отменён.
 
 ## Полная область и первоначальная инвентаризация
@@ -17,7 +17,7 @@
 | --- | --- | --- |
 | 00-001 | AST-проверка 160 main/preload/shared request channels, общий реестр входов и versioned transport envelope; object contracts проверяют поля/массивы, save-settings покрывает все 39 общих полей AppSettings; TypeScript checker проверяет results всех 160 listeners, public results с `any` больше нет; native contextBridge сохраняет JSON профиля и nullable active result, feature list/cancel | Завершить проверку текущего PR; отдельная semantic matrix ошибок остаётся в 00-004 |
 | 00-002 | Production TunnelStateMachine интегрирована в main lane/IPC/Soft/tray/UI; 4096 stable tours и 117649 tours семи событий глубиной 6, включая timeout/cancel и native completion, с fake PID/TUN ledger и балансом operation events; sticky faults и generation fencing | Общая durable operation history/counters; все blocked/unknown/background paths; native Windows resources; общий admission фоновых restart |
-| 00-003 | Main connection lane: UUIDv4, owner, deadline запуска, priority admission; ручные Hard/Direct и Soft из tray, scheduled startup вместе с proxy detection; общий feature registry с prompt cancellation/deadline и physical drain, speed test, refresh подписок и импорт профилей, включая curl/DoH и commit queue; текущий участок config browse/validate/apply/export реализован локально, PR gate ещё впереди | Завершить config PR gate; экспорт ключей/rotation и UI cancel/unmount; deadline остановки, все entrypoints и полная матрица поздних эффектов |
+| 00-003 | Main connection lane: UUIDv4, owner, deadline запуска, priority admission; ручные Hard/Direct и Soft из tray, scheduled startup вместе с proxy detection; общий feature registry с prompt cancellation/deadline и physical drain, speed test, refresh подписок и импорт профилей, включая curl/DoH и commit queue; config browse/validate/apply/export, async file I/O и terminal commit приняты в PR #70 | Экспорт ключей/rotation и UI cancel/unmount; deadline остановки, все entrypoints и полная матрица поздних эффектов |
 | 00-004 | Общая классификация transport; 157 каналов × 7 категорий через guard; native contextBridge сохраняет code/category/correlation в en/ru; typed local validation; 4 настоящих config handlers × 7 категорий, canonical domain failures | Миграция legacy domain-result `{success:false,error}` и semantic matrix настоящих feature handlers; transport fixtures не доказывают её |
 | 00-005 | Один action correlation id в guarded IPC response/error, lifecycle connect/stop и JSONL logger; async isolation, native wait/drain, diagnostic read-back с повторной redaction; ID исходного connect и source/owner/route/confidence в session history/JSON/CSV; JSONL clockId/monotonicMs отдельно от календарных дат и durationMs; реальные owned/legacy/tray/recovery Soft sessions | Все native/background entrypoints и полная матрица событий/истории автоматизаций, live-check и recovery |
 | 00-006 | Локальные миграции; общий version admission для 20 electron-store файлов / 28 constructors; future-version SHA-256 invariance на real Conf backend до defaults/repair и при записи через ранее открытый handle | Централизованный упорядоченный migration registry, fixtures всех исторических преобразований, остальные persisted JSON, полноценный upgrade/downgrade и межпроцессная координация |
@@ -1006,3 +1006,54 @@ Qodo 1543042 подтвердил три прежних исправления �
 типографскими апострофами. Paths helper теперь передаёт их как base64 data,
 без вставки символов имени в PowerShell literal. Четыре дополнительных native
 cases с U+2018…U+201B проверяют создание и перезапись; новый PR gate обязателен.
+
+
+PR #70 слит: Qodo 1543096 completed на ceaa20b (все 4 findings implemented,
+новых нет), CI 39183295438 success на том же head. Отдельный REST GET подтвердил
+merge 2e61411. Это завершает текущий config участок; общий остаток AT и WP-0
+сохранён. Следующий участок — экспорт VPN-ключей. Полный локальный набор:
+4346 passed / 5 skipped, typecheck/build/native PASS; подробности — progress.md.
+
+
+## Экспорт ключей: общий lifetime и terminal persistence (19.10.2026)
+
+Пять production handlers (renderer URI/JSON, main clipboard, single key file,
+bulk key file и proxy-list) подключены к registry с отдельными ресурсами
+keys:renderer/clipboard/file. Native consent и save picker сохраняют quiet
+{ok:false,cancelled:true}; registry фиксирует это как cancelled. Ожидание
+пользователя не расходует work budget. Cancel/destroy/shutdown/deadline запрещают
+поздний выбор файла/раскрытие; physical resource удерживается до raw settlement.
+
+Три file exports переиспользуют staging/Windows ACL/fsync/terminal rename из
+config export #70. Ошибка записи возвращается через безопасную taxonomy,
+сохраняя предыдущий destination. URI/JSON/mixed batch и counts не изменены.
+
+Native clipboard write в Electron не поддерживает отзыв уже выданного вызова.
+Отмена caller prompt, но resource ждёт write и компенсирующую очистку только
+неизменённого owned значения. Новые пользовательские text/formats не стираются;
+ошибка native cleanup логируется cleanupFailed с retry. Если владение форматами
+не доказано, данные не стираются и невозможность очистки видна в журнале.
+Не заявляется отсутствие кратковременной native записи после abort или очистка
+Windows clipboard history/cloud. Это ограничение отдельно сохраняется для
+полной приёмки; новый clipboard L3 этим fixture не выполнен.
+
+L2 использует actual picker/registry/IPC guard, настоящие files/Conf/exporters и
+logger/redactor/JSONL/diagnostic read-back. Dialogs/clipboard/Electron DPAPI boundary
+заменены. Включены cancel до/после native boundaries, sender destroy/shutdown,
+рабочий deadline и long user wait, file-handle drain, queue cancellation,
+неизменность destination/temp cleanup, terminal abort и correlation/redaction.
+Общие actual Windows ACL tests shared writer повторно прошли. Полный AT и WP-0
+остаются открытыми: rotation, UI cancel/unmount, migration/audit/semantic matrices
+и полная native/state/resource приёмка ещё нужны. Проверки и remote PR gate — progress.md.
+
+
+Qodo #71 выявил три границы наблюдаемости/сохранения policy. Key failures теперь
+сохраняют allowlisted errno вместе с category/destination в исходном correlation,
+без raw exception data; этот безопасный allowlist общий с config diagnostics.
+Bulk success снова пишет total/exported/skipped в actual JSONL, без path/content.
+POSIX branch сохраняет uid/gid/mode до plaintext и проверяет read-back, иначе
+экспорт отклоняется. Этот POSIX тест управляет filesystem/identity boundary;
+натурная Linux приёмка не заявляется, actual Windows ACL cases сохранены.
+Все 14 новых cases падали до исправления, адресный набор 167 passed после.
+Initial CI 39185510421 success относится к cdb1229; новый head требует
+повторных full tests, completed Qodo и CI success. Attribution не менялся вручную.

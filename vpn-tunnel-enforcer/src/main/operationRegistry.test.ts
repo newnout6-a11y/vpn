@@ -13,6 +13,14 @@ afterEach(() => vi.useRealTimers())
 const kinds = Object.keys(OPERATION_DEADLINES) as ManagedOperationKind[]
 
 describe('long operation registry', () => {
+  it('preserves quiet user dismissal while recording a cancelled terminal outcome', async () => {
+    const registry = new OperationRegistry()
+    expect(await registry.run('export', async () => ({ ok: false, cancelled: true }))).toEqual({ ok: false, cancelled: true })
+    expect(registry.list()).toMatchObject([{ status: 'cancelled', category: 'cancelled' }])
+    expect(await registry.run('export', async () => ({ ok: false, cancelled: false }))).toEqual({ ok: false, cancelled: false })
+    expect(registry.list()[1]).toMatchObject({ status: 'error' })
+    await registry.close()
+  })
   it('pauses only user decision time, then enforces the remaining work budget and drains timeout', async () => {
     vi.useFakeTimers()
     const registry = new OperationRegistry(), dialog = held<void>(), work = held<void>()

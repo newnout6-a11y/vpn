@@ -4279,3 +4279,138 @@ CI/review нового SHA проверяются отдельно после pu
   (.tmp/wp0-config-qodo70-path-csp.log). Scope smoke прежний; path/ACL проверены
   отдельно реальными Windows files. `git diff --check` — exit 0. До следующего
   участка снова требуются completed Qodo и CI на последнем head.
+
+
+### PR #70 — окончательное ревью
+
+- Qodo **1543096 completed** на **ceaa20b693f4a5519a8acc5b89e75a59ff5f5a03**:
+  все четыре прежних findings implemented, новых нет. Attribution прочитан
+  через API и вручную не менялся; review request вручную не отправлялся.
+- CI **39183295438** выполняется на том же SHA; сайт и Rust success,
+  Windows unit ещё in_progress. До terminal CI success слияние не выполняется.
+
+- Окончательный CI **39183295438 success** на ceaa20b: Windows unit,
+  traceability, production IPC/CSP, WFP ABI/rollback и native reads,
+  Rust и сайт зелёные. Watcher завершился exit 0.
+- Перед merge отдельные REST GET подтвердили head=ceaa20b, mergeable=true /
+  clean и CI success; Qodo API повторно подтвердил completed, 4 implemented,
+  openFindings=[] на том же SHA. Слияние выполнено с expected head.
+- Отдельный REST GET после merge подтвердил merged=true/state=closed,
+  merge **2e61411dfd1b8443099fa223b950acd2e973a28f**.
+- Следующая ветка — codex/wp0-key-export от обновлённого main. Эта запись
+  меняет только журнал/матрицу; production tree совпадает с проверенным
+  ceaa20b. Последние фактические проверки: полный npm test 4346 passed /
+  5 skipped, typecheck/build/native PASS, traceability AC 927/927 / F 210/210.
+  Экспорт VPN keys, rotation, UI cancel/unmount и прочий остаток WP-0 сохраняются.
+  Полная WP-0 и следующая WP-2 остаются активной целью.
+
+
+### WP-0 — экспорт VPN-ключей: lifetime, atomic files и clipboard drain
+
+- Все пять handlers экспортов (renderer/clipboard/single file/bulk keys/proxy-list)
+  используют общий operation registry: UUIDv4, original IPC correlation, deadline,
+  prompt cancellation и physical drain. Native consent и save picker приостанавливают
+  рабочий budget; renderer destroyed отменяет запрос. Три file variants разделяют
+  resource keys:file; новые экспорты не обходят незавершённый native эффект.
+- Файлы используют проверенный в #70 writeConfigExport: собственный staging,
+  Windows security descriptor до plaintext, fsync/close, destination snapshot и
+  terminal rename. Прежний файл сохраняется при cancel/error; raw write errors
+  больше не возвращаются renderer и не передаются в handleLogged. Существующие
+  URI/JSON/mixed-array/proxy форматы, counts и native consent сохранены.
+- Буфер проверяет active внутри собственной очереди до native write. Уже выданный
+  Electron native write нельзя отозвать: caller получает cancel/timeout promptly,
+  physical lease остаётся до его завершения и compensating cleanup. Очистка
+  удаляет только неизменённое owned значение, сохраняет новый текст/форматы;
+  native failure диагностируется cleanupFailed с retry. Если владение форматами
+  не доказано, буфер не стирается и cleanupFailed явно фиксируется. Это не
+  утверждение об отсутствии кратковременной записи в уже вызванном native API
+  или удалении Windows clipboard history/cloud copies.
+- Тихий native dismiss {ok:false,cancelled:true} сохранён для существующего UI,
+  но terminal registry outcome теперь cancelled/category cancelled, не error.
+  Clipboard acknowledgement фиксируется синхронным lease.commit; поздний abort
+  не заменяет уже сохранённый успех. Bulk preparation уступает event loop по 64 профиля.
+- До исправления clipboard: npm.cmd test -- src/main/secretClipboard.test.ts -t AT-00-003
+  — 4 failed / 13 skipped (.tmp/wp0-key-clipboard-before.log). Все четыре
+  операции игнорировали lifetime и возвращали успех. Первые integration fixture
+  trials содержали повторно обёрнутый IPC mock и SOCKS outbound, который не
+  поддерживает VPN sharing; они исправлены в стенде и не считаются production
+  defects. Итоговый fixture использует настоящий naive exporter/Conf/guard/logger.
+- npm.cmd test -- src/main/serverKeyOperations.test.ts src/main/serverKeyExportSecurity.test.ts src/main/secretClipboard.test.ts src/main/operationRegistry.test.ts src/main/configExportAcl.test.ts
+  — 115 passed / 5 files, 8.66 s, exit 0 (.tmp/wp0-key-regression-final.log).
+  Покрыты consent всех пяти каналов, long decision, save picker/destroy,
+  open/write/fsync, shutdown/deadline native clipboard, file errors, terminal
+  rename, JSON/URI compatibility, queue cancellation, preservation чужих данных,
+  cleanup retry и actual JSONL/diagnostic correlation/redaction.
+- npm.cmd run typecheck — exit 0, 160 channels / 0 public any
+  (.tmp/wp0-key-typecheck.log). python ../docs/04-приёмочные-тесты/traceability/check-coverage.py
+  — AC 927/927 / F 210/210, exit 0. git diff --check — exit 0.
+  Полный npm test выполняется отдельно; build/native, PR и exact-head Qodo/CI
+  пока не завершены. Полный AT-00-003 и весь WP-0 не объявляются PASS.
+
+- Первый полный npm.cmd test — 1 failed / 4378 passed / 5 skipped,
+  201.61 s (.tmp/wp0-key-full.log). Новый fixture удалял test directory до
+  завершения actual logger append queue; поздняя запись предыдущего instance
+  попадала в следующую mutable fixture dir (11 строк вместо 10). Добавлен
+  actual JSONL drain перед reuse/removal, по образцу configOperations fixture;
+  production assertion о correlation/redaction сохранён. Это исправление
+  изоляции теста, а не скрытое исключение failing case. Полный набор повторяется.
+
+- Адресный набор после исправления fixture drain — 115 passed / 5 files,
+  10.10 s, exit 0 (.tmp/wp0-key-regression-drain.log). Повторный полный
+  npm.cmd test — 4379 passed / 5 skipped / 0 failed, 271 files passed /
+  2 skipped, 199.90 s, exit 0 (.tmp/wp0-key-full-final.log).
+- npm.cmd run build — exit 0, включая typecheck (.tmp/wp0-key-build.log).
+  node scripts/test-electron-runtime.mjs — ELECTRON_SMOKE_PASS, exit 0
+  (.tmp/wp0-key-electron.log); node scripts/test-wp1-native.mjs --ipc-only
+  — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-key-csp.log). Это существующие общие
+  runtime/IPC/CSP subsets, не новая native clipboard приёмка. Повторные
+  traceability AC 927/927 / F 210/210 и git diff --check — exit 0.
+  После commit/push нужны completed Qodo и CI success на окончательном SHA;
+  следующий участок до этого не начинается.
+
+
+### PR #71 — Qodo: причины I/O, POSIX group и bulk audit
+
+- PR #71 создан на cdb1229e390236708930c165a4b972f1c5c7bd83. Qodo
+  1543248 completed: 11df09e6, 7d633b25, 0a6b5ed7 — remediation_recommended.
+  Все три проверены и подтверждены; attribution вручную не менялся.
+- Новые регрессии npm.cmd test -- src/main/serverKeyOperations.test.ts src/main/configExportPosixSecurity.test.ts -t 'bounded cause|nonsecret success counts|POSIX export'
+  — 14 failed / 26 skipped, 6.27 s, exit 1 (.tmp/wp0-key-qodo71-before.log).
+  Девять случаев потеряли errno, два — persistent counts, три — group policy.
+- Для config/key diagnostics выделен прежний bounded IO allowlist в общий
+  ioFailureDetails: category и allowlisted own data-property ioCode, без raw
+  message/stack/path. runKeyExport до bounded rethrow пишет destination и
+  эти details в исходном correlation context; cancellation не объявляется
+  файловой ошибкой. Config diagnostics сохраняют прежний формат.
+- После успешного bulk writer возвращены audit events export-all-keys-file /
+  export-all-proxies-file с total/exported/skipped и без path/content.
+  Actual JSONL проверяет counts и correlation при skipped profiles.
+- POSIX staging до plaintext копирует uid/gid, затем mode (chown может сбросить
+  mode bits), читает policy обратно и отказывает при mismatch/EPERM. Это
+  controlled POSIX branch test, не заявление о native Linux приёмке.
+  Actual Windows ACL helper и его семь native cases не изменены.
+- Дополнительный вопрос Revix 4309641449 проверен по всем шести renderer
+  call sites в Servers.tsx / ServerDetailModal.tsx: каждый имеет catch для
+  rejected IPC, bulk handlers сбрасывают busy в finally; ветвления именно по
+  write-failed нет. Quiet native dismiss по-прежнему возвращается без reject.
+- npm.cmd test -- src/main/serverKeyOperations.test.ts src/main/configExportPosixSecurity.test.ts src/main/configIpcErrors.test.ts src/main/configExportAcl.test.ts src/main/serverKeyExportSecurity.test.ts src/main/secretClipboard.test.ts src/main/operationRegistry.test.ts
+  — 167 passed / 7 files, 13.98 s, exit 0 (.tmp/wp0-key-qodo71-regression.log).
+  Typecheck/traceability и полный набор выполняются для нового состояния.
+- Initial CI 39185510421 success на cdb1229: Windows unit/traceability/
+  production IPC/CSP/WFP/native, Rust и сайт зелёные. Watcher terminal exit 0.
+  Это проверка первоначального head, не нового исправления; новый Qodo/CI gate
+  обязателен после push, следующий участок пока закрыт.
+
+- npm.cmd run typecheck — exit 0, 160 channels / 0 public any
+  (.tmp/wp0-key-qodo71-typecheck.log). Полный npm.cmd test — 4393 passed /
+  5 skipped / 0 failed, 272 files passed / 2 skipped, 204.47 s, exit 0
+  (.tmp/wp0-key-qodo71-full.log). npm.cmd run build — exit 0, включая
+  повторный typecheck (.tmp/wp0-key-qodo71-build.log).
+- node scripts/test-electron-runtime.mjs — ELECTRON_SMOKE_PASS, exit 0
+  (.tmp/wp0-key-qodo71-electron.log); node scripts/test-wp1-native.mjs --ipc-only
+  — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-key-qodo71-csp.log). Scope smoke прежний.
+  Повторные traceability AC 927/927 / F 210/210 и git diff --check — exit 0.
+  Исправление требует нового completed Qodo/CI после push.
+- Попытка убрать собственный orphan fixture .tmp/key-operations-ADQ7rk
+  отклонена автоматической проверкой инструмента: blocked by policy. Повторных
+  попыток/обхода нет, папка оставлена ignored; проверкам и изменениям не мешает.
