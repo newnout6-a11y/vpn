@@ -61,7 +61,6 @@ import { operations } from './operations'
 import type { OperationLease } from './operationRegistry'
 import { classifyIpcError, IpcFault } from '../shared/ipc-result'
 import { ioFailureDetails } from './ioFailureDiagnostics'
-import { requestDocumentLifetime } from './requestDocumentLifetime'
 import { runRequesterOperation } from './requesterOperation'
 
 export const RESOLVED_IP_TTL_MS = 5 * 60_000
@@ -2639,15 +2638,15 @@ function handleLogged<T>(
 }
 
 /** Native user waits remain cancellable, with the resource held until drain. */
-async function runKeyExport<T>(sender: IpcMainInvokeEvent['sender'], destination: 'renderer' | 'clipboard' | 'file', effect: (lease: OperationLease) => Promise<T>): Promise<T | CancelledSecretExport> {
-  const lifetime = requestDocumentLifetime(sender)
+async function runKeyExport<T>(sender: IpcMainInvokeEvent['sender'], destination: 'renderer' | 'clipboard' | 'file', requestId: unknown, effect: (lease: OperationLease) => Promise<T>): Promise<T | CancelledSecretExport> {
   try {
-    return await operations.run('export', async lease => {
+    return await runRequesterOperation(sender, requestId, (signal, admitted) => operations.run('export', async lease => {
+      admitted(lease)
       const consent = await lease.waitForUser(withSecretExportConsent(sender, destination, () => true as const))
       if (consent !== true) return consent
       lease.assertActive()
       return effect(lease)
-    }, { resource: 'keys:' + destination, signal: lifetime.signal })
+    }, { resource: 'keys:' + destination, signal }))
   } catch (error) {
     const details = ioFailureDetails(error)
     if (!(error instanceof IpcFault)) try {
@@ -2655,7 +2654,6 @@ async function runKeyExport<T>(sender: IpcMainInvokeEvent['sender'], destination
     } catch { /* Diagnostics cannot replace the bounded caller failure. */ }
     throw new IpcFault(details.reason)
   }
-  finally { lifetime.dispose() }
 }
 
 function sanitizeAddProfilesOptions(value: unknown): AddProfilesOptions | undefined {
@@ -2819,16 +2817,16 @@ export function registerServerPickerHandlers(): void {
     // Keep the legacy IPC field name; content can be a URI or complete JSON.
     return { ok: true as const, uri: exported.content, format: exported.format, name: profile.name, protocol: profile.protocol }
   }
-  handleLogged('servers:export-key', async (event, id: string) => {
+  handleLogged('servers:export-key', async (event, id: string, requestId?: unknown) => {
     id = requireString(id, 'id', { maxLength: 200 })
-    return runKeyExport(event.sender, 'renderer', async lease => {
+    return runKeyExport(event.sender, 'renderer', requestId, async lease => {
       const result = exportProfileKey(id)
       return result.ok ? lease.commit(() => result) : result
     })
   })
-  handleLogged('servers:copy-key', async (event, id: string) => {
+  handleLogged('servers:copy-key', async (event, id: string, requestId?: unknown) => {
     id = requireString(id, 'id', { maxLength: 200 })
-    return runKeyExport(event.sender, 'clipboard', async lease => {
+    return runKeyExport(event.sender, 'clipboard', requestId, async lease => {
       const result = exportProfileKey(id)
       if (!result.ok) return result
       // The renderer receives only acknowledgement, not the clipboard secret.
@@ -2847,9 +2845,9 @@ export function registerServerPickerHandlers(): void {
   //   {ok: false, cancelled: true} — user dismissed the dialog
   //   {ok: false, reason}          — missing/unsupported profile
   // Native I/O failures use the common typed IPC error envelope.
-  handleLogged('servers:export-key-file', async (event, id: string) => {
+  handleLogged('servers:export-key-file', async (event, id: string, requestId?: unknown) => {
     id = requireString(id, 'id', { maxLength: 200 })
-    return runKeyExport(event.sender, 'file', async lease => {
+    return runKeyExport(event.sender, 'file', requestId, async lease => {
       const profile = getProfiles().find(p => p.id === id)
       if (!profile) return { ok: false as const, reason: 'profile-not-found' }
       if (!profile.outbound || typeof profile.outbound !== 'object') {
@@ -2898,8 +2896,8 @@ export function registerServerPickerHandlers(): void {
   //   {ok: true, path, total, exported, skipped}
   //   {ok: false, cancelled: true}
   //   {ok: false, reason: 'no-profiles' | 'unsupported-all'}
-  handleLogged('servers:export-all-keys-file', async (event) => {
-    return runKeyExport(event.sender, 'file', async lease => {
+  handleLogged('servers:export-all-keys-file', async (event, requestId?: unknown) => {
+    return runKeyExport(event.sender, 'file', requestId, async lease => {
       const profiles = getProfiles()
       if (!profiles.length) return { ok: false as const, reason: 'no-profiles' }
 
@@ -2958,8 +2956,8 @@ export function registerServerPickerHandlers(): void {
     })
   })
 
-  handleLogged('servers:export-all-proxies-file', async (event) => {
-    return runKeyExport(event.sender, 'file', async lease => {
+  handleLogged('servers:export-all-proxies-file', async (event, requestId?: unknown) => {
+    return runKeyExport(event.sender, 'file', requestId, async lease => {
       const profiles = getProfiles()
       if (!profiles.length) return { ok: false as const, reason: 'no-profiles' }
 

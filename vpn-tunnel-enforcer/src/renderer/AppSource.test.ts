@@ -189,12 +189,11 @@ describe('App source regressions', () => {
 
   it('exposes a separate proxy-list export action on the Servers page', () => {
     const servers = serversSource()
-    const preload = preloadSource()
 
     expect(servers).toContain('handleExportProxyList')
     expect(servers).toContain('serversExportAllProxiesToFile')
     expect(servers).toContain("t('servers.exportProxyList', 'Proxy list')")
-    expect(preload).toContain("serversExportAllProxiesToFile: () => invoke('servers:export-all-proxies-file')")
+    // Actual legacy/token forwarding is exercised by preloadValidation.test.ts.
   })
 
   it('keeps server add selects above the server list and shows key-loading feedback', () => {

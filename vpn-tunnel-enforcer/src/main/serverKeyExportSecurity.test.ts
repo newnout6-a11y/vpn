@@ -121,7 +121,9 @@ let destroyed = false
 let exportDirectory = ''
 let exportPath = ''
 const sender = { isDestroyed: () => destroyed }
-function invoke(channel: string) { return state.ipcHandlers.get(channel)!({ sender }, 'a') }
+function invoke(channel: string) {
+  return state.ipcHandlers.get(channel)!({ sender }, ...(channel.startsWith('servers:export-all-') ? [] : ['a']))
+}
 
 beforeEach(async () => {
   vi.resetModules(); vi.clearAllMocks(); state.storeData.clear(); state.ipcHandlers.clear(); destroyed = false
