@@ -4116,3 +4116,166 @@ CI/review нового SHA проверяются отдельно после pu
   (.tmp/wp0-import-qodo69-electron.log); `node scripts/test-wp1-native.mjs --ipc-only`
   — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-import-qodo69-csp.log). Scope этих smoke
   прежний, новый import дополнительно проверен actual curl/guard/Conf fixture.
+
+### PR #69 — итоговая проверка и слияние
+
+- Qodo **1542807 completed** на **a5cf69eade2e28f39555f7ecbd5ee5d1bb98a83b**:
+  оба прежних findings implemented, новых нет. Attribution прочитан через API,
+  вручную не менялся; ручного запроса review не было.
+- CI **39179194108 success** на том же SHA: Windows, Rust и сайт зелёные.
+  Windows выполнил typecheck/unit/traceability, production IPC/CSP, WFP ABI/
+  rollback и native reads. Watcher завершён exit 0; initial failed run не скрыт.
+- Слияние выполнено с expected head SHA; отдельный REST GET подтвердил
+  merged=true, state=closed, merge **639ade16393e1b121bdca66aff49e8f2e27f10f4**.
+- Следующая ветка — codex/wp0-config-operations от обновлённого main.
+  Эта запись меняет только журнал/матрицу; production tree совпадает с
+  проверенным a5cf69e. Последние проверки: npm test 4307 passed / 5 skipped,
+  typecheck/build/native PASS, traceability AC 927/927 / F 210/210. WP-0
+  целиком и следующая WP-2 остаются незавершёнными.
+
+
+### WP-0 — config browse/import/apply/export: operation lifetime и atomic export
+
+- Browse/validate/apply/export подключены к общему registry, original correlation,
+  deadline 120 s, prompt cancellation, physical drain и renderer destroyed.
+  Main-only grant сохраняет snapshot, sender и 60 s expiry; apply одноразово
+  claims authority при invocation. Новая selection/expiry/закрытие окна проверяются
+  повторно внутри общей profile-write queue до финального синхронного commit.
+- Чтение — async один handle, bounded 16 MiB + 1, regular-file/size/mtime checks.
+  Export — wx/0600 staging рядом с destination, async write/fsync/close, terminal
+  sync rename. До commit прежний файл неизменен; cancel ждёт raw close до удаления
+  своего temp. Lease.commit сохраняет terminal result, запрещает pending tracked
+  I/O/async callback и не переименовывает сохранённый success после позднего abort.
+  Reentrant cancellation внутри синхронного commit возвращает false; ошибочный
+  post-commit throw логируется bounded category с исходной correlation.
+- Baseline registry `npm.cmd test -- src/main/operationRegistry.test.ts -t commit`
+  — 4 failed / 36 skipped, exit 1 (.tmp/wp0-config-commit-before.log): commit API
+  отсутствовал. Новые fixture trials с неверным IPC export mode и logger spy
+  исправлены в стенде; они не объявляются production regressions. Прежние stat
+  fault injections configIpcErrors перенесены с fstatSync на actual FileHandle.stat.
+- `npm.cmd test -- src/main/configOperations.test.ts src/main/configManager.test.ts src/main/configImportSecurity.test.ts src/main/configExportSecurity.test.ts src/main/configIpcErrors.test.ts src/main/operationRegistry.test.ts`
+  — **179 passed / 6 files**, **4.06 s**, exit 0 (.tmp/wp0-config-regression.log).
+  Новый config fixture использует real files/Conf/guard/logger/diagnostic;
+  Electron/DPAPI boundary и native dialogs заменены. Включены отмена held consent/
+  dialogs/open/read/write/fsync, queue lifetime, concurrent merge, write/rename
+  failure, rollback failure без false success, original correlation/redaction,
+  terminal abort и deadline. Registry отдельно покрывает async misuse/drain.
+- Первый typecheck после расширения fixture — exit 2: object defaults и TS control
+  flow после mutating entry.cancel. Исправлены тип defaults и фактический boolean
+  результат cancel; runtime casts не добавлялись. `npm.cmd run typecheck` после
+  исправлений — exit 0, 160 channels / 0 public any
+  (.tmp/wp0-config-typecheck-final.log). Traceability `python ../docs/04-приёмочные-тесты/traceability/check-coverage.py`
+  — AC 927/927 / F 210/210, exit 0. Полный npm test запущен отдельно от build/native;
+  их результаты и remote gate будут записаны после фактического завершения.
+
+- Полный `npm.cmd test` — **4333 passed / 5 skipped / 0 failed**,
+  **269 files passed / 2 skipped**, **190.37 s**, exit 0
+  (.tmp/wp0-config-full.log). Stderr RootErrorBoundary содержит ожидаемые
+  fixture crashes; это не unhandled failure. Build/native выполняются после
+  полного набора, без конкурирующей нагрузки на PowerShell fixtures.
+
+- `npm.cmd run build` — exit 0, включая повторный typecheck
+  (.tmp/wp0-config-build.log). `node scripts/test-electron-runtime.mjs`
+  — ELECTRON_SMOKE_PASS, exit 0 (.tmp/wp0-config-electron.log).
+  `node scripts/test-wp1-native.mjs --ipc-only` — WP1_NATIVE_PASS, exit 0
+  (.tmp/wp0-config-csp.log). Это существующие общие runtime/IPC/CSP subsets;
+  новый config lifetime отдельно покрыт actual file/Conf/guard fixture.
+  `git diff --check` — exit 0. После push нужны completed Qodo и зелёный
+  CI на итоговом SHA; следующий участок до этого не начинается.
+
+
+### PR #70 — Qodo: Windows ACL, остаточный temp и время ожидания пользователя
+
+- PR #70 создан на **f11cadce878891a30ec2e00d2e3fec9693661cd3**.
+  Initial CI **39181351651 success**, все Windows/Rust/site jobs; watcher
+  завершился exit 0. Это проверка первого head, не последующих исправлений.
+- Qodo **1542946 completed** на f11cadc: 30661bb9 (action_required),
+  f3fab6a9 и 17a5978f (remediation_recommended). Все три проверены и учтены;
+  attribution вручную не менялся, ручного review request нет.
+- 30661bb9 подтверждён настоящими Windows ACL: `npm.cmd test -- src/main/configExportAcl.test.ts`
+  — **2 failed**, **1.30 s**, exit 1 (.tmp/wp0-config-qodo70-acl-before-fixed.log).
+  Rename действительно заменял protected owner/group/DACL наследуемыми правами.
+  Предыдущий fixture trial не смог autoload Get-Acl из-за унаследованного
+  PowerShell 7 PSModulePath; он не считается доказательством production defect.
+  Fixture и production helper используют .NET ACL APIs без autoload.
+- Empty staging теперь получает проверенный security descriptor до plaintext:
+  existing owner/group/DACL сохраняются, новый файл имеет protected user/SYSTEM
+  DACL. Учитываются ACL round-trip auto-inheritance flags; fresh FileSecurity
+  явно помечает секции modified перед SetAccessControl. Неверный/недоступный
+  descriptor блокирует export. PowerShell выполняется async, без elevation/FFI
+  в main. Destination dev/ino/size/mtime/ctime проверяются после ACL capture и
+  непосредственно перед sync rename; изменение ACL выявляется как conflict.
+  Это проверка snapshot, не заявление о блокировке внешних writers ОС.
+- f3fab6a9: отказ удаления staging больше не заменяет primary cancellation/
+  write/rename error. Отдельный error event `config export cleanup failed`
+  сохраняет cleanupFailed=true, bounded category, operationKey и original
+  correlation. Тесты намеренно оставляют temp при постоянном EBUSY, сверяют
+  прежний destination и JSONL diagnostic; fixture удаляет только свою папку.
+- 17a5978f: lease.waitForUser приостанавливает только work budget на native
+  consent/picker. Deadline в snapshot временно null, cancellation остаётся
+  prompt, physical lease держится до dialog settlement. После ответа остаётся
+  неиспользованный budget 120 s; реальные file I/O по-прежнему timeout-ятся.
+  Проверены выбор после 10 минут, cancel pending picker, поздний ответ без grant,
+  timeout actual held read, отсутствие лишнего таймера после drain.
+- `npm.cmd test -- src/main/configExportAcl.test.ts src/main/configOperations.test.ts src/main/configManager.test.ts src/main/configImportSecurity.test.ts src/main/configExportSecurity.test.ts src/main/configIpcErrors.test.ts src/main/operationRegistry.test.ts`
+  — **188 passed / 7 files**, **6.82 s**, exit 0
+  (.tmp/wp0-config-qodo70-regression.log). Три ACL tests используют реальные
+  Windows файлы/security descriptors, включая смену ACL после capture.
+- Первый typecheck нового helper выявил void вместо undefined в catch lstat;
+  исправлено явным return undefined, без cast. `npm.cmd run typecheck`
+  — exit 0, 160 channels / 0 public any (.tmp/wp0-config-qodo70-typecheck-final.log).
+  Traceability AC 927/927 / F 210/210 — exit 0. Полный npm test запущен после
+  typecheck, build/native и повторный exact-head Qodo/CI ещё необходимы.
+
+- Полный `npm.cmd test` после Qodo fixes — **4342 passed / 5 skipped /
+  0 failed**, **270 files passed / 2 skipped**, **194.31 s**, exit 0
+  (.tmp/wp0-config-qodo70-full.log). Build/native выполняются после него.
+
+- `npm.cmd run build` — exit 0, включая typecheck
+  (.tmp/wp0-config-qodo70-build.log). `node scripts/test-electron-runtime.mjs`
+  — ELECTRON_SMOKE_PASS, exit 0 (.tmp/wp0-config-qodo70-electron.log).
+  `node scripts/test-wp1-native.mjs --ipc-only` — WP1_NATIVE_PASS, exit 0
+  (.tmp/wp0-config-qodo70-csp.log). Scope этих smoke прежний; реальные Windows
+  ACL нового export отдельно проверены тремя configExportAcl cases.
+  `git diff --check` — exit 0. Следующий участок остаётся закрыт до completed
+  Qodo и CI success на окончательном SHA.
+
+
+### PR #70 — Qodo: типографские апострофы в выбранном пути
+
+- Повторный Qodo **1543042 completed** на **9d65a141364fc14c988474d45d5b1df6a96da332**:
+  три прежних findings — implemented. Новый fd861793 — action_required:
+  ASCII-only quote helper не учитывал типографские кавычки PowerShell.
+- Подтверждён легитимными именами файлов с U+2018…U+201B:
+  `npm.cmd test -- src/main/configExportAcl.test.ts -t typographic`
+  — **4 failed / 3 skipped**, **3.12 s**, exit 1
+  (.tmp/wp0-config-qodo70-path-before.log). Экспорт возвращал permission.
+  Проверка не выполняет посторонние команды: только обычные имена файлов.
+- Paths теперь передаются в PowerShell только как base64 data expression;
+  произвольные символы пути не попадают в string literal или исполняемый source.
+  Fixture использует такой же безопасный транспорт для своего ACL read-back.
+  Каждый из четырёх native cases создаёт и затем перезаписывает выбранный файл,
+  проверяя точный content; прежние owner/group/DACL tests сохранены.
+- `npm.cmd test -- src/main/configExportAcl.test.ts src/main/configOperations.test.ts src/main/configManager.test.ts src/main/configImportSecurity.test.ts src/main/configExportSecurity.test.ts src/main/configIpcErrors.test.ts src/main/operationRegistry.test.ts`
+  — **192 passed / 7 files**, **8.31 s**, exit 0
+  (.tmp/wp0-config-qodo70-path-regression.log). `npm.cmd run typecheck`
+  — exit 0, 160 channels / 0 public any (.tmp/wp0-config-qodo70-path-typecheck.log).
+  Traceability AC 927/927 / F 210/210 — exit 0. Полный набор запущен отдельно;
+  окончательные build/native и exact-head Qodo/CI требуются после исправления.
+
+- CI **39182525633 success** на 9d65a14: Windows unit/traceability/
+  production IPC/CSP/WFP/native, Rust и сайт зелёные. Watcher завершился exit 0.
+  Этот результат сохраняется как проверка предыдущего head; новый path fix
+  требует отдельного completed Qodo и CI success после push.
+
+- Полный `npm.cmd test` с path fix — **4346 passed / 5 skipped / 0 failed**,
+  **270 files passed / 2 skipped**, **199.67 s**, exit 0
+  (.tmp/wp0-config-qodo70-path-full.log). Build/native выполняются после него.
+
+- `npm.cmd run build` — exit 0, включая повторный typecheck
+  (.tmp/wp0-config-qodo70-path-build.log). `node scripts/test-electron-runtime.mjs`
+  — ELECTRON_SMOKE_PASS, exit 0 (.tmp/wp0-config-qodo70-path-electron.log).
+  `node scripts/test-wp1-native.mjs --ipc-only` — WP1_NATIVE_PASS, exit 0
+  (.tmp/wp0-config-qodo70-path-csp.log). Scope smoke прежний; path/ACL проверены
+  отдельно реальными Windows files. `git diff --check` — exit 0. До следующего
+  участка снова требуются completed Qodo и CI на последнем head.

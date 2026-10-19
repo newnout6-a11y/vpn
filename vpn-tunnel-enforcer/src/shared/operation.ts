@@ -32,7 +32,8 @@ export const OPERATION_DEADLINES = Object.freeze({
 export type ManagedOperationKind = keyof typeof OPERATION_DEADLINES
 export interface ManagedOperation extends Omit<ConnectionOperation, 'kind' | 'deadline' | 'category'> {
   readonly kind: ManagedOperationKind
-  readonly deadline: number
+  /** No work clock runs while a native dialog awaits the user's decision. */
+  readonly deadline: number | null
   readonly source: import('./connection-provenance').ConnectionProvenance['source']
   readonly category?: import('./ipc-result').IpcErrorCategory
 }
