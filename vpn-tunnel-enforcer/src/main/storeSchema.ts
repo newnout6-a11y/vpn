@@ -14,7 +14,7 @@ export const STORE_SCHEMA_VERSIONS = Object.freeze({
   'notification-prefs': 0,
   'profile-rotation': 0,
   scheduler: 0,
-  'server-groups': 1,
+  'server-groups': 0,
   'server-picker': 2,
   settings: 2,
   'smart-route-rule-sets': 0,

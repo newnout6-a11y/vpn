@@ -5408,3 +5408,47 @@ CI/review нового SHA проверяются отдельно после pu
   (.tmp/wp0-migrations-typecheck-serial.log). Все validation processes terminal;
   git diff --check — exit 0. Следующий gate — automatic Qodo и default CI
   окончательного SHA. AT-00-006 в целом остаётся частичным.
+- PR #77: CI 39214950099 старого head 2ef0332 completed/success, watcher
+  exit 0 (.tmp/wp0-migrations-ci-watch.log); Windows, Rust и сайт success.
+  Qodo 1545089 completed выявил четыре подтверждённых замечания:
+  5590b12a (backup expansion/restart), 6dba281a (empty groups/DPAPI),
+  a98d9466 (ненужный groups schema bump/downgrade), d058c2ac (fake fresh migration).
+  Revix review 5568127046 — free-quota-reached, полного ревью нет.
+- До production fix новые regressions воспроизвели все четыре причины:
+  npm.cmd test -- src/main/storeMigrations.test.ts -t
+  'exceeds 16 MiB|empty legacy groups|fake legacy migration|previous schema-0'
+  — 6 failed / 28 skipped, 1.11 s, exit 1
+  (.tmp/wp0-migrations-qodo-before.log). После исправления source/decrypted
+  plaintext остаются <=16 MiB, encoded backup <=32 MiB с проверкой до write.
+  Groups сохраняет формат 0: его released reader уже поддерживает SecretRef.
+  Runner не создаёт миграцию без plaintext; raw snapshot не подставляет defaults
+  или version 0. Fresh read не создаёт файл/history; пустые legacy groups
+  без backup не требуют DPAPI. Существующий backup продолжает проверяться.
+- Первый targeted после fixes — 103 passed / 4 failed, 3.04 s, exit 1
+  (.tmp/wp0-migrations-qodo-targeted.log). Уточнены корректные ожидания typed
+  source validation и честного backup-skipped audit; rollback import fixture
+  явно начинает с existing canonical empty stores, вместо прежнего побочного
+  создания defaults при startup. Exact snapshot rollback assertions сохранены.
+  Switch проверяет логическое отсутствие выбора, не требует записанного null.
+  npm.cmd test -- src/main/storeMigrations.test.ts
+  src/main/sharedStoresSecurity.test.ts src/main/settingsSecretSecurity.test.ts
+  src/main/settingsLoginItem.test.ts src/main/settingsForensicsDefault.test.ts
+  src/main/serverPickerSwitch.test.ts src/main/profileImportOperations.test.ts
+  — 107 passed, 3.21 s, exit 0 (.tmp/wp0-migrations-qodo-targeted2.log).
+  В real Conf suite теперь 36 cases; full/build/native и review нового SHA
+  ещё ожидаются. npm.cmd run typecheck после production fixes — exit 0,
+  163 channels / 0 public any (.tmp/wp0-migrations-qodo-typecheck.log).
+- После Qodo fixes окончательный production/unit tree: npm.cmd test --
+  --maxWorkers=1 — **4585 passed / 5 skipped / 0 failed**, 280 files passed /
+  2 skipped, **308.77 s**, exit 0 (.tmp/wp0-migrations-qodo-full.log).
+  npm.cmd run build — exit 0, включая typecheck 163 channels / 0 public any
+  (.tmp/wp0-migrations-qodo-build.log). node scripts/test-wp1-migration.mjs
+  --same-version — все пять фаз PASS, actual DPAPI/Conf/restart, exit 0
+  (.tmp/wp0-migrations-qodo-native.log). node scripts/test-electron-runtime.mjs
+  — ELECTRON_SMOKE_PASS / SPEED_UI_NATIVE_PASS, exit 0
+  (.tmp/wp0-migrations-qodo-electron.log); node scripts/test-wp1-native.mjs
+  --ipc-only — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-migrations-qodo-csp.log).
+  python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py —
+  AC 927/927, F 210/210, exit 0; git diff --check — exit 0.
+  Local native subset остаётся same-version, не Electron 42→44/VM matrix.
+  Следующий gate — automatic Qodo и default CI нового exact head #77.

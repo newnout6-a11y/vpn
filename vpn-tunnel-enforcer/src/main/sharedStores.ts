@@ -73,12 +73,9 @@ function decryptProfile(profile: PersistedServerProfile): ServerProfile {
 function migrateProfilesIfNeeded(): void {
   migrateSecretStore('server-picker', {
     path: persistedServerPickerStore.path,
-    read: () => ({ ...persistedServerPickerStore.store,
-      schemaVersion: persistedServerPickerStore.get('schemaVersion') ?? 0,
-      profiles: persistedServerPickerStore.get('profiles', []),
-      activeProfileId: persistedServerPickerStore.get('activeProfileId', null) }),
+    read: () => ({ ...persistedServerPickerStore.store }),
     write: value => { persistedServerPickerStore.store = value },
-    hasPlaintext: value => value.profiles.some(profileContainsPlaintextSecret),
+    hasPlaintext: value => (value.profiles ?? []).some(profileContainsPlaintextSecret),
     prepare(value) {
       const decoded = value.profiles.map(decryptProfile)
       const encrypted = decoded.map(encryptProfile)
@@ -133,11 +130,10 @@ export const serverGroupsStore = {
   get(_key: 'groups', fallback: ServerGroup[] = []): ServerGroup[] {
     migrateSecretStore('server-groups', {
       path: persistedServerGroupsStore.path,
-      read: () => ({ ...persistedServerGroupsStore.store,
-        schemaVersion: persistedServerGroupsStore.get('schemaVersion') ?? 0,
-        groups: persistedServerGroupsStore.get('groups', fallback) }),
+      read: () => ({ ...persistedServerGroupsStore.store }),
       write: value => { persistedServerGroupsStore.store = value },
       hasPlaintext(value) {
+        if (value.groups === undefined) return false
         if (!Array.isArray(value.groups)) throw new Error('Invalid server group store')
         return value.groups.some(group => !isSecretRef(group))
       },

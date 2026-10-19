@@ -91,7 +91,7 @@ app.whenReady().then(async () => {
         const [step] = migrated.migrationHistory
         assert.equal(step.id, 'safe-storage-v1')
         assert.equal(step.from, 0)
-        assert.equal(step.to, name === 'server-groups' ? 1 : 2)
+        assert.equal(step.to, name === 'server-groups' ? 0 : 2)
         assert.equal(step.status, 'success')
         assert.match(step.inputChecksum, /^[a-f0-9]{64}$/)
         assert.equal(step.backupChecksum, originalDigests[name])

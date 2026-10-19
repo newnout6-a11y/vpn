@@ -82,7 +82,8 @@ const store = new Store<{ settings: PersistedAppSettings | AppSettings; schemaVe
   name: 'settings'
 })
 
-function hasPlaintextSettingsSecrets(value: PersistedAppSettings | AppSettings): boolean {
+function hasPlaintextSettingsSecrets(value: PersistedAppSettings | AppSettings | undefined): boolean {
+  if (!value) return false
   return Boolean(
     (typeof value.proxyOverride === 'string' && /@/.test(value.proxyOverride)) ||
     (typeof value.directVpnInput === 'string' && value.directVpnInput) ||
@@ -121,7 +122,7 @@ function encodeSettings(value: AppSettings): PersistedAppSettings {
 function readSettingsWithMigration(): AppSettings {
   migrateSecretStore('settings', {
     path: store.path,
-    read: () => ({ ...store.store, settings: store.get('settings', defaults), schemaVersion: store.get('schemaVersion') ?? 0 }),
+    read: () => ({ ...store.store }),
     write: value => { store.store = value },
     hasPlaintext: value => hasPlaintextSettingsSecrets(value.settings),
     prepare(value) {

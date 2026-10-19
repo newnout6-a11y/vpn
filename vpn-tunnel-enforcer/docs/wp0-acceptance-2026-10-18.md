@@ -1295,3 +1295,32 @@ planned-features:status возвращает отдельный snapshot с requ
 при обычном и advanced режиме, включая forged saved flags. Это адресное
 доказательство AT-00-009/AT-12-002, не запуск planned VPN/monitor/boxes функций.
 Команды, полные результаты и remote gate — в progress.md.
+
+## Реестр secret-store migrations — PR #77
+
+Actual facades settings/server-picker/server-groups используют общий dry-run и
+синхронный runner: detached preparation, encrypted backup точных исходных bytes,
+input/output/backup SHA-256, migrationHistory, atomic Conf replacement и read-back.
+Success записывается после read-back. Ошибки подготовки сохраняют исходный файл;
+ошибки commit/read-back не выдают неподтверждённый успех. Старый backup и backup
+другого исходника сохраняются отдельно. Constructor defaults больше не изменяют
+исходный файл до snapshot, неизвестные поля сохраняются.
+
+После замечаний Qodo 1545089 миграция выполняется только при plaintext: реальные
+settings/picker 0/1 → 2, current plaintext 2 → 2 repair; groups 0 → 0, поскольку
+выпущенный schema-0 reader уже понимает SecretRef. Уже encrypted/empty/public
+legacy stores сохраняют совместимую версию, fresh reads не создают файл или
+фиктивную migrationHistory. Пустые groups без backup читаются без DPAPI.
+Проверка/защита существующего backup по-прежнему обязательна.
+
+Размер исходника и authenticated plaintext ограничен 16 MiB; encrypted envelope
+имеет отдельный предел 32 MiB с проверкой до записи. Base64/DPAPI expansion больше
+не ломает restart допустимого исходника. Real Conf regressions включают backup
+больше 16 MiB с повторным import/read, три отказа size bounds, fresh stores всех
+трёх видов, пустые groups без DPAPI и совместимость с прежним group admission.
+
+Это часть AT-00-006 / AT-01-001/010 / F-074. Остальные 17 electron-store форматов
+остаются 0; startup классификация/переносы, другие persisted JSON, полноценный
+upgrade/downgrade и межпроцессный CAS остаются открыты. Pre-commit comparison
+не является OS-level CAS; native same-version smoke не заменяет OS/VM matrix.
+Точные команды, результаты и remote gate записываются в progress.md.

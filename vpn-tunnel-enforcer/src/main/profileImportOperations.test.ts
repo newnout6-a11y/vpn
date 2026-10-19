@@ -38,6 +38,10 @@ beforeEach(async () => {
   vi.clearAllMocks()
   state.log.mockReset()
   state.data.clear()
+  // These rollback cases start with existing canonical empty stores. A fresh
+  // read deliberately no longer persists defaults as a fake legacy migration.
+  state.data.set('server-picker', { profiles: [], schemaVersion: 2, activeProfileId: null })
+  state.data.set('server-groups', { groups: [] })
   state.write.mockReset()
   state.handlers.clear()
   state.resolve.mockReset().mockResolvedValue(response())

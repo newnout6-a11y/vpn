@@ -1,7 +1,7 @@
 // AT-00-006 / AT-01-001/010 / F-074: historical fixtures through the actual
 // settings/shared-store facades and Conf disk backend. Only DPAPI is replaced.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync, existsSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync, existsSync, truncateSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { STORE_SCHEMA_VERSIONS } from './storeSchema'
@@ -61,6 +61,60 @@ beforeEach(() => {
 afterEach(() => rmSync(state.dir, { recursive: true, force: true }))
 
 describe('registered historical migrations', () => {
+  it('reopens a valid store whose encrypted migration backup exceeds 16 MiB', async () => {
+    const seed = { ...fixture('settings', 0), padding: 'x'.repeat(13 * 1024 * 1024) }
+    writeFileSync(file('settings'), JSON.stringify(seed))
+    const read = await facade('settings')
+    expect(read()).toMatchObject({ directVpnInput: marker })
+    expect(readFileSync(file('settings') + '.pre-safe-storage-v1.bak').length).toBeGreaterThan(16 * 1024 * 1024)
+    vi.resetModules()
+    expect((await facade('settings'))()).toMatchObject({ directVpnInput: marker })
+  })
+
+  it.each(['source', 'authenticated-plaintext', 'encrypted-envelope'] as const)('retains the separate %s size bound', async boundary => {
+    const seed = { ...fixture('settings', 0), ...(boundary === 'source' ? { padding: 'x'.repeat(17 * 1024 * 1024) } : {}) }
+    const raw = JSON.stringify(seed), backup = file('settings') + '.pre-safe-storage-v1.bak'
+    writeFileSync(file('settings'), raw)
+    if (boundary === 'authenticated-plaintext') {
+      const { encryptSecret } = await import('./secretStorage')
+      writeFileSync(backup, JSON.stringify({ __vpnteEncryptedBackup: 1, contents: encryptSecret('x'.repeat(17 * 1024 * 1024)) }))
+    }
+    if (boundary === 'encrypted-envelope') { writeFileSync(backup, ''); truncateSync(backup, 33 * 1024 * 1024) }
+    const read = await facade('settings')
+    expect(read).toThrow(boundary === 'source'
+      ? expect.objectContaining({ category: 'validation' })
+      : 'Invalid secret migration backup artifact')
+    expect(readFileSync(file('settings'), 'utf8')).toBe(raw)
+    expect(state.log.mock.calls.some(call => call[2] === 'migration step committed')).toBe(false)
+  })
+
+  it('reads empty legacy groups without DPAPI, file writes or a fake migration', async () => {
+    const raw = '{"groups":[]}'
+    writeFileSync(file('server-groups'), raw)
+    const read = await facade('server-groups')
+    state.available = false
+    expect(read()).toEqual([])
+    expect(readFileSync(file('server-groups'), 'utf8')).toBe(raw)
+    expect(state.calls).toBe(0)
+    expect(state.log.mock.calls.some(call => call[1] === 'store-migration')).toBe(false)
+  })
+
+  it.each(names)('does not create a fake legacy migration on a fresh %s install', async name => {
+    const read = await facade(name)
+    read()
+    expect(existsSync(file(name))).toBe(false)
+    expect(state.log.mock.calls.some(call => call[1] === 'store-migration')).toBe(false)
+  })
+
+  it('keeps encrypted groups compatible with the previous schema-0 admission guard', async () => {
+    writeFileSync(file('server-groups'), JSON.stringify(fixture('server-groups', 0)))
+    ;(await facade('server-groups'))()
+    const stored = JSON.parse(readFileSync(file('server-groups'), 'utf8'))
+    expect(stored.schemaVersion).toBe(0)
+    expect(stored.migrationHistory[0]).toMatchObject({ id: 'safe-storage-v1', from: 0, to: 0 })
+    expect(JSON.stringify(stored)).not.toContain(marker)
+  })
+
   const cases = names.flatMap(name => [undefined, ...Array.from({ length: STORE_SCHEMA_VERSIONS[name] + 1 }, (_, v) => v)]
     .map(version => ({ name, version })))
   it.each(cases)('migrates $name version $version once, retaining metadata and the exact original backup', async ({ name, version }) => {
@@ -77,11 +131,11 @@ describe('registered historical migrations', () => {
     const step = persisted.migrationHistory[0]
     expect(persisted.migrationHistory).toHaveLength(1)
     expect(step).toMatchObject({
-      id: version === STORE_SCHEMA_VERSIONS[name] ? 'safe-storage-v1-repair' : 'safe-storage-v1',
+      id: name !== 'server-groups' && version === STORE_SCHEMA_VERSIONS[name] ? 'safe-storage-v1-repair' : 'safe-storage-v1',
       from: version ?? 0, to: STORE_SCHEMA_VERSIONS[name], status: 'success'
     })
     expect(step.completedAt).toEqual(expect.any(Number))
-    expect(step.inputChecksum).toBe(digest(JSON.stringify({ ...seed, schemaVersion: version ?? 0 })))
+    expect(step.inputChecksum).toBe(digest(JSON.stringify(seed)))
     expect(step.backupChecksum).toBe(digest(raw))
     expect(step.backupSuffix).toBe('.pre-safe-storage-v1.bak')
     const { migrationHistory: _history, ...output } = persisted
@@ -164,7 +218,8 @@ describe('migration transaction boundaries', () => {
       expect(planStoreMigrations(id, { schemaVersion: version })).toEqual([])
       expect(() => planStoreMigrations(id, { schemaVersion: version + 1 })).toThrow(expect.objectContaining({ code: 'STORE_SCHEMA_FUTURE' }))
     }
-    expect(planStoreMigrations('settings', { schemaVersion: 1 })).toEqual([{ id: 'safe-storage-v1', from: 1, to: 2 }])
+    expect(planStoreMigrations('settings', { schemaVersion: 1 }, true)).toEqual([{ id: 'safe-storage-v1', from: 1, to: 2 }])
+    expect(planStoreMigrations('settings', { schemaVersion: 1 })).toEqual([])
     expect(state.calls).toBe(0); expect(state.log).not.toHaveBeenCalled()
   })
 
@@ -176,7 +231,7 @@ describe('migration transaction boundaries', () => {
       current = boundary === 'read-back' ? { schemaVersion: 2, lost: true } : value
     })
     const options = { path: file('settings'), read: () => structuredClone(current), write,
-      hasPlaintext: () => false, prepare: (value: Record<string, unknown>) => {
+      hasPlaintext: () => Number(current.schemaVersion) < 2, prepare: (value: Record<string, unknown>) => {
         if (boundary === 'prepare') { (value.value as Record<string, unknown>).keep = false; throw new Error('injected-prepare-failure') }
         if (boundary === 'changed') current = { schemaVersion: 0, concurrent: true }
         if (boundary === 'reentrant') migrateSecretStore('settings', options)

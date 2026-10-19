@@ -151,7 +151,7 @@ describe('server profile switching', () => {
     setProfileSwitchHooks({ begin, end })
     const pending = selectProfileHandler({}, 'a')
     expect(begin).toHaveBeenCalledOnce()
-    expect(state.storeData.get('activeProfileId')).toBeNull()
+    expect(state.storeData.get('activeProfileId') ?? null).toBeNull()
     expect(state.restartProtected).not.toHaveBeenCalled()
     gate.resolve()
     await pending
@@ -279,7 +279,7 @@ describe('server profile switching', () => {
     await cancelSwitchHandler({})
     gate.resolve()
     await expect(pending).resolves.toEqual({ cancelled: true })
-    expect(state.storeData.get('activeProfileId')).toBeNull()
+    expect(state.storeData.get('activeProfileId') ?? null).toBeNull()
     expect(state.restartProtected).not.toHaveBeenCalled()
     expect(end).toHaveBeenCalledOnce()
   })

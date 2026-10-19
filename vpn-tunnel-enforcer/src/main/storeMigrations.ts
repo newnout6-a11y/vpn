@@ -16,7 +16,9 @@ type Document = Record<string, unknown>
 export const STORE_MIGRATIONS = Object.freeze({
   settings: Object.freeze({ id: 'safe-storage-v1', from: Object.freeze([0, 1]), to: 2 }),
   'server-picker': Object.freeze({ id: 'safe-storage-v1', from: Object.freeze([0, 1]), to: 2 }),
-  'server-groups': Object.freeze({ id: 'safe-storage-v1', from: Object.freeze([0]), to: 1 })
+  // The released schema-0 reader already supports SecretRefs: encryption does
+  // not introduce a new group format or force users to abandon older builds.
+  'server-groups': Object.freeze({ id: 'safe-storage-v1', from: Object.freeze([0]), to: 0 })
 })
 
 export interface StoreMigrationStep {
@@ -34,11 +36,14 @@ export function planStoreMigrations(name: StoreId, value: Document, plaintext = 
   }
   const migration = STORE_MIGRATIONS[name as SecretStoreId]
   if (migration.to !== storeSchemaVersion(name)) throw new IpcFault('internal')
+  // No secret conversion means no migration: this includes new installs,
+  // empty/public legacy data and files already encrypted by released builds.
+  if (!plaintext) return []
   if (version < migration.to) {
     if (!migration.from.includes(version)) throw new IpcFault('validation')
     return [{ id: migration.id, from: version, to: migration.to }]
   }
-  return plaintext ? [{ id: `${migration.id}-repair`, from: version, to: version }] : []
+  return [{ id: migration.from.includes(version) ? migration.id : `${migration.id}-repair`, from: version, to: version }]
 }
 
 function checksum(value: Document): string {
